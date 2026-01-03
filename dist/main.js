@@ -1,4 +1,5 @@
 "use strict";
+var _a, _b;
 class RNG {
     constructor(seed) {
         this.state = seed >>> 0;
@@ -51,7 +52,7 @@ const ZOOM_MAX = 2.5;
 const ZOOM_STEP = 0.1;
 const ISO_TILE_WIDTH = TILE_SIZE * 2;
 const ISO_TILE_HEIGHT = TILE_SIZE;
-const HEIGHT_SCALE = TILE_SIZE * 5;
+const HEIGHT_SCALE = TILE_SIZE * 6.5;
 const HEIGHT_WATER_DROP = TILE_SIZE * 0.7;
 const CAREER_YEARS = 20;
 const DAYS_PER_SECOND = 4;
@@ -60,12 +61,18 @@ const FIREBREAK_COST_PER_TILE = 45;
 const BASE_BUDGET = 320;
 const APPROVAL_MIN = 0.2;
 const FIRE_IGNITION_CHANCE_PER_DAY = 0.08;
+const FIRE_SIM_SPEED = 2.6;
+const FIRE_SEASON_TAPER_DAYS = 22;
+const FIRE_SEASON_MIN_INTENSITY = 0.2;
+const FIRE_DAY_FACTOR_MIN = 0.65;
+const FIRE_DAY_FACTOR_MAX = 1.35;
 const PHASES = [
     { id: "growth", label: "Growth", duration: 120 },
     { id: "maintenance", label: "Maintenance", duration: 30 },
     { id: "fire", label: "Fire Season", duration: 90 },
     { id: "budget", label: "Budget", duration: 15 }
 ];
+const FIRE_SEASON_DURATION = (_b = (_a = PHASES.find((phase) => phase.id === "fire")) === null || _a === void 0 ? void 0 : _a.duration) !== null && _b !== void 0 ? _b : 90;
 const FIRE_COLORS = ["#d34b2a", "#f09a3e", "#f2c94c"];
 const TILE_COLORS = {
     water: "#2a6f97",
@@ -198,6 +205,7 @@ let waterParticles = [];
 let smokeParticles = [];
 let heatBuffer = new Float32Array(TOTAL_TILES);
 let colorNoiseMap = new Float32Array(TOTAL_TILES);
+let valleyMap = new Float32Array(TOTAL_TILES);
 let rng = new RNG(Date.now());
 let basePoint = { x: 0, y: 0 };
 let seed = 0;
@@ -205,6 +213,7 @@ let budget = 300;
 let burnedTiles = 0;
 let containedCount = 0;
 let totalLandTiles = 1;
+let lastActiveFires = 0;
 let lastTick = 0;
 let accumulator = 0;
 let paused = false;
@@ -219,6 +228,7 @@ let year = 1;
 let phaseIndex = 0;
 let phase = "growth";
 let phaseDay = 0;
+let fireSeasonDay = 0;
 let careerScore = 0;
 let approval = 0.7;
 let pendingBudget = 300;
@@ -245,6 +255,24 @@ function formatTime(totalSeconds) {
 }
 function clamp(value, min, max) {
     return Math.max(min, Math.min(max, value));
+}
+function getDayNightFactor(dayValue) {
+    const dayFraction = dayValue - Math.floor(dayValue);
+    const cycle = Math.cos((dayFraction - 0.5) * Math.PI * 2) * 0.5 + 0.5;
+    return FIRE_DAY_FACTOR_MIN + (FIRE_DAY_FACTOR_MAX - FIRE_DAY_FACTOR_MIN) * cycle;
+}
+function getFireSeasonIntensity(dayValue) {
+    if (dayValue <= FIRE_SEASON_DURATION) {
+        return 1;
+    }
+    const over = dayValue - FIRE_SEASON_DURATION;
+    const tapered = 1 - over / FIRE_SEASON_TAPER_DAYS;
+    return clamp(tapered, FIRE_SEASON_MIN_INTENSITY, 1);
+}
+function getFireSpreadScale(dayValue) {
+    const dayFactor = getDayNightFactor(dayValue);
+    const season = getFireSeasonIntensity(dayValue);
+    return FIRE_SIM_SPEED * dayFactor * (0.55 + season * 0.45);
 }
 function indexFor(x, y) {
     return y * GRID_COLS + x;
@@ -315,10 +343,119 @@ function fractalNoise(x, y, seedValue) {
     const n3 = hash2D(Math.floor(x / 7), Math.floor(y / 7), seedValue + 271);
     return n1 * 0.6 + n2 * 0.3 + n3 * 0.1;
 }
+function pickRiverSource(elevationMap) {
+    let best = null;
+    let bestElev = 0;
+    for (let i = 0; i < 120; i += 1) {
+        const x = 4 + Math.floor(rng.next() * (GRID_COLS - 8));
+        const y = 4 + Math.floor(rng.next() * (GRID_ROWS - 8));
+        const elev = elevationMap[indexFor(x, y)];
+        if (elev > bestElev) {
+            bestElev = elev;
+            best = { x, y };
+        }
+    }
+    if (best && bestElev > 0.45) {
+        return best;
+    }
+    return null;
+}
+function carveRiverValleys(elevationMap) {
+    valleyMap = new Float32Array(TOTAL_TILES);
+    const riverCount = 3 + Math.floor(rng.next() * 3);
+    const maxSteps = GRID_COLS + GRID_ROWS;
+    for (let r = 0; r < riverCount; r += 1) {
+        const source = pickRiverSource(elevationMap);
+        if (!source) {
+            continue;
+        }
+        const isWet = rng.next() < 0.55;
+        const depthBase = isWet ? 0.22 + rng.next() * 0.08 : 0.1 + rng.next() * 0.06;
+        const widthBase = isWet ? 3 : 2;
+        let current = source;
+        let dir = null;
+        const visited = new Uint8Array(TOTAL_TILES);
+        for (let step = 0; step < maxSteps; step += 1) {
+            const idx = indexFor(current.x, current.y);
+            if (visited[idx]) {
+                break;
+            }
+            visited[idx] = 1;
+            const width = widthBase + (rng.next() < 0.25 ? 1 : 0);
+            for (let dy = -width; dy <= width; dy += 1) {
+                for (let dx = -width; dx <= width; dx += 1) {
+                    const nx = current.x + dx;
+                    const ny = current.y + dy;
+                    if (!inBounds(nx, ny)) {
+                        continue;
+                    }
+                    const dist = Math.hypot(dx, dy);
+                    if (dist > width + 0.1) {
+                        continue;
+                    }
+                    const falloff = 1 - dist / (width + 0.5);
+                    const depth = depthBase * falloff;
+                    const nIdx = indexFor(nx, ny);
+                    elevationMap[nIdx] = clamp(elevationMap[nIdx] - depth, 0, 1);
+                    valleyMap[nIdx] = Math.max(valleyMap[nIdx], depth);
+                }
+            }
+            let next = null;
+            let bestScore = Number.POSITIVE_INFINITY;
+            for (const dirStep of NEIGHBOR_DIRS) {
+                const nx = current.x + dirStep.x;
+                const ny = current.y + dirStep.y;
+                if (!inBounds(nx, ny)) {
+                    continue;
+                }
+                const nIdx = indexFor(nx, ny);
+                const currentElev = elevationMap[idx];
+                const nextElev = elevationMap[nIdx];
+                const slope = nextElev - currentElev;
+                let score = nextElev + rng.next() * 0.03;
+                if (slope > 0) {
+                    score += slope * 1.8;
+                }
+                if (dir) {
+                    const dot = dir.x * dirStep.x + dir.y * dirStep.y;
+                    if (dot < 0) {
+                        score += 0.08;
+                    }
+                    else if (dot === 0) {
+                        score += 0.03;
+                    }
+                }
+                if (score < bestScore) {
+                    bestScore = score;
+                    next = { x: nx, y: ny };
+                }
+            }
+            if (!next) {
+                break;
+            }
+            dir = { x: next.x - current.x, y: next.y - current.y };
+            current = next;
+            if (current.x <= 1 ||
+                current.y <= 1 ||
+                current.x >= GRID_COLS - 2 ||
+                current.y >= GRID_ROWS - 2) {
+                break;
+            }
+            if (elevationMap[indexFor(current.x, current.y)] < 0.12 && rng.next() < 0.35) {
+                break;
+            }
+        }
+    }
+}
 function buildElevationMap(seedValue) {
     const elevationMap = new Float32Array(TOTAL_TILES);
     const temp = new Float32Array(TOTAL_TILES);
     const centerFactor = Math.min(GRID_COLS, GRID_ROWS) / 2;
+    const bandAngle = rng.next() * Math.PI;
+    const bandDir = { x: Math.cos(bandAngle), y: Math.sin(bandAngle) };
+    const bandScale = 16 + rng.next() * 14;
+    const bandPhase = rng.next() * Math.PI * 2;
+    const bandStrength = 0.18 + rng.next() * 0.1;
     const landCenters = Array.from({ length: 3 }, () => ({
         x: rng.next() * GRID_COLS,
         y: rng.next() * GRID_ROWS,
@@ -346,8 +483,12 @@ function buildElevationMap(seedValue) {
             const detail = fractalNoise(nx / 10, ny / 10, seedValue + 151);
             const ridgeNoise = fractalNoise(nx / 24, ny / 24, seedValue + 703);
             const ridge = 1 - Math.abs(ridgeNoise * 2 - 1);
+            const bandCoord = (x * bandDir.x + y * bandDir.y) / bandScale;
+            const band = (Math.sin(bandCoord + bandPhase) + 1) * 0.5;
+            const bandBoost = (band - 0.5) * bandStrength;
             let elevation = macro * 0.7 + mid * 0.18 + detail * 0.06 + ridge * 0.06;
             elevation += edgeFactor * 0.06;
+            elevation = elevation * (0.75 + band * 0.5) + bandBoost;
             let landBoost = 0;
             for (const land of landCenters) {
                 const dx = (x - land.x) / land.radius;
@@ -397,9 +538,10 @@ function buildElevationMap(seedValue) {
         }
         elevationMap.set(temp);
     }
+    carveRiverValleys(elevationMap);
     for (let i = 0; i < elevationMap.length; i += 1) {
         const value = elevationMap[i];
-        elevationMap[i] = clamp(value * value * (0.65 + value * 0.6), 0, 1);
+        elevationMap[i] = clamp(Math.pow(value, 1.35) * (0.55 + value * 0.9), 0, 1);
     }
     return elevationMap;
 }
@@ -549,8 +691,8 @@ function applyGrowth(dayDelta) {
         }
     }
 }
-function igniteRandomFire(dayDelta) {
-    const ignitionChance = FIRE_IGNITION_CHANCE_PER_DAY * dayDelta;
+function igniteRandomFire(dayDelta, intensity) {
+    const ignitionChance = FIRE_IGNITION_CHANCE_PER_DAY * dayDelta * intensity;
     if (rng.next() >= ignitionChance) {
         return;
     }
@@ -599,6 +741,9 @@ function startNewYear() {
 }
 function setPhase(next) {
     phase = next;
+    if (phase !== "fire") {
+        fireSeasonDay = 0;
+    }
     updatePhaseControls();
     if (phase === "growth") {
         startNewYear();
@@ -610,6 +755,7 @@ function setPhase(next) {
         return;
     }
     if (phase === "fire") {
+        fireSeasonDay = 0;
         randomizeWind();
         pickInitialFires();
         setStatus("Fire season begins. Stay ahead of the line.");
@@ -653,37 +799,105 @@ function advanceCalendar(dayDelta) {
         if (phaseDay < current.duration) {
             break;
         }
+        if (current.id === "fire" && lastActiveFires > 0) {
+            phaseDay = current.duration;
+            break;
+        }
         phaseDay -= current.duration;
         advancePhase();
     }
 }
-function carveRoad(start, end) {
-    let x = start.x;
-    let y = start.y;
-    while (x !== end.x || y !== end.y) {
-        const idx = indexFor(x, y);
-        if (tiles[idx].type !== "house" && tiles[idx].type !== "base") {
-            tiles[idx].type = "road";
-        }
-        if (x !== end.x && y !== end.y) {
-            if (rng.next() < 0.5) {
-                x += Math.sign(end.x - x);
-            }
-            else {
-                y += Math.sign(end.y - y);
-            }
-        }
-        else if (x !== end.x) {
-            x += Math.sign(end.x - x);
-        }
-        else if (y !== end.y) {
-            y += Math.sign(end.y - y);
-        }
+function setRoadAt(x, y) {
+    if (!inBounds(x, y)) {
+        return;
     }
+    const tile = tiles[indexFor(x, y)];
+    if (tile.type === "water" || tile.type === "house" || tile.type === "base") {
+        return;
+    }
+    tile.type = "road";
+}
+function canRoadTraverse(x, y, start, end) {
+    if (!inBounds(x, y)) {
+        return false;
+    }
+    if ((x === start.x && y === start.y) || (x === end.x && y === end.y)) {
+        return tiles[indexFor(x, y)].type !== "water";
+    }
+    const type = tiles[indexFor(x, y)].type;
+    return type !== "water" && type !== "house";
+}
+function findRoadPath(start, end) {
+    if (!inBounds(start.x, start.y) || !inBounds(end.x, end.y)) {
+        return [];
+    }
+    if (tiles[indexFor(start.x, start.y)].type === "water" || tiles[indexFor(end.x, end.y)].type === "water") {
+        return [];
+    }
+    const startIdx = indexFor(start.x, start.y);
     const endIdx = indexFor(end.x, end.y);
-    if (tiles[endIdx].type !== "house" && tiles[endIdx].type !== "base") {
-        tiles[endIdx].type = "road";
+    if (startIdx === endIdx) {
+        return [start];
     }
+    const prev = new Int32Array(TOTAL_TILES);
+    prev.fill(-1);
+    const queueX = new Int16Array(TOTAL_TILES);
+    const queueY = new Int16Array(TOTAL_TILES);
+    let head = 0;
+    let tail = 0;
+    queueX[tail] = start.x;
+    queueY[tail] = start.y;
+    tail += 1;
+    prev[startIdx] = startIdx;
+    while (head < tail) {
+        const x = queueX[head];
+        const y = queueY[head];
+        head += 1;
+        if (x === end.x && y === end.y) {
+            break;
+        }
+        const neighbors = [
+            { x: x + 1, y },
+            { x: x - 1, y },
+            { x, y: y + 1 },
+            { x, y: y - 1 }
+        ];
+        for (const next of neighbors) {
+            if (!canRoadTraverse(next.x, next.y, start, end)) {
+                continue;
+            }
+            const idx = indexFor(next.x, next.y);
+            if (prev[idx] !== -1) {
+                continue;
+            }
+            prev[idx] = indexFor(x, y);
+            queueX[tail] = next.x;
+            queueY[tail] = next.y;
+            tail += 1;
+        }
+    }
+    if (prev[endIdx] === -1) {
+        return [];
+    }
+    const path = [];
+    let current = endIdx;
+    while (current !== startIdx) {
+        const px = current % GRID_COLS;
+        const py = Math.floor(current / GRID_COLS);
+        path.push({ x: px, y: py });
+        current = prev[current];
+    }
+    path.push(start);
+    path.reverse();
+    return path;
+}
+function carveRoad(start, end) {
+    const path = findRoadPath(start, end);
+    if (path.length === 0) {
+        return false;
+    }
+    path.forEach((point) => setRoadAt(point.x, point.y));
+    return true;
 }
 function isBuildable(x, y) {
     if (!inBounds(x, y)) {
@@ -722,6 +936,27 @@ function isAdjacentToRoad(x, y) {
         return type === "road" || type === "base";
     });
 }
+function countAdjacentHouses(x, y) {
+    const neighbors = [
+        { x: x + 1, y },
+        { x: x - 1, y },
+        { x, y: y + 1 },
+        { x, y: y - 1 }
+    ];
+    let count = 0;
+    neighbors.forEach((point) => {
+        if (!inBounds(point.x, point.y)) {
+            return;
+        }
+        if (tiles[indexFor(point.x, point.y)].type === "house") {
+            count += 1;
+        }
+    });
+    return count;
+}
+function isHouseSpacingOk(x, y) {
+    return countAdjacentHouses(x, y) <= 2;
+}
 function findNearestRoadTile(origin) {
     let best = basePoint;
     let bestDist = Math.abs(origin.x - basePoint.x) + Math.abs(origin.y - basePoint.y);
@@ -740,69 +975,162 @@ function findNearestRoadTile(origin) {
     }
     return best;
 }
+function findNearbyBuildable(origin, radius) {
+    let best = null;
+    let bestDist = Number.POSITIVE_INFINITY;
+    for (let y = origin.y - radius; y <= origin.y + radius; y += 1) {
+        for (let x = origin.x - radius; x <= origin.x + radius; x += 1) {
+            if (!inBounds(x, y) || !isBuildable(x, y)) {
+                continue;
+            }
+            const dist = Math.hypot(origin.x - x, origin.y - y);
+            if (dist < bestDist) {
+                bestDist = dist;
+                best = { x, y };
+            }
+        }
+    }
+    return best;
+}
+function carveRoadRing(center, radius) {
+    for (let dx = -radius; dx <= radius; dx += 1) {
+        setRoadAt(center.x + dx, center.y - radius);
+        setRoadAt(center.x + dx, center.y + radius);
+    }
+    for (let dy = -radius; dy <= radius; dy += 1) {
+        setRoadAt(center.x - radius, center.y + dy);
+        setRoadAt(center.x + radius, center.y + dy);
+    }
+}
+function placeVillageHouses(center, radius, count, valueMin, valueMax, residentsMin, residentsMax, roadBias) {
+    let placed = 0;
+    let tries = 0;
+    const maxTries = count * 40;
+    while (placed < count && tries < maxTries) {
+        tries += 1;
+        const angle = rng.next() * Math.PI * 2;
+        const dist = 2 + rng.next() * radius;
+        const x = Math.round(center.x + Math.cos(angle) * dist);
+        const y = Math.round(center.y + Math.sin(angle) * dist);
+        if (!isBuildable(x, y) || !isHouseSpacingOk(x, y)) {
+            continue;
+        }
+        if (!isAdjacentToRoad(x, y) && rng.next() < roadBias) {
+            continue;
+        }
+        const value = valueMin + Math.floor(rng.next() * (valueMax - valueMin));
+        const residents = residentsMin + Math.floor(rng.next() * (residentsMax - residentsMin));
+        if (placeHouseAt(x, y, value, residents)) {
+            placed += 1;
+        }
+    }
+}
+function collectRoadTiles() {
+    const roads = [];
+    for (let y = 0; y < GRID_ROWS; y += 1) {
+        for (let x = 0; x < GRID_COLS; x += 1) {
+            const type = tiles[indexFor(x, y)].type;
+            if (type === "road" || type === "base") {
+                roads.push({ x, y });
+            }
+        }
+    }
+    return roads;
+}
+function placeRoadsideHouses(roadTiles, count) {
+    let placed = 0;
+    let tries = 0;
+    const maxTries = count * 40;
+    while (placed < count && tries < maxTries) {
+        tries += 1;
+        const road = roadTiles[Math.floor(rng.next() * roadTiles.length)];
+        if (!road) {
+            return;
+        }
+        const candidates = [
+            { x: road.x + 1, y: road.y },
+            { x: road.x - 1, y: road.y },
+            { x: road.x, y: road.y + 1 },
+            { x: road.x, y: road.y - 1 }
+        ];
+        const pick = candidates[Math.floor(rng.next() * candidates.length)];
+        if (!isBuildable(pick.x, pick.y) || !isHouseSpacingOk(pick.x, pick.y)) {
+            continue;
+        }
+        const value = 100 + Math.floor(rng.next() * 170);
+        const residents = 1 + Math.floor(rng.next() * 3);
+        if (placeHouseAt(pick.x, pick.y, value, residents)) {
+            placed += 1;
+        }
+    }
+}
 function populateCommunities() {
     totalPropertyValue = 0;
     totalPopulation = 0;
     totalHouses = 0;
     destroyedHouses = 0;
+    const centralRadius = 7 + Math.floor(rng.next() * 3);
+    const ringRadius = 3 + Math.floor(rng.next() * 2);
+    const spokeCount = 4 + Math.floor(rng.next() * 3);
+    const spokeLength = ringRadius + 7 + Math.floor(rng.next() * 6);
+    carveRoadRing(basePoint, ringRadius);
+    for (let i = 0; i < spokeCount; i += 1) {
+        const angle = (Math.PI * 2 * i) / spokeCount + (rng.next() - 0.5) * 0.5;
+        const rawTarget = {
+            x: Math.round(basePoint.x + Math.cos(angle) * spokeLength),
+            y: Math.round(basePoint.y + Math.sin(angle) * spokeLength)
+        };
+        const nearby = findNearbyBuildable(rawTarget, 6);
+        const target = nearby !== null && nearby !== void 0 ? nearby : (isBuildable(rawTarget.x, rawTarget.y) ? rawTarget : null);
+        if (target && inBounds(target.x, target.y)) {
+            carveRoad(basePoint, target);
+        }
+    }
+    const centralHouseCount = 22 + Math.floor(rng.next() * 12);
+    placeVillageHouses(basePoint, centralRadius, centralHouseCount, 150, 320, 2, 5, 0.85);
     const villageCenters = [];
-    const villageCount = 4 + Math.floor(rng.next() * 3);
+    const villageCount = 3 + Math.floor(rng.next() * 3);
     let attempts = 0;
-    while (villageCenters.length < villageCount && attempts < 4000) {
+    while (villageCenters.length < villageCount && attempts < 5000) {
         attempts += 1;
         const x = Math.floor(rng.next() * GRID_COLS);
         const y = Math.floor(rng.next() * GRID_ROWS);
         if (!isBuildable(x, y)) {
             continue;
         }
-        if (Math.hypot(x - basePoint.x, y - basePoint.y) < 10) {
+        if (Math.hypot(x - basePoint.x, y - basePoint.y) < centralRadius + 12) {
             continue;
         }
-        if (villageCenters.some((center) => Math.hypot(x - center.x, y - center.y) < 18)) {
+        if (villageCenters.some((center) => Math.hypot(x - center.x, y - center.y) < 20)) {
+            continue;
+        }
+        const anchor = findNearestRoadTile({ x, y });
+        if (findRoadPath(anchor, { x, y }).length === 0) {
             continue;
         }
         villageCenters.push({ x, y });
     }
     villageCenters.forEach((center) => {
-        const clusterSize = 10 + Math.floor(rng.next() * 9);
-        let placed = 0;
-        let tries = 0;
-        while (placed < clusterSize && tries < clusterSize * 20) {
-            tries += 1;
-            const angle = rng.next() * Math.PI * 2;
-            const radius = 2 + rng.next() * 5;
-            const x = Math.round(center.x + Math.cos(angle) * radius + (rng.next() - 0.5) * 2);
-            const y = Math.round(center.y + Math.sin(angle) * radius + (rng.next() - 0.5) * 2);
-            const value = 140 + Math.floor(rng.next() * 260);
-            const residents = 2 + Math.floor(rng.next() * 4);
-            if (placeHouseAt(x, y, value, residents)) {
-                placed += 1;
+        const anchor = findNearestRoadTile(center);
+        carveRoad(anchor, center);
+        const localSize = 2 + Math.floor(rng.next() * 2);
+        const localEnds = [
+            { x: center.x + localSize, y: center.y },
+            { x: center.x - localSize, y: center.y },
+            { x: center.x, y: center.y + localSize },
+            { x: center.x, y: center.y - localSize }
+        ];
+        localEnds.forEach((end) => {
+            if (inBounds(end.x, end.y)) {
+                carveRoad(center, end);
             }
-        }
+        });
+        const houseCount = 9 + Math.floor(rng.next() * 8);
+        placeVillageHouses(center, 6, houseCount, 120, 260, 1, 4, 0.75);
     });
-    const isolatedTarget = 12 + Math.floor(rng.next() * 10);
-    let isolatedPlaced = 0;
-    let isolatedAttempts = 0;
-    while (isolatedPlaced < isolatedTarget && isolatedAttempts < isolatedTarget * 40) {
-        isolatedAttempts += 1;
-        const x = Math.floor(rng.next() * GRID_COLS);
-        const y = Math.floor(rng.next() * GRID_ROWS);
-        if (!isBuildable(x, y)) {
-            continue;
-        }
-        if (villageCenters.some((center) => Math.hypot(x - center.x, y - center.y) < 10)) {
-            continue;
-        }
-        const value = 90 + Math.floor(rng.next() * 180);
-        const residents = 1 + Math.floor(rng.next() * 3);
-        if (placeHouseAt(x, y, value, residents)) {
-            isolatedPlaced += 1;
-        }
-    }
-    villageCenters.forEach((center) => carveRoad(basePoint, center));
-    for (let i = 1; i < villageCenters.length; i += 1) {
-        carveRoad(villageCenters[i - 1], villageCenters[i]);
-    }
+    const roadTiles = collectRoadTiles();
+    const roadsideTarget = 8 + Math.floor(rng.next() * 8);
+    placeRoadsideHouses(roadTiles, roadsideTarget);
     for (let y = 0; y < GRID_ROWS; y += 1) {
         for (let x = 0; x < GRID_COLS; x += 1) {
             const idx = indexFor(x, y);
@@ -816,6 +1144,53 @@ function populateCommunities() {
         }
     }
 }
+function isBaseCandidate(x, y, buffer) {
+    if (!inBounds(x, y)) {
+        return false;
+    }
+    if (tiles[indexFor(x, y)].type === "water") {
+        return false;
+    }
+    for (let dy = -buffer; dy <= buffer; dy += 1) {
+        for (let dx = -buffer; dx <= buffer; dx += 1) {
+            if (Math.hypot(dx, dy) > buffer) {
+                continue;
+            }
+            const nx = x + dx;
+            const ny = y + dy;
+            if (!inBounds(nx, ny)) {
+                return false;
+            }
+            if (tiles[indexFor(nx, ny)].type === "water") {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+function findBasePoint() {
+    const center = { x: Math.floor(GRID_COLS / 2), y: Math.floor(GRID_ROWS / 2) };
+    const buffer = 4;
+    if (isBaseCandidate(center.x, center.y, buffer)) {
+        return center;
+    }
+    const maxRadius = Math.max(GRID_COLS, GRID_ROWS);
+    for (let radius = 1; radius < maxRadius; radius += 1) {
+        for (let dy = -radius; dy <= radius; dy += 1) {
+            for (let dx = -radius; dx <= radius; dx += 1) {
+                if (Math.abs(dx) !== radius && Math.abs(dy) !== radius) {
+                    continue;
+                }
+                const x = center.x + dx;
+                const y = center.y + dy;
+                if (isBaseCandidate(x, y, buffer)) {
+                    return { x, y };
+                }
+            }
+        }
+    }
+    return center;
+}
 function generateMap(newSeed) {
     seed = newSeed;
     rng = new RNG(seed);
@@ -826,11 +1201,17 @@ function generateMap(newSeed) {
             const edgeDist = Math.min(x, y, GRID_COLS - 1 - x, GRID_ROWS - 1 - y);
             const edgeFactor = clamp(edgeDist / (Math.min(GRID_COLS, GRID_ROWS) / 2), 0, 1);
             const elevation = elevationMap[indexFor(x, y)];
+            const valley = valleyMap[indexFor(x, y)];
             const micro = fractalNoise(x / 4, y / 4, seed + 211);
-            const waterThreshold = clamp(0.16 + (1 - edgeFactor) * 0.1 - (micro - 0.5) * 0.05, 0.1, 0.28);
+            const baseWaterThreshold = clamp(0.16 + (1 - edgeFactor) * 0.1 - (micro - 0.5) * 0.05, 0.1, 0.28);
+            const riverBias = clamp(valley * 1.8, 0, 0.12);
+            const waterThreshold = clamp(baseWaterThreshold + riverBias, 0.1, 0.32);
             const isWater = elevation < waterThreshold;
-            const type = isWater ? "water" : micro > 0.62 || elevation > 0.7 ? "forest" : "grass";
-            const canopy = isWater ? 0 : clamp(type === "forest" ? 0.55 + micro * 0.55 : 0.15 + micro * 0.45, 0, 1);
+            const valleyDry = valley > 0.08 && elevation < 0.55;
+            const isForest = !valleyDry && (micro > 0.62 || elevation > 0.72);
+            const type = isWater ? "water" : isForest ? "forest" : "grass";
+            const canopyBase = isForest ? 0.55 + micro * 0.55 : 0.12 + micro * 0.35 - (valleyDry ? 0.08 : 0);
+            const canopy = isWater ? 0 : clamp(canopyBase, 0, 1);
             tiles.push({
                 type,
                 fuel: 0,
@@ -858,14 +1239,7 @@ function generateMap(newSeed) {
             tile.canopy = 0;
         }
     });
-    basePoint = { x: Math.floor(GRID_COLS / 2), y: Math.floor(GRID_ROWS / 2) };
-    const roadTargets = [
-        { x: 0, y: Math.floor(rng.next() * GRID_ROWS) },
-        { x: GRID_COLS - 1, y: Math.floor(rng.next() * GRID_ROWS) },
-        { x: Math.floor(rng.next() * GRID_COLS), y: 0 },
-        { x: Math.floor(rng.next() * GRID_COLS), y: GRID_ROWS - 1 }
-    ];
-    roadTargets.forEach((target) => carveRoad(basePoint, target));
+    basePoint = findBasePoint();
     for (let y = -2; y <= 2; y += 1) {
         for (let x = -2; x <= 2; x += 1) {
             const nx = basePoint.x + x;
@@ -1068,17 +1442,19 @@ function updateParticles(delta) {
         return true;
     });
 }
-function updateHeat(delta) {
+function updateHeat(delta, spreadScale) {
     heatBuffer.fill(0);
-    const diffusion = clamp(delta * 0.65, 0.08, 0.45);
-    const cooling = clamp(1 - delta * 0.22, 0.75, 0.98);
+    const heatDelta = delta * spreadScale;
+    const diffusion = clamp(delta * (0.6 + spreadScale * 0.05), 0.08, 0.45);
+    const cooling = clamp(1 - heatDelta * 0.2, 0.7, 0.98);
+    const windBias = 0.35 + spreadScale * 0.12;
     for (let y = 0; y < GRID_ROWS; y += 1) {
         for (let x = 0; x < GRID_COLS; x += 1) {
             const idx = indexFor(x, y);
             const tile = tiles[idx];
             let heat = tile.heat;
             const baseHeat = tile.fire * tile.heatOutput;
-            heat = heat * cooling + baseHeat * delta * 3.2;
+            heat = heat * cooling + baseHeat * heatDelta * 3.2;
             if (heat < 0.005) {
                 heat = 0;
             }
@@ -1098,7 +1474,7 @@ function updateHeat(delta) {
                 const slope = tiles[nIdx].elevation - tile.elevation;
                 const slopeWeight = slope >= 0 ? 1 + slope * 1.4 : 1 + slope * 0.6;
                 const dot = dir.x * wind.dx + dir.y * wind.dy;
-                const windWeight = 1 + dot * wind.strength * 0.35;
+                const windWeight = 1 + dot * wind.strength * windBias;
                 const weight = clamp(slopeWeight * windWeight, 0.2, 2.4);
                 weightSum += weight;
             }
@@ -1115,7 +1491,7 @@ function updateHeat(delta) {
                 const slope = tiles[nIdx].elevation - tile.elevation;
                 const slopeWeight = slope >= 0 ? 1 + slope * 1.4 : 1 + slope * 0.6;
                 const dot = dir.x * wind.dx + dir.y * wind.dy;
-                const windWeight = 1 + dot * wind.strength * 0.35;
+                const windWeight = 1 + dot * wind.strength * windBias;
                 const weight = clamp(slopeWeight * windWeight, 0.2, 2.4);
                 heatBuffer[nIdx] += (share * weight) / weightSum;
             }
@@ -1428,24 +1804,25 @@ function applyExtinguish(delta) {
         }
     });
 }
-function updateFire(delta) {
+function updateFire(delta, spreadScale) {
     const igniteList = [];
     let activeFires = 0;
-    const emberChance = delta * 0.1;
+    const fireDelta = delta * spreadScale;
+    const emberChance = fireDelta * 0.1;
     for (let y = 0; y < GRID_ROWS; y += 1) {
         for (let x = 0; x < GRID_COLS; x += 1) {
             const idx = indexFor(x, y);
             const tile = tiles[idx];
             if (tile.fire > 0) {
                 activeFires += 1;
-                if (rng.next() < delta * 0.8) {
+                if (rng.next() < fireDelta * 0.8) {
                     emitSmokeAt(x + 0.5, y + 0.5);
                 }
                 if (tile.fuel > 0) {
                     const heatRatio = tile.heat / (tile.ignitionPoint * 1.6);
-                    const growth = delta * tile.burnRate * (heatRatio - 0.45);
+                    const growth = fireDelta * tile.burnRate * (heatRatio - 0.45);
                     tile.fire = clamp(tile.fire + growth, 0, 1);
-                    tile.fuel = Math.max(0, tile.fuel - delta * tile.burnRate * (0.6 + tile.fire * 0.9));
+                    tile.fuel = Math.max(0, tile.fuel - fireDelta * tile.burnRate * (0.6 + tile.fire * 0.9));
                 }
                 if (tile.fuel <= 0.02 && tile.type !== "ash") {
                     if (tile.type === "house" && !tile.houseDestroyed) {
@@ -1590,8 +1967,10 @@ function resetGame(newSeed) {
     phaseIndex = 0;
     phaseDay = 0;
     phase = "growth";
+    fireSeasonDay = 0;
     approval = 0.7;
     careerScore = 0;
+    lastActiveFires = 0;
     lostPropertyValue = 0;
     lostResidents = 0;
     yearPropertyLost = 0;
@@ -1622,14 +2001,24 @@ function update(delta) {
     if (phase === "growth") {
         applyGrowth(calendarDelta);
     }
+    if (phase === "fire") {
+        fireSeasonDay += dayDelta;
+    }
     let activeFires = 0;
     if (phase === "fire") {
         updateWind(delta);
-        igniteRandomFire(dayDelta);
+        const dayFactor = getDayNightFactor(fireSeasonDay);
+        const seasonIntensity = getFireSeasonIntensity(fireSeasonDay);
+        const spreadScale = getFireSpreadScale(fireSeasonDay);
+        igniteRandomFire(dayDelta, dayFactor * seasonIntensity);
         updateUnits(delta);
         applyExtinguish(delta);
-        updateHeat(delta);
-        activeFires = updateFire(delta);
+        updateHeat(delta, spreadScale);
+        activeFires = updateFire(delta, spreadScale);
+        lastActiveFires = activeFires;
+    }
+    else {
+        lastActiveFires = 0;
     }
     updateParticles(delta);
     checkFailureConditions();
