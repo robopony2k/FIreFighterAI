@@ -1,0 +1,155 @@
+import type { RNG, Point } from "../core/types.js";
+import type { WorldState } from "../core/state.js";
+import {
+  FIRE_IGNITION_CHANCE_PER_DAY,
+  FIRE_JUMP_BASE_CHANCE,
+  FIRE_JUMP_DOT_THRESHOLD,
+  FIRE_JUMP_HEAT_BOOST,
+  FIRE_JUMP_WIND_THRESHOLD,
+  FIRE_DAY_FACTOR_MAX,
+  NEIGHBOR_DIRS
+} from "../core/config.js";
+import { clamp } from "../core/utils.js";
+import { inBounds, indexFor } from "../core/grid.js";
+import { emitSmokeAt } from "./particles.js";
+
+export function igniteRandomFire(state: WorldState, rng: RNG, dayDelta: number, intensity: number): void {
+  const ignitionChance = FIRE_IGNITION_CHANCE_PER_DAY * dayDelta * intensity;
+  if (rng.next() >= ignitionChance) {
+    return;
+  }
+  let attempts = 0;
+  while (attempts < 80) {
+    attempts += 1;
+    const x = Math.floor(rng.next() * state.grid.cols);
+    const y = Math.floor(rng.next() * state.grid.rows);
+    const tile = state.tiles[indexFor(state.grid, x, y)];
+    if (tile.fire > 0 || tile.fuel <= 0) {
+      continue;
+    }
+    if (
+      tile.type === "water" ||
+      tile.type === "base" ||
+      tile.type === "ash" ||
+      tile.type === "firebreak" ||
+      tile.type === "road"
+    ) {
+      continue;
+    }
+    tile.fire = 0.35 + rng.next() * 0.25;
+    tile.heat = Math.max(tile.heat, tile.ignitionPoint * 1.3);
+    break;
+  }
+}
+
+export function stepFire(state: WorldState, rng: RNG, delta: number, spreadScale: number, dayFactor: number): number {
+  const igniteList: Point[] = [];
+  let activeFires = 0;
+  const fireDelta = delta * spreadScale;
+  const emberChance = fireDelta * 0.1;
+  const hotFactor = clamp((dayFactor - 1) / (FIRE_DAY_FACTOR_MAX - 1), 0, 1);
+  const windFactor = clamp((state.wind.strength - FIRE_JUMP_WIND_THRESHOLD) / (1 - FIRE_JUMP_WIND_THRESHOLD), 0, 1);
+  const jumpChance = fireDelta * FIRE_JUMP_BASE_CHANCE * hotFactor * windFactor;
+  for (let y = 0; y < state.grid.rows; y += 1) {
+    for (let x = 0; x < state.grid.cols; x += 1) {
+      const idx = indexFor(state.grid, x, y);
+      const tile = state.tiles[idx];
+      if (tile.fire > 0) {
+        activeFires += 1;
+        if (rng.next() < fireDelta * 0.8) {
+          emitSmokeAt(state, rng, x + 0.5, y + 0.5);
+        }
+        if (tile.fuel > 0) {
+          const heatRatio = tile.heat / (tile.ignitionPoint * 1.6);
+          const growth = fireDelta * tile.burnRate * (heatRatio - 0.45);
+          tile.fire = clamp(tile.fire + growth, 0, 1);
+          tile.fuel = Math.max(0, tile.fuel - fireDelta * tile.burnRate * (0.6 + tile.fire * 0.9));
+        }
+        if (tile.fuel <= 0.02 && tile.type !== "ash") {
+          if (tile.type === "house" && !tile.houseDestroyed) {
+            tile.houseDestroyed = true;
+            state.destroyedHouses += 1;
+            state.lostPropertyValue += tile.houseValue;
+            state.lostResidents += tile.houseResidents;
+            state.yearPropertyLost += tile.houseValue;
+            state.yearLivesLost += tile.houseResidents;
+          }
+          tile.fire = 0;
+          tile.type = "ash";
+          tile.fuel = 0;
+          tile.ashAge = 0;
+          tile.heat *= 0.4;
+          if (!tile.isBase) {
+            state.burnedTiles += 1;
+          }
+          continue;
+        }
+
+        if (rng.next() < emberChance * state.wind.strength) {
+          let best: Point | null = null;
+          let bestDot = -Infinity;
+          for (const dir of NEIGHBOR_DIRS) {
+            const nx = x + dir.x;
+            const ny = y + dir.y;
+            if (!inBounds(state.grid, nx, ny)) {
+              continue;
+            }
+            const dot = dir.x * state.wind.dx + dir.y * state.wind.dy;
+            if (dot > bestDot) {
+              bestDot = dot;
+              best = { x: nx, y: ny };
+            }
+          }
+          if (best) {
+            const neighbor = state.tiles[indexFor(state.grid, best.x, best.y)];
+            if (neighbor.fire === 0 && neighbor.fuel > 0) {
+              neighbor.heat = Math.min(5, neighbor.heat + 0.25 + state.wind.strength * 0.25);
+            }
+          }
+        }
+
+        if (jumpChance > 0) {
+          for (const dir of NEIGHBOR_DIRS) {
+            const nx = x + dir.x;
+            const ny = y + dir.y;
+            if (!inBounds(state.grid, nx, ny)) {
+              continue;
+            }
+            const barrier = state.tiles[indexFor(state.grid, nx, ny)];
+            if (barrier.type !== "road" && barrier.type !== "firebreak") {
+              continue;
+            }
+            const dot = dir.x * state.wind.dx + dir.y * state.wind.dy;
+            if (dot <= FIRE_JUMP_DOT_THRESHOLD) {
+              continue;
+            }
+            const tx = nx + dir.x;
+            const ty = ny + dir.y;
+            if (!inBounds(state.grid, tx, ty)) {
+              continue;
+            }
+            const target = state.tiles[indexFor(state.grid, tx, ty)];
+            if (target.fire > 0 || target.fuel <= 0) {
+              continue;
+            }
+            if (rng.next() < jumpChance * dot) {
+              target.heat = Math.min(5, target.heat + FIRE_JUMP_HEAT_BOOST + state.wind.strength * 0.25 + hotFactor * 0.2);
+            }
+          }
+        }
+      } else if (tile.fuel > 0 && tile.heat >= tile.ignitionPoint) {
+        igniteList.push({ x, y });
+      }
+    }
+  }
+
+  igniteList.forEach((point) => {
+    const tile = state.tiles[indexFor(state.grid, point.x, point.y)];
+    if (tile.fire === 0 && tile.fuel > 0) {
+      tile.fire = 0.2 + rng.next() * 0.25;
+    }
+  });
+
+  return activeFires;
+}
+
