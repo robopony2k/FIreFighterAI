@@ -12,6 +12,32 @@ import {
 import { clamp } from "../core/utils.js";
 import { inBounds, indexFor } from "../core/grid.js";
 import { emitSmokeAt } from "./particles.js";
+import { clearHeatInBounds } from "./heat.js";
+
+const FIRE_BOUNDS_PADDING = 6;
+
+function markFireBounds(state: WorldState, x: number, y: number): void {
+  if (!state.fireBoundsActive) {
+    state.fireBoundsActive = true;
+    state.fireMinX = x;
+    state.fireMaxX = x;
+    state.fireMinY = y;
+    state.fireMaxY = y;
+    return;
+  }
+  state.fireMinX = Math.min(state.fireMinX, x);
+  state.fireMaxX = Math.max(state.fireMaxX, x);
+  state.fireMinY = Math.min(state.fireMinY, y);
+  state.fireMaxY = Math.max(state.fireMaxY, y);
+}
+
+export function resetFireBounds(state: WorldState): void {
+  state.fireBoundsActive = false;
+  state.fireMinX = 0;
+  state.fireMaxX = 0;
+  state.fireMinY = 0;
+  state.fireMaxY = 0;
+}
 
 export function igniteRandomFire(state: WorldState, rng: RNG, dayDelta: number, intensity: number): void {
   const ignitionChance = FIRE_IGNITION_CHANCE_PER_DAY * dayDelta * intensity;
@@ -38,6 +64,7 @@ export function igniteRandomFire(state: WorldState, rng: RNG, dayDelta: number, 
     }
     tile.fire = 0.35 + rng.next() * 0.25;
     tile.heat = Math.max(tile.heat, tile.ignitionPoint * 1.3);
+    markFireBounds(state, x, y);
     break;
   }
 }
@@ -45,17 +72,43 @@ export function igniteRandomFire(state: WorldState, rng: RNG, dayDelta: number, 
 export function stepFire(state: WorldState, rng: RNG, delta: number, spreadScale: number, dayFactor: number): number {
   const igniteList: Point[] = [];
   let activeFires = 0;
+  const cols = state.grid.cols;
+  const rows = state.grid.rows;
+  const boundsActive = state.fireBoundsActive;
+  const minX = boundsActive ? clamp(state.fireMinX - FIRE_BOUNDS_PADDING, 0, cols - 1) : 0;
+  const maxX = boundsActive ? clamp(state.fireMaxX + FIRE_BOUNDS_PADDING, 0, cols - 1) : cols - 1;
+  const minY = boundsActive ? clamp(state.fireMinY - FIRE_BOUNDS_PADDING, 0, rows - 1) : 0;
+  const maxY = boundsActive ? clamp(state.fireMaxY + FIRE_BOUNDS_PADDING, 0, rows - 1) : rows - 1;
+  if (!boundsActive && state.lastActiveFires === 0) {
+    return 0;
+  }
+  let nextMinX = cols;
+  let nextMaxX = -1;
+  let nextMinY = rows;
+  let nextMaxY = -1;
   const fireDelta = delta * spreadScale;
   const emberChance = fireDelta * 0.1;
   const hotFactor = clamp((dayFactor - 1) / (FIRE_DAY_FACTOR_MAX - 1), 0, 1);
   const windFactor = clamp((state.wind.strength - FIRE_JUMP_WIND_THRESHOLD) / (1 - FIRE_JUMP_WIND_THRESHOLD), 0, 1);
   const jumpChance = fireDelta * FIRE_JUMP_BASE_CHANCE * hotFactor * windFactor;
-  for (let y = 0; y < state.grid.rows; y += 1) {
-    for (let x = 0; x < state.grid.cols; x += 1) {
+  for (let y = minY; y <= maxY; y += 1) {
+    for (let x = minX; x <= maxX; x += 1) {
       const idx = indexFor(state.grid, x, y);
       const tile = state.tiles[idx];
       if (tile.fire > 0) {
         activeFires += 1;
+        if (x < nextMinX) {
+          nextMinX = x;
+        }
+        if (x > nextMaxX) {
+          nextMaxX = x;
+        }
+        if (y < nextMinY) {
+          nextMinY = y;
+        }
+        if (y > nextMaxY) {
+          nextMaxY = y;
+        }
         if (rng.next() < fireDelta * 0.8) {
           emitSmokeAt(state, rng, x + 0.5, y + 0.5);
         }
@@ -81,7 +134,9 @@ export function stepFire(state: WorldState, rng: RNG, delta: number, spreadScale
           tile.heat *= 0.4;
           if (!tile.isBase) {
             state.burnedTiles += 1;
+            state.yearBurnedTiles += 1;
           }
+          state.terrainDirty = true;
           continue;
         }
 
@@ -147,8 +202,32 @@ export function stepFire(state: WorldState, rng: RNG, delta: number, spreadScale
     const tile = state.tiles[indexFor(state.grid, point.x, point.y)];
     if (tile.fire === 0 && tile.fuel > 0) {
       tile.fire = 0.2 + rng.next() * 0.25;
+      activeFires += 1;
+      if (point.x < nextMinX) {
+        nextMinX = point.x;
+      }
+      if (point.x > nextMaxX) {
+        nextMaxX = point.x;
+      }
+      if (point.y < nextMinY) {
+        nextMinY = point.y;
+      }
+      if (point.y > nextMaxY) {
+        nextMaxY = point.y;
+      }
     }
   });
+
+  if (activeFires > 0) {
+    state.fireBoundsActive = true;
+    state.fireMinX = nextMinX;
+    state.fireMaxX = nextMaxX;
+    state.fireMinY = nextMinY;
+    state.fireMaxY = nextMaxY;
+  } else if (boundsActive) {
+    clearHeatInBounds(state, minX, maxX, minY, maxY);
+    resetFireBounds(state);
+  }
 
   return activeFires;
 }

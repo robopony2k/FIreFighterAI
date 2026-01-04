@@ -1,14 +1,28 @@
 import { NEIGHBOR_DIRS } from "../core/config.js";
 import { clamp } from "../core/utils.js";
-import { inBounds, indexFor } from "../core/grid.js";
-export function stepHeat(state, delta, spreadScale) {
+import { indexFor } from "../core/grid.js";
+export function clearHeatInBounds(state, minX, maxX, minY, maxY) {
+    for (let y = minY; y <= maxY; y += 1) {
+        for (let x = minX; x <= maxX; x += 1) {
+            state.tiles[indexFor(state.grid, x, y)].heat = 0;
+        }
+    }
+}
+export function stepHeat(state, delta, spreadScale, bounds) {
+    if (!bounds) {
+        return;
+    }
+    const minX = bounds.minX;
+    const maxX = bounds.maxX;
+    const minY = bounds.minY;
+    const maxY = bounds.maxY;
     state.heatBuffer.fill(0);
     const heatDelta = delta * spreadScale;
     const diffusion = clamp(delta * (0.6 + spreadScale * 0.05), 0.08, 0.45);
     const cooling = clamp(1 - heatDelta * 0.2, 0.7, 0.98);
     const windBias = 0.35 + spreadScale * 0.12;
-    for (let y = 0; y < state.grid.rows; y += 1) {
-        for (let x = 0; x < state.grid.cols; x += 1) {
+    for (let y = minY; y <= maxY; y += 1) {
+        for (let x = minX; x <= maxX; x += 1) {
             const idx = indexFor(state.grid, x, y);
             const tile = state.tiles[idx];
             let heat = tile.heat;
@@ -26,7 +40,7 @@ export function stepHeat(state, delta, spreadScale) {
             for (const dir of NEIGHBOR_DIRS) {
                 const nx = x + dir.x;
                 const ny = y + dir.y;
-                if (!inBounds(state.grid, nx, ny)) {
+                if (nx < minX || nx > maxX || ny < minY || ny > maxY) {
                     continue;
                 }
                 const nIdx = indexFor(state.grid, nx, ny);
@@ -43,7 +57,7 @@ export function stepHeat(state, delta, spreadScale) {
             for (const dir of NEIGHBOR_DIRS) {
                 const nx = x + dir.x;
                 const ny = y + dir.y;
-                if (!inBounds(state.grid, nx, ny)) {
+                if (nx < minX || nx > maxX || ny < minY || ny > maxY) {
                     continue;
                 }
                 const nIdx = indexFor(state.grid, nx, ny);
@@ -56,9 +70,11 @@ export function stepHeat(state, delta, spreadScale) {
             }
         }
     }
-    for (let i = 0; i < state.tiles.length; i += 1) {
-        const tile = state.tiles[i];
-        const retention = tile.type === "water" ? 0.4 : tile.type === "ash" ? 0.55 : 1;
-        tile.heat = Math.min(5, state.heatBuffer[i] * retention);
+    for (let y = minY; y <= maxY; y += 1) {
+        for (let x = minX; x <= maxX; x += 1) {
+            const tile = state.tiles[indexFor(state.grid, x, y)];
+            const retention = tile.type === "water" ? 0.4 : tile.type === "ash" ? 0.55 : 1;
+            tile.heat = Math.min(5, state.heatBuffer[indexFor(state.grid, x, y)] * retention);
+        }
     }
 }

@@ -1,5 +1,7 @@
-import type { DeployMode, Grid, Point, SeasonPhase, Tile, Unit, Particle, Wind, TileType } from "./types.js";
+import type { DeployMode, Grid, Point, SeasonPhase, Tile, Unit, Particle, Wind, TileType, RosterUnit } from "./types.js";
+import type { CampaignState } from "./campaign.js";
 import { BASE_BUDGET } from "./config.js";
+import { createCampaignState } from "./campaign.js";
 
 export interface WorldState {
   grid: Grid;
@@ -10,6 +12,7 @@ export interface WorldState {
   heatBuffer: number[];
   colorNoiseMap: number[];
   valleyMap: number[];
+  terrainDirty: boolean;
   basePoint: Point;
   seed: number;
   budget: number;
@@ -22,7 +25,7 @@ export interface WorldState {
   wind: Wind;
   windTimer: number;
   deployMode: DeployMode | null;
-  selectedUnitId: number | null;
+  selectedUnitIds: number[];
   zoom: number;
   cameraCenter: Point;
   year: number;
@@ -30,6 +33,13 @@ export interface WorldState {
   phase: SeasonPhase;
   phaseDay: number;
   fireSeasonDay: number;
+  fireSimAccumulator: number;
+  fireBoundsActive: boolean;
+  fireMinX: number;
+  fireMaxX: number;
+  fireMinY: number;
+  fireMaxY: number;
+  yearBurnedTiles: number;
   careerScore: number;
   approval: number;
   pendingBudget: number;
@@ -42,13 +52,26 @@ export interface WorldState {
   totalHouses: number;
   destroyedHouses: number;
   clearLineStart: Point | null;
+  formationStart: Point | null;
+  formationEnd: Point | null;
   statusMessage: string;
   overlayVisible: boolean;
   overlayTitle: string;
   overlayMessage: string;
+  overlayDetails: string[];
+  overlayAction: "restart" | "dismiss";
   finalScore: number;
   scoreSubmitted: boolean;
   leaderboardDirty: boolean;
+  campaign: CampaignState;
+  renderTrees: boolean;
+  renderEffects: boolean;
+  fireSnapshot: Float32Array;
+  growthView: { zoom: number; camera: Point } | null;
+  selectionBox: { x1: number; y1: number; x2: number; y2: number } | null;
+  roster: RosterUnit[];
+  selectedRosterId: number | null;
+  nextRosterId: number;
 }
 
 const DEFAULT_WIND: Wind = { name: "N", dx: 0, dy: -1, strength: 0.5 };
@@ -65,6 +88,7 @@ export function createInitialState(seed: number, grid: Grid): WorldState {
     heatBuffer: createNumberArray(grid.totalTiles, 0),
     colorNoiseMap: createNumberArray(grid.totalTiles, 0.5),
     valleyMap: createNumberArray(grid.totalTiles, 0),
+    terrainDirty: true,
     basePoint: { x: 0, y: 0 },
     seed,
     budget: BASE_BUDGET,
@@ -77,7 +101,7 @@ export function createInitialState(seed: number, grid: Grid): WorldState {
     wind: { ...DEFAULT_WIND },
     windTimer: 0,
     deployMode: null,
-    selectedUnitId: null,
+    selectedUnitIds: [],
     zoom: 1,
     cameraCenter: { x: 0, y: 0 },
     year: 1,
@@ -85,6 +109,13 @@ export function createInitialState(seed: number, grid: Grid): WorldState {
     phase: "growth",
     phaseDay: 0,
     fireSeasonDay: 0,
+    fireSimAccumulator: 0,
+    fireBoundsActive: false,
+    fireMinX: 0,
+    fireMaxX: 0,
+    fireMinY: 0,
+    fireMaxY: 0,
+    yearBurnedTiles: 0,
     careerScore: 0,
     approval: 0.7,
     pendingBudget: BASE_BUDGET,
@@ -97,13 +128,26 @@ export function createInitialState(seed: number, grid: Grid): WorldState {
     totalHouses: 0,
     destroyedHouses: 0,
     clearLineStart: null,
+    formationStart: null,
+    formationEnd: null,
     statusMessage: "Ready.",
     overlayVisible: false,
     overlayTitle: "Fireline",
     overlayMessage: "",
+    overlayDetails: [],
+    overlayAction: "dismiss",
     finalScore: 0,
     scoreSubmitted: false,
-    leaderboardDirty: true
+    leaderboardDirty: true,
+    campaign: createCampaignState(),
+    renderTrees: true,
+    renderEffects: true,
+    fireSnapshot: new Float32Array(grid.totalTiles),
+    growthView: null,
+    selectionBox: null,
+    roster: [],
+    selectedRosterId: null,
+    nextRosterId: 1
   };
 }
 

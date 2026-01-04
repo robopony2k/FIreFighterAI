@@ -1,30 +1,127 @@
-import { FIREBREAK_COST_PER_TILE, UNIT_CONFIG } from "../core/config.js";
+import { FIREBREAK_COST_PER_TILE, MAX_TRAINING_LEVEL, RECRUIT_FIREFIGHTER_COST, RECRUIT_TRUCK_COST, TRAINING_COST, TRAINING_POWER_GAIN, TRAINING_RANGE_GAIN, TRAINING_RESILIENCE_GAIN, TRAINING_SPEED_GAIN, UNIT_CONFIG, UNIT_LOSS_FIRE_THRESHOLD } from "../core/config.js";
 import { formatCurrency } from "../core/utils.js";
 import { setStatus, resetStatus } from "../core/state.js";
+import { getCharacterDefinition, getCharacterFirebreakCost } from "../core/characters.js";
 import { inBounds, indexFor } from "../core/grid.js";
 import { applyFuel } from "../core/tiles.js";
 import { findPath, isPassable } from "./pathing.js";
 import { emitWaterSpray } from "./particles.js";
+const FIRST_NAMES = ["Alex", "Casey", "Drew", "Jordan", "Parker", "Quinn", "Riley", "Sawyer", "Taylor", "Wyatt"];
+const LAST_NAMES = ["Cedar", "Hawk", "Keel", "Marsh", "Reed", "Stone", "Sutter", "Vale", "Wells", "Yates"];
+const TRUCK_PREFIX = ["Engine", "Tanker", "Brush", "Rescue"];
+const createTraining = () => ({
+    speed: 0,
+    power: 0,
+    range: 0,
+    resilience: 0
+});
+const getRosterUnit = (state, rosterId) => {
+    if (rosterId === null) {
+        return null;
+    }
+    return state.roster.find((unit) => unit.id === rosterId) ?? null;
+};
+const nextTruckName = (state) => {
+    const index = state.roster.filter((unit) => unit.kind === "truck").length + 1;
+    const prefix = TRUCK_PREFIX[index % TRUCK_PREFIX.length];
+    return `${prefix} ${index}`;
+};
+const nextFirefighterName = (rng) => {
+    const first = FIRST_NAMES[Math.floor(rng.next() * FIRST_NAMES.length)];
+    const last = LAST_NAMES[Math.floor(rng.next() * LAST_NAMES.length)];
+    return `${first} ${last}`;
+};
+export function seedStartingRoster(state, rng) {
+    if (state.roster.length > 0) {
+        return;
+    }
+    recruitUnit(state, rng, "firefighter", true);
+    recruitUnit(state, rng, "firefighter", true);
+    recruitUnit(state, rng, "truck", true);
+}
+export function recruitUnit(state, rng, kind, free = false) {
+    if (state.phase !== "maintenance" && !free) {
+        setStatus(state, "Recruitment is only available during winter.");
+        return false;
+    }
+    const cost = kind === "truck" ? RECRUIT_TRUCK_COST : RECRUIT_FIREFIGHTER_COST;
+    if (!free && state.budget < cost) {
+        setStatus(state, "Insufficient budget to recruit.");
+        return false;
+    }
+    const entry = {
+        id: state.nextRosterId,
+        kind,
+        name: kind === "truck" ? nextTruckName(state) : nextFirefighterName(rng),
+        training: createTraining(),
+        status: "available"
+    };
+    state.nextRosterId += 1;
+    state.roster.push(entry);
+    state.selectedRosterId = entry.id;
+    if (!free) {
+        state.budget -= cost;
+    }
+    setStatus(state, `${entry.name} recruited and ready for training.`);
+    return true;
+}
+export function trainSelectedUnit(state, skill) {
+    if (state.phase !== "maintenance") {
+        setStatus(state, "Training is only available during winter.");
+        return false;
+    }
+    const unit = getRosterUnit(state, state.selectedRosterId);
+    if (!unit || unit.status === "lost") {
+        setStatus(state, "Select an available unit to train.");
+        return false;
+    }
+    if (unit.training[skill] >= MAX_TRAINING_LEVEL) {
+        setStatus(state, "Training level maxed.");
+        return false;
+    }
+    if (state.budget < TRAINING_COST) {
+        setStatus(state, "Insufficient budget for training.");
+        return false;
+    }
+    unit.training[skill] += 1;
+    state.budget -= TRAINING_COST;
+    setStatus(state, `${unit.name} trained: ${skill} level ${unit.training[skill]}.`);
+    return true;
+}
+const getTrainingMultiplier = (training) => ({
+    speed: 1 + training.speed * TRAINING_SPEED_GAIN,
+    power: 1 + training.power * TRAINING_POWER_GAIN,
+    range: 1 + training.range * TRAINING_RANGE_GAIN,
+    resilience: training.resilience * TRAINING_RESILIENCE_GAIN
+});
 export function setDeployMode(state, mode, options) {
     state.deployMode = mode;
     if (options?.silent) {
         return;
     }
+    const firebreakCost = getCharacterFirebreakCost(state.campaign.characterId, FIREBREAK_COST_PER_TILE);
     if (mode === "firefighter" || mode === "truck") {
         setStatus(state, `Deploy ${mode === "firefighter" ? "firefighter" : "truck"} units.`);
     }
     else if (mode === "clear") {
-        setStatus(state, `Clear fuel breaks for ${formatCurrency(FIREBREAK_COST_PER_TILE)} per tile.`);
+        setStatus(state, `Clear fuel breaks for ${formatCurrency(firebreakCost)} per tile.`);
     }
     else {
         resetStatus(state);
     }
 }
+export function clearUnitSelection(state) {
+    state.units.forEach((current) => {
+        current.selected = false;
+    });
+    state.selectedUnitIds = [];
+    resetStatus(state);
+}
 export function selectUnit(state, unit) {
     state.units.forEach((current) => {
         current.selected = unit ? current.id === unit.id : false;
     });
-    state.selectedUnitId = unit ? unit.id : null;
+    state.selectedUnitIds = unit ? [unit.id] : [];
     if (unit) {
         setStatus(state, `Unit ${unit.kind} selected. Click a tile to retask.`);
     }
@@ -32,26 +129,53 @@ export function selectUnit(state, unit) {
         resetStatus(state);
     }
 }
-export function createUnit(state, kind, rng) {
+export function toggleUnitSelection(state, unit) {
+    if (unit.selected) {
+        unit.selected = false;
+        state.selectedUnitIds = state.selectedUnitIds.filter((id) => id !== unit.id);
+    }
+    else {
+        unit.selected = true;
+        state.selectedUnitIds = [...state.selectedUnitIds, unit.id];
+    }
+    if (state.selectedUnitIds.length > 0) {
+        setStatus(state, `${state.selectedUnitIds.length} unit(s) selected. Click to retask.`);
+    }
+    else {
+        resetStatus(state);
+    }
+}
+export function getSelectedUnits(state) {
+    return state.units.filter((unit) => unit.selected);
+}
+export function createUnit(state, kind, rng, rosterEntry) {
     const config = UNIT_CONFIG[kind];
+    const modifiers = getCharacterDefinition(state.campaign.characterId).modifiers;
+    const rosterUnit = rosterEntry ?? state.roster.find((entry) => entry.kind === kind && entry.status === "available") ?? null;
+    const training = rosterUnit ? getTrainingMultiplier(rosterUnit.training) : { speed: 1, power: 1, range: 1, resilience: 0 };
     return {
         id: Date.now() + Math.floor(rng.next() * 10000),
         kind,
+        rosterId: rosterUnit ? rosterUnit.id : null,
+        autonomous: true,
         x: state.basePoint.x + 0.5,
         y: state.basePoint.y + 0.5,
         target: null,
         path: [],
         pathIndex: 0,
-        speed: config.speed,
-        radius: config.radius,
-        power: config.power,
+        speed: config.speed * modifiers.unitSpeedMultiplier * training.speed,
+        radius: config.radius * training.range,
+        power: config.power * modifiers.unitPowerMultiplier * training.power,
         selected: false
     };
 }
-export function setUnitTarget(state, unit, tileX, tileY) {
+export function setUnitTarget(state, unit, tileX, tileY, manual = true) {
     if (!inBounds(state.grid, tileX, tileY) || !isPassable(state, tileX, tileY)) {
         setStatus(state, "That location is blocked.");
         return;
+    }
+    if (manual) {
+        unit.autonomous = false;
     }
     unit.target = { x: tileX, y: tileY };
     unit.path = findPath(state, { x: Math.floor(unit.x), y: Math.floor(unit.y) }, unit.target);
@@ -63,15 +187,15 @@ export function deployUnit(state, rng, kind, tileX, tileY) {
         setStatus(state, "Units deploy during fire season only.");
         return;
     }
-    const config = UNIT_CONFIG[kind];
-    if (state.budget < config.cost) {
-        setStatus(state, "Insufficient budget.");
+    const rosterEntry = state.roster.find((entry) => entry.kind === kind && entry.status === "available") ?? null;
+    if (!rosterEntry) {
+        setStatus(state, "No available units in the roster.");
         return;
     }
-    const unit = createUnit(state, kind, rng);
+    const unit = createUnit(state, kind, rng, rosterEntry);
+    rosterEntry.status = "deployed";
     state.units.push(unit);
-    state.budget -= config.cost;
-    setUnitTarget(state, unit, tileX, tileY);
+    setUnitTarget(state, unit, tileX, tileY, false);
 }
 export function clearFuelAt(state, rng, tileX, tileY, showStatus = true) {
     if (state.phase !== "maintenance") {
@@ -83,6 +207,7 @@ export function clearFuelAt(state, rng, tileX, tileY, showStatus = true) {
     if (!inBounds(state.grid, tileX, tileY)) {
         return false;
     }
+    const firebreakCost = getCharacterFirebreakCost(state.campaign.characterId, FIREBREAK_COST_PER_TILE);
     const tile = state.tiles[indexFor(state.grid, tileX, tileY)];
     if (tile.type === "water" || tile.type === "base" || tile.type === "house" || tile.type === "road") {
         if (showStatus) {
@@ -96,7 +221,7 @@ export function clearFuelAt(state, rng, tileX, tileY, showStatus = true) {
         }
         return false;
     }
-    if (state.budget < FIREBREAK_COST_PER_TILE) {
+    if (state.budget < firebreakCost) {
         if (showStatus) {
             setStatus(state, "Insufficient budget.");
         }
@@ -109,7 +234,8 @@ export function clearFuelAt(state, rng, tileX, tileY, showStatus = true) {
     tile.canopy = 0;
     tile.ashAge = 0;
     applyFuel(tile, tile.moisture, rng);
-    state.budget -= FIREBREAK_COST_PER_TILE;
+    state.terrainDirty = true;
+    state.budget -= firebreakCost;
     if (showStatus) {
         setStatus(state, "Fuel break established.");
     }
@@ -120,7 +246,8 @@ export function clearFuelLine(state, rng, start, end) {
         setStatus(state, "Fuel breaks can only be cut during maintenance.");
         return;
     }
-    if (state.budget < FIREBREAK_COST_PER_TILE) {
+    const firebreakCost = getCharacterFirebreakCost(state.campaign.characterId, FIREBREAK_COST_PER_TILE);
+    if (state.budget < firebreakCost) {
         setStatus(state, "Insufficient budget.");
         return;
     }
@@ -136,12 +263,12 @@ export function clearFuelLine(state, rng, start, end) {
     let cleared = 0;
     let spent = 0;
     while (true) {
-        if (state.budget < FIREBREAK_COST_PER_TILE) {
+        if (state.budget < firebreakCost) {
             break;
         }
         if (clearFuelAt(state, rng, x0, y0, false)) {
             cleared += 1;
-            spent += FIREBREAK_COST_PER_TILE;
+            spent += firebreakCost;
         }
         if (x0 === x1 && y0 === y1) {
             break;
@@ -193,6 +320,106 @@ export function stepUnits(state, delta) {
                 unit.x += (dx / dist) * step;
                 unit.y += (dy / dist) * step;
             }
+        }
+    });
+}
+export function autoAssignTargets(state) {
+    for (const unit of state.units) {
+        if (!unit.autonomous) {
+            continue;
+        }
+        if (unit.target && unit.pathIndex < unit.path.length) {
+            continue;
+        }
+        const scanRadius = unit.kind === "truck" ? 8 : 6;
+        let best = null;
+        let bestFire = 0;
+        const minX = Math.max(0, Math.floor(unit.x - scanRadius));
+        const maxX = Math.min(state.grid.cols - 1, Math.floor(unit.x + scanRadius));
+        const minY = Math.max(0, Math.floor(unit.y - scanRadius));
+        const maxY = Math.min(state.grid.rows - 1, Math.floor(unit.y + scanRadius));
+        for (let y = minY; y <= maxY; y += 1) {
+            for (let x = minX; x <= maxX; x += 1) {
+                const tile = state.tiles[indexFor(state.grid, x, y)];
+                if (tile.fire > bestFire) {
+                    bestFire = tile.fire;
+                    best = { x, y };
+                }
+            }
+        }
+        if (best && bestFire > 0.15) {
+            setUnitTarget(state, unit, best.x, best.y, false);
+        }
+    }
+}
+const findNearestPassable = (state, x, y, radius = 2) => {
+    if (inBounds(state.grid, x, y) && isPassable(state, x, y)) {
+        return { x, y };
+    }
+    for (let r = 1; r <= radius; r += 1) {
+        for (let dy = -r; dy <= r; dy += 1) {
+            for (let dx = -r; dx <= r; dx += 1) {
+                if (Math.abs(dx) !== r && Math.abs(dy) !== r) {
+                    continue;
+                }
+                const nx = x + dx;
+                const ny = y + dy;
+                if (!inBounds(state.grid, nx, ny)) {
+                    continue;
+                }
+                if (isPassable(state, nx, ny)) {
+                    return { x: nx, y: ny };
+                }
+            }
+        }
+    }
+    return null;
+};
+export function assignFormationTargets(state, units, start, end) {
+    if (units.length === 0) {
+        return;
+    }
+    const count = units.length;
+    for (let i = 0; i < count; i += 1) {
+        const t = count === 1 ? 0.5 : i / (count - 1);
+        const rawX = Math.round(start.x + (end.x - start.x) * t);
+        const rawY = Math.round(start.y + (end.y - start.y) * t);
+        const target = findNearestPassable(state, rawX, rawY, 2);
+        if (target) {
+            setUnitTarget(state, units[i], target.x, target.y, true);
+        }
+    }
+}
+export function applyUnitHazards(state, rng, delta) {
+    for (let i = state.units.length - 1; i >= 0; i -= 1) {
+        const unit = state.units[i];
+        const tile = state.tiles[indexFor(state.grid, Math.floor(unit.x), Math.floor(unit.y))];
+        if (tile.fire < UNIT_LOSS_FIRE_THRESHOLD) {
+            continue;
+        }
+        const rosterEntry = getRosterUnit(state, unit.rosterId);
+        const resilience = rosterEntry ? getTrainingMultiplier(rosterEntry.training).resilience : 0;
+        const baseRisk = unit.kind === "truck" ? 0.06 : 0.1;
+        const risk = baseRisk * (tile.fire - UNIT_LOSS_FIRE_THRESHOLD + 0.15) * (1 - resilience) * delta;
+        if (rng.next() < risk) {
+            if (rosterEntry) {
+                rosterEntry.status = "lost";
+            }
+            if (unit.selected) {
+                unit.selected = false;
+                state.selectedUnitIds = state.selectedUnitIds.filter((id) => id !== unit.id);
+            }
+            state.units.splice(i, 1);
+            setStatus(state, `${unit.kind === "truck" ? "Truck" : "Firefighter"} lost in the fire.`);
+        }
+    }
+}
+export function recallUnits(state) {
+    state.units = [];
+    state.selectedUnitIds = [];
+    state.roster.forEach((entry) => {
+        if (entry.status === "deployed") {
+            entry.status = "available";
         }
     });
 }

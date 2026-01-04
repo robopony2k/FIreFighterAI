@@ -1,6 +1,8 @@
 export type TileType = "water" | "grass" | "forest" | "ash" | "road" | "base" | "house" | "firebreak";
 
 export type UnitKind = "firefighter" | "truck";
+export type UnitSkill = "speed" | "power" | "range" | "resilience";
+export type RosterStatus = "available" | "deployed" | "lost";
 export type SeasonPhase = "growth" | "maintenance" | "fire" | "budget";
 export type DeployMode = UnitKind | "clear";
 
@@ -26,6 +28,7 @@ export interface Tile {
   burnRate: number;
   heatOutput: number;
   moisture: number;
+  waterDist: number;
   canopy: number;
   houseValue: number;
   houseResidents: number;
@@ -36,6 +39,8 @@ export interface Tile {
 export interface Unit {
   id: number;
   kind: UnitKind;
+  rosterId: number | null;
+  autonomous: boolean;
   x: number;
   y: number;
   target: Point | null;
@@ -45,6 +50,21 @@ export interface Unit {
   radius: number;
   power: number;
   selected: boolean;
+}
+
+export interface UnitTraining {
+  speed: number;
+  power: number;
+  range: number;
+  resilience: number;
+}
+
+export interface RosterUnit {
+  id: number;
+  kind: UnitKind;
+  name: string;
+  training: UnitTraining;
+  status: RosterStatus;
 }
 
 export interface Particle {

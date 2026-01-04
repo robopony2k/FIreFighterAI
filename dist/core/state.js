@@ -1,4 +1,5 @@
 import { BASE_BUDGET } from "./config.js";
+import { createCampaignState } from "./campaign.js";
 const DEFAULT_WIND = { name: "N", dx: 0, dy: -1, strength: 0.5 };
 const createNumberArray = (size, fill = 0) => Array.from({ length: size }, () => fill);
 export function createInitialState(seed, grid) {
@@ -11,6 +12,7 @@ export function createInitialState(seed, grid) {
         heatBuffer: createNumberArray(grid.totalTiles, 0),
         colorNoiseMap: createNumberArray(grid.totalTiles, 0.5),
         valleyMap: createNumberArray(grid.totalTiles, 0),
+        terrainDirty: true,
         basePoint: { x: 0, y: 0 },
         seed,
         budget: BASE_BUDGET,
@@ -23,7 +25,7 @@ export function createInitialState(seed, grid) {
         wind: { ...DEFAULT_WIND },
         windTimer: 0,
         deployMode: null,
-        selectedUnitId: null,
+        selectedUnitIds: [],
         zoom: 1,
         cameraCenter: { x: 0, y: 0 },
         year: 1,
@@ -31,6 +33,13 @@ export function createInitialState(seed, grid) {
         phase: "growth",
         phaseDay: 0,
         fireSeasonDay: 0,
+        fireSimAccumulator: 0,
+        fireBoundsActive: false,
+        fireMinX: 0,
+        fireMaxX: 0,
+        fireMinY: 0,
+        fireMaxY: 0,
+        yearBurnedTiles: 0,
         careerScore: 0,
         approval: 0.7,
         pendingBudget: BASE_BUDGET,
@@ -43,13 +52,26 @@ export function createInitialState(seed, grid) {
         totalHouses: 0,
         destroyedHouses: 0,
         clearLineStart: null,
+        formationStart: null,
+        formationEnd: null,
         statusMessage: "Ready.",
         overlayVisible: false,
         overlayTitle: "Fireline",
         overlayMessage: "",
+        overlayDetails: [],
+        overlayAction: "dismiss",
         finalScore: 0,
         scoreSubmitted: false,
-        leaderboardDirty: true
+        leaderboardDirty: true,
+        campaign: createCampaignState(),
+        renderTrees: true,
+        renderEffects: true,
+        fireSnapshot: new Float32Array(grid.totalTiles),
+        growthView: null,
+        selectionBox: null,
+        roster: [],
+        selectedRosterId: null,
+        nextRosterId: 1
     };
 }
 export function resetState(state, seed) {

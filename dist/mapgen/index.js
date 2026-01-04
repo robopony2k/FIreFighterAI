@@ -270,6 +270,54 @@ function smoothWater(state, inputTiles) {
     }
     return output;
 }
+function computeWaterDistances(state, maxDistance) {
+    const total = state.grid.totalTiles;
+    const dist = new Int16Array(total);
+    dist.fill(-1);
+    const queue = new Int32Array(total);
+    let head = 0;
+    let tail = 0;
+    for (let i = 0; i < total; i += 1) {
+        if (state.tiles[i].type === "water") {
+            dist[i] = 0;
+            queue[tail] = i;
+            tail += 1;
+        }
+    }
+    const dirs = [
+        { x: 1, y: 0 },
+        { x: -1, y: 0 },
+        { x: 0, y: 1 },
+        { x: 0, y: -1 }
+    ];
+    while (head < tail) {
+        const idx = queue[head];
+        head += 1;
+        const currentDist = dist[idx];
+        if (currentDist >= maxDistance) {
+            continue;
+        }
+        const x = idx % state.grid.cols;
+        const y = Math.floor(idx / state.grid.cols);
+        for (const dir of dirs) {
+            const nx = x + dir.x;
+            const ny = y + dir.y;
+            if (!inBounds(state.grid, nx, ny)) {
+                continue;
+            }
+            const nIdx = indexFor(state.grid, nx, ny);
+            if (dist[nIdx] !== -1) {
+                continue;
+            }
+            dist[nIdx] = currentDist + 1;
+            queue[tail] = nIdx;
+            tail += 1;
+        }
+    }
+    for (let i = 0; i < total; i += 1) {
+        state.tiles[i].waterDist = dist[i] === -1 ? maxDistance : Math.min(dist[i], maxDistance);
+    }
+}
 function isBaseCandidate(state, x, y, buffer) {
     if (!inBounds(state.grid, x, y)) {
         return false;
@@ -347,6 +395,7 @@ export function generateMap(state, rng) {
                 burnRate: 0,
                 heatOutput: 0,
                 moisture: 0,
+                waterDist: 0,
                 canopy,
                 houseValue: 0,
                 houseResidents: 0,
@@ -364,6 +413,7 @@ export function generateMap(state, rng) {
             tile.canopy = 0;
         }
     });
+    computeWaterDistances(state, 30);
     state.basePoint = findBasePoint(state);
     for (let y = -2; y <= 2; y += 1) {
         for (let x = -2; x <= 2; x += 1) {
@@ -397,4 +447,5 @@ export function generateMap(state, rng) {
     }
     state.burnedTiles = 0;
     state.containedCount = 0;
+    state.terrainDirty = true;
 }

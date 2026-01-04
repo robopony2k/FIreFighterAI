@@ -8,6 +8,36 @@
   </head>
   <body>
     <div id="app">
+      <div id="characterScreen" class="character-screen hidden">
+        <div class="character-panel">
+          <div class="character-header">
+            <div class="badge">COMMAND ROSTER</div>
+            <h2>Choose Your Fire Chief</h2>
+            <p>Different leadership styles shape budgets, response speed, and containment.</p>
+          </div>
+          <div class="character-preview">
+            <div id="characterPreviewPortrait" class="character-preview-portrait">
+              <img id="characterPreviewImage" class="character-preview-image" alt="Selected chief portrait" />
+              <span id="characterPreviewInitials"></span>
+            </div>
+            <div class="character-preview-fields">
+              <label class="character-input">
+                Callsign
+                <div class="character-input-row">
+                  <input id="characterNameInput" type="text" maxlength="24" />
+                  <button id="characterNameRandom" type="button">Random</button>
+                </div>
+              </label>
+              <div class="character-input-note">Callsign is used for leaderboards only.</div>
+            </div>
+          </div>
+          <div id="characterGrid" class="character-grid"></div>
+          <div class="character-footer">
+            <p id="characterSummary">Select a chief to begin the campaign.</p>
+            <button id="characterConfirm" disabled>Begin Command</button>
+          </div>
+        </div>
+      </div>
       <header class="topbar">
         <div class="brand">
           <div class="badge">FIRELINE</div>
@@ -57,6 +87,7 @@
             <div class="overlay-card">
               <h2 id="overlayTitle">Fireline</h2>
               <p id="overlayMessage"></p>
+              <ul id="overlayDetails" class="overlay-details"></ul>
               <div class="overlay-actions">
                 <button id="overlayRestart">Play Again</button>
               </div>
@@ -74,12 +105,45 @@
             <div id="statusText" class="status">Ready.</div>
           </div>
           <div class="panel-block">
+            <h3>Roster</h3>
+            <div class="roster-summary">
+              <span>Firefighters: <span id="rosterFirefighterCount">0</span></span>
+              <span>Trucks: <span id="rosterTruckCount">0</span></span>
+            </div>
+            <div class="roster-actions">
+              <button id="recruitFirefighter">Recruit Firefighter</button>
+              <button id="recruitTruck">Recruit Truck</button>
+            </div>
+            <div id="rosterList" class="roster-list"></div>
+            <div class="roster-training">
+              <div class="roster-training-title">Training</div>
+              <button id="trainSpeed">Train Speed</button>
+              <button id="trainPower">Train Power</button>
+              <button id="trainRange">Train Range</button>
+              <button id="trainResilience">Train Resilience</button>
+            </div>
+            <p class="hint">Recruit and train during winter.</p>
+          </div>
+          <div class="panel-block">
             <h3>Season</h3>
             <div class="season-row">
               <span>Wind</span>
               <span id="windValue">--</span>
             </div>
             <button id="beginFireSeason" class="season-action">Begin Fire Season</button>
+          </div>
+          <div class="panel-block">
+            <h3>Commander</h3>
+            <div class="chief-row">
+              <div id="chiefPortrait" class="chief-portrait">
+                <img id="chiefPortraitImage" class="chief-portrait-image" alt="Chief portrait" />
+                <span id="chiefPortraitInitials"></span>
+              </div>
+              <div>
+                <div id="chiefName" class="chief-name">--</div>
+                <div id="chiefTitle" class="chief-title">--</div>
+              </div>
+            </div>
           </div>
           <div class="panel-block">
             <h3>Losses</h3>
@@ -90,7 +154,7 @@
               <span id="livesLossValue">0</span>
             </div>
           </div>
-          <div class="panel-block">
+          <div class="panel-block hidden">
             <h3>Callsign</h3>
             <input id="callsignInput" type="text" maxlength="12" value="Chief" />
           </div>

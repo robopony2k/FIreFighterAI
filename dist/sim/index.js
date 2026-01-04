@@ -1,14 +1,76 @@
-import { APPROVAL_MIN, BASE_BUDGET, CAREER_YEARS, DAYS_PER_SECOND, GROWTH_SPEED_MULTIPLIER } from "../core/config.js";
+import { APPROVAL_MIN, BASE_BUDGET, CAREER_YEARS, DAYS_PER_SECOND, FIRE_PHASE_TIME_SCALE, FIRE_SIM_TICK_SECONDS, GROWTH_SPEED_MULTIPLIER, HECTARES_PER_TILE, ZOOM_MIN } from "../core/config.js";
 import { formatCurrency } from "../core/utils.js";
 import { getDayNightFactor, getFireSeasonIntensity, getFireSpreadScale, getPhaseInfo, PHASES } from "../core/time.js";
 import { setStatus, resetStatus } from "../core/state.js";
 import { indexFor } from "../core/grid.js";
+import { getCharacterBaseBudget, getCharacterDefinition } from "../core/characters.js";
 import { randomizeWind, stepWind } from "./wind.js";
 import { igniteRandomFire, stepFire } from "./fire.js";
 import { stepHeat } from "./heat.js";
 import { stepGrowth } from "./growth.js";
 import { stepParticles } from "./particles.js";
-import { applyExtinguish, clearFuelLine, deployUnit, selectUnit, setDeployMode, setUnitTarget, stepUnits } from "./units.js";
+import { applyExtinguish, applyUnitHazards, autoAssignTargets, clearFuelLine, deployUnit, recallUnits, selectUnit, setDeployMode, setUnitTarget, stepUnits } from "./units.js";
+const FIRE_HEAT_PADDING = 8;
+const YEAR_EVENTS = {};
+const ensureFireSnapshot = (state) => {
+    if (state.fireSnapshot.length !== state.grid.totalTiles) {
+        state.fireSnapshot = new Float32Array(state.grid.totalTiles);
+    }
+    return state.fireSnapshot;
+};
+const getForecastTemp = (state) => {
+    const seedSwing = (state.seed % 7) - 3;
+    const trend = Math.min(8, Math.floor((state.year - 1) * 0.6));
+    return 28 + seedSwing + trend;
+};
+const getYearEventMessages = (year) => YEAR_EVENTS[year] ?? [];
+const showSeasonOverlay = (state) => {
+    if (state.gameOver) {
+        return;
+    }
+    const details = [];
+    const yearEvents = getYearEventMessages(state.year);
+    if (yearEvents.length > 0) {
+        details.push(...yearEvents);
+    }
+    if (state.phase === "growth") {
+        state.overlayTitle = "Spring Growth";
+        state.overlayMessage = "Vegetation is rebounding across the region.";
+        details.push("Observe regrowth from above. Interactions are paused during spring.");
+    }
+    else if (state.phase === "maintenance") {
+        state.overlayTitle = "Winter Planning";
+        state.overlayMessage = `It's wintertime. You have a budget of ${formatCurrency(state.budget)} to prepare.`;
+        details.push("Recruit, train, and cut fuel breaks before summer.");
+    }
+    else if (state.phase === "fire") {
+        const forecast = getForecastTemp(state);
+        state.overlayTitle = "Summer Fire Season";
+        state.overlayMessage = `It's summertime. Forecast: hot summer with average temperatures around ${forecast}°C.`;
+        details.push("Be ready to deploy firefighters and trucks quickly.");
+    }
+    else if (state.phase === "budget") {
+        const housesSaved = Math.max(0, state.totalHouses - state.destroyedHouses);
+        const burnedHectares = Math.round(state.yearBurnedTiles * HECTARES_PER_TILE);
+        state.overlayTitle = "Autumn Review";
+        state.overlayMessage = "Annual performance review and scorecard.";
+        details.push(`Approval rating: ${Math.round(state.approval * 100)}%.`);
+        details.push(`Houses saved: ${housesSaved}/${state.totalHouses}.`);
+        details.push(`Land burned: ${burnedHectares} ha.`);
+        details.push(`Lives lost: ${state.yearLivesLost}.`);
+        details.push("Politics & lobbying: placeholder.");
+    }
+    details.push("Press OK to continue.");
+    state.overlayDetails = details;
+    state.overlayAction = "dismiss";
+    state.overlayVisible = true;
+};
+const captureFireSnapshot = (state) => {
+    const fireSnapshot = ensureFireSnapshot(state);
+    for (let i = 0; i < state.tiles.length; i += 1) {
+        fireSnapshot[i] = state.tiles[i].fire;
+    }
+};
 export function updatePhaseControls(state) {
     const fireActive = state.phase === "fire";
     const maintenanceActive = state.phase === "maintenance";
@@ -34,13 +96,17 @@ export function calculateBudgetOutcome(state) {
     const propertyLossRatio = state.totalPropertyValue > 0 ? state.yearPropertyLost / state.totalPropertyValue : 0;
     const lifeLossRatio = state.totalPopulation > 0 ? state.yearLivesLost / state.totalPopulation : 0;
     const landLossRatio = state.totalLandTiles > 0 ? state.burnedTiles / state.totalLandTiles : 0;
+    const character = getCharacterDefinition(state.campaign.characterId);
+    const baseBudget = getCharacterBaseBudget(character.id, BASE_BUDGET);
     const responseScore = Math.max(0, Math.min(1, 1 - (propertyLossRatio * 0.7 + lifeLossRatio * 1.3 + landLossRatio * 0.4)));
-    const containmentBonus = Math.max(0, Math.min(0.2, state.containedCount / 60));
+    const containmentBonus = Math.max(0, Math.min(0.2, state.containedCount / 60 + character.modifiers.containmentBonus));
     const rating = Math.max(0, Math.min(1, responseScore + containmentBonus));
     const previousApproval = state.approval;
-    state.approval = Math.max(0, Math.min(1, state.approval * 0.65 + rating * 0.35));
+    const retention = Math.max(0.45, Math.min(0.85, 0.65 * character.modifiers.approvalRetentionMultiplier));
+    const ratingWeight = 1 - retention;
+    state.approval = Math.max(0, Math.min(1, state.approval * retention + rating * ratingWeight));
     const carryOver = Math.floor(state.budget * 0.2);
-    state.pendingBudget = Math.max(0, Math.floor(BASE_BUDGET * (0.7 + state.approval * 0.8 + rating * 0.5) + carryOver));
+    state.pendingBudget = Math.max(0, Math.floor(baseBudget * (0.7 + state.approval * 0.8 + rating * 0.5) + carryOver));
     state.careerScore += Math.floor(rating * 900 + (1 - propertyLossRatio) * 400 + (1 - lifeLossRatio) * 600);
     setStatus(state, `Budget review: approval ${Math.round(previousApproval * 100)}% -> ${Math.round(state.approval * 100)}%, next budget ${formatCurrency(state.pendingBudget)}.`);
     if (state.approval < APPROVAL_MIN) {
@@ -51,8 +117,9 @@ export function startNewYear(state) {
     state.budget = state.pendingBudget;
     state.yearPropertyLost = 0;
     state.yearLivesLost = 0;
+    state.yearBurnedTiles = 0;
     state.containedCount = 0;
-    state.units = [];
+    recallUnits(state);
     selectUnit(state, null);
     setDeployMode(state, null);
 }
@@ -60,32 +127,50 @@ export function setPhase(state, rng, next) {
     state.phase = next;
     if (state.phase !== "fire") {
         state.fireSeasonDay = 0;
+        state.fireSimAccumulator = 0;
+        state.fireBoundsActive = false;
     }
     updatePhaseControls(state);
     if (state.phase === "growth") {
         startNewYear(state);
+        if (!state.growthView) {
+            state.growthView = {
+                zoom: state.zoom,
+                camera: { ...state.cameraCenter }
+            };
+        }
+        state.zoom = ZOOM_MIN;
+        state.cameraCenter = { x: state.grid.cols * 0.5, y: state.grid.rows * 0.5 };
         setStatus(state, `Year ${state.year} begins. Growth fuels the region.`);
+        showSeasonOverlay(state);
         return;
     }
     if (state.phase === "maintenance") {
         setStatus(state, "Maintenance season: spend budget to cut firebreaks.");
+        showSeasonOverlay(state);
         return;
     }
     if (state.phase === "fire") {
         state.fireSeasonDay = 0;
+        state.fireSimAccumulator = 0;
+        state.fireBoundsActive = false;
         randomizeWind(state, rng);
         pickInitialFires(state, rng);
+        captureFireSnapshot(state);
         setStatus(state, "Fire season begins. Stay ahead of the line.");
+        showSeasonOverlay(state);
         return;
     }
     extinguishAllFires(state);
     calculateBudgetOutcome(state);
+    showSeasonOverlay(state);
 }
 export function advancePhase(state, rng) {
     const current = getPhaseInfo(state.phaseIndex).id;
+    const leavingGrowth = current === "growth";
     if (current === "fire") {
         extinguishAllFires(state);
-        state.units = [];
+        recallUnits(state);
     }
     if (current === "budget") {
         state.year += 1;
@@ -95,6 +180,11 @@ export function advancePhase(state, rng) {
         }
     }
     state.phaseIndex = (state.phaseIndex + 1) % PHASES.length;
+    if (leavingGrowth && state.growthView) {
+        state.zoom = state.growthView.zoom;
+        state.cameraCenter = { ...state.growthView.camera };
+        state.growthView = null;
+    }
     setPhase(state, rng, PHASES[state.phaseIndex].id);
 }
 export function beginFireSeason(state, rng) {
@@ -127,6 +217,10 @@ export function advanceCalendar(state, rng, dayDelta) {
 export function pickInitialFires(state, rng) {
     let attempts = 0;
     let placed = 0;
+    let minX = state.grid.cols;
+    let maxX = -1;
+    let minY = state.grid.rows;
+    let maxY = -1;
     while (placed < 3 && attempts < 300) {
         attempts += 1;
         const x = Math.floor(rng.next() * state.grid.cols);
@@ -139,8 +233,19 @@ export function pickInitialFires(state, rng) {
                 tile.fire = 0.5 + rng.next() * 0.2;
                 tile.heat = Math.max(tile.heat, tile.ignitionPoint * 1.4);
                 placed += 1;
+                minX = Math.min(minX, x);
+                maxX = Math.max(maxX, x);
+                minY = Math.min(minY, y);
+                maxY = Math.max(maxY, y);
             }
         }
+    }
+    if (placed > 0) {
+        state.fireBoundsActive = true;
+        state.fireMinX = minX;
+        state.fireMaxX = maxX;
+        state.fireMinY = minY;
+        state.fireMaxY = maxY;
     }
 }
 export function getBaseTile(state) {
@@ -177,6 +282,8 @@ export function endGame(state, victory, reason) {
     state.overlayTitle = victory ? "Career Complete" : "Command Relieved";
     const baseMessage = reason || (victory ? "Your twenty-year career leaves the region resilient." : "The region is overwhelmed.");
     state.overlayMessage = `${baseMessage} Final score: ${score}.`;
+    state.overlayDetails = [];
+    state.overlayAction = "restart";
     state.scoreSubmitted = false;
     state.leaderboardDirty = true;
 }
@@ -185,7 +292,8 @@ export function stepSim(state, rng, delta) {
         return;
     }
     const dayDelta = delta * DAYS_PER_SECOND;
-    const calendarDelta = state.phase === "growth" ? dayDelta * GROWTH_SPEED_MULTIPLIER : dayDelta;
+    const phaseScale = state.phase === "growth" ? GROWTH_SPEED_MULTIPLIER : state.phase === "fire" ? FIRE_PHASE_TIME_SCALE : 1;
+    const calendarDelta = dayDelta * phaseScale;
     if (state.phase !== "maintenance") {
         advanceCalendar(state, rng, calendarDelta);
     }
@@ -196,20 +304,33 @@ export function stepSim(state, rng, delta) {
     if (state.phase === "growth") {
         stepGrowth(state, dayDelta * GROWTH_SPEED_MULTIPLIER, rng);
     }
-    if (state.phase === "fire") {
-        state.fireSeasonDay += dayDelta;
-    }
     let activeFires = 0;
     if (state.phase === "fire") {
-        stepWind(state, delta, rng);
-        const dayFactor = getDayNightFactor(state.fireSeasonDay);
-        const seasonIntensity = getFireSeasonIntensity(state.fireSeasonDay);
-        const spreadScale = getFireSpreadScale(state.fireSeasonDay);
-        igniteRandomFire(state, rng, dayDelta, dayFactor * seasonIntensity);
+        autoAssignTargets(state);
         stepUnits(state, delta);
         applyExtinguish(state, rng, delta);
-        stepHeat(state, delta, spreadScale);
-        activeFires = stepFire(state, rng, delta, spreadScale, dayFactor);
+        applyUnitHazards(state, rng, delta);
+        state.fireSimAccumulator = Math.min(state.fireSimAccumulator + delta, FIRE_SIM_TICK_SECONDS * 3);
+        while (state.fireSimAccumulator >= FIRE_SIM_TICK_SECONDS) {
+            const simDelta = FIRE_SIM_TICK_SECONDS;
+            const simDayDelta = simDelta * DAYS_PER_SECOND * FIRE_PHASE_TIME_SCALE;
+            state.fireSeasonDay += simDayDelta;
+            captureFireSnapshot(state);
+            stepWind(state, simDelta, rng);
+            const dayFactor = getDayNightFactor(state.fireSeasonDay);
+            const seasonIntensity = getFireSeasonIntensity(state.fireSeasonDay);
+            const spreadScale = getFireSpreadScale(state.fireSeasonDay);
+            igniteRandomFire(state, rng, simDayDelta, dayFactor * seasonIntensity);
+            if (state.fireBoundsActive) {
+                const minX = Math.max(0, state.fireMinX - FIRE_HEAT_PADDING);
+                const maxX = Math.min(state.grid.cols - 1, state.fireMaxX + FIRE_HEAT_PADDING);
+                const minY = Math.max(0, state.fireMinY - FIRE_HEAT_PADDING);
+                const maxY = Math.min(state.grid.rows - 1, state.fireMaxY + FIRE_HEAT_PADDING);
+                stepHeat(state, simDelta, spreadScale, { minX, maxX, minY, maxY });
+            }
+            activeFires = stepFire(state, rng, simDelta, spreadScale, dayFactor);
+            state.fireSimAccumulator -= FIRE_SIM_TICK_SECONDS;
+        }
         state.lastActiveFires = activeFires;
     }
     else {
@@ -230,23 +351,28 @@ export function togglePause(state) {
 export function handleEscape(state) {
     selectUnit(state, null);
     setDeployMode(state, null);
+    state.formationStart = null;
+    state.formationEnd = null;
+    state.selectionBox = null;
 }
 export function handleDeployAction(state, mode) {
     setDeployMode(state, state.deployMode === mode ? null : mode);
     selectUnit(state, null);
 }
 export function handleUnitDeployment(state, rng, tileX, tileY) {
-    if ((state.deployMode === "firefighter" || state.deployMode === "truck") && state.selectedUnitId === null) {
+    if (state.deployMode === "firefighter" || state.deployMode === "truck") {
         deployUnit(state, rng, state.deployMode, tileX, tileY);
     }
 }
 export function handleUnitRetask(state, tileX, tileY) {
-    if (state.selectedUnitId !== null) {
-        const unit = state.units.find((current) => current.id === state.selectedUnitId) || null;
-        if (unit) {
-            setUnitTarget(state, unit, tileX, tileY);
-        }
+    if (state.selectedUnitIds.length === 0) {
+        return;
     }
+    state.units.forEach((unit) => {
+        if (unit.selected) {
+            setUnitTarget(state, unit, tileX, tileY, true);
+        }
+    });
 }
 export function handleClearLine(state, rng, start, end) {
     clearFuelLine(state, rng, start, end);
