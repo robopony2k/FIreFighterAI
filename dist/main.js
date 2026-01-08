@@ -1,4 +1,4 @@
-import { BASE_BUDGET, TILE_SIZE, MAP_SCALE, TIME_SPEED_OPTIONS } from "./core/config.js";
+import { BASE_BUDGET, MAP_SCALE, TIME_SPEED_OPTIONS } from "./core/config.js";
 import { getCharacterBaseBudget } from "./core/characters.js";
 import { RNG } from "./core/rng.js";
 import { computeChecksum, createInitialState, resetState } from "./core/state.js";
@@ -20,8 +20,8 @@ if (!ctx) {
 const baseCanvasWidth = canvas.width;
 const baseCanvasHeight = canvas.height;
 const gridScale = MAP_SCALE;
-const gridCols = Math.max(32, Math.floor((baseCanvasWidth * gridScale) / TILE_SIZE));
-const gridRows = Math.max(24, Math.floor((baseCanvasHeight * gridScale) / TILE_SIZE));
+const gridCols = 255;
+const gridRows = 255;
 const grid = {
     cols: gridCols,
     rows: gridRows,
