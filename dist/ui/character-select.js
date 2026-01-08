@@ -139,20 +139,24 @@ export function initCharacterSelect(ui, state, onConfirm) {
     });
     updateSelection();
     updateConfirmState();
+    const flushConfirmation = (seed) => {
+        window.requestAnimationFrame(() => {
+            onConfirm(seed);
+        });
+    };
     ui.characterConfirm.addEventListener("click", () => {
         state.campaign.characterId = selectedId;
         const trimmed = ui.characterNameInput.value.trim();
         state.campaign.callsign = trimmed || buildCallsign(selectedId);
         ui.characterScreen.classList.add("hidden");
-        onConfirm(pendingSeed);
+        const seedToUse = pendingSeed;
         pendingSeed = null;
         state.paused = false;
-        ui.pauseBtn.textContent = "Pause";
+        flushConfirmation(seedToUse);
     });
     const open = (seed) => {
         pendingSeed = seed;
         state.paused = true;
-        ui.pauseBtn.textContent = "Resume";
         ui.characterNameInput.value = state.campaign.callsign;
         if (ui.characterNameInput.value.trim().length === 0) {
             applyRandomName();

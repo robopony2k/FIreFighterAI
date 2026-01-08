@@ -2,11 +2,11 @@ import { APPROVAL_MIN, BASE_BUDGET, CAREER_YEARS, DAYS_PER_SECOND, FIRE_PHASE_TI
 import { formatCurrency } from "../core/utils.js";
 import { getDayNightFactor, getFireSeasonIntensity, getFireSpreadScale, getPhaseInfo, PHASES } from "../core/time.js";
 import { setStatus, resetStatus } from "../core/state.js";
-import { indexFor } from "../core/grid.js";
+import { inBounds, indexFor } from "../core/grid.js";
+import { NEIGHBOR_DIRS } from "../core/config.js";
 import { getCharacterBaseBudget, getCharacterDefinition } from "../core/characters.js";
 import { randomizeWind, stepWind } from "./wind.js";
 import { igniteRandomFire, stepFire } from "./fire.js";
-import { stepHeat } from "./heat.js";
 import { stepGrowth } from "./growth.js";
 import { stepParticles } from "./particles.js";
 import { applyExtinguish, applyUnitHazards, autoAssignTargets, clearFuelLine, deployUnit, recallUnits, selectUnit, setDeployMode, setUnitTarget, stepUnits } from "./units.js";
@@ -17,6 +17,12 @@ const ensureFireSnapshot = (state) => {
         state.fireSnapshot = new Float32Array(state.grid.totalTiles);
     }
     return state.fireSnapshot;
+};
+const captureFireSnapshot = (state) => {
+    const fireSnapshot = ensureFireSnapshot(state);
+    for (let i = 0; i < state.tiles.length; i += 1) {
+        fireSnapshot[i] = state.tiles[i].fire;
+    }
 };
 const getForecastTemp = (state) => {
     const seedSwing = (state.seed % 7) - 3;
@@ -64,12 +70,6 @@ const showSeasonOverlay = (state) => {
     state.overlayDetails = details;
     state.overlayAction = "dismiss";
     state.overlayVisible = true;
-};
-const captureFireSnapshot = (state) => {
-    const fireSnapshot = ensureFireSnapshot(state);
-    for (let i = 0; i < state.tiles.length; i += 1) {
-        fireSnapshot[i] = state.tiles[i].fire;
-    }
 };
 export function updatePhaseControls(state) {
     const fireActive = state.phase === "fire";
@@ -128,6 +128,7 @@ export function setPhase(state, rng, next) {
     if (state.phase !== "fire") {
         state.fireSeasonDay = 0;
         state.fireSimAccumulator = 0;
+        state.fireWork = null;
         state.fireBoundsActive = false;
     }
     updatePhaseControls(state);
@@ -153,6 +154,7 @@ export function setPhase(state, rng, next) {
     if (state.phase === "fire") {
         state.fireSeasonDay = 0;
         state.fireSimAccumulator = 0;
+        state.fireWork = null;
         state.fireBoundsActive = false;
         randomizeWind(state, rng);
         pickInitialFires(state, rng);
@@ -221,6 +223,32 @@ export function pickInitialFires(state, rng) {
     let maxX = -1;
     let minY = state.grid.rows;
     let maxY = -1;
+    const primeNeighborHeat = (originX, originY) => {
+        const boost = 0.9;
+        for (const offset of NEIGHBOR_DIRS) {
+            const nx = originX + offset.x;
+            const ny = originY + offset.y;
+            if (!inBounds(state.grid, nx, ny)) {
+                continue;
+            }
+            const neighbor = state.tiles[indexFor(state.grid, nx, ny)];
+            if (neighbor.fire > 0 || neighbor.fuel <= 0) {
+                continue;
+            }
+            neighbor.heat = Math.max(neighbor.heat, neighbor.ignitionPoint * boost);
+        }
+    };
+    const isBlockedType = (tile) => tile.type === "water" || tile.type === "base" || tile.type === "ash" || tile.type === "firebreak" || tile.type === "road";
+    const canIgnite = (tile) => tile.fire === 0 && tile.fuel > 0 && !isBlockedType(tile);
+    const igniteTile = (tile, x, y) => {
+        tile.fire = 0.5 + rng.next() * 0.2;
+        tile.heat = Math.max(tile.heat, tile.ignitionPoint * 1.4);
+        placed += 1;
+        minX = Math.min(minX, x);
+        maxX = Math.max(maxX, x);
+        minY = Math.min(minY, y);
+        maxY = Math.max(maxY, y);
+    };
     while (placed < 3 && attempts < 300) {
         attempts += 1;
         const x = Math.floor(rng.next() * state.grid.cols);
@@ -229,14 +257,26 @@ export function pickInitialFires(state, rng) {
         const tile = state.tiles[idx];
         if (tile.type === "forest" || tile.type === "grass") {
             const dist = Math.hypot(x - state.basePoint.x, y - state.basePoint.y);
-            if (dist > 8 && tile.fire === 0) {
-                tile.fire = 0.5 + rng.next() * 0.2;
-                tile.heat = Math.max(tile.heat, tile.ignitionPoint * 1.4);
-                placed += 1;
-                minX = Math.min(minX, x);
-                maxX = Math.max(maxX, x);
-                minY = Math.min(minY, y);
-                maxY = Math.max(maxY, y);
+            if (dist > 8 && canIgnite(tile)) {
+                igniteTile(tile, x, y);
+                primeNeighborHeat(x, y);
+            }
+        }
+    }
+    if (placed < 3) {
+        for (let y = 0; y < state.grid.rows && placed < 3; y += 1) {
+            for (let x = 0; x < state.grid.cols && placed < 3; x += 1) {
+                const idx = indexFor(state.grid, x, y);
+                const tile = state.tiles[idx];
+                if (!canIgnite(tile)) {
+                    continue;
+                }
+                const dist = Math.hypot(x - state.basePoint.x, y - state.basePoint.y);
+                if (dist < 3) {
+                    continue;
+                }
+                igniteTile(tile, x, y);
+                primeNeighborHeat(x, y);
             }
         }
     }
@@ -304,14 +344,14 @@ export function stepSim(state, rng, delta) {
     if (state.phase === "growth") {
         stepGrowth(state, dayDelta * GROWTH_SPEED_MULTIPLIER, rng);
     }
-    let activeFires = 0;
+    let activeFires = state.lastActiveFires;
     if (state.phase === "fire") {
         autoAssignTargets(state);
         stepUnits(state, delta);
         applyExtinguish(state, rng, delta);
         applyUnitHazards(state, rng, delta);
-        state.fireSimAccumulator = Math.min(state.fireSimAccumulator + delta, FIRE_SIM_TICK_SECONDS * 3);
-        while (state.fireSimAccumulator >= FIRE_SIM_TICK_SECONDS) {
+        state.fireSimAccumulator = Math.min(state.fireSimAccumulator + delta, FIRE_SIM_TICK_SECONDS * 2);
+        if (state.fireSimAccumulator >= FIRE_SIM_TICK_SECONDS) {
             const simDelta = FIRE_SIM_TICK_SECONDS;
             const simDayDelta = simDelta * DAYS_PER_SECOND * FIRE_PHASE_TIME_SCALE;
             state.fireSeasonDay += simDayDelta;
@@ -321,15 +361,11 @@ export function stepSim(state, rng, delta) {
             const seasonIntensity = getFireSeasonIntensity(state.fireSeasonDay);
             const spreadScale = getFireSpreadScale(state.fireSeasonDay);
             igniteRandomFire(state, rng, simDayDelta, dayFactor * seasonIntensity);
-            if (state.fireBoundsActive) {
-                const minX = Math.max(0, state.fireMinX - FIRE_HEAT_PADDING);
-                const maxX = Math.min(state.grid.cols - 1, state.fireMaxX + FIRE_HEAT_PADDING);
-                const minY = Math.max(0, state.fireMinY - FIRE_HEAT_PADDING);
-                const maxY = Math.min(state.grid.rows - 1, state.fireMaxY + FIRE_HEAT_PADDING);
-                stepHeat(state, simDelta, spreadScale, { minX, maxX, minY, maxY });
-            }
             activeFires = stepFire(state, rng, simDelta, spreadScale, dayFactor);
-            state.fireSimAccumulator -= FIRE_SIM_TICK_SECONDS;
+            state.fireSimAccumulator = Math.max(0, state.fireSimAccumulator - FIRE_SIM_TICK_SECONDS);
+        }
+        else {
+            activeFires = 0;
         }
         state.lastActiveFires = activeFires;
     }
@@ -366,6 +402,13 @@ export function handleUnitDeployment(state, rng, tileX, tileY) {
 }
 export function handleUnitRetask(state, tileX, tileY) {
     if (state.selectedUnitIds.length === 0) {
+        return;
+    }
+    const selectedTrucks = state.units.filter((unit) => unit.selected && unit.kind === "truck");
+    if (selectedTrucks.length > 0) {
+        selectedTrucks.forEach((unit) => {
+            setUnitTarget(state, unit, tileX, tileY, true);
+        });
         return;
     }
     state.units.forEach((unit) => {

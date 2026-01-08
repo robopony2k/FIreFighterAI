@@ -38,51 +38,9 @@
           </div>
         </div>
       </div>
-      <header class="topbar">
-        <div class="brand">
-          <div class="badge">FIRELINE</div>
-          <div>
-            <div class="title">Fireline Command</div>
-            <div class="seed">Seed: <span id="seedValue">----</span></div>
-          </div>
-        </div>
-        <div class="stats">
-          <div class="stat">
-            <span class="label">Budget</span>
-            <span id="budgetValue">$0</span>
-          </div>
-          <div class="stat">
-            <span class="label">Approval</span>
-            <span id="approvalValue">--</span>
-          </div>
-          <div class="stat">
-            <span class="label">Year</span>
-            <span id="yearValue">1 / 20</span>
-          </div>
-          <div class="stat">
-            <span class="label">Phase</span>
-            <span id="phaseValue">Growth 1/120</span>
-          </div>
-          <div class="stat">
-            <span class="label">Active Fires</span>
-            <span id="firesValue">0</span>
-          </div>
-          <div class="stat">
-            <span class="label">Score</span>
-            <span id="scoreValue">0</span>
-          </div>
-        </div>
-        <div class="controls">
-          <button id="newRunBtn">New Run</button>
-          <button id="pauseBtn">Pause</button>
-          <button id="zoomOutBtn">Zoom -</button>
-          <button id="zoomInBtn">Zoom +</button>
-        </div>
-      </header>
-
       <section class="playfield">
         <div class="canvas-wrap">
-          <canvas id="gameCanvas" width="2000" height="1300"></canvas>
+          <canvas id="gameCanvas" width="1400" height="900"></canvas>
           <div id="overlay" class="overlay hidden">
             <div class="overlay-card">
               <h2 id="overlayTitle">Fireline</h2>
@@ -94,93 +52,8 @@
             </div>
           </div>
         </div>
-
-        <aside class="panel">
-          <div class="panel-block">
-            <h3>Deploy</h3>
-            <button id="deployFirefighter">Firefighter $50</button>
-            <button id="deployTruck">Truck $120</button>
-            <button id="deployClear">Fuel Break $45 / tile</button>
-            <p class="hint">Drag to cut firebreak lines in maintenance.</p>
-            <div id="statusText" class="status">Ready.</div>
-          </div>
-          <div class="panel-block">
-            <h3>Roster</h3>
-            <div class="roster-summary">
-              <span>Firefighters: <span id="rosterFirefighterCount">0</span></span>
-              <span>Trucks: <span id="rosterTruckCount">0</span></span>
-            </div>
-            <div class="roster-actions">
-              <button id="recruitFirefighter">Recruit Firefighter</button>
-              <button id="recruitTruck">Recruit Truck</button>
-            </div>
-            <div id="rosterList" class="roster-list"></div>
-            <div class="roster-training">
-              <div class="roster-training-title">Training</div>
-              <button id="trainSpeed">Train Speed</button>
-              <button id="trainPower">Train Power</button>
-              <button id="trainRange">Train Range</button>
-              <button id="trainResilience">Train Resilience</button>
-            </div>
-            <p class="hint">Recruit and train during winter.</p>
-          </div>
-          <div class="panel-block">
-            <h3>Season</h3>
-            <div class="season-row">
-              <span>Wind</span>
-              <span id="windValue">--</span>
-            </div>
-            <button id="beginFireSeason" class="season-action">Begin Fire Season</button>
-          </div>
-          <div class="panel-block">
-            <h3>Commander</h3>
-            <div class="chief-row">
-              <div id="chiefPortrait" class="chief-portrait">
-                <img id="chiefPortraitImage" class="chief-portrait-image" alt="Chief portrait" />
-                <span id="chiefPortraitInitials"></span>
-              </div>
-              <div>
-                <div id="chiefName" class="chief-name">--</div>
-                <div id="chiefTitle" class="chief-title">--</div>
-              </div>
-            </div>
-          </div>
-          <div class="panel-block">
-            <h3>Losses</h3>
-            <div class="loss-grid">
-              <span>Property Lost</span>
-              <span id="propertyLossValue">$0</span>
-              <span>Lives Lost</span>
-              <span id="livesLossValue">0</span>
-            </div>
-          </div>
-          <div class="panel-block hidden">
-            <h3>Callsign</h3>
-            <input id="callsignInput" type="text" maxlength="12" value="Chief" />
-          </div>
-          <div class="panel-block">
-            <h3>Leaderboard</h3>
-            <ol id="leaderboardList"></ol>
-          </div>
-          <div class="panel-block">
-            <h3>Legend</h3>
-            <div class="legend">
-              <div><span class="swatch water"></span>Water</div>
-              <div><span class="swatch grass"></span>Grass</div>
-              <div><span class="swatch forest"></span>Forest</div>
-              <div><span class="swatch house"></span>House</div>
-              <div><span class="swatch ash"></span>Burned</div>
-              <div><span class="swatch road"></span>Road</div>
-              <div><span class="swatch firebreak"></span>Firebreak</div>
-              <div><span class="swatch base"></span>Base</div>
-              <div><span class="swatch fire"></span>Fire</div>
-            </div>
-          </div>
-        </aside>
       </section>
-      <footer class="footer">
-        Guide twenty fire seasons, protect communities, and earn your next budget.
-      </footer>
+      <div id="phaseUI" class="phase-ui-root"></div>
     </div>
 
     <script type="module" src="dist/main.js"></script>

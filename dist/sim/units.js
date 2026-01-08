@@ -1,10 +1,10 @@
-import { FIREBREAK_COST_PER_TILE, MAX_TRAINING_LEVEL, RECRUIT_FIREFIGHTER_COST, RECRUIT_TRUCK_COST, TRAINING_COST, TRAINING_POWER_GAIN, TRAINING_RANGE_GAIN, TRAINING_RESILIENCE_GAIN, TRAINING_SPEED_GAIN, UNIT_CONFIG, UNIT_LOSS_FIRE_THRESHOLD } from "../core/config.js";
+import { FIREBREAK_COST_PER_TILE, FIREFIGHTER_TETHER_DISTANCE, MAX_TRAINING_LEVEL, RECRUIT_FIREFIGHTER_COST, RECRUIT_TRUCK_COST, TRUCK_BOARD_RADIUS, TRUCK_CAPACITY, TRAINING_COST, TRAINING_POWER_GAIN, TRAINING_RANGE_GAIN, TRAINING_RESILIENCE_GAIN, TRAINING_SPEED_GAIN, UNIT_CONFIG, UNIT_LOSS_FIRE_THRESHOLD } from "../core/config.js";
 import { formatCurrency } from "../core/utils.js";
 import { setStatus, resetStatus } from "../core/state.js";
 import { getCharacterDefinition, getCharacterFirebreakCost } from "../core/characters.js";
 import { inBounds, indexFor } from "../core/grid.js";
 import { applyFuel } from "../core/tiles.js";
-import { findPath, isPassable } from "./pathing.js";
+import { findPath, getMoveSpeedMultiplier, isPassable } from "./pathing.js";
 import { emitWaterSpray } from "./particles.js";
 const FIRST_NAMES = ["Alex", "Casey", "Drew", "Jordan", "Parker", "Quinn", "Riley", "Sawyer", "Taylor", "Wyatt"];
 const LAST_NAMES = ["Cedar", "Hawk", "Keel", "Marsh", "Reed", "Stone", "Sutter", "Vale", "Wells", "Yates"];
@@ -21,6 +21,74 @@ const getRosterUnit = (state, rosterId) => {
     }
     return state.roster.find((unit) => unit.id === rosterId) ?? null;
 };
+const getRosterTruck = (state, rosterId) => {
+    const unit = getRosterUnit(state, rosterId);
+    if (!unit || unit.kind !== "truck") {
+        return null;
+    }
+    return unit;
+};
+const getRosterFirefighter = (state, rosterId) => {
+    const unit = getRosterUnit(state, rosterId);
+    if (!unit || unit.kind !== "firefighter") {
+        return null;
+    }
+    return unit;
+};
+const unassignRosterFirefighter = (state, firefighter) => {
+    if (firefighter.assignedTruckId === null) {
+        return;
+    }
+    const truck = getRosterTruck(state, firefighter.assignedTruckId);
+    if (truck) {
+        truck.crewIds = truck.crewIds.filter((id) => id !== firefighter.id);
+    }
+    firefighter.assignedTruckId = null;
+};
+export function assignRosterCrew(state, firefighterId, truckId) {
+    if (state.phase !== "maintenance") {
+        setStatus(state, "Crew assignments are managed during winter.");
+        return false;
+    }
+    const firefighter = getRosterFirefighter(state, firefighterId);
+    const truck = getRosterTruck(state, truckId);
+    if (!firefighter || !truck) {
+        return false;
+    }
+    if (firefighter.status === "lost" || truck.status === "lost") {
+        return false;
+    }
+    if (truck.crewIds.length >= TRUCK_CAPACITY) {
+        setStatus(state, "Truck crew is at capacity.");
+        return false;
+    }
+    if (firefighter.assignedTruckId === truck.id) {
+        return true;
+    }
+    unassignRosterFirefighter(state, firefighter);
+    truck.crewIds.push(firefighter.id);
+    firefighter.assignedTruckId = truck.id;
+    setStatus(state, `${firefighter.name} assigned to ${truck.name}.`);
+    return true;
+}
+export function unassignRosterCrew(state, firefighterId) {
+    if (state.phase !== "maintenance") {
+        setStatus(state, "Crew assignments are managed during winter.");
+        return;
+    }
+    const firefighter = getRosterFirefighter(state, firefighterId);
+    if (!firefighter) {
+        return;
+    }
+    if (firefighter.assignedTruckId === null) {
+        return;
+    }
+    const truck = getRosterTruck(state, firefighter.assignedTruckId);
+    unassignRosterFirefighter(state, firefighter);
+    if (truck) {
+        setStatus(state, `${firefighter.name} unassigned from ${truck.name}.`);
+    }
+}
 const nextTruckName = (state) => {
     const index = state.roster.filter((unit) => unit.kind === "truck").length + 1;
     const prefix = TRUCK_PREFIX[index % TRUCK_PREFIX.length];
@@ -38,6 +106,16 @@ export function seedStartingRoster(state, rng) {
     recruitUnit(state, rng, "firefighter", true);
     recruitUnit(state, rng, "firefighter", true);
     recruitUnit(state, rng, "truck", true);
+    const truck = state.roster.find((unit) => unit.kind === "truck") ?? null;
+    if (!truck) {
+        return;
+    }
+    truck.crewIds = [];
+    const starters = state.roster.filter((unit) => unit.kind === "firefighter");
+    starters.slice(0, TRUCK_CAPACITY).forEach((firefighter) => {
+        firefighter.assignedTruckId = truck.id;
+        truck.crewIds.push(firefighter.id);
+    });
 }
 export function recruitUnit(state, rng, kind, free = false) {
     if (state.phase !== "maintenance" && !free) {
@@ -54,7 +132,9 @@ export function recruitUnit(state, rng, kind, free = false) {
         kind,
         name: kind === "truck" ? nextTruckName(state) : nextFirefighterName(rng),
         training: createTraining(),
-        status: "available"
+        status: "available",
+        assignedTruckId: null,
+        crewIds: []
     };
     state.nextRosterId += 1;
     state.roster.push(entry);
@@ -94,6 +174,114 @@ const getTrainingMultiplier = (training) => ({
     range: 1 + training.range * TRAINING_RANGE_GAIN,
     resilience: training.resilience * TRAINING_RESILIENCE_GAIN
 });
+const getUnitTile = (unit) => ({
+    x: Math.floor(unit.x),
+    y: Math.floor(unit.y)
+});
+const getUnitById = (state, id) => state.units.find((unit) => unit.id === id) ?? null;
+const getAssignedTruck = (state, firefighter) => {
+    if (firefighter.assignedTruckId === null) {
+        return null;
+    }
+    const truck = getUnitById(state, firefighter.assignedTruckId);
+    return truck && truck.kind === "truck" ? truck : null;
+};
+const getNearestTruck = (state, origin) => {
+    let best = null;
+    let bestDist = Number.POSITIVE_INFINITY;
+    for (const unit of state.units) {
+        if (unit.kind !== "truck") {
+            continue;
+        }
+        const dist = Math.hypot(origin.x - unit.x, origin.y - unit.y);
+        if (dist < bestDist) {
+            bestDist = dist;
+            best = unit;
+        }
+    }
+    return best ? { unit: best, distance: bestDist } : null;
+};
+const detachFromCarrier = (state, firefighter) => {
+    if (firefighter.carrierId === null) {
+        return;
+    }
+    const carrier = getUnitById(state, firefighter.carrierId);
+    if (carrier) {
+        carrier.passengerIds = carrier.passengerIds.filter((id) => id !== firefighter.id);
+    }
+    firefighter.carrierId = null;
+};
+const boardTruck = (state, firefighter, truck) => {
+    if (truck.kind !== "truck") {
+        return false;
+    }
+    if (firefighter.assignedTruckId !== truck.id) {
+        return false;
+    }
+    if (truck.passengerIds.length >= TRUCK_CAPACITY) {
+        return false;
+    }
+    if (firefighter.carrierId !== null) {
+        detachFromCarrier(state, firefighter);
+    }
+    if (!truck.passengerIds.includes(firefighter.id)) {
+        truck.passengerIds.push(firefighter.id);
+    }
+    firefighter.carrierId = truck.id;
+    firefighter.path = [];
+    firefighter.pathIndex = 0;
+    firefighter.x = truck.x;
+    firefighter.y = truck.y;
+    return true;
+};
+const unassignFirefighterFromTruck = (state, firefighter) => {
+    const truck = getAssignedTruck(state, firefighter);
+    if (truck) {
+        truck.crewIds = truck.crewIds.filter((id) => id !== firefighter.id);
+        truck.passengerIds = truck.passengerIds.filter((id) => id !== firefighter.id);
+    }
+    firefighter.assignedTruckId = null;
+    detachFromCarrier(state, firefighter);
+};
+const assignFirefighterToTruck = (state, firefighter, truck) => {
+    if (truck.kind !== "truck") {
+        return false;
+    }
+    if (truck.crewIds.length >= TRUCK_CAPACITY) {
+        return false;
+    }
+    if (firefighter.assignedTruckId === truck.id) {
+        return true;
+    }
+    if (firefighter.assignedTruckId !== null) {
+        unassignFirefighterFromTruck(state, firefighter);
+    }
+    truck.crewIds.push(firefighter.id);
+    firefighter.assignedTruckId = truck.id;
+    return true;
+};
+const clampTargetToTruckRange = (state, truck, target) => {
+    const truckTile = getUnitTile(truck);
+    const dx = target.x - truckTile.x;
+    const dy = target.y - truckTile.y;
+    const dist = Math.hypot(dx, dy);
+    if (dist <= FIREFIGHTER_TETHER_DISTANCE) {
+        return target;
+    }
+    const scale = FIREFIGHTER_TETHER_DISTANCE / Math.max(0.0001, dist);
+    const rawX = Math.round(truckTile.x + dx * scale);
+    const rawY = Math.round(truckTile.y + dy * scale);
+    const clamped = findNearestPassable(state, rawX, rawY, 2);
+    return clamped ?? truckTile;
+};
+const getSelectedTruck = (state) => {
+    for (const unit of state.units) {
+        if (unit.selected && unit.kind === "truck") {
+            return unit;
+        }
+    }
+    return null;
+};
 export function setDeployMode(state, mode, options) {
     state.deployMode = mode;
     if (options?.silent) {
@@ -157,7 +345,7 @@ export function createUnit(state, kind, rng, rosterEntry) {
         id: Date.now() + Math.floor(rng.next() * 10000),
         kind,
         rosterId: rosterUnit ? rosterUnit.id : null,
-        autonomous: true,
+        autonomous: kind !== "truck",
         x: state.basePoint.x + 0.5,
         y: state.basePoint.y + 0.5,
         target: null,
@@ -166,10 +354,15 @@ export function createUnit(state, kind, rng, rosterEntry) {
         speed: config.speed * modifiers.unitSpeedMultiplier * training.speed,
         radius: config.radius * training.range,
         power: config.power * modifiers.unitPowerMultiplier * training.power,
-        selected: false
+        selected: false,
+        carrierId: null,
+        passengerIds: [],
+        assignedTruckId: null,
+        crewIds: [],
+        crewMode: "deployed"
     };
 }
-export function setUnitTarget(state, unit, tileX, tileY, manual = true) {
+export function setUnitTarget(state, unit, tileX, tileY, manual = true, options) {
     if (!inBounds(state.grid, tileX, tileY) || !isPassable(state, tileX, tileY)) {
         setStatus(state, "That location is blocked.");
         return;
@@ -177,24 +370,120 @@ export function setUnitTarget(state, unit, tileX, tileY, manual = true) {
     if (manual) {
         unit.autonomous = false;
     }
+    if (unit.kind === "firefighter") {
+        const target = { x: tileX, y: tileY };
+        const assignedTruck = getAssignedTruck(state, unit);
+        if (assignedTruck) {
+            if (assignedTruck.crewMode === "boarded") {
+                if (manual) {
+                    setStatus(state, "Crew is boarded. Move the truck to reposition.");
+                    return;
+                }
+                const truckTile = getUnitTile(assignedTruck);
+                tileX = truckTile.x;
+                tileY = truckTile.y;
+            }
+            else {
+                if (unit.carrierId !== null) {
+                    detachFromCarrier(state, unit);
+                }
+                const clamped = clampTargetToTruckRange(state, assignedTruck, target);
+                tileX = clamped.x;
+                tileY = clamped.y;
+            }
+        }
+        else {
+            const nearest = getNearestTruck(state, getUnitTile(unit));
+            if (nearest) {
+                const truckTile = getUnitTile(nearest.unit);
+                const targetDist = Math.hypot(target.x - truckTile.x, target.y - truckTile.y);
+                if (targetDist > FIREFIGHTER_TETHER_DISTANCE) {
+                    const clamped = clampTargetToTruckRange(state, nearest.unit, target);
+                    tileX = clamped.x;
+                    tileY = clamped.y;
+                }
+            }
+        }
+    }
     unit.target = { x: tileX, y: tileY };
     unit.path = findPath(state, { x: Math.floor(unit.x), y: Math.floor(unit.y) }, unit.target);
     unit.pathIndex = 0;
-    setStatus(state, `${unit.kind} routing to ${tileX}, ${tileY}.`);
+    if (!options?.silent) {
+        setStatus(state, `${unit.kind} routing to ${tileX}, ${tileY}.`);
+    }
 }
 export function deployUnit(state, rng, kind, tileX, tileY) {
     if (state.phase !== "fire") {
         setStatus(state, "Units deploy during fire season only.");
         return;
     }
-    const rosterEntry = state.roster.find((entry) => entry.kind === kind && entry.status === "available") ?? null;
+    const selectedRoster = getRosterUnit(state, state.selectedRosterId);
+    let rosterEntry = selectedRoster && selectedRoster.kind === kind && selectedRoster.status === "available" ? selectedRoster : null;
+    const deployedTruckMap = new Map();
+    state.units.forEach((unit) => {
+        if (unit.kind === "truck" && unit.rosterId !== null) {
+            deployedTruckMap.set(unit.rosterId, unit);
+        }
+    });
+    if (!rosterEntry) {
+        if (kind === "firefighter") {
+            rosterEntry =
+                state.roster.find((entry) => entry.kind === "firefighter" &&
+                    entry.status === "available" &&
+                    entry.assignedTruckId !== null &&
+                    deployedTruckMap.has(entry.assignedTruckId)) ?? null;
+        }
+        else {
+            rosterEntry = state.roster.find((entry) => entry.kind === kind && entry.status === "available") ?? null;
+        }
+    }
     if (!rosterEntry) {
         setStatus(state, "No available units in the roster.");
         return;
     }
+    let assignedTruck = null;
+    if (kind === "firefighter") {
+        if (rosterEntry.assignedTruckId === null) {
+            setStatus(state, "Assign this firefighter to a truck before deploying.");
+            return;
+        }
+        assignedTruck = deployedTruckMap.get(rosterEntry.assignedTruckId) ?? null;
+        if (!assignedTruck) {
+            setStatus(state, "Assigned truck is not deployed.");
+            return;
+        }
+        if (assignedTruck.crewIds.length >= TRUCK_CAPACITY) {
+            setStatus(state, "Assigned truck is at crew capacity.");
+            return;
+        }
+    }
     const unit = createUnit(state, kind, rng, rosterEntry);
     rosterEntry.status = "deployed";
     state.units.push(unit);
+    if (kind === "firefighter" && assignedTruck) {
+        assignFirefighterToTruck(state, unit, assignedTruck);
+        const truckTile = getUnitTile(assignedTruck);
+        setUnitTarget(state, unit, truckTile.x, truckTile.y, false, { silent: true });
+        return;
+    }
+    if (kind === "truck") {
+        const crewRoster = state.roster.filter((entry) => entry.kind === "firefighter" &&
+            entry.status === "available" &&
+            entry.assignedTruckId === rosterEntry.id);
+        let deployedCrew = 0;
+        crewRoster.forEach((crewEntry) => {
+            if (deployedCrew >= TRUCK_CAPACITY) {
+                return;
+            }
+            const crewUnit = createUnit(state, "firefighter", rng, crewEntry);
+            crewEntry.status = "deployed";
+            state.units.push(crewUnit);
+            assignFirefighterToTruck(state, crewUnit, unit);
+            const truckTile = getUnitTile(unit);
+            setUnitTarget(state, crewUnit, truckTile.x, truckTile.y, false, { silent: true });
+            deployedCrew += 1;
+        });
+    }
     setUnitTarget(state, unit, tileX, tileY, false);
 }
 export function clearFuelAt(state, rng, tileX, tileY, showStatus = true) {
@@ -294,6 +583,9 @@ export function getUnitAt(state, tileX, tileY) {
     const clickX = tileX + 0.5;
     const clickY = tileY + 0.5;
     for (const unit of state.units) {
+        if (unit.carrierId !== null) {
+            continue;
+        }
         const dist = Math.hypot(unit.x - clickX, unit.y - clickY);
         if (dist < 0.6) {
             return unit;
@@ -302,7 +594,11 @@ export function getUnitAt(state, tileX, tileY) {
     return null;
 }
 export function stepUnits(state, delta) {
+    const unitsById = new Map();
     state.units.forEach((unit) => {
+        unitsById.set(unit.id, unit);
+    });
+    const advanceUnit = (unit) => {
         if (unit.pathIndex < unit.path.length) {
             const next = unit.path[unit.pathIndex];
             const targetX = next.x + 0.5;
@@ -310,7 +606,9 @@ export function stepUnits(state, delta) {
             const dx = targetX - unit.x;
             const dy = targetY - unit.y;
             const dist = Math.hypot(dx, dy);
-            const step = unit.speed * delta;
+            const tile = getUnitTile(unit);
+            const speedMultiplier = getMoveSpeedMultiplier(state, tile.x, tile.y, next.x, next.y);
+            const step = unit.speed * speedMultiplier * delta;
             if (dist <= step || dist < 0.01) {
                 unit.x = targetX;
                 unit.y = targetY;
@@ -321,11 +619,139 @@ export function stepUnits(state, delta) {
                 unit.y += (dy / dist) * step;
             }
         }
+    };
+    state.units.forEach((unit) => {
+        if (unit.kind === "truck") {
+            advanceUnit(unit);
+        }
+    });
+    state.units.forEach((unit) => {
+        if (unit.kind !== "firefighter") {
+            return;
+        }
+        if (unit.carrierId !== null) {
+            const carrier = unitsById.get(unit.carrierId);
+            if (!carrier) {
+                unit.carrierId = null;
+            }
+            else {
+                unit.x = carrier.x;
+                unit.y = carrier.y;
+                if (unit.target) {
+                    const distToTarget = Math.hypot(unit.target.x + 0.5 - carrier.x, unit.target.y + 0.5 - carrier.y);
+                    if (distToTarget <= 0.8) {
+                        detachFromCarrier(state, unit);
+                        unit.path = findPath(state, getUnitTile(unit), unit.target);
+                        unit.pathIndex = 0;
+                    }
+                }
+            }
+            return;
+        }
+        advanceUnit(unit);
     });
 }
+const findFireTargetNear = (state, center, radius) => {
+    let best = null;
+    let bestFire = 0;
+    const minX = Math.max(0, center.x - radius);
+    const maxX = Math.min(state.grid.cols - 1, center.x + radius);
+    const minY = Math.max(0, center.y - radius);
+    const maxY = Math.min(state.grid.rows - 1, center.y + radius);
+    for (let y = minY; y <= maxY; y += 1) {
+        for (let x = minX; x <= maxX; x += 1) {
+            const dist = Math.hypot(center.x - x, center.y - y);
+            if (dist > radius) {
+                continue;
+            }
+            const tile = state.tiles[indexFor(state.grid, x, y)];
+            if (tile.fire > bestFire) {
+                bestFire = tile.fire;
+                best = { x, y };
+            }
+        }
+    }
+    return bestFire > 0.15 ? best : null;
+};
+const updateTruckCrewOrders = (state, truck) => {
+    if (truck.kind !== "truck") {
+        return;
+    }
+    truck.crewIds = truck.crewIds.filter((id) => {
+        const crew = getUnitById(state, id);
+        if (!crew || crew.kind !== "firefighter") {
+            return false;
+        }
+        crew.assignedTruckId = truck.id;
+        return true;
+    });
+    truck.passengerIds = truck.passengerIds.filter((id) => truck.crewIds.includes(id));
+    const truckTile = getUnitTile(truck);
+    for (const id of truck.crewIds) {
+        const crew = getUnitById(state, id);
+        if (!crew) {
+            continue;
+        }
+        if (truck.crewMode === "boarded") {
+            if (crew.carrierId === truck.id) {
+                continue;
+            }
+            const distToTruck = Math.hypot(crew.x - truck.x, crew.y - truck.y);
+            if (distToTruck <= TRUCK_BOARD_RADIUS && truck.passengerIds.length < TRUCK_CAPACITY) {
+                boardTruck(state, crew, truck);
+            }
+            else {
+                setUnitTarget(state, crew, truckTile.x, truckTile.y, false, { silent: true });
+            }
+            continue;
+        }
+        if (crew.carrierId === truck.id) {
+            detachFromCarrier(state, crew);
+        }
+        const distFromTruck = Math.hypot(crew.x - truck.x, crew.y - truck.y);
+        if (distFromTruck > FIREFIGHTER_TETHER_DISTANCE) {
+            const clamped = clampTargetToTruckRange(state, truck, truckTile);
+            setUnitTarget(state, crew, clamped.x, clamped.y, false, { silent: true });
+            continue;
+        }
+        if (crew.target && crew.pathIndex < crew.path.length) {
+            continue;
+        }
+        const fireTarget = findFireTargetNear(state, truckTile, FIREFIGHTER_TETHER_DISTANCE);
+        if (fireTarget) {
+            setUnitTarget(state, crew, fireTarget.x, fireTarget.y, false, { silent: true });
+        }
+    }
+};
+export function setTruckCrewMode(state, truckId, mode) {
+    const truck = getUnitById(state, truckId);
+    if (!truck || truck.kind !== "truck") {
+        return;
+    }
+    truck.crewMode = mode;
+    if (mode === "deployed") {
+        truck.crewIds.forEach((id) => {
+            const crew = getUnitById(state, id);
+            if (crew) {
+                detachFromCarrier(state, crew);
+            }
+        });
+        truck.passengerIds = [];
+    }
+    setStatus(state, mode === "boarded" ? "Crew boarding truck." : "Crew deployed around truck.");
+    updateTruckCrewOrders(state, truck);
+}
 export function autoAssignTargets(state) {
+    state.units.forEach((unit) => {
+        if (unit.kind === "truck") {
+            updateTruckCrewOrders(state, unit);
+        }
+    });
     for (const unit of state.units) {
         if (!unit.autonomous) {
+            continue;
+        }
+        if (unit.kind === "firefighter" && unit.assignedTruckId !== null) {
             continue;
         }
         if (unit.target && unit.pathIndex < unit.path.length) {
@@ -348,7 +774,7 @@ export function autoAssignTargets(state) {
             }
         }
         if (best && bestFire > 0.15) {
-            setUnitTarget(state, unit, best.x, best.y, false);
+            setUnitTarget(state, unit, best.x, best.y, false, { silent: true });
         }
     }
 }
@@ -404,6 +830,51 @@ export function applyUnitHazards(state, rng, delta) {
         if (rng.next() < risk) {
             if (rosterEntry) {
                 rosterEntry.status = "lost";
+                if (rosterEntry.kind === "truck") {
+                    rosterEntry.crewIds.forEach((id) => {
+                        const crew = getRosterFirefighter(state, id);
+                        if (crew) {
+                            crew.assignedTruckId = null;
+                        }
+                    });
+                    rosterEntry.crewIds = [];
+                }
+                else if (rosterEntry.kind === "firefighter" && rosterEntry.assignedTruckId !== null) {
+                    const truck = getRosterTruck(state, rosterEntry.assignedTruckId);
+                    if (truck) {
+                        truck.crewIds = truck.crewIds.filter((id) => id !== rosterEntry.id);
+                    }
+                    rosterEntry.assignedTruckId = null;
+                }
+            }
+            if (unit.kind === "truck" && unit.passengerIds.length > 0) {
+                unit.passengerIds.forEach((id) => {
+                    const passenger = getUnitById(state, id);
+                    if (passenger) {
+                        passenger.carrierId = null;
+                    }
+                });
+                unit.passengerIds = [];
+                unit.crewIds.forEach((id) => {
+                    const crew = getUnitById(state, id);
+                    if (crew) {
+                        crew.assignedTruckId = null;
+                    }
+                });
+                unit.crewIds = [];
+            }
+            else if (unit.carrierId !== null) {
+                const carrier = getUnitById(state, unit.carrierId);
+                if (carrier) {
+                    carrier.passengerIds = carrier.passengerIds.filter((id) => id !== unit.id);
+                }
+            }
+            if (unit.assignedTruckId !== null) {
+                const truck = getUnitById(state, unit.assignedTruckId);
+                if (truck) {
+                    truck.crewIds = truck.crewIds.filter((id) => id !== unit.id);
+                    truck.passengerIds = truck.passengerIds.filter((id) => id !== unit.id);
+                }
             }
             if (unit.selected) {
                 unit.selected = false;
@@ -426,6 +897,9 @@ export function recallUnits(state) {
 export function applyExtinguish(state, rng, delta) {
     const powerMultiplier = delta;
     state.units.forEach((unit) => {
+        if (unit.kind === "firefighter" && unit.carrierId !== null) {
+            return;
+        }
         const radius = unit.radius;
         const minX = Math.max(0, Math.floor(unit.x - radius));
         const maxX = Math.min(state.grid.cols - 1, Math.ceil(unit.x + radius));

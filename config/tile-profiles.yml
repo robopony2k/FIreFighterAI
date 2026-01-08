@@ -1,0 +1,81 @@
+  # Profile fields:
+  #   baseFuel        = relative fuel load per tile (0-2), higher = more sustain
+  #   ignition        = normalized heat required to ignite (0-1.4), higher = harder to start
+  #   burnRate        = speed at which fire grows/drains fuel (0-1), larger = quick burning
+  #   heatOutput      = heat emitted when burning (0-2), larger boosts diffusion
+  #   spreadBoost     = multiplier applied to outgoing heat (0-2), controls how fast heat fans out
+  #   heatTransferCap = cap on per-tick heat that can accumulate in neighbors (0-5)
+  #   heatRetention   = fraction of incoming heat retained (0-1), lower = quicker cooling
+  #   windFactor      = alignment weight for wind bias (0-2), larger = more directional spread
+water:
+  baseFuel: 0
+  ignition: 9
+  burnRate: 0
+  heatOutput: 0
+  spreadBoost: 0
+  heatTransferCap: 0
+  heatRetention: 0.4
+  windFactor: 0
+grass:
+  baseFuel: 0.50
+  ignition: 0.1
+  burnRate: 0.95
+  heatOutput: 1.0
+  spreadBoost: 1.12
+  heatTransferCap: 0.4
+  heatRetention: 0.75
+  windFactor: 0.5
+forest:
+  baseFuel: 1.35
+  ignition: 0.6
+  burnRate: 0.64
+  heatOutput: 1.35
+  spreadBoost: 1.25
+  heatTransferCap: 5
+  heatRetention: 1
+  windFactor: 0.5
+road:
+  baseFuel: 0
+  ignition: 9
+  burnRate: 0
+  heatOutput: 0
+  spreadBoost: 0
+  heatTransferCap: 0
+  heatRetention: 0.4
+  windFactor: 0
+base:
+  baseFuel: 1.1
+  ignition: 0.38
+  burnRate: 0.3
+  heatOutput: 1.15
+  spreadBoost: 1
+  heatTransferCap: 4
+  heatRetention: 0.9
+  windFactor: 0.7
+house:
+  baseFuel: 1.2
+  ignition: 0.32
+  burnRate: 0.28
+  heatOutput: 1.4
+  spreadBoost: 1.1
+  heatTransferCap: 4.2
+  heatRetention: 0.85
+  windFactor: 0.75
+firebreak:
+  baseFuel: 0
+  ignition: 9
+  burnRate: 0
+  heatOutput: 0
+  spreadBoost: 0
+  heatTransferCap: 0
+  heatRetention: 0.4
+  windFactor: 0
+ash:
+  baseFuel: 0
+  ignition: 9
+  burnRate: 0
+  heatOutput: 0
+  spreadBoost: 0
+  heatTransferCap: 0
+  heatRetention: 0.55
+  windFactor: 0

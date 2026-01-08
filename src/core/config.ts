@@ -1,4 +1,5 @@
 import type { FuelProfile, Point, TileType, UnitKind, Wind } from "./types.js";
+import { TILE_FUEL_PROFILES } from "./generated/fuelProfiles.js";
 
 export const TILE_SIZE = 10;
 export const ZOOM_MIN = 0.6;
@@ -8,6 +9,7 @@ export const ISO_TILE_WIDTH = TILE_SIZE * 2;
 export const ISO_TILE_HEIGHT = TILE_SIZE;
 export const HEIGHT_SCALE = TILE_SIZE * 6.5;
 export const HEIGHT_WATER_DROP = TILE_SIZE * 0.7;
+export const MAP_SCALE = 0.65;
 
 export const CAREER_YEARS = 20;
 export const DAYS_PER_SECOND = 4;
@@ -19,6 +21,7 @@ export const APPROVAL_MIN = 0.2;
 export const FIRE_IGNITION_CHANCE_PER_DAY = 0.08;
 export const FIRE_SIM_SPEED = 2.6;
 export const FIRE_SIM_TICK_SECONDS = 2;
+export const FIRE_SIM_ROWS_PER_SLICE = 8;
 export const FIRE_PHASE_TIME_SCALE = 0.125;
 export const FIRE_RENDER_SMOOTH_SECONDS = 0.5;
 export const FIRE_SEASON_TAPER_DAYS = 22;
@@ -39,6 +42,24 @@ export const TRAINING_POWER_GAIN = 0.12;
 export const TRAINING_RANGE_GAIN = 0.1;
 export const TRAINING_RESILIENCE_GAIN = 0.12;
 export const UNIT_LOSS_FIRE_THRESHOLD = 0.55;
+export const TRUCK_CAPACITY = 3;
+export const TRUCK_BOARD_RADIUS = 1.6;
+export const FIREFIGHTER_TETHER_DISTANCE = 10;
+export const MOVE_UPHILL_FACTOR = 2.1;
+export const MOVE_DOWNHILL_FACTOR = 0.8;
+export const MOVE_SLOPE_MIN = 0.65;
+export const MOVE_SLOPE_MAX = 2.2;
+
+export const MOVE_TERRAIN_COST: Record<TileType, number> = {
+  water: 99,
+  grass: 1.15,
+  forest: 1.5,
+  ash: 1.25,
+  road: 1,
+  base: 1.05,
+  house: 1.2,
+  firebreak: 1.05
+};
 
 export const FIRE_COLORS = ["#d34b2a", "#f09a3e", "#f2c94c"];
 
@@ -82,23 +103,16 @@ export const CONTOUR_STEP = 0.08;
 export const CONTOUR_BAND = 0.012;
 export const LIGHT_DIR = { x: 0.6, y: -0.8 };
 
+export const TIME_SPEED_OPTIONS = [1, 2, 3, 5];
+
 export const UNIT_CONFIG: Record<UnitKind, { cost: number; speed: number; radius: number; power: number; color: string }> = {
-  firefighter: { cost: 50, speed: 4.2, radius: 1.1, power: 0.5, color: "#f0b33b" },
-  truck: { cost: 120, speed: 2.8, radius: 2.2, power: 0.75, color: "#c0462c" }
+  firefighter: { cost: 50, speed: 3.2, radius: 1.1, power: 0.5, color: "#f0b33b" },
+  truck: { cost: 120, speed: 5.4, radius: 2.2, power: 0.75, color: "#c0462c" }
 };
 
 export const WATER_PARTICLE_COLOR = "#7ad4ff";
 
-export const FUEL_PROFILES: Record<TileType, FuelProfile> = {
-  water: { baseFuel: 0, ignition: 9, burnRate: 0, heatOutput: 0 },
-  grass: { baseFuel: 0.75, ignition: 0.28, burnRate: 0.32, heatOutput: 1.0 },
-  forest: { baseFuel: 1.35, ignition: 0.42, burnRate: 0.24, heatOutput: 1.35 },
-  road: { baseFuel: 0, ignition: 9, burnRate: 0, heatOutput: 0 },
-  base: { baseFuel: 1.1, ignition: 0.38, burnRate: 0.3, heatOutput: 1.15 },
-  house: { baseFuel: 1.2, ignition: 0.32, burnRate: 0.28, heatOutput: 1.4 },
-  firebreak: { baseFuel: 0, ignition: 9, burnRate: 0, heatOutput: 0 },
-  ash: { baseFuel: 0, ignition: 9, burnRate: 0, heatOutput: 0 }
-};
+export const FUEL_PROFILES: Record<TileType, FuelProfile> = TILE_FUEL_PROFILES;
 
 export const NEIGHBOR_DIRS: Point[] = [
   { x: 1, y: 0 },

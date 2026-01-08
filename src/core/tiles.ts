@@ -12,5 +12,9 @@ export function applyFuel(tile: Tile, moisture: number, rng: RNG): void {
   tile.ignitionPoint = clamp(profile.ignition + moisture * 0.35 + (tile.type === "forest" ? 0.08 : 0), 0.2, 1.4);
   tile.burnRate = profile.burnRate * (0.7 + (1 - moisture) * 0.8);
   tile.heatOutput = profile.heatOutput * (0.85 + fuel * 0.25);
+  tile.spreadBoost = profile.spreadBoost;
+  tile.heatTransferCap = profile.heatTransferCap;
+  tile.heatRetention = profile.heatRetention;
+  tile.windFactor = profile.windFactor;
 }
 

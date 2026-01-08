@@ -1,0 +1,36 @@
+
+import type { RNG } from "../../core/types.js";
+import type { WorldState } from "../../core/state.js";
+import { FIRE_IGNITION_CHANCE_PER_DAY } from "../../core/config.js";
+import { indexFor } from "../../core/grid.js";
+import { markFireBounds } from "./bounds.js";
+
+export function igniteRandomFire(state: WorldState, rng: RNG, dayDelta: number, intensity: number): void {
+  const ignitionChance = FIRE_IGNITION_CHANCE_PER_DAY * dayDelta * intensity;
+  if (rng.next() >= ignitionChance) {
+    return;
+  }
+  let attempts = 0;
+  while (attempts < 80) {
+    attempts += 1;
+    const x = Math.floor(rng.next() * state.grid.cols);
+    const y = Math.floor(rng.next() * state.grid.rows);
+    const tile = state.tiles[indexFor(state.grid, x, y)];
+    if (tile.fire > 0 || tile.fuel <= 0) {
+      continue;
+    }
+    if (
+      tile.type === "water" ||
+      tile.type === "base" ||
+      tile.type === "ash" ||
+      tile.type === "firebreak" ||
+      tile.type === "road"
+    ) {
+      continue;
+    }
+    tile.fire = 0.35 + rng.next() * 0.25;
+    tile.heat = Math.max(tile.heat, tile.ignitionPoint * 1.3);
+    markFireBounds(state, x, y);
+    break;
+  }
+}

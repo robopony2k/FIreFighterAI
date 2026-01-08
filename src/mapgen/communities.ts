@@ -1,7 +1,7 @@
 import type { RNG, Point } from "../core/types.js";
 import type { WorldState } from "../core/state.js";
 import { inBounds, indexFor } from "../core/grid.js";
-import { carveRoad, collectRoadTiles, findNearestRoadTile, findRoadPath, setRoadAt } from "./roads.js";
+import { carveRoad, collectRoadTiles, findNearestRoadTile, findRoadPath, findRoadPathToTarget, setRoadAt } from "./roads.js";
 
 function isBuildable(state: WorldState, x: number, y: number): boolean {
   if (!inBounds(state.grid, x, y)) {
@@ -158,6 +158,126 @@ function placeRoadsideHouses(state: WorldState, rng: RNG, roadTiles: Point[], co
   }
 }
 
+function markReachableLand(state: WorldState, origin: Point): Uint8Array {
+  const total = state.grid.totalTiles;
+  const visited = new Uint8Array(total);
+  if (!inBounds(state.grid, origin.x, origin.y)) {
+    return visited;
+  }
+  const originIdx = indexFor(state.grid, origin.x, origin.y);
+  if (state.tiles[originIdx].type === "water") {
+    return visited;
+  }
+
+  const queueX = new Int16Array(total);
+  const queueY = new Int16Array(total);
+  let head = 0;
+  let tail = 0;
+  queueX[tail] = origin.x;
+  queueY[tail] = origin.y;
+  tail += 1;
+  visited[originIdx] = 1;
+
+  while (head < tail) {
+    const x = queueX[head];
+    const y = queueY[head];
+    head += 1;
+    const neighbors = [
+      { x: x + 1, y },
+      { x: x - 1, y },
+      { x, y: y + 1 },
+      { x, y: y - 1 }
+    ];
+    for (const next of neighbors) {
+      if (!inBounds(state.grid, next.x, next.y)) {
+        continue;
+      }
+      const idx = indexFor(state.grid, next.x, next.y);
+      if (visited[idx]) {
+        continue;
+      }
+      if (state.tiles[idx].type === "water") {
+        continue;
+      }
+      visited[idx] = 1;
+      queueX[tail] = next.x;
+      queueY[tail] = next.y;
+      tail += 1;
+    }
+  }
+
+  return visited;
+}
+
+function findClosestUnreachableLand(state: WorldState, reachable: Uint8Array): Point | null {
+  let best: Point | null = null;
+  let bestDist = Number.POSITIVE_INFINITY;
+  for (let y = 0; y < state.grid.rows; y += 1) {
+    for (let x = 0; x < state.grid.cols; x += 1) {
+      const idx = indexFor(state.grid, x, y);
+      if (reachable[idx] || state.tiles[idx].type === "water") {
+        continue;
+      }
+      const dist = Math.abs(x - state.basePoint.x) + Math.abs(y - state.basePoint.y);
+      if (dist < bestDist) {
+        bestDist = dist;
+        best = { x, y };
+      }
+    }
+  }
+  return best;
+}
+
+function connectDetachedLand(state: WorldState, rng: RNG): void {
+  let reachable = markReachableLand(state, state.basePoint);
+  while (true) {
+    const start = findClosestUnreachableLand(state, reachable);
+    if (!start) {
+      break;
+    }
+    const path = findRoadPathToTarget(
+      state,
+      start,
+      (x, y) => {
+        const idx = indexFor(state.grid, x, y);
+        return reachable[idx] === 1 && state.tiles[idx].type !== "house";
+      },
+      { allowWater: true }
+    );
+    if (path.length === 0) {
+      break;
+    }
+    path.forEach((point) => setRoadAt(state, rng, point.x, point.y, { allowBridge: true }));
+    reachable = markReachableLand(state, state.basePoint);
+  }
+}
+
+function ensureEvacuationRoute(state: WorldState, rng: RNG): void {
+  const start = state.basePoint;
+  const isEdge = (x: number, y: number) =>
+    x === 0 || y === 0 || x === state.grid.cols - 1 || y === state.grid.rows - 1;
+  const isValidEdge = (x: number, y: number) => {
+    if (!isEdge(x, y)) {
+      return false;
+    }
+    if (x === start.x && y === start.y) {
+      return false;
+    }
+    return state.tiles[indexFor(state.grid, x, y)].type !== "house";
+  };
+
+  let allowBridge = false;
+  let path = findRoadPathToTarget(state, start, isValidEdge, { allowWater: false });
+  if (path.length === 0) {
+    allowBridge = true;
+    path = findRoadPathToTarget(state, start, isValidEdge, { allowWater: true });
+  }
+  if (path.length === 0) {
+    return;
+  }
+  path.forEach((point) => setRoadAt(state, rng, point.x, point.y, { allowBridge }));
+}
+
 export function populateCommunities(state: WorldState, rng: RNG): void {
   state.totalPropertyValue = 0;
   state.totalPopulation = 0;
@@ -247,5 +367,8 @@ export function populateCommunities(state: WorldState, rng: RNG): void {
       }
     }
   }
+
+  connectDetachedLand(state, rng);
+  ensureEvacuationRoute(state, rng);
 }
 

@@ -1,8 +1,10 @@
 export function getClimateDifficulty(year: number): number {
+  const baseDifficulty = 1.2;
   if (year <= 1) {
-    return 1;
+    return baseDifficulty;
   }
-  return 1 + Math.min(0.6, (year - 1) * 0.03);
+  // Ramp up to a max of +0.4 over 20 years
+  return baseDifficulty + Math.min(0.4, (year - 1) * 0.02);
 }
 
 export function getIgnitionMultiplier(year: number): number {

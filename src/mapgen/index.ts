@@ -7,6 +7,14 @@ import { NEIGHBOR_DIRS } from "../core/config.js";
 import { fractalNoise } from "./noise.js";
 import { populateCommunities } from "./communities.js";
 
+function softenPeaks(value: number, cap: number, softness: number): number {
+  if (value <= cap) {
+    return value;
+  }
+  const excess = value - cap;
+  return cap + (1 - cap) * (1 - Math.exp(-excess * softness));
+}
+
 function pickRiverSource(state: WorldState, rng: RNG, elevationMap: number[]): Point | null {
   let best: Point | null = null;
   let bestElev = 0;
@@ -217,7 +225,9 @@ function buildElevationMap(state: WorldState, rng: RNG): number[] {
 
   for (let i = 0; i < elevationMap.length; i += 1) {
     const value = elevationMap[i];
-    elevationMap[i] = clamp(Math.pow(value, 1.35) * (0.55 + value * 0.9), 0, 1);
+    const shaped = Math.pow(value, 1.35) * (0.55 + value * 0.9);
+    const softened = softenPeaks(shaped, 0.88, 2.3);
+    elevationMap[i] = clamp(softened, 0, 1);
   }
 
   return elevationMap;
@@ -417,6 +427,10 @@ export function generateMap(state: WorldState, rng: RNG): void {
         ignitionPoint: 0,
         burnRate: 0,
         heatOutput: 0,
+        spreadBoost: 0,
+        heatTransferCap: 0,
+        heatRetention: 1,
+        windFactor: 0,
         moisture: 0,
         waterDist: 0,
         canopy,

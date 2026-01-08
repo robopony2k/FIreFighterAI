@@ -1,12 +1,12 @@
-import { BASE_BUDGET, TILE_SIZE } from "./core/config.js";
+import { BASE_BUDGET, TILE_SIZE, MAP_SCALE, TIME_SPEED_OPTIONS } from "./core/config.js";
 import { getCharacterBaseBudget } from "./core/characters.js";
 import { RNG } from "./core/rng.js";
 import { computeChecksum, createInitialState, resetState } from "./core/state.js";
 import { generateMap } from "./mapgen/index.js";
 import { draw } from "./render/draw.js";
-import { getUIRefs } from "./ui/dom.js";
-import { bindUI } from "./ui/bindings.js";
-import { updateHud } from "./ui/hud.js";
+import { initPhaseUI } from "./ui/phase/index.js";
+import { bindPhaseUi } from "./ui/phase/bindings.js";
+import { getOverlayRefs, updateOverlay } from "./ui/overlay.js";
 import { saveLeaderboard } from "./persistence/leaderboard.js";
 import { randomizeWind } from "./sim/wind.js";
 import { setPhase, stepSim } from "./sim/index.js";
@@ -17,8 +17,11 @@ const ctx = canvas.getContext("2d");
 if (!ctx) {
     throw new Error("Canvas not supported");
 }
-const gridCols = Math.floor(canvas.width / TILE_SIZE);
-const gridRows = Math.floor(canvas.height / TILE_SIZE);
+const baseCanvasWidth = canvas.width;
+const baseCanvasHeight = canvas.height;
+const gridScale = MAP_SCALE;
+const gridCols = Math.max(32, Math.floor((baseCanvasWidth * gridScale) / TILE_SIZE));
+const gridRows = Math.max(24, Math.floor((baseCanvasHeight * gridScale) / TILE_SIZE));
 const grid = {
     cols: gridCols,
     rows: gridRows,
@@ -28,9 +31,43 @@ const params = new URLSearchParams(window.location.search);
 const seedParam = params.get("seed");
 const initialSeed = seedParam && !Number.isNaN(Number(seedParam)) ? Number(seedParam) : Math.floor(Date.now() % 1000000);
 const headless = params.get("headless") === "1";
-const ui = getUIRefs();
 const state = createInitialState(initialSeed, grid);
 const rng = new RNG(Date.now());
+const phaseUiRoot = document.getElementById("phaseUI");
+const phaseUi = phaseUiRoot ? initPhaseUI(phaseUiRoot) : null;
+const overlayRefs = getOverlayRefs();
+const characterScreen = document.getElementById("characterScreen");
+const canvasWrap = canvas.parentElement;
+let resizeObserver = null;
+let lastCanvasWidth = 0;
+let lastCanvasHeight = 0;
+const resizeCanvasToWrap = () => {
+    if (!canvasWrap) {
+        return;
+    }
+    const rect = canvasWrap.getBoundingClientRect();
+    const nextWidth = Math.max(1, Math.floor(rect.width));
+    const nextHeight = Math.max(1, Math.floor(rect.height));
+    if (lastCanvasWidth !== nextWidth || lastCanvasHeight !== nextHeight) {
+        lastCanvasWidth = nextWidth;
+        lastCanvasHeight = nextHeight;
+        canvas.width = nextWidth;
+        canvas.height = nextHeight;
+    }
+};
+const watchCanvasSize = () => {
+    if (!canvasWrap) {
+        return;
+    }
+    resizeCanvasToWrap();
+    if (typeof ResizeObserver !== "undefined") {
+        resizeObserver = new ResizeObserver(() => resizeCanvasToWrap());
+        resizeObserver.observe(canvasWrap);
+    }
+    else {
+        window.addEventListener("resize", resizeCanvasToWrap);
+    }
+};
 const resetGame = (seed) => {
     resetState(state, seed);
     const baseBudget = getCharacterBaseBudget(state.campaign.characterId, BASE_BUDGET);
@@ -45,16 +82,21 @@ const resetGame = (seed) => {
     state.phaseIndex = maintenanceIndex >= 0 ? maintenanceIndex : 1;
     setPhase(state, rng, "maintenance");
     state.leaderboardDirty = true;
+    phaseUi?.sync(state);
+    updateOverlay(overlayRefs, state);
 };
+watchCanvasSize();
 resetGame(initialSeed);
 if (!headless) {
-    bindUI(ui, state, rng, canvas, resetGame);
+    if (phaseUi) {
+        bindPhaseUi(phaseUi, state, rng, canvas, resetGame, overlayRefs);
+    }
 }
 const persistScoreIfNeeded = () => {
     if (!state.gameOver || state.scoreSubmitted) {
         return;
     }
-    const callsign = state.campaign.callsign.trim() || ui.callsignInput.value.trim() || "Chief";
+    const callsign = state.campaign.callsign.trim() || "Chief";
     saveLeaderboard({ name: callsign, score: state.finalScore, seed: state.seed, date: Date.now() });
     state.scoreSubmitted = true;
     state.leaderboardDirty = true;
@@ -64,20 +106,19 @@ if (headless) {
     const step = 0.1;
     for (let i = 0; i < ticks; i += 1) {
         stepSim(state, rng, step);
+        phaseUi?.sync(state);
     }
     console.log(`checksum:${computeChecksum(state)}`);
 }
 else {
     let lastTick = 0;
     let accumulator = 0;
-    let lastHudUpdate = 0;
-    const hudIntervalMs = 150;
-    const step = 0.1;
+    const baseStep = 0.1;
     const frame = (now) => {
         if (!lastTick) {
             lastTick = now;
         }
-        if (!ui.characterScreen.classList.contains("hidden") || document.hidden) {
+        if (!characterScreen.classList.contains("hidden") || document.hidden) {
             lastTick = now;
             accumulator = 0;
             requestAnimationFrame(frame);
@@ -86,15 +127,15 @@ else {
         const delta = Math.min(0.25, (now - lastTick) / 1000);
         lastTick = now;
         accumulator += delta;
-        while (accumulator >= step) {
-            stepSim(state, rng, step);
-            accumulator -= step;
+        const speedIndex = Math.min(Math.max(state.timeSpeedIndex, 0), TIME_SPEED_OPTIONS.length - 1);
+        const simStep = baseStep * (TIME_SPEED_OPTIONS[speedIndex] ?? 1);
+        while (accumulator >= baseStep) {
+            stepSim(state, rng, simStep);
+            accumulator -= baseStep;
         }
         persistScoreIfNeeded();
-        if (now - lastHudUpdate >= hudIntervalMs) {
-            updateHud(ui, state);
-            lastHudUpdate = now;
-        }
+        phaseUi?.sync(state);
+        updateOverlay(overlayRefs, state);
         draw(state, canvas, ctx);
         requestAnimationFrame(frame);
     };

@@ -1,5 +1,26 @@
 import { BASE_BUDGET } from "./config.js";
 import { createCampaignState } from "./campaign.js";
+import { buildNeighborOffsets } from "./grid.js";
+export const TILE_TYPE_IDS = {
+    water: 0,
+    grass: 1,
+    forest: 2,
+    ash: 3,
+    road: 4,
+    base: 5,
+    house: 6,
+    firebreak: 7
+};
+export const TILE_ID_TO_TYPE = [
+    "water",
+    "grass",
+    "forest",
+    "ash",
+    "road",
+    "base",
+    "house",
+    "firebreak"
+];
 const DEFAULT_WIND = { name: "N", dx: 0, dy: -1, strength: 0.5 };
 const createNumberArray = (size, fill = 0) => Array.from({ length: size }, () => fill);
 export function createInitialState(seed, grid) {
@@ -9,7 +30,33 @@ export function createInitialState(seed, grid) {
         units: [],
         waterParticles: [],
         smokeParticles: [],
-        heatBuffer: createNumberArray(grid.totalTiles, 0),
+        heatBuffer: new Float32Array(grid.totalTiles),
+        tileFire: new Float32Array(grid.totalTiles),
+        tileFuel: new Float32Array(grid.totalTiles),
+        tileHeat: new Float32Array(grid.totalTiles),
+        tileIgniteAt: new Float32Array(grid.totalTiles).fill(Number.POSITIVE_INFINITY),
+        tileIgnitionPoint: new Float32Array(grid.totalTiles),
+        tileBurnRate: new Float32Array(grid.totalTiles),
+        tileHeatOutput: new Float32Array(grid.totalTiles),
+        baselineFireScratch: new Float32Array(grid.totalTiles),
+        baselineHeatScratch: new Float32Array(grid.totalTiles),
+        baselineNextHeat: new Float32Array(grid.totalTiles),
+        tileElevation: new Float32Array(grid.totalTiles),
+        tileTypeId: new Uint8Array(grid.totalTiles),
+        tileSoaDirty: true,
+        tileSoaPhase: null,
+        neighborOffsets4: buildNeighborOffsets(grid.cols, 4),
+        neighborOffsets8: buildNeighborOffsets(grid.cols, 8),
+        igniteBuffer: new Int32Array(grid.totalTiles),
+        igniteMask: new Uint8Array(grid.totalTiles),
+        igniteCount: 0,
+        simPerf: {
+            quality: 1,
+            smokeRate: 1,
+            emberRateScale: 1,
+            useSnapshot: true,
+            neighbourMode: 8
+        },
         colorNoiseMap: createNumberArray(grid.totalTiles, 0.5),
         valleyMap: createNumberArray(grid.totalTiles, 0),
         terrainDirty: true,
@@ -28,12 +75,14 @@ export function createInitialState(seed, grid) {
         selectedUnitIds: [],
         zoom: 1,
         cameraCenter: { x: 0, y: 0 },
+        timeSpeedIndex: 0,
         year: 1,
         phaseIndex: 0,
         phase: "growth",
         phaseDay: 0,
         fireSeasonDay: 0,
         fireSimAccumulator: 0,
+        fireWork: null,
         fireBoundsActive: false,
         fireMinX: 0,
         fireMaxX: 0,
@@ -66,13 +115,63 @@ export function createInitialState(seed, grid) {
         campaign: createCampaignState(),
         renderTrees: true,
         renderEffects: true,
+        debugIgniteMode: false,
         fireSnapshot: new Float32Array(grid.totalTiles),
+        renderFireSmooth: new Float32Array(grid.totalTiles),
         growthView: null,
         selectionBox: null,
+        lastInteractionTime: 0,
+        lastRenderTime: 0,
         roster: [],
         selectedRosterId: null,
         nextRosterId: 1
     };
+}
+export function syncTileSoA(state) {
+    const total = state.grid.totalTiles;
+    if (state.tileFire.length !== total) {
+        state.tileFire = new Float32Array(total);
+        state.tileFuel = new Float32Array(total);
+        state.tileHeat = new Float32Array(total);
+        state.tileIgniteAt = new Float32Array(total).fill(Number.POSITIVE_INFINITY);
+        state.tileIgnitionPoint = new Float32Array(total);
+        state.tileBurnRate = new Float32Array(total);
+        state.tileHeatOutput = new Float32Array(total);
+        state.tileElevation = new Float32Array(total);
+        state.tileTypeId = new Uint8Array(total);
+        state.heatBuffer = new Float32Array(total);
+        state.fireSnapshot = new Float32Array(total);
+        state.renderFireSmooth = new Float32Array(total);
+        state.igniteBuffer = new Int32Array(total);
+        state.igniteMask = new Uint8Array(total);
+        state.baselineFireScratch = new Float32Array(total);
+        state.baselineHeatScratch = new Float32Array(total);
+        state.baselineNextHeat = new Float32Array(total);
+        state.neighborOffsets4 = buildNeighborOffsets(state.grid.cols, 4);
+        state.neighborOffsets8 = buildNeighborOffsets(state.grid.cols, 8);
+    }
+    const tiles = state.tiles;
+    const fire = state.tileFire;
+    const fuel = state.tileFuel;
+    const heat = state.tileHeat;
+    const ignition = state.tileIgnitionPoint;
+    const burnRate = state.tileBurnRate;
+    const heatOutput = state.tileHeatOutput;
+    const elevation = state.tileElevation;
+    const typeId = state.tileTypeId;
+    for (let i = 0; i < tiles.length; i += 1) {
+        const tile = tiles[i];
+        fire[i] = tile.fire;
+        fuel[i] = tile.fuel;
+        heat[i] = tile.heat;
+        ignition[i] = tile.ignitionPoint;
+        burnRate[i] = tile.burnRate;
+        heatOutput[i] = tile.heatOutput;
+        elevation[i] = tile.elevation;
+        typeId[i] = TILE_TYPE_IDS[tile.type];
+    }
+    state.tileSoaDirty = false;
+    state.tileSoaPhase = state.phase;
 }
 export function resetState(state, seed) {
     const zoom = state.zoom;

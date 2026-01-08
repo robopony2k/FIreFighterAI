@@ -1,7 +1,17 @@
 import type { WorldState } from "../core/state.js";
 import { CHARACTERS, getCharacterInitials } from "../core/characters.js";
 import type { CharacterId, CharacterDefinition } from "../core/characters.js";
-import type { UIRefs } from "./dom.js";
+export type CharacterSelectRefs = {
+  characterScreen: HTMLDivElement;
+  characterGrid: HTMLDivElement;
+  characterSummary: HTMLParagraphElement;
+  characterConfirm: HTMLButtonElement;
+  characterPreviewPortrait: HTMLDivElement;
+  characterPreviewImage: HTMLImageElement;
+  characterPreviewInitials: HTMLSpanElement;
+  characterNameInput: HTMLInputElement;
+  characterNameRandom: HTMLButtonElement;
+};
 
 const formatPercent = (value: number): string => {
   const rounded = Math.round(value * 100);
@@ -79,7 +89,7 @@ const buildCallsign = (characterId: CharacterId): string => {
 };
 
 export function initCharacterSelect(
-  ui: UIRefs,
+  ui: CharacterSelectRefs,
   state: WorldState,
   onConfirm: (seed: number | null) => void
 ): { open: (seed: number | null) => void } {
@@ -164,21 +174,26 @@ export function initCharacterSelect(
   updateSelection();
   updateConfirmState();
 
+  const flushConfirmation = (seed: number | null): void => {
+    window.requestAnimationFrame(() => {
+      onConfirm(seed);
+    });
+  };
+
   ui.characterConfirm.addEventListener("click", () => {
     state.campaign.characterId = selectedId;
     const trimmed = ui.characterNameInput.value.trim();
     state.campaign.callsign = trimmed || buildCallsign(selectedId);
     ui.characterScreen.classList.add("hidden");
-    onConfirm(pendingSeed);
+    const seedToUse = pendingSeed;
     pendingSeed = null;
     state.paused = false;
-    ui.pauseBtn.textContent = "Pause";
+    flushConfirmation(seedToUse);
   });
 
   const open = (seed: number | null): void => {
     pendingSeed = seed;
     state.paused = true;
-    ui.pauseBtn.textContent = "Resume";
     ui.characterNameInput.value = state.campaign.callsign;
     if (ui.characterNameInput.value.trim().length === 0) {
       applyRandomName();

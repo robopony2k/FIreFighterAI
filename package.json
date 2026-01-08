@@ -4,10 +4,16 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
+    "generate-fuel-profiles": "node scripts/generate-fuel-profiles.mjs",
+    "prebuild": "npm run generate-fuel-profiles",
     "build": "tsc --project tsconfig.json",
+    "predev": "npm run generate-fuel-profiles",
     "dev": "node scripts/dev-server.cjs"
   },
   "devDependencies": {
     "typescript": "^5.5.4"
+  },
+  "dependencies": {
+    "yaml": "^2.8.2"
   }
 }

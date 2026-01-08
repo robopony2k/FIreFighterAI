@@ -41,11 +41,23 @@ export function screenToWorld(state: WorldState, canvas: HTMLCanvasElement, scre
   const worldX = (screenX - view.offsetX) / view.scale;
   const worldY = (screenY - view.offsetY) / view.scale;
   const isoX = worldX / (ISO_TILE_WIDTH * 0.5);
-  const isoY = worldY / (ISO_TILE_HEIGHT * 0.5);
-  return {
-    x: (isoY + isoX) / 2,
-    y: (isoY - isoX) / 2
-  };
+  let isoY = worldY / (ISO_TILE_HEIGHT * 0.5);
+  let wx = (isoY + isoX) / 2;
+  let wy = (isoY - isoX) / 2;
+  for (let i = 0; i < 2; i += 1) {
+    const height = getHeightAt(state, wx, wy);
+    isoY = (worldY + height) / (ISO_TILE_HEIGHT * 0.5);
+    const nextWx = (isoY + isoX) / 2;
+    const nextWy = (isoY - isoX) / 2;
+    if (Math.floor(nextWx) === Math.floor(wx) && Math.floor(nextWy) === Math.floor(wy)) {
+      wx = nextWx;
+      wy = nextWy;
+      break;
+    }
+    wx = nextWx;
+    wy = nextWy;
+  }
+  return { x: wx, y: wy };
 }
 
 export function zoomAtPointer(state: WorldState, canvas: HTMLCanvasElement, targetZoom: number, screenX: number, screenY: number): void {

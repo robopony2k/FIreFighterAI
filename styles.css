@@ -27,6 +27,11 @@
   box-sizing: border-box;
 }
 
+html,
+body {
+  height: 100%;
+}
+
 body {
   margin: 0;
   font-family: "Palatino Linotype", "Book Antiqua", "Georgia", serif;
@@ -36,7 +41,7 @@ body {
     linear-gradient(120deg, #cbd7e3 0%, #f2ece2 70%);
   min-height: 100vh;
   position: relative;
-  overflow-x: hidden;
+  overflow: hidden;
 }
 
 body::before,
@@ -68,8 +73,9 @@ body::after {
 #app {
   display: flex;
   flex-direction: column;
-  min-height: 100vh;
-  padding: 20px;
+  min-height: 100%;
+  height: 100dvh;
+  padding: 20px 20px 0;
   gap: 18px;
   position: relative;
 }
@@ -179,19 +185,27 @@ button:disabled {
 
 .playfield {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 280px;
+  grid-template-columns: minmax(0, 1fr);
   gap: 16px;
   align-items: stretch;
+  flex: 1;
+  min-height: 0;
 }
 
 .canvas-wrap {
   position: relative;
   animation: riseIn 0.6s ease;
+  display: flex;
+  align-items: stretch;
+  justify-content: stretch;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
 }
 
 canvas {
   width: 100%;
-  height: auto;
+  height: 100%;
   display: block;
   border-radius: 18px;
   background: #1d2329;
@@ -555,6 +569,8 @@ button.character-card.selected {
   box-shadow: var(--shadow-soft);
   border: 1px solid rgba(129, 113, 92, 0.12);
   animation: floatIn 0.8s ease;
+  max-height: calc(100vh - 260px);
+  overflow-y: auto;
 }
 
 .panel-block h3 {
@@ -633,6 +649,106 @@ button.character-card.selected {
   text-transform: uppercase;
   letter-spacing: 0.6px;
   color: var(--muted);
+}
+
+.crew-plan-hint {
+  font-size: 12px;
+  color: var(--muted);
+  margin-bottom: 8px;
+}
+
+.crew-plan-list {
+  border: 1px solid rgba(150, 135, 115, 0.25);
+  border-radius: 10px;
+  padding: 6px;
+  background: rgba(255, 255, 255, 0.6);
+  max-height: 140px;
+  overflow-y: auto;
+  margin-bottom: 8px;
+}
+
+.crew-plan-item {
+  padding: 6px 8px;
+  border-radius: 8px;
+  font-size: 12px;
+  color: var(--ink);
+}
+
+.crew-plan-item + .crew-plan-item {
+  margin-top: 4px;
+}
+
+.crew-plan-empty {
+  font-size: 12px;
+  color: var(--muted);
+  padding: 6px 8px;
+}
+
+.crew-plan-label {
+  display: grid;
+  gap: 6px;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  color: var(--muted);
+  margin-bottom: 8px;
+}
+
+.crew-plan-label select {
+  text-transform: none;
+  letter-spacing: 0;
+  font-size: 13px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid #d7d0c2;
+  background: #fffdf8;
+}
+
+.crew-plan-actions {
+  display: grid;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.truck-summary {
+  font-size: 12px;
+  color: var(--muted);
+  margin-bottom: 8px;
+}
+
+.truck-actions {
+  display: grid;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.truck-crew-list {
+  border: 1px solid rgba(150, 135, 115, 0.25);
+  border-radius: 10px;
+  padding: 6px;
+  background: rgba(255, 255, 255, 0.6);
+  max-height: 160px;
+  overflow-y: auto;
+}
+
+.truck-crew-item {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 8px;
+  font-size: 12px;
+  color: var(--ink);
+}
+
+.truck-crew-item + .truck-crew-item {
+  margin-top: 4px;
+}
+
+.truck-crew-empty {
+  font-size: 12px;
+  color: var(--muted);
+  padding: 6px 8px;
 }
 
 .season-action {
@@ -736,6 +852,353 @@ input[type="text"] {
   text-transform: uppercase;
 }
 
+.phase-ui-root {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  display: flex;
+  flex-direction: column;
+}
+
+.phase-ui {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 16px;
+  pointer-events: none;
+}
+
+.phase-shell {
+  display: grid;
+  grid-template-rows: auto 1fr;
+  gap: 16px;
+  height: 100%;
+  position: relative;
+}
+
+.phase-body {
+  display: grid;
+  grid-template-columns: minmax(240px, 320px);
+  align-items: stretch;
+}
+
+.phase-column {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 0;
+}
+
+.phase-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  flex: 1;
+  min-height: 0;
+}
+
+.phase-panel {
+  pointer-events: auto;
+  transition: opacity 180ms ease, transform 180ms ease;
+}
+
+.phase-panel.is-hidden {
+  display: none;
+  opacity: 0;
+  transform: translateY(8px);
+  pointer-events: none;
+}
+
+.phase-topbar {
+  display: grid;
+  grid-template-columns: auto 1fr auto auto auto;
+  gap: 12px;
+  align-items: center;
+  background: rgba(255, 255, 255, 0.92);
+  border-radius: 14px;
+  padding: 12px 16px;
+  box-shadow: var(--shadow-soft);
+}
+
+.phase-badge {
+  background: linear-gradient(135deg, var(--accent), #b43a22);
+  color: #fff;
+  padding: 6px 10px;
+  border-radius: 10px;
+  font-weight: 700;
+  letter-spacing: 1px;
+  font-size: 12px;
+}
+
+.phase-progress {
+  height: 8px;
+  background: rgba(27, 27, 27, 0.12);
+  border-radius: 99px;
+  overflow: hidden;
+}
+
+.phase-progress-fill {
+  height: 100%;
+  background: linear-gradient(90deg, var(--accent-2), var(--accent));
+  width: 0%;
+  transition: width 200ms ease;
+}
+
+.phase-alert {
+  font-size: 12px;
+  color: var(--accent);
+}
+
+.phase-wind {
+  font-size: 11px;
+  letter-spacing: 0.6px;
+  color: #7a5e40;
+  justify-self: end;
+}
+
+.phase-cta {
+  padding: 8px 12px;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+}
+
+.phase-cta.is-hidden,
+.phase-alert.is-hidden {
+  display: none;
+}
+.phase-wind.is-hidden {
+  display: none;
+}
+
+.phase-card {
+  background: rgba(255, 255, 255, 0.92);
+  border-radius: 14px;
+  padding: 12px 14px;
+  box-shadow: var(--shadow-soft);
+  border: 1px solid rgba(129, 113, 92, 0.12);
+}
+
+.phase-card-title {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  margin-bottom: 6px;
+}
+
+.phase-card-summary {
+  font-size: 12px;
+  color: var(--muted);
+  margin-bottom: 8px;
+}
+
+.phase-hint {
+  background: rgba(255, 255, 255, 0.92);
+  border-radius: 14px;
+  padding: 12px 14px;
+  box-shadow: var(--shadow-soft);
+  border: 1px solid rgba(129, 113, 92, 0.12);
+}
+
+.phase-hint-title {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  margin-bottom: 6px;
+}
+
+.phase-hint-body {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.phase-list {
+  display: grid;
+  gap: 6px;
+  font-size: 12px;
+}
+
+.phase-list-header {
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+  color: var(--muted);
+  margin-top: 6px;
+}
+
+.phase-list-row {
+  display: flex;
+  justify-content: space-between;
+}
+
+.phase-list-muted {
+  color: var(--muted);
+}
+
+.phase-action-row {
+  display: grid;
+  gap: 8px;
+}
+
+.phase-action-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.phase-action {
+  width: 100%;
+}
+
+.phase-action.is-active {
+  background: linear-gradient(135deg, var(--accent) 0%, #b43a22 100%);
+}
+
+.phase-roster-list {
+  display: grid;
+  gap: 8px;
+  margin: 10px 0;
+  max-height: 260px;
+  overflow-y: auto;
+}
+
+.phase-roster-item {
+  text-align: left;
+  width: 100%;
+  font-size: 12px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid rgba(129, 113, 92, 0.2);
+  background: rgba(255, 255, 255, 0.7);
+  box-shadow: none;
+}
+
+.phase-roster-item.is-selected {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px rgba(209, 74, 44, 0.15);
+}
+
+.phase-roster-item.is-lost {
+  opacity: 0.6;
+}
+
+.phase-roster-item:hover {
+  transform: none;
+  background: rgba(255, 255, 255, 0.85);
+}
+
+.phase-roster-title {
+  font-weight: 700;
+  margin-bottom: 2px;
+}
+
+.phase-roster-meta {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.phase-crew-selection {
+  display: grid;
+  gap: 8px;
+}
+
+.phase-crew-label {
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.phase-crew-select {
+  display: grid;
+  gap: 4px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  color: var(--muted);
+}
+
+.phase-crew-select select {
+  margin-top: 4px;
+  width: 100%;
+  padding: 6px 8px;
+  border-radius: 8px;
+  border: 1px solid rgba(129, 113, 92, 0.3);
+  background: rgba(255, 255, 255, 0.9);
+  font-family: inherit;
+}
+
+.phase-bottom-controls {
+  background: rgba(255, 255, 255, 0.92);
+  border-radius: 14px;
+  padding: 12px 14px;
+  box-shadow: var(--shadow-soft);
+  border: 1px solid rgba(129, 113, 92, 0.12);
+  position: absolute;
+  top: 72px;
+  right: 16px;
+  width: 210px;
+}
+
+.phase-control-group {
+  display: grid;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+
+.phase-control-title {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+  color: var(--muted);
+}
+
+.phase-control-row {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.phase-time-speed-row {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.phase-time-speed-row button {
+  padding: 6px 8px;
+  font-size: 11px;
+  background: linear-gradient(135deg, #3a3530 0%, #1b1b1b 100%);
+}
+
+.phase-time-speed-row button.is-active {
+  background: linear-gradient(135deg, var(--accent), #b43a22);
+  box-shadow: 0 8px 16px rgba(209, 74, 44, 0.35);
+}
+
+.phase-control-status {
+  font-size: 11px;
+  color: var(--accent);
+}
+
+.phase-time-group.is-hidden {
+  display: none;
+}
+
+.phase-scrubber {
+  width: 100%;
+}
+
+.phase-ui--minimal .phase-card,
+.phase-ui--minimal .phase-bottom-controls {
+  opacity: 0.9;
+}
+
+#app[data-phase="growth"] .panel-block[data-phase-hide~="growth"],
+#app[data-phase="maintenance"] .panel-block[data-phase-hide~="maintenance"],
+#app[data-phase="fire"] .panel-block[data-phase-hide~="fire"],
+#app[data-phase="budget"] .panel-block[data-phase-hide~="budget"] {
+  display: none;
+}
+
 @keyframes fadeIn {
   from {
     opacity: 0;
@@ -790,6 +1253,31 @@ input[type="text"] {
   }
 }
 
+@media (max-height: 900px) {
+  #app {
+    padding: 12px;
+    gap: 12px;
+  }
+
+  .topbar {
+    padding: 12px 14px;
+  }
+
+  button {
+    padding: 8px 10px;
+    font-size: 13px;
+  }
+
+  .panel {
+    padding: 12px;
+    gap: 12px;
+    max-height: calc(100vh - 220px);
+  }
+
+  .canvas-wrap {
+    height: 100%;
+  }
+}
 @media (max-width: 640px) {
   .character-grid {
     grid-template-columns: 1fr;

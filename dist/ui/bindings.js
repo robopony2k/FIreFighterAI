@@ -4,7 +4,7 @@ import { zoomAtPointer, screenToWorld } from "../render/iso.js";
 import { ISO_TILE_HEIGHT, ISO_TILE_WIDTH } from "../core/config.js";
 import { resetStatus, setStatus } from "../core/state.js";
 import { beginFireSeason, handleDeployAction, handleEscape, handleUnitDeployment, handleUnitRetask, togglePause } from "../sim/index.js";
-import { assignFormationTargets, clearFuelLine, clearUnitSelection, getSelectedUnits, getUnitAt, recruitUnit, selectUnit, setDeployMode, toggleUnitSelection, trainSelectedUnit } from "../sim/units.js";
+import { assignFormationTargets, assignRosterCrew, clearFuelLine, clearUnitSelection, getSelectedUnits, getUnitAt, recruitUnit, selectUnit, setDeployMode, setTruckCrewMode, toggleUnitSelection, trainSelectedUnit, unassignRosterCrew } from "../sim/units.js";
 import { getCharacterBaseBudget } from "../core/characters.js";
 import { initCharacterSelect } from "./character-select.js";
 function getTileFromPointer(state, canvas, event) {
@@ -32,6 +32,9 @@ export function bindUI(ui, state, rng, canvas, onNewRun) {
     let selectStart = null;
     let selectEnd = null;
     let rightDragStart = null;
+    const noteInteraction = () => {
+        state.lastInteractionTime = performance.now();
+    };
     const applyCharacterBudget = () => {
         const baseBudget = getCharacterBaseBudget(state.campaign.characterId, BASE_BUDGET);
         state.budget = baseBudget;
@@ -68,6 +71,36 @@ export function bindUI(ui, state, rng, canvas, onNewRun) {
     });
     ui.trainResilience.addEventListener("click", () => {
         trainSelectedUnit(state, "resilience");
+    });
+    ui.crewPlanAssign.addEventListener("click", () => {
+        const selected = state.roster.find((unit) => unit.id === state.selectedRosterId) ?? null;
+        if (!selected || selected.kind !== "firefighter") {
+            return;
+        }
+        if (!ui.crewPlanSelect.value) {
+            return;
+        }
+        const truckId = Number(ui.crewPlanSelect.value);
+        assignRosterCrew(state, selected.id, truckId);
+    });
+    ui.crewPlanUnassign.addEventListener("click", () => {
+        const selected = state.roster.find((unit) => unit.id === state.selectedRosterId) ?? null;
+        if (!selected || selected.kind !== "firefighter") {
+            return;
+        }
+        unassignRosterCrew(state, selected.id);
+    });
+    ui.truckCrewBoard.addEventListener("click", () => {
+        const selectedTruck = state.units.find((unit) => unit.selected && unit.kind === "truck") ?? null;
+        if (selectedTruck) {
+            setTruckCrewMode(state, selectedTruck.id, "boarded");
+        }
+    });
+    ui.truckCrewDeploy.addEventListener("click", () => {
+        const selectedTruck = state.units.find((unit) => unit.selected && unit.kind === "truck") ?? null;
+        if (selectedTruck) {
+            setTruckCrewMode(state, selectedTruck.id, "deployed");
+        }
     });
     ui.deployClear.addEventListener("click", () => {
         handleDeployAction(state, "clear");
@@ -116,6 +149,7 @@ export function bindUI(ui, state, rng, canvas, onNewRun) {
         if (isInputLocked()) {
             return;
         }
+        noteInteraction();
         if (suppressClick) {
             suppressClick = false;
             return;
@@ -151,6 +185,7 @@ export function bindUI(ui, state, rng, canvas, onNewRun) {
         if (isInputLocked()) {
             return;
         }
+        noteInteraction();
         const canvasPos = getCanvasPos(event);
         if (event.button === 1 || (event.button === 0 && isSpaceDown)) {
             isPanning = true;
@@ -190,6 +225,7 @@ export function bindUI(ui, state, rng, canvas, onNewRun) {
         if (isInputLocked()) {
             return;
         }
+        noteInteraction();
         const canvasPos = getCanvasPos(event);
         if (event.button === 2) {
             if (isFormationDrag) {
@@ -294,6 +330,9 @@ export function bindUI(ui, state, rng, canvas, onNewRun) {
         if (isInputLocked()) {
             return;
         }
+        if (isPanning || isSelecting || isFormationDrag) {
+            noteInteraction();
+        }
         if (isFormationDrag) {
             const tile = getTileFromPointer(state, canvas, event);
             if (tile) {
@@ -332,6 +371,7 @@ export function bindUI(ui, state, rng, canvas, onNewRun) {
         if (isInputLocked()) {
             return;
         }
+        noteInteraction();
         event.preventDefault();
         const modeScale = event.deltaMode === 1 ? 22 : event.deltaMode === 2 ? 60 : 1;
         const scaledDelta = event.deltaY * modeScale;
