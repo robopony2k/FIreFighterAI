@@ -73,13 +73,14 @@ export const drawFireFx = (state, ctx, now, visibleBounds, view) => {
             }
             if (fire > 0.01) {
                 const intensity = clamp(fire, 0, 1);
+                const heatIntensity = clamp(state.tileHeat[idx] / DRAW_HEAT_MAX, 0, 1);
                 const radiusScale = samplingEnabled ? sampleStep * 0.75 : 1.0;
                 const white = { r: 255, g: 255, b: 255 };
                 const lightYellow = { r: 255, g: 255, b: 220 };
                 const gold = { r: 255, g: 190, b: 0 };
                 const orange = { r: 240, g: 120, b: 0 };
                 const red = { r: 200, g: 30, b: 0 };
-                // 1. Strengthened, grounded base glow
+                // 1. Strengthened, grounded base glow, aligned with fire intensity
                 const groundCenter = isoProject(x + 0.5, y + 0.5, height);
                 const groundGlowRadius = TILE_SIZE * (0.7 + intensity * 0.5) * radiusScale;
                 const groundGlowGrad = ctx.createRadialGradient(groundCenter.x, groundCenter.y, TILE_SIZE * 0.1 * radiusScale, groundCenter.x, groundCenter.y, groundGlowRadius);
@@ -91,16 +92,12 @@ export const drawFireFx = (state, ctx, now, visibleBounds, view) => {
                 ctx.beginPath();
                 ctx.arc(groundCenter.x, groundCenter.y, groundGlowRadius, 0, Math.PI * 2);
                 ctx.fill();
-                // --- LOD Setup ---
+                // --- Flamelet Rendering ---
                 const zoomThreshold = 0.6;
                 const isLodZoom = view.scale < zoomThreshold;
-                let flameletCount = 10;
-                if (samplingEnabled) {
-                    flameletCount = 5;
-                }
-                else if (isLodZoom) {
-                    flameletCount = 7;
-                }
+                // Dynamic flamelet count based on fire intensity to ensure visuals match state
+                const baseFlameletCount = isLodZoom ? 12 : 18;
+                const flameletCount = Math.ceil(baseFlameletCount * intensity);
                 const spawnBase = isoProject(x + 0.5, y + 0.5, height + TILE_SIZE * 0.05);
                 for (let i = 0; i < flameletCount; i++) {
                     const s1 = hash2D(idx, i, state.seed + 151);
@@ -150,11 +147,12 @@ export const drawFireFx = (state, ctx, now, visibleBounds, view) => {
                     const curl = Math.sin(phase * 18 + s1 * 6.28) * curlAmp;
                     const flameletY = spawnPos.y - riseT * riseHeight;
                     const flameletX = spawnPos.x + curl;
-                    const startSize = TILE_SIZE * (0.09 + intensity * 0.18) * startSizeFactor;
+                    // Flamelet size is now thicker and driven by heat
+                    const startSize = TILE_SIZE * (0.3 + heatIntensity * 0.7) * startSizeFactor;
                     const heightDecay = Math.pow(1.0 - phase, 1.0);
                     const widthDecay = Math.pow(1.0 - phase, 2.2);
                     const flameHeight = startSize * heightDecay;
-                    const flameWidth = startSize * 0.45 * widthDecay;
+                    const flameWidth = startSize * 0.6 * widthDecay;
                     if (flameHeight < 1.0)
                         continue;
                     const alphaT = Math.pow(Math.sin(Math.PI * phase), 1.5);

@@ -1,3 +1,4 @@
+import type { Formation } from "../../core/types.js";
 export type Phase = "growth" | "maintenance" | "fire" | "budget";
 
 export type InteractionMode = "default" | "deploy" | "fuelBreak" | "formation" | "inspect";
@@ -26,7 +27,13 @@ export type InputAction =
 
 export type SelectedEntity =
   | { kind: "none" }
-  | { kind: "unit"; id: number; unitType: "firefighter" | "truck"; status?: string };
+  | {
+      kind: "unit";
+      id: number;
+      unitType: "firefighter" | "truck";
+      status?: string;
+      crewFormation?: Formation | null;
+    };
 
 export type PrimaryCta = {
   label: string;

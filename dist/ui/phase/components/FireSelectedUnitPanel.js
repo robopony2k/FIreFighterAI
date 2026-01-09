@@ -13,18 +13,37 @@ export const createFireSelectedUnitPanel = () => {
     <button class="phase-action" data-action="crew-board">Board Crew</button>
     <button class="phase-action" data-action="crew-deploy">Deploy Crew</button>
   `;
-    element.append(title, summary, actions);
+    const formationActions = document.createElement("div");
+    formationActions.className = "phase-action-row";
+    formationActions.innerHTML = `
+    <div class="phase-action-label">Formation:</div>
+    <button class="phase-action" data-action="formation-narrow" data-formation="narrow">Narrow</button>
+    <button class="phase-action" data-action="formation-medium" data-formation="medium">Medium</button>
+    <button class="phase-action" data-action="formation-wide" data-formation="wide">Wide</button>
+  `;
+    element.append(title, summary, actions, formationActions);
+    const formationButtons = formationActions.querySelectorAll("[data-formation]");
     return {
         element,
         update: (data) => {
+            let formation = null;
             if (data.selection.kind === "unit") {
                 summary.textContent = `Unit ${data.selection.id} - ${data.selection.unitType}`;
-                actions.classList.toggle("hidden", data.selection.unitType !== "truck");
+                const isTruck = data.selection.unitType === "truck";
+                actions.classList.toggle("hidden", !isTruck);
+                formationActions.classList.toggle("hidden", !isTruck);
+                if (isTruck && data.selection.crewFormation) {
+                    formation = data.selection.crewFormation;
+                }
             }
             else {
                 summary.textContent = "Select a unit to see actions.";
                 actions.classList.add("hidden");
+                formationActions.classList.add("hidden");
             }
+            formationButtons.forEach((button) => {
+                button.classList.toggle("is-active", button.dataset.formation === formation);
+            });
         }
     };
 };

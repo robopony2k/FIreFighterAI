@@ -10,6 +10,7 @@ import { formatCurrency } from "../../core/utils.js";
 import { getPhaseInfo } from "../../core/time.js";
 import { getCharacterFirebreakCost } from "../../core/characters.js";
 import type { SelectedEntity } from "./types.js";
+import type { Formation } from "../../core/types.js";
 import type { CrewPanelData } from "./components/MaintenanceCrewPanel.js";
 import { GameState } from "./gameState.js";
 import { UIController } from "./uiController.js";
@@ -28,10 +29,18 @@ const getSelection = (world: WorldState): SelectedEntity => {
   if (!selected) {
     return { kind: "none" };
   }
+  let crewFormation: Formation | null = null;
+  if (selected.kind === "truck" && selected.crewIds.length > 0) {
+    const crewMember = world.units.find((u) => u.id === selected.crewIds[0]);
+    if (crewMember) {
+      crewFormation = crewMember.formation;
+    }
+  }
   return {
     kind: "unit",
     id: selected.id,
-    unitType: selected.kind
+    unitType: selected.kind,
+    crewFormation
   };
 };
 

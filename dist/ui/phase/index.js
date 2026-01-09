@@ -12,10 +12,18 @@ const getSelection = (world) => {
     if (!selected) {
         return { kind: "none" };
     }
+    let crewFormation = null;
+    if (selected.kind === "truck" && selected.crewIds.length > 0) {
+        const crewMember = world.units.find((u) => u.id === selected.crewIds[0]);
+        if (crewMember) {
+            crewFormation = crewMember.formation;
+        }
+    }
     return {
         kind: "unit",
         id: selected.id,
-        unitType: selected.kind
+        unitType: selected.kind,
+        crewFormation
     };
 };
 const getInteractionMode = (world) => {

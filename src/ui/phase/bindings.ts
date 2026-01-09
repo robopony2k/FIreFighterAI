@@ -1,4 +1,4 @@
-import type { RNG } from "../../core/types.js";
+import type { RNG, Unit, Formation } from "../../core/types.js";
 import type { WorldState } from "../../core/state.js";
 import { BASE_BUDGET, ISO_TILE_HEIGHT, ISO_TILE_WIDTH, TIME_SPEED_OPTIONS, ZOOM_STEP } from "../../core/config.js";
 import { inBounds, indexFor } from "../../core/grid.js";
@@ -22,6 +22,7 @@ import {
   getUnitAt,
   recruitUnit,
   selectUnit,
+  setCrewFormation,
   setDeployMode,
   setTruckCrewMode,
   toggleUnitSelection,
@@ -351,6 +352,15 @@ export const bindPhaseUi = (
         }
         return;
       }
+      const formationMatch = action.match(/^formation-(narrow|medium|wide)$/);
+      if (formationMatch) {
+        const formation = formationMatch[1] as Formation;
+        const selectedTruck = state.units.find((unit) => unit.selected && unit.kind === "truck") ?? null;
+        if (selectedTruck) {
+          setCrewFormation(state, selectedTruck.id, formation);
+        }
+        return;
+      }
       return;
     }
 
@@ -398,10 +408,27 @@ export const bindPhaseUi = (
     const clickedUnit = getUnitAt(state, tile.x, tile.y);
     if (clickedUnit) {
       gate("select", () => {
-        if (event.shiftKey) {
-          toggleUnitSelection(state, clickedUnit);
-        } else {
-          selectUnit(state, clickedUnit);
+        let unitToSelect: Unit | null = clickedUnit;
+        if (clickedUnit.kind === "firefighter") {
+          if (clickedUnit.assignedTruckId) {
+            unitToSelect = state.units.find((u) => u.id === clickedUnit.assignedTruckId) ?? null;
+            if (unitToSelect) {
+              setStatus(state, "Firefighter selected. Controlling assigned truck.");
+            }
+          } else {
+            unitToSelect = null;
+            setStatus(state, "This firefighter is not assigned to a truck.");
+          }
+        }
+
+        if (unitToSelect) {
+          if (event.shiftKey) {
+            toggleUnitSelection(state, unitToSelect);
+          } else {
+            selectUnit(state, unitToSelect);
+          }
+        } else if (!event.shiftKey) {
+          clearUnitSelection(state);
         }
         setDeployMode(state, null);
       });
@@ -527,16 +554,29 @@ export const bindPhaseUi = (
           if (!event.shiftKey) {
             clearUnitSelection(state);
           }
+          const newlySelectedTrucks = new Set<number>();
           state.units.forEach((unit) => {
             if (unit.x >= minX && unit.x <= maxX && unit.y >= minY && unit.y <= maxY) {
-              unit.selected = true;
-              if (!state.selectedUnitIds.includes(unit.id)) {
-                state.selectedUnitIds.push(unit.id);
+              if (unit.kind === "truck") {
+                newlySelectedTrucks.add(unit.id);
+              } else if (unit.kind === "firefighter" && unit.assignedTruckId) {
+                newlySelectedTrucks.add(unit.assignedTruckId);
               }
             }
           });
+
+          newlySelectedTrucks.forEach((truckId) => {
+            const truck = state.units.find((u) => u.id === truckId);
+            if (truck) {
+              truck.selected = true;
+              if (!state.selectedUnitIds.includes(truck.id)) {
+                state.selectedUnitIds.push(truck.id);
+              }
+            }
+          });
+
           if (state.selectedUnitIds.length > 0) {
-            setStatus(state, `${state.selectedUnitIds.length} unit(s) selected. Right-click to move.`);
+            setStatus(state, `${state.selectedUnitIds.length} truck(s) selected. Right-click to move.`);
           } else {
             resetStatus(state);
           }

@@ -89,6 +89,9 @@ export function extinguishAllFires(state) {
         tile.fire = 0;
         tile.heat = 0;
     });
+    state.tileFire.fill(0);
+    state.tileHeat.fill(0);
+    state.renderFireSmooth.fill(0);
     state.smokeParticles = [];
     state.waterParticles = [];
 }
@@ -404,18 +407,19 @@ export function handleUnitRetask(state, tileX, tileY) {
     if (state.selectedUnitIds.length === 0) {
         return;
     }
-    const selectedTrucks = state.units.filter((unit) => unit.selected && unit.kind === "truck");
+    const selectedUnits = state.units.filter((unit) => unit.selected);
+    const selectedTrucks = selectedUnits.filter((unit) => unit.kind === "truck");
     if (selectedTrucks.length > 0) {
         selectedTrucks.forEach((unit) => {
             setUnitTarget(state, unit, tileX, tileY, true);
         });
         return;
     }
-    state.units.forEach((unit) => {
-        if (unit.selected) {
-            setUnitTarget(state, unit, tileX, tileY, true);
-        }
-    });
+    // If only firefighters are selected, which shouldn't happen with the new UI changes,
+    // show a single message instead of trying to command them.
+    if (selectedUnits.every((unit) => unit.kind === "firefighter")) {
+        setStatus(state, "Firefighters are controlled by their truck. Move the truck to reposition the crew.");
+    }
 }
 export function handleClearLine(state, rng, start, end) {
     clearFuelLine(state, rng, start, end);

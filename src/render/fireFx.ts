@@ -95,6 +95,7 @@ export const drawFireFx = (
 
       if (fire > 0.01) {
         const intensity = clamp(fire, 0, 1);
+        const heatIntensity = clamp(state.tileHeat[idx] / DRAW_HEAT_MAX, 0, 1);
         const radiusScale = samplingEnabled ? sampleStep * 0.75 : 1.0;
 
         const white = { r: 255, g: 255, b: 255 };
@@ -103,7 +104,7 @@ export const drawFireFx = (
         const orange = { r: 240, g: 120, b: 0 };
         const red = { r: 200, g: 30, b: 0 };
 
-        // 1. Strengthened, grounded base glow
+        // 1. Strengthened, grounded base glow, aligned with fire intensity
         const groundCenter = isoProject(x + 0.5, y + 0.5, height);
         const groundGlowRadius = TILE_SIZE * (0.7 + intensity * 0.5) * radiusScale;
         const groundGlowGrad = ctx.createRadialGradient(
@@ -124,16 +125,13 @@ export const drawFireFx = (
         ctx.arc(groundCenter.x, groundCenter.y, groundGlowRadius, 0, Math.PI * 2);
         ctx.fill();
 
-        // --- LOD Setup ---
+        // --- Flamelet Rendering ---
         const zoomThreshold = 0.6;
         const isLodZoom = view.scale < zoomThreshold;
-        let flameletCount = 10;
-        
-        if (samplingEnabled) {
-          flameletCount = 5;
-        } else if (isLodZoom) {
-          flameletCount = 7;
-        }
+
+        // Dynamic flamelet count based on fire intensity to ensure visuals match state
+        const baseFlameletCount = isLodZoom ? 12 : 18;
+        const flameletCount = Math.ceil(baseFlameletCount * intensity);
 
         const spawnBase = isoProject(x + 0.5, y + 0.5, height + TILE_SIZE * 0.05);
 
@@ -144,13 +142,13 @@ export const drawFireFx = (
 
           let tier: "small" | "medium" | "large";
           if (samplingEnabled) {
-             tier = s1 < 0.5 ? "large" : "medium";
+            tier = s1 < 0.5 ? "large" : "medium";
           } else {
             if (s1 < 0.15) tier = "large";
             else if (s1 < 0.5) tier = "medium";
             else tier = "small";
           }
-          
+
           let maxPhaseDuration = 1.0,
             riseHeightFactor = 1.0,
             startSizeFactor = 1.0,
@@ -192,11 +190,12 @@ export const drawFireFx = (
           const flameletY = spawnPos.y - riseT * riseHeight;
           const flameletX = spawnPos.x + curl;
 
-          const startSize = TILE_SIZE * (0.09 + intensity * 0.18) * startSizeFactor;
+          // Flamelet size is now thicker and driven by heat
+          const startSize = TILE_SIZE * (0.3 + heatIntensity * 0.7) * startSizeFactor;
           const heightDecay = Math.pow(1.0 - phase, 1.0);
           const widthDecay = Math.pow(1.0 - phase, 2.2);
           const flameHeight = startSize * heightDecay;
-          const flameWidth = startSize * 0.45 * widthDecay;
+          const flameWidth = startSize * 0.6 * widthDecay;
 
           if (flameHeight < 1.0) continue;
 
@@ -222,7 +221,15 @@ export const drawFireFx = (
             const blurAlpha = alpha * 0.5;
             ctx.globalAlpha = blurAlpha;
             ctx.beginPath();
-            ctx.ellipse(flameletX, flameletY - blurOffset, flameWidth * 0.8, flameHeight * 0.9, 0, 0, Math.PI * 2);
+            ctx.ellipse(
+              flameletX,
+              flameletY - blurOffset,
+              flameWidth * 0.8,
+              flameHeight * 0.9,
+              0,
+              0,
+              Math.PI * 2
+            );
             ctx.fill();
           }
         }

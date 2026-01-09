@@ -20,8 +20,8 @@ if (!ctx) {
 const baseCanvasWidth = canvas.width;
 const baseCanvasHeight = canvas.height;
 const gridScale = MAP_SCALE;
-const gridCols = 255;
-const gridRows = 255;
+const gridCols = 64;
+const gridRows = 64;
 const grid = {
     cols: gridCols,
     rows: gridRows,

@@ -42,6 +42,11 @@ export const UNIT_LOSS_FIRE_THRESHOLD = 0.55;
 export const TRUCK_CAPACITY = 3;
 export const TRUCK_BOARD_RADIUS = 1.6;
 export const FIREFIGHTER_TETHER_DISTANCE = 10;
+export const FORMATION_SPACING = {
+    narrow: 1.5,
+    medium: 2.5,
+    wide: 4.0
+};
 export const MOVE_UPHILL_FACTOR = 2.1;
 export const MOVE_DOWNHILL_FACTOR = 0.8;
 export const MOVE_SLOPE_MIN = 0.65;

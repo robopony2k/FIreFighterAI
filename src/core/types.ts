@@ -2,13 +2,23 @@ export type TileType = "water" | "grass" | "forest" | "ash" | "road" | "base" | 
 
 export type UnitKind = "firefighter" | "truck";
 export type UnitSkill = "speed" | "power" | "range" | "resilience";
-export type RosterStatus = "available" | "deployed" | "lost";
-export type SeasonPhase = "growth" | "maintenance" | "fire" | "budget";
-export type DeployMode = UnitKind | "clear";
-export type FireSimPhase = "snapshot" | "heat-clear" | "heat-pass1" | "heat-pass2" | "fire" | "ignite";
+export type RosterStatus = "available" | "deployed" | "lost";
+
+export type SeasonPhase = "growth" | "maintenance" | "fire" | "budget";
+
+export type DeployMode = UnitKind | "clear";
+
+export type Formation = "narrow" | "medium" | "wide";
+
+export type FireSimPhase = "snapshot" | "heat-clear" | "heat-pass1" | "heat-pass2" | "fire" | "ignite";
+
+
+
+export interface Point {
+
+  x: number;
+
 
-export interface Point {
-  x: number;
   y: number;
 }
 
@@ -58,29 +68,67 @@ export interface Unit {
   carrierId: number | null;
   passengerIds: number[];
   assignedTruckId: number | null;
-  crewIds: number[];
-  crewMode: "boarded" | "deployed";
-}
-
-export interface UnitTraining {
-  speed: number;
-  power: number;
-  range: number;
-  resilience: number;
-}
-
-export interface RosterUnit {
-  id: number;
+    crewIds: number[];
+
+    crewMode: "boarded" | "deployed";
+
+    formation: Formation;
+
+  }
+
+  
+
+  export interface UnitTraining {
+
+  
+
+    speed: number;
+
+  
+
+    power: number;
+
+  
+
+    range: number;
+
+  
+
+    resilience: number;
+
+  
+
+  }
+
+  
+
+  
+
+  
+
+  export interface RosterUnit {
+
+  
+
+    id: number;
   kind: UnitKind;
   name: string;
   training: UnitTraining;
-  status: RosterStatus;
-  assignedTruckId: number | null;
-  crewIds: number[];
-}
-
-export interface Particle {
-  x: number;
+    status: RosterStatus;
+
+    assignedTruckId: number | null;
+
+    crewIds: number[];
+
+    formation: Formation;
+
+  }
+
+  
+
+  export interface Particle {
+
+    x: number;
   y: number;
   vx: number;
   vy: number;

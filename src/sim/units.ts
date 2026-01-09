@@ -1,8 +1,9 @@
-import type { RNG, Point, Unit, UnitKind, UnitSkill, RosterUnit } from "../core/types.js";
+import type { RNG, Point, Unit, UnitKind, UnitSkill, RosterUnit, Formation } from "../core/types.js";
 import type { WorldState } from "../core/state.js";
 import {
   FIREBREAK_COST_PER_TILE,
   FIREFIGHTER_TETHER_DISTANCE,
+  FORMATION_SPACING,
   MAX_TRAINING_LEVEL,
   RECRUIT_FIREFIGHTER_COST,
   RECRUIT_TRUCK_COST,
@@ -163,7 +164,8 @@ export function recruitUnit(state: WorldState, rng: RNG, kind: UnitKind, free = 
     training: createTraining(),
     status: "available",
     assignedTruckId: null,
-    crewIds: []
+    crewIds: [],
+    formation: "medium"
   };
   state.nextRosterId += 1;
   state.roster.push(entry);
@@ -402,7 +404,8 @@ export function createUnit(state: WorldState, kind: UnitKind, rng: RNG, rosterEn
     passengerIds: [],
     assignedTruckId: null,
     crewIds: [],
-    crewMode: "deployed"
+    crewMode: "deployed",
+    formation: rosterUnit ? rosterUnit.formation : "medium"
   };
 }
 
@@ -415,45 +418,29 @@ export function setUnitTarget(
   options?: { silent?: boolean }
 ): void {
   if (!inBounds(state.grid, tileX, tileY) || !isPassable(state, tileX, tileY)) {
-    setStatus(state, "That location is blocked.");
+    if (!options?.silent) {
+      setStatus(state, "That location is blocked.");
+    }
     return;
   }
   if (manual) {
     unit.autonomous = false;
   }
+
+  // New control scheme logic
   if (unit.kind === "firefighter") {
-    const target = { x: tileX, y: tileY };
-    const assignedTruck = getAssignedTruck(state, unit);
-    if (assignedTruck) {
-      if (assignedTruck.crewMode === "boarded") {
-        if (manual) {
-          setStatus(state, "Crew is boarded. Move the truck to reposition.");
-          return;
-        }
-        const truckTile = getUnitTile(assignedTruck);
-        tileX = truckTile.x;
-        tileY = truckTile.y;
-      } else {
-        if (unit.carrierId !== null) {
-          detachFromCarrier(state, unit);
-        }
-        const clamped = clampTargetToTruckRange(state, assignedTruck, target);
-        tileX = clamped.x;
-        tileY = clamped.y;
-      }
-    } else {
-      const nearest = getNearestTruck(state, getUnitTile(unit));
-      if (nearest) {
-        const truckTile = getUnitTile(nearest.unit);
-        const targetDist = Math.hypot(target.x - truckTile.x, target.y - truckTile.y);
-        if (targetDist > FIREFIGHTER_TETHER_DISTANCE) {
-          const clamped = clampTargetToTruckRange(state, nearest.unit, target);
-          tileX = clamped.x;
-          tileY = clamped.y;
-        }
-      }
+    if (manual) {
+      setStatus(state, "Firefighters are controlled by their truck. Move the truck to reposition the crew.");
+      return;
     }
+  } else if (unit.kind === "truck" && manual) {
+    // A manual move command for a truck now initiates the boarding process.
+    unit.crewMode = "boarded";
+    const rosterUnit = getRosterUnit(state, unit.rosterId);
+    const name = rosterUnit ? rosterUnit.name : "Truck";
+    setStatus(state, `${name} moving to new position. Crew beginning to board.`);
   }
+
   unit.target = { x: tileX, y: tileY };
   unit.path = findPath(state, { x: Math.floor(unit.x), y: Math.floor(unit.y) }, unit.target);
   unit.pathIndex = 0;
@@ -684,7 +671,16 @@ export function stepUnits(state: WorldState, delta: number): void {
 
   state.units.forEach((unit) => {
     if (unit.kind === "truck") {
-      advanceUnit(unit);
+      const isWaitingForCrew = unit.crewMode === "boarded" && unit.passengerIds.length < unit.crewIds.length;
+      const hasArrived = unit.pathIndex >= unit.path.length;
+
+      if (!isWaitingForCrew) {
+        advanceUnit(unit);
+      }
+
+      if (hasArrived && unit.crewMode === "boarded") {
+        setTruckCrewMode(state, unit.id, "deployed");
+      }
     }
   });
 
@@ -751,13 +747,12 @@ const updateTruckCrewOrders = (state: WorldState, truck: Unit): void => {
   });
   truck.passengerIds = truck.passengerIds.filter((id) => truck.crewIds.includes(id));
   const truckTile = getUnitTile(truck);
-  for (const id of truck.crewIds) {
-    const crew = getUnitById(state, id);
-    if (!crew) {
-      continue;
-    }
-    if (truck.crewMode === "boarded") {
-      if (crew.carrierId === truck.id) {
+
+  // --- Handle Boarding ---
+  if (truck.crewMode === "boarded") {
+    for (const id of truck.crewIds) {
+      const crew = getUnitById(state, id);
+      if (!crew || crew.carrierId === truck.id) {
         continue;
       }
       const distToTruck = Math.hypot(crew.x - truck.x, crew.y - truck.y);
@@ -766,9 +761,18 @@ const updateTruckCrewOrders = (state: WorldState, truck: Unit): void => {
       } else {
         setUnitTarget(state, crew, truckTile.x, truckTile.y, false, { silent: true });
       }
-      continue;
     }
+    return;
+  }
 
+  // --- Handle Deployment & Targeting ---
+  const deployedCrew = truck.crewIds.map((id) => getUnitById(state, id)).filter((c) => c) as Unit[];
+  if (deployedCrew.length === 0) {
+    return;
+  }
+
+  // First, ensure all crew are disembarked and within tether range
+  deployedCrew.forEach((crew) => {
     if (crew.carrierId === truck.id) {
       detachFromCarrier(state, crew);
     }
@@ -776,16 +780,41 @@ const updateTruckCrewOrders = (state: WorldState, truck: Unit): void => {
     if (distFromTruck > FIREFIGHTER_TETHER_DISTANCE) {
       const clamped = clampTargetToTruckRange(state, truck, truckTile);
       setUnitTarget(state, crew, clamped.x, clamped.y, false, { silent: true });
-      continue;
     }
-    if (crew.target && crew.pathIndex < crew.path.length) {
-      continue;
-    }
-    const fireTarget = findFireTargetNear(state, truckTile, FIREFIGHTER_TETHER_DISTANCE);
-    if (fireTarget) {
-      setUnitTarget(state, crew, fireTarget.x, fireTarget.y, false, { silent: true });
-    }
+  });
+
+  // Now, check if the crew needs new fire targets
+  const isCrewIdle = deployedCrew.every((crew) => !crew.target || crew.pathIndex >= crew.path.length);
+  if (!isCrewIdle) {
+    return; // Crew is busy, don't re-task them
   }
+
+  const mainFireTarget = findFireTargetNear(state, truckTile, FIREFIGHTER_TETHER_DISTANCE);
+  if (!mainFireTarget) {
+    return; // No fires in range
+  }
+
+  const formation = deployedCrew[0].formation; // Assume all crew have same formation
+  const spacing = FORMATION_SPACING[formation];
+  const crewSize = deployedCrew.length;
+
+  const dirX = mainFireTarget.x - truckTile.x;
+  const dirY = mainFireTarget.y - truckTile.y;
+  const dirMag = Math.hypot(dirX, dirY);
+
+  // Get a perpendicular vector to form the fireline
+  const perpX = dirMag > 0 ? -dirY / dirMag : 1;
+  const perpY = dirMag > 0 ? dirX / dirMag : 0;
+
+  deployedCrew.forEach((crew, i) => {
+    const offset = (i - (crewSize - 1) / 2) * spacing;
+    const targetX = Math.round(mainFireTarget.x + perpX * offset);
+    const targetY = Math.round(mainFireTarget.y + perpY * offset);
+    const finalTarget = findNearestPassable(state, targetX, targetY);
+    if (finalTarget) {
+      setUnitTarget(state, crew, finalTarget.x, finalTarget.y, false, { silent: true });
+    }
+  });
 };
 
 export function setTruckCrewMode(state: WorldState, truckId: number, mode: "boarded" | "deployed"): void {
@@ -805,6 +834,30 @@ export function setTruckCrewMode(state: WorldState, truckId: number, mode: "boar
   }
   setStatus(state, mode === "boarded" ? "Crew boarding truck." : "Crew deployed around truck.");
   updateTruckCrewOrders(state, truck);
+}
+
+export function setCrewFormation(state: WorldState, truckId: number, formation: Formation): void {
+  const truck = getUnitById(state, truckId);
+  if (!truck || truck.kind !== "truck") {
+    return;
+  }
+  truck.crewIds.forEach((id) => {
+    const crewMember = getUnitById(state, id);
+    if (crewMember) {
+      crewMember.formation = formation;
+    }
+  });
+  const rosterTruck = getRosterUnit(state, truck.rosterId);
+  if (rosterTruck) {
+    rosterTruck.crewIds.forEach((id) => {
+      const rosterCrew = getRosterUnit(state, id);
+      if (rosterCrew) {
+        rosterCrew.formation = formation;
+      }
+    });
+  }
+  const name = rosterTruck ? rosterTruck.name : "Truck";
+  setStatus(state, `${name} crew set to ${formation} formation.`);
 }
 
 export function autoAssignTargets(state: WorldState): void {
@@ -970,7 +1023,26 @@ export function applyExtinguish(state: WorldState, rng: RNG, delta: number): voi
     if (unit.kind === "firefighter" && unit.carrierId !== null) {
       return;
     }
-    const radius = unit.radius;
+
+    let radius = unit.radius;
+    let power = unit.power;
+
+    if (unit.kind === "firefighter") {
+      switch (unit.formation) {
+        case "narrow":
+          radius *= 0.7;
+          power *= 1.4;
+          break;
+        case "wide":
+          radius *= 1.4;
+          power *= 0.7;
+          break;
+        case "medium":
+        default:
+          break;
+      }
+    }
+
     const minX = Math.max(0, Math.floor(unit.x - radius));
     const maxX = Math.min(state.grid.cols - 1, Math.ceil(unit.x + radius));
     const minY = Math.max(0, Math.floor(unit.y - radius));
@@ -983,11 +1055,11 @@ export function applyExtinguish(state: WorldState, rng: RNG, delta: number): voi
         if (dist <= radius) {
           const tile = state.tiles[indexFor(state.grid, x, y)];
           if (tile.heat > 0) {
-            tile.heat = Math.max(0, tile.heat - unit.power * 1.1 * powerMultiplier);
+            tile.heat = Math.max(0, tile.heat - power * 1.1 * powerMultiplier);
           }
           if (tile.fire > 0) {
             const before = tile.fire;
-            tile.fire = Math.max(0, tile.fire - unit.power * powerMultiplier);
+            tile.fire = Math.max(0, tile.fire - power * powerMultiplier);
             if (before > 0 && tile.fire === 0 && tile.fuel > 0) {
               state.containedCount += 1;
             }
