@@ -1,6 +1,6 @@
-import type { RNG, Unit, Formation } from "../../core/types.js";
+import type { RNG, Unit, Formation, Point } from "../../core/types.js";
 import type { WorldState } from "../../core/state.js";
-import { BASE_BUDGET, ISO_TILE_HEIGHT, ISO_TILE_WIDTH, TIME_SPEED_OPTIONS, ZOOM_STEP } from "../../core/config.js";
+import { BASE_BUDGET, FIRE_SIM_TICK_SECONDS, ISO_TILE_HEIGHT, ISO_TILE_WIDTH, TIME_SPEED_OPTIONS, ZOOM_STEP } from "../../core/config.js";
 import { inBounds, indexFor } from "../../core/grid.js";
 import { zoomAtPointer, screenToWorld } from "../../render/iso.js";
 import { resetStatus, setStatus } from "../../core/state.js";
@@ -38,7 +38,7 @@ import { gateInput, isInputAllowed } from "./inputGate.js";
 import type { InteractionMode, InputAction } from "./types.js";
 import { markFireBounds } from "../../sim/fire/bounds.js";
 
-const getInteractionMode = (state: WorldState): InteractionMode => {
+  const getInteractionMode = (state: WorldState): InteractionMode => {
   if (state.deployMode === "clear") {
     return "fuelBreak";
   }
@@ -67,6 +67,16 @@ const getTileFromPointer = (state: WorldState, canvas: HTMLCanvasElement, event:
 };
 
 const DEBUG_IGNITE_TOGGLE_KEY = "i";
+const DEBUG_CELL_TOGGLE_KEY = "d";
+
+  const getWorldFromPointer = (state: WorldState, canvas: HTMLCanvasElement, event: MouseEvent): Point => {
+  const rect = canvas.getBoundingClientRect();
+  const scaleX = canvas.width / rect.width;
+  const scaleY = canvas.height / rect.height;
+  const canvasX = (event.clientX - rect.left) * scaleX;
+  const canvasY = (event.clientY - rect.top) * scaleY;
+  return screenToWorld(state, canvas, canvasX, canvasY);
+};
 
 export const bindPhaseUi = (
   phaseUi: PhaseUiApi,
@@ -110,14 +120,15 @@ export const bindPhaseUi = (
       return;
     }
     const newFire = Math.min(1, 0.65 + rng.next() * 0.3);
-    target.fire = newFire;
-    target.heat = Math.max(target.heat, target.ignitionPoint * 1.4);
-    state.tileFire[idx] = target.fire;
-    state.tileHeat[idx] = target.heat;
-    markFireBounds(state, tile.x, tile.y);
-    state.lastActiveFires = Math.max(state.lastActiveFires, 1);
-    setStatus(state, `Debug ignition at ${tile.x}, ${tile.y}`);
-  };
+      target.fire = newFire;
+      target.heat = Math.max(target.heat, target.ignitionPoint * 1.4);
+      state.tileFire[idx] = target.fire;
+      state.tileHeat[idx] = target.heat;
+      markFireBounds(state, tile.x, tile.y);
+      state.lastActiveFires = Math.max(state.lastActiveFires, 1);
+      state.fireSimAccumulator = Math.max(state.fireSimAccumulator, FIRE_SIM_TICK_SECONDS);
+      setStatus(state, `Debug ignition at ${tile.x}, ${tile.y}`);
+    };
 
   const applyCharacterBudget = (): void => {
     const baseBudget = getCharacterBaseBudget(state.campaign.characterId, BASE_BUDGET);
@@ -125,7 +136,7 @@ export const bindPhaseUi = (
     state.pendingBudget = baseBudget;
   };
 
-  const isOverlayLocked = (): boolean => state.overlayVisible;
+  const isOverlayLocked = (): boolean => state.overlayVisible && state.overlayAction === "restart";
 
   const gate = (action: InputAction, handler: () => void): void => {
     gateInput(state.phase, getInteractionMode(state), action, handler, (reason) => setStatus(state, reason));
@@ -140,6 +151,18 @@ export const bindPhaseUi = (
         state,
         debugIgniteMode ? "Debug ignite mode enabled. Click to place a fire." : "Debug ignite mode disabled."
       );
+      noteInteraction();
+    });
+  };
+
+  const toggleDebugCellMode = (): void => {
+    gate("select", () => {
+      state.debugCellEnabled = !state.debugCellEnabled;
+      if (!state.debugCellEnabled) {
+        state.debugHoverTile = null;
+        state.debugHoverWorld = null;
+      }
+      setStatus(state, state.debugCellEnabled ? "Debug cell overlay enabled." : "Debug cell overlay disabled.");
       noteInteraction();
     });
   };
@@ -201,9 +224,6 @@ export const bindPhaseUi = (
     if (isOverlayLocked()) {
       return;
     }
-    if (actionId === "begin-fire") {
-      beginFireSeason(state, rng);
-    }
     if (actionId === "continue" && state.phase === "budget") {
       advancePhase(state, rng);
     }
@@ -226,6 +246,9 @@ export const bindPhaseUi = (
     }
     if (event.key.toLowerCase() === DEBUG_IGNITE_TOGGLE_KEY && event.ctrlKey && event.shiftKey) {
       toggleDebugIgniteMode();
+    }
+    if (event.key.toLowerCase() === DEBUG_CELL_TOGGLE_KEY && event.ctrlKey && event.shiftKey) {
+      toggleDebugCellMode();
     }
   });
 
@@ -292,6 +315,43 @@ export const bindPhaseUi = (
       }
       if (action === "deploy-truck") {
         gate("deploy", () => handleDeployAction(state, "truck"));
+        return;
+      }
+      if (action === "backburn") {
+        const selectedTruck = state.units.find((unit) => unit.kind === "truck" && unit.selected) ?? null;
+        if (!selectedTruck) {
+          setStatus(state, "Select a truck to issue a backburn.");
+          return;
+        }
+        gate("select", () => {
+          debugIgniteMode = !debugIgniteMode;
+          state.debugIgniteMode = debugIgniteMode;
+          refreshDebugToggle();
+          setStatus(
+            state,
+            debugIgniteMode ? "Fuel break (backburn) mode enabled. Click to ignite." : "Fuel break mode disabled."
+          );
+        });
+        noteInteraction();
+        return;
+      }
+      if (action === "focus-base") {
+        phaseUi.state.toggleBaseOpsOpen();
+        noteInteraction();
+        return;
+      }
+      if (action === "select-truck") {
+        const id = Number(actionTarget.dataset.truckId ?? "");
+        if (Number.isFinite(id)) {
+          const truck = state.units.find((unit) => unit.kind === "truck" && unit.id === id) ?? null;
+          if (truck) {
+            gate("select", () => {
+              selectUnit(state, truck);
+              setDeployMode(state, null);
+            });
+            noteInteraction();
+          }
+        }
         return;
       }
       if (action === "recruit-firefighter") {
@@ -618,11 +678,23 @@ export const bindPhaseUi = (
     selectStart = null;
     selectEnd = null;
     state.selectionBox = null;
+    state.debugHoverTile = null;
+    state.debugHoverWorld = null;
   });
 
   canvas.addEventListener("mousemove", (event) => {
     if (isOverlayLocked()) {
       return;
+    }
+    if (state.debugCellEnabled) {
+      const world = getWorldFromPointer(state, canvas, event);
+      state.debugHoverWorld = world;
+      const tileX = Math.floor(world.x);
+      const tileY = Math.floor(world.y);
+      state.debugHoverTile = inBounds(state.grid, tileX, tileY) ? { x: tileX, y: tileY } : null;
+    } else if (state.debugHoverTile || state.debugHoverWorld) {
+      state.debugHoverTile = null;
+      state.debugHoverWorld = null;
     }
     if (isPanning || isSelecting || isFormationDrag) {
       noteInteraction();
@@ -704,6 +776,24 @@ export const bindPhaseUi = (
     }
     if (event.key === " ") {
       isSpaceDown = true;
+    }
+    if (event.key.length === 1 && /^[0-9]$/.test(event.key)) {
+      const slot = event.key === "0" ? 9 : Number(event.key) - 1;
+      if (slot >= 0) {
+        const trucks = state.units
+          .filter((unit) => unit.kind === "truck")
+          .sort((a, b) => (a.rosterId ?? a.id) - (b.rosterId ?? b.id))
+          .slice(0, 10);
+        const target = trucks[slot] ?? null;
+        if (target) {
+          gate("select", () => {
+            selectUnit(state, target);
+            setDeployMode(state, null);
+          });
+          noteInteraction();
+          return;
+        }
+      }
     }
     if (event.key === "+" || event.key === "=") {
       gate("zoom", () => zoomAtPointer(state, canvas, state.zoom + ZOOM_STEP, canvas.width / 2, canvas.height / 2));

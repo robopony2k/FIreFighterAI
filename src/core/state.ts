@@ -1,7 +1,22 @@
-import type { DeployMode, FireSimWork, Grid, Point, SeasonPhase, Tile, Unit, Particle, Wind, TileType, RosterUnit } from "./types.js";
+import type {
+  ClimateForecast,
+  ClimateTimeline,
+  DeployMode,
+  FireSimWork,
+  Grid,
+  Point,
+  SeasonPhase,
+  Tile,
+  Unit,
+  Particle,
+  Wind,
+  TileType,
+  RosterUnit
+} from "./types.js";
 import type { CampaignState } from "./campaign.js";
 import { BASE_BUDGET } from "./config.js";
-import { createCampaignState } from "./campaign.js";
+import { createCampaignState } from "./campaign.js";
+import { DEFAULT_CLIMATE_PARAMS, DEFAULT_MOISTURE_PARAMS } from "./climate.js";
 import { buildNeighborOffsets } from "./grid.js";
 
 // simPerf controls fast/approx modes in fire + heat simulation.
@@ -130,6 +145,21 @@ export interface WorldState {
   selectedRosterId: number | null;
   nextRosterId: number;
   debugIgniteMode: boolean;
+  debugCellEnabled: boolean;
+  debugHoverTile: Point | null;
+  debugHoverWorld: Point | null;
+  climateDay: number;
+  climateYear: number;
+  climateTemp: number;
+  climateMoisture: number;
+  climateIgnitionMultiplier: number;
+  climateSpreadMultiplier: number;
+  climateTimeline: ClimateTimeline | null;
+  climateTimelineSeed: number;
+  climateForecast: ClimateForecast | null;
+  climateForecastStart: number;
+  climateForecastDay: number;
+  careerDay: number;
 }
 
 const DEFAULT_WIND: Wind = { name: "N", dx: 0, dy: -1, strength: 0.5 };
@@ -228,9 +258,24 @@ export function createInitialState(seed: number, grid: Grid): WorldState {
     campaign: createCampaignState(),
     renderTrees: true,
     renderEffects: true,
-        debugIgniteMode: false,
-        fireSnapshot: new Float32Array(grid.totalTiles),
-        renderFireSmooth: new Float32Array(grid.totalTiles),
+    debugIgniteMode: false,
+    debugCellEnabled: true,
+    debugHoverTile: null,
+    debugHoverWorld: null,
+    climateDay: 0,
+    climateYear: 0,
+    climateTemp: DEFAULT_CLIMATE_PARAMS.tMid,
+    climateMoisture: DEFAULT_MOISTURE_PARAMS.Mmax,
+    climateIgnitionMultiplier: 1,
+    climateSpreadMultiplier: 1,
+    climateTimeline: null,
+    climateTimelineSeed: -1,
+    climateForecast: null,
+    climateForecastStart: -1,
+    climateForecastDay: 0,
+    careerDay: 0,
+    fireSnapshot: new Float32Array(grid.totalTiles),
+    renderFireSmooth: new Float32Array(grid.totalTiles),
         growthView: null,
         selectionBox: null,
         lastInteractionTime: 0,

@@ -1,4 +1,14 @@
 export type FireDeployPanelData = {
+  trucks: Array<{
+    id: number;
+    name: string;
+    crewCount: number;
+    crewCapacity: number;
+    crewMode: "boarded" | "deployed";
+    hotkey: string;
+    selected: boolean;
+  }>;
+  baseOpsOpen?: boolean;
   deployableFirefighters: number;
   availableTrucks: number;
   activeMode: "firefighter" | "truck" | null;
@@ -11,12 +21,27 @@ export type FireDeployPanelView = {
 
 export const createFireDeployPanel = (): FireDeployPanelView => {
   const element = document.createElement("div");
-  element.className = "phase-panel phase-card";
+  element.className = "phase-panel phase-card phase-truck-dock";
   element.dataset.panel = "fireDeploy";
+
+  const header = document.createElement("div");
+  header.className = "phase-truck-header";
 
   const title = document.createElement("div");
   title.className = "phase-card-title";
-  title.textContent = "Deploy";
+  title.textContent = "Trucks";
+
+  const baseButton = document.createElement("button");
+  baseButton.className = "phase-base-action";
+  baseButton.dataset.action = "focus-base";
+  baseButton.textContent = "Base Ops";
+
+  const hint = document.createElement("div");
+  hint.className = "phase-card-summary";
+  hint.textContent = "Hotkeys 1-0 select trucks.";
+
+  const list = document.createElement("div");
+  list.className = "phase-list phase-truck-list";
 
   const actions = document.createElement("div");
   actions.className = "phase-action-grid";
@@ -29,14 +54,40 @@ export const createFireDeployPanel = (): FireDeployPanelView => {
   deployTruck.className = "phase-action";
   deployTruck.dataset.action = "deploy-truck";
 
-  actions.append(deployFirefighter, deployTruck);
+  actions.append(deployTruck, deployFirefighter);
 
-  element.append(title, actions);
+  header.append(title, baseButton);
+  element.append(header, hint, list, actions);
 
   return {
     element,
     update: (data) => {
-      deployFirefighter.textContent = `Deploy Firefighter (${data.deployableFirefighters})`;
+      const baseOpsOpen = data.baseOpsOpen ?? false;
+      baseButton.classList.toggle("is-active", baseOpsOpen);
+      baseButton.textContent = baseOpsOpen ? "Base Ops On" : "Base Ops";
+      list.innerHTML = "";
+      if (data.trucks.length === 0) {
+        const empty = document.createElement("div");
+        empty.className = "phase-list-row phase-list-muted";
+        empty.textContent = "No active trucks.";
+        list.appendChild(empty);
+      } else {
+        data.trucks.forEach((truck) => {
+          const row = document.createElement("div");
+          row.className = "phase-truck-row";
+          row.dataset.action = "select-truck";
+          row.dataset.truckId = truck.id.toString();
+          row.classList.toggle("is-selected", truck.selected);
+          const crewLabel = `Crew ${truck.crewCount}/${truck.crewCapacity} · ${truck.crewMode}`;
+          row.innerHTML = `
+            <div class="phase-truck-key">${truck.hotkey}</div>
+            <div class="phase-truck-name">${truck.name}</div>
+            <div class="phase-truck-meta">${crewLabel}</div>
+          `;
+          list.appendChild(row);
+        });
+      }
+      deployFirefighter.textContent = `Deploy Crew (${data.deployableFirefighters})`;
       deployTruck.textContent = `Deploy Truck (${data.availableTrucks})`;
       deployFirefighter.disabled = data.deployableFirefighters <= 0;
       deployTruck.disabled = data.availableTrucks <= 0;

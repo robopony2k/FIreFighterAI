@@ -1,5 +1,6 @@
 import { BASE_BUDGET } from "./config.js";
 import { createCampaignState } from "./campaign.js";
+import { DEFAULT_CLIMATE_PARAMS, DEFAULT_MOISTURE_PARAMS } from "./climate.js";
 import { buildNeighborOffsets } from "./grid.js";
 export const TILE_TYPE_IDS = {
     water: 0,
@@ -116,6 +117,21 @@ export function createInitialState(seed, grid) {
         renderTrees: true,
         renderEffects: true,
         debugIgniteMode: false,
+        debugCellEnabled: true,
+        debugHoverTile: null,
+        debugHoverWorld: null,
+        climateDay: 0,
+        climateYear: 0,
+        climateTemp: DEFAULT_CLIMATE_PARAMS.tMid,
+        climateMoisture: DEFAULT_MOISTURE_PARAMS.Mmax,
+        climateIgnitionMultiplier: 1,
+        climateSpreadMultiplier: 1,
+        climateTimeline: null,
+        climateTimelineSeed: -1,
+        climateForecast: null,
+        climateForecastStart: -1,
+        climateForecastDay: 0,
+        careerDay: 0,
         fireSnapshot: new Float32Array(grid.totalTiles),
         renderFireSmooth: new Float32Array(grid.totalTiles),
         growthView: null,

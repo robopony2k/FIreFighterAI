@@ -1,3 +1,5 @@
+let dismissTimeout = null;
+let lastOverlayToken = "";
 export const getOverlayRefs = () => ({
     overlay: document.getElementById("overlay"),
     overlayTitle: document.getElementById("overlayTitle"),
@@ -7,6 +9,7 @@ export const getOverlayRefs = () => ({
 });
 export const updateOverlay = (refs, state) => {
     refs.overlay.classList.toggle("hidden", !state.overlayVisible);
+    refs.overlay.classList.toggle("is-blocking", state.overlayAction === "restart");
     refs.overlayTitle.textContent = state.overlayTitle;
     refs.overlayMessage.textContent = state.overlayMessage;
     refs.overlayDetails.innerHTML = "";
@@ -22,4 +25,23 @@ export const updateOverlay = (refs, state) => {
         refs.overlayDetails.classList.add("hidden");
     }
     refs.overlayRestart.textContent = state.overlayAction === "restart" ? "Play Again" : "OK";
+    if (state.overlayVisible && state.overlayAction === "dismiss") {
+        const token = `${state.overlayTitle}|${state.overlayMessage}|${state.overlayDetails.join("|")}`;
+        if (token !== lastOverlayToken) {
+            lastOverlayToken = token;
+            if (dismissTimeout !== null) {
+                window.clearTimeout(dismissTimeout);
+            }
+            dismissTimeout = window.setTimeout(() => {
+                state.overlayVisible = false;
+            }, 5000);
+        }
+    }
+    else {
+        lastOverlayToken = "";
+        if (dismissTimeout !== null) {
+            window.clearTimeout(dismissTimeout);
+            dismissTimeout = null;
+        }
+    }
 };

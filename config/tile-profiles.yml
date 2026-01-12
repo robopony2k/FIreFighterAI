@@ -17,23 +17,23 @@ water:
   heatRetention: 0.4
   windFactor: 0
 grass:
-  baseFuel: 0.50
-  ignition: 0.1
-  burnRate: 0.95
-  heatOutput: 1.0
-  spreadBoost: 1.12
-  heatTransferCap: 0.4
-  heatRetention: 0.75
-  windFactor: 0.5
+  baseFuel: 0.6
+  ignition: 0.18
+  burnRate: 0.72
+  heatOutput: 0.9
+  spreadBoost: 1.0
+  heatTransferCap: 0.55
+  heatRetention: 0.7
+  windFactor: 0.7
 forest:
-  baseFuel: 1.35
-  ignition: 0.6
-  burnRate: 0.64
-  heatOutput: 1.35
-  spreadBoost: 1.25
-  heatTransferCap: 5
-  heatRetention: 1
-  windFactor: 0.5
+  baseFuel: 1.25
+  ignition: 0.52
+  burnRate: 0.52
+  heatOutput: 1.2
+  spreadBoost: 1.1
+  heatTransferCap: 3.2
+  heatRetention: 0.9
+  windFactor: 0.7
 road:
   baseFuel: 0
   ignition: 9

@@ -208,6 +208,18 @@ export interface FuelProfile {
   windFactor: number;
 }
 
-export interface RNG {
+export type ClimateForecast = {
+  days: number;
+  temps: number[];
+  risk: number[];
+};
+
+export type ClimateTimeline = {
+  daysPerYear: number;
+  totalDays: number;
+  risk: Float32Array;
+};
+
+export interface RNG {
   next(): number;
 }

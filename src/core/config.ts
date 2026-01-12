@@ -19,7 +19,7 @@ export const FIREBREAK_COST_PER_TILE = 45;
 export const BASE_BUDGET = 320;
 export const APPROVAL_MIN = 0.2;
 export const FIRE_IGNITION_CHANCE_PER_DAY = 0.08;
-export const FIRE_SIM_SPEED = 2.6;
+export const FIRE_SIM_SPEED = 1.8;
 export const FIRE_SIM_TICK_SECONDS = 2;
 export const FIRE_SIM_ROWS_PER_SLICE = 8;
 export const FIRE_PHASE_TIME_SCALE = 0.125;
@@ -68,7 +68,7 @@ export const MOVE_TERRAIN_COST: Record<TileType, number> = {
 
 export const FIRE_COLORS = ["#d34b2a", "#f09a3e", "#f2c94c"];
 
-export const TILE_COLORS: Record<TileType, string> = {
+export const TILE_COLORS: Record<TileType | "ON_FIRE_GRASS", string> = {
   water: "#2a6f97",
   grass: "#5a8f4e",
   forest: "#2f5d31",
@@ -76,7 +76,8 @@ export const TILE_COLORS: Record<TileType, string> = {
   road: "#bdb49c",
   base: "#a12f1d",
   house: "#c08a5a",
-  firebreak: "#d6c6a6"
+  firebreak: "#d6c6a6",
+  ON_FIRE_GRASS: "#8a765a"
 };
 
 const hexToRgb = (hex: string): { r: number; g: number; b: number } => {
@@ -89,7 +90,7 @@ const hexToRgb = (hex: string): { r: number; g: number; b: number } => {
   };
 };
 
-export const TILE_COLOR_RGB: Record<TileType, { r: number; g: number; b: number }> = {
+export const TILE_COLOR_RGB: Record<TileType | "ON_FIRE_GRASS", { r: number; g: number; b: number }> = {
   water: hexToRgb(TILE_COLORS.water),
   grass: hexToRgb(TILE_COLORS.grass),
   forest: hexToRgb(TILE_COLORS.forest),
@@ -97,7 +98,8 @@ export const TILE_COLOR_RGB: Record<TileType, { r: number; g: number; b: number 
   road: hexToRgb(TILE_COLORS.road),
   base: hexToRgb(TILE_COLORS.base),
   house: hexToRgb(TILE_COLORS.house),
-  firebreak: hexToRgb(TILE_COLORS.firebreak)
+  firebreak: hexToRgb(TILE_COLORS.firebreak),
+  ON_FIRE_GRASS: hexToRgb(TILE_COLORS.ON_FIRE_GRASS)
 };
 
 export const ELEVATION_TINT_LOW = { r: 74, g: 102, b: 93 };

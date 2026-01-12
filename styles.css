@@ -215,12 +215,23 @@ canvas {
 
 .overlay {
   position: absolute;
+  right: 16px;
+  bottom: 16px;
+  display: block;
+  background: transparent;
+  border-radius: 0;
+  animation: fadeIn 0.4s ease;
+}
+
+.overlay.is-blocking {
   inset: 0;
+  right: 0;
+  bottom: 0;
   display: grid;
   place-items: center;
   background: linear-gradient(135deg, rgba(12, 14, 18, 0.82), rgba(65, 42, 28, 0.85));
   border-radius: 14px;
-  animation: fadeIn 0.4s ease;
+  pointer-events: auto;
 }
 
 .overlay.hidden {
@@ -229,10 +240,11 @@ canvas {
 
 .overlay-card {
   background: #fdf7ec;
-  padding: 20px 26px;
-  border-radius: 18px;
-  text-align: center;
-  min-width: 260px;
+  padding: 16px 18px;
+  border-radius: 16px;
+  text-align: left;
+  min-width: 240px;
+  max-width: min(340px, 90vw);
   animation: riseIn 0.4s ease;
   box-shadow: var(--shadow-soft);
 }
@@ -897,6 +909,8 @@ input[type="text"] {
   gap: 12px;
   flex: 1;
   min-height: 0;
+  overflow-y: auto;
+  padding-right: 4px;
 }
 
 .phase-panel {
@@ -912,14 +926,25 @@ input[type="text"] {
 }
 
 .phase-topbar {
-  display: grid;
-  grid-template-columns: auto 1fr auto auto auto;
-  gap: 12px;
-  align-items: center;
-  background: rgba(255, 255, 255, 0.92);
+  --forecast-width: 240px;
+  position: relative;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
   border-radius: 14px;
   padding: 12px 16px;
-  box-shadow: var(--shadow-soft);
+  background: transparent;
+  box-shadow: none;
+}
+
+.phase-topbar-content {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  flex: 1 1 auto;
+  min-width: 0;
 }
 
 .phase-badge {
@@ -932,18 +957,172 @@ input[type="text"] {
   font-size: 12px;
 }
 
-.phase-progress {
-  height: 8px;
-  background: rgba(27, 27, 27, 0.12);
-  border-radius: 99px;
-  overflow: hidden;
+.phase-forecast {
+  display: grid;
+  gap: 6px;
+  width: min(100%, var(--forecast-width));
+  align-self: stretch;
+  background: rgba(255, 255, 255, 0.92);
+  border-radius: 12px;
+  padding: 10px;
+  border: 1px solid rgba(27, 27, 27, 0.12);
+  box-shadow: var(--shadow-soft);
 }
 
-.phase-progress-fill {
+.phase-forecast.is-hidden {
+  display: none;
+}
+
+.phase-forecast-chart {
+  width: 100%;
+  aspect-ratio: 4 / 3;
+  border-radius: 10px;
+  padding: 6px;
+  background: rgba(27, 27, 27, 0.05);
+  border: 1px solid rgba(27, 27, 27, 0.12);
+}
+
+.phase-forecast-svg {
+  width: 100%;
   height: 100%;
-  background: linear-gradient(90deg, var(--accent-2), var(--accent));
-  width: 0%;
-  transition: width 200ms ease;
+  display: block;
+}
+
+.phase-forecast-meta {
+  font-size: 11px;
+  color: var(--muted);
+  letter-spacing: 0.4px;
+  text-align: center;
+  line-height: 1.2;
+}
+
+.phase-forecast-controls {
+  display: grid;
+  gap: 8px;
+}
+
+.phase-forecast-scale {
+  position: relative;
+  height: 14px;
+  width: 100%;
+}
+
+.phase-forecast-season-scale {
+  position: relative;
+  height: 16px;
+  width: 100%;
+}
+
+.phase-forecast-axis {
+  stroke: rgba(27, 27, 27, 0.25);
+  stroke-width: 1;
+}
+
+.phase-forecast-bands {
+  opacity: 0.35;
+}
+
+.phase-forecast-band.is-low {
+  fill: rgba(43, 104, 140, 0.25);
+}
+
+.phase-forecast-band.is-moderate {
+  fill: rgba(90, 143, 78, 0.22);
+}
+
+.phase-forecast-band.is-high {
+  fill: rgba(240, 179, 59, 0.28);
+}
+
+.phase-forecast-band.is-extreme {
+  fill: rgba(209, 74, 44, 0.3);
+}
+
+.phase-forecast-line {
+  fill: none;
+  stroke-width: 2.2;
+}
+
+.phase-forecast-area {
+  opacity: 0.5;
+}
+
+.phase-forecast-marker {
+  stroke: var(--accent);
+  stroke-width: 1.4;
+  stroke-dasharray: 3 3;
+}
+
+.phase-forecast-year-line {
+  stroke: rgba(27, 27, 27, 0.35);
+  stroke-width: 1;
+  stroke-dasharray: 2 3;
+}
+
+.phase-forecast-year-label {
+  position: absolute;
+  top: 0;
+  transform: translateX(-50%);
+  color: rgba(27, 27, 27, 0.65);
+  font-size: 9px;
+  white-space: nowrap;
+}
+
+.phase-forecast-season-label {
+  position: absolute;
+  top: 0;
+  transform: translateX(-50%);
+  color: rgba(27, 27, 27, 0.7);
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+  white-space: nowrap;
+}
+
+.phase-forecast-season.is-winter {
+  fill: rgba(43, 104, 140, 0.12);
+}
+
+.phase-forecast-season.is-spring {
+  fill: rgba(90, 143, 78, 0.12);
+}
+
+.phase-forecast-season.is-summer {
+  fill: rgba(240, 179, 59, 0.14);
+}
+
+.phase-forecast-season.is-autumn {
+  fill: rgba(209, 74, 44, 0.12);
+}
+
+.phase-forecast-season-line {
+  stroke: rgba(27, 27, 27, 0.25);
+  stroke-width: 1;
+  stroke-dasharray: 1 4;
+}
+
+.phase-forecast-yline {
+  stroke: rgba(27, 27, 27, 0.2);
+  stroke-width: 1;
+  stroke-dasharray: 2 4;
+}
+
+.phase-forecast-ylabel {
+  fill: rgba(27, 27, 27, 0.6);
+  font-size: 8px;
+  letter-spacing: 0.2px;
+}
+
+.phase-forecast-stop.is-cool {
+  stop-color: var(--cool);
+}
+
+.phase-forecast-stop.is-warm {
+  stop-color: var(--accent-2);
+}
+
+.phase-forecast-stop.is-hot {
+  stop-color: var(--accent);
 }
 
 .phase-alert {
@@ -1035,6 +1214,88 @@ input[type="text"] {
 
 .phase-list-muted {
   color: var(--muted);
+}
+
+.phase-truck-dock {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+}
+
+.phase-truck-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.phase-base-action {
+  padding: 6px 10px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+}
+
+.phase-base-action.is-active {
+  background: linear-gradient(135deg, var(--accent), #b43a22);
+  box-shadow: 0 8px 16px rgba(209, 74, 44, 0.35);
+}
+
+.phase-truck-list {
+  max-height: 180px;
+  overflow-y: auto;
+}
+
+.phase-truck-row {
+  display: grid;
+  grid-template-columns: 22px minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+  padding: 6px 8px;
+  border-radius: 10px;
+  font-size: 12px;
+  color: var(--ink);
+  background: rgba(255, 255, 255, 0.55);
+  border: 1px solid rgba(129, 113, 92, 0.12);
+  cursor: pointer;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease, background 0.15s ease;
+}
+
+.phase-truck-row + .phase-truck-row {
+  margin-top: 6px;
+}
+
+.phase-truck-row:hover {
+  border-color: rgba(129, 113, 92, 0.35);
+  background: rgba(255, 255, 255, 0.75);
+}
+
+.phase-truck-row.is-selected {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px rgba(209, 74, 44, 0.18);
+  background: rgba(240, 179, 59, 0.15);
+}
+
+.phase-truck-key {
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  display: grid;
+  place-items: center;
+  font-weight: 700;
+  font-size: 11px;
+  color: #fff;
+  background: linear-gradient(135deg, #3a3530 0%, #1b1b1b 100%);
+}
+
+.phase-truck-name {
+  font-weight: 600;
+}
+
+.phase-truck-meta {
+  font-size: 10px;
+  color: var(--muted);
+  white-space: nowrap;
 }
 
 .phase-action-row {
@@ -1129,15 +1390,14 @@ input[type="text"] {
 }
 
 .phase-bottom-controls {
-  background: rgba(255, 255, 255, 0.92);
-  border-radius: 14px;
-  padding: 12px 14px;
-  box-shadow: var(--shadow-soft);
-  border: 1px solid rgba(129, 113, 92, 0.12);
-  position: absolute;
-  top: 72px;
-  right: 16px;
-  width: 210px;
+  background: none;
+  border-radius: 0;
+  padding: 8px 0 0;
+  box-shadow: none;
+  border: none;
+  border-top: 1px solid rgba(27, 27, 27, 0.12);
+  position: static;
+  width: 100%;
 }
 
 .phase-control-group {
@@ -1159,13 +1419,23 @@ input[type="text"] {
   gap: 8px;
 }
 
+.phase-control-row-single {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.phase-control-row button {
+  padding: 6px 8px;
+  font-size: 12px;
+}
+
 .phase-time-speed-row {
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(5, minmax(0, 1fr));
 }
 
 .phase-time-speed-row button {
-  padding: 6px 8px;
+  padding: 4px 6px;
   font-size: 11px;
+  letter-spacing: 0.6px;
   background: linear-gradient(135deg, #3a3530 0%, #1b1b1b 100%);
 }
 
@@ -1250,6 +1520,22 @@ input[type="text"] {
   .character-preview {
     grid-template-columns: 1fr;
     text-align: left;
+  }
+}
+
+@media (max-width: 720px) {
+  .phase-topbar {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .phase-forecast {
+    --forecast-width: 240px;
+  }
+
+  .phase-topbar-content {
+    width: 100%;
+    justify-content: space-between;
   }
 }
 

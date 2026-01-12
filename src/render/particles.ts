@@ -14,11 +14,18 @@ export const drawParticles = (state: WorldState, ctx: CanvasRenderingContext2D) 
     const baseHeight = getRenderHeightAt(state, particle.x, particle.y);
     const rise = (1 - particle.alpha) * TILE_SIZE * 5;
     const pos = isoProject(particle.x, particle.y, baseHeight + TILE_SIZE * 2 + rise);
-    const alpha = clamp(particle.alpha * 0.6, 0, 0.6);
-    ctx.fillStyle = `rgba(70, 70, 70, ${alpha})`;
+    const alpha = clamp(particle.alpha * 0.95, 0, 0.95);
+    const radius = particle.size * 0.7;
+    ctx.fillStyle = `rgba(85, 85, 85, ${alpha})`;
     ctx.beginPath();
-    ctx.arc(pos.x, pos.y, particle.size * 0.5, 0, Math.PI * 2);
+    ctx.arc(pos.x, pos.y, radius, 0, Math.PI * 2);
     ctx.fill();
+    if (alpha > 0.1) {
+      ctx.fillStyle = `rgba(55, 55, 55, ${alpha * 0.45})`;
+      ctx.beginPath();
+      ctx.arc(pos.x, pos.y, radius * 0.6, 0, Math.PI * 2);
+      ctx.fill();
+    }
   });
 
   // Draw water particles

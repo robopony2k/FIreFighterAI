@@ -1,5 +1,6 @@
 // @ts-nocheck
 import { clamp } from "../core/utils.js";
+import { coolCellTemp, DEFAULT_COOLING_PARAMS } from "../core/climate.js";
 import { indexFor } from "../core/grid.js";
 import { syncTileSoA } from "../core/state.js";
 import { emitSmokeAt } from "./particles.js";
@@ -42,6 +43,9 @@ const BASELINE_FIRE_SEED = 0.35;
 const BASELINE_FIRE_EPS = 0.04;
 const BASELINE_HEAT_EPS = 0.08;
 let baselineTickCounter = 0;
+
+const isIgnitableTile = (tile) =>
+    tile.type !== "water" && tile.type !== "ash" && tile.type !== "firebreak" && tile.type !== "road";
 
 function stepFireBaseline(state, rng, delta, spreadScale, dayFactor) {
     const cols = state.grid.cols;
@@ -101,6 +105,7 @@ function stepFireBaseline(state, rng, delta, spreadScale, dayFactor) {
         }
     }
     const tiles = state.tiles;
+    const ignitionBoost = Math.max(0.2, state.climateIgnitionMultiplier || 1);
     const igniteMask = state.igniteMask;
     for (let y = diffMinY; y <= diffMaxY; y += 1) {
         const rowBase = y * cols;
@@ -127,8 +132,8 @@ function stepFireBaseline(state, rng, delta, spreadScale, dayFactor) {
             tile.heat = currentHeat;
             tile.fuel = fuel[idx];
             igniteMask[idx] = 0;
-            if (fuel[idx] > 0 && currentFire <= BASELINE_FIRE_EPS && currentHeat >= BASELINE_IGNITION_HEAT) {
-                const igniteChance = clamp(BASELINE_BASE_IGNITE * (currentHeat / HEAT_MAX), 0, 1);
+            if (fuel[idx] > 0 && currentFire <= BASELINE_FIRE_EPS && currentHeat >= BASELINE_IGNITION_HEAT / ignitionBoost && isIgnitableTile(tile)) {
+                const igniteChance = clamp(BASELINE_BASE_IGNITE * ignitionBoost * (currentHeat / HEAT_MAX), 0, 1);
                 if (rng.next() < igniteChance) {
                     igniteMask[idx] = 1;
                 }
@@ -231,12 +236,14 @@ function applyHeatDiffusion(state, minX, maxX, minY, maxY, fireDelta, spreadScal
                     return 1;
                 }
                 const dot = (dx * state.wind.dx + dy * state.wind.dy) / (windMagnitude * dirLen);
-                const alignment = Math.max(0, dot);
-                if (alignment <= 0) {
-                    return 1;
+                const alignment = Math.max(-1, Math.min(1, dot));
+                if (alignment >= 0) {
+                    const weight = alignment * alignment * state.wind.strength * windPull;
+                    return 1 + weight;
                 }
-                const weight = alignment * alignment * state.wind.strength * windPull;
-                return 1 + weight;
+                const opposing = -alignment;
+                const penalty = opposing * opposing * state.wind.strength * windPull * 1.35;
+                return Math.max(0.05, 1 - penalty);
             };
             const addHeat = (ix, iy, scale, dir, isSecondary = false) => {
                 if (
@@ -295,6 +302,7 @@ export function stepFire(state, rng, delta, spreadScale, dayFactor) {
     }
     const cols = state.grid.cols;
     const rows = state.grid.rows;
+    const ignitionBoost = Math.max(0.2, state.climateIgnitionMultiplier || 1);
     const boundsActive = state.fireBoundsActive;
     const minX = boundsActive ? clamp(state.fireMinX - FIRE_BOUNDS_PADDING, 0, cols - 1) : 0;
     const maxX = boundsActive ? clamp(state.fireMaxX + FIRE_BOUNDS_PADDING, 0, cols - 1) : cols - 1;
@@ -315,7 +323,7 @@ export function stepFire(state, rng, delta, spreadScale, dayFactor) {
             const idx = indexFor(state.grid, x, y);
             if (tileIgniteAt[idx] <= currentTime) {
                 const tile = state.tiles[idx];
-                if (tile.fire === 0 && tile.fuel > 0) {
+                if (tile.fire === 0 && tile.fuel > 0 && isIgnitableTile(tile)) {
                     tile.fire = 0.2 + rng.next() * 0.25;
                 }
                 // Whether it ignited or not, clear the schedule
@@ -332,10 +340,9 @@ export function stepFire(state, rng, delta, spreadScale, dayFactor) {
         for (let x = minX; x <= maxX; x += 1) {
             const idx = indexFor(state.grid, x, y);
             const tile = state.tiles[idx];
-            if (tile.fire > 0) {
-                if (rng.next() < fireDelta * 0.8) {
-                    emitSmokeAt(state, rng, x + 0.5, y + 0.5);
-                }
+            const wasBurning = tile.fire > 0;
+            if (wasBurning) {
+                emitSmokeAt(state, rng, x + 0.5, y + 0.5, tile.fire);
                 if (tile.fuel > 0) {
                     // burnTile returns true if the fire was extinguished
                     burnTile(state, tile, fireDelta);
@@ -346,9 +353,20 @@ export function stepFire(state, rng, delta, spreadScale, dayFactor) {
                     }
                 }
             }
-            // Note: This is an else-if block. A tile cannot be extinguished and then
-            // immediately re-scheduled in the same simulation step.
-            else if (tile.fuel > 0 && tile.heat >= tile.ignitionPoint) {
+            if (!wasBurning && tile.fire <= 0 && tile.heat > 0) {
+                const retention = typeof tile.heatRetention === "number" ? tile.heatRetention : 0.9;
+                const coolingDt = delta * (0.35 + (1 - retention) * 0.35);
+                tile.heat = coolCellTemp(tile.heat, state.climateTemp, coolingDt, DEFAULT_COOLING_PARAMS);
+                if (tile.heat < tile.ignitionPoint) {
+                    tileIgniteAt[idx] = Number.POSITIVE_INFINITY;
+                }
+            }
+            if (
+                !wasBurning &&
+                tile.fuel > 0 &&
+                tile.heat >= tile.ignitionPoint / ignitionBoost &&
+                isIgnitableTile(tile)
+            ) {
                 if (tileIgniteAt[idx] < Number.POSITIVE_INFINITY) {
                     continue; // Already scheduled
                 }
@@ -367,7 +385,7 @@ export function stepFire(state, rng, delta, spreadScale, dayFactor) {
                 if (!hasNeighborFire) {
                     continue;
                 }
-                const hazard = (tile.heat - tile.ignitionPoint) * 0.8;
+                const hazard = (tile.heat - tile.ignitionPoint / ignitionBoost) * 0.55 * ignitionBoost;
                 if (hazard <= 0) {
                     continue;
                 }

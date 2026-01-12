@@ -27,6 +27,7 @@ export const createFireSelectedUnitPanel = (): FireSelectedUnitView => {
   actions.innerHTML = `
     <button class="phase-action" data-action="crew-board">Board Crew</button>
     <button class="phase-action" data-action="crew-deploy">Deploy Crew</button>
+    <button class="phase-action" data-action="backburn">Fuel Break</button>
   `;
 
   const formationActions = document.createElement("div");

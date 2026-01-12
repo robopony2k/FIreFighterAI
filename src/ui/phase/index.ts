@@ -74,9 +74,17 @@ export const initPhaseUI = (container: HTMLElement): PhaseUiApi => {
     state.setPaused(world.paused);
     state.setTimeSpeedIndex(world.timeSpeedIndex);
     state.setAlert(world.statusMessage && world.statusMessage !== "Ready." ? world.statusMessage : null);
-    const windLabel =
-      world.phase === "fire" ? `${world.wind.name} ${Math.round(world.wind.strength * 10)}` : "Calm";
-    state.setWind(windLabel);
+    const windStrength = Math.round(world.wind.strength * 10);
+    const windLabel = windStrength > 0 ? `Wind ${world.wind.name} ${windStrength}` : "Wind Calm";
+    const tempLabel = Number.isFinite(world.climateTemp) ? `${Math.round(world.climateTemp)}C` : "n/a";
+    const forecastMeta = `Year ${world.year} | ${tempLabel} | ${windLabel}`;
+    state.setForecast(
+      world.climateForecast ?? null,
+      world.climateForecastDay ?? 0,
+      Math.max(0, world.climateForecastStart ?? 0),
+      world.climateTimeline?.daysPerYear ?? 360,
+      forecastMeta
+    );
 
     const rosterFirefighters = world.roster.filter((unit) => unit.kind === "firefighter");
     const rosterList = world.roster.map((entry) => {
@@ -202,7 +210,27 @@ export const initPhaseUI = (container: HTMLElement): PhaseUiApi => {
         unit.assignedTruckId !== null &&
         deployedTruckRosterIds.has(unit.assignedTruckId)
     ).length;
+    const truckSlots = world.units
+      .filter((unit) => unit.kind === "truck")
+      .sort((a, b) => (a.rosterId ?? a.id) - (b.rosterId ?? b.id))
+      .slice(0, 10)
+      .map((truck, index) => {
+        const rosterName = truck.rosterId
+          ? world.roster.find((entry) => entry.id === truck.rosterId)?.name ?? null
+          : null;
+        const hotkey = index === 9 ? "0" : String(index + 1);
+        return {
+          id: truck.id,
+          name: rosterName ?? `Truck ${index + 1}`,
+          crewCount: truck.crewIds.length,
+          crewCapacity: TRUCK_CAPACITY,
+          crewMode: truck.crewMode,
+          hotkey,
+          selected: world.selectedUnitIds.includes(truck.id)
+        };
+      });
     controller.setPanelData("fireDeploy", {
+      trucks: truckSlots,
       deployableFirefighters,
       availableTrucks,
       activeMode: world.deployMode === "firefighter" ? "firefighter" : world.deployMode === "truck" ? "truck" : null

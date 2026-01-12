@@ -450,10 +450,6 @@ export function setUnitTarget(
 }
 
 export function deployUnit(state: WorldState, rng: RNG, kind: UnitKind, tileX: number, tileY: number): void {
-  if (state.phase !== "fire") {
-    setStatus(state, "Units deploy during fire season only.");
-    return;
-  }
   const selectedRoster = getRosterUnit(state, state.selectedRosterId);
   let rosterEntry: RosterUnit | null =
     selectedRoster && selectedRoster.kind === kind && selectedRoster.status === "available" ? selectedRoster : null;
@@ -1048,20 +1044,34 @@ export function applyExtinguish(state: WorldState, rng: RNG, delta: number): voi
     const minY = Math.max(0, Math.floor(unit.y - radius));
     const maxY = Math.min(state.grid.rows - 1, Math.ceil(unit.y + radius));
     let closestFire: Point | null = null;
+    let closestHeat: Point | null = null;
     let closestDist = Number.POSITIVE_INFINITY;
+    let closestHeatDist = Number.POSITIVE_INFINITY;
     for (let y = minY; y <= maxY; y += 1) {
       for (let x = minX; x <= maxX; x += 1) {
         const dist = Math.hypot(unit.x - (x + 0.5), unit.y - (y + 0.5));
         if (dist <= radius) {
-          const tile = state.tiles[indexFor(state.grid, x, y)];
+          const idx = indexFor(state.grid, x, y);
+          const tile = state.tiles[idx];
           if (tile.heat > 0) {
             tile.heat = Math.max(0, tile.heat - power * 1.1 * powerMultiplier);
+            if (tile.heat < tile.ignitionPoint) {
+              state.tileIgniteAt[idx] = Number.POSITIVE_INFINITY;
+            }
+            if (tile.heat > 0.05 && dist < closestHeatDist) {
+              closestHeatDist = dist;
+              closestHeat = { x: x + 0.5, y: y + 0.5 };
+            }
           }
           if (tile.fire > 0) {
             const before = tile.fire;
             tile.fire = Math.max(0, tile.fire - power * powerMultiplier);
-            if (before > 0 && tile.fire === 0 && tile.fuel > 0) {
-              state.containedCount += 1;
+            if (before > 0 && tile.fire === 0) {
+              tile.heat = Math.min(tile.heat, tile.ignitionPoint * 0.25);
+              state.tileIgniteAt[idx] = Number.POSITIVE_INFINITY;
+              if (tile.fuel > 0) {
+                state.containedCount += 1;
+              }
             }
             if (dist < closestDist) {
               closestDist = dist;
@@ -1073,6 +1083,8 @@ export function applyExtinguish(state: WorldState, rng: RNG, delta: number): voi
     }
     if (closestFire) {
       emitWaterSpray(state, rng, unit, closestFire);
+    } else if (closestHeat) {
+      emitWaterSpray(state, rng, unit, closestHeat);
     }
   });
 }
