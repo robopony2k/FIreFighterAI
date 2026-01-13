@@ -1,17 +1,104 @@
-import { APPROVAL_MIN, BASE_BUDGET, CAREER_YEARS, DAYS_PER_SECOND, FIRE_PHASE_TIME_SCALE, FIRE_SIM_TICK_SECONDS, GROWTH_SPEED_MULTIPLIER, HECTARES_PER_TILE, ZOOM_MIN } from "../core/config.js";
+import { APPROVAL_MIN, BASE_BUDGET, CAREER_YEARS, DAYS_PER_SECOND, FIRE_SIM_SPEED, FIRE_SIM_TICK_SECONDS, HECTARES_PER_TILE } from "../core/config.js";
 import { formatCurrency } from "../core/utils.js";
-import { getDayNightFactor, getFireSeasonIntensity, getFireSpreadScale, getPhaseInfo, PHASES } from "../core/time.js";
+import { getDayNightFactor, getPhaseInfo, PHASES } from "../core/time.js";
 import { setStatus, resetStatus } from "../core/state.js";
 import { inBounds, indexFor } from "../core/grid.js";
 import { NEIGHBOR_DIRS } from "../core/config.js";
 import { getCharacterBaseBudget, getCharacterDefinition } from "../core/characters.js";
+import { ambientTemp, clamp, buildClimateTimeline, CLIMATE_IGNITION_MAX, CLIMATE_IGNITION_MIN, debugClimateChecks, DEFAULT_MOISTURE_PARAMS, moistureStep, VIRTUAL_CLIMATE_PARAMS } from "../core/climate.js";
 import { randomizeWind, stepWind } from "./wind.js";
 import { igniteRandomFire, stepFire } from "./fire.js";
 import { stepGrowth } from "./growth.js";
 import { stepParticles } from "./particles.js";
-import { applyExtinguish, applyUnitHazards, autoAssignTargets, clearFuelLine, deployUnit, recallUnits, selectUnit, setDeployMode, setUnitTarget, stepUnits } from "./units.js";
+import { applyExtinguish, applyUnitHazards, autoAssignTargets, clearFuelLine, deployUnit, selectUnit, setDeployMode, setUnitTarget, stepUnits } from "./units.js";
 const FIRE_HEAT_PADDING = 8;
 const YEAR_EVENTS = {};
+const FORECAST_WINDOW_DAYS = 90;
+const PHASE_YEAR_DAYS = PHASES.reduce((sum, phase) => sum + phase.duration, 0);
+const VIRTUAL_YEAR_DAYS = Math.max(1, Math.floor(VIRTUAL_CLIMATE_PARAMS.seasonLen));
+const CAREER_TOTAL_DAYS = VIRTUAL_YEAR_DAYS * CAREER_YEARS;
+const CLIMATE_SEASONS = ["Winter", "Spring", "Summer", "Autumn"];
+const CLIMATE_SPREAD_BASE = 0.6;
+const CLIMATE_SPREAD_RANGE = 1.4;
+const CLIMATE_RISK_WEIGHT_IGNITION = 0.55;
+const CLIMATE_RISK_WEIGHT_SPREAD = 0.45;
+const ensureClimateTimeline = (state) => {
+    if (state.climateTimeline && state.climateTimelineSeed === state.seed) {
+        return;
+    }
+    state.climateTimeline = buildClimateTimeline(state.seed, CAREER_YEARS, VIRTUAL_CLIMATE_PARAMS, DEFAULT_MOISTURE_PARAMS);
+    state.climateTimelineSeed = state.seed;
+    state.climateForecast = {
+        days: FORECAST_WINDOW_DAYS,
+        temps: [],
+        risk: Array.from({ length: FORECAST_WINDOW_DAYS }, () => 0)
+    };
+    state.climateForecastStart = -1;
+    state.climateForecastDay = 0;
+};
+const updateClimateForDay = (state, seasonDay, yearIndex = Math.max(0, state.year - 1)) => {
+    state.climateDay = seasonDay;
+    state.climateYear = yearIndex;
+    state.climateTemp = ambientTemp(seasonDay, yearIndex, state.seed, VIRTUAL_CLIMATE_PARAMS);
+    state.climateMoisture = moistureStep(state.climateMoisture, state.climateTemp, DEFAULT_MOISTURE_PARAMS);
+    const denom = Math.max(0.0001, DEFAULT_MOISTURE_PARAMS.Mmax - DEFAULT_MOISTURE_PARAMS.Mmin);
+    const moistureNorm = clamp((state.climateMoisture - DEFAULT_MOISTURE_PARAMS.Mmin) / denom, 0, 1);
+    state.climateIgnitionMultiplier = CLIMATE_IGNITION_MAX + (CLIMATE_IGNITION_MIN - CLIMATE_IGNITION_MAX) * moistureNorm;
+    const dryness = 1 - moistureNorm;
+    state.climateSpreadMultiplier = 0.6 + dryness * 1.4;
+};
+const getClimateRisk = (state) => {
+    const ignitionRange = Math.max(0.0001, CLIMATE_IGNITION_MAX - CLIMATE_IGNITION_MIN);
+    const ignitionNorm = clamp((state.climateIgnitionMultiplier - CLIMATE_IGNITION_MIN) / ignitionRange, 0, 1);
+    const spreadNorm = clamp((state.climateSpreadMultiplier - CLIMATE_SPREAD_BASE) / CLIMATE_SPREAD_RANGE, 0, 1);
+    return clamp(CLIMATE_RISK_WEIGHT_IGNITION * ignitionNorm + CLIMATE_RISK_WEIGHT_SPREAD * spreadNorm, 0, 1);
+};
+const advanceCareerDay = (state, calendarDelta) => {
+    if (!Number.isFinite(calendarDelta) || calendarDelta <= 0) {
+        return;
+    }
+    const scale = PHASE_YEAR_DAYS > 0 ? VIRTUAL_YEAR_DAYS / PHASE_YEAR_DAYS : 1;
+    state.careerDay = Math.min(state.careerDay + calendarDelta * scale, CAREER_TOTAL_DAYS);
+};
+const syncClimateToCareerDay = (state) => {
+    if (CAREER_TOTAL_DAYS <= 0) {
+        return;
+    }
+    const targetTotal = clamp(Math.floor(state.careerDay), 0, Math.max(0, CAREER_TOTAL_DAYS - 1));
+    const dayOffset = state.climateDay > 0 ? state.climateDay - 1 : -1;
+    let currentTotal = state.climateYear * VIRTUAL_YEAR_DAYS + dayOffset;
+    while (currentTotal < targetTotal) {
+        currentTotal += 1;
+        const yearIndex = Math.floor(currentTotal / VIRTUAL_YEAR_DAYS);
+        const dayOfYear = (currentTotal % VIRTUAL_YEAR_DAYS) + 1;
+        updateClimateForDay(state, dayOfYear, yearIndex);
+    }
+};
+const updateClimateForecastWindow = (state) => {
+    ensureClimateTimeline(state);
+    const timeline = state.climateTimeline;
+    const forecast = state.climateForecast;
+    if (!timeline || !forecast) {
+        return;
+    }
+    const totalDays = timeline.totalDays;
+    const currentDay = clamp(Math.floor(state.careerDay), 0, Math.max(0, totalDays - 1));
+    const maxWindowStart = Math.max(0, totalDays - FORECAST_WINDOW_DAYS);
+    const windowStart = clamp(currentDay - 15, 0, maxWindowStart);
+    if (forecast.days !== FORECAST_WINDOW_DAYS || forecast.risk.length !== FORECAST_WINDOW_DAYS) {
+        forecast.days = FORECAST_WINDOW_DAYS;
+        forecast.risk = Array.from({ length: FORECAST_WINDOW_DAYS }, () => 0);
+        forecast.temps = [];
+    }
+    if (state.climateForecastStart !== windowStart) {
+        for (let i = 0; i < FORECAST_WINDOW_DAYS; i += 1) {
+            const idx = Math.min(windowStart + i, Math.max(0, totalDays - 1));
+            forecast.risk[i] = timeline.risk[idx] ?? 0;
+        }
+        state.climateForecastStart = windowStart;
+    }
+    state.climateForecastDay = clamp(currentDay - windowStart, 0, FORECAST_WINDOW_DAYS - 1);
+};
 const ensureFireSnapshot = (state) => {
     if (state.fireSnapshot.length !== state.grid.totalTiles) {
         state.fireSnapshot = new Float32Array(state.grid.totalTiles);
@@ -29,44 +116,59 @@ const getForecastTemp = (state) => {
     const trend = Math.min(8, Math.floor((state.year - 1) * 0.6));
     return 28 + seedSwing + trend;
 };
+const getClimateSeasonInfo = (state) => {
+    const yearDays = Math.max(1, VIRTUAL_YEAR_DAYS);
+    const seasonLength = Math.max(1, Math.floor(yearDays / 4));
+    const dayOfYear = ((Math.floor(state.careerDay) % yearDays) + yearDays) % yearDays + 1;
+    const seasonIndex = Math.min(3, Math.floor((dayOfYear - 1) / seasonLength));
+    const start = seasonIndex * seasonLength + 1;
+    const end = seasonIndex === 3 ? yearDays : (seasonIndex + 1) * seasonLength;
+    return {
+        label: CLIMATE_SEASONS[seasonIndex] ?? "Season",
+        start,
+        end
+    };
+};
 const getYearEventMessages = (year) => YEAR_EVENTS[year] ?? [];
 const showSeasonOverlay = (state) => {
     if (state.gameOver) {
         return;
     }
     const details = [];
+    const climateSeason = getClimateSeasonInfo(state);
+    const seasonLabel = `${climateSeason.label} days ${climateSeason.start}-${climateSeason.end}`;
     const yearEvents = getYearEventMessages(state.year);
     if (yearEvents.length > 0) {
         details.push(...yearEvents);
     }
     if (state.phase === "growth") {
-        state.overlayTitle = "Spring Growth";
-        state.overlayMessage = "Vegetation is rebounding across the region.";
-        details.push("Observe regrowth from above. Interactions are paused during spring.");
+        state.overlayTitle = "Growth Update";
+        state.overlayMessage = `Climate season: ${seasonLabel}. Vegetation is rebounding across the region.`;
+        details.push("Observe regrowth from above.");
     }
     else if (state.phase === "maintenance") {
-        state.overlayTitle = "Winter Planning";
-        state.overlayMessage = `It's wintertime. You have a budget of ${formatCurrency(state.budget)} to prepare.`;
-        details.push("Recruit, train, and cut fuel breaks before summer.");
+        state.overlayTitle = "Maintenance Update";
+        state.overlayMessage = `Climate season: ${seasonLabel}. Budget available: ${formatCurrency(state.budget)}.`;
+        details.push("Recruit, train, and cut fuel breaks before fire activity builds.");
     }
     else if (state.phase === "fire") {
         const forecast = getForecastTemp(state);
-        state.overlayTitle = "Summer Fire Season";
-        state.overlayMessage = `It's summertime. Forecast: hot summer with average temperatures around ${forecast}°C.`;
+        state.overlayTitle = "Fire Operations";
+        state.overlayMessage = `Climate season: ${seasonLabel}. Forecast: hot period with average temperatures around ${forecast}C.`;
         details.push("Be ready to deploy firefighters and trucks quickly.");
     }
     else if (state.phase === "budget") {
         const housesSaved = Math.max(0, state.totalHouses - state.destroyedHouses);
         const burnedHectares = Math.round(state.yearBurnedTiles * HECTARES_PER_TILE);
-        state.overlayTitle = "Autumn Review";
-        state.overlayMessage = "Annual performance review and scorecard.";
+        state.overlayTitle = "Budget Review";
+        state.overlayMessage = `Climate season: ${seasonLabel}. Annual performance review and scorecard.`;
         details.push(`Approval rating: ${Math.round(state.approval * 100)}%.`);
         details.push(`Houses saved: ${housesSaved}/${state.totalHouses}.`);
         details.push(`Land burned: ${burnedHectares} ha.`);
         details.push(`Lives lost: ${state.yearLivesLost}.`);
         details.push("Politics & lobbying: placeholder.");
     }
-    details.push("Press OK to continue.");
+    details.push("Dismiss or wait to close.");
     state.overlayDetails = details;
     state.overlayAction = "dismiss";
     state.overlayVisible = true;
@@ -122,29 +224,16 @@ export function startNewYear(state) {
     state.yearLivesLost = 0;
     state.yearBurnedTiles = 0;
     state.containedCount = 0;
-    recallUnits(state);
     selectUnit(state, null);
     setDeployMode(state, null);
 }
 export function setPhase(state, rng, next) {
     state.phase = next;
-    if (state.phase !== "fire") {
-        state.fireSeasonDay = 0;
-        state.fireSimAccumulator = 0;
-        state.fireWork = null;
-        state.fireBoundsActive = false;
-    }
+    ensureClimateTimeline(state);
+    updateClimateForecastWindow(state);
     updatePhaseControls(state);
     if (state.phase === "growth") {
         startNewYear(state);
-        if (!state.growthView) {
-            state.growthView = {
-                zoom: state.zoom,
-                camera: { ...state.cameraCenter }
-            };
-        }
-        state.zoom = ZOOM_MIN;
-        state.cameraCenter = { x: state.grid.cols * 0.5, y: state.grid.rows * 0.5 };
         setStatus(state, `Year ${state.year} begins. Growth fuels the region.`);
         showSeasonOverlay(state);
         return;
@@ -155,28 +244,19 @@ export function setPhase(state, rng, next) {
         return;
     }
     if (state.phase === "fire") {
-        state.fireSeasonDay = 0;
-        state.fireSimAccumulator = 0;
-        state.fireWork = null;
-        state.fireBoundsActive = false;
         randomizeWind(state, rng);
         pickInitialFires(state, rng);
+        debugClimateChecks(state.seed, VIRTUAL_CLIMATE_PARAMS, DEFAULT_MOISTURE_PARAMS);
         captureFireSnapshot(state);
         setStatus(state, "Fire season begins. Stay ahead of the line.");
         showSeasonOverlay(state);
         return;
     }
-    extinguishAllFires(state);
     calculateBudgetOutcome(state);
     showSeasonOverlay(state);
 }
 export function advancePhase(state, rng) {
     const current = getPhaseInfo(state.phaseIndex).id;
-    const leavingGrowth = current === "growth";
-    if (current === "fire") {
-        extinguishAllFires(state);
-        recallUnits(state);
-    }
     if (current === "budget") {
         state.year += 1;
         if (state.year > CAREER_YEARS) {
@@ -185,11 +265,6 @@ export function advancePhase(state, rng) {
         }
     }
     state.phaseIndex = (state.phaseIndex + 1) % PHASES.length;
-    if (leavingGrowth && state.growthView) {
-        state.zoom = state.growthView.zoom;
-        state.cameraCenter = { ...state.growthView.camera };
-        state.growthView = null;
-    }
     setPhase(state, rng, PHASES[state.phaseIndex].id);
 }
 export function beginFireSeason(state, rng) {
@@ -211,10 +286,6 @@ export function advanceCalendar(state, rng, dayDelta) {
         if (state.phaseDay < current.duration) {
             break;
         }
-        if (current.id === "fire" && state.lastActiveFires > 0) {
-            state.phaseDay = current.duration;
-            break;
-        }
         state.phaseDay -= current.duration;
         advancePhase(state, rng);
     }
@@ -222,6 +293,7 @@ export function advanceCalendar(state, rng, dayDelta) {
 export function pickInitialFires(state, rng) {
     let attempts = 0;
     let placed = 0;
+    const targetFires = state.year >= 15 ? 4 : state.year >= 10 ? 3 : state.year >= 5 ? 2 : 1;
     let minX = state.grid.cols;
     let maxX = -1;
     let minY = state.grid.rows;
@@ -252,7 +324,7 @@ export function pickInitialFires(state, rng) {
         minY = Math.min(minY, y);
         maxY = Math.max(maxY, y);
     };
-    while (placed < 3 && attempts < 300) {
+    while (placed < targetFires && attempts < 300) {
         attempts += 1;
         const x = Math.floor(rng.next() * state.grid.cols);
         const y = Math.floor(rng.next() * state.grid.rows);
@@ -266,9 +338,9 @@ export function pickInitialFires(state, rng) {
             }
         }
     }
-    if (placed < 3) {
-        for (let y = 0; y < state.grid.rows && placed < 3; y += 1) {
-            for (let x = 0; x < state.grid.cols && placed < 3; x += 1) {
+    if (placed < targetFires) {
+        for (let y = 0; y < state.grid.rows && placed < targetFires; y += 1) {
+            for (let x = 0; x < state.grid.cols && placed < targetFires; x += 1) {
                 const idx = indexFor(state.grid, x, y);
                 const tile = state.tiles[idx];
                 if (!canIgnite(tile)) {
@@ -335,46 +407,49 @@ export function stepSim(state, rng, delta) {
         return;
     }
     const dayDelta = delta * DAYS_PER_SECOND;
-    const phaseScale = state.phase === "growth" ? GROWTH_SPEED_MULTIPLIER : state.phase === "fire" ? FIRE_PHASE_TIME_SCALE : 1;
-    const calendarDelta = dayDelta * phaseScale;
-    if (state.phase !== "maintenance") {
-        advanceCalendar(state, rng, calendarDelta);
+    const calendarDelta = dayDelta;
+    advanceCalendar(state, rng, calendarDelta);
+    advanceCareerDay(state, calendarDelta);
+    syncClimateToCareerDay(state);
+    updateClimateForecastWindow(state);
+    if (state.careerDay >= CAREER_TOTAL_DAYS && !state.gameOver) {
+        endGame(state, true, "Career complete. The region passes into new hands.");
+        state.lastActiveFires = 0;
+        return;
     }
     if (state.gameOver) {
         state.lastActiveFires = 0;
         return;
     }
     if (state.phase === "growth") {
-        stepGrowth(state, dayDelta * GROWTH_SPEED_MULTIPLIER, rng);
+        stepGrowth(state, dayDelta, rng);
     }
-    let activeFires = state.lastActiveFires;
-    if (state.phase === "fire") {
+    if (state.units.length > 0) {
         autoAssignTargets(state);
         stepUnits(state, delta);
         applyExtinguish(state, rng, delta);
         applyUnitHazards(state, rng, delta);
-        state.fireSimAccumulator = Math.min(state.fireSimAccumulator + delta, FIRE_SIM_TICK_SECONDS * 2);
-        if (state.fireSimAccumulator >= FIRE_SIM_TICK_SECONDS) {
-            const simDelta = FIRE_SIM_TICK_SECONDS;
-            const simDayDelta = simDelta * DAYS_PER_SECOND * FIRE_PHASE_TIME_SCALE;
-            state.fireSeasonDay += simDayDelta;
-            captureFireSnapshot(state);
-            stepWind(state, simDelta, rng);
-            const dayFactor = getDayNightFactor(state.fireSeasonDay);
-            const seasonIntensity = getFireSeasonIntensity(state.fireSeasonDay);
-            const spreadScale = getFireSpreadScale(state.fireSeasonDay);
-            igniteRandomFire(state, rng, simDayDelta, dayFactor * seasonIntensity);
-            activeFires = stepFire(state, rng, simDelta, spreadScale, dayFactor);
-            state.fireSimAccumulator = Math.max(0, state.fireSimAccumulator - FIRE_SIM_TICK_SECONDS);
-        }
-        else {
-            activeFires = 0;
-        }
-        state.lastActiveFires = activeFires;
+    }
+    let activeFires = state.lastActiveFires;
+    state.fireSimAccumulator = Math.min(state.fireSimAccumulator + delta, FIRE_SIM_TICK_SECONDS * 2);
+    const simDelta = Math.min(state.fireSimAccumulator, FIRE_SIM_TICK_SECONDS);
+    if (simDelta > 0) {
+        const simDayDelta = simDelta * DAYS_PER_SECOND;
+        state.fireSeasonDay += simDayDelta;
+        captureFireSnapshot(state);
+        stepWind(state, simDelta, rng);
+        const dayFactor = getDayNightFactor(state.careerDay);
+        const climateRisk = getClimateRisk(state);
+        const spreadScale = FIRE_SIM_SPEED;
+        const ignitionIntensity = dayFactor * climateRisk * state.climateIgnitionMultiplier;
+        igniteRandomFire(state, rng, simDayDelta, ignitionIntensity);
+        activeFires = stepFire(state, rng, simDelta, spreadScale, 1);
+        state.fireSimAccumulator = Math.max(0, state.fireSimAccumulator - simDelta);
     }
     else {
-        state.lastActiveFires = 0;
+        activeFires = state.lastActiveFires;
     }
+    state.lastActiveFires = activeFires;
     stepParticles(state, delta);
     checkFailureConditions(state);
 }

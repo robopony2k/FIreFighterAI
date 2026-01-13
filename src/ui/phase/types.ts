@@ -1,11 +1,10 @@
-import type { Formation } from "../../core/types.js";
+import type { ClimateForecast, Formation } from "../../core/types.js";
 export type Phase = "growth" | "maintenance" | "fire" | "budget";
 
 export type InteractionMode = "default" | "deploy" | "fuelBreak" | "formation" | "inspect";
 
 export type PanelId =
   | "topbar"
-  | "contextHint"
   | "bottomControls"
   | "maintenanceRoster"
   | "maintenanceCrew"
@@ -48,5 +47,10 @@ export type GameUiSnapshot = {
   paused: boolean;
   alert: string | null;
   timeSpeedIndex: number;
-  windLabel: string | null;
+  baseOpsOpen: boolean;
+  forecast: ClimateForecast | null;
+  forecastDay: number;
+  forecastStartDay: number;
+  forecastYearDays: number;
+  forecastMeta: string | null;
 };

@@ -1,39 +1,27 @@
 import { inBounds, indexFor } from "../core/grid.js";
 import { hash2D } from "../mapgen/noise.js";
-import { isoProject } from "./iso.js";
-import { TILE_SIZE, HEIGHT_SCALE, HEIGHT_WATER_DROP, ISO_TILE_WIDTH, ISO_TILE_HEIGHT, TILE_COLOR_RGB, LIGHT_DIR, ELEVATION_TINT_LOW, ELEVATION_TINT_HIGH, DRY_TINT, WET_TINT, TILE_COLORS, } from "../core/config.js";
+import { getHeightAt as getSmoothedHeightAt, getTileHeight, isoProject } from "./iso.js";
+import { TILE_SIZE, HEIGHT_SCALE, ISO_TILE_WIDTH, ISO_TILE_HEIGHT, TILE_COLOR_RGB, LIGHT_DIR, ELEVATION_TINT_LOW, ELEVATION_TINT_HIGH, DRY_TINT, WET_TINT, TILE_COLORS, } from "../core/config.js";
 import { clamp } from "../core/utils.js";
 import { rgbString, mixRgb, scaleRgb, lighten, darken } from "./color.js";
 // Constants
 const RENDER_TERRAIN_SIDES = true;
 const RENDER_TERRAIN_TREES = true;
-const VOXEL_LAYERED_TERRAIN = true;
 const SIDE_SHADE_TOP = 0.88;
 const SIDE_SHADE_BOTTOM = 0.58;
-const TERRAIN_HEIGHT_STEPS = 12;
 const TERRAIN_OUTLINE_ALPHA = 0.08;
-const TERRAIN_STEP_HEIGHT = HEIGHT_SCALE / TERRAIN_HEIGHT_STEPS;
 const TERRAIN_CACHE_INTERVAL_MS = 400;
 const TERRAIN_PADDING = TILE_SIZE * 6;
 const TERRAIN_INTERACTION_COOLDOWN_MS = 120;
 // Module-level state for caches
 let treeSprites = null;
 let terrainCache = null;
-const quantizeElevation = (elevation) => Math.round(elevation * TERRAIN_HEIGHT_STEPS) / TERRAIN_HEIGHT_STEPS;
+let treeBurnScratch = null;
 export const getRenderHeightForTile = (tile) => {
-    if (tile.type === "water") {
-        return -HEIGHT_WATER_DROP;
-    }
-    const quantized = quantizeElevation(tile.elevation);
-    return quantized * HEIGHT_SCALE;
+    return getTileHeight(tile);
 };
 export const getRenderHeightAt = (state, wx, wy) => {
-    const x = Math.floor(wx);
-    const y = Math.floor(wy);
-    if (!inBounds(state.grid, x, y)) {
-        return 0;
-    }
-    return getRenderHeightForTile(state.tiles[indexFor(state.grid, x, y)]);
+    return getSmoothedHeightAt(state, wx, wy);
 };
 const buildTreeSprite = (size, canopy, trunk, highlight, variant, layers) => {
     const canopyWidth = size * (0.95 + variant * 0.08);
@@ -118,23 +106,51 @@ const ensureTreeSprites = () => {
     };
     return treeSprites;
 };
+const ensureTreeBurnScratch = (width, height) => {
+    if (!treeBurnScratch) {
+        const canvas = document.createElement("canvas");
+        const ctx = canvas.getContext("2d");
+        if (!ctx) {
+            throw new Error("Canvas not supported");
+        }
+        treeBurnScratch = { canvas, ctx };
+    }
+    if (treeBurnScratch.canvas.width !== width || treeBurnScratch.canvas.height !== height) {
+        treeBurnScratch.canvas.width = width;
+        treeBurnScratch.canvas.height = height;
+    }
+    else {
+        treeBurnScratch.ctx.setTransform(1, 0, 0, 1, 0, 0);
+        treeBurnScratch.ctx.clearRect(0, 0, width, height);
+    }
+    return treeBurnScratch;
+};
 const shadeTileColor = (state, tile, x, y) => {
-    const elev = tile.type === "water" ? 0 : quantizeElevation(tile.elevation);
-    const base = tile.type === "grass" || tile.type === "forest"
-        ? mixRgb(TILE_COLOR_RGB.grass, TILE_COLOR_RGB.forest, clamp(tile.canopy, 0, 1))
-        : TILE_COLOR_RGB[tile.type];
-    const left = inBounds(state.grid, x - 1, y)
-        ? quantizeElevation(state.tiles[indexFor(state.grid, x - 1, y)].elevation)
-        : elev;
-    const right = inBounds(state.grid, x + 1, y)
-        ? quantizeElevation(state.tiles[indexFor(state.grid, x + 1, y)].elevation)
-        : elev;
-    const up = inBounds(state.grid, x, y - 1)
-        ? quantizeElevation(state.tiles[indexFor(state.grid, x, y - 1)].elevation)
-        : elev;
-    const down = inBounds(state.grid, x, y + 1)
-        ? quantizeElevation(state.tiles[indexFor(state.grid, x, y + 1)].elevation)
-        : elev;
+    const elev = tile.type === "water" ? 0 : tile.elevation;
+    let base;
+    if (tile.type === "grass" && tile.fire > 0) {
+        base = TILE_COLOR_RGB.ON_FIRE_GRASS;
+    }
+    else if (tile.type === "forest" && tile.fire > 0) {
+        base = darken(TILE_COLOR_RGB.forest, 0.2); // Scorched earth color
+    }
+    else if (tile.type === "grass" || tile.type === "forest") {
+        base = mixRgb(TILE_COLOR_RGB.grass, TILE_COLOR_RGB.forest, clamp(tile.canopy, 0, 1));
+    }
+    else {
+        base = TILE_COLOR_RGB[tile.type];
+    }
+    const sampleElev = (nx, ny) => {
+        if (!inBounds(state.grid, nx, ny)) {
+            return elev;
+        }
+        const neighbor = state.tiles[indexFor(state.grid, nx, ny)];
+        return neighbor.type === "water" ? 0 : neighbor.elevation;
+    };
+    const left = sampleElev(x - 1, y);
+    const right = sampleElev(x + 1, y);
+    const up = sampleElev(x, y - 1);
+    const down = sampleElev(x, y + 1);
     const dx = right - left;
     const dy = down - up;
     const slope = dx * LIGHT_DIR.x + dy * LIGHT_DIR.y;
@@ -163,30 +179,27 @@ const shadeTileColor = (state, tile, x, y) => {
         b: clamp(mixed.b * shade * noiseShade, 0, 255),
     };
 };
-const drawVoxelSide = (ctx, x1, y1, x2, y2, heightTop, heightBottom, topColor) => {
-    const diff = heightTop - heightBottom;
-    if (diff <= 0.1) {
+const drawRampSide = (ctx, x1, y1, x2, y2, heightTop1, heightTop2, heightBottom1, heightBottom2, topColor) => {
+    const top = Math.max(heightTop1, heightTop2);
+    const bottom = Math.max(heightBottom1, heightBottom2);
+    if (top - bottom <= 0.1) {
         return;
     }
-    const steps = Math.max(1, Math.ceil(diff / TERRAIN_STEP_HEIGHT));
-    for (let i = 0; i < steps; i += 1) {
-        const bandTop = heightTop - i * TERRAIN_STEP_HEIGHT;
-        const bandBottom = Math.max(heightTop - (i + 1) * TERRAIN_STEP_HEIGHT, heightBottom);
-        const t = steps === 1 ? 0 : i / (steps - 1);
-        const shade = SIDE_SHADE_TOP - (SIDE_SHADE_TOP - SIDE_SHADE_BOTTOM) * t;
-        ctx.fillStyle = rgbString(scaleRgb(topColor, shade));
-        const up1 = isoProject(x1, y1, bandTop);
-        const up2 = isoProject(x2, y2, bandTop);
-        const low1 = isoProject(x1, y1, bandBottom);
-        const low2 = isoProject(x2, y2, bandBottom);
-        ctx.beginPath();
-        ctx.moveTo(up1.x, up1.y);
-        ctx.lineTo(up2.x, up2.y);
-        ctx.lineTo(low2.x, low2.y);
-        ctx.lineTo(low1.x, low1.y);
-        ctx.closePath();
-        ctx.fill();
-    }
+    const up1 = isoProject(x1, y1, heightTop1);
+    const up2 = isoProject(x2, y2, heightTop2);
+    const low1 = isoProject(x1, y1, heightBottom1);
+    const low2 = isoProject(x2, y2, heightBottom2);
+    const grad = ctx.createLinearGradient((up1.x + up2.x) * 0.5, (up1.y + up2.y) * 0.5, (low1.x + low2.x) * 0.5, (low1.y + low2.y) * 0.5);
+    grad.addColorStop(0, rgbString(scaleRgb(topColor, SIDE_SHADE_TOP)));
+    grad.addColorStop(1, rgbString(scaleRgb(topColor, SIDE_SHADE_BOTTOM)));
+    ctx.fillStyle = grad;
+    ctx.beginPath();
+    ctx.moveTo(up1.x, up1.y);
+    ctx.lineTo(up2.x, up2.y);
+    ctx.lineTo(low2.x, low2.y);
+    ctx.lineTo(low1.x, low1.y);
+    ctx.closePath();
+    ctx.fill();
 };
 const tileSeed = (state, x, y, offset) => hash2D(x + offset * 31, y + offset * 57, state.seed + offset * 131);
 const drawTreesOnTile = (state, context, tile, x, y, height, detail) => {
@@ -223,7 +236,23 @@ const drawTreesOnTile = (state, context, tile, x, y, height, detail) => {
         const base = isoProject(x + 0.5 + jitterX, y + 0.5 + jitterY, height + TILE_SIZE * 0.05);
         const width = sprite.width * scale;
         const heightPx = sprite.height * scale;
-        context.drawImage(sprite.canvas, base.x - sprite.anchorX * scale, base.y - sprite.anchorY * scale, width, heightPx);
+        const drawX = base.x - sprite.anchorX * scale;
+        const drawY = base.y - sprite.anchorY * scale;
+        if (tile.fire > 0 && tile.fuel < 1) {
+            const scratch = ensureTreeBurnScratch(sprite.width, sprite.height);
+            scratch.ctx.drawImage(sprite.canvas, 0, 0);
+            scratch.ctx.globalCompositeOperation = "source-atop";
+            scratch.ctx.fillStyle = "rgba(0, 0, 0, 0.35)";
+            scratch.ctx.fillRect(0, 0, sprite.width, sprite.height);
+            scratch.ctx.globalCompositeOperation = "destination-out";
+            const burnHeight = sprite.height * (1 - tile.fuel);
+            scratch.ctx.fillRect(0, 0, sprite.width, burnHeight);
+            scratch.ctx.globalCompositeOperation = "source-over";
+            context.drawImage(scratch.canvas, drawX, drawY, width, heightPx);
+        }
+        else {
+            context.drawImage(sprite.canvas, drawX, drawY, width, heightPx);
+        }
     }
 };
 export const ensureTerrainCache = (state, now) => {
@@ -274,30 +303,24 @@ export const ensureTerrainCache = (state, now) => {
                 }
                 const tileIndex = indexFor(state.grid, x, y);
                 const tile = state.tiles[tileIndex];
-                const heightValue = getRenderHeightForTile(tile);
+                const h00 = getSmoothedHeightAt(state, x, y);
+                const h10 = getSmoothedHeightAt(state, x + 1, y);
+                const h11 = getSmoothedHeightAt(state, x + 1, y + 1);
+                const h01 = getSmoothedHeightAt(state, x, y + 1);
+                const heightValue = (h00 + h10 + h11 + h01) * 0.25;
                 const top = shadeTileColor(state, tile, x, y);
-                const p0 = isoProject(x, y, heightValue);
-                const p1 = isoProject(x + 1, y, heightValue);
-                const p2 = isoProject(x + 1, y + 1, heightValue);
-                const p3 = isoProject(x, y + 1, heightValue);
+                const p0 = isoProject(x, y, h00);
+                const p1 = isoProject(x + 1, y, h10);
+                const p2 = isoProject(x + 1, y + 1, h11);
+                const p3 = isoProject(x, y + 1, h01);
                 if (RENDER_TERRAIN_SIDES) {
-                    const eastInBounds = x + 1 < cols;
-                    if (eastInBounds) {
-                        const eastNeighborHeight = getRenderHeightForTile(state.tiles[tileIndex + 1]);
-                        if (eastNeighborHeight < heightValue - 0.1) {
-                            if (VOXEL_LAYERED_TERRAIN) {
-                                drawVoxelSide(ctx, x + 1, y, x + 1, y + 1, heightValue, eastNeighborHeight, top);
-                            }
-                        }
+                    if (x === cols - 1) {
+                        const baseHeight = Math.min(0, Math.min(h10, h11));
+                        drawRampSide(ctx, x + 1, y, x + 1, y + 1, h10, h11, baseHeight, baseHeight, top);
                     }
-                    const southInBounds = y + 1 < rows;
-                    if (southInBounds) {
-                        const southNeighborHeight = getRenderHeightForTile(state.tiles[tileIndex + cols]);
-                        if (southNeighborHeight < heightValue - 0.1) {
-                            if (VOXEL_LAYERED_TERRAIN) {
-                                drawVoxelSide(ctx, x, y + 1, x + 1, y + 1, heightValue, southNeighborHeight, top);
-                            }
-                        }
+                    if (y === rows - 1) {
+                        const baseHeight = Math.min(0, Math.min(h01, h11));
+                        drawRampSide(ctx, x, y + 1, x + 1, y + 1, h01, h11, baseHeight, baseHeight, top);
                     }
                 }
                 ctx.fillStyle = rgbString(top);

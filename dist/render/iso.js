@@ -10,13 +10,38 @@ export function isoProject(wx, wy, height) {
 export function getTileHeight(tile) {
     return tile.elevation * HEIGHT_SCALE - (tile.type === "water" ? HEIGHT_WATER_DROP : 0);
 }
+const sampleVertexHeight = (state, vx, vy) => {
+    let sum = 0;
+    let count = 0;
+    const add = (tx, ty) => {
+        if (!inBounds(state.grid, tx, ty)) {
+            return;
+        }
+        sum += getTileHeight(state.tiles[indexFor(state.grid, tx, ty)]);
+        count += 1;
+    };
+    add(vx - 1, vy - 1);
+    add(vx, vy - 1);
+    add(vx - 1, vy);
+    add(vx, vy);
+    return count > 0 ? sum / count : 0;
+};
 export function getHeightAt(state, wx, wy) {
-    const x = Math.floor(wx);
-    const y = Math.floor(wy);
-    if (!inBounds(state.grid, x, y)) {
+    const { cols, rows } = state.grid;
+    if (wx < 0 || wy < 0 || wx > cols || wy > rows) {
         return 0;
     }
-    return getTileHeight(state.tiles[indexFor(state.grid, x, y)]);
+    const x0 = Math.min(cols - 1, Math.floor(wx));
+    const y0 = Math.min(rows - 1, Math.floor(wy));
+    const fx = clamp(wx - x0, 0, 1);
+    const fy = clamp(wy - y0, 0, 1);
+    const h00 = sampleVertexHeight(state, x0, y0);
+    const h10 = sampleVertexHeight(state, x0 + 1, y0);
+    const h01 = sampleVertexHeight(state, x0, y0 + 1);
+    const h11 = sampleVertexHeight(state, x0 + 1, y0 + 1);
+    const hx0 = h00 + (h10 - h00) * fx;
+    const hx1 = h01 + (h11 - h01) * fx;
+    return hx0 + (hx1 - hx0) * fy;
 }
 export function getViewTransform(state, canvas) {
     const scale = state.zoom;

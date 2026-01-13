@@ -26,9 +26,9 @@ export function emitWaterSpray(state: WorldState, rng: RNG, unit: Unit, target: 
   }
 }
 
-export function emitSmokeAt(state: WorldState, rng: RNG, x: number, y: number): void {
-  const count = rng.next() < 0.35 ? 2 : 1;
-  const baseSpeed = 0.8 + state.wind.strength * 1.2;
+export function emitSmokeAt(state: WorldState, rng: RNG, x: number, y: number, intensity: number): void {
+  const count = 2 + Math.ceil(intensity * 3);
+  const baseSpeed = 0.9 + state.wind.strength * 1.6;
   for (let i = 0; i < count; i += 1) {
     const jitter = (rng.next() - 0.5) * 0.6;
     const speed = baseSpeed * (0.6 + rng.next() * 0.8);
@@ -38,10 +38,10 @@ export function emitSmokeAt(state: WorldState, rng: RNG, x: number, y: number): 
       y: y + (rng.next() - 0.5) * 0.3,
       vx: Math.cos(angle) * speed,
       vy: Math.sin(angle) * speed,
-      life: 1.8 + rng.next() * 1.4,
-      maxLife: 2.6,
-      size: 2.2 + rng.next() * 2.6,
-      alpha: 0.8
+      life: 2.2 + rng.next() * 1.8,
+      maxLife: 3.4,
+      size: 3 + rng.next() * 4,
+      alpha: 0.95
     });
   }
 }
@@ -67,8 +67,8 @@ export function stepParticles(state: WorldState, delta: number): void {
     }
     particle.x += particle.vx * delta;
     particle.y += particle.vy * delta;
-    particle.vx += state.wind.dx * 0.05 * delta;
-    particle.vy += state.wind.dy * 0.05 * delta;
+    particle.vx += state.wind.dx * 0.35 * delta;
+    particle.vy += state.wind.dy * 0.35 * delta;
     particle.alpha = particle.life / particle.maxLife;
     return true;
   });

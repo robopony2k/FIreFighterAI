@@ -2,7 +2,6 @@ import { getPhaseRules } from "./uiRules.js";
 import { TIME_SPEED_OPTIONS } from "../../core/config.js";
 import { createBottomLeftControls } from "./components/BottomLeftControls.js";
 import { createBudgetReportView } from "./components/BudgetReportView.js";
-import { createContextHint } from "./components/ContextHint.js";
 import { createFireDeployPanel } from "./components/FireDeployPanel.js";
 import { createFireSelectedUnitPanel } from "./components/FireSelectedUnitPanel.js";
 import { createFireUnitListPanel } from "./components/FireUnitListPanel.js";
@@ -42,6 +41,8 @@ const defaultPanelData = {
         toolLabel: "Drag to carve a fire break"
     },
     fireDeploy: {
+        trucks: [],
+        baseOpsOpen: false,
         deployableFirefighters: 0,
         availableTrucks: 0,
         activeMode: null
@@ -63,7 +64,6 @@ export class UIController {
         this.panels = new Map();
         this.panelData = {};
         this.topBar = createTopBar();
-        this.contextHint = createContextHint();
         this.bottomControls = createBottomLeftControls();
         this.maintenanceRoster = createMaintenanceRosterPanel();
         this.maintenanceCrew = createMaintenanceCrewPanel();
@@ -91,14 +91,14 @@ export class UIController {
         left.className = "phase-column phase-column-left";
         const stack = document.createElement("div");
         stack.className = "phase-stack";
-        stack.append(this.contextHint.element, this.maintenanceRoster.element, this.maintenanceCrew.element, this.fuelBreak.element, this.fireDeploy.element, this.fireSelectedUnit.element, this.fireUnitList.element, this.budgetReport.element);
+        stack.append(this.fireDeploy.element, this.fireSelectedUnit.element, this.fireUnitList.element, this.maintenanceRoster.element, this.maintenanceCrew.element, this.fuelBreak.element, this.budgetReport.element);
         left.append(stack);
         body.append(left);
-        shell.append(this.topBar.element, body, this.bottomControls.element);
+        this.topBar.attachControls(this.bottomControls.element);
+        shell.append(this.topBar.element, body);
         this.root.append(shell);
         [
             this.topBar.element,
-            this.contextHint.element,
             this.bottomControls.element,
             this.maintenanceRoster.element,
             this.maintenanceCrew.element,
@@ -119,19 +119,15 @@ export class UIController {
         this.root.classList.toggle("phase-ui--minimal", rules.minimalUi);
         const topBarData = {
             phase: rules.phase,
-            progress: snapshot.phaseProgress,
             alert: snapshot.alert,
             primaryCta: rules.primaryCta,
-            windInfo: snapshot.windLabel
+            forecast: snapshot.forecast,
+            forecastDay: snapshot.forecastDay,
+            forecastStartDay: snapshot.forecastStartDay,
+            forecastYearDays: snapshot.forecastYearDays,
+            forecastMeta: snapshot.forecastMeta
         };
         this.topBar.update(topBarData);
-        const hintData = {
-            phase: rules.phase,
-            selection: snapshot.selection,
-            interactionMode: snapshot.interactionMode,
-            focus: rules.focus
-        };
-        this.contextHint.update(hintData);
         const bottomStatus = snapshot.interactionMode === "fuelBreak"
             ? "Fuel break tool armed."
             : `Time speed ${TIME_SPEED_OPTIONS[snapshot.timeSpeedIndex]}x`;
@@ -146,16 +142,18 @@ export class UIController {
         this.maintenanceRoster.update(this.panelData.maintenanceRoster ?? defaultPanelData.maintenanceRoster);
         this.maintenanceCrew.update(this.panelData.maintenanceCrew ?? defaultPanelData.maintenanceCrew);
         this.fuelBreak.update(this.panelData.fuelBreak ?? defaultPanelData.fuelBreak);
-        this.fireDeploy.update(this.panelData.fireDeploy ?? defaultPanelData.fireDeploy);
+        const fireDeployData = this.panelData.fireDeploy ?? defaultPanelData.fireDeploy;
+        this.fireDeploy.update({ ...fireDeployData, baseOpsOpen: snapshot.baseOpsOpen });
         this.fireUnitList.update(this.panelData.fireUnitList ?? defaultPanelData.fireUnitList);
         this.fireSelectedUnit.update({ selection: snapshot.selection });
         this.budgetReport.update(this.panelData.budgetReport ?? defaultPanelData.budgetReport);
-        this.applyVisibility(rules.visiblePanels);
+        this.applyVisibility(rules.visiblePanels, snapshot.baseOpsOpen);
     }
-    applyVisibility(visible) {
+    applyVisibility(visible, baseOpsOpen) {
         const visibleSet = new Set(visible);
         this.panels.forEach((panel, id) => {
-            const shouldShow = visibleSet.has(id);
+            const isBaseOpsPanel = id === "maintenanceRoster" || id === "maintenanceCrew";
+            const shouldShow = visibleSet.has(id) && (!isBaseOpsPanel || baseOpsOpen);
             panel.classList.toggle("is-hidden", !shouldShow);
             panel.setAttribute("aria-hidden", shouldShow ? "false" : "true");
         });

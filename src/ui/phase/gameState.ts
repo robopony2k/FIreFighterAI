@@ -17,7 +17,12 @@ export class GameState {
     paused: false,
     alert: null,
     timeSpeedIndex: 0,
-    windLabel: null
+    baseOpsOpen: false,
+    forecast: null,
+    forecastDay: 0,
+    forecastStartDay: 0,
+    forecastYearDays: 360,
+    forecastMeta: null
   };
 
   on<K extends keyof GameStateEvents>(event: K, listener: (payload: GameStateEvents[K]) => void): void {
@@ -93,11 +98,39 @@ export class GameState {
     this.emitChange();
   }
 
-  setWind(label: string | null): void {
-    if (this.snapshot.windLabel === label) {
+  setBaseOpsOpen(open: boolean): void {
+    if (this.snapshot.baseOpsOpen === open) {
       return;
     }
-    this.snapshot.windLabel = label;
+    this.snapshot.baseOpsOpen = open;
+    this.emitChange();
+  }
+
+  toggleBaseOpsOpen(): void {
+    this.setBaseOpsOpen(!this.snapshot.baseOpsOpen);
+  }
+
+  setForecast(
+    forecast: GameUiSnapshot["forecast"],
+    day: number,
+    startDay: number,
+    yearDays: number,
+    meta: string | null
+  ): void {
+    if (
+      this.snapshot.forecast === forecast &&
+      this.snapshot.forecastDay === day &&
+      this.snapshot.forecastStartDay === startDay &&
+      this.snapshot.forecastYearDays === yearDays &&
+      this.snapshot.forecastMeta === meta
+    ) {
+      return;
+    }
+    this.snapshot.forecast = forecast;
+    this.snapshot.forecastDay = day;
+    this.snapshot.forecastStartDay = startDay;
+    this.snapshot.forecastYearDays = yearDays;
+    this.snapshot.forecastMeta = meta;
     this.emitChange();
   }
 

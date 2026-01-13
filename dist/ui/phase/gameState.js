@@ -11,7 +11,12 @@ export class GameState {
             paused: false,
             alert: null,
             timeSpeedIndex: 0,
-            windLabel: null
+            baseOpsOpen: false,
+            forecast: null,
+            forecastDay: 0,
+            forecastStartDay: 0,
+            forecastYearDays: 360,
+            forecastMeta: null
         };
     }
     on(event, listener) {
@@ -77,11 +82,29 @@ export class GameState {
         this.snapshot.timeSpeedIndex = index;
         this.emitChange();
     }
-    setWind(label) {
-        if (this.snapshot.windLabel === label) {
+    setBaseOpsOpen(open) {
+        if (this.snapshot.baseOpsOpen === open) {
             return;
         }
-        this.snapshot.windLabel = label;
+        this.snapshot.baseOpsOpen = open;
+        this.emitChange();
+    }
+    toggleBaseOpsOpen() {
+        this.setBaseOpsOpen(!this.snapshot.baseOpsOpen);
+    }
+    setForecast(forecast, day, startDay, yearDays, meta) {
+        if (this.snapshot.forecast === forecast &&
+            this.snapshot.forecastDay === day &&
+            this.snapshot.forecastStartDay === startDay &&
+            this.snapshot.forecastYearDays === yearDays &&
+            this.snapshot.forecastMeta === meta) {
+            return;
+        }
+        this.snapshot.forecast = forecast;
+        this.snapshot.forecastDay = day;
+        this.snapshot.forecastStartDay = startDay;
+        this.snapshot.forecastYearDays = yearDays;
+        this.snapshot.forecastMeta = meta;
         this.emitChange();
     }
     emitCta(actionId) {

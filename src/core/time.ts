@@ -3,10 +3,10 @@ import { FIRE_DAY_FACTOR_MAX, FIRE_DAY_FACTOR_MIN, FIRE_SEASON_MIN_INTENSITY, FI
 import { clamp } from "./utils.js";
 
 export const PHASES: { id: SeasonPhase; label: string; duration: number }[] = [
-  { id: "growth", label: "Growth", duration: 120 },
-  { id: "maintenance", label: "Maintenance", duration: 30 },
+  { id: "maintenance", label: "Maintenance", duration: 90 },
+  { id: "growth", label: "Growth", duration: 90 },
   { id: "fire", label: "Fire Season", duration: 90 },
-  { id: "budget", label: "Budget", duration: 15 }
+  { id: "budget", label: "Budget", duration: 90 }
 ];
 
 export const FIRE_SEASON_DURATION = PHASES.find((phase) => phase.id === "fire")?.duration ?? 90;
