@@ -1,6 +1,6 @@
 import type { RNG, Unit, Formation, Point } from "../../core/types.js";
 import type { WorldState } from "../../core/state.js";
-import { BASE_BUDGET, FIRE_SIM_TICK_SECONDS, ISO_TILE_HEIGHT, ISO_TILE_WIDTH, TIME_SPEED_OPTIONS, ZOOM_STEP } from "../../core/config.js";
+import { FIRE_SIM_TICK_SECONDS, ISO_TILE_HEIGHT, ISO_TILE_WIDTH, TIME_SPEED_OPTIONS, ZOOM_STEP } from "../../core/config.js";
 import { inBounds, indexFor } from "../../core/grid.js";
 import { zoomAtPointer, screenToWorld } from "../../render/iso.js";
 import { resetStatus, setStatus } from "../../core/state.js";
@@ -29,7 +29,6 @@ import {
   trainSelectedUnit,
   unassignRosterCrew
 } from "../../sim/units.js";
-import { getCharacterBaseBudget } from "../../core/characters.js";
 import { initCharacterSelect } from "../character-select.js";
 import { updateOverlay } from "../overlay.js";
 import type { OverlayRefs } from "../overlay.js";
@@ -37,6 +36,8 @@ import type { PhaseUiApi } from "./index.js";
 import { gateInput, isInputAllowed } from "./inputGate.js";
 import type { InteractionMode, InputAction } from "./types.js";
 import { markFireBounds } from "../../sim/fire/bounds.js";
+import { DEFAULT_MAP_SIZE, DEFAULT_RUN_OPTIONS, DEFAULT_RUN_SEED } from "../run-config.js";
+import type { NewRunConfig } from "../run-config.js";
 
   const getInteractionMode = (state: WorldState): InteractionMode => {
   if (state.deployMode === "clear") {
@@ -83,7 +84,7 @@ export const bindPhaseUi = (
   state: WorldState,
   rng: RNG,
   canvas: HTMLCanvasElement,
-  onNewRun: (seed: number) => void,
+  onNewRun: (config: NewRunConfig) => void,
   overlayRefs: OverlayRefs
 ): void => {
   let isPanning = false;
@@ -129,12 +130,6 @@ export const bindPhaseUi = (
       state.fireSimAccumulator = Math.max(state.fireSimAccumulator, FIRE_SIM_TICK_SECONDS);
       setStatus(state, `Debug ignition at ${tile.x}, ${tile.y}`);
     };
-
-  const applyCharacterBudget = (): void => {
-    const baseBudget = getCharacterBaseBudget(state.campaign.characterId, BASE_BUDGET);
-    state.budget = baseBudget;
-    state.pendingBudget = baseBudget;
-  };
 
   const isOverlayLocked = (): boolean => state.overlayVisible && state.overlayAction === "restart";
 
@@ -200,6 +195,24 @@ export const bindPhaseUi = (
     state.selectedRosterId = Number(rosterId);
   };
 
+  const startMenu = document.getElementById("startMenu") as HTMLDivElement | null;
+  const startNewRunButton = document.getElementById("startNewRun") as HTMLButtonElement | null;
+
+  const showStartMenu = (): void => {
+    if (!startMenu) {
+      return;
+    }
+    startMenu.classList.remove("hidden");
+    state.paused = true;
+  };
+
+  const hideStartMenu = (): void => {
+    if (!startMenu) {
+      return;
+    }
+    startMenu.classList.add("hidden");
+  };
+
   const characterRefs = {
     characterScreen: document.getElementById("characterScreen") as HTMLDivElement,
     characterGrid: document.getElementById("characterGrid") as HTMLDivElement,
@@ -209,16 +222,33 @@ export const bindPhaseUi = (
     characterPreviewImage: document.getElementById("characterPreviewImage") as HTMLImageElement,
     characterPreviewInitials: document.getElementById("characterPreviewInitials") as HTMLSpanElement,
     characterNameInput: document.getElementById("characterNameInput") as HTMLInputElement,
-    characterNameRandom: document.getElementById("characterNameRandom") as HTMLButtonElement
+    characterNameRandom: document.getElementById("characterNameRandom") as HTMLButtonElement,
+    runSeedInput: document.getElementById("runSeedInput") as HTMLInputElement,
+    runMapSizeInputs: Array.from(
+      document.querySelectorAll<HTMLInputElement>('#characterScreen input[name="mapSize"]')
+    ),
+    runUnlimitedMoney: document.getElementById("runUnlimitedMoney") as HTMLInputElement
   };
 
-  const characterSelect = initCharacterSelect(characterRefs, state, (seed) => {
-    if (seed !== null) {
-      onNewRun(seed);
-      return;
-    }
-    applyCharacterBudget();
+  let lastRunConfig: NewRunConfig = {
+    seed: DEFAULT_RUN_SEED,
+    mapSize: DEFAULT_MAP_SIZE,
+    options: { ...DEFAULT_RUN_OPTIONS },
+    characterId: state.campaign.characterId,
+    callsign: state.campaign.callsign
+  };
+
+  const characterSelect = initCharacterSelect(characterRefs, state, (config) => {
+    lastRunConfig = config;
+    onNewRun(config);
   });
+
+  if (startNewRunButton) {
+    startNewRunButton.addEventListener("click", () => {
+      hideStartMenu();
+      characterSelect.open(lastRunConfig);
+    });
+  }
 
   phaseUi.state.on("cta", (actionId) => {
     if (isOverlayLocked()) {
@@ -429,7 +459,8 @@ export const bindPhaseUi = (
 
   overlayRefs.overlayRestart.addEventListener("click", () => {
     if (state.overlayAction === "restart") {
-      characterSelect.open(Math.floor(Date.now() % 1000000));
+      hideStartMenu();
+      characterSelect.open(lastRunConfig);
       return;
     }
     state.overlayVisible = false;
@@ -818,6 +849,10 @@ export const bindPhaseUi = (
     }
   });
 
-  characterSelect.open(null);
+  if (startMenu) {
+    showStartMenu();
+  } else {
+    characterSelect.open(lastRunConfig);
+  }
   updateOverlay(overlayRefs, state);
 };

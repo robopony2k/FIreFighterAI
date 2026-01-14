@@ -1,4 +1,5 @@
 import { CHARACTERS, getCharacterInitials } from "../core/characters.js";
+import { DEFAULT_MAP_SIZE, DEFAULT_RUN_OPTIONS, DEFAULT_RUN_SEED } from "./run-config.js";
 const formatPercent = (value) => {
     const rounded = Math.round(value * 100);
     if (rounded === 0) {
@@ -68,7 +69,6 @@ const buildCallsign = (characterId) => {
 };
 export function initCharacterSelect(ui, state, onConfirm) {
     let selectedId = state.campaign.characterId;
-    let pendingSeed = null;
     const cards = new Map();
     ui.characterGrid.innerHTML = "";
     CHARACTERS.forEach((character) => {
@@ -129,40 +129,93 @@ export function initCharacterSelect(ui, state, onConfirm) {
         state.campaign.callsign = name;
         updateConfirmState();
     };
+    const coerceSeed = (value) => {
+        const trimmed = value.trim();
+        if (trimmed.length === 0) {
+            return DEFAULT_RUN_SEED;
+        }
+        const parsed = Number(trimmed);
+        if (!Number.isFinite(parsed)) {
+            return DEFAULT_RUN_SEED;
+        }
+        return Math.floor(parsed);
+    };
+    const setSelectedMapSize = (mapSize) => {
+        let matched = false;
+        ui.runMapSizeInputs.forEach((input) => {
+            const isMatch = input.value === mapSize;
+            input.checked = isMatch;
+            matched = matched || isMatch;
+        });
+        if (!matched) {
+            const fallback = ui.runMapSizeInputs.find((input) => input.value === DEFAULT_MAP_SIZE);
+            if (fallback) {
+                fallback.checked = true;
+                return;
+            }
+            if (ui.runMapSizeInputs.length > 0) {
+                ui.runMapSizeInputs[0].checked = true;
+            }
+        }
+    };
+    const getSelectedMapSize = () => {
+        const selected = ui.runMapSizeInputs.find((input) => input.checked);
+        return selected?.value ?? DEFAULT_MAP_SIZE;
+    };
+    const getRunOptions = () => ({
+        ...DEFAULT_RUN_OPTIONS,
+        unlimitedMoney: ui.runUnlimitedMoney.checked
+    });
     ui.characterNameInput.value = state.campaign.callsign;
     ui.characterNameInput.addEventListener("input", () => {
         state.campaign.callsign = ui.characterNameInput.value;
         updateConfirmState();
+    });
+    ui.runSeedInput.value = coerceSeed(ui.runSeedInput.value).toString();
+    ui.runSeedInput.addEventListener("blur", () => {
+        ui.runSeedInput.value = coerceSeed(ui.runSeedInput.value).toString();
     });
     ui.characterNameRandom.addEventListener("click", () => {
         applyRandomName();
     });
     updateSelection();
     updateConfirmState();
-    const flushConfirmation = (seed) => {
+    const flushConfirmation = (config) => {
         window.requestAnimationFrame(() => {
-            onConfirm(seed);
+            onConfirm(config);
         });
     };
     ui.characterConfirm.addEventListener("click", () => {
         state.campaign.characterId = selectedId;
         const trimmed = ui.characterNameInput.value.trim();
-        state.campaign.callsign = trimmed || buildCallsign(selectedId);
+        const callsign = trimmed || buildCallsign(selectedId);
+        state.campaign.callsign = callsign;
+        ui.characterNameInput.value = callsign;
+        const config = {
+            seed: coerceSeed(ui.runSeedInput.value),
+            mapSize: getSelectedMapSize(),
+            options: getRunOptions(),
+            characterId: selectedId,
+            callsign
+        };
         ui.characterScreen.classList.add("hidden");
-        const seedToUse = pendingSeed;
-        pendingSeed = null;
         state.paused = false;
-        flushConfirmation(seedToUse);
+        flushConfirmation(config);
     });
-    const open = (seed) => {
-        pendingSeed = seed;
+    const open = (config) => {
         state.paused = true;
-        ui.characterNameInput.value = state.campaign.callsign;
+        selectedId = config.characterId;
+        state.campaign.characterId = selectedId;
+        state.campaign.callsign = config.callsign;
+        ui.characterNameInput.value = config.callsign;
+        const seedValue = Number.isFinite(config.seed) ? Math.floor(config.seed) : DEFAULT_RUN_SEED;
+        ui.runSeedInput.value = seedValue.toString();
+        setSelectedMapSize(config.mapSize);
+        ui.runUnlimitedMoney.checked = config.options.unlimitedMoney;
         if (ui.characterNameInput.value.trim().length === 0) {
             applyRandomName();
         }
-        updateConfirmState();
-        updatePreview();
+        updateSelection();
         ui.characterScreen.classList.remove("hidden");
     };
     return { open };

@@ -1,4 +1,5 @@
-import { BASE_BUDGET, TILE_SIZE, MAP_SCALE, TIME_SPEED_OPTIONS } from "./core/config.js";
+import { BASE_BUDGET, TILE_SIZE, MAP_SCALE, TIME_SPEED_OPTIONS, MAP_SIZE_PRESETS } from "./core/config.js";
+import type { MapSizeId } from "./core/config.js";
 import { getCharacterBaseBudget } from "./core/characters.js";
 import { RNG } from "./core/rng.js";
 import { computeChecksum, createInitialState, resetState } from "./core/state.js";
@@ -12,6 +13,8 @@ import { randomizeWind } from "./sim/wind.js";
 import { setPhase, stepSim } from "./sim/index.js";
 import { seedStartingRoster } from "./sim/units.js";
 import { PHASES } from "./core/time.js";
+import { DEFAULT_MAP_SIZE, DEFAULT_RUN_OPTIONS } from "./ui/run-config.js";
+import type { NewRunConfig } from "./ui/run-config.js";
 
 const canvas = document.getElementById("gameCanvas") as HTMLCanvasElement;
 const ctx = canvas.getContext("2d");
@@ -23,13 +26,16 @@ if (!ctx) {
 const baseCanvasWidth = canvas.width;
 const baseCanvasHeight = canvas.height;
 const gridScale = MAP_SCALE;
-const gridCols = 64;
-const gridRows = 64;
-const grid = {
-  cols: gridCols,
-  rows: gridRows,
-  totalTiles: gridCols * gridRows
+const buildGrid = (mapSize: MapSizeId) => {
+  const size = MAP_SIZE_PRESETS[mapSize];
+  return {
+    cols: size,
+    rows: size,
+    totalTiles: size * size
+  };
 };
+let activeMapSize: MapSizeId = DEFAULT_MAP_SIZE;
+const grid = buildGrid(activeMapSize);
 
 const params = new URLSearchParams(window.location.search);
 const seedParam = params.get("seed");
@@ -42,6 +48,7 @@ const phaseUiRoot = document.getElementById("phaseUI") as HTMLDivElement | null;
 const phaseUi = phaseUiRoot ? initPhaseUI(phaseUiRoot) : null;
 const overlayRefs = getOverlayRefs();
 const characterScreen = document.getElementById("characterScreen") as HTMLDivElement;
+const startMenu = document.getElementById("startMenu") as HTMLDivElement | null;
 const canvasWrap = canvas.parentElement as HTMLElement | null;
 let resizeObserver: ResizeObserver | null = null;
 let lastCanvasWidth = 0;
@@ -73,8 +80,15 @@ const watchCanvasSize = (): void => {
   }
 };
 
-const resetGame = (seed: number) => {
+const resetGame = (config: NewRunConfig) => {
+  const { seed, mapSize, characterId, callsign } = config;
+  if (activeMapSize !== mapSize) {
+    activeMapSize = mapSize;
+    state.grid = buildGrid(mapSize);
+  }
   resetState(state, seed);
+  state.campaign.characterId = characterId;
+  state.campaign.callsign = callsign;
   const baseBudget = getCharacterBaseBudget(state.campaign.characterId, BASE_BUDGET);
   state.budget = baseBudget;
   state.pendingBudget = baseBudget;
@@ -91,8 +105,16 @@ const resetGame = (seed: number) => {
   updateOverlay(overlayRefs, state);
 };
 
+const initialRunConfig: NewRunConfig = {
+  seed: initialSeed,
+  mapSize: activeMapSize,
+  options: { ...DEFAULT_RUN_OPTIONS },
+  characterId: state.campaign.characterId,
+  callsign: state.campaign.callsign
+};
+
 watchCanvasSize();
-resetGame(initialSeed);
+resetGame(initialRunConfig);
 
 if (!headless) {
   if (phaseUi) {
@@ -127,7 +149,8 @@ const persistScoreIfNeeded = () => {
       if (!lastTick) {
         lastTick = now;
       }
-      if (!characterScreen.classList.contains("hidden") || document.hidden) {
+      const startMenuVisible = startMenu ? !startMenu.classList.contains("hidden") : false;
+      if (!characterScreen.classList.contains("hidden") || startMenuVisible || document.hidden) {
         lastTick = now;
         accumulator = 0;
         requestAnimationFrame(frame);

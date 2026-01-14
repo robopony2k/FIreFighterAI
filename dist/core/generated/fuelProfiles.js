@@ -10,24 +10,24 @@ export const TILE_FUEL_PROFILES = {
         windFactor: 0
     },
     grass: {
-        baseFuel: 0.6,
-        ignition: 0.18,
-        burnRate: 0.72,
-        heatOutput: 0.9,
-        spreadBoost: 1,
-        heatTransferCap: 0.55,
-        heatRetention: 0.7,
-        windFactor: 0.7
+        baseFuel: 0.3,
+        ignition: 0.24,
+        burnRate: 0.85,
+        heatOutput: 0.75,
+        spreadBoost: 0.85,
+        heatTransferCap: 0.3,
+        heatRetention: 0.55,
+        windFactor: 0.95
     },
     forest: {
-        baseFuel: 1.25,
-        ignition: 0.52,
-        burnRate: 0.52,
-        heatOutput: 1.2,
-        spreadBoost: 1.1,
-        heatTransferCap: 3.2,
-        heatRetention: 0.9,
-        windFactor: 0.7
+        baseFuel: 1.1,
+        ignition: 0.66,
+        burnRate: 0.38,
+        heatOutput: 1.35,
+        spreadBoost: 1.05,
+        heatTransferCap: 3.6,
+        heatRetention: 0.92,
+        windFactor: 0.65
     },
     road: {
         baseFuel: 0,
@@ -40,7 +40,7 @@ export const TILE_FUEL_PROFILES = {
         windFactor: 0
     },
     base: {
-        baseFuel: 1.1,
+        baseFuel: 0.9,
         ignition: 0.38,
         burnRate: 0.3,
         heatOutput: 1.15,
@@ -51,13 +51,13 @@ export const TILE_FUEL_PROFILES = {
     },
     house: {
         baseFuel: 1.2,
-        ignition: 0.32,
-        burnRate: 0.28,
-        heatOutput: 1.4,
-        spreadBoost: 1.1,
-        heatTransferCap: 4.2,
-        heatRetention: 0.85,
-        windFactor: 0.75
+        ignition: 0.9,
+        burnRate: 0.22,
+        heatOutput: 1.65,
+        spreadBoost: 1.05,
+        heatTransferCap: 4.5,
+        heatRetention: 0.88,
+        windFactor: 0.8
     },
     firebreak: {
         baseFuel: 0,

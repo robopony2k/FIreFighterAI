@@ -8,6 +8,12 @@ export const ISO_TILE_HEIGHT = TILE_SIZE;
 export const HEIGHT_SCALE = TILE_SIZE * 6.5;
 export const HEIGHT_WATER_DROP = TILE_SIZE * 0.7;
 export const MAP_SCALE = 0.65;
+export const MAP_SIZE_PRESETS = {
+    small: 48,
+    medium: 64,
+    large: 80,
+    huge: 96
+};
 export const CAREER_YEARS = 20;
 export const DAYS_PER_SECOND = 4;
 export const GROWTH_SPEED_MULTIPLIER = 3;
