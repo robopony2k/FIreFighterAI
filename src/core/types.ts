@@ -58,6 +58,8 @@ export interface Unit {
   autonomous: boolean;
   x: number;
   y: number;
+  prevX: number;
+  prevY: number;
   target: Point | null;
   path: Point[];
   pathIndex: number;

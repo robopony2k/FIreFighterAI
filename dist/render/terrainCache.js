@@ -1,7 +1,7 @@
 import { inBounds, indexFor } from "../core/grid.js";
 import { hash2D } from "../mapgen/noise.js";
 import { getHeightAt as getSmoothedHeightAt, getTileHeight, isoProject } from "./iso.js";
-import { TILE_SIZE, HEIGHT_SCALE, ISO_TILE_WIDTH, ISO_TILE_HEIGHT, TILE_COLOR_RGB, LIGHT_DIR, ELEVATION_TINT_LOW, ELEVATION_TINT_HIGH, DRY_TINT, WET_TINT, TILE_COLORS, } from "../core/config.js";
+import { TILE_SIZE, HEIGHT_SCALE, ISO_TILE_WIDTH, ISO_TILE_HEIGHT, TILE_COLOR_RGB, LIGHT_DIR, ELEVATION_TINT_LOW, ELEVATION_TINT_HIGH, DRY_TINT, WET_TINT, } from "../core/config.js";
 import { clamp } from "../core/utils.js";
 import { rgbString, mixRgb, scaleRgb, lighten, darken } from "./color.js";
 // Constants
@@ -9,13 +9,25 @@ const RENDER_TERRAIN_SIDES = true;
 const RENDER_TERRAIN_TREES = true;
 const SIDE_SHADE_TOP = 0.88;
 const SIDE_SHADE_BOTTOM = 0.58;
-const TERRAIN_OUTLINE_ALPHA = 0.08;
+const TERRAIN_OUTLINE_ALPHA = 0;
 const TERRAIN_CACHE_INTERVAL_MS = 400;
 const TERRAIN_PADDING = TILE_SIZE * 6;
 const TERRAIN_INTERACTION_COOLDOWN_MS = 120;
+const ROAD_WIDTH = TILE_SIZE * 0.45;
+const ROAD_EDGE_WIDTH = ROAD_WIDTH + 1.4;
+const ROAD_HEIGHT_OFFSET = TILE_SIZE * 0.04;
+const ROAD_CENTER_SHIFT = 0.2;
+const ROAD_WIDTH_JITTER = 0.12;
+const ROAD_VERGE_ALPHA = 0.22;
+const ROAD_PAD_SCALE = 1.25;
+const SHORE_SAND_DISTANCE = 3;
+const SHORE_SAND_ALPHA = 0.6;
+const WATER_SURFACE_ALPHA = 0.98;
+const SHALLOW_WATER_BLEND = 0.6;
 // Module-level state for caches
 let treeSprites = null;
 let terrainCache = null;
+let treeLayerCache = null;
 let treeBurnScratch = null;
 export const getRenderHeightForTile = (tile) => {
     return getTileHeight(tile);
@@ -39,7 +51,19 @@ const buildTreeSprite = (size, canopy, trunk, highlight, variant, layers) => {
     }
     const centerX = width / 2;
     const baseY = height - size * 0.08;
-    ctx.fillStyle = rgbString(trunk);
+    ctx.save();
+    ctx.globalAlpha = 0.18;
+    ctx.fillStyle = "rgb(0, 0, 0)";
+    ctx.beginPath();
+    ctx.ellipse(centerX, baseY + size * 0.08, canopyWidth * 0.28, canopyHeight * 0.14, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+    const trunkLight = lighten(trunk, 0.12);
+    const trunkDark = darken(trunk, 0.2);
+    const trunkGrad = ctx.createLinearGradient(centerX - trunkWidth / 2, 0, centerX + trunkWidth / 2, 0);
+    trunkGrad.addColorStop(0, rgbString(trunkLight));
+    trunkGrad.addColorStop(1, rgbString(trunkDark));
+    ctx.fillStyle = trunkGrad;
     ctx.fillRect(centerX - trunkWidth / 2, baseY - trunkHeight, trunkWidth, trunkHeight);
     const drawLayer = (offset, scale, color) => {
         const layerHeight = canopyHeight * scale;
@@ -51,6 +75,16 @@ const buildTreeSprite = (size, canopy, trunk, highlight, variant, layers) => {
         ctx.lineTo(centerX - layerWidth / 2, baseY - trunkHeight - offset);
         ctx.closePath();
         ctx.fill();
+        ctx.save();
+        ctx.globalAlpha = 0.55;
+        ctx.fillStyle = rgbString(darken(color, 0.18));
+        ctx.beginPath();
+        ctx.moveTo(centerX, baseY - trunkHeight - offset - layerHeight);
+        ctx.lineTo(centerX + layerWidth / 2, baseY - trunkHeight - offset);
+        ctx.lineTo(centerX + layerWidth * 0.12, baseY - trunkHeight - offset);
+        ctx.closePath();
+        ctx.fill();
+        ctx.restore();
     };
     for (let i = 0; i < layers; i += 1) {
         const offset = i * size * 0.18;
@@ -125,20 +159,172 @@ const ensureTreeBurnScratch = (width, height) => {
     }
     return treeBurnScratch;
 };
-const shadeTileColor = (state, tile, x, y) => {
+const getBaseTileColor = (state, tile) => {
+    if (tile.type === "grass" && tile.fire > 0) {
+        return TILE_COLOR_RGB.ON_FIRE_GRASS;
+    }
+    if (tile.type === "forest" && tile.fire > 0) {
+        return darken(TILE_COLOR_RGB.forest, 0.2);
+    }
+    if (tile.type === "grass" || tile.type === "forest") {
+        return mixRgb(TILE_COLOR_RGB.grass, TILE_COLOR_RGB.forest, clamp(tile.canopy, 0, 1));
+    }
+    return TILE_COLOR_RGB[tile.type];
+};
+const getRoadbedColor = (state, x, y) => {
+    const neighbors = [
+        { x: x + 1, y },
+        { x: x - 1, y },
+        { x, y: y + 1 },
+        { x, y: y - 1 }
+    ];
+    let sumR = 0;
+    let sumG = 0;
+    let sumB = 0;
+    let count = 0;
+    neighbors.forEach((pos) => {
+        if (!inBounds(state.grid, pos.x, pos.y)) {
+            return;
+        }
+        const neighbor = state.tiles[indexFor(state.grid, pos.x, pos.y)];
+        if (neighbor.type === "water" || neighbor.type === "road" || neighbor.type === "base") {
+            return;
+        }
+        const base = getBaseTileColor(state, neighbor);
+        sumR += base.r;
+        sumG += base.g;
+        sumB += base.b;
+        count += 1;
+    });
+    if (count > 0) {
+        return { r: sumR / count, g: sumG / count, b: sumB / count };
+    }
+    const noise = clamp(state.colorNoiseMap[indexFor(state.grid, x, y)], 0, 1);
+    return mixRgb(TILE_COLOR_RGB.grass, TILE_COLOR_RGB.forest, 0.3 + noise * 0.4);
+};
+const getWaterEdgeBaseColor = (state, x, y) => {
+    const neighbors = [
+        { x: x + 1, y },
+        { x: x - 1, y },
+        { x, y: y + 1 },
+        { x, y: y - 1 }
+    ];
+    let sumR = 0;
+    let sumG = 0;
+    let sumB = 0;
+    let count = 0;
+    neighbors.forEach((pos) => {
+        if (!inBounds(state.grid, pos.x, pos.y)) {
+            return;
+        }
+        const neighbor = state.tiles[indexFor(state.grid, pos.x, pos.y)];
+        if (neighbor.type === "water") {
+            return;
+        }
+        const base = getBaseTileColor(state, neighbor);
+        sumR += base.r;
+        sumG += base.g;
+        sumB += base.b;
+        count += 1;
+    });
+    if (count === 0) {
+        return TILE_COLOR_RGB.water;
+    }
+    const landColor = { r: sumR / count, g: sumG / count, b: sumB / count };
+    const sandBlend = mixRgb(landColor, SAND_COLOR, 0.4);
+    const blendStrength = clamp(count / 4, 0, 1);
+    const shallow = mixRgb(SHALLOW_WATER_COLOR, sandBlend, 0.35);
+    return mixRgb(TILE_COLOR_RGB.water, shallow, 0.25 + blendStrength * 0.35);
+};
+const getWaterLandInfluence = (state, x, y) => {
+    const neighbors = [
+        { x: x + 1, y, w: 1 },
+        { x: x - 1, y, w: 1 },
+        { x, y: y + 1, w: 1 },
+        { x, y: y - 1, w: 1 },
+        { x: x + 1, y: y + 1, w: 0.7 },
+        { x: x + 1, y: y - 1, w: 0.7 },
+        { x: x - 1, y: y + 1, w: 0.7 },
+        { x: x - 1, y: y - 1, w: 0.7 }
+    ];
+    let landWeight = 0;
+    let totalWeight = 0;
+    neighbors.forEach((pos) => {
+        totalWeight += pos.w;
+        if (!inBounds(state.grid, pos.x, pos.y)) {
+            landWeight += pos.w;
+            return;
+        }
+        const neighbor = state.tiles[indexFor(state.grid, pos.x, pos.y)];
+        if (neighbor.type !== "water") {
+            landWeight += pos.w;
+        }
+    });
+    if (totalWeight <= 0) {
+        return 0;
+    }
+    return clamp(landWeight / totalWeight, 0, 1);
+};
+const getSmoothedWaterInfluence = (state, x, y) => {
+    let sum = getWaterLandInfluence(state, x, y);
+    let count = 1;
+    const cardinals = [
+        { x: x + 1, y },
+        { x: x - 1, y },
+        { x, y: y + 1 },
+        { x, y: y - 1 }
+    ];
+    cardinals.forEach((pos) => {
+        if (!inBounds(state.grid, pos.x, pos.y)) {
+            return;
+        }
+        const neighbor = state.tiles[indexFor(state.grid, pos.x, pos.y)];
+        if (neighbor.type !== "water") {
+            return;
+        }
+        sum += getWaterLandInfluence(state, pos.x, pos.y);
+        count += 1;
+    });
+    return clamp(sum / count, 0, 1);
+};
+const shadeTileColor = (state, tile, x, y, baseOverride) => {
     const elev = tile.type === "water" ? 0 : tile.elevation;
     let base;
-    if (tile.type === "grass" && tile.fire > 0) {
-        base = TILE_COLOR_RGB.ON_FIRE_GRASS;
-    }
-    else if (tile.type === "forest" && tile.fire > 0) {
-        base = darken(TILE_COLOR_RGB.forest, 0.2); // Scorched earth color
-    }
-    else if (tile.type === "grass" || tile.type === "forest") {
-        base = mixRgb(TILE_COLOR_RGB.grass, TILE_COLOR_RGB.forest, clamp(tile.canopy, 0, 1));
+    if (baseOverride) {
+        base = baseOverride;
     }
     else {
-        base = TILE_COLOR_RGB[tile.type];
+        base = getBaseTileColor(state, tile);
+    }
+    if (!baseOverride && tile.type !== "water" && tile.type !== "house") {
+        const neighbors = [
+            { x: x + 1, y },
+            { x: x - 1, y },
+            { x, y: y + 1 },
+            { x, y: y - 1 }
+        ];
+        let sumR = 0;
+        let sumG = 0;
+        let sumB = 0;
+        let count = 0;
+        neighbors.forEach((pos) => {
+            if (!inBounds(state.grid, pos.x, pos.y)) {
+                return;
+            }
+            const neighbor = state.tiles[indexFor(state.grid, pos.x, pos.y)];
+            if (neighbor.type === "water" || neighbor.type === "road" || neighbor.type === "base" || neighbor.type === "house") {
+                return;
+            }
+            const neighborBase = getBaseTileColor(state, neighbor);
+            sumR += neighborBase.r;
+            sumG += neighborBase.g;
+            sumB += neighborBase.b;
+            count += 1;
+        });
+        if (count > 0) {
+            const neighborAvg = { r: sumR / count, g: sumG / count, b: sumB / count };
+            base = mixRgb(base, neighborAvg, 0.12);
+        }
     }
     const sampleElev = (nx, ny) => {
         if (!inBounds(state.grid, nx, ny)) {
@@ -156,9 +342,10 @@ const shadeTileColor = (state, tile, x, y) => {
     const slope = dx * LIGHT_DIR.x + dy * LIGHT_DIR.y;
     const avg = (left + right + up + down) * 0.25;
     const relief = clamp((elev - avg) * 1.35, -0.2, 0.2);
-    const heightBoost = 0.9 + elev * 0.24;
-    const shade = clamp(heightBoost * (0.96 + slope * 0.7) * (1 + relief * 0.5), 0.7, 1.18);
-    const tintAmount = tile.type === "water" ? 0.05 : 0.12 + elev * 0.22;
+    const isWater = tile.type === "water";
+    const heightBoost = isWater ? 1 : 0.9 + elev * 0.24;
+    const shade = isWater ? 1 : clamp(heightBoost * (0.96 + slope * 0.7) * (1 + relief * 0.5), 0.7, 1.18);
+    const tintAmount = isWater ? 0.03 : 0.12 + elev * 0.22;
     const tint = {
         r: ELEVATION_TINT_LOW.r + (ELEVATION_TINT_HIGH.r - ELEVATION_TINT_LOW.r) * elev,
         g: ELEVATION_TINT_LOW.g + (ELEVATION_TINT_HIGH.g - ELEVATION_TINT_LOW.g) * elev,
@@ -170,8 +357,13 @@ const shadeTileColor = (state, tile, x, y) => {
         const moistureAmount = 0.12 + tile.moisture * 0.18;
         mixed = mixRgb(mixed, moistureTint, moistureAmount);
     }
+    else if (baseOverride) {
+        const moistureTint = mixRgb(DRY_TINT, WET_TINT, clamp(tile.moisture, 0, 1));
+        const moistureAmount = 0.06 + tile.moisture * 0.08;
+        mixed = mixRgb(mixed, moistureTint, moistureAmount);
+    }
     const noise = state.colorNoiseMap[indexFor(state.grid, x, y)];
-    const noiseShift = (noise - 0.5) * 0.05;
+    const noiseShift = (noise - 0.5) * (isWater ? 0.02 : 0.05);
     const noiseShade = 1 + noiseShift;
     return {
         r: clamp(mixed.r * shade * noiseShade, 0, 255),
@@ -255,6 +447,336 @@ const drawTreesOnTile = (state, context, tile, x, y, height, detail) => {
         }
     }
 };
+const ROAD_CORE_COLOR = lighten(TILE_COLOR_RGB.road, 0.08);
+const ROAD_VERGE_COLOR = mixRgb(TILE_COLOR_RGB.firebreak, TILE_COLOR_RGB.grass, 0.6);
+const SAND_COLOR = lighten(TILE_COLOR_RGB.firebreak, 0.08);
+const SHALLOW_WATER_COLOR = mixRgb(TILE_COLOR_RGB.water, TILE_COLOR_RGB.grass, 0.22);
+const isRoadTile = (state, x, y) => {
+    if (!inBounds(state.grid, x, y)) {
+        return false;
+    }
+    const type = state.tiles[indexFor(state.grid, x, y)].type;
+    return type === "road" || type === "base";
+};
+const isRoadAdjacent = (state, x, y) => {
+    for (let dy = -1; dy <= 1; dy += 1) {
+        for (let dx = -1; dx <= 1; dx += 1) {
+            if (dx === 0 && dy === 0) {
+                continue;
+            }
+            if (isRoadTile(state, x + dx, y + dy)) {
+                return true;
+            }
+        }
+    }
+    return false;
+};
+const getRoadFlow = (state, x, y) => {
+    const dirs = [
+        { dx: 1, dy: 0 },
+        { dx: -1, dy: 0 },
+        { dx: 0, dy: 1 },
+        { dx: 0, dy: -1 },
+        { dx: 1, dy: 1 },
+        { dx: 1, dy: -1 },
+        { dx: -1, dy: 1 },
+        { dx: -1, dy: -1 }
+    ];
+    let dx = 0;
+    let dy = 0;
+    let count = 0;
+    dirs.forEach((dir) => {
+        if (isRoadTile(state, x + dir.dx, y + dir.dy)) {
+            dx += dir.dx;
+            dy += dir.dy;
+            count += 1;
+        }
+    });
+    return { dx, dy, count };
+};
+const getRoadAnchor = (state, x, y, heightValue) => {
+    const height = typeof heightValue === "number" ? heightValue : getSmoothedHeightAt(state, x + 0.5, y + 0.5);
+    const flow = getRoadFlow(state, x, y);
+    let offsetX = 0;
+    let offsetY = 0;
+    if (flow.count > 0) {
+        const len = Math.hypot(flow.dx, flow.dy);
+        if (len > 0) {
+            let shift = ROAD_CENTER_SHIFT;
+            if (flow.count === 2 && flow.dx !== 0 && flow.dy !== 0) {
+                shift *= 1.45;
+            }
+            if (flow.count >= 3) {
+                shift *= 0.45;
+            }
+            offsetX = (flow.dx / len) * shift;
+            offsetY = (flow.dy / len) * shift;
+        }
+    }
+    return isoProject(x + 0.5 + offsetX, y + 0.5 + offsetY, height + ROAD_HEIGHT_OFFSET);
+};
+const drawRoadOverlay = (state, ctx, x, y, heightValue) => {
+    const center = getRoadAnchor(state, x, y, heightValue);
+    const neighbors = [];
+    const addNeighbor = (dir, nx, ny) => {
+        if (!isRoadTile(state, nx, ny)) {
+            return;
+        }
+        neighbors.push({ dir, pos: getRoadAnchor(state, nx, ny), height: getSmoothedHeightAt(state, nx + 0.5, ny + 0.5) });
+    };
+    addNeighbor("n", x, y - 1);
+    addNeighbor("s", x, y + 1);
+    addNeighbor("e", x + 1, y);
+    addNeighbor("w", x - 1, y);
+    addNeighbor("ne", x + 1, y - 1);
+    addNeighbor("nw", x - 1, y - 1);
+    addNeighbor("se", x + 1, y + 1);
+    addNeighbor("sw", x - 1, y + 1);
+    const isOpposite = (a, b) => (a === "n" && b === "s") ||
+        (a === "s" && b === "n") ||
+        (a === "e" && b === "w") ||
+        (a === "w" && b === "e") ||
+        (a === "ne" && b === "sw") ||
+        (a === "sw" && b === "ne") ||
+        (a === "nw" && b === "se") ||
+        (a === "se" && b === "nw");
+    const cardinals = neighbors.filter((neighbor) => ["n", "s", "e", "w"].includes(neighbor.dir));
+    const diagonals = neighbors.filter((neighbor) => ["ne", "nw", "se", "sw"].includes(neighbor.dir));
+    let activeNeighbors = neighbors;
+    if (neighbors.length > 2) {
+        if (cardinals.length >= 2) {
+            activeNeighbors = cardinals;
+        }
+        else if (cardinals.length === 1 && diagonals.length > 0) {
+            const flow = getRoadFlow(state, x, y);
+            const len = Math.hypot(flow.dx, flow.dy);
+            let best = diagonals[0];
+            if (len > 0) {
+                const fx = flow.dx / len;
+                const fy = flow.dy / len;
+                let bestDot = -Infinity;
+                diagonals.forEach((diag) => {
+                    const dir = diag.dir === "ne"
+                        ? { x: 1, y: -1 }
+                        : diag.dir === "nw"
+                            ? { x: -1, y: -1 }
+                            : diag.dir === "se"
+                                ? { x: 1, y: 1 }
+                                : { x: -1, y: 1 };
+                    const dLen = Math.hypot(dir.x, dir.y) || 1;
+                    const dot = (dir.x / dLen) * fx + (dir.y / dLen) * fy;
+                    if (dot > bestDot) {
+                        bestDot = dot;
+                        best = diag;
+                    }
+                });
+            }
+            activeNeighbors = [cardinals[0], best];
+        }
+    }
+    const baseHeight = heightValue;
+    const avgNeighborHeight = activeNeighbors.length > 0
+        ? activeNeighbors.reduce((sum, neighbor) => sum + neighbor.height, 0) / activeNeighbors.length
+        : baseHeight;
+    const slope = clamp((avgNeighborHeight - baseHeight) / (TILE_SIZE * 0.6), -0.2, 0.2);
+    const slopeAmount = Math.min(Math.abs(slope) * 0.7, 0.2);
+    const isCurve = activeNeighbors.length === 2 && !isOpposite(activeNeighbors[0].dir, activeNeighbors[1].dir);
+    const curveLight = !Number.isNaN(slope) && slope < 0 && isCurve ? 0.06 : 0;
+    const widthNoise = tileSeed(state, x, y, 61) - 0.5;
+    const widthScale = 1 + widthNoise * ROAD_WIDTH_JITTER;
+    const renderRoad = (color, width, extraLight = 0) => {
+        const adjusted = slope > 0 ? darken(color, slopeAmount) : lighten(color, Math.max(0, slopeAmount * 0.6 + extraLight));
+        ctx.strokeStyle = rgbString(adjusted);
+        ctx.lineWidth = width * widthScale;
+        ctx.lineCap = "round";
+        ctx.lineJoin = "round";
+        if (activeNeighbors.length === 0) {
+            ctx.fillStyle = rgbString(adjusted);
+            ctx.beginPath();
+            ctx.arc(center.x, center.y, Math.max(1.2, width * 0.28 * widthScale), 0, Math.PI * 2);
+            ctx.fill();
+            return;
+        }
+        if (activeNeighbors.length === 1) {
+            ctx.beginPath();
+            ctx.moveTo(center.x, center.y);
+            ctx.lineTo(activeNeighbors[0].pos.x, activeNeighbors[0].pos.y);
+            ctx.stroke();
+            return;
+        }
+        if (activeNeighbors.length === 2) {
+            const [a, b] = activeNeighbors;
+            ctx.beginPath();
+            if (isOpposite(a.dir, b.dir)) {
+                ctx.moveTo(a.pos.x, a.pos.y);
+                ctx.lineTo(b.pos.x, b.pos.y);
+            }
+            else {
+                ctx.moveTo(a.pos.x, a.pos.y);
+                ctx.quadraticCurveTo(center.x, center.y, b.pos.x, b.pos.y);
+            }
+            ctx.stroke();
+            return;
+        }
+        ctx.beginPath();
+        activeNeighbors.forEach((neighbor) => {
+            ctx.moveTo(center.x, center.y);
+            ctx.lineTo(neighbor.pos.x, neighbor.pos.y);
+        });
+        ctx.stroke();
+    };
+    if (activeNeighbors.length >= 3) {
+        const padSize = ROAD_EDGE_WIDTH * widthScale * ROAD_PAD_SCALE;
+        const padTone = slope > 0 ? darken(ROAD_CORE_COLOR, slopeAmount * 0.6) : lighten(ROAD_CORE_COLOR, slopeAmount * 0.3 + curveLight);
+        ctx.fillStyle = rgbString(padTone);
+        ctx.beginPath();
+        ctx.arc(center.x, center.y, padSize * 0.55, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = rgbString(lighten(padTone, 0.06));
+        ctx.beginPath();
+        ctx.arc(center.x, center.y, padSize * 0.38, 0, Math.PI * 2);
+        ctx.fill();
+    }
+    renderRoad(ROAD_CORE_COLOR, ROAD_WIDTH, curveLight);
+};
+const drawBaseOnTile = (state, ctx, x, y, heightValue) => {
+    const baseColor = TILE_COLOR_RGB.base;
+    const padTop = lighten(baseColor, 0.12);
+    const padSideLight = lighten(baseColor, 0.04);
+    const padSideDark = darken(baseColor, 0.24);
+    const padInset = 0.05;
+    const padHeight = TILE_SIZE * 0.08;
+    const padZ = heightValue + TILE_SIZE * 0.02;
+    const drawBox = (inset, height, top, sideLight, sideDark, z) => {
+        const baseNW = isoProject(x + inset, y + inset, z);
+        const baseNE = isoProject(x + 1 - inset, y + inset, z);
+        const baseSE = isoProject(x + 1 - inset, y + 1 - inset, z);
+        const baseSW = isoProject(x + inset, y + 1 - inset, z);
+        const topZ = z + height;
+        const topNW = isoProject(x + inset, y + inset, topZ);
+        const topNE = isoProject(x + 1 - inset, y + inset, topZ);
+        const topSE = isoProject(x + 1 - inset, y + 1 - inset, topZ);
+        const topSW = isoProject(x + inset, y + 1 - inset, topZ);
+        ctx.fillStyle = rgbString(sideLight);
+        ctx.beginPath();
+        ctx.moveTo(topNE.x, topNE.y);
+        ctx.lineTo(topSE.x, topSE.y);
+        ctx.lineTo(baseSE.x, baseSE.y);
+        ctx.lineTo(baseNE.x, baseNE.y);
+        ctx.closePath();
+        ctx.fill();
+        ctx.fillStyle = rgbString(sideDark);
+        ctx.beginPath();
+        ctx.moveTo(topSE.x, topSE.y);
+        ctx.lineTo(topSW.x, topSW.y);
+        ctx.lineTo(baseSW.x, baseSW.y);
+        ctx.lineTo(baseSE.x, baseSE.y);
+        ctx.closePath();
+        ctx.fill();
+        ctx.fillStyle = rgbString(top);
+        ctx.beginPath();
+        ctx.moveTo(topNW.x, topNW.y);
+        ctx.lineTo(topNE.x, topNE.y);
+        ctx.lineTo(topSE.x, topSE.y);
+        ctx.lineTo(topSW.x, topSW.y);
+        ctx.closePath();
+        ctx.fill();
+    };
+    drawBox(padInset, padHeight, padTop, padSideLight, padSideDark, padZ);
+    const dist = Math.abs(x - state.basePoint.x) + Math.abs(y - state.basePoint.y);
+    const seed = tileSeed(state, x, y, 143);
+    const buildingZ = padZ + padHeight;
+    if (dist === 0) {
+        const mainInset = 0.18;
+        const mainHeight = TILE_SIZE * 0.52;
+        const mainTop = lighten(baseColor, 0.2);
+        const mainSideLight = lighten(baseColor, 0.06);
+        const mainSideDark = darken(baseColor, 0.28);
+        drawBox(mainInset, mainHeight, mainTop, mainSideLight, mainSideDark, buildingZ);
+        const roofInset = mainInset + 0.08;
+        const roofHeight = TILE_SIZE * 0.05;
+        const roofTop = lighten(baseColor, 0.28);
+        drawBox(roofInset, roofHeight, roofTop, lighten(baseColor, 0.14), darken(baseColor, 0.18), buildingZ + mainHeight);
+    }
+    else if (dist <= 1 && seed > 0.45) {
+        const shedInset = clamp(0.28 + (seed - 0.45) * 0.18, 0.26, 0.42);
+        const shedHeight = TILE_SIZE * (0.22 + (seed - 0.45) * 0.16);
+        const shedTop = lighten(baseColor, 0.18);
+        drawBox(shedInset, shedHeight, shedTop, lighten(baseColor, 0.05), darken(baseColor, 0.24), buildingZ);
+    }
+};
+const drawHouseOnTile = (state, ctx, tile, x, y, heightValue) => {
+    const seedA = tileSeed(state, x, y, 81);
+    const seedB = tileSeed(state, x, y, 97);
+    const seedC = tileSeed(state, x, y, 113);
+    const baseInset = 0.16 + seedA * 0.08;
+    const roofInset = clamp(baseInset + 0.06 + seedB * 0.05, baseInset + 0.04, 0.38);
+    const heightScale = tile.houseDestroyed ? 0.65 : 1;
+    const wallHeight = TILE_SIZE * (0.26 + seedB * 0.18) * heightScale;
+    const roofHeight = TILE_SIZE * (0.14 + seedC * 0.1) * heightScale;
+    const baseZ = heightValue + TILE_SIZE * 0.04;
+    const roofBaseZ = baseZ + wallHeight;
+    const roofTopZ = roofBaseZ + roofHeight;
+    const baseNW = isoProject(x + baseInset, y + baseInset, baseZ);
+    const baseNE = isoProject(x + 1 - baseInset, y + baseInset, baseZ);
+    const baseSE = isoProject(x + 1 - baseInset, y + 1 - baseInset, baseZ);
+    const baseSW = isoProject(x + baseInset, y + 1 - baseInset, baseZ);
+    const topNW = isoProject(x + baseInset, y + baseInset, roofBaseZ);
+    const topNE = isoProject(x + 1 - baseInset, y + baseInset, roofBaseZ);
+    const topSE = isoProject(x + 1 - baseInset, y + 1 - baseInset, roofBaseZ);
+    const topSW = isoProject(x + baseInset, y + 1 - baseInset, roofBaseZ);
+    const roofNW = isoProject(x + roofInset, y + roofInset, roofTopZ);
+    const roofNE = isoProject(x + 1 - roofInset, y + roofInset, roofTopZ);
+    const roofSE = isoProject(x + 1 - roofInset, y + 1 - roofInset, roofTopZ);
+    const roofSW = isoProject(x + roofInset, y + 1 - roofInset, roofTopZ);
+    const baseColor = tile.houseDestroyed ? mixRgb(TILE_COLOR_RGB.ash, TILE_COLOR_RGB.house, 0.2) : TILE_COLOR_RGB.house;
+    const wallLight = lighten(baseColor, tile.houseDestroyed ? 0.04 : 0.12);
+    const wallDark = darken(baseColor, tile.houseDestroyed ? 0.24 : 0.18);
+    const roofBase = tile.houseDestroyed ? darken(baseColor, 0.3) : darken(baseColor, 0.08);
+    const roofLight = lighten(roofBase, tile.houseDestroyed ? 0.02 : 0.09);
+    const roofDark = darken(roofBase, tile.houseDestroyed ? 0.12 : 0.22);
+    const roofTop = lighten(roofBase, tile.houseDestroyed ? 0.05 : 0.14);
+    ctx.fillStyle = rgbString(wallLight);
+    ctx.beginPath();
+    ctx.moveTo(topNE.x, topNE.y);
+    ctx.lineTo(topSE.x, topSE.y);
+    ctx.lineTo(baseSE.x, baseSE.y);
+    ctx.lineTo(baseNE.x, baseNE.y);
+    ctx.closePath();
+    ctx.fill();
+    ctx.fillStyle = rgbString(wallDark);
+    ctx.beginPath();
+    ctx.moveTo(topSE.x, topSE.y);
+    ctx.lineTo(topSW.x, topSW.y);
+    ctx.lineTo(baseSW.x, baseSW.y);
+    ctx.lineTo(baseSE.x, baseSE.y);
+    ctx.closePath();
+    ctx.fill();
+    ctx.fillStyle = rgbString(roofLight);
+    ctx.beginPath();
+    ctx.moveTo(topNE.x, topNE.y);
+    ctx.lineTo(topSE.x, topSE.y);
+    ctx.lineTo(roofSE.x, roofSE.y);
+    ctx.lineTo(roofNE.x, roofNE.y);
+    ctx.closePath();
+    ctx.fill();
+    ctx.fillStyle = rgbString(roofDark);
+    ctx.beginPath();
+    ctx.moveTo(topSE.x, topSE.y);
+    ctx.lineTo(topSW.x, topSW.y);
+    ctx.lineTo(roofSW.x, roofSW.y);
+    ctx.lineTo(roofSE.x, roofSE.y);
+    ctx.closePath();
+    ctx.fill();
+    ctx.fillStyle = rgbString(roofTop);
+    ctx.beginPath();
+    ctx.moveTo(roofNW.x, roofNW.y);
+    ctx.lineTo(roofNE.x, roofNE.y);
+    ctx.lineTo(roofSE.x, roofSE.y);
+    ctx.lineTo(roofSW.x, roofSW.y);
+    ctx.closePath();
+    ctx.fill();
+};
 export const ensureTerrainCache = (state, now) => {
     const { cols, rows } = state.grid;
     const maxHeight = HEIGHT_SCALE;
@@ -308,7 +830,17 @@ export const ensureTerrainCache = (state, now) => {
                 const h11 = getSmoothedHeightAt(state, x + 1, y + 1);
                 const h01 = getSmoothedHeightAt(state, x, y + 1);
                 const heightValue = (h00 + h10 + h11 + h01) * 0.25;
-                const top = shadeTileColor(state, tile, x, y);
+                let baseOverride;
+                if (tile.type === "road") {
+                    baseOverride = getRoadbedColor(state, x, y);
+                }
+                else if (tile.type === "water") {
+                    baseOverride = getWaterEdgeBaseColor(state, x, y);
+                }
+                else if (tile.type === "house" || tile.type === "base") {
+                    baseOverride = TILE_COLOR_RGB.grass;
+                }
+                const top = shadeTileColor(state, tile, x, y, baseOverride);
                 const p0 = isoProject(x, y, h00);
                 const p1 = isoProject(x + 1, y, h10);
                 const p2 = isoProject(x + 1, y + 1, h11);
@@ -336,19 +868,77 @@ export const ensureTerrainCache = (state, now) => {
                     ctx.lineWidth = 1;
                     ctx.stroke();
                 }
-                if (RENDER_TERRAIN_TREES && state.renderTrees) {
-                    drawTreesOnTile(state, ctx, tile, x, y, heightValue, 1);
-                }
-                if (tile.type === "house") {
-                    const roof = isoProject(x + 0.5, y + 0.5, heightValue + TILE_SIZE * 0.35);
-                    ctx.fillStyle = TILE_COLORS.house;
+                if (tile.type === "water") {
+                    const waterHeight = getTileHeight(tile);
+                    const landInfluence = getSmoothedWaterInfluence(state, x, y);
+                    const surfaceBlend = clamp(landInfluence * 0.85, 0, 0.8);
+                    const w00 = waterHeight + (h00 - waterHeight) * surfaceBlend;
+                    const w10 = waterHeight + (h10 - waterHeight) * surfaceBlend;
+                    const w11 = waterHeight + (h11 - waterHeight) * surfaceBlend;
+                    const w01 = waterHeight + (h01 - waterHeight) * surfaceBlend;
+                    const wp0 = isoProject(x, y, w00);
+                    const wp1 = isoProject(x + 1, y, w10);
+                    const wp2 = isoProject(x + 1, y + 1, w11);
+                    const wp3 = isoProject(x, y + 1, w01);
+                    const shoreTint = getWaterEdgeBaseColor(state, x, y);
+                    const waterTone = mixRgb(TILE_COLOR_RGB.water, mixRgb(SHALLOW_WATER_COLOR, shoreTint, 0.5), clamp(landInfluence * SHALLOW_WATER_BLEND, 0, 1));
+                    ctx.globalAlpha = WATER_SURFACE_ALPHA;
+                    ctx.fillStyle = rgbString(waterTone);
                     ctx.beginPath();
-                    ctx.moveTo(roof.x, roof.y - TILE_SIZE * 0.28);
-                    ctx.lineTo(roof.x + TILE_SIZE * 0.32, roof.y);
-                    ctx.lineTo(roof.x, roof.y + TILE_SIZE * 0.28);
-                    ctx.lineTo(roof.x - TILE_SIZE * 0.32, roof.y);
+                    ctx.moveTo(wp0.x, wp0.y);
+                    ctx.lineTo(wp1.x, wp1.y);
+                    ctx.lineTo(wp2.x, wp2.y);
+                    ctx.lineTo(wp3.x, wp3.y);
                     ctx.closePath();
                     ctx.fill();
+                    ctx.globalAlpha = 1;
+                }
+                else if (tile.type !== "road" &&
+                    tile.type !== "base" &&
+                    tile.type !== "house" &&
+                    tile.waterDist > 0 &&
+                    tile.waterDist <= SHORE_SAND_DISTANCE) {
+                    const rawBlend = clamp((SHORE_SAND_DISTANCE - (tile.waterDist - 1)) / SHORE_SAND_DISTANCE, 0, 1);
+                    const sandBlend = rawBlend * rawBlend * (3 - 2 * rawBlend);
+                    const nearBoost = tile.waterDist === 1 ? 0.18 : 0;
+                    ctx.globalAlpha = SHORE_SAND_ALPHA * clamp(sandBlend + nearBoost, 0, 1);
+                    ctx.fillStyle = rgbString(SAND_COLOR);
+                    ctx.beginPath();
+                    ctx.moveTo(p0.x, p0.y);
+                    ctx.lineTo(p1.x, p1.y);
+                    ctx.lineTo(p2.x, p2.y);
+                    ctx.lineTo(p3.x, p3.y);
+                    ctx.closePath();
+                    ctx.fill();
+                    ctx.globalAlpha = 1;
+                }
+                if (tile.type !== "road" &&
+                    tile.type !== "base" &&
+                    tile.type !== "house" &&
+                    tile.type !== "water" &&
+                    isRoadAdjacent(state, x, y)) {
+                    const vergeNoise = tileSeed(state, x, y, 73);
+                    const vergeAlpha = ROAD_VERGE_ALPHA * (0.65 + vergeNoise * 0.55);
+                    const vergeColor = mixRgb(top, ROAD_VERGE_COLOR, 0.6);
+                    ctx.globalAlpha = vergeAlpha;
+                    ctx.fillStyle = rgbString(vergeColor);
+                    ctx.beginPath();
+                    ctx.moveTo(p0.x, p0.y);
+                    ctx.lineTo(p1.x, p1.y);
+                    ctx.lineTo(p2.x, p2.y);
+                    ctx.lineTo(p3.x, p3.y);
+                    ctx.closePath();
+                    ctx.fill();
+                    ctx.globalAlpha = 1;
+                }
+                if (tile.type === "road") {
+                    drawRoadOverlay(state, ctx, x, y, heightValue);
+                }
+                if (tile.type === "base") {
+                    drawBaseOnTile(state, ctx, x, y, heightValue);
+                }
+                if (tile.type === "house") {
+                    drawHouseOnTile(state, ctx, tile, x, y, heightValue);
                 }
             }
         }
@@ -356,4 +946,72 @@ export const ensureTerrainCache = (state, now) => {
         state.terrainDirty = false;
     }
     return terrainCache;
+};
+export const ensureTreeLayerCache = (state, now) => {
+    if (!RENDER_TERRAIN_TREES || !state.renderTrees) {
+        return null;
+    }
+    const { cols, rows } = state.grid;
+    const maxHeight = HEIGHT_SCALE;
+    const originX = -rows * ISO_TILE_WIDTH * 0.5 - TERRAIN_PADDING;
+    const originY = -maxHeight - TERRAIN_PADDING;
+    const width = (cols + rows) * ISO_TILE_WIDTH * 0.5 + TERRAIN_PADDING * 2;
+    const height = (cols + rows) * ISO_TILE_HEIGHT * 0.5 + maxHeight + TERRAIN_PADDING * 2;
+    const timeReady = !treeLayerCache || now - treeLayerCache.lastBuild > TERRAIN_CACHE_INTERVAL_MS;
+    const interactionCooldown = now - state.lastInteractionTime < TERRAIN_INTERACTION_COOLDOWN_MS;
+    const baseBuild = terrainCache?.lastBuild ?? 0;
+    const needsRebuild = !treeLayerCache ||
+        treeLayerCache.width !== Math.ceil(width) ||
+        treeLayerCache.height !== Math.ceil(height) ||
+        treeLayerCache.lastBuild < baseBuild ||
+        (state.terrainDirty && timeReady && !interactionCooldown);
+    if (!treeLayerCache) {
+        const canvas = document.createElement("canvas");
+        const ctx = canvas.getContext("2d");
+        if (!ctx) {
+            throw new Error("Canvas not supported");
+        }
+        treeLayerCache = {
+            canvas,
+            ctx,
+            originX,
+            originY,
+            width: Math.ceil(width),
+            height: Math.ceil(height),
+            lastBuild: 0,
+        };
+    }
+    if (needsRebuild) {
+        treeLayerCache.originX = originX;
+        treeLayerCache.originY = originY;
+        treeLayerCache.width = Math.ceil(width);
+        treeLayerCache.height = Math.ceil(height);
+        treeLayerCache.canvas.width = treeLayerCache.width;
+        treeLayerCache.canvas.height = treeLayerCache.height;
+        const ctx = treeLayerCache.ctx;
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
+        ctx.clearRect(0, 0, treeLayerCache.width, treeLayerCache.height);
+        ctx.setTransform(1, 0, 0, 1, -originX, -originY);
+        for (let sum = 0; sum <= cols + rows - 2; sum += 1) {
+            for (let x = 0; x < cols; x += 1) {
+                const y = sum - x;
+                if (y < 0 || y >= rows) {
+                    continue;
+                }
+                const tileIndex = indexFor(state.grid, x, y);
+                const tile = state.tiles[tileIndex];
+                if (tile.type !== "grass" && tile.type !== "forest") {
+                    continue;
+                }
+                const h00 = getSmoothedHeightAt(state, x, y);
+                const h10 = getSmoothedHeightAt(state, x + 1, y);
+                const h11 = getSmoothedHeightAt(state, x + 1, y + 1);
+                const h01 = getSmoothedHeightAt(state, x, y + 1);
+                const heightValue = (h00 + h10 + h11 + h01) * 0.25;
+                drawTreesOnTile(state, ctx, tile, x, y, heightValue, 1);
+            }
+        }
+        treeLayerCache.lastBuild = now;
+    }
+    return treeLayerCache;
 };

@@ -342,13 +342,17 @@ export function createUnit(state, kind, rng, rosterEntry) {
     const modifiers = getCharacterDefinition(state.campaign.characterId).modifiers;
     const rosterUnit = rosterEntry ?? state.roster.find((entry) => entry.kind === kind && entry.status === "available") ?? null;
     const training = rosterUnit ? getTrainingMultiplier(rosterUnit.training) : { speed: 1, power: 1, range: 1, resilience: 0 };
+    const spawnX = state.basePoint.x + 0.5;
+    const spawnY = state.basePoint.y + 0.5;
     return {
         id: Date.now() + Math.floor(rng.next() * 10000),
         kind,
         rosterId: rosterUnit ? rosterUnit.id : null,
         autonomous: kind !== "truck",
-        x: state.basePoint.x + 0.5,
-        y: state.basePoint.y + 0.5,
+        x: spawnX,
+        y: spawnY,
+        prevX: spawnX,
+        prevY: spawnY,
         target: null,
         path: [],
         pathIndex: 0,
@@ -573,6 +577,10 @@ export function getUnitAt(state, tileX, tileY) {
     return null;
 }
 export function stepUnits(state, delta) {
+    state.units.forEach((unit) => {
+        unit.prevX = unit.x;
+        unit.prevY = unit.y;
+    });
     const unitsById = new Map();
     state.units.forEach((unit) => {
         unitsById.set(unit.id, unit);

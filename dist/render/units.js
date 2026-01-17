@@ -57,7 +57,15 @@ const drawTargetMarker = (ctx, pos, size, color) => {
     ctx.closePath();
     ctx.stroke();
 };
-export const drawUnits = (state, ctx) => {
+export const drawUnits = (state, ctx, alpha = 1) => {
+    const t = Math.max(0, Math.min(1, alpha));
+    const renderPositions = new Map();
+    state.units.forEach((unit) => {
+        renderPositions.set(unit.id, {
+            x: unit.prevX + (unit.x - unit.prevX) * t,
+            y: unit.prevY + (unit.y - unit.prevY) * t
+        });
+    });
     const truckById = new Map();
     state.units.forEach((unit) => {
         if (unit.kind === "truck") {
@@ -82,11 +90,13 @@ export const drawUnits = (state, ctx) => {
             return;
         }
         const offset = crewOffsets.get(unit.id) ?? { x: 0, y: 0 };
-        const crewX = unit.x + offset.x;
-        const crewY = unit.y + offset.y;
-        const truckHeight = getRenderHeightAt(state, truck.x, truck.y);
+        const crewPos = renderPositions.get(unit.id) ?? { x: unit.x, y: unit.y };
+        const truckPos = renderPositions.get(truck.id) ?? { x: truck.x, y: truck.y };
+        const crewX = crewPos.x + offset.x;
+        const crewY = crewPos.y + offset.y;
+        const truckHeight = getRenderHeightAt(state, truckPos.x, truckPos.y);
         const crewHeight = getRenderHeightAt(state, crewX, crewY);
-        const truckAnchor = isoProject(truck.x, truck.y, truckHeight + TILE_SIZE * 0.35);
+        const truckAnchor = isoProject(truckPos.x, truckPos.y, truckHeight + TILE_SIZE * 0.35);
         const crewAnchor = isoProject(crewX, crewY, crewHeight + TILE_SIZE * 0.55);
         const dx = crewAnchor.x - truckAnchor.x;
         const dy = crewAnchor.y - truckAnchor.y;
@@ -104,8 +114,9 @@ export const drawUnits = (state, ctx) => {
     // Draw all units
     state.units.forEach((unit) => {
         const offset = unit.kind === "firefighter" ? crewOffsets.get(unit.id) ?? { x: 0, y: 0 } : { x: 0, y: 0 };
-        const unitX = unit.x + offset.x;
-        const unitY = unit.y + offset.y;
+        const unitPos = renderPositions.get(unit.id) ?? { x: unit.x, y: unit.y };
+        const unitX = unitPos.x + offset.x;
+        const unitY = unitPos.y + offset.y;
         const baseHeight = getRenderHeightAt(state, unitX, unitY);
         const ground = isoProject(unitX, unitY, baseHeight);
         const unitHeight = unit.kind === "truck" ? TILE_SIZE * 0.6 : TILE_SIZE * 0.75;

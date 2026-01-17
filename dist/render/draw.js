@@ -1,14 +1,326 @@
-import { TILE_SIZE } from "../core/config.js";
+import { TILE_SIZE, TILE_COLOR_RGB } from "../core/config.js";
 import { indexFor } from "../core/grid.js";
-import { getViewTransform, isoProject } from "./iso.js";
+import { getTileHeight, getViewTransform, isoProject } from "./iso.js";
 import { syncTileSoA } from "../core/state.js";
 import { getVisibleBounds } from "./view.js";
-import { ensureTerrainCache, getRenderHeightAt } from "./terrainCache.js";
+import { ensureTerrainCache, ensureTreeLayerCache, getRenderHeightAt } from "./terrainCache.js";
 import { updateFireSmoothing, drawFireFx } from "./fireFx.js";
 import { drawUnits } from "./units.js";
 import { drawParticles } from "./particles.js";
+import { clamp } from "../core/utils.js";
+import { darken, mixRgb } from "./color.js";
+import { hash2D } from "../mapgen/noise.js";
 const formatNumber = (value, digits = 3) => (Number.isFinite(value) ? value.toFixed(digits) : "inf");
 const formatOptional = (value, digits = 3) => typeof value === "number" ? value.toFixed(digits) : "n/a";
+const GRID_COLORS = {
+    grass: darken(TILE_COLOR_RGB.grass, 0.35),
+    forest: darken(TILE_COLOR_RGB.forest, 0.4),
+    ash: { r: 72, g: 62, b: 54 },
+    road: darken(TILE_COLOR_RGB.road, 0.28),
+    base: darken(TILE_COLOR_RGB.base, 0.2),
+    house: darken(TILE_COLOR_RGB.house, 0.2),
+    firebreak: darken(TILE_COLOR_RGB.firebreak, 0.25)
+};
+const rgbaString = (color, alpha) => `rgba(${Math.round(color.r)}, ${Math.round(color.g)}, ${Math.round(color.b)}, ${alpha})`;
+const COAST_EDGE_N = 1;
+const COAST_EDGE_E = 2;
+const COAST_EDGE_S = 4;
+const COAST_EDGE_W = 8;
+const COAST_BAND_PX = TILE_SIZE * 0.45;
+const COAST_JITTER_PX = 2.2;
+const COAST_BAND_ALPHA = 0.42;
+const COAST_BAND_ALPHA_JITTER = 0.18;
+const SHALLOW_WATER_COLOR = mixRgb(TILE_COLOR_RGB.water, TILE_COLOR_RGB.grass, 0.22);
+const getBaseTileColor = (state, tile) => {
+    if (tile.type === "grass" || tile.type === "forest") {
+        const canopy = clamp(tile.canopy, 0, 1);
+        return mixRgb(TILE_COLOR_RGB.grass, TILE_COLOR_RGB.forest, canopy);
+    }
+    if (tile.type === "ash") {
+        return TILE_COLOR_RGB.ash;
+    }
+    if (tile.type === "firebreak") {
+        return TILE_COLOR_RGB.firebreak;
+    }
+    return TILE_COLOR_RGB.grass;
+};
+const getShoreLandColor = (state, tile) => {
+    const base = getBaseTileColor(state, tile);
+    const sandMix = mixRgb(base, TILE_COLOR_RGB.firebreak, tile.type === "forest" ? 0.25 : 0.35);
+    return mixRgb(sandMix, TILE_COLOR_RGB.grass, 0.2);
+};
+const computeCoastEdgeMask = (state, x, y) => {
+    const tile = state.tiles[indexFor(state.grid, x, y)];
+    if (tile.type !== "water") {
+        return 0;
+    }
+    let mask = 0;
+    if (y > 0 && state.tiles[indexFor(state.grid, x, y - 1)].type !== "water") {
+        mask |= COAST_EDGE_N;
+    }
+    if (x < state.grid.cols - 1 && state.tiles[indexFor(state.grid, x + 1, y)].type !== "water") {
+        mask |= COAST_EDGE_E;
+    }
+    if (y < state.grid.rows - 1 && state.tiles[indexFor(state.grid, x, y + 1)].type !== "water") {
+        mask |= COAST_EDGE_S;
+    }
+    if (x > 0 && state.tiles[indexFor(state.grid, x - 1, y)].type !== "water") {
+        mask |= COAST_EDGE_W;
+    }
+    return mask;
+};
+const getWaterLandInfluence = (state, x, y) => {
+    const neighbors = [
+        { x: x + 1, y, w: 1 },
+        { x: x - 1, y, w: 1 },
+        { x, y: y + 1, w: 1 },
+        { x, y: y - 1, w: 1 },
+        { x: x + 1, y: y + 1, w: 0.7 },
+        { x: x + 1, y: y - 1, w: 0.7 },
+        { x: x - 1, y: y + 1, w: 0.7 },
+        { x: x - 1, y: y - 1, w: 0.7 }
+    ];
+    let landWeight = 0;
+    let totalWeight = 0;
+    neighbors.forEach((pos) => {
+        totalWeight += pos.w;
+        if (pos.x < 0 || pos.y < 0 || pos.x >= state.grid.cols || pos.y >= state.grid.rows) {
+            landWeight += pos.w;
+            return;
+        }
+        const neighbor = state.tiles[indexFor(state.grid, pos.x, pos.y)];
+        if (neighbor.type !== "water") {
+            landWeight += pos.w;
+        }
+    });
+    return totalWeight > 0 ? clamp(landWeight / totalWeight, 0, 1) : 0;
+};
+const getSmoothedWaterInfluence = (state, x, y) => {
+    let sum = getWaterLandInfluence(state, x, y);
+    let count = 1;
+    const cardinals = [
+        { x: x + 1, y },
+        { x: x - 1, y },
+        { x, y: y + 1 },
+        { x, y: y - 1 }
+    ];
+    cardinals.forEach((pos) => {
+        if (pos.x < 0 || pos.y < 0 || pos.x >= state.grid.cols || pos.y >= state.grid.rows) {
+            return;
+        }
+        const neighbor = state.tiles[indexFor(state.grid, pos.x, pos.y)];
+        if (neighbor.type !== "water") {
+            return;
+        }
+        sum += getWaterLandInfluence(state, pos.x, pos.y);
+        count += 1;
+    });
+    return clamp(sum / count, 0, 1);
+};
+const getWaterSurfaceCorners = (state, x, y) => {
+    const tile = state.tiles[indexFor(state.grid, x, y)];
+    const waterHeight = getTileHeight(tile);
+    const landInfluence = getSmoothedWaterInfluence(state, x, y);
+    const surfaceBlend = clamp(landInfluence * 0.85, 0, 0.8);
+    const h00 = getRenderHeightAt(state, x, y);
+    const h10 = getRenderHeightAt(state, x + 1, y);
+    const h11 = getRenderHeightAt(state, x + 1, y + 1);
+    const h01 = getRenderHeightAt(state, x, y + 1);
+    const w00 = waterHeight + (h00 - waterHeight) * surfaceBlend;
+    const w10 = waterHeight + (h10 - waterHeight) * surfaceBlend;
+    const w11 = waterHeight + (h11 - waterHeight) * surfaceBlend;
+    const w01 = waterHeight + (h01 - waterHeight) * surfaceBlend;
+    const p0 = isoProject(x, y, w00);
+    const p1 = isoProject(x + 1, y, w10);
+    const p2 = isoProject(x + 1, y + 1, w11);
+    const p3 = isoProject(x, y + 1, w01);
+    return { p0, p1, p2, p3, landInfluence };
+};
+const drawCoastBandForTile = (state, ctx, x, y, view) => {
+    const edgeMask = computeCoastEdgeMask(state, x, y);
+    if (!edgeMask) {
+        return;
+    }
+    const { p0, p1, p2, p3, landInfluence } = getWaterSurfaceCorners(state, x, y);
+    const center = {
+        x: (p0.x + p1.x + p2.x + p3.x) * 0.25,
+        y: (p0.y + p1.y + p2.y + p3.y) * 0.25
+    };
+    const bandBase = COAST_BAND_PX / Math.max(0.5, view.scale);
+    const edgeCount = (edgeMask & COAST_EDGE_N ? 1 : 0) +
+        (edgeMask & COAST_EDGE_E ? 1 : 0) +
+        (edgeMask & COAST_EDGE_S ? 1 : 0) +
+        (edgeMask & COAST_EDGE_W ? 1 : 0);
+    const alphaScale = edgeCount > 0 ? 1 / edgeCount : 1;
+    const drawEdge = (edgeId, a, b, neighborTile) => {
+        const noise = hash2D(x + edgeId * 11, y + edgeId * 29, state.seed + 991);
+        const jitter = (noise * 2 - 1) * COAST_JITTER_PX / Math.max(0.5, view.scale);
+        const band = Math.max(0.5 / Math.max(0.5, view.scale), bandBase + jitter);
+        const dx = b.x - a.x;
+        const dy = b.y - a.y;
+        const len = Math.hypot(dx, dy) || 1;
+        let nx = -dy / len;
+        let ny = dx / len;
+        const mid = { x: (a.x + b.x) * 0.5, y: (a.y + b.y) * 0.5 };
+        const toCenter = { x: center.x - mid.x, y: center.y - mid.y };
+        if (nx * toCenter.x + ny * toCenter.y < 0) {
+            nx = -nx;
+            ny = -ny;
+        }
+        const a2 = { x: a.x + nx * band, y: a.y + ny * band };
+        const b2 = { x: b.x + nx * band, y: b.y + ny * band };
+        const outerMid = { x: (a.x + b.x) * 0.5, y: (a.y + b.y) * 0.5 };
+        const innerMid = { x: (a2.x + b2.x) * 0.5, y: (a2.y + b2.y) * 0.5 };
+        const landColor = getShoreLandColor(state, neighborTile);
+        const shoreBase = mixRgb(SHALLOW_WATER_COLOR, TILE_COLOR_RGB.water, 0.35);
+        const outerColor = mixRgb(shoreBase, landColor, 0.18 + landInfluence * 0.12);
+        const grad = ctx.createLinearGradient(outerMid.x, outerMid.y, innerMid.x, innerMid.y);
+        const alphaJitter = 1 + (hash2D(x + edgeId * 17, y + edgeId * 37, state.seed + 733) - 0.5) * COAST_BAND_ALPHA_JITTER;
+        const edgeAlpha = clamp(COAST_BAND_ALPHA * alphaScale * alphaJitter, 0, 0.6);
+        grad.addColorStop(0, rgbaString(outerColor, edgeAlpha));
+        grad.addColorStop(1, rgbaString(TILE_COLOR_RGB.water, 0));
+        ctx.fillStyle = grad;
+        ctx.beginPath();
+        ctx.moveTo(a.x, a.y);
+        ctx.lineTo(b.x, b.y);
+        ctx.lineTo(b2.x, b2.y);
+        ctx.lineTo(a2.x, a2.y);
+        ctx.closePath();
+        ctx.fill();
+    };
+    if (edgeMask & COAST_EDGE_N) {
+        const neighbor = state.tiles[indexFor(state.grid, x, y - 1)];
+        drawEdge(1, p0, p1, neighbor);
+    }
+    if (edgeMask & COAST_EDGE_E) {
+        const neighbor = state.tiles[indexFor(state.grid, x + 1, y)];
+        drawEdge(2, p1, p2, neighbor);
+    }
+    if (edgeMask & COAST_EDGE_S) {
+        const neighbor = state.tiles[indexFor(state.grid, x, y + 1)];
+        drawEdge(3, p2, p3, neighbor);
+    }
+    if (edgeMask & COAST_EDGE_W) {
+        const neighbor = state.tiles[indexFor(state.grid, x - 1, y)];
+        drawEdge(4, p3, p0, neighbor);
+    }
+};
+const drawCoastBands = (state, canvas, ctx, view) => {
+    const bounds = getVisibleBounds(state, canvas, view);
+    for (let y = bounds.startY; y <= bounds.endY; y += 1) {
+        for (let x = bounds.startX; x <= bounds.endX; x += 1) {
+            if (state.tiles[indexFor(state.grid, x, y)].type !== "water") {
+                continue;
+            }
+            drawCoastBandForTile(state, ctx, x, y, view);
+        }
+    }
+};
+const drawGridOverlay = (state, canvas, ctx, view) => {
+    const zoomFactor = clamp((view.scale - 0.75) / 1.3, 0, 1);
+    const gridActive = state.deployMode !== null ||
+        state.selectedUnitIds.length > 0 ||
+        state.selectionBox !== null ||
+        state.formationStart !== null ||
+        state.formationEnd !== null ||
+        state.clearLineStart !== null;
+    const hoverBoost = state.debugHoverTile !== null;
+    const baseAlpha = 0.03 + 0.1 * zoomFactor;
+    const boostAlpha = (gridActive || hoverBoost ? 0.24 : 0) * zoomFactor;
+    const alpha = clamp(baseAlpha + boostAlpha, 0, 0.35);
+    if (alpha < 0.02) {
+        return;
+    }
+    const bounds = getVisibleBounds(state, canvas, view);
+    ctx.save();
+    ctx.lineWidth = Math.max(0.8, 1.1 / view.scale);
+    for (let y = bounds.startY; y <= bounds.endY; y += 1) {
+        for (let x = bounds.startX; x <= bounds.endX; x += 1) {
+            const idx = indexFor(state.grid, x, y);
+            const tile = state.tiles[idx];
+            if (tile.type === "water" || tile.type === "road" || tile.type === "base" || tile.type === "house") {
+                continue;
+            }
+            let tileAlpha = alpha;
+            if (tile.type === "forest") {
+                tileAlpha *= 0.75;
+            }
+            else if (tile.type === "ash") {
+                tileAlpha *= 0.6;
+            }
+            if (tile.waterDist <= 1) {
+                tileAlpha *= 0.2;
+            }
+            else if (tile.waterDist === 2) {
+                tileAlpha *= 0.5;
+            }
+            const nearRoad = (x > 0 && ["road", "base"].includes(state.tiles[indexFor(state.grid, x - 1, y)].type)) ||
+                (x < state.grid.cols - 1 && ["road", "base"].includes(state.tiles[indexFor(state.grid, x + 1, y)].type)) ||
+                (y > 0 && ["road", "base"].includes(state.tiles[indexFor(state.grid, x, y - 1)].type)) ||
+                (y < state.grid.rows - 1 && ["road", "base"].includes(state.tiles[indexFor(state.grid, x, y + 1)].type));
+            if (nearRoad) {
+                tileAlpha *= 0.3;
+            }
+            if (tileAlpha < 0.01) {
+                continue;
+            }
+            const p0 = isoProject(x, y, getRenderHeightAt(state, x, y));
+            const p1 = isoProject(x + 1, y, getRenderHeightAt(state, x + 1, y));
+            const p2 = isoProject(x + 1, y + 1, getRenderHeightAt(state, x + 1, y + 1));
+            const p3 = isoProject(x, y + 1, getRenderHeightAt(state, x, y + 1));
+            const color = GRID_COLORS[tile.type] ?? GRID_COLORS.grass;
+            ctx.strokeStyle = rgbaString(color, tileAlpha);
+            const edgeAllowed = (nx, ny) => {
+                if (nx < 0 || ny < 0 || nx >= state.grid.cols || ny >= state.grid.rows) {
+                    return false;
+                }
+                const neighbor = state.tiles[indexFor(state.grid, nx, ny)];
+                return neighbor.type !== "water" && neighbor.type !== "road" && neighbor.type !== "base";
+            };
+            if (edgeAllowed(x, y - 1)) {
+                ctx.beginPath();
+                ctx.moveTo(p0.x, p0.y);
+                ctx.lineTo(p1.x, p1.y);
+                ctx.stroke();
+            }
+            if (edgeAllowed(x + 1, y)) {
+                ctx.beginPath();
+                ctx.moveTo(p1.x, p1.y);
+                ctx.lineTo(p2.x, p2.y);
+                ctx.stroke();
+            }
+            if (edgeAllowed(x, y + 1)) {
+                ctx.beginPath();
+                ctx.moveTo(p2.x, p2.y);
+                ctx.lineTo(p3.x, p3.y);
+                ctx.stroke();
+            }
+            if (edgeAllowed(x - 1, y)) {
+                ctx.beginPath();
+                ctx.moveTo(p3.x, p3.y);
+                ctx.lineTo(p0.x, p0.y);
+                ctx.stroke();
+            }
+        }
+    }
+    if (state.debugHoverTile) {
+        const { x, y } = state.debugHoverTile;
+        const p0 = isoProject(x, y, getRenderHeightAt(state, x, y));
+        const p1 = isoProject(x + 1, y, getRenderHeightAt(state, x + 1, y));
+        const p2 = isoProject(x + 1, y + 1, getRenderHeightAt(state, x + 1, y + 1));
+        const p3 = isoProject(x, y + 1, getRenderHeightAt(state, x, y + 1));
+        ctx.strokeStyle = "rgba(255, 255, 255, 0.35)";
+        ctx.lineWidth = Math.max(1.2, 1.6 / view.scale);
+        ctx.beginPath();
+        ctx.moveTo(p0.x, p0.y);
+        ctx.lineTo(p1.x, p1.y);
+        ctx.lineTo(p2.x, p2.y);
+        ctx.lineTo(p3.x, p3.y);
+        ctx.closePath();
+        ctx.stroke();
+    }
+    ctx.restore();
+};
 const drawDebugCellHighlight = (state, ctx, view, tileX, tileY) => {
     const idx = indexFor(state.grid, tileX, tileY);
     const p0 = isoProject(tileX, tileY, getRenderHeightAt(state, tileX, tileY));
@@ -96,8 +408,9 @@ const drawDebugCellPanel = (state, canvas, ctx, tileX, tileY) => {
  * @param state The current world state.
  * @param canvas The target HTML canvas element.
  * @param ctx The 2D rendering context of the canvas.
+ * @param alpha Interpolation factor between the previous and current sim step.
  */
-export function draw(state, canvas, ctx) {
+export function draw(state, canvas, ctx, alpha = 1) {
     // Ensure the Structure-of-Arrays tile data is in sync with the main state.
     syncTileSoA(state);
     const view = getViewTransform(state, canvas);
@@ -114,6 +427,12 @@ export function draw(state, canvas, ctx) {
     ctx.setTransform(view.scale, 0, 0, view.scale, view.offsetX, view.offsetY);
     // Draw the pre-rendered terrain from its cache
     ctx.drawImage(cache.canvas, cache.originX, cache.originY);
+    drawCoastBands(state, canvas, ctx, view);
+    drawGridOverlay(state, canvas, ctx, view);
+    const treeLayer = ensureTreeLayerCache(state, now);
+    if (treeLayer) {
+        ctx.drawImage(treeLayer.canvas, treeLayer.originX, treeLayer.originY);
+    }
     if (state.renderEffects) {
         // Draw formation line for units
         if (state.formationStart && state.formationEnd) {
@@ -134,7 +453,7 @@ export function draw(state, canvas, ctx) {
         // Draw all fire effects
         drawFireFx(state, ctx, now, visibleBounds, view);
         // Draw all units and their related effects (selection, hoses)
-        drawUnits(state, ctx);
+        drawUnits(state, ctx, alpha);
         // Draw non-fire particles (smoke, water)
         drawParticles(state, ctx);
     }

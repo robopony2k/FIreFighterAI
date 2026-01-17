@@ -153,10 +153,11 @@ else {
             stepSim(state, rng, simStep);
             accumulator -= baseStep;
         }
+        const alpha = state.paused || state.gameOver ? 1 : Math.min(1, Math.max(0, accumulator / baseStep));
         persistScoreIfNeeded();
         phaseUi?.sync(state);
         updateOverlay(overlayRefs, state);
-        draw(state, canvas, ctx);
+        draw(state, canvas, ctx, alpha);
         requestAnimationFrame(frame);
     };
     requestAnimationFrame(frame);

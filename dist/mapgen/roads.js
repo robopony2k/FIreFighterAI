@@ -65,11 +65,24 @@ export function findRoadPath(state, start, end, options = {}) {
             { x: x + 1, y },
             { x: x - 1, y },
             { x, y: y + 1 },
-            { x, y: y - 1 }
+            { x, y: y - 1 },
+            { x: x + 1, y: y + 1 },
+            { x: x + 1, y: y - 1 },
+            { x: x - 1, y: y + 1 },
+            { x: x - 1, y: y - 1 }
         ];
         for (const next of neighbors) {
             if (!canRoadTraverse(state, next.x, next.y, start, end, options)) {
                 continue;
+            }
+            if (next.x !== x && next.y !== y) {
+                const dx = next.x - x;
+                const dy = next.y - y;
+                const passA = canRoadTraverse(state, x + dx, y, start, end, options);
+                const passB = canRoadTraverse(state, x, y + dy, start, end, options);
+                if (!passA && !passB) {
+                    continue;
+                }
             }
             const idx = indexFor(state.grid, next.x, next.y);
             if (prev[idx] !== -1) {
@@ -131,11 +144,24 @@ export function findRoadPathToTarget(state, start, isTarget, options = {}) {
             { x: x + 1, y },
             { x: x - 1, y },
             { x, y: y + 1 },
-            { x, y: y - 1 }
+            { x, y: y - 1 },
+            { x: x + 1, y: y + 1 },
+            { x: x + 1, y: y - 1 },
+            { x: x - 1, y: y + 1 },
+            { x: x - 1, y: y - 1 }
         ];
         for (const next of neighbors) {
             if (!canRoadTraverse(state, next.x, next.y, start, start, options)) {
                 continue;
+            }
+            if (next.x !== x && next.y !== y) {
+                const dx = next.x - x;
+                const dy = next.y - y;
+                const passA = canRoadTraverse(state, x + dx, y, start, start, options);
+                const passB = canRoadTraverse(state, x, y + dy, start, start, options);
+                if (!passA && !passB) {
+                    continue;
+                }
             }
             const idx = indexFor(state.grid, next.x, next.y);
             if (prev[idx] !== -1) {
