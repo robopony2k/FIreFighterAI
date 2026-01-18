@@ -25,83 +25,976 @@
             <h2>Start a New Campaign</h2>
             <p>Set the seed, map size, and options before selecting your chief.</p>
           </div>
-          <div class="run-settings">
-            <div class="run-settings-card">
-              <div class="run-settings-title">Seed</div>
-              <label class="run-input">
-                Seed value
-                <input id="runSeedInput" type="number" inputmode="numeric" min="0" step="1" value="1337" />
-              </label>
-              <div class="run-settings-note">Default: 1337.</div>
-            </div>
-            <div class="run-settings-card">
-              <div class="run-settings-title">Map Size</div>
-              <div class="run-size-options">
-                <label class="run-size-option">
-                  <input type="radio" name="mapSize" value="small" />
-                  <div>
-                    <div class="run-size-name">Small</div>
-                    <div class="run-size-meta">48 x 48</div>
-                  </div>
-                </label>
-                <label class="run-size-option">
-                  <input type="radio" name="mapSize" value="medium" checked />
-                  <div>
-                    <div class="run-size-name">Medium</div>
-                    <div class="run-size-meta">64 x 64</div>
-                  </div>
-                </label>
-                <label class="run-size-option">
-                  <input type="radio" name="mapSize" value="large" />
-                  <div>
-                    <div class="run-size-name">Large</div>
-                    <div class="run-size-meta">80 x 80</div>
-                  </div>
-                </label>
-                <label class="run-size-option">
-                  <input type="radio" name="mapSize" value="huge" />
-                  <div>
-                    <div class="run-size-name">Huge</div>
-                    <div class="run-size-meta">96 x 96</div>
-                  </div>
-                </label>
+          <div class="run-tabs" role="tablist">
+            <button type="button" class="run-tab is-active" data-tab="roster" aria-selected="true">
+              Command Roster
+            </button>
+            <button type="button" class="run-tab" data-tab="terrain" aria-selected="false">Terrain</button>
+            <button type="button" class="run-tab" data-tab="climate" aria-selected="false">Climate</button>
+            <button type="button" class="run-tab" data-tab="fire" aria-selected="false">Fire</button>
+            <button type="button" class="run-tab" data-tab="other" aria-selected="false">Other</button>
+          </div>
+          <div class="run-tab-panels">
+            <section class="run-tab-panel is-active" data-tab-panel="roster">
+              <div class="character-header character-header--sub">
+                <div class="badge">COMMAND ROSTER</div>
+                <h2>Choose Your Fire Chief</h2>
+                <p>Different leadership styles shape budgets, response speed, and containment.</p>
               </div>
-            </div>
-            <div class="run-settings-card">
-              <div class="run-settings-title">Other Settings</div>
-              <label class="run-checkbox">
-                <input id="runUnlimitedMoney" type="checkbox" />
-                Unlimited money (TBC)
-              </label>
-              <label class="run-checkbox">
-                <input type="checkbox" disabled />
-                Additional options (TBC)
-              </label>
-              <div class="run-settings-note">Placeholder toggles for upcoming modifiers.</div>
-            </div>
-          </div>
-          <div class="character-header character-header--sub">
-            <div class="badge">COMMAND ROSTER</div>
-            <h2>Choose Your Fire Chief</h2>
-            <p>Different leadership styles shape budgets, response speed, and containment.</p>
-          </div>
-          <div class="character-preview">
-            <div id="characterPreviewPortrait" class="character-preview-portrait">
-              <img id="characterPreviewImage" class="character-preview-image" alt="Selected chief portrait" />
-              <span id="characterPreviewInitials"></span>
-            </div>
-            <div class="character-preview-fields">
-              <label class="character-input">
-                Callsign
-                <div class="character-input-row">
-                  <input id="characterNameInput" type="text" maxlength="24" />
-                  <button id="characterNameRandom" type="button">Random</button>
+              <div class="character-preview">
+                <div id="characterPreviewPortrait" class="character-preview-portrait">
+                  <img id="characterPreviewImage" class="character-preview-image" alt="Selected chief portrait" />
+                  <span id="characterPreviewInitials"></span>
                 </div>
-              </label>
-              <div class="character-input-note">Callsign is used for leaderboards only.</div>
-            </div>
+                <div class="character-preview-fields">
+                  <label class="character-input">
+                    Callsign
+                    <div class="character-input-row">
+                      <input id="characterNameInput" type="text" maxlength="24" />
+                      <button id="characterNameRandom" type="button">Random</button>
+                    </div>
+                  </label>
+                  <div class="character-input-note">Callsign is used for leaderboards only.</div>
+                </div>
+              </div>
+              <div id="characterGrid" class="character-grid"></div>
+              <div class="run-settings">
+                <div class="run-settings-card">
+                  <div class="run-settings-title">Starting Roster</div>
+                  <label class="run-input">
+                    Firefighters
+                    <input type="number" min="0" step="1" value="2" disabled />
+                  </label>
+                  <label class="run-input">
+                    Trucks
+                    <input type="number" min="0" step="1" value="1" disabled />
+                  </label>
+                  <div class="run-settings-note">Defaults shown. Not wired yet.</div>
+                </div>
+                <div class="run-settings-card">
+                  <div class="run-settings-title">Unit Economy</div>
+                  <label class="run-input">
+                    Recruit firefighter cost
+                    <input type="number" min="0" step="1" value="140" disabled />
+                  </label>
+                  <label class="run-input">
+                    Recruit truck cost
+                    <input type="number" min="0" step="1" value="320" disabled />
+                  </label>
+                  <label class="run-input">
+                    Training cost
+                    <input type="number" min="0" step="1" value="90" disabled />
+                  </label>
+                  <label class="run-input">
+                    Max training level
+                    <input type="number" min="0" step="1" value="5" disabled />
+                  </label>
+                  <div class="run-settings-note">Defaults shown. Not wired yet.</div>
+                </div>
+                <div class="run-settings-card">
+                  <div class="run-settings-title">Training Gains</div>
+                  <label class="run-input">
+                    Speed gain per level
+                    <input type="number" min="0" step="0.01" value="0.08" disabled />
+                  </label>
+                  <label class="run-input">
+                    Power gain per level
+                    <input type="number" min="0" step="0.01" value="0.12" disabled />
+                  </label>
+                  <label class="run-input">
+                    Range gain per level
+                    <input type="number" min="0" step="0.01" value="0.1" disabled />
+                  </label>
+                  <label class="run-input">
+                    Resilience gain per level
+                    <input type="number" min="0" step="0.01" value="0.12" disabled />
+                  </label>
+                  <div class="run-settings-note">Defaults shown. Not wired yet.</div>
+                </div>
+                <div class="run-settings-card">
+                  <div class="run-settings-title">Unit Performance</div>
+                  <label class="run-input">
+                    Firefighter speed
+                    <input type="number" min="0" step="0.1" value="3.2" disabled />
+                  </label>
+                  <label class="run-input">
+                    Firefighter power
+                    <input type="number" min="0" step="0.01" value="0.5" disabled />
+                  </label>
+                  <label class="run-input">
+                    Firefighter radius
+                    <input type="number" min="0" step="0.1" value="1.1" disabled />
+                  </label>
+                  <label class="run-input">
+                    Truck speed
+                    <input type="number" min="0" step="0.1" value="5.4" disabled />
+                  </label>
+                  <label class="run-input">
+                    Truck power
+                    <input type="number" min="0" step="0.01" value="0.75" disabled />
+                  </label>
+                  <label class="run-input">
+                    Truck radius
+                    <input type="number" min="0" step="0.1" value="2.2" disabled />
+                  </label>
+                  <div class="run-settings-note">Defaults shown. Not wired yet.</div>
+                </div>
+                <div class="run-settings-card">
+                  <div class="run-settings-title">Movement + Formation</div>
+                  <label class="run-input">
+                    Truck capacity
+                    <input type="number" min="0" step="1" value="3" disabled />
+                  </label>
+                  <label class="run-input">
+                    Truck board radius
+                    <input type="number" min="0" step="0.1" value="1.6" disabled />
+                  </label>
+                  <label class="run-input">
+                    Firefighter tether distance
+                    <input type="number" min="0" step="1" value="10" disabled />
+                  </label>
+                  <label class="run-input">
+                    Formation spacing (narrow)
+                    <input type="number" min="0" step="0.1" value="1.5" disabled />
+                  </label>
+                  <label class="run-input">
+                    Formation spacing (medium)
+                    <input type="number" min="0" step="0.1" value="2.5" disabled />
+                  </label>
+                  <label class="run-input">
+                    Formation spacing (wide)
+                    <input type="number" min="0" step="0.1" value="4" disabled />
+                  </label>
+                  <label class="run-input">
+                    Move uphill factor
+                    <input type="number" min="0" step="0.1" value="2.1" disabled />
+                  </label>
+                  <label class="run-input">
+                    Move downhill factor
+                    <input type="number" min="0" step="0.1" value="0.8" disabled />
+                  </label>
+                  <label class="run-input">
+                    Move slope min
+                    <input type="number" min="0" step="0.01" value="0.65" disabled />
+                  </label>
+                  <label class="run-input">
+                    Move slope max
+                    <input type="number" min="0" step="0.01" value="2.2" disabled />
+                  </label>
+                  <label class="run-input">
+                    Unit loss fire threshold
+                    <input type="number" min="0" step="0.01" value="0.55" disabled />
+                  </label>
+                  <div class="run-settings-note">Defaults shown. Not wired yet.</div>
+                </div>
+                <div class="run-settings-card">
+                  <div class="run-settings-title">Firebreak Cost</div>
+                  <label class="run-input">
+                    Cost per tile
+                    <input type="number" min="0" step="1" value="45" disabled />
+                  </label>
+                  <div class="run-settings-note">Defaults shown. Not wired yet.</div>
+                </div>
+              </div>
+            </section>
+            <section class="run-tab-panel" data-tab-panel="terrain">
+              <div class="run-settings">
+                <div class="run-settings-card">
+                  <div class="run-settings-title">Seed</div>
+                  <label class="run-input">
+                    Seed value
+                    <input id="runSeedInput" type="number" inputmode="numeric" min="0" step="1" value="1337" />
+                  </label>
+                  <div class="run-settings-note">Default: 1337.</div>
+                </div>
+                <div class="run-settings-card">
+                  <div class="run-settings-title">Map Size</div>
+                  <div class="run-size-options">
+                    <label class="run-size-option">
+                      <input type="radio" name="mapSize" value="medium" checked />
+                      <div>
+                        <div class="run-size-name">Medium</div>
+                        <div class="run-size-meta">64 x 64</div>
+                      </div>
+                    </label>
+                    <label class="run-size-option">
+                      <input type="radio" name="mapSize" value="massive" />
+                      <div>
+                        <div class="run-size-name">Massive</div>
+                        <div class="run-size-meta">128 x 128</div>
+                      </div>
+                    </label>
+                    <label class="run-size-option">
+                      <input type="radio" name="mapSize" value="colossal" />
+                      <div>
+                        <div class="run-size-name">Colossal</div>
+                        <div class="run-size-meta">256 x 256</div>
+                      </div>
+                    </label>
+                    <label class="run-size-option">
+                      <input type="radio" name="mapSize" value="gigantic" />
+                      <div>
+                        <div class="run-size-name">Gigantic</div>
+                        <div class="run-size-meta">512 x 512</div>
+                      </div>
+                    </label>
+                    <label class="run-size-option">
+                      <input type="radio" name="mapSize" value="titanic" />
+                      <div>
+                        <div class="run-size-name">Titanic</div>
+                        <div class="run-size-meta">1024 x 1024</div>
+                      </div>
+                    </label>
+                  </div>
+                </div>
+                <div class="run-settings-card">
+                  <div class="run-settings-title">Forests & Meadows</div>
+                  <label class="run-slider">
+                    Forest patch size
+                    <div class="run-slider-row">
+                      <input
+                        id="runForestMacroScale"
+                        type="range"
+                        min="10"
+                        max="32"
+                        step="1"
+                        value="18"
+                        data-mapgen-key="forestMacroScale"
+                        data-format="int"
+                        data-output="runForestMacroScaleValue"
+                      />
+                      <output id="runForestMacroScaleValue" for="runForestMacroScale" class="run-slider-value">
+                        18
+                      </output>
+                    </div>
+                  </label>
+                  <label class="run-slider">
+                    Forest detail scale
+                    <div class="run-slider-row">
+                      <input
+                        id="runForestDetailScale"
+                        type="range"
+                        min="4"
+                        max="16"
+                        step="1"
+                        value="8"
+                        data-mapgen-key="forestDetailScale"
+                        data-format="int"
+                        data-output="runForestDetailScaleValue"
+                      />
+                      <output id="runForestDetailScaleValue" for="runForestDetailScale" class="run-slider-value">
+                        8
+                      </output>
+                    </div>
+                  </label>
+                  <label class="run-slider">
+                    Forest density
+                    <div class="run-slider-row">
+                      <input
+                        id="runForestThreshold"
+                        type="range"
+                        min="0.5"
+                        max="0.8"
+                        step="0.01"
+                        value="0.66"
+                        data-mapgen-key="forestThreshold"
+                        data-format="fixed2"
+                        data-output="runForestThresholdValue"
+                      />
+                      <output id="runForestThresholdValue" for="runForestThreshold" class="run-slider-value">
+                        0.66
+                      </output>
+                    </div>
+                  </label>
+                  <label class="run-slider">
+                    Highland forest elevation
+                    <div class="run-slider-row">
+                      <input
+                        id="runHighlandForestElevation"
+                        type="range"
+                        min="0.6"
+                        max="0.9"
+                        step="0.01"
+                        value="0.74"
+                        data-mapgen-key="highlandForestElevation"
+                        data-format="fixed2"
+                        data-output="runHighlandForestElevationValue"
+                      />
+                      <output
+                        id="runHighlandForestElevationValue"
+                        for="runHighlandForestElevation"
+                        class="run-slider-value"
+                      >
+                        0.74
+                      </output>
+                    </div>
+                  </label>
+                  <label class="run-slider">
+                    Meadow scale
+                    <div class="run-slider-row">
+                      <input
+                        id="runMeadowScale"
+                        type="range"
+                        min="10"
+                        max="40"
+                        step="1"
+                        value="22"
+                        data-mapgen-key="meadowScale"
+                        data-format="int"
+                        data-output="runMeadowScaleValue"
+                      />
+                      <output id="runMeadowScaleValue" for="runMeadowScale" class="run-slider-value">22</output>
+                    </div>
+                  </label>
+                  <label class="run-slider">
+                    Meadow threshold
+                    <div class="run-slider-row">
+                      <input
+                        id="runMeadowThreshold"
+                        type="range"
+                        min="0.4"
+                        max="0.8"
+                        step="0.01"
+                        value="0.58"
+                        data-mapgen-key="meadowThreshold"
+                        data-format="fixed2"
+                        data-output="runMeadowThresholdValue"
+                      />
+                      <output id="runMeadowThresholdValue" for="runMeadowThreshold" class="run-slider-value">
+                        0.58
+                      </output>
+                    </div>
+                  </label>
+                  <label class="run-slider">
+                    Meadow strength
+                    <div class="run-slider-row">
+                      <input
+                        id="runMeadowStrength"
+                        type="range"
+                        min="0"
+                        max="1"
+                        step="0.01"
+                        value="0.75"
+                        data-mapgen-key="meadowStrength"
+                        data-format="fixed2"
+                        data-output="runMeadowStrengthValue"
+                      />
+                      <output id="runMeadowStrengthValue" for="runMeadowStrength" class="run-slider-value">
+                        0.75
+                      </output>
+                    </div>
+                  </label>
+                  <label class="run-slider">
+                    Grass canopy base
+                    <div class="run-slider-row">
+                      <input
+                        id="runGrassCanopyBase"
+                        type="range"
+                        min="0"
+                        max="0.2"
+                        step="0.01"
+                        value="0.05"
+                        data-mapgen-key="grassCanopyBase"
+                        data-format="fixed2"
+                        data-output="runGrassCanopyBaseValue"
+                      />
+                      <output id="runGrassCanopyBaseValue" for="runGrassCanopyBase" class="run-slider-value">
+                        0.05
+                      </output>
+                    </div>
+                  </label>
+                  <label class="run-slider">
+                    Grass canopy range
+                    <div class="run-slider-row">
+                      <input
+                        id="runGrassCanopyRange"
+                        type="range"
+                        min="0"
+                        max="0.4"
+                        step="0.01"
+                        value="0.22"
+                        data-mapgen-key="grassCanopyRange"
+                        data-format="fixed2"
+                        data-output="runGrassCanopyRangeValue"
+                      />
+                      <output id="runGrassCanopyRangeValue" for="runGrassCanopyRange" class="run-slider-value">
+                        0.22
+                      </output>
+                    </div>
+                  </label>
+                </div>
+                <div class="run-settings-card">
+                  <div class="run-settings-title">Water & Rivers</div>
+                  <label class="run-slider">
+                    Base water threshold
+                    <div class="run-slider-row">
+                      <input
+                        id="runBaseWaterThreshold"
+                        type="range"
+                        min="0.08"
+                        max="0.22"
+                        step="0.01"
+                        value="0.14"
+                        data-mapgen-key="baseWaterThreshold"
+                        data-format="fixed2"
+                        data-output="runBaseWaterThresholdValue"
+                      />
+                      <output id="runBaseWaterThresholdValue" for="runBaseWaterThreshold" class="run-slider-value">
+                        0.14
+                      </output>
+                    </div>
+                  </label>
+                  <label class="run-slider">
+                    Coast water bias
+                    <div class="run-slider-row">
+                      <input
+                        id="runEdgeWaterBias"
+                        type="range"
+                        min="0"
+                        max="0.25"
+                        step="0.01"
+                        value="0.14"
+                        data-mapgen-key="edgeWaterBias"
+                        data-format="fixed2"
+                        data-output="runEdgeWaterBiasValue"
+                      />
+                      <output id="runEdgeWaterBiasValue" for="runEdgeWaterBias" class="run-slider-value">0.14</output>
+                    </div>
+                  </label>
+                  <label class="run-slider">
+                    River water bias
+                    <div class="run-slider-row">
+                      <input
+                        id="runRiverWaterBias"
+                        type="range"
+                        min="0"
+                        max="0.3"
+                        step="0.01"
+                        value="0.18"
+                        data-mapgen-key="riverWaterBias"
+                        data-format="fixed2"
+                        data-output="runRiverWaterBiasValue"
+                      />
+                      <output id="runRiverWaterBiasValue" for="runRiverWaterBias" class="run-slider-value">
+                        0.18
+                      </output>
+                    </div>
+                  </label>
+                </div>
+                <div class="run-settings-card">
+                  <div class="run-settings-title">Fuel Profiles</div>
+                  <label class="run-input">
+                    Tile type
+                    <select disabled>
+                      <option>Grass</option>
+                      <option>Forest</option>
+                      <option>House</option>
+                      <option>Base</option>
+                      <option>Road</option>
+                      <option>Firebreak</option>
+                      <option>Ash</option>
+                      <option>Water</option>
+                    </select>
+                  </label>
+                  <label class="run-input">
+                    Base fuel
+                    <input type="number" min="0" step="0.01" value="0.3" disabled />
+                  </label>
+                  <label class="run-input">
+                    Ignition point
+                    <input type="number" min="0" step="0.01" value="0.24" disabled />
+                  </label>
+                  <label class="run-input">
+                    Burn rate
+                    <input type="number" min="0" step="0.01" value="0.85" disabled />
+                  </label>
+                  <label class="run-input">
+                    Heat output
+                    <input type="number" min="0" step="0.01" value="0.75" disabled />
+                  </label>
+                  <label class="run-input">
+                    Spread boost
+                    <input type="number" min="0" step="0.01" value="0.85" disabled />
+                  </label>
+                  <label class="run-input">
+                    Heat transfer cap
+                    <input type="number" min="0" step="0.01" value="0.3" disabled />
+                  </label>
+                  <label class="run-input">
+                    Heat retention
+                    <input type="number" min="0" step="0.01" value="0.55" disabled />
+                  </label>
+                  <label class="run-input">
+                    Wind factor
+                    <input type="number" min="0" step="0.01" value="0.95" disabled />
+                  </label>
+                  <div class="run-settings-note">Defaults shown (grass). Not wired yet.</div>
+                </div>
+                <div class="run-settings-card">
+                  <div class="run-settings-title">Regrowth</div>
+                  <label class="run-input">
+                    Water influence distance
+                    <input type="number" min="0" step="1" value="18" disabled />
+                  </label>
+                  <label class="run-input">
+                    Max water distance
+                    <input type="number" min="0" step="1" value="30" disabled />
+                  </label>
+                  <label class="run-input">
+                    Ash recovery ramp days
+                    <input type="number" min="0" step="1" value="80" disabled />
+                  </label>
+                  <label class="run-input">
+                    Ash recovery rate
+                    <input type="number" min="0" step="0.001" value="0.045" disabled />
+                  </label>
+                  <label class="run-input">
+                    Firebreak recovery rate
+                    <input type="number" min="0" step="0.001" value="0.008" disabled />
+                  </label>
+                  <label class="run-input">
+                    Fuel growth rate
+                    <input type="number" min="0" step="0.01" value="0.04" disabled />
+                  </label>
+                  <label class="run-input">
+                    Canopy growth (grass)
+                    <input type="number" min="0" step="0.001" value="0.008" disabled />
+                  </label>
+                  <label class="run-input">
+                    Canopy growth (forest)
+                    <input type="number" min="0" step="0.001" value="0.009" disabled />
+                  </label>
+                  <label class="run-input">
+                    Forest recruit rate
+                    <input type="number" min="0" step="0.01" value="0.03" disabled />
+                  </label>
+                  <label class="run-input">
+                    Canopy forest threshold
+                    <input type="number" min="0" step="0.01" value="0.35" disabled />
+                  </label>
+                  <label class="run-input">
+                    Long distance recruit factor
+                    <input type="number" min="0" step="0.01" value="0.25" disabled />
+                  </label>
+                  <div class="run-settings-note">Defaults shown. Not wired yet.</div>
+                </div>
+                <div class="run-settings-card">
+                  <div class="run-settings-title">Communities + Roads</div>
+                  <label class="run-input">
+                    Central radius
+                    <input type="number" min="0" step="1" value="7" disabled />
+                  </label>
+                  <label class="run-input">
+                    Ring radius
+                    <input type="number" min="0" step="1" value="3" disabled />
+                  </label>
+                  <label class="run-input">
+                    Spoke count
+                    <input type="number" min="0" step="1" value="4" disabled />
+                  </label>
+                  <label class="run-input">
+                    Spoke length
+                    <input type="number" min="0" step="1" value="7" disabled />
+                  </label>
+                  <label class="run-input">
+                    Central house count
+                    <input type="number" min="0" step="1" value="22" disabled />
+                  </label>
+                  <label class="run-input">
+                    Village count
+                    <input type="number" min="0" step="1" value="3" disabled />
+                  </label>
+                  <label class="run-input">
+                    Roadside target
+                    <input type="number" min="0" step="1" value="8" disabled />
+                  </label>
+                  <label class="run-input">
+                    House value min
+                    <input type="number" min="0" step="1" value="100" disabled />
+                  </label>
+                  <label class="run-input">
+                    House value max
+                    <input type="number" min="0" step="1" value="270" disabled />
+                  </label>
+                  <label class="run-input">
+                    Residents min
+                    <input type="number" min="0" step="1" value="1" disabled />
+                  </label>
+                  <label class="run-input">
+                    Residents max
+                    <input type="number" min="0" step="1" value="3" disabled />
+                  </label>
+                  <div class="run-settings-note">Defaults shown. Not wired yet.</div>
+                </div>
+              </div>
+            </section>
+            <section class="run-tab-panel" data-tab-panel="climate">
+              <div class="run-settings">
+                <div class="run-settings-card">
+                  <div class="run-settings-title">Climate Curve</div>
+                  <label class="run-input">
+                    Season length (days)
+                    <input type="number" min="1" step="1" value="360" disabled />
+                  </label>
+                  <label class="run-input">
+                    Peak day
+                    <input type="number" min="1" step="1" value="240" disabled />
+                  </label>
+                  <label class="run-input">
+                    Mid temp
+                    <input type="number" step="0.1" value="30" disabled />
+                  </label>
+                  <label class="run-input">
+                    Temp amplitude
+                    <input type="number" step="0.1" value="8" disabled />
+                  </label>
+                  <label class="run-input">
+                    Warming per year
+                    <input type="number" step="0.01" value="0.03" disabled />
+                  </label>
+                  <label class="run-input">
+                    Noise amplitude
+                    <input type="number" step="0.1" value="1.5" disabled />
+                  </label>
+                  <label class="run-input">
+                    Heatwaves per year
+                    <input type="number" min="0" step="1" value="3" disabled />
+                  </label>
+                  <div class="run-settings-note">Defaults shown. Not wired yet.</div>
+                </div>
+                <div class="run-settings-card">
+                  <div class="run-settings-title">Moisture Model</div>
+                  <label class="run-input">
+                    Moisture min
+                    <input type="number" min="0" step="0.01" value="0.05" disabled />
+                  </label>
+                  <label class="run-input">
+                    Moisture max
+                    <input type="number" min="0" step="0.01" value="0.35" disabled />
+                  </label>
+                  <label class="run-input">
+                    Drying temp start
+                    <input type="number" step="1" value="18" disabled />
+                  </label>
+                  <label class="run-input">
+                    Drying temp end
+                    <input type="number" step="1" value="38" disabled />
+                  </label>
+                  <label class="run-input">
+                    Moisture k0
+                    <input type="number" min="0" step="0.01" value="0.04" disabled />
+                  </label>
+                  <label class="run-input">
+                    Moisture k1
+                    <input type="number" min="0" step="0.01" value="0.06" disabled />
+                  </label>
+                  <div class="run-settings-note">Defaults shown. Not wired yet.</div>
+                </div>
+                <div class="run-settings-card">
+                  <div class="run-settings-title">Cooling</div>
+                  <label class="run-input">
+                    Base cooling
+                    <input type="number" min="0" step="0.01" value="0.15" disabled />
+                  </label>
+                  <label class="run-input">
+                    Cooling alpha
+                    <input type="number" min="0" step="0.001" value="0.015" disabled />
+                  </label>
+                  <label class="run-input">
+                    Reference temp
+                    <input type="number" step="1" value="25" disabled />
+                  </label>
+                  <label class="run-input">
+                    k min factor
+                    <input type="number" min="0" step="0.01" value="0.3" disabled />
+                  </label>
+                  <label class="run-input">
+                    k max factor
+                    <input type="number" min="0" step="0.01" value="1.2" disabled />
+                  </label>
+                  <div class="run-settings-note">Defaults shown. Not wired yet.</div>
+                </div>
+                <div class="run-settings-card">
+                  <div class="run-settings-title">Risk Mapping</div>
+                  <label class="run-input">
+                    Ignition min
+                    <input type="number" min="0" step="0.01" value="1" disabled />
+                  </label>
+                  <label class="run-input">
+                    Ignition max
+                    <input type="number" min="0" step="0.01" value="1.9" disabled />
+                  </label>
+                  <label class="run-input">
+                    Spread base
+                    <input type="number" min="0" step="0.01" value="0.6" disabled />
+                  </label>
+                  <label class="run-input">
+                    Spread range
+                    <input type="number" min="0" step="0.01" value="1.4" disabled />
+                  </label>
+                  <label class="run-input">
+                    Risk weight (ignition)
+                    <input type="number" min="0" step="0.01" value="0.55" disabled />
+                  </label>
+                  <label class="run-input">
+                    Risk weight (spread)
+                    <input type="number" min="0" step="0.01" value="0.45" disabled />
+                  </label>
+                  <label class="run-input">
+                    Forecast window (days)
+                    <input type="number" min="1" step="1" value="90" disabled />
+                  </label>
+                  <div class="run-settings-note">Defaults shown. Not wired yet.</div>
+                </div>
+                <div class="run-settings-card">
+                  <div class="run-settings-title">Wind Model</div>
+                  <label class="run-input">
+                    Strength base
+                    <input type="number" min="0" step="0.01" value="0.28" disabled />
+                  </label>
+                  <label class="run-input">
+                    Dryness weight
+                    <input type="number" min="0" step="0.01" value="0.32" disabled />
+                  </label>
+                  <label class="run-input">
+                    Temp weight
+                    <input type="number" min="0" step="0.01" value="0.18" disabled />
+                  </label>
+                  <label class="run-input">
+                    Year trend weight
+                    <input type="number" min="0" step="0.01" value="0.22" disabled />
+                  </label>
+                  <label class="run-input">
+                    Gust amplitude
+                    <input type="number" min="0" step="0.01" value="0.08" disabled />
+                  </label>
+                  <div class="run-settings-note">Defaults shown. Not wired yet.</div>
+                </div>
+              </div>
+            </section>
+            <section class="run-tab-panel" data-tab-panel="fire">
+              <div class="run-settings">
+                <div class="run-settings-card">
+                  <div class="run-settings-title">Ignition + Simulation</div>
+                  <label class="run-input">
+                    Ignition chance per day
+                    <input type="number" min="0" step="0.01" value="0.08" disabled />
+                  </label>
+                  <label class="run-input">
+                    Sim speed
+                    <input type="number" min="0" step="0.1" value="1.8" disabled />
+                  </label>
+                  <label class="run-input">
+                    Sim tick seconds
+                    <input type="number" min="0" step="0.1" value="2" disabled />
+                  </label>
+                  <label class="run-input">
+                    Rows per slice
+                    <input type="number" min="1" step="1" value="8" disabled />
+                  </label>
+                  <label class="run-input">
+                    Render smoothing (sec)
+                    <input type="number" min="0" step="0.1" value="0.5" disabled />
+                  </label>
+                  <div class="run-settings-note">Defaults shown. Not wired yet.</div>
+                </div>
+                <div class="run-settings-card">
+                  <div class="run-settings-title">Season + Day Factors</div>
+                  <label class="run-input">
+                    Fire season taper days
+                    <input type="number" min="0" step="1" value="22" disabled />
+                  </label>
+                  <label class="run-input">
+                    Fire season min intensity
+                    <input type="number" min="0" step="0.01" value="0.2" disabled />
+                  </label>
+                  <label class="run-input">
+                    Day factor min
+                    <input type="number" min="0" step="0.01" value="0.65" disabled />
+                  </label>
+                  <label class="run-input">
+                    Day factor max
+                    <input type="number" min="0" step="0.01" value="1.35" disabled />
+                  </label>
+                  <div class="run-settings-note">Defaults shown. Not wired yet.</div>
+                </div>
+                <div class="run-settings-card">
+                  <div class="run-settings-title">Fire Jumps</div>
+                  <label class="run-input">
+                    Jump wind threshold
+                    <input type="number" min="0" step="0.01" value="0.7" disabled />
+                  </label>
+                  <label class="run-input">
+                    Jump base chance
+                    <input type="number" min="0" step="0.01" value="0.25" disabled />
+                  </label>
+                  <label class="run-input">
+                    Jump heat boost
+                    <input type="number" min="0" step="0.01" value="0.4" disabled />
+                  </label>
+                  <label class="run-input">
+                    Jump dot threshold
+                    <input type="number" min="0" step="0.01" value="0.2" disabled />
+                  </label>
+                  <div class="run-settings-note">Defaults shown. Not wired yet.</div>
+                </div>
+                <div class="run-settings-card">
+                  <div class="run-settings-title">Heat Diffusion</div>
+                  <label class="run-input">
+                    Cardinal diffusion
+                    <input type="number" min="0" step="0.01" value="0.35" disabled />
+                  </label>
+                  <label class="run-input">
+                    Diagonal diffusion
+                    <input type="number" min="0" step="0.01" value="0.25" disabled />
+                  </label>
+                  <label class="run-input">
+                    Secondary diffusion
+                    <input type="number" min="0" step="0.01" value="0.4" disabled />
+                  </label>
+                  <label class="run-input">
+                    Moisture diffusion
+                    <input type="number" min="0" step="0.01" value="0.35" disabled />
+                  </label>
+                  <label class="run-input">
+                    Heat cap
+                    <input type="number" min="0" step="0.1" value="5" disabled />
+                  </label>
+                  <div class="run-settings-note">Defaults shown. Not wired yet.</div>
+                </div>
+                <div class="run-settings-card">
+                  <div class="run-settings-title">Conflagration + Bounds</div>
+                  <label class="run-input">
+                    Heat boost
+                    <input type="number" min="0" step="0.01" value="0.3" disabled />
+                  </label>
+                  <label class="run-input">
+                    Fuel boost
+                    <input type="number" min="0" step="0.01" value="0.5" disabled />
+                  </label>
+                  <label class="run-input">
+                    Fire bounds padding
+                    <input type="number" min="0" step="1" value="6" disabled />
+                  </label>
+                  <div class="run-settings-note">Defaults shown. Not wired yet.</div>
+                </div>
+              </div>
+            </section>
+            <section class="run-tab-panel" data-tab-panel="other">
+              <div class="run-settings">
+                <div class="run-settings-card">
+                  <div class="run-settings-title">Other Settings</div>
+                  <label class="run-checkbox">
+                    <input id="runUnlimitedMoney" type="checkbox" />
+                    Unlimited money
+                  </label>
+                  <div class="run-settings-note">Unlimited money is wired. Other options are placeholders.</div>
+                </div>
+                <div class="run-settings-card">
+                  <div class="run-settings-title">Career Pace</div>
+                  <label class="run-input">
+                    Career years
+                    <input type="number" min="1" step="1" value="20" disabled />
+                  </label>
+                  <label class="run-input">
+                    Days per second
+                    <input type="number" min="0" step="1" value="4" disabled />
+                  </label>
+                  <label class="run-input">
+                    Phase duration (days)
+                    <input type="number" min="1" step="1" value="90" disabled />
+                  </label>
+                  <label class="run-input">
+                    Ash regrow delay
+                    <input type="number" min="0" step="1" value="91" disabled />
+                  </label>
+                  <label class="run-input">
+                    Growth speed multiplier
+                    <input type="number" min="0" step="0.1" value="3" disabled />
+                  </label>
+                  <div class="run-settings-note">Defaults shown. Not wired yet.</div>
+                </div>
+                <div class="run-settings-card">
+                  <div class="run-settings-title">Economy</div>
+                  <label class="run-input">
+                    Base budget
+                    <input type="number" min="0" step="1" value="320" disabled />
+                  </label>
+                  <label class="run-input">
+                    Approval min
+                    <input type="number" min="0" step="0.01" value="0.2" disabled />
+                  </label>
+                  <label class="run-input">
+                    Starting approval
+                    <input type="number" min="0" step="0.01" value="0.7" disabled />
+                  </label>
+                  <label class="run-input">
+                    Hectares per tile
+                    <input type="number" min="0" step="0.1" value="1" disabled />
+                  </label>
+                  <div class="run-settings-note">Defaults shown. Not wired yet.</div>
+                </div>
+                <div class="run-settings-card">
+                  <div class="run-settings-title">Upgrades</div>
+                  <label class="run-checkbox">
+                    <input type="checkbox" disabled checked />
+                    Rapid Response
+                  </label>
+                  <label class="run-checkbox">
+                    <input type="checkbox" disabled checked />
+                    Fireline Training
+                  </label>
+                  <label class="run-checkbox">
+                    <input type="checkbox" disabled checked />
+                    Air Support
+                  </label>
+                  <label class="run-checkbox">
+                    <input type="checkbox" disabled checked />
+                    Resilient Infrastructure
+                  </label>
+                  <div class="run-settings-note">Defaults shown. Not wired yet.</div>
+                </div>
+                <div class="run-settings-card">
+                  <div class="run-settings-title">Debug + Perf</div>
+                  <label class="run-input">
+                    Sim quality (0-2)
+                    <input type="number" min="0" step="1" value="1" disabled />
+                  </label>
+                  <label class="run-input">
+                    Smoke rate
+                    <input type="number" min="0" step="0.1" value="1" disabled />
+                  </label>
+                  <label class="run-input">
+                    Ember rate scale
+                    <input type="number" min="0" step="0.1" value="1" disabled />
+                  </label>
+                  <label class="run-checkbox">
+                    <input type="checkbox" disabled checked />
+                    Use fire snapshot
+                  </label>
+                  <label class="run-input">
+                    Neighbor mode (4/8)
+                    <input type="number" min="4" step="4" value="8" disabled />
+                  </label>
+                  <label class="run-checkbox">
+                    <input type="checkbox" disabled checked />
+                    Render trees
+                  </label>
+                  <label class="run-checkbox">
+                    <input type="checkbox" disabled checked />
+                    Render effects
+                  </label>
+                  <div class="run-settings-note">Defaults shown. Not wired yet.</div>
+                </div>
+                <div class="run-settings-card">
+                  <div class="run-settings-title">Defaults</div>
+                  <button type="button" disabled>Save as default</button>
+                  <button type="button" disabled>Reset to defaults</button>
+                  <div class="run-settings-note">Persistence actions will be wired later.</div>
+                </div>
+              </div>
+            </section>
           </div>
-          <div id="characterGrid" class="character-grid"></div>
           <div class="character-footer">
             <p id="characterSummary">Select a chief to begin the campaign.</p>
             <button id="characterConfirm" disabled>Begin Command</button>
@@ -119,6 +1012,15 @@
               <div class="overlay-actions">
                 <button id="overlayRestart">Play Again</button>
               </div>
+            </div>
+          </div>
+          <div id="mapgenOverlay" class="mapgen-overlay hidden">
+            <div class="mapgen-card">
+              <div id="mapgenMessage" class="mapgen-message">Reticulating splines...</div>
+              <div class="mapgen-progress">
+                <div id="mapgenProgressBar" class="mapgen-progress-bar"></div>
+              </div>
+              <div id="mapgenPercent" class="mapgen-percent">0%</div>
             </div>
           </div>
         </div>

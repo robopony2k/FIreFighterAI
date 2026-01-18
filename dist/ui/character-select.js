@@ -162,9 +162,91 @@ export function initCharacterSelect(ui, state, onConfirm) {
         const selected = ui.runMapSizeInputs.find((input) => input.checked);
         return selected?.value ?? DEFAULT_MAP_SIZE;
     };
+    const mapGenOutputs = new Map();
+    ui.mapGenInputs.forEach((input) => {
+        const outputId = input.dataset.output;
+        if (!outputId) {
+            return;
+        }
+        const output = document.getElementById(outputId);
+        if (output) {
+            mapGenOutputs.set(input, output);
+        }
+    });
+    const tabButtons = Array.from(document.querySelectorAll("#characterScreen .run-tab"));
+    const tabPanels = Array.from(document.querySelectorAll("#characterScreen .run-tab-panel"));
+    const setActiveTab = (tabId) => {
+        tabButtons.forEach((button) => {
+            const isActive = button.dataset.tab === tabId;
+            button.classList.toggle("is-active", isActive);
+            button.setAttribute("aria-selected", isActive ? "true" : "false");
+        });
+        tabPanels.forEach((panel) => {
+            const isActive = panel.dataset.tabPanel === tabId;
+            panel.classList.toggle("is-active", isActive);
+        });
+    };
+    tabButtons.forEach((button) => {
+        button.addEventListener("click", () => {
+            const tabId = button.dataset.tab;
+            if (!tabId) {
+                return;
+            }
+            setActiveTab(tabId);
+        });
+    });
+    const defaultTab = tabButtons.find((button) => button.classList.contains("is-active"))?.dataset.tab
+        ?? tabButtons[0]?.dataset.tab;
+    if (defaultTab) {
+        setActiveTab(defaultTab);
+    }
+    const formatMapGenValue = (input) => {
+        const raw = Number(input.value);
+        if (!Number.isFinite(raw)) {
+            return input.value;
+        }
+        const format = input.dataset.format;
+        if (format === "int") {
+            return Math.round(raw).toString();
+        }
+        return raw.toFixed(2);
+    };
+    const syncMapGenOutput = (input) => {
+        const output = mapGenOutputs.get(input);
+        if (!output) {
+            return;
+        }
+        output.textContent = formatMapGenValue(input);
+    };
+    const getMapGenSettings = () => {
+        const settings = { ...DEFAULT_RUN_OPTIONS.mapGen };
+        ui.mapGenInputs.forEach((input) => {
+            const key = input.dataset.mapgenKey;
+            if (!key) {
+                return;
+            }
+            const value = Number(input.value);
+            if (Number.isFinite(value)) {
+                settings[key] = value;
+            }
+        });
+        return settings;
+    };
+    const applyMapGenSettings = (settings) => {
+        const nextSettings = { ...DEFAULT_RUN_OPTIONS.mapGen, ...settings };
+        ui.mapGenInputs.forEach((input) => {
+            const key = input.dataset.mapgenKey;
+            if (!key) {
+                return;
+            }
+            input.value = `${nextSettings[key]}`;
+            syncMapGenOutput(input);
+        });
+    };
     const getRunOptions = () => ({
         ...DEFAULT_RUN_OPTIONS,
-        unlimitedMoney: ui.runUnlimitedMoney.checked
+        unlimitedMoney: ui.runUnlimitedMoney.checked,
+        mapGen: getMapGenSettings()
     });
     ui.characterNameInput.value = state.campaign.callsign;
     ui.characterNameInput.addEventListener("input", () => {
@@ -178,6 +260,11 @@ export function initCharacterSelect(ui, state, onConfirm) {
     ui.characterNameRandom.addEventListener("click", () => {
         applyRandomName();
     });
+    ui.mapGenInputs.forEach((input) => {
+        input.addEventListener("input", () => syncMapGenOutput(input));
+        syncMapGenOutput(input);
+    });
+    applyMapGenSettings(DEFAULT_RUN_OPTIONS.mapGen);
     updateSelection();
     updateConfirmState();
     const flushConfirmation = (config) => {
@@ -212,6 +299,8 @@ export function initCharacterSelect(ui, state, onConfirm) {
         ui.runSeedInput.value = seedValue.toString();
         setSelectedMapSize(config.mapSize);
         ui.runUnlimitedMoney.checked = config.options.unlimitedMoney;
+        applyMapGenSettings(config.options.mapGen ?? DEFAULT_RUN_OPTIONS.mapGen);
+        setActiveTab("roster");
         if (ui.characterNameInput.value.trim().length === 0) {
             applyRandomName();
         }

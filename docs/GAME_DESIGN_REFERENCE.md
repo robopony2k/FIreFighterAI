@@ -101,6 +101,53 @@ Design intent:
 - Top left of screen - Available trucks to select with key info
 - Bottom left of screen - Details on selected unit + available commands
 
+## New Run Configuration (Proposed)
+
+Purpose: expose tunable run constants before each campaign. Defaults are shown, players can keep last-used settings or save a default profile.
+
+### Tabs and Fields
+
+Command Roster
+- Chief selection + modifiers (budget, speed, power, containment, firebreak cost, approval retention).
+- Starting roster composition (2 firefighters + 1 truck).
+- Unit economy + stats (recruit costs, training cost/cap/gains, unit speed/power/radius, truck capacity/board radius, tether distance, formation spacing, movement cost/slope factors, unit loss fire threshold).
+- Firebreak cost per tile.
+
+Terrain
+- Seed and map size presets.
+- Map generation sliders (forest/meadow/water settings).
+- Tile fuel profiles (baseFuel/ignition/burnRate/heatOutput/spreadBoost/heatTransferCap/heatRetention/windFactor per tile type).
+- Vegetation regrowth (water influence, ash recovery, canopy growth, forest recruit).
+- Community and road generation (village/house counts, value/resident ranges, road bias).
+
+Climate
+- Climate params (seasonLen, peakDay, tMid, tAmp, warmingPerYear, noiseAmp, heatwavesPerYear).
+- Moisture params (Mmin/Mmax, Tdry0/Tdry1, k0/k1).
+- Cooling params (base/alpha/Tref/kMinFactor/kMaxFactor).
+- Climate risk mapping (CLIMATE_IGNITION_MIN/MAX, spread base/range, risk weights), forecast window (90).
+- Wind model tuning (strength base/dryness/temp/year weights, gust).
+
+Fire
+- Ignition chance per day, sim speed/tick cadence/rows per slice, render smoothing.
+- Fire season taper/min intensity; day/night factor min/max.
+- Fire jump thresholds/chance/boosts.
+- Heat diffusion constants and heat cap.
+- Conflagration boosts.
+- Fire bounds padding.
+
+Other
+- Career/time pacing (career years, days/sec, phase durations, ash regrow delay, growth speed).
+- Economy baselines (base budget, approval min, hectares per tile, initial approval).
+- Progression toggles (available upgrades list).
+- Debug/perf toggles (simPerf, renderTrees/effects), unlimited money.
+
+### Persistence
+- Store “last-used run config” and “saved defaults” separately.
+- Provide UI actions: Save as default, Reset to defaults.
+
+### Notes
+- Expose gameplay/system constants only; keep render-only constants (colors, zoom ranges, tile sizing) out unless a dedicated Visuals tab is desired.
+
 ## Risk Communication
 
 - Forecast visual should map to clear risk tiers (low, moderate, high, extreme).

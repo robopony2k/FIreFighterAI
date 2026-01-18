@@ -8,6 +8,9 @@ export function isoProject(wx, wy, height) {
     };
 }
 export function getTileHeight(tile) {
+    if (!tile) {
+        return 0;
+    }
     return tile.elevation * HEIGHT_SCALE - (tile.type === "water" ? HEIGHT_WATER_DROP : 0);
 }
 const sampleVertexHeight = (state, vx, vy) => {
@@ -27,6 +30,9 @@ const sampleVertexHeight = (state, vx, vy) => {
     return count > 0 ? sum / count : 0;
 };
 export function getHeightAt(state, wx, wy) {
+    if (state.tiles.length === 0) {
+        return 0;
+    }
     const { cols, rows } = state.grid;
     if (wx < 0 || wy < 0 || wx > cols || wy > rows) {
         return 0;

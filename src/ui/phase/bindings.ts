@@ -84,7 +84,7 @@ export const bindPhaseUi = (
   state: WorldState,
   rng: RNG,
   canvas: HTMLCanvasElement,
-  onNewRun: (config: NewRunConfig) => void,
+  onNewRun: (config: NewRunConfig) => void | Promise<void>,
   overlayRefs: OverlayRefs
 ): void => {
   let isPanning = false;
@@ -227,13 +227,16 @@ export const bindPhaseUi = (
     runMapSizeInputs: Array.from(
       document.querySelectorAll<HTMLInputElement>('#characterScreen input[name="mapSize"]')
     ),
-    runUnlimitedMoney: document.getElementById("runUnlimitedMoney") as HTMLInputElement
+    runUnlimitedMoney: document.getElementById("runUnlimitedMoney") as HTMLInputElement,
+    mapGenInputs: Array.from(
+      document.querySelectorAll<HTMLInputElement>('#characterScreen input[data-mapgen-key]')
+    )
   };
 
   let lastRunConfig: NewRunConfig = {
     seed: DEFAULT_RUN_SEED,
     mapSize: DEFAULT_MAP_SIZE,
-    options: { ...DEFAULT_RUN_OPTIONS },
+    options: { ...DEFAULT_RUN_OPTIONS, mapGen: { ...DEFAULT_RUN_OPTIONS.mapGen } },
     characterId: state.campaign.characterId,
     callsign: state.campaign.callsign
   };

@@ -36,6 +36,7 @@ const ROAD_VERGE_ALPHA = 0.22;
 const ROAD_PAD_SCALE = 1.25;
 const SHORE_SAND_DISTANCE = 3;
 const SHORE_SAND_ALPHA = 0.6;
+const SHORE_SAND_EDGE_ALPHA = 0.35;
 const WATER_SURFACE_ALPHA = 0.98;
 const SHALLOW_WATER_BLEND = 0.6;
 
@@ -1072,8 +1073,8 @@ export const ensureTerrainCache = (state: WorldState, now: number): TerrainCache
         ) {
           const rawBlend = clamp((SHORE_SAND_DISTANCE - (tile.waterDist - 1)) / SHORE_SAND_DISTANCE, 0, 1);
           const sandBlend = rawBlend * rawBlend * (3 - 2 * rawBlend);
-          const nearBoost = tile.waterDist === 1 ? 0.18 : 0;
-          ctx.globalAlpha = SHORE_SAND_ALPHA * clamp(sandBlend + nearBoost, 0, 1);
+          const edgeScale = tile.waterDist === 1 ? SHORE_SAND_EDGE_ALPHA : 1;
+          ctx.globalAlpha = SHORE_SAND_ALPHA * sandBlend * edgeScale;
           ctx.fillStyle = rgbString(SAND_COLOR);
           ctx.beginPath();
           ctx.moveTo(p0.x, p0.y);

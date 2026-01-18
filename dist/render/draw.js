@@ -8,7 +8,7 @@ import { updateFireSmoothing, drawFireFx } from "./fireFx.js";
 import { drawUnits } from "./units.js";
 import { drawParticles } from "./particles.js";
 import { clamp } from "../core/utils.js";
-import { darken, mixRgb } from "./color.js";
+import { darken, mixRgb, lighten } from "./color.js";
 import { hash2D } from "../mapgen/noise.js";
 const formatNumber = (value, digits = 3) => (Number.isFinite(value) ? value.toFixed(digits) : "inf");
 const formatOptional = (value, digits = 3) => typeof value === "number" ? value.toFixed(digits) : "n/a";
@@ -26,11 +26,48 @@ const COAST_EDGE_N = 1;
 const COAST_EDGE_E = 2;
 const COAST_EDGE_S = 4;
 const COAST_EDGE_W = 8;
-const COAST_BAND_PX = TILE_SIZE * 0.45;
-const COAST_JITTER_PX = 2.2;
-const COAST_BAND_ALPHA = 0.42;
-const COAST_BAND_ALPHA_JITTER = 0.18;
+const COAST_BAND_PX = TILE_SIZE * 0.78;
+const COAST_JITTER_PX = 3.4;
+const COAST_BAND_ALPHA = 0.6;
+const COAST_BAND_ALPHA_JITTER = 0.2;
+const COAST_CORNER_RADIUS_MULT = 1.1;
+const COAST_CORNER_INSET = 0.18;
+const COAST_CORNER_ALPHA = 0.5;
+const COAST_CORNER_STRETCH = 1.6;
+const COAST_CORNER_SQUASH = 0.78;
+const COAST_WATER_LIGHTEN = 0.22;
+const SHALLOWS_BAND_PX = TILE_SIZE * 1.1;
+const SHALLOWS_JITTER_PX = 2.4;
+const SHALLOWS_ALPHA = 0.35;
+const SHALLOWS_ALPHA_JITTER = 0.1;
+const SHALLOWS_LIGHTEN = 0.28;
+const SHALLOWS_WASH_BAND_PX = TILE_SIZE * 1.6;
+const SHALLOWS_WASH_ALPHA = 0.22;
+const SHALLOWS_WASH_ALPHA_JITTER = 0.08;
+const LAND_SHORE_BAND_PX = TILE_SIZE * 0.6;
+const LAND_SHORE_JITTER_PX = 2.1;
+const LAND_SHORE_BAND_ALPHA = 0.5;
+const LAND_SHORE_BAND_ALPHA_JITTER = 0.18;
+const LAND_SHORE_CORNER_RADIUS_MULT = 1.05;
+const LAND_SHORE_CORNER_INSET = 0.22;
+const LAND_SHORE_CORNER_ALPHA = 0.45;
+const LAND_SHORE_CORNER_STRETCH = 1.55;
+const LAND_SHORE_CORNER_SQUASH = 0.8;
+const LAND_SHORE_WATER_BLEND = 0.28;
+const LAND_WASH_BAND_PX = TILE_SIZE * 1.45;
+const LAND_WASH_ALPHA = 0.22;
+const LAND_WASH_ALPHA_JITTER = 0.08;
+const SHORE_NOISE_WIDTH = 0.14;
+const SHORE_NOISE_ALPHA = 0.1;
 const SHALLOW_WATER_COLOR = mixRgb(TILE_COLOR_RGB.water, TILE_COLOR_RGB.grass, 0.22);
+const COASTLINE_SMOOTH_ITERATIONS = 3;
+const COASTLINE_STROKE_WIDTH = TILE_SIZE * 1.1;
+const COASTLINE_STROKE_ALPHA = 0.55;
+const COASTLINE_EDGE_WIDTH = TILE_SIZE * 0.2;
+const COASTLINE_EDGE_ALPHA = 0.28;
+const COASTLINE_EDGE_DARKEN = 0.2;
+const COASTLINE_COLOR = mixRgb(TILE_COLOR_RGB.firebreak, TILE_COLOR_RGB.grass, 0.68);
+let coastlineCache = null;
 const getBaseTileColor = (state, tile) => {
     if (tile.type === "grass" || tile.type === "forest") {
         const canopy = clamp(tile.canopy, 0, 1);
@@ -65,6 +102,27 @@ const computeCoastEdgeMask = (state, x, y) => {
         mask |= COAST_EDGE_S;
     }
     if (x > 0 && state.tiles[indexFor(state.grid, x - 1, y)].type !== "water") {
+        mask |= COAST_EDGE_W;
+    }
+    return mask;
+};
+const isFeatherableLandTile = (tile) => tile.type !== "water" && tile.type !== "road" && tile.type !== "base" && tile.type !== "house";
+const computeLandCoastEdgeMask = (state, x, y) => {
+    const tile = state.tiles[indexFor(state.grid, x, y)];
+    if (!isFeatherableLandTile(tile)) {
+        return 0;
+    }
+    let mask = 0;
+    if (y > 0 && state.tiles[indexFor(state.grid, x, y - 1)].type === "water") {
+        mask |= COAST_EDGE_N;
+    }
+    if (x < state.grid.cols - 1 && state.tiles[indexFor(state.grid, x + 1, y)].type === "water") {
+        mask |= COAST_EDGE_E;
+    }
+    if (y < state.grid.rows - 1 && state.tiles[indexFor(state.grid, x, y + 1)].type === "water") {
+        mask |= COAST_EDGE_S;
+    }
+    if (x > 0 && state.tiles[indexFor(state.grid, x - 1, y)].type === "water") {
         mask |= COAST_EDGE_W;
     }
     return mask;
@@ -117,6 +175,134 @@ const getSmoothedWaterInfluence = (state, x, y) => {
     });
     return clamp(sum / count, 0, 1);
 };
+const getTileCorners = (state, x, y) => {
+    const h00 = getRenderHeightAt(state, x, y);
+    const h10 = getRenderHeightAt(state, x + 1, y);
+    const h11 = getRenderHeightAt(state, x + 1, y + 1);
+    const h01 = getRenderHeightAt(state, x, y + 1);
+    const p0 = isoProject(x, y, h00);
+    const p1 = isoProject(x + 1, y, h10);
+    const p2 = isoProject(x + 1, y + 1, h11);
+    const p3 = isoProject(x, y + 1, h01);
+    return { p0, p1, p2, p3 };
+};
+const clipToTile = (ctx, p0, p1, p2, p3) => {
+    ctx.beginPath();
+    ctx.moveTo(p0.x, p0.y);
+    ctx.lineTo(p1.x, p1.y);
+    ctx.lineTo(p2.x, p2.y);
+    ctx.lineTo(p3.x, p3.y);
+    ctx.closePath();
+    ctx.clip();
+};
+const getShoreNoise = (state, x, y, offset) => {
+    const widthNoise = (hash2D(x + offset * 19, y + offset * 23, state.seed + offset * 151) - 0.5) * 2;
+    const alphaNoise = (hash2D(x + offset * 29, y + offset * 31, state.seed + offset * 197) - 0.5) * 2;
+    return {
+        width: 1 + widthNoise * SHORE_NOISE_WIDTH,
+        alpha: 1 + alphaNoise * SHORE_NOISE_ALPHA
+    };
+};
+const getShoreAnchor = (state, x, y, p0, p1, p2, p3, center, wantWater) => {
+    const midN = { x: (p0.x + p1.x) * 0.5, y: (p0.y + p1.y) * 0.5 };
+    const midE = { x: (p1.x + p2.x) * 0.5, y: (p1.y + p2.y) * 0.5 };
+    const midS = { x: (p2.x + p3.x) * 0.5, y: (p2.y + p3.y) * 0.5 };
+    const midW = { x: (p3.x + p0.x) * 0.5, y: (p3.y + p0.y) * 0.5 };
+    const dirs = [
+        { dx: 0, dy: -1, point: midN, weight: 1 },
+        { dx: 1, dy: 0, point: midE, weight: 1 },
+        { dx: 0, dy: 1, point: midS, weight: 1 },
+        { dx: -1, dy: 0, point: midW, weight: 1 },
+        { dx: 1, dy: -1, point: p1, weight: 0.7 },
+        { dx: 1, dy: 1, point: p2, weight: 0.7 },
+        { dx: -1, dy: 1, point: p3, weight: 0.7 },
+        { dx: -1, dy: -1, point: p0, weight: 0.7 }
+    ];
+    let sumX = 0;
+    let sumY = 0;
+    let sumW = 0;
+    dirs.forEach((dir) => {
+        const nx = x + dir.dx;
+        const ny = y + dir.dy;
+        if (nx < 0 || ny < 0 || nx >= state.grid.cols || ny >= state.grid.rows) {
+            return;
+        }
+        const neighbor = state.tiles[indexFor(state.grid, nx, ny)];
+        const isWater = neighbor.type === "water";
+        if (wantWater !== isWater) {
+            return;
+        }
+        sumX += (dir.point.x - center.x) * dir.weight;
+        sumY += (dir.point.y - center.y) * dir.weight;
+        sumW += dir.weight;
+    });
+    if (sumW <= 0) {
+        return null;
+    }
+    const dirX = sumX / sumW;
+    const dirY = sumY / sumW;
+    const len = Math.hypot(dirX, dirY);
+    if (len <= 0.001) {
+        return null;
+    }
+    const ray = { x: dirX / len, y: dirY / len };
+    const edges = [
+        [p0, p1],
+        [p1, p2],
+        [p2, p3],
+        [p3, p0]
+    ];
+    const cross = (ax, ay, bx, by) => ax * by - ay * bx;
+    let bestX = 0;
+    let bestY = 0;
+    let bestT = Number.POSITIVE_INFINITY;
+    let hasBest = false;
+    edges.forEach(([a, b]) => {
+        const sx = b.x - a.x;
+        const sy = b.y - a.y;
+        const denom = cross(ray.x, ray.y, sx, sy);
+        if (Math.abs(denom) < 1e-6) {
+            return;
+        }
+        const ax = a.x - center.x;
+        const ay = a.y - center.y;
+        const t = cross(ax, ay, sx, sy) / denom;
+        const u = cross(ax, ay, ray.x, ray.y) / denom;
+        if (t >= 0 && u >= 0 && u <= 1) {
+            if (t < bestT) {
+                bestT = t;
+                bestX = center.x + ray.x * t;
+                bestY = center.y + ray.y * t;
+                hasBest = true;
+            }
+        }
+    });
+    if (!hasBest) {
+        return null;
+    }
+    return { x: bestX, y: bestY };
+};
+const drawShoreWash = (ctx, p0, p1, p2, p3, anchor, center, color, bandPx, alpha) => {
+    const dx = center.x - anchor.x;
+    const dy = center.y - anchor.y;
+    const len = Math.hypot(dx, dy);
+    if (len <= 0.001) {
+        return;
+    }
+    const t = Math.min(1, bandPx / len);
+    const inner = { x: anchor.x + dx * t, y: anchor.y + dy * t };
+    const grad = ctx.createLinearGradient(anchor.x, anchor.y, inner.x, inner.y);
+    grad.addColorStop(0, rgbaString(color, alpha));
+    grad.addColorStop(1, rgbaString(color, 0));
+    ctx.fillStyle = grad;
+    ctx.beginPath();
+    ctx.moveTo(p0.x, p0.y);
+    ctx.lineTo(p1.x, p1.y);
+    ctx.lineTo(p2.x, p2.y);
+    ctx.lineTo(p3.x, p3.y);
+    ctx.closePath();
+    ctx.fill();
+};
 const getWaterSurfaceCorners = (state, x, y) => {
     const tile = state.tiles[indexFor(state.grid, x, y)];
     const waterHeight = getTileHeight(tile);
@@ -136,7 +322,7 @@ const getWaterSurfaceCorners = (state, x, y) => {
     const p3 = isoProject(x, y + 1, w01);
     return { p0, p1, p2, p3, landInfluence };
 };
-const drawCoastBandForTile = (state, ctx, x, y, view) => {
+const drawWaterShallowsForTile = (state, ctx, x, y) => {
     const edgeMask = computeCoastEdgeMask(state, x, y);
     if (!edgeMask) {
         return;
@@ -146,16 +332,18 @@ const drawCoastBandForTile = (state, ctx, x, y, view) => {
         x: (p0.x + p1.x + p2.x + p3.x) * 0.25,
         y: (p0.y + p1.y + p2.y + p3.y) * 0.25
     };
-    const bandBase = COAST_BAND_PX / Math.max(0.5, view.scale);
-    const edgeCount = (edgeMask & COAST_EDGE_N ? 1 : 0) +
-        (edgeMask & COAST_EDGE_E ? 1 : 0) +
-        (edgeMask & COAST_EDGE_S ? 1 : 0) +
-        (edgeMask & COAST_EDGE_W ? 1 : 0);
-    const alphaScale = edgeCount > 0 ? 1 / edgeCount : 1;
-    const drawEdge = (edgeId, a, b, neighborTile) => {
-        const noise = hash2D(x + edgeId * 11, y + edgeId * 29, state.seed + 991);
-        const jitter = (noise * 2 - 1) * COAST_JITTER_PX / Math.max(0.5, view.scale);
-        const band = Math.max(0.5 / Math.max(0.5, view.scale), bandBase + jitter);
+    const noise = getShoreNoise(state, x, y, 3);
+    const bandBase = SHALLOWS_BAND_PX * noise.width;
+    const baseColor = lighten(TILE_COLOR_RGB.water, clamp(SHALLOWS_LIGHTEN + landInfluence * 0.12, 0, 0.6));
+    const anchor = getShoreAnchor(state, x, y, p0, p1, p2, p3, center, false);
+    if (anchor) {
+        const washJitter = 1 + (hash2D(x + 19, y + 23, state.seed + 1213) - 0.5) * SHALLOWS_WASH_ALPHA_JITTER;
+        const washAlpha = clamp(SHALLOWS_WASH_ALPHA * noise.alpha * washJitter, 0, 0.25);
+        drawShoreWash(ctx, p0, p1, p2, p3, anchor, center, baseColor, SHALLOWS_WASH_BAND_PX * noise.width, washAlpha);
+    }
+    const drawEdge = (edgeId, a, b) => {
+        const jitter = (hash2D(x + edgeId * 41, y + edgeId * 43, state.seed + 881) - 0.5) * 2 * SHALLOWS_JITTER_PX;
+        const band = Math.max(0.5, bandBase + jitter);
         const dx = b.x - a.x;
         const dy = b.y - a.y;
         const len = Math.hypot(dx, dy) || 1;
@@ -171,12 +359,84 @@ const drawCoastBandForTile = (state, ctx, x, y, view) => {
         const b2 = { x: b.x + nx * band, y: b.y + ny * band };
         const outerMid = { x: (a.x + b.x) * 0.5, y: (a.y + b.y) * 0.5 };
         const innerMid = { x: (a2.x + b2.x) * 0.5, y: (a2.y + b2.y) * 0.5 };
-        const landColor = getShoreLandColor(state, neighborTile);
-        const shoreBase = mixRgb(SHALLOW_WATER_COLOR, TILE_COLOR_RGB.water, 0.35);
-        const outerColor = mixRgb(shoreBase, landColor, 0.18 + landInfluence * 0.12);
+        const alphaJitter = 1 + (hash2D(x + edgeId * 47, y + edgeId * 53, state.seed + 907) - 0.5) * SHALLOWS_ALPHA_JITTER;
+        const edgeAlpha = clamp(SHALLOWS_ALPHA * noise.alpha * alphaJitter, 0, 0.4);
+        const grad = ctx.createLinearGradient(outerMid.x, outerMid.y, innerMid.x, innerMid.y);
+        grad.addColorStop(0, rgbaString(baseColor, edgeAlpha));
+        grad.addColorStop(1, rgbaString(baseColor, 0));
+        ctx.fillStyle = grad;
+        ctx.beginPath();
+        ctx.moveTo(a.x, a.y);
+        ctx.lineTo(b.x, b.y);
+        ctx.lineTo(b2.x, b2.y);
+        ctx.lineTo(a2.x, a2.y);
+        ctx.closePath();
+        ctx.fill();
+    };
+    ctx.save();
+    clipToTile(ctx, p0, p1, p2, p3);
+    if (edgeMask & COAST_EDGE_N) {
+        drawEdge(1, p0, p1);
+    }
+    if (edgeMask & COAST_EDGE_E) {
+        drawEdge(2, p1, p2);
+    }
+    if (edgeMask & COAST_EDGE_S) {
+        drawEdge(3, p2, p3);
+    }
+    if (edgeMask & COAST_EDGE_W) {
+        drawEdge(4, p3, p0);
+    }
+    ctx.restore();
+};
+const drawCoastBandForTile = (state, ctx, x, y) => {
+    const edgeMask = computeCoastEdgeMask(state, x, y);
+    const neLand = x < state.grid.cols - 1 &&
+        y > 0 &&
+        state.tiles[indexFor(state.grid, x + 1, y - 1)].type !== "water";
+    const seLand = x < state.grid.cols - 1 &&
+        y < state.grid.rows - 1 &&
+        state.tiles[indexFor(state.grid, x + 1, y + 1)].type !== "water";
+    const swLand = x > 0 &&
+        y < state.grid.rows - 1 &&
+        state.tiles[indexFor(state.grid, x - 1, y + 1)].type !== "water";
+    const nwLand = x > 0 &&
+        y > 0 &&
+        state.tiles[indexFor(state.grid, x - 1, y - 1)].type !== "water";
+    if (!edgeMask && !neLand && !seLand && !swLand && !nwLand) {
+        return;
+    }
+    const { p0, p1, p2, p3, landInfluence } = getWaterSurfaceCorners(state, x, y);
+    const center = {
+        x: (p0.x + p1.x + p2.x + p3.x) * 0.25,
+        y: (p0.y + p1.y + p2.y + p3.y) * 0.25
+    };
+    const noise = getShoreNoise(state, x, y, 1);
+    const bandBase = COAST_BAND_PX * noise.width;
+    const drawEdge = (edgeId, a, b, neighborTile) => {
+        const edgeNoise = hash2D(x + edgeId * 11, y + edgeId * 29, state.seed + 991);
+        const jitter = (edgeNoise * 2 - 1) * COAST_JITTER_PX;
+        const band = Math.max(0.5, bandBase + jitter);
+        const dx = b.x - a.x;
+        const dy = b.y - a.y;
+        const len = Math.hypot(dx, dy) || 1;
+        let nx = -dy / len;
+        let ny = dx / len;
+        const mid = { x: (a.x + b.x) * 0.5, y: (a.y + b.y) * 0.5 };
+        const toCenter = { x: center.x - mid.x, y: center.y - mid.y };
+        if (nx * toCenter.x + ny * toCenter.y < 0) {
+            nx = -nx;
+            ny = -ny;
+        }
+        const a2 = { x: a.x + nx * band, y: a.y + ny * band };
+        const b2 = { x: b.x + nx * band, y: b.y + ny * band };
+        const outerMid = { x: (a.x + b.x) * 0.5, y: (a.y + b.y) * 0.5 };
+        const innerMid = { x: (a2.x + b2.x) * 0.5, y: (a2.y + b2.y) * 0.5 };
+        const shoreBase = lighten(TILE_COLOR_RGB.water, clamp(COAST_WATER_LIGHTEN + landInfluence * 0.12, 0, 0.6));
+        const outerColor = shoreBase;
         const grad = ctx.createLinearGradient(outerMid.x, outerMid.y, innerMid.x, innerMid.y);
         const alphaJitter = 1 + (hash2D(x + edgeId * 17, y + edgeId * 37, state.seed + 733) - 0.5) * COAST_BAND_ALPHA_JITTER;
-        const edgeAlpha = clamp(COAST_BAND_ALPHA * alphaScale * alphaJitter, 0, 0.6);
+        const edgeAlpha = clamp(COAST_BAND_ALPHA * noise.alpha * alphaJitter, 0, 0.6);
         grad.addColorStop(0, rgbaString(outerColor, edgeAlpha));
         grad.addColorStop(1, rgbaString(TILE_COLOR_RGB.water, 0));
         ctx.fillStyle = grad;
@@ -204,6 +464,187 @@ const drawCoastBandForTile = (state, ctx, x, y, view) => {
         const neighbor = state.tiles[indexFor(state.grid, x - 1, y)];
         drawEdge(4, p3, p0, neighbor);
     }
+    const cornerPairs = [
+        { mask: COAST_EDGE_N | COAST_EDGE_E, corner: p1, id: 11, neighbors: [[0, -1], [1, 0]], diag: neLand },
+        { mask: COAST_EDGE_E | COAST_EDGE_S, corner: p2, id: 12, neighbors: [[1, 0], [0, 1]], diag: seLand },
+        { mask: COAST_EDGE_S | COAST_EDGE_W, corner: p3, id: 13, neighbors: [[0, 1], [-1, 0]], diag: swLand },
+        { mask: COAST_EDGE_W | COAST_EDGE_N, corner: p0, id: 14, neighbors: [[-1, 0], [0, -1]], diag: nwLand }
+    ];
+    const cornerRadius = Math.max(0.5, bandBase * COAST_CORNER_RADIUS_MULT);
+    ctx.save();
+    clipToTile(ctx, p0, p1, p2, p3);
+    cornerPairs.forEach((corner) => {
+        const hasAnyEdge = (edgeMask & corner.mask) !== 0;
+        const hasBothEdges = (edgeMask & corner.mask) === corner.mask;
+        const hasSingleEdge = hasAnyEdge && !hasBothEdges;
+        const hasDiag = corner.diag;
+        let cornerScale = 0;
+        let radiusScale = 0;
+        if (hasBothEdges) {
+            cornerScale = hasDiag ? 1.12 : 1;
+            radiusScale = hasDiag ? 1.05 : 1;
+        }
+        else if (hasSingleEdge && hasDiag) {
+            cornerScale = 0.65;
+            radiusScale = 0.78;
+        }
+        else if (hasDiag) {
+            cornerScale = 0.45;
+            radiusScale = 0.68;
+        }
+        else {
+            return;
+        }
+        const outerColor = lighten(TILE_COLOR_RGB.water, clamp(COAST_WATER_LIGHTEN + landInfluence * 0.16, 0, 0.6));
+        const alphaJitter = 1 + (hash2D(x + corner.id * 19, y + corner.id * 27, state.seed + 901) - 0.5) * COAST_BAND_ALPHA_JITTER;
+        const cornerAlpha = clamp(COAST_CORNER_ALPHA * noise.alpha * alphaJitter * cornerScale, 0, 0.6);
+        const insetX = corner.corner.x + (center.x - corner.corner.x) * COAST_CORNER_INSET;
+        const insetY = corner.corner.y + (center.y - corner.corner.y) * COAST_CORNER_INSET;
+        const angle = Math.atan2(center.y - insetY, center.x - insetX);
+        const radius = cornerRadius * radiusScale;
+        ctx.save();
+        ctx.translate(insetX, insetY);
+        ctx.rotate(angle);
+        ctx.scale(COAST_CORNER_STRETCH, COAST_CORNER_SQUASH);
+        const grad = ctx.createRadialGradient(0, 0, 0, 0, 0, radius);
+        grad.addColorStop(0, rgbaString(outerColor, cornerAlpha));
+        grad.addColorStop(1, rgbaString(outerColor, 0));
+        ctx.fillStyle = grad;
+        ctx.beginPath();
+        ctx.arc(0, 0, radius, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+    });
+    ctx.restore();
+};
+const drawLandShoreFeatherForTile = (state, ctx, x, y) => {
+    const edgeMask = computeLandCoastEdgeMask(state, x, y);
+    const neWater = x < state.grid.cols - 1 &&
+        y > 0 &&
+        state.tiles[indexFor(state.grid, x + 1, y - 1)].type === "water";
+    const seWater = x < state.grid.cols - 1 &&
+        y < state.grid.rows - 1 &&
+        state.tiles[indexFor(state.grid, x + 1, y + 1)].type === "water";
+    const swWater = x > 0 &&
+        y < state.grid.rows - 1 &&
+        state.tiles[indexFor(state.grid, x - 1, y + 1)].type === "water";
+    const nwWater = x > 0 &&
+        y > 0 &&
+        state.tiles[indexFor(state.grid, x - 1, y - 1)].type === "water";
+    if (!edgeMask && !neWater && !seWater && !swWater && !nwWater) {
+        return;
+    }
+    const tile = state.tiles[indexFor(state.grid, x, y)];
+    const { p0, p1, p2, p3 } = getTileCorners(state, x, y);
+    const center = {
+        x: (p0.x + p1.x + p2.x + p3.x) * 0.25,
+        y: (p0.y + p1.y + p2.y + p3.y) * 0.25
+    };
+    const noise = getShoreNoise(state, x, y, 2);
+    const bandBase = LAND_SHORE_BAND_PX * noise.width;
+    const shoreColor = mixRgb(getShoreLandColor(state, tile), SHALLOW_WATER_COLOR, LAND_SHORE_WATER_BLEND);
+    const anchor = getShoreAnchor(state, x, y, p0, p1, p2, p3, center, true);
+    if (anchor) {
+        const washJitter = 1 + (hash2D(x + 31, y + 37, state.seed + 1301) - 0.5) * LAND_WASH_ALPHA_JITTER;
+        const washAlpha = clamp(LAND_WASH_ALPHA * noise.alpha * washJitter, 0, 0.3);
+        drawShoreWash(ctx, p0, p1, p2, p3, anchor, center, shoreColor, LAND_WASH_BAND_PX * noise.width, washAlpha);
+    }
+    const drawEdge = (edgeId, a, b) => {
+        const edgeNoise = hash2D(x + edgeId * 23, y + edgeId * 31, state.seed + 1451);
+        const jitter = (edgeNoise * 2 - 1) * LAND_SHORE_JITTER_PX;
+        const band = Math.max(0.5, bandBase + jitter);
+        const dx = b.x - a.x;
+        const dy = b.y - a.y;
+        const len = Math.hypot(dx, dy) || 1;
+        let nx = -dy / len;
+        let ny = dx / len;
+        const mid = { x: (a.x + b.x) * 0.5, y: (a.y + b.y) * 0.5 };
+        const toCenter = { x: center.x - mid.x, y: center.y - mid.y };
+        if (nx * toCenter.x + ny * toCenter.y < 0) {
+            nx = -nx;
+            ny = -ny;
+        }
+        const a2 = { x: a.x + nx * band, y: a.y + ny * band };
+        const b2 = { x: b.x + nx * band, y: b.y + ny * band };
+        const outerMid = { x: (a.x + b.x) * 0.5, y: (a.y + b.y) * 0.5 };
+        const innerMid = { x: (a2.x + b2.x) * 0.5, y: (a2.y + b2.y) * 0.5 };
+        const alphaJitter = 1 + (hash2D(x + edgeId * 29, y + edgeId * 41, state.seed + 1601) - 0.5) * LAND_SHORE_BAND_ALPHA_JITTER;
+        const edgeAlpha = clamp(LAND_SHORE_BAND_ALPHA * noise.alpha * alphaJitter, 0, 0.6);
+        const grad = ctx.createLinearGradient(outerMid.x, outerMid.y, innerMid.x, innerMid.y);
+        grad.addColorStop(0, rgbaString(shoreColor, edgeAlpha));
+        grad.addColorStop(1, rgbaString(shoreColor, 0));
+        ctx.fillStyle = grad;
+        ctx.beginPath();
+        ctx.moveTo(a.x, a.y);
+        ctx.lineTo(b.x, b.y);
+        ctx.lineTo(b2.x, b2.y);
+        ctx.lineTo(a2.x, a2.y);
+        ctx.closePath();
+        ctx.fill();
+    };
+    if (edgeMask & COAST_EDGE_N) {
+        drawEdge(1, p0, p1);
+    }
+    if (edgeMask & COAST_EDGE_E) {
+        drawEdge(2, p1, p2);
+    }
+    if (edgeMask & COAST_EDGE_S) {
+        drawEdge(3, p2, p3);
+    }
+    if (edgeMask & COAST_EDGE_W) {
+        drawEdge(4, p3, p0);
+    }
+    const cornerPairs = [
+        { mask: COAST_EDGE_N | COAST_EDGE_E, corner: p1, id: 21, diag: neWater },
+        { mask: COAST_EDGE_E | COAST_EDGE_S, corner: p2, id: 22, diag: seWater },
+        { mask: COAST_EDGE_S | COAST_EDGE_W, corner: p3, id: 23, diag: swWater },
+        { mask: COAST_EDGE_W | COAST_EDGE_N, corner: p0, id: 24, diag: nwWater }
+    ];
+    const cornerRadius = Math.max(0.5, bandBase * LAND_SHORE_CORNER_RADIUS_MULT);
+    ctx.save();
+    clipToTile(ctx, p0, p1, p2, p3);
+    cornerPairs.forEach((corner) => {
+        const hasAnyEdge = (edgeMask & corner.mask) !== 0;
+        const hasBothEdges = (edgeMask & corner.mask) === corner.mask;
+        const hasSingleEdge = hasAnyEdge && !hasBothEdges;
+        const hasDiag = corner.diag;
+        let cornerScale = 0;
+        let radiusScale = 0;
+        if (hasBothEdges) {
+            cornerScale = hasDiag ? 1.08 : 1;
+            radiusScale = hasDiag ? 1.04 : 1;
+        }
+        else if (hasSingleEdge && hasDiag) {
+            cornerScale = 0.6;
+            radiusScale = 0.78;
+        }
+        else if (hasDiag) {
+            cornerScale = 0.42;
+            radiusScale = 0.66;
+        }
+        else {
+            return;
+        }
+        const alphaJitter = 1 + (hash2D(x + corner.id * 13, y + corner.id * 17, state.seed + 1709) - 0.5) * LAND_SHORE_BAND_ALPHA_JITTER;
+        const cornerAlpha = clamp(LAND_SHORE_CORNER_ALPHA * noise.alpha * alphaJitter * cornerScale, 0, 0.6);
+        const insetX = corner.corner.x + (center.x - corner.corner.x) * LAND_SHORE_CORNER_INSET;
+        const insetY = corner.corner.y + (center.y - corner.corner.y) * LAND_SHORE_CORNER_INSET;
+        const angle = Math.atan2(center.y - insetY, center.x - insetX);
+        const radius = cornerRadius * radiusScale;
+        ctx.save();
+        ctx.translate(insetX, insetY);
+        ctx.rotate(angle);
+        ctx.scale(LAND_SHORE_CORNER_STRETCH, LAND_SHORE_CORNER_SQUASH);
+        const grad = ctx.createRadialGradient(0, 0, 0, 0, 0, radius);
+        grad.addColorStop(0, rgbaString(shoreColor, cornerAlpha));
+        grad.addColorStop(1, rgbaString(shoreColor, 0));
+        ctx.fillStyle = grad;
+        ctx.beginPath();
+        ctx.arc(0, 0, radius, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+    });
+    ctx.restore();
 };
 const drawCoastBands = (state, canvas, ctx, view) => {
     const bounds = getVisibleBounds(state, canvas, view);
@@ -212,9 +653,264 @@ const drawCoastBands = (state, canvas, ctx, view) => {
             if (state.tiles[indexFor(state.grid, x, y)].type !== "water") {
                 continue;
             }
-            drawCoastBandForTile(state, ctx, x, y, view);
+            drawWaterShallowsForTile(state, ctx, x, y);
+            drawCoastBandForTile(state, ctx, x, y);
         }
     }
+};
+const drawLandShoreFeather = (state, canvas, ctx, view) => {
+    const bounds = getVisibleBounds(state, canvas, view);
+    for (let y = bounds.startY; y <= bounds.endY; y += 1) {
+        for (let x = bounds.startX; x <= bounds.endX; x += 1) {
+            drawLandShoreFeatherForTile(state, ctx, x, y);
+        }
+    }
+};
+const pointKey = (point) => `${point.x},${point.y}`;
+const pointsEqual = (a, b) => a.x === b.x && a.y === b.y;
+const buildCoastSegments = (state) => {
+    const segments = [];
+    const { cols, rows } = state.grid;
+    for (let y = 0; y < rows; y += 1) {
+        for (let x = 0; x < cols; x += 1) {
+            const tile = state.tiles[indexFor(state.grid, x, y)];
+            if (tile.type === "water") {
+                continue;
+            }
+            const northWater = y === 0 || state.tiles[indexFor(state.grid, x, y - 1)].type === "water";
+            const eastWater = x === cols - 1 || state.tiles[indexFor(state.grid, x + 1, y)].type === "water";
+            const southWater = y === rows - 1 || state.tiles[indexFor(state.grid, x, y + 1)].type === "water";
+            const westWater = x === 0 || state.tiles[indexFor(state.grid, x - 1, y)].type === "water";
+            const p00 = { x, y };
+            const p10 = { x: x + 1, y };
+            const p11 = { x: x + 1, y: y + 1 };
+            const p01 = { x, y: y + 1 };
+            if (northWater) {
+                segments.push({ a: p00, b: p10 });
+            }
+            if (eastWater) {
+                segments.push({ a: p10, b: p11 });
+            }
+            if (southWater) {
+                segments.push({ a: p11, b: p01 });
+            }
+            if (westWater) {
+                segments.push({ a: p01, b: p00 });
+            }
+        }
+    }
+    return segments;
+};
+const traceCoastlines = (segments) => {
+    const adjacency = new Map();
+    const used = new Array(segments.length).fill(false);
+    segments.forEach((segment, index) => {
+        const aKey = pointKey(segment.a);
+        const bKey = pointKey(segment.b);
+        const aList = adjacency.get(aKey) ?? [];
+        aList.push(index);
+        adjacency.set(aKey, aList);
+        const bList = adjacency.get(bKey) ?? [];
+        bList.push(index);
+        adjacency.set(bKey, bList);
+    });
+    const nextSegment = (current, prev) => {
+        const list = adjacency.get(pointKey(current));
+        if (!list) {
+            return -1;
+        }
+        let fallback = -1;
+        for (const idx of list) {
+            if (used[idx]) {
+                continue;
+            }
+            const seg = segments[idx];
+            const other = pointsEqual(seg.a, current) ? seg.b : seg.a;
+            if (prev && pointsEqual(other, prev)) {
+                if (fallback === -1) {
+                    fallback = idx;
+                }
+                continue;
+            }
+            return idx;
+        }
+        return fallback;
+    };
+    const coastlines = [];
+    for (let i = 0; i < segments.length; i += 1) {
+        if (used[i]) {
+            continue;
+        }
+        used[i] = true;
+        const seed = segments[i];
+        const points = [seed.a, seed.b];
+        let current = seed.b;
+        let previous = seed.a;
+        while (true) {
+            const nextIdx = nextSegment(current, previous);
+            if (nextIdx === -1) {
+                break;
+            }
+            used[nextIdx] = true;
+            const nextSeg = segments[nextIdx];
+            const nextPoint = pointsEqual(nextSeg.a, current) ? nextSeg.b : nextSeg.a;
+            points.push(nextPoint);
+            previous = current;
+            current = nextPoint;
+        }
+        const backward = [];
+        current = seed.a;
+        previous = seed.b;
+        while (true) {
+            const nextIdx = nextSegment(current, previous);
+            if (nextIdx === -1) {
+                break;
+            }
+            used[nextIdx] = true;
+            const nextSeg = segments[nextIdx];
+            const nextPoint = pointsEqual(nextSeg.a, current) ? nextSeg.b : nextSeg.a;
+            backward.push(nextPoint);
+            previous = current;
+            current = nextPoint;
+        }
+        if (backward.length > 0) {
+            backward.reverse();
+            points.unshift(...backward);
+        }
+        let closed = false;
+        if (points.length >= 3 && pointsEqual(points[0], points[points.length - 1])) {
+            closed = true;
+            points.pop();
+        }
+        if (points.length >= 2) {
+            coastlines.push({ points, closed });
+        }
+    }
+    return coastlines;
+};
+const smoothCoastline = (points, closed, iterations) => {
+    let result = points;
+    for (let iter = 0; iter < iterations; iter += 1) {
+        if (result.length < 2) {
+            break;
+        }
+        const next = [];
+        if (!closed) {
+            next.push(result[0]);
+        }
+        const count = result.length;
+        const limit = closed ? count : count - 1;
+        for (let i = 0; i < limit; i += 1) {
+            const a = result[i];
+            const b = result[(i + 1) % count];
+            const q = { x: a.x * 0.75 + b.x * 0.25, y: a.y * 0.75 + b.y * 0.25 };
+            const r = { x: a.x * 0.25 + b.x * 0.75, y: a.y * 0.25 + b.y * 0.75 };
+            next.push(q, r);
+        }
+        if (!closed) {
+            next.push(result[count - 1]);
+        }
+        result = next;
+    }
+    return result;
+};
+const simplifyCoastline = (points, closed) => {
+    if (points.length < 3) {
+        return points;
+    }
+    const result = [];
+    const count = points.length;
+    for (let i = 0; i < count; i += 1) {
+        const prev = points[(i - 1 + count) % count];
+        const current = points[i];
+        const next = points[(i + 1) % count];
+        if (!closed && (i === 0 || i === count - 1)) {
+            result.push(current);
+            continue;
+        }
+        const colinearX = prev.x === current.x && current.x === next.x;
+        const colinearY = prev.y === current.y && current.y === next.y;
+        if (colinearX || colinearY) {
+            continue;
+        }
+        result.push(current);
+    }
+    return result.length >= 2 ? result : points;
+};
+const buildCoastlinePaths = (state) => {
+    const segments = buildCoastSegments(state);
+    const traced = traceCoastlines(segments);
+    return traced.map((path) => ({
+        closed: path.closed,
+        points: smoothCoastline(simplifyCoastline(path.points, path.closed), path.closed, COASTLINE_SMOOTH_ITERATIONS)
+    }));
+};
+const ensureCoastlineCache = (state) => {
+    if (!coastlineCache ||
+        coastlineCache.tilesRef !== state.tiles ||
+        coastlineCache.cols !== state.grid.cols ||
+        coastlineCache.rows !== state.grid.rows) {
+        coastlineCache = {
+            paths: buildCoastlinePaths(state),
+            tilesRef: state.tiles,
+            cols: state.grid.cols,
+            rows: state.grid.rows
+        };
+    }
+    return coastlineCache;
+};
+const drawCoastlinePaths = (state, ctx) => {
+    const coastline = ensureCoastlineCache(state);
+    if (coastline.paths.length === 0) {
+        return;
+    }
+    const edgeColor = darken(COASTLINE_COLOR, COASTLINE_EDGE_DARKEN);
+    ctx.save();
+    ctx.lineJoin = "round";
+    ctx.lineCap = "round";
+    ctx.strokeStyle = rgbaString(COASTLINE_COLOR, COASTLINE_STROKE_ALPHA);
+    ctx.lineWidth = COASTLINE_STROKE_WIDTH;
+    coastline.paths.forEach((path) => {
+        if (path.points.length < 2) {
+            return;
+        }
+        const first = path.points[0];
+        const start = isoProject(first.x, first.y, getRenderHeightAt(state, first.x, first.y));
+        ctx.beginPath();
+        ctx.moveTo(start.x, start.y);
+        for (let i = 1; i < path.points.length; i += 1) {
+            const point = path.points[i];
+            const pos = isoProject(point.x, point.y, getRenderHeightAt(state, point.x, point.y));
+            ctx.lineTo(pos.x, pos.y);
+        }
+        if (path.closed) {
+            ctx.closePath();
+        }
+        ctx.stroke();
+    });
+    if (COASTLINE_EDGE_ALPHA > 0 && COASTLINE_EDGE_WIDTH > 0) {
+        ctx.strokeStyle = rgbaString(edgeColor, COASTLINE_EDGE_ALPHA);
+        ctx.lineWidth = COASTLINE_EDGE_WIDTH;
+        coastline.paths.forEach((path) => {
+            if (path.points.length < 2) {
+                return;
+            }
+            const first = path.points[0];
+            const start = isoProject(first.x, first.y, getRenderHeightAt(state, first.x, first.y));
+            ctx.beginPath();
+            ctx.moveTo(start.x, start.y);
+            for (let i = 1; i < path.points.length; i += 1) {
+                const point = path.points[i];
+                const pos = isoProject(point.x, point.y, getRenderHeightAt(state, point.x, point.y));
+                ctx.lineTo(pos.x, pos.y);
+            }
+            if (path.closed) {
+                ctx.closePath();
+            }
+            ctx.stroke();
+        });
+    }
+    ctx.restore();
 };
 const drawGridOverlay = (state, canvas, ctx, view) => {
     const zoomFactor = clamp((view.scale - 0.75) / 1.3, 0, 1);
@@ -427,7 +1123,7 @@ export function draw(state, canvas, ctx, alpha = 1) {
     ctx.setTransform(view.scale, 0, 0, view.scale, view.offsetX, view.offsetY);
     // Draw the pre-rendered terrain from its cache
     ctx.drawImage(cache.canvas, cache.originX, cache.originY);
-    drawCoastBands(state, canvas, ctx, view);
+    drawCoastlinePaths(state, ctx);
     drawGridOverlay(state, canvas, ctx, view);
     const treeLayer = ensureTreeLayerCache(state, now);
     if (treeLayer) {

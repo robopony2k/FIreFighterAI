@@ -11,7 +11,10 @@ export function isoProject(wx: number, wy: number, height: number): Point {
   };
 }
 
-export function getTileHeight(tile: WorldState["tiles"][number]): number {
+export function getTileHeight(tile: WorldState["tiles"][number] | undefined): number {
+  if (!tile) {
+    return 0;
+  }
   return tile.elevation * HEIGHT_SCALE - (tile.type === "water" ? HEIGHT_WATER_DROP : 0);
 }
 
@@ -33,6 +36,9 @@ const sampleVertexHeight = (state: WorldState, vx: number, vy: number): number =
 };
 
 export function getHeightAt(state: WorldState, wx: number, wy: number): number {
+  if (state.tiles.length === 0) {
+    return 0;
+  }
   const { cols, rows } = state.grid;
   if (wx < 0 || wy < 0 || wx > cols || wy > rows) {
     return 0;

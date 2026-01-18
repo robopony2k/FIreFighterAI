@@ -50,6 +50,10 @@ const overlayRefs = getOverlayRefs();
 const characterScreen = document.getElementById("characterScreen") as HTMLDivElement;
 const startMenu = document.getElementById("startMenu") as HTMLDivElement | null;
 const canvasWrap = canvas.parentElement as HTMLElement | null;
+const mapgenOverlay = document.getElementById("mapgenOverlay") as HTMLDivElement | null;
+const mapgenMessage = document.getElementById("mapgenMessage") as HTMLDivElement | null;
+const mapgenProgressBar = document.getElementById("mapgenProgressBar") as HTMLDivElement | null;
+const mapgenPercent = document.getElementById("mapgenPercent") as HTMLDivElement | null;
 let resizeObserver: ResizeObserver | null = null;
 let lastCanvasWidth = 0;
 let lastCanvasHeight = 0;
@@ -80,21 +84,59 @@ const watchCanvasSize = (): void => {
   }
 };
 
-const resetGame = (config: NewRunConfig) => {
-  const { seed, mapSize, characterId, callsign } = config;
-  if (activeMapSize !== mapSize) {
-    activeMapSize = mapSize;
-    state.grid = buildGrid(mapSize);
+let isGenerating = false;
+const showMapgenOverlay = (): void => {
+  if (!mapgenOverlay) {
+    return;
   }
-  resetState(state, seed);
-  state.campaign.characterId = characterId;
-  state.campaign.callsign = callsign;
-  const baseBudget = getCharacterBaseBudget(state.campaign.characterId, BASE_BUDGET);
-  state.budget = baseBudget;
-  state.pendingBudget = baseBudget;
-  randomizeWind(state, rng);
-  rng.setState(seed);
-  generateMap(state, rng);
+  mapgenOverlay.classList.remove("hidden");
+};
+const hideMapgenOverlay = (): void => {
+  if (!mapgenOverlay) {
+    return;
+  }
+  mapgenOverlay.classList.add("hidden");
+};
+const updateMapgenOverlay = (message: string, progress: number): void => {
+  if (!mapgenOverlay || !mapgenMessage || !mapgenProgressBar || !mapgenPercent) {
+    return;
+  }
+  const clamped = Math.min(1, Math.max(0, progress));
+  mapgenMessage.textContent = message;
+  mapgenProgressBar.style.width = `${Math.round(clamped * 100)}%`;
+  mapgenPercent.textContent = `${Math.round(clamped * 100)}%`;
+};
+
+const resetGame = async (config: NewRunConfig) => {
+  if (isGenerating) {
+    return;
+  }
+  isGenerating = true;
+  const { seed, mapSize, characterId, callsign } = config;
+  try {
+    if (activeMapSize !== mapSize) {
+      activeMapSize = mapSize;
+      state.grid = buildGrid(mapSize);
+    }
+    resetState(state, seed);
+    state.campaign.characterId = characterId;
+    state.campaign.callsign = callsign;
+    const baseBudget = getCharacterBaseBudget(state.campaign.characterId, BASE_BUDGET);
+    state.budget = baseBudget;
+    state.pendingBudget = baseBudget;
+    randomizeWind(state, rng);
+    rng.setState(seed);
+    state.paused = true;
+    showMapgenOverlay();
+    updateMapgenOverlay("Reticulating splines...", 0);
+    await generateMap(state, rng, (message, progress) => {
+      updateMapgenOverlay(message, progress);
+    }, config.options.mapGen);
+    state.paused = false;
+  } finally {
+    hideMapgenOverlay();
+    isGenerating = false;
+  }
   seedStartingRoster(state, rng);
   state.cameraCenter = { x: state.basePoint.x + 0.5, y: state.basePoint.y + 0.5 };
   const maintenanceIndex = PHASES.findIndex((phase) => phase.id === "maintenance");
@@ -108,19 +150,12 @@ const resetGame = (config: NewRunConfig) => {
 const initialRunConfig: NewRunConfig = {
   seed: initialSeed,
   mapSize: activeMapSize,
-  options: { ...DEFAULT_RUN_OPTIONS },
+  options: { ...DEFAULT_RUN_OPTIONS, mapGen: { ...DEFAULT_RUN_OPTIONS.mapGen } },
   characterId: state.campaign.characterId,
   callsign: state.campaign.callsign
 };
 
 watchCanvasSize();
-resetGame(initialRunConfig);
-
-if (!headless) {
-  if (phaseUi) {
-    bindPhaseUi(phaseUi, state, rng, canvas, resetGame, overlayRefs);
-  }
-}
 
 const persistScoreIfNeeded = () => {
   if (!state.gameOver || state.scoreSubmitted) {
@@ -132,6 +167,15 @@ const persistScoreIfNeeded = () => {
   state.leaderboardDirty = true;
 };
 
+const boot = async () => {
+  await resetGame(initialRunConfig);
+
+  if (!headless) {
+    if (phaseUi) {
+      bindPhaseUi(phaseUi, state, rng, canvas, resetGame, overlayRefs);
+    }
+  }
+
   if (headless) {
     const ticks = 10000;
     const step = 0.1;
@@ -140,38 +184,42 @@ const persistScoreIfNeeded = () => {
       phaseUi?.sync(state);
     }
     console.log(`checksum:${computeChecksum(state)}`);
-  } else {
-    let lastTick = 0;
-    let accumulator = 0;
-    const baseStep = 0.1;
-
-    const frame = (now: number) => {
-      if (!lastTick) {
-        lastTick = now;
-      }
-      const startMenuVisible = startMenu ? !startMenu.classList.contains("hidden") : false;
-      if (!characterScreen.classList.contains("hidden") || startMenuVisible || document.hidden) {
-        lastTick = now;
-        accumulator = 0;
-        requestAnimationFrame(frame);
-        return;
-      }
-      const delta = Math.min(0.25, (now - lastTick) / 1000);
-      lastTick = now;
-      accumulator += delta;
-      const speedIndex = Math.min(Math.max(state.timeSpeedIndex, 0), TIME_SPEED_OPTIONS.length - 1);
-      const simStep = baseStep * (TIME_SPEED_OPTIONS[speedIndex] ?? 1);
-      while (accumulator >= baseStep) {
-        stepSim(state, rng, simStep);
-        accumulator -= baseStep;
-      }
-      const alpha = state.paused || state.gameOver ? 1 : Math.min(1, Math.max(0, accumulator / baseStep));
-      persistScoreIfNeeded();
-      phaseUi?.sync(state);
-      updateOverlay(overlayRefs, state);
-      draw(state, canvas, ctx, alpha);
-      requestAnimationFrame(frame);
-    };
-
-    requestAnimationFrame(frame);
+    return;
   }
+
+  let lastTick = 0;
+  let accumulator = 0;
+  const baseStep = 0.1;
+
+  const frame = (now: number) => {
+    if (!lastTick) {
+      lastTick = now;
+    }
+    const startMenuVisible = startMenu ? !startMenu.classList.contains("hidden") : false;
+    if (isGenerating || !characterScreen.classList.contains("hidden") || startMenuVisible || document.hidden) {
+      lastTick = now;
+      accumulator = 0;
+      requestAnimationFrame(frame);
+      return;
+    }
+    const delta = Math.min(0.25, (now - lastTick) / 1000);
+    lastTick = now;
+    accumulator += delta;
+    const speedIndex = Math.min(Math.max(state.timeSpeedIndex, 0), TIME_SPEED_OPTIONS.length - 1);
+    const simStep = baseStep * (TIME_SPEED_OPTIONS[speedIndex] ?? 1);
+    while (accumulator >= baseStep) {
+      stepSim(state, rng, simStep);
+      accumulator -= baseStep;
+    }
+    const alpha = state.paused || state.gameOver ? 1 : Math.min(1, Math.max(0, accumulator / baseStep));
+    persistScoreIfNeeded();
+    phaseUi?.sync(state);
+    updateOverlay(overlayRefs, state);
+    draw(state, canvas, ctx, alpha);
+    requestAnimationFrame(frame);
+  };
+
+  requestAnimationFrame(frame);
+};
+
+void boot();

@@ -166,12 +166,13 @@ export const bindPhaseUi = (phaseUi, state, rng, canvas, onNewRun, overlayRefs) 
         characterNameRandom: document.getElementById("characterNameRandom"),
         runSeedInput: document.getElementById("runSeedInput"),
         runMapSizeInputs: Array.from(document.querySelectorAll('#characterScreen input[name="mapSize"]')),
-        runUnlimitedMoney: document.getElementById("runUnlimitedMoney")
+        runUnlimitedMoney: document.getElementById("runUnlimitedMoney"),
+        mapGenInputs: Array.from(document.querySelectorAll('#characterScreen input[data-mapgen-key]'))
     };
     let lastRunConfig = {
         seed: DEFAULT_RUN_SEED,
         mapSize: DEFAULT_MAP_SIZE,
-        options: { ...DEFAULT_RUN_OPTIONS },
+        options: { ...DEFAULT_RUN_OPTIONS, mapGen: { ...DEFAULT_RUN_OPTIONS.mapGen } },
         characterId: state.campaign.characterId,
         callsign: state.campaign.callsign
     };

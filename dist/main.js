@@ -43,6 +43,10 @@ const overlayRefs = getOverlayRefs();
 const characterScreen = document.getElementById("characterScreen");
 const startMenu = document.getElementById("startMenu");
 const canvasWrap = canvas.parentElement;
+const mapgenOverlay = document.getElementById("mapgenOverlay");
+const mapgenMessage = document.getElementById("mapgenMessage");
+const mapgenProgressBar = document.getElementById("mapgenProgressBar");
+const mapgenPercent = document.getElementById("mapgenPercent");
 let resizeObserver = null;
 let lastCanvasWidth = 0;
 let lastCanvasHeight = 0;
@@ -73,21 +77,59 @@ const watchCanvasSize = () => {
         window.addEventListener("resize", resizeCanvasToWrap);
     }
 };
-const resetGame = (config) => {
-    const { seed, mapSize, characterId, callsign } = config;
-    if (activeMapSize !== mapSize) {
-        activeMapSize = mapSize;
-        state.grid = buildGrid(mapSize);
+let isGenerating = false;
+const showMapgenOverlay = () => {
+    if (!mapgenOverlay) {
+        return;
     }
-    resetState(state, seed);
-    state.campaign.characterId = characterId;
-    state.campaign.callsign = callsign;
-    const baseBudget = getCharacterBaseBudget(state.campaign.characterId, BASE_BUDGET);
-    state.budget = baseBudget;
-    state.pendingBudget = baseBudget;
-    randomizeWind(state, rng);
-    rng.setState(seed);
-    generateMap(state, rng);
+    mapgenOverlay.classList.remove("hidden");
+};
+const hideMapgenOverlay = () => {
+    if (!mapgenOverlay) {
+        return;
+    }
+    mapgenOverlay.classList.add("hidden");
+};
+const updateMapgenOverlay = (message, progress) => {
+    if (!mapgenOverlay || !mapgenMessage || !mapgenProgressBar || !mapgenPercent) {
+        return;
+    }
+    const clamped = Math.min(1, Math.max(0, progress));
+    mapgenMessage.textContent = message;
+    mapgenProgressBar.style.width = `${Math.round(clamped * 100)}%`;
+    mapgenPercent.textContent = `${Math.round(clamped * 100)}%`;
+};
+const resetGame = async (config) => {
+    if (isGenerating) {
+        return;
+    }
+    isGenerating = true;
+    const { seed, mapSize, characterId, callsign } = config;
+    try {
+        if (activeMapSize !== mapSize) {
+            activeMapSize = mapSize;
+            state.grid = buildGrid(mapSize);
+        }
+        resetState(state, seed);
+        state.campaign.characterId = characterId;
+        state.campaign.callsign = callsign;
+        const baseBudget = getCharacterBaseBudget(state.campaign.characterId, BASE_BUDGET);
+        state.budget = baseBudget;
+        state.pendingBudget = baseBudget;
+        randomizeWind(state, rng);
+        rng.setState(seed);
+        state.paused = true;
+        showMapgenOverlay();
+        updateMapgenOverlay("Reticulating splines...", 0);
+        await generateMap(state, rng, (message, progress) => {
+            updateMapgenOverlay(message, progress);
+        }, config.options.mapGen);
+        state.paused = false;
+    }
+    finally {
+        hideMapgenOverlay();
+        isGenerating = false;
+    }
     seedStartingRoster(state, rng);
     state.cameraCenter = { x: state.basePoint.x + 0.5, y: state.basePoint.y + 0.5 };
     const maintenanceIndex = PHASES.findIndex((phase) => phase.id === "maintenance");
@@ -100,17 +142,11 @@ const resetGame = (config) => {
 const initialRunConfig = {
     seed: initialSeed,
     mapSize: activeMapSize,
-    options: { ...DEFAULT_RUN_OPTIONS },
+    options: { ...DEFAULT_RUN_OPTIONS, mapGen: { ...DEFAULT_RUN_OPTIONS.mapGen } },
     characterId: state.campaign.characterId,
     callsign: state.campaign.callsign
 };
 watchCanvasSize();
-resetGame(initialRunConfig);
-if (!headless) {
-    if (phaseUi) {
-        bindPhaseUi(phaseUi, state, rng, canvas, resetGame, overlayRefs);
-    }
-}
 const persistScoreIfNeeded = () => {
     if (!state.gameOver || state.scoreSubmitted) {
         return;
@@ -120,16 +156,23 @@ const persistScoreIfNeeded = () => {
     state.scoreSubmitted = true;
     state.leaderboardDirty = true;
 };
-if (headless) {
-    const ticks = 10000;
-    const step = 0.1;
-    for (let i = 0; i < ticks; i += 1) {
-        stepSim(state, rng, step);
-        phaseUi?.sync(state);
+const boot = async () => {
+    await resetGame(initialRunConfig);
+    if (!headless) {
+        if (phaseUi) {
+            bindPhaseUi(phaseUi, state, rng, canvas, resetGame, overlayRefs);
+        }
     }
-    console.log(`checksum:${computeChecksum(state)}`);
-}
-else {
+    if (headless) {
+        const ticks = 10000;
+        const step = 0.1;
+        for (let i = 0; i < ticks; i += 1) {
+            stepSim(state, rng, step);
+            phaseUi?.sync(state);
+        }
+        console.log(`checksum:${computeChecksum(state)}`);
+        return;
+    }
     let lastTick = 0;
     let accumulator = 0;
     const baseStep = 0.1;
@@ -138,7 +181,7 @@ else {
             lastTick = now;
         }
         const startMenuVisible = startMenu ? !startMenu.classList.contains("hidden") : false;
-        if (!characterScreen.classList.contains("hidden") || startMenuVisible || document.hidden) {
+        if (isGenerating || !characterScreen.classList.contains("hidden") || startMenuVisible || document.hidden) {
             lastTick = now;
             accumulator = 0;
             requestAnimationFrame(frame);
@@ -161,4 +204,5 @@ else {
         requestAnimationFrame(frame);
     };
     requestAnimationFrame(frame);
-}
+};
+void boot();

@@ -4,6 +4,7 @@ import type { CharacterId, CharacterDefinition } from "../core/characters.js";
 import type { MapSizeId } from "../core/config.js";
 import { DEFAULT_MAP_SIZE, DEFAULT_RUN_OPTIONS, DEFAULT_RUN_SEED } from "./run-config.js";
 import type { NewRunConfig, RunOptions } from "./run-config.js";
+import type { MapGenSettings } from "../mapgen/settings.js";
 export type CharacterSelectRefs = {
   characterScreen: HTMLDivElement;
   characterGrid: HTMLDivElement;
@@ -17,6 +18,7 @@ export type CharacterSelectRefs = {
   runSeedInput: HTMLInputElement;
   runMapSizeInputs: HTMLInputElement[];
   runUnlimitedMoney: HTMLInputElement;
+  mapGenInputs: HTMLInputElement[];
 };
 
 const formatPercent = (value: number): string => {
@@ -97,7 +99,7 @@ const buildCallsign = (characterId: CharacterId): string => {
 export function initCharacterSelect(
   ui: CharacterSelectRefs,
   state: WorldState,
-  onConfirm: (config: NewRunConfig) => void
+  onConfirm: (config: NewRunConfig) => void | Promise<void>
 ): { open: (config: NewRunConfig) => void } {
   let selectedId: CharacterId = state.campaign.characterId;
   const cards = new Map<CharacterId, HTMLButtonElement>();
@@ -202,9 +204,100 @@ export function initCharacterSelect(
     return (selected?.value as MapSizeId) ?? DEFAULT_MAP_SIZE;
   };
 
+  const mapGenOutputs = new Map<HTMLInputElement, HTMLElement>();
+  ui.mapGenInputs.forEach((input) => {
+    const outputId = input.dataset.output;
+    if (!outputId) {
+      return;
+    }
+    const output = document.getElementById(outputId);
+    if (output) {
+      mapGenOutputs.set(input, output);
+    }
+  });
+
+  const tabButtons = Array.from(document.querySelectorAll<HTMLButtonElement>("#characterScreen .run-tab"));
+  const tabPanels = Array.from(document.querySelectorAll<HTMLElement>("#characterScreen .run-tab-panel"));
+
+  const setActiveTab = (tabId: string): void => {
+    tabButtons.forEach((button) => {
+      const isActive = button.dataset.tab === tabId;
+      button.classList.toggle("is-active", isActive);
+      button.setAttribute("aria-selected", isActive ? "true" : "false");
+    });
+    tabPanels.forEach((panel) => {
+      const isActive = panel.dataset.tabPanel === tabId;
+      panel.classList.toggle("is-active", isActive);
+    });
+  };
+
+  tabButtons.forEach((button) => {
+    button.addEventListener("click", () => {
+      const tabId = button.dataset.tab;
+      if (!tabId) {
+        return;
+      }
+      setActiveTab(tabId);
+    });
+  });
+
+  const defaultTab = tabButtons.find((button) => button.classList.contains("is-active"))?.dataset.tab
+    ?? tabButtons[0]?.dataset.tab;
+  if (defaultTab) {
+    setActiveTab(defaultTab);
+  }
+
+  const formatMapGenValue = (input: HTMLInputElement): string => {
+    const raw = Number(input.value);
+    if (!Number.isFinite(raw)) {
+      return input.value;
+    }
+    const format = input.dataset.format;
+    if (format === "int") {
+      return Math.round(raw).toString();
+    }
+    return raw.toFixed(2);
+  };
+
+  const syncMapGenOutput = (input: HTMLInputElement): void => {
+    const output = mapGenOutputs.get(input);
+    if (!output) {
+      return;
+    }
+    output.textContent = formatMapGenValue(input);
+  };
+
+  const getMapGenSettings = (): MapGenSettings => {
+    const settings: MapGenSettings = { ...DEFAULT_RUN_OPTIONS.mapGen };
+    ui.mapGenInputs.forEach((input) => {
+      const key = input.dataset.mapgenKey as keyof MapGenSettings | undefined;
+      if (!key) {
+        return;
+      }
+      const value = Number(input.value);
+      if (Number.isFinite(value)) {
+        settings[key] = value;
+      }
+    });
+    return settings;
+  };
+
+  const applyMapGenSettings = (settings: MapGenSettings): void => {
+    const nextSettings = { ...DEFAULT_RUN_OPTIONS.mapGen, ...settings };
+    ui.mapGenInputs.forEach((input) => {
+      const key = input.dataset.mapgenKey as keyof MapGenSettings | undefined;
+      if (!key) {
+        return;
+      }
+      input.value = `${nextSettings[key]}`;
+      syncMapGenOutput(input);
+    });
+  };
+
   const getRunOptions = (): RunOptions => ({
     ...DEFAULT_RUN_OPTIONS,
-    unlimitedMoney: ui.runUnlimitedMoney.checked
+    unlimitedMoney: ui.runUnlimitedMoney.checked,
+    mapGen: getMapGenSettings()
   });
 
   ui.characterNameInput.value = state.campaign.callsign;
@@ -221,6 +314,12 @@ export function initCharacterSelect(
   ui.characterNameRandom.addEventListener("click", () => {
     applyRandomName();
   });
+
+  ui.mapGenInputs.forEach((input) => {
+    input.addEventListener("input", () => syncMapGenOutput(input));
+    syncMapGenOutput(input);
+  });
+  applyMapGenSettings(DEFAULT_RUN_OPTIONS.mapGen);
 
   updateSelection();
   updateConfirmState();
@@ -259,6 +358,8 @@ export function initCharacterSelect(
     ui.runSeedInput.value = seedValue.toString();
     setSelectedMapSize(config.mapSize);
     ui.runUnlimitedMoney.checked = config.options.unlimitedMoney;
+    applyMapGenSettings(config.options.mapGen ?? DEFAULT_RUN_OPTIONS.mapGen);
+    setActiveTab("roster");
     if (ui.characterNameInput.value.trim().length === 0) {
       applyRandomName();
     }

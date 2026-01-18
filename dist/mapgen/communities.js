@@ -85,6 +85,24 @@ function carveRoadRing(state, rng, center, radius) {
         setRoadAt(state, rng, center.x + radius, center.y + dy);
     }
 }
+function carveRoadLine(state, rng, start, end) {
+    const dx = end.x - start.x;
+    const dy = end.y - start.y;
+    const steps = Math.max(Math.abs(dx), Math.abs(dy));
+    if (steps <= 0) {
+        setRoadAt(state, rng, start.x, start.y);
+        return;
+    }
+    const stepX = dx / steps;
+    const stepY = dy / steps;
+    let x = start.x;
+    let y = start.y;
+    for (let i = 0; i <= steps; i += 1) {
+        setRoadAt(state, rng, Math.round(x), Math.round(y));
+        x += stepX;
+        y += stepY;
+    }
+}
 function placeVillageHouses(state, rng, center, radius, count, valueMin, valueMax, residentsMin, residentsMax, roadBias) {
     let placed = 0;
     let tries = 0;
@@ -182,6 +200,15 @@ function markReachableLand(state, origin) {
     }
     return visited;
 }
+function countReachable(reachable) {
+    let count = 0;
+    for (let i = 0; i < reachable.length; i += 1) {
+        if (reachable[i]) {
+            count += 1;
+        }
+    }
+    return count;
+}
 function findClosestUnreachableLand(state, reachable) {
     let best = null;
     let bestDist = Number.POSITIVE_INFINITY;
@@ -202,7 +229,9 @@ function findClosestUnreachableLand(state, reachable) {
 }
 function connectDetachedLand(state, rng) {
     let reachable = markReachableLand(state, state.basePoint);
-    while (true) {
+    let reachableCount = countReachable(reachable);
+    const maxIterations = Math.min(state.grid.totalTiles, 4096);
+    for (let iteration = 0; iteration < maxIterations; iteration += 1) {
         const start = findClosestUnreachableLand(state, reachable);
         if (!start) {
             break;
@@ -215,7 +244,13 @@ function connectDetachedLand(state, rng) {
             break;
         }
         path.forEach((point) => setRoadAt(state, rng, point.x, point.y, { allowBridge: true }));
-        reachable = markReachableLand(state, state.basePoint);
+        const nextReachable = markReachableLand(state, state.basePoint);
+        const nextCount = countReachable(nextReachable);
+        if (nextCount <= reachableCount) {
+            break;
+        }
+        reachable = nextReachable;
+        reachableCount = nextCount;
     }
 }
 function ensureEvacuationRoute(state, rng) {
@@ -246,11 +281,29 @@ export function populateCommunities(state, rng) {
     state.totalPopulation = 0;
     state.totalHouses = 0;
     state.destroyedHouses = 0;
+    const maxDim = Math.max(state.grid.cols, state.grid.rows);
+    const fastMode = maxDim >= 1024;
     const centralRadius = 7 + Math.floor(rng.next() * 3);
     const ringRadius = 3 + Math.floor(rng.next() * 2);
     const spokeCount = 4 + Math.floor(rng.next() * 3);
     const spokeLength = ringRadius + 7 + Math.floor(rng.next() * 6);
     carveRoadRing(state, rng, state.basePoint, ringRadius);
+    if (fastMode) {
+        const fastSpokes = Math.min(4, spokeCount);
+        for (let i = 0; i < fastSpokes; i += 1) {
+            const angle = (Math.PI * 2 * i) / fastSpokes;
+            const target = {
+                x: Math.round(state.basePoint.x + Math.cos(angle) * spokeLength),
+                y: Math.round(state.basePoint.y + Math.sin(angle) * spokeLength)
+            };
+            if (inBounds(state.grid, target.x, target.y)) {
+                carveRoadLine(state, rng, state.basePoint, target);
+            }
+        }
+        const centralHouseCount = 12 + Math.floor(rng.next() * 8);
+        placeVillageHouses(state, rng, state.basePoint, centralRadius, centralHouseCount, 150, 320, 2, 5, 0.85);
+        return;
+    }
     for (let i = 0; i < spokeCount; i += 1) {
         const angle = (Math.PI * 2 * i) / spokeCount + (rng.next() - 0.5) * 0.5;
         const rawTarget = {
