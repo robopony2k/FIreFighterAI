@@ -1,4 +1,4 @@
-import { FIRE_SIM_TICK_SECONDS, ISO_TILE_HEIGHT, ISO_TILE_WIDTH, TIME_SPEED_OPTIONS, ZOOM_STEP } from "../../core/config.js";
+import { ISO_TILE_HEIGHT, ISO_TILE_WIDTH, TIME_SPEED_OPTIONS, ZOOM_STEP } from "../../core/config.js";
 import { inBounds, indexFor } from "../../core/grid.js";
 import { zoomAtPointer, screenToWorld } from "../../render/iso.js";
 import { resetStatus, setStatus } from "../../core/state.js";
@@ -45,7 +45,7 @@ const getWorldFromPointer = (state, canvas, event) => {
     const canvasY = (event.clientY - rect.top) * scaleY;
     return screenToWorld(state, canvas, canvasX, canvasY);
 };
-export const bindPhaseUi = (phaseUi, state, rng, canvas, onNewRun, overlayRefs) => {
+export const bindPhaseUi = (phaseUi, state, rng, canvas, onNewRun, onThreeTest, overlayRefs) => {
     let isPanning = false;
     let isSelecting = false;
     let isFormationDrag = false;
@@ -81,7 +81,8 @@ export const bindPhaseUi = (phaseUi, state, rng, canvas, onNewRun, overlayRefs) 
         state.tileHeat[idx] = target.heat;
         markFireBounds(state, tile.x, tile.y);
         state.lastActiveFires = Math.max(state.lastActiveFires, 1);
-        state.fireSimAccumulator = Math.max(state.fireSimAccumulator, FIRE_SIM_TICK_SECONDS);
+        const simTickSeconds = Math.max(0, state.fireSettings.simTickSeconds);
+        state.fireSimAccumulator = Math.max(state.fireSimAccumulator, simTickSeconds);
         setStatus(state, `Debug ignition at ${tile.x}, ${tile.y}`);
     };
     const isOverlayLocked = () => state.overlayVisible && state.overlayAction === "restart";
@@ -141,6 +142,7 @@ export const bindPhaseUi = (phaseUi, state, rng, canvas, onNewRun, overlayRefs) 
     };
     const startMenu = document.getElementById("startMenu");
     const startNewRunButton = document.getElementById("startNewRun");
+    const startThreeTestButton = document.getElementById("startThreeTest");
     const showStartMenu = () => {
         if (!startMenu) {
             return;
@@ -167,12 +169,17 @@ export const bindPhaseUi = (phaseUi, state, rng, canvas, onNewRun, overlayRefs) 
         runSeedInput: document.getElementById("runSeedInput"),
         runMapSizeInputs: Array.from(document.querySelectorAll('#characterScreen input[name="mapSize"]')),
         runUnlimitedMoney: document.getElementById("runUnlimitedMoney"),
-        mapGenInputs: Array.from(document.querySelectorAll('#characterScreen input[data-mapgen-key]'))
+        mapGenInputs: Array.from(document.querySelectorAll('#characterScreen input[data-mapgen-key]')),
+        fireInputs: Array.from(document.querySelectorAll('#characterScreen input[data-fire-key]'))
     };
     let lastRunConfig = {
         seed: DEFAULT_RUN_SEED,
         mapSize: DEFAULT_MAP_SIZE,
-        options: { ...DEFAULT_RUN_OPTIONS, mapGen: { ...DEFAULT_RUN_OPTIONS.mapGen } },
+        options: {
+            ...DEFAULT_RUN_OPTIONS,
+            mapGen: { ...DEFAULT_RUN_OPTIONS.mapGen },
+            fire: { ...DEFAULT_RUN_OPTIONS.fire }
+        },
         characterId: state.campaign.characterId,
         callsign: state.campaign.callsign
     };
@@ -184,6 +191,13 @@ export const bindPhaseUi = (phaseUi, state, rng, canvas, onNewRun, overlayRefs) 
         startNewRunButton.addEventListener("click", () => {
             hideStartMenu();
             characterSelect.open(lastRunConfig);
+        });
+    }
+    if (startThreeTestButton) {
+        startThreeTestButton.addEventListener("click", () => {
+            const config = characterSelect.getCurrentConfig();
+            lastRunConfig = config;
+            onThreeTest(config);
         });
     }
     phaseUi.state.on("cta", (actionId) => {

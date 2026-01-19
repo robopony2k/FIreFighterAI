@@ -1,6 +1,6 @@
 import type { RNG, Unit, Formation, Point } from "../../core/types.js";
 import type { WorldState } from "../../core/state.js";
-import { FIRE_SIM_TICK_SECONDS, ISO_TILE_HEIGHT, ISO_TILE_WIDTH, TIME_SPEED_OPTIONS, ZOOM_STEP } from "../../core/config.js";
+import { ISO_TILE_HEIGHT, ISO_TILE_WIDTH, TIME_SPEED_OPTIONS, ZOOM_STEP } from "../../core/config.js";
 import { inBounds, indexFor } from "../../core/grid.js";
 import { zoomAtPointer, screenToWorld } from "../../render/iso.js";
 import { resetStatus, setStatus } from "../../core/state.js";
@@ -85,6 +85,7 @@ export const bindPhaseUi = (
   rng: RNG,
   canvas: HTMLCanvasElement,
   onNewRun: (config: NewRunConfig) => void | Promise<void>,
+  onThreeTest: (config: NewRunConfig) => void | Promise<void>,
   overlayRefs: OverlayRefs
 ): void => {
   let isPanning = false;
@@ -127,7 +128,8 @@ export const bindPhaseUi = (
       state.tileHeat[idx] = target.heat;
       markFireBounds(state, tile.x, tile.y);
       state.lastActiveFires = Math.max(state.lastActiveFires, 1);
-      state.fireSimAccumulator = Math.max(state.fireSimAccumulator, FIRE_SIM_TICK_SECONDS);
+      const simTickSeconds = Math.max(0, state.fireSettings.simTickSeconds);
+      state.fireSimAccumulator = Math.max(state.fireSimAccumulator, simTickSeconds);
       setStatus(state, `Debug ignition at ${tile.x}, ${tile.y}`);
     };
 
@@ -197,6 +199,7 @@ export const bindPhaseUi = (
 
   const startMenu = document.getElementById("startMenu") as HTMLDivElement | null;
   const startNewRunButton = document.getElementById("startNewRun") as HTMLButtonElement | null;
+  const startThreeTestButton = document.getElementById("startThreeTest") as HTMLButtonElement | null;
 
   const showStartMenu = (): void => {
     if (!startMenu) {
@@ -230,13 +233,20 @@ export const bindPhaseUi = (
     runUnlimitedMoney: document.getElementById("runUnlimitedMoney") as HTMLInputElement,
     mapGenInputs: Array.from(
       document.querySelectorAll<HTMLInputElement>('#characterScreen input[data-mapgen-key]')
+    ),
+    fireInputs: Array.from(
+      document.querySelectorAll<HTMLInputElement>('#characterScreen input[data-fire-key]')
     )
   };
 
   let lastRunConfig: NewRunConfig = {
     seed: DEFAULT_RUN_SEED,
     mapSize: DEFAULT_MAP_SIZE,
-    options: { ...DEFAULT_RUN_OPTIONS, mapGen: { ...DEFAULT_RUN_OPTIONS.mapGen } },
+    options: {
+      ...DEFAULT_RUN_OPTIONS,
+      mapGen: { ...DEFAULT_RUN_OPTIONS.mapGen },
+      fire: { ...DEFAULT_RUN_OPTIONS.fire }
+    },
     characterId: state.campaign.characterId,
     callsign: state.campaign.callsign
   };
@@ -250,6 +260,14 @@ export const bindPhaseUi = (
     startNewRunButton.addEventListener("click", () => {
       hideStartMenu();
       characterSelect.open(lastRunConfig);
+    });
+  }
+
+  if (startThreeTestButton) {
+    startThreeTestButton.addEventListener("click", () => {
+      const config = characterSelect.getCurrentConfig();
+      lastRunConfig = config;
+      onThreeTest(config);
     });
   }
 

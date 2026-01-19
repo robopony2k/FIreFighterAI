@@ -1,4 +1,4 @@
-import { BASE_BUDGET } from "./config.js";
+import { BASE_BUDGET, DEFAULT_FIRE_SETTINGS } from "./config.js";
 import { createCampaignState } from "./campaign.js";
 import { DEFAULT_CLIMATE_PARAMS, DEFAULT_MOISTURE_PARAMS } from "./climate.js";
 import { buildNeighborOffsets } from "./grid.js";
@@ -63,6 +63,7 @@ export function createInitialState(seed, grid) {
         terrainDirty: true,
         basePoint: { x: 0, y: 0 },
         seed,
+        fireSettings: { ...DEFAULT_FIRE_SETTINGS },
         budget: BASE_BUDGET,
         burnedTiles: 0,
         containedCount: 0,

@@ -1,11 +1,10 @@
 import { inBounds, indexFor } from "../core/grid.js";
-import { FIRE_RENDER_SMOOTH_SECONDS, TILE_SIZE } from "../core/config.js";
+import { TILE_SIZE } from "../core/config.js";
 import { clamp } from "../core/utils.js";
 import { isoProject } from "./iso.js";
 import { hash2D } from "../mapgen/noise.js";
 import { getRenderHeightAt } from "./terrainCache.js";
 import { mixRgbTo, rgbString } from "./color.js";
-const DRAW_HEAT_MAX = 5;
 const MAX_VISIBLE_TILES = 5200;
 /**
  * Updates the smoothed fire intensity values used for rendering.
@@ -13,8 +12,9 @@ const MAX_VISIBLE_TILES = 5200;
 export const updateFireSmoothing = (state, now) => {
     const dt = state.lastRenderTime > 0 ? (now - state.lastRenderTime) / 1000 : 0.016;
     const clampedDt = Math.min(dt, 0.05);
-    const alpha = clampedDt > 0 && FIRE_RENDER_SMOOTH_SECONDS > 0
-        ? 1 - Math.exp(-clampedDt / FIRE_RENDER_SMOOTH_SECONDS)
+    const smoothSeconds = Math.max(0, state.fireSettings.renderSmoothSeconds);
+    const alpha = clampedDt > 0 && smoothSeconds > 0
+        ? 1 - Math.exp(-clampedDt / smoothSeconds)
         : 1;
     const total = state.grid.totalTiles;
     const targetFire = state.tileFire;
@@ -70,7 +70,8 @@ export const drawFireFx = (state, ctx, now, visibleBounds, view) => {
             }
             if (fire > 0.01) {
                 const intensity = clamp(fire, 0, 1);
-                const heatIntensity = clamp(state.tileHeat[idx] / DRAW_HEAT_MAX, 0, 1);
+                const heatCap = Math.max(0.01, state.fireSettings.heatCap);
+                const heatIntensity = clamp(state.tileHeat[idx] / heatCap, 0, 1);
                 const radiusScale = samplingEnabled ? sampleStep * 0.75 : 1.0;
                 const paleOrange = { r: 255, g: 210, b: 140 };
                 const amber = { r: 255, g: 165, b: 60 };

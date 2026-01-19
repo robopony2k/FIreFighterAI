@@ -1,4 +1,3 @@
-export const FIRE_BOUNDS_PADDING = 6;
 export function markFireBounds(state, x, y) {
     if (!state.fireBoundsActive) {
         state.fireBoundsActive = true;

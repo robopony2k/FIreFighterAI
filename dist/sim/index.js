@@ -1,13 +1,13 @@
-import { APPROVAL_MIN, BASE_BUDGET, CAREER_YEARS, DAYS_PER_SECOND, FIRE_SIM_SPEED, FIRE_SIM_TICK_SECONDS, HECTARES_PER_TILE } from "../core/config.js";
+import { APPROVAL_MIN, BASE_BUDGET, CAREER_YEARS, DAYS_PER_SECOND, FIRE_WEATHER_BURNOUT_RISK, FIRE_WEATHER_RISK_MIN, GROWTH_WEATHER_MOISTURE_MIN, GROWTH_WEATHER_TEMP_MAX, GROWTH_WEATHER_TEMP_MIN, HECTARES_PER_TILE } from "../core/config.js";
 import { formatCurrency } from "../core/utils.js";
-import { getDayNightFactor, getPhaseInfo, PHASES } from "../core/time.js";
+import { getDayNightFactor, getFireSeasonIntensity, getPhaseInfo, PHASES } from "../core/time.js";
 import { setStatus, resetStatus } from "../core/state.js";
 import { inBounds, indexFor } from "../core/grid.js";
 import { NEIGHBOR_DIRS } from "../core/config.js";
 import { getCharacterBaseBudget, getCharacterDefinition } from "../core/characters.js";
 import { ambientTemp, clamp, buildClimateTimeline, CLIMATE_IGNITION_MAX, CLIMATE_IGNITION_MIN, debugClimateChecks, DEFAULT_MOISTURE_PARAMS, moistureStep, VIRTUAL_CLIMATE_PARAMS } from "../core/climate.js";
 import { randomizeWind, stepWind } from "./wind.js";
-import { igniteRandomFire, stepFire } from "./fire.js";
+import { igniteRandomFire, resetFireBounds, stepFire } from "./fire.js";
 import { stepGrowth } from "./growth.js";
 import { stepParticles } from "./particles.js";
 import { applyExtinguish, applyUnitHazards, autoAssignTargets, clearFuelLine, deployUnit, selectUnit, setDeployMode, setUnitTarget, stepUnits } from "./units.js";
@@ -116,11 +116,16 @@ const getForecastTemp = (state) => {
     const trend = Math.min(8, Math.floor((state.year - 1) * 0.6));
     return 28 + seedSwing + trend;
 };
-const getClimateSeasonInfo = (state) => {
+const getClimateSeasonIndex = (state) => {
     const yearDays = Math.max(1, VIRTUAL_YEAR_DAYS);
     const seasonLength = Math.max(1, Math.floor(yearDays / 4));
     const dayOfYear = ((Math.floor(state.careerDay) % yearDays) + yearDays) % yearDays + 1;
-    const seasonIndex = Math.min(3, Math.floor((dayOfYear - 1) / seasonLength));
+    return Math.min(3, Math.floor((dayOfYear - 1) / seasonLength));
+};
+const getClimateSeasonInfo = (state) => {
+    const yearDays = Math.max(1, VIRTUAL_YEAR_DAYS);
+    const seasonLength = Math.max(1, Math.floor(yearDays / 4));
+    const seasonIndex = getClimateSeasonIndex(state);
     const start = seasonIndex * seasonLength + 1;
     const end = seasonIndex === 3 ? yearDays : (seasonIndex + 1) * seasonLength;
     return {
@@ -129,6 +134,9 @@ const getClimateSeasonInfo = (state) => {
         end
     };
 };
+const isGrowthWeather = (state) => state.climateTemp >= GROWTH_WEATHER_TEMP_MIN &&
+    state.climateTemp <= GROWTH_WEATHER_TEMP_MAX &&
+    state.climateMoisture >= GROWTH_WEATHER_MOISTURE_MIN;
 const getYearEventMessages = (year) => YEAR_EVENTS[year] ?? [];
 const showSeasonOverlay = (state) => {
     if (state.gameOver) {
@@ -193,9 +201,11 @@ export function extinguishAllFires(state) {
     });
     state.tileFire.fill(0);
     state.tileHeat.fill(0);
-    state.renderFireSmooth.fill(0);
+    state.tileIgniteAt.fill(Number.POSITIVE_INFINITY);
     state.smokeParticles = [];
     state.waterParticles = [];
+    state.lastActiveFires = 0;
+    resetFireBounds(state);
 }
 export function calculateBudgetOutcome(state) {
     const propertyLossRatio = state.totalPropertyValue > 0 ? state.yearPropertyLost / state.totalPropertyValue : 0;
@@ -421,7 +431,14 @@ export function stepSim(state, rng, delta) {
         state.lastActiveFires = 0;
         return;
     }
-    if (state.phase === "growth") {
+    const climateRisk = getClimateRisk(state);
+    const allowGrowth = state.phase === "growth" && isGrowthWeather(state);
+    const allowIgnition = state.phase === "fire" && climateRisk >= FIRE_WEATHER_RISK_MIN;
+    const allowFireSim = state.lastActiveFires > 0 || state.fireBoundsActive || allowIgnition;
+    const burnoutFactor = climateRisk < FIRE_WEATHER_BURNOUT_RISK
+        ? clamp(1 - climateRisk / Math.max(0.0001, FIRE_WEATHER_BURNOUT_RISK), 0, 1)
+        : 0;
+    if (allowGrowth) {
         stepGrowth(state, dayDelta, rng);
     }
     if (state.units.length > 0) {
@@ -430,24 +447,33 @@ export function stepSim(state, rng, delta) {
         applyExtinguish(state, rng, delta);
         applyUnitHazards(state, rng, delta);
     }
+    stepWind(state, delta, rng);
     let activeFires = state.lastActiveFires;
-    state.fireSimAccumulator = Math.min(state.fireSimAccumulator + delta, FIRE_SIM_TICK_SECONDS * 2);
-    const simDelta = Math.min(state.fireSimAccumulator, FIRE_SIM_TICK_SECONDS);
-    if (simDelta > 0) {
-        const simDayDelta = simDelta * DAYS_PER_SECOND;
-        state.fireSeasonDay += simDayDelta;
-        captureFireSnapshot(state);
-        stepWind(state, simDelta, rng);
-        const dayFactor = getDayNightFactor(state.careerDay);
-        const climateRisk = getClimateRisk(state);
-        const spreadScale = FIRE_SIM_SPEED;
-        const ignitionIntensity = dayFactor * climateRisk * state.climateIgnitionMultiplier;
-        igniteRandomFire(state, rng, simDayDelta, ignitionIntensity);
-        activeFires = stepFire(state, rng, simDelta, spreadScale, 1);
-        state.fireSimAccumulator = Math.max(0, state.fireSimAccumulator - simDelta);
+    if (allowFireSim) {
+        const simTickSeconds = Math.max(0, state.fireSettings.simTickSeconds);
+        state.fireSimAccumulator = Math.min(state.fireSimAccumulator + delta, simTickSeconds * 2);
+        const simDelta = Math.min(state.fireSimAccumulator, simTickSeconds);
+        if (simDelta > 0) {
+            const simDayDelta = simDelta * DAYS_PER_SECOND;
+            state.fireSeasonDay += simDayDelta;
+            captureFireSnapshot(state);
+            const dayFactor = getDayNightFactor(state.careerDay, state.fireSettings);
+            const seasonDay = state.phase === "fire" ? state.phaseDay : state.fireSeasonDay;
+            const seasonIntensity = getFireSeasonIntensity(seasonDay, state.fireSettings);
+            const spreadScale = state.fireSettings.simSpeed * (0.55 + seasonIntensity * 0.45);
+            const ignitionIntensity = dayFactor * climateRisk * state.climateIgnitionMultiplier;
+            if (allowIgnition) {
+                igniteRandomFire(state, rng, simDayDelta, ignitionIntensity);
+            }
+            activeFires = stepFire(state, rng, simDelta, spreadScale, dayFactor, burnoutFactor);
+            state.fireSimAccumulator = Math.max(0, state.fireSimAccumulator - simDelta);
+        }
+        else {
+            activeFires = state.lastActiveFires;
+        }
     }
     else {
-        activeFires = state.lastActiveFires;
+        state.fireSimAccumulator = 0;
     }
     state.lastActiveFires = activeFires;
     stepParticles(state, delta);

@@ -192,7 +192,26 @@ export interface FireSimWork {
   nextMaxY: number;
 }
 
-export interface LeaderboardEntry {
+export interface FireSettings {
+  ignitionChancePerDay: number;
+  simSpeed: number;
+  simTickSeconds: number;
+  renderSmoothSeconds: number;
+  seasonTaperDays: number;
+  seasonMinIntensity: number;
+  dayFactorMin: number;
+  dayFactorMax: number;
+  diffusionCardinal: number;
+  diffusionDiagonal: number;
+  diffusionSecondary: number;
+  diffusionMoisture: number;
+  heatCap: number;
+  conflagrationHeatBoost: number;
+  conflagrationFuelBoost: number;
+  boundsPadding: number;
+}
+
+export interface LeaderboardEntry {
   name: string;
   score: number;
   seed: number;

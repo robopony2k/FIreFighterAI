@@ -5,14 +5,9 @@ import { indexFor } from "../core/grid.js";
 import { syncTileSoA } from "../core/state.js";
 import { emitSmokeAt } from "./particles.js";
 import { clearHeatInBounds } from "./heat.js";
-import { FIRE_BOUNDS_PADDING, resetFireBounds } from "./fire/bounds.js";
+import { resetFireBounds } from "./fire/bounds.js";
 import { igniteRandomFire } from "./fire/ignite.js";
 import { burnTile } from "./fire/burn.js";
-const HEAT_DIFFUSE_CARDINAL = 0.35;
-const HEAT_DIFFUSE_DIAGONAL = 0.25;
-const HEAT_DIFFUSE_SECONDARY = 0.4;
-const HEAT_DIFFUSE_MOISTURE = 0.35;
-const HEAT_MAX = 5;
 const CARDINAL_DIRS = [
     { dx: 1, dy: 0 },
     { dx: -1, dy: 0 },
@@ -43,14 +38,16 @@ const BASELINE_FIRE_EPS = 0.04;
 const BASELINE_HEAT_EPS = 0.08;
 let baselineTickCounter = 0;
 const isIgnitableTile = (tile) => tile.type !== "water" && tile.type !== "ash" && tile.type !== "firebreak" && tile.type !== "road";
-function stepFireBaseline(state, rng, delta, spreadScale, dayFactor) {
+function stepFireBaseline(state, rng, delta, spreadScale, dayFactor, burnoutFactor = 0) {
     const cols = state.grid.cols;
     const rows = state.grid.rows;
     const boundsActive = state.fireBoundsActive;
-    const minX = boundsActive ? clamp(state.fireMinX - FIRE_BOUNDS_PADDING, 0, cols - 1) : 0;
-    const maxX = boundsActive ? clamp(state.fireMaxX + FIRE_BOUNDS_PADDING, 0, cols - 1) : cols - 1;
-    const minY = boundsActive ? clamp(state.fireMinY - FIRE_BOUNDS_PADDING, 0, rows - 1) : 0;
-    const maxY = boundsActive ? clamp(state.fireMaxY + FIRE_BOUNDS_PADDING, 0, rows - 1) : rows - 1;
+    const boundsPadding = Math.max(0, Math.round(state.fireSettings.boundsPadding));
+    const heatCap = Math.max(0.01, state.fireSettings.heatCap);
+    const minX = boundsActive ? clamp(state.fireMinX - boundsPadding, 0, cols - 1) : 0;
+    const maxX = boundsActive ? clamp(state.fireMaxX + boundsPadding, 0, cols - 1) : cols - 1;
+    const minY = boundsActive ? clamp(state.fireMinY - boundsPadding, 0, rows - 1) : 0;
+    const maxY = boundsActive ? clamp(state.fireMaxY + boundsPadding, 0, rows - 1) : rows - 1;
     if (!boundsActive && state.lastActiveFires === 0) {
         return 0;
     }
@@ -94,8 +91,8 @@ function stepFireBaseline(state, rng, delta, spreadScale, dayFactor) {
             if (diffused < 0) {
                 diffused = 0;
             }
-            if (diffused > HEAT_MAX) {
-                diffused = HEAT_MAX;
+            if (diffused > heatCap) {
+                diffused = heatCap;
             }
             nextHeat[idx] = diffused;
         }
@@ -116,11 +113,16 @@ function stepFireBaseline(state, rng, delta, spreadScale, dayFactor) {
                 currentFire = Math.min(BASELINE_FIRE_MAX, prevFire + BASELINE_FIRE_GAIN * candidateHeat);
                 const burned = BASELINE_BURN_RATE * currentFire;
                 fuel[idx] = Math.max(0, tileFuel - burned);
-                currentHeat = Math.min(HEAT_MAX, candidateHeat + BASELINE_HEAT_FROM_FIRE * currentFire);
+                currentHeat = Math.min(heatCap, candidateHeat + BASELINE_HEAT_FROM_FIRE * currentFire);
             }
             else {
                 currentFire = Math.max(0, prevFire - BASELINE_FIRE_DECAY);
                 currentHeat = candidateHeat * BASELINE_HEAT_DECAY;
+            }
+            if (burnoutFactor > 0 && currentFire > 0) {
+                const coolingDt = delta * (0.35 + burnoutFactor * 0.65);
+                currentHeat = coolCellTemp(currentHeat, state.climateTemp, coolingDt, DEFAULT_COOLING_PARAMS);
+                currentFire = Math.max(0, currentFire - delta * (0.12 + burnoutFactor * 0.25));
             }
             fire[idx] = currentFire;
             heat[idx] = currentHeat;
@@ -130,7 +132,7 @@ function stepFireBaseline(state, rng, delta, spreadScale, dayFactor) {
             tile.fuel = fuel[idx];
             igniteMask[idx] = 0;
             if (fuel[idx] > 0 && currentFire <= BASELINE_FIRE_EPS && currentHeat >= BASELINE_IGNITION_HEAT / ignitionBoost && isIgnitableTile(tile)) {
-                const igniteChance = clamp(BASELINE_BASE_IGNITE * ignitionBoost * (currentHeat / HEAT_MAX), 0, 1);
+                const igniteChance = clamp(BASELINE_BASE_IGNITE * ignitionBoost * (currentHeat / heatCap), 0, 1);
                 if (rng.next() < igniteChance) {
                     igniteMask[idx] = 1;
                 }
@@ -146,7 +148,7 @@ function stepFireBaseline(state, rng, delta, spreadScale, dayFactor) {
                 const seededFire = Math.min(BASELINE_FIRE_MAX, BASELINE_FIRE_SEED);
                 fire[idx] = seededFire;
                 tiles[idx].fire = seededFire;
-                const boostedHeat = Math.min(HEAT_MAX, heat[idx] + BASELINE_HEAT_FROM_FIRE * seededFire);
+                const boostedHeat = Math.min(heatCap, heat[idx] + BASELINE_HEAT_FROM_FIRE * seededFire);
                 heat[idx] = boostedHeat;
                 tiles[idx].heat = boostedHeat;
                 igniteMask[idx] = 0;
@@ -202,6 +204,11 @@ function stepFireBaseline(state, rng, delta, spreadScale, dayFactor) {
 }
 function applyHeatDiffusion(state, minX, maxX, minY, maxY, fireDelta, spreadScale, dayFactor) {
     const cols = state.grid.cols;
+    const heatCap = Math.max(0.01, state.fireSettings.heatCap);
+    const diffuseCardinal = Math.max(0, state.fireSettings.diffusionCardinal);
+    const diffuseDiagonal = Math.max(0, state.fireSettings.diffusionDiagonal);
+    const diffuseSecondary = Math.max(0, state.fireSettings.diffusionSecondary);
+    const diffuseMoisture = Math.max(0, state.fireSettings.diffusionMoisture);
     const windMagnitude = Math.hypot(state.wind.dx, state.wind.dy);
     for (let y = minY; y <= maxY; y += 1) {
         let baseIdx = y * cols;
@@ -211,17 +218,17 @@ function applyHeatDiffusion(state, minX, maxX, minY, maxY, fireDelta, spreadScal
                 continue;
             }
             const baseHeat = (0.25 + tile.fire * 0.45) * tile.heatOutput;
-            const moistureFactor = Math.max(0, 1 - tile.moisture * HEAT_DIFFUSE_MOISTURE);
+            const moistureFactor = Math.max(0, 1 - tile.moisture * diffuseMoisture);
             const intensity = Math.max(0.25, fireDelta * (0.45 + spreadScale * 0.12));
             const dayBoost = 0.65 + dayFactor * 0.4;
             const spreadMultiplier = Math.max(0, tile.spreadBoost ?? 1);
             const primary = baseHeat * spreadMultiplier * moistureFactor * intensity * dayBoost;
-            tile.heat = Math.min(HEAT_MAX, tile.heat + primary * 0.45);
+            tile.heat = Math.min(heatCap, tile.heat + primary * 0.45);
             if (primary <= 0) {
                 continue;
             }
-            const cardinalScale = HEAT_DIFFUSE_CARDINAL * (1 + spreadScale * 0.12);
-            const diagonalScale = HEAT_DIFFUSE_DIAGONAL * (1 + spreadScale * 0.08);
+            const cardinalScale = diffuseCardinal * (1 + spreadScale * 0.12);
+            const diagonalScale = diffuseDiagonal * (1 + spreadScale * 0.08);
             const windPull = Math.max(0, tile.windFactor ?? 0);
             const getWindFactor = (dx, dy) => {
                 if (windPull <= 0 || windMagnitude === 0) {
@@ -264,8 +271,8 @@ function applyHeatDiffusion(state, minX, maxX, minY, maxY, fireDelta, spreadScal
                 const neighborBoost = 1 + Math.min(0.6, tile.fire * 0.45 + spreadScale * 0.25);
                 const windFactor = dir ? getWindFactor(dir.dx, dir.dy) : 1;
                 const contribution = primary * scale * neighborBoost * windFactor;
-                const transferCapBase = typeof target.heatTransferCap === "number" ? target.heatTransferCap : HEAT_MAX;
-                let transferCap = Math.min(HEAT_MAX, Math.max(0, transferCapBase));
+                const transferCapBase = typeof target.heatTransferCap === "number" ? target.heatTransferCap : heatCap;
+                let transferCap = Math.min(heatCap, Math.max(0, transferCapBase));
                 if (transferCap > 0) {
                     transferCap = Math.max(transferCap, target.ignitionPoint * 1.05);
                 }
@@ -281,27 +288,28 @@ function applyHeatDiffusion(state, minX, maxX, minY, maxY, fireDelta, spreadScal
             };
             for (const dir of CARDINAL_DIRS) {
                 addHeat(x + dir.dx, y + dir.dy, cardinalScale, dir);
-                addHeat(x + dir.dx * 2, y + dir.dy * 2, cardinalScale * HEAT_DIFFUSE_SECONDARY, dir, true);
+                addHeat(x + dir.dx * 2, y + dir.dy * 2, cardinalScale * diffuseSecondary, dir, true);
             }
             for (const dir of DIAGONAL_DIRS) {
                 addHeat(x + dir.dx, y + dir.dy, diagonalScale, dir);
-                addHeat(x + dir.dx * 2, y + dir.dy * 2, diagonalScale * HEAT_DIFFUSE_SECONDARY, dir, true);
+                addHeat(x + dir.dx * 2, y + dir.dy * 2, diagonalScale * diffuseSecondary, dir, true);
             }
         }
     }
 }
-export function stepFire(state, rng, delta, spreadScale, dayFactor) {
+export function stepFire(state, rng, delta, spreadScale, dayFactor, burnoutFactor = 0) {
     if (BASELINE_FIRE) {
-        return stepFireBaseline(state, rng, delta, spreadScale, dayFactor);
+        return stepFireBaseline(state, rng, delta, spreadScale, dayFactor, burnoutFactor);
     }
     const cols = state.grid.cols;
     const rows = state.grid.rows;
     const ignitionBoost = Math.max(0.2, state.climateIgnitionMultiplier || 1);
     const boundsActive = state.fireBoundsActive;
-    const minX = boundsActive ? clamp(state.fireMinX - FIRE_BOUNDS_PADDING, 0, cols - 1) : 0;
-    const maxX = boundsActive ? clamp(state.fireMaxX + FIRE_BOUNDS_PADDING, 0, cols - 1) : cols - 1;
-    const minY = boundsActive ? clamp(state.fireMinY - FIRE_BOUNDS_PADDING, 0, rows - 1) : 0;
-    const maxY = boundsActive ? clamp(state.fireMaxY + FIRE_BOUNDS_PADDING, 0, rows - 1) : rows - 1;
+    const boundsPadding = Math.max(0, Math.round(state.fireSettings.boundsPadding));
+    const minX = boundsActive ? clamp(state.fireMinX - boundsPadding, 0, cols - 1) : 0;
+    const maxX = boundsActive ? clamp(state.fireMaxX + boundsPadding, 0, cols - 1) : cols - 1;
+    const minY = boundsActive ? clamp(state.fireMinY - boundsPadding, 0, rows - 1) : 0;
+    const maxY = boundsActive ? clamp(state.fireMaxY + boundsPadding, 0, rows - 1) : rows - 1;
     if (!boundsActive && state.lastActiveFires === 0) {
         // A check to see if any ignitions are scheduled could be added here,
         // but it would require a full scan. The logic below prevents the bounds
@@ -346,6 +354,14 @@ export function stepFire(state, rng, delta, spreadScale, dayFactor) {
                     if (tile.fire <= 0.01) {
                         tile.fire = 0; // Truly extinguished
                     }
+                }
+            }
+            if (burnoutFactor > 0 && tile.fire > 0) {
+                const coolingDt = delta * (0.4 + burnoutFactor * 0.8);
+                tile.heat = coolCellTemp(tile.heat, state.climateTemp, coolingDt, DEFAULT_COOLING_PARAMS);
+                tile.fire = Math.max(0, tile.fire - fireDelta * (0.12 + burnoutFactor * 0.35));
+                if (tile.fire <= 0.01) {
+                    tile.fire = 0;
                 }
             }
             if (!wasBurning && tile.fire <= 0 && tile.heat > 0) {

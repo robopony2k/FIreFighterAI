@@ -1,8 +1,6 @@
 
 import type { WorldState } from "../../core/state.js";
 
-export const FIRE_BOUNDS_PADDING = 6;
-
 export function markFireBounds(state: WorldState, x: number, y: number): void {
   if (!state.fireBoundsActive) {
     state.fireBoundsActive = true;

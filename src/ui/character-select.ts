@@ -2,7 +2,8 @@ import type { WorldState } from "../core/state.js";
 import { CHARACTERS, getCharacterInitials } from "../core/characters.js";
 import type { CharacterId, CharacterDefinition } from "../core/characters.js";
 import type { MapSizeId } from "../core/config.js";
-import { DEFAULT_MAP_SIZE, DEFAULT_RUN_OPTIONS, DEFAULT_RUN_SEED } from "./run-config.js";
+import type { FireSettings } from "../core/types.js";
+import { DEFAULT_MAP_SIZE, DEFAULT_RUN_OPTIONS, DEFAULT_RUN_SEED, normalizeFireSettings } from "./run-config.js";
 import type { NewRunConfig, RunOptions } from "./run-config.js";
 import type { MapGenSettings } from "../mapgen/settings.js";
 export type CharacterSelectRefs = {
@@ -19,6 +20,7 @@ export type CharacterSelectRefs = {
   runMapSizeInputs: HTMLInputElement[];
   runUnlimitedMoney: HTMLInputElement;
   mapGenInputs: HTMLInputElement[];
+  fireInputs: HTMLInputElement[];
 };
 
 const formatPercent = (value: number): string => {
@@ -100,7 +102,7 @@ export function initCharacterSelect(
   ui: CharacterSelectRefs,
   state: WorldState,
   onConfirm: (config: NewRunConfig) => void | Promise<void>
-): { open: (config: NewRunConfig) => void } {
+): { open: (config: NewRunConfig) => void; getCurrentConfig: () => NewRunConfig } {
   let selectedId: CharacterId = state.campaign.characterId;
   const cards = new Map<CharacterId, HTMLButtonElement>();
 
@@ -294,10 +296,37 @@ export function initCharacterSelect(
     });
   };
 
+  const getFireSettings = (): FireSettings => {
+    const settings: Partial<FireSettings> = {};
+    ui.fireInputs.forEach((input) => {
+      const key = input.dataset.fireKey as keyof FireSettings | undefined;
+      if (!key) {
+        return;
+      }
+      const value = Number(input.value);
+      if (Number.isFinite(value)) {
+        settings[key] = value;
+      }
+    });
+    return normalizeFireSettings(settings);
+  };
+
+  const applyFireSettings = (settings: Partial<FireSettings>): void => {
+    const nextSettings = normalizeFireSettings(settings);
+    ui.fireInputs.forEach((input) => {
+      const key = input.dataset.fireKey as keyof FireSettings | undefined;
+      if (!key) {
+        return;
+      }
+      input.value = `${nextSettings[key]}`;
+    });
+  };
+
   const getRunOptions = (): RunOptions => ({
     ...DEFAULT_RUN_OPTIONS,
     unlimitedMoney: ui.runUnlimitedMoney.checked,
-    mapGen: getMapGenSettings()
+    mapGen: getMapGenSettings(),
+    fire: getFireSettings()
   });
 
   ui.characterNameInput.value = state.campaign.callsign;
@@ -320,6 +349,7 @@ export function initCharacterSelect(
     syncMapGenOutput(input);
   });
   applyMapGenSettings(DEFAULT_RUN_OPTIONS.mapGen);
+  applyFireSettings(DEFAULT_RUN_OPTIONS.fire);
 
   updateSelection();
   updateConfirmState();
@@ -348,6 +378,18 @@ export function initCharacterSelect(
     flushConfirmation(config);
   });
 
+  const getCurrentConfig = (): NewRunConfig => {
+    const trimmed = ui.characterNameInput.value.trim();
+    const callsign = trimmed || state.campaign.callsign || buildCallsign(selectedId);
+    return {
+      seed: coerceSeed(ui.runSeedInput.value),
+      mapSize: getSelectedMapSize(),
+      options: getRunOptions(),
+      characterId: selectedId,
+      callsign
+    };
+  };
+
   const open = (config: NewRunConfig): void => {
     state.paused = true;
     selectedId = config.characterId;
@@ -359,6 +401,7 @@ export function initCharacterSelect(
     setSelectedMapSize(config.mapSize);
     ui.runUnlimitedMoney.checked = config.options.unlimitedMoney;
     applyMapGenSettings(config.options.mapGen ?? DEFAULT_RUN_OPTIONS.mapGen);
+    applyFireSettings(config.options.fire ?? DEFAULT_RUN_OPTIONS.fire);
     setActiveTab("roster");
     if (ui.characterNameInput.value.trim().length === 0) {
       applyRandomName();
@@ -367,5 +410,5 @@ export function initCharacterSelect(
     ui.characterScreen.classList.remove("hidden");
   };
 
-  return { open };
+  return { open, getCurrentConfig };
 }

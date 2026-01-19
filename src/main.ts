@@ -2,9 +2,10 @@ import { BASE_BUDGET, TILE_SIZE, MAP_SCALE, TIME_SPEED_OPTIONS, MAP_SIZE_PRESETS
 import type { MapSizeId } from "./core/config.js";
 import { getCharacterBaseBudget } from "./core/characters.js";
 import { RNG } from "./core/rng.js";
-import { computeChecksum, createInitialState, resetState } from "./core/state.js";
+import { computeChecksum, createInitialState, resetState, syncTileSoA } from "./core/state.js";
 import { generateMap } from "./mapgen/index.js";
 import { draw } from "./render/draw.js";
+import { createThreeTest } from "./render/threeTest.js";
 import { initPhaseUI } from "./ui/phase/index.js";
 import { bindPhaseUi } from "./ui/phase/bindings.js";
 import { getOverlayRefs, updateOverlay } from "./ui/overlay.js";
@@ -13,7 +14,7 @@ import { randomizeWind } from "./sim/wind.js";
 import { setPhase, stepSim } from "./sim/index.js";
 import { seedStartingRoster } from "./sim/units.js";
 import { PHASES } from "./core/time.js";
-import { DEFAULT_MAP_SIZE, DEFAULT_RUN_OPTIONS } from "./ui/run-config.js";
+import { DEFAULT_MAP_SIZE, DEFAULT_RUN_OPTIONS, normalizeFireSettings } from "./ui/run-config.js";
 import type { NewRunConfig } from "./ui/run-config.js";
 
 const canvas = document.getElementById("gameCanvas") as HTMLCanvasElement;
@@ -54,6 +55,9 @@ const mapgenOverlay = document.getElementById("mapgenOverlay") as HTMLDivElement
 const mapgenMessage = document.getElementById("mapgenMessage") as HTMLDivElement | null;
 const mapgenProgressBar = document.getElementById("mapgenProgressBar") as HTMLDivElement | null;
 const mapgenPercent = document.getElementById("mapgenPercent") as HTMLDivElement | null;
+const threeTestOverlay = document.getElementById("threeTestOverlay") as HTMLDivElement | null;
+const threeTestCanvas = document.getElementById("threeTestCanvas") as HTMLCanvasElement | null;
+const threeTestCloseButton = document.getElementById("threeTestClose") as HTMLButtonElement | null;
 let resizeObserver: ResizeObserver | null = null;
 let lastCanvasWidth = 0;
 let lastCanvasHeight = 0;
@@ -107,6 +111,78 @@ const updateMapgenOverlay = (message: string, progress: number): void => {
   mapgenPercent.textContent = `${Math.round(clamped * 100)}%`;
 };
 
+let threeTestController: ReturnType<typeof createThreeTest> | null = null;
+const handleThreeResize = (): void => {
+  threeTestController?.resize();
+};
+
+const setThreeTestVisible = (visible: boolean): void => {
+  if (!threeTestOverlay) {
+    return;
+  }
+  threeTestOverlay.classList.toggle("hidden", !visible);
+  threeTestOverlay.setAttribute("aria-hidden", visible ? "false" : "true");
+};
+
+const prepareTerrainPreview = async (config: NewRunConfig): Promise<void> => {
+  if (isGenerating) {
+    return;
+  }
+  isGenerating = true;
+  const { seed, mapSize } = config;
+  try {
+    if (activeMapSize !== mapSize) {
+      activeMapSize = mapSize;
+      state.grid = buildGrid(mapSize);
+    }
+    resetState(state, seed);
+    rng.setState(seed);
+    state.paused = true;
+    showMapgenOverlay();
+    updateMapgenOverlay("Building terrain preview...", 0);
+    await generateMap(
+      state,
+      rng,
+      (message, progress) => updateMapgenOverlay(message, progress),
+      config.options.mapGen
+    );
+  } finally {
+    hideMapgenOverlay();
+    isGenerating = false;
+    state.paused = true;
+  }
+};
+
+const openThreeTest = async (config: NewRunConfig): Promise<void> => {
+  if (!threeTestOverlay || !threeTestCanvas) {
+    return;
+  }
+  if (!threeTestController) {
+    threeTestController = createThreeTest(threeTestCanvas);
+  }
+  setThreeTestVisible(true);
+  threeTestController.start();
+  handleThreeResize();
+  window.addEventListener("resize", handleThreeResize);
+  await prepareTerrainPreview(config);
+  syncTileSoA(state);
+  threeTestController.setTerrain({
+    cols: state.grid.cols,
+    rows: state.grid.rows,
+    elevations: state.tileElevation,
+    tileTypes: state.tileTypeId
+  });
+};
+
+const closeThreeTest = (): void => {
+  if (!threeTestOverlay) {
+    return;
+  }
+  setThreeTestVisible(false);
+  threeTestController?.stop();
+  window.removeEventListener("resize", handleThreeResize);
+};
+
 const resetGame = async (config: NewRunConfig) => {
   if (isGenerating) {
     return;
@@ -119,6 +195,7 @@ const resetGame = async (config: NewRunConfig) => {
       state.grid = buildGrid(mapSize);
     }
     resetState(state, seed);
+    state.fireSettings = normalizeFireSettings(config.options.fire);
     state.campaign.characterId = characterId;
     state.campaign.callsign = callsign;
     const baseBudget = getCharacterBaseBudget(state.campaign.characterId, BASE_BUDGET);
@@ -150,10 +227,25 @@ const resetGame = async (config: NewRunConfig) => {
 const initialRunConfig: NewRunConfig = {
   seed: initialSeed,
   mapSize: activeMapSize,
-  options: { ...DEFAULT_RUN_OPTIONS, mapGen: { ...DEFAULT_RUN_OPTIONS.mapGen } },
+  options: {
+    ...DEFAULT_RUN_OPTIONS,
+    mapGen: { ...DEFAULT_RUN_OPTIONS.mapGen },
+    fire: { ...DEFAULT_RUN_OPTIONS.fire }
+  },
   characterId: state.campaign.characterId,
   callsign: state.campaign.callsign
 };
+
+if (threeTestCloseButton) {
+  threeTestCloseButton.addEventListener("click", () => closeThreeTest());
+}
+if (threeTestOverlay) {
+  threeTestOverlay.addEventListener("click", (event) => {
+    if (event.target === threeTestOverlay) {
+      closeThreeTest();
+    }
+  });
+}
 
 watchCanvasSize();
 
@@ -172,7 +264,7 @@ const boot = async () => {
 
   if (!headless) {
     if (phaseUi) {
-      bindPhaseUi(phaseUi, state, rng, canvas, resetGame, overlayRefs);
+      bindPhaseUi(phaseUi, state, rng, canvas, resetGame, openThreeTest, overlayRefs);
     }
   }
 

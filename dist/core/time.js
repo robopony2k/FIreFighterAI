@@ -25,21 +25,29 @@ export function formatPhaseStatus(phase, phaseIndex, phaseDay) {
     const day = clamp(Math.ceil(phaseDay + 0.0001), 1, current.duration);
     return `${current.label} ${day}/${current.duration}`;
 }
-export function getDayNightFactor(dayValue) {
+export function getDayNightFactor(dayValue, settings) {
+    const dayFactorMin = settings?.dayFactorMin ?? FIRE_DAY_FACTOR_MIN;
+    const dayFactorMax = settings?.dayFactorMax ?? FIRE_DAY_FACTOR_MAX;
     const dayFraction = dayValue - Math.floor(dayValue);
     const cycle = Math.cos((dayFraction - 0.5) * Math.PI * 2) * 0.5 + 0.5;
-    return FIRE_DAY_FACTOR_MIN + (FIRE_DAY_FACTOR_MAX - FIRE_DAY_FACTOR_MIN) * cycle;
+    return dayFactorMin + (dayFactorMax - dayFactorMin) * cycle;
 }
-export function getFireSeasonIntensity(dayValue) {
+export function getFireSeasonIntensity(dayValue, settings) {
+    const taperDays = settings?.seasonTaperDays ?? FIRE_SEASON_TAPER_DAYS;
+    const minIntensity = settings?.seasonMinIntensity ?? FIRE_SEASON_MIN_INTENSITY;
     if (dayValue <= FIRE_SEASON_DURATION) {
         return 1;
     }
+    if (taperDays <= 0) {
+        return clamp(minIntensity, 0, 1);
+    }
     const over = dayValue - FIRE_SEASON_DURATION;
-    const tapered = 1 - over / FIRE_SEASON_TAPER_DAYS;
-    return clamp(tapered, FIRE_SEASON_MIN_INTENSITY, 1);
+    const tapered = 1 - over / taperDays;
+    return clamp(tapered, minIntensity, 1);
 }
-export function getFireSpreadScale(dayValue) {
-    const dayFactor = getDayNightFactor(dayValue);
-    const season = getFireSeasonIntensity(dayValue);
-    return FIRE_SIM_SPEED * dayFactor * (0.55 + season * 0.45);
+export function getFireSpreadScale(dayValue, settings) {
+    const dayFactor = getDayNightFactor(dayValue, settings);
+    const season = getFireSeasonIntensity(dayValue, settings);
+    const simSpeed = settings?.simSpeed ?? FIRE_SIM_SPEED;
+    return simSpeed * dayFactor * (0.55 + season * 0.45);
 }

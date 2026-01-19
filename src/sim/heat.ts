@@ -3,7 +3,6 @@ import { TILE_TYPE_IDS, syncTileSoA } from "../core/state.js";
 
 const TYPE_WATER = TILE_TYPE_IDS.water;
 const TYPE_ASH = TILE_TYPE_IDS.ash;
-const HEAT_MAX = 5;
 
 const ensureTileSoA = (state: WorldState): void => {
   if (
@@ -47,6 +46,7 @@ export function stepHeat(
   const tiles = state.tiles;
   const fire = state.tileFire;
   const heat = state.tileHeat;
+  const heatCap = Math.max(0.01, state.fireSettings.heatCap);
   const heatOutput = state.tileHeatOutput;
   const elevation = state.tileElevation;
   const typeId = state.tileTypeId;
@@ -323,8 +323,8 @@ export function stepHeat(
       const fallbackRetention = typeId[idx] === TYPE_WATER ? 0.4 : typeId[idx] === TYPE_ASH ? 0.55 : 1;
       const retention = typeof tile.heatRetention === "number" ? tile.heatRetention : fallbackRetention;
       let newHeat = heatBuffer[idx] * retention;
-      const transferCapBase = typeof tile.heatTransferCap === "number" ? tile.heatTransferCap : HEAT_MAX;
-      let transferCap = Math.min(HEAT_MAX, Math.max(0, transferCapBase));
+      const transferCapBase = typeof tile.heatTransferCap === "number" ? tile.heatTransferCap : heatCap;
+      let transferCap = Math.min(heatCap, Math.max(0, transferCapBase));
       if (transferCap > 0) {
         transferCap = Math.max(transferCap, tile.ignitionPoint * 1.05);
       } else {

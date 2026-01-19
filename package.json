@@ -11,9 +11,11 @@
     "dev": "node scripts/dev-server.cjs"
   },
   "devDependencies": {
+    "@types/three": "^0.182.0",
     "typescript": "^5.5.4"
   },
   "dependencies": {
+    "three": "^0.182.0",
     "yaml": "^2.8.2"
   }
 }

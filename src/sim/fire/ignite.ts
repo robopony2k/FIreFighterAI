@@ -1,12 +1,11 @@
 
 import type { RNG } from "../../core/types.js";
 import type { WorldState } from "../../core/state.js";
-import { FIRE_IGNITION_CHANCE_PER_DAY } from "../../core/config.js";
 import { indexFor } from "../../core/grid.js";
 import { markFireBounds } from "./bounds.js";
 
 export function igniteRandomFire(state: WorldState, rng: RNG, dayDelta: number, intensity: number): void {
-  const ignitionChance = FIRE_IGNITION_CHANCE_PER_DAY * dayDelta * intensity;
+  const ignitionChance = state.fireSettings.ignitionChancePerDay * dayDelta * intensity;
   if (rng.next() >= ignitionChance) {
     return;
   }

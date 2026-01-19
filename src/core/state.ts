@@ -3,6 +3,7 @@ import type {
   ClimateTimeline,
   DeployMode,
   FireSimWork,
+  FireSettings,
   Grid,
   Point,
   SeasonPhase,
@@ -14,7 +15,7 @@ import type {
   RosterUnit
 } from "./types.js";
 import type { CampaignState } from "./campaign.js";
-import { BASE_BUDGET } from "./config.js";
+import { BASE_BUDGET, DEFAULT_FIRE_SETTINGS } from "./config.js";
 import { createCampaignState } from "./campaign.js";
 import { DEFAULT_CLIMATE_PARAMS, DEFAULT_MOISTURE_PARAMS } from "./climate.js";
 import { buildNeighborOffsets } from "./grid.js";
@@ -81,7 +82,8 @@ export interface WorldState {
   valleyMap: number[];
   terrainDirty: boolean;
   basePoint: Point;
-  seed: number;
+  seed: number;
+  fireSettings: FireSettings;
   budget: number;
   burnedTiles: number;
   containedCount: number;
@@ -204,7 +206,8 @@ export function createInitialState(seed: number, grid: Grid): WorldState {
     valleyMap: createNumberArray(grid.totalTiles, 0),
     terrainDirty: true,
     basePoint: { x: 0, y: 0 },
-    seed,
+    seed,
+    fireSettings: { ...DEFAULT_FIRE_SETTINGS },
     budget: BASE_BUDGET,
     burnedTiles: 0,
     containedCount: 0,

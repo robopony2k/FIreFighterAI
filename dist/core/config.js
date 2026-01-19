@@ -36,6 +36,29 @@ export const FIRE_JUMP_WIND_THRESHOLD = 0.7;
 export const FIRE_JUMP_BASE_CHANCE = 0.25;
 export const FIRE_JUMP_HEAT_BOOST = 0.4;
 export const FIRE_JUMP_DOT_THRESHOLD = 0.2;
+export const FIRE_WEATHER_RISK_MIN = 0.4;
+export const FIRE_WEATHER_BURNOUT_RISK = 0.25;
+export const DEFAULT_FIRE_SETTINGS = {
+    ignitionChancePerDay: FIRE_IGNITION_CHANCE_PER_DAY,
+    simSpeed: FIRE_SIM_SPEED,
+    simTickSeconds: FIRE_SIM_TICK_SECONDS,
+    renderSmoothSeconds: FIRE_RENDER_SMOOTH_SECONDS,
+    seasonTaperDays: FIRE_SEASON_TAPER_DAYS,
+    seasonMinIntensity: FIRE_SEASON_MIN_INTENSITY,
+    dayFactorMin: FIRE_DAY_FACTOR_MIN,
+    dayFactorMax: FIRE_DAY_FACTOR_MAX,
+    diffusionCardinal: 0.35,
+    diffusionDiagonal: 0.25,
+    diffusionSecondary: 0.4,
+    diffusionMoisture: 0.35,
+    heatCap: 5,
+    conflagrationHeatBoost: 0.3,
+    conflagrationFuelBoost: 0.5,
+    boundsPadding: 6
+};
+export const GROWTH_WEATHER_TEMP_MIN = 18;
+export const GROWTH_WEATHER_TEMP_MAX = 30;
+export const GROWTH_WEATHER_MOISTURE_MIN = 0.22;
 export const HECTARES_PER_TILE = 1;
 export const RECRUIT_FIREFIGHTER_COST = 140;
 export const RECRUIT_TRUCK_COST = 320;
