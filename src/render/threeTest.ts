@@ -1,8 +1,9 @@
 import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
-import { HEIGHT_SCALE, TILE_COLOR_RGB, TILE_SIZE } from "../core/config.js";
+import { DEBUG_TERRAIN_RENDER, HEIGHT_MAP_RATIO, HEIGHT_SCALE, TILE_COLOR_RGB, TILE_SIZE } from "../core/config.js";
 import { TILE_ID_TO_TYPE, TILE_TYPE_IDS } from "../core/state.js";
+import { TreeType, TREE_TYPE_IDS } from "../core/types.js";
 import { registerPbrSpecularGlossiness } from "./gltfSpecGloss.js";
 
 export type TerrainSample = {
@@ -10,7 +11,10 @@ export type TerrainSample = {
   rows: number;
   elevations: Float32Array;
   tileTypes?: Uint8Array;
+  treeTypes?: Uint8Array;
+  riverMask?: Uint8Array;
   debugTypeColors?: boolean;
+  treesEnabled?: boolean;
 };
 
 type TreeMeshTemplate = {
@@ -25,10 +29,9 @@ type TreeVariant = {
   baseOffset: number;
 };
 
-type TreeAssets = {
-  forest: TreeVariant[];
-  light: TreeVariant[];
-};
+type TreeAssets = Record<TreeType, TreeVariant[]>;
+
+let threeTestLoggedTotal = -1;
 
 type HouseVariant = {
   meshes: TreeMeshTemplate[];
@@ -55,7 +58,7 @@ type TreeInstance = {
   z: number;
   scale: number;
   rotation: number;
-  variantSet: "forest" | "light";
+  treeType: TreeType;
   variantIndex: number;
 };
 
@@ -75,11 +78,19 @@ export type ThreeTestController = {
   stop: () => void;
   resize: () => void;
   setTerrain: (sample: TerrainSample) => void;
+  setSeason: (index: number) => void;
 };
 
 const clamp = (value: number, min: number, max: number): number => Math.min(max, Math.max(min, value));
+type RGB = { r: number; g: number; b: number };
+const mixRgb = (a: RGB, b: RGB, t: number): RGB => ({
+  r: a.r + (b.r - a.r) * t,
+  g: a.g + (b.g - a.g) * t,
+  b: a.b + (b.b - a.b) * t
+});
+const lighten = (color: RGB, amount: number): RGB => mixRgb(color, { r: 255, g: 255, b: 255 }, clamp(amount, 0, 1));
+const darken = (color: RGB, amount: number): RGB => mixRgb(color, { r: 0, g: 0, b: 0 }, clamp(amount, 0, 1));
 const TERRAIN_HEIGHT_EXAGGERATION = 1.35;
-const TERRAIN_HEIGHT_SCALE = (HEIGHT_SCALE / TILE_SIZE) * TERRAIN_HEIGHT_EXAGGERATION;
 const HEIGHT_SAMPLE_PEAK_WEIGHT = 0.65;
 const WATER_ALPHA_MIN_RATIO = 0.1;
 const WATER_ALPHA_POWER = 0.85;
@@ -95,32 +106,247 @@ const SUN_DIR = (() => {
   return { x: x / len, y: y / len, z: z / len };
 })();
 
-const TREE_MODEL_PATHS = {
-  forest: [
-    "assets/3d/GLTF/Green/Green_A.glb",
-    "assets/3d/GLTF/Green/Green_B.glb",
-    "assets/3d/GLTF/Green/Green_C.glb",
-    "assets/3d/GLTF/Green/Green_D.glb",
-    "assets/3d/GLTF/Green/Green_E.glb",
-    "assets/3d/GLTF/Green/Green_F.glb",
-    "assets/3d/GLTF/Green/Green_G.glb",
-    "assets/3d/GLTF/Green/Green_H.glb",
-    "assets/3d/GLTF/Green/Green_I.glb",
-    "assets/3d/GLTF/Green/Green_J.glb"
+const FOREST_TONE_BASE = TILE_COLOR_RGB.forest;
+const FOREST_CANOPY_TONES: Record<TreeType, RGB> = {
+  [TreeType.Pine]: darken(mixRgb(FOREST_TONE_BASE, { r: 48, g: 80, b: 64 }, 0.35), 0.08),
+  [TreeType.Oak]: mixRgb(FOREST_TONE_BASE, { r: 110, g: 118, b: 58 }, 0.35),
+  [TreeType.Maple]: mixRgb(FOREST_TONE_BASE, { r: 120, g: 92, b: 62 }, 0.32),
+  [TreeType.Birch]: lighten(mixRgb(FOREST_TONE_BASE, { r: 148, g: 152, b: 98 }, 0.42), 0.05),
+  [TreeType.Elm]: mixRgb(FOREST_TONE_BASE, { r: 72, g: 122, b: 86 }, 0.3),
+  [TreeType.Scrub]: mixRgb(FOREST_TONE_BASE, TILE_COLOR_RGB.scrub, 0.5)
+};
+
+const FOREST_TINT_BY_ID: RGB[] = [];
+FOREST_TINT_BY_ID[TREE_TYPE_IDS[TreeType.Pine]] = FOREST_CANOPY_TONES[TreeType.Pine];
+FOREST_TINT_BY_ID[TREE_TYPE_IDS[TreeType.Oak]] = FOREST_CANOPY_TONES[TreeType.Oak];
+FOREST_TINT_BY_ID[TREE_TYPE_IDS[TreeType.Maple]] = FOREST_CANOPY_TONES[TreeType.Maple];
+FOREST_TINT_BY_ID[TREE_TYPE_IDS[TreeType.Birch]] = FOREST_CANOPY_TONES[TreeType.Birch];
+FOREST_TINT_BY_ID[TREE_TYPE_IDS[TreeType.Elm]] = FOREST_CANOPY_TONES[TreeType.Elm];
+FOREST_TINT_BY_ID[TREE_TYPE_IDS[TreeType.Scrub]] = FOREST_CANOPY_TONES[TreeType.Scrub];
+
+type SeasonPreset = {
+  name: string;
+  mix: number;
+  tints: Record<TreeType, RGB>;
+  leafPresence: Record<TreeType, number>;
+};
+
+const SEASON_PRESETS: SeasonPreset[] = [
+  {
+    name: "Spring",
+    mix: 0.6,
+    tints: {
+      [TreeType.Pine]: { r: 46, g: 107, b: 74 },
+      [TreeType.Oak]: { r: 111, g: 175, b: 92 },
+      [TreeType.Maple]: { r: 106, g: 184, b: 94 },
+      [TreeType.Birch]: { r: 139, g: 197, b: 106 },
+      [TreeType.Elm]: { r: 107, g: 174, b: 102 },
+      [TreeType.Scrub]: { r: 121, g: 168, b: 97 }
+    },
+    leafPresence: {
+      [TreeType.Pine]: 1,
+      [TreeType.Oak]: 1,
+      [TreeType.Maple]: 1,
+      [TreeType.Birch]: 1,
+      [TreeType.Elm]: 1,
+      [TreeType.Scrub]: 1
+    }
+  },
+  {
+    name: "Summer",
+    mix: 0.6,
+    tints: {
+      [TreeType.Pine]: { r: 33, g: 90, b: 62 },
+      [TreeType.Oak]: { r: 77, g: 139, b: 74 },
+      [TreeType.Maple]: { r: 76, g: 147, b: 71 },
+      [TreeType.Birch]: { r: 106, g: 169, b: 92 },
+      [TreeType.Elm]: { r: 79, g: 143, b: 85 },
+      [TreeType.Scrub]: { r: 92, g: 127, b: 75 }
+    },
+    leafPresence: {
+      [TreeType.Pine]: 1,
+      [TreeType.Oak]: 1,
+      [TreeType.Maple]: 1,
+      [TreeType.Birch]: 1,
+      [TreeType.Elm]: 1,
+      [TreeType.Scrub]: 1
+    }
+  },
+  {
+    name: "Autumn",
+    mix: 0.65,
+    tints: {
+      [TreeType.Pine]: { r: 43, g: 90, b: 62 },
+      [TreeType.Oak]: { r: 185, g: 130, b: 58 },
+      [TreeType.Maple]: { r: 198, g: 74, b: 46 },
+      [TreeType.Birch]: { r: 215, g: 176, b: 62 },
+      [TreeType.Elm]: { r: 200, g: 160, b: 71 },
+      [TreeType.Scrub]: { r: 154, g: 123, b: 60 }
+    },
+    leafPresence: {
+      [TreeType.Pine]: 1,
+      [TreeType.Oak]: 1,
+      [TreeType.Maple]: 1,
+      [TreeType.Birch]: 1,
+      [TreeType.Elm]: 1,
+      [TreeType.Scrub]: 0.9
+    }
+  },
+  {
+    name: "Winter",
+    mix: 0.55,
+    tints: {
+      [TreeType.Pine]: { r: 31, g: 74, b: 55 },
+      [TreeType.Oak]: { r: 120, g: 102, b: 78 },
+      [TreeType.Maple]: { r: 118, g: 92, b: 78 },
+      [TreeType.Birch]: { r: 136, g: 120, b: 86 },
+      [TreeType.Elm]: { r: 122, g: 106, b: 80 },
+      [TreeType.Scrub]: { r: 108, g: 106, b: 78 }
+    },
+    leafPresence: {
+      [TreeType.Pine]: 1,
+      [TreeType.Oak]: 0,
+      [TreeType.Maple]: 0,
+      [TreeType.Birch]: 0,
+      [TreeType.Elm]: 0,
+      [TreeType.Scrub]: 0.35
+    }
+  }
+];
+
+const SEASON_COUNT = SEASON_PRESETS.length;
+
+const isLeafName = (name?: string | null): boolean => {
+  if (!name) {
+    return false;
+  }
+  return /(leaf|leaves|foliage|canopy|needle|needles)/i.test(name);
+};
+
+const ensureTreeMaterialDefaults = (material: THREE.Material) => {
+  const standard = material as THREE.MeshStandardMaterial;
+  if (standard.userData.treeBaseColor === undefined && standard.color) {
+    standard.userData.treeBaseColor = standard.color.clone();
+  }
+  if (standard.userData.treeBaseOpacity === undefined && typeof standard.opacity === "number") {
+    standard.userData.treeBaseOpacity = standard.opacity;
+  }
+};
+
+const applySeasonToMaterial = (
+  material: THREE.Material,
+  preset: SeasonPreset,
+  treeType: TreeType,
+  applyOpacity: boolean,
+  forceTint: boolean
+) => {
+  const standard = material as THREE.MeshStandardMaterial;
+  if (!standard.color) {
+    return;
+  }
+  ensureTreeMaterialDefaults(standard);
+  const baseColor = standard.userData.treeBaseColor as THREE.Color | undefined;
+  const baseOpacity = standard.userData.treeBaseOpacity as number | undefined;
+  if (!baseColor) {
+    return;
+  }
+  const tint = preset.tints[treeType];
+  const mix = preset.mix;
+  const mixed = baseColor.clone();
+  mixed.r = baseColor.r * (1 - mix) + (tint.r / 255) * mix;
+  mixed.g = baseColor.g * (1 - mix) + (tint.g / 255) * mix;
+  mixed.b = baseColor.b * (1 - mix) + (tint.b / 255) * mix;
+  if (forceTint || standard.userData.treeLeafHint === true) {
+    standard.color.copy(mixed);
+  } else {
+    standard.color.copy(baseColor);
+  }
+  if (applyOpacity && standard.userData.treeLeafHint === true && baseOpacity !== undefined) {
+    const presence = preset.leafPresence[treeType] ?? 1;
+    standard.opacity = baseOpacity * presence;
+    standard.transparent = standard.opacity < 0.99 || standard.transparent;
+  } else if (baseOpacity !== undefined) {
+    standard.opacity = baseOpacity;
+  }
+  standard.needsUpdate = true;
+};
+
+const applySeasonToTreeAssets = (assets: TreeAssets, seasonIndex: number): void => {
+  const preset = SEASON_PRESETS[Math.max(0, Math.min(SEASON_COUNT - 1, seasonIndex))];
+  (Object.keys(assets) as TreeType[]).forEach((treeType) => {
+    const variants = assets[treeType] ?? [];
+    let hasLeafHint = false;
+    variants.forEach((variant) => {
+      variant.meshes.forEach((template) => {
+        const materials = Array.isArray(template.material) ? template.material : [template.material];
+        materials.forEach((material) => {
+          if ((material as THREE.Material & { userData?: any }).userData?.treeLeafHint) {
+            hasLeafHint = true;
+          }
+        });
+      });
+    });
+    const forceTint = !hasLeafHint;
+    variants.forEach((variant) => {
+      variant.meshes.forEach((template) => {
+        const materials = Array.isArray(template.material) ? template.material : [template.material];
+        materials.forEach((material) => {
+          applySeasonToMaterial(material, preset, treeType, true, forceTint);
+        });
+      });
+    });
+  });
+};
+
+const TREE_MODEL_PATHS: Record<TreeType, string[]> = {
+  [TreeType.Birch]: [
+    "assets/3d/GLTF/Trees/Birch/Birch_01.glb",
+    "assets/3d/GLTF/Trees/Birch/Birch_02.glb",
+    "assets/3d/GLTF/Trees/Birch/Birch_03.glb",
+    "assets/3d/GLTF/Trees/Birch/Birch_04.glb",
+    "assets/3d/GLTF/Trees/Birch/Birch_05.glb"
   ],
-  light: [
-    "assets/3d/GLTF/Birch/Birch_A.glb",
-    "assets/3d/GLTF/Birch/Birch_B.glb",
-    "assets/3d/GLTF/Birch/Birch_C.glb",
-    "assets/3d/GLTF/Birch/Birch_D.glb",
-    "assets/3d/GLTF/Birch/Birch_E.glb",
-    "assets/3d/GLTF/Birch/Birch_F.glb",
-    "assets/3d/GLTF/Birch/Birch_G.glb",
-    "assets/3d/GLTF/Birch/Birch_H.glb",
-    "assets/3d/GLTF/Birch/Birch_I.glb",
-    "assets/3d/GLTF/Birch/Birch_J.glb"
+  [TreeType.Maple]: [
+    "assets/3d/GLTF/Trees/Maple/Maple_01.glb",
+    "assets/3d/GLTF/Trees/Maple/Maple_02.glb",
+    "assets/3d/GLTF/Trees/Maple/Maple_03.glb",
+    "assets/3d/GLTF/Trees/Maple/Maple_04.glb",
+    "assets/3d/GLTF/Trees/Maple/Maple_05.glb"
+  ],
+  [TreeType.Oak]: [
+    "assets/3d/GLTF/Trees/Oak/Tree.glb",
+    "assets/3d/GLTF/Trees/Oak/Trees.glb"
+  ],
+  [TreeType.Pine]: [
+    "assets/3d/GLTF/Trees/Pine/Pine-01.glb",
+    "assets/3d/GLTF/Trees/Pine/Pine-02.glb",
+    "assets/3d/GLTF/Trees/Pine/Pine-03.glb"
+  ],
+  [TreeType.Elm]: [
+    "assets/3d/GLTF/Trees/Green/Green_A.glb",
+    "assets/3d/GLTF/Trees/Green/Green_B.glb",
+    "assets/3d/GLTF/Trees/Green/Green_C.glb",
+    "assets/3d/GLTF/Trees/Green/Green_D.glb",
+    "assets/3d/GLTF/Trees/Green/Green_E.glb",
+    "assets/3d/GLTF/Trees/Green/Green_F.glb",
+    "assets/3d/GLTF/Trees/Green/Green_G.glb",
+    "assets/3d/GLTF/Trees/Green/Green_H.glb",
+    "assets/3d/GLTF/Trees/Green/Green_I.glb",
+    "assets/3d/GLTF/Trees/Green/Green_J.glb"
+  ],
+  [TreeType.Scrub]: [
+    "assets/3d/GLTF/Trees/Green/Green_A.glb",
+    "assets/3d/GLTF/Trees/Green/Green_B.glb",
+    "assets/3d/GLTF/Trees/Green/Green_C.glb",
+    "assets/3d/GLTF/Trees/Green/Green_D.glb",
+    "assets/3d/GLTF/Trees/Green/Green_E.glb",
+    "assets/3d/GLTF/Trees/Green/Green_F.glb",
+    "assets/3d/GLTF/Trees/Green/Green_G.glb",
+    "assets/3d/GLTF/Trees/Green/Green_H.glb",
+    "assets/3d/GLTF/Trees/Green/Green_I.glb",
+    "assets/3d/GLTF/Trees/Green/Green_J.glb"
   ]
-} as const;
+};
 
 const createGLTFLoader = (): GLTFLoader => registerPbrSpecularGlossiness(new GLTFLoader());
 
@@ -203,30 +429,42 @@ const loadTreeVariant = (loader: GLTFLoader, url: string): Promise<TreeVariant> 
         const bounds = new THREE.Box3().setFromObject(scene);
         const height = Math.max(0.01, bounds.max.y - bounds.min.y);
         const baseOffset = -bounds.min.y;
+        const center = new THREE.Vector3();
+        bounds.getCenter(center);
+        const recenter = new THREE.Matrix4().makeTranslation(-center.x, baseOffset, -center.z);
         const meshes: TreeMeshTemplate[] = [];
         scene.traverse((child) => {
           if (child instanceof THREE.Mesh) {
             const geometry = child.geometry.clone();
             geometry.userData.treeAsset = true;
+            const leafHint = isLeafName(child.name);
             const material = Array.isArray(child.material)
               ? child.material.map((mat) => {
                   const clone = mat.clone();
                   clone.userData.treeAsset = true;
+                  if (leafHint || isLeafName(mat.name)) {
+                    clone.userData.treeLeafHint = true;
+                  }
                   return clone;
                 })
               : (() => {
                   const clone = child.material.clone();
                   clone.userData.treeAsset = true;
+                  if (leafHint || isLeafName(child.material.name)) {
+                    clone.userData.treeLeafHint = true;
+                  }
                   return clone;
                 })();
+            const baseMatrix = child.matrixWorld.clone();
+            baseMatrix.premultiply(recenter);
             meshes.push({
               geometry,
               material,
-              baseMatrix: child.matrixWorld.clone()
+              baseMatrix
             });
           }
         });
-        resolve({ meshes, height, baseOffset });
+        resolve({ meshes, height, baseOffset: 0 });
       },
       undefined,
       (error) => reject(error)
@@ -241,14 +479,17 @@ const loadTreeAssets = (): Promise<TreeAssets> => {
     return treeAssetsPromise;
   }
   const loader = createGLTFLoader();
-  const forest = TREE_MODEL_PATHS.forest.map((url) => loadTreeVariant(loader, url));
-  const light = TREE_MODEL_PATHS.light.map((url) => loadTreeVariant(loader, url));
-  treeAssetsPromise = Promise.all([Promise.all(forest), Promise.all(light)]).then(([forestModels, lightModels]) => {
-    treeAssetsCache = {
-      forest: forestModels,
-      light: lightModels
-    };
-    return treeAssetsCache;
+  const entries = Object.entries(TREE_MODEL_PATHS) as [TreeType, string[]][];
+  const loads = entries.map(([type, urls]) =>
+    Promise.all(urls.map((url) => loadTreeVariant(loader, url))).then((models) => [type, models] as const)
+  );
+  treeAssetsPromise = Promise.all(loads).then((loaded) => {
+    const assets = {} as TreeAssets;
+    loaded.forEach(([type, models]) => {
+      assets[type] = models;
+    });
+    treeAssetsCache = assets;
+    return assets;
   });
   return treeAssetsPromise;
 };
@@ -283,10 +524,14 @@ const buildVariantFromMeshes = (meshes: THREE.Mesh[], theme: "brick" | "wood"): 
   if (!hasBounds) {
     return null;
   }
+  const size = new THREE.Vector3();
+  worldBounds.getSize(size);
+  const center = new THREE.Vector3();
+  worldBounds.getCenter(center);
   const rootInv = new THREE.Matrix4().makeTranslation(
-    -worldBounds.min.x,
-    -worldBounds.min.y,
-    -worldBounds.min.z
+    -center.x,
+    -center.y,
+    -center.z
   );
   const templates: TreeMeshTemplate[] = [];
   meshes.forEach((mesh) => {
@@ -311,8 +556,6 @@ const buildVariantFromMeshes = (meshes: THREE.Mesh[], theme: "brick" | "wood"): 
     });
   });
   const localBounds = worldBounds.clone().applyMatrix4(rootInv);
-  const size = new THREE.Vector3();
-  localBounds.getSize(size);
   const height = Math.max(0.01, size.y);
   const baseOffset = -localBounds.min.y;
   return { meshes: templates, height, baseOffset, size, theme };
@@ -406,10 +649,17 @@ const extractHouseVariants = (scene: THREE.Object3D, theme: "brick" | "wood"): H
     }
     const bounds = new THREE.Box3().setFromObject(root);
     bounds.applyMatrix4(rootInv);
+    const center = new THREE.Vector3();
+    bounds.getCenter(center);
+    const recenter = new THREE.Matrix4().makeTranslation(-center.x, -center.y, -center.z);
+    meshes.forEach((template) => {
+      template.baseMatrix.premultiply(recenter);
+    });
+    const centeredBounds = bounds.clone().applyMatrix4(recenter);
     const size = new THREE.Vector3();
-    bounds.getSize(size);
+    centeredBounds.getSize(size);
     const height = Math.max(0.01, size.y);
-    const baseOffset = -bounds.min.y;
+    const baseOffset = -centeredBounds.min.y;
     const footprint = Math.max(0.0001, size.x * size.z);
     candidates.push({
       meshes,
@@ -524,10 +774,17 @@ const extractFirestationAsset = (scene: THREE.Object3D): FirestationAsset | null
   }
   const bounds = new THREE.Box3().setFromObject(scene);
   bounds.applyMatrix4(rootInv);
+  const center = new THREE.Vector3();
+  bounds.getCenter(center);
+  const recenter = new THREE.Matrix4().makeTranslation(-center.x, -center.y, -center.z);
+  meshes.forEach((template) => {
+    template.baseMatrix.premultiply(recenter);
+  });
+  const centeredBounds = bounds.clone().applyMatrix4(recenter);
   const size = new THREE.Vector3();
-  bounds.getSize(size);
+  centeredBounds.getSize(size);
   const height = Math.max(0.01, size.y);
-  const baseOffset = -bounds.min.y;
+  const baseOffset = -centeredBounds.min.y;
   return { meshes, height, baseOffset, size };
 };
 
@@ -597,7 +854,7 @@ const buildSampleHeightMap = (
           }
         }
       }
-      if (tileTypes && waterCount > count * 0.6) {
+      if (tileTypes && waterCount > count * 0.2) {
         heights[offset] = waterCount > 0 ? waterSum / waterCount : 0;
         offset += 1;
         continue;
@@ -611,7 +868,55 @@ const buildSampleHeightMap = (
   return heights;
 };
 
-const computeWaterLevel = (sample: TerrainSample, waterId: number): number | null => {
+const buildOceanMask = (cols: number, rows: number, tileTypes: Uint8Array, waterId: number): Uint8Array => {
+  const total = cols * rows;
+  const mask = new Uint8Array(total);
+  const queue = new Int32Array(total);
+  let head = 0;
+  let tail = 0;
+  const pushIfWater = (idx: number) => {
+    if (mask[idx] || tileTypes[idx] !== waterId) {
+      return;
+    }
+    mask[idx] = 1;
+    queue[tail] = idx;
+    tail += 1;
+  };
+  for (let x = 0; x < cols; x += 1) {
+    pushIfWater(x);
+    pushIfWater((rows - 1) * cols + x);
+  }
+  for (let y = 1; y < rows - 1; y += 1) {
+    pushIfWater(y * cols);
+    pushIfWater(y * cols + (cols - 1));
+  }
+  while (head < tail) {
+    const idx = queue[head];
+    head += 1;
+    const x = idx % cols;
+    const y = Math.floor(idx / cols);
+    if (x > 0) {
+      pushIfWater(idx - 1);
+    }
+    if (x < cols - 1) {
+      pushIfWater(idx + 1);
+    }
+    if (y > 0) {
+      pushIfWater(idx - cols);
+    }
+    if (y < rows - 1) {
+      pushIfWater(idx + cols);
+    }
+  }
+  return mask;
+};
+
+const computeWaterLevel = (
+  sample: TerrainSample,
+  waterId: number,
+  oceanMask?: Uint8Array | null,
+  riverMask?: Uint8Array | null
+): number | null => {
   const tileTypes = sample.tileTypes;
   if (!tileTypes) {
     return null;
@@ -622,7 +927,7 @@ const computeWaterLevel = (sample: TerrainSample, waterId: number): number | nul
   const sums = new Float32Array(bins);
   let total = 0;
   for (let i = 0; i < elevations.length; i += 1) {
-    if (tileTypes[i] !== waterId) {
+    if (tileTypes[i] !== waterId || (oceanMask && !oceanMask[i]) || (riverMask && riverMask[i])) {
       continue;
     }
     const height = clamp(elevations[i] ?? 0, 0, 1);
@@ -719,7 +1024,12 @@ const buildSampleTypeMap = (
       } else if (priorityType >= 0) {
         types[offset] = priorityType;
       } else {
-        types[offset] = maxType;
+        const waterRatio = total > 0 ? waterCount / total : 0;
+        if (waterRatio >= 0.2) {
+          types[offset] = waterId;
+        } else {
+          types[offset] = maxType;
+        }
       }
       offset += 1;
     }
@@ -732,7 +1042,8 @@ const buildWaterMaskTexture = (
   sampleCols: number,
   sampleRows: number,
   step: number,
-  waterId: number
+  waterId: number,
+  oceanMask?: Uint8Array | null
 ): THREE.DataTexture => {
   const { cols, rows, tileTypes } = sample;
   const data = new Uint8Array(sampleCols * sampleRows * 4);
@@ -749,7 +1060,11 @@ const buildWaterMaskTexture = (
         const rowBase = y * cols;
         for (let x = tileX; x < endX; x += 1) {
           const idx = rowBase + x;
-          if (tileTypes && tileTypes[idx] === waterId) {
+          if (
+            tileTypes &&
+            tileTypes[idx] === waterId &&
+            (!oceanMask || oceanMask[idx])
+          ) {
             waterCount += 1;
           }
           total += 1;
@@ -777,6 +1092,82 @@ const buildWaterMaskTexture = (
   return texture;
 };
 
+const buildWaterSurfaceHeights = (
+  sampleTypes: Uint8Array,
+  sampleHeights: Float32Array,
+  sampleCols: number,
+  sampleRows: number,
+  waterId: number,
+  oceanLevel: number | null
+): Float32Array => {
+  const total = sampleCols * sampleRows;
+  const heights = new Float32Array(total);
+  const visited = new Uint8Array(total);
+  const queue = new Int32Array(total);
+  const components: WaterComponent[] = [];
+  let head = 0;
+  let tail = 0;
+
+  const push = (idx: number) => {
+    visited[idx] = 1;
+    queue[tail] = idx;
+    tail += 1;
+  };
+
+  for (let i = 0; i < total; i += 1) {
+    if (visited[i] || sampleTypes[i] !== waterId) {
+      continue;
+    }
+    head = 0;
+    tail = 0;
+    push(i);
+    const component: WaterComponent = { indices: [], min: Number.POSITIVE_INFINITY, touchesEdge: false };
+    while (head < tail) {
+      const idx = queue[head];
+      head += 1;
+      component.indices.push(idx);
+      component.min = Math.min(component.min, sampleHeights[idx] ?? 0);
+      const x = idx % sampleCols;
+      const y = Math.floor(idx / sampleCols);
+      if (x === 0 || y === 0 || x === sampleCols - 1 || y === sampleRows - 1) {
+        component.touchesEdge = true;
+      }
+      const neighbors = [
+        idx - 1,
+        idx + 1,
+        idx - sampleCols,
+        idx + sampleCols
+      ];
+      for (const nIdx of neighbors) {
+        if (nIdx < 0 || nIdx >= total) {
+          continue;
+        }
+        if (visited[nIdx] || sampleTypes[nIdx] !== waterId) {
+          continue;
+        }
+        const nx = nIdx % sampleCols;
+        const ny = Math.floor(nIdx / sampleCols);
+        if (Math.abs(nx - x) + Math.abs(ny - y) !== 1) {
+          continue;
+        }
+        push(nIdx);
+      }
+    }
+    components.push(component);
+  }
+
+  for (const component of components) {
+    const level =
+      component.touchesEdge && oceanLevel !== null
+        ? oceanLevel
+        : clamp(component.min + 0.01, 0, 1);
+    component.indices.forEach((idx) => {
+      heights[idx] = level;
+    });
+  }
+  return heights;
+};
+
 const buildTileTexture = (
   sample: TerrainSample,
   sampleCols: number,
@@ -793,6 +1184,7 @@ const buildTileTexture = (
   debugTypeColors: boolean
 ): THREE.DataTexture => {
   const { cols, rows } = sample;
+  const treeTypes = sample.treeTypes;
   const data = new Uint8Array(sampleCols * sampleRows * 4);
   const heightAtSample = (x: number, y: number): number => {
     const clampedX = Math.max(0, Math.min(sampleCols - 1, x));
@@ -824,7 +1216,18 @@ const buildTileTexture = (
           colorType = hasLandNeighbor ? beachId : waterId;
         }
       }
-      const color = palette[colorType] ?? palette[grassId];
+      let color = palette[colorType] ?? palette[grassId];
+      if (!debugTypeColors && typeId === forestId) {
+        const dominantId = treeTypes ? treeTypes[idx] : 255;
+        const tint = FOREST_TINT_BY_ID[dominantId] ?? FOREST_TONE_BASE;
+        const tintColor: [number, number, number] = [tint.r / 255, tint.g / 255, tint.b / 255];
+        const mixFactor = 0.55;
+        color = [
+          color[0] * (1 - mixFactor) + tintColor[0] * mixFactor,
+          color[1] * (1 - mixFactor) + tintColor[1] * mixFactor,
+          color[2] * (1 - mixFactor) + tintColor[2] * mixFactor
+        ];
+      }
       const height = heightAtSample(col, row);
       const baseNoise = noiseAt(idx + 1);
       const fineNoise = (noiseAt(idx * 3.7 + 17.7) - 0.5) * 0.04;
@@ -886,6 +1289,7 @@ const buildTerrainMesh = (
     sampleRows: number;
     width: number;
     depth: number;
+    heights?: Float32Array;
   };
 } => {
   const { cols, rows, elevations } = sample;
@@ -899,14 +1303,15 @@ const buildTerrainMesh = (
   const houseId = TILE_TYPE_IDS.house;
   const roadId = TILE_TYPE_IDS.road;
   const firebreakId = TILE_TYPE_IDS.firebreak;
-  const maxDim = Math.max(cols, rows);
-  const step = Math.max(1, Math.floor(maxDim / 256));
+  const step = 1;
   const sampleCols = Math.floor((cols - 1) / step) + 1;
   const sampleRows = Math.floor((rows - 1) / step) + 1;
   const width = (sampleCols - 1) * step;
   const depth = (sampleRows - 1) * step;
   const sampleHeights = buildSampleHeightMap(sample, sampleCols, sampleRows, step, waterId);
-  const waterLevel = computeWaterLevel(sample, waterId);
+  const oceanMask = sample.tileTypes ? buildOceanMask(cols, rows, sample.tileTypes, waterId) : null;
+  const riverMask = sample.riverMask ?? null;
+  const waterLevel = computeWaterLevel(sample, waterId, oceanMask, riverMask);
   const sampleTypes = buildSampleTypeMap(
     sample,
     sampleCols,
@@ -918,9 +1323,37 @@ const buildTerrainMesh = (
     [baseId, houseId, roadId, firebreakId]
   );
   if (waterLevel !== null) {
-    for (let i = 0; i < sampleHeights.length; i += 1) {
-      if (sampleTypes[i] === waterId) {
-        sampleHeights[i] = waterLevel;
+    for (let row = 0; row < sampleRows; row += 1) {
+      const tileY = Math.min(rows - 1, row * step);
+      const endY = Math.min(rows, tileY + step);
+      for (let col = 0; col < sampleCols; col += 1) {
+        const tileX = Math.min(cols - 1, col * step);
+        const endX = Math.min(cols, tileX + step);
+        const idx = row * sampleCols + col;
+        if (sampleTypes[idx] !== waterId) {
+          continue;
+        }
+        let isOcean = false;
+        let isRiver = false;
+        if (oceanMask) {
+          for (let y = tileY; y < endY && !isOcean; y += 1) {
+            const rowBase = y * cols;
+            for (let x = tileX; x < endX; x += 1) {
+              const idx = rowBase + x;
+              if (riverMask && riverMask[idx]) {
+                isRiver = true;
+                break;
+              }
+              if (oceanMask[idx]) {
+                isOcean = true;
+                break;
+              }
+            }
+          }
+        }
+        if ((!oceanMask || isOcean) && !isRiver) {
+          sampleHeights[idx] = waterLevel;
+        }
       }
     }
   }
@@ -954,14 +1387,39 @@ const buildTerrainMesh = (
   geometry.rotateX(-Math.PI / 2);
 
   const positions = geometry.attributes.position;
-  const heightScale = TERRAIN_HEIGHT_SCALE;
+  const baseScale = Math.max(HEIGHT_SCALE / TILE_SIZE, Math.min(cols, rows) * HEIGHT_MAP_RATIO);
+  const heightScale = baseScale * TERRAIN_HEIGHT_EXAGGERATION;
   let minHeight = Number.POSITIVE_INFINITY;
   let maxHeight = Number.NEGATIVE_INFINITY;
   let waterHeightSum = 0;
   let waterCount = 0;
   let vertexIndex = 0;
   const treeInstances: TreeInstance[] = [];
-  const hasTreeAssets = !!treeAssets && (treeAssets.forest.length > 0 || treeAssets.light.length > 0);
+  const allowTrees = sample.treesEnabled ?? true;
+  const hasTreeAssets =
+    allowTrees &&
+    !!treeAssets &&
+    Object.values(treeAssets).some((variants) => Array.isArray(variants) && variants.length > 0);
+  const getTreeVariants = (type: TreeType): TreeVariant[] => {
+    if (!treeAssets) {
+      return [];
+    }
+    const direct = treeAssets[type] ?? [];
+    if (direct.length > 0) {
+      return direct;
+    }
+    const scrubFallback = treeAssets[TreeType.Scrub] ?? [];
+    if (scrubFallback.length > 0) {
+      return scrubFallback;
+    }
+    return treeAssets[TreeType.Pine] ?? [];
+  };
+  const treeTypes = sample.treeTypes;
+  const birchId = TREE_TYPE_IDS[TreeType.Birch];
+  const pineId = TREE_TYPE_IDS[TreeType.Pine];
+  const oakId = TREE_TYPE_IDS[TreeType.Oak];
+  const mapleId = TREE_TYPE_IDS[TreeType.Maple];
+  const elmId = TREE_TYPE_IDS[TreeType.Elm];
   for (let row = 0; row < sampleRows; row += 1) {
     const tileY = Math.min(rows - 1, row * step);
     for (let col = 0; col < sampleCols; col += 1) {
@@ -978,6 +1436,35 @@ const buildTerrainMesh = (
         waterHeightSum += y;
         waterCount += 1;
       }
+      const edgeBand = 3;
+      if (tileX < edgeBand || tileY < edgeBand || tileX >= cols - edgeBand || tileY >= rows - edgeBand) {
+        vertexIndex += 1;
+        continue;
+      }
+      const leftIdx = col > 0 ? vertexIndex - 1 : vertexIndex;
+      const rightIdx = col < sampleCols - 1 ? vertexIndex + 1 : vertexIndex;
+      const upIdx = row > 0 ? vertexIndex - sampleCols : vertexIndex;
+      const downIdx = row < sampleRows - 1 ? vertexIndex + sampleCols : vertexIndex;
+      const neighborWater =
+        sampleTypes[leftIdx] === waterId ||
+        sampleTypes[rightIdx] === waterId ||
+        sampleTypes[upIdx] === waterId ||
+        sampleTypes[downIdx] === waterId;
+      if (neighborWater) {
+        vertexIndex += 1;
+        continue;
+      }
+      const slope =
+        Math.max(
+          Math.abs((sampleHeights[leftIdx] ?? height) - height),
+          Math.abs((sampleHeights[rightIdx] ?? height) - height),
+          Math.abs((sampleHeights[upIdx] ?? height) - height),
+          Math.abs((sampleHeights[downIdx] ?? height) - height)
+        );
+      if (slope > 0.12) {
+        vertexIndex += 1;
+        continue;
+      }
       const densityScale = Math.min(1.5, 1 + Math.max(0, step - 1) * 0.2);
       let treeChance = 0;
       if (typeId === forestId) {
@@ -989,32 +1476,69 @@ const buildTerrainMesh = (
       } else if (typeId === grassId) {
         treeChance = 0.08 * densityScale;
       }
-      if (hasTreeAssets && treeChance > 0 && noiseAt(idx + 5.1) < treeChance) {
-        const baseScale = TREE_SCALE_BASE + Math.min(TREE_SCALE_STEP_CAP, Math.max(0, step - 1) * TREE_SCALE_STEP_GAIN);
-        const jitterX = (noiseAt(idx + 0.27) - 0.5) * 0.6 * step;
-        const jitterZ = (noiseAt(idx + 0.61) - 0.5) * 0.6 * step;
-        const typeScale = typeId === forestId ? 1 : typeId === scrubId ? 0.75 : 0.6;
-        const preferredSet = typeId === forestId ? "forest" : "light";
-        const primary = preferredSet === "forest" ? treeAssets!.forest : treeAssets!.light;
-        const fallback = preferredSet === "forest" ? treeAssets!.light : treeAssets!.forest;
-        const variants = primary.length > 0 ? primary : fallback;
-        const variantSet = primary.length > 0 ? preferredSet : preferredSet === "forest" ? "light" : "forest";
+      if (hasTreeAssets && treeChance > 0) {
+        const dominantId = treeTypes ? treeTypes[idx] : 255;
+        const isForest = typeId === forestId;
+        const forestScale =
+          dominantId === pineId
+            ? 1.05
+            : dominantId === oakId
+            ? 1
+            : dominantId === mapleId
+            ? 0.98
+            : dominantId === elmId
+            ? 1.02
+            : dominantId === birchId
+            ? 0.9
+            : 1;
+        const baseScale =
+          TREE_SCALE_BASE + Math.min(TREE_SCALE_STEP_CAP, Math.max(0, step - 1) * TREE_SCALE_STEP_GAIN);
+        const typeScale = isForest ? forestScale : typeId === scrubId ? 0.75 : 0.6;
+        let treeType: TreeType = TreeType.Scrub;
+        if (isForest) {
+          if (dominantId === birchId) {
+            treeType = TreeType.Birch;
+          } else if (dominantId === oakId) {
+            treeType = TreeType.Oak;
+          } else if (dominantId === mapleId) {
+            treeType = TreeType.Maple;
+          } else if (dominantId === elmId) {
+            treeType = TreeType.Elm;
+          } else {
+            treeType = TreeType.Pine;
+          }
+        }
+        const variants = getTreeVariants(treeType);
         if (variants.length > 0) {
-          const variantIndex = Math.floor(noiseAt(idx + 9.7) * variants.length);
-          const variant = variants[variantIndex] ?? variants[0];
-          const targetHeight = baseScale * typeScale * TREE_HEIGHT_FACTOR;
-          const scale = (targetHeight / variant.height) * (0.85 + noiseAt(idx + 7.9) * 0.3);
-          const rotation = noiseAt(idx + 3.3) * Math.PI * 2;
-          const x = (col / Math.max(1, sampleCols - 1) - 0.5) * width + jitterX;
-          const z = (row / Math.max(1, sampleRows - 1) - 0.5) * depth + jitterZ;
-          const treeY = y + variant.baseOffset * scale;
-          treeInstances.push({ x, y: treeY, z, scale, rotation, variantSet, variantIndex });
+          const attempts = isForest ? Math.min(3, 1 + Math.floor(noiseAt(idx + 11.7) * (1 + densityScale))) : 1;
+          for (let attempt = 0; attempt < attempts; attempt += 1) {
+            if (noiseAt(idx + 5.1 + attempt * 0.37) >= treeChance) {
+              continue;
+            }
+            const jitterX = (noiseAt(idx + 0.27 + attempt * 0.31) - 0.5) * 0.6 * step;
+            const jitterZ = (noiseAt(idx + 0.61 + attempt * 0.29) - 0.5) * 0.6 * step;
+            const variantIndex = Math.floor(noiseAt(idx + 9.7 + attempt * 0.53) * variants.length);
+            const variant = variants[variantIndex] ?? variants[0];
+            const targetHeight = baseScale * typeScale * TREE_HEIGHT_FACTOR;
+            const scale = (targetHeight / variant.height) * (0.85 + noiseAt(idx + 7.9 + attempt * 0.41) * 0.3);
+            const rotation = noiseAt(idx + 3.3 + attempt * 0.23) * Math.PI * 2;
+            const x = (col / Math.max(1, sampleCols - 1) - 0.5) * width + jitterX;
+            const z = (row / Math.max(1, sampleCols - 1) - 0.5) * depth + jitterZ;
+            const treeY = y + variant.baseOffset * scale;
+            treeInstances.push({ x, y: treeY, z, scale, rotation, treeType, variantIndex });
+          }
         }
       }
       vertexIndex += 1;
     }
   }
   geometry.computeVertexNormals();
+  if (DEBUG_TERRAIN_RENDER && threeTestLoggedTotal !== cols * rows) {
+    console.log(
+      `ThreeTest heights: min=${minHeight.toFixed(2)} max=${maxHeight.toFixed(2)} scale=${heightScale.toFixed(2)}`
+    );
+    threeTestLoggedTotal = cols * rows;
+  }
 
   const tileTexture = buildTileTexture(
     sample,
@@ -1042,8 +1566,8 @@ const buildTerrainMesh = (
     const treeGroup = new THREE.Group();
     const dummy = new THREE.Object3D();
     const tempMatrix = new THREE.Matrix4();
-    const addVariantInstances = (variantSet: "forest" | "light", variants: TreeVariant[]) => {
-      const instances = treeInstances.filter((instance) => instance.variantSet === variantSet);
+    const addVariantInstances = (treeType: TreeType, variants: TreeVariant[]) => {
+      const instances = treeInstances.filter((instance) => instance.treeType === treeType);
       if (instances.length === 0 || variants.length === 0) {
         return;
       }
@@ -1078,8 +1602,9 @@ const buildTerrainMesh = (
         });
       });
     };
-    addVariantInstances("forest", treeAssets.forest);
-    addVariantInstances("light", treeAssets.light);
+    (Object.keys(TREE_MODEL_PATHS) as TreeType[]).forEach((treeType) => {
+      addVariantInstances(treeType, getTreeVariants(treeType));
+    });
     mesh.add(treeGroup);
   }
   if (sample.tileTypes) {
@@ -1294,16 +1819,39 @@ const buildTerrainMesh = (
   }
   mesh.position.y = -0.75 + (minHeight + maxHeight) * -0.15;
   const hasWater = waterLevel !== null || waterCount > 0;
-  const waterPlaneLevel = waterLevel !== null ? waterLevel * heightScale : waterCount > 0 ? waterHeightSum / waterCount : 0;
+  const waterPlaneLevel =
+    waterLevel !== null ? waterLevel * heightScale : waterCount > 0 ? waterHeightSum / waterCount : 0;
+  const waterLevels = buildWaterSurfaceHeights(sampleTypes, sampleHeights, sampleCols, sampleRows, waterId, waterLevel);
+  if (sample.riverMask) {
+    for (let row = 0; row < sampleRows; row += 1) {
+      const tileY = Math.min(rows - 1, row * step);
+      const rowBase = tileY * cols;
+      for (let col = 0; col < sampleCols; col += 1) {
+        const tileX = Math.min(cols - 1, col * step);
+        const tileIdx = rowBase + tileX;
+        const sampleIdx = row * sampleCols + col;
+        if (sampleTypes[sampleIdx] !== waterId || sample.riverMask[tileIdx] === 0) {
+          continue;
+        }
+        const base = sampleHeights[sampleIdx] ?? 0;
+        waterLevels[sampleIdx] = Math.max(waterLevels[sampleIdx] ?? 0, base + 0.004);
+      }
+    }
+  }
+  const waterHeights = new Float32Array(sampleHeights.length);
+  for (let i = 0; i < sampleHeights.length; i += 1) {
+    waterHeights[i] = clamp(waterLevels[i] ?? 0, -1, 1) * heightScale;
+  }
   const water =
     hasWater
       ? {
-          mask: buildWaterMaskTexture(sample, sampleCols, sampleRows, step, waterId),
-          level: waterPlaneLevel,
+          mask: buildWaterMaskTexture(sample, sampleCols, sampleRows, step, waterId, null),
+          level: 0,
           sampleCols,
           sampleRows,
           width,
-          depth
+          depth,
+          heights: waterHeights
         }
       : undefined;
   return { mesh, size: { width, depth }, water };
@@ -1325,6 +1873,12 @@ type WaterUniforms = {
   u_shininess?: { value: number };
   u_lightDir: { value: THREE.Vector3 };
   u_specular: { value: number };
+};
+
+type WaterComponent = {
+  indices: number[];
+  min: number;
+  touchesEdge: boolean;
 };
 
 type WaterCapUniforms = {
@@ -1421,6 +1975,11 @@ export const createThreeTest = (canvas: HTMLCanvasElement): ThreeTestController 
   let houseAssets: HouseAssets | null = houseAssetsCache;
   let firestationAsset: FirestationAsset | null = firestationAssetCache;
   let lastSample: TerrainSample | null = null;
+  let seasonIndex = 1;
+
+  if (treeAssets) {
+    applySeasonToTreeAssets(treeAssets, seasonIndex);
+  }
 
   let raf = 0;
   let running = false;
@@ -1463,6 +2022,14 @@ export const createThreeTest = (canvas: HTMLCanvasElement): ThreeTestController 
     controls.enabled = false;
     if (raf) {
       window.cancelAnimationFrame(raf);
+    }
+  };
+
+  const setSeason = (index: number): void => {
+    const clamped = Math.max(0, Math.min(SEASON_COUNT - 1, Math.round(index)));
+    seasonIndex = clamped;
+    if (treeAssets) {
+      applySeasonToTreeAssets(treeAssets, seasonIndex);
     }
   };
 
@@ -1546,7 +2113,7 @@ export const createThreeTest = (canvas: HTMLCanvasElement): ThreeTestController 
       ground.visible = true;
       return;
     }
-  const { mesh, size, water } = buildTerrainMesh(sample, treeAssets, houseAssets, firestationAsset);
+    const { mesh, size, water } = buildTerrainMesh(sample, treeAssets, houseAssets, firestationAsset);
     terrainMesh = mesh;
     scene.add(terrainMesh);
     ground.visible = false;
@@ -1563,20 +2130,31 @@ export const createThreeTest = (canvas: HTMLCanvasElement): ThreeTestController 
         Math.max(1, water.sampleRows - 1)
       );
       waterGeometry.rotateX(-Math.PI / 2);
+      if (water.heights) {
+        const positions = waterGeometry.attributes.position as THREE.BufferAttribute;
+        const count = Math.min(positions.count, water.heights.length);
+        for (let i = 0; i < count; i += 1) {
+          positions.setY(i, water.heights[i] + 0.08);
+        }
+        positions.needsUpdate = true;
+      }
       // create small neutral normal textures as safe defaults (can be replaced with better maps)
       const makeNeutralNormal = () => {
         const size = 2;
-        const data = new Uint8Array(size * size * 3);
+        const data = new Uint8Array(size * size * 4);
         for (let i = 0; i < size * size; i++) {
-          data[i * 3 + 0] = 128; // R
-          data[i * 3 + 1] = 128; // G
-          data[i * 3 + 2] = 255; // B (pointing up)
+          const base = i * 4;
+          data[base + 0] = 128; // R
+          data[base + 1] = 128; // G
+          data[base + 2] = 255; // B (pointing up)
+          data[base + 3] = 255; // A
         }
-        const tex = new THREE.DataTexture(data, size, size, THREE.RGBFormat);
+        const tex = new THREE.DataTexture(data, size, size, THREE.RGBAFormat);
         tex.needsUpdate = true;
         tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
-        tex.minFilter = THREE.LinearMipMapLinearFilter;
+        tex.minFilter = THREE.LinearFilter;
         tex.magFilter = THREE.LinearFilter;
+        tex.generateMipmaps = false;
         return tex;
       };
       const defaultNormal1 = makeNeutralNormal();
@@ -1584,30 +2162,10 @@ export const createThreeTest = (canvas: HTMLCanvasElement): ThreeTestController 
 
       waterUniforms = {
         u_time: { value: 0 },
-<<<<<<< HEAD
-<<<<<<< HEAD
-<<<<<<< HEAD
-        u_mask: { value: water.mask },
-        u_color: { value: new THREE.Color(0x3b7f9c) },
-        u_deepColor: { value: new THREE.Color(0x143449) },
-        u_opacity: { value: 0.68 },
-=======
         u_mask: { value: waterMask },
         u_color: { value: new THREE.Color(0x1f6fb2) },
         u_deepColor: { value: new THREE.Color(0x0b2a45) },
         u_opacity: { value: 0.88 },
->>>>>>> 6611271 (water shader)
-=======
-=======
->>>>>>> cd3f1e3 (3d assets and map generation controls)
-        u_mask: { value: waterMask },
-        u_color: { value: new THREE.Color(0x1f6fb2) },
-        u_deepColor: { value: new THREE.Color(0x0b2a45) },
-        u_opacity: { value: 0.78 },
-<<<<<<< HEAD
->>>>>>> cd3f1e3 (3d assets and map generation controls)
-=======
->>>>>>> cd3f1e3 (3d assets and map generation controls)
         u_waveScale: { value: 0.28 },
         u_normalMap1: { value: defaultNormal1 },
         u_normalMap2: { value: defaultNormal2 },
@@ -1625,16 +2183,18 @@ export const createThreeTest = (canvas: HTMLCanvasElement): ThreeTestController 
       const maxAniso = renderer.capabilities.getMaxAnisotropy();
       loader.load('assets/textures/water1.png', (tex) => {
         tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
-        tex.minFilter = THREE.LinearMipMapLinearFilter;
+        tex.minFilter = THREE.LinearFilter;
         tex.magFilter = THREE.LinearFilter;
         tex.anisotropy = maxAniso;
+        tex.generateMipmaps = false;
         (waterUniforms as any).u_normalMap1.value = tex;
       });
       loader.load('assets/textures/water2.png', (tex) => {
         tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
-        tex.minFilter = THREE.LinearMipMapLinearFilter;
+        tex.minFilter = THREE.LinearFilter;
         tex.magFilter = THREE.LinearFilter;
         tex.anisotropy = maxAniso;
+        tex.generateMipmaps = false;
         (waterUniforms as any).u_normalMap2.value = tex;
       });
 
@@ -1642,60 +2202,6 @@ export const createThreeTest = (canvas: HTMLCanvasElement): ThreeTestController 
         uniforms: waterUniforms as any,
         transparent: true,
         depthWrite: false,
-<<<<<<< HEAD
-        vertexShader: `
-          varying vec2 vUv;
-          varying vec3 vWorldPos;
-          uniform float u_time;
-          uniform float u_waveScale;
-          void main() {
-            vUv = uv;
-            vec3 pos = position;
-            float wave = sin((pos.x * 0.16 + u_time * 0.55)) * 0.2
-              + sin((pos.z * 0.22 - u_time * 0.42)) * 0.16;
-            pos.y += wave * u_waveScale;
-            vec4 worldPos = modelMatrix * vec4(pos, 1.0);
-            vWorldPos = worldPos.xyz;
-            gl_Position = projectionMatrix * viewMatrix * worldPos;
-          }
-        `,
-        fragmentShader: `
-          varying vec2 vUv;
-          varying vec3 vWorldPos;
-          uniform sampler2D u_mask;
-          uniform vec3 u_color;
-          uniform vec3 u_deepColor;
-          uniform float u_opacity;
-          uniform float u_time;
-          uniform float u_waveScale;
-          uniform vec3 u_lightDir;
-          uniform float u_specular;
-          void main() {
-            float mask = texture2D(u_mask, vUv).a;
-            if (mask < 0.02) discard;
-            float wave = sin((vWorldPos.x + vWorldPos.z) * 0.2 + u_time * 0.7);
-            float ripple = wave * 0.035;
-            vec3 viewDir = normalize(cameraPosition - vWorldPos);
-            float waveX = cos((vWorldPos.x * 0.16 + u_time * 0.55)) * 0.16;
-            float waveZ = cos((vWorldPos.z * 0.22 - u_time * 0.42)) * 0.22;
-            vec3 normal = normalize(vec3(-waveX * u_waveScale, 1.0, -waveZ * u_waveScale));
-            vec3 lightDir = normalize(u_lightDir);
-            float diffuse = max(dot(normal, lightDir), 0.0);
-            float fresnel = pow(1.0 - max(dot(viewDir, normal), 0.0), 3.0);
-            vec3 halfDir = normalize(lightDir + viewDir);
-            float spec = pow(max(dot(normal, halfDir), 0.0), 40.0) * u_specular;
-            vec3 color = mix(u_deepColor, u_color, 0.6 + ripple + diffuse * 0.08);
-            float edge = smoothstep(0.0, 0.65, 1.0 - mask);
-            float foamNoise = sin((vWorldPos.x + u_time * 0.25) * 1.4) * sin((vWorldPos.z - u_time * 0.18) * 1.1);
-            foamNoise = foamNoise * 0.5 + 0.5;
-            float foam = edge * (0.55 + foamNoise * 0.75);
-            vec3 foamColor = vec3(0.9, 0.96, 1.0);
-            color = mix(color, foamColor, foam * 0.55);
-            color += fresnel * 0.16 + spec;
-            gl_FragColor = vec4(color, u_opacity * mask);
-          }
-        `
-=======
             vertexShader: `
               varying vec2 vUv;
               varying vec3 vWorldPos;
@@ -1761,54 +2267,56 @@ export const createThreeTest = (canvas: HTMLCanvasElement): ThreeTestController 
                 gl_FragColor = vec4(color, u_opacity * mask);
               }
             `
->>>>>>> 6611271 (water shader)
       });
       waterMesh = new THREE.Mesh(waterGeometry, waterMaterial);
-      waterMesh.position.y = mesh.position.y + water.level + 0.08;
+      waterMesh.position.y = mesh.position.y + water.level;
       waterMesh.renderOrder = 2;
       waterMesh.receiveShadow = false;
       scene.add(waterMesh);
 
-      const capGeometry = new THREE.PlaneGeometry(water.width, water.depth, 1, 1);
-      capGeometry.rotateX(-Math.PI / 2);
-      waterCapUniforms = {
-        u_mask: { value: waterMask },
-        u_color: { value: new THREE.Color(0x3a6f8d) },
-        u_opacity: { value: 0.2 }
-      };
-      const capMaterial = new THREE.ShaderMaterial({
-        uniforms: waterCapUniforms,
-        transparent: true,
-        depthWrite: false,
-        vertexShader: `
-          varying vec2 vUv;
-          void main() {
-            vUv = uv;
-            gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-          }
-        `,
-        fragmentShader: `
-          varying vec2 vUv;
-          uniform sampler2D u_mask;
-          uniform vec3 u_color;
-          uniform float u_opacity;
-          void main() {
-            float mask = texture2D(u_mask, vUv).a;
-            if (mask < 0.02) discard;
-            gl_FragColor = vec4(u_color, u_opacity * mask);
-          }
-        `
-      });
-      waterCapMesh = new THREE.Mesh(capGeometry, capMaterial);
-      waterCapMesh.position.y = mesh.position.y + water.level + 0.12;
-      waterCapMesh.renderOrder = 3;
-      scene.add(waterCapMesh);
+      if (!water.heights) {
+        const capGeometry = new THREE.PlaneGeometry(water.width, water.depth, 1, 1);
+        capGeometry.rotateX(-Math.PI / 2);
+        waterCapUniforms = {
+          u_mask: { value: waterMask },
+          u_color: { value: new THREE.Color(0x3a6f8d) },
+          u_opacity: { value: 0.2 }
+        };
+        const capMaterial = new THREE.ShaderMaterial({
+          uniforms: waterCapUniforms,
+          transparent: true,
+          depthWrite: false,
+          vertexShader: `
+            varying vec2 vUv;
+            void main() {
+              vUv = uv;
+              gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+            }
+          `,
+          fragmentShader: `
+            varying vec2 vUv;
+            uniform sampler2D u_mask;
+            uniform vec3 u_color;
+            uniform float u_opacity;
+            void main() {
+              float mask = texture2D(u_mask, vUv).a;
+              if (mask < 0.02) discard;
+              gl_FragColor = vec4(u_color, u_opacity * mask);
+            }
+          `
+        });
+        waterCapMesh = new THREE.Mesh(capGeometry, capMaterial);
+        waterCapMesh.position.y = mesh.position.y + water.level + 0.12;
+        waterCapMesh.renderOrder = 3;
+        scene.add(waterCapMesh);
+      }
     }
   };
 
   void loadTreeAssets()
     .then((assets) => {
       treeAssets = assets;
+      applySeasonToTreeAssets(treeAssets, seasonIndex);
       if (lastSample) {
         setTerrain(lastSample);
       }
@@ -1839,5 +2347,5 @@ export const createThreeTest = (canvas: HTMLCanvasElement): ThreeTestController 
       console.warn("Failed to load firestation model.", error);
     });
 
-  return { start, stop, resize, setTerrain };
+  return { start, stop, resize, setTerrain, setSeason };
 };
