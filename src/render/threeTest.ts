@@ -1586,6 +1586,7 @@ export const createThreeTest = (canvas: HTMLCanvasElement): ThreeTestController 
         u_time: { value: 0 },
 <<<<<<< HEAD
 <<<<<<< HEAD
+<<<<<<< HEAD
         u_mask: { value: water.mask },
         u_color: { value: new THREE.Color(0x3b7f9c) },
         u_deepColor: { value: new THREE.Color(0x143449) },
@@ -1597,10 +1598,15 @@ export const createThreeTest = (canvas: HTMLCanvasElement): ThreeTestController 
         u_opacity: { value: 0.88 },
 >>>>>>> 6611271 (water shader)
 =======
+=======
+>>>>>>> cd3f1e3 (3d assets and map generation controls)
         u_mask: { value: waterMask },
         u_color: { value: new THREE.Color(0x1f6fb2) },
         u_deepColor: { value: new THREE.Color(0x0b2a45) },
         u_opacity: { value: 0.78 },
+<<<<<<< HEAD
+>>>>>>> cd3f1e3 (3d assets and map generation controls)
+=======
 >>>>>>> cd3f1e3 (3d assets and map generation controls)
         u_waveScale: { value: 0.28 },
         u_normalMap1: { value: defaultNormal1 },
