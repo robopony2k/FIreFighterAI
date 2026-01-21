@@ -20,6 +20,9 @@ export function igniteRandomFire(state: WorldState, rng: RNG, dayDelta: number, 
     }
     if (
       tile.type === "water" ||
+      tile.type === "beach" ||
+      tile.type === "rocky" ||
+      tile.type === "bare" ||
       tile.type === "base" ||
       tile.type === "ash" ||
       tile.type === "firebreak" ||

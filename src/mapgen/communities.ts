@@ -8,7 +8,7 @@ function isBuildable(state: WorldState, x: number, y: number): boolean {
     return false;
   }
   const type = state.tiles[indexFor(state.grid, x, y)].type;
-  return type === "grass" || type === "forest";
+  return type === "grass" || type === "scrub" || type === "floodplain" || type === "forest";
 }
 
 function placeHouseAt(state: WorldState, x: number, y: number, value: number, residents: number): boolean {

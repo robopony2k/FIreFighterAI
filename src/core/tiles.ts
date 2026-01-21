@@ -4,7 +4,9 @@ import { clamp } from "./utils.js";
 
 export function applyFuel(tile: Tile, moisture: number, rng: RNG): void {
   const profile = FUEL_PROFILES[tile.type];
-  const variance = tile.type === "forest" || tile.type === "grass" ? (rng.next() - 0.5) * 0.35 : 0;
+  const isVegetation =
+    tile.type === "forest" || tile.type === "grass" || tile.type === "scrub" || tile.type === "floodplain";
+  const variance = isVegetation ? (rng.next() - 0.5) * 0.35 : 0;
   const fuel = Math.max(0, profile.baseFuel * (1 + variance) * (1 - moisture * 0.6));
   tile.fuel = fuel;
   tile.fire = 0;

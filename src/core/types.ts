@@ -1,4 +1,17 @@
-export type TileType = "water" | "grass" | "forest" | "ash" | "road" | "base" | "house" | "firebreak";
+export type TileType =
+  | "water"
+  | "beach"
+  | "floodplain"
+  | "grass"
+  | "scrub"
+  | "forest"
+  | "rocky"
+  | "bare"
+  | "ash"
+  | "road"
+  | "base"
+  | "house"
+  | "firebreak";
 
 export type UnitKind = "firefighter" | "truck";
 export type UnitSkill = "speed" | "power" | "range" | "resilience";

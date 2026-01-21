@@ -34,7 +34,10 @@ export const createBottomLeftControls = (): BottomControlsView => {
 
   const debugRow = document.createElement("div");
   debugRow.className = "phase-control-row phase-control-row-single phase-debug-row";
-  debugRow.innerHTML = `<button data-action="debug-ignite-toggle">Debug Ignite</button>`;
+  debugRow.innerHTML = `
+    <button data-action="debug-ignite-toggle">Debug Ignite</button>
+    <button data-action="debug-type-colors-toggle">Type Colors</button>
+  `;
 
   const status = document.createElement("div");
   status.className = "phase-control-status";

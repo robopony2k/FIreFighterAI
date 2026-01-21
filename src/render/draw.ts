@@ -19,8 +19,13 @@ const formatOptional = (value: number | undefined | null, digits = 3): string =>
   typeof value === "number" ? value.toFixed(digits) : "n/a";
 
 const GRID_COLORS = {
+  beach: darken(TILE_COLOR_RGB.beach, 0.25),
+  floodplain: darken(TILE_COLOR_RGB.floodplain, 0.35),
   grass: darken(TILE_COLOR_RGB.grass, 0.35),
+  scrub: darken(TILE_COLOR_RGB.scrub, 0.35),
   forest: darken(TILE_COLOR_RGB.forest, 0.4),
+  rocky: darken(TILE_COLOR_RGB.rocky, 0.3),
+  bare: darken(TILE_COLOR_RGB.bare, 0.3),
   ash: { r: 72, g: 62, b: 54 },
   road: darken(TILE_COLOR_RGB.road, 0.28),
   base: darken(TILE_COLOR_RGB.base, 0.2),
@@ -77,6 +82,10 @@ const COASTLINE_EDGE_ALPHA = 0.28;
 const COASTLINE_EDGE_DARKEN = 0.2;
 const COASTLINE_COLOR = mixRgb(TILE_COLOR_RGB.firebreak, TILE_COLOR_RGB.grass, 0.68);
 
+const isGrassLikeType = (type: WorldState["tiles"][number]["type"]) =>
+  type === "grass" || type === "scrub" || type === "floodplain";
+const isVegetationType = (type: WorldState["tiles"][number]["type"]) => type === "forest" || isGrassLikeType(type);
+
 type CoastPoint = { x: number; y: number };
 type CoastSegment = { a: CoastPoint; b: CoastPoint };
 type CoastlinePath = { points: CoastPoint[]; closed: boolean };
@@ -89,9 +98,10 @@ let coastlineCache: {
 } | null = null;
 
 const getBaseTileColor = (state: WorldState, tile: WorldState["tiles"][number]) => {
-  if (tile.type === "grass" || tile.type === "forest") {
+  if (isVegetationType(tile.type)) {
     const canopy = clamp(tile.canopy, 0, 1);
-    return mixRgb(TILE_COLOR_RGB.grass, TILE_COLOR_RGB.forest, canopy);
+    const base = tile.type === "forest" ? TILE_COLOR_RGB.grass : TILE_COLOR_RGB[tile.type] ?? TILE_COLOR_RGB.grass;
+    return mixRgb(base, TILE_COLOR_RGB.forest, canopy);
   }
   if (tile.type === "ash") {
     return TILE_COLOR_RGB.ash;
@@ -99,7 +109,7 @@ const getBaseTileColor = (state: WorldState, tile: WorldState["tiles"][number]) 
   if (tile.type === "firebreak") {
     return TILE_COLOR_RGB.firebreak;
   }
-  return TILE_COLOR_RGB.grass;
+  return TILE_COLOR_RGB[tile.type] ?? TILE_COLOR_RGB.grass;
 };
 
 const getShoreLandColor = (state: WorldState, tile: WorldState["tiles"][number]) => {

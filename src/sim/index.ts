@@ -395,7 +395,14 @@ export function pickInitialFires(state: WorldState, rng: RNG): void {
     }
   };
   const isBlockedType = (tile: WorldState["tiles"][number]): boolean =>
-    tile.type === "water" || tile.type === "base" || tile.type === "ash" || tile.type === "firebreak" || tile.type === "road";
+    tile.type === "water" ||
+    tile.type === "beach" ||
+    tile.type === "rocky" ||
+    tile.type === "bare" ||
+    tile.type === "base" ||
+    tile.type === "ash" ||
+    tile.type === "firebreak" ||
+    tile.type === "road";
   const canIgnite = (tile: WorldState["tiles"][number]): boolean => tile.fire === 0 && tile.fuel > 0 && !isBlockedType(tile);
   const igniteTile = (tile: WorldState["tiles"][number], x: number, y: number): void => {
     tile.fire = 0.5 + rng.next() * 0.2;
@@ -413,7 +420,7 @@ export function pickInitialFires(state: WorldState, rng: RNG): void {
     const y = Math.floor(rng.next() * state.grid.rows);
     const idx = indexFor(state.grid, x, y);
     const tile = state.tiles[idx];
-    if (tile.type === "forest" || tile.type === "grass") {
+    if (tile.type === "forest" || tile.type === "grass" || tile.type === "scrub" || tile.type === "floodplain") {
       const dist = Math.hypot(x - state.basePoint.x, y - state.basePoint.y);
       if (dist > 8 && canIgnite(tile)) {
         igniteTile(tile, x, y);

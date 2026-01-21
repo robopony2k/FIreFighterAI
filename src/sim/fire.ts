@@ -40,7 +40,13 @@ const BASELINE_HEAT_EPS = 0.08;
 let baselineTickCounter = 0;
 
 const isIgnitableTile = (tile) =>
-    tile.type !== "water" && tile.type !== "ash" && tile.type !== "firebreak" && tile.type !== "road";
+    tile.type !== "water" &&
+        tile.type !== "beach" &&
+        tile.type !== "rocky" &&
+        tile.type !== "bare" &&
+        tile.type !== "ash" &&
+        tile.type !== "firebreak" &&
+        tile.type !== "road";
 
 function stepFireBaseline(state, rng, delta, spreadScale, dayFactor, burnoutFactor = 0) {
     const cols = state.grid.cols;

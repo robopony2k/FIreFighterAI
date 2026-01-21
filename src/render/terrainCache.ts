@@ -72,6 +72,10 @@ let terrainCache: TerrainCache | null = null;
 let treeLayerCache: TerrainCache | null = null;
 let treeBurnScratch: { canvas: HTMLCanvasElement; ctx: CanvasRenderingContext2D } | null = null;
 
+const isGrassLikeType = (type: WorldState["tiles"][number]["type"]) =>
+  type === "grass" || type === "scrub" || type === "floodplain";
+const isVegetationType = (type: WorldState["tiles"][number]["type"]) => type === "forest" || isGrassLikeType(type);
+
 export const getRenderHeightForTile = (tile: WorldState["tiles"][number]): number => {
   return getTileHeight(tile);
 };
@@ -223,16 +227,18 @@ const ensureTreeBurnScratch = (width: number, height: number) => {
 };
 
 const getBaseTileColor = (state: WorldState, tile: WorldState["tiles"][number]): RGB => {
-  if (tile.type === "grass" && tile.fire > 0) {
+  if (isGrassLikeType(tile.type) && tile.fire > 0) {
     return TILE_COLOR_RGB.ON_FIRE_GRASS;
   }
   if (tile.type === "forest" && tile.fire > 0) {
     return darken(TILE_COLOR_RGB.forest, 0.2);
   }
-  if (tile.type === "grass" || tile.type === "forest") {
-    return mixRgb(TILE_COLOR_RGB.grass, TILE_COLOR_RGB.forest, clamp(tile.canopy, 0, 1));
+  if (isVegetationType(tile.type)) {
+    const canopy = clamp(tile.canopy, 0, 1);
+    const base = tile.type === "forest" ? TILE_COLOR_RGB.grass : TILE_COLOR_RGB[tile.type] ?? TILE_COLOR_RGB.grass;
+    return mixRgb(base, TILE_COLOR_RGB.forest, canopy);
   }
-  return TILE_COLOR_RGB[tile.type];
+  return TILE_COLOR_RGB[tile.type] ?? TILE_COLOR_RGB.grass;
 };
 
 const getRoadbedColor = (state: WorldState, x: number, y: number): RGB => {
@@ -364,6 +370,10 @@ const shadeTileColor = (
 ) => {
   const elev = tile.type === "water" ? 0 : tile.elevation;
   
+  if (state.debugTypeColors) {
+    return TILE_COLOR_RGB[tile.type] ?? TILE_COLOR_RGB.grass;
+  }
+
   let base: RGB;
   if (baseOverride) {
     base = baseOverride;
@@ -428,7 +438,7 @@ const shadeTileColor = (
   };
 
   let mixed = mixRgb(base, tint, tintAmount);
-  if (tile.type === "grass" || tile.type === "forest") {
+  if (isVegetationType(tile.type)) {
     const moistureTint = mixRgb(DRY_TINT, WET_TINT, clamp(tile.moisture, 0, 1));
     const moistureAmount = 0.12 + tile.moisture * 0.18;
     mixed = mixRgb(mixed, moistureTint, moistureAmount);
@@ -499,7 +509,7 @@ const drawTreesOnTile = (
   height: number,
   detail: number
 ) => {
-  if (tile.type !== "grass" && tile.type !== "forest") {
+  if (!isVegetationType(tile.type)) {
     return;
   }
   const detailFactor = clamp(detail, 0, 1);
@@ -507,7 +517,8 @@ const drawTreesOnTile = (
     return;
   }
   const canopy = clamp(tile.canopy, 0, 1);
-  if (tile.type === "grass" && canopy < 0.2) {
+  const grassLike = isGrassLikeType(tile.type);
+  if (grassLike && canopy < 0.12) {
     return;
   }
   const densityBase = tile.type === "forest" ? 0.32 + canopy * 0.55 : 0.12 + canopy * 0.35;
@@ -1186,7 +1197,7 @@ export const ensureTreeLayerCache = (state: WorldState, now: number): TerrainCac
         }
         const tileIndex = indexFor(state.grid, x, y);
         const tile = state.tiles[tileIndex];
-        if (tile.type !== "grass" && tile.type !== "forest") {
+        if (!isVegetationType(tile.type)) {
           continue;
         }
         const h00 = getSmoothedHeightAt(state, x, y);

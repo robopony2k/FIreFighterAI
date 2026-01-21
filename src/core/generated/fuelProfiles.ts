@@ -12,6 +12,26 @@ export const TILE_FUEL_PROFILES: Record<TileType, FuelProfile> = {
     heatRetention: 0.4,
     windFactor: 0
   },
+  beach: {
+    baseFuel: 0,
+    ignition: 9,
+    burnRate: 0,
+    heatOutput: 0,
+    spreadBoost: 0,
+    heatTransferCap: 0,
+    heatRetention: 0.4,
+    windFactor: 0
+  },
+  floodplain: {
+    baseFuel: 0.28,
+    ignition: 0.3,
+    burnRate: 0.7,
+    heatOutput: 0.65,
+    spreadBoost: 0.8,
+    heatTransferCap: 0.3,
+    heatRetention: 0.6,
+    windFactor: 0.9
+  },
   grass: {
     baseFuel: 0.3,
     ignition: 0.24,
@@ -22,6 +42,16 @@ export const TILE_FUEL_PROFILES: Record<TileType, FuelProfile> = {
     heatRetention: 0.55,
     windFactor: 0.95
   },
+  scrub: {
+    baseFuel: 0.45,
+    ignition: 0.35,
+    burnRate: 0.7,
+    heatOutput: 0.7,
+    spreadBoost: 0.9,
+    heatTransferCap: 0.35,
+    heatRetention: 0.6,
+    windFactor: 0.9
+  },
   forest: {
     baseFuel: 1.1,
     ignition: 0.66,
@@ -31,6 +61,26 @@ export const TILE_FUEL_PROFILES: Record<TileType, FuelProfile> = {
     heatTransferCap: 3.6,
     heatRetention: 0.92,
     windFactor: 0.65
+  },
+  rocky: {
+    baseFuel: 0,
+    ignition: 9,
+    burnRate: 0,
+    heatOutput: 0,
+    spreadBoost: 0,
+    heatTransferCap: 0,
+    heatRetention: 0.4,
+    windFactor: 0
+  },
+  bare: {
+    baseFuel: 0,
+    ignition: 9,
+    burnRate: 0,
+    heatOutput: 0,
+    spreadBoost: 0,
+    heatTransferCap: 0,
+    heatRetention: 0.4,
+    windFactor: 0
   },
   road: {
     baseFuel: 0,

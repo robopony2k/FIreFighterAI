@@ -7,7 +7,7 @@ export const ZOOM_MAX = 4.5;
 export const ZOOM_STEP = 0.1;
 export const ISO_TILE_WIDTH = TILE_SIZE * 2;
 export const ISO_TILE_HEIGHT = TILE_SIZE;
-export const HEIGHT_SCALE = TILE_SIZE * 6.5;
+export const HEIGHT_SCALE = TILE_SIZE * 10;
 export const HEIGHT_WATER_DROP = TILE_SIZE * 0.7;
 export const MAP_SCALE = 0.65;
 export const MAP_SIZE_PRESETS = {
@@ -88,8 +88,13 @@ export const MOVE_SLOPE_MAX = 2.2;
 
 export const MOVE_TERRAIN_COST: Record<TileType, number> = {
   water: 99,
+  beach: 1.1,
+  floodplain: 1.25,
   grass: 1.15,
+  scrub: 1.3,
   forest: 1.5,
+  rocky: 1.6,
+  bare: 1.4,
   ash: 1.25,
   road: 1,
   base: 1.05,
@@ -101,8 +106,13 @@ export const FIRE_COLORS = ["#d34b2a", "#f09a3e", "#f2c94c"];
 
 export const TILE_COLORS: Record<TileType | "ON_FIRE_GRASS", string> = {
   water: "#2a6f97",
+  beach: "#d9c79e",
+  floodplain: "#7b8f4f",
   grass: "#5a8f4e",
+  scrub: "#6f7f4a",
   forest: "#2f5d31",
+  rocky: "#8b8b86",
+  bare: "#b99b6b",
   ash: "#4a4a4a",
   road: "#bdb49c",
   base: "#a12f1d",
@@ -123,8 +133,13 @@ const hexToRgb = (hex: string): { r: number; g: number; b: number } => {
 
 export const TILE_COLOR_RGB: Record<TileType | "ON_FIRE_GRASS", { r: number; g: number; b: number }> = {
   water: hexToRgb(TILE_COLORS.water),
+  beach: hexToRgb(TILE_COLORS.beach),
+  floodplain: hexToRgb(TILE_COLORS.floodplain),
   grass: hexToRgb(TILE_COLORS.grass),
+  scrub: hexToRgb(TILE_COLORS.scrub),
   forest: hexToRgb(TILE_COLORS.forest),
+  rocky: hexToRgb(TILE_COLORS.rocky),
+  bare: hexToRgb(TILE_COLORS.bare),
   ash: hexToRgb(TILE_COLORS.ash),
   road: hexToRgb(TILE_COLORS.road),
   base: hexToRgb(TILE_COLORS.base),

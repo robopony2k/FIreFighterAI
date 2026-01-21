@@ -46,7 +46,8 @@ function ensureSeedSnapshots(state: WorldState): { canopy: Float32Array; forest:
   const forest = forestSnapshot;
   for (let i = 0; i < total; i += 1) {
     const tile = state.tiles[i];
-    const vegetation = tile.type === "grass" || tile.type === "forest";
+    const vegetation =
+      tile.type === "grass" || tile.type === "scrub" || tile.type === "floodplain" || tile.type === "forest";
     canopy[i] = vegetation ? tile.canopy : 0;
     forest[i] = tile.type === "forest" ? 1 : 0;
   }
@@ -95,7 +96,7 @@ function logGrowthMetrics(state: WorldState): void {
     if (tile.type === "ash") {
       ashCount += 1;
     }
-    if (tile.type === "grass") {
+    if (tile.type === "grass" || tile.type === "scrub" || tile.type === "floodplain") {
       grassCount += 1;
     }
     if (tile.type === "forest" || tile.canopy >= CANOPY_FOREST_THRESHOLD) {
@@ -135,7 +136,15 @@ export function stepGrowth(state: WorldState, dayDelta: number, rng: RNG): void 
       if (tile.fire > 0) {
         continue;
       }
-      if (tile.type === "water" || tile.type === "road" || tile.type === "base" || tile.type === "house") {
+      if (
+        tile.type === "water" ||
+        tile.type === "beach" ||
+        tile.type === "rocky" ||
+        tile.type === "bare" ||
+        tile.type === "road" ||
+        tile.type === "base" ||
+        tile.type === "house"
+      ) {
         continue;
       }
 
@@ -180,7 +189,7 @@ export function stepGrowth(state: WorldState, dayDelta: number, rng: RNG): void 
         continue;
       }
 
-      if (tile.type === "grass" || tile.type === "forest") {
+      if (tile.type === "grass" || tile.type === "scrub" || tile.type === "floodplain" || tile.type === "forest") {
         const seedPressure = getSeedPressure(state, x, y, canopyValues, forestValues);
         const profile = FUEL_PROFILES[tile.type];
         const maxFuel = profile.baseFuel * (1.1 + waterFactor * 0.2);
@@ -191,7 +200,10 @@ export function stepGrowth(state: WorldState, dayDelta: number, rng: RNG): void 
         const seedBoost = 0.5 + seedPressure * 0.9;
         tile.canopy = clamp(tile.canopy + dayDelta * canopyRate * env * seedBoost, 0, 1);
 
-        if (tile.type === "grass" && tile.canopy >= CANOPY_FOREST_THRESHOLD) {
+        if (
+          (tile.type === "grass" || tile.type === "scrub" || tile.type === "floodplain") &&
+          tile.canopy >= CANOPY_FOREST_THRESHOLD
+        ) {
           const recruitChance = dayDelta * FOREST_RECRUIT_RATE * env * (LONG_DISTANCE_RECRUIT_FACTOR + seedPressure);
           if (rng.next() < recruitChance) {
             tile.type = "forest";

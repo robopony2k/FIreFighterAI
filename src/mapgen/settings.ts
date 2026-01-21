@@ -1,4 +1,13 @@
 export type MapGenSettings = {
+  cellSizeM: number;
+  worldOffsetXM: number;
+  worldOffsetYM: number;
+  microScaleM: number;
+  elevationScale: number;
+  elevationExponent: number;
+  mountainScale: number;
+  ridgeStrength: number;
+  valleyDepth: number;
   forestMacroScale: number;
   forestDetailScale: number;
   forestThreshold: number;
@@ -14,6 +23,15 @@ export type MapGenSettings = {
 };
 
 export const DEFAULT_MAP_GEN_SETTINGS: MapGenSettings = {
+  cellSizeM: 10,
+  worldOffsetXM: 0,
+  worldOffsetYM: 0,
+  microScaleM: 40,
+  elevationScale: 1.15,
+  elevationExponent: 1.3,
+  mountainScale: 1.0,
+  ridgeStrength: 0.08,
+  valleyDepth: 1.1,
   forestMacroScale: 18,
   forestDetailScale: 8,
   forestThreshold: 0.66,

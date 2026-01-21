@@ -8,6 +8,7 @@ import { draw } from "./render/draw.js";
 import { createThreeTest } from "./render/threeTest.js";
 import { initPhaseUI } from "./ui/phase/index.js";
 import { bindPhaseUi } from "./ui/phase/bindings.js";
+import { buildMapGenControls } from "./ui/mapgen-controls.js";
 import { getOverlayRefs, updateOverlay } from "./ui/overlay.js";
 import { saveLeaderboard } from "./persistence/leaderboard.js";
 import { randomizeWind } from "./sim/wind.js";
@@ -48,6 +49,7 @@ const rng = new RNG(Date.now());
 const phaseUiRoot = document.getElementById("phaseUI") as HTMLDivElement | null;
 const phaseUi = phaseUiRoot ? initPhaseUI(phaseUiRoot) : null;
 const overlayRefs = getOverlayRefs();
+buildMapGenControls();
 const characterScreen = document.getElementById("characterScreen") as HTMLDivElement;
 const startMenu = document.getElementById("startMenu") as HTMLDivElement | null;
 const canvasWrap = canvas.parentElement as HTMLElement | null;
@@ -58,6 +60,7 @@ const mapgenPercent = document.getElementById("mapgenPercent") as HTMLDivElement
 const threeTestOverlay = document.getElementById("threeTestOverlay") as HTMLDivElement | null;
 const threeTestCanvas = document.getElementById("threeTestCanvas") as HTMLCanvasElement | null;
 const threeTestCloseButton = document.getElementById("threeTestClose") as HTMLButtonElement | null;
+const DEBUG_TYPE_EVENT = "debug-type-colors-changed";
 let resizeObserver: ResizeObserver | null = null;
 let lastCanvasWidth = 0;
 let lastCanvasHeight = 0;
@@ -170,7 +173,8 @@ const openThreeTest = async (config: NewRunConfig): Promise<void> => {
     cols: state.grid.cols,
     rows: state.grid.rows,
     elevations: state.tileElevation,
-    tileTypes: state.tileTypeId
+    tileTypes: state.tileTypeId,
+    debugTypeColors: state.debugTypeColors
   });
 };
 
@@ -181,6 +185,23 @@ const closeThreeTest = (): void => {
   setThreeTestVisible(false);
   threeTestController?.stop();
   window.removeEventListener("resize", handleThreeResize);
+};
+
+const refreshThreeTestDebug = (): void => {
+  if (!threeTestOverlay || threeTestOverlay.classList.contains("hidden")) {
+    return;
+  }
+  if (!threeTestController) {
+    return;
+  }
+  syncTileSoA(state);
+  threeTestController.setTerrain({
+    cols: state.grid.cols,
+    rows: state.grid.rows,
+    elevations: state.tileElevation,
+    tileTypes: state.tileTypeId,
+    debugTypeColors: state.debugTypeColors
+  });
 };
 
 const resetGame = async (config: NewRunConfig) => {
@@ -246,6 +267,7 @@ if (threeTestOverlay) {
     }
   });
 }
+window.addEventListener(DEBUG_TYPE_EVENT, () => refreshThreeTestDebug());
 
 watchCanvasSize();
 

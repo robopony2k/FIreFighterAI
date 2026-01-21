@@ -4,7 +4,21 @@ import yaml from "yaml";
 
 const inputPath = path.resolve("config/tile-profiles.yml");
 const outputPath = path.resolve("src/core/generated/fuelProfiles.ts");
-const tileTypes = ["water", "grass", "forest", "road", "base", "house", "firebreak", "ash"];
+const tileTypes = [
+  "water",
+  "beach",
+  "floodplain",
+  "grass",
+  "scrub",
+  "forest",
+  "rocky",
+  "bare",
+  "road",
+  "base",
+  "house",
+  "firebreak",
+  "ash"
+];
 
 const raw = fs.readFileSync(inputPath, "utf8");
 const parsed = yaml.parse(raw);

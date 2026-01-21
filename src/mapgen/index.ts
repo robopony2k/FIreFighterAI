@@ -35,6 +35,56 @@ const createYield = (maxIterations = 32) => {
   };
 };
 
+const WARP_WAVELENGTH_M = 1000;
+const WARP_MAG_M = 80;
+const MACRO_WAVELENGTH_M = 9000;
+const MID_WAVELENGTH_M = 3500;
+const DETAIL_WAVELENGTH_M = 1200;
+const RIDGE_WAVELENGTH_M = 4200;
+const BAND_SCALE_BASE_M = 2000;
+const BAND_SCALE_RANGE_M = 2000;
+
+const getWorldX = (settings: MapGenSettings, x: number): number => settings.worldOffsetXM + x * settings.cellSizeM;
+const getWorldY = (settings: MapGenSettings, y: number): number => settings.worldOffsetYM + y * settings.cellSizeM;
+
+type TileClassificationInput = {
+  elevation: number;
+  slope: number;
+  waterDistM: number;
+  valley: number;
+  moisture: number;
+  forestNoise: number;
+  seaLevel: number;
+  forestThreshold: number;
+};
+
+function classifyTile(input: TileClassificationInput): TileType {
+  const { elevation, slope, waterDistM, valley, moisture, forestNoise, seaLevel, forestThreshold } = input;
+  if (elevation < seaLevel) {
+    return "water";
+  }
+  if (waterDistM <= 30 && slope < 0.15) {
+    return "beach";
+  }
+  const isFloodplain = valley > 0.08 && slope < 0.12 && elevation < seaLevel + 0.15;
+  if (isFloodplain) {
+    return "floodplain";
+  }
+  if (slope > 0.45 && elevation > seaLevel + 0.25) {
+    return "rocky";
+  }
+  if (elevation > seaLevel + 0.35 && moisture < 0.25 && slope <= 0.45) {
+    return "bare";
+  }
+  if (moisture > 0.45 && slope < 0.35 && forestNoise > forestThreshold && !isFloodplain) {
+    return "forest";
+  }
+  if (moisture > 0.3) {
+    return "scrub";
+  }
+  return "grass";
+}
+
 function softenPeaks(value: number, cap: number, softness: number): number {
   if (value <= cap) {
     return value;
@@ -61,7 +111,13 @@ function pickRiverSource(state: WorldState, rng: RNG, elevationMap: number[]): P
   return null;
 }
 
-function carveRiverValleys(state: WorldState, rng: RNG, elevationMap: number[], riverMask: Uint8Array): void {
+function carveRiverValleys(
+  state: WorldState,
+  rng: RNG,
+  elevationMap: number[],
+  riverMask: Uint8Array,
+  valleyDepth: number
+): void {
   state.valleyMap = Array.from({ length: state.grid.totalTiles }, () => 0);
   const riverCount = 3 + Math.floor(rng.next() * 3);
   const maxSteps = state.grid.cols + state.grid.rows;
@@ -71,7 +127,7 @@ function carveRiverValleys(state: WorldState, rng: RNG, elevationMap: number[], 
       continue;
     }
     const isWet = rng.next() < 0.55;
-    const depthBase = isWet ? 0.22 + rng.next() * 0.08 : 0.1 + rng.next() * 0.06;
+    const depthBase = (isWet ? 0.22 + rng.next() * 0.08 : 0.1 + rng.next() * 0.06) * valleyDepth;
     const widthBase = isWet ? 3 : 2;
     let current = source;
     let dir: Point | null = null;
@@ -163,63 +219,87 @@ function carveRiverValleys(state: WorldState, rng: RNG, elevationMap: number[], 
 async function buildElevationMap(
   state: WorldState,
   rng: RNG,
+  settings: MapGenSettings,
   report?: MapGenReporter,
   yieldIfNeeded?: () => Promise<boolean>
 ): Promise<{ elevationMap: number[]; riverMask: Uint8Array }> {
   const maxDim = Math.max(state.grid.cols, state.grid.rows);
   const elevationBlock = maxDim >= 1024 ? 8 : maxDim >= 512 ? 4 : 2;
   if (elevationBlock > 1) {
-    return buildElevationMapCoarse(state, rng, elevationBlock, report, yieldIfNeeded);
+    return buildElevationMapCoarse(state, rng, elevationBlock, settings, report, yieldIfNeeded);
   }
   const elevationMap = Array.from({ length: state.grid.totalTiles }, () => 0);
   const temp = Array.from({ length: state.grid.totalTiles }, () => 0);
   const riverMask = new Uint8Array(state.grid.totalTiles);
-  const centerFactor = Math.min(state.grid.cols, state.grid.rows) / 2;
+  const cellSizeM = Math.max(0.1, settings.cellSizeM);
+  const worldOffsetXM = settings.worldOffsetXM;
+  const worldOffsetYM = settings.worldOffsetYM;
+  const worldWidthM = state.grid.cols * cellSizeM;
+  const worldHeightM = state.grid.rows * cellSizeM;
+  const minDimM = Math.min(worldWidthM, worldHeightM);
+  const elevationScale = clamp(settings.elevationScale, 0.6, 3);
+  const elevationExponent = clamp(settings.elevationExponent, 0.6, 2.6);
+  const mountainScale = clamp(settings.mountainScale, 0.6, 2.6);
+  const ridgeStrength = clamp(settings.ridgeStrength, 0, 0.35);
+  const valleyDepth = clamp(settings.valleyDepth, 0.4, 3);
+  const centerFactorM = minDimM / 2;
+  const warpScaleM = WARP_WAVELENGTH_M * mountainScale;
+  const macroScaleM = MACRO_WAVELENGTH_M * mountainScale;
+  const midScaleM = MID_WAVELENGTH_M * mountainScale;
+  const detailScaleM = DETAIL_WAVELENGTH_M * mountainScale;
+  const ridgeScaleM = RIDGE_WAVELENGTH_M * mountainScale;
   const bandAngle = rng.next() * Math.PI;
   const bandDir = { x: Math.cos(bandAngle), y: Math.sin(bandAngle) };
-  const bandScale = 16 + rng.next() * 14;
+  const bandScaleM = (BAND_SCALE_BASE_M + rng.next() * BAND_SCALE_RANGE_M) * mountainScale;
   const bandPhase = rng.next() * Math.PI * 2;
   const bandStrength = 0.18 + rng.next() * 0.1;
 
   const landCenters = Array.from({ length: 3 }, () => ({
-    x: rng.next() * state.grid.cols,
-    y: rng.next() * state.grid.rows,
-    radius: (Math.min(state.grid.cols, state.grid.rows) * (0.45 + rng.next() * 0.25)) / 2,
+    x: worldOffsetXM + rng.next() * worldWidthM,
+    y: worldOffsetYM + rng.next() * worldHeightM,
+    radius: (minDimM * (0.45 + rng.next() * 0.25)) / 2,
     height: 0.28 + rng.next() * 0.28
   }));
 
   const basinCenters = Array.from({ length: 2 + Math.floor(rng.next() * 2) }, () => ({
-    x: rng.next() * state.grid.cols,
-    y: rng.next() * state.grid.rows,
-    radius: (Math.min(state.grid.cols, state.grid.rows) * (0.22 + rng.next() * 0.18)) / 2,
-    depth: 0.12 + rng.next() * 0.18
+    x: worldOffsetXM + rng.next() * worldWidthM,
+    y: worldOffsetYM + rng.next() * worldHeightM,
+    radius: (minDimM * (0.22 + rng.next() * 0.18)) / 2,
+    depth: (0.12 + rng.next() * 0.18) * valleyDepth
   }));
+  const macroWeight = 0.7;
+  const midWeight = 0.18;
+  const detailWeight = 0.06;
+  const weightSum = macroWeight + midWeight + detailWeight + ridgeStrength;
 
   for (let y = 0; y < state.grid.rows; y += 1) {
     for (let x = 0; x < state.grid.cols; x += 1) {
-      const edgeDist = Math.min(x, y, state.grid.cols - 1 - x, state.grid.rows - 1 - y);
-      const edgeFactor = clamp(edgeDist / centerFactor, 0, 1);
-      const warpA = fractalNoise(x / 11, y / 11, state.seed + 33);
-      const warpB = fractalNoise(x / 11, y / 11, state.seed + 67);
-      const warpX = (warpA - 0.5) * 4;
-      const warpY = (warpB - 0.5) * 4;
-      const nx = x + warpX;
-      const ny = y + warpY;
-      const macro = fractalNoise(nx / 42, ny / 42, state.seed + 991);
-      const mid = fractalNoise(nx / 22, ny / 22, state.seed + 517);
-      const detail = fractalNoise(nx / 10, ny / 10, state.seed + 151);
-      const ridgeNoise = fractalNoise(nx / 24, ny / 24, state.seed + 703);
+      const edgeDistM =
+        Math.min(x, y, state.grid.cols - 1 - x, state.grid.rows - 1 - y) * cellSizeM;
+      const edgeFactor = clamp(edgeDistM / centerFactorM, 0, 1);
+      const worldX = worldOffsetXM + x * cellSizeM;
+      const worldY = worldOffsetYM + y * cellSizeM;
+      const warpA = fractalNoise(worldX / warpScaleM, worldY / warpScaleM, state.seed + 33);
+      const warpB = fractalNoise(worldX / warpScaleM, worldY / warpScaleM, state.seed + 67);
+      const warpX = (warpA - 0.5) * WARP_MAG_M;
+      const warpY = (warpB - 0.5) * WARP_MAG_M;
+      const worldNX = worldX + warpX;
+      const worldNY = worldY + warpY;
+      const macro = fractalNoise(worldNX / macroScaleM, worldNY / macroScaleM, state.seed + 991);
+      const mid = fractalNoise(worldNX / midScaleM, worldNY / midScaleM, state.seed + 517);
+      const detail = fractalNoise(worldNX / detailScaleM, worldNY / detailScaleM, state.seed + 151);
+      const ridgeNoise = fractalNoise(worldNX / ridgeScaleM, worldNY / ridgeScaleM, state.seed + 703);
       const ridge = 1 - Math.abs(ridgeNoise * 2 - 1);
-      const bandCoord = (x * bandDir.x + y * bandDir.y) / bandScale;
+      const bandCoord = (worldX * bandDir.x + worldY * bandDir.y) / bandScaleM;
       const band = (Math.sin(bandCoord + bandPhase) + 1) * 0.5;
       const bandBoost = (band - 0.5) * bandStrength;
-      let elevation = macro * 0.7 + mid * 0.18 + detail * 0.06 + ridge * 0.06;
+      let elevation = (macro * macroWeight + mid * midWeight + detail * detailWeight + ridge * ridgeStrength) / weightSum;
       elevation += edgeFactor * 0.06;
       elevation = elevation * (0.75 + band * 0.5) + bandBoost;
       let landBoost = 0;
       for (const land of landCenters) {
-        const dx = (x - land.x) / land.radius;
-        const dy = (y - land.y) / land.radius;
+        const dx = (worldX - land.x) / land.radius;
+        const dy = (worldY - land.y) / land.radius;
         const d = Math.hypot(dx, dy);
         if (d < 1) {
           landBoost = Math.max(landBoost, (1 - d) * (1 - d) * land.height);
@@ -228,8 +308,8 @@ async function buildElevationMap(
       elevation += landBoost;
       let basinDrop = 0;
       for (const basin of basinCenters) {
-        const dx = (x - basin.x) / basin.radius;
-        const dy = (y - basin.y) / basin.radius;
+        const dx = (worldX - basin.x) / basin.radius;
+        const dy = (worldY - basin.y) / basin.radius;
         const d = Math.hypot(dx, dy);
         if (d < 1) {
           basinDrop = Math.max(basinDrop, (1 - d) * basin.depth);
@@ -283,12 +363,13 @@ async function buildElevationMap(
   if (report) {
     await report("Carving rivers...", 0.8);
   }
-  carveRiverValleys(state, rng, elevationMap, riverMask);
+  carveRiverValleys(state, rng, elevationMap, riverMask, valleyDepth);
 
   for (let i = 0; i < elevationMap.length; i += 1) {
     const value = elevationMap[i];
-    const shaped = Math.pow(value, 1.35) * (0.55 + value * 0.9);
-    const softened = softenPeaks(shaped, 0.88, 2.3);
+    const shaped = Math.pow(value, elevationExponent) * (0.55 + value * 0.9);
+    const scaled = shaped * elevationScale;
+    const softened = softenPeaks(scaled, 0.88, 2.3);
     elevationMap[i] = clamp(softened, 0, 1);
     if (yieldIfNeeded && report && i % state.grid.cols === state.grid.cols - 1) {
       if (await yieldIfNeeded()) {
@@ -301,10 +382,29 @@ async function buildElevationMap(
   return { elevationMap, riverMask };
 }
 
+const assertDeterministicElevation = async (
+  state: WorldState,
+  rng: RNG & { getState: () => number; setState: (state: number) => void },
+  settings: MapGenSettings,
+  samples = 64
+): Promise<void> => {
+  const rngState = rng.getState();
+  const first = await buildElevationMap(state, rng, settings);
+  rng.setState(rngState);
+  const second = await buildElevationMap(state, rng, settings);
+  const limit = Math.min(samples, first.elevationMap.length, second.elevationMap.length);
+  for (let i = 0; i < limit; i += 1) {
+    if (first.elevationMap[i] !== second.elevationMap[i]) {
+      throw new Error(`Elevation determinism check failed at ${i}.`);
+    }
+  }
+};
+
 async function buildElevationMapCoarse(
   state: WorldState,
   rng: RNG,
   blockSize: number,
+  settings: MapGenSettings,
   report?: MapGenReporter,
   yieldIfNeeded?: () => Promise<boolean>
 ): Promise<{ elevationMap: number[]; riverMask: Uint8Array }> {
@@ -316,71 +416,123 @@ async function buildElevationMapCoarse(
   const coarseElevation = Array.from({ length: coarseTotal }, () => 0);
   const coarseTemp = Array.from({ length: coarseTotal }, () => 0);
   const coarseRiverMask = new Uint8Array(coarseTotal);
-  const centerFactor = Math.min(cols, rows) / 2;
+  const cellSizeM = Math.max(0.1, settings.cellSizeM);
+  const worldOffsetXM = settings.worldOffsetXM;
+  const worldOffsetYM = settings.worldOffsetYM;
+  const worldWidthM = cols * cellSizeM;
+  const worldHeightM = rows * cellSizeM;
+  const minDimM = Math.min(worldWidthM, worldHeightM);
+  const elevationScale = clamp(settings.elevationScale, 0.6, 3);
+  const elevationExponent = clamp(settings.elevationExponent, 0.6, 2.6);
+  const mountainScale = clamp(settings.mountainScale, 0.6, 2.6);
+  const ridgeStrength = clamp(settings.ridgeStrength, 0, 0.35);
+  const valleyDepth = clamp(settings.valleyDepth, 0.4, 3);
+  const centerFactorM = minDimM / 2;
+  const warpScaleM = WARP_WAVELENGTH_M * mountainScale;
+  const macroScaleM = MACRO_WAVELENGTH_M * mountainScale;
+  const midScaleM = MID_WAVELENGTH_M * mountainScale;
+  const detailScaleM = DETAIL_WAVELENGTH_M * mountainScale;
+  const ridgeScaleM = RIDGE_WAVELENGTH_M * mountainScale;
   const bandAngle = rng.next() * Math.PI;
   const bandDir = { x: Math.cos(bandAngle), y: Math.sin(bandAngle) };
-  const bandScale = 16 + rng.next() * 14;
+  const bandScaleM = (BAND_SCALE_BASE_M + rng.next() * BAND_SCALE_RANGE_M) * mountainScale;
   const bandPhase = rng.next() * Math.PI * 2;
   const bandStrength = 0.18 + rng.next() * 0.1;
 
   const landCenters = Array.from({ length: 3 }, () => ({
-    x: rng.next() * cols,
-    y: rng.next() * rows,
-    radius: (Math.min(cols, rows) * (0.45 + rng.next() * 0.25)) / 2,
+    x: worldOffsetXM + rng.next() * worldWidthM,
+    y: worldOffsetYM + rng.next() * worldHeightM,
+    radius: (minDimM * (0.45 + rng.next() * 0.25)) / 2,
     height: 0.28 + rng.next() * 0.28
   }));
 
   const basinCenters = Array.from({ length: 2 + Math.floor(rng.next() * 2) }, () => ({
-    x: rng.next() * cols,
-    y: rng.next() * rows,
-    radius: (Math.min(cols, rows) * (0.22 + rng.next() * 0.18)) / 2,
-    depth: 0.12 + rng.next() * 0.18
+    x: worldOffsetXM + rng.next() * worldWidthM,
+    y: worldOffsetYM + rng.next() * worldHeightM,
+    radius: (minDimM * (0.22 + rng.next() * 0.18)) / 2,
+    depth: (0.12 + rng.next() * 0.18) * valleyDepth
   }));
 
+  const macroWeight = 0.7;
+  const midWeight = 0.18;
+  const detailWeight = 0.06;
+  const weightSum = macroWeight + midWeight + detailWeight + ridgeStrength;
+  const peakWeight = 0.65;
+  const sampleOffsets = [
+    { x: 0.25, y: 0.25 },
+    { x: 0.75, y: 0.25 },
+    { x: 0.25, y: 0.75 },
+    { x: 0.75, y: 0.75 },
+    { x: 0.5, y: 0.5 }
+  ];
+  const sampleElevationAt = (sampleX: number, sampleY: number): number => {
+    const edgeDistM = Math.min(sampleX, sampleY, cols - 1 - sampleX, rows - 1 - sampleY) * cellSizeM;
+    const edgeFactor = clamp(edgeDistM / centerFactorM, 0, 1);
+    const worldX = worldOffsetXM + sampleX * cellSizeM;
+    const worldY = worldOffsetYM + sampleY * cellSizeM;
+    const warpA = fractalNoise(worldX / warpScaleM, worldY / warpScaleM, state.seed + 33);
+    const warpB = fractalNoise(worldX / warpScaleM, worldY / warpScaleM, state.seed + 67);
+    const warpX = (warpA - 0.5) * WARP_MAG_M;
+    const warpY = (warpB - 0.5) * WARP_MAG_M;
+    const worldNX = worldX + warpX;
+    const worldNY = worldY + warpY;
+    const macro = fractalNoise(worldNX / macroScaleM, worldNY / macroScaleM, state.seed + 991);
+    const mid = fractalNoise(worldNX / midScaleM, worldNY / midScaleM, state.seed + 517);
+    const detail = fractalNoise(worldNX / detailScaleM, worldNY / detailScaleM, state.seed + 151);
+    const ridgeNoise = fractalNoise(worldNX / ridgeScaleM, worldNY / ridgeScaleM, state.seed + 703);
+    const ridge = 1 - Math.abs(ridgeNoise * 2 - 1);
+    const bandCoord = (worldX * bandDir.x + worldY * bandDir.y) / bandScaleM;
+    const band = (Math.sin(bandCoord + bandPhase) + 1) * 0.5;
+    const bandBoost = (band - 0.5) * bandStrength;
+    let elevation =
+      (macro * macroWeight + mid * midWeight + detail * detailWeight + ridge * ridgeStrength) / weightSum;
+    elevation += edgeFactor * 0.06;
+    elevation = elevation * (0.75 + band * 0.5) + bandBoost;
+    let landBoost = 0;
+    for (const land of landCenters) {
+      const dx = (worldX - land.x) / land.radius;
+      const dy = (worldY - land.y) / land.radius;
+      const d = Math.hypot(dx, dy);
+      if (d < 1) {
+        landBoost = Math.max(landBoost, (1 - d) * (1 - d) * land.height);
+      }
+    }
+    elevation += landBoost;
+    let basinDrop = 0;
+    for (const basin of basinCenters) {
+      const dx = (worldX - basin.x) / basin.radius;
+      const dy = (worldY - basin.y) / basin.radius;
+      const d = Math.hypot(dx, dy);
+      if (d < 1) {
+        basinDrop = Math.max(basinDrop, (1 - d) * basin.depth);
+      }
+    }
+    elevation = clamp(elevation - basinDrop, 0, 1);
+    return elevation;
+  };
+
   for (let cy = 0; cy < coarseRows; cy += 1) {
-    const sampleY = Math.min(rows - 1, (cy + 0.5) * blockSize);
+    const startY = cy * blockSize;
+    const height = Math.min(blockSize, rows - startY);
     for (let cx = 0; cx < coarseCols; cx += 1) {
-      const sampleX = Math.min(cols - 1, (cx + 0.5) * blockSize);
-      const edgeDist = Math.min(sampleX, sampleY, cols - 1 - sampleX, rows - 1 - sampleY);
-      const edgeFactor = clamp(edgeDist / centerFactor, 0, 1);
-      const warpA = fractalNoise(sampleX / 11, sampleY / 11, state.seed + 33);
-      const warpB = fractalNoise(sampleX / 11, sampleY / 11, state.seed + 67);
-      const warpX = (warpA - 0.5) * 4;
-      const warpY = (warpB - 0.5) * 4;
-      const nx = sampleX + warpX;
-      const ny = sampleY + warpY;
-      const macro = fractalNoise(nx / 42, ny / 42, state.seed + 991);
-      const mid = fractalNoise(nx / 22, ny / 22, state.seed + 517);
-      const detail = fractalNoise(nx / 10, ny / 10, state.seed + 151);
-      const ridgeNoise = fractalNoise(nx / 24, ny / 24, state.seed + 703);
-      const ridge = 1 - Math.abs(ridgeNoise * 2 - 1);
-      const bandCoord = (sampleX * bandDir.x + sampleY * bandDir.y) / bandScale;
-      const band = (Math.sin(bandCoord + bandPhase) + 1) * 0.5;
-      const bandBoost = (band - 0.5) * bandStrength;
-      let elevation = macro * 0.7 + mid * 0.18 + detail * 0.06 + ridge * 0.06;
-      elevation += edgeFactor * 0.06;
-      elevation = elevation * (0.75 + band * 0.5) + bandBoost;
-      let landBoost = 0;
-      for (const land of landCenters) {
-        const dx = (sampleX - land.x) / land.radius;
-        const dy = (sampleY - land.y) / land.radius;
-        const d = Math.hypot(dx, dy);
-        if (d < 1) {
-          landBoost = Math.max(landBoost, (1 - d) * (1 - d) * land.height);
+      const startX = cx * blockSize;
+      const width = Math.min(blockSize, cols - startX);
+      let sum = 0;
+      let count = 0;
+      let maxValue = 0;
+      for (const offset of sampleOffsets) {
+        const sampleX = Math.min(cols - 1, startX + width * offset.x);
+        const sampleY = Math.min(rows - 1, startY + height * offset.y);
+        const elevation = sampleElevationAt(sampleX, sampleY);
+        sum += elevation;
+        count += 1;
+        if (elevation > maxValue) {
+          maxValue = elevation;
         }
       }
-      elevation += landBoost;
-      let basinDrop = 0;
-      for (const basin of basinCenters) {
-        const dx = (sampleX - basin.x) / basin.radius;
-        const dy = (sampleY - basin.y) / basin.radius;
-        const d = Math.hypot(dx, dy);
-        if (d < 1) {
-          basinDrop = Math.max(basinDrop, (1 - d) * basin.depth);
-        }
-      }
-      elevation = clamp(elevation - basinDrop, 0, 1);
-      coarseElevation[cy * coarseCols + cx] = clamp(elevation, 0, 1);
+      const avg = count > 0 ? sum / count : 0;
+      const blended = avg * (1 - peakWeight) + maxValue * peakWeight;
+      coarseElevation[cy * coarseCols + cx] = clamp(blended, 0, 1);
     }
     if (yieldIfNeeded && report) {
       if (await yieldIfNeeded()) {
@@ -433,12 +585,13 @@ async function buildElevationMapCoarse(
     valleyMap: Array.from({ length: coarseTotal }, () => 0),
     seed: state.seed
   } as WorldState;
-  carveRiverValleys(coarseState, rng, coarseElevation, coarseRiverMask);
+  carveRiverValleys(coarseState, rng, coarseElevation, coarseRiverMask, valleyDepth);
 
   for (let i = 0; i < coarseElevation.length; i += 1) {
     const value = coarseElevation[i];
-    const shaped = Math.pow(value, 1.35) * (0.55 + value * 0.9);
-    const softened = softenPeaks(shaped, 0.88, 2.3);
+    const shaped = Math.pow(value, elevationExponent) * (0.55 + value * 0.9);
+    const scaled = shaped * elevationScale;
+    const softened = softenPeaks(scaled, 0.88, 2.3);
     coarseElevation[i] = clamp(softened, 0, 1);
     if (yieldIfNeeded && report && i % coarseCols === coarseCols - 1) {
       if (await yieldIfNeeded()) {
@@ -477,6 +630,7 @@ async function buildElevationMapCoarse(
 
 async function buildMoistureMap(
   state: WorldState,
+  maxWaterDistance: number,
   report?: MapGenReporter,
   yieldIfNeeded?: () => Promise<boolean>
 ): Promise<number[]> {
@@ -501,8 +655,16 @@ async function buildMoistureMap(
       }
       const idx = indexFor(state.grid, x, y);
       const waterFactor = clamp(waterCount / 12, 0, 1);
-      const elevationFactor = 1 - state.tiles[idx].elevation;
-      moisture[idx] = clamp(waterFactor * 0.7 + elevationFactor * 0.3, 0, 1);
+      const tile = state.tiles[idx];
+      const elevationFactor = 1 - tile.elevation;
+      const waterDistFactor = clamp(1 - tile.waterDist / maxWaterDistance, 0, 1);
+      const distBoost = Math.sqrt(waterDistFactor);
+      const valleyBoost = clamp(state.valleyMap[idx] / 0.12, 0, 1);
+      moisture[idx] = clamp(
+        waterFactor * 0.3 + distBoost * 0.35 + elevationFactor * 0.25 + valleyBoost * 0.1,
+        0,
+        1
+      );
     }
     if (yieldIfNeeded && report) {
       if (await yieldIfNeeded()) {
@@ -801,6 +963,177 @@ function findBasePoint(state: WorldState): Point {
   return center;
 }
 
+function flattenSettlementGround(state: WorldState): void {
+  const tiles = state.tiles;
+  const cols = state.grid.cols;
+  const rows = state.grid.rows;
+  const total = state.grid.totalTiles;
+  const visited = new Uint8Array(total);
+  const flattened = new Uint8Array(total);
+  const softenSum = new Float32Array(total);
+  const softenCount = new Uint8Array(total);
+  const queue = new Int32Array(total);
+  const component: number[] = [];
+  const radius = 2;
+
+  for (let i = 0; i < total; i += 1) {
+    if (visited[i]) {
+      continue;
+    }
+    const type = tiles[i].type;
+    if (type !== "house" && type !== "base") {
+      continue;
+    }
+    let head = 0;
+    let tail = 0;
+    queue[tail] = i;
+    tail += 1;
+    visited[i] = 1;
+    component.length = 0;
+    let sum = 0;
+
+    while (head < tail) {
+      const idx = queue[head];
+      head += 1;
+      component.push(idx);
+      sum += tiles[idx].elevation;
+      const x = idx % cols;
+      const y = Math.floor(idx / cols);
+      if (x > 0) {
+        const nIdx = idx - 1;
+        if (!visited[nIdx]) {
+          const nType = tiles[nIdx].type;
+          if (nType === "house" || nType === "base") {
+            visited[nIdx] = 1;
+            queue[tail] = nIdx;
+            tail += 1;
+          }
+        }
+      }
+      if (x < cols - 1) {
+        const nIdx = idx + 1;
+        if (!visited[nIdx]) {
+          const nType = tiles[nIdx].type;
+          if (nType === "house" || nType === "base") {
+            visited[nIdx] = 1;
+            queue[tail] = nIdx;
+            tail += 1;
+          }
+        }
+      }
+      if (y > 0) {
+        const nIdx = idx - cols;
+        if (!visited[nIdx]) {
+          const nType = tiles[nIdx].type;
+          if (nType === "house" || nType === "base") {
+            visited[nIdx] = 1;
+            queue[tail] = nIdx;
+            tail += 1;
+          }
+        }
+      }
+      if (y < rows - 1) {
+        const nIdx = idx + cols;
+        if (!visited[nIdx]) {
+          const nType = tiles[nIdx].type;
+          if (nType === "house" || nType === "base") {
+            visited[nIdx] = 1;
+            queue[tail] = nIdx;
+            tail += 1;
+          }
+        }
+      }
+    }
+
+    if (component.length === 0) {
+      continue;
+    }
+    const target = clamp(sum / component.length, 0, 1);
+    component.forEach((idx) => {
+      tiles[idx].elevation = target;
+      flattened[idx] = 1;
+    });
+
+    component.forEach((idx) => {
+      const cx = idx % cols;
+      const cy = Math.floor(idx / cols);
+      for (let dy = -radius; dy <= radius; dy += 1) {
+        const ny = cy + dy;
+        if (ny < 0 || ny >= rows) {
+          continue;
+        }
+        const maxDx = radius - Math.abs(dy);
+        const rowBase = ny * cols;
+        for (let dx = -maxDx; dx <= maxDx; dx += 1) {
+          const nx = cx + dx;
+          if (nx < 0 || nx >= cols) {
+            continue;
+          }
+          const nIdx = rowBase + nx;
+          if (tiles[nIdx].type === "road") {
+            tiles[nIdx].elevation = target;
+            flattened[nIdx] = 1;
+          }
+        }
+      }
+    });
+  }
+
+  for (let i = 0; i < total; i += 1) {
+    if (!flattened[i]) {
+      continue;
+    }
+    const x = i % cols;
+    const y = Math.floor(i / cols);
+    const target = tiles[i].elevation;
+    if (x > 0) {
+      const nIdx = i - 1;
+      const nType = tiles[nIdx].type;
+      if (!flattened[nIdx] && nType !== "water" && nType !== "road" && nType !== "house" && nType !== "base") {
+        softenSum[nIdx] += target;
+        softenCount[nIdx] += 1;
+      }
+    }
+    if (x < cols - 1) {
+      const nIdx = i + 1;
+      const nType = tiles[nIdx].type;
+      if (!flattened[nIdx] && nType !== "water" && nType !== "road" && nType !== "house" && nType !== "base") {
+        softenSum[nIdx] += target;
+        softenCount[nIdx] += 1;
+      }
+    }
+    if (y > 0) {
+      const nIdx = i - cols;
+      const nType = tiles[nIdx].type;
+      if (!flattened[nIdx] && nType !== "water" && nType !== "road" && nType !== "house" && nType !== "base") {
+        softenSum[nIdx] += target;
+        softenCount[nIdx] += 1;
+      }
+    }
+    if (y < rows - 1) {
+      const nIdx = i + cols;
+      const nType = tiles[nIdx].type;
+      if (!flattened[nIdx] && nType !== "water" && nType !== "road" && nType !== "house" && nType !== "base") {
+        softenSum[nIdx] += target;
+        softenCount[nIdx] += 1;
+      }
+    }
+  }
+
+  for (let i = 0; i < total; i += 1) {
+    const count = softenCount[i];
+    if (count === 0) {
+      continue;
+    }
+    const type = tiles[i].type;
+    if (type === "water" || type === "road" || type === "house" || type === "base") {
+      continue;
+    }
+    const avg = softenSum[i] / count;
+    tiles[i].elevation = clamp(tiles[i].elevation * 0.6 + avg * 0.4, 0, 1);
+  }
+}
+
 export async function generateMap(
   state: WorldState,
   rng: RNG,
@@ -809,6 +1142,15 @@ export async function generateMap(
 ): Promise<void> {
   const yieldIfNeeded = createYield();
   const mapSettings = { ...DEFAULT_MAP_GEN_SETTINGS, ...(settings ?? {}) };
+  const cellSizeM = Math.max(0.1, mapSettings.cellSizeM);
+  const worldOffsetXM = mapSettings.worldOffsetXM;
+  const worldOffsetYM = mapSettings.worldOffsetYM;
+  const microScaleM = Math.max(1, mapSettings.microScaleM);
+  const forestMacroScaleM = Math.max(1, mapSettings.forestMacroScale * cellSizeM);
+  const forestDetailScaleM = Math.max(1, mapSettings.forestDetailScale * cellSizeM);
+  const meadowScaleM = Math.max(1, mapSettings.meadowScale * cellSizeM);
+  const minDimM = Math.min(state.grid.cols, state.grid.rows) * cellSizeM;
+  const edgeDenomM = minDimM / 2;
   const maxDim = Math.max(state.grid.cols, state.grid.rows);
   const biomeBlock = maxDim >= 1024 ? 8 : maxDim >= 512 ? 4 : 2;
   state.tiles = new Array(state.grid.totalTiles);
@@ -818,14 +1160,35 @@ export async function generateMap(
 
   type BiomeSample = {
     micro: number;
-    forestMacro: number;
-    forestPatch: boolean;
+    forestNoise: number;
     meadowMask: number;
   };
 
-  const { elevationMap, riverMask } = await buildElevationMap(state, rng, report ? async (message, progress) => {
+  const { elevationMap, riverMask } = await buildElevationMap(state, rng, mapSettings, report ? async (message, progress) => {
     await report(message, progress * 0.6);
   } : undefined, yieldIfNeeded);
+
+  const slopeMap = new Float32Array(state.grid.totalTiles);
+  for (let y = 0; y < state.grid.rows; y += 1) {
+    for (let x = 0; x < state.grid.cols; x += 1) {
+      const idx = indexFor(state.grid, x, y);
+      const e = elevationMap[idx];
+      let maxDiff = 0;
+      if (y > 0) {
+        maxDiff = Math.max(maxDiff, Math.abs(e - elevationMap[idx - state.grid.cols]));
+      }
+      if (y < state.grid.rows - 1) {
+        maxDiff = Math.max(maxDiff, Math.abs(e - elevationMap[idx + state.grid.cols]));
+      }
+      if (x > 0) {
+        maxDiff = Math.max(maxDiff, Math.abs(e - elevationMap[idx - 1]));
+      }
+      if (x < state.grid.cols - 1) {
+        maxDiff = Math.max(maxDiff, Math.abs(e - elevationMap[idx + 1]));
+      }
+      slopeMap[idx] = clamp(maxDiff, 0, 1);
+    }
+  }
 
   const blockCols = Math.ceil(state.grid.cols / biomeBlock);
   const blockRows = Math.ceil(state.grid.rows / biomeBlock);
@@ -836,15 +1199,23 @@ export async function generateMap(
       const sampleY = (by + 0.5) * biomeBlock;
       for (let bx = 0; bx < blockCols; bx += 1) {
         const sampleX = (bx + 0.5) * biomeBlock;
-        const micro = fractalNoise(sampleX / 4, sampleY / 4, state.seed + 211);
+        const worldX = worldOffsetXM + sampleX * cellSizeM;
+        const worldY = worldOffsetYM + sampleY * cellSizeM;
+        const micro = fractalNoise(worldX / microScaleM, worldY / microScaleM, state.seed + 211);
         const forestMacro = fractalNoise(
-          sampleX / mapSettings.forestMacroScale,
-          sampleY / mapSettings.forestMacroScale,
+          worldX / forestMacroScaleM,
+          worldY / forestMacroScaleM,
           state.seed + 415
         );
+        const forestDetail = fractalNoise(
+          worldX / forestDetailScaleM,
+          worldY / forestDetailScaleM,
+          state.seed + 619
+        );
+        const forestNoise = forestMacro * 0.75 + forestDetail * 0.25;
         const meadowNoise = fractalNoise(
-          sampleX / mapSettings.meadowScale,
-          sampleY / mapSettings.meadowScale,
+          worldX / meadowScaleM,
+          worldY / meadowScaleM,
           state.seed + 933
         );
         const meadowMask = clamp(
@@ -854,8 +1225,7 @@ export async function generateMap(
         );
         biomeSamples[by * blockCols + bx] = {
           micro,
-          forestMacro,
-          forestPatch: forestMacro > mapSettings.forestThreshold,
+          forestNoise,
           meadowMask
         };
       }
@@ -865,65 +1235,66 @@ export async function generateMap(
     }
   }
 
+  const totalTiles = state.grid.totalTiles;
+  const microMap = new Float32Array(totalTiles);
+  const forestNoiseMap = new Float32Array(totalTiles);
+  const meadowMaskMap = new Float32Array(totalTiles);
+  const seaLevelMap = new Float32Array(totalTiles);
+
   for (let y = 0; y < state.grid.rows; y += 1) {
     for (let x = 0; x < state.grid.cols; x += 1) {
-      const edgeDist = Math.min(x, y, state.grid.cols - 1 - x, state.grid.rows - 1 - y);
-      const edgeFactor = clamp(edgeDist / (Math.min(state.grid.cols, state.grid.rows) / 2), 0, 1);
+      const edgeDistM =
+        Math.min(x, y, state.grid.cols - 1 - x, state.grid.rows - 1 - y) * cellSizeM;
+      const edgeFactor = clamp(edgeDistM / edgeDenomM, 0, 1);
       const idx = indexFor(state.grid, x, y);
       const elevation = elevationMap[idx];
       const valley = state.valleyMap[idx];
       let micro = 0.5;
-      let forestMacro = 0.5;
-      let forestPatch = false;
+      let forestNoise = 0.5;
       let meadowMask = 0;
       if (biomeBlock > 1 && biomeSamples) {
         const bx = Math.floor(x / biomeBlock);
         const by = Math.floor(y / biomeBlock);
         const sample = biomeSamples[by * blockCols + bx];
         micro = sample.micro;
-        forestMacro = sample.forestMacro;
-        forestPatch = sample.forestPatch;
+        forestNoise = sample.forestNoise;
         meadowMask = sample.meadowMask;
       } else {
-        micro = fractalNoise(x / 4, y / 4, state.seed + 211);
-        forestMacro = fractalNoise(
-          x / mapSettings.forestMacroScale,
-          y / mapSettings.forestMacroScale,
+        const worldX = worldOffsetXM + x * cellSizeM;
+        const worldY = worldOffsetYM + y * cellSizeM;
+        micro = fractalNoise(worldX / microScaleM, worldY / microScaleM, state.seed + 211);
+        const forestMacro = fractalNoise(
+          worldX / forestMacroScaleM,
+          worldY / forestMacroScaleM,
           state.seed + 415
         );
         const forestDetail = fractalNoise(
-          x / mapSettings.forestDetailScale,
-          y / mapSettings.forestDetailScale,
+          worldX / forestDetailScaleM,
+          worldY / forestDetailScaleM,
           state.seed + 619
         );
-        const forestSignal = forestMacro * 0.75 + forestDetail * 0.25;
-        forestPatch = forestSignal > mapSettings.forestThreshold;
-        const meadowNoise = fractalNoise(x / mapSettings.meadowScale, y / mapSettings.meadowScale, state.seed + 933);
+        forestNoise = forestMacro * 0.75 + forestDetail * 0.25;
+        const meadowNoise = fractalNoise(worldX / meadowScaleM, worldY / meadowScaleM, state.seed + 933);
         meadowMask = clamp(
           (meadowNoise - mapSettings.meadowThreshold) / (1 - mapSettings.meadowThreshold),
           0,
           1
         );
       }
+      microMap[idx] = micro;
+      forestNoiseMap[idx] = forestNoise;
+      meadowMaskMap[idx] = meadowMask;
+
       const riverFlag = riverMask[idx] > 0;
-      const baseWaterThreshold = clamp(
-        mapSettings.baseWaterThreshold + (1 - edgeFactor) * mapSettings.edgeWaterBias - (micro - 0.5) * 0.04,
-        0.08,
-        0.26
-      );
       const riverBias = riverFlag ? mapSettings.riverWaterBias + valley * 0.08 : 0;
-      const waterThreshold = clamp(baseWaterThreshold + riverBias, 0.08, 0.34);
-      const riverWater = riverFlag && elevation < waterThreshold + 0.1;
-      const isWater = elevation < waterThreshold || riverWater;
-      const valleyDry = valley > 0.1 && elevation < 0.6;
-      const highlandForest = elevation > mapSettings.highlandForestElevation && forestMacro > 0.5;
-      const isForest = !valleyDry && !riverFlag && (forestPatch || highlandForest);
-      const type: TileType = isWater ? "water" : isForest ? "forest" : "grass";
-      const grassCanopyBase =
-        (mapSettings.grassCanopyBase + micro * mapSettings.grassCanopyRange) *
-        (1 - meadowMask * mapSettings.meadowStrength);
-      const canopyBase = isForest ? 0.55 + micro * 0.55 : grassCanopyBase - (valleyDry ? 0.08 : 0);
-      const canopy = isWater ? 0 : clamp(canopyBase, 0, 1);
+      const seaLevel = clamp(
+        mapSettings.baseWaterThreshold + (1 - edgeFactor) * mapSettings.edgeWaterBias + riverBias,
+        0.08,
+        0.34
+      );
+      seaLevelMap[idx] = seaLevel;
+
+      const type: TileType = elevation < seaLevel ? "water" : "grass";
       state.tiles[idx] = {
         type,
         fuel: 0,
@@ -940,7 +1311,7 @@ export async function generateMap(
         windFactor: 0,
         moisture: 0,
         waterDist: 0,
-        canopy,
+        canopy: 0,
         houseValue: 0,
         houseResidents: 0,
         houseDestroyed: false,
@@ -952,36 +1323,77 @@ export async function generateMap(
     }
   }
 
+  const waterDistanceCap = 30;
   if (report) {
-    await report("Softening shoreline...", 0.72);
+    await report("Charting shoreline distance...", 0.72);
   }
-  const smoothPasses = 1;
-  const smoothProgress = [
-    { base: 0.72, scale: 0.08 },
-    { base: 0.8, scale: 0.05 },
-    { base: 0.85, scale: 0.05 }
-  ];
-  for (let pass = 0; pass < smoothPasses; pass += 1) {
-    const { base, scale } = smoothProgress[pass];
-    state.tiles = await smoothWater(state, state.tiles, report ? async (message, progress) => {
-      await report(message, base + progress * scale);
-    } : undefined, yieldIfNeeded);
-  }
+  await computeWaterDistances(
+    state,
+    waterDistanceCap,
+    report
+      ? async (message, progress) => {
+          await report(message, 0.72 + progress * 0.08);
+        }
+      : undefined,
+    yieldIfNeeded
+  );
+
+  const moistureMap = await buildMoistureMap(
+    state,
+    waterDistanceCap,
+    report
+      ? async (message, progress) => {
+          await report(message, 0.8 + progress * 0.08);
+        }
+      : undefined,
+    yieldIfNeeded
+  );
+
   for (let i = 0; i < state.tiles.length; i += 1) {
-    if (riverMask[i]) {
-      state.tiles[i].type = "water";
-    }
-  }
-  state.tiles.forEach((tile) => {
-    if (tile.type === "water") {
+    const tile = state.tiles[i];
+    const elevation = tile.elevation;
+    const valley = state.valleyMap[i];
+    const slope = slopeMap[i];
+    const seaLevel = seaLevelMap[i];
+    const moisture = moistureMap[i];
+    const forestNoise = forestNoiseMap[i];
+    const waterDistM = tile.waterDist * cellSizeM;
+    const nextType = classifyTile({
+      elevation,
+      slope,
+      waterDistM,
+      valley,
+      moisture,
+      forestNoise,
+      seaLevel,
+      forestThreshold: mapSettings.forestThreshold
+    });
+    tile.type = nextType;
+    tile.moisture = moisture;
+
+    if (nextType === "water") {
       tile.elevation = Math.min(tile.elevation, 0.22 + rng.next() * 0.04);
       tile.canopy = 0;
+    } else if (nextType === "forest" || nextType === "grass" || nextType === "scrub" || nextType === "floodplain") {
+      const micro = microMap[i];
+      const meadowMask = meadowMaskMap[i];
+      const grassCanopyBase =
+        (mapSettings.grassCanopyBase + micro * mapSettings.grassCanopyRange) *
+        (1 - meadowMask * mapSettings.meadowStrength);
+      const valleyDry = valley > 0.1 && elevation < 0.6;
+      const canopyBase = nextType === "forest" ? 0.55 + micro * 0.55 : grassCanopyBase - (valleyDry ? 0.08 : 0);
+      tile.canopy = clamp(canopyBase, 0, 1);
+    } else {
+      tile.canopy = 0;
     }
-  });
-  const waterDistanceCap = 30;
-  state.tiles.forEach((tile) => {
-    tile.waterDist = tile.type === "water" ? 0 : waterDistanceCap;
-  });
+
+    if (yieldIfNeeded && report && i % state.grid.cols === state.grid.cols - 1) {
+      if (await yieldIfNeeded()) {
+        const row = Math.floor(i / state.grid.cols);
+        await report("Classifying terrain...", 0.88 + (row + 1) / state.grid.rows * 0.05);
+      }
+    }
+  }
 
   if (report) {
     await report("Placing communities...", 0.93);
@@ -1001,14 +1413,11 @@ export async function generateMap(
   }
 
   populateCommunities(state, rng);
+  flattenSettlementGround(state);
 
   state.totalLandTiles = 0;
-  const moistureMap = await buildMoistureMap(state, report ? async (message, progress) => {
-    await report(message, 0.93 + progress * 0.04);
-  } : undefined, yieldIfNeeded);
-  state.tiles.forEach((tile, index) => {
-    tile.moisture = moistureMap[index];
-    applyFuel(tile, moistureMap[index], rng);
+  state.tiles.forEach((tile) => {
+    applyFuel(tile, tile.moisture, rng);
     if (tile.type !== "water" && !tile.isBase) {
       state.totalLandTiles += 1;
     }
@@ -1018,8 +1427,10 @@ export async function generateMap(
   for (let y = 0; y < state.grid.rows; y += 1) {
     for (let x = 0; x < state.grid.cols; x += 1) {
       const idx = indexFor(state.grid, x, y);
-      const low = fractalNoise(x / 14, y / 14, state.seed + 801);
-      const broad = fractalNoise(x / 38, y / 38, state.seed + 1001);
+      const worldX = getWorldX(mapSettings, x);
+      const worldY = getWorldY(mapSettings, y);
+      const low = fractalNoise(worldX / (14 * cellSizeM), worldY / (14 * cellSizeM), state.seed + 801);
+      const broad = fractalNoise(worldX / (38 * cellSizeM), worldY / (38 * cellSizeM), state.seed + 1001);
       state.colorNoiseMap[idx] = clamp(low * 0.65 + broad * 0.35, 0, 1);
     }
     if (report && (await yieldIfNeeded())) {

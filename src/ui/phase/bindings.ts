@@ -69,6 +69,7 @@ const getTileFromPointer = (state: WorldState, canvas: HTMLCanvasElement, event:
 
 const DEBUG_IGNITE_TOGGLE_KEY = "i";
 const DEBUG_CELL_TOGGLE_KEY = "d";
+const DEBUG_TYPE_EVENT = "debug-type-colors-changed";
 
   const getWorldFromPointer = (state: WorldState, canvas: HTMLCanvasElement, event: MouseEvent): Point => {
   const rect = canvas.getBoundingClientRect();
@@ -107,12 +108,22 @@ export const bindPhaseUi = (
   const debugToggleButton = phaseUi.controller.root.querySelector<HTMLButtonElement>(
     '[data-action="debug-ignite-toggle"]'
   );
+  let debugTypeColors = state.debugTypeColors;
+  const debugTypeButton = phaseUi.controller.root.querySelector<HTMLButtonElement>(
+    '[data-action="debug-type-colors-toggle"]'
+  );
   const refreshDebugToggle = (): void => {
     if (debugToggleButton) {
       debugToggleButton.classList.toggle("is-active", debugIgniteMode);
     }
   };
+  const refreshDebugTypeToggle = (): void => {
+    if (debugTypeButton) {
+      debugTypeButton.classList.toggle("is-active", debugTypeColors);
+    }
+  };
   refreshDebugToggle();
+  refreshDebugTypeToggle();
 
   const igniteDebugFireAt = (tile: { x: number; y: number }): void => {
     const idx = indexFor(state.grid, tile.x, tile.y);
@@ -148,6 +159,18 @@ export const bindPhaseUi = (
         state,
         debugIgniteMode ? "Debug ignite mode enabled. Click to place a fire." : "Debug ignite mode disabled."
       );
+      noteInteraction();
+    });
+  };
+
+  const toggleDebugTypeColors = (): void => {
+    gate("select", () => {
+      debugTypeColors = !debugTypeColors;
+      state.debugTypeColors = debugTypeColors;
+      state.terrainDirty = true;
+      refreshDebugTypeToggle();
+      setStatus(state, debugTypeColors ? "Debug type colors enabled." : "Debug type colors disabled.");
+      window.dispatchEvent(new CustomEvent(DEBUG_TYPE_EVENT, { detail: { enabled: debugTypeColors } }));
       noteInteraction();
     });
   };
@@ -354,6 +377,10 @@ export const bindPhaseUi = (
       }
       if (action === "debug-ignite-toggle") {
         toggleDebugIgniteMode();
+        return;
+      }
+      if (action === "debug-type-colors-toggle") {
+        toggleDebugTypeColors();
         return;
       }
       if (action === "toggle-fuel-break") {
