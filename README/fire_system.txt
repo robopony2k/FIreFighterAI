@@ -1,0 +1,24 @@
+# Fire System
+
+## Purpose
+Simulates directional, fuel-based fire spread at scale, creating emergent wildfire behavior for strategic response.
+
+## Inputs
+- Fuel load per tile (from terrain).
+- Heat levels (accumulates over time).
+- Wind vector (from climate).
+- Ignition threshold (constant).
+
+## Outputs
+- Updated heat and fire state per tile.
+- Visual fire particles (non-authoritative).
+
+## Key Tunables
+- Heat diffusion rate (controls spread speed).
+- Fuel consumption per tick.
+- Wind influence multiplier.
+
+## Performance Trade-Offs
+- Heat diffusion approximates physics for speed (O(n) per tick).
+- Visual fire is non-deterministic (random particles) to avoid simulation overhead.
+- Grid-based: Scales to large maps but abstracts continuous spread.

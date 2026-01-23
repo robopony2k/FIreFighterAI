@@ -1,0 +1,40 @@
+# Fireline Command
+
+## Game Concept
+Fireline Command is a seasonal bushfire simulation and real-time strategy game where players manage a firefighting operation over a 20-year career. Prepare for fire seasons by cutting breaks and training crews, respond to spreading wildfires by deploying units, and recover through budget allocation and ecological regrowth, all while maintaining public approval.
+
+## Core Loop
+- **Growth**: Vegetation regrows passively, increasing fuel loads.
+- **Maintenance**: Prepare by recruiting units, training crews, and cutting firebreaks.
+- **Fire**: Respond to chaotic wildfires by deploying firefighters and trucks to suppress flames.
+- **Budget**: Review performance, allocate funds, and adjust for the next cycle.
+
+## Tech Stack
+- **Language**: TypeScript
+- **Rendering**: HTML5 Canvas (2D) with optional Three.js (WebGL for 3D previews)
+- **Simulation**: Grid-based with real-time fire propagation, unit pathfinding, and climate modeling
+- **Persistence**: LocalStorage for leaderboards
+
+## How to Run
+1. Clone the repo.
+2. Run `npm install`.
+3. Start dev server: `npm run dev`.
+4. Open `http://localhost:5173` in a browser.
+
+For headless testing: Use `npm run headless` to run simulations without UI.
+
+## Folder Structure
+- `src/core/`: Game state, types, constants, and utilities.
+- `src/mapgen/`: Procedural terrain generation.
+- `src/sim/`: Simulation logic (fire, units, growth).
+- `src/render/`: Drawing and 3D rendering.
+- `src/ui/`: User interfaces and bindings.
+- `src/persistence/`: Leaderboard saving.
+- `assets/`: 3D models and resources.
+- `config/`: YAML configs for fuel profiles.
+
+## Key Systems
+- **Terrain & Fuel**: Procedural maps with elevations, moisture, and fuel types.
+- **Fire Propagation**: Directional spread based on fuel, wind, and heat.
+- **Units & Suppression**: Deployment, pathfinding, and fire suppression mechanics.
+- **Seasonal Economy**: Budget cycles with approval and resource management.

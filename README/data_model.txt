@@ -1,0 +1,25 @@
+# Data Model
+
+## Core State Objects
+- **WorldState**: Top-level struct with tiles, units, climate, time, and phase.
+- **Tile**: Fuel, heat, elevation, moisture, type (e.g., forest, water).
+- **Unit**: Position, type, crew level, target.
+- **Climate**: Temperature, wind vector, moisture.
+- **Time**: Current tick, phase, year.
+
+## Invariants
+- Fuel >= 0 and <= max (no negative or infinite fuel).
+- Heat >= 0; fire only if heat > ignition threshold.
+- Water tiles: Fuel = 0, never ignite.
+- Units: Position within grid bounds; can't occupy same tile.
+- Approval: 0-100 range; drops on poor performance.
+
+## Mutation Rules Per Tick
+- Sim systems (fire, growth) mutate WorldState during tick.
+- Render reads only; no mutations.
+- UI triggers mutations via Sim calls.
+- State resets only on new run or explicit commands.
+
+## Serialization
+- WorldState serializable for saves/checksums.
+- Excludes non-deterministic render data.

@@ -1,0 +1,10 @@
+### TSK-0123: <short title>
+**Type:** bug | feature | refactor | tech-debt | polish
+**Why:** <1–2 lines>
+**Done when:**
+- [ ] <observable outcome>
+- [ ] <test or repro scenario>
+**Touchpoints:** <folders/files you suspect>
+**Constraints:** <perf/determinism/UX>
+**Notes:** <optional>
+**Status:** queued | in-progress | blocked | done

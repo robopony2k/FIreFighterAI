@@ -1,0 +1,29 @@
+# Game Design
+
+## Design Principles
+- **Systems-First**: Mechanics driven by simulation, not scripts.
+- **Readability Over Realism**: Simplify complex fire physics for player understanding (e.g., heat diffusion approximates spread).
+- **Long-Term Consequences**: Budget and approval changes persist across seasons, emphasizing strategy.
+- **Emergent Gameplay**: Player choices create varied outcomes without hard-coded events.
+
+## Design Goals
+- Balance realism (fuel-based spread, climate impact) with accessibility (clear UI, phase structure).
+- Encourage preparation: Maintenance phase rewards proactive planning.
+- High cognitive load in Fire phase to simulate chaos, with recovery for reflection.
+
+## Seasonal Intent
+- **Growth**: Passive ecological recovery; players observe but don't intervene directly.
+- **Maintenance**: Active preparation; cut breaks, train units to mitigate future fires.
+- **Fire**: Chaotic response; deploy units strategically to contain spread.
+- **Budget**: Reflective review; allocate based on performance, with approval penalties for failure.
+
+## Player Affordances
+- **Growth**: View forecasts, plan ahead.
+- **Maintenance**: Deploy units, cut breaks, train crews.
+- **Fire**: Click-to-deploy, retask units, monitor spread.
+- **Budget**: Adjust allocations, view reports.
+
+## Constraints and Philosophy
+- **What Should Never Happen**: Fires in water tiles; units ignoring terrain costs; infinite fuel loops.
+- **Abstractions**: Fire spread uses simplified heat diffusion (not full physics); units have abstracted suppression rates.
+- **Realism Trade-Offs**: Prioritize fun and pacing over hyper-accurate wildfire models.

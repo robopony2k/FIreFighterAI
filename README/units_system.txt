@@ -1,0 +1,23 @@
+# Units System
+
+## Purpose
+Manages deployment, movement, and suppression of firefighting units to contain fires.
+
+## Inputs
+- Unit types (firefighter, truck).
+- Target tiles and formations.
+- Terrain costs and fire state.
+
+## Outputs
+- Updated unit positions and actions.
+- Suppression effects on fire.
+
+## Key Tunables
+- Movement speed and suppression rate.
+- Training multipliers.
+- Formation bonuses.
+
+## Performance Trade-Offs
+- A* pathfinding with min-heap (efficient for sparse units).
+- Batch updates per tick (scales with unit count).
+- Abstraction: No individual AI; player-directed for strategy focus.

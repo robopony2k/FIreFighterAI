@@ -276,6 +276,13 @@ type WaterUniforms = {
   u_deepColor: { value: THREE.Color };
   u_opacity: { value: number };
   u_waveScale: { value: number };
+  u_normalMap1?: { value: THREE.Texture };
+  u_normalMap2?: { value: THREE.Texture };
+  u_scroll1?: { value: THREE.Vector2 };
+  u_scroll2?: { value: THREE.Vector2 };
+  u_normalScale?: { value: number };
+  u_normalStrength?: { value: number };
+  u_shininess?: { value: number };
   u_lightDir: { value: THREE.Vector3 };
   u_specular: { value: number };
 };
@@ -291,13 +298,33 @@ export const createThreeTest = (canvas: HTMLCanvasElement): ThreeTestController 
   renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 
   const scene = new THREE.Scene();
-  scene.background = new THREE.Color(0x1a1d21);
+  const horizonColor = 0xffdab9;
+  const zenithColor = 0x87ceeb;
+  const gradientCanvas = document.createElement("canvas");
+  gradientCanvas.width = 2;
+  gradientCanvas.height = 256;
+  const context = gradientCanvas.getContext("2d")!;
+  const gradient = context.createLinearGradient(0, 0, 0, gradientCanvas.height);
+  gradient.addColorStop(0, new THREE.Color(zenithColor).getStyle());
+  gradient.addColorStop(0.45, new THREE.Color(zenithColor).getStyle());
+  gradient.addColorStop(0.55, new THREE.Color(horizonColor).getStyle());
+  gradient.addColorStop(1, new THREE.Color(horizonColor).getStyle());
+  context.fillStyle = gradient;
+  context.fillRect(0, 0, gradientCanvas.width, gradientCanvas.height);
+  const texture = new THREE.CanvasTexture(gradientCanvas);
+  texture.magFilter = THREE.LinearFilter;
+  texture.minFilter = THREE.LinearFilter;
+  texture.wrapS = THREE.ClampToEdgeWrapping;
+  texture.wrapT = THREE.ClampToEdgeWrapping;
+  scene.background = texture;
+
+  // Fog disabled: removed because it caused whiteout/edge artefacts.
 
   const camera = new THREE.PerspectiveCamera(45, 1, 0.1, 100);
   camera.position.set(2.6, 2.2, 3.4);
   camera.lookAt(0, 0, 0);
 
-  const hemisphere = new THREE.HemisphereLight(0xd6d3c4, 0x2d362b, 0.55);
+  const hemisphere = new THREE.HemisphereLight(zenithColor, 0x4d433b, 0.65);
   scene.add(hemisphere);
   const ambient = new THREE.AmbientLight(0xffffff, 0.25);
   scene.add(ambient);
@@ -390,6 +417,7 @@ export const createThreeTest = (canvas: HTMLCanvasElement): ThreeTestController 
     const distance = Math.max(8, size * 0.6);
     camera.near = 0.1;
     camera.far = Math.max(200, distance * 6);
+    // Fog disabled: keep camera frustum and lighting adjustments only.
     camera.position.set(distance * 0.65, distance * 0.55, distance * 0.65);
     controls.minDistance = Math.max(3, distance * 0.15);
     controls.maxDistance = Math.max(120, distance * 4);
@@ -467,20 +495,73 @@ export const createThreeTest = (canvas: HTMLCanvasElement): ThreeTestController 
         Math.max(1, water.sampleRows - 1)
       );
       waterGeometry.rotateX(-Math.PI / 2);
+      // create small neutral normal textures as safe defaults (can be replaced with better maps)
+      const makeNeutralNormal = () => {
+        const size = 2;
+        const data = new Uint8Array(size * size * 3);
+        for (let i = 0; i < size * size; i++) {
+          data[i * 3 + 0] = 128; // R
+          data[i * 3 + 1] = 128; // G
+          data[i * 3 + 2] = 255; // B (pointing up)
+        }
+        const tex = new THREE.DataTexture(data, size, size, THREE.RGBFormat);
+        tex.needsUpdate = true;
+        tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+        tex.minFilter = THREE.LinearMipMapLinearFilter;
+        tex.magFilter = THREE.LinearFilter;
+        return tex;
+      };
+      const defaultNormal1 = makeNeutralNormal();
+      const defaultNormal2 = makeNeutralNormal();
+
       waterUniforms = {
         u_time: { value: 0 },
+<<<<<<< HEAD
         u_mask: { value: water.mask },
         u_color: { value: new THREE.Color(0x3b7f9c) },
         u_deepColor: { value: new THREE.Color(0x143449) },
         u_opacity: { value: 0.68 },
+=======
+        u_mask: { value: waterMask },
+        u_color: { value: new THREE.Color(0x1f6fb2) },
+        u_deepColor: { value: new THREE.Color(0x0b2a45) },
+        u_opacity: { value: 0.88 },
+>>>>>>> 6611271 (water shader)
         u_waveScale: { value: 0.28 },
+        u_normalMap1: { value: defaultNormal1 },
+        u_normalMap2: { value: defaultNormal2 },
+        u_scroll1: { value: new THREE.Vector2(0.02, 0.01) },
+        u_scroll2: { value: new THREE.Vector2(-0.015, 0.018) },
+        u_normalScale: { value: 0.08 },
+        u_normalStrength: { value: 0.8 },
+        u_shininess: { value: 40.0 },
         u_lightDir: { value: keyLight.position.clone().normalize() },
         u_specular: { value: 0.6 }
-      };
+      } as unknown as WaterUniforms;
+
+      // If the user has provided normal maps in assets/textures, load and assign them.
+      const loader = new THREE.TextureLoader();
+      const maxAniso = renderer.capabilities.getMaxAnisotropy();
+      loader.load('assets/textures/water1.png', (tex) => {
+        tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+        tex.minFilter = THREE.LinearMipMapLinearFilter;
+        tex.magFilter = THREE.LinearFilter;
+        tex.anisotropy = maxAniso;
+        (waterUniforms as any).u_normalMap1.value = tex;
+      });
+      loader.load('assets/textures/water2.png', (tex) => {
+        tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+        tex.minFilter = THREE.LinearMipMapLinearFilter;
+        tex.magFilter = THREE.LinearFilter;
+        tex.anisotropy = maxAniso;
+        (waterUniforms as any).u_normalMap2.value = tex;
+      });
+
       const waterMaterial = new THREE.ShaderMaterial({
-        uniforms: waterUniforms,
+        uniforms: waterUniforms as any,
         transparent: true,
         depthWrite: false,
+<<<<<<< HEAD
         vertexShader: `
           varying vec2 vUv;
           varying vec3 vWorldPos;
@@ -526,6 +607,73 @@ export const createThreeTest = (canvas: HTMLCanvasElement): ThreeTestController 
             gl_FragColor = vec4(color, u_opacity * mask);
           }
         `
+=======
+            vertexShader: `
+              varying vec2 vUv;
+              varying vec3 vWorldPos;
+              uniform float u_time;
+              void main() {
+                vUv = uv;
+                vec4 worldPos = modelMatrix * vec4(position, 1.0);
+                vWorldPos = worldPos.xyz;
+                gl_Position = projectionMatrix * viewMatrix * worldPos;
+              }
+            `,
+            fragmentShader: `
+              varying vec2 vUv;
+              varying vec3 vWorldPos;
+              uniform sampler2D u_mask;
+              uniform vec3 u_color; // shallow/surface color
+              uniform vec3 u_deepColor; // deep offshore color
+              uniform float u_opacity;
+              uniform float u_time;
+              uniform float u_waveScale;
+              uniform float u_normalScale;
+              uniform float u_normalStrength;
+              uniform float u_shininess;
+              uniform vec3 u_lightDir;
+              uniform float u_specular;
+              uniform sampler2D u_normalMap1;
+              uniform sampler2D u_normalMap2;
+              uniform vec2 u_scroll1;
+              uniform vec2 u_scroll2;
+              void main() {
+                float mask = texture2D(u_mask, vUv).a;
+                if (mask < 0.02) discard;
+                // sample two scrolling normal maps in world-space XZ
+                vec2 worldUv = vWorldPos.xz * u_waveScale;
+                vec2 uv1 = worldUv + u_scroll1 * u_time;
+                vec2 uv2 = worldUv + u_scroll2 * u_time;
+                vec3 nm1 = texture2D(u_normalMap1, uv1).xyz * 2.0 - 1.0;
+                vec3 nm2 = texture2D(u_normalMap2, uv2).xyz * 2.0 - 1.0;
+                vec3 nmap = normalize(mix(nm1, nm2, 0.5));
+                // convert sampled tangent-like normal into a simple world-space perturbation
+                vec3 n = normalize(vec3(nmap.x * u_normalScale * u_normalStrength, 1.0, nmap.y * u_normalScale * u_normalStrength));
+                vec3 viewDir = normalize(cameraPosition - vWorldPos);
+                vec3 lightDir = normalize(u_lightDir);
+                // diffuse
+                float diffuse = max(dot(n, lightDir), 0.0);
+                // specular (Blinn-Phong)
+                vec3 halfDir = normalize(lightDir + viewDir);
+                float spec = pow(max(dot(n, halfDir), 0.0), max(1.0, u_shininess)) * u_specular;
+                // fresnel rim
+                float fresnel = pow(1.0 - max(dot(viewDir, n), 0.0), 3.0);
+                // depth-like tint using mask as proxy for proximity to shore
+                float depthFactor = pow(clamp(mask, 0.0, 1.0), 1.2);
+                vec3 baseColor = mix(u_color, u_deepColor, depthFactor);
+                // shoreline foam and brightness
+                float shore = smoothstep(0.0, 0.85, 1.0 - mask);
+                float foamNoise = sin((vWorldPos.x + u_time * 0.25) * 1.4) * sin((vWorldPos.z - u_time * 0.18) * 1.1);
+                foamNoise = foamNoise * 0.5 + 0.5;
+                float foam = shore * (0.45 + foamNoise * 0.6);
+                vec3 foamColor = vec3(0.9, 0.96, 1.0);
+                vec3 color = mix(baseColor, foamColor, clamp(foam, 0.0, 1.0) * 0.6);
+                // combine lighting
+                color = color * (0.6 + diffuse * 0.4) + (fresnel * 0.12 + spec);
+                gl_FragColor = vec4(color, u_opacity * mask);
+              }
+            `
+>>>>>>> 6611271 (water shader)
       });
       waterMesh = new THREE.Mesh(waterGeometry, waterMaterial);
       waterMesh.position.y = mesh.position.y + water.level + 0.08;

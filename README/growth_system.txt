@@ -1,0 +1,23 @@
+# Growth System
+
+## Purpose
+Handles passive ecological recovery, increasing fuel loads over time to simulate vegetation regrowth.
+
+## Inputs
+- Current fuel levels.
+- Moisture and season data.
+- Growth rate constants.
+
+## Outputs
+- Updated fuel per tile.
+- Regrowth events (e.g., forest expansion).
+
+## Key Tunables
+- Base growth rate.
+- Moisture multiplier.
+- Seasonal modifiers (faster in growth phase).
+
+## Performance Trade-Offs
+- Simple per-tile updates (fast, O(n)).
+- No spatial interactions (e.g., no competition models) for simplicity.
+- Deterministic: Ensures reproducible maps.

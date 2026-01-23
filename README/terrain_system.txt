@@ -1,0 +1,22 @@
+# Terrain System
+
+## Purpose
+Generates and manages procedural landscapes, providing fuel, elevation, and pathing data for simulation.
+
+## Inputs
+- Seed and size parameters.
+- Noise functions for variation.
+
+## Outputs
+- Tile grid with elevations, moisture, fuel types.
+- Community placements and roads.
+
+## Key Tunables
+- Elevation scale and octaves.
+- Moisture thresholds for biomes.
+- Fuel profiles (from YAML config).
+
+## Performance Trade-Offs
+- Async generation with progress (avoids blocking UI).
+- Precomputed distances (e.g., to communities) for pathing efficiency.
+- Memory: SoA (Struct of Arrays) for tiles reduces overhead.

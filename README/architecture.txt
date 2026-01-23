@@ -1,0 +1,39 @@
+# Architecture
+
+## Major Modules and Responsibilities
+- **Core** (`src/core/`): Manages authoritative state (`WorldState`), types, constants, climate, and time. Provides utilities and RNG.
+- **MapGen** (`src/mapgen/`): Procedural generation of terrain, elevations, moisture, communities, and roads.
+- **Sim** (`src/sim/`): Handles simulation systems like fire spread, unit actions, growth, and pathfinding.
+- **Render** (`src/render/`): Non-authoritative rendering (2D Canvas and 3D Three.js).
+- **UI** (`src/ui/`): User interfaces, bindings, and phase management.
+- **Persistence** (`src/persistence/`): Saves leaderboards to localStorage.
+
+## Data Flow Direction
+- MapGen → Core (initializes `WorldState`).
+- Sim reads from Core, writes back updates.
+- Render reads from Core (read-only).
+- UI reads from Core, triggers Sim actions.
+- Persistence reads from Core on game end.
+
+## Coupling Boundaries
+- Sim is decoupled from Render (no direct calls).
+- Core state is immutable except during Sim ticks.
+- RNG is seeded for determinism in Sim, but Render can be non-deterministic.
+
+## Simulation Layers
+- **WorldState**: Authoritative, serializable state.
+- **Systems**: Fire, growth, weather, units (deterministic).
+- **Rendering**: Visual effects (non-deterministic).
+
+## Tick Order
+1. Advance time and phase.
+2. Update climate and weather.
+3. Simulate growth/decay.
+4. Propagate fire.
+5. Execute unit actions and pathfinding.
+6. Update visuals and particles.
+
+## Determinism Boundaries
+- Sim is fully deterministic with seeds.
+- Render effects (e.g., particle randomness) are non-deterministic for performance.
+- State checksums ensure reproducibility.
