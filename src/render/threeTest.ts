@@ -11,7 +11,10 @@ export type TerrainSample = {
   rows: number;
   elevations: Float32Array;
   tileTypes?: Uint8Array;
+<<<<<<< HEAD
   treeTypes?: Uint8Array;
+=======
+>>>>>>> 1fdb952 (rivers based on riverBias and map size)
   riverMask?: Uint8Array;
   debugTypeColors?: boolean;
   treesEnabled?: boolean;
@@ -30,6 +33,8 @@ type TreeVariant = {
 };
 
 type TreeAssets = Record<TreeType, TreeVariant[]>;
+
+let threeTestLoggedTotal = -1;
 
 let threeTestLoggedTotal = -1;
 

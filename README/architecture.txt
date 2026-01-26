@@ -37,3 +37,6 @@
 - Sim is fully deterministic with seeds.
 - Render effects (e.g., particle randomness) are non-deterministic for performance.
 - State checksums ensure reproducibility.
+- Static spatial fields (elevation, moisture, distance-to-water) are generated once during map creation.
+- Runtime simulation systems consume these fields but never recompute them.
+- This avoids expensive spatial queries during fire or growth phases.

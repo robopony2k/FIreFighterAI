@@ -22,3 +22,13 @@ Simulates directional, fuel-based fire spread at scale, creating emergent wildfi
 - Heat diffusion approximates physics for speed (O(n) per tick).
 - Visual fire is non-deterministic (random particles) to avoid simulation overhead.
 - Grid-based: Scales to large maps but abstracts continuous spread.
+
+## Fire–Moisture Interaction
+
+The fire system does not currently mutate tile moisture.
+
+- Moisture does not diffuse or change during fire.
+- Any moisture influence on fire behaviour is indirect or via derived values (e.g. ignition thresholds, heat retention).
+- Distance-to-water is not queried during fire propagation.
+
+This separation preserves performance and determinism during fire season.

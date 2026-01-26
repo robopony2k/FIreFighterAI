@@ -1,7 +1,7 @@
 import type { WorldState } from "../core/state.js";
-import { TILE_SIZE, TILE_COLOR_RGB } from "../core/config.js";
+import { DEBUG_TERRAIN_RENDER, TILE_SIZE, TILE_COLOR_RGB } from "../core/config.js";
 import { indexFor } from "../core/grid.js";
-import { getTileHeight, getViewTransform, isoProject } from "./iso.js";
+import { getHeightScale, getTileHeight, getViewTransform, isoProject, setHeightScale } from "./iso.js";
 import { syncTileSoA } from "../core/state.js";
 import { getVisibleBounds } from "./view.js";
 import type { ViewTransform } from "./view.js";
@@ -35,6 +35,37 @@ const GRID_COLORS = {
 
 const rgbaString = (color: { r: number; g: number; b: number }, alpha: number) =>
   `rgba(${Math.round(color.r)}, ${Math.round(color.g)}, ${Math.round(color.b)}, ${alpha})`;
+
+let terrainRenderStatsTotal = -1;
+const logTerrainRenderStats = (state: WorldState): void => {
+  if (!DEBUG_TERRAIN_RENDER) {
+    return;
+  }
+  if (state.grid.totalTiles === terrainRenderStatsTotal) {
+    return;
+  }
+  const elevations = state.tileElevation;
+  if (!elevations || elevations.length === 0) {
+    return;
+  }
+  let min = 1;
+  let max = 0;
+  let sum = 0;
+  for (let i = 0; i < elevations.length; i += 1) {
+    const value = elevations[i];
+    min = Math.min(min, value);
+    max = Math.max(max, value);
+    sum += value;
+  }
+  const mean = sum / Math.max(1, elevations.length);
+  const heightScale = getHeightScale(state);
+  console.log(
+    `Render heights: elev[min=${min.toFixed(3)} max=${max.toFixed(3)} mean=${mean.toFixed(3)}] heightMax=${(
+      max * heightScale
+    ).toFixed(2)}`
+  );
+  terrainRenderStatsTotal = state.grid.totalTiles;
+};
 
 const COAST_EDGE_N = 1;
 const COAST_EDGE_E = 2;
@@ -1267,6 +1298,8 @@ const drawDebugCellPanel = (
 export function draw(state: WorldState, canvas: HTMLCanvasElement, ctx: CanvasRenderingContext2D, alpha = 1): void {
   // Ensure the Structure-of-Arrays tile data is in sync with the main state.
   syncTileSoA(state);
+  setHeightScale(getHeightScale(state));
+  logTerrainRenderStats(state);
 
   const view = getViewTransform(state, canvas);
   const now = performance.now();

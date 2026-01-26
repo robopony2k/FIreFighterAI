@@ -2,7 +2,10 @@
 
 ## Core State Objects
 - **WorldState**: Top-level struct with tiles, units, climate, time, and phase.
-- **Tile**: Fuel, heat, elevation, moisture, type (e.g., forest, water).
+  - Authoritative simulation state.
+  - Carries Struct-of-Arrays (SoA) storage for tile properties, including:
+    - tileMoisture: Float32Array
+    - tileWaterDist: Uint16Array / Uint32Array- **Tile**: Fuel, heat, elevation, moisture, type (e.g., forest, water).
 - **Unit**: Position, type, crew level, target.
 - **Climate**: Temperature, wind vector, moisture.
 - **Time**: Current tick, phase, year.
@@ -13,6 +16,17 @@
 - Water tiles: Fuel = 0, never ignite.
 - Units: Position within grid bounds; can't occupy same tile.
 - Approval: 0-100 range; drops on poor performance.
+- Moisture is clamped to [0..1].
+- Water tiles always have moisture = 1.
+- Moisture and water-distance are deterministic for a given seed.
+
+## Tile ##
+- fuel: current fuel load
+- heat: accumulated heat
+- elevation: static terrain height
+- moisture: static per-tile moisture scalar [0..1]
+- type: terrain classification (e.g. forest, grass, water)
+
 
 ## Mutation Rules Per Tick
 - Sim systems (fire, growth) mutate WorldState during tick.

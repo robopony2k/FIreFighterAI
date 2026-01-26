@@ -2,10 +2,9 @@
 import type { WorldState } from "../core/state.js";
 import { inBounds, indexFor } from "../core/grid.js";
 import { hash2D } from "../mapgen/noise.js";
-import { getHeightAt as getSmoothedHeightAt, getTileHeight, isoProject } from "./iso.js";
+import { getHeightAt as getSmoothedHeightAt, getHeightScale, getTileHeight, isoProject } from "./iso.js";
 import {
   TILE_SIZE,
-  HEIGHT_SCALE,
   ISO_TILE_WIDTH,
   ISO_TILE_HEIGHT,
   TILE_COLOR_RGB,
@@ -34,9 +33,9 @@ const ROAD_CENTER_SHIFT = 0.2;
 const ROAD_WIDTH_JITTER = 0.12;
 const ROAD_VERGE_ALPHA = 0.22;
 const ROAD_PAD_SCALE = 1.25;
-const SHORE_SAND_DISTANCE = 3;
-const SHORE_SAND_ALPHA = 0.6;
-const SHORE_SAND_EDGE_ALPHA = 0.35;
+const SHORE_SAND_DISTANCE = 1;
+const SHORE_SAND_ALPHA = 0.45;
+const SHORE_SAND_EDGE_ALPHA = 0.2;
 const WATER_SURFACE_ALPHA = 0.98;
 const SHALLOW_WATER_BLEND = 0.6;
 
@@ -71,6 +70,12 @@ let treeSprites: TreeSpriteSet | null = null;
 let terrainCache: TerrainCache | null = null;
 let treeLayerCache: TerrainCache | null = null;
 let treeBurnScratch: { canvas: HTMLCanvasElement; ctx: CanvasRenderingContext2D } | null = null;
+
+export const resetTerrainCaches = (): void => {
+  terrainCache = null;
+  treeLayerCache = null;
+  treeBurnScratch = null;
+};
 
 const isGrassLikeType = (type: WorldState["tiles"][number]["type"]) =>
   type === "grass" || type === "scrub" || type === "floodplain";
@@ -953,7 +958,7 @@ const drawHouseOnTile = (
 
 export const ensureTerrainCache = (state: WorldState, now: number): TerrainCache => {
   const { cols, rows } = state.grid;
-  const maxHeight = HEIGHT_SCALE;
+  const maxHeight = getHeightScale(state);
   const originX = -rows * ISO_TILE_WIDTH * 0.5 - TERRAIN_PADDING;
   const originY = -maxHeight - TERRAIN_PADDING;
   const width = (cols + rows) * ISO_TILE_WIDTH * 0.5 + TERRAIN_PADDING * 2;
@@ -1145,7 +1150,7 @@ export const ensureTreeLayerCache = (state: WorldState, now: number): TerrainCac
     return null;
   }
   const { cols, rows } = state.grid;
-  const maxHeight = HEIGHT_SCALE;
+  const maxHeight = getHeightScale(state);
   const originX = -rows * ISO_TILE_WIDTH * 0.5 - TERRAIN_PADDING;
   const originY = -maxHeight - TERRAIN_PADDING;
   const width = (cols + rows) * ISO_TILE_WIDTH * 0.5 + TERRAIN_PADDING * 2;

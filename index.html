@@ -34,7 +34,17 @@
               <h2>3D Renderer Preview</h2>
               <p>Experimental WebGL view using Three.js.</p>
             </div>
-            <button id="threeTestClose" type="button">Close</button>
+            <div class="three-test-actions">
+              <div class="three-test-controls">
+                <label class="three-test-toggle">
+                  <input id="threeTestAuto" type="checkbox" checked />
+                  Auto
+                </label>
+                <button id="threeTestStep" type="button">Next step</button>
+                <span id="threeTestPhase" class="three-test-phase">Idle</span>
+              </div>
+              <button id="threeTestClose" type="button">Close</button>
+            </div>
           </div>
           <div class="three-test-canvas-wrap">
             <canvas id="threeTestCanvas"></canvas>

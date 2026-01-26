@@ -8,13 +8,45 @@ Generates and manages procedural landscapes, providing fuel, elevation, and path
 - Noise functions for variation.
 
 ## Outputs
-- Tile grid with elevations, moisture, fuel types.
+- Tile grid with elevation, fuel types, and **static per-tile moisture**.
+- Distance-to-water map used for moisture derivation.
 - Community placements and roads.
+
+## Moisture Model (Map Generation)
+
+Moisture is generated **once at map creation** and stored as a deterministic, per-tile scalar in the range [0..1].
+
+- Moisture represents long-term environmental wetness (e.g. proximity to water, elevation).
+- It is **not recomputed during gameplay**.
+- It does not diffuse or change over time.
+
+### Computation
+- A multi-source BFS distance transform computes distance to nearest water tile.
+- All water tiles are initial BFS sources (distance = 0).
+- The algorithm runs in O(n) time over the grid using a ring-buffer queue.
+- Distance computation is chunked with yielding and guarded by a safety watchdog to prevent stalls.
+
+Moisture is then derived from:
+- Normalised distance to water (with saturation cap),
+- Elevation-based dryness adjustment,
+- Optional gamma shaping for distribution control.
+
+The resulting moisture value is stored in both:
+- Tile objects (AoS), and
+- Struct-of-Arrays storage for performance-critical systems.
+
+
 
 ## Key Tunables
 - Elevation scale and octaves.
 - Moisture thresholds for biomes.
 - Fuel profiles (from YAML config).
+
+## Performance Characteristics
+- Distance-to-water is computed once during map generation.
+- No per-tile distance scanning or pathfinding is performed at runtime.
+- All moisture-related runtime systems rely only on cheap arithmetic.
+
 
 ## Performance Trade-Offs
 - Async generation with progress (avoids blocking UI).

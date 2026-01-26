@@ -5,7 +5,8 @@ Handles passive ecological recovery, increasing fuel loads over time to simulate
 
 ## Inputs
 - Current fuel levels.
-- Moisture and season data.
+- **Static per-tile moisture (from map generation)**.
+- Season data.
 - Growth rate constants.
 
 ## Outputs
@@ -21,3 +22,8 @@ Handles passive ecological recovery, increasing fuel loads over time to simulate
 - Simple per-tile updates (fast, O(n)).
 - No spatial interactions (e.g., no competition models) for simplicity.
 - Deterministic: Ensures reproducible maps.
+
+## Notes on Moisture
+- Moisture is treated as a long-term environmental modifier.
+- It biases regrowth speed and success but does not change dynamically.
+- Dynamic climate effects (e.g. hot summers) are handled separately and do not mutate base moisture.

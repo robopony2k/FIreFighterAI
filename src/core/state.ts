@@ -105,7 +105,10 @@ export interface WorldState {
   tileHeatOutput: Float32Array;
 
   tileElevation: Float32Array;
+  tileMoisture: Float32Array;
   tileTypeId: Uint8Array;
+  tileWaterDist: Uint16Array;
+  tileRiverMask: Uint8Array;
   igniteMask: Uint8Array;
   tileSoaDirty: boolean;
   tileSoaPhase: SeasonPhase | null;
@@ -296,7 +299,10 @@ export function createInitialState(seed: number, grid: Grid): WorldState {
     baselineHeatScratch: new Float32Array(grid.totalTiles),
     baselineNextHeat: new Float32Array(grid.totalTiles),
     tileElevation: new Float32Array(grid.totalTiles),
+    tileMoisture: new Float32Array(grid.totalTiles),
     tileTypeId: new Uint8Array(grid.totalTiles),
+    tileWaterDist: new Uint16Array(grid.totalTiles),
+    tileRiverMask: new Uint8Array(grid.totalTiles),
 
     tileSoaDirty: true,
 
@@ -493,7 +499,10 @@ export function syncTileSoA(state: WorldState): void {
     state.tileBurnRate = new Float32Array(total);
     state.tileHeatOutput = new Float32Array(total);
     state.tileElevation = new Float32Array(total);
+    state.tileMoisture = new Float32Array(total);
     state.tileTypeId = new Uint8Array(total);
+    state.tileWaterDist = new Uint16Array(total);
+    state.tileRiverMask = new Uint8Array(total);
     state.heatBuffer = new Float32Array(total);
     state.fireSnapshot = new Float32Array(total);
     state.renderFireSmooth = new Float32Array(total);
@@ -525,8 +534,10 @@ export function syncTileSoA(state: WorldState): void {
   const heatOutput = state.tileHeatOutput;
 
   const elevation = state.tileElevation;
+  const moisture = state.tileMoisture;
 
   const typeId = state.tileTypeId;
+  const waterDist = state.tileWaterDist;
 
 
 
@@ -549,6 +560,8 @@ export function syncTileSoA(state: WorldState): void {
     elevation[i] = tile.elevation;
 
     typeId[i] = TILE_TYPE_IDS[tile.type];
+    moisture[i] = tile.moisture;
+    waterDist[i] = tile.waterDist;
 
   }
 

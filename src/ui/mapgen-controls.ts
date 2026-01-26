@@ -4,10 +4,11 @@ import type { MapGenSettings } from "../mapgen/settings.js";
 type MapGenSlider = {
   key: keyof MapGenSettings;
   label: string;
+  tooltip: string;
   min: number;
   max: number;
   step: number;
-  format?: "int" | "fixed2";
+  format?: "int" | "fixed2" | "percent";
   inputId: string;
   outputId: string;
 };
@@ -24,8 +25,9 @@ const MAPGEN_GROUPS: MapGenGroup[] = [
       {
         key: "elevationScale",
         label: "Height intensity",
+        tooltip: "Overall terrain height multiplier. Higher values make taller terrain (too high can clip peaks).",
         min: 0.6,
-        max: 3,
+        max: 2.2,
         step: 0.05,
         inputId: "runElevationScale",
         outputId: "runElevationScaleValue"
@@ -33,7 +35,8 @@ const MAPGEN_GROUPS: MapGenGroup[] = [
       {
         key: "elevationExponent",
         label: "Height curve",
-        min: 0.8,
+        tooltip: "Curve applied to elevation noise. Higher values flatten lowlands and sharpen peaks.",
+        min: 0.6,
         max: 2.4,
         step: 0.05,
         inputId: "runElevationExponent",
@@ -42,8 +45,9 @@ const MAPGEN_GROUPS: MapGenGroup[] = [
       {
         key: "mountainScale",
         label: "Mountain scale",
-        min: 0.7,
-        max: 2.2,
+        tooltip: "Controls the size of mountain features. Higher values create broader ranges.",
+        min: 0.6,
+        max: 2.4,
         step: 0.05,
         inputId: "runMountainScale",
         outputId: "runMountainScaleValue"
@@ -51,6 +55,7 @@ const MAPGEN_GROUPS: MapGenGroup[] = [
       {
         key: "ridgeStrength",
         label: "Ridge sharpness",
+        tooltip: "Adds sharp ridges and crags. Higher values make terrain more rugged.",
         min: 0,
         max: 0.35,
         step: 0.01,
@@ -60,8 +65,9 @@ const MAPGEN_GROUPS: MapGenGroup[] = [
       {
         key: "valleyDepth",
         label: "Valley depth",
-        min: 0.6,
-        max: 2.6,
+        tooltip: "Depth of carved valleys and river channels. Higher values deepen low areas.",
+        min: 0.4,
+        max: 3.0,
         step: 0.05,
         inputId: "runValleyDepth",
         outputId: "runValleyDepthValue"
@@ -74,8 +80,9 @@ const MAPGEN_GROUPS: MapGenGroup[] = [
       {
         key: "forestMacroScale",
         label: "Forest patch size",
-        min: 10,
-        max: 32,
+        tooltip: "Size of large forest regions. Higher values create bigger patches.",
+        min: 6,
+        max: 60,
         step: 1,
         format: "int",
         inputId: "runForestMacroScale",
@@ -84,8 +91,9 @@ const MAPGEN_GROUPS: MapGenGroup[] = [
       {
         key: "forestDetailScale",
         label: "Forest detail scale",
-        min: 4,
-        max: 16,
+        tooltip: "Fine-grain forest variation within patches. Higher values increase detail size.",
+        min: 2,
+        max: 24,
         step: 1,
         format: "int",
         inputId: "runForestDetailScale",
@@ -94,8 +102,9 @@ const MAPGEN_GROUPS: MapGenGroup[] = [
       {
         key: "forestThreshold",
         label: "Forest density",
-        min: 0.5,
-        max: 0.8,
+        tooltip: "Threshold for forest placement. Higher values mean fewer forests.",
+        min: 0.35,
+        max: 0.9,
         step: 0.01,
         inputId: "runForestThreshold",
         outputId: "runForestThresholdValue"
@@ -103,8 +112,9 @@ const MAPGEN_GROUPS: MapGenGroup[] = [
       {
         key: "highlandForestElevation",
         label: "Highland forest elevation",
-        min: 0.6,
-        max: 0.9,
+        tooltip: "Upper elevation cutoff for forests. Higher values allow forests at higher altitudes.",
+        min: 0.5,
+        max: 0.95,
         step: 0.01,
         inputId: "runHighlandForestElevation",
         outputId: "runHighlandForestElevationValue"
@@ -112,8 +122,9 @@ const MAPGEN_GROUPS: MapGenGroup[] = [
       {
         key: "meadowScale",
         label: "Meadow scale",
-        min: 10,
-        max: 40,
+        tooltip: "Size of meadow features. Higher values create larger meadows.",
+        min: 6,
+        max: 64,
         step: 1,
         format: "int",
         inputId: "runMeadowScale",
@@ -122,8 +133,9 @@ const MAPGEN_GROUPS: MapGenGroup[] = [
       {
         key: "meadowThreshold",
         label: "Meadow threshold",
-        min: 0.4,
-        max: 0.8,
+        tooltip: "Threshold for meadow placement. Higher values mean fewer meadows.",
+        min: 0.3,
+        max: 0.9,
         step: 0.01,
         inputId: "runMeadowThreshold",
         outputId: "runMeadowThresholdValue"
@@ -131,6 +143,7 @@ const MAPGEN_GROUPS: MapGenGroup[] = [
       {
         key: "meadowStrength",
         label: "Meadow strength",
+        tooltip: "How strongly meadows reduce grass/forest canopy. Higher values make meadows more open.",
         min: 0,
         max: 1,
         step: 0.01,
@@ -140,8 +153,9 @@ const MAPGEN_GROUPS: MapGenGroup[] = [
       {
         key: "grassCanopyBase",
         label: "Grass canopy base",
+        tooltip: "Baseline grass canopy coverage. Higher values make grass thicker everywhere.",
         min: 0,
-        max: 0.2,
+        max: 0.35,
         step: 0.01,
         inputId: "runGrassCanopyBase",
         outputId: "runGrassCanopyBaseValue"
@@ -149,8 +163,9 @@ const MAPGEN_GROUPS: MapGenGroup[] = [
       {
         key: "grassCanopyRange",
         label: "Grass canopy range",
+        tooltip: "Variation range for grass canopy. Higher values increase patchiness.",
         min: 0,
-        max: 0.4,
+        max: 0.6,
         step: 0.01,
         inputId: "runGrassCanopyRange",
         outputId: "runGrassCanopyRangeValue"
@@ -161,28 +176,43 @@ const MAPGEN_GROUPS: MapGenGroup[] = [
     title: "Water & Rivers",
     sliders: [
       {
-        key: "baseWaterThreshold",
-        label: "Base water threshold",
-        min: 0.08,
-        max: 0.22,
+        key: "waterCoverage",
+        label: "Water coverage",
+        tooltip: "Target share of water tiles. Sea level is raised until this percentage is reached.",
+        min: 0.1,
+        max: 0.75,
         step: 0.01,
-        inputId: "runBaseWaterThreshold",
-        outputId: "runBaseWaterThresholdValue"
+        format: "percent",
+        inputId: "runWaterCoverage",
+        outputId: "runWaterCoverageValue"
       },
       {
         key: "edgeWaterBias",
         label: "Coast water bias",
+        tooltip: "How strongly water is favored near edges when setting sea level. Higher values enlarge coastlines.",
         min: 0,
-        max: 0.25,
+        max: 0.4,
         step: 0.01,
         inputId: "runEdgeWaterBias",
         outputId: "runEdgeWaterBiasValue"
       },
       {
-        key: "riverWaterBias",
-        label: "River water bias",
+        key: "riverCount",
+        label: "River count (0 = auto)",
+        tooltip: "Number of rivers to carve. Set to 0 to keep automatic river counts by map size.",
         min: 0,
-        max: 0.3,
+        max: 12,
+        step: 1,
+        format: "int",
+        inputId: "runRiverCount",
+        outputId: "runRiverCountValue"
+      },
+      {
+        key: "riverWaterBias",
+        label: "River carve strength",
+        tooltip: "Controls river channel width/depth and lake size. Higher values make rivers wider and lakes larger.",
+        min: 0,
+        max: 0.6,
         step: 0.01,
         inputId: "runRiverWaterBias",
         outputId: "runRiverWaterBiasValue"
@@ -194,6 +224,9 @@ const MAPGEN_GROUPS: MapGenGroup[] = [
 const formatValue = (value: number, format?: MapGenSlider["format"]): string => {
   if (format === "int") {
     return Math.round(value).toString();
+  }
+  if (format === "percent") {
+    return `${Math.round(value * 100)}%`;
   }
   return value.toFixed(2);
 };
@@ -217,6 +250,7 @@ export const buildMapGenControls = (): void => {
       const label = document.createElement("label");
       label.className = "run-slider";
       label.appendChild(document.createTextNode(slider.label));
+      label.title = slider.tooltip;
 
       const row = document.createElement("div");
       row.className = "run-slider-row";
@@ -227,6 +261,7 @@ export const buildMapGenControls = (): void => {
       input.min = slider.min.toString();
       input.max = slider.max.toString();
       input.step = slider.step.toString();
+      input.title = slider.tooltip;
       const defaultValue = DEFAULT_MAP_GEN_SETTINGS[slider.key];
       input.value = `${defaultValue}`;
       input.setAttribute("data-mapgen-key", slider.key);

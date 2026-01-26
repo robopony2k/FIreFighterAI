@@ -363,6 +363,32 @@ canvas {
   gap: 16px;
 }
 
+.three-test-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.three-test-controls {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.three-test-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.three-test-phase {
+  min-width: 140px;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+}
+
 .three-test-header h2 {
   margin: 6px 0 4px;
   font-size: 20px;

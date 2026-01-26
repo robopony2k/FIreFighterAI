@@ -258,6 +258,9 @@ export function initCharacterSelect(
     if (format === "int") {
       return Math.round(raw).toString();
     }
+    if (format === "percent") {
+      return `${Math.round(raw * 100)}%`;
+    }
     return raw.toFixed(2);
   };
 

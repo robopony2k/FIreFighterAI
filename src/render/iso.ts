@@ -1,6 +1,14 @@
 import type { Point } from "../core/types.js";
 import type { WorldState } from "../core/state.js";
-import { HEIGHT_SCALE, HEIGHT_WATER_DROP, ISO_TILE_HEIGHT, ISO_TILE_WIDTH, ZOOM_MAX, ZOOM_MIN } from "../core/config.js";
+import {
+  HEIGHT_MAP_RATIO,
+  HEIGHT_SCALE,
+  HEIGHT_WATER_DROP,
+  ISO_TILE_HEIGHT,
+  ISO_TILE_WIDTH,
+  ZOOM_MAX,
+  ZOOM_MIN
+} from "../core/config.js";
 import { clamp } from "../core/utils.js";
 import { inBounds, indexFor } from "../core/grid.js";
 
@@ -11,11 +19,23 @@ export function isoProject(wx: number, wy: number, height: number): Point {
   };
 }
 
+let activeHeightScale = HEIGHT_SCALE;
+
+export function getHeightScale(state: WorldState): number {
+  const minDim = Math.min(state.grid.cols, state.grid.rows);
+  const target = minDim * ISO_TILE_WIDTH * HEIGHT_MAP_RATIO;
+  return Math.max(HEIGHT_SCALE, target);
+}
+
+export function setHeightScale(scale: number): void {
+  activeHeightScale = Number.isFinite(scale) ? scale : HEIGHT_SCALE;
+}
+
 export function getTileHeight(tile: WorldState["tiles"][number] | undefined): number {
   if (!tile) {
     return 0;
   }
-  return tile.elevation * HEIGHT_SCALE - (tile.type === "water" ? HEIGHT_WATER_DROP : 0);
+  return tile.elevation * activeHeightScale - (tile.type === "water" ? HEIGHT_WATER_DROP : 0);
 }
 
 const sampleVertexHeight = (state: WorldState, vx: number, vy: number): number => {

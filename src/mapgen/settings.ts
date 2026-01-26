@@ -17,8 +17,10 @@ export type MapGenSettings = {
   meadowStrength: number;
   grassCanopyBase: number;
   grassCanopyRange: number;
+  waterCoverage: number;
   baseWaterThreshold: number;
   edgeWaterBias: number;
+  riverCount: number;
   riverWaterBias: number;
 };
 
@@ -27,7 +29,7 @@ export const DEFAULT_MAP_GEN_SETTINGS: MapGenSettings = {
   worldOffsetXM: 0,
   worldOffsetYM: 0,
   microScaleM: 40,
-  elevationScale: 1.15,
+  elevationScale: 0.7,
   elevationExponent: 1.3,
   mountainScale: 1.0,
   ridgeStrength: 0.08,
@@ -41,7 +43,9 @@ export const DEFAULT_MAP_GEN_SETTINGS: MapGenSettings = {
   meadowStrength: 0.75,
   grassCanopyBase: 0.05,
   grassCanopyRange: 0.22,
+  waterCoverage: 0.32,
   baseWaterThreshold: 0.14,
   edgeWaterBias: 0.14,
+  riverCount: 0,
   riverWaterBias: 0.18
 };

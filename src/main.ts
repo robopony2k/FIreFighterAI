@@ -3,8 +3,9 @@ import type { MapSizeId } from "./core/config.js";
 import { getCharacterBaseBudget } from "./core/characters.js";
 import { RNG } from "./core/rng.js";
 import { computeChecksum, createInitialState, resetState, syncTileSoA } from "./core/state.js";
-import { generateMap } from "./mapgen/index.js";
+import { generateMap, type MapGenDebug, type MapGenDebugSnapshot } from "./mapgen/index.js";
 import { draw } from "./render/draw.js";
+import { resetTerrainCaches } from "./render/terrainCache.js";
 import { createThreeTest } from "./render/threeTest.js";
 import { initPhaseUI } from "./ui/phase/index.js";
 import { bindPhaseUi } from "./ui/phase/bindings.js";
@@ -60,6 +61,9 @@ const mapgenPercent = document.getElementById("mapgenPercent") as HTMLDivElement
 const threeTestOverlay = document.getElementById("threeTestOverlay") as HTMLDivElement | null;
 const threeTestCanvas = document.getElementById("threeTestCanvas") as HTMLCanvasElement | null;
 const threeTestCloseButton = document.getElementById("threeTestClose") as HTMLButtonElement | null;
+const threeTestStepButton = document.getElementById("threeTestStep") as HTMLButtonElement | null;
+const threeTestAutoToggle = document.getElementById("threeTestAuto") as HTMLInputElement | null;
+const threeTestPhaseLabel = document.getElementById("threeTestPhase") as HTMLSpanElement | null;
 const DEBUG_TYPE_EVENT = "debug-type-colors-changed";
 let resizeObserver: ResizeObserver | null = null;
 let lastCanvasWidth = 0;
@@ -115,6 +119,32 @@ const updateMapgenOverlay = (message: string, progress: number): void => {
 };
 
 let threeTestController: ReturnType<typeof createThreeTest> | null = null;
+let threeTestStepController: {
+  waitForStep: () => Promise<void>;
+  next: () => void;
+  setAuto: (auto: boolean) => void;
+  auto: boolean;
+} | null = null;
+
+const updateThreeTestStepUi = (): void => {
+  if (!threeTestStepButton || !threeTestStepController) {
+    return;
+  }
+  threeTestStepButton.disabled = threeTestStepController.auto;
+};
+
+if (threeTestStepButton) {
+  threeTestStepButton.addEventListener("click", () => {
+    threeTestStepController?.next();
+  });
+}
+
+if (threeTestAutoToggle) {
+  threeTestAutoToggle.addEventListener("change", () => {
+    threeTestStepController?.setAuto(threeTestAutoToggle.checked);
+    updateThreeTestStepUi();
+  });
+}
 const handleThreeResize = (): void => {
   threeTestController?.resize();
 };
@@ -127,7 +157,7 @@ const setThreeTestVisible = (visible: boolean): void => {
   threeTestOverlay.setAttribute("aria-hidden", visible ? "false" : "true");
 };
 
-const prepareTerrainPreview = async (config: NewRunConfig): Promise<void> => {
+const prepareTerrainPreview = async (config: NewRunConfig, debug?: MapGenDebug): Promise<void> => {
   if (isGenerating) {
     return;
   }
@@ -138,6 +168,7 @@ const prepareTerrainPreview = async (config: NewRunConfig): Promise<void> => {
       activeMapSize = mapSize;
       state.grid = buildGrid(mapSize);
     }
+    resetTerrainCaches();
     resetState(state, seed);
     rng.setState(seed);
     state.paused = true;
@@ -147,7 +178,8 @@ const prepareTerrainPreview = async (config: NewRunConfig): Promise<void> => {
       state,
       rng,
       (message, progress) => updateMapgenOverlay(message, progress),
-      config.options.mapGen
+      config.options.mapGen,
+      debug
     );
   } finally {
     hideMapgenOverlay();
@@ -163,17 +195,75 @@ const openThreeTest = async (config: NewRunConfig): Promise<void> => {
   if (!threeTestController) {
     threeTestController = createThreeTest(threeTestCanvas);
   }
+  if (!threeTestStepController) {
+    let auto = threeTestAutoToggle ? threeTestAutoToggle.checked : true;
+    let resolver: (() => void) | null = null;
+    threeTestStepController = {
+      get auto() {
+        return auto;
+      },
+      waitForStep: async () => {
+        if (auto) {
+          return;
+        }
+        await new Promise<void>((resolve) => {
+          resolver = resolve;
+        });
+      },
+      next: () => {
+        if (resolver) {
+          const resolve = resolver;
+          resolver = null;
+          resolve();
+        }
+      },
+      setAuto: (value: boolean) => {
+        auto = value;
+        if (auto) {
+          if (resolver) {
+            const resolve = resolver;
+            resolver = null;
+            resolve();
+          }
+        }
+      }
+    };
+  }
+  if (threeTestAutoToggle) {
+    threeTestStepController.setAuto(threeTestAutoToggle.checked);
+  }
+  updateThreeTestStepUi();
   setThreeTestVisible(true);
   threeTestController.start();
   handleThreeResize();
   window.addEventListener("resize", handleThreeResize);
-  await prepareTerrainPreview(config);
+  const debug: MapGenDebug = {
+    onPhase: async (snapshot: MapGenDebugSnapshot) => {
+      if (threeTestPhaseLabel) {
+        threeTestPhaseLabel.textContent = snapshot.phase;
+      }
+      if (!threeTestController) {
+        return;
+      }
+      threeTestController.setTerrain({
+        cols: state.grid.cols,
+        rows: state.grid.rows,
+        elevations: snapshot.elevations,
+        tileTypes: snapshot.tileTypes,
+        riverMask: snapshot.riverMask,
+        debugTypeColors: state.debugTypeColors
+      });
+    },
+    waitForStep: () => threeTestStepController?.waitForStep() ?? Promise.resolve()
+  };
+  await prepareTerrainPreview(config, debug);
   syncTileSoA(state);
   threeTestController.setTerrain({
     cols: state.grid.cols,
     rows: state.grid.rows,
     elevations: state.tileElevation,
     tileTypes: state.tileTypeId,
+    riverMask: state.tileRiverMask,
     debugTypeColors: state.debugTypeColors
   });
 };
@@ -185,6 +275,8 @@ const closeThreeTest = (): void => {
   setThreeTestVisible(false);
   threeTestController?.stop();
   window.removeEventListener("resize", handleThreeResize);
+  threeTestStepController?.setAuto(true);
+  updateThreeTestStepUi();
 };
 
 const refreshThreeTestDebug = (): void => {
@@ -200,6 +292,7 @@ const refreshThreeTestDebug = (): void => {
     rows: state.grid.rows,
     elevations: state.tileElevation,
     tileTypes: state.tileTypeId,
+    riverMask: state.tileRiverMask,
     debugTypeColors: state.debugTypeColors
   });
 };
@@ -215,6 +308,7 @@ const resetGame = async (config: NewRunConfig) => {
       activeMapSize = mapSize;
       state.grid = buildGrid(mapSize);
     }
+    resetTerrainCaches();
     resetState(state, seed);
     state.fireSettings = normalizeFireSettings(config.options.fire);
     state.campaign.characterId = characterId;

@@ -3,12 +3,66 @@ import type { WorldState } from "../core/state.js";
 import { clamp } from "../core/utils.js";
 import { inBounds, indexFor } from "../core/grid.js";
 import { applyFuel } from "../core/tiles.js";
-import { NEIGHBOR_DIRS } from "../core/config.js";
+import { TILE_TYPE_IDS } from "../core/state.js";
+import {
+  DEBUG_TERRAIN,
+  DEBUG_TERRAIN_EDGE,
+  DISABLE_INLAND_LAKES,
+  EDGE_WATER_WIDTH_TILES,
+  EDGE_WATER_WIDTH_SCALE,
+  EDGE_WATER_NOISE_TILES,
+  EDGE_WATER_VARIANCE,
+  EDGE_WATER_VARIANCE_REF,
+  EDGE_WATER_OFFSET_CAP,
+  EDGE_WATER_JITTER_CAP,
+  LAND_CENTER_HEIGHT_SCALE,
+  BASIN_DEPTH_SCALE,
+  LAND_CENTER_INSET_FRACTION,
+  EDGE_LAND_ATTENUATION,
+  EDGE_LAND_EXPONENT,
+  EDGE_WATER_BASE_OFFSET,
+  ELEVATION_DETAIL_WEIGHT,
+  ELEVATION_MACRO_SCALE,
+  ELEVATION_MACRO_WEIGHT,
+  ELEVATION_PEAK_CAP,
+  ELEVATION_PEAK_SOFTNESS,
+  ELEVATION_CONTRAST,
+  LAND_MASS_BIAS_FRACTION,
+  LAND_MASS_BIAS_STRENGTH,
+  MOISTURE_BFS_CHUNK,
+  MOISTURE_ELEV_DRYNESS_WEIGHT,
+  MOISTURE_ELEV_DRY_RANGE,
+  MOISTURE_ELEV_WET_REF,
+  MOISTURE_GAMMA,
+  MOISTURE_WATER_DIST_CAP,
+  WATER_BASELINE_ELEV,
+  NEIGHBOR_DIRS
+} from "../core/config.js";
 import { fractalNoise } from "./noise.js";
 import { populateCommunities } from "./communities.js";
 import { DEFAULT_MAP_GEN_SETTINGS, type MapGenSettings } from "./settings.js";
 
 export type MapGenReporter = (message: string, progress: number) => void | Promise<void>;
+
+export type MapGenDebugPhase =
+  | "elevation:raw"
+  | "elevation:smooth"
+  | "elevation:rivers"
+  | "elevation:edgeFalloff"
+  | "elevation:edgeSmooth"
+  | "tiles:classified";
+
+export type MapGenDebugSnapshot = {
+  phase: MapGenDebugPhase;
+  elevations: Float32Array;
+  tileTypes?: Uint8Array;
+  riverMask?: Uint8Array;
+};
+
+export type MapGenDebug = {
+  onPhase: (snapshot: MapGenDebugSnapshot) => void | Promise<void>;
+  waitForStep?: () => Promise<void>;
+};
 
 const nextFrame = () =>
   new Promise<void>((resolve) => {
@@ -33,6 +87,212 @@ const createYield = (maxIterations = 32) => {
     await nextFrame();
     return true;
   };
+};
+
+const getEdgeWidth = (cols: number, rows: number): number =>
+  Math.max(EDGE_WATER_WIDTH_TILES, Math.floor(Math.min(cols, rows) * EDGE_WATER_WIDTH_SCALE));
+
+const getEdgeJitter = (x: number, y: number, scale: number, seed: number, strength: number): number => {
+  const noise = fractalNoise(x / scale, y / scale, seed);
+  return (noise * 2 - 1) * strength;
+};
+
+const getEdgeWarp = (
+  x: number,
+  y: number,
+  cols: number,
+  rows: number,
+  width: number,
+  seed: number
+): { x: number; y: number } => {
+  const minDim = Math.min(cols, rows);
+  const warpScale = Math.max(48, Math.floor(minDim * 0.08));
+  const warpStrength = Math.max(EDGE_WATER_NOISE_TILES, Math.floor(width * 0.8));
+  const warpX = getEdgeJitter(x, y, warpScale, seed + 9101, warpStrength);
+  const warpY = getEdgeJitter(x, y, warpScale, seed + 9203, warpStrength);
+  const safeWarpX = clamp(warpX, -x, cols - 1 - x);
+  const safeWarpY = clamp(warpY, -y, rows - 1 - y);
+  return { x: safeWarpX, y: safeWarpY };
+};
+
+const getEdgeFalloff = (x: number, y: number, cols: number, rows: number, width: number, seed: number): number => {
+  if (width <= 0) {
+    return 1;
+  }
+  if (x === 0 || y === 0 || x === cols - 1 || y === rows - 1) {
+    return 0;
+  }
+  const radialDist = Math.min(x, y, cols - 1 - x, rows - 1 - y);
+  const warp = getEdgeWarp(x, y, cols, rows, width, seed);
+  const warpedX = x + warp.x;
+  const warpedY = y + warp.y;
+  const edgeDist = Math.max(0, Math.min(warpedX, warpedY, cols - 1 - warpedX, rows - 1 - warpedY));
+  const minDim = Math.min(cols, rows);
+  const coastScale = Math.max(120, Math.floor(minDim * 0.22));
+  const macroScale = Math.max(220, Math.floor(minDim * 0.5));
+  const varianceScale = Math.min(1, EDGE_WATER_VARIANCE_REF / Math.max(1, width));
+  const variance = EDGE_WATER_VARIANCE * varianceScale;
+  const offsetCap = Math.min(width, EDGE_WATER_OFFSET_CAP);
+  const coastNoise = fractalNoise(x / coastScale, y / coastScale, seed + 7001);
+  const macroNoise = fractalNoise(x / macroScale, y / macroScale, seed + 7027);
+  const coastOffset = (coastNoise * 2 - 1) * Math.min(offsetCap, width * variance * 0.35);
+  const macroOffset = (macroNoise * 2 - 1) * Math.min(offsetCap, width * variance * 0.7);
+  const tRadial = clamp(radialDist / width, 0, 1);
+  const noiseFade = clamp(1 - tRadial, 0, 1);
+  const baseDist = edgeDist + (coastOffset + macroOffset) * noiseFade;
+  const adjusted = Math.max(0, baseDist);
+  const tNoise = clamp(adjusted / width, 0, 1);
+  const t = clamp(tRadial * 0.6 + tNoise * 0.4, 0, 1);
+  // Smoothstep plus jitter softens the ring and avoids a square moat.
+  return t * t * (3 - 2 * t);
+};
+
+const getSeaLevelBounds = (settings: MapGenSettings): { min: number; max: number } => {
+  if (Number.isFinite(settings.waterCoverage)) {
+    return { min: 0.04, max: 0.5 };
+  }
+  return { min: 0.08, max: 0.34 };
+};
+
+const clampSeaLevel = (value: number, settings: MapGenSettings): number => {
+  const { min, max } = getSeaLevelBounds(settings);
+  return clamp(value, min, max);
+};
+
+const resolveSeaLevelBase = (
+  state: WorldState,
+  settings: MapGenSettings,
+  elevationMap: ArrayLike<number>,
+  cellSizeM: number
+): number => {
+  const target = Number.isFinite(settings.waterCoverage)
+    ? clamp(settings.waterCoverage, 0.05, 0.85)
+    : null;
+  if (target === null) {
+    return settings.baseWaterThreshold;
+  }
+  const total = state.grid.totalTiles;
+  const edgeDenomM = (Math.min(state.grid.cols, state.grid.rows) * cellSizeM) / 2;
+  const edgeBias = new Float32Array(total);
+  for (let y = 0; y < state.grid.rows; y += 1) {
+    const rowBase = y * state.grid.cols;
+    for (let x = 0; x < state.grid.cols; x += 1) {
+      const idx = rowBase + x;
+      const edgeDistM = Math.min(x, y, state.grid.cols - 1 - x, state.grid.rows - 1 - y) * cellSizeM;
+      const edgeFactor = clamp(edgeDistM / edgeDenomM, 0, 1);
+      edgeBias[idx] = (1 - edgeFactor) * settings.edgeWaterBias;
+    }
+  }
+  const { min, max } = getSeaLevelBounds(settings);
+  let low = min - settings.edgeWaterBias;
+  let high = max;
+  for (let i = 0; i < 18; i += 1) {
+    const mid = (low + high) / 2;
+    let waterCount = 0;
+    for (let j = 0; j < total; j += 1) {
+      const seaLevel = clampSeaLevel(mid + edgeBias[j], settings);
+      if ((elevationMap[j] ?? 0) <= seaLevel) {
+        waterCount += 1;
+      }
+    }
+    const ratio = waterCount / Math.max(1, total);
+    if (ratio < target) {
+      low = mid;
+    } else {
+      high = mid;
+    }
+  }
+  return clamp(high, min - settings.edgeWaterBias, max);
+};
+
+const buildDebugTypeIds = (
+  state: WorldState,
+  settings: MapGenSettings,
+  elevationMap: ArrayLike<number>,
+  riverMask?: Uint8Array,
+  seaLevelBase?: number
+): Uint8Array => {
+  const total = state.grid.totalTiles;
+  const typeIds = new Uint8Array(total);
+  const base = seaLevelBase ?? settings.baseWaterThreshold;
+  const cellSizeM = Math.max(0.1, settings.cellSizeM);
+  const edgeDenomM = (Math.min(state.grid.cols, state.grid.rows) * cellSizeM) / 2;
+  for (let y = 0; y < state.grid.rows; y += 1) {
+    for (let x = 0; x < state.grid.cols; x += 1) {
+      const idx = indexFor(state.grid, x, y);
+      const edgeDistM =
+        Math.min(x, y, state.grid.cols - 1 - x, state.grid.rows - 1 - y) * cellSizeM;
+      const edgeFactor = clamp(edgeDistM / edgeDenomM, 0, 1);
+      const seaLevel = clampSeaLevel(base + (1 - edgeFactor) * settings.edgeWaterBias, settings);
+      const elev = elevationMap[idx] ?? 0;
+      const isRiver = riverMask ? riverMask[idx] > 0 : false;
+      typeIds[idx] = elev < seaLevel || isRiver ? TILE_TYPE_IDS.water : TILE_TYPE_IDS.grass;
+    }
+  }
+  return typeIds;
+};
+
+const emitDebugPhase = async (
+  debug: MapGenDebug | undefined,
+  phase: MapGenDebugPhase,
+  state: WorldState,
+  settings: MapGenSettings,
+  elevationMap: ArrayLike<number>,
+  riverMask?: Uint8Array,
+  tileTypes?: Uint8Array,
+  seaLevelBase?: number
+): Promise<void> => {
+  if (!debug) {
+    return;
+  }
+  const elevations = Float32Array.from(elevationMap);
+  const types = tileTypes
+    ? Uint8Array.from(tileTypes)
+    : buildDebugTypeIds(state, settings, elevationMap, riverMask, seaLevelBase);
+  const rivers = riverMask ? Uint8Array.from(riverMask) : undefined;
+  await debug.onPhase({ phase, elevations, tileTypes: types, riverMask: rivers });
+  if (debug.waitForStep) {
+    await debug.waitForStep();
+  }
+};
+
+const getLandBias = (x: number, y: number, cols: number, rows: number, seed: number): number => {
+  const edgeDist = Math.min(x, y, cols - 1 - x, rows - 1 - y);
+  const width = Math.max(4, Math.floor(Math.min(cols, rows) * LAND_MASS_BIAS_FRACTION));
+  const jitter = getEdgeJitter(x, y, Math.max(12, width), seed + 4301, Math.max(2, width * 0.08));
+  const adjusted = Math.max(0, edgeDist + jitter);
+  return clamp(adjusted / width, 0, 1);
+};
+
+const assertEdgeWater = (state: WorldState): void => {
+  if (!DEBUG_TERRAIN_EDGE) {
+    return;
+  }
+  const cols = state.grid.cols;
+  const rows = state.grid.rows;
+  let nonWater = 0;
+  for (let x = 0; x < cols; x += 1) {
+    if (state.tiles[x].type !== "water") {
+      nonWater += 1;
+    }
+    const bottomIdx = (rows - 1) * cols + x;
+    if (state.tiles[bottomIdx].type !== "water") {
+      nonWater += 1;
+    }
+  }
+  for (let y = 1; y < rows - 1; y += 1) {
+    const leftIdx = y * cols;
+    if (state.tiles[leftIdx].type !== "water") {
+      nonWater += 1;
+    }
+    const rightIdx = y * cols + (cols - 1);
+    if (state.tiles[rightIdx].type !== "water") {
+      nonWater += 1;
+    }
+  }
+  if (nonWater > 0) {
+    throw new Error(`Edge water check failed: ${nonWater} non-water edge tiles (seed=${state.seed}).`);
+  }
 };
 
 const WARP_WAVELENGTH_M = 1000;
@@ -63,7 +323,7 @@ function classifyTile(input: TileClassificationInput): TileType {
   if (elevation < seaLevel) {
     return "water";
   }
-  if (waterDistM <= 30 && slope < 0.15) {
+  if (waterDistM <= 15 && slope < 0.15) {
     return "beach";
   }
   const isFloodplain = valley > 0.08 && slope < 0.12 && elevation < seaLevel + 0.15;
@@ -96,7 +356,7 @@ function softenPeaks(value: number, cap: number, softness: number): number {
 function pickRiverSource(state: WorldState, rng: RNG, elevationMap: number[]): Point | null {
   let best: Point | null = null;
   let bestElev = 0;
-  for (let i = 0; i < 120; i += 1) {
+  for (let i = 0; i < 200; i += 1) {
     const x = 4 + Math.floor(rng.next() * (state.grid.cols - 8));
     const y = 4 + Math.floor(rng.next() * (state.grid.rows - 8));
     const elev = elevationMap[indexFor(state.grid, x, y)];
@@ -105,7 +365,7 @@ function pickRiverSource(state: WorldState, rng: RNG, elevationMap: number[]): P
       best = { x, y };
     }
   }
-  if (best && bestElev > 0.45) {
+  if (best && bestElev > 0.25) {
     return best;
   }
   return null;
@@ -116,49 +376,104 @@ function carveRiverValleys(
   rng: RNG,
   elevationMap: number[],
   riverMask: Uint8Array,
-  valleyDepth: number
+  valleyDepth: number,
+  riverBias: number,
+  settings: MapGenSettings,
+  seaLevelBase: number,
+  oceanMask?: Uint8Array
 ): void {
   state.valleyMap = Array.from({ length: state.grid.totalTiles }, () => 0);
-  const riverCount = 3 + Math.floor(rng.next() * 3);
+  const minDim = Math.min(state.grid.cols, state.grid.rows);
+  const maxRivers = minDim >= 256 ? 4 : minDim >= 128 ? 3 : 2;
+  const requestedRivers = Math.max(0, Math.round(settings.riverCount ?? 0));
+  const riverCount =
+    requestedRivers > 0 ? requestedRivers : Math.max(1, Math.floor(maxRivers * (0.6 + rng.next() * 0.4)));
   const maxSteps = state.grid.cols + state.grid.rows;
+  const riverScale = clamp(riverBias / 0.3, 0, 2);
+  const minRiverSteps = Math.max(10, Math.floor(minDim * 0.2));
+  const pathWidth = 1;
+  const edgePull = 0.06 + riverScale * 0.18;
+  const minRiverElev = 0.18;
+  const bedSlope = 0.00012 + riverScale * 0.0001;
+  const maxDepth = 0.03 + riverScale * 0.02;
+  const cellSizeM = Math.max(0.1, settings.cellSizeM);
+  const edgeDenomM = (Math.min(state.grid.cols, state.grid.rows) * cellSizeM) / 2;
+  const edgeWidth = getEdgeWidth(state.grid.cols, state.grid.rows);
+  const seaLevelAt = (x: number, y: number): number => {
+    const edgeDistM = Math.min(x, y, state.grid.cols - 1 - x, state.grid.rows - 1 - y) * cellSizeM;
+    const edgeFactor = clamp(edgeDistM / edgeDenomM, 0, 1);
+    return clampSeaLevel(seaLevelBase + (1 - edgeFactor) * settings.edgeWaterBias, settings);
+  };
+  const markRiverPath = (path: number[], width: number) => {
+    if (path.length === 0) {
+      return;
+    }
+    const cols = state.grid.cols;
+    const rows = state.grid.rows;
+    for (const idx of path) {
+      const cx = idx % cols;
+      const cy = Math.floor(idx / cols);
+      for (let dy = -width; dy <= width; dy += 1) {
+        const ny = cy + dy;
+        if (ny < 0 || ny >= rows) {
+          continue;
+        }
+        const maxDx = width - Math.abs(dy);
+        const rowBase = ny * cols;
+        for (let dx = -maxDx; dx <= maxDx; dx += 1) {
+          const nx = cx + dx;
+          if (nx < 0 || nx >= cols) {
+            continue;
+          }
+          riverMask[rowBase + nx] = 1;
+        }
+      }
+    }
+  };
   for (let r = 0; r < riverCount; r += 1) {
-    const source = pickRiverSource(state, rng, elevationMap);
+    let source: Point | null = null;
+    for (let attempt = 0; attempt < 4 && !source; attempt += 1) {
+      source = pickRiverSource(state, rng, elevationMap);
+    }
     if (!source) {
       continue;
     }
     const isWet = rng.next() < 0.55;
-    const depthBase = (isWet ? 0.22 + rng.next() * 0.08 : 0.1 + rng.next() * 0.06) * valleyDepth;
-    const widthBase = isWet ? 3 : 2;
+    const depthBase = (isWet ? 0.02 + rng.next() * 0.01 : 0.015 + rng.next() * 0.008) * (0.6 + riverScale * 0.4);
+    const widthBase = 1;
     let current = source;
     let dir: Point | null = null;
     const visited = new Uint8Array(state.grid.totalTiles);
-    const riverMarks: number[] = [];
+    const riverPath: number[] = [];
+    const riverWidths: number[] = [];
     let reachedEdge = false;
+    let reachedSea = false;
     for (let step = 0; step < maxSteps; step += 1) {
       const idx = indexFor(state.grid, current.x, current.y);
       if (visited[idx]) {
         break;
       }
       visited[idx] = 1;
-      const width = widthBase + (rng.next() < 0.25 ? 1 : 0);
-      for (let dy = -width; dy <= width; dy += 1) {
-        for (let dx = -width; dx <= width; dx += 1) {
-          const nx = current.x + dx;
-          const ny = current.y + dy;
-          if (!inBounds(state.grid, nx, ny)) {
-            continue;
-          }
-          const dist = Math.hypot(dx, dy);
-          if (dist > width + 0.1) {
-            continue;
-          }
-          const falloff = 1 - dist / (width + 0.5);
-          const depth = depthBase * falloff;
-          const nIdx = indexFor(state.grid, nx, ny);
-          elevationMap[nIdx] = clamp(elevationMap[nIdx] - depth, 0, 1);
-          state.valleyMap[nIdx] = Math.max(state.valleyMap[nIdx], depth);
-          riverMarks.push(nIdx);
-        }
+      riverPath.push(idx);
+      const width = widthBase;
+      riverWidths.push(width);
+      if (oceanMask && oceanMask[idx]) {
+        reachedSea = true;
+        break;
+      }
+      const currentElev = elevationMap[idx];
+      const currentFalloff = getEdgeFalloff(
+        current.x,
+        current.y,
+        state.grid.cols,
+        state.grid.rows,
+        edgeWidth,
+        state.seed
+      );
+      const routedCurrent = WATER_BASELINE_ELEV + (currentElev - WATER_BASELINE_ELEV) * currentFalloff;
+      if (routedCurrent <= seaLevelAt(current.x, current.y) + 0.008) {
+        reachedSea = true;
+        break;
       }
 
       let next: Point | null = null;
@@ -173,10 +488,17 @@ function carveRiverValleys(
         if (visited[nIdx]) {
           continue;
         }
-        const currentElev = elevationMap[idx];
         const nextElev = elevationMap[nIdx];
-        const slope = nextElev - currentElev;
-        let score = nextElev + rng.next() * 0.03;
+        const nextFalloff = getEdgeFalloff(nx, ny, state.grid.cols, state.grid.rows, edgeWidth, state.seed);
+        const routedNext = WATER_BASELINE_ELEV + (nextElev - WATER_BASELINE_ELEV) * nextFalloff;
+        const slope = routedNext - routedCurrent;
+        let score = routedNext + rng.next() * 0.03;
+        if (oceanMask && oceanMask[nIdx]) {
+          score = -1;
+        }
+        const edgeDist = Math.min(nx, ny, state.grid.cols - 1 - nx, state.grid.rows - 1 - ny);
+        const edgeNorm = edgeDist / Math.max(1, minDim * 0.5);
+        score += edgeNorm * edgePull;
         if (slope > 0) {
           score += slope * 1.8;
         }
@@ -204,13 +526,67 @@ function carveRiverValleys(
         current.x >= state.grid.cols - 2 ||
         current.y >= state.grid.rows - 2
       ) {
+        const edgeIdx = indexFor(state.grid, current.x, current.y);
+        if (!visited[edgeIdx]) {
+          visited[edgeIdx] = 1;
+          riverPath.push(edgeIdx);
+          riverWidths.push(widthBase);
+        }
         reachedEdge = true;
         break;
       }
     }
-    if (reachedEdge) {
-      for (const idx of riverMarks) {
-        riverMask[idx] = 1;
+    if (!reachedEdge && !reachedSea) {
+      continue;
+    }
+    markRiverPath(riverPath, pathWidth);
+    const riverBeds: number[] = [];
+    let lastBed = 0;
+    for (let i = 0; i < riverPath.length; i += 1) {
+      const idx = riverPath[i];
+      const localElev = elevationMap[idx];
+      if (i === 0) {
+        lastBed = Math.max(minRiverElev, localElev - 0.01);
+      } else {
+        const target = Math.min(localElev - 0.004, lastBed - bedSlope);
+        lastBed = Math.max(minRiverElev, target);
+      }
+      riverBeds.push(lastBed);
+    }
+    const cols = state.grid.cols;
+    const rows = state.grid.rows;
+    for (let i = 0; i < riverPath.length; i += 1) {
+      const idx = riverPath[i];
+      const width = riverWidths[i] ?? widthBase;
+      const bed = riverBeds[i] ?? minRiverElev;
+      const cx = idx % cols;
+      const cy = Math.floor(idx / cols);
+      for (let dy = -width; dy <= width; dy += 1) {
+        const ny = cy + dy;
+        if (ny < 0 || ny >= rows) {
+          continue;
+        }
+        for (let dx = -width; dx <= width; dx += 1) {
+          const nx = cx + dx;
+          if (nx < 0 || nx >= cols) {
+            continue;
+          }
+          const dist = Math.hypot(dx, dy);
+          if (dist > width + 0.1) {
+            continue;
+          }
+          const falloff = 1 - dist / (width + 0.5);
+          const depth = depthBase * falloff;
+          const localBed = bed + (1 - falloff) * 0.01;
+          const nIdx = ny * cols + nx;
+          const maxCarve = Math.max(0, elevationMap[nIdx] - localBed);
+          const carve = Math.min(depth, maxCarve, maxDepth * falloff);
+          if (carve <= 0) {
+            continue;
+          }
+          elevationMap[nIdx] = clamp(elevationMap[nIdx] - carve, 0, 1);
+          state.valleyMap[nIdx] = Math.max(state.valleyMap[nIdx], carve);
+        }
       }
     }
   }
@@ -221,12 +597,13 @@ async function buildElevationMap(
   rng: RNG,
   settings: MapGenSettings,
   report?: MapGenReporter,
-  yieldIfNeeded?: () => Promise<boolean>
-): Promise<{ elevationMap: number[]; riverMask: Uint8Array }> {
+  yieldIfNeeded?: () => Promise<boolean>,
+  debug?: MapGenDebug
+): Promise<{ elevationMap: number[]; riverMask: Uint8Array; seaLevelBase: number }> {
   const maxDim = Math.max(state.grid.cols, state.grid.rows);
   const elevationBlock = maxDim >= 1024 ? 8 : maxDim >= 512 ? 4 : 2;
   if (elevationBlock > 1) {
-    return buildElevationMapCoarse(state, rng, elevationBlock, settings, report, yieldIfNeeded);
+    return buildElevationMapCoarse(state, rng, elevationBlock, settings, report, yieldIfNeeded, debug);
   }
   const elevationMap = Array.from({ length: state.grid.totalTiles }, () => 0);
   const temp = Array.from({ length: state.grid.totalTiles }, () => 0);
@@ -237,14 +614,15 @@ async function buildElevationMap(
   const worldWidthM = state.grid.cols * cellSizeM;
   const worldHeightM = state.grid.rows * cellSizeM;
   const minDimM = Math.min(worldWidthM, worldHeightM);
-  const elevationScale = clamp(settings.elevationScale, 0.6, 3);
+  const elevationScaleMax = maxDim >= 1024 ? 4.5 : maxDim >= 512 ? 3.8 : 3;
+  const elevationScale = clamp(settings.elevationScale, 0.6, elevationScaleMax);
   const elevationExponent = clamp(settings.elevationExponent, 0.6, 2.6);
   const mountainScale = clamp(settings.mountainScale, 0.6, 2.6);
   const ridgeStrength = clamp(settings.ridgeStrength, 0, 0.35);
   const valleyDepth = clamp(settings.valleyDepth, 0.4, 3);
   const centerFactorM = minDimM / 2;
   const warpScaleM = WARP_WAVELENGTH_M * mountainScale;
-  const macroScaleM = MACRO_WAVELENGTH_M * mountainScale;
+  const macroScaleM = MACRO_WAVELENGTH_M * mountainScale * ELEVATION_MACRO_SCALE;
   const midScaleM = MID_WAVELENGTH_M * mountainScale;
   const detailScaleM = DETAIL_WAVELENGTH_M * mountainScale;
   const ridgeScaleM = RIDGE_WAVELENGTH_M * mountainScale;
@@ -254,23 +632,27 @@ async function buildElevationMap(
   const bandPhase = rng.next() * Math.PI * 2;
   const bandStrength = 0.18 + rng.next() * 0.1;
 
+  const insetM = Math.min(minDimM * LAND_CENTER_INSET_FRACTION, Math.min(worldWidthM, worldHeightM) * 0.45);
+  const landMinX = worldOffsetXM + insetM;
+  const landMaxX = worldOffsetXM + Math.max(0, worldWidthM - insetM);
+  const landMinY = worldOffsetYM + insetM;
+  const landMaxY = worldOffsetYM + Math.max(0, worldHeightM - insetM);
   const landCenters = Array.from({ length: 3 }, () => ({
-    x: worldOffsetXM + rng.next() * worldWidthM,
-    y: worldOffsetYM + rng.next() * worldHeightM,
+    x: landMinX + rng.next() * Math.max(0, landMaxX - landMinX),
+    y: landMinY + rng.next() * Math.max(0, landMaxY - landMinY),
     radius: (minDimM * (0.45 + rng.next() * 0.25)) / 2,
-    height: 0.28 + rng.next() * 0.28
+    height: (0.28 + rng.next() * 0.28) * LAND_CENTER_HEIGHT_SCALE
   }));
 
   const basinCenters = Array.from({ length: 2 + Math.floor(rng.next() * 2) }, () => ({
-    x: worldOffsetXM + rng.next() * worldWidthM,
-    y: worldOffsetYM + rng.next() * worldHeightM,
+    x: landMinX + rng.next() * Math.max(0, landMaxX - landMinX),
+    y: landMinY + rng.next() * Math.max(0, landMaxY - landMinY),
     radius: (minDimM * (0.22 + rng.next() * 0.18)) / 2,
-    depth: (0.12 + rng.next() * 0.18) * valleyDepth
+    depth: (0.12 + rng.next() * 0.18) * valleyDepth * BASIN_DEPTH_SCALE
   }));
-  const macroWeight = 0.7;
-  const midWeight = 0.18;
-  const detailWeight = 0.06;
-  const weightSum = macroWeight + midWeight + detailWeight + ridgeStrength;
+  const macroWeight = clamp(ELEVATION_MACRO_WEIGHT, 0, 1);
+  const detailWeight = clamp(ELEVATION_DETAIL_WEIGHT, 0, 1);
+  const weightSum = Math.max(0.0001, macroWeight + detailWeight);
 
   for (let y = 0; y < state.grid.rows; y += 1) {
     for (let x = 0; x < state.grid.cols; x += 1) {
@@ -285,15 +667,22 @@ async function buildElevationMap(
       const warpY = (warpB - 0.5) * WARP_MAG_M;
       const worldNX = worldX + warpX;
       const worldNY = worldY + warpY;
-      const macro = fractalNoise(worldNX / macroScaleM, worldNY / macroScaleM, state.seed + 991);
-      const mid = fractalNoise(worldNX / midScaleM, worldNY / midScaleM, state.seed + 517);
-      const detail = fractalNoise(worldNX / detailScaleM, worldNY / detailScaleM, state.seed + 151);
+      const macroNoise = fractalNoise(worldNX / macroScaleM, worldNY / macroScaleM, state.seed + 991);
+      const detailNoiseA = fractalNoise(worldNX / midScaleM, worldNY / midScaleM, state.seed + 517);
+      const detailNoiseB = fractalNoise(worldNX / detailScaleM, worldNY / detailScaleM, state.seed + 151);
       const ridgeNoise = fractalNoise(worldNX / ridgeScaleM, worldNY / ridgeScaleM, state.seed + 703);
       const ridge = 1 - Math.abs(ridgeNoise * 2 - 1);
+      const ridgeCentered = ridge * 2 - 1;
       const bandCoord = (worldX * bandDir.x + worldY * bandDir.y) / bandScaleM;
       const band = (Math.sin(bandCoord + bandPhase) + 1) * 0.5;
       const bandBoost = (band - 0.5) * bandStrength;
-      let elevation = (macro * macroWeight + mid * midWeight + detail * detailWeight + ridge * ridgeStrength) / weightSum;
+      let macroElevation = macroNoise * 2 - 1;
+      const landBias = getLandBias(x, y, state.grid.cols, state.grid.rows, state.seed);
+      macroElevation = clamp(macroElevation + (landBias - 0.5) * LAND_MASS_BIAS_STRENGTH, -1, 1);
+      let detailElevation = (detailNoiseA * 0.7 + detailNoiseB * 0.3) * 2 - 1;
+      detailElevation = clamp(detailElevation + ridgeCentered * ridgeStrength, -1, 1);
+      let elevation = (macroElevation * macroWeight + detailElevation * detailWeight) / weightSum;
+      elevation = elevation * 0.5 + 0.5;
       elevation += edgeFactor * 0.06;
       elevation = elevation * (0.75 + band * 0.5) + bandBoost;
       let landBoost = 0;
@@ -305,7 +694,8 @@ async function buildElevationMap(
           landBoost = Math.max(landBoost, (1 - d) * (1 - d) * land.height);
         }
       }
-      elevation += landBoost;
+      const landEdgeFactor = edgeFactor * edgeFactor * edgeFactor;
+      elevation += landBoost * landEdgeFactor;
       let basinDrop = 0;
       for (const basin of basinCenters) {
         const dx = (worldX - basin.x) / basin.radius;
@@ -316,6 +706,15 @@ async function buildElevationMap(
         }
       }
       elevation = clamp(elevation - basinDrop, 0, 1);
+      const edgeWeight = Math.pow(clamp(edgeFactor, 0, 1), EDGE_LAND_EXPONENT);
+      const edgeScale = 1 - EDGE_LAND_ATTENUATION * (1 - edgeWeight);
+      const seaLevel = clampSeaLevel(
+        settings.baseWaterThreshold + (1 - edgeFactor) * settings.edgeWaterBias,
+        settings
+      );
+      const baseline = Math.max(WATER_BASELINE_ELEV, seaLevel - EDGE_WATER_BASE_OFFSET);
+      elevation = baseline + (elevation - baseline) * edgeScale;
+      elevation = clamp((elevation - 0.5) * ELEVATION_CONTRAST + 0.5, 0, 1);
       elevationMap[indexFor(state.grid, x, y)] = clamp(elevation, 0, 1);
     }
     if (yieldIfNeeded && report) {
@@ -324,6 +723,7 @@ async function buildElevationMap(
       }
     }
   }
+  await emitDebugPhase(debug, "elevation:raw", state, settings, elevationMap);
 
   for (let pass = 0; pass < 4; pass += 1) {
     for (let y = 0; y < state.grid.rows; y += 1) {
@@ -359,18 +759,54 @@ async function buildElevationMap(
       elevationMap[i] = temp[i];
     }
   }
+  await emitDebugPhase(debug, "elevation:smooth", state, settings, elevationMap);
+
+  const seaLevelBase = resolveSeaLevelBase(state, settings, elevationMap, cellSizeM);
+  const preSeaLevelMap = buildSeaLevelMap(state, settings, cellSizeM, seaLevelBase);
+  let preOceanMask = buildOceanMaskFromElevation(state, elevationMap, preSeaLevelMap);
+  const preOceanLevel = computeOceanLevel(elevationMap, preOceanMask);
+  if (preOceanLevel !== null) {
+    preOceanMask = expandOceanMaskByElevation(
+      state,
+      elevationMap,
+      preSeaLevelMap,
+      preOceanMask,
+      undefined,
+      preOceanLevel
+    );
+  }
 
   if (report) {
     await report("Carving rivers...", 0.8);
   }
-  carveRiverValleys(state, rng, elevationMap, riverMask, valleyDepth);
+  carveRiverValleys(
+    state,
+    rng,
+    elevationMap,
+    riverMask,
+    valleyDepth,
+    settings.riverWaterBias,
+    settings,
+    seaLevelBase,
+    preOceanMask
+  );
+  await emitDebugPhase(debug, "elevation:rivers", state, settings, elevationMap, riverMask, undefined, seaLevelBase);
 
+  const edgeWidth = getEdgeWidth(state.grid.cols, state.grid.rows);
+  const edgeDenomM = (Math.min(state.grid.cols, state.grid.rows) * cellSizeM) / 2;
   for (let i = 0; i < elevationMap.length; i += 1) {
     const value = elevationMap[i];
     const shaped = Math.pow(value, elevationExponent) * (0.55 + value * 0.9);
     const scaled = shaped * elevationScale;
-    const softened = softenPeaks(scaled, 0.88, 2.3);
-    elevationMap[i] = clamp(softened, 0, 1);
+    const softened = softenPeaks(scaled, ELEVATION_PEAK_CAP, ELEVATION_PEAK_SOFTNESS);
+    const x = i % state.grid.cols;
+    const y = Math.floor(i / state.grid.cols);
+    const falloff = getEdgeFalloff(x, y, state.grid.cols, state.grid.rows, edgeWidth, state.seed);
+    const edgeDistM = Math.min(x, y, state.grid.cols - 1 - x, state.grid.rows - 1 - y) * cellSizeM;
+    const edgeFactor = clamp(edgeDistM / edgeDenomM, 0, 1);
+    const seaLevel = clampSeaLevel(seaLevelBase + (1 - edgeFactor) * settings.edgeWaterBias, settings);
+    const baseline = Math.max(WATER_BASELINE_ELEV, seaLevel - EDGE_WATER_BASE_OFFSET);
+    elevationMap[i] = clamp(baseline + (softened - baseline) * falloff, 0, 1);
     if (yieldIfNeeded && report && i % state.grid.cols === state.grid.cols - 1) {
       if (await yieldIfNeeded()) {
         const row = Math.floor(i / state.grid.cols);
@@ -378,8 +814,46 @@ async function buildElevationMap(
       }
     }
   }
+  await emitDebugPhase(debug, "elevation:edgeFalloff", state, settings, elevationMap, riverMask, undefined, seaLevelBase);
+  const edgeSmoothRadius = edgeWidth * 3;
+  for (let y = 0; y < state.grid.rows; y += 1) {
+    for (let x = 0; x < state.grid.cols; x += 1) {
+      const idx = indexFor(state.grid, x, y);
+      const edgeDist = Math.min(x, y, state.grid.cols - 1 - x, state.grid.rows - 1 - y);
+      if (edgeDist >= edgeSmoothRadius) {
+        temp[idx] = elevationMap[idx];
+        continue;
+      }
+      let sum = elevationMap[idx];
+      let count = 1;
+      if (x > 0) {
+        sum += elevationMap[idx - 1];
+        count += 1;
+      }
+      if (x < state.grid.cols - 1) {
+        sum += elevationMap[idx + 1];
+        count += 1;
+      }
+      if (y > 0) {
+        sum += elevationMap[idx - state.grid.cols];
+        count += 1;
+      }
+      if (y < state.grid.rows - 1) {
+        sum += elevationMap[idx + state.grid.cols];
+        count += 1;
+      }
+      const avg = sum / count;
+      const t = 1 - clamp(edgeDist / edgeSmoothRadius, 0, 1);
+      const blend = 0.6 * t;
+      temp[idx] = elevationMap[idx] * (1 - blend) + avg * blend;
+    }
+  }
+  for (let i = 0; i < elevationMap.length; i += 1) {
+    elevationMap[i] = temp[i];
+  }
+  await emitDebugPhase(debug, "elevation:edgeSmooth", state, settings, elevationMap, riverMask, undefined, seaLevelBase);
 
-  return { elevationMap, riverMask };
+  return { elevationMap, riverMask, seaLevelBase };
 }
 
 const assertDeterministicElevation = async (
@@ -406,8 +880,9 @@ async function buildElevationMapCoarse(
   blockSize: number,
   settings: MapGenSettings,
   report?: MapGenReporter,
-  yieldIfNeeded?: () => Promise<boolean>
-): Promise<{ elevationMap: number[]; riverMask: Uint8Array }> {
+  yieldIfNeeded?: () => Promise<boolean>,
+  debug?: MapGenDebug
+): Promise<{ elevationMap: number[]; riverMask: Uint8Array; seaLevelBase: number }> {
   const cols = state.grid.cols;
   const rows = state.grid.rows;
   const coarseCols = Math.ceil(cols / blockSize);
@@ -415,21 +890,23 @@ async function buildElevationMapCoarse(
   const coarseTotal = coarseCols * coarseRows;
   const coarseElevation = Array.from({ length: coarseTotal }, () => 0);
   const coarseTemp = Array.from({ length: coarseTotal }, () => 0);
-  const coarseRiverMask = new Uint8Array(coarseTotal);
+  const coarseValleyMap = Array.from({ length: coarseTotal }, () => 0);
   const cellSizeM = Math.max(0.1, settings.cellSizeM);
   const worldOffsetXM = settings.worldOffsetXM;
   const worldOffsetYM = settings.worldOffsetYM;
   const worldWidthM = cols * cellSizeM;
   const worldHeightM = rows * cellSizeM;
   const minDimM = Math.min(worldWidthM, worldHeightM);
-  const elevationScale = clamp(settings.elevationScale, 0.6, 3);
+  const maxDim = Math.max(cols, rows);
+  const elevationScaleMax = maxDim >= 1024 ? 4.5 : maxDim >= 512 ? 3.8 : 3;
+  const elevationScale = clamp(settings.elevationScale, 0.6, elevationScaleMax);
   const elevationExponent = clamp(settings.elevationExponent, 0.6, 2.6);
   const mountainScale = clamp(settings.mountainScale, 0.6, 2.6);
   const ridgeStrength = clamp(settings.ridgeStrength, 0, 0.35);
   const valleyDepth = clamp(settings.valleyDepth, 0.4, 3);
   const centerFactorM = minDimM / 2;
   const warpScaleM = WARP_WAVELENGTH_M * mountainScale;
-  const macroScaleM = MACRO_WAVELENGTH_M * mountainScale;
+  const macroScaleM = MACRO_WAVELENGTH_M * mountainScale * ELEVATION_MACRO_SCALE;
   const midScaleM = MID_WAVELENGTH_M * mountainScale;
   const detailScaleM = DETAIL_WAVELENGTH_M * mountainScale;
   const ridgeScaleM = RIDGE_WAVELENGTH_M * mountainScale;
@@ -439,24 +916,28 @@ async function buildElevationMapCoarse(
   const bandPhase = rng.next() * Math.PI * 2;
   const bandStrength = 0.18 + rng.next() * 0.1;
 
+  const insetM = Math.min(minDimM * LAND_CENTER_INSET_FRACTION, Math.min(worldWidthM, worldHeightM) * 0.45);
+  const landMinX = worldOffsetXM + insetM;
+  const landMaxX = worldOffsetXM + Math.max(0, worldWidthM - insetM);
+  const landMinY = worldOffsetYM + insetM;
+  const landMaxY = worldOffsetYM + Math.max(0, worldHeightM - insetM);
   const landCenters = Array.from({ length: 3 }, () => ({
-    x: worldOffsetXM + rng.next() * worldWidthM,
-    y: worldOffsetYM + rng.next() * worldHeightM,
+    x: landMinX + rng.next() * Math.max(0, landMaxX - landMinX),
+    y: landMinY + rng.next() * Math.max(0, landMaxY - landMinY),
     radius: (minDimM * (0.45 + rng.next() * 0.25)) / 2,
-    height: 0.28 + rng.next() * 0.28
+    height: (0.28 + rng.next() * 0.28) * LAND_CENTER_HEIGHT_SCALE
   }));
 
   const basinCenters = Array.from({ length: 2 + Math.floor(rng.next() * 2) }, () => ({
-    x: worldOffsetXM + rng.next() * worldWidthM,
-    y: worldOffsetYM + rng.next() * worldHeightM,
+    x: landMinX + rng.next() * Math.max(0, landMaxX - landMinX),
+    y: landMinY + rng.next() * Math.max(0, landMaxY - landMinY),
     radius: (minDimM * (0.22 + rng.next() * 0.18)) / 2,
-    depth: (0.12 + rng.next() * 0.18) * valleyDepth
+    depth: (0.12 + rng.next() * 0.18) * valleyDepth * BASIN_DEPTH_SCALE
   }));
 
-  const macroWeight = 0.7;
-  const midWeight = 0.18;
-  const detailWeight = 0.06;
-  const weightSum = macroWeight + midWeight + detailWeight + ridgeStrength;
+  const macroWeight = clamp(ELEVATION_MACRO_WEIGHT, 0, 1);
+  const detailWeight = clamp(ELEVATION_DETAIL_WEIGHT, 0, 1);
+  const weightSum = Math.max(0.0001, macroWeight + detailWeight);
   const peakWeight = 0.65;
   const sampleOffsets = [
     { x: 0.25, y: 0.25 },
@@ -476,16 +957,22 @@ async function buildElevationMapCoarse(
     const warpY = (warpB - 0.5) * WARP_MAG_M;
     const worldNX = worldX + warpX;
     const worldNY = worldY + warpY;
-    const macro = fractalNoise(worldNX / macroScaleM, worldNY / macroScaleM, state.seed + 991);
-    const mid = fractalNoise(worldNX / midScaleM, worldNY / midScaleM, state.seed + 517);
-    const detail = fractalNoise(worldNX / detailScaleM, worldNY / detailScaleM, state.seed + 151);
+    const macroNoise = fractalNoise(worldNX / macroScaleM, worldNY / macroScaleM, state.seed + 991);
+    const detailNoiseA = fractalNoise(worldNX / midScaleM, worldNY / midScaleM, state.seed + 517);
+    const detailNoiseB = fractalNoise(worldNX / detailScaleM, worldNY / detailScaleM, state.seed + 151);
     const ridgeNoise = fractalNoise(worldNX / ridgeScaleM, worldNY / ridgeScaleM, state.seed + 703);
     const ridge = 1 - Math.abs(ridgeNoise * 2 - 1);
+    const ridgeCentered = ridge * 2 - 1;
     const bandCoord = (worldX * bandDir.x + worldY * bandDir.y) / bandScaleM;
     const band = (Math.sin(bandCoord + bandPhase) + 1) * 0.5;
     const bandBoost = (band - 0.5) * bandStrength;
-    let elevation =
-      (macro * macroWeight + mid * midWeight + detail * detailWeight + ridge * ridgeStrength) / weightSum;
+    let macroElevation = macroNoise * 2 - 1;
+    const landBias = getLandBias(sampleX, sampleY, cols, rows, state.seed);
+    macroElevation = clamp(macroElevation + (landBias - 0.5) * LAND_MASS_BIAS_STRENGTH, -1, 1);
+    let detailElevation = (detailNoiseA * 0.7 + detailNoiseB * 0.3) * 2 - 1;
+    detailElevation = clamp(detailElevation + ridgeCentered * ridgeStrength, -1, 1);
+    let elevation = (macroElevation * macroWeight + detailElevation * detailWeight) / weightSum;
+    elevation = elevation * 0.5 + 0.5;
     elevation += edgeFactor * 0.06;
     elevation = elevation * (0.75 + band * 0.5) + bandBoost;
     let landBoost = 0;
@@ -497,7 +984,8 @@ async function buildElevationMapCoarse(
         landBoost = Math.max(landBoost, (1 - d) * (1 - d) * land.height);
       }
     }
-    elevation += landBoost;
+    const landEdgeFactor = edgeFactor * edgeFactor * edgeFactor;
+    elevation += landBoost * landEdgeFactor;
     let basinDrop = 0;
     for (const basin of basinCenters) {
       const dx = (worldX - basin.x) / basin.radius;
@@ -508,6 +996,15 @@ async function buildElevationMapCoarse(
       }
     }
     elevation = clamp(elevation - basinDrop, 0, 1);
+    const edgeWeight = Math.pow(clamp(edgeFactor, 0, 1), EDGE_LAND_EXPONENT);
+    const edgeScale = 1 - EDGE_LAND_ATTENUATION * (1 - edgeWeight);
+    const seaLevel = clampSeaLevel(
+      settings.baseWaterThreshold + (1 - edgeFactor) * settings.edgeWaterBias,
+      settings
+    );
+    const baseline = Math.max(WATER_BASELINE_ELEV, seaLevel - EDGE_WATER_BASE_OFFSET);
+    elevation = baseline + (elevation - baseline) * edgeScale;
+    elevation = clamp((elevation - 0.5) * ELEVATION_CONTRAST + 0.5, 0, 1);
     return elevation;
   };
 
@@ -577,21 +1074,11 @@ async function buildElevationMapCoarse(
     }
   }
 
-  if (report) {
-    await report("Carving rivers...", 0.8);
-  }
-  const coarseState = {
-    grid: { cols: coarseCols, rows: coarseRows, totalTiles: coarseTotal },
-    valleyMap: Array.from({ length: coarseTotal }, () => 0),
-    seed: state.seed
-  } as WorldState;
-  carveRiverValleys(coarseState, rng, coarseElevation, coarseRiverMask, valleyDepth);
-
   for (let i = 0; i < coarseElevation.length; i += 1) {
     const value = coarseElevation[i];
     const shaped = Math.pow(value, elevationExponent) * (0.55 + value * 0.9);
     const scaled = shaped * elevationScale;
-    const softened = softenPeaks(scaled, 0.88, 2.3);
+    const softened = softenPeaks(scaled, ELEVATION_PEAK_CAP, ELEVATION_PEAK_SOFTNESS);
     coarseElevation[i] = clamp(softened, 0, 1);
     if (yieldIfNeeded && report && i % coarseCols === coarseCols - 1) {
       if (await yieldIfNeeded()) {
@@ -604,19 +1091,44 @@ async function buildElevationMapCoarse(
   const elevationMap = Array.from({ length: state.grid.totalTiles }, () => 0);
   const riverMask = new Uint8Array(state.grid.totalTiles);
   state.valleyMap = Array.from({ length: state.grid.totalTiles }, () => 0);
+  const edgeWidth = getEdgeWidth(cols, rows);
+  const sampleCoarse = (arr: ArrayLike<number>, gx: number, gy: number): number => {
+    const x0 = Math.floor(gx);
+    const y0 = Math.floor(gy);
+    const x1 = Math.min(coarseCols - 1, x0 + 1);
+    const y1 = Math.min(coarseRows - 1, y0 + 1);
+    const tx = clamp(gx - x0, 0, 1);
+    const ty = clamp(gy - y0, 0, 1);
+    const i00 = y0 * coarseCols + x0;
+    const i10 = y0 * coarseCols + x1;
+    const i01 = y1 * coarseCols + x0;
+    const i11 = y1 * coarseCols + x1;
+    const v00 = arr[i00] ?? 0;
+    const v10 = arr[i10] ?? 0;
+    const v01 = arr[i01] ?? 0;
+    const v11 = arr[i11] ?? 0;
+    const v0 = v00 + (v10 - v00) * tx;
+    const v1 = v01 + (v11 - v01) * tx;
+    return v0 + (v1 - v0) * ty;
+  };
+  const edgeDenomM = (Math.min(cols, rows) * cellSizeM) / 2;
   for (let y = 0; y < rows; y += 1) {
     const rowBase = y * cols;
-    const cy = Math.floor(y / blockSize);
-    const coarseRowBase = cy * coarseCols;
+    const gy = y / blockSize;
     for (let x = 0; x < cols; x += 1) {
-      const cx = Math.floor(x / blockSize);
-      const coarseIdx = coarseRowBase + cx;
+      const gx = x / blockSize;
       const idx = rowBase + x;
-      elevationMap[idx] = coarseElevation[coarseIdx];
-      state.valleyMap[idx] = coarseState.valleyMap[coarseIdx] ?? 0;
-      if (coarseRiverMask[coarseIdx]) {
-        riverMask[idx] = 1;
-      }
+      const falloff = getEdgeFalloff(x, y, cols, rows, edgeWidth, state.seed);
+      const softened = sampleCoarse(coarseElevation, gx, gy);
+      const edgeDistM = Math.min(x, y, cols - 1 - x, rows - 1 - y) * cellSizeM;
+      const edgeFactor = clamp(edgeDistM / edgeDenomM, 0, 1);
+      const seaLevel = clampSeaLevel(
+        settings.baseWaterThreshold + (1 - edgeFactor) * settings.edgeWaterBias,
+        settings
+      );
+      const baseline = Math.max(WATER_BASELINE_ELEV, seaLevel - EDGE_WATER_BASE_OFFSET);
+      elevationMap[idx] = clamp(baseline + (softened - baseline) * falloff, 0, 1);
+      state.valleyMap[idx] = sampleCoarse(coarseValleyMap, gx, gy);
     }
     if (yieldIfNeeded && report) {
       if (await yieldIfNeeded()) {
@@ -624,47 +1136,108 @@ async function buildElevationMapCoarse(
       }
     }
   }
+  await emitDebugPhase(debug, "elevation:edgeFalloff", state, settings, elevationMap);
 
-  return { elevationMap, riverMask };
+  const seaLevelBase = resolveSeaLevelBase(state, settings, elevationMap, cellSizeM);
+  const preSeaLevelMap = buildSeaLevelMap(state, settings, cellSizeM, seaLevelBase);
+  let preOceanMask = buildOceanMaskFromElevation(state, elevationMap, preSeaLevelMap);
+  const preOceanLevel = computeOceanLevel(elevationMap, preOceanMask);
+  if (preOceanLevel !== null) {
+    preOceanMask = expandOceanMaskByElevation(
+      state,
+      elevationMap,
+      preSeaLevelMap,
+      preOceanMask,
+      undefined,
+      preOceanLevel
+    );
+  }
+
+  if (report) {
+    await report("Carving rivers...", 0.8);
+  }
+  carveRiverValleys(
+    state,
+    rng,
+    elevationMap,
+    riverMask,
+    valleyDepth,
+    settings.riverWaterBias,
+    settings,
+    seaLevelBase,
+    preOceanMask
+  );
+  await emitDebugPhase(debug, "elevation:rivers", state, settings, elevationMap, riverMask, undefined, seaLevelBase);
+
+  const edgeSmoothRadius = edgeWidth * 3;
+  const temp = new Float32Array(elevationMap.length);
+  for (let y = 0; y < rows; y += 1) {
+    for (let x = 0; x < cols; x += 1) {
+      const idx = y * cols + x;
+      const edgeDist = Math.min(x, y, cols - 1 - x, rows - 1 - y);
+      if (edgeDist >= edgeSmoothRadius) {
+        temp[idx] = elevationMap[idx];
+        continue;
+      }
+      let sum = elevationMap[idx];
+      let count = 1;
+      if (x > 0) {
+        sum += elevationMap[idx - 1];
+        count += 1;
+      }
+      if (x < cols - 1) {
+        sum += elevationMap[idx + 1];
+        count += 1;
+      }
+      if (y > 0) {
+        sum += elevationMap[idx - cols];
+        count += 1;
+      }
+      if (y < rows - 1) {
+        sum += elevationMap[idx + cols];
+        count += 1;
+      }
+      const avg = sum / count;
+      const t = 1 - clamp(edgeDist / edgeSmoothRadius, 0, 1);
+      const blend = 0.6 * t;
+      temp[idx] = elevationMap[idx] * (1 - blend) + avg * blend;
+    }
+  }
+  for (let i = 0; i < elevationMap.length; i += 1) {
+    elevationMap[i] = temp[i];
+  }
+  await emitDebugPhase(debug, "elevation:edgeSmooth", state, settings, elevationMap, riverMask, undefined, seaLevelBase);
+
+  return { elevationMap, riverMask, seaLevelBase };
 }
 
 async function buildMoistureMap(
   state: WorldState,
+  distToWater: Uint16Array,
   maxWaterDistance: number,
   report?: MapGenReporter,
   yieldIfNeeded?: () => Promise<boolean>
-): Promise<number[]> {
-  const moisture = Array.from({ length: state.grid.totalTiles }, () => 0);
+): Promise<Float32Array> {
+  const total = state.grid.totalTiles;
+  const moisture = new Float32Array(total);
+  const maxDistance = Math.max(1, Math.min(0xffff - 1, Math.floor(maxWaterDistance)));
+  const dryRange = Math.max(0.0001, MOISTURE_ELEV_DRY_RANGE);
+  const gamma = Math.max(0.01, MOISTURE_GAMMA);
+
   for (let y = 0; y < state.grid.rows; y += 1) {
+    const rowBase = y * state.grid.cols;
     for (let x = 0; x < state.grid.cols; x += 1) {
-      let waterCount = 0;
-      for (let dy = -2; dy <= 2; dy += 1) {
-        for (let dx = -2; dx <= 2; dx += 1) {
-          if (dx === 0 && dy === 0) {
-            continue;
-          }
-          const nx = x + dx;
-          const ny = y + dy;
-          if (!inBounds(state.grid, nx, ny)) {
-            continue;
-          }
-          if (state.tiles[indexFor(state.grid, nx, ny)].type === "water") {
-            waterCount += 1;
-          }
-        }
-      }
-      const idx = indexFor(state.grid, x, y);
-      const waterFactor = clamp(waterCount / 12, 0, 1);
+      const idx = rowBase + x;
       const tile = state.tiles[idx];
-      const elevationFactor = 1 - tile.elevation;
-      const waterDistFactor = clamp(1 - tile.waterDist / maxWaterDistance, 0, 1);
-      const distBoost = Math.sqrt(waterDistFactor);
-      const valleyBoost = clamp(state.valleyMap[idx] / 0.12, 0, 1);
-      moisture[idx] = clamp(
-        waterFactor * 0.3 + distBoost * 0.35 + elevationFactor * 0.25 + valleyBoost * 0.1,
-        0,
-        1
-      );
+      if (tile.type === "water") {
+        moisture[idx] = 1;
+        continue;
+      }
+      const dNorm = clamp(distToWater[idx] / maxDistance, 0, 1);
+      let m = 1 - dNorm;
+      const eNorm = clamp((tile.elevation - MOISTURE_ELEV_WET_REF) / dryRange, 0, 1);
+      m = clamp(m - eNorm * MOISTURE_ELEV_DRYNESS_WEIGHT, 0, 1);
+      moisture[idx] = clamp(Math.pow(m, gamma), 0, 1);
     }
     if (yieldIfNeeded && report) {
       if (await yieldIfNeeded()) {
@@ -730,79 +1303,101 @@ async function computeWaterDistances(
   maxDistance: number,
   report?: MapGenReporter,
   yieldIfNeeded?: () => Promise<boolean>
-): Promise<void> {
-  const maxDim = Math.max(state.grid.cols, state.grid.rows);
-  if (maxDim >= 1024) {
-    const total = state.grid.totalTiles;
-    for (let i = 0; i < total; i += 1) {
-      const tile = state.tiles[i];
-      tile.waterDist = tile.type === "water" ? 0 : maxDistance;
-    }
-    if (report) {
-      await report("Charting shoreline distance...", 1);
-    }
-    return;
-  }
-  const coarseFactor = maxDim >= 768 ? 4 : 1;
-  if (coarseFactor > 1) {
-    await computeWaterDistancesCoarse(state, maxDistance, coarseFactor, report, yieldIfNeeded);
-    return;
-  }
+): Promise<Uint16Array> {
   const total = state.grid.totalTiles;
-  const dist = new Int16Array(total);
-  dist.fill(-1);
+  const cols = state.grid.cols;
+  const rows = state.grid.rows;
+  const unvisited = 0xffff;
+  const maxDist = Math.max(1, Math.min(unvisited - 1, Math.floor(maxDistance)));
+  const dist = new Uint16Array(total);
+  dist.fill(unvisited);
   const queue = new Int32Array(total);
   let head = 0;
   let tail = 0;
-  for (let i = 0; i < total; i += 1) {
-    if (state.tiles[i].type === "water") {
-      dist[i] = 0;
-      queue[tail] = i;
-      tail += 1;
+
+  for (let y = 0; y < rows; y += 1) {
+    const rowBase = y * cols;
+    for (let x = 0; x < cols; x += 1) {
+      const idx = rowBase + x;
+      if (state.tiles[idx].type === "water") {
+        dist[idx] = 0;
+        queue[tail] = idx;
+        tail += 1;
+      }
+    }
+    if (yieldIfNeeded && report) {
+      if (await yieldIfNeeded()) {
+        await report("Charting shoreline distance...", Math.min(0.15, (y + 1) / rows * 0.15));
+      }
     }
   }
 
-  const dirs = [
-    { x: 1, y: 0 },
-    { x: -1, y: 0 },
-    { x: 0, y: 1 },
-    { x: 0, y: -1 }
-  ];
-
-  const reportStride = Math.max(1024, state.grid.cols);
+  let pops = 0;
+  const safetyLimit = total * 8;
+  const chunkSize = Math.max(1, MOISTURE_BFS_CHUNK);
   while (head < tail) {
     const idx = queue[head];
     head += 1;
+    pops += 1;
+    if (pops > safetyLimit) {
+      throw new Error(
+        `Water distance BFS exceeded safety limit (seed=${state.seed}, pops=${pops}, head=${head}, tail=${tail}, total=${total}).`
+      );
+    }
     const currentDist = dist[idx];
-    if (currentDist >= maxDistance) {
+    if (currentDist >= maxDist) {
       continue;
     }
-    const x = idx % state.grid.cols;
-    const y = Math.floor(idx / state.grid.cols);
-    for (const dir of dirs) {
-      const nx = x + dir.x;
-      const ny = y + dir.y;
-      if (!inBounds(state.grid, nx, ny)) {
-        continue;
+    const x = idx % cols;
+    const y = Math.floor(idx / cols);
+
+    if (x > 0) {
+      const nIdx = idx - 1;
+      if (dist[nIdx] === unvisited) {
+        dist[nIdx] = currentDist + 1;
+        queue[tail] = nIdx;
+        tail += 1;
       }
-      const nIdx = indexFor(state.grid, nx, ny);
-      if (dist[nIdx] !== -1) {
-        continue;
-      }
-      dist[nIdx] = currentDist + 1;
-      queue[tail] = nIdx;
-      tail += 1;
     }
-    if (yieldIfNeeded && report && head % reportStride === 0) {
+    if (x < cols - 1) {
+      const nIdx = idx + 1;
+      if (dist[nIdx] === unvisited) {
+        dist[nIdx] = currentDist + 1;
+        queue[tail] = nIdx;
+        tail += 1;
+      }
+    }
+    if (y > 0) {
+      const nIdx = idx - cols;
+      if (dist[nIdx] === unvisited) {
+        dist[nIdx] = currentDist + 1;
+        queue[tail] = nIdx;
+        tail += 1;
+      }
+    }
+    if (y < rows - 1) {
+      const nIdx = idx + cols;
+      if (dist[nIdx] === unvisited) {
+        dist[nIdx] = currentDist + 1;
+        queue[tail] = nIdx;
+        tail += 1;
+      }
+    }
+
+    if (yieldIfNeeded && report && pops % chunkSize === 0) {
       if (await yieldIfNeeded()) {
-        await report("Charting shoreline distance...", Math.min(1, head / total));
+        await report("Charting shoreline distance...", Math.min(1, pops / total));
       }
     }
   }
 
   for (let i = 0; i < total; i += 1) {
-    state.tiles[i].waterDist = dist[i] === -1 ? maxDistance : Math.min(dist[i], maxDistance);
+    const value = dist[i] === unvisited ? maxDist : Math.min(dist[i], maxDist);
+    dist[i] = value;
+    state.tiles[i].waterDist = value;
   }
+
+  return dist;
 }
 
 async function computeWaterDistancesCoarse(
@@ -961,6 +1556,337 @@ function findBasePoint(state: WorldState): Point {
     }
   }
   return center;
+}
+
+function buildOceanMask(state: WorldState): Uint8Array {
+  const { cols, rows, totalTiles } = state.grid;
+  const mask = new Uint8Array(totalTiles);
+  const queue = new Int32Array(totalTiles);
+  let head = 0;
+  let tail = 0;
+  const pushIfWater = (idx: number) => {
+    if (mask[idx] || state.tiles[idx].type !== "water") {
+      return;
+    }
+    mask[idx] = 1;
+    queue[tail] = idx;
+    tail += 1;
+  };
+  for (let x = 0; x < cols; x += 1) {
+    pushIfWater(x);
+    pushIfWater((rows - 1) * cols + x);
+  }
+  for (let y = 1; y < rows - 1; y += 1) {
+    pushIfWater(y * cols);
+    pushIfWater(y * cols + (cols - 1));
+  }
+  while (head < tail) {
+    const idx = queue[head];
+    head += 1;
+    const x = idx % cols;
+    const y = Math.floor(idx / cols);
+    if (x > 0) {
+      pushIfWater(idx - 1);
+    }
+    if (x < cols - 1) {
+      pushIfWater(idx + 1);
+    }
+    if (y > 0) {
+      pushIfWater(idx - cols);
+    }
+    if (y < rows - 1) {
+      pushIfWater(idx + cols);
+    }
+  }
+  return mask;
+}
+
+function countMaskTiles(mask: Uint8Array): number {
+  let total = 0;
+  for (let i = 0; i < mask.length; i += 1) {
+    if (mask[i]) {
+      total += 1;
+    }
+  }
+  return total;
+}
+
+function buildLargestWaterMask(state: WorldState): Uint8Array {
+  const { cols, rows, totalTiles } = state.grid;
+  const component = new Int32Array(totalTiles);
+  component.fill(-1);
+  const queue = new Int32Array(totalTiles);
+  const sizes: number[] = [];
+  let componentId = 0;
+  for (let i = 0; i < totalTiles; i += 1) {
+    if (component[i] !== -1 || state.tiles[i].type !== "water") {
+      continue;
+    }
+    let head = 0;
+    let tail = 0;
+    queue[tail] = i;
+    tail += 1;
+    component[i] = componentId;
+    let size = 0;
+    while (head < tail) {
+      const idx = queue[head];
+      head += 1;
+      size += 1;
+      const x = idx % cols;
+      const y = Math.floor(idx / cols);
+      if (x > 0) {
+        const nIdx = idx - 1;
+        if (component[nIdx] === -1 && state.tiles[nIdx].type === "water") {
+          component[nIdx] = componentId;
+          queue[tail] = nIdx;
+          tail += 1;
+        }
+      }
+      if (x < cols - 1) {
+        const nIdx = idx + 1;
+        if (component[nIdx] === -1 && state.tiles[nIdx].type === "water") {
+          component[nIdx] = componentId;
+          queue[tail] = nIdx;
+          tail += 1;
+        }
+      }
+      if (y > 0) {
+        const nIdx = idx - cols;
+        if (component[nIdx] === -1 && state.tiles[nIdx].type === "water") {
+          component[nIdx] = componentId;
+          queue[tail] = nIdx;
+          tail += 1;
+        }
+      }
+      if (y < rows - 1) {
+        const nIdx = idx + cols;
+        if (component[nIdx] === -1 && state.tiles[nIdx].type === "water") {
+          component[nIdx] = componentId;
+          queue[tail] = nIdx;
+          tail += 1;
+        }
+      }
+    }
+    sizes[componentId] = size;
+    componentId += 1;
+  }
+  const mask = new Uint8Array(totalTiles);
+  if (componentId === 0) {
+    return mask;
+  }
+  let largestId = 0;
+  for (let i = 1; i < componentId; i += 1) {
+    if ((sizes[i] ?? 0) > (sizes[largestId] ?? 0)) {
+      largestId = i;
+    }
+  }
+  for (let i = 0; i < totalTiles; i += 1) {
+    if (component[i] === largestId) {
+      mask[i] = 1;
+    }
+  }
+  return mask;
+}
+
+function buildSeaLevelMap(
+  state: WorldState,
+  settings: MapGenSettings,
+  cellSizeM: number,
+  seaLevelBase: number
+): Float32Array {
+  const seaLevelMap = new Float32Array(state.grid.totalTiles);
+  const edgeDenomM = (Math.min(state.grid.cols, state.grid.rows) * cellSizeM) / 2;
+  for (let y = 0; y < state.grid.rows; y += 1) {
+    const rowBase = y * state.grid.cols;
+    for (let x = 0; x < state.grid.cols; x += 1) {
+      const idx = rowBase + x;
+      const edgeDistM = Math.min(x, y, state.grid.cols - 1 - x, state.grid.rows - 1 - y) * cellSizeM;
+      const edgeFactor = clamp(edgeDistM / edgeDenomM, 0, 1);
+      seaLevelMap[idx] = clampSeaLevel(seaLevelBase + (1 - edgeFactor) * settings.edgeWaterBias, settings);
+    }
+  }
+  return seaLevelMap;
+}
+
+function buildOceanMaskFromElevation(
+  state: WorldState,
+  elevationMap: ArrayLike<number>,
+  seaLevelMap: ArrayLike<number>
+): Uint8Array {
+  const { cols, rows, totalTiles } = state.grid;
+  const edgeWidth = getEdgeWidth(cols, rows);
+  const waterMask = new Uint8Array(totalTiles);
+  for (let y = 0; y < rows; y += 1) {
+    const rowBase = y * cols;
+    for (let x = 0; x < cols; x += 1) {
+      const idx = rowBase + x;
+      const localSea = seaLevelMap[idx] ?? 0;
+      const baseline = Math.max(WATER_BASELINE_ELEV, localSea - EDGE_WATER_BASE_OFFSET);
+      const falloff = getEdgeFalloff(x, y, cols, rows, edgeWidth, state.seed);
+      const elev = elevationMap[idx] ?? 0;
+      const coastElev = baseline + (elev - baseline) * falloff;
+      if (coastElev <= localSea) {
+        waterMask[idx] = 1;
+      }
+    }
+  }
+  const mask = new Uint8Array(totalTiles);
+  const queue = new Int32Array(totalTiles);
+  let head = 0;
+  let tail = 0;
+  const pushIfWater = (idx: number) => {
+    if (mask[idx] || waterMask[idx] === 0) {
+      return;
+    }
+    mask[idx] = 1;
+    queue[tail] = idx;
+    tail += 1;
+  };
+  for (let x = 0; x < cols; x += 1) {
+    pushIfWater(x);
+    pushIfWater((rows - 1) * cols + x);
+  }
+  for (let y = 1; y < rows - 1; y += 1) {
+    pushIfWater(y * cols);
+    pushIfWater(y * cols + (cols - 1));
+  }
+  while (head < tail) {
+    const idx = queue[head];
+    head += 1;
+    const x = idx % cols;
+    const y = Math.floor(idx / cols);
+    if (x > 0) {
+      pushIfWater(idx - 1);
+    }
+    if (x < cols - 1) {
+      pushIfWater(idx + 1);
+    }
+    if (y > 0) {
+      pushIfWater(idx - cols);
+    }
+    if (y < rows - 1) {
+      pushIfWater(idx + cols);
+    }
+  }
+  return mask;
+}
+
+function computeOceanLevel(
+  elevationMap: ArrayLike<number>,
+  oceanMask: Uint8Array,
+  riverMask?: Uint8Array
+): number | null {
+  const bins = 32;
+  const counts = new Uint32Array(bins);
+  const sums = new Float32Array(bins);
+  let total = 0;
+  for (let i = 0; i < oceanMask.length; i += 1) {
+    if (!oceanMask[i] || (riverMask && riverMask[i] > 0)) {
+      continue;
+    }
+    const height = clamp(elevationMap[i] ?? 0, 0, 1);
+    const bin = Math.min(bins - 1, Math.floor(height * (bins - 1)));
+    counts[bin] += 1;
+    sums[bin] += height;
+    total += 1;
+  }
+  if (total === 0) {
+    return null;
+  }
+  if (total < 8) {
+    const sum = sums.reduce((acc, value) => acc + value, 0);
+    return clamp(sum / total, 0, 1);
+  }
+  const target = Math.max(1, Math.ceil(total * 0.25));
+  let taken = 0;
+  let sum = 0;
+  let count = 0;
+  for (let bin = bins - 1; bin >= 0; bin -= 1) {
+    const binCount = counts[bin];
+    if (binCount === 0) {
+      continue;
+    }
+    const take = Math.min(binCount, target - taken);
+    const avg = sums[bin] / binCount;
+    sum += avg * take;
+    count += take;
+    taken += take;
+    if (taken >= target) {
+      break;
+    }
+  }
+  return count > 0 ? clamp(sum / count, 0, 1) : null;
+}
+
+function expandOceanMaskByElevation(
+  state: WorldState,
+  elevationMap: ArrayLike<number>,
+  seaLevelMap: ArrayLike<number>,
+  oceanMask: Uint8Array,
+  riverMask: Uint8Array | undefined,
+  seaLevel: number
+): Uint8Array {
+  const { cols, rows, totalTiles } = state.grid;
+  const mask = Uint8Array.from(oceanMask);
+  const queue = new Int32Array(totalTiles);
+  const edgeWidth = getEdgeWidth(cols, rows);
+  const coastMarginBase = 0.012;
+  let head = 0;
+  let tail = 0;
+  for (let i = 0; i < totalTiles; i += 1) {
+    if (mask[i]) {
+      queue[tail] = i;
+      tail += 1;
+    }
+  }
+  while (head < tail) {
+    const idx = queue[head];
+    head += 1;
+    const x = idx % cols;
+    const y = Math.floor(idx / cols);
+    const isRiver = riverMask && riverMask[idx] > 0;
+    const tryPush = (nIdx: number, nx: number, ny: number) => {
+      if (mask[nIdx]) {
+        return;
+      }
+      if (riverMask && riverMask[nIdx] > 0) {
+        mask[nIdx] = 1;
+        queue[tail] = nIdx;
+        tail += 1;
+        return;
+      }
+      if (isRiver) {
+        return;
+      }
+      const edgeDist = Math.min(nx, ny, cols - 1 - nx, rows - 1 - ny);
+      const edgeT = clamp(1 - edgeDist / Math.max(1, edgeWidth), 0, 1);
+      const seaMargin = edgeT * coastMarginBase;
+      const localSea = seaLevelMap[nIdx] ?? seaLevel;
+      const baseline = Math.max(WATER_BASELINE_ELEV, localSea - EDGE_WATER_BASE_OFFSET);
+      const falloff = getEdgeFalloff(nx, ny, cols, rows, edgeWidth, state.seed);
+      const elev = elevationMap[nIdx] ?? 0;
+      const coastElev = baseline + (elev - baseline) * falloff;
+      const threshold = Math.max(seaLevel, localSea) + seaMargin;
+      if (coastElev <= threshold) {
+        mask[nIdx] = 1;
+        queue[tail] = nIdx;
+        tail += 1;
+      }
+    };
+    if (x > 0) {
+      tryPush(idx - 1, x - 1, y);
+    }
+    if (x < cols - 1) {
+      tryPush(idx + 1, x + 1, y);
+    }
+    if (y > 0) {
+      tryPush(idx - cols, x, y - 1);
+    }
+    if (y < rows - 1) {
+      tryPush(idx + cols, x, y + 1);
+    }
+  }
+  return mask;
 }
 
 function flattenSettlementGround(state: WorldState): void {
@@ -1138,7 +2064,8 @@ export async function generateMap(
   state: WorldState,
   rng: RNG,
   report?: MapGenReporter,
-  settings?: MapGenSettings
+  settings?: MapGenSettings,
+  debug?: MapGenDebug
 ): Promise<void> {
   const yieldIfNeeded = createYield();
   const mapSettings = { ...DEFAULT_MAP_GEN_SETTINGS, ...(settings ?? {}) };
@@ -1164,9 +2091,18 @@ export async function generateMap(
     meadowMask: number;
   };
 
-  const { elevationMap, riverMask } = await buildElevationMap(state, rng, mapSettings, report ? async (message, progress) => {
-    await report(message, progress * 0.6);
-  } : undefined, yieldIfNeeded);
+  const { elevationMap, riverMask, seaLevelBase } = await buildElevationMap(
+    state,
+    rng,
+    mapSettings,
+    report
+      ? async (message, progress) => {
+          await report(message, progress * 0.6);
+        }
+      : undefined,
+    yieldIfNeeded,
+    debug
+  );
 
   const slopeMap = new Float32Array(state.grid.totalTiles);
   for (let y = 0; y < state.grid.rows; y += 1) {
@@ -1240,6 +2176,11 @@ export async function generateMap(
   const forestNoiseMap = new Float32Array(totalTiles);
   const meadowMaskMap = new Float32Array(totalTiles);
   const seaLevelMap = new Float32Array(totalTiles);
+  const trackTerrainStats = DEBUG_TERRAIN;
+  let elevMin = 1;
+  let elevMax = 0;
+  let elevSum = 0;
+  let waterCount = 0;
 
   for (let y = 0; y < state.grid.rows; y += 1) {
     for (let x = 0; x < state.grid.cols; x += 1) {
@@ -1285,14 +2226,20 @@ export async function generateMap(
       forestNoiseMap[idx] = forestNoise;
       meadowMaskMap[idx] = meadowMask;
 
-      const riverFlag = riverMask[idx] > 0;
-      const riverBias = riverFlag ? mapSettings.riverWaterBias + valley * 0.08 : 0;
-      const seaLevel = clamp(
-        mapSettings.baseWaterThreshold + (1 - edgeFactor) * mapSettings.edgeWaterBias + riverBias,
-        0.08,
-        0.34
+      const riverBias = 0;
+      const seaLevel = clampSeaLevel(
+        seaLevelBase + (1 - edgeFactor) * mapSettings.edgeWaterBias + riverBias,
+        mapSettings
       );
       seaLevelMap[idx] = seaLevel;
+      if (trackTerrainStats) {
+        elevMin = Math.min(elevMin, elevation);
+        elevMax = Math.max(elevMax, elevation);
+        elevSum += elevation;
+        if (elevation < seaLevel) {
+          waterCount += 1;
+        }
+      }
 
       const type: TileType = elevation < seaLevel ? "water" : "grass";
       state.tiles[idx] = {
@@ -1322,12 +2269,134 @@ export async function generateMap(
       await report("Seeding biomes...", 0.6 + (y + 1) / state.grid.rows * 0.12);
     }
   }
+  for (let i = 0; i < riverMask.length; i += 1) {
+    if (riverMask[i] > 0) {
+      state.tiles[i].type = "water";
+    }
+  }
+  let inlandAdjusted = false;
+  let slopeDirty = false;
+  let oceanMask = buildOceanMask(state);
+  let oceanMaskCount = countMaskTiles(oceanMask);
+  if (oceanMaskCount === 0) {
+    oceanMask = buildOceanMaskFromElevation(state, elevationMap, seaLevelMap);
+    oceanMaskCount = countMaskTiles(oceanMask);
+  }
+  if (oceanMaskCount === 0) {
+    oceanMask = buildLargestWaterMask(state);
+    oceanMaskCount = countMaskTiles(oceanMask);
+  }
+  const oceanLevel = oceanMaskCount > 0 ? computeOceanLevel(elevationMap, oceanMask, riverMask) : null;
+  if (oceanLevel !== null) {
+    oceanMask = expandOceanMaskByElevation(state, elevationMap, seaLevelMap, oceanMask, riverMask, oceanLevel);
+    for (let i = 0; i < state.tiles.length; i += 1) {
+      if (!oceanMask[i]) {
+        continue;
+      }
+      if (state.tiles[i].type !== "water") {
+        state.tiles[i].type = "water";
+        inlandAdjusted = true;
+      }
+    }
+  }
+  if (DISABLE_INLAND_LAKES && oceanMaskCount > 0) {
+    for (let i = 0; i < state.tiles.length; i += 1) {
+      if (oceanMask[i]) {
+        continue;
+      }
+      const tile = state.tiles[i];
+      const belowOceanLevel = oceanLevel !== null && elevationMap[i] < oceanLevel;
+      if (tile.type !== "water" && !belowOceanLevel) {
+        continue;
+      }
+      inlandAdjusted = true;
+      const seaLevel = seaLevelMap[i];
+      const floorLevel = oceanLevel !== null ? Math.max(seaLevel, oceanLevel) : seaLevel;
+      const nextElevation = Math.max(elevationMap[i], floorLevel + 0.002);
+      if (nextElevation !== elevationMap[i]) {
+        elevationMap[i] = nextElevation;
+        tile.elevation = nextElevation;
+        slopeDirty = true;
+      } else {
+        tile.elevation = nextElevation;
+      }
+      tile.type = "grass";
+    }
+    if (slopeDirty) {
+      for (let y = 0; y < state.grid.rows; y += 1) {
+        for (let x = 0; x < state.grid.cols; x += 1) {
+          const idx = indexFor(state.grid, x, y);
+          const e = elevationMap[idx];
+          let maxDiff = 0;
+          if (y > 0) {
+            maxDiff = Math.max(maxDiff, Math.abs(e - elevationMap[idx - state.grid.cols]));
+          }
+          if (y < state.grid.rows - 1) {
+            maxDiff = Math.max(maxDiff, Math.abs(e - elevationMap[idx + state.grid.cols]));
+          }
+          if (x > 0) {
+            maxDiff = Math.max(maxDiff, Math.abs(e - elevationMap[idx - 1]));
+          }
+          if (x < state.grid.cols - 1) {
+            maxDiff = Math.max(maxDiff, Math.abs(e - elevationMap[idx + 1]));
+          }
+          slopeMap[idx] = clamp(maxDiff, 0, 1);
+        }
+      }
+    }
+  }
+  if (trackTerrainStats && inlandAdjusted) {
+    elevMin = 1;
+    elevMax = 0;
+    elevSum = 0;
+    waterCount = 0;
+    for (let i = 0; i < totalTiles; i += 1) {
+      const elevation = state.tiles[i].elevation;
+      elevMin = Math.min(elevMin, elevation);
+      elevMax = Math.max(elevMax, elevation);
+      elevSum += elevation;
+      if (state.tiles[i].type === "water") {
+        waterCount += 1;
+      }
+    }
+  }
+  if (DEBUG_TERRAIN) {
+    let riverTiles = 0;
+    for (let i = 0; i < riverMask.length; i += 1) {
+      if (riverMask[i] > 0) {
+        riverTiles += 1;
+      }
+    }
+    console.log(`MapGen rivers: tiles=${riverTiles}`);
+  }
+  if (trackTerrainStats) {
+    const mean = elevSum / Math.max(1, totalTiles);
+    const waterShare = (waterCount / Math.max(1, totalTiles)) * 100;
+    console.log(
+      `MapGen elevation: min=${elevMin.toFixed(3)} max=${elevMax.toFixed(3)} mean=${mean.toFixed(3)} water=${waterShare.toFixed(1)}%`
+    );
+  }
+  if (debug) {
+    const typeIds = new Uint8Array(totalTiles);
+    for (let i = 0; i < totalTiles; i += 1) {
+      typeIds[i] = TILE_TYPE_IDS[state.tiles[i].type];
+    }
+    await debug.onPhase({
+      phase: "tiles:classified",
+      elevations: Float32Array.from(elevationMap),
+      tileTypes: typeIds,
+      riverMask: Uint8Array.from(riverMask)
+    });
+    if (debug.waitForStep) {
+      await debug.waitForStep();
+    }
+  }
 
-  const waterDistanceCap = 30;
+  const waterDistanceCap = MOISTURE_WATER_DIST_CAP;
   if (report) {
     await report("Charting shoreline distance...", 0.72);
   }
-  await computeWaterDistances(
+  const waterDistMap = await computeWaterDistances(
     state,
     waterDistanceCap,
     report
@@ -1340,6 +2409,7 @@ export async function generateMap(
 
   const moistureMap = await buildMoistureMap(
     state,
+    waterDistMap,
     waterDistanceCap,
     report
       ? async (message, progress) => {
@@ -1348,9 +2418,24 @@ export async function generateMap(
       : undefined,
     yieldIfNeeded
   );
+  state.tileWaterDist = waterDistMap;
+  state.tileMoisture = moistureMap;
+  state.tileRiverMask = riverMask;
 
   for (let i = 0; i < state.tiles.length; i += 1) {
     const tile = state.tiles[i];
+    if (oceanMask[i]) {
+      tile.type = "water";
+      tile.canopy = 0;
+      tile.moisture = moistureMap[i];
+      continue;
+    }
+    if (riverMask[i] > 0 && (!DISABLE_INLAND_LAKES || oceanMask[i])) {
+      tile.type = "water";
+      tile.canopy = 0;
+      tile.moisture = moistureMap[i];
+      continue;
+    }
     const elevation = tile.elevation;
     const valley = state.valleyMap[i];
     const slope = slopeMap[i];
@@ -1372,7 +2457,6 @@ export async function generateMap(
     tile.moisture = moisture;
 
     if (nextType === "water") {
-      tile.elevation = Math.min(tile.elevation, 0.22 + rng.next() * 0.04);
       tile.canopy = 0;
     } else if (nextType === "forest" || nextType === "grass" || nextType === "scrub" || nextType === "floodplain") {
       const micro = microMap[i];
@@ -1394,6 +2478,13 @@ export async function generateMap(
       }
     }
   }
+  for (let i = 0; i < state.tiles.length; i += 1) {
+    const tile = state.tiles[i];
+    if (tile.type === "water" && oceanMask[i] && riverMask[i] === 0) {
+      tile.elevation = Math.min(tile.elevation, 0.22 + rng.next() * 0.04);
+    }
+  }
+  assertEdgeWater(state);
 
   if (report) {
     await report("Placing communities...", 0.93);
