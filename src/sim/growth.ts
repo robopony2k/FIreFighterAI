@@ -4,6 +4,7 @@ import { DEBUG_GROWTH_METRICS, FUEL_PROFILES } from "../core/config.js";
 import { clamp } from "../core/utils.js";
 import { applyFuel } from "../core/tiles.js";
 import { indexFor } from "../core/grid.js";
+import { hash2D } from "../mapgen/noise.js";
 
 const WATER_INFLUENCE_DIST = 18;
 const MAX_WATER_DIST = 30;
@@ -85,6 +86,38 @@ function getElevationFactor(elevation: number): number {
   return clamp(0.35 + (1 - elevation) * 0.65, 0.35, 1);
 }
 
+const computeStemDensity = (
+  state: WorldState,
+  type: WorldState["tiles"][number]["type"],
+  canopyCover: number,
+  x: number,
+  y: number
+): number => {
+  if (canopyCover <= 0) {
+    return 0;
+  }
+  const jitter = (hash2D(x, y, state.seed + 1729) - 0.5) * 2;
+  if (type === "forest") {
+    const base = 2 + canopyCover * 9;
+    return Math.round(clamp(base + jitter * 2, 0, 12));
+  }
+  if (type === "grass" || type === "scrub" || type === "floodplain") {
+    const base = canopyCover * 3;
+    return Math.round(clamp(base + jitter, 0, 3));
+  }
+  return 0;
+};
+
+const syncCanopyMetrics = (
+  state: WorldState,
+  tile: WorldState["tiles"][number],
+  x: number,
+  y: number
+): void => {
+  tile.canopyCover = tile.canopy;
+  tile.stemDensity = computeStemDensity(state, tile.type, tile.canopyCover, x, y);
+};
+
 function logGrowthMetrics(state: WorldState): void {
   let ashCount = 0;
   let grassCount = 0;
@@ -159,6 +192,10 @@ export function stepGrowth(state: WorldState, dayDelta: number, rng: RNG): void 
       if (tile.type === "ash") {
         tile.canopy = 0;
         if (tile.houseDestroyed) {
+          syncCanopyMetrics(state, tile, x, y);
+          if (tile.type !== prevType || Math.abs(tile.canopy - prevCanopy) >= CANOPY_DIRTY_THRESHOLD) {
+            terrainDirty = true;
+          }
           continue;
         }
         tile.ashAge += dayDelta;
@@ -171,6 +208,7 @@ export function stepGrowth(state: WorldState, dayDelta: number, rng: RNG): void 
           applyFuel(tile, tile.moisture, rng);
           state.burnedTiles = Math.max(0, state.burnedTiles - 1);
         }
+        syncCanopyMetrics(state, tile, x, y);
         if (tile.type !== prevType || Math.abs(tile.canopy - prevCanopy) >= CANOPY_DIRTY_THRESHOLD) {
           terrainDirty = true;
         }
@@ -183,6 +221,7 @@ export function stepGrowth(state: WorldState, dayDelta: number, rng: RNG): void 
           tile.canopy = clamp(0.1 + tile.moisture * 0.2 + waterFactor * 0.1, 0.1, 0.35);
           applyFuel(tile, tile.moisture, rng);
         }
+        syncCanopyMetrics(state, tile, x, y);
         if (tile.type !== prevType || Math.abs(tile.canopy - prevCanopy) >= CANOPY_DIRTY_THRESHOLD) {
           terrainDirty = true;
         }
@@ -211,6 +250,7 @@ export function stepGrowth(state: WorldState, dayDelta: number, rng: RNG): void 
             applyFuel(tile, tile.moisture, rng);
           }
         }
+        syncCanopyMetrics(state, tile, x, y);
         if (tile.type !== prevType || Math.abs(tile.canopy - prevCanopy) >= CANOPY_DIRTY_THRESHOLD) {
           terrainDirty = true;
         }

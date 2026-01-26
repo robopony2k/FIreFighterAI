@@ -565,6 +565,10 @@ export function clearFuelAt(state: WorldState, rng: RNG, tileX: number, tileY: n
   }
   tile.type = "firebreak";
   tile.canopy = 0;
+  tile.canopyCover = 0;
+  tile.stemDensity = 0;
+  tile.dominantTreeType = null;
+  tile.treeType = null;
   tile.ashAge = 0;
   applyFuel(tile, tile.moisture, rng);
   state.terrainDirty = true;

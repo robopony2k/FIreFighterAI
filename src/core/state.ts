@@ -109,6 +109,7 @@ export interface WorldState {
   tileTypeId: Uint8Array;
   tileWaterDist: Uint16Array;
   tileRiverMask: Uint8Array;
+  structureMask: Uint8Array;
   igniteMask: Uint8Array;
   tileSoaDirty: boolean;
   tileSoaPhase: SeasonPhase | null;
@@ -303,6 +304,7 @@ export function createInitialState(seed: number, grid: Grid): WorldState {
     tileTypeId: new Uint8Array(grid.totalTiles),
     tileWaterDist: new Uint16Array(grid.totalTiles),
     tileRiverMask: new Uint8Array(grid.totalTiles),
+    structureMask: new Uint8Array(grid.totalTiles),
 
     tileSoaDirty: true,
 
@@ -503,6 +505,7 @@ export function syncTileSoA(state: WorldState): void {
     state.tileTypeId = new Uint8Array(total);
     state.tileWaterDist = new Uint16Array(total);
     state.tileRiverMask = new Uint8Array(total);
+    state.structureMask = new Uint8Array(total);
     state.heatBuffer = new Float32Array(total);
     state.fireSnapshot = new Float32Array(total);
     state.renderFireSmooth = new Float32Array(total);

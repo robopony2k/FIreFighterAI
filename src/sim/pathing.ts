@@ -114,8 +114,12 @@ export function isPassable(state: WorldState, x: number, y: number): boolean {
   if (!inBounds(state.grid, x, y)) {
     return false;
   }
-  const type = state.tiles[indexFor(state.grid, x, y)].type;
-  return type !== "water";
+  const idx = indexFor(state.grid, x, y);
+  const type = state.tiles[idx].type;
+  if (type === "water" || type === "house") {
+    return false;
+  }
+  return state.structureMask[idx] === 0;
 }
 
 export function findPath(state: WorldState, start: Point, goal: Point): Point[] {

@@ -12,9 +12,47 @@ export type TileType =
   | "base"
   | "house"
   | "firebreak";
-
-export type UnitKind = "firefighter" | "truck";
-export type UnitSkill = "speed" | "power" | "range" | "resilience";
+export enum TreeType {
+  // Tall evergreen, colder and drier slopes.
+  Pine = "pine",
+  // Broad canopy, richer lowlands.
+  Oak = "oak",
+  // Mixed hardwood, balanced climates.
+  Maple = "maple",
+  // Light pioneer, early regrowth.
+  Birch = "birch",
+  // Moist ground specialist.
+  Elm = "elm",
+  // Low, hardy brush.
+  Scrub = "scrub"
+}
+
+export const TREE_TYPE_ORDER: TreeType[] = [
+  TreeType.Pine,
+  TreeType.Oak,
+  TreeType.Maple,
+  TreeType.Birch,
+  TreeType.Elm,
+  TreeType.Scrub
+];
+
+export const TREE_TYPE_IDS: Record<TreeType, number> = TREE_TYPE_ORDER.reduce(
+  (acc, type, index) => {
+    acc[type] = index;
+    return acc;
+  },
+  {} as Record<TreeType, number>
+);
+
+export const TREE_ID_TO_TYPE: TreeType[] = TREE_TYPE_ORDER;
+
+
+
+
+export type UnitKind = "firefighter" | "truck";
+
+export type UnitSkill = "speed" | "power" | "range" | "resilience";
+
 export type RosterStatus = "available" | "deployed" | "lost";
 
 export type SeasonPhase = "growth" | "maintenance" | "fire" | "budget";
@@ -31,23 +69,40 @@ export interface Point {
 
   x: number;
 
-
-  y: number;
-}
-
-export interface Grid {
-  cols: number;
-  rows: number;
-  totalTiles: number;
-}
-
-export interface Tile {
-  type: TileType;
-  fuel: number;
-  fire: number;
-  isBase: boolean;
-  elevation: number;
-  heat: number;
+
+
+  y: number;
+
+}
+
+
+
+export interface Grid {
+
+  cols: number;
+
+  rows: number;
+
+  totalTiles: number;
+
+}
+
+
+
+export interface Tile {
+
+  type: TileType;
+
+  fuel: number;
+
+  fire: number;
+
+  isBase: boolean;
+
+  elevation: number;
+
+  heat: number;
+
   ignitionPoint: number;
   burnRate: number;
   heatOutput: number;
@@ -56,33 +111,64 @@ export interface Tile {
   heatRetention: number;
   windFactor: number;
   moisture: number;
-  waterDist: number;
-  canopy: number;
-  houseValue: number;
-  houseResidents: number;
-  houseDestroyed: boolean;
-  ashAge: number;
-}
-
-export interface Unit {
-  id: number;
-  kind: UnitKind;
-  rosterId: number | null;
-  autonomous: boolean;
-  x: number;
-  y: number;
-  prevX: number;
-  prevY: number;
-  target: Point | null;
-  path: Point[];
-  pathIndex: number;
-  speed: number;
-  radius: number;
-  power: number;
-  selected: boolean;
-  carrierId: number | null;
-  passengerIds: number[];
-  assignedTruckId: number | null;
+  waterDist: number;
+
+  canopy: number;
+  canopyCover: number;
+  stemDensity: number;
+  dominantTreeType: TreeType | null;
+  treeType: TreeType | null;
+
+  houseValue: number;
+
+  houseResidents: number;
+
+  houseDestroyed: boolean;
+
+  ashAge: number;
+
+}
+
+
+
+export interface Unit {
+
+  id: number;
+
+  kind: UnitKind;
+
+  rosterId: number | null;
+
+  autonomous: boolean;
+
+  x: number;
+
+  y: number;
+
+  prevX: number;
+
+  prevY: number;
+
+  target: Point | null;
+
+  path: Point[];
+
+  pathIndex: number;
+
+  speed: number;
+
+  radius: number;
+
+  power: number;
+
+  selected: boolean;
+
+  carrierId: number | null;
+
+  passengerIds: number[];
+
+  assignedTruckId: number | null;
+
     crewIds: number[];
 
     crewMode: "boarded" | "deployed";
@@ -125,10 +211,14 @@ export interface Unit {
 
   
 
-    id: number;
-  kind: UnitKind;
-  name: string;
-  training: UnitTraining;
+    id: number;
+
+  kind: UnitKind;
+
+  name: string;
+
+  training: UnitTraining;
+
     status: RosterStatus;
 
     assignedTruckId: number | null;
@@ -143,68 +233,130 @@ export interface Unit {
 
   export interface Particle {
 
-    x: number;
-  y: number;
-  vx: number;
-  vy: number;
-  life: number;
-  maxLife: number;
-  size: number;
-  alpha: number;
-}
-
-export interface Wind {
-  name: string;
-  dx: number;
-  dy: number;
-  strength: number;
-}
-
-export interface FireSimWork {
-  phase: FireSimPhase;
-  useSnapshot: boolean;
-  neighborMode: 4 | 8;
-  quality: 0 | 1 | 2;
-  boundsActive: boolean;
-  minX: number;
-  maxX: number;
-  minY: number;
-  maxY: number;
-  snapshotMinX: number;
-  snapshotMaxX: number;
-  snapshotMinY: number;
-  snapshotMaxY: number;
-  heatMinX: number;
-  heatMaxX: number;
-  heatMinY: number;
-  heatMaxY: number;
-  hasHeatBounds: boolean;
-  currentY: number;
-  fireDelta: number;
-  hotFactor: number;
-  heatDelta: number;
-  diffusion: number;
-  cooling: number;
-  advectX: number;
-  advectY: number;
-  advectFraction: number;
-  igniteBuffer: Int32Array;
-  igniteCount: number;
-  heatWeights: Float32Array;
-  heatWeightScale: number;
-  heatActiveMinX: number;
-  heatActiveMaxX: number;
-  heatActiveMinY: number;
-  heatActiveMaxY: number;
-  heatResidue: boolean;
-  smokeAccumulator: number;
-  activeFires: number;
-  nextMinX: number;
-  nextMaxX: number;
-  nextMinY: number;
-  nextMaxY: number;
-}
-
+    x: number;
+
+  y: number;
+
+  vx: number;
+
+  vy: number;
+
+  life: number;
+
+  maxLife: number;
+
+  size: number;
+
+  alpha: number;
+
+}
+
+
+
+export interface Wind {
+
+  name: string;
+
+  dx: number;
+
+  dy: number;
+
+  strength: number;
+
+}
+
+
+
+export interface FireSimWork {
+
+  phase: FireSimPhase;
+
+  useSnapshot: boolean;
+
+  neighborMode: 4 | 8;
+
+  quality: 0 | 1 | 2;
+
+  boundsActive: boolean;
+
+  minX: number;
+
+  maxX: number;
+
+  minY: number;
+
+  maxY: number;
+
+  snapshotMinX: number;
+
+  snapshotMaxX: number;
+
+  snapshotMinY: number;
+
+  snapshotMaxY: number;
+
+  heatMinX: number;
+
+  heatMaxX: number;
+
+  heatMinY: number;
+
+  heatMaxY: number;
+
+  hasHeatBounds: boolean;
+
+  currentY: number;
+
+  fireDelta: number;
+
+  hotFactor: number;
+
+  heatDelta: number;
+
+  diffusion: number;
+
+  cooling: number;
+
+  advectX: number;
+
+  advectY: number;
+
+  advectFraction: number;
+
+  igniteBuffer: Int32Array;
+
+  igniteCount: number;
+
+  heatWeights: Float32Array;
+
+  heatWeightScale: number;
+
+  heatActiveMinX: number;
+
+  heatActiveMaxX: number;
+
+  heatActiveMinY: number;
+
+  heatActiveMaxY: number;
+
+  heatResidue: boolean;
+
+  smokeAccumulator: number;
+
+  activeFires: number;
+
+  nextMinX: number;
+
+  nextMaxX: number;
+
+  nextMinY: number;
+
+  nextMaxY: number;
+
+}
+
+
+
 export interface FireSettings {
   ignitionChancePerDay: number;
   simSpeed: number;
@@ -225,12 +377,18 @@ export interface FireSettings {
 }
 
 export interface LeaderboardEntry {
-  name: string;
-  score: number;
-  seed: number;
-  date: number;
-}
-
+  name: string;
+
+  score: number;
+
+  seed: number;
+
+  date: number;
+
+}
+
+
+
 export interface FuelProfile {
   baseFuel: number;
   ignition: number;
@@ -255,5 +413,7 @@ export type ClimateTimeline = {
 };
 
 export interface RNG {
-  next(): number;
-}
+  next(): number;
+
+}
+

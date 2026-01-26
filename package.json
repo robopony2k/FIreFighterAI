@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "generate-fuel-profiles": "node scripts/generate-fuel-profiles.mjs",
+    "generate-building-footprints": "node scripts/generate-building-footprints.mjs",
     "prebuild": "npm run generate-fuel-profiles",
     "build": "tsc --project tsconfig.json",
     "predev": "npm run generate-fuel-profiles",

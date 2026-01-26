@@ -1,46 +1,230 @@
 import type { RNG, Point } from "../core/types.js";
 import type { WorldState } from "../core/state.js";
+import { HOUSE_VARIANTS } from "../core/buildingFootprints.js";
 import { inBounds, indexFor } from "../core/grid.js";
 import { carveRoad, collectRoadTiles, findNearestRoadTile, findRoadPath, findRoadPathToTarget, setRoadAt } from "./roads.js";
+
+const HOUSE_BUFFER_RADIUS = 1;
+const HOUSE_FOOTPRINT_EPS = 1e-4;
+
+type HouseFootprintBounds = {
+  minX: number;
+  maxX: number;
+  minY: number;
+  maxY: number;
+};
+
+type HousePlacementContext = {
+  bufferMask: Uint8Array;
+  footprints: Map<number, HouseFootprintBounds>;
+};
+
+const noiseAt = (value: number): number => {
+  const s = Math.sin(value * 12.9898 + 78.233) * 43758.5453;
+  return s - Math.floor(s);
+};
+
+const pickHouseRotation = (state: WorldState, tileX: number, tileY: number, seed: number): number => {
+  const isRoadLike = (x: number, y: number): boolean => {
+    if (!inBounds(state.grid, x, y)) {
+      return false;
+    }
+    const type = state.tiles[indexFor(state.grid, x, y)].type;
+    return type === "road" || type === "base";
+  };
+  const roadEW = isRoadLike(tileX - 1, tileY) || isRoadLike(tileX + 1, tileY);
+  const roadNS = isRoadLike(tileX, tileY - 1) || isRoadLike(tileX, tileY + 1);
+  const flip = noiseAt(seed + 21.4) < 0.5 ? 0 : Math.PI;
+  if (roadEW && !roadNS) {
+    return flip;
+  }
+  if (roadNS && !roadEW) {
+    return Math.PI / 2 + flip;
+  }
+  return noiseAt(seed + 9.1) < 0.5 ? 0 : Math.PI / 2;
+};
+
+const pickHouseVariant = (seed: number) => {
+  if (HOUSE_VARIANTS.length === 0) {
+    return { sizeX: 1, sizeZ: 1 };
+  }
+  const index = Math.floor(noiseAt(seed + 6.1) * HOUSE_VARIANTS.length);
+  const variant = HOUSE_VARIANTS[Math.min(HOUSE_VARIANTS.length - 1, Math.max(0, index))];
+  return { sizeX: Math.max(0.01, variant.sizeX), sizeZ: Math.max(0.01, variant.sizeZ) };
+};
+
+const getHouseFootprintBounds = (tileX: number, tileY: number, rotation: number, seed: number): HouseFootprintBounds => {
+  const variant = pickHouseVariant(seed);
+  const rotate = Math.abs(Math.sin(rotation)) > 0.5;
+  const width = rotate ? variant.sizeZ : variant.sizeX;
+  const depth = rotate ? variant.sizeX : variant.sizeZ;
+  const centerX = tileX + 0.5;
+  const centerY = tileY + 0.5;
+  const minX = Math.floor(centerX - width / 2);
+  const maxX = Math.floor(centerX + width / 2 - HOUSE_FOOTPRINT_EPS);
+  const minY = Math.floor(centerY - depth / 2);
+  const maxY = Math.floor(centerY + depth / 2 - HOUSE_FOOTPRINT_EPS);
+  return { minX, maxX, minY, maxY };
+};
+
+const isBuildableType = (type: WorldState["tiles"][number]["type"]): boolean =>
+  type === "grass" || type === "scrub" || type === "floodplain" || type === "forest";
+
+const canPlaceHouseFootprint = (
+  state: WorldState,
+  bounds: HouseFootprintBounds,
+  context: HousePlacementContext
+): boolean => {
+  for (let y = bounds.minY; y <= bounds.maxY; y += 1) {
+    for (let x = bounds.minX; x <= bounds.maxX; x += 1) {
+      if (!inBounds(state.grid, x, y)) {
+        return false;
+      }
+      const idx = indexFor(state.grid, x, y);
+      if (state.structureMask[idx] || context.bufferMask[idx]) {
+        return false;
+      }
+      if (!isBuildableType(state.tiles[idx].type)) {
+        return false;
+      }
+    }
+  }
+  return true;
+};
+
+const markHouseFootprint = (
+  state: WorldState,
+  bounds: HouseFootprintBounds,
+  context: HousePlacementContext
+): void => {
+  for (let y = bounds.minY; y <= bounds.maxY; y += 1) {
+    for (let x = bounds.minX; x <= bounds.maxX; x += 1) {
+      if (!inBounds(state.grid, x, y)) {
+        continue;
+      }
+      const idx = indexFor(state.grid, x, y);
+      state.structureMask[idx] = 1;
+    }
+  }
+  const minX = bounds.minX - HOUSE_BUFFER_RADIUS;
+  const maxX = bounds.maxX + HOUSE_BUFFER_RADIUS;
+  const minY = bounds.minY - HOUSE_BUFFER_RADIUS;
+  const maxY = bounds.maxY + HOUSE_BUFFER_RADIUS;
+  for (let y = minY; y <= maxY; y += 1) {
+    for (let x = minX; x <= maxX; x += 1) {
+      if (!inBounds(state.grid, x, y)) {
+        continue;
+      }
+      const idx = indexFor(state.grid, x, y);
+      context.bufferMask[idx] = 1;
+    }
+  }
+};
+
+const isFootprintAdjacentToRoad = (state: WorldState, bounds: HouseFootprintBounds): boolean => {
+  for (let y = bounds.minY; y <= bounds.maxY; y += 1) {
+    for (let x = bounds.minX; x <= bounds.maxX; x += 1) {
+      const neighbors = [
+        { x: x + 1, y },
+        { x: x - 1, y },
+        { x, y: y + 1 },
+        { x, y: y - 1 }
+      ];
+      for (const point of neighbors) {
+        if (!inBounds(state.grid, point.x, point.y)) {
+          continue;
+        }
+        if (
+          point.x >= bounds.minX &&
+          point.x <= bounds.maxX &&
+          point.y >= bounds.minY &&
+          point.y <= bounds.maxY
+        ) {
+          continue;
+        }
+        const type = state.tiles[indexFor(state.grid, point.x, point.y)].type;
+        if (type === "road" || type === "base") {
+          return true;
+        }
+      }
+    }
+  }
+  return false;
+};
+
+const findFootprintEntryTile = (state: WorldState, bounds: HouseFootprintBounds): Point | null => {
+  let best: Point | null = null;
+  let bestScore = Number.POSITIVE_INFINITY;
+  const minX = bounds.minX - HOUSE_BUFFER_RADIUS;
+  const maxX = bounds.maxX + HOUSE_BUFFER_RADIUS;
+  const minY = bounds.minY - HOUSE_BUFFER_RADIUS;
+  const maxY = bounds.maxY + HOUSE_BUFFER_RADIUS;
+  for (let y = minY; y <= maxY; y += 1) {
+    for (let x = minX; x <= maxX; x += 1) {
+      if (!inBounds(state.grid, x, y)) {
+        continue;
+      }
+      if (x >= bounds.minX && x <= bounds.maxX && y >= bounds.minY && y <= bounds.maxY) {
+        continue;
+      }
+      const idx = indexFor(state.grid, x, y);
+      if (state.structureMask[idx]) {
+        continue;
+      }
+      const type = state.tiles[idx].type;
+      if (type === "water") {
+        continue;
+      }
+      const score = Math.abs(x - state.basePoint.x) + Math.abs(y - state.basePoint.y);
+      if (score < bestScore) {
+        bestScore = score;
+        best = { x, y };
+      }
+    }
+  }
+  return best;
+};
 
 function isBuildable(state: WorldState, x: number, y: number): boolean {
   if (!inBounds(state.grid, x, y)) {
     return false;
   }
   const type = state.tiles[indexFor(state.grid, x, y)].type;
-  return type === "grass" || type === "scrub" || type === "floodplain" || type === "forest";
+  return isBuildableType(type);
 }
 
-function placeHouseAt(state: WorldState, x: number, y: number, value: number, residents: number): boolean {
+function placeHouseAt(
+  state: WorldState,
+  x: number,
+  y: number,
+  value: number,
+  residents: number,
+  bounds: HouseFootprintBounds,
+  context: HousePlacementContext
+): boolean {
+  if (!canPlaceHouseFootprint(state, bounds, context)) {
+    return false;
+  }
+  const idx = indexFor(state.grid, x, y);
+  const tile = state.tiles[idx];
   if (!isBuildable(state, x, y)) {
     return false;
   }
-  const tile = state.tiles[indexFor(state.grid, x, y)];
   tile.type = "house";
   tile.canopy = 0;
+  tile.canopyCover = 0;
+  tile.stemDensity = 0;
+  tile.dominantTreeType = null;
+  tile.treeType = null;
   tile.houseValue = value;
   tile.houseResidents = residents;
   tile.houseDestroyed = false;
   state.totalPropertyValue += value;
   state.totalPopulation += residents;
   state.totalHouses += 1;
+  markHouseFootprint(state, bounds, context);
+  context.footprints.set(idx, bounds);
   return true;
-}
-
-function isAdjacentToRoad(state: WorldState, x: number, y: number): boolean {
-  const neighbors = [
-    { x: x + 1, y },
-    { x: x - 1, y },
-    { x, y: y + 1 },
-    { x, y: y - 1 }
-  ];
-  return neighbors.some((point) => {
-    if (!inBounds(state.grid, point.x, point.y)) {
-      return false;
-    }
-    const type = state.tiles[indexFor(state.grid, point.x, point.y)].type;
-    return type === "road" || type === "base";
-  });
 }
 
 function countAdjacentHouses(state: WorldState, x: number, y: number): number {
@@ -124,7 +308,8 @@ function placeVillageHouses(
   valueMax: number,
   residentsMin: number,
   residentsMax: number,
-  roadBias: number
+  roadBias: number,
+  context: HousePlacementContext
 ): void {
   let placed = 0;
   let tries = 0;
@@ -138,18 +323,30 @@ function placeVillageHouses(
     if (!isBuildable(state, x, y) || !isHouseSpacingOk(state, x, y)) {
       continue;
     }
-    if (!isAdjacentToRoad(state, x, y) && rng.next() < roadBias) {
+    const seed = y * state.grid.cols + x;
+    const rotation = pickHouseRotation(state, x, y, seed);
+    const bounds = getHouseFootprintBounds(x, y, rotation, seed);
+    if (!canPlaceHouseFootprint(state, bounds, context)) {
+      continue;
+    }
+    if (!isFootprintAdjacentToRoad(state, bounds) && rng.next() < roadBias) {
       continue;
     }
     const value = valueMin + Math.floor(rng.next() * (valueMax - valueMin));
     const residents = residentsMin + Math.floor(rng.next() * (residentsMax - residentsMin));
-    if (placeHouseAt(state, x, y, value, residents)) {
+    if (placeHouseAt(state, x, y, value, residents, bounds, context)) {
       placed += 1;
     }
   }
 }
 
-function placeRoadsideHouses(state: WorldState, rng: RNG, roadTiles: Point[], count: number): void {
+function placeRoadsideHouses(
+  state: WorldState,
+  rng: RNG,
+  roadTiles: Point[],
+  count: number,
+  context: HousePlacementContext
+): void {
   let placed = 0;
   let tries = 0;
   const maxTries = count * 40;
@@ -169,9 +366,15 @@ function placeRoadsideHouses(state: WorldState, rng: RNG, roadTiles: Point[], co
     if (!isBuildable(state, pick.x, pick.y) || !isHouseSpacingOk(state, pick.x, pick.y)) {
       continue;
     }
+    const seed = pick.y * state.grid.cols + pick.x;
+    const rotation = pickHouseRotation(state, pick.x, pick.y, seed);
+    const bounds = getHouseFootprintBounds(pick.x, pick.y, rotation, seed);
+    if (!canPlaceHouseFootprint(state, bounds, context)) {
+      continue;
+    }
     const value = 100 + Math.floor(rng.next() * 170);
     const residents = 1 + Math.floor(rng.next() * 3);
-    if (placeHouseAt(state, pick.x, pick.y, value, residents)) {
+    if (placeHouseAt(state, pick.x, pick.y, value, residents, bounds, context)) {
       placed += 1;
     }
   }
@@ -184,7 +387,7 @@ function markReachableLand(state: WorldState, origin: Point): Uint8Array {
     return visited;
   }
   const originIdx = indexFor(state.grid, origin.x, origin.y);
-  if (state.tiles[originIdx].type === "water") {
+  if (state.tiles[originIdx].type === "water" || state.structureMask[originIdx]) {
     return visited;
   }
 
@@ -215,7 +418,7 @@ function markReachableLand(state: WorldState, origin: Point): Uint8Array {
       if (visited[idx]) {
         continue;
       }
-      if (state.tiles[idx].type === "water") {
+      if (state.tiles[idx].type === "water" || state.structureMask[idx]) {
         continue;
       }
       visited[idx] = 1;
@@ -244,9 +447,9 @@ function findClosestUnreachableLand(state: WorldState, reachable: Uint8Array): P
   for (let y = 0; y < state.grid.rows; y += 1) {
     for (let x = 0; x < state.grid.cols; x += 1) {
       const idx = indexFor(state.grid, x, y);
-      if (reachable[idx] || state.tiles[idx].type === "water") {
-        continue;
-      }
+    if (reachable[idx] || state.tiles[idx].type === "water" || state.structureMask[idx]) {
+      continue;
+    }
       const dist = Math.abs(x - state.basePoint.x) + Math.abs(y - state.basePoint.y);
       if (dist < bestDist) {
         bestDist = dist;
@@ -271,7 +474,7 @@ function connectDetachedLand(state: WorldState, rng: RNG): void {
       start,
       (x, y) => {
         const idx = indexFor(state.grid, x, y);
-        return reachable[idx] === 1 && state.tiles[idx].type !== "house";
+        return reachable[idx] === 1 && state.tiles[idx].type !== "house" && state.structureMask[idx] === 0;
       },
       { allowWater: true }
     );
@@ -300,7 +503,8 @@ function ensureEvacuationRoute(state: WorldState, rng: RNG): void {
     if (x === start.x && y === start.y) {
       return false;
     }
-    return state.tiles[indexFor(state.grid, x, y)].type !== "house";
+    const idx = indexFor(state.grid, x, y);
+    return state.tiles[idx].type !== "house" && state.structureMask[idx] === 0;
   };
 
   let allowBridge = false;
@@ -320,6 +524,15 @@ export function populateCommunities(state: WorldState, rng: RNG): void {
   state.totalPopulation = 0;
   state.totalHouses = 0;
   state.destroyedHouses = 0;
+  if (state.structureMask.length !== state.grid.totalTiles) {
+    state.structureMask = new Uint8Array(state.grid.totalTiles);
+  } else {
+    state.structureMask.fill(0);
+  }
+  const context: HousePlacementContext = {
+    bufferMask: new Uint8Array(state.grid.totalTiles),
+    footprints: new Map<number, HouseFootprintBounds>()
+  };
 
   const maxDim = Math.max(state.grid.cols, state.grid.rows);
   const fastMode = maxDim >= 1024;
@@ -343,7 +556,7 @@ export function populateCommunities(state: WorldState, rng: RNG): void {
       }
     }
     const centralHouseCount = 12 + Math.floor(rng.next() * 8);
-    placeVillageHouses(state, rng, state.basePoint, centralRadius, centralHouseCount, 150, 320, 2, 5, 0.85);
+    placeVillageHouses(state, rng, state.basePoint, centralRadius, centralHouseCount, 150, 320, 2, 5, 0.85, context);
     return;
   }
 
@@ -361,7 +574,7 @@ export function populateCommunities(state: WorldState, rng: RNG): void {
   }
 
   const centralHouseCount = 22 + Math.floor(rng.next() * 12);
-  placeVillageHouses(state, rng, state.basePoint, centralRadius, centralHouseCount, 150, 320, 2, 5, 0.85);
+  placeVillageHouses(state, rng, state.basePoint, centralRadius, centralHouseCount, 150, 320, 2, 5, 0.85, context);
 
   const villageCenters: Point[] = [];
   const villageCount = 3 + Math.floor(rng.next() * 3);
@@ -404,12 +617,12 @@ export function populateCommunities(state: WorldState, rng: RNG): void {
     });
 
     const houseCount = 9 + Math.floor(rng.next() * 8);
-    placeVillageHouses(state, rng, center, 6, houseCount, 120, 260, 1, 4, 0.75);
+    placeVillageHouses(state, rng, center, 6, houseCount, 120, 260, 1, 4, 0.75, context);
   });
 
   const roadTiles = collectRoadTiles(state);
   const roadsideTarget = 8 + Math.floor(rng.next() * 8);
-  placeRoadsideHouses(state, rng, roadTiles, roadsideTarget);
+  placeRoadsideHouses(state, rng, roadTiles, roadsideTarget, context);
 
   for (let y = 0; y < state.grid.rows; y += 1) {
     for (let x = 0; x < state.grid.cols; x += 1) {
@@ -417,9 +630,14 @@ export function populateCommunities(state: WorldState, rng: RNG): void {
       if (state.tiles[idx].type !== "house") {
         continue;
       }
-      if (!isAdjacentToRoad(state, x, y)) {
-        const target = findNearestRoadTile(state, { x, y });
-        carveRoad(state, rng, { x, y }, target);
+      const bounds = context.footprints.get(idx) ?? { minX: x, maxX: x, minY: y, maxY: y };
+      if (!isFootprintAdjacentToRoad(state, bounds)) {
+        const entry = findFootprintEntryTile(state, bounds);
+        if (!entry) {
+          continue;
+        }
+        const target = findNearestRoadTile(state, entry);
+        carveRoad(state, rng, entry, target);
       }
     }
   }

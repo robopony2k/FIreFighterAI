@@ -12,6 +12,7 @@ import { drawParticles } from "./particles.js";
 import { clamp } from "../core/utils.js";
 import { darken, mixRgb, lighten } from "./color.js";
 import { hash2D } from "../mapgen/noise.js";
+import { TreeType } from "../core/types.js";
 
 const formatNumber = (value: number, digits = 3): string => (Number.isFinite(value) ? value.toFixed(digits) : "inf");
 
@@ -31,6 +32,24 @@ const GRID_COLORS = {
   base: darken(TILE_COLOR_RGB.base, 0.2),
   house: darken(TILE_COLOR_RGB.house, 0.2),
   firebreak: darken(TILE_COLOR_RGB.firebreak, 0.25)
+};
+
+const FOREST_TONE_BASE = TILE_COLOR_RGB.forest;
+const FOREST_CANOPY_TONES = {
+  [TreeType.Pine]: darken(mixRgb(FOREST_TONE_BASE, { r: 48, g: 80, b: 64 }, 0.35), 0.08),
+  [TreeType.Oak]: mixRgb(FOREST_TONE_BASE, { r: 110, g: 118, b: 58 }, 0.35),
+  [TreeType.Maple]: mixRgb(FOREST_TONE_BASE, { r: 120, g: 92, b: 62 }, 0.32),
+  [TreeType.Birch]: lighten(mixRgb(FOREST_TONE_BASE, { r: 148, g: 152, b: 98 }, 0.42), 0.05),
+  [TreeType.Elm]: mixRgb(FOREST_TONE_BASE, { r: 72, g: 122, b: 86 }, 0.3),
+  [TreeType.Scrub]: mixRgb(FOREST_TONE_BASE, TILE_COLOR_RGB.scrub, 0.5)
+};
+
+const getForestTreeType = (tile: WorldState["tiles"][number]) =>
+  tile.treeType ?? tile.dominantTreeType ?? TreeType.Pine;
+
+const getForestTreeColor = (tile: WorldState["tiles"][number]) => {
+  const treeType = getForestTreeType(tile);
+  return FOREST_CANOPY_TONES[treeType] ?? FOREST_TONE_BASE;
 };
 
 const rgbaString = (color: { r: number; g: number; b: number }, alpha: number) =>
@@ -130,9 +149,10 @@ let coastlineCache: {
 
 const getBaseTileColor = (state: WorldState, tile: WorldState["tiles"][number]) => {
   if (isVegetationType(tile.type)) {
-    const canopy = clamp(tile.canopy, 0, 1);
+    const canopy = clamp(tile.canopyCover ?? tile.canopy, 0, 1);
     const base = tile.type === "forest" ? TILE_COLOR_RGB.grass : TILE_COLOR_RGB[tile.type] ?? TILE_COLOR_RGB.grass;
-    return mixRgb(base, TILE_COLOR_RGB.forest, canopy);
+    const forestTone = tile.type === "forest" ? getForestTreeColor(tile) : TILE_COLOR_RGB.forest;
+    return mixRgb(base, forestTone, canopy);
   }
   if (tile.type === "ash") {
     return TILE_COLOR_RGB.ash;

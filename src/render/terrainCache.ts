@@ -1,5 +1,6 @@
 
 import type { WorldState } from "../core/state.js";
+import { TreeType } from "../core/types.js";
 import { inBounds, indexFor } from "../core/grid.js";
 import { hash2D } from "../mapgen/noise.js";
 import { getHeightAt as getSmoothedHeightAt, getHeightScale, getTileHeight, isoProject } from "./iso.js";
@@ -52,6 +53,7 @@ type TreeSprite = {
 
 type TreeSpriteSet = {
   forest: Record<TreeStage, TreeSprite[]>;
+  forestByType: Record<TreeType, Record<TreeStage, TreeSprite[]>>;
   grass: Record<TreeStage, TreeSprite[]>;
 };
 
@@ -80,6 +82,24 @@ export const resetTerrainCaches = (): void => {
 const isGrassLikeType = (type: WorldState["tiles"][number]["type"]) =>
   type === "grass" || type === "scrub" || type === "floodplain";
 const isVegetationType = (type: WorldState["tiles"][number]["type"]) => type === "forest" || isGrassLikeType(type);
+
+const FOREST_TONE_BASE = TILE_COLOR_RGB.forest;
+const FOREST_CANOPY_TONES: Record<TreeType, RGB> = {
+  [TreeType.Pine]: darken(mixRgb(FOREST_TONE_BASE, { r: 48, g: 80, b: 64 }, 0.35), 0.08),
+  [TreeType.Oak]: mixRgb(FOREST_TONE_BASE, { r: 110, g: 118, b: 58 }, 0.35),
+  [TreeType.Maple]: mixRgb(FOREST_TONE_BASE, { r: 120, g: 92, b: 62 }, 0.32),
+  [TreeType.Birch]: lighten(mixRgb(FOREST_TONE_BASE, { r: 148, g: 152, b: 98 }, 0.42), 0.05),
+  [TreeType.Elm]: mixRgb(FOREST_TONE_BASE, { r: 72, g: 122, b: 86 }, 0.3),
+  [TreeType.Scrub]: mixRgb(FOREST_TONE_BASE, TILE_COLOR_RGB.scrub, 0.5)
+};
+
+const getForestTreeType = (tile: WorldState["tiles"][number]): TreeType =>
+  tile.treeType ?? tile.dominantTreeType ?? TreeType.Pine;
+
+const getForestTreeColor = (tile: WorldState["tiles"][number]): RGB => {
+  const treeType = getForestTreeType(tile);
+  return FOREST_CANOPY_TONES[treeType] ?? FOREST_TONE_BASE;
+};
 
 export const getRenderHeightForTile = (tile: WorldState["tiles"][number]): number => {
   return getTileHeight(tile);
@@ -205,8 +225,17 @@ const ensureTreeSprites = (): TreeSpriteSet => {
     return treeSprites;
   }
   const trunkColor = { r: 73, g: 54, b: 38 };
+  const forestByType: Record<TreeType, Record<TreeStage, TreeSprite[]>> = {
+    [TreeType.Pine]: buildTreeSpriteSet(FOREST_CANOPY_TONES[TreeType.Pine], trunkColor),
+    [TreeType.Oak]: buildTreeSpriteSet(FOREST_CANOPY_TONES[TreeType.Oak], trunkColor),
+    [TreeType.Maple]: buildTreeSpriteSet(FOREST_CANOPY_TONES[TreeType.Maple], trunkColor),
+    [TreeType.Birch]: buildTreeSpriteSet(FOREST_CANOPY_TONES[TreeType.Birch], trunkColor),
+    [TreeType.Elm]: buildTreeSpriteSet(FOREST_CANOPY_TONES[TreeType.Elm], trunkColor),
+    [TreeType.Scrub]: buildTreeSpriteSet(FOREST_CANOPY_TONES[TreeType.Scrub], trunkColor)
+  };
   treeSprites = {
     forest: buildTreeSpriteSet(TILE_COLOR_RGB.forest, trunkColor),
+    forestByType,
     grass: buildTreeSpriteSet(TILE_COLOR_RGB.grass, trunkColor),
   };
   return treeSprites;
@@ -236,12 +265,13 @@ const getBaseTileColor = (state: WorldState, tile: WorldState["tiles"][number]):
     return TILE_COLOR_RGB.ON_FIRE_GRASS;
   }
   if (tile.type === "forest" && tile.fire > 0) {
-    return darken(TILE_COLOR_RGB.forest, 0.2);
+    return darken(getForestTreeColor(tile), 0.2);
   }
   if (isVegetationType(tile.type)) {
-    const canopy = clamp(tile.canopy, 0, 1);
+    const canopy = clamp(tile.canopyCover ?? tile.canopy, 0, 1);
     const base = tile.type === "forest" ? TILE_COLOR_RGB.grass : TILE_COLOR_RGB[tile.type] ?? TILE_COLOR_RGB.grass;
-    return mixRgb(base, TILE_COLOR_RGB.forest, canopy);
+    const forestTone = tile.type === "forest" ? getForestTreeColor(tile) : TILE_COLOR_RGB.forest;
+    return mixRgb(base, forestTone, canopy);
   }
   return TILE_COLOR_RGB[tile.type] ?? TILE_COLOR_RGB.grass;
 };
@@ -521,37 +551,66 @@ const drawTreesOnTile = (
   if (detailFactor <= 0.05) {
     return;
   }
-  const canopy = clamp(tile.canopy, 0, 1);
+  const canopy = clamp(tile.canopyCover ?? tile.canopy, 0, 1);
   const grassLike = isGrassLikeType(tile.type);
   if (grassLike && canopy < 0.12) {
     return;
   }
-  const densityBase = tile.type === "forest" ? 0.32 + canopy * 0.55 : 0.12 + canopy * 0.35;
-  const density = densityBase * (0.55 + detailFactor * 0.45);
-  if (tileSeed(state, x, y, 1) > density) {
-    return;
-  }
   const stage: TreeStage =
     canopy < 0.28 ? "sapling" : canopy < 0.45 ? "young" : canopy < 0.7 ? "mature" : "old";
-  const maxCount = tile.type === "forest" ? 4 : 2;
-  const rawCount = Math.floor(tileSeed(state, x, y, 2) * (maxCount + 1));
-  const count = Math.round(rawCount * (0.6 + detailFactor * 0.4));
+  let count = 0;
+  if (tile.type === "forest") {
+    const stemDensity = Math.max(0, Math.round(tile.stemDensity ?? 0));
+    const baseCount = Math.round(stemDensity * (0.6 + detailFactor * 0.4));
+    const jitter = Math.round((tileSeed(state, x, y, 2) - 0.5) * 2);
+    count = clamp(baseCount + jitter, 0, stemDensity);
+  } else {
+    const densityBase = 0.12 + canopy * 0.35;
+    const density = densityBase * (0.55 + detailFactor * 0.45);
+    if (tileSeed(state, x, y, 1) > density) {
+      return;
+    }
+    const maxCount = 2;
+    const rawCount = Math.floor(tileSeed(state, x, y, 2) * (maxCount + 1));
+    count = Math.round(rawCount * (0.6 + detailFactor * 0.4));
+  }
   if (count <= 0) {
     return;
   }
   const spriteSet = ensureTreeSprites();
-  const sprites = tile.type === "forest" ? spriteSet.forest[stage] : spriteSet.grass[stage];
+  const sprites =
+    tile.type === "forest"
+      ? (spriteSet.forestByType[getForestTreeType(tile)] ?? spriteSet.forest)[stage]
+      : spriteSet.grass[stage];
 
   for (let i = 0; i < count; i += 1) {
     const jitterX = (tileSeed(state, x, y, 10 + i) - 0.5) * 0.45;
     const jitterY = (tileSeed(state, x, y, 20 + i) - 0.5) * 0.45;
     const sprite = sprites[Math.floor(tileSeed(state, x, y, 30 + i) * sprites.length)];
     const scale = 0.9 + canopy * 0.15 + tileSeed(state, x, y, 40 + i) * 0.12;
+    const rotation = (tileSeed(state, x, y, 50 + i) - 0.5) * 0.35;
     const base = isoProject(x + 0.5 + jitterX, y + 0.5 + jitterY, height + TILE_SIZE * 0.05);
     const width = sprite.width * scale;
     const heightPx = sprite.height * scale;
-    const drawX = base.x - sprite.anchorX * scale;
-    const drawY = base.y - sprite.anchorY * scale;
+    const drawImage = (image: HTMLCanvasElement) => {
+      if (Math.abs(rotation) > 0.001) {
+        context.save();
+        context.translate(base.x, base.y);
+        context.rotate(rotation);
+        context.drawImage(
+          image,
+          -sprite.anchorX * scale,
+          -sprite.anchorY * scale,
+          width,
+          heightPx
+        );
+        context.restore();
+        return;
+      }
+      const drawX = base.x - sprite.anchorX * scale;
+      const drawY = base.y - sprite.anchorY * scale;
+      context.drawImage(image, drawX, drawY, width, heightPx);
+    };
     if (tile.fire > 0 && tile.fuel < 1) {
       const scratch = ensureTreeBurnScratch(sprite.width, sprite.height);
       scratch.ctx.drawImage(sprite.canvas, 0, 0);
@@ -562,9 +621,9 @@ const drawTreesOnTile = (
       const burnHeight = sprite.height * (1 - tile.fuel);
       scratch.ctx.fillRect(0, 0, sprite.width, burnHeight);
       scratch.ctx.globalCompositeOperation = "source-over";
-      context.drawImage(scratch.canvas, drawX, drawY, width, heightPx);
+      drawImage(scratch.canvas);
     } else {
-      context.drawImage(sprite.canvas, drawX, drawY, width, heightPx);
+      drawImage(sprite.canvas);
     }
   }
 };

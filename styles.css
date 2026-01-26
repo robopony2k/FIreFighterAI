@@ -377,6 +377,23 @@ canvas {
   color: var(--muted);
 }
 
+.three-test-season {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.three-test-season input[type="range"] {
+  width: 140px;
+}
+
+.three-test-season span {
+  min-width: 64px;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+  color: rgba(45, 35, 24, 0.8);
+}
+
 .three-test-toggle {
   display: inline-flex;
   align-items: center;

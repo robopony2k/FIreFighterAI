@@ -16,7 +16,11 @@ export function setRoadAt(state: WorldState, rng: RNG, x: number, y: number, opt
   if (!inBounds(state.grid, x, y)) {
     return;
   }
-  const tile = state.tiles[indexFor(state.grid, x, y)];
+  const idx = indexFor(state.grid, x, y);
+  const tile = state.tiles[idx];
+  if (state.structureMask[idx]) {
+    return;
+  }
   if (tile.type === "house" || tile.type === "base") {
     return;
   }
@@ -25,6 +29,10 @@ export function setRoadAt(state: WorldState, rng: RNG, x: number, y: number, opt
   }
   tile.type = "road";
   tile.canopy = 0;
+  tile.canopyCover = 0;
+  tile.stemDensity = 0;
+  tile.dominantTreeType = null;
+  tile.treeType = null;
   tile.ashAge = 0;
   applyFuel(tile, tile.moisture, rng);
 }
@@ -40,7 +48,11 @@ export function canRoadTraverse(
   if (!inBounds(state.grid, x, y)) {
     return false;
   }
-  const type = state.tiles[indexFor(state.grid, x, y)].type;
+  const idx = indexFor(state.grid, x, y);
+  const type = state.tiles[idx].type;
+  if (state.structureMask[idx]) {
+    return false;
+  }
   const allowWater = options.allowWater ?? false;
   if (type === "water") {
     return allowWater;

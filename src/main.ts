@@ -3,6 +3,7 @@ import type { MapSizeId } from "./core/config.js";
 import { getCharacterBaseBudget } from "./core/characters.js";
 import { RNG } from "./core/rng.js";
 import { computeChecksum, createInitialState, resetState, syncTileSoA } from "./core/state.js";
+import { TREE_TYPE_IDS } from "./core/types.js";
 import { generateMap, type MapGenDebug, type MapGenDebugSnapshot } from "./mapgen/index.js";
 import { draw } from "./render/draw.js";
 import { resetTerrainCaches } from "./render/terrainCache.js";
@@ -47,6 +48,22 @@ const headless = params.get("headless") === "1";
 
 const state = createInitialState(initialSeed, grid);
 const rng = new RNG(Date.now());
+const buildTreeTypeMap = (): Uint8Array => {
+  const result = new Uint8Array(state.grid.totalTiles);
+  result.fill(255);
+  if (!state.tiles || state.tiles.length === 0) {
+    return result;
+  }
+  for (let i = 0; i < state.tiles.length; i += 1) {
+    const tile = state.tiles[i];
+    if (!tile) {
+      continue;
+    }
+    const treeType = tile.treeType ?? tile.dominantTreeType;
+    result[i] = treeType ? TREE_TYPE_IDS[treeType] : 255;
+  }
+  return result;
+};
 const phaseUiRoot = document.getElementById("phaseUI") as HTMLDivElement | null;
 const phaseUi = phaseUiRoot ? initPhaseUI(phaseUiRoot) : null;
 const overlayRefs = getOverlayRefs();
@@ -64,7 +81,10 @@ const threeTestCloseButton = document.getElementById("threeTestClose") as HTMLBu
 const threeTestStepButton = document.getElementById("threeTestStep") as HTMLButtonElement | null;
 const threeTestAutoToggle = document.getElementById("threeTestAuto") as HTMLInputElement | null;
 const threeTestPhaseLabel = document.getElementById("threeTestPhase") as HTMLSpanElement | null;
+const threeTestSeason = document.getElementById("threeTestSeason") as HTMLInputElement | null;
+const threeTestSeasonLabel = document.getElementById("threeTestSeasonLabel") as HTMLSpanElement | null;
 const DEBUG_TYPE_EVENT = "debug-type-colors-changed";
+const THREE_TEST_SEASONS = ["Spring", "Summer", "Autumn", "Winter"] as const;
 let resizeObserver: ResizeObserver | null = null;
 let lastCanvasWidth = 0;
 let lastCanvasHeight = 0;
@@ -133,6 +153,18 @@ const updateThreeTestStepUi = (): void => {
   threeTestStepButton.disabled = threeTestStepController.auto;
 };
 
+const updateThreeTestSeasonUi = (value?: number): number => {
+  const raw = value ?? (threeTestSeason ? Number(threeTestSeason.value) : 1);
+  const clamped = Math.max(0, Math.min(THREE_TEST_SEASONS.length - 1, Math.round(raw)));
+  if (threeTestSeason) {
+    threeTestSeason.value = String(clamped);
+  }
+  if (threeTestSeasonLabel) {
+    threeTestSeasonLabel.textContent = THREE_TEST_SEASONS[clamped] ?? "Summer";
+  }
+  return clamped;
+};
+
 if (threeTestStepButton) {
   threeTestStepButton.addEventListener("click", () => {
     threeTestStepController?.next();
@@ -143,6 +175,12 @@ if (threeTestAutoToggle) {
   threeTestAutoToggle.addEventListener("change", () => {
     threeTestStepController?.setAuto(threeTestAutoToggle.checked);
     updateThreeTestStepUi();
+  });
+}
+if (threeTestSeason) {
+  threeTestSeason.addEventListener("input", () => {
+    const index = updateThreeTestSeasonUi();
+    threeTestController?.setSeason(index);
   });
 }
 const handleThreeResize = (): void => {
@@ -194,6 +232,9 @@ const openThreeTest = async (config: NewRunConfig): Promise<void> => {
   }
   if (!threeTestController) {
     threeTestController = createThreeTest(threeTestCanvas);
+  }
+  if (threeTestController) {
+    threeTestController.setSeason(updateThreeTestSeasonUi());
   }
   if (!threeTestStepController) {
     let auto = threeTestAutoToggle ? threeTestAutoToggle.checked : true;
@@ -250,8 +291,10 @@ const openThreeTest = async (config: NewRunConfig): Promise<void> => {
         rows: state.grid.rows,
         elevations: snapshot.elevations,
         tileTypes: snapshot.tileTypes,
+        treeTypes: buildTreeTypeMap(),
         riverMask: snapshot.riverMask,
-        debugTypeColors: state.debugTypeColors
+        debugTypeColors: state.debugTypeColors,
+        treesEnabled: snapshot.phase === "tiles:classified"
       });
     },
     waitForStep: () => threeTestStepController?.waitForStep() ?? Promise.resolve()
@@ -263,8 +306,10 @@ const openThreeTest = async (config: NewRunConfig): Promise<void> => {
     rows: state.grid.rows,
     elevations: state.tileElevation,
     tileTypes: state.tileTypeId,
+    treeTypes: buildTreeTypeMap(),
     riverMask: state.tileRiverMask,
-    debugTypeColors: state.debugTypeColors
+    debugTypeColors: state.debugTypeColors,
+    treesEnabled: true
   });
 };
 
@@ -292,8 +337,10 @@ const refreshThreeTestDebug = (): void => {
     rows: state.grid.rows,
     elevations: state.tileElevation,
     tileTypes: state.tileTypeId,
+    treeTypes: buildTreeTypeMap(),
     riverMask: state.tileRiverMask,
-    debugTypeColors: state.debugTypeColors
+    debugTypeColors: state.debugTypeColors,
+    treesEnabled: true
   });
 };
 

@@ -28,6 +28,8 @@ export function burnTile(state: WorldState, tile: Tile, fireDelta: number): bool
     tile.type = "ash";
     tile.fuel = 0;
     tile.ashAge = 0;
+    tile.dominantTreeType = null;
+    tile.treeType = null;
     tile.heat *= 0.4;
     if (!tile.isBase) {
       state.burnedTiles += 1;

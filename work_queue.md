@@ -26,7 +26,7 @@ Constraints: deterministic; no impact on fire sim unless explicitly wired later
 
 Notes: This is render-driving metadata only.
 
-Status: queued
+Status: done
 
 
 
@@ -62,7 +62,7 @@ Constraints: use GPU instancing; deterministic placement; LOD-friendly
 
 Notes: This is the “big win” for dense-looking forests.
 
-Status: queued
+Status: done
 
 
 
@@ -122,7 +122,7 @@ Constraints: no behavioural logic; naming only
 
 Notes: Semantic step only; no visual or simulation changes expected.
 
-Status: queued
+Status: done
 
 
 
@@ -158,7 +158,7 @@ Constraints: no clustering yet; one value per forest area
 
 Notes: Classification only; rendering may still be uniform.
 
-Status: queued
+Status: done
 
 
 
@@ -198,7 +198,7 @@ Constraints: deterministic visuals; minimal art variance
 
 Notes: Intentional “boring but readable” checkpoint.
 
-Status: queued
+Status: done
 
 
 
@@ -234,7 +234,7 @@ Constraints: simple blob or noise-based clustering only
 
 Notes: Limit to 1–2 secondary species per forest area.
 
-Status: queued
+Status: done
 
 
 
@@ -270,7 +270,7 @@ Constraints: use existing elevation / moisture inputs only
 
 Notes: Should subtly affect composition, not redraw biomes.
 
-Status: queued
+Status: done
 
 
 
