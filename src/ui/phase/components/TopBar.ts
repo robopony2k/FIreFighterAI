@@ -1,5 +1,15 @@
 import type { Phase, PrimaryCta } from "../types.js";
 import type { ClimateForecast } from "../../../core/types.js";
+import {
+  FORECAST_CHART,
+  RISK_BANDS,
+  RISK_THRESHOLDS,
+  SEASON_CLASSES,
+  buildRiskPaths,
+  computeForecastMarkerX,
+  computeSeasonLayout,
+  computeYearLayout
+} from "../forecastLayout.js";
 
 export type TopBarData = {
   phase: Phase;
@@ -27,43 +37,7 @@ const phaseLabels: Record<Phase, string> = {
 };
 
 const SVG_NS = "http://www.w3.org/2000/svg";
-const CHART_WIDTH = 180;
-const CHART_HEIGHT = 135;
-const CHART_PADDING = 12;
-const SEASON_LABELS = ["Winter", "Spring", "Summer", "Autumn"];
-const SEASON_CLASSES = ["winter", "spring", "summer", "autumn"];
-
-const clamp = (value: number, min: number, max: number): number => Math.max(min, Math.min(max, value));
-
-const buildRiskPaths = (risk: number[]): { line: string; area: string } => {
-  const count = risk.length;
-  if (count === 0) {
-    return { line: "", area: "" };
-  }
-  const axisY = CHART_HEIGHT - CHART_PADDING;
-  const width = CHART_WIDTH - CHART_PADDING * 2;
-  const height = axisY - CHART_PADDING;
-  let line = "";
-  let firstX = CHART_PADDING;
-  let lastX = CHART_PADDING;
-  for (let i = 0; i < count; i += 1) {
-    const t = count > 1 ? i / (count - 1) : 0;
-    const x = CHART_PADDING + t * width;
-    const value = clamp(risk[i] ?? 0, 0, 1);
-    const y = axisY - value * height;
-    if (i === 0) {
-      firstX = x;
-      line = `M ${x.toFixed(2)} ${y.toFixed(2)}`;
-    } else {
-      line += ` L ${x.toFixed(2)} ${y.toFixed(2)}`;
-    }
-    if (i === count - 1) {
-      lastX = x;
-    }
-  }
-  const area = `${line} L ${lastX.toFixed(2)} ${axisY.toFixed(2)} L ${firstX.toFixed(2)} ${axisY.toFixed(2)} Z`;
-  return { line, area };
-};
+const { width: CHART_WIDTH, height: CHART_HEIGHT, padding: CHART_PADDING } = FORECAST_CHART;
 
 export const createTopBar = (): TopBarView => {
   const element = document.createElement("header");
@@ -131,11 +105,10 @@ export const createTopBar = (): TopBarView => {
   riskBands.classList.add("phase-forecast-bands");
   const seasonBands = document.createElementNS(SVG_NS, "g");
   seasonBands.classList.add("phase-forecast-seasons");
-  const bandNames = ["low", "moderate", "high", "extreme"];
-  const bandHeight = (CHART_HEIGHT - CHART_PADDING * 2) / bandNames.length;
-  for (let i = 0; i < bandNames.length; i += 1) {
+  const bandHeight = (CHART_HEIGHT - CHART_PADDING * 2) / RISK_BANDS.length;
+  for (let i = 0; i < RISK_BANDS.length; i += 1) {
     const rect = document.createElementNS(SVG_NS, "rect");
-    rect.classList.add("phase-forecast-band", `is-${bandNames[i]}`);
+    rect.classList.add("phase-forecast-band", `is-${RISK_BANDS[i]}`);
     rect.setAttribute("x", CHART_PADDING.toString());
     rect.setAttribute("width", (CHART_WIDTH - CHART_PADDING * 2).toString());
     rect.setAttribute("height", bandHeight.toFixed(2));
@@ -203,33 +176,23 @@ export const createTopBar = (): TopBarView => {
     while (forecastScale.firstChild) {
       forecastScale.removeChild(forecastScale.firstChild);
     }
-    if (yearDays <= 0 || windowDays <= 0) {
-      return;
-    }
-    const windowEnd = startDay + windowDays - 1;
-    const firstYear = Math.floor(startDay / yearDays);
-    const lastYear = Math.floor(windowEnd / yearDays);
-    for (let year = firstYear; year <= lastYear; year += 1) {
-      const boundary = year * yearDays;
-      if (boundary < startDay || boundary > windowEnd) {
-        continue;
-      }
-      const offset = boundary - startDay;
-      const t = windowDays > 1 ? offset / (windowDays - 1) : 0;
-      const x = CHART_PADDING + t * (CHART_WIDTH - CHART_PADDING * 2);
+    const layout = computeYearLayout(startDay, yearDays, windowDays, FORECAST_CHART);
+    layout.markers.forEach((x) => {
       const line = document.createElementNS(SVG_NS, "line");
       line.classList.add("phase-forecast-year-line");
       line.setAttribute("x1", x.toFixed(2));
       line.setAttribute("x2", x.toFixed(2));
       line.setAttribute("y1", CHART_PADDING.toString());
       line.setAttribute("y2", (CHART_HEIGHT - CHART_PADDING).toString());
+      yearMarkers.append(line);
+    });
+    layout.labels.forEach((labelData) => {
       const label = document.createElement("div");
       label.classList.add("phase-forecast-year-label");
-      label.style.left = `${(t * 100).toFixed(2)}%`;
-      label.textContent = `Year ${year + 1}`;
-      yearMarkers.append(line);
+      label.style.left = `${labelData.leftPercent.toFixed(2)}%`;
+      label.textContent = labelData.text;
       forecastScale.appendChild(label);
-    }
+    });
   };
 
   const updateSeasonMarkers = (startDay: number, yearDays: number, windowDays: number): void => {
@@ -242,56 +205,33 @@ export const createTopBar = (): TopBarView => {
     while (forecastSeasonScale.firstChild) {
       forecastSeasonScale.removeChild(forecastSeasonScale.firstChild);
     }
-    if (yearDays <= 0 || windowDays <= 0) {
-      return;
-    }
-    const seasonLength = Math.max(1, Math.floor(yearDays / 4));
-    const width = CHART_WIDTH - CHART_PADDING * 2;
+    const layout = computeSeasonLayout(startDay, yearDays, windowDays, FORECAST_CHART);
     const height = CHART_HEIGHT - CHART_PADDING * 2;
-    const windowEnd = startDay + windowDays;
-    const firstYear = Math.floor(startDay / yearDays);
-    const lastYear = Math.floor((windowEnd - 1) / yearDays);
-    for (let year = firstYear; year <= lastYear; year += 1) {
-      const yearStart = year * yearDays;
-      for (let season = 0; season < 4; season += 1) {
-        const seasonStart = yearStart + season * seasonLength;
-        const seasonEnd = season === 3 ? yearStart + yearDays : seasonStart + seasonLength;
-        const segStart = Math.max(seasonStart, startDay);
-        const segEnd = Math.min(seasonEnd, windowEnd);
-        if (segStart >= segEnd) {
-          continue;
-        }
-        const t0 = windowDays > 0 ? (segStart - startDay) / windowDays : 0;
-        const t1 = windowDays > 0 ? (segEnd - startDay) / windowDays : 0;
-        const x = CHART_PADDING + t0 * width;
-        const rectWidth = Math.max(0, (t1 - t0) * width);
-        const rect = document.createElementNS(SVG_NS, "rect");
-        rect.classList.add("phase-forecast-season", `is-${SEASON_CLASSES[season]}`);
-        rect.setAttribute("x", x.toFixed(2));
-        rect.setAttribute("y", CHART_PADDING.toString());
-        rect.setAttribute("width", rectWidth.toFixed(2));
-        rect.setAttribute("height", height.toFixed(2));
-        seasonBands.appendChild(rect);
-
-        const label = document.createElement("div");
-        label.classList.add("phase-forecast-season-label");
-        label.style.left = `${((t0 + t1) * 50).toFixed(2)}%`;
-        label.textContent = SEASON_LABELS[season];
-        forecastSeasonScale.appendChild(label);
-
-        if (seasonStart > startDay && seasonStart < windowEnd) {
-          const boundaryT = windowDays > 0 ? (seasonStart - startDay) / windowDays : 0;
-          const boundaryX = CHART_PADDING + boundaryT * width;
-          const line = document.createElementNS(SVG_NS, "line");
-          line.classList.add("phase-forecast-season-line");
-          line.setAttribute("x1", boundaryX.toFixed(2));
-          line.setAttribute("x2", boundaryX.toFixed(2));
-          line.setAttribute("y1", CHART_PADDING.toString());
-          line.setAttribute("y2", (CHART_HEIGHT - CHART_PADDING).toString());
-          seasonMarkers.appendChild(line);
-        }
-      }
-    }
+    layout.bands.forEach((band) => {
+      const rect = document.createElementNS(SVG_NS, "rect");
+      rect.classList.add("phase-forecast-season", `is-${SEASON_CLASSES[band.seasonIndex]}`);
+      rect.setAttribute("x", band.x.toFixed(2));
+      rect.setAttribute("y", CHART_PADDING.toString());
+      rect.setAttribute("width", band.width.toFixed(2));
+      rect.setAttribute("height", height.toFixed(2));
+      seasonBands.appendChild(rect);
+    });
+    layout.labels.forEach((labelData) => {
+      const label = document.createElement("div");
+      label.classList.add("phase-forecast-season-label");
+      label.style.left = `${labelData.leftPercent.toFixed(2)}%`;
+      label.textContent = labelData.label;
+      forecastSeasonScale.appendChild(label);
+    });
+    layout.markers.forEach((x) => {
+      const line = document.createElementNS(SVG_NS, "line");
+      line.classList.add("phase-forecast-season-line");
+      line.setAttribute("x1", x.toFixed(2));
+      line.setAttribute("x2", x.toFixed(2));
+      line.setAttribute("y1", CHART_PADDING.toString());
+      line.setAttribute("y2", (CHART_HEIGHT - CHART_PADDING).toString());
+      seasonMarkers.appendChild(line);
+    });
   };
 
   const updateRiskAxis = (): void => {
@@ -301,8 +241,7 @@ export const createTopBar = (): TopBarView => {
     const width = CHART_WIDTH - CHART_PADDING * 2;
     const height = CHART_HEIGHT - CHART_PADDING * 2;
     const axisY = CHART_HEIGHT - CHART_PADDING;
-    const thresholds = [0.25, 0.5, 0.75];
-    thresholds.forEach((value) => {
+    RISK_THRESHOLDS.forEach((value) => {
       const y = axisY - value * height;
       const line = document.createElementNS(SVG_NS, "line");
       line.classList.add("phase-forecast-yline");
@@ -338,13 +277,10 @@ export const createTopBar = (): TopBarView => {
       badge.textContent = phaseLabels[data.phase];
       if (data.forecast && data.forecast.risk.length > 0) {
         forecast.classList.remove("is-hidden");
-        const { line, area } = buildRiskPaths(data.forecast.risk);
+        const { line, area } = buildRiskPaths(data.forecast.risk, FORECAST_CHART);
         linePath.setAttribute("d", line);
         areaPath.setAttribute("d", area);
-        const dayValue = clamp(data.forecastDay, 0, Math.max(0, data.forecast.days - 1));
-        const range = Math.max(1, data.forecast.days - 1);
-        const progress = dayValue / range;
-        const markerX = CHART_PADDING + progress * (CHART_WIDTH - CHART_PADDING * 2);
+        const markerX = computeForecastMarkerX(data.forecastDay, data.forecast.days, FORECAST_CHART);
         const markerXValue = markerX.toFixed(2);
         markerLine.setAttribute("x1", markerXValue);
         markerLine.setAttribute("x2", markerXValue);

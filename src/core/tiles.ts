@@ -1,9 +1,64 @@
-import type { RNG, Tile } from "./types.js";
+import type { FuelProfile, RNG, Tile, TileType } from "./types.js";
 import { FUEL_PROFILES } from "./config.js";
 import { clamp } from "./utils.js";
 
+const FUEL_PROFILE_FIELDS: (keyof FuelProfile)[] = [
+  "baseFuel",
+  "ignition",
+  "burnRate",
+  "heatOutput",
+  "spreadBoost",
+  "heatTransferCap",
+  "heatRetention",
+  "windFactor"
+];
+
+const cloneProfile = (profile: FuelProfile): FuelProfile => ({
+  baseFuel: profile.baseFuel,
+  ignition: profile.ignition,
+  burnRate: profile.burnRate,
+  heatOutput: profile.heatOutput,
+  spreadBoost: profile.spreadBoost,
+  heatTransferCap: profile.heatTransferCap,
+  heatRetention: profile.heatRetention,
+  windFactor: profile.windFactor
+});
+
+const ACTIVE_FUEL_PROFILES: Record<TileType, FuelProfile> = Object.keys(FUEL_PROFILES).reduce(
+  (acc, key) => {
+    const type = key as TileType;
+    acc[type] = cloneProfile(FUEL_PROFILES[type]);
+    return acc;
+  },
+  {} as Record<TileType, FuelProfile>
+);
+
+type FuelProfileOverrides = Partial<Record<TileType, Partial<FuelProfile>>>;
+
+export function setFuelProfiles(overrides?: FuelProfileOverrides): void {
+  const types = Object.keys(FUEL_PROFILES) as TileType[];
+  for (const type of types) {
+    const base = FUEL_PROFILES[type];
+    const entry = overrides?.[type];
+    const next = cloneProfile(base);
+    if (entry) {
+      for (const key of FUEL_PROFILE_FIELDS) {
+        const value = entry[key];
+        if (Number.isFinite(value)) {
+          next[key] = Number(value);
+        }
+      }
+    }
+    ACTIVE_FUEL_PROFILES[type] = next;
+  }
+}
+
+export function getFuelProfiles(): Record<TileType, FuelProfile> {
+  return ACTIVE_FUEL_PROFILES;
+}
+
 export function applyFuel(tile: Tile, moisture: number, rng: RNG): void {
-  const profile = FUEL_PROFILES[tile.type];
+  const profile = ACTIVE_FUEL_PROFILES[tile.type];
   const isVegetation =
     tile.type === "forest" || tile.type === "grass" || tile.type === "scrub" || tile.type === "floodplain";
   const variance = isVegetation ? (rng.next() - 0.5) * 0.35 : 0;

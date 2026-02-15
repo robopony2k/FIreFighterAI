@@ -1,8 +1,11 @@
 import type { RNG, Unit, Formation, Point } from "../../core/types.js";
 import type { WorldState } from "../../core/state.js";
-import { ISO_TILE_HEIGHT, ISO_TILE_WIDTH, TIME_SPEED_OPTIONS, ZOOM_STEP } from "../../core/config.js";
+import type { InputState } from "../../core/inputState.js";
+import type { UiState } from "../../core/uiState.js";
+import type { RenderState } from "../../render/renderState.js";
+import { TIME_SPEED_OPTIONS, ZOOM_STEP } from "../../core/config.js";
 import { inBounds, indexFor } from "../../core/grid.js";
-import { zoomAtPointer, screenToWorld } from "../../render/iso.js";
+import { panCameraByPixels, screenToWorld, zoomAtPointer } from "../../render/inputProjection.js";
 import { resetStatus, setStatus } from "../../core/state.js";
 import {
   advancePhase,
@@ -35,30 +38,39 @@ import type { OverlayRefs } from "../overlay.js";
 import type { PhaseUiApi } from "./index.js";
 import { gateInput, isInputAllowed } from "./inputGate.js";
 import type { InteractionMode, InputAction } from "./types.js";
+import { ensureTileSoA } from "../../core/tileCache.js";
 import { markFireBounds } from "../../sim/fire/bounds.js";
+import { ensureFireBlocks, markFireBlockActiveByTile } from "../../sim/fire/activeBlocks.js";
 import { DEFAULT_MAP_SIZE, DEFAULT_RUN_OPTIONS, DEFAULT_RUN_SEED } from "../run-config.js";
 import type { NewRunConfig } from "../run-config.js";
 
-  const getInteractionMode = (state: WorldState): InteractionMode => {
+const DEBUG_IGNITE_SIM_KICK_SECONDS = 0.12;
+
+const getInteractionMode = (state: WorldState, inputState: InputState): InteractionMode => {
   if (state.deployMode === "clear") {
     return "fuelBreak";
   }
   if (state.deployMode === "firefighter" || state.deployMode === "truck") {
     return "deploy";
   }
-  if (state.formationStart) {
+  if (inputState.formationStart) {
     return "formation";
   }
   return "default";
 };
 
-const getTileFromPointer = (state: WorldState, canvas: HTMLCanvasElement, event: MouseEvent): { x: number; y: number } | null => {
+const getTileFromPointer = (
+  state: WorldState,
+  renderState: RenderState,
+  canvas: HTMLCanvasElement,
+  event: MouseEvent
+): { x: number; y: number } | null => {
   const rect = canvas.getBoundingClientRect();
   const scaleX = canvas.width / rect.width;
   const scaleY = canvas.height / rect.height;
   const canvasX = (event.clientX - rect.left) * scaleX;
   const canvasY = (event.clientY - rect.top) * scaleY;
-  const world = screenToWorld(state, canvas, canvasX, canvasY);
+  const world = screenToWorld(state, renderState, canvas, canvasX, canvasY);
   const tileX = Math.floor(world.x);
   const tileY = Math.floor(world.y);
   if (!inBounds(state.grid, tileX, tileY)) {
@@ -71,18 +83,26 @@ const DEBUG_IGNITE_TOGGLE_KEY = "i";
 const DEBUG_CELL_TOGGLE_KEY = "d";
 const DEBUG_TYPE_EVENT = "debug-type-colors-changed";
 
-  const getWorldFromPointer = (state: WorldState, canvas: HTMLCanvasElement, event: MouseEvent): Point => {
+  const getWorldFromPointer = (
+    state: WorldState,
+    renderState: RenderState,
+    canvas: HTMLCanvasElement,
+    event: MouseEvent
+  ): Point => {
   const rect = canvas.getBoundingClientRect();
   const scaleX = canvas.width / rect.width;
   const scaleY = canvas.height / rect.height;
   const canvasX = (event.clientX - rect.left) * scaleX;
   const canvasY = (event.clientY - rect.top) * scaleY;
-  return screenToWorld(state, canvas, canvasX, canvasY);
+  return screenToWorld(state, renderState, canvas, canvasX, canvasY);
 };
 
 export const bindPhaseUi = (
   phaseUi: PhaseUiApi,
   state: WorldState,
+  inputState: InputState,
+  uiState: UiState,
+  renderState: RenderState,
   rng: RNG,
   canvas: HTMLCanvasElement,
   onNewRun: (config: NewRunConfig) => void | Promise<void>,
@@ -101,14 +121,14 @@ export const bindPhaseUi = (
   let rightDragStart: { x: number; y: number } | null = null;
 
   const noteInteraction = (): void => {
-    state.lastInteractionTime = performance.now();
+    inputState.lastInteractionTime = performance.now();
   };
 
-  let debugIgniteMode = state.debugIgniteMode;
+  let debugIgniteMode = inputState.debugIgniteMode;
   const debugToggleButton = phaseUi.controller.root.querySelector<HTMLButtonElement>(
     '[data-action="debug-ignite-toggle"]'
   );
-  let debugTypeColors = state.debugTypeColors;
+  let debugTypeColors = inputState.debugTypeColors;
   const debugTypeButton = phaseUi.controller.root.querySelector<HTMLButtonElement>(
     '[data-action="debug-type-colors-toggle"]'
   );
@@ -132,28 +152,36 @@ export const bindPhaseUi = (
       setStatus(state, "Cannot ignite: no fuel.");
       return;
     }
+    if (state.tileSoaDirty) {
+      ensureTileSoA(state);
+    }
+    ensureFireBlocks(state);
     const newFire = Math.min(1, 0.65 + rng.next() * 0.3);
       target.fire = newFire;
       target.heat = Math.max(target.heat, target.ignitionPoint * 1.4);
       state.tileFire[idx] = target.fire;
       state.tileHeat[idx] = target.heat;
+      if (state.tileIgniteAt[idx] < Number.POSITIVE_INFINITY) {
+        state.tileIgniteAt[idx] = Number.POSITIVE_INFINITY;
+        state.fireScheduledCount = Math.max(0, state.fireScheduledCount - 1);
+      }
+      markFireBlockActiveByTile(state, idx);
       markFireBounds(state, tile.x, tile.y);
       state.lastActiveFires = Math.max(state.lastActiveFires, 1);
-      const simTickSeconds = Math.max(0, state.fireSettings.simTickSeconds);
-      state.fireSimAccumulator = Math.max(state.fireSimAccumulator, simTickSeconds);
+      state.fireSimAccumulator = Math.max(state.fireSimAccumulator, DEBUG_IGNITE_SIM_KICK_SECONDS);
       setStatus(state, `Debug ignition at ${tile.x}, ${tile.y}`);
     };
 
-  const isOverlayLocked = (): boolean => state.overlayVisible && state.overlayAction === "restart";
+  const isOverlayLocked = (): boolean => uiState.overlayVisible && uiState.overlayAction === "restart";
 
   const gate = (action: InputAction, handler: () => void): void => {
-    gateInput(state.phase, getInteractionMode(state), action, handler, (reason) => setStatus(state, reason));
+    gateInput(state.phase, getInteractionMode(state, inputState), action, handler, (reason) => setStatus(state, reason));
   };
 
   const toggleDebugIgniteMode = (): void => {
     gate("select", () => {
       debugIgniteMode = !debugIgniteMode;
-      state.debugIgniteMode = debugIgniteMode;
+      inputState.debugIgniteMode = debugIgniteMode;
       refreshDebugToggle();
       setStatus(
         state,
@@ -166,7 +194,7 @@ export const bindPhaseUi = (
   const toggleDebugTypeColors = (): void => {
     gate("select", () => {
       debugTypeColors = !debugTypeColors;
-      state.debugTypeColors = debugTypeColors;
+      inputState.debugTypeColors = debugTypeColors;
       state.terrainDirty = true;
       refreshDebugTypeToggle();
       setStatus(state, debugTypeColors ? "Debug type colors enabled." : "Debug type colors disabled.");
@@ -177,12 +205,12 @@ export const bindPhaseUi = (
 
   const toggleDebugCellMode = (): void => {
     gate("select", () => {
-      state.debugCellEnabled = !state.debugCellEnabled;
-      if (!state.debugCellEnabled) {
-        state.debugHoverTile = null;
-        state.debugHoverWorld = null;
+      inputState.debugCellEnabled = !inputState.debugCellEnabled;
+      if (!inputState.debugCellEnabled) {
+        inputState.debugHoverTile = null;
+        inputState.debugHoverWorld = null;
       }
-      setStatus(state, state.debugCellEnabled ? "Debug cell overlay enabled." : "Debug cell overlay disabled.");
+      setStatus(state, inputState.debugCellEnabled ? "Debug cell overlay enabled." : "Debug cell overlay disabled.");
       noteInteraction();
     });
   };
@@ -222,6 +250,7 @@ export const bindPhaseUi = (
 
   const startMenu = document.getElementById("startMenu") as HTMLDivElement | null;
   const startNewRunButton = document.getElementById("startNewRun") as HTMLButtonElement | null;
+  const startMenuThreeTestButton = document.getElementById("startMenuThreeTest") as HTMLButtonElement | null;
   const startThreeTestButton = document.getElementById("startThreeTest") as HTMLButtonElement | null;
 
   const showStartMenu = (): void => {
@@ -259,7 +288,8 @@ export const bindPhaseUi = (
     ),
     fireInputs: Array.from(
       document.querySelectorAll<HTMLInputElement>('#characterScreen input[data-fire-key]')
-    )
+    ),
+    fuelProfileGrid: document.getElementById("fuelProfileGrid") as HTMLDivElement
   };
 
   let lastRunConfig: NewRunConfig = {
@@ -268,7 +298,8 @@ export const bindPhaseUi = (
     options: {
       ...DEFAULT_RUN_OPTIONS,
       mapGen: { ...DEFAULT_RUN_OPTIONS.mapGen },
-      fire: { ...DEFAULT_RUN_OPTIONS.fire }
+      fire: { ...DEFAULT_RUN_OPTIONS.fire },
+      fuelProfiles: { ...DEFAULT_RUN_OPTIONS.fuelProfiles }
     },
     characterId: state.campaign.characterId,
     callsign: state.campaign.callsign
@@ -286,11 +317,25 @@ export const bindPhaseUi = (
     });
   }
 
+  const startThreeTest = async (): Promise<void> => {
+    const config = characterSelect.getCurrentConfig();
+    lastRunConfig = config;
+    characterRefs.characterScreen.classList.add("hidden");
+    hideStartMenu();
+    state.paused = false;
+    await onNewRun(config);
+    await onThreeTest(config);
+  };
+
   if (startThreeTestButton) {
     startThreeTestButton.addEventListener("click", () => {
-      const config = characterSelect.getCurrentConfig();
-      lastRunConfig = config;
-      onThreeTest(config);
+      void startThreeTest();
+    });
+  }
+
+  if (startMenuThreeTestButton) {
+    startMenuThreeTestButton.addEventListener("click", () => {
+      void startThreeTest();
     });
   }
 
@@ -353,7 +398,7 @@ export const bindPhaseUi = (
             gate("timeControl", () => {
               state.timeSpeedIndex = nextIndex;
               setStatus(state, `Time speed ${TIME_SPEED_OPTIONS[nextIndex]}x.`);
-              phaseUi.sync(state);
+              phaseUi.sync(state, inputState);
             });
           }
           return;
@@ -364,11 +409,15 @@ export const bindPhaseUi = (
           return;
       }
       if (action === "zoom-in") {
-        gate("zoom", () => zoomAtPointer(state, canvas, state.zoom + ZOOM_STEP, canvas.width / 2, canvas.height / 2));
+        gate("zoom", () =>
+          zoomAtPointer(state, renderState, canvas, renderState.zoom + ZOOM_STEP, canvas.width / 2, canvas.height / 2)
+        );
         return;
       }
       if (action === "zoom-out") {
-        gate("zoom", () => zoomAtPointer(state, canvas, state.zoom - ZOOM_STEP, canvas.width / 2, canvas.height / 2));
+        gate("zoom", () =>
+          zoomAtPointer(state, renderState, canvas, renderState.zoom - ZOOM_STEP, canvas.width / 2, canvas.height / 2)
+        );
         return;
       }
       if (action === "pause") {
@@ -403,7 +452,7 @@ export const bindPhaseUi = (
         }
         gate("select", () => {
           debugIgniteMode = !debugIgniteMode;
-          state.debugIgniteMode = debugIgniteMode;
+          inputState.debugIgniteMode = debugIgniteMode;
           refreshDebugToggle();
           setStatus(
             state,
@@ -506,12 +555,12 @@ export const bindPhaseUi = (
   });
 
   overlayRefs.overlayRestart.addEventListener("click", () => {
-    if (state.overlayAction === "restart") {
+    if (uiState.overlayAction === "restart") {
       hideStartMenu();
       characterSelect.open(lastRunConfig);
       return;
     }
-    state.overlayVisible = false;
+    uiState.overlayVisible = false;
   });
 
   const getCanvasPos = (event: MouseEvent): { x: number; y: number } => {
@@ -536,7 +585,7 @@ export const bindPhaseUi = (
       suppressClick = false;
       return;
     }
-    const tile = getTileFromPointer(state, canvas, event);
+    const tile = getTileFromPointer(state, renderState, canvas, event);
     if (!tile) {
       return;
     }
@@ -595,19 +644,19 @@ export const bindPhaseUi = (
       gate("pan", () => {
         isPanning = true;
         panAnchor = canvasPos;
-        panCamera = { x: state.cameraCenter.x, y: state.cameraCenter.y };
+        panCamera = { x: renderState.cameraCenter.x, y: renderState.cameraCenter.y };
       });
       return;
     }
     if (event.button === 2) {
       if (state.selectedUnitIds.length > 0) {
         gate("formation", () => {
-          const tile = getTileFromPointer(state, canvas, event);
+          const tile = getTileFromPointer(state, renderState, canvas, event);
           if (tile) {
             isFormationDrag = true;
             rightDragStart = canvasPos;
-            state.formationStart = tile;
-            state.formationEnd = tile;
+            inputState.formationStart = tile;
+            inputState.formationEnd = tile;
           }
         });
       }
@@ -615,11 +664,11 @@ export const bindPhaseUi = (
     }
     if (state.deployMode === "clear" && state.phase === "maintenance") {
       gate("clearFuelBreak", () => {
-        const tile = getTileFromPointer(state, canvas, event);
+        const tile = getTileFromPointer(state, renderState, canvas, event);
         if (!tile) {
           return;
         }
-        state.clearLineStart = tile;
+        inputState.clearLineStart = tile;
       });
       return;
     }
@@ -630,7 +679,7 @@ export const bindPhaseUi = (
       isSelecting = true;
       selectStart = canvasPos;
       selectEnd = canvasPos;
-      state.selectionBox = { x1: canvasPos.x, y1: canvasPos.y, x2: canvasPos.x, y2: canvasPos.y };
+      inputState.selectionBox = { x1: canvasPos.x, y1: canvasPos.y, x2: canvasPos.x, y2: canvasPos.y };
     });
   });
 
@@ -642,7 +691,7 @@ export const bindPhaseUi = (
     const canvasPos = getCanvasPos(event);
     if (event.button === 2) {
       if (isFormationDrag) {
-        const tile = getTileFromPointer(state, canvas, event);
+        const tile = getTileFromPointer(state, renderState, canvas, event);
         const dragDistance =
           rightDragStart && event
             ? Math.hypot(canvasPos.x - rightDragStart.x, canvasPos.y - rightDragStart.y)
@@ -650,8 +699,8 @@ export const bindPhaseUi = (
         if (tile && dragDistance < 6) {
           gate("retask", () => handleUnitRetask(state, tile.x, tile.y));
         } else {
-          const start = state.formationStart;
-          const end = state.formationEnd;
+          const start = inputState.formationStart;
+          const end = inputState.formationEnd;
           if (start && end) {
             gate("formation", () => {
               const selectedUnits = getSelectedUnits(state);
@@ -661,10 +710,10 @@ export const bindPhaseUi = (
         }
         isFormationDrag = false;
         rightDragStart = null;
-        state.formationStart = null;
-        state.formationEnd = null;
+        inputState.formationStart = null;
+        inputState.formationEnd = null;
       } else if (state.selectedUnitIds.length > 0) {
-        const tile = getTileFromPointer(state, canvas, event);
+        const tile = getTileFromPointer(state, renderState, canvas, event);
         if (tile) {
           gate("retask", () => handleUnitRetask(state, tile.x, tile.y));
         }
@@ -684,8 +733,8 @@ export const bindPhaseUi = (
         const dy = selectEnd.y - selectStart.y;
         const dist = Math.hypot(dx, dy);
         if (dist > 6) {
-          const startWorld = screenToWorld(state, canvas, selectStart.x, selectStart.y);
-          const endWorld = screenToWorld(state, canvas, selectEnd.x, selectEnd.y);
+      const startWorld = screenToWorld(state, renderState, canvas, selectStart.x, selectStart.y);
+      const endWorld = screenToWorld(state, renderState, canvas, selectEnd.x, selectEnd.y);
           const minX = Math.min(startWorld.x, endWorld.x);
           const maxX = Math.max(startWorld.x, endWorld.x);
           const minY = Math.min(startWorld.y, endWorld.y);
@@ -727,61 +776,61 @@ export const bindPhaseUi = (
       isSelecting = false;
       selectStart = null;
       selectEnd = null;
-      state.selectionBox = null;
+      inputState.selectionBox = null;
       return;
     }
-    if (!state.clearLineStart) {
+    if (!inputState.clearLineStart) {
       return;
     }
-    const tile = getTileFromPointer(state, canvas, event);
+    const tile = getTileFromPointer(state, renderState, canvas, event);
     if (!tile) {
-      state.clearLineStart = null;
+      inputState.clearLineStart = null;
       return;
     }
     gate("clearFuelBreak", () => {
-      clearFuelLine(state, rng, state.clearLineStart as { x: number; y: number }, tile);
-      state.clearLineStart = null;
+      clearFuelLine(state, rng, inputState.clearLineStart as { x: number; y: number }, tile);
+      inputState.clearLineStart = null;
     });
   });
 
   canvas.addEventListener("mouseleave", () => {
-    state.clearLineStart = null;
+    inputState.clearLineStart = null;
     isPanning = false;
     panAnchor = null;
     panCamera = null;
     isFormationDrag = false;
     rightDragStart = null;
-    state.formationStart = null;
-    state.formationEnd = null;
+    inputState.formationStart = null;
+    inputState.formationEnd = null;
     isSelecting = false;
     selectStart = null;
     selectEnd = null;
-    state.selectionBox = null;
-    state.debugHoverTile = null;
-    state.debugHoverWorld = null;
+    inputState.selectionBox = null;
+    inputState.debugHoverTile = null;
+    inputState.debugHoverWorld = null;
   });
 
   canvas.addEventListener("mousemove", (event) => {
     if (isOverlayLocked()) {
       return;
     }
-    if (state.debugCellEnabled) {
-      const world = getWorldFromPointer(state, canvas, event);
-      state.debugHoverWorld = world;
+    if (inputState.debugCellEnabled) {
+      const world = getWorldFromPointer(state, renderState, canvas, event);
+      inputState.debugHoverWorld = world;
       const tileX = Math.floor(world.x);
       const tileY = Math.floor(world.y);
-      state.debugHoverTile = inBounds(state.grid, tileX, tileY) ? { x: tileX, y: tileY } : null;
-    } else if (state.debugHoverTile || state.debugHoverWorld) {
-      state.debugHoverTile = null;
-      state.debugHoverWorld = null;
+      inputState.debugHoverTile = inBounds(state.grid, tileX, tileY) ? { x: tileX, y: tileY } : null;
+    } else if (inputState.debugHoverTile || inputState.debugHoverWorld) {
+      inputState.debugHoverTile = null;
+      inputState.debugHoverWorld = null;
     }
     if (isPanning || isSelecting || isFormationDrag) {
       noteInteraction();
     }
     if (isFormationDrag) {
-      const tile = getTileFromPointer(state, canvas, event);
+      const tile = getTileFromPointer(state, renderState, canvas, event);
       if (tile) {
-        state.formationEnd = tile;
+        inputState.formationEnd = tile;
       }
       return;
     }
@@ -789,18 +838,13 @@ export const bindPhaseUi = (
       const canvasPos = getCanvasPos(event);
       const dx = canvasPos.x - panAnchor.x;
       const dy = canvasPos.y - panAnchor.y;
-      const worldDx = dx / state.zoom;
-      const worldDy = dy / state.zoom;
-      state.cameraCenter = {
-        x: panCamera.x - (worldDy / ISO_TILE_HEIGHT + worldDx / ISO_TILE_WIDTH),
-        y: panCamera.y - (worldDy / ISO_TILE_HEIGHT - worldDx / ISO_TILE_WIDTH)
-      };
+      renderState.cameraCenter = panCameraByPixels(renderState, panCamera, dx, dy);
       return;
     }
     if (isSelecting && selectStart) {
       const canvasPos = getCanvasPos(event);
       selectEnd = canvasPos;
-      state.selectionBox = {
+      inputState.selectionBox = {
         x1: selectStart.x,
         y1: selectStart.y,
         x2: canvasPos.x,
@@ -820,7 +864,7 @@ export const bindPhaseUi = (
       if (isOverlayLocked()) {
         return;
       }
-      if (!isInputAllowed(state.phase, getInteractionMode(state), "zoom").allowed) {
+      if (!isInputAllowed(state.phase, getInteractionMode(state, inputState), "zoom").allowed) {
         return;
       }
       noteInteraction();
@@ -834,7 +878,7 @@ export const bindPhaseUi = (
       const scaleY = canvas.height / rect.height;
       const canvasX = (event.clientX - rect.left) * scaleX;
       const canvasY = (event.clientY - rect.top) * scaleY;
-      zoomAtPointer(state, canvas, state.zoom * zoomFactor, canvasX, canvasY);
+      zoomAtPointer(state, renderState, canvas, renderState.zoom * zoomFactor, canvasX, canvasY);
     },
     { passive: false }
   );
@@ -851,7 +895,7 @@ export const bindPhaseUi = (
       return;
     }
     if (event.key === "Escape") {
-      handleEscape(state);
+      handleEscape(state, inputState);
     }
     if (event.key === " ") {
       isSpaceDown = true;
@@ -875,19 +919,23 @@ export const bindPhaseUi = (
       }
     }
     if (event.key === "+" || event.key === "=") {
-      gate("zoom", () => zoomAtPointer(state, canvas, state.zoom + ZOOM_STEP, canvas.width / 2, canvas.height / 2));
+      gate("zoom", () =>
+        zoomAtPointer(state, renderState, canvas, renderState.zoom + ZOOM_STEP, canvas.width / 2, canvas.height / 2)
+      );
     }
     if (event.key === "-" || event.key === "_") {
-      gate("zoom", () => zoomAtPointer(state, canvas, state.zoom - ZOOM_STEP, canvas.width / 2, canvas.height / 2));
+      gate("zoom", () =>
+        zoomAtPointer(state, renderState, canvas, renderState.zoom - ZOOM_STEP, canvas.width / 2, canvas.height / 2)
+      );
     }
     if (event.key === "t" || event.key === "T") {
-      state.renderTrees = !state.renderTrees;
+      renderState.renderTrees = !renderState.renderTrees;
       state.terrainDirty = true;
-      setStatus(state, `Tree rendering ${state.renderTrees ? "on" : "off"}.`);
+      setStatus(state, `Tree rendering ${renderState.renderTrees ? "on" : "off"}.`);
     }
     if (event.key === "e" || event.key === "E") {
-      state.renderEffects = !state.renderEffects;
-      setStatus(state, `Effects rendering ${state.renderEffects ? "on" : "off"}.`);
+      renderState.renderEffects = !renderState.renderEffects;
+      setStatus(state, `Effects rendering ${renderState.renderEffects ? "on" : "off"}.`);
     }
   });
 
@@ -902,5 +950,5 @@ export const bindPhaseUi = (
   } else {
     characterSelect.open(lastRunConfig);
   }
-  updateOverlay(overlayRefs, state);
+  updateOverlay(overlayRefs, uiState);
 };

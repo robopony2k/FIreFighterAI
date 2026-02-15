@@ -1,5 +1,7 @@
 import type { RNG } from "../core/types.js";
 import type { WorldState } from "../core/state.js";
+import type { EventBus } from "../core/eventBus.js";
+import type { GameEvents, OverlayPayload } from "../core/gameEvents.js";
 import {
   APPROVAL_MIN,
   BASE_BUDGET,
@@ -15,6 +17,7 @@ import {
 import { formatCurrency } from "../core/utils.js";
 import { getDayNightFactor, getFireSeasonIntensity, getPhaseInfo, PHASES } from "../core/time.js";
 import { setStatus, resetStatus } from "../core/state.js";
+import { maybeReport } from "./prof.js";
 import { inBounds, indexFor } from "../core/grid.js";
 import { NEIGHBOR_DIRS } from "../core/config.js";
 import { getCharacterBaseBudget, getCharacterDefinition } from "../core/characters.js";
@@ -31,6 +34,7 @@ import {
 } from "../core/climate.js";
 import { randomizeWind, stepWind } from "./wind.js";
 import { igniteRandomFire, resetFireBounds, stepFire } from "./fire.js";
+import { clearFireBlocks, markFireBlockActiveByTile } from "./fire/activeBlocks.js";
 import { stepGrowth } from "./growth.js";
 import { stepParticles } from "./particles.js";
 import {
@@ -45,8 +49,12 @@ import {
   setUnitTarget,
   stepUnits
 } from "./units.js";
+import type { InputState } from "../core/inputState.js";
+import type { EffectsState } from "../core/effectsState.js";
 
 const FIRE_HEAT_PADDING = 8;
+const FIRE_SIM_MAX_FRAME_STEP_SECONDS = 0.2;
+const FIRE_SIM_SUBSTEP_SECONDS = 0.1;
 const YEAR_EVENTS: Record<number, string[]> = {};
 
 const FORECAST_WINDOW_DAYS = 90;
@@ -58,6 +66,20 @@ const CLIMATE_SPREAD_BASE = 0.6;
 const CLIMATE_SPREAD_RANGE = 1.4;
 const CLIMATE_RISK_WEIGHT_IGNITION = 0.55;
 const CLIMATE_RISK_WEIGHT_SPREAD = 0.45;
+
+let gameEvents: EventBus<GameEvents> | null = null;
+
+export const setGameEventBus = (events: EventBus<GameEvents> | null): void => {
+  gameEvents = events;
+};
+
+const emitOverlay = (payload: OverlayPayload): void => {
+  gameEvents?.emit("overlay:show", payload);
+};
+
+const emitGameOver = (payload: GameEvents["game:over"]): void => {
+  gameEvents?.emit("game:over", payload);
+};
 
 const ensureClimateTimeline = (state: WorldState): void => {
   if (state.climateTimeline && state.climateTimelineSeed === state.seed) {
@@ -210,33 +232,43 @@ const showSeasonOverlay = (state: WorldState): void => {
     details.push(...yearEvents);
   }
   if (state.phase === "growth") {
-    state.overlayTitle = "Growth Update";
-    state.overlayMessage = `Climate season: ${seasonLabel}. Vegetation is rebounding across the region.`;
+    const title = "Growth Update";
+    const message = `Climate season: ${seasonLabel}. Vegetation is rebounding across the region.`;
     details.push("Observe regrowth from above.");
+    details.push("Dismiss or wait to close.");
+    emitOverlay({ title, message, details, action: "dismiss" });
+    return;
   } else if (state.phase === "maintenance") {
-    state.overlayTitle = "Maintenance Update";
-    state.overlayMessage = `Climate season: ${seasonLabel}. Budget available: ${formatCurrency(state.budget)}.`;
+    const title = "Maintenance Update";
+    const message = `Climate season: ${seasonLabel}. Budget available: ${formatCurrency(state.budget)}.`;
     details.push("Recruit, train, and cut fuel breaks before fire activity builds.");
+    details.push("Dismiss or wait to close.");
+    emitOverlay({ title, message, details, action: "dismiss" });
+    return;
   } else if (state.phase === "fire") {
     const forecast = getForecastTemp(state);
-    state.overlayTitle = "Fire Operations";
-    state.overlayMessage = `Climate season: ${seasonLabel}. Forecast: hot period with average temperatures around ${forecast}C.`;
+    const title = "Fire Operations";
+    const message = `Climate season: ${seasonLabel}. Forecast: hot period with average temperatures around ${forecast}C.`;
     details.push("Be ready to deploy firefighters and trucks quickly.");
+    details.push("Dismiss or wait to close.");
+    emitOverlay({ title, message, details, action: "dismiss" });
+    return;
   } else if (state.phase === "budget") {
     const housesSaved = Math.max(0, state.totalHouses - state.destroyedHouses);
     const burnedHectares = Math.round(state.yearBurnedTiles * HECTARES_PER_TILE);
-    state.overlayTitle = "Budget Review";
-    state.overlayMessage = `Climate season: ${seasonLabel}. Annual performance review and scorecard.`;
+    const title = "Budget Review";
+    const message = `Climate season: ${seasonLabel}. Annual performance review and scorecard.`;
     details.push(`Approval rating: ${Math.round(state.approval * 100)}%.`);
     details.push(`Houses saved: ${housesSaved}/${state.totalHouses}.`);
     details.push(`Land burned: ${burnedHectares} ha.`);
     details.push(`Lives lost: ${state.yearLivesLost}.`);
     details.push("Politics & lobbying: placeholder.");
+    details.push("Dismiss or wait to close.");
+    emitOverlay({ title, message, details, action: "dismiss" });
+    return;
   }
   details.push("Dismiss or wait to close.");
-  state.overlayDetails = details;
-  state.overlayAction = "dismiss";
-  state.overlayVisible = true;
+  emitOverlay({ title: "Update", message: `Climate season: ${seasonLabel}.`, details, action: "dismiss" });
 };
 
 export function updatePhaseControls(state: WorldState): void {
@@ -253,7 +285,7 @@ export function updatePhaseControls(state: WorldState): void {
   }
 }
 
-export function extinguishAllFires(state: WorldState): void {
+export function extinguishAllFires(state: WorldState, effects: EffectsState): void {
   state.tiles.forEach((tile) => {
     tile.fire = 0;
     tile.heat = 0;
@@ -261,8 +293,10 @@ export function extinguishAllFires(state: WorldState): void {
   state.tileFire.fill(0);
   state.tileHeat.fill(0);
   state.tileIgniteAt.fill(Number.POSITIVE_INFINITY);
-  state.smokeParticles = [];
-  state.waterParticles = [];
+  state.fireScheduledCount = 0;
+  clearFireBlocks(state);
+  effects.smokeParticles = [];
+  effects.waterParticles = [];
   state.lastActiveFires = 0;
   resetFireBounds(state);
 }
@@ -324,7 +358,6 @@ export function setPhase(state: WorldState, rng: RNG, next: WorldState["phase"])
     randomizeWind(state, rng);
     pickInitialFires(state, rng);
     debugClimateChecks(state.seed, VIRTUAL_CLIMATE_PARAMS, DEFAULT_MOISTURE_PARAMS);
-    captureFireSnapshot(state);
     setStatus(state, "Fire season begins. Stay ahead of the line.");
     showSeasonOverlay(state);
     return;
@@ -387,11 +420,15 @@ export function pickInitialFires(state: WorldState, rng: RNG): void {
       if (!inBounds(state.grid, nx, ny)) {
         continue;
       }
-      const neighbor = state.tiles[indexFor(state.grid, nx, ny)];
-      if (neighbor.fire > 0 || neighbor.fuel <= 0) {
+      const nIdx = indexFor(state.grid, nx, ny);
+      const neighbor = state.tiles[nIdx];
+      if (state.tileFire[nIdx] > 0 || state.tileFuel[nIdx] <= 0) {
         continue;
       }
-      neighbor.heat = Math.max(neighbor.heat, neighbor.ignitionPoint * boost);
+      const nextHeat = Math.max(state.tileHeat[nIdx], neighbor.ignitionPoint * boost);
+      neighbor.heat = nextHeat;
+      state.tileHeat[nIdx] = nextHeat;
+      markFireBlockActiveByTile(state, nIdx);
     }
   };
   const isBlockedType = (tile: WorldState["tiles"][number]): boolean =>
@@ -404,9 +441,12 @@ export function pickInitialFires(state: WorldState, rng: RNG): void {
     tile.type === "firebreak" ||
     tile.type === "road";
   const canIgnite = (tile: WorldState["tiles"][number]): boolean => tile.fire === 0 && tile.fuel > 0 && !isBlockedType(tile);
-  const igniteTile = (tile: WorldState["tiles"][number], x: number, y: number): void => {
+  const igniteTile = (tile: WorldState["tiles"][number], idx: number, x: number, y: number): void => {
     tile.fire = 0.5 + rng.next() * 0.2;
     tile.heat = Math.max(tile.heat, tile.ignitionPoint * 1.4);
+    state.tileFire[idx] = tile.fire;
+    state.tileHeat[idx] = tile.heat;
+    markFireBlockActiveByTile(state, idx);
     placed += 1;
     minX = Math.min(minX, x);
     maxX = Math.max(maxX, x);
@@ -423,7 +463,7 @@ export function pickInitialFires(state: WorldState, rng: RNG): void {
     if (tile.type === "forest" || tile.type === "grass" || tile.type === "scrub" || tile.type === "floodplain") {
       const dist = Math.hypot(x - state.basePoint.x, y - state.basePoint.y);
       if (dist > 8 && canIgnite(tile)) {
-        igniteTile(tile, x, y);
+        igniteTile(tile, idx, x, y);
         primeNeighborHeat(x, y);
       }
     }
@@ -441,7 +481,7 @@ export function pickInitialFires(state: WorldState, rng: RNG): void {
         if (dist < 3) {
           continue;
         }
-        igniteTile(tile, x, y);
+        igniteTile(tile, idx, x, y);
         primeNeighborHeat(x, y);
       }
     }
@@ -491,18 +531,19 @@ export function endGame(state: WorldState, victory: boolean, reason?: string): v
   const score = Math.max(0, Math.floor(state.careerScore + approvalBonus + budgetBonus));
 
   state.finalScore = score;
-  state.overlayVisible = true;
-  state.overlayTitle = victory ? "Career Complete" : "Command Relieved";
   const baseMessage =
     reason || (victory ? "Your twenty-year career leaves the region resilient." : "The region is overwhelmed.");
-  state.overlayMessage = `${baseMessage} Final score: ${score}.`;
-  state.overlayDetails = [];
-  state.overlayAction = "restart";
-  state.scoreSubmitted = false;
-  state.leaderboardDirty = true;
+  const overlay = {
+    title: victory ? "Career Complete" : "Command Relieved",
+    message: `${baseMessage} Final score: ${score}.`,
+    details: [] as string[],
+    action: "restart" as const
+  };
+  emitOverlay(overlay);
+  emitGameOver({ victory, reason: baseMessage, score, seed: state.seed });
 }
 
-export function stepSim(state: WorldState, rng: RNG, delta: number): void {
+export function stepSim(state: WorldState, effects: EffectsState, rng: RNG, delta: number): void {
   if (state.paused || state.gameOver) {
     return;
   }
@@ -539,7 +580,7 @@ export function stepSim(state: WorldState, rng: RNG, delta: number): void {
   if (state.units.length > 0) {
     autoAssignTargets(state);
     stepUnits(state, delta);
-    applyExtinguish(state, rng, delta);
+    applyExtinguish(state, effects, rng, delta);
     applyUnitHazards(state, rng, delta);
   }
 
@@ -549,21 +590,31 @@ export function stepSim(state: WorldState, rng: RNG, delta: number): void {
   if (allowFireSim) {
     const simTickSeconds = Math.max(0, state.fireSettings.simTickSeconds);
     state.fireSimAccumulator = Math.min(state.fireSimAccumulator + delta, simTickSeconds * 2);
-    const simDelta = Math.min(state.fireSimAccumulator, simTickSeconds);
-    if (simDelta > 0) {
-      const simDayDelta = simDelta * DAYS_PER_SECOND;
-      state.fireSeasonDay += simDayDelta;
-      captureFireSnapshot(state);
-      const dayFactor = getDayNightFactor(state.careerDay, state.fireSettings);
-      const seasonDay = state.phase === "fire" ? state.phaseDay : state.fireSeasonDay;
-      const seasonIntensity = getFireSeasonIntensity(seasonDay, state.fireSettings);
-      const spreadScale = state.fireSettings.simSpeed * (0.55 + seasonIntensity * 0.45);
-      const ignitionIntensity = dayFactor * climateRisk * state.climateIgnitionMultiplier;
-      if (allowIgnition) {
-        igniteRandomFire(state, rng, simDayDelta, ignitionIntensity);
+    const frameFireBudget = Math.min(
+      state.fireSimAccumulator,
+      simTickSeconds,
+      FIRE_SIM_MAX_FRAME_STEP_SECONDS
+    );
+    if (frameFireBudget > 0) {
+      let consumed = 0;
+      let remaining = frameFireBudget;
+      while (remaining > 0.0001) {
+        const simDelta = Math.min(remaining, FIRE_SIM_SUBSTEP_SECONDS);
+        const simDayDelta = simDelta * DAYS_PER_SECOND;
+        state.fireSeasonDay += simDayDelta;
+        const dayFactor = getDayNightFactor(state.careerDay, state.fireSettings);
+        const seasonDay = state.phase === "fire" ? state.phaseDay : state.fireSeasonDay;
+        const seasonIntensity = getFireSeasonIntensity(seasonDay, state.fireSettings);
+        const spreadScale = state.fireSettings.simSpeed * (0.55 + seasonIntensity * 0.45);
+        const ignitionIntensity = dayFactor * climateRisk * state.climateIgnitionMultiplier;
+        if (allowIgnition) {
+          igniteRandomFire(state, rng, simDayDelta, ignitionIntensity);
+        }
+        activeFires = stepFire(state, effects, rng, simDelta, spreadScale, dayFactor, burnoutFactor);
+        consumed += simDelta;
+        remaining -= simDelta;
       }
-      activeFires = stepFire(state, rng, simDelta, spreadScale, dayFactor, burnoutFactor);
-      state.fireSimAccumulator = Math.max(0, state.fireSimAccumulator - simDelta);
+      state.fireSimAccumulator = Math.max(0, state.fireSimAccumulator - consumed);
     } else {
       activeFires = state.lastActiveFires;
     }
@@ -572,8 +623,9 @@ export function stepSim(state: WorldState, rng: RNG, delta: number): void {
   }
   state.lastActiveFires = activeFires;
 
-  stepParticles(state, delta);
+  stepParticles(state, effects, delta);
   checkFailureConditions(state);
+  maybeReport(state);
 }
 
 export function togglePause(state: WorldState): void {
@@ -585,12 +637,12 @@ export function togglePause(state: WorldState): void {
   }
 }
 
-export function handleEscape(state: WorldState): void {
+export function handleEscape(state: WorldState, inputState: InputState): void {
   selectUnit(state, null);
   setDeployMode(state, null);
-  state.formationStart = null;
-  state.formationEnd = null;
-  state.selectionBox = null;
+  inputState.formationStart = null;
+  inputState.formationEnd = null;
+  inputState.selectionBox = null;
 }
 
 export function handleDeployAction(state: WorldState, mode: WorldState["deployMode"]): void {

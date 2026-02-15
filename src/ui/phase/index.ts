@@ -1,4 +1,5 @@
 import type { WorldState } from "../../core/state.js";
+import type { InputState } from "../../core/inputState.js";
 import {
   FIREBREAK_COST_PER_TILE,
   RECRUIT_FIREFIGHTER_COST,
@@ -16,7 +17,7 @@ import { GameState } from "./gameState.js";
 import { UIController } from "./uiController.js";
 
 export type PhaseUiApi = {
-  sync: (world: WorldState) => void;
+  sync: (world: WorldState, inputState: InputState) => void;
   state: GameState;
   controller: UIController;
 };
@@ -44,14 +45,14 @@ const getSelection = (world: WorldState): SelectedEntity => {
   };
 };
 
-const getInteractionMode = (world: WorldState) => {
+const getInteractionMode = (world: WorldState, inputState: InputState) => {
   if (world.deployMode === "clear") {
     return "fuelBreak";
   }
   if (world.deployMode === "firefighter" || world.deployMode === "truck") {
     return "deploy";
   }
-  if (world.formationStart) {
+  if (inputState.formationStart) {
     return "formation";
   }
   return "default";
@@ -64,13 +65,13 @@ export const initPhaseUI = (container: HTMLElement): PhaseUiApi => {
   container.appendChild(root);
   const controller = new UIController(root, state);
 
-  const sync = (world: WorldState) => {
+  const sync = (world: WorldState, inputState: InputState) => {
     const phaseInfo = getPhaseInfo(world.phaseIndex);
     const progress = phaseInfo.duration > 0 ? world.phaseDay / phaseInfo.duration : 0;
     state.setPhase(world.phase);
     state.setPhaseProgress(progress);
     state.setSelection(getSelection(world));
-    state.setInteractionMode(getInteractionMode(world));
+    state.setInteractionMode(getInteractionMode(world, inputState));
     state.setPaused(world.paused);
     state.setTimeSpeedIndex(world.timeSpeedIndex);
     state.setAlert(world.statusMessage && world.statusMessage !== "Ready." ? world.statusMessage : null);

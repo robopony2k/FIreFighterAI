@@ -1,18 +1,9 @@
 import type { WorldState } from "../core/state.js";
-import { TILE_TYPE_IDS, syncTileSoA } from "../core/state.js";
+import { TILE_TYPE_IDS } from "../core/state.js";
+import { ensureTileSoA } from "../core/tileCache.js";
 
 const TYPE_WATER = TILE_TYPE_IDS.water;
 const TYPE_ASH = TILE_TYPE_IDS.ash;
-
-const ensureTileSoA = (state: WorldState): void => {
-  if (
-    state.tileFire.length !== state.grid.totalTiles ||
-    state.tileSoaDirty ||
-    state.tileSoaPhase !== state.phase
-  ) {
-    syncTileSoA(state);
-  }
-};
 
 export function clearHeatInBounds(state: WorldState, minX: number, maxX: number, minY: number, maxY: number): void {
   ensureTileSoA(state);

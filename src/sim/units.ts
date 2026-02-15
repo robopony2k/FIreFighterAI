@@ -1,5 +1,6 @@
 import type { RNG, Point, Unit, UnitKind, UnitSkill, RosterUnit, Formation } from "../core/types.js";
 import type { WorldState } from "../core/state.js";
+import type { EffectsState } from "../core/effectsState.js";
 import {
   FIREBREAK_COST_PER_TILE,
   FIREFIGHTER_TETHER_DISTANCE,
@@ -22,6 +23,7 @@ import { setStatus, resetStatus } from "../core/state.js";
 import { getCharacterDefinition, getCharacterFirebreakCost } from "../core/characters.js";
 import { inBounds, indexFor } from "../core/grid.js";
 import { applyFuel } from "../core/tiles.js";
+import { syncTileSoAIndex } from "../core/tileCache.js";
 import { findPath, getMoveSpeedMultiplier, isPassable } from "./pathing.js";
 import { emitWaterSpray } from "./particles.js";
 
@@ -389,7 +391,7 @@ export function createUnit(state: WorldState, kind: UnitKind, rng: RNG, rosterEn
   const spawnX = state.basePoint.x + 0.5;
   const spawnY = state.basePoint.y + 0.5;
   return {
-    id: Date.now() + Math.floor(rng.next() * 10000),
+    id: state.nextUnitId++,
     kind,
     rosterId: rosterUnit ? rosterUnit.id : null,
     autonomous: kind !== "truck",
@@ -564,6 +566,7 @@ export function clearFuelAt(state: WorldState, rng: RNG, tileX: number, tileY: n
     state.burnedTiles = Math.max(0, state.burnedTiles - 1);
   }
   tile.type = "firebreak";
+  state.terrainTypeRevision += 1;
   tile.canopy = 0;
   tile.canopyCover = 0;
   tile.stemDensity = 0;
@@ -572,6 +575,7 @@ export function clearFuelAt(state: WorldState, rng: RNG, tileX: number, tileY: n
   tile.ashAge = 0;
   applyFuel(tile, tile.moisture, rng);
   state.terrainDirty = true;
+  syncTileSoAIndex(state, indexFor(state.grid, tileX, tileY));
   state.budget -= firebreakCost;
   if (showStatus) {
     setStatus(state, "Fuel break established.");
@@ -732,9 +736,10 @@ const findFireTargetNear = (state: WorldState, center: Point, radius: number): P
       if (dist > radius) {
         continue;
       }
-      const tile = state.tiles[indexFor(state.grid, x, y)];
-      if (tile.fire > bestFire) {
-        bestFire = tile.fire;
+      const idx = indexFor(state.grid, x, y);
+      const fireValue = state.tileFire[idx];
+      if (fireValue > bestFire) {
+        bestFire = fireValue;
         best = { x, y };
       }
     }
@@ -895,9 +900,10 @@ export function autoAssignTargets(state: WorldState): void {
     const maxY = Math.min(state.grid.rows - 1, Math.floor(unit.y + scanRadius));
     for (let y = minY; y <= maxY; y += 1) {
       for (let x = minX; x <= maxX; x += 1) {
-        const tile = state.tiles[indexFor(state.grid, x, y)];
-        if (tile.fire > bestFire) {
-          bestFire = tile.fire;
+        const idx = indexFor(state.grid, x, y);
+        const fireValue = state.tileFire[idx];
+        if (fireValue > bestFire) {
+          bestFire = fireValue;
           best = { x, y };
         }
       }
@@ -951,14 +957,15 @@ export function assignFormationTargets(state: WorldState, units: Unit[], start: 
 export function applyUnitHazards(state: WorldState, rng: RNG, delta: number): void {
   for (let i = state.units.length - 1; i >= 0; i -= 1) {
     const unit = state.units[i];
-    const tile = state.tiles[indexFor(state.grid, Math.floor(unit.x), Math.floor(unit.y))];
-    if (tile.fire < UNIT_LOSS_FIRE_THRESHOLD) {
+    const idx = indexFor(state.grid, Math.floor(unit.x), Math.floor(unit.y));
+    const fireValue = state.tileFire[idx];
+    if (fireValue < UNIT_LOSS_FIRE_THRESHOLD) {
       continue;
     }
     const rosterEntry = getRosterUnit(state, unit.rosterId);
     const resilience = rosterEntry ? getTrainingMultiplier(rosterEntry.training).resilience : 0;
     const baseRisk = unit.kind === "truck" ? 0.06 : 0.1;
-    const risk = baseRisk * (tile.fire - UNIT_LOSS_FIRE_THRESHOLD + 0.15) * (1 - resilience) * delta;
+    const risk = baseRisk * (fireValue - UNIT_LOSS_FIRE_THRESHOLD + 0.15) * (1 - resilience) * delta;
     if (rng.next() < risk) {
       if (rosterEntry) {
         rosterEntry.status = "lost";
@@ -1026,8 +1033,14 @@ export function recallUnits(state: WorldState): void {
   });
 }
 
-export function applyExtinguish(state: WorldState, rng: RNG, delta: number): void {
+export function applyExtinguish(state: WorldState, effects: EffectsState, rng: RNG, delta: number): void {
   const powerMultiplier = delta;
+  const clearScheduled = (idx: number): void => {
+    if (state.tileIgniteAt[idx] < Number.POSITIVE_INFINITY) {
+      state.tileIgniteAt[idx] = Number.POSITIVE_INFINITY;
+      state.fireScheduledCount = Math.max(0, state.fireScheduledCount - 1);
+    }
+  };
   state.units.forEach((unit) => {
     if (unit.kind === "firefighter" && unit.carrierId !== null) {
       return;
@@ -1066,23 +1079,31 @@ export function applyExtinguish(state: WorldState, rng: RNG, delta: number): voi
         if (dist <= radius) {
           const idx = indexFor(state.grid, x, y);
           const tile = state.tiles[idx];
-          if (tile.heat > 0) {
-            tile.heat = Math.max(0, tile.heat - power * 1.1 * powerMultiplier);
-            if (tile.heat < tile.ignitionPoint) {
-              state.tileIgniteAt[idx] = Number.POSITIVE_INFINITY;
+          let heatValue = state.tileHeat[idx];
+          if (heatValue > 0) {
+            heatValue = Math.max(0, heatValue - power * 1.1 * powerMultiplier);
+            state.tileHeat[idx] = heatValue;
+            tile.heat = heatValue;
+            if (heatValue < tile.ignitionPoint) {
+              clearScheduled(idx);
             }
-            if (tile.heat > 0.05 && dist < closestHeatDist) {
+            if (heatValue > 0.05 && dist < closestHeatDist) {
               closestHeatDist = dist;
               closestHeat = { x: x + 0.5, y: y + 0.5 };
             }
           }
-          if (tile.fire > 0) {
-            const before = tile.fire;
-            tile.fire = Math.max(0, tile.fire - power * powerMultiplier);
-            if (before > 0 && tile.fire === 0) {
-              tile.heat = Math.min(tile.heat, tile.ignitionPoint * 0.25);
-              state.tileIgniteAt[idx] = Number.POSITIVE_INFINITY;
-              if (tile.fuel > 0) {
+          let fireValue = state.tileFire[idx];
+          if (fireValue > 0) {
+            const before = fireValue;
+            fireValue = Math.max(0, fireValue - power * powerMultiplier);
+            state.tileFire[idx] = fireValue;
+            tile.fire = fireValue;
+            if (before > 0 && fireValue === 0) {
+              heatValue = Math.min(state.tileHeat[idx], tile.ignitionPoint * 0.25);
+              state.tileHeat[idx] = heatValue;
+              tile.heat = heatValue;
+              clearScheduled(idx);
+              if (state.tileFuel[idx] > 0) {
                 state.containedCount += 1;
               }
             }
@@ -1095,9 +1116,9 @@ export function applyExtinguish(state: WorldState, rng: RNG, delta: number): voi
       }
     }
     if (closestFire) {
-      emitWaterSpray(state, rng, unit, closestFire);
+      emitWaterSpray(state, effects, rng, unit, closestFire);
     } else if (closestHeat) {
-      emitWaterSpray(state, rng, unit, closestHeat);
+      emitWaterSpray(state, effects, rng, unit, closestHeat);
     }
   });
 }

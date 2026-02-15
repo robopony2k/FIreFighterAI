@@ -22,8 +22,4 @@ export function resetFireBounds(state: WorldState): void {
   state.fireMaxX = 0;
   state.fireMinY = 0;
   state.fireMaxY = 0;
-  // Clear renderFireSmooth when fire activity ceases
-  for (let i = 0; i < state.grid.totalTiles; i++) {
-    state.renderFireSmooth[i] = 0;
-  }
 }

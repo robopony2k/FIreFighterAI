@@ -23,6 +23,7 @@
           <p>Coordinate crews, cut firebreaks, and keep the region standing.</p>
           <div class="start-menu-actions">
             <button id="startNewRun" type="button">New Run</button>
+            <button id="startMenuThreeTest" type="button">3D Test Run</button>
           </div>
         </div>
       </div>
@@ -41,13 +42,19 @@
                   Auto
                 </label>
                 <button id="threeTestStep" type="button">Next step</button>
+                <button id="threeTestDebugIgnite" type="button">Debug Ignite</button>
                 <span id="threeTestPhase" class="three-test-phase">Idle</span>
                 <div class="three-test-season">
                   <label for="threeTestSeason">Season</label>
-                  <input id="threeTestSeason" type="range" min="0" max="3" step="1" value="1" />
-                  <span id="threeTestSeasonLabel">Summer</span>
+                  <label class="three-test-toggle">
+                    <input id="threeTestSeasonManual" type="checkbox" />
+                    Manual
+                  </label>
+                  <input id="threeTestSeason" type="range" min="0" max="1" step="0.001" value="0.5" />
+                  <span id="threeTestSeasonLabel">Summer | AUTO</span>
                 </div>
               </div>
+              <button id="threeTestEndRun" type="button">End Run</button>
               <button id="threeTestClose" type="button">Close</button>
             </div>
           </div>
@@ -286,54 +293,12 @@
                   </div>
                 </div>
                 <div id="mapGenControls" class="run-settings-slot"></div>
-                <div class="run-settings-card">
+                <div class="run-settings-card run-settings-card--wide">
                   <div class="run-settings-title">Fuel Profiles</div>
-                  <label class="run-input">
-                    Tile type
-                    <select disabled>
-                      <option>Grass</option>
-                      <option>Forest</option>
-                      <option>House</option>
-                      <option>Base</option>
-                      <option>Road</option>
-                      <option>Firebreak</option>
-                      <option>Ash</option>
-                      <option>Water</option>
-                    </select>
-                  </label>
-                  <label class="run-input">
-                    Base fuel
-                    <input type="number" min="0" step="0.01" value="0.3" disabled />
-                  </label>
-                  <label class="run-input">
-                    Ignition point
-                    <input type="number" min="0" step="0.01" value="0.24" disabled />
-                  </label>
-                  <label class="run-input">
-                    Burn rate
-                    <input type="number" min="0" step="0.01" value="0.85" disabled />
-                  </label>
-                  <label class="run-input">
-                    Heat output
-                    <input type="number" min="0" step="0.01" value="0.75" disabled />
-                  </label>
-                  <label class="run-input">
-                    Spread boost
-                    <input type="number" min="0" step="0.01" value="0.85" disabled />
-                  </label>
-                  <label class="run-input">
-                    Heat transfer cap
-                    <input type="number" min="0" step="0.01" value="0.3" disabled />
-                  </label>
-                  <label class="run-input">
-                    Heat retention
-                    <input type="number" min="0" step="0.01" value="0.55" disabled />
-                  </label>
-                  <label class="run-input">
-                    Wind factor
-                    <input type="number" min="0" step="0.01" value="0.95" disabled />
-                  </label>
-                  <div class="run-settings-note">Defaults shown (grass). Not wired yet.</div>
+                  <div id="fuelProfileGrid" class="fuel-grid" role="table" aria-label="Fuel profile grid"></div>
+                  <div class="run-settings-note">
+                    Adjusted values are saved locally and applied to new maps.
+                  </div>
                 </div>
                 <div class="run-settings-card">
                   <div class="run-settings-title">Regrowth</div>

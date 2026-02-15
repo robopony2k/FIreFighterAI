@@ -1,12 +1,14 @@
 
 import type { WorldState } from "../../core/state.js";
 import type { Tile } from "../../core/types.js";
-import { FUEL_PROFILES } from "../../core/config.js";
+import { getFuelProfiles } from "../../core/tiles.js";
 import { clamp } from "../../core/utils.js";
+import { markTileSoADirty } from "../../core/tileCache.js";
 
 const MIN_IGNITION_POINT = 0.0001;
 
 export function burnTile(state: WorldState, tile: Tile, fireDelta: number): boolean {
+  const fuelProfiles = getFuelProfiles();
   const conflagrationHeatBoost = state.fireSettings.conflagrationHeatBoost;
   const conflagrationFuelBoost = state.fireSettings.conflagrationFuelBoost;
   const ignitionPoint = Math.max(tile.ignitionPoint, MIN_IGNITION_POINT);
@@ -36,11 +38,13 @@ export function burnTile(state: WorldState, tile: Tile, fireDelta: number): bool
       state.yearBurnedTiles += 1;
     }
     state.terrainDirty = true;
-    const ashProfile = FUEL_PROFILES.ash;
+    state.terrainTypeRevision += 1;
+    const ashProfile = fuelProfiles.ash;
     tile.spreadBoost = ashProfile.spreadBoost;
     tile.heatTransferCap = ashProfile.heatTransferCap;
     tile.heatRetention = ashProfile.heatRetention;
     tile.windFactor = ashProfile.windFactor;
+    markTileSoADirty(state);
     return true;
   }
   return false;

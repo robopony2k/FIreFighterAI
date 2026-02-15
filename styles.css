@@ -384,11 +384,11 @@ canvas {
 }
 
 .three-test-season input[type="range"] {
-  width: 140px;
+  width: 170px;
 }
 
 .three-test-season span {
-  min-width: 64px;
+  min-width: 160px;
   text-transform: uppercase;
   letter-spacing: 0.3px;
   color: rgba(45, 35, 24, 0.8);
@@ -597,6 +597,10 @@ canvas {
   border: 1px solid rgba(129, 113, 92, 0.2);
 }
 
+.run-settings-card--wide {
+  grid-column: 1 / -1;
+}
+
 .run-settings-title {
   font-size: 12px;
   text-transform: uppercase;
@@ -715,6 +719,107 @@ canvas {
 .run-settings-note {
   font-size: 11px;
   color: var(--muted);
+}
+
+.fuel-grid {
+  display: grid;
+  grid-template-columns: minmax(120px, 1.1fr) repeat(8, minmax(90px, 1fr));
+  gap: 6px;
+  align-items: center;
+  min-width: 720px;
+  overflow-x: auto;
+}
+
+.fuel-grid-cell {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.fuel-grid-head {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  color: rgba(50, 45, 38, 0.85);
+}
+
+.fuel-grid-type {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 600;
+  text-transform: capitalize;
+  color: var(--ink);
+}
+
+.fuel-grid-cell input[type="number"] {
+  width: 100%;
+  padding: 6px 8px;
+  border-radius: 8px;
+  border: 1px solid #d7d0c2;
+  background: #fffdf8;
+  font-size: 12px;
+  font-family: inherit;
+  color: var(--ink);
+}
+
+.fuel-grid-swatch {
+  width: 10px;
+  height: 10px;
+  border-radius: 4px;
+  background: #888;
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.08);
+}
+
+.fuel-grid-swatch[data-type="water"] {
+  background: #2a6f97;
+}
+
+.fuel-grid-swatch[data-type="beach"] {
+  background: #d9c79e;
+}
+
+.fuel-grid-swatch[data-type="floodplain"] {
+  background: #7b8f4f;
+}
+
+.fuel-grid-swatch[data-type="grass"] {
+  background: #5a8f4e;
+}
+
+.fuel-grid-swatch[data-type="scrub"] {
+  background: #6f7f4a;
+}
+
+.fuel-grid-swatch[data-type="forest"] {
+  background: #2f5d31;
+}
+
+.fuel-grid-swatch[data-type="rocky"] {
+  background: #8b8b86;
+}
+
+.fuel-grid-swatch[data-type="bare"] {
+  background: #b99b6b;
+}
+
+.fuel-grid-swatch[data-type="ash"] {
+  background: #4a4a4a;
+}
+
+.fuel-grid-swatch[data-type="road"] {
+  background: #bdb49c;
+}
+
+.fuel-grid-swatch[data-type="base"] {
+  background: #a12f1d;
+}
+
+.fuel-grid-swatch[data-type="house"] {
+  background: #c08a5a;
+}
+
+.fuel-grid-swatch[data-type="firebreak"] {
+  background: #d6c6a6;
 }
 
 .character-preview {

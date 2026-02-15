@@ -2,23 +2,42 @@ import { BASE_BUDGET, TILE_SIZE, MAP_SCALE, TIME_SPEED_OPTIONS, MAP_SIZE_PRESETS
 import type { MapSizeId } from "./core/config.js";
 import { getCharacterBaseBudget } from "./core/characters.js";
 import { RNG } from "./core/rng.js";
-import { computeChecksum, createInitialState, resetState, syncTileSoA } from "./core/state.js";
+import { computeChecksum, createInitialState, resetState, setStatus } from "./core/state.js";
+import { ensureTileSoA, syncTileSoA } from "./core/tileCache.js";
+import { setFuelProfiles } from "./core/tiles.js";
 import { TREE_TYPE_IDS } from "./core/types.js";
+import { createEffectsState, resetEffectsState } from "./core/effectsState.js";
+import { createInputState, resetInputState } from "./core/inputState.js";
+import { createUiState, resetUiState } from "./core/uiState.js";
+import { createGameEventBus } from "./core/gameEvents.js";
+import { CLIMATE_IGNITION_MAX, CLIMATE_IGNITION_MIN, VIRTUAL_CLIMATE_PARAMS } from "./core/climate.js";
 import { generateMap, type MapGenDebug, type MapGenDebugSnapshot } from "./mapgen/index.js";
 import { draw } from "./render/draw.js";
 import { resetTerrainCaches } from "./render/terrainCache.js";
-import { createThreeTest } from "./render/threeTest.js";
+import { createThreeTest, type ThreeTestPerfSnapshot } from "./render/threeTest.js";
+import {
+  getFirestationAssetCache,
+  getHouseAssetsCache,
+  getTreeAssetsCache,
+  loadFirestationAsset,
+  loadHouseAssets,
+  loadTreeAssets
+} from "./render/threeTestAssets.js";
+import { asRenderSim, buildRenderTerrainSample } from "./render/simView.js";
+import { createRenderState, syncRenderState } from "./render/renderState.js";
 import { initPhaseUI } from "./ui/phase/index.js";
 import { bindPhaseUi } from "./ui/phase/bindings.js";
 import { buildMapGenControls } from "./ui/mapgen-controls.js";
 import { getOverlayRefs, updateOverlay } from "./ui/overlay.js";
 import { saveLeaderboard } from "./persistence/leaderboard.js";
+import { loadFuelProfileOverrides } from "./persistence/fuelProfiles.js";
 import { randomizeWind } from "./sim/wind.js";
-import { setPhase, stepSim } from "./sim/index.js";
+import { endGame, setGameEventBus, setPhase, stepSim } from "./sim/index.js";
 import { seedStartingRoster } from "./sim/units.js";
 import { PHASES } from "./core/time.js";
 import { DEFAULT_MAP_SIZE, DEFAULT_RUN_OPTIONS, normalizeFireSettings } from "./ui/run-config.js";
 import type { NewRunConfig } from "./ui/run-config.js";
+import type { GameUiSnapshot } from "./ui/phase/types.js";
 
 const canvas = document.getElementById("gameCanvas") as HTMLCanvasElement;
 const ctx = canvas.getContext("2d");
@@ -45,9 +64,50 @@ const params = new URLSearchParams(window.location.search);
 const seedParam = params.get("seed");
 const initialSeed = seedParam && !Number.isNaN(Number(seedParam)) ? Number(seedParam) : Math.floor(Date.now() % 1000000);
 const headless = params.get("headless") === "1";
+const threeTestNoSim = params.get("nosim") === "1";
+const threeTestSeasonal = params.get("seasonal") !== "0";
+const threeTestNoTerrainSync = params.get("noterrain") === "1";
+const threeTestDprCap = (() => {
+  const raw = Number(params.get("dpr"));
+  if (!Number.isFinite(raw)) {
+    return 3;
+  }
+  return Math.max(0.5, Math.min(4, raw));
+})();
 
 const state = createInitialState(initialSeed, grid);
-const rng = new RNG(Date.now());
+const inputState = createInputState();
+const renderState = createRenderState(state.grid);
+const effectsState = createEffectsState();
+const uiState = createUiState();
+const gameEvents = createGameEventBus();
+const rng = new RNG(initialSeed);
+const persistedFuelProfiles = loadFuelProfileOverrides();
+
+setGameEventBus(gameEvents);
+
+const persistenceState = { scoreSubmitted: false };
+
+gameEvents.on("overlay:show", (payload) => {
+  uiState.overlayTitle = payload.title;
+  uiState.overlayMessage = payload.message;
+  uiState.overlayDetails = payload.details;
+  uiState.overlayAction = payload.action;
+  uiState.overlayVisible = true;
+});
+
+gameEvents.on("overlay:hide", () => {
+  uiState.overlayVisible = false;
+});
+
+gameEvents.on("game:over", (payload) => {
+  if (persistenceState.scoreSubmitted) {
+    return;
+  }
+  const callsign = state.campaign.callsign.trim() || "Chief";
+  saveLeaderboard({ name: callsign, score: payload.score, seed: payload.seed, date: Date.now() });
+  persistenceState.scoreSubmitted = true;
+});
 const buildTreeTypeMap = (): Uint8Array => {
   const result = new Uint8Array(state.grid.totalTiles);
   result.fill(255);
@@ -78,13 +138,25 @@ const mapgenPercent = document.getElementById("mapgenPercent") as HTMLDivElement
 const threeTestOverlay = document.getElementById("threeTestOverlay") as HTMLDivElement | null;
 const threeTestCanvas = document.getElementById("threeTestCanvas") as HTMLCanvasElement | null;
 const threeTestCloseButton = document.getElementById("threeTestClose") as HTMLButtonElement | null;
+const threeTestEndRunButton = document.getElementById("threeTestEndRun") as HTMLButtonElement | null;
 const threeTestStepButton = document.getElementById("threeTestStep") as HTMLButtonElement | null;
+const threeTestDebugIgniteButton = document.getElementById("threeTestDebugIgnite") as HTMLButtonElement | null;
 const threeTestAutoToggle = document.getElementById("threeTestAuto") as HTMLInputElement | null;
 const threeTestPhaseLabel = document.getElementById("threeTestPhase") as HTMLSpanElement | null;
 const threeTestSeason = document.getElementById("threeTestSeason") as HTMLInputElement | null;
+const threeTestSeasonManualToggle = document.getElementById("threeTestSeasonManual") as HTMLInputElement | null;
 const threeTestSeasonLabel = document.getElementById("threeTestSeasonLabel") as HTMLSpanElement | null;
 const DEBUG_TYPE_EVENT = "debug-type-colors-changed";
-const THREE_TEST_SEASONS = ["Spring", "Summer", "Autumn", "Winter"] as const;
+const CLIMATE_SEASONS = ["Winter", "Spring", "Summer", "Autumn"] as const;
+const ENABLE_THREE_TEST_SEASONAL_RECOLOR = threeTestSeasonal;
+type ThreeTestSeasonMode = "auto" | "manual";
+type ActiveRenderMode = "2d" | "3d";
+const THREE_TEST_VISUAL_EPSILON = 0.0005;
+type PerfStat = { last: number; avg: number; max: number; samples: number; updatedAt: number };
+const PERF_OVERLAY_REFRESH_MS = 220;
+const PERF_CONSOLE_INTERVAL_MS = 2000;
+const PERF_EMA_ALPHA = 0.18;
+const MAIN_HITCH_THRESHOLD_MS = 45;
 let resizeObserver: ResizeObserver | null = null;
 let lastCanvasWidth = 0;
 let lastCanvasHeight = 0;
@@ -145,6 +217,232 @@ let threeTestStepController: {
   setAuto: (auto: boolean) => void;
   auto: boolean;
 } | null = null;
+let threeTestUiListener: ((snapshot: GameUiSnapshot) => void) | null = null;
+let threeTestSeasonMode: ThreeTestSeasonMode = "auto";
+let threeTestManualSeasonT01 = 0.5;
+let lastThreeTestSeasonT01 = Number.NaN;
+let lastThreeTestRisk01 = Number.NaN;
+let lastThreeTestSeasonMode = "";
+let lastThreeTestUiSeasonT01 = Number.NaN;
+let lastThreeTestUiSeasonMode = "";
+let lastThreeTestTerrainTypeRevision = -1;
+let lastThreeTestDebugTypeColors = false;
+let cachedThreeTestTreeTypeMap: Uint8Array | null = null;
+let savedThreeTestSmokeRate: number | null = null;
+let activeRenderMode: ActiveRenderMode = "2d";
+const perfStats = new Map<string, PerfStat>();
+const perfOverlay = document.createElement("pre");
+let perfOverlayVisible = params.get("perf") === "1";
+const perfConsoleAlways = params.get("perflog") === "1";
+let lastPerfOverlayUpdate = 0;
+let lastPerfConsoleLog = 0;
+type LongTaskStats = { count: number; totalMs: number; maxMs: number; lastMs: number; lastAt: number; lastDetail: string };
+const longTaskStats: LongTaskStats = { count: 0, totalMs: 0, maxMs: 0, lastMs: 0, lastAt: 0, lastDetail: "n/a" };
+
+const setRenderMode = (mode: ActiveRenderMode): void => {
+  activeRenderMode = mode;
+  const show2d = mode === "2d";
+  canvas.classList.toggle("hidden", !show2d);
+  phaseUiRoot?.classList.toggle("hidden", !show2d);
+  perfStats.clear();
+  lastPerfOverlayUpdate = 0;
+  lastPerfConsoleLog = 0;
+  longTaskStats.count = 0;
+  longTaskStats.totalMs = 0;
+  longTaskStats.maxMs = 0;
+  longTaskStats.lastMs = 0;
+  longTaskStats.lastAt = 0;
+  longTaskStats.lastDetail = "n/a";
+};
+
+const recordPerfSample = (name: string, value: number): void => {
+  if (!Number.isFinite(value)) {
+    return;
+  }
+  const now = performance.now();
+  const safe = Math.max(0, value);
+  const stat = perfStats.get(name);
+  if (!stat) {
+    perfStats.set(name, { last: safe, avg: safe, max: safe, samples: 1, updatedAt: now });
+    return;
+  }
+  stat.last = safe;
+  stat.avg = stat.avg * (1 - PERF_EMA_ALPHA) + safe * PERF_EMA_ALPHA;
+  stat.max = Math.max(safe, stat.max * 0.996);
+  stat.samples += 1;
+  stat.updatedAt = now;
+};
+
+const readPerf = (name: string): PerfStat | null => perfStats.get(name) ?? null;
+const readRecentPerf = (name: string, now: number, maxAgeMs = 3000): PerfStat | null => {
+  const stat = perfStats.get(name);
+  if (!stat) {
+    return null;
+  }
+  if (now - stat.updatedAt > maxAgeMs) {
+    return null;
+  }
+  return stat;
+};
+const formatMs = (value: number | null | undefined): string =>
+  typeof value === "number" && Number.isFinite(value) ? `${value.toFixed(2)}ms` : "n/a";
+const formatNum = (value: number | null | undefined): string =>
+  typeof value === "number" && Number.isFinite(value) ? value.toFixed(2) : "n/a";
+const formatInt = (value: number | null | undefined): string =>
+  typeof value === "number" && Number.isFinite(value) ? Math.round(value).toString() : "n/a";
+
+const setPerfOverlayVisible = (visible: boolean): void => {
+  perfOverlayVisible = visible;
+  perfOverlay.style.display = visible ? "block" : "none";
+};
+
+const applyPerfOverlayStyle = (): void => {
+  perfOverlay.id = "perfOverlay";
+  perfOverlay.style.position = "fixed";
+  perfOverlay.style.right = "12px";
+  perfOverlay.style.bottom = "12px";
+  perfOverlay.style.margin = "0";
+  perfOverlay.style.padding = "10px 12px";
+  perfOverlay.style.maxWidth = "460px";
+  perfOverlay.style.whiteSpace = "pre";
+  perfOverlay.style.pointerEvents = "none";
+  perfOverlay.style.zIndex = "80";
+  perfOverlay.style.color = "#d7f0dd";
+  perfOverlay.style.background = "rgba(9, 13, 17, 0.84)";
+  perfOverlay.style.border = "1px solid rgba(123, 175, 141, 0.45)";
+  perfOverlay.style.borderRadius = "8px";
+  perfOverlay.style.font = "12px/1.35 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace";
+  perfOverlay.style.boxShadow = "0 8px 20px rgba(0, 0, 0, 0.35)";
+  document.body.appendChild(perfOverlay);
+  setPerfOverlayVisible(perfOverlayVisible);
+};
+
+const buildPerfOverlayText = (threePerf: ThreeTestPerfSnapshot | null, now: number): string => {
+  const mainFrame = readRecentPerf("main.frame", now);
+  const mainRafGap = readRecentPerf("main.rafGap", now);
+  const mainHitch = readRecentPerf("main.hitch", now);
+  const simFrame = readRecentPerf("sim.frame", now);
+  const simStep = readRecentPerf("sim.step", now);
+  const simSteps = readRecentPerf("sim.steps", now);
+  const draw2d = readRecentPerf("2d.draw", now);
+  const ui2d = readRecentPerf("2d.ui", now);
+  const overlay2d = readRecentPerf("2d.overlay", now);
+  const climate3d = readRecentPerf("3d.climateSync", now);
+  const terrain3d = readRecentPerf("3d.terrainSync", now);
+  const terrainDeferred3d = readRecentPerf("3d.terrainDeferred", now);
+  const lines = [
+    `Perf (${activeRenderMode.toUpperCase()})  |  Ctrl+Shift+P toggle`,
+    `Flags: seasonal=${threeTestSeasonal ? "1" : "0"} nosim=${threeTestNoSim ? "1" : "0"} noterrain=${threeTestNoTerrainSync ? "1" : "0"} dpr=${threeTestDprCap.toFixed(2)}`,
+    `Main:  ${formatMs(mainFrame?.avg)} avg  ${formatMs(mainFrame?.last)} last  ${formatMs(mainFrame?.max)} max`,
+    `Main gap: ${formatMs(mainRafGap?.avg)} avg  ${formatMs(mainRafGap?.last)} last  hitch ${formatMs(mainHitch?.last)}`,
+    `Sim:   ${formatMs(simFrame?.avg)} frame  ${formatMs(simStep?.avg)} step  steps/frame ${formatNum(simSteps?.avg)}`
+  ];
+  if (activeRenderMode === "2d") {
+    lines.push(`2D:    draw ${formatMs(draw2d?.avg)}  ui ${formatMs(ui2d?.avg)}  overlay ${formatMs(overlay2d?.avg)}`);
+  } else {
+    lines.push(
+      `3D sync: climate ${formatMs(climate3d?.avg)}  terrain ${formatMs(terrain3d?.avg)}  deferred ${formatNum(terrainDeferred3d?.avg)}`
+    );
+    if (threePerf) {
+      lines.push(`3D frame: ${formatMs(threePerf.frameMs)}  fps ${formatNum(threePerf.fps)}`);
+      lines.push(
+        `3D slices: scene ${formatMs(threePerf.sceneRenderMs)}  fx ${formatMs(threePerf.fireFxMs)}  hud ${formatMs(threePerf.hudMs)}`
+      );
+      lines.push(
+        `3D misc: controls ${formatMs(threePerf.controlsMs)}  treeBurn ${formatMs(threePerf.treeBurnMs)}  ui ${formatMs(threePerf.uiRenderMs)}`
+      );
+      lines.push(
+        `3D terrain set: avg ${formatMs(threePerf.terrainSetMs)} last ${formatMs(threePerf.terrainSetLastMs)} max ${formatMs(threePerf.terrainSetMaxMs)} n ${formatInt(threePerf.terrainSetCount)}`
+      );
+      lines.push(
+        `3D gap: avg ${formatMs(threePerf.rafGapMs)}  last ${formatMs(threePerf.rafGapLastMs)}  max ${formatMs(threePerf.rafGapMaxMs)}  hitches ${formatInt(threePerf.hitchCount)}`
+      );
+      lines.push(
+        `3D geo: calls ${formatInt(threePerf.sceneCalls)} tri ${formatInt(threePerf.sceneTriangles)} line ${formatInt(threePerf.sceneLines)} pt ${formatInt(threePerf.scenePoints)}`
+      );
+      lines.push(
+        `3D mem: geom ${formatInt(threePerf.memoryGeometries)} tex ${formatInt(threePerf.memoryTextures)} totalCalls ${formatInt(threePerf.totalCalls)}`
+      );
+      lines.push(
+        `3D ctx: loss ${formatInt(threePerf.contextLosses)} restore ${formatInt(threePerf.contextRestores)}`
+      );
+    }
+  }
+  if (longTaskStats.count > 0 && now - longTaskStats.lastAt < 60000) {
+    lines.push(
+      `LongTask: n ${longTaskStats.count} last ${formatMs(longTaskStats.lastMs)} max ${formatMs(longTaskStats.maxMs)} src ${longTaskStats.lastDetail}`
+    );
+  }
+  return lines.join("\n");
+};
+
+const maybeUpdatePerfDiagnostics = (now: number): void => {
+  const threePerf = activeRenderMode === "3d" ? threeTestController?.getPerfSnapshot() ?? null : null;
+  if (threePerf) {
+    recordPerfSample("3d.frame", threePerf.frameMs);
+    recordPerfSample("3d.scene", threePerf.sceneRenderMs);
+    recordPerfSample("3d.fx", threePerf.fireFxMs);
+    recordPerfSample("3d.hud", threePerf.hudMs);
+    recordPerfSample("3d.controls", threePerf.controlsMs);
+    recordPerfSample("3d.treeBurn", threePerf.treeBurnMs);
+    recordPerfSample("3d.uiRender", threePerf.uiRenderMs);
+  }
+  if (perfOverlayVisible && now - lastPerfOverlayUpdate >= PERF_OVERLAY_REFRESH_MS) {
+    perfOverlay.textContent = buildPerfOverlayText(threePerf, now);
+    lastPerfOverlayUpdate = now;
+  }
+  if ((perfOverlayVisible || perfConsoleAlways) && now - lastPerfConsoleLog >= PERF_CONSOLE_INTERVAL_MS) {
+    if (activeRenderMode === "3d") {
+      const mainAvg = readRecentPerf("main.frame", now)?.avg ?? 0;
+      const simAvg = readRecentPerf("sim.frame", now)?.avg ?? 0;
+      const climateAvg = readRecentPerf("3d.climateSync", now)?.avg ?? 0;
+      const terrainAvg = readRecentPerf("3d.terrainSync", now)?.avg ?? 0;
+      const terrainDeferred = readRecentPerf("3d.terrainDeferred", now)?.avg ?? 0;
+      const threeFrame = readRecentPerf("3d.frame", now)?.avg ?? 0;
+      const threeScene = readRecentPerf("3d.scene", now)?.avg ?? 0;
+      const threeFx = readRecentPerf("3d.fx", now)?.avg ?? 0;
+      const threeHud = readRecentPerf("3d.hud", now)?.avg ?? 0;
+      const sceneCalls = threePerf?.sceneCalls ?? 0;
+      const sceneTriangles = threePerf?.sceneTriangles ?? 0;
+      const contextLosses = threePerf?.contextLosses ?? 0;
+      const contextRestores = threePerf?.contextRestores ?? 0;
+      const mainGap = readRecentPerf("main.rafGap", now)?.avg ?? 0;
+      const hitch = readRecentPerf("main.hitch", now)?.last ?? 0;
+      const terrainSetLast = threePerf?.terrainSetLastMs ?? 0;
+      const terrainSetMax = threePerf?.terrainSetMaxMs ?? 0;
+      const terrainSetCount = threePerf?.terrainSetCount ?? 0;
+      console.log(
+        `[perf] mode=3d main=${mainAvg.toFixed(2)}ms sim=${simAvg.toFixed(2)}ms ` +
+          `seasonal=${threeTestSeasonal ? 1 : 0} ` +
+          `nosim=${threeTestNoSim ? 1 : 0} ` +
+          `noterrain=${threeTestNoTerrainSync ? 1 : 0} ` +
+          `gap=${mainGap.toFixed(2)}ms hitch=${hitch.toFixed(2)}ms ` +
+          `sync(climate=${climateAvg.toFixed(2)} terrain=${terrainAvg.toFixed(2)} defer=${terrainDeferred.toFixed(2)}) ` +
+          `3dFrame=${threeFrame.toFixed(2)}ms scene=${threeScene.toFixed(2)} sceneLast=${(threePerf?.sceneRenderLastMs ?? 0).toFixed(2)} ` +
+          `gap3d=${(threePerf?.rafGapLastMs ?? 0).toFixed(2)} terrainSetLast=${terrainSetLast.toFixed(2)} terrainSetMax=${terrainSetMax.toFixed(2)} terrainSetN=${Math.round(terrainSetCount)} ` +
+          `fx=${threeFx.toFixed(2)} hud=${threeHud.toFixed(2)} ctxLoss=${Math.round(contextLosses)} ctxRestore=${Math.round(contextRestores)} ` +
+          `calls=${Math.round(sceneCalls)} tri=${Math.round(sceneTriangles)}`
+      );
+    } else {
+      const mainAvg = readRecentPerf("main.frame", now)?.avg ?? 0;
+      const simAvg = readRecentPerf("sim.frame", now)?.avg ?? 0;
+      const drawAvg = readRecentPerf("2d.draw", now)?.avg ?? 0;
+      const uiAvg = readRecentPerf("2d.ui", now)?.avg ?? 0;
+      const overlayAvg = readRecentPerf("2d.overlay", now)?.avg ?? 0;
+      const mainGap = readRecentPerf("main.rafGap", now)?.avg ?? 0;
+      const hitch = readRecentPerf("main.hitch", now)?.last ?? 0;
+      console.log(
+        `[perf] mode=2d main=${mainAvg.toFixed(2)}ms sim=${simAvg.toFixed(2)}ms ` +
+          `seasonal=${threeTestSeasonal ? 1 : 0} ` +
+          `nosim=${threeTestNoSim ? 1 : 0} ` +
+          `noterrain=${threeTestNoTerrainSync ? 1 : 0} ` +
+          `gap=${mainGap.toFixed(2)}ms hitch=${hitch.toFixed(2)}ms ` +
+          `draw=${drawAvg.toFixed(2)}ms ui=${uiAvg.toFixed(2)}ms overlay=${overlayAvg.toFixed(2)}ms`
+      );
+    }
+    lastPerfConsoleLog = now;
+  }
+};
 
 const updateThreeTestStepUi = (): void => {
   if (!threeTestStepButton || !threeTestStepController) {
@@ -153,16 +451,164 @@ const updateThreeTestStepUi = (): void => {
   threeTestStepButton.disabled = threeTestStepController.auto;
 };
 
-const updateThreeTestSeasonUi = (value?: number): number => {
-  const raw = value ?? (threeTestSeason ? Number(threeTestSeason.value) : 1);
-  const clamped = Math.max(0, Math.min(THREE_TEST_SEASONS.length - 1, Math.round(raw)));
+const clamp01 = (value: number): number => Math.max(0, Math.min(1, value));
+
+const getSeasonLabelFromT01 = (seasonT01: number): string => {
+  const wrapped = ((seasonT01 % 1) + 1) % 1;
+  const index = Math.min(3, Math.floor(wrapped * 4));
+  return CLIMATE_SEASONS[index] ?? "Season";
+};
+
+const getClimateSeasonT01 = (): number => {
+  const yearDays = Math.max(1, Math.floor(VIRTUAL_CLIMATE_PARAMS.seasonLen));
+  const dayInYear = ((state.careerDay % yearDays) + yearDays) % yearDays;
+  return clamp01(dayInYear / yearDays);
+};
+
+const getClimateRisk01 = (): number => {
+  const ignitionRange = Math.max(0.0001, CLIMATE_IGNITION_MAX - CLIMATE_IGNITION_MIN);
+  const ignitionNorm = clamp01((state.climateIgnitionMultiplier - CLIMATE_IGNITION_MIN) / ignitionRange);
+  const spreadNorm = clamp01((state.climateSpreadMultiplier - 0.6) / 1.4);
+  return clamp01(0.55 * ignitionNorm + 0.45 * spreadNorm);
+};
+
+const updateThreeTestSeasonUi = (seasonT01: number, mode: ThreeTestSeasonMode): number => {
+  const clamped = clamp01(seasonT01);
+  const label = getSeasonLabelFromT01(clamped);
   if (threeTestSeason) {
     threeTestSeason.value = String(clamped);
+    threeTestSeason.disabled = !ENABLE_THREE_TEST_SEASONAL_RECOLOR || mode === "auto";
+  }
+  if (threeTestSeasonManualToggle) {
+    threeTestSeasonManualToggle.disabled = !ENABLE_THREE_TEST_SEASONAL_RECOLOR;
+    threeTestSeasonManualToggle.checked = mode === "manual";
   }
   if (threeTestSeasonLabel) {
-    threeTestSeasonLabel.textContent = THREE_TEST_SEASONS[clamped] ?? "Summer";
+    threeTestSeasonLabel.textContent = ENABLE_THREE_TEST_SEASONAL_RECOLOR
+      ? `${label} | ${mode.toUpperCase()}`
+      : "SEASONAL OFF";
+  }
+  if (ENABLE_THREE_TEST_SEASONAL_RECOLOR) {
+    threeTestController?.setSeasonLabel(`Season: ${label} (${mode.toUpperCase()})`);
+  } else {
+    threeTestController?.setSeasonLabel("Seasonal visuals disabled");
   }
   return clamped;
+};
+
+const getThreeTestTreeTypeMap = (forceRefresh = false): Uint8Array => {
+  const needsBuild =
+    forceRefresh ||
+    !cachedThreeTestTreeTypeMap ||
+    cachedThreeTestTreeTypeMap.length !== state.grid.totalTiles;
+  if (needsBuild) {
+    cachedThreeTestTreeTypeMap = buildTreeTypeMap();
+  }
+  return cachedThreeTestTreeTypeMap!;
+};
+
+const updateThreeTestDebugIgniteUi = (): void => {
+  if (!threeTestDebugIgniteButton) {
+    return;
+  }
+  threeTestDebugIgniteButton.classList.toggle("active", inputState.debugIgniteMode);
+};
+
+const buildThreeTestSample = (fastUpdate = false) => {
+  const sample = buildRenderTerrainSample(
+    state,
+    getThreeTestTreeTypeMap(!fastUpdate),
+    inputState.debugTypeColors,
+    true,
+    fastUpdate,
+    true
+  );
+  // Climate tinting is shader-driven in 3D; avoid terrain texture rebuild pressure from moisture deltas.
+  sample.tileMoisture = undefined;
+  sample.climateDryness = undefined;
+  return sample;
+};
+
+const THREE_TEST_TERRAIN_COOLDOWN_MS = 1200;
+const THREE_TEST_TERRAIN_COOLDOWN_ACTIVE_FIRE_MS = 750;
+let lastThreeTestTerrainSync = 0;
+
+const syncThreeTestTerrain = (
+  force = false,
+  reason: "terrain" | "debug" | "initial" | "climate" = "terrain"
+): void => {
+  const startedAt = performance.now();
+  try {
+    if (!threeTestController) {
+      return;
+    }
+    if (reason === "climate") {
+      console.warn("[threeTest] climate-only visual update attempted terrain rebuild; request ignored.");
+      return;
+    }
+    const nextTypeRevision = state.terrainTypeRevision;
+    const debugChanged = lastThreeTestDebugTypeColors !== inputState.debugTypeColors;
+    if (!force && !debugChanged && nextTypeRevision === lastThreeTestTerrainTypeRevision) {
+      state.terrainDirty = false;
+      return;
+    }
+    const now = performance.now();
+    const cooldownMs =
+      !force && state.lastActiveFires > 0
+        ? THREE_TEST_TERRAIN_COOLDOWN_ACTIVE_FIRE_MS
+        : THREE_TEST_TERRAIN_COOLDOWN_MS;
+    if (!force && now - lastThreeTestTerrainSync < cooldownMs) {
+      return;
+    }
+    lastThreeTestTerrainSync = now;
+    ensureTileSoA(state);
+    threeTestController.setTerrain(buildThreeTestSample(!force));
+    lastThreeTestTerrainTypeRevision = nextTypeRevision;
+    lastThreeTestDebugTypeColors = inputState.debugTypeColors;
+    state.terrainDirty = false;
+  } finally {
+    recordPerfSample("3d.terrainSync", performance.now() - startedAt);
+  }
+};
+
+const syncThreeTestClimateVisuals = (): void => {
+  const startedAt = performance.now();
+  try {
+    if (!threeTestController) {
+      return;
+    }
+    const autoSeasonT01 = getClimateSeasonT01();
+    const seasonT01 = threeTestSeasonMode === "manual" ? threeTestManualSeasonT01 : autoSeasonT01;
+    const uiSeasonChanged =
+      !Number.isFinite(lastThreeTestUiSeasonT01) ||
+      Math.abs(seasonT01 - lastThreeTestUiSeasonT01) >= THREE_TEST_VISUAL_EPSILON ||
+      lastThreeTestUiSeasonMode !== threeTestSeasonMode;
+    if (uiSeasonChanged) {
+      updateThreeTestSeasonUi(seasonT01, threeTestSeasonMode);
+      lastThreeTestUiSeasonT01 = seasonT01;
+      lastThreeTestUiSeasonMode = threeTestSeasonMode;
+    }
+    if (!ENABLE_THREE_TEST_SEASONAL_RECOLOR) {
+      return;
+    }
+    const risk01 = getClimateRisk01();
+    const seasonChanged = !Number.isFinite(lastThreeTestSeasonT01) || Math.abs(seasonT01 - lastThreeTestSeasonT01) >= THREE_TEST_VISUAL_EPSILON;
+    const riskChanged = !Number.isFinite(lastThreeTestRisk01) || Math.abs(risk01 - lastThreeTestRisk01) >= THREE_TEST_VISUAL_EPSILON;
+    const modeChanged = lastThreeTestSeasonMode !== threeTestSeasonMode;
+    if (seasonChanged || riskChanged || modeChanged) {
+      threeTestController.setSeasonVisualState({
+        seasonT01,
+        risk01,
+        mode: threeTestSeasonMode,
+        manualSeasonT01: threeTestManualSeasonT01
+      });
+      lastThreeTestSeasonT01 = seasonT01;
+      lastThreeTestRisk01 = risk01;
+      lastThreeTestSeasonMode = threeTestSeasonMode;
+    }
+  } finally {
+    recordPerfSample("3d.climateSync", performance.now() - startedAt);
+  }
 };
 
 if (threeTestStepButton) {
@@ -177,10 +623,48 @@ if (threeTestAutoToggle) {
     updateThreeTestStepUi();
   });
 }
+if (threeTestDebugIgniteButton) {
+  threeTestDebugIgniteButton.addEventListener("click", () => {
+    inputState.debugIgniteMode = !inputState.debugIgniteMode;
+    updateThreeTestDebugIgniteUi();
+    setStatus(
+      state,
+      inputState.debugIgniteMode
+        ? "Debug ignite mode enabled. Click to place a fire."
+        : "Debug ignite mode disabled."
+    );
+  });
+}
 if (threeTestSeason) {
   threeTestSeason.addEventListener("input", () => {
-    const index = updateThreeTestSeasonUi();
-    threeTestController?.setSeason(index);
+    if (!ENABLE_THREE_TEST_SEASONAL_RECOLOR) {
+      return;
+    }
+    const parsed = Number(threeTestSeason.value);
+    if (Number.isFinite(parsed)) {
+      threeTestManualSeasonT01 = clamp01(parsed);
+      if (threeTestSeasonMode === "manual") {
+        syncThreeTestClimateVisuals();
+      } else {
+        updateThreeTestSeasonUi(getClimateSeasonT01(), threeTestSeasonMode);
+      }
+    }
+  });
+}
+if (threeTestSeasonManualToggle) {
+  threeTestSeasonManualToggle.addEventListener("change", () => {
+    if (!ENABLE_THREE_TEST_SEASONAL_RECOLOR) {
+      return;
+    }
+    threeTestSeasonMode = threeTestSeasonManualToggle.checked ? "manual" : "auto";
+    if (threeTestSeason) {
+      const parsed = Number(threeTestSeason.value);
+      if (Number.isFinite(parsed)) {
+        threeTestManualSeasonT01 = clamp01(parsed);
+      }
+    }
+    lastThreeTestSeasonMode = "";
+    syncThreeTestClimateVisuals();
   });
 }
 const handleThreeResize = (): void => {
@@ -191,6 +675,7 @@ const setThreeTestVisible = (visible: boolean): void => {
   if (!threeTestOverlay) {
     return;
   }
+  setRenderMode(visible ? "3d" : "2d");
   threeTestOverlay.classList.toggle("hidden", !visible);
   threeTestOverlay.setAttribute("aria-hidden", visible ? "false" : "true");
 };
@@ -205,11 +690,13 @@ const prepareTerrainPreview = async (config: NewRunConfig, debug?: MapGenDebug):
     if (activeMapSize !== mapSize) {
       activeMapSize = mapSize;
       state.grid = buildGrid(mapSize);
+      syncRenderState(renderState, state.grid);
     }
     resetTerrainCaches();
     resetState(state, seed);
     rng.setState(seed);
     state.paused = true;
+    setFuelProfiles(config.options.fuelProfiles);
     showMapgenOverlay();
     updateMapgenOverlay("Building terrain preview...", 0);
     await generateMap(
@@ -226,16 +713,75 @@ const prepareTerrainPreview = async (config: NewRunConfig, debug?: MapGenDebug):
   }
 };
 
+const preloadThreeTestAssets = async (): Promise<void> => {
+  if (getTreeAssetsCache() && getHouseAssetsCache() && getFirestationAssetCache()) {
+    return;
+  }
+  const startedAt = performance.now();
+  showMapgenOverlay();
+  updateMapgenOverlay("Loading 3D assets...", 0);
+  const tasks: Array<{ label: string; run: () => Promise<unknown> }> = [
+    { label: "trees", run: () => loadTreeAssets() },
+    { label: "houses", run: () => loadHouseAssets() },
+    { label: "firestation", run: () => loadFirestationAsset() }
+  ];
+  let completed = 0;
+  const updateProgress = (label: string): void => {
+    completed += 1;
+    const progress = completed / tasks.length;
+    updateMapgenOverlay(`Loading 3D assets (${label})...`, progress);
+  };
+  try {
+    await Promise.all(
+      tasks.map(async (task) => {
+        try {
+          await task.run();
+        } catch (error) {
+          console.warn(`[threeTest] Failed to preload ${task.label} asset(s).`, error);
+        } finally {
+          updateProgress(task.label);
+        }
+      })
+    );
+  } finally {
+    hideMapgenOverlay();
+    recordPerfSample("3d.assetPreload", performance.now() - startedAt);
+  }
+};
+
 const openThreeTest = async (config: NewRunConfig): Promise<void> => {
   if (!threeTestOverlay || !threeTestCanvas) {
     return;
   }
+  console.info(
+    `[threeTest] opening 3D mode with flags seasonal=${ENABLE_THREE_TEST_SEASONAL_RECOLOR ? 1 : 0} ` +
+      `nosim=${threeTestNoSim ? 1 : 0} noterrain=${threeTestNoTerrainSync ? 1 : 0} dpr=${threeTestDprCap.toFixed(2)}`
+  );
+  await preloadThreeTestAssets();
+  if (savedThreeTestSmokeRate === null) {
+    savedThreeTestSmokeRate = state.simPerf.smokeRate;
+  }
+  state.simPerf.smokeRate = 0;
+  effectsState.smokeParticles.length = 0;
+  effectsState.waterParticles.length = 0;
   if (!threeTestController) {
-    threeTestController = createThreeTest(threeTestCanvas);
+    threeTestController = createThreeTest(threeTestCanvas, asRenderSim(state), inputState);
   }
   if (threeTestController) {
-    threeTestController.setSeason(updateThreeTestSeasonUi());
+    threeTestController.setClimateForecast(null, 0, 0, 0, null);
   }
+  threeTestSeasonMode = "auto";
+  threeTestManualSeasonT01 = getClimateSeasonT01();
+  lastThreeTestSeasonT01 = Number.NaN;
+  lastThreeTestRisk01 = Number.NaN;
+  lastThreeTestSeasonMode = "";
+  lastThreeTestUiSeasonT01 = Number.NaN;
+  lastThreeTestUiSeasonMode = "";
+  lastThreeTestTerrainTypeRevision = -1;
+  lastThreeTestDebugTypeColors = inputState.debugTypeColors;
+  cachedThreeTestTreeTypeMap = null;
+  updateThreeTestSeasonUi(threeTestManualSeasonT01, threeTestSeasonMode);
+  updateThreeTestDebugIgniteUi();
   if (!threeTestStepController) {
     let auto = threeTestAutoToggle ? threeTestAutoToggle.checked : true;
     let resolver: (() => void) | null = null;
@@ -274,54 +820,69 @@ const openThreeTest = async (config: NewRunConfig): Promise<void> => {
     threeTestStepController.setAuto(threeTestAutoToggle.checked);
   }
   updateThreeTestStepUi();
+  const previewDuringMapgen = state.tiles.length === 0;
   setThreeTestVisible(true);
-  threeTestController.start();
   handleThreeResize();
   window.addEventListener("resize", handleThreeResize);
-  const debug: MapGenDebug = {
-    onPhase: async (snapshot: MapGenDebugSnapshot) => {
-      if (threeTestPhaseLabel) {
-        threeTestPhaseLabel.textContent = snapshot.phase;
-      }
-      if (!threeTestController) {
-        return;
-      }
-      threeTestController.setTerrain({
-        cols: state.grid.cols,
-        rows: state.grid.rows,
-        elevations: snapshot.elevations,
-        tileTypes: snapshot.tileTypes,
-        treeTypes: buildTreeTypeMap(),
-        riverMask: snapshot.riverMask,
-        debugTypeColors: state.debugTypeColors,
-        treesEnabled: snapshot.phase === "tiles:classified"
-      });
-    },
-    waitForStep: () => threeTestStepController?.waitForStep() ?? Promise.resolve()
-  };
-  await prepareTerrainPreview(config, debug);
-  syncTileSoA(state);
-  threeTestController.setTerrain({
-    cols: state.grid.cols,
-    rows: state.grid.rows,
-    elevations: state.tileElevation,
-    tileTypes: state.tileTypeId,
-    treeTypes: buildTreeTypeMap(),
-    riverMask: state.tileRiverMask,
-    debugTypeColors: state.debugTypeColors,
-    treesEnabled: true
-  });
+  if (previewDuringMapgen) {
+    threeTestController.start();
+  }
+  if (state.tiles.length === 0) {
+    const debug: MapGenDebug = {
+      onPhase: async (snapshot: MapGenDebugSnapshot) => {
+        if (threeTestPhaseLabel) {
+          threeTestPhaseLabel.textContent = snapshot.phase;
+        }
+        if (!threeTestController) {
+          return;
+        }
+        threeTestController.setPhaseLabel(`Phase: ${snapshot.phase}`);
+        threeTestController.setTerrain({
+          cols: state.grid.cols,
+          rows: state.grid.rows,
+          elevations: snapshot.elevations,
+          tileTypes: snapshot.tileTypes,
+          treeTypes: buildTreeTypeMap(),
+          riverMask: snapshot.riverMask,
+          debugTypeColors: inputState.debugTypeColors,
+          treesEnabled: snapshot.phase === "tiles:classified",
+          worldSeed: state.seed
+        });
+      },
+      waitForStep: () => threeTestStepController?.waitForStep() ?? Promise.resolve()
+    };
+    await prepareTerrainPreview(config, debug);
+    syncTileSoA(state);
+  }
+  syncThreeTestTerrain(true, "initial");
+  if (ENABLE_THREE_TEST_SEASONAL_RECOLOR) {
+    syncThreeTestClimateVisuals();
+  } else {
+    updateThreeTestSeasonUi(threeTestManualSeasonT01, threeTestSeasonMode);
+  }
+  threeTestController.prime();
+  if (!previewDuringMapgen) {
+    threeTestController.start();
+  }
 };
 
 const closeThreeTest = (): void => {
   if (!threeTestOverlay) {
     return;
   }
+  if (savedThreeTestSmokeRate !== null) {
+    state.simPerf.smokeRate = savedThreeTestSmokeRate;
+    savedThreeTestSmokeRate = null;
+  }
   setThreeTestVisible(false);
   threeTestController?.stop();
   window.removeEventListener("resize", handleThreeResize);
   threeTestStepController?.setAuto(true);
   updateThreeTestStepUi();
+  if (phaseUi && threeTestUiListener) {
+    phaseUi.state.off("change", threeTestUiListener);
+    threeTestUiListener = null;
+  }
 };
 
 const refreshThreeTestDebug = (): void => {
@@ -331,17 +892,7 @@ const refreshThreeTestDebug = (): void => {
   if (!threeTestController) {
     return;
   }
-  syncTileSoA(state);
-  threeTestController.setTerrain({
-    cols: state.grid.cols,
-    rows: state.grid.rows,
-    elevations: state.tileElevation,
-    tileTypes: state.tileTypeId,
-    treeTypes: buildTreeTypeMap(),
-    riverMask: state.tileRiverMask,
-    debugTypeColors: state.debugTypeColors,
-    treesEnabled: true
-  });
+  syncThreeTestTerrain(true, "debug");
 };
 
 const resetGame = async (config: NewRunConfig) => {
@@ -351,13 +902,19 @@ const resetGame = async (config: NewRunConfig) => {
   isGenerating = true;
   const { seed, mapSize, characterId, callsign } = config;
   try {
+    resetInputState(inputState);
+    resetEffectsState(effectsState);
+    resetUiState(uiState);
+    persistenceState.scoreSubmitted = false;
     if (activeMapSize !== mapSize) {
       activeMapSize = mapSize;
       state.grid = buildGrid(mapSize);
+      syncRenderState(renderState, state.grid);
     }
     resetTerrainCaches();
     resetState(state, seed);
     state.fireSettings = normalizeFireSettings(config.options.fire);
+    setFuelProfiles(config.options.fuelProfiles);
     state.campaign.characterId = characterId;
     state.campaign.callsign = callsign;
     const baseBudget = getCharacterBaseBudget(state.campaign.characterId, BASE_BUDGET);
@@ -377,13 +934,12 @@ const resetGame = async (config: NewRunConfig) => {
     isGenerating = false;
   }
   seedStartingRoster(state, rng);
-  state.cameraCenter = { x: state.basePoint.x + 0.5, y: state.basePoint.y + 0.5 };
+  renderState.cameraCenter = { x: state.basePoint.x + 0.5, y: state.basePoint.y + 0.5 };
   const maintenanceIndex = PHASES.findIndex((phase) => phase.id === "maintenance");
   state.phaseIndex = maintenanceIndex >= 0 ? maintenanceIndex : 1;
   setPhase(state, rng, "maintenance");
-  state.leaderboardDirty = true;
-  phaseUi?.sync(state);
-  updateOverlay(overlayRefs, state);
+  phaseUi?.sync(state, inputState);
+  updateOverlay(overlayRefs, uiState);
 };
 
 const initialRunConfig: NewRunConfig = {
@@ -392,7 +948,8 @@ const initialRunConfig: NewRunConfig = {
   options: {
     ...DEFAULT_RUN_OPTIONS,
     mapGen: { ...DEFAULT_RUN_OPTIONS.mapGen },
-    fire: { ...DEFAULT_RUN_OPTIONS.fire }
+    fire: { ...DEFAULT_RUN_OPTIONS.fire },
+    fuelProfiles: { ...persistedFuelProfiles }
   },
   characterId: state.campaign.characterId,
   callsign: state.campaign.callsign
@@ -400,6 +957,12 @@ const initialRunConfig: NewRunConfig = {
 
 if (threeTestCloseButton) {
   threeTestCloseButton.addEventListener("click", () => closeThreeTest());
+}
+if (threeTestEndRunButton) {
+  threeTestEndRunButton.addEventListener("click", () => {
+    endGame(state, false, "Run ended from 3D test.");
+    closeThreeTest();
+  });
 }
 if (threeTestOverlay) {
   threeTestOverlay.addEventListener("click", (event) => {
@@ -409,34 +972,67 @@ if (threeTestOverlay) {
   });
 }
 window.addEventListener(DEBUG_TYPE_EVENT, () => refreshThreeTestDebug());
-
-watchCanvasSize();
-
-const persistScoreIfNeeded = () => {
-  if (!state.gameOver || state.scoreSubmitted) {
+document.addEventListener("keydown", (event) => {
+  if (!event.ctrlKey || !event.shiftKey || event.key.toLowerCase() !== "p") {
     return;
   }
-  const callsign = state.campaign.callsign.trim() || "Chief";
-  saveLeaderboard({ name: callsign, score: state.finalScore, seed: state.seed, date: Date.now() });
-  state.scoreSubmitted = true;
-  state.leaderboardDirty = true;
-};
+  event.preventDefault();
+  setPerfOverlayVisible(!perfOverlayVisible);
+});
+
+applyPerfOverlayStyle();
+if (typeof PerformanceObserver !== "undefined" && PerformanceObserver.supportedEntryTypes?.includes("longtask")) {
+  const longTaskObserver = new PerformanceObserver((list) => {
+    const entries = list.getEntries();
+    for (let i = 0; i < entries.length; i += 1) {
+      const entry = entries[i];
+      const duration = Math.max(0, entry.duration || 0);
+      if (duration <= 0) {
+        continue;
+      }
+      longTaskStats.count += 1;
+      longTaskStats.totalMs += duration;
+      longTaskStats.maxMs = Math.max(longTaskStats.maxMs, duration);
+      longTaskStats.lastMs = duration;
+      longTaskStats.lastAt = performance.now();
+      const longTaskEntry = entry as PerformanceEntry & {
+        attribution?: Array<{
+          name?: string;
+          containerType?: string;
+          containerSrc?: string;
+          scriptURL?: string;
+        }>;
+      };
+      const attribution = longTaskEntry.attribution?.[0];
+      const detail =
+        attribution?.scriptURL ||
+        attribution?.containerType ||
+        attribution?.name ||
+        (entry.name && entry.name.length > 0 ? entry.name : "unknown");
+      longTaskStats.lastDetail = (detail || "unknown").slice(0, 72);
+    }
+  });
+  longTaskObserver.observe({ entryTypes: ["longtask"] });
+}
+watchCanvasSize();
 
 const boot = async () => {
   await resetGame(initialRunConfig);
 
   if (!headless) {
     if (phaseUi) {
-      bindPhaseUi(phaseUi, state, rng, canvas, resetGame, openThreeTest, overlayRefs);
+      bindPhaseUi(phaseUi, state, inputState, uiState, renderState, rng, canvas, resetGame, openThreeTest, overlayRefs);
     }
   }
 
+  const baseStep = 0.25;
+
   if (headless) {
     const ticks = 10000;
-    const step = 0.1;
+    const step = baseStep;
     for (let i = 0; i < ticks; i += 1) {
-      stepSim(state, rng, step);
-      phaseUi?.sync(state);
+      stepSim(state, effectsState, rng, step);
+      phaseUi?.sync(state, inputState);
     }
     console.log(`checksum:${computeChecksum(state)}`);
     return;
@@ -444,16 +1040,27 @@ const boot = async () => {
 
   let lastTick = 0;
   let accumulator = 0;
-  const baseStep = 0.1;
-
+  let lastMainRafAt = 0;
   const frame = (now: number) => {
+    const frameStartedAt = performance.now();
+    if (lastMainRafAt > 0) {
+      const rafGapMs = Math.max(0, now - lastMainRafAt);
+      recordPerfSample("main.rafGap", rafGapMs);
+      if (rafGapMs >= MAIN_HITCH_THRESHOLD_MS) {
+        recordPerfSample("main.hitch", rafGapMs);
+      }
+    }
+    lastMainRafAt = now;
     if (!lastTick) {
       lastTick = now;
     }
     const startMenuVisible = startMenu ? !startMenu.classList.contains("hidden") : false;
+    const threeTestVisible = activeRenderMode === "3d" && !!threeTestController;
     if (isGenerating || !characterScreen.classList.contains("hidden") || startMenuVisible || document.hidden) {
       lastTick = now;
       accumulator = 0;
+      recordPerfSample("main.frame", performance.now() - frameStartedAt);
+      maybeUpdatePerfDiagnostics(now);
       requestAnimationFrame(frame);
       return;
     }
@@ -462,15 +1069,64 @@ const boot = async () => {
     accumulator += delta;
     const speedIndex = Math.min(Math.max(state.timeSpeedIndex, 0), TIME_SPEED_OPTIONS.length - 1);
     const simStep = baseStep * (TIME_SPEED_OPTIONS[speedIndex] ?? 1);
-    while (accumulator >= baseStep) {
-      stepSim(state, rng, simStep);
-      accumulator -= baseStep;
+    const maxStepsPerFrame = threeTestVisible ? 1 : 8;
+    let simStepsThisFrame = 0;
+    let simFrameMs = 0;
+    const skipSimThisFrame = threeTestVisible && threeTestNoSim;
+    if (skipSimThisFrame) {
+      accumulator = 0;
+    } else {
+      while (accumulator >= baseStep && simStepsThisFrame < maxStepsPerFrame) {
+        const simStartedAt = performance.now();
+        stepSim(state, effectsState, rng, simStep);
+        simFrameMs += performance.now() - simStartedAt;
+        accumulator -= baseStep;
+        simStepsThisFrame += 1;
+      }
+    }
+    recordPerfSample("sim.frame", simFrameMs);
+    recordPerfSample("sim.steps", simStepsThisFrame);
+    if (simStepsThisFrame > 0) {
+      recordPerfSample("sim.step", simFrameMs / simStepsThisFrame);
+    }
+    if (simStepsThisFrame >= maxStepsPerFrame && accumulator >= baseStep) {
+      // Drop backlog to avoid visible hitch/catch-up bursts in 3D debug view.
+      accumulator = Math.min(accumulator, baseStep);
     }
     const alpha = state.paused || state.gameOver ? 1 : Math.min(1, Math.max(0, accumulator / baseStep));
-    persistScoreIfNeeded();
-    phaseUi?.sync(state);
-    updateOverlay(overlayRefs, state);
-    draw(state, canvas, ctx, alpha);
+    if (threeTestVisible) {
+      const controller = threeTestController;
+      if (state.gameOver) {
+        closeThreeTest();
+      }
+      if (ENABLE_THREE_TEST_SEASONAL_RECOLOR) {
+        syncThreeTestClimateVisuals();
+      }
+      if (controller && state.terrainDirty) {
+        if (threeTestNoTerrainSync) {
+          state.terrainDirty = false;
+          recordPerfSample("3d.terrainDeferred", 0);
+        } else if (controller.isCameraInteracting()) {
+          recordPerfSample("3d.terrainDeferred", 1);
+        } else {
+          syncThreeTestTerrain();
+          recordPerfSample("3d.terrainDeferred", 0);
+        }
+      }
+    }
+    if (!threeTestVisible) {
+      const uiStartedAt = performance.now();
+      phaseUi?.sync(state, inputState);
+      recordPerfSample("2d.ui", performance.now() - uiStartedAt);
+      const overlayStartedAt = performance.now();
+      updateOverlay(overlayRefs, uiState);
+      recordPerfSample("2d.overlay", performance.now() - overlayStartedAt);
+      const drawStartedAt = performance.now();
+      draw(state, renderState, inputState, effectsState, canvas, ctx, alpha);
+      recordPerfSample("2d.draw", performance.now() - drawStartedAt);
+    }
+    recordPerfSample("main.frame", performance.now() - frameStartedAt);
+    maybeUpdatePerfDiagnostics(now);
     requestAnimationFrame(frame);
   };
 

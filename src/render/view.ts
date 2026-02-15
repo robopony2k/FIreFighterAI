@@ -1,5 +1,6 @@
 
 import type { WorldState } from "../core/state.js";
+import type { RenderState } from "./renderState.js";
 import { ISO_TILE_WIDTH, ISO_TILE_HEIGHT } from "../core/config.js";
 import { clamp } from "../core/utils.js";
 
@@ -17,6 +18,7 @@ export const MAX_VISIBLE_TILES = 5200;
  */
 export const getVisibleBounds = (
   state: WorldState,
+  renderState: RenderState,
   canvas: HTMLCanvasElement,
   view: ViewTransform
 ): Bounds => {

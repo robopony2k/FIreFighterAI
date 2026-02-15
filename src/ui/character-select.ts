@@ -1,11 +1,12 @@
 import type { WorldState } from "../core/state.js";
 import { CHARACTERS, getCharacterInitials } from "../core/characters.js";
 import type { CharacterId, CharacterDefinition } from "../core/characters.js";
-import type { MapSizeId } from "../core/config.js";
-import type { FireSettings } from "../core/types.js";
+import { FUEL_PROFILES, type MapSizeId } from "../core/config.js";
+import type { FireSettings, FuelProfile, TileType } from "../core/types.js";
 import { DEFAULT_MAP_SIZE, DEFAULT_RUN_OPTIONS, DEFAULT_RUN_SEED, normalizeFireSettings } from "./run-config.js";
-import type { NewRunConfig, RunOptions } from "./run-config.js";
+import type { FuelProfileOverrides, NewRunConfig, RunOptions } from "./run-config.js";
 import type { MapGenSettings } from "../mapgen/settings.js";
+import { loadFuelProfileOverrides, saveFuelProfileOverrides } from "../persistence/fuelProfiles.js";
 export type CharacterSelectRefs = {
   characterScreen: HTMLDivElement;
   characterGrid: HTMLDivElement;
@@ -21,6 +22,7 @@ export type CharacterSelectRefs = {
   runUnlimitedMoney: HTMLInputElement;
   mapGenInputs: HTMLInputElement[];
   fireInputs: HTMLInputElement[];
+  fuelProfileGrid: HTMLDivElement;
 };
 
 const formatPercent = (value: number): string => {
@@ -41,6 +43,49 @@ const buildStats = (character: CharacterDefinition): string[] => [
   `Firebreak Cost ${formatMultiplier(character.modifiers.firebreakCostMultiplier)}`,
   `Approval Retention ${formatMultiplier(character.modifiers.approvalRetentionMultiplier)}`
 ];
+
+const FUEL_PROFILE_FIELDS: { key: keyof FuelProfile; label: string; step: string }[] = [
+  { key: "baseFuel", label: "Base fuel", step: "0.01" },
+  { key: "ignition", label: "Ignition point", step: "0.01" },
+  { key: "burnRate", label: "Burn rate", step: "0.01" },
+  { key: "heatOutput", label: "Heat output", step: "0.01" },
+  { key: "spreadBoost", label: "Spread boost", step: "0.01" },
+  { key: "heatTransferCap", label: "Heat transfer cap", step: "0.01" },
+  { key: "heatRetention", label: "Heat retention", step: "0.01" },
+  { key: "windFactor", label: "Wind factor", step: "0.01" }
+];
+
+const FUEL_PROFILE_TYPES = Object.keys(FUEL_PROFILES) as TileType[];
+
+const formatTileTypeLabel = (type: TileType): string => type.charAt(0).toUpperCase() + type.slice(1);
+
+const buildFuelProfiles = (overrides: FuelProfileOverrides): Record<TileType, FuelProfile> => {
+  const result = {} as Record<TileType, FuelProfile>;
+  for (const type of FUEL_PROFILE_TYPES) {
+    const base = FUEL_PROFILES[type];
+    result[type] = { ...base, ...(overrides[type] ?? {}) };
+  }
+  return result;
+};
+
+const buildFuelProfileOverrides = (profiles: Record<TileType, FuelProfile>): FuelProfileOverrides => {
+  const overrides: FuelProfileOverrides = {};
+  for (const type of FUEL_PROFILE_TYPES) {
+    const base = FUEL_PROFILES[type];
+    const profile = profiles[type];
+    const delta: Partial<FuelProfile> = {};
+    for (const field of FUEL_PROFILE_FIELDS) {
+      const key = field.key;
+      if (Math.abs(profile[key] - base[key]) > 1e-6) {
+        delta[key] = profile[key];
+      }
+    }
+    if (Object.keys(delta).length > 0) {
+      overrides[type] = delta;
+    }
+  }
+  return overrides;
+};
 
 const FIRST_NAMES = [
   "Alex",
@@ -104,6 +149,9 @@ export function initCharacterSelect(
   onConfirm: (config: NewRunConfig) => void | Promise<void>
 ): { open: (config: NewRunConfig) => void; getCurrentConfig: () => NewRunConfig } {
   let selectedId: CharacterId = state.campaign.characterId;
+  let fuelProfileOverrides = loadFuelProfileOverrides();
+  let fuelProfiles = buildFuelProfiles(fuelProfileOverrides);
+  const fuelProfileInputs: HTMLInputElement[] = [];
   const cards = new Map<CharacterId, HTMLButtonElement>();
 
   ui.characterGrid.innerHTML = "";
@@ -325,11 +373,102 @@ export function initCharacterSelect(
     });
   };
 
+  const handleFuelProfileInput = (event: Event): void => {
+    const input = event.target as HTMLInputElement | null;
+    if (!input) {
+      return;
+    }
+    const type = input.dataset.fuelType as TileType | undefined;
+    const key = input.dataset.fuelKey as keyof FuelProfile | undefined;
+    if (!type || !key) {
+      return;
+    }
+    if (input.value.trim().length === 0) {
+      return;
+    }
+    const value = Number(input.value);
+    if (!Number.isFinite(value)) {
+      return;
+    }
+    fuelProfiles[type] = { ...fuelProfiles[type], [key]: value };
+    fuelProfileOverrides = buildFuelProfileOverrides(fuelProfiles);
+    saveFuelProfileOverrides(fuelProfileOverrides);
+  };
+
+  const syncFuelProfileInputs = (): void => {
+    fuelProfileInputs.forEach((input) => {
+      const type = input.dataset.fuelType as TileType | undefined;
+      const key = input.dataset.fuelKey as keyof FuelProfile | undefined;
+      if (!type || !key) {
+        return;
+      }
+      const value = fuelProfiles[type]?.[key];
+      if (Number.isFinite(value)) {
+        input.value = value.toFixed(2);
+      }
+    });
+  };
+
+  const buildFuelProfileGrid = (): void => {
+    if (!ui.fuelProfileGrid) {
+      return;
+    }
+    fuelProfileInputs.length = 0;
+    ui.fuelProfileGrid.innerHTML = "";
+    const headerLabels = ["Tile", ...FUEL_PROFILE_FIELDS.map((field) => field.label)];
+    headerLabels.forEach((label) => {
+      const cell = document.createElement("div");
+      cell.className = "fuel-grid-cell fuel-grid-head";
+      cell.textContent = label;
+      ui.fuelProfileGrid.appendChild(cell);
+    });
+
+    for (const type of FUEL_PROFILE_TYPES) {
+      const typeCell = document.createElement("div");
+      typeCell.className = "fuel-grid-cell fuel-grid-type";
+      const swatch = document.createElement("span");
+      swatch.className = "fuel-grid-swatch";
+      swatch.dataset.type = type;
+      const label = document.createElement("span");
+      label.textContent = formatTileTypeLabel(type);
+      typeCell.appendChild(swatch);
+      typeCell.appendChild(label);
+      ui.fuelProfileGrid.appendChild(typeCell);
+
+      for (const field of FUEL_PROFILE_FIELDS) {
+        const cell = document.createElement("div");
+        cell.className = "fuel-grid-cell";
+        const input = document.createElement("input");
+        input.type = "number";
+        input.min = "0";
+        input.step = field.step;
+        const value = fuelProfiles[type][field.key];
+        input.value = Number.isFinite(value) ? value.toFixed(2) : "0";
+        input.dataset.fuelType = type;
+        input.dataset.fuelKey = field.key;
+        input.addEventListener("input", handleFuelProfileInput);
+        cell.appendChild(input);
+        ui.fuelProfileGrid.appendChild(cell);
+        fuelProfileInputs.push(input);
+      }
+    }
+  };
+
+  const applyFuelProfileOverrides = (overrides?: FuelProfileOverrides): void => {
+    if (overrides !== undefined) {
+      fuelProfileOverrides = overrides;
+    }
+    fuelProfiles = buildFuelProfiles(fuelProfileOverrides);
+    syncFuelProfileInputs();
+    saveFuelProfileOverrides(fuelProfileOverrides);
+  };
+
   const getRunOptions = (): RunOptions => ({
     ...DEFAULT_RUN_OPTIONS,
     unlimitedMoney: ui.runUnlimitedMoney.checked,
     mapGen: getMapGenSettings(),
-    fire: getFireSettings()
+    fire: getFireSettings(),
+    fuelProfiles: fuelProfileOverrides
   });
 
   ui.characterNameInput.value = state.campaign.callsign;
@@ -353,6 +492,8 @@ export function initCharacterSelect(
   });
   applyMapGenSettings(DEFAULT_RUN_OPTIONS.mapGen);
   applyFireSettings(DEFAULT_RUN_OPTIONS.fire);
+  buildFuelProfileGrid();
+  applyFuelProfileOverrides(fuelProfileOverrides);
 
   updateSelection();
   updateConfirmState();
@@ -405,6 +546,9 @@ export function initCharacterSelect(
     ui.runUnlimitedMoney.checked = config.options.unlimitedMoney;
     applyMapGenSettings(config.options.mapGen ?? DEFAULT_RUN_OPTIONS.mapGen);
     applyFireSettings(config.options.fire ?? DEFAULT_RUN_OPTIONS.fire);
+    const requestedOverrides = config.options.fuelProfiles;
+    const hasOverrides = requestedOverrides && Object.keys(requestedOverrides).length > 0;
+    applyFuelProfileOverrides(hasOverrides ? requestedOverrides : undefined);
     setActiveTab("roster");
     if (ui.characterNameInput.value.trim().length === 0) {
       applyRandomName();

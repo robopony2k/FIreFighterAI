@@ -1,0 +1,5562 @@
+import * as THREE from "three";
+import {
+  DEBUG_TERRAIN_RENDER,
+  ENABLE_GRASS_DETAIL_FX,
+  HEIGHT_MAP_RATIO,
+  HEIGHT_SCALE,
+  TILE_COLOR_RGB,
+  TILE_SIZE
+} from "../core/config.js";
+import { HOUSE_VARIANTS } from "../core/buildingFootprints.js";
+import { TILE_ID_TO_TYPE, TILE_TYPE_IDS } from "../core/state.js";
+import { TreeType, TREE_TYPE_IDS } from "../core/types.js";
+import type { WorldState } from "../core/state.js";
+import type { FirestationAsset, HouseAssets, HouseVariant, TreeAssets, TreeMeshTemplate, TreeVariant } from "./threeTestAssets.js";
+import { TREE_MODEL_PATHS } from "./threeTestAssets.js";
+import { applyGrassDetailFx } from "./grassDetailFx.js";
+
+export type TerrainSample = {
+  cols: number;
+  rows: number;
+  elevations: Float32Array;
+  tileTypes?: Uint8Array;
+  treeTypes?: Uint8Array;
+  tileFuel?: Float32Array;
+  tileMoisture?: Float32Array;
+  riverMask?: Uint8Array;
+  riverBed?: Float32Array;
+  riverSurface?: Float32Array;
+  riverStepStrength?: Float32Array;
+  climateDryness?: number;
+  debugTypeColors?: boolean;
+  treesEnabled?: boolean;
+  fastUpdate?: boolean;
+  fullResolution?: boolean;
+  worldSeed?: number;
+};
+
+export type TreeSeasonVisualConfig = {
+  enabled: boolean;
+  uniforms: {
+    uRisk01: { value: number };
+    uSeasonT01: { value: number };
+    uWorldSeed: { value: number };
+  };
+  phaseShiftMax: number;
+  rateJitter: number;
+  autumnHueJitter: number;
+};
+
+type RGB = { r: number; g: number; b: number };
+
+const clamp = (value: number, min: number, max: number): number => Math.min(max, Math.max(min, value));
+const mixRgb = (a: RGB, b: RGB, t: number): RGB => ({
+  r: a.r + (b.r - a.r) * t,
+  g: a.g + (b.g - a.g) * t,
+  b: a.b + (b.b - a.b) * t
+});
+const lighten = (color: RGB, amount: number): RGB => mixRgb(color, { r: 255, g: 255, b: 255 }, clamp(amount, 0, 1));
+const darken = (color: RGB, amount: number): RGB => mixRgb(color, { r: 0, g: 0, b: 0 }, clamp(amount, 0, 1));
+
+const TERRAIN_HEIGHT_EXAGGERATION = 1.35;
+const HEIGHT_SAMPLE_PEAK_WEIGHT = 0.65;
+const WATER_ALPHA_MIN_RATIO = 0.1;
+const OCEAN_RATIO_MIN = 0.1;
+const RIVER_RATIO_MIN = 0.2;
+const OCEAN_SAMPLE_SUPPORT_FLOOR = 0.12;
+const WATER_ALPHA_POWER = 0.85;
+const SHORE_SDF_MAX_DISTANCE = 7;
+const RIVER_BANK_MAX_DISTANCE = 5;
+const WATERFALL_MAX_INSTANCES = 64;
+const WATERFALL_MIN_DROP_NORM = 0.006;
+const WATERFALL_MIN_RIVER_RATIO = 0.38;
+const WATERFALL_MAX_DROP = 1.6;
+const WATERFALL_MAX_OCEAN_RATIO = 0.08;
+const WATERFALL_MIN_STEP_STRENGTH = 0.16;
+const WATER_SURFACE_LIFT_OCEAN = 0.08;
+const WATER_SURFACE_LIFT_RIVER = 0.012;
+const RIVER_SURFACE_BANK_CLEARANCE = 0.02;
+const RIVER_MIN_DEPTH_NORM = 0.006;
+const WATERFALL_TOP_OFFSET = 0.04;
+const WATERFALL_DROP_PADDING = 0.05;
+const RIVER_STEP_BLEND_BLOCK_THRESHOLD = 0.26;
+const RIVER_MIN_VISUAL_WIDTH_CELLS = 1.35;
+const RIVER_DIAGONAL_FILL_MAX_ADDS_PER_CELL = 1;
+const RIVER_WIDTH_EXPAND_MAX_PASSES = 1;
+const BANK_INSET = 0.01;
+const WALL_MIN_HEIGHT = 0.02;
+const WALL_RISE_GUARD = 0.001;
+const WALL_BANK_OVERLAP = 0.012;
+const STEP_ROCKY_TINT_MAX = 0.28;
+const TREE_SCALE_BASE = 0.75;
+const TREE_SCALE_STEP_GAIN = 0.06;
+const TREE_SCALE_STEP_CAP = 0.4;
+const TREE_HEIGHT_FACTOR = 1.8;
+const SCRUB_PLACEHOLDER_BASE_CHANCE = 0.42;
+const SCRUB_PLACEHOLDER_MAX_INSTANCES = 30000;
+const SCRUB_PLACEHOLDER_SCALE_MIN = 0.55;
+const SCRUB_PLACEHOLDER_SCALE_MAX = 0.95;
+const TREE_BURN_UPDATE_INTERVAL_MS = 120;
+const TREE_BURN_FUEL_EPS = 0.02;
+const TREE_BURN_FIRE_BOUNDS_PADDING = 2;
+const TREE_BURN_VISIBLE_EPS = 0.004;
+const TREE_BURN_PROGRESS_PER_SECOND = 0.22;
+const TREE_BURN_RECOVERY_PER_SECOND = 0.08;
+const TREE_BURN_POST_FIRE_TAIL_MS = 8000;
+const TREE_BURN_ACTIVE_FIRE_EPS = 0.015;
+const TREE_BURN_ACTIVE_HEAT_EPS = 0.12;
+const TREE_BURN_VISUAL_EPS = 0.06;
+const TREE_BURN_LEAF_PIVOT_HEIGHT_FACTOR = 0.72;
+const TREE_BURN_MIXED_PIVOT_HEIGHT_FACTOR = 0.46;
+const TREE_BURN_TRUNK_PIVOT_HEIGHT_FACTOR = 0.06;
+const TREE_LEAF_DROP_BIAS_MAX = 0.22;
+export const ROAD_SURFACE_WIDTH = 0.5;
+const ROAD_SURFACE_OFFSET = 0.001;
+export const ROAD_TEX_SCALE = 12;
+const ROAD_TEX_MAX_SIZE = 4096;
+const ROAD_ATLAS_PATH = "assets/textures/ROAD_TILES.png";
+const ROAD_ATLAS_TILE_SIZE = 64;
+let roadOverlayMaxSize = ROAD_TEX_MAX_SIZE;
+
+export const setRoadOverlayMaxSize = (size: number): void => {
+  const safe = Math.max(256, Math.floor(size));
+  roadOverlayMaxSize = safe;
+};
+const SUN_DIR = (() => {
+  const x = 0.55;
+  const y = 0.78;
+  const z = 0.32;
+  const len = Math.hypot(x, y, z) || 1;
+  return { x: x / len, y: y / len, z: z / len };
+})();
+
+const FOREST_TONE_BASE = TILE_COLOR_RGB.forest;
+const FOREST_CANOPY_TONES: Record<TreeType, RGB> = {
+  [TreeType.Pine]: darken(mixRgb(FOREST_TONE_BASE, { r: 48, g: 80, b: 64 }, 0.35), 0.08),
+  [TreeType.Oak]: mixRgb(FOREST_TONE_BASE, { r: 110, g: 118, b: 58 }, 0.35),
+  [TreeType.Maple]: mixRgb(FOREST_TONE_BASE, { r: 120, g: 92, b: 62 }, 0.32),
+  [TreeType.Birch]: lighten(mixRgb(FOREST_TONE_BASE, { r: 148, g: 152, b: 98 }, 0.42), 0.05),
+  [TreeType.Elm]: mixRgb(FOREST_TONE_BASE, { r: 72, g: 122, b: 86 }, 0.3),
+  [TreeType.Scrub]: mixRgb(FOREST_TONE_BASE, TILE_COLOR_RGB.scrub, 0.5)
+};
+const FOREST_TINT_BY_ID: RGB[] = [];
+FOREST_TINT_BY_ID[TREE_TYPE_IDS[TreeType.Pine]] = FOREST_CANOPY_TONES[TreeType.Pine];
+FOREST_TINT_BY_ID[TREE_TYPE_IDS[TreeType.Oak]] = FOREST_CANOPY_TONES[TreeType.Oak];
+FOREST_TINT_BY_ID[TREE_TYPE_IDS[TreeType.Maple]] = FOREST_CANOPY_TONES[TreeType.Maple];
+FOREST_TINT_BY_ID[TREE_TYPE_IDS[TreeType.Birch]] = FOREST_CANOPY_TONES[TreeType.Birch];
+FOREST_TINT_BY_ID[TREE_TYPE_IDS[TreeType.Elm]] = FOREST_CANOPY_TONES[TreeType.Elm];
+FOREST_TINT_BY_ID[TREE_TYPE_IDS[TreeType.Scrub]] = FOREST_CANOPY_TONES[TreeType.Scrub];
+const DRY_TINT_BY_TILE: Record<number, [number, number, number]> = {
+  [TILE_TYPE_IDS.grass]: [0.72, 0.62, 0.34],
+  [TILE_TYPE_IDS.scrub]: [0.68, 0.58, 0.32],
+  [TILE_TYPE_IDS.floodplain]: [0.66, 0.61, 0.42],
+  [TILE_TYPE_IDS.forest]: [0.48, 0.44, 0.28]
+};
+const WET_TINT_BY_TILE: Record<number, [number, number, number]> = {
+  [TILE_TYPE_IDS.grass]: [0.38, 0.56, 0.32],
+  [TILE_TYPE_IDS.scrub]: [0.42, 0.53, 0.33],
+  [TILE_TYPE_IDS.floodplain]: [0.48, 0.6, 0.4],
+  [TILE_TYPE_IDS.forest]: [0.33, 0.46, 0.31]
+};
+
+let threeTestLoggedTotal = -1;
+
+type TreeInstance = {
+  x: number;
+  y: number;
+  z: number;
+  scale: number;
+  rotation: number;
+  treeType: TreeType;
+  variantIndex: number;
+  tileIndex: number;
+  tileX: number;
+  tileY: number;
+};
+
+type ScrubPlaceholderInstance = {
+  x: number;
+  y: number;
+  z: number;
+  scale: number;
+  rotation: number;
+  colorJitter: number;
+};
+
+type TreeBurnMeshRole = "leaf" | "trunk" | "mixed";
+
+type TreeBurnMeshState = {
+  mesh: THREE.InstancedMesh;
+  role: TreeBurnMeshRole;
+  baseMatrix: THREE.Matrix4;
+  tileIndices: Uint32Array;
+  tileX: Uint16Array;
+  tileY: Uint16Array;
+  baseX: Float32Array;
+  baseY: Float32Array;
+  baseZ: Float32Array;
+  baseRotation: Float32Array;
+  baseScale: Float32Array;
+  scalePivotY: Float32Array;
+  fuelReference: Float32Array;
+  burnProgress: Float32Array;
+  burnQ: Uint8Array;
+  visibilityQ: Uint8Array;
+  cropTopAttr: THREE.InstancedBufferAttribute | null;
+  cropMinY: number;
+  cropMaxY: number;
+};
+
+export type TreeFlameProfile = {
+  x: number;
+  y: number;
+  z: number;
+  crownHeight: number;
+  crownRadius: number;
+  trunkHeight: number;
+  treeCount: number;
+};
+
+export type TreeBurnController = {
+  update: (timeMs: number, world: WorldState) => void;
+  getTileBurnVisual: (tileIndex: number) => number;
+  getTileBurnProgress: (tileIndex: number) => number;
+  getTileAnchor: (tileIndex: number) => { x: number; y: number; z: number } | null;
+  getTileFlameProfile: (tileIndex: number) => TreeFlameProfile | null;
+  getVisualBounds: () => { minX: number; maxX: number; minY: number; maxY: number } | null;
+};
+
+export type OceanWaterData = {
+  mask: THREE.DataTexture;
+  supportMap: THREE.DataTexture;
+  domainMap: THREE.DataTexture;
+  shoreSdf: THREE.DataTexture;
+  flowMap: THREE.DataTexture;
+  rapidMap: THREE.DataTexture;
+  // World-space base Y for the water mesh.
+  level: number;
+  sampleCols: number;
+  sampleRows: number;
+  width: number;
+  depth: number;
+  // World-space Y offsets relative to `level`.
+  heights?: Float32Array;
+};
+
+export type RiverWaterData = {
+  positions: Float32Array;
+  uvs: Float32Array;
+  indices: Uint32Array;
+  wallPositions?: Float32Array;
+  wallUvs?: Float32Array;
+  wallIndices?: Uint32Array;
+  bankDist: Float32Array;
+  flowDir: Float32Array;
+  rapid: Float32Array;
+  supportMap: THREE.DataTexture;
+  flowMap: THREE.DataTexture;
+  rapidMap: THREE.DataTexture;
+  riverBankMap: THREE.DataTexture;
+  waterfallInfluenceMap: THREE.DataTexture;
+  level: number;
+  cols: number;
+  rows: number;
+  width: number;
+  depth: number;
+  debugRiverDomainStats?: RiverDomainDebugStats;
+};
+
+export type TerrainWaterData = {
+  ocean: OceanWaterData;
+  river?: RiverWaterData;
+  // Packed x,z,top,drop,dirX,dirZ,width; top/drop are world-space offsets relative to `level`.
+  waterfallInstances?: Float32Array;
+};
+
+type HouseSpot = {
+  x: number;
+  y: number;
+  z: number;
+  footprintX: number;
+  footprintZ: number;
+  rotation: number;
+  seed: number;
+  groundMin: number;
+  groundMax: number;
+  variantKey: string | null;
+  variantSource: string | null;
+};
+
+type WaterComponent = {
+  indices: number[];
+  min: number;
+};
+
+type WaterfallCandidate = {
+  sampleCol: number;
+  sampleRow: number;
+  x: number;
+  z: number;
+  top: number;
+  drop: number;
+  dirX: number;
+  dirZ: number;
+  width: number;
+};
+
+type RiverContourVertex = {
+  x: number;
+  y: number;
+};
+
+type RiverContourEdge = {
+  ax: number;
+  ay: number;
+  bx: number;
+  by: number;
+};
+
+type RiverContourPolygon = RiverContourVertex[];
+
+type RiverDomainDebugStats = {
+  baseCount: number;
+  renderCount: number;
+  contourVertexCount: number;
+  contourTriangleCount: number;
+  boundaryEdgeCount: number;
+  wallQuadCount: number;
+  protrudingVertexRatio: number;
+};
+
+type RiverRenderDomain = {
+  cols: number;
+  rows: number;
+  baseSupport: Uint8Array;
+  renderSupport: Uint8Array;
+  vertexField: Float32Array;
+  contourVertices: Float32Array;
+  contourIndices: Uint32Array;
+  boundaryEdges: Float32Array;
+  distanceToBank: Int16Array;
+  debugStats?: RiverDomainDebugStats;
+};
+
+type WaterSampleRatios = {
+  water: Float32Array;
+  ocean: Float32Array;
+  river: Float32Array;
+};
+
+type SampleFloatReducer = "mean" | "min" | "max";
+
+type RoadAtlas = {
+  canvas: HTMLCanvasElement;
+  tileSize: number;
+  tileStride: number;
+  cols: number;
+  rows: number;
+};
+
+let roadAtlasCache: RoadAtlas | null = null;
+let roadAtlasLoading = false;
+let roadAtlasVersion = 0;
+
+export const getRoadAtlasVersion = (): number => roadAtlasVersion;
+
+const ensureRoadAtlas = (): void => {
+  if (roadAtlasCache || roadAtlasLoading) {
+    return;
+  }
+  if (typeof document === "undefined") {
+    return;
+  }
+  roadAtlasLoading = true;
+  const image = new Image();
+  image.src = ROAD_ATLAS_PATH;
+  image.onload = () => {
+    const width = Math.max(1, image.width);
+    const height = Math.max(1, image.height);
+    const tileSize = ROAD_ATLAS_TILE_SIZE;
+    let tileStride = tileSize;
+    if (width % tileSize !== 0 || height % tileSize !== 0) {
+      const strideWithGap = tileSize + 1;
+      if (width % strideWithGap === 0 && height % strideWithGap === 0) {
+        tileStride = strideWithGap;
+      }
+    }
+    const gap = Math.max(0, tileStride - tileSize);
+    const cols = Math.max(1, Math.floor((width + gap) / tileStride));
+    const rows = Math.max(1, Math.floor((height + gap) / tileStride));
+    const canvas = document.createElement("canvas");
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) {
+      roadAtlasLoading = false;
+      return;
+    }
+    ctx.drawImage(image, 0, 0);
+    const imageData = ctx.getImageData(0, 0, width, height);
+    const data = imageData.data;
+    for (let i = 0; i < data.length; i += 4) {
+      const r = data[i];
+      const g = data[i + 1];
+      const b = data[i + 2];
+      const isGridRed = r > 200 && g < 60 && b < 60;
+      const isGridBlue = b > 200 && r < 60 && g < 60;
+      const isDark = r < 10 && g < 10 && b < 10;
+      if (isGridRed || isGridBlue || isDark) {
+        data[i + 3] = 0;
+      }
+    }
+    ctx.putImageData(imageData, 0, 0);
+    roadAtlasCache = { canvas, tileSize, tileStride, cols, rows };
+    roadAtlasVersion += 1;
+    roadAtlasLoading = false;
+  };
+  image.onerror = () => {
+    roadAtlasLoading = false;
+  };
+};
+
+const getRoadAtlas = (): RoadAtlas | null => {
+  ensureRoadAtlas();
+  return roadAtlasCache;
+};
+
+const smoothstep = (edge0: number, edge1: number, x: number): number => {
+  if (edge0 === edge1) {
+    return x < edge0 ? 0 : 1;
+  }
+  const t = clamp((x - edge0) / (edge1 - edge0), 0, 1);
+  return t * t * (3 - 2 * t);
+};
+
+const getTreeBurnRole = (material: THREE.Material | THREE.Material[]): TreeBurnMeshRole => {
+  const materials = Array.isArray(material) ? material : [material];
+  let leafCount = 0;
+  materials.forEach((mat) => {
+    if ((mat as THREE.Material & { userData?: Record<string, unknown> }).userData?.treeLeafHint === true) {
+      leafCount += 1;
+    }
+  });
+  if (leafCount <= 0) {
+    return "trunk";
+  }
+  if (leafCount >= materials.length) {
+    return "leaf";
+  }
+  return "mixed";
+};
+
+const applyTrunkTopCropShader = (material: THREE.Material | THREE.Material[]): void => {
+  const materials = Array.isArray(material) ? material : [material];
+  materials.forEach((mat) => {
+    const standard = mat as THREE.MeshStandardMaterial & { userData?: Record<string, unknown> };
+    if (!(standard instanceof THREE.MeshStandardMaterial)) {
+      return;
+    }
+    if (!standard.userData) {
+      standard.userData = {};
+    }
+    if (standard.userData.treeTrunkTopCropPatched) {
+      return;
+    }
+    const priorOnBeforeCompile = standard.onBeforeCompile;
+    standard.onBeforeCompile = (shader, renderer) => {
+      if (priorOnBeforeCompile) {
+        priorOnBeforeCompile(shader, renderer);
+      }
+      shader.vertexShader =
+        `attribute float aCropTop;\n` +
+        `varying float vCropTop;\n` +
+        `varying float vCropLocalY;\n` +
+        shader.vertexShader;
+      shader.vertexShader = shader.vertexShader.replace(
+        "#include <begin_vertex>",
+        `#include <begin_vertex>\n` + `vCropTop = aCropTop;\n` + `vCropLocalY = transformed.y;`
+      );
+      shader.fragmentShader =
+        `varying float vCropTop;\n` + `varying float vCropLocalY;\n` + shader.fragmentShader;
+      shader.fragmentShader = shader.fragmentShader.replace(
+        "void main() {",
+        `void main() {\n` + `  if (vCropLocalY > vCropTop) discard;`
+      );
+    };
+    standard.userData.treeTrunkTopCropPatched = true;
+    standard.needsUpdate = true;
+  });
+};
+
+const getDeciduousStrength = (treeType: TreeType): number => {
+  if (treeType === TreeType.Pine) {
+    return 0;
+  }
+  if (treeType === TreeType.Scrub) {
+    return 0.45;
+  }
+  return 1;
+};
+
+const applyTreeSeasonShader = (
+  material: THREE.Material | THREE.Material[],
+  seasonVisual: TreeSeasonVisualConfig | null,
+  treeType: TreeType
+): void => {
+  if (!seasonVisual || !seasonVisual.enabled) {
+    return;
+  }
+  const materials = Array.isArray(material) ? material : [material];
+  const deciduousStrength = getDeciduousStrength(treeType);
+  materials.forEach((mat) => {
+    const standard = mat as THREE.MeshStandardMaterial & { userData?: Record<string, unknown> };
+    if (!(standard instanceof THREE.MeshStandardMaterial)) {
+      return;
+    }
+    if (!standard.userData) {
+      standard.userData = {};
+    }
+    if (standard.userData.treeSeasonPatched) {
+      return;
+    }
+    const isLeafMaterial = standard.userData.treeLeafHint === true;
+    if (isLeafMaterial && deciduousStrength > 0.01) {
+      standard.transparent = true;
+    }
+    const priorOnBeforeCompile = standard.onBeforeCompile;
+    standard.onBeforeCompile = (shader, renderer) => {
+      if (priorOnBeforeCompile) {
+        priorOnBeforeCompile(shader, renderer);
+      }
+      shader.uniforms.uRisk01 = seasonVisual.uniforms.uRisk01;
+      shader.uniforms.uSeasonT01 = seasonVisual.uniforms.uSeasonT01;
+      shader.vertexShader =
+        `attribute float aSeasonPhaseOffset;\n` +
+        `attribute float aSeasonRateJitter;\n` +
+        `attribute float aLeafDropBias;\n` +
+        `attribute float aAutumnHueBias;\n` +
+        `varying float vTreeSeasonT;\n` +
+        `varying float vLeafDropBias;\n` +
+        `varying float vAutumnHueBias;\n` +
+        `uniform float uSeasonT01;\n` +
+        shader.vertexShader;
+      shader.vertexShader = shader.vertexShader.replace(
+        "#include <begin_vertex>",
+        [
+          "#include <begin_vertex>",
+          "vTreeSeasonT = fract(uSeasonT01 * (1.0 + aSeasonRateJitter) + aSeasonPhaseOffset);",
+          "vLeafDropBias = aLeafDropBias;",
+          "vAutumnHueBias = aAutumnHueBias;"
+        ].join("\n")
+      );
+      shader.fragmentShader =
+        `uniform float uRisk01;\n` +
+        `varying float vTreeSeasonT;\n` +
+        `varying float vLeafDropBias;\n` +
+        `varying float vAutumnHueBias;\n` +
+        shader.fragmentShader;
+      shader.fragmentShader = shader.fragmentShader.replace(
+        "#include <color_fragment>",
+        [
+          "#include <color_fragment>",
+          "float seasonT = fract(vTreeSeasonT);",
+          "float risk = clamp(uRisk01, 0.0, 1.0);",
+          "float autumn = smoothstep(0.62, 0.70, seasonT) * (1.0 - smoothstep(0.90, 0.98, seasonT));",
+          "float winterA = 1.0 - smoothstep(0.08, 0.18, seasonT);",
+          "float winterB = smoothstep(0.88, 0.96, seasonT);",
+          "float winter = clamp(winterA + winterB, 0.0, 1.0);",
+          "float spring = smoothstep(0.18, 0.28, seasonT) * (1.0 - smoothstep(0.42, 0.52, seasonT));",
+          "vec3 riskTint = vec3(0.77, 0.64, 0.40);",
+          "diffuseColor.rgb = mix(diffuseColor.rgb, riskTint, risk * 0.24);",
+          "vec3 autumnGold = vec3(0.90, 0.68, 0.31);",
+          "vec3 autumnRust = vec3(0.73, 0.39, 0.22);",
+          "vec3 autumnTint = mix(autumnGold, autumnRust, clamp(0.5 + vAutumnHueBias * 0.5, 0.0, 1.0));",
+          "diffuseColor.rgb = mix(diffuseColor.rgb, autumnTint, autumn * 0.30);",
+          "float luma = dot(diffuseColor.rgb, vec3(0.299, 0.587, 0.114));",
+          "vec3 winterTint = vec3(luma * 0.95, luma * 0.97, luma * 1.01);",
+          "diffuseColor.rgb = mix(diffuseColor.rgb, winterTint, winter * 0.36);",
+          "diffuseColor.rgb *= 1.0 + spring * 0.06;"
+        ].join("\n")
+      );
+      if (isLeafMaterial && deciduousStrength > 0.01) {
+        shader.fragmentShader = shader.fragmentShader.replace(
+          "#include <dithering_fragment>",
+          [
+            "float dropStart = 0.72 + vLeafDropBias * 0.12;",
+            "float dropEnd = 0.98 + vLeafDropBias * 0.12;",
+            "float leafDrop = smoothstep(dropStart, dropEnd, seasonT);",
+            `float leafPresence = clamp(1.0 - leafDrop * ${deciduousStrength.toFixed(4)}, 0.06, 1.0);`,
+            "diffuseColor.a *= leafPresence;",
+            "#include <dithering_fragment>"
+          ].join("\n")
+        );
+      }
+    };
+    standard.userData.treeSeasonPatched = true;
+    standard.needsUpdate = true;
+  });
+};
+
+const createTreeBurnController = (
+  meshStates: TreeBurnMeshState[],
+  ashId: number,
+  tileProfiles: Map<number, TreeFlameProfile>
+): TreeBurnController => {
+  const dummy = new THREE.Object3D();
+  const tempMatrix = new THREE.Matrix4();
+  const tempColor = new THREE.Color(1, 1, 1);
+  const whiteTint = new THREE.Color(1, 1, 1);
+  const leafScorchTint = new THREE.Color(1.08, 0.79, 0.45);
+  const leafCharTint = new THREE.Color(0.2, 0.19, 0.18);
+  const trunkScorchTint = new THREE.Color(1.02, 0.66, 0.43);
+  const trunkCharTint = new THREE.Color(0.26, 0.24, 0.22);
+  let lastUpdateMs = 0;
+  let postFireTailUntilMs = 0;
+  let tileVisual = new Map<number, number>();
+  let tileProgress = new Map<number, number>();
+  let visualBounds: { minX: number; maxX: number; minY: number; maxY: number } | null = null;
+
+  const applyState = (state: TreeBurnMeshState, index: number, burn: number): boolean => {
+    let scorch = 0;
+    let char = 0;
+    let visibility = 1;
+    if (state.role === "leaf") {
+      scorch = smoothstep(0.12, 0.55, burn);
+      char = smoothstep(0.45, 0.82, burn);
+      visibility = 1 - smoothstep(0.54, 0.88, burn);
+      tempColor.copy(whiteTint).lerp(leafScorchTint, scorch).lerp(leafCharTint, char);
+    } else if (state.role === "trunk") {
+      // Delay trunk disappearance so flame visibility leads structural collapse.
+      scorch = smoothstep(0.45, 0.82, burn);
+      char = smoothstep(0.68, 0.96, burn);
+      visibility = 1 - smoothstep(0.78, 1.04, burn);
+      tempColor.copy(whiteTint).lerp(trunkScorchTint, scorch).lerp(trunkCharTint, char);
+    } else {
+      scorch = smoothstep(0.2, 0.72, burn);
+      char = smoothstep(0.7, 1.02, burn);
+      visibility = 1 - smoothstep(0.82, 1.08, burn);
+      tempColor.copy(whiteTint).lerp(leafScorchTint, scorch).lerp(trunkCharTint, char);
+    }
+    visibility = clamp(visibility, 0, 1);
+    const burnQ = Math.round(clamp(burn, 0, 1.2) * (255 / 1.2));
+    const visibilityQ = Math.round(visibility * 255);
+    if (state.burnQ[index] === burnQ && state.visibilityQ[index] === visibilityQ) {
+      return false;
+    }
+    state.burnQ[index] = burnQ;
+    state.visibilityQ[index] = visibilityQ;
+    const scaleFactor = visibility <= TREE_BURN_VISIBLE_EPS ? 0 : visibility;
+    const baseScale = state.baseScale[index];
+    let posY = state.baseY[index] + (1 - scaleFactor) * state.scalePivotY[index];
+    let scaleX = baseScale * scaleFactor;
+    let scaleY = baseScale * scaleFactor;
+    let scaleZ = baseScale * scaleFactor;
+    if (state.role === "trunk") {
+      // Trunks use top-down clipping instead of geometric squashing.
+      posY = state.baseY[index];
+      scaleX = baseScale;
+      scaleY = baseScale;
+      scaleZ = baseScale;
+      if (state.cropTopAttr) {
+        const cropSpan = Math.max(0, state.cropMaxY - state.cropMinY);
+        const cropTop = state.cropMinY + cropSpan * scaleFactor - 1e-4;
+        state.cropTopAttr.setX(index, cropTop);
+      }
+    }
+    dummy.position.set(state.baseX[index], posY, state.baseZ[index]);
+    dummy.rotation.set(0, state.baseRotation[index], 0);
+    dummy.scale.set(scaleX, scaleY, scaleZ);
+    dummy.updateMatrix();
+    tempMatrix.copy(dummy.matrix).multiply(state.baseMatrix);
+    state.mesh.setMatrixAt(index, tempMatrix);
+    state.mesh.setColorAt(index, tempColor);
+    return true;
+  };
+
+  return {
+    update: (timeMs: number, world: WorldState) => {
+      if (timeMs - lastUpdateMs < TREE_BURN_UPDATE_INTERVAL_MS) {
+        return;
+      }
+      const elapsedMs = lastUpdateMs > 0 ? timeMs - lastUpdateMs : TREE_BURN_UPDATE_INTERVAL_MS;
+      const dt = Math.max(0.001, elapsedMs / 1000);
+      lastUpdateMs = timeMs;
+      const hasActiveFire = (world.lastActiveFires ?? 0) > 0;
+      const useFireBounds = hasActiveFire && world.fireBoundsActive;
+      if (hasActiveFire) {
+        postFireTailUntilMs = timeMs + TREE_BURN_POST_FIRE_TAIL_MS;
+      }
+      if (!hasActiveFire && timeMs > postFireTailUntilMs) {
+        return;
+      }
+      const fire = world.tileFire;
+      const fuel = world.tileFuel;
+      const heat = world.tileHeat;
+      const typeIds = world.tileTypeId;
+      const heatCap = Math.max(0.01, world.fireSettings.heatCap);
+      const minX = useFireBounds ? world.fireMinX - TREE_BURN_FIRE_BOUNDS_PADDING : 0;
+      const maxX = useFireBounds ? world.fireMaxX + TREE_BURN_FIRE_BOUNDS_PADDING : -1;
+      const minY = useFireBounds ? world.fireMinY - TREE_BURN_FIRE_BOUNDS_PADDING : 0;
+      const maxY = useFireBounds ? world.fireMaxY + TREE_BURN_FIRE_BOUNDS_PADDING : -1;
+      const nextTileVisual = tileVisual;
+      const nextTileProgress = tileProgress;
+      nextTileVisual.clear();
+      nextTileProgress.clear();
+      let nextBounds: { minX: number; maxX: number; minY: number; maxY: number } | null = null;
+      meshStates.forEach((state) => {
+        let changed = false;
+        let minChanged = Number.POSITIVE_INFINITY;
+        let maxChanged = -1;
+        for (let i = 0; i < state.tileIndices.length; i += 1) {
+          const tileIndex = state.tileIndices[i];
+          const tileX = state.tileX[i];
+          const tileY = state.tileY[i];
+          const nearActiveFire =
+            useFireBounds && tileX >= minX && tileX <= maxX && tileY >= minY && tileY <= maxY;
+          const hasPriorTransition = state.burnQ[i] > 0 || state.visibilityQ[i] < 255;
+          if (!nearActiveFire && !hasPriorTransition) {
+            continue;
+          }
+          const isAsh = (typeIds[tileIndex] ?? -1) === ashId;
+          const fireNow = clamp(fire[tileIndex] ?? 0, 0, 1);
+          const heatNow = clamp((heat[tileIndex] ?? 0) / heatCap, 0, 1);
+          const fuelNow = Math.max(0, fuel[tileIndex] ?? 0);
+          if (!nearActiveFire && !isAsh && fireNow <= 0 && fuelNow > TREE_BURN_FUEL_EPS && !hasPriorTransition) {
+            continue;
+          }
+          if (fuelNow > state.fuelReference[i] * 1.08) {
+            state.fuelReference[i] = fuelNow;
+          }
+          const fuelRef = Math.max(TREE_BURN_FUEL_EPS, state.fuelReference[i]);
+          const fuelRatio = clamp(fuelNow / fuelRef, 0, 1.2);
+          let targetBurn = clamp(1 - fuelRatio, 0, 1.15);
+          const burningNow = fireNow > TREE_BURN_ACTIVE_FIRE_EPS || heatNow > TREE_BURN_ACTIVE_HEAT_EPS;
+          const currentBurn = state.burnProgress[i] ?? 0;
+          if (burningNow) {
+            const flameDrivenBurn = clamp(fireNow * 0.72 + heatNow * 0.24, 0, 1.05);
+            targetBurn = Math.max(targetBurn, flameDrivenBurn);
+            if (!isAsh) {
+              // Prevent geometry loss from racing ahead of visible flames.
+              targetBurn = Math.min(targetBurn, flameDrivenBurn + 0.28);
+            }
+            if (isAsh) {
+              targetBurn = Math.max(targetBurn, 1.0);
+            }
+          } else {
+            // Keep visual burn synchronized with active flames/heat; do not advance burn after fire is out.
+            targetBurn = Math.min(currentBurn, targetBurn);
+          }
+          let nextBurn = currentBurn;
+          if (targetBurn > currentBurn) {
+            nextBurn = Math.min(targetBurn, currentBurn + dt * TREE_BURN_PROGRESS_PER_SECOND);
+          } else if (targetBurn < currentBurn) {
+            nextBurn = Math.max(targetBurn, currentBurn - dt * TREE_BURN_RECOVERY_PER_SECOND);
+          }
+          state.burnProgress[i] = nextBurn;
+          if (applyState(state, i, nextBurn)) {
+            changed = true;
+            if (i < minChanged) {
+              minChanged = i;
+            }
+            if (i > maxChanged) {
+              maxChanged = i;
+            }
+          }
+          const prevBurn = nextTileProgress.get(tileIndex) ?? 0;
+          if (nextBurn > prevBurn) {
+            nextTileProgress.set(tileIndex, nextBurn);
+          }
+          let burnVisual = Math.max(fireNow, heatNow * 0.55);
+          if (burningNow && nextBurn > 0.08) {
+            burnVisual = Math.max(burnVisual, 0.16 + nextBurn * 0.45);
+          } else if (!burningNow) {
+            burnVisual *= 0.45;
+          }
+          const prevVisual = nextTileVisual.get(tileIndex) ?? 0;
+          if (burnVisual > prevVisual) {
+            nextTileVisual.set(tileIndex, burnVisual);
+          }
+          if (burnVisual > TREE_BURN_VISUAL_EPS) {
+            if (!nextBounds) {
+              nextBounds = { minX: tileX, maxX: tileX, minY: tileY, maxY: tileY };
+            } else {
+              if (tileX < nextBounds.minX) nextBounds.minX = tileX;
+              if (tileX > nextBounds.maxX) nextBounds.maxX = tileX;
+              if (tileY < nextBounds.minY) nextBounds.minY = tileY;
+              if (tileY > nextBounds.maxY) nextBounds.maxY = tileY;
+            }
+          }
+        }
+        if (changed && maxChanged >= minChanged) {
+          const instanceCount = maxChanged - minChanged + 1;
+          const matrixAttr = state.mesh.instanceMatrix;
+          matrixAttr.clearUpdateRanges();
+          matrixAttr.addUpdateRange(minChanged * 16, instanceCount * 16);
+          matrixAttr.needsUpdate = true;
+          if (state.mesh.instanceColor) {
+            const colorAttr = state.mesh.instanceColor;
+            colorAttr.setUsage(THREE.DynamicDrawUsage);
+            colorAttr.clearUpdateRanges();
+            colorAttr.addUpdateRange(minChanged * 3, instanceCount * 3);
+            colorAttr.needsUpdate = true;
+          }
+          if (state.cropTopAttr) {
+            state.cropTopAttr.clearUpdateRanges();
+            state.cropTopAttr.addUpdateRange(minChanged, instanceCount);
+            state.cropTopAttr.needsUpdate = true;
+          }
+        }
+      });
+      visualBounds = nextBounds;
+    },
+    getTileBurnVisual: (tileIndex: number): number => {
+      return tileVisual.get(tileIndex) ?? 0;
+    },
+    getTileBurnProgress: (tileIndex: number): number => {
+      return tileProgress.get(tileIndex) ?? 0;
+    },
+    getTileAnchor: (tileIndex: number): { x: number; y: number; z: number } | null => {
+      const profile = tileProfiles.get(tileIndex);
+      return profile ? { x: profile.x, y: profile.y, z: profile.z } : null;
+    },
+    getTileFlameProfile: (tileIndex: number): TreeFlameProfile | null => {
+      return tileProfiles.get(tileIndex) ?? null;
+    },
+    getVisualBounds: (): { minX: number; maxX: number; minY: number; maxY: number } | null => {
+      return visualBounds;
+    }
+  };
+};
+
+export const buildPalette = (): number[][] =>
+  TILE_ID_TO_TYPE.map((tileType) => {
+    const rgb = TILE_COLOR_RGB[tileType];
+    return [rgb.r / 255, rgb.g / 255, rgb.b / 255];
+  });
+
+const noiseAt = (value: number): number => {
+  const s = Math.sin(value * 12.9898 + 78.233) * 43758.5453;
+  return s - Math.floor(s);
+};
+
+const HOUSE_FOOTPRINT_EPS = 1e-4;
+
+const pickHouseFootprint = (seed: number) => {
+  if (HOUSE_VARIANTS.length === 0) {
+    return { source: "", name: "default", sizeX: 1, sizeY: 1, sizeZ: 1 };
+  }
+  const index = Math.floor(noiseAt(seed + 6.1) * HOUSE_VARIANTS.length);
+  return HOUSE_VARIANTS[Math.min(HOUSE_VARIANTS.length - 1, Math.max(0, index))];
+};
+
+const getHouseFootprintDims = (rotation: number, footprint: { sizeX: number; sizeZ: number }) => {
+  const rotate = Math.abs(Math.sin(rotation)) > 0.5;
+  const width = rotate ? footprint.sizeZ : footprint.sizeX;
+  const depth = rotate ? footprint.sizeX : footprint.sizeZ;
+  return {
+    width: Math.max(0.01, width),
+    depth: Math.max(0.01, depth)
+  };
+};
+
+const getHouseFootprintBounds = (
+  tileX: number,
+  tileY: number,
+  rotation: number,
+  footprint: { sizeX: number; sizeZ: number }
+) => {
+  const { width, depth } = getHouseFootprintDims(rotation, footprint);
+  const centerX = tileX + 0.5;
+  const centerY = tileY + 0.5;
+  const minX = Math.floor(centerX - width / 2);
+  const maxX = Math.floor(centerX + width / 2 - HOUSE_FOOTPRINT_EPS);
+  const minY = Math.floor(centerY - depth / 2);
+  const maxY = Math.floor(centerY + depth / 2 - HOUSE_FOOTPRINT_EPS);
+  return { minX, maxX, minY, maxY, width, depth };
+};
+
+const pickHouseRotation = (
+  tileX: number,
+  tileY: number,
+  cols: number,
+  rows: number,
+  tileTypes: Uint8Array,
+  roadId: number,
+  baseId: number,
+  seed: number
+): number => {
+  const isRoadLike = (x: number, y: number): boolean => {
+    if (x < 0 || y < 0 || x >= cols || y >= rows) {
+      return false;
+    }
+    const typeId = tileTypes[y * cols + x];
+    return typeId === roadId || typeId === baseId;
+  };
+  const roadEW = isRoadLike(tileX - 1, tileY) || isRoadLike(tileX + 1, tileY);
+  const roadNS = isRoadLike(tileX, tileY - 1) || isRoadLike(tileX, tileY + 1);
+  const flip = noiseAt(seed + 21.4) < 0.5 ? 0 : Math.PI;
+  if (roadEW && !roadNS) {
+    return flip;
+  }
+  if (roadNS && !roadEW) {
+    return Math.PI / 2 + flip;
+  }
+  return noiseAt(seed + 9.1) < 0.5 ? 0 : Math.PI / 2;
+};
+
+export const buildSampleHeightMap = (
+  sample: TerrainSample,
+  sampleCols: number,
+  sampleRows: number,
+  step: number,
+  waterId: number
+): Float32Array => {
+  const { cols, rows, elevations, tileTypes } = sample;
+  const heights = new Float32Array(sampleCols * sampleRows);
+  let offset = 0;
+  for (let row = 0; row < sampleRows; row += 1) {
+    const tileY = Math.min(rows - 1, row * step);
+    for (let col = 0; col < sampleCols; col += 1) {
+      const tileX = Math.min(cols - 1, col * step);
+      const idx = tileY * cols + tileX;
+      if (step <= 1) {
+        heights[offset] = elevations[idx] ?? 0;
+        offset += 1;
+        continue;
+      }
+      const endX = Math.min(cols, tileX + step);
+      const endY = Math.min(rows, tileY + step);
+      let sum = 0;
+      let count = 0;
+      let maxHeight = 0;
+      let waterCount = 0;
+      let waterSum = 0;
+      for (let y = tileY; y < endY; y += 1) {
+        const rowBase = y * cols;
+        for (let x = tileX; x < endX; x += 1) {
+          const tileIdx = rowBase + x;
+          const height = elevations[tileIdx] ?? 0;
+          sum += height;
+          count += 1;
+          if (height > maxHeight) {
+            maxHeight = height;
+          }
+          if (tileTypes && tileTypes[tileIdx] === waterId) {
+            waterCount += 1;
+            waterSum += height;
+          }
+        }
+      }
+      if (tileTypes && waterCount > count * 0.2) {
+        heights[offset] = waterCount > 0 ? waterSum / waterCount : 0;
+        offset += 1;
+        continue;
+      }
+      const avg = count > 0 ? sum / count : 0;
+      const blended = avg * (1 - HEIGHT_SAMPLE_PEAK_WEIGHT) + maxHeight * HEIGHT_SAMPLE_PEAK_WEIGHT;
+      heights[offset] = clamp(blended, 0, 1);
+      offset += 1;
+    }
+  }
+  return heights;
+};
+
+export const buildOceanMask = (cols: number, rows: number, tileTypes: Uint8Array, waterId: number): Uint8Array => {
+  const total = cols * rows;
+  const mask = new Uint8Array(total);
+  const queue = new Int32Array(total);
+  let head = 0;
+  let tail = 0;
+  const pushIfWater = (idx: number) => {
+    if (mask[idx] || tileTypes[idx] !== waterId) {
+      return;
+    }
+    mask[idx] = 1;
+    queue[tail] = idx;
+    tail += 1;
+  };
+  for (let x = 0; x < cols; x += 1) {
+    pushIfWater(x);
+    pushIfWater((rows - 1) * cols + x);
+  }
+  for (let y = 1; y < rows - 1; y += 1) {
+    pushIfWater(y * cols);
+    pushIfWater(y * cols + (cols - 1));
+  }
+  while (head < tail) {
+    const idx = queue[head];
+    head += 1;
+    const x = idx % cols;
+    const y = Math.floor(idx / cols);
+    if (x > 0) {
+      pushIfWater(idx - 1);
+    }
+    if (x < cols - 1) {
+      pushIfWater(idx + 1);
+    }
+    if (y > 0) {
+      pushIfWater(idx - cols);
+    }
+    if (y < rows - 1) {
+      pushIfWater(idx + cols);
+    }
+  }
+  return mask;
+};
+
+export const computeWaterLevel = (
+  sample: TerrainSample,
+  waterId: number,
+  oceanMask?: Uint8Array | null,
+  riverMask?: Uint8Array | null
+): number | null => {
+  const tileTypes = sample.tileTypes;
+  if (!tileTypes) {
+    return null;
+  }
+  const { elevations } = sample;
+  const bins = 32;
+  const counts = new Uint32Array(bins);
+  const sums = new Float32Array(bins);
+  let total = 0;
+  for (let i = 0; i < elevations.length; i += 1) {
+    if (tileTypes[i] !== waterId || (oceanMask && !oceanMask[i]) || (riverMask && riverMask[i])) {
+      continue;
+    }
+    const height = clamp(elevations[i] ?? 0, 0, 1);
+    const bin = Math.min(bins - 1, Math.floor(height * (bins - 1)));
+    counts[bin] += 1;
+    sums[bin] += height;
+    total += 1;
+  }
+  if (total === 0) {
+    return null;
+  }
+  if (total < 8) {
+    const sum = sums.reduce((acc, value) => acc + value, 0);
+    return sum / total;
+  }
+  const target = Math.max(1, Math.ceil(total * 0.25));
+  let taken = 0;
+  let sum = 0;
+  let count = 0;
+  for (let bin = bins - 1; bin >= 0; bin -= 1) {
+    const binCount = counts[bin];
+    if (binCount === 0) {
+      continue;
+    }
+    const take = Math.min(binCount, target - taken);
+    const avg = sums[bin] / binCount;
+    sum += avg * take;
+    count += take;
+    taken += take;
+    if (taken >= target) {
+      break;
+    }
+  }
+  return count > 0 ? sum / count : null;
+};
+
+export const buildSampleTypeMap = (
+  sample: TerrainSample,
+  sampleCols: number,
+  sampleRows: number,
+  step: number,
+  grassId: number,
+  waterId: number,
+  typeCount: number,
+  priorityIds: number[]
+): Uint8Array => {
+  const { cols, rows, tileTypes } = sample;
+  const types = new Uint8Array(sampleCols * sampleRows);
+  const counts = new Uint16Array(typeCount);
+  const priorityRank = new Int16Array(typeCount);
+  priorityRank.fill(-1);
+  priorityIds.forEach((id, index) => {
+    if (id >= 0 && id < typeCount) {
+      priorityRank[id] = index;
+    }
+  });
+  let offset = 0;
+  for (let row = 0; row < sampleRows; row += 1) {
+    const tileY = Math.min(rows - 1, row * step);
+    for (let col = 0; col < sampleCols; col += 1) {
+      const tileX = Math.min(cols - 1, col * step);
+      const endX = Math.min(cols, tileX + step);
+      const endY = Math.min(rows, tileY + step);
+      counts.fill(0);
+      let maxType = grassId;
+      let maxCount = 0;
+      let waterCount = 0;
+      let total = 0;
+      let priorityType = -1;
+      let priorityScore = Number.POSITIVE_INFINITY;
+      for (let y = tileY; y < endY; y += 1) {
+        const rowBase = y * cols;
+        for (let x = tileX; x < endX; x += 1) {
+          const idx = rowBase + x;
+          const typeId = tileTypes ? tileTypes[idx] ?? grassId : grassId;
+          const nextCount = (counts[typeId] += 1);
+          if (nextCount > maxCount) {
+            maxCount = nextCount;
+            maxType = typeId;
+          }
+          const rank = priorityRank[typeId];
+          if (rank >= 0 && rank < priorityScore) {
+            priorityScore = rank;
+            priorityType = typeId;
+          }
+          total += 1;
+          if (typeId === waterId) {
+            waterCount += 1;
+          }
+        }
+      }
+      if (total > 0 && waterCount === total) {
+        types[offset] = waterId;
+      } else if (priorityType >= 0) {
+        types[offset] = priorityType;
+      } else {
+        const waterRatio = total > 0 ? waterCount / total : 0;
+        if (waterRatio >= 0.2) {
+          types[offset] = waterId;
+        } else {
+          types[offset] = maxType;
+        }
+      }
+      offset += 1;
+    }
+  }
+  return types;
+};
+
+const createDataTexture = (
+  data: Uint8Array,
+  width: number,
+  height: number,
+  magFilter: THREE.MagnificationTextureFilter,
+  minFilter: THREE.MinificationTextureFilter
+): THREE.DataTexture => {
+  const texture = new THREE.DataTexture(data, width, height, THREE.RGBAFormat);
+  texture.needsUpdate = true;
+  texture.colorSpace = THREE.NoColorSpace;
+  texture.magFilter = magFilter;
+  texture.minFilter = minFilter;
+  texture.wrapS = THREE.ClampToEdgeWrapping;
+  texture.wrapT = THREE.ClampToEdgeWrapping;
+  texture.flipY = true;
+  texture.generateMipmaps = false;
+  return texture;
+};
+
+const buildSampleWaterRatios = (
+  sample: TerrainSample,
+  sampleCols: number,
+  sampleRows: number,
+  step: number,
+  waterId: number,
+  oceanMask?: Uint8Array | null,
+  riverMask?: Uint8Array | null
+): WaterSampleRatios => {
+  const { cols, rows, tileTypes } = sample;
+  const total = sampleCols * sampleRows;
+  const water = new Float32Array(total);
+  const ocean = new Float32Array(total);
+  const river = new Float32Array(total);
+  if (!tileTypes || cols <= 0 || rows <= 0) {
+    return { water, ocean, river };
+  }
+  let offset = 0;
+  for (let row = 0; row < sampleRows; row += 1) {
+    const tileY = Math.min(rows - 1, row * step);
+    for (let col = 0; col < sampleCols; col += 1) {
+      const tileX = Math.min(cols - 1, col * step);
+      const endX = Math.min(cols, tileX + step);
+      const endY = Math.min(rows, tileY + step);
+      let waterCount = 0;
+      let oceanCount = 0;
+      let riverCount = 0;
+      let count = 0;
+      for (let y = tileY; y < endY; y += 1) {
+        const rowBase = y * cols;
+        for (let x = tileX; x < endX; x += 1) {
+          const idx = rowBase + x;
+          count += 1;
+          if (tileTypes[idx] !== waterId) {
+            continue;
+          }
+          waterCount += 1;
+          if (riverMask && riverMask[idx]) {
+            riverCount += 1;
+            continue;
+          }
+          if (!oceanMask || oceanMask[idx]) {
+            oceanCount += 1;
+          }
+        }
+      }
+      const inv = count > 0 ? 1 / count : 0;
+      let waterRatio = waterCount * inv;
+      let oceanRatio = oceanCount * inv;
+      let riverRatio = riverCount * inv;
+      if (oceanCount > 0) {
+        oceanRatio = Math.max(oceanRatio, OCEAN_SAMPLE_SUPPORT_FLOOR);
+        // Keep ocean cells from collapsing during downsample while avoiding
+        // blanket widening of inland rivers.
+        waterRatio = Math.max(waterRatio, oceanRatio);
+      }
+      water[offset] = clamp(waterRatio, 0, 1);
+      ocean[offset] = clamp(oceanRatio, 0, 1);
+      river[offset] = clamp(riverRatio, 0, 1);
+      offset += 1;
+    }
+  }
+  return { water, ocean, river };
+};
+
+const buildSampleOptionalFloatMap = (
+  sample: TerrainSample,
+  source: Float32Array | undefined,
+  sampleCols: number,
+  sampleRows: number,
+  step: number,
+  includeMask?: Uint8Array | null,
+  reducer: SampleFloatReducer = "mean"
+): Float32Array | undefined => {
+  const { cols, rows } = sample;
+  if (!source || source.length !== cols * rows || cols <= 0 || rows <= 0) {
+    return undefined;
+  }
+  const sampled = new Float32Array(sampleCols * sampleRows).fill(Number.NaN);
+  let offset = 0;
+  for (let row = 0; row < sampleRows; row += 1) {
+    const tileY = Math.min(rows - 1, row * step);
+    for (let col = 0; col < sampleCols; col += 1) {
+      const tileX = Math.min(cols - 1, col * step);
+      const endX = Math.min(cols, tileX + step);
+      const endY = Math.min(rows, tileY + step);
+      let acc = reducer === "min" ? Number.POSITIVE_INFINITY : reducer === "max" ? Number.NEGATIVE_INFINITY : 0;
+      let count = 0;
+      for (let y = tileY; y < endY; y += 1) {
+        const rowBase = y * cols;
+        for (let x = tileX; x < endX; x += 1) {
+          const idx = rowBase + x;
+          if (includeMask && !includeMask[idx]) {
+            continue;
+          }
+          const value = source[idx];
+          if (!Number.isFinite(value)) {
+            continue;
+          }
+          if (reducer === "min") {
+            acc = Math.min(acc, value);
+          } else if (reducer === "max") {
+            acc = Math.max(acc, value);
+          } else {
+            acc += value;
+          }
+          count += 1;
+        }
+      }
+      if (count > 0) {
+        sampled[offset] = reducer === "mean" ? acc / count : acc;
+      }
+      offset += 1;
+    }
+  }
+  return sampled;
+};
+
+const buildSampleMaskCoverage = (
+  sample: TerrainSample,
+  sourceMask: Uint8Array | undefined,
+  sampleCols: number,
+  sampleRows: number,
+  step: number
+): Float32Array | undefined => {
+  const { cols, rows } = sample;
+  if (!sourceMask || sourceMask.length !== cols * rows || cols <= 0 || rows <= 0) {
+    return undefined;
+  }
+  const sampled = new Float32Array(sampleCols * sampleRows);
+  let offset = 0;
+  for (let row = 0; row < sampleRows; row += 1) {
+    const tileY = Math.min(rows - 1, row * step);
+    for (let col = 0; col < sampleCols; col += 1) {
+      const tileX = Math.min(cols - 1, col * step);
+      const endX = Math.min(cols, tileX + step);
+      const endY = Math.min(rows, tileY + step);
+      let count = 0;
+      let support = 0;
+      for (let y = tileY; y < endY; y += 1) {
+        const rowBase = y * cols;
+        for (let x = tileX; x < endX; x += 1) {
+          count += 1;
+          if (sourceMask[rowBase + x] > 0) {
+            support += 1;
+          }
+        }
+      }
+      sampled[offset] = count > 0 ? support / count : 0;
+      offset += 1;
+    }
+  }
+  return sampled;
+};
+
+const buildWaterMaskTexture = (
+  sampleCols: number,
+  sampleRows: number,
+  ratios: WaterSampleRatios
+): THREE.DataTexture => {
+  const data = new Uint8Array(sampleCols * sampleRows * 4);
+  for (let i = 0; i < ratios.water.length; i += 1) {
+    const ratio = clamp(ratios.water[i] ?? 0, 0, 1);
+    const ramp = clamp((ratio - WATER_ALPHA_MIN_RATIO) / (1 - WATER_ALPHA_MIN_RATIO), 0, 1);
+    const alpha = Math.round(Math.pow(ramp, WATER_ALPHA_POWER) * 255);
+    const base = i * 4;
+    data[base] = 255;
+    data[base + 1] = 255;
+    data[base + 2] = 255;
+    data[base + 3] = alpha;
+  }
+  return createDataTexture(data, sampleCols, sampleRows, THREE.LinearFilter, THREE.LinearFilter);
+};
+
+const buildWaterSupportMask = (
+  sampleTypes: Uint8Array,
+  waterId: number
+): Uint8Array => {
+  const support = new Uint8Array(sampleTypes.length);
+  for (let i = 0; i < sampleTypes.length; i += 1) {
+    support[i] = sampleTypes[i] === waterId ? 1 : 0;
+  }
+  return support;
+};
+
+const buildWaterSupportMapTexture = (
+  sampleCols: number,
+  sampleRows: number,
+  supportMask: Uint8Array
+): THREE.DataTexture => {
+  const data = new Uint8Array(sampleCols * sampleRows * 4);
+  for (let i = 0; i < supportMask.length; i += 1) {
+    const v = supportMask[i] ? 255 : 0;
+    const base = i * 4;
+    data[base] = v;
+    data[base + 1] = v;
+    data[base + 2] = v;
+    data[base + 3] = 255;
+  }
+  return createDataTexture(data, sampleCols, sampleRows, THREE.NearestFilter, THREE.NearestFilter);
+};
+
+const buildWaterDomainMapTexture = (
+  sampleCols: number,
+  sampleRows: number,
+  ratios: WaterSampleRatios
+): THREE.DataTexture => {
+  const data = new Uint8Array(sampleCols * sampleRows * 4);
+  for (let i = 0; i < ratios.water.length; i += 1) {
+    const waterRatio = clamp(ratios.water[i] ?? 0, 0, 1);
+    const oceanRatio = clamp(ratios.ocean[i] ?? 0, 0, waterRatio);
+    const riverRatio = clamp(ratios.river[i] ?? 0, 0, waterRatio);
+    const ramp = clamp((waterRatio - WATER_ALPHA_MIN_RATIO) / (1 - WATER_ALPHA_MIN_RATIO), 0, 1);
+    const alpha = Math.round(Math.pow(ramp, WATER_ALPHA_POWER) * 255);
+    const base = i * 4;
+    data[base] = Math.round(oceanRatio * 255);
+    data[base + 1] = Math.round(riverRatio * 255);
+    data[base + 2] = Math.round(waterRatio * 255);
+    data[base + 3] = alpha;
+  }
+  return createDataTexture(data, sampleCols, sampleRows, THREE.LinearFilter, THREE.LinearFilter);
+};
+
+const buildRiverBankMapTexture = (
+  sampleCols: number,
+  sampleRows: number,
+  supportMask: Uint8Array,
+  riverRatio: Float32Array
+): THREE.DataTexture => {
+  const total = sampleCols * sampleRows;
+  const riverSupport = new Uint8Array(total);
+  for (let i = 0; i < total; i += 1) {
+    riverSupport[i] = supportMask[i] && (riverRatio[i] ?? 0) >= RIVER_RATIO_MIN ? 1 : 0;
+  }
+  const distToRiver = buildDistanceField(riverSupport, sampleCols, sampleRows, 1);
+  const distToNonRiver = buildDistanceField(riverSupport, sampleCols, sampleRows, 0);
+  const data = new Uint8Array(total * 4);
+  for (let i = 0; i < total; i += 1) {
+    const inside = riverSupport[i] > 0;
+    const distInside = distToNonRiver[i] >= 0 ? distToNonRiver[i] : RIVER_BANK_MAX_DISTANCE;
+    const distOutside = distToRiver[i] >= 0 ? distToRiver[i] : RIVER_BANK_MAX_DISTANCE;
+    const signed = inside ? distInside : -distOutside;
+    const normalized = clamp(signed / RIVER_BANK_MAX_DISTANCE, -1, 1);
+    const encoded = Math.round((normalized * 0.5 + 0.5) * 255);
+    const base = i * 4;
+    data[base] = encoded;
+    data[base + 1] = encoded;
+    data[base + 2] = encoded;
+    data[base + 3] = 255;
+  }
+  return createDataTexture(data, sampleCols, sampleRows, THREE.LinearFilter, THREE.LinearFilter);
+};
+
+const buildDistanceField = (
+  sampleTypes: Uint8Array,
+  sampleCols: number,
+  sampleRows: number,
+  targetType: number
+): Int16Array => {
+  const total = sampleCols * sampleRows;
+  const dist = new Int16Array(total);
+  dist.fill(-1);
+  const queue = new Int32Array(total);
+  let head = 0;
+  let tail = 0;
+  for (let i = 0; i < total; i += 1) {
+    if (sampleTypes[i] !== targetType) {
+      continue;
+    }
+    dist[i] = 0;
+    queue[tail] = i;
+    tail += 1;
+  }
+  while (head < tail) {
+    const idx = queue[head];
+    head += 1;
+    const d = dist[idx];
+    const x = idx % sampleCols;
+    const y = Math.floor(idx / sampleCols);
+    const nextD = (d + 1) as number;
+    if (x > 0) {
+      const n = idx - 1;
+      if (dist[n] === -1) {
+        dist[n] = nextD;
+        queue[tail] = n;
+        tail += 1;
+      }
+    }
+    if (x < sampleCols - 1) {
+      const n = idx + 1;
+      if (dist[n] === -1) {
+        dist[n] = nextD;
+        queue[tail] = n;
+        tail += 1;
+      }
+    }
+    if (y > 0) {
+      const n = idx - sampleCols;
+      if (dist[n] === -1) {
+        dist[n] = nextD;
+        queue[tail] = n;
+        tail += 1;
+      }
+    }
+    if (y < sampleRows - 1) {
+      const n = idx + sampleCols;
+      if (dist[n] === -1) {
+        dist[n] = nextD;
+        queue[tail] = n;
+        tail += 1;
+      }
+    }
+  }
+  return dist;
+};
+
+const buildShoreSdfTexture = (
+  sampleTypes: Uint8Array,
+  sampleCols: number,
+  sampleRows: number,
+  waterId: number
+): THREE.DataTexture => {
+  const distToWater = buildDistanceField(sampleTypes, sampleCols, sampleRows, waterId);
+  const distToLand = (() => {
+    const total = sampleCols * sampleRows;
+    const mapped = new Uint8Array(total);
+    for (let i = 0; i < total; i += 1) {
+      mapped[i] = sampleTypes[i] === waterId ? 1 : 0;
+    }
+    return buildDistanceField(mapped, sampleCols, sampleRows, 0);
+  })();
+  const data = new Uint8Array(sampleCols * sampleRows * 4);
+  for (let i = 0; i < sampleTypes.length; i += 1) {
+    const isWater = sampleTypes[i] === waterId;
+    const waterDist = distToWater[i] >= 0 ? distToWater[i] : SHORE_SDF_MAX_DISTANCE;
+    const landDist = distToLand[i] >= 0 ? distToLand[i] : SHORE_SDF_MAX_DISTANCE;
+    const signed = isWater ? landDist : -waterDist;
+    const normalized = clamp(signed / SHORE_SDF_MAX_DISTANCE, -1, 1);
+    const encoded = Math.round((normalized * 0.5 + 0.5) * 255);
+    const base = i * 4;
+    data[base] = encoded;
+    data[base + 1] = encoded;
+    data[base + 2] = encoded;
+    data[base + 3] = 255;
+  }
+  return createDataTexture(data, sampleCols, sampleRows, THREE.LinearFilter, THREE.LinearFilter);
+};
+
+const buildRiverFlowTexture = (
+  sampleHeights: Float32Array,
+  sampleTypes: Uint8Array,
+  sampleCols: number,
+  sampleRows: number,
+  waterId: number,
+  riverRatio: Float32Array
+): THREE.DataTexture => {
+  const total = sampleCols * sampleRows;
+  const data = new Uint8Array(total * 4);
+  const sampleHeight = (x: number, y: number): number => {
+    const clampedX = clamp(x, 0, sampleCols - 1);
+    const clampedY = clamp(y, 0, sampleRows - 1);
+    return sampleHeights[clampedY * sampleCols + clampedX] ?? 0;
+  };
+  for (let i = 0; i < total; i += 1) {
+    const base = i * 4;
+    const riverStrength = clamp(riverRatio[i] ?? 0, 0, 1);
+    if (sampleTypes[i] !== waterId || riverStrength <= 0.02) {
+      data[base] = 128;
+      data[base + 1] = 128;
+      data[base + 2] = 0;
+      data[base + 3] = 0;
+      continue;
+    }
+    const x = i % sampleCols;
+    const y = Math.floor(i / sampleCols);
+    const center = sampleHeight(x, y);
+    let dirX = 0;
+    let dirY = 0;
+    let bestDrop = 0;
+    const neighbors = [
+      { x: x - 1, y, dx: -1, dy: 0 },
+      { x: x + 1, y, dx: 1, dy: 0 },
+      { x, y: y - 1, dx: 0, dy: -1 },
+      { x, y: y + 1, dx: 0, dy: 1 }
+    ];
+    neighbors.forEach((neighbor) => {
+      if (neighbor.x < 0 || neighbor.y < 0 || neighbor.x >= sampleCols || neighbor.y >= sampleRows) {
+        return;
+      }
+      const nIdx = neighbor.y * sampleCols + neighbor.x;
+      if (sampleTypes[nIdx] !== waterId) {
+        return;
+      }
+      const drop = center - sampleHeights[nIdx];
+      if (drop > bestDrop) {
+        bestDrop = drop;
+        dirX = neighbor.dx;
+        dirY = neighbor.dy;
+      }
+    });
+    const gradX = sampleHeight(x - 1, y) - sampleHeight(x + 1, y);
+    const gradY = sampleHeight(x, y - 1) - sampleHeight(x, y + 1);
+    if (bestDrop <= 0.0001) {
+      dirX = gradX;
+      dirY = gradY;
+    }
+    let len = Math.hypot(dirX, dirY);
+    if (len <= 0.0001) {
+      const n = noiseAt(i * 0.37 + 1.7) * Math.PI * 2;
+      dirX = Math.cos(n);
+      dirY = Math.sin(n);
+      len = 1;
+    }
+    dirX /= len;
+    dirY /= len;
+    const speed = clamp(bestDrop * 22 + Math.hypot(gradX, gradY) * 4, 0, 1);
+    data[base] = Math.round((dirX * 0.5 + 0.5) * 255);
+    data[base + 1] = Math.round((dirY * 0.5 + 0.5) * 255);
+    data[base + 2] = Math.round(speed * 255);
+    data[base + 3] = Math.round(riverStrength * 255);
+  }
+  return createDataTexture(data, sampleCols, sampleRows, THREE.LinearFilter, THREE.LinearFilter);
+};
+
+const buildRapidMapTexture = (
+  waterHeights: Float32Array,
+  sampleCols: number,
+  sampleRows: number,
+  ratios: WaterSampleRatios,
+  riverStepStrength?: Float32Array
+): THREE.DataTexture => {
+  const total = sampleCols * sampleRows;
+  const data = new Uint8Array(total * 4);
+  for (let i = 0; i < total; i += 1) {
+    const base = i * 4;
+    const water = clamp(ratios.water[i] ?? 0, 0, 1);
+    const river = clamp(ratios.river[i] ?? 0, 0, 1);
+    if (water < WATER_ALPHA_MIN_RATIO || river <= 0.01) {
+      data[base] = 0;
+      data[base + 1] = 0;
+      data[base + 2] = 0;
+      data[base + 3] = 0;
+      continue;
+    }
+    const rawStep = riverStepStrength ? riverStepStrength[i] : 0;
+    const step = Number.isFinite(rawStep) ? clamp(rawStep as number, 0, 1) : 0;
+    const x = i % sampleCols;
+    const y = Math.floor(i / sampleCols);
+    const left = x > 0 ? waterHeights[i - 1] : waterHeights[i];
+    const right = x < sampleCols - 1 ? waterHeights[i + 1] : waterHeights[i];
+    const up = y > 0 ? waterHeights[i - sampleCols] : waterHeights[i];
+    const down = y < sampleRows - 1 ? waterHeights[i + sampleCols] : waterHeights[i];
+    const grad = Math.hypot(right - left, down - up);
+    const flow = clamp(grad * 7.5, 0, 1);
+    const rapid = clamp(step * 0.72 + flow * 0.58 + river * 0.24, 0, 1);
+    const ramp = clamp((water - WATER_ALPHA_MIN_RATIO) / (1 - WATER_ALPHA_MIN_RATIO), 0, 1);
+    const alpha = Math.pow(ramp, WATER_ALPHA_POWER);
+    data[base] = Math.round(step * 255);
+    data[base + 1] = Math.round(flow * 255);
+    data[base + 2] = Math.round(river * 255);
+    data[base + 3] = Math.round(clamp(alpha * rapid, 0, 1) * 255);
+  }
+  return createDataTexture(data, sampleCols, sampleRows, THREE.LinearFilter, THREE.LinearFilter);
+};
+
+const buildWaterfallInstances = (
+  waterHeights: Float32Array,
+  supportMask: Uint8Array,
+  oceanRatio: Float32Array,
+  sampleCols: number,
+  sampleRows: number,
+  riverRatio: Float32Array,
+  riverStepStrength: Float32Array | undefined,
+  minDrop: number,
+  width: number,
+  depth: number,
+  riverDomain?: RiverRenderDomain
+): Float32Array | undefined => {
+  const candidates: WaterfallCandidate[] = [];
+  const total = sampleCols * sampleRows;
+  const cellWorldX = width / Math.max(1, sampleCols);
+  const cellWorldZ = depth / Math.max(1, sampleRows);
+  const cellWorld = Math.max(1e-4, Math.min(cellWorldX, cellWorldZ));
+  const isWaterCell = (idx: number): boolean => (supportMask[idx] ?? 0) > 0;
+  const isRiverCell = (idx: number): boolean => (riverRatio[idx] ?? 0) >= WATERFALL_MIN_RIVER_RATIO;
+  const isOceanish = (idx: number): boolean => (oceanRatio[idx] ?? 0) >= WATERFALL_MAX_OCEAN_RATIO;
+  const isValidCoord = (x: number, y: number): boolean => x >= 0 && y >= 0 && x < sampleCols && y < sampleRows;
+  const toWorldX = (x: number): number => ((x + 0.5) / Math.max(1, sampleCols) - 0.5) * width;
+  const toWorldZ = (y: number): number => ((y + 0.5) / Math.max(1, sampleRows) - 0.5) * depth;
+  const measureCrossSection = (
+    centerCol: number,
+    centerRow: number,
+    flowX: number,
+    flowY: number
+  ): { halfWidth: number; centerShift: number } => {
+    let perpX = -flowY;
+    let perpY = flowX;
+    const perpLen = Math.hypot(perpX, perpY);
+    if (perpLen <= 1e-5) {
+      perpX = 1;
+      perpY = 0;
+    } else {
+      perpX /= perpLen;
+      perpY /= perpLen;
+    }
+    const sampleSpan = (sign: number): number => {
+      let span = 0;
+      const maxSteps = 8;
+      for (let s = 1; s <= maxSteps; s += 1) {
+        const sx = Math.round(centerCol + perpX * sign * s);
+        const sy = Math.round(centerRow + perpY * sign * s);
+        if (!isValidCoord(sx, sy)) {
+          break;
+        }
+        const sIdx = sy * sampleCols + sx;
+        if (!isWaterCell(sIdx) || !isRiverCell(sIdx) || isOceanish(sIdx)) {
+          break;
+        }
+        span = s;
+      }
+      return span;
+    };
+    const negSpan = sampleSpan(-1);
+    const posSpan = sampleSpan(1);
+    const halfCells = 0.5 + 0.5 * (negSpan + posSpan);
+    const shiftCells = (posSpan - negSpan) * 0.5;
+    return {
+      halfWidth: clamp(halfCells * cellWorld, cellWorld * 0.45, cellWorld * 2.6),
+      centerShift: shiftCells * cellWorld
+    };
+  };
+
+  for (let row = 1; row < sampleRows - 1; row += 1) {
+    for (let col = 1; col < sampleCols - 1; col += 1) {
+      const idx = row * sampleCols + col;
+      if (!isWaterCell(idx)) {
+        continue;
+      }
+      if (!isRiverCell(idx)) {
+        continue;
+      }
+      const rawStepStrength = riverStepStrength ? riverStepStrength[idx] : 0;
+      const stepStrength = Number.isFinite(rawStepStrength) ? clamp(rawStepStrength as number, 0, 1) : 0;
+      if (stepStrength < WATERFALL_MIN_STEP_STRENGTH) {
+        continue;
+      }
+      if (isOceanish(idx)) {
+        continue;
+      }
+      const center = waterHeights[idx] ?? 0;
+      if (!Number.isFinite(center)) {
+        continue;
+      }
+      let bestDrop = 0;
+      let bestDx = 0;
+      let bestDy = 0;
+      const dirs = [
+        { dx: -1, dy: 0 },
+        { dx: 1, dy: 0 },
+        { dx: 0, dy: -1 },
+        { dx: 0, dy: 1 }
+      ];
+      dirs.forEach((dir) => {
+        const nx = col + dir.dx;
+        const ny = row + dir.dy;
+        if (!isValidCoord(nx, ny)) {
+          return;
+        }
+        const nIdx = ny * sampleCols + nx;
+        if (nIdx < 0 || nIdx >= total || !isWaterCell(nIdx)) {
+          return;
+        }
+        if (!isRiverCell(nIdx) || isOceanish(nIdx)) {
+          return;
+        }
+        const neighborHeight = waterHeights[nIdx] ?? 0;
+        if (!Number.isFinite(neighborHeight)) {
+          return;
+        }
+        const drop = center - neighborHeight;
+        if (drop > bestDrop) {
+          bestDrop = drop;
+          bestDx = dir.dx;
+          bestDy = dir.dy;
+        }
+      });
+      if (bestDrop < minDrop) {
+        continue;
+      }
+      const nx1 = col + bestDx;
+      const ny1 = row + bestDy;
+      const nx2 = col + bestDx * 2;
+      const ny2 = row + bestDy * 2;
+      if (!isValidCoord(nx1, ny1) || !isValidCoord(nx2, ny2)) {
+        continue;
+      }
+      const idx1 = ny1 * sampleCols + nx1;
+      const idx2 = ny2 * sampleCols + nx2;
+      if (!isWaterCell(idx1) || !isWaterCell(idx2) || !isRiverCell(idx1) || !isRiverCell(idx2)) {
+        continue;
+      }
+      if (isOceanish(idx1) || isOceanish(idx2)) {
+        continue;
+      }
+      const h1 = waterHeights[idx1] ?? 0;
+      const h2 = waterHeights[idx2] ?? 0;
+      if (!Number.isFinite(h1) || !Number.isFinite(h2)) {
+        continue;
+      }
+      const lookaheadDrop = center - h2;
+      if (lookaheadDrop < minDrop * 0.9 || lookaheadDrop > WATERFALL_MAX_DROP) {
+        continue;
+      }
+      const x0 = toWorldX(col);
+      const z0 = toWorldZ(row);
+      const x1 = toWorldX(nx2);
+      const z1 = toWorldZ(ny2);
+      let dirX = x1 - x0;
+      let dirZ = z1 - z0;
+      const len = Math.hypot(dirX, dirZ) || 1;
+      dirX /= len;
+      dirZ /= len;
+      const lipX = x0 + dirX * (cellWorldX * Math.abs(bestDx) * 0.5);
+      const lipZ = z0 + dirZ * (cellWorldZ * Math.abs(bestDy) * 0.5);
+      const cross = measureCrossSection(col, row, dirX, dirZ);
+      const halfWidth = clamp(cross.halfWidth * (0.96 + stepStrength * 0.08), cellWorld * 0.45, cellWorld * 2.8);
+      const centerX = lipX + (-dirZ) * cross.centerShift;
+      const centerZ = lipZ + dirX * cross.centerShift;
+      candidates.push({
+        sampleCol: col,
+        sampleRow: row,
+        x: centerX,
+        z: centerZ,
+        top: center + WATERFALL_TOP_OFFSET,
+        drop: Math.min(WATERFALL_MAX_DROP, lookaheadDrop + WATERFALL_DROP_PADDING + stepStrength * minDrop * 0.7),
+        dirX,
+        dirZ,
+        width: halfWidth
+      });
+    }
+  }
+  if (candidates.length === 0) {
+    return undefined;
+  }
+  candidates.sort((a, b) => b.drop - a.drop);
+
+  type Cluster = {
+    x: number;
+    z: number;
+    top: number;
+    drop: number;
+    dirX: number;
+    dirZ: number;
+    width: number;
+    weight: number;
+    minCol: number;
+    maxCol: number;
+    minRow: number;
+    maxRow: number;
+    count: number;
+  };
+  const clusters: Cluster[] = [];
+  const minSampleSpacing = 2;
+  for (let i = 0; i < candidates.length; i += 1) {
+    const candidate = candidates[i];
+    const candidateWeight = Math.max(0.05, candidate.drop);
+    let bestCluster = -1;
+    let bestScore = Number.POSITIVE_INFINITY;
+    for (let j = 0; j < clusters.length; j += 1) {
+      const cluster = clusters[j];
+      const dirDot = candidate.dirX * cluster.dirX + candidate.dirZ * cluster.dirZ;
+      if (dirDot < 0.7) {
+        continue;
+      }
+      const dx = Math.abs(candidate.sampleCol - Math.round((cluster.minCol + cluster.maxCol) * 0.5));
+      const dy = Math.abs(candidate.sampleRow - Math.round((cluster.minRow + cluster.maxRow) * 0.5));
+      if (dx > minSampleSpacing || dy > minSampleSpacing) {
+        continue;
+      }
+      const worldDist = Math.hypot(candidate.x - cluster.x, candidate.z - cluster.z);
+      const maxWorldDist = Math.max(0.8, (candidate.width + cluster.width) * 1.65);
+      if (worldDist > maxWorldDist) {
+        continue;
+      }
+      if (worldDist < bestScore) {
+        bestScore = worldDist;
+        bestCluster = j;
+      }
+    }
+    if (bestCluster < 0) {
+      clusters.push({
+        x: candidate.x,
+        z: candidate.z,
+        top: candidate.top,
+        drop: candidate.drop,
+        dirX: candidate.dirX,
+        dirZ: candidate.dirZ,
+        width: candidate.width,
+        weight: candidateWeight,
+        minCol: candidate.sampleCol,
+        maxCol: candidate.sampleCol,
+        minRow: candidate.sampleRow,
+        maxRow: candidate.sampleRow,
+        count: 1
+      });
+      continue;
+    }
+    const cluster = clusters[bestCluster];
+    const totalWeight = cluster.weight + candidateWeight;
+    cluster.x = (cluster.x * cluster.weight + candidate.x * candidateWeight) / totalWeight;
+    cluster.z = (cluster.z * cluster.weight + candidate.z * candidateWeight) / totalWeight;
+    cluster.top = (cluster.top * cluster.weight + candidate.top * candidateWeight) / totalWeight;
+    cluster.drop = Math.max(cluster.drop, candidate.drop);
+    cluster.width = Math.max(cluster.width, candidate.width);
+    const dirLen = Math.hypot(cluster.dirX + candidate.dirX, cluster.dirZ + candidate.dirZ) || 1;
+    cluster.dirX = (cluster.dirX + candidate.dirX) / dirLen;
+    cluster.dirZ = (cluster.dirZ + candidate.dirZ) / dirLen;
+    cluster.weight = totalWeight;
+    cluster.minCol = Math.min(cluster.minCol, candidate.sampleCol);
+    cluster.maxCol = Math.max(cluster.maxCol, candidate.sampleCol);
+    cluster.minRow = Math.min(cluster.minRow, candidate.sampleRow);
+    cluster.maxRow = Math.max(cluster.maxRow, candidate.sampleRow);
+    cluster.count += 1;
+  }
+
+  if (clusters.length === 0) {
+    return undefined;
+  }
+
+  clusters.sort((a, b) => b.drop - a.drop);
+  const limit = Math.min(WATERFALL_MAX_INSTANCES, clusters.length);
+  const out = new Float32Array(limit * 7);
+  const contourEdges = riverDomain?.boundaryEdges;
+  const contourCols = riverDomain?.cols ?? sampleCols;
+  const contourRows = riverDomain?.rows ?? sampleRows;
+  const toEdgeX = (worldX: number): number => (worldX / Math.max(1e-5, width) + 0.5) * contourCols;
+  const toEdgeY = (worldZ: number): number => (worldZ / Math.max(1e-5, depth) + 0.5) * contourRows;
+  const fromEdgeX = (edgeX: number): number => (edgeX / Math.max(1, contourCols) - 0.5) * width;
+  const fromEdgeY = (edgeY: number): number => (edgeY / Math.max(1, contourRows) - 0.5) * depth;
+
+  const snapClusterToContour = (cluster: Cluster): Cluster => {
+    if (!contourEdges || contourEdges.length < 4) {
+      return cluster;
+    }
+    const pX = toEdgeX(cluster.x);
+    const pY = toEdgeY(cluster.z);
+    let bestDistSq = Number.POSITIVE_INFINITY;
+    let bestEdgeX = pX;
+    let bestEdgeY = pY;
+    let bestSegmentLenWorld = 0;
+    for (let i = 0; i < contourEdges.length; i += 4) {
+      const ax = contourEdges[i];
+      const ay = contourEdges[i + 1];
+      const bx = contourEdges[i + 2];
+      const by = contourEdges[i + 3];
+      const abX = bx - ax;
+      const abY = by - ay;
+      const abLenSq = abX * abX + abY * abY;
+      if (abLenSq <= 1e-6) {
+        continue;
+      }
+      const t = clamp(((pX - ax) * abX + (pY - ay) * abY) / abLenSq, 0, 1);
+      const qx = ax + abX * t;
+      const qy = ay + abY * t;
+      const dx = pX - qx;
+      const dy = pY - qy;
+      const distSq = dx * dx + dy * dy;
+      if (distSq < bestDistSq) {
+        bestDistSq = distSq;
+        bestEdgeX = qx;
+        bestEdgeY = qy;
+        bestSegmentLenWorld = Math.hypot((abX / Math.max(1, contourCols)) * width, (abY / Math.max(1, contourRows)) * depth);
+      }
+    }
+    if (!Number.isFinite(bestDistSq) || bestDistSq > 4) {
+      return cluster;
+    }
+    const snapped = { ...cluster };
+    snapped.x = fromEdgeX(bestEdgeX);
+    snapped.z = fromEdgeY(bestEdgeY);
+    if (bestSegmentLenWorld > 0) {
+      snapped.width = clamp(snapped.width, cellWorld * 0.45, Math.max(cellWorld * 0.6, bestSegmentLenWorld * 0.55));
+    }
+    return snapped;
+  };
+
+  for (let i = 0; i < limit; i += 1) {
+    const cluster = snapClusterToContour(clusters[i]);
+    const clusteredWidth = clamp(cluster.width, cellWorld * 0.45, cellWorld * 2.9);
+    const base = i * 7;
+    out[base] = cluster.x;
+    out[base + 1] = cluster.z;
+    out[base + 2] = cluster.top;
+    out[base + 3] = cluster.drop;
+    out[base + 4] = cluster.dirX;
+    out[base + 5] = cluster.dirZ;
+    out[base + 6] = clusteredWidth;
+  }
+  return out;
+};
+
+const buildWaterfallInfluenceMap = (
+  sampleCols: number,
+  sampleRows: number,
+  width: number,
+  depth: number,
+  supportMask: Uint8Array,
+  waterfallInstances?: Float32Array
+): THREE.DataTexture => {
+  const total = sampleCols * sampleRows;
+  const lipField = new Float32Array(total);
+  const plungeField = new Float32Array(total);
+  if (waterfallInstances && waterfallInstances.length >= 7) {
+    const cellWorldX = width / Math.max(1, sampleCols - 1);
+    const cellWorldZ = depth / Math.max(1, sampleRows - 1);
+    const cellWorld = Math.max(0.001, Math.min(cellWorldX, cellWorldZ));
+    const waterfallCount = Math.floor(waterfallInstances.length / 7);
+    for (let i = 0; i < waterfallCount; i += 1) {
+      const base = i * 7;
+      const x = waterfallInstances[base];
+      const z = waterfallInstances[base + 1];
+      const drop = Math.max(0.06, waterfallInstances[base + 3]);
+      const dirX = waterfallInstances[base + 4];
+      const dirZ = waterfallInstances[base + 5];
+      const halfWidth = Math.max(0.08, waterfallInstances[base + 6]);
+      const influenceStrength = clamp(drop / 1.6, 0, 1);
+      const streamLen = Math.max(halfWidth * 1.6, drop * 0.6);
+      const lipX = x - dirX * (streamLen * 0.35);
+      const lipZ = z - dirZ * (streamLen * 0.35);
+      const plungeX = x + dirX * (streamLen * 0.6);
+      const plungeZ = z + dirZ * (streamLen * 0.6);
+      const lipRadius = Math.max(1, Math.round((halfWidth * 1.45) / cellWorld));
+      const plungeRadius = Math.max(1, Math.round((halfWidth * 1.95 + drop * 0.35) / cellWorld));
+      const stamp = (
+        cxWorld: number,
+        czWorld: number,
+        radius: number,
+        target: Float32Array,
+        strengthScale: number
+      ): void => {
+        const u = clamp(cxWorld / Math.max(1e-4, width) + 0.5, 0, 1);
+        const v = clamp(czWorld / Math.max(1e-4, depth) + 0.5, 0, 1);
+        const cx = Math.round(u * Math.max(1, sampleCols - 1));
+        const cy = Math.round(v * Math.max(1, sampleRows - 1));
+        const minY = Math.max(0, cy - radius);
+        const maxY = Math.min(sampleRows - 1, cy + radius);
+        const minX = Math.max(0, cx - radius);
+        const maxX = Math.min(sampleCols - 1, cx + radius);
+        for (let y = minY; y <= maxY; y += 1) {
+          const rowBase = y * sampleCols;
+          for (let xCell = minX; xCell <= maxX; xCell += 1) {
+            const idx = rowBase + xCell;
+            if (!supportMask[idx]) {
+              continue;
+            }
+            const dx = xCell - cx;
+            const dy = y - cy;
+            const dist = Math.hypot(dx, dy);
+            if (dist > radius) {
+              continue;
+            }
+            const t = 1 - dist / Math.max(1, radius);
+            const influence = t * t * strengthScale * influenceStrength;
+            target[idx] = Math.max(target[idx], influence);
+          }
+        }
+      };
+      stamp(lipX, lipZ, lipRadius, lipField, 0.92);
+      stamp(plungeX, plungeZ, plungeRadius, plungeField, 1.0);
+    }
+  }
+  const data = new Uint8Array(total * 4);
+  for (let i = 0; i < total; i += 1) {
+    const base = i * 4;
+    const lip = clamp(lipField[i], 0, 1);
+    const plunge = clamp(plungeField[i], 0, 1);
+    const combined = clamp(lip * 0.55 + plunge * 0.85, 0, 1);
+    data[base] = Math.round(lip * 255);
+    data[base + 1] = Math.round(plunge * 255);
+    data[base + 2] = Math.round(combined * 255);
+    data[base + 3] = Math.round(combined * 255);
+  }
+  return createDataTexture(data, sampleCols, sampleRows, THREE.LinearFilter, THREE.LinearFilter);
+};
+
+const buildRenderRiverSupportMasks = (
+  sample: TerrainSample,
+  waterId: number
+): { base: Uint8Array; render: Uint8Array } | undefined => {
+  const tileTypes = sample.tileTypes;
+  const riverMask = sample.riverMask;
+  if (!tileTypes || !riverMask) {
+    return undefined;
+  }
+  const cols = sample.cols;
+  const rows = sample.rows;
+  if (cols < 2 || rows < 2) {
+    return undefined;
+  }
+  const riverSurface = sample.riverSurface;
+  const total = cols * rows;
+  const base = new Uint8Array(total);
+  let sourceCount = 0;
+  for (let i = 0; i < total; i += 1) {
+    const hasSurface = !riverSurface || Number.isFinite(riverSurface[i]);
+    base[i] = tileTypes[i] === waterId && riverMask[i] > 0 && hasSurface ? 1 : 0;
+    if (base[i]) {
+      sourceCount += 1;
+    }
+  }
+  if (sourceCount === 0) {
+    return undefined;
+  }
+
+  const render = new Uint8Array(base);
+  const isValid = (x: number, y: number): boolean => x >= 0 && y >= 0 && x < cols && y < rows;
+  const idxAt = (x: number, y: number): number => y * cols + x;
+  const orthDirs = [
+    { dx: -1, dy: 0 },
+    { dx: 1, dy: 0 },
+    { dx: 0, dy: -1 },
+    { dx: 0, dy: 1 }
+  ];
+  const diagDirs = [
+    { dx: -1, dy: -1 },
+    { dx: 1, dy: -1 },
+    { dx: -1, dy: 1 },
+    { dx: 1, dy: 1 }
+  ];
+  for (let pass = 0; pass < RIVER_WIDTH_EXPAND_MAX_PASSES; pass += 1) {
+    const additions = new Set<number>();
+    for (let y = 0; y < rows; y += 1) {
+      const rowBase = y * cols;
+      for (let x = 0; x < cols; x += 1) {
+        const idx = rowBase + x;
+        // Grow only around authored/base river cells to avoid flood-like recursive expansion.
+        if (!base[idx]) {
+          continue;
+        }
+        let orthCount = 0;
+        for (let i = 0; i < orthDirs.length; i += 1) {
+          const nx = x + orthDirs[i].dx;
+          const ny = y + orthDirs[i].dy;
+          if (isValid(nx, ny) && render[idxAt(nx, ny)]) {
+            orthCount += 1;
+          }
+        }
+        let diagCount = 0;
+        for (let i = 0; i < diagDirs.length; i += 1) {
+          const nx = x + diagDirs[i].dx;
+          const ny = y + diagDirs[i].dy;
+          if (isValid(nx, ny) && render[idxAt(nx, ny)]) {
+            diagCount += 1;
+          }
+        }
+        const thinCell = orthCount === 0 || (orthCount < RIVER_MIN_VISUAL_WIDTH_CELLS && diagCount > 0);
+        if (!thinCell || diagCount === 0) {
+          continue;
+        }
+        let bestCandidate = -1;
+        let bestScore = Number.POSITIVE_INFINITY;
+        for (let i = 0; i < orthDirs.length; i += 1) {
+          const nx = x + orthDirs[i].dx;
+          const ny = y + orthDirs[i].dy;
+          if (!isValid(nx, ny)) {
+            continue;
+          }
+          const nIdx = idxAt(nx, ny);
+          if (render[nIdx]) {
+            continue;
+          }
+          if (tileTypes[nIdx] === waterId && riverMask[nIdx] === 0) {
+            continue;
+          }
+          let neighborSupport = 0;
+          for (let oy = -1; oy <= 1; oy += 1) {
+            for (let ox = -1; ox <= 1; ox += 1) {
+              if (ox === 0 && oy === 0) {
+                continue;
+              }
+              const sx = nx + ox;
+              const sy = ny + oy;
+              if (isValid(sx, sy) && render[idxAt(sx, sy)]) {
+                neighborSupport += 1;
+              }
+            }
+          }
+          if (neighborSupport > 4) {
+            continue;
+          }
+          const elevPenalty = Math.abs((sample.elevations[nIdx] ?? 0) - (sample.elevations[idx] ?? 0));
+          const supportPenalty = neighborSupport >= 3 ? 0.15 : 0;
+          const score = elevPenalty + supportPenalty;
+          if (score < bestScore) {
+            bestScore = score;
+            bestCandidate = nIdx;
+          }
+        }
+        if (bestCandidate >= 0) {
+          additions.add(bestCandidate);
+          if (additions.size >= sourceCount * RIVER_DIAGONAL_FILL_MAX_ADDS_PER_CELL) {
+            break;
+          }
+        }
+      }
+    }
+    if (additions.size === 0) {
+      break;
+    }
+    additions.forEach((idx) => {
+      render[idx] = 1;
+    });
+  }
+
+  return { base, render };
+};
+
+const buildRiverRenderDomain = (
+  sample: TerrainSample,
+  waterId: number
+): RiverRenderDomain | undefined => {
+  const masks = buildRenderRiverSupportMasks(sample, waterId);
+  if (!masks) {
+    return undefined;
+  }
+  const cols = sample.cols;
+  const rows = sample.rows;
+  const { base: baseSupport, render: renderSupport } = masks;
+  const renderCount = (() => {
+    let count = 0;
+    for (let i = 0; i < renderSupport.length; i += 1) {
+      if (renderSupport[i] > 0) {
+        count += 1;
+      }
+    }
+    return count;
+  })();
+  if (renderCount === 0) {
+    return undefined;
+  }
+
+  const vertexField = new Float32Array((cols + 1) * (rows + 1));
+  const vIdx = (x: number, y: number): number => y * (cols + 1) + x;
+  const isValid = (x: number, y: number): boolean => x >= 0 && y >= 0 && x < cols && y < rows;
+  const idxAt = (x: number, y: number): number => y * cols + x;
+  for (let y = 0; y <= rows; y += 1) {
+    for (let x = 0; x <= cols; x += 1) {
+      let sum = 0;
+      let count = 0;
+      const cells = [
+        { x: x - 1, y: y - 1 },
+        { x, y: y - 1 },
+        { x: x - 1, y },
+        { x, y }
+      ];
+      for (let i = 0; i < cells.length; i += 1) {
+        const c = cells[i];
+        if (!isValid(c.x, c.y)) {
+          continue;
+        }
+        sum += renderSupport[idxAt(c.x, c.y)] ? 1 : 0;
+        count += 1;
+      }
+      vertexField[vIdx(x, y)] = count > 0 ? sum / count : 0;
+    }
+  }
+
+  type ScalarPoint = { v: RiverContourVertex; s: number };
+  type EdgeCountRecord = { count: number; a: number; b: number };
+  const threshold = 0.5;
+  const quantScale = 4096;
+  const contourVertices: number[] = [];
+  const contourIndices: number[] = [];
+  const vertexToIndex = new Map<string, number>();
+  const edgeCounts = new Map<string, EdgeCountRecord>();
+
+  const quantKey = (x: number, y: number): string => `${Math.round(x * quantScale)},${Math.round(y * quantScale)}`;
+  const undirectedEdgeKey = (a: number, b: number): string => {
+    return a < b ? `${a}|${b}` : `${b}|${a}`;
+  };
+  const getOrCreateVertexIndex = (v: RiverContourVertex): number => {
+    const key = quantKey(v.x, v.y);
+    const existing = vertexToIndex.get(key);
+    if (existing !== undefined) {
+      return existing;
+    }
+    const idx = contourVertices.length / 2;
+    contourVertices.push(v.x, v.y);
+    vertexToIndex.set(key, idx);
+    return idx;
+  };
+  const registerOrientedEdge = (a: number, b: number): void => {
+    if (a === b) {
+      return;
+    }
+    const key = undirectedEdgeKey(a, b);
+    const existing = edgeCounts.get(key);
+    if (!existing) {
+      edgeCounts.set(key, { count: 1, a, b });
+      return;
+    }
+    existing.count += 1;
+  };
+  const polygonArea = (poly: RiverContourPolygon): number => {
+    let area = 0;
+    for (let i = 0; i < poly.length; i += 1) {
+      const a = poly[i];
+      const b = poly[(i + 1) % poly.length];
+      area += a.x * b.y - b.x * a.y;
+    }
+    return area * 0.5;
+  };
+  const cleanPolygon = (poly: RiverContourPolygon): RiverContourPolygon => {
+    const out: RiverContourPolygon = [];
+    for (let i = 0; i < poly.length; i += 1) {
+      const cur = poly[i];
+      const prev = out.length > 0 ? out[out.length - 1] : null;
+      if (!prev || Math.hypot(cur.x - prev.x, cur.y - prev.y) > 1e-5) {
+        out.push(cur);
+      }
+    }
+    if (out.length >= 3) {
+      const first = out[0];
+      const last = out[out.length - 1];
+      if (Math.hypot(first.x - last.x, first.y - last.y) <= 1e-5) {
+        out.pop();
+      }
+    }
+    return out;
+  };
+  const addPolygon = (polygon: RiverContourPolygon): void => {
+    const cleaned = cleanPolygon(polygon);
+    if (cleaned.length < 3) {
+      return;
+    }
+    const area = polygonArea(cleaned);
+    if (Math.abs(area) <= 1e-6) {
+      return;
+    }
+    const oriented = area > 0 ? cleaned : [...cleaned].reverse();
+    const polyIndices = oriented.map((v) => getOrCreateVertexIndex(v));
+    for (let i = 1; i < polyIndices.length - 1; i += 1) {
+      contourIndices.push(polyIndices[0], polyIndices[i], polyIndices[i + 1]);
+    }
+    for (let i = 0; i < polyIndices.length; i += 1) {
+      const a = polyIndices[i];
+      const b = polyIndices[(i + 1) % polyIndices.length];
+      registerOrientedEdge(a, b);
+    }
+  };
+  const interpolate = (a: ScalarPoint, b: ScalarPoint): ScalarPoint => {
+    const delta = b.s - a.s;
+    const t = Math.abs(delta) <= 1e-5 ? 0.5 : clamp((threshold - a.s) / delta, 0, 1);
+    return {
+      v: {
+        x: a.v.x + (b.v.x - a.v.x) * t,
+        y: a.v.y + (b.v.y - a.v.y) * t
+      },
+      s: threshold
+    };
+  };
+  const clipTriangleInside = (v0: ScalarPoint, v1: ScalarPoint, v2: ScalarPoint): RiverContourPolygon => {
+    let poly: ScalarPoint[] = [v0, v1, v2];
+    const out: ScalarPoint[] = [];
+    for (let i = 0; i < poly.length; i += 1) {
+      const cur = poly[i];
+      const nxt = poly[(i + 1) % poly.length];
+      const curIn = cur.s >= threshold;
+      const nxtIn = nxt.s >= threshold;
+      if (curIn && nxtIn) {
+        out.push(nxt);
+      } else if (curIn && !nxtIn) {
+        out.push(interpolate(cur, nxt));
+      } else if (!curIn && nxtIn) {
+        out.push(interpolate(cur, nxt));
+        out.push(nxt);
+      }
+    }
+    poly = out;
+    if (poly.length < 3) {
+      return [];
+    }
+    return poly.map((p) => p.v);
+  };
+  const emitTriangleClipped = (
+    a: RiverContourVertex,
+    sa: number,
+    b: RiverContourVertex,
+    sb: number,
+    c: RiverContourVertex,
+    sc: number
+  ): void => {
+    const poly = clipTriangleInside({ v: a, s: sa }, { v: b, s: sb }, { v: c, s: sc });
+    if (poly.length < 3) {
+      return;
+    }
+    addPolygon(poly);
+  };
+
+  for (let y = 0; y < rows; y += 1) {
+    for (let x = 0; x < cols; x += 1) {
+      const a: RiverContourVertex = { x, y };
+      const b: RiverContourVertex = { x: x + 1, y };
+      const c: RiverContourVertex = { x: x + 1, y: y + 1 };
+      const d: RiverContourVertex = { x, y: y + 1 };
+      const sa = vertexField[vIdx(x, y)];
+      const sb = vertexField[vIdx(x + 1, y)];
+      const sc = vertexField[vIdx(x + 1, y + 1)];
+      const sd = vertexField[vIdx(x, y + 1)];
+      const caseMask =
+        (sa >= threshold ? 1 : 0) |
+        (sb >= threshold ? 2 : 0) |
+        (sc >= threshold ? 4 : 0) |
+        (sd >= threshold ? 8 : 0);
+      if (caseMask === 0) {
+        continue;
+      }
+      let splitAC = true;
+      if (caseMask === 5 || caseMask === 10) {
+        // Asymptotic-decider style tie-break for ambiguous cases.
+        const center = (sa + sb + sc + sd) * 0.25;
+        const centerInside = center >= threshold;
+        if (caseMask === 5) {
+          splitAC = centerInside;
+        } else {
+          splitAC = !centerInside;
+        }
+      }
+      if (splitAC) {
+        emitTriangleClipped(a, sa, b, sb, c, sc);
+        emitTriangleClipped(a, sa, c, sc, d, sd);
+      } else {
+        emitTriangleClipped(a, sa, b, sb, d, sd);
+        emitTriangleClipped(b, sb, c, sc, d, sd);
+      }
+    }
+  }
+
+  if (contourIndices.length === 0 || contourVertices.length < 6) {
+    return undefined;
+  }
+
+  const boundaryEdges: number[] = [];
+  edgeCounts.forEach((record) => {
+    if (record.count !== 1) {
+      return;
+    }
+    const aOffset = record.a * 2;
+    const bOffset = record.b * 2;
+    boundaryEdges.push(
+      contourVertices[aOffset],
+      contourVertices[aOffset + 1],
+      contourVertices[bOffset],
+      contourVertices[bOffset + 1]
+    );
+  });
+
+  const baseCount = (() => {
+    let count = 0;
+    for (let i = 0; i < baseSupport.length; i += 1) {
+      if (baseSupport[i]) {
+        count += 1;
+      }
+    }
+    return count;
+  })();
+
+  return {
+    cols,
+    rows,
+    baseSupport,
+    renderSupport,
+    vertexField,
+    contourVertices: new Float32Array(contourVertices),
+    contourIndices: new Uint32Array(contourIndices),
+    boundaryEdges: new Float32Array(boundaryEdges),
+    distanceToBank: buildDistanceField(renderSupport, cols, rows, 0),
+    debugStats: DEBUG_TERRAIN_RENDER
+      ? {
+          baseCount,
+          renderCount,
+          contourVertexCount: contourVertices.length / 2,
+          contourTriangleCount: contourIndices.length / 3,
+          boundaryEdgeCount: boundaryEdges.length / 4,
+          wallQuadCount: 0,
+          protrudingVertexRatio: 0
+        }
+      : undefined
+  };
+};
+
+const buildRiverCutoutAlphaMap = (
+  riverDomain: RiverRenderDomain | undefined
+): THREE.DataTexture | undefined => {
+  if (!riverDomain) {
+    return undefined;
+  }
+  const cols = riverDomain.cols;
+  const rows = riverDomain.rows;
+  if (cols <= 0 || rows <= 0) {
+    return undefined;
+  }
+  const texCols = Math.max(256, Math.min(4096, cols * 8));
+  const texRows = Math.max(256, Math.min(4096, rows * 8));
+  const inside = new Uint8Array(texCols * texRows);
+  const vertices = riverDomain.contourVertices;
+  const indices = riverDomain.contourIndices;
+  const toTexX = (x: number): number => (x / Math.max(1, cols)) * texCols;
+  const toTexY = (y: number): number => (y / Math.max(1, rows)) * texRows;
+  const edgeFn = (ax: number, ay: number, bx: number, by: number, px: number, py: number): number => {
+    return (px - ax) * (by - ay) - (py - ay) * (bx - ax);
+  };
+
+  for (let i = 0; i < indices.length; i += 3) {
+    const i0 = indices[i] * 2;
+    const i1 = indices[i + 1] * 2;
+    const i2 = indices[i + 2] * 2;
+    if (i2 + 1 >= vertices.length) {
+      continue;
+    }
+    const ax = toTexX(vertices[i0]);
+    const ay = toTexY(vertices[i0 + 1]);
+    const bx = toTexX(vertices[i1]);
+    const by = toTexY(vertices[i1 + 1]);
+    const cx = toTexX(vertices[i2]);
+    const cy = toTexY(vertices[i2 + 1]);
+    const minX = clamp(Math.floor(Math.min(ax, bx, cx)) - 1, 0, texCols - 1);
+    const maxX = clamp(Math.ceil(Math.max(ax, bx, cx)) + 1, 0, texCols - 1);
+    const minY = clamp(Math.floor(Math.min(ay, by, cy)) - 1, 0, texRows - 1);
+    const maxY = clamp(Math.ceil(Math.max(ay, by, cy)) + 1, 0, texRows - 1);
+    for (let y = minY; y <= maxY; y += 1) {
+      const py = y + 0.5;
+      const rowBase = y * texCols;
+      for (let x = minX; x <= maxX; x += 1) {
+        const px = x + 0.5;
+        const e0 = edgeFn(ax, ay, bx, by, px, py);
+        const e1 = edgeFn(bx, by, cx, cy, px, py);
+        const e2 = edgeFn(cx, cy, ax, ay, px, py);
+        const insideTri = (e0 >= -1e-5 && e1 >= -1e-5 && e2 >= -1e-5) || (e0 <= 1e-5 && e1 <= 1e-5 && e2 <= 1e-5);
+        if (insideTri) {
+          inside[rowBase + x] = 1;
+        }
+      }
+    }
+  }
+
+  const data = new Uint8Array(texCols * texRows * 4);
+  for (let i = 0; i < inside.length; i += 1) {
+    const encoded = inside[i] ? 0 : 255;
+    const base = i * 4;
+    data[base] = encoded;
+    data[base + 1] = encoded;
+    data[base + 2] = encoded;
+    data[base + 3] = 255;
+  }
+  return createDataTexture(data, texCols, texRows, THREE.LinearFilter, THREE.LinearFilter);
+};
+
+const applyRiverTerrainTriangleCutout = (
+  geometry: THREE.BufferGeometry,
+  sampleCols: number,
+  sampleRows: number,
+  riverDomain: RiverRenderDomain | undefined
+): void => {
+  if (!riverDomain || sampleCols < 2 || sampleRows < 2) {
+    return;
+  }
+  const index = geometry.getIndex();
+  if (!index) {
+    return;
+  }
+  const src = index.array as ArrayLike<number>;
+  const vertexCount = sampleCols * sampleRows;
+  const vf = riverDomain.vertexField;
+  const vfCols = riverDomain.cols + 1;
+  const boundaryEdges = riverDomain.boundaryEdges;
+  if (!boundaryEdges || boundaryEdges.length < 4) {
+    return;
+  }
+  const vIdx = (x: number, y: number): number => y * vfCols + x;
+  const sampleField = (xEdge: number, yEdge: number): number => {
+    const x = clamp(xEdge, 0, riverDomain.cols);
+    const y = clamp(yEdge, 0, riverDomain.rows);
+    const x0 = Math.floor(x);
+    const y0 = Math.floor(y);
+    const x1 = Math.min(riverDomain.cols, x0 + 1);
+    const y1 = Math.min(riverDomain.rows, y0 + 1);
+    const tx = x - x0;
+    const ty = y - y0;
+    const s00 = vf[vIdx(x0, y0)] ?? 0;
+    const s10 = vf[vIdx(x1, y0)] ?? s00;
+    const s01 = vf[vIdx(x0, y1)] ?? s00;
+    const s11 = vf[vIdx(x1, y1)] ?? s10;
+    const sx0 = s00 * (1 - tx) + s10 * tx;
+    const sx1 = s01 * (1 - tx) + s11 * tx;
+    return sx0 * (1 - ty) + sx1 * ty;
+  };
+  const toEdgeX = (gridX: number): number =>
+    (gridX / Math.max(1, sampleCols - 1)) * riverDomain.cols;
+  const toEdgeY = (gridY: number): number =>
+    (gridY / Math.max(1, sampleRows - 1)) * riverDomain.rows;
+  const pointInTriangle = (
+    px: number,
+    py: number,
+    ax: number,
+    ay: number,
+    bx: number,
+    by: number,
+    cx: number,
+    cy: number
+  ): boolean => {
+    const v0x = cx - ax;
+    const v0y = cy - ay;
+    const v1x = bx - ax;
+    const v1y = by - ay;
+    const v2x = px - ax;
+    const v2y = py - ay;
+    const dot00 = v0x * v0x + v0y * v0y;
+    const dot01 = v0x * v1x + v0y * v1y;
+    const dot02 = v0x * v2x + v0y * v2y;
+    const dot11 = v1x * v1x + v1y * v1y;
+    const dot12 = v1x * v2x + v1y * v2y;
+    const invDen = 1 / Math.max(1e-8, dot00 * dot11 - dot01 * dot01);
+    const u = (dot11 * dot02 - dot01 * dot12) * invDen;
+    const v = (dot00 * dot12 - dot01 * dot02) * invDen;
+    return u >= -1e-5 && v >= -1e-5 && u + v <= 1 + 1e-5;
+  };
+  const orient = (ax: number, ay: number, bx: number, by: number, cx: number, cy: number): number =>
+    (bx - ax) * (cy - ay) - (by - ay) * (cx - ax);
+  const onSegment = (ax: number, ay: number, bx: number, by: number, px: number, py: number): boolean =>
+    px >= Math.min(ax, bx) - 1e-5 &&
+    px <= Math.max(ax, bx) + 1e-5 &&
+    py >= Math.min(ay, by) - 1e-5 &&
+    py <= Math.max(ay, by) + 1e-5;
+  const segmentsIntersect = (
+    ax: number,
+    ay: number,
+    bx: number,
+    by: number,
+    cx: number,
+    cy: number,
+    dx: number,
+    dy: number
+  ): boolean => {
+    const o1 = orient(ax, ay, bx, by, cx, cy);
+    const o2 = orient(ax, ay, bx, by, dx, dy);
+    const o3 = orient(cx, cy, dx, dy, ax, ay);
+    const o4 = orient(cx, cy, dx, dy, bx, by);
+    if ((o1 > 0) !== (o2 > 0) && (o3 > 0) !== (o4 > 0)) {
+      return true;
+    }
+    if (Math.abs(o1) <= 1e-5 && onSegment(ax, ay, bx, by, cx, cy)) return true;
+    if (Math.abs(o2) <= 1e-5 && onSegment(ax, ay, bx, by, dx, dy)) return true;
+    if (Math.abs(o3) <= 1e-5 && onSegment(cx, cy, dx, dy, ax, ay)) return true;
+    if (Math.abs(o4) <= 1e-5 && onSegment(cx, cy, dx, dy, bx, by)) return true;
+    return false;
+  };
+  const edgeCount = Math.floor(boundaryEdges.length / 4);
+  const binSize = Math.max(1, Math.floor(Math.max(riverDomain.cols, riverDomain.rows) / 48));
+  const binKey = (x: number, y: number): string => `${x},${y}`;
+  const bins = new Map<string, number[]>();
+  for (let edgeIdx = 0; edgeIdx < edgeCount; edgeIdx += 1) {
+    const base = edgeIdx * 4;
+    const ax = boundaryEdges[base];
+    const ay = boundaryEdges[base + 1];
+    const bx = boundaryEdges[base + 2];
+    const by = boundaryEdges[base + 3];
+    const minX = Math.floor(Math.min(ax, bx) / binSize);
+    const maxX = Math.floor(Math.max(ax, bx) / binSize);
+    const minY = Math.floor(Math.min(ay, by) / binSize);
+    const maxY = Math.floor(Math.max(ay, by) / binSize);
+    for (let byIdx = minY; byIdx <= maxY; byIdx += 1) {
+      for (let bxIdx = minX; bxIdx <= maxX; bxIdx += 1) {
+        const key = binKey(bxIdx, byIdx);
+        let list = bins.get(key);
+        if (!list) {
+          list = [];
+          bins.set(key, list);
+        }
+        list.push(edgeIdx);
+      }
+    }
+  }
+  const edgeStamp = new Int32Array(edgeCount);
+  let stamp = 1;
+  const collectEdges = (minX: number, maxX: number, minY: number, maxY: number, out: number[]): void => {
+    out.length = 0;
+    const bx0 = Math.floor(minX / binSize);
+    const bx1 = Math.floor(maxX / binSize);
+    const by0 = Math.floor(minY / binSize);
+    const by1 = Math.floor(maxY / binSize);
+    for (let byIdx = by0; byIdx <= by1; byIdx += 1) {
+      for (let bxIdx = bx0; bxIdx <= bx1; bxIdx += 1) {
+        const list = bins.get(binKey(bxIdx, byIdx));
+        if (!list) {
+          continue;
+        }
+        for (let i = 0; i < list.length; i += 1) {
+          const edgeIdx = list[i];
+          if (edgeStamp[edgeIdx] === stamp) {
+            continue;
+          }
+          edgeStamp[edgeIdx] = stamp;
+          out.push(edgeIdx);
+        }
+      }
+    }
+    stamp += 1;
+    if (stamp >= 2147483640) {
+      edgeStamp.fill(0);
+      stamp = 1;
+    }
+  };
+  const candidateEdges: number[] = [];
+
+  const keep: number[] = [];
+  for (let i = 0; i < src.length; i += 3) {
+    const ia = src[i] as number;
+    const ib = src[i + 1] as number;
+    const ic = src[i + 2] as number;
+    if (
+      ia < 0 ||
+      ib < 0 ||
+      ic < 0 ||
+      ia >= vertexCount ||
+      ib >= vertexCount ||
+      ic >= vertexCount
+    ) {
+      continue;
+    }
+    const ax = ia % sampleCols;
+    const ay = Math.floor(ia / sampleCols);
+    const bx = ib % sampleCols;
+    const by = Math.floor(ib / sampleCols);
+    const cx = ic % sampleCols;
+    const cy = Math.floor(ic / sampleCols);
+    const axE = toEdgeX(ax);
+    const ayE = toEdgeY(ay);
+    const bxE = toEdgeX(bx);
+    const byE = toEdgeY(by);
+    const cxE = toEdgeX(cx);
+    const cyE = toEdgeY(cy);
+    const cX = (axE + bxE + cxE) / 3;
+    const cY = (ayE + byE + cyE) / 3;
+    let cut =
+      sampleField(axE, ayE) >= 0.5 ||
+      sampleField(bxE, byE) >= 0.5 ||
+      sampleField(cxE, cyE) >= 0.5 ||
+      sampleField(cX, cY) >= 0.5;
+    if (!cut) {
+      const minX = Math.min(axE, bxE, cxE);
+      const maxX = Math.max(axE, bxE, cxE);
+      const minY = Math.min(ayE, byE, cyE);
+      const maxY = Math.max(ayE, byE, cyE);
+      collectEdges(minX, maxX, minY, maxY, candidateEdges);
+      for (let e = 0; e < candidateEdges.length; e += 1) {
+        const edgeIdx = candidateEdges[e];
+        const base = edgeIdx * 4;
+        const ex0 = boundaryEdges[base];
+        const ey0 = boundaryEdges[base + 1];
+        const ex1 = boundaryEdges[base + 2];
+        const ey1 = boundaryEdges[base + 3];
+        if (
+          segmentsIntersect(axE, ayE, bxE, byE, ex0, ey0, ex1, ey1) ||
+          segmentsIntersect(bxE, byE, cxE, cyE, ex0, ey0, ex1, ey1) ||
+          segmentsIntersect(cxE, cyE, axE, ayE, ex0, ey0, ex1, ey1) ||
+          pointInTriangle(ex0, ey0, axE, ayE, bxE, byE, cxE, cyE) ||
+          pointInTriangle(ex1, ey1, axE, ayE, bxE, byE, cxE, cyE)
+        ) {
+          cut = true;
+          break;
+        }
+      }
+    }
+    if (!cut) {
+      keep.push(ia, ib, ic);
+    }
+  }
+  if (keep.length === src.length || keep.length === 0) {
+    return;
+  }
+  const dst =
+    vertexCount > 65535
+      ? new Uint32Array(keep)
+      : new Uint16Array(keep);
+  geometry.setIndex(new THREE.BufferAttribute(dst, 1));
+};
+
+const buildRiverMeshData = (
+  sample: TerrainSample,
+  waterId: number,
+  heightScale: number,
+  width: number,
+  depth: number,
+  waterLevelWorld: number,
+  riverDomain: RiverRenderDomain | undefined,
+  waterfallInstances?: Float32Array
+): RiverWaterData | undefined => {
+  if (!sample.tileTypes || !riverDomain) {
+    return undefined;
+  }
+  const cols = sample.cols;
+  const rows = sample.rows;
+  if (cols < 2 || rows < 2) {
+    return undefined;
+  }
+  if (riverDomain.contourIndices.length < 3 || riverDomain.contourVertices.length < 6) {
+    return undefined;
+  }
+  const riverSurface = sample.riverSurface;
+  const total = cols * rows;
+  const riverSupportBase = riverDomain.baseSupport;
+  const renderSupport = riverDomain.renderSupport;
+
+  const isValid = (x: number, y: number): boolean => x >= 0 && y >= 0 && x < cols && y < rows;
+  const idxAt = (x: number, y: number): number => y * cols + x;
+
+  const riverRatio = new Float32Array(total);
+  const riverTypes = new Uint8Array(total);
+  const surfaceNorm = new Float32Array(total);
+  const rapidAttrCenter = new Float32Array(total);
+  const flowDirX = new Float32Array(total);
+  const flowDirY = new Float32Array(total);
+  const surfaceWorld = new Float32Array(total).fill(Number.NaN);
+  const lipSurfaceOverride = new Float32Array(total).fill(Number.NaN);
+  const riverBed = sample.riverBed;
+  const riverStepStrength = sample.riverStepStrength;
+  const minDepthWorld = RIVER_MIN_DEPTH_NORM * heightScale;
+
+  for (let i = 0; i < total; i += 1) {
+    if (!renderSupport[i]) {
+      continue;
+    }
+    riverRatio[i] = 1;
+    riverTypes[i] = waterId;
+  }
+
+  const sampleSurfaceWorld = (idx: number): number => {
+    if (!renderSupport[idx]) {
+      return (sample.elevations[idx] ?? 0) * heightScale;
+    }
+    const source = riverSupportBase[idx] > 0;
+    let surfaceY = (sample.elevations[idx] ?? 0) * heightScale;
+    let bedY = surfaceY - minDepthWorld;
+    if (source) {
+      const surface = Number.isFinite(riverSurface?.[idx]) ? clamp(riverSurface?.[idx] as number, 0, 1) : sample.elevations[idx] ?? 0;
+      const bed = Number.isFinite(riverBed?.[idx]) ? clamp(riverBed?.[idx] as number, 0, 1) : surface - RIVER_MIN_DEPTH_NORM;
+      surfaceY = surface * heightScale;
+      bedY = bed * heightScale;
+    } else {
+      let sum = 0;
+      let count = 0;
+      const x = idx % cols;
+      const y = Math.floor(idx / cols);
+      for (let oy = -1; oy <= 1; oy += 1) {
+        for (let ox = -1; ox <= 1; ox += 1) {
+          if (ox === 0 && oy === 0) {
+            continue;
+          }
+          const nx = x + ox;
+          const ny = y + oy;
+          if (!isValid(nx, ny)) {
+            continue;
+          }
+          const nIdx = idxAt(nx, ny);
+          if (!riverSupportBase[nIdx]) {
+            continue;
+          }
+          const nSurface = Number.isFinite(riverSurface?.[nIdx]) ? clamp(riverSurface?.[nIdx] as number, 0, 1) : sample.elevations[nIdx] ?? 0;
+          sum += nSurface * heightScale;
+          count += 1;
+        }
+      }
+      if (count > 0) {
+        surfaceY = sum / count;
+      }
+      bedY = surfaceY - minDepthWorld;
+    }
+    surfaceY = Math.max(surfaceY, bedY + minDepthWorld);
+    const x = idx % cols;
+    const y = Math.floor(idx / cols);
+    let minBankWorld = Number.POSITIVE_INFINITY;
+    for (let oy = -1; oy <= 1; oy += 1) {
+      for (let ox = -1; ox <= 1; ox += 1) {
+        if (ox === 0 && oy === 0) {
+          continue;
+        }
+        const nx = x + ox;
+        const ny = y + oy;
+        if (!isValid(nx, ny)) {
+          continue;
+        }
+          const nIdx = idxAt(nx, ny);
+          if (renderSupport[nIdx]) {
+            continue;
+          }
+          minBankWorld = Math.min(minBankWorld, (sample.elevations[nIdx] ?? 0) * heightScale);
+      }
+    }
+    if (Number.isFinite(minBankWorld)) {
+      surfaceY = Math.min(surfaceY, minBankWorld - RIVER_SURFACE_BANK_CLEARANCE);
+    }
+    return surfaceY;
+  };
+
+  for (let i = 0; i < total; i += 1) {
+    if (!renderSupport[i]) {
+      continue;
+    }
+    surfaceWorld[i] = sampleSurfaceWorld(i);
+    surfaceNorm[i] = clamp(surfaceWorld[i] / Math.max(1e-4, heightScale), 0, 1);
+    const step = Number.isFinite(riverStepStrength?.[i]) ? clamp(riverStepStrength?.[i] as number, 0, 1) : 0;
+    rapidAttrCenter[i] = step;
+  }
+
+  if (waterfallInstances && waterfallInstances.length >= 7) {
+    const instanceCount = Math.floor(waterfallInstances.length / 7);
+    const cellWorldX = width / Math.max(1, cols - 1);
+    const cellWorldZ = depth / Math.max(1, rows - 1);
+    const cellWorld = Math.max(1e-4, Math.min(cellWorldX, cellWorldZ));
+    for (let i = 0; i < instanceCount; i += 1) {
+      const base = i * 7;
+      const centerX = waterfallInstances[base];
+      const centerZ = waterfallInstances[base + 1];
+      const topOffset = waterfallInstances[base + 2];
+      const dirX = waterfallInstances[base + 4];
+      const dirZ = waterfallInstances[base + 5];
+      const halfWidth = Math.max(0.08, waterfallInstances[base + 6]);
+      const lipSurface = waterLevelWorld + topOffset - WATERFALL_TOP_OFFSET;
+      const radiusCells = Math.max(1, Math.ceil((halfWidth * 1.6) / cellWorld));
+      const u = clamp(centerX / Math.max(1e-4, width) + 0.5, 0, 1);
+      const v = clamp(centerZ / Math.max(1e-4, depth) + 0.5, 0, 1);
+      const cx = Math.round(u * Math.max(1, cols - 1));
+      const cy = Math.round(v * Math.max(1, rows - 1));
+      const minY = Math.max(0, cy - radiusCells);
+      const maxY = Math.min(rows - 1, cy + radiusCells);
+      const minX = Math.max(0, cx - radiusCells);
+      const maxX = Math.min(cols - 1, cx + radiusCells);
+      for (let y = minY; y <= maxY; y += 1) {
+        const rowBase = y * cols;
+        for (let x = minX; x <= maxX; x += 1) {
+          const idx = rowBase + x;
+          if (!renderSupport[idx] || !Number.isFinite(surfaceWorld[idx])) {
+            continue;
+          }
+          const wx = ((x + 0.5) / Math.max(1, cols) - 0.5) * width - centerX;
+          const wz = ((y + 0.5) / Math.max(1, rows) - 0.5) * depth - centerZ;
+          const along = wx * dirX + wz * dirZ;
+          const perp = Math.abs(wx * -dirZ + wz * dirX);
+          if (along < -cellWorld * 1.8 || along > cellWorld * 0.35) {
+            continue;
+          }
+          if (perp > Math.max(cellWorld * 0.8, halfWidth * 0.9)) {
+            continue;
+          }
+          surfaceWorld[idx] = Math.max(surfaceWorld[idx], lipSurface);
+          const prevLip = lipSurfaceOverride[idx];
+          lipSurfaceOverride[idx] = Number.isFinite(prevLip) ? Math.max(prevLip, lipSurface) : lipSurface;
+        }
+      }
+    }
+  }
+
+  for (let y = 0; y < rows; y += 1) {
+    for (let x = 0; x < cols; x += 1) {
+      const idx = idxAt(x, y);
+      if (!renderSupport[idx]) {
+        continue;
+      }
+      const center = surfaceWorld[idx];
+      const left = isValid(x - 1, y) && renderSupport[idxAt(x - 1, y)] ? surfaceWorld[idxAt(x - 1, y)] : center;
+      const right = isValid(x + 1, y) && renderSupport[idxAt(x + 1, y)] ? surfaceWorld[idxAt(x + 1, y)] : center;
+      const up = isValid(x, y - 1) && renderSupport[idxAt(x, y - 1)] ? surfaceWorld[idxAt(x, y - 1)] : center;
+      const down = isValid(x, y + 1) && renderSupport[idxAt(x, y + 1)] ? surfaceWorld[idxAt(x, y + 1)] : center;
+      let dx = left - right;
+      let dy = up - down;
+      const len = Math.hypot(dx, dy);
+      if (len <= 1e-5) {
+        const n = noiseAt(idx * 0.37 + 1.7) * Math.PI * 2;
+        dx = Math.cos(n);
+        dy = Math.sin(n);
+      } else {
+        dx /= len;
+        dy /= len;
+      }
+      flowDirX[idx] = dx;
+      flowDirY[idx] = dy;
+      const grad = Math.hypot(right - left, down - up);
+      rapidAttrCenter[idx] = clamp(rapidAttrCenter[idx] * 0.65 + grad * 0.42, 0, 1);
+    }
+  }
+
+  const riverSupportMap = buildWaterSupportMapTexture(cols, rows, renderSupport);
+  const riverFlowMap = buildRiverFlowTexture(surfaceNorm, riverTypes, cols, rows, waterId, riverRatio);
+  const riverRatios: WaterSampleRatios = { water: riverRatio, ocean: new Float32Array(total), river: riverRatio };
+  const riverRapidMap = buildRapidMapTexture(surfaceNorm, cols, rows, riverRatios, riverStepStrength);
+  const riverBankMap = buildRiverBankMapTexture(cols, rows, renderSupport, riverRatio);
+  const riverWaterfallInfluence = buildWaterfallInfluenceMap(
+    cols,
+    rows,
+    width,
+    depth,
+    renderSupport,
+    waterfallInstances
+  );
+
+  const positions: number[] = [];
+  const uvs: number[] = [];
+  const bankDist: number[] = [];
+  const flowDir: number[] = [];
+  const rapid: number[] = [];
+  const indices = Array.from(riverDomain.contourIndices);
+  const distToNonRiver = riverDomain.distanceToBank;
+
+  const worldXEdge = (x: number): number => (x / Math.max(1, cols) - 0.5) * width;
+  const worldZEdge = (y: number): number => (y / Math.max(1, rows) - 0.5) * depth;
+  const sampleFromCells = (fx: number, fy: number, getter: (idx: number) => number): number => {
+    const cx = fx - 0.5;
+    const cy = fy - 0.5;
+    const x0 = Math.floor(cx);
+    const y0 = Math.floor(cy);
+    let sum = 0;
+    let wSum = 0;
+    for (let oy = 0; oy <= 1; oy += 1) {
+      for (let ox = 0; ox <= 1; ox += 1) {
+        const sx = x0 + ox;
+        const sy = y0 + oy;
+        if (!isValid(sx, sy)) {
+          continue;
+        }
+        const idx = idxAt(sx, sy);
+        if (!renderSupport[idx]) {
+          continue;
+        }
+        const wx = 1 - Math.abs(cx - sx);
+        const wy = 1 - Math.abs(cy - sy);
+        const w = Math.max(0, wx) * Math.max(0, wy);
+        if (w <= 1e-5) {
+          continue;
+        }
+        const value = getter(idx);
+        if (!Number.isFinite(value)) {
+          continue;
+        }
+        sum += value * w;
+        wSum += w;
+      }
+    }
+    if (wSum > 1e-5) {
+      return sum / wSum;
+    }
+    const nearestX = clamp(Math.round(cx), 0, cols - 1);
+    const nearestY = clamp(Math.round(cy), 0, rows - 1);
+    let bestIdx = -1;
+    let bestDistSq = Number.POSITIVE_INFINITY;
+    for (let radius = 0; radius <= 5 && bestIdx < 0; radius += 1) {
+      const minX = Math.max(0, nearestX - radius);
+      const maxX = Math.min(cols - 1, nearestX + radius);
+      const minY = Math.max(0, nearestY - radius);
+      const maxY = Math.min(rows - 1, nearestY + radius);
+      for (let sy = minY; sy <= maxY; sy += 1) {
+        for (let sx = minX; sx <= maxX; sx += 1) {
+          const idx = idxAt(sx, sy);
+          if (!renderSupport[idx]) {
+            continue;
+          }
+          const dx = sx - cx;
+          const dy = sy - cy;
+          const distSq = dx * dx + dy * dy;
+          if (distSq < bestDistSq) {
+            bestDistSq = distSq;
+            bestIdx = idx;
+          }
+        }
+      }
+    }
+    if (bestIdx >= 0) {
+      return getter(bestIdx);
+    }
+    return Number.NaN;
+  };
+  const sampleSurfaceOffset = (fx: number, fy: number): number => {
+    const surface = sampleFromCells(fx, fy, (idx) => surfaceWorld[idx]);
+    const lip = sampleFromCells(fx, fy, (idx) => lipSurfaceOverride[idx]);
+    let topWorld = Number.isFinite(lip) ? Math.max(surface, lip) : surface;
+    let minBankWorld = Number.POSITIVE_INFINITY;
+    const vx = Math.floor(fx);
+    const vy = Math.floor(fy);
+    const candidates = [
+      { x: vx - 1, y: vy - 1 },
+      { x: vx, y: vy - 1 },
+      { x: vx - 1, y: vy },
+      { x: vx, y: vy }
+    ];
+    for (let i = 0; i < candidates.length; i += 1) {
+      const c = candidates[i];
+      if (!isValid(c.x, c.y)) {
+        continue;
+      }
+      const idx = idxAt(c.x, c.y);
+      if (renderSupport[idx]) {
+        continue;
+      }
+      minBankWorld = Math.min(minBankWorld, (sample.elevations[idx] ?? 0) * heightScale);
+    }
+    if (Number.isFinite(minBankWorld)) {
+      topWorld = Math.min(topWorld, minBankWorld - RIVER_SURFACE_BANK_CLEARANCE * 0.45);
+    }
+    if (!Number.isFinite(topWorld)) {
+      return WATER_SURFACE_LIFT_RIVER;
+    }
+    return topWorld - waterLevelWorld + WATER_SURFACE_LIFT_RIVER;
+  };
+  const sampleBankDist = (fx: number, fy: number): number => {
+    const value = sampleFromCells(fx, fy, (idx) => (distToNonRiver[idx] >= 0 ? distToNonRiver[idx] : 0));
+    return clamp((Number.isFinite(value) ? value : 0) / Math.max(2, RIVER_MIN_VISUAL_WIDTH_CELLS * 2.5), 0, 1);
+  };
+  const sampleFlow = (fx: number, fy: number): { x: number; y: number } => {
+    const x = sampleFromCells(fx, fy, (idx) => flowDirX[idx]);
+    const y = sampleFromCells(fx, fy, (idx) => flowDirY[idx]);
+    if (!Number.isFinite(x) || !Number.isFinite(y)) {
+      return { x: 1, y: 0 };
+    }
+    const len = Math.hypot(x, y) || 1;
+    return { x: x / len, y: y / len };
+  };
+  const sampleRapid = (fx: number, fy: number): number => {
+    const value = sampleFromCells(fx, fy, (idx) => rapidAttrCenter[idx]);
+    return clamp(Number.isFinite(value) ? value : 0, 0, 1);
+  };
+  const addVertex = (v: RiverContourVertex): void => {
+    const flow = sampleFlow(v.x, v.y);
+    positions.push(worldXEdge(v.x), sampleSurfaceOffset(v.x, v.y), worldZEdge(v.y));
+    uvs.push(v.x / Math.max(1, cols), v.y / Math.max(1, rows));
+    bankDist.push(sampleBankDist(v.x, v.y));
+    flowDir.push(flow.x, flow.y);
+    rapid.push(sampleRapid(v.x, v.y));
+  };
+  for (let i = 0; i < riverDomain.contourVertices.length; i += 2) {
+    addVertex({
+      x: riverDomain.contourVertices[i],
+      y: riverDomain.contourVertices[i + 1]
+    });
+  }
+  if (indices.length === 0 || positions.length / 3 !== riverDomain.contourVertices.length / 2) {
+    return undefined;
+  }
+
+  const wallPositions: number[] = [];
+  const wallUvs: number[] = [];
+  const wallIndices: number[] = [];
+  const sampleTerrainWorld = (fx: number, fy: number): number => {
+    const sx = clamp(fx - 0.5, 0, cols - 1);
+    const sy = clamp(fy - 0.5, 0, rows - 1);
+    const x0 = Math.floor(sx);
+    const y0 = Math.floor(sy);
+    const x1 = Math.min(cols - 1, x0 + 1);
+    const y1 = Math.min(rows - 1, y0 + 1);
+    const tx = sx - x0;
+    const ty = sy - y0;
+    const h00 = (sample.elevations[idxAt(x0, y0)] ?? 0) * heightScale;
+    const h10 = (sample.elevations[idxAt(x1, y0)] ?? 0) * heightScale;
+    const h01 = (sample.elevations[idxAt(x0, y1)] ?? 0) * heightScale;
+    const h11 = (sample.elevations[idxAt(x1, y1)] ?? 0) * heightScale;
+    const hx0 = h00 * (1 - tx) + h10 * tx;
+    const hx1 = h01 * (1 - tx) + h11 * tx;
+    return hx0 * (1 - ty) + hx1 * ty;
+  };
+  const sampleOutsideBank = (fx: number, fy: number, outX: number, outY: number, fallback: number): number => {
+    let nearest = Number.NaN;
+    let sum = 0;
+    let count = 0;
+    const rayStep = 0.16;
+    for (let step = 1; step <= 4; step += 1) {
+      const px = fx + outX * rayStep * step;
+      const py = fy + outY * rayStep * step;
+      if (px < 0 || py < 0 || px > cols || py > rows) {
+        continue;
+      }
+      const cellX = clamp(Math.floor(px), 0, cols - 1);
+      const cellY = clamp(Math.floor(py), 0, rows - 1);
+      const idx = idxAt(cellX, cellY);
+      if (renderSupport[idx]) {
+        continue;
+      }
+      const bank = sampleTerrainWorld(px, py) - waterLevelWorld - BANK_INSET;
+      if (!Number.isFinite(bank)) {
+        continue;
+      }
+      if (!Number.isFinite(nearest)) {
+        nearest = bank;
+      }
+      sum += bank;
+      count += 1;
+    }
+    if (!Number.isFinite(nearest)) {
+      return fallback;
+    }
+    const avg = sum / Math.max(1, count);
+    // Bias toward the nearest outside sample so the wall follows the cut edge closely.
+    return nearest * 0.72 + avg * 0.28;
+  };
+  const sampleSupportValue = (fx: number, fy: number): number => {
+    const sx = clamp(fx - 0.5, 0, cols - 1);
+    const sy = clamp(fy - 0.5, 0, rows - 1);
+    const x0 = Math.floor(sx);
+    const y0 = Math.floor(sy);
+    const x1 = Math.min(cols - 1, x0 + 1);
+    const y1 = Math.min(rows - 1, y0 + 1);
+    const tx = sx - x0;
+    const ty = sy - y0;
+    const s00 = renderSupport[idxAt(x0, y0)] ? 1 : 0;
+    const s10 = renderSupport[idxAt(x1, y0)] ? 1 : 0;
+    const s01 = renderSupport[idxAt(x0, y1)] ? 1 : 0;
+    const s11 = renderSupport[idxAt(x1, y1)] ? 1 : 0;
+    const sx0 = s00 * (1 - tx) + s10 * tx;
+    const sx1 = s01 * (1 - tx) + s11 * tx;
+    return sx0 * (1 - ty) + sx1 * ty;
+  };
+  const resolveOutward = (
+    midX: number,
+    midY: number,
+    candidateX: number,
+    candidateY: number
+  ): { x: number; y: number } => {
+    const probe = 0.28;
+    const plus = sampleSupportValue(midX + candidateX * probe, midY + candidateY * probe);
+    const minus = sampleSupportValue(midX - candidateX * probe, midY - candidateY * probe);
+    // Outward should move away from river support.
+    if (plus > minus + 1e-4) {
+      return { x: -candidateX, y: -candidateY };
+    }
+    return { x: candidateX, y: candidateY };
+  };
+  const sampleAnyOutsideBank = (fx: number, fy: number, fallback: number): number => {
+    let best = Number.NaN;
+    const dirs = [
+      [1, 0], [-1, 0], [0, 1], [0, -1],
+      [0.7071, 0.7071], [-0.7071, 0.7071], [0.7071, -0.7071], [-0.7071, -0.7071]
+    ];
+    for (let i = 0; i < dirs.length; i += 1) {
+      const dir = dirs[i];
+      const bank = sampleOutsideBank(fx, fy, dir[0], dir[1], Number.NaN);
+      if (!Number.isFinite(bank)) {
+        continue;
+      }
+      if (!Number.isFinite(best)) {
+        best = bank;
+      } else {
+        best = Math.min(best, bank);
+      }
+    }
+    return Number.isFinite(best) ? best : fallback;
+  };
+  const pushWallEdge = (edge: RiverContourEdge): void => {
+    const edgeAx = edge.ax;
+    const edgeAy = edge.ay;
+    const edgeBx = edge.bx;
+    const edgeBy = edge.by;
+    let topA = sampleSurfaceOffset(edgeAx, edgeAy);
+    let topB = sampleSurfaceOffset(edgeBx, edgeBy);
+    const ex = edge.bx - edge.ax;
+    const ey = edge.by - edge.ay;
+    const eLen = Math.hypot(ex, ey);
+    if (eLen <= 1e-5) {
+      return;
+    }
+    // Polygon winding is stabilized as CCW, so outward is to the right of edge direction.
+    let outX = ey / eLen;
+    let outY = -ex / eLen;
+    const midX = (edgeAx + edgeBx) * 0.5;
+    const midY = (edgeAy + edgeBy) * 0.5;
+    const resolved = resolveOutward(midX, midY, outX, outY);
+    outX = resolved.x;
+    outY = resolved.y;
+    const bankA = sampleOutsideBank(edgeAx, edgeAy, outX, outY, topA + WALL_MIN_HEIGHT);
+    const bankB = sampleOutsideBank(edgeBx, edgeBy, outX, outY, topB + WALL_MIN_HEIGHT);
+    if (!Number.isFinite(bankA) || !Number.isFinite(bankB)) {
+      return;
+    }
+    topA = Math.min(topA, bankA - WALL_RISE_GUARD);
+    topB = Math.min(topB, bankB - WALL_RISE_GUARD);
+    if (bankA <= topA + WALL_MIN_HEIGHT && bankB <= topB + WALL_MIN_HEIGHT) {
+      return;
+    }
+    const bottomA = bankA + WALL_BANK_OVERLAP;
+    const bottomB = bankB + WALL_BANK_OVERLAP;
+    const vBase = wallPositions.length / 3;
+    wallPositions.push(
+      worldXEdge(edgeAx), topA, worldZEdge(edgeAy),
+      worldXEdge(edgeBx), topB, worldZEdge(edgeBy),
+      worldXEdge(edgeBx), bottomB, worldZEdge(edgeBy),
+      worldXEdge(edgeAx), bottomA, worldZEdge(edgeAy)
+    );
+    const edgeWorldLen = Math.hypot(worldXEdge(edgeBx) - worldXEdge(edgeAx), worldZEdge(edgeBy) - worldZEdge(edgeAy));
+    const wallHeight = Math.max(WALL_MIN_HEIGHT, ((bottomA - topA) + (bottomB - topB)) * 0.5);
+    wallUvs.push(
+      0, 0,
+      edgeWorldLen, 0,
+      edgeWorldLen, wallHeight,
+      0, wallHeight
+    );
+    wallIndices.push(
+      vBase, vBase + 1, vBase + 2,
+      vBase, vBase + 2, vBase + 3
+    );
+  };
+  for (let i = 0; i < riverDomain.boundaryEdges.length; i += 4) {
+    pushWallEdge({
+      ax: riverDomain.boundaryEdges[i],
+      ay: riverDomain.boundaryEdges[i + 1],
+      bx: riverDomain.boundaryEdges[i + 2],
+      by: riverDomain.boundaryEdges[i + 3]
+    });
+  }
+
+  if (riverDomain.debugStats && positions.length >= 3) {
+    let protruding = 0;
+    for (let i = 0; i < positions.length; i += 3) {
+      const vx = riverDomain.contourVertices[(i / 3) * 2];
+      const vy = riverDomain.contourVertices[(i / 3) * 2 + 1];
+      const bank = sampleAnyOutsideBank(vx, vy, positions[i + 1] + WALL_MIN_HEIGHT);
+      if (Number.isFinite(bank) && positions[i + 1] > bank + WALL_RISE_GUARD) {
+        protruding += 1;
+      }
+    }
+    riverDomain.debugStats.wallQuadCount = wallIndices.length / 6;
+    riverDomain.debugStats.protrudingVertexRatio = protruding / Math.max(1, positions.length / 3);
+    if (riverDomain.debugStats.protrudingVertexRatio > 0.04) {
+      console.warn(
+        `[threeTestTerrain] river domain wall alignment warning protrudingRatio=${riverDomain.debugStats.protrudingVertexRatio.toFixed(3)}`
+      );
+    }
+  }
+
+  return {
+    positions: new Float32Array(positions),
+    uvs: new Float32Array(uvs),
+    indices: new Uint32Array(indices),
+    wallPositions: wallPositions.length > 0 ? new Float32Array(wallPositions) : undefined,
+    wallUvs: wallUvs.length > 0 ? new Float32Array(wallUvs) : undefined,
+    wallIndices: wallIndices.length > 0 ? new Uint32Array(wallIndices) : undefined,
+    bankDist: new Float32Array(bankDist),
+    flowDir: new Float32Array(flowDir),
+    rapid: new Float32Array(rapid),
+    supportMap: riverSupportMap,
+    flowMap: riverFlowMap,
+    rapidMap: riverRapidMap,
+    riverBankMap,
+    waterfallInfluenceMap: riverWaterfallInfluence,
+    level: waterLevelWorld,
+    cols,
+    rows,
+    width,
+    depth,
+    debugRiverDomainStats: riverDomain.debugStats
+  };
+};
+
+export const buildRoadOverlayTexture = (
+  sample: TerrainSample,
+  roadId: number,
+  baseId: number,
+  roadWidth: number,
+  scale: number
+): THREE.Texture | null => {
+  const tileTypes = sample.tileTypes;
+  if (!tileTypes) {
+    return null;
+  }
+  const atlas = getRoadAtlas();
+  const { cols, rows } = sample;
+  const maxTileSpan = Math.max(1, Math.max(cols, rows));
+  const maxSize = roadOverlayMaxSize || ROAD_TEX_MAX_SIZE;
+  const baseScale = Math.round(scale);
+  const tileSize = atlas
+    ? Math.max(1, Math.min(atlas.tileSize, Math.floor(maxSize / maxTileSpan)))
+    : Math.max(1, Math.min(baseScale, Math.floor(maxSize / maxTileSpan)));
+  if (atlas && tileSize > 0) {
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.max(1, cols * tileSize);
+    canvas.height = Math.max(1, rows * tileSize);
+    const ctx = canvas.getContext("2d");
+    if (!ctx) {
+      return null;
+    }
+    ctx.imageSmoothingEnabled = true;
+
+    const tiles = {
+      straightEW: { col: 0, row: 0 },
+      straightNS: { col: 1, row: 0 },
+      cross: { col: 2, row: 0 },
+      teeMissingN: { col: 3, row: 0 },
+      cornerES: { col: 4, row: 0 },
+      cornerWS: { col: 5, row: 0 },
+      diagNESW: { col: 0, row: 1 },
+      diagNWSE: { col: 1, row: 1 },
+      infillSW: { col: 2, row: 1 },
+      infillSE: { col: 3, row: 1 },
+      infillNW: { col: 4, row: 1 },
+      infillNE: { col: 5, row: 1 },
+      cornerEN: { col: 0, row: 2 },
+      cornerWN: { col: 1, row: 2 },
+      longCornerNSE: { col: 2, row: 2 },
+      longCornerESW: { col: 1, row: 3 },
+      longCornerENE: { col: 2, row: 3 },
+      longCornerSNE: { col: 3, row: 3 },
+      longCornerWNE: { col: 4, row: 3 },
+      longCornerWSE: { col: 5, row: 3 },
+      longCornerNSW: { col: 3, row: 2 },
+      longCornerSNW: { col: 4, row: 2 }
+    };
+    const atlasTileSize = atlas.tileSize;
+    const drawAtlasTile = (
+      tile: { col: number; row: number },
+      tileX: number,
+      tileY: number,
+      rotation = 0,
+      scaleFactor = 1,
+      align: "center" | "NW" | "NE" | "SE" | "SW" = "center",
+      clip?: { x: number; y: number; w: number; h: number }
+    ) => {
+      if (tile.col >= atlas.cols || tile.row >= atlas.rows) {
+        return;
+      }
+      const srcX = tile.col * atlas.tileStride;
+      const srcY = tile.row * atlas.tileStride;
+      if (srcX + atlasTileSize > atlas.canvas.width || srcY + atlasTileSize > atlas.canvas.height) {
+        return;
+      }
+      const dstSize = tileSize * scaleFactor;
+      let dx = tileX * tileSize;
+      let dy = tileY * tileSize;
+      if (align === "center") {
+        dx += (tileSize - dstSize) / 2;
+        dy += (tileSize - dstSize) / 2;
+      } else {
+        if (align.includes("N")) {
+          dy += 0;
+        }
+        if (align.includes("S")) {
+          dy += tileSize - dstSize;
+        }
+        if (align.includes("W")) {
+          dx += 0;
+        }
+        if (align.includes("E")) {
+          dx += tileSize - dstSize;
+        }
+      }
+      ctx.save();
+      if (clip) {
+        ctx.beginPath();
+        ctx.rect(
+          tileX * tileSize + clip.x * tileSize,
+          tileY * tileSize + clip.y * tileSize,
+          clip.w * tileSize,
+          clip.h * tileSize
+        );
+        ctx.clip();
+      }
+      ctx.translate(dx + dstSize / 2, dy + dstSize / 2);
+      ctx.rotate(rotation);
+      ctx.drawImage(
+        atlas.canvas,
+        srcX,
+        srcY,
+        atlasTileSize,
+        atlasTileSize,
+        -dstSize / 2,
+        -dstSize / 2,
+        dstSize,
+        dstSize
+      );
+      ctx.restore();
+    };
+    const drawInfill = (
+      tileX: number,
+      tileY: number,
+      tile: { col: number; row: number }
+    ) => {
+      if (tileX < 0 || tileY < 0 || tileX >= cols || tileY >= rows) {
+        return;
+      }
+      if (isRoadLike(tileX, tileY)) {
+        return;
+      }
+      drawAtlasTile(tile, tileX, tileY);
+    };
+    const isRoadLike = (x: number, y: number): boolean => {
+      if (x < 0 || y < 0 || x >= cols || y >= rows) {
+        return false;
+      }
+      const type = tileTypes[y * cols + x];
+      return type === roadId || type === baseId;
+    };
+
+    for (let tileY = 0; tileY < rows; tileY += 1) {
+      for (let tileX = 0; tileX < cols; tileX += 1) {
+        if (!isRoadLike(tileX, tileY)) {
+          continue;
+        }
+        const n = isRoadLike(tileX, tileY - 1);
+        const s = isRoadLike(tileX, tileY + 1);
+        const w = isRoadLike(tileX - 1, tileY);
+        const e = isRoadLike(tileX + 1, tileY);
+        const ne = isRoadLike(tileX + 1, tileY - 1);
+        const nw = isRoadLike(tileX - 1, tileY - 1);
+        const se = isRoadLike(tileX + 1, tileY + 1);
+        const sw = isRoadLike(tileX - 1, tileY + 1);
+
+        const orthCount = Number(n) + Number(s) + Number(e) + Number(w);
+        if (orthCount === 4) {
+          drawAtlasTile(tiles.cross, tileX, tileY);
+          continue;
+        }
+        if (orthCount === 3) {
+          let rotation = 0;
+          if (!n) {
+            rotation = 0;
+          } else if (!e) {
+            rotation = Math.PI / 2;
+          } else if (!s) {
+            rotation = Math.PI;
+          } else {
+            rotation = -Math.PI / 2;
+          }
+          drawAtlasTile(tiles.teeMissingN, tileX, tileY, rotation);
+          continue;
+        }
+        if (orthCount === 2) {
+          if (n && s) {
+            drawAtlasTile(tiles.straightNS, tileX, tileY);
+            continue;
+          }
+          if (e && w) {
+            drawAtlasTile(tiles.straightEW, tileX, tileY);
+            continue;
+          }
+          if (e && s) {
+            drawAtlasTile(tiles.cornerES, tileX, tileY);
+          } else if (s && w) {
+            drawAtlasTile(tiles.cornerWS, tileX, tileY);
+          } else if (n && e) {
+            drawAtlasTile(tiles.cornerEN, tileX, tileY);
+          } else {
+            drawAtlasTile(tiles.cornerWN, tileX, tileY);
+          }
+          continue;
+        }
+        if (orthCount === 1) {
+          const diagCount = Number(ne) + Number(nw) + Number(se) + Number(sw);
+          if (diagCount === 1) {
+            let longCorner: { col: number; row: number } | null = null;
+            if (n && se) {
+              longCorner = tiles.longCornerNSE;
+            } else if (n && sw) {
+              longCorner = tiles.longCornerNSW;
+            } else if (s && ne) {
+              longCorner = tiles.longCornerSNE;
+            } else if (s && nw) {
+              longCorner = tiles.longCornerSNW;
+            } else if (e && sw) {
+              longCorner = tiles.longCornerESW;
+            } else if (e && ne) {
+              longCorner = tiles.longCornerENE;
+            } else if (w && ne) {
+              longCorner = tiles.longCornerWNE;
+            } else if (w && se) {
+              longCorner = tiles.longCornerWSE;
+            }
+            if (longCorner) {
+              drawAtlasTile(longCorner, tileX, tileY);
+              continue;
+            }
+          }
+          if (n || s) {
+            drawAtlasTile(tiles.straightNS, tileX, tileY);
+          } else {
+            drawAtlasTile(tiles.straightEW, tileX, tileY);
+          }
+          continue;
+        }
+        if (ne || nw || se || sw) {
+          if (nw || se) {
+            drawAtlasTile(tiles.diagNWSE, tileX, tileY);
+          }
+          if (ne || sw) {
+            drawAtlasTile(tiles.diagNESW, tileX, tileY);
+          }
+
+          if (se) {
+            drawInfill(tileX + 1, tileY, tiles.infillSW);
+            drawInfill(tileX, tileY + 1, tiles.infillNE);
+          }
+          if (nw) {
+            drawInfill(tileX - 1, tileY, tiles.infillNE);
+            drawInfill(tileX, tileY - 1, tiles.infillSW);
+          }
+          if (ne) {
+            drawInfill(tileX + 1, tileY, tiles.infillNW);
+            drawInfill(tileX, tileY - 1, tiles.infillSE);
+          }
+          if (sw) {
+            drawInfill(tileX - 1, tileY, tiles.infillSE);
+            drawInfill(tileX, tileY + 1, tiles.infillNW);
+          }
+          continue;
+        }
+        drawAtlasTile(tiles.straightEW, tileX, tileY);
+      }
+    }
+
+    const texture = new THREE.CanvasTexture(canvas);
+    texture.needsUpdate = true;
+    texture.colorSpace = THREE.SRGBColorSpace;
+    texture.magFilter = THREE.LinearFilter;
+    texture.minFilter = THREE.LinearFilter;
+    texture.wrapS = THREE.ClampToEdgeWrapping;
+    texture.wrapT = THREE.ClampToEdgeWrapping;
+    texture.flipY = true;
+    texture.generateMipmaps = false;
+    texture.anisotropy = 4;
+    return texture;
+  }
+  const texCols = Math.max(1, cols * tileSize);
+  const texRows = Math.max(1, rows * tileSize);
+  const data = new Uint8Array(texCols * texRows * 4);
+  const roadColor = TILE_COLOR_RGB.road;
+  const roadPixels = Math.max(1, Math.round(roadWidth * tileSize));
+  const bandStart = Math.floor((tileSize - roadPixels) / 2);
+  const bandEnd = Math.min(tileSize - 1, bandStart + roadPixels - 1);
+  const halfPixels = Math.max(0.5, roadPixels / 2);
+  const center = (tileSize - 1) / 2;
+  const snipSize = Math.max(1, Math.round(roadPixels * 0.5));
+  const setPixel = (x: number, y: number) => {
+    if (x < 0 || y < 0 || x >= texCols || y >= texRows) {
+      return;
+    }
+    const idx = (y * texCols + x) * 4;
+    data[idx] = roadColor.r;
+    data[idx + 1] = roadColor.g;
+    data[idx + 2] = roadColor.b;
+    data[idx + 3] = 255;
+  };
+  const fillRect = (x0: number, y0: number, x1: number, y1: number) => {
+    const minX = Math.max(0, Math.min(x0, x1));
+    const maxX = Math.min(texCols - 1, Math.max(x0, x1));
+    const minY = Math.max(0, Math.min(y0, y1));
+    const maxY = Math.min(texRows - 1, Math.max(y0, y1));
+    for (let y = minY; y <= maxY; y += 1) {
+      for (let x = minX; x <= maxX; x += 1) {
+        setPixel(x, y);
+      }
+    }
+  };
+  const drawLine = (x0: number, y0: number, x1: number, y1: number) => {
+    const minX = Math.max(0, Math.floor(Math.min(x0, x1) - halfPixels - 1));
+    const maxX = Math.min(texCols - 1, Math.ceil(Math.max(x0, x1) + halfPixels + 1));
+    const minY = Math.max(0, Math.floor(Math.min(y0, y1) - halfPixels - 1));
+    const maxY = Math.min(texRows - 1, Math.ceil(Math.max(y0, y1) + halfPixels + 1));
+    const dx = x1 - x0;
+    const dy = y1 - y0;
+    const lenSq = dx * dx + dy * dy || 1;
+    for (let y = minY; y <= maxY; y += 1) {
+      for (let x = minX; x <= maxX; x += 1) {
+        const px = x + 0.5;
+        const py = y + 0.5;
+        const t = Math.max(0, Math.min(1, ((px - x0) * dx + (py - y0) * dy) / lenSq));
+        const sx = x0 + dx * t;
+        const sy = y0 + dy * t;
+        const distSq = (px - sx) * (px - sx) + (py - sy) * (py - sy);
+        if (distSq <= halfPixels * halfPixels) {
+          setPixel(x, y);
+        }
+      }
+    }
+  };
+  const isRoadLike = (x: number, y: number): boolean => {
+    if (x < 0 || y < 0 || x >= cols || y >= rows) {
+      return false;
+    }
+    const type = tileTypes[y * cols + x];
+    return type === roadId || type === baseId;
+  };
+
+  const tileOffsetX = (tileX: number) => tileX * tileSize;
+  const tileOffsetY = (tileY: number) => tileY * tileSize;
+  const stampRect = (tileX: number, tileY: number, x0: number, y0: number, x1: number, y1: number) => {
+    const ox = tileOffsetX(tileX);
+    const oy = tileOffsetY(tileY);
+    fillRect(ox + x0, oy + y0, ox + x1, oy + y1);
+  };
+  const stampCorner = (tileX: number, tileY: number, corner: "NW" | "NE" | "SE" | "SW") => {
+    if (tileX < 0 || tileY < 0 || tileX >= cols || tileY >= rows) {
+      return;
+    }
+    const ox = tileOffsetX(tileX);
+    const oy = tileOffsetY(tileY);
+    const x0 = corner.includes("E") ? tileSize - snipSize : 0;
+    const y0 = corner.includes("S") ? tileSize - snipSize : 0;
+    fillRect(ox + x0, oy + y0, ox + x0 + snipSize - 1, oy + y0 + snipSize - 1);
+  };
+  const drawDiagonal = (tileX: number, tileY: number, corner: "NE" | "NW" | "SE" | "SW") => {
+    const ox = tileOffsetX(tileX);
+    const oy = tileOffsetY(tileY);
+    const cx = ox + center;
+    const cy = oy + center;
+    const ex = ox + (corner.includes("E") ? tileSize - 1 : 0);
+    const ey = oy + (corner.includes("S") ? tileSize - 1 : 0);
+    drawLine(cx, cy, ex, ey);
+    stampCorner(tileX, tileY, corner);
+  };
+
+  for (let tileY = 0; tileY < rows; tileY += 1) {
+    for (let tileX = 0; tileX < cols; tileX += 1) {
+      if (!isRoadLike(tileX, tileY)) {
+        continue;
+      }
+      const n = isRoadLike(tileX, tileY - 1);
+      const s = isRoadLike(tileX, tileY + 1);
+      const w = isRoadLike(tileX - 1, tileY);
+      const e = isRoadLike(tileX + 1, tileY);
+      const ne = isRoadLike(tileX + 1, tileY - 1);
+      const nw = isRoadLike(tileX - 1, tileY - 1);
+      const se = isRoadLike(tileX + 1, tileY + 1);
+      const sw = isRoadLike(tileX - 1, tileY + 1);
+
+      if (n) {
+        stampRect(tileX, tileY, bandStart, 0, bandEnd, bandEnd);
+      }
+      if (s) {
+        stampRect(tileX, tileY, bandStart, bandStart, bandEnd, tileSize - 1);
+      }
+      if (w) {
+        stampRect(tileX, tileY, 0, bandStart, bandEnd, bandEnd);
+      }
+      if (e) {
+        stampRect(tileX, tileY, bandStart, bandStart, tileSize - 1, bandEnd);
+      }
+
+      const useNE = ne && !(n && e);
+      const useNW = nw && !(n && w);
+      const useSE = se && !(s && e);
+      const useSW = sw && !(s && w);
+
+      if (useNE) {
+        drawDiagonal(tileX, tileY, "NE");
+        if (!e) {
+          stampCorner(tileX + 1, tileY, "NW");
+        }
+        if (!n) {
+          stampCorner(tileX, tileY - 1, "SE");
+        }
+      }
+      if (useNW) {
+        drawDiagonal(tileX, tileY, "NW");
+        if (!w) {
+          stampCorner(tileX - 1, tileY, "NE");
+        }
+        if (!n) {
+          stampCorner(tileX, tileY - 1, "SW");
+        }
+      }
+      if (useSE) {
+        drawDiagonal(tileX, tileY, "SE");
+        if (!e) {
+          stampCorner(tileX + 1, tileY, "SW");
+        }
+        if (!s) {
+          stampCorner(tileX, tileY + 1, "NE");
+        }
+      }
+      if (useSW) {
+        drawDiagonal(tileX, tileY, "SW");
+        if (!w) {
+          stampCorner(tileX - 1, tileY, "SE");
+        }
+        if (!s) {
+          stampCorner(tileX, tileY + 1, "NW");
+        }
+      }
+
+      const hasAny =
+        n || s || w || e || useNE || useNW || useSE || useSW;
+      if (!hasAny) {
+        stampRect(tileX, tileY, bandStart, bandStart, bandEnd, bandEnd);
+      }
+    }
+  }
+
+  const texture = new THREE.DataTexture(data, texCols, texRows, THREE.RGBAFormat);
+  texture.needsUpdate = true;
+  texture.colorSpace = THREE.SRGBColorSpace;
+  texture.magFilter = THREE.LinearFilter;
+  texture.minFilter = THREE.LinearFilter;
+  texture.wrapS = THREE.ClampToEdgeWrapping;
+  texture.wrapT = THREE.ClampToEdgeWrapping;
+  texture.flipY = true;
+  texture.generateMipmaps = false;
+  texture.anisotropy = 4;
+  return texture;
+};
+
+const buildWaterSurfaceHeights = (
+  sampleHeights: Float32Array,
+  supportMask: Uint8Array,
+  oceanRatio: Float32Array,
+  riverRatio: Float32Array,
+  sampleCols: number,
+  sampleRows: number,
+  oceanLevel: number | null,
+  sampledRiverSurface?: Float32Array,
+  sampledRiverStepStrength?: Float32Array
+): Float32Array => {
+  const total = sampleCols * sampleRows;
+  const heights = new Float32Array(total).fill(Number.NaN);
+  const visited = new Uint8Array(total);
+  const queue = new Int32Array(total);
+  const components: WaterComponent[] = [];
+  let head = 0;
+  let tail = 0;
+
+  const push = (idx: number) => {
+    visited[idx] = 1;
+    queue[tail] = idx;
+    tail += 1;
+  };
+
+  const hasWater = (idx: number): boolean => (supportMask[idx] ?? 0) > 0;
+  const hasOcean = (idx: number): boolean =>
+    hasWater(idx) && (oceanRatio[idx] ?? 0) >= OCEAN_RATIO_MIN;
+  const isRiverCell = (idx: number): boolean =>
+    hasWater(idx) && (riverRatio[idx] ?? 0) >= RIVER_RATIO_MIN;
+
+  for (let i = 0; i < total; i += 1) {
+    if (!hasWater(i) || !isRiverCell(i) || !sampledRiverSurface) {
+      continue;
+    }
+    const riverSurface = sampledRiverSurface[i];
+    if (!Number.isFinite(riverSurface)) {
+      continue;
+    }
+    heights[i] = clamp(riverSurface, 0, 1);
+  }
+
+  const floodComponent = (seed: number, predicate: (idx: number) => boolean): WaterComponent | null => {
+    if (visited[seed] || !predicate(seed)) {
+      return null;
+    }
+    head = 0;
+    tail = 0;
+    push(seed);
+    const component: WaterComponent = { indices: [], min: Number.POSITIVE_INFINITY };
+    while (head < tail) {
+      const idx = queue[head];
+      head += 1;
+      component.indices.push(idx);
+      component.min = Math.min(component.min, sampleHeights[idx] ?? 0);
+      const x = idx % sampleCols;
+      const y = Math.floor(idx / sampleCols);
+      const neighbors = [idx - 1, idx + 1, idx - sampleCols, idx + sampleCols];
+      for (const nIdx of neighbors) {
+        if (nIdx < 0 || nIdx >= total) {
+          continue;
+        }
+        if (visited[nIdx] || !predicate(nIdx)) {
+          continue;
+        }
+        const nx = nIdx % sampleCols;
+        const ny = Math.floor(nIdx / sampleCols);
+        if (Math.abs(nx - x) + Math.abs(ny - y) !== 1) {
+          continue;
+        }
+        push(nIdx);
+      }
+    }
+    return component;
+  };
+
+  for (let i = 0; i < total; i += 1) {
+    if (visited[i] || !hasOcean(i)) {
+      continue;
+    }
+    const component = floodComponent(i, hasOcean);
+    if (!component) {
+      continue;
+    }
+    components.push(component);
+  }
+
+  for (const component of components) {
+    const level = oceanLevel !== null ? clamp(oceanLevel, 0, 1) : clamp(component.min + 0.01, 0, 1);
+    component.indices.forEach((idx) => {
+      heights[idx] = level;
+    });
+  }
+
+  visited.fill(0);
+  for (let i = 0; i < total; i += 1) {
+    if (visited[i] || !hasWater(i) || Number.isFinite(heights[i])) {
+      continue;
+    }
+    const component = floodComponent(i, (idx) => hasWater(idx) && !Number.isFinite(heights[idx]));
+    if (!component) {
+      continue;
+    }
+    const level = clamp(component.min + 0.01, 0, 1);
+    component.indices.forEach((idx) => {
+      heights[idx] = level;
+    });
+  }
+
+  for (let i = 0; i < total; i += 1) {
+    if (!Number.isFinite(heights[i])) {
+      heights[i] = sampleHeights[i] ?? 0;
+    }
+  }
+
+  if (sampledRiverSurface && oceanLevel !== null) {
+    const oceanLevelClamped = clamp(oceanLevel, 0, 1);
+    for (let i = 0; i < total; i += 1) {
+      if (!hasWater(i)) {
+        continue;
+      }
+      const river = clamp(riverRatio[i] ?? 0, 0, 1);
+      const ocean = clamp(oceanRatio[i] ?? 0, 0, 1);
+      if (river <= 0.01 || ocean <= 0.01) {
+        continue;
+      }
+      const riverSurface = sampledRiverSurface[i];
+      if (!Number.isFinite(riverSurface)) {
+        continue;
+      }
+      const rawStepStrength = sampledRiverStepStrength ? sampledRiverStepStrength[i] : 0;
+      const stepStrength = Number.isFinite(rawStepStrength) ? clamp(rawStepStrength as number, 0, 1) : 0;
+      if (stepStrength >= RIVER_STEP_BLEND_BLOCK_THRESHOLD) {
+        continue;
+      }
+      const estuaryBlend = clamp((Math.min(river, ocean) - 0.06) / 0.24, 0, 1);
+      if (estuaryBlend <= 0) {
+        continue;
+      }
+      const blended = clamp(riverSurface * (1 - estuaryBlend) + oceanLevelClamped * estuaryBlend, 0, 1);
+      heights[i] = blended;
+    }
+  }
+
+  const smoothed = new Float32Array(total);
+  for (let row = 0; row < sampleRows; row += 1) {
+    for (let col = 0; col < sampleCols; col += 1) {
+      const idx = row * sampleCols + col;
+      if (!hasWater(idx)) {
+        smoothed[idx] = heights[idx];
+        continue;
+      }
+      const center = heights[idx];
+      let sum = center;
+      let count = 1;
+      const neighbors = [idx - 1, idx + 1, idx - sampleCols, idx + sampleCols];
+      for (const nIdx of neighbors) {
+        if (nIdx < 0 || nIdx >= total || !hasWater(nIdx)) {
+          continue;
+        }
+        sum += heights[nIdx];
+        count += 1;
+      }
+      const avg = sum / Math.max(1, count);
+      const river = clamp(riverRatio[idx] ?? 0, 0, 1);
+      const ocean = clamp(oceanRatio[idx] ?? 0, 0, 1);
+      const rawStepStrength = sampledRiverStepStrength ? sampledRiverStepStrength[idx] : 0;
+      const stepStrength = Number.isFinite(rawStepStrength) ? clamp(rawStepStrength as number, 0, 1) : 0;
+      const estuary = clamp((Math.min(river, ocean) - 0.05) / 0.2, 0, 1);
+      const stepBlend = clamp((stepStrength - 0.14) / (0.5 - 0.14), 0, 1);
+      const stepDampen = 1 - stepBlend;
+      const smoothAmt = (0.05 + estuary * 0.2) * stepDampen;
+      const target = center * (1 - smoothAmt) + avg * smoothAmt;
+      const maxDelta = (0.006 + estuary * 0.035) * stepDampen;
+      if (maxDelta <= 1e-5) {
+        smoothed[idx] = center;
+      } else {
+        smoothed[idx] = clamp(target, center - maxDelta, center + maxDelta);
+      }
+    }
+  }
+  heights.set(smoothed);
+
+  return heights;
+};
+
+export const buildTileTexture = (
+  sample: TerrainSample,
+  sampleCols: number,
+  sampleRows: number,
+  step: number,
+  palette: number[][],
+  grassId: number,
+  scrubId: number,
+  floodplainId: number,
+  beachId: number,
+  forestId: number,
+  waterId: number,
+  roadId: number | null,
+  heightScale: number,
+  sampleHeights: Float32Array,
+  sampleTypes: Uint8Array,
+  waterRatio: Float32Array | null,
+  oceanRatio: Float32Array | null,
+  riverRatio: Float32Array | null,
+  sampledRiverCoverage: Float32Array | null,
+  riverStepStrength: Float32Array | null | undefined,
+  debugTypeColors: boolean
+): THREE.DataTexture => {
+  const { cols, rows } = sample;
+  const treeTypes = sample.treeTypes;
+  const riverMask = sample.riverMask;
+  const tileMoisture = sample.tileMoisture;
+  const climateDryness = clamp(sample.climateDryness ?? 0.35, 0, 1);
+  const ashId = TILE_TYPE_IDS.ash;
+  const data = new Uint8Array(sampleCols * sampleRows * 4);
+  const getRoadGroundColor = (row: number, col: number): number[] => {
+    if (roadId === null) {
+      return palette[grassId] ?? [0, 0, 0];
+    }
+    let sumR = 0;
+    let sumG = 0;
+    let sumB = 0;
+    let count = 0;
+    const addNeighbor = (nRow: number, nCol: number) => {
+      if (nRow < 0 || nCol < 0 || nRow >= sampleRows || nCol >= sampleCols) {
+        return;
+      }
+      const t = sampleTypes[nRow * sampleCols + nCol];
+      if (t === roadId) {
+        return;
+      }
+      const source = t === waterId ? palette[grassId] : palette[t] ?? palette[grassId];
+      if (!source) {
+        return;
+      }
+      sumR += source[0];
+      sumG += source[1];
+      sumB += source[2];
+      count += 1;
+    };
+    addNeighbor(row - 1, col);
+    addNeighbor(row + 1, col);
+    addNeighbor(row, col - 1);
+    addNeighbor(row, col + 1);
+    addNeighbor(row - 1, col - 1);
+    addNeighbor(row - 1, col + 1);
+    addNeighbor(row + 1, col - 1);
+    addNeighbor(row + 1, col + 1);
+    if (count === 0) {
+      return palette[grassId] ?? [0, 0, 0];
+    }
+    return [sumR / count, sumG / count, sumB / count];
+  };
+  const heightAtSample = (x: number, y: number): number => {
+    const clampedX = Math.max(0, Math.min(sampleCols - 1, x));
+    const clampedY = Math.max(0, Math.min(sampleRows - 1, y));
+    return sampleHeights[clampedY * sampleCols + clampedX] ?? 0;
+  };
+  let offset = 0;
+  for (let row = 0; row < sampleRows; row += 1) {
+    const tileY = Math.min(rows - 1, row * step);
+    for (let col = 0; col < sampleCols; col += 1) {
+      const tileX = Math.min(cols - 1, col * step);
+      const idx = tileY * cols + tileX;
+      const sampleIndex = row * sampleCols + col;
+      const typeId = sampleTypes[sampleIndex] ?? grassId;
+      const localWaterRatio = waterRatio ? clamp(waterRatio[sampleIndex] ?? 0, 0, 1) : typeId === waterId ? 1 : 0;
+      const localOceanRatio = oceanRatio ? clamp(oceanRatio[sampleIndex] ?? 0, 0, 1) : localWaterRatio;
+      const localRiverRatio = riverRatio ? clamp(riverRatio[sampleIndex] ?? 0, 0, 1) : 0;
+      const localRiverCoverage = sampledRiverCoverage ? clamp(sampledRiverCoverage[sampleIndex] ?? 0, 0, 1) : localRiverRatio;
+      const riverMaskAtTile = riverMask ? riverMask[idx] > 0 : false;
+      const riverMaskNearby = (() => {
+        if (!riverMask) {
+          return false;
+        }
+        for (let oy = -1; oy <= 1; oy += 1) {
+          for (let ox = -1; ox <= 1; ox += 1) {
+            if (ox === 0 && oy === 0) {
+              continue;
+            }
+            const nx = tileX + ox;
+            const ny = tileY + oy;
+            if (nx < 0 || ny < 0 || nx >= cols || ny >= rows) {
+              continue;
+            }
+            if (riverMask[ny * cols + nx] > 0) {
+              return true;
+            }
+          }
+        }
+        return false;
+      })();
+      const rawStepStrength = riverStepStrength ? riverStepStrength[sampleIndex] : 0;
+      const localStepStrength = Number.isFinite(rawStepStrength) ? clamp(rawStepStrength as number, 0, 1) : 0;
+      let colorType = typeId;
+      if (!debugTypeColors) {
+        if (typeId === forestId) {
+          colorType = grassId;
+        } else if (typeId === beachId) {
+          const riverBank =
+            riverMaskAtTile ||
+            riverMaskNearby ||
+            localRiverCoverage >= 0.06 ||
+            (localRiverRatio >= 0.03 &&
+              localOceanRatio < Math.max(0.28, localRiverRatio * 1.25));
+          if (riverBank) {
+            colorType = grassId;
+          }
+        } else if (typeId === waterId) {
+          const riverDominant =
+            riverMaskAtTile ||
+            localRiverCoverage >= 0.1 ||
+            localRiverRatio >= Math.max(0.08, localOceanRatio * 0.7);
+          const oceanShoreDominant = localOceanRatio >= Math.max(0.22, localRiverRatio * 1.35);
+          const hasLandNeighbor =
+            row === 0 ||
+            col === 0 ||
+            row === sampleRows - 1 ||
+            col === sampleCols - 1 ||
+            sampleTypes[sampleIndex - 1] !== waterId ||
+            sampleTypes[sampleIndex + 1] !== waterId ||
+            sampleTypes[sampleIndex - sampleCols] !== waterId ||
+            sampleTypes[sampleIndex + sampleCols] !== waterId;
+          if (riverDominant) {
+            // River channels are rendered by the river mesh; terrain underlay should be bank/bed tones.
+            colorType = floodplainId;
+          } else {
+            colorType = oceanShoreDominant && hasLandNeighbor ? beachId : waterId;
+          }
+        }
+      }
+      let color = palette[colorType] ?? palette[grassId];
+      if (!debugTypeColors && roadId !== null && typeId === roadId) {
+        color = getRoadGroundColor(row, col);
+      }
+      if (!debugTypeColors && typeId === forestId) {
+        const dominantId = treeTypes ? treeTypes[idx] : 255;
+        const tint = FOREST_TINT_BY_ID[dominantId] ?? FOREST_TONE_BASE;
+        const tintColor: [number, number, number] = [tint.r / 255, tint.g / 255, tint.b / 255];
+        const mixFactor = 0.55;
+        color = [
+          color[0] * (1 - mixFactor) + tintColor[0] * mixFactor,
+          color[1] * (1 - mixFactor) + tintColor[1] * mixFactor,
+          color[2] * (1 - mixFactor) + tintColor[2] * mixFactor
+        ];
+      }
+      if (!debugTypeColors && typeId === ashId) {
+        const ashNoise = noiseAt(idx * 5.131 + 91.7);
+        const ashCool = noiseAt(idx * 1.977 + 13.4);
+        const ashBase = 0.18 + ashNoise * 0.18;
+        color = [
+          ashBase * 0.95,
+          ashBase * 0.93,
+          ashBase * (1.0 + ashCool * 0.08)
+        ];
+      }
+      if (!debugTypeColors && (typeId === grassId || typeId === scrubId || typeId === floodplainId || typeId === forestId)) {
+        const localMoisture = tileMoisture ? clamp(tileMoisture[idx] ?? 0.5, 0, 1) : 0.5;
+        const localDryness = 1 - localMoisture;
+        const effectiveDryness = clamp(climateDryness * 0.72 + localDryness * 0.28, 0, 1);
+        const dryTint = DRY_TINT_BY_TILE[typeId] ?? DRY_TINT_BY_TILE[grassId];
+        const wetTint = WET_TINT_BY_TILE[typeId] ?? WET_TINT_BY_TILE[grassId];
+        const dryWeight =
+          (typeId === grassId ? 0.58 : typeId === scrubId ? 0.62 : typeId === floodplainId ? 0.34 : 0.26) *
+          effectiveDryness;
+        const wetWeight =
+          (typeId === floodplainId ? 0.18 : 0.08) * (1 - effectiveDryness);
+        color = [
+          color[0] * (1 - dryWeight) + dryTint[0] * dryWeight,
+          color[1] * (1 - dryWeight) + dryTint[1] * dryWeight,
+          color[2] * (1 - dryWeight) + dryTint[2] * dryWeight
+        ];
+        if (wetWeight > 0.0001) {
+          color = [
+            color[0] * (1 - wetWeight) + wetTint[0] * wetWeight,
+            color[1] * (1 - wetWeight) + wetTint[1] * wetWeight,
+          color[2] * (1 - wetWeight) + wetTint[2] * wetWeight
+          ];
+        }
+      }
+      if (!debugTypeColors && typeId === waterId && localRiverRatio >= RIVER_RATIO_MIN) {
+        const rockyColor = palette[TILE_TYPE_IDS.rocky] ?? color;
+        const floodColor = palette[floodplainId] ?? palette[grassId] ?? color;
+        const wetBankColor: [number, number, number] = [
+          floodColor[0] * 0.72 + rockyColor[0] * 0.28,
+          floodColor[1] * 0.76 + rockyColor[1] * 0.24,
+          floodColor[2] * 0.8 + rockyColor[2] * 0.2
+        ];
+        const blend = clamp(localRiverRatio * 1.25 + localRiverCoverage * 0.35, 0, 0.9);
+        const riverbedColor: [number, number, number] = [
+          color[0] * (1 - blend) + wetBankColor[0] * blend,
+          color[1] * (1 - blend) + wetBankColor[1] * blend,
+          color[2] * (1 - blend) + wetBankColor[2] * blend
+        ];
+        const rockyStepBlend = clamp(localStepStrength * STEP_ROCKY_TINT_MAX, 0, STEP_ROCKY_TINT_MAX);
+        color = [
+          riverbedColor[0] * (1 - rockyStepBlend) + rockyColor[0] * rockyStepBlend,
+          riverbedColor[1] * (1 - rockyStepBlend) + rockyColor[1] * rockyStepBlend,
+          riverbedColor[2] * (1 - rockyStepBlend) + rockyColor[2] * rockyStepBlend
+        ];
+      }
+      const height = heightAtSample(col, row);
+      const baseNoise = noiseAt(idx + 1);
+      const fineNoise = (noiseAt(idx * 3.7 + 17.7) - 0.5) * 0.04;
+      const heightTone = clamp(0.88 + height * 0.08, 0.72, 1.05);
+      const noise = (baseNoise - 0.5) * 0.08;
+      const heightLeft = heightAtSample(col - 1, row);
+      const heightRight = heightAtSample(col + 1, row);
+      const heightUp = heightAtSample(col, row - 1);
+      const heightDown = heightAtSample(col, row + 1);
+      const dx = (heightRight - heightLeft) * heightScale;
+      const dz = (heightDown - heightUp) * heightScale;
+      const nx = -dx;
+      const ny = 2;
+      const nz = -dz;
+      const nLen = Math.hypot(nx, ny, nz) || 1;
+      const light =
+        (nx / nLen) * SUN_DIR.x + (ny / nLen) * SUN_DIR.y + (nz / nLen) * SUN_DIR.z;
+      const shade = clamp(0.68 + light * 0.32, 0.55, 1);
+      const slope = Math.sqrt(dx * dx + dz * dz);
+      const occlusion = clamp(1 - slope * 0.06, 0.7, 1);
+      const ashToneBoost = !debugTypeColors && typeId === ashId ? 1.18 : 1;
+      const tone = heightTone * shade * occlusion * ashToneBoost;
+      const rawR = color[0];
+      const rawG = color[1];
+      const rawB = color[2];
+      const r = clamp((debugTypeColors ? rawR : (rawR + noise) * tone + fineNoise), 0, 1) * 255;
+      const g = clamp((debugTypeColors ? rawG : (rawG + noise) * tone + fineNoise), 0, 1) * 255;
+      const b = clamp((debugTypeColors ? rawB : (rawB + noise) * tone + fineNoise), 0, 1) * 255;
+      const alpha =
+        !debugTypeColors && localOceanRatio >= WATER_ALPHA_MIN_RATIO
+          ? 0
+          : 255;
+      data[offset] = Math.round(r);
+      data[offset + 1] = Math.round(g);
+      data[offset + 2] = Math.round(b);
+      data[offset + 3] = alpha;
+      offset += 4;
+    }
+  }
+  const texture = new THREE.DataTexture(data, sampleCols, sampleRows, THREE.RGBAFormat);
+  texture.needsUpdate = true;
+  texture.colorSpace = THREE.SRGBColorSpace;
+  texture.magFilter = THREE.NearestFilter;
+  texture.minFilter = THREE.NearestFilter;
+  texture.wrapS = THREE.ClampToEdgeWrapping;
+  texture.wrapT = THREE.ClampToEdgeWrapping;
+  texture.flipY = true;
+  texture.generateMipmaps = false;
+  return texture;
+};
+
+export const getTerrainStep = (size: number, fullResolution = false): number => {
+  if (fullResolution) {
+    return 1;
+  }
+  if (size >= 1024) {
+    return 4;
+  }
+  if (size >= 512) {
+    return 3;
+  }
+  if (size >= 256) {
+    return 2;
+  }
+  return 1;
+};
+
+export const getTerrainHeightScale = (cols: number, rows: number): number => {
+  const baseScale = Math.max(HEIGHT_SCALE / TILE_SIZE, Math.min(cols, rows) * HEIGHT_MAP_RATIO);
+  return baseScale * TERRAIN_HEIGHT_EXAGGERATION;
+};
+
+export const buildTerrainMesh = (
+  sample: TerrainSample,
+  treeAssets: TreeAssets | null,
+  houseAssets: HouseAssets | null,
+  firestationAsset: FirestationAsset | null,
+  seasonVisualConfig?: TreeSeasonVisualConfig
+): {
+  mesh: THREE.Mesh;
+  size: { width: number; depth: number };
+  water?: TerrainWaterData;
+  treeBurn?: TreeBurnController;
+} => {
+  const { cols, rows, elevations } = sample;
+  const palette = buildPalette();
+  const grassId = TILE_TYPE_IDS.grass;
+  const scrubId = TILE_TYPE_IDS.scrub;
+  const floodplainId = TILE_TYPE_IDS.floodplain;
+  const forestId = TILE_TYPE_IDS.forest;
+  const waterId = TILE_TYPE_IDS.water;
+  const baseId = TILE_TYPE_IDS.base;
+  const houseId = TILE_TYPE_IDS.house;
+  const roadId = TILE_TYPE_IDS.road;
+  const firebreakId = TILE_TYPE_IDS.firebreak;
+  const ashId = TILE_TYPE_IDS.ash;
+  const step = getTerrainStep(Math.max(cols, rows), sample.fullResolution ?? false);
+  const sampleCols = Math.floor((cols - 1) / step) + 1;
+  const sampleRows = Math.floor((rows - 1) / step) + 1;
+  const width = (sampleCols - 1) * step;
+  const depth = (sampleRows - 1) * step;
+  const sampleHeights = buildSampleHeightMap(sample, sampleCols, sampleRows, step, waterId);
+  const oceanMask = sample.tileTypes ? buildOceanMask(cols, rows, sample.tileTypes, waterId) : null;
+  const riverMask = sample.riverMask ?? null;
+  const waterLevel = computeWaterLevel(sample, waterId, oceanMask, riverMask);
+  const parcelTargetElev = sample.tileTypes ? new Float32Array(cols * rows).fill(Number.NaN) : null;
+  let baseTargetElev: number | null = null;
+  const sampleTypes = buildSampleTypeMap(
+    sample,
+    sampleCols,
+    sampleRows,
+    step,
+    grassId,
+    waterId,
+    TILE_ID_TO_TYPE.length,
+    [baseId, houseId, roadId, firebreakId, ashId]
+  );
+  if (waterLevel !== null) {
+    for (let row = 0; row < sampleRows; row += 1) {
+      const tileY = Math.min(rows - 1, row * step);
+      const endY = Math.min(rows, tileY + step);
+      for (let col = 0; col < sampleCols; col += 1) {
+        const tileX = Math.min(cols - 1, col * step);
+        const endX = Math.min(cols, tileX + step);
+        const idx = row * sampleCols + col;
+        if (sampleTypes[idx] !== waterId) {
+          continue;
+        }
+        let isOcean = false;
+        let isRiver = false;
+        if (oceanMask) {
+          for (let y = tileY; y < endY && !isOcean; y += 1) {
+            const rowBase = y * cols;
+            for (let x = tileX; x < endX; x += 1) {
+              const idx = rowBase + x;
+              if (riverMask && riverMask[idx]) {
+                isRiver = true;
+                break;
+              }
+              if (oceanMask[idx]) {
+                isOcean = true;
+                break;
+              }
+            }
+          }
+        }
+        if ((!oceanMask || isOcean) && !isRiver) {
+          sampleHeights[idx] = waterLevel;
+        }
+      }
+    }
+  }
+  const waterRatios = buildSampleWaterRatios(sample, sampleCols, sampleRows, step, waterId, oceanMask, riverMask);
+  const sampledRiverSurface = buildSampleOptionalFloatMap(
+    sample,
+    sample.riverSurface,
+    sampleCols,
+    sampleRows,
+    step,
+    riverMask,
+    "min"
+  );
+  const sampledRiverStepStrength = buildSampleOptionalFloatMap(
+    sample,
+    sample.riverStepStrength,
+    sampleCols,
+    sampleRows,
+    step,
+    riverMask,
+    "max"
+  );
+  const riverRenderDomain = buildRiverRenderDomain(sample, waterId);
+  const sampledRiverCoverage = buildSampleMaskCoverage(
+    sample,
+    riverRenderDomain?.renderSupport ?? riverMask ?? undefined,
+    sampleCols,
+    sampleRows,
+    step
+  );
+  const heightAtSample = (x: number, y: number): number => {
+    const clampedX = Math.max(0, Math.min(sampleCols - 1, x));
+    const clampedY = Math.max(0, Math.min(sampleRows - 1, y));
+    return sampleHeights[clampedY * sampleCols + clampedX] ?? 0;
+  };
+  const heightAtTileCoord = (tileX: number, tileY: number): number => {
+    const sx = clamp(tileX / step, 0, sampleCols - 1);
+    const sy = clamp(tileY / step, 0, sampleRows - 1);
+    const x0 = Math.floor(sx);
+    const y0 = Math.floor(sy);
+    const x1 = Math.min(sampleCols - 1, x0 + 1);
+    const y1 = Math.min(sampleRows - 1, y0 + 1);
+    const tx = sx - x0;
+    const ty = sy - y0;
+    const h00 = heightAtSample(x0, y0);
+    const h10 = heightAtSample(x1, y0);
+    const h01 = heightAtSample(x0, y1);
+    const h11 = heightAtSample(x1, y1);
+    const hx0 = h00 * (1 - tx) + h10 * tx;
+    const hx1 = h01 * (1 - tx) + h11 * tx;
+    return hx0 * (1 - ty) + hx1 * ty;
+  };
+  const heightAtTile = (tileX: number, tileY: number): number => {
+    return heightAtTileCoord(tileX + 0.5, tileY + 0.5);
+  };
+
+  const geometry = new THREE.PlaneGeometry(width, depth, sampleCols - 1, sampleRows - 1);
+  geometry.rotateX(-Math.PI / 2);
+
+  const positions = geometry.attributes.position;
+  const heightScale = getTerrainHeightScale(cols, rows);
+  let minHeight = Number.POSITIVE_INFINITY;
+  let maxHeight = Number.NEGATIVE_INFINITY;
+  let waterHeightSum = 0;
+  let waterCount = 0;
+  let vertexIndex = 0;
+  const treeInstances: TreeInstance[] = [];
+  const scrubPlaceholderInstances: ScrubPlaceholderInstance[] = [];
+  const treeTileProfilesRaw = new Map<
+    number,
+    {
+      x: number;
+      y: number;
+      z: number;
+      crownHeight: number;
+      crownRadius: number;
+      trunkHeight: number;
+      count: number;
+    }
+  >();
+  const allowTrees = sample.treesEnabled ?? true;
+  const seasonVisual = seasonVisualConfig && seasonVisualConfig.enabled ? seasonVisualConfig : null;
+  const hasTreeAssets =
+    allowTrees &&
+    !!treeAssets &&
+    Object.values(treeAssets).some((variants) => Array.isArray(variants) && variants.length > 0);
+  const getTreeVariants = (type: TreeType): TreeVariant[] => {
+    if (!treeAssets) {
+      return [];
+    }
+    const direct = treeAssets[type] ?? [];
+    if (direct.length > 0) {
+      return direct;
+    }
+    const scrubFallback = treeAssets[TreeType.Scrub] ?? [];
+    if (scrubFallback.length > 0) {
+      return scrubFallback;
+    }
+    return treeAssets[TreeType.Pine] ?? [];
+  };
+  const treeTypes = sample.treeTypes;
+  const birchId = TREE_TYPE_IDS[TreeType.Birch];
+  const pineId = TREE_TYPE_IDS[TreeType.Pine];
+  const oakId = TREE_TYPE_IDS[TreeType.Oak];
+  const mapleId = TREE_TYPE_IDS[TreeType.Maple];
+  const elmId = TREE_TYPE_IDS[TreeType.Elm];
+  const houseMask = sample.tileTypes
+    ? (() => {
+        const mask = new Uint8Array(cols * rows);
+        const tiles = sample.tileTypes!;
+        const elevations = sample.elevations;
+        const applyFlatten = (bounds: { minX: number; maxX: number; minY: number; maxY: number }, targetElev: number) => {
+          const minX = clamp(bounds.minX, 0, cols - 1);
+          const maxX = clamp(bounds.maxX, 0, cols - 1);
+          const minY = clamp(bounds.minY, 0, rows - 1);
+          const maxY = clamp(bounds.maxY, 0, rows - 1);
+          const startCol = clamp(Math.floor(minX / step), 0, sampleCols - 1);
+          const endCol = clamp(Math.floor(maxX / step), 0, sampleCols - 1);
+          const startRow = clamp(Math.floor(minY / step), 0, sampleRows - 1);
+          const endRow = clamp(Math.floor(maxY / step), 0, sampleRows - 1);
+          for (let row = startRow; row <= endRow; row += 1) {
+            const rowBase = row * sampleCols;
+            for (let col = startCol; col <= endCol; col += 1) {
+              sampleHeights[rowBase + col] = targetElev;
+            }
+          }
+        };
+        const computeAverageElev = (bounds: { minX: number; maxX: number; minY: number; maxY: number }): number => {
+          const minX = clamp(bounds.minX, 0, cols - 1);
+          const maxX = clamp(bounds.maxX, 0, cols - 1);
+          const minY = clamp(bounds.minY, 0, rows - 1);
+          const maxY = clamp(bounds.maxY, 0, rows - 1);
+          let sum = 0;
+          let count = 0;
+          for (let y = minY; y <= maxY; y += 1) {
+            const rowBase = y * cols;
+            for (let x = minX; x <= maxX; x += 1) {
+              sum += elevations[rowBase + x] ?? 0;
+              count += 1;
+            }
+          }
+          if (count === 0) {
+            return 0;
+          }
+          return clamp(sum / count, 0, 1);
+        };
+
+        let baseMinX = cols;
+        let baseMaxX = -1;
+        let baseMinY = rows;
+        let baseMaxY = -1;
+        let baseSum = 0;
+        let baseCount = 0;
+
+        for (let tileY = 0; tileY < rows; tileY += 1) {
+          const rowBase = tileY * cols;
+          for (let tileX = 0; tileX < cols; tileX += 1) {
+            const idx = rowBase + tileX;
+            const type = tiles[idx];
+            if (type === baseId) {
+              baseMinX = Math.min(baseMinX, tileX);
+              baseMaxX = Math.max(baseMaxX, tileX);
+              baseMinY = Math.min(baseMinY, tileY);
+              baseMaxY = Math.max(baseMaxY, tileY);
+              baseSum += elevations[idx] ?? 0;
+              baseCount += 1;
+              continue;
+            }
+            if (type !== houseId) {
+              continue;
+            }
+            const seed = idx;
+            const rotation = pickHouseRotation(tileX, tileY, cols, rows, tiles, roadId, baseId, seed);
+            const footprint = pickHouseFootprint(seed);
+            const bounds = getHouseFootprintBounds(tileX, tileY, rotation, footprint);
+            for (let fy = bounds.minY; fy <= bounds.maxY; fy += 1) {
+              if (fy < 0 || fy >= rows) {
+                continue;
+              }
+              const row = fy * cols;
+              for (let fx = bounds.minX; fx <= bounds.maxX; fx += 1) {
+                if (fx < 0 || fx >= cols) {
+                  continue;
+                }
+                mask[row + fx] = 1;
+              }
+            }
+            const targetElev = computeAverageElev(bounds);
+            if (parcelTargetElev) {
+              parcelTargetElev[idx] = targetElev;
+            }
+            applyFlatten(bounds, targetElev);
+          }
+        }
+
+        if (baseCount > 0) {
+          const bounds = { minX: baseMinX, maxX: baseMaxX, minY: baseMinY, maxY: baseMaxY };
+          const targetElev = clamp(baseSum / baseCount, 0, 1);
+          baseTargetElev = targetElev;
+          applyFlatten(bounds, targetElev);
+        }
+
+        return mask;
+      })()
+    : null;
+  for (let row = 0; row < sampleRows; row += 1) {
+    const tileY = Math.min(rows - 1, row * step);
+    for (let col = 0; col < sampleCols; col += 1) {
+      const tileX = Math.min(cols - 1, col * step);
+      const idx = tileY * cols + tileX;
+      const height = sampleHeights[vertexIndex] ?? 0;
+      const clampedHeight = clamp(height, -1, 1);
+      const y = clampedHeight * heightScale;
+      positions.setY(vertexIndex, y);
+      minHeight = Math.min(minHeight, y);
+      maxHeight = Math.max(maxHeight, y);
+      const typeId = sampleTypes[vertexIndex] ?? grassId;
+      if (typeId === waterId) {
+        waterHeightSum += y;
+        waterCount += 1;
+      }
+      const edgeBand = 3;
+      if (tileX < edgeBand || tileY < edgeBand || tileX >= cols - edgeBand || tileY >= rows - edgeBand) {
+        vertexIndex += 1;
+        continue;
+      }
+      const leftIdx = col > 0 ? vertexIndex - 1 : vertexIndex;
+      const rightIdx = col < sampleCols - 1 ? vertexIndex + 1 : vertexIndex;
+      const upIdx = row > 0 ? vertexIndex - sampleCols : vertexIndex;
+      const downIdx = row < sampleRows - 1 ? vertexIndex + sampleCols : vertexIndex;
+      const neighborWater =
+        sampleTypes[leftIdx] === waterId ||
+        sampleTypes[rightIdx] === waterId ||
+        sampleTypes[upIdx] === waterId ||
+        sampleTypes[downIdx] === waterId;
+      if (neighborWater) {
+        vertexIndex += 1;
+        continue;
+      }
+      if (houseMask && houseMask[idx]) {
+        vertexIndex += 1;
+        continue;
+      }
+      const slope =
+        Math.max(
+          Math.abs((sampleHeights[leftIdx] ?? height) - height),
+          Math.abs((sampleHeights[rightIdx] ?? height) - height),
+          Math.abs((sampleHeights[upIdx] ?? height) - height),
+          Math.abs((sampleHeights[downIdx] ?? height) - height)
+        );
+      if (slope > 0.12) {
+        vertexIndex += 1;
+        continue;
+      }
+      const densityScale = Math.min(1.5, 1 + Math.max(0, step - 1) * 0.2);
+      const centerX = ((tileX + 0.5) / Math.max(1, cols) - 0.5) * width;
+      const centerZ = ((tileY + 0.5) / Math.max(1, rows) - 0.5) * depth;
+      let treeChance = 0;
+      if (typeId === forestId) {
+        treeChance = 0.85 * densityScale;
+      } else if (typeId === scrubId) {
+        treeChance = 0.18 * densityScale;
+      } else if (typeId === floodplainId) {
+        treeChance = 0.12 * densityScale;
+      } else if (typeId === grassId) {
+        treeChance = 0.08 * densityScale;
+      }
+      let placedTreeOnTile = false;
+      if (treeChance > 0) {
+        const dominantId = treeTypes ? treeTypes[idx] : 255;
+        const isForest = typeId === forestId;
+        const forestScale =
+          dominantId === pineId
+            ? 1.05
+            : dominantId === oakId
+            ? 1
+            : dominantId === mapleId
+            ? 0.98
+            : dominantId === elmId
+            ? 1.02
+            : dominantId === birchId
+                  ? 0.9
+                  : 1;
+        const baseScale =
+          TREE_SCALE_BASE + Math.min(TREE_SCALE_STEP_CAP, Math.max(0, step - 1) * TREE_SCALE_STEP_GAIN);
+        const typeScale = isForest ? forestScale : typeId === scrubId ? 0.75 : 0.6;
+        let treeType: TreeType = TreeType.Scrub;
+        if (isForest) {
+          if (dominantId === birchId) {
+            treeType = TreeType.Birch;
+          } else if (dominantId === oakId) {
+            treeType = TreeType.Oak;
+          } else if (dominantId === mapleId) {
+            treeType = TreeType.Maple;
+          } else if (dominantId === elmId) {
+            treeType = TreeType.Elm;
+          } else {
+            treeType = TreeType.Pine;
+          }
+        }
+        const variants = hasTreeAssets ? getTreeVariants(treeType) : [];
+        const attempts = isForest ? Math.min(3, 1 + Math.floor(noiseAt(idx + 11.7) * (1 + densityScale))) : 1;
+        for (let attempt = 0; attempt < attempts; attempt += 1) {
+          if (noiseAt(idx + 5.1 + attempt * 0.37) >= treeChance) {
+            continue;
+          }
+          const jitterRange = Math.max(0.1, step * 0.42);
+          const jitterX = (noiseAt(idx + 0.27 + attempt * 0.31) - 0.5) * jitterRange;
+          const jitterZ = (noiseAt(idx + 0.61 + attempt * 0.29) - 0.5) * jitterRange;
+          const variantIndex =
+            variants.length > 0 ? Math.floor(noiseAt(idx + 9.7 + attempt * 0.53) * variants.length) : 0;
+          const variant = variants.length > 0 ? variants[variantIndex] ?? variants[0] : null;
+          const targetHeight = baseScale * typeScale * TREE_HEIGHT_FACTOR;
+          const sourceHeight = Math.max(0.35, variant?.height ?? 1.5);
+          const scale = (targetHeight / sourceHeight) * (0.85 + noiseAt(idx + 7.9 + attempt * 0.41) * 0.3);
+          const rotation = noiseAt(idx + 3.3 + attempt * 0.23) * Math.PI * 2;
+          // Place trees relative to tile centers (not terrain vertices), then jitter within the tile.
+          const x = centerX + jitterX;
+          const z = centerZ + jitterZ;
+          const treeY = y + (variant ? variant.baseOffset * scale : 0);
+          const treeHeight = Math.max(0.2, sourceHeight * scale);
+          const crownHeight = Math.max(0.25, treeHeight * 0.72);
+          const trunkHeight = Math.max(0.2, treeHeight * 0.45);
+          const crownRadius = Math.max(0.16, treeHeight * (isForest ? 0.22 : 0.18));
+          treeInstances.push({
+            x,
+            y: treeY,
+            z,
+            scale,
+            rotation,
+            treeType,
+            variantIndex,
+            tileIndex: idx,
+            tileX,
+            tileY
+          });
+          placedTreeOnTile = true;
+          const profile = treeTileProfilesRaw.get(idx);
+          if (profile) {
+            profile.x += x;
+            profile.y += treeY;
+            profile.z += z;
+            profile.crownHeight += crownHeight;
+            profile.crownRadius += crownRadius;
+            profile.trunkHeight += trunkHeight;
+            profile.count += 1;
+          } else {
+            treeTileProfilesRaw.set(idx, { x, y: treeY, z, crownHeight, crownRadius, trunkHeight, count: 1 });
+          }
+        }
+      }
+      if (
+        typeId === scrubId &&
+        !placedTreeOnTile &&
+        scrubPlaceholderInstances.length < SCRUB_PLACEHOLDER_MAX_INSTANCES
+      ) {
+        const placeholderChance = Math.min(0.68, SCRUB_PLACEHOLDER_BASE_CHANCE * densityScale);
+        if (noiseAt(idx + 14.39) < placeholderChance) {
+          const jitterRange = Math.max(0.1, step * 0.34);
+          const jitterX = (noiseAt(idx + 2.91) - 0.5) * jitterRange;
+          const jitterZ = (noiseAt(idx + 3.17) - 0.5) * jitterRange;
+          const scale =
+            SCRUB_PLACEHOLDER_SCALE_MIN +
+            noiseAt(idx + 6.41) * (SCRUB_PLACEHOLDER_SCALE_MAX - SCRUB_PLACEHOLDER_SCALE_MIN);
+          scrubPlaceholderInstances.push({
+            x: centerX + jitterX,
+            y,
+            z: centerZ + jitterZ,
+            scale,
+            rotation: noiseAt(idx + 8.23) * Math.PI * 2,
+            colorJitter: noiseAt(idx + 9.57)
+          });
+        }
+      }
+      vertexIndex += 1;
+    }
+  }
+  applyRiverTerrainTriangleCutout(geometry, sampleCols, sampleRows, riverRenderDomain);
+  geometry.computeVertexNormals();
+  if (DEBUG_TERRAIN_RENDER && threeTestLoggedTotal !== cols * rows) {
+    console.log(
+      `ThreeTest heights: min=${minHeight.toFixed(2)} max=${maxHeight.toFixed(2)} scale=${heightScale.toFixed(2)}`
+    );
+    threeTestLoggedTotal = cols * rows;
+  }
+
+  const tileTexture = buildTileTexture(
+    sample,
+    sampleCols,
+    sampleRows,
+    step,
+    palette,
+    grassId,
+    scrubId,
+    floodplainId,
+    TILE_TYPE_IDS.beach,
+    forestId,
+    waterId,
+    roadId,
+    heightScale,
+    sampleHeights,
+    sampleTypes,
+    waterRatios.water,
+    waterRatios.ocean,
+    waterRatios.river,
+    sampledRiverCoverage ?? null,
+    sampledRiverStepStrength,
+    sample.debugTypeColors ?? false
+  );
+  const material = new THREE.MeshStandardMaterial({
+    map: tileTexture,
+    roughness: 0.88,
+    metalness: 0
+  });
+  material.transparent = false;
+  material.alphaTest = 0.5;
+  if (ENABLE_GRASS_DETAIL_FX) {
+    applyGrassDetailFx(material, {
+      enabled: ENABLE_GRASS_DETAIL_FX,
+      tileWorldSize: step,
+      seed: sample.worldSeed ?? 0,
+      sampleTypes,
+      sampleCols,
+      sampleRows,
+      grassTypeId: grassId,
+      originX: -width * 0.5,
+      originZ: -depth * 0.5
+    });
+  }
+  const mesh = new THREE.Mesh(geometry, material);
+  mesh.receiveShadow = true;
+  const roadOverlay = buildRoadOverlayTexture(sample, roadId, baseId, ROAD_SURFACE_WIDTH, ROAD_TEX_SCALE);
+  if (roadOverlay) {
+    const roadMaterial = new THREE.MeshStandardMaterial({
+      map: roadOverlay,
+      color: new THREE.Color(0xffffff),
+      transparent: true,
+      depthWrite: false,
+      roughness: 0.9,
+      metalness: 0.05,
+      side: THREE.DoubleSide,
+      polygonOffset: true,
+      polygonOffsetFactor: -2,
+      polygonOffsetUnits: -2
+    });
+    roadMaterial.alphaTest = 0.02;
+    const roadMesh = new THREE.Mesh(geometry, roadMaterial);
+    roadMesh.castShadow = false;
+    roadMesh.receiveShadow = true;
+    roadMesh.renderOrder = 1;
+    roadMesh.userData.roadOverlay = true;
+    roadMesh.userData.roadOverlayVersion = getRoadAtlasVersion();
+    mesh.add(roadMesh);
+  }
+  const treeBurnMeshStates: TreeBurnMeshState[] = [];
+  if (hasTreeAssets && treeInstances.length > 0) {
+    const treeGroup = new THREE.Group();
+    const whiteColor = new THREE.Color(1, 1, 1);
+    const dummy = new THREE.Object3D();
+    const tempMatrix = new THREE.Matrix4();
+    const addVariantInstances = (treeType: TreeType, variants: TreeVariant[]) => {
+      const instances = treeInstances.filter((instance) => instance.treeType === treeType);
+      if (instances.length === 0 || variants.length === 0) {
+        return;
+      }
+      const buckets = variants.map(() => [] as TreeInstance[]);
+      instances.forEach((instance) => {
+        const index = Math.min(variants.length - 1, Math.max(0, instance.variantIndex));
+        buckets[index].push(instance);
+      });
+      variants.forEach((variant, variantIndex) => {
+        const variantInstances = buckets[variantIndex];
+        if (variantInstances.length === 0) {
+          return;
+        }
+        variant.meshes.forEach((meshTemplate) => {
+          const role = getTreeBurnRole(meshTemplate.material);
+          if (role === "trunk") {
+            applyTrunkTopCropShader(meshTemplate.material);
+          }
+          applyTreeSeasonShader(meshTemplate.material, seasonVisual, treeType);
+          if (!meshTemplate.geometry.boundingBox) {
+            meshTemplate.geometry.computeBoundingBox();
+          }
+          const geometryBounds = meshTemplate.geometry.boundingBox;
+          const cropMinY = geometryBounds?.min.y ?? 0;
+          const cropMaxY = geometryBounds?.max.y ?? 0;
+          const instanced = new THREE.InstancedMesh(
+            meshTemplate.geometry,
+            meshTemplate.material,
+            variantInstances.length
+          );
+          instanced.castShadow = true;
+          instanced.receiveShadow = true;
+          const baseMatrix = meshTemplate.baseMatrix;
+          const tileIndices = new Uint32Array(variantInstances.length);
+          const tileX = new Uint16Array(variantInstances.length);
+          const tileY = new Uint16Array(variantInstances.length);
+          const baseX = new Float32Array(variantInstances.length);
+          const baseY = new Float32Array(variantInstances.length);
+          const baseZ = new Float32Array(variantInstances.length);
+          const baseRotation = new Float32Array(variantInstances.length);
+          const baseScale = new Float32Array(variantInstances.length);
+          const scalePivotY = new Float32Array(variantInstances.length);
+          const fuelReference = new Float32Array(variantInstances.length);
+          const burnProgress = new Float32Array(variantInstances.length);
+          const burnQ = new Uint8Array(variantInstances.length);
+          const visibilityQ = new Uint8Array(variantInstances.length).fill(255);
+          const seasonPhaseOffset = seasonVisual ? new Float32Array(variantInstances.length) : null;
+          const seasonRateJitter = seasonVisual ? new Float32Array(variantInstances.length) : null;
+          const leafDropBias = seasonVisual ? new Float32Array(variantInstances.length) : null;
+          const autumnHueBias = seasonVisual ? new Float32Array(variantInstances.length) : null;
+          const cropTopAttr =
+            role === "trunk"
+              ? new THREE.InstancedBufferAttribute(new Float32Array(variantInstances.length), 1)
+              : null;
+          if (cropTopAttr) {
+            cropTopAttr.setUsage(THREE.DynamicDrawUsage);
+            cropTopAttr.array.fill(cropMaxY + 1);
+            instanced.geometry.setAttribute("aCropTop", cropTopAttr);
+          }
+          variantInstances.forEach((instance, i) => {
+            tileIndices[i] = instance.tileIndex;
+            tileX[i] = instance.tileX;
+            tileY[i] = instance.tileY;
+            baseX[i] = instance.x;
+            baseY[i] = instance.y;
+            baseZ[i] = instance.z;
+            baseRotation[i] = instance.rotation;
+            baseScale[i] = instance.scale;
+            const treeHeight = Math.max(0.2, variant.height * instance.scale);
+            const pivotFactor =
+              role === "leaf"
+                ? TREE_BURN_LEAF_PIVOT_HEIGHT_FACTOR
+                : role === "mixed"
+                  ? TREE_BURN_MIXED_PIVOT_HEIGHT_FACTOR
+                  : TREE_BURN_TRUNK_PIVOT_HEIGHT_FACTOR;
+            scalePivotY[i] = treeHeight * pivotFactor;
+            const baseFuel = sample.tileFuel?.[instance.tileIndex] ?? 1;
+            fuelReference[i] = Math.max(TREE_BURN_FUEL_EPS, baseFuel);
+            dummy.position.set(instance.x, instance.y, instance.z);
+            dummy.rotation.set(0, instance.rotation, 0);
+            dummy.scale.set(instance.scale, instance.scale, instance.scale);
+            dummy.updateMatrix();
+            tempMatrix.copy(dummy.matrix).multiply(baseMatrix);
+            instanced.setMatrixAt(i, tempMatrix);
+            instanced.setColorAt(i, whiteColor);
+            if (
+              seasonVisual &&
+              seasonPhaseOffset &&
+              seasonRateJitter &&
+              leafDropBias &&
+              autumnHueBias
+            ) {
+              const worldSeed = sample.worldSeed ?? 0;
+              const treeTypeId = TREE_TYPE_IDS[instance.treeType] ?? 0;
+              const noiseBase =
+                worldSeed * 0.000013 +
+                instance.tileIndex * 0.173 +
+                i * 0.619 +
+                variantIndex * 1.331 +
+                treeTypeId * 0.41;
+              const n0 = noiseAt(noiseBase + 0.11);
+              const n1 = noiseAt(noiseBase + 1.37);
+              const n2 = noiseAt(noiseBase + 2.71);
+              const n3 = noiseAt(noiseBase + 3.97);
+              seasonPhaseOffset[i] = (n0 * 2 - 1) * seasonVisual.phaseShiftMax;
+              seasonRateJitter[i] = (n1 * 2 - 1) * seasonVisual.rateJitter;
+              leafDropBias[i] = (n2 * 2 - 1) * TREE_LEAF_DROP_BIAS_MAX;
+              autumnHueBias[i] = (n3 * 2 - 1) * seasonVisual.autumnHueJitter;
+            }
+          });
+          if (
+            seasonVisual &&
+            seasonPhaseOffset &&
+            seasonRateJitter &&
+            leafDropBias &&
+            autumnHueBias
+          ) {
+            const geometry = instanced.geometry;
+            const phaseAttr = new THREE.InstancedBufferAttribute(seasonPhaseOffset, 1);
+            const rateAttr = new THREE.InstancedBufferAttribute(seasonRateJitter, 1);
+            const leafAttr = new THREE.InstancedBufferAttribute(leafDropBias, 1);
+            const hueAttr = new THREE.InstancedBufferAttribute(autumnHueBias, 1);
+            phaseAttr.setUsage(THREE.StaticDrawUsage);
+            rateAttr.setUsage(THREE.StaticDrawUsage);
+            leafAttr.setUsage(THREE.StaticDrawUsage);
+            hueAttr.setUsage(THREE.StaticDrawUsage);
+            geometry.setAttribute("aSeasonPhaseOffset", phaseAttr);
+            geometry.setAttribute("aSeasonRateJitter", rateAttr);
+            geometry.setAttribute("aLeafDropBias", leafAttr);
+            geometry.setAttribute("aAutumnHueBias", hueAttr);
+          }
+          instanced.instanceMatrix.needsUpdate = true;
+          if (instanced.instanceColor) {
+            instanced.instanceColor.setUsage(THREE.DynamicDrawUsage);
+            instanced.instanceColor.needsUpdate = true;
+          }
+          treeBurnMeshStates.push({
+            mesh: instanced,
+            role,
+            baseMatrix,
+            tileIndices,
+            tileX,
+            tileY,
+            baseX,
+            baseY,
+            baseZ,
+            baseRotation,
+            baseScale,
+            scalePivotY,
+            fuelReference,
+            burnProgress,
+            burnQ,
+            visibilityQ,
+            cropTopAttr,
+            cropMinY,
+            cropMaxY
+          });
+          treeGroup.add(instanced);
+        });
+      });
+    };
+    (Object.keys(TREE_MODEL_PATHS) as TreeType[]).forEach((treeType) => {
+      addVariantInstances(treeType, getTreeVariants(treeType));
+    });
+    mesh.add(treeGroup);
+  } else if (treeInstances.length > 0) {
+    const treeGroup = new THREE.Group();
+    const trunkGeometry = new THREE.CylinderGeometry(0.1, 0.12, 1, 6);
+    const canopyGeometry = new THREE.SphereGeometry(0.35, 9, 7);
+    const trunkMaterial = new THREE.MeshStandardMaterial({ color: 0x5f4330, roughness: 0.92, metalness: 0.03 });
+    const canopyMaterial = new THREE.MeshStandardMaterial({
+      color: 0x4d8f4e,
+      roughness: 0.9,
+      metalness: 0,
+      vertexColors: true
+    });
+    const trunkMesh = new THREE.InstancedMesh(trunkGeometry, trunkMaterial, treeInstances.length);
+    const canopyMesh = new THREE.InstancedMesh(canopyGeometry, canopyMaterial, treeInstances.length);
+    const canopyColor = new THREE.Color();
+    const dummy = new THREE.Object3D();
+    trunkMesh.castShadow = true;
+    trunkMesh.receiveShadow = true;
+    canopyMesh.castShadow = true;
+    canopyMesh.receiveShadow = true;
+    treeInstances.forEach((instance, i) => {
+      const treeHeight = Math.max(0.7, instance.scale * TREE_HEIGHT_FACTOR * 0.95);
+      const trunkHeight = Math.max(0.22, treeHeight * 0.44);
+      const canopyHeight = Math.max(0.28, treeHeight * 0.66);
+      const canopyRadius = Math.max(0.18, treeHeight * 0.23);
+      const trunkRadius = Math.max(0.05, canopyRadius * 0.22);
+
+      dummy.position.set(instance.x, instance.y + trunkHeight * 0.5, instance.z);
+      dummy.rotation.set(0, instance.rotation, 0);
+      dummy.scale.set(trunkRadius / 0.1, trunkHeight, trunkRadius / 0.1);
+      dummy.updateMatrix();
+      trunkMesh.setMatrixAt(i, dummy.matrix);
+
+      dummy.position.set(instance.x, instance.y + trunkHeight + canopyHeight * 0.26, instance.z);
+      dummy.rotation.set(0, instance.rotation, 0);
+      dummy.scale.set(canopyRadius / 0.35, canopyHeight / 0.7, canopyRadius / 0.35);
+      dummy.updateMatrix();
+      canopyMesh.setMatrixAt(i, dummy.matrix);
+
+      const tint = FOREST_CANOPY_TONES[instance.treeType] ?? FOREST_TONE_BASE;
+      canopyColor.setRGB(tint.r / 255, tint.g / 255, tint.b / 255);
+      canopyMesh.setColorAt(i, canopyColor);
+    });
+    trunkMesh.instanceMatrix.needsUpdate = true;
+    canopyMesh.instanceMatrix.needsUpdate = true;
+    if (canopyMesh.instanceColor) {
+      canopyMesh.instanceColor.needsUpdate = true;
+    }
+    treeGroup.add(trunkMesh);
+    treeGroup.add(canopyMesh);
+    mesh.add(treeGroup);
+  }
+  if (scrubPlaceholderInstances.length > 0) {
+    const shrubGeometry = new THREE.IcosahedronGeometry(0.24, 0);
+    const shrubMaterial = new THREE.MeshStandardMaterial({
+      color: 0x5f7d49,
+      roughness: 0.94,
+      metalness: 0.02,
+      vertexColors: true
+    });
+    const shrubMesh = new THREE.InstancedMesh(shrubGeometry, shrubMaterial, scrubPlaceholderInstances.length);
+    const baseScrub = TILE_COLOR_RGB.scrub;
+    const baseR = baseScrub.r / 255;
+    const baseG = baseScrub.g / 255;
+    const baseB = baseScrub.b / 255;
+    const tintColor = new THREE.Color();
+    const dummy = new THREE.Object3D();
+    shrubMesh.castShadow = true;
+    shrubMesh.receiveShadow = true;
+    scrubPlaceholderInstances.forEach((instance, index) => {
+      const tint = 0.9 + instance.colorJitter * 0.22;
+      const warmShift = (instance.colorJitter - 0.5) * 0.06;
+      tintColor.setRGB(
+        clamp(baseR * (tint + warmShift), 0, 1),
+        clamp(baseG * (tint + 0.03), 0, 1),
+        clamp(baseB * (tint - warmShift * 0.6), 0, 1)
+      );
+      dummy.position.set(instance.x, instance.y + instance.scale * 0.2, instance.z);
+      dummy.rotation.set(0, instance.rotation, 0);
+      dummy.scale.set(instance.scale, instance.scale * 0.68, instance.scale);
+      dummy.updateMatrix();
+      shrubMesh.setMatrixAt(index, dummy.matrix);
+      shrubMesh.setColorAt(index, tintColor);
+    });
+    shrubMesh.instanceMatrix.needsUpdate = true;
+    if (shrubMesh.instanceColor) {
+      shrubMesh.instanceColor.needsUpdate = true;
+    }
+    mesh.add(shrubMesh);
+  }
+  if (sample.tileTypes) {
+    const tileTypes = sample.tileTypes;
+    const baseTiles: { tileX: number; tileY: number; x: number; z: number; groundMin: number; groundMax: number }[] = [];
+    const houseSpots: HouseSpot[] = [];
+    for (let tileY = 0; tileY < rows; tileY += 1) {
+      const rowBase = tileY * cols;
+      for (let tileX = 0; tileX < cols; tileX += 1) {
+        const typeId = tileTypes[rowBase + tileX];
+        const normX = (tileX + 0.5) / cols;
+        const normZ = (tileY + 0.5) / rows;
+        const x = (normX - 0.5) * width;
+        const z = (normZ - 0.5) * depth;
+        const height = heightAtTile(tileX, tileY) * heightScale;
+        const seed = rowBase + tileX;
+        const right = Math.min(cols, tileX + 1);
+        const bottom = Math.min(rows, tileY + 1);
+        const h00 = heightAtTileCoord(tileX, tileY) * heightScale;
+        const h10 = heightAtTileCoord(right, tileY) * heightScale;
+        const h01 = heightAtTileCoord(tileX, bottom) * heightScale;
+        const h11 = heightAtTileCoord(right, bottom) * heightScale;
+        const tileGroundMin = Math.min(h00, h10, h01, h11);
+        const tileGroundMax = Math.max(h00, h10, h01, h11);
+        if (typeId !== baseId && typeId !== houseId) {
+          continue;
+        }
+        if (typeId === baseId) {
+          baseTiles.push({ tileX, tileY, x, z, groundMin: tileGroundMin, groundMax: tileGroundMax });
+        } else {
+          const rotation = pickHouseRotation(tileX, tileY, cols, rows, tileTypes, roadId, baseId, seed);
+          const footprint = pickHouseFootprint(seed);
+          const bounds = getHouseFootprintBounds(tileX, tileY, rotation, footprint);
+          const minX = clamp(bounds.minX, 0, cols - 1);
+          const maxX = clamp(bounds.maxX, 0, cols - 1);
+          const minY = clamp(bounds.minY, 0, rows - 1);
+          const maxY = clamp(bounds.maxY, 0, rows - 1);
+          let groundMin = Number.POSITIVE_INFINITY;
+          let groundMax = Number.NEGATIVE_INFINITY;
+          for (let fy = minY; fy <= maxY + 1; fy += 1) {
+            const clampedY = clamp(fy, 0, rows);
+            for (let fx = minX; fx <= maxX + 1; fx += 1) {
+              const clampedX = clamp(fx, 0, cols);
+              const h = heightAtTileCoord(clampedX, clampedY) * heightScale;
+              groundMin = Math.min(groundMin, h);
+              groundMax = Math.max(groundMax, h);
+            }
+          }
+          if (!Number.isFinite(groundMin) || !Number.isFinite(groundMax)) {
+            groundMin = height;
+            groundMax = height;
+          }
+          if (parcelTargetElev && Number.isFinite(parcelTargetElev[seed])) {
+            const parcelElev = parcelTargetElev[seed] * heightScale;
+            groundMin = parcelElev;
+            groundMax = parcelElev;
+          }
+          houseSpots.push({
+            x,
+            y: height,
+            z,
+            footprintX: bounds.width,
+            footprintZ: bounds.depth,
+            rotation,
+            seed,
+            groundMin,
+            groundMax,
+            variantKey: footprint.name ?? null,
+            variantSource: footprint.source ?? null
+          });
+        }
+      }
+    }
+    const buildingGeometry = new THREE.BoxGeometry(1, 1, 1);
+    const baseMaterial = new THREE.MeshStandardMaterial({ color: 0xa0a7ad, roughness: 0.75, metalness: 0.1 });
+    const houseMaterial = new THREE.MeshStandardMaterial({ color: 0xc19a66, roughness: 0.8, metalness: 0.08 });
+    const foundationMaterial = new THREE.MeshStandardMaterial({
+      color: 0x4b4036,
+      roughness: 0.95,
+      metalness: 0
+    });
+    const dummy = new THREE.Object3D();
+    if (baseTiles.length > 0) {
+      const minTileX = Math.min(...baseTiles.map((tile) => tile.tileX));
+      const maxTileX = Math.max(...baseTiles.map((tile) => tile.tileX));
+      const minTileY = Math.min(...baseTiles.map((tile) => tile.tileY));
+      const maxTileY = Math.max(...baseTiles.map((tile) => tile.tileY));
+      const centerTileX = (minTileX + maxTileX) / 2 + 0.5;
+      const centerTileY = (minTileY + maxTileY) / 2 + 0.5;
+      const centerX = (centerTileX / cols - 0.5) * width;
+      const centerZ = (centerTileY / rows - 0.5) * depth;
+      const baseFootprintX = Math.max(1, maxTileX - minTileX + 1);
+      const baseFootprintZ = Math.max(1, maxTileY - minTileY + 1);
+      let groundMin = Math.min(...baseTiles.map((tile) => tile.groundMin));
+      let groundMax = Math.max(...baseTiles.map((tile) => tile.groundMax));
+      if (baseTargetElev !== null) {
+        const elev = baseTargetElev * heightScale;
+        groundMin = elev;
+        groundMax = elev;
+      }
+      const rotation = baseFootprintX >= baseFootprintZ ? 0 : Math.PI / 2;
+
+      if (firestationAsset && firestationAsset.meshes.length > 0) {
+        const footprintTarget = Math.max(baseFootprintX, baseFootprintZ) * 0.85;
+        const assetFootprint = Math.max(firestationAsset.size.x, firestationAsset.size.z);
+        const scale = footprintTarget / Math.max(0.01, assetFootprint);
+        const foundationTop = groundMax + 0.01;
+        const baseY = foundationTop + firestationAsset.baseOffset * scale;
+        const baseGroup = new THREE.Group();
+        const tempMatrix = new THREE.Matrix4();
+        firestationAsset.meshes.forEach((meshTemplate) => {
+          const instanced = new THREE.InstancedMesh(meshTemplate.geometry, meshTemplate.material, 1);
+          instanced.castShadow = true;
+          instanced.receiveShadow = true;
+          dummy.position.set(centerX, baseY, centerZ);
+          dummy.rotation.set(0, rotation, 0);
+          dummy.scale.set(scale, scale, scale);
+          dummy.updateMatrix();
+          tempMatrix.copy(dummy.matrix).multiply(meshTemplate.baseMatrix);
+          instanced.setMatrixAt(0, tempMatrix);
+          instanced.instanceMatrix.needsUpdate = true;
+          baseGroup.add(instanced);
+        });
+        if (groundMin < foundationTop - 0.01) {
+          const foundationHeight = Math.max(0.1, foundationTop - groundMin);
+          const foundation = new THREE.Mesh(buildingGeometry, foundationMaterial);
+          foundation.scale.set(baseFootprintX, foundationHeight, baseFootprintZ);
+          foundation.position.set(centerX, groundMin + foundationHeight / 2, centerZ);
+          foundation.rotation.set(0, rotation, 0);
+          foundation.castShadow = true;
+          foundation.receiveShadow = true;
+          baseGroup.add(foundation);
+        }
+        mesh.add(baseGroup);
+      } else {
+        const base = new THREE.Mesh(buildingGeometry, baseMaterial);
+        base.scale.set(baseFootprintX, 0.6, baseFootprintZ);
+        base.position.set(centerX, groundMax + 0.3, centerZ);
+        base.rotation.set(0, rotation, 0);
+        base.castShadow = true;
+        base.receiveShadow = true;
+        mesh.add(base);
+        if (groundMin < groundMax - 0.01) {
+          const foundationHeight = Math.max(0.1, groundMax - groundMin);
+          const foundation = new THREE.Mesh(buildingGeometry, foundationMaterial);
+          foundation.scale.set(baseFootprintX, foundationHeight, baseFootprintZ);
+          foundation.position.set(centerX, groundMin + foundationHeight / 2, centerZ);
+          foundation.rotation.set(0, rotation, 0);
+          foundation.castShadow = true;
+          foundation.receiveShadow = true;
+          mesh.add(foundation);
+        }
+      }
+    }
+
+    if (houseSpots.length > 0) {
+      const availableHouseVariants = houseAssets?.variants ?? [];
+      const houseByKey = new Map<string, HouseVariant[]>();
+      const houseByTheme: Record<HouseVariant["theme"], HouseVariant[]> = {
+        brick: [],
+        wood: []
+      };
+      availableHouseVariants.forEach((variant) => {
+        houseByTheme[variant.theme].push(variant);
+        if (variant.buildKey) {
+          const key = variant.buildKey.toLowerCase();
+          const list = houseByKey.get(key);
+          if (list) {
+            list.push(variant);
+          } else {
+            houseByKey.set(key, [variant]);
+          }
+        }
+      });
+      const pickHouseVariant = (spot: HouseSpot): HouseVariant | null => {
+        const key = spot.variantKey ? spot.variantKey.toLowerCase() : null;
+        if (key) {
+          const matches = houseByKey.get(key);
+          if (matches && matches.length > 0) {
+            const index = Math.floor(noiseAt(spot.seed + 0.2) * matches.length);
+            return matches[Math.min(matches.length - 1, Math.max(0, index))];
+          }
+        }
+        const source = spot.variantSource ?? "";
+        const theme =
+          /brick/i.test(source) ? "brick" : /wood/i.test(source) ? "wood" : null;
+        const bucket = theme ? houseByTheme[theme] : availableHouseVariants;
+        if (bucket.length === 0) {
+          return null;
+        }
+        const index = Math.floor(noiseAt(spot.seed + 0.2) * bucket.length);
+        return bucket[Math.min(bucket.length - 1, Math.max(0, index))];
+      };
+      type HouseBatchInstance = { spot: HouseSpot; scale: number; baseY: number };
+      type FoundationInstance = {
+        x: number;
+        y: number;
+        z: number;
+        scaleX: number;
+        scaleY: number;
+        scaleZ: number;
+        rotation: number;
+      };
+      const variantIds = new Map<HouseVariant, number>();
+      availableHouseVariants.forEach((variant, index) => {
+        variantIds.set(variant, index);
+      });
+      const detailedBatches = new Map<string, { template: TreeMeshTemplate; instances: HouseBatchInstance[] }>();
+      const fallbackInstances: HouseSpot[] = [];
+      const foundationInstances: FoundationInstance[] = [];
+
+      houseSpots.forEach((spot) => {
+        const footprintX = Math.max(0.5, spot.footprintX);
+        const footprintZ = Math.max(0.5, spot.footprintZ);
+        const foundationTop = spot.groundMax + 0.01;
+        if (spot.groundMin < foundationTop - 0.01) {
+          const foundationHeight = Math.max(0.1, foundationTop - spot.groundMin);
+          foundationInstances.push({
+            x: spot.x,
+            y: spot.groundMin + foundationHeight / 2,
+            z: spot.z,
+            scaleX: footprintX,
+            scaleY: foundationHeight,
+            scaleZ: footprintZ,
+            rotation: spot.rotation
+          });
+        }
+        const variant = pickHouseVariant(spot);
+        if (variant && variant.meshes.length > 0) {
+          const sizeX = Math.max(0.01, variant.size?.x ?? 0);
+          const sizeZ = Math.max(0.01, variant.size?.z ?? 0);
+          const fitScale = Math.min(footprintX / sizeX, footprintZ / sizeZ);
+          const scale = Math.max(0.01, fitScale * 0.98);
+          const baseY = foundationTop + variant.baseOffset * scale;
+          const variantId = variantIds.get(variant) ?? 0;
+          variant.meshes.forEach((meshTemplate, meshIndex) => {
+            const key = `${variantId}:${meshIndex}`;
+            const existing = detailedBatches.get(key);
+            if (existing) {
+              existing.instances.push({ spot, scale, baseY });
+            } else {
+              detailedBatches.set(key, {
+                template: meshTemplate,
+                instances: [{ spot, scale, baseY }]
+              });
+            }
+          });
+        } else {
+          fallbackInstances.push(spot);
+        }
+      });
+
+      const tempMatrix = new THREE.Matrix4();
+      detailedBatches.forEach((batch) => {
+        const { template, instances } = batch;
+        if (instances.length === 0) {
+          return;
+        }
+        const instanced = new THREE.InstancedMesh(template.geometry, template.material, instances.length);
+        instanced.castShadow = true;
+        instanced.receiveShadow = true;
+        instances.forEach((instance, index) => {
+          dummy.position.set(instance.spot.x, instance.baseY, instance.spot.z);
+          dummy.rotation.set(0, instance.spot.rotation, 0);
+          dummy.scale.set(instance.scale, instance.scale, instance.scale);
+          dummy.updateMatrix();
+          tempMatrix.copy(dummy.matrix).multiply(template.baseMatrix);
+          instanced.setMatrixAt(index, tempMatrix);
+        });
+        instanced.instanceMatrix.needsUpdate = true;
+        mesh.add(instanced);
+      });
+
+      if (fallbackInstances.length > 0) {
+        const fallbackMesh = new THREE.InstancedMesh(buildingGeometry, houseMaterial, fallbackInstances.length);
+        fallbackMesh.castShadow = true;
+        fallbackMesh.receiveShadow = true;
+        fallbackInstances.forEach((spot, index) => {
+          const footprintX = Math.max(0.5, spot.footprintX);
+          const footprintZ = Math.max(0.5, spot.footprintZ);
+          const foundationTop = spot.groundMax + 0.01;
+          dummy.position.set(spot.x, foundationTop + 0.3, spot.z);
+          dummy.rotation.set(0, spot.rotation, 0);
+          dummy.scale.set(footprintX, 0.6, footprintZ);
+          dummy.updateMatrix();
+          fallbackMesh.setMatrixAt(index, dummy.matrix);
+        });
+        fallbackMesh.instanceMatrix.needsUpdate = true;
+        mesh.add(fallbackMesh);
+      }
+
+      if (foundationInstances.length > 0) {
+        const foundationMesh = new THREE.InstancedMesh(buildingGeometry, foundationMaterial, foundationInstances.length);
+        foundationMesh.castShadow = true;
+        foundationMesh.receiveShadow = true;
+        foundationInstances.forEach((instance, index) => {
+          dummy.position.set(instance.x, instance.y, instance.z);
+          dummy.rotation.set(0, instance.rotation, 0);
+          dummy.scale.set(instance.scaleX, instance.scaleY, instance.scaleZ);
+          dummy.updateMatrix();
+          foundationMesh.setMatrixAt(index, dummy.matrix);
+        });
+        foundationMesh.instanceMatrix.needsUpdate = true;
+        mesh.add(foundationMesh);
+      }
+    }
+
+  }
+
+  let water: TerrainWaterData | undefined;
+  const oceanLevel = computeWaterLevel(sample, waterId, oceanMask, riverMask);
+  const ratios = waterRatios;
+  const supportMask = buildWaterSupportMask(sampleTypes, waterId);
+  let hasVisibleWater = false;
+  for (let i = 0; i < supportMask.length; i += 1) {
+    if (supportMask[i] > 0 || (ratios.water[i] ?? 0) > 0) {
+      hasVisibleWater = true;
+      break;
+    }
+  }
+  if (hasVisibleWater) {
+    const oceanSupportMask = new Uint8Array(sampleCols * sampleRows);
+    const oceanRatios: WaterSampleRatios = {
+      water: new Float32Array(sampleCols * sampleRows),
+      ocean: new Float32Array(sampleCols * sampleRows),
+      river: new Float32Array(sampleCols * sampleRows)
+    };
+    for (let i = 0; i < sampleCols * sampleRows; i += 1) {
+      const ocean = clamp(ratios.ocean[i] ?? 0, 0, 1);
+      oceanRatios.water[i] = ocean;
+      oceanRatios.ocean[i] = ocean;
+      oceanSupportMask[i] = ocean >= OCEAN_RATIO_MIN ? 1 : 0;
+    }
+    const zeroRiver = new Float32Array(sampleCols * sampleRows);
+    const oceanMaskTexture = buildWaterMaskTexture(sampleCols, sampleRows, oceanRatios);
+    const oceanSupportMap = buildWaterSupportMapTexture(sampleCols, sampleRows, oceanSupportMask);
+    const oceanDomainMap = buildWaterDomainMapTexture(sampleCols, sampleRows, oceanRatios);
+    const shoreSdf = buildShoreSdfTexture(sampleTypes, sampleCols, sampleRows, waterId);
+    const normalizedOceanHeights = buildWaterSurfaceHeights(
+      sampleHeights,
+      oceanSupportMask,
+      oceanRatios.ocean,
+      zeroRiver,
+      sampleCols,
+      sampleRows,
+      oceanLevel,
+      undefined,
+      undefined
+    );
+    const normalizedWaterHeights = buildWaterSurfaceHeights(
+      sampleHeights,
+      supportMask,
+      ratios.ocean,
+      ratios.river,
+      sampleCols,
+      sampleRows,
+      oceanLevel,
+      sampledRiverSurface,
+      sampledRiverStepStrength
+    );
+    const oceanFlowMap = buildRiverFlowTexture(
+      normalizedOceanHeights,
+      sampleTypes,
+      sampleCols,
+      sampleRows,
+      waterId,
+      zeroRiver
+    );
+    const oceanRapidMap = buildRapidMapTexture(
+      normalizedOceanHeights,
+      sampleCols,
+      sampleRows,
+      oceanRatios,
+      undefined
+    );
+    let representativeLevel = oceanLevel;
+    if (representativeLevel === null) {
+      let oceanWeightedSum = 0;
+      let oceanWeightedCount = 0;
+      const fallbackWeightedValues: number[] = [];
+      for (let i = 0; i < normalizedOceanHeights.length; i += 1) {
+        const waterRatio = oceanRatios.water[i] ?? 0;
+        if (waterRatio < WATER_ALPHA_MIN_RATIO) {
+          continue;
+        }
+        const h = clamp(normalizedOceanHeights[i] ?? 0, 0, 1);
+        const oceanWeight = clamp(oceanRatios.ocean[i] ?? 0, 0, 1);
+        if (oceanWeight >= OCEAN_RATIO_MIN * 0.5) {
+          const weight = Math.max(oceanWeight, 0.001);
+          oceanWeightedSum += h * weight;
+          oceanWeightedCount += weight;
+        }
+        const w = Math.max(waterRatio, 0.001);
+        const repeats = Math.max(1, Math.min(4, Math.floor(w * 4)));
+        for (let r = 0; r < repeats; r += 1) {
+          fallbackWeightedValues.push(h);
+        }
+      }
+      if (oceanWeightedCount > 0) {
+        representativeLevel = oceanWeightedSum / oceanWeightedCount;
+      } else if (fallbackWeightedValues.length > 0) {
+        fallbackWeightedValues.sort((a, b) => a - b);
+        const qIndex = Math.floor((fallbackWeightedValues.length - 1) * 0.25);
+        representativeLevel = fallbackWeightedValues[Math.max(0, qIndex)] ?? null;
+      }
+    }
+    const fallbackLevelWorld = waterCount > 0 ? waterHeightSum / Math.max(1, waterCount) : 0;
+    const waterLevelWorld =
+      representativeLevel !== null ? clamp(representativeLevel, 0, 1) * heightScale : fallbackLevelWorld;
+    const oceanHeights = new Float32Array(normalizedOceanHeights.length);
+    for (let i = 0; i < normalizedOceanHeights.length; i += 1) {
+      const surfaceWorld = clamp(normalizedOceanHeights[i] ?? 0, 0, 1) * heightScale;
+      oceanHeights[i] = surfaceWorld - waterLevelWorld + WATER_SURFACE_LIFT_OCEAN;
+    }
+    const waterHeights = new Float32Array(normalizedWaterHeights.length);
+    let validationCount = 0;
+    let terrainWaterMean = 0;
+    let surfaceWaterMean = 0;
+    for (let i = 0; i < normalizedWaterHeights.length; i += 1) {
+      const ratio = ratios.water[i] ?? 0;
+      const riverRatio = clamp(ratios.river[i] ?? 0, 0, 1);
+      const riverWeight = clamp((riverRatio - 0.08) / 0.42, 0, 1);
+      const lift = WATER_SURFACE_LIFT_OCEAN * (1 - riverWeight) + WATER_SURFACE_LIFT_RIVER * riverWeight;
+      let surfaceWorld = clamp(normalizedWaterHeights[i] ?? 0, 0, 1) * heightScale;
+      if (riverRatio >= RIVER_RATIO_MIN) {
+        const x = i % sampleCols;
+        const y = Math.floor(i / sampleCols);
+        let minBankWorld = Number.POSITIVE_INFINITY;
+        const neighbors = [
+          { x: x - 1, y },
+          { x: x + 1, y },
+          { x, y: y - 1 },
+          { x, y: y + 1 },
+          { x: x - 1, y: y - 1 },
+          { x: x + 1, y: y - 1 },
+          { x: x - 1, y: y + 1 },
+          { x: x + 1, y: y + 1 }
+        ];
+        for (const neighbor of neighbors) {
+          if (
+            neighbor.x < 0 ||
+            neighbor.y < 0 ||
+            neighbor.x >= sampleCols ||
+            neighbor.y >= sampleRows
+          ) {
+            continue;
+          }
+          const nIdx = neighbor.y * sampleCols + neighbor.x;
+          if (supportMask[nIdx] > 0) {
+            continue;
+          }
+          minBankWorld = Math.min(minBankWorld, (sampleHeights[nIdx] ?? 0) * heightScale);
+        }
+        if (Number.isFinite(minBankWorld)) {
+          const maxSurfaceWorld = minBankWorld - RIVER_SURFACE_BANK_CLEARANCE;
+          surfaceWorld = Math.min(surfaceWorld, maxSurfaceWorld);
+        }
+      }
+      const offsetY = surfaceWorld - waterLevelWorld + lift;
+      waterHeights[i] = offsetY;
+      if (ratio < WATER_ALPHA_MIN_RATIO) {
+        continue;
+      }
+      if (DEBUG_TERRAIN_RENDER) {
+        validationCount += 1;
+        terrainWaterMean += (sampleHeights[i] ?? 0) * heightScale;
+        surfaceWaterMean += waterLevelWorld + offsetY;
+      }
+    }
+    if (DEBUG_TERRAIN_RENDER && validationCount > 0) {
+      terrainWaterMean /= validationCount;
+      surfaceWaterMean /= validationCount;
+      const delta = Math.abs(surfaceWaterMean - terrainWaterMean);
+      if (delta > 0.35) {
+        console.warn(
+          `[threeTestTerrain] Water/terrain mean Y mismatch: delta=${delta.toFixed(3)} terrain=${terrainWaterMean.toFixed(3)} surface=${surfaceWaterMean.toFixed(3)} samples=${validationCount}`
+        );
+      }
+    }
+    const waterfallMinDrop = Math.max(0.12, WATERFALL_MIN_DROP_NORM * heightScale);
+    const waterfallInstances = buildWaterfallInstances(
+      waterHeights,
+      supportMask,
+      ratios.ocean,
+      sampleCols,
+      sampleRows,
+      ratios.river,
+      sampledRiverStepStrength,
+      waterfallMinDrop,
+      width,
+      depth,
+      riverRenderDomain
+    );
+    const river = buildRiverMeshData(
+      sample,
+      waterId,
+      heightScale,
+      width,
+      depth,
+      waterLevelWorld,
+      riverRenderDomain,
+      waterfallInstances
+    );
+    water = {
+      ocean: {
+        mask: oceanMaskTexture,
+        supportMap: oceanSupportMap,
+        domainMap: oceanDomainMap,
+        shoreSdf,
+        flowMap: oceanFlowMap,
+        rapidMap: oceanRapidMap,
+        level: waterLevelWorld,
+        sampleCols,
+        sampleRows,
+        width,
+        depth,
+        heights: oceanHeights
+      },
+      river,
+      waterfallInstances
+    };
+  }
+
+  const treeTileProfiles = new Map<number, TreeFlameProfile>();
+  treeTileProfilesRaw.forEach((profile, tileIndex) => {
+    const count = Math.max(1, profile.count);
+    treeTileProfiles.set(tileIndex, {
+      x: profile.x / count,
+      y: profile.y / count,
+      z: profile.z / count,
+      crownHeight: profile.crownHeight / count,
+      crownRadius: profile.crownRadius / count,
+      trunkHeight: profile.trunkHeight / count,
+      treeCount: count
+    });
+  });
+  const treeBurn =
+    treeBurnMeshStates.length > 0
+      ? createTreeBurnController(treeBurnMeshStates, TILE_TYPE_IDS.ash, treeTileProfiles)
+      : undefined;
+  return { mesh, size: { width, depth }, water, treeBurn };
+};

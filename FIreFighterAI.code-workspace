@@ -5,6 +5,7 @@
 		}
 	],
 	"settings": {
-		"geminicodeassist.agentYoloMode": true
+		"geminicodeassist.agentYoloMode": true,
+		"chatgpt.openOnStartup": true
 	}
 }

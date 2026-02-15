@@ -1,5 +1,6 @@
 
 import type { WorldState } from "../core/state.js";
+import type { RenderState } from "./renderState.js";
 import { inBounds, indexFor } from "../core/grid.js";
 import { TILE_SIZE } from "../core/config.js";
 import { clamp } from "../core/utils.js";
@@ -14,8 +15,8 @@ const MAX_VISIBLE_TILES = 5200;
 /**
  * Updates the smoothed fire intensity values used for rendering.
  */
-export const updateFireSmoothing = (state: WorldState, now: number) => {
-  const dt = state.lastRenderTime > 0 ? (now - state.lastRenderTime) / 1000 : 0.016;
+export const updateFireSmoothing = (state: WorldState, renderState: RenderState, now: number) => {
+  const dt = renderState.lastRenderTime > 0 ? (now - renderState.lastRenderTime) / 1000 : 0.016;
   const clampedDt = Math.min(dt, 0.05);
   const smoothSeconds = Math.max(0, state.fireSettings.renderSmoothSeconds);
 
@@ -26,7 +27,7 @@ export const updateFireSmoothing = (state: WorldState, now: number) => {
 
   const total = state.grid.totalTiles;
   const targetFire = state.tileFire;
-  const smooth = state.renderFireSmooth;
+  const smooth = renderState.renderFireSmooth;
   for (let i = 0; i < total; i += 1) {
     smooth[i] += (targetFire[i] - smooth[i]) * alpha;
   }
@@ -37,6 +38,7 @@ export const updateFireSmoothing = (state: WorldState, now: number) => {
  */
 export const drawFireFx = (
   state: WorldState,
+  renderState: RenderState,
   ctx: CanvasRenderingContext2D,
   now: number,
   visibleBounds: Bounds,
@@ -78,7 +80,7 @@ export const drawFireFx = (
           for (let dx = 0; dx < sampleStep; dx++) {
             if (inBounds(state.grid, x + dx, y + dy)) {
               const blockIdx = indexFor(state.grid, x + dx, y + dy);
-              const blockFire = state.renderFireSmooth[blockIdx];
+              const blockFire = renderState.renderFireSmooth[blockIdx];
               if (blockFire > maxFireInBlock) {
                 maxFireInBlock = blockFire;
               }
@@ -87,7 +89,7 @@ export const drawFireFx = (
         }
         fire = maxFireInBlock;
       } else {
-        fire = state.renderFireSmooth[idx];
+        fire = renderState.renderFireSmooth[idx];
       }
 
       if (fire > 0.01) {

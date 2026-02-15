@@ -1,4 +1,4 @@
-import type { WorldState } from "../core/state.js";
+import type { UiState } from "../core/uiState.js";
 
 export type OverlayRefs = {
   overlay: HTMLDivElement;
@@ -19,7 +19,7 @@ export const getOverlayRefs = (): OverlayRefs => ({
   overlayRestart: document.getElementById("overlayRestart") as HTMLButtonElement
 });
 
-export const updateOverlay = (refs: OverlayRefs, state: WorldState): void => {
+export const updateOverlay = (refs: OverlayRefs, state: UiState): void => {
   refs.overlay.classList.toggle("hidden", !state.overlayVisible);
   refs.overlay.classList.toggle("is-blocking", state.overlayAction === "restart");
   refs.overlayTitle.textContent = state.overlayTitle;

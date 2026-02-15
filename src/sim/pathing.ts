@@ -3,6 +3,7 @@ import type { WorldState } from "../core/state.js";
 import { MOVE_DOWNHILL_FACTOR, MOVE_SLOPE_MAX, MOVE_SLOPE_MIN, MOVE_TERRAIN_COST, MOVE_UPHILL_FACTOR } from "../core/config.js";
 import { inBounds, indexFor } from "../core/grid.js";
 import { clamp } from "../core/utils.js";
+import { profEnd, profStart } from "./prof.js";
 
 type MoveDir = { x: number; y: number; cost: number };
 
@@ -44,72 +45,6 @@ const getMoveCost = (state: WorldState, fromX: number, fromY: number, toX: numbe
   return baseCost * terrain * slope;
 };
 
-class MinHeap {
-  private heap: { idx: number; f: number }[] = [];
-
-  push(node: { idx: number; f: number }): void {
-    this.heap.push(node);
-    this.bubbleUp(this.heap.length - 1);
-  }
-
-  pop(): { idx: number; f: number } | null {
-    if (this.heap.length === 0) {
-      return null;
-    }
-    const top = this.heap[0];
-    const end = this.heap.pop();
-    if (end && this.heap.length > 0) {
-      this.heap[0] = end;
-      this.sinkDown(0);
-    }
-    return top;
-  }
-
-  get size(): number {
-    return this.heap.length;
-  }
-
-  private bubbleUp(index: number): void {
-    const node = this.heap[index];
-    while (index > 0) {
-      const parentIndex = Math.floor((index - 1) / 2);
-      const parent = this.heap[parentIndex];
-      if (node.f >= parent.f) {
-        break;
-      }
-      this.heap[parentIndex] = node;
-      this.heap[index] = parent;
-      index = parentIndex;
-    }
-  }
-
-  private sinkDown(index: number): void {
-    const length = this.heap.length;
-    const node = this.heap[index];
-    while (true) {
-      let swap = -1;
-      const leftIndex = index * 2 + 1;
-      const rightIndex = index * 2 + 2;
-
-      if (leftIndex < length && this.heap[leftIndex].f < node.f) {
-        swap = leftIndex;
-      }
-      if (
-        rightIndex < length &&
-        this.heap[rightIndex].f < (swap === -1 ? node.f : this.heap[leftIndex].f)
-      ) {
-        swap = rightIndex;
-      }
-      if (swap === -1) {
-        break;
-      }
-      this.heap[index] = this.heap[swap];
-      this.heap[swap] = node;
-      index = swap;
-    }
-  }
-}
-
 export function isPassable(state: WorldState, x: number, y: number): boolean {
   if (!inBounds(state.grid, x, y)) {
     return false;
@@ -123,27 +58,41 @@ export function isPassable(state: WorldState, x: number, y: number): boolean {
 }
 
 export function findPath(state: WorldState, start: Point, goal: Point): Point[] {
+  const profStartAt = profStart();
   if (!inBounds(state.grid, goal.x, goal.y) || !isPassable(state, goal.x, goal.y)) {
+    profEnd("findPath", profStartAt);
     return [];
   }
   if (!inBounds(state.grid, start.x, start.y) || !isPassable(state, start.x, start.y)) {
+    profEnd("findPath", profStartAt);
     return [];
   }
   const startIdx = indexFor(state.grid, start.x, start.y);
   const goalIdx = indexFor(state.grid, goal.x, goal.y);
   if (startIdx === goalIdx) {
+    profEnd("findPath", profStartAt);
     return [];
   }
 
   const total = state.grid.totalTiles;
-  const prev = new Int32Array(total);
-  prev.fill(-1);
-  const gScore = new Float32Array(total);
-  gScore.fill(Number.POSITIVE_INFINITY);
-
-  const open = new MinHeap();
-  gScore[startIdx] = 0;
-  prev[startIdx] = startIdx;
+  const prev = state.pathPrev;
+  const gScore = state.pathGScore;
+  const visit = state.pathVisitStamp;
+  const closed = state.pathClosedStamp;
+  let stamp = (state.pathStamp + 1) >>> 0;
+  if (stamp === 0) {
+    visit.fill(0);
+    closed.fill(0);
+    stamp = 1;
+  }
+  state.pathStamp = stamp;
+  const openIdx = state.pathOpenIdx;
+  const openF = state.pathOpenF;
+  let openSize = 0;
+  let nodesExpanded = 0;
+  let maxOpen = 0;
+  const epsilon = Math.max(1, state.simPerf.pathEpsilon || 1);
+  const maxExpansions = Math.max(0, state.simPerf.pathMaxExpansions || 0);
 
   const heuristicScale = MOVE_SLOPE_MIN;
   const estimate = (x: number, y: number) => {
@@ -153,19 +102,87 @@ export function findPath(state: WorldState, start: Point, goal: Point): Point[] 
     return (dx + dy + (Math.SQRT2 - 2) * diagonal) * heuristicScale;
   };
 
-  open.push({ idx: startIdx, f: estimate(start.x, start.y) });
+  const heapPush = (idx: number, f: number): void => {
+    if (openSize >= openIdx.length) {
+      return;
+    }
+    let i = openSize;
+    openIdx[i] = idx;
+    openF[i] = f;
+    openSize += 1;
+    while (i > 0) {
+      const parent = (i - 1) >> 1;
+      if (openF[parent] <= f) {
+        break;
+      }
+      openIdx[i] = openIdx[parent];
+      openF[i] = openF[parent];
+      i = parent;
+    }
+    openIdx[i] = idx;
+    openF[i] = f;
+  };
 
-  while (open.size > 0) {
-    const current = open.pop();
-    if (!current) {
+  const heapPop = (): number => {
+    if (openSize === 0) {
+      return -1;
+    }
+    const result = openIdx[0];
+    openSize -= 1;
+    if (openSize > 0) {
+      const idx = openIdx[openSize];
+      const f = openF[openSize];
+      let i = 0;
+      while (true) {
+        const left = i * 2 + 1;
+        if (left >= openSize) {
+          break;
+        }
+        const right = left + 1;
+        let smallest = left;
+        if (right < openSize && openF[right] < openF[left]) {
+          smallest = right;
+        }
+        if (openF[smallest] >= f) {
+          break;
+        }
+        openIdx[i] = openIdx[smallest];
+        openF[i] = openF[smallest];
+        i = smallest;
+      }
+      openIdx[i] = idx;
+      openF[i] = f;
+    }
+    return result;
+  };
+
+  visit[startIdx] = stamp;
+  gScore[startIdx] = 0;
+  prev[startIdx] = startIdx;
+  heapPush(startIdx, estimate(start.x, start.y) * epsilon);
+  if (openSize > maxOpen) {
+    maxOpen = openSize;
+  }
+
+  while (openSize > 0) {
+    const currentIdx = heapPop();
+    if (currentIdx < 0) {
       break;
     }
-    if (current.idx === goalIdx) {
+    if (closed[currentIdx] === stamp) {
+      continue;
+    }
+    closed[currentIdx] = stamp;
+    nodesExpanded += 1;
+    if (currentIdx === goalIdx) {
       break;
     }
-    const cx = current.idx % state.grid.cols;
-    const cy = Math.floor(current.idx / state.grid.cols);
-    const currentScore = gScore[current.idx];
+    if (maxExpansions > 0 && nodesExpanded >= maxExpansions) {
+      break;
+    }
+    const cx = currentIdx % state.grid.cols;
+    const cy = Math.floor(currentIdx / state.grid.cols);
+    const currentScore = gScore[currentIdx];
 
     for (const dir of MOVE_DIRS) {
       const nx = cx + dir.x;
@@ -181,16 +198,27 @@ export function findPath(state: WorldState, start: Point, goal: Point): Point[] 
       const nIdx = indexFor(state.grid, nx, ny);
       const stepCost = getMoveCost(state, cx, cy, nx, ny, dir.cost);
       const nextScore = currentScore + stepCost;
-      if (nextScore >= gScore[nIdx]) {
+      if (visit[nIdx] === stamp && nextScore >= gScore[nIdx]) {
         continue;
       }
+      visit[nIdx] = stamp;
       gScore[nIdx] = nextScore;
-      prev[nIdx] = current.idx;
-      open.push({ idx: nIdx, f: nextScore + estimate(nx, ny) });
+      prev[nIdx] = currentIdx;
+      const f = nextScore + estimate(nx, ny) * epsilon;
+      heapPush(nIdx, f);
+      if (openSize > maxOpen) {
+        maxOpen = openSize;
+      }
     }
   }
 
-  if (prev[goalIdx] === -1) {
+  state.pathOpenSize = openSize;
+  state.pathLastNodesExpanded = nodesExpanded;
+  state.pathMaxOpenSize = Math.max(state.pathMaxOpenSize, maxOpen);
+  state.pathNodesExpanded = state.pathNodesExpanded > 0 ? state.pathNodesExpanded * 0.8 + nodesExpanded * 0.2 : nodesExpanded;
+
+  if (visit[goalIdx] !== stamp || prev[goalIdx] === -1) {
+    profEnd("findPath", profStartAt);
     return [];
   }
 
@@ -203,6 +231,7 @@ export function findPath(state: WorldState, start: Point, goal: Point): Point[] 
     current = prev[current];
   }
   path.reverse();
+  profEnd("findPath", profStartAt);
   return path;
 }
 

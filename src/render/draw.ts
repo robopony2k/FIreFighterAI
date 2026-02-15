@@ -1,8 +1,10 @@
 import type { WorldState } from "../core/state.js";
+import type { InputState } from "../core/inputState.js";
+import type { EffectsState } from "../core/effectsState.js";
 import { DEBUG_TERRAIN_RENDER, TILE_SIZE, TILE_COLOR_RGB } from "../core/config.js";
 import { indexFor } from "../core/grid.js";
 import { getHeightScale, getTileHeight, getViewTransform, isoProject, setHeightScale } from "./iso.js";
-import { syncTileSoA } from "../core/state.js";
+import { ensureTileSoA } from "../core/tileCache.js";
 import { getVisibleBounds } from "./view.js";
 import type { ViewTransform } from "./view.js";
 import { ensureTerrainCache, ensureTreeLayerCache, getRenderHeightAt } from "./terrainCache.js";
@@ -13,6 +15,7 @@ import { clamp } from "../core/utils.js";
 import { darken, mixRgb, lighten } from "./color.js";
 import { hash2D } from "../mapgen/noise.js";
 import { TreeType } from "../core/types.js";
+import type { RenderState } from "./renderState.js";
 
 const formatNumber = (value: number, digits = 3): string => (Number.isFinite(value) ? value.toFixed(digits) : "inf");
 
@@ -798,11 +801,12 @@ const drawLandShoreFeatherForTile = (
 
 const drawCoastBands = (
   state: WorldState,
+  renderState: RenderState,
   canvas: HTMLCanvasElement,
   ctx: CanvasRenderingContext2D,
   view: ViewTransform
 ) => {
-  const bounds = getVisibleBounds(state, canvas, view);
+  const bounds = getVisibleBounds(state, renderState, canvas, view);
   for (let y = bounds.startY; y <= bounds.endY; y += 1) {
     for (let x = bounds.startX; x <= bounds.endX; x += 1) {
       if (state.tiles[indexFor(state.grid, x, y)].type !== "water") {
@@ -816,11 +820,12 @@ const drawCoastBands = (
 
 const drawLandShoreFeather = (
   state: WorldState,
+  renderState: RenderState,
   canvas: HTMLCanvasElement,
   ctx: CanvasRenderingContext2D,
   view: ViewTransform
 ) => {
-  const bounds = getVisibleBounds(state, canvas, view);
+  const bounds = getVisibleBounds(state, renderState, canvas, view);
   for (let y = bounds.startY; y <= bounds.endY; y += 1) {
     for (let x = bounds.startX; x <= bounds.endX; x += 1) {
       drawLandShoreFeatherForTile(state, ctx, x, y);
@@ -1095,6 +1100,8 @@ const drawCoastlinePaths = (state: WorldState, ctx: CanvasRenderingContext2D) =>
 
 const drawGridOverlay = (
   state: WorldState,
+  renderState: RenderState,
+  inputState: InputState,
   canvas: HTMLCanvasElement,
   ctx: CanvasRenderingContext2D,
   view: { scale: number; offsetX: number; offsetY: number }
@@ -1103,11 +1110,11 @@ const drawGridOverlay = (
   const gridActive =
     state.deployMode !== null ||
     state.selectedUnitIds.length > 0 ||
-    state.selectionBox !== null ||
-    state.formationStart !== null ||
-    state.formationEnd !== null ||
-    state.clearLineStart !== null;
-  const hoverBoost = state.debugHoverTile !== null;
+    inputState.selectionBox !== null ||
+    inputState.formationStart !== null ||
+    inputState.formationEnd !== null ||
+    inputState.clearLineStart !== null;
+  const hoverBoost = inputState.debugHoverTile !== null;
   const baseAlpha = 0.03 + 0.1 * zoomFactor;
   const boostAlpha = (gridActive || hoverBoost ? 0.24 : 0) * zoomFactor;
   const alpha = clamp(baseAlpha + boostAlpha, 0, 0.35);
@@ -1115,7 +1122,7 @@ const drawGridOverlay = (
     return;
   }
 
-  const bounds = getVisibleBounds(state, canvas, view);
+  const bounds = getVisibleBounds(state, renderState, canvas, view);
   ctx.save();
   ctx.lineWidth = Math.max(0.8, 1.1 / view.scale);
 
@@ -1188,8 +1195,8 @@ const drawGridOverlay = (
     }
   }
 
-  if (state.debugHoverTile) {
-    const { x, y } = state.debugHoverTile;
+  if (inputState.debugHoverTile) {
+    const { x, y } = inputState.debugHoverTile;
     const p0 = isoProject(x, y, getRenderHeightAt(state, x, y));
     const p1 = isoProject(x + 1, y, getRenderHeightAt(state, x + 1, y));
     const p2 = isoProject(x + 1, y + 1, getRenderHeightAt(state, x + 1, y + 1));
@@ -1238,6 +1245,8 @@ const drawDebugCellHighlight = (
 
 const drawDebugCellPanel = (
   state: WorldState,
+  renderState: RenderState,
+  inputState: InputState,
   canvas: HTMLCanvasElement,
   ctx: CanvasRenderingContext2D,
   tileX: number,
@@ -1252,14 +1261,14 @@ const drawDebugCellPanel = (
   const cachedIgnition = state.tileIgnitionPoint[idx];
   const cachedBurnRate = state.tileBurnRate[idx];
   const cachedHeatOutput = state.tileHeatOutput[idx];
-  const smoothFire = state.renderFireSmooth[idx];
+  const smoothFire = renderState.renderFireSmooth[idx];
   const inBounds =
     state.fireBoundsActive &&
     tileX >= state.fireMinX &&
     tileX <= state.fireMaxX &&
     tileY >= state.fireMinY &&
     tileY <= state.fireMaxY;
-  const hoverWorld = state.debugHoverWorld;
+  const hoverWorld = inputState.debugHoverWorld;
   const height = getRenderHeightAt(state, tileX + 0.5, tileY + 0.5);
 
   const lines = [
@@ -1315,21 +1324,29 @@ const drawDebugCellPanel = (
  * @param ctx The 2D rendering context of the canvas.
  * @param alpha Interpolation factor between the previous and current sim step.
  */
-export function draw(state: WorldState, canvas: HTMLCanvasElement, ctx: CanvasRenderingContext2D, alpha = 1): void {
+export function draw(
+  state: WorldState,
+  renderState: RenderState,
+  inputState: InputState,
+  effectsState: EffectsState,
+  canvas: HTMLCanvasElement,
+  ctx: CanvasRenderingContext2D,
+  alpha = 1
+): void {
   // Ensure the Structure-of-Arrays tile data is in sync with the main state.
-  syncTileSoA(state);
+  ensureTileSoA(state);
   setHeightScale(getHeightScale(state));
   logTerrainRenderStats(state);
 
-  const view = getViewTransform(state, canvas);
+  const view = getViewTransform(state, renderState, canvas);
   const now = performance.now();
 
   // Update smoothed fire values for rendering
-  updateFireSmoothing(state, now);
-  state.lastRenderTime = now;
+  updateFireSmoothing(state, renderState, now);
+  renderState.lastRenderTime = now;
 
   // --- Main Rendering ---
-  const cache = ensureTerrainCache(state, now);
+  const cache = ensureTerrainCache(state, inputState, now);
 
   // Reset transform and clear screen
   ctx.setTransform(1, 0, 0, 1, 0, 0);
@@ -1341,19 +1358,27 @@ export function draw(state: WorldState, canvas: HTMLCanvasElement, ctx: CanvasRe
   // Draw the pre-rendered terrain from its cache
   ctx.drawImage(cache.canvas, cache.originX, cache.originY);
   drawCoastlinePaths(state, ctx);
-  drawGridOverlay(state, canvas, ctx, view);
-  const treeLayer = ensureTreeLayerCache(state, now);
+  drawGridOverlay(state, renderState, inputState, canvas, ctx, view);
+  const treeLayer = ensureTreeLayerCache(state, renderState, inputState, now);
   if (treeLayer) {
     ctx.drawImage(treeLayer.canvas, treeLayer.originX, treeLayer.originY);
   }
 
-  if (state.renderEffects) {
+  if (renderState.renderEffects) {
     // Draw formation line for units
-    if (state.formationStart && state.formationEnd) {
-      const startHeight = getRenderHeightAt(state, state.formationStart.x + 0.5, state.formationStart.y + 0.5);
-      const endHeight = getRenderHeightAt(state, state.formationEnd.x + 0.5, state.formationEnd.y + 0.5);
-      const start = isoProject(state.formationStart.x + 0.5, state.formationStart.y + 0.5, startHeight + TILE_SIZE * 0.1);
-      const end = isoProject(state.formationEnd.x + 0.5, state.formationEnd.y + 0.5, endHeight + TILE_SIZE * 0.1);
+    if (inputState.formationStart && inputState.formationEnd) {
+      const startHeight = getRenderHeightAt(state, inputState.formationStart.x + 0.5, inputState.formationStart.y + 0.5);
+      const endHeight = getRenderHeightAt(state, inputState.formationEnd.x + 0.5, inputState.formationEnd.y + 0.5);
+      const start = isoProject(
+        inputState.formationStart.x + 0.5,
+        inputState.formationStart.y + 0.5,
+        startHeight + TILE_SIZE * 0.1
+      );
+      const end = isoProject(
+        inputState.formationEnd.x + 0.5,
+        inputState.formationEnd.y + 0.5,
+        endHeight + TILE_SIZE * 0.1
+      );
       ctx.strokeStyle = "rgba(255, 255, 255, 0.65)";
       ctx.lineWidth = 2;
       ctx.setLineDash([8, 6]);
@@ -1364,27 +1389,35 @@ export function draw(state: WorldState, canvas: HTMLCanvasElement, ctx: CanvasRe
       ctx.setLineDash([]);
     }
 
-    const visibleBounds = getVisibleBounds(state, canvas, view);
+    const visibleBounds = getVisibleBounds(state, renderState, canvas, view);
 
     // Draw all fire effects
-    drawFireFx(state, ctx, now, visibleBounds, view);
+    drawFireFx(state, renderState, ctx, now, visibleBounds, view);
 
     // Draw all units and their related effects (selection, hoses)
     drawUnits(state, ctx, alpha);
 
     // Draw non-fire particles (smoke, water)
-    drawParticles(state, ctx);
+    drawParticles(state, effectsState, ctx);
   }
 
   // Draw screen-space UI elements like the selection box
-  if (state.debugCellEnabled && state.debugHoverTile) {
-    drawDebugCellHighlight(state, ctx, view, state.debugHoverTile.x, state.debugHoverTile.y);
+  if (inputState.debugCellEnabled && inputState.debugHoverTile) {
+    drawDebugCellHighlight(state, ctx, view, inputState.debugHoverTile.x, inputState.debugHoverTile.y);
   }
-  if (state.debugCellEnabled && state.debugHoverTile) {
-    drawDebugCellPanel(state, canvas, ctx, state.debugHoverTile.x, state.debugHoverTile.y);
+  if (inputState.debugCellEnabled && inputState.debugHoverTile) {
+    drawDebugCellPanel(
+      state,
+      renderState,
+      inputState,
+      canvas,
+      ctx,
+      inputState.debugHoverTile.x,
+      inputState.debugHoverTile.y
+    );
   }
-  if (state.selectionBox) {
-    const { x1, y1, x2, y2 } = state.selectionBox;
+  if (inputState.selectionBox) {
+    const { x1, y1, x2, y2 } = inputState.selectionBox;
     const left = Math.min(x1, x2);
     const top = Math.min(y1, y2);
     const width = Math.abs(x2 - x1);

@@ -1,5 +1,7 @@
 
 import type { WorldState } from "../core/state.js";
+import type { InputState } from "../core/inputState.js";
+import type { RenderState } from "./renderState.js";
 import { TreeType } from "../core/types.js";
 import { inBounds, indexFor } from "../core/grid.js";
 import { hash2D } from "../mapgen/noise.js";
@@ -401,11 +403,12 @@ const shadeTileColor = (
   tile: WorldState["tiles"][number],
   x: number,
   y: number,
+  debugTypeColors: boolean,
   baseOverride?: RGB
 ) => {
   const elev = tile.type === "water" ? 0 : tile.elevation;
   
-  if (state.debugTypeColors) {
+  if (debugTypeColors) {
     return TILE_COLOR_RGB[tile.type] ?? TILE_COLOR_RGB.grass;
   }
 
@@ -1015,7 +1018,7 @@ const drawHouseOnTile = (
   ctx.fill();
 };
 
-export const ensureTerrainCache = (state: WorldState, now: number): TerrainCache => {
+export const ensureTerrainCache = (state: WorldState, inputState: InputState, now: number): TerrainCache => {
   const { cols, rows } = state.grid;
   const maxHeight = getHeightScale(state);
   const originX = -rows * ISO_TILE_WIDTH * 0.5 - TERRAIN_PADDING;
@@ -1023,7 +1026,7 @@ export const ensureTerrainCache = (state: WorldState, now: number): TerrainCache
   const width = (cols + rows) * ISO_TILE_WIDTH * 0.5 + TERRAIN_PADDING * 2;
   const height = (cols + rows) * ISO_TILE_HEIGHT * 0.5 + maxHeight + TERRAIN_PADDING * 2;
   const timeReady = !terrainCache || now - terrainCache.lastBuild > TERRAIN_CACHE_INTERVAL_MS;
-  const interactionCooldown = now - state.lastInteractionTime < TERRAIN_INTERACTION_COOLDOWN_MS;
+  const interactionCooldown = now - inputState.lastInteractionTime < TERRAIN_INTERACTION_COOLDOWN_MS;
   const needsRebuild =
     !terrainCache ||
     terrainCache.width !== Math.ceil(width) ||
@@ -1080,7 +1083,7 @@ export const ensureTerrainCache = (state: WorldState, now: number): TerrainCache
         } else if (tile.type === "house" || tile.type === "base") {
           baseOverride = TILE_COLOR_RGB.grass;
         }
-        const top = shadeTileColor(state, tile, x, y, baseOverride);
+        const top = shadeTileColor(state, tile, x, y, inputState.debugTypeColors, baseOverride);
         const p0 = isoProject(x, y, h00);
         const p1 = isoProject(x + 1, y, h10);
         const p2 = isoProject(x + 1, y + 1, h11);
@@ -1204,8 +1207,13 @@ export const ensureTerrainCache = (state: WorldState, now: number): TerrainCache
   return terrainCache;
 };
 
-export const ensureTreeLayerCache = (state: WorldState, now: number): TerrainCache | null => {
-  if (!RENDER_TERRAIN_TREES || !state.renderTrees) {
+export const ensureTreeLayerCache = (
+  state: WorldState,
+  renderState: RenderState,
+  inputState: InputState,
+  now: number
+): TerrainCache | null => {
+  if (!RENDER_TERRAIN_TREES || !renderState.renderTrees) {
     return null;
   }
   const { cols, rows } = state.grid;
@@ -1215,7 +1223,7 @@ export const ensureTreeLayerCache = (state: WorldState, now: number): TerrainCac
   const width = (cols + rows) * ISO_TILE_WIDTH * 0.5 + TERRAIN_PADDING * 2;
   const height = (cols + rows) * ISO_TILE_HEIGHT * 0.5 + maxHeight + TERRAIN_PADDING * 2;
   const timeReady = !treeLayerCache || now - treeLayerCache.lastBuild > TERRAIN_CACHE_INTERVAL_MS;
-  const interactionCooldown = now - state.lastInteractionTime < TERRAIN_INTERACTION_COOLDOWN_MS;
+  const interactionCooldown = now - inputState.lastInteractionTime < TERRAIN_INTERACTION_COOLDOWN_MS;
   const baseBuild = terrainCache?.lastBuild ?? 0;
   const needsRebuild =
     !treeLayerCache ||

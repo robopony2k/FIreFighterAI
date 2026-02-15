@@ -1,7 +1,14 @@
 import type { RNG, Point, Unit } from "../core/types.js";
 import type { WorldState } from "../core/state.js";
+import type { EffectsState } from "../core/effectsState.js";
 
-export function emitWaterSpray(state: WorldState, rng: RNG, unit: Unit, target: Point | null): void {
+export function emitWaterSpray(
+  state: WorldState,
+  effects: EffectsState,
+  rng: RNG,
+  unit: Unit,
+  target: Point | null
+): void {
   const count = unit.kind === "truck" ? 8 : 5;
   const baseSpeed = unit.kind === "truck" ? 8 : 6;
   const spread = unit.kind === "truck" ? 0.55 : 0.7;
@@ -13,7 +20,7 @@ export function emitWaterSpray(state: WorldState, rng: RNG, unit: Unit, target: 
   for (let i = 0; i < count; i += 1) {
     const jitter = (rng.next() - 0.5) * spread;
     const speed = baseSpeed * (0.7 + rng.next() * 0.6);
-    state.waterParticles.push({
+    effects.waterParticles.push({
       x: unit.x,
       y: unit.y,
       vx: Math.cos(baseAngle + jitter) * speed,
@@ -26,14 +33,29 @@ export function emitWaterSpray(state: WorldState, rng: RNG, unit: Unit, target: 
   }
 }
 
-export function emitSmokeAt(state: WorldState, rng: RNG, x: number, y: number, intensity: number): void {
-  const count = 2 + Math.ceil(intensity * 3);
+export function emitSmokeAt(
+  state: WorldState,
+  effects: EffectsState,
+  rng: RNG,
+  x: number,
+  y: number,
+  intensity: number
+): void {
+  const smokeRate = Math.max(0, state.simPerf.smokeRate ?? 1);
+  if (smokeRate <= 0) {
+    return;
+  }
+  const rawCount = (2 + Math.ceil(intensity * 3)) * smokeRate;
+  const count = Math.max(0, Math.floor(rawCount + rng.next()));
+  if (count <= 0) {
+    return;
+  }
   const baseSpeed = 0.9 + state.wind.strength * 1.6;
   for (let i = 0; i < count; i += 1) {
     const jitter = (rng.next() - 0.5) * 0.6;
     const speed = baseSpeed * (0.6 + rng.next() * 0.8);
     const angle = Math.atan2(state.wind.dy, state.wind.dx) + jitter;
-    state.smokeParticles.push({
+    effects.smokeParticles.push({
       x: x + (rng.next() - 0.5) * 0.3,
       y: y + (rng.next() - 0.5) * 0.3,
       vx: Math.cos(angle) * speed,
@@ -46,31 +68,49 @@ export function emitSmokeAt(state: WorldState, rng: RNG, x: number, y: number, i
   }
 }
 
-export function stepParticles(state: WorldState, delta: number): void {
-  state.waterParticles = state.waterParticles.filter((particle) => {
-    particle.life -= delta;
-    if (particle.life <= 0) {
-      return false;
-    }
-    particle.x += particle.vx * delta;
-    particle.y += particle.vy * delta;
-    particle.vx *= 0.96;
-    particle.vy *= 0.96;
-    particle.alpha = particle.life / particle.maxLife;
-    return true;
-  });
+export function stepParticles(state: WorldState, effects: EffectsState, delta: number): void {
+  if (effects.waterParticles.length === 0 && effects.smokeParticles.length === 0) {
+    return;
+  }
 
-  state.smokeParticles = state.smokeParticles.filter((particle) => {
-    particle.life -= delta;
-    if (particle.life <= 0) {
-      return false;
+  if (effects.waterParticles.length > 0) {
+    const water = effects.waterParticles;
+    let write = 0;
+    for (let read = 0; read < water.length; read += 1) {
+      const particle = water[read];
+      particle.life -= delta;
+      if (particle.life <= 0) {
+        continue;
+      }
+      particle.x += particle.vx * delta;
+      particle.y += particle.vy * delta;
+      particle.vx *= 0.96;
+      particle.vy *= 0.96;
+      particle.alpha = particle.life / particle.maxLife;
+      water[write] = particle;
+      write += 1;
     }
-    particle.x += particle.vx * delta;
-    particle.y += particle.vy * delta;
-    particle.vx += state.wind.dx * 0.35 * delta;
-    particle.vy += state.wind.dy * 0.35 * delta;
-    particle.alpha = particle.life / particle.maxLife;
-    return true;
-  });
+    water.length = write;
+  }
+
+  if (effects.smokeParticles.length > 0) {
+    const smoke = effects.smokeParticles;
+    let write = 0;
+    for (let read = 0; read < smoke.length; read += 1) {
+      const particle = smoke[read];
+      particle.life -= delta;
+      if (particle.life <= 0) {
+        continue;
+      }
+      particle.x += particle.vx * delta;
+      particle.y += particle.vy * delta;
+      particle.vx += state.wind.dx * 0.35 * delta;
+      particle.vy += state.wind.dy * 0.35 * delta;
+      particle.alpha = particle.life / particle.maxLife;
+      smoke[write] = particle;
+      write += 1;
+    }
+    smoke.length = write;
+  }
 }
 

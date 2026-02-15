@@ -1,5 +1,6 @@
 import type { Point } from "../core/types.js";
 import type { WorldState } from "../core/state.js";
+import type { RenderState } from "./renderState.js";
 import {
   HEIGHT_MAP_RATIO,
   HEIGHT_SCALE,
@@ -78,18 +79,25 @@ export function getHeightAt(state: WorldState, wx: number, wy: number): number {
 
 export function getViewTransform(
   state: WorldState,
+  renderState: RenderState,
   canvas: HTMLCanvasElement
 ): { scale: number; offsetX: number; offsetY: number } {
-  const scale = state.zoom;
-  const centerHeight = getHeightAt(state, state.cameraCenter.x, state.cameraCenter.y);
-  const center = isoProject(state.cameraCenter.x, state.cameraCenter.y, centerHeight);
+  const scale = renderState.zoom;
+  const centerHeight = getHeightAt(state, renderState.cameraCenter.x, renderState.cameraCenter.y);
+  const center = isoProject(renderState.cameraCenter.x, renderState.cameraCenter.y, centerHeight);
   const offsetX = canvas.width / 2 - center.x * scale;
   const offsetY = canvas.height / 2 - center.y * scale;
   return { scale, offsetX, offsetY };
 }
 
-export function screenToWorld(state: WorldState, canvas: HTMLCanvasElement, screenX: number, screenY: number): Point {
-  const view = getViewTransform(state, canvas);
+export function screenToWorld(
+  state: WorldState,
+  renderState: RenderState,
+  canvas: HTMLCanvasElement,
+  screenX: number,
+  screenY: number
+): Point {
+  const view = getViewTransform(state, renderState, canvas);
   const worldX = (screenX - view.offsetX) / view.scale;
   const worldY = (screenY - view.offsetY) / view.scale;
   const isoX = worldX / (ISO_TILE_WIDTH * 0.5);
@@ -112,19 +120,26 @@ export function screenToWorld(state: WorldState, canvas: HTMLCanvasElement, scre
   return { x: wx, y: wy };
 }
 
-export function zoomAtPointer(state: WorldState, canvas: HTMLCanvasElement, targetZoom: number, screenX: number, screenY: number): void {
+export function zoomAtPointer(
+  state: WorldState,
+  renderState: RenderState,
+  canvas: HTMLCanvasElement,
+  targetZoom: number,
+  screenX: number,
+  screenY: number
+): void {
   const nextZoom = clamp(targetZoom, ZOOM_MIN, ZOOM_MAX);
-  const before = screenToWorld(state, canvas, screenX, screenY);
-  const prevZoom = state.zoom;
-  state.zoom = nextZoom;
-  const ratio = prevZoom / state.zoom;
-  state.cameraCenter = {
-    x: before.x + (state.cameraCenter.x - before.x) * ratio,
-    y: before.y + (state.cameraCenter.y - before.y) * ratio
+  const before = screenToWorld(state, renderState, canvas, screenX, screenY);
+  const prevZoom = renderState.zoom;
+  renderState.zoom = nextZoom;
+  const ratio = prevZoom / renderState.zoom;
+  renderState.cameraCenter = {
+    x: before.x + (renderState.cameraCenter.x - before.x) * ratio,
+    y: before.y + (renderState.cameraCenter.y - before.y) * ratio
   };
 }
 
-export function setZoom(state: WorldState, next: number): void {
-  state.zoom = clamp(next, ZOOM_MIN, ZOOM_MAX);
+export function setZoom(renderState: RenderState, next: number): void {
+  renderState.zoom = clamp(next, ZOOM_MIN, ZOOM_MAX);
 }
 

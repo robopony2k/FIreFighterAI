@@ -1,14 +1,17 @@
 import type { CharacterId } from "../core/characters.js";
 import type { MapSizeId } from "../core/config.js";
 import { DEFAULT_FIRE_SETTINGS } from "../core/config.js";
-import type { FireSettings } from "../core/types.js";
+import type { FireSettings, FuelProfile, TileType } from "../core/types.js";
 import type { MapGenSettings } from "../mapgen/settings.js";
 import { DEFAULT_MAP_GEN_SETTINGS } from "../mapgen/settings.js";
+
+export type FuelProfileOverrides = Partial<Record<TileType, Partial<FuelProfile>>>;
 
 export type RunOptions = {
   unlimitedMoney: boolean;
   mapGen: MapGenSettings;
   fire: FireSettings;
+  fuelProfiles: FuelProfileOverrides;
 };
 
 export type NewRunConfig = {
@@ -24,7 +27,8 @@ export const DEFAULT_MAP_SIZE: MapSizeId = "medium";
 export const DEFAULT_RUN_OPTIONS: RunOptions = {
   unlimitedMoney: false,
   mapGen: { ...DEFAULT_MAP_GEN_SETTINGS },
-  fire: { ...DEFAULT_FIRE_SETTINGS }
+  fire: { ...DEFAULT_FIRE_SETTINGS },
+  fuelProfiles: {}
 };
 
 const toNumber = (value: unknown, fallback: number): number => {
