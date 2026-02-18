@@ -73,6 +73,9 @@ const drawTargetMarker = (ctx: CanvasRenderingContext2D, pos: { x: number; y: nu
   ctx.stroke();
 };
 
+/**
+ * @deprecated Legacy 2D renderer. Prefer the 3D render backend.
+ */
 export const drawUnits = (state: WorldState, ctx: CanvasRenderingContext2D, alpha = 1) => {
   const t = Math.max(0, Math.min(1, alpha));
   const renderPositions = new Map<number, { x: number; y: number }>();

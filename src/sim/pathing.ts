@@ -18,7 +18,15 @@ const MOVE_DIRS: MoveDir[] = [
   { x: -1, y: -1, cost: Math.SQRT2 }
 ];
 
-const getTerrainCost = (state: WorldState, idx: number): number => MOVE_TERRAIN_COST[state.tiles[idx].type] ?? 1;
+const getTerrainCost = (state: WorldState, idx: number): number => {
+  if (state.tiles[idx].type === "water" && state.tileRoadBridge[idx] > 0) {
+    return MOVE_TERRAIN_COST.road;
+  }
+  return MOVE_TERRAIN_COST[state.tiles[idx].type] ?? 1;
+};
+
+const isBridgeTile = (state: WorldState, idx: number): boolean =>
+  state.tiles[idx].type === "water" && state.tileRoadBridge[idx] > 0;
 
 const getSlopeFactor = (fromElev: number, toElev: number): number => {
   const delta = toElev - fromElev;
@@ -33,7 +41,9 @@ export const getMoveSpeedMultiplier = (state: WorldState, fromX: number, fromY: 
   const fromIdx = indexFor(state.grid, fromX, fromY);
   const toIdx = indexFor(state.grid, toX, toY);
   const terrain = getTerrainCost(state, toIdx);
-  const slope = getSlopeFactor(state.tiles[fromIdx].elevation, state.tiles[toIdx].elevation);
+  const slope = isBridgeTile(state, fromIdx) || isBridgeTile(state, toIdx)
+    ? 1
+    : getSlopeFactor(state.tiles[fromIdx].elevation, state.tiles[toIdx].elevation);
   return 1 / (terrain * slope);
 };
 
@@ -41,7 +51,9 @@ const getMoveCost = (state: WorldState, fromX: number, fromY: number, toX: numbe
   const fromIdx = indexFor(state.grid, fromX, fromY);
   const toIdx = indexFor(state.grid, toX, toY);
   const terrain = getTerrainCost(state, toIdx);
-  const slope = getSlopeFactor(state.tiles[fromIdx].elevation, state.tiles[toIdx].elevation);
+  const slope = isBridgeTile(state, fromIdx) || isBridgeTile(state, toIdx)
+    ? 1
+    : getSlopeFactor(state.tiles[fromIdx].elevation, state.tiles[toIdx].elevation);
   return baseCost * terrain * slope;
 };
 
@@ -51,7 +63,7 @@ export function isPassable(state: WorldState, x: number, y: number): boolean {
   }
   const idx = indexFor(state.grid, x, y);
   const type = state.tiles[idx].type;
-  if (type === "water" || type === "house") {
+  if ((type === "water" && state.tileRoadBridge[idx] === 0) || type === "house") {
     return false;
   }
   return state.structureMask[idx] === 0;

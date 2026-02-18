@@ -14,8 +14,8 @@ import { drawParticles } from "./particles.js";
 import { clamp } from "../core/utils.js";
 import { darken, mixRgb, lighten } from "./color.js";
 import { hash2D } from "../mapgen/noise.js";
-import { TreeType } from "../core/types.js";
 import type { RenderState } from "./renderState.js";
+import { getForestTreeColor, isGrassLikeType, isVegetationType } from "./vegetationPalette.js";
 
 const formatNumber = (value: number, digits = 3): string => (Number.isFinite(value) ? value.toFixed(digits) : "inf");
 
@@ -35,24 +35,6 @@ const GRID_COLORS = {
   base: darken(TILE_COLOR_RGB.base, 0.2),
   house: darken(TILE_COLOR_RGB.house, 0.2),
   firebreak: darken(TILE_COLOR_RGB.firebreak, 0.25)
-};
-
-const FOREST_TONE_BASE = TILE_COLOR_RGB.forest;
-const FOREST_CANOPY_TONES = {
-  [TreeType.Pine]: darken(mixRgb(FOREST_TONE_BASE, { r: 48, g: 80, b: 64 }, 0.35), 0.08),
-  [TreeType.Oak]: mixRgb(FOREST_TONE_BASE, { r: 110, g: 118, b: 58 }, 0.35),
-  [TreeType.Maple]: mixRgb(FOREST_TONE_BASE, { r: 120, g: 92, b: 62 }, 0.32),
-  [TreeType.Birch]: lighten(mixRgb(FOREST_TONE_BASE, { r: 148, g: 152, b: 98 }, 0.42), 0.05),
-  [TreeType.Elm]: mixRgb(FOREST_TONE_BASE, { r: 72, g: 122, b: 86 }, 0.3),
-  [TreeType.Scrub]: mixRgb(FOREST_TONE_BASE, TILE_COLOR_RGB.scrub, 0.5)
-};
-
-const getForestTreeType = (tile: WorldState["tiles"][number]) =>
-  tile.treeType ?? tile.dominantTreeType ?? TreeType.Pine;
-
-const getForestTreeColor = (tile: WorldState["tiles"][number]) => {
-  const treeType = getForestTreeType(tile);
-  return FOREST_CANOPY_TONES[treeType] ?? FOREST_TONE_BASE;
 };
 
 const rgbaString = (color: { r: number; g: number; b: number }, alpha: number) =>
@@ -134,10 +116,6 @@ const COASTLINE_EDGE_WIDTH = TILE_SIZE * 0.2;
 const COASTLINE_EDGE_ALPHA = 0.28;
 const COASTLINE_EDGE_DARKEN = 0.2;
 const COASTLINE_COLOR = mixRgb(TILE_COLOR_RGB.firebreak, TILE_COLOR_RGB.grass, 0.68);
-
-const isGrassLikeType = (type: WorldState["tiles"][number]["type"]) =>
-  type === "grass" || type === "scrub" || type === "floodplain";
-const isVegetationType = (type: WorldState["tiles"][number]["type"]) => type === "forest" || isGrassLikeType(type);
 
 type CoastPoint = { x: number; y: number };
 type CoastSegment = { a: CoastPoint; b: CoastPoint };
@@ -1323,6 +1301,9 @@ const drawDebugCellPanel = (
  * @param canvas The target HTML canvas element.
  * @param ctx The 2D rendering context of the canvas.
  * @param alpha Interpolation factor between the previous and current sim step.
+ */
+/**
+ * @deprecated Legacy 2D renderer. Prefer the 3D render backend.
  */
 export function draw(
   state: WorldState,

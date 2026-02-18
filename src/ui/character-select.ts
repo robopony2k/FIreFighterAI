@@ -7,6 +7,10 @@ import { DEFAULT_MAP_SIZE, DEFAULT_RUN_OPTIONS, DEFAULT_RUN_SEED, normalizeFireS
 import type { FuelProfileOverrides, NewRunConfig, RunOptions } from "./run-config.js";
 import type { MapGenSettings } from "../mapgen/settings.js";
 import { loadFuelProfileOverrides, saveFuelProfileOverrides } from "../persistence/fuelProfiles.js";
+
+type NumericMapGenKey = {
+  [K in keyof MapGenSettings]: MapGenSettings[K] extends number ? K : never;
+}[keyof MapGenSettings];
 export type CharacterSelectRefs = {
   characterScreen: HTMLDivElement;
   characterGrid: HTMLDivElement;
@@ -323,7 +327,7 @@ export function initCharacterSelect(
   const getMapGenSettings = (): MapGenSettings => {
     const settings: MapGenSettings = { ...DEFAULT_RUN_OPTIONS.mapGen };
     ui.mapGenInputs.forEach((input) => {
-      const key = input.dataset.mapgenKey as keyof MapGenSettings | undefined;
+      const key = input.dataset.mapgenKey as NumericMapGenKey | undefined;
       if (!key) {
         return;
       }
@@ -338,7 +342,7 @@ export function initCharacterSelect(
   const applyMapGenSettings = (settings: MapGenSettings): void => {
     const nextSettings = { ...DEFAULT_RUN_OPTIONS.mapGen, ...settings };
     ui.mapGenInputs.forEach((input) => {
-      const key = input.dataset.mapgenKey as keyof MapGenSettings | undefined;
+      const key = input.dataset.mapgenKey as NumericMapGenKey | undefined;
       if (!key) {
         return;
       }

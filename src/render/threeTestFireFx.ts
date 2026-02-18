@@ -8,9 +8,17 @@ const FIRE_MAX_INSTANCES = 720;
 const SMOKE_MAX_INSTANCES = 1400;
 const EMBER_MAX_INSTANCES = 520;
 const GLOW_MAX_INSTANCES = FIRE_MAX_INSTANCES;
+const SMOKE_QUALITY_FALLBACK_FPS = 56;
+const SMOKE_QUALITY_RECOVERY_FPS = 61;
+const SMOKE_QUALITY_FALLBACK_SCENE_MS = 14;
+const SMOKE_QUALITY_RECOVERY_SCENE_MS = 11;
+const SMOKE_QUALITY_FALLBACK_SECONDS = 1.2;
+const SMOKE_QUALITY_RECOVERY_SECONDS = 5;
+const SMOKE_BUDGET_MIN_SCALE = 0.3;
 const FIRE_FX_ACTIVE_UPDATE_INTERVAL_MS = 16;
 const FIRE_FX_IDLE_UPDATE_INTERVAL_MS = 120;
-const FIRE_MIN_INTENSITY = 0.01;
+const FIRE_MIN_INTENSITY_FLOOR = 0.001;
+const FIRE_FLAME_VISUAL_FLOOR = 0.006;
 const FIRE_MIN_HEAT = 0.12;
 const TREE_BURN_FLAME_VISUAL_MIN = 0.08;
 const TREE_BURN_CARRY_PROGRESS_MIN = 0.08;
@@ -50,6 +58,10 @@ const smoothApproach = (current: number, target: number, riseRate: number, fallR
   const rate = target >= current ? riseRate : fallRate;
   const k = 1 - Math.exp(-Math.max(0, rate) * Math.max(0, dtSeconds));
   return current + (target - current) * k;
+};
+const getSimFireEps = (world: RenderSim): number => {
+  const heatEps = Math.max(0.002, world.simPerf?.diffusionEps || 0.02);
+  return Math.max(FIRE_MIN_INTENSITY_FLOOR, heatEps * 0.5);
 };
 const swapDepthOrder = (depth: Float32Array, order: Uint16Array, a: number, b: number): void => {
   const d = depth[a];
@@ -287,7 +299,9 @@ export type ThreeTestFireFx = {
     world: RenderSim,
     sample: TerrainSample | null,
     terrainSize: { width: number; depth: number } | null,
-    treeBurn: TreeBurnController | null
+    treeBurn: TreeBurnController | null,
+    fpsEstimate: number,
+    sceneRenderMs: number
   ) => void;
   dispose: () => void;
 };
@@ -430,6 +444,9 @@ export const createThreeTestFireFx = (scene: THREE.Scene, camera: THREE.Camera):
   let pendingDeltaSeconds = 0;
   let lastRebuildTimeMs = -Infinity;
   let visualsCleared = true;
+  let smokeBudgetScale = 1;
+  let smokeFallbackAccum = 0;
+  let smokeRecoveryAccum = 0;
 
   const clearVisuals = (): void => {
     fireMesh.count = 0;
@@ -457,7 +474,9 @@ export const createThreeTestFireFx = (scene: THREE.Scene, camera: THREE.Camera):
     world: RenderSim,
     sample: TerrainSample | null,
     terrainSize: { width: number; depth: number } | null,
-    treeBurn: TreeBurnController | null
+    treeBurn: TreeBurnController | null,
+    fpsEstimate: number,
+    sceneRenderMs: number
   ): void => {
     const frameDeltaSeconds =
       previousTimeMs === null ? 1 / 60 : clamp((time - previousTimeMs) * 0.001, 1 / 240, 0.2);
@@ -491,6 +510,28 @@ export const createThreeTestFireFx = (scene: THREE.Scene, camera: THREE.Camera):
     lastRebuildTimeMs = time;
     const deltaSeconds = clamp(pendingDeltaSeconds, 1 / 240, 0.08);
     pendingDeltaSeconds = 0;
+    if (Number.isFinite(fpsEstimate) && fpsEstimate > 0 && Number.isFinite(sceneRenderMs) && sceneRenderMs > 0) {
+      const overloaded = fpsEstimate < SMOKE_QUALITY_FALLBACK_FPS || sceneRenderMs > SMOKE_QUALITY_FALLBACK_SCENE_MS;
+      if (overloaded) {
+        smokeFallbackAccum += deltaSeconds;
+      } else {
+        smokeFallbackAccum = Math.max(0, smokeFallbackAccum - deltaSeconds * 0.7);
+      }
+      const healthy = fpsEstimate > SMOKE_QUALITY_RECOVERY_FPS && sceneRenderMs < SMOKE_QUALITY_RECOVERY_SCENE_MS;
+      if (healthy) {
+        smokeRecoveryAccum += deltaSeconds;
+      } else {
+        smokeRecoveryAccum = Math.max(0, smokeRecoveryAccum - deltaSeconds * 0.4);
+      }
+      if (smokeFallbackAccum >= SMOKE_QUALITY_FALLBACK_SECONDS) {
+        smokeBudgetScale = Math.max(SMOKE_BUDGET_MIN_SCALE, smokeBudgetScale * 0.8);
+        smokeFallbackAccum = 0;
+        smokeRecoveryAccum = 0;
+      } else if (smokeRecoveryAccum >= SMOKE_QUALITY_RECOVERY_SECONDS) {
+        smokeBudgetScale = Math.min(1, smokeBudgetScale + 0.08);
+        smokeRecoveryAccum = 0;
+      }
+    }
     const minX =
       useFireBounds || treeBounds
         ? Math.max(0, Math.min(useFireBounds ? world.fireMinX : cols - 1, treeBounds?.minX ?? cols - 1))
@@ -520,6 +561,8 @@ export const createThreeTestFireFx = (scene: THREE.Scene, camera: THREE.Camera):
     const sampleFootprint = tileSpan * sampleStep;
     const heightScale = getTerrainHeightScale(cols, rows);
     const heatCap = Math.max(0.01, world.fireSettings.heatCap);
+    const simFireEps = getSimFireEps(world);
+    const flamePresenceEps = Math.max(FIRE_FLAME_VISUAL_FLOOR, simFireEps * 0.9);
     const wind = world.wind;
     const windX = wind?.dx ?? 0;
     const windZ = wind?.dy ?? 0;
@@ -546,7 +589,10 @@ export const createThreeTestFireFx = (scene: THREE.Scene, camera: THREE.Camera):
     let smokeCount = 0;
     let emberCount = 0;
     let smokeSpawnsThisFrame = 0;
-    const smokeSpawnFrameCap = Math.max(72, Math.floor(SMOKE_MAX_INSTANCES * 0.26));
+    const smokeSpawnFrameCap = Math.max(24, Math.floor(SMOKE_MAX_INSTANCES * 0.26 * smokeBudgetScale));
+    const smokeRenderCap = Math.max(180, Math.floor(SMOKE_MAX_INSTANCES * smokeBudgetScale));
+    const smokeRenderStride =
+      smokeBudgetScale >= 0.9 ? 1 : smokeBudgetScale >= 0.7 ? 2 : smokeBudgetScale >= 0.5 ? 3 : 4;
     for (let y = minY; y <= maxY; y += sampleStep) {
       const rowBase = y * cols;
       for (let x = minX; x <= maxX; x += sampleStep) {
@@ -555,7 +601,7 @@ export const createThreeTestFireFx = (scene: THREE.Scene, camera: THREE.Camera):
         const heat = clamp((world.tileHeat[idx] ?? 0) / heatCap, 0, 1);
         const flameProfile: TreeFlameProfile | null = treeBurn?.getTileFlameProfile(idx) ?? null;
         const burnProgress = treeBurn?.getTileBurnProgress(idx) ?? 0;
-        const hasActiveFire = fire > FIRE_MIN_INTENSITY;
+        const hasActiveFire = fire > simFireEps;
         const treeBurnVisual = treeBurn?.getTileBurnVisual(idx) ?? 0;
         const hasTreeCarryFlame =
           !hasActiveFire &&
@@ -569,7 +615,7 @@ export const createThreeTestFireFx = (scene: THREE.Scene, camera: THREE.Camera):
           : hasTreeCarryFlame
             ? treeBurnVisual * 0.72
             : 0;
-        const targetFlame = clamp(flameVisual, 0, 1);
+        const targetFlame = hasActiveFire ? clamp(Math.max(flameVisual, simFireEps * 1.1), 0, 1) : clamp(flameVisual, 0, 1);
         const smoothedFlame = hasVisualFlame
           ? smoothApproach(tileFlameVisual[idx] ?? 0, targetFlame, 12, 5.6, deltaSeconds)
           : 0;
@@ -579,7 +625,7 @@ export const createThreeTestFireFx = (scene: THREE.Scene, camera: THREE.Camera):
           ? smoothApproach(tileSmokeVisual[idx] ?? 0, targetSmoke, 10.0, 0.18, deltaSeconds)
           : smoothApproach(tileSmokeVisual[idx] ?? 0, 0, 0, 12.0, deltaSeconds);
         tileSmokeVisual[idx] = smoothedSmoke;
-        const hasFlame = smoothedFlame > 0.015;
+        const hasFlame = smoothedFlame > flamePresenceEps;
         const hasPlume = hasFlame || (hasVisualFlame && smoothedSmoke > 0.02);
         if (!hasPlume) {
           tileSmokeSpawnAccum[idx] = Math.max(0, (tileSmokeSpawnAccum[idx] ?? 0) - deltaSeconds * 0.6);
@@ -626,7 +672,7 @@ export const createThreeTestFireFx = (scene: THREE.Scene, camera: THREE.Camera):
           flameletCount = 0;
         }
         flameletCount = Math.max(0, Math.min(FIRE_VISUAL_TUNING.tongueSpawnMax, flameletCount));
-        if (flameletCount <= 0 && hasActiveFire && flameProfile && flameIntensity > 0.06) {
+        if (flameletCount <= 0 && hasActiveFire && flameIntensity > Math.max(simFireEps * 0.75, FIRE_FLAME_VISUAL_FLOOR)) {
           flameletCount = 1;
         }
         const heroCount = flameletCount <= 0 ? 0 : Math.max(1, Math.min(3, Math.round(flameletCount * 0.28 + (1 - crownToTrunk) * 0.6)));
@@ -884,7 +930,7 @@ export const createThreeTestFireFx = (scene: THREE.Scene, camera: THREE.Camera):
       const sourceIdx = smokeParticleSourceIdx[i];
       const sourceFire = sourceIdx >= 0 ? world.tileFire[sourceIdx] ?? 0 : 0;
       const sourceHeat = sourceIdx >= 0 ? clamp((world.tileHeat[sourceIdx] ?? 0) / heatCap, 0, 1) : 0;
-      if (sourceIdx < 0 || (sourceFire <= FIRE_MIN_INTENSITY && sourceHeat < 0.08)) {
+      if (sourceIdx < 0 || (sourceFire <= simFireEps && sourceHeat < 0.08)) {
         smokeParticleActive[i] = 0;
         smokeParticleSourceIdx[i] = -1;
         continue;
@@ -947,6 +993,12 @@ export const createThreeTestFireFx = (scene: THREE.Scene, camera: THREE.Camera):
       const dx = smokeParticleX[i] - cameraWorldPos.x;
       const dy = smokeParticleY[i] - cameraWorldPos.y;
       const dz = smokeParticleZ[i] - cameraWorldPos.z;
+      if (smokeCount >= smokeRenderCap) {
+        continue;
+      }
+      if (smokeRenderStride > 1 && (i % smokeRenderStride) !== 0) {
+        continue;
+      }
       smokeRenderDepth[smokeCount] = dx * cameraForward.x + dy * cameraForward.y + dz * cameraForward.z;
       smokeRenderOrder[smokeCount] = i;
       smokeCount += 1;

@@ -35,6 +35,9 @@ import {
 import { randomizeWind, stepWind } from "./wind.js";
 import { igniteRandomFire, resetFireBounds, stepFire } from "./fire.js";
 import { clearFireBlocks, markFireBlockActiveByTile } from "./fire/activeBlocks.js";
+import { advanceCareerDay, getClimateRisk } from "./climateRuntime.js";
+import { isBaseTileLost } from "./failure.js";
+import { updatePhaseControls } from "./lifecycle.js";
 import { stepGrowth } from "./growth.js";
 import { stepParticles } from "./particles.js";
 import {
@@ -51,6 +54,7 @@ import {
 } from "./units.js";
 import type { InputState } from "../core/inputState.js";
 import type { EffectsState } from "../core/effectsState.js";
+export { updatePhaseControls };
 
 const FIRE_HEAT_PADDING = 8;
 const FIRE_SIM_MAX_FRAME_STEP_SECONDS = 0.2;
@@ -62,10 +66,6 @@ const PHASE_YEAR_DAYS = PHASES.reduce((sum, phase) => sum + phase.duration, 0);
 const VIRTUAL_YEAR_DAYS = Math.max(1, Math.floor(VIRTUAL_CLIMATE_PARAMS.seasonLen));
 const CAREER_TOTAL_DAYS = VIRTUAL_YEAR_DAYS * CAREER_YEARS;
 const CLIMATE_SEASONS = ["Winter", "Spring", "Summer", "Autumn"];
-const CLIMATE_SPREAD_BASE = 0.6;
-const CLIMATE_SPREAD_RANGE = 1.4;
-const CLIMATE_RISK_WEIGHT_IGNITION = 0.55;
-const CLIMATE_RISK_WEIGHT_SPREAD = 0.45;
 
 let gameEvents: EventBus<GameEvents> | null = null;
 
@@ -111,25 +111,6 @@ const updateClimateForDay = (state: WorldState, seasonDay: number, yearIndex = M
   state.climateIgnitionMultiplier = CLIMATE_IGNITION_MAX + (CLIMATE_IGNITION_MIN - CLIMATE_IGNITION_MAX) * moistureNorm;
   const dryness = 1 - moistureNorm;
   state.climateSpreadMultiplier = 0.6 + dryness * 1.4;
-};
-
-const getClimateRisk = (state: WorldState): number => {
-  const ignitionRange = Math.max(0.0001, CLIMATE_IGNITION_MAX - CLIMATE_IGNITION_MIN);
-  const ignitionNorm = clamp((state.climateIgnitionMultiplier - CLIMATE_IGNITION_MIN) / ignitionRange, 0, 1);
-  const spreadNorm = clamp((state.climateSpreadMultiplier - CLIMATE_SPREAD_BASE) / CLIMATE_SPREAD_RANGE, 0, 1);
-  return clamp(
-    CLIMATE_RISK_WEIGHT_IGNITION * ignitionNorm + CLIMATE_RISK_WEIGHT_SPREAD * spreadNorm,
-    0,
-    1
-  );
-};
-
-const advanceCareerDay = (state: WorldState, calendarDelta: number): void => {
-  if (!Number.isFinite(calendarDelta) || calendarDelta <= 0) {
-    return;
-  }
-  const scale = PHASE_YEAR_DAYS > 0 ? VIRTUAL_YEAR_DAYS / PHASE_YEAR_DAYS : 1;
-  state.careerDay = Math.min(state.careerDay + calendarDelta * scale, CAREER_TOTAL_DAYS);
 };
 
 const syncClimateToCareerDay = (state: WorldState): void => {
@@ -270,20 +251,6 @@ const showSeasonOverlay = (state: WorldState): void => {
   details.push("Dismiss or wait to close.");
   emitOverlay({ title: "Update", message: `Climate season: ${seasonLabel}.`, details, action: "dismiss" });
 };
-
-export function updatePhaseControls(state: WorldState): void {
-  const fireActive = state.phase === "fire";
-  const maintenanceActive = state.phase === "maintenance";
-  if (!fireActive && (state.deployMode === "firefighter" || state.deployMode === "truck")) {
-    state.deployMode = null;
-  }
-  if (!maintenanceActive && state.deployMode === "clear") {
-    state.deployMode = null;
-  }
-  if (!fireActive) {
-    selectUnit(state, null);
-  }
-}
 
 export function extinguishAllFires(state: WorldState, effects: EffectsState): void {
   state.tiles.forEach((tile) => {
@@ -505,7 +472,7 @@ export function checkFailureConditions(state: WorldState): void {
     return;
   }
   const baseTile = getBaseTile(state);
-  if (baseTile.fire > 0 || baseTile.type === "ash") {
+  if (isBaseTileLost(baseTile)) {
     endGame(state, false, "The command base is lost.");
     return;
   }
@@ -551,7 +518,7 @@ export function stepSim(state: WorldState, effects: EffectsState, rng: RNG, delt
   const dayDelta = delta * DAYS_PER_SECOND;
   const calendarDelta = dayDelta;
   advanceCalendar(state, rng, calendarDelta);
-  advanceCareerDay(state, calendarDelta);
+  advanceCareerDay(state, calendarDelta, PHASE_YEAR_DAYS, VIRTUAL_YEAR_DAYS, CAREER_TOTAL_DAYS);
   syncClimateToCareerDay(state);
   updateClimateForecastWindow(state);
   if (state.careerDay >= CAREER_TOTAL_DAYS && !state.gameOver) {

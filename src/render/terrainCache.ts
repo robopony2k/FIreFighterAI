@@ -19,6 +19,13 @@ import {
 } from "../core/config.js";
 import { clamp } from "../core/utils.js";
 import { rgbString, mixRgb, scaleRgb, lighten, darken, type RGB } from "./color.js";
+import {
+  FOREST_CANOPY_TONES,
+  getForestTreeType,
+  getForestTreeColor,
+  isGrassLikeType,
+  isVegetationType
+} from "./vegetationPalette.js";
 
 // Constants
 const RENDER_TERRAIN_SIDES = true;
@@ -75,32 +82,13 @@ let terrainCache: TerrainCache | null = null;
 let treeLayerCache: TerrainCache | null = null;
 let treeBurnScratch: { canvas: HTMLCanvasElement; ctx: CanvasRenderingContext2D } | null = null;
 
+/**
+ * @deprecated Legacy 2D terrain cache path. Prefer the 3D render backend.
+ */
 export const resetTerrainCaches = (): void => {
   terrainCache = null;
   treeLayerCache = null;
   treeBurnScratch = null;
-};
-
-const isGrassLikeType = (type: WorldState["tiles"][number]["type"]) =>
-  type === "grass" || type === "scrub" || type === "floodplain";
-const isVegetationType = (type: WorldState["tiles"][number]["type"]) => type === "forest" || isGrassLikeType(type);
-
-const FOREST_TONE_BASE = TILE_COLOR_RGB.forest;
-const FOREST_CANOPY_TONES: Record<TreeType, RGB> = {
-  [TreeType.Pine]: darken(mixRgb(FOREST_TONE_BASE, { r: 48, g: 80, b: 64 }, 0.35), 0.08),
-  [TreeType.Oak]: mixRgb(FOREST_TONE_BASE, { r: 110, g: 118, b: 58 }, 0.35),
-  [TreeType.Maple]: mixRgb(FOREST_TONE_BASE, { r: 120, g: 92, b: 62 }, 0.32),
-  [TreeType.Birch]: lighten(mixRgb(FOREST_TONE_BASE, { r: 148, g: 152, b: 98 }, 0.42), 0.05),
-  [TreeType.Elm]: mixRgb(FOREST_TONE_BASE, { r: 72, g: 122, b: 86 }, 0.3),
-  [TreeType.Scrub]: mixRgb(FOREST_TONE_BASE, TILE_COLOR_RGB.scrub, 0.5)
-};
-
-const getForestTreeType = (tile: WorldState["tiles"][number]): TreeType =>
-  tile.treeType ?? tile.dominantTreeType ?? TreeType.Pine;
-
-const getForestTreeColor = (tile: WorldState["tiles"][number]): RGB => {
-  const treeType = getForestTreeType(tile);
-  return FOREST_CANOPY_TONES[treeType] ?? FOREST_TONE_BASE;
 };
 
 export const getRenderHeightForTile = (tile: WorldState["tiles"][number]): number => {
@@ -1018,6 +1006,9 @@ const drawHouseOnTile = (
   ctx.fill();
 };
 
+/**
+ * @deprecated Legacy 2D terrain cache path. Prefer the 3D render backend.
+ */
 export const ensureTerrainCache = (state: WorldState, inputState: InputState, now: number): TerrainCache => {
   const { cols, rows } = state.grid;
   const maxHeight = getHeightScale(state);
@@ -1207,6 +1198,9 @@ export const ensureTerrainCache = (state: WorldState, inputState: InputState, no
   return terrainCache;
 };
 
+/**
+ * @deprecated Legacy 2D terrain cache path. Prefer the 3D render backend.
+ */
 export const ensureTreeLayerCache = (
   state: WorldState,
   renderState: RenderState,

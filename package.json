@@ -7,9 +7,14 @@
     "generate-fuel-profiles": "node scripts/generate-fuel-profiles.mjs",
     "generate-building-footprints": "node scripts/generate-building-footprints.mjs",
     "prebuild": "npm run generate-fuel-profiles",
+    "check": "tsc --noEmit --pretty false",
     "build": "tsc --project tsconfig.json",
     "predev": "npm run generate-fuel-profiles",
-    "dev": "node scripts/dev-server.cjs"
+    "dev": "node scripts/dev-server.cjs",
+    "mapgen:regression": "npm run build && node scripts/mapgen-regression.mjs",
+    "mapgen:regression:full": "npm run build && node scripts/mapgen-regression.mjs --full",
+    "mapgen:regression:baseline": "npm run build && node scripts/mapgen-regression.mjs --write-baseline",
+    "mapgen:regression:baseline:full": "npm run build && node scripts/mapgen-regression.mjs --full --write-baseline"
   },
   "devDependencies": {
     "@types/three": "^0.182.0",

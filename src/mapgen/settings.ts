@@ -1,3 +1,5 @@
+export type BiomeClassifierMode = "legacy" | "seedSpread";
+
 export type MapGenSettings = {
   cellSizeM: number;
   worldOffsetXM: number;
@@ -22,6 +24,7 @@ export type MapGenSettings = {
   edgeWaterBias: number;
   riverCount: number;
   riverWaterBias: number;
+  biomeClassifierMode: BiomeClassifierMode;
 };
 
 export const DEFAULT_MAP_GEN_SETTINGS: MapGenSettings = {
@@ -47,5 +50,6 @@ export const DEFAULT_MAP_GEN_SETTINGS: MapGenSettings = {
   baseWaterThreshold: 0.14,
   edgeWaterBias: 0.14,
   riverCount: 0,
-  riverWaterBias: 0.18
+  riverWaterBias: 0.18,
+  biomeClassifierMode: "seedSpread"
 };

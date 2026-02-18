@@ -1,8 +1,12 @@
 import { DEFAULT_MAP_GEN_SETTINGS } from "../mapgen/settings.js";
 import type { MapGenSettings } from "../mapgen/settings.js";
 
+type NumericMapGenKey = {
+  [K in keyof MapGenSettings]: MapGenSettings[K] extends number ? K : never;
+}[keyof MapGenSettings];
+
 type MapGenSlider = {
-  key: keyof MapGenSettings;
+  key: NumericMapGenKey;
   label: string;
   tooltip: string;
   min: number;

@@ -24,6 +24,7 @@ export type TerrainSample = {
   tileFuel?: Float32Array;
   tileMoisture?: Float32Array;
   riverMask?: Uint8Array;
+  roadBridgeMask?: Uint8Array;
   riverBed?: Float32Array;
   riverSurface?: Float32Array;
   riverStepStrength?: Float32Array;
@@ -57,6 +58,145 @@ const mixRgb = (a: RGB, b: RGB, t: number): RGB => ({
 });
 const lighten = (color: RGB, amount: number): RGB => mixRgb(color, { r: 255, g: 255, b: 255 }, clamp(amount, 0, 1));
 const darken = (color: RGB, amount: number): RGB => mixRgb(color, { r: 0, g: 0, b: 0 }, clamp(amount, 0, 1));
+
+type RiverSpaceTransform = {
+  worldToEdgeX: (worldX: number) => number;
+  worldToEdgeY: (worldZ: number) => number;
+  edgeToWorldX: (edgeX: number) => number;
+  edgeToWorldY: (edgeY: number) => number;
+  gridToEdgeX: (gridX: number) => number;
+  gridToEdgeY: (gridY: number) => number;
+  edgeToGridX: (edgeX: number) => number;
+  edgeToGridY: (edgeY: number) => number;
+};
+
+const createRiverSpaceTransform = (
+  cols: number,
+  rows: number,
+  width: number,
+  depth: number,
+  sampleCols: number,
+  sampleRows: number
+): RiverSpaceTransform => {
+  const safeCols = Math.max(1, cols);
+  const safeRows = Math.max(1, rows);
+  const safeWidth = Math.max(1e-5, width);
+  const safeDepth = Math.max(1e-5, depth);
+  const safeSampleCols = Math.max(1, sampleCols - 1);
+  const safeSampleRows = Math.max(1, sampleRows - 1);
+  return {
+    worldToEdgeX: (worldX: number): number => (worldX / safeWidth + 0.5) * safeCols,
+    worldToEdgeY: (worldZ: number): number => (worldZ / safeDepth + 0.5) * safeRows,
+    edgeToWorldX: (edgeX: number): number => (edgeX / safeCols - 0.5) * safeWidth,
+    edgeToWorldY: (edgeY: number): number => (edgeY / safeRows - 0.5) * safeDepth,
+    gridToEdgeX: (gridX: number): number => (gridX / safeSampleCols) * safeCols,
+    gridToEdgeY: (gridY: number): number => (gridY / safeSampleRows) * safeRows,
+    edgeToGridX: (edgeX: number): number => (edgeX / safeCols) * safeSampleCols,
+    edgeToGridY: (edgeY: number): number => (edgeY / safeRows) * safeSampleRows
+  };
+};
+
+const validateRiverSpaceTransform = (
+  transform: RiverSpaceTransform,
+  sampleCols: number,
+  sampleRows: number
+): { worldRoundTripMax: number; sampleRoundTripMax: number } => {
+  let worldRoundTripMax = 0;
+  let sampleRoundTripMax = 0;
+  const samplePoints = [
+    [0, 0],
+    [sampleCols - 1, 0],
+    [0, sampleRows - 1],
+    [sampleCols - 1, sampleRows - 1],
+    [(sampleCols - 1) * 0.5, (sampleRows - 1) * 0.5],
+    [(sampleCols - 1) * 0.25, (sampleRows - 1) * 0.6],
+    [(sampleCols - 1) * 0.73, (sampleRows - 1) * 0.19]
+  ];
+  for (let i = 0; i < samplePoints.length; i += 1) {
+    const point = samplePoints[i];
+    const gridX = point[0];
+    const gridY = point[1];
+    const edgeX = transform.gridToEdgeX(gridX);
+    const edgeY = transform.gridToEdgeY(gridY);
+    const worldX = transform.edgeToWorldX(edgeX);
+    const worldY = transform.edgeToWorldY(edgeY);
+    const edgeBackX = transform.worldToEdgeX(worldX);
+    const edgeBackY = transform.worldToEdgeY(worldY);
+    worldRoundTripMax = Math.max(worldRoundTripMax, Math.abs(edgeBackX - edgeX), Math.abs(edgeBackY - edgeY));
+    const gridBackX = transform.edgeToGridX(edgeX);
+    const gridBackY = transform.edgeToGridY(edgeY);
+    sampleRoundTripMax = Math.max(sampleRoundTripMax, Math.abs(gridBackX - gridX), Math.abs(gridBackY - gridY));
+  }
+  return { worldRoundTripMax, sampleRoundTripMax };
+};
+
+const pointToSegmentDistance2D = (
+  px: number,
+  py: number,
+  ax: number,
+  ay: number,
+  bx: number,
+  by: number
+): number => {
+  const abX = bx - ax;
+  const abY = by - ay;
+  const abLenSq = abX * abX + abY * abY;
+  if (abLenSq <= 1e-8) {
+    return Math.hypot(px - ax, py - ay);
+  }
+  const t = clamp(((px - ax) * abX + (py - ay) * abY) / abLenSq, 0, 1);
+  const qx = ax + abX * t;
+  const qy = ay + abY * t;
+  return Math.hypot(px - qx, py - qy);
+};
+
+const computeBoundaryMismatchStats = (
+  aEdges: ArrayLike<number>,
+  bEdges: ArrayLike<number>
+): { mean: number; max: number; countA: number; countB: number } => {
+  const countA = Math.floor(aEdges.length / 4);
+  const countB = Math.floor(bEdges.length / 4);
+  if (countA <= 0 || countB <= 0) {
+    return { mean: 0, max: 0, countA, countB };
+  }
+  let sum = 0;
+  let total = 0;
+  let max = 0;
+  const accumulate = (src: ArrayLike<number>, srcCount: number, dst: ArrayLike<number>, dstCount: number): void => {
+    for (let i = 0; i < srcCount; i += 1) {
+      const base = i * 4;
+      const mx = (src[base] + src[base + 2]) * 0.5;
+      const my = (src[base + 1] + src[base + 3]) * 0.5;
+      let best = Number.POSITIVE_INFINITY;
+      for (let j = 0; j < dstCount; j += 1) {
+        const d = j * 4;
+        const dist = pointToSegmentDistance2D(mx, my, dst[d], dst[d + 1], dst[d + 2], dst[d + 3]);
+        if (dist < best) {
+          best = dist;
+          if (best <= 1e-4) {
+            break;
+          }
+        }
+      }
+      if (!Number.isFinite(best)) {
+        continue;
+      }
+      sum += best;
+      total += 1;
+      if (best > max) {
+        max = best;
+      }
+    }
+  };
+  accumulate(aEdges, countA, bEdges, countB);
+  accumulate(bEdges, countB, aEdges, countA);
+  return {
+    mean: total > 0 ? sum / total : 0,
+    max,
+    countA,
+    countB
+  };
+};
 
 const TERRAIN_HEIGHT_EXAGGERATION = 1.35;
 const HEIGHT_SAMPLE_PEAK_WEIGHT = 0.65;
@@ -324,6 +464,9 @@ type RiverDomainDebugStats = {
   contourVertexCount: number;
   contourTriangleCount: number;
   boundaryEdgeCount: number;
+  cutoutBoundaryEdgeCount: number;
+  boundaryMismatchMean: number;
+  boundaryMismatchMax: number;
   wallQuadCount: number;
   protrudingVertexRatio: number;
 };
@@ -337,6 +480,7 @@ type RiverRenderDomain = {
   contourVertices: Float32Array;
   contourIndices: Uint32Array;
   boundaryEdges: Float32Array;
+  cutoutBoundaryEdges: Float32Array;
   distanceToBank: Int16Array;
   debugStats?: RiverDomainDebugStats;
 };
@@ -1884,17 +2028,14 @@ const buildWaterfallInstances = (
   const contourEdges = riverDomain?.boundaryEdges;
   const contourCols = riverDomain?.cols ?? sampleCols;
   const contourRows = riverDomain?.rows ?? sampleRows;
-  const toEdgeX = (worldX: number): number => (worldX / Math.max(1e-5, width) + 0.5) * contourCols;
-  const toEdgeY = (worldZ: number): number => (worldZ / Math.max(1e-5, depth) + 0.5) * contourRows;
-  const fromEdgeX = (edgeX: number): number => (edgeX / Math.max(1, contourCols) - 0.5) * width;
-  const fromEdgeY = (edgeY: number): number => (edgeY / Math.max(1, contourRows) - 0.5) * depth;
+  const contourSpace = createRiverSpaceTransform(contourCols, contourRows, width, depth, sampleCols, sampleRows);
 
   const snapClusterToContour = (cluster: Cluster): Cluster => {
     if (!contourEdges || contourEdges.length < 4) {
       return cluster;
     }
-    const pX = toEdgeX(cluster.x);
-    const pY = toEdgeY(cluster.z);
+    const pX = contourSpace.worldToEdgeX(cluster.x);
+    const pY = contourSpace.worldToEdgeY(cluster.z);
     let bestDistSq = Number.POSITIVE_INFINITY;
     let bestEdgeX = pX;
     let bestEdgeY = pY;
@@ -1927,8 +2068,8 @@ const buildWaterfallInstances = (
       return cluster;
     }
     const snapped = { ...cluster };
-    snapped.x = fromEdgeX(bestEdgeX);
-    snapped.z = fromEdgeY(bestEdgeY);
+    snapped.x = contourSpace.edgeToWorldX(bestEdgeX);
+    snapped.z = contourSpace.edgeToWorldY(bestEdgeY);
     if (bestSegmentLenWorld > 0) {
       snapped.width = clamp(snapped.width, cellWorld * 0.45, Math.max(cellWorld * 0.6, bestSegmentLenWorld * 0.55));
     }
@@ -2425,6 +2566,7 @@ const buildRiverRenderDomain = (
     contourVertices: new Float32Array(contourVertices),
     contourIndices: new Uint32Array(contourIndices),
     boundaryEdges: new Float32Array(boundaryEdges),
+    cutoutBoundaryEdges: new Float32Array(boundaryEdges),
     distanceToBank: buildDistanceField(renderSupport, cols, rows, 0),
     debugStats: DEBUG_TERRAIN_RENDER
       ? {
@@ -2433,6 +2575,9 @@ const buildRiverRenderDomain = (
           contourVertexCount: contourVertices.length / 2,
           contourTriangleCount: contourIndices.length / 3,
           boundaryEdgeCount: boundaryEdges.length / 4,
+          cutoutBoundaryEdgeCount: 0,
+          boundaryMismatchMean: 0,
+          boundaryMismatchMax: 0,
           wallQuadCount: 0,
           protrudingVertexRatio: 0
         }
@@ -2520,14 +2665,17 @@ const applyRiverTerrainTriangleCutout = (
   if (!index) {
     return;
   }
-  const src = index.array as ArrayLike<number>;
-  const vertexCount = sampleCols * sampleRows;
-  const vf = riverDomain.vertexField;
-  const vfCols = riverDomain.cols + 1;
-  const boundaryEdges = riverDomain.boundaryEdges;
-  if (!boundaryEdges || boundaryEdges.length < 4) {
+  const positionAttr = geometry.getAttribute("position") as THREE.BufferAttribute | undefined;
+  if (!positionAttr) {
     return;
   }
+  const uvAttr = geometry.getAttribute("uv") as THREE.BufferAttribute | undefined;
+  const src = index.array as ArrayLike<number>;
+  const vertexCount = sampleCols * sampleRows;
+  const positions = positionAttr.array as ArrayLike<number>;
+  const uvs = uvAttr?.array as ArrayLike<number> | undefined;
+  const vf = riverDomain.vertexField;
+  const vfCols = riverDomain.cols + 1;
   const vIdx = (x: number, y: number): number => y * vfCols + x;
   const sampleField = (xEdge: number, yEdge: number): number => {
     const x = clamp(xEdge, 0, riverDomain.cols);
@@ -2546,125 +2694,111 @@ const applyRiverTerrainTriangleCutout = (
     const sx1 = s01 * (1 - tx) + s11 * tx;
     return sx0 * (1 - ty) + sx1 * ty;
   };
-  const toEdgeX = (gridX: number): number =>
-    (gridX / Math.max(1, sampleCols - 1)) * riverDomain.cols;
-  const toEdgeY = (gridY: number): number =>
-    (gridY / Math.max(1, sampleRows - 1)) * riverDomain.rows;
-  const pointInTriangle = (
-    px: number,
-    py: number,
-    ax: number,
-    ay: number,
-    bx: number,
-    by: number,
-    cx: number,
-    cy: number
-  ): boolean => {
-    const v0x = cx - ax;
-    const v0y = cy - ay;
-    const v1x = bx - ax;
-    const v1y = by - ay;
-    const v2x = px - ax;
-    const v2y = py - ay;
-    const dot00 = v0x * v0x + v0y * v0y;
-    const dot01 = v0x * v1x + v0y * v1y;
-    const dot02 = v0x * v2x + v0y * v2y;
-    const dot11 = v1x * v1x + v1y * v1y;
-    const dot12 = v1x * v2x + v1y * v2y;
-    const invDen = 1 / Math.max(1e-8, dot00 * dot11 - dot01 * dot01);
-    const u = (dot11 * dot02 - dot01 * dot12) * invDen;
-    const v = (dot00 * dot12 - dot01 * dot02) * invDen;
-    return u >= -1e-5 && v >= -1e-5 && u + v <= 1 + 1e-5;
+  const transform = createRiverSpaceTransform(riverDomain.cols, riverDomain.rows, 1, 1, sampleCols, sampleRows);
+  const toEdgeX = (gridX: number): number => transform.gridToEdgeX(gridX);
+  const toEdgeY = (gridY: number): number => transform.gridToEdgeY(gridY);
+  type CutVertex = {
+    x: number;
+    y: number;
+    z: number;
+    u: number;
+    v: number;
+    ex: number;
+    ey: number;
+    s: number;
+    boundary: boolean;
   };
-  const orient = (ax: number, ay: number, bx: number, by: number, cx: number, cy: number): number =>
-    (bx - ax) * (cy - ay) - (by - ay) * (cx - ax);
-  const onSegment = (ax: number, ay: number, bx: number, by: number, px: number, py: number): boolean =>
-    px >= Math.min(ax, bx) - 1e-5 &&
-    px <= Math.max(ax, bx) + 1e-5 &&
-    py >= Math.min(ay, by) - 1e-5 &&
-    py <= Math.max(ay, by) + 1e-5;
-  const segmentsIntersect = (
-    ax: number,
-    ay: number,
-    bx: number,
-    by: number,
-    cx: number,
-    cy: number,
-    dx: number,
-    dy: number
-  ): boolean => {
-    const o1 = orient(ax, ay, bx, by, cx, cy);
-    const o2 = orient(ax, ay, bx, by, dx, dy);
-    const o3 = orient(cx, cy, dx, dy, ax, ay);
-    const o4 = orient(cx, cy, dx, dy, bx, by);
-    if ((o1 > 0) !== (o2 > 0) && (o3 > 0) !== (o4 > 0)) {
-      return true;
+  const threshold = 0.5;
+  const eps = 1e-6;
+  const makeVertex = (vertexIndex: number): CutVertex | null => {
+    if (vertexIndex < 0 || vertexIndex >= vertexCount) {
+      return null;
     }
-    if (Math.abs(o1) <= 1e-5 && onSegment(ax, ay, bx, by, cx, cy)) return true;
-    if (Math.abs(o2) <= 1e-5 && onSegment(ax, ay, bx, by, dx, dy)) return true;
-    if (Math.abs(o3) <= 1e-5 && onSegment(cx, cy, dx, dy, ax, ay)) return true;
-    if (Math.abs(o4) <= 1e-5 && onSegment(cx, cy, dx, dy, bx, by)) return true;
-    return false;
+    const gridX = vertexIndex % sampleCols;
+    const gridY = Math.floor(vertexIndex / sampleCols);
+    const ex = toEdgeX(gridX);
+    const ey = toEdgeY(gridY);
+    const posBase = vertexIndex * 3;
+    if (posBase + 2 >= positions.length) {
+      return null;
+    }
+    const uvBase = vertexIndex * 2;
+    return {
+      x: positions[posBase],
+      y: positions[posBase + 1],
+      z: positions[posBase + 2],
+      u: uvs && uvBase + 1 < uvs.length ? uvs[uvBase] : 0,
+      v: uvs && uvBase + 1 < uvs.length ? uvs[uvBase + 1] : 0,
+      ex,
+      ey,
+      s: sampleField(ex, ey),
+      boundary: false
+    };
   };
-  const edgeCount = Math.floor(boundaryEdges.length / 4);
-  const binSize = Math.max(1, Math.floor(Math.max(riverDomain.cols, riverDomain.rows) / 48));
-  const binKey = (x: number, y: number): string => `${x},${y}`;
-  const bins = new Map<string, number[]>();
-  for (let edgeIdx = 0; edgeIdx < edgeCount; edgeIdx += 1) {
-    const base = edgeIdx * 4;
-    const ax = boundaryEdges[base];
-    const ay = boundaryEdges[base + 1];
-    const bx = boundaryEdges[base + 2];
-    const by = boundaryEdges[base + 3];
-    const minX = Math.floor(Math.min(ax, bx) / binSize);
-    const maxX = Math.floor(Math.max(ax, bx) / binSize);
-    const minY = Math.floor(Math.min(ay, by) / binSize);
-    const maxY = Math.floor(Math.max(ay, by) / binSize);
-    for (let byIdx = minY; byIdx <= maxY; byIdx += 1) {
-      for (let bxIdx = minX; bxIdx <= maxX; bxIdx += 1) {
-        const key = binKey(bxIdx, byIdx);
-        let list = bins.get(key);
-        if (!list) {
-          list = [];
-          bins.set(key, list);
-        }
-        list.push(edgeIdx);
+  const interpolate = (a: CutVertex, b: CutVertex): CutVertex => {
+    const delta = b.s - a.s;
+    const t = Math.abs(delta) <= eps ? 0.5 : clamp((threshold - a.s) / delta, 0, 1);
+    return {
+      x: a.x + (b.x - a.x) * t,
+      y: a.y + (b.y - a.y) * t,
+      z: a.z + (b.z - a.z) * t,
+      u: a.u + (b.u - a.u) * t,
+      v: a.v + (b.v - a.v) * t,
+      ex: a.ex + (b.ex - a.ex) * t,
+      ey: a.ey + (b.ey - a.ey) * t,
+      s: threshold,
+      boundary: true
+    };
+  };
+  const clipTriangle = (a: CutVertex, b: CutVertex, c: CutVertex): CutVertex[] => {
+    let poly: CutVertex[] = [a, b, c];
+    const output: CutVertex[] = [];
+    let prev = poly[poly.length - 1];
+    let prevInside = prev.s < threshold;
+    for (let i = 0; i < poly.length; i += 1) {
+      const cur = poly[i];
+      const curInside = cur.s < threshold;
+      if (curInside !== prevInside) {
+        output.push(interpolate(prev, cur));
       }
-    }
-  }
-  const edgeStamp = new Int32Array(edgeCount);
-  let stamp = 1;
-  const collectEdges = (minX: number, maxX: number, minY: number, maxY: number, out: number[]): void => {
-    out.length = 0;
-    const bx0 = Math.floor(minX / binSize);
-    const bx1 = Math.floor(maxX / binSize);
-    const by0 = Math.floor(minY / binSize);
-    const by1 = Math.floor(maxY / binSize);
-    for (let byIdx = by0; byIdx <= by1; byIdx += 1) {
-      for (let bxIdx = bx0; bxIdx <= bx1; bxIdx += 1) {
-        const list = bins.get(binKey(bxIdx, byIdx));
-        if (!list) {
-          continue;
-        }
-        for (let i = 0; i < list.length; i += 1) {
-          const edgeIdx = list[i];
-          if (edgeStamp[edgeIdx] === stamp) {
-            continue;
-          }
-          edgeStamp[edgeIdx] = stamp;
-          out.push(edgeIdx);
-        }
+      if (curInside) {
+        output.push(cur);
       }
+      prev = cur;
+      prevInside = curInside;
     }
-    stamp += 1;
-    if (stamp >= 2147483640) {
-      edgeStamp.fill(0);
-      stamp = 1;
-    }
+    return output;
   };
-  const candidateEdges: number[] = [];
 
-  const keep: number[] = [];
+  const outPositions: number[] = [];
+  const outUvs: number[] = [];
+  const boundaryEdgeMap = new Map<string, { count: number; ax: number; ay: number; bx: number; by: number; boundary: boolean }>();
+  const q = 8192;
+  const vertexKey = (v: CutVertex): string => `${Math.round(v.ex * q)},${Math.round(v.ey * q)}`;
+  const registerEdge = (a: CutVertex, b: CutVertex): void => {
+    const keyA = vertexKey(a);
+    const keyB = vertexKey(b);
+    if (keyA === keyB) {
+      return;
+    }
+    const forward = keyA < keyB;
+    const edgeKey = forward ? `${keyA}|${keyB}` : `${keyB}|${keyA}`;
+    const ax = forward ? a.ex : b.ex;
+    const ay = forward ? a.ey : b.ey;
+    const bx = forward ? b.ex : a.ex;
+    const by = forward ? b.ey : a.ey;
+    const boundary = a.boundary && b.boundary;
+    const existing = boundaryEdgeMap.get(edgeKey);
+    if (!existing) {
+      boundaryEdgeMap.set(edgeKey, { count: 1, ax, ay, bx, by, boundary });
+      return;
+    }
+    existing.count += 1;
+    existing.boundary = existing.boundary || boundary;
+  };
+
+  const triCount = Math.floor(src.length / 3);
+  let cutCount = 0;
   for (let i = 0; i < src.length; i += 3) {
     const ia = src[i] as number;
     const ib = src[i + 1] as number;
@@ -2679,62 +2813,97 @@ const applyRiverTerrainTriangleCutout = (
     ) {
       continue;
     }
-    const ax = ia % sampleCols;
-    const ay = Math.floor(ia / sampleCols);
-    const bx = ib % sampleCols;
-    const by = Math.floor(ib / sampleCols);
-    const cx = ic % sampleCols;
-    const cy = Math.floor(ic / sampleCols);
-    const axE = toEdgeX(ax);
-    const ayE = toEdgeY(ay);
-    const bxE = toEdgeX(bx);
-    const byE = toEdgeY(by);
-    const cxE = toEdgeX(cx);
-    const cyE = toEdgeY(cy);
-    const cX = (axE + bxE + cxE) / 3;
-    const cY = (ayE + byE + cyE) / 3;
-    let cut =
-      sampleField(axE, ayE) >= 0.5 ||
-      sampleField(bxE, byE) >= 0.5 ||
-      sampleField(cxE, cyE) >= 0.5 ||
-      sampleField(cX, cY) >= 0.5;
-    if (!cut) {
-      const minX = Math.min(axE, bxE, cxE);
-      const maxX = Math.max(axE, bxE, cxE);
-      const minY = Math.min(ayE, byE, cyE);
-      const maxY = Math.max(ayE, byE, cyE);
-      collectEdges(minX, maxX, minY, maxY, candidateEdges);
-      for (let e = 0; e < candidateEdges.length; e += 1) {
-        const edgeIdx = candidateEdges[e];
-        const base = edgeIdx * 4;
-        const ex0 = boundaryEdges[base];
-        const ey0 = boundaryEdges[base + 1];
-        const ex1 = boundaryEdges[base + 2];
-        const ey1 = boundaryEdges[base + 3];
-        if (
-          segmentsIntersect(axE, ayE, bxE, byE, ex0, ey0, ex1, ey1) ||
-          segmentsIntersect(bxE, byE, cxE, cyE, ex0, ey0, ex1, ey1) ||
-          segmentsIntersect(cxE, cyE, axE, ayE, ex0, ey0, ex1, ey1) ||
-          pointInTriangle(ex0, ey0, axE, ayE, bxE, byE, cxE, cyE) ||
-          pointInTriangle(ex1, ey1, axE, ayE, bxE, byE, cxE, cyE)
-        ) {
-          cut = true;
-          break;
-        }
-      }
+    const a = makeVertex(ia);
+    const b = makeVertex(ib);
+    const c = makeVertex(ic);
+    if (!a || !b || !c) {
+      continue;
     }
-    if (!cut) {
-      keep.push(ia, ib, ic);
+    const clipped = clipTriangle(a, b, c);
+    if (clipped.length < 3) {
+      cutCount += 1;
+      continue;
+    }
+    const changed = clipped.length !== 3 || clipped.some((v) => v.boundary);
+    if (changed) {
+      cutCount += 1;
+    }
+    const base = clipped[0];
+    for (let t = 1; t < clipped.length - 1; t += 1) {
+      let p1 = clipped[t];
+      let p2 = clipped[t + 1];
+      const e1x = p1.x - base.x;
+      const e1y = p1.y - base.y;
+      const e1z = p1.z - base.z;
+      const e2x = p2.x - base.x;
+      const e2y = p2.y - base.y;
+      const e2z = p2.z - base.z;
+      const nx = e1y * e2z - e1z * e2y;
+      const ny = e1z * e2x - e1x * e2z;
+      const nz = e1x * e2y - e1y * e2x;
+      if (Math.hypot(nx, ny, nz) <= 1e-9) {
+        continue;
+      }
+      if (ny < 0) {
+        const swap = p1;
+        p1 = p2;
+        p2 = swap;
+      }
+      outPositions.push(
+        base.x, base.y, base.z,
+        p1.x, p1.y, p1.z,
+        p2.x, p2.y, p2.z
+      );
+      outUvs.push(
+        base.u, base.v,
+        p1.u, p1.v,
+        p2.u, p2.v
+      );
+      registerEdge(base, p1);
+      registerEdge(p1, p2);
+      registerEdge(p2, base);
     }
   }
-  if (keep.length === src.length || keep.length === 0) {
+  const cutBoundaryEdges: number[] = [];
+  boundaryEdgeMap.forEach((record) => {
+    // Boundary edge from clipped exterior mesh should be unique and lie on clip threshold.
+    if (record.count !== 1 || !record.boundary) {
+      return;
+    }
+    cutBoundaryEdges.push(record.ax, record.ay, record.bx, record.by);
+  });
+  riverDomain.cutoutBoundaryEdges =
+    cutBoundaryEdges.length >= 4
+      ? new Float32Array(cutBoundaryEdges)
+      : riverDomain.boundaryEdges;
+  if (riverDomain.debugStats) {
+    const mismatch = computeBoundaryMismatchStats(riverDomain.cutoutBoundaryEdges, riverDomain.boundaryEdges);
+    riverDomain.debugStats.cutoutBoundaryEdgeCount = mismatch.countA;
+    riverDomain.debugStats.boundaryMismatchMean = mismatch.mean;
+    riverDomain.debugStats.boundaryMismatchMax = mismatch.max;
+    if (DEBUG_TERRAIN_RENDER) {
+      console.log(
+        `[threeTestTerrain] river boundary mismatch cutoutEdges=${mismatch.countA} domainEdges=${mismatch.countB} mean=${mismatch.mean.toFixed(4)} max=${mismatch.max.toFixed(4)}`
+      );
+    }
+  }
+  if (outPositions.length < 9) {
     return;
   }
-  const dst =
-    vertexCount > 65535
-      ? new Uint32Array(keep)
-      : new Uint16Array(keep);
-  geometry.setIndex(new THREE.BufferAttribute(dst, 1));
+  geometry.setIndex(null);
+  geometry.setAttribute("position", new THREE.Float32BufferAttribute(new Float32Array(outPositions), 3));
+  geometry.setAttribute("uv", new THREE.Float32BufferAttribute(new Float32Array(outUvs), 2));
+  // Geometry topology changed from indexed grid to clipped non-indexed tris.
+  // Drop stale normals/groups so downstream normal recompute and draw ranges stay valid.
+  geometry.deleteAttribute("normal");
+  geometry.clearGroups();
+  geometry.addGroup(0, outPositions.length / 3, 0);
+  if (DEBUG_TERRAIN_RENDER) {
+    const kept = triCount - cutCount;
+    console.log(
+      `[threeTestTerrain] river terrain cutout tris total=${triCount} cut=${cutCount} kept=${kept}`
+    );
+  }
 };
 
 const buildRiverMeshData = (
@@ -2962,9 +3131,90 @@ const buildRiverMeshData = (
   const rapid: number[] = [];
   const indices = Array.from(riverDomain.contourIndices);
   const distToNonRiver = riverDomain.distanceToBank;
+  const contourVertexCount = riverDomain.contourVertices.length / 2;
+  const renderContourVertices = new Float32Array(riverDomain.contourVertices);
+  if (
+    contourVertexCount > 0 &&
+    riverDomain.boundaryEdges.length >= 4 &&
+    riverDomain.cutoutBoundaryEdges &&
+    riverDomain.cutoutBoundaryEdges.length >= 4
+  ) {
+    const quantScale = 8192;
+    const keyOf = (x: number, y: number): string => `${Math.round(x * quantScale)},${Math.round(y * quantScale)}`;
+    const vertexLookup = new Map<string, number[]>();
+    for (let i = 0; i < contourVertexCount; i += 1) {
+      const vx = renderContourVertices[i * 2];
+      const vy = renderContourVertices[i * 2 + 1];
+      const key = keyOf(vx, vy);
+      let list = vertexLookup.get(key);
+      if (!list) {
+        list = [];
+        vertexLookup.set(key, list);
+      }
+      list.push(i);
+    }
+    const boundaryFlags = new Uint8Array(contourVertexCount);
+    for (let i = 0; i < riverDomain.boundaryEdges.length; i += 4) {
+      const aKey = keyOf(riverDomain.boundaryEdges[i], riverDomain.boundaryEdges[i + 1]);
+      const bKey = keyOf(riverDomain.boundaryEdges[i + 2], riverDomain.boundaryEdges[i + 3]);
+      const aList = vertexLookup.get(aKey);
+      const bList = vertexLookup.get(bKey);
+      if (aList) {
+        for (let j = 0; j < aList.length; j += 1) {
+          boundaryFlags[aList[j]] = 1;
+        }
+      }
+      if (bList) {
+        for (let j = 0; j < bList.length; j += 1) {
+          boundaryFlags[bList[j]] = 1;
+        }
+      }
+    }
+    const snapMaxEdgeDist = 1.15;
+    const cutoutEdges = riverDomain.cutoutBoundaryEdges;
+    for (let i = 0; i < contourVertexCount; i += 1) {
+      if (!boundaryFlags[i]) {
+        continue;
+      }
+      const vx = renderContourVertices[i * 2];
+      const vy = renderContourVertices[i * 2 + 1];
+      let bestDist = Number.POSITIVE_INFINITY;
+      let bestX = vx;
+      let bestY = vy;
+      for (let e = 0; e < cutoutEdges.length; e += 4) {
+        const ax = cutoutEdges[e];
+        const ay = cutoutEdges[e + 1];
+        const bx = cutoutEdges[e + 2];
+        const by = cutoutEdges[e + 3];
+        const abX = bx - ax;
+        const abY = by - ay;
+        const lenSq = abX * abX + abY * abY;
+        if (lenSq <= 1e-8) {
+          continue;
+        }
+        const t = clamp(((vx - ax) * abX + (vy - ay) * abY) / lenSq, 0, 1);
+        const qx = ax + abX * t;
+        const qy = ay + abY * t;
+        const dist = Math.hypot(vx - qx, vy - qy);
+        if (dist < bestDist) {
+          bestDist = dist;
+          bestX = qx;
+          bestY = qy;
+          if (bestDist <= 1e-4) {
+            break;
+          }
+        }
+      }
+      if (Number.isFinite(bestDist) && bestDist <= snapMaxEdgeDist) {
+        renderContourVertices[i * 2] = bestX;
+        renderContourVertices[i * 2 + 1] = bestY;
+      }
+    }
+  }
 
-  const worldXEdge = (x: number): number => (x / Math.max(1, cols) - 0.5) * width;
-  const worldZEdge = (y: number): number => (y / Math.max(1, rows) - 0.5) * depth;
+  const riverSpace = createRiverSpaceTransform(cols, rows, width, depth, cols + 1, rows + 1);
+  const worldXEdge = (x: number): number => riverSpace.edgeToWorldX(x);
+  const worldZEdge = (y: number): number => riverSpace.edgeToWorldY(y);
   const sampleFromCells = (fx: number, fy: number, getter: (idx: number) => number): number => {
     const cx = fx - 0.5;
     const cy = fy - 0.5;
@@ -3087,19 +3337,23 @@ const buildRiverMeshData = (
     flowDir.push(flow.x, flow.y);
     rapid.push(sampleRapid(v.x, v.y));
   };
-  for (let i = 0; i < riverDomain.contourVertices.length; i += 2) {
+  for (let i = 0; i < renderContourVertices.length; i += 2) {
     addVertex({
-      x: riverDomain.contourVertices[i],
-      y: riverDomain.contourVertices[i + 1]
+      x: renderContourVertices[i],
+      y: renderContourVertices[i + 1]
     });
   }
-  if (indices.length === 0 || positions.length / 3 !== riverDomain.contourVertices.length / 2) {
+  if (indices.length === 0 || positions.length / 3 !== renderContourVertices.length / 2) {
     return undefined;
   }
 
   const wallPositions: number[] = [];
   const wallUvs: number[] = [];
   const wallIndices: number[] = [];
+  const wallBoundaryEdges =
+    riverDomain.cutoutBoundaryEdges && riverDomain.cutoutBoundaryEdges.length >= 4
+      ? riverDomain.cutoutBoundaryEdges
+      : riverDomain.boundaryEdges;
   const sampleTerrainWorld = (fx: number, fy: number): number => {
     const sx = clamp(fx - 0.5, 0, cols - 1);
     const sy = clamp(fy - 0.5, 0, rows - 1);
@@ -3256,20 +3510,20 @@ const buildRiverMeshData = (
       vBase, vBase + 2, vBase + 3
     );
   };
-  for (let i = 0; i < riverDomain.boundaryEdges.length; i += 4) {
+  for (let i = 0; i < wallBoundaryEdges.length; i += 4) {
     pushWallEdge({
-      ax: riverDomain.boundaryEdges[i],
-      ay: riverDomain.boundaryEdges[i + 1],
-      bx: riverDomain.boundaryEdges[i + 2],
-      by: riverDomain.boundaryEdges[i + 3]
+      ax: wallBoundaryEdges[i],
+      ay: wallBoundaryEdges[i + 1],
+      bx: wallBoundaryEdges[i + 2],
+      by: wallBoundaryEdges[i + 3]
     });
   }
 
   if (riverDomain.debugStats && positions.length >= 3) {
     let protruding = 0;
     for (let i = 0; i < positions.length; i += 3) {
-      const vx = riverDomain.contourVertices[(i / 3) * 2];
-      const vy = riverDomain.contourVertices[(i / 3) * 2 + 1];
+      const vx = renderContourVertices[(i / 3) * 2];
+      const vy = renderContourVertices[(i / 3) * 2 + 1];
       const bank = sampleAnyOutsideBank(vx, vy, positions[i + 1] + WALL_MIN_HEIGHT);
       if (Number.isFinite(bank) && positions[i + 1] > bank + WALL_RISE_GUARD) {
         protruding += 1;
@@ -3316,6 +3570,7 @@ export const buildRoadOverlayTexture = (
   scale: number
 ): THREE.Texture | null => {
   const tileTypes = sample.tileTypes;
+  const roadBridgeMask = sample.roadBridgeMask;
   if (!tileTypes) {
     return null;
   }
@@ -3442,8 +3697,9 @@ export const buildRoadOverlayTexture = (
       if (x < 0 || y < 0 || x >= cols || y >= rows) {
         return false;
       }
-      const type = tileTypes[y * cols + x];
-      return type === roadId || type === baseId;
+      const idx = y * cols + x;
+      const type = tileTypes[idx];
+      return type === roadId || type === baseId || (roadBridgeMask ? roadBridgeMask[idx] > 0 : false);
     };
 
     for (let tileY = 0; tileY < rows; tileY += 1) {
@@ -3631,8 +3887,9 @@ export const buildRoadOverlayTexture = (
     if (x < 0 || y < 0 || x >= cols || y >= rows) {
       return false;
     }
-    const type = tileTypes[y * cols + x];
-    return type === roadId || type === baseId;
+    const idx = y * cols + x;
+    const type = tileTypes[idx];
+    return type === roadId || type === baseId || (roadBridgeMask ? roadBridgeMask[idx] > 0 : false);
   };
 
   const tileOffsetX = (tileX: number) => tileX * tileSize;
@@ -3751,6 +4008,111 @@ export const buildRoadOverlayTexture = (
   texture.generateMipmaps = false;
   texture.anisotropy = 4;
   return texture;
+};
+
+const buildBridgeDeckMesh = (
+  sample: TerrainSample,
+  width: number,
+  depth: number,
+  heightScale: number
+): THREE.InstancedMesh | null => {
+  const bridgeMask = sample.roadBridgeMask;
+  if (!bridgeMask || bridgeMask.length === 0) {
+    return null;
+  }
+  const { cols, rows, elevations } = sample;
+  const riverSurface = sample.riverSurface;
+  const bridgeIndices: number[] = [];
+  for (let i = 0; i < bridgeMask.length; i += 1) {
+    if (bridgeMask[i] > 0) {
+      bridgeIndices.push(i);
+    }
+  }
+  if (bridgeIndices.length === 0) {
+    return null;
+  }
+
+  const roadColor = TILE_COLOR_RGB.road;
+  const bridgeColor = new THREE.Color(
+    clamp((roadColor.r + 28) / 255, 0, 1),
+    clamp((roadColor.g + 28) / 255, 0, 1),
+    clamp((roadColor.b + 28) / 255, 0, 1)
+  );
+  const deckGeometry = new THREE.BoxGeometry(1, 1, 1);
+  const deckMaterial = new THREE.MeshStandardMaterial({
+    color: bridgeColor,
+    roughness: 0.92,
+    metalness: 0.03
+  });
+  const mesh = new THREE.InstancedMesh(deckGeometry, deckMaterial, bridgeIndices.length);
+  const matrix = new THREE.Matrix4();
+  const position = new THREE.Vector3();
+  const quaternion = new THREE.Quaternion();
+  const scale = new THREE.Vector3();
+
+  const neighborOffsets = [
+    { x: 1, y: 0 },
+    { x: -1, y: 0 },
+    { x: 0, y: 1 },
+    { x: 0, y: -1 },
+    { x: 1, y: 1 },
+    { x: 1, y: -1 },
+    { x: -1, y: 1 },
+    { x: -1, y: -1 }
+  ];
+
+  for (let i = 0; i < bridgeIndices.length; i += 1) {
+    const idx = bridgeIndices[i];
+    const tileX = idx % cols;
+    const tileY = Math.floor(idx / cols);
+    const n = tileY > 0 && bridgeMask[(tileY - 1) * cols + tileX] > 0;
+    const s = tileY < rows - 1 && bridgeMask[(tileY + 1) * cols + tileX] > 0;
+    const w = tileX > 0 && bridgeMask[tileY * cols + tileX - 1] > 0;
+    const e = tileX < cols - 1 && bridgeMask[tileY * cols + tileX + 1] > 0;
+
+    const alongX = e || w;
+    const alongZ = n || s;
+    const deckWidth = alongX && !alongZ ? 1.26 : alongX && alongZ ? 1.08 : 0.98;
+    const deckDepth = alongZ && !alongX ? 1.26 : alongX && alongZ ? 1.08 : 0.98;
+    const deckThickness = 0.08;
+
+    const rawSurface = Number.isFinite(riverSurface?.[idx]) ? (riverSurface?.[idx] as number) : elevations[idx] ?? 0;
+    const riverSurfaceY = clamp(rawSurface, 0, 1) * heightScale;
+
+    let bankY = Number.NEGATIVE_INFINITY;
+    for (const offset of neighborOffsets) {
+      const nx = tileX + offset.x;
+      const ny = tileY + offset.y;
+      if (nx < 0 || ny < 0 || nx >= cols || ny >= rows) {
+        continue;
+      }
+      const nIdx = ny * cols + nx;
+      if (bridgeMask[nIdx] > 0) {
+        continue;
+      }
+      bankY = Math.max(bankY, clamp(elevations[nIdx] ?? 0, 0, 1) * heightScale);
+    }
+    if (!Number.isFinite(bankY)) {
+      bankY = clamp(elevations[idx] ?? 0, 0, 1) * heightScale;
+    }
+    const deckY = Math.max(riverSurfaceY + 0.35, bankY + 0.12);
+
+    position.set(
+      ((tileX + 0.5) / Math.max(1, cols) - 0.5) * width,
+      deckY,
+      ((tileY + 0.5) / Math.max(1, rows) - 0.5) * depth
+    );
+    scale.set(deckWidth, deckThickness, deckDepth);
+    matrix.compose(position, quaternion, scale);
+    mesh.setMatrixAt(i, matrix);
+  }
+
+  mesh.castShadow = false;
+  mesh.receiveShadow = true;
+  mesh.renderOrder = 2;
+  mesh.userData.bridgeDeck = true;
+  mesh.instanceMatrix.needsUpdate = true;
+  return mesh;
 };
 
 const buildWaterSurfaceHeights = (
@@ -4334,6 +4696,20 @@ export const buildTerrainMesh = (
     sampleRows,
     step
   );
+  if (DEBUG_TERRAIN_RENDER && riverRenderDomain) {
+    const transform = createRiverSpaceTransform(
+      riverRenderDomain.cols,
+      riverRenderDomain.rows,
+      width,
+      depth,
+      sampleCols,
+      sampleRows
+    );
+    const check = validateRiverSpaceTransform(transform, sampleCols, sampleRows);
+    console.log(
+      `[threeTestTerrain] river xform validation worldRoundTripMax=${check.worldRoundTripMax.toFixed(5)} sampleRoundTripMax=${check.sampleRoundTripMax.toFixed(5)}`
+    );
+  }
   const heightAtSample = (x: number, y: number): number => {
     const clampedX = Math.max(0, Math.min(sampleCols - 1, x));
     const clampedY = Math.max(0, Math.min(sampleRows - 1, y));
@@ -4757,6 +5133,10 @@ export const buildTerrainMesh = (
     roadMesh.userData.roadOverlay = true;
     roadMesh.userData.roadOverlayVersion = getRoadAtlasVersion();
     mesh.add(roadMesh);
+  }
+  const bridgeDeckMesh = buildBridgeDeckMesh(sample, width, depth, heightScale);
+  if (bridgeDeckMesh) {
+    mesh.add(bridgeDeckMesh);
   }
   const treeBurnMeshStates: TreeBurnMeshState[] = [];
   if (hasTreeAssets && treeInstances.length > 0) {

@@ -2,6 +2,9 @@ import type { RNG, Point, Unit } from "../core/types.js";
 import type { WorldState } from "../core/state.js";
 import type { EffectsState } from "../core/effectsState.js";
 
+const MAX_WATER_PARTICLES = 2400;
+const MAX_SMOKE_PARTICLES = 12000;
+
 export function emitWaterSpray(
   state: WorldState,
   effects: EffectsState,
@@ -10,6 +13,11 @@ export function emitWaterSpray(
   target: Point | null
 ): void {
   const count = unit.kind === "truck" ? 8 : 5;
+  const available = Math.max(0, MAX_WATER_PARTICLES - effects.waterParticles.length);
+  if (available <= 0) {
+    return;
+  }
+  const spawnCount = Math.min(count, available);
   const baseSpeed = unit.kind === "truck" ? 8 : 6;
   const spread = unit.kind === "truck" ? 0.55 : 0.7;
   let baseAngle = rng.next() * Math.PI * 2;
@@ -17,7 +25,7 @@ export function emitWaterSpray(
     baseAngle = Math.atan2(target.y - unit.y, target.x - unit.x);
   }
 
-  for (let i = 0; i < count; i += 1) {
+  for (let i = 0; i < spawnCount; i += 1) {
     const jitter = (rng.next() - 0.5) * spread;
     const speed = baseSpeed * (0.7 + rng.next() * 0.6);
     effects.waterParticles.push({
@@ -50,8 +58,13 @@ export function emitSmokeAt(
   if (count <= 0) {
     return;
   }
+  const available = Math.max(0, MAX_SMOKE_PARTICLES - effects.smokeParticles.length);
+  if (available <= 0) {
+    return;
+  }
+  const spawnCount = Math.min(count, available);
   const baseSpeed = 0.9 + state.wind.strength * 1.6;
-  for (let i = 0; i < count; i += 1) {
+  for (let i = 0; i < spawnCount; i += 1) {
     const jitter = (rng.next() - 0.5) * 0.6;
     const speed = baseSpeed * (0.6 + rng.next() * 0.8);
     const angle = Math.atan2(state.wind.dy, state.wind.dx) + jitter;

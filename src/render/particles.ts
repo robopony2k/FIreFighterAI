@@ -325,7 +325,13 @@ export const createSmokeShaderMaterial = (options: SmokeShaderMaterialOptions = 
 /**
  * Draws all non-fire particle effects (smoke, water).
  */
+/**
+ * @deprecated Legacy 2D renderer. Prefer the 3D render backend.
+ */
 export const drawParticles = (state: WorldState, effects: EffectsState, ctx: CanvasRenderingContext2D) => {
+  const canvasWidth = ctx.canvas.width;
+  const canvasHeight = ctx.canvas.height;
+
   // Draw smoke particles
   effects.smokeParticles.forEach((particle) => {
     const baseHeight = getRenderHeightAt(state, particle.x, particle.y);
@@ -333,6 +339,14 @@ export const drawParticles = (state: WorldState, effects: EffectsState, ctx: Can
     const pos = isoProject(particle.x, particle.y, baseHeight + TILE_SIZE * 2 + rise);
     const alpha = clamp(particle.alpha * 0.95, 0, 0.95);
     const radius = particle.size * 0.7;
+    if (
+      pos.x + radius < 0 ||
+      pos.x - radius > canvasWidth ||
+      pos.y + radius < 0 ||
+      pos.y - radius > canvasHeight
+    ) {
+      return;
+    }
     ctx.fillStyle = `rgba(85, 85, 85, ${alpha})`;
     ctx.beginPath();
     ctx.arc(pos.x, pos.y, radius, 0, Math.PI * 2);
@@ -351,8 +365,17 @@ export const drawParticles = (state: WorldState, effects: EffectsState, ctx: Can
   effects.waterParticles.forEach((particle) => {
     const baseHeight = getRenderHeightAt(state, particle.x, particle.y);
     const pos = isoProject(particle.x, particle.y, baseHeight + TILE_SIZE * 0.5);
+    const half = particle.size * 0.5;
+    if (
+      pos.x + half < 0 ||
+      pos.x - half > canvasWidth ||
+      pos.y + half < 0 ||
+      pos.y - half > canvasHeight
+    ) {
+      return;
+    }
     ctx.globalAlpha = clamp(particle.alpha, 0, 1);
-    ctx.fillRect(pos.x - particle.size / 2, pos.y - particle.size / 2, particle.size, particle.size);
+    ctx.fillRect(pos.x - half, pos.y - half, particle.size, particle.size);
   });
   ctx.globalAlpha = originalAlpha;
 };

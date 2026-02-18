@@ -1,8 +1,19 @@
 import type { RNG, Point } from "../core/types.js";
 import type { WorldState } from "../core/state.js";
 import { HOUSE_VARIANTS } from "../core/buildingFootprints.js";
+import { DEBUG_TERRAIN } from "../core/config.js";
 import { inBounds, indexFor } from "../core/grid.js";
-import { carveRoad, collectRoadTiles, findNearestRoadTile, findRoadPath, findRoadPathToTarget, setRoadAt } from "./roads.js";
+import {
+  carveRoad,
+  collectRoadTiles,
+  findNearestRoadTile,
+  findRoadPath,
+  findRoadPathToTarget,
+  getRoadGenerationStats,
+  isRoadLikeTile,
+  resetRoadGenerationStats,
+  setRoadAt
+} from "./roads.js";
 
 const HOUSE_BUFFER_RADIUS = 1;
 const HOUSE_FOOTPRINT_EPS = 1e-4;
@@ -19,6 +30,10 @@ type HousePlacementContext = {
   footprints: Map<number, HouseFootprintBounds>;
 };
 
+export type SettlementPlacementResult = {
+  generatedRoads: boolean;
+};
+
 const noiseAt = (value: number): number => {
   const s = Math.sin(value * 12.9898 + 78.233) * 43758.5453;
   return s - Math.floor(s);
@@ -26,11 +41,7 @@ const noiseAt = (value: number): number => {
 
 const pickHouseRotation = (state: WorldState, tileX: number, tileY: number, seed: number): number => {
   const isRoadLike = (x: number, y: number): boolean => {
-    if (!inBounds(state.grid, x, y)) {
-      return false;
-    }
-    const type = state.tiles[indexFor(state.grid, x, y)].type;
-    return type === "road" || type === "base";
+    return isRoadLikeTile(state, x, y);
   };
   const roadEW = isRoadLike(tileX - 1, tileY) || isRoadLike(tileX + 1, tileY);
   const roadNS = isRoadLike(tileX, tileY - 1) || isRoadLike(tileX, tileY + 1);
@@ -142,8 +153,7 @@ const isFootprintAdjacentToRoad = (state: WorldState, bounds: HouseFootprintBoun
         ) {
           continue;
         }
-        const type = state.tiles[indexFor(state.grid, point.x, point.y)].type;
-        if (type === "road" || type === "base") {
+        if (isRoadLikeTile(state, point.x, point.y)) {
           return true;
         }
       }
@@ -387,7 +397,7 @@ function markReachableLand(state: WorldState, origin: Point): Uint8Array {
     return visited;
   }
   const originIdx = indexFor(state.grid, origin.x, origin.y);
-  if (state.tiles[originIdx].type === "water" || state.structureMask[originIdx]) {
+  if ((state.tiles[originIdx].type === "water" && state.tileRoadBridge[originIdx] === 0) || state.structureMask[originIdx]) {
     return visited;
   }
 
@@ -418,7 +428,7 @@ function markReachableLand(state: WorldState, origin: Point): Uint8Array {
       if (visited[idx]) {
         continue;
       }
-      if (state.tiles[idx].type === "water" || state.structureMask[idx]) {
+      if ((state.tiles[idx].type === "water" && state.tileRoadBridge[idx] === 0) || state.structureMask[idx]) {
         continue;
       }
       visited[idx] = 1;
@@ -447,9 +457,9 @@ function findClosestUnreachableLand(state: WorldState, reachable: Uint8Array): P
   for (let y = 0; y < state.grid.rows; y += 1) {
     for (let x = 0; x < state.grid.cols; x += 1) {
       const idx = indexFor(state.grid, x, y);
-    if (reachable[idx] || state.tiles[idx].type === "water" || state.structureMask[idx]) {
-      continue;
-    }
+      if (reachable[idx] || (state.tiles[idx].type === "water" && state.tileRoadBridge[idx] === 0) || state.structureMask[idx]) {
+        continue;
+      }
       const dist = Math.abs(x - state.basePoint.x) + Math.abs(y - state.basePoint.y);
       if (dist < bestDist) {
         bestDist = dist;
@@ -460,7 +470,7 @@ function findClosestUnreachableLand(state: WorldState, reachable: Uint8Array): P
   return best;
 }
 
-function connectDetachedLand(state: WorldState, rng: RNG): void {
+function connectDetachedLandPass(state: WorldState, rng: RNG, allowBridge: boolean): void {
   let reachable = markReachableLand(state, state.basePoint);
   let reachableCount = countReachable(reachable);
   const maxIterations = Math.min(state.grid.totalTiles, 4096);
@@ -476,12 +486,16 @@ function connectDetachedLand(state: WorldState, rng: RNG): void {
         const idx = indexFor(state.grid, x, y);
         return reachable[idx] === 1 && state.tiles[idx].type !== "house" && state.structureMask[idx] === 0;
       },
-      { allowWater: true }
+      { bridgePolicy: allowBridge ? "allow" : "never" }
     );
     if (path.length === 0) {
       break;
     }
-    path.forEach((point) => setRoadAt(state, rng, point.x, point.y, { allowBridge: true }));
+    path.forEach((point) => {
+      const idx = indexFor(state.grid, point.x, point.y);
+      const isBridgeTile = state.tiles[idx].type === "water" && state.tileRiverMask[idx] > 0;
+      setRoadAt(state, rng, point.x, point.y, { allowBridge: allowBridge && isBridgeTile });
+    });
     const nextReachable = markReachableLand(state, state.basePoint);
     const nextCount = countReachable(nextReachable);
     if (nextCount <= reachableCount) {
@@ -492,34 +506,12 @@ function connectDetachedLand(state: WorldState, rng: RNG): void {
   }
 }
 
-function ensureEvacuationRoute(state: WorldState, rng: RNG): void {
-  const start = state.basePoint;
-  const isEdge = (x: number, y: number) =>
-    x === 0 || y === 0 || x === state.grid.cols - 1 || y === state.grid.rows - 1;
-  const isValidEdge = (x: number, y: number) => {
-    if (!isEdge(x, y)) {
-      return false;
-    }
-    if (x === start.x && y === start.y) {
-      return false;
-    }
-    const idx = indexFor(state.grid, x, y);
-    return state.tiles[idx].type !== "house" && state.structureMask[idx] === 0;
-  };
-
-  let allowBridge = false;
-  let path = findRoadPathToTarget(state, start, isValidEdge, { allowWater: false });
-  if (path.length === 0) {
-    allowBridge = true;
-    path = findRoadPathToTarget(state, start, isValidEdge, { allowWater: true });
-  }
-  if (path.length === 0) {
-    return;
-  }
-  path.forEach((point) => setRoadAt(state, rng, point.x, point.y, { allowBridge }));
+function connectDetachedLand(state: WorldState, rng: RNG): void {
+  connectDetachedLandPass(state, rng, false);
+  connectDetachedLandPass(state, rng, true);
 }
 
-export function populateCommunities(state: WorldState, rng: RNG): void {
+export function placeSettlements(state: WorldState, rng: RNG): SettlementPlacementResult {
   state.totalPropertyValue = 0;
   state.totalPopulation = 0;
   state.totalHouses = 0;
@@ -533,6 +525,7 @@ export function populateCommunities(state: WorldState, rng: RNG): void {
     bufferMask: new Uint8Array(state.grid.totalTiles),
     footprints: new Map<number, HouseFootprintBounds>()
   };
+  resetRoadGenerationStats();
 
   const maxDim = Math.max(state.grid.cols, state.grid.rows);
   const fastMode = maxDim >= 1024;
@@ -557,7 +550,7 @@ export function populateCommunities(state: WorldState, rng: RNG): void {
     }
     const centralHouseCount = 12 + Math.floor(rng.next() * 8);
     placeVillageHouses(state, rng, state.basePoint, centralRadius, centralHouseCount, 150, 320, 2, 5, 0.85, context);
-    return;
+    return { generatedRoads: true };
   }
 
   for (let i = 0; i < spokeCount; i += 1) {
@@ -593,7 +586,7 @@ export function populateCommunities(state: WorldState, rng: RNG): void {
       continue;
     }
     const anchor = findNearestRoadTile(state, { x, y });
-    if (findRoadPath(state, anchor, { x, y }).length === 0) {
+    if (findRoadPath(state, anchor, { x, y }, { bridgePolicy: "allow" }).length === 0) {
       continue;
     }
     villageCenters.push({ x, y });
@@ -643,6 +636,35 @@ export function populateCommunities(state: WorldState, rng: RNG): void {
   }
 
   connectDetachedLand(state, rng);
-  ensureEvacuationRoute(state, rng);
+  if (DEBUG_TERRAIN) {
+    const stats = getRoadGenerationStats();
+    let bridgeTiles = 0;
+    for (let i = 0; i < state.tileRoadBridge.length; i += 1) {
+      if (state.tileRoadBridge[i] > 0) {
+        bridgeTiles += 1;
+      }
+    }
+    const roadTileCount = collectRoadTiles(state).length;
+    const minClearance = Number.isFinite(stats.minRiverClearance) ? stats.minRiverClearance.toString() : "n/a";
+    console.log(
+      `[roadgen] roads=${roadTileCount} bridges=${bridgeTiles} paths=${stats.pathsFound}/${stats.pathsAttempted} maxGrade=${stats.maxRealizedGrade.toFixed(3)} minRiverClearance=${minClearance} bridgeSegments=${stats.bridgeSegments}`
+    );
+  }
+  return { generatedRoads: true };
+}
+
+export function connectSettlementsByRoad(
+  _state: WorldState,
+  _rng: RNG,
+  plan: SettlementPlacementResult | null
+): void {
+  if (!plan || plan.generatedRoads) {
+    return;
+  }
+}
+
+export function populateCommunities(state: WorldState, rng: RNG): void {
+  const plan = placeSettlements(state, rng);
+  connectSettlementsByRoad(state, rng, plan);
 }
 

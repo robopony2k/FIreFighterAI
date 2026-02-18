@@ -1,4 +1,4 @@
-import { EventBus } from "./eventBus.js";
+import { EventBus } from "../../core/eventBus.js";
 import type { GameUiSnapshot, InteractionMode, Phase, SelectedEntity } from "./types.js";
 import { clamp } from "../../core/utils.js";
 

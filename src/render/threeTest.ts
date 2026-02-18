@@ -119,7 +119,14 @@ const ENABLE_THREE_TEST_SEASONAL_RECOLOR = THREE_TEST_QUERY?.get("seasonal") !==
 const THREE_TEST_DISABLE_HUD = THREE_TEST_QUERY?.get("nohud") === "1";
 const THREE_TEST_DISABLE_FX = THREE_TEST_QUERY?.get("nofx") === "1";
 const THREE_TEST_DPR_PARAM = Number(THREE_TEST_QUERY?.get("dpr"));
-const THREE_TEST_MAX_DPR = Number.isFinite(THREE_TEST_DPR_PARAM) ? Math.max(0.5, Math.min(4, THREE_TEST_DPR_PARAM)) : 3;
+const THREE_TEST_MAX_DPR = Number.isFinite(THREE_TEST_DPR_PARAM) ? Math.max(0.5, Math.min(4, THREE_TEST_DPR_PARAM)) : 2;
+const THREE_TEST_FPS_PARAM = Number(THREE_TEST_QUERY?.get("fps"));
+const THREE_TEST_FRAME_CAP_FPS = !Number.isFinite(THREE_TEST_FPS_PARAM)
+  ? 60
+  : THREE_TEST_FPS_PARAM <= 0
+    ? 0
+    : Math.max(15, Math.min(240, THREE_TEST_FPS_PARAM));
+const THREE_TEST_FRAME_MIN_MS = THREE_TEST_FRAME_CAP_FPS > 0 ? 1000 / THREE_TEST_FRAME_CAP_FPS : 0;
 const THREE_TEST_WATER_QUALITY_PARAM = (THREE_TEST_QUERY?.get("waterq") ?? "").toLowerCase();
 const THREE_TEST_DEFAULT_WATER_QUALITY: WaterQualityProfile =
   THREE_TEST_WATER_QUALITY_PARAM === "fast" ||
@@ -127,6 +134,8 @@ const THREE_TEST_DEFAULT_WATER_QUALITY: WaterQualityProfile =
   THREE_TEST_WATER_QUALITY_PARAM === "high"
     ? THREE_TEST_WATER_QUALITY_PARAM
     : "balanced";
+const THREE_TEST_RIVER_VIEW = (THREE_TEST_QUERY?.get("rivercam") ?? "").toLowerCase();
+const THREE_TEST_RIVER_VIEW_LOCK = THREE_TEST_QUERY?.get("rivercamlock") === "1";
 const FAST_OCEAN_SAMPLE_SUPPORT_FLOOR = 0.12;
 const GROUND_PHASE_SHIFT_MAX = 0.06;
 const TREE_PHASE_SHIFT_MAX = 0.08;
@@ -161,7 +170,7 @@ export const createThreeTest = (
     canvas,
     antialias: true,
     alpha: false,
-    powerPreference: "high-performance"
+    powerPreference: "default"
   });
   renderer.setPixelRatio(Math.min(window.devicePixelRatio ?? 1, THREE_TEST_MAX_DPR));
   renderer.setClearColor(0x0c0d11, 1);
@@ -512,6 +521,7 @@ export const createThreeTest = (
   };
   const smoothPerf = (current: number, next: number): number => (current > 0 ? current * 0.86 + next * 0.14 : next);
   let lastRafAt = 0;
+  let lastPresentedAt = 0;
 
   const cleanup = (): void => {
     running = false;
@@ -578,6 +588,7 @@ export const createThreeTest = (
     hudSprite.position.set(0, height, 0);
     hudTexture.needsUpdate = true;
     lastFrameTime = 0;
+    lastPresentedAt = 0;
   };
 
   const resize = (): void => {
@@ -606,6 +617,11 @@ export const createThreeTest = (
         threePerf.lastHitchMs = rafGapMs;
       }
     }
+    if (THREE_TEST_FRAME_MIN_MS > 0 && lastPresentedAt > 0 && time - lastPresentedAt < THREE_TEST_FRAME_MIN_MS) {
+      raf = window.requestAnimationFrame(renderFrame);
+      return;
+    }
+    lastPresentedAt = time;
     const frameStart = performance.now();
     const dt = lastFrameTime > 0 ? (time - lastFrameTime) / 1000 : 0;
     lastFrameTime = time;
@@ -635,7 +651,15 @@ export const createThreeTest = (
     threePerf.treeBurnMs = smoothPerf(threePerf.treeBurnMs, performance.now() - treeBurnStart);
     const fireFxStart = performance.now();
     if (!THREE_TEST_DISABLE_FX) {
-      fireFx.update(time, world, lastSample, lastTerrainSize, treeBurnController);
+      fireFx.update(
+        time,
+        world,
+        lastSample,
+        lastTerrainSize,
+        treeBurnController,
+        threePerf.fps > 0 ? threePerf.fps : instantFps,
+        threePerf.sceneRenderMs
+      );
     }
     threePerf.fireFxMs = smoothPerf(threePerf.fireFxMs, performance.now() - fireFxStart);
     refreshRoadOverlayIfNeeded();
@@ -691,6 +715,7 @@ export const createThreeTest = (
     }
     running = true;
     controls.enabled = true;
+    lastPresentedAt = 0;
     resize();
     raf = window.requestAnimationFrame(renderFrame);
   };
@@ -721,6 +746,7 @@ export const createThreeTest = (
     controls.enabled = false;
     clearDebugHover();
     lastRafAt = 0;
+    lastPresentedAt = 0;
     if (raf) {
       window.cancelAnimationFrame(raf);
     }
@@ -835,9 +861,21 @@ export const createThreeTest = (
     camera.far = Math.max(200, distance * 6);
     // Fog disabled: keep camera frustum and lighting adjustments only.
     camera.position.set(distance * 0.65, distance * 0.55, distance * 0.65);
+    if (THREE_TEST_RIVER_VIEW === "top") {
+      camera.position.set(0, distance * 1.35, 0.001);
+    } else if (THREE_TEST_RIVER_VIEW === "under") {
+      camera.position.set(distance * 0.55, -distance * 0.42, distance * 0.55);
+    } else if (THREE_TEST_RIVER_VIEW === "oblique") {
+      camera.position.set(distance * 0.7, distance * 0.5, distance * 0.58);
+    }
     controls.minDistance = Math.max(3, distance * 0.15);
     controls.maxDistance = Math.max(120, distance * 4);
     controls.target.set(0, 0, 0);
+    if (THREE_TEST_RIVER_VIEW_LOCK) {
+      controls.enableRotate = false;
+      controls.enablePan = false;
+      controls.enableZoom = false;
+    }
     keyLight.position.set(distance * 0.45, distance * 0.85, distance * 0.35);
     waterSystem.setLightDirectionFromKeyLight();
     const shadowCam = keyLight.shadow.camera as THREE.OrthographicCamera;
