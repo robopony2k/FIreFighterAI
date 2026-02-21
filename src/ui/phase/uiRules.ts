@@ -14,6 +14,7 @@ const RULES: Record<Phase, PhaseUiRules> = {
     phase: "growth",
     visiblePanels: [
       "topbar",
+      "miniMap",
       "maintenanceRoster",
       "maintenanceCrew",
       "fireDeploy",
@@ -29,6 +30,7 @@ const RULES: Record<Phase, PhaseUiRules> = {
     phase: "maintenance",
     visiblePanels: [
       "topbar",
+      "miniMap",
       "maintenanceRoster",
       "maintenanceCrew",
       "fireDeploy",
@@ -44,6 +46,7 @@ const RULES: Record<Phase, PhaseUiRules> = {
     phase: "fire",
     visiblePanels: [
       "topbar",
+      "miniMap",
       "maintenanceRoster",
       "maintenanceCrew",
       "fireDeploy",
@@ -59,6 +62,7 @@ const RULES: Record<Phase, PhaseUiRules> = {
     phase: "budget",
     visiblePanels: [
       "topbar",
+      "miniMap",
       "maintenanceRoster",
       "maintenanceCrew",
       "fireDeploy",

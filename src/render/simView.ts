@@ -1,4 +1,5 @@
 import type { WorldState } from "../core/state.js";
+import type { Town } from "../core/types.js";
 import { DEFAULT_MOISTURE_PARAMS } from "../core/climate.js";
 import { clamp } from "../core/utils.js";
 
@@ -26,6 +27,9 @@ export type RenderTerrainSample = {
   fastUpdate?: boolean;
   fullResolution?: boolean;
   worldSeed?: number;
+  towns?: Town[];
+  structureRevision?: number;
+  dynamicStructures?: boolean;
 };
 
 const getClimateDryness = (state: RenderSim): number => {
@@ -59,5 +63,8 @@ export const buildRenderTerrainSample = (
   treesEnabled,
   fastUpdate,
   fullResolution,
-  worldSeed: state.seed
+  worldSeed: state.seed,
+  towns: state.towns,
+  structureRevision: state.structureRevision,
+  dynamicStructures: true
 });

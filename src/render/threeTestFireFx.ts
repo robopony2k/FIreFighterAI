@@ -3,11 +3,15 @@ import type { RenderSim } from "./simView.js";
 import { createParticleBuffers, createSmokeShaderMaterial } from "./particles.js";
 import type { TerrainSample, TreeBurnController, TreeFlameProfile } from "./threeTestTerrain.js";
 import { getTerrainHeightScale } from "./threeTestTerrain.js";
+import { FUEL_PROFILES } from "../core/config.js";
+import { TILE_ID_TO_TYPE, TILE_TYPE_IDS } from "../core/state.js";
 
 const FIRE_MAX_INSTANCES = 720;
+const FIRE_CROSS_MAX_INSTANCES = 320;
 const SMOKE_MAX_INSTANCES = 1400;
 const EMBER_MAX_INSTANCES = 520;
 const GLOW_MAX_INSTANCES = FIRE_MAX_INSTANCES;
+const ASH_PREVIEW_MAX_INSTANCES = 1700;
 const SMOKE_QUALITY_FALLBACK_FPS = 56;
 const SMOKE_QUALITY_RECOVERY_FPS = 61;
 const SMOKE_QUALITY_FALLBACK_SCENE_MS = 14;
@@ -15,6 +19,7 @@ const SMOKE_QUALITY_RECOVERY_SCENE_MS = 11;
 const SMOKE_QUALITY_FALLBACK_SECONDS = 1.2;
 const SMOKE_QUALITY_RECOVERY_SECONDS = 5;
 const SMOKE_BUDGET_MIN_SCALE = 0.3;
+const FLAME_BUDGET_MIN_SCALE = 0.35;
 const FIRE_FX_ACTIVE_UPDATE_INTERVAL_MS = 16;
 const FIRE_FX_IDLE_UPDATE_INTERVAL_MS = 120;
 const FIRE_MIN_INTENSITY_FLOOR = 0.001;
@@ -22,10 +27,15 @@ const FIRE_FLAME_VISUAL_FLOOR = 0.006;
 const FIRE_MIN_HEAT = 0.12;
 const TREE_BURN_FLAME_VISUAL_MIN = 0.08;
 const TREE_BURN_CARRY_PROGRESS_MIN = 0.08;
+const TREE_BURN_CARRY_FUEL_MIN = 0.03;
+const ASH_PREVIEW_Y_OFFSET = 0.06;
 const FLAME_CELL_LATERAL_LIMIT = 0.45;
 const FLAME_WIND_GAIN = 1.7;
 const SMOKE_LAYER_MAX = 3;
 const TAU = Math.PI * 2;
+const DEFAULT_FIRE_WALL_BLEND = 0.62;
+const DEFAULT_FIRE_HERO_VOLUMETRIC_SHARE = 0.55;
+const DEFAULT_FIRE_BUDGET_SCALE = 1.0;
 const FIRE_VISUAL_TUNING = {
   tongueSpawnMin: 0,
   tongueSpawnMax: 6,
@@ -43,6 +53,14 @@ const FIRE_VISUAL_TUNING = {
   flickerRateMin: 0.55,
   flickerRateMax: 2.6
 } as const;
+
+const ASH_PREVIEW_BASE_FUEL_BY_TYPE_ID = TILE_ID_TO_TYPE.map((tileType) => Math.max(0, FUEL_PROFILES[tileType].baseFuel));
+
+const isAshPreviewCandidateType = (typeId: number): boolean =>
+  typeId === TILE_TYPE_IDS.grass ||
+  typeId === TILE_TYPE_IDS.scrub ||
+  typeId === TILE_TYPE_IDS.floodplain ||
+  typeId === TILE_TYPE_IDS.forest;
 
 const clamp = (value: number, min: number, max: number): number => Math.min(max, Math.max(min, value));
 const fract = (value: number): number => value - Math.floor(value);
@@ -100,6 +118,11 @@ const sortSmokeParticlesByDepth = (depth: Float32Array, order: Uint16Array, coun
     sortDepthBackToFront(depth, order, 0, count - 1);
   }
 };
+type NeighbourFireFront = {
+  centerTileX: number;
+  centerTileY: number;
+  strength: number;
+};
 const getNeighbourFireBias = (world: RenderSim, cols: number, rows: number, x: number, y: number): number => {
   let sum = 0;
   let count = 0;
@@ -123,6 +146,87 @@ const getNeighbourFireBias = (world: RenderSim, cols: number, rows: number, x: n
     }
   }
   return count > 0 ? sum / count : 0;
+};
+const getNeighbourFireFront = (
+  world: RenderSim,
+  cols: number,
+  rows: number,
+  x: number,
+  y: number,
+  simFireEps: number,
+  windX: number,
+  windY: number
+): NeighbourFireFront => {
+  const idx = y * cols + x;
+  const localFire = world.tileFire[idx] ?? 0;
+  let weightedX = 0;
+  let weightedY = 0;
+  let weightedDirX = 0;
+  let weightedDirY = 0;
+  let weightedSum = 0;
+  let neighborSum = 0;
+  let neighborCount = 0;
+  for (let oy = -1; oy <= 1; oy += 1) {
+    const ny = y + oy;
+    if (ny < 0 || ny >= rows) {
+      continue;
+    }
+    const row = ny * cols;
+    for (let ox = -1; ox <= 1; ox += 1) {
+      if (ox === 0 && oy === 0) {
+        continue;
+      }
+      const nx = x + ox;
+      if (nx < 0 || nx >= cols) {
+        continue;
+      }
+      const nFire = world.tileFire[row + nx] ?? 0;
+      if (nFire <= simFireEps) {
+        continue;
+      }
+      const distWeight = ox === 0 || oy === 0 ? 1 : 0.72;
+      const weight = Math.max(0, nFire - localFire * 0.35) * distWeight;
+      if (weight <= 0) {
+        continue;
+      }
+      weightedX += (nx + 0.5) * weight;
+      weightedY += (ny + 0.5) * weight;
+      weightedDirX += ox * weight;
+      weightedDirY += oy * weight;
+      weightedSum += weight;
+      neighborSum += nFire;
+      neighborCount += 1;
+    }
+  }
+  if (weightedSum <= 0.0001) {
+    return { centerTileX: x + 0.5, centerTileY: y + 0.5, strength: 0 };
+  }
+  const centerTileX = weightedX / weightedSum;
+  const centerTileY = weightedY / weightedSum;
+  const neighborAvg = neighborCount > 0 ? neighborSum / neighborCount : 0;
+  const dirLen = Math.hypot(weightedDirX, weightedDirY);
+  const windLen = Math.hypot(windX, windY);
+  let windAlign = 0;
+  if (dirLen > 0.0001 && windLen > 0.0001) {
+    const dirX = weightedDirX / dirLen;
+    const dirY = weightedDirY / dirLen;
+    const normWindX = windX / windLen;
+    const normWindY = windY / windLen;
+    windAlign = Math.max(0, dirX * normWindX + dirY * normWindY);
+  }
+  const cluster = clamp(weightedSum / 2.6, 0, 1);
+  const gradient = clamp(neighborAvg - localFire + 0.15, 0, 1);
+  const strength = clamp(gradient * 0.62 + cluster * 0.24 + windAlign * 0.34, 0, 1);
+  return { centerTileX, centerTileY, strength };
+};
+
+export type FireFxFallbackMode = "aggressive" | "gentle" | "off";
+
+export type ThreeTestFireFxOptions = {
+  wallBlend?: number;
+  heroVolumetricShare?: number;
+  budgetScale?: number;
+  fallbackMode?: FireFxFallbackMode;
 };
 
 const fireVertexShader = `
@@ -269,6 +373,92 @@ const createFireShaderMaterial = (core: number, alphaScale: number): THREE.Shade
     toneMapped: false
   });
 
+const ashPreviewVertexShader = `
+  attribute float aProgress;
+  attribute float aSeed;
+
+  varying vec2 vUv;
+  varying float vProgress;
+  varying float vSeed;
+
+  void main() {
+    vUv = uv;
+    vProgress = clamp(aProgress, 0.0, 1.2);
+    vSeed = aSeed;
+    vec4 worldPosition = instanceMatrix * vec4(position, 1.0);
+    gl_Position = projectionMatrix * modelViewMatrix * worldPosition;
+  }
+`;
+
+const ashPreviewFragmentShader = `
+  precision highp float;
+
+  uniform float uTime;
+
+  varying vec2 vUv;
+  varying float vProgress;
+  varying float vSeed;
+
+  float hash(vec2 p) {
+    p = fract(p * vec2(443.897, 441.423));
+    p += dot(p, p + 19.19);
+    return fract(p.x * p.y);
+  }
+
+  void main() {
+    float progress = clamp(vProgress, 0.0, 1.0);
+    if (progress <= 0.01) {
+      discard;
+    }
+
+    // Use larger dither cells so scorch-to-ash transitions form broader patches
+    // and reduce high-frequency jagged edges along the ash field boundary.
+    vec2 coarseCell = floor(vUv * vec2(8.0, 8.0) + vec2(vSeed * 37.1, vSeed * 19.7));
+    vec2 fineCell = floor(vUv * vec2(16.0, 16.0) + vec2(vSeed * 83.3, vSeed * 41.9));
+    float coarse = hash(coarseCell);
+    float fine = hash(fineCell);
+    float checker = mod(floor(vUv.x * 10.0) + floor(vUv.y * 10.0) + floor(vSeed * 29.0), 2.0);
+    float dither = clamp(mix(coarse, fine, 0.38) * 0.88 + checker * 0.12, 0.0, 1.0);
+    float coverage = clamp(pow(progress, 0.62) * 1.15, 0.0, 1.0);
+    if (dither > coverage) {
+      discard;
+    }
+
+    float edge = min(min(vUv.x, 1.0 - vUv.x), min(vUv.y, 1.0 - vUv.y));
+    float edgeFade = smoothstep(0.0, 0.05, edge);
+    vec3 warmScorch = vec3(0.27, 0.2, 0.14);
+    vec3 charScorch = vec3(0.2, 0.19, 0.18);
+    vec3 ashNear = vec3(0.165, 0.162, 0.168);
+    float charT = smoothstep(0.08, 0.58, progress);
+    float ashT = smoothstep(0.24, 1.0, progress);
+    vec3 color = mix(warmScorch, charScorch, charT);
+    color = mix(color, ashNear, ashT);
+    float ashNoise = hash(floor(vUv * vec2(7.0, 7.0) + vec2(vSeed * 71.0, vSeed * 37.0)));
+    color *= mix(0.9, 1.04, ashNoise);
+    float alpha = (0.22 + progress * 0.62) * edgeFade;
+    gl_FragColor = vec4(color * alpha, alpha);
+  }
+`;
+
+const createAshPreviewMaterial = (): THREE.ShaderMaterial =>
+  new THREE.ShaderMaterial({
+    vertexShader: ashPreviewVertexShader,
+    fragmentShader: ashPreviewFragmentShader,
+    uniforms: {
+      uTime: { value: 0 }
+    },
+    transparent: true,
+    premultipliedAlpha: true,
+    depthWrite: false,
+    depthTest: true,
+    polygonOffset: true,
+    polygonOffsetFactor: -1,
+    polygonOffsetUnits: -2,
+    blending: THREE.NormalBlending,
+    side: THREE.DoubleSide,
+    toneMapped: false
+  });
+
 const createRadialTexture = (size: number, stops: Array<{ stop: number; color: string }>): THREE.CanvasTexture => {
   const canvas = document.createElement("canvas");
   canvas.width = size;
@@ -306,7 +496,16 @@ export type ThreeTestFireFx = {
   dispose: () => void;
 };
 
-export const createThreeTestFireFx = (scene: THREE.Scene, camera: THREE.Camera): ThreeTestFireFx => {
+export const createThreeTestFireFx = (
+  scene: THREE.Scene,
+  camera: THREE.Camera,
+  options: ThreeTestFireFxOptions = {}
+): ThreeTestFireFx => {
+  const wallBlend = clamp(options.wallBlend ?? DEFAULT_FIRE_WALL_BLEND, 0, 1);
+  const heroVolumetricShare = clamp(options.heroVolumetricShare ?? DEFAULT_FIRE_HERO_VOLUMETRIC_SHARE, 0, 1);
+  const flameBudgetBaseScale = clamp(options.budgetScale ?? DEFAULT_FIRE_BUDGET_SCALE, 0.4, 1.25);
+  const fallbackMode: FireFxFallbackMode =
+    options.fallbackMode === "gentle" || options.fallbackMode === "off" ? options.fallbackMode : "aggressive";
   const glowTexture = createRadialTexture(96, [
     { stop: 0, color: "rgba(255, 210, 110, 0.75)" },
     { stop: 0.25, color: "rgba(255, 150, 55, 0.45)" },
@@ -319,7 +518,9 @@ export const createThreeTestFireFx = (scene: THREE.Scene, camera: THREE.Camera):
     { stop: 1, color: "rgba(0, 0, 0, 0)" }
   ]);
   const fireMaterial = createFireShaderMaterial(0, 0.78);
+  const fireCrossMaterial = createFireShaderMaterial(0, 0.42);
   const fireCoreMaterial = createFireShaderMaterial(1, 0.52);
+  const ashPreviewMaterial = createAshPreviewMaterial();
   const smokeMaterial = createSmokeShaderMaterial({
     pointScale: 240,
     // Push smoke toward a stylized white/ash look while keeping slight warm near-source tint.
@@ -357,22 +558,41 @@ export const createThreeTestFireFx = (scene: THREE.Scene, camera: THREE.Camera):
     toneMapped: false
   });
   const fireGeometry = new THREE.PlaneGeometry(1, 1);
+  const fireCrossGeometry = new THREE.PlaneGeometry(1, 1);
   const fireCoreGeometry = new THREE.PlaneGeometry(1, 1);
   const smokeBuffers = createParticleBuffers(SMOKE_MAX_INSTANCES);
+  const ashPreviewGeometry = new THREE.PlaneGeometry(1, 1);
   const groundGlowGeometry = new THREE.PlaneGeometry(1, 1);
   const emberGeometry = new THREE.PlaneGeometry(1, 1);
   fireGeometry.translate(0, 0.5, 0);
+  fireCrossGeometry.translate(0, 0.5, 0);
   fireCoreGeometry.translate(0, 0.5, 0);
+  ashPreviewGeometry.rotateX(-Math.PI / 2);
   groundGlowGeometry.rotateX(-Math.PI / 2);
   const fireIntensityAttr = new THREE.InstancedBufferAttribute(new Float32Array(FIRE_MAX_INSTANCES), 1);
   const fireSeedAttr = new THREE.InstancedBufferAttribute(new Float32Array(FIRE_MAX_INSTANCES), 1);
   const fireBaseCurveAttr = new THREE.InstancedBufferAttribute(new Float32Array(FIRE_MAX_INSTANCES), 1);
+  const fireCrossIntensityAttr = new THREE.InstancedBufferAttribute(new Float32Array(FIRE_CROSS_MAX_INSTANCES), 1);
+  const fireCrossSeedAttr = new THREE.InstancedBufferAttribute(new Float32Array(FIRE_CROSS_MAX_INSTANCES), 1);
+  const fireCrossBaseCurveAttr = new THREE.InstancedBufferAttribute(new Float32Array(FIRE_CROSS_MAX_INSTANCES), 1);
+  const ashPreviewProgressAttr = new THREE.InstancedBufferAttribute(new Float32Array(ASH_PREVIEW_MAX_INSTANCES), 1);
+  const ashPreviewSeedAttr = new THREE.InstancedBufferAttribute(new Float32Array(ASH_PREVIEW_MAX_INSTANCES), 1);
   fireIntensityAttr.setUsage(THREE.DynamicDrawUsage);
   fireSeedAttr.setUsage(THREE.DynamicDrawUsage);
   fireBaseCurveAttr.setUsage(THREE.DynamicDrawUsage);
+  fireCrossIntensityAttr.setUsage(THREE.DynamicDrawUsage);
+  fireCrossSeedAttr.setUsage(THREE.DynamicDrawUsage);
+  fireCrossBaseCurveAttr.setUsage(THREE.DynamicDrawUsage);
+  ashPreviewProgressAttr.setUsage(THREE.DynamicDrawUsage);
+  ashPreviewSeedAttr.setUsage(THREE.DynamicDrawUsage);
   fireGeometry.setAttribute("aIntensity", fireIntensityAttr);
   fireGeometry.setAttribute("aSeed", fireSeedAttr);
   fireGeometry.setAttribute("aBaseCurve", fireBaseCurveAttr);
+  fireCrossGeometry.setAttribute("aIntensity", fireCrossIntensityAttr);
+  fireCrossGeometry.setAttribute("aSeed", fireCrossSeedAttr);
+  fireCrossGeometry.setAttribute("aBaseCurve", fireCrossBaseCurveAttr);
+  ashPreviewGeometry.setAttribute("aProgress", ashPreviewProgressAttr);
+  ashPreviewGeometry.setAttribute("aSeed", ashPreviewSeedAttr);
   fireCoreGeometry.setAttribute("aIntensity", fireIntensityAttr);
   fireCoreGeometry.setAttribute("aSeed", fireSeedAttr);
   fireCoreGeometry.setAttribute("aBaseCurve", fireBaseCurveAttr);
@@ -382,12 +602,24 @@ export const createThreeTestFireFx = (scene: THREE.Scene, camera: THREE.Camera):
   fireMesh.frustumCulled = false;
   fireMesh.count = 0;
   scene.add(fireMesh);
+  const fireCrossMesh = new THREE.InstancedMesh(fireCrossGeometry, fireCrossMaterial, FIRE_CROSS_MAX_INSTANCES);
+  fireCrossMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+  fireCrossMesh.renderOrder = 6;
+  fireCrossMesh.frustumCulled = false;
+  fireCrossMesh.count = 0;
+  scene.add(fireCrossMesh);
   const fireCoreMesh = new THREE.InstancedMesh(fireCoreGeometry, fireCoreMaterial, FIRE_MAX_INSTANCES);
   fireCoreMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
   fireCoreMesh.renderOrder = 7;
   fireCoreMesh.frustumCulled = false;
   fireCoreMesh.count = 0;
   scene.add(fireCoreMesh);
+  const ashPreviewMesh = new THREE.InstancedMesh(ashPreviewGeometry, ashPreviewMaterial, ASH_PREVIEW_MAX_INSTANCES);
+  ashPreviewMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+  ashPreviewMesh.renderOrder = 5;
+  ashPreviewMesh.frustumCulled = false;
+  ashPreviewMesh.count = 0;
+  scene.add(ashPreviewMesh);
   const groundGlowMesh = new THREE.InstancedMesh(groundGlowGeometry, groundGlowMaterial, GLOW_MAX_INSTANCES);
   groundGlowMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
   groundGlowMesh.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(GLOW_MAX_INSTANCES * 3), 3);
@@ -410,13 +642,17 @@ export const createThreeTestFireFx = (scene: THREE.Scene, camera: THREE.Camera):
   scene.add(emberMesh);
 
   const fireBillboard = new THREE.Object3D();
+  const fireCrossBillboard = new THREE.Object3D();
+  const ashPreviewBillboard = new THREE.Object3D();
   const groundGlowBillboard = new THREE.Object3D();
   const emberBillboard = new THREE.Object3D();
   let previousTimeMs: number | null = null;
   let tileStateCols = 0;
   let tileStateRows = 0;
   let tileFlameVisual = new Float32Array(0);
+  let tileAshPreviewVisual = new Float32Array(0);
   let tileSmokeVisual = new Float32Array(0);
+  let tileFuelReference = new Float32Array(0);
   let tileSmokeSpawnAccum = new Float32Array(0);
   let smokeSpawnCursor = 0;
   let smokeSpawnSequence = 0;
@@ -445,12 +681,17 @@ export const createThreeTestFireFx = (scene: THREE.Scene, camera: THREE.Camera):
   let lastRebuildTimeMs = -Infinity;
   let visualsCleared = true;
   let smokeBudgetScale = 1;
+  let flameBudgetScale = 1;
   let smokeFallbackAccum = 0;
   let smokeRecoveryAccum = 0;
+  let flameFallbackAccum = 0;
+  let flameRecoveryAccum = 0;
 
   const clearVisuals = (): void => {
     fireMesh.count = 0;
+    fireCrossMesh.count = 0;
     fireCoreMesh.count = 0;
+    ashPreviewMesh.count = 0;
     groundGlowMesh.count = 0;
     smokeBuffers.geometry.setDrawRange(0, 0);
     emberMesh.count = 0;
@@ -465,7 +706,9 @@ export const createThreeTestFireFx = (scene: THREE.Scene, camera: THREE.Camera):
     tileStateCols = cols;
     tileStateRows = rows;
     tileFlameVisual = new Float32Array(count);
+    tileAshPreviewVisual = new Float32Array(count);
     tileSmokeVisual = new Float32Array(count);
+    tileFuelReference = new Float32Array(count);
     tileSmokeSpawnAccum = new Float32Array(count);
   };
 
@@ -531,6 +774,40 @@ export const createThreeTestFireFx = (scene: THREE.Scene, camera: THREE.Camera):
         smokeBudgetScale = Math.min(1, smokeBudgetScale + 0.08);
         smokeRecoveryAccum = 0;
       }
+      if (fallbackMode !== "off") {
+        const fallbackFps = fallbackMode === "gentle" ? 54 : 58;
+        const recoveryFps = fallbackMode === "gentle" ? 60 : 62;
+        const fallbackSceneMs = fallbackMode === "gentle" ? 15 : 13;
+        const recoverySceneMs = fallbackMode === "gentle" ? 11.5 : 10.5;
+        const fallbackSeconds = fallbackMode === "gentle" ? 1.7 : 0.85;
+        const recoverySeconds = fallbackMode === "gentle" ? 4.2 : 5.5;
+        const overloadedFlames = fpsEstimate < fallbackFps || sceneRenderMs > fallbackSceneMs;
+        if (overloadedFlames) {
+          flameFallbackAccum += deltaSeconds;
+        } else {
+          flameFallbackAccum = Math.max(0, flameFallbackAccum - deltaSeconds * 0.75);
+        }
+        const healthyFlames = fpsEstimate > recoveryFps && sceneRenderMs < recoverySceneMs;
+        if (healthyFlames) {
+          flameRecoveryAccum += deltaSeconds;
+        } else {
+          flameRecoveryAccum = Math.max(0, flameRecoveryAccum - deltaSeconds * 0.45);
+        }
+        if (flameFallbackAccum >= fallbackSeconds) {
+          const decay = fallbackMode === "gentle" ? 0.88 : 0.74;
+          flameBudgetScale = Math.max(FLAME_BUDGET_MIN_SCALE, flameBudgetScale * decay);
+          flameFallbackAccum = 0;
+          flameRecoveryAccum = 0;
+        } else if (flameRecoveryAccum >= recoverySeconds) {
+          const recoveryStep = fallbackMode === "gentle" ? 0.05 : 0.1;
+          flameBudgetScale = Math.min(1, flameBudgetScale + recoveryStep);
+          flameRecoveryAccum = 0;
+        }
+      } else {
+        flameBudgetScale = 1;
+        flameFallbackAccum = 0;
+        flameRecoveryAccum = 0;
+      }
     }
     const minX =
       useFireBounds || treeBounds
@@ -573,8 +850,11 @@ export const createThreeTestFireFx = (scene: THREE.Scene, camera: THREE.Camera):
     const windLeanZ = windZ * windStrength;
     const timeSeconds = time * 0.001;
     fireMaterial.uniforms.uTime.value = timeSeconds;
+    fireCrossMaterial.uniforms.uTime.value = timeSeconds;
     fireCoreMaterial.uniforms.uTime.value = timeSeconds;
+    ashPreviewMaterial.uniforms.uTime.value = timeSeconds;
     fireMaterial.uniforms.uWind.value.set(windLeanX * FLAME_WIND_GAIN, windLeanZ * FLAME_WIND_GAIN);
+    fireCrossMaterial.uniforms.uWind.value.set(windLeanX * FLAME_WIND_GAIN, windLeanZ * FLAME_WIND_GAIN);
     fireCoreMaterial.uniforms.uWind.value.set(windLeanX * FLAME_WIND_GAIN, windLeanZ * FLAME_WIND_GAIN);
     smokeMaterial.uniforms.uTime.value = timeSeconds;
     smokeMaterial.uniforms.uWarmStartY.value = -heightScale * 0.1;
@@ -584,7 +864,36 @@ export const createThreeTestFireFx = (scene: THREE.Scene, camera: THREE.Camera):
     smokeMaterial.uniforms.uZoomScale.value = zoomScale;
     camera.getWorldPosition(cameraWorldPos);
     camera.getWorldDirection(cameraForward);
+    const terrainMinX = -terrainSize.width * 0.5;
+    const terrainMaxX = terrainSize.width * 0.5;
+    const terrainMinZ = -terrainSize.depth * 0.5;
+    const terrainMaxZ = terrainSize.depth * 0.5;
+    const flameFallbackPressure = clamp(1 - flameBudgetScale, 0, 1);
+    const flameDensityScale = clamp(
+      flameBudgetBaseScale * (1 - Math.max(0, flameFallbackPressure - 0.12) * 1.05),
+      0.2,
+      1.25
+    );
+    const groundDensityScale = clamp(
+      flameBudgetBaseScale * (1 - Math.max(0, flameFallbackPressure - 0.32) * 1.25),
+      0.18,
+      1.15
+    );
+    const heroCrossDensity = clamp(
+      heroVolumetricShare * flameBudgetBaseScale * (1 - flameFallbackPressure * 1.45),
+      0,
+      1
+    );
+    const ashPreviewCap = Math.max(
+      180,
+      Math.floor(
+        ASH_PREVIEW_MAX_INSTANCES *
+          clamp(flameBudgetBaseScale * (0.72 + flameBudgetScale * 0.28), 0.45, 1)
+      )
+    );
     let fireCount = 0;
+    let fireCrossCount = 0;
+    let ashPreviewCount = 0;
     let glowCount = 0;
     let smokeCount = 0;
     let emberCount = 0;
@@ -593,18 +902,66 @@ export const createThreeTestFireFx = (scene: THREE.Scene, camera: THREE.Camera):
     const smokeRenderCap = Math.max(180, Math.floor(SMOKE_MAX_INSTANCES * smokeBudgetScale));
     const smokeRenderStride =
       smokeBudgetScale >= 0.9 ? 1 : smokeBudgetScale >= 0.7 ? 2 : smokeBudgetScale >= 0.5 ? 3 : 4;
+    let activeFlameTileCount = 0;
+    for (let y = minY; y <= maxY; y += sampleStep) {
+      const rowBase = y * cols;
+      for (let x = minX; x <= maxX; x += sampleStep) {
+        const idx = rowBase + x;
+        const fire = world.tileFire[idx] ?? 0;
+        if (fire > simFireEps) {
+          activeFlameTileCount += 1;
+          continue;
+        }
+        const heat = clamp((world.tileHeat[idx] ?? 0) / heatCap, 0, 1);
+        if (heat <= 0.08) {
+          continue;
+        }
+        const fuel = clamp(world.tileFuel[idx] ?? 0, 0, 1);
+        const isAshTile = (world.tileTypeId[idx] ?? -1) === TILE_TYPE_IDS.ash;
+        if (fuel <= TREE_BURN_CARRY_FUEL_MIN || isAshTile) {
+          continue;
+        }
+        const flameProfile: TreeFlameProfile | null = treeBurn?.getTileFlameProfile(idx) ?? null;
+        if (!flameProfile) {
+          continue;
+        }
+        const treeBurnVisual = treeBurn?.getTileBurnVisual(idx) ?? 0;
+        const burnProgress = treeBurn?.getTileBurnProgress(idx) ?? 0;
+        if (treeBurnVisual > TREE_BURN_FLAME_VISUAL_MIN && burnProgress > TREE_BURN_CARRY_PROGRESS_MIN) {
+          activeFlameTileCount += 1;
+        }
+      }
+    }
+    const perTileFlameCap =
+      activeFlameTileCount > 0
+        ? clamp(Math.floor(FIRE_MAX_INSTANCES / activeFlameTileCount), 1, FIRE_VISUAL_TUNING.tongueSpawnMax)
+        : FIRE_VISUAL_TUNING.tongueSpawnMax;
+    const guaranteedFlameInstances =
+      activeFlameTileCount > 0 ? Math.min(FIRE_MAX_INSTANCES, activeFlameTileCount * perTileFlameCap) : 0;
+    const perTileGroundCap =
+      activeFlameTileCount > 0
+        ? clamp(
+            Math.floor(Math.max(0, FIRE_MAX_INSTANCES - guaranteedFlameInstances) / activeFlameTileCount),
+            0,
+            FIRE_VISUAL_TUNING.groundFlameSpawnMax
+          )
+        : FIRE_VISUAL_TUNING.groundFlameSpawnMax;
     for (let y = minY; y <= maxY; y += sampleStep) {
       const rowBase = y * cols;
       for (let x = minX; x <= maxX; x += sampleStep) {
         const idx = rowBase + x;
         const fire = world.tileFire[idx] ?? 0;
         const heat = clamp((world.tileHeat[idx] ?? 0) / heatCap, 0, 1);
+        const fuel = clamp(world.tileFuel[idx] ?? 0, 0, 1);
+        const isAshTile = (world.tileTypeId[idx] ?? -1) === TILE_TYPE_IDS.ash;
         const flameProfile: TreeFlameProfile | null = treeBurn?.getTileFlameProfile(idx) ?? null;
         const burnProgress = treeBurn?.getTileBurnProgress(idx) ?? 0;
         const hasActiveFire = fire > simFireEps;
         const treeBurnVisual = treeBurn?.getTileBurnVisual(idx) ?? 0;
+        const hasCarryFuel = fuel > TREE_BURN_CARRY_FUEL_MIN && !isAshTile;
         const hasTreeCarryFlame =
           !hasActiveFire &&
+          hasCarryFuel &&
           flameProfile !== null &&
           treeBurnVisual > TREE_BURN_FLAME_VISUAL_MIN &&
           burnProgress > TREE_BURN_CARRY_PROGRESS_MIN &&
@@ -616,9 +973,13 @@ export const createThreeTestFireFx = (scene: THREE.Scene, camera: THREE.Camera):
             ? treeBurnVisual * 0.72
             : 0;
         const targetFlame = hasActiveFire ? clamp(Math.max(flameVisual, simFireEps * 1.1), 0, 1) : clamp(flameVisual, 0, 1);
-        const smoothedFlame = hasVisualFlame
-          ? smoothApproach(tileFlameVisual[idx] ?? 0, targetFlame, 12, 5.6, deltaSeconds)
+        const previousFlame = tileFlameVisual[idx] ?? 0;
+        let smoothedFlame = hasVisualFlame
+          ? smoothApproach(previousFlame, targetFlame, 12, 5.6, deltaSeconds)
           : 0;
+        if (hasActiveFire && previousFlame < flamePresenceEps * 0.5) {
+          smoothedFlame = Math.max(smoothedFlame, targetFlame * 0.42);
+        }
         tileFlameVisual[idx] = smoothedFlame;
         const targetSmoke = hasVisualFlame ? clamp(Math.max(targetFlame * 1.05, heat * 0.85, treeBurnVisual * 0.8), 0, 1.2) : 0;
         const smoothedSmoke = hasVisualFlame
@@ -627,6 +988,46 @@ export const createThreeTestFireFx = (scene: THREE.Scene, camera: THREE.Camera):
         tileSmokeVisual[idx] = smoothedSmoke;
         const hasFlame = smoothedFlame > flamePresenceEps;
         const hasPlume = hasFlame || (hasVisualFlame && smoothedSmoke > 0.02);
+        const typeId = world.tileTypeId[idx] ?? -1;
+        const canPreviewAsh = isAshPreviewCandidateType(typeId);
+        let targetAshPreview = 0;
+        if (canPreviewAsh) {
+          const baseFuelRef = ASH_PREVIEW_BASE_FUEL_BY_TYPE_ID[typeId] ?? 0;
+          const fallbackFuelRef = Math.max(0.01, baseFuelRef * 0.42);
+          const previousFuelRef = tileFuelReference[idx] ?? 0;
+          const nextFuelRef = Math.max(previousFuelRef, fuel, fallbackFuelRef);
+          tileFuelReference[idx] = nextFuelRef;
+          const fuelDepletion = clamp(1 - fuel / Math.max(0.01, nextFuelRef), 0, 1);
+          const heatDrive = clamp((heat - 0.04) * 1.2 + fire * 0.62 + treeBurnVisual * 0.38, 0, 1);
+          targetAshPreview = clamp(Math.max(fuelDepletion * 1.08, heatDrive * 0.82), 0, 1);
+        } else {
+          tileFuelReference[idx] = 0;
+        }
+        if (isAshTile) {
+          targetAshPreview = 0;
+        }
+        const ashPreview = smoothApproach(tileAshPreviewVisual[idx] ?? 0, targetAshPreview, 7.2, 2.9, deltaSeconds);
+        tileAshPreviewVisual[idx] = ashPreview;
+        if (ashPreview > 0.03 && ashPreviewCount < ashPreviewCap) {
+          const tileCenterXPreview = ((x + 0.5) / cols - 0.5) * terrainSize.width;
+          const tileCenterZPreview = ((y + 0.5) / rows - 0.5) * terrainSize.depth;
+          const x1 = Math.min(cols - 1, x + sampleStep);
+          const y1 = Math.min(rows - 1, y + sampleStep);
+          const rowBase1 = y1 * cols;
+          const e00 = clamp(world.tileElevation[idx] ?? 0, -1, 1);
+          const e10 = clamp(world.tileElevation[rowBase + x1] ?? e00, -1, 1);
+          const e01 = clamp(world.tileElevation[rowBase1 + x] ?? e00, -1, 1);
+          const e11 = clamp(world.tileElevation[rowBase1 + x1] ?? e00, -1, 1);
+          const groundPreviewY = Math.max(e00, e10, e01, e11) * heightScale;
+          ashPreviewBillboard.position.set(tileCenterXPreview, groundPreviewY + ASH_PREVIEW_Y_OFFSET, tileCenterZPreview);
+          ashPreviewBillboard.rotation.set(0, 0, 0);
+          ashPreviewBillboard.scale.set(tileSpanX * sampleStep * 0.96, tileSpanZ * sampleStep * 0.96, 1);
+          ashPreviewBillboard.updateMatrix();
+          ashPreviewMesh.setMatrixAt(ashPreviewCount, ashPreviewBillboard.matrix);
+          ashPreviewProgressAttr.setX(ashPreviewCount, ashPreview);
+          ashPreviewSeedAttr.setX(ashPreviewCount, hash1(idx * 0.137 + 17.3));
+          ashPreviewCount += 1;
+        }
         if (!hasPlume) {
           tileSmokeSpawnAccum[idx] = Math.max(0, (tileSmokeSpawnAccum[idx] ?? 0) - deltaSeconds * 0.6);
           continue;
@@ -648,6 +1049,14 @@ export const createThreeTestFireFx = (scene: THREE.Scene, camera: THREE.Camera):
         const trunkDescent = smoothstep(0.58, 1.0, burnProgress);
         const worldX = anchor ? clamp(anchor.x, minTileX, maxTileX) : tileCenterX;
         const worldZ = anchor ? clamp(anchor.z, minTileZ, maxTileZ) : tileCenterZ;
+        const frontSample = hasActiveFire
+          ? getNeighbourFireFront(world, cols, rows, x, y, simFireEps, windX, windZ)
+          : { centerTileX: x + 0.5, centerTileY: y + 0.5, strength: 0 };
+        const frontWorldX = (frontSample.centerTileX / cols - 0.5) * terrainSize.width;
+        const frontWorldZ = (frontSample.centerTileY / rows - 0.5) * terrainSize.depth;
+        const frontBlend = clamp(wallBlend * frontSample.strength, 0, 0.9);
+        const flameSourceX = clamp(worldX * (1 - frontBlend) + frontWorldX * frontBlend, terrainMinX, terrainMaxX);
+        const flameSourceZ = clamp(worldZ * (1 - frontBlend) + frontWorldZ * frontBlend, terrainMinZ, terrainMaxZ);
         const elevation = world.tileElevation[idx] ?? 0;
         const baseY = anchor ? anchor.y : clamp(elevation, -1, 1) * heightScale;
         const tileSeed = hash1(idx + 0.123);
@@ -671,16 +1080,22 @@ export const createThreeTestFireFx = (scene: THREE.Scene, camera: THREE.Camera):
         if (tongueDrive < 0.24 && slowFlicker < 0.42) {
           flameletCount = 0;
         }
+        flameletCount = Math.round(flameletCount * flameDensityScale);
         flameletCount = Math.max(0, Math.min(FIRE_VISUAL_TUNING.tongueSpawnMax, flameletCount));
+        flameletCount = Math.min(flameletCount, perTileFlameCap);
         if (flameletCount <= 0 && hasActiveFire && flameIntensity > Math.max(simFireEps * 0.75, FIRE_FLAME_VISUAL_FLOOR)) {
           flameletCount = 1;
         }
         const heroCount = flameletCount <= 0 ? 0 : Math.max(1, Math.min(3, Math.round(flameletCount * 0.28 + (1 - crownToTrunk) * 0.6)));
+        const heroCrossLimit = Math.min(heroCount, Math.round(heroCount * heroCrossDensity));
         const windStrengthBoost = 0.35 + windStrength * windStrength * 0.9;
         const crownRadius = flameProfile ? flameProfile.crownRadius * (0.9 + Math.min(0.5, flameProfile.treeCount * 0.08)) : tileSpan * FLAME_CELL_LATERAL_LIMIT;
         const trunkRadius = flameProfile ? Math.max(tileSpan * 0.1, crownRadius * 0.22) : tileSpan * 0.16;
         const sourceRadius = crownRadius * (1 - crownToTrunk) + trunkRadius * crownToTrunk;
-        const lateralLimit = Math.max(tileSpan * 0.1, sourceRadius * (1.1 - crownToTrunk * 0.55));
+        const lateralLimit = Math.max(
+          tileSpan * 0.1,
+          sourceRadius * (1.1 - crownToTrunk * 0.55) + sampleFootprint * (0.16 + wallBlend * frontSample.strength * 0.95)
+        );
         const crownSourceY = flameProfile ? flameProfile.y + flameProfile.crownHeight * 0.72 : baseY + tileSpan * 0.45;
         const trunkSourceY = flameProfile
           ? flameProfile.y + flameProfile.trunkHeight * (0.95 + (0.2 - 0.95) * trunkDescent)
@@ -744,11 +1159,12 @@ export const createThreeTestFireFx = (scene: THREE.Scene, camera: THREE.Camera):
           }
           lateralX = clamp(lateralX, -lateralLimit, lateralLimit);
           lateralZ = clamp(lateralZ, -lateralLimit, lateralLimit);
-          const flameWorldX = clamp(worldX + lateralX, minTileX, maxTileX);
-          const flameWorldZ = clamp(worldZ + lateralZ, minTileZ, maxTileZ);
+          const flameWorldX = clamp(flameSourceX + lateralX, terrainMinX, terrainMaxX);
+          const flameWorldZ = clamp(flameSourceZ + lateralZ, terrainMinZ, terrainMaxZ);
+          const flameYaw = Math.atan2(cameraWorldPos.x - flameWorldX, cameraWorldPos.z - flameWorldZ);
           fireBillboard.position.set(flameWorldX, flameY, flameWorldZ);
+          fireBillboard.rotation.set(0, flameYaw, 0);
           fireBillboard.scale.set(flameWidth, flameHeight, flameWidth);
-          fireBillboard.quaternion.copy(camera.quaternion);
           fireBillboard.updateMatrix();
           fireMesh.setMatrixAt(fireCount, fireBillboard.matrix);
           const stageBoost = 0.85 + (1 - crownToTrunk) * 0.2;
@@ -764,6 +1180,17 @@ export const createThreeTestFireFx = (scene: THREE.Scene, camera: THREE.Camera):
           fireBillboard.scale.set(flameWidth * 0.62, flameHeight * 0.58, flameWidth * 0.62);
           fireBillboard.updateMatrix();
           fireCoreMesh.setMatrixAt(fireCount, fireBillboard.matrix);
+          if (isHero && fireCrossCount < FIRE_CROSS_MAX_INSTANCES && flamelet < heroCrossLimit) {
+            fireCrossBillboard.position.set(flameWorldX, flameY, flameWorldZ);
+            fireCrossBillboard.rotation.set(0, flameYaw + Math.PI * 0.5, 0);
+            fireCrossBillboard.scale.set(flameWidth * 0.92, flameHeight * 0.96, flameWidth * 0.92);
+            fireCrossBillboard.updateMatrix();
+            fireCrossMesh.setMatrixAt(fireCrossCount, fireCrossBillboard.matrix);
+            fireCrossIntensityAttr.setX(fireCrossCount, flickerIntensity * 0.94);
+            fireCrossSeedAttr.setX(fireCrossCount, fract(tileSeed + s3 + flamelet * 0.19 + 0.37));
+            fireCrossBaseCurveAttr.setX(fireCrossCount, crownCurve);
+            fireCrossCount += 1;
+          }
           fireCount += 1;
         }
         }
@@ -773,10 +1200,11 @@ export const createThreeTestFireFx = (scene: THREE.Scene, camera: THREE.Camera):
         const groundCountRaw =
           FIRE_VISUAL_TUNING.groundFlameSpawnMin +
           (FIRE_VISUAL_TUNING.groundFlameSpawnMax - FIRE_VISUAL_TUNING.groundFlameSpawnMin) * clamp(groundFlameDrive, 0, 1);
-        let groundFlameCount = Math.round(groundCountRaw);
+        let groundFlameCount = Math.round(groundCountRaw * groundDensityScale);
         if (groundFlameDrive < 0.2 && slowFlicker < 0.35) {
           groundFlameCount = Math.max(0, groundFlameCount - 2);
         }
+        groundFlameCount = Math.min(groundFlameCount, perTileGroundCap);
         for (let groundFlame = 0; groundFlame < groundFlameCount && fireCount < FIRE_MAX_INSTANCES; groundFlame += 1) {
           const g1 = hash1(idx * 1.621 + groundFlame * 7.11 + 13.7);
           const g2 = hash1(idx * 0.743 + groundFlame * 9.31 + 23.1);
@@ -795,11 +1223,12 @@ export const createThreeTestFireFx = (scene: THREE.Scene, camera: THREE.Camera):
             tileSpan * (0.08 + groundFlameDrive * 0.22) * (0.6 + gFlicker * 0.7) * (0.85 + g3 * 0.4);
           const gWidth = Math.max(tileSpan * 0.06, gHeight * (0.6 + g2 * 0.3));
           const gWindLean = tileSpan * (0.015 + groundFlameDrive * 0.05 + windStrength * 0.03);
-          const groundWorldX = clamp(worldX + gX + windX * gWindLean, minTileX, maxTileX);
-          const groundWorldZ = clamp(worldZ + gZ + windZ * gWindLean, minTileZ, maxTileZ);
+          const groundWorldX = clamp(flameSourceX + gX + windX * gWindLean, terrainMinX, terrainMaxX);
+          const groundWorldZ = clamp(flameSourceZ + gZ + windZ * gWindLean, terrainMinZ, terrainMaxZ);
+          const groundYaw = Math.atan2(cameraWorldPos.x - groundWorldX, cameraWorldPos.z - groundWorldZ);
           fireBillboard.position.set(groundWorldX, baseY + gHeight * 0.42, groundWorldZ);
+          fireBillboard.rotation.set(0, groundYaw, 0);
           fireBillboard.scale.set(gWidth, gHeight, gWidth);
-          fireBillboard.quaternion.copy(camera.quaternion);
           fireBillboard.updateMatrix();
           fireMesh.setMatrixAt(fireCount, fireBillboard.matrix);
           const groundIntensity = clamp(groundFlameDrive * (0.38 + 0.38 * gFlicker), 0, 1);
@@ -1018,13 +1447,17 @@ export const createThreeTestFireFx = (scene: THREE.Scene, camera: THREE.Camera):
       smokeBuffers.aSize[writeIndex] = smokeParticleBaseSize[i] * (1.2 + smokeParticleAge[i] * 3.35);
     }
     fireMesh.count = fireCount;
+    fireCrossMesh.count = fireCrossCount;
     fireCoreMesh.count = fireCount;
+    ashPreviewMesh.count = ashPreviewCount;
     groundGlowMesh.count = glowCount;
     smokeBuffers.geometry.setDrawRange(0, smokeCount);
     emberMesh.count = emberCount;
     visualsCleared = false;
     fireMesh.instanceMatrix.needsUpdate = true;
+    fireCrossMesh.instanceMatrix.needsUpdate = true;
     fireCoreMesh.instanceMatrix.needsUpdate = true;
+    ashPreviewMesh.instanceMatrix.needsUpdate = true;
     groundGlowMesh.instanceMatrix.needsUpdate = true;
     emberMesh.instanceMatrix.needsUpdate = true;
     smokeBuffers.positionAttr.needsUpdate = true;
@@ -1036,6 +1469,11 @@ export const createThreeTestFireFx = (scene: THREE.Scene, camera: THREE.Camera):
     fireIntensityAttr.needsUpdate = true;
     fireSeedAttr.needsUpdate = true;
     fireBaseCurveAttr.needsUpdate = true;
+    fireCrossIntensityAttr.needsUpdate = true;
+    fireCrossSeedAttr.needsUpdate = true;
+    fireCrossBaseCurveAttr.needsUpdate = true;
+    ashPreviewProgressAttr.needsUpdate = true;
+    ashPreviewSeedAttr.needsUpdate = true;
     if (groundGlowMesh.instanceColor) {
       groundGlowMesh.instanceColor.needsUpdate = true;
     }
@@ -1046,17 +1484,23 @@ export const createThreeTestFireFx = (scene: THREE.Scene, camera: THREE.Camera):
 
   const dispose = (): void => {
     scene.remove(fireMesh);
+    scene.remove(fireCrossMesh);
     scene.remove(fireCoreMesh);
+    scene.remove(ashPreviewMesh);
     scene.remove(groundGlowMesh);
     scene.remove(smokePoints);
     scene.remove(emberMesh);
     fireGeometry.dispose();
+    fireCrossGeometry.dispose();
     fireCoreGeometry.dispose();
+    ashPreviewGeometry.dispose();
     groundGlowGeometry.dispose();
     smokeBuffers.geometry.dispose();
     emberGeometry.dispose();
     fireMaterial.dispose();
+    fireCrossMaterial.dispose();
     fireCoreMaterial.dispose();
+    ashPreviewMaterial.dispose();
     groundGlowMaterial.dispose();
     smokeMaterial.dispose();
     emberMaterial.dispose();

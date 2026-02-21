@@ -89,7 +89,7 @@ export const createAppRuntime = (): AppRuntime => {
   const threeTestDprCap = (() => {
     const raw = Number(params.get("dpr"));
     if (!Number.isFinite(raw)) {
-      return 2;
+      return 1.5;
     }
     return Math.max(0.5, Math.min(4, raw));
   })();
@@ -155,6 +155,8 @@ export const createAppRuntime = (): AppRuntime => {
   };
   const phaseUiRoot = document.getElementById("phaseUI") as HTMLDivElement | null;
   const phaseUi = phaseUiRoot ? initPhaseUI(phaseUiRoot) : null;
+  const phaseUiOriginalParent = phaseUiRoot?.parentNode ?? null;
+  const phaseUiOriginalNextSibling = phaseUiRoot?.nextSibling ?? null;
   const overlayRefs = getOverlayRefs();
   buildMapGenControls();
   const characterScreen = document.getElementById("characterScreen") as HTMLDivElement;
@@ -165,6 +167,7 @@ export const createAppRuntime = (): AppRuntime => {
   const mapgenProgressBar = document.getElementById("mapgenProgressBar") as HTMLDivElement | null;
   const mapgenPercent = document.getElementById("mapgenPercent") as HTMLDivElement | null;
   const threeTestOverlay = document.getElementById("threeTestOverlay") as HTMLDivElement | null;
+  const threeTestPhaseHudMount = document.getElementById("threeTestPhaseHudMount") as HTMLDivElement | null;
   const threeTestCanvas = document.getElementById("threeTestCanvas") as HTMLCanvasElement | null;
   const threeTestCloseButton = document.getElementById("threeTestClose") as HTMLButtonElement | null;
   const threeTestEndRunButton = document.getElementById("threeTestEndRun") as HTMLButtonElement | null;
@@ -259,6 +262,7 @@ export const createAppRuntime = (): AppRuntime => {
   let lastThreeTestUiSeasonT01 = Number.NaN;
   let lastThreeTestUiSeasonMode = "";
   let lastThreeTestTerrainTypeRevision = -1;
+  let lastThreeTestStructureRevision = -1;
   let lastThreeTestDebugTypeColors = false;
   let cachedThreeTestTreeTypeMap: Uint8Array | null = null;
   let savedThreeTestSmokeRate: number | null = null;
@@ -554,9 +558,11 @@ export const createAppRuntime = (): AppRuntime => {
     return sample;
   };
   
-  const THREE_TEST_TERRAIN_COOLDOWN_MS = 1200;
-  const THREE_TEST_TERRAIN_COOLDOWN_ACTIVE_FIRE_MS = 750;
+  const THREE_TEST_TERRAIN_COOLDOWN_MS = 600;
+  const THREE_TEST_TERRAIN_COOLDOWN_ACTIVE_FIRE_MS = 90;
   let lastThreeTestTerrainSync = 0;
+  const hasActiveFireTerrainPressure = (): boolean =>
+    state.phase === "fire" || state.lastActiveFires > 0 || state.fireBoundsActive;
   
   const syncThreeTestTerrain = (
     force = false,
@@ -572,23 +578,26 @@ export const createAppRuntime = (): AppRuntime => {
         return;
       }
       const nextTypeRevision = state.terrainTypeRevision;
+      const nextStructureRevision = state.structureRevision;
       const debugChanged = lastThreeTestDebugTypeColors !== inputState.debugTypeColors;
-      if (!force && !debugChanged && nextTypeRevision === lastThreeTestTerrainTypeRevision) {
+      const structuresChanged = nextStructureRevision !== lastThreeTestStructureRevision;
+      if (!force && !debugChanged && !structuresChanged && nextTypeRevision === lastThreeTestTerrainTypeRevision) {
         state.terrainDirty = false;
         return;
       }
       const now = performance.now();
       const cooldownMs =
-        !force && state.lastActiveFires > 0
+        hasActiveFireTerrainPressure()
           ? THREE_TEST_TERRAIN_COOLDOWN_ACTIVE_FIRE_MS
           : THREE_TEST_TERRAIN_COOLDOWN_MS;
-      if (!force && now - lastThreeTestTerrainSync < cooldownMs) {
+      if (!force && !structuresChanged && now - lastThreeTestTerrainSync < cooldownMs) {
         return;
       }
       lastThreeTestTerrainSync = now;
       ensureTileSoA(state);
       threeTestController.setTerrain(buildThreeTestSample(!force));
       lastThreeTestTerrainTypeRevision = nextTypeRevision;
+      lastThreeTestStructureRevision = nextStructureRevision;
       lastThreeTestDebugTypeColors = inputState.debugTypeColors;
       state.terrainDirty = false;
     } finally {
@@ -695,12 +704,44 @@ export const createAppRuntime = (): AppRuntime => {
   const handleThreeResize = (): void => {
     threeTestController?.resize();
   };
+
+  const mountPhaseUiIntoThreeTest = (): void => {
+    if (!phaseUiRoot || !threeTestPhaseHudMount) {
+      return;
+    }
+    phaseUiRoot.classList.remove("hidden");
+    phaseUiRoot.classList.add("phase-ui-root--three-test");
+    phaseUi?.state.setBaseOpsOpen(true);
+    if (phaseUiRoot.parentNode !== threeTestPhaseHudMount) {
+      threeTestPhaseHudMount.appendChild(phaseUiRoot);
+    }
+  };
+
+  const restorePhaseUiMount = (): void => {
+    if (!phaseUiRoot || !phaseUiOriginalParent) {
+      return;
+    }
+    phaseUiRoot.classList.remove("phase-ui-root--three-test");
+    if (phaseUiRoot.parentNode === phaseUiOriginalParent) {
+      return;
+    }
+    if (phaseUiOriginalNextSibling && phaseUiOriginalNextSibling.parentNode === phaseUiOriginalParent) {
+      phaseUiOriginalParent.insertBefore(phaseUiRoot, phaseUiOriginalNextSibling);
+      return;
+    }
+    phaseUiOriginalParent.appendChild(phaseUiRoot);
+  };
   
   const setThreeTestVisible = (visible: boolean): void => {
     if (!threeTestOverlay) {
       return;
     }
     setRenderMode(visible ? "3d" : "2d");
+    if (visible) {
+      mountPhaseUiIntoThreeTest();
+    } else {
+      restorePhaseUiMount();
+    }
     threeTestOverlay.classList.toggle("hidden", !visible);
     threeTestOverlay.setAttribute("aria-hidden", visible ? "false" : "true");
   };
@@ -790,7 +831,7 @@ export const createAppRuntime = (): AppRuntime => {
     effectsState.smokeParticles.length = 0;
     effectsState.waterParticles.length = 0;
     if (!threeTestController) {
-      threeTestController = createThreeTest(threeTestCanvas, asRenderSim(state), inputState);
+      threeTestController = createThreeTest(threeTestCanvas, asRenderSim(state), inputState, effectsState);
     }
     if (threeTestController) {
       threeTestController.setClimateForecast(null, 0, 0, 0, null);
@@ -803,6 +844,7 @@ export const createAppRuntime = (): AppRuntime => {
     lastThreeTestUiSeasonT01 = Number.NaN;
     lastThreeTestUiSeasonMode = "";
     lastThreeTestTerrainTypeRevision = -1;
+    lastThreeTestStructureRevision = -1;
     lastThreeTestDebugTypeColors = inputState.debugTypeColors;
     cachedThreeTestTreeTypeMap = null;
     updateThreeTestSeasonUi(threeTestManualSeasonT01, threeTestSeasonMode);
@@ -1134,6 +1176,9 @@ export const createAppRuntime = (): AppRuntime => {
         return performance.now() - simStartedAt;
       },
       onThreeTestFrame: () => {
+        const uiStartedAt = performance.now();
+        phaseUi?.sync(state, inputState);
+        recordPerfSample("3d.phaseUi", performance.now() - uiStartedAt);
         const controller = threeTestController;
         if (state.gameOver) {
           closeThreeTest();
@@ -1142,10 +1187,11 @@ export const createAppRuntime = (): AppRuntime => {
           syncThreeTestClimateVisuals();
         }
         if (controller && state.terrainDirty) {
+          const activeFireTerrainPressure = hasActiveFireTerrainPressure();
           if (threeTestNoTerrainSync) {
             state.terrainDirty = false;
             recordPerfSample("3d.terrainDeferred", 0);
-          } else if (controller.isCameraInteracting()) {
+          } else if (controller.isCameraInteracting() && !activeFireTerrainPressure) {
             recordPerfSample("3d.terrainDeferred", 1);
           } else {
             syncThreeTestTerrain();

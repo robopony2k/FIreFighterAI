@@ -6,6 +6,7 @@ import type {
   FireSettings,
   Grid,
   Point,
+  Town,
   SeasonPhase,
   Tile,
   Unit,
@@ -129,6 +130,8 @@ export interface WorldState {
   tileRiverSurface: Float32Array;
   tileRiverStepStrength: Float32Array;
   structureMask: Uint8Array;
+  tileTownId: Int16Array;
+  tileStructure: Uint8Array;
   igniteMask: Uint8Array;
   tileSoaDirty: boolean;
   neighborOffsets4: Int32Array;
@@ -147,8 +150,12 @@ export interface WorldState {
 
   terrainDirty: boolean;
   terrainTypeRevision: number;
+  structureRevision: number;
 
   basePoint: Point;
+  towns: Town[];
+  townGrowthAppliedYear: number;
+  townAlertDayAccumulator: number;
 
   seed: number;
   fireSettings: FireSettings;
@@ -336,6 +343,8 @@ export function createInitialState(seed: number, grid: Grid): WorldState {
     tileRiverSurface: new Float32Array(grid.totalTiles).fill(Number.NaN),
     tileRiverStepStrength: new Float32Array(grid.totalTiles),
     structureMask: new Uint8Array(grid.totalTiles),
+    tileTownId: new Int16Array(grid.totalTiles).fill(-1),
+    tileStructure: new Uint8Array(grid.totalTiles),
 
     tileSoaDirty: true,
 
@@ -385,8 +394,12 @@ export function createInitialState(seed: number, grid: Grid): WorldState {
 
     terrainDirty: true,
     terrainTypeRevision: 0,
+    structureRevision: 0,
 
     basePoint: { x: 0, y: 0 },
+    towns: [],
+    townGrowthAppliedYear: -1,
+    townAlertDayAccumulator: 0,
 
     seed,
     fireSettings: { ...DEFAULT_FIRE_SETTINGS },
@@ -412,7 +425,7 @@ export function createInitialState(seed: number, grid: Grid): WorldState {
 
     selectedUnitIds: [],
 
-    timeSpeedIndex: 0,
+    timeSpeedIndex: 1,
 
     year: 1,
 
@@ -530,7 +543,12 @@ export function syncTileSoA(state: WorldState): void {
 
   const total = state.grid.totalTiles;
 
-  if (state.tileFire.length !== total || state.tileRoadBridge.length !== total) {
+  if (
+    state.tileFire.length !== total ||
+    state.tileRoadBridge.length !== total ||
+    state.tileTownId.length !== total ||
+    state.tileStructure.length !== total
+  ) {
 
     state.tileFire = new Float32Array(total);
 
@@ -555,6 +573,8 @@ export function syncTileSoA(state: WorldState): void {
     state.tileRiverSurface = new Float32Array(total).fill(Number.NaN);
     state.tileRiverStepStrength = new Float32Array(total);
     state.structureMask = new Uint8Array(total);
+    state.tileTownId = new Int16Array(total).fill(-1);
+    state.tileStructure = new Uint8Array(total);
     state.heatBuffer = new Float32Array(total);
     state.fireSnapshot = new Float32Array(total);
     state.igniteBuffer = new Int32Array(total);

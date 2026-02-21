@@ -98,6 +98,46 @@ const analyzeForestPatches = (state) => {
   };
 };
 
+const analyzeRiverConnectivity = (state) => {
+  const { cols, rows, totalTiles } = state.grid;
+  const riverMask = state.tileRiverMask;
+  let riverCells = 0;
+  let diagOnlyLinks = 0;
+  let isolatedCells = 0;
+  let orthConnectedCells = 0;
+  const hasRiver = (x, y) => x >= 0 && y >= 0 && x < cols && y < rows && riverMask[y * cols + x] > 0;
+  for (let i = 0; i < totalTiles; i += 1) {
+    if (!(riverMask[i] > 0)) {
+      continue;
+    }
+    riverCells += 1;
+    const x = i % cols;
+    const y = Math.floor(i / cols);
+    const orthCount =
+      (hasRiver(x - 1, y) ? 1 : 0) +
+      (hasRiver(x + 1, y) ? 1 : 0) +
+      (hasRiver(x, y - 1) ? 1 : 0) +
+      (hasRiver(x, y + 1) ? 1 : 0);
+    const diagCount =
+      (hasRiver(x - 1, y - 1) ? 1 : 0) +
+      (hasRiver(x + 1, y - 1) ? 1 : 0) +
+      (hasRiver(x - 1, y + 1) ? 1 : 0) +
+      (hasRiver(x + 1, y + 1) ? 1 : 0);
+    if (orthCount > 0) {
+      orthConnectedCells += 1;
+    } else if (diagCount > 0) {
+      diagOnlyLinks += 1;
+    } else {
+      isolatedCells += 1;
+    }
+  }
+  return {
+    riverDiagOnlyLinks: diagOnlyLinks,
+    riverIsolatedCells: isolatedCells,
+    riverOrthConnectivityRatio: Number((riverCells > 0 ? orthConnectedCells / riverCells : 1).toFixed(4))
+  };
+};
+
 const runCase = async (sizeId, seed) => {
   const grid = createGrid(sizeId);
   const state = createInitialState(seed, grid);
@@ -148,6 +188,7 @@ const runCase = async (sizeId, seed) => {
   }
   const total = Math.max(1, state.tiles.length);
   const patchMetrics = analyzeForestPatches(state);
+  const riverMetrics = analyzeRiverConnectivity(state);
   const biomeSpreadMs = phaseTimingsMs["biome:spread"] ?? 0;
   const biomeClassifyMs = phaseTimingsMs["biome:classify"] ?? 0;
   return {
@@ -164,7 +205,8 @@ const runCase = async (sizeId, seed) => {
     riverCount: river,
     phaseTimingsMs,
     biomeSpreadClassifyMs: Number((biomeSpreadMs + biomeClassifyMs).toFixed(2)),
-    ...patchMetrics
+    ...patchMetrics,
+    ...riverMetrics
   };
 };
 
@@ -175,7 +217,7 @@ const runAll = async () => {
       const metrics = await runCase(sizeId, seed);
       results.push(metrics);
       console.log(
-        `[mapgen] size=${metrics.sizeId} seed=${metrics.seed} ms=${metrics.durationMs.toFixed(2)} biome=${metrics.biomeSpreadClassifyMs.toFixed(2)}ms water=${metrics.waterPct.toFixed(2)}% forest=${metrics.forestPct.toFixed(2)}% patches=${metrics.forestPatchCount} meanPatch=${metrics.forestPatchMean} p95Patch=${metrics.forestPatchP95} houses=${metrics.houseCount} roads=${metrics.roadCount} rivers=${metrics.riverCount}`
+        `[mapgen] size=${metrics.sizeId} seed=${metrics.seed} ms=${metrics.durationMs.toFixed(2)} biome=${metrics.biomeSpreadClassifyMs.toFixed(2)}ms water=${metrics.waterPct.toFixed(2)}% forest=${metrics.forestPct.toFixed(2)}% patches=${metrics.forestPatchCount} meanPatch=${metrics.forestPatchMean} p95Patch=${metrics.forestPatchP95} houses=${metrics.houseCount} roads=${metrics.roadCount} rivers=${metrics.riverCount} riverDiagOnly=${metrics.riverDiagOnlyLinks} riverIso=${metrics.riverIsolatedCells} riverOrthRatio=${metrics.riverOrthConnectivityRatio.toFixed(4)}`
       );
     }
   }
@@ -184,27 +226,44 @@ const runAll = async () => {
 
 const compareAgainstBaseline = async (results) => {
   let baselineRaw = null;
+  let hasBaseline = true;
   try {
     baselineRaw = await readFile(baselinePath, "utf8");
   } catch {
-    console.warn("[mapgen] baseline file missing; skipping comparison.");
-    return;
+    console.warn("[mapgen] baseline file missing; skipping water-drift comparison.");
+    hasBaseline = false;
   }
-  const baseline = JSON.parse(baselineRaw);
+  const baseline = hasBaseline && baselineRaw ? JSON.parse(baselineRaw) : { entries: [] };
   const entries = baseline?.entries ?? [];
   const index = new Map(entries.map((entry) => [`${entry.sizeId}:${entry.seed}`, entry]));
   let failures = 0;
   for (const result of results) {
     const key = `${result.sizeId}:${result.seed}`;
-    const expected = index.get(key);
-    if (!expected) {
-      console.warn(`[mapgen] no baseline entry for ${key}`);
-      continue;
-    }
-    const drift = Math.abs(result.waterPct - expected.waterPct);
-    if (drift > 8) {
+    if (result.riverDiagOnlyLinks !== 0) {
       failures += 1;
-      console.error(`[mapgen] water drift too high for ${key}: ${drift.toFixed(2)}%`);
+      console.error(`[mapgen] diagonal-only river links present for ${key}: ${result.riverDiagOnlyLinks}`);
+    }
+    if (result.riverIsolatedCells !== 0) {
+      failures += 1;
+      console.error(`[mapgen] isolated river cells present for ${key}: ${result.riverIsolatedCells}`);
+    }
+    if (result.riverOrthConnectivityRatio < 0.995) {
+      failures += 1;
+      console.error(
+        `[mapgen] orthogonal river connectivity too low for ${key}: ${result.riverOrthConnectivityRatio.toFixed(4)}`
+      );
+    }
+    if (hasBaseline) {
+      const expected = index.get(key);
+      if (!expected) {
+        console.warn(`[mapgen] no baseline entry for ${key}`);
+      } else {
+        const drift = Math.abs(result.waterPct - expected.waterPct);
+        if (drift > 8) {
+          failures += 1;
+          console.error(`[mapgen] water drift too high for ${key}: ${drift.toFixed(2)}%`);
+        }
+      }
     }
   }
   if (failures > 0) {

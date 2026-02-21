@@ -5,6 +5,7 @@ import { indexFor } from "../core/grid.js";
 import { ensureTileSoA } from "../core/tileCache.js";
 import { getFuelProfiles } from "../core/tiles.js";
 import { TILE_TYPE_IDS } from "../core/state.js";
+import { destroyHouse } from "../core/towns.js";
 import { emitSmokeAt } from "./particles.js";
 import type { EffectsState } from "../core/effectsState.js";
 import { resetFireBounds } from "./fire/bounds.js";
@@ -492,6 +493,10 @@ export function stepFire(state, effects: EffectsState, rng, delta, spreadScale, 
                     if (fuelValue <= 0.02 && tid !== TILE_TYPE_IDS.ash) {
                         const tile = state.tiles[idx];
                         if (tile.type === "house" && !tile.houseDestroyed) {
+                            if (!destroyHouse(state, idx)) {
+                                state.totalPropertyValue = Math.max(0, state.totalPropertyValue - Math.max(0, tile.houseValue));
+                                state.totalPopulation = Math.max(0, state.totalPopulation - Math.max(0, tile.houseResidents));
+                            }
                             tile.houseDestroyed = true;
                             state.destroyedHouses += 1;
                             state.lostPropertyValue += tile.houseValue;

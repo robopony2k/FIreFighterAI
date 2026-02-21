@@ -2,6 +2,7 @@ import * as THREE from "three";
 import {
   DEBUG_TERRAIN_RENDER,
   ENABLE_GRASS_DETAIL_FX,
+  FUEL_PROFILES,
   HEIGHT_MAP_RATIO,
   HEIGHT_SCALE,
   TILE_COLOR_RGB,
@@ -9,7 +10,7 @@ import {
 } from "../core/config.js";
 import { HOUSE_VARIANTS } from "../core/buildingFootprints.js";
 import { TILE_ID_TO_TYPE, TILE_TYPE_IDS } from "../core/state.js";
-import { TreeType, TREE_TYPE_IDS } from "../core/types.js";
+import { TreeType, TREE_TYPE_IDS, type Town } from "../core/types.js";
 import type { WorldState } from "../core/state.js";
 import type { FirestationAsset, HouseAssets, HouseVariant, TreeAssets, TreeMeshTemplate, TreeVariant } from "./threeTestAssets.js";
 import { TREE_MODEL_PATHS } from "./threeTestAssets.js";
@@ -34,6 +35,9 @@ export type TerrainSample = {
   fastUpdate?: boolean;
   fullResolution?: boolean;
   worldSeed?: number;
+  towns?: Town[];
+  structureRevision?: number;
+  dynamicStructures?: boolean;
 };
 
 export type TreeSeasonVisualConfig = {
@@ -207,12 +211,12 @@ const OCEAN_SAMPLE_SUPPORT_FLOOR = 0.12;
 const WATER_ALPHA_POWER = 0.85;
 const SHORE_SDF_MAX_DISTANCE = 7;
 const RIVER_BANK_MAX_DISTANCE = 5;
-const WATERFALL_MAX_INSTANCES = 64;
+const WATERFALL_MAX_INSTANCES = 96;
 const WATERFALL_MIN_DROP_NORM = 0.006;
-const WATERFALL_MIN_RIVER_RATIO = 0.38;
+const WATERFALL_MIN_RIVER_RATIO = 0.28;
 const WATERFALL_MAX_DROP = 1.6;
 const WATERFALL_MAX_OCEAN_RATIO = 0.08;
-const WATERFALL_MIN_STEP_STRENGTH = 0.16;
+const WATERFALL_MIN_STEP_STRENGTH = 0.12;
 const WATER_SURFACE_LIFT_OCEAN = 0.08;
 const WATER_SURFACE_LIFT_RIVER = 0.012;
 const RIVER_SURFACE_BANK_CLEARANCE = 0.02;
@@ -223,15 +227,34 @@ const RIVER_STEP_BLEND_BLOCK_THRESHOLD = 0.26;
 const RIVER_MIN_VISUAL_WIDTH_CELLS = 1.35;
 const RIVER_DIAGONAL_FILL_MAX_ADDS_PER_CELL = 1;
 const RIVER_WIDTH_EXPAND_MAX_PASSES = 1;
-const BANK_INSET = 0.01;
+const RIVER_FIELD_THRESHOLD = 0.5;
+const RIVER_VERTEX_FIELD_BLUR_BLEND = 0;
+const RIVER_CUTOUT_FIELD_DILATE = 0;
+const BANK_INSET = 0.004;
 const WALL_MIN_HEIGHT = 0.02;
 const WALL_RISE_GUARD = 0.001;
 const WALL_BANK_OVERLAP = 0.012;
+const WALL_TOP_OVERLAP = 0.0035;
+const WALL_TOP_MAX_UNDERCUT = 0.0004;
+const RIVER_EDGE_SURFACE_UNDERSHOOT = 0.002;
+const WATERFALL_ANCHOR_ERR_WARN = 0.03;
+const WALL_TOP_GAP_WARN = 0.05;
 const STEP_ROCKY_TINT_MAX = 0.28;
 const TREE_SCALE_BASE = 0.75;
 const TREE_SCALE_STEP_GAIN = 0.06;
 const TREE_SCALE_STEP_CAP = 0.4;
 const TREE_HEIGHT_FACTOR = 1.8;
+const MEDIUM_TERRAIN_DETAIL_THRESHOLD = 256;
+const LARGE_TERRAIN_DETAIL_THRESHOLD = 512;
+const TREE_DENSITY_SCALE_MEDIUM = 0.8;
+const TREE_DENSITY_SCALE_LARGE = 0.62;
+const TREE_ATTEMPT_CAP_MEDIUM = 2;
+const TREE_ATTEMPT_CAP_LARGE = 1;
+const TREE_VARIANT_CAP_MEDIUM = 2;
+const TREE_VARIANT_CAP_LARGE = 1;
+const TREE_INSTANCE_BUDGET_MEDIUM = 28000;
+const TREE_INSTANCE_BUDGET_LARGE = 18000;
+const DETAILED_STRUCTURE_THRESHOLD = 512;
 const SCRUB_PLACEHOLDER_BASE_CHANCE = 0.42;
 const SCRUB_PLACEHOLDER_MAX_INSTANCES = 30000;
 const SCRUB_PLACEHOLDER_SCALE_MIN = 0.55;
@@ -240,16 +263,25 @@ const TREE_BURN_UPDATE_INTERVAL_MS = 120;
 const TREE_BURN_FUEL_EPS = 0.02;
 const TREE_BURN_FIRE_BOUNDS_PADDING = 2;
 const TREE_BURN_VISIBLE_EPS = 0.004;
-const TREE_BURN_PROGRESS_PER_SECOND = 0.22;
+const TREE_BURN_PROGRESS_PER_SECOND = 0.12;
 const TREE_BURN_RECOVERY_PER_SECOND = 0.08;
+const TREE_BURN_ASH_CATCHUP_PER_SECOND = 1.85;
 const TREE_BURN_POST_FIRE_TAIL_MS = 8000;
 const TREE_BURN_ACTIVE_FIRE_EPS = 0.015;
 const TREE_BURN_ACTIVE_HEAT_EPS = 0.12;
+const TREE_BURN_CARRY_HEAT_EPS = 0.08;
 const TREE_BURN_VISUAL_EPS = 0.06;
+const TREE_BURN_FUEL_GAUGE_START = 0.16;
+const TREE_BURN_FUEL_GAUGE_END = 0.95;
+const TREE_BURN_EMBER_TAIL_START = 0.58;
+const TREE_BURN_EMBER_TAIL_END = 0.98;
 const TREE_BURN_LEAF_PIVOT_HEIGHT_FACTOR = 0.72;
 const TREE_BURN_MIXED_PIVOT_HEIGHT_FACTOR = 0.46;
 const TREE_BURN_TRUNK_PIVOT_HEIGHT_FACTOR = 0.06;
 const TREE_LEAF_DROP_BIAS_MAX = 0.22;
+const TOWN_LABEL_SCREEN_HEIGHT = 0.025;
+const TOWN_LABEL_LIFT_METERS = 100;
+const ENABLE_TOWN_LABEL_SPRITES = false;
 export const ROAD_SURFACE_WIDTH = 0.5;
 const ROAD_SURFACE_OFFSET = 0.001;
 export const ROAD_TEX_SCALE = 12;
@@ -298,6 +330,9 @@ const WET_TINT_BY_TILE: Record<number, [number, number, number]> = {
   [TILE_TYPE_IDS.floodplain]: [0.48, 0.6, 0.4],
   [TILE_TYPE_IDS.forest]: [0.33, 0.46, 0.31]
 };
+const SCORCH_WARM_TINT: [number, number, number] = [0.34, 0.25, 0.16];
+const SCORCH_CHAR_TINT: [number, number, number] = [0.19, 0.18, 0.17];
+const BASE_FUEL_BY_TILE_ID = TILE_ID_TO_TYPE.map((tileType) => Math.max(0, FUEL_PROFILES[tileType]?.baseFuel ?? 0));
 
 let threeTestLoggedTotal = -1;
 
@@ -392,6 +427,7 @@ export type RiverWaterData = {
   wallIndices?: Uint32Array;
   bankDist: Float32Array;
   flowDir: Float32Array;
+  flowSpeed: Float32Array;
   rapid: Float32Array;
   supportMap: THREE.DataTexture;
   flowMap: THREE.DataTexture;
@@ -469,6 +505,10 @@ type RiverDomainDebugStats = {
   boundaryMismatchMax: number;
   wallQuadCount: number;
   protrudingVertexRatio: number;
+  waterfallAnchorErrorMean: number;
+  waterfallAnchorErrorMax: number;
+  wallTopGapMean: number;
+  wallTopGapMax: number;
 };
 
 type RiverRenderDomain = {
@@ -504,6 +544,7 @@ type RoadAtlas = {
 let roadAtlasCache: RoadAtlas | null = null;
 let roadAtlasLoading = false;
 let roadAtlasVersion = 0;
+const townLabelMaterialCache = new Map<string, { material: THREE.SpriteMaterial; aspect: number }>();
 
 export const getRoadAtlasVersion = (): number => roadAtlasVersion;
 
@@ -574,6 +615,130 @@ const smoothstep = (edge0: number, edge1: number, x: number): number => {
   }
   const t = clamp((x - edge0) / (edge1 - edge0), 0, 1);
   return t * t * (3 - 2 * t);
+};
+
+const drawRoundedRect = (
+  context: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+  radius: number
+): void => {
+  const r = Math.min(radius, width * 0.5, height * 0.5);
+  context.beginPath();
+  context.moveTo(x + r, y);
+  context.lineTo(x + width - r, y);
+  context.quadraticCurveTo(x + width, y, x + width, y + r);
+  context.lineTo(x + width, y + height - r);
+  context.quadraticCurveTo(x + width, y + height, x + width - r, y + height);
+  context.lineTo(x + r, y + height);
+  context.quadraticCurveTo(x, y + height, x, y + height - r);
+  context.lineTo(x, y + r);
+  context.quadraticCurveTo(x, y, x + r, y);
+  context.closePath();
+};
+
+const getTownLabelMaterial = (name: string): { material: THREE.SpriteMaterial; aspect: number } => {
+  const normalizedName = name.trim();
+  const cached = townLabelMaterialCache.get(normalizedName);
+  if (cached) {
+    return cached;
+  }
+  if (typeof document === "undefined") {
+    const fallbackMaterial = new THREE.SpriteMaterial({
+      color: 0xf3dfb8,
+      transparent: true,
+      sizeAttenuation: false,
+      depthTest: false,
+      depthWrite: false
+    });
+    fallbackMaterial.toneMapped = false;
+    const fallback = { material: fallbackMaterial, aspect: 1.8 };
+    townLabelMaterialCache.set(normalizedName, fallback);
+    return fallback;
+  }
+  const canvas = document.createElement("canvas");
+  const context = canvas.getContext("2d");
+  if (!context) {
+    const fallbackMaterial = new THREE.SpriteMaterial({
+      color: 0xf3dfb8,
+      transparent: true,
+      sizeAttenuation: false,
+      depthTest: false,
+      depthWrite: false
+    });
+    fallbackMaterial.toneMapped = false;
+    const fallback = { material: fallbackMaterial, aspect: 1.8 };
+    townLabelMaterialCache.set(normalizedName, fallback);
+    return fallback;
+  }
+  const fontPx = 52;
+  const paddingX = 54;
+  const paddingY = 24;
+  const strokeWidth = 4;
+  const pixelRatio = 2;
+  const font = `700 ${fontPx}px "Trebuchet MS", "Segoe UI", sans-serif`;
+  context.font = font;
+  const measuredWidth = Math.ceil(context.measureText(normalizedName).width);
+  const layoutWidth = Math.max(280, measuredWidth + paddingX * 2);
+  const layoutHeight = fontPx + paddingY * 2;
+  canvas.width = layoutWidth * pixelRatio;
+  canvas.height = layoutHeight * pixelRatio;
+  context.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
+  context.clearRect(0, 0, layoutWidth, layoutHeight);
+  drawRoundedRect(context, strokeWidth * 0.5, strokeWidth * 0.5, layoutWidth - strokeWidth, layoutHeight - strokeWidth, 18);
+  context.fillStyle = "rgba(33, 25, 18, 0.78)";
+  context.fill();
+  context.strokeStyle = "rgba(255, 231, 176, 0.95)";
+  context.lineWidth = strokeWidth;
+  context.stroke();
+  context.font = font;
+  context.textAlign = "center";
+  context.textBaseline = "middle";
+  context.fillStyle = "#fff3d5";
+  context.fillText(normalizedName, layoutWidth * 0.5, layoutHeight * 0.53);
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  texture.minFilter = THREE.LinearFilter;
+  texture.magFilter = THREE.LinearFilter;
+  texture.generateMipmaps = false;
+  texture.needsUpdate = true;
+  const material = new THREE.SpriteMaterial({
+    map: texture,
+    transparent: true,
+    sizeAttenuation: false,
+    depthTest: false,
+    depthWrite: false
+  });
+  material.toneMapped = false;
+  const created = { material, aspect: layoutWidth / layoutHeight };
+  townLabelMaterialCache.set(normalizedName, created);
+  return created;
+};
+
+const createTownLabelSprite = (
+  town: Town,
+  width: number,
+  depth: number,
+  cols: number,
+  rows: number,
+  heightScale: number,
+  heightAtTile: (tileX: number, tileY: number) => number
+): THREE.Sprite | null => {
+  const tileX = clamp(Math.floor(town.x), 0, cols - 1);
+  const tileY = clamp(Math.floor(town.y), 0, rows - 1);
+  const worldX = ((tileX + 0.5) / Math.max(1, cols) - 0.5) * width;
+  const worldZ = ((tileY + 0.5) / Math.max(1, rows) - 0.5) * depth;
+  const groundY = heightAtTile(tileX, tileY) * heightScale;
+  const labelHeight = TOWN_LABEL_SCREEN_HEIGHT;
+  const labelLift = TOWN_LABEL_LIFT_METERS / Math.max(0.001, TILE_SIZE);
+  const { material, aspect } = getTownLabelMaterial(town.name);
+  const sprite = new THREE.Sprite(material);
+  sprite.scale.set(labelHeight * aspect, labelHeight, 1);
+  sprite.position.set(worldX, groundY + labelLift, worldZ);
+  sprite.renderOrder = 25;
+  return sprite;
 };
 
 const getTreeBurnRole = (material: THREE.Material | THREE.Material[]): TreeBurnMeshRole => {
@@ -873,26 +1038,52 @@ const createTreeBurnController = (
           }
           const fuelRef = Math.max(TREE_BURN_FUEL_EPS, state.fuelReference[i]);
           const fuelRatio = clamp(fuelNow / fuelRef, 0, 1.2);
+          const depletion = clamp(1 - fuelRatio, 0, 1);
           let targetBurn = clamp(1 - fuelRatio, 0, 1.15);
-          const burningNow = fireNow > TREE_BURN_ACTIVE_FIRE_EPS || heatNow > TREE_BURN_ACTIVE_HEAT_EPS;
           const currentBurn = state.burnProgress[i] ?? 0;
+          const carryHeatActive =
+            !isAsh &&
+            fireNow <= TREE_BURN_ACTIVE_FIRE_EPS &&
+            heatNow > TREE_BURN_CARRY_HEAT_EPS &&
+            fuelNow > TREE_BURN_FUEL_EPS &&
+            currentBurn > 0.06;
+          // Treat carry heat as active while fuel remains so tree collapse tracks the visible carry-flame phase.
+          const burningNow =
+            fireNow > TREE_BURN_ACTIVE_FIRE_EPS ||
+            carryHeatActive ||
+            (!isAsh && heatNow > TREE_BURN_ACTIVE_HEAT_EPS && depletion > 0.06);
           if (burningNow) {
-            const flameDrivenBurn = clamp(fireNow * 0.72 + heatNow * 0.24, 0, 1.05);
-            targetBurn = Math.max(targetBurn, flameDrivenBurn);
+            const flameDrivenBurn = clamp(fireNow * 0.74 + heatNow * 0.24, 0, 1.05);
+            const fuelDrivenBurn = smoothstep(TREE_BURN_FUEL_GAUGE_START, TREE_BURN_FUEL_GAUGE_END, depletion) * 0.82;
+            targetBurn = Math.max(targetBurn, flameDrivenBurn, fuelDrivenBurn);
             if (!isAsh) {
-              // Prevent geometry loss from racing ahead of visible flames.
-              targetBurn = Math.min(targetBurn, flameDrivenBurn + 0.28);
+              // Keep some lag so structure does not vanish before the tile is nearly exhausted.
+              const flameCap = flameDrivenBurn + 0.26 + depletion * 0.58;
+              targetBurn = Math.min(targetBurn, flameCap);
             }
             if (isAsh) {
               targetBurn = Math.max(targetBurn, 1.0);
             }
+          } else if (isAsh) {
+            // Once converted to ash, quickly finish the structural collapse.
+            targetBurn = Math.max(targetBurn, 1.0);
           } else {
-            // Keep visual burn synchronized with active flames/heat; do not advance burn after fire is out.
-            targetBurn = Math.min(currentBurn, targetBurn);
+            // Let late-stage fuel depletion keep advancing burn even if flame intensity just dipped.
+            const emberTailBurn = smoothstep(TREE_BURN_EMBER_TAIL_START, TREE_BURN_EMBER_TAIL_END, depletion) * 0.8;
+            targetBurn = Math.max(Math.min(currentBurn, targetBurn), emberTailBurn);
           }
           let nextBurn = currentBurn;
+          let riseRate = TREE_BURN_PROGRESS_PER_SECOND;
+          if (burningNow) {
+            riseRate *= 1 + fireNow * 0.9 + heatNow * 0.35 + depletion * 0.7;
+          } else if (!isAsh && depletion > TREE_BURN_EMBER_TAIL_START) {
+            riseRate *= 1 + (depletion - TREE_BURN_EMBER_TAIL_START) * 0.7;
+          }
+          if (isAsh) {
+            riseRate = Math.max(riseRate, TREE_BURN_ASH_CATCHUP_PER_SECOND);
+          }
           if (targetBurn > currentBurn) {
-            nextBurn = Math.min(targetBurn, currentBurn + dt * TREE_BURN_PROGRESS_PER_SECOND);
+            nextBurn = Math.min(targetBurn, currentBurn + dt * riseRate);
           } else if (targetBurn < currentBurn) {
             nextBurn = Math.max(targetBurn, currentBurn - dt * TREE_BURN_RECOVERY_PER_SECOND);
           }
@@ -1782,6 +1973,174 @@ const buildWaterfallInstances = (
   const isValidCoord = (x: number, y: number): boolean => x >= 0 && y >= 0 && x < sampleCols && y < sampleRows;
   const toWorldX = (x: number): number => ((x + 0.5) / Math.max(1, sampleCols) - 0.5) * width;
   const toWorldZ = (y: number): number => ((y + 0.5) / Math.max(1, sampleRows) - 0.5) * depth;
+  const sampleWaterHeight = (fx: number, fy: number): number => {
+    const x = clamp(fx, 0, sampleCols - 1);
+    const y = clamp(fy, 0, sampleRows - 1);
+    const x0 = Math.floor(x);
+    const y0 = Math.floor(y);
+    const x1 = Math.min(sampleCols - 1, x0 + 1);
+    const y1 = Math.min(sampleRows - 1, y0 + 1);
+    const tx = x - x0;
+    const ty = y - y0;
+    const h00 = waterHeights[y0 * sampleCols + x0] ?? 0;
+    const h10 = waterHeights[y0 * sampleCols + x1] ?? h00;
+    const h01 = waterHeights[y1 * sampleCols + x0] ?? h00;
+    const h11 = waterHeights[y1 * sampleCols + x1] ?? h10;
+    const hx0 = h00 * (1 - tx) + h10 * tx;
+    const hx1 = h01 * (1 - tx) + h11 * tx;
+    return hx0 * (1 - ty) + hx1 * ty;
+  };
+  const sampleRiverHeight = (fx: number, fy: number): number => {
+    const x = clamp(fx, 0, sampleCols - 1);
+    const y = clamp(fy, 0, sampleRows - 1);
+    const x0 = Math.floor(x);
+    const y0 = Math.floor(y);
+    const x1 = Math.min(sampleCols - 1, x0 + 1);
+    const y1 = Math.min(sampleRows - 1, y0 + 1);
+    const tx = x - x0;
+    const ty = y - y0;
+    const samples = [
+      { x: x0, y: y0, w: (1 - tx) * (1 - ty) },
+      { x: x1, y: y0, w: tx * (1 - ty) },
+      { x: x0, y: y1, w: (1 - tx) * ty },
+      { x: x1, y: y1, w: tx * ty }
+    ];
+    let weighted = 0;
+    let wSum = 0;
+    for (let i = 0; i < samples.length; i += 1) {
+      const s = samples[i];
+      const idx = s.y * sampleCols + s.x;
+      if (!isWaterCell(idx) || !isRiverCell(idx) || isOceanish(idx)) {
+        continue;
+      }
+      const h = waterHeights[idx];
+      if (!Number.isFinite(h)) {
+        continue;
+      }
+      weighted += h * s.w;
+      wSum += s.w;
+    }
+    if (wSum > 1e-5) {
+      return weighted / wSum;
+    }
+    const nearestX = clamp(Math.round(x), 0, sampleCols - 1);
+    const nearestY = clamp(Math.round(y), 0, sampleRows - 1);
+    let bestIdx = -1;
+    let bestDistSq = Number.POSITIVE_INFINITY;
+    for (let radius = 1; radius <= 4 && bestIdx < 0; radius += 1) {
+      const minX = Math.max(0, nearestX - radius);
+      const maxX = Math.min(sampleCols - 1, nearestX + radius);
+      const minY = Math.max(0, nearestY - radius);
+      const maxY = Math.min(sampleRows - 1, nearestY + radius);
+      for (let sy = minY; sy <= maxY; sy += 1) {
+        for (let sx = minX; sx <= maxX; sx += 1) {
+          const idx = sy * sampleCols + sx;
+          if (!isWaterCell(idx) || !isRiverCell(idx) || isOceanish(idx)) {
+            continue;
+          }
+          const h = waterHeights[idx];
+          if (!Number.isFinite(h)) {
+            continue;
+          }
+          const dx = sx - x;
+          const dy = sy - y;
+          const distSq = dx * dx + dy * dy;
+          if (distSq < bestDistSq) {
+            bestDistSq = distSq;
+            bestIdx = idx;
+          }
+        }
+      }
+    }
+    if (bestIdx >= 0) {
+      return waterHeights[bestIdx];
+    }
+    return sampleWaterHeight(fx, fy);
+  };
+  const worldToGridX = (worldX: number): number => (worldX / Math.max(1e-4, width) + 0.5) * sampleCols - 0.5;
+  const worldToGridY = (worldZ: number): number => (worldZ / Math.max(1e-4, depth) + 0.5) * sampleRows - 0.5;
+  const sampleRiverOccupancy = (fx: number, fy: number): number => {
+    const x = clamp(fx, 0, sampleCols - 1);
+    const y = clamp(fy, 0, sampleRows - 1);
+    const x0 = Math.floor(x);
+    const y0 = Math.floor(y);
+    const x1 = Math.min(sampleCols - 1, x0 + 1);
+    const y1 = Math.min(sampleRows - 1, y0 + 1);
+    const tx = x - x0;
+    const ty = y - y0;
+    const sampleValue = (sx: number, sy: number): number => {
+      const idx = sy * sampleCols + sx;
+      if (!isWaterCell(idx) || !isRiverCell(idx) || isOceanish(idx)) {
+        return 0;
+      }
+      return 1;
+    };
+    const s00 = sampleValue(x0, y0);
+    const s10 = sampleValue(x1, y0);
+    const s01 = sampleValue(x0, y1);
+    const s11 = sampleValue(x1, y1);
+    const sx0 = s00 * (1 - tx) + s10 * tx;
+    const sx1 = s01 * (1 - tx) + s11 * tx;
+    return sx0 * (1 - ty) + sx1 * ty;
+  };
+  const measureWorldCrossSection = (
+    centerX: number,
+    centerZ: number,
+    flowX: number,
+    flowZ: number
+  ): { halfWidth: number; shiftX: number; shiftZ: number } => {
+    let perpX = -flowZ;
+    let perpZ = flowX;
+    const len = Math.hypot(perpX, perpZ);
+    if (len <= 1e-5) {
+      perpX = 1;
+      perpZ = 0;
+    } else {
+      perpX /= len;
+      perpZ /= len;
+    }
+    const stepDist = Math.max(0.05, cellWorld * 0.32);
+    const maxDist = Math.max(cellWorld * 8.0, 0.6);
+    const sampleSpan = (sign: number): number => {
+      let span = 0;
+      for (let dist = stepDist; dist <= maxDist; dist += stepDist) {
+        const wx = centerX + perpX * sign * dist;
+        const wz = centerZ + perpZ * sign * dist;
+        const occ = sampleRiverOccupancy(worldToGridX(wx), worldToGridY(wz));
+        if (occ < 0.42) {
+          break;
+        }
+        span = dist;
+      }
+      return span;
+    };
+    const neg = sampleSpan(-1);
+    const pos = sampleSpan(1);
+    const shift = clamp((pos - neg) * 0.5, -cellWorld * 1.2, cellWorld * 1.2);
+    const halfWidth = clamp(Math.max(cellWorld * 0.45, (neg + pos) * 0.5 + cellWorld * 0.2), cellWorld * 0.45, cellWorld * 3.2);
+    return { halfWidth, shiftX: perpX * shift, shiftZ: perpZ * shift };
+  };
+  const sampleLocalDropAtWorld = (
+    centerX: number,
+    centerZ: number,
+    dirX: number,
+    dirZ: number,
+    lipHeight: number
+  ): number => {
+    let minHeight = lipHeight;
+    const stepDist = Math.max(cellWorld * 0.55, 0.08);
+    const maxDist = Math.max(cellWorld * 4.2, 0.9);
+    for (let dist = stepDist; dist <= maxDist; dist += stepDist) {
+      const wx = centerX + dirX * dist;
+      const wz = centerZ + dirZ * dist;
+      const h = sampleRiverHeight(worldToGridX(wx), worldToGridY(wz));
+      if (!Number.isFinite(h)) {
+        continue;
+      }
+      minHeight = Math.min(minHeight, h);
+    }
+    return clamp(lipHeight - minHeight + WATERFALL_DROP_PADDING * 0.6, minDrop * 0.85, WATERFALL_MAX_DROP);
+  };
   const measureCrossSection = (
     centerCol: number,
     centerRow: number,
@@ -1897,13 +2256,29 @@ const buildWaterfallInstances = (
       if (isOceanish(idx1) || isOceanish(idx2)) {
         continue;
       }
-      const h1 = waterHeights[idx1] ?? 0;
       const h2 = waterHeights[idx2] ?? 0;
-      if (!Number.isFinite(h1) || !Number.isFinite(h2)) {
+      if (!Number.isFinite(h2)) {
         continue;
       }
-      const lookaheadDrop = center - h2;
-      if (lookaheadDrop < minDrop * 0.9 || lookaheadDrop > WATERFALL_MAX_DROP) {
+      let downstreamMin = h2;
+      for (let stepMul = 3; stepMul <= 5; stepMul += 1) {
+        const nx = col + bestDx * stepMul;
+        const ny = row + bestDy * stepMul;
+        if (!isValidCoord(nx, ny)) {
+          break;
+        }
+        const nIdx = ny * sampleCols + nx;
+        if (!isWaterCell(nIdx) || !isRiverCell(nIdx) || isOceanish(nIdx)) {
+          break;
+        }
+        const h = waterHeights[nIdx] ?? Number.NaN;
+        if (!Number.isFinite(h)) {
+          break;
+        }
+        downstreamMin = Math.min(downstreamMin, h);
+      }
+      const localDrop = center - downstreamMin;
+      if (localDrop < minDrop * 0.9 || localDrop > WATERFALL_MAX_DROP) {
         continue;
       }
       const x0 = toWorldX(col);
@@ -1927,7 +2302,7 @@ const buildWaterfallInstances = (
         x: centerX,
         z: centerZ,
         top: center + WATERFALL_TOP_OFFSET,
-        drop: Math.min(WATERFALL_MAX_DROP, lookaheadDrop + WATERFALL_DROP_PADDING + stepStrength * minDrop * 0.7),
+        drop: Math.min(WATERFALL_MAX_DROP, localDrop + WATERFALL_DROP_PADDING + stepStrength * minDrop * 0.7),
         dirX,
         dirZ,
         width: halfWidth
@@ -2029,49 +2404,95 @@ const buildWaterfallInstances = (
   const contourCols = riverDomain?.cols ?? sampleCols;
   const contourRows = riverDomain?.rows ?? sampleRows;
   const contourSpace = createRiverSpaceTransform(contourCols, contourRows, width, depth, sampleCols, sampleRows);
+  const debugStats = riverDomain?.debugStats;
+  let anchorErrSum = 0;
+  let anchorErrMax = 0;
+  let anchorErrCount = 0;
 
   const snapClusterToContour = (cluster: Cluster): Cluster => {
-    if (!contourEdges || contourEdges.length < 4) {
-      return cluster;
-    }
-    const pX = contourSpace.worldToEdgeX(cluster.x);
-    const pY = contourSpace.worldToEdgeY(cluster.z);
-    let bestDistSq = Number.POSITIVE_INFINITY;
-    let bestEdgeX = pX;
-    let bestEdgeY = pY;
-    let bestSegmentLenWorld = 0;
-    for (let i = 0; i < contourEdges.length; i += 4) {
-      const ax = contourEdges[i];
-      const ay = contourEdges[i + 1];
-      const bx = contourEdges[i + 2];
-      const by = contourEdges[i + 3];
-      const abX = bx - ax;
-      const abY = by - ay;
-      const abLenSq = abX * abX + abY * abY;
-      if (abLenSq <= 1e-6) {
-        continue;
-      }
-      const t = clamp(((pX - ax) * abX + (pY - ay) * abY) / abLenSq, 0, 1);
-      const qx = ax + abX * t;
-      const qy = ay + abY * t;
-      const dx = pX - qx;
-      const dy = pY - qy;
-      const distSq = dx * dx + dy * dy;
-      if (distSq < bestDistSq) {
-        bestDistSq = distSq;
-        bestEdgeX = qx;
-        bestEdgeY = qy;
-        bestSegmentLenWorld = Math.hypot((abX / Math.max(1, contourCols)) * width, (abY / Math.max(1, contourRows)) * depth);
-      }
-    }
-    if (!Number.isFinite(bestDistSq) || bestDistSq > 4) {
-      return cluster;
-    }
     const snapped = { ...cluster };
-    snapped.x = contourSpace.edgeToWorldX(bestEdgeX);
-    snapped.z = contourSpace.edgeToWorldY(bestEdgeY);
-    if (bestSegmentLenWorld > 0) {
-      snapped.width = clamp(snapped.width, cellWorld * 0.45, Math.max(cellWorld * 0.6, bestSegmentLenWorld * 0.55));
+    if (contourEdges && contourEdges.length >= 4) {
+      const pX = contourSpace.worldToEdgeX(cluster.x);
+      const pY = contourSpace.worldToEdgeY(cluster.z);
+      let bestDistSq = Number.POSITIVE_INFINITY;
+      let bestEdgeX = pX;
+      let bestEdgeY = pY;
+      let bestSegmentLenWorld = 0;
+      let bestTanX = cluster.dirX;
+      let bestTanZ = cluster.dirZ;
+      for (let i = 0; i < contourEdges.length; i += 4) {
+        const ax = contourEdges[i];
+        const ay = contourEdges[i + 1];
+        const bx = contourEdges[i + 2];
+        const by = contourEdges[i + 3];
+        const abX = bx - ax;
+        const abY = by - ay;
+        const abLenSq = abX * abX + abY * abY;
+        if (abLenSq <= 1e-6) {
+          continue;
+        }
+        const t = clamp(((pX - ax) * abX + (pY - ay) * abY) / abLenSq, 0, 1);
+        const qx = ax + abX * t;
+        const qy = ay + abY * t;
+        const dx = pX - qx;
+        const dy = pY - qy;
+        const distSq = dx * dx + dy * dy;
+        if (distSq < bestDistSq) {
+          bestDistSq = distSq;
+          bestEdgeX = qx;
+          bestEdgeY = qy;
+          const segWorldX = (abX / Math.max(1, contourCols)) * width;
+          const segWorldZ = (abY / Math.max(1, contourRows)) * depth;
+          bestSegmentLenWorld = Math.hypot(segWorldX, segWorldZ);
+          if (bestSegmentLenWorld > 1e-6) {
+            bestTanX = segWorldX / bestSegmentLenWorld;
+            bestTanZ = segWorldZ / bestSegmentLenWorld;
+          }
+        }
+      }
+      if (Number.isFinite(bestDistSq) && bestDistSq <= 4) {
+        const targetX = contourSpace.edgeToWorldX(bestEdgeX);
+        const targetZ = contourSpace.edgeToWorldY(bestEdgeY);
+        const toTargetX = targetX - snapped.x;
+        const toTargetZ = targetZ - snapped.z;
+        const snapWorldDist = Math.hypot(toTargetX, toTargetZ);
+        const maxSnapWorld = Math.max(cellWorld * 0.18, Math.min(snapped.width * 0.35, cellWorld * 0.95));
+        if (snapWorldDist > maxSnapWorld && snapWorldDist > 1e-5) {
+          const t = maxSnapWorld / snapWorldDist;
+          snapped.x += toTargetX * t;
+          snapped.z += toTargetZ * t;
+        } else {
+          snapped.x = targetX;
+          snapped.z = targetZ;
+        }
+        if (bestSegmentLenWorld > 0) {
+          const tangentDot = bestTanX * snapped.dirX + bestTanZ * snapped.dirZ;
+          if (Math.abs(tangentDot) >= 0.35) {
+            if (tangentDot < 0) {
+              bestTanX = -bestTanX;
+              bestTanZ = -bestTanZ;
+            }
+            snapped.dirX = bestTanX;
+            snapped.dirZ = bestTanZ;
+          }
+        }
+      }
+    }
+
+    const localCross = measureWorldCrossSection(snapped.x, snapped.z, snapped.dirX, snapped.dirZ);
+    snapped.x += localCross.shiftX;
+    snapped.z += localCross.shiftZ;
+    snapped.width = clamp(Math.max(snapped.width * 0.82, localCross.halfWidth), cellWorld * 0.45, cellWorld * 3.2);
+
+    const sampleX = contourSpace.edgeToGridX(contourSpace.worldToEdgeX(snapped.x));
+    const sampleY = contourSpace.edgeToGridY(contourSpace.worldToEdgeY(snapped.z));
+    const sampledHeight = sampleRiverHeight(sampleX, sampleY);
+    if (Number.isFinite(sampledHeight)) {
+      const targetTop = sampledHeight + WATERFALL_TOP_OFFSET;
+      const maxAdjust = Math.max(0.08, Math.min(0.55, snapped.drop * 0.7));
+      snapped.top = clamp(targetTop, cluster.top - maxAdjust, cluster.top + maxAdjust);
+      const measuredDrop = sampleLocalDropAtWorld(snapped.x, snapped.z, snapped.dirX, snapped.dirZ, sampledHeight);
+      snapped.drop = clamp(Math.max(snapped.drop * 0.65, measuredDrop), minDrop * 0.8, WATERFALL_MAX_DROP);
     }
     return snapped;
   };
@@ -2087,6 +2508,25 @@ const buildWaterfallInstances = (
     out[base + 4] = cluster.dirX;
     out[base + 5] = cluster.dirZ;
     out[base + 6] = clusteredWidth;
+    const sampledSurface = sampleRiverHeight(
+      contourSpace.edgeToGridX(contourSpace.worldToEdgeX(cluster.x)),
+      contourSpace.edgeToGridY(contourSpace.worldToEdgeY(cluster.z))
+    );
+    if (Number.isFinite(sampledSurface)) {
+      const anchorError = Math.abs(cluster.top - WATERFALL_TOP_OFFSET - sampledSurface);
+      anchorErrSum += anchorError;
+      anchorErrMax = Math.max(anchorErrMax, anchorError);
+      anchorErrCount += 1;
+    }
+  }
+  if (debugStats) {
+    debugStats.waterfallAnchorErrorMean = anchorErrCount > 0 ? anchorErrSum / anchorErrCount : 0;
+    debugStats.waterfallAnchorErrorMax = anchorErrMax;
+    if (debugStats.waterfallAnchorErrorMax > WATERFALL_ANCHOR_ERR_WARN) {
+      console.warn(
+        `[threeTestTerrain] waterfall anchor warning mean=${debugStats.waterfallAnchorErrorMean.toFixed(4)} max=${debugStats.waterfallAnchorErrorMax.toFixed(4)}`
+      );
+    }
   }
   return out;
 };
@@ -2220,88 +2660,173 @@ const buildRenderRiverSupportMasks = (
     { dx: 1, dy: 1 }
   ];
   for (let pass = 0; pass < RIVER_WIDTH_EXPAND_MAX_PASSES; pass += 1) {
-    const additions = new Set<number>();
-    for (let y = 0; y < rows; y += 1) {
-      const rowBase = y * cols;
-      for (let x = 0; x < cols; x += 1) {
-        const idx = rowBase + x;
-        // Grow only around authored/base river cells to avoid flood-like recursive expansion.
-        if (!base[idx]) {
-          continue;
-        }
-        let orthCount = 0;
-        for (let i = 0; i < orthDirs.length; i += 1) {
-          const nx = x + orthDirs[i].dx;
-          const ny = y + orthDirs[i].dy;
-          if (isValid(nx, ny) && render[idxAt(nx, ny)]) {
-            orthCount += 1;
+    const source = render;
+    const additions = new Map<number, number>();
+    const isSourceActive = (idx: number): boolean => source[idx] > 0;
+    const isTaken = (idx: number): boolean => source[idx] > 0 || additions.has(idx);
+    const isNonRiverWaterCell = (idx: number): boolean => tileTypes[idx] === waterId && riverMask[idx] === 0;
+    const canAdd = (idx: number): boolean => !isTaken(idx) && !isNonRiverWaterCell(idx);
+    const neighborSupport = (x: number, y: number): number => {
+      let support = 0;
+      for (let oy = -1; oy <= 1; oy += 1) {
+        for (let ox = -1; ox <= 1; ox += 1) {
+          if (ox === 0 && oy === 0) {
+            continue;
           }
-        }
-        let diagCount = 0;
-        for (let i = 0; i < diagDirs.length; i += 1) {
-          const nx = x + diagDirs[i].dx;
-          const ny = y + diagDirs[i].dy;
-          if (isValid(nx, ny) && render[idxAt(nx, ny)]) {
-            diagCount += 1;
-          }
-        }
-        const thinCell = orthCount === 0 || (orthCount < RIVER_MIN_VISUAL_WIDTH_CELLS && diagCount > 0);
-        if (!thinCell || diagCount === 0) {
-          continue;
-        }
-        let bestCandidate = -1;
-        let bestScore = Number.POSITIVE_INFINITY;
-        for (let i = 0; i < orthDirs.length; i += 1) {
-          const nx = x + orthDirs[i].dx;
-          const ny = y + orthDirs[i].dy;
+          const nx = x + ox;
+          const ny = y + oy;
           if (!isValid(nx, ny)) {
             continue;
           }
-          const nIdx = idxAt(nx, ny);
-          if (render[nIdx]) {
-            continue;
-          }
-          if (tileTypes[nIdx] === waterId && riverMask[nIdx] === 0) {
-            continue;
-          }
-          let neighborSupport = 0;
-          for (let oy = -1; oy <= 1; oy += 1) {
-            for (let ox = -1; ox <= 1; ox += 1) {
-              if (ox === 0 && oy === 0) {
-                continue;
-              }
-              const sx = nx + ox;
-              const sy = ny + oy;
-              if (isValid(sx, sy) && render[idxAt(sx, sy)]) {
-                neighborSupport += 1;
-              }
-            }
-          }
-          if (neighborSupport > 4) {
-            continue;
-          }
-          const elevPenalty = Math.abs((sample.elevations[nIdx] ?? 0) - (sample.elevations[idx] ?? 0));
-          const supportPenalty = neighborSupport >= 3 ? 0.15 : 0;
-          const score = elevPenalty + supportPenalty;
-          if (score < bestScore) {
-            bestScore = score;
-            bestCandidate = nIdx;
+          if (isSourceActive(idxAt(nx, ny))) {
+            support += 1;
           }
         }
-        if (bestCandidate >= 0) {
-          additions.add(bestCandidate);
-          if (additions.size >= sourceCount * RIVER_DIAGONAL_FILL_MAX_ADDS_PER_CELL) {
-            break;
-          }
+      }
+      return support;
+    };
+    const bridgeScore = (candidateIdx: number, aIdx: number, bIdx: number): number => {
+      const elev = sample.elevations[candidateIdx] ?? 0;
+      const elevA = sample.elevations[aIdx] ?? elev;
+      const elevB = sample.elevations[bIdx] ?? elev;
+      const x = candidateIdx % cols;
+      const y = Math.floor(candidateIdx / cols);
+      const crowdedPenalty = neighborSupport(x, y) >= 5 ? 0.2 : 0;
+      return Math.abs(elev - elevA) + Math.abs(elev - elevB) + crowdedPenalty;
+    };
+    const addCandidate = (idx: number, score: number): void => {
+      if (!canAdd(idx)) {
+        return;
+      }
+      const existing = additions.get(idx);
+      if (existing === undefined || score < existing) {
+        additions.set(idx, score);
+      }
+    };
+    const addBridge = (firstIdx: number, secondIdx: number, leftIdx: number, rightIdx: number): void => {
+      const canFirst = canAdd(firstIdx);
+      const canSecond = canAdd(secondIdx);
+      if (!canFirst && !canSecond) {
+        return;
+      }
+      if (canFirst && !canSecond) {
+        addCandidate(firstIdx, bridgeScore(firstIdx, leftIdx, rightIdx));
+        return;
+      }
+      if (!canFirst && canSecond) {
+        addCandidate(secondIdx, bridgeScore(secondIdx, leftIdx, rightIdx));
+        return;
+      }
+      const firstScore = bridgeScore(firstIdx, leftIdx, rightIdx);
+      const secondScore = bridgeScore(secondIdx, leftIdx, rightIdx);
+      addCandidate(firstScore <= secondScore ? firstIdx : secondIdx, Math.min(firstScore, secondScore));
+    };
+    // 1) Bridge pure diagonal checkerboard links only.
+    for (let y = 0; y < rows - 1; y += 1) {
+      for (let x = 0; x < cols - 1; x += 1) {
+        const a = idxAt(x, y);
+        const b = idxAt(x + 1, y);
+        const c = idxAt(x, y + 1);
+        const d = idxAt(x + 1, y + 1);
+        const aOn = isSourceActive(a);
+        const bOn = isSourceActive(b);
+        const cOn = isSourceActive(c);
+        const dOn = isSourceActive(d);
+        if (aOn && dOn && !bOn && !cOn) {
+          addBridge(b, c, a, d);
+        } else if (!aOn && !dOn && bOn && cOn) {
+          addBridge(a, d, b, c);
         }
+      }
+    }
+    // 2) Fill single-cell axial gaps only.
+    for (let y = 0; y < rows; y += 1) {
+      for (let x = 0; x < cols; x += 1) {
+        const idx = idxAt(x, y);
+        if (isSourceActive(idx) || additions.has(idx)) {
+          continue;
+        }
+        if (isNonRiverWaterCell(idx)) {
+          continue;
+        }
+        const west = x > 0 && isSourceActive(idxAt(x - 1, y));
+        const east = x < cols - 1 && isSourceActive(idxAt(x + 1, y));
+        const north = y > 0 && isSourceActive(idxAt(x, y - 1));
+        const south = y < rows - 1 && isSourceActive(idxAt(x, y + 1));
+        if ((west && east) || (north && south)) {
+          addCandidate(idx, 0.02);
+        }
+      }
+    }
+    // 3) For diagonal-only source cells, add one orthogonal bridge.
+    for (let y = 0; y < rows; y += 1) {
+      for (let x = 0; x < cols; x += 1) {
+        const idx = idxAt(x, y);
+        if (!isSourceActive(idx)) {
+          continue;
+        }
+        const west = x > 0 && isSourceActive(idxAt(x - 1, y));
+        const east = x < cols - 1 && isSourceActive(idxAt(x + 1, y));
+        const north = y > 0 && isSourceActive(idxAt(x, y - 1));
+        const south = y < rows - 1 && isSourceActive(idxAt(x, y + 1));
+        const orthCount = (west ? 1 : 0) + (east ? 1 : 0) + (north ? 1 : 0) + (south ? 1 : 0);
+        if (orthCount > 0) {
+          continue;
+        }
+        const diagNeighbors: number[] = [];
+        if (x > 0 && y > 0 && isSourceActive(idxAt(x - 1, y - 1))) {
+          diagNeighbors.push(idxAt(x - 1, y - 1));
+        }
+        if (x < cols - 1 && y > 0 && isSourceActive(idxAt(x + 1, y - 1))) {
+          diagNeighbors.push(idxAt(x + 1, y - 1));
+        }
+        if (x > 0 && y < rows - 1 && isSourceActive(idxAt(x - 1, y + 1))) {
+          diagNeighbors.push(idxAt(x - 1, y + 1));
+        }
+        if (x < cols - 1 && y < rows - 1 && isSourceActive(idxAt(x + 1, y + 1))) {
+          diagNeighbors.push(idxAt(x + 1, y + 1));
+        }
+        if (diagNeighbors.length === 0) {
+          continue;
+        }
+        const bestDiag = diagNeighbors
+          .slice()
+          .sort((aIdx, bIdx) => {
+            const da = Math.abs((sample.elevations[aIdx] ?? 0) - (sample.elevations[idx] ?? 0));
+            const db = Math.abs((sample.elevations[bIdx] ?? 0) - (sample.elevations[idx] ?? 0));
+            return da - db;
+          })[0];
+        const dx = (bestDiag % cols) - x;
+        const dy = Math.floor(bestDiag / cols) - y;
+        const bridgeA = idxAt(x + dx, y);
+        const bridgeB = idxAt(x, y + dy);
+        const canA = canAdd(bridgeA);
+        const canB = canAdd(bridgeB);
+        if (!canA && !canB) {
+          continue;
+        }
+        if (canA && !canB) {
+          addCandidate(bridgeA, bridgeScore(bridgeA, idx, bestDiag));
+          continue;
+        }
+        if (!canA && canB) {
+          addCandidate(bridgeB, bridgeScore(bridgeB, idx, bestDiag));
+          continue;
+        }
+        const scoreA = bridgeScore(bridgeA, idx, bestDiag);
+        const scoreB = bridgeScore(bridgeB, idx, bestDiag);
+        addCandidate(scoreA <= scoreB ? bridgeA : bridgeB, Math.min(scoreA, scoreB));
       }
     }
     if (additions.size === 0) {
       break;
     }
-    additions.forEach((idx) => {
+    const maxAdds = Math.max(1, sourceCount * RIVER_DIAGONAL_FILL_MAX_ADDS_PER_CELL);
+    const ranked = Array.from(additions.entries()).sort((a, b) => a[1] - b[1]);
+    for (let i = 0; i < ranked.length && i < maxAdds; i += 1) {
+      const idx = ranked[i][0];
       render[idx] = 1;
-    });
+    }
   }
 
   return { base, render };
@@ -2356,10 +2881,37 @@ const buildRiverRenderDomain = (
       vertexField[vIdx(x, y)] = count > 0 ? sum / count : 0;
     }
   }
+  if (RIVER_VERTEX_FIELD_BLUR_BLEND > 0) {
+    const smoothed = new Float32Array(vertexField.length);
+    const vIsValid = (x: number, y: number): boolean => x >= 0 && y >= 0 && x <= cols && y <= rows;
+    for (let y = 0; y <= rows; y += 1) {
+      for (let x = 0; x <= cols; x += 1) {
+        let sum = 0;
+        let wSum = 0;
+        for (let oy = -1; oy <= 1; oy += 1) {
+          for (let ox = -1; ox <= 1; ox += 1) {
+            const sx = x + ox;
+            const sy = y + oy;
+            if (!vIsValid(sx, sy)) {
+              continue;
+            }
+            const w = ox === 0 && oy === 0 ? 4 : ox === 0 || oy === 0 ? 2 : 1;
+            sum += vertexField[vIdx(sx, sy)] * w;
+            wSum += w;
+          }
+        }
+        const base = vertexField[vIdx(x, y)];
+        const blur = wSum > 0 ? sum / wSum : base;
+        const blended = base * (1 - RIVER_VERTEX_FIELD_BLUR_BLEND) + blur * RIVER_VERTEX_FIELD_BLUR_BLEND;
+        smoothed[vIdx(x, y)] = Math.max(base, blended * 0.96);
+      }
+    }
+    vertexField.set(smoothed);
+  }
 
   type ScalarPoint = { v: RiverContourVertex; s: number };
   type EdgeCountRecord = { count: number; a: number; b: number };
-  const threshold = 0.5;
+  const threshold = RIVER_FIELD_THRESHOLD;
   const quantScale = 4096;
   const contourVertices: number[] = [];
   const contourIndices: number[] = [];
@@ -2579,7 +3131,11 @@ const buildRiverRenderDomain = (
           boundaryMismatchMean: 0,
           boundaryMismatchMax: 0,
           wallQuadCount: 0,
-          protrudingVertexRatio: 0
+          protrudingVertexRatio: 0,
+          waterfallAnchorErrorMean: 0,
+          waterfallAnchorErrorMax: 0,
+          wallTopGapMean: 0,
+          wallTopGapMax: 0
         }
       : undefined
   };
@@ -2677,7 +3233,7 @@ const applyRiverTerrainTriangleCutout = (
   const vf = riverDomain.vertexField;
   const vfCols = riverDomain.cols + 1;
   const vIdx = (x: number, y: number): number => y * vfCols + x;
-  const sampleField = (xEdge: number, yEdge: number): number => {
+  const sampleFieldRaw = (xEdge: number, yEdge: number): number => {
     const x = clamp(xEdge, 0, riverDomain.cols);
     const y = clamp(yEdge, 0, riverDomain.rows);
     const x0 = Math.floor(x);
@@ -2694,6 +3250,22 @@ const applyRiverTerrainTriangleCutout = (
     const sx1 = s01 * (1 - tx) + s11 * tx;
     return sx0 * (1 - ty) + sx1 * ty;
   };
+  const sampleField = (xEdge: number, yEdge: number): number => {
+    let value = sampleFieldRaw(xEdge, yEdge);
+    const r = RIVER_CUTOUT_FIELD_DILATE;
+    if (r <= 1e-6) {
+      return value;
+    }
+    const offsets = [
+      [r, 0], [-r, 0], [0, r], [0, -r],
+      [r * 0.7, r * 0.7], [-r * 0.7, r * 0.7], [r * 0.7, -r * 0.7], [-r * 0.7, -r * 0.7]
+    ];
+    for (let i = 0; i < offsets.length; i += 1) {
+      const o = offsets[i];
+      value = Math.max(value, sampleFieldRaw(xEdge + o[0], yEdge + o[1]));
+    }
+    return value;
+  };
   const transform = createRiverSpaceTransform(riverDomain.cols, riverDomain.rows, 1, 1, sampleCols, sampleRows);
   const toEdgeX = (gridX: number): number => transform.gridToEdgeX(gridX);
   const toEdgeY = (gridY: number): number => transform.gridToEdgeY(gridY);
@@ -2708,7 +3280,7 @@ const applyRiverTerrainTriangleCutout = (
     s: number;
     boundary: boolean;
   };
-  const threshold = 0.5;
+  const threshold = RIVER_FIELD_THRESHOLD;
   const eps = 1e-6;
   const makeVertex = (vertexIndex: number): CutVertex | null => {
     if (vertexIndex < 0 || vertexIndex >= vertexCount) {
@@ -2939,6 +3511,7 @@ const buildRiverMeshData = (
   const riverTypes = new Uint8Array(total);
   const surfaceNorm = new Float32Array(total);
   const rapidAttrCenter = new Float32Array(total);
+  const flowSpeedCenter = new Float32Array(total);
   const flowDirX = new Float32Array(total);
   const flowDirY = new Float32Array(total);
   const surfaceWorld = new Float32Array(total).fill(Number.NaN);
@@ -3043,11 +3616,17 @@ const buildRiverMeshData = (
       const centerX = waterfallInstances[base];
       const centerZ = waterfallInstances[base + 1];
       const topOffset = waterfallInstances[base + 2];
+      const drop = Math.max(0.1, waterfallInstances[base + 3]);
       const dirX = waterfallInstances[base + 4];
       const dirZ = waterfallInstances[base + 5];
       const halfWidth = Math.max(0.08, waterfallInstances[base + 6]);
       const lipSurface = waterLevelWorld + topOffset - WATERFALL_TOP_OFFSET;
-      const radiusCells = Math.max(1, Math.ceil((halfWidth * 1.6) / cellWorld));
+      const poolSurface = lipSurface - drop + Math.min(0.018, drop * 0.12);
+      const upstreamLen = Math.max(cellWorld * 4.2, halfWidth * 2.6);
+      const downstreamLen = Math.max(cellWorld * 4.8, halfWidth * 3.0);
+      const transitionHalfLen = Math.max(cellWorld * 0.28, halfWidth * 0.22);
+      const radiusWorld = Math.max(upstreamLen, downstreamLen, halfWidth * 1.35);
+      const radiusCells = Math.max(1, Math.ceil(radiusWorld / cellWorld));
       const u = clamp(centerX / Math.max(1e-4, width) + 0.5, 0, 1);
       const v = clamp(centerZ / Math.max(1e-4, depth) + 0.5, 0, 1);
       const cx = Math.round(u * Math.max(1, cols - 1));
@@ -3067,15 +3646,35 @@ const buildRiverMeshData = (
           const wz = ((y + 0.5) / Math.max(1, rows) - 0.5) * depth - centerZ;
           const along = wx * dirX + wz * dirZ;
           const perp = Math.abs(wx * -dirZ + wz * dirX);
-          if (along < -cellWorld * 1.8 || along > cellWorld * 0.35) {
+          if (along < -upstreamLen || along > downstreamLen) {
             continue;
           }
-          if (perp > Math.max(cellWorld * 0.8, halfWidth * 0.9)) {
+          if (perp > Math.max(cellWorld * 0.85, halfWidth * 1.05)) {
             continue;
           }
-          surfaceWorld[idx] = Math.max(surfaceWorld[idx], lipSurface);
-          const prevLip = lipSurfaceOverride[idx];
-          lipSurfaceOverride[idx] = Number.isFinite(prevLip) ? Math.max(prevLip, lipSurface) : lipSurface;
+          const baseSurface = surfaceWorld[idx];
+          if (along <= -transitionHalfLen) {
+            const maxLipLift = Math.max(0.03, Math.min(0.42, drop * 0.62));
+            const upstreamFade = clamp((-along - transitionHalfLen) / Math.max(cellWorld, upstreamLen), 0, 1);
+            const upstreamSurface = lipSurface - upstreamFade * Math.min(0.018, drop * 0.1);
+            const clampedUpstream = clamp(upstreamSurface, baseSurface, baseSurface + maxLipLift);
+            surfaceWorld[idx] = Math.max(baseSurface, clampedUpstream);
+            const prevLip = lipSurfaceOverride[idx];
+            lipSurfaceOverride[idx] = Number.isFinite(prevLip)
+              ? Math.max(prevLip, clampedUpstream)
+              : clampedUpstream;
+            continue;
+          }
+          if (along >= transitionHalfLen) {
+            const poolFade = clamp((along - transitionHalfLen) / Math.max(cellWorld, downstreamLen), 0, 1);
+            const poolRise = poolFade * Math.min(0.014, drop * 0.08);
+            const targetPoolSurface = poolSurface + poolRise;
+            surfaceWorld[idx] = Math.min(baseSurface, targetPoolSurface);
+            continue;
+          }
+          const t = clamp((along + transitionHalfLen) / Math.max(1e-4, transitionHalfLen * 2), 0, 1);
+          const seamSurface = lipSurface * (1 - t) + poolSurface * t;
+          surfaceWorld[idx] = baseSurface * 0.35 + seamSurface * 0.65;
         }
       }
     }
@@ -3107,6 +3706,7 @@ const buildRiverMeshData = (
       flowDirY[idx] = dy;
       const grad = Math.hypot(right - left, down - up);
       rapidAttrCenter[idx] = clamp(rapidAttrCenter[idx] * 0.65 + grad * 0.42, 0, 1);
+      flowSpeedCenter[idx] = clamp(0.35 + grad * 5.0 + rapidAttrCenter[idx] * 1.2, 0.25, 2.4);
     }
   }
 
@@ -3128,6 +3728,7 @@ const buildRiverMeshData = (
   const uvs: number[] = [];
   const bankDist: number[] = [];
   const flowDir: number[] = [];
+  const flowSpeed: number[] = [];
   const rapid: number[] = [];
   const indices = Array.from(riverDomain.contourIndices);
   const distToNonRiver = riverDomain.distanceToBank;
@@ -3305,7 +3906,7 @@ const buildRiverMeshData = (
       minBankWorld = Math.min(minBankWorld, (sample.elevations[idx] ?? 0) * heightScale);
     }
     if (Number.isFinite(minBankWorld)) {
-      topWorld = Math.min(topWorld, minBankWorld - RIVER_SURFACE_BANK_CLEARANCE * 0.45);
+      topWorld = Math.min(topWorld, minBankWorld - RIVER_EDGE_SURFACE_UNDERSHOOT);
     }
     if (!Number.isFinite(topWorld)) {
       return WATER_SURFACE_LIFT_RIVER;
@@ -3329,12 +3930,17 @@ const buildRiverMeshData = (
     const value = sampleFromCells(fx, fy, (idx) => rapidAttrCenter[idx]);
     return clamp(Number.isFinite(value) ? value : 0, 0, 1);
   };
+  const sampleFlowSpeed = (fx: number, fy: number): number => {
+    const value = sampleFromCells(fx, fy, (idx) => flowSpeedCenter[idx]);
+    return clamp(Number.isFinite(value) ? value : 0.35, 0.25, 2.4);
+  };
   const addVertex = (v: RiverContourVertex): void => {
     const flow = sampleFlow(v.x, v.y);
     positions.push(worldXEdge(v.x), sampleSurfaceOffset(v.x, v.y), worldZEdge(v.y));
     uvs.push(v.x / Math.max(1, cols), v.y / Math.max(1, rows));
     bankDist.push(sampleBankDist(v.x, v.y));
     flowDir.push(flow.x, flow.y);
+    flowSpeed.push(sampleFlowSpeed(v.x, v.y));
     rapid.push(sampleRapid(v.x, v.y));
   };
   for (let i = 0; i < renderContourVertices.length; i += 2) {
@@ -3371,7 +3977,14 @@ const buildRiverMeshData = (
     const hx1 = h01 * (1 - tx) + h11 * tx;
     return hx0 * (1 - ty) + hx1 * ty;
   };
-  const sampleOutsideBank = (fx: number, fy: number, outX: number, outY: number, fallback: number): number => {
+  const sampleOutsideBank = (
+    fx: number,
+    fy: number,
+    outX: number,
+    outY: number,
+    fallback: number,
+    inset: number = BANK_INSET
+  ): number => {
     let nearest = Number.NaN;
     let sum = 0;
     let count = 0;
@@ -3388,7 +4001,7 @@ const buildRiverMeshData = (
       if (renderSupport[idx]) {
         continue;
       }
-      const bank = sampleTerrainWorld(px, py) - waterLevelWorld - BANK_INSET;
+      const bank = sampleTerrainWorld(px, py) - waterLevelWorld - inset;
       if (!Number.isFinite(bank)) {
         continue;
       }
@@ -3457,13 +4070,18 @@ const buildRiverMeshData = (
     }
     return Number.isFinite(best) ? best : fallback;
   };
+  let wallTopGapSum = 0;
+  let wallTopGapMax = 0;
+  let wallTopGapCount = 0;
   const pushWallEdge = (edge: RiverContourEdge): void => {
     const edgeAx = edge.ax;
     const edgeAy = edge.ay;
     const edgeBx = edge.bx;
     const edgeBy = edge.by;
-    let topA = sampleSurfaceOffset(edgeAx, edgeAy);
-    let topB = sampleSurfaceOffset(edgeBx, edgeBy);
+    const edgeTerrainTopA = sampleTerrainWorld(edgeAx, edgeAy) - waterLevelWorld;
+    const edgeTerrainTopB = sampleTerrainWorld(edgeBx, edgeBy) - waterLevelWorld;
+    let topA = edgeTerrainTopA + WALL_TOP_OVERLAP;
+    let topB = edgeTerrainTopB + WALL_TOP_OVERLAP;
     const ex = edge.bx - edge.ax;
     const ey = edge.by - edge.ay;
     const eLen = Math.hypot(ex, ey);
@@ -3478,18 +4096,26 @@ const buildRiverMeshData = (
     const resolved = resolveOutward(midX, midY, outX, outY);
     outX = resolved.x;
     outY = resolved.y;
-    const bankA = sampleOutsideBank(edgeAx, edgeAy, outX, outY, topA + WALL_MIN_HEIGHT);
-    const bankB = sampleOutsideBank(edgeBx, edgeBy, outX, outY, topB + WALL_MIN_HEIGHT);
-    if (!Number.isFinite(bankA) || !Number.isFinite(bankB)) {
-      return;
+    const bankTopA = sampleOutsideBank(edgeAx, edgeAy, outX, outY, edgeTerrainTopA + WALL_TOP_OVERLAP, 0);
+    const bankTopB = sampleOutsideBank(edgeBx, edgeBy, outX, outY, edgeTerrainTopB + WALL_TOP_OVERLAP, 0);
+    if (Number.isFinite(bankTopA)) {
+      topA = Math.min(topA, bankTopA - WALL_RISE_GUARD * 0.2);
     }
-    topA = Math.min(topA, bankA - WALL_RISE_GUARD);
-    topB = Math.min(topB, bankB - WALL_RISE_GUARD);
-    if (bankA <= topA + WALL_MIN_HEIGHT && bankB <= topB + WALL_MIN_HEIGHT) {
-      return;
+    if (Number.isFinite(bankTopB)) {
+      topB = Math.min(topB, bankTopB - WALL_RISE_GUARD * 0.2);
     }
-    const bottomA = bankA + WALL_BANK_OVERLAP;
-    const bottomB = bankB + WALL_BANK_OVERLAP;
+    topA = Math.max(topA, edgeTerrainTopA - WALL_TOP_MAX_UNDERCUT);
+    topB = Math.max(topB, edgeTerrainTopB - WALL_TOP_MAX_UNDERCUT);
+
+    const bankA = sampleOutsideBank(edgeAx, edgeAy, outX, outY, topA + WALL_MIN_HEIGHT, BANK_INSET);
+    const bankB = sampleOutsideBank(edgeBx, edgeBy, outX, outY, topB + WALL_MIN_HEIGHT, BANK_INSET);
+    const gapA = Math.abs(edgeTerrainTopA - topA);
+    const gapB = Math.abs(edgeTerrainTopB - topB);
+    wallTopGapSum += gapA + gapB;
+    wallTopGapMax = Math.max(wallTopGapMax, gapA, gapB);
+    wallTopGapCount += 2;
+    const bottomA = Math.max(bankA + WALL_BANK_OVERLAP, topA + WALL_MIN_HEIGHT);
+    const bottomB = Math.max(bankB + WALL_BANK_OVERLAP, topB + WALL_MIN_HEIGHT);
     const vBase = wallPositions.length / 3;
     wallPositions.push(
       worldXEdge(edgeAx), topA, worldZEdge(edgeAy),
@@ -3531,9 +4157,16 @@ const buildRiverMeshData = (
     }
     riverDomain.debugStats.wallQuadCount = wallIndices.length / 6;
     riverDomain.debugStats.protrudingVertexRatio = protruding / Math.max(1, positions.length / 3);
+    riverDomain.debugStats.wallTopGapMean = wallTopGapCount > 0 ? wallTopGapSum / wallTopGapCount : 0;
+    riverDomain.debugStats.wallTopGapMax = wallTopGapMax;
     if (riverDomain.debugStats.protrudingVertexRatio > 0.04) {
       console.warn(
         `[threeTestTerrain] river domain wall alignment warning protrudingRatio=${riverDomain.debugStats.protrudingVertexRatio.toFixed(3)}`
+      );
+    }
+    if (riverDomain.debugStats.wallTopGapMax > WALL_TOP_GAP_WARN) {
+      console.warn(
+        `[threeTestTerrain] river wall top-gap warning mean=${riverDomain.debugStats.wallTopGapMean.toFixed(4)} max=${riverDomain.debugStats.wallTopGapMax.toFixed(4)}`
       );
     }
   }
@@ -3547,6 +4180,7 @@ const buildRiverMeshData = (
     wallIndices: wallIndices.length > 0 ? new Uint32Array(wallIndices) : undefined,
     bankDist: new Float32Array(bankDist),
     flowDir: new Float32Array(flowDir),
+    flowSpeed: new Float32Array(flowSpeed),
     rapid: new Float32Array(rapid),
     supportMap: riverSupportMap,
     flowMap: riverFlowMap,
@@ -4284,11 +4918,12 @@ const buildWaterSurfaceHeights = (
       const rawStepStrength = sampledRiverStepStrength ? sampledRiverStepStrength[idx] : 0;
       const stepStrength = Number.isFinite(rawStepStrength) ? clamp(rawStepStrength as number, 0, 1) : 0;
       const estuary = clamp((Math.min(river, ocean) - 0.05) / 0.2, 0, 1);
+      const inlandRiver = clamp((river - ocean * 0.6 - 0.06) / 0.55, 0, 1);
       const stepBlend = clamp((stepStrength - 0.14) / (0.5 - 0.14), 0, 1);
       const stepDampen = 1 - stepBlend;
-      const smoothAmt = (0.05 + estuary * 0.2) * stepDampen;
+      const smoothAmt = (0.03 + estuary * 0.2) * (1 - inlandRiver * 0.72) * stepDampen;
       const target = center * (1 - smoothAmt) + avg * smoothAmt;
-      const maxDelta = (0.006 + estuary * 0.035) * stepDampen;
+      const maxDelta = (0.004 + estuary * 0.035) * (1 - inlandRiver * 0.65) * stepDampen;
       if (maxDelta <= 1e-5) {
         smoothed[idx] = center;
       } else {
@@ -4297,6 +4932,28 @@ const buildWaterSurfaceHeights = (
     }
   }
   heights.set(smoothed);
+  if (sampledRiverSurface) {
+    for (let i = 0; i < total; i += 1) {
+      if (!hasWater(i)) {
+        continue;
+      }
+      const riverSurface = sampledRiverSurface[i];
+      if (!Number.isFinite(riverSurface)) {
+        continue;
+      }
+      const river = clamp(riverRatio[i] ?? 0, 0, 1);
+      const ocean = clamp(oceanRatio[i] ?? 0, 0, 1);
+      const rawStepStrength = sampledRiverStepStrength ? sampledRiverStepStrength[i] : 0;
+      const stepStrength = Number.isFinite(rawStepStrength) ? clamp(rawStepStrength as number, 0, 1) : 0;
+      const riverDominance = clamp((river - ocean * 0.65 - 0.04) / 0.55, 0, 1);
+      const stepKeep = clamp((stepStrength - 0.08) / 0.26, 0, 1);
+      const preserve = clamp(riverDominance * 0.25 + stepKeep * 0.7, 0, 0.92);
+      if (preserve <= 1e-5) {
+        continue;
+      }
+      heights[i] = clamp(heights[i] * (1 - preserve) + riverSurface * preserve, 0, 1);
+    }
+  }
 
   return heights;
 };
@@ -4496,6 +5153,29 @@ export const buildTileTexture = (
           ];
         }
       }
+      if (!debugTypeColors && sample.tileFuel && (typeId === grassId || typeId === scrubId || typeId === floodplainId || typeId === forestId)) {
+        const baseFuel = BASE_FUEL_BY_TILE_ID[typeId] ?? 0;
+        if (baseFuel > 0) {
+          const localMoisture = tileMoisture ? clamp(tileMoisture[idx] ?? 0.5, 0, 1) : 0.5;
+          const expectedFuel = Math.max(0.01, baseFuel * (1 - localMoisture * 0.6));
+          const fuelNow = clamp(sample.tileFuel[idx] ?? expectedFuel, 0, expectedFuel);
+          const fuelDepletion = clamp(1 - fuelNow / expectedFuel, 0, 1);
+          const warmScorch = smoothstep(0.3, 0.85, fuelDepletion);
+          const charScorch = smoothstep(0.62, 0.98, fuelDepletion);
+          const warmMix = (typeId === forestId ? 0.46 : 0.34) * warmScorch;
+          const charMix = (typeId === forestId ? 0.54 : 0.4) * charScorch;
+          color = [
+            color[0] * (1 - warmMix) + SCORCH_WARM_TINT[0] * warmMix,
+            color[1] * (1 - warmMix) + SCORCH_WARM_TINT[1] * warmMix,
+            color[2] * (1 - warmMix) + SCORCH_WARM_TINT[2] * warmMix
+          ];
+          color = [
+            color[0] * (1 - charMix) + SCORCH_CHAR_TINT[0] * charMix,
+            color[1] * (1 - charMix) + SCORCH_CHAR_TINT[1] * charMix,
+            color[2] * (1 - charMix) + SCORCH_CHAR_TINT[2] * charMix
+          ];
+        }
+      }
       if (!debugTypeColors && typeId === waterId && localRiverRatio >= RIVER_RATIO_MIN) {
         const rockyColor = palette[TILE_TYPE_IDS.rocky] ?? color;
         const floodColor = palette[floodplainId] ?? palette[grassId] ?? color;
@@ -4613,7 +5293,19 @@ export const buildTerrainMesh = (
   const roadId = TILE_TYPE_IDS.road;
   const firebreakId = TILE_TYPE_IDS.firebreak;
   const ashId = TILE_TYPE_IDS.ash;
-  const step = getTerrainStep(Math.max(cols, rows), sample.fullResolution ?? false);
+  const maxMapSpan = Math.max(cols, rows);
+  const step = getTerrainStep(maxMapSpan, sample.fullResolution ?? false);
+  const isLargeTerrain = maxMapSpan >= LARGE_TERRAIN_DETAIL_THRESHOLD;
+  const isMediumTerrain = !isLargeTerrain && maxMapSpan >= MEDIUM_TERRAIN_DETAIL_THRESHOLD;
+  const treeDensitySafetyScale = isLargeTerrain ? TREE_DENSITY_SCALE_LARGE : isMediumTerrain ? TREE_DENSITY_SCALE_MEDIUM : 1;
+  const treeAttemptCap = isLargeTerrain ? TREE_ATTEMPT_CAP_LARGE : isMediumTerrain ? TREE_ATTEMPT_CAP_MEDIUM : 3;
+  const treeVariantCap = isLargeTerrain ? TREE_VARIANT_CAP_LARGE : isMediumTerrain ? TREE_VARIANT_CAP_MEDIUM : Number.POSITIVE_INFINITY;
+  const treeInstanceBudget = isLargeTerrain
+    ? TREE_INSTANCE_BUDGET_LARGE
+    : isMediumTerrain
+      ? TREE_INSTANCE_BUDGET_MEDIUM
+      : Number.POSITIVE_INFINITY;
+  const useDetailedStructures = maxMapSpan < DETAILED_STRUCTURE_THRESHOLD;
   const sampleCols = Math.floor((cols - 1) / step) + 1;
   const sampleRows = Math.floor((rows - 1) / step) + 1;
   const width = (sampleCols - 1) * step;
@@ -4766,19 +5458,25 @@ export const buildTerrainMesh = (
     allowTrees &&
     !!treeAssets &&
     Object.values(treeAssets).some((variants) => Array.isArray(variants) && variants.length > 0);
+  const limitTreeVariants = (variants: TreeVariant[]): TreeVariant[] => {
+    if (treeVariantCap >= variants.length) {
+      return variants;
+    }
+    return variants.slice(0, treeVariantCap);
+  };
   const getTreeVariants = (type: TreeType): TreeVariant[] => {
     if (!treeAssets) {
       return [];
     }
     const direct = treeAssets[type] ?? [];
     if (direct.length > 0) {
-      return direct;
+      return limitTreeVariants(direct);
     }
     const scrubFallback = treeAssets[TreeType.Scrub] ?? [];
     if (scrubFallback.length > 0) {
-      return scrubFallback;
+      return limitTreeVariants(scrubFallback);
     }
-    return treeAssets[TreeType.Pine] ?? [];
+    return limitTreeVariants(treeAssets[TreeType.Pine] ?? []);
   };
   const treeTypes = sample.treeTypes;
   const birchId = TREE_TYPE_IDS[TreeType.Birch];
@@ -4934,7 +5632,7 @@ export const buildTerrainMesh = (
         vertexIndex += 1;
         continue;
       }
-      const densityScale = Math.min(1.5, 1 + Math.max(0, step - 1) * 0.2);
+      const densityScale = Math.min(1.5, 1 + Math.max(0, step - 1) * 0.2) * treeDensitySafetyScale;
       const centerX = ((tileX + 0.5) / Math.max(1, cols) - 0.5) * width;
       const centerZ = ((tileY + 0.5) / Math.max(1, rows) - 0.5) * depth;
       let treeChance = 0;
@@ -4948,7 +5646,7 @@ export const buildTerrainMesh = (
         treeChance = 0.08 * densityScale;
       }
       let placedTreeOnTile = false;
-      if (treeChance > 0) {
+      if (treeChance > 0 && treeInstances.length < treeInstanceBudget) {
         const dominantId = treeTypes ? treeTypes[idx] : 255;
         const isForest = typeId === forestId;
         const forestScale =
@@ -4981,8 +5679,11 @@ export const buildTerrainMesh = (
           }
         }
         const variants = hasTreeAssets ? getTreeVariants(treeType) : [];
-        const attempts = isForest ? Math.min(3, 1 + Math.floor(noiseAt(idx + 11.7) * (1 + densityScale))) : 1;
+        const attempts = isForest ? Math.min(treeAttemptCap, 1 + Math.floor(noiseAt(idx + 11.7) * (1 + densityScale))) : 1;
         for (let attempt = 0; attempt < attempts; attempt += 1) {
+          if (treeInstances.length >= treeInstanceBudget) {
+            break;
+          }
           if (noiseAt(idx + 5.1 + attempt * 0.37) >= treeChance) {
             continue;
           }
@@ -5400,7 +6101,7 @@ export const buildTerrainMesh = (
     }
     mesh.add(shrubMesh);
   }
-  if (sample.tileTypes) {
+  if (sample.tileTypes && !sample.dynamicStructures) {
     const tileTypes = sample.tileTypes;
     const baseTiles: { tileX: number; tileY: number; x: number; z: number; groundMin: number; groundMax: number }[] = [];
     const houseSpots: HouseSpot[] = [];
@@ -5500,7 +6201,7 @@ export const buildTerrainMesh = (
       }
       const rotation = baseFootprintX >= baseFootprintZ ? 0 : Math.PI / 2;
 
-      if (firestationAsset && firestationAsset.meshes.length > 0) {
+      if (useDetailedStructures && firestationAsset && firestationAsset.meshes.length > 0) {
         const footprintTarget = Math.max(baseFootprintX, baseFootprintZ) * 0.85;
         const assetFootprint = Math.max(firestationAsset.size.x, firestationAsset.size.z);
         const scale = footprintTarget / Math.max(0.01, assetFootprint);
@@ -5626,7 +6327,7 @@ export const buildTerrainMesh = (
           });
         }
         const variant = pickHouseVariant(spot);
-        if (variant && variant.meshes.length > 0) {
+        if (useDetailedStructures && variant && variant.meshes.length > 0) {
           const sizeX = Math.max(0.01, variant.size?.x ?? 0);
           const sizeZ = Math.max(0.01, variant.size?.z ?? 0);
           const fitScale = Math.min(footprintX / sizeX, footprintZ / sizeZ);
@@ -5705,6 +6406,25 @@ export const buildTerrainMesh = (
       }
     }
 
+  }
+  if (ENABLE_TOWN_LABEL_SPRITES && sample.towns && sample.towns.length > 0) {
+    const townLabelGroup = new THREE.Group();
+    sample.towns.forEach((town) => {
+      if (typeof town.name !== "string" || town.name.trim().length === 0) {
+        return;
+      }
+      if (!Number.isFinite(town.x) || !Number.isFinite(town.y)) {
+        return;
+      }
+      const sprite = createTownLabelSprite(town, width, depth, cols, rows, heightScale, heightAtTile);
+      if (!sprite) {
+        return;
+      }
+      townLabelGroup.add(sprite);
+    });
+    if (townLabelGroup.children.length > 0) {
+      mesh.add(townLabelGroup);
+    }
   }
 
   let water: TerrainWaterData | undefined;

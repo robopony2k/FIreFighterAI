@@ -76,6 +76,25 @@ export interface Point {
 }
 
 
+export interface Town extends Point {
+  id: number;
+  name: string;
+  cx: number;
+  cy: number;
+  radius: number;
+  houseCount: number;
+  alertPosture: number;
+  alertCooldownDays: number;
+  nonApprovingHouseCount: number;
+  approval: number;
+  evacState: "none" | "in_progress" | "complete";
+  evacProgress: number;
+  lastPostureChangeDay?: number;
+  desiredHouseDelta?: number;
+  lastSeasonHouseDelta?: number;
+}
+
+
 
 export interface Grid {
 

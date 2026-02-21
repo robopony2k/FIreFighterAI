@@ -10,6 +10,7 @@ import { createFireUnitListPanel } from "./components/FireUnitListPanel.js";
 import { createFuelBreakPanel } from "./components/FuelBreakPanel.js";
 import { createMaintenanceCrewPanel } from "./components/MaintenanceCrewPanel.js";
 import { createMaintenanceRosterPanel } from "./components/MaintenanceRosterPanel.js";
+import { createMiniMapPanel } from "./components/MiniMapPanel.js";
 import { createTopBar } from "./components/TopBar.js";
 import type { FireDeployPanelData } from "./components/FireDeployPanel.js";
 import type { BudgetReportData } from "./components/BudgetReportView.js";
@@ -19,9 +20,11 @@ import type { FireUnitListData } from "./components/FireUnitListPanel.js";
 import type { FuelBreakPanelData } from "./components/FuelBreakPanel.js";
 import type { CrewPanelData } from "./components/MaintenanceCrewPanel.js";
 import type { MaintenanceRosterPanelData } from "./components/MaintenanceRosterPanel.js";
+import type { MiniMapPanelData } from "./components/MiniMapPanel.js";
 import type { TopBarData } from "./components/TopBar.js";
 
 type PanelDataMap = {
+  miniMap: MiniMapPanelData;
   maintenanceRoster: MaintenanceRosterPanelData;
   maintenanceCrew: CrewPanelData;
   fuelBreak: FuelBreakPanelData;
@@ -32,6 +35,9 @@ type PanelDataMap = {
 };
 
 const defaultPanelData: PanelDataMap = {
+  miniMap: {
+    world: null
+  },
   maintenanceRoster: {
     totalFirefighters: 0,
     availableFirefighters: 0,
@@ -92,6 +98,7 @@ export class UIController {
   private bottomControls = createBottomLeftControls();
   private maintenanceRoster = createMaintenanceRosterPanel();
   private maintenanceCrew = createMaintenanceCrewPanel();
+  private miniMap = createMiniMapPanel();
   private fuelBreak = createFuelBreakPanel();
   private fireDeploy = createFireDeployPanel();
   private fireUnitList = createFireUnitListPanel();
@@ -128,6 +135,7 @@ export class UIController {
       this.fireDeploy.element,
       this.fireSelectedUnit.element,
       this.fireUnitList.element,
+      this.miniMap.element,
       this.maintenanceRoster.element,
       this.maintenanceCrew.element,
       this.fuelBreak.element,
@@ -146,6 +154,7 @@ export class UIController {
       this.bottomControls.element,
       this.maintenanceRoster.element,
       this.maintenanceCrew.element,
+      this.miniMap.element,
       this.fuelBreak.element,
       this.fireDeploy.element,
       this.fireUnitList.element,
@@ -190,6 +199,7 @@ export class UIController {
 
     this.maintenanceRoster.update(this.panelData.maintenanceRoster ?? defaultPanelData.maintenanceRoster);
     this.maintenanceCrew.update(this.panelData.maintenanceCrew ?? defaultPanelData.maintenanceCrew);
+    this.miniMap.update(this.panelData.miniMap ?? defaultPanelData.miniMap);
     this.fuelBreak.update(this.panelData.fuelBreak ?? defaultPanelData.fuelBreak);
     const fireDeployData = this.panelData.fireDeploy ?? defaultPanelData.fireDeploy;
     this.fireDeploy.update({ ...fireDeployData, baseOpsOpen: snapshot.baseOpsOpen });

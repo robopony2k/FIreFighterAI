@@ -78,7 +78,11 @@ export const initPhaseUI = (container: HTMLElement): PhaseUiApi => {
     const windStrength = Math.round(world.wind.strength * 10);
     const windLabel = windStrength > 0 ? `Wind ${world.wind.name} ${windStrength}` : "Wind Calm";
     const tempLabel = Number.isFinite(world.climateTemp) ? `${Math.round(world.climateTemp)}C` : "n/a";
-    const forecastMeta = `Year ${world.year} | ${tempLabel} | ${windLabel}`;
+    const approvalPct = Math.round(Math.max(0, Math.min(1, world.approval)) * 100);
+    const totalHouses = Number.isFinite(world.totalHouses) ? Math.max(0, Math.floor(world.totalHouses)) : 0;
+    const destroyedHouses = Number.isFinite(world.destroyedHouses) ? Math.max(0, Math.floor(world.destroyedHouses)) : 0;
+    const houseCount = Math.max(0, totalHouses - destroyedHouses);
+    const forecastMeta = `Year ${world.year} | ${tempLabel} | ${windLabel} | Approval ${approvalPct}% | Houses ${houseCount}`;
     state.setForecast(
       world.climateForecast ?? null,
       world.climateForecastDay ?? 0,
@@ -86,6 +90,7 @@ export const initPhaseUI = (container: HTMLElement): PhaseUiApi => {
       world.climateTimeline?.daysPerYear ?? 360,
       forecastMeta
     );
+    controller.setPanelData("miniMap", { world });
 
     const rosterFirefighters = world.roster.filter((unit) => unit.kind === "firefighter");
     const rosterList = world.roster.map((entry) => {

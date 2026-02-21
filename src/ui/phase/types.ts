@@ -6,6 +6,7 @@ export type InteractionMode = "default" | "deploy" | "fuelBreak" | "formation" |
 export type PanelId =
   | "topbar"
   | "bottomControls"
+  | "miniMap"
   | "maintenanceRoster"
   | "maintenanceCrew"
   | "fuelBreak"

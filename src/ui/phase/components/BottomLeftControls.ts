@@ -25,10 +25,10 @@ export const createBottomLeftControls = (): BottomControlsView => {
   speedRow.className = "phase-control-row phase-time-speed-row";
   speedRow.innerHTML = `
     <button data-action="pause" aria-label="Pause" title="Pause">||</button>
-    <button data-action="time-speed-0" data-speed-index="0" aria-label="Speed 1x" title="Speed 1x">&gt;</button>
-    <button data-action="time-speed-1" data-speed-index="1" aria-label="Speed 2x" title="Speed 2x">&gt;&gt;</button>
-    <button data-action="time-speed-2" data-speed-index="2" aria-label="Speed 3x" title="Speed 3x">&gt;&gt;&gt;</button>
-    <button data-action="time-speed-3" data-speed-index="3" aria-label="Speed Max" title="Speed Max">&gt;&gt;&gt;&gt;</button>
+    <button data-action="time-speed-0" data-speed-index="0" aria-label="Speed 0.5x" title="Speed 0.5x">0.5x</button>
+    <button data-action="time-speed-1" data-speed-index="1" aria-label="Speed 1x" title="Speed 1x">1x</button>
+    <button data-action="time-speed-2" data-speed-index="2" aria-label="Speed 2x" title="Speed 2x">2x</button>
+    <button data-action="time-speed-8" data-speed-index="8" aria-label="Speed Max" title="Speed Max">MAX</button>
   `;
   timeGroup.append(titleRow, speedRow);
 

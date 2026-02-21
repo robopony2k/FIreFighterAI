@@ -31,6 +31,11 @@ export const DISABLE_INLAND_LAKES = true;
 export const FIREBREAK_COST_PER_TILE = 45;
 export const BASE_BUDGET = 320;
 export const APPROVAL_MIN = 0.2;
+export const TOWN_ALERT_MAX_POSTURE = 3;
+export const TOWN_ALERT_CHANGE_COOLDOWN_DAYS = 0.75;
+export const TOWN_ALERT_FATIGUE_RATE_BY_POSTURE = [0, 0.5, 1.0, 2.0] as const;
+export const TOWN_ALERT_RECOVERY_RATE = 0.75;
+export const TOWN_EVAC_SPEED = 0.2;
 export const FIRE_IGNITION_CHANCE_PER_DAY = 0.08;
 export const FIRE_SIM_SPEED = 1.35;
 export const FIRE_SIM_TICK_SECONDS = 1;
@@ -190,7 +195,7 @@ export const CONTOUR_STEP = 0.08;
 export const CONTOUR_BAND = 0.012;
 export const LIGHT_DIR = { x: 0.6, y: -0.8 };
 
-export const TIME_SPEED_OPTIONS = [1, 2, 3, 5, 10, 20, 40, 80];
+export const TIME_SPEED_OPTIONS = [0.5, 1, 2, 3, 5, 10, 20, 40, 80];
 
 export const UNIT_CONFIG: Record<UnitKind, { cost: number; speed: number; radius: number; power: number; color: string }> = {
   firefighter: { cost: 50, speed: 3.2, radius: 1.1, power: 0.5, color: "#f0b33b" },

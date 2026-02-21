@@ -158,9 +158,15 @@ export class ThreeTestWaterfallHelper {
       const dirZ = instances[base + 5];
       const halfWidth = Math.max(0.08, instances[base + 6]);
       const yaw = Math.atan2(dirX, dirZ);
-      dummy.position.set(x, top - drop * 0.5, z);
-      dummy.rotation.set(0, yaw, 0);
-      dummy.scale.set(halfWidth * 2.0, drop, 1);
+      const forwardOffset = Math.max(0.05, Math.min(0.46, halfWidth * 0.26 + drop * 0.11));
+      const pitch = Math.atan2(Math.max(0.04, drop * 0.42), Math.max(0.2, halfWidth * 1.3));
+      dummy.position.set(
+        x + dirX * forwardOffset,
+        top - drop * 0.5 + 0.016,
+        z + dirZ * forwardOffset
+      );
+      dummy.rotation.set(-pitch * 0.32, yaw, 0);
+      dummy.scale.set(halfWidth * 2.0, drop, 1.12);
       dummy.updateMatrix();
       this.mesh.setMatrixAt(i, dummy.matrix);
       dropNormAttr.setX(i, Math.min(1, drop / 1.6));

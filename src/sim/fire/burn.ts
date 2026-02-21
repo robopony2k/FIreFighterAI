@@ -2,6 +2,7 @@
 import type { WorldState } from "../../core/state.js";
 import type { Tile } from "../../core/types.js";
 import { getFuelProfiles } from "../../core/tiles.js";
+import { destroyHouse } from "../../core/towns.js";
 import { clamp } from "../../core/utils.js";
 import { markTileSoADirty } from "../../core/tileCache.js";
 
@@ -18,8 +19,13 @@ export function burnTile(state: WorldState, tile: Tile, fireDelta: number): bool
   tile.fire = clamp(tile.fire + growth, 0, 1);
   const fuelDrain = fireDelta * tile.burnRate * (0.6 + tile.fire * 0.9 + overheatFactor * conflagrationFuelBoost);
   tile.fuel = Math.max(0, tile.fuel - fuelDrain);
+  const tileIndex = state.tiles.indexOf(tile);
   if (tile.fuel <= 0.02 && tile.type !== "ash") {
     if (tile.type === "house" && !tile.houseDestroyed) {
+      if (tileIndex < 0 || !destroyHouse(state, tileIndex)) {
+        state.totalPropertyValue = Math.max(0, state.totalPropertyValue - Math.max(0, tile.houseValue));
+        state.totalPopulation = Math.max(0, state.totalPopulation - Math.max(0, tile.houseResidents));
+      }
       tile.houseDestroyed = true;
       state.destroyedHouses += 1;
       state.lostPropertyValue += tile.houseValue;

@@ -38,7 +38,8 @@ import { clearFireBlocks, markFireBlockActiveByTile } from "./fire/activeBlocks.
 import { advanceCareerDay, getClimateRisk } from "./climateRuntime.js";
 import { isBaseTileLost } from "./failure.js";
 import { updatePhaseControls } from "./lifecycle.js";
-import { stepGrowth } from "./growth.js";
+import { stepGrowth, stepTownSeasonScaling } from "./growth.js";
+import { stepTownAlertPosture } from "./towns.js";
 import { stepParticles } from "./particles.js";
 import {
   applyExtinguish,
@@ -532,6 +533,8 @@ export function stepSim(state: WorldState, effects: EffectsState, rng: RNG, delt
   }
 
   const climateRisk = getClimateRisk(state);
+  stepTownSeasonScaling(state);
+  stepTownAlertPosture(state, dayDelta);
   const allowGrowth = state.phase === "growth" && isGrowthWeather(state);
   const allowIgnition = state.phase === "fire" && climateRisk >= FIRE_WEATHER_RISK_MIN;
   const allowFireSim = state.lastActiveFires > 0 || state.fireBoundsActive || allowIgnition;

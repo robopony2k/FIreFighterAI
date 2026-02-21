@@ -634,17 +634,20 @@ function carveRiverValleys(
   const minRiverElev = 0.18;
   const bedSlope = 0.00012 + riverScale * 0.0001;
   const maxDepth = 0.03 + riverScale * 0.02;
-  const SURFACE_DROP_MIN = 0.0006;
+  const SURFACE_DROP_MIN = 0.00025;
   const MIN_RIVER_DEPTH = 0.006;
   const OUTLET_EPS = 0.0015;
   const BANK_CLEARANCE = 0.002;
   const EDGE_SURFACE_RISE = 0.0018;
-  const STEP_TARGET_DROP_BASE = 0.006;
-  const STEP_TARGET_DROP_STEEP_BONUS = 0.006;
-  const STEP_MIN_SPACING = 3;
-  const STEP_MAX_SPACING = 10;
+  const STEP_TARGET_DROP_BASE = 0.009;
+  const STEP_TARGET_DROP_STEEP_BONUS = 0.01;
+  const STEP_MIN_SPACING = 2;
+  const STEP_MAX_SPACING = 6;
   const PLUNGE_POOL_STRENGTH = 0.01;
   const STEP_LIP_STRENGTH = 0.42;
+  const POOL_STEP_THRESHOLD = 0.12;
+  const POOL_MAX_DROP_PER_TILE = 0.00012;
+  const POOL_MIN_MONOTONIC_DROP = 0.00002;
   const MOUTH_BLEND_START = 0.8;
   const MOUTH_BLEND_RANGE = 0.2;
   const RIVER_MASK_CORE_RADIUS = 0.42;
@@ -685,6 +688,278 @@ function carveRiverValleys(
           }
           riverMask[rowBase + nx] = 1;
         }
+      }
+    }
+  };
+  const safeBedAt = (idx: number): number => {
+    const existing = riverBedField[idx];
+    if (Number.isFinite(existing)) {
+      return existing;
+    }
+    return clamp(elevationMap[idx] - MIN_RIVER_DEPTH, 0, 1);
+  };
+  const safeSurfaceAt = (idx: number): number => {
+    const existing = riverSurfaceField[idx];
+    if (Number.isFinite(existing)) {
+      return existing;
+    }
+    const bed = safeBedAt(idx);
+    const minSurface = bed + MIN_RIVER_DEPTH;
+    const maxSurface = Math.max(minSurface, elevationMap[idx] - BANK_CLEARANCE);
+    return clamp(minSurface, minSurface, maxSurface);
+  };
+  const safeStepAt = (idx: number): number => {
+    const value = riverStepStrengthField[idx];
+    return Number.isFinite(value) ? clamp(value, 0, 1) : 0;
+  };
+  const enforcePoolGradients = (surfaces: number[], stepProfile: number[]): void => {
+    if (surfaces.length < 2 || stepProfile.length === 0) {
+      return;
+    }
+    for (let pass = 0; pass < 3; pass += 1) {
+      let changed = false;
+      for (let i = 1; i < surfaces.length; i += 1) {
+        const prevSurface = surfaces[i - 1];
+        const currentSurface = surfaces[i];
+        if (!Number.isFinite(prevSurface) || !Number.isFinite(currentSurface)) {
+          continue;
+        }
+        const stepStrength = clamp(stepProfile[i] ?? 0, 0, 1);
+        if (stepStrength >= POOL_STEP_THRESHOLD) {
+          continue;
+        }
+        const drop = prevSurface - currentSurface;
+        if (drop <= POOL_MAX_DROP_PER_TILE) {
+          continue;
+        }
+        const excess = drop - POOL_MAX_DROP_PER_TILE;
+        surfaces[i] += excess;
+        let remaining = excess;
+        for (let j = i + 1; j < surfaces.length; j += 1) {
+          const downstreamStep = clamp(stepProfile[j] ?? 0, 0, 1);
+          if (downstreamStep < POOL_STEP_THRESHOLD) {
+            continue;
+          }
+          surfaces[j] = Math.max(0, surfaces[j] - remaining);
+          const stepTarget = STEP_TARGET_DROP_BASE + STEP_TARGET_DROP_STEEP_BONUS;
+          const stepBoost = clamp(remaining / Math.max(1e-5, stepTarget), 0, 1);
+          stepProfile[j] = clamp(Math.max(downstreamStep, downstreamStep + stepBoost * 0.35), 0, 1);
+          remaining = 0;
+          break;
+        }
+        if (remaining > 0) {
+          const tail = surfaces.length - 1;
+          surfaces[tail] = Math.max(0, surfaces[tail] - remaining);
+          stepProfile[tail] = clamp(Math.max(stepProfile[tail] ?? 0, POOL_STEP_THRESHOLD + remaining * 28), 0, 1);
+        }
+        changed = true;
+      }
+      if (!changed) {
+        break;
+      }
+    }
+  };
+  const enforceOrthogonalRiverConnectivity = (): void => {
+    const cols = state.grid.cols;
+    const rows = state.grid.rows;
+    const idxAt = (x: number, y: number): number => y * cols + x;
+    const isInside = (x: number, y: number): boolean => x >= 0 && y >= 0 && x < cols && y < rows;
+    const neighborPenalty = (x: number, y: number): number => {
+      let support = 0;
+      for (let oy = -1; oy <= 1; oy += 1) {
+        for (let ox = -1; ox <= 1; ox += 1) {
+          if (ox === 0 && oy === 0) {
+            continue;
+          }
+          const nx = x + ox;
+          const ny = y + oy;
+          if (!isInside(nx, ny)) {
+            continue;
+          }
+          if (riverMask[idxAt(nx, ny)] > 0) {
+            support += 1;
+          }
+        }
+      }
+      return support >= 3 ? 0.18 : support <= 1 ? 0.05 : 0;
+    };
+    const ensureRiverCell = (targetIdx: number, aIdx: number, bIdx: number): boolean => {
+      const alreadyRiver = riverMask[targetIdx] > 0;
+      const bedA = safeBedAt(aIdx);
+      const bedB = safeBedAt(bIdx);
+      const surfaceA = safeSurfaceAt(aIdx);
+      const surfaceB = safeSurfaceAt(bIdx);
+      const stepA = safeStepAt(aIdx);
+      const stepB = safeStepAt(bIdx);
+      const bed = Math.min(bedA, bedB);
+      const minElevation = bed + MIN_RIVER_DEPTH + BANK_CLEARANCE;
+      if ((elevationMap[targetIdx] ?? 0) < minElevation) {
+        elevationMap[targetIdx] = minElevation;
+      }
+      const minSurface = bed + MIN_RIVER_DEPTH;
+      const maxSurface = Math.max(minSurface, (elevationMap[targetIdx] ?? 0) - BANK_CLEARANCE);
+      const surface = clamp((surfaceA + surfaceB) * 0.5, minSurface, maxSurface);
+      const step = clamp(Math.max(stepA, stepB) * 0.7, 0, 1);
+
+      riverMask[targetIdx] = 1;
+      const existingBed = riverBedField[targetIdx];
+      if (!Number.isFinite(existingBed) || bed < existingBed) {
+        riverBedField[targetIdx] = bed;
+      }
+      const existingSurface = riverSurfaceField[targetIdx];
+      const existingWeight = riverSurfaceWeight[targetIdx] ?? 0;
+      if (!Number.isFinite(existingSurface) || existingWeight <= 0) {
+        riverSurfaceField[targetIdx] = surface;
+        riverSurfaceWeight[targetIdx] = 0.3;
+      } else {
+        const weight = 0.3;
+        const totalWeight = existingWeight + weight;
+        riverSurfaceField[targetIdx] = (existingSurface * existingWeight + surface * weight) / totalWeight;
+        riverSurfaceWeight[targetIdx] = totalWeight;
+      }
+      riverStepStrengthField[targetIdx] = Math.max(riverStepStrengthField[targetIdx] ?? 0, step);
+      return !alreadyRiver;
+    };
+
+    for (let pass = 0; pass < 8; pass += 1) {
+      let changed = false;
+      const additions = new Map<number, { a: number; b: number; score: number }>();
+      const addCandidate = (targetIdx: number, aIdx: number, bIdx: number, score: number): void => {
+        if (riverMask[targetIdx] > 0) {
+          return;
+        }
+        const existing = additions.get(targetIdx);
+        if (!existing || score < existing.score) {
+          additions.set(targetIdx, { a: aIdx, b: bIdx, score });
+        }
+      };
+
+      for (let y = 0; y < rows - 1; y += 1) {
+        for (let x = 0; x < cols - 1; x += 1) {
+          const aIdx = idxAt(x, y);
+          const bIdx = idxAt(x + 1, y + 1);
+          if (!(riverMask[aIdx] > 0 && riverMask[bIdx] > 0)) {
+            continue;
+          }
+          const bridgeA = idxAt(x + 1, y);
+          const bridgeB = idxAt(x, y + 1);
+          if (riverMask[bridgeA] > 0 || riverMask[bridgeB] > 0) {
+            continue;
+          }
+          const elevA = elevationMap[aIdx] ?? 0;
+          const elevB = elevationMap[bIdx] ?? 0;
+          const elevBridgeA = elevationMap[bridgeA] ?? 0;
+          const elevBridgeB = elevationMap[bridgeB] ?? 0;
+          const scoreA =
+            Math.abs(elevBridgeA - elevA) + Math.abs(elevBridgeA - elevB) + neighborPenalty(x + 1, y);
+          const scoreB =
+            Math.abs(elevBridgeB - elevA) + Math.abs(elevBridgeB - elevB) + neighborPenalty(x, y + 1);
+          if (scoreA <= scoreB) {
+            addCandidate(bridgeA, aIdx, bIdx, scoreA);
+          } else {
+            addCandidate(bridgeB, aIdx, bIdx, scoreB);
+          }
+        }
+      }
+
+      for (let y = 0; y < rows; y += 1) {
+        for (let x = 1; x < cols - 1; x += 1) {
+          const center = idxAt(x, y);
+          if (riverMask[center] > 0) {
+            continue;
+          }
+          const left = idxAt(x - 1, y);
+          const right = idxAt(x + 1, y);
+          if (riverMask[left] > 0 && riverMask[right] > 0) {
+            const elevCenter = elevationMap[center] ?? 0;
+            const score =
+              Math.abs(elevCenter - (elevationMap[left] ?? elevCenter)) +
+              Math.abs(elevCenter - (elevationMap[right] ?? elevCenter)) +
+              neighborPenalty(x, y);
+            addCandidate(center, left, right, score);
+          }
+        }
+      }
+      for (let y = 1; y < rows - 1; y += 1) {
+        for (let x = 0; x < cols; x += 1) {
+          const center = idxAt(x, y);
+          if (riverMask[center] > 0) {
+            continue;
+          }
+          const up = idxAt(x, y - 1);
+          const down = idxAt(x, y + 1);
+          if (riverMask[up] > 0 && riverMask[down] > 0) {
+            const elevCenter = elevationMap[center] ?? 0;
+            const score =
+              Math.abs(elevCenter - (elevationMap[up] ?? elevCenter)) +
+              Math.abs(elevCenter - (elevationMap[down] ?? elevCenter)) +
+              neighborPenalty(x, y);
+            addCandidate(center, up, down, score);
+          }
+        }
+      }
+
+      for (let y = 0; y < rows; y += 1) {
+        for (let x = 0; x < cols; x += 1) {
+          const idx = idxAt(x, y);
+          if (riverMask[idx] === 0) {
+            continue;
+          }
+          const west = x > 0 && riverMask[idxAt(x - 1, y)] > 0;
+          const east = x < cols - 1 && riverMask[idxAt(x + 1, y)] > 0;
+          const north = y > 0 && riverMask[idxAt(x, y - 1)] > 0;
+          const south = y < rows - 1 && riverMask[idxAt(x, y + 1)] > 0;
+          const orthCount = (west ? 1 : 0) + (east ? 1 : 0) + (north ? 1 : 0) + (south ? 1 : 0);
+          if (orthCount > 0) {
+            continue;
+          }
+          const diagNeighbors: { x: number; y: number; idx: number; score: number }[] = [];
+          const tryDiag = (nx: number, ny: number) => {
+            if (!isInside(nx, ny)) {
+              return;
+            }
+            const nIdx = idxAt(nx, ny);
+            if (riverMask[nIdx] === 0) {
+              return;
+            }
+            const elevDiff = Math.abs((elevationMap[idx] ?? 0) - (elevationMap[nIdx] ?? 0));
+            diagNeighbors.push({ x: nx, y: ny, idx: nIdx, score: elevDiff });
+          };
+          tryDiag(x - 1, y - 1);
+          tryDiag(x + 1, y - 1);
+          tryDiag(x - 1, y + 1);
+          tryDiag(x + 1, y + 1);
+          if (diagNeighbors.length === 0) {
+            continue;
+          }
+          diagNeighbors.sort((a, b) => a.score - b.score);
+          const best = diagNeighbors[0];
+          const bridgeA = idxAt(best.x, y);
+          const bridgeB = idxAt(x, best.y);
+          const elev = elevationMap[idx] ?? 0;
+          const scoreA =
+            Math.abs((elevationMap[bridgeA] ?? elev) - elev) +
+            Math.abs((elevationMap[bridgeA] ?? elev) - (elevationMap[best.idx] ?? elev)) +
+            neighborPenalty(best.x, y);
+          const scoreB =
+            Math.abs((elevationMap[bridgeB] ?? elev) - elev) +
+            Math.abs((elevationMap[bridgeB] ?? elev) - (elevationMap[best.idx] ?? elev)) +
+            neighborPenalty(x, best.y);
+          if (scoreA <= scoreB) {
+            addCandidate(bridgeA, idx, best.idx, scoreA);
+          } else {
+            addCandidate(bridgeB, idx, best.idx, scoreB);
+          }
+        }
+      }
+
+      additions.forEach((candidate, idx) => {
+        if (ensureRiverCell(idx, candidate.a, candidate.b)) {
+          changed = true;
+        }
+      });
+      if (!changed) {
+        break;
       }
     }
   };
@@ -851,6 +1126,7 @@ function carveRiverValleys(
         riverStepProfile.push(stepStrength);
       }
     }
+    enforcePoolGradients(riverSurfaces, riverStepProfile);
     const outletIdx = riverPath[riverPath.length - 1];
     const outletX = outletIdx % state.grid.cols;
     const outletY = Math.floor(outletIdx / state.grid.cols);
@@ -874,7 +1150,11 @@ function carveRiverValleys(
       const terrainCap = Math.max(minSurface, elevationMap[idx] - BANK_CLEARANCE);
       let surface = clamp(riverSurfaces[i] ?? minSurface, minSurface, terrainCap);
       if (i > 0) {
-        const maxBySlope = (riverSurfaces[i - 1] ?? surface) - SURFACE_DROP_MIN;
+        const prevStep = clamp(riverStepProfile[i - 1] ?? 0, 0, 1);
+        const localStep = clamp(riverStepProfile[i] ?? 0, 0, 1);
+        const inPoolSegment = Math.max(prevStep, localStep) < POOL_STEP_THRESHOLD;
+        const minDrop = inPoolSegment ? POOL_MIN_MONOTONIC_DROP : SURFACE_DROP_MIN;
+        const maxBySlope = (riverSurfaces[i - 1] ?? surface) - minDrop;
         if (surface > maxBySlope) {
           surface = maxBySlope;
         }
@@ -1006,6 +1286,7 @@ function carveRiverValleys(
       }
     }
   }
+  enforceOrthogonalRiverConnectivity();
   for (let i = 0; i < totalTiles; i += 1) {
     if (!riverMask[i]) {
       continue;

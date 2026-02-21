@@ -4,7 +4,7 @@ import type { InputState } from "../../../core/inputState.js";
 import type { UiState } from "../../../core/uiState.js";
 import type { RenderState } from "../../../render/renderState.js";
 import { TIME_SPEED_OPTIONS, ZOOM_STEP } from "../../../core/config.js";
-import { inBounds, indexFor } from "../../../core/grid.js";
+import { inBounds } from "../../../core/grid.js";
 import { screenToWorld, zoomAtPointer } from "../../../render/inputProjection.js";
 import { setStatus } from "../../../core/state.js";
 import {
@@ -30,9 +30,6 @@ import type { OverlayRefs } from "../../overlay.js";
 import type { PhaseUiApi } from "../index.js";
 import { gateInput, isInputAllowed } from "../inputGate.js";
 import type { InteractionMode, InputAction } from "../types.js";
-import { ensureTileSoA } from "../../../core/tileCache.js";
-import { markFireBounds } from "../../../sim/fire/bounds.js";
-import { ensureFireBlocks, markFireBlockActiveByTile } from "../../../sim/fire/activeBlocks.js";
 import { DEFAULT_MAP_SIZE, DEFAULT_RUN_OPTIONS, DEFAULT_RUN_SEED } from "../../run-config.js";
 import type { NewRunConfig } from "../../run-config.js";
 import { bindCanvasMouseHandlers } from "./canvasMouse.js";
@@ -40,8 +37,6 @@ import { DEBUG_CELL_TOGGLE_KEY, DEBUG_IGNITE_TOGGLE_KEY, DEBUG_TYPE_EVENT } from
 import { isEditableTarget } from "./keyboard.js";
 import { hideStartMenu as hideStartMenuView, showStartMenu as showStartMenuView } from "./startMenu.js";
 import { getActionTarget } from "./uiActions.js";
-
-const DEBUG_IGNITE_SIM_KICK_SECONDS = 0.12;
 
 const getInteractionMode = (state: WorldState, inputState: InputState): InteractionMode => {
   if (state.deployMode === "clear") {
@@ -181,33 +176,6 @@ export const bindPhaseUi = ({
   };
   refreshDebugToggle();
   refreshDebugTypeToggle();
-
-  const igniteDebugFireAt = (tile: { x: number; y: number }): void => {
-    const idx = indexFor(state.grid, tile.x, tile.y);
-    const target = state.tiles[idx];
-    if (target.fuel <= 0) {
-      setStatus(state, "Cannot ignite: no fuel.");
-      return;
-    }
-    if (state.tileSoaDirty) {
-      ensureTileSoA(state);
-    }
-    ensureFireBlocks(state);
-    const newFire = Math.min(1, 0.65 + rng.next() * 0.3);
-      target.fire = newFire;
-      target.heat = Math.max(target.heat, target.ignitionPoint * 1.4);
-      state.tileFire[idx] = target.fire;
-      state.tileHeat[idx] = target.heat;
-      if (state.tileIgniteAt[idx] < Number.POSITIVE_INFINITY) {
-        state.tileIgniteAt[idx] = Number.POSITIVE_INFINITY;
-        state.fireScheduledCount = Math.max(0, state.fireScheduledCount - 1);
-      }
-      markFireBlockActiveByTile(state, idx);
-      markFireBounds(state, tile.x, tile.y);
-      state.lastActiveFires = Math.max(state.lastActiveFires, 1);
-      state.fireSimAccumulator = Math.max(state.fireSimAccumulator, DEBUG_IGNITE_SIM_KICK_SECONDS);
-      setStatus(state, `Debug ignition at ${tile.x}, ${tile.y}`);
-    };
 
   const isOverlayLocked = (): boolean => uiState.overlayVisible && uiState.overlayAction === "restart";
 
@@ -600,7 +568,6 @@ export const bindPhaseUi = ({
     isOverlayLocked,
     getTileFromPointer: (event) => getTileFromPointer(state, renderState, canvas, event),
     getWorldFromPointer: (event) => getWorldFromPointer(state, renderState, canvas, event),
-    igniteDebugFireAt,
     isDebugIgniteMode: () => debugIgniteMode,
     isPanModifierDown: () => isSpaceDown,
     canZoom: () => isInputAllowed(state.phase, getInteractionMode(state, inputState), "zoom").allowed

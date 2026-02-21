@@ -1,8 +1,17 @@
-import type { RNG, Point } from "../core/types.js";
+import type { RNG, Point, Town } from "../core/types.js";
 import type { WorldState } from "../core/state.js";
 import { HOUSE_VARIANTS } from "../core/buildingFootprints.js";
 import { DEBUG_TERRAIN } from "../core/config.js";
 import { inBounds, indexFor } from "../core/grid.js";
+import {
+  placeHouse,
+  removeHouse,
+  recountTownHouses,
+  resolveNearestTownId,
+  validateTownInvariants,
+  STRUCTURE_HOUSE,
+  STRUCTURE_NONE
+} from "../core/towns.js";
 import {
   carveRoad,
   collectRoadTiles,
@@ -32,6 +41,158 @@ type HousePlacementContext = {
 
 export type SettlementPlacementResult = {
   generatedRoads: boolean;
+};
+
+type TownCenterSeed = Point & {
+  radius: number;
+};
+
+const TOWN_NAME_POOL: readonly string[] = [
+  "Ashbourne",
+  "Ashford",
+  "Ashbridge",
+  "Ashmere",
+  "Ashmoor",
+  "Ashholt",
+  "Ashhaven",
+  "Ashwick",
+  "Ashvale",
+  "Ashgrove",
+  "Cinderbrook",
+  "Cinderford",
+  "Cinderhollow",
+  "Cindermere",
+  "Emberleigh",
+  "Emberford",
+  "Emberfield",
+  "Embervale",
+  "Emberwick",
+  "Emberton",
+  "Burnside",
+  "Burnham",
+  "Burnhaven",
+  "Burnholt",
+  "Burnstead",
+  "Burnwick",
+  "Burnridge",
+  "Burnmere",
+  "Burnhollow",
+  "Burncross",
+  "Scorchfield",
+  "Scorchford",
+  "Scorchmere",
+  "Scorchwell",
+  "Charminster",
+  "Charford",
+  "Charbridge",
+  "Charbury",
+  "Charvale",
+  "Charwood",
+  "Smokebrook",
+  "Smokeford",
+  "Smokehaven",
+  "Smokevale",
+  "Sootbridge",
+  "Sootmere",
+  "Sooton",
+  "Blackash",
+  "Blackcinder",
+  "Blackember",
+  "Redhaven",
+  "Redglen",
+  "Redvale",
+  "Brimstone Bay",
+  "Brimstone Downs",
+  "Firebreak Flats",
+  "Firewatch Ridge",
+  "Glowmere",
+  "Hearthwick",
+  "Pyrewick"
+];
+
+const createTownNameRng = (seed: number): (() => number) => {
+  let state = (seed >>> 0) ^ 0xa511e9b3;
+  return (): number => {
+    state = (Math.imul(state, 1664525) + 1013904223) >>> 0;
+    return state / 0x100000000;
+  };
+};
+
+const shuffleTownNames = (seed: number): string[] => {
+  const names = [...TOWN_NAME_POOL];
+  const next = createTownNameRng(seed);
+  for (let i = names.length - 1; i > 0; i -= 1) {
+    const swapIndex = Math.floor(next() * (i + 1));
+    const temp = names[i];
+    names[i] = names[swapIndex];
+    names[swapIndex] = temp;
+  }
+  return names;
+};
+
+const assignTownNames = (state: WorldState, centers: TownCenterSeed[]): void => {
+  if (centers.length === 0) {
+    state.towns = [];
+    return;
+  }
+  const unique: TownCenterSeed[] = [];
+  const seen = new Set<string>();
+  centers.forEach((center) => {
+    const key = `${center.x},${center.y}`;
+    if (seen.has(key)) {
+      return;
+    }
+    seen.add(key);
+    unique.push(center);
+  });
+  const ranked = unique
+    .map((center, index) => ({
+      x: center.x,
+      y: center.y,
+      radius: center.radius,
+      index,
+      dist: Math.hypot(center.x - state.basePoint.x, center.y - state.basePoint.y)
+    }))
+    .sort((a, b) => {
+      if (a.index === 0 && b.index !== 0) {
+        return -1;
+      }
+      if (b.index === 0 && a.index !== 0) {
+        return 1;
+      }
+      if (a.dist !== b.dist) {
+        return a.dist - b.dist;
+      }
+      if (a.y !== b.y) {
+        return a.y - b.y;
+      }
+      return a.x - b.x;
+    });
+  const shuffledNames = shuffleTownNames(state.seed ^ state.grid.cols * 73856093 ^ state.grid.rows * 19349663);
+  const towns: Town[] = ranked.map((center, index) => {
+    const baseName = shuffledNames[index % shuffledNames.length];
+    const suffix = index < shuffledNames.length ? "" : ` ${Math.floor(index / shuffledNames.length) + 1}`;
+    return {
+      id: index,
+      name: `${baseName}${suffix}`,
+      cx: center.x,
+      cy: center.y,
+      x: center.x,
+      y: center.y,
+      radius: Math.max(3, center.radius),
+      houseCount: 0,
+      alertPosture: 0,
+      alertCooldownDays: 0,
+      nonApprovingHouseCount: 0,
+      approval: 1,
+      evacState: "none",
+      evacProgress: 0,
+      lastPostureChangeDay: 0,
+      desiredHouseDelta: 0,
+      lastSeasonHouseDelta: 0
+    };
+  });
+  state.towns = towns;
 };
 
 const noiseAt = (value: number): number => {
@@ -220,18 +381,13 @@ function placeHouseAt(
   if (!isBuildable(state, x, y)) {
     return false;
   }
-  tile.type = "house";
-  tile.canopy = 0;
-  tile.canopyCover = 0;
-  tile.stemDensity = 0;
-  tile.dominantTreeType = null;
-  tile.treeType = null;
   tile.houseValue = value;
   tile.houseResidents = residents;
   tile.houseDestroyed = false;
-  state.totalPropertyValue += value;
-  state.totalPopulation += residents;
-  state.totalHouses += 1;
+  const townId = resolveNearestTownId(state, x, y);
+  if (townId < 0 || !placeHouse(state, idx, townId)) {
+    return false;
+  }
   markHouseFootprint(state, bounds, context);
   context.footprints.set(idx, bounds);
   return true;
@@ -506,6 +662,52 @@ function connectDetachedLandPass(state: WorldState, rng: RNG, allowBridge: boole
   }
 }
 
+function remapHousesToNearestTown(state: WorldState): void {
+  if (state.towns.length === 0) {
+    return;
+  }
+  const cols = state.grid.cols;
+  for (let idx = 0; idx < state.grid.totalTiles; idx += 1) {
+    if (state.tileStructure[idx] !== STRUCTURE_HOUSE) {
+      continue;
+    }
+    const tile = state.tiles[idx];
+    if (!tile || tile.type !== "house" || tile.houseDestroyed) {
+      continue;
+    }
+    const x = idx % cols;
+    const y = Math.floor(idx / cols);
+    const targetTownId = resolveNearestTownId(state, x, y);
+    const currentTownId = state.tileTownId[idx];
+    if (targetTownId < 0 || targetTownId === currentTownId) {
+      continue;
+    }
+    const value = tile.houseValue;
+    const residents = tile.houseResidents;
+    if (!removeHouse(state, idx)) {
+      continue;
+    }
+    tile.houseValue = value;
+    tile.houseResidents = residents;
+    tile.houseDestroyed = false;
+    if (!placeHouse(state, idx, targetTownId)) {
+      tile.houseValue = value;
+      tile.houseResidents = residents;
+      tile.houseDestroyed = false;
+      placeHouse(state, idx, currentTownId);
+    }
+  }
+  recountTownHouses(state);
+}
+
+function validateTownState(state: WorldState): void {
+  const invariants = validateTownInvariants(state);
+  if (!invariants.ok) {
+    const detail = invariants.errors.slice(0, 8).join(" | ");
+    console.warn(`[towns] invariant failure: ${detail}`);
+  }
+}
+
 function connectDetachedLand(state: WorldState, rng: RNG): void {
   connectDetachedLandPass(state, rng, false);
   connectDetachedLandPass(state, rng, true);
@@ -516,10 +718,23 @@ export function placeSettlements(state: WorldState, rng: RNG): SettlementPlaceme
   state.totalPopulation = 0;
   state.totalHouses = 0;
   state.destroyedHouses = 0;
+  state.townGrowthAppliedYear = -1;
+  state.townAlertDayAccumulator = 0;
+  state.towns = [];
   if (state.structureMask.length !== state.grid.totalTiles) {
     state.structureMask = new Uint8Array(state.grid.totalTiles);
   } else {
     state.structureMask.fill(0);
+  }
+  if (state.tileTownId.length !== state.grid.totalTiles) {
+    state.tileTownId = new Int16Array(state.grid.totalTiles).fill(-1);
+  } else {
+    state.tileTownId.fill(-1);
+  }
+  if (state.tileStructure.length !== state.grid.totalTiles) {
+    state.tileStructure = new Uint8Array(state.grid.totalTiles);
+  } else {
+    state.tileStructure.fill(STRUCTURE_NONE);
   }
   const context: HousePlacementContext = {
     bufferMask: new Uint8Array(state.grid.totalTiles),
@@ -537,6 +752,7 @@ export function placeSettlements(state: WorldState, rng: RNG): SettlementPlaceme
   carveRoadRing(state, rng, state.basePoint, ringRadius);
 
   if (fastMode) {
+    assignTownNames(state, [{ x: state.basePoint.x, y: state.basePoint.y, radius: centralRadius + 2 }]);
     const fastSpokes = Math.min(4, spokeCount);
     for (let i = 0; i < fastSpokes; i += 1) {
       const angle = (Math.PI * 2 * i) / fastSpokes;
@@ -550,8 +766,12 @@ export function placeSettlements(state: WorldState, rng: RNG): SettlementPlaceme
     }
     const centralHouseCount = 12 + Math.floor(rng.next() * 8);
     placeVillageHouses(state, rng, state.basePoint, centralRadius, centralHouseCount, 150, 320, 2, 5, 0.85, context);
+    remapHousesToNearestTown(state);
+    validateTownState(state);
     return { generatedRoads: true };
   }
+
+  assignTownNames(state, [{ x: state.basePoint.x, y: state.basePoint.y, radius: centralRadius + 2 }]);
 
   for (let i = 0; i < spokeCount; i += 1) {
     const angle = (Math.PI * 2 * i) / spokeCount + (rng.next() - 0.5) * 0.5;
@@ -591,6 +811,12 @@ export function placeSettlements(state: WorldState, rng: RNG): SettlementPlaceme
     }
     villageCenters.push({ x, y });
   }
+
+  assignTownNames(state, [
+    { x: state.basePoint.x, y: state.basePoint.y, radius: centralRadius + 2 },
+    ...villageCenters.map((center) => ({ x: center.x, y: center.y, radius: 6 }))
+  ]);
+  remapHousesToNearestTown(state);
 
   villageCenters.forEach((center) => {
     const anchor = findNearestRoadTile(state, center);
@@ -636,6 +862,8 @@ export function placeSettlements(state: WorldState, rng: RNG): SettlementPlaceme
   }
 
   connectDetachedLand(state, rng);
+  remapHousesToNearestTown(state);
+  validateTownState(state);
   if (DEBUG_TERRAIN) {
     const stats = getRoadGenerationStats();
     let bridgeTiles = 0;

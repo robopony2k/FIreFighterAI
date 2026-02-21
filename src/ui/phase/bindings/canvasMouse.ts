@@ -1,4 +1,4 @@
-import type { RNG, Unit } from "../../../core/types.js";
+import type { RNG } from "../../../core/types.js";
 import type { WorldState } from "../../../core/state.js";
 import type { InputState } from "../../../core/inputState.js";
 import type { RenderState } from "../../../render/renderState.js";
@@ -6,17 +6,14 @@ import type { InputAction } from "../types.js";
 import { inBounds } from "../../../core/grid.js";
 import { panCameraByPixels, screenToWorld, zoomAtPointer } from "../../../render/inputProjection.js";
 import { resetStatus, setStatus } from "../../../core/state.js";
-import { handleUnitDeployment, handleUnitRetask } from "../../../sim/index.js";
+import { clearUnitSelection } from "../../../sim/units.js";
 import {
-  assignFormationTargets,
-  clearFuelLine,
-  clearUnitSelection,
-  getSelectedUnits,
-  getUnitAt,
-  selectUnit,
-  setDeployMode,
-  toggleUnitSelection
-} from "../../../sim/units.js";
+  beginClearFuelBreakLine,
+  completeClearFuelBreakLine,
+  handleMapFormationDragCommand,
+  handleMapPrimaryTileClick,
+  handleMapRetaskTileCommand
+} from "../../../sim/input/mapTileActions.js";
 import { wheelDeltaToZoomFactor } from "./canvasWheel.js";
 
 type ListenCanvas = <K extends keyof HTMLElementEventMap>(
@@ -37,7 +34,6 @@ export type BindCanvasMouseDeps = {
   isOverlayLocked: () => boolean;
   getTileFromPointer: (event: MouseEvent) => { x: number; y: number } | null;
   getWorldFromPointer: (event: MouseEvent) => { x: number; y: number };
-  igniteDebugFireAt: (tile: { x: number; y: number }) => void;
   isDebugIgniteMode: () => boolean;
   isPanModifierDown: () => boolean;
   canZoom: () => boolean;
@@ -55,7 +51,6 @@ export const bindCanvasMouseHandlers = ({
   isOverlayLocked,
   getTileFromPointer,
   getWorldFromPointer,
-  igniteDebugFireAt,
   isDebugIgniteMode,
   isPanModifierDown,
   canZoom
@@ -96,48 +91,18 @@ export const bindCanvasMouseHandlers = ({
     if (!tile) {
       return;
     }
-    if (isDebugIgniteMode()) {
-      igniteDebugFireAt(tile);
-      return;
-    }
-    const clickedUnit = getUnitAt(state, tile.x, tile.y);
-    if (clickedUnit) {
-      gate("select", () => {
-        let unitToSelect: Unit | null = clickedUnit;
-        if (clickedUnit.kind === "firefighter") {
-          if (clickedUnit.assignedTruckId) {
-            unitToSelect = state.units.find((u) => u.id === clickedUnit.assignedTruckId) ?? null;
-            if (unitToSelect) {
-              setStatus(state, "Firefighter selected. Controlling assigned truck.");
-            }
-          } else {
-            unitToSelect = null;
-            setStatus(state, "This firefighter is not assigned to a truck.");
-          }
-        }
-        if (unitToSelect) {
-          if ((event as MouseEvent).shiftKey) {
-            toggleUnitSelection(state, unitToSelect);
-          } else {
-            selectUnit(state, unitToSelect);
-          }
-        } else if (!(event as MouseEvent).shiftKey) {
-          clearUnitSelection(state);
-        }
-        setDeployMode(state, null);
-      });
-      return;
-    }
-    if (state.deployMode) {
-      gate("deploy", () => handleUnitDeployment(state, rng, tile.x, tile.y));
-      return;
-    }
-    gate("select", () => {
-      if (!(event as MouseEvent).shiftKey) {
-        clearUnitSelection(state);
-      }
-      setStatus(state, "Select a unit or choose a deployment.");
+    const handled = handleMapPrimaryTileClick({
+      state,
+      inputState,
+      rng,
+      tile,
+      shiftKey: (event as MouseEvent).shiftKey,
+      debugIgniteMode: isDebugIgniteMode(),
+      gate
     });
+    if (!handled) {
+      return;
+    }
   });
 
   listenCanvas("mousedown", (event) => {
@@ -175,7 +140,7 @@ export const bindCanvasMouseHandlers = ({
         if (!tile) {
           return;
         }
-        inputState.clearLineStart = tile;
+        beginClearFuelBreakLine(state, inputState, tile);
       });
       return;
     }
@@ -205,15 +170,12 @@ export const bindCanvasMouseHandlers = ({
             ? Math.hypot(canvasPos.x - rightDragStart.x, canvasPos.y - rightDragStart.y)
             : 0;
         if (tile && dragDistance < 6) {
-          gate("retask", () => handleUnitRetask(state, tile.x, tile.y));
+          handleMapRetaskTileCommand({ state, tile, gate });
         } else {
           const start = inputState.formationStart;
           const end = inputState.formationEnd;
           if (start && end) {
-            gate("formation", () => {
-              const selectedUnits = getSelectedUnits(state);
-              assignFormationTargets(state, selectedUnits, start, end);
-            });
+            handleMapFormationDragCommand({ state, start, end, gate });
           }
         }
         isFormationDrag = false;
@@ -223,7 +185,7 @@ export const bindCanvasMouseHandlers = ({
       } else if (state.selectedUnitIds.length > 0) {
         const tile = getTileFromPointer(mouseEvent);
         if (tile) {
-          gate("retask", () => handleUnitRetask(state, tile.x, tile.y));
+          handleMapRetaskTileCommand({ state, tile, gate });
         }
       }
       return;
@@ -293,10 +255,7 @@ export const bindCanvasMouseHandlers = ({
       inputState.clearLineStart = null;
       return;
     }
-    gate("clearFuelBreak", () => {
-      clearFuelLine(state, rng, inputState.clearLineStart as { x: number; y: number }, tile);
-      inputState.clearLineStart = null;
-    });
+    completeClearFuelBreakLine({ state, inputState, rng, tile, gate });
   });
 
   listenCanvas("mouseleave", () => {

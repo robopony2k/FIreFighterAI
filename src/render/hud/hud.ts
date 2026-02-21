@@ -124,9 +124,12 @@ const renderTopBar = (ctx: CanvasRenderingContext2D, world: WorldState, ui: HudS
   const centerText = `${phaseText} | DAY ${day} | YEAR ${year}`;
 
   const approval = Number.isFinite(world.approval) ? `${Math.round(clamp(world.approval, 0, 1) * 100)}%` : "--";
+  const totalHouses = Number.isFinite(world.totalHouses) ? Math.max(0, Math.floor(world.totalHouses)) : 0;
+  const destroyedHouses = Number.isFinite(world.destroyedHouses) ? Math.max(0, Math.floor(world.destroyedHouses)) : 0;
+  const liveHouses = Math.max(0, totalHouses - destroyedHouses);
   const speedIndex = Math.min(Math.max(world.timeSpeedIndex ?? 0, 0), TIME_SPEED_OPTIONS.length - 1);
   const speed = TIME_SPEED_OPTIONS[speedIndex] ?? 1;
-  const rightText = `APPROVAL ${approval}`;
+  const rightText = `APPROVAL ${approval} | HOUSES ${liveHouses}`;
 
   ctx.fillStyle = "#f2f2f2";
   ctx.font = "600 12px ui-sans-serif, system-ui, sans-serif";

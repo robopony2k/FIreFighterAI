@@ -139,6 +139,7 @@ export class ThreeTestRiverWaterHelper {
     geometry.setAttribute("uv", new THREE.BufferAttribute(river.uvs, 2));
     geometry.setAttribute("a_bankDist", new THREE.BufferAttribute(river.bankDist, 1));
     geometry.setAttribute("a_flowDir", new THREE.BufferAttribute(river.flowDir, 2));
+    geometry.setAttribute("a_flowSpeed", new THREE.BufferAttribute(river.flowSpeed, 1));
     geometry.setAttribute("a_rapid", new THREE.BufferAttribute(river.rapid, 1));
     geometry.setIndex(new THREE.BufferAttribute(river.indices, 1));
     geometry.computeVertexNormals();
@@ -177,20 +178,24 @@ export class ThreeTestRiverWaterHelper {
         varying vec3 vGeomNormal;
         varying float vBankDist;
         varying vec2 vFlowDir;
+        varying float vFlowSpeed;
         varying float vRapid;
         uniform float u_time;
         uniform float u_quality;
         attribute float a_bankDist;
         attribute vec2 a_flowDir;
+        attribute float a_flowSpeed;
         attribute float a_rapid;
         void main() {
           vUv = uv;
           vBankDist = a_bankDist;
           vFlowDir = a_flowDir;
+          vFlowSpeed = a_flowSpeed;
           vRapid = a_rapid;
           float qualityFactor = step(0.5, u_quality);
           float centerFactor = smoothstep(0.08, 0.6, a_bankDist);
-          float wobble = sin(dot(position.xz, a_flowDir * 2.4) + u_time * (1.8 + a_rapid * 2.2)) * 0.004;
+          float speedFactor = clamp(a_flowSpeed, 0.25, 2.4);
+          float wobble = sin(dot(position.xz, a_flowDir * 2.4) + u_time * (1.35 + a_rapid * 2.1) * speedFactor) * 0.004;
           vec3 displaced = position + vec3(0.0, wobble * centerFactor * qualityFactor, 0.0);
           vec4 worldPos = modelMatrix * vec4(displaced, 1.0);
           vWorldPos = worldPos.xyz;
@@ -204,6 +209,7 @@ export class ThreeTestRiverWaterHelper {
         varying vec3 vGeomNormal;
         varying float vBankDist;
         varying vec2 vFlowDir;
+        varying float vFlowSpeed;
         varying float vRapid;
         uniform float u_time;
         uniform vec3 u_color;
@@ -227,9 +233,11 @@ export class ThreeTestRiverWaterHelper {
         void main() {
           float qualityFactor = step(0.5, u_quality);
           float edge = smoothstep(0.02, 0.25, vBankDist);
-          if (edge < 0.06) discard;
+          float edgeFeather = smoothstep(0.0, 0.14, vBankDist);
           vec2 worldUv = vWorldPos.xz * u_waveScale;
-          vec2 flowOffset = normalize(vFlowDir + vec2(1e-4)) * (u_time * (0.09 + vRapid * 0.24));
+          vec2 flowN = normalize(vFlowDir + vec2(1e-4));
+          float flowSpeed = clamp(vFlowSpeed, 0.25, 2.4);
+          vec2 flowOffset = flowN * (u_time * (0.07 + vRapid * 0.2) * flowSpeed);
           vec2 uv1 = worldUv * 8.0 + flowOffset * 1.7 + u_scroll1 * (u_time * 1.8);
           vec2 uv2 = worldUv * 10.4 - flowOffset.yx * 1.4 + u_scroll2 * (u_time * 2.2);
           vec2 nXY = texture2D(u_normalMap1, uv1).xy * 2.0 - 1.0 + (texture2D(u_normalMap2, uv2).xy * 2.0 - 1.0) * 0.85;
@@ -248,9 +256,12 @@ export class ThreeTestRiverWaterHelper {
           float spec = specBase * u_specular * (0.4 + rapid * 0.8) * (0.7 + 0.45 * grazing);
           float fresnel = pow(1.0 - max(dot(viewDir, n), 0.0), 3.5);
           vec3 baseColor = mix(u_color, u_deepColor, clamp(1.0 - edge * 1.2, 0.0, 1.0) * 0.42);
-          float foam = (1.0 - edge) * (0.1 + rapid * 0.28) + rapid * 0.14;
+          float centerBand = smoothstep(0.08, 0.55, vBankDist) * (1.0 - smoothstep(0.62, 0.95, vBankDist));
+          float ripplePhase = dot(worldUv, flowN * 18.0) - u_time * (2.4 + flowSpeed * 1.6);
+          float centerRipple = 0.5 + 0.5 * sin(ripplePhase);
+          float foam = (1.0 - edge) * (0.1 + rapid * 0.28) + rapid * 0.14 + centerBand * centerRipple * (0.05 + rapid * 0.09);
           vec3 foamColor = vec3(0.93, 0.97, 1.0);
-          vec3 litBase = mix(baseColor, foamColor, clamp(foam, 0.0, 1.0) * 0.55);
+          vec3 litBase = mix(baseColor, foamColor, clamp(foam, 0.0, 1.0) * (0.5 + edgeFeather * 0.1));
           float skyT = clamp(0.58 + 0.42 * viewDir.y, 0.0, 1.0);
           vec3 skyReflect = mix(u_skyHorizonColor, u_skyTopColor, skyT);
           float sunGlitter = pow(max(dot(reflect(-viewDir, n), lightDir), 0.0), mix(130.0, 74.0, grazing)) * (0.24 + rapid * 0.7);

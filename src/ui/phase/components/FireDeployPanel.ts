@@ -54,10 +54,15 @@ export const createFireDeployPanel = (): FireDeployPanelView => {
   deployTruck.className = "phase-action";
   deployTruck.dataset.action = "deploy-truck";
 
+  const threeTestHint = document.createElement("div");
+  threeTestHint.className = "phase-card-summary phase-three-test-hud-note";
+  threeTestHint.textContent =
+    "3D controls: left-click terrain to deploy/select/ignite, right-click to retask selected trucks.";
+
   actions.append(deployTruck, deployFirefighter);
 
   header.append(title, baseButton);
-  element.append(header, hint, list, actions);
+  element.append(header, hint, list, actions, threeTestHint);
 
   return {
     element,
@@ -78,7 +83,7 @@ export const createFireDeployPanel = (): FireDeployPanelView => {
           row.dataset.action = "select-truck";
           row.dataset.truckId = truck.id.toString();
           row.classList.toggle("is-selected", truck.selected);
-          const crewLabel = `Crew ${truck.crewCount}/${truck.crewCapacity} · ${truck.crewMode}`;
+          const crewLabel = `Crew ${truck.crewCount}/${truck.crewCapacity} - ${truck.crewMode}`;
           row.innerHTML = `
             <div class="phase-truck-key">${truck.hotkey}</div>
             <div class="phase-truck-name">${truck.name}</div>

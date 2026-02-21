@@ -16,7 +16,7 @@ export class GameState {
     interactionMode: "default",
     paused: false,
     alert: null,
-    timeSpeedIndex: 0,
+    timeSpeedIndex: 1,
     baseOpsOpen: false,
     forecast: null,
     forecastDay: 0,

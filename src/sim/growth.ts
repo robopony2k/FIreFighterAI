@@ -5,6 +5,14 @@ import { clamp } from "../core/utils.js";
 import { applyFuel, getFuelProfiles } from "../core/tiles.js";
 import { syncTileSoAIndex } from "../core/tileCache.js";
 import { indexFor } from "../core/grid.js";
+import {
+  placeHouse,
+  removeHouse,
+  recountTownHouses,
+  validateTownInvariants,
+  STRUCTURE_HOUSE,
+  STRUCTURE_NONE
+} from "../core/towns.js";
 import { hash2D } from "../mapgen/noise.js";
 import { profEnd, profStart } from "./prof.js";
 
@@ -21,6 +29,11 @@ const CANOPY_FOREST_THRESHOLD = 0.35;
 const LONG_DISTANCE_RECRUIT_FACTOR = 0.25;
 const SEED_NORMALIZE = 3.4;
 const CANOPY_DIRTY_THRESHOLD = 0.02;
+const TOWN_RADIUS_MIN = 4;
+const TOWN_CAP_DENSITY = 0.55;
+const TOWN_SEASON_DELTA_MAX = 3;
+const TOWN_STEEP_ELEVATION_DIFF = 0.12;
+const TOWN_ROAD_PROXIMITY = 2;
 
 const SEED_NEIGHBORS = [
   { x: 1, y: 0, weight: 1 },
@@ -166,6 +179,297 @@ function logGrowthMetrics(state: WorldState): void {
   console.log(
     `Year ${state.year} growth: ash ${ashCount} grass ${grassCount} forest ${forestCount} canopyByWaterDist [0-4:${bandAverages[0]} 5-9:${bandAverages[1]} 10-14:${bandAverages[2]} 15-19:${bandAverages[3]} 20+:${bandAverages[4]}]`
   );
+}
+
+const getTownCenterX = (town: WorldState["towns"][number]): number => {
+  return Number.isFinite(town.cx) ? town.cx : town.x;
+};
+
+const getTownCenterY = (town: WorldState["towns"][number]): number => {
+  return Number.isFinite(town.cy) ? town.cy : town.y;
+};
+
+const isTownBuildableType = (type: WorldState["tiles"][number]["type"]): boolean =>
+  type === "grass" || type === "scrub" || type === "floodplain" || type === "forest" || type === "bare";
+
+const hasRoadNetwork = (state: WorldState): boolean => {
+  for (let i = 0; i < state.tiles.length; i += 1) {
+    if (state.tiles[i].type === "road") {
+      return true;
+    }
+  }
+  return false;
+};
+
+const hasNearbyRoad = (state: WorldState, x: number, y: number, radius: number): boolean => {
+  for (let dy = -radius; dy <= radius; dy += 1) {
+    for (let dx = -radius; dx <= radius; dx += 1) {
+      const manhattan = Math.abs(dx) + Math.abs(dy);
+      if (manhattan > radius) {
+        continue;
+      }
+      const nx = x + dx;
+      const ny = y + dy;
+      if (nx < 0 || ny < 0 || nx >= state.grid.cols || ny >= state.grid.rows) {
+        continue;
+      }
+      const neighborType = state.tiles[indexFor(state.grid, nx, ny)].type;
+      if (neighborType === "road" || neighborType === "base") {
+        return true;
+      }
+    }
+  }
+  return false;
+};
+
+const isSteepCandidate = (state: WorldState, x: number, y: number): boolean => {
+  const idx = indexFor(state.grid, x, y);
+  const baseElevation = state.tiles[idx].elevation;
+  const neighbors = [
+    { x: x + 1, y },
+    { x: x - 1, y },
+    { x, y: y + 1 },
+    { x, y: y - 1 }
+  ];
+  let maxDiff = 0;
+  for (const neighbor of neighbors) {
+    if (neighbor.x < 0 || neighbor.y < 0 || neighbor.x >= state.grid.cols || neighbor.y >= state.grid.rows) {
+      continue;
+    }
+    const nIdx = indexFor(state.grid, neighbor.x, neighbor.y);
+    maxDiff = Math.max(maxDiff, Math.abs(baseElevation - state.tiles[nIdx].elevation));
+    if (maxDiff > TOWN_STEEP_ELEVATION_DIFF) {
+      return true;
+    }
+  }
+  return false;
+};
+
+const collectGrowthCandidates = (
+  state: WorldState,
+  town: WorldState["towns"][number],
+  roadPreferred: boolean
+): number[] => {
+  const cx = getTownCenterX(town);
+  const cy = getTownCenterY(town);
+  const radius = Math.max(TOWN_RADIUS_MIN, town.radius);
+  const radiusSq = radius * radius;
+  const minX = Math.max(0, Math.floor(cx - radius));
+  const maxX = Math.min(state.grid.cols - 1, Math.ceil(cx + radius));
+  const minY = Math.max(0, Math.floor(cy - radius));
+  const maxY = Math.min(state.grid.rows - 1, Math.ceil(cy + radius));
+  const candidates: number[] = [];
+  for (let y = minY; y <= maxY; y += 1) {
+    for (let x = minX; x <= maxX; x += 1) {
+      const dx = x - cx;
+      const dy = y - cy;
+      const distSq = dx * dx + dy * dy;
+      if (distSq > radiusSq) {
+        continue;
+      }
+      const idx = indexFor(state.grid, x, y);
+      if (state.tileStructure[idx] !== STRUCTURE_NONE || state.structureMask[idx] !== 0) {
+        continue;
+      }
+      const tile = state.tiles[idx];
+      if (!isTownBuildableType(tile.type)) {
+        continue;
+      }
+      if (tile.type === "water" || tile.type === "road" || tile.type === "base" || tile.type === "house") {
+        continue;
+      }
+      if (isSteepCandidate(state, x, y)) {
+        continue;
+      }
+      if (roadPreferred && !hasNearbyRoad(state, x, y, TOWN_ROAD_PROXIMITY)) {
+        continue;
+      }
+      candidates.push(idx);
+    }
+  }
+
+  candidates.sort((a, b) => {
+    const ax = a % state.grid.cols;
+    const ay = Math.floor(a / state.grid.cols);
+    const bx = b % state.grid.cols;
+    const by = Math.floor(b / state.grid.cols);
+    const adx = ax - cx;
+    const ady = ay - cy;
+    const bdx = bx - cx;
+    const bdy = by - cy;
+    const aDist = adx * adx + ady * ady;
+    const bDist = bdx * bdx + bdy * bdy;
+    if (aDist !== bDist) {
+      return aDist - bDist;
+    }
+    return a - b;
+  });
+  return candidates;
+};
+
+const collectShrinkCandidates = (state: WorldState, town: WorldState["towns"][number]): number[] => {
+  const cx = getTownCenterX(town);
+  const cy = getTownCenterY(town);
+  const candidates: number[] = [];
+  for (let idx = 0; idx < state.grid.totalTiles; idx += 1) {
+    if (state.tileStructure[idx] !== STRUCTURE_HOUSE || state.tileTownId[idx] !== town.id) {
+      continue;
+    }
+    const tile = state.tiles[idx];
+    if (!tile || tile.type !== "house" || tile.houseDestroyed) {
+      continue;
+    }
+    candidates.push(idx);
+  }
+  candidates.sort((a, b) => {
+    const ax = a % state.grid.cols;
+    const ay = Math.floor(a / state.grid.cols);
+    const bx = b % state.grid.cols;
+    const by = Math.floor(b / state.grid.cols);
+    const adx = ax - cx;
+    const ady = ay - cy;
+    const bdx = bx - cx;
+    const bdy = by - cy;
+    const aDist = adx * adx + ady * ady;
+    const bDist = bdx * bdx + bdy * bdy;
+    if (aDist !== bDist) {
+      return bDist - aDist;
+    }
+    return a - b;
+  });
+  return candidates;
+};
+
+const computeTownCap = (town: WorldState["towns"][number]): number => {
+  const radius = Math.max(TOWN_RADIUS_MIN, town.radius);
+  return Math.max(1, Math.floor(radius * radius * TOWN_CAP_DENSITY));
+};
+
+const computeDesiredSeasonDelta = (state: WorldState, town: WorldState["towns"][number]): number => {
+  const cap = computeTownCap(town);
+  const occupancy = town.houseCount / Math.max(1, cap);
+  let delta = 0;
+  if (occupancy < 0.55) {
+    delta += 1;
+  }
+  if (occupancy < 0.35) {
+    delta += 1;
+  }
+  if (occupancy > 0.95) {
+    delta -= 1;
+  }
+  if (occupancy > 1.2) {
+    delta -= 1;
+  }
+
+  const jitter = hash2D(state.seed + town.id * 13 + state.year * 17, town.id * 101 + state.year, 9083);
+  if (jitter > 0.82) {
+    delta += 1;
+  } else if (jitter < 0.18) {
+    delta -= 1;
+  }
+
+  if (town.houseCount === 0) {
+    delta = Math.max(delta, 1);
+  }
+  return Math.max(-TOWN_SEASON_DELTA_MAX, Math.min(TOWN_SEASON_DELTA_MAX, delta));
+};
+
+const computeDeterministicHouseValue = (state: WorldState, idx: number, townId: number): number => {
+  const sample = hash2D(idx + townId * 29, state.year * 13 + townId * 7, state.seed + 1307);
+  return 120 + Math.floor(sample * 220);
+};
+
+const computeDeterministicHouseResidents = (state: WorldState, idx: number, townId: number): number => {
+  const sample = hash2D(idx + townId * 31, state.year * 19 + townId * 11, state.seed + 1709);
+  return 1 + Math.floor(sample * 4);
+};
+
+const updateTownRadius = (state: WorldState, town: WorldState["towns"][number]): void => {
+  const maxRadius = Math.max(TOWN_RADIUS_MIN + 1, Math.min(Math.max(state.grid.cols, state.grid.rows) * 0.25, 24));
+  const target = clamp(3.6 + 0.75 * Math.sqrt(Math.max(1, town.houseCount)), TOWN_RADIUS_MIN, maxRadius);
+  town.radius = clamp(town.radius * 0.72 + target * 0.28, TOWN_RADIUS_MIN, maxRadius);
+};
+
+export function stepTownSeasonScaling(state: WorldState): void {
+  if (state.phase !== "growth" || state.townGrowthAppliedYear === state.year) {
+    return;
+  }
+
+  state.townGrowthAppliedYear = state.year;
+  if (state.towns.length === 0) {
+    return;
+  }
+
+  recountTownHouses(state);
+  const roadNetworkExists = hasRoadNetwork(state);
+
+  let anyRequestedDelta = false;
+  for (const town of state.towns) {
+    const delta = computeDesiredSeasonDelta(state, town);
+    town.desiredHouseDelta = delta;
+    town.lastSeasonHouseDelta = 0;
+    if (delta !== 0) {
+      anyRequestedDelta = true;
+    }
+  }
+
+  if (!anyRequestedDelta && state.towns.length > 0) {
+    let bestTown = state.towns[0];
+    let bestPressure = -1;
+    for (const town of state.towns) {
+      const cap = computeTownCap(town);
+      const pressure = Math.abs(cap - town.houseCount);
+      if (pressure > bestPressure || (pressure === bestPressure && town.id < bestTown.id)) {
+        bestPressure = pressure;
+        bestTown = town;
+      }
+    }
+    if (bestTown) {
+      bestTown.desiredHouseDelta = bestTown.houseCount <= computeTownCap(bestTown) ? 1 : -1;
+    }
+  }
+
+  for (const town of state.towns) {
+    const desiredDelta = Math.trunc(town.desiredHouseDelta ?? 0);
+    let appliedDelta = 0;
+    if (desiredDelta > 0) {
+      let candidates = collectGrowthCandidates(state, town, roadNetworkExists);
+      if (candidates.length === 0 && roadNetworkExists) {
+        candidates = collectGrowthCandidates(state, town, false);
+      }
+      for (let i = 0; i < candidates.length && appliedDelta < desiredDelta; i += 1) {
+        const idx = candidates[i];
+        const tile = state.tiles[idx];
+        if (!tile || state.tileStructure[idx] !== STRUCTURE_NONE || state.structureMask[idx] !== 0) {
+          continue;
+        }
+        tile.houseValue = computeDeterministicHouseValue(state, idx, town.id);
+        tile.houseResidents = computeDeterministicHouseResidents(state, idx, town.id);
+        tile.houseDestroyed = false;
+        if (placeHouse(state, idx, town.id)) {
+          appliedDelta += 1;
+        }
+      }
+    } else if (desiredDelta < 0) {
+      const removalsNeeded = Math.abs(desiredDelta);
+      const candidates = collectShrinkCandidates(state, town);
+      for (let i = 0; i < candidates.length && appliedDelta > -removalsNeeded; i += 1) {
+        if (removeHouse(state, candidates[i])) {
+          appliedDelta -= 1;
+        }
+      }
+    }
+    town.lastSeasonHouseDelta = appliedDelta;
+    updateTownRadius(state, town);
+  }
+
+  recountTownHouses(state);
+  const invariant = validateTownInvariants(state);
+  if (!invariant.ok) {
+    const details = invariant.errors.slice(0, 8).join(" | ");
+    console.warn(`[towns] growth invariant failure: ${details}`);
+  }
 }
 
 export function stepGrowth(state: WorldState, dayDelta: number, rng: RNG): void {
