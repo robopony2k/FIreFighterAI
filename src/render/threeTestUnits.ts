@@ -2,10 +2,10 @@ import * as THREE from "three";
 import type { WorldState } from "../core/state.js";
 import { getTerrainHeightScale, type TerrainSample } from "./threeTestTerrain.js";
 
-const TRUCK_BASE_COLOR = new THREE.Color(0xc0462c);
-const TRUCK_SELECTED_COLOR = new THREE.Color(0xffd166);
-const FIREFIGHTER_BASE_COLOR = new THREE.Color(0xf0b33b);
-const FIREFIGHTER_SELECTED_COLOR = new THREE.Color(0xffef99);
+const TRUCK_BASE_COLOR = new THREE.Color(0xe0311d);
+const TRUCK_SELECTED_COLOR = new THREE.Color(0xff6e57);
+const FIREFIGHTER_BASE_COLOR = new THREE.Color(0xffdf3a);
+const FIREFIGHTER_SELECTED_COLOR = new THREE.Color(0xfff3a6);
 const UNIT_BASE_Y_OFFSET = 0.02;
 const MAX_TRUCK_INSTANCES = 512;
 const MAX_FIREFIGHTER_INSTANCES = 1024;
@@ -56,8 +56,10 @@ export const createThreeTestUnitsLayer = (scene: THREE.Scene): ThreeTestUnitsLay
   const truckGeometry = new THREE.BoxGeometry(0.38, 0.18, 0.64);
   const truckMaterial = new THREE.MeshStandardMaterial({
     color: TRUCK_BASE_COLOR,
-    roughness: 0.72,
-    metalness: 0.04,
+    emissive: new THREE.Color(0x3a0904),
+    emissiveIntensity: 0.3,
+    roughness: 0.64,
+    metalness: 0.05,
     vertexColors: true
   });
   const truckMesh = new THREE.InstancedMesh(truckGeometry, truckMaterial, MAX_TRUCK_INSTANCES);
@@ -68,7 +70,9 @@ export const createThreeTestUnitsLayer = (scene: THREE.Scene): ThreeTestUnitsLay
   const firefighterGeometry = new THREE.CylinderGeometry(0.08, 0.1, 0.34, 6);
   const firefighterMaterial = new THREE.MeshStandardMaterial({
     color: FIREFIGHTER_BASE_COLOR,
-    roughness: 0.78,
+    emissive: new THREE.Color(0x4a4004),
+    emissiveIntensity: 0.24,
+    roughness: 0.7,
     metalness: 0.02,
     vertexColors: true
   });

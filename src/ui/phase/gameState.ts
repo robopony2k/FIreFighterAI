@@ -17,7 +17,6 @@ export class GameState {
     paused: false,
     alert: null,
     timeSpeedIndex: 1,
-    baseOpsOpen: false,
     forecast: null,
     forecastDay: 0,
     forecastStartDay: 0,
@@ -96,18 +95,6 @@ export class GameState {
     }
     this.snapshot.timeSpeedIndex = index;
     this.emitChange();
-  }
-
-  setBaseOpsOpen(open: boolean): void {
-    if (this.snapshot.baseOpsOpen === open) {
-      return;
-    }
-    this.snapshot.baseOpsOpen = open;
-    this.emitChange();
-  }
-
-  toggleBaseOpsOpen(): void {
-    this.setBaseOpsOpen(!this.snapshot.baseOpsOpen);
   }
 
   setForecast(

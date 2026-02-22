@@ -452,25 +452,54 @@ canvas {
   position: absolute;
   left: 0;
   top: 0;
-  transform: translate(-50%, -100%);
-  border: 1px solid rgba(255, 244, 219, 0.88);
+  --town-border-color: rgba(255, 244, 219, 0.88);
+  border: 2px solid var(--town-border-color);
   border-radius: 9px;
   background: rgba(26, 21, 16, 0.84);
   color: #fff2d4;
-  padding: 4px 8px 5px;
-  font-size: 12px;
-  line-height: 1.2;
+  padding: 7px 11px 8px;
+  font-size: 14px;
+  line-height: 1.25;
   box-shadow: 0 6px 16px rgba(0, 0, 0, 0.32);
   pointer-events: auto;
-  cursor: pointer;
   text-align: left;
-  min-width: 118px;
+  min-width: 112px;
+  transition: none;
+  will-change: transform;
+  transform-origin: top left;
+  isolation: isolate;
+}
+
+.three-test-town-connector {
+  position: absolute;
+  left: 0;
+  top: 0;
+  display: none;
+  height: 2px;
+  width: 0;
+  background: rgba(255, 244, 219, 0.88);
+  transform-origin: 0 50%;
+  pointer-events: none;
+  z-index: 1;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.2);
+}
+
+.three-test-town-nameplate + .three-test-town-connector {
+  background: rgba(255, 244, 219, 0.88);
+}
+
+.three-test-town-nameplate:hover + .three-test-town-connector,
+.three-test-town-nameplate:focus-within + .three-test-town-connector,
+.three-test-town-nameplate.is-selected + .three-test-town-connector {
+  background: rgba(255, 233, 179, 0.95);
 }
 
 .three-test-town-nameplate:hover,
-.three-test-town-nameplate:focus-visible {
+.three-test-town-nameplate:focus-within,
+.three-test-town-nameplate.is-selected,
+.three-test-town-nameplate.is-hover-peek {
   background: rgba(35, 28, 20, 0.92);
-  border-color: rgba(255, 233, 179, 0.95);
+  --town-border-color: rgba(255, 233, 179, 0.95);
 }
 
 .three-test-town-nameplate.is-selected {
@@ -478,16 +507,58 @@ canvas {
   box-shadow: 0 0 0 2px rgba(240, 179, 59, 0.3), 0 6px 16px rgba(0, 0, 0, 0.32);
 }
 
+.three-test-town-nameplate[data-threat="watch"] {
+  --town-border-color: rgba(240, 179, 59, 0.9);
+}
+
+.three-test-town-nameplate[data-threat="watch"] + .three-test-town-connector {
+  background: rgba(240, 179, 59, 0.9);
+}
+
+.three-test-town-nameplate[data-threat="high"] {
+  --town-border-color: rgba(229, 122, 47, 0.95);
+}
+
+.three-test-town-nameplate[data-threat="high"] + .three-test-town-connector {
+  background: rgba(229, 122, 47, 0.95);
+}
+
+.three-test-town-nameplate[data-threat="critical"] {
+  --town-border-color: rgba(209, 74, 44, 0.98);
+}
+
+.three-test-town-nameplate[data-threat="critical"] + .three-test-town-connector {
+  background: rgba(209, 74, 44, 0.98);
+}
+
+.three-test-town-nameplate-main-btn {
+  width: 100%;
+  border: none;
+  background: transparent;
+  color: inherit;
+  padding: 3px 5px;
+  margin: -3px -5px;
+  text-align: left;
+  font: inherit;
+  box-shadow: none;
+  cursor: pointer;
+}
+
+.three-test-town-nameplate-main-btn:hover {
+  transform: none;
+  background: transparent;
+}
+
 .three-test-town-nameplate-main {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
   white-space: nowrap;
 }
 
 .three-test-town-dot {
-  width: 8px;
-  height: 8px;
+  width: 12px;
+  height: 12px;
   border-radius: 999px;
   background: #6fb77e;
   box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.28);
@@ -512,75 +583,574 @@ canvas {
 
 .three-test-town-name {
   font-weight: 700;
+  font-size: 17px;
   letter-spacing: 0.2px;
 }
 
 .three-test-town-nameplate-meta {
   display: none;
-  margin-top: 5px;
+  margin-top: 4px;
   color: rgba(255, 240, 212, 0.9);
-  font-size: 10px;
-  line-height: 1.25;
+  font-size: 14px;
+  line-height: 1.3;
+  white-space: nowrap;
+  align-items: center;
+  gap: 8px;
+  opacity: 0.9;
+}
+
+.three-test-town-nameplate.is-hover-peek .three-test-town-nameplate-meta {
+  display: inline-flex;
+}
+
+.three-test-town-nameplate-details {
+  display: none;
+}
+
+.three-test-town-summary-line {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
   white-space: nowrap;
 }
 
-.three-test-town-nameplate:hover .three-test-town-nameplate-meta,
-.three-test-town-nameplate:focus-visible .three-test-town-nameplate-meta {
-  display: block;
+.three-test-town-summary-text {
+  font-family: Consolas, "Courier New", monospace;
+  font-size: inherit;
+  line-height: 1.3;
+  color: rgba(255, 240, 212, 0.92);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.05px;
+}
+
+.three-test-town-alert-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2px 7px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 800;
+  line-height: 1;
+  letter-spacing: 0.3px;
+  text-transform: uppercase;
+  border: 1px solid rgba(0, 0, 0, 0.35);
+  color: #f7f9fb;
+  background: #4e5760;
+}
+
+.three-test-town-alert-badge.alert-0 {
+  color: #f7f9fb;
+  background: #4e5760;
+}
+
+.three-test-town-alert-badge.alert-1 {
+  color: #2a1f00;
+  background: #ffd447;
+}
+
+.three-test-town-alert-badge.alert-2 {
+  color: #2b1200;
+  background: #ff9738;
+}
+
+.three-test-town-alert-badge.alert-3 {
+  color: #ffffff;
+  background: #d13232;
 }
 
 .three-test-town-card {
   position: absolute;
   left: 0;
   top: 0;
-  width: 260px;
-  min-height: 190px;
-  display: grid;
-  gap: 7px;
-  border: 1px solid rgba(129, 113, 92, 0.28);
-  border-radius: 12px;
-  background: rgba(250, 244, 232, 0.96);
-  color: #2a2017;
-  padding: 10px 11px;
-  box-shadow: 0 12px 24px rgba(20, 18, 14, 0.24);
   pointer-events: auto;
+  min-width: 292px;
+  max-width: 372px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 233, 179, 0.92);
+  background: rgba(22, 18, 14, 0.94);
+  color: #fff2d4;
+  box-shadow: 0 14px 24px rgba(0, 0, 0, 0.38);
+  padding: 12px 13px;
+  display: grid;
+  gap: 10px;
 }
 
-.three-test-town-card[data-threat="watch"] {
-  border-color: rgba(240, 179, 59, 0.55);
+.three-test-town-card-top-line {
+  justify-content: flex-start;
 }
 
-.three-test-town-card[data-threat="high"] {
-  border-color: rgba(229, 122, 47, 0.6);
-}
-
-.three-test-town-card[data-threat="critical"] {
-  border-color: rgba(209, 74, 44, 0.72);
+.three-test-town-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
 }
 
 .three-test-town-card-title {
-  margin: 0;
-  font-size: 14px;
-  letter-spacing: 0.3px;
+  font-size: 16px;
+  font-weight: 700;
+  letter-spacing: 0.2px;
 }
 
-.three-test-town-card-row {
-  font-size: 12px;
+.three-test-town-card-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.three-test-town-card-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 14px;
+  line-height: 1;
+  color: rgba(255, 240, 212, 0.92);
+}
+
+.three-test-town-card-chip.posture-0 {
+  color: rgba(173, 186, 195, 0.92);
+}
+
+.three-test-town-card-chip.posture-1 {
+  color: rgba(240, 179, 59, 0.96);
+}
+
+.three-test-town-card-chip.posture-2 {
+  color: rgba(229, 122, 47, 0.96);
+}
+
+.three-test-town-card-chip.posture-3 {
+  color: rgba(209, 74, 44, 0.98);
+}
+
+.three-test-town-card-metrics,
+.three-test-town-card-evac {
+  font-family: Consolas, "Courier New", monospace;
+  font-size: 14px;
   line-height: 1.3;
-  color: rgba(35, 29, 21, 0.86);
+  color: rgba(255, 240, 212, 0.9);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.three-test-town-card-metrics {
+  align-items: center;
+  gap: 8px;
+}
+
+.three-test-town-card-metrics .three-test-town-summary-text {
+  color: rgba(255, 240, 212, 0.92);
 }
 
 .three-test-town-card-actions {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 6px;
-  margin-top: 2px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
 }
 
-.three-test-town-card-actions button {
+.three-test-town-card-action {
+  display: grid;
+  gap: 4px;
+  justify-items: start;
+  padding: 9px 11px;
+  border-radius: 8px;
+  background: rgba(44, 35, 27, 0.96);
+  border: 1px solid rgba(255, 233, 179, 0.24);
+  box-shadow: none;
+  transform: none;
+}
+
+.three-test-town-card-action:hover {
+  transform: none;
+  background: rgba(56, 42, 30, 0.98);
+}
+
+.three-test-town-card-action-icon {
+  font-size: 20px;
+  line-height: 1;
+}
+
+.three-test-town-card-action-meta {
+  font-family: Consolas, "Courier New", monospace;
+  font-size: 13px;
+  line-height: 1.1;
+  color: rgba(255, 240, 212, 0.8);
+  min-height: 14px;
+  font-variant-numeric: tabular-nums;
+}
+
+.three-test-town-card-header-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.three-test-town-card-pin,
+.three-test-town-card-focus,
+.three-test-town-card-close {
+  border: 1px solid rgba(255, 233, 179, 0.32);
+  background: rgba(44, 35, 27, 0.96);
+  color: rgba(255, 240, 212, 0.95);
+  border-radius: 7px;
+  padding: 4px 8px;
+  font-size: 11px;
+  letter-spacing: 0.3px;
+  box-shadow: none;
+}
+
+.three-test-town-card-pin:hover,
+.three-test-town-card-focus:hover,
+.three-test-town-card-close:hover {
+  transform: none;
+  background: rgba(58, 42, 31, 0.98);
+}
+
+.three-test-town-nameplate.is-dimmed,
+.three-test-town-connector.is-dimmed {
+  opacity: 0.32;
+}
+
+.three-test-town-card.is-dimmed {
+  opacity: 0.45;
+}
+
+.three-test-town-card.is-focused {
+  box-shadow: 0 0 0 2px rgba(240, 179, 59, 0.35), 0 14px 24px rgba(0, 0, 0, 0.38);
+}
+
+.three-test-town-card.is-pinned {
+  border-color: rgba(240, 179, 59, 0.95);
+}
+
+.three-test-base-nameplate {
+  --town-border-color: rgba(153, 214, 255, 0.9);
+}
+
+.three-test-base-connector {
+  background: rgba(153, 214, 255, 0.9);
+}
+
+.three-test-base-card {
+  max-width: 390px;
+}
+
+.three-test-base-section {
+  display: grid;
+  gap: 6px;
+}
+
+.three-test-base-section-title {
+  font-size: 11px;
+  letter-spacing: 0.8px;
+  text-transform: uppercase;
+  color: rgba(255, 240, 212, 0.72);
+}
+
+.three-test-base-hint {
+  font-size: 11px;
+  color: rgba(255, 240, 212, 0.72);
+}
+
+.three-test-dock-overlay {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 12;
+}
+
+.three-test-right-dock {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  width: min(320px, 36vw);
+  display: grid;
+  gap: 8px;
+  pointer-events: auto;
+}
+
+.three-test-dock-card {
+  position: relative;
+  border-radius: 11px;
+  border: 1px solid rgba(255, 233, 179, 0.28);
+  background: rgba(22, 18, 14, 0.9);
+  color: #fff2d4;
+  box-shadow: 0 10px 18px rgba(0, 0, 0, 0.28);
+  overflow: hidden;
+}
+
+.three-test-dock-card.is-dimmed {
+  opacity: 0.45;
+}
+
+.three-test-dock-card.is-focused {
+  box-shadow: 0 0 0 2px rgba(240, 179, 59, 0.3), 0 10px 18px rgba(0, 0, 0, 0.28);
+}
+
+.three-test-dock-card-collapsed {
+  width: 100%;
+  text-align: left;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  background: transparent;
+  border: none;
+  box-shadow: none;
+  font-size: 12px;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+}
+
+.three-test-dock-card-collapsed:hover {
+  transform: none;
+  background: rgba(43, 32, 24, 0.9);
+}
+
+.three-test-dock-card-icon {
+  width: 20px;
+  height: 20px;
+  border-radius: 5px;
+  display: inline-grid;
+  place-items: center;
+  background: rgba(240, 179, 59, 0.2);
+  font-size: 11px;
+}
+
+.three-test-dock-card-panel {
+  display: none;
+  gap: 8px;
+  padding: 8px 10px 10px;
+}
+
+.three-test-dock-card.is-peek .three-test-dock-card-panel,
+.three-test-dock-card.is-expanded .three-test-dock-card-panel,
+.three-test-dock-card.is-pinned .three-test-dock-card-panel {
+  display: grid;
+}
+
+.three-test-dock-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.three-test-dock-card-title {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.7px;
+}
+
+.three-test-dock-card-header-actions {
+  display: inline-flex;
+  gap: 6px;
+}
+
+.three-test-dock-card-pin,
+.three-test-dock-card-close {
+  padding: 4px 7px;
+  border-radius: 6px;
+  border: 1px solid rgba(255, 233, 179, 0.28);
+  background: rgba(44, 35, 27, 0.95);
+  box-shadow: none;
+  font-size: 11px;
+}
+
+.three-test-dock-card-pin:hover,
+.three-test-dock-card-close:hover {
+  transform: none;
+  background: rgba(57, 43, 32, 0.95);
+}
+
+.three-test-dock-card-summary {
+  display: grid;
+  gap: 6px;
+  font-size: 11px;
+  color: rgba(255, 240, 212, 0.84);
+}
+
+.three-test-dock-kpis {
+  display: grid;
+  gap: 2px;
+  font-size: 11px;
+}
+
+.three-test-dock-card-details {
+  display: none;
+  gap: 8px;
+}
+
+.three-test-dock-card.is-expanded .three-test-dock-card-details,
+.three-test-dock-card.is-pinned .three-test-dock-card-details {
+  display: grid;
+}
+
+.three-test-climate-chart {
+  width: 100%;
+  height: 110px;
+  border-radius: 8px;
+  background: rgba(27, 27, 27, 0.18);
+  border: 1px solid rgba(255, 233, 179, 0.2);
+}
+
+.three-test-climate-chart.is-peek {
+  height: 56px;
+}
+
+.three-test-dock-card-button {
+  width: 100%;
+  border: 1px solid rgba(255, 233, 179, 0.28);
+  background: rgba(44, 35, 27, 0.95);
+  box-shadow: none;
+  border-radius: 8px;
+  padding: 7px 9px;
+  font-size: 12px;
+}
+
+.three-test-dock-card-button:hover {
+  transform: none;
+  background: rgba(57, 43, 32, 0.95);
+}
+
+.three-test-minimap-canvas {
+  width: 100%;
+  height: 168px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 233, 179, 0.2);
+  background: rgba(23, 25, 29, 0.9);
+  image-rendering: pixelated;
+}
+
+.three-test-minimap-canvas.is-peek {
+  height: 72px;
+}
+
+.three-test-minimap-layers {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.three-test-minimap-layer {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+}
+
+.three-test-time-controls {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.three-test-time-button {
+  border: 1px solid rgba(255, 233, 179, 0.26);
+  background: rgba(44, 35, 27, 0.95);
+  border-radius: 8px;
+  box-shadow: none;
+  padding: 6px 5px;
+  font-size: 11px;
+  letter-spacing: 0.4px;
+  text-transform: uppercase;
+}
+
+.three-test-time-button:hover {
+  transform: none;
+  background: rgba(57, 43, 32, 0.95);
+}
+
+.three-test-time-button.is-active {
+  border-color: rgba(240, 179, 59, 0.92);
+  box-shadow: inset 0 0 0 1px rgba(240, 179, 59, 0.34);
+  background: rgba(78, 50, 29, 0.98);
+}
+
+.three-test-unit-tray {
+  position: absolute;
+  left: 12px;
+  right: 12px;
+  bottom: 12px;
+  display: grid;
+  gap: 8px;
+  pointer-events: auto;
+  z-index: 13;
+}
+
+.three-test-unit-tray-list {
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  padding-bottom: 4px;
+}
+
+.three-test-unit-card {
+  flex: 0 0 230px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 233, 179, 0.25);
+  background: rgba(20, 18, 15, 0.92);
+  color: #fff2d4;
+  padding: 8px;
+  display: grid;
+  gap: 6px;
+}
+
+.three-test-unit-card.is-selected {
+  border-color: rgba(240, 179, 59, 0.92);
+  box-shadow: 0 0 0 2px rgba(240, 179, 59, 0.25);
+}
+
+.three-test-unit-name {
+  font-weight: 700;
+  font-size: 12px;
+}
+
+.three-test-unit-metrics {
+  font-size: 11px;
+  color: rgba(255, 240, 212, 0.84);
+  min-height: 30px;
+}
+
+.three-test-unit-actions,
+.three-test-unit-detail-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.three-test-unit-action {
+  border: 1px solid rgba(255, 233, 179, 0.26);
+  background: rgba(44, 35, 27, 0.95);
+  border-radius: 8px;
+  box-shadow: none;
   padding: 6px 7px;
   font-size: 11px;
-  letter-spacing: 0.2px;
+}
+
+.three-test-unit-action:hover {
+  transform: none;
+  background: rgba(57, 43, 32, 0.95);
+}
+
+.three-test-unit-detail {
+  border-radius: 11px;
+  border: 1px solid rgba(255, 233, 179, 0.28);
+  background: rgba(22, 18, 14, 0.93);
+  color: #fff2d4;
+  padding: 9px 10px;
+  display: grid;
+  gap: 8px;
+}
+
+.three-test-unit-detail-title {
+  font-weight: 700;
+  font-size: 12px;
+}
+
+.three-test-unit-detail-stats {
+  font-size: 11px;
+  color: rgba(255, 240, 212, 0.84);
 }
 
 .start-menu {
@@ -1550,18 +2120,39 @@ input[type="text"] {
 }
 
 .phase-ui-root--three-test [data-panel="fuelBreak"],
-.phase-ui-root--three-test [data-panel="budgetReport"] {
+.phase-ui-root--three-test [data-panel="budgetReport"],
+.phase-ui-root--three-test [data-panel="miniMap"],
+.phase-ui-root--three-test [data-panel="fireDeploy"],
+.phase-ui-root--three-test [data-panel="fireUnitList"],
+.phase-ui-root--three-test [data-panel="fireSelectedUnit"],
+.phase-ui-root--three-test [data-panel="maintenanceRoster"],
+.phase-ui-root--three-test [data-panel="maintenanceCrew"] {
   display: none !important;
 }
 
 .phase-ui-root--three-test .phase-column {
-  max-width: 330px;
+  max-width: 220px;
 }
 
 .phase-ui-root--three-test .phase-stack {
   gap: 10px;
   overflow-y: auto;
-  max-height: calc(100vh - 210px);
+  max-height: calc(100vh - 160px);
+}
+
+.phase-ui-root--three-test .phase-forecast-chart,
+.phase-ui-root--three-test .phase-forecast-scale,
+.phase-ui-root--three-test .phase-forecast-season-scale,
+.phase-ui-root--three-test .phase-forecast-meta {
+  display: none;
+}
+
+.phase-ui-root--three-test .phase-forecast {
+  display: none;
+}
+
+.phase-ui-root--three-test .phase-topbar {
+  padding: 6px 10px;
 }
 
 .phase-ui {
@@ -1865,13 +2456,6 @@ input[type="text"] {
   margin-bottom: 8px;
 }
 
-.phase-three-test-hud-note {
-  display: none;
-  margin: 8px 0 0;
-  font-size: 11px;
-  line-height: 1.3;
-}
-
 .phase-minimap-panel {
   display: none;
   padding: 10px;
@@ -1914,10 +2498,6 @@ input[type="text"] {
   height: 100%;
   display: block;
   image-rendering: pixelated;
-}
-
-.phase-ui-root--three-test .phase-three-test-hud-note {
-  display: block;
 }
 
 .phase-hint {
@@ -1974,18 +2554,6 @@ input[type="text"] {
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-}
-
-.phase-base-action {
-  padding: 6px 10px;
-  font-size: 11px;
-  text-transform: uppercase;
-  letter-spacing: 0.6px;
-}
-
-.phase-base-action.is-active {
-  background: linear-gradient(135deg, var(--accent), #b43a22);
-  box-shadow: 0 8px 16px rgba(209, 74, 44, 0.35);
 }
 
 .phase-truck-list {
@@ -2272,6 +2840,14 @@ input[type="text"] {
     grid-template-columns: 1fr;
     text-align: left;
   }
+
+  .three-test-right-dock {
+    width: min(270px, 45vw);
+  }
+
+  .three-test-unit-card {
+    flex-basis: 200px;
+  }
 }
 
 @media (max-width: 720px) {
@@ -2287,6 +2863,22 @@ input[type="text"] {
   .phase-topbar-content {
     width: 100%;
     justify-content: space-between;
+  }
+
+  .three-test-right-dock {
+    top: 8px;
+    right: 8px;
+    width: min(230px, 58vw);
+  }
+
+  .three-test-unit-tray {
+    left: 8px;
+    right: 8px;
+    bottom: 8px;
+  }
+
+  .three-test-unit-card {
+    flex-basis: 176px;
   }
 }
 

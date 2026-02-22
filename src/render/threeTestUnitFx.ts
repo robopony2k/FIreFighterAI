@@ -6,7 +6,8 @@ import { getTerrainHeightScale, type TerrainSample } from "./threeTestTerrain.js
 const MAX_HOSE_SEGMENTS = 1024;
 const MAX_WATER_PARTICLES = 4096;
 const HOSE_BASE_Y = 0.08;
-const HOSE_COLOR = new THREE.Color(0x4d3f33);
+const HOSE_RADIUS = 0.017;
+const HOSE_COLOR = new THREE.Color(0xffffff);
 const WATER_COLOR = new THREE.Color(0x7ad4ff);
 
 const clamp = (value: number, min: number, max: number): number => Math.max(min, Math.min(max, value));
@@ -86,21 +87,27 @@ export type ThreeTestUnitFxLayer = {
 };
 
 export const createThreeTestUnitFxLayer = (scene: THREE.Scene): ThreeTestUnitFxLayer => {
-  const hosePositions = new Float32Array(MAX_HOSE_SEGMENTS * 2 * 3);
-  const hoseGeometry = new THREE.BufferGeometry();
-  const hosePosAttr = new THREE.BufferAttribute(hosePositions, 3);
-  hosePosAttr.setUsage(THREE.DynamicDrawUsage);
-  hoseGeometry.setAttribute("position", hosePosAttr);
-  hoseGeometry.setDrawRange(0, 0);
-  const hoseMaterial = new THREE.LineBasicMaterial({
+  const hoseGeometry = new THREE.CylinderGeometry(HOSE_RADIUS, HOSE_RADIUS, 1, 6, 1, true);
+  const hoseMaterial = new THREE.MeshStandardMaterial({
     color: HOSE_COLOR,
+    emissive: new THREE.Color(0x1a1a1a),
+    emissiveIntensity: 0.35,
+    roughness: 0.68,
+    metalness: 0.04,
     transparent: true,
-    opacity: 0.68,
+    opacity: 0.94,
     depthWrite: false
   });
-  const hoses = new THREE.LineSegments(hoseGeometry, hoseMaterial);
+  const hoses = new THREE.InstancedMesh(hoseGeometry, hoseMaterial, MAX_HOSE_SEGMENTS);
+  hoses.count = 0;
   hoses.frustumCulled = false;
   scene.add(hoses);
+  const hoseMatrix = new THREE.Matrix4();
+  const hoseMidpoint = new THREE.Vector3();
+  const hoseDirection = new THREE.Vector3();
+  const hoseQuaternion = new THREE.Quaternion();
+  const hoseScale = new THREE.Vector3(1, 1, 1);
+  const hoseUpAxis = new THREE.Vector3(0, 1, 0);
 
   const waterPositions = new Float32Array(MAX_WATER_PARTICLES * 3);
   const waterAlpha = new Float32Array(MAX_WATER_PARTICLES);
@@ -138,7 +145,7 @@ export const createThreeTestUnitFxLayer = (scene: THREE.Scene): ThreeTestUnitFxL
     terrainSize: { width: number; depth: number } | null
   ): void => {
     if (!sample || !terrainSize) {
-      hoseGeometry.setDrawRange(0, 0);
+      hoses.count = 0;
       waterGeometry.setDrawRange(0, 0);
       return;
     }
@@ -176,17 +183,21 @@ export const createThreeTestUnitFxLayer = (scene: THREE.Scene): ThreeTestUnitFxL
       const truckZ = toWorldZ(truck.y, rows, terrainSize.depth);
       const truckY = sampleHeight(sample, truck.x, truck.y) * heightScale + HOSE_BASE_Y + 0.11;
 
-      const offset = hoseSegments * 6;
-      hosePositions[offset] = truckX;
-      hosePositions[offset + 1] = truckY;
-      hosePositions[offset + 2] = truckZ;
-      hosePositions[offset + 3] = crewX;
-      hosePositions[offset + 4] = crewY;
-      hosePositions[offset + 5] = crewZ;
+      hoseDirection.set(crewX - truckX, crewY - truckY, crewZ - truckZ);
+      const hoseLength = hoseDirection.length();
+      if (hoseLength <= 0.0001) {
+        continue;
+      }
+      hoseDirection.multiplyScalar(1 / hoseLength);
+      hoseMidpoint.set((truckX + crewX) * 0.5, (truckY + crewY) * 0.5, (truckZ + crewZ) * 0.5);
+      hoseQuaternion.setFromUnitVectors(hoseUpAxis, hoseDirection);
+      hoseScale.set(1, hoseLength, 1);
+      hoseMatrix.compose(hoseMidpoint, hoseQuaternion, hoseScale);
+      hoses.setMatrixAt(hoseSegments, hoseMatrix);
       hoseSegments += 1;
     }
-    hoseGeometry.setDrawRange(0, hoseSegments * 2);
-    hosePosAttr.needsUpdate = true;
+    hoses.count = hoseSegments;
+    hoses.instanceMatrix.needsUpdate = true;
 
     const spray = effects?.waterParticles ?? null;
     if (!spray || spray.length === 0) {

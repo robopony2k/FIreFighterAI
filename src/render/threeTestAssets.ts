@@ -225,50 +225,32 @@ export const applySeasonToTreeAssets = (assets: TreeAssets, seasonIndex: number)
 
 export const TREE_MODEL_PATHS: Record<TreeType, string[]> = {
   [TreeType.Birch]: [
-    "assets/3d/GLTF/Trees/Birch/Birch_01.glb",
-    "assets/3d/GLTF/Trees/Birch/Birch_02.glb",
-    "assets/3d/GLTF/Trees/Birch/Birch_03.glb",
-    "assets/3d/GLTF/Trees/Birch/Birch_04.glb",
-    "assets/3d/GLTF/Trees/Birch/Birch_05.glb"
+    "assets/3d/GLTF/Trees/Birch/Birch_001.glb",
+    "assets/3d/GLTF/Trees/Birch/Birch_002.glb",
+    "assets/3d/GLTF/Trees/Birch/Birch_003.glb"
   ],
   [TreeType.Maple]: [
-    "assets/3d/GLTF/Trees/Maple/Maple_01.glb",
-    "assets/3d/GLTF/Trees/Maple/Maple_02.glb",
-    "assets/3d/GLTF/Trees/Maple/Maple_03.glb",
-    "assets/3d/GLTF/Trees/Maple/Maple_04.glb",
-    "assets/3d/GLTF/Trees/Maple/Maple_05.glb"
+    "assets/3d/GLTF/Trees/Maple/Maple_001.glb",
+    "assets/3d/GLTF/Trees/Maple/Maple_002.glb",
+    "assets/3d/GLTF/Trees/Maple/Maple_003.glb"
   ],
   [TreeType.Oak]: [
-    "assets/3d/GLTF/Trees/Oak/Tree.glb"
+    "assets/3d/GLTF/Trees/Oak/Oak_001.glb",
+    "assets/3d/GLTF/Trees/Oak/Oak_002.glb",
+    "assets/3d/GLTF/Trees/Oak/Oak_003.glb"
   ],
   [TreeType.Pine]: [
-    "assets/3d/GLTF/Trees/Pine/Pine-01.glb",
-    "assets/3d/GLTF/Trees/Pine/Pine-02.glb",
-    "assets/3d/GLTF/Trees/Pine/Pine-03.glb"
+    "assets/3d/GLTF/Trees/Pine/Pine_001.glb",
+    "assets/3d/GLTF/Trees/Pine/Pine_002.glb",
+    "assets/3d/GLTF/Trees/Pine/Pine_003.glb"
   ],
   [TreeType.Elm]: [
-    "assets/3d/GLTF/Trees/Green/Green_A.glb",
-    "assets/3d/GLTF/Trees/Green/Green_B.glb",
-    "assets/3d/GLTF/Trees/Green/Green_C.glb",
-    "assets/3d/GLTF/Trees/Green/Green_D.glb",
-    "assets/3d/GLTF/Trees/Green/Green_E.glb",
-    "assets/3d/GLTF/Trees/Green/Green_F.glb",
-    "assets/3d/GLTF/Trees/Green/Green_G.glb",
-    "assets/3d/GLTF/Trees/Green/Green_H.glb",
-    "assets/3d/GLTF/Trees/Green/Green_I.glb",
-    "assets/3d/GLTF/Trees/Green/Green_J.glb"
+    "assets/3d/GLTF/Trees/Elm/Elm_001.glb"
   ],
   [TreeType.Scrub]: [
-    "assets/3d/GLTF/Trees/Green/Green_A.glb",
-    "assets/3d/GLTF/Trees/Green/Green_B.glb",
-    "assets/3d/GLTF/Trees/Green/Green_C.glb",
-    "assets/3d/GLTF/Trees/Green/Green_D.glb",
-    "assets/3d/GLTF/Trees/Green/Green_E.glb",
-    "assets/3d/GLTF/Trees/Green/Green_F.glb",
-    "assets/3d/GLTF/Trees/Green/Green_G.glb",
-    "assets/3d/GLTF/Trees/Green/Green_H.glb",
-    "assets/3d/GLTF/Trees/Green/Green_I.glb",
-    "assets/3d/GLTF/Trees/Green/Green_J.glb"
+    "assets/3d/GLTF/Trees/Scrub/Shrub_001.glb",
+    "assets/3d/GLTF/Trees/Scrub/Shrub_002.glb",
+    "assets/3d/GLTF/Trees/Scrub/Shrub_003.glb"
   ]
 };
 

@@ -37,6 +37,7 @@ import { DEBUG_CELL_TOGGLE_KEY, DEBUG_IGNITE_TOGGLE_KEY, DEBUG_TYPE_EVENT } from
 import { isEditableTarget } from "./keyboard.js";
 import { hideStartMenu as hideStartMenuView, showStartMenu as showStartMenuView } from "./startMenu.js";
 import { getActionTarget } from "./uiActions.js";
+import { listenPhaseUiCommand, type PhaseUiCommand } from "../commandChannel.js";
 
 const getInteractionMode = (state: WorldState, inputState: InputState): InteractionMode => {
   if (state.deployMode === "clear") {
@@ -84,14 +85,15 @@ export type PhaseUiBindingDeps = {
   overlayRefs: OverlayRefs;
   showStartMenuOnBind?: boolean;
   startThreeOnConfirm?: boolean;
+  onMinimapPan?: (tile: { x: number; y: number }) => void;
 };
 
-  const getWorldFromPointer = (
-    state: WorldState,
-    renderState: RenderState,
-    canvas: HTMLCanvasElement,
-    event: MouseEvent
-  ): Point => {
+const getWorldFromPointer = (
+  state: WorldState,
+  renderState: RenderState,
+  canvas: HTMLCanvasElement,
+  event: MouseEvent
+): Point => {
   const rect = canvas.getBoundingClientRect();
   const scaleX = canvas.width / rect.width;
   const scaleY = canvas.height / rect.height;
@@ -112,7 +114,8 @@ export const bindPhaseUi = ({
   onThreeTest,
   overlayRefs,
   showStartMenuOnBind = true,
-  startThreeOnConfirm = false
+  startThreeOnConfirm = false,
+  onMinimapPan
 }: PhaseUiBindingDeps): (() => void) => {
   let isSpaceDown = false;
   const disposers: Array<() => void> = [];
@@ -157,25 +160,7 @@ export const bindPhaseUi = ({
   };
 
   let debugIgniteMode = inputState.debugIgniteMode;
-  const debugToggleButton = phaseUi.controller.root.querySelector<HTMLButtonElement>(
-    '[data-action="debug-ignite-toggle"]'
-  );
   let debugTypeColors = inputState.debugTypeColors;
-  const debugTypeButton = phaseUi.controller.root.querySelector<HTMLButtonElement>(
-    '[data-action="debug-type-colors-toggle"]'
-  );
-  const refreshDebugToggle = (): void => {
-    if (debugToggleButton) {
-      debugToggleButton.classList.toggle("is-active", debugIgniteMode);
-    }
-  };
-  const refreshDebugTypeToggle = (): void => {
-    if (debugTypeButton) {
-      debugTypeButton.classList.toggle("is-active", debugTypeColors);
-    }
-  };
-  refreshDebugToggle();
-  refreshDebugTypeToggle();
 
   const isOverlayLocked = (): boolean => uiState.overlayVisible && uiState.overlayAction === "restart";
 
@@ -187,7 +172,6 @@ export const bindPhaseUi = ({
     gate("select", () => {
       debugIgniteMode = !debugIgniteMode;
       inputState.debugIgniteMode = debugIgniteMode;
-      refreshDebugToggle();
       setStatus(
         state,
         debugIgniteMode ? "Debug ignite mode enabled. Click to place a fire." : "Debug ignite mode disabled."
@@ -201,7 +185,6 @@ export const bindPhaseUi = ({
       debugTypeColors = !debugTypeColors;
       inputState.debugTypeColors = debugTypeColors;
       state.terrainDirty = true;
-      refreshDebugTypeToggle();
       setStatus(state, debugTypeColors ? "Debug type colors enabled." : "Debug type colors disabled.");
       window.dispatchEvent(new CustomEvent(DEBUG_TYPE_EVENT, { detail: { enabled: debugTypeColors } }));
       noteInteraction();
@@ -374,178 +357,221 @@ export const bindPhaseUi = ({
     }
   });
 
+  const applyCrewModeToSelection = (mode: "boarded" | "deployed"): void => {
+    const selectedTrucks = state.units.filter((unit) => unit.selected && unit.kind === "truck");
+    if (selectedTrucks.length === 0) {
+      return;
+    }
+    selectedTrucks.forEach((truck) => setTruckCrewMode(state, truck.id, mode));
+  };
+
+  const applyFormationToSelection = (formation: Formation): void => {
+    const selectedTrucks = state.units.filter((unit) => unit.selected && unit.kind === "truck");
+    if (selectedTrucks.length === 0) {
+      return;
+    }
+    selectedTrucks.forEach((truck) => setCrewFormation(state, truck.id, formation));
+  };
+
+  const runUiAction = (action: string, actionTarget?: HTMLElement | null, event?: Event): void => {
+    const speedMatch = action.match(/^time-speed-(\d+)$/);
+    if (speedMatch) {
+      const nextIndex = Number(speedMatch[1]);
+      if (!Number.isNaN(nextIndex) && nextIndex >= 0 && nextIndex < TIME_SPEED_OPTIONS.length) {
+        gate("timeControl", () => {
+          state.timeSpeedIndex = nextIndex;
+          setStatus(state, `Time speed ${TIME_SPEED_OPTIONS[nextIndex]}x.`);
+          phaseUi.sync(state, inputState);
+        });
+      }
+      return;
+    }
+    if (action === "select-roster") {
+      if (event) {
+        selectRosterFromEvent(event);
+      }
+      return;
+    }
+    if (action === "zoom-in") {
+      gate("zoom", () =>
+        zoomAtPointer(state, renderState, canvas, renderState.zoom + ZOOM_STEP, canvas.width / 2, canvas.height / 2)
+      );
+      return;
+    }
+    if (action === "zoom-out") {
+      gate("zoom", () =>
+        zoomAtPointer(state, renderState, canvas, renderState.zoom - ZOOM_STEP, canvas.width / 2, canvas.height / 2)
+      );
+      return;
+    }
+    if (action === "pause") {
+      gate("timeControl", () => togglePause(state));
+      return;
+    }
+    if (action === "debug-ignite-toggle") {
+      toggleDebugIgniteMode();
+      return;
+    }
+    if (action === "debug-type-colors-toggle") {
+      toggleDebugTypeColors();
+      return;
+    }
+    if (action === "toggle-fuel-break") {
+      gate("clearFuelBreak", () => handleDeployAction(state, "clear"));
+      return;
+    }
+    if (action === "deploy-firefighter") {
+      gate("deploy", () => handleDeployAction(state, "firefighter"));
+      return;
+    }
+    if (action === "deploy-truck") {
+      gate("deploy", () => handleDeployAction(state, "truck"));
+      return;
+    }
+    if (action === "backburn") {
+      const selectedTruck = state.units.find((unit) => unit.kind === "truck" && unit.selected) ?? null;
+      if (!selectedTruck) {
+        setStatus(state, "Select a truck to issue a backburn.");
+        return;
+      }
+      gate("select", () => {
+        debugIgniteMode = !debugIgniteMode;
+        inputState.debugIgniteMode = debugIgniteMode;
+        setStatus(
+          state,
+          debugIgniteMode ? "Fuel break (backburn) mode enabled. Click to ignite." : "Fuel break mode disabled."
+        );
+      });
+      return;
+    }
+    if (action === "select-truck") {
+      const id = Number(actionTarget?.dataset.truckId ?? "");
+      if (Number.isFinite(id)) {
+        const truck = state.units.find((unit) => unit.kind === "truck" && unit.id === id) ?? null;
+        if (truck) {
+          gate("select", () => {
+            selectUnit(state, truck);
+            setDeployMode(state, null);
+          });
+        }
+      }
+      return;
+    }
+    if (action === "select-unit") {
+      const id = Number(actionTarget?.dataset.unitId ?? "");
+      if (Number.isFinite(id)) {
+        const unit = state.units.find((entry) => entry.id === id) ?? null;
+        if (unit) {
+          gate("select", () => {
+            selectUnit(state, unit);
+            setDeployMode(state, null);
+          });
+        }
+      }
+      return;
+    }
+    if (action === "recruit-firefighter") {
+      recruitUnit(state, rng, "firefighter");
+      return;
+    }
+    if (action === "recruit-truck") {
+      recruitUnit(state, rng, "truck");
+      return;
+    }
+    if (action === "train-speed") {
+      trainSelectedUnit(state, "speed");
+      return;
+    }
+    if (action === "train-power") {
+      trainSelectedUnit(state, "power");
+      return;
+    }
+    if (action === "train-range") {
+      trainSelectedUnit(state, "range");
+      return;
+    }
+    if (action === "train-resilience") {
+      trainSelectedUnit(state, "resilience");
+      return;
+    }
+    if (action === "crew-assign") {
+      const selected = state.roster.find((unit) => unit.id === state.selectedRosterId) ?? null;
+      if (!selected || selected.kind !== "firefighter") {
+        return;
+      }
+      const select = phaseUi.controller.root.querySelector('[data-role="crew-assign-select"]') as HTMLSelectElement | null;
+      if (!select || !select.value) {
+        return;
+      }
+      assignRosterCrew(state, selected.id, Number(select.value));
+      return;
+    }
+    if (action === "crew-unassign") {
+      const selected = state.roster.find((unit) => unit.id === state.selectedRosterId) ?? null;
+      if (!selected || selected.kind !== "firefighter") {
+        return;
+      }
+      unassignRosterCrew(state, selected.id);
+      return;
+    }
+    if (action === "crew-board") {
+      applyCrewModeToSelection("boarded");
+      return;
+    }
+    if (action === "crew-deploy") {
+      applyCrewModeToSelection("deployed");
+      return;
+    }
+    const formationMatch = action.match(/^formation-(narrow|medium|wide)$/);
+    if (formationMatch) {
+      applyFormationToSelection(formationMatch[1] as Formation);
+      return;
+    }
+  };
+
   listenElement(phaseUi.controller.root, "click", (event) => {
     if (isOverlayLocked()) {
       return;
     }
     const actionTarget = getActionTarget(event.target);
-      if (actionTarget) {
-        const action = actionTarget.dataset.action;
-        if (!action) {
-          return;
-        }
-        const speedMatch = action.match(/^time-speed-(\d+)$/);
-        if (speedMatch) {
-          const nextIndex = Number(speedMatch[1]);
-          if (!Number.isNaN(nextIndex) && nextIndex >= 0 && nextIndex < TIME_SPEED_OPTIONS.length) {
-            gate("timeControl", () => {
-              state.timeSpeedIndex = nextIndex;
-              setStatus(state, `Time speed ${TIME_SPEED_OPTIONS[nextIndex]}x.`);
-              phaseUi.sync(state, inputState);
-            });
-          }
-          return;
-        }
-        noteInteraction();
-        if (action === "select-roster") {
-          selectRosterFromEvent(event);
-          return;
-      }
-      if (action === "zoom-in") {
-        gate("zoom", () =>
-          zoomAtPointer(state, renderState, canvas, renderState.zoom + ZOOM_STEP, canvas.width / 2, canvas.height / 2)
-        );
-        return;
-      }
-      if (action === "zoom-out") {
-        gate("zoom", () =>
-          zoomAtPointer(state, renderState, canvas, renderState.zoom - ZOOM_STEP, canvas.width / 2, canvas.height / 2)
-        );
-        return;
-      }
-      if (action === "pause") {
-        gate("timeControl", () => togglePause(state));
-        return;
-      }
-      if (action === "debug-ignite-toggle") {
-        toggleDebugIgniteMode();
-        return;
-      }
-      if (action === "debug-type-colors-toggle") {
-        toggleDebugTypeColors();
-        return;
-      }
-      if (action === "toggle-fuel-break") {
-        gate("clearFuelBreak", () => handleDeployAction(state, "clear"));
-        return;
-      }
-      if (action === "deploy-firefighter") {
-        gate("deploy", () => handleDeployAction(state, "firefighter"));
-        return;
-      }
-      if (action === "deploy-truck") {
-        gate("deploy", () => handleDeployAction(state, "truck"));
-        return;
-      }
-      if (action === "backburn") {
-        const selectedTruck = state.units.find((unit) => unit.kind === "truck" && unit.selected) ?? null;
-        if (!selectedTruck) {
-          setStatus(state, "Select a truck to issue a backburn.");
-          return;
-        }
-        gate("select", () => {
-          debugIgniteMode = !debugIgniteMode;
-          inputState.debugIgniteMode = debugIgniteMode;
-          refreshDebugToggle();
-          setStatus(
-            state,
-            debugIgniteMode ? "Fuel break (backburn) mode enabled. Click to ignite." : "Fuel break mode disabled."
-          );
-        });
-        noteInteraction();
-        return;
-      }
-      if (action === "focus-base") {
-        phaseUi.state.toggleBaseOpsOpen();
-        noteInteraction();
-        return;
-      }
-      if (action === "select-truck") {
-        const id = Number(actionTarget.dataset.truckId ?? "");
-        if (Number.isFinite(id)) {
-          const truck = state.units.find((unit) => unit.kind === "truck" && unit.id === id) ?? null;
-          if (truck) {
-            gate("select", () => {
-              selectUnit(state, truck);
-              setDeployMode(state, null);
-            });
-            noteInteraction();
-          }
-        }
-        return;
-      }
-      if (action === "recruit-firefighter") {
-        recruitUnit(state, rng, "firefighter");
-        return;
-      }
-      if (action === "recruit-truck") {
-        recruitUnit(state, rng, "truck");
-        return;
-      }
-      if (action === "train-speed") {
-        trainSelectedUnit(state, "speed");
-        return;
-      }
-      if (action === "train-power") {
-        trainSelectedUnit(state, "power");
-        return;
-      }
-      if (action === "train-range") {
-        trainSelectedUnit(state, "range");
-        return;
-      }
-      if (action === "train-resilience") {
-        trainSelectedUnit(state, "resilience");
-        return;
-      }
-      if (action === "crew-assign") {
-        const selected = state.roster.find((unit) => unit.id === state.selectedRosterId) ?? null;
-        if (!selected || selected.kind !== "firefighter") {
-          return;
-        }
-        const select = phaseUi.controller.root.querySelector('[data-role="crew-assign-select"]') as HTMLSelectElement | null;
-        if (!select || !select.value) {
-          return;
-        }
-        assignRosterCrew(state, selected.id, Number(select.value));
-        return;
-      }
-      if (action === "crew-unassign") {
-        const selected = state.roster.find((unit) => unit.id === state.selectedRosterId) ?? null;
-        if (!selected || selected.kind !== "firefighter") {
-          return;
-        }
-        unassignRosterCrew(state, selected.id);
-        return;
-      }
-      if (action === "crew-board") {
-        const selectedTruck = state.units.find((unit) => unit.selected && unit.kind === "truck") ?? null;
-        if (selectedTruck) {
-          setTruckCrewMode(state, selectedTruck.id, "boarded");
-        }
-        return;
-      }
-      if (action === "crew-deploy") {
-        const selectedTruck = state.units.find((unit) => unit.selected && unit.kind === "truck") ?? null;
-        if (selectedTruck) {
-          setTruckCrewMode(state, selectedTruck.id, "deployed");
-        }
-        return;
-      }
-      const formationMatch = action.match(/^formation-(narrow|medium|wide)$/);
-      if (formationMatch) {
-        const formation = formationMatch[1] as Formation;
-        const selectedTruck = state.units.find((unit) => unit.selected && unit.kind === "truck") ?? null;
-        if (selectedTruck) {
-          setCrewFormation(state, selectedTruck.id, formation);
-        }
-        return;
-      }
+    if (!actionTarget) {
+      selectRosterFromEvent(event);
       return;
     }
-
-    selectRosterFromEvent(event);
+    const action = actionTarget.dataset.action;
+    if (!action) {
+      return;
+    }
+    noteInteraction();
+    runUiAction(action, actionTarget, event);
   });
+
+  const onCommand = (command: PhaseUiCommand): void => {
+    if (isOverlayLocked()) {
+      return;
+    }
+    if (command.type === "action") {
+      noteInteraction();
+      let syntheticTarget: HTMLElement | null = null;
+      if (command.payload) {
+        syntheticTarget = document.createElement("div");
+        Object.entries(command.payload).forEach(([key, value]) => {
+          syntheticTarget!.dataset[key] = value;
+        });
+      }
+      runUiAction(command.action, syntheticTarget, undefined);
+      return;
+    }
+    if (command.type === "minimap-pan") {
+      noteInteraction();
+      if (onMinimapPan) {
+        onMinimapPan(command.tile);
+      } else {
+        renderState.cameraCenter = { x: command.tile.x + 0.5, y: command.tile.y + 0.5 };
+      }
+    }
+  };
+  disposers.push(listenPhaseUiCommand(onCommand));
 
   listenElement(overlayRefs.overlayRestart, "click", () => {
     if (uiState.overlayAction === "restart") {

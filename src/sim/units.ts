@@ -588,6 +588,15 @@ export function clearFuelLine(state: WorldState, rng: RNG, start: Point, end: Po
     setStatus(state, "Fuel breaks can only be cut during maintenance.");
     return;
   }
+  if (
+    !Number.isFinite(start.x) ||
+    !Number.isFinite(start.y) ||
+    !Number.isFinite(end.x) ||
+    !Number.isFinite(end.y)
+  ) {
+    setStatus(state, "Invalid fuel break coordinates.");
+    return;
+  }
   const firebreakCost = getCharacterFirebreakCost(state.campaign.characterId, FIREBREAK_COST_PER_TILE);
   if (state.budget < firebreakCost) {
     setStatus(state, "Insufficient budget.");
@@ -604,8 +613,16 @@ export function clearFuelLine(state: WorldState, rng: RNG, start: Point, end: Po
   let err = dx - dy;
   let cleared = 0;
   let spent = 0;
+  let steps = 0;
+  const maxSteps = state.grid.totalTiles + 1;
 
   while (true) {
+    steps += 1;
+    if (steps > maxSteps) {
+      console.warn("Fuel break line traversal aborted due to unexpected path length.", { start, end, maxSteps });
+      setStatus(state, "Fuel break line aborted due to an invalid path.");
+      return;
+    }
     if (state.budget < firebreakCost) {
       break;
     }

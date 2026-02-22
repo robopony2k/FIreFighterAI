@@ -83,6 +83,7 @@ export interface Town extends Point {
   cy: number;
   radius: number;
   houseCount: number;
+  housesLost: number;
   alertPosture: number;
   alertCooldownDays: number;
   nonApprovingHouseCount: number;

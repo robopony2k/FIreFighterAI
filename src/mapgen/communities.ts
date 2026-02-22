@@ -181,6 +181,7 @@ const assignTownNames = (state: WorldState, centers: TownCenterSeed[]): void => 
       y: center.y,
       radius: Math.max(3, center.radius),
       houseCount: 0,
+      housesLost: 0,
       alertPosture: 0,
       alertCooldownDays: 0,
       nonApprovingHouseCount: 0,

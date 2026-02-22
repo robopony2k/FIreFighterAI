@@ -8,7 +8,6 @@ export type FireDeployPanelData = {
     hotkey: string;
     selected: boolean;
   }>;
-  baseOpsOpen?: boolean;
   deployableFirefighters: number;
   availableTrucks: number;
   activeMode: "firefighter" | "truck" | null;
@@ -31,11 +30,6 @@ export const createFireDeployPanel = (): FireDeployPanelView => {
   title.className = "phase-card-title";
   title.textContent = "Trucks";
 
-  const baseButton = document.createElement("button");
-  baseButton.className = "phase-base-action";
-  baseButton.dataset.action = "focus-base";
-  baseButton.textContent = "Base Ops";
-
   const hint = document.createElement("div");
   hint.className = "phase-card-summary";
   hint.textContent = "Hotkeys 1-0 select trucks.";
@@ -54,22 +48,14 @@ export const createFireDeployPanel = (): FireDeployPanelView => {
   deployTruck.className = "phase-action";
   deployTruck.dataset.action = "deploy-truck";
 
-  const threeTestHint = document.createElement("div");
-  threeTestHint.className = "phase-card-summary phase-three-test-hud-note";
-  threeTestHint.textContent =
-    "3D controls: left-click terrain to deploy/select/ignite, right-click to retask selected trucks.";
-
   actions.append(deployTruck, deployFirefighter);
 
-  header.append(title, baseButton);
-  element.append(header, hint, list, actions, threeTestHint);
+  header.append(title);
+  element.append(header, hint, list, actions);
 
   return {
     element,
     update: (data) => {
-      const baseOpsOpen = data.baseOpsOpen ?? false;
-      baseButton.classList.toggle("is-active", baseOpsOpen);
-      baseButton.textContent = baseOpsOpen ? "Base Ops On" : "Base Ops";
       list.innerHTML = "";
       if (data.trucks.length === 0) {
         const empty = document.createElement("div");

@@ -66,6 +66,7 @@ export const initPhaseUI = (container: HTMLElement): PhaseUiApi => {
   const controller = new UIController(root, state);
 
   const sync = (world: WorldState, inputState: InputState) => {
+    const isThreeTest = container.classList.contains("phase-ui-root--three-test");
     const phaseInfo = getPhaseInfo(world.phaseIndex);
     const progress = phaseInfo.duration > 0 ? world.phaseDay / phaseInfo.duration : 0;
     state.setPhase(world.phase);
@@ -90,6 +91,9 @@ export const initPhaseUI = (container: HTMLElement): PhaseUiApi => {
       world.climateTimeline?.daysPerYear ?? 360,
       forecastMeta
     );
+    if (isThreeTest) {
+      return;
+    }
     controller.setPanelData("miniMap", { world });
 
     const rosterFirefighters = world.roster.filter((unit) => unit.kind === "firefighter");

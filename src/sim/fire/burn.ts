@@ -5,6 +5,7 @@ import { getFuelProfiles } from "../../core/tiles.js";
 import { destroyHouse } from "../../core/towns.js";
 import { clamp } from "../../core/utils.js";
 import { markTileSoADirty } from "../../core/tileCache.js";
+import { recordTownHouseLoss } from "../towns.js";
 
 const MIN_IGNITION_POINT = 0.0001;
 
@@ -22,6 +23,10 @@ export function burnTile(state: WorldState, tile: Tile, fireDelta: number): bool
   const tileIndex = state.tiles.indexOf(tile);
   if (tile.fuel <= 0.02 && tile.type !== "ash") {
     if (tile.type === "house" && !tile.houseDestroyed) {
+      const townId = tileIndex >= 0 ? state.tileTownId[tileIndex] ?? -1 : -1;
+      if (townId >= 0) {
+        recordTownHouseLoss(state, townId);
+      }
       if (tileIndex < 0 || !destroyHouse(state, tileIndex)) {
         state.totalPropertyValue = Math.max(0, state.totalPropertyValue - Math.max(0, tile.houseValue));
         state.totalPopulation = Math.max(0, state.totalPopulation - Math.max(0, tile.houseResidents));

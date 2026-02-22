@@ -33,6 +33,7 @@ const syncTownApproval = (town: Town): void => {
 const normalizeTownState = (town: Town): void => {
   town.alertPosture = clampPosture(town.alertPosture ?? 0);
   town.alertCooldownDays = Math.max(0, Number.isFinite(town.alertCooldownDays) ? town.alertCooldownDays : 0);
+  town.housesLost = Math.max(0, Number.isFinite(town.housesLost) ? Math.floor(town.housesLost) : 0);
   town.evacProgress = clamp(Number.isFinite(town.evacProgress) ? town.evacProgress : 0, 0, 1);
   if (town.evacState !== "in_progress" && town.evacState !== "complete") {
     town.evacState = "none";
@@ -61,14 +62,16 @@ const getTownCenterY = (town: Town): number => (Number.isFinite(town.cy) ? town.
 
 export const getTownPostureLabel = (posture: number): string => {
   switch (clampPosture(posture)) {
+    case 0:
+      return "No Alert";
     case 1:
-      return "Raised";
+      return "Advice (Yellow)";
     case 2:
-      return "High";
+      return "Watch and Act (Orange)";
     case 3:
-      return "EvacReady";
+      return "Emergency Warning (Red)";
     default:
-      return "Normal";
+      return "No Alert";
   }
 };
 
@@ -209,8 +212,9 @@ const tickTownsOneDay = (state: WorldState): void => {
 
 /*
  * Posture ladder + cooldown:
- * posture 0..3 (Normal -> Raised -> High -> EvacReady), with a cooldown between changes.
+ * posture 0..3 (No Alert -> Advice -> Watch and Act -> Emergency Warning), with cooldown between changes.
  * Threat is computed from fire conditions and remains separate from this player-set posture.
+ * Reaching Emergency Warning starts evacuation immediately (no separate evac action required).
  */
 const changeTownAlertPosture = (state: WorldState, townId: number, delta: number): boolean => {
   const town = getTownById(state, townId);
@@ -228,6 +232,10 @@ const changeTownAlertPosture = (state: WorldState, townId: number, delta: number
   town.alertPosture = nextPosture;
   town.alertCooldownDays = TOWN_ALERT_CHANGE_COOLDOWN_DAYS;
   town.lastPostureChangeDay = state.careerDay;
+  if (town.alertPosture === TOWN_ALERT_MAX_POSTURE && town.evacState === "none") {
+    town.evacState = "in_progress";
+    town.evacProgress = 0;
+  }
   return true;
 };
 
@@ -251,6 +259,15 @@ export const startTownEvacuation = (state: WorldState, townId: number): boolean 
   town.evacState = "in_progress";
   town.evacProgress = 0;
   return true;
+};
+
+export const recordTownHouseLoss = (state: WorldState, townId: number): void => {
+  const town = getTownById(state, townId);
+  if (!town) {
+    return;
+  }
+  normalizeTownState(town);
+  town.housesLost += 1;
 };
 
 export const stepTownAlertPosture = (state: WorldState, dayDelta: number): void => {

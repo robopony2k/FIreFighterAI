@@ -236,11 +236,18 @@ export function findPath(state: WorldState, start: Point, goal: Point): Point[] 
 
   const path: Point[] = [];
   let current = goalIdx;
+  let steps = 0;
   while (current !== startIdx) {
+    if (steps > total) {
+      console.warn("Path reconstruction aborted due to unexpected cycle.", { start, goal, total });
+      profEnd("findPath", profStartAt);
+      return [];
+    }
     const px = current % state.grid.cols;
     const py = Math.floor(current / state.grid.cols);
     path.push({ x: px, y: py });
     current = prev[current];
+    steps += 1;
   }
   path.reverse();
   profEnd("findPath", profStartAt);

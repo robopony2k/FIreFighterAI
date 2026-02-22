@@ -98,10 +98,7 @@ export const createAppRuntime = (): AppRuntime => {
     if (!Number.isFinite(raw)) {
       return 60;
     }
-    if (raw <= 0) {
-      return 0;
-    }
-    return Math.max(15, Math.min(240, raw));
+    return Math.max(30, Math.min(120, raw > 0 ? raw : 60));
   })();
   
   const state = createInitialState(initialSeed, grid);
@@ -172,7 +169,6 @@ export const createAppRuntime = (): AppRuntime => {
   const threeTestCloseButton = document.getElementById("threeTestClose") as HTMLButtonElement | null;
   const threeTestEndRunButton = document.getElementById("threeTestEndRun") as HTMLButtonElement | null;
   const threeTestStepButton = document.getElementById("threeTestStep") as HTMLButtonElement | null;
-  const threeTestDebugIgniteButton = document.getElementById("threeTestDebugIgnite") as HTMLButtonElement | null;
   const threeTestAutoToggle = document.getElementById("threeTestAuto") as HTMLInputElement | null;
   const threeTestPhaseLabel = document.getElementById("threeTestPhase") as HTMLSpanElement | null;
   const threeTestSeason = document.getElementById("threeTestSeason") as HTMLInputElement | null;
@@ -536,13 +532,6 @@ export const createAppRuntime = (): AppRuntime => {
     return cachedThreeTestTreeTypeMap!;
   };
   
-  const updateThreeTestDebugIgniteUi = (): void => {
-    if (!threeTestDebugIgniteButton) {
-      return;
-    }
-    threeTestDebugIgniteButton.classList.toggle("active", inputState.debugIgniteMode);
-  };
-  
   const buildThreeTestSample = (fastUpdate = false) => {
     const sample = buildRenderTerrainSample(
       state,
@@ -657,18 +646,6 @@ export const createAppRuntime = (): AppRuntime => {
       updateThreeTestStepUi();
     });
   }
-  if (threeTestDebugIgniteButton) {
-    threeTestDebugIgniteButton.addEventListener("click", () => {
-      inputState.debugIgniteMode = !inputState.debugIgniteMode;
-      updateThreeTestDebugIgniteUi();
-      setStatus(
-        state,
-        inputState.debugIgniteMode
-          ? "Debug ignite mode enabled. Click to place a fire."
-          : "Debug ignite mode disabled."
-      );
-    });
-  }
   if (threeTestSeason) {
     threeTestSeason.addEventListener("input", () => {
       if (!ENABLE_THREE_TEST_SEASONAL_RECOLOR) {
@@ -711,7 +688,6 @@ export const createAppRuntime = (): AppRuntime => {
     }
     phaseUiRoot.classList.remove("hidden");
     phaseUiRoot.classList.add("phase-ui-root--three-test");
-    phaseUi?.state.setBaseOpsOpen(true);
     if (phaseUiRoot.parentNode !== threeTestPhaseHudMount) {
       threeTestPhaseHudMount.appendChild(phaseUiRoot);
     }
@@ -834,6 +810,9 @@ export const createAppRuntime = (): AppRuntime => {
       threeTestController = createThreeTest(threeTestCanvas, asRenderSim(state), inputState, effectsState);
     }
     if (threeTestController) {
+      threeTestController.setBaseCardOpen(false);
+    }
+    if (threeTestController) {
       threeTestController.setClimateForecast(null, 0, 0, 0, null);
     }
     threeTestSeasonMode = "auto";
@@ -848,7 +827,6 @@ export const createAppRuntime = (): AppRuntime => {
     lastThreeTestDebugTypeColors = inputState.debugTypeColors;
     cachedThreeTestTreeTypeMap = null;
     updateThreeTestSeasonUi(threeTestManualSeasonT01, threeTestSeasonMode);
-    updateThreeTestDebugIgniteUi();
     if (!threeTestStepController) {
       let auto = threeTestAutoToggle ? threeTestAutoToggle.checked : true;
       let resolver: (() => void) | null = null;
@@ -1139,7 +1117,14 @@ export const createAppRuntime = (): AppRuntime => {
           onThreeTest: openThreeTest,
           overlayRefs,
           showStartMenuOnBind: true,
-          startThreeOnConfirm: !legacy2dEnabled
+          startThreeOnConfirm: !legacy2dEnabled,
+          onMinimapPan: (tile) => {
+            if (threeTestController) {
+              threeTestController.panToTile(tile.x, tile.y);
+              return;
+            }
+            renderState.cameraCenter = { x: tile.x + 0.5, y: tile.y + 0.5 };
+          }
         });
       }
     }

@@ -70,7 +70,6 @@ const defaultPanelData: PanelDataMap = {
   },
   fireDeploy: {
     trucks: [],
-    baseOpsOpen: false,
     deployableFirefighters: 0,
     availableTrucks: 0,
     activeMode: null
@@ -87,6 +86,18 @@ const defaultPanelData: PanelDataMap = {
     losses: "--"
   }
 };
+
+const THREE_TEST_LEGACY_PANELS = new Set<PanelId>([
+  "bottomControls",
+  "miniMap",
+  "maintenanceRoster",
+  "maintenanceCrew",
+  "fuelBreak",
+  "fireDeploy",
+  "fireUnitList",
+  "fireSelectedUnit",
+  "budgetReport"
+]);
 
 export class UIController {
   private state: GameState;
@@ -171,6 +182,7 @@ export class UIController {
   private update(snapshot: GameUiSnapshot): void {
     const rules = getPhaseRules(snapshot.phase as Phase, snapshot.interactionMode as InteractionMode);
     this.root.classList.toggle("phase-ui--minimal", rules.minimalUi);
+    const isThreeTest = this.root.parentElement?.classList.contains("phase-ui-root--three-test") ?? false;
 
     const topBarData: TopBarData = {
       phase: rules.phase,
@@ -197,24 +209,27 @@ export class UIController {
     };
     this.bottomControls.update(bottomData);
 
-    this.maintenanceRoster.update(this.panelData.maintenanceRoster ?? defaultPanelData.maintenanceRoster);
-    this.maintenanceCrew.update(this.panelData.maintenanceCrew ?? defaultPanelData.maintenanceCrew);
-    this.miniMap.update(this.panelData.miniMap ?? defaultPanelData.miniMap);
-    this.fuelBreak.update(this.panelData.fuelBreak ?? defaultPanelData.fuelBreak);
-    const fireDeployData = this.panelData.fireDeploy ?? defaultPanelData.fireDeploy;
-    this.fireDeploy.update({ ...fireDeployData, baseOpsOpen: snapshot.baseOpsOpen });
-    this.fireUnitList.update(this.panelData.fireUnitList ?? defaultPanelData.fireUnitList);
-    this.fireSelectedUnit.update({ selection: snapshot.selection });
-    this.budgetReport.update(this.panelData.budgetReport ?? defaultPanelData.budgetReport);
+    if (!isThreeTest) {
+      this.maintenanceRoster.update(this.panelData.maintenanceRoster ?? defaultPanelData.maintenanceRoster);
+      this.maintenanceCrew.update(this.panelData.maintenanceCrew ?? defaultPanelData.maintenanceCrew);
+      this.miniMap.update(this.panelData.miniMap ?? defaultPanelData.miniMap);
+      this.fuelBreak.update(this.panelData.fuelBreak ?? defaultPanelData.fuelBreak);
+      this.fireDeploy.update(this.panelData.fireDeploy ?? defaultPanelData.fireDeploy);
+      this.fireUnitList.update(this.panelData.fireUnitList ?? defaultPanelData.fireUnitList);
+      this.fireSelectedUnit.update({ selection: snapshot.selection });
+      this.budgetReport.update(this.panelData.budgetReport ?? defaultPanelData.budgetReport);
+    }
 
-    this.applyVisibility(rules.visiblePanels, snapshot.baseOpsOpen);
+    const visiblePanels = isThreeTest
+      ? rules.visiblePanels.filter((panelId) => !THREE_TEST_LEGACY_PANELS.has(panelId))
+      : rules.visiblePanels;
+    this.applyVisibility(visiblePanels);
   }
 
-  private applyVisibility(visible: PanelId[], baseOpsOpen: boolean): void {
+  private applyVisibility(visible: PanelId[]): void {
     const visibleSet = new Set(visible);
     this.panels.forEach((panel, id) => {
-      const isBaseOpsPanel = id === "maintenanceRoster" || id === "maintenanceCrew";
-      const shouldShow = visibleSet.has(id) && (!isBaseOpsPanel || baseOpsOpen);
+      const shouldShow = visibleSet.has(id);
       panel.classList.toggle("is-hidden", !shouldShow);
       panel.setAttribute("aria-hidden", shouldShow ? "false" : "true");
     });

@@ -32,17 +32,10 @@ export const createBottomLeftControls = (): BottomControlsView => {
   `;
   timeGroup.append(titleRow, speedRow);
 
-  const debugRow = document.createElement("div");
-  debugRow.className = "phase-control-row phase-control-row-single phase-debug-row";
-  debugRow.innerHTML = `
-    <button data-action="debug-ignite-toggle">Debug Ignite</button>
-    <button data-action="debug-type-colors-toggle">Type Colors</button>
-  `;
-
   const status = document.createElement("div");
   status.className = "phase-control-status";
 
-  element.append(timeGroup, status, debugRow);
+  element.append(timeGroup, status);
 
   const pauseButton = speedRow.querySelector('[data-action="pause"]') as HTMLButtonElement;
   const speedButtons = Array.from(speedRow.querySelectorAll<HTMLButtonElement>("[data-speed-index]"));

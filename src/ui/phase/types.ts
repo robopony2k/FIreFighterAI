@@ -7,6 +7,8 @@ export type PanelId =
   | "topbar"
   | "bottomControls"
   | "miniMap"
+  | "rightDock"
+  | "unitTray"
   | "maintenanceRoster"
   | "maintenanceCrew"
   | "fuelBreak"
@@ -48,7 +50,6 @@ export type GameUiSnapshot = {
   paused: boolean;
   alert: string | null;
   timeSpeedIndex: number;
-  baseOpsOpen: boolean;
   forecast: ClimateForecast | null;
   forecastDay: number;
   forecastStartDay: number;
