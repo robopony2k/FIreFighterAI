@@ -14,6 +14,10 @@ const mimeTypes = {
   ".png": "image/png",
   ".jpg": "image/jpeg",
   ".jpeg": "image/jpeg",
+  ".ogg": "audio/ogg",
+  ".wav": "audio/wav",
+  ".mid": "audio/midi",
+  ".midi": "audio/midi",
   ".ico": "image/x-icon"
 };
 

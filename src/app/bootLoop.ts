@@ -45,6 +45,7 @@ export type AppBootLoopDeps = {
   frameCapFps: number;
   timeSpeedOptions: readonly number[];
   isGenerating: () => boolean;
+  isTitleScreenVisible?: () => boolean;
   isCharacterScreenVisible: () => boolean;
   isStartMenuVisible: () => boolean;
   isDocumentHidden: () => boolean;
@@ -53,7 +54,7 @@ export type AppBootLoopDeps = {
   isThreeTestNoSim: boolean;
   isPausedOrGameOver: () => boolean;
   stepSimulation: (simStep: number) => number;
-  onThreeTestFrame: () => void;
+  onThreeTestFrame: (alpha: number) => void;
   render2dFrame: (alpha: number) => void;
   recordPerfSample: (name: string, value: number) => void;
   maybeUpdatePerfDiagnostics: (now: number) => void;
@@ -88,6 +89,7 @@ export const startAppBootLoop = (deps: AppBootLoopDeps): void => {
     const threeTestVisible = deps.isThreeTestVisible();
     if (
       deps.isGenerating() ||
+      deps.isTitleScreenVisible?.() ||
       deps.isCharacterScreenVisible() ||
       deps.isStartMenuVisible() ||
       deps.isDocumentHidden()
@@ -129,7 +131,7 @@ export const startAppBootLoop = (deps: AppBootLoopDeps): void => {
 
     const alpha = deps.isPausedOrGameOver() ? 1 : Math.min(1, Math.max(0, accumulator / deps.baseStep));
     if (threeTestVisible) {
-      deps.onThreeTestFrame();
+      deps.onThreeTestFrame(alpha);
     } else {
       deps.render2dFrame(alpha);
     }

@@ -41,9 +41,51 @@ import type { GameUiSnapshot } from "../ui/phase/types.js";
 import { createRenderBackend, resolveRenderBackend, type RenderBackend } from "./renderBackend.js";
 import { updatePerfCounter } from "./perfDiagnostics.js";
 import { startAppBootLoop } from "./bootLoop.js";
+import { createUiAudioController } from "../audio/uiAudio.js";
+import { createMusicController } from "../audio/musicController.js";
+import { showTitleScreen as mountTitleScreen, type TitleScreenHandle } from "../ui/titleScreen.js";
+import { loadMusicAudioSettings, saveMusicAudioSettings } from "../persistence/audioSettings.js";
 
 
 export type { RenderBackend } from "./renderBackend.js";
+
+// Single switch for removing the startup title layer.
+const ENABLE_TITLE_SCREEN = true;
+
+type ElectronBridge = {
+  quit?: () => void;
+  close?: () => void;
+  appQuit?: () => void;
+  send?: (channel: string) => void;
+  invoke?: (channel: string) => Promise<unknown> | unknown;
+};
+
+const callQuitBridge = (bridge: ElectronBridge | null | undefined): boolean => {
+  if (!bridge) {
+    return false;
+  }
+  if (typeof bridge.quit === "function") {
+    bridge.quit();
+    return true;
+  }
+  if (typeof bridge.appQuit === "function") {
+    bridge.appQuit();
+    return true;
+  }
+  if (typeof bridge.close === "function") {
+    bridge.close();
+    return true;
+  }
+  if (typeof bridge.send === "function") {
+    bridge.send("app:quit");
+    return true;
+  }
+  if (typeof bridge.invoke === "function") {
+    void bridge.invoke("app:quit");
+    return true;
+  }
+  return false;
+};
 
 export type AppRuntime = {
   boot: () => Promise<void>;
@@ -109,6 +151,60 @@ export const createAppRuntime = (): AppRuntime => {
   const gameEvents = createGameEventBus();
   const rng = new RNG(initialSeed);
   const persistedFuelProfiles = loadFuelProfileOverrides();
+  const uiAudio = createUiAudioController();
+  const musicController = createMusicController();
+  type HudMusicSettings = { muted: boolean; volume: number };
+  const clampMusic01 = (value: number): number => Math.max(0, Math.min(1, value));
+  const hudMusicListeners = new Set<(settings: HudMusicSettings) => void>();
+  const persistedMusicSettings = loadMusicAudioSettings();
+  let musicMutedByUser = persistedMusicSettings.muted;
+  let musicVolume = clampMusic01(persistedMusicSettings.volume);
+  const getHudMusicSettings = (): HudMusicSettings => ({ muted: musicMutedByUser, volume: musicVolume });
+  const saveHudMusicSettings = (): void => {
+    saveMusicAudioSettings(getHudMusicSettings());
+  };
+  const notifyHudMusicSettings = (): void => {
+    const snapshot = getHudMusicSettings();
+    hudMusicListeners.forEach((listener) => listener(snapshot));
+  };
+  const applyMusicOutputState = (): void => {
+    musicController.setVolume(musicVolume);
+    musicController.setMuted(document.hidden || musicMutedByUser);
+  };
+  applyMusicOutputState();
+  const musicControls = {
+    getSettings: getHudMusicSettings,
+    setMuted: (muted: boolean): void => {
+      const nextMuted = Boolean(muted);
+      if (musicMutedByUser === nextMuted) {
+        return;
+      }
+      musicMutedByUser = nextMuted;
+      applyMusicOutputState();
+      saveHudMusicSettings();
+      notifyHudMusicSettings();
+    },
+    toggleMuted: (): void => {
+      musicControls.setMuted(!musicMutedByUser);
+    },
+    setVolume: (value: number): void => {
+      const nextVolume = clampMusic01(value);
+      if (Math.abs(musicVolume - nextVolume) < 0.0001) {
+        return;
+      }
+      musicVolume = nextVolume;
+      applyMusicOutputState();
+      saveHudMusicSettings();
+      notifyHudMusicSettings();
+    },
+    onChange: (listener: (settings: HudMusicSettings) => void): (() => void) => {
+      hudMusicListeners.add(listener);
+      listener(getHudMusicSettings());
+      return () => {
+        hudMusicListeners.delete(listener);
+      };
+    }
+  };
   
   setGameEventBus(gameEvents);
   
@@ -133,6 +229,7 @@ export const createAppRuntime = (): AppRuntime => {
     const callsign = state.campaign.callsign.trim() || "Chief";
     saveLeaderboard({ name: callsign, score: payload.score, seed: payload.seed, date: Date.now() });
     persistenceState.scoreSubmitted = true;
+    musicController.setGameOver(payload.victory ? "victory" : "defeat");
   });
   const buildTreeTypeMap = (): Uint8Array => {
     const result = new Uint8Array(state.grid.totalTiles);
@@ -150,6 +247,7 @@ export const createAppRuntime = (): AppRuntime => {
     }
     return result;
   };
+  const appRoot = document.getElementById("app") as HTMLDivElement | null;
   const phaseUiRoot = document.getElementById("phaseUI") as HTMLDivElement | null;
   const phaseUi = phaseUiRoot ? initPhaseUI(phaseUiRoot) : null;
   const phaseUiOriginalParent = phaseUiRoot?.parentNode ?? null;
@@ -158,6 +256,7 @@ export const createAppRuntime = (): AppRuntime => {
   buildMapGenControls();
   const characterScreen = document.getElementById("characterScreen") as HTMLDivElement;
   const startMenu = document.getElementById("startMenu") as HTMLDivElement | null;
+  const startNewRunButton = document.getElementById("startNewRun") as HTMLButtonElement | null;
   const canvasWrap = canvas.parentElement as HTMLElement | null;
   const mapgenOverlay = document.getElementById("mapgenOverlay") as HTMLDivElement | null;
   const mapgenMessage = document.getElementById("mapgenMessage") as HTMLDivElement | null;
@@ -174,6 +273,20 @@ export const createAppRuntime = (): AppRuntime => {
   const threeTestSeason = document.getElementById("threeTestSeason") as HTMLInputElement | null;
   const threeTestSeasonManualToggle = document.getElementById("threeTestSeasonManual") as HTMLInputElement | null;
   const threeTestSeasonLabel = document.getElementById("threeTestSeasonLabel") as HTMLSpanElement | null;
+  const isMenuActive = (): boolean =>
+    (startMenu ? !startMenu.classList.contains("hidden") : false) || !characterScreen.classList.contains("hidden");
+  const syncMusicContext = (): void => {
+    if (headless) {
+      return;
+    }
+    applyMusicOutputState();
+    musicController.unlock();
+    const menuActive = isMenuActive();
+    musicController.setMenuActive(menuActive);
+    if (!menuActive && !state.gameOver) {
+      musicController.setPhase(state.phase);
+    }
+  };
   if (!legacy2dEnabled) {
     threeTestCloseButton?.classList.add("hidden");
   }
@@ -219,6 +332,9 @@ export const createAppRuntime = (): AppRuntime => {
   };
   
   let isGenerating = false;
+  const titleScreenEnabled = ENABLE_TITLE_SCREEN && !headless;
+  let titleScreenVisible = false;
+  let titleScreen: TitleScreenHandle | null = null;
   const showMapgenOverlay = (): void => {
     if (!mapgenOverlay) {
       return;
@@ -807,7 +923,14 @@ export const createAppRuntime = (): AppRuntime => {
     effectsState.smokeParticles.length = 0;
     effectsState.waterParticles.length = 0;
     if (!threeTestController) {
-      threeTestController = createThreeTest(threeTestCanvas, asRenderSim(state), inputState, effectsState);
+      threeTestController = createThreeTest(
+        threeTestCanvas,
+        asRenderSim(state),
+        inputState,
+        effectsState,
+        uiAudio,
+        musicControls
+      );
     }
     if (threeTestController) {
       threeTestController.setBaseCardOpen(false);
@@ -946,6 +1069,74 @@ export const createAppRuntime = (): AppRuntime => {
     startMenu?.classList.remove("hidden");
     state.paused = true;
     setStatus(state, "Run ended. Ready to start a new run.");
+    syncMusicContext();
+  };
+
+  const destroyTitleScreen = (): void => {
+    titleScreen?.destroy();
+    titleScreen = null;
+    titleScreenVisible = false;
+  };
+
+  const requestQuit = (): void => {
+    const electronWindow = window as Window & {
+      electronAPI?: ElectronBridge;
+      ipcRenderer?: ElectronBridge;
+      require?: (name: string) => unknown;
+    };
+    if (callQuitBridge(electronWindow.electronAPI)) {
+      return;
+    }
+    if (callQuitBridge(electronWindow.ipcRenderer)) {
+      return;
+    }
+    if (typeof electronWindow.require === "function") {
+      try {
+        const electronModule = electronWindow.require("electron") as { ipcRenderer?: ElectronBridge } | undefined;
+        if (callQuitBridge(electronModule?.ipcRenderer)) {
+          return;
+        }
+      } catch {
+        // Ignore require failures in browser mode.
+      }
+    }
+    if (!window.confirm("Quit EMBERWATCH and close this window?")) {
+      return;
+    }
+    window.close();
+  };
+
+  const showTitleScreen = (): void => {
+    if (!titleScreenEnabled || titleScreen) {
+      return;
+    }
+    const mount = appRoot ?? document.body;
+    titleScreenVisible = true;
+    titleScreen = mountTitleScreen({
+      mount,
+      audioControls: {
+        sfx: uiAudio,
+        music: {
+          getSettings: musicControls.getSettings,
+          setMuted: musicControls.setMuted,
+          setVolume: musicControls.setVolume,
+          onChange: musicControls.onChange
+        }
+      },
+      onNewGame: () => {
+        destroyTitleScreen();
+        if (phaseUi && startNewRunButton) {
+          startNewRunButton.click();
+          return;
+        }
+        startMenu?.classList.remove("hidden");
+        state.paused = true;
+        syncMusicContext();
+      },
+      onQuit: () => requestQuit()
+    });
+    state.paused = true;
+    syncMusicContext();
   };
   
   const refreshThreeTestDebug = (): void => {
@@ -969,6 +1160,7 @@ export const createAppRuntime = (): AppRuntime => {
       resetEffectsState(effectsState);
       resetUiState(uiState);
       persistenceState.scoreSubmitted = false;
+      musicController.clearGameOver();
       if (activeMapSize !== mapSize) {
         activeMapSize = mapSize;
         state.grid = buildGrid(mapSize);
@@ -1001,6 +1193,7 @@ export const createAppRuntime = (): AppRuntime => {
     const maintenanceIndex = PHASES.findIndex((phase) => phase.id === "maintenance");
     state.phaseIndex = maintenanceIndex >= 0 ? maintenanceIndex : 1;
     setPhase(state, rng, "maintenance");
+    syncMusicContext();
     phaseUi?.sync(state, inputState);
     updateOverlay(overlayRefs, uiState);
   };
@@ -1100,10 +1293,41 @@ export const createAppRuntime = (): AppRuntime => {
   watchCanvasSize();
   
   const boot = async () => {
-    await resetGame(initialRunConfig);
-  
-    if (!headless) {
+    if (titleScreenEnabled) {
       if (phaseUi) {
+        phaseUiDisposer?.();
+        phaseUiDisposer = bindPhaseUi({
+          phaseUi,
+          state,
+          inputState,
+          uiState,
+          renderState,
+          rng,
+          canvas,
+          onNewRun: resetGame,
+          onThreeTest: openThreeTest,
+          overlayRefs,
+          showStartMenuOnBind: false,
+          startThreeOnConfirm: !legacy2dEnabled,
+          onMinimapPan: (tile) => {
+            if (threeTestController) {
+              threeTestController.panToTile(tile.x, tile.y);
+              return;
+            }
+            renderState.cameraCenter = { x: tile.x + 0.5, y: tile.y + 0.5 };
+          },
+          uiAudio,
+          musicControls
+        });
+      }
+      startMenu?.classList.add("hidden");
+      characterScreen.classList.add("hidden");
+      state.paused = true;
+      syncMusicContext();
+      showTitleScreen();
+    } else {
+      await resetGame(initialRunConfig);
+      if (!headless && phaseUi) {
         phaseUiDisposer?.();
         phaseUiDisposer = bindPhaseUi({
           phaseUi,
@@ -1124,7 +1348,9 @@ export const createAppRuntime = (): AppRuntime => {
               return;
             }
             renderState.cameraCenter = { x: tile.x + 0.5, y: tile.y + 0.5 };
-          }
+          },
+          uiAudio,
+          musicControls
         });
       }
     }
@@ -1148,6 +1374,7 @@ export const createAppRuntime = (): AppRuntime => {
       frameCapFps,
       timeSpeedOptions: TIME_SPEED_OPTIONS,
       isGenerating: () => isGenerating,
+      isTitleScreenVisible: () => titleScreenVisible,
       isCharacterScreenVisible: () => !characterScreen.classList.contains("hidden"),
       isStartMenuVisible: () => (startMenu ? !startMenu.classList.contains("hidden") : false),
       isDocumentHidden: () => document.hidden,
@@ -1160,11 +1387,12 @@ export const createAppRuntime = (): AppRuntime => {
         stepSim(state, effectsState, rng, simStep);
         return performance.now() - simStartedAt;
       },
-      onThreeTestFrame: () => {
+      onThreeTestFrame: (alpha: number) => {
         const uiStartedAt = performance.now();
         phaseUi?.sync(state, inputState);
         recordPerfSample("3d.phaseUi", performance.now() - uiStartedAt);
         const controller = threeTestController;
+        controller?.setSimulationAlpha(alpha);
         if (state.gameOver) {
           closeThreeTest();
         }
@@ -1188,16 +1416,21 @@ export const createAppRuntime = (): AppRuntime => {
         renderBackend.frame(alpha);
       },
       recordPerfSample,
-      maybeUpdatePerfDiagnostics
+      maybeUpdatePerfDiagnostics: (now: number) => {
+        syncMusicContext();
+        maybeUpdatePerfDiagnostics(now);
+      }
     });
   };
   
 
   const dispose = (): void => {
+    destroyTitleScreen();
     closeThreeTest(true);
     renderBackend.dispose();
     phaseUiDisposer?.();
     phaseUiDisposer = null;
+    musicController.dispose();
     if (resizeObserver) {
       resizeObserver.disconnect();
       resizeObserver = null;

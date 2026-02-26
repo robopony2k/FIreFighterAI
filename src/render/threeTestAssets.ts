@@ -35,6 +35,7 @@ export type HouseVariant = {
   baseOffset: number;
   size: THREE.Vector3;
   theme: "brick" | "wood";
+  source: string;
   buildKey?: string | null;
 };
 
@@ -188,8 +189,19 @@ const applySeasonToMaterial = (
   }
   if (applyOpacity && standard.userData.treeLeafHint === true && baseOpacity !== undefined) {
     const presence = preset.leafPresence[treeType] ?? 1;
-    standard.opacity = baseOpacity * presence;
-    standard.transparent = standard.opacity < 0.99 || standard.transparent;
+    let nextOpacity = baseOpacity * presence;
+    // Evergreen foliage should never disappear from seasonal opacity logic.
+    // This also protects against asset edits that accidentally export pine leaf opacity near zero.
+    if (treeType === TreeType.Pine) {
+      nextOpacity = Math.max(baseOpacity, 0.99);
+    }
+    standard.opacity = clamp(nextOpacity, 0, 1);
+    const usesAlphaCutout = (standard.alphaMap ?? null) !== null || standard.alphaTest > 0;
+    if (!usesAlphaCutout && treeType === TreeType.Pine && standard.opacity >= 0.99) {
+      standard.transparent = false;
+    } else {
+      standard.transparent = standard.opacity < 0.99 || standard.transparent;
+    }
   } else if (baseOpacity !== undefined) {
     standard.opacity = baseOpacity;
   }
@@ -248,17 +260,22 @@ export const TREE_MODEL_PATHS: Record<TreeType, string[]> = {
     "assets/3d/GLTF/Trees/Elm/Elm_001.glb"
   ],
   [TreeType.Scrub]: [
-    "assets/3d/GLTF/Trees/Scrub/Shrub_001.glb",
-    "assets/3d/GLTF/Trees/Scrub/Shrub_002.glb",
-    "assets/3d/GLTF/Trees/Scrub/Shrub_003.glb"
+    "assets/3d/GLTF/Trees/Scrub/Scrub_001.glb",
+    "assets/3d/GLTF/Trees/Scrub/Scrub_002.glb",
+    "assets/3d/GLTF/Trees/Scrub/Scrub_003.glb"
   ]
 };
 
 const createGLTFLoader = (): GLTFLoader => registerPbrSpecularGlossiness(new GLTFLoader());
 
 const HOUSE_MODEL_PATHS = [
-  "assets/3d/GLTF/Houses/ModularBrickStructures.glb",
-  "assets/3d/GLTF/Houses/ModularWoodenStructures.glb"
+  "assets/3d/GLTF/Houses/house_001.glb",
+  "assets/3d/GLTF/Houses/house_002.glb",
+  "assets/3d/GLTF/Houses/house_003.glb",
+  "assets/3d/GLTF/Houses/house_004.glb",
+  "assets/3d/GLTF/Houses/house_005.glb",
+  "assets/3d/GLTF/Houses/house_006.glb",
+  "assets/3d/GLTF/Houses/suburb_house__001.glb"
 ];
 const FIRESTATION_MODEL_PATH = "assets/3d/GLTF/Firestation/Classic Fire Station.glb";
 
@@ -373,6 +390,7 @@ const cloneHouseMaterial = (material: THREE.Material): THREE.Material => {
 const buildVariantFromMeshes = (
   meshes: THREE.Mesh[],
   theme: "brick" | "wood",
+  source: string,
   buildKey?: string | null
 ): HouseVariant | null => {
   if (meshes.length === 0) {
@@ -432,10 +450,14 @@ const buildVariantFromMeshes = (
   const localBounds = worldBounds.clone().applyMatrix4(rootInv);
   const height = Math.max(0.01, size.y);
   const baseOffset = -localBounds.min.y;
-  return { meshes: templates, height, baseOffset, size, theme, buildKey: buildKey ?? null };
+  return { meshes: templates, height, baseOffset, size, theme, source, buildKey: buildKey ?? null };
 };
 
-const extractHouseVariantsByBuildKey = (scene: THREE.Object3D, theme: "brick" | "wood"): HouseVariant[] => {
+const extractHouseVariantsByBuildKey = (
+  scene: THREE.Object3D,
+  theme: "brick" | "wood",
+  source: string
+): HouseVariant[] => {
   const groups = new Map<string, THREE.Mesh[]>();
   scene.traverse((child) => {
     if (child instanceof THREE.Mesh) {
@@ -456,7 +478,7 @@ const extractHouseVariantsByBuildKey = (scene: THREE.Object3D, theme: "brick" | 
   }
   const variants: HouseVariant[] = [];
   groups.forEach((meshes, key) => {
-    const variant = buildVariantFromMeshes(meshes, theme, key);
+    const variant = buildVariantFromMeshes(meshes, theme, source, key);
     if (variant) {
       variants.push(variant);
     }
@@ -464,9 +486,9 @@ const extractHouseVariantsByBuildKey = (scene: THREE.Object3D, theme: "brick" | 
   return variants;
 };
 
-const extractHouseAssets = (scene: THREE.Object3D, theme: "brick" | "wood"): HouseAssets => {
+const extractHouseAssets = (scene: THREE.Object3D, theme: "brick" | "wood", source: string): HouseAssets => {
   const variants: HouseVariant[] = [];
-  const byBuildKey = extractHouseVariantsByBuildKey(scene, theme);
+  const byBuildKey = extractHouseVariantsByBuildKey(scene, theme, source);
   if (byBuildKey.length > 0) {
     variants.push(...byBuildKey);
   } else {
@@ -476,7 +498,7 @@ const extractHouseAssets = (scene: THREE.Object3D, theme: "brick" | "wood"): Hou
         meshes.push(child);
       }
     });
-    const variant = buildVariantFromMeshes(meshes, theme, null);
+    const variant = buildVariantFromMeshes(meshes, theme, source, null);
     if (variant) {
       variants.push(variant);
     }
@@ -499,7 +521,7 @@ export const loadHouseAssets = (): Promise<HouseAssets> => {
         (gltf) => {
           const isBrick = /brick/i.test(path);
           const theme: "brick" | "wood" = isBrick ? "brick" : "wood";
-          resolve(extractHouseAssets(gltf.scene, theme));
+          resolve(extractHouseAssets(gltf.scene, theme, path));
         },
         undefined,
         (error) => reject(error)

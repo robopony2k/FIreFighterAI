@@ -22,6 +22,7 @@ import type { CrewPanelData } from "./components/MaintenanceCrewPanel.js";
 import type { MaintenanceRosterPanelData } from "./components/MaintenanceRosterPanel.js";
 import type { MiniMapPanelData } from "./components/MiniMapPanel.js";
 import type { TopBarData } from "./components/TopBar.js";
+import type { UiAudioSettings } from "../../audio/uiAudio.js";
 
 type PanelDataMap = {
   miniMap: MiniMapPanelData;
@@ -127,6 +128,30 @@ export class UIController {
   setPanelData<K extends keyof PanelDataMap>(panel: K, data: PanelDataMap[K]): void {
     this.panelData[panel] = data;
     this.update(this.state.getSnapshot());
+  }
+
+  setAudioState(settings: UiAudioSettings): void {
+    this.bottomControls.setAudioState(settings);
+  }
+
+  setMusicState(settings: UiAudioSettings): void {
+    this.bottomControls.setMusicState(settings);
+  }
+
+  onAudioMuteToggle(handler: () => void): void {
+    this.bottomControls.onAudioMuteToggle(handler);
+  }
+
+  onAudioVolumeChange(handler: (value: number) => void): void {
+    this.bottomControls.onAudioVolumeChange(handler);
+  }
+
+  onMusicMuteToggle(handler: () => void): void {
+    this.bottomControls.onMusicMuteToggle(handler);
+  }
+
+  onMusicVolumeChange(handler: (value: number) => void): void {
+    this.bottomControls.onMusicVolumeChange(handler);
   }
 
   private buildLayout(): void {

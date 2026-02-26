@@ -8,7 +8,7 @@ const __dirname = path.dirname(__filename);
 const repoRoot = path.resolve(__dirname, "..");
 
 const CONFIG_PATH = path.join(repoRoot, "src/core/config.ts");
-const THREE_TEST_PATH = path.join(repoRoot, "src/render/threeTest.ts");
+const THREE_TEST_ASSETS_PATH = path.join(repoRoot, "src/render/threeTestAssets.ts");
 const OUTPUT_PATH = path.join(repoRoot, "src/core/buildingFootprints.ts");
 
 const readText = async (filePath) => fs.readFile(filePath, "utf8");
@@ -56,14 +56,14 @@ const readConfig = async () => {
 };
 
 const readHouseAssetPaths = async () => {
-  const source = await readText(THREE_TEST_PATH);
+  const source = await readText(THREE_TEST_ASSETS_PATH);
   const housePaths = parseArrayConst(source, "HOUSE_MODEL_PATHS");
   const firestationPath = parseStringConst(source, "FIRESTATION_MODEL_PATH");
   if (housePaths.length === 0) {
-    throw new Error("Failed to parse HOUSE_MODEL_PATHS from threeTest.ts");
+    throw new Error("Failed to parse HOUSE_MODEL_PATHS from threeTestAssets.ts");
   }
   if (!firestationPath) {
-    throw new Error("Failed to parse FIRESTATION_MODEL_PATH from threeTest.ts");
+    throw new Error("Failed to parse FIRESTATION_MODEL_PATH from threeTestAssets.ts");
   }
   return { housePaths, firestationPath };
 };

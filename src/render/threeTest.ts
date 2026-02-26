@@ -4,6 +4,7 @@ import { TILE_SIZE, TIME_SPEED_OPTIONS, TOWN_ALERT_MAX_POSTURE } from "../core/c
 import type { EffectsState } from "../core/effectsState.js";
 import type { InputState } from "../core/inputState.js";
 import { indexFor } from "../core/grid.js";
+import { HOUSE_VARIANTS } from "../core/buildingFootprints.js";
 import { TILE_ID_TO_TYPE, TILE_TYPE_IDS } from "../core/state.js";
 import type { ClimateForecast, Town } from "../core/types.js";
 import type { RenderSim } from "./simView.js";
@@ -59,6 +60,7 @@ import { ThreeTestWaterSystem, type WaterQualityProfile } from "./threeTestWater
 import { createThreeTestUnitsLayer } from "./threeTestUnits.js";
 import { CardStateModel } from "../ui/cards/cardState.js";
 import { dispatchPhaseUiCommand } from "../ui/phase/commandChannel.js";
+import type { UiAudioController } from "../audio/uiAudio.js";
 
 export type SeasonVisualState = {
   seasonT01: number;
@@ -103,6 +105,7 @@ export type ThreeTestController = {
   stop: () => void;
   resize: () => void;
   prime: () => void;
+  setSimulationAlpha: (alpha: number) => void;
   isCameraInteracting: () => boolean;
   setTerrain: (sample: TerrainSample) => void;
   setSeasonVisualState: (state: SeasonVisualState) => void;
@@ -126,6 +129,18 @@ type TerrainClimateUniforms = {
   uRisk01: { value: number };
   uSeasonT01: { value: number };
   uWorldSeed: { value: number };
+};
+
+type HudMusicSettings = {
+  muted: boolean;
+  volume: number;
+};
+
+type HudMusicControls = {
+  getSettings: () => HudMusicSettings;
+  toggleMuted: () => void;
+  setVolume: (value: number) => void;
+  onChange: (listener: (settings: HudMusicSettings) => void) => () => void;
 };
 
 let threeTestInitCount = 0;
@@ -204,6 +219,9 @@ const BASE_LABEL_SCREEN_OFFSET_Y = -22;
 const BASE_LABEL_CONNECTOR_ORIGIN_X = 12;
 const MINIMAP_REDRAW_INTERVAL_MS = 140;
 const UNIT_TRAY_UPDATE_INTERVAL_MS = 90;
+const UNIT_COMMAND_PATH_LIFT = 0.07;
+const UNIT_COMMAND_MARKER_LIFT = 0.1;
+const UNIT_COMMAND_MARKER_RADIUS = 0.06;
 
 const clamp01 = (value: number): number => Math.max(0, Math.min(1, value));
 const wrap01 = (value: number): number => {
@@ -217,7 +235,9 @@ export const createThreeTest = (
   canvas: HTMLCanvasElement,
   world: RenderSim,
   inputState: InputState,
-  effectsState: EffectsState | null = null
+  effectsState: EffectsState | null = null,
+  uiAudio: UiAudioController | null = null,
+  musicControls: HudMusicControls | null = null
 ): ThreeTestController => {
   threeTestInitCount += 1;
   if (threeTestInitCount > 1) {
@@ -345,6 +365,28 @@ export const createThreeTest = (
   });
   const unitsLayer = createThreeTestUnitsLayer(scene);
   const unitFxLayer = createThreeTestUnitFxLayer(scene);
+  type UnitCommandVisual = {
+    line: THREE.Line;
+    destination: THREE.Mesh;
+  };
+  const unitCommandVisualGroup = new THREE.Group();
+  unitCommandVisualGroup.name = "three-test-unit-commands";
+  scene.add(unitCommandVisualGroup);
+  const unitCommandPathMaterial = new THREE.LineBasicMaterial({
+    color: 0xb8e6ff,
+    transparent: true,
+    opacity: 0.92,
+    depthWrite: false
+  });
+  const unitCommandMarkerGeometry = new THREE.SphereGeometry(UNIT_COMMAND_MARKER_RADIUS, 10, 10);
+  const unitCommandMarkerMaterial = new THREE.MeshStandardMaterial({
+    color: 0xfff0b8,
+    emissive: 0x5b4b17,
+    emissiveIntensity: 0.8,
+    roughness: 0.45,
+    metalness: 0.05
+  });
+  const unitCommandVisuals = new Map<number, UnitCommandVisual>();
 
   const hudState = createHudState();
   const hudCanvas = document.createElement("canvas");
@@ -409,6 +451,11 @@ export const createThreeTest = (
   const TOWN_CLEAR_TREES_DAYS_DEFAULT = 2;
   const TOWN_UPGRADE_EQUIP_COST_DEFAULT = 180;
   const TOWN_UPGRADE_EQUIP_DAYS_DEFAULT = 3;
+  const playUiCue = (cue: "hover" | "click" | "toggle" | "confirm"): void => {
+    uiAudio?.play(cue);
+  };
+  let removeUiAudioChangeListener: (() => void) | null = null;
+  let removeMusicControlsChangeListener: (() => void) | null = null;
 
   type TownLabelElements = {
     root: HTMLDivElement;
@@ -785,6 +832,7 @@ export const createThreeTest = (
     };
 
     root.addEventListener("mouseenter", () => {
+      playUiCue("hover");
       dockCardState.hoverEnter(id);
       applyDockCardStates();
     });
@@ -795,6 +843,7 @@ export const createThreeTest = (
     collapsedButton.addEventListener("click", (event) => {
       event.preventDefault();
       event.stopPropagation();
+      playUiCue("click");
       const snapshot = dockCardState.get(id);
       if (snapshot.visual === "expanded" && !snapshot.pinned) {
         dockCardState.collapse(id);
@@ -806,12 +855,14 @@ export const createThreeTest = (
     pinButton.addEventListener("click", (event) => {
       event.preventDefault();
       event.stopPropagation();
+      playUiCue("toggle");
       dockCardState.togglePin(id);
       applyDockCardStates();
     });
     closeButton.addEventListener("click", (event) => {
       event.preventDefault();
       event.stopPropagation();
+      playUiCue("click");
       dockCardState.setPinned(id, false);
       dockCardState.collapse(id);
       applyDockCardStates();
@@ -841,11 +892,9 @@ export const createThreeTest = (
 
   const climateChartCanvas = document.createElement("canvas");
   climateChartCanvas.className = "three-test-climate-chart";
-  const climatePeekCanvas = document.createElement("canvas");
-  climatePeekCanvas.className = "three-test-climate-chart is-peek";
   const climateKpis = document.createElement("div");
   climateKpis.className = "three-test-dock-kpis";
-  climateDock.summary.append(climateKpis, climatePeekCanvas);
+  climateDock.summary.append(climateKpis, climateChartCanvas);
   const climateMetricButton = document.createElement("button");
   climateMetricButton.type = "button";
   climateMetricButton.className = "three-test-dock-card-button";
@@ -857,14 +906,13 @@ export const createThreeTest = (
     if (world.phase === "fire") {
       return;
     }
+    playUiCue("toggle");
     climateMetricMode = climateMetricMode === "risk" ? "temp" : "risk";
   });
-  climateDock.details.append(climateChartCanvas, climateMetricButton);
+  climateDock.details.append(climateMetricButton);
 
   const minimapCanvas = document.createElement("canvas");
   minimapCanvas.className = "three-test-minimap-canvas";
-  const minimapPeekCanvas = document.createElement("canvas");
-  minimapPeekCanvas.className = "three-test-minimap-canvas is-peek";
   const minimapLayersWrap = document.createElement("div");
   minimapLayersWrap.className = "three-test-minimap-layers";
   const minimapLayers = {
@@ -881,6 +929,7 @@ export const createThreeTest = (
     input.type = "checkbox";
     input.checked = minimapLayers[key];
     input.addEventListener("change", () => {
+      playUiCue("toggle");
       minimapLayers[key] = input.checked;
       lastMinimapRasterAt = -Infinity;
     });
@@ -894,12 +943,13 @@ export const createThreeTest = (
   addLayerToggle("moisture", "Moisture");
   addLayerToggle("wind", "Wind");
   addLayerToggle("units", "Units");
-  minimapDock.summary.append(minimapPeekCanvas);
-  minimapDock.details.append(minimapCanvas, minimapLayersWrap);
+  minimapDock.summary.append(minimapCanvas);
+  minimapDock.details.append(minimapLayersWrap);
 
   minimapCanvas.addEventListener("click", (event) => {
     event.preventDefault();
     event.stopPropagation();
+    playUiCue("click");
     const rect = minimapCanvas.getBoundingClientRect();
     if (rect.width <= 0 || rect.height <= 0) {
       return;
@@ -955,8 +1005,111 @@ export const createThreeTest = (
     timeControls.appendChild(button);
     speedButtons.push({ index: preset.index, button });
   });
+  const timeAudioControls = document.createElement("div");
+  timeAudioControls.className = "three-test-time-audio";
+  const createTimeVolumeControls = (): {
+    root: HTMLDivElement;
+    muteButton: HTMLButtonElement;
+    volumeLabel: HTMLSpanElement;
+    volumeSlider: HTMLInputElement;
+  } => {
+    const root = document.createElement("div");
+    root.className = "three-test-time-audio-group";
+    const muteButton = document.createElement("button");
+    muteButton.type = "button";
+    muteButton.className = "three-test-time-button";
+    const volumeWrap = document.createElement("label");
+    volumeWrap.className = "three-test-time-volume";
+    const volumeLabel = document.createElement("span");
+    volumeLabel.className = "three-test-time-volume-label";
+    const volumeSlider = document.createElement("input");
+    volumeSlider.type = "range";
+    volumeSlider.min = "0";
+    volumeSlider.max = "1";
+    volumeSlider.step = "0.01";
+    volumeSlider.className = "three-test-time-volume-slider";
+    volumeWrap.append(volumeLabel, volumeSlider);
+    root.append(muteButton, volumeWrap);
+    return { root, muteButton, volumeLabel, volumeSlider };
+  };
+  const sfxControls = createTimeVolumeControls();
+  const musicTimeControls = createTimeVolumeControls();
+  timeAudioControls.append(sfxControls.root, musicTimeControls.root);
+
+  const applyDockAudioState = (settings: { muted: boolean; volume: number }): void => {
+    const volumePct = Math.round(Math.max(0, Math.min(1, settings.volume)) * 100);
+    sfxControls.muteButton.textContent = settings.muted ? "Unmute SFX" : "Mute SFX";
+    sfxControls.muteButton.title = settings.muted ? "Unmute UI SFX" : "Mute UI SFX";
+    sfxControls.muteButton.setAttribute("aria-pressed", settings.muted ? "true" : "false");
+    sfxControls.volumeLabel.textContent = `SFX ${volumePct}%`;
+    sfxControls.volumeSlider.value = settings.volume.toFixed(2);
+    sfxControls.muteButton.disabled = !uiAudio;
+    sfxControls.volumeSlider.disabled = !uiAudio || settings.muted;
+  };
+
+  const applyDockMusicState = (settings: { muted: boolean; volume: number }): void => {
+    const volumePct = Math.round(Math.max(0, Math.min(1, settings.volume)) * 100);
+    musicTimeControls.muteButton.textContent = settings.muted ? "Unmute Music" : "Mute Music";
+    musicTimeControls.muteButton.title = settings.muted ? "Unmute music" : "Mute music";
+    musicTimeControls.muteButton.setAttribute("aria-pressed", settings.muted ? "true" : "false");
+    musicTimeControls.volumeLabel.textContent = `Music ${volumePct}%`;
+    musicTimeControls.volumeSlider.value = settings.volume.toFixed(2);
+    musicTimeControls.muteButton.disabled = !musicControls;
+    musicTimeControls.volumeSlider.disabled = !musicControls || settings.muted;
+  };
+
+  if (uiAudio) {
+    removeUiAudioChangeListener = uiAudio.onChange((settings) => {
+      applyDockAudioState(settings);
+    });
+    sfxControls.muteButton.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      playUiCue("toggle");
+      uiAudio.toggleMuted();
+    });
+    sfxControls.volumeSlider.addEventListener("input", (event) => {
+      const target = event.target;
+      if (!(target instanceof HTMLInputElement)) {
+        return;
+      }
+      const next = Number(target.value);
+      if (!Number.isFinite(next)) {
+        return;
+      }
+      uiAudio.setVolume(next);
+    });
+  } else {
+    applyDockAudioState({ muted: false, volume: 0.65 });
+  }
+
+  if (musicControls) {
+    removeMusicControlsChangeListener = musicControls.onChange((settings) => {
+      applyDockMusicState(settings);
+    });
+    musicTimeControls.muteButton.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      playUiCue("toggle");
+      musicControls.toggleMuted();
+    });
+    musicTimeControls.volumeSlider.addEventListener("input", (event) => {
+      const target = event.target;
+      if (!(target instanceof HTMLInputElement)) {
+        return;
+      }
+      const next = Number(target.value);
+      if (!Number.isFinite(next)) {
+        return;
+      }
+      musicControls.setVolume(next);
+    });
+  } else {
+    applyDockMusicState({ muted: false, volume: 0.35 });
+  }
+
   timeDock.summary.append(timeSummary);
-  timeDock.details.append(timeControls);
+  timeDock.details.append(timeControls, timeAudioControls);
 
   const getTileColor = (tileId: number): { r: number; g: number; b: number } => {
     const type = TILE_ID_TO_TYPE[tileId] ?? "grass";
@@ -1182,18 +1335,15 @@ export const createThreeTest = (
     climateMetricButton.disabled = world.phase === "fire";
     climateMetricButton.textContent = `View: ${climateMetricMode === "risk" ? "Risk" : "Temp"}${world.phase === "fire" ? " (Read-only)" : ""}`;
     const climateSeries = climateMetricMode === "risk" ? riskSeries : tempSeries;
-    drawClimateSparkline(climatePeekCanvas, climateSeries, markerIndex, climateMetricMode);
-    if (dockCardState.get(climateCardId).visual === "expanded") {
+    const climateState = dockCardState.get(climateCardId).visual;
+    if (climateState === "peek" || climateState === "expanded") {
       drawClimateSparkline(climateChartCanvas, climateSeries, markerIndex, climateMetricMode);
     }
 
-    minimapDock.summary.title = "Click expanded minimap to pan camera";
+    minimapDock.summary.title = "Click minimap to pan camera";
     if (time - lastMinimapRasterAt >= MINIMAP_REDRAW_INTERVAL_MS) {
       const minimapState = dockCardState.get(minimapCardId).visual;
       if (minimapState === "peek" || minimapState === "expanded") {
-        drawMinimapCanvas(minimapPeekCanvas);
-      }
-      if (minimapState === "expanded") {
         drawMinimapCanvas(minimapCanvas);
       }
       lastMinimapRasterAt = time;
@@ -1248,6 +1398,16 @@ export const createThreeTest = (
 
   const getUnitMoveStatus = (unit: RenderSim["units"][number]): string =>
     unit.target && unit.pathIndex < unit.path.length ? "Moving" : "Holding";
+
+  const getSprayModeLabel = (formation: "narrow" | "medium" | "wide"): string => {
+    if (formation === "narrow") {
+      return "Precision";
+    }
+    if (formation === "wide") {
+      return "Suppression";
+    }
+    return "Balanced";
+  };
 
   const ensureUnitTrayCard = (unitId: number): UnitTrayCardElements => {
     const existing = unitTrayCards.get(unitId);
@@ -1309,8 +1469,8 @@ export const createThreeTest = (
       card.root.classList.toggle("is-selected", selected);
       card.name.textContent = `${rosterLabel} (${unit.kind})`;
       const crewMode = unit.kind === "truck" ? unit.crewMode : "foot";
-      const formation = unit.kind === "truck" ? unit.formation : "n/a";
-      card.metrics.textContent = `Move ${getUnitMoveStatus(unit)} | Crew ${crewMode} | Form ${formation}`;
+      const sprayMode = unit.kind === "truck" ? getSprayModeLabel(unit.formation) : "n/a";
+      card.metrics.textContent = `Move ${getUnitMoveStatus(unit)} | Crew ${crewMode} | Spray ${sprayMode}`;
       if (unit.kind === "truck") {
         card.actionA.disabled = false;
         card.actionA.textContent = unit.crewMode === "boarded" ? "Deploy" : "Board";
@@ -1387,9 +1547,9 @@ export const createThreeTest = (
       };
       if (unit.kind === "truck") {
         addAction(unit.crewMode === "boarded" ? "Deploy Crew" : "Board Crew", unit.crewMode === "boarded" ? "crew-deploy" : "crew-board");
-        addAction("Formation Narrow", "formation-narrow");
-        addAction("Formation Medium", "formation-medium");
-        addAction("Formation Wide", "formation-wide");
+        addAction("Spray Precision", "formation-narrow");
+        addAction("Spray Balanced", "formation-medium");
+        addAction("Spray Suppression", "formation-wide");
       }
       unitTrayDetailCard.append(title, stats, actions);
     } else if (selectedUnits.length > 1) {
@@ -1419,9 +1579,9 @@ export const createThreeTest = (
       };
       addShared("Board Crew", "crew-board");
       addShared("Deploy Crew", "crew-deploy");
-      addShared("Narrow", "formation-narrow");
-      addShared("Medium", "formation-medium");
-      addShared("Wide", "formation-wide");
+      addShared("Precision", "formation-narrow");
+      addShared("Balanced", "formation-medium");
+      addShared("Suppression", "formation-wide");
       unitTrayGroupCard.append(title, stats, actions);
     } else {
       unitTrayDetailCard.classList.add("hidden");
@@ -1732,9 +1892,13 @@ export const createThreeTest = (
     resolveTownId: () => number | null,
     isPinnedCard: boolean
   ): void => {
+    card.root.addEventListener("mouseenter", () => {
+      playUiCue("hover");
+    });
     card.raiseButton.addEventListener("click", (event) => {
       event.preventDefault();
       event.stopPropagation();
+      playUiCue("confirm");
       const townId = resolveTownId();
       if (townId === null) {
         return;
@@ -1747,6 +1911,7 @@ export const createThreeTest = (
     card.lowerButton.addEventListener("click", (event) => {
       event.preventDefault();
       event.stopPropagation();
+      playUiCue("confirm");
       const townId = resolveTownId();
       if (townId === null) {
         return;
@@ -1759,16 +1924,19 @@ export const createThreeTest = (
     card.clearTreesButton.addEventListener("click", (event) => {
       event.preventDefault();
       event.stopPropagation();
+      playUiCue("click");
       inputState.lastInteractionTime = performance.now();
     });
     card.upgradeButton.addEventListener("click", (event) => {
       event.preventDefault();
       event.stopPropagation();
+      playUiCue("click");
       inputState.lastInteractionTime = performance.now();
     });
     card.pinButton.addEventListener("click", (event) => {
       event.preventDefault();
       event.stopPropagation();
+      playUiCue("toggle");
       const townId = resolveTownId();
       if (townId === null) {
         return;
@@ -1791,6 +1959,7 @@ export const createThreeTest = (
     card.focusButton.addEventListener("click", (event) => {
       event.preventDefault();
       event.stopPropagation();
+      playUiCue("click");
       const townId = resolveTownId();
       if (townId === null) {
         return;
@@ -1801,6 +1970,7 @@ export const createThreeTest = (
     card.closeButton.addEventListener("click", (event) => {
       event.preventDefault();
       event.stopPropagation();
+      playUiCue("click");
       const townId = resolveTownId();
       if (townId === null) {
         return;
@@ -1862,11 +2032,13 @@ export const createThreeTest = (
   baseCardElements.mainButton.addEventListener("click", (event) => {
     event.preventDefault();
     event.stopPropagation();
+    playUiCue("click");
     const snapshot = worldCardState.get(baseCardId);
     const nextOpen = snapshot.visual !== "expanded";
     setBaseCardOpenInternal(nextOpen);
   });
   baseCardElements.root.addEventListener("mouseenter", () => {
+    playUiCue("hover");
     worldCardState.hoverEnter(baseCardId);
     updateBaseCardState();
   });
@@ -1885,6 +2057,7 @@ export const createThreeTest = (
   baseCardElements.pinButton.addEventListener("click", (event) => {
     event.preventDefault();
     event.stopPropagation();
+    playUiCue("toggle");
     const pinned = worldCardState.togglePin(baseCardId);
     baseFocused = true;
     selectedTownId = null;
@@ -1900,12 +2073,14 @@ export const createThreeTest = (
   baseCardElements.focusButton.addEventListener("click", (event) => {
     event.preventDefault();
     event.stopPropagation();
+    playUiCue("click");
     inputState.lastInteractionTime = performance.now();
     focusCameraOnBase();
   });
   baseCardElements.closeButton.addEventListener("click", (event) => {
     event.preventDefault();
     event.stopPropagation();
+    playUiCue("click");
     worldCardState.setPinned(baseCardId, false);
     worldCardState.collapse(baseCardId);
     baseFocused = false;
@@ -2081,6 +2256,7 @@ export const createThreeTest = (
       mainButton.addEventListener("click", (event) => {
         event.preventDefault();
         event.stopPropagation();
+        playUiCue("click");
         baseFocused = false;
         toggleTownCard(townId);
         if (selectedTownId !== townId && !root.matches(":hover")) {
@@ -2699,6 +2875,7 @@ export const createThreeTest = (
 
   let raf = 0;
   let running = false;
+  let simulationAlpha = 1;
   let lastFrameTime = 0;
   let hudScaleX = 1;
   let hudScaleY = 1;
@@ -2752,6 +2929,140 @@ export const createThreeTest = (
   let lastRafAt = 0;
   let lastPresentedAt = 0;
 
+  const sampleWorldHeight = (tileX: number, tileY: number): number => {
+    const cols = Math.max(1, world.grid.cols);
+    const rows = Math.max(1, world.grid.rows);
+    const x = Math.max(0, Math.min(cols - 1, tileX - 0.5));
+    const y = Math.max(0, Math.min(rows - 1, tileY - 0.5));
+    const x0 = Math.floor(x);
+    const y0 = Math.floor(y);
+    const x1 = Math.min(cols - 1, x0 + 1);
+    const y1 = Math.min(rows - 1, y0 + 1);
+    const tx = x - x0;
+    const ty = y - y0;
+    const h00 = world.tileElevation[indexFor(world.grid, x0, y0)] ?? 0;
+    const h10 = world.tileElevation[indexFor(world.grid, x1, y0)] ?? h00;
+    const h01 = world.tileElevation[indexFor(world.grid, x0, y1)] ?? h00;
+    const h11 = world.tileElevation[indexFor(world.grid, x1, y1)] ?? h00;
+    const hx0 = h00 * (1 - tx) + h10 * tx;
+    const hx1 = h01 * (1 - tx) + h11 * tx;
+    const elevation = hx0 * (1 - ty) + hx1 * ty;
+    return elevation * getTerrainHeightScale(cols, rows);
+  };
+
+  const toWorldCommandPoint = (tileX: number, tileY: number, lift: number): THREE.Vector3 | null => {
+    if (!lastTerrainSize) {
+      return null;
+    }
+    const cols = Math.max(1, world.grid.cols);
+    const rows = Math.max(1, world.grid.rows);
+    const x = (tileX / cols - 0.5) * lastTerrainSize.width;
+    const z = (tileY / rows - 0.5) * lastTerrainSize.depth;
+    const y = sampleWorldHeight(tileX, tileY) + lift;
+    return new THREE.Vector3(x, y, z);
+  };
+
+  const getInterpolatedUnitTile = (unit: (typeof world.units)[number]): { x: number; y: number } => {
+    const alpha = clamp01(simulationAlpha);
+    return {
+      x: unit.prevX + (unit.x - unit.prevX) * alpha,
+      y: unit.prevY + (unit.y - unit.prevY) * alpha
+    };
+  };
+
+  const acquireUnitCommandVisual = (unitId: number): UnitCommandVisual => {
+    const existing = unitCommandVisuals.get(unitId);
+    if (existing) {
+      return existing;
+    }
+    const line = new THREE.Line(new THREE.BufferGeometry(), unitCommandPathMaterial);
+    line.frustumCulled = false;
+    line.renderOrder = 5;
+    const destination = new THREE.Mesh(unitCommandMarkerGeometry, unitCommandMarkerMaterial);
+    destination.frustumCulled = false;
+    destination.renderOrder = 6;
+    unitCommandVisualGroup.add(line, destination);
+    const created: UnitCommandVisual = { line, destination };
+    unitCommandVisuals.set(unitId, created);
+    return created;
+  };
+
+  const removeUnitCommandVisual = (unitId: number): void => {
+    const existing = unitCommandVisuals.get(unitId);
+    if (!existing) {
+      return;
+    }
+    unitCommandVisualGroup.remove(existing.line, existing.destination);
+    existing.line.geometry.dispose();
+    unitCommandVisuals.delete(unitId);
+  };
+
+  const clearUnitCommandVisuals = (): void => {
+    Array.from(unitCommandVisuals.keys()).forEach((unitId) => removeUnitCommandVisual(unitId));
+  };
+
+  const updateUnitCommandVisuals = (): void => {
+    if (!lastTerrainSize || world.units.length === 0) {
+      clearUnitCommandVisuals();
+      return;
+    }
+    const activeUnitIds = new Set<number>();
+    for (let i = 0; i < world.units.length; i += 1) {
+      const unit = world.units[i];
+      if (!unit.selected || !unit.target) {
+        continue;
+      }
+      const tilePoints: Array<{ x: number; y: number }> = [];
+      const interpolated = getInterpolatedUnitTile(unit);
+      tilePoints.push({ x: interpolated.x, y: interpolated.y });
+      if (unit.pathIndex < unit.path.length) {
+        for (let pathIndex = unit.pathIndex; pathIndex < unit.path.length; pathIndex += 1) {
+          const waypoint = unit.path[pathIndex];
+          tilePoints.push({ x: waypoint.x + 0.5, y: waypoint.y + 0.5 });
+        }
+      }
+      const destinationX = unit.target.x + 0.5;
+      const destinationY = unit.target.y + 0.5;
+      const tail = tilePoints[tilePoints.length - 1] ?? null;
+      if (!tail || Math.hypot(tail.x - destinationX, tail.y - destinationY) > 0.01) {
+        tilePoints.push({ x: destinationX, y: destinationY });
+      }
+
+      const worldPoints: THREE.Vector3[] = [];
+      for (let pointIndex = 0; pointIndex < tilePoints.length; pointIndex += 1) {
+        const tilePoint = tilePoints[pointIndex];
+        const worldPoint = toWorldCommandPoint(tilePoint.x, tilePoint.y, UNIT_COMMAND_PATH_LIFT);
+        if (worldPoint) {
+          worldPoints.push(worldPoint);
+        }
+      }
+      if (worldPoints.length <= 0) {
+        continue;
+      }
+      const visual = acquireUnitCommandVisual(unit.id);
+      activeUnitIds.add(unit.id);
+      if (worldPoints.length >= 2) {
+        visual.line.geometry.setFromPoints(worldPoints);
+        visual.line.geometry.computeBoundingSphere();
+        visual.line.visible = true;
+      } else {
+        visual.line.visible = false;
+      }
+      const destinationPoint = toWorldCommandPoint(destinationX, destinationY, UNIT_COMMAND_MARKER_LIFT);
+      if (destinationPoint) {
+        visual.destination.visible = true;
+        visual.destination.position.copy(destinationPoint);
+      } else {
+        visual.destination.visible = false;
+      }
+    }
+    Array.from(unitCommandVisuals.keys()).forEach((unitId) => {
+      if (!activeUnitIds.has(unitId)) {
+        removeUnitCommandVisual(unitId);
+      }
+    });
+  };
+
   const disposeStructureOverlay = (): void => {
     if (!structureOverlayGroup) {
       return;
@@ -2773,7 +3084,8 @@ export const createThreeTest = (
 
   const rebuildStructureOverlay = (sample: TerrainSample): void => {
     const structureRevision = sample.structureRevision ?? -1;
-    const structureOverlayKey = `${sample.cols}x${sample.rows}:${sample.worldSeed ?? -1}`;
+    const structureAssetKey = `${houseAssets?.variants.length ?? 0}:${firestationAsset ? 1 : 0}`;
+    const structureOverlayKey = `${sample.cols}x${sample.rows}:${sample.worldSeed ?? -1}:${structureAssetKey}`;
     const shouldRenderDynamic = sample.dynamicStructures === true;
     if (!shouldRenderDynamic) {
       disposeStructureOverlay();
@@ -2807,18 +3119,128 @@ export const createThreeTest = (
     const heightScale = getTerrainHeightScale(cols, rows);
     const toWorldX = (tileX: number): number => ((tileX + 0.5) / cols - 0.5) * width;
     const toWorldZ = (tileY: number): number => ((tileY + 0.5) / rows - 0.5) * depth;
+    const clampToRange = (value: number, min: number, max: number): number => Math.max(min, Math.min(max, value));
+    const noiseAt = (value: number): number => {
+      const s = Math.sin(value * 12.9898 + 78.233) * 43758.5453;
+      return s - Math.floor(s);
+    };
+    const HOUSE_FOOTPRINT_EPS = 1e-4;
+    const pickHouseFootprint = (seed: number) => {
+      if (HOUSE_VARIANTS.length === 0) {
+        return { source: "", name: "default", sizeX: 1, sizeY: 1, sizeZ: 1 };
+      }
+      const index = Math.floor(noiseAt(seed + 6.1) * HOUSE_VARIANTS.length);
+      return HOUSE_VARIANTS[Math.min(HOUSE_VARIANTS.length - 1, Math.max(0, index))];
+    };
+    const getHouseFootprintDims = (rotation: number, footprint: { sizeX: number; sizeZ: number }) => {
+      const rotate = Math.abs(Math.sin(rotation)) > 0.5;
+      const width = rotate ? footprint.sizeZ : footprint.sizeX;
+      const depth = rotate ? footprint.sizeX : footprint.sizeZ;
+      return {
+        width: Math.max(0.01, width),
+        depth: Math.max(0.01, depth)
+      };
+    };
+    const getHouseFootprintBounds = (
+      tileX: number,
+      tileY: number,
+      rotation: number,
+      footprint: { sizeX: number; sizeZ: number }
+    ) => {
+      const { width, depth } = getHouseFootprintDims(rotation, footprint);
+      const centerX = tileX + 0.5;
+      const centerY = tileY + 0.5;
+      const minX = Math.floor(centerX - width / 2);
+      const maxX = Math.floor(centerX + width / 2 - HOUSE_FOOTPRINT_EPS);
+      const minY = Math.floor(centerY - depth / 2);
+      const maxY = Math.floor(centerY + depth / 2 - HOUSE_FOOTPRINT_EPS);
+      return { minX, maxX, minY, maxY, width, depth };
+    };
+    const pickHouseRotation = (
+      tileX: number,
+      tileY: number,
+      seed: number
+    ): number => {
+      const isRoadLike = (x: number, y: number): boolean => {
+        if (x < 0 || y < 0 || x >= cols || y >= rows) {
+          return false;
+        }
+        const typeId = tileTypes[y * cols + x];
+        return typeId === TILE_TYPE_IDS.road || typeId === baseId;
+      };
+      const roadEW = isRoadLike(tileX - 1, tileY) || isRoadLike(tileX + 1, tileY);
+      const roadNS = isRoadLike(tileX, tileY - 1) || isRoadLike(tileX, tileY + 1);
+      const flip = noiseAt(seed + 21.4) < 0.5 ? 0 : Math.PI;
+      if (roadEW && !roadNS) {
+        return flip;
+      }
+      if (roadNS && !roadEW) {
+        return Math.PI / 2 + flip;
+      }
+      return noiseAt(seed + 9.1) < 0.5 ? 0 : Math.PI / 2;
+    };
+    const elevationAt = (tileX: number, tileY: number): number => {
+      const clampedX = clampToRange(tileX, 0, cols - 1);
+      const clampedY = clampToRange(tileY, 0, rows - 1);
+      return (elevations[clampedY * cols + clampedX] ?? 0) * heightScale;
+    };
 
-    const houseIndices: number[] = [];
+    type OverlayHouseSpot = {
+      x: number;
+      z: number;
+      footprintX: number;
+      footprintZ: number;
+      rotation: number;
+      seed: number;
+      groundMin: number;
+      groundMax: number;
+      variantKey: string | null;
+      variantSource: string | null;
+    };
+    const houseSpots: OverlayHouseSpot[] = [];
     let baseMinX = cols;
     let baseMaxX = -1;
     let baseMinY = rows;
     let baseMaxY = -1;
-    let baseElevationSum = 0;
-    let baseCount = 0;
     for (let idx = 0; idx < tileTypes.length; idx += 1) {
       const type = tileTypes[idx];
       if (type === houseId) {
-        houseIndices.push(idx);
+        const tileX = idx % cols;
+        const tileY = Math.floor(idx / cols);
+        const seed = Math.imul(idx + 1, 1103515245) >>> 0;
+        const rotation = pickHouseRotation(tileX, tileY, seed);
+        const footprint = pickHouseFootprint(seed);
+        const bounds = getHouseFootprintBounds(tileX, tileY, rotation, footprint);
+        const minX = clampToRange(bounds.minX, 0, cols - 1);
+        const maxX = clampToRange(bounds.maxX, 0, cols - 1);
+        const minY = clampToRange(bounds.minY, 0, rows - 1);
+        const maxY = clampToRange(bounds.maxY, 0, rows - 1);
+        let groundMin = Number.POSITIVE_INFINITY;
+        let groundMax = Number.NEGATIVE_INFINITY;
+        for (let fy = minY; fy <= maxY + 1; fy += 1) {
+          for (let fx = minX; fx <= maxX + 1; fx += 1) {
+            const h = elevationAt(fx, fy);
+            groundMin = Math.min(groundMin, h);
+            groundMax = Math.max(groundMax, h);
+          }
+        }
+        if (!Number.isFinite(groundMin) || !Number.isFinite(groundMax)) {
+          const fallbackH = elevationAt(tileX, tileY);
+          groundMin = fallbackH;
+          groundMax = fallbackH;
+        }
+        houseSpots.push({
+          x: toWorldX(tileX),
+          z: toWorldZ(tileY),
+          footprintX: bounds.width,
+          footprintZ: bounds.depth,
+          rotation,
+          seed,
+          groundMin,
+          groundMax,
+          variantKey: footprint.name ?? null,
+          variantSource: footprint.source ?? null
+        });
         continue;
       }
       if (type !== baseId) {
@@ -2830,53 +3252,268 @@ export const createThreeTest = (
       baseMaxX = Math.max(baseMaxX, tileX);
       baseMinY = Math.min(baseMinY, tileY);
       baseMaxY = Math.max(baseMaxY, tileY);
-      baseElevationSum += elevations[idx] ?? 0;
-      baseCount += 1;
     }
 
     const group = new THREE.Group();
     group.name = "dynamic-structures";
+    const buildingGeometry = new THREE.BoxGeometry(1, 1, 1);
+    const houseMaterial = new THREE.MeshStandardMaterial({ color: 0xc19a66, roughness: 0.82, metalness: 0.06 });
+    const baseMaterial = new THREE.MeshStandardMaterial({ color: 0xa0a7ad, roughness: 0.74, metalness: 0.12 });
+    const foundationMaterial = new THREE.MeshStandardMaterial({ color: 0x4b4036, roughness: 0.95, metalness: 0 });
+    const dummy = new THREE.Object3D();
 
-    if (houseIndices.length > 0) {
-      const houseGeometry = new THREE.BoxGeometry(1, 1, 1);
-      const houseMaterial = new THREE.MeshStandardMaterial({ color: 0xc19a66, roughness: 0.82, metalness: 0.06 });
-      const houseMesh = new THREE.InstancedMesh(houseGeometry, houseMaterial, houseIndices.length);
-      houseMesh.castShadow = true;
-      houseMesh.receiveShadow = true;
-      const dummy = new THREE.Object3D();
-      for (let i = 0; i < houseIndices.length; i += 1) {
-        const idx = houseIndices[i];
-        const tileX = idx % cols;
-        const tileY = Math.floor(idx / cols);
-        const elevation = elevations[idx] ?? 0;
-        const seed = Math.imul(idx + 1, 1103515245) >>> 0;
-        const rotation = ((seed >>> 16) & 3) * (Math.PI * 0.5);
-        dummy.position.set(toWorldX(tileX), elevation * heightScale + 0.31, toWorldZ(tileY));
-        dummy.rotation.set(0, rotation, 0);
-        dummy.scale.set(0.84, 0.62, 0.84);
-        dummy.updateMatrix();
-        houseMesh.setMatrixAt(i, dummy.matrix);
+    if (houseSpots.length > 0) {
+      type OverlayHouseVariant = HouseAssets["variants"][number];
+      type HouseBatchInstance = { spot: OverlayHouseSpot; scale: number; baseY: number };
+      type FoundationInstance = {
+        x: number;
+        y: number;
+        z: number;
+        scaleX: number;
+        scaleY: number;
+        scaleZ: number;
+        rotation: number;
+      };
+      const availableHouseVariants = houseAssets?.variants ?? [];
+      const houseByKey = new Map<string, OverlayHouseVariant[]>();
+      const houseBySource = new Map<string, OverlayHouseVariant[]>();
+      const houseByTheme: Record<OverlayHouseVariant["theme"], OverlayHouseVariant[]> = {
+        brick: [],
+        wood: []
+      };
+      availableHouseVariants.forEach((variant) => {
+        houseByTheme[variant.theme].push(variant);
+        const sourceKey = variant.source.toLowerCase();
+        const sourceList = houseBySource.get(sourceKey);
+        if (sourceList) {
+          sourceList.push(variant);
+        } else {
+          houseBySource.set(sourceKey, [variant]);
+        }
+        if (!variant.buildKey) {
+          return;
+        }
+        const key = variant.buildKey.toLowerCase();
+        const list = houseByKey.get(key);
+        if (list) {
+          list.push(variant);
+        } else {
+          houseByKey.set(key, [variant]);
+        }
+      });
+      const pickHouseVariant = (spot: OverlayHouseSpot): OverlayHouseVariant | null => {
+        const key = spot.variantKey ? spot.variantKey.toLowerCase() : null;
+        if (key) {
+          const keyMatches = houseByKey.get(key);
+          if (keyMatches && keyMatches.length > 0) {
+            const index = Math.floor(noiseAt(spot.seed + 0.2) * keyMatches.length);
+            return keyMatches[Math.min(keyMatches.length - 1, Math.max(0, index))];
+          }
+        }
+        const source = (spot.variantSource ?? "").toLowerCase();
+        if (source) {
+          const sourceMatches = houseBySource.get(source);
+          if (sourceMatches && sourceMatches.length > 0) {
+            const index = Math.floor(noiseAt(spot.seed + 0.27) * sourceMatches.length);
+            return sourceMatches[Math.min(sourceMatches.length - 1, Math.max(0, index))];
+          }
+        }
+        const theme = /brick/i.test(source) ? "brick" : /wood/i.test(source) ? "wood" : null;
+        const bucket = theme ? houseByTheme[theme] : availableHouseVariants;
+        if (bucket.length === 0) {
+          return null;
+        }
+        const index = Math.floor(noiseAt(spot.seed + 0.33) * bucket.length);
+        return bucket[Math.min(bucket.length - 1, Math.max(0, index))];
+      };
+
+      const variantIds = new Map<OverlayHouseVariant, number>();
+      availableHouseVariants.forEach((variant, index) => {
+        variantIds.set(variant, index);
+      });
+      const detailedBatches = new Map<
+        string,
+        { template: OverlayHouseVariant["meshes"][number]; instances: HouseBatchInstance[] }
+      >();
+      const fallbackInstances: OverlayHouseSpot[] = [];
+      const foundationInstances: FoundationInstance[] = [];
+
+      houseSpots.forEach((spot) => {
+        const footprintX = Math.max(0.5, spot.footprintX);
+        const footprintZ = Math.max(0.5, spot.footprintZ);
+        const foundationTop = spot.groundMax + 0.01;
+        if (spot.groundMin < foundationTop - 0.01) {
+          const foundationHeight = Math.max(0.1, foundationTop - spot.groundMin);
+          foundationInstances.push({
+            x: spot.x,
+            y: spot.groundMin + foundationHeight / 2,
+            z: spot.z,
+            scaleX: footprintX,
+            scaleY: foundationHeight,
+            scaleZ: footprintZ,
+            rotation: spot.rotation
+          });
+        }
+
+        const variant = pickHouseVariant(spot);
+        if (variant && variant.meshes.length > 0) {
+          const sizeX = Math.max(0.01, variant.size?.x ?? 0);
+          const sizeZ = Math.max(0.01, variant.size?.z ?? 0);
+          const fitScale = Math.min(footprintX / sizeX, footprintZ / sizeZ);
+          const scale = Math.max(0.01, fitScale * 0.98);
+          const baseY = foundationTop + variant.baseOffset * scale;
+          const variantId = variantIds.get(variant) ?? 0;
+          variant.meshes.forEach((meshTemplate, meshIndex) => {
+            const key = `${variantId}:${meshIndex}`;
+            const existing = detailedBatches.get(key);
+            if (existing) {
+              existing.instances.push({ spot, scale, baseY });
+            } else {
+              detailedBatches.set(key, {
+                template: meshTemplate,
+                instances: [{ spot, scale, baseY }]
+              });
+            }
+          });
+          return;
+        }
+        fallbackInstances.push(spot);
+      });
+
+      const tempMatrix = new THREE.Matrix4();
+      detailedBatches.forEach((batch) => {
+        const { template, instances } = batch;
+        if (instances.length === 0) {
+          return;
+        }
+        const geometry = template.geometry.clone();
+        const material = Array.isArray(template.material)
+          ? template.material.map((entry) => entry.clone())
+          : template.material.clone();
+        const instanced = new THREE.InstancedMesh(geometry, material, instances.length);
+        instanced.castShadow = true;
+        instanced.receiveShadow = true;
+        instances.forEach((instance, index) => {
+          dummy.position.set(instance.spot.x, instance.baseY, instance.spot.z);
+          dummy.rotation.set(0, instance.spot.rotation, 0);
+          dummy.scale.set(instance.scale, instance.scale, instance.scale);
+          dummy.updateMatrix();
+          tempMatrix.copy(dummy.matrix).multiply(template.baseMatrix);
+          instanced.setMatrixAt(index, tempMatrix);
+        });
+        instanced.instanceMatrix.needsUpdate = true;
+        group.add(instanced);
+      });
+
+      if (fallbackInstances.length > 0) {
+        const fallbackMesh = new THREE.InstancedMesh(buildingGeometry, houseMaterial, fallbackInstances.length);
+        fallbackMesh.castShadow = true;
+        fallbackMesh.receiveShadow = true;
+        fallbackInstances.forEach((spot, index) => {
+          const foundationTop = spot.groundMax + 0.01;
+          const footprintX = Math.max(0.5, spot.footprintX);
+          const footprintZ = Math.max(0.5, spot.footprintZ);
+          dummy.position.set(spot.x, foundationTop + 0.3, spot.z);
+          dummy.rotation.set(0, spot.rotation, 0);
+          dummy.scale.set(footprintX, 0.6, footprintZ);
+          dummy.updateMatrix();
+          fallbackMesh.setMatrixAt(index, dummy.matrix);
+        });
+        fallbackMesh.instanceMatrix.needsUpdate = true;
+        group.add(fallbackMesh);
       }
-      houseMesh.instanceMatrix.needsUpdate = true;
-      group.add(houseMesh);
+
+      if (foundationInstances.length > 0) {
+        const foundationMesh = new THREE.InstancedMesh(buildingGeometry, foundationMaterial, foundationInstances.length);
+        foundationMesh.castShadow = true;
+        foundationMesh.receiveShadow = true;
+        foundationInstances.forEach((instance, index) => {
+          dummy.position.set(instance.x, instance.y, instance.z);
+          dummy.rotation.set(0, instance.rotation, 0);
+          dummy.scale.set(instance.scaleX, instance.scaleY, instance.scaleZ);
+          dummy.updateMatrix();
+          foundationMesh.setMatrixAt(index, dummy.matrix);
+        });
+        foundationMesh.instanceMatrix.needsUpdate = true;
+        group.add(foundationMesh);
+      }
     }
 
-    if (baseCount > 0) {
-      const baseGeometry = new THREE.BoxGeometry(1, 1, 1);
-      const baseMaterial = new THREE.MeshStandardMaterial({ color: 0xa0a7ad, roughness: 0.74, metalness: 0.12 });
-      const baseMesh = new THREE.Mesh(baseGeometry, baseMaterial);
-      baseMesh.castShadow = true;
-      baseMesh.receiveShadow = true;
+    if (baseMinX <= baseMaxX && baseMinY <= baseMaxY) {
       const centerTileX = (baseMinX + baseMaxX) * 0.5;
       const centerTileY = (baseMinY + baseMaxY) * 0.5;
-      const baseElev = baseElevationSum / Math.max(1, baseCount);
-      baseMesh.scale.set(Math.max(1, baseMaxX - baseMinX + 1), 0.66, Math.max(1, baseMaxY - baseMinY + 1));
-      baseMesh.position.set(
-        ((centerTileX + 0.5) / cols - 0.5) * width,
-        baseElev * heightScale + baseMesh.scale.y * 0.5,
-        ((centerTileY + 0.5) / rows - 0.5) * depth
-      );
-      group.add(baseMesh);
+      const centerX = ((centerTileX + 0.5) / cols - 0.5) * width;
+      const centerZ = ((centerTileY + 0.5) / rows - 0.5) * depth;
+      const baseFootprintX = Math.max(1, baseMaxX - baseMinX + 1);
+      const baseFootprintZ = Math.max(1, baseMaxY - baseMinY + 1);
+      const rotation = baseFootprintX >= baseFootprintZ ? 0 : Math.PI / 2;
+
+      let groundMin = Number.POSITIVE_INFINITY;
+      let groundMax = Number.NEGATIVE_INFINITY;
+      for (let fy = baseMinY; fy <= baseMaxY + 1; fy += 1) {
+        for (let fx = baseMinX; fx <= baseMaxX + 1; fx += 1) {
+          const h = elevationAt(fx, fy);
+          groundMin = Math.min(groundMin, h);
+          groundMax = Math.max(groundMax, h);
+        }
+      }
+      if (!Number.isFinite(groundMin) || !Number.isFinite(groundMax)) {
+        groundMin = elevationAt(Math.floor(centerTileX), Math.floor(centerTileY));
+        groundMax = groundMin;
+      }
+
+      if (firestationAsset && firestationAsset.meshes.length > 0) {
+        const footprintTarget = Math.max(baseFootprintX, baseFootprintZ) * 0.85;
+        const assetFootprint = Math.max(firestationAsset.size.x, firestationAsset.size.z);
+        const scale = footprintTarget / Math.max(0.01, assetFootprint);
+        const foundationTop = groundMax + 0.01;
+        const baseY = foundationTop + firestationAsset.baseOffset * scale;
+        const tempMatrix = new THREE.Matrix4();
+        firestationAsset.meshes.forEach((template) => {
+          const geometry = template.geometry.clone();
+          const material = Array.isArray(template.material)
+            ? template.material.map((entry) => entry.clone())
+            : template.material.clone();
+          const instanced = new THREE.InstancedMesh(geometry, material, 1);
+          instanced.castShadow = true;
+          instanced.receiveShadow = true;
+          dummy.position.set(centerX, baseY, centerZ);
+          dummy.rotation.set(0, rotation, 0);
+          dummy.scale.set(scale, scale, scale);
+          dummy.updateMatrix();
+          tempMatrix.copy(dummy.matrix).multiply(template.baseMatrix);
+          instanced.setMatrixAt(0, tempMatrix);
+          instanced.instanceMatrix.needsUpdate = true;
+          group.add(instanced);
+        });
+        if (groundMin < foundationTop - 0.01) {
+          const foundationHeight = Math.max(0.1, foundationTop - groundMin);
+          const foundation = new THREE.Mesh(buildingGeometry, foundationMaterial);
+          foundation.scale.set(baseFootprintX, foundationHeight, baseFootprintZ);
+          foundation.position.set(centerX, groundMin + foundationHeight / 2, centerZ);
+          foundation.rotation.set(0, rotation, 0);
+          foundation.castShadow = true;
+          foundation.receiveShadow = true;
+          group.add(foundation);
+        }
+      } else {
+        const baseMesh = new THREE.Mesh(buildingGeometry, baseMaterial);
+        baseMesh.castShadow = true;
+        baseMesh.receiveShadow = true;
+        baseMesh.scale.set(baseFootprintX, 0.66, baseFootprintZ);
+        baseMesh.position.set(centerX, groundMax + baseMesh.scale.y * 0.5, centerZ);
+        group.add(baseMesh);
+        if (groundMin < groundMax - 0.01) {
+          const foundationHeight = Math.max(0.1, groundMax - groundMin);
+          const foundation = new THREE.Mesh(buildingGeometry, foundationMaterial);
+          foundation.scale.set(baseFootprintX, foundationHeight, baseFootprintZ);
+          foundation.position.set(centerX, groundMin + foundationHeight / 2, centerZ);
+          foundation.rotation.set(0, rotation, 0);
+          foundation.castShadow = true;
+          foundation.receiveShadow = true;
+          group.add(foundation);
+        }
+      }
     }
 
     if (group.children.length > 0) {
@@ -2916,6 +3553,7 @@ export const createThreeTest = (
     cancelFormationDrag();
     clearTownHoverDelay();
     disposeStructureOverlay();
+    clearUnitCommandVisuals();
     lastStructureOverlayKey = "";
     lastStructureRevision = -1;
     townLabelElements.clear();
@@ -2928,12 +3566,20 @@ export const createThreeTest = (
     townOverlayRoot.remove();
     dockOverlayRoot.remove();
     unitTrayRoot.remove();
+    removeUiAudioChangeListener?.();
+    removeUiAudioChangeListener = null;
+    removeMusicControlsChangeListener?.();
+    removeMusicControlsChangeListener = null;
     uiScene.remove(hudSprite);
     hudTexture.dispose();
     hudMaterial.dispose();
     fireFx.dispose();
     unitsLayer.dispose();
     unitFxLayer.dispose();
+    scene.remove(unitCommandVisualGroup);
+    unitCommandPathMaterial.dispose();
+    unitCommandMarkerGeometry.dispose();
+    unitCommandMarkerMaterial.dispose();
     waterSystem.dispose();
     renderer.dispose();
   };
@@ -3081,8 +3727,9 @@ export const createThreeTest = (
       );
     }
     threePerf.fireFxMs = smoothPerf(threePerf.fireFxMs, performance.now() - fireFxStart);
-    unitsLayer.update(world, lastSample, lastTerrainSize);
-    unitFxLayer.update(world, effectsState, lastSample, lastTerrainSize);
+    unitsLayer.update(world, lastSample, lastTerrainSize, simulationAlpha);
+    unitFxLayer.update(world, effectsState, lastSample, lastTerrainSize, simulationAlpha, time);
+    updateUnitCommandVisuals();
     updateTownOverlay(time);
     updateDockOverlay(time);
     updateUnitTrayOverlay(time);
@@ -3277,6 +3924,10 @@ export const createThreeTest = (
       forecastYearDays: yearDays,
       forecastMeta: meta
     };
+  };
+
+  const setSimulationAlpha = (alpha: number): void => {
+    simulationAlpha = clamp01(alpha);
   };
 
   const panToTile = (tileX: number, tileY: number): void => {
@@ -3865,6 +4516,7 @@ export const createThreeTest = (
     stop,
     resize,
     prime,
+    setSimulationAlpha,
     isCameraInteracting,
     setTerrain,
     setSeasonVisualState,

@@ -60,6 +60,7 @@ export type SeasonPhase = "growth" | "maintenance" | "fire" | "budget";
 export type DeployMode = UnitKind | "clear";
 
 export type Formation = "narrow" | "medium" | "wide";
+export type WaterSprayMode = "precision" | "balanced" | "suppression";
 
 export type FireSimPhase = "snapshot" | "heat-clear" | "heat-pass1" | "heat-pass2" | "fire" | "ignite";
 
@@ -268,6 +269,13 @@ export interface Unit {
   size: number;
 
   alpha: number;
+
+  sprayMode?: WaterSprayMode;
+  sprayVolume?: number;
+  spraySeed?: number;
+  sprayPulseHz?: number;
+  spraySpread?: number;
+  spraySourceId?: number;
 
 }
 

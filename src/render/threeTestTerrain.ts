@@ -275,6 +275,7 @@ const TREE_BURN_FUEL_GAUGE_START = 0.16;
 const TREE_BURN_FUEL_GAUGE_END = 0.95;
 const TREE_BURN_EMBER_TAIL_START = 0.58;
 const TREE_BURN_EMBER_TAIL_END = 0.98;
+const TREE_BURN_COMPLETE_TARGET = 1.12;
 const TREE_BURN_LEAF_PIVOT_HEIGHT_FACTOR = 0.72;
 const TREE_BURN_MIXED_PIVOT_HEIGHT_FACTOR = 0.46;
 const TREE_BURN_TRUNK_PIVOT_HEIGHT_FACTOR = 0.06;
@@ -750,7 +751,9 @@ const getTreeBurnRole = (material: THREE.Material | THREE.Material[]): TreeBurnM
     }
   });
   if (leafCount <= 0) {
-    return "trunk";
+    // Low-poly imports often ship as a single combined material with no leaf naming hints.
+    // Treat those as mixed so they fully collapse instead of relying on trunk-only top cropping.
+    return materials.length <= 1 ? "mixed" : "trunk";
   }
   if (leafCount >= materials.length) {
     return "leaf";
@@ -1062,11 +1065,11 @@ const createTreeBurnController = (
               targetBurn = Math.min(targetBurn, flameCap);
             }
             if (isAsh) {
-              targetBurn = Math.max(targetBurn, 1.0);
+              targetBurn = Math.max(targetBurn, TREE_BURN_COMPLETE_TARGET);
             }
           } else if (isAsh) {
             // Once converted to ash, quickly finish the structural collapse.
-            targetBurn = Math.max(targetBurn, 1.0);
+            targetBurn = Math.max(targetBurn, TREE_BURN_COMPLETE_TARGET);
           } else {
             // Let late-stage fuel depletion keep advancing burn even if flame intensity just dipped.
             const emberTailBurn = smoothstep(TREE_BURN_EMBER_TAIL_START, TREE_BURN_EMBER_TAIL_END, depletion) * 0.8;
@@ -5478,6 +5481,7 @@ export const buildTerrainMesh = (
     }
     return limitTreeVariants(treeAssets[TreeType.Pine] ?? []);
   };
+  const hasNativeScrubVariants = (treeAssets?.[TreeType.Scrub]?.length ?? 0) > 0;
   const treeTypes = sample.treeTypes;
   const birchId = TREE_TYPE_IDS[TreeType.Birch];
   const pineId = TREE_TYPE_IDS[TreeType.Pine];
@@ -5742,17 +5746,61 @@ export const buildTerrainMesh = (
           const jitterRange = Math.max(0.1, step * 0.34);
           const jitterX = (noiseAt(idx + 2.91) - 0.5) * jitterRange;
           const jitterZ = (noiseAt(idx + 3.17) - 0.5) * jitterRange;
-          const scale =
-            SCRUB_PLACEHOLDER_SCALE_MIN +
-            noiseAt(idx + 6.41) * (SCRUB_PLACEHOLDER_SCALE_MAX - SCRUB_PLACEHOLDER_SCALE_MIN);
-          scrubPlaceholderInstances.push({
-            x: centerX + jitterX,
-            y,
-            z: centerZ + jitterZ,
-            scale,
-            rotation: noiseAt(idx + 8.23) * Math.PI * 2,
-            colorJitter: noiseAt(idx + 9.57)
-          });
+          if (hasNativeScrubVariants && treeInstances.length < treeInstanceBudget) {
+            const scrubVariants = getTreeVariants(TreeType.Scrub);
+            const variantIndex =
+              scrubVariants.length > 0 ? Math.floor(noiseAt(idx + 9.73) * scrubVariants.length) : 0;
+            const variant = scrubVariants.length > 0 ? scrubVariants[variantIndex] ?? scrubVariants[0] : null;
+            const baseScale =
+              TREE_SCALE_BASE + Math.min(TREE_SCALE_STEP_CAP, Math.max(0, step - 1) * TREE_SCALE_STEP_GAIN);
+            const targetHeight = baseScale * 0.75 * TREE_HEIGHT_FACTOR;
+            const sourceHeight = Math.max(0.35, variant?.height ?? 1.5);
+            const scale = (targetHeight / sourceHeight) * (0.82 + noiseAt(idx + 6.41) * 0.24);
+            const rotation = noiseAt(idx + 8.23) * Math.PI * 2;
+            const x = centerX + jitterX;
+            const z = centerZ + jitterZ;
+            const treeY = y + (variant ? variant.baseOffset * scale : 0);
+            treeInstances.push({
+              x,
+              y: treeY,
+              z,
+              scale,
+              rotation,
+              treeType: TreeType.Scrub,
+              variantIndex,
+              tileIndex: idx,
+              tileX,
+              tileY
+            });
+            const crownHeight = targetHeight * 0.64;
+            const crownRadius = targetHeight * 0.2;
+            const trunkHeight = targetHeight * 0.36;
+            const profile = treeTileProfilesRaw.get(idx);
+            if (profile) {
+              profile.x += x;
+              profile.y += treeY;
+              profile.z += z;
+              profile.crownHeight += crownHeight;
+              profile.crownRadius += crownRadius;
+              profile.trunkHeight += trunkHeight;
+              profile.count += 1;
+            } else {
+              treeTileProfilesRaw.set(idx, { x, y: treeY, z, crownHeight, crownRadius, trunkHeight, count: 1 });
+            }
+            placedTreeOnTile = true;
+          } else {
+            const scale =
+              SCRUB_PLACEHOLDER_SCALE_MIN +
+              noiseAt(idx + 6.41) * (SCRUB_PLACEHOLDER_SCALE_MAX - SCRUB_PLACEHOLDER_SCALE_MIN);
+            scrubPlaceholderInstances.push({
+              x: centerX + jitterX,
+              y,
+              z: centerZ + jitterZ,
+              scale,
+              rotation: noiseAt(idx + 8.23) * Math.PI * 2,
+              colorJitter: noiseAt(idx + 9.57)
+            });
+          }
         }
       }
       vertexIndex += 1;
@@ -6257,12 +6305,20 @@ export const buildTerrainMesh = (
     if (houseSpots.length > 0) {
       const availableHouseVariants = houseAssets?.variants ?? [];
       const houseByKey = new Map<string, HouseVariant[]>();
+      const houseBySource = new Map<string, HouseVariant[]>();
       const houseByTheme: Record<HouseVariant["theme"], HouseVariant[]> = {
         brick: [],
         wood: []
       };
       availableHouseVariants.forEach((variant) => {
         houseByTheme[variant.theme].push(variant);
+        const sourceKey = variant.source.toLowerCase();
+        const sourceList = houseBySource.get(sourceKey);
+        if (sourceList) {
+          sourceList.push(variant);
+        } else {
+          houseBySource.set(sourceKey, [variant]);
+        }
         if (variant.buildKey) {
           const key = variant.buildKey.toLowerCase();
           const list = houseByKey.get(key);
@@ -6282,7 +6338,14 @@ export const buildTerrainMesh = (
             return matches[Math.min(matches.length - 1, Math.max(0, index))];
           }
         }
-        const source = spot.variantSource ?? "";
+        const source = (spot.variantSource ?? "").toLowerCase();
+        if (source) {
+          const sourceMatches = houseBySource.get(source);
+          if (sourceMatches && sourceMatches.length > 0) {
+            const index = Math.floor(noiseAt(spot.seed + 0.27) * sourceMatches.length);
+            return sourceMatches[Math.min(sourceMatches.length - 1, Math.max(0, index))];
+          }
+        }
         const theme =
           /brick/i.test(source) ? "brick" : /wood/i.test(source) ? "wood" : null;
         const bucket = theme ? houseByTheme[theme] : availableHouseVariants;

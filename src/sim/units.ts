@@ -440,11 +440,7 @@ export function setUnitTarget(
       return;
     }
   } else if (unit.kind === "truck" && manual) {
-    // A manual move command for a truck now initiates the boarding process.
-    unit.crewMode = "boarded";
-    const rosterUnit = getRosterUnit(state, unit.rosterId);
-    const name = rosterUnit ? rosterUnit.name : "Truck";
-    setStatus(state, `${name} moving to new position. Crew beginning to board.`);
+    setTruckCrewMode(state, unit.id, "boarded", { silent: true });
   }
 
   unit.target = { x: tileX, y: tileY };
@@ -503,12 +499,20 @@ export function deployUnit(state: WorldState, rng: RNG, kind: UnitKind, tileX: n
   rosterEntry.status = "deployed";
   state.units.push(unit);
   if (kind === "firefighter" && assignedTruck) {
-    assignFirefighterToTruck(state, unit, assignedTruck);
-    const truckTile = getUnitTile(assignedTruck);
-    setUnitTarget(state, unit, truckTile.x, truckTile.y, false, { silent: true });
+    if (!assignFirefighterToTruck(state, unit, assignedTruck)) {
+      state.units = state.units.filter((entry) => entry.id !== unit.id);
+      rosterEntry.status = "available";
+      setStatus(state, "Assigned truck is at crew capacity.");
+      return;
+    }
+    if (!boardTruck(state, unit, assignedTruck)) {
+      const truckTile = getUnitTile(assignedTruck);
+      setUnitTarget(state, unit, truckTile.x, truckTile.y, false, { silent: true });
+    }
     return;
   }
   if (kind === "truck") {
+    unit.crewMode = "boarded";
     const crewRoster = state.roster.filter(
       (entry) =>
         entry.kind === "firefighter" &&
@@ -523,11 +527,13 @@ export function deployUnit(state: WorldState, rng: RNG, kind: UnitKind, tileX: n
       const crewUnit = createUnit(state, "firefighter", rng, crewEntry);
       crewEntry.status = "deployed";
       state.units.push(crewUnit);
-      assignFirefighterToTruck(state, crewUnit, unit);
-      const truckTile = getUnitTile(unit);
-      setUnitTarget(state, crewUnit, truckTile.x, truckTile.y, false, { silent: true });
+      if (!assignFirefighterToTruck(state, crewUnit, unit) || !boardTruck(state, crewUnit, unit)) {
+        const truckTile = getUnitTile(unit);
+        setUnitTarget(state, crewUnit, truckTile.x, truckTile.y, false, { silent: true });
+      }
       deployedCrew += 1;
     });
+    setTruckCrewMode(state, unit.id, "boarded", { silent: true });
   }
   setUnitTarget(state, unit, tileX, tileY, false);
 }
@@ -702,14 +708,16 @@ export function stepUnits(state: WorldState, delta: number): void {
   state.units.forEach((unit) => {
     if (unit.kind === "truck") {
       const isWaitingForCrew = unit.crewMode === "boarded" && unit.passengerIds.length < unit.crewIds.length;
-      const hasArrived = unit.pathIndex >= unit.path.length;
-
       if (!isWaitingForCrew) {
         advanceUnit(unit);
       }
-
+      const hasArrived = unit.pathIndex >= unit.path.length;
       if (hasArrived && unit.crewMode === "boarded") {
-        setTruckCrewMode(state, unit.id, "deployed");
+        const truckTile = getUnitTile(unit);
+        const nearbyFire = findFireTargetNear(state, truckTile, FIREFIGHTER_TETHER_DISTANCE);
+        if (nearbyFire) {
+          setTruckCrewMode(state, unit.id, "deployed", { silent: true });
+        }
       }
     }
   });
@@ -848,7 +856,12 @@ const updateTruckCrewOrders = (state: WorldState, truck: Unit): void => {
   });
 };
 
-export function setTruckCrewMode(state: WorldState, truckId: number, mode: "boarded" | "deployed"): void {
+export function setTruckCrewMode(
+  state: WorldState,
+  truckId: number,
+  mode: "boarded" | "deployed",
+  options?: { silent?: boolean }
+): void {
   const truck = getUnitById(state, truckId);
   if (!truck || truck.kind !== "truck") {
     return;
@@ -863,7 +876,9 @@ export function setTruckCrewMode(state: WorldState, truckId: number, mode: "boar
     });
     truck.passengerIds = [];
   }
-  setStatus(state, mode === "boarded" ? "Crew boarding truck." : "Crew deployed around truck.");
+  if (!options?.silent) {
+    setStatus(state, mode === "boarded" ? "Crew boarding truck." : "Crew deployed around truck.");
+  }
   updateTruckCrewOrders(state, truck);
 }
 
@@ -1069,12 +1084,14 @@ export function applyExtinguish(state: WorldState, effects: EffectsState, rng: R
     if (unit.kind === "firefighter") {
       switch (unit.formation) {
         case "narrow":
-          radius *= 0.7;
-          power *= 1.4;
+          // Precision mode: tighter stream, longer throw, higher knockdown.
+          radius *= 1.22;
+          power *= 1.34;
           break;
         case "wide":
-          radius *= 1.4;
-          power *= 0.7;
+          // Suppression mode: broad coverage with lower per-tile intensity.
+          radius *= 1.56;
+          power *= 0.62;
           break;
         case "medium":
         default:

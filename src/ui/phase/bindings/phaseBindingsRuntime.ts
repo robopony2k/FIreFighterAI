@@ -38,6 +38,19 @@ import { isEditableTarget } from "./keyboard.js";
 import { hideStartMenu as hideStartMenuView, showStartMenu as showStartMenuView } from "./startMenu.js";
 import { getActionTarget } from "./uiActions.js";
 import { listenPhaseUiCommand, type PhaseUiCommand } from "../commandChannel.js";
+import type { UiAudioController, UiAudioCue } from "../../../audio/uiAudio.js";
+
+type HudMusicSettings = {
+  muted: boolean;
+  volume: number;
+};
+
+type HudMusicControls = {
+  getSettings: () => HudMusicSettings;
+  toggleMuted: () => void;
+  setVolume: (value: number) => void;
+  onChange: (listener: (settings: HudMusicSettings) => void) => () => void;
+};
 
 const getInteractionMode = (state: WorldState, inputState: InputState): InteractionMode => {
   if (state.deployMode === "clear") {
@@ -86,6 +99,8 @@ export type PhaseUiBindingDeps = {
   showStartMenuOnBind?: boolean;
   startThreeOnConfirm?: boolean;
   onMinimapPan?: (tile: { x: number; y: number }) => void;
+  uiAudio?: UiAudioController;
+  musicControls?: HudMusicControls;
 };
 
 const getWorldFromPointer = (
@@ -115,7 +130,9 @@ export const bindPhaseUi = ({
   overlayRefs,
   showStartMenuOnBind = true,
   startThreeOnConfirm = false,
-  onMinimapPan
+  onMinimapPan,
+  uiAudio,
+  musicControls
 }: PhaseUiBindingDeps): (() => void) => {
   let isSpaceDown = false;
   const disposers: Array<() => void> = [];
@@ -157,6 +174,7 @@ export const bindPhaseUi = ({
 
   const noteInteraction = (): void => {
     inputState.lastInteractionTime = performance.now();
+    uiAudio?.unlock();
   };
 
   let debugIgniteMode = inputState.debugIgniteMode;
@@ -373,7 +391,111 @@ export const bindPhaseUi = ({
     selectedTrucks.forEach((truck) => setCrewFormation(state, truck.id, formation));
   };
 
+  const getUiActionAudioCue = (action: string): UiAudioCue | null => {
+    if (action === "pause" || action === "crew-board" || action === "crew-deploy" || action === "toggle-fuel-break" || action === "backburn") {
+      return "toggle";
+    }
+    if (/^time-speed-\d+$/.test(action) || /^formation-(narrow|medium|wide)$/.test(action)) {
+      return "toggle";
+    }
+    if (action === "select-unit" || action === "select-truck" || action === "select-roster" || action === "zoom-in" || action === "zoom-out") {
+      return "click";
+    }
+    if (
+      /^deploy-(firefighter|truck)$/.test(action) ||
+      /^recruit-(firefighter|truck)$/.test(action) ||
+      /^train-(speed|power|range|resilience)$/.test(action) ||
+      action === "crew-assign" ||
+      action === "crew-unassign"
+    ) {
+      return "confirm";
+    }
+    return null;
+  };
+
+  const playUiActionAudio = (action: string): void => {
+    const cue = getUiActionAudioCue(action);
+    if (!cue) {
+      return;
+    }
+    uiAudio?.play(cue);
+  };
+
+  const findHoverActionable = (target: EventTarget | null): HTMLElement | null => {
+    if (!(target instanceof Element)) {
+      return null;
+    }
+    const actionable = target.closest("[data-action], button, [data-roster-id], .phase-truck-row");
+    return actionable instanceof HTMLElement ? actionable : null;
+  };
+
+  const isHoverActionable = (element: HTMLElement): boolean => {
+    if (element.classList.contains("is-hidden") || element.getAttribute("aria-hidden") === "true") {
+      return false;
+    }
+    if (element instanceof HTMLButtonElement && element.disabled) {
+      return false;
+    }
+    return true;
+  };
+
+  if (uiAudio) {
+    phaseUi.controller.setAudioState(uiAudio.getSettings());
+    phaseUi.controller.onAudioMuteToggle(() => {
+      noteInteraction();
+      uiAudio.play("toggle");
+      uiAudio.toggleMuted();
+    });
+    phaseUi.controller.onAudioVolumeChange((value) => {
+      noteInteraction();
+      uiAudio.setVolume(value);
+    });
+    disposers.push(
+      uiAudio.onChange((settings) => {
+        phaseUi.controller.setAudioState(settings);
+      })
+    );
+  }
+
+  if (musicControls) {
+    phaseUi.controller.setMusicState(musicControls.getSettings());
+    phaseUi.controller.onMusicMuteToggle(() => {
+      noteInteraction();
+      uiAudio?.play("toggle");
+      musicControls.toggleMuted();
+    });
+    phaseUi.controller.onMusicVolumeChange((value) => {
+      noteInteraction();
+      musicControls.setVolume(value);
+    });
+    disposers.push(
+      musicControls.onChange((settings) => {
+        phaseUi.controller.setMusicState(settings);
+      })
+    );
+  }
+
+  let lastHoverActionable: HTMLElement | null = null;
+  listenElement(phaseUi.controller.root, "pointerover", (event) => {
+    if (isOverlayLocked()) {
+      return;
+    }
+    const actionable = findHoverActionable(event.target);
+    if (!actionable || !phaseUi.controller.root.contains(actionable) || !isHoverActionable(actionable)) {
+      return;
+    }
+    if (actionable === lastHoverActionable) {
+      return;
+    }
+    lastHoverActionable = actionable;
+    uiAudio?.play("hover");
+  });
+  listenElement(phaseUi.controller.root, "pointerleave", () => {
+    lastHoverActionable = null;
+  });
+
   const runUiAction = (action: string, actionTarget?: HTMLElement | null, event?: Event): void => {
+    playUiActionAudio(action);
     const speedMatch = action.match(/^time-speed-(\d+)$/);
     if (speedMatch) {
       const nextIndex = Number(speedMatch[1]);

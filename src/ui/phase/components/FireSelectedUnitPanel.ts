@@ -33,10 +33,10 @@ export const createFireSelectedUnitPanel = (): FireSelectedUnitView => {
   const formationActions = document.createElement("div");
   formationActions.className = "phase-action-row";
   formationActions.innerHTML = `
-    <div class="phase-action-label">Formation:</div>
-    <button class="phase-action" data-action="formation-narrow" data-formation="narrow">Narrow</button>
-    <button class="phase-action" data-action="formation-medium" data-formation="medium">Medium</button>
-    <button class="phase-action" data-action="formation-wide" data-formation="wide">Wide</button>
+    <div class="phase-action-label">Spray Mode:</div>
+    <button class="phase-action" data-action="formation-narrow" data-formation="narrow">Precision</button>
+    <button class="phase-action" data-action="formation-medium" data-formation="medium">Balanced</button>
+    <button class="phase-action" data-action="formation-wide" data-formation="wide">Suppression</button>
   `;
 
   element.append(title, summary, actions, formationActions);
