@@ -1392,10 +1392,7 @@ canvas {
   display: grid;
   place-items: center;
   padding: 24px;
-  background:
-    radial-gradient(circle at 20% 18%, rgba(255, 144, 56, 0.16) 0%, transparent 52%),
-    radial-gradient(circle at 82% 82%, rgba(255, 88, 24, 0.08) 0%, transparent 58%),
-    linear-gradient(180deg, rgba(5, 6, 9, 0.97) 0%, rgba(9, 10, 14, 0.99) 100%);
+  background: linear-gradient(180deg, rgba(2, 3, 5, 0.99) 0%, rgba(7, 8, 12, 0.995) 100%);
   z-index: 40;
   isolation: isolate;
 }
@@ -1408,6 +1405,19 @@ canvas {
   background-image: radial-gradient(rgba(255, 255, 255, 0.06) 0.5px, transparent 0.5px);
   background-size: 2px 2px;
   opacity: 0.08;
+  z-index: 0;
+}
+
+.title-screen::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background:
+    radial-gradient(circle at 20% 18%, rgba(255, 144, 56, 0.16) 0%, transparent 52%),
+    radial-gradient(circle at 82% 82%, rgba(255, 88, 24, 0.08) 0%, transparent 58%);
+  opacity: 1;
+  z-index: 0;
 }
 
 .title-screen-shell {
@@ -1435,6 +1445,8 @@ canvas {
   letter-spacing: 0.45em;
   color: rgba(250, 238, 220, 0.68);
   font-size: clamp(11px, 1.2vw, 15px);
+  opacity: 1;
+  transform: translateY(0);
 }
 
 .title-screen-menu {
@@ -1442,6 +1454,35 @@ canvas {
   width: min(320px, 82vw);
   display: grid;
   gap: 8px;
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.title-screen--intro-sequence .title-screen-subtitle,
+.title-screen--intro-sequence .title-screen-menu {
+  opacity: 0;
+  transform: translateY(6px);
+}
+
+.title-screen--intro-sequence::after {
+  opacity: 0;
+}
+
+.title-screen--intro-sequence.title-screen--intro-visible .title-screen-subtitle {
+  opacity: 1;
+  transform: translateY(0);
+  transition: opacity 0.74s ease 2.24s, transform 0.74s ease 2.24s;
+}
+
+.title-screen--intro-sequence.title-screen--intro-visible .title-screen-menu {
+  opacity: 1;
+  transform: translateY(0);
+  transition: opacity 0.82s ease 3.02s, transform 0.82s ease 3.02s;
+}
+
+.title-screen--intro-sequence.title-screen--intro-visible::after {
+  opacity: 1;
+  transition: opacity 1.35s ease 3.95s;
 }
 
 .title-screen-menu-item {

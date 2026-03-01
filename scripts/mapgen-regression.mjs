@@ -267,6 +267,184 @@ const analyzeRiverConnectivity = (state) => {
   };
 };
 
+const ROAD_EDGE_N = 1 << 0;
+const ROAD_EDGE_E = 1 << 1;
+const ROAD_EDGE_S = 1 << 2;
+const ROAD_EDGE_W = 1 << 3;
+const ROAD_EDGE_NE = 1 << 4;
+const ROAD_EDGE_NW = 1 << 5;
+const ROAD_EDGE_SE = 1 << 6;
+const ROAD_EDGE_SW = 1 << 7;
+const ROAD_EDGE_DIRS = [
+  { dx: 0, dy: -1, bit: ROAD_EDGE_N },
+  { dx: 1, dy: 0, bit: ROAD_EDGE_E },
+  { dx: 0, dy: 1, bit: ROAD_EDGE_S },
+  { dx: -1, dy: 0, bit: ROAD_EDGE_W },
+  { dx: 1, dy: -1, bit: ROAD_EDGE_NE },
+  { dx: -1, dy: -1, bit: ROAD_EDGE_NW },
+  { dx: 1, dy: 1, bit: ROAD_EDGE_SE },
+  { dx: -1, dy: 1, bit: ROAD_EDGE_SW }
+];
+
+const analyzeRoadEdgeQuality = (state) => {
+  const { cols, rows, totalTiles } = state.grid;
+  const roadEdges = state.tileRoadEdges;
+  const roadBridge = state.tileRoadBridge;
+  const hasRoadEdges = !!roadEdges && roadEdges.length === totalTiles;
+  const isRoadLike = (x, y) => {
+    if (x < 0 || y < 0 || x >= cols || y >= rows) {
+      return false;
+    }
+    const idx = y * cols + x;
+    const tile = state.tiles[idx];
+    if (!tile) {
+      return false;
+    }
+    return tile.type === "road" || tile.type === "base" || (roadBridge?.[idx] ?? 0) > 0;
+  };
+  const getMask = (x, y) => {
+    if (!isRoadLike(x, y)) {
+      return 0;
+    }
+    const idx = y * cols + x;
+    if (hasRoadEdges) {
+      let mask = roadEdges[idx] ?? 0;
+      let sanitized = 0;
+      for (const dir of ROAD_EDGE_DIRS) {
+        if ((mask & dir.bit) === 0) {
+          continue;
+        }
+        const nx = x + dir.dx;
+        const ny = y + dir.dy;
+        if (!isRoadLike(nx, ny)) {
+          continue;
+        }
+        sanitized |= dir.bit;
+      }
+      if (sanitized !== 0) {
+        return sanitized;
+      }
+    }
+    let mask = 0;
+    if (isRoadLike(x, y - 1)) {
+      mask |= ROAD_EDGE_N;
+    }
+    if (isRoadLike(x + 1, y)) {
+      mask |= ROAD_EDGE_E;
+    }
+    if (isRoadLike(x, y + 1)) {
+      mask |= ROAD_EDGE_S;
+    }
+    if (isRoadLike(x - 1, y)) {
+      mask |= ROAD_EDGE_W;
+    }
+    if (isRoadLike(x + 1, y - 1)) {
+      mask |= ROAD_EDGE_NE;
+    }
+    if (isRoadLike(x - 1, y - 1)) {
+      mask |= ROAD_EDGE_NW;
+    }
+    if (isRoadLike(x + 1, y + 1)) {
+      mask |= ROAD_EDGE_SE;
+    }
+    if (isRoadLike(x - 1, y + 1)) {
+      mask |= ROAD_EDGE_SW;
+    }
+    return mask;
+  };
+
+  let roadCount = 0;
+  let ignoredDiagonalCount = 0;
+  let unmatchedPatternCount = 0;
+  const degreeHistogram = new Map();
+  const classifyPattern = (orth, diag, orthMask) => {
+    if (orth === 0 && diag === 0) {
+      return "isolated";
+    }
+    if (orth === 0) {
+      return diag === 1 ? "endcap_diagonal" : "diag_only";
+    }
+    if (diag === 0) {
+      if (orth === 1) {
+        return "endcap_cardinal";
+      }
+      if (orth === 2) {
+        const oppositeNS = (orthMask & (ROAD_EDGE_N | ROAD_EDGE_S)) === (ROAD_EDGE_N | ROAD_EDGE_S);
+        const oppositeEW = (orthMask & (ROAD_EDGE_E | ROAD_EDGE_W)) === (ROAD_EDGE_E | ROAD_EDGE_W);
+        return oppositeNS || oppositeEW ? "straight" : "corner";
+      }
+      if (orth === 3) {
+        return "tee";
+      }
+      return "cross";
+    }
+    if (orth === 1) {
+      return "o1d";
+    }
+    if (orth === 2 && diag === 1) {
+      return "o2d1";
+    }
+    if (orth === 2 && diag >= 2) {
+      return "o2d2plus";
+    }
+    if (orth === 3 && diag === 1) {
+      return "o3d1";
+    }
+    if (orth >= 3 && diag >= 2) {
+      return "hub_dense";
+    }
+    return "mixed_dense";
+  };
+
+  for (let y = 0; y < rows; y += 1) {
+    for (let x = 0; x < cols; x += 1) {
+      if (!isRoadLike(x, y)) {
+        continue;
+      }
+      roadCount += 1;
+      const mask = getMask(x, y);
+      const orthCount =
+        ((mask & ROAD_EDGE_N) > 0 ? 1 : 0) +
+        ((mask & ROAD_EDGE_E) > 0 ? 1 : 0) +
+        ((mask & ROAD_EDGE_S) > 0 ? 1 : 0) +
+        ((mask & ROAD_EDGE_W) > 0 ? 1 : 0);
+      const diagCount =
+        ((mask & ROAD_EDGE_NE) > 0 ? 1 : 0) +
+        ((mask & ROAD_EDGE_NW) > 0 ? 1 : 0) +
+        ((mask & ROAD_EDGE_SE) > 0 ? 1 : 0) +
+        ((mask & ROAD_EDGE_SW) > 0 ? 1 : 0);
+      const degree = orthCount + diagCount;
+      degreeHistogram.set(degree, (degreeHistogram.get(degree) ?? 0) + 1);
+      const family = classifyPattern(orthCount, diagCount, mask & (ROAD_EDGE_N | ROAD_EDGE_E | ROAD_EDGE_S | ROAD_EDGE_W));
+      if (family === "mixed_unknown") {
+        unmatchedPatternCount += 1;
+      }
+      const mixedHandled =
+        family === "o1d" ||
+        family === "o2d1" ||
+        family === "o2d2plus" ||
+        family === "o3d1" ||
+        family === "hub_dense" ||
+        family === "mixed_dense";
+      if (orthCount >= 2 && diagCount > 0 && !mixedHandled) {
+        ignoredDiagonalCount += 1;
+      }
+    }
+  }
+
+  const nodeDegreeHistogram = {};
+  for (const [degree, count] of degreeHistogram.entries()) {
+    nodeDegreeHistogram[String(degree)] = count;
+  }
+
+  return {
+    roadCount,
+    ignoredDiagonalCount,
+    unmatchedPatternCount,
+    nodeDegreeHistogram
+  };
+};
+
 const runCase = async (sizeId, seed) => {
   const grid = createGrid(sizeId);
   const state = createInitialState(seed, grid);
@@ -318,6 +496,7 @@ const runCase = async (sizeId, seed) => {
   const total = Math.max(1, state.tiles.length);
   const patchMetrics = analyzeForestPatches(state);
   const riverMetrics = analyzeRiverConnectivity(state);
+  const roadMetrics = analyzeRoadEdgeQuality(state);
   const biomeSpreadMs = phaseTimingsMs["biome:spread"] ?? 0;
   const biomeClassifyMs = phaseTimingsMs["biome:classify"] ?? 0;
   return {
@@ -335,7 +514,8 @@ const runCase = async (sizeId, seed) => {
     phaseTimingsMs,
     biomeSpreadClassifyMs: Number((biomeSpreadMs + biomeClassifyMs).toFixed(2)),
     ...patchMetrics,
-    ...riverMetrics
+    ...riverMetrics,
+    ...roadMetrics
   };
 };
 
@@ -346,7 +526,7 @@ const runAll = async () => {
       const metrics = await runCase(sizeId, seed);
       results.push(metrics);
       console.log(
-        `[mapgen] size=${metrics.sizeId} seed=${metrics.seed} ms=${metrics.durationMs.toFixed(2)} biome=${metrics.biomeSpreadClassifyMs.toFixed(2)}ms water=${metrics.waterPct.toFixed(2)}% forest=${metrics.forestPct.toFixed(2)}% patches=${metrics.forestPatchCount} meanPatch=${metrics.forestPatchMean} p95Patch=${metrics.forestPatchP95} houses=${metrics.houseCount} roads=${metrics.roadCount} rivers=${metrics.riverCount} riverDiagOnly=${metrics.riverDiagOnlyLinks} riverIso=${metrics.riverIsolatedCells} riverOrthRatio=${metrics.riverOrthConnectivityRatio.toFixed(4)} riverComps=${metrics.riverComponentCount} riverDetachedComps=${metrics.detachedRiverComponents} riverDetachedCells=${metrics.detachedRiverCells}`
+        `[mapgen] size=${metrics.sizeId} seed=${metrics.seed} ms=${metrics.durationMs.toFixed(2)} biome=${metrics.biomeSpreadClassifyMs.toFixed(2)}ms water=${metrics.waterPct.toFixed(2)}% forest=${metrics.forestPct.toFixed(2)}% patches=${metrics.forestPatchCount} meanPatch=${metrics.forestPatchMean} p95Patch=${metrics.forestPatchP95} houses=${metrics.houseCount} roads=${metrics.roadCount} rivers=${metrics.riverCount} roadIgnoredDiag=${metrics.ignoredDiagonalCount} roadUnmatched=${metrics.unmatchedPatternCount} riverDiagOnly=${metrics.riverDiagOnlyLinks} riverIso=${metrics.riverIsolatedCells} riverOrthRatio=${metrics.riverOrthConnectivityRatio.toFixed(4)} riverComps=${metrics.riverComponentCount} riverDetachedComps=${metrics.detachedRiverComponents} riverDetachedCells=${metrics.detachedRiverCells}`
       );
     }
   }
@@ -385,6 +565,17 @@ const compareAgainstBaseline = async (results) => {
     if (result.detachedRiverComponents !== 0) {
       failures += 1;
       console.error(`[mapgen] detached river components present for ${key}: ${result.detachedRiverComponents}`);
+    }
+    const ignoredDiagonalRatio = result.roadCount > 0 ? result.ignoredDiagonalCount / result.roadCount : 0;
+    if (ignoredDiagonalRatio > 0.05) {
+      failures += 1;
+      console.error(
+        `[mapgen] ignored road diagonal ratio too high for ${key}: ${(ignoredDiagonalRatio * 100).toFixed(2)}%`
+      );
+    }
+    if (result.unmatchedPatternCount !== 0) {
+      failures += 1;
+      console.error(`[mapgen] unmatched road patterns present for ${key}: ${result.unmatchedPatternCount}`);
     }
     if (hasBaseline) {
       const expected = index.get(key);

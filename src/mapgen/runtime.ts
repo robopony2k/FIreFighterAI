@@ -42,10 +42,8 @@ import {
 } from "../core/config.js";
 import { fractalNoise, hash2D } from "./noise.js";
 import {
-  connectSettlementsByRoad,
-  populateCommunities,
-  placeSettlements,
-  type SettlementPlacementResult
+  createSettlementPlacementPlan,
+  connectSettlementsByRoad
 } from "./communities.js";
 import { DEFAULT_MAP_GEN_SETTINGS, type MapGenSettings } from "./settings.js";
 import type { MapGenDebug, MapGenDebugPhase, MapGenReporter } from "./mapgenTypes.js";
@@ -3291,6 +3289,11 @@ async function generateMapLegacy(
   } else {
     state.tileRoadBridge.fill(0);
   }
+  if (state.tileRoadEdges.length !== state.grid.totalTiles) {
+    state.tileRoadEdges = new Uint8Array(state.grid.totalTiles);
+  } else {
+    state.tileRoadEdges.fill(0);
+  }
 
   for (let y = -2; y <= 2; y += 1) {
     for (let x = -2; x <= 2; x += 1) {
@@ -3309,7 +3312,12 @@ async function generateMapLegacy(
     }
   }
 
-  populateCommunities(state, rng);
+  const legacySettlementPlan = createSettlementPlacementPlan({
+    diagonalPenalty: mapSettings.road.diagonalPenalty,
+    pruneRedundantDiagonals: mapSettings.road.pruneRedundantDiagonals,
+    bridgeTransitions: mapSettings.road.bridgeTransitions
+  });
+  connectSettlementsByRoad(state, rng, legacySettlementPlan);
   flattenSettlementGround(state);
   assignForestComposition(state);
 
@@ -3881,6 +3889,11 @@ export async function runSettlementPlacementStage(ctx: MapGenContext): Promise<v
   } else {
     state.tileRoadBridge.fill(0);
   }
+  if (state.tileRoadEdges.length !== state.grid.totalTiles) {
+    state.tileRoadEdges = new Uint8Array(state.grid.totalTiles);
+  } else {
+    state.tileRoadEdges.fill(0);
+  }
   for (let y = -2; y <= 2; y += 1) {
     for (let x = -2; x <= 2; x += 1) {
       const nx = state.basePoint.x + x;
@@ -3899,17 +3912,27 @@ export async function runSettlementPlacementStage(ctx: MapGenContext): Promise<v
     }
   }
 
-  await ctx.reportStage("Placing settlements...", 0.4);
-  ctx.settlementPlan = placeSettlements(state, ctx.rng);
-  flattenSettlementGround(state);
-  assignForestComposition(state);
+  await ctx.reportStage("Planning settlements...", 0.4);
+  ctx.settlementPlan = createSettlementPlacementPlan({
+    diagonalPenalty: ctx.settings.road.diagonalPenalty,
+    pruneRedundantDiagonals: ctx.settings.road.pruneRedundantDiagonals,
+    bridgeTransitions: ctx.settings.road.bridgeTransitions
+  });
 
+  await ctx.reportStage("Settlement plan ready.", 1);
+  await emitStageSnapshot(ctx, "settlement:place");
+}
+
+export async function runRoadNetworkStage(ctx: MapGenContext): Promise<void> {
+  connectSettlementsByRoad(ctx.state, ctx.rng, ctx.settlementPlan ?? null);
+  flattenSettlementGround(ctx.state);
+  assignForestComposition(ctx.state);
   if (ctx.riverMask) {
-    for (let i = 0; i < state.tiles.length; i += 1) {
+    for (let i = 0; i < ctx.state.tiles.length; i += 1) {
       if (ctx.riverMask[i] === 0) {
         continue;
       }
-      const tile = state.tiles[i];
+      const tile = ctx.state.tiles[i];
       tile.type = "water";
       tile.canopy = 0;
       tile.canopyCover = 0;
@@ -3919,13 +3942,6 @@ export async function runSettlementPlacementStage(ctx: MapGenContext): Promise<v
       tile.isBase = false;
     }
   }
-
-  await ctx.reportStage("Settlements placed.", 1);
-  await emitStageSnapshot(ctx, "settlement:place");
-}
-
-export async function runRoadNetworkStage(ctx: MapGenContext): Promise<void> {
-  connectSettlementsByRoad(ctx.state, ctx.rng, ctx.settlementPlan ?? null);
   await ctx.reportStage("Connecting roads...", 1);
   await emitStageSnapshot(ctx, "roads:connect");
 }

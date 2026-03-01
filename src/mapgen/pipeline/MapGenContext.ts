@@ -2,7 +2,7 @@ import type { RNG } from "../../core/types.js";
 import type { WorldState } from "../../core/state.js";
 import type { MapGenDebug, MapGenDebugPhase, MapGenReporter } from "../mapgenTypes.js";
 import type { MapGenSettings } from "../settings.js";
-import { DEFAULT_MAP_GEN_SETTINGS } from "../settings.js";
+import { DEFAULT_MAP_GEN_SETTINGS, DEFAULT_ROAD_GEN_SETTINGS } from "../settings.js";
 import { DirtyRegionTracker } from "./DirtyRegionTracker.js";
 import type { SettlementPlacementResult } from "../communities.js";
 
@@ -60,7 +60,14 @@ export class MapGenContext {
     this.state = state;
     this.rng = rng;
     this.report = report;
-    this.settings = { ...DEFAULT_MAP_GEN_SETTINGS, ...(settings ?? {}) };
+    this.settings = {
+      ...DEFAULT_MAP_GEN_SETTINGS,
+      ...(settings ?? {}),
+      road: {
+        ...DEFAULT_ROAD_GEN_SETTINGS,
+        ...(settings?.road ?? {})
+      }
+    };
     this.debug = debug;
     this.yieldIfNeeded = yieldIfNeeded;
     this.dirtyRegions = new DirtyRegionTracker(state.grid.cols, state.grid.rows);

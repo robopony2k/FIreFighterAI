@@ -13,15 +13,19 @@ import {
   STRUCTURE_NONE
 } from "../core/towns.js";
 import {
+  analyzeRoadEdgeQuality,
+  backfillRoadEdgesFromAdjacency,
   carveRoad,
+  carveRoadPath,
+  clearRoadEdges,
   collectRoadTiles,
   findNearestRoadTile,
   findRoadPath,
   findRoadPathToTarget,
   getRoadGenerationStats,
   isRoadLikeTile,
-  resetRoadGenerationStats,
-  setRoadAt
+  pruneRoadDiagonalStubs,
+  resetRoadGenerationStats
 } from "./roads.js";
 
 const HOUSE_BUFFER_RADIUS = 1;
@@ -41,6 +45,9 @@ type HousePlacementContext = {
 
 export type SettlementPlacementResult = {
   generatedRoads: boolean;
+  diagonalPenalty?: number;
+  pruneRedundantDiagonals?: boolean;
+  bridgeTransitions?: boolean;
 };
 
 type TownCenterSeed = Point & {
@@ -436,33 +443,58 @@ function findNearbyBuildable(state: WorldState, origin: Point, radius: number): 
 }
 
 function carveRoadRing(state: WorldState, rng: RNG, center: Point, radius: number): void {
+  if (radius <= 0) {
+    carveRoadPath(state, rng, [center]);
+    return;
+  }
+  const points: Point[] = [];
   for (let dx = -radius; dx <= radius; dx += 1) {
-    setRoadAt(state, rng, center.x + dx, center.y - radius);
-    setRoadAt(state, rng, center.x + dx, center.y + radius);
+    points.push({ x: center.x + dx, y: center.y - radius });
   }
-  for (let dy = -radius; dy <= radius; dy += 1) {
-    setRoadAt(state, rng, center.x - radius, center.y + dy);
-    setRoadAt(state, rng, center.x + radius, center.y + dy);
+  for (let dy = -radius + 1; dy <= radius; dy += 1) {
+    points.push({ x: center.x + radius, y: center.y + dy });
   }
+  for (let dx = radius - 1; dx >= -radius; dx -= 1) {
+    points.push({ x: center.x + dx, y: center.y + radius });
+  }
+  for (let dy = radius - 1; dy >= -radius + 1; dy -= 1) {
+    points.push({ x: center.x - radius, y: center.y + dy });
+  }
+  if (points.length > 0) {
+    points.push(points[0]);
+  }
+  carveRoadPath(state, rng, points);
 }
 
 function carveRoadLine(state: WorldState, rng: RNG, start: Point, end: Point): void {
-  const dx = end.x - start.x;
-  const dy = end.y - start.y;
-  const steps = Math.max(Math.abs(dx), Math.abs(dy));
-  if (steps <= 0) {
-    setRoadAt(state, rng, start.x, start.y);
-    return;
+  const points: Point[] = [];
+  let x0 = start.x;
+  let y0 = start.y;
+  const x1 = end.x;
+  const y1 = end.y;
+  const dx = Math.abs(x1 - x0);
+  const sx = x0 < x1 ? 1 : -1;
+  const dy = -Math.abs(y1 - y0);
+  const sy = y0 < y1 ? 1 : -1;
+  let err = dx + dy;
+
+  while (true) {
+    points.push({ x: x0, y: y0 });
+    if (x0 === x1 && y0 === y1) {
+      break;
+    }
+    const e2 = err * 2;
+    if (e2 >= dy) {
+      err += dy;
+      x0 += sx;
+    }
+    if (e2 <= dx) {
+      err += dx;
+      y0 += sy;
+    }
   }
-  const stepX = dx / steps;
-  const stepY = dy / steps;
-  let x = start.x;
-  let y = start.y;
-  for (let i = 0; i <= steps; i += 1) {
-    setRoadAt(state, rng, Math.round(x), Math.round(y));
-    x += stepX;
-    y += stepY;
-  }
+
+  carveRoadPath(state, rng, points);
 }
 
 function placeVillageHouses(
@@ -627,7 +659,12 @@ function findClosestUnreachableLand(state: WorldState, reachable: Uint8Array): P
   return best;
 }
 
-function connectDetachedLandPass(state: WorldState, rng: RNG, allowBridge: boolean): void {
+function connectDetachedLandPass(
+  state: WorldState,
+  rng: RNG,
+  allowBridge: boolean,
+  diagonalPenalty: number
+): void {
   let reachable = markReachableLand(state, state.basePoint);
   let reachableCount = countReachable(reachable);
   const maxIterations = Math.min(state.grid.totalTiles, 4096);
@@ -643,16 +680,26 @@ function connectDetachedLandPass(state: WorldState, rng: RNG, allowBridge: boole
         const idx = indexFor(state.grid, x, y);
         return reachable[idx] === 1 && state.tiles[idx].type !== "house" && state.structureMask[idx] === 0;
       },
-      { bridgePolicy: allowBridge ? "allow" : "never" }
+      {
+        bridgePolicy: allowBridge ? "allow" : "never",
+        diagonalPenalty
+      }
     );
     if (path.length === 0) {
       break;
     }
-    path.forEach((point) => {
-      const idx = indexFor(state.grid, point.x, point.y);
-      const isBridgeTile = state.tiles[idx].type === "water" && state.tileRiverMask[idx] > 0;
-      setRoadAt(state, rng, point.x, point.y, { allowBridge: allowBridge && isBridgeTile });
-    });
+    if (allowBridge) {
+      const bridgeIndices = new Set<number>();
+      path.forEach((point) => {
+        const idx = indexFor(state.grid, point.x, point.y);
+        if (state.tiles[idx].type === "water" && state.tileRiverMask[idx] > 0) {
+          bridgeIndices.add(idx);
+        }
+      });
+      carveRoadPath(state, rng, path, { allowBridgeIndices: bridgeIndices });
+    } else {
+      carveRoadPath(state, rng, path);
+    }
     const nextReachable = markReachableLand(state, state.basePoint);
     const nextCount = countReachable(nextReachable);
     if (nextCount <= reachableCount) {
@@ -709,12 +756,26 @@ function validateTownState(state: WorldState): void {
   }
 }
 
-function connectDetachedLand(state: WorldState, rng: RNG): void {
-  connectDetachedLandPass(state, rng, false);
-  connectDetachedLandPass(state, rng, true);
+function connectDetachedLand(
+  state: WorldState,
+  rng: RNG,
+  diagonalPenalty: number,
+  bridgeTransitions: boolean
+): void {
+  connectDetachedLandPass(state, rng, false, diagonalPenalty);
+  if (bridgeTransitions) {
+    connectDetachedLandPass(state, rng, true, diagonalPenalty);
+  }
 }
 
-export function placeSettlements(state: WorldState, rng: RNG): SettlementPlacementResult {
+export function placeSettlements(
+  state: WorldState,
+  rng: RNG,
+  plan: SettlementPlacementResult | null = null
+): SettlementPlacementResult {
+  const diagonalPenalty = Math.max(0, plan?.diagonalPenalty ?? 0.18);
+  const pruneRedundantDiagonals = plan?.pruneRedundantDiagonals ?? true;
+  const bridgeTransitions = plan?.bridgeTransitions ?? true;
   state.totalPropertyValue = 0;
   state.totalPopulation = 0;
   state.totalHouses = 0;
@@ -742,6 +803,7 @@ export function placeSettlements(state: WorldState, rng: RNG): SettlementPlaceme
     footprints: new Map<number, HouseFootprintBounds>()
   };
   resetRoadGenerationStats();
+  clearRoadEdges(state);
 
   const maxDim = Math.max(state.grid.cols, state.grid.rows);
   const fastMode = maxDim >= 1024;
@@ -769,7 +831,16 @@ export function placeSettlements(state: WorldState, rng: RNG): SettlementPlaceme
     placeVillageHouses(state, rng, state.basePoint, centralRadius, centralHouseCount, 150, 320, 2, 5, 0.85, context);
     remapHousesToNearestTown(state);
     validateTownState(state);
-    return { generatedRoads: true };
+    backfillRoadEdgesFromAdjacency(state);
+    if (pruneRedundantDiagonals) {
+      pruneRoadDiagonalStubs(state);
+    }
+    return {
+      generatedRoads: true,
+      diagonalPenalty,
+      pruneRedundantDiagonals,
+      bridgeTransitions
+    };
   }
 
   assignTownNames(state, [{ x: state.basePoint.x, y: state.basePoint.y, radius: centralRadius + 2 }]);
@@ -783,7 +854,10 @@ export function placeSettlements(state: WorldState, rng: RNG): SettlementPlaceme
     const nearby = findNearbyBuildable(state, rawTarget, 6);
     const target = nearby ?? (isBuildable(state, rawTarget.x, rawTarget.y) ? rawTarget : null);
     if (target && inBounds(state.grid, target.x, target.y)) {
-      carveRoad(state, rng, state.basePoint, target);
+      carveRoad(state, rng, state.basePoint, target, {
+        bridgePolicy: bridgeTransitions ? "allow" : "never",
+        diagonalPenalty
+      });
     }
   }
 
@@ -807,7 +881,12 @@ export function placeSettlements(state: WorldState, rng: RNG): SettlementPlaceme
       continue;
     }
     const anchor = findNearestRoadTile(state, { x, y });
-    if (findRoadPath(state, anchor, { x, y }, { bridgePolicy: "allow" }).length === 0) {
+    if (
+      findRoadPath(state, anchor, { x, y }, {
+        bridgePolicy: bridgeTransitions ? "allow" : "never",
+        diagonalPenalty
+      }).length === 0
+    ) {
       continue;
     }
     villageCenters.push({ x, y });
@@ -821,7 +900,10 @@ export function placeSettlements(state: WorldState, rng: RNG): SettlementPlaceme
 
   villageCenters.forEach((center) => {
     const anchor = findNearestRoadTile(state, center);
-    carveRoad(state, rng, anchor, center);
+    carveRoad(state, rng, anchor, center, {
+      bridgePolicy: bridgeTransitions ? "allow" : "never",
+      diagonalPenalty
+    });
 
     const localSize = 2 + Math.floor(rng.next() * 2);
     const localEnds = [
@@ -832,7 +914,10 @@ export function placeSettlements(state: WorldState, rng: RNG): SettlementPlaceme
     ];
     localEnds.forEach((end) => {
       if (inBounds(state.grid, end.x, end.y)) {
-        carveRoad(state, rng, center, end);
+        carveRoad(state, rng, center, end, {
+          bridgePolicy: bridgeTransitions ? "allow" : "never",
+          diagonalPenalty
+        });
       }
     });
 
@@ -857,14 +942,22 @@ export function placeSettlements(state: WorldState, rng: RNG): SettlementPlaceme
           continue;
         }
         const target = findNearestRoadTile(state, entry);
-        carveRoad(state, rng, entry, target);
+        carveRoad(state, rng, entry, target, {
+          bridgePolicy: bridgeTransitions ? "allow" : "never",
+          diagonalPenalty
+        });
       }
     }
   }
 
-  connectDetachedLand(state, rng);
+  connectDetachedLand(state, rng, diagonalPenalty, bridgeTransitions);
+  backfillRoadEdgesFromAdjacency(state);
+  if (pruneRedundantDiagonals) {
+    pruneRoadDiagonalStubs(state);
+  }
   remapHousesToNearestTown(state);
   validateTownState(state);
+  const edgeQuality = analyzeRoadEdgeQuality(state);
   if (DEBUG_TERRAIN) {
     const stats = getRoadGenerationStats();
     let bridgeTiles = 0;
@@ -876,20 +969,45 @@ export function placeSettlements(state: WorldState, rng: RNG): SettlementPlaceme
     const roadTileCount = collectRoadTiles(state).length;
     const minClearance = Number.isFinite(stats.minRiverClearance) ? stats.minRiverClearance.toString() : "n/a";
     console.log(
-      `[roadgen] roads=${roadTileCount} bridges=${bridgeTiles} paths=${stats.pathsFound}/${stats.pathsAttempted} maxGrade=${stats.maxRealizedGrade.toFixed(3)} minRiverClearance=${minClearance} bridgeSegments=${stats.bridgeSegments}`
+      `[roadgen] roads=${roadTileCount} bridges=${bridgeTiles} paths=${stats.pathsFound}/${stats.pathsAttempted} maxGrade=${stats.maxRealizedGrade.toFixed(3)} minRiverClearance=${minClearance} bridgeSegments=${stats.bridgeSegments} ignoredDiag=${edgeQuality.ignoredDiagonalCount} unmatched=${edgeQuality.unmatchedPatternCount}`
     );
   }
-  return { generatedRoads: true };
+  return {
+    generatedRoads: true,
+    diagonalPenalty,
+    pruneRedundantDiagonals,
+    bridgeTransitions
+  };
 }
 
 export function connectSettlementsByRoad(
-  _state: WorldState,
-  _rng: RNG,
+  state: WorldState,
+  rng: RNG,
   plan: SettlementPlacementResult | null
 ): void {
   if (!plan || plan.generatedRoads) {
     return;
   }
+  const realized = placeSettlements(state, rng, plan);
+  plan.generatedRoads = realized.generatedRoads;
+  plan.diagonalPenalty = realized.diagonalPenalty;
+  plan.pruneRedundantDiagonals = realized.pruneRedundantDiagonals;
+  plan.bridgeTransitions = realized.bridgeTransitions;
+}
+
+export const createSettlementPlacementPlan = (
+  options: {
+    diagonalPenalty?: number;
+    pruneRedundantDiagonals?: boolean;
+    bridgeTransitions?: boolean;
+  } = {}
+): SettlementPlacementResult => {
+  return {
+    generatedRoads: false,
+    diagonalPenalty: Math.max(0, options.diagonalPenalty ?? 0.18),
+    pruneRedundantDiagonals: options.pruneRedundantDiagonals ?? true,
+    bridgeTransitions: options.bridgeTransitions ?? true
+  };
 }
 
 export function populateCommunities(state: WorldState, rng: RNG): void {

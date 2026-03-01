@@ -26,6 +26,7 @@ export type TerrainSample = {
   tileMoisture?: Float32Array;
   riverMask?: Uint8Array;
   roadBridgeMask?: Uint8Array;
+  roadEdges?: Uint8Array;
   riverBed?: Float32Array;
   riverSurface?: Float32Array;
   riverStepStrength?: Float32Array;
@@ -287,8 +288,9 @@ export const ROAD_SURFACE_WIDTH = 0.5;
 const ROAD_SURFACE_OFFSET = 0.001;
 export const ROAD_TEX_SCALE = 12;
 const ROAD_TEX_MAX_SIZE = 4096;
-const ROAD_ATLAS_PATH = "assets/textures/ROAD_TILES.png";
-const ROAD_ATLAS_TILE_SIZE = 64;
+const ROAD_ATLAS_V2_METADATA_PATH = "assets/textures/road_atlas_v2.json";
+const ROAD_ATLAS_FALLBACK_IMAGE_PATH = "assets/textures/ROAD_TILES.png";
+const ROAD_ATLAS_FALLBACK_TILE_SIZE = 64;
 let roadOverlayMaxSize = ROAD_TEX_MAX_SIZE;
 
 export const setRoadOverlayMaxSize = (size: number): void => {
@@ -542,6 +544,78 @@ type RoadAtlas = {
   tileStride: number;
   cols: number;
   rows: number;
+  version: number;
+  tiles: Record<string, { col: number; row: number }>;
+};
+
+type RoadAtlasMetadata = {
+  version: number;
+  image: string;
+  tileSize: number;
+  tileStride: number;
+  tiles: Record<string, { col: number; row: number }>;
+};
+
+const ROAD_EDGE_N = 1 << 0;
+const ROAD_EDGE_E = 1 << 1;
+const ROAD_EDGE_S = 1 << 2;
+const ROAD_EDGE_W = 1 << 3;
+const ROAD_EDGE_NE = 1 << 4;
+const ROAD_EDGE_NW = 1 << 5;
+const ROAD_EDGE_SE = 1 << 6;
+const ROAD_EDGE_SW = 1 << 7;
+const ROAD_EDGE_CARDINAL_MASK = ROAD_EDGE_N | ROAD_EDGE_E | ROAD_EDGE_S | ROAD_EDGE_W;
+const ROAD_EDGE_DIAGONAL_MASK = ROAD_EDGE_NE | ROAD_EDGE_NW | ROAD_EDGE_SE | ROAD_EDGE_SW;
+
+const ROAD_EDGE_DIRS: Array<{ dx: number; dy: number; bit: number; diagonal: boolean }> = [
+  { dx: 0, dy: -1, bit: ROAD_EDGE_N, diagonal: false },
+  { dx: 1, dy: 0, bit: ROAD_EDGE_E, diagonal: false },
+  { dx: 0, dy: 1, bit: ROAD_EDGE_S, diagonal: false },
+  { dx: -1, dy: 0, bit: ROAD_EDGE_W, diagonal: false },
+  { dx: 1, dy: -1, bit: ROAD_EDGE_NE, diagonal: true },
+  { dx: -1, dy: -1, bit: ROAD_EDGE_NW, diagonal: true },
+  { dx: 1, dy: 1, bit: ROAD_EDGE_SE, diagonal: true },
+  { dx: -1, dy: 1, bit: ROAD_EDGE_SW, diagonal: true }
+];
+
+const ROAD_ATLAS_FALLBACK_METADATA: RoadAtlasMetadata = {
+  version: 2,
+  image: ROAD_ATLAS_FALLBACK_IMAGE_PATH,
+  tileSize: ROAD_ATLAS_FALLBACK_TILE_SIZE,
+  tileStride: ROAD_ATLAS_FALLBACK_TILE_SIZE,
+  tiles: {
+    base_isolated: { col: 0, row: 0 },
+    base_endcap_cardinal: { col: 1, row: 0 },
+    base_endcap_diagonal: { col: 0, row: 1 },
+    base_corner_ne: { col: 0, row: 2 },
+    base_straight: { col: 1, row: 0 },
+    base_corner: { col: 0, row: 2 },
+    base_tee: { col: 3, row: 0 },
+    base_cross: { col: 2, row: 0 },
+    diag_pair_nesw: { col: 0, row: 1 },
+    diag_pair_nwse: { col: 1, row: 1 },
+    mix_cardinal_diag_adjacent: { col: 2, row: 2 },
+    mix_straight_diag_single_ns: { col: 2, row: 2 },
+    mix_straight_diag_single_ew: { col: 2, row: 3 },
+    mix_straight_diag_pair_ns: { col: 1, row: 1 },
+    mix_straight_diag_pair_ew: { col: 0, row: 1 },
+    mix_corner_diag_outer: { col: 4, row: 3 },
+    mix_tee_diag: { col: 3, row: 0 },
+    mix_hub_dense: { col: 2, row: 0 },
+    mix_diag_to_straight_w_ne: { col: 2, row: 2 },
+    mix_diag_to_straight_w_se: { col: 2, row: 2 },
+    diag_infill_ne: { col: 5, row: 1 },
+    bridge_abutment_cardinal: { col: 4, row: 1 },
+    bridge_abutment_diagonal: { col: 5, row: 1 },
+    straight_ew: { col: 0, row: 0 },
+    straight_ns: { col: 1, row: 0 },
+    corner_es: { col: 4, row: 0 },
+    corner_sw: { col: 5, row: 0 },
+    corner_ne: { col: 0, row: 2 },
+    corner_nw: { col: 1, row: 2 },
+    tee_missing_n: { col: 3, row: 0 },
+    cross: { col: 2, row: 0 }
+  }
 };
 
 let roadAtlasCache: RoadAtlas | null = null;
@@ -551,6 +625,69 @@ const townLabelMaterialCache = new Map<string, { material: THREE.SpriteMaterial;
 
 export const getRoadAtlasVersion = (): number => roadAtlasVersion;
 
+const toRoadAtlasMetadata = (raw: unknown): RoadAtlasMetadata | null => {
+  if (!raw || typeof raw !== "object") {
+    return null;
+  }
+  const candidate = raw as {
+    version?: unknown;
+    image?: unknown;
+    tileSize?: unknown;
+    tileStride?: unknown;
+    tiles?: unknown;
+  };
+  const image = typeof candidate.image === "string" && candidate.image.length > 0
+    ? candidate.image
+    : ROAD_ATLAS_FALLBACK_METADATA.image;
+  const tileSize = Number(candidate.tileSize);
+  const safeTileSize = Number.isFinite(tileSize) && tileSize > 0
+    ? Math.round(tileSize)
+    : ROAD_ATLAS_FALLBACK_METADATA.tileSize;
+  const tileStrideRaw = Number(candidate.tileStride);
+  const safeTileStride =
+    Number.isFinite(tileStrideRaw) && tileStrideRaw > 0 ? Math.round(tileStrideRaw) : safeTileSize;
+  const versionRaw = Number(candidate.version);
+  const version = Number.isFinite(versionRaw) ? Math.max(1, Math.round(versionRaw)) : 2;
+  const tilesRaw = candidate.tiles;
+  if (!tilesRaw || typeof tilesRaw !== "object") {
+    return null;
+  }
+  const tiles: Record<string, { col: number; row: number }> = {};
+  for (const [key, value] of Object.entries(tilesRaw as Record<string, unknown>)) {
+    if (!value || typeof value !== "object") {
+      continue;
+    }
+    const entry = value as { col?: unknown; row?: unknown };
+    const col = Number(entry.col);
+    const row = Number(entry.row);
+    if (!Number.isFinite(col) || !Number.isFinite(row)) {
+      continue;
+    }
+    tiles[key] = {
+      col: Math.max(0, Math.floor(col)),
+      row: Math.max(0, Math.floor(row))
+    };
+  }
+  if (Object.keys(tiles).length === 0) {
+    return null;
+  }
+  return {
+    version,
+    image,
+    tileSize: safeTileSize,
+    tileStride: safeTileStride,
+    tiles
+  };
+};
+
+const loadImageElement = (src: string): Promise<HTMLImageElement> =>
+  new Promise((resolve, reject) => {
+    const image = new Image();
+    image.onload = () => resolve(image);
+    image.onerror = () => reject(new Error(`Failed to load image: ${src}`));
+    image.src = src;
+  });
+
 const ensureRoadAtlas = (): void => {
   if (roadAtlasCache || roadAtlasLoading) {
     return;
@@ -559,52 +696,55 @@ const ensureRoadAtlas = (): void => {
     return;
   }
   roadAtlasLoading = true;
-  const image = new Image();
-  image.src = ROAD_ATLAS_PATH;
-  image.onload = () => {
-    const width = Math.max(1, image.width);
-    const height = Math.max(1, image.height);
-    const tileSize = ROAD_ATLAS_TILE_SIZE;
-    let tileStride = tileSize;
-    if (width % tileSize !== 0 || height % tileSize !== 0) {
-      const strideWithGap = tileSize + 1;
-      if (width % strideWithGap === 0 && height % strideWithGap === 0) {
-        tileStride = strideWithGap;
+  void (async () => {
+    let metadata = ROAD_ATLAS_FALLBACK_METADATA;
+    if (typeof fetch === "function") {
+      try {
+        const response = await fetch(ROAD_ATLAS_V2_METADATA_PATH, { cache: "no-store" });
+        if (response.ok) {
+          const json = await response.json();
+          const parsed = toRoadAtlasMetadata(json);
+          if (parsed) {
+            metadata = parsed;
+          }
+        }
+      } catch {
+        // Atlas metadata is optional; fallback metadata keeps rendering alive.
       }
     }
-    const gap = Math.max(0, tileStride - tileSize);
-    const cols = Math.max(1, Math.floor((width + gap) / tileStride));
-    const rows = Math.max(1, Math.floor((height + gap) / tileStride));
-    const canvas = document.createElement("canvas");
-    canvas.width = width;
-    canvas.height = height;
-    const ctx = canvas.getContext("2d");
-    if (!ctx) {
+
+    try {
+      const image = await loadImageElement(metadata.image);
+      const width = Math.max(1, image.width);
+      const height = Math.max(1, image.height);
+      const tileSize = Math.max(1, Math.floor(metadata.tileSize));
+      const tileStride = Math.max(tileSize, Math.floor(metadata.tileStride));
+      const cols = Math.max(1, Math.floor(width / tileStride));
+      const rows = Math.max(1, Math.floor(height / tileStride));
+      const canvas = document.createElement("canvas");
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) {
+        return;
+      }
+      ctx.drawImage(image, 0, 0);
+      roadAtlasCache = {
+        canvas,
+        tileSize,
+        tileStride,
+        cols,
+        rows,
+        version: metadata.version,
+        tiles: metadata.tiles
+      };
+      roadAtlasVersion += 1;
+    } catch {
+      // If atlas loading fails we'll continue with procedural fallback.
+    } finally {
       roadAtlasLoading = false;
-      return;
     }
-    ctx.drawImage(image, 0, 0);
-    const imageData = ctx.getImageData(0, 0, width, height);
-    const data = imageData.data;
-    for (let i = 0; i < data.length; i += 4) {
-      const r = data[i];
-      const g = data[i + 1];
-      const b = data[i + 2];
-      const isGridRed = r > 200 && g < 60 && b < 60;
-      const isGridBlue = b > 200 && r < 60 && g < 60;
-      const isDark = r < 10 && g < 10 && b < 10;
-      if (isGridRed || isGridBlue || isDark) {
-        data[i + 3] = 0;
-      }
-    }
-    ctx.putImageData(imageData, 0, 0);
-    roadAtlasCache = { canvas, tileSize, tileStride, cols, rows };
-    roadAtlasVersion += 1;
-    roadAtlasLoading = false;
-  };
-  image.onerror = () => {
-    roadAtlasLoading = false;
-  };
+  })();
 };
 
 const getRoadAtlas = (): RoadAtlas | null => {
@@ -4659,17 +4799,195 @@ export const buildRoadOverlayTexture = (
 ): THREE.Texture | null => {
   const tileTypes = sample.tileTypes;
   const roadBridgeMask = sample.roadBridgeMask;
+  const roadEdges = sample.roadEdges;
   if (!tileTypes) {
     return null;
   }
-  const atlas = getRoadAtlas();
   const { cols, rows } = sample;
+  const total = cols * rows;
+  const hasRoadEdges = !!roadEdges && roadEdges.length === total;
+  const getIndex = (x: number, y: number): number => y * cols + x;
+  const isRoadLike = (x: number, y: number): boolean => {
+    if (x < 0 || y < 0 || x >= cols || y >= rows) {
+      return false;
+    }
+    const idx = getIndex(x, y);
+    const type = tileTypes[idx];
+    return type === roadId || type === baseId || (roadBridgeMask ? roadBridgeMask[idx] > 0 : false);
+  };
+  const isBridge = (x: number, y: number): boolean => {
+    if (!roadBridgeMask || x < 0 || y < 0 || x >= cols || y >= rows) {
+      return false;
+    }
+    return roadBridgeMask[getIndex(x, y)] > 0;
+  };
+  const getRoadMask = (x: number, y: number): number => {
+    if (!isRoadLike(x, y)) {
+      return 0;
+    }
+    if (hasRoadEdges && roadEdges) {
+      const idx = getIndex(x, y);
+      let mask = roadEdges[idx] ?? 0;
+      let sanitized = 0;
+      for (let i = 0; i < ROAD_EDGE_DIRS.length; i += 1) {
+        const dir = ROAD_EDGE_DIRS[i];
+        if ((mask & dir.bit) === 0) {
+          continue;
+        }
+        const nx = x + dir.dx;
+        const ny = y + dir.dy;
+        if (!isRoadLike(nx, ny)) {
+          continue;
+        }
+        sanitized |= dir.bit;
+      }
+      if (sanitized !== 0) {
+        return sanitized;
+      }
+    }
+    let mask = 0;
+    if (isRoadLike(x, y - 1)) {
+      mask |= ROAD_EDGE_N;
+    }
+    if (isRoadLike(x + 1, y)) {
+      mask |= ROAD_EDGE_E;
+    }
+    if (isRoadLike(x, y + 1)) {
+      mask |= ROAD_EDGE_S;
+    }
+    if (isRoadLike(x - 1, y)) {
+      mask |= ROAD_EDGE_W;
+    }
+    if (isRoadLike(x + 1, y - 1)) {
+      mask |= ROAD_EDGE_NE;
+    }
+    if (isRoadLike(x - 1, y - 1)) {
+      mask |= ROAD_EDGE_NW;
+    }
+    if (isRoadLike(x + 1, y + 1)) {
+      mask |= ROAD_EDGE_SE;
+    }
+    if (isRoadLike(x - 1, y + 1)) {
+      mask |= ROAD_EDGE_SW;
+    }
+    return mask;
+  };
+
+  const popCount4 = (mask: number, bits: number[]): number =>
+    Number((mask & bits[0]) > 0) +
+    Number((mask & bits[1]) > 0) +
+    Number((mask & bits[2]) > 0) +
+    Number((mask & bits[3]) > 0);
+
+  const cardinalRotation = (bit: number): number => {
+    if (bit === ROAD_EDGE_N) {
+      return 0;
+    }
+    if (bit === ROAD_EDGE_E) {
+      return Math.PI / 2;
+    }
+    if (bit === ROAD_EDGE_S) {
+      return Math.PI;
+    }
+    return -Math.PI / 2;
+  };
+
+  const diagonalRotation = (bit: number): number => {
+    if (bit === ROAD_EDGE_NE) {
+      return 0;
+    }
+    if (bit === ROAD_EDGE_SE) {
+      return Math.PI / 2;
+    }
+    if (bit === ROAD_EDGE_SW) {
+      return Math.PI;
+    }
+    return -Math.PI / 2;
+  };
+  const cornerRotationFromNe = (corner: "NE" | "SE" | "SW" | "NW"): number => {
+    if (corner === "NE") {
+      return 0;
+    }
+    if (corner === "SE") {
+      return Math.PI / 2;
+    }
+    if (corner === "SW") {
+      return Math.PI;
+    }
+    return -Math.PI / 2;
+  };
+  const firstSetBit = (mask: number, bits: number[]): number => {
+    for (let i = 0; i < bits.length; i += 1) {
+      if ((mask & bits[i]) > 0) {
+        return bits[i];
+      }
+    }
+    return 0;
+  };
+  const longCornerWToNeRotation = (orthBit: number, diagBit: number): number | null => {
+    if (orthBit === ROAD_EDGE_W && diagBit === ROAD_EDGE_NE) {
+      return 0;
+    }
+    if (orthBit === ROAD_EDGE_N && diagBit === ROAD_EDGE_SE) {
+      return Math.PI / 2;
+    }
+    if (orthBit === ROAD_EDGE_E && diagBit === ROAD_EDGE_SW) {
+      return Math.PI;
+    }
+    if (orthBit === ROAD_EDGE_S && diagBit === ROAD_EDGE_NW) {
+      return -Math.PI / 2;
+    }
+    return null;
+  };
+  const longCornerWToSeRotation = (orthBit: number, diagBit: number): number | null => {
+    if (orthBit === ROAD_EDGE_W && diagBit === ROAD_EDGE_SE) {
+      return 0;
+    }
+    if (orthBit === ROAD_EDGE_N && diagBit === ROAD_EDGE_SW) {
+      return Math.PI / 2;
+    }
+    if (orthBit === ROAD_EDGE_E && diagBit === ROAD_EDGE_NW) {
+      return Math.PI;
+    }
+    if (orthBit === ROAD_EDGE_S && diagBit === ROAD_EDGE_NE) {
+      return -Math.PI / 2;
+    }
+    return null;
+  };
+  const teeRotation = (missingBit: number): number => {
+    // Atlas base_tee source is missing WEST (N+E+S connected) at 0 rotation.
+    if (missingBit === ROAD_EDGE_W) {
+      return 0;
+    }
+    if (missingBit === ROAD_EDGE_N) {
+      return Math.PI / 2;
+    }
+    if (missingBit === ROAD_EDGE_E) {
+      return Math.PI;
+    }
+    return -Math.PI / 2;
+  };
+  const cornerRotation = (orthMask: number): number => {
+    if ((orthMask & (ROAD_EDGE_N | ROAD_EDGE_E)) === (ROAD_EDGE_N | ROAD_EDGE_E)) {
+      return 0;
+    }
+    if ((orthMask & (ROAD_EDGE_E | ROAD_EDGE_S)) === (ROAD_EDGE_E | ROAD_EDGE_S)) {
+      return Math.PI / 2;
+    }
+    if ((orthMask & (ROAD_EDGE_S | ROAD_EDGE_W)) === (ROAD_EDGE_S | ROAD_EDGE_W)) {
+      return Math.PI;
+    }
+    return -Math.PI / 2;
+  };
+
+  const atlas = getRoadAtlas();
   const maxTileSpan = Math.max(1, Math.max(cols, rows));
   const maxSize = roadOverlayMaxSize || ROAD_TEX_MAX_SIZE;
   const baseScale = Math.round(scale);
   const tileSize = atlas
     ? Math.max(1, Math.min(atlas.tileSize, Math.floor(maxSize / maxTileSpan)))
     : Math.max(1, Math.min(baseScale, Math.floor(maxSize / maxTileSpan)));
+
   if (atlas && tileSize > 0) {
     const canvas = document.createElement("canvas");
     canvas.width = Math.max(1, cols * tileSize);
@@ -4679,41 +4997,29 @@ export const buildRoadOverlayTexture = (
       return null;
     }
     ctx.imageSmoothingEnabled = true;
-
-    const tiles = {
-      straightEW: { col: 0, row: 0 },
-      straightNS: { col: 1, row: 0 },
-      cross: { col: 2, row: 0 },
-      teeMissingN: { col: 3, row: 0 },
-      cornerES: { col: 4, row: 0 },
-      cornerWS: { col: 5, row: 0 },
-      diagNESW: { col: 0, row: 1 },
-      diagNWSE: { col: 1, row: 1 },
-      infillSW: { col: 2, row: 1 },
-      infillSE: { col: 3, row: 1 },
-      infillNW: { col: 4, row: 1 },
-      infillNE: { col: 5, row: 1 },
-      cornerEN: { col: 0, row: 2 },
-      cornerWN: { col: 1, row: 2 },
-      longCornerNSE: { col: 2, row: 2 },
-      longCornerESW: { col: 1, row: 3 },
-      longCornerENE: { col: 2, row: 3 },
-      longCornerSNE: { col: 3, row: 3 },
-      longCornerWNE: { col: 4, row: 3 },
-      longCornerWSE: { col: 5, row: 3 },
-      longCornerNSW: { col: 3, row: 2 },
-      longCornerSNW: { col: 4, row: 2 }
-    };
     const atlasTileSize = atlas.tileSize;
+    const resolveTile = (...ids: string[]): { col: number; row: number } | null => {
+      for (let i = 0; i < ids.length; i += 1) {
+        const id = ids[i];
+        const tile = atlas.tiles[id];
+        if (tile) {
+          return tile;
+        }
+      }
+      return null;
+    };
     const drawAtlasTile = (
-      tile: { col: number; row: number },
+      tileIds: string[],
       tileX: number,
       tileY: number,
       rotation = 0,
       scaleFactor = 1,
-      align: "center" | "NW" | "NE" | "SE" | "SW" = "center",
-      clip?: { x: number; y: number; w: number; h: number }
+      align: "center" | "NW" | "NE" | "SE" | "SW" = "center"
     ) => {
+      const tile = resolveTile(...tileIds);
+      if (!tile) {
+        return;
+      }
       if (tile.col >= atlas.cols || tile.row >= atlas.rows) {
         return;
       }
@@ -4743,16 +5049,6 @@ export const buildRoadOverlayTexture = (
         }
       }
       ctx.save();
-      if (clip) {
-        ctx.beginPath();
-        ctx.rect(
-          tileX * tileSize + clip.x * tileSize,
-          tileY * tileSize + clip.y * tileSize,
-          clip.w * tileSize,
-          clip.h * tileSize
-        );
-        ctx.clip();
-      }
       ctx.translate(dx + dstSize / 2, dy + dstSize / 2);
       ctx.rotate(rotation);
       ctx.drawImage(
@@ -4768,26 +5064,14 @@ export const buildRoadOverlayTexture = (
       );
       ctx.restore();
     };
-    const drawInfill = (
-      tileX: number,
-      tileY: number,
-      tile: { col: number; row: number }
-    ) => {
-      if (tileX < 0 || tileY < 0 || tileX >= cols || tileY >= rows) {
+    const drawInfillAt = (targetX: number, targetY: number, corner: "NE" | "SE" | "SW" | "NW"): void => {
+      if (targetX < 0 || targetY < 0 || targetX >= cols || targetY >= rows) {
         return;
       }
-      if (isRoadLike(tileX, tileY)) {
+      if (isRoadLike(targetX, targetY)) {
         return;
       }
-      drawAtlasTile(tile, tileX, tileY);
-    };
-    const isRoadLike = (x: number, y: number): boolean => {
-      if (x < 0 || y < 0 || x >= cols || y >= rows) {
-        return false;
-      }
-      const idx = y * cols + x;
-      const type = tileTypes[idx];
-      return type === roadId || type === baseId || (roadBridgeMask ? roadBridgeMask[idx] > 0 : false);
+      drawAtlasTile(["diag_infill_ne"], targetX, targetY, cornerRotationFromNe(corner));
     };
 
     for (let tileY = 0; tileY < rows; tileY += 1) {
@@ -4795,114 +5079,153 @@ export const buildRoadOverlayTexture = (
         if (!isRoadLike(tileX, tileY)) {
           continue;
         }
-        const n = isRoadLike(tileX, tileY - 1);
-        const s = isRoadLike(tileX, tileY + 1);
-        const w = isRoadLike(tileX - 1, tileY);
-        const e = isRoadLike(tileX + 1, tileY);
-        const ne = isRoadLike(tileX + 1, tileY - 1);
-        const nw = isRoadLike(tileX - 1, tileY - 1);
-        const se = isRoadLike(tileX + 1, tileY + 1);
-        const sw = isRoadLike(tileX - 1, tileY + 1);
+        const mask = getRoadMask(tileX, tileY);
+        const orthMask = mask & ROAD_EDGE_CARDINAL_MASK;
+        const diagMask = mask & ROAD_EDGE_DIAGONAL_MASK;
+        const orthCount = popCount4(orthMask, [ROAD_EDGE_N, ROAD_EDGE_E, ROAD_EDGE_S, ROAD_EDGE_W]);
+        const diagCount = popCount4(diagMask, [ROAD_EDGE_NE, ROAD_EDGE_NW, ROAD_EDGE_SE, ROAD_EDGE_SW]);
 
-        const orthCount = Number(n) + Number(s) + Number(e) + Number(w);
-        if (orthCount === 4) {
-          drawAtlasTile(tiles.cross, tileX, tileY);
-          continue;
+        const isStraightOrth =
+          orthCount === 2 &&
+          (((orthMask & (ROAD_EDGE_N | ROAD_EDGE_S)) === (ROAD_EDGE_N | ROAD_EDGE_S)) ||
+            ((orthMask & (ROAD_EDGE_E | ROAD_EDGE_W)) === (ROAD_EDGE_E | ROAD_EDGE_W)));
+        const isCornerOrth = orthCount === 2 && !isStraightOrth;
+
+        // Layer A: orth topology (use dedicated corner/tee/cross when available).
+        if (orthCount >= 4) {
+          drawAtlasTile(["base_cross"], tileX, tileY);
+        } else if (orthCount === 3) {
+          const missing =
+            (orthMask & ROAD_EDGE_N) === 0 ? ROAD_EDGE_N :
+            (orthMask & ROAD_EDGE_E) === 0 ? ROAD_EDGE_E :
+            (orthMask & ROAD_EDGE_S) === 0 ? ROAD_EDGE_S : ROAD_EDGE_W;
+          drawAtlasTile(["base_tee"], tileX, tileY, teeRotation(missing));
+        } else if (isCornerOrth) {
+          drawAtlasTile(["base_corner_ne", "base_corner", "corner_ne"], tileX, tileY, cornerRotation(orthMask));
+        } else if (orthCount === 0 && diagCount === 0) {
+          drawAtlasTile(["base_isolated"], tileX, tileY);
+        } else {
+          if ((orthMask & ROAD_EDGE_N) > 0) {
+            drawAtlasTile(["base_endcap_cardinal"], tileX, tileY, cardinalRotation(ROAD_EDGE_N));
+          }
+          if ((orthMask & ROAD_EDGE_E) > 0) {
+            drawAtlasTile(["base_endcap_cardinal"], tileX, tileY, cardinalRotation(ROAD_EDGE_E));
+          }
+          if ((orthMask & ROAD_EDGE_S) > 0) {
+            drawAtlasTile(["base_endcap_cardinal"], tileX, tileY, cardinalRotation(ROAD_EDGE_S));
+          }
+          if ((orthMask & ROAD_EDGE_W) > 0) {
+            drawAtlasTile(["base_endcap_cardinal"], tileX, tileY, cardinalRotation(ROAD_EDGE_W));
+          }
         }
-        if (orthCount === 3) {
-          let rotation = 0;
-          if (!n) {
-            rotation = 0;
-          } else if (!e) {
-            rotation = Math.PI / 2;
-          } else if (!s) {
-            rotation = Math.PI;
+
+        // Layer B: diagonal stubs from diagonal endcaps.
+        if ((diagMask & ROAD_EDGE_NE) > 0) {
+          drawAtlasTile(["base_endcap_diagonal"], tileX, tileY, diagonalRotation(ROAD_EDGE_NE));
+        }
+        if ((diagMask & ROAD_EDGE_NW) > 0) {
+          drawAtlasTile(["base_endcap_diagonal"], tileX, tileY, diagonalRotation(ROAD_EDGE_NW));
+        }
+        if ((diagMask & ROAD_EDGE_SE) > 0) {
+          drawAtlasTile(["base_endcap_diagonal"], tileX, tileY, diagonalRotation(ROAD_EDGE_SE));
+        }
+        if ((diagMask & ROAD_EDGE_SW) > 0) {
+          drawAtlasTile(["base_endcap_diagonal"], tileX, tileY, diagonalRotation(ROAD_EDGE_SW));
+        }
+
+        // Layer C: mixed-pattern overlays for common orth+diag combinations.
+        if (orthCount === 1 && diagCount === 1) {
+          const orthBit = firstSetBit(orthMask, [ROAD_EDGE_N, ROAD_EDGE_E, ROAD_EDGE_S, ROAD_EDGE_W]);
+          const diagBit = firstSetBit(diagMask, [ROAD_EDGE_NE, ROAD_EDGE_NW, ROAD_EDGE_SE, ROAD_EDGE_SW]);
+          const longRotationNe = longCornerWToNeRotation(orthBit, diagBit);
+          const longRotationSe = longCornerWToSeRotation(orthBit, diagBit);
+          if (longRotationNe !== null) {
+            drawAtlasTile(["mix_diag_to_straight_w_ne"], tileX, tileY, longRotationNe);
+          } else if (longRotationSe !== null) {
+            drawAtlasTile(["mix_diag_to_straight_w_se"], tileX, tileY, longRotationSe);
           } else {
-            rotation = -Math.PI / 2;
+            drawAtlasTile(["mix_cardinal_diag_adjacent"], tileX, tileY, cardinalRotation(orthBit));
           }
-          drawAtlasTile(tiles.teeMissingN, tileX, tileY, rotation);
-          continue;
-        }
-        if (orthCount === 2) {
-          if (n && s) {
-            drawAtlasTile(tiles.straightNS, tileX, tileY);
-            continue;
-          }
-          if (e && w) {
-            drawAtlasTile(tiles.straightEW, tileX, tileY);
-            continue;
-          }
-          if (e && s) {
-            drawAtlasTile(tiles.cornerES, tileX, tileY);
-          } else if (s && w) {
-            drawAtlasTile(tiles.cornerWS, tileX, tileY);
-          } else if (n && e) {
-            drawAtlasTile(tiles.cornerEN, tileX, tileY);
+        } else if (orthCount === 1 && diagCount > 1) {
+          const orthBit = firstSetBit(orthMask, [ROAD_EDGE_N, ROAD_EDGE_E, ROAD_EDGE_S, ROAD_EDGE_W]);
+          drawAtlasTile(["mix_cardinal_diag_adjacent"], tileX, tileY, cardinalRotation(orthBit));
+        } else if (orthCount === 2 && diagCount === 1) {
+          const isNS = (orthMask & (ROAD_EDGE_N | ROAD_EDGE_S)) === (ROAD_EDGE_N | ROAD_EDGE_S);
+          const isEW = (orthMask & (ROAD_EDGE_E | ROAD_EDGE_W)) === (ROAD_EDGE_E | ROAD_EDGE_W);
+          if (isNS) {
+            drawAtlasTile(["mix_straight_diag_single_ns"], tileX, tileY);
+          } else if (isEW) {
+            drawAtlasTile(["mix_straight_diag_single_ew"], tileX, tileY);
           } else {
-            drawAtlasTile(tiles.cornerWN, tileX, tileY);
+            drawAtlasTile(["mix_corner_diag_outer"], tileX, tileY, cornerRotation(orthMask));
           }
-          continue;
+        } else if (orthCount === 2 && diagCount >= 2) {
+          const isNS = (orthMask & (ROAD_EDGE_N | ROAD_EDGE_S)) === (ROAD_EDGE_N | ROAD_EDGE_S);
+          const isEW = (orthMask & (ROAD_EDGE_E | ROAD_EDGE_W)) === (ROAD_EDGE_E | ROAD_EDGE_W);
+          if (isNS) {
+            drawAtlasTile(["mix_straight_diag_pair_ns"], tileX, tileY);
+          } else if (isEW) {
+            drawAtlasTile(["mix_straight_diag_pair_ew"], tileX, tileY);
+          } else {
+            drawAtlasTile(["mix_corner_diag_outer"], tileX, tileY, cornerRotation(orthMask));
+          }
+        } else if (orthCount === 3 && diagCount >= 1) {
+          const missing =
+            (orthMask & ROAD_EDGE_N) === 0 ? ROAD_EDGE_N :
+            (orthMask & ROAD_EDGE_E) === 0 ? ROAD_EDGE_E :
+            (orthMask & ROAD_EDGE_S) === 0 ? ROAD_EDGE_S : ROAD_EDGE_W;
+          drawAtlasTile(["mix_tee_diag"], tileX, tileY, cardinalRotation(missing));
+        } else if ((orthCount >= 3 && diagCount >= 2) || (orthCount >= 2 && diagCount >= 3)) {
+          drawAtlasTile(["mix_hub_dense"], tileX, tileY);
         }
-        if (orthCount === 1) {
-          const diagCount = Number(ne) + Number(nw) + Number(se) + Number(sw);
-          if (diagCount === 1) {
-            let longCorner: { col: number; row: number } | null = null;
-            if (n && se) {
-              longCorner = tiles.longCornerNSE;
-            } else if (n && sw) {
-              longCorner = tiles.longCornerNSW;
-            } else if (s && ne) {
-              longCorner = tiles.longCornerSNE;
-            } else if (s && nw) {
-              longCorner = tiles.longCornerSNW;
-            } else if (e && sw) {
-              longCorner = tiles.longCornerESW;
-            } else if (e && ne) {
-              longCorner = tiles.longCornerENE;
-            } else if (w && ne) {
-              longCorner = tiles.longCornerWNE;
-            } else if (w && se) {
-              longCorner = tiles.longCornerWSE;
-            }
-            if (longCorner) {
-              drawAtlasTile(longCorner, tileX, tileY);
+
+        // Layer C2: diagonal infill into adjacent non-road cells for exposed diagonals.
+        const useNE =
+          (diagMask & ROAD_EDGE_NE) > 0 && !((orthMask & ROAD_EDGE_N) > 0 && (orthMask & ROAD_EDGE_E) > 0);
+        const useNW =
+          (diagMask & ROAD_EDGE_NW) > 0 && !((orthMask & ROAD_EDGE_N) > 0 && (orthMask & ROAD_EDGE_W) > 0);
+        const useSE =
+          (diagMask & ROAD_EDGE_SE) > 0 && !((orthMask & ROAD_EDGE_S) > 0 && (orthMask & ROAD_EDGE_E) > 0);
+        const useSW =
+          (diagMask & ROAD_EDGE_SW) > 0 && !((orthMask & ROAD_EDGE_S) > 0 && (orthMask & ROAD_EDGE_W) > 0);
+
+        if (useNE) {
+          drawInfillAt(tileX + 1, tileY, "NW");
+          drawInfillAt(tileX, tileY - 1, "SE");
+        }
+        if (useNW) {
+          drawInfillAt(tileX - 1, tileY, "NE");
+          drawInfillAt(tileX, tileY - 1, "SW");
+        }
+        if (useSE) {
+          drawInfillAt(tileX + 1, tileY, "SW");
+          drawInfillAt(tileX, tileY + 1, "NE");
+        }
+        if (useSW) {
+          drawInfillAt(tileX - 1, tileY, "SE");
+          drawInfillAt(tileX, tileY + 1, "NW");
+        }
+
+        // Layer D: bridge transition abutments.
+        if (roadBridgeMask && !isBridge(tileX, tileY)) {
+          for (let i = 0; i < ROAD_EDGE_DIRS.length; i += 1) {
+            const dir = ROAD_EDGE_DIRS[i];
+            if ((mask & dir.bit) === 0) {
               continue;
             }
+            const nx = tileX + dir.dx;
+            const ny = tileY + dir.dy;
+            if (!isBridge(nx, ny)) {
+              continue;
+            }
+            drawAtlasTile(
+              [dir.diagonal ? "bridge_abutment_diagonal" : "bridge_abutment_cardinal"],
+              tileX,
+              tileY,
+              dir.diagonal ? diagonalRotation(dir.bit) : cardinalRotation(dir.bit)
+            );
           }
-          if (n || s) {
-            drawAtlasTile(tiles.straightNS, tileX, tileY);
-          } else {
-            drawAtlasTile(tiles.straightEW, tileX, tileY);
-          }
-          continue;
         }
-        if (ne || nw || se || sw) {
-          if (nw || se) {
-            drawAtlasTile(tiles.diagNWSE, tileX, tileY);
-          }
-          if (ne || sw) {
-            drawAtlasTile(tiles.diagNESW, tileX, tileY);
-          }
-
-          if (se) {
-            drawInfill(tileX + 1, tileY, tiles.infillSW);
-            drawInfill(tileX, tileY + 1, tiles.infillNE);
-          }
-          if (nw) {
-            drawInfill(tileX - 1, tileY, tiles.infillNE);
-            drawInfill(tileX, tileY - 1, tiles.infillSW);
-          }
-          if (ne) {
-            drawInfill(tileX + 1, tileY, tiles.infillNW);
-            drawInfill(tileX, tileY - 1, tiles.infillSE);
-          }
-          if (sw) {
-            drawInfill(tileX - 1, tileY, tiles.infillSE);
-            drawInfill(tileX, tileY + 1, tiles.infillNW);
-          }
-          continue;
-        }
-        drawAtlasTile(tiles.straightEW, tileX, tileY);
       }
     }
 
@@ -4971,15 +5294,6 @@ export const buildRoadOverlayTexture = (
       }
     }
   };
-  const isRoadLike = (x: number, y: number): boolean => {
-    if (x < 0 || y < 0 || x >= cols || y >= rows) {
-      return false;
-    }
-    const idx = y * cols + x;
-    const type = tileTypes[idx];
-    return type === roadId || type === baseId || (roadBridgeMask ? roadBridgeMask[idx] > 0 : false);
-  };
-
   const tileOffsetX = (tileX: number) => tileX * tileSize;
   const tileOffsetY = (tileY: number) => tileY * tileSize;
   const stampRect = (tileX: number, tileY: number, x0: number, y0: number, x1: number, y1: number) => {
@@ -5013,14 +5327,15 @@ export const buildRoadOverlayTexture = (
       if (!isRoadLike(tileX, tileY)) {
         continue;
       }
-      const n = isRoadLike(tileX, tileY - 1);
-      const s = isRoadLike(tileX, tileY + 1);
-      const w = isRoadLike(tileX - 1, tileY);
-      const e = isRoadLike(tileX + 1, tileY);
-      const ne = isRoadLike(tileX + 1, tileY - 1);
-      const nw = isRoadLike(tileX - 1, tileY - 1);
-      const se = isRoadLike(tileX + 1, tileY + 1);
-      const sw = isRoadLike(tileX - 1, tileY + 1);
+      const mask = getRoadMask(tileX, tileY);
+      const n = (mask & ROAD_EDGE_N) > 0;
+      const s = (mask & ROAD_EDGE_S) > 0;
+      const w = (mask & ROAD_EDGE_W) > 0;
+      const e = (mask & ROAD_EDGE_E) > 0;
+      const ne = (mask & ROAD_EDGE_NE) > 0;
+      const nw = (mask & ROAD_EDGE_NW) > 0;
+      const se = (mask & ROAD_EDGE_SE) > 0;
+      const sw = (mask & ROAD_EDGE_SW) > 0;
 
       if (n) {
         stampRect(tileX, tileY, bandStart, 0, bandEnd, bandEnd);

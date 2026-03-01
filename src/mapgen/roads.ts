@@ -11,6 +11,7 @@ export const ROAD_RIVER_BLOCK_DIST = 1;
 export const ROAD_RIVER_PENALTY_DIST = 3;
 export const ROAD_RIVER_PENALTY_WEIGHT = 8;
 export const ROAD_TURN_PENALTY = 0.35;
+export const ROAD_DIAGONAL_PENALTY = 0.18;
 export const ROAD_BRIDGE_STEP_COST = 24;
 export const ROAD_BRIDGE_MAX_CONSEC_WATER = 3;
 export const ROAD_BRIDGE_MAX_WATER_TILES_PER_PATH = 6;
@@ -28,6 +29,7 @@ export type RoadPathOptions = {
   riverPenaltyDistance?: number;
   riverPenaltyWeight?: number;
   turnPenalty?: number;
+  diagonalPenalty?: number;
   bridgeStepCost?: number;
   bridgeMaxConsecutiveWater?: number;
   bridgeMaxWaterTilesPerPath?: number;
@@ -43,6 +45,7 @@ type RoadPathOptionsResolved = {
   riverPenaltyDistance: number;
   riverPenaltyWeight: number;
   turnPenalty: number;
+  diagonalPenalty: number;
   bridgeStepCost: number;
   bridgeMaxConsecutiveWater: number;
   bridgeMaxWaterTilesPerPath: number;
@@ -84,6 +87,46 @@ const ROAD_DIRS: Array<{ x: number; y: number; cost: number }> = [
   { x: -1, y: -1, cost: Math.SQRT2 }
 ];
 
+export const ROAD_EDGE_N = 1 << 0;
+export const ROAD_EDGE_E = 1 << 1;
+export const ROAD_EDGE_S = 1 << 2;
+export const ROAD_EDGE_W = 1 << 3;
+export const ROAD_EDGE_NE = 1 << 4;
+export const ROAD_EDGE_NW = 1 << 5;
+export const ROAD_EDGE_SE = 1 << 6;
+export const ROAD_EDGE_SW = 1 << 7;
+export const ROAD_EDGE_CARDINAL_MASK = ROAD_EDGE_N | ROAD_EDGE_E | ROAD_EDGE_S | ROAD_EDGE_W;
+export const ROAD_EDGE_DIAGONAL_MASK = ROAD_EDGE_NE | ROAD_EDGE_NW | ROAD_EDGE_SE | ROAD_EDGE_SW;
+
+type RoadEdgeDir = {
+  dx: number;
+  dy: number;
+  bit: number;
+  opposite: number;
+  diagonal: boolean;
+};
+
+const ROAD_EDGE_DIRS: RoadEdgeDir[] = [
+  { dx: 0, dy: -1, bit: ROAD_EDGE_N, opposite: ROAD_EDGE_S, diagonal: false },
+  { dx: 1, dy: 0, bit: ROAD_EDGE_E, opposite: ROAD_EDGE_W, diagonal: false },
+  { dx: 0, dy: 1, bit: ROAD_EDGE_S, opposite: ROAD_EDGE_N, diagonal: false },
+  { dx: -1, dy: 0, bit: ROAD_EDGE_W, opposite: ROAD_EDGE_E, diagonal: false },
+  { dx: 1, dy: -1, bit: ROAD_EDGE_NE, opposite: ROAD_EDGE_SW, diagonal: true },
+  { dx: -1, dy: -1, bit: ROAD_EDGE_NW, opposite: ROAD_EDGE_SE, diagonal: true },
+  { dx: 1, dy: 1, bit: ROAD_EDGE_SE, opposite: ROAD_EDGE_NW, diagonal: true },
+  { dx: -1, dy: 1, bit: ROAD_EDGE_SW, opposite: ROAD_EDGE_NE, diagonal: true }
+];
+
+const getRoadEdgeDir = (dx: number, dy: number): RoadEdgeDir | null => {
+  for (let i = 0; i < ROAD_EDGE_DIRS.length; i += 1) {
+    const dir = ROAD_EDGE_DIRS[i];
+    if (dir.dx === dx && dir.dy === dy) {
+      return dir;
+    }
+  }
+  return null;
+};
+
 const riverDistanceCache = new WeakMap<WorldState, RiverDistanceCache>();
 
 const roadGenerationStats: RoadGenerationStats = {
@@ -109,6 +152,7 @@ const resolveRoadPathOptions = (options: RoadPathOptions = {}): RoadPathOptionsR
     riverPenaltyDistance: Math.max(0, Math.round(options.riverPenaltyDistance ?? ROAD_RIVER_PENALTY_DIST)),
     riverPenaltyWeight: Math.max(0, options.riverPenaltyWeight ?? ROAD_RIVER_PENALTY_WEIGHT),
     turnPenalty: Math.max(0, options.turnPenalty ?? ROAD_TURN_PENALTY),
+    diagonalPenalty: Math.max(0, options.diagonalPenalty ?? ROAD_DIAGONAL_PENALTY),
     bridgeStepCost: Math.max(0, options.bridgeStepCost ?? ROAD_BRIDGE_STEP_COST),
     bridgeMaxConsecutiveWater: Math.max(1, Math.round(options.bridgeMaxConsecutiveWater ?? ROAD_BRIDGE_MAX_CONSEC_WATER)),
     bridgeMaxWaterTilesPerPath: Math.max(1, Math.round(options.bridgeMaxWaterTilesPerPath ?? ROAD_BRIDGE_MAX_WATER_TILES_PER_PATH))
@@ -214,6 +258,292 @@ export const isRoadLikeTile = (state: WorldState, x: number, y: number): boolean
     return false;
   }
   return isRoadLikeIndex(state, indexFor(state.grid, x, y));
+};
+
+const ensureRoadEdgeBuffer = (state: WorldState): void => {
+  if (state.tileRoadEdges.length !== state.grid.totalTiles) {
+    state.tileRoadEdges = new Uint8Array(state.grid.totalTiles);
+  }
+};
+
+export const clearRoadEdges = (state: WorldState): void => {
+  ensureRoadEdgeBuffer(state);
+  state.tileRoadEdges.fill(0);
+};
+
+export const getRoadEdgeMaskAt = (state: WorldState, x: number, y: number): number => {
+  if (!inBounds(state.grid, x, y)) {
+    return 0;
+  }
+  ensureRoadEdgeBuffer(state);
+  return state.tileRoadEdges[indexFor(state.grid, x, y)] ?? 0;
+};
+
+const setRoadEdgeMaskAtIndex = (state: WorldState, idx: number, mask: number): void => {
+  ensureRoadEdgeBuffer(state);
+  state.tileRoadEdges[idx] = mask & 0xff;
+};
+
+const setRoadEdgeBitAtIndex = (state: WorldState, idx: number, bit: number): void => {
+  ensureRoadEdgeBuffer(state);
+  state.tileRoadEdges[idx] |= bit;
+};
+
+const clearRoadEdgeBitAtIndex = (state: WorldState, idx: number, bit: number): void => {
+  ensureRoadEdgeBuffer(state);
+  state.tileRoadEdges[idx] &= ~bit;
+};
+
+export const clearRoadEdgesAt = (state: WorldState, x: number, y: number): void => {
+  if (!inBounds(state.grid, x, y)) {
+    return;
+  }
+  const idx = indexFor(state.grid, x, y);
+  setRoadEdgeMaskAtIndex(state, idx, 0);
+};
+
+export const connectRoadPoints = (
+  state: WorldState,
+  ax: number,
+  ay: number,
+  bx: number,
+  by: number
+): boolean => {
+  if (!inBounds(state.grid, ax, ay) || !inBounds(state.grid, bx, by)) {
+    return false;
+  }
+  if (ax === bx && ay === by) {
+    return false;
+  }
+  if (!isRoadLikeTile(state, ax, ay) || !isRoadLikeTile(state, bx, by)) {
+    return false;
+  }
+  const dx = bx - ax;
+  const dy = by - ay;
+  if (Math.abs(dx) > 1 || Math.abs(dy) > 1) {
+    return false;
+  }
+  const dir = getRoadEdgeDir(dx, dy);
+  if (!dir) {
+    return false;
+  }
+  const aIdx = indexFor(state.grid, ax, ay);
+  const bIdx = indexFor(state.grid, bx, by);
+  setRoadEdgeBitAtIndex(state, aIdx, dir.bit);
+  setRoadEdgeBitAtIndex(state, bIdx, dir.opposite);
+  return true;
+};
+
+export const disconnectRoadPoints = (
+  state: WorldState,
+  ax: number,
+  ay: number,
+  bx: number,
+  by: number
+): boolean => {
+  if (!inBounds(state.grid, ax, ay) || !inBounds(state.grid, bx, by)) {
+    return false;
+  }
+  const dx = bx - ax;
+  const dy = by - ay;
+  if (Math.abs(dx) > 1 || Math.abs(dy) > 1) {
+    return false;
+  }
+  const dir = getRoadEdgeDir(dx, dy);
+  if (!dir) {
+    return false;
+  }
+  const aIdx = indexFor(state.grid, ax, ay);
+  const bIdx = indexFor(state.grid, bx, by);
+  clearRoadEdgeBitAtIndex(state, aIdx, dir.bit);
+  clearRoadEdgeBitAtIndex(state, bIdx, dir.opposite);
+  return true;
+};
+
+const hasCardinalLinkPair = (
+  state: WorldState,
+  x: number,
+  y: number,
+  dx: number,
+  dy: number
+): boolean => {
+  const mx1 = x + dx;
+  const my1 = y;
+  const mx2 = x;
+  const my2 = y + dy;
+  const tx = x + dx;
+  const ty = y + dy;
+  const hasPathA =
+    isRoadLikeTile(state, mx1, my1) &&
+    isRoadLikeTile(state, tx, ty) &&
+    (getRoadEdgeMaskAt(state, x, y) & (dx > 0 ? ROAD_EDGE_E : ROAD_EDGE_W)) > 0 &&
+    (getRoadEdgeMaskAt(state, mx1, my1) & (dx > 0 ? ROAD_EDGE_W : ROAD_EDGE_E)) > 0 &&
+    (getRoadEdgeMaskAt(state, mx1, my1) & (dy > 0 ? ROAD_EDGE_S : ROAD_EDGE_N)) > 0 &&
+    (getRoadEdgeMaskAt(state, tx, ty) & (dy > 0 ? ROAD_EDGE_N : ROAD_EDGE_S)) > 0;
+  const hasPathB =
+    isRoadLikeTile(state, mx2, my2) &&
+    isRoadLikeTile(state, tx, ty) &&
+    (getRoadEdgeMaskAt(state, x, y) & (dy > 0 ? ROAD_EDGE_S : ROAD_EDGE_N)) > 0 &&
+    (getRoadEdgeMaskAt(state, mx2, my2) & (dy > 0 ? ROAD_EDGE_N : ROAD_EDGE_S)) > 0 &&
+    (getRoadEdgeMaskAt(state, mx2, my2) & (dx > 0 ? ROAD_EDGE_E : ROAD_EDGE_W)) > 0 &&
+    (getRoadEdgeMaskAt(state, tx, ty) & (dx > 0 ? ROAD_EDGE_W : ROAD_EDGE_E)) > 0;
+  return hasPathA || hasPathB;
+};
+
+export const pruneRoadDiagonalStubs = (state: WorldState): void => {
+  ensureRoadEdgeBuffer(state);
+  const removals: Array<{ ax: number; ay: number; bx: number; by: number }> = [];
+  const { cols, rows } = state.grid;
+  for (let y = 0; y < rows; y += 1) {
+    for (let x = 0; x < cols; x += 1) {
+      if (!isRoadLikeTile(state, x, y)) {
+        continue;
+      }
+      const mask = getRoadEdgeMaskAt(state, x, y);
+      for (let i = 0; i < ROAD_EDGE_DIRS.length; i += 1) {
+        const dir = ROAD_EDGE_DIRS[i];
+        if (!dir.diagonal || (mask & dir.bit) === 0) {
+          continue;
+        }
+        const nx = x + dir.dx;
+        const ny = y + dir.dy;
+        if (!inBounds(state.grid, nx, ny) || !isRoadLikeTile(state, nx, ny)) {
+          removals.push({ ax: x, ay: y, bx: nx, by: ny });
+          continue;
+        }
+        if (hasCardinalLinkPair(state, x, y, dir.dx, dir.dy)) {
+          removals.push({ ax: x, ay: y, bx: nx, by: ny });
+        }
+      }
+    }
+  }
+  for (let i = 0; i < removals.length; i += 1) {
+    const edge = removals[i];
+    disconnectRoadPoints(state, edge.ax, edge.ay, edge.bx, edge.by);
+  }
+};
+
+export const backfillRoadEdgesFromAdjacency = (state: WorldState): void => {
+  ensureRoadEdgeBuffer(state);
+  const { cols, rows } = state.grid;
+  for (let y = 0; y < rows; y += 1) {
+    for (let x = 0; x < cols; x += 1) {
+      if (!isRoadLikeTile(state, x, y)) {
+        continue;
+      }
+      const idx = indexFor(state.grid, x, y);
+      if (state.tileRoadEdges[idx] !== 0) {
+        continue;
+      }
+      for (let i = 0; i < ROAD_EDGE_DIRS.length; i += 1) {
+        const dir = ROAD_EDGE_DIRS[i];
+        const nx = x + dir.dx;
+        const ny = y + dir.dy;
+        if (isRoadLikeTile(state, nx, ny)) {
+          connectRoadPoints(state, x, y, nx, ny);
+        }
+      }
+    }
+  }
+};
+
+export const analyzeRoadEdgeQuality = (
+  state: WorldState
+): {
+  roadCount: number;
+  ignoredDiagonalCount: number;
+  unmatchedPatternCount: number;
+  nodeDegreeHistogram: Record<string, number>;
+} => {
+  ensureRoadEdgeBuffer(state);
+  const { cols, rows } = state.grid;
+  let roadCount = 0;
+  let ignoredDiagonalCount = 0;
+  let unmatchedPatternCount = 0;
+  const degreeHistogram = new Map<number, number>();
+  const classifyPattern = (orth: number, diag: number, orthMask: number): string => {
+    if (orth === 0 && diag === 0) {
+      return "isolated";
+    }
+    if (orth === 0) {
+      return diag === 1 ? "endcap_diagonal" : "diag_only";
+    }
+    if (diag === 0) {
+      if (orth === 1) {
+        return "endcap_cardinal";
+      }
+      if (orth === 2) {
+        const oppositeNS = (orthMask & (ROAD_EDGE_N | ROAD_EDGE_S)) === (ROAD_EDGE_N | ROAD_EDGE_S);
+        const oppositeEW = (orthMask & (ROAD_EDGE_E | ROAD_EDGE_W)) === (ROAD_EDGE_E | ROAD_EDGE_W);
+        return oppositeNS || oppositeEW ? "straight" : "corner";
+      }
+      if (orth === 3) {
+        return "tee";
+      }
+      return "cross";
+    }
+    if (orth === 1) {
+      return "o1d";
+    }
+    if (orth === 2 && diag === 1) {
+      return "o2d1";
+    }
+    if (orth === 2 && diag >= 2) {
+      return "o2d2plus";
+    }
+    if (orth === 3 && diag === 1) {
+      return "o3d1";
+    }
+    if (orth >= 3 && diag >= 2) {
+      return "hub_dense";
+    }
+    return "mixed_dense";
+  };
+  for (let y = 0; y < rows; y += 1) {
+    for (let x = 0; x < cols; x += 1) {
+      if (!isRoadLikeTile(state, x, y)) {
+        continue;
+      }
+      roadCount += 1;
+      const mask = getRoadEdgeMaskAt(state, x, y);
+      const orth =
+        Number((mask & ROAD_EDGE_N) > 0) +
+        Number((mask & ROAD_EDGE_E) > 0) +
+        Number((mask & ROAD_EDGE_S) > 0) +
+        Number((mask & ROAD_EDGE_W) > 0);
+      const diag =
+        Number((mask & ROAD_EDGE_NE) > 0) +
+        Number((mask & ROAD_EDGE_NW) > 0) +
+        Number((mask & ROAD_EDGE_SE) > 0) +
+        Number((mask & ROAD_EDGE_SW) > 0);
+      const family = classifyPattern(orth, diag, mask & ROAD_EDGE_CARDINAL_MASK);
+      const mixedHandled =
+        family === "o1d" ||
+        family === "o2d1" ||
+        family === "o2d2plus" ||
+        family === "o3d1" ||
+        family === "hub_dense" ||
+        family === "mixed_dense";
+      if (orth >= 2 && diag > 0 && !mixedHandled) {
+        ignoredDiagonalCount += 1;
+      }
+      if (family === "mixed_unknown") {
+        unmatchedPatternCount += 1;
+      }
+      const degree = orth + diag;
+      degreeHistogram.set(degree, (degreeHistogram.get(degree) ?? 0) + 1);
+    }
+  }
+  const nodeDegreeHistogram: Record<string, number> = {};
+  degreeHistogram.forEach((count, degree) => {
+    nodeDegreeHistogram[String(degree)] = count;
+  });
+  return {
+    roadCount,
+    ignoredDiagonalCount,
+    unmatchedPatternCount,
+    nodeDegreeHistogram
+  };
 };
 
 const canTraverseTileIndex = (
@@ -553,6 +883,9 @@ const runAStar = (
       }
 
       let stepCost = dir.cost;
+      if (dir.x !== 0 && dir.y !== 0) {
+        stepCost += options.diagonalPenalty;
+      }
       if (!currentIsWater && !nextIsWater) {
         stepCost += grade * options.slopePenaltyWeight;
       }
@@ -697,6 +1030,33 @@ export function findRoadPathToTarget(
   return findRoadPathToTargetDetailed(state, start, isTarget, options).path;
 }
 
+export function carveRoadPath(
+  state: WorldState,
+  rng: RNG,
+  path: Point[],
+  options: {
+    allowBridgeIndices?: Set<number>;
+    allowBridgeByPoint?: (point: Point) => boolean;
+  } = {}
+): boolean {
+  if (path.length === 0) {
+    return false;
+  }
+  for (let i = 0; i < path.length; i += 1) {
+    const point = path[i];
+    const idx = indexFor(state.grid, point.x, point.y);
+    const allowBridge =
+      options.allowBridgeIndices?.has(idx) ?? options.allowBridgeByPoint?.(point) ?? false;
+    setRoadAt(state, rng, point.x, point.y, { allowBridge });
+  }
+  for (let i = 1; i < path.length; i += 1) {
+    const prev = path[i - 1];
+    const next = path[i];
+    connectRoadPoints(state, prev.x, prev.y, next.x, next.y);
+  }
+  return true;
+}
+
 export function carveRoad(state: WorldState, rng: RNG, start: Point, end: Point, options: RoadCarveOptions = {}): boolean {
   const bridgePolicy =
     options.bridgePolicy ?? (typeof options.allowBridge === "boolean" ? (options.allowBridge ? "allow" : "never") : "allow");
@@ -705,11 +1065,7 @@ export function carveRoad(state: WorldState, rng: RNG, start: Point, end: Point,
     return false;
   }
   const bridgeSet = new Set<number>(result.bridgeTileIndices);
-  result.path.forEach((point) => {
-    const idx = indexFor(state.grid, point.x, point.y);
-    setRoadAt(state, rng, point.x, point.y, { allowBridge: bridgeSet.has(idx) });
-  });
-  return true;
+  return carveRoadPath(state, rng, result.path, { allowBridgeIndices: bridgeSet });
 }
 
 export function collectRoadTiles(state: WorldState): Point[] {

@@ -128,6 +128,7 @@ export interface WorldState {
   tileTypeId: Uint8Array;
   tileRiverMask: Uint8Array;
   tileRoadBridge: Uint8Array;
+  tileRoadEdges: Uint8Array;
   tileRiverBed: Float32Array;
   tileRiverSurface: Float32Array;
   tileRiverStepStrength: Float32Array;
@@ -344,6 +345,7 @@ export function createInitialState(seed: number, grid: Grid): WorldState {
     tileTypeId: new Uint8Array(grid.totalTiles),
     tileRiverMask: new Uint8Array(grid.totalTiles),
     tileRoadBridge: new Uint8Array(grid.totalTiles),
+    tileRoadEdges: new Uint8Array(grid.totalTiles),
     tileRiverBed: new Float32Array(grid.totalTiles).fill(Number.NaN),
     tileRiverSurface: new Float32Array(grid.totalTiles).fill(Number.NaN),
     tileRiverStepStrength: new Float32Array(grid.totalTiles),
@@ -554,6 +556,7 @@ export function syncTileSoA(state: WorldState): void {
   if (
     state.tileFire.length !== total ||
     state.tileRoadBridge.length !== total ||
+    state.tileRoadEdges.length !== total ||
     state.tileTownId.length !== total ||
     state.tileStructure.length !== total
   ) {
@@ -577,6 +580,7 @@ export function syncTileSoA(state: WorldState): void {
     state.tileTypeId = new Uint8Array(total);
     state.tileRiverMask = new Uint8Array(total);
     state.tileRoadBridge = new Uint8Array(total);
+    state.tileRoadEdges = new Uint8Array(total);
     state.tileRiverBed = new Float32Array(total).fill(Number.NaN);
     state.tileRiverSurface = new Float32Array(total).fill(Number.NaN);
     state.tileRiverStepStrength = new Float32Array(total);

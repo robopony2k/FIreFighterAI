@@ -75,6 +75,14 @@ const FIRE_HEIGHT = 260;
 const FIRE_LEVELS = 48;
 const FIRE_UPDATE_MS = 34;
 const EMITTER_REBUILD_MS = 64;
+const INTRO_EMBER_DELAY_MS = 0;
+const INTRO_FLAME_DELAY_MS = 420;
+const INTRO_SILHOUETTE_DELAY_MS = 1360;
+const INTRO_OUTLINE_DELAY_MS = 2140;
+const INTRO_EMBER_FADE_MS = 760;
+const INTRO_FLAME_FADE_MS = 1800;
+const INTRO_SILHOUETTE_FADE_MS = 900;
+const INTRO_OUTLINE_FADE_MS = 1200;
 
 const clamp = (value: number, min: number, max: number): number => Math.min(max, Math.max(min, value));
 const hash01 = (n: number): number => {
@@ -253,7 +261,7 @@ const buildCreditsPanel = (body: HTMLElement): void => {
 export const showTitleScreen = (deps: TitleScreenDeps): TitleScreenHandle => {
   const mount = deps.mount ?? document.body;
   const root = document.createElement("section");
-  root.className = "title-screen";
+  root.className = "title-screen title-screen--intro-sequence";
   root.setAttribute("role", "dialog");
   root.setAttribute("aria-modal", "true");
   root.setAttribute("aria-label", "EMBERWATCH title screen");
@@ -379,6 +387,11 @@ export const showTitleScreen = (deps: TitleScreenDeps): TitleScreenHandle => {
   const emitterPoints: FlameEmitterPoint[] = [];
   const emberParticles: EmberParticle[] = [];
   const MAX_EMBER_PARTICLES = 280;
+  const introStartMs = performance.now();
+  const introReveal = (delayMs: number, durationMs: number): number => {
+    const t = clamp((performance.now() - introStartMs - delayMs) / Math.max(1, durationMs), 0, 1);
+    return t * t * (3 - 2 * t);
+  };
   const panelDisposers: Array<() => void> = [];
 
   const clearPanelDisposers = (): void => {
@@ -714,11 +727,11 @@ export const showTitleScreen = (deps: TitleScreenDeps): TitleScreenHandle => {
 
   const stepFire = (): void => {
     noiseOffset = (noiseOffset + 23) % firePixelCount;
-    emitterPhase += 0.035;
-    if (Math.random() < 0.16) {
+    emitterPhase += 0.018;
+    if (Math.random() < 0.1) {
       windTarget = (Math.random() * 2 - 1) * (0.8 + Math.random() * 1.6);
     }
-    windCurrent += (windTarget - windCurrent) * 0.09;
+    windCurrent += (windTarget - windCurrent) * 0.06;
     const windGust =
       windCurrent + Math.sin(emitterPhase * 0.93) * 0.35 + Math.sin(emitterPhase * 2.37 + 0.7) * 0.18;
 
@@ -742,11 +755,11 @@ export const showTitleScreen = (deps: TitleScreenDeps): TitleScreenHandle => {
         const x = i % FIRE_WIDTH;
         const boost = 0.74 + columnPulse[x] * 0.28;
         const flicker = 0.7 + noiseField[(i + noiseOffset * 3) % firePixelCount] * 0.5;
-        const pulse = 0.76 + 0.24 * Math.sin(x * 0.17 + emitterPhase * 3.1);
-        const shimmer = 0.86 + 0.28 * Math.sin(i * 0.031 + emitterPhase * 7.1);
-        const spark = Math.random() < 0.04 ? 5 + Math.random() * 11 : 0;
+        const pulse = 0.76 + 0.24 * Math.sin(x * 0.17 + emitterPhase * 1.35);
+        const shimmer = 0.86 + 0.28 * Math.sin(i * 0.031 + emitterPhase * 3.2);
+        const spark = Math.random() < 0.014 ? 5 + Math.random() * 11 : 0;
         const targetHeat = (FIRE_LEVELS - 1) * emitter * boost * flicker * pulse * shimmer + spark;
-        firePixels[i] += (targetHeat - firePixels[i]) * 0.36;
+        firePixels[i] += (targetHeat - firePixels[i]) * 0.22;
       } else {
         firePixels[i] = Math.max(0, firePixels[i] - 0.19);
       }
@@ -1123,20 +1136,24 @@ export const showTitleScreen = (deps: TitleScreenDeps): TitleScreenHandle => {
     drawFlameJets(width, height, centerY, fontSize, outline);
 
     titleCtx.clearRect(0, 0, width, height);
+    const emberReveal = introReveal(INTRO_EMBER_DELAY_MS, INTRO_EMBER_FADE_MS);
+    const flameReveal = introReveal(INTRO_FLAME_DELAY_MS, INTRO_FLAME_FADE_MS);
+    const silhouetteReveal = introReveal(INTRO_SILHOUETTE_DELAY_MS, INTRO_SILHOUETTE_FADE_MS);
+    const outlineReveal = introReveal(INTRO_OUTLINE_DELAY_MS, INTRO_OUTLINE_FADE_MS);
     const windVisualShift = windCurrent * Math.max(2.1, outline * 0.62);
     const plumeLift = Math.max(18, Math.round(outline * 4.4));
     const plumeDrop = Math.max(3, Math.round(outline * 0.85));
 
     titleCtx.save();
     titleCtx.globalCompositeOperation = "lighter";
-    titleCtx.globalAlpha = 0.3;
+    titleCtx.globalAlpha = 0.3 * flameReveal;
     titleCtx.filter = `blur(${Math.max(16, Math.round(outline * 3.6))}px)`;
     titleCtx.drawImage(glowFireCanvas, windVisualShift * 0.34, -plumeLift * 1.6, width, Math.round(height * 1.58));
     titleCtx.restore();
 
     titleCtx.save();
     titleCtx.globalCompositeOperation = "lighter";
-    titleCtx.globalAlpha = 0.44;
+    titleCtx.globalAlpha = 0.44 * flameReveal;
     titleCtx.filter = `blur(${Math.max(9, Math.round(outline * 1.95))}px)`;
     titleCtx.drawImage(glowFireCanvas, windVisualShift * 0.24, -plumeLift * 0.9, width, Math.round(height * 1.28));
     titleCtx.drawImage(glowFireCanvas, windVisualShift * 0.18, plumeDrop * 0.35, width, Math.round(height * 1.02));
@@ -1144,14 +1161,14 @@ export const showTitleScreen = (deps: TitleScreenDeps): TitleScreenHandle => {
 
     titleCtx.save();
     titleCtx.globalCompositeOperation = "lighter";
-    titleCtx.globalAlpha = 0.84;
+    titleCtx.globalAlpha = 0.84 * flameReveal;
     titleCtx.drawImage(coreFireCanvas, windVisualShift * 0.1, -Math.max(1, Math.round(outline * 0.2)), width, height);
     titleCtx.drawImage(coreFireCanvas, windVisualShift * 0.06, plumeDrop * 0.26, width, Math.round(height * 0.98));
     titleCtx.restore();
 
     titleCtx.save();
     titleCtx.globalCompositeOperation = "lighter";
-    titleCtx.globalAlpha = 0.6;
+    titleCtx.globalAlpha = 0.6 * flameReveal;
     titleCtx.filter = `blur(${Math.max(6, Math.round(outline * 1.24))}px)`;
     titleCtx.drawImage(jetCanvas, windVisualShift * 0.18, -Math.max(2, Math.round(outline * 0.44)));
     titleCtx.drawImage(jetCanvas, windVisualShift * 0.08, Math.max(4, Math.round(outline * 0.74)));
@@ -1159,30 +1176,50 @@ export const showTitleScreen = (deps: TitleScreenDeps): TitleScreenHandle => {
 
     titleCtx.save();
     titleCtx.globalCompositeOperation = "lighter";
-    titleCtx.globalAlpha = 0.97;
+    titleCtx.globalAlpha = 0.97 * flameReveal;
     titleCtx.drawImage(jetCanvas, 0, 0);
     titleCtx.drawImage(jetCanvas, windVisualShift * 0.08, Math.max(2, Math.round(outline * 0.35)));
     titleCtx.restore();
 
+    if (silhouetteReveal > 0.001) {
+      titleCtx.save();
+      titleCtx.globalCompositeOperation = "destination-out";
+      titleCtx.font = font;
+      titleCtx.textAlign = "center";
+      titleCtx.textBaseline = "middle";
+      titleCtx.fillStyle = `rgba(0, 0, 0, ${silhouetteReveal})`;
+      fillSpacedText(titleCtx, TITLE_WORD, centerX, centerY, letterSpacing);
+      titleCtx.restore();
+
+      titleCtx.save();
+      titleCtx.globalCompositeOperation = "source-over";
+      titleCtx.font = font;
+      titleCtx.textAlign = "center";
+      titleCtx.textBaseline = "middle";
+      const interiorFillAlpha = 0.95 * silhouetteReveal;
+      titleCtx.fillStyle = `rgba(18, 18, 22, ${interiorFillAlpha})`;
+      fillSpacedText(titleCtx, TITLE_WORD, centerX, centerY, letterSpacing);
+      titleCtx.restore();
+    }
+
     titleCtx.save();
-    titleCtx.globalCompositeOperation = "destination-out";
+    titleCtx.globalCompositeOperation = "screen";
     titleCtx.font = font;
     titleCtx.textAlign = "center";
     titleCtx.textBaseline = "middle";
-    titleCtx.fillStyle = "rgba(0, 0, 0, 1)";
-    fillSpacedText(titleCtx, TITLE_WORD, centerX, centerY, letterSpacing);
+    titleCtx.lineJoin = "round";
+    titleCtx.lineCap = "round";
+    titleCtx.strokeStyle = `rgba(255, 238, 204, ${0.72 * outlineReveal})`;
+    titleCtx.lineWidth = Math.max(0.65, outline * 0.14);
+    strokeSpacedText(titleCtx, TITLE_WORD, centerX, centerY, letterSpacing);
     titleCtx.restore();
 
-    titleCtx.save();
-    titleCtx.globalCompositeOperation = "source-over";
-    titleCtx.font = font;
-    titleCtx.textAlign = "center";
-    titleCtx.textBaseline = "middle";
-    titleCtx.fillStyle = "rgba(18, 18, 22, 0.95)";
-    fillSpacedText(titleCtx, TITLE_WORD, centerX, centerY, letterSpacing);
-    titleCtx.restore();
-
-    drawEmbers(titleCtx);
+    if (emberReveal > 0.001) {
+      titleCtx.save();
+      titleCtx.globalAlpha = emberReveal;
+      drawEmbers(titleCtx);
+      titleCtx.restore();
+    }
 
     // Fade the lower edge so the underglow blends into the background
     // before the canvas boundary clip.
@@ -1291,6 +1328,12 @@ export const showTitleScreen = (deps: TitleScreenDeps): TitleScreenHandle => {
   renderFireBuffer();
   drawTitle();
   root.focus();
+  window.requestAnimationFrame(() => {
+    if (!visible) {
+      return;
+    }
+    root.classList.add("title-screen--intro-visible");
+  });
   rafId = window.requestAnimationFrame(tick);
 
   return {

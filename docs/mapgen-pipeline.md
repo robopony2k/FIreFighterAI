@@ -29,6 +29,8 @@ Context:
 - `MapGenContext` owns all transient mapgen fields (`elevationMap`, `riverMask`, `slopeMap`, `moistureMap`, etc).
 - Stage progress is normalized through `ProgressTracker`.
 - Debug snapshots are stage-labeled and emitted through `MapGenDebug`.
+- `settlement:place` prepares settlement-road plan data only; road carving now happens in `roads:connect`.
+- `roads:connect` is non-noop and owns road/bridge network carving plus edge-mask stamping (`WorldState.tileRoadEdges`).
 - Post-settlement reconcile only touches dirty regions captured from settlement deltas.
 - `biome:spread` builds deterministic suitability and `forestMask` layers before `biome:classify`.
 
@@ -43,3 +45,6 @@ Context:
 - Full run (expensive): `npm run mapgen:regression:full`
   - Covers `medium`, `massive`, `colossal`, `gigantic`, `titanic`.
 - Baseline snapshots are written to `docs/mapgen-regression-baseline.json`.
+- Road quality gates include:
+  - `ignoredDiagonalCount / roadCount <= 0.05`
+  - `unmatchedPatternCount == 0`

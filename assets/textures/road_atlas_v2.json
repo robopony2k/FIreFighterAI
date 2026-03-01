@@ -1,0 +1,27 @@
+{
+  "version": 2,
+  "image": "assets/textures/ROAD_TILES_2.png",
+  "tileSize": 64,
+  "tileStride": 64,
+  "tiles": {
+    "base_isolated": { "col": 0, "row": 0 },
+    "base_endcap_cardinal": { "col": 1, "row": 0 },
+    "base_endcap_diagonal": { "col": 2, "row": 0 },
+    "mix_cardinal_diag_adjacent": { "col": 3, "row": 0 },
+    "mix_straight_diag_single_ns": { "col": 4, "row": 0 },
+    "mix_straight_diag_single_ew": { "col": 0, "row": 1 },
+    "mix_straight_diag_pair_ns": { "col": 1, "row": 1 },
+    "mix_straight_diag_pair_ew": { "col": 2, "row": 1 },
+    "mix_corner_diag_outer": { "col": 3, "row": 1 },
+    "mix_tee_diag": { "col": 4, "row": 1 },
+    "mix_hub_dense": { "col": 0, "row": 2 },
+    "bridge_abutment_cardinal": { "col": 1, "row": 2 },
+    "bridge_abutment_diagonal": { "col": 2, "row": 2 },
+    "base_cross": { "col": 3, "row": 2 },
+    "base_tee": { "col": 4, "row": 2 },
+    "base_corner_ne": { "col": 0, "row": 3 },
+    "diag_infill_ne": { "col": 1, "row": 3 },
+    "mix_diag_to_straight_w_ne": { "col": 2, "row": 3 },
+    "mix_diag_to_straight_w_se": { "col": 3, "row": 3 }
+  }
+}

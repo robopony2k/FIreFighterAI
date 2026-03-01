@@ -1,5 +1,14 @@
 export type BiomeClassifierMode = "legacy" | "seedSpread";
 
+export type RoadTopologyMode = "eight_dir";
+
+export type RoadGenSettings = {
+  topology: RoadTopologyMode;
+  diagonalPenalty: number;
+  pruneRedundantDiagonals: boolean;
+  bridgeTransitions: boolean;
+};
+
 export type MapGenSettings = {
   cellSizeM: number;
   worldOffsetXM: number;
@@ -25,6 +34,14 @@ export type MapGenSettings = {
   riverCount: number;
   riverWaterBias: number;
   biomeClassifierMode: BiomeClassifierMode;
+  road: RoadGenSettings;
+};
+
+export const DEFAULT_ROAD_GEN_SETTINGS: RoadGenSettings = {
+  topology: "eight_dir",
+  diagonalPenalty: 0.18,
+  pruneRedundantDiagonals: true,
+  bridgeTransitions: true
 };
 
 export const DEFAULT_MAP_GEN_SETTINGS: MapGenSettings = {
@@ -51,5 +68,6 @@ export const DEFAULT_MAP_GEN_SETTINGS: MapGenSettings = {
   edgeWaterBias: 0.14,
   riverCount: 0,
   riverWaterBias: 0.18,
-  biomeClassifierMode: "seedSpread"
+  biomeClassifierMode: "seedSpread",
+  road: { ...DEFAULT_ROAD_GEN_SETTINGS }
 };
