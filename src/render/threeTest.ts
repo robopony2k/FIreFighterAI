@@ -1,6 +1,7 @@
 import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
-import { TILE_SIZE, TIME_SPEED_OPTIONS, TOWN_ALERT_MAX_POSTURE } from "../core/config.js";
+import { CAREER_YEARS, TILE_SIZE, TIME_SPEED_OPTIONS, TOWN_ALERT_MAX_POSTURE } from "../core/config.js";
+import { VIRTUAL_CLIMATE_PARAMS } from "../core/climate.js";
 import type { EffectsState } from "../core/effectsState.js";
 import type { InputState } from "../core/inputState.js";
 import { indexFor } from "../core/grid.js";
@@ -8,8 +9,9 @@ import { HOUSE_VARIANTS } from "../core/buildingFootprints.js";
 import { TILE_ID_TO_TYPE, TILE_TYPE_IDS } from "../core/state.js";
 import type { ClimateForecast, Town } from "../core/types.js";
 import type { RenderSim } from "./simView.js";
-import { createHudState, setHudViewport } from "./hud/hudState.js";
+import { createHudState, setHudViewport, type HudTheme } from "./hud/hudState.js";
 import { handleHudClick, handleHudKey, renderHud } from "./hud/hud.js";
+import { buildEnvironmentPalette, computeFireLoad01 } from "./environmentPalette.js";
 import {
   getFirestationAssetCache,
   getHouseAssetsCache,
@@ -54,12 +56,14 @@ import {
   type TreeBurnController,
   type TerrainSample
 } from "./threeTestTerrain.js";
-import { createThreeTestFireFx } from "./threeTestFireFx.js";
+import { createThreeTestFireFx, type SparkMode } from "./threeTestFireFx.js";
+import { createThreeTestCinematicGrade, type ThreeTestCinematicGradeConfig } from "./threeTestCinematicGrade.js";
 import { createThreeTestUnitFxLayer } from "./threeTestUnitFx.js";
 import { ThreeTestWaterSystem, type WaterQualityProfile } from "./threeTestWater.js";
 import { createThreeTestUnitsLayer } from "./threeTestUnits.js";
 import { CardStateModel } from "../ui/cards/cardState.js";
 import { dispatchPhaseUiCommand } from "../ui/phase/commandChannel.js";
+import { RISK_THRESHOLDS, SEASON_LABELS, computeSeasonLayout } from "../ui/phase/forecastLayout.js";
 import type { UiAudioController } from "../audio/uiAudio.js";
 
 export type SeasonVisualState = {
@@ -67,6 +71,12 @@ export type SeasonVisualState = {
   risk01: number;
   mode: "auto" | "manual";
   manualSeasonT01?: number;
+};
+
+type EnvironmentSignalState = {
+  seasonT01: number;
+  risk01: number;
+  fireLoad01: number;
 };
 
 export type ThreeTestPerfSnapshot = {
@@ -143,6 +153,22 @@ type HudMusicControls = {
   onChange: (listener: (settings: HudMusicSettings) => void) => () => void;
 };
 
+type ThreeTestRenderFlags = {
+  cinematicGrade: boolean;
+};
+
+type ThreeTestRenderState = {
+  flags: ThreeTestRenderFlags;
+};
+
+type ThreeTestCinematicLookConfig = ThreeTestCinematicGradeConfig & {
+  exposure: number;
+  fogDensity: number;
+  fireFlameIntensityBoost: number;
+  fireGlowBoost: number;
+  emberBoost: number;
+};
+
 let threeTestInitCount = 0;
 let activeThreeTestCleanup: (() => void) | null = null;
 const HUD_REDRAW_INTERVAL_MS = 120;
@@ -198,6 +224,32 @@ const THREE_TEST_FX_FALLBACK =
   THREE_TEST_FX_FALLBACK_PARAM === "gentle" || THREE_TEST_FX_FALLBACK_PARAM === "off"
     ? THREE_TEST_FX_FALLBACK_PARAM
     : "aggressive";
+const THREE_TEST_SPARK_DEBUG = THREE_TEST_QUERY?.get("sparkdebug") === "1";
+const THREE_TEST_SPARK_MODE_PARAM = (THREE_TEST_QUERY?.get("sparkmode") ?? "").toLowerCase();
+const THREE_TEST_SPARK_MODE: SparkMode =
+  THREE_TEST_SPARK_MODE_PARAM === "mixed" || THREE_TEST_SPARK_MODE_PARAM === "embers"
+    ? THREE_TEST_SPARK_MODE_PARAM
+    : "tip";
+const THREE_TEST_ENV_FOG_ENABLED = false;
+const THREE_TEST_CINEMATIC_PARAM = (THREE_TEST_QUERY?.get("cinematic") ?? "").trim();
+const THREE_TEST_CINEMATIC_GRADE_ENABLED = THREE_TEST_CINEMATIC_PARAM !== "0";
+const THREE_TEST_LEGACY_EXPOSURE = 1.05;
+const THREE_TEST_CINEMATIC_GRADE_CONFIG: ThreeTestCinematicLookConfig = {
+  exposure: 0.94,
+  fogColor: 0x2f3238,
+  fogDensity: 0.0065,
+  heightHazeStrength: 0.09,
+  heightHazeHorizon: 0.58,
+  heightHazeCurve: 1.6,
+  contrast: 1.08,
+  midtoneDesaturation: 0.12,
+  vignetteStrength: 0.2,
+  vignetteSoftness: 0.72,
+  warmHighlightStrength: 0.06,
+  fireFlameIntensityBoost: 1.22,
+  fireGlowBoost: 1.36,
+  emberBoost: 1.42
+};
 const FAST_OCEAN_SAMPLE_SUPPORT_FLOOR = 0.12;
 const GROUND_PHASE_SHIFT_MAX = 0.06;
 const TREE_PHASE_SHIFT_MAX = 0.08;
@@ -222,14 +274,46 @@ const UNIT_TRAY_UPDATE_INTERVAL_MS = 90;
 const UNIT_COMMAND_PATH_LIFT = 0.07;
 const UNIT_COMMAND_MARKER_LIFT = 0.1;
 const UNIT_COMMAND_MARKER_RADIUS = 0.06;
+const CLIMATE_RISK_LABELS = ["Low", "Moderate", "High", "Extreme"] as const;
+const CLIMATE_TEMP_DOMAIN_MIN = Math.floor(
+  VIRTUAL_CLIMATE_PARAMS.tMid - VIRTUAL_CLIMATE_PARAMS.tAmp - VIRTUAL_CLIMATE_PARAMS.noiseAmp
+);
+const CLIMATE_TEMP_DOMAIN_MAX = Math.ceil(
+  VIRTUAL_CLIMATE_PARAMS.tMid +
+    VIRTUAL_CLIMATE_PARAMS.tAmp +
+    VIRTUAL_CLIMATE_PARAMS.noiseAmp +
+    8 +
+    VIRTUAL_CLIMATE_PARAMS.warmingPerYear * Math.max(0, CAREER_YEARS - 1)
+);
 
 const clamp01 = (value: number): number => Math.max(0, Math.min(1, value));
 const wrap01 = (value: number): number => {
   const wrapped = value % 1;
   return wrapped < 0 ? wrapped + 1 : wrapped;
 };
+const lerpWrapped01 = (current: number, target: number, alpha: number): number => {
+  const c = wrap01(current);
+  const t = wrap01(target);
+  let delta = t - c;
+  if (delta > 0.5) {
+    delta -= 1;
+  } else if (delta < -0.5) {
+    delta += 1;
+  }
+  return wrap01(c + delta * alpha);
+};
 const easeInOutCubic = (t: number): number =>
   t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+const rgbToHex = (color: { r: number; g: number; b: number }): number =>
+  (Math.round(color.r) << 16) | (Math.round(color.g) << 8) | Math.round(color.b);
+const cloneHudTheme = (theme: HudTheme): HudTheme => ({
+  ...theme,
+  chartBandColors: [...theme.chartBandColors] as [string, string, string, string],
+  chartSeasonColors: [...theme.chartSeasonColors] as [string, string, string, string],
+  thermalLow: { ...theme.thermalLow },
+  thermalMid: { ...theme.thermalMid },
+  thermalHigh: { ...theme.thermalHigh }
+});
 
 export const createThreeTest = (
   canvas: HTMLCanvasElement,
@@ -247,6 +331,12 @@ export const createThreeTest = (
     activeThreeTestCleanup();
     activeThreeTestCleanup = null;
   }
+  const render: ThreeTestRenderState = {
+    flags: {
+      cinematicGrade: THREE_TEST_CINEMATIC_GRADE_ENABLED
+    }
+  };
+  let cinematicGradeEnabled = render.flags.cinematicGrade;
   const renderer = new THREE.WebGLRenderer({
     canvas,
     antialias: true,
@@ -257,7 +347,9 @@ export const createThreeTest = (
   renderer.setClearColor(0x0c0d11, 1);
   renderer.outputColorSpace = THREE.SRGBColorSpace;
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
-  renderer.toneMappingExposure = 1.05;
+  renderer.toneMappingExposure = cinematicGradeEnabled
+    ? THREE_TEST_CINEMATIC_GRADE_CONFIG.exposure
+    : THREE_TEST_LEGACY_EXPOSURE;
   renderer.shadowMap.enabled = false;
   renderer.shadowMap.type = THREE.PCFSoftShadowMap;
   renderer.autoClear = false;
@@ -265,19 +357,24 @@ export const createThreeTest = (
 
   const scene = new THREE.Scene();
   const uiScene = new THREE.Scene();
-  const horizonColor = 0xffdab9;
-  const zenithColor = 0x87ceeb;
+  const horizonColor = cinematicGradeEnabled ? 0x2a2019 : 0xffdab9;
+  const zenithColor = cinematicGradeEnabled ? 0x1a212c : 0x87ceeb;
   const gradientCanvas = document.createElement("canvas");
   gradientCanvas.width = 2;
   gradientCanvas.height = 256;
-  const context = gradientCanvas.getContext("2d")!;
-  const gradient = context.createLinearGradient(0, 0, 0, gradientCanvas.height);
-  gradient.addColorStop(0, new THREE.Color(zenithColor).getStyle());
-  gradient.addColorStop(0.45, new THREE.Color(zenithColor).getStyle());
-  gradient.addColorStop(0.55, new THREE.Color(horizonColor).getStyle());
-  gradient.addColorStop(1, new THREE.Color(horizonColor).getStyle());
-  context.fillStyle = gradient;
-  context.fillRect(0, 0, gradientCanvas.width, gradientCanvas.height);
+  const skyContext = gradientCanvas.getContext("2d")!;
+  const repaintSkyGradient = (topColor: THREE.ColorRepresentation, horizonColorValue: THREE.ColorRepresentation): void => {
+    const top = new THREE.Color(topColor);
+    const horizon = new THREE.Color(horizonColorValue);
+    const gradient = skyContext.createLinearGradient(0, 0, 0, gradientCanvas.height);
+    gradient.addColorStop(0, top.getStyle());
+    gradient.addColorStop(0.45, top.getStyle());
+    gradient.addColorStop(0.55, horizon.getStyle());
+    gradient.addColorStop(1, horizon.getStyle());
+    skyContext.fillStyle = gradient;
+    skyContext.fillRect(0, 0, gradientCanvas.width, gradientCanvas.height);
+  };
+  repaintSkyGradient(zenithColor, horizonColor);
   const texture = new THREE.CanvasTexture(gradientCanvas);
   texture.magFilter = THREE.LinearFilter;
   texture.minFilter = THREE.LinearFilter;
@@ -285,13 +382,42 @@ export const createThreeTest = (
   texture.wrapT = THREE.ClampToEdgeWrapping;
   scene.background = texture;
 
-  // Fog disabled: removed because it caused whiteout/edge artefacts.
-
   const camera = new THREE.PerspectiveCamera(45, 1, 0.1, 100);
   camera.position.set(2.6, 2.2, 3.4);
   camera.lookAt(0, 0, 0);
   const uiCamera = new THREE.OrthographicCamera(0, 1, 1, 0, -10, 10);
   uiCamera.position.set(0, 0, 5);
+  const cinematicFog = new THREE.FogExp2(
+    THREE_TEST_CINEMATIC_GRADE_CONFIG.fogColor,
+    THREE_TEST_CINEMATIC_GRADE_CONFIG.fogDensity
+  );
+  const applyCinematicLook = (enabled: boolean): void => {
+    renderer.toneMappingExposure = enabled
+      ? THREE_TEST_CINEMATIC_GRADE_CONFIG.exposure
+      : THREE_TEST_LEGACY_EXPOSURE;
+    scene.fog = enabled && THREE_TEST_ENV_FOG_ENABLED ? cinematicFog : null;
+  };
+  applyCinematicLook(cinematicGradeEnabled);
+  let cinematicGradePost: ReturnType<typeof createThreeTestCinematicGrade> | null = null;
+  try {
+    cinematicGradePost = createThreeTestCinematicGrade(renderer, {
+      contrast: THREE_TEST_CINEMATIC_GRADE_CONFIG.contrast,
+      midtoneDesaturation: THREE_TEST_CINEMATIC_GRADE_CONFIG.midtoneDesaturation,
+      vignetteStrength: THREE_TEST_CINEMATIC_GRADE_CONFIG.vignetteStrength,
+      vignetteSoftness: THREE_TEST_CINEMATIC_GRADE_CONFIG.vignetteSoftness,
+      warmHighlightStrength: THREE_TEST_CINEMATIC_GRADE_CONFIG.warmHighlightStrength,
+      heightHazeStrength: THREE_TEST_ENV_FOG_ENABLED ? THREE_TEST_CINEMATIC_GRADE_CONFIG.heightHazeStrength : 0,
+      heightHazeHorizon: THREE_TEST_CINEMATIC_GRADE_CONFIG.heightHazeHorizon,
+      heightHazeCurve: THREE_TEST_CINEMATIC_GRADE_CONFIG.heightHazeCurve,
+      fogColor: THREE_TEST_CINEMATIC_GRADE_CONFIG.fogColor
+    });
+    cinematicGradePost.setEnabled(cinematicGradeEnabled);
+  } catch (error) {
+    cinematicGradeEnabled = false;
+    render.flags.cinematicGrade = false;
+    console.warn("[threeTest] CinematicGrade setup failed; using legacy scene rendering.", error);
+    applyCinematicLook(false);
+  }
 
   const hemisphere = new THREE.HemisphereLight(zenithColor, 0x4d433b, 0.65);
   scene.add(hemisphere);
@@ -361,7 +487,12 @@ export const createThreeTest = (
     wallBlend: THREE_TEST_FIRE_WALL_BLEND,
     heroVolumetricShare: THREE_TEST_FIRE_HERO_VOL,
     budgetScale: THREE_TEST_FIRE_BUDGET_SCALE,
-    fallbackMode: THREE_TEST_FX_FALLBACK
+    fallbackMode: THREE_TEST_FX_FALLBACK,
+    flameIntensityBoost: cinematicGradeEnabled ? THREE_TEST_CINEMATIC_GRADE_CONFIG.fireFlameIntensityBoost : 1,
+    groundGlowBoost: cinematicGradeEnabled ? THREE_TEST_CINEMATIC_GRADE_CONFIG.fireGlowBoost : 1,
+    emberBoost: cinematicGradeEnabled ? THREE_TEST_CINEMATIC_GRADE_CONFIG.emberBoost : 1,
+    sparkDebug: THREE_TEST_SPARK_DEBUG,
+    sparkMode: THREE_TEST_SPARK_MODE
   });
   const unitsLayer = createThreeTestUnitsLayer(scene);
   const unitFxLayer = createThreeTestUnitFxLayer(scene);
@@ -429,6 +560,14 @@ export const createThreeTest = (
   const unitTrayRoot = document.createElement("div");
   unitTrayRoot.className = "three-test-unit-tray hidden";
   canvas.parentElement?.appendChild(unitTrayRoot);
+  const sparkDebugOverlay = document.createElement("div");
+  sparkDebugOverlay.className = THREE_TEST_SPARK_DEBUG
+    ? "three-test-spark-debug"
+    : "three-test-spark-debug hidden";
+  sparkDebugOverlay.textContent = "Sparks: waiting for fire fx...";
+  canvas.parentElement?.appendChild(sparkDebugOverlay);
+  let sparkDebugLastUiAt = -Infinity;
+  let sparkDebugLastLogAt = -Infinity;
 
   const TOWN_ICON_HOUSES = "H";
   const TOWN_ICON_BURNING = "F";
@@ -537,6 +676,16 @@ export const createThreeTest = (
     deployTruckButton: HTMLButtonElement;
     deployFirefighterButton: HTMLButtonElement;
   };
+  type FireAlertCardElements = {
+    root: HTMLDivElement;
+    summary: HTMLDivElement;
+    details: HTMLDivElement;
+    zoomButton: HTMLButtonElement;
+    openTownButton: HTMLButtonElement;
+    deployTruckButton: HTMLButtonElement;
+    deployCrewButton: HTMLButtonElement;
+    dismissButton: HTMLButtonElement;
+  };
 
   const townLabelElements = new Map<number, TownLabelElements>();
   const townAnchors = new Map<number, TownScreenAnchor>();
@@ -549,6 +698,10 @@ export const createThreeTest = (
   let hoverPeekTownId: number | null = null;
   let hoverDelayHandle: number | null = null;
   let lastTownMetricsUpdateAt = -Infinity;
+  let visibleFireAlertId: number | null = null;
+  let dismissedFireAlertId: number | null = null;
+  let activeFireAlertTownId: number | null = null;
+  let activeFireAlertTile: { x: number; y: number } | null = null;
 
   const createTownCardAction = (
     iconText: string,
@@ -660,6 +813,51 @@ export const createThreeTest = (
   };
 
   const townCardElements = createTownCardElements(false);
+  const fireAlertCardRoot = document.createElement("div");
+  fireAlertCardRoot.className = "three-test-town-card three-test-fire-alert-card hidden";
+  const fireAlertHeader = document.createElement("div");
+  fireAlertHeader.className = "three-test-town-card-header";
+  const fireAlertTitle = document.createElement("div");
+  fireAlertTitle.className = "three-test-town-nameplate-main";
+  fireAlertTitle.innerHTML = `<span class="three-test-town-dot is-critical"></span><span class="three-test-town-name">Fire Alert</span>`;
+  fireAlertHeader.appendChild(fireAlertTitle);
+  const fireAlertSummary = document.createElement("div");
+  fireAlertSummary.className = "three-test-town-card-metrics three-test-town-summary-line";
+  const fireAlertDetails = document.createElement("div");
+  fireAlertDetails.className = "three-test-fire-alert-details";
+  const fireAlertActions = document.createElement("div");
+  fireAlertActions.className = "three-test-town-card-actions";
+  const createFireAlertAction = (label: string): HTMLButtonElement => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "three-test-town-card-action";
+    button.textContent = label;
+    return button;
+  };
+  const fireAlertZoomButton = createFireAlertAction("Zoom to Fire");
+  const fireAlertOpenTownButton = createFireAlertAction("Open Town");
+  const fireAlertDeployTruckButton = createFireAlertAction("Deploy Truck");
+  const fireAlertDeployCrewButton = createFireAlertAction("Deploy Crew");
+  const fireAlertDismissButton = createFireAlertAction("Dismiss");
+  fireAlertActions.append(
+    fireAlertZoomButton,
+    fireAlertOpenTownButton,
+    fireAlertDeployTruckButton,
+    fireAlertDeployCrewButton,
+    fireAlertDismissButton
+  );
+  fireAlertCardRoot.append(fireAlertHeader, fireAlertSummary, fireAlertDetails, fireAlertActions);
+  townOverlayRoot.appendChild(fireAlertCardRoot);
+  const fireAlertCardElements: FireAlertCardElements = {
+    root: fireAlertCardRoot,
+    summary: fireAlertSummary,
+    details: fireAlertDetails,
+    zoomButton: fireAlertZoomButton,
+    openTownButton: fireAlertOpenTownButton,
+    deployTruckButton: fireAlertDeployTruckButton,
+    deployCrewButton: fireAlertDeployCrewButton,
+    dismissButton: fireAlertDismissButton
+  };
 
   const baseLabelRoot = document.createElement("div");
   baseLabelRoot.className = "three-test-town-nameplate three-test-base-nameplate";
@@ -765,8 +963,11 @@ export const createThreeTest = (
   type DockCardElements = {
     id: string;
     root: HTMLDivElement;
-    collapsedButton: HTMLButtonElement;
-    panel: HTMLDivElement;
+    headerRow: HTMLDivElement;
+    headerButton: HTMLButtonElement;
+    indicatorChip: HTMLSpanElement;
+    titleLabel: HTMLSpanElement;
+    body: HTMLDivElement;
     summary: HTMLDivElement;
     details: HTMLDivElement;
     pinButton: HTMLButtonElement;
@@ -783,22 +984,23 @@ export const createThreeTest = (
     dockCards.forEach((card) => card.applyState());
   };
 
-  const createDockCard = (id: string, title: string, icon: string): DockCardElements => {
+  const createDockCard = (id: string, title: string, indicator: string): DockCardElements => {
     dockCardState.register(id);
     const root = document.createElement("div");
     root.className = "three-test-dock-card";
     root.dataset.cardId = id;
-    const collapsedButton = document.createElement("button");
-    collapsedButton.type = "button";
-    collapsedButton.className = "three-test-dock-card-collapsed";
-    collapsedButton.innerHTML = `<span class="three-test-dock-card-icon">${icon}</span><span>${title}</span>`;
-    const panel = document.createElement("div");
-    panel.className = "three-test-dock-card-panel";
-    const header = document.createElement("div");
-    header.className = "three-test-dock-card-header";
-    const headerTitle = document.createElement("div");
-    headerTitle.className = "three-test-dock-card-title";
-    headerTitle.textContent = title;
+    const headerRow = document.createElement("div");
+    headerRow.className = "three-test-dock-card-header";
+    const headerButton = document.createElement("button");
+    headerButton.type = "button";
+    headerButton.className = "three-test-dock-card-header-main";
+    const indicatorChip = document.createElement("span");
+    indicatorChip.className = "three-test-dock-card-icon";
+    indicatorChip.textContent = indicator;
+    const titleLabel = document.createElement("span");
+    titleLabel.className = "three-test-dock-card-title";
+    titleLabel.textContent = title;
+    headerButton.append(indicatorChip, titleLabel);
     const headerActions = document.createElement("div");
     headerActions.className = "three-test-dock-card-header-actions";
     const pinButton = document.createElement("button");
@@ -809,19 +1011,24 @@ export const createThreeTest = (
     closeButton.type = "button";
     closeButton.className = "three-test-dock-card-close";
     closeButton.textContent = "x";
+    closeButton.title = "Minimize";
+    closeButton.setAttribute("aria-label", "Minimize card");
     headerActions.append(pinButton, closeButton);
-    header.append(headerTitle, headerActions);
+    headerRow.append(headerButton, headerActions);
+    const body = document.createElement("div");
+    body.className = "three-test-dock-card-body";
     const summary = document.createElement("div");
     summary.className = "three-test-dock-card-summary";
     const details = document.createElement("div");
     details.className = "three-test-dock-card-details";
-    panel.append(header, summary, details);
-    root.append(collapsedButton, panel);
+    body.append(summary, details);
+    root.append(headerRow, body);
     rightDockRoot.appendChild(root);
 
     const applyState = (): void => {
       const snapshot = dockCardState.get(id);
       root.dataset.state = snapshot.visual;
+      root.classList.toggle("is-collapsed", snapshot.visual === "collapsed");
       root.classList.toggle("is-expanded", snapshot.visual === "expanded");
       root.classList.toggle("is-peek", snapshot.visual === "peek");
       root.classList.toggle("is-pinned", snapshot.pinned);
@@ -840,12 +1047,15 @@ export const createThreeTest = (
       dockCardState.hoverLeave(id);
       applyDockCardStates();
     });
-    collapsedButton.addEventListener("click", (event) => {
+    headerButton.addEventListener("click", (event) => {
       event.preventDefault();
       event.stopPropagation();
       playUiCue("click");
       const snapshot = dockCardState.get(id);
-      if (snapshot.visual === "expanded" && !snapshot.pinned) {
+      if (snapshot.pinned) {
+        return;
+      }
+      if (snapshot.visual === "expanded") {
         dockCardState.collapse(id);
       } else {
         dockCardState.clickExpand(id);
@@ -870,8 +1080,11 @@ export const createThreeTest = (
     const card: DockCardElements = {
       id,
       root,
-      collapsedButton,
-      panel,
+      headerRow,
+      headerButton,
+      indicatorChip,
+      titleLabel,
+      body,
       summary,
       details,
       pinButton,
@@ -886,30 +1099,21 @@ export const createThreeTest = (
   const climateCardId = "dock:climate";
   const minimapCardId = "dock:minimap";
   const timeCardId = "dock:time";
-  const climateDock = createDockCard(climateCardId, "Climate", "CL");
-  const minimapDock = createDockCard(minimapCardId, "Minimap", "MP");
-  const timeDock = createDockCard(timeCardId, "Time", "TM");
+  const climateDock = createDockCard(climateCardId, "FIRE RISK", "--%");
+  const minimapDock = createDockCard(minimapCardId, "MINIMAP", "--");
+  const timeDock = createDockCard(timeCardId, "TIME", "Y1 WINTER");
+  climateDock.indicatorChip.classList.add("three-test-dock-card-icon-risk", "is-low");
+  climateDock.indicatorChip.title = "Forecast risk";
+  minimapDock.indicatorChip.classList.add("three-test-dock-card-icon-info");
+  minimapDock.indicatorChip.title = "Wind";
+  timeDock.indicatorChip.classList.add("three-test-dock-card-icon-info");
+  timeDock.indicatorChip.title = "Year and season";
 
   const climateChartCanvas = document.createElement("canvas");
   climateChartCanvas.className = "three-test-climate-chart";
   const climateKpis = document.createElement("div");
   climateKpis.className = "three-test-dock-kpis";
   climateDock.summary.append(climateKpis, climateChartCanvas);
-  const climateMetricButton = document.createElement("button");
-  climateMetricButton.type = "button";
-  climateMetricButton.className = "three-test-dock-card-button";
-  climateMetricButton.textContent = "View: Risk";
-  let climateMetricMode: "risk" | "temp" = "risk";
-  climateMetricButton.addEventListener("click", (event) => {
-    event.preventDefault();
-    event.stopPropagation();
-    if (world.phase === "fire") {
-      return;
-    }
-    playUiCue("toggle");
-    climateMetricMode = climateMetricMode === "risk" ? "temp" : "risk";
-  });
-  climateDock.details.append(climateMetricButton);
 
   const minimapCanvas = document.createElement("canvas");
   minimapCanvas.className = "three-test-minimap-canvas";
@@ -1005,6 +1209,16 @@ export const createThreeTest = (
     timeControls.appendChild(button);
     speedButtons.push({ index: preset.index, button });
   });
+  const nextFireButton = document.createElement("button");
+  nextFireButton.type = "button";
+  nextFireButton.className = "three-test-time-button";
+  nextFireButton.textContent = "Next Fire";
+  nextFireButton.addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    dispatchPhaseUiCommand({ type: "action", action: "time-skip-next-fire" });
+  });
+  timeControls.appendChild(nextFireButton);
   const timeAudioControls = document.createElement("div");
   timeAudioControls.className = "three-test-time-audio";
   const createTimeVolumeControls = (): {
@@ -1141,7 +1355,12 @@ export const createThreeTest = (
     canvasElement: HTMLCanvasElement,
     values: number[],
     markerIndex: number,
-    mode: "risk" | "temp"
+    mode: "risk" | "temp",
+    chartContext: {
+      forecastStartDay: number;
+      forecastYearDays: number;
+      forecastWindowDays: number;
+    }
   ): void => {
     const rect = canvasElement.getBoundingClientRect();
     if (rect.width <= 1 || rect.height <= 1 || values.length === 0) {
@@ -1158,15 +1377,178 @@ export const createThreeTest = (
       return;
     }
     ctx.clearRect(0, 0, width, height);
-    const min = Math.min(...values);
-    const max = Math.max(...values);
-    const span = Math.max(0.0001, max - min);
-    ctx.strokeStyle = mode === "risk" ? "rgba(209, 74, 44, 0.95)" : "rgba(43, 104, 140, 0.95)";
-    ctx.lineWidth = 2;
+
+    const leftPad = mode === "risk" ? 54 : 46;
+    const rightPad = 10;
+    const topPad = 8;
+    const bottomPad = 30;
+    const plotX = leftPad;
+    const plotY = topPad;
+    const plotWidth = Math.max(12, width - leftPad - rightPad);
+    const plotHeight = Math.max(12, height - topPad - bottomPad);
+
+    const domainMin = mode === "risk" ? 0 : CLIMATE_TEMP_DOMAIN_MIN;
+    const domainMax = mode === "risk" ? 1 : CLIMATE_TEMP_DOMAIN_MAX;
+    const domainSpan = Math.max(0.0001, domainMax - domainMin);
+    const toY = (value: number): number => {
+      const normalized = clamp01((value - domainMin) / domainSpan);
+      return plotY + (1 - normalized) * plotHeight;
+    };
+    const toX = (index: number): number => plotX + (index / Math.max(1, values.length - 1)) * plotWidth;
+
+    const seasonLayout = computeSeasonLayout(
+      Math.max(0, Math.floor(chartContext.forecastStartDay)),
+      Math.max(1, Math.floor(chartContext.forecastYearDays)),
+      Math.max(1, Math.floor(chartContext.forecastWindowDays)),
+      { width: plotWidth, height: plotHeight, padding: 0 }
+    );
+
+    ctx.fillStyle = "rgba(14, 11, 9, 0.78)";
+    ctx.fillRect(plotX, plotY, plotWidth, plotHeight);
+
+    const seasonBandColors = [
+      "rgba(43, 104, 140, 0.13)",
+      "rgba(90, 143, 78, 0.12)",
+      "rgba(240, 179, 59, 0.13)",
+      "rgba(209, 74, 44, 0.13)"
+    ];
+    seasonLayout.bands.forEach((band) => {
+      ctx.fillStyle = seasonBandColors[band.seasonIndex] ?? seasonBandColors[0];
+      ctx.fillRect(plotX + band.x, plotY, band.width, plotHeight);
+    });
+
+    if (mode === "risk") {
+      const riskBandColors = [
+        "rgba(43, 104, 140, 0.2)",
+        "rgba(90, 143, 78, 0.18)",
+        "rgba(240, 179, 59, 0.2)",
+        "rgba(209, 74, 44, 0.22)"
+      ];
+      const riskBandHeight = plotHeight / CLIMATE_RISK_LABELS.length;
+      for (let i = 0; i < CLIMATE_RISK_LABELS.length; i += 1) {
+        const y = plotY + plotHeight - riskBandHeight * (i + 1);
+        ctx.fillStyle = riskBandColors[i] ?? riskBandColors[0];
+        ctx.fillRect(plotX, y, plotWidth, riskBandHeight);
+      }
+      ctx.font = "500 10px ui-sans-serif, system-ui, sans-serif";
+      ctx.textBaseline = "middle";
+      ctx.textAlign = "left";
+      CLIMATE_RISK_LABELS.forEach((label, index) => {
+        const bandCenter = (index + 0.5) / CLIMATE_RISK_LABELS.length;
+        const y = plotY + plotHeight - bandCenter * plotHeight;
+        ctx.fillStyle = "rgba(255, 236, 202, 0.9)";
+        ctx.fillText(label, 4, y);
+      });
+      ctx.strokeStyle = "rgba(255, 226, 181, 0.26)";
+      ctx.lineWidth = 1;
+      ctx.setLineDash([2, 4]);
+      RISK_THRESHOLDS.forEach((value) => {
+        const y = toY(value);
+        ctx.beginPath();
+        ctx.moveTo(plotX, y);
+        ctx.lineTo(plotX + plotWidth, y);
+        ctx.stroke();
+      });
+      ctx.setLineDash([]);
+    } else {
+      const tickCount = 5;
+      ctx.font = "500 10px ui-sans-serif, system-ui, sans-serif";
+      ctx.textBaseline = "middle";
+      ctx.textAlign = "left";
+      for (let i = 0; i < tickCount; i += 1) {
+        const t = i / Math.max(1, tickCount - 1);
+        const value = domainMin + t * domainSpan;
+        const y = plotY + plotHeight - t * plotHeight;
+        ctx.strokeStyle = "rgba(255, 226, 181, 0.24)";
+        ctx.lineWidth = 1;
+        ctx.setLineDash([2, 4]);
+        ctx.beginPath();
+        ctx.moveTo(plotX, y);
+        ctx.lineTo(plotX + plotWidth, y);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.fillStyle = "rgba(255, 236, 202, 0.9)";
+        ctx.fillText(`${Math.round(value)}C`, 4, y);
+      }
+    }
+
+    ctx.strokeStyle = "rgba(255, 226, 181, 0.28)";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(plotX, plotY);
+    ctx.lineTo(plotX, plotY + plotHeight);
+    ctx.lineTo(plotX + plotWidth, plotY + plotHeight);
+    ctx.stroke();
+
+    ctx.strokeStyle = "rgba(255, 226, 181, 0.24)";
+    ctx.lineWidth = 1;
+    ctx.setLineDash([1, 4]);
+    seasonLayout.markers.forEach((markerX) => {
+      const x = plotX + markerX;
+      ctx.beginPath();
+      ctx.moveTo(x, plotY);
+      ctx.lineTo(x, plotY + plotHeight);
+      ctx.stroke();
+    });
+    ctx.setLineDash([]);
+
+    const seasonLabelY = plotY + plotHeight + 13;
+    const maxSeasonLabels = Math.max(1, Math.floor(plotWidth / 68));
+    const seasonStep = Math.ceil(seasonLayout.labels.length / maxSeasonLabels);
+    ctx.font = "600 9px ui-sans-serif, system-ui, sans-serif";
+    ctx.fillStyle = "rgba(255, 228, 186, 0.86)";
+    ctx.textBaseline = "middle";
+    ctx.textAlign = "center";
+    seasonLayout.labels.forEach((labelData, index) => {
+      if (index % seasonStep !== 0) {
+        return;
+      }
+      const x = plotX + (labelData.leftPercent / 100) * plotWidth;
+      ctx.fillText(labelData.label.toUpperCase(), x, seasonLabelY);
+    });
+
+    const areaGradient = ctx.createLinearGradient(0, plotY + plotHeight, 0, plotY);
+    if (mode === "risk") {
+      areaGradient.addColorStop(0, "rgba(43, 104, 140, 0.26)");
+      areaGradient.addColorStop(0.58, "rgba(240, 179, 59, 0.3)");
+      areaGradient.addColorStop(1, "rgba(209, 74, 44, 0.34)");
+    } else {
+      areaGradient.addColorStop(0, "rgba(43, 104, 140, 0.3)");
+      areaGradient.addColorStop(1, "rgba(240, 179, 59, 0.34)");
+    }
+    ctx.fillStyle = areaGradient;
     ctx.beginPath();
     values.forEach((value, index) => {
-      const x = (index / Math.max(1, values.length - 1)) * (width - 1);
-      const y = (1 - (value - min) / span) * (height - 1);
+      const x = toX(index);
+      const y = toY(value);
+      if (index === 0) {
+        ctx.moveTo(x, y);
+      } else {
+        ctx.lineTo(x, y);
+      }
+    });
+    const lastX = toX(values.length - 1);
+    const firstX = toX(0);
+    ctx.lineTo(lastX, plotY + plotHeight);
+    ctx.lineTo(firstX, plotY + plotHeight);
+    ctx.closePath();
+    ctx.fill();
+
+    const lineGradient = ctx.createLinearGradient(plotX, 0, plotX + plotWidth, 0);
+    if (mode === "risk") {
+      lineGradient.addColorStop(0, "rgba(99, 183, 255, 0.98)");
+      lineGradient.addColorStop(0.55, "rgba(240, 179, 59, 0.98)");
+      lineGradient.addColorStop(1, "rgba(232, 92, 56, 0.98)");
+    } else {
+      lineGradient.addColorStop(0, "rgba(99, 183, 255, 0.98)");
+      lineGradient.addColorStop(1, "rgba(240, 179, 59, 0.98)");
+    }
+    ctx.strokeStyle = lineGradient;
+    ctx.lineWidth = 2.2;
+    ctx.beginPath();
+    values.forEach((value, index) => {
+      const x = toX(index);
+      const y = toY(value);
       if (index === 0) {
         ctx.moveTo(x, y);
       } else {
@@ -1174,16 +1556,23 @@ export const createThreeTest = (
       }
     });
     ctx.stroke();
+
     const clampedMarker = Math.max(0, Math.min(values.length - 1, markerIndex));
-    const markerX = (clampedMarker / Math.max(1, values.length - 1)) * (width - 1);
-    ctx.strokeStyle = "rgba(240, 179, 59, 0.95)";
-    ctx.lineWidth = 1;
+    const markerX = toX(clampedMarker);
+    const markerY = toY(values[clampedMarker] ?? values[0] ?? domainMin);
+    ctx.strokeStyle = "rgba(240, 179, 59, 0.98)";
+    ctx.lineWidth = 1.2;
     ctx.setLineDash([3, 3]);
     ctx.beginPath();
-    ctx.moveTo(markerX, 0);
-    ctx.lineTo(markerX, height);
+    ctx.moveTo(markerX, plotY);
+    ctx.lineTo(markerX, plotY + plotHeight + 4);
     ctx.stroke();
     ctx.setLineDash([]);
+
+    ctx.fillStyle = "rgba(255, 229, 171, 0.98)";
+    ctx.beginPath();
+    ctx.arc(markerX, markerY, 2.2, 0, Math.PI * 2);
+    ctx.fill();
   };
 
   let lastMinimapRasterAt = -Infinity;
@@ -1305,11 +1694,11 @@ export const createThreeTest = (
     return [fallback];
   };
 
-  const getClimateTempSeries = (): number[] => {
-    if (world.climateForecast && world.climateForecast.temps.length > 0) {
-      return world.climateForecast.temps.slice();
-    }
-    return [world.climateTemp ?? 20];
+  const getCurrentSeasonLabel = (): string => {
+    const yearDays = Math.max(1, Math.floor(world.climateTimeline?.daysPerYear ?? 360));
+    const dayInYear = ((world.careerDay ?? 0) % yearDays + yearDays) % yearDays;
+    const seasonIndex = Math.min(3, Math.floor((dayInYear / yearDays) * 4));
+    return SEASON_LABELS[seasonIndex] ?? "Season";
   };
 
   const updateDockOverlay = (time: number): void => {
@@ -1321,23 +1710,39 @@ export const createThreeTest = (
     const forecastDays = Math.max(1, world.climateForecast?.days ?? getClimateRiskSeries().length);
     const markerIndex = Math.max(0, Math.min(forecastDays - 1, Math.floor(world.climateForecastDay ?? 0)));
     const riskSeries = getClimateRiskSeries();
-    const tempSeries = getClimateTempSeries();
     const riskNow = riskSeries[Math.min(markerIndex, riskSeries.length - 1)] ?? 0;
+    const riskPct = Math.round(clamp01(riskNow) * 100);
+    const seasonLabel = getCurrentSeasonLabel();
     const windSpeed = Math.round(Math.max(0, world.wind.strength) * 10);
+    const windDir = (world.wind.name ?? "Calm").toUpperCase();
     climateKpis.innerHTML = "";
-    const kpiYearDay = document.createElement("div");
-    kpiYearDay.textContent = `Year/Day ${world.year}/${Math.max(1, Math.floor(world.phaseDay) + 1)}`;
     const kpiRisk = document.createElement("div");
-    kpiRisk.textContent = `Risk ${(riskNow * 100).toFixed(0)}%`;
+    kpiRisk.textContent = `Risk ${riskPct}%`;
     const kpiWind = document.createElement("div");
     kpiWind.textContent = `Wind ${world.wind.name} ${windSpeed}`;
-    climateKpis.append(kpiYearDay, kpiRisk, kpiWind);
-    climateMetricButton.disabled = world.phase === "fire";
-    climateMetricButton.textContent = `View: ${climateMetricMode === "risk" ? "Risk" : "Temp"}${world.phase === "fire" ? " (Read-only)" : ""}`;
-    const climateSeries = climateMetricMode === "risk" ? riskSeries : tempSeries;
+    climateKpis.append(kpiRisk, kpiWind);
+    climateDock.indicatorChip.textContent = `${riskPct}%`;
+    climateDock.indicatorChip.classList.remove("is-low", "is-moderate", "is-high", "is-extreme");
+    if (riskNow < 0.25) {
+      climateDock.indicatorChip.classList.add("is-low");
+    } else if (riskNow < 0.5) {
+      climateDock.indicatorChip.classList.add("is-moderate");
+    } else if (riskNow < 0.75) {
+      climateDock.indicatorChip.classList.add("is-high");
+    } else {
+      climateDock.indicatorChip.classList.add("is-extreme");
+    }
+    timeDock.indicatorChip.textContent = `Y${Math.max(1, world.year)} ${seasonLabel.toUpperCase()}`;
+    minimapDock.indicatorChip.textContent = `${windDir} ${windSpeed}`;
+    const climateSeries = riskSeries;
+    const climateChartContext = {
+      forecastStartDay: Math.max(0, world.climateForecastStart ?? 0),
+      forecastYearDays: Math.max(1, Math.floor(world.climateTimeline?.daysPerYear ?? 360)),
+      forecastWindowDays: forecastDays
+    };
     const climateState = dockCardState.get(climateCardId).visual;
     if (climateState === "peek" || climateState === "expanded") {
-      drawClimateSparkline(climateChartCanvas, climateSeries, markerIndex, climateMetricMode);
+      drawClimateSparkline(climateChartCanvas, climateSeries, markerIndex, "risk", climateChartContext);
     }
 
     minimapDock.summary.title = "Click minimap to pan camera";
@@ -1352,6 +1757,8 @@ export const createThreeTest = (
     const activeSpeedIndex = Math.max(0, Math.min(TIME_SPEED_OPTIONS.length - 1, world.timeSpeedIndex ?? 0));
     const speedValue = TIME_SPEED_OPTIONS[activeSpeedIndex] ?? 1;
     const speedLabel = Number.isInteger(speedValue) ? speedValue.toFixed(0) : speedValue.toFixed(1);
+    const skipToNextFireActive = !!world.skipToNextFire;
+    const canSkipToNextFire = !world.gameOver && world.lastActiveFires <= 0 && !skipToNextFireActive;
     timeSummary.innerHTML = "";
     const timeLine = document.createElement("div");
     timeLine.textContent = world.paused ? "State Paused" : "State Running";
@@ -1359,7 +1766,13 @@ export const createThreeTest = (
     speedLine.textContent = `Speed ${speedLabel}x`;
     const phaseLine = document.createElement("div");
     phaseLine.textContent = `Phase ${world.phase}`;
-    timeSummary.append(timeLine, speedLine, phaseLine);
+    const skipLine = document.createElement("div");
+    skipLine.textContent = skipToNextFireActive
+      ? "Seeking next fire..."
+      : canSkipToNextFire
+        ? "Next fire skip ready"
+        : "Next fire skip unavailable";
+    timeSummary.append(timeLine, speedLine, phaseLine, skipLine);
     pauseButton.textContent = world.paused ? "Resume" : "Pause";
     pauseButton.title = world.paused ? "Resume simulation" : "Pause simulation";
     pauseButton.setAttribute("aria-label", world.paused ? "Resume simulation" : "Pause simulation");
@@ -1368,6 +1781,18 @@ export const createThreeTest = (
       button.title = `Set speed to ${button.textContent}`;
       button.setAttribute("aria-label", `Set speed to ${button.textContent}`);
     });
+    nextFireButton.disabled = !canSkipToNextFire || skipToNextFireActive;
+    nextFireButton.textContent = skipToNextFireActive ? "Seeking..." : "Next Fire";
+    if (skipToNextFireActive) {
+      nextFireButton.title = "Advancing time to next fire incident.";
+      nextFireButton.setAttribute("aria-label", "Seeking next fire");
+    } else if (canSkipToNextFire) {
+      nextFireButton.title = "Advance time until the next fire starts.";
+      nextFireButton.setAttribute("aria-label", "Skip to next fire");
+    } else {
+      nextFireButton.title = "Available when no fires are currently active.";
+      nextFireButton.setAttribute("aria-label", "Skip to next fire unavailable");
+    }
     applyDockCardStates();
   };
 
@@ -2000,6 +2425,52 @@ export const createThreeTest = (
   const dispatchBaseAction = (action: string): void => {
     dispatchPhaseUiCommand({ type: "action", action });
   };
+  fireAlertCardElements.root.addEventListener("pointerdown", (event) => {
+    event.stopPropagation();
+  });
+  fireAlertCardElements.zoomButton.addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    playUiCue("click");
+    if (!activeFireAlertTile) {
+      return;
+    }
+    inputState.lastInteractionTime = performance.now();
+    focusCameraOnTile(activeFireAlertTile.x, activeFireAlertTile.y);
+  });
+  fireAlertCardElements.openTownButton.addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    playUiCue("click");
+    if (activeFireAlertTownId === null) {
+      return;
+    }
+    inputState.lastInteractionTime = performance.now();
+    openTownCard(activeFireAlertTownId);
+  });
+  fireAlertCardElements.deployTruckButton.addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    playUiCue("confirm");
+    dispatchBaseAction("deploy-truck");
+  });
+  fireAlertCardElements.deployCrewButton.addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    playUiCue("confirm");
+    dispatchBaseAction("deploy-firefighter");
+  });
+  fireAlertCardElements.dismissButton.addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    playUiCue("click");
+    if (visibleFireAlertId !== null) {
+      dismissedFireAlertId = visibleFireAlertId;
+    }
+    activeFireAlertTownId = null;
+    activeFireAlertTile = null;
+    fireAlertCardElements.root.classList.add("hidden");
+  });
 
   const updateBaseCardState = (): void => {
     const snapshot = worldCardState.get(baseCardId);
@@ -2200,6 +2671,25 @@ export const createThreeTest = (
     updateTownMetrics();
   };
 
+  const openTownCard = (townId: number): void => {
+    const town = getTownById(townId);
+    if (!town) {
+      return;
+    }
+    baseFocused = false;
+    hoverPeekTownId = null;
+    clearTownHoverDelay();
+    if (pinnedTownCards.has(town.id)) {
+      selectedTownId = null;
+      focusedTownId = town.id;
+    } else {
+      selectedTownId = town.id;
+      focusedTownId = town.id;
+    }
+    syncFocusedTown();
+    updateTownMetrics();
+  };
+
   const removeTownLabel = (townId: number): void => {
     const entry = townLabelElements.get(townId);
     if (!entry) {
@@ -2339,12 +2829,49 @@ export const createThreeTest = (
     }
   };
 
+  const updateFireAlertCard = (): void => {
+    const alert = world.latestFireAlert;
+    if (!alert) {
+      visibleFireAlertId = null;
+      activeFireAlertTownId = null;
+      activeFireAlertTile = null;
+      fireAlertCardElements.root.classList.add("hidden");
+      return;
+    }
+    if (dismissedFireAlertId === alert.id) {
+      activeFireAlertTownId = null;
+      activeFireAlertTile = null;
+      fireAlertCardElements.root.classList.add("hidden");
+      return;
+    }
+    visibleFireAlertId = alert.id;
+    activeFireAlertTile = { x: alert.tileX, y: alert.tileY };
+    activeFireAlertTownId = alert.townId >= 0 ? alert.townId : null;
+    const town = activeFireAlertTownId !== null ? getTownById(activeFireAlertTownId) : null;
+    if (town) {
+      const snapshot = readTownUiSnapshot(town);
+      fireAlertCardElements.summary.textContent = `${town.name} | Tile ${alert.tileX},${alert.tileY}`;
+      fireAlertCardElements.details.textContent = `Burning ${snapshot.burning} | Houses ${snapshot.houses} | Alert ${snapshot.postureLabel}`;
+      fireAlertCardElements.openTownButton.disabled = false;
+      fireAlertCardElements.openTownButton.title = `Open ${town.name} card`;
+    } else {
+      fireAlertCardElements.summary.textContent = `Incident Tile ${alert.tileX},${alert.tileY}`;
+      fireAlertCardElements.details.textContent = "No nearby town linked to this ignition.";
+      fireAlertCardElements.openTownButton.disabled = true;
+      fireAlertCardElements.openTownButton.title = "No nearby town for this incident.";
+    }
+    fireAlertCardElements.root.classList.remove("hidden");
+  };
+
   const handleTownOverlayPointerDown = (event: PointerEvent): void => {
     const target = event.target;
     if (!(target instanceof Node)) {
       return;
     }
     if (dockOverlayRoot.contains(target) || unitTrayRoot.contains(target)) {
+      return;
+    }
+    if (fireAlertCardElements.root.contains(target)) {
       return;
     }
     if (baseCardElements.cardRoot.contains(target) || baseCardElements.root.contains(target)) {
@@ -2406,6 +2933,11 @@ export const createThreeTest = (
       townAnchors.clear();
       baseAnchor = null;
       townCardElements.root.classList.add("hidden");
+      fireAlertCardElements.root.classList.add("hidden");
+      visibleFireAlertId = null;
+      dismissedFireAlertId = null;
+      activeFireAlertTownId = null;
+      activeFireAlertTile = null;
       pinnedTownCards.forEach((card) => card.root.classList.add("hidden"));
       baseCardElements.root.classList.add("hidden");
       baseCardElements.connector.style.display = "none";
@@ -2422,6 +2954,7 @@ export const createThreeTest = (
     ensureTownLabels();
     if (time - lastTownMetricsUpdateAt >= TOWN_LABEL_UPDATE_INTERVAL_MS) {
       updateTownMetrics();
+      updateFireAlertCard();
       lastTownMetricsUpdateAt = time;
     }
     const cols = Math.max(1, world.grid.cols);
@@ -2842,6 +3375,49 @@ export const createThreeTest = (
     skyHorizonColor: horizonColor,
     preferredQuality: THREE_TEST_DEFAULT_WATER_QUALITY
   });
+  const applyDomEnvironmentTheme = (theme: ReturnType<typeof buildEnvironmentPalette>["hud"]["dom"]): void => {
+    const overlayRoot = canvas.closest(".three-test-overlay") as HTMLElement | null;
+    const cardRoot = canvas.closest(".three-test-card") as HTMLElement | null;
+    const targets = [overlayRoot, cardRoot, canvas.parentElement, townOverlayRoot, dockOverlayRoot, unitTrayRoot];
+    targets.forEach((target) => {
+      if (!target) {
+        return;
+      }
+      target.style.setProperty("--three-test-overlay-bg", theme.overlayBackground);
+      target.style.setProperty("--three-test-card-bg", theme.cardBackground);
+      target.style.setProperty("--three-test-card-border", theme.cardBorder);
+      target.style.setProperty("--three-test-card-header-bg", theme.cardHeaderBackground);
+      target.style.setProperty("--three-test-text-primary", theme.textPrimary);
+      target.style.setProperty("--three-test-text-muted", theme.textMuted);
+      target.style.setProperty("--three-test-button-bg", theme.buttonBackground);
+      target.style.setProperty("--three-test-button-bg-hover", theme.buttonHoverBackground);
+      target.style.setProperty("--three-test-button-border", theme.buttonBorder);
+      target.style.setProperty("--three-test-button-disabled-bg", theme.buttonDisabledBackground);
+      target.style.setProperty("--three-test-button-disabled-border", theme.buttonDisabledBorder);
+      target.style.setProperty("--three-test-accent", theme.accent);
+      target.style.setProperty("--three-test-risk-low-bg", theme.riskLowBackground);
+      target.style.setProperty("--three-test-risk-low-border", theme.riskLowBorder);
+      target.style.setProperty("--three-test-risk-low-text", theme.riskLowText);
+      target.style.setProperty("--three-test-risk-moderate-bg", theme.riskModerateBackground);
+      target.style.setProperty("--three-test-risk-moderate-border", theme.riskModerateBorder);
+      target.style.setProperty("--three-test-risk-moderate-text", theme.riskModerateText);
+      target.style.setProperty("--three-test-risk-high-bg", theme.riskHighBackground);
+      target.style.setProperty("--three-test-risk-high-border", theme.riskHighBorder);
+      target.style.setProperty("--three-test-risk-high-text", theme.riskHighText);
+      target.style.setProperty("--three-test-risk-extreme-bg", theme.riskExtremeBackground);
+      target.style.setProperty("--three-test-risk-extreme-border", theme.riskExtremeBorder);
+      target.style.setProperty("--three-test-risk-extreme-text", theme.riskExtremeText);
+      target.style.setProperty("--three-test-info-bg", theme.infoBackground);
+      target.style.setProperty("--three-test-info-border", theme.infoBorder);
+      target.style.setProperty("--three-test-info-text", theme.infoText);
+      target.style.setProperty("--three-test-chart-bg", theme.chartBackground);
+      target.style.setProperty("--three-test-chart-border", theme.chartBorder);
+      target.style.setProperty("--three-test-minimap-bg", theme.minimapBackground);
+      target.style.setProperty("--three-test-unit-card-bg", theme.unitCardBackground);
+      target.style.setProperty("--three-test-unit-card-border", theme.unitCardBorder);
+    });
+  };
+  let applyEnvironmentPalette = (_force = false): void => {};
   let treeAssets: TreeAssets | null = getTreeAssetsCache();
   let houseAssets: HouseAssets | null = getHouseAssetsCache();
   let firestationAsset: FirestationAsset | null = getFirestationAssetCache();
@@ -2865,6 +3441,49 @@ export const createThreeTest = (
     risk01: 0.35,
     mode: "auto"
   };
+  let environmentTarget: EnvironmentSignalState = {
+    seasonT01: initialSeasonT01,
+    risk01: 0.35,
+    fireLoad01: computeFireLoad01(world.lastActiveFires, world.grid.totalTiles)
+  };
+  let environmentCurrent: EnvironmentSignalState = { ...environmentTarget };
+  let lastEnvironmentApplied: EnvironmentSignalState | null = null;
+  applyEnvironmentPalette = (force = false): void => {
+    if (!ENABLE_THREE_TEST_SEASONAL_RECOLOR) {
+      return;
+    }
+    const changed =
+      !lastEnvironmentApplied ||
+      Math.abs(environmentCurrent.seasonT01 - lastEnvironmentApplied.seasonT01) >= SEASON_VISUAL_EPSILON ||
+      Math.abs(environmentCurrent.risk01 - lastEnvironmentApplied.risk01) >= SEASON_VISUAL_EPSILON ||
+      Math.abs(environmentCurrent.fireLoad01 - lastEnvironmentApplied.fireLoad01) >= SEASON_VISUAL_EPSILON;
+    if (!force && !changed) {
+      return;
+    }
+    const palette = buildEnvironmentPalette(environmentCurrent);
+    fireFx.setEnvironmentSignals({
+      smoke01: palette.signals.smoke01,
+      denseSmoke01: palette.signals.denseSmoke01,
+      fireLoad01: palette.signals.fireLoad01,
+      orangeGlow01: palette.signals.orangeGlow01
+    });
+    repaintSkyGradient(rgbToHex(palette.atmosphere.skyTop), rgbToHex(palette.atmosphere.skyHorizon));
+    texture.needsUpdate = true;
+    if (THREE_TEST_ENV_FOG_ENABLED) {
+      cinematicFog.color.set(rgbToHex(palette.atmosphere.fogColor));
+      cinematicFog.density = THREE_TEST_CINEMATIC_GRADE_CONFIG.fogDensity * palette.atmosphere.fogDensityScale;
+      cinematicGradePost?.setFogColor(rgbToHex(palette.atmosphere.fogColor));
+    }
+    hemisphere.color.set(rgbToHex(palette.atmosphere.hemisphereSky));
+    hemisphere.groundColor.set(rgbToHex(palette.atmosphere.hemisphereGround));
+    keyLight.color.set(rgbToHex(palette.atmosphere.keyLight));
+    fillLight.color.set(rgbToHex(palette.atmosphere.fillLight));
+    waterSystem.setPalette(palette.water);
+    hudState.theme = cloneHudTheme(palette.hud.canvas);
+    applyDomEnvironmentTheme(palette.hud.dom);
+    lastEnvironmentApplied = { ...environmentCurrent };
+  };
+  applyEnvironmentPalette(true);
   const treeSeasonVisualConfig: TreeSeasonVisualConfig = {
     enabled: ENABLE_THREE_TEST_SEASONAL_RECOLOR,
     uniforms: terrainClimateUniforms,
@@ -3566,6 +4185,7 @@ export const createThreeTest = (
     townOverlayRoot.remove();
     dockOverlayRoot.remove();
     unitTrayRoot.remove();
+    sparkDebugOverlay.remove();
     removeUiAudioChangeListener?.();
     removeUiAudioChangeListener = null;
     removeMusicControlsChangeListener?.();
@@ -3580,6 +4200,8 @@ export const createThreeTest = (
     unitCommandPathMaterial.dispose();
     unitCommandMarkerGeometry.dispose();
     unitCommandMarkerMaterial.dispose();
+    cinematicGradePost?.dispose();
+    cinematicGradePost = null;
     waterSystem.dispose();
     renderer.dispose();
   };
@@ -3604,6 +4226,7 @@ export const createThreeTest = (
     const effectiveDpr = THREE_TEST_ADAPTIVE_DPR_ENABLED ? adaptiveDpr : deviceDpr;
     renderer.setPixelRatio(effectiveDpr);
     renderer.setSize(width, height, false);
+    cinematicGradePost?.resize(width, height, effectiveDpr);
     camera.aspect = width / height;
     camera.updateProjectionMatrix();
     uiCamera.left = 0;
@@ -3666,6 +4289,32 @@ export const createThreeTest = (
     markCameraMotion();
   };
 
+  const disableCinematicGrade = (): void => {
+    if (!cinematicGradeEnabled) {
+      return;
+    }
+    cinematicGradeEnabled = false;
+    render.flags.cinematicGrade = false;
+    cinematicGradePost?.setEnabled(false);
+    applyCinematicLook(false);
+  };
+
+  const renderWorldScene = (): void => {
+    renderer.clear();
+    renderer.render(scene, camera);
+  };
+
+  const renderWorldPass = (): void => {
+    if (cinematicGradeEnabled && cinematicGradePost) {
+      const renderedWithPost = cinematicGradePost.renderSceneToScreen(renderWorldScene);
+      if (!renderedWithPost) {
+        disableCinematicGrade();
+      }
+      return;
+    }
+    renderWorldScene();
+  };
+
   const renderFrame = (time: number): void => {
     if (!running) {
       return;
@@ -3689,6 +4338,29 @@ export const createThreeTest = (
     const frameStart = performance.now();
     const dt = lastFrameTime > 0 ? (time - lastFrameTime) / 1000 : 0;
     lastFrameTime = time;
+    if (ENABLE_THREE_TEST_SEASONAL_RECOLOR) {
+      const nextEnvironmentTarget: EnvironmentSignalState = {
+        seasonT01: seasonVisualState.seasonT01,
+        risk01: seasonVisualState.risk01,
+        fireLoad01: computeFireLoad01(world.lastActiveFires, world.grid.totalTiles)
+      };
+      const targetChanged =
+        Math.abs(nextEnvironmentTarget.seasonT01 - environmentTarget.seasonT01) >= SEASON_VISUAL_EPSILON ||
+        Math.abs(nextEnvironmentTarget.risk01 - environmentTarget.risk01) >= SEASON_VISUAL_EPSILON ||
+        Math.abs(nextEnvironmentTarget.fireLoad01 - environmentTarget.fireLoad01) >= SEASON_VISUAL_EPSILON;
+      if (targetChanged) {
+        environmentTarget = nextEnvironmentTarget;
+      }
+      if (dt > 0) {
+        const envAlpha = 1 - Math.exp(-dt / 1.6);
+        environmentCurrent.seasonT01 = lerpWrapped01(environmentCurrent.seasonT01, environmentTarget.seasonT01, envAlpha);
+        environmentCurrent.risk01 += (environmentTarget.risk01 - environmentCurrent.risk01) * envAlpha;
+        environmentCurrent.fireLoad01 += (environmentTarget.fireLoad01 - environmentCurrent.fireLoad01) * envAlpha;
+      } else {
+        environmentCurrent = { ...environmentTarget };
+      }
+      applyEnvironmentPalette();
+    }
     let instantFps = 0;
     if (dt > 0) {
       instantFps = 1 / Math.max(1 / 240, dt);
@@ -3725,6 +4397,26 @@ export const createThreeTest = (
         threePerf.fps > 0 ? threePerf.fps : instantFps,
         threePerf.sceneRenderMs
       );
+      if (THREE_TEST_SPARK_DEBUG) {
+        const snapshot = fireFx.getSparkDebugSnapshot();
+        if (time - sparkDebugLastUiAt >= 100) {
+          sparkDebugOverlay.textContent =
+            `SPARK DEBUG (${snapshot.mode})` +
+            ` | flames:${snapshot.visibleFlameTiles}` +
+            ` | clusters:${snapshot.clusterCount}/${snapshot.clusteredTiles}` +
+            ` | bed:${snapshot.clusterBedInstances}` +
+            ` | plume:${snapshot.clusterPlumeSpawns}` +
+            ` | tip:${snapshot.heroTipSparkEmitted}/${snapshot.heroTipSparkAttempts}` +
+            ` | embers:${snapshot.freeEmberEmitted}/${snapshot.freeEmberAttempts}` +
+            ` | dropped:${snapshot.droppedByInstanceCap}` +
+            ` | total:${snapshot.finalSparkInstanceCount}`;
+          sparkDebugLastUiAt = time;
+        }
+        if (time - sparkDebugLastLogAt >= 1000) {
+          console.info("[threeTest:sparkdebug]", snapshot);
+          sparkDebugLastLogAt = time;
+        }
+      }
     }
     threePerf.fireFxMs = smoothPerf(threePerf.fireFxMs, performance.now() - fireFxStart);
     unitsLayer.update(world, lastSample, lastTerrainSize, simulationAlpha);
@@ -3735,8 +4427,7 @@ export const createThreeTest = (
     updateUnitTrayOverlay(time);
     refreshRoadOverlayIfNeeded();
     const sceneRenderStart = performance.now();
-    renderer.clear();
-    renderer.render(scene, camera);
+    renderWorldPass();
     renderer.clearDepth();
     const sceneRenderRawMs = performance.now() - sceneRenderStart;
     threePerf.sceneRenderLastMs = sceneRenderRawMs;
@@ -3827,8 +4518,7 @@ export const createThreeTest = (
       pendingResize = null;
     }
     renderer.compile(scene, camera);
-    renderer.clear();
-    renderer.render(scene, camera);
+    renderWorldPass();
     if (!THREE_TEST_DISABLE_HUD) {
       renderer.clearDepth();
       renderer.render(uiScene, uiCamera);
@@ -3876,6 +4566,15 @@ export const createThreeTest = (
       mode,
       manualSeasonT01: Number.isFinite(next.manualSeasonT01) ? wrap01(next.manualSeasonT01!) : undefined
     };
+    environmentTarget = {
+      seasonT01,
+      risk01,
+      fireLoad01: computeFireLoad01(world.lastActiveFires, world.grid.totalTiles)
+    };
+    if (!running) {
+      environmentCurrent = { ...environmentTarget };
+      applyEnvironmentPalette(true);
+    }
   };
 
   const setSeason = (index: number): void => {
@@ -3990,7 +4689,7 @@ export const createThreeTest = (
     const distance = Math.max(8, size * 0.6);
     camera.near = 0.1;
     camera.far = Math.max(200, distance * 6);
-    // Fog disabled: keep camera frustum and lighting adjustments only.
+    // Fog parameters are managed by CinematicGrade mode.
     camera.position.set(distance * 0.65, distance * 0.55, distance * 0.65);
     if (THREE_TEST_RIVER_VIEW === "top") {
       camera.position.set(0, distance * 1.35, 0.001);

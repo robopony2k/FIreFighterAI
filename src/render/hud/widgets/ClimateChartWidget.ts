@@ -13,6 +13,21 @@ import {
 } from "../../../ui/phase/forecastLayout.js";
 
 const clamp = (value: number, min: number, max: number): number => Math.min(max, Math.max(min, value));
+const withAlpha = (color: string, alpha: number): string => {
+  if (color.startsWith("rgba(")) {
+    const parts = color.slice(5, -1).split(",");
+    if (parts.length >= 3) {
+      return `rgba(${parts[0]?.trim() ?? "0"}, ${parts[1]?.trim() ?? "0"}, ${parts[2]?.trim() ?? "0"}, ${alpha})`;
+    }
+  }
+  if (color.startsWith("rgb(")) {
+    const parts = color.slice(4, -1).split(",");
+    if (parts.length >= 3) {
+      return `rgba(${parts[0]?.trim() ?? "0"}, ${parts[1]?.trim() ?? "0"}, ${parts[2]?.trim() ?? "0"}, ${alpha})`;
+    }
+  }
+  return color;
+};
 
 const drawRoundedRect = (ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, radius: number) => {
   const r = Math.min(radius, w * 0.5, h * 0.5);
@@ -34,6 +49,7 @@ export class ClimateChartWidget implements HudWidget {
   }
 
   render(ctx: CanvasRenderingContext2D, rect: Rect, world: WorldState, ui: HudState): void {
+    const theme = ui.theme;
     const compact = ui.slots[this.slot].compact;
     const forecast = ui.forecastOverride?.forecast ?? world.climateForecast ?? null;
     const forecastDay = ui.forecastOverride?.forecastDay ?? (world.climateForecastDay ?? 0);
@@ -60,40 +76,26 @@ export class ClimateChartWidget implements HudWidget {
     const axisY = chartY + chartHeight - chartPadding;
     const innerTop = chartY + chartPadding;
 
-    const cardBorder = "rgba(27, 27, 27, 0.12)";
-    const cardBackground = "rgba(255, 255, 255, 0.92)";
-    const chartBackground = "rgba(27, 27, 27, 0.05)";
-    const chartBorder = "rgba(27, 27, 27, 0.12)";
-    const bandColors = [
-      "rgba(43, 104, 140, 0.25)",
-      "rgba(90, 143, 78, 0.22)",
-      "rgba(240, 179, 59, 0.28)",
-      "rgba(209, 74, 44, 0.3)"
-    ];
-    const seasonColors = [
-      "rgba(43, 104, 140, 0.12)",
-      "rgba(90, 143, 78, 0.12)",
-      "rgba(240, 179, 59, 0.14)",
-      "rgba(209, 74, 44, 0.12)"
-    ];
-    const lineCool = "#2b688c";
-    const lineWarm = "#f0b33b";
-    const lineHot = "#d14a2c";
+    const bandColors = theme.chartBandColors;
+    const seasonColors = theme.chartSeasonColors;
+    const lineCool = theme.chartLineCool;
+    const lineWarm = theme.chartLineWarm;
+    const lineHot = theme.chartLineHot;
 
-    ctx.fillStyle = cardBackground;
-    ctx.strokeStyle = cardBorder;
+    ctx.fillStyle = theme.chartCardBackground;
+    ctx.strokeStyle = theme.chartCardBorder;
     drawRoundedRect(ctx, rect.x, rect.y, rect.width, rect.height, 10);
     ctx.fill();
     ctx.stroke();
 
-    ctx.fillStyle = "rgba(27, 27, 27, 0.8)";
+    ctx.fillStyle = theme.slotHeaderText;
     ctx.font = `600 ${titleFont}px ui-sans-serif, system-ui, sans-serif`;
     ctx.textBaseline = "top";
     ctx.textAlign = "left";
     ctx.fillText("Climate Forecast", rect.x + padding, rect.y + padding - 1);
 
     if (!forecast || forecast.risk.length === 0) {
-      ctx.fillStyle = "rgba(27, 27, 27, 0.6)";
+      ctx.fillStyle = theme.chartLabel;
       ctx.font = `500 ${labelFont}px ui-sans-serif, system-ui, sans-serif`;
       ctx.textAlign = "center";
       ctx.textBaseline = "middle";
@@ -102,8 +104,8 @@ export class ClimateChartWidget implements HudWidget {
       return;
     }
 
-    ctx.fillStyle = chartBackground;
-    ctx.strokeStyle = chartBorder;
+    ctx.fillStyle = theme.chartBackground;
+    ctx.strokeStyle = theme.chartBorder;
     drawRoundedRect(ctx, chartX, chartY, chartWidth, chartHeight, 8);
     ctx.fill();
     ctx.stroke();
@@ -126,7 +128,7 @@ export class ClimateChartWidget implements HudWidget {
       ctx.fillRect(chartX + band.x, innerTop, band.width, innerHeight);
     });
 
-    ctx.strokeStyle = "rgba(27, 27, 27, 0.2)";
+    ctx.strokeStyle = theme.chartGrid;
     ctx.lineWidth = 1;
     ctx.setLineDash([2, 4]);
     RISK_THRESHOLDS.forEach((value) => {
@@ -143,7 +145,7 @@ export class ClimateChartWidget implements HudWidget {
       height: chartHeight,
       padding: chartPadding
     });
-    ctx.strokeStyle = "rgba(27, 27, 27, 0.35)";
+    ctx.strokeStyle = theme.chartGrid;
     ctx.lineWidth = 1;
     ctx.setLineDash([2, 3]);
     yearLayout.markers.forEach((x) => {
@@ -154,7 +156,7 @@ export class ClimateChartWidget implements HudWidget {
       ctx.stroke();
     });
 
-    ctx.strokeStyle = "rgba(27, 27, 27, 0.25)";
+    ctx.strokeStyle = theme.chartGrid;
     ctx.setLineDash([1, 4]);
     seasonLayout.markers.forEach((x) => {
       const px = chartX + x;
@@ -168,9 +170,9 @@ export class ClimateChartWidget implements HudWidget {
     const riskLayout = buildRiskPaths(forecast.risk, { width: chartWidth, height: chartHeight, padding: chartPadding });
     if (riskLayout.points.length > 0) {
       const areaGradient = ctx.createLinearGradient(0, axisY, 0, innerTop);
-      areaGradient.addColorStop(0, "rgba(43, 104, 140, 0.45)");
-      areaGradient.addColorStop(0.6, "rgba(240, 179, 59, 0.45)");
-      areaGradient.addColorStop(1, "rgba(209, 74, 44, 0.45)");
+      areaGradient.addColorStop(0, withAlpha(lineCool, 0.45));
+      areaGradient.addColorStop(0.6, withAlpha(lineWarm, 0.45));
+      areaGradient.addColorStop(1, withAlpha(lineHot, 0.45));
       ctx.fillStyle = areaGradient;
       ctx.beginPath();
       riskLayout.points.forEach((point, index) => {
@@ -226,7 +228,7 @@ export class ClimateChartWidget implements HudWidget {
       const labels = ["Low", "Moderate", "High", "Extreme"];
       const maxLabels = compact ? 2 : labels.length;
       const step = Math.ceil(labels.length / maxLabels);
-      ctx.fillStyle = "rgba(27, 27, 27, 0.6)";
+      ctx.fillStyle = theme.chartLabel;
       ctx.font = `${tinyFont}px ui-sans-serif, system-ui, sans-serif`;
       ctx.textBaseline = "middle";
       ctx.textAlign = "left";
@@ -245,7 +247,7 @@ export class ClimateChartWidget implements HudWidget {
       const maxLabels = Math.max(1, Math.floor(chartWidth / 70));
       const step = Math.ceil(seasonLayout.labels.length / maxLabels);
       ctx.font = `${labelFont}px ui-sans-serif, system-ui, sans-serif`;
-      ctx.fillStyle = "rgba(27, 27, 27, 0.7)";
+      ctx.fillStyle = theme.chartLabel;
       ctx.textBaseline = "top";
       ctx.textAlign = "center";
       const seasonLabelY = chartY + chartHeight + 6;
@@ -263,7 +265,7 @@ export class ClimateChartWidget implements HudWidget {
       const maxLabels = Math.max(1, Math.floor(chartWidth / 90));
       const step = Math.ceil(yearLayout.labels.length / maxLabels);
       ctx.font = `${tinyFont}px ui-sans-serif, system-ui, sans-serif`;
-      ctx.fillStyle = "rgba(27, 27, 27, 0.65)";
+      ctx.fillStyle = theme.chartLabel;
       ctx.textBaseline = "top";
       ctx.textAlign = "center";
       const yearLabelY = chartY + chartHeight + 20;

@@ -12,14 +12,15 @@ import {
   GROWTH_WEATHER_MOISTURE_MIN,
   GROWTH_WEATHER_TEMP_MAX,
   GROWTH_WEATHER_TEMP_MIN,
-  HECTARES_PER_TILE
+  HECTARES_PER_TILE,
+  NEIGHBOR_DIRS,
+  TIME_SPEED_OPTIONS
 } from "../core/config.js";
 import { formatCurrency } from "../core/utils.js";
 import { getDayNightFactor, getFireSeasonIntensity, getPhaseInfo, PHASES } from "../core/time.js";
 import { setStatus, resetStatus } from "../core/state.js";
 import { maybeReport } from "./prof.js";
 import { inBounds, indexFor } from "../core/grid.js";
-import { NEIGHBOR_DIRS } from "../core/config.js";
 import { getCharacterBaseBudget, getCharacterDefinition } from "../core/characters.js";
 import {
   ambientTemp,
@@ -195,10 +196,107 @@ const getClimateSeasonInfo = (state: WorldState): { label: string; start: number
   };
 };
 
+const getTownCenterX = (town: WorldState["towns"][number]): number => (Number.isFinite(town.cx) ? town.cx : town.x);
+const getTownCenterY = (town: WorldState["towns"][number]): number => (Number.isFinite(town.cy) ? town.cy : town.y);
+
+const getMaxTimeSpeedIndex = (): number => Math.max(0, TIME_SPEED_OPTIONS.length - 1);
+
+const findStrongestFireTile = (state: WorldState): { x: number; y: number } | null => {
+  if (state.lastActiveFires <= 0 && !state.fireBoundsActive) {
+    return null;
+  }
+  const cols = state.grid.cols;
+  const rows = state.grid.rows;
+  const minX = state.fireBoundsActive ? Math.max(0, state.fireMinX) : 0;
+  const maxX = state.fireBoundsActive ? Math.min(cols - 1, state.fireMaxX) : cols - 1;
+  const minY = state.fireBoundsActive ? Math.max(0, state.fireMinY) : 0;
+  const maxY = state.fireBoundsActive ? Math.min(rows - 1, state.fireMaxY) : rows - 1;
+  let bestScore = 0;
+  let best: { x: number; y: number } | null = null;
+  for (let y = minY; y <= maxY; y += 1) {
+    for (let x = minX; x <= maxX; x += 1) {
+      const idx = indexFor(state.grid, x, y);
+      const fire = state.tileFire[idx] ?? 0;
+      if (fire <= 0) {
+        continue;
+      }
+      const heat = state.tileHeat[idx] ?? 0;
+      const score = fire * 2 + heat * 0.15;
+      if (score > bestScore || !best) {
+        bestScore = score;
+        best = { x, y };
+      }
+    }
+  }
+  return best;
+};
+
+const resolveNearestTownIdForTile = (state: WorldState, x: number, y: number): number => {
+  if (state.towns.length === 0) {
+    return -1;
+  }
+  let bestTownId = -1;
+  let bestDistSq = Number.POSITIVE_INFINITY;
+  for (const town of state.towns) {
+    const dx = x - getTownCenterX(town);
+    const dy = y - getTownCenterY(town);
+    const distSq = dx * dx + dy * dy;
+    if (distSq < bestDistSq || (distSq === bestDistSq && (bestTownId < 0 || town.id < bestTownId))) {
+      bestDistSq = distSq;
+      bestTownId = town.id;
+    }
+  }
+  return bestTownId;
+};
+
+const recordLatestFireAlert = (state: WorldState, tileX: number, tileY: number): void => {
+  state.latestFireAlert = {
+    id: state.nextFireAlertId++,
+    tileX,
+    tileY,
+    townId: resolveNearestTownIdForTile(state, tileX, tileY),
+    year: state.year,
+    careerDay: state.careerDay,
+    phaseDay: state.phaseDay
+  };
+};
+
 const isGrowthWeather = (state: WorldState): boolean =>
   state.climateTemp >= GROWTH_WEATHER_TEMP_MIN &&
   state.climateTemp <= GROWTH_WEATHER_TEMP_MAX &&
   state.climateMoisture >= GROWTH_WEATHER_MOISTURE_MIN;
+
+export const isSkipToNextFireAvailable = (state: WorldState): boolean =>
+  !state.gameOver && state.lastActiveFires <= 0 && !state.skipToNextFire;
+
+export const requestSkipToNextFire = (state: WorldState): boolean => {
+  if (!isSkipToNextFireAvailable(state)) {
+    return false;
+  }
+  state.skipToNextFire = {
+    active: true,
+    previousPaused: state.paused,
+    previousTimeSpeedIndex: state.timeSpeedIndex,
+    startedCareerDay: state.careerDay
+  };
+  state.paused = false;
+  state.timeSpeedIndex = getMaxTimeSpeedIndex();
+  setStatus(state, "Seeking next fire incident...");
+  return true;
+};
+
+export const cancelSkipToNextFire = (state: WorldState, reason?: string): void => {
+  const skip = state.skipToNextFire;
+  if (!skip) {
+    return;
+  }
+  state.paused = skip.previousPaused;
+  state.timeSpeedIndex = clamp(skip.previousTimeSpeedIndex, 0, getMaxTimeSpeedIndex());
+  state.skipToNextFire = null;
+  if (reason) {
+    setStatus(state, reason);
+  }
+};
 
 const getYearEventMessages = (year: number): string[] => YEAR_EVENTS[year] ?? [];
 
@@ -512,6 +610,9 @@ export function endGame(state: WorldState, victory: boolean, reason?: string): v
 }
 
 export function stepSim(state: WorldState, effects: EffectsState, rng: RNG, delta: number): void {
+  if (state.skipToNextFire && state.gameOver) {
+    cancelSkipToNextFire(state);
+  }
   if (state.paused || state.gameOver) {
     return;
   }
@@ -524,14 +625,20 @@ export function stepSim(state: WorldState, effects: EffectsState, rng: RNG, delt
   updateClimateForecastWindow(state);
   if (state.careerDay >= CAREER_TOTAL_DAYS && !state.gameOver) {
     endGame(state, true, "Career complete. The region passes into new hands.");
+    if (state.skipToNextFire) {
+      cancelSkipToNextFire(state);
+    }
     state.lastActiveFires = 0;
     return;
   }
   if (state.gameOver) {
+    if (state.skipToNextFire) {
+      cancelSkipToNextFire(state);
+    }
     state.lastActiveFires = 0;
     return;
   }
-
+  const hadActiveFires = state.lastActiveFires > 0;
   const climateRisk = getClimateRisk(state);
   stepTownSeasonScaling(state);
   stepTownAlertPosture(state, dayDelta);
@@ -592,13 +699,40 @@ export function stepSim(state: WorldState, effects: EffectsState, rng: RNG, delt
     state.fireSimAccumulator = 0;
   }
   state.lastActiveFires = activeFires;
+  if (!hadActiveFires && activeFires > 0) {
+    const strongest = findStrongestFireTile(state);
+    if (strongest) {
+      recordLatestFireAlert(state, strongest.x, strongest.y);
+      if (state.skipToNextFire) {
+        const previousSpeedIndex = clamp(state.skipToNextFire.previousTimeSpeedIndex, 0, getMaxTimeSpeedIndex());
+        const incident = state.latestFireAlert;
+        const nearestTown = incident && incident.townId >= 0
+          ? state.towns.find((town) => town.id === incident.townId) ?? null
+          : null;
+        state.timeSpeedIndex = previousSpeedIndex;
+        state.paused = true;
+        state.skipToNextFire = null;
+        if (nearestTown) {
+          setStatus(state, `Fire incident detected near ${nearestTown.name}. Simulation paused.`);
+        } else {
+          setStatus(state, "Fire incident detected. Simulation paused.");
+        }
+      }
+    }
+  }
 
   stepParticles(state, effects, delta);
   checkFailureConditions(state);
+  if (state.skipToNextFire && state.gameOver) {
+    cancelSkipToNextFire(state);
+  }
   maybeReport(state);
 }
 
 export function togglePause(state: WorldState): void {
+  if (state.skipToNextFire) {
+    cancelSkipToNextFire(state);
+  }
   state.paused = !state.paused;
   if (state.paused) {
     setStatus(state, "Simulation paused.");

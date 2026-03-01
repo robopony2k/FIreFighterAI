@@ -2,10 +2,12 @@ import type {
   ClimateForecast,
   ClimateTimeline,
   DeployMode,
+  FireAlertIncident,
   FireSimWork,
   FireSettings,
   Grid,
   Point,
+  SkipToNextFireState,
   Town,
   SeasonPhase,
   Tile,
@@ -168,6 +170,9 @@ export interface WorldState {
   totalLandTiles: number;
 
   lastActiveFires: number;
+  latestFireAlert: FireAlertIncident | null;
+  nextFireAlertId: number;
+  skipToNextFire: SkipToNextFireState | null;
 
   paused: boolean;
 
@@ -412,6 +417,9 @@ export function createInitialState(seed: number, grid: Grid): WorldState {
     totalLandTiles: 1,
 
     lastActiveFires: 0,
+    latestFireAlert: null,
+    nextFireAlertId: 1,
+    skipToNextFire: null,
 
     paused: false,
 

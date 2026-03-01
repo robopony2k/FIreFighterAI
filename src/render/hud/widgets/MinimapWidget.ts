@@ -17,10 +17,6 @@ const mix = (a: RGB, b: RGB, t: number): RGB => ({
   b: a.b + (b.b - a.b) * t
 });
 
-const THERMAL_LOW: RGB = { r: 20, g: 20, b: 22 };
-const THERMAL_MID: RGB = { r: 192, g: 70, b: 40 };
-const THERMAL_HIGH: RGB = { r: 242, g: 201, b: 76 };
-
 export class MinimapWidget implements HudWidget {
   public readonly type: WidgetType = WidgetKind.Minimap;
   private slot: WidgetSlot;
@@ -56,15 +52,15 @@ export class MinimapWidget implements HudWidget {
     ctx.rect(rect.x, rect.y, rect.width, rect.height);
     ctx.clip();
 
-    ctx.fillStyle = "rgba(10, 12, 16, 0.06)";
+    ctx.fillStyle = ui.theme.minimapPanelBackground;
     ctx.fillRect(rect.x, rect.y, rect.width, rect.height);
 
-    ctx.fillStyle = "rgba(8, 10, 14, 0.75)";
-    ctx.strokeStyle = "rgba(255, 255, 255, 0.15)";
+    ctx.fillStyle = ui.theme.minimapModeBackground;
+    ctx.strokeStyle = ui.theme.minimapModeBorder;
     ctx.lineWidth = 1;
     ctx.fillRect(this.modeRect.x, this.modeRect.y, this.modeRect.width, this.modeRect.height);
     ctx.strokeRect(this.modeRect.x + 0.5, this.modeRect.y + 0.5, this.modeRect.width - 1, this.modeRect.height - 1);
-    ctx.fillStyle = "#f2f2f2";
+    ctx.fillStyle = ui.theme.minimapModeText;
     ctx.font = "600 10px ui-sans-serif, system-ui, sans-serif";
     ctx.textAlign = "left";
     ctx.textBaseline = "middle";
@@ -85,9 +81,9 @@ export class MinimapWidget implements HudWidget {
       height: squareSize
     };
 
-    this.drawMinimap(ctx, mapRect, world, mode);
+    this.drawMinimap(ctx, mapRect, world, ui, mode);
 
-    ctx.strokeStyle = "rgba(27, 27, 27, 0.35)";
+    ctx.strokeStyle = ui.theme.minimapBorder;
     ctx.lineWidth = 1;
     ctx.strokeRect(mapRect.x + 0.5, mapRect.y + 0.5, mapRect.width - 1, mapRect.height - 1);
 
@@ -111,7 +107,7 @@ export class MinimapWidget implements HudWidget {
     }
   }
 
-  private drawMinimap(ctx: CanvasRenderingContext2D, rect: Rect, world: WorldState, mode: string): void {
+  private drawMinimap(ctx: CanvasRenderingContext2D, rect: Rect, world: WorldState, ui: HudState, mode: string): void {
     if (!this.mapCtx || rect.width <= 2 || rect.height <= 2) {
       return;
     }
@@ -163,9 +159,9 @@ export class MinimapWidget implements HudWidget {
           } else {
             const heat = clamp(fire[idx] ?? 0, 0, 1);
             if (heat <= 0.5) {
-              color = mix(THERMAL_LOW, THERMAL_MID, heat / 0.5);
+              color = mix(ui.theme.thermalLow, ui.theme.thermalMid, heat / 0.5);
             } else {
-              color = mix(THERMAL_MID, THERMAL_HIGH, (heat - 0.5) / 0.5);
+              color = mix(ui.theme.thermalMid, ui.theme.thermalHigh, (heat - 0.5) / 0.5);
             }
           }
           const base = (y * mapWidth + x) * 4;
@@ -219,7 +215,7 @@ export class MinimapWidget implements HudWidget {
     ctx.save();
     const mapped = toMap(center.x, center.y);
     const len = Math.min(rect.width, rect.height) * 0.12;
-    ctx.strokeStyle = "rgba(80, 160, 220, 0.85)";
+    ctx.strokeStyle = ui.theme.minimapViewportStroke;
     ctx.lineWidth = 1;
     ctx.beginPath();
     ctx.moveTo(mapped.x - len, mapped.y);
@@ -227,7 +223,7 @@ export class MinimapWidget implements HudWidget {
     ctx.moveTo(mapped.x, mapped.y - len);
     ctx.lineTo(mapped.x, mapped.y + len);
     ctx.stroke();
-    ctx.fillStyle = "rgba(80, 160, 220, 0.45)";
+    ctx.fillStyle = ui.theme.minimapViewportFill;
     ctx.beginPath();
     ctx.arc(mapped.x, mapped.y, Math.max(2, len * 0.15), 0, Math.PI * 2);
     ctx.fill();

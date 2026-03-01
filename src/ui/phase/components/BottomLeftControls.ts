@@ -10,6 +10,8 @@ export type BottomControlsData = {
   showSpeedControl: boolean;
   paused: boolean;
   timeSpeedIndex: number;
+  skipToNextFireActive: boolean;
+  canSkipToNextFire: boolean;
   status?: string;
 };
 
@@ -42,6 +44,7 @@ export const createBottomLeftControls = (): BottomControlsView => {
     <button data-action="time-speed-1" data-speed-index="1" aria-label="Speed 1x" title="Speed 1x">1x</button>
     <button data-action="time-speed-2" data-speed-index="2" aria-label="Speed 2x" title="Speed 2x">2x</button>
     <button data-action="time-speed-8" data-speed-index="8" aria-label="Speed Max" title="Speed Max">MAX</button>
+    <button data-action="time-skip-next-fire" aria-label="Skip to Next Fire" title="Skip to Next Fire">Next Fire</button>
   `;
   timeGroup.append(titleRow, speedRow);
 
@@ -81,6 +84,7 @@ export const createBottomLeftControls = (): BottomControlsView => {
   element.append(timeGroup, status);
 
   const pauseButton = speedRow.querySelector('[data-action="pause"]') as HTMLButtonElement;
+  const nextFireButton = speedRow.querySelector('[data-action="time-skip-next-fire"]') as HTMLButtonElement;
   const speedButtons = Array.from(speedRow.querySelectorAll<HTMLButtonElement>("[data-speed-index]"));
   let audioState: ChannelSettings = { muted: false, volume: 0.65 };
   let musicState: ChannelSettings = { muted: false, volume: 0.35 };
@@ -151,6 +155,19 @@ export const createBottomLeftControls = (): BottomControlsView => {
         const index = Number(button.dataset.speedIndex ?? 0);
         button.classList.toggle("is-active", data.timeSpeedIndex === index);
       });
+      const nextFireDisabled = data.skipToNextFireActive || !data.canSkipToNextFire;
+      nextFireButton.disabled = nextFireDisabled;
+      nextFireButton.textContent = data.skipToNextFireActive ? "Seeking..." : "Next Fire";
+      if (data.skipToNextFireActive) {
+        nextFireButton.setAttribute("title", "Advancing time to next fire incident.");
+        nextFireButton.setAttribute("aria-label", "Seeking next fire");
+      } else if (data.canSkipToNextFire) {
+        nextFireButton.setAttribute("title", "Advance time until the next fire starts.");
+        nextFireButton.setAttribute("aria-label", "Skip to next fire");
+      } else {
+        nextFireButton.setAttribute("title", "Available when no fires are currently active.");
+        nextFireButton.setAttribute("aria-label", "Skip to next fire unavailable");
+      }
       const pauseLabel = data.paused ? "Resume" : "Pause";
       pauseButton.textContent = data.paused ? ">" : "||";
       pauseButton.setAttribute("aria-label", pauseLabel);

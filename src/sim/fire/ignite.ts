@@ -4,6 +4,7 @@ import type { WorldState } from "../../core/state.js";
 import { indexFor } from "../../core/grid.js";
 import { markFireBlockActiveByTile } from "./activeBlocks.js";
 import { markFireBounds } from "./bounds.js";
+import { sampleIgnitionFireSeed, sampleIgnitionHeatMultiplier } from "./ignitionTuning.js";
 
 export function igniteRandomFire(state: WorldState, rng: RNG, dayDelta: number, intensity: number): void {
   const ignitionChance = state.fireSettings.ignitionChancePerDay * dayDelta * intensity;
@@ -32,8 +33,8 @@ export function igniteRandomFire(state: WorldState, rng: RNG, dayDelta: number, 
     ) {
       continue;
     }
-    tile.fire = 0.35 + rng.next() * 0.25;
-    tile.heat = Math.max(tile.heat, tile.ignitionPoint * 1.3);
+    tile.fire = sampleIgnitionFireSeed(rng, "random");
+    tile.heat = Math.max(tile.heat, tile.ignitionPoint * sampleIgnitionHeatMultiplier(rng));
     state.tileFire[idx] = tile.fire;
     state.tileHeat[idx] = tile.heat;
     markFireBounds(state, x, y);

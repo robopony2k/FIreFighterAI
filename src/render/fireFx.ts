@@ -56,6 +56,7 @@ export const drawFireFx = (
 
   const pColor: RGB = { r: 0, g: 0, b: 0 };
   const timeSeconds = now / 1000;
+  const flameTimeSeconds = timeSeconds * 0.56;
 
   ctx.globalCompositeOperation = "lighter";
 
@@ -188,7 +189,7 @@ export const drawFireFx = (
               break;
           }
           const rate = 1.0 / maxPhaseDuration;
-          const phase = (timeSeconds * rate + s3) % 1.0;
+          const phase = (flameTimeSeconds * rate + s3) % 1.0;
 
           const baseSpread = (samplingEnabled ? TILE_SIZE * 0.4 * sampleStep : TILE_SIZE * 0.3) * (0.85 + intensity * 0.4);
           const ox = (s1 - 0.5) * baseSpread;
@@ -202,7 +203,7 @@ export const drawFireFx = (
           const curl = Math.sin(phase * 18 + s1 * 6.28) * curlAmp;
 
           const windStrength = state.wind.strength;
-          const windFlicker = 0.7 + 0.3 * Math.sin(timeSeconds * 3.6 + s2 * Math.PI * 2);
+          const windFlicker = 0.7 + 0.3 * Math.sin(flameTimeSeconds * 3.6 + s2 * Math.PI * 2);
           const windStrengthBoost = 0.35 + windStrength * windStrength * 0.9;
           const windScale =
             TILE_SIZE * (0.14 + intensity * 0.35 + heatIntensity * 0.3) * windStrengthBoost * windFlicker;

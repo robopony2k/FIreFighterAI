@@ -128,6 +128,10 @@ const smokeFragmentShader = `
   uniform float uOcclK;
   uniform float uWarmStartY;
   uniform float uWarmRangeY;
+  uniform vec3 uUnderglowColor;
+  uniform float uUnderglowStrength;
+  uniform float uUnderglowStartY;
+  uniform float uUnderglowRangeY;
   uniform float uRimInner;
   uniform float uRimOuter;
 
@@ -243,14 +247,24 @@ const smokeFragmentShader = `
     vec3 color = mix(uWarmCol, uCoolCol, heightT);
     float warmBoost = (1.0 - heightT) * (1.0 - vAge01) * (0.55 + 0.85 * vIntensity);
     color += uWarmStainCol * (warmBoost * 0.4);
+    float underglowEndY = uUnderglowStartY + max(0.001, uUnderglowRangeY);
+    float underglowHeight = 1.0 - smoothstep(uUnderglowStartY, underglowEndY, vWorldPos.y);
+    float underglowAge = 1.0 - smoothstep(0.45, 0.95, vAge01);
+    float underglow =
+      uUnderglowStrength *
+      underglowHeight *
+      underglowAge *
+      (0.4 + 0.6 * vIntensity) *
+      (0.5 + 0.5 * (1.0 - vSoot));
+    color += uUnderglowColor * underglow;
 
     float sootPocket = smoothstep(0.56, 0.92, billow + edgeNoise * 0.28);
-    float sootMix = vSoot * sootPocket * (0.13 + coreEnvelope * 0.34);
-    float sootDark = exp(-(0.5 + mix(0.22, 0.8, vSoot)) * thickness * 0.14);
-    color *= mix(1.0, 0.84, sootMix);
-    color *= mix(1.0, sootDark, 0.6);
-    // Keep single-particle centers a touch lighter; darkest read should come from overlap.
-    float coreLift = (0.08 + 0.12 * vIntensity) * pow(coreEnvelope, 0.82) * (0.72 + 0.28 * (1.0 - vSoot));
+    float sootMix = vSoot * sootPocket * (0.2 + coreEnvelope * 0.48);
+    float sootDark = exp(-(0.5 + mix(0.22, 0.8, vSoot)) * thickness * 0.24);
+    color *= mix(1.0, 0.78, sootMix);
+    color *= mix(1.0, sootDark, 0.82);
+    // Keep core lift subtle so dense plumes stay weighty instead of chalky.
+    float coreLift = (0.03 + 0.07 * vIntensity) * pow(coreEnvelope, 0.75) * (0.5 + 0.5 * (1.0 - vSoot));
     color += vec3(coreLift);
 
     // Fake backlit edge scattering: brighter near sprite rim when sun is behind view.
@@ -273,6 +287,10 @@ export type SmokeShaderMaterialOptions = {
   warmColor?: THREE.ColorRepresentation;
   coolColor?: THREE.ColorRepresentation;
   warmStainColor?: THREE.ColorRepresentation;
+  underglowColor?: THREE.ColorRepresentation;
+  underglowStrength?: number;
+  underglowStartY?: number;
+  underglowRangeY?: number;
   sunDirection?: THREE.Vector3;
   sunTint?: THREE.ColorRepresentation;
   baseSigma?: number;
@@ -301,6 +319,10 @@ export const createSmokeShaderMaterial = (options: SmokeShaderMaterialOptions = 
       uWarmCol: { value: toColor(options.warmColor, new THREE.Color(0.49, 0.36, 0.26)) },
       uCoolCol: { value: toColor(options.coolColor, new THREE.Color(0.56, 0.6, 0.66)) },
       uWarmStainCol: { value: toColor(options.warmStainColor, new THREE.Color(0.36, 0.18, 0.07)) },
+      uUnderglowColor: { value: toColor(options.underglowColor, new THREE.Color(1.0, 0.45, 0.16)) },
+      uUnderglowStrength: { value: options.underglowStrength ?? 0 },
+      uUnderglowStartY: { value: options.underglowStartY ?? 0 },
+      uUnderglowRangeY: { value: options.underglowRangeY ?? 8.0 },
       uSunDir: { value: sunDirection },
       uSunTint: { value: toColor(options.sunTint, new THREE.Color(0.97, 0.9, 0.82)) },
       uBaseSigma: { value: options.baseSigma ?? 3.15 },

@@ -75,6 +75,10 @@ export const initPhaseUI = (container: HTMLElement): PhaseUiApi => {
     state.setInteractionMode(getInteractionMode(world, inputState));
     state.setPaused(world.paused);
     state.setTimeSpeedIndex(world.timeSpeedIndex);
+    state.setSkipToNextFireState(
+      !!world.skipToNextFire,
+      !world.gameOver && world.lastActiveFires <= 0 && !world.skipToNextFire
+    );
     state.setAlert(world.statusMessage && world.statusMessage !== "Ready." ? world.statusMessage : null);
     const windStrength = Math.round(world.wind.strength * 10);
     const windLabel = windStrength > 0 ? `Wind ${world.wind.name} ${windStrength}` : "Wind Calm";

@@ -11,6 +11,7 @@ import { emitSmokeAt } from "./particles.js";
 import type { EffectsState } from "../core/effectsState.js";
 import { resetFireBounds } from "./fire/bounds.js";
 import { igniteRandomFire } from "./fire/ignite.js";
+import { sampleIgnitionFireSeed, sampleIgnitionHeatMultiplier } from "./fire/ignitionTuning.js";
 import { buildFireWorkBlocks, ensureFireBlocks, finalizeFireBlocks, markFireBlockNextByTile } from "./fire/activeBlocks.js";
 import { profEnd, profStart } from "./prof.js";
 const CARDINAL_DIRS = [
@@ -300,6 +301,30 @@ export function stepFire(state, effects: EffectsState, rng, delta, spreadScale, 
         }
         tileIgniteAt[idx] = time;
     };
+    const hasNeighborFireAt = (x, y) => {
+        if (fireQuality === 0) {
+            if (x < cols - 1 && fire[y * cols + x + 1] > fireEps)
+                return true;
+            if (x > 0 && fire[y * cols + x - 1] > fireEps)
+                return true;
+            if (y < rows - 1 && fire[(y + 1) * cols + x] > fireEps)
+                return true;
+            if (y > 0 && fire[(y - 1) * cols + x] > fireEps)
+                return true;
+            return false;
+        }
+        for (const offset of NEIGHBOR_OFFSETS) {
+            const nx = x + offset.dx;
+            const ny = y + offset.dy;
+            if (nx < 0 || ny < 0 || nx >= cols || ny >= rows) {
+                continue;
+            }
+            if (fire[ny * cols + nx] > fireEps) {
+                return true;
+            }
+        }
+        return false;
+    };
     const addHeat = (idx, value) => {
         if (value <= 0) {
             return;
@@ -334,7 +359,13 @@ export function stepFire(state, effects: EffectsState, rng, delta, spreadScale, 
                 const tid = typeId[idx];
                 const scheduledAt = tileIgniteAt[idx];
                 if (scheduledAt <= currentTime) {
-                    if (fireValue <= fireEps && fuelValue > 0 && isIgnitableTypeId(tid)) {
+                    const hasNeighborFire = hasNeighborFireAt(x, y);
+                    const ignitionThreshold = ignitionPoint[idx] / ignitionBoost;
+                    const residualHeatIgnitionReady = heatValue >= ignitionThreshold * 1.18;
+                    if (fireValue <= fireEps &&
+                        fuelValue > 0 &&
+                        isIgnitableTypeId(tid) &&
+                        (hasNeighborFire || residualHeatIgnitionReady)) {
                         igniteBuffer[igniteCount] = idx;
                         igniteCount += 1;
                     }
@@ -444,29 +475,7 @@ export function stepFire(state, effects: EffectsState, rng, delta, spreadScale, 
                 }
                 if (!burning && fuelValue > 0 && heatValue >= ignitionPoint[idx] / ignitionBoost && isIgnitableTypeId(tid)) {
                     if (tileIgniteAt[idx] === Number.POSITIVE_INFINITY) {
-                        let hasNeighborFire = false;
-                        if (fireQuality === 0) {
-                            if (x < cols - 1 && fire[idx + 1] > fireEps)
-                                hasNeighborFire = true;
-                            else if (x > 0 && fire[idx - 1] > fireEps)
-                                hasNeighborFire = true;
-                            else if (y < rows - 1 && fire[idx + cols] > fireEps)
-                                hasNeighborFire = true;
-                            else if (y > 0 && fire[idx - cols] > fireEps)
-                                hasNeighborFire = true;
-                        } else {
-                            for (const offset of NEIGHBOR_OFFSETS) {
-                                const nx = x + offset.dx;
-                                const ny = y + offset.dy;
-                                if (nx < 0 || ny < 0 || nx >= cols || ny >= rows) {
-                                    continue;
-                                }
-                                if (fire[ny * cols + nx] > fireEps) {
-                                    hasNeighborFire = true;
-                                    break;
-                                }
-                            }
-                        }
+                        const hasNeighborFire = hasNeighborFireAt(x, y);
                         if (hasNeighborFire) {
                             const hazard = (heatValue - ignitionPoint[idx] / ignitionBoost) * 0.55 * ignitionBoost;
                             if (hazard > 0) {
@@ -574,13 +583,25 @@ export function stepFire(state, effects: EffectsState, rng, delta, spreadScale, 
         if (!isIgnitableTypeId(typeId[idx])) {
             continue;
         }
-        const seeded = 0.2 + rng.next() * 0.25;
+        const seeded = sampleIgnitionFireSeed(rng, "scheduled");
         fire[idx] = seeded;
-        heat[idx] = Math.min(heatCap, Math.max(heat[idx], ignitionPoint[idx] * 1.2));
+        const ignitionHeat = ignitionPoint[idx] * sampleIgnitionHeatMultiplier(rng);
+        heat[idx] = Math.min(heatCap, Math.max(heat[idx], ignitionHeat));
         const tile = state.tiles[idx];
         tile.fire = fire[idx];
         tile.heat = heat[idx];
         markFireBlockNextByTile(state, idx);
+        activeFires += 1;
+        const x = idx % cols;
+        const y = Math.floor(idx / cols);
+        if (x < fireMinX)
+            fireMinX = x;
+        if (x > fireMaxX)
+            fireMaxX = x;
+        if (y < fireMinY)
+            fireMinY = y;
+        if (y > fireMaxY)
+            fireMaxY = y;
     }
     profEnd("fireIgnite", igniteStart);
     finalizeFireBlocks(state);

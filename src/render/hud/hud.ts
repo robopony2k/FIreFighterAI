@@ -100,11 +100,12 @@ const getSpeedButtonRect = (rect: Rect): Rect => ({
 });
 
 const renderTopBar = (ctx: CanvasRenderingContext2D, world: WorldState, ui: HudState, rect: Rect): void => {
+  const theme = ui.theme;
   const padding = 12;
   drawRoundedRect(ctx, rect.x, rect.y, rect.width, rect.height, 10);
-  ctx.fillStyle = "rgba(8, 10, 14, 0.78)";
+  ctx.fillStyle = theme.topBarBackground;
   ctx.fill();
-  ctx.strokeStyle = "rgba(255, 255, 255, 0.18)";
+  ctx.strokeStyle = theme.topBarBorder;
   ctx.lineWidth = 1;
   ctx.stroke();
 
@@ -131,7 +132,7 @@ const renderTopBar = (ctx: CanvasRenderingContext2D, world: WorldState, ui: HudS
   const speed = TIME_SPEED_OPTIONS[speedIndex] ?? 1;
   const rightText = `APPROVAL ${approval} | HOUSES ${liveHouses}`;
 
-  ctx.fillStyle = "#f2f2f2";
+  ctx.fillStyle = theme.textPrimary;
   ctx.font = "600 12px ui-sans-serif, system-ui, sans-serif";
   ctx.textBaseline = "middle";
 
@@ -140,12 +141,12 @@ const renderTopBar = (ctx: CanvasRenderingContext2D, world: WorldState, ui: HudS
   ctx.textAlign = "center";
   ctx.fillText(centerText, rect.x + rect.width / 2, rect.y + rect.height / 2);
   const speedRect = getSpeedButtonRect(rect);
-  ctx.fillStyle = "rgba(30, 36, 48, 0.9)";
+  ctx.fillStyle = theme.speedButtonBackground;
   drawRoundedRect(ctx, speedRect.x, speedRect.y, speedRect.width, speedRect.height, 8);
   ctx.fill();
-  ctx.strokeStyle = "rgba(255, 255, 255, 0.22)";
+  ctx.strokeStyle = theme.speedButtonBorder;
   ctx.stroke();
-  ctx.fillStyle = "#f2f2f2";
+  ctx.fillStyle = theme.textPrimary;
   ctx.textAlign = "center";
   ctx.font = "700 11px ui-sans-serif, system-ui, sans-serif";
   ctx.fillText("-", speedRect.x + SPEED_BUTTON_SIDE * 0.5, speedRect.y + speedRect.height / 2);
@@ -161,6 +162,7 @@ const renderToasts = (ctx: CanvasRenderingContext2D, ui: HudState, area: Rect): 
   if (ui.toasts.length === 0) {
     return;
   }
+  const theme = ui.theme;
   ctx.save();
   const toastWidth = area.width;
   const padding = 10;
@@ -175,16 +177,16 @@ const renderToasts = (ctx: CanvasRenderingContext2D, ui: HudState, area: Rect): 
     }
     const bg =
       toast.severity === "error"
-        ? "rgba(176, 63, 46, 0.92)"
+        ? theme.toastErrorBackground
         : toast.severity === "warning"
-          ? "rgba(191, 129, 36, 0.92)"
-          : "rgba(40, 48, 60, 0.92)";
+          ? theme.toastWarningBackground
+          : theme.toastInfoBackground;
     ctx.fillStyle = bg;
-    ctx.strokeStyle = "rgba(255, 255, 255, 0.18)";
+    ctx.strokeStyle = theme.toastBorder;
     drawRoundedRect(ctx, area.x, y, toastWidth, height, 8);
     ctx.fill();
     ctx.stroke();
-    ctx.fillStyle = "#f2f2f2";
+    ctx.fillStyle = theme.toastText;
     ctx.textAlign = "left";
     ctx.textBaseline = "top";
     let lineY = y + padding;
@@ -213,6 +215,7 @@ const autoToasts = (world: WorldState, ui: HudState): void => {
 const renderDebugCellOverlay = (
   ctx: CanvasRenderingContext2D,
   world: WorldState,
+  ui: HudState,
   inputState: InputState,
   width: number,
   height: number
@@ -281,11 +284,11 @@ const renderDebugCellOverlay = (
   const boxHeight = lines.length * lineHeight + padding * 2;
   const boxX = padding;
   const boxY = Math.max(padding, height - boxHeight - padding);
-  ctx.fillStyle = "rgba(0, 0, 0, 0.75)";
+  ctx.fillStyle = ui.theme.debugPanelBackground;
   ctx.fillRect(boxX, boxY, boxWidth, boxHeight);
-  ctx.strokeStyle = "rgba(255, 255, 255, 0.2)";
+  ctx.strokeStyle = ui.theme.debugPanelBorder;
   ctx.strokeRect(boxX, boxY, boxWidth, boxHeight);
-  ctx.fillStyle = "#e8e8e8";
+  ctx.fillStyle = ui.theme.debugPanelText;
   lines.forEach((line, i) => {
     ctx.fillText(line, boxX + padding, boxY + padding + i * lineHeight);
   });
@@ -322,18 +325,18 @@ export const renderHud = (
     const slotState = ui.slots[slot];
     const label = widgetLabel(slotState.widget, slotState.compact);
 
-    ctx.fillStyle = "rgba(255, 255, 255, 0.92)";
-    ctx.strokeStyle = "rgba(27, 27, 27, 0.18)";
+    ctx.fillStyle = ui.theme.slotCardBackground;
+    ctx.strokeStyle = ui.theme.slotCardBorder;
     drawRoundedRect(ctx, slotRect.x, slotRect.y, slotRect.width, slotRect.height, 10);
     ctx.fill();
     ctx.stroke();
 
-    ctx.fillStyle = "rgba(8, 10, 14, 0.08)";
+    ctx.fillStyle = ui.theme.slotHeaderBackground;
     ctx.fillRect(headerRect.x, headerRect.y, headerRect.width, headerRect.height);
-    ctx.strokeStyle = "rgba(27, 27, 27, 0.2)";
+    ctx.strokeStyle = ui.theme.slotHeaderBorder;
     ctx.strokeRect(headerRect.x + 0.5, headerRect.y + 0.5, headerRect.width - 1, headerRect.height - 1);
 
-    ctx.fillStyle = "rgba(27, 27, 27, 0.8)";
+    ctx.fillStyle = ui.theme.slotHeaderText;
     ctx.font = "700 11px ui-sans-serif, system-ui, sans-serif";
     ctx.textBaseline = "middle";
     ctx.textAlign = "left";
@@ -349,7 +352,7 @@ export const renderHud = (
     }
   });
 
-  renderDebugCellOverlay(ctx, world, inputState, width, height);
+  renderDebugCellOverlay(ctx, world, ui, inputState, width, height);
   renderToasts(ctx, ui, layout.toastArea);
 };
 

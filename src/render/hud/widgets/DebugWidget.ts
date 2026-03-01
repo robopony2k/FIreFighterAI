@@ -14,13 +14,16 @@ export class DebugWidget implements HudWidget {
 
   render(ctx: CanvasRenderingContext2D, rect: Rect, world: WorldState, ui: HudState): void {
     const padding = 8;
+    const theme = ui.theme;
     ctx.save();
     ctx.beginPath();
     ctx.rect(rect.x, rect.y, rect.width, rect.height);
     ctx.clip();
-    ctx.fillStyle = "rgba(12, 14, 18, 0.6)";
+    ctx.fillStyle = theme.debugPanelBackground;
     ctx.fillRect(rect.x, rect.y, rect.width, rect.height);
-    ctx.fillStyle = "#f2f2f2";
+    ctx.strokeStyle = theme.debugPanelBorder;
+    ctx.strokeRect(rect.x + 0.5, rect.y + 0.5, rect.width - 1, rect.height - 1);
+    ctx.fillStyle = theme.debugPanelText;
     ctx.font = "600 11px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace";
     ctx.textBaseline = "top";
     ctx.textAlign = "left";

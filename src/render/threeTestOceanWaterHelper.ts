@@ -56,11 +56,24 @@ type ThreeTestOceanWaterHelperOptions = {
   skyHorizonColor: number;
 };
 
+type OceanWaterPalette = {
+  skyTopColor: THREE.ColorRepresentation;
+  skyHorizonColor: THREE.ColorRepresentation;
+  shallowColor: THREE.ColorRepresentation;
+  deepColor: THREE.ColorRepresentation;
+  sunColor: THREE.ColorRepresentation;
+};
+
 export class ThreeTestOceanWaterHelper {
   private readonly scene: THREE.Scene;
   private readonly keyLight: THREE.DirectionalLight;
-  private readonly skyTopColor: number;
-  private readonly skyHorizonColor: number;
+  private currentPalette: {
+    skyTopColor: THREE.Color;
+    skyHorizonColor: THREE.Color;
+    shallowColor: THREE.Color;
+    deepColor: THREE.Color;
+    sunColor: THREE.Color;
+  };
   private mesh: THREE.Mesh | null = null;
   private uniforms: OceanUniforms | null = null;
   private mask: THREE.Texture | null = null;
@@ -75,8 +88,29 @@ export class ThreeTestOceanWaterHelper {
   constructor(options: ThreeTestOceanWaterHelperOptions) {
     this.scene = options.scene;
     this.keyLight = options.keyLight;
-    this.skyTopColor = options.skyTopColor;
-    this.skyHorizonColor = options.skyHorizonColor;
+    this.currentPalette = {
+      skyTopColor: new THREE.Color(options.skyTopColor),
+      skyHorizonColor: new THREE.Color(options.skyHorizonColor),
+      shallowColor: new THREE.Color(0x2f87c8),
+      deepColor: new THREE.Color(0x1b5078),
+      sunColor: new THREE.Color(0xfff0cf)
+    };
+  }
+
+  public setPalette(palette: OceanWaterPalette): void {
+    this.currentPalette.skyTopColor.set(palette.skyTopColor);
+    this.currentPalette.skyHorizonColor.set(palette.skyHorizonColor);
+    this.currentPalette.shallowColor.set(palette.shallowColor);
+    this.currentPalette.deepColor.set(palette.deepColor);
+    this.currentPalette.sunColor.set(palette.sunColor);
+    if (!this.uniforms) {
+      return;
+    }
+    this.uniforms.u_skyTopColor.value.copy(this.currentPalette.skyTopColor);
+    this.uniforms.u_skyHorizonColor.value.copy(this.currentPalette.skyHorizonColor);
+    this.uniforms.u_color.value.copy(this.currentPalette.shallowColor);
+    this.uniforms.u_deepColor.value.copy(this.currentPalette.deepColor);
+    this.uniforms.u_sunColor.value.copy(this.currentPalette.sunColor);
   }
 
   public setNormalMaps(normal1: THREE.Texture, normal2: THREE.Texture): void {
@@ -164,8 +198,8 @@ export class ThreeTestOceanWaterHelper {
       u_supportMap: { value: this.supportMap },
       u_domainMap: { value: this.domainMap },
       u_shoreSdf: { value: this.shoreSdf },
-      u_color: { value: new THREE.Color(0x2f87c8) },
-      u_deepColor: { value: new THREE.Color(0x1b5078) },
+      u_color: { value: this.currentPalette.shallowColor.clone() },
+      u_deepColor: { value: this.currentPalette.deepColor.clone() },
       u_opacity: { value: 0.985 },
       u_waveScale: { value: 0.38 },
       u_normalMap1: { value: this.normal1 as THREE.Texture },
@@ -177,9 +211,9 @@ export class ThreeTestOceanWaterHelper {
       u_shininess: { value: 72.0 },
       u_lightDir: { value: this.keyLight.position.clone().normalize() },
       u_specular: { value: 0.42 },
-      u_skyTopColor: { value: new THREE.Color(this.skyTopColor) },
-      u_skyHorizonColor: { value: new THREE.Color(this.skyHorizonColor) },
-      u_sunColor: { value: new THREE.Color(0xfff0cf) },
+      u_skyTopColor: { value: this.currentPalette.skyTopColor.clone() },
+      u_skyHorizonColor: { value: this.currentPalette.skyHorizonColor.clone() },
+      u_sunColor: { value: this.currentPalette.sunColor.clone() },
       u_waveAmp: { value: 0.088 },
       u_waveFreq: { value: new THREE.Vector2(0.44, 0.39) },
       u_waveVariance: { value: 1.62 },

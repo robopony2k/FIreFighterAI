@@ -17,9 +17,10 @@ const { MAP_SIZE_PRESETS } = await import(distImport(["core", "config.js"]));
 const { generateMap } = await import(distImport(["mapgen", "index.js"]));
 
 const allSizes = ["medium", "massive", "colossal", "gigantic", "titanic"];
-const quickSizes = ["medium", "massive", "colossal"];
-const sizes = process.argv.includes("--full") ? allSizes : quickSizes;
-const seeds = [1337];
+const quickSizes = ["medium", "massive"];
+const fullMode = process.argv.includes("--full");
+const sizes = fullMode ? allSizes : quickSizes;
+const seeds = fullMode ? [1337] : [1337, 2, 4, 9001];
 
 const createGrid = (sizeId) => {
   const dim = MAP_SIZE_PRESETS[sizeId];
@@ -98,13 +99,84 @@ const analyzeForestPatches = (state) => {
   };
 };
 
+const buildOceanMask = (state) => {
+  const { cols, rows, totalTiles } = state.grid;
+  const riverMask = state.tileRiverMask;
+  const oceanMask = new Uint8Array(totalTiles);
+  const queue = new Int32Array(totalTiles);
+  let head = 0;
+  let tail = 0;
+  const push = (x, y) => {
+    if (x < 0 || y < 0 || x >= cols || y >= rows) {
+      return;
+    }
+    const idx = y * cols + x;
+    if (oceanMask[idx] > 0) {
+      return;
+    }
+    if (state.tiles[idx]?.type !== "water") {
+      return;
+    }
+    if (riverMask[idx] > 0) {
+      return;
+    }
+    oceanMask[idx] = 1;
+    queue[tail] = idx;
+    tail += 1;
+  };
+
+  for (let x = 0; x < cols; x += 1) {
+    push(x, 0);
+    push(x, rows - 1);
+  }
+  for (let y = 1; y < rows - 1; y += 1) {
+    push(0, y);
+    push(cols - 1, y);
+  }
+
+  while (head < tail) {
+    const idx = queue[head];
+    head += 1;
+    const x = idx % cols;
+    const y = Math.floor(idx / cols);
+    const neighbors = [
+      [x - 1, y],
+      [x + 1, y],
+      [x, y - 1],
+      [x, y + 1]
+    ];
+    for (let i = 0; i < neighbors.length; i += 1) {
+      const [nx, ny] = neighbors[i];
+      if (nx < 0 || ny < 0 || nx >= cols || ny >= rows) {
+        continue;
+      }
+      const nIdx = ny * cols + nx;
+      if (oceanMask[nIdx] > 0) {
+        continue;
+      }
+      if (state.tiles[nIdx]?.type !== "water" || riverMask[nIdx] > 0) {
+        continue;
+      }
+      oceanMask[nIdx] = 1;
+      queue[tail] = nIdx;
+      tail += 1;
+    }
+  }
+
+  return oceanMask;
+};
+
 const analyzeRiverConnectivity = (state) => {
   const { cols, rows, totalTiles } = state.grid;
   const riverMask = state.tileRiverMask;
+  const oceanMask = buildOceanMask(state);
   let riverCells = 0;
   let diagOnlyLinks = 0;
   let isolatedCells = 0;
   let orthConnectedCells = 0;
+  let riverComponentCount = 0;
+  let detachedRiverComponents = 0;
+  let detachedRiverCells = 0;
   const hasRiver = (x, y) => x >= 0 && y >= 0 && x < cols && y < rows && riverMask[y * cols + x] > 0;
   for (let i = 0; i < totalTiles; i += 1) {
     if (!(riverMask[i] > 0)) {
@@ -131,10 +203,67 @@ const analyzeRiverConnectivity = (state) => {
       isolatedCells += 1;
     }
   }
+  const visited = new Uint8Array(totalTiles);
+  const queue = new Int32Array(totalTiles);
+  for (let i = 0; i < totalTiles; i += 1) {
+    if (visited[i] > 0 || riverMask[i] === 0) {
+      continue;
+    }
+    riverComponentCount += 1;
+    let head = 0;
+    let tail = 0;
+    queue[tail] = i;
+    tail += 1;
+    visited[i] = 1;
+    let size = 0;
+    let touchesEdge = false;
+    let touchesOcean = false;
+    while (head < tail) {
+      const idx = queue[head];
+      head += 1;
+      size += 1;
+      const x = idx % cols;
+      const y = Math.floor(idx / cols);
+      if (x === 0 || y === 0 || x === cols - 1 || y === rows - 1) {
+        touchesEdge = true;
+      }
+      const neighbors = [
+        [x - 1, y],
+        [x + 1, y],
+        [x, y - 1],
+        [x, y + 1]
+      ];
+      for (let n = 0; n < neighbors.length; n += 1) {
+        const [nx, ny] = neighbors[n];
+        if (nx < 0 || ny < 0 || nx >= cols || ny >= rows) {
+          continue;
+        }
+        const nIdx = ny * cols + nx;
+        if (riverMask[nIdx] > 0) {
+          if (visited[nIdx] === 0) {
+            visited[nIdx] = 1;
+            queue[tail] = nIdx;
+            tail += 1;
+          }
+          continue;
+        }
+        if (oceanMask[nIdx] > 0) {
+          touchesOcean = true;
+        }
+      }
+    }
+    if (!touchesEdge && !touchesOcean) {
+      detachedRiverComponents += 1;
+      detachedRiverCells += size;
+    }
+  }
   return {
     riverDiagOnlyLinks: diagOnlyLinks,
     riverIsolatedCells: isolatedCells,
-    riverOrthConnectivityRatio: Number((riverCells > 0 ? orthConnectedCells / riverCells : 1).toFixed(4))
+    riverOrthConnectivityRatio: Number((riverCells > 0 ? orthConnectedCells / riverCells : 1).toFixed(4)),
+    riverComponentCount,
+    detachedRiverComponents,
+    detachedRiverCells
   };
 };
 
@@ -217,7 +346,7 @@ const runAll = async () => {
       const metrics = await runCase(sizeId, seed);
       results.push(metrics);
       console.log(
-        `[mapgen] size=${metrics.sizeId} seed=${metrics.seed} ms=${metrics.durationMs.toFixed(2)} biome=${metrics.biomeSpreadClassifyMs.toFixed(2)}ms water=${metrics.waterPct.toFixed(2)}% forest=${metrics.forestPct.toFixed(2)}% patches=${metrics.forestPatchCount} meanPatch=${metrics.forestPatchMean} p95Patch=${metrics.forestPatchP95} houses=${metrics.houseCount} roads=${metrics.roadCount} rivers=${metrics.riverCount} riverDiagOnly=${metrics.riverDiagOnlyLinks} riverIso=${metrics.riverIsolatedCells} riverOrthRatio=${metrics.riverOrthConnectivityRatio.toFixed(4)}`
+        `[mapgen] size=${metrics.sizeId} seed=${metrics.seed} ms=${metrics.durationMs.toFixed(2)} biome=${metrics.biomeSpreadClassifyMs.toFixed(2)}ms water=${metrics.waterPct.toFixed(2)}% forest=${metrics.forestPct.toFixed(2)}% patches=${metrics.forestPatchCount} meanPatch=${metrics.forestPatchMean} p95Patch=${metrics.forestPatchP95} houses=${metrics.houseCount} roads=${metrics.roadCount} rivers=${metrics.riverCount} riverDiagOnly=${metrics.riverDiagOnlyLinks} riverIso=${metrics.riverIsolatedCells} riverOrthRatio=${metrics.riverOrthConnectivityRatio.toFixed(4)} riverComps=${metrics.riverComponentCount} riverDetachedComps=${metrics.detachedRiverComponents} riverDetachedCells=${metrics.detachedRiverCells}`
       );
     }
   }
@@ -252,6 +381,10 @@ const compareAgainstBaseline = async (results) => {
       console.error(
         `[mapgen] orthogonal river connectivity too low for ${key}: ${result.riverOrthConnectivityRatio.toFixed(4)}`
       );
+    }
+    if (result.detachedRiverComponents !== 0) {
+      failures += 1;
+      console.error(`[mapgen] detached river components present for ${key}: ${result.detachedRiverComponents}`);
     }
     if (hasBaseline) {
       const expected = index.get(key);

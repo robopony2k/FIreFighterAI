@@ -233,9 +233,9 @@ const RIVER_CUTOUT_FIELD_DILATE = 0;
 const BANK_INSET = 0.004;
 const WALL_MIN_HEIGHT = 0.02;
 const WALL_RISE_GUARD = 0.001;
-const WALL_BANK_OVERLAP = 0.012;
-const WALL_TOP_OVERLAP = 0.0035;
+const WALL_TOP_OVERLAP = 0.0012;
 const WALL_TOP_MAX_UNDERCUT = 0.0004;
+const WALL_WATER_OVERLAP = 0.002;
 const RIVER_EDGE_SURFACE_UNDERSHOOT = 0.002;
 const WATERFALL_ANCHOR_ERR_WARN = 0.03;
 const WALL_TOP_GAP_WARN = 0.05;
@@ -522,6 +522,8 @@ type RiverRenderDomain = {
   contourIndices: Uint32Array;
   boundaryEdges: Float32Array;
   cutoutBoundaryEdges: Float32Array;
+  cutoutBoundaryVertexHeights?: Float32Array;
+  cutoutBoundaryWallEdges?: Float32Array;
   distanceToBank: Int16Array;
   debugStats?: RiverDomainDebugStats;
 };
@@ -3211,6 +3213,169 @@ const buildRiverCutoutAlphaMap = (
   return createDataTexture(data, texCols, texRows, THREE.LinearFilter, THREE.LinearFilter);
 };
 
+const buildBoundaryEdgesFromIndexedContour = (
+  contourVerticesXY: Float32Array,
+  contourTriIndices: ArrayLike<number>
+): Float32Array => {
+  type BoundaryRecord = { count: number; a: number; b: number };
+  const edgeMap = new Map<string, BoundaryRecord>();
+  const addEdge = (a: number, b: number): void => {
+    if (a === b) {
+      return;
+    }
+    const key = a < b ? `${a}|${b}` : `${b}|${a}`;
+    const existing = edgeMap.get(key);
+    if (!existing) {
+      edgeMap.set(key, { count: 1, a, b });
+      return;
+    }
+    existing.count += 1;
+  };
+  for (let i = 0; i < contourTriIndices.length; i += 3) {
+    const a = contourTriIndices[i] as number;
+    const b = contourTriIndices[i + 1] as number;
+    const c = contourTriIndices[i + 2] as number;
+    if (a < 0 || b < 0 || c < 0) {
+      continue;
+    }
+    addEdge(a, b);
+    addEdge(b, c);
+    addEdge(c, a);
+  }
+  const edges: number[] = [];
+  edgeMap.forEach((record) => {
+    if (record.count !== 1) {
+      return;
+    }
+    const aOff = record.a * 2;
+    const bOff = record.b * 2;
+    if (
+      aOff + 1 >= contourVerticesXY.length ||
+      bOff + 1 >= contourVerticesXY.length
+    ) {
+      return;
+    }
+    edges.push(
+      contourVerticesXY[aOff],
+      contourVerticesXY[aOff + 1],
+      contourVerticesXY[bOff],
+      contourVerticesXY[bOff + 1]
+    );
+  });
+  return new Float32Array(edges);
+};
+
+const buildSnappedRiverContourVertices = (
+  riverDomain: RiverRenderDomain,
+  contourIndices: number[]
+): Float32Array => {
+  const contourVertexCount = riverDomain.contourVertices.length / 2;
+  const snapped = new Float32Array(riverDomain.contourVertices);
+  if (contourVertexCount === 0) {
+    return snapped;
+  }
+  const cutoutEdges =
+    riverDomain.cutoutBoundaryEdges && riverDomain.cutoutBoundaryEdges.length >= 4
+      ? riverDomain.cutoutBoundaryEdges
+      : riverDomain.boundaryEdges;
+  if (!cutoutEdges || cutoutEdges.length < 4) {
+    return snapped;
+  }
+  const quantScale = 8192;
+  const keyOf = (x: number, y: number): string => `${Math.round(x * quantScale)},${Math.round(y * quantScale)}`;
+  const boundaryFlags = new Uint8Array(contourVertexCount);
+  const boundaryEdgeMap = new Map<string, { count: number; a: number; b: number }>();
+  const addBoundaryCandidate = (a: number, b: number): void => {
+    if (a === b) {
+      return;
+    }
+    const key = a < b ? `${a}|${b}` : `${b}|${a}`;
+    const existing = boundaryEdgeMap.get(key);
+    if (!existing) {
+      boundaryEdgeMap.set(key, { count: 1, a, b });
+      return;
+    }
+    existing.count += 1;
+  };
+  for (let i = 0; i < contourIndices.length; i += 3) {
+    const a = contourIndices[i] as number;
+    const b = contourIndices[i + 1] as number;
+    const c = contourIndices[i + 2] as number;
+    if (
+      a < 0 || b < 0 || c < 0 ||
+      a >= contourVertexCount || b >= contourVertexCount || c >= contourVertexCount
+    ) {
+      continue;
+    }
+    addBoundaryCandidate(a, b);
+    addBoundaryCandidate(b, c);
+    addBoundaryCandidate(c, a);
+  }
+  boundaryEdgeMap.forEach((record) => {
+    if (record.count !== 1) {
+      return;
+    }
+    boundaryFlags[record.a] = 1;
+    boundaryFlags[record.b] = 1;
+  });
+  const cutoutEndpointLookup = new Map<string, { x: number; y: number }>();
+  const registerEndpoint = (x: number, y: number): void => {
+    const key = keyOf(x, y);
+    if (!cutoutEndpointLookup.has(key)) {
+      cutoutEndpointLookup.set(key, { x, y });
+    }
+  };
+  for (let e = 0; e < cutoutEdges.length; e += 4) {
+    registerEndpoint(cutoutEdges[e], cutoutEdges[e + 1]);
+    registerEndpoint(cutoutEdges[e + 2], cutoutEdges[e + 3]);
+  }
+  for (let i = 0; i < contourVertexCount; i += 1) {
+    if (!boundaryFlags[i]) {
+      continue;
+    }
+    const vx = snapped[i * 2];
+    const vy = snapped[i * 2 + 1];
+    const exact = cutoutEndpointLookup.get(keyOf(vx, vy));
+    if (exact) {
+      snapped[i * 2] = exact.x;
+      snapped[i * 2 + 1] = exact.y;
+      continue;
+    }
+    let bestDist = Number.POSITIVE_INFINITY;
+    let bestX = vx;
+    let bestY = vy;
+    for (let e = 0; e < cutoutEdges.length; e += 4) {
+      const ax = cutoutEdges[e];
+      const ay = cutoutEdges[e + 1];
+      const bx = cutoutEdges[e + 2];
+      const by = cutoutEdges[e + 3];
+      const abX = bx - ax;
+      const abY = by - ay;
+      const lenSq = abX * abX + abY * abY;
+      if (lenSq <= 1e-8) {
+        continue;
+      }
+      const t = clamp(((vx - ax) * abX + (vy - ay) * abY) / lenSq, 0, 1);
+      const qx = ax + abX * t;
+      const qy = ay + abY * t;
+      const dist = Math.hypot(vx - qx, vy - qy);
+      if (dist < bestDist) {
+        bestDist = dist;
+        bestX = qx;
+        bestY = qy;
+        if (bestDist <= 1e-4) {
+          break;
+        }
+      }
+    }
+    if (Number.isFinite(bestDist)) {
+      snapped[i * 2] = bestX;
+      snapped[i * 2 + 1] = bestY;
+    }
+  }
+  return snapped;
+};
+
 const applyRiverTerrainTriangleCutout = (
   geometry: THREE.BufferGeometry,
   sampleCols: number,
@@ -3220,6 +3385,8 @@ const applyRiverTerrainTriangleCutout = (
   if (!riverDomain || sampleCols < 2 || sampleRows < 2) {
     return;
   }
+  riverDomain.cutoutBoundaryVertexHeights = undefined;
+  riverDomain.cutoutBoundaryWallEdges = undefined;
   const index = geometry.getIndex();
   if (!index) {
     return;
@@ -3233,6 +3400,32 @@ const applyRiverTerrainTriangleCutout = (
   const vertexCount = sampleCols * sampleRows;
   const positions = positionAttr.array as ArrayLike<number>;
   const uvs = uvAttr?.array as ArrayLike<number> | undefined;
+  let minWorldX = Number.POSITIVE_INFINITY;
+  let maxWorldX = Number.NEGATIVE_INFINITY;
+  let minWorldZ = Number.POSITIVE_INFINITY;
+  let maxWorldZ = Number.NEGATIVE_INFINITY;
+  for (let i = 0; i + 2 < positions.length; i += 3) {
+    const px = positions[i] as number;
+    const pz = positions[i + 2] as number;
+    if (px < minWorldX) minWorldX = px;
+    if (px > maxWorldX) maxWorldX = px;
+    if (pz < minWorldZ) minWorldZ = pz;
+    if (pz > maxWorldZ) maxWorldZ = pz;
+  }
+  const worldWidth = Number.isFinite(minWorldX) && Number.isFinite(maxWorldX) ? Math.max(1e-5, maxWorldX - minWorldX) : 1;
+  const worldDepth = Number.isFinite(minWorldZ) && Number.isFinite(maxWorldZ) ? Math.max(1e-5, maxWorldZ - minWorldZ) : 1;
+  const worldTransform = createRiverSpaceTransform(
+    riverDomain.cols,
+    riverDomain.rows,
+    worldWidth,
+    worldDepth,
+    sampleCols,
+    sampleRows
+  );
+  const contourIndices = Array.from(riverDomain.contourIndices);
+  const snappedContourVertices = buildSnappedRiverContourVertices(riverDomain, contourIndices);
+  const snappedBoundaryEdges = buildBoundaryEdgesFromIndexedContour(snappedContourVertices, contourIndices);
+  const clipBoundaryEdges = snappedBoundaryEdges.length >= 4 ? snappedBoundaryEdges : riverDomain.boundaryEdges;
   const vf = riverDomain.vertexField;
   const vfCols = riverDomain.cols + 1;
   const vIdx = (x: number, y: number): number => y * vfCols + x;
@@ -3312,15 +3505,65 @@ const applyRiverTerrainTriangleCutout = (
   };
   const interpolate = (a: CutVertex, b: CutVertex): CutVertex => {
     const delta = b.s - a.s;
-    const t = Math.abs(delta) <= eps ? 0.5 : clamp((threshold - a.s) / delta, 0, 1);
+    const estimateT = Math.abs(delta) <= eps ? 0.5 : clamp((threshold - a.s) / delta, 0, 1);
+    const segX = b.ex - a.ex;
+    const segY = b.ey - a.ey;
+    const segLenSq = segX * segX + segY * segY;
+    let t = estimateT;
+    let ex = a.ex + segX * t;
+    let ey = a.ey + segY * t;
+    if (segLenSq > 1e-10 && clipBoundaryEdges.length >= 4) {
+      let bestScore = Number.POSITIVE_INFINITY;
+      let bestT = t;
+      let bestX = ex;
+      let bestY = ey;
+      const cross2 = (ax: number, ay: number, bx: number, by: number): number => ax * by - ay * bx;
+      for (let e = 0; e < clipBoundaryEdges.length; e += 4) {
+        const cx = clipBoundaryEdges[e];
+        const cy = clipBoundaryEdges[e + 1];
+        const dx = clipBoundaryEdges[e + 2];
+        const dy = clipBoundaryEdges[e + 3];
+        const edgeX = dx - cx;
+        const edgeY = dy - cy;
+        const denom = cross2(segX, segY, edgeX, edgeY);
+        if (Math.abs(denom) <= 1e-9) {
+          continue;
+        }
+        const relX = cx - a.ex;
+        const relY = cy - a.ey;
+        const hitT = cross2(relX, relY, edgeX, edgeY) / denom;
+        const hitU = cross2(relX, relY, segX, segY) / denom;
+        if (hitT < -1e-6 || hitT > 1 + 1e-6 || hitU < -1e-6 || hitU > 1 + 1e-6) {
+          continue;
+        }
+        const clampedT = clamp(hitT, 0, 1);
+        const hx = a.ex + segX * clampedT;
+        const hy = a.ey + segY * clampedT;
+        const score = Math.abs(clampedT - estimateT);
+        if (score < bestScore) {
+          bestScore = score;
+          bestT = clampedT;
+          bestX = hx;
+          bestY = hy;
+          if (bestScore <= 1e-4) {
+            break;
+          }
+        }
+      }
+      if (Number.isFinite(bestScore)) {
+        t = bestT;
+        ex = bestX;
+        ey = bestY;
+      }
+    }
     return {
-      x: a.x + (b.x - a.x) * t,
+      x: worldTransform.edgeToWorldX(ex),
       y: a.y + (b.y - a.y) * t,
-      z: a.z + (b.z - a.z) * t,
+      z: worldTransform.edgeToWorldY(ey),
       u: a.u + (b.u - a.u) * t,
       v: a.v + (b.v - a.v) * t,
-      ex: a.ex + (b.ex - a.ex) * t,
-      ey: a.ey + (b.ey - a.ey) * t,
+      ex,
+      ey,
       s: threshold,
       boundary: true
     };
@@ -3347,12 +3590,25 @@ const applyRiverTerrainTriangleCutout = (
 
   const outPositions: number[] = [];
   const outUvs: number[] = [];
-  const boundaryEdgeMap = new Map<string, { count: number; ax: number; ay: number; bx: number; by: number; boundary: boolean }>();
-  const q = 8192;
-  const vertexKey = (v: CutVertex): string => `${Math.round(v.ex * q)},${Math.round(v.ey * q)}`;
-  const registerEdge = (a: CutVertex, b: CutVertex): void => {
-    const keyA = vertexKey(a);
-    const keyB = vertexKey(b);
+  type BoundarySegment = { ax: number; ay: number; az: number; bx: number; by: number; bz: number };
+  const boundarySegments: BoundarySegment[] = [];
+  const boundaryEdgeMap = new Map<string, { count: number; ax: number; ay: number; az: number; bx: number; by: number; bz: number; boundary: boolean }>();
+  const boundaryQuant = 8192;
+  const boundaryVertexKey = (v: CutVertex): string => `${Math.round(v.ex * boundaryQuant)},${Math.round(v.ey * boundaryQuant)}`;
+  const directBoundaryVertexHeightByKey = new Map<string, number>();
+  const registerBoundaryVertexHeight = (v: CutVertex): void => {
+    if (!v.boundary) {
+      return;
+    }
+    const key = boundaryVertexKey(v);
+    const existing = directBoundaryVertexHeightByKey.get(key);
+    if (existing === undefined || v.y > existing) {
+      directBoundaryVertexHeightByKey.set(key, v.y);
+    }
+  };
+  const registerBoundaryEdge = (a: CutVertex, b: CutVertex): void => {
+    const keyA = boundaryVertexKey(a);
+    const keyB = boundaryVertexKey(b);
     if (keyA === keyB) {
       return;
     }
@@ -3360,18 +3616,47 @@ const applyRiverTerrainTriangleCutout = (
     const edgeKey = forward ? `${keyA}|${keyB}` : `${keyB}|${keyA}`;
     const ax = forward ? a.ex : b.ex;
     const ay = forward ? a.ey : b.ey;
+    const az = forward ? a.y : b.y;
     const bx = forward ? b.ex : a.ex;
     const by = forward ? b.ey : a.ey;
+    const bz = forward ? b.y : a.y;
     const boundary = a.boundary && b.boundary;
     const existing = boundaryEdgeMap.get(edgeKey);
     if (!existing) {
-      boundaryEdgeMap.set(edgeKey, { count: 1, ax, ay, bx, by, boundary });
+      boundaryEdgeMap.set(edgeKey, { count: 1, ax, ay, az, bx, by, bz, boundary });
       return;
     }
     existing.count += 1;
     existing.boundary = existing.boundary || boundary;
+    if (boundary) {
+      if (az > existing.az) {
+        existing.az = az;
+      }
+      if (bz > existing.bz) {
+        existing.bz = bz;
+      }
+    }
   };
-
+  const registerBoundarySegment = (a: CutVertex, b: CutVertex): void => {
+    if (!a.boundary || !b.boundary) {
+      return;
+    }
+    registerBoundaryVertexHeight(a);
+    registerBoundaryVertexHeight(b);
+    const dx = b.ex - a.ex;
+    const dy = b.ey - a.ey;
+    if (dx * dx + dy * dy <= 1e-10) {
+      return;
+    }
+    boundarySegments.push({
+      ax: a.ex,
+      ay: a.ey,
+      az: a.y,
+      bx: b.ex,
+      by: b.ey,
+      bz: b.y
+    });
+  };
   const triCount = Math.floor(src.length / 3);
   let cutCount = 0;
   for (let i = 0; i < src.length; i += 3) {
@@ -3402,6 +3687,11 @@ const applyRiverTerrainTriangleCutout = (
     const changed = clipped.length !== 3 || clipped.some((v) => v.boundary);
     if (changed) {
       cutCount += 1;
+    }
+    for (let e = 0; e < clipped.length; e += 1) {
+      const vA = clipped[e];
+      const vB = clipped[(e + 1) % clipped.length];
+      registerBoundarySegment(vA, vB);
     }
     const base = clipped[0];
     for (let t = 1; t < clipped.length - 1; t += 1) {
@@ -3434,23 +3724,104 @@ const applyRiverTerrainTriangleCutout = (
         p1.u, p1.v,
         p2.u, p2.v
       );
-      registerEdge(base, p1);
-      registerEdge(p1, p2);
-      registerEdge(p2, base);
+      registerBoundaryEdge(base, p1);
+      registerBoundaryEdge(p1, p2);
+      registerBoundaryEdge(p2, base);
     }
   }
   const cutBoundaryEdges: number[] = [];
+  const cutBoundaryWallEdges: number[] = [];
   boundaryEdgeMap.forEach((record) => {
-    // Boundary edge from clipped exterior mesh should be unique and lie on clip threshold.
     if (record.count !== 1 || !record.boundary) {
       return;
     }
     cutBoundaryEdges.push(record.ax, record.ay, record.bx, record.by);
+    cutBoundaryWallEdges.push(record.ax, record.ay, record.az, record.bx, record.by, record.bz);
   });
   riverDomain.cutoutBoundaryEdges =
     cutBoundaryEdges.length >= 4
       ? new Float32Array(cutBoundaryEdges)
-      : riverDomain.boundaryEdges;
+      : snappedBoundaryEdges.length >= 4
+        ? snappedBoundaryEdges
+        : riverDomain.boundaryEdges;
+  riverDomain.cutoutBoundaryWallEdges =
+    cutBoundaryWallEdges.length >= 6
+      ? new Float32Array(cutBoundaryWallEdges)
+      : undefined;
+  if (boundarySegments.length > 0 && riverDomain.cutoutBoundaryEdges.length >= 4) {
+    const quantScale = 8192;
+    const keyOf = (x: number, y: number): string => `${Math.round(x * quantScale)},${Math.round(y * quantScale)}`;
+    const boundaryHeightByKey = new Map<string, { x: number; y: number; height: number }>();
+    const addBoundaryHeight = (x: number, y: number, worldY: number): void => {
+      const key = keyOf(x, y);
+      const existing = boundaryHeightByKey.get(key);
+      if (existing) {
+        if (worldY > existing.height) {
+          existing.height = worldY;
+        }
+        return;
+      }
+      boundaryHeightByKey.set(key, { x, y, height: worldY });
+    };
+    const sampleBoundaryHeight = (x: number, y: number): number => {
+      let bestDist = Number.POSITIVE_INFINITY;
+      let bestHeight = Number.NaN;
+      let envelopeHeight = Number.NEGATIVE_INFINITY;
+      for (let i = 0; i < boundarySegments.length; i += 1) {
+        const seg = boundarySegments[i];
+        const abX = seg.bx - seg.ax;
+        const abY = seg.by - seg.ay;
+        const lenSq = abX * abX + abY * abY;
+        if (lenSq <= 1e-10) {
+          continue;
+        }
+        const t = clamp(((x - seg.ax) * abX + (y - seg.ay) * abY) / lenSq, 0, 1);
+        const qx = seg.ax + abX * t;
+        const qy = seg.ay + abY * t;
+        const dist = Math.hypot(x - qx, y - qy);
+        const hitHeight = seg.az + (seg.bz - seg.az) * t;
+        if (dist <= 0.32 && hitHeight > envelopeHeight) {
+          envelopeHeight = hitHeight;
+        }
+        if (dist < bestDist) {
+          bestDist = dist;
+          bestHeight = hitHeight;
+          if (bestDist <= 1e-5) {
+            break;
+          }
+        }
+      }
+      if (Number.isFinite(envelopeHeight)) {
+        return envelopeHeight;
+      }
+      return bestDist <= 0.45 ? bestHeight : Number.NaN;
+    };
+    for (let i = 0; i < riverDomain.cutoutBoundaryEdges.length; i += 4) {
+      const ax = riverDomain.cutoutBoundaryEdges[i];
+      const ay = riverDomain.cutoutBoundaryEdges[i + 1];
+      const bx = riverDomain.cutoutBoundaryEdges[i + 2];
+      const by = riverDomain.cutoutBoundaryEdges[i + 3];
+      const aKey = keyOf(ax, ay);
+      const aExact = directBoundaryVertexHeightByKey.get(aKey);
+      const aHeight = Number.isFinite(aExact) ? (aExact as number) : sampleBoundaryHeight(ax, ay);
+      if (Number.isFinite(aHeight)) {
+        addBoundaryHeight(ax, ay, aHeight);
+      }
+      const bKey = keyOf(bx, by);
+      const bExact = directBoundaryVertexHeightByKey.get(bKey);
+      const bHeight = Number.isFinite(bExact) ? (bExact as number) : sampleBoundaryHeight(bx, by);
+      if (Number.isFinite(bHeight)) {
+        addBoundaryHeight(bx, by, bHeight);
+      }
+    }
+    if (boundaryHeightByKey.size > 0) {
+      const packed: number[] = [];
+      boundaryHeightByKey.forEach((record) => {
+        packed.push(record.x, record.y, record.height);
+      });
+      riverDomain.cutoutBoundaryVertexHeights = new Float32Array(packed);
+    }
+  }
   if (riverDomain.debugStats) {
     const mismatch = computeBoundaryMismatchStats(riverDomain.cutoutBoundaryEdges, riverDomain.boundaryEdges);
     riverDomain.debugStats.cutoutBoundaryEdgeCount = mismatch.countA;
@@ -3733,86 +4104,37 @@ const buildRiverMeshData = (
   const flowDir: number[] = [];
   const flowSpeed: number[] = [];
   const rapid: number[] = [];
+  const contourQuantScale = 8192;
+  const contourKeyOf = (x: number, y: number): string =>
+    `${Math.round(x * contourQuantScale)},${Math.round(y * contourQuantScale)}`;
+  const contourWaterOffsetByKey = new Map<string, number>();
+  const contourBoundaryTerrainWorldByKey = new Map<string, number>();
   const indices = Array.from(riverDomain.contourIndices);
   const distToNonRiver = riverDomain.distanceToBank;
-  const contourVertexCount = riverDomain.contourVertices.length / 2;
-  const renderContourVertices = new Float32Array(riverDomain.contourVertices);
-  if (
-    contourVertexCount > 0 &&
-    riverDomain.boundaryEdges.length >= 4 &&
-    riverDomain.cutoutBoundaryEdges &&
-    riverDomain.cutoutBoundaryEdges.length >= 4
-  ) {
-    const quantScale = 8192;
-    const keyOf = (x: number, y: number): string => `${Math.round(x * quantScale)},${Math.round(y * quantScale)}`;
-    const vertexLookup = new Map<string, number[]>();
-    for (let i = 0; i < contourVertexCount; i += 1) {
-      const vx = renderContourVertices[i * 2];
-      const vy = renderContourVertices[i * 2 + 1];
-      const key = keyOf(vx, vy);
-      let list = vertexLookup.get(key);
-      if (!list) {
-        list = [];
-        vertexLookup.set(key, list);
+  const renderContourVertices = buildSnappedRiverContourVertices(riverDomain, indices);
+  const packedCutoutWallEdges = riverDomain.cutoutBoundaryWallEdges;
+  if (packedCutoutWallEdges && packedCutoutWallEdges.length >= 6) {
+    const registerBoundaryTerrainHeight = (x: number, y: number, worldY: number): void => {
+      if (!Number.isFinite(worldY)) {
+        return;
       }
-      list.push(i);
-    }
-    const boundaryFlags = new Uint8Array(contourVertexCount);
-    for (let i = 0; i < riverDomain.boundaryEdges.length; i += 4) {
-      const aKey = keyOf(riverDomain.boundaryEdges[i], riverDomain.boundaryEdges[i + 1]);
-      const bKey = keyOf(riverDomain.boundaryEdges[i + 2], riverDomain.boundaryEdges[i + 3]);
-      const aList = vertexLookup.get(aKey);
-      const bList = vertexLookup.get(bKey);
-      if (aList) {
-        for (let j = 0; j < aList.length; j += 1) {
-          boundaryFlags[aList[j]] = 1;
-        }
+      const key = contourKeyOf(x, y);
+      const existing = contourBoundaryTerrainWorldByKey.get(key);
+      if (existing === undefined || worldY > existing) {
+        contourBoundaryTerrainWorldByKey.set(key, worldY);
       }
-      if (bList) {
-        for (let j = 0; j < bList.length; j += 1) {
-          boundaryFlags[bList[j]] = 1;
-        }
-      }
-    }
-    const snapMaxEdgeDist = 1.15;
-    const cutoutEdges = riverDomain.cutoutBoundaryEdges;
-    for (let i = 0; i < contourVertexCount; i += 1) {
-      if (!boundaryFlags[i]) {
-        continue;
-      }
-      const vx = renderContourVertices[i * 2];
-      const vy = renderContourVertices[i * 2 + 1];
-      let bestDist = Number.POSITIVE_INFINITY;
-      let bestX = vx;
-      let bestY = vy;
-      for (let e = 0; e < cutoutEdges.length; e += 4) {
-        const ax = cutoutEdges[e];
-        const ay = cutoutEdges[e + 1];
-        const bx = cutoutEdges[e + 2];
-        const by = cutoutEdges[e + 3];
-        const abX = bx - ax;
-        const abY = by - ay;
-        const lenSq = abX * abX + abY * abY;
-        if (lenSq <= 1e-8) {
-          continue;
-        }
-        const t = clamp(((vx - ax) * abX + (vy - ay) * abY) / lenSq, 0, 1);
-        const qx = ax + abX * t;
-        const qy = ay + abY * t;
-        const dist = Math.hypot(vx - qx, vy - qy);
-        if (dist < bestDist) {
-          bestDist = dist;
-          bestX = qx;
-          bestY = qy;
-          if (bestDist <= 1e-4) {
-            break;
-          }
-        }
-      }
-      if (Number.isFinite(bestDist) && bestDist <= snapMaxEdgeDist) {
-        renderContourVertices[i * 2] = bestX;
-        renderContourVertices[i * 2 + 1] = bestY;
-      }
+    };
+    for (let i = 0; i + 5 < packedCutoutWallEdges.length; i += 6) {
+      registerBoundaryTerrainHeight(
+        packedCutoutWallEdges[i],
+        packedCutoutWallEdges[i + 1],
+        packedCutoutWallEdges[i + 2]
+      );
+      registerBoundaryTerrainHeight(
+        packedCutoutWallEdges[i + 3],
+        packedCutoutWallEdges[i + 4],
+        packedCutoutWallEdges[i + 5]
+      );
     }
   }
 
@@ -3939,12 +4261,22 @@ const buildRiverMeshData = (
   };
   const addVertex = (v: RiverContourVertex): void => {
     const flow = sampleFlow(v.x, v.y);
-    positions.push(worldXEdge(v.x), sampleSurfaceOffset(v.x, v.y), worldZEdge(v.y));
+    let waterOffset = sampleSurfaceOffset(v.x, v.y);
+    const boundaryTerrainWorld = contourBoundaryTerrainWorldByKey.get(contourKeyOf(v.x, v.y));
+    if (Number.isFinite(boundaryTerrainWorld)) {
+      // Keep boundary water strictly below the cutout terrain top so wall top can always cover it.
+      const maxBoundarySurfaceOffset = (boundaryTerrainWorld as number) - waterLevelWorld - WALL_WATER_OVERLAP;
+      if (Number.isFinite(maxBoundarySurfaceOffset)) {
+        waterOffset = Math.min(waterOffset, maxBoundarySurfaceOffset);
+      }
+    }
+    positions.push(worldXEdge(v.x), waterOffset, worldZEdge(v.y));
     uvs.push(v.x / Math.max(1, cols), v.y / Math.max(1, rows));
     bankDist.push(sampleBankDist(v.x, v.y));
     flowDir.push(flow.x, flow.y);
     flowSpeed.push(sampleFlowSpeed(v.x, v.y));
     rapid.push(sampleRapid(v.x, v.y));
+    contourWaterOffsetByKey.set(contourKeyOf(v.x, v.y), waterOffset);
   };
   for (let i = 0; i < renderContourVertices.length; i += 2) {
     addVertex({
@@ -3959,10 +4291,6 @@ const buildRiverMeshData = (
   const wallPositions: number[] = [];
   const wallUvs: number[] = [];
   const wallIndices: number[] = [];
-  const wallBoundaryEdges =
-    riverDomain.cutoutBoundaryEdges && riverDomain.cutoutBoundaryEdges.length >= 4
-      ? riverDomain.cutoutBoundaryEdges
-      : riverDomain.boundaryEdges;
   const sampleTerrainWorld = (fx: number, fy: number): number => {
     const sx = clamp(fx - 0.5, 0, cols - 1);
     const sy = clamp(fy - 0.5, 0, rows - 1);
@@ -4076,58 +4404,186 @@ const buildRiverMeshData = (
   let wallTopGapSum = 0;
   let wallTopGapMax = 0;
   let wallTopGapCount = 0;
-  const pushWallEdge = (edge: RiverContourEdge): void => {
-    const edgeAx = edge.ax;
-    const edgeAy = edge.ay;
-    const edgeBx = edge.bx;
-    const edgeBy = edge.by;
-    const edgeTerrainTopA = sampleTerrainWorld(edgeAx, edgeAy) - waterLevelWorld;
-    const edgeTerrainTopB = sampleTerrainWorld(edgeBx, edgeBy) - waterLevelWorld;
-    let topA = edgeTerrainTopA + WALL_TOP_OVERLAP;
-    let topB = edgeTerrainTopB + WALL_TOP_OVERLAP;
-    const ex = edge.bx - edge.ax;
-    const ey = edge.by - edge.ay;
-    const eLen = Math.hypot(ex, ey);
-    if (eLen <= 1e-5) {
+  const packedWallBoundaryEdges =
+    riverDomain.cutoutBoundaryWallEdges && riverDomain.cutoutBoundaryWallEdges.length >= 6
+      ? riverDomain.cutoutBoundaryWallEdges
+      : undefined;
+  const wallBoundaryEdgesFromContour = buildBoundaryEdgesFromIndexedContour(renderContourVertices, indices);
+  const wallBoundaryEdgesFallback =
+    wallBoundaryEdgesFromContour.length >= 4
+      ? wallBoundaryEdgesFromContour
+      : riverDomain.cutoutBoundaryEdges && riverDomain.cutoutBoundaryEdges.length >= 4
+        ? riverDomain.cutoutBoundaryEdges
+        : riverDomain.boundaryEdges;
+  type WallEdgeProfile = RiverContourEdge & {
+    outX: number;
+    outY: number;
+    terrainWorldA?: number;
+    terrainWorldB?: number;
+  };
+  type WallVertexProfile = { top: number; bottom: number; terrainTop: number };
+  const wallQuantScale = 8192;
+  const wallKeyOf = (x: number, y: number): string => `${Math.round(x * wallQuantScale)},${Math.round(y * wallQuantScale)}`;
+  const cutoutBoundaryTerrainByKey = new Map<string, number>();
+  const packedBoundaryHeights = riverDomain.cutoutBoundaryVertexHeights;
+  if (packedBoundaryHeights && packedBoundaryHeights.length >= 3) {
+    for (let i = 0; i + 2 < packedBoundaryHeights.length; i += 3) {
+      const hx = packedBoundaryHeights[i];
+      const hy = packedBoundaryHeights[i + 1];
+      const hWorld = packedBoundaryHeights[i + 2];
+      cutoutBoundaryTerrainByKey.set(wallKeyOf(hx, hy), hWorld);
+    }
+  }
+  const wallEdges: WallEdgeProfile[] = [];
+  const wallVertexOutward = new Map<string, { x: number; y: number; outX: number; outY: number; count: number }>();
+  const addVertexOutward = (x: number, y: number, outX: number, outY: number): void => {
+    const key = wallKeyOf(x, y);
+    const existing = wallVertexOutward.get(key);
+    if (existing) {
+      existing.outX += outX;
+      existing.outY += outY;
+      existing.count += 1;
       return;
     }
-    // Polygon winding is stabilized as CCW, so outward is to the right of edge direction.
-    let outX = ey / eLen;
-    let outY = -ex / eLen;
-    const midX = (edgeAx + edgeBx) * 0.5;
-    const midY = (edgeAy + edgeBy) * 0.5;
-    const resolved = resolveOutward(midX, midY, outX, outY);
-    outX = resolved.x;
-    outY = resolved.y;
-    const bankTopA = sampleOutsideBank(edgeAx, edgeAy, outX, outY, edgeTerrainTopA + WALL_TOP_OVERLAP, 0);
-    const bankTopB = sampleOutsideBank(edgeBx, edgeBy, outX, outY, edgeTerrainTopB + WALL_TOP_OVERLAP, 0);
-    if (Number.isFinite(bankTopA)) {
-      topA = Math.min(topA, bankTopA - WALL_RISE_GUARD * 0.2);
+    wallVertexOutward.set(key, { x, y, outX, outY, count: 1 });
+  };
+  if (packedWallBoundaryEdges) {
+    for (let i = 0; i < packedWallBoundaryEdges.length; i += 6) {
+      const ax = packedWallBoundaryEdges[i];
+      const ay = packedWallBoundaryEdges[i + 1];
+      const az = packedWallBoundaryEdges[i + 2];
+      const bx = packedWallBoundaryEdges[i + 3];
+      const by = packedWallBoundaryEdges[i + 4];
+      const bz = packedWallBoundaryEdges[i + 5];
+      const ex = bx - ax;
+      const ey = by - ay;
+      const eLen = Math.hypot(ex, ey);
+      if (eLen <= 1e-5) {
+        continue;
+      }
+      // Polygon winding is stabilized as CCW, so outward is to the right of edge direction.
+      const candX = ey / eLen;
+      const candY = -ex / eLen;
+      const midX = (ax + bx) * 0.5;
+      const midY = (ay + by) * 0.5;
+      const resolved = resolveOutward(midX, midY, candX, candY);
+      wallEdges.push({
+        ax,
+        ay,
+        bx,
+        by,
+        outX: resolved.x,
+        outY: resolved.y,
+        terrainWorldA: Number.isFinite(az) ? az : undefined,
+        terrainWorldB: Number.isFinite(bz) ? bz : undefined
+      });
+      addVertexOutward(ax, ay, resolved.x, resolved.y);
+      addVertexOutward(bx, by, resolved.x, resolved.y);
     }
-    if (Number.isFinite(bankTopB)) {
-      topB = Math.min(topB, bankTopB - WALL_RISE_GUARD * 0.2);
+  } else {
+    for (let i = 0; i < wallBoundaryEdgesFallback.length; i += 4) {
+      const ax = wallBoundaryEdgesFallback[i];
+      const ay = wallBoundaryEdgesFallback[i + 1];
+      const bx = wallBoundaryEdgesFallback[i + 2];
+      const by = wallBoundaryEdgesFallback[i + 3];
+      const ex = bx - ax;
+      const ey = by - ay;
+      const eLen = Math.hypot(ex, ey);
+      if (eLen <= 1e-5) {
+        continue;
+      }
+      // Polygon winding is stabilized as CCW, so outward is to the right of edge direction.
+      const candX = ey / eLen;
+      const candY = -ex / eLen;
+      const midX = (ax + bx) * 0.5;
+      const midY = (ay + by) * 0.5;
+      const resolved = resolveOutward(midX, midY, candX, candY);
+      wallEdges.push({
+        ax,
+        ay,
+        bx,
+        by,
+        outX: resolved.x,
+        outY: resolved.y
+      });
+      addVertexOutward(ax, ay, resolved.x, resolved.y);
+      addVertexOutward(bx, by, resolved.x, resolved.y);
     }
-    topA = Math.max(topA, edgeTerrainTopA - WALL_TOP_MAX_UNDERCUT);
-    topB = Math.max(topB, edgeTerrainTopB - WALL_TOP_MAX_UNDERCUT);
-
-    const bankA = sampleOutsideBank(edgeAx, edgeAy, outX, outY, topA + WALL_MIN_HEIGHT, BANK_INSET);
-    const bankB = sampleOutsideBank(edgeBx, edgeBy, outX, outY, topB + WALL_MIN_HEIGHT, BANK_INSET);
-    const gapA = Math.abs(edgeTerrainTopA - topA);
-    const gapB = Math.abs(edgeTerrainTopB - topB);
+  }
+  const wallVertexProfiles = new Map<string, WallVertexProfile>();
+  const resolveWallVertexProfile = (
+    x: number,
+    y: number,
+    fallbackOutX: number,
+    fallbackOutY: number,
+    exactTerrainWorld?: number
+  ): WallVertexProfile => {
+    const waterFromContour = contourWaterOffsetByKey.get(wallKeyOf(x, y));
+    const waterSurface = Number.isFinite(waterFromContour) ? (waterFromContour as number) : sampleSurfaceOffset(x, y);
+    if (Number.isFinite(exactTerrainWorld)) {
+      const terrainTop = (exactTerrainWorld as number) - waterLevelWorld;
+      let top = terrainTop + WALL_TOP_OVERLAP;
+      if (Number.isFinite(waterSurface)) {
+        top = Math.max(top, (waterSurface as number) + WALL_WATER_OVERLAP);
+      }
+      let bottom = top - WALL_MIN_HEIGHT;
+      if (Number.isFinite(waterSurface)) {
+        bottom = Math.min(bottom, waterSurface - WALL_WATER_OVERLAP);
+      }
+      bottom = Math.min(bottom, terrainTop - WALL_RISE_GUARD);
+      return { top, bottom, terrainTop };
+    }
+    const key = wallKeyOf(x, y);
+    const cached = wallVertexProfiles.get(key);
+    if (cached) {
+      return cached;
+    }
+    const accum = wallVertexOutward.get(key);
+    let outX = accum?.outX ?? fallbackOutX;
+    let outY = accum?.outY ?? fallbackOutY;
+    const len = Math.hypot(outX, outY);
+    if (len > 1e-5) {
+      outX /= len;
+      outY /= len;
+    } else {
+      outX = fallbackOutX;
+      outY = fallbackOutY;
+    }
+    const boundaryTerrainWorld = cutoutBoundaryTerrainByKey.get(key);
+    const terrainTop = (Number.isFinite(boundaryTerrainWorld) ? (boundaryTerrainWorld as number) : sampleTerrainWorld(x, y)) - waterLevelWorld;
+    let top = Math.max(terrainTop - WALL_TOP_MAX_UNDERCUT, terrainTop + WALL_TOP_OVERLAP);
+    if (Number.isFinite(waterSurface)) {
+      top = Math.max(top, (waterSurface as number) + WALL_WATER_OVERLAP);
+    }
+    let bottom = top - WALL_MIN_HEIGHT;
+    if (Number.isFinite(waterSurface)) {
+      bottom = Math.min(bottom, waterSurface - WALL_WATER_OVERLAP);
+    }
+    bottom = Math.min(bottom, terrainTop - WALL_RISE_GUARD);
+    const profile: WallVertexProfile = { top, bottom, terrainTop };
+    wallVertexProfiles.set(key, profile);
+    return profile;
+  };
+  const pushWallEdge = (edge: WallEdgeProfile): void => {
+    const profileA = resolveWallVertexProfile(edge.ax, edge.ay, edge.outX, edge.outY, edge.terrainWorldA);
+    const profileB = resolveWallVertexProfile(edge.bx, edge.by, edge.outX, edge.outY, edge.terrainWorldB);
+    const gapA = Math.abs(profileA.terrainTop - profileA.top);
+    const gapB = Math.abs(profileB.terrainTop - profileB.top);
     wallTopGapSum += gapA + gapB;
     wallTopGapMax = Math.max(wallTopGapMax, gapA, gapB);
     wallTopGapCount += 2;
-    const bottomA = Math.max(bankA + WALL_BANK_OVERLAP, topA + WALL_MIN_HEIGHT);
-    const bottomB = Math.max(bankB + WALL_BANK_OVERLAP, topB + WALL_MIN_HEIGHT);
     const vBase = wallPositions.length / 3;
     wallPositions.push(
-      worldXEdge(edgeAx), topA, worldZEdge(edgeAy),
-      worldXEdge(edgeBx), topB, worldZEdge(edgeBy),
-      worldXEdge(edgeBx), bottomB, worldZEdge(edgeBy),
-      worldXEdge(edgeAx), bottomA, worldZEdge(edgeAy)
+      worldXEdge(edge.ax), profileA.top, worldZEdge(edge.ay),
+      worldXEdge(edge.bx), profileB.top, worldZEdge(edge.by),
+      worldXEdge(edge.bx), profileB.bottom, worldZEdge(edge.by),
+      worldXEdge(edge.ax), profileA.bottom, worldZEdge(edge.ay)
     );
-    const edgeWorldLen = Math.hypot(worldXEdge(edgeBx) - worldXEdge(edgeAx), worldZEdge(edgeBy) - worldZEdge(edgeAy));
-    const wallHeight = Math.max(WALL_MIN_HEIGHT, ((bottomA - topA) + (bottomB - topB)) * 0.5);
+    const edgeWorldLen = Math.hypot(worldXEdge(edge.bx) - worldXEdge(edge.ax), worldZEdge(edge.by) - worldZEdge(edge.ay));
+    const wallHeight = Math.max(
+      WALL_MIN_HEIGHT,
+      (Math.abs(profileA.bottom - profileA.top) + Math.abs(profileB.bottom - profileB.top)) * 0.5
+    );
     wallUvs.push(
       0, 0,
       edgeWorldLen, 0,
@@ -4139,13 +4595,8 @@ const buildRiverMeshData = (
       vBase, vBase + 2, vBase + 3
     );
   };
-  for (let i = 0; i < wallBoundaryEdges.length; i += 4) {
-    pushWallEdge({
-      ax: wallBoundaryEdges[i],
-      ay: wallBoundaryEdges[i + 1],
-      bx: wallBoundaryEdges[i + 2],
-      by: wallBoundaryEdges[i + 3]
-    });
+  for (let i = 0; i < wallEdges.length; i += 1) {
+    pushWallEdge(wallEdges[i]);
   }
 
   if (riverDomain.debugStats && positions.length >= 3) {

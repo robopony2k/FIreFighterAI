@@ -10,8 +10,11 @@ import { setStatus } from "../../../core/state.js";
 import {
   advancePhase,
   beginFireSeason,
+  cancelSkipToNextFire,
   handleDeployAction,
   handleEscape,
+  isSkipToNextFireAvailable,
+  requestSkipToNextFire,
   togglePause
 } from "../../../sim/index.js";
 import {
@@ -395,7 +398,7 @@ export const bindPhaseUi = ({
     if (action === "pause" || action === "crew-board" || action === "crew-deploy" || action === "toggle-fuel-break" || action === "backburn") {
       return "toggle";
     }
-    if (/^time-speed-\d+$/.test(action) || /^formation-(narrow|medium|wide)$/.test(action)) {
+    if (action === "time-skip-next-fire" || /^time-speed-\d+$/.test(action) || /^formation-(narrow|medium|wide)$/.test(action)) {
       return "toggle";
     }
     if (action === "select-unit" || action === "select-truck" || action === "select-roster" || action === "zoom-in" || action === "zoom-out") {
@@ -501,6 +504,9 @@ export const bindPhaseUi = ({
       const nextIndex = Number(speedMatch[1]);
       if (!Number.isNaN(nextIndex) && nextIndex >= 0 && nextIndex < TIME_SPEED_OPTIONS.length) {
         gate("timeControl", () => {
+          if (state.skipToNextFire) {
+            cancelSkipToNextFire(state, "Skip to next fire cancelled.");
+          }
           state.timeSpeedIndex = nextIndex;
           setStatus(state, `Time speed ${TIME_SPEED_OPTIONS[nextIndex]}x.`);
           phaseUi.sync(state, inputState);
@@ -527,7 +533,37 @@ export const bindPhaseUi = ({
       return;
     }
     if (action === "pause") {
-      gate("timeControl", () => togglePause(state));
+      gate("timeControl", () => {
+        if (state.skipToNextFire) {
+          cancelSkipToNextFire(state, "Skip to next fire cancelled.");
+          if (!state.paused) {
+            state.paused = true;
+          }
+          setStatus(state, "Simulation paused.");
+          phaseUi.sync(state, inputState);
+          return;
+        }
+        togglePause(state);
+      });
+      return;
+    }
+    if (action === "time-skip-next-fire") {
+      gate("timeControl", () => {
+        if (!isSkipToNextFireAvailable(state)) {
+          if (state.skipToNextFire) {
+            setStatus(state, "Already seeking next fire incident.");
+          } else if (state.lastActiveFires > 0) {
+            setStatus(state, "Cannot skip: active fires already on the map.");
+          } else if (state.gameOver) {
+            setStatus(state, "Cannot skip after game over.");
+          }
+          phaseUi.sync(state, inputState);
+          return;
+        }
+        if (requestSkipToNextFire(state)) {
+          phaseUi.sync(state, inputState);
+        }
+      });
       return;
     }
     if (action === "debug-ignite-toggle") {

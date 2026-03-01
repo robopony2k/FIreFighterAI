@@ -230,6 +230,8 @@ export class UIController {
       showSpeedControl: true,
       paused: snapshot.paused,
       timeSpeedIndex: snapshot.timeSpeedIndex,
+      skipToNextFireActive: snapshot.skipToNextFireActive,
+      canSkipToNextFire: snapshot.canSkipToNextFire,
       status: bottomStatus
     };
     this.bottomControls.update(bottomData);

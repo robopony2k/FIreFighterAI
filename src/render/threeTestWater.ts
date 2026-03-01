@@ -1,5 +1,6 @@
 import * as THREE from "three";
 import type { TerrainWaterData } from "./threeTestTerrain.js";
+import type { WaterEnvironmentPalette } from "./environmentPalette.js";
 import { ThreeTestOceanWaterHelper } from "./threeTestOceanWaterHelper.js";
 import { ThreeTestRiverWaterHelper } from "./threeTestRiverWaterHelper.js";
 import { ThreeTestWaterfallHelper } from "./threeTestWaterfallHelper.js";
@@ -30,6 +31,9 @@ const disposeTexture = (texture: THREE.Texture | null): void => {
   texture.dispose();
 };
 
+const rgbToHex = (color: { r: number; g: number; b: number }): number =>
+  (Math.round(color.r) << 16) | (Math.round(color.g) << 8) | Math.round(color.b);
+
 export class ThreeTestWaterSystem {
   private readonly renderer: THREE.WebGLRenderer;
   private preferredQuality: WaterQualityProfile;
@@ -39,6 +43,7 @@ export class ThreeTestWaterSystem {
   private readonly oceanHelper: ThreeTestOceanWaterHelper;
   private readonly riverHelper: ThreeTestRiverWaterHelper;
   private readonly waterfallHelper: ThreeTestWaterfallHelper;
+  private palette: WaterEnvironmentPalette;
 
   private waterNormal1: THREE.Texture | null = null;
   private waterNormal2: THREE.Texture | null = null;
@@ -53,6 +58,17 @@ export class ThreeTestWaterSystem {
     this.quality = options.preferredQuality;
     this.defaultNormal1 = this.makeNeutralNormal();
     this.defaultNormal2 = this.makeNeutralNormal();
+    const initialSkyTop = new THREE.Color(options.skyTopColor);
+    const initialSkyHorizon = new THREE.Color(options.skyHorizonColor);
+    this.palette = {
+      skyTop: { r: initialSkyTop.r * 255, g: initialSkyTop.g * 255, b: initialSkyTop.b * 255 },
+      skyHorizon: { r: initialSkyHorizon.r * 255, g: initialSkyHorizon.g * 255, b: initialSkyHorizon.b * 255 },
+      sun: { r: 255, g: 240, b: 207 },
+      oceanShallow: { r: 47, g: 135, b: 200 },
+      oceanDeep: { r: 27, g: 80, b: 120 },
+      riverShallow: { r: 63, g: 134, b: 191 },
+      riverDeep: { r: 26, g: 77, b: 121 }
+    };
     this.oceanHelper = new ThreeTestOceanWaterHelper({
       scene: options.scene,
       keyLight: options.keyLight,
@@ -68,6 +84,7 @@ export class ThreeTestWaterSystem {
     this.waterfallHelper = new ThreeTestWaterfallHelper({
       scene: options.scene
     });
+    this.setPalette(this.palette);
     this.applyQualityProfile(this.quality);
   }
 
@@ -212,6 +229,32 @@ export class ThreeTestWaterSystem {
     this.waterfallHelper.clear();
   }
 
+  public setPalette(palette: WaterEnvironmentPalette): void {
+    this.palette = {
+      skyTop: { ...palette.skyTop },
+      skyHorizon: { ...palette.skyHorizon },
+      sun: { ...palette.sun },
+      oceanShallow: { ...palette.oceanShallow },
+      oceanDeep: { ...palette.oceanDeep },
+      riverShallow: { ...palette.riverShallow },
+      riverDeep: { ...palette.riverDeep }
+    };
+    this.oceanHelper.setPalette({
+      skyTopColor: rgbToHex(this.palette.skyTop),
+      skyHorizonColor: rgbToHex(this.palette.skyHorizon),
+      shallowColor: rgbToHex(this.palette.oceanShallow),
+      deepColor: rgbToHex(this.palette.oceanDeep),
+      sunColor: rgbToHex(this.palette.sun)
+    });
+    this.riverHelper.setPalette({
+      skyTopColor: rgbToHex(this.palette.skyTop),
+      skyHorizonColor: rgbToHex(this.palette.skyHorizon),
+      shallowColor: rgbToHex(this.palette.riverShallow),
+      deepColor: rgbToHex(this.palette.riverDeep),
+      sunColor: rgbToHex(this.palette.sun)
+    });
+  }
+
   public dispose(): void {
     this.clear();
     this.oceanHelper.dispose();
@@ -237,7 +280,7 @@ export class ThreeTestWaterSystem {
       this.riverHelper.clear();
     }
     this.waterfallHelper.rebuild(baseMesh, water.ocean.level, water.waterfallInstances, qualityValue);
+    this.setPalette(this.palette);
     this.applyQualityProfile(this.quality);
   }
 }
-

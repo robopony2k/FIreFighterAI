@@ -17,6 +17,8 @@ export class GameState {
     paused: false,
     alert: null,
     timeSpeedIndex: 1,
+    skipToNextFireActive: false,
+    canSkipToNextFire: false,
     forecast: null,
     forecastDay: 0,
     forecastStartDay: 0,
@@ -94,6 +96,15 @@ export class GameState {
       return;
     }
     this.snapshot.timeSpeedIndex = index;
+    this.emitChange();
+  }
+
+  setSkipToNextFireState(active: boolean, available: boolean): void {
+    if (this.snapshot.skipToNextFireActive === active && this.snapshot.canSkipToNextFire === available) {
+      return;
+    }
+    this.snapshot.skipToNextFireActive = active;
+    this.snapshot.canSkipToNextFire = available;
     this.emitChange();
   }
 

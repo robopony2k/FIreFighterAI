@@ -96,6 +96,23 @@ export interface Town extends Point {
   lastSeasonHouseDelta?: number;
 }
 
+export interface FireAlertIncident {
+  id: number;
+  tileX: number;
+  tileY: number;
+  townId: number;
+  year: number;
+  careerDay: number;
+  phaseDay: number;
+}
+
+export interface SkipToNextFireState {
+  active: boolean;
+  previousPaused: boolean;
+  previousTimeSpeedIndex: number;
+  startedCareerDay: number;
+}
+
 
 
 export interface Grid {

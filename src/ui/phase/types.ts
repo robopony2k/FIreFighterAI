@@ -50,6 +50,8 @@ export type GameUiSnapshot = {
   paused: boolean;
   alert: string | null;
   timeSpeedIndex: number;
+  skipToNextFireActive: boolean;
+  canSkipToNextFire: boolean;
   forecast: ClimateForecast | null;
   forecastDay: number;
   forecastStartDay: number;
