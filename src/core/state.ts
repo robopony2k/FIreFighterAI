@@ -7,6 +7,7 @@ import type {
   FireSettings,
   Grid,
   Point,
+  ScoringState,
   SkipToNextFireState,
   Town,
   SeasonPhase,
@@ -218,6 +219,7 @@ export interface WorldState {
   careerScore: number;
 
   approval: number;
+  scoring: ScoringState;
 
   pendingBudget: number;
 
@@ -300,6 +302,54 @@ const DEFAULT_WIND: Wind = { name: "N", dx: 0, dy: -1, strength: 0.5 };
 
 
 const createNumberArray = (size: number, fill = 0): number[] => Array.from({ length: size }, () => fill);
+
+const createInitialScoringState = (grid: Grid): ScoringState => ({
+  grossPoints: 0,
+  lossPenalties: 0,
+  score: 0,
+  difficultyMult: 1,
+  approvalMult: 1,
+  streakMult: 1,
+  riskMult: 1,
+  totalMult: 1,
+  approvalTier: "B",
+  riskTier: "low",
+  approval01: 0.7,
+  nextApprovalTier: "A",
+  nextApprovalThreshold01: 0.75,
+  nextTierProgress01: 0,
+  noHouseLossDays: 0,
+  noLifeLossDays: 0,
+  dayAccumulator: 0,
+  hadHouseLossToday: false,
+  hadLifeLossToday: false,
+  seasonBurnoutPoints: 0,
+  seasonSquirtBonusPoints: 0,
+  seasonOtherPositivePoints: 0,
+  seasonHouseLossPenalties: 0,
+  seasonCivilianLifeLossPenalties: 0,
+  seasonFirefighterLifeLossPenalties: 0,
+  seasonCriticalAssetLossPenalties: 0,
+  seasonStartScore: 0,
+  seasonFinalScore: 0,
+  seasonApprovalMultIntegral: 0,
+  seasonRiskMultIntegral: 0,
+  seasonSampleSeconds: 0,
+  seasonSummary: null,
+  events: [],
+  nextEventId: 1,
+  previousDestroyedHouses: 0,
+  previousLostResidents: 0,
+  previousLostFirefighters: 0,
+  previousTownHousesLost: new Int32Array(0),
+  burnStartFuel: new Float32Array(grid.totalTiles).fill(-1),
+  lastSuppressedAt: new Float32Array(grid.totalTiles).fill(Number.NEGATIVE_INFINITY),
+  prevFireBoundsActive: false,
+  prevFireMinX: 0,
+  prevFireMaxX: 0,
+  prevFireMinY: 0,
+  prevFireMaxY: 0
+});
 
 
 
@@ -466,6 +516,7 @@ export function createInitialState(seed: number, grid: Grid): WorldState {
     careerScore: 0,
 
     approval: 0.7,
+    scoring: createInitialScoringState(grid),
 
     pendingBudget: BASE_BUDGET,
 
@@ -594,6 +645,8 @@ export function syncTileSoA(state: WorldState): void {
     state.baselineFireScratch = new Float32Array(total);
     state.baselineHeatScratch = new Float32Array(total);
     state.baselineNextHeat = new Float32Array(total);
+    state.scoring.burnStartFuel = new Float32Array(total).fill(-1);
+    state.scoring.lastSuppressedAt = new Float32Array(total).fill(Number.NEGATIVE_INFINITY);
     state.neighborOffsets4 = buildNeighborOffsets(state.grid.cols, 4);
 
     state.neighborOffsets8 = buildNeighborOffsets(state.grid.cols, 8);
@@ -703,6 +756,13 @@ export function syncTileSoA(state: WorldState): void {
     const bx = Math.floor(x / state.fireBlockSize);
     const by = Math.floor(y / state.fireBlockSize);
     state.tileBlockIndex[i] = by * state.fireBlockCols + bx;
+  }
+
+  if (state.scoring.burnStartFuel.length !== total) {
+    state.scoring.burnStartFuel = new Float32Array(total).fill(-1);
+  }
+  if (state.scoring.lastSuppressedAt.length !== total) {
+    state.scoring.lastSuppressedAt = new Float32Array(total).fill(Number.NEGATIVE_INFINITY);
   }
 
 

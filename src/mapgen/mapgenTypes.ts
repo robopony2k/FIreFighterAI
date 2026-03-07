@@ -5,6 +5,7 @@ export type MapGenReporter = (message: string, progress: number) => void | Promi
 export type MapGenDebugPhase =
   | "terrain:elevation"
   | "terrain:erosion"
+  | "terrain:shoreline"
   | "hydro:solve"
   | "hydro:rivers"
   | "biome:fields"

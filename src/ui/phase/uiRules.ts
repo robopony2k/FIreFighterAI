@@ -80,7 +80,6 @@ const RULES: Record<Phase, PhaseUiRules> = {
       "bottomControls"
     ],
     allowedInputs: ["pan", "zoom", "select", "retask", "formation", "deploy", "clearFuelBreak", "timeControl"],
-    primaryCta: { label: "Continue", actionId: "continue" },
     focus: "All operations available year-round.",
     minimalUi: false
   }

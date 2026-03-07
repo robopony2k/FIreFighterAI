@@ -12,6 +12,7 @@ import type { RenderSim } from "./simView.js";
 import { createHudState, setHudViewport, type HudTheme } from "./hud/hudState.js";
 import { handleHudClick, handleHudKey, renderHud } from "./hud/hud.js";
 import { buildEnvironmentPalette, computeFireLoad01 } from "./environmentPalette.js";
+import { buildLightingDirectorState, type LightingDirectorState } from "./lightingDirector.js";
 import {
   getFirestationAssetCache,
   getHouseAssetsCache,
@@ -77,6 +78,7 @@ type EnvironmentSignalState = {
   seasonT01: number;
   risk01: number;
   fireLoad01: number;
+  timeSpeedIndex: number;
 };
 
 export type ThreeTestPerfSnapshot = {
@@ -230,7 +232,20 @@ const THREE_TEST_SPARK_MODE: SparkMode =
   THREE_TEST_SPARK_MODE_PARAM === "mixed" || THREE_TEST_SPARK_MODE_PARAM === "embers"
     ? THREE_TEST_SPARK_MODE_PARAM
     : "tip";
-const THREE_TEST_ENV_FOG_ENABLED = false;
+const THREE_TEST_ENV_FOG_ENABLED = true;
+const THREE_TEST_SHADOW_RES_PARAM = Number(THREE_TEST_QUERY?.get("shadowres"));
+const THREE_TEST_SHADOW_MAP_SIZE = Number.isFinite(THREE_TEST_SHADOW_RES_PARAM) && THREE_TEST_SHADOW_RES_PARAM > 0
+  ? Math.max(512, Math.min(4096, 2 ** Math.round(Math.log2(THREE_TEST_SHADOW_RES_PARAM))))
+  : 2048;
+const THREE_TEST_SHADOW_VIEW_PADDING = 1.08;
+const THREE_TEST_SHADOW_HEIGHT_PADDING = 1.28;
+const THREE_TEST_SHADOW_MIN_EXTENT = 12;
+const THREE_TEST_SHADOW_MAX_TERRAIN_RATIO = 0.45;
+const THREE_TEST_SHADOW_TARGET_EPSILON = 0.2;
+const THREE_TEST_SHADOW_EXTENT_EPSILON = 0.35;
+const THREE_TEST_SHADOW_FAR_EPSILON = 1;
+const THREE_TEST_SHADOW_AZIMUTH_EPSILON_DEG = 0.25;
+const THREE_TEST_SHADOW_ELEVATION_EPSILON_DEG = 0.5;
 const THREE_TEST_CINEMATIC_PARAM = (THREE_TEST_QUERY?.get("cinematic") ?? "").trim();
 const THREE_TEST_CINEMATIC_GRADE_ENABLED = THREE_TEST_CINEMATIC_PARAM !== "0";
 const THREE_TEST_LEGACY_EXPOSURE = 1.05;
@@ -350,8 +365,9 @@ export const createThreeTest = (
   renderer.toneMappingExposure = cinematicGradeEnabled
     ? THREE_TEST_CINEMATIC_GRADE_CONFIG.exposure
     : THREE_TEST_LEGACY_EXPOSURE;
-  renderer.shadowMap.enabled = false;
+  renderer.shadowMap.enabled = true;
   renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+  renderer.shadowMap.autoUpdate = !ENABLE_THREE_TEST_SEASONAL_RECOLOR;
   renderer.autoClear = false;
   setRoadOverlayMaxSize(renderer.capabilities.maxTextureSize || 4096);
 
@@ -395,7 +411,7 @@ export const createThreeTest = (
     renderer.toneMappingExposure = enabled
       ? THREE_TEST_CINEMATIC_GRADE_CONFIG.exposure
       : THREE_TEST_LEGACY_EXPOSURE;
-    scene.fog = enabled && THREE_TEST_ENV_FOG_ENABLED ? cinematicFog : null;
+    scene.fog = THREE_TEST_ENV_FOG_ENABLED ? cinematicFog : null;
   };
   applyCinematicLook(cinematicGradeEnabled);
   let cinematicGradePost: ReturnType<typeof createThreeTestCinematicGrade> | null = null;
@@ -425,15 +441,17 @@ export const createThreeTest = (
   scene.add(ambient);
   const keyLight = new THREE.DirectionalLight(0xffe6c2, 0.95);
   keyLight.position.set(4, 5, 2);
-  keyLight.castShadow = false;
-  keyLight.shadow.mapSize.width = 1024;
-  keyLight.shadow.mapSize.height = 1024;
+  keyLight.castShadow = true;
+  keyLight.shadow.mapSize.width = THREE_TEST_SHADOW_MAP_SIZE;
+  keyLight.shadow.mapSize.height = THREE_TEST_SHADOW_MAP_SIZE;
   keyLight.shadow.bias = -0.00035;
   keyLight.shadow.normalBias = 0.02;
   scene.add(keyLight);
   const fillLight = new THREE.DirectionalLight(0x88a9c9, 0.35);
   fillLight.position.set(-4, 2.5, -2);
   scene.add(fillLight);
+  scene.add(keyLight.target);
+  scene.add(fillLight.target);
 
   const controls = new OrbitControls(camera, renderer.domElement);
   controls.enableDamping = true;
@@ -1183,10 +1201,10 @@ export const createThreeTest = (
   timeControls.appendChild(pauseButton);
   const speedButtons: Array<{ index: number; button: HTMLButtonElement }> = [];
   const speedPresets = [
-    { index: 0, label: "0.5x" },
-    { index: 1, label: "1x" },
-    { index: 2, label: "2x" },
-    { index: Math.max(0, TIME_SPEED_OPTIONS.length - 1), label: "MAX" }
+    { index: 0, label: "1/2", title: "0.5x" },
+    { index: 1, label: "1", title: "1x" },
+    { index: 2, label: "2", title: "2x" },
+    { index: Math.max(0, TIME_SPEED_OPTIONS.length - 1), label: ">>", title: "Max speed" }
   ];
   const usedSpeedIndices = new Set<number>();
   speedPresets.forEach((preset) => {
@@ -1201,6 +1219,7 @@ export const createThreeTest = (
     button.type = "button";
     button.className = "three-test-time-button";
     button.textContent = preset.label;
+    button.dataset.speedLabel = preset.title;
     button.addEventListener("click", (event) => {
       event.preventDefault();
       event.stopPropagation();
@@ -1212,7 +1231,7 @@ export const createThreeTest = (
   const nextFireButton = document.createElement("button");
   nextFireButton.type = "button";
   nextFireButton.className = "three-test-time-button";
-  nextFireButton.textContent = "Next Fire";
+  nextFireButton.textContent = ">>>";
   nextFireButton.addEventListener("click", (event) => {
     event.preventDefault();
     event.stopPropagation();
@@ -1252,9 +1271,10 @@ export const createThreeTest = (
 
   const applyDockAudioState = (settings: { muted: boolean; volume: number }): void => {
     const volumePct = Math.round(Math.max(0, Math.min(1, settings.volume)) * 100);
-    sfxControls.muteButton.textContent = settings.muted ? "Unmute SFX" : "Mute SFX";
+    sfxControls.muteButton.textContent = settings.muted ? "🔇" : "🔊";
     sfxControls.muteButton.title = settings.muted ? "Unmute UI SFX" : "Mute UI SFX";
     sfxControls.muteButton.setAttribute("aria-pressed", settings.muted ? "true" : "false");
+    sfxControls.muteButton.setAttribute("aria-label", settings.muted ? "Unmute UI sound effects" : "Mute UI sound effects");
     sfxControls.volumeLabel.textContent = `SFX ${volumePct}%`;
     sfxControls.volumeSlider.value = settings.volume.toFixed(2);
     sfxControls.muteButton.disabled = !uiAudio;
@@ -1263,9 +1283,10 @@ export const createThreeTest = (
 
   const applyDockMusicState = (settings: { muted: boolean; volume: number }): void => {
     const volumePct = Math.round(Math.max(0, Math.min(1, settings.volume)) * 100);
-    musicTimeControls.muteButton.textContent = settings.muted ? "Unmute Music" : "Mute Music";
+    musicTimeControls.muteButton.textContent = settings.muted ? "🔇" : "🔊";
     musicTimeControls.muteButton.title = settings.muted ? "Unmute music" : "Mute music";
     musicTimeControls.muteButton.setAttribute("aria-pressed", settings.muted ? "true" : "false");
+    musicTimeControls.muteButton.setAttribute("aria-label", settings.muted ? "Unmute music" : "Mute music");
     musicTimeControls.volumeLabel.textContent = `Music ${volumePct}%`;
     musicTimeControls.volumeSlider.value = settings.volume.toFixed(2);
     musicTimeControls.muteButton.disabled = !musicControls;
@@ -1773,16 +1794,17 @@ export const createThreeTest = (
         ? "Next fire skip ready"
         : "Next fire skip unavailable";
     timeSummary.append(timeLine, speedLine, phaseLine, skipLine);
-    pauseButton.textContent = world.paused ? "Resume" : "Pause";
+    pauseButton.textContent = world.paused ? ">" : "||";
     pauseButton.title = world.paused ? "Resume simulation" : "Pause simulation";
     pauseButton.setAttribute("aria-label", world.paused ? "Resume simulation" : "Pause simulation");
     speedButtons.forEach(({ index, button }) => {
       button.classList.toggle("is-active", index === activeSpeedIndex);
-      button.title = `Set speed to ${button.textContent}`;
-      button.setAttribute("aria-label", `Set speed to ${button.textContent}`);
+      const speedLabelText = button.dataset.speedLabel ?? button.textContent ?? "";
+      button.title = `Set speed to ${speedLabelText}`;
+      button.setAttribute("aria-label", `Set speed to ${speedLabelText}`);
     });
     nextFireButton.disabled = !canSkipToNextFire || skipToNextFireActive;
-    nextFireButton.textContent = skipToNextFireActive ? "Seeking..." : "Next Fire";
+    nextFireButton.textContent = skipToNextFireActive ? "..." : ">>>";
     if (skipToNextFireActive) {
       nextFireButton.title = "Advancing time to next fire incident.";
       nextFireButton.setAttribute("aria-label", "Seeking next fire");
@@ -3444,10 +3466,115 @@ export const createThreeTest = (
   let environmentTarget: EnvironmentSignalState = {
     seasonT01: initialSeasonT01,
     risk01: 0.35,
-    fireLoad01: computeFireLoad01(world.lastActiveFires, world.grid.totalTiles)
+    fireLoad01: computeFireLoad01(world.lastActiveFires, world.grid.totalTiles),
+    timeSpeedIndex: Math.max(0, Math.min(TIME_SPEED_OPTIONS.length - 1, world.timeSpeedIndex ?? 0))
   };
   let environmentCurrent: EnvironmentSignalState = { ...environmentTarget };
   let lastEnvironmentApplied: EnvironmentSignalState | null = null;
+  let lastLightingApplied: LightingDirectorState | null = null;
+  let shadowRefreshPending = true;
+  let lastShadowRefreshAt = -Infinity;
+  let lastShadowAzimuthDeg = Number.NaN;
+  let lastShadowElevationDeg = Number.NaN;
+  let lastShadowCameraInteracting = false;
+  const lastShadowFocusPoint = new THREE.Vector3(Number.NaN, Number.NaN, Number.NaN);
+  let lastShadowExtent = Number.NaN;
+  let lastShadowFar = Number.NaN;
+  const requestShadowRefresh = (): void => {
+    shadowRefreshPending = true;
+  };
+  const getLightDistance = (): number => {
+    const terrainSpan = lastTerrainSize ? Math.max(lastTerrainSize.width, lastTerrainSize.depth) : 12;
+    const cameraDistance = camera.position.distanceTo(controls.target);
+    return Math.max(18, Math.min(terrainSpan * 0.85, Math.max(terrainSpan * 0.4, cameraDistance * 1.9)));
+  };
+  const getShadowExtent = (): number => {
+    const terrainSpan = lastTerrainSize ? Math.max(lastTerrainSize.width, lastTerrainSize.depth) : 12;
+    const cameraDistance = Math.max(1, camera.position.distanceTo(controls.target));
+    const halfFovRadians = THREE.MathUtils.degToRad(camera.fov * 0.5);
+    const visibleHalfHeight = Math.tan(halfFovRadians) * cameraDistance;
+    const visibleHalfWidth = visibleHalfHeight * Math.max(1, camera.aspect);
+    const focusExtent = Math.max(
+      terrainSpan * 0.1,
+      visibleHalfWidth * THREE_TEST_SHADOW_VIEW_PADDING,
+      visibleHalfHeight * THREE_TEST_SHADOW_HEIGHT_PADDING
+    );
+    return Math.max(
+      THREE_TEST_SHADOW_MIN_EXTENT,
+      Math.min(Math.max(THREE_TEST_SHADOW_MIN_EXTENT, terrainSpan * THREE_TEST_SHADOW_MAX_TERRAIN_RATIO), focusExtent)
+    );
+  };
+  const syncDirectionalLightRig = (lighting: LightingDirectorState): void => {
+    const focusPoint = controls.target;
+    const lightDistance = Math.max(getLightDistance(), getShadowExtent() * 1.8);
+    keyLight.position.copy(focusPoint).addScaledVector(lighting.sunDirection, lightDistance);
+    keyLight.target.position.copy(focusPoint);
+    fillLight.position.copy(focusPoint).addScaledVector(lighting.fillDirection, lightDistance * 0.72);
+    fillLight.target.position.copy(focusPoint);
+    const shadowCam = keyLight.shadow.camera as THREE.OrthographicCamera;
+    const shadowExtent = getShadowExtent();
+    const shadowFar = Math.max(120, lightDistance * 2.35);
+    shadowCam.left = -shadowExtent;
+    shadowCam.right = shadowExtent;
+    shadowCam.top = shadowExtent;
+    shadowCam.bottom = -shadowExtent;
+    shadowCam.near = 0.1;
+    shadowCam.far = shadowFar;
+    shadowCam.updateProjectionMatrix();
+    keyLight.target.updateMatrixWorld();
+    fillLight.target.updateMatrixWorld();
+    keyLight.updateMatrixWorld();
+    fillLight.updateMatrixWorld();
+    const focusChanged =
+      !Number.isFinite(lastShadowFocusPoint.x) ||
+      focusPoint.distanceTo(lastShadowFocusPoint) >= THREE_TEST_SHADOW_TARGET_EPSILON;
+    const extentChanged =
+      !Number.isFinite(lastShadowExtent) || Math.abs(shadowExtent - lastShadowExtent) >= THREE_TEST_SHADOW_EXTENT_EPSILON;
+    const farChanged = !Number.isFinite(lastShadowFar) || Math.abs(shadowFar - lastShadowFar) >= THREE_TEST_SHADOW_FAR_EPSILON;
+    if (focusChanged || extentChanged || farChanged) {
+      shadowRefreshPending = true;
+    }
+    lastShadowFocusPoint.copy(focusPoint);
+    lastShadowExtent = shadowExtent;
+    lastShadowFar = shadowFar;
+    waterSystem.setLightDirectionFromKeyLight();
+  };
+  const applyLightingState = (lighting: LightingDirectorState): void => {
+    keyLight.color.set(rgbToHex(lighting.sunColor));
+    keyLight.intensity = lighting.sunIntensity;
+    fillLight.color.set(rgbToHex(lighting.fillColor));
+    fillLight.intensity = lighting.fillIntensity;
+    ambient.color.set(rgbToHex(lighting.fogColor));
+    ambient.intensity = lighting.ambientIntensity;
+    hemisphere.intensity = Math.min(0.9, 0.56 + lighting.ambientIntensity * 1.08);
+    syncDirectionalLightRig(lighting);
+  };
+  const maybeRefreshShadowMap = (time: number, lighting: LightingDirectorState | null, cameraInteracting: boolean): void => {
+    if (!renderer.shadowMap.enabled || !keyLight.castShadow || !lighting) {
+      return;
+    }
+    if (lastShadowCameraInteracting && !cameraInteracting) {
+      shadowRefreshPending = true;
+    }
+    lastShadowCameraInteracting = cameraInteracting;
+    const azimuthChanged =
+      !Number.isFinite(lastShadowAzimuthDeg) ||
+      Math.abs(lighting.sunAzimuthDeg - lastShadowAzimuthDeg) >= THREE_TEST_SHADOW_AZIMUTH_EPSILON_DEG;
+    const elevationChanged =
+      !Number.isFinite(lastShadowElevationDeg) ||
+      Math.abs(lighting.sunElevationDeg - lastShadowElevationDeg) >= THREE_TEST_SHADOW_ELEVATION_EPSILON_DEG;
+    if (azimuthChanged || elevationChanged) {
+      shadowRefreshPending = true;
+    }
+    if (!shadowRefreshPending || time - lastShadowRefreshAt < lighting.shadowRefreshMinMs) {
+      return;
+    }
+    renderer.shadowMap.needsUpdate = true;
+    lastShadowRefreshAt = time;
+    lastShadowAzimuthDeg = lighting.sunAzimuthDeg;
+    lastShadowElevationDeg = lighting.sunElevationDeg;
+    shadowRefreshPending = false;
+  };
   applyEnvironmentPalette = (force = false): void => {
     if (!ENABLE_THREE_TEST_SEASONAL_RECOLOR) {
       return;
@@ -3456,32 +3583,44 @@ export const createThreeTest = (
       !lastEnvironmentApplied ||
       Math.abs(environmentCurrent.seasonT01 - lastEnvironmentApplied.seasonT01) >= SEASON_VISUAL_EPSILON ||
       Math.abs(environmentCurrent.risk01 - lastEnvironmentApplied.risk01) >= SEASON_VISUAL_EPSILON ||
-      Math.abs(environmentCurrent.fireLoad01 - lastEnvironmentApplied.fireLoad01) >= SEASON_VISUAL_EPSILON;
+      Math.abs(environmentCurrent.fireLoad01 - lastEnvironmentApplied.fireLoad01) >= SEASON_VISUAL_EPSILON ||
+      environmentCurrent.timeSpeedIndex !== lastEnvironmentApplied.timeSpeedIndex;
     if (!force && !changed) {
       return;
     }
     const palette = buildEnvironmentPalette(environmentCurrent);
+    const lighting = buildLightingDirectorState(environmentCurrent);
     fireFx.setEnvironmentSignals({
       smoke01: palette.signals.smoke01,
       denseSmoke01: palette.signals.denseSmoke01,
       fireLoad01: palette.signals.fireLoad01,
-      orangeGlow01: palette.signals.orangeGlow01
+      orangeGlow01: palette.signals.orangeGlow01,
+      sunDirection: lighting.sunDirection,
+      sunTint: rgbToHex(lighting.sunColor),
+      smokeTint: rgbToHex(lighting.smokeTint)
     });
     repaintSkyGradient(rgbToHex(palette.atmosphere.skyTop), rgbToHex(palette.atmosphere.skyHorizon));
     texture.needsUpdate = true;
     if (THREE_TEST_ENV_FOG_ENABLED) {
-      cinematicFog.color.set(rgbToHex(palette.atmosphere.fogColor));
-      cinematicFog.density = THREE_TEST_CINEMATIC_GRADE_CONFIG.fogDensity * palette.atmosphere.fogDensityScale;
-      cinematicGradePost?.setFogColor(rgbToHex(palette.atmosphere.fogColor));
+      cinematicFog.color.set(rgbToHex(lighting.fogColor));
+      cinematicFog.density = lighting.fogDensity;
+      cinematicGradePost?.setFogColor(rgbToHex(lighting.fogColor));
+      cinematicGradePost?.setHeightHazeStrength(lighting.hazeStrength);
     }
     hemisphere.color.set(rgbToHex(palette.atmosphere.hemisphereSky));
     hemisphere.groundColor.set(rgbToHex(palette.atmosphere.hemisphereGround));
-    keyLight.color.set(rgbToHex(palette.atmosphere.keyLight));
-    fillLight.color.set(rgbToHex(palette.atmosphere.fillLight));
-    waterSystem.setPalette(palette.water);
+    applyLightingState(lighting);
+    waterSystem.setPalette({
+      ...palette.water,
+      sun: lighting.waterSunColor
+    });
     hudState.theme = cloneHudTheme(palette.hud.canvas);
     applyDomEnvironmentTheme(palette.hud.dom);
     lastEnvironmentApplied = { ...environmentCurrent };
+    lastLightingApplied = lighting;
+    if (force) {
+      requestShadowRefresh();
+    }
   };
   applyEnvironmentPalette(true);
   const treeSeasonVisualConfig: TreeSeasonVisualConfig = {
@@ -4342,12 +4481,14 @@ export const createThreeTest = (
       const nextEnvironmentTarget: EnvironmentSignalState = {
         seasonT01: seasonVisualState.seasonT01,
         risk01: seasonVisualState.risk01,
-        fireLoad01: computeFireLoad01(world.lastActiveFires, world.grid.totalTiles)
+        fireLoad01: computeFireLoad01(world.lastActiveFires, world.grid.totalTiles),
+        timeSpeedIndex: Math.max(0, Math.min(TIME_SPEED_OPTIONS.length - 1, world.timeSpeedIndex ?? 0))
       };
       const targetChanged =
         Math.abs(nextEnvironmentTarget.seasonT01 - environmentTarget.seasonT01) >= SEASON_VISUAL_EPSILON ||
         Math.abs(nextEnvironmentTarget.risk01 - environmentTarget.risk01) >= SEASON_VISUAL_EPSILON ||
-        Math.abs(nextEnvironmentTarget.fireLoad01 - environmentTarget.fireLoad01) >= SEASON_VISUAL_EPSILON;
+        Math.abs(nextEnvironmentTarget.fireLoad01 - environmentTarget.fireLoad01) >= SEASON_VISUAL_EPSILON ||
+        nextEnvironmentTarget.timeSpeedIndex !== environmentTarget.timeSpeedIndex;
       if (targetChanged) {
         environmentTarget = nextEnvironmentTarget;
       }
@@ -4359,6 +4500,7 @@ export const createThreeTest = (
       } else {
         environmentCurrent = { ...environmentTarget };
       }
+      environmentCurrent.timeSpeedIndex = environmentTarget.timeSpeedIndex;
       applyEnvironmentPalette();
     }
     let instantFps = 0;
@@ -4377,6 +4519,10 @@ export const createThreeTest = (
     updateCameraFlight(time);
     controls.update();
     threePerf.controlsMs = smoothPerf(threePerf.controlsMs, performance.now() - controlsStart);
+    if (lastLightingApplied) {
+      syncDirectionalLightRig(lastLightingApplied);
+    }
+    maybeRefreshShadowMap(time, lastLightingApplied, isCameraInteracting());
     const treeBurnStart = performance.now();
     if (
       !THREE_TEST_DISABLE_FX &&
@@ -4518,6 +4664,10 @@ export const createThreeTest = (
       pendingResize = null;
     }
     renderer.compile(scene, camera);
+    if (lastLightingApplied) {
+      syncDirectionalLightRig(lastLightingApplied);
+    }
+    maybeRefreshShadowMap(performance.now(), lastLightingApplied, false);
     renderWorldPass();
     if (!THREE_TEST_DISABLE_HUD) {
       renderer.clearDepth();
@@ -4569,7 +4719,8 @@ export const createThreeTest = (
     environmentTarget = {
       seasonT01,
       risk01,
-      fireLoad01: computeFireLoad01(world.lastActiveFires, world.grid.totalTiles)
+      fireLoad01: computeFireLoad01(world.lastActiveFires, world.grid.totalTiles),
+      timeSpeedIndex: Math.max(0, Math.min(TIME_SPEED_OPTIONS.length - 1, world.timeSpeedIndex ?? 0))
     };
     if (!running) {
       environmentCurrent = { ...environmentTarget };
@@ -4706,19 +4857,12 @@ export const createThreeTest = (
       controls.enablePan = false;
       controls.enableZoom = false;
     }
-    keyLight.position.set(distance * 0.45, distance * 0.85, distance * 0.35);
-    waterSystem.setLightDirectionFromKeyLight();
-    const shadowCam = keyLight.shadow.camera as THREE.OrthographicCamera;
-    const shadowExtent = Math.max(10, size * 0.7);
-    shadowCam.left = -shadowExtent;
-    shadowCam.right = shadowExtent;
-    shadowCam.top = shadowExtent;
-    shadowCam.bottom = -shadowExtent;
-    shadowCam.near = 0.1;
-    shadowCam.far = Math.max(200, distance * 5);
-    shadowCam.updateProjectionMatrix();
     camera.updateProjectionMatrix();
     controls.update();
+    if (lastLightingApplied) {
+      syncDirectionalLightRig(lastLightingApplied);
+    }
+    requestShadowRefresh();
   };
 
   const findRoadOverlayMesh = (root: THREE.Object3D): THREE.Mesh | null => {
@@ -5019,6 +5163,7 @@ export const createThreeTest = (
       if (updateTerrainSurface(nextSample)) {
         lastSample = nextSample;
         rebuildStructureOverlay(nextSample);
+        requestShadowRefresh();
         return;
       }
       lastSample = nextSample;
@@ -5097,11 +5242,18 @@ export const createThreeTest = (
       cameraLockedToTerrain = true;
     }
     lastTerrainSize = size;
+    if (lastLightingApplied) {
+      applyLightingState(lastLightingApplied);
+    }
 
     if (water) {
       waterSystem.rebuild(mesh, water);
     }
+    if (lastLightingApplied) {
+      applyLightingState(lastLightingApplied);
+    }
     rebuildStructureOverlay(nextSample);
+    requestShadowRefresh();
     } finally {
       const terrainSetMs = performance.now() - setTerrainStartedAt;
       threePerf.terrainSetLastMs = terrainSetMs;

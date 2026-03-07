@@ -7,6 +7,15 @@ import { profEnd, profStart } from "./prof.js";
 
 type MoveDir = { x: number; y: number; cost: number };
 
+const ROAD_EDGE_N = 1 << 0;
+const ROAD_EDGE_E = 1 << 1;
+const ROAD_EDGE_S = 1 << 2;
+const ROAD_EDGE_W = 1 << 3;
+const ROAD_EDGE_NE = 1 << 4;
+const ROAD_EDGE_NW = 1 << 5;
+const ROAD_EDGE_SE = 1 << 6;
+const ROAD_EDGE_SW = 1 << 7;
+
 const MOVE_DIRS: MoveDir[] = [
   { x: 1, y: 0, cost: 1 },
   { x: -1, y: 0, cost: 1 },
@@ -27,6 +36,74 @@ const getTerrainCost = (state: WorldState, idx: number): number => {
 
 const isBridgeTile = (state: WorldState, idx: number): boolean =>
   state.tiles[idx].type === "water" && state.tileRoadBridge[idx] > 0;
+
+const isRoadLikeTile = (state: WorldState, idx: number): boolean => {
+  const type = state.tiles[idx].type;
+  return type === "road" || type === "base" || isBridgeTile(state, idx);
+};
+
+const getRoadEdgeBit = (dx: number, dy: number): number => {
+  if (dx === 0 && dy < 0) {
+    return ROAD_EDGE_N;
+  }
+  if (dx > 0 && dy === 0) {
+    return ROAD_EDGE_E;
+  }
+  if (dx === 0 && dy > 0) {
+    return ROAD_EDGE_S;
+  }
+  if (dx < 0 && dy === 0) {
+    return ROAD_EDGE_W;
+  }
+  if (dx > 0 && dy < 0) {
+    return ROAD_EDGE_NE;
+  }
+  if (dx < 0 && dy < 0) {
+    return ROAD_EDGE_NW;
+  }
+  if (dx > 0 && dy > 0) {
+    return ROAD_EDGE_SE;
+  }
+  if (dx < 0 && dy > 0) {
+    return ROAD_EDGE_SW;
+  }
+  return 0;
+};
+
+const getOppositeRoadEdgeBit = (bit: number): number => {
+  switch (bit) {
+    case ROAD_EDGE_N:
+      return ROAD_EDGE_S;
+    case ROAD_EDGE_E:
+      return ROAD_EDGE_W;
+    case ROAD_EDGE_S:
+      return ROAD_EDGE_N;
+    case ROAD_EDGE_W:
+      return ROAD_EDGE_E;
+    case ROAD_EDGE_NE:
+      return ROAD_EDGE_SW;
+    case ROAD_EDGE_NW:
+      return ROAD_EDGE_SE;
+    case ROAD_EDGE_SE:
+      return ROAD_EDGE_NW;
+    case ROAD_EDGE_SW:
+      return ROAD_EDGE_NE;
+    default:
+      return 0;
+  }
+};
+
+const hasExplicitRoadConnection = (state: WorldState, fromIdx: number, toIdx: number, dx: number, dy: number): boolean => {
+  if (!isRoadLikeTile(state, fromIdx) || !isRoadLikeTile(state, toIdx)) {
+    return false;
+  }
+  const bit = getRoadEdgeBit(dx, dy);
+  const opposite = getOppositeRoadEdgeBit(bit);
+  if (bit === 0 || opposite === 0) {
+    return false;
+  }
+  return (state.tileRoadEdges[fromIdx] & bit) !== 0 && (state.tileRoadEdges[toIdx] & opposite) !== 0;
+};
 
 const getSlopeFactor = (fromElev: number, toElev: number): number => {
   const delta = toElev - fromElev;
@@ -202,12 +279,13 @@ export function findPath(state: WorldState, start: Point, goal: Point): Point[] 
       if (!inBounds(state.grid, nx, ny) || !isPassable(state, nx, ny)) {
         continue;
       }
+      const nIdx = indexFor(state.grid, nx, ny);
       if (dir.x !== 0 && dir.y !== 0) {
-        if (!isPassable(state, cx + dir.x, cy) || !isPassable(state, cx, cy + dir.y)) {
+        const allowExplicitRoadDiagonal = hasExplicitRoadConnection(state, currentIdx, nIdx, dir.x, dir.y);
+        if (!allowExplicitRoadDiagonal && (!isPassable(state, cx + dir.x, cy) || !isPassable(state, cx, cy + dir.y))) {
           continue;
         }
       }
-      const nIdx = indexFor(state.grid, nx, ny);
       const stepCost = getMoveCost(state, cx, cy, nx, ny, dir.cost);
       const nextScore = currentScore + stepCost;
       if (visit[nIdx] === stamp && nextScore >= gScore[nIdx]) {

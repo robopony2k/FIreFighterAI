@@ -1,4 +1,4 @@
-import type { FireSettings, FuelProfile, Point, TileType, UnitKind, Wind } from "./types.js";
+import type { ApprovalTier, FireSettings, FuelProfile, Point, RiskTier, TileType, UnitKind, Wind } from "./types.js";
 import { TILE_FUEL_PROFILES } from "./generated/fuelProfiles.js";
 
 export const TILE_SIZE = 10;
@@ -44,14 +44,37 @@ export const FIRE_PHASE_TIME_SCALE = 0.125;
 export const FIRE_RENDER_SMOOTH_SECONDS = 0.5;
 export const FIRE_SEASON_TAPER_DAYS = 22;
 export const FIRE_SEASON_MIN_INTENSITY = 0.2;
-export const FIRE_DAY_FACTOR_MIN = 0.65;
-export const FIRE_DAY_FACTOR_MAX = 1.35;
 export const FIRE_JUMP_WIND_THRESHOLD = 0.7;
 export const FIRE_JUMP_BASE_CHANCE = 0.25;
 export const FIRE_JUMP_HEAT_BOOST = 0.4;
 export const FIRE_JUMP_DOT_THRESHOLD = 0.2;
 export const FIRE_WEATHER_RISK_MIN = 0.4;
 export const FIRE_WEATHER_BURNOUT_RISK = 0.25;
+export const SCORE_HOUSE_LOSS_PENALTY = 50000;
+export const SCORE_LIFE_LOSS_PENALTY = 250000;
+export const SCORE_BURNOUT_POINTS_PER_FUEL = 8;
+export const SCORE_SQUIRT_BONUS_RATE = 0.25;
+export const SCORE_SUPPRESSION_ASSIST_SECONDS = 5;
+export const SCORE_APPROVAL_HOUSE_LOSS_DISAPPROVAL = 3;
+export const SCORE_STREAK_HOUSE_CAP_DAYS = 30;
+export const SCORE_STREAK_LIFE_CAP_DAYS = 30;
+export const SCORE_STREAK_HOUSE_MAX_BONUS = 0.30;
+export const SCORE_STREAK_LIFE_MAX_BONUS = 0.50;
+export const SCORE_STREAK_TOTAL_CAP = 2.0;
+export const SCORE_DIFFICULTY_YEAR_MULTIPLIER = 0.08;
+export const SCORE_APPROVAL_TIERS: { tier: ApprovalTier; minApproval: number; multiplier: number }[] = [
+  { tier: "S", minApproval: 0.90, multiplier: 1.30 },
+  { tier: "A", minApproval: 0.75, multiplier: 1.15 },
+  { tier: "B", minApproval: 0.60, multiplier: 1.00 },
+  { tier: "C", minApproval: 0.45, multiplier: 0.85 },
+  { tier: "D", minApproval: 0.00, multiplier: 0.70 }
+];
+export const SCORE_RISK_TIERS: { tier: RiskTier; minRisk: number; multiplier: number }[] = [
+  { tier: "extreme", minRisk: 0.75, multiplier: 1.50 },
+  { tier: "high", minRisk: 0.50, multiplier: 1.25 },
+  { tier: "moderate", minRisk: 0.25, multiplier: 1.10 },
+  { tier: "low", minRisk: 0.00, multiplier: 1.00 }
+];
 export const DEFAULT_FIRE_SETTINGS: FireSettings = {
   ignitionChancePerDay: FIRE_IGNITION_CHANCE_PER_DAY,
   simSpeed: FIRE_SIM_SPEED,
@@ -59,8 +82,6 @@ export const DEFAULT_FIRE_SETTINGS: FireSettings = {
   renderSmoothSeconds: FIRE_RENDER_SMOOTH_SECONDS,
   seasonTaperDays: FIRE_SEASON_TAPER_DAYS,
   seasonMinIntensity: FIRE_SEASON_MIN_INTENSITY,
-  dayFactorMin: FIRE_DAY_FACTOR_MIN,
-  dayFactorMax: FIRE_DAY_FACTOR_MAX,
   diffusionCardinal: 0.35,
   diffusionDiagonal: 0.25,
   diffusionSecondary: 0.4,
@@ -114,7 +135,7 @@ export const TRAINING_RESILIENCE_GAIN = 0.12;
 export const UNIT_LOSS_FIRE_THRESHOLD = 0.55;
 export const TRUCK_CAPACITY = 3;
 export const TRUCK_BOARD_RADIUS = 1.6;
-export const FIREFIGHTER_TETHER_DISTANCE = 10;
+export const FIREFIGHTER_TETHER_DISTANCE = 6.5;
 export const FORMATION_SPACING = {
   narrow: 1.5,
   medium: 2.5,
@@ -197,9 +218,12 @@ export const LIGHT_DIR = { x: 0.6, y: -0.8 };
 
 export const TIME_SPEED_OPTIONS = [0.5, 1, 2, 3, 5, 10, 20, 40, 80];
 
-export const UNIT_CONFIG: Record<UnitKind, { cost: number; speed: number; radius: number; power: number; color: string }> = {
-  firefighter: { cost: 50, speed: 3.2, radius: 1.1, power: 0.5, color: "#f0b33b" },
-  truck: { cost: 120, speed: 5.4, radius: 2.2, power: 0.75, color: "#c0462c" }
+export const UNIT_CONFIG: Record<
+  UnitKind,
+  { cost: number; speed: number; radius: number; hoseRange: number; power: number; color: string }
+> = {
+  firefighter: { cost: 50, speed: 3.2, radius: 1.1, hoseRange: 4.5, power: 0.5, color: "#f0b33b" },
+  truck: { cost: 120, speed: 5.4, radius: 2.2, hoseRange: 6.0, power: 0.75, color: "#c0462c" }
 };
 
 export const WATER_PARTICLE_COLOR = "#7ad4ff";

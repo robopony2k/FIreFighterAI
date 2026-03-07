@@ -38,6 +38,12 @@ const toNumber = (value: unknown, fallback: number): number => {
 
 export const normalizeFireSettings = (settings?: Partial<FireSettings>): FireSettings => {
   const source = settings ?? {};
+  const legacySource = source as Partial<FireSettings> & {
+    dayFactorMin?: unknown;
+    dayFactorMax?: unknown;
+  };
+  void legacySource.dayFactorMin;
+  void legacySource.dayFactorMax;
   return {
     ignitionChancePerDay: toNumber(source.ignitionChancePerDay, DEFAULT_FIRE_SETTINGS.ignitionChancePerDay),
     simSpeed: toNumber(source.simSpeed, DEFAULT_FIRE_SETTINGS.simSpeed),
@@ -45,8 +51,6 @@ export const normalizeFireSettings = (settings?: Partial<FireSettings>): FireSet
     renderSmoothSeconds: toNumber(source.renderSmoothSeconds, DEFAULT_FIRE_SETTINGS.renderSmoothSeconds),
     seasonTaperDays: Math.max(0, Math.round(toNumber(source.seasonTaperDays, DEFAULT_FIRE_SETTINGS.seasonTaperDays))),
     seasonMinIntensity: toNumber(source.seasonMinIntensity, DEFAULT_FIRE_SETTINGS.seasonMinIntensity),
-    dayFactorMin: toNumber(source.dayFactorMin, DEFAULT_FIRE_SETTINGS.dayFactorMin),
-    dayFactorMax: toNumber(source.dayFactorMax, DEFAULT_FIRE_SETTINGS.dayFactorMax),
     diffusionCardinal: toNumber(source.diffusionCardinal, DEFAULT_FIRE_SETTINGS.diffusionCardinal),
     diffusionDiagonal: toNumber(source.diffusionDiagonal, DEFAULT_FIRE_SETTINGS.diffusionDiagonal),
     diffusionSecondary: toNumber(source.diffusionSecondary, DEFAULT_FIRE_SETTINGS.diffusionSecondary),

@@ -1,4 +1,4 @@
-import type { ClimateForecast, Formation } from "../../core/types.js";
+import type { ApprovalTier, ClimateForecast, Formation, RiskTier, ScoreEventSeverity } from "../../core/types.js";
 export type Phase = "growth" | "maintenance" | "fire" | "budget";
 
 export type InteractionMode = "default" | "deploy" | "fuelBreak" | "formation" | "inspect";
@@ -57,4 +57,25 @@ export type GameUiSnapshot = {
   forecastStartDay: number;
   forecastYearDays: number;
   forecastMeta: string | null;
+  scoring: {
+    score: number;
+    difficultyMult: number;
+    approvalMult: number;
+    streakMult: number;
+    riskMult: number;
+    totalMult: number;
+    noHouseLossDays: number;
+    noLifeLossDays: number;
+    approvalTier: ApprovalTier;
+    riskTier: RiskTier;
+    nextApprovalTier: ApprovalTier | null;
+    nextApprovalThreshold01: number | null;
+    nextTierProgress01: number;
+    events: Array<{
+      id: number;
+      message: string;
+      severity: ScoreEventSeverity;
+      remainingSeconds: number;
+    }>;
+  } | null;
 };

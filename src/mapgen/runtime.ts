@@ -368,6 +368,35 @@ function classifyTile(input: TileClassificationInput): TileType {
 
 const getYieldEveryRows = (cols: number): number => Math.max(4, Math.floor(2048 / Math.max(1, cols)));
 
+const SHORELINE_SEA_BAND = 0.06;
+const SHORELINE_NOISE_SCALE_FINE_M = 180;
+const SHORELINE_NOISE_SCALE_BROAD_M = 420;
+const SHORELINE_NOISE_AMPLITUDE = 0.016;
+const SHORELINE_SMOOTH_PASSES = 2;
+
+const COAST_BEACH_MAX_SLOPE = 0.22;
+const COAST_BEACH_MAX_RELIEF = 0.1;
+const COAST_BEACH_MAX_HEIGHT_ABOVE_SEA = 0.1;
+const COAST_BEACH_SCULPT_MAX_HEIGHT_ABOVE_SEA = 0.12;
+const COAST_BEACH_NEAR_TARGET = 0.012;
+const COAST_BEACH_FAR_TARGET = 0.022;
+const COAST_BEACH_NEAR_BLEND = 0.82;
+const COAST_BEACH_FAR_BLEND = 0.58;
+const COAST_BEACH_NEAR_MAX_DROP = 0.025;
+const COAST_BEACH_FAR_MAX_DROP = 0.015;
+const COAST_CLIFF_NEAR_MIN = 0.04;
+const COAST_CLIFF_FAR_MIN = 0.055;
+const COAST_CLIFF_NEAR_BLEND = 0.2;
+const COAST_CLIFF_FAR_BLEND = 0.12;
+const COAST_OCEAN_SHELF_DEEPEN = 0.006;
+const COAST_LOCAL_SEA_MARGIN = 0.0005;
+const COAST_MIN_LAND_ABOVE_SEA = 0.001;
+const OCEAN_BATHY_DEPTH_MIN = 0.012;
+const OCEAN_BATHY_DEPTH_MAX = 0.036;
+const OCEAN_BATHY_BLEND = 0.75;
+const RIVER_MOUTH_MAX_BED_BELOW_SEA = 0.008;
+const RIVER_MOUTH_SURFACE_ABOVE_SEA = 0.0005;
+
 type SeedSpreadClassificationInput = {
   elevation: number;
   slope: number;
@@ -403,6 +432,58 @@ const classifySeedSpreadTile = (input: SeedSpreadClassificationInput): TileType 
     return "scrub";
   }
   return "grass";
+};
+
+const classifyOceanCoastTile = (
+  state: WorldState,
+  idx: number,
+  oceanMask: Uint8Array,
+  riverMask: Uint8Array,
+  seaLevelMap: ArrayLike<number>,
+  slope: number,
+  elevation: number
+): TileType | null => {
+  if (riverMask[idx] > 0 || oceanMask[idx]) {
+    return null;
+  }
+  const tile = state.tiles[idx];
+  if (!tile || tile.type === "water" || tile.type === "road" || tile.type === "base" || tile.type === "house") {
+    return null;
+  }
+  const cols = state.grid.cols;
+  const rows = state.grid.rows;
+  const x = idx % cols;
+  const y = Math.floor(idx / cols);
+  let touchesOcean = false;
+  if (x > 0 && oceanMask[idx - 1]) {
+    touchesOcean = true;
+  } else if (x < cols - 1 && oceanMask[idx + 1]) {
+    touchesOcean = true;
+  } else if (y > 0 && oceanMask[idx - cols]) {
+    touchesOcean = true;
+  } else if (y < rows - 1 && oceanMask[idx + cols]) {
+    touchesOcean = true;
+  }
+  if (!touchesOcean) {
+    return null;
+  }
+  const seaLevel = seaLevelMap[idx] ?? 0;
+  if (elevation <= seaLevel + COAST_LOCAL_SEA_MARGIN) {
+    return null;
+  }
+  if (slope <= COAST_BEACH_MAX_SLOPE && elevation - seaLevel <= COAST_BEACH_MAX_HEIGHT_ABOVE_SEA) {
+    return "beach";
+  }
+  return "rocky";
+};
+
+const shapeOceanFloorAtSeaLevel = (current: number, seaLevel: number, noise01: number): number => {
+  const clampedSea = clamp(seaLevel, 0, 1);
+  const depth = OCEAN_BATHY_DEPTH_MIN + clamp(noise01, 0, 1) * (OCEAN_BATHY_DEPTH_MAX - OCEAN_BATHY_DEPTH_MIN);
+  const maxFloor = Math.max(0, clampedSea - 0.001);
+  const targetFloor = clamp(clampedSea - depth, 0, maxFloor);
+  const blended = current * (1 - OCEAN_BATHY_BLEND) + targetFloor * OCEAN_BATHY_BLEND;
+  return clamp(blended, 0, maxFloor);
 };
 
 function softenPeaks(value: number, cap: number, softness: number): number {
@@ -2231,6 +2312,209 @@ function buildOceanMask(state: WorldState): Uint8Array {
   return mask;
 }
 
+function buildEdgeConnectedMask(mask: Uint8Array, cols: number, rows: number): Uint8Array {
+  const total = cols * rows;
+  const connected = new Uint8Array(total);
+  const queue = new Int32Array(total);
+  let head = 0;
+  let tail = 0;
+  const push = (idx: number): void => {
+    if (!mask[idx] || connected[idx]) {
+      return;
+    }
+    connected[idx] = 1;
+    queue[tail] = idx;
+    tail += 1;
+  };
+  for (let x = 0; x < cols; x += 1) {
+    push(x);
+    if (rows > 1) {
+      push((rows - 1) * cols + x);
+    }
+  }
+  for (let y = 1; y < rows - 1; y += 1) {
+    push(y * cols);
+    if (cols > 1) {
+      push(y * cols + (cols - 1));
+    }
+  }
+  while (head < tail) {
+    const idx = queue[head];
+    head += 1;
+    const x = idx % cols;
+    const y = Math.floor(idx / cols);
+    if (x > 0) {
+      push(idx - 1);
+    }
+    if (x < cols - 1) {
+      push(idx + 1);
+    }
+    if (y > 0) {
+      push(idx - cols);
+    }
+    if (y < rows - 1) {
+      push(idx + cols);
+    }
+  }
+  return connected;
+}
+
+function buildDistanceFromMask(mask: Uint8Array, cols: number, rows: number): Uint16Array {
+  const total = cols * rows;
+  const unvisited = 0xffff;
+  const dist = new Uint16Array(total);
+  dist.fill(unvisited);
+  const queue = new Int32Array(total);
+  let head = 0;
+  let tail = 0;
+  for (let i = 0; i < total; i += 1) {
+    if (!mask[i]) {
+      continue;
+    }
+    dist[i] = 0;
+    queue[tail] = i;
+    tail += 1;
+  }
+  while (head < tail) {
+    const idx = queue[head];
+    head += 1;
+    const nextDist = Math.min(0xfffe, (dist[idx] ?? 0) + 1);
+    const x = idx % cols;
+    const y = Math.floor(idx / cols);
+    if (x > 0) {
+      const left = idx - 1;
+      if (dist[left] === unvisited) {
+        dist[left] = nextDist;
+        queue[tail] = left;
+        tail += 1;
+      }
+    }
+    if (x < cols - 1) {
+      const right = idx + 1;
+      if (dist[right] === unvisited) {
+        dist[right] = nextDist;
+        queue[tail] = right;
+        tail += 1;
+      }
+    }
+    if (y > 0) {
+      const up = idx - cols;
+      if (dist[up] === unvisited) {
+        dist[up] = nextDist;
+        queue[tail] = up;
+        tail += 1;
+      }
+    }
+    if (y < rows - 1) {
+      const down = idx + cols;
+      if (dist[down] === unvisited) {
+        dist[down] = nextDist;
+        queue[tail] = down;
+        tail += 1;
+      }
+    }
+  }
+  return dist;
+}
+
+function expandOceanMaskByLocalSeaLevel(
+  elevationMap: ArrayLike<number>,
+  seaLevelMap: ArrayLike<number>,
+  oceanMask: Uint8Array,
+  riverMask: Uint8Array,
+  cols: number,
+  rows: number,
+  seaMargin: number
+): Uint8Array {
+  const expanded = Uint8Array.from(oceanMask);
+  const total = cols * rows;
+  const queue = new Int32Array(total);
+  let head = 0;
+  let tail = 0;
+  for (let i = 0; i < total; i += 1) {
+    if (expanded[i]) {
+      queue[tail] = i;
+      tail += 1;
+    }
+  }
+  while (head < tail) {
+    const idx = queue[head];
+    head += 1;
+    const x = idx % cols;
+    const y = Math.floor(idx / cols);
+    const tryPush = (nIdx: number): void => {
+      if (expanded[nIdx] || riverMask[nIdx] > 0) {
+        return;
+      }
+      const sea = seaLevelMap[nIdx] ?? 0;
+      const elev = elevationMap[nIdx] ?? 0;
+      if (elev <= sea + seaMargin) {
+        expanded[nIdx] = 1;
+        queue[tail] = nIdx;
+        tail += 1;
+      }
+    };
+    if (x > 0) {
+      tryPush(idx - 1);
+    }
+    if (x < cols - 1) {
+      tryPush(idx + 1);
+    }
+    if (y > 0) {
+      tryPush(idx - cols);
+    }
+    if (y < rows - 1) {
+      tryPush(idx + cols);
+    }
+  }
+  return expanded;
+}
+
+function clampRiverMouthDepthsToSeaLevel(
+  state: WorldState,
+  oceanMask: Uint8Array,
+  riverMask: Uint8Array,
+  seaLevelMap: ArrayLike<number>
+): void {
+  const cols = state.grid.cols;
+  const rows = state.grid.rows;
+  const total = state.grid.totalTiles;
+  if (
+    state.tileRiverBed.length !== total ||
+    state.tileRiverSurface.length !== total
+  ) {
+    return;
+  }
+  for (let i = 0; i < total; i += 1) {
+    if (riverMask[i] === 0) {
+      continue;
+    }
+    const x = i % cols;
+    const y = Math.floor(i / cols);
+    let touchesOcean = false;
+    if (x > 0 && oceanMask[i - 1]) {
+      touchesOcean = true;
+    } else if (x < cols - 1 && oceanMask[i + 1]) {
+      touchesOcean = true;
+    } else if (y > 0 && oceanMask[i - cols]) {
+      touchesOcean = true;
+    } else if (y < rows - 1 && oceanMask[i + cols]) {
+      touchesOcean = true;
+    }
+    if (!touchesOcean) {
+      continue;
+    }
+    const sea = seaLevelMap[i] ?? 0;
+    const rawBed = state.tileRiverBed[i];
+    const bed = Number.isFinite(rawBed) ? rawBed : sea - RIVER_MOUTH_MAX_BED_BELOW_SEA;
+    const clampedBed = Math.max(bed, sea - RIVER_MOUTH_MAX_BED_BELOW_SEA);
+    state.tileRiverBed[i] = clampedBed;
+    const rawSurface = state.tileRiverSurface[i];
+    const minSurface = Math.max(clampedBed + 0.002, sea + RIVER_MOUTH_SURFACE_ABOVE_SEA);
+    state.tileRiverSurface[i] = Number.isFinite(rawSurface) ? Math.max(rawSurface, minSurface) : minSurface;
+  }
+}
+
 function countMaskTiles(mask: Uint8Array): number {
   let total = 0;
   for (let i = 0; i < mask.length; i += 1) {
@@ -3275,7 +3559,7 @@ async function generateMapLegacy(
   for (let i = 0; i < state.tiles.length; i += 1) {
     const tile = state.tiles[i];
     if (tile.type === "water" && oceanMask[i] && riverMask[i] === 0) {
-      tile.elevation = Math.min(tile.elevation, 0.22 + rng.next() * 0.04);
+      tile.elevation = shapeOceanFloorAtSeaLevel(tile.elevation, seaLevelMap[i] ?? tile.elevation, rng.next());
     }
   }
   assertEdgeWater(state);
@@ -3652,6 +3936,261 @@ export async function runHydrologyStage(ctx: MapGenContext): Promise<void> {
   await emitStageSnapshot(ctx, "hydro:solve");
 }
 
+export async function runShorelinePolishStage(ctx: MapGenContext): Promise<void> {
+  const { state, settings, elevationMap, seaLevelMap, oceanMask, riverMask } = ctx;
+  if (!elevationMap || !seaLevelMap || !oceanMask || !riverMask) {
+    throw new Error("Shoreline stage missing hydrology fields.");
+  }
+
+  const { cols, rows, totalTiles } = state.grid;
+  const baseOceanMask = Uint8Array.from(oceanMask);
+  const coastalBand = new Uint8Array(totalTiles);
+
+  for (let y = 0; y < rows; y += 1) {
+    const rowBase = y * cols;
+    for (let x = 0; x < cols; x += 1) {
+      const idx = rowBase + x;
+      if (riverMask[idx] > 0) {
+        continue;
+      }
+      const elevation = elevationMap[idx] ?? 0;
+      const seaLevel = seaLevelMap[idx] ?? 0;
+      if (Math.abs(elevation - seaLevel) > SHORELINE_SEA_BAND) {
+        continue;
+      }
+      const isOcean = baseOceanMask[idx] > 0;
+      let touchesTransition = false;
+      for (let dy = -2; dy <= 2 && !touchesTransition; dy += 1) {
+        for (let dx = -2; dx <= 2; dx += 1) {
+          if (Math.abs(dx) + Math.abs(dy) > 2) {
+            continue;
+          }
+          const nx = x + dx;
+          const ny = y + dy;
+          if (nx < 0 || ny < 0 || nx >= cols || ny >= rows) {
+            continue;
+          }
+          const nIdx = ny * cols + nx;
+          if (riverMask[nIdx] > 0) {
+            continue;
+          }
+          if ((baseOceanMask[nIdx] > 0) !== isOcean) {
+            touchesTransition = true;
+            break;
+          }
+        }
+      }
+      if (touchesTransition) {
+        coastalBand[idx] = 1;
+      }
+    }
+    if (await ctx.yieldIfNeeded()) {
+      await ctx.reportStage("Polishing shoreline...", ((y + 1) / rows) * 0.25);
+    }
+  }
+
+  const oceanCandidate = Uint8Array.from(baseOceanMask);
+  for (let y = 0; y < rows; y += 1) {
+    const rowBase = y * cols;
+    for (let x = 0; x < cols; x += 1) {
+      const idx = rowBase + x;
+      if (coastalBand[idx] === 0 || riverMask[idx] > 0) {
+        continue;
+      }
+      const worldX = getWorldX(settings, x);
+      const worldY = getWorldY(settings, y);
+      const fine = fractalNoise(
+        worldX / SHORELINE_NOISE_SCALE_FINE_M,
+        worldY / SHORELINE_NOISE_SCALE_FINE_M,
+        state.seed + 13031
+      );
+      const broad = fractalNoise(
+        worldX / SHORELINE_NOISE_SCALE_BROAD_M,
+        worldY / SHORELINE_NOISE_SCALE_BROAD_M,
+        state.seed + 13079
+      );
+      const offset = ((fine * 2 - 1) * 0.65 + (broad * 2 - 1) * 0.35) * SHORELINE_NOISE_AMPLITUDE;
+      const seaLevel = seaLevelMap[idx] ?? 0;
+      const elevation = elevationMap[idx] ?? 0;
+      oceanCandidate[idx] = elevation <= seaLevel + offset ? 1 : 0;
+    }
+    if (await ctx.yieldIfNeeded()) {
+      await ctx.reportStage("Polishing shoreline...", 0.25 + ((y + 1) / rows) * 0.2);
+    }
+  }
+
+  let source = Uint8Array.from(oceanCandidate);
+  let scratch = Uint8Array.from(oceanCandidate);
+  for (let pass = 0; pass < SHORELINE_SMOOTH_PASSES; pass += 1) {
+    for (let y = 0; y < rows; y += 1) {
+      const rowBase = y * cols;
+      for (let x = 0; x < cols; x += 1) {
+        const idx = rowBase + x;
+        if (coastalBand[idx] === 0 || riverMask[idx] > 0) {
+          scratch[idx] = source[idx];
+          continue;
+        }
+        let waterNeighbors = 0;
+        for (let dy = -1; dy <= 1; dy += 1) {
+          for (let dx = -1; dx <= 1; dx += 1) {
+            if (dx === 0 && dy === 0) {
+              continue;
+            }
+            const nx = x + dx;
+            const ny = y + dy;
+            if (nx < 0 || ny < 0 || nx >= cols || ny >= rows) {
+              continue;
+            }
+            if (source[ny * cols + nx] > 0) {
+              waterNeighbors += 1;
+            }
+          }
+        }
+        if (waterNeighbors >= 5) {
+          scratch[idx] = 1;
+        } else if (waterNeighbors <= 3) {
+          scratch[idx] = 0;
+        } else {
+          scratch[idx] = source[idx];
+        }
+      }
+      if (await ctx.yieldIfNeeded()) {
+        const passProgress = (pass + (y + 1) / rows) / SHORELINE_SMOOTH_PASSES;
+        await ctx.reportStage("Polishing shoreline...", 0.45 + passProgress * 0.2);
+      }
+    }
+    const temp = source;
+    source = scratch;
+    scratch = temp;
+  }
+
+  for (let i = 0; i < totalTiles; i += 1) {
+    if (riverMask[i] > 0) {
+      source[i] = 0;
+    }
+  }
+  let polishedOceanMask = buildEdgeConnectedMask(source, cols, rows);
+  if (countEdgeMaskTiles(polishedOceanMask, cols, rows) === 0 || countMaskTiles(polishedOceanMask) === 0) {
+    polishedOceanMask = baseOceanMask;
+  }
+
+  const slopeMap = buildSlopeMap(state, elevationMap);
+  const landMask = new Uint8Array(totalTiles);
+  for (let i = 0; i < totalTiles; i += 1) {
+    if (!polishedOceanMask[i] && riverMask[i] === 0) {
+      landMask[i] = 1;
+    }
+  }
+  const distToOcean = buildDistanceFromMask(polishedOceanMask, cols, rows);
+  const distToLand = buildDistanceFromMask(landMask, cols, rows);
+  const reliefAt = (x: number, y: number): number => {
+    let min = Number.POSITIVE_INFINITY;
+    let max = Number.NEGATIVE_INFINITY;
+    for (let dy = -1; dy <= 1; dy += 1) {
+      const ny = y + dy;
+      if (ny < 0 || ny >= rows) {
+        continue;
+      }
+      for (let dx = -1; dx <= 1; dx += 1) {
+        const nx = x + dx;
+        if (nx < 0 || nx >= cols) {
+          continue;
+        }
+        const value = elevationMap[ny * cols + nx] ?? 0;
+        min = Math.min(min, value);
+        max = Math.max(max, value);
+      }
+    }
+    if (!Number.isFinite(min) || !Number.isFinite(max)) {
+      return 0;
+    }
+    return max - min;
+  };
+
+  for (let y = 0; y < rows; y += 1) {
+    const rowBase = y * cols;
+    for (let x = 0; x < cols; x += 1) {
+      const idx = rowBase + x;
+      const seaLevel = seaLevelMap[idx] ?? 0;
+      const current = elevationMap[idx] ?? 0;
+      if (riverMask[idx] > 0) {
+        continue;
+      }
+      if (polishedOceanMask[idx] > 0) {
+        if (distToLand[idx] === 1) {
+          const deepened = Math.min(current - COAST_OCEAN_SHELF_DEEPEN, seaLevel - 0.002);
+          const nextElevation = clamp(deepened, 0, 1);
+          elevationMap[idx] = nextElevation;
+          state.tiles[idx].elevation = nextElevation;
+        }
+        continue;
+      }
+      const dist = distToOcean[idx];
+      if (dist !== 1 && dist !== 2) {
+        continue;
+      }
+      const slope = slopeMap[idx] ?? 0;
+      const relief = reliefAt(x, y);
+      const beachCandidate =
+        slope <= COAST_BEACH_MAX_SLOPE &&
+        relief <= COAST_BEACH_MAX_RELIEF &&
+        current - seaLevel <= COAST_BEACH_SCULPT_MAX_HEIGHT_ABOVE_SEA;
+      let nextElevation = current;
+      if (beachCandidate) {
+        const target = seaLevel + (dist === 1 ? COAST_BEACH_NEAR_TARGET : COAST_BEACH_FAR_TARGET);
+        const blend = dist === 1 ? COAST_BEACH_NEAR_BLEND : COAST_BEACH_FAR_BLEND;
+        const maxDrop = dist === 1 ? COAST_BEACH_NEAR_MAX_DROP : COAST_BEACH_FAR_MAX_DROP;
+        const blended = current * (1 - blend) + target * blend;
+        nextElevation = clamp(Math.max(current - maxDrop, blended), 0, 1);
+      } else {
+        const minTarget = seaLevel + (dist === 1 ? COAST_CLIFF_NEAR_MIN : COAST_CLIFF_FAR_MIN);
+        const blend = dist === 1 ? COAST_CLIFF_NEAR_BLEND : COAST_CLIFF_FAR_BLEND;
+        const blended = current * (1 - blend) + minTarget * blend;
+        nextElevation = clamp(Math.max(current, blended, seaLevel + 0.02), 0, 1);
+      }
+      elevationMap[idx] = nextElevation;
+      state.tiles[idx].elevation = nextElevation;
+    }
+    if (await ctx.yieldIfNeeded()) {
+      await ctx.reportStage("Polishing shoreline...", 0.65 + ((y + 1) / rows) * 0.3);
+    }
+  }
+
+  polishedOceanMask = expandOceanMaskByLocalSeaLevel(
+    elevationMap,
+    seaLevelMap,
+    polishedOceanMask,
+    riverMask,
+    cols,
+    rows,
+    COAST_LOCAL_SEA_MARGIN
+  );
+
+  for (let i = 0; i < totalTiles; i += 1) {
+    if (riverMask[i] > 0 || polishedOceanMask[i] > 0) {
+      continue;
+    }
+    const sea = seaLevelMap[i] ?? 0;
+    if ((elevationMap[i] ?? 0) <= sea + COAST_LOCAL_SEA_MARGIN) {
+      const lifted = sea + COAST_MIN_LAND_ABOVE_SEA;
+      elevationMap[i] = lifted;
+      state.tiles[i].elevation = lifted;
+    }
+  }
+
+  for (let i = 0; i < totalTiles; i += 1) {
+    if (riverMask[i] > 0 || polishedOceanMask[i] > 0) {
+      state.tiles[i].type = "water";
+    } else {
+      state.tiles[i].type = "grass";
+    }
+  }
+  clampRiverMouthDepthsToSeaLevel(state, polishedOceanMask, riverMask, seaLevelMap);
+  ctx.oceanMask = polishedOceanMask;
+  await ctx.reportStage("Shoreline polished.", 1);
+  await emitStageSnapshot(ctx, "terrain:shoreline");
+}
+
 export async function runBiomeFieldsStage(ctx: MapGenContext): Promise<void> {
   const { state, elevationMap } = ctx;
   if (!elevationMap) {
@@ -3804,28 +4343,39 @@ export async function runBiomeClassificationStage(ctx: MapGenContext): Promise<v
       const slope = slopeMap[idx] ?? 0;
       const seaLevel = seaLevelMap[idx] ?? 0;
       const waterDistM = tile.waterDist * ctx.cellSizeM;
-      const nextType = useSeedSpread
-        ? classifySeedSpreadTile({
-            elevation,
-            slope,
-            waterDistM,
-            valley,
-            moisture,
-            seaLevel,
-            highlandForestElevation: settings.highlandForestElevation,
-            forestCandidate: (forestMask?.[idx] ?? 0) > 0
-          })
-        : classifyTile({
-            elevation,
-            slope,
-            waterDistM,
-            valley,
-            moisture,
-            forestNoise: forestNoiseMap[idx] ?? 0.5,
-            seaLevel,
-            forestThreshold: settings.forestThreshold,
-            highlandForestElevation: settings.highlandForestElevation
-          });
+      const coastlineOverride = classifyOceanCoastTile(
+        state,
+        idx,
+        oceanMask,
+        riverMask,
+        seaLevelMap,
+        slope,
+        elevation
+      );
+      const nextType =
+        coastlineOverride ??
+        (useSeedSpread
+          ? classifySeedSpreadTile({
+              elevation,
+              slope,
+              waterDistM,
+              valley,
+              moisture,
+              seaLevel,
+              highlandForestElevation: settings.highlandForestElevation,
+              forestCandidate: (forestMask?.[idx] ?? 0) > 0
+            })
+          : classifyTile({
+              elevation,
+              slope,
+              waterDistM,
+              valley,
+              moisture,
+              forestNoise: forestNoiseMap[idx] ?? 0.5,
+              seaLevel,
+              forestThreshold: settings.forestThreshold,
+              highlandForestElevation: settings.highlandForestElevation
+            }));
       nextTypes[idx] = nextType;
 
       let canopyCover = 0;
@@ -3860,8 +4410,18 @@ export async function runBiomeClassificationStage(ctx: MapGenContext): Promise<v
       tile.canopy = nextCanopy[idx] ?? 0;
       tile.canopyCover = tile.canopy;
       tile.stemDensity = nextStemDensity[idx] ?? 0;
+      const seaLevel = seaLevelMap[idx] ?? tile.elevation;
       if (tile.type === "water" && oceanMask[idx] && riverMask[idx] === 0) {
-        tile.elevation = Math.min(tile.elevation, 0.22 + ctx.rng.next() * 0.04);
+        tile.elevation = shapeOceanFloorAtSeaLevel(
+          tile.elevation,
+          seaLevel,
+          ctx.rng.next()
+        );
+      } else if (tile.type !== "water" && riverMask[idx] === 0 && tile.elevation <= seaLevel + COAST_LOCAL_SEA_MARGIN) {
+        tile.elevation = seaLevel + COAST_MIN_LAND_ABOVE_SEA;
+      }
+      if (ctx.elevationMap) {
+        ctx.elevationMap[idx] = tile.elevation;
       }
     }
     if ((y === state.grid.rows - 1 || (y + 1) % yieldEveryRows === 0) && (await ctx.yieldIfNeeded())) {
@@ -4034,7 +4594,18 @@ export async function runPostSettlementReconcileStage(ctx: MapGenContext): Promi
         const valley = state.valleyMap[idx] ?? 0;
         const seaLevel = ctx.seaLevelMap[idx] ?? 0;
         let nextType: TileType;
-        if (ctx.settings.biomeClassifierMode === "seedSpread" && ctx.forestMask && ctx.biomeSuitabilityMap) {
+        const coastlineOverride = classifyOceanCoastTile(
+          state,
+          idx,
+          ctx.oceanMask,
+          ctx.riverMask,
+          ctx.seaLevelMap,
+          slopeLocal,
+          tile.elevation
+        );
+        if (coastlineOverride) {
+          nextType = coastlineOverride;
+        } else if (ctx.settings.biomeClassifierMode === "seedSpread" && ctx.forestMask && ctx.biomeSuitabilityMap) {
           const suitability = computeBiomeSuitabilityValue({
             elevation: tile.elevation,
             slope: slopeLocal,
@@ -4096,6 +4667,10 @@ export async function runPostSettlementReconcileStage(ctx: MapGenContext): Promi
           });
         }
         tile.type = nextType;
+        if (tile.type !== "water" && tile.elevation <= seaLevel + COAST_LOCAL_SEA_MARGIN) {
+          tile.elevation = seaLevel + COAST_MIN_LAND_ABOVE_SEA;
+          ctx.elevationMap[idx] = tile.elevation;
+        }
         let canopy = 0;
         if (nextType === "forest" || nextType === "grass" || nextType === "scrub" || nextType === "floodplain") {
           const grassCanopyBase =

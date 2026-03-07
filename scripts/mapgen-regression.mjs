@@ -445,6 +445,54 @@ const analyzeRoadEdgeQuality = (state) => {
   };
 };
 
+const analyzeCoastalClassification = (state) => {
+  const { cols, rows, totalTiles } = state.grid;
+  const oceanMask = buildOceanMask(state);
+  let coastalNaturalCount = 0;
+  let coastalBeachCount = 0;
+  let coastalRockyCount = 0;
+  let coastalOtherCount = 0;
+  const isNaturalLand = (type) =>
+    type !== "water" && type !== "road" && type !== "base" && type !== "house";
+
+  for (let i = 0; i < totalTiles; i += 1) {
+    const tile = state.tiles[i];
+    if (!tile || !isNaturalLand(tile.type)) {
+      continue;
+    }
+    const x = i % cols;
+    const y = Math.floor(i / cols);
+    let touchesOcean = false;
+    if (x > 0 && oceanMask[i - 1] > 0) {
+      touchesOcean = true;
+    } else if (x < cols - 1 && oceanMask[i + 1] > 0) {
+      touchesOcean = true;
+    } else if (y > 0 && oceanMask[i - cols] > 0) {
+      touchesOcean = true;
+    } else if (y < rows - 1 && oceanMask[i + cols] > 0) {
+      touchesOcean = true;
+    }
+    if (!touchesOcean) {
+      continue;
+    }
+    coastalNaturalCount += 1;
+    if (tile.type === "beach") {
+      coastalBeachCount += 1;
+    } else if (tile.type === "rocky") {
+      coastalRockyCount += 1;
+    } else {
+      coastalOtherCount += 1;
+    }
+  }
+
+  return {
+    coastalNaturalCount,
+    coastalBeachCount,
+    coastalRockyCount,
+    coastalOtherCount
+  };
+};
+
 const runCase = async (sizeId, seed) => {
   const grid = createGrid(sizeId);
   const state = createInitialState(seed, grid);
@@ -497,6 +545,7 @@ const runCase = async (sizeId, seed) => {
   const patchMetrics = analyzeForestPatches(state);
   const riverMetrics = analyzeRiverConnectivity(state);
   const roadMetrics = analyzeRoadEdgeQuality(state);
+  const coastMetrics = analyzeCoastalClassification(state);
   const biomeSpreadMs = phaseTimingsMs["biome:spread"] ?? 0;
   const biomeClassifyMs = phaseTimingsMs["biome:classify"] ?? 0;
   return {
@@ -515,7 +564,8 @@ const runCase = async (sizeId, seed) => {
     biomeSpreadClassifyMs: Number((biomeSpreadMs + biomeClassifyMs).toFixed(2)),
     ...patchMetrics,
     ...riverMetrics,
-    ...roadMetrics
+    ...roadMetrics,
+    ...coastMetrics
   };
 };
 
@@ -526,7 +576,7 @@ const runAll = async () => {
       const metrics = await runCase(sizeId, seed);
       results.push(metrics);
       console.log(
-        `[mapgen] size=${metrics.sizeId} seed=${metrics.seed} ms=${metrics.durationMs.toFixed(2)} biome=${metrics.biomeSpreadClassifyMs.toFixed(2)}ms water=${metrics.waterPct.toFixed(2)}% forest=${metrics.forestPct.toFixed(2)}% patches=${metrics.forestPatchCount} meanPatch=${metrics.forestPatchMean} p95Patch=${metrics.forestPatchP95} houses=${metrics.houseCount} roads=${metrics.roadCount} rivers=${metrics.riverCount} roadIgnoredDiag=${metrics.ignoredDiagonalCount} roadUnmatched=${metrics.unmatchedPatternCount} riverDiagOnly=${metrics.riverDiagOnlyLinks} riverIso=${metrics.riverIsolatedCells} riverOrthRatio=${metrics.riverOrthConnectivityRatio.toFixed(4)} riverComps=${metrics.riverComponentCount} riverDetachedComps=${metrics.detachedRiverComponents} riverDetachedCells=${metrics.detachedRiverCells}`
+        `[mapgen] size=${metrics.sizeId} seed=${metrics.seed} ms=${metrics.durationMs.toFixed(2)} biome=${metrics.biomeSpreadClassifyMs.toFixed(2)}ms water=${metrics.waterPct.toFixed(2)}% forest=${metrics.forestPct.toFixed(2)}% patches=${metrics.forestPatchCount} meanPatch=${metrics.forestPatchMean} p95Patch=${metrics.forestPatchP95} houses=${metrics.houseCount} roads=${metrics.roadCount} rivers=${metrics.riverCount} roadIgnoredDiag=${metrics.ignoredDiagonalCount} roadUnmatched=${metrics.unmatchedPatternCount} riverDiagOnly=${metrics.riverDiagOnlyLinks} riverIso=${metrics.riverIsolatedCells} riverOrthRatio=${metrics.riverOrthConnectivityRatio.toFixed(4)} riverComps=${metrics.riverComponentCount} riverDetachedComps=${metrics.detachedRiverComponents} riverDetachedCells=${metrics.detachedRiverCells} coastNatural=${metrics.coastalNaturalCount} coastBeach=${metrics.coastalBeachCount} coastRocky=${metrics.coastalRockyCount} coastOther=${metrics.coastalOtherCount}`
       );
     }
   }
@@ -576,6 +626,12 @@ const compareAgainstBaseline = async (results) => {
     if (result.unmatchedPatternCount !== 0) {
       failures += 1;
       console.error(`[mapgen] unmatched road patterns present for ${key}: ${result.unmatchedPatternCount}`);
+    }
+    if (result.coastalNaturalCount > 0 && result.coastalOtherCount !== 0) {
+      failures += 1;
+      console.error(
+        `[mapgen] coastline classification drift for ${key}: coastalOther=${result.coastalOtherCount} of natural=${result.coastalNaturalCount}`
+      );
     }
     if (hasBaseline) {
       const expected = index.get(key);

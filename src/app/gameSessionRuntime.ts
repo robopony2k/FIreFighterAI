@@ -33,6 +33,7 @@ import { saveLeaderboard } from "../persistence/leaderboard.js";
 import { loadFuelProfileOverrides } from "../persistence/fuelProfiles.js";
 import { randomizeWind } from "../sim/wind.js";
 import { endGame, setGameEventBus, setPhase, stepSim } from "../sim/index.js";
+import { initScoringForRun } from "../sim/scoring.js";
 import { seedStartingRoster } from "../sim/units.js";
 import { PHASES } from "../core/time.js";
 import { DEFAULT_MAP_SIZE, DEFAULT_RUN_OPTIONS, normalizeFireSettings } from "../ui/run-config.js";
@@ -265,14 +266,7 @@ export const createAppRuntime = (): AppRuntime => {
   const threeTestOverlay = document.getElementById("threeTestOverlay") as HTMLDivElement | null;
   const threeTestPhaseHudMount = document.getElementById("threeTestPhaseHudMount") as HTMLDivElement | null;
   const threeTestCanvas = document.getElementById("threeTestCanvas") as HTMLCanvasElement | null;
-  const threeTestCloseButton = document.getElementById("threeTestClose") as HTMLButtonElement | null;
   const threeTestEndRunButton = document.getElementById("threeTestEndRun") as HTMLButtonElement | null;
-  const threeTestStepButton = document.getElementById("threeTestStep") as HTMLButtonElement | null;
-  const threeTestAutoToggle = document.getElementById("threeTestAuto") as HTMLInputElement | null;
-  const threeTestPhaseLabel = document.getElementById("threeTestPhase") as HTMLSpanElement | null;
-  const threeTestSeason = document.getElementById("threeTestSeason") as HTMLInputElement | null;
-  const threeTestSeasonManualToggle = document.getElementById("threeTestSeasonManual") as HTMLInputElement | null;
-  const threeTestSeasonLabel = document.getElementById("threeTestSeasonLabel") as HTMLSpanElement | null;
   const isMenuActive = (): boolean =>
     (startMenu ? !startMenu.classList.contains("hidden") : false) || !characterScreen.classList.contains("hidden");
   const syncMusicContext = (): void => {
@@ -287,9 +281,6 @@ export const createAppRuntime = (): AppRuntime => {
       musicController.setPhase(state.phase);
     }
   };
-  if (!legacy2dEnabled) {
-    threeTestCloseButton?.classList.add("hidden");
-  }
   const DEBUG_TYPE_EVENT = "debug-type-colors-changed";
   const CLIMATE_SEASONS = ["Winter", "Spring", "Summer", "Autumn"] as const;
   const ENABLE_THREE_TEST_SEASONAL_RECOLOR = threeTestSeasonal;
@@ -585,13 +576,6 @@ export const createAppRuntime = (): AppRuntime => {
     }
   };
   
-  const updateThreeTestStepUi = (): void => {
-    if (!threeTestStepButton || !threeTestStepController) {
-      return;
-    }
-    threeTestStepButton.disabled = threeTestStepController.auto;
-  };
-  
   const clamp01 = (value: number): number => Math.max(0, Math.min(1, value));
   
   const getSeasonLabelFromT01 = (seasonT01: number): string => {
@@ -612,23 +596,10 @@ export const createAppRuntime = (): AppRuntime => {
     const spreadNorm = clamp01((state.climateSpreadMultiplier - 0.6) / 1.4);
     return clamp01(0.55 * ignitionNorm + 0.45 * spreadNorm);
   };
-  
+
   const updateThreeTestSeasonUi = (seasonT01: number, mode: ThreeTestSeasonMode): number => {
     const clamped = clamp01(seasonT01);
     const label = getSeasonLabelFromT01(clamped);
-    if (threeTestSeason) {
-      threeTestSeason.value = String(clamped);
-      threeTestSeason.disabled = !ENABLE_THREE_TEST_SEASONAL_RECOLOR || mode === "auto";
-    }
-    if (threeTestSeasonManualToggle) {
-      threeTestSeasonManualToggle.disabled = !ENABLE_THREE_TEST_SEASONAL_RECOLOR;
-      threeTestSeasonManualToggle.checked = mode === "manual";
-    }
-    if (threeTestSeasonLabel) {
-      threeTestSeasonLabel.textContent = ENABLE_THREE_TEST_SEASONAL_RECOLOR
-        ? `${label} | ${mode.toUpperCase()}`
-        : "SEASONAL OFF";
-    }
     if (ENABLE_THREE_TEST_SEASONAL_RECOLOR) {
       threeTestController?.setSeasonLabel(`Season: ${label} (${mode.toUpperCase()})`);
     } else {
@@ -750,50 +721,6 @@ export const createAppRuntime = (): AppRuntime => {
     }
   };
   
-  if (threeTestStepButton) {
-    threeTestStepButton.addEventListener("click", () => {
-      threeTestStepController?.next();
-    });
-  }
-  
-  if (threeTestAutoToggle) {
-    threeTestAutoToggle.addEventListener("change", () => {
-      threeTestStepController?.setAuto(threeTestAutoToggle.checked);
-      updateThreeTestStepUi();
-    });
-  }
-  if (threeTestSeason) {
-    threeTestSeason.addEventListener("input", () => {
-      if (!ENABLE_THREE_TEST_SEASONAL_RECOLOR) {
-        return;
-      }
-      const parsed = Number(threeTestSeason.value);
-      if (Number.isFinite(parsed)) {
-        threeTestManualSeasonT01 = clamp01(parsed);
-        if (threeTestSeasonMode === "manual") {
-          syncThreeTestClimateVisuals();
-        } else {
-          updateThreeTestSeasonUi(getClimateSeasonT01(), threeTestSeasonMode);
-        }
-      }
-    });
-  }
-  if (threeTestSeasonManualToggle) {
-    threeTestSeasonManualToggle.addEventListener("change", () => {
-      if (!ENABLE_THREE_TEST_SEASONAL_RECOLOR) {
-        return;
-      }
-      threeTestSeasonMode = threeTestSeasonManualToggle.checked ? "manual" : "auto";
-      if (threeTestSeason) {
-        const parsed = Number(threeTestSeason.value);
-        if (Number.isFinite(parsed)) {
-          threeTestManualSeasonT01 = clamp01(parsed);
-        }
-      }
-      lastThreeTestSeasonMode = "";
-      syncThreeTestClimateVisuals();
-    });
-  }
   const handleThreeResize = (): void => {
     threeTestController?.resize();
   };
@@ -951,7 +878,7 @@ export const createAppRuntime = (): AppRuntime => {
     cachedThreeTestTreeTypeMap = null;
     updateThreeTestSeasonUi(threeTestManualSeasonT01, threeTestSeasonMode);
     if (!threeTestStepController) {
-      let auto = threeTestAutoToggle ? threeTestAutoToggle.checked : true;
+      let auto = true;
       let resolver: (() => void) | null = null;
       threeTestStepController = {
         get auto() {
@@ -984,10 +911,7 @@ export const createAppRuntime = (): AppRuntime => {
         }
       };
     }
-    if (threeTestAutoToggle) {
-      threeTestStepController.setAuto(threeTestAutoToggle.checked);
-    }
-    updateThreeTestStepUi();
+    threeTestStepController.setAuto(true);
     const previewDuringMapgen = state.tiles.length === 0;
     setThreeTestVisible(true);
     handleThreeResize();
@@ -998,9 +922,6 @@ export const createAppRuntime = (): AppRuntime => {
     if (state.tiles.length === 0) {
       const debug: MapGenDebug = {
         onPhase: async (snapshot: MapGenDebugSnapshot) => {
-          if (threeTestPhaseLabel) {
-            threeTestPhaseLabel.textContent = snapshot.phase;
-          }
           if (!threeTestController) {
             return;
           }
@@ -1053,7 +974,6 @@ export const createAppRuntime = (): AppRuntime => {
     threeTestController?.stop();
     window.removeEventListener("resize", handleThreeResize);
     threeTestStepController?.setAuto(true);
-    updateThreeTestStepUi();
     if (phaseUi && threeTestUiListener) {
       phaseUi.state.off("change", threeTestUiListener);
       threeTestUiListener = null;
@@ -1189,6 +1109,7 @@ export const createAppRuntime = (): AppRuntime => {
       isGenerating = false;
     }
     seedStartingRoster(state, rng);
+    initScoringForRun(state);
     renderState.cameraCenter = { x: state.basePoint.x + 0.5, y: state.basePoint.y + 0.5 };
     const maintenanceIndex = PHASES.findIndex((phase) => phase.id === "maintenance");
     state.phaseIndex = maintenanceIndex >= 0 ? maintenanceIndex : 1;
@@ -1231,9 +1152,6 @@ export const createAppRuntime = (): AppRuntime => {
     }
   });
   
-  if (threeTestCloseButton) {
-    threeTestCloseButton.addEventListener("click", () => closeThreeTest());
-  }
   if (threeTestEndRunButton) {
     threeTestEndRunButton.addEventListener("click", () => {
       endGame(state, false, "Run ended from 3D test.");

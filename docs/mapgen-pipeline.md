@@ -16,19 +16,21 @@ Context:
 1. `terrain:elevation`
 2. `terrain:erosion`
 3. `hydro:solve`
-4. `biome:fields`
-5. `biome:spread`
-6. `biome:classify`
-7. `settlement:place`
-8. `roads:connect`
-9. `reconcile:postSettlement`
-10. `map:finalize`
+4. `terrain:shoreline`
+5. `biome:fields`
+6. `biome:spread`
+7. `biome:classify`
+8. `settlement:place`
+9. `roads:connect`
+10. `reconcile:postSettlement`
+11. `map:finalize`
 
 ## Invariants
 - `generateMap(state, rng, report?, settings?, debug?)` remains the public API.
 - `MapGenContext` owns all transient mapgen fields (`elevationMap`, `riverMask`, `slopeMap`, `moistureMap`, etc).
 - Stage progress is normalized through `ProgressTracker`.
 - Debug snapshots are stage-labeled and emitted through `MapGenDebug`.
+- `terrain:shoreline` performs an ocean-only coastal polish pass (organic shoreline smoothing + near-shore elevation sculpt).
 - `settlement:place` prepares settlement-road plan data only; road carving now happens in `roads:connect`.
 - `roads:connect` is non-noop and owns road/bridge network carving plus edge-mask stamping (`WorldState.tileRoadEdges`).
 - Post-settlement reconcile only touches dirty regions captured from settlement deltas.

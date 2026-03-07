@@ -349,6 +349,7 @@ export const bindPhaseUi = ({
     }
     if (actionId === "continue" && state.phase === "budget") {
       advancePhase(state, rng);
+      state.paused = false;
     }
   };
   phaseUi.state.on("cta", onCta);
@@ -499,6 +500,13 @@ export const bindPhaseUi = ({
 
   const runUiAction = (action: string, actionTarget?: HTMLElement | null, event?: Event): void => {
     playUiActionAudio(action);
+    if (action === "continue") {
+      if (state.phase === "budget") {
+        advancePhase(state, rng);
+        state.paused = false;
+      }
+      return;
+    }
     const speedMatch = action.match(/^time-speed-(\d+)$/);
     if (speedMatch) {
       const nextIndex = Number(speedMatch[1]);

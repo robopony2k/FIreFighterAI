@@ -5,6 +5,11 @@ import type { EffectsState } from "../core/effectsState.js";
 const MAX_WATER_PARTICLES = 2400;
 const MAX_SMOKE_PARTICLES = 12000;
 const clamp01 = (value: number): number => Math.max(0, Math.min(1, value));
+const smoothstep = (edge0: number, edge1: number, value: number): number => {
+  const width = Math.max(0.0001, edge1 - edge0);
+  const t = clamp01((value - edge0) / width);
+  return t * t * (3 - 2 * t);
+};
 
 type WaterSprayProfile = {
   mode: WaterSprayMode;
@@ -94,20 +99,45 @@ export function emitWaterSpray(
 ): void {
   const profile = getWaterSprayProfile(unit);
   const available = Math.max(0, MAX_WATER_PARTICLES - effects.waterParticles.length);
-  if (available <= 0) {
+  if (available <= 0 && !target) {
     return;
   }
   const spawnCount = Math.min(profile.count, available);
   let baseAngle = rng.next() * Math.PI * 2;
+  let targetDistance = 0;
   if (target) {
     baseAngle = Math.atan2(target.y - unit.y, target.x - unit.x);
+    targetDistance = Math.hypot(target.x - unit.x, target.y - unit.y);
+    effects.waterStreams.push({
+      sourceUnitId: unit.id,
+      sourceX: unit.x,
+      sourceY: unit.y,
+      targetX: target.x,
+      targetY: target.y,
+      mode: profile.mode,
+      volume: clamp01(profile.volume),
+      intensity: clamp01(profile.count > 0 ? spawnCount / profile.count : 1)
+    });
+  }
+  if (spawnCount <= 0) {
+    return;
   }
 
   for (let i = 0; i < spawnCount; i += 1) {
     const jitter = (rng.next() - 0.5) * profile.spread;
     const speed = profile.baseSpeed * (0.72 + rng.next() * 0.56);
-    const maxLife = profile.maxLife * (0.9 + rng.next() * 0.2);
-    const life = profile.lifeMin + rng.next() * (profile.lifeMax - profile.lifeMin);
+    const travelLife =
+      targetDistance > 0
+        ? (targetDistance / Math.max(0.0001, speed)) * (1.18 + rng.next() * 0.18)
+        : profile.lifeMin + rng.next() * (profile.lifeMax - profile.lifeMin);
+    const boundedMaxLife = Math.max(
+      profile.lifeMin * 0.9,
+      Math.min(profile.maxLife * 1.3, Math.max(profile.maxLife * 0.5, travelLife * 1.08))
+    );
+    const life = Math.max(
+      profile.lifeMin * 0.82,
+      Math.min(boundedMaxLife, travelLife * (0.92 + rng.next() * 0.16))
+    );
     const size = profile.sizeMin + rng.next() * (profile.sizeMax - profile.sizeMin);
     const volume = profile.volume * (0.84 + rng.next() * 0.3);
     effects.waterParticles.push({
@@ -115,8 +145,8 @@ export function emitWaterSpray(
       y: unit.y,
       vx: Math.cos(baseAngle + jitter) * speed,
       vy: Math.sin(baseAngle + jitter) * speed,
-      life: Math.min(life, maxLife),
-      maxLife,
+      life,
+      maxLife: boundedMaxLife,
       size,
       alpha: 1,
       sprayMode: profile.mode,
@@ -193,9 +223,12 @@ export function stepParticles(state: WorldState, effects: EffectsState, delta: n
             : 0.95;
       particle.vx *= drag;
       particle.vy *= drag;
-      const lifeAlpha = particle.life / particle.maxLife;
+      const maxLife = Math.max(0.0001, particle.maxLife);
+      const age01 = clamp01(1 - particle.life / maxLife);
       const volume = particle.sprayVolume ?? 0.7;
-      particle.alpha = clamp01(lifeAlpha * (0.72 + volume * 0.38));
+      const fadeIn = smoothstep(0.02, 0.18, age01);
+      const fadeOut = 1 - smoothstep(0.68, 1, age01);
+      particle.alpha = clamp01(fadeIn * fadeOut * (0.72 + volume * 0.38));
       water[write] = particle;
       write += 1;
     }

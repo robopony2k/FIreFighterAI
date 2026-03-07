@@ -17,6 +17,7 @@ export type ThreeTestCinematicGrade = {
   renderSceneToScreen: (renderSceneFn: () => void) => boolean;
   setEnabled: (enabled: boolean) => void;
   setFogColor: (color: THREE.ColorRepresentation) => void;
+  setHeightHazeStrength: (value: number) => void;
   dispose: () => void;
 };
 
@@ -214,6 +215,10 @@ export const createThreeTestCinematicGrade = (
     uniforms.uFogColor.value.set(color);
   };
 
+  const setHeightHazeStrength = (value: number): void => {
+    uniforms.uHeightHazeStrength.value = Math.max(0, value);
+  };
+
   const dispose = (): void => {
     disposeRenderTarget();
     postMesh.geometry.dispose();
@@ -225,6 +230,7 @@ export const createThreeTestCinematicGrade = (
     renderSceneToScreen,
     setEnabled,
     setFogColor,
+    setHeightHazeStrength,
     dispose
   };
 };

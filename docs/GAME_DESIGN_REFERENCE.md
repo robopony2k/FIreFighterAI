@@ -129,7 +129,7 @@ Climate
 
 Fire
 - Ignition chance per day, sim speed/tick cadence/rows per slice, render smoothing.
-- Fire season taper/min intensity; day/night factor min/max.
+- Fire season taper/min intensity and seasonal fire pacing.
 - Fire jump thresholds/chance/boosts.
 - Heat diffusion constants and heat cap.
 - Conflagration boosts.

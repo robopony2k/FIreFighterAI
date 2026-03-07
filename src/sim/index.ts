@@ -17,7 +17,7 @@ import {
   TIME_SPEED_OPTIONS
 } from "../core/config.js";
 import { formatCurrency } from "../core/utils.js";
-import { getDayNightFactor, getFireSeasonIntensity, getPhaseInfo, PHASES } from "../core/time.js";
+import { getFireSeasonIntensity, getPhaseInfo, PHASES } from "../core/time.js";
 import { setStatus, resetStatus } from "../core/state.js";
 import { maybeReport } from "./prof.js";
 import { inBounds, indexFor } from "../core/grid.js";
@@ -42,6 +42,7 @@ import { updatePhaseControls } from "./lifecycle.js";
 import { stepGrowth, stepTownSeasonScaling } from "./growth.js";
 import { stepTownAlertPosture } from "./towns.js";
 import { stepParticles } from "./particles.js";
+import { freezeScoringSeason, startScoringSeason, stepScoring } from "./scoring.js";
 import {
   applyExtinguish,
   applyUnitHazards,
@@ -336,13 +337,33 @@ const showSeasonOverlay = (state: WorldState): void => {
   } else if (state.phase === "budget") {
     const housesSaved = Math.max(0, state.totalHouses - state.destroyedHouses);
     const burnedHectares = Math.round(state.yearBurnedTiles * HECTARES_PER_TILE);
+    const seasonSummary = state.scoring.seasonSummary;
+    const lifeLossTotal = state.yearLivesLost;
     const title = "Budget Review";
     const message = `Climate season: ${seasonLabel}. Annual performance review and scorecard.`;
     details.push(`Approval rating: ${Math.round(state.approval * 100)}%.`);
     details.push(`Houses saved: ${housesSaved}/${state.totalHouses}.`);
     details.push(`Land burned: ${burnedHectares} ha.`);
-    details.push(`Lives lost: ${state.yearLivesLost}.`);
-    details.push("Politics & lobbying: placeholder.");
+    details.push(`Lives lost: ${lifeLossTotal}.`);
+    if (seasonSummary) {
+      const totalLosses =
+        seasonSummary.houseLossPenalties +
+        seasonSummary.civilianLifeLossPenalties +
+        seasonSummary.firefighterLifeLossPenalties +
+        seasonSummary.criticalAssetLossPenalties;
+      details.push(`Burnout points: +${Math.round(seasonSummary.burnoutPoints).toLocaleString()}.`);
+      details.push(`Squirt bonus: +${Math.round(seasonSummary.squirtBonusPoints).toLocaleString()}.`);
+      details.push(`Loss penalties: -${Math.round(totalLosses).toLocaleString()}.`);
+      details.push(
+        `Final multiplier: ${seasonSummary.finalTotalMult.toFixed(2)}x (${seasonSummary.finalDifficultyMult.toFixed(
+          2
+        )} x ${seasonSummary.finalApprovalMult.toFixed(2)} x ${seasonSummary.finalStreakMult.toFixed(
+          2
+        )} x ${seasonSummary.finalRiskMult.toFixed(2)}).`
+      );
+      details.push(`Season score delta: ${Math.round(seasonSummary.seasonDeltaScore).toLocaleString()}.`);
+      details.push(`Career score: ${Math.round(state.scoring.score).toLocaleString()}.`);
+    }
     details.push("Dismiss or wait to close.");
     emitOverlay({ title, message, details, action: "dismiss" });
     return;
@@ -363,6 +384,7 @@ export function extinguishAllFires(state: WorldState, effects: EffectsState): vo
   clearFireBlocks(state);
   effects.smokeParticles = [];
   effects.waterParticles = [];
+  effects.waterStreams = [];
   state.lastActiveFires = 0;
   resetFireBounds(state);
 }
@@ -376,16 +398,11 @@ export function calculateBudgetOutcome(state: WorldState): void {
   const responseScore = Math.max(0, Math.min(1, 1 - (propertyLossRatio * 0.7 + lifeLossRatio * 1.3 + landLossRatio * 0.4)));
   const containmentBonus = Math.max(0, Math.min(0.2, state.containedCount / 60 + character.modifiers.containmentBonus));
   const rating = Math.max(0, Math.min(1, responseScore + containmentBonus));
-  const previousApproval = state.approval;
-  const retention = Math.max(0.45, Math.min(0.85, 0.65 * character.modifiers.approvalRetentionMultiplier));
-  const ratingWeight = 1 - retention;
-  state.approval = Math.max(0, Math.min(1, state.approval * retention + rating * ratingWeight));
   const carryOver = Math.floor(state.budget * 0.2);
   state.pendingBudget = Math.max(0, Math.floor(baseBudget * (0.7 + state.approval * 0.8 + rating * 0.5) + carryOver));
-  state.careerScore += Math.floor(rating * 900 + (1 - propertyLossRatio) * 400 + (1 - lifeLossRatio) * 600);
   setStatus(
     state,
-    `Budget review: approval ${Math.round(previousApproval * 100)}% -> ${Math.round(state.approval * 100)}%, next budget ${formatCurrency(
+    `Budget review: approval ${Math.round(state.approval * 100)}%, rating ${Math.round(rating * 100)}%, next budget ${formatCurrency(
       state.pendingBudget
     )}.`
   );
@@ -423,11 +440,14 @@ export function setPhase(state: WorldState, rng: RNG, next: WorldState["phase"])
   if (state.phase === "fire") {
     randomizeWind(state, rng);
     pickInitialFires(state, rng);
+    startScoringSeason(state);
     debugClimateChecks(state.seed, VIRTUAL_CLIMATE_PARAMS, DEFAULT_MOISTURE_PARAMS);
     setStatus(state, "Fire season begins. Stay ahead of the line.");
     showSeasonOverlay(state);
     return;
   }
+  freezeScoringSeason(state);
+  state.paused = true;
   calculateBudgetOutcome(state);
   showSeasonOverlay(state);
 }
@@ -592,9 +612,7 @@ export function endGame(state: WorldState, victory: boolean, reason?: string): v
   }
   state.gameOver = true;
   state.paused = true;
-  const approvalBonus = Math.floor(state.approval * 500);
-  const budgetBonus = Math.floor(state.budget * 0.5);
-  const score = Math.max(0, Math.floor(state.careerScore + approvalBonus + budgetBonus));
+  const score = Math.round(state.scoring.score);
 
   state.finalScore = score;
   const baseMessage =
@@ -679,15 +697,14 @@ export function stepSim(state: WorldState, effects: EffectsState, rng: RNG, delt
         const simDelta = Math.min(remaining, FIRE_SIM_SUBSTEP_SECONDS);
         const simDayDelta = simDelta * DAYS_PER_SECOND;
         state.fireSeasonDay += simDayDelta;
-        const dayFactor = getDayNightFactor(state.careerDay, state.fireSettings);
         const seasonDay = state.phase === "fire" ? state.phaseDay : state.fireSeasonDay;
         const seasonIntensity = getFireSeasonIntensity(seasonDay, state.fireSettings);
         const spreadScale = state.fireSettings.simSpeed * (0.55 + seasonIntensity * 0.45);
-        const ignitionIntensity = dayFactor * climateRisk * state.climateIgnitionMultiplier;
+        const ignitionIntensity = climateRisk * state.climateIgnitionMultiplier;
         if (allowIgnition) {
           igniteRandomFire(state, rng, simDayDelta, ignitionIntensity);
         }
-        activeFires = stepFire(state, effects, rng, simDelta, spreadScale, dayFactor, burnoutFactor);
+        activeFires = stepFire(state, effects, rng, simDelta, spreadScale, 1, burnoutFactor);
         consumed += simDelta;
         remaining -= simDelta;
       }
@@ -721,6 +738,7 @@ export function stepSim(state: WorldState, effects: EffectsState, rng: RNG, delt
     }
   }
 
+  stepScoring(state, dayDelta, climateRisk);
   stepParticles(state, effects, delta);
   checkFailureConditions(state);
   if (state.skipToNextFire && state.gameOver) {

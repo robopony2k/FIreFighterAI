@@ -23,7 +23,8 @@ export class GameState {
     forecastDay: 0,
     forecastStartDay: 0,
     forecastYearDays: 360,
-    forecastMeta: null
+    forecastMeta: null,
+    scoring: null
   };
 
   on<K extends keyof GameStateEvents>(event: K, listener: (payload: GameStateEvents[K]) => void): void {
@@ -129,6 +130,14 @@ export class GameState {
     this.snapshot.forecastStartDay = startDay;
     this.snapshot.forecastYearDays = yearDays;
     this.snapshot.forecastMeta = meta;
+    this.emitChange();
+  }
+
+  setScoring(scoring: GameUiSnapshot["scoring"]): void {
+    if (this.snapshot.scoring === scoring) {
+      return;
+    }
+    this.snapshot.scoring = scoring;
     this.emitChange();
   }
 

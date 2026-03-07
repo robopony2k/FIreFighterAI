@@ -83,8 +83,8 @@ const defaultPanelData: PanelDataMap = {
   },
   budgetReport: {
     summary: "Summary to be populated from seasonal results.",
-    approval: "--",
-    losses: "--"
+    continueLabel: "Continue",
+    sections: []
   }
 };
 
@@ -96,8 +96,7 @@ const THREE_TEST_LEGACY_PANELS = new Set<PanelId>([
   "fuelBreak",
   "fireDeploy",
   "fireUnitList",
-  "fireSelectedUnit",
-  "budgetReport"
+  "fireSelectedUnit"
 ]);
 
 export class UIController {
@@ -217,7 +216,8 @@ export class UIController {
       forecastDay: snapshot.forecastDay,
       forecastStartDay: snapshot.forecastStartDay,
       forecastYearDays: snapshot.forecastYearDays,
-      forecastMeta: snapshot.forecastMeta
+      forecastMeta: snapshot.forecastMeta,
+      scoring: snapshot.scoring
     };
     this.topBar.update(topBarData);
 
@@ -244,8 +244,8 @@ export class UIController {
       this.fireDeploy.update(this.panelData.fireDeploy ?? defaultPanelData.fireDeploy);
       this.fireUnitList.update(this.panelData.fireUnitList ?? defaultPanelData.fireUnitList);
       this.fireSelectedUnit.update({ selection: snapshot.selection });
-      this.budgetReport.update(this.panelData.budgetReport ?? defaultPanelData.budgetReport);
     }
+    this.budgetReport.update(this.panelData.budgetReport ?? defaultPanelData.budgetReport);
 
     const visiblePanels = isThreeTest
       ? rules.visiblePanels.filter((panelId) => !THREE_TEST_LEGACY_PANELS.has(panelId))
@@ -255,6 +255,7 @@ export class UIController {
 
   private applyVisibility(visible: PanelId[]): void {
     const visibleSet = new Set(visible);
+    this.root.classList.toggle("phase-ui--budget-modal", visibleSet.has("budgetReport"));
     this.panels.forEach((panel, id) => {
       const shouldShow = visibleSet.has(id);
       panel.classList.toggle("is-hidden", !shouldShow);

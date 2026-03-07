@@ -30,6 +30,7 @@ import { emitWaterSpray } from "./particles.js";
 const FIRST_NAMES = ["Alex", "Casey", "Drew", "Jordan", "Parker", "Quinn", "Riley", "Sawyer", "Taylor", "Wyatt"];
 const LAST_NAMES = ["Cedar", "Hawk", "Keel", "Marsh", "Reed", "Stone", "Sutter", "Vale", "Wells", "Yates"];
 const TRUCK_PREFIX = ["Engine", "Tanker", "Brush", "Rescue"];
+const clamp = (value: number, min: number, max: number): number => Math.max(min, Math.min(max, value));
 
 const createTraining = (): RosterUnit["training"] => ({
   speed: 0,
@@ -274,6 +275,7 @@ const boardTruck = (state: WorldState, firefighter: Unit, truck: Unit): boolean 
   firefighter.pathIndex = 0;
   firefighter.x = truck.x;
   firefighter.y = truck.y;
+  firefighter.attackTarget = null;
   return true;
 };
 
@@ -404,6 +406,7 @@ export function createUnit(state: WorldState, kind: UnitKind, rng: RNG, rosterEn
     pathIndex: 0,
     speed: config.speed * modifiers.unitSpeedMultiplier * training.speed,
     radius: config.radius * training.range,
+    hoseRange: config.hoseRange * training.range,
     power: config.power * modifiers.unitPowerMultiplier * training.power,
     selected: false,
     carrierId: null,
@@ -411,7 +414,8 @@ export function createUnit(state: WorldState, kind: UnitKind, rng: RNG, rosterEn
     assignedTruckId: null,
     crewIds: [],
     crewMode: "deployed",
-    formation: rosterUnit ? rosterUnit.formation : "medium"
+    formation: rosterUnit ? rosterUnit.formation : "medium",
+    attackTarget: null
   };
 }
 
@@ -713,11 +717,7 @@ export function stepUnits(state: WorldState, delta: number): void {
       }
       const hasArrived = unit.pathIndex >= unit.path.length;
       if (hasArrived && unit.crewMode === "boarded") {
-        const truckTile = getUnitTile(unit);
-        const nearbyFire = findFireTargetNear(state, truckTile, FIREFIGHTER_TETHER_DISTANCE);
-        if (nearbyFire) {
-          setTruckCrewMode(state, unit.id, "deployed", { silent: true });
-        }
+        updateTruckCrewOrders(state, unit);
       }
     }
   });
@@ -751,10 +751,10 @@ export function stepUnits(state: WorldState, delta: number): void {
 const findFireTargetNear = (state: WorldState, center: Point, radius: number): Point | null => {
   let best: Point | null = null;
   let bestFire = 0;
-  const minX = Math.max(0, center.x - radius);
-  const maxX = Math.min(state.grid.cols - 1, center.x + radius);
-  const minY = Math.max(0, center.y - radius);
-  const maxY = Math.min(state.grid.rows - 1, center.y + radius);
+  const minX = Math.max(0, Math.floor(center.x - radius));
+  const maxX = Math.min(state.grid.cols - 1, Math.ceil(center.x + radius));
+  const minY = Math.max(0, Math.floor(center.y - radius));
+  const maxY = Math.min(state.grid.rows - 1, Math.ceil(center.y + radius));
   for (let y = minY; y <= maxY; y += 1) {
     for (let x = minX; x <= maxX; x += 1) {
       const dist = Math.hypot(center.x - x, center.y - y);
@@ -772,6 +772,66 @@ const findFireTargetNear = (state: WorldState, center: Point, radius: number): P
   return bestFire > 0.15 ? best : null;
 };
 
+const setAttackTarget = (unit: Unit, target: Point | null): void => {
+  unit.attackTarget = target ? { x: target.x, y: target.y } : null;
+};
+
+const getAverageHoseRange = (crew: Unit[]): number => {
+  if (crew.length === 0) {
+    return 0;
+  }
+  let total = 0;
+  for (const member of crew) {
+    total += Math.max(0, member.hoseRange);
+  }
+  return total / crew.length;
+};
+
+const getStandoffDistance = (hoseRange: number): number =>
+  clamp(hoseRange * 0.85, 2.75, Math.max(2.75, hoseRange - 0.5));
+
+const findPassableStandoffSlot = (
+  state: WorldState,
+  desiredX: number,
+  desiredY: number,
+  fireTarget: Point,
+  attackDirX: number,
+  attackDirY: number,
+  radius = 2
+): Point | null => {
+  let best: Point | null = null;
+  let bestScore = Number.POSITIVE_INFINITY;
+  for (let r = 0; r <= radius; r += 1) {
+    const minX = Math.max(0, Math.floor(desiredX - r));
+    const maxX = Math.min(state.grid.cols - 1, Math.ceil(desiredX + r));
+    const minY = Math.max(0, Math.floor(desiredY - r));
+    const maxY = Math.min(state.grid.rows - 1, Math.ceil(desiredY + r));
+    for (let y = minY; y <= maxY; y += 1) {
+      for (let x = minX; x <= maxX; x += 1) {
+        if (r > 0 && Math.abs(x - desiredX) < r && Math.abs(y - desiredY) < r) {
+          continue;
+        }
+        if (!inBounds(state.grid, x, y) || !isPassable(state, x, y)) {
+          continue;
+        }
+        const fireSideDot = (x - fireTarget.x) * attackDirX + (y - fireTarget.y) * attackDirY;
+        if (fireSideDot > 0.2) {
+          continue;
+        }
+        const score = Math.hypot(x - desiredX, y - desiredY);
+        if (score < bestScore) {
+          bestScore = score;
+          best = { x, y };
+        }
+      }
+    }
+    if (best) {
+      return best;
+    }
+  }
+  return null;
+};
+
 const updateTruckCrewOrders = (state: WorldState, truck: Unit): void => {
   if (truck.kind !== "truck") {
     return;
@@ -786,14 +846,20 @@ const updateTruckCrewOrders = (state: WorldState, truck: Unit): void => {
   });
   truck.passengerIds = truck.passengerIds.filter((id) => truck.crewIds.includes(id));
   const truckTile = getUnitTile(truck);
+  const deployedCrew = truck.crewIds.map((id) => getUnitById(state, id)).filter((c) => c) as Unit[];
+  const averageHoseRange = getAverageHoseRange(deployedCrew);
+  const engagementRadius = FIREFIGHTER_TETHER_DISTANCE + averageHoseRange;
+  const mainFireTarget = deployedCrew.length > 0 ? findFireTargetNear(state, truckTile, engagementRadius) : null;
+  const fireFocus = mainFireTarget ? { x: mainFireTarget.x + 0.5, y: mainFireTarget.y + 0.5 } : null;
 
-  // --- Handle Boarding ---
   if (truck.crewMode === "boarded") {
+    setAttackTarget(truck, null);
     for (const id of truck.crewIds) {
       const crew = getUnitById(state, id);
       if (!crew || crew.carrierId === truck.id) {
         continue;
       }
+      setAttackTarget(crew, null);
       const distToTruck = Math.hypot(crew.x - truck.x, crew.y - truck.y);
       if (distToTruck <= TRUCK_BOARD_RADIUS && truck.passengerIds.length < TRUCK_CAPACITY) {
         boardTruck(state, crew, truck);
@@ -801,55 +867,123 @@ const updateTruckCrewOrders = (state: WorldState, truck: Unit): void => {
         setUnitTarget(state, crew, truckTile.x, truckTile.y, false, { silent: true });
       }
     }
-    return;
+    if (deployedCrew.length === 0 || !mainFireTarget || !fireFocus || truck.pathIndex < truck.path.length) {
+      return;
+    }
+    const dirX = fireFocus.x - truck.x;
+    const dirY = fireFocus.y - truck.y;
+    const dirMag = Math.hypot(dirX, dirY);
+    const attackDirX = dirMag > 0.0001 ? dirX / dirMag : 1;
+    const attackDirY = dirMag > 0.0001 ? dirY / dirMag : 0;
+    const averageStandoff = deployedCrew.reduce((sum, crew) => sum + getStandoffDistance(crew.hoseRange), 0) / deployedCrew.length;
+    const desiredSupportX = mainFireTarget.x - attackDirX * (averageStandoff + 2.0);
+    const desiredSupportY = mainFireTarget.y - attackDirY * (averageStandoff + 2.0);
+    const supportTile =
+      findPassableStandoffSlot(state, desiredSupportX, desiredSupportY, mainFireTarget, attackDirX, attackDirY, 2) ??
+      findNearestPassable(state, Math.round(desiredSupportX), Math.round(desiredSupportY), 2) ??
+      truckTile;
+    const supportDist = Math.hypot(truckTile.x - supportTile.x, truckTile.y - supportTile.y);
+    if (supportDist > 1.25) {
+      if (
+        truck.autonomous &&
+        (!truck.target || truck.target.x !== supportTile.x || truck.target.y !== supportTile.y || truck.pathIndex >= truck.path.length)
+      ) {
+        setUnitTarget(state, truck, supportTile.x, supportTile.y, false, { silent: true });
+      }
+      return;
+    }
+    truck.crewMode = "deployed";
+    truck.passengerIds = [];
+    for (const crew of deployedCrew) {
+      if (crew.carrierId === truck.id) {
+        detachFromCarrier(state, crew);
+      }
+    }
   }
 
-  // --- Handle Deployment & Targeting ---
-  const deployedCrew = truck.crewIds.map((id) => getUnitById(state, id)).filter((c) => c) as Unit[];
   if (deployedCrew.length === 0) {
+    setAttackTarget(truck, null);
+    return;
+  }
+  if (!mainFireTarget || !fireFocus) {
+    setAttackTarget(truck, null);
+    deployedCrew.forEach((crew) => setAttackTarget(crew, null));
     return;
   }
 
-  // First, ensure all crew are disembarked and within tether range
+  const dirX = fireFocus.x - truck.x;
+  const dirY = fireFocus.y - truck.y;
+  const dirMag = Math.hypot(dirX, dirY);
+  const attackDirX = dirMag > 0.0001 ? dirX / dirMag : 1;
+  const attackDirY = dirMag > 0.0001 ? dirY / dirMag : 0;
+  const perpX = -attackDirY;
+  const perpY = attackDirX;
+  const averageStandoff = deployedCrew.reduce((sum, crew) => sum + getStandoffDistance(crew.hoseRange), 0) / deployedCrew.length;
+  const desiredSupportX = mainFireTarget.x - attackDirX * (averageStandoff + 2.0);
+  const desiredSupportY = mainFireTarget.y - attackDirY * (averageStandoff + 2.0);
+  const supportTile =
+    findPassableStandoffSlot(state, desiredSupportX, desiredSupportY, mainFireTarget, attackDirX, attackDirY, 2) ??
+    findNearestPassable(state, Math.round(desiredSupportX), Math.round(desiredSupportY), 2) ??
+    truckTile;
+  const supportDist = Math.hypot(truckTile.x - supportTile.x, truckTile.y - supportTile.y);
+
+  if (supportDist > 1.25) {
+    truck.crewMode = "boarded";
+    setAttackTarget(truck, null);
+    deployedCrew.forEach((crew) => {
+      setAttackTarget(crew, null);
+      if (crew.carrierId === truck.id) {
+        return;
+      }
+      const distToTruck = Math.hypot(crew.x - truck.x, crew.y - truck.y);
+      if (distToTruck <= TRUCK_BOARD_RADIUS && truck.passengerIds.length < TRUCK_CAPACITY) {
+        boardTruck(state, crew, truck);
+      } else {
+        setUnitTarget(state, crew, truckTile.x, truckTile.y, false, { silent: true });
+      }
+    });
+    if (
+      truck.autonomous &&
+      (!truck.target || truck.target.x !== supportTile.x || truck.target.y !== supportTile.y || truck.pathIndex >= truck.path.length)
+    ) {
+      setUnitTarget(state, truck, supportTile.x, supportTile.y, false, { silent: true });
+    }
+    return;
+  }
+
   deployedCrew.forEach((crew) => {
     if (crew.carrierId === truck.id) {
       detachFromCarrier(state, crew);
     }
+    setAttackTarget(crew, fireFocus);
     const distFromTruck = Math.hypot(crew.x - truck.x, crew.y - truck.y);
     if (distFromTruck > FIREFIGHTER_TETHER_DISTANCE) {
-      const clamped = clampTargetToTruckRange(state, truck, truckTile);
-      setUnitTarget(state, crew, clamped.x, clamped.y, false, { silent: true });
+      const returnTile = findNearestPassable(state, supportTile.x, supportTile.y, 2) ?? truckTile;
+      setUnitTarget(state, crew, returnTile.x, returnTile.y, false, { silent: true });
     }
   });
 
-  // Now, check if the crew needs new fire targets
+  setAttackTarget(
+    truck,
+    Math.hypot(fireFocus.x - truck.x, fireFocus.y - truck.y) <= truck.hoseRange + 0.75 ? fireFocus : null
+  );
+
   const isCrewIdle = deployedCrew.every((crew) => !crew.target || crew.pathIndex >= crew.path.length);
   if (!isCrewIdle) {
-    return; // Crew is busy, don't re-task them
+    return;
   }
 
-  const mainFireTarget = findFireTargetNear(state, truckTile, FIREFIGHTER_TETHER_DISTANCE);
-  if (!mainFireTarget) {
-    return; // No fires in range
-  }
-
-  const formation = deployedCrew[0].formation; // Assume all crew have same formation
+  const formation = deployedCrew[0].formation;
   const spacing = FORMATION_SPACING[formation];
   const crewSize = deployedCrew.length;
-
-  const dirX = mainFireTarget.x - truckTile.x;
-  const dirY = mainFireTarget.y - truckTile.y;
-  const dirMag = Math.hypot(dirX, dirY);
-
-  // Get a perpendicular vector to form the fireline
-  const perpX = dirMag > 0 ? -dirY / dirMag : 1;
-  const perpY = dirMag > 0 ? dirX / dirMag : 0;
-
   deployedCrew.forEach((crew, i) => {
     const offset = (i - (crewSize - 1) / 2) * spacing;
-    const targetX = Math.round(mainFireTarget.x + perpX * offset);
-    const targetY = Math.round(mainFireTarget.y + perpY * offset);
-    const finalTarget = findNearestPassable(state, targetX, targetY);
+    const standoffDistance = getStandoffDistance(crew.hoseRange);
+    const desiredX = mainFireTarget.x - attackDirX * standoffDistance + perpX * offset;
+    const desiredY = mainFireTarget.y - attackDirY * standoffDistance + perpY * offset;
+    const finalTarget =
+      findPassableStandoffSlot(state, desiredX, desiredY, mainFireTarget, attackDirX, attackDirY, 2) ??
+      findNearestPassable(state, supportTile.x, supportTile.y, 2);
     if (finalTarget) {
       setUnitTarget(state, crew, finalTarget.x, finalTarget.y, false, { silent: true });
     }
@@ -1067,6 +1201,8 @@ export function recallUnits(state: WorldState): void {
 
 export function applyExtinguish(state: WorldState, effects: EffectsState, rng: RNG, delta: number): void {
   const powerMultiplier = delta;
+  const suppressionTimestamp = state.careerDay;
+  effects.waterStreams = [];
   const clearScheduled = (idx: number): void => {
     if (state.tileIgniteAt[idx] < Number.POSITIVE_INFINITY) {
       state.tileIgniteAt[idx] = Number.POSITIVE_INFINITY;
@@ -1099,61 +1235,134 @@ export function applyExtinguish(state: WorldState, effects: EffectsState, rng: R
       }
     }
 
-    const minX = Math.max(0, Math.floor(unit.x - radius));
-    const maxX = Math.min(state.grid.cols - 1, Math.ceil(unit.x + radius));
-    const minY = Math.max(0, Math.floor(unit.y - radius));
-    const maxY = Math.min(state.grid.rows - 1, Math.ceil(unit.y + radius));
-    let closestFire: Point | null = null;
-    let closestHeat: Point | null = null;
-    let closestDist = Number.POSITIVE_INFINITY;
-    let closestHeatDist = Number.POSITIVE_INFINITY;
-    for (let y = minY; y <= maxY; y += 1) {
-      for (let x = minX; x <= maxX; x += 1) {
-        const dist = Math.hypot(unit.x - (x + 0.5), unit.y - (y + 0.5));
-        if (dist <= radius) {
-          const idx = indexFor(state.grid, x, y);
-          const tile = state.tiles[idx];
-          let heatValue = state.tileHeat[idx];
-          if (heatValue > 0) {
-            heatValue = Math.max(0, heatValue - power * 1.1 * powerMultiplier);
+    const hoseRange = Math.max(radius + 0.5, unit.hoseRange);
+    const preferredAim =
+      unit.attackTarget ??
+      (unit.target && unit.pathIndex < unit.path.length
+        ? {
+            x: unit.target.x + 0.5,
+            y: unit.target.y + 0.5
+          }
+        : null);
+    let forwardDirX = 1;
+    let forwardDirY = 0;
+    if (preferredAim) {
+      const aimMag = Math.hypot(preferredAim.x - unit.x, preferredAim.y - unit.y);
+      if (aimMag > 0.0001) {
+        forwardDirX = (preferredAim.x - unit.x) / aimMag;
+        forwardDirY = (preferredAim.y - unit.y) / aimMag;
+      }
+    }
+
+    const searchMinX = Math.max(0, Math.floor(unit.x - hoseRange));
+    const searchMaxX = Math.min(state.grid.cols - 1, Math.ceil(unit.x + hoseRange));
+    const searchMinY = Math.max(0, Math.floor(unit.y - hoseRange));
+    const searchMaxY = Math.min(state.grid.rows - 1, Math.ceil(unit.y + hoseRange));
+    let bestFireTarget: Point | null = null;
+    let bestFireScore = 0;
+    let bestHeatTarget: Point | null = null;
+    let bestHeatScore = 0;
+    for (let y = searchMinY; y <= searchMaxY; y += 1) {
+      for (let x = searchMinX; x <= searchMaxX; x += 1) {
+        const tileCenterX = x + 0.5;
+        const tileCenterY = y + 0.5;
+        const dist = Math.hypot(unit.x - tileCenterX, unit.y - tileCenterY);
+        if (dist > hoseRange) {
+          continue;
+        }
+        const idx = indexFor(state.grid, x, y);
+        const fireValue = state.tileFire[idx];
+        const heatValue = state.tileHeat[idx];
+        if (fireValue <= 0 && heatValue <= 0.05) {
+          continue;
+        }
+        const forwardDot =
+          dist > 0.0001 ? ((tileCenterX - unit.x) * forwardDirX + (tileCenterY - unit.y) * forwardDirY) / dist : 1;
+        if (preferredAim && forwardDot < -0.05) {
+          continue;
+        }
+        const forwardWeight = preferredAim ? clamp((forwardDot + 0.1) / 1.1, 0, 1) : 1;
+        if (forwardWeight <= 0) {
+          continue;
+        }
+        const distanceWeight = clamp(1 - dist / Math.max(0.0001, hoseRange), 0, 1);
+        const targetDistance = preferredAim ? Math.hypot(tileCenterX - preferredAim.x, tileCenterY - preferredAim.y) : 0;
+        const targetWeight = preferredAim ? clamp(1 - targetDistance / Math.max(hoseRange * 0.9, 0.0001), 0, 1) : 1;
+        const combinedWeight =
+          (0.28 + forwardWeight * 0.72) * (0.3 + distanceWeight * 0.7) * (0.34 + targetWeight * 0.66);
+        if (fireValue > 0) {
+          const fireScore = (0.2 + fireValue) * combinedWeight;
+          if (fireScore > bestFireScore) {
+            bestFireScore = fireScore;
+            bestFireTarget = { x: tileCenterX, y: tileCenterY };
+          }
+        }
+        if (heatValue > 0.05) {
+          const heatScore = (0.15 + heatValue * 0.85) * combinedWeight;
+          if (heatScore > bestHeatScore) {
+            bestHeatScore = heatScore;
+            bestHeatTarget = { x: tileCenterX, y: tileCenterY };
+          }
+        }
+      }
+    }
+
+    const impactTarget = bestFireTarget ?? bestHeatTarget;
+    if (!impactTarget) {
+      return;
+    }
+
+    const impactMinX = Math.max(0, Math.floor(impactTarget.x - radius));
+    const impactMaxX = Math.min(state.grid.cols - 1, Math.ceil(impactTarget.x + radius));
+    const impactMinY = Math.max(0, Math.floor(impactTarget.y - radius));
+    const impactMaxY = Math.min(state.grid.rows - 1, Math.ceil(impactTarget.y + radius));
+    const radiusSafe = Math.max(0.0001, radius);
+    for (let y = impactMinY; y <= impactMaxY; y += 1) {
+      for (let x = impactMinX; x <= impactMaxX; x += 1) {
+        const tileCenterX = x + 0.5;
+        const tileCenterY = y + 0.5;
+        const dist = Math.hypot(impactTarget.x - tileCenterX, impactTarget.y - tileCenterY);
+        if (dist > radius) {
+          continue;
+        }
+        const idx = indexFor(state.grid, x, y);
+        const tile = state.tiles[idx];
+        const proximityWeight = Math.max(0, 1 - dist / radiusSafe);
+        let heatValue = state.tileHeat[idx];
+        if (heatValue > 0) {
+          const prevHeatValue = heatValue;
+          heatValue = Math.max(0, heatValue - power * 1.1 * powerMultiplier * (0.45 + proximityWeight * 0.55));
+          state.tileHeat[idx] = heatValue;
+          tile.heat = heatValue;
+          if (heatValue < prevHeatValue && idx < state.scoring.lastSuppressedAt.length) {
+            state.scoring.lastSuppressedAt[idx] = suppressionTimestamp;
+          }
+          if (heatValue < tile.ignitionPoint) {
+            clearScheduled(idx);
+          }
+        }
+        let fireValue = state.tileFire[idx];
+        if (fireValue > 0) {
+          const before = fireValue;
+          fireValue = Math.max(0, fireValue - power * powerMultiplier * (0.45 + proximityWeight * 0.55));
+          state.tileFire[idx] = fireValue;
+          tile.fire = fireValue;
+          if (fireValue < before && idx < state.scoring.lastSuppressedAt.length) {
+            state.scoring.lastSuppressedAt[idx] = suppressionTimestamp;
+          }
+          if (before > 0 && fireValue === 0) {
+            heatValue = Math.min(state.tileHeat[idx], tile.ignitionPoint * 0.25);
             state.tileHeat[idx] = heatValue;
             tile.heat = heatValue;
-            if (heatValue < tile.ignitionPoint) {
-              clearScheduled(idx);
-            }
-            if (heatValue > 0.05 && dist < closestHeatDist) {
-              closestHeatDist = dist;
-              closestHeat = { x: x + 0.5, y: y + 0.5 };
-            }
-          }
-          let fireValue = state.tileFire[idx];
-          if (fireValue > 0) {
-            const before = fireValue;
-            fireValue = Math.max(0, fireValue - power * powerMultiplier);
-            state.tileFire[idx] = fireValue;
-            tile.fire = fireValue;
-            if (before > 0 && fireValue === 0) {
-              heatValue = Math.min(state.tileHeat[idx], tile.ignitionPoint * 0.25);
-              state.tileHeat[idx] = heatValue;
-              tile.heat = heatValue;
-              clearScheduled(idx);
-              if (state.tileFuel[idx] > 0) {
-                state.containedCount += 1;
-              }
-            }
-            if (dist < closestDist) {
-              closestDist = dist;
-              closestFire = { x: x + 0.5, y: y + 0.5 };
+            clearScheduled(idx);
+            if (state.tileFuel[idx] > 0) {
+              state.containedCount += 1;
             }
           }
         }
       }
     }
-    if (closestFire) {
-      emitWaterSpray(state, effects, rng, unit, closestFire);
-    } else if (closestHeat) {
-      emitWaterSpray(state, effects, rng, unit, closestHeat);
-    }
+    emitWaterSpray(state, effects, rng, unit, impactTarget);
   });
 }
 

@@ -6,17 +6,27 @@ import { getTerrainHeightScale, type TerrainSample } from "./threeTestTerrain.js
 
 const MAX_HOSE_SEGMENTS = 1024;
 const MAX_WATER_PARTICLES = 4096;
-const MAX_WATER_CONES = 768;
+const MAX_WATER_STREAMS = 768;
+const MAX_WATER_IMPACTS = MAX_WATER_STREAMS;
 const HOSE_BASE_Y = 0.08;
 const HOSE_RADIUS = 0.017;
 const HOSE_COLOR = new THREE.Color(0xffffff);
 const WATER_CORE_COLOR = new THREE.Color(0xf4fcff);
 const WATER_EDGE_COLOR = new THREE.Color(0x6ecbff);
 const WATER_MIST_COLOR = new THREE.Color(0xc2ebff);
-const WATER_CONE_CORE_COLOR = new THREE.Color(0xeef8ff);
-const WATER_CONE_EDGE_COLOR = new THREE.Color(0x89d7ff);
+const WATER_JET_CORE_COLOR = new THREE.Color(0xffffff);
+const WATER_JET_EDGE_COLOR = new THREE.Color(0xc8eeff);
+const WATER_SHELL_CORE_COLOR = new THREE.Color(0xeef8ff);
+const WATER_SHELL_EDGE_COLOR = new THREE.Color(0x89d7ff);
+const WATER_IMPACT_CORE_COLOR = new THREE.Color(0xf5fcff);
+const WATER_IMPACT_EDGE_COLOR = new THREE.Color(0x8edcff);
+const TAU = Math.PI * 2;
 
 const clamp = (value: number, min: number, max: number): number => Math.max(min, Math.min(max, value));
+const expFactor = (rate: number, dtSeconds: number): number =>
+  1 - Math.exp(-Math.max(0, rate) * Math.max(0, dtSeconds));
+const approachExp = (current: number, target: number, rate: number, dtSeconds: number): number =>
+  current + (target - current) * expFactor(rate, dtSeconds);
 
 const bilerp = (h00: number, h10: number, h01: number, h11: number, tx: number, ty: number): number => {
   const hx0 = h00 * (1 - tx) + h10 * tx;
@@ -48,6 +58,17 @@ const sampleHeight = (sample: TerrainSample, tileX: number, tileY: number): numb
 
 const toWorldX = (tileX: number, cols: number, width: number): number => (tileX / Math.max(1, cols) - 0.5) * width;
 const toWorldZ = (tileY: number, rows: number, depth: number): number => (tileY / Math.max(1, rows) - 0.5) * depth;
+const toTileX = (worldX: number, cols: number, width: number): number => (worldX / Math.max(0.0001, width) + 0.5) * cols;
+const toTileY = (worldZ: number, rows: number, depth: number): number => (worldZ / Math.max(0.0001, depth) + 0.5) * rows;
+const sampleWorldHeight = (
+  sample: TerrainSample,
+  terrainSize: { width: number; depth: number },
+  cols: number,
+  rows: number,
+  heightScale: number,
+  worldX: number,
+  worldZ: number
+): number => sampleHeight(sample, toTileX(worldX, cols, terrainSize.width), toTileY(worldZ, rows, terrainSize.depth)) * heightScale;
 
 const sprayModeToValue = (mode?: WaterSprayMode): number => {
   if (mode === "precision") {
@@ -100,14 +121,13 @@ const waterVertexShader = `
     float dist = max(1.0, -mvPosition.z);
     float mode01 = clamp(aMode * 0.5, 0.0, 1.0);
     float pulse = 0.74 + 0.26 * sin(uTimeSec * (aPulseHz + mode01 * 0.8) + aSeed * 31.4159);
-    float volumeScale = mix(0.8, 1.4, clamp(aVolume, 0.0, 1.0));
-    float ageFade = 1.0 - smoothstep(0.62, 1.0, clamp(aAge01, 0.0, 1.0));
-    float sizeScale = mix(0.82, 1.36, mode01);
-    float streamScale = mix(1.22, 0.92, mode01);
-    float pointSize = aSize * (162.0 / dist) * pulse * volumeScale * sizeScale * streamScale * mix(0.62, 1.0, ageFade);
+    float volumeScale = mix(0.74, 1.05, clamp(aVolume, 0.0, 1.0));
+    float ageFade = smoothstep(0.18, 0.48, clamp(aAge01, 0.0, 1.0)) * (1.0 - smoothstep(0.84, 1.0, clamp(aAge01, 0.0, 1.0)));
+    float sizeScale = mix(0.74, 1.02, mode01);
+    float pointSize = aSize * (134.0 / dist) * pulse * volumeScale * sizeScale * mix(0.45, 1.0, ageFade);
     gl_PointSize = max(2.0, pointSize);
     gl_Position = projectionMatrix * mvPosition;
-    vAlpha = clamp(aAlpha, 0.0, 1.0) * mix(1.18, 0.8, mode01);
+    vAlpha = clamp(aAlpha, 0.0, 1.0) * mix(1.02, 0.8, mode01);
     vMode = clamp(aMode, 0.0, 2.0);
     vVolume = clamp(aVolume, 0.0, 1.0);
     vSeed = aSeed;
@@ -138,57 +158,77 @@ const waterFragmentShader = `
   void main() {
     float mode01 = clamp(vMode * 0.5, 0.0, 1.0);
     vec2 uv = gl_PointCoord * 2.0 - 1.0;
-    uv.x *= mix(0.78, 1.28, mode01);
+    uv.x *= mix(0.88, 1.14, mode01);
     float radial = length(uv);
-    float shell = 1.0 - smoothstep(0.44, 1.0, radial);
+    float shell = 1.0 - smoothstep(0.36, 1.0, radial);
     if (shell <= 0.001) {
       discard;
     }
-    float core = 1.0 - smoothstep(0.0, mix(0.36, 0.6, mode01), radial);
-    float outer = 1.0 - smoothstep(0.58, 1.04, radial);
+    float core = 1.0 - smoothstep(0.0, mix(0.26, 0.46, mode01), radial);
+    float outer = 1.0 - smoothstep(0.46, 1.04, radial);
     float noise = hash(gl_PointCoord * vec2(13.7, 17.9) + vec2(vSeed * 41.3, uTimeSec * 0.75 + vSeed));
-    float breakup = mix(0.86, 0.64, mode01);
-    float mist = smoothstep(mix(0.45, 0.22, mode01), 1.0, noise + outer * breakup);
-    float pulseGlow = 0.75 + vPulse * 0.45;
-    float volumeBoost = mix(0.72, 1.3, vVolume);
-    float lifeFade = 1.0 - smoothstep(0.72, 1.0, vAge01);
+    float breakup = mix(0.82, 0.58, mode01);
+    float mist = smoothstep(mix(0.58, 0.32, mode01), 1.0, noise + outer * breakup);
+    float pulseGlow = 0.72 + vPulse * 0.32;
+    float volumeBoost = mix(0.68, 1.02, vVolume);
+    float lifeFade = smoothstep(0.18, 0.5, vAge01) * (1.0 - smoothstep(0.84, 1.0, vAge01));
     float alpha = vAlpha * outer * pulseGlow * volumeBoost * lifeFade;
-    alpha *= mix(1.3, 0.78, mode01);
-    alpha *= mix(0.7, 1.0, shell);
+    alpha *= mix(0.88, 0.68, mode01);
+    alpha *= mix(0.56, 0.92, shell);
     alpha = clamp(alpha, 0.0, 1.0);
     if (alpha <= 0.01) {
       discard;
     }
 
     vec3 color = mix(uEdgeColor, uCoreColor, core);
-    color = mix(color, uMistColor, mist * mode01 * 0.55);
-    color += vec3(core * 0.18 * (0.6 + vVolume * 0.7));
+    color = mix(color, uMistColor, mist * 0.36);
+    color += vec3(core * 0.1 * (0.4 + vVolume * 0.4));
     gl_FragColor = vec4(color * alpha, alpha);
   }
 `;
 
-const waterConeVertexShader = `
+const waterJetCoreVertexShader = `
   precision highp float;
+  uniform float uTimeSec;
   attribute float aMode;
   attribute float aVolume;
   attribute float aSeed;
+  attribute float aIntensity;
   varying float vAlong;
   varying float vRadial;
   varying float vMode;
   varying float vVolume;
   varying float vSeed;
+  varying float vIntensity;
   void main() {
-    vAlong = clamp(position.y + 0.5, 0.0, 1.0);
+    float along = clamp(position.y + 0.5, 0.0, 1.0);
+    float mode01 = clamp(aMode * 0.5, 0.0, 1.0);
+    float intensity = clamp(aIntensity, 0.0, 1.0);
+    vec3 localPos = position;
+    float nozzleBody = mix(1.26, 1.0, smoothstep(0.0, 0.22, along));
+    float tipFade = 1.0 - smoothstep(0.9, 1.0, along);
+    float taper = 1.0 - smoothstep(0.74, 0.98, along) * 0.82;
+    float ripple = sin(along * mix(12.0, 8.2, mode01) - uTimeSec * mix(15.0, 10.0, mode01) + aSeed * 31.4159);
+    float sway = sin(along * 6.2 - uTimeSec * 4.6 + aSeed * 19.1);
+    float widthProfile = nozzleBody * taper * mix(0.96, 1.04, tipFade);
+    widthProfile *= mix(0.92, 1.06, clamp(aVolume, 0.0, 1.0));
+    widthProfile *= mix(0.9, 1.06, intensity);
+    widthProfile *= 1.0 + ripple * 0.018 * smoothstep(0.18, 0.92, along);
+    localPos.xz *= widthProfile;
+    localPos.x += ripple * 0.014 * smoothstep(0.22, 0.94, along);
+    localPos.z += sway * 0.01 * smoothstep(0.28, 1.0, along);
+    vAlong = along;
     vRadial = clamp(length(position.xz), 0.0, 1.0);
     vMode = clamp(aMode, 0.0, 2.0);
     vVolume = clamp(aVolume, 0.0, 1.0);
     vSeed = aSeed;
-    vec4 worldPos = modelMatrix * instanceMatrix * vec4(position, 1.0);
+    vIntensity = intensity;
+    vec4 worldPos = modelMatrix * instanceMatrix * vec4(localPos, 1.0);
     gl_Position = projectionMatrix * viewMatrix * worldPos;
   }
 `;
 
-const waterConeFragmentShader = `
+const waterJetCoreFragmentShader = `
   precision highp float;
   uniform float uTimeSec;
   uniform vec3 uCoreColor;
@@ -198,48 +238,198 @@ const waterConeFragmentShader = `
   varying float vMode;
   varying float vVolume;
   varying float vSeed;
+  varying float vIntensity;
 
-  float wave(float x) {
-    return 0.5 + 0.5 * sin(x);
+  float hash(vec2 p) {
+    return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453123 + vSeed * 17.0);
   }
 
   void main() {
     float mode01 = clamp(vMode * 0.5, 0.0, 1.0);
-    float startFade = smoothstep(0.0, 0.05, vAlong);
-    float endFade = 1.0 - smoothstep(0.9, 1.0, vAlong);
-    float body = startFade * endFade;
-    float radialFade = 1.0 - smoothstep(0.52, 1.0, vRadial);
-    float pulseSpeed = mix(10.4, 5.8, mode01);
-    float pulseFreq = mix(26.0, 16.0, mode01);
-    float pulse = wave(vAlong * pulseFreq - uTimeSec * pulseSpeed + vSeed * 17.0);
-    float pulseBand = smoothstep(0.52, 1.0, pulse);
-    float coneAlpha = body * radialFade;
-    coneAlpha *= mix(0.22, 0.38, vVolume);
-    coneAlpha *= mix(1.18, 0.82, mode01);
-    coneAlpha *= mix(0.68, 1.0, pulseBand);
-    coneAlpha *= mix(1.08, 0.82, vAlong);
-    coneAlpha = clamp(coneAlpha, 0.0, 1.0);
-    if (coneAlpha <= 0.01) {
+    float intensity = clamp(vIntensity, 0.0, 1.0);
+    float entryFade = mix(0.58, 1.0, smoothstep(0.0, 0.08, vAlong));
+    float exitFade = 1.0 - smoothstep(0.9, 1.0, vAlong);
+    float body = entryFade * exitFade;
+    float radialCore = 1.0 - smoothstep(0.0, mix(0.22, 0.28, mode01), vRadial);
+    float radialBody = 1.0 - smoothstep(mix(0.4, 0.5, mode01), 1.0, vRadial);
+    float streak = 0.66 + 0.34 * sin(vAlong * mix(22.0, 15.0, mode01) - uTimeSec * mix(16.0, 10.0, mode01) + vSeed * 23.0);
+    float noise = hash(vec2(vAlong * 14.0 + uTimeSec * 0.8, vRadial * 9.8 + vSeed * 7.3));
+    float breakup = smoothstep(0.78, 1.0, noise + vAlong * 0.2 + (1.0 - radialBody) * 0.1);
+    float alpha = body * radialBody;
+    alpha *= mix(0.62, 0.82, clamp(vVolume, 0.0, 1.0));
+    alpha *= mix(0.46, 1.0, intensity);
+    alpha *= mix(1.06, 0.96, mode01);
+    alpha *= mix(0.88, 1.04, streak);
+    alpha *= 1.0 - breakup * 0.12;
+    alpha = clamp(alpha, 0.0, 1.0);
+    if (alpha <= 0.01) {
       discard;
     }
-    vec3 color = mix(uEdgeColor, uCoreColor, 1.0 - vRadial);
-    color += vec3(0.12, 0.2, 0.26) * pulseBand * (0.4 + vVolume * 0.4);
-    gl_FragColor = vec4(color, coneAlpha);
+    vec3 color = mix(uEdgeColor, uCoreColor, radialCore);
+    color += vec3(radialCore * 0.08 * (0.6 + intensity * 0.5));
+    gl_FragColor = vec4(color, alpha);
   }
 `;
 
-type SprayConeAggregate = {
+const waterMistVertexShader = `
+  precision highp float;
+  uniform float uTimeSec;
+  attribute float aMode;
+  attribute float aVolume;
+  attribute float aSeed;
+  attribute float aIntensity;
+  varying float vAlong;
+  varying float vRadial;
+  varying float vMode;
+  varying float vVolume;
+  varying float vSeed;
+  varying float vIntensity;
+  void main() {
+    float along = clamp(position.y + 0.5, 0.0, 1.0);
+    float mode01 = clamp(aMode * 0.5, 0.0, 1.0);
+    vec3 localPos = position;
+    float growth = smoothstep(0.02, 0.82, along);
+    float taper = 1.0 - smoothstep(0.88, 1.0, along) * 0.32;
+    float widthProfile = mix(0.42, mix(0.84, 1.12, mode01), growth) * taper;
+    widthProfile *= mix(0.88, 1.18, clamp(aVolume, 0.0, 1.0));
+    float ripple = sin(along * mix(10.0, 7.0, mode01) - uTimeSec * mix(11.0, 7.0, mode01) + aSeed * 27.0);
+    float swirl = sin(along * 5.4 - uTimeSec * 3.8 + aSeed * 14.0);
+    localPos.xz *= widthProfile * (1.0 + ripple * 0.045 * growth);
+    localPos.x += ripple * 0.03 * growth;
+    localPos.z += swirl * 0.026 * growth;
+    vAlong = along;
+    vRadial = clamp(length(position.xz), 0.0, 1.0);
+    vMode = clamp(aMode, 0.0, 2.0);
+    vVolume = clamp(aVolume, 0.0, 1.0);
+    vSeed = aSeed;
+    vIntensity = clamp(aIntensity, 0.0, 1.0);
+    vec4 worldPos = modelMatrix * instanceMatrix * vec4(localPos, 1.0);
+    gl_Position = projectionMatrix * viewMatrix * worldPos;
+  }
+`;
+
+const waterMistFragmentShader = `
+  precision highp float;
+  uniform float uTimeSec;
+  uniform vec3 uCoreColor;
+  uniform vec3 uEdgeColor;
+  varying float vAlong;
+  varying float vRadial;
+  varying float vMode;
+  varying float vVolume;
+  varying float vSeed;
+  varying float vIntensity;
+
+  float hash(vec2 p) {
+    return fract(sin(dot(p, vec2(97.1, 281.7))) * 43758.5453123 + vSeed * 11.0);
+  }
+
+  void main() {
+    float mode01 = clamp(vMode * 0.5, 0.0, 1.0);
+    float entryFade = mix(0.34, 1.0, smoothstep(0.0, 0.12, vAlong));
+    float exitFade = 1.0 - smoothstep(0.82, 1.0, vAlong);
+    float shellInner = smoothstep(0.12, mix(0.34, 0.24, mode01), vRadial);
+    float shellOuter = 1.0 - smoothstep(mix(0.84, 0.94, mode01), 1.0, vRadial);
+    float shell = shellInner * shellOuter;
+    float noise = hash(vec2(vAlong * 11.0 + uTimeSec * 0.55, vRadial * 13.0 + vSeed * 5.2));
+    float feather = 1.0 - smoothstep(0.8, 1.0, noise + vAlong * 0.14);
+    float alpha = entryFade * exitFade * shell * feather;
+    alpha *= mix(0.18, 0.28, clamp(vVolume, 0.0, 1.0));
+    alpha *= mix(0.4, 1.0, clamp(vIntensity, 0.0, 1.0));
+    alpha *= mix(0.76, 1.08, mode01);
+    alpha = clamp(alpha, 0.0, 1.0);
+    if (alpha <= 0.01) {
+      discard;
+    }
+    vec3 color = mix(uEdgeColor, uCoreColor, 1.0 - vRadial);
+    gl_FragColor = vec4(color, alpha);
+  }
+`;
+
+const waterImpactVertexShader = `
+  precision highp float;
+  attribute float aAlpha;
+  attribute float aSize;
+  attribute float aMode;
+  attribute float aSeed;
+  uniform float uTimeSec;
+  varying float vAlpha;
+  varying float vMode;
+  varying float vSeed;
+  void main() {
+    vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
+    float dist = max(1.0, -mvPosition.z);
+    float pulse = 0.9 + 0.1 * sin(uTimeSec * 5.4 + aSeed * 31.4159);
+    gl_PointSize = max(6.0, aSize * (176.0 / dist) * pulse);
+    gl_Position = projectionMatrix * mvPosition;
+    vAlpha = clamp(aAlpha, 0.0, 1.0);
+    vMode = clamp(aMode, 0.0, 2.0);
+    vSeed = aSeed;
+  }
+`;
+
+const waterImpactFragmentShader = `
+  precision highp float;
+  uniform vec3 uCoreColor;
+  uniform vec3 uEdgeColor;
+  uniform float uTimeSec;
+  varying float vAlpha;
+  varying float vMode;
+  varying float vSeed;
+
+  float hash(vec2 p) {
+    return fract(sin(dot(p, vec2(133.1, 271.7))) * 43758.5453123 + vSeed * 13.0);
+  }
+
+  void main() {
+    float mode01 = clamp(vMode * 0.5, 0.0, 1.0);
+    vec2 uv = gl_PointCoord * 2.0 - 1.0;
+    float radial = length(uv);
+    float body = 1.0 - smoothstep(0.2, 1.0, radial);
+    float ring = smoothstep(0.18, 0.56, radial) * (1.0 - smoothstep(0.7, 1.0, radial));
+    float noise = hash(gl_PointCoord * vec2(9.1, 13.7) + vec2(vSeed * 17.0, uTimeSec * 0.5));
+    float spokes = 0.7 + 0.3 * sin(atan(uv.y, uv.x) * mix(4.0, 6.0, mode01) + uTimeSec * 2.4 + vSeed * 17.0);
+    float alpha = body * (0.45 + ring * 0.65 * spokes);
+    alpha *= mix(0.6, 0.96, noise);
+    alpha *= vAlpha;
+    alpha = clamp(alpha, 0.0, 1.0);
+    if (alpha <= 0.01) {
+      discard;
+    }
+    vec3 color = mix(uEdgeColor, uCoreColor, 1.0 - smoothstep(0.0, 0.38, radial));
+    color += vec3(ring * 0.1);
+    gl_FragColor = vec4(color * alpha, alpha);
+  }
+`;
+
+type SprayStreamAggregate = {
   sourceX: number;
   sourceY: number;
   sourceZ: number;
-  sumVelX: number;
-  sumVelZ: number;
-  sumSpeed: number;
-  sumMode: number;
-  sumVolume: number;
-  sumPulseHz: number;
-  sumMaxLife: number;
-  particleCount: number;
+  targetX: number;
+  targetY: number;
+  targetZ: number;
+  mode: number;
+  volume: number;
+  intensity: number;
+  seed: number;
+};
+
+type SprayStreamVisualState = {
+  direction: THREE.Vector3;
+  sourceX: number;
+  sourceY: number;
+  sourceZ: number;
+  length: number;
+  tipX: number;
+  tipY: number;
+  tipZ: number;
+  coreRadius: number;
+  mistRadius: number;
+  impactRadius: number;
+  mode: number;
+  volume: number;
+  intensity: number;
   seed: number;
 };
 
@@ -328,45 +518,129 @@ export const createThreeTestUnitFxLayer = (scene: THREE.Scene): ThreeTestUnitFxL
   });
   const waterPoints = new THREE.Points(waterGeometry, waterMaterial);
   waterPoints.frustumCulled = false;
+  waterPoints.renderOrder = 11;
   scene.add(waterPoints);
-  const waterConeGeometry = new THREE.CylinderGeometry(1, 0.08, 1, 16, 1, true);
-  const coneModeData = new Float32Array(MAX_WATER_CONES);
-  const coneVolumeData = new Float32Array(MAX_WATER_CONES);
-  const coneSeedData = new Float32Array(MAX_WATER_CONES);
-  const coneModeAttr = new THREE.InstancedBufferAttribute(coneModeData, 1);
-  const coneVolumeAttr = new THREE.InstancedBufferAttribute(coneVolumeData, 1);
-  const coneSeedAttr = new THREE.InstancedBufferAttribute(coneSeedData, 1);
-  coneModeAttr.setUsage(THREE.DynamicDrawUsage);
-  coneVolumeAttr.setUsage(THREE.DynamicDrawUsage);
-  coneSeedAttr.setUsage(THREE.DynamicDrawUsage);
-  waterConeGeometry.setAttribute("aMode", coneModeAttr);
-  waterConeGeometry.setAttribute("aVolume", coneVolumeAttr);
-  waterConeGeometry.setAttribute("aSeed", coneSeedAttr);
-  const waterConeMaterial = new THREE.ShaderMaterial({
-    vertexShader: waterConeVertexShader,
-    fragmentShader: waterConeFragmentShader,
+  const createTubeBuffers = (): {
+    geometry: THREE.CylinderGeometry;
+    modeAttr: THREE.InstancedBufferAttribute;
+    volumeAttr: THREE.InstancedBufferAttribute;
+    seedAttr: THREE.InstancedBufferAttribute;
+    intensityAttr: THREE.InstancedBufferAttribute;
+  } => {
+    const geometry = new THREE.CylinderGeometry(1, 1, 1, 18, 12, true);
+    const modeAttr = new THREE.InstancedBufferAttribute(new Float32Array(MAX_WATER_STREAMS), 1);
+    const volumeAttr = new THREE.InstancedBufferAttribute(new Float32Array(MAX_WATER_STREAMS), 1);
+    const seedAttr = new THREE.InstancedBufferAttribute(new Float32Array(MAX_WATER_STREAMS), 1);
+    const intensityAttr = new THREE.InstancedBufferAttribute(new Float32Array(MAX_WATER_STREAMS), 1);
+    modeAttr.setUsage(THREE.DynamicDrawUsage);
+    volumeAttr.setUsage(THREE.DynamicDrawUsage);
+    seedAttr.setUsage(THREE.DynamicDrawUsage);
+    intensityAttr.setUsage(THREE.DynamicDrawUsage);
+    geometry.setAttribute("aMode", modeAttr);
+    geometry.setAttribute("aVolume", volumeAttr);
+    geometry.setAttribute("aSeed", seedAttr);
+    geometry.setAttribute("aIntensity", intensityAttr);
+    return { geometry, modeAttr, volumeAttr, seedAttr, intensityAttr };
+  };
+
+  const jetCoreBuffers = createTubeBuffers();
+  const mistShellBuffers = createTubeBuffers();
+  const jetCoreMaterial = new THREE.ShaderMaterial({
+    vertexShader: waterJetCoreVertexShader,
+    fragmentShader: waterJetCoreFragmentShader,
     uniforms: {
       uTimeSec: { value: 0 },
-      uCoreColor: { value: WATER_CONE_CORE_COLOR.clone() },
-      uEdgeColor: { value: WATER_CONE_EDGE_COLOR.clone() }
+      uCoreColor: { value: WATER_JET_CORE_COLOR.clone() },
+      uEdgeColor: { value: WATER_JET_EDGE_COLOR.clone() }
     },
     transparent: true,
     depthWrite: false,
     depthTest: true,
     side: THREE.DoubleSide,
-    blending: THREE.NormalBlending,
+    blending: THREE.AdditiveBlending,
     toneMapped: false
   });
-  const waterCones = new THREE.InstancedMesh(waterConeGeometry, waterConeMaterial, MAX_WATER_CONES);
-  waterCones.count = 0;
-  waterCones.frustumCulled = false;
-  waterCones.renderOrder = 3;
-  scene.add(waterCones);
-  const coneMatrix = new THREE.Matrix4();
-  const coneMidpoint = new THREE.Vector3();
-  const coneDirection = new THREE.Vector3();
-  const coneQuaternion = new THREE.Quaternion();
-  const coneScale = new THREE.Vector3(1, 1, 1);
+  const mistShellMaterial = new THREE.ShaderMaterial({
+    vertexShader: waterMistVertexShader,
+    fragmentShader: waterMistFragmentShader,
+    uniforms: {
+      uTimeSec: { value: 0 },
+      uCoreColor: { value: WATER_SHELL_CORE_COLOR.clone() },
+      uEdgeColor: { value: WATER_SHELL_EDGE_COLOR.clone() }
+    },
+    transparent: true,
+    depthWrite: false,
+    depthTest: true,
+    side: THREE.DoubleSide,
+    blending: THREE.AdditiveBlending,
+    toneMapped: false
+  });
+  const jetCores = new THREE.InstancedMesh(jetCoreBuffers.geometry, jetCoreMaterial, MAX_WATER_STREAMS);
+  jetCores.count = 0;
+  jetCores.frustumCulled = false;
+  jetCores.renderOrder = 9;
+  scene.add(jetCores);
+  const mistShells = new THREE.InstancedMesh(mistShellBuffers.geometry, mistShellMaterial, MAX_WATER_STREAMS);
+  mistShells.count = 0;
+  mistShells.frustumCulled = false;
+  mistShells.renderOrder = 8;
+  scene.add(mistShells);
+
+  const impactPositions = new Float32Array(MAX_WATER_IMPACTS * 3);
+  const impactAlpha = new Float32Array(MAX_WATER_IMPACTS);
+  const impactSize = new Float32Array(MAX_WATER_IMPACTS);
+  const impactMode = new Float32Array(MAX_WATER_IMPACTS);
+  const impactSeed = new Float32Array(MAX_WATER_IMPACTS);
+  const impactGeometry = new THREE.BufferGeometry();
+  const impactPosAttr = new THREE.BufferAttribute(impactPositions, 3);
+  const impactAlphaAttr = new THREE.BufferAttribute(impactAlpha, 1);
+  const impactSizeAttr = new THREE.BufferAttribute(impactSize, 1);
+  const impactModeAttr = new THREE.BufferAttribute(impactMode, 1);
+  const impactSeedAttr = new THREE.BufferAttribute(impactSeed, 1);
+  impactPosAttr.setUsage(THREE.DynamicDrawUsage);
+  impactAlphaAttr.setUsage(THREE.DynamicDrawUsage);
+  impactSizeAttr.setUsage(THREE.DynamicDrawUsage);
+  impactModeAttr.setUsage(THREE.DynamicDrawUsage);
+  impactSeedAttr.setUsage(THREE.DynamicDrawUsage);
+  impactGeometry.setAttribute("position", impactPosAttr);
+  impactGeometry.setAttribute("aAlpha", impactAlphaAttr);
+  impactGeometry.setAttribute("aSize", impactSizeAttr);
+  impactGeometry.setAttribute("aMode", impactModeAttr);
+  impactGeometry.setAttribute("aSeed", impactSeedAttr);
+  impactGeometry.setDrawRange(0, 0);
+  const impactMaterial = new THREE.ShaderMaterial({
+    vertexShader: waterImpactVertexShader,
+    fragmentShader: waterImpactFragmentShader,
+    uniforms: {
+      uTimeSec: { value: 0 },
+      uCoreColor: { value: WATER_IMPACT_CORE_COLOR.clone() },
+      uEdgeColor: { value: WATER_IMPACT_EDGE_COLOR.clone() }
+    },
+    transparent: true,
+    depthWrite: false,
+    depthTest: true,
+    blending: THREE.AdditiveBlending,
+    toneMapped: false
+  });
+  const impactPoints = new THREE.Points(impactGeometry, impactMaterial);
+  impactPoints.frustumCulled = false;
+  impactPoints.renderOrder = 10;
+  scene.add(impactPoints);
+
+  const sprayMatrix = new THREE.Matrix4();
+  const sprayMidpoint = new THREE.Vector3();
+  const sprayQuaternion = new THREE.Quaternion();
+  const sprayScale = new THREE.Vector3(1, 1, 1);
+  const streamTargetDirection = new THREE.Vector3();
+  const streamTargetPoint = new THREE.Vector3();
+  const streamBaseDirection = new THREE.Vector3();
+  const swayAxisA = new THREE.Vector3();
+  const swayAxisB = new THREE.Vector3();
+  const swayTargetPoint = new THREE.Vector3();
+  const swayFallbackAxis = new THREE.Vector3(1, 0, 0);
+  const fallbackStreamDirection = new THREE.Vector3(0, -0.04, 1).normalize();
+  const sprayVisualBySourceId = new Map<number, SprayStreamVisualState>();
+  let lastUpdateTimeMs: number | null = null;
 
   const update = (
     world: WorldState,
@@ -376,12 +650,21 @@ export const createThreeTestUnitFxLayer = (scene: THREE.Scene): ThreeTestUnitFxL
     interpolationAlpha: number,
     timeMs: number
   ): void => {
-    waterMaterial.uniforms.uTimeSec.value = timeMs * 0.001;
-    waterConeMaterial.uniforms.uTimeSec.value = timeMs * 0.001;
+    const timeSec = timeMs * 0.001;
+    waterMaterial.uniforms.uTimeSec.value = timeSec;
+    jetCoreMaterial.uniforms.uTimeSec.value = timeSec;
+    mistShellMaterial.uniforms.uTimeSec.value = timeSec;
+    impactMaterial.uniforms.uTimeSec.value = timeSec;
+    const deltaSeconds =
+      lastUpdateTimeMs === null ? 1 / 60 : clamp((timeMs - lastUpdateTimeMs) * 0.001, 1 / 240, 0.12);
+    lastUpdateTimeMs = timeMs;
     if (!sample || !terrainSize) {
       hoses.count = 0;
       waterGeometry.setDrawRange(0, 0);
-      waterCones.count = 0;
+      jetCores.count = 0;
+      mistShells.count = 0;
+      impactGeometry.setDrawRange(0, 0);
+      sprayVisualBySourceId.clear();
       return;
     }
 
@@ -458,80 +741,315 @@ export const createThreeTestUnitFxLayer = (scene: THREE.Scene): ThreeTestUnitFxL
     hoses.count = hoseSegments;
     hoses.instanceMatrix.needsUpdate = true;
 
+    const streamFx = effects?.waterStreams ?? null;
     const spray = effects?.waterParticles ?? null;
-    if (!spray || spray.length === 0) {
-      waterGeometry.setDrawRange(0, 0);
-      waterCones.count = 0;
-      return;
+    const particleCount = Math.min(MAX_WATER_PARTICLES, spray?.length ?? 0);
+    const streamBySource = new Map<number, SprayStreamAggregate>();
+    const streamCount = Math.min(MAX_WATER_STREAMS, streamFx?.length ?? 0);
+    for (let i = 0; i < streamCount; i += 1) {
+      const stream = streamFx![i];
+      const sourceId = stream.sourceUnitId;
+      const source = nozzleByUnitId.get(sourceId) ?? null;
+      const modeValue = sprayModeToValue(stream.mode);
+      const precisionMode = modeValue <= 0.5;
+      const suppressionMode = modeValue >= 1.5;
+      const targetX = toWorldX(stream.targetX, cols, terrainSize.width);
+      const targetZ = toWorldZ(stream.targetY, rows, terrainSize.depth);
+      const targetY =
+        sampleHeight(sample, stream.targetX, stream.targetY) * heightScale +
+        (precisionMode ? 0.05 : suppressionMode ? 0.02 : 0.035);
+      streamBySource.set(sourceId, {
+        sourceX: source?.x ?? toWorldX(stream.sourceX, cols, terrainSize.width),
+        sourceY:
+          source?.y ??
+          sampleHeight(sample, stream.sourceX, stream.sourceY) * heightScale +
+            HOSE_BASE_Y +
+            0.18,
+        sourceZ: source?.z ?? toWorldZ(stream.sourceY, rows, terrainSize.depth),
+        targetX,
+        targetY,
+        targetZ,
+        mode: modeValue,
+        volume: clamp(stream.volume, 0, 1),
+        intensity: clamp(stream.intensity, 0, 1),
+        seed: (sourceId * 0.61803398875) % 1
+      });
     }
-    const particleCount = Math.min(MAX_WATER_PARTICLES, spray.length);
-    const coneBySource = new Map<number, SprayConeAggregate>();
-    for (let i = 0; i < particleCount; i += 1) {
-      const particle = spray[i];
-      const modeValue = sprayModeToValue(particle.sprayMode);
-      const volume = clamp(particle.sprayVolume ?? defaultVolumeForMode(modeValue), 0, 1);
-      const modeSizeScale = modeValue <= 0.5 ? 0.9 : modeValue >= 1.5 ? 1.34 : 1.06;
-      const wx = toWorldX(particle.x, cols, terrainSize.width);
-      const wz = toWorldZ(particle.y, rows, terrainSize.depth);
-      const lift = (1 - clamp(particle.alpha, 0, 1)) * (0.08 + modeValue * 0.05);
-      const wy = sampleHeight(sample, particle.x, particle.y) * heightScale + 0.13 + lift;
-      const particleLife01 =
-        particle.maxLife > 0
-          ? clamp(1 - particle.life / particle.maxLife, 0, 1)
-          : clamp(1 - particle.alpha, 0, 1);
-      const posOffset = i * 3;
-      waterPositions[posOffset] = wx;
-      waterPositions[posOffset + 1] = wy;
-      waterPositions[posOffset + 2] = wz;
-      waterAlpha[i] = clamp(particle.alpha, 0, 1);
-      waterSize[i] = clamp(particle.size * 0.44 * modeSizeScale * (0.82 + volume * 0.5), 1.4, 8.4);
-      waterMode[i] = modeValue;
-      waterVolume[i] = volume;
-      waterSeed[i] = Number.isFinite(particle.spraySeed) ? particle.spraySeed! : (i * 0.61803398875) % 1;
-      waterPulseHz[i] = Number.isFinite(particle.sprayPulseHz)
-        ? Math.max(2, Math.min(12, particle.sprayPulseHz!))
-        : defaultPulseForMode(modeValue);
-      waterAge01[i] = particleLife01;
 
+    const activeSourceIds = new Set<number>();
+    streamBySource.forEach((_value, sourceId) => activeSourceIds.add(sourceId));
+    sprayVisualBySourceId.forEach((_value, sourceId) => activeSourceIds.add(sourceId));
+
+    let jetCoreCount = 0;
+    let mistShellCount = 0;
+    let impactCount = 0;
+    activeSourceIds.forEach((sourceId) => {
+      if (jetCoreCount >= MAX_WATER_STREAMS && mistShellCount >= MAX_WATER_STREAMS && impactCount >= MAX_WATER_IMPACTS) {
+        return;
+      }
+      const aggregate = streamBySource.get(sourceId) ?? null;
+      const source = nozzleByUnitId.get(sourceId) ?? null;
+      let visual = sprayVisualBySourceId.get(sourceId) ?? null;
+      if (!visual) {
+        if (!aggregate) {
+          return;
+        }
+        visual = {
+          direction: fallbackStreamDirection.clone(),
+          sourceX: aggregate.sourceX,
+          sourceY: aggregate.sourceY,
+          sourceZ: aggregate.sourceZ,
+          length: worldPerTile * 1.2,
+          tipX: aggregate.targetX,
+          tipY: aggregate.targetY,
+          tipZ: aggregate.targetZ,
+          coreRadius: worldPerTile * 0.08,
+          mistRadius: worldPerTile * 0.16,
+          impactRadius: worldPerTile * 0.18,
+          mode: aggregate.mode,
+          volume: aggregate.volume,
+          intensity: 0,
+          seed: aggregate.seed
+        };
+        sprayVisualBySourceId.set(sourceId, visual);
+      }
+
+      if (source) {
+        visual.sourceX = source.x;
+        visual.sourceY = source.y;
+        visual.sourceZ = source.z;
+      } else if (aggregate) {
+        visual.sourceX = aggregate.sourceX;
+        visual.sourceY = aggregate.sourceY;
+        visual.sourceZ = aggregate.sourceZ;
+      }
+
+      if (aggregate) {
+        const precisionMode = aggregate.mode <= 0.5;
+        const suppressionMode = aggregate.mode >= 1.5;
+        streamTargetPoint.set(
+          aggregate.targetX - visual.sourceX,
+          aggregate.targetY - visual.sourceY,
+          aggregate.targetZ - visual.sourceZ
+        );
+        const targetLength = Math.max(0.0001, streamTargetPoint.length());
+        streamTargetDirection.copy(streamTargetPoint).multiplyScalar(1 / targetLength);
+        visual.direction.copy(streamTargetDirection);
+        visual.length = targetLength;
+        visual.tipX = aggregate.targetX;
+        visual.tipY = aggregate.targetY;
+        visual.tipZ = aggregate.targetZ;
+        visual.mode = approachExp(visual.mode, aggregate.mode, 18, deltaSeconds);
+        visual.volume = approachExp(visual.volume, aggregate.volume, 16, deltaSeconds);
+        visual.intensity = approachExp(
+          visual.intensity,
+          aggregate.intensity,
+          aggregate.intensity >= visual.intensity ? 18 : 6,
+          deltaSeconds
+        );
+        visual.coreRadius = approachExp(
+          visual.coreRadius,
+          Math.max(
+            worldPerTile * 0.055,
+            worldPerTile * (precisionMode ? 0.06 : suppressionMode ? 0.092 : 0.075) * (0.9 + aggregate.volume * 0.25)
+          ),
+          18,
+          deltaSeconds
+        );
+        visual.mistRadius = approachExp(
+          visual.mistRadius,
+          Math.max(
+            worldPerTile * 0.12,
+            worldPerTile * (precisionMode ? 0.15 : suppressionMode ? 0.27 : 0.21) * (0.92 + aggregate.volume * 0.24)
+          ),
+          16,
+          deltaSeconds
+        );
+        visual.impactRadius = approachExp(
+          visual.impactRadius,
+          Math.max(
+            worldPerTile * (precisionMode ? 0.12 : suppressionMode ? 0.22 : 0.16),
+            visual.mistRadius * (precisionMode ? 1.05 : suppressionMode ? 1.25 : 1.12)
+          ),
+          14,
+          deltaSeconds
+        );
+        visual.seed = aggregate.seed;
+      } else {
+        visual.intensity = approachExp(visual.intensity, 0, 5.2, deltaSeconds);
+        visual.coreRadius = approachExp(
+          visual.coreRadius,
+          Math.max(worldPerTile * 0.03, visual.coreRadius * 0.96),
+          4.6,
+          deltaSeconds
+        );
+        visual.mistRadius = approachExp(
+          visual.mistRadius,
+          Math.max(worldPerTile * 0.08, visual.mistRadius * 0.96),
+          4.2,
+          deltaSeconds
+        );
+        visual.impactRadius = approachExp(
+          visual.impactRadius,
+          Math.max(worldPerTile * 0.1, visual.impactRadius * 0.96),
+          4,
+          deltaSeconds
+        );
+      }
+
+      if (!source && !aggregate && visual.intensity <= 0.015) {
+        sprayVisualBySourceId.delete(sourceId);
+        return;
+      }
+
+      const renderIntensity = clamp(visual.intensity, 0, 1);
+      if (renderIntensity <= 0.015 || visual.length <= 0.0001) {
+        if (!aggregate) {
+          sprayVisualBySourceId.delete(sourceId);
+        }
+        return;
+      }
+
+      if (jetCoreCount < MAX_WATER_STREAMS) {
+        const coreLength = visual.length;
+        sprayMidpoint.set(
+          visual.sourceX + visual.direction.x * coreLength * 0.5,
+          visual.sourceY + visual.direction.y * coreLength * 0.5,
+          visual.sourceZ + visual.direction.z * coreLength * 0.5
+        );
+        sprayQuaternion.setFromUnitVectors(hoseUpAxis, visual.direction);
+        sprayScale.set(visual.coreRadius, coreLength, visual.coreRadius);
+        sprayMatrix.compose(sprayMidpoint, sprayQuaternion, sprayScale);
+        jetCores.setMatrixAt(jetCoreCount, sprayMatrix);
+        jetCoreBuffers.modeAttr.setX(jetCoreCount, clamp(visual.mode, 0, 2));
+        jetCoreBuffers.volumeAttr.setX(jetCoreCount, clamp(visual.volume, 0, 1));
+        jetCoreBuffers.seedAttr.setX(jetCoreCount, visual.seed);
+        jetCoreBuffers.intensityAttr.setX(jetCoreCount, renderIntensity);
+        jetCoreCount += 1;
+      }
+
+      if (mistShellCount < MAX_WATER_STREAMS) {
+        const shellLength = visual.length;
+        sprayMidpoint.set(
+          visual.sourceX + visual.direction.x * shellLength * 0.5,
+          visual.sourceY + visual.direction.y * shellLength * 0.5,
+          visual.sourceZ + visual.direction.z * shellLength * 0.5
+        );
+        sprayQuaternion.setFromUnitVectors(hoseUpAxis, visual.direction);
+        sprayScale.set(visual.mistRadius, shellLength, visual.mistRadius);
+        sprayMatrix.compose(sprayMidpoint, sprayQuaternion, sprayScale);
+        mistShells.setMatrixAt(mistShellCount, sprayMatrix);
+        mistShellBuffers.modeAttr.setX(mistShellCount, clamp(visual.mode, 0, 2));
+        mistShellBuffers.volumeAttr.setX(mistShellCount, clamp(visual.volume, 0, 1));
+        mistShellBuffers.seedAttr.setX(mistShellCount, visual.seed + 0.37);
+        mistShellBuffers.intensityAttr.setX(mistShellCount, renderIntensity);
+        mistShellCount += 1;
+      }
+
+      if (impactCount < MAX_WATER_IMPACTS) {
+        const impactOffset = impactCount * 3;
+        impactPositions[impactOffset] = visual.tipX;
+        impactPositions[impactOffset + 1] = visual.tipY;
+        impactPositions[impactOffset + 2] = visual.tipZ;
+        impactAlpha[impactCount] = clamp(
+          renderIntensity * (visual.mode <= 0.5 ? 0.34 : visual.mode >= 1.5 ? 0.58 : 0.46),
+          0,
+          1
+        );
+        impactSize[impactCount] = clamp((visual.impactRadius / Math.max(worldPerTile, 0.0001)) * 34, 12, 48);
+        impactMode[impactCount] = clamp(visual.mode, 0, 2);
+        impactSeed[impactCount] = visual.seed;
+        impactCount += 1;
+      }
+    });
+    jetCores.count = jetCoreCount;
+    jetCores.instanceMatrix.needsUpdate = true;
+    jetCoreBuffers.modeAttr.needsUpdate = true;
+    jetCoreBuffers.volumeAttr.needsUpdate = true;
+    jetCoreBuffers.seedAttr.needsUpdate = true;
+    jetCoreBuffers.intensityAttr.needsUpdate = true;
+    mistShells.count = mistShellCount;
+    mistShells.instanceMatrix.needsUpdate = true;
+    mistShellBuffers.modeAttr.needsUpdate = true;
+    mistShellBuffers.volumeAttr.needsUpdate = true;
+    mistShellBuffers.seedAttr.needsUpdate = true;
+    mistShellBuffers.intensityAttr.needsUpdate = true;
+    impactGeometry.setDrawRange(0, Math.min(impactCount, impactPosAttr.count));
+    impactPosAttr.needsUpdate = true;
+    impactAlphaAttr.needsUpdate = true;
+    impactSizeAttr.needsUpdate = true;
+    impactModeAttr.needsUpdate = true;
+    impactSeedAttr.needsUpdate = true;
+
+    let breakupCount = 0;
+    for (let i = 0; i < particleCount && breakupCount < MAX_WATER_PARTICLES; i += 1) {
+      const particle = spray![i];
       const sourceId = particle.spraySourceId;
       if (typeof sourceId !== "number") {
         continue;
       }
-      const source = nozzleByUnitId.get(sourceId);
-      if (!source) {
+      const visual = sprayVisualBySourceId.get(sourceId);
+      if (!visual) {
         continue;
       }
-      const velocityX = particle.vx * worldPerTileX;
-      const velocityZ = particle.vy * worldPerTileZ;
-      const speed = Math.hypot(velocityX, velocityZ);
-      let aggregate = coneBySource.get(sourceId);
-      if (!aggregate) {
-        aggregate = {
-          sourceX: source.x,
-          sourceY: source.y,
-          sourceZ: source.z,
-          sumVelX: 0,
-          sumVelZ: 0,
-          sumSpeed: 0,
-          sumMode: 0,
-          sumVolume: 0,
-          sumPulseHz: 0,
-          sumMaxLife: 0,
-          particleCount: 0,
-          seed: Number.isFinite(particle.spraySeed) ? particle.spraySeed! : (sourceId * 0.61803398875) % 1
-        };
-        coneBySource.set(sourceId, aggregate);
+      const renderIntensity = clamp(visual.intensity, 0, 1);
+      if (renderIntensity <= 0.08) {
+        continue;
       }
-      aggregate.sumVelX += velocityX;
-      aggregate.sumVelZ += velocityZ;
-      aggregate.sumSpeed += speed;
-      aggregate.sumMode += modeValue;
-      aggregate.sumVolume += volume;
-      aggregate.sumPulseHz += waterPulseHz[i];
-      aggregate.sumMaxLife += Math.max(0.1, particle.maxLife);
-      aggregate.particleCount += 1;
+      const modeValue = sprayModeToValue(particle.sprayMode);
+      const volume = clamp(particle.sprayVolume ?? defaultVolumeForMode(modeValue), 0, 1);
+      const wx = toWorldX(particle.x, cols, terrainSize.width);
+      const wz = toWorldZ(particle.y, rows, terrainSize.depth);
+      const particleAlpha = clamp(particle.alpha, 0, 1);
+      const particleLife01 =
+        particle.maxLife > 0
+          ? clamp(1 - particle.life / particle.maxLife, 0, 1)
+          : clamp(1 - particle.alpha, 0, 1);
+      const distFromSource = Math.hypot(wx - visual.sourceX, wz - visual.sourceZ);
+      const distToTip = Math.hypot(wx - visual.tipX, wz - visual.tipZ);
+      const breakupStart = visual.length * 0.66;
+      const tailInfluence = clamp(
+        (distFromSource - breakupStart) / Math.max(visual.length * 0.26, worldPerTile * 0.35),
+        0,
+        1
+      );
+      const tipInfluence = 1 - clamp(distToTip / Math.max(visual.impactRadius * 1.7, worldPerTile * 0.3), 0, 1);
+      const breakupInfluence = Math.max(tailInfluence, tipInfluence * 0.9);
+      if (breakupInfluence <= 0.01 || particleLife01 < 0.24) {
+        continue;
+      }
+      const expectedY = visual.sourceY + visual.direction.y * Math.min(visual.length, Math.max(0, distFromSource));
+      const terrainY = sampleWorldHeight(sample, terrainSize, cols, rows, heightScale, wx, wz) + 0.03;
+      const wy = Math.max(terrainY, expectedY - worldPerTile * 0.04);
+      const drawAlpha = clamp(
+        particleAlpha * breakupInfluence * (0.2 + renderIntensity * 0.24) * (0.7 + volume * 0.2),
+        0,
+        1
+      );
+      if (drawAlpha <= 0.02) {
+        continue;
+      }
+      const modeSizeScale = modeValue <= 0.5 ? 0.86 : modeValue >= 1.5 ? 1.02 : 0.94;
+      const posOffset = breakupCount * 3;
+      waterPositions[posOffset] = wx;
+      waterPositions[posOffset + 1] = wy;
+      waterPositions[posOffset + 2] = wz;
+      waterAlpha[breakupCount] = drawAlpha;
+      waterSize[breakupCount] = clamp(
+        particle.size * 0.16 * modeSizeScale * (0.68 + volume * 0.18) * (0.75 + breakupInfluence * 0.4),
+        0.8,
+        3.4
+      );
+      waterMode[breakupCount] = modeValue;
+      waterVolume[breakupCount] = volume;
+      waterSeed[breakupCount] = Number.isFinite(particle.spraySeed) ? particle.spraySeed! : (i * 0.61803398875) % 1;
+      waterPulseHz[breakupCount] = Number.isFinite(particle.sprayPulseHz)
+        ? Math.max(2, Math.min(12, particle.sprayPulseHz!))
+        : defaultPulseForMode(modeValue);
+      waterAge01[breakupCount] = particleLife01;
+      breakupCount += 1;
     }
-    waterGeometry.setDrawRange(0, particleCount);
+    waterGeometry.setDrawRange(0, Math.min(breakupCount, waterPosAttr.count));
     waterPosAttr.needsUpdate = true;
     waterAlphaAttr.needsUpdate = true;
     waterSizeAttr.needsUpdate = true;
@@ -540,66 +1058,24 @@ export const createThreeTestUnitFxLayer = (scene: THREE.Scene): ThreeTestUnitFxL
     waterSeedAttr.needsUpdate = true;
     waterPulseAttr.needsUpdate = true;
     waterAgeAttr.needsUpdate = true;
-
-    let coneCount = 0;
-    coneBySource.forEach((aggregate) => {
-      if (coneCount >= MAX_WATER_CONES || aggregate.particleCount <= 0) {
-        return;
-      }
-      const inv = 1 / aggregate.particleCount;
-      const avgMode = aggregate.sumMode * inv;
-      const avgVolume = clamp(aggregate.sumVolume * inv, 0, 1);
-      const avgPulseHz = Math.max(2.4, Math.min(12, aggregate.sumPulseHz * inv));
-      const avgSpeed = aggregate.sumSpeed * inv;
-      const avgMaxLife = aggregate.sumMaxLife * inv;
-      const modeLengthScale = avgMode <= 0.5 ? 1.18 : avgMode >= 1.5 ? 0.83 : 1;
-      const length = clamp(
-        (avgSpeed * avgMaxLife * 0.55 + worldPerTile * 0.85) * modeLengthScale,
-        worldPerTile * 0.8,
-        worldPerTile * 7.5
-      );
-      const radiusTiles = avgMode <= 0.5 ? 0.42 : avgMode >= 1.5 ? 0.95 : 0.66;
-      const radius = Math.max(worldPerTile * 0.08, radiusTiles * worldPerTile * (0.82 + avgVolume * 0.58));
-      coneDirection.set(aggregate.sumVelX, Math.max(0.0001, avgSpeed * 0.14), aggregate.sumVelZ);
-      if (coneDirection.lengthSq() <= 1e-7) {
-        coneDirection.set(0, 0.08, 1);
-      } else {
-        coneDirection.normalize();
-      }
-      const startX = aggregate.sourceX + coneDirection.x * worldPerTile * 0.12;
-      const startY = aggregate.sourceY + 0.02 + coneDirection.y * worldPerTile * 0.1;
-      const startZ = aggregate.sourceZ + coneDirection.z * worldPerTile * 0.12;
-      coneMidpoint.set(
-        startX + coneDirection.x * length * 0.5,
-        startY + coneDirection.y * length * 0.5,
-        startZ + coneDirection.z * length * 0.5
-      );
-      coneQuaternion.setFromUnitVectors(hoseUpAxis, coneDirection);
-      coneScale.set(radius, length, radius);
-      coneMatrix.compose(coneMidpoint, coneQuaternion, coneScale);
-      waterCones.setMatrixAt(coneCount, coneMatrix);
-      coneModeAttr.setX(coneCount, avgMode);
-      coneVolumeAttr.setX(coneCount, avgVolume);
-      coneSeedAttr.setX(coneCount, aggregate.seed + avgPulseHz * 0.013);
-      coneCount += 1;
-    });
-    waterCones.count = coneCount;
-    waterCones.instanceMatrix.needsUpdate = true;
-    coneModeAttr.needsUpdate = true;
-    coneVolumeAttr.needsUpdate = true;
-    coneSeedAttr.needsUpdate = true;
   };
 
   const dispose = (): void => {
     scene.remove(hoses);
     scene.remove(waterPoints);
-    scene.remove(waterCones);
+    scene.remove(jetCores);
+    scene.remove(mistShells);
+    scene.remove(impactPoints);
     hoseGeometry.dispose();
     hoseMaterial.dispose();
     waterGeometry.dispose();
     waterMaterial.dispose();
-    waterConeGeometry.dispose();
-    waterConeMaterial.dispose();
+    jetCoreBuffers.geometry.dispose();
+    mistShellBuffers.geometry.dispose();
+    jetCoreMaterial.dispose();
+    mistShellMaterial.dispose();
+    impactGeometry.dispose();
+    impactMaterial.dispose();
   };
 
   return { update, dispose };

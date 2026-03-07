@@ -197,6 +197,8 @@ export interface Unit {
 
   radius: number;
 
+  hoseRange: number;
+
   power: number;
 
   selected: boolean;
@@ -211,7 +213,9 @@ export interface Unit {
 
     crewMode: "boarded" | "deployed";
 
-    formation: Formation;
+  formation: Formation;
+
+  attackTarget: Point | null;
 
   }
 
@@ -294,6 +298,17 @@ export interface Unit {
   spraySpread?: number;
   spraySourceId?: number;
 
+}
+
+export interface WaterStreamFx {
+  sourceUnitId: number;
+  sourceX: number;
+  sourceY: number;
+  targetX: number;
+  targetY: number;
+  mode: WaterSprayMode;
+  volume: number;
+  intensity: number;
 }
 
 
@@ -409,8 +424,6 @@ export interface FireSettings {
   renderSmoothSeconds: number;
   seasonTaperDays: number;
   seasonMinIntensity: number;
-  dayFactorMin: number;
-  dayFactorMax: number;
   diffusionCardinal: number;
   diffusionDiagonal: number;
   diffusionSecondary: number;
@@ -455,6 +468,92 @@ export type ClimateTimeline = {
   daysPerYear: number;
   totalDays: number;
   risk: Float32Array;
+};
+
+export type ApprovalTier = "S" | "A" | "B" | "C" | "D";
+
+export type RiskTier = "low" | "moderate" | "high" | "extreme";
+
+export type ScoreEventSeverity = "positive" | "negative" | "info";
+
+export type ScoreEvent = {
+  id: number;
+  message: string;
+  severity: ScoreEventSeverity;
+  remainingSeconds: number;
+};
+
+export type ScoringSeasonSummary = {
+  burnoutPoints: number;
+  squirtBonusPoints: number;
+  otherPositivePoints: number;
+  houseLossPenalties: number;
+  civilianLifeLossPenalties: number;
+  firefighterLifeLossPenalties: number;
+  criticalAssetLossPenalties: number;
+  netBasePoints: number;
+  seasonStartScore: number;
+  seasonFinalScore: number;
+  seasonDeltaScore: number;
+  averageApprovalMult: number;
+  averageRiskMult: number;
+  finalDifficultyMult: number;
+  finalApprovalMult: number;
+  finalStreakMult: number;
+  finalRiskMult: number;
+  finalTotalMult: number;
+  finalApprovalTier: ApprovalTier;
+  finalRiskTier: RiskTier;
+  finalNoHouseLossDays: number;
+  finalNoLifeLossDays: number;
+};
+
+export type ScoringState = {
+  grossPoints: number;
+  lossPenalties: number;
+  score: number;
+  difficultyMult: number;
+  approvalMult: number;
+  streakMult: number;
+  riskMult: number;
+  totalMult: number;
+  approvalTier: ApprovalTier;
+  riskTier: RiskTier;
+  approval01: number;
+  nextApprovalTier: ApprovalTier | null;
+  nextApprovalThreshold01: number | null;
+  nextTierProgress01: number;
+  noHouseLossDays: number;
+  noLifeLossDays: number;
+  dayAccumulator: number;
+  hadHouseLossToday: boolean;
+  hadLifeLossToday: boolean;
+  seasonBurnoutPoints: number;
+  seasonSquirtBonusPoints: number;
+  seasonOtherPositivePoints: number;
+  seasonHouseLossPenalties: number;
+  seasonCivilianLifeLossPenalties: number;
+  seasonFirefighterLifeLossPenalties: number;
+  seasonCriticalAssetLossPenalties: number;
+  seasonStartScore: number;
+  seasonFinalScore: number;
+  seasonApprovalMultIntegral: number;
+  seasonRiskMultIntegral: number;
+  seasonSampleSeconds: number;
+  seasonSummary: ScoringSeasonSummary | null;
+  events: ScoreEvent[];
+  nextEventId: number;
+  previousDestroyedHouses: number;
+  previousLostResidents: number;
+  previousLostFirefighters: number;
+  previousTownHousesLost: Int32Array;
+  burnStartFuel: Float32Array;
+  lastSuppressedAt: Float32Array;
+  prevFireBoundsActive: boolean;
+  prevFireMinX: number;
+  prevFireMaxX: number;
+  prevFireMinY: number;
+  prevFireMaxY: number;
 };
 
 export interface RNG {

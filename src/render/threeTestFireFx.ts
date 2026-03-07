@@ -294,6 +294,9 @@ export type FireFxEnvironmentSignals = {
   denseSmoke01: number;
   fireLoad01: number;
   orangeGlow01: number;
+  sunDirection?: { x: number; y: number; z: number };
+  sunTint?: THREE.ColorRepresentation;
+  smokeTint?: THREE.ColorRepresentation;
 };
 
 export type SparkDebugSnapshot = {
@@ -703,17 +706,30 @@ export const createThreeTestFireFx = (
   const smokeCoolScratch = new THREE.Color();
   const smokeStainScratch = new THREE.Color();
   const smokeUnderglowScratch = new THREE.Color();
+  const smokeTintScratch = new THREE.Color();
+  const sunDirectionTarget = new THREE.Vector3(0.68, 0.74, 0.2).normalize();
+  const sunDirectionCurrent = sunDirectionTarget.clone();
+  const sunTintTarget = new THREE.Color(1.0, 0.62, 0.28);
+  const sunTintCurrent = sunTintTarget.clone();
+  const smokeTintTarget = new THREE.Color(0.56, 0.46, 0.37);
+  const smokeTintCurrent = smokeTintTarget.clone();
   const envTarget: FireFxEnvironmentSignals = {
     smoke01: 0,
     denseSmoke01: 0,
     fireLoad01: 0,
-    orangeGlow01: 0
+    orangeGlow01: 0,
+    sunDirection: sunDirectionTarget.clone(),
+    sunTint: sunTintTarget.clone(),
+    smokeTint: smokeTintTarget.clone()
   };
   const envCurrent: FireFxEnvironmentSignals = {
     smoke01: 0,
     denseSmoke01: 0,
     fireLoad01: 0,
-    orangeGlow01: 0
+    orangeGlow01: 0,
+    sunDirection: sunDirectionCurrent.clone(),
+    sunTint: sunTintCurrent.clone(),
+    smokeTint: smokeTintCurrent.clone()
   };
   const glowTexture = createRadialTexture(96, [
     { stop: 0, color: "rgba(255, 232, 165, 0.96)" },
@@ -1093,6 +1109,15 @@ export const createThreeTestFireFx = (
     envTarget.denseSmoke01 = clamp(signals.denseSmoke01, 0, 1);
     envTarget.fireLoad01 = clamp(signals.fireLoad01, 0, 1);
     envTarget.orangeGlow01 = clamp(signals.orangeGlow01, 0, 1);
+    if (signals.sunDirection) {
+      sunDirectionTarget.set(signals.sunDirection.x, signals.sunDirection.y, signals.sunDirection.z).normalize();
+    }
+    if (signals.sunTint) {
+      sunTintTarget.set(signals.sunTint);
+    }
+    if (signals.smokeTint) {
+      smokeTintTarget.set(signals.smokeTint);
+    }
   };
 
   const ensureTileState = (cols: number, rows: number): void => {
@@ -1451,6 +1476,9 @@ export const createThreeTestFireFx = (
     envCurrent.denseSmoke01 += (envTarget.denseSmoke01 - envCurrent.denseSmoke01) * envAlpha;
     envCurrent.fireLoad01 += (envTarget.fireLoad01 - envCurrent.fireLoad01) * envAlpha;
     envCurrent.orangeGlow01 += (envTarget.orangeGlow01 - envCurrent.orangeGlow01) * envAlpha;
+    sunDirectionCurrent.lerp(sunDirectionTarget, envAlpha).normalize();
+    sunTintCurrent.lerp(sunTintTarget, envAlpha);
+    smokeTintCurrent.lerp(smokeTintTarget, envAlpha);
     const envOrange = clamp(envCurrent.orangeGlow01, 0, 1);
     if (Number.isFinite(fpsEstimate) && fpsEstimate > 0 && Number.isFinite(sceneRenderMs) && sceneRenderMs > 0) {
       const overloaded = fpsEstimate < SMOKE_QUALITY_FALLBACK_FPS || sceneRenderMs > SMOKE_QUALITY_FALLBACK_SCENE_MS;
@@ -1565,9 +1593,15 @@ export const createThreeTestFireFx = (
     smokeCoolScratch.copy(smokeCoolBase).lerp(smokeCoolHot, envOrange);
     smokeStainScratch.copy(smokeStainBase).lerp(smokeStainHot, envOrange);
     smokeUnderglowScratch.copy(smokeUnderglowBase).lerp(smokeUnderglowHot, envOrange * 0.5);
+    smokeTintScratch.copy(smokeTintCurrent);
+    smokeWarmScratch.lerp(smokeTintScratch, 0.16 + envCurrent.smoke01 * 0.12);
+    smokeCoolScratch.lerp(smokeTintScratch, 0.22 + envCurrent.denseSmoke01 * 0.18);
+    smokeStainScratch.lerp(smokeTintScratch, 0.08 + envCurrent.fireLoad01 * 0.12);
     (smokeMaterial.uniforms.uWarmCol.value as THREE.Color).copy(smokeWarmScratch);
     (smokeMaterial.uniforms.uCoolCol.value as THREE.Color).copy(smokeCoolScratch);
     (smokeMaterial.uniforms.uWarmStainCol.value as THREE.Color).copy(smokeStainScratch);
+    (smokeMaterial.uniforms.uSunDir.value as THREE.Vector3).copy(sunDirectionCurrent);
+    (smokeMaterial.uniforms.uSunTint.value as THREE.Color).copy(sunTintCurrent);
     smokeMaterial.uniforms.uWarmStartY.value = -heightScale * 0.1;
     smokeMaterial.uniforms.uWarmRangeY.value = Math.max(tileSpan * 8, heightScale * 0.65);
     (smokeMaterial.uniforms.uUnderglowColor.value as THREE.Color).copy(smokeUnderglowScratch);

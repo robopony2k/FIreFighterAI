@@ -288,6 +288,28 @@ export const ROAD_SURFACE_WIDTH = 0.5;
 const ROAD_SURFACE_OFFSET = 0.001;
 export const ROAD_TEX_SCALE = 12;
 const ROAD_TEX_MAX_SIZE = 4096;
+const BRIDGE_DECK_WIDTH = ROAD_SURFACE_WIDTH + 0.08;
+const BRIDGE_SURFACE_WIDTH = ROAD_SURFACE_WIDTH;
+const BRIDGE_DECK_THICKNESS = 0.08;
+const BRIDGE_DECK_SURFACE_LIFT = 0.02;
+const BRIDGE_DECK_CLEARANCE_WATER = 0.18;
+const BRIDGE_DECK_CLEARANCE_BANK = 0.05;
+const BRIDGE_OVERLAY_LIFT = 0.004;
+const BRIDGE_RAIL_HEIGHT = 0.15;
+const BRIDGE_RAIL_MID_HEIGHT = 0.082;
+const BRIDGE_RAIL_THICKNESS = 0.018;
+const BRIDGE_RAIL_EDGE_INSET = 0.022;
+const BRIDGE_POST_SIZE = 0.034;
+const BRIDGE_POST_SPACING = 0.95;
+const BRIDGE_ABUTMENT_LENGTH = 0.1;
+const BRIDGE_BEAM_RADIUS = 0.022;
+const BRIDGE_BEAM_END_INSET = 0.16;
+const BRIDGE_BEAM_DROP_FACTOR = 0.08;
+const BRIDGE_BEAM_DROP_MAX = 0.24;
+const BRIDGE_BEAM_MIN_LENGTH = 1.4;
+const BRIDGE_ANCHOR_MAX_BANK_RISE = 0.04;
+const BRIDGE_CUTOUT_MARGIN = 0.12;
+const BRIDGE_BOUNDARY_SEARCH_PADDING = 5;
 const ROAD_ATLAS_V2_METADATA_PATH = "assets/textures/road_atlas_v2.json";
 const ROAD_ATLAS_FALLBACK_IMAGE_PATH = "assets/textures/ROAD_TILES.png";
 const ROAD_ATLAS_FALLBACK_TILE_SIZE = 64;
@@ -5413,109 +5435,817 @@ export const buildRoadOverlayTexture = (
   return texture;
 };
 
+type BridgeConnector = {
+  bridgeIdx: number;
+  roadIdx: number;
+};
+
+type BridgeSpan = {
+  bridgePath: number[];
+  startRoadIdx: number;
+  endRoadIdx: number;
+};
+
+type BridgeProfilePoint = {
+  center: THREE.Vector3;
+  right: THREE.Vector3;
+  leftTop: THREE.Vector3;
+  rightTop: THREE.Vector3;
+  leftBottom: THREE.Vector3;
+  rightBottom: THREE.Vector3;
+};
+
+type BridgeAnchor = {
+  edgeX: number;
+  edgeY: number;
+  x: number;
+  z: number;
+  baseY: number;
+  terrainY: number;
+};
+
+const intersectSegments2D = (
+  ax: number,
+  ay: number,
+  bx: number,
+  by: number,
+  cx: number,
+  cy: number,
+  dx: number,
+  dy: number
+): { x: number; y: number; t: number; u: number } | null => {
+  const rX = bx - ax;
+  const rY = by - ay;
+  const sX = dx - cx;
+  const sY = dy - cy;
+  const denom = rX * sY - rY * sX;
+  if (Math.abs(denom) <= 1e-6) {
+    return null;
+  }
+  const qpx = cx - ax;
+  const qpy = cy - ay;
+  const t = (qpx * sY - qpy * sX) / denom;
+  const u = (qpx * rY - qpy * rX) / denom;
+  if (t < 0 || t > 1 || u < 0 || u > 1) {
+    return null;
+  }
+  return {
+    x: ax + rX * t,
+    y: ay + rY * t,
+    t,
+    u
+  };
+};
+
+const buildBridgeDeckGeometry = (profilePoints: BridgeProfilePoint[]): THREE.BufferGeometry | null => {
+  if (profilePoints.length < 2) {
+    return null;
+  }
+  const positions: number[] = [];
+  const indices: number[] = [];
+  const leftTop: number[] = [];
+  const rightTop: number[] = [];
+  const leftBottom: number[] = [];
+  const rightBottom: number[] = [];
+  const pushVertex = (vertex: THREE.Vector3): number => {
+    const index = positions.length / 3;
+    positions.push(vertex.x, vertex.y, vertex.z);
+    return index;
+  };
+
+  for (let i = 0; i < profilePoints.length; i += 1) {
+    const point = profilePoints[i];
+    leftTop.push(pushVertex(point.leftTop));
+    rightTop.push(pushVertex(point.rightTop));
+    leftBottom.push(pushVertex(point.leftBottom));
+    rightBottom.push(pushVertex(point.rightBottom));
+  }
+
+  for (let i = 0; i < profilePoints.length - 1; i += 1) {
+    const next = i + 1;
+    indices.push(
+      leftTop[i], rightTop[i], rightTop[next],
+      leftTop[i], rightTop[next], leftTop[next],
+      leftBottom[i], rightBottom[next], rightBottom[i],
+      leftBottom[i], leftBottom[next], rightBottom[next],
+      leftBottom[i], leftTop[i], leftTop[next],
+      leftBottom[i], leftTop[next], leftBottom[next],
+      rightTop[i], rightBottom[i], rightBottom[next],
+      rightTop[i], rightBottom[next], rightTop[next]
+    );
+  }
+
+  const first = 0;
+  const last = profilePoints.length - 1;
+  indices.push(
+    leftTop[first], leftBottom[first], rightBottom[first],
+    leftTop[first], rightBottom[first], rightTop[first],
+    leftTop[last], rightTop[last], rightBottom[last],
+    leftTop[last], rightBottom[last], leftBottom[last]
+  );
+
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute("position", new THREE.Float32BufferAttribute(new Float32Array(positions), 3));
+  geometry.setIndex(indices);
+  geometry.computeVertexNormals();
+  return geometry;
+};
+
+const buildBridgeOverlayGeometry = (
+  profilePoints: BridgeProfilePoint[],
+  width: number,
+  depth: number,
+  surfaceWidth: number
+): THREE.BufferGeometry | null => {
+  if (profilePoints.length < 2) {
+    return null;
+  }
+  const safeWidth = Math.max(1e-5, width);
+  const safeDepth = Math.max(1e-5, depth);
+  const halfSurfaceWidth = Math.max(1e-4, surfaceWidth) * 0.5;
+  const positions: number[] = [];
+  const uvs: number[] = [];
+  const indices: number[] = [];
+  const leftTop: number[] = [];
+  const rightTop: number[] = [];
+  const pushVertex = (vertex: THREE.Vector3): number => {
+    const index = positions.length / 3;
+    positions.push(vertex.x, vertex.y + BRIDGE_OVERLAY_LIFT, vertex.z);
+    uvs.push(vertex.x / safeWidth + 0.5, 0.5 - vertex.z / safeDepth);
+    return index;
+  };
+
+  for (let i = 0; i < profilePoints.length; i += 1) {
+    const point = profilePoints[i];
+    leftTop.push(pushVertex(point.center.clone().addScaledVector(point.right, -halfSurfaceWidth)));
+    rightTop.push(pushVertex(point.center.clone().addScaledVector(point.right, halfSurfaceWidth)));
+  }
+
+  for (let i = 0; i < profilePoints.length - 1; i += 1) {
+    const next = i + 1;
+    indices.push(
+      leftTop[i], rightTop[i], rightTop[next],
+      leftTop[i], rightTop[next], leftTop[next]
+    );
+  }
+
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute("position", new THREE.Float32BufferAttribute(new Float32Array(positions), 3));
+  geometry.setAttribute("uv", new THREE.Float32BufferAttribute(new Float32Array(uvs), 2));
+  geometry.setIndex(indices);
+  geometry.computeVertexNormals();
+  return geometry;
+};
+
+const buildBridgePolylineLengths = (points: THREE.Vector3[]): { cumulative: number[]; total: number } => {
+  const cumulative = new Array<number>(points.length).fill(0);
+  let total = 0;
+  for (let i = 1; i < points.length; i += 1) {
+    total += points[i].distanceTo(points[i - 1]);
+    cumulative[i] = total;
+  }
+  return { cumulative, total };
+};
+
+const sampleBridgePolyline = (
+  profilePoints: BridgeProfilePoint[],
+  cumulative: number[],
+  total: number,
+  distance: number
+): { position: THREE.Vector3; right: THREE.Vector3; tangent: THREE.Vector3 } => {
+  if (profilePoints.length === 0) {
+    return {
+      position: new THREE.Vector3(),
+      right: new THREE.Vector3(1, 0, 0),
+      tangent: new THREE.Vector3(1, 0, 0)
+    };
+  }
+  if (profilePoints.length === 1 || total <= 1e-5) {
+    return {
+      position: profilePoints[0].center.clone(),
+      right: profilePoints[0].right.clone(),
+      tangent: new THREE.Vector3(1, 0, 0)
+    };
+  }
+  const clampedDistance = clamp(distance, 0, total);
+  let segment = profilePoints.length - 2;
+  for (let i = 0; i < cumulative.length - 1; i += 1) {
+    if (clampedDistance <= cumulative[i + 1]) {
+      segment = i;
+      break;
+    }
+  }
+  const start = profilePoints[segment];
+  const end = profilePoints[segment + 1];
+  const segmentLength = cumulative[segment + 1] - cumulative[segment];
+  const t = segmentLength > 1e-5 ? (clampedDistance - cumulative[segment]) / segmentLength : 0;
+  const position = start.center.clone().lerp(end.center, t);
+  const right = start.right.clone().lerp(end.right, t);
+  if (right.lengthSq() < 1e-6) {
+    right.copy(start.right);
+  }
+  right.normalize();
+  const tangent = end.center.clone().sub(start.center);
+  if (tangent.lengthSq() < 1e-6) {
+    tangent.set(1, 0, 0);
+  } else {
+    tangent.normalize();
+  }
+  return { position, right, tangent };
+};
+
+const createBridgeBoxMesh = (
+  geometry: THREE.BufferGeometry,
+  material: THREE.Material,
+  center: THREE.Vector3,
+  forward: THREE.Vector3,
+  scale: THREE.Vector3
+): THREE.Mesh => {
+  const safeForward = forward.clone();
+  if (safeForward.lengthSq() < 1e-6) {
+    safeForward.set(1, 0, 0);
+  } else {
+    safeForward.normalize();
+  }
+  let side = new THREE.Vector3().crossVectors(safeForward, new THREE.Vector3(0, 1, 0));
+  if (side.lengthSq() < 1e-6) {
+    side = new THREE.Vector3(0, 0, 1);
+  } else {
+    side.normalize();
+  }
+  let up = new THREE.Vector3().crossVectors(side, safeForward);
+  if (up.lengthSq() < 1e-6) {
+    up = new THREE.Vector3(0, 1, 0);
+  } else {
+    up.normalize();
+  }
+  side = new THREE.Vector3().crossVectors(safeForward, up);
+  if (side.lengthSq() < 1e-6) {
+    side.set(0, 0, 1);
+  } else {
+    side.normalize();
+  }
+  const basis = new THREE.Matrix4().makeBasis(safeForward, up, side);
+  const quaternion = new THREE.Quaternion().setFromRotationMatrix(basis);
+  const mesh = new THREE.Mesh(geometry, material);
+  mesh.position.copy(center);
+  mesh.quaternion.copy(quaternion);
+  mesh.scale.copy(scale);
+  mesh.castShadow = true;
+  mesh.receiveShadow = true;
+  mesh.updateMatrix();
+  mesh.matrixAutoUpdate = false;
+  return mesh;
+};
+
 const buildBridgeDeckMesh = (
   sample: TerrainSample,
   width: number,
   depth: number,
-  heightScale: number
-): THREE.InstancedMesh | null => {
+  heightScale: number,
+  roadOverlay: THREE.Texture | null,
+  roadId: number,
+  baseId: number,
+  heightAtTileCoord: (tileX: number, tileY: number) => number,
+  riverDomain?: RiverRenderDomain
+): THREE.Group | null => {
   const bridgeMask = sample.roadBridgeMask;
-  if (!bridgeMask || bridgeMask.length === 0) {
+  const tileTypes = sample.tileTypes;
+  if (!bridgeMask || bridgeMask.length === 0 || !tileTypes) {
     return null;
   }
   const { cols, rows, elevations } = sample;
   const riverSurface = sample.riverSurface;
-  const bridgeIndices: number[] = [];
-  for (let i = 0; i < bridgeMask.length; i += 1) {
-    if (bridgeMask[i] > 0) {
-      bridgeIndices.push(i);
+  const roadEdges = sample.roadEdges;
+  const total = cols * rows;
+  const hasRoadEdges = !!roadEdges && roadEdges.length === total;
+  const getIndex = (x: number, y: number): number => y * cols + x;
+  const isBridgeIndex = (idx: number): boolean => bridgeMask[idx] > 0;
+  const isRoadLikeIndex = (idx: number): boolean => {
+    const type = tileTypes[idx];
+    return type === roadId || type === baseId || isBridgeIndex(idx);
+  };
+  const edgeToWorldX = (edgeX: number): number => (edgeX / Math.max(1, cols) - 0.5) * width;
+  const edgeToWorldZ = (edgeY: number): number => (edgeY / Math.max(1, rows) - 0.5) * depth;
+  const cutoutBoundaryEdges =
+    riverDomain?.cutoutBoundaryEdges && riverDomain.cutoutBoundaryEdges.length >= 4
+      ? riverDomain.cutoutBoundaryEdges
+      : riverDomain?.boundaryEdges && riverDomain.boundaryEdges.length >= 4
+        ? riverDomain.boundaryEdges
+        : undefined;
+  const getRoadMaskAtIndex = (idx: number): number => {
+    if (!isRoadLikeIndex(idx)) {
+      return 0;
     }
+    if (hasRoadEdges && roadEdges) {
+      return roadEdges[idx] ?? 0;
+    }
+    const tileX = idx % cols;
+    const tileY = Math.floor(idx / cols);
+    let mask = 0;
+    for (let i = 0; i < ROAD_EDGE_DIRS.length; i += 1) {
+      const dir = ROAD_EDGE_DIRS[i];
+      const nx = tileX + dir.dx;
+      const ny = tileY + dir.dy;
+      if (nx < 0 || ny < 0 || nx >= cols || ny >= rows) {
+        continue;
+      }
+      const neighborIdx = getIndex(nx, ny);
+      if (isRoadLikeIndex(neighborIdx)) {
+        mask |= dir.bit;
+      }
+    }
+    return mask;
+  };
+
+  const bridgeIndices: number[] = [];
+  const bridgeNeighbors = new Map<number, number[]>();
+  const bridgeConnectors = new Map<number, BridgeConnector[]>();
+  for (let idx = 0; idx < bridgeMask.length; idx += 1) {
+    if (!isBridgeIndex(idx)) {
+      continue;
+    }
+    bridgeIndices.push(idx);
+    const tileX = idx % cols;
+    const tileY = Math.floor(idx / cols);
+    const mask = getRoadMaskAtIndex(idx);
+    const neighbors: number[] = [];
+    const connectorMap = new Map<number, BridgeConnector>();
+    for (let i = 0; i < ROAD_EDGE_DIRS.length; i += 1) {
+      const dir = ROAD_EDGE_DIRS[i];
+      if ((mask & dir.bit) === 0) {
+        continue;
+      }
+      const nx = tileX + dir.dx;
+      const ny = tileY + dir.dy;
+      if (nx < 0 || ny < 0 || nx >= cols || ny >= rows) {
+        continue;
+      }
+      const neighborIdx = getIndex(nx, ny);
+      if (isBridgeIndex(neighborIdx)) {
+        if (!neighbors.includes(neighborIdx)) {
+          neighbors.push(neighborIdx);
+        }
+      } else if (isRoadLikeIndex(neighborIdx)) {
+        connectorMap.set(neighborIdx, { bridgeIdx: idx, roadIdx: neighborIdx });
+      }
+    }
+    bridgeNeighbors.set(idx, neighbors);
+    bridgeConnectors.set(idx, Array.from(connectorMap.values()));
   }
+
   if (bridgeIndices.length === 0) {
     return null;
   }
 
-  const roadColor = TILE_COLOR_RGB.road;
-  const bridgeColor = new THREE.Color(
-    clamp((roadColor.r + 28) / 255, 0, 1),
-    clamp((roadColor.g + 28) / 255, 0, 1),
-    clamp((roadColor.b + 28) / 255, 0, 1)
-  );
-  const deckGeometry = new THREE.BoxGeometry(1, 1, 1);
-  const deckMaterial = new THREE.MeshStandardMaterial({
-    color: bridgeColor,
-    roughness: 0.92,
-    metalness: 0.03
-  });
-  const mesh = new THREE.InstancedMesh(deckGeometry, deckMaterial, bridgeIndices.length);
-  const matrix = new THREE.Matrix4();
-  const position = new THREE.Vector3();
-  const quaternion = new THREE.Quaternion();
-  const scale = new THREE.Vector3();
-
-  const neighborOffsets = [
-    { x: 1, y: 0 },
-    { x: -1, y: 0 },
-    { x: 0, y: 1 },
-    { x: 0, y: -1 },
-    { x: 1, y: 1 },
-    { x: 1, y: -1 },
-    { x: -1, y: 1 },
-    { x: -1, y: -1 }
-  ];
-
   for (let i = 0; i < bridgeIndices.length; i += 1) {
     const idx = bridgeIndices[i];
-    const tileX = idx % cols;
-    const tileY = Math.floor(idx / cols);
-    const n = tileY > 0 && bridgeMask[(tileY - 1) * cols + tileX] > 0;
-    const s = tileY < rows - 1 && bridgeMask[(tileY + 1) * cols + tileX] > 0;
-    const w = tileX > 0 && bridgeMask[tileY * cols + tileX - 1] > 0;
-    const e = tileX < cols - 1 && bridgeMask[tileY * cols + tileX + 1] > 0;
-
-    const alongX = e || w;
-    const alongZ = n || s;
-    const deckWidth = alongX && !alongZ ? 1.26 : alongX && alongZ ? 1.08 : 0.98;
-    const deckDepth = alongZ && !alongX ? 1.26 : alongX && alongZ ? 1.08 : 0.98;
-    const deckThickness = 0.08;
-
-    const rawSurface = Number.isFinite(riverSurface?.[idx]) ? (riverSurface?.[idx] as number) : elevations[idx] ?? 0;
-    const riverSurfaceY = clamp(rawSurface, 0, 1) * heightScale;
-
-    let bankY = Number.NEGATIVE_INFINITY;
-    for (const offset of neighborOffsets) {
-      const nx = tileX + offset.x;
-      const ny = tileY + offset.y;
-      if (nx < 0 || ny < 0 || nx >= cols || ny >= rows) {
-        continue;
+    const neighbors = bridgeNeighbors.get(idx) ?? [];
+    for (let j = 0; j < neighbors.length; j += 1) {
+      const neighborIdx = neighbors[j];
+      const reverse = bridgeNeighbors.get(neighborIdx);
+      if (reverse && !reverse.includes(idx)) {
+        reverse.push(idx);
       }
-      const nIdx = ny * cols + nx;
-      if (bridgeMask[nIdx] > 0) {
-        continue;
-      }
-      bankY = Math.max(bankY, clamp(elevations[nIdx] ?? 0, 0, 1) * heightScale);
     }
-    if (!Number.isFinite(bankY)) {
-      bankY = clamp(elevations[idx] ?? 0, 0, 1) * heightScale;
-    }
-    const deckY = Math.max(riverSurfaceY + 0.35, bankY + 0.12);
-
-    position.set(
-      ((tileX + 0.5) / Math.max(1, cols) - 0.5) * width,
-      deckY,
-      ((tileY + 0.5) / Math.max(1, rows) - 0.5) * depth
-    );
-    scale.set(deckWidth, deckThickness, deckDepth);
-    matrix.compose(position, quaternion, scale);
-    mesh.setMatrixAt(i, matrix);
   }
 
-  mesh.castShadow = false;
-  mesh.receiveShadow = true;
-  mesh.renderOrder = 2;
-  mesh.userData.bridgeDeck = true;
-  mesh.instanceMatrix.needsUpdate = true;
-  return mesh;
+  const spans: BridgeSpan[] = [];
+  const visited = new Uint8Array(total);
+  for (let i = 0; i < bridgeIndices.length; i += 1) {
+    const startIdx = bridgeIndices[i];
+    if (visited[startIdx] > 0) {
+      continue;
+    }
+    const component: number[] = [];
+    const queue = [startIdx];
+    visited[startIdx] = 1;
+    for (let head = 0; head < queue.length; head += 1) {
+      const current = queue[head];
+      component.push(current);
+      const neighbors = bridgeNeighbors.get(current) ?? [];
+      for (let j = 0; j < neighbors.length; j += 1) {
+        const neighborIdx = neighbors[j];
+        if (visited[neighborIdx] > 0) {
+          continue;
+        }
+        visited[neighborIdx] = 1;
+        queue.push(neighborIdx);
+      }
+    }
+
+    const connectorByRoad = new Map<number, BridgeConnector>();
+    for (let j = 0; j < component.length; j += 1) {
+      const connectors = bridgeConnectors.get(component[j]) ?? [];
+      for (let k = 0; k < connectors.length; k += 1) {
+        const connector = connectors[k];
+        if (!connectorByRoad.has(connector.roadIdx)) {
+          connectorByRoad.set(connector.roadIdx, connector);
+        }
+      }
+    }
+    const connectors = Array.from(connectorByRoad.values());
+    if (connectors.length < 2) {
+      continue;
+    }
+
+    let spanStart = connectors[0];
+    let spanEnd = connectors[1];
+    let bestDistance = -1;
+    for (let a = 0; a < connectors.length; a += 1) {
+      const aRoadIdx = connectors[a].roadIdx;
+      const ax = aRoadIdx % cols;
+      const ay = Math.floor(aRoadIdx / cols);
+      for (let b = a + 1; b < connectors.length; b += 1) {
+        const bRoadIdx = connectors[b].roadIdx;
+        const bx = bRoadIdx % cols;
+        const by = Math.floor(bRoadIdx / cols);
+        const distanceSq = (ax - bx) * (ax - bx) + (ay - by) * (ay - by);
+        if (distanceSq > bestDistance) {
+          bestDistance = distanceSq;
+          spanStart = connectors[a];
+          spanEnd = connectors[b];
+        }
+      }
+    }
+
+    const componentSet = new Set<number>(component);
+    let bridgePath: number[] | null = null;
+    if (spanStart.bridgeIdx === spanEnd.bridgeIdx) {
+      bridgePath = [spanStart.bridgeIdx];
+    } else {
+      const previous = new Map<number, number>();
+      const pathQueue = [spanStart.bridgeIdx];
+      const seen = new Set<number>([spanStart.bridgeIdx]);
+      let found = false;
+      for (let head = 0; head < pathQueue.length && !found; head += 1) {
+        const current = pathQueue[head];
+        const neighbors = bridgeNeighbors.get(current) ?? [];
+        for (let j = 0; j < neighbors.length; j += 1) {
+          const neighborIdx = neighbors[j];
+          if (!componentSet.has(neighborIdx) || seen.has(neighborIdx)) {
+            continue;
+          }
+          previous.set(neighborIdx, current);
+          if (neighborIdx === spanEnd.bridgeIdx) {
+            found = true;
+            break;
+          }
+          seen.add(neighborIdx);
+          pathQueue.push(neighborIdx);
+        }
+      }
+      if (previous.has(spanEnd.bridgeIdx)) {
+        bridgePath = [];
+        let cursor = spanEnd.bridgeIdx;
+        bridgePath.push(cursor);
+        while (cursor !== spanStart.bridgeIdx) {
+          const parent = previous.get(cursor);
+          if (parent === undefined) {
+            bridgePath = null;
+            break;
+          }
+          cursor = parent;
+          bridgePath.push(cursor);
+        }
+        if (bridgePath) {
+          bridgePath.reverse();
+        }
+      }
+    }
+
+    if (!bridgePath || bridgePath.length === 0) {
+      continue;
+    }
+
+    spans.push({
+      bridgePath,
+      startRoadIdx: spanStart.roadIdx,
+      endRoadIdx: spanEnd.roadIdx
+    });
+  }
+
+  if (spans.length === 0) {
+    return null;
+  }
+
+  const roadColor = TILE_COLOR_RGB.road;
+  const deckColor = new THREE.Color(
+    clamp((roadColor.r + 14) / 255, 0, 1),
+    clamp((roadColor.g + 14) / 255, 0, 1),
+    clamp((roadColor.b + 14) / 255, 0, 1)
+  );
+  const railingColor = new THREE.Color(
+    clamp((roadColor.r + 36) / 255, 0, 1),
+    clamp((roadColor.g + 32) / 255, 0, 1),
+    clamp((roadColor.b + 28) / 255, 0, 1)
+  );
+  const beamColor = new THREE.Color(
+    clamp((roadColor.r - 24) / 255, 0, 1),
+    clamp((roadColor.g - 26) / 255, 0, 1),
+    clamp((roadColor.b - 28) / 255, 0, 1)
+  );
+  const deckMaterial = new THREE.MeshStandardMaterial({
+    color: deckColor,
+    roughness: 0.88,
+    metalness: 0.04
+  });
+  const railMaterial = new THREE.MeshStandardMaterial({
+    color: railingColor,
+    roughness: 0.78,
+    metalness: 0.08
+  });
+  const beamMaterial = new THREE.MeshStandardMaterial({
+    color: beamColor,
+    roughness: 0.84,
+    metalness: 0.09
+  });
+  const overlayMaterial = roadOverlay
+    ? new THREE.MeshStandardMaterial({
+        map: roadOverlay,
+        color: new THREE.Color(0xffffff),
+        transparent: true,
+        depthWrite: false,
+        roughness: 0.9,
+        metalness: 0.05,
+        side: THREE.DoubleSide,
+        polygonOffset: true,
+        polygonOffsetFactor: -2,
+        polygonOffsetUnits: -2
+      })
+    : null;
+  if (overlayMaterial) {
+    overlayMaterial.alphaTest = 0.02;
+  }
+  const unitBox = new THREE.BoxGeometry(1, 1, 1);
+  const bridgeGroup = new THREE.Group();
+  const resolveBridgeAnchor = (roadIdx: number, bridgeIdx: number): BridgeAnchor => {
+    const roadTileX = roadIdx % cols;
+    const roadTileY = Math.floor(roadIdx / cols);
+    const bridgeTileX = bridgeIdx % cols;
+    const bridgeTileY = Math.floor(bridgeIdx / cols);
+    const roadEdgeX = roadTileX + 0.5;
+    const roadEdgeY = roadTileY + 0.5;
+    const bridgeEdgeX = bridgeTileX + 0.5;
+    const bridgeEdgeY = bridgeTileY + 0.5;
+    let dirX = roadEdgeX - bridgeEdgeX;
+    let dirY = roadEdgeY - bridgeEdgeY;
+    const dirLength = Math.hypot(dirX, dirY) || 1;
+    dirX /= dirLength;
+    dirY /= dirLength;
+    let anchorEdgeX = (roadEdgeX + bridgeEdgeX) * 0.5;
+    let anchorEdgeY = (roadEdgeY + bridgeEdgeY) * 0.5;
+
+    if (cutoutBoundaryEdges) {
+      const searchDistance = Math.max(dirLength + BRIDGE_BOUNDARY_SEARCH_PADDING, 3);
+      const rayEndX = bridgeEdgeX + dirX * searchDistance;
+      const rayEndY = bridgeEdgeY + dirY * searchDistance;
+      let bestT = Number.POSITIVE_INFINITY;
+      let bestHit: { x: number; y: number } | null = null;
+      for (let j = 0; j + 3 < cutoutBoundaryEdges.length; j += 4) {
+        const hit = intersectSegments2D(
+          bridgeEdgeX,
+          bridgeEdgeY,
+          rayEndX,
+          rayEndY,
+          cutoutBoundaryEdges[j],
+          cutoutBoundaryEdges[j + 1],
+          cutoutBoundaryEdges[j + 2],
+          cutoutBoundaryEdges[j + 3]
+        );
+        if (!hit || hit.t <= 1e-4) {
+          continue;
+        }
+        if (hit.t < bestT) {
+          bestT = hit.t;
+          bestHit = { x: hit.x, y: hit.y };
+        }
+      }
+      if (bestHit) {
+        anchorEdgeX = bestHit.x + dirX * BRIDGE_CUTOUT_MARGIN;
+        anchorEdgeY = bestHit.y + dirY * BRIDGE_CUTOUT_MARGIN;
+      }
+    }
+
+    anchorEdgeX = clamp(anchorEdgeX, 0, cols);
+    anchorEdgeY = clamp(anchorEdgeY, 0, rows);
+    const terrainY = heightAtTileCoord(anchorEdgeX, anchorEdgeY) * heightScale;
+    const roadY = heightAtTileCoord(roadEdgeX, roadEdgeY) * heightScale;
+    const anchorY = Math.min(Math.max(terrainY, roadY), roadY + BRIDGE_ANCHOR_MAX_BANK_RISE);
+    const baseY = anchorY + ROAD_SURFACE_OFFSET + BRIDGE_DECK_SURFACE_LIFT;
+    return {
+      edgeX: anchorEdgeX,
+      edgeY: anchorEdgeY,
+      x: edgeToWorldX(anchorEdgeX),
+      z: edgeToWorldZ(anchorEdgeY),
+      baseY,
+      terrainY
+    };
+  };
+
+  for (let i = 0; i < spans.length; i += 1) {
+    const span = spans[i];
+    const startAnchor = resolveBridgeAnchor(span.startRoadIdx, span.bridgePath[0]);
+    const endAnchor = resolveBridgeAnchor(span.endRoadIdx, span.bridgePath[span.bridgePath.length - 1]);
+    const routePoints: Array<{ idx?: number; x: number; z: number; baseY: number; terrainY?: number }> = [
+      { x: startAnchor.x, z: startAnchor.z, baseY: startAnchor.baseY, terrainY: startAnchor.terrainY }
+    ];
+    const spanCenterX = endAnchor.x - startAnchor.x;
+    const spanCenterZ = endAnchor.z - startAnchor.z;
+    const bridgeSegments = Math.max(1, span.bridgePath.length);
+    for (let j = 0; j < span.bridgePath.length; j += 1) {
+      const idx = span.bridgePath[j];
+      const tileX = idx % cols;
+      const tileY = Math.floor(idx / cols);
+      const t = (j + 1) / (bridgeSegments + 1);
+      const x = startAnchor.x + spanCenterX * t;
+      const z = startAnchor.z + spanCenterZ * t;
+      const prev = routePoints[routePoints.length - 1];
+      if (Math.hypot(prev.x - x, prev.z - z) <= 1e-4) {
+        continue;
+      }
+      const terrainY = heightAtTileCoord(tileX + 0.5, tileY + 0.5) * heightScale;
+      let baseY = terrainY + ROAD_SURFACE_OFFSET + BRIDGE_DECK_SURFACE_LIFT;
+      const rawSurface = Number.isFinite(riverSurface?.[idx]) ? (riverSurface?.[idx] as number) : elevations[idx] ?? 0;
+      const riverSurfaceY = clamp(rawSurface, 0, 1) * heightScale;
+      baseY = Math.max(baseY, terrainY + BRIDGE_DECK_CLEARANCE_BANK, riverSurfaceY + BRIDGE_DECK_CLEARANCE_WATER);
+      routePoints.push({ idx, x, z, baseY });
+    }
+    const tail = routePoints[routePoints.length - 1];
+    if (Math.hypot(tail.x - endAnchor.x, tail.z - endAnchor.z) > 1e-4) {
+      routePoints.push({ x: endAnchor.x, z: endAnchor.z, baseY: endAnchor.baseY, terrainY: endAnchor.terrainY });
+    }
+
+    if (routePoints.length < 2) {
+      continue;
+    }
+
+    const planarLengths = new Array<number>(routePoints.length).fill(0);
+    let planarTotal = 0;
+    for (let j = 1; j < routePoints.length; j += 1) {
+      const dx = routePoints[j].x - routePoints[j - 1].x;
+      const dz = routePoints[j].z - routePoints[j - 1].z;
+      planarTotal += Math.hypot(dx, dz);
+      planarLengths[j] = planarTotal;
+    }
+    if (planarTotal <= 1e-4) {
+      continue;
+    }
+
+    const startY = routePoints[0].baseY;
+    const endY = routePoints[routePoints.length - 1].baseY;
+    const centerPoints: THREE.Vector3[] = [];
+    for (let j = 0; j < routePoints.length; j += 1) {
+      const point = routePoints[j];
+      const t = planarTotal > 1e-5 ? planarLengths[j] / planarTotal : 0;
+      const y = Math.max(point.baseY, startY * (1 - t) + endY * t);
+      centerPoints.push(new THREE.Vector3(point.x, y, point.z));
+    }
+
+    const profilePoints: BridgeProfilePoint[] = [];
+    const halfWidth = BRIDGE_DECK_WIDTH * 0.5;
+    for (let j = 0; j < centerPoints.length; j += 1) {
+      const prev = centerPoints[Math.max(0, j - 1)];
+      const next = centerPoints[Math.min(centerPoints.length - 1, j + 1)];
+      const tangent = next.clone().sub(prev);
+      tangent.y = 0;
+      if (tangent.lengthSq() < 1e-6) {
+        tangent.set(1, 0, 0);
+      } else {
+        tangent.normalize();
+      }
+      const right = new THREE.Vector3(-tangent.z, 0, tangent.x);
+      const center = centerPoints[j];
+      const leftTop = center.clone().addScaledVector(right, -halfWidth);
+      const rightTop = center.clone().addScaledVector(right, halfWidth);
+      const leftBottom = leftTop.clone();
+      const rightBottom = rightTop.clone();
+      leftBottom.y -= BRIDGE_DECK_THICKNESS;
+      rightBottom.y -= BRIDGE_DECK_THICKNESS;
+      profilePoints.push({
+        center,
+        right,
+        leftTop,
+        rightTop,
+        leftBottom,
+        rightBottom
+      });
+    }
+
+    const deckGeometry = buildBridgeDeckGeometry(profilePoints);
+    if (deckGeometry) {
+      const deckMesh = new THREE.Mesh(deckGeometry, deckMaterial);
+      deckMesh.castShadow = true;
+      deckMesh.receiveShadow = true;
+      deckMesh.userData.bridgeDeck = true;
+      bridgeGroup.add(deckMesh);
+    }
+
+    if (overlayMaterial) {
+      const overlayGeometry = buildBridgeOverlayGeometry(profilePoints, width, depth, BRIDGE_SURFACE_WIDTH);
+      if (overlayGeometry) {
+        const overlayMesh = new THREE.Mesh(overlayGeometry, overlayMaterial);
+        overlayMesh.castShadow = false;
+        overlayMesh.receiveShadow = true;
+        overlayMesh.renderOrder = 2;
+        overlayMesh.userData.bridgeDeck = true;
+        bridgeGroup.add(overlayMesh);
+      }
+    }
+
+    const { cumulative, total: spanLength } = buildBridgePolylineLengths(centerPoints);
+    if (spanLength <= 1e-4) {
+      continue;
+    }
+
+    const railOffset = halfWidth - BRIDGE_RAIL_EDGE_INSET;
+    for (let j = 0; j < profilePoints.length - 1; j += 1) {
+      const next = j + 1;
+      for (const side of [-1, 1]) {
+        for (const railHeight of [BRIDGE_RAIL_HEIGHT, BRIDGE_RAIL_MID_HEIGHT]) {
+          const railThickness = railHeight === BRIDGE_RAIL_HEIGHT ? BRIDGE_RAIL_THICKNESS : BRIDGE_RAIL_THICKNESS * 0.75;
+          const a = profilePoints[j].center.clone().addScaledVector(profilePoints[j].right, side * railOffset);
+          const b = profilePoints[next].center.clone().addScaledVector(profilePoints[next].right, side * railOffset);
+          a.y += railHeight;
+          b.y += railHeight;
+          const forward = b.clone().sub(a);
+          const length = forward.length();
+          if (length <= 1e-4) {
+            continue;
+          }
+          const center = a.clone().add(b).multiplyScalar(0.5);
+          bridgeGroup.add(
+            createBridgeBoxMesh(
+              unitBox,
+              railMaterial,
+              center,
+              forward,
+              new THREE.Vector3(length, railThickness, railThickness)
+            )
+          );
+        }
+      }
+    }
+
+    const postInset = Math.min(BRIDGE_ABUTMENT_LENGTH, spanLength * 0.18);
+    const usablePostLength = Math.max(0, spanLength - postInset * 2);
+    const postSteps = Math.max(1, Math.floor(usablePostLength / BRIDGE_POST_SPACING));
+    for (let j = 0; j <= postSteps; j += 1) {
+      const distance = postInset + usablePostLength * (j / Math.max(1, postSteps));
+      const samplePoint = sampleBridgePolyline(profilePoints, cumulative, spanLength, distance);
+      for (const side of [-1, 1]) {
+        const postMesh = new THREE.Mesh(unitBox, railMaterial);
+        postMesh.position.copy(samplePoint.position).addScaledVector(samplePoint.right, side * railOffset);
+        postMesh.position.y += BRIDGE_RAIL_HEIGHT * 0.5;
+        postMesh.scale.set(BRIDGE_POST_SIZE, BRIDGE_RAIL_HEIGHT, BRIDGE_POST_SIZE);
+        postMesh.castShadow = true;
+        postMesh.receiveShadow = true;
+        postMesh.updateMatrix();
+        postMesh.matrixAutoUpdate = false;
+        bridgeGroup.add(postMesh);
+      }
+    }
+
+    if (spanLength >= BRIDGE_BEAM_MIN_LENGTH) {
+      const beamInset = Math.min(BRIDGE_BEAM_END_INSET, spanLength * 0.18);
+      const beamLength = spanLength - beamInset * 2;
+      if (beamLength > 0.35) {
+        const beamSampleCount = Math.max(5, Math.ceil(beamLength / 0.5) + 1);
+        const beamOffset = halfWidth - BRIDGE_RAIL_EDGE_INSET - BRIDGE_POST_SIZE * 0.35;
+        const archDrop = Math.min(BRIDGE_BEAM_DROP_MAX, Math.max(0.12, beamLength * BRIDGE_BEAM_DROP_FACTOR));
+        for (const side of [-1, 1]) {
+          const beamPoints: THREE.Vector3[] = [];
+          for (let j = 0; j < beamSampleCount; j += 1) {
+            const t = beamSampleCount <= 1 ? 0 : j / (beamSampleCount - 1);
+            const distance = beamInset + beamLength * t;
+            const samplePoint = sampleBridgePolyline(profilePoints, cumulative, spanLength, distance);
+            const point = samplePoint.position.clone().addScaledVector(samplePoint.right, side * beamOffset);
+            point.y -= BRIDGE_DECK_THICKNESS * 0.55 + archDrop * 4 * t * (1 - t);
+            beamPoints.push(point);
+          }
+          const beamCurve = new THREE.CatmullRomCurve3(beamPoints, false, "centripetal");
+          const beamGeometry = new THREE.TubeGeometry(
+            beamCurve,
+            Math.max(8, Math.ceil(beamLength * 6)),
+            BRIDGE_BEAM_RADIUS,
+            6,
+            false
+          );
+          const beamMesh = new THREE.Mesh(beamGeometry, beamMaterial);
+          beamMesh.castShadow = true;
+          beamMesh.receiveShadow = true;
+          bridgeGroup.add(beamMesh);
+        }
+      }
+    }
+  }
+
+  if (bridgeGroup.children.length === 0) {
+    return null;
+  }
+
+  bridgeGroup.userData.bridgeDeck = true;
+  return bridgeGroup;
 };
 
 const buildWaterSurfaceHeights = (
@@ -6649,7 +7379,17 @@ export const buildTerrainMesh = (
     roadMesh.userData.roadOverlayVersion = getRoadAtlasVersion();
     mesh.add(roadMesh);
   }
-  const bridgeDeckMesh = buildBridgeDeckMesh(sample, width, depth, heightScale);
+  const bridgeDeckMesh = buildBridgeDeckMesh(
+    sample,
+    width,
+    depth,
+    heightScale,
+    roadOverlay,
+    roadId,
+    baseId,
+    heightAtTileCoord,
+    riverRenderDomain
+  );
   if (bridgeDeckMesh) {
     mesh.add(bridgeDeckMesh);
   }

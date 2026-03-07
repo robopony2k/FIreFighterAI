@@ -20,6 +20,27 @@ export type TopBarData = {
   forecastStartDay: number;
   forecastYearDays: number;
   forecastMeta: string | null;
+  scoring: {
+    score: number;
+    difficultyMult: number;
+    approvalMult: number;
+    streakMult: number;
+    riskMult: number;
+    totalMult: number;
+    noHouseLossDays: number;
+    noLifeLossDays: number;
+    approvalTier: "S" | "A" | "B" | "C" | "D";
+    riskTier: "low" | "moderate" | "high" | "extreme";
+    nextApprovalTier: "S" | "A" | "B" | "C" | "D" | null;
+    nextApprovalThreshold01: number | null;
+    nextTierProgress01: number;
+    events: Array<{
+      id: number;
+      message: string;
+      severity: "positive" | "negative" | "info";
+      remainingSeconds: number;
+    }>;
+  } | null;
 };
 
 export type TopBarView = {
@@ -38,6 +59,38 @@ const phaseLabels: Record<Phase, string> = {
 
 const SVG_NS = "http://www.w3.org/2000/svg";
 const { width: CHART_WIDTH, height: CHART_HEIGHT, padding: CHART_PADDING } = FORECAST_CHART;
+const SCORE_EVENT_LIFETIME_SECONDS: Record<NonNullable<TopBarData["scoring"]>["events"][number]["severity"], number> = {
+  positive: 8,
+  negative: 16,
+  info: 8
+};
+
+const parseScoreEventMessage = (message: string): { label: string; value: string | null } => {
+  const trimmed = message.trim();
+  const match = trimmed.match(/^([+-]\d[\d,]*)(?:\s+)(.+)$/);
+  if (!match) {
+    return { label: trimmed, value: null };
+  }
+  return {
+    label: match[2].trim(),
+    value: match[1]
+  };
+};
+
+const syncThreeTestTopClearance = (element: HTMLElement, scoreStrip: HTMLElement, scoreEvents: HTMLElement): void => {
+  const overlayRoot = element.closest(".three-test-overlay") as HTMLElement | null;
+  if (!overlayRoot) {
+    return;
+  }
+  if (scoreStrip.classList.contains("is-hidden")) {
+    overlayRoot.style.setProperty("--three-test-top-clearance", "12px");
+    return;
+  }
+  const stripHeight = scoreStrip.offsetHeight;
+  const trayHeight = scoreEvents.classList.contains("is-hidden") ? 0 : scoreEvents.offsetHeight;
+  const clearance = Math.max(12, Math.ceil(stripHeight + trayHeight + 22));
+  overlayRoot.style.setProperty("--three-test-top-clearance", `${clearance}px`);
+};
 
 export const createTopBar = (): TopBarView => {
   const element = document.createElement("header");
@@ -155,11 +208,52 @@ export const createTopBar = (): TopBarView => {
   const cta = document.createElement("button");
   cta.className = "phase-cta";
 
+  const scoreCounter = document.createElement("div");
+  scoreCounter.className = "phase-score-counter is-hidden";
+
+  const scoreStrip = document.createElement("div");
+  scoreStrip.className = "phase-score-strip is-hidden";
+  const scoreValue = document.createElement("div");
+  scoreValue.className = "phase-score-value";
+  const scoreLabel = document.createElement("span");
+  scoreLabel.className = "phase-score-label";
+  scoreLabel.textContent = "Score";
+  const scoreNumber = document.createElement("span");
+  scoreNumber.className = "phase-score-number";
+  scoreValue.append(scoreLabel, scoreNumber);
+  const multiplierRow = document.createElement("div");
+  multiplierRow.className = "phase-score-multipliers";
+  const difficultyPill = document.createElement("span");
+  difficultyPill.className = "phase-score-pill";
+  const approvalPill = document.createElement("span");
+  approvalPill.className = "phase-score-pill";
+  const streakPill = document.createElement("span");
+  streakPill.className = "phase-score-pill";
+  const riskPill = document.createElement("span");
+  riskPill.className = "phase-score-pill";
+  const totalPill = document.createElement("span");
+  totalPill.className = "phase-score-pill is-total";
+  multiplierRow.append(difficultyPill, approvalPill, streakPill, riskPill, totalPill);
+
+  const streakLabel = document.createElement("div");
+  streakLabel.className = "phase-score-streak";
+  const approvalMeta = document.createElement("div");
+  approvalMeta.className = "phase-score-approval-meta";
+  const approvalProgress = document.createElement("div");
+  approvalProgress.className = "phase-score-progress";
+  const approvalProgressFill = document.createElement("div");
+  approvalProgressFill.className = "phase-score-progress-fill";
+  approvalProgress.appendChild(approvalProgressFill);
+  scoreStrip.append(scoreValue, multiplierRow, streakLabel, approvalMeta, approvalProgress);
+
+  const scoreEvents = document.createElement("div");
+  scoreEvents.className = "phase-score-events is-hidden";
+
   const content = document.createElement("div");
   content.className = "phase-topbar-content";
-  content.append(badge, alert, cta);
+  content.append(badge, scoreCounter, alert, cta);
 
-  element.append(content, forecast);
+  element.append(content, scoreStrip, scoreEvents, forecast);
 
   let ctaHandler: ((actionId: string) => void) | null = null;
   let currentAction: string | null = null;
@@ -274,6 +368,7 @@ export const createTopBar = (): TopBarView => {
       forecastControls.appendChild(controls);
     },
     update: (data) => {
+      const isThreeTest = element.closest(".phase-ui-root--three-test") !== null;
       badge.textContent = phaseLabels[data.phase];
       if (data.forecast && data.forecast.risk.length > 0) {
         forecast.classList.remove("is-hidden");
@@ -311,6 +406,70 @@ export const createTopBar = (): TopBarView => {
         cta.classList.add("is-hidden");
         currentAction = null;
       }
+      if (data.scoring) {
+        scoreCounter.classList.remove("is-hidden");
+        scoreCounter.textContent = `Score ${Math.round(data.scoring.score).toLocaleString()}`;
+        scoreStrip.classList.remove("is-hidden");
+        scoreNumber.textContent = Math.round(data.scoring.score).toLocaleString();
+        difficultyPill.textContent = isThreeTest
+          ? `Diff x${data.scoring.difficultyMult.toFixed(2)}`
+          : `Difficulty ${data.scoring.difficultyMult.toFixed(2)}x`;
+        approvalPill.textContent = isThreeTest
+          ? `Approval ${data.scoring.approvalTier} x${data.scoring.approvalMult.toFixed(2)}`
+          : `Approval ${data.scoring.approvalMult.toFixed(2)}x`;
+        streakPill.textContent = isThreeTest
+          ? `Streak x${data.scoring.streakMult.toFixed(2)}`
+          : `Streak ${data.scoring.streakMult.toFixed(2)}x`;
+        riskPill.textContent = isThreeTest
+          ? `Risk x${data.scoring.riskMult.toFixed(2)}`
+          : `Risk ${data.scoring.riskMult.toFixed(2)}x`;
+        totalPill.textContent = `Total ${data.scoring.totalMult.toFixed(2)}x`;
+        streakLabel.textContent = `No-loss streaks: Houses ${data.scoring.noHouseLossDays}d | Lives ${data.scoring.noLifeLossDays}d`;
+        if (data.scoring.nextApprovalTier && data.scoring.nextApprovalThreshold01 !== null) {
+          approvalMeta.textContent = `Approval Tier ${data.scoring.approvalTier} -> ${data.scoring.nextApprovalTier} at ${Math.round(
+            data.scoring.nextApprovalThreshold01 * 100
+          )}% (Risk ${data.scoring.riskTier})`;
+        } else {
+          approvalMeta.textContent = `Approval Tier ${data.scoring.approvalTier} (max) | Risk ${data.scoring.riskTier}`;
+        }
+        approvalProgressFill.style.width = `${Math.round(
+          Math.max(0, Math.min(1, data.scoring.nextTierProgress01)) * 100
+        )}%`;
+
+        scoreEvents.innerHTML = "";
+        if (data.scoring.events.length > 0) {
+          scoreEvents.classList.remove("is-hidden");
+          for (let i = data.scoring.events.length - 1; i >= 0; i -= 1) {
+            const event = data.scoring.events[i];
+            const row = document.createElement("div");
+            row.className = `phase-score-event is-${event.severity}`;
+            const parsed = parseScoreEventMessage(event.message);
+            const labelText = document.createElement("span");
+            labelText.className = "phase-score-event-label";
+            labelText.textContent = parsed.label;
+            row.appendChild(labelText);
+            if (parsed.value) {
+              const valueText = document.createElement("span");
+              valueText.className = "phase-score-event-value";
+              valueText.textContent = parsed.value;
+              row.appendChild(valueText);
+            }
+            const eventLifetime = SCORE_EVENT_LIFETIME_SECONDS[event.severity] ?? 8;
+            const fade = Math.max(event.severity === "negative" ? 0.4 : 0.25, Math.min(1, event.remainingSeconds / eventLifetime));
+            row.style.opacity = fade.toFixed(2);
+            scoreEvents.appendChild(row);
+          }
+        } else {
+          scoreEvents.classList.add("is-hidden");
+        }
+      } else {
+        scoreCounter.classList.add("is-hidden");
+        scoreStrip.classList.add("is-hidden");
+        scoreEvents.classList.add("is-hidden");
+        scoreEvents.innerHTML = "";
+        scoreNumber.textContent = "";
+      }
+      syncThreeTestTopClearance(element, scoreStrip, scoreEvents);
     },
     onCta: (handler) => {
       ctaHandler = handler;

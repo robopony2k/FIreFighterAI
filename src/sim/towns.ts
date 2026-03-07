@@ -19,15 +19,21 @@ const TOWN_THREAT_SCAN_RADIUS_SCALE = 2.1;
 
 const clampPosture = (value: number): number => clamp(Math.trunc(value), 0, TOWN_ALERT_MAX_POSTURE);
 
+const getTownApprovalBaseHouses = (town: Town): number => {
+  const activeHouses = Math.max(0, Number.isFinite(town.houseCount) ? town.houseCount : 0);
+  const lostHouses = Math.max(0, Number.isFinite(town.housesLost) ? Math.floor(town.housesLost) : 0);
+  return Math.max(1, activeHouses + lostHouses);
+};
+
 // Town approval is derived from disapproving households, not from regional approval.
 const syncTownApproval = (town: Town): void => {
-  const houses = Math.max(0, Number.isFinite(town.houseCount) ? town.houseCount : 0);
+  const houses = getTownApprovalBaseHouses(town);
   town.nonApprovingHouseCount = clamp(
     Number.isFinite(town.nonApprovingHouseCount) ? town.nonApprovingHouseCount : 0,
     0,
     houses
   );
-  town.approval = houses > 0 ? clamp(1 - town.nonApprovingHouseCount / houses, 0, 1) : 1;
+  town.approval = clamp(1 - town.nonApprovingHouseCount / houses, 0, 1);
 };
 
 const normalizeTownState = (town: Town): void => {
@@ -196,9 +202,9 @@ const tickTownsOneDay = (state: WorldState): void => {
       town.nonApprovingHouseCount -= TOWN_ALERT_RECOVERY_RATE;
     }
 
-    const houses = Math.max(0, town.houseCount);
+    const houses = getTownApprovalBaseHouses(town);
     town.nonApprovingHouseCount = clamp(town.nonApprovingHouseCount, 0, houses);
-    town.approval = houses > 0 ? clamp(1 - town.nonApprovingHouseCount / houses, 0, 1) : 1;
+    town.approval = clamp(1 - town.nonApprovingHouseCount / houses, 0, 1);
 
     if (town.evacState === "in_progress") {
       town.evacProgress = clamp(town.evacProgress + TOWN_EVAC_SPEED, 0, 1);
