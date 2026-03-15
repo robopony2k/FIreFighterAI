@@ -1,15 +1,14 @@
 import type { WorldState } from "../core/state.js";
-import type { ApprovalTier, RiskTier, ScoreEventSeverity, ScoringSeasonSummary } from "../core/types.js";
+import type { ApprovalTier, RiskTier, ScoreEventLane, ScoreEventSeverity, ScoringSeasonSummary } from "../core/types.js";
 import {
   DAYS_PER_SECOND,
   SCORE_APPROVAL_HOUSE_LOSS_DISAPPROVAL,
   SCORE_APPROVAL_TIERS,
-  SCORE_BURNOUT_POINTS_PER_FUEL,
   SCORE_DIFFICULTY_YEAR_MULTIPLIER,
+  SCORE_EXTINGUISHED_TILE_POINTS,
   SCORE_HOUSE_LOSS_PENALTY,
   SCORE_LIFE_LOSS_PENALTY,
   SCORE_RISK_TIERS,
-  SCORE_SQUIRT_BONUS_RATE,
   SCORE_STREAK_HOUSE_CAP_DAYS,
   SCORE_STREAK_HOUSE_MAX_BONUS,
   SCORE_STREAK_LIFE_CAP_DAYS,
@@ -20,11 +19,19 @@ import {
 import { clamp } from "../core/utils.js";
 
 const FIRE_EPS = 0.0001;
-// Tray timing lives here so UI fade duration stays aligned with score-event TTL.
-const DEFAULT_EVENT_TTL_SECONDS = 8;
-const NEGATIVE_EVENT_TTL_SECONDS = DEFAULT_EVENT_TTL_SECONDS * 2;
-const MAX_EVENT_COUNT = 10;
+const DEFAULT_EVENT_TTL_SECONDS = 1.1;
+const NEGATIVE_EVENT_TTL_SECONDS = 1.6;
+const MAX_EVENT_COUNT = 12;
 const APPROVAL_TIER_ORDER: ApprovalTier[] = ["D", "C", "B", "A", "S"];
+
+type LaneDelta = {
+  lane: ScoreEventLane;
+  deltaCount: number;
+  deltaPoints: number;
+  severity: ScoreEventSeverity;
+  ttlSeconds?: number;
+  detail?: string;
+};
 
 const getApprovalTierFloor = (tier: ApprovalTier): number => {
   const found = SCORE_APPROVAL_TIERS.find((entry) => entry.tier === tier);
@@ -76,24 +83,25 @@ const stepScoreEvents = (state: WorldState, stepSeconds: number): void => {
 
 const pushScoreEvent = (
   state: WorldState,
-  message: string,
+  lane: ScoreEventLane,
+  deltaCount: number,
+  deltaPoints: number,
   severity: ScoreEventSeverity,
-  ttlSeconds = DEFAULT_EVENT_TTL_SECONDS
+  ttlSeconds = DEFAULT_EVENT_TTL_SECONDS,
+  detail?: string
 ): void => {
   state.scoring.events.push({
     id: state.scoring.nextEventId++,
-    message,
+    lane,
+    deltaCount,
+    deltaPoints,
     severity,
-    remainingSeconds: ttlSeconds
+    remainingSeconds: ttlSeconds,
+    detail
   });
   if (state.scoring.events.length > MAX_EVENT_COUNT) {
     state.scoring.events = state.scoring.events.slice(state.scoring.events.length - MAX_EVENT_COUNT);
   }
-};
-
-const formatDeltaPoints = (value: number): string => {
-  const abs = Math.round(Math.abs(value)).toLocaleString();
-  return `${value >= 0 ? "+" : "-"}${abs}`;
 };
 
 const countLostFirefighters = (state: WorldState): number =>
@@ -103,6 +111,13 @@ const countLostFirefighters = (state: WorldState): number =>
     }
     return count;
   }, 0);
+
+const buildDetail = (parts: string[]): string | undefined => {
+  if (parts.length === 0) {
+    return undefined;
+  }
+  return parts.join(" | ");
+};
 
 const applyTownHouseLossApprovalHit = (state: WorldState): void => {
   syncTownLossSnapshotLength(state);
@@ -137,8 +152,9 @@ const recomputeGlobalApproval = (state: WorldState): void => {
   state.scoring.approval01 = state.approval;
 };
 
-const applyLossPenalties = (state: WorldState): void => {
+const applyLossPenalties = (state: WorldState): LaneDelta[] => {
   const scoring = state.scoring;
+  const deltas: LaneDelta[] = [];
 
   const currentDestroyedHouses = Math.max(0, Math.floor(state.destroyedHouses));
   const houseDelta = Math.max(0, currentDestroyedHouses - scoring.previousDestroyedHouses);
@@ -146,15 +162,20 @@ const applyLossPenalties = (state: WorldState): void => {
   if (houseDelta > 0) {
     const penalty = houseDelta * SCORE_HOUSE_LOSS_PENALTY;
     scoring.lossPenalties += penalty;
+    scoring.seasonPropertyDamageCount += houseDelta;
+    scoring.seasonPropertyDamagePenalties += penalty;
+    scoring.seasonDestroyedHouseCount += houseDelta;
     scoring.seasonHouseLossPenalties += penalty;
     scoring.noHouseLossDays = 0;
     scoring.hadHouseLossToday = true;
-    pushScoreEvent(
-      state,
-      `${formatDeltaPoints(-penalty)} HOUSE LOST${houseDelta > 1 ? ` x${houseDelta}` : ""}`,
-      "negative",
-      NEGATIVE_EVENT_TTL_SECONDS
-    );
+    deltas.push({
+      lane: "property",
+      deltaCount: houseDelta,
+      deltaPoints: -penalty,
+      severity: "negative",
+      ttlSeconds: NEGATIVE_EVENT_TTL_SECONDS,
+      detail: buildDetail([`${houseDelta} house${houseDelta === 1 ? "" : "s"}`])
+    });
   }
 
   const currentLostResidents = Math.max(0, Math.floor(state.lostResidents));
@@ -163,15 +184,20 @@ const applyLossPenalties = (state: WorldState): void => {
   if (residentDelta > 0) {
     const penalty = residentDelta * SCORE_LIFE_LOSS_PENALTY;
     scoring.lossPenalties += penalty;
+    scoring.seasonLivesLostCount += residentDelta;
+    scoring.seasonCivilianLivesLost += residentDelta;
+    scoring.seasonLifeLossPenalties += penalty;
     scoring.seasonCivilianLifeLossPenalties += penalty;
     scoring.noLifeLossDays = 0;
     scoring.hadLifeLossToday = true;
-    pushScoreEvent(
-      state,
-      `${formatDeltaPoints(-penalty)} CIVILIAN LIFE LOST${residentDelta > 1 ? ` x${residentDelta}` : ""}`,
-      "negative",
-      NEGATIVE_EVENT_TTL_SECONDS
-    );
+    deltas.push({
+      lane: "lives",
+      deltaCount: residentDelta,
+      deltaPoints: -penalty,
+      severity: "negative",
+      ttlSeconds: NEGATIVE_EVENT_TTL_SECONDS,
+      detail: buildDetail([`${residentDelta} civilian${residentDelta === 1 ? "" : "s"}`])
+    });
   }
 
   const currentLostFirefighters = countLostFirefighters(state);
@@ -180,16 +206,50 @@ const applyLossPenalties = (state: WorldState): void => {
   if (firefighterDelta > 0) {
     const penalty = firefighterDelta * SCORE_LIFE_LOSS_PENALTY;
     scoring.lossPenalties += penalty;
+    scoring.seasonLivesLostCount += firefighterDelta;
+    scoring.seasonFirefighterLivesLost += firefighterDelta;
+    scoring.seasonLifeLossPenalties += penalty;
     scoring.seasonFirefighterLifeLossPenalties += penalty;
     scoring.noLifeLossDays = 0;
     scoring.hadLifeLossToday = true;
-    pushScoreEvent(
-      state,
-      `${formatDeltaPoints(-penalty)} FIREFIGHTER LOST${firefighterDelta > 1 ? ` x${firefighterDelta}` : ""}`,
-      "negative",
-      NEGATIVE_EVENT_TTL_SECONDS
-    );
+    deltas.push({
+      lane: "lives",
+      deltaCount: firefighterDelta,
+      deltaPoints: -penalty,
+      severity: "negative",
+      ttlSeconds: NEGATIVE_EVENT_TTL_SECONDS,
+      detail: buildDetail([`${firefighterDelta} firefighter${firefighterDelta === 1 ? "" : "s"}`])
+    });
   }
+
+  if (deltas.length === 0) {
+    return deltas;
+  }
+
+  const propertyDelta = deltas.filter((entry) => entry.lane === "property");
+  const livesDelta = deltas.filter((entry) => entry.lane === "lives");
+  const merged: LaneDelta[] = [];
+  if (propertyDelta.length > 0) {
+    merged.push({
+      lane: "property",
+      deltaCount: propertyDelta.reduce((sum, entry) => sum + entry.deltaCount, 0),
+      deltaPoints: propertyDelta.reduce((sum, entry) => sum + entry.deltaPoints, 0),
+      severity: "negative",
+      ttlSeconds: NEGATIVE_EVENT_TTL_SECONDS,
+      detail: buildDetail(propertyDelta.flatMap((entry) => (entry.detail ? [entry.detail] : [])))
+    });
+  }
+  if (livesDelta.length > 0) {
+    merged.push({
+      lane: "lives",
+      deltaCount: livesDelta.reduce((sum, entry) => sum + entry.deltaCount, 0),
+      deltaPoints: livesDelta.reduce((sum, entry) => sum + entry.deltaPoints, 0),
+      severity: "negative",
+      ttlSeconds: NEGATIVE_EVENT_TTL_SECONDS,
+      detail: buildDetail(livesDelta.flatMap((entry) => (entry.detail ? [entry.detail] : [])))
+    });
+  }
+  return merged;
 };
 
 const applyStreakProgress = (state: WorldState, dayDelta: number): void => {
@@ -211,10 +271,9 @@ const applyStreakProgress = (state: WorldState, dayDelta: number): void => {
   }
 };
 
-const scoreFireTransitions = (state: WorldState): { burnoutPoints: number; squirtBonusPoints: number } => {
+const scoreExtinguishTransitions = (state: WorldState): LaneDelta | null => {
   const scoring = state.scoring;
-  let burnoutPoints = 0;
-  let squirtBonusPoints = 0;
+  let extinguishCount = 0;
   const cols = state.grid.cols;
   const rows = state.grid.rows;
 
@@ -256,24 +315,16 @@ const scoreFireTransitions = (state: WorldState): { burnoutPoints: number; squir
           const previousFire = state.fireSnapshot[idx] > FIRE_EPS;
           const currentFireValue = state.tileFire[idx] ?? 0;
           const currentFire = currentFireValue > FIRE_EPS;
-          if (!previousFire && currentFire) {
-            scoring.burnStartFuel[idx] = Math.max(0, state.tileFuel[idx] ?? 0);
-          } else if (previousFire && !currentFire) {
-            const fuelNow = Math.max(0, state.tileFuel[idx] ?? 0);
-            let startFuel = scoring.burnStartFuel[idx];
-            if (!Number.isFinite(startFuel) || startFuel < 0) {
-              startFuel = fuelNow;
+          if (previousFire && !currentFire) {
+            const assisted =
+              assistWindowDays > 0 && state.careerDay - scoring.lastSuppressedAt[idx] <= assistWindowDays;
+            if (assisted) {
+              extinguishCount += 1;
             }
-            const fuelConsumed = Math.max(0, startFuel - fuelNow);
-            if (fuelConsumed > 0) {
-              const burnout = fuelConsumed * SCORE_BURNOUT_POINTS_PER_FUEL;
-              burnoutPoints += burnout;
-              if (assistWindowDays > 0 && state.careerDay - scoring.lastSuppressedAt[idx] <= assistWindowDays) {
-                squirtBonusPoints += burnout * SCORE_SQUIRT_BONUS_RATE;
-              }
-            }
-            scoring.burnStartFuel[idx] = -1;
             scoring.lastSuppressedAt[idx] = Number.NEGATIVE_INFINITY;
+            scoring.burnStartFuel[idx] = -1;
+          } else if (!previousFire && currentFire) {
+            scoring.burnStartFuel[idx] = Math.max(0, state.tileFuel[idx] ?? 0);
           }
           state.fireSnapshot[idx] = currentFireValue;
         }
@@ -287,16 +338,22 @@ const scoreFireTransitions = (state: WorldState): { burnoutPoints: number; squir
   scoring.prevFireMinY = state.fireMinY;
   scoring.prevFireMaxY = state.fireMaxY;
 
-  if (burnoutPoints > 0) {
-    scoring.grossPoints += burnoutPoints;
-    scoring.seasonBurnoutPoints += burnoutPoints;
-  }
-  if (squirtBonusPoints > 0) {
-    scoring.grossPoints += squirtBonusPoints;
-    scoring.seasonSquirtBonusPoints += squirtBonusPoints;
+  if (extinguishCount <= 0) {
+    return null;
   }
 
-  return { burnoutPoints, squirtBonusPoints };
+  const points = extinguishCount * SCORE_EXTINGUISHED_TILE_POINTS;
+  scoring.grossPoints += points;
+  scoring.seasonExtinguishedCount += extinguishCount;
+  scoring.seasonExtinguishPoints += points;
+  return {
+    lane: "extinguished",
+    deltaCount: extinguishCount,
+    deltaPoints: points,
+    severity: "positive",
+    ttlSeconds: DEFAULT_EVENT_TTL_SECONDS,
+    detail: `${extinguishCount} assisted tile${extinguishCount === 1 ? "" : "s"}`
+  };
 };
 
 const getApprovalTierInfo = (approval01: number): { tier: ApprovalTier; multiplier: number } => {
@@ -319,10 +376,8 @@ const getRiskTierInfo = (risk01: number): { tier: RiskTier; multiplier: number }
   return { tier: fallback.tier, multiplier: fallback.multiplier };
 };
 
-const applyMultiplierUpdate = (state: WorldState, climateRisk: number, emitTierChangeEvents: boolean): void => {
+const applyMultiplierUpdate = (state: WorldState, climateRisk: number): void => {
   const scoring = state.scoring;
-  const previousApprovalTier = scoring.approvalTier;
-
   const approval01 = clamp(state.approval, 0, 1);
   const approvalInfo = getApprovalTierInfo(approval01);
   const riskInfo = getRiskTierInfo(clamp(climateRisk, 0, 1));
@@ -361,12 +416,9 @@ const applyMultiplierUpdate = (state: WorldState, climateRisk: number, emitTierC
     scoring.nextTierProgress01 = clamp((approval01 - currentFloor) / span, 0, 1);
   }
 
-  if (emitTierChangeEvents && previousApprovalTier !== scoring.approvalTier) {
-    pushScoreEvent(state, `Approval Tier: ${previousApprovalTier} -> ${scoring.approvalTier}`, "info", DEFAULT_EVENT_TTL_SECONDS);
-  }
-
   scoring.totalMult = scoring.difficultyMult * scoring.approvalMult * scoring.streakMult * scoring.riskMult;
-  scoring.score = (scoring.grossPoints - scoring.lossPenalties) * scoring.totalMult;
+  scoring.seasonMultipliedPositivePoints = scoring.grossPoints * scoring.totalMult;
+  scoring.score = scoring.seasonStartScore + scoring.seasonMultipliedPositivePoints - scoring.lossPenalties;
   state.careerScore = scoring.score;
 };
 
@@ -391,13 +443,21 @@ export const initScoringForRun = (state: WorldState): void => {
   state.scoring.dayAccumulator = 0;
   state.scoring.hadHouseLossToday = false;
   state.scoring.hadLifeLossToday = false;
-  state.scoring.seasonBurnoutPoints = 0;
-  state.scoring.seasonSquirtBonusPoints = 0;
-  state.scoring.seasonOtherPositivePoints = 0;
+  state.scoring.seasonExtinguishedCount = 0;
+  state.scoring.seasonExtinguishPoints = 0;
+  state.scoring.seasonPropertyDamageCount = 0;
+  state.scoring.seasonPropertyDamagePenalties = 0;
+  state.scoring.seasonDestroyedHouseCount = 0;
+  state.scoring.seasonCriticalAssetLossCount = 0;
   state.scoring.seasonHouseLossPenalties = 0;
+  state.scoring.seasonCriticalAssetLossPenalties = 0;
+  state.scoring.seasonLivesLostCount = 0;
+  state.scoring.seasonCivilianLivesLost = 0;
+  state.scoring.seasonFirefighterLivesLost = 0;
+  state.scoring.seasonLifeLossPenalties = 0;
   state.scoring.seasonCivilianLifeLossPenalties = 0;
   state.scoring.seasonFirefighterLifeLossPenalties = 0;
-  state.scoring.seasonCriticalAssetLossPenalties = 0;
+  state.scoring.seasonMultipliedPositivePoints = 0;
   state.scoring.seasonStartScore = 0;
   state.scoring.seasonFinalScore = 0;
   state.scoring.seasonApprovalMultIntegral = 0;
@@ -416,11 +476,7 @@ export const initScoringForRun = (state: WorldState): void => {
   state.scoring.burnStartFuel.fill(-1);
   state.scoring.lastSuppressedAt.fill(Number.NEGATIVE_INFINITY);
   for (let i = 0; i < state.grid.totalTiles; i += 1) {
-    const fireValue = state.tileFire[i] ?? 0;
-    state.fireSnapshot[i] = fireValue;
-    if (fireValue > FIRE_EPS) {
-      state.scoring.burnStartFuel[i] = Math.max(0, state.tileFuel[i] ?? 0);
-    }
+    state.fireSnapshot[i] = state.tileFire[i] ?? 0;
   }
   state.scoring.prevFireBoundsActive = state.fireBoundsActive;
   state.scoring.prevFireMinX = state.fireMinX;
@@ -429,50 +485,69 @@ export const initScoringForRun = (state: WorldState): void => {
   state.scoring.prevFireMaxY = state.fireMaxY;
 
   recomputeGlobalApproval(state);
-  applyMultiplierUpdate(state, 0, false);
+  applyMultiplierUpdate(state, 0);
   state.scoring.seasonStartScore = state.scoring.score;
   state.scoring.seasonFinalScore = state.scoring.score;
   state.finalScore = Math.round(state.scoring.score);
 };
 
 export const startScoringSeason = (state: WorldState): void => {
-  state.scoring.seasonBurnoutPoints = 0;
-  state.scoring.seasonSquirtBonusPoints = 0;
-  state.scoring.seasonOtherPositivePoints = 0;
+  state.scoring.grossPoints = 0;
+  state.scoring.lossPenalties = 0;
+  state.scoring.seasonExtinguishedCount = 0;
+  state.scoring.seasonExtinguishPoints = 0;
+  state.scoring.seasonPropertyDamageCount = 0;
+  state.scoring.seasonPropertyDamagePenalties = 0;
+  state.scoring.seasonDestroyedHouseCount = 0;
+  state.scoring.seasonCriticalAssetLossCount = 0;
   state.scoring.seasonHouseLossPenalties = 0;
+  state.scoring.seasonCriticalAssetLossPenalties = 0;
+  state.scoring.seasonLivesLostCount = 0;
+  state.scoring.seasonCivilianLivesLost = 0;
+  state.scoring.seasonFirefighterLivesLost = 0;
+  state.scoring.seasonLifeLossPenalties = 0;
   state.scoring.seasonCivilianLifeLossPenalties = 0;
   state.scoring.seasonFirefighterLifeLossPenalties = 0;
-  state.scoring.seasonCriticalAssetLossPenalties = 0;
+  state.scoring.seasonMultipliedPositivePoints = 0;
   state.scoring.seasonApprovalMultIntegral = 0;
   state.scoring.seasonRiskMultIntegral = 0;
   state.scoring.seasonSampleSeconds = 0;
   state.scoring.seasonSummary = null;
+  state.scoring.events = [];
   state.scoring.seasonStartScore = state.scoring.score;
   state.scoring.seasonFinalScore = state.scoring.score;
 };
 
 export const freezeScoringSeason = (state: WorldState): void => {
   const scoring = state.scoring;
-  const totalLosses =
-    scoring.seasonHouseLossPenalties +
-    scoring.seasonCivilianLifeLossPenalties +
-    scoring.seasonFirefighterLifeLossPenalties +
-    scoring.seasonCriticalAssetLossPenalties;
-  const totalPositives = scoring.seasonBurnoutPoints + scoring.seasonSquirtBonusPoints + scoring.seasonOtherPositivePoints;
+  const propertyDamagePenalties = scoring.seasonHouseLossPenalties + scoring.seasonCriticalAssetLossPenalties;
+  const lifeLossPenalties = scoring.seasonCivilianLifeLossPenalties + scoring.seasonFirefighterLifeLossPenalties;
+  const positiveBasePoints = scoring.seasonExtinguishPoints;
   const averageApprovalMult =
     scoring.seasonSampleSeconds > 0 ? scoring.seasonApprovalMultIntegral / scoring.seasonSampleSeconds : scoring.approvalMult;
   const averageRiskMult =
     scoring.seasonSampleSeconds > 0 ? scoring.seasonRiskMultIntegral / scoring.seasonSampleSeconds : scoring.riskMult;
-  scoring.seasonFinalScore = scoring.score;
+  scoring.seasonMultipliedPositivePoints = positiveBasePoints * scoring.totalMult;
+  scoring.seasonFinalScore = scoring.seasonStartScore + scoring.seasonMultipliedPositivePoints - propertyDamagePenalties - lifeLossPenalties;
+  scoring.score = scoring.seasonFinalScore;
+  state.careerScore = scoring.score;
   const summary: ScoringSeasonSummary = {
-    burnoutPoints: scoring.seasonBurnoutPoints,
-    squirtBonusPoints: scoring.seasonSquirtBonusPoints,
-    otherPositivePoints: scoring.seasonOtherPositivePoints,
+    extinguishedCount: scoring.seasonExtinguishedCount,
+    extinguishPoints: scoring.seasonExtinguishPoints,
+    propertyDamageCount: scoring.seasonPropertyDamageCount,
+    propertyDamagePenalties,
+    destroyedHouseCount: scoring.seasonDestroyedHouseCount,
+    criticalAssetLossCount: scoring.seasonCriticalAssetLossCount,
     houseLossPenalties: scoring.seasonHouseLossPenalties,
+    criticalAssetLossPenalties: scoring.seasonCriticalAssetLossPenalties,
+    livesLostCount: scoring.seasonLivesLostCount,
+    civilianLivesLost: scoring.seasonCivilianLivesLost,
+    firefighterLivesLost: scoring.seasonFirefighterLivesLost,
+    lifeLossPenalties,
     civilianLifeLossPenalties: scoring.seasonCivilianLifeLossPenalties,
     firefighterLifeLossPenalties: scoring.seasonFirefighterLifeLossPenalties,
-    criticalAssetLossPenalties: scoring.seasonCriticalAssetLossPenalties,
-    netBasePoints: totalPositives - totalLosses,
+    positiveBasePoints,
+    multipliedPositivePoints: scoring.seasonMultipliedPositivePoints,
     seasonStartScore: scoring.seasonStartScore,
     seasonFinalScore: scoring.seasonFinalScore,
     seasonDeltaScore: scoring.seasonFinalScore - scoring.seasonStartScore,
@@ -489,6 +564,7 @@ export const freezeScoringSeason = (state: WorldState): void => {
     finalNoLifeLossDays: scoring.noLifeLossDays
   };
   scoring.seasonSummary = summary;
+  state.finalScore = Math.round(state.scoring.score);
 };
 
 export const stepScoring = (state: WorldState, dayDelta: number, climateRisk: number): void => {
@@ -498,19 +574,27 @@ export const stepScoring = (state: WorldState, dayDelta: number, climateRisk: nu
   stepScoreEvents(state, stepDays);
 
   applyTownHouseLossApprovalHit(state);
-  applyLossPenalties(state);
+  const lossDeltas = applyLossPenalties(state);
   recomputeGlobalApproval(state);
 
-  const { burnoutPoints, squirtBonusPoints } = scoreFireTransitions(state);
-  if (burnoutPoints > 0) {
-    pushScoreEvent(state, `${formatDeltaPoints(burnoutPoints)} Burnout`, "positive");
+  const extinguishDelta = scoreExtinguishTransitions(state);
+  if (extinguishDelta) {
+    pushScoreEvent(
+      state,
+      extinguishDelta.lane,
+      extinguishDelta.deltaCount,
+      extinguishDelta.deltaPoints,
+      extinguishDelta.severity,
+      extinguishDelta.ttlSeconds,
+      extinguishDelta.detail
+    );
   }
-  if (squirtBonusPoints > 0) {
-    pushScoreEvent(state, `${formatDeltaPoints(squirtBonusPoints)} Squirt Bonus`, "positive");
+  for (const delta of lossDeltas) {
+    pushScoreEvent(state, delta.lane, delta.deltaCount, delta.deltaPoints, delta.severity, delta.ttlSeconds, delta.detail);
   }
 
   applyStreakProgress(state, stepDays);
-  applyMultiplierUpdate(state, climateRisk, true);
+  applyMultiplierUpdate(state, climateRisk);
 
   if (stepDays > 0) {
     state.scoring.seasonApprovalMultIntegral += state.scoring.approvalMult * stepDays;

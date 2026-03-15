@@ -116,7 +116,8 @@ export function emitWaterSpray(
       targetY: target.y,
       mode: profile.mode,
       volume: clamp01(profile.volume),
-      intensity: clamp01(profile.count > 0 ? spawnCount / profile.count : 1)
+      // Keep the coherent stream readable even if breakup particles are throttled.
+      intensity: 1
     });
   }
   if (spawnCount <= 0) {

@@ -91,6 +91,22 @@ const buildFuelProfileOverrides = (profiles: Record<TileType, FuelProfile>): Fue
   return overrides;
 };
 
+const cloneRunOptions = (options: RunOptions): RunOptions => ({
+  ...DEFAULT_RUN_OPTIONS,
+  ...options,
+  mapGen: { ...DEFAULT_RUN_OPTIONS.mapGen, ...options.mapGen },
+  fire: normalizeFireSettings(options.fire),
+  fuelProfiles: { ...(options.fuelProfiles ?? {}) }
+});
+
+const cloneRunConfig = (config: NewRunConfig): NewRunConfig => ({
+  seed: Number.isFinite(config.seed) ? Math.floor(config.seed) : DEFAULT_RUN_SEED,
+  mapSize: config.mapSize,
+  characterId: config.characterId,
+  callsign: config.callsign,
+  options: cloneRunOptions(config.options)
+});
+
 const FIRST_NAMES = [
   "Alex",
   "Riley",
@@ -150,10 +166,25 @@ const buildCallsign = (characterId: CharacterId): string => {
 export function initCharacterSelect(
   ui: CharacterSelectRefs,
   state: WorldState,
-  onConfirm: (config: NewRunConfig) => void | Promise<void>
+  onConfirm: (config: NewRunConfig) => void | Promise<void>,
+  initialConfig?: NewRunConfig
 ): { open: (config: NewRunConfig) => void; getCurrentConfig: () => NewRunConfig } {
-  let selectedId: CharacterId = state.campaign.characterId;
-  let fuelProfileOverrides = loadFuelProfileOverrides();
+  const defaultConfig: NewRunConfig = cloneRunConfig(
+    initialConfig ?? {
+      seed: DEFAULT_RUN_SEED,
+      mapSize: DEFAULT_MAP_SIZE,
+      options: {
+        ...DEFAULT_RUN_OPTIONS,
+        mapGen: { ...DEFAULT_RUN_OPTIONS.mapGen },
+        fire: { ...DEFAULT_RUN_OPTIONS.fire },
+        fuelProfiles: { ...loadFuelProfileOverrides() }
+      },
+      characterId: state.campaign.characterId,
+      callsign: state.campaign.callsign
+    }
+  );
+  let selectedId: CharacterId = defaultConfig.characterId;
+  let fuelProfileOverrides = { ...defaultConfig.options.fuelProfiles };
   let fuelProfiles = buildFuelProfiles(fuelProfileOverrides);
   const fuelProfileInputs: HTMLInputElement[] = [];
   const cards = new Map<CharacterId, HTMLButtonElement>();
@@ -458,10 +489,8 @@ export function initCharacterSelect(
     }
   };
 
-  const applyFuelProfileOverrides = (overrides?: FuelProfileOverrides): void => {
-    if (overrides !== undefined) {
-      fuelProfileOverrides = overrides;
-    }
+  const applyFuelProfileOverrides = (overrides: FuelProfileOverrides): void => {
+    fuelProfileOverrides = { ...overrides };
     fuelProfiles = buildFuelProfiles(fuelProfileOverrides);
     syncFuelProfileInputs();
     saveFuelProfileOverrides(fuelProfileOverrides);
@@ -475,7 +504,26 @@ export function initCharacterSelect(
     fuelProfiles: fuelProfileOverrides
   });
 
-  ui.characterNameInput.value = state.campaign.callsign;
+  const applyConfigToForm = (config: NewRunConfig, fillMissingCallsign: boolean): void => {
+    const nextConfig = cloneRunConfig(config);
+    selectedId = nextConfig.characterId;
+    state.campaign.characterId = selectedId;
+    state.campaign.callsign = nextConfig.callsign;
+    ui.characterNameInput.value = nextConfig.callsign;
+    ui.runSeedInput.value = coerceSeed(`${nextConfig.seed}`).toString();
+    setSelectedMapSize(nextConfig.mapSize);
+    ui.runUnlimitedMoney.checked = nextConfig.options.unlimitedMoney;
+    applyMapGenSettings(nextConfig.options.mapGen);
+    applyFireSettings(nextConfig.options.fire);
+    applyFuelProfileOverrides(nextConfig.options.fuelProfiles ?? {});
+    setActiveTab("roster");
+    if (fillMissingCallsign && ui.characterNameInput.value.trim().length === 0) {
+      applyRandomName();
+    }
+    updateSelection();
+    updateConfirmState();
+  };
+
   ui.characterNameInput.addEventListener("input", () => {
     state.campaign.callsign = ui.characterNameInput.value;
     updateConfirmState();
@@ -494,13 +542,8 @@ export function initCharacterSelect(
     input.addEventListener("input", () => syncMapGenOutput(input));
     syncMapGenOutput(input);
   });
-  applyMapGenSettings(DEFAULT_RUN_OPTIONS.mapGen);
-  applyFireSettings(DEFAULT_RUN_OPTIONS.fire);
   buildFuelProfileGrid();
-  applyFuelProfileOverrides(fuelProfileOverrides);
-
-  updateSelection();
-  updateConfirmState();
+  applyConfigToForm(defaultConfig, false);
 
   const flushConfirmation = (config: NewRunConfig): void => {
     window.requestAnimationFrame(() => {
@@ -540,24 +583,7 @@ export function initCharacterSelect(
 
   const open = (config: NewRunConfig): void => {
     state.paused = true;
-    selectedId = config.characterId;
-    state.campaign.characterId = selectedId;
-    state.campaign.callsign = config.callsign;
-    ui.characterNameInput.value = config.callsign;
-    const seedValue = Number.isFinite(config.seed) ? Math.floor(config.seed) : DEFAULT_RUN_SEED;
-    ui.runSeedInput.value = seedValue.toString();
-    setSelectedMapSize(config.mapSize);
-    ui.runUnlimitedMoney.checked = config.options.unlimitedMoney;
-    applyMapGenSettings(config.options.mapGen ?? DEFAULT_RUN_OPTIONS.mapGen);
-    applyFireSettings(config.options.fire ?? DEFAULT_RUN_OPTIONS.fire);
-    const requestedOverrides = config.options.fuelProfiles;
-    const hasOverrides = requestedOverrides && Object.keys(requestedOverrides).length > 0;
-    applyFuelProfileOverrides(hasOverrides ? requestedOverrides : undefined);
-    setActiveTab("roster");
-    if (ui.characterNameInput.value.trim().length === 0) {
-      applyRandomName();
-    }
-    updateSelection();
+    applyConfigToForm(config, true);
     ui.characterScreen.classList.remove("hidden");
   };
 

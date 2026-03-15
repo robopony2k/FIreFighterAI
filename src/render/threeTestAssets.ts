@@ -1,5 +1,6 @@
 import * as THREE from "three";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
+import { HOUSE_VARIANTS } from "../core/buildingFootprints.js";
 import { TILE_COLOR_RGB } from "../core/config.js";
 import { TreeType } from "../core/types.js";
 import { registerPbrSpecularGlossiness } from "./gltfSpecGloss.js";
@@ -34,6 +35,8 @@ export type HouseVariant = {
   height: number;
   baseOffset: number;
   size: THREE.Vector3;
+  doorWidth: number | null;
+  scaleBias: number;
   theme: "brick" | "wood";
   source: string;
   buildKey?: string | null;
@@ -291,6 +294,21 @@ export const getHouseAssetsCache = (): HouseAssets | null => houseAssetsCache;
 export const getFirestationAssetCache = (): FirestationAsset | null => firestationAssetCache;
 
 const buildKeyPattern = /^Build_[^_]+/i;
+const doorNamePattern = /door/i;
+const doorIgnorePattern = /(knob|handle|hinge|frame)/i;
+const HOUSE_DOOR_SCALE_BIAS_MIN = 0.78;
+const HOUSE_DOOR_SCALE_BIAS_MAX = 1.08;
+const HOUSE_FIT_PADDING = 0.98;
+const houseFootprintBySource = new Map(HOUSE_VARIANTS.map((variant) => [variant.source.toLowerCase(), variant]));
+
+const median = (values: number[]): number | null => {
+  if (values.length === 0) {
+    return null;
+  }
+  const sorted = [...values].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 0 ? (sorted[mid - 1] + sorted[mid]) * 0.5 : sorted[mid];
+};
 
 const getBuildKey = (object: THREE.Object3D): string | null => {
   let current: THREE.Object3D | null = object;
@@ -397,7 +415,9 @@ const buildVariantFromMeshes = (
     return null;
   }
   const worldBounds = new THREE.Box3();
+  const doorBounds = new THREE.Box3();
   let hasBounds = false;
+  let hasDoorBounds = false;
   meshes.forEach((mesh) => {
     if (!mesh.geometry.boundingBox) {
       mesh.geometry.computeBoundingBox();
@@ -411,6 +431,14 @@ const buildVariantFromMeshes = (
       hasBounds = true;
     } else {
       worldBounds.union(meshBounds);
+    }
+    if (doorNamePattern.test(mesh.name) && !doorIgnorePattern.test(mesh.name)) {
+      if (!hasDoorBounds) {
+        doorBounds.copy(meshBounds);
+        hasDoorBounds = true;
+      } else {
+        doorBounds.union(meshBounds);
+      }
     }
   });
   if (!hasBounds) {
@@ -448,9 +476,19 @@ const buildVariantFromMeshes = (
     });
   });
   const localBounds = worldBounds.clone().applyMatrix4(rootInv);
+  const localDoorBounds = hasDoorBounds ? doorBounds.clone().applyMatrix4(rootInv) : null;
   const height = Math.max(0.01, size.y);
   const baseOffset = -localBounds.min.y;
-  return { meshes: templates, height, baseOffset, size, theme, source, buildKey: buildKey ?? null };
+  let doorWidth: number | null = null;
+  if (localDoorBounds) {
+    const doorSize = new THREE.Vector3();
+    localDoorBounds.getSize(doorSize);
+    const width = Math.max(doorSize.x, doorSize.z);
+    if (Number.isFinite(width) && width > 0.01) {
+      doorWidth = width;
+    }
+  }
+  return { meshes: templates, height, baseOffset, size, doorWidth, scaleBias: 1, theme, source, buildKey: buildKey ?? null };
 };
 
 const extractHouseVariantsByBuildKey = (
@@ -533,6 +571,49 @@ export const loadHouseAssets = (): Promise<HouseAssets> => {
     loaded.forEach((asset) => {
       variants.push(...asset.variants);
     });
+    const fittedDoorWidths = variants
+      .map((variant) => {
+        if (!variant.doorWidth) {
+          return null;
+        }
+        const footprint = houseFootprintBySource.get(variant.source.toLowerCase());
+        if (!footprint) {
+          return null;
+        }
+        const fitScale =
+          Math.min(
+            footprint.parcelX / Math.max(0.01, variant.size.x),
+            footprint.parcelZ / Math.max(0.01, variant.size.z)
+          ) * HOUSE_FIT_PADDING;
+        return variant.doorWidth * fitScale;
+      })
+      .filter((value): value is number => typeof value === "number" && Number.isFinite(value) && value > 0.01);
+    const targetDoorWidth = median(fittedDoorWidths);
+    if (targetDoorWidth !== null) {
+      variants.forEach((variant) => {
+        if (!variant.doorWidth) {
+          return;
+        }
+        const footprint = houseFootprintBySource.get(variant.source.toLowerCase());
+        if (!footprint) {
+          return;
+        }
+        const fitScale =
+          Math.min(
+            footprint.parcelX / Math.max(0.01, variant.size.x),
+            footprint.parcelZ / Math.max(0.01, variant.size.z)
+          ) * HOUSE_FIT_PADDING;
+        const fittedDoorWidth = variant.doorWidth * fitScale;
+        if (!Number.isFinite(fittedDoorWidth) || fittedDoorWidth <= 0.01) {
+          return;
+        }
+        variant.scaleBias = clamp(
+          targetDoorWidth / fittedDoorWidth,
+          HOUSE_DOOR_SCALE_BIAS_MIN,
+          HOUSE_DOOR_SCALE_BIAS_MAX
+        );
+      });
+    }
     const assets = { variants };
     houseAssetsCache = assets;
     return assets;

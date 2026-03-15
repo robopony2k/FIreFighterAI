@@ -15,9 +15,9 @@ const WATER_CORE_COLOR = new THREE.Color(0xf4fcff);
 const WATER_EDGE_COLOR = new THREE.Color(0x6ecbff);
 const WATER_MIST_COLOR = new THREE.Color(0xc2ebff);
 const WATER_JET_CORE_COLOR = new THREE.Color(0xffffff);
-const WATER_JET_EDGE_COLOR = new THREE.Color(0xc8eeff);
+const WATER_JET_EDGE_COLOR = new THREE.Color(0x78d8ff);
 const WATER_SHELL_CORE_COLOR = new THREE.Color(0xeef8ff);
-const WATER_SHELL_EDGE_COLOR = new THREE.Color(0x89d7ff);
+const WATER_SHELL_EDGE_COLOR = new THREE.Color(0x6ecfff);
 const WATER_IMPACT_CORE_COLOR = new THREE.Color(0xf5fcff);
 const WATER_IMPACT_EDGE_COLOR = new THREE.Color(0x8edcff);
 const TAU = Math.PI * 2;
@@ -247,8 +247,8 @@ const waterJetCoreFragmentShader = `
   void main() {
     float mode01 = clamp(vMode * 0.5, 0.0, 1.0);
     float intensity = clamp(vIntensity, 0.0, 1.0);
-    float entryFade = mix(0.58, 1.0, smoothstep(0.0, 0.08, vAlong));
-    float exitFade = 1.0 - smoothstep(0.9, 1.0, vAlong);
+    float entryFade = mix(0.82, 1.0, smoothstep(0.0, 0.05, vAlong));
+    float exitFade = 1.0 - smoothstep(0.93, 1.0, vAlong);
     float body = entryFade * exitFade;
     float radialCore = 1.0 - smoothstep(0.0, mix(0.22, 0.28, mode01), vRadial);
     float radialBody = 1.0 - smoothstep(mix(0.4, 0.5, mode01), 1.0, vRadial);
@@ -256,17 +256,17 @@ const waterJetCoreFragmentShader = `
     float noise = hash(vec2(vAlong * 14.0 + uTimeSec * 0.8, vRadial * 9.8 + vSeed * 7.3));
     float breakup = smoothstep(0.78, 1.0, noise + vAlong * 0.2 + (1.0 - radialBody) * 0.1);
     float alpha = body * radialBody;
-    alpha *= mix(0.62, 0.82, clamp(vVolume, 0.0, 1.0));
-    alpha *= mix(0.46, 1.0, intensity);
+    alpha *= mix(0.94, 1.1, clamp(vVolume, 0.0, 1.0));
+    alpha *= mix(0.72, 1.18, intensity);
     alpha *= mix(1.06, 0.96, mode01);
-    alpha *= mix(0.88, 1.04, streak);
-    alpha *= 1.0 - breakup * 0.12;
-    alpha = clamp(alpha, 0.0, 1.0);
+    alpha *= mix(0.94, 1.08, streak);
+    alpha *= 1.16 - breakup * 0.1;
+    alpha = clamp(alpha * 1.42, 0.0, 1.0);
     if (alpha <= 0.01) {
       discard;
     }
     vec3 color = mix(uEdgeColor, uCoreColor, radialCore);
-    color += vec3(radialCore * 0.08 * (0.6 + intensity * 0.5));
+    color += vec3(radialCore * 0.16 * (0.65 + intensity * 0.55));
     gl_FragColor = vec4(color, alpha);
   }
 `;
@@ -326,18 +326,18 @@ const waterMistFragmentShader = `
 
   void main() {
     float mode01 = clamp(vMode * 0.5, 0.0, 1.0);
-    float entryFade = mix(0.34, 1.0, smoothstep(0.0, 0.12, vAlong));
-    float exitFade = 1.0 - smoothstep(0.82, 1.0, vAlong);
+    float entryFade = mix(0.5, 1.0, smoothstep(0.0, 0.1, vAlong));
+    float exitFade = 1.0 - smoothstep(0.88, 1.0, vAlong);
     float shellInner = smoothstep(0.12, mix(0.34, 0.24, mode01), vRadial);
     float shellOuter = 1.0 - smoothstep(mix(0.84, 0.94, mode01), 1.0, vRadial);
     float shell = shellInner * shellOuter;
     float noise = hash(vec2(vAlong * 11.0 + uTimeSec * 0.55, vRadial * 13.0 + vSeed * 5.2));
     float feather = 1.0 - smoothstep(0.8, 1.0, noise + vAlong * 0.14);
     float alpha = entryFade * exitFade * shell * feather;
-    alpha *= mix(0.18, 0.28, clamp(vVolume, 0.0, 1.0));
-    alpha *= mix(0.4, 1.0, clamp(vIntensity, 0.0, 1.0));
+    alpha *= mix(0.3, 0.42, clamp(vVolume, 0.0, 1.0));
+    alpha *= mix(0.56, 1.0, clamp(vIntensity, 0.0, 1.0));
     alpha *= mix(0.76, 1.08, mode01);
-    alpha = clamp(alpha, 0.0, 1.0);
+    alpha = clamp(alpha * 1.26, 0.0, 1.0);
     if (alpha <= 0.01) {
       discard;
     }
@@ -430,6 +430,7 @@ type SprayStreamVisualState = {
   mode: number;
   volume: number;
   intensity: number;
+  flow: number;
   seed: number;
 };
 
@@ -513,12 +514,12 @@ export const createThreeTestUnitFxLayer = (scene: THREE.Scene): ThreeTestUnitFxL
     },
     transparent: true,
     depthWrite: false,
-    blending: THREE.AdditiveBlending,
+    blending: THREE.NormalBlending,
     toneMapped: false
   });
   const waterPoints = new THREE.Points(waterGeometry, waterMaterial);
   waterPoints.frustumCulled = false;
-  waterPoints.renderOrder = 11;
+  waterPoints.renderOrder = 10;
   scene.add(waterPoints);
   const createTubeBuffers = (): {
     geometry: THREE.CylinderGeometry;
@@ -578,12 +579,12 @@ export const createThreeTestUnitFxLayer = (scene: THREE.Scene): ThreeTestUnitFxL
   const jetCores = new THREE.InstancedMesh(jetCoreBuffers.geometry, jetCoreMaterial, MAX_WATER_STREAMS);
   jetCores.count = 0;
   jetCores.frustumCulled = false;
-  jetCores.renderOrder = 9;
+  jetCores.renderOrder = 13;
   scene.add(jetCores);
   const mistShells = new THREE.InstancedMesh(mistShellBuffers.geometry, mistShellMaterial, MAX_WATER_STREAMS);
   mistShells.count = 0;
   mistShells.frustumCulled = false;
-  mistShells.renderOrder = 8;
+  mistShells.renderOrder = 12;
   scene.add(mistShells);
 
   const impactPositions = new Float32Array(MAX_WATER_IMPACTS * 3);
@@ -624,7 +625,7 @@ export const createThreeTestUnitFxLayer = (scene: THREE.Scene): ThreeTestUnitFxL
   });
   const impactPoints = new THREE.Points(impactGeometry, impactMaterial);
   impactPoints.frustumCulled = false;
-  impactPoints.renderOrder = 10;
+  impactPoints.renderOrder = 11;
   scene.add(impactPoints);
 
   const sprayMatrix = new THREE.Matrix4();
@@ -803,12 +804,13 @@ export const createThreeTestUnitFxLayer = (scene: THREE.Scene): ThreeTestUnitFxL
           tipX: aggregate.targetX,
           tipY: aggregate.targetY,
           tipZ: aggregate.targetZ,
-          coreRadius: worldPerTile * 0.08,
-          mistRadius: worldPerTile * 0.16,
+          coreRadius: worldPerTile * 0.14,
+          mistRadius: worldPerTile * 0.28,
           impactRadius: worldPerTile * 0.18,
           mode: aggregate.mode,
           volume: aggregate.volume,
           intensity: 0,
+          flow: 0,
           seed: aggregate.seed
         };
         sprayVisualBySourceId.set(sourceId, visual);
@@ -841,17 +843,18 @@ export const createThreeTestUnitFxLayer = (scene: THREE.Scene): ThreeTestUnitFxL
         visual.tipZ = aggregate.targetZ;
         visual.mode = approachExp(visual.mode, aggregate.mode, 18, deltaSeconds);
         visual.volume = approachExp(visual.volume, aggregate.volume, 16, deltaSeconds);
+        visual.flow = approachExp(visual.flow, aggregate.intensity > 0.01 ? 1 : 0, 9.5, deltaSeconds);
         visual.intensity = approachExp(
           visual.intensity,
-          aggregate.intensity,
-          aggregate.intensity >= visual.intensity ? 18 : 6,
+          Math.max(aggregate.intensity, 0.92),
+          aggregate.intensity >= visual.intensity ? 12 : 5.4,
           deltaSeconds
         );
         visual.coreRadius = approachExp(
           visual.coreRadius,
           Math.max(
-            worldPerTile * 0.055,
-            worldPerTile * (precisionMode ? 0.06 : suppressionMode ? 0.092 : 0.075) * (0.9 + aggregate.volume * 0.25)
+            worldPerTile * 0.15,
+            worldPerTile * (precisionMode ? 0.16 : suppressionMode ? 0.24 : 0.19) * (0.96 + aggregate.volume * 0.32)
           ),
           18,
           deltaSeconds
@@ -859,8 +862,8 @@ export const createThreeTestUnitFxLayer = (scene: THREE.Scene): ThreeTestUnitFxL
         visual.mistRadius = approachExp(
           visual.mistRadius,
           Math.max(
-            worldPerTile * 0.12,
-            worldPerTile * (precisionMode ? 0.15 : suppressionMode ? 0.27 : 0.21) * (0.92 + aggregate.volume * 0.24)
+            worldPerTile * 0.3,
+            worldPerTile * (precisionMode ? 0.3 : suppressionMode ? 0.5 : 0.4) * (0.98 + aggregate.volume * 0.3)
           ),
           16,
           deltaSeconds
@@ -876,16 +879,17 @@ export const createThreeTestUnitFxLayer = (scene: THREE.Scene): ThreeTestUnitFxL
         );
         visual.seed = aggregate.seed;
       } else {
+        visual.flow = approachExp(visual.flow, 0, 3.6, deltaSeconds);
         visual.intensity = approachExp(visual.intensity, 0, 5.2, deltaSeconds);
         visual.coreRadius = approachExp(
           visual.coreRadius,
-          Math.max(worldPerTile * 0.03, visual.coreRadius * 0.96),
+          Math.max(worldPerTile * 0.1, visual.coreRadius * 0.98),
           4.6,
           deltaSeconds
         );
         visual.mistRadius = approachExp(
           visual.mistRadius,
-          Math.max(worldPerTile * 0.08, visual.mistRadius * 0.96),
+          Math.max(worldPerTile * 0.2, visual.mistRadius * 0.98),
           4.2,
           deltaSeconds
         );
@@ -897,13 +901,16 @@ export const createThreeTestUnitFxLayer = (scene: THREE.Scene): ThreeTestUnitFxL
         );
       }
 
-      if (!source && !aggregate && visual.intensity <= 0.015) {
+      if (!source && !aggregate && visual.intensity <= 0.015 && visual.flow <= 0.015) {
         sprayVisualBySourceId.delete(sourceId);
         return;
       }
 
+      const renderFlow = clamp(visual.flow, 0, 1);
       const renderIntensity = clamp(visual.intensity, 0, 1);
-      if (renderIntensity <= 0.015 || visual.length <= 0.0001) {
+      const coreStrength = clamp((0.34 + renderIntensity * 0.66) * Math.pow(renderFlow, 0.82), 0, 1);
+      const shellStrength = clamp((0.2 + renderIntensity * 0.8) * Math.pow(renderFlow, 1.02), 0, 1);
+      if (coreStrength <= 0.015 || visual.length <= 0.0001) {
         if (!aggregate) {
           sprayVisualBySourceId.delete(sourceId);
         }
@@ -924,7 +931,7 @@ export const createThreeTestUnitFxLayer = (scene: THREE.Scene): ThreeTestUnitFxL
         jetCoreBuffers.modeAttr.setX(jetCoreCount, clamp(visual.mode, 0, 2));
         jetCoreBuffers.volumeAttr.setX(jetCoreCount, clamp(visual.volume, 0, 1));
         jetCoreBuffers.seedAttr.setX(jetCoreCount, visual.seed);
-        jetCoreBuffers.intensityAttr.setX(jetCoreCount, renderIntensity);
+        jetCoreBuffers.intensityAttr.setX(jetCoreCount, coreStrength);
         jetCoreCount += 1;
       }
 
@@ -942,17 +949,19 @@ export const createThreeTestUnitFxLayer = (scene: THREE.Scene): ThreeTestUnitFxL
         mistShellBuffers.modeAttr.setX(mistShellCount, clamp(visual.mode, 0, 2));
         mistShellBuffers.volumeAttr.setX(mistShellCount, clamp(visual.volume, 0, 1));
         mistShellBuffers.seedAttr.setX(mistShellCount, visual.seed + 0.37);
-        mistShellBuffers.intensityAttr.setX(mistShellCount, renderIntensity);
+        mistShellBuffers.intensityAttr.setX(mistShellCount, shellStrength);
         mistShellCount += 1;
       }
 
-      if (impactCount < MAX_WATER_IMPACTS) {
+      if (impactCount < MAX_WATER_IMPACTS && renderFlow > 0.16) {
         const impactOffset = impactCount * 3;
         impactPositions[impactOffset] = visual.tipX;
         impactPositions[impactOffset + 1] = visual.tipY;
         impactPositions[impactOffset + 2] = visual.tipZ;
         impactAlpha[impactCount] = clamp(
-          renderIntensity * (visual.mode <= 0.5 ? 0.34 : visual.mode >= 1.5 ? 0.58 : 0.46),
+          renderIntensity *
+            Math.pow(renderFlow, 1.7) *
+            (visual.mode <= 0.5 ? 0.32 : visual.mode >= 1.5 ? 0.54 : 0.42),
           0,
           1
         );
@@ -992,8 +1001,9 @@ export const createThreeTestUnitFxLayer = (scene: THREE.Scene): ThreeTestUnitFxL
       if (!visual) {
         continue;
       }
+      const renderFlow = clamp(visual.flow, 0, 1);
       const renderIntensity = clamp(visual.intensity, 0, 1);
-      if (renderIntensity <= 0.08) {
+      if (renderIntensity <= 0.08 || renderFlow <= 0.22) {
         continue;
       }
       const modeValue = sprayModeToValue(particle.sprayMode);
@@ -1022,7 +1032,11 @@ export const createThreeTestUnitFxLayer = (scene: THREE.Scene): ThreeTestUnitFxL
       const terrainY = sampleWorldHeight(sample, terrainSize, cols, rows, heightScale, wx, wz) + 0.03;
       const wy = Math.max(terrainY, expectedY - worldPerTile * 0.04);
       const drawAlpha = clamp(
-        particleAlpha * breakupInfluence * (0.2 + renderIntensity * 0.24) * (0.7 + volume * 0.2),
+        particleAlpha *
+          breakupInfluence *
+          Math.pow(renderFlow, 1.85) *
+          (0.12 + renderIntensity * 0.18) *
+          (0.68 + volume * 0.16),
         0,
         1
       );

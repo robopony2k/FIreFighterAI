@@ -3,9 +3,9 @@ import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { CAREER_YEARS, TILE_SIZE, TIME_SPEED_OPTIONS, TOWN_ALERT_MAX_POSTURE } from "../core/config.js";
 import { VIRTUAL_CLIMATE_PARAMS } from "../core/climate.js";
 import type { EffectsState } from "../core/effectsState.js";
+import { getHouseFootprintBounds, pickHouseFootprint } from "../core/houseFootprints.js";
 import type { InputState } from "../core/inputState.js";
 import { indexFor } from "../core/grid.js";
-import { HOUSE_VARIANTS } from "../core/buildingFootprints.js";
 import { TILE_ID_TO_TYPE, TILE_TYPE_IDS } from "../core/state.js";
 import type { ClimateForecast, Town } from "../core/types.js";
 import type { RenderSim } from "./simView.js";
@@ -3882,38 +3882,6 @@ export const createThreeTest = (
       const s = Math.sin(value * 12.9898 + 78.233) * 43758.5453;
       return s - Math.floor(s);
     };
-    const HOUSE_FOOTPRINT_EPS = 1e-4;
-    const pickHouseFootprint = (seed: number) => {
-      if (HOUSE_VARIANTS.length === 0) {
-        return { source: "", name: "default", sizeX: 1, sizeY: 1, sizeZ: 1 };
-      }
-      const index = Math.floor(noiseAt(seed + 6.1) * HOUSE_VARIANTS.length);
-      return HOUSE_VARIANTS[Math.min(HOUSE_VARIANTS.length - 1, Math.max(0, index))];
-    };
-    const getHouseFootprintDims = (rotation: number, footprint: { sizeX: number; sizeZ: number }) => {
-      const rotate = Math.abs(Math.sin(rotation)) > 0.5;
-      const width = rotate ? footprint.sizeZ : footprint.sizeX;
-      const depth = rotate ? footprint.sizeX : footprint.sizeZ;
-      return {
-        width: Math.max(0.01, width),
-        depth: Math.max(0.01, depth)
-      };
-    };
-    const getHouseFootprintBounds = (
-      tileX: number,
-      tileY: number,
-      rotation: number,
-      footprint: { sizeX: number; sizeZ: number }
-    ) => {
-      const { width, depth } = getHouseFootprintDims(rotation, footprint);
-      const centerX = tileX + 0.5;
-      const centerY = tileY + 0.5;
-      const minX = Math.floor(centerX - width / 2);
-      const maxX = Math.floor(centerX + width / 2 - HOUSE_FOOTPRINT_EPS);
-      const minY = Math.floor(centerY - depth / 2);
-      const maxY = Math.floor(centerY + depth / 2 - HOUSE_FOOTPRINT_EPS);
-      return { minX, maxX, minY, maxY, width, depth };
-    };
     const pickHouseRotation = (
       tileX: number,
       tileY: number,
@@ -4118,7 +4086,7 @@ export const createThreeTest = (
           const sizeX = Math.max(0.01, variant.size?.x ?? 0);
           const sizeZ = Math.max(0.01, variant.size?.z ?? 0);
           const fitScale = Math.min(footprintX / sizeX, footprintZ / sizeZ);
-          const scale = Math.max(0.01, fitScale * 0.98);
+          const scale = Math.max(0.01, fitScale * 0.98 * (variant.scaleBias ?? 1));
           const baseY = foundationTop + variant.baseOffset * scale;
           const variantId = variantIds.get(variant) ?? 0;
           variant.meshes.forEach((meshTemplate, meshIndex) => {
@@ -5168,15 +5136,20 @@ export const createThreeTest = (
       }
       lastSample = nextSample;
       if (terrainMesh) {
-      scene.remove(terrainMesh);
-      terrainMesh.traverse((child) => {
+      const activeTerrainMesh = terrainMesh;
+      scene.remove(activeTerrainMesh);
+      activeTerrainMesh.traverse((child) => {
         if (!(child instanceof THREE.Mesh)) {
           return;
         }
-        if (!(child as THREE.Mesh).userData?.roadOverlay) {
+        if (child === activeTerrainMesh) {
           return;
         }
-        const material = (child as THREE.Mesh).material;
+        const meshChild = child as THREE.Mesh;
+        if (meshChild.geometry && meshChild.geometry !== activeTerrainMesh.geometry) {
+          meshChild.geometry.dispose();
+        }
+        const material = meshChild.material;
         const disposeMaterial = (mat: THREE.Material) => {
           const textured = mat as THREE.Material & { map?: THREE.Texture | null };
           if (textured.map) {
@@ -5190,9 +5163,9 @@ export const createThreeTest = (
           disposeMaterial(material);
         }
       });
-      terrainMesh.geometry.dispose();
-      if (Array.isArray(terrainMesh.material)) {
-        terrainMesh.material.forEach((material) => {
+      activeTerrainMesh.geometry.dispose();
+      if (Array.isArray(activeTerrainMesh.material)) {
+        activeTerrainMesh.material.forEach((material) => {
           const textured = material as THREE.Material & { map?: THREE.Texture | null };
           if (textured.map) {
             textured.map.dispose();
@@ -5200,11 +5173,11 @@ export const createThreeTest = (
           material.dispose();
         });
       } else {
-        const textured = terrainMesh.material as THREE.Material & { map?: THREE.Texture | null };
+        const textured = activeTerrainMesh.material as THREE.Material & { map?: THREE.Texture | null };
         if (textured.map) {
           textured.map.dispose();
         }
-        terrainMesh.material.dispose();
+        activeTerrainMesh.material.dispose();
       }
       terrainMesh = null;
       terrainRoadOverlayMesh = null;

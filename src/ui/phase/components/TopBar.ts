@@ -34,11 +34,17 @@ export type TopBarData = {
     nextApprovalTier: "S" | "A" | "B" | "C" | "D" | null;
     nextApprovalThreshold01: number | null;
     nextTierProgress01: number;
+    extinguishedCount: number;
+    propertyDamageCount: number;
+    livesLostCount: number;
     events: Array<{
       id: number;
-      message: string;
+      lane: "extinguished" | "property" | "lives" | "info";
+      deltaCount: number;
+      deltaPoints: number;
       severity: "positive" | "negative" | "info";
       remainingSeconds: number;
+      detail?: string;
     }>;
   } | null;
 };
@@ -60,24 +66,162 @@ const phaseLabels: Record<Phase, string> = {
 const SVG_NS = "http://www.w3.org/2000/svg";
 const { width: CHART_WIDTH, height: CHART_HEIGHT, padding: CHART_PADDING } = FORECAST_CHART;
 const SCORE_EVENT_LIFETIME_SECONDS: Record<NonNullable<TopBarData["scoring"]>["events"][number]["severity"], number> = {
-  positive: 8,
-  negative: 16,
-  info: 8
+  positive: 1.1,
+  negative: 1.6,
+  info: 1.1
 };
+const LEDGER_RAILS = [
+  { lane: "extinguished", label: "Extinguished" },
+  { lane: "property", label: "Property Damage" },
+  { lane: "lives", label: "Lives Lost" }
+] as const;
 
-const parseScoreEventMessage = (message: string): { label: string; value: string | null } => {
-  const trimmed = message.trim();
-  const match = trimmed.match(/^([+-]\d[\d,]*)(?:\s+)(.+)$/);
-  if (!match) {
-    return { label: trimmed, value: null };
+const formatSignedPoints = (value: number): string => `${value >= 0 ? "+" : "-"}${Math.round(Math.abs(value)).toLocaleString()}`;
+
+const formatScoreEvent = (
+  event: NonNullable<TopBarData["scoring"]>["events"][number]
+): { label: string; value: string | null } => {
+  if (event.lane === "info") {
+    return { label: event.detail ?? "Multiplier update", value: null };
   }
+  const laneLabel =
+    event.lane === "extinguished" ? "Extinguished" : event.lane === "property" ? "Property Damage" : "Lives Lost";
+  const countLabel = `${event.deltaCount.toLocaleString()} ${event.deltaCount === 1 ? "count" : "counts"}`;
   return {
-    label: match[2].trim(),
-    value: match[1]
+    label: event.detail ? `${laneLabel} | ${event.detail}` : `${laneLabel} | ${countLabel}`,
+    value: formatSignedPoints(event.deltaPoints)
   };
 };
 
-const syncThreeTestTopClearance = (element: HTMLElement, scoreStrip: HTMLElement, scoreEvents: HTMLElement): void => {
+const triggerPulse = (element: HTMLElement): void => {
+  element.classList.remove("is-pulsing");
+  void element.offsetWidth;
+  element.classList.add("is-pulsing");
+};
+
+const createRailIcon = (lane: (typeof LEDGER_RAILS)[number]["lane"]): SVGSVGElement => {
+  const svg = document.createElementNS(SVG_NS, "svg");
+  svg.classList.add("phase-score-rail-icon");
+  svg.setAttribute("viewBox", "0 0 16 16");
+  if (lane === "extinguished") {
+    const circle = document.createElementNS(SVG_NS, "circle");
+    circle.setAttribute("cx", "8");
+    circle.setAttribute("cy", "8");
+    circle.setAttribute("r", "5");
+    circle.setAttribute("fill", "currentColor");
+    const slash = document.createElementNS(SVG_NS, "path");
+    slash.setAttribute("d", "M4 9.75L7 12.5L12 4.25");
+    slash.setAttribute("fill", "none");
+    slash.setAttribute("stroke", "rgba(15, 15, 15, 0.82)");
+    slash.setAttribute("stroke-width", "1.6");
+    slash.setAttribute("stroke-linecap", "round");
+    slash.setAttribute("stroke-linejoin", "round");
+    svg.append(circle, slash);
+    return svg;
+  }
+  if (lane === "property") {
+    const body = document.createElementNS(SVG_NS, "path");
+    body.setAttribute("d", "M3 13V7.75L8 4.25L13 7.75V13H10V9H6V13Z");
+    body.setAttribute("fill", "currentColor");
+    svg.appendChild(body);
+    return svg;
+  }
+  const head = document.createElementNS(SVG_NS, "circle");
+  head.setAttribute("cx", "8");
+  head.setAttribute("cy", "5");
+  head.setAttribute("r", "2.5");
+  head.setAttribute("fill", "currentColor");
+  const torso = document.createElementNS(SVG_NS, "path");
+  torso.setAttribute("d", "M4 13C4 10.8 5.8 9 8 9C10.2 9 12 10.8 12 13");
+  torso.setAttribute("fill", "none");
+  torso.setAttribute("stroke", "currentColor");
+  torso.setAttribute("stroke-width", "1.8");
+  torso.setAttribute("stroke-linecap", "round");
+  svg.append(head, torso);
+  return svg;
+};
+
+const buildLedgerBundles = (count: number): Array<{ magnitude: number; digit: number; label: string }> => {
+  const bundles: Array<{ magnitude: number; digit: number; label: string }> = [];
+  let remaining = Math.max(0, Math.floor(count));
+  let magnitude = 1;
+  while (remaining > 0) {
+    const digit = remaining % 10;
+    if (digit > 0) {
+      bundles.push({
+        magnitude,
+        digit,
+        label: magnitude === 1 ? "" : `x${magnitude.toLocaleString()}`
+      });
+    }
+    remaining = Math.floor(remaining / 10);
+    magnitude *= 10;
+  }
+  return bundles.reverse();
+};
+
+const getBundleUnitsBucket = (magnitude: number): string => {
+  if (magnitude >= 1000) {
+    return "1000";
+  }
+  if (magnitude >= 100) {
+    return "100";
+  }
+  if (magnitude >= 10) {
+    return "10";
+  }
+  return "1";
+};
+
+const renderLedgerBundles = (
+  container: HTMLElement,
+  count: number,
+  className: string,
+  clipDigits = 9
+): void => {
+  container.innerHTML = "";
+  const bundles = buildLedgerBundles(count);
+  for (const bundle of bundles) {
+    const group = document.createElement("div");
+    group.className = "phase-score-bundle";
+    const unitsBucket = getBundleUnitsBucket(bundle.magnitude);
+    group.dataset.units = unitsBucket;
+    if (bundle.label) {
+      const badge = document.createElement("span");
+      badge.className = "phase-score-bundle-label";
+      badge.textContent = bundle.label;
+      badge.dataset.units = unitsBucket;
+      group.appendChild(badge);
+    }
+    const digit = Math.min(bundle.digit, clipDigits);
+    for (let i = 0; i < digit; i += 1) {
+      const chip = document.createElement("span");
+      chip.className = `phase-score-chip ${className}`;
+      chip.dataset.units = unitsBucket;
+      group.appendChild(chip);
+    }
+    container.appendChild(group);
+  }
+};
+
+const layoutIncomingLedgerGroups = (settled: HTMLElement, incoming: HTMLElement): void => {
+  const trackWidth = incoming.clientWidth;
+  if (trackWidth <= 0) {
+    return;
+  }
+  const settledWidth = settled.scrollWidth;
+  const wrappers = Array.from(incoming.children) as HTMLElement[];
+  let occupiedWidth = settledWidth;
+  wrappers.forEach((wrapper, index) => {
+    const wrapperWidth = wrapper.offsetWidth;
+    const remainingWidth = Math.max(0, trackWidth - occupiedWidth - wrapperWidth);
+    wrapper.style.setProperty("--incoming-travel", `${remainingWidth}px`);
+    wrapper.style.setProperty("--incoming-stagger", `${Math.min(index * 10, 36)}px`);
+    occupiedWidth += wrapperWidth + 6;
+  });
+};
+
+const syncThreeTestTopClearance = (element: HTMLElement, scoreStrip: HTMLElement): void => {
   const overlayRoot = element.closest(".three-test-overlay") as HTMLElement | null;
   if (!overlayRoot) {
     return;
@@ -87,8 +231,7 @@ const syncThreeTestTopClearance = (element: HTMLElement, scoreStrip: HTMLElement
     return;
   }
   const stripHeight = scoreStrip.offsetHeight;
-  const trayHeight = scoreEvents.classList.contains("is-hidden") ? 0 : scoreEvents.offsetHeight;
-  const clearance = Math.max(12, Math.ceil(stripHeight + trayHeight + 22));
+  const clearance = Math.max(12, Math.ceil(stripHeight + 24));
   overlayRoot.style.setProperty("--three-test-top-clearance", `${clearance}px`);
 };
 
@@ -213,6 +356,8 @@ export const createTopBar = (): TopBarView => {
 
   const scoreStrip = document.createElement("div");
   scoreStrip.className = "phase-score-strip is-hidden";
+  const legacyScoreContent = document.createElement("div");
+  legacyScoreContent.className = "phase-score-legacy";
   const scoreValue = document.createElement("div");
   scoreValue.className = "phase-score-value";
   const scoreLabel = document.createElement("span");
@@ -244,7 +389,63 @@ export const createTopBar = (): TopBarView => {
   const approvalProgressFill = document.createElement("div");
   approvalProgressFill.className = "phase-score-progress-fill";
   approvalProgress.appendChild(approvalProgressFill);
-  scoreStrip.append(scoreValue, multiplierRow, streakLabel, approvalMeta, approvalProgress);
+  legacyScoreContent.append(scoreValue, multiplierRow, streakLabel, approvalMeta, approvalProgress);
+
+  const ledgerBoard = document.createElement("div");
+  ledgerBoard.className = "phase-score-ledger is-hidden";
+  const ledgerHeader = document.createElement("div");
+  ledgerHeader.className = "phase-score-ledger-header";
+  const ledgerPills = document.createElement("div");
+  ledgerPills.className = "phase-score-ledger-pills";
+  const ledgerDifficultyPill = document.createElement("span");
+  ledgerDifficultyPill.className = "phase-score-pill";
+  const ledgerApprovalPill = document.createElement("span");
+  ledgerApprovalPill.className = "phase-score-pill";
+  const ledgerStreakPill = document.createElement("span");
+  ledgerStreakPill.className = "phase-score-pill";
+  const ledgerRiskPill = document.createElement("span");
+  ledgerRiskPill.className = "phase-score-pill";
+  ledgerPills.append(ledgerDifficultyPill, ledgerApprovalPill, ledgerStreakPill, ledgerRiskPill);
+  ledgerHeader.appendChild(ledgerPills);
+
+  const ledgerRails = document.createElement("div");
+  ledgerRails.className = "phase-score-ledger-rails";
+  const ledgerRailMap = new Map<
+    (typeof LEDGER_RAILS)[number]["lane"],
+    {
+      rail: HTMLElement;
+      settled: HTMLElement;
+      incoming: HTMLElement;
+      count: HTMLElement;
+    }
+  >();
+  for (const config of LEDGER_RAILS) {
+    const rail = document.createElement("div");
+    rail.className = `phase-score-rail is-${config.lane}`;
+    const meta = document.createElement("div");
+    meta.className = "phase-score-rail-meta";
+    meta.append(createRailIcon(config.lane));
+    const label = document.createElement("span");
+    label.className = "phase-score-rail-label";
+    label.textContent = config.label;
+    meta.appendChild(label);
+
+    const track = document.createElement("div");
+    track.className = "phase-score-track";
+    const settled = document.createElement("div");
+    settled.className = "phase-score-track-settled";
+    const incoming = document.createElement("div");
+    incoming.className = "phase-score-track-incoming";
+    track.append(settled, incoming);
+
+    const count = document.createElement("span");
+    count.className = "phase-score-rail-count";
+    rail.append(meta, track, count);
+    ledgerRails.appendChild(rail);
+    ledgerRailMap.set(config.lane, { rail, settled, incoming, count });
+  }
+  ledgerBoard.append(ledgerHeader, ledgerRails);
+  scoreStrip.append(legacyScoreContent, ledgerBoard);
 
   const scoreEvents = document.createElement("div");
   scoreEvents.className = "phase-score-events is-hidden";
@@ -257,11 +458,95 @@ export const createTopBar = (): TopBarView => {
 
   let ctaHandler: ((actionId: string) => void) | null = null;
   let currentAction: string | null = null;
+  let previousApprovalSignature = "";
+  let previousRiskSignature = "";
   cta.addEventListener("click", () => {
     if (currentAction && ctaHandler) {
       ctaHandler(currentAction);
     }
   });
+
+  const applyMultiplierLabels = (data: NonNullable<TopBarData["scoring"]>, isThreeTest: boolean): void => {
+    difficultyPill.textContent = isThreeTest
+      ? `DIFF x${data.difficultyMult.toFixed(2)}`
+      : `Difficulty ${data.difficultyMult.toFixed(2)}x`;
+    approvalPill.textContent = isThreeTest
+      ? `APP ${data.approvalTier} x${data.approvalMult.toFixed(2)}`
+      : `Approval ${data.approvalMult.toFixed(2)}x`;
+    streakPill.textContent = isThreeTest
+      ? `STREAK x${data.streakMult.toFixed(2)}`
+      : `Streak ${data.streakMult.toFixed(2)}x`;
+    riskPill.textContent = isThreeTest
+      ? `RISK x${data.riskMult.toFixed(2)}`
+      : `Risk ${data.riskMult.toFixed(2)}x`;
+    totalPill.textContent = `Total ${data.totalMult.toFixed(2)}x`;
+
+    ledgerDifficultyPill.textContent = `DIFF x${data.difficultyMult.toFixed(2)}`;
+    ledgerApprovalPill.textContent = `APP ${data.approvalTier} x${data.approvalMult.toFixed(2)}`;
+    ledgerStreakPill.textContent = `STREAK x${data.streakMult.toFixed(2)}`;
+    ledgerRiskPill.textContent = `RISK x${data.riskMult.toFixed(2)}`;
+
+    const approvalSignature = `${data.approvalTier}:${data.approvalMult.toFixed(2)}`;
+    const riskSignature = `${data.riskTier}:${data.riskMult.toFixed(2)}`;
+    if (previousApprovalSignature && previousApprovalSignature !== approvalSignature) {
+      triggerPulse(ledgerApprovalPill);
+    }
+    if (previousRiskSignature && previousRiskSignature !== riskSignature) {
+      triggerPulse(ledgerRiskPill);
+    }
+    previousApprovalSignature = approvalSignature;
+    previousRiskSignature = riskSignature;
+  };
+
+  const renderLedgerBoard = (data: NonNullable<TopBarData["scoring"]>): void => {
+    const countsByLane = {
+      extinguished: Math.max(0, Math.floor(data.extinguishedCount)),
+      property: Math.max(0, Math.floor(data.propertyDamageCount)),
+      lives: Math.max(0, Math.floor(data.livesLostCount))
+    };
+    const activeEvents = new Map<
+      (typeof LEDGER_RAILS)[number]["lane"],
+      Array<NonNullable<TopBarData["scoring"]>["events"][number]>
+    >();
+    LEDGER_RAILS.forEach(({ lane }) => activeEvents.set(lane, []));
+    for (const event of data.events) {
+      if (event.lane === "info") {
+        continue;
+      }
+      const laneEvents = activeEvents.get(event.lane);
+      if (laneEvents) {
+        laneEvents.push(event);
+      }
+    }
+
+    for (const { lane } of LEDGER_RAILS) {
+      const refs = ledgerRailMap.get(lane);
+      if (!refs) {
+        continue;
+      }
+      const laneEvents = activeEvents.get(lane) ?? [];
+      const pendingCount = laneEvents.reduce((sum, event) => sum + Math.max(0, Math.floor(event.deltaCount)), 0);
+      const settledCount = Math.max(0, countsByLane[lane] - pendingCount);
+      refs.count.textContent = countsByLane[lane].toLocaleString();
+      renderLedgerBundles(refs.settled, settledCount, "is-settled");
+      refs.incoming.innerHTML = "";
+      refs.rail.classList.toggle(
+        "is-hot",
+        laneEvents.some((event) => event.severity === "negative" && event.remainingSeconds > 0)
+      );
+
+      laneEvents.forEach((event) => {
+        const wrapper = document.createElement("div");
+        wrapper.className = `phase-score-incoming-group is-${event.severity}`;
+        const lifetime = SCORE_EVENT_LIFETIME_SECONDS[event.severity] ?? 1.1;
+        const progress = Math.max(0, Math.min(1, 1 - event.remainingSeconds / lifetime));
+        wrapper.style.setProperty("--incoming-progress", progress.toFixed(3));
+        renderLedgerBundles(wrapper, Math.max(0, Math.floor(event.deltaCount)), "is-incoming", 9);
+        refs.incoming.appendChild(wrapper);
+      });
+      layoutIncomingLedgerGroups(refs.settled, refs.incoming);
+    }
+  };
 
   const updateYearMarkers = (startDay: number, yearDays: number, windowDays: number): void => {
     while (yearMarkers.firstChild) {
@@ -407,60 +692,63 @@ export const createTopBar = (): TopBarView => {
         currentAction = null;
       }
       if (data.scoring) {
-        scoreCounter.classList.remove("is-hidden");
-        scoreCounter.textContent = `Score ${Math.round(data.scoring.score).toLocaleString()}`;
         scoreStrip.classList.remove("is-hidden");
-        scoreNumber.textContent = Math.round(data.scoring.score).toLocaleString();
-        difficultyPill.textContent = isThreeTest
-          ? `Diff x${data.scoring.difficultyMult.toFixed(2)}`
-          : `Difficulty ${data.scoring.difficultyMult.toFixed(2)}x`;
-        approvalPill.textContent = isThreeTest
-          ? `Approval ${data.scoring.approvalTier} x${data.scoring.approvalMult.toFixed(2)}`
-          : `Approval ${data.scoring.approvalMult.toFixed(2)}x`;
-        streakPill.textContent = isThreeTest
-          ? `Streak x${data.scoring.streakMult.toFixed(2)}`
-          : `Streak ${data.scoring.streakMult.toFixed(2)}x`;
-        riskPill.textContent = isThreeTest
-          ? `Risk x${data.scoring.riskMult.toFixed(2)}`
-          : `Risk ${data.scoring.riskMult.toFixed(2)}x`;
-        totalPill.textContent = `Total ${data.scoring.totalMult.toFixed(2)}x`;
-        streakLabel.textContent = `No-loss streaks: Houses ${data.scoring.noHouseLossDays}d | Lives ${data.scoring.noLifeLossDays}d`;
-        if (data.scoring.nextApprovalTier && data.scoring.nextApprovalThreshold01 !== null) {
-          approvalMeta.textContent = `Approval Tier ${data.scoring.approvalTier} -> ${data.scoring.nextApprovalTier} at ${Math.round(
-            data.scoring.nextApprovalThreshold01 * 100
-          )}% (Risk ${data.scoring.riskTier})`;
-        } else {
-          approvalMeta.textContent = `Approval Tier ${data.scoring.approvalTier} (max) | Risk ${data.scoring.riskTier}`;
-        }
-        approvalProgressFill.style.width = `${Math.round(
-          Math.max(0, Math.min(1, data.scoring.nextTierProgress01)) * 100
-        )}%`;
-
-        scoreEvents.innerHTML = "";
-        if (data.scoring.events.length > 0) {
-          scoreEvents.classList.remove("is-hidden");
-          for (let i = data.scoring.events.length - 1; i >= 0; i -= 1) {
-            const event = data.scoring.events[i];
-            const row = document.createElement("div");
-            row.className = `phase-score-event is-${event.severity}`;
-            const parsed = parseScoreEventMessage(event.message);
-            const labelText = document.createElement("span");
-            labelText.className = "phase-score-event-label";
-            labelText.textContent = parsed.label;
-            row.appendChild(labelText);
-            if (parsed.value) {
-              const valueText = document.createElement("span");
-              valueText.className = "phase-score-event-value";
-              valueText.textContent = parsed.value;
-              row.appendChild(valueText);
-            }
-            const eventLifetime = SCORE_EVENT_LIFETIME_SECONDS[event.severity] ?? 8;
-            const fade = Math.max(event.severity === "negative" ? 0.4 : 0.25, Math.min(1, event.remainingSeconds / eventLifetime));
-            row.style.opacity = fade.toFixed(2);
-            scoreEvents.appendChild(row);
-          }
-        } else {
+        applyMultiplierLabels(data.scoring, isThreeTest);
+        if (isThreeTest) {
+          scoreCounter.classList.add("is-hidden");
+          scoreCounter.textContent = "";
+          legacyScoreContent.classList.add("is-hidden");
+          ledgerBoard.classList.remove("is-hidden");
           scoreEvents.classList.add("is-hidden");
+          scoreEvents.innerHTML = "";
+          renderLedgerBoard(data.scoring);
+        } else {
+          scoreCounter.classList.remove("is-hidden");
+          scoreCounter.textContent = `Score ${Math.round(data.scoring.score).toLocaleString()}`;
+          legacyScoreContent.classList.remove("is-hidden");
+          ledgerBoard.classList.add("is-hidden");
+          scoreNumber.textContent = Math.round(data.scoring.score).toLocaleString();
+          streakLabel.textContent = `No-loss streaks: Houses ${data.scoring.noHouseLossDays}d | Lives ${data.scoring.noLifeLossDays}d`;
+          if (data.scoring.nextApprovalTier && data.scoring.nextApprovalThreshold01 !== null) {
+            approvalMeta.textContent = `Approval Tier ${data.scoring.approvalTier} -> ${data.scoring.nextApprovalTier} at ${Math.round(
+              data.scoring.nextApprovalThreshold01 * 100
+            )}% (Risk ${data.scoring.riskTier})`;
+          } else {
+            approvalMeta.textContent = `Approval Tier ${data.scoring.approvalTier} (max) | Risk ${data.scoring.riskTier}`;
+          }
+          approvalProgressFill.style.width = `${Math.round(
+            Math.max(0, Math.min(1, data.scoring.nextTierProgress01)) * 100
+          )}%`;
+
+          scoreEvents.innerHTML = "";
+          if (data.scoring.events.length > 0) {
+            scoreEvents.classList.remove("is-hidden");
+            for (let i = data.scoring.events.length - 1; i >= 0; i -= 1) {
+              const event = data.scoring.events[i];
+              const row = document.createElement("div");
+              row.className = `phase-score-event is-${event.severity}`;
+              const parsed = formatScoreEvent(event);
+              const labelText = document.createElement("span");
+              labelText.className = "phase-score-event-label";
+              labelText.textContent = parsed.label;
+              row.appendChild(labelText);
+              if (parsed.value) {
+                const valueText = document.createElement("span");
+                valueText.className = "phase-score-event-value";
+                valueText.textContent = parsed.value;
+                row.appendChild(valueText);
+              }
+              const eventLifetime = SCORE_EVENT_LIFETIME_SECONDS[event.severity] ?? 1.1;
+              const fade = Math.max(
+                event.severity === "negative" ? 0.4 : 0.25,
+                Math.min(1, event.remainingSeconds / eventLifetime)
+              );
+              row.style.opacity = fade.toFixed(2);
+              scoreEvents.appendChild(row);
+            }
+          } else {
+            scoreEvents.classList.add("is-hidden");
+          }
         }
       } else {
         scoreCounter.classList.add("is-hidden");
@@ -468,8 +756,10 @@ export const createTopBar = (): TopBarView => {
         scoreEvents.classList.add("is-hidden");
         scoreEvents.innerHTML = "";
         scoreNumber.textContent = "";
+        legacyScoreContent.classList.add("is-hidden");
+        ledgerBoard.classList.add("is-hidden");
       }
-      syncThreeTestTopClearance(element, scoreStrip, scoreEvents);
+      syncThreeTestTopClearance(element, scoreStrip);
     },
     onCta: (handler) => {
       ctaHandler = handler;

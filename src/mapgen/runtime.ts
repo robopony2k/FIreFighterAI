@@ -42,6 +42,12 @@ import {
 } from "../core/config.js";
 import { fractalNoise, hash2D } from "./noise.js";
 import {
+  ROAD_EDGE_DIRS,
+  analyzeRoadSurfaceMetrics,
+  getRoadGenerationStats,
+  type RoadSurfaceMetrics
+} from "./roads.js";
+import {
   createSettlementPlacementPlan,
   connectSettlementsByRoad
 } from "./communities.js";
@@ -2890,26 +2896,522 @@ function expandOceanMaskByElevation(
   return mask;
 }
 
+type RoadSegmentTrace = {
+  indices: number[];
+  loop: boolean;
+};
+
+const ROAD_GRADE_TARGET_LIMIT = 0.085;
+const ROAD_GRADE_CHANGE_TARGET_LIMIT = 0.055;
+const ROAD_SHOULDER_BLEND_RADIUS = 2;
+const ROAD_WALL_DROP_THRESHOLD = 0.09;
+const ROAD_WALL_OUTER_DROP_THRESHOLD = 0.11;
+const ROAD_PROFILE_MAX_FILL = 0.022;
+const ROAD_PROFILE_MAX_CUT = 0.14;
+const ROAD_SHOULDER_MAX_FILL_NEAR = 0.028;
+const ROAD_SHOULDER_MAX_FILL_FAR = 0.014;
+const ROAD_SHOULDER_MAX_CUT_NEAR = 0.1;
+const ROAD_SHOULDER_MAX_CUT_FAR = 0.05;
+
+const isRoadLikeIndex = (state: WorldState, idx: number): boolean => {
+  const type = state.tiles[idx]?.type;
+  return type === "road" || type === "base" || state.tileRoadBridge[idx] > 0;
+};
+
+const isLandRoadLikeIndex = (state: WorldState, idx: number): boolean =>
+  isRoadLikeIndex(state, idx) && state.tiles[idx]?.type !== "water";
+
+const countEdgeBits = (mask: number): number => {
+  let count = 0;
+  for (let bits = mask; bits !== 0; bits &= bits - 1) {
+    count += 1;
+  }
+  return count;
+};
+
+const getRoadMaskAtIndex = (state: WorldState, idx: number, landOnly: boolean): number => {
+  if (!(landOnly ? isLandRoadLikeIndex(state, idx) : isRoadLikeIndex(state, idx))) {
+    return 0;
+  }
+  const cols = state.grid.cols;
+  const x = idx % cols;
+  const y = Math.floor(idx / cols);
+  const stored = state.tileRoadEdges[idx] ?? 0;
+  let mask = 0;
+  if (stored !== 0) {
+    for (let i = 0; i < ROAD_EDGE_DIRS.length; i += 1) {
+      const dir = ROAD_EDGE_DIRS[i];
+      if ((stored & dir.bit) === 0) {
+        continue;
+      }
+      const nx = x + dir.dx;
+      const ny = y + dir.dy;
+      if (!inBounds(state.grid, nx, ny)) {
+        continue;
+      }
+      const neighborIdx = indexFor(state.grid, nx, ny);
+      if (!(landOnly ? isLandRoadLikeIndex(state, neighborIdx) : isRoadLikeIndex(state, neighborIdx))) {
+        continue;
+      }
+      mask |= dir.bit;
+    }
+    if (mask !== 0) {
+      return mask;
+    }
+  }
+  for (let i = 0; i < ROAD_EDGE_DIRS.length; i += 1) {
+    const dir = ROAD_EDGE_DIRS[i];
+    const nx = x + dir.dx;
+    const ny = y + dir.dy;
+    if (!inBounds(state.grid, nx, ny)) {
+      continue;
+    }
+    const neighborIdx = indexFor(state.grid, nx, ny);
+    if (landOnly ? isLandRoadLikeIndex(state, neighborIdx) : isRoadLikeIndex(state, neighborIdx)) {
+      mask |= dir.bit;
+    }
+  }
+  return mask;
+};
+
+const touchesStructurePad = (state: WorldState, idx: number): boolean => {
+  const cols = state.grid.cols;
+  const x = idx % cols;
+  const y = Math.floor(idx / cols);
+  for (let dy = -1; dy <= 1; dy += 1) {
+    for (let dx = -1; dx <= 1; dx += 1) {
+      if (dx === 0 && dy === 0) {
+        continue;
+      }
+      const nx = x + dx;
+      const ny = y + dy;
+      if (!inBounds(state.grid, nx, ny)) {
+        continue;
+      }
+      const neighbor = state.tiles[indexFor(state.grid, nx, ny)];
+      if (!neighbor) {
+        continue;
+      }
+      if (neighbor.type === "house" || neighbor.type === "base") {
+        return true;
+      }
+    }
+  }
+  return false;
+};
+
+const traceRoadSegment = (
+  state: WorldState,
+  startIdx: number,
+  startDirIndex: number,
+  landMaskByIdx: Uint8Array,
+  anchorMask: Uint8Array,
+  visitedEdges: Uint8Array
+): RoadSegmentTrace => {
+  const segment = [startIdx];
+  let currentIdx = startIdx;
+  let dir = ROAD_EDGE_DIRS[startDirIndex];
+  let loop = false;
+  while (dir) {
+    const cols = state.grid.cols;
+    const x = currentIdx % cols;
+    const y = Math.floor(currentIdx / cols);
+    const nextX = x + dir.dx;
+    const nextY = y + dir.dy;
+    if (!inBounds(state.grid, nextX, nextY)) {
+      break;
+    }
+    const nextIdx = indexFor(state.grid, nextX, nextY);
+    visitedEdges[currentIdx] |= dir.bit;
+    visitedEdges[nextIdx] |= dir.opposite;
+    if (nextIdx === startIdx) {
+      loop = true;
+      break;
+    }
+    segment.push(nextIdx);
+    if (anchorMask[nextIdx] > 0) {
+      break;
+    }
+    const nextMask = landMaskByIdx[nextIdx] ?? 0;
+    let nextDir: (typeof ROAD_EDGE_DIRS)[number] | null = null;
+    for (let i = 0; i < ROAD_EDGE_DIRS.length; i += 1) {
+      const candidate = ROAD_EDGE_DIRS[i];
+      if ((nextMask & candidate.bit) === 0 || candidate.bit === dir.opposite) {
+        continue;
+      }
+      nextDir = candidate;
+      break;
+    }
+    if (!nextDir) {
+      break;
+    }
+    currentIdx = nextIdx;
+    dir = nextDir;
+  }
+  return { indices: segment, loop };
+};
+
+const buildRoadSegmentProfile = (
+  state: WorldState,
+  indices: number[],
+  loop: boolean,
+  originalElevations: Float32Array
+): number[] => {
+  if (indices.length <= 1) {
+    return indices.map((idx) => state.tiles[idx]?.elevation ?? 0);
+  }
+  const original = indices.map((idx) => state.tiles[idx]?.elevation ?? 0);
+  const runs = new Array<number>(indices.length - 1);
+  const cumulative = new Array<number>(indices.length).fill(0);
+  let totalRun = 0;
+  for (let i = 1; i < indices.length; i += 1) {
+    const prevIdx = indices[i - 1];
+    const idx = indices[i];
+    const prevX = prevIdx % state.grid.cols;
+    const prevY = Math.floor(prevIdx / state.grid.cols);
+    const x = idx % state.grid.cols;
+    const y = Math.floor(idx / state.grid.cols);
+    const run = Math.hypot(x - prevX, y - prevY);
+    runs[i - 1] = Math.max(1, run);
+    totalRun += runs[i - 1];
+    cumulative[i] = totalRun;
+  }
+
+  let target = original.slice();
+  if (!loop) {
+    const start = original[0];
+    const end = original[original.length - 1];
+    for (let i = 1; i < target.length - 1; i += 1) {
+      const t = totalRun > 1e-6 ? cumulative[i] / totalRun : i / Math.max(1, target.length - 1);
+      const linear = start * (1 - t) + end * t;
+      target[i] = clamp(original[i] * 0.35 + linear * 0.65, 0, 1);
+    }
+  } else {
+    const mean = original.reduce((sum, value) => sum + value, 0) / Math.max(1, original.length);
+    for (let i = 0; i < target.length; i += 1) {
+      target[i] = clamp(original[i] * 0.45 + mean * 0.55, 0, 1);
+    }
+  }
+
+  const smoothPasses = loop ? 4 : 3;
+  for (let pass = 0; pass < smoothPasses; pass += 1) {
+    const next = target.slice();
+    const startIndex = loop ? 0 : 1;
+    const endIndex = loop ? target.length : target.length - 1;
+    for (let i = startIndex; i < endIndex; i += 1) {
+      const prevIndex = loop ? (i + target.length - 1) % target.length : i - 1;
+      const nextIndex = loop ? (i + 1) % target.length : i + 1;
+      const prevValue = target[prevIndex] ?? target[i];
+      const nextValue = target[nextIndex] ?? target[i];
+      next[i] = clamp(target[i] * 0.48 + (prevValue + nextValue) * 0.26, 0, 1);
+    }
+    target = next;
+  }
+
+  if (!loop) {
+    const forward = target.slice();
+    let prevSlope: number | null = null;
+    for (let i = 1; i < forward.length; i += 1) {
+      let slope = (forward[i] - forward[i - 1]) / runs[i - 1];
+      slope = clamp(slope, -ROAD_GRADE_TARGET_LIMIT, ROAD_GRADE_TARGET_LIMIT);
+      if (prevSlope !== null) {
+        slope = clamp(
+          slope,
+          prevSlope - ROAD_GRADE_CHANGE_TARGET_LIMIT,
+          prevSlope + ROAD_GRADE_CHANGE_TARGET_LIMIT
+        );
+      }
+      forward[i] = clamp(forward[i - 1] + slope * runs[i - 1], 0, 1);
+      prevSlope = slope;
+    }
+
+    const backward = target.slice();
+    prevSlope = null;
+    for (let i = backward.length - 2; i >= 0; i -= 1) {
+      let slope = (backward[i + 1] - backward[i]) / runs[i];
+      slope = clamp(slope, -ROAD_GRADE_TARGET_LIMIT, ROAD_GRADE_TARGET_LIMIT);
+      if (prevSlope !== null) {
+        slope = clamp(
+          slope,
+          prevSlope - ROAD_GRADE_CHANGE_TARGET_LIMIT,
+          prevSlope + ROAD_GRADE_CHANGE_TARGET_LIMIT
+        );
+      }
+      backward[i] = clamp(backward[i + 1] - slope * runs[i], 0, 1);
+      prevSlope = slope;
+    }
+
+    for (let i = 1; i < target.length - 1; i += 1) {
+      const t = totalRun > 1e-6 ? cumulative[i] / totalRun : i / Math.max(1, target.length - 1);
+      target[i] = clamp(forward[i] * (1 - t) + backward[i] * t, 0, 1);
+    }
+    target[0] = original[0];
+    target[target.length - 1] = original[original.length - 1];
+  } else {
+    let prevSlope = 0;
+    for (let i = 1; i < target.length; i += 1) {
+      let slope = (target[i] - target[i - 1]) / runs[i - 1];
+      slope = clamp(slope, -ROAD_GRADE_TARGET_LIMIT, ROAD_GRADE_TARGET_LIMIT);
+      slope = clamp(slope, prevSlope - ROAD_GRADE_CHANGE_TARGET_LIMIT, prevSlope + ROAD_GRADE_CHANGE_TARGET_LIMIT);
+      target[i] = clamp(target[i - 1] + slope * runs[i - 1], 0, 1);
+      prevSlope = slope;
+    }
+  }
+
+  for (let i = 0; i < target.length; i += 1) {
+    const idx = indices[i];
+    const originalElevation = originalElevations[idx] ?? original[i];
+    const minElevation = Math.max(0, originalElevation - ROAD_PROFILE_MAX_CUT);
+    const maxElevation = Math.min(1, originalElevation + ROAD_PROFILE_MAX_FILL);
+    target[i] = clamp(target[i], minElevation, maxElevation);
+  }
+
+  return target;
+};
+
+function gradeRoadNetworkTerrain(state: WorldState): RoadSurfaceMetrics {
+  const total = state.grid.totalTiles;
+  const originalElevations = new Float32Array(total);
+  for (let i = 0; i < total; i += 1) {
+    originalElevations[i] = state.tiles[i]?.elevation ?? 0;
+  }
+  if (state.tileRoadWallEdges.length !== total) {
+    state.tileRoadWallEdges = new Uint8Array(total);
+  } else {
+    state.tileRoadWallEdges.fill(0);
+  }
+
+  const fullMaskByIdx = new Uint8Array(total);
+  const landMaskByIdx = new Uint8Array(total);
+  const anchorMask = new Uint8Array(total);
+  const visitedEdges = new Uint8Array(total);
+
+  for (let idx = 0; idx < total; idx += 1) {
+    if (!isRoadLikeIndex(state, idx)) {
+      continue;
+    }
+    fullMaskByIdx[idx] = getRoadMaskAtIndex(state, idx, false);
+    if (isLandRoadLikeIndex(state, idx)) {
+      landMaskByIdx[idx] = getRoadMaskAtIndex(state, idx, true);
+    }
+  }
+
+  for (let idx = 0; idx < total; idx += 1) {
+    if (!isLandRoadLikeIndex(state, idx)) {
+      continue;
+    }
+    const tile = state.tiles[idx];
+    const landMask = landMaskByIdx[idx] ?? 0;
+    const fullMask = fullMaskByIdx[idx] ?? 0;
+    if (tile.type === "base" || countEdgeBits(landMask) !== 2 || touchesStructurePad(state, idx)) {
+      anchorMask[idx] = 1;
+      continue;
+    }
+    const x = idx % state.grid.cols;
+    const y = Math.floor(idx / state.grid.cols);
+    let attachedToBridge = false;
+    for (let i = 0; i < ROAD_EDGE_DIRS.length; i += 1) {
+      const dir = ROAD_EDGE_DIRS[i];
+      if ((fullMask & dir.bit) === 0) {
+        continue;
+      }
+      const nx = x + dir.dx;
+      const ny = y + dir.dy;
+      if (!inBounds(state.grid, nx, ny)) {
+        continue;
+      }
+      const neighborIdx = indexFor(state.grid, nx, ny);
+      if (state.tileRoadBridge[neighborIdx] > 0 || state.tiles[neighborIdx]?.type === "water") {
+        attachedToBridge = true;
+        break;
+      }
+    }
+    if (attachedToBridge) {
+      anchorMask[idx] = 1;
+    }
+  }
+
+  const segments: RoadSegmentTrace[] = [];
+  for (let idx = 0; idx < total; idx += 1) {
+    if (!isLandRoadLikeIndex(state, idx) || anchorMask[idx] === 0) {
+      continue;
+    }
+    const mask = landMaskByIdx[idx] ?? 0;
+    for (let dirIndex = 0; dirIndex < ROAD_EDGE_DIRS.length; dirIndex += 1) {
+      const dir = ROAD_EDGE_DIRS[dirIndex];
+      if ((mask & dir.bit) === 0 || (visitedEdges[idx] & dir.bit) !== 0) {
+        continue;
+      }
+      const segment = traceRoadSegment(state, idx, dirIndex, landMaskByIdx, anchorMask, visitedEdges);
+      if (segment.indices.length > 1) {
+        segments.push(segment);
+      }
+    }
+  }
+
+  for (let idx = 0; idx < total; idx += 1) {
+    if (!isLandRoadLikeIndex(state, idx)) {
+      continue;
+    }
+    const mask = landMaskByIdx[idx] ?? 0;
+    if (mask === 0) {
+      continue;
+    }
+    for (let dirIndex = 0; dirIndex < ROAD_EDGE_DIRS.length; dirIndex += 1) {
+      const dir = ROAD_EDGE_DIRS[dirIndex];
+      if ((mask & dir.bit) === 0 || (visitedEdges[idx] & dir.bit) !== 0) {
+        continue;
+      }
+      const segment = traceRoadSegment(state, idx, dirIndex, landMaskByIdx, anchorMask, visitedEdges);
+      if (segment.indices.length > 1) {
+        segments.push(segment);
+      }
+    }
+  }
+
+  for (let i = 0; i < segments.length; i += 1) {
+    const segment = segments[i];
+    const profile = buildRoadSegmentProfile(state, segment.indices, segment.loop, originalElevations);
+    for (let j = 0; j < segment.indices.length; j += 1) {
+      const idx = segment.indices[j];
+      const tile = state.tiles[idx];
+      if (!tile || tile.type === "water") {
+        continue;
+      }
+      tile.elevation = clamp(profile[j] ?? tile.elevation, 0, 1);
+    }
+  }
+
+  const shoulderSum = new Float32Array(total);
+  const shoulderWeight = new Float32Array(total);
+  for (let idx = 0; idx < total; idx += 1) {
+    if (!isLandRoadLikeIndex(state, idx)) {
+      continue;
+    }
+    const roadElevation = state.tiles[idx]?.elevation ?? 0;
+    const x = idx % state.grid.cols;
+    const y = Math.floor(idx / state.grid.cols);
+    for (let dy = -ROAD_SHOULDER_BLEND_RADIUS; dy <= ROAD_SHOULDER_BLEND_RADIUS; dy += 1) {
+      for (let dx = -ROAD_SHOULDER_BLEND_RADIUS; dx <= ROAD_SHOULDER_BLEND_RADIUS; dx += 1) {
+        if (dx === 0 && dy === 0) {
+          continue;
+        }
+        const nx = x + dx;
+        const ny = y + dy;
+        if (!inBounds(state.grid, nx, ny)) {
+          continue;
+        }
+        const nIdx = indexFor(state.grid, nx, ny);
+        const neighbor = state.tiles[nIdx];
+        if (!neighbor || neighbor.type === "water" || neighbor.type === "house" || neighbor.type === "base") {
+          continue;
+        }
+        if (isRoadLikeIndex(state, nIdx)) {
+          continue;
+        }
+        const dist = Math.hypot(dx, dy);
+        if (dist > ROAD_SHOULDER_BLEND_RADIUS + 0.01) {
+          continue;
+        }
+        const weight = dist <= 1.05 ? 0.34 : 0.16;
+        shoulderSum[nIdx] += roadElevation * weight;
+        shoulderWeight[nIdx] += weight;
+      }
+    }
+  }
+
+  for (let idx = 0; idx < total; idx += 1) {
+    const weight = shoulderWeight[idx] ?? 0;
+    if (weight <= 0) {
+      continue;
+    }
+    const tile = state.tiles[idx];
+    if (!tile || tile.type === "water" || tile.type === "house" || tile.type === "base" || isRoadLikeIndex(state, idx)) {
+      continue;
+    }
+    const blend = Math.min(0.68, weight);
+    const target = shoulderSum[idx] / Math.max(1e-6, weight);
+    const originalElevation = originalElevations[idx] ?? tile.elevation;
+    const nearRoad = blend >= 0.3;
+    const maxFill = nearRoad ? ROAD_SHOULDER_MAX_FILL_NEAR : ROAD_SHOULDER_MAX_FILL_FAR;
+    const maxCut = nearRoad ? ROAD_SHOULDER_MAX_CUT_NEAR : ROAD_SHOULDER_MAX_CUT_FAR;
+    const clampedTarget = clamp(target, originalElevation - maxCut, originalElevation + maxFill);
+    tile.elevation = clamp(tile.elevation * (1 - blend) + clampedTarget * blend, 0, 1);
+  }
+
+  for (let idx = 0; idx < total; idx += 1) {
+    if (!isLandRoadLikeIndex(state, idx)) {
+      continue;
+    }
+    const x = idx % state.grid.cols;
+    const y = Math.floor(idx / state.grid.cols);
+    const roadElevation = state.tiles[idx]?.elevation ?? 0;
+    for (let i = 0; i < ROAD_EDGE_DIRS.length; i += 1) {
+      const dir = ROAD_EDGE_DIRS[i];
+      if (dir.diagonal) {
+        continue;
+      }
+      const nx = x + dir.dx;
+      const ny = y + dir.dy;
+      if (!inBounds(state.grid, nx, ny)) {
+        continue;
+      }
+      const neighborIdx = indexFor(state.grid, nx, ny);
+      const neighbor = state.tiles[neighborIdx];
+      if (!neighbor || neighbor.type === "water" || neighbor.type === "house" || neighbor.type === "base") {
+        continue;
+      }
+      if (isRoadLikeIndex(state, neighborIdx)) {
+        continue;
+      }
+      const outsideX = nx + dir.dx;
+      const outsideY = ny + dir.dy;
+      const outsideElevation = inBounds(state.grid, outsideX, outsideY)
+        ? state.tiles[indexFor(state.grid, outsideX, outsideY)]?.elevation ?? neighbor.elevation
+        : neighbor.elevation;
+      const localDrop = roadElevation - neighbor.elevation;
+      const outerDrop = roadElevation - Math.min(neighbor.elevation, outsideElevation);
+      if (localDrop >= ROAD_WALL_DROP_THRESHOLD && outerDrop >= ROAD_WALL_OUTER_DROP_THRESHOLD) {
+        state.tileRoadWallEdges[idx] |= dir.bit;
+      }
+    }
+  }
+
+  return analyzeRoadSurfaceMetrics(state);
+}
+
 function flattenSettlementGround(state: WorldState): void {
   const tiles = state.tiles;
   const cols = state.grid.cols;
   const rows = state.grid.rows;
   const total = state.grid.totalTiles;
   const visited = new Uint8Array(total);
-  const flattened = new Uint8Array(total);
-  const softenSum = new Float32Array(total);
-  const softenCount = new Uint8Array(total);
   const queue = new Int32Array(total);
   const component: number[] = [];
-  const radius = 2;
-  const plateauRadius = 3;
-  const plateauRadiusSq = plateauRadius * plateauRadius;
-  const plateauInfluence = new Float32Array(total);
-  const plateauTarget = new Float32Array(total);
+  const ringInfluence = new Float32Array(total);
+  const ringTarget = new Float32Array(total);
+  const roadAdjustSum = new Float32Array(total);
+  const roadAdjustCount = new Uint8Array(total);
   const isStructureTile = (idx: number): boolean => {
     const type = tiles[idx].type;
     return type === "house" || type === "base" || state.structureMask[idx] === 1;
   };
+  const recordRingInfluence = (idx: number, weight: number, target: number): void => {
+    if (weight <= 0 || tiles[idx].type === "water" || tiles[idx].type === "road" || isStructureTile(idx)) {
+      return;
+    }
+    if (weight > ringInfluence[idx]) {
+      ringInfluence[idx] = weight;
+      ringTarget[idx] = target;
+      return;
+    }
+    if (Math.abs(weight - ringInfluence[idx]) <= 1e-6) {
+      ringTarget[idx] = (ringTarget[idx] + target) * 0.5;
+    }
+  };
+  let housePadReliefMax = 0;
+  let housePadReliefSum = 0;
+  let housePadCount = 0;
 
   for (let i = 0; i < total; i += 1) {
     if (visited[i]) {
@@ -2924,13 +3426,17 @@ function flattenSettlementGround(state: WorldState): void {
     tail += 1;
     visited[i] = 1;
     component.length = 0;
-    let sum = 0;
+    const samples: number[] = [];
+    let componentHasHouse = false;
 
     while (head < tail) {
       const idx = queue[head];
       head += 1;
       component.push(idx);
-      sum += tiles[idx].elevation;
+      samples.push(tiles[idx].elevation);
+      if (tiles[idx].type === "house") {
+        componentHasHouse = true;
+      }
       const x = idx % cols;
       const y = Math.floor(idx / cols);
       if (x > 0) {
@@ -2978,32 +3484,45 @@ function flattenSettlementGround(state: WorldState): void {
     if (component.length === 0) {
       continue;
     }
-    const target = clamp(sum / component.length, 0, 1);
+    samples.sort((a, b) => a - b);
+    const middle = Math.floor(samples.length / 2);
+    const target =
+      samples.length % 2 === 0
+        ? clamp((samples[middle - 1] + samples[middle]) * 0.5, 0, 1)
+        : clamp(samples[middle] ?? 0, 0, 1);
     component.forEach((idx) => {
       tiles[idx].elevation = target;
-      flattened[idx] = 1;
     });
 
     component.forEach((idx) => {
       const cx = idx % cols;
       const cy = Math.floor(idx / cols);
-      for (let dy = -radius; dy <= radius; dy += 1) {
-        const ny = cy + dy;
-        if (ny < 0 || ny >= rows) {
-          continue;
+      if (cx > 0) {
+        const nIdx = idx - 1;
+        if (tiles[nIdx].type === "road") {
+          roadAdjustSum[nIdx] += clamp(target - tiles[nIdx].elevation, -0.02, 0.02);
+          roadAdjustCount[nIdx] += 1;
         }
-        const maxDx = radius - Math.abs(dy);
-        const rowBase = ny * cols;
-        for (let dx = -maxDx; dx <= maxDx; dx += 1) {
-          const nx = cx + dx;
-          if (nx < 0 || nx >= cols) {
-            continue;
-          }
-          const nIdx = rowBase + nx;
-          if (tiles[nIdx].type === "road") {
-            tiles[nIdx].elevation = target;
-            flattened[nIdx] = 1;
-          }
+      }
+      if (cx < cols - 1) {
+        const nIdx = idx + 1;
+        if (tiles[nIdx].type === "road") {
+          roadAdjustSum[nIdx] += clamp(target - tiles[nIdx].elevation, -0.02, 0.02);
+          roadAdjustCount[nIdx] += 1;
+        }
+      }
+      if (cy > 0) {
+        const nIdx = idx - cols;
+        if (tiles[nIdx].type === "road") {
+          roadAdjustSum[nIdx] += clamp(target - tiles[nIdx].elevation, -0.02, 0.02);
+          roadAdjustCount[nIdx] += 1;
+        }
+      }
+      if (cy < rows - 1) {
+        const nIdx = idx + cols;
+        if (tiles[nIdx].type === "road") {
+          roadAdjustSum[nIdx] += clamp(target - tiles[nIdx].elevation, -0.02, 0.02);
+          roadAdjustCount[nIdx] += 1;
         }
       }
     });
@@ -3011,104 +3530,59 @@ function flattenSettlementGround(state: WorldState): void {
     component.forEach((idx) => {
       const cx = idx % cols;
       const cy = Math.floor(idx / cols);
-      for (let dy = -plateauRadius; dy <= plateauRadius; dy += 1) {
+      for (let dy = -2; dy <= 2; dy += 1) {
         const ny = cy + dy;
         if (ny < 0 || ny >= rows) {
           continue;
         }
-        for (let dx = -plateauRadius; dx <= plateauRadius; dx += 1) {
+        for (let dx = -2; dx <= 2; dx += 1) {
           const nx = cx + dx;
           if (nx < 0 || nx >= cols) {
             continue;
           }
-          const distSq = dx * dx + dy * dy;
-          if (distSq > plateauRadiusSq) {
+          const chebyshev = Math.max(Math.abs(dx), Math.abs(dy));
+          if (chebyshev === 0 || chebyshev > 2) {
             continue;
           }
           const nIdx = ny * cols + nx;
-          if (tiles[nIdx].type === "water") {
-            continue;
-          }
-          const dist = Math.sqrt(distSq);
-          const t = clamp(1 - dist / Math.max(0.01, plateauRadius), 0, 1);
-          if (t <= plateauInfluence[nIdx]) {
-            continue;
-          }
-          plateauInfluence[nIdx] = t;
-          plateauTarget[nIdx] = target;
+          recordRingInfluence(nIdx, chebyshev === 1 ? 0.75 : 0.35, target);
         }
       }
     });
+
+    if (componentHasHouse) {
+      let minElevation = Number.POSITIVE_INFINITY;
+      let maxElevation = Number.NEGATIVE_INFINITY;
+      component.forEach((idx) => {
+        minElevation = Math.min(minElevation, tiles[idx].elevation);
+        maxElevation = Math.max(maxElevation, tiles[idx].elevation);
+      });
+      const relief = Number.isFinite(minElevation) && Number.isFinite(maxElevation) ? maxElevation - minElevation : 0;
+      housePadReliefMax = Math.max(housePadReliefMax, relief);
+      housePadReliefSum += relief;
+      housePadCount += 1;
+    }
   }
 
   for (let i = 0; i < total; i += 1) {
-    if (tiles[i].type === "water") {
+    if (tiles[i].type === "water" || ringInfluence[i] <= 0) {
       continue;
     }
-    const t = plateauInfluence[i];
-    if (t <= 0) {
-      continue;
-    }
-    const target = plateauTarget[i];
+    const target = ringTarget[i];
+    const t = ringInfluence[i];
     tiles[i].elevation = clamp(tiles[i].elevation * (1 - t) + target * t, 0, 1);
-    if (t >= 0.35) {
-      flattened[i] = 1;
-    }
   }
 
   for (let i = 0; i < total; i += 1) {
-    if (!flattened[i]) {
+    const count = roadAdjustCount[i];
+    if (count === 0 || tiles[i].type !== "road") {
       continue;
     }
-    const x = i % cols;
-    const y = Math.floor(i / cols);
-    const target = tiles[i].elevation;
-    if (x > 0) {
-      const nIdx = i - 1;
-      const nType = tiles[nIdx].type;
-      if (!flattened[nIdx] && nType !== "water" && nType !== "road" && nType !== "house" && nType !== "base") {
-        softenSum[nIdx] += target;
-        softenCount[nIdx] += 1;
-      }
-    }
-    if (x < cols - 1) {
-      const nIdx = i + 1;
-      const nType = tiles[nIdx].type;
-      if (!flattened[nIdx] && nType !== "water" && nType !== "road" && nType !== "house" && nType !== "base") {
-        softenSum[nIdx] += target;
-        softenCount[nIdx] += 1;
-      }
-    }
-    if (y > 0) {
-      const nIdx = i - cols;
-      const nType = tiles[nIdx].type;
-      if (!flattened[nIdx] && nType !== "water" && nType !== "road" && nType !== "house" && nType !== "base") {
-        softenSum[nIdx] += target;
-        softenCount[nIdx] += 1;
-      }
-    }
-    if (y < rows - 1) {
-      const nIdx = i + cols;
-      const nType = tiles[nIdx].type;
-      if (!flattened[nIdx] && nType !== "water" && nType !== "road" && nType !== "house" && nType !== "base") {
-        softenSum[nIdx] += target;
-        softenCount[nIdx] += 1;
-      }
-    }
+    const delta = clamp(roadAdjustSum[i] / count, -0.02, 0.02);
+    tiles[i].elevation = clamp(tiles[i].elevation + delta, 0, 1);
   }
-
-  for (let i = 0; i < total; i += 1) {
-    const count = softenCount[i];
-    if (count === 0) {
-      continue;
-    }
-    const type = tiles[i].type;
-    if (type === "water" || type === "road" || type === "house" || type === "base") {
-      continue;
-    }
-    const avg = softenSum[i] / count;
-    tiles[i].elevation = clamp(tiles[i].elevation * 0.6 + avg * 0.4, 0, 1);
-  }
+  state.settlementPadReliefMax = Number(housePadReliefMax.toFixed(4));
+  state.settlementPadReliefMean = Number((housePadCount > 0 ? housePadReliefSum / housePadCount : 0).toFixed(4));
 }
 
 async function generateMapLegacy(
@@ -3577,6 +4051,11 @@ async function generateMapLegacy(
     state.tileRoadEdges = new Uint8Array(state.grid.totalTiles);
   } else {
     state.tileRoadEdges.fill(0);
+  }
+  if (state.tileRoadWallEdges.length !== state.grid.totalTiles) {
+    state.tileRoadWallEdges = new Uint8Array(state.grid.totalTiles);
+  } else {
+    state.tileRoadWallEdges.fill(0);
   }
 
   for (let y = -2; y <= 2; y += 1) {
@@ -4454,6 +4933,11 @@ export async function runSettlementPlacementStage(ctx: MapGenContext): Promise<v
   } else {
     state.tileRoadEdges.fill(0);
   }
+  if (state.tileRoadWallEdges.length !== state.grid.totalTiles) {
+    state.tileRoadWallEdges = new Uint8Array(state.grid.totalTiles);
+  } else {
+    state.tileRoadWallEdges.fill(0);
+  }
   for (let y = -2; y <= 2; y += 1) {
     for (let x = -2; x <= 2; x += 1) {
       const nx = state.basePoint.x + x;
@@ -4486,6 +4970,7 @@ export async function runSettlementPlacementStage(ctx: MapGenContext): Promise<v
 export async function runRoadNetworkStage(ctx: MapGenContext): Promise<void> {
   connectSettlementsByRoad(ctx.state, ctx.rng, ctx.settlementPlan ?? null);
   flattenSettlementGround(ctx.state);
+  const roadSurfaceMetrics = gradeRoadNetworkTerrain(ctx.state);
   assignForestComposition(ctx.state);
   if (ctx.riverMask) {
     for (let i = 0; i < ctx.state.tiles.length; i += 1) {
@@ -4501,6 +4986,13 @@ export async function runRoadNetworkStage(ctx: MapGenContext): Promise<void> {
       tile.treeType = null;
       tile.isBase = false;
     }
+  }
+  if (DEBUG_TERRAIN) {
+    const stats = getRoadGenerationStats();
+    const finalMetrics: RoadSurfaceMetrics = roadSurfaceMetrics;
+    console.log(
+      `[roadsurface] maxGrade=${finalMetrics.maxRoadGrade.toFixed(3)} maxCrossfall=${finalMetrics.maxRoadCrossfall.toFixed(3)} maxGradeChange=${finalMetrics.maxRoadGradeChange.toFixed(3)} wallEdges=${finalMetrics.wallEdgeCount} routedMaxGrade=${stats.maxRealizedGrade.toFixed(3)} routedMaxCrossfall=${stats.maxRealizedCrossfall.toFixed(3)} routedMaxGradeChange=${stats.maxRealizedGradeChange.toFixed(3)}`
+    );
   }
   await ctx.reportStage("Connecting roads...", 1);
   await emitStageSnapshot(ctx, "roads:connect");

@@ -217,6 +217,8 @@ export interface Unit {
 
   attackTarget: Point | null;
 
+  sprayTarget: Point | null;
+
   }
 
   
@@ -476,22 +478,35 @@ export type RiskTier = "low" | "moderate" | "high" | "extreme";
 
 export type ScoreEventSeverity = "positive" | "negative" | "info";
 
+export type ScoreEventLane = "extinguished" | "property" | "lives" | "info";
+
 export type ScoreEvent = {
   id: number;
-  message: string;
+  lane: ScoreEventLane;
+  deltaCount: number;
+  deltaPoints: number;
   severity: ScoreEventSeverity;
   remainingSeconds: number;
+  detail?: string;
 };
 
 export type ScoringSeasonSummary = {
-  burnoutPoints: number;
-  squirtBonusPoints: number;
-  otherPositivePoints: number;
+  extinguishedCount: number;
+  extinguishPoints: number;
+  propertyDamageCount: number;
+  propertyDamagePenalties: number;
+  destroyedHouseCount: number;
+  criticalAssetLossCount: number;
   houseLossPenalties: number;
+  criticalAssetLossPenalties: number;
+  livesLostCount: number;
+  civilianLivesLost: number;
+  firefighterLivesLost: number;
+  lifeLossPenalties: number;
   civilianLifeLossPenalties: number;
   firefighterLifeLossPenalties: number;
-  criticalAssetLossPenalties: number;
-  netBasePoints: number;
+  positiveBasePoints: number;
+  multipliedPositivePoints: number;
   seasonStartScore: number;
   seasonFinalScore: number;
   seasonDeltaScore: number;
@@ -528,13 +543,21 @@ export type ScoringState = {
   dayAccumulator: number;
   hadHouseLossToday: boolean;
   hadLifeLossToday: boolean;
-  seasonBurnoutPoints: number;
-  seasonSquirtBonusPoints: number;
-  seasonOtherPositivePoints: number;
+  seasonExtinguishedCount: number;
+  seasonExtinguishPoints: number;
+  seasonPropertyDamageCount: number;
+  seasonPropertyDamagePenalties: number;
+  seasonDestroyedHouseCount: number;
+  seasonCriticalAssetLossCount: number;
   seasonHouseLossPenalties: number;
+  seasonCriticalAssetLossPenalties: number;
+  seasonLivesLostCount: number;
+  seasonCivilianLivesLost: number;
+  seasonFirefighterLivesLost: number;
+  seasonLifeLossPenalties: number;
   seasonCivilianLifeLossPenalties: number;
   seasonFirefighterLifeLossPenalties: number;
-  seasonCriticalAssetLossPenalties: number;
+  seasonMultipliedPositivePoints: number;
   seasonStartScore: number;
   seasonFinalScore: number;
   seasonApprovalMultIntegral: number;

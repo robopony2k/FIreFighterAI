@@ -12,6 +12,7 @@ const THREE_TEST_ASSETS_PATH = path.join(repoRoot, "src/render/threeTestAssets.t
 const OUTPUT_PATH = path.join(repoRoot, "src/core/buildingFootprints.ts");
 
 const readText = async (filePath) => fs.readFile(filePath, "utf8");
+const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
 
 const parseNumberConst = (source, name) => {
   const pattern = new RegExp(`export const ${name} = ([0-9]+(?:\\.[0-9]+)?);`);
@@ -512,12 +513,17 @@ const run = async () => {
       continue;
     }
     variants.forEach((variant) => {
+      const sizeX = variant.size.x / tileSize;
+      const sizeY = variant.size.y / tileSize;
+      const sizeZ = variant.size.z / tileSize;
       houseVariants.push({
         source: housePath,
         name: variant.name ?? "",
-        sizeX: formatNumber(variant.size.x / tileSize),
-        sizeY: formatNumber(variant.size.y / tileSize),
-        sizeZ: formatNumber(variant.size.z / tileSize)
+        sizeX: formatNumber(sizeX),
+        sizeY: formatNumber(sizeY),
+        sizeZ: formatNumber(sizeZ),
+        parcelX: formatNumber(clamp(sizeX * 2.4, 1.25, 2.2)),
+        parcelZ: formatNumber(clamp(sizeZ * 2.4, 1, 1.8))
       });
     });
   }
@@ -532,6 +538,8 @@ const run = async () => {
   lines.push("  sizeX: number;");
   lines.push("  sizeY: number;");
   lines.push("  sizeZ: number;");
+  lines.push("  parcelX: number;");
+  lines.push("  parcelZ: number;");
   lines.push("};");
   lines.push("");
   lines.push("export const HOUSE_VARIANTS: HouseVariantFootprint[] = [");
@@ -541,7 +549,9 @@ const run = async () => {
     lines.push(`    name: ${JSON.stringify(variant.name)},`);
     lines.push(`    sizeX: ${variant.sizeX},`);
     lines.push(`    sizeY: ${variant.sizeY},`);
-    lines.push(`    sizeZ: ${variant.sizeZ}`);
+    lines.push(`    sizeZ: ${variant.sizeZ},`);
+    lines.push(`    parcelX: ${variant.parcelX},`);
+    lines.push(`    parcelZ: ${variant.parcelZ}`);
     lines.push("  },");
   });
   lines.push("];");

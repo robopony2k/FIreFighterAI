@@ -25,7 +25,7 @@ const toNumberOrNull = (value: unknown): number | null => {
   return Number.isFinite(parsed) ? parsed : null;
 };
 
-const sanitizeOverrides = (input: unknown): FuelProfileOverrides => {
+export const sanitizeFuelProfileOverrides = (input: unknown): FuelProfileOverrides => {
   if (!isRecord(input)) {
     return {};
   }
@@ -50,19 +50,25 @@ const sanitizeOverrides = (input: unknown): FuelProfileOverrides => {
 };
 
 export function loadFuelProfileOverrides(): FuelProfileOverrides {
+  if (typeof localStorage === "undefined") {
+    return {};
+  }
   const raw = localStorage.getItem(FUEL_PROFILE_KEY);
   if (!raw) {
     return {};
   }
   try {
     const parsed = JSON.parse(raw) as unknown;
-    return sanitizeOverrides(parsed);
+    return sanitizeFuelProfileOverrides(parsed);
   } catch {
     return {};
   }
 }
 
 export function saveFuelProfileOverrides(overrides: FuelProfileOverrides): void {
-  const sanitized = sanitizeOverrides(overrides);
+  if (typeof localStorage === "undefined") {
+    return;
+  }
+  const sanitized = sanitizeFuelProfileOverrides(overrides);
   localStorage.setItem(FUEL_PROFILE_KEY, JSON.stringify(sanitized));
 }

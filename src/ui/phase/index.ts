@@ -4,10 +4,9 @@ import {
   FIREBREAK_COST_PER_TILE,
   RECRUIT_FIREFIGHTER_COST,
   RECRUIT_TRUCK_COST,
-  SCORE_BURNOUT_POINTS_PER_FUEL,
+  SCORE_EXTINGUISHED_TILE_POINTS,
   SCORE_HOUSE_LOSS_PENALTY,
   SCORE_LIFE_LOSS_PENALTY,
-  SCORE_SQUIRT_BONUS_RATE,
   TRAINING_COST,
   TRUCK_CAPACITY
 } from "../../core/config.js";
@@ -29,21 +28,26 @@ export type PhaseUiApi = {
 
 const buildBudgetReportData = (world: WorldState): BudgetReportData => {
   const summary = world.scoring.seasonSummary;
-  const burnoutPoints = summary ? summary.burnoutPoints : world.scoring.seasonBurnoutPoints;
-  const squirtBonusPoints = summary ? summary.squirtBonusPoints : world.scoring.seasonSquirtBonusPoints;
-  const otherPositivePoints = summary ? summary.otherPositivePoints : world.scoring.seasonOtherPositivePoints;
+  const extinguishedCount = summary ? summary.extinguishedCount : world.scoring.seasonExtinguishedCount;
+  const extinguishPoints = summary ? summary.extinguishPoints : world.scoring.seasonExtinguishPoints;
+  const propertyDamageCount = summary ? summary.propertyDamageCount : world.scoring.seasonPropertyDamageCount;
+  const propertyDamagePenalties = summary ? summary.propertyDamagePenalties : world.scoring.seasonPropertyDamagePenalties;
+  const destroyedHouseCount = summary ? summary.destroyedHouseCount : world.scoring.seasonDestroyedHouseCount;
+  const criticalAssetLossCount = summary ? summary.criticalAssetLossCount : world.scoring.seasonCriticalAssetLossCount;
   const houseLossPenalties = summary ? summary.houseLossPenalties : world.scoring.seasonHouseLossPenalties;
+  const criticalAssetLossPenalties = summary
+    ? summary.criticalAssetLossPenalties
+    : world.scoring.seasonCriticalAssetLossPenalties;
+  const livesLostCount = summary ? summary.livesLostCount : world.scoring.seasonLivesLostCount;
+  const civilianLivesLost = summary ? summary.civilianLivesLost : world.scoring.seasonCivilianLivesLost;
+  const firefighterLivesLost = summary ? summary.firefighterLivesLost : world.scoring.seasonFirefighterLivesLost;
+  const lifeLossPenalties = summary ? summary.lifeLossPenalties : world.scoring.seasonLifeLossPenalties;
   const civilianLifeLossPenalties = summary
     ? summary.civilianLifeLossPenalties
     : world.scoring.seasonCivilianLifeLossPenalties;
   const firefighterLifeLossPenalties = summary
     ? summary.firefighterLifeLossPenalties
     : world.scoring.seasonFirefighterLifeLossPenalties;
-  const criticalAssetLossPenalties = summary
-    ? summary.criticalAssetLossPenalties
-    : world.scoring.seasonCriticalAssetLossPenalties;
-  const totalLossPenalties =
-    houseLossPenalties + civilianLifeLossPenalties + firefighterLifeLossPenalties + criticalAssetLossPenalties;
   const seasonStartScore = summary ? summary.seasonStartScore : world.scoring.seasonStartScore;
   const seasonFinalScore = summary ? summary.seasonFinalScore : world.scoring.score;
   const seasonDeltaScore = summary ? summary.seasonDeltaScore : seasonFinalScore - seasonStartScore;
@@ -56,180 +60,165 @@ const buildBudgetReportData = (world: WorldState): BudgetReportData => {
   const finalTotalMult = summary ? summary.finalTotalMult : world.scoring.totalMult;
   const finalApprovalTier = summary ? summary.finalApprovalTier : world.scoring.approvalTier;
   const finalRiskTier = summary ? summary.finalRiskTier : world.scoring.riskTier;
-  const houseDays = summary ? summary.finalNoHouseLossDays : world.scoring.noHouseLossDays;
-  const lifeDays = summary ? summary.finalNoLifeLossDays : world.scoring.noLifeLossDays;
-  const housesLostUnits = SCORE_HOUSE_LOSS_PENALTY > 0 ? Math.round(houseLossPenalties / SCORE_HOUSE_LOSS_PENALTY) : 0;
-  const civilianLossUnits =
-    SCORE_LIFE_LOSS_PENALTY > 0 ? Math.round(civilianLifeLossPenalties / SCORE_LIFE_LOSS_PENALTY) : 0;
-  const firefighterLossUnits =
-    SCORE_LIFE_LOSS_PENALTY > 0 ? Math.round(firefighterLifeLossPenalties / SCORE_LIFE_LOSS_PENALTY) : 0;
-  const burnoutFuelUnits =
-    SCORE_BURNOUT_POINTS_PER_FUEL > 0 ? burnoutPoints / SCORE_BURNOUT_POINTS_PER_FUEL : 0;
-  const activeUnits = world.units.length;
-  const rosterFirefighters = world.roster.filter((entry) => entry.kind === "firefighter" && entry.status !== "lost").length;
-  const rosterTrucks = world.roster.filter((entry) => entry.kind === "truck" && entry.status !== "lost").length;
-  const baseScore = burnoutPoints + squirtBonusPoints + otherPositivePoints;
-  const multiplierSum = finalDifficultyMult + finalApprovalMult + finalStreakMult + finalRiskMult;
-  const annualScore = seasonDeltaScore;
-  const nettScore = annualScore + totalLossPenalties;
-  const computedMultiplier = Math.abs(baseScore) > 0.0001 ? nettScore / baseScore : finalTotalMult;
-  const multiplierUsed = Number.isFinite(computedMultiplier) ? computedMultiplier : finalTotalMult;
-  const previousYearScore = seasonStartScore;
-  const currentYearsScore = seasonFinalScore;
-  const balanceScore = currentYearsScore - previousYearScore;
+  const positiveBasePoints = summary ? summary.positiveBasePoints : world.scoring.seasonExtinguishPoints;
+  const multipliedPositivePoints = summary
+    ? summary.multipliedPositivePoints
+    : world.scoring.seasonMultipliedPositivePoints;
 
   return {
-    summary: `Year ${world.year} review: score sources, penalties, and carryover.`,
+    summary: `Year ${world.year} ledger: extinguish gains, losses, multiplier, and carry-over.`,
     continueLabel: "Continue",
-    sections: [
+    multiplierPills: [
       {
-        title: "Base Score",
-        rows: [
-          {
-            id: "burnout-points",
-            label: "Burnout points",
-            value: burnoutPoints,
-            format: "signed_points",
-            detail: `${burnoutFuelUnits.toFixed(1)} fuel x ${SCORE_BURNOUT_POINTS_PER_FUEL} pts`,
-            tone: "positive"
-          },
-          {
-            id: "squirt-bonus",
-            label: "Squirt bonus",
-            value: squirtBonusPoints,
-            format: "signed_points",
-            detail: `${(SCORE_SQUIRT_BONUS_RATE * 100).toFixed(0)}% assist on suppressed tiles`,
-            tone: "positive"
-          },
-          {
-            id: "other-positive",
-            label: "Other positives",
-            value: otherPositivePoints,
-            format: "signed_points",
-            detail: `Units ${activeUnits} | roster ${rosterFirefighters + rosterTrucks}`,
-            tone: otherPositivePoints >= 0 ? "positive" : "negative"
-          },
-          {
-            id: "net-base",
-            label: "Base score",
-            value: baseScore,
-            format: "signed_points",
-            detail: "Burnout + squirt + other",
-            tone: baseScore >= 0 ? "positive" : "negative"
-          }
-        ]
+        id: "difficulty",
+        label: "DIFF",
+        value: `x${finalDifficultyMult.toFixed(2)}`
       },
       {
-        title: "Multiplier",
-        rows: [
-          {
-            id: "mult-total",
-            label: "Total multiplier",
-            value: multiplierUsed,
-            format: "multiplier",
-            detail: `D ${finalDifficultyMult.toFixed(2)} | A ${finalApprovalMult.toFixed(2)} | S ${finalStreakMult.toFixed(
-              2
-            )} | R ${finalRiskMult.toFixed(2)} | sum ${multiplierSum.toFixed(2)} | avg A/R ${averageApprovalMult.toFixed(
-              2
-            )}/${averageRiskMult.toFixed(2)} | ${finalApprovalTier}/${finalRiskTier} | streak ${houseDays}d/${lifeDays}d`
-          }
-        ]
+        id: "approval",
+        label: `APP ${finalApprovalTier}`,
+        value: `x${finalApprovalMult.toFixed(2)}`
       },
       {
-        title: "NETT",
-        rows: [
-          {
-            id: "nett-base-mult",
-            label: "Net after multiplier",
-            value: nettScore,
-            format: "points",
-            units: "pts",
-            detail: `${Math.round(baseScore).toLocaleString()} x ${multiplierUsed.toFixed(2)}`,
-            tone: nettScore >= 0 ? "positive" : "negative"
-          }
-        ]
+        id: "streak",
+        label: "STREAK",
+        value: `x${finalStreakMult.toFixed(2)}`
       },
       {
-        title: "Expenses",
-        rows: [
-          {
-            id: "expense-house",
-            label: "House loss penalties",
-            value: -houseLossPenalties,
-            format: "signed_points",
-            detail: `${housesLostUnits} x ${SCORE_HOUSE_LOSS_PENALTY.toLocaleString()}`,
-            tone: houseLossPenalties > 0 ? "negative" : "neutral"
-          },
-          {
-            id: "expense-civilian",
-            label: "Civilian life penalties",
-            value: -civilianLifeLossPenalties,
-            format: "signed_points",
-            detail: `${civilianLossUnits} x ${SCORE_LIFE_LOSS_PENALTY.toLocaleString()}`,
-            tone: civilianLifeLossPenalties > 0 ? "negative" : "neutral"
-          },
-          {
-            id: "expense-firefighter",
-            label: "Firefighter life penalties",
-            value: -firefighterLifeLossPenalties,
-            format: "signed_points",
-            detail: `${firefighterLossUnits} x ${SCORE_LIFE_LOSS_PENALTY.toLocaleString()}`,
-            tone: firefighterLifeLossPenalties > 0 ? "negative" : "neutral"
-          },
-          {
-            id: "expense-assets",
-            label: "Critical asset penalties",
-            value: -criticalAssetLossPenalties,
-            format: "signed_points",
-            detail: "Usually 0 unless configured",
-            tone: criticalAssetLossPenalties > 0 ? "negative" : "neutral"
-          },
-          {
-            id: "expense-total",
-            label: "Total expenses",
-            value: -totalLossPenalties,
-            format: "signed_points",
-            detail: "All negative lines above",
-            tone: totalLossPenalties > 0 ? "negative" : "neutral"
-          }
-        ]
+        id: "risk",
+        label: `RISK ${finalRiskTier.toUpperCase()}`,
+        value: `x${finalRiskMult.toFixed(2)}`
       },
       {
-        title: "Annual Score",
-        rows: [
-          {
-            id: "annual-score",
-            label: "Annual score",
-            value: annualScore,
-            format: "signed_points",
-            detail: `${Math.round(nettScore).toLocaleString()} - ${Math.round(totalLossPenalties).toLocaleString()}`,
-            tone: annualScore >= 0 ? "positive" : "negative"
-          },
-          {
-            id: "annual-prev",
-            label: "Previous year",
-            value: previousYearScore,
-            format: "points",
-            units: "pts",
-            detail: "Carry-in"
-          },
-          {
-            id: "annual-current",
-            label: "Current year",
-            value: currentYearsScore,
-            format: "points",
-            units: "pts",
-            detail: "Carry-out"
-          },
-          {
-            id: "annual-balance",
-            label: "Balance",
-            value: balanceScore,
-            format: "signed_points",
-            detail: "Current - previous",
-            tone: balanceScore >= 0 ? "positive" : "negative"
-          }
-        ]
+        id: "total",
+        label: "TOTAL",
+        value: `x${finalTotalMult.toFixed(2)}`,
+        tone: "positive"
+      }
+    ],
+    rails: [
+      {
+        id: "extinguished",
+        label: "Extinguished",
+        count: extinguishedCount,
+        formula: `${extinguishedCount.toLocaleString()} x ${SCORE_EXTINGUISHED_TILE_POINTS.toLocaleString()} pts`,
+        points: extinguishPoints,
+        tone: "positive"
+      },
+      {
+        id: "property",
+        label: "Property Damage",
+        count: propertyDamageCount,
+        formula: `${propertyDamageCount.toLocaleString()} structures impacted`,
+        points: -propertyDamagePenalties,
+        tone: "negative"
+      },
+      {
+        id: "lives",
+        label: "Lives Lost",
+        count: livesLostCount,
+        formula: `${livesLostCount.toLocaleString()} lives lost`,
+        points: -lifeLossPenalties,
+        tone: "negative"
+      }
+    ],
+    propertyDetails: [
+      {
+        id: "houses",
+        label: "Houses",
+        count: destroyedHouseCount,
+        points: -houseLossPenalties,
+        detail: `${destroyedHouseCount.toLocaleString()} x ${SCORE_HOUSE_LOSS_PENALTY.toLocaleString()}`,
+        tone: houseLossPenalties > 0 ? "negative" : "neutral"
+      },
+      {
+        id: "assets",
+        label: "Critical Assets",
+        count: criticalAssetLossCount,
+        points: -criticalAssetLossPenalties,
+        detail:
+          criticalAssetLossCount > 0
+            ? `${criticalAssetLossCount.toLocaleString()} x tracked penalty`
+            : "No asset-loss producer configured in this pass.",
+        tone: criticalAssetLossPenalties > 0 ? "negative" : "neutral"
+      }
+    ],
+    lifeDetails: [
+      {
+        id: "civilians",
+        label: "Civilians",
+        count: civilianLivesLost,
+        points: -civilianLifeLossPenalties,
+        detail: `${civilianLivesLost.toLocaleString()} x ${SCORE_LIFE_LOSS_PENALTY.toLocaleString()}`,
+        tone: civilianLifeLossPenalties > 0 ? "negative" : "neutral"
+      },
+      {
+        id: "firefighters",
+        label: "Firefighters",
+        count: firefighterLivesLost,
+        points: -firefighterLifeLossPenalties,
+        detail: `${firefighterLivesLost.toLocaleString()} x ${SCORE_LIFE_LOSS_PENALTY.toLocaleString()}`,
+        tone: firefighterLifeLossPenalties > 0 ? "negative" : "neutral"
+      }
+    ],
+    stageTotals: [
+      {
+        id: "positive-base",
+        label: "Base Positives",
+        value: positiveBasePoints,
+        detail: `${extinguishedCount.toLocaleString()} extinguished tiles`,
+        format: "points",
+        tone: "positive"
+      },
+      {
+        id: "multiplied-positive",
+        label: "After Multiplier",
+        value: multipliedPositivePoints,
+        detail: `${Math.round(positiveBasePoints).toLocaleString()} x ${finalTotalMult.toFixed(2)}x | avg A/R ${averageApprovalMult.toFixed(
+          2
+        )}/${averageRiskMult.toFixed(2)}`,
+        format: "points",
+        tone: "positive"
+      },
+      {
+        id: "property-loss",
+        label: "Property Damage",
+        value: -propertyDamagePenalties,
+        detail: `${propertyDamageCount.toLocaleString()} structure losses`,
+        format: "signed_points",
+        tone: propertyDamagePenalties > 0 ? "negative" : "neutral"
+      },
+      {
+        id: "life-loss",
+        label: "Lives Lost",
+        value: -lifeLossPenalties,
+        detail: `${livesLostCount.toLocaleString()} life losses`,
+        format: "signed_points",
+        tone: lifeLossPenalties > 0 ? "negative" : "neutral"
+      },
+      {
+        id: "annual-score",
+        label: "Annual Score",
+        value: seasonDeltaScore,
+        detail: `${Math.round(multipliedPositivePoints).toLocaleString()} - ${Math.round(propertyDamagePenalties).toLocaleString()} - ${Math.round(
+          lifeLossPenalties
+        ).toLocaleString()}`,
+        format: "signed_points",
+        tone: seasonDeltaScore >= 0 ? "positive" : "negative"
+      },
+      {
+        id: "carry-in",
+        label: "Carry In",
+        value: seasonStartScore,
+        detail: "Career score entering fire season",
+        format: "points"
+      },
+      {
+        id: "carry-out",
+        label: "Carry Out",
+        value: seasonFinalScore,
+        detail: "Career score after annual ledger closes",
+        format: "points"
       }
     ]
   };
@@ -322,11 +311,17 @@ export const initPhaseUI = (container: HTMLElement): PhaseUiApi => {
       nextApprovalTier: world.scoring.nextApprovalTier,
       nextApprovalThreshold01: world.scoring.nextApprovalThreshold01,
       nextTierProgress01: world.scoring.nextTierProgress01,
+      extinguishedCount: world.scoring.seasonExtinguishedCount,
+      propertyDamageCount: world.scoring.seasonPropertyDamageCount,
+      livesLostCount: world.scoring.seasonLivesLostCount,
       events: world.scoring.events.map((event) => ({
         id: event.id,
-        message: event.message,
+        lane: event.lane,
+        deltaCount: event.deltaCount,
+        deltaPoints: event.deltaPoints,
         severity: event.severity,
-        remainingSeconds: event.remainingSeconds
+        remainingSeconds: event.remainingSeconds,
+        detail: event.detail
       }))
     });
     const budgetReportData = buildBudgetReportData(world);

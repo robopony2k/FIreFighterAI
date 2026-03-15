@@ -35,6 +35,8 @@ import { gateInput, isInputAllowed } from "../inputGate.js";
 import type { InteractionMode, InputAction } from "../types.js";
 import { DEFAULT_MAP_SIZE, DEFAULT_RUN_OPTIONS, DEFAULT_RUN_SEED } from "../../run-config.js";
 import type { NewRunConfig } from "../../run-config.js";
+import { loadFuelProfileOverrides } from "../../../persistence/fuelProfiles.js";
+import { loadLastRunConfig, saveLastRunConfig } from "../../../persistence/lastRunConfig.js";
 import { bindCanvasMouseHandlers } from "./canvasMouse.js";
 import { DEBUG_CELL_TOGGLE_KEY, DEBUG_IGNITE_TOGGLE_KEY, DEBUG_TYPE_EVENT } from "./debugTools.js";
 import { isEditableTarget } from "./keyboard.js";
@@ -53,6 +55,39 @@ type HudMusicControls = {
   toggleMuted: () => void;
   setVolume: (value: number) => void;
   onChange: (listener: (settings: HudMusicSettings) => void) => () => void;
+};
+
+const cloneRunConfig = (config: NewRunConfig): NewRunConfig => ({
+  seed: Number.isFinite(config.seed) ? Math.floor(config.seed) : DEFAULT_RUN_SEED,
+  mapSize: config.mapSize,
+  characterId: config.characterId,
+  callsign: config.callsign,
+  options: {
+    ...DEFAULT_RUN_OPTIONS,
+    ...config.options,
+    mapGen: { ...DEFAULT_RUN_OPTIONS.mapGen, ...config.options.mapGen },
+    fire: { ...DEFAULT_RUN_OPTIONS.fire, ...config.options.fire },
+    fuelProfiles: { ...(config.options.fuelProfiles ?? {}) }
+  }
+});
+
+const resolveRunConfig = (defaults: NewRunConfig, persisted?: NewRunConfig | null): NewRunConfig => {
+  if (!persisted) {
+    return cloneRunConfig(defaults);
+  }
+  return {
+    seed: persisted.seed,
+    mapSize: persisted.mapSize,
+    characterId: persisted.characterId,
+    callsign: persisted.callsign.trim().length > 0 ? persisted.callsign : defaults.callsign,
+    options: {
+      ...defaults.options,
+      ...persisted.options,
+      mapGen: { ...defaults.options.mapGen, ...persisted.options.mapGen },
+      fire: { ...defaults.options.fire, ...persisted.options.fire },
+      fuelProfiles: { ...(persisted.options.fuelProfiles ?? {}) }
+    }
+  };
 };
 
 const getInteractionMode = (state: WorldState, inputState: InputState): InteractionMode => {
@@ -291,33 +326,36 @@ export const bindPhaseUi = ({
     fuelProfileGrid: document.getElementById("fuelProfileGrid") as HTMLDivElement
   };
 
-  let lastRunConfig: NewRunConfig = {
+  const defaultRunConfig: NewRunConfig = {
     seed: DEFAULT_RUN_SEED,
     mapSize: DEFAULT_MAP_SIZE,
     options: {
       ...DEFAULT_RUN_OPTIONS,
       mapGen: { ...DEFAULT_RUN_OPTIONS.mapGen },
       fire: { ...DEFAULT_RUN_OPTIONS.fire },
-      fuelProfiles: { ...DEFAULT_RUN_OPTIONS.fuelProfiles }
+      fuelProfiles: { ...loadFuelProfileOverrides() }
     },
     characterId: state.campaign.characterId,
     callsign: state.campaign.callsign
   };
+  let lastRunConfig: NewRunConfig = resolveRunConfig(defaultRunConfig, loadLastRunConfig());
 
   const launchSession = async (config: NewRunConfig, openThreeTest = startThreeOnConfirm): Promise<void> => {
-    lastRunConfig = config;
+    const nextConfig = resolveRunConfig(defaultRunConfig, cloneRunConfig(config));
+    lastRunConfig = nextConfig;
+    saveLastRunConfig(nextConfig);
     characterRefs.characterScreen.classList.add("hidden");
     hideStartMenuPanel();
     state.paused = false;
-    await onNewRun(config);
+    await onNewRun(nextConfig);
     if (openThreeTest) {
-      await onThreeTest(config);
+      await onThreeTest(nextConfig);
     }
   };
 
   const characterSelect = initCharacterSelect(characterRefs, state, (config) => {
     void launchSession(config);
-  });
+  }, lastRunConfig);
 
   if (startNewRunButton) {
     listenElement(startNewRunButton, "click", () => {

@@ -31,12 +31,13 @@ import { buildMapGenControls } from "../ui/mapgen-controls.js";
 import { getOverlayRefs, updateOverlay } from "../ui/overlay.js";
 import { saveLeaderboard } from "../persistence/leaderboard.js";
 import { loadFuelProfileOverrides } from "../persistence/fuelProfiles.js";
+import { loadLastRunConfig } from "../persistence/lastRunConfig.js";
 import { randomizeWind } from "../sim/wind.js";
 import { endGame, setGameEventBus, setPhase, stepSim } from "../sim/index.js";
 import { initScoringForRun } from "../sim/scoring.js";
 import { seedStartingRoster } from "../sim/units.js";
 import { PHASES } from "../core/time.js";
-import { DEFAULT_MAP_SIZE, DEFAULT_RUN_OPTIONS, normalizeFireSettings } from "../ui/run-config.js";
+import { DEFAULT_MAP_SIZE, DEFAULT_RUN_OPTIONS, DEFAULT_RUN_SEED, normalizeFireSettings } from "../ui/run-config.js";
 import type { NewRunConfig } from "../ui/run-config.js";
 import type { GameUiSnapshot } from "../ui/phase/types.js";
 import { createRenderBackend, resolveRenderBackend, type RenderBackend } from "./renderBackend.js";
@@ -93,6 +94,39 @@ export type AppRuntime = {
   resetGame: (config: NewRunConfig) => Promise<void>;
   openThreeTest: (config: NewRunConfig) => Promise<void>;
   dispose: () => void;
+};
+
+const cloneRunConfig = (config: NewRunConfig): NewRunConfig => ({
+  seed: Number.isFinite(config.seed) ? Math.floor(config.seed) : DEFAULT_RUN_SEED,
+  mapSize: config.mapSize,
+  characterId: config.characterId,
+  callsign: config.callsign,
+  options: {
+    ...DEFAULT_RUN_OPTIONS,
+    ...config.options,
+    mapGen: { ...DEFAULT_RUN_OPTIONS.mapGen, ...config.options.mapGen },
+    fire: { ...DEFAULT_RUN_OPTIONS.fire, ...config.options.fire },
+    fuelProfiles: { ...(config.options.fuelProfiles ?? {}) }
+  }
+});
+
+const resolveRunConfig = (defaults: NewRunConfig, persisted?: NewRunConfig | null): NewRunConfig => {
+  if (!persisted) {
+    return cloneRunConfig(defaults);
+  }
+  return {
+    seed: persisted.seed,
+    mapSize: persisted.mapSize,
+    characterId: persisted.characterId,
+    callsign: persisted.callsign.trim().length > 0 ? persisted.callsign : defaults.callsign,
+    options: {
+      ...defaults.options,
+      ...persisted.options,
+      mapGen: { ...defaults.options.mapGen, ...persisted.options.mapGen },
+      fire: { ...defaults.options.fire, ...persisted.options.fire },
+      fuelProfiles: { ...(persisted.options.fuelProfiles ?? {}) }
+    }
+  };
 };
 
 export const createAppRuntime = (): AppRuntime => {
@@ -152,6 +186,7 @@ export const createAppRuntime = (): AppRuntime => {
   const gameEvents = createGameEventBus();
   const rng = new RNG(initialSeed);
   const persistedFuelProfiles = loadFuelProfileOverrides();
+  const persistedLastRunConfig = loadLastRunConfig();
   const uiAudio = createUiAudioController();
   const musicController = createMusicController();
   type HudMusicSettings = { muted: boolean; volume: number };
@@ -1119,7 +1154,7 @@ export const createAppRuntime = (): AppRuntime => {
     updateOverlay(overlayRefs, uiState);
   };
   
-  const initialRunConfig: NewRunConfig = {
+  const defaultRunConfig: NewRunConfig = {
     seed: initialSeed,
     mapSize: activeMapSize,
     options: {
@@ -1131,6 +1166,7 @@ export const createAppRuntime = (): AppRuntime => {
     characterId: state.campaign.characterId,
     callsign: state.campaign.callsign
   };
+  const initialRunConfig: NewRunConfig = resolveRunConfig(defaultRunConfig, persistedLastRunConfig);
 
   const renderBackend = createRenderBackend(selectedRenderBackend, {
     renderLegacy2d: (alpha: number) => {

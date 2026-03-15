@@ -130,6 +130,7 @@ export interface WorldState {
   tileRiverMask: Uint8Array;
   tileRoadBridge: Uint8Array;
   tileRoadEdges: Uint8Array;
+  tileRoadWallEdges: Uint8Array;
   tileRiverBed: Float32Array;
   tileRiverSurface: Float32Array;
   tileRiverStepStrength: Float32Array;
@@ -236,6 +237,10 @@ export interface WorldState {
   yearLivesLost: number;
 
   totalHouses: number;
+  settlementRequestedHouses: number;
+  settlementPlacedHouses: number;
+  settlementPadReliefMax: number;
+  settlementPadReliefMean: number;
 
   destroyedHouses: number;
 
@@ -323,13 +328,21 @@ const createInitialScoringState = (grid: Grid): ScoringState => ({
   dayAccumulator: 0,
   hadHouseLossToday: false,
   hadLifeLossToday: false,
-  seasonBurnoutPoints: 0,
-  seasonSquirtBonusPoints: 0,
-  seasonOtherPositivePoints: 0,
+  seasonExtinguishedCount: 0,
+  seasonExtinguishPoints: 0,
+  seasonPropertyDamageCount: 0,
+  seasonPropertyDamagePenalties: 0,
+  seasonDestroyedHouseCount: 0,
+  seasonCriticalAssetLossCount: 0,
   seasonHouseLossPenalties: 0,
+  seasonCriticalAssetLossPenalties: 0,
+  seasonLivesLostCount: 0,
+  seasonCivilianLivesLost: 0,
+  seasonFirefighterLivesLost: 0,
+  seasonLifeLossPenalties: 0,
   seasonCivilianLifeLossPenalties: 0,
   seasonFirefighterLifeLossPenalties: 0,
-  seasonCriticalAssetLossPenalties: 0,
+  seasonMultipliedPositivePoints: 0,
   seasonStartScore: 0,
   seasonFinalScore: 0,
   seasonApprovalMultIntegral: 0,
@@ -396,6 +409,7 @@ export function createInitialState(seed: number, grid: Grid): WorldState {
     tileRiverMask: new Uint8Array(grid.totalTiles),
     tileRoadBridge: new Uint8Array(grid.totalTiles),
     tileRoadEdges: new Uint8Array(grid.totalTiles),
+    tileRoadWallEdges: new Uint8Array(grid.totalTiles),
     tileRiverBed: new Float32Array(grid.totalTiles).fill(Number.NaN),
     tileRiverSurface: new Float32Array(grid.totalTiles).fill(Number.NaN),
     tileRiverStepStrength: new Float32Array(grid.totalTiles),
@@ -533,6 +547,10 @@ export function createInitialState(seed: number, grid: Grid): WorldState {
     yearLivesLost: 0,
 
     totalHouses: 0,
+    settlementRequestedHouses: 0,
+    settlementPlacedHouses: 0,
+    settlementPadReliefMax: 0,
+    settlementPadReliefMean: 0,
 
     destroyedHouses: 0,
 
@@ -608,6 +626,7 @@ export function syncTileSoA(state: WorldState): void {
     state.tileFire.length !== total ||
     state.tileRoadBridge.length !== total ||
     state.tileRoadEdges.length !== total ||
+    state.tileRoadWallEdges.length !== total ||
     state.tileTownId.length !== total ||
     state.tileStructure.length !== total
   ) {
@@ -632,6 +651,7 @@ export function syncTileSoA(state: WorldState): void {
     state.tileRiverMask = new Uint8Array(total);
     state.tileRoadBridge = new Uint8Array(total);
     state.tileRoadEdges = new Uint8Array(total);
+    state.tileRoadWallEdges = new Uint8Array(total);
     state.tileRiverBed = new Float32Array(total).fill(Number.NaN);
     state.tileRiverSurface = new Float32Array(total).fill(Number.NaN);
     state.tileRiverStepStrength = new Float32Array(total);

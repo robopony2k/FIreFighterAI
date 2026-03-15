@@ -346,14 +346,21 @@ const showSeasonOverlay = (state: WorldState): void => {
     details.push(`Land burned: ${burnedHectares} ha.`);
     details.push(`Lives lost: ${lifeLossTotal}.`);
     if (seasonSummary) {
-      const totalLosses =
-        seasonSummary.houseLossPenalties +
-        seasonSummary.civilianLifeLossPenalties +
-        seasonSummary.firefighterLifeLossPenalties +
-        seasonSummary.criticalAssetLossPenalties;
-      details.push(`Burnout points: +${Math.round(seasonSummary.burnoutPoints).toLocaleString()}.`);
-      details.push(`Squirt bonus: +${Math.round(seasonSummary.squirtBonusPoints).toLocaleString()}.`);
-      details.push(`Loss penalties: -${Math.round(totalLosses).toLocaleString()}.`);
+      details.push(
+        `Extinguished: ${seasonSummary.extinguishedCount.toLocaleString()} for +${Math.round(
+          seasonSummary.extinguishPoints
+        ).toLocaleString()}.`
+      );
+      details.push(
+        `Property damage: ${seasonSummary.propertyDamageCount.toLocaleString()} for -${Math.round(
+          seasonSummary.propertyDamagePenalties
+        ).toLocaleString()}.`
+      );
+      details.push(
+        `Lives lost: ${seasonSummary.livesLostCount.toLocaleString()} for -${Math.round(
+          seasonSummary.lifeLossPenalties
+        ).toLocaleString()}.`
+      );
       details.push(
         `Final multiplier: ${seasonSummary.finalTotalMult.toFixed(2)}x (${seasonSummary.finalDifficultyMult.toFixed(
           2
@@ -361,7 +368,7 @@ const showSeasonOverlay = (state: WorldState): void => {
           2
         )} x ${seasonSummary.finalRiskMult.toFixed(2)}).`
       );
-      details.push(`Season score delta: ${Math.round(seasonSummary.seasonDeltaScore).toLocaleString()}.`);
+      details.push(`Annual score: ${Math.round(seasonSummary.seasonDeltaScore).toLocaleString()}.`);
       details.push(`Career score: ${Math.round(state.scoring.score).toLocaleString()}.`);
     }
     details.push("Dismiss or wait to close.");

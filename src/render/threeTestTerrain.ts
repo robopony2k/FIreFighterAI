@@ -8,7 +8,7 @@ import {
   TILE_COLOR_RGB,
   TILE_SIZE
 } from "../core/config.js";
-import { HOUSE_VARIANTS } from "../core/buildingFootprints.js";
+import { getHouseFootprintBounds, pickHouseFootprint } from "../core/houseFootprints.js";
 import { TILE_ID_TO_TYPE, TILE_TYPE_IDS } from "../core/state.js";
 import { TreeType, TREE_TYPE_IDS, type Town } from "../core/types.js";
 import type { WorldState } from "../core/state.js";
@@ -27,6 +27,7 @@ export type TerrainSample = {
   riverMask?: Uint8Array;
   roadBridgeMask?: Uint8Array;
   roadEdges?: Uint8Array;
+  roadWallEdges?: Uint8Array;
   riverBed?: Float32Array;
   riverSurface?: Float32Array;
   riverStepStrength?: Float32Array;
@@ -286,8 +287,16 @@ const TOWN_LABEL_LIFT_METERS = 100;
 const ENABLE_TOWN_LABEL_SPRITES = false;
 export const ROAD_SURFACE_WIDTH = 0.5;
 const ROAD_SURFACE_OFFSET = 0.001;
+const ROAD_DECK_SURFACE_LIFT = 0.008;
+const ROAD_DECK_CROSSFALL_THRESHOLD = 0.045;
+const ROAD_DECK_RELIEF_THRESHOLD = 0.08;
+const ROAD_DECK_CAP_SIZE = ROAD_SURFACE_WIDTH * 0.92;
 export const ROAD_TEX_SCALE = 12;
 const ROAD_TEX_MAX_SIZE = 4096;
+const ROAD_WALL_TOP_INSET = 0.14;
+const ROAD_WALL_OUTSET = 0.28;
+const ROAD_WALL_BOTTOM_DROP = 0.03;
+const ROAD_WALL_MIN_HEIGHT = 0.025;
 const BRIDGE_DECK_WIDTH = ROAD_SURFACE_WIDTH + 0.08;
 const BRIDGE_SURFACE_WIDTH = ROAD_SURFACE_WIDTH;
 const BRIDGE_DECK_THICKNESS = 0.08;
@@ -1339,42 +1348,6 @@ export const buildPalette = (): number[][] =>
 const noiseAt = (value: number): number => {
   const s = Math.sin(value * 12.9898 + 78.233) * 43758.5453;
   return s - Math.floor(s);
-};
-
-const HOUSE_FOOTPRINT_EPS = 1e-4;
-
-const pickHouseFootprint = (seed: number) => {
-  if (HOUSE_VARIANTS.length === 0) {
-    return { source: "", name: "default", sizeX: 1, sizeY: 1, sizeZ: 1 };
-  }
-  const index = Math.floor(noiseAt(seed + 6.1) * HOUSE_VARIANTS.length);
-  return HOUSE_VARIANTS[Math.min(HOUSE_VARIANTS.length - 1, Math.max(0, index))];
-};
-
-const getHouseFootprintDims = (rotation: number, footprint: { sizeX: number; sizeZ: number }) => {
-  const rotate = Math.abs(Math.sin(rotation)) > 0.5;
-  const width = rotate ? footprint.sizeZ : footprint.sizeX;
-  const depth = rotate ? footprint.sizeX : footprint.sizeZ;
-  return {
-    width: Math.max(0.01, width),
-    depth: Math.max(0.01, depth)
-  };
-};
-
-const getHouseFootprintBounds = (
-  tileX: number,
-  tileY: number,
-  rotation: number,
-  footprint: { sizeX: number; sizeZ: number }
-) => {
-  const { width, depth } = getHouseFootprintDims(rotation, footprint);
-  const centerX = tileX + 0.5;
-  const centerY = tileY + 0.5;
-  const minX = Math.floor(centerX - width / 2);
-  const maxX = Math.floor(centerX + width / 2 - HOUSE_FOOTPRINT_EPS);
-  const minY = Math.floor(centerY - depth / 2);
-  const maxY = Math.floor(centerY + depth / 2 - HOUSE_FOOTPRINT_EPS);
-  return { minX, maxX, minY, maxY, width, depth };
 };
 
 const pickHouseRotation = (
@@ -2445,7 +2418,7 @@ const buildWaterfallInstances = (
         downstreamMin = Math.min(downstreamMin, h);
       }
       const localDrop = center - downstreamMin;
-      if (localDrop < minDrop * 0.9 || localDrop > WATERFALL_MAX_DROP) {
+      if (localDrop < minDrop * 0.9) {
         continue;
       }
       const x0 = toWorldX(col);
@@ -5597,6 +5570,345 @@ const buildBridgeOverlayGeometry = (
   return geometry;
 };
 
+const buildRoadDeckMesh = (
+  sample: TerrainSample,
+  width: number,
+  depth: number,
+  heightScale: number,
+  roadOverlay: THREE.Texture | null,
+  roadId: number,
+  baseId: number,
+  heightAtTileCoord: (tileX: number, tileY: number) => number
+): THREE.Group | null => {
+  const tileTypes = sample.tileTypes;
+  const roadEdges = sample.roadEdges;
+  if (!tileTypes || !roadEdges) {
+    return null;
+  }
+  const bridgeMask = sample.roadBridgeMask;
+  const wallMask = sample.roadWallEdges;
+  const { cols, rows, elevations } = sample;
+  const total = cols * rows;
+  if (roadEdges.length !== total) {
+    return null;
+  }
+
+  const safeWidth = Math.max(1e-5, width);
+  const safeDepth = Math.max(1e-5, depth);
+  const halfRoadWidth = ROAD_SURFACE_WIDTH * 0.5;
+  const halfCapSize = ROAD_DECK_CAP_SIZE * 0.5;
+  const edgeToWorldX = (edgeX: number): number => (edgeX / Math.max(1, cols) - 0.5) * width;
+  const edgeToWorldZ = (edgeY: number): number => (edgeY / Math.max(1, rows) - 0.5) * depth;
+  const getIndex = (x: number, y: number): number => y * cols + x;
+  const inBounds = (x: number, y: number): boolean => x >= 0 && y >= 0 && x < cols && y < rows;
+  const countBits = (mask: number): number => {
+    let count = 0;
+    for (let bits = mask; bits !== 0; bits &= bits - 1) {
+      count += 1;
+    }
+    return count;
+  };
+  const isStraightMask = (mask: number): boolean =>
+    mask === (ROAD_EDGE_N | ROAD_EDGE_S) ||
+    mask === (ROAD_EDGE_E | ROAD_EDGE_W) ||
+    mask === (ROAD_EDGE_NE | ROAD_EDGE_SW) ||
+    mask === (ROAD_EDGE_NW | ROAD_EDGE_SE);
+  const isBridgeIndex = (idx: number): boolean => (bridgeMask?.[idx] ?? 0) > 0;
+  const isRoadSurfaceTile = (idx: number): boolean => {
+    const type = tileTypes[idx];
+    return (type === roadId || type === baseId) && !isBridgeIndex(idx);
+  };
+  const getRoadMaskAtIndex = (idx: number): number => {
+    if (!isRoadSurfaceTile(idx)) {
+      return 0;
+    }
+    const stored = roadEdges[idx] ?? 0;
+    if (stored !== 0) {
+      let sanitized = 0;
+      const tileX = idx % cols;
+      const tileY = Math.floor(idx / cols);
+      for (let i = 0; i < ROAD_EDGE_DIRS.length; i += 1) {
+        const dir = ROAD_EDGE_DIRS[i];
+        if ((stored & dir.bit) === 0) {
+          continue;
+        }
+        const nx = tileX + dir.dx;
+        const ny = tileY + dir.dy;
+        if (!inBounds(nx, ny)) {
+          continue;
+        }
+        const neighborIdx = getIndex(nx, ny);
+        if (isRoadSurfaceTile(neighborIdx)) {
+          sanitized |= dir.bit;
+        }
+      }
+      if (sanitized !== 0) {
+        return sanitized;
+      }
+    }
+    const tileX = idx % cols;
+    const tileY = Math.floor(idx / cols);
+    let mask = 0;
+    for (let i = 0; i < ROAD_EDGE_DIRS.length; i += 1) {
+      const dir = ROAD_EDGE_DIRS[i];
+      const nx = tileX + dir.dx;
+      const ny = tileY + dir.dy;
+      if (!inBounds(nx, ny)) {
+        continue;
+      }
+      const neighborIdx = getIndex(nx, ny);
+      if (isRoadSurfaceTile(neighborIdx)) {
+        mask |= dir.bit;
+      }
+    }
+    return mask;
+  };
+  const getElevationAt = (x: number, y: number, fallback: number): number => {
+    if (!inBounds(x, y)) {
+      return fallback;
+    }
+    return elevations[getIndex(x, y)] ?? fallback;
+  };
+  const computeCrossfallAtSegment = (fromX: number, fromY: number, toX: number, toY: number): number => {
+    const dx = Math.sign(toX - fromX);
+    const dy = Math.sign(toY - fromY);
+    if (dx === 0 && dy === 0) {
+      return 0;
+    }
+    const fromElevation = elevations[getIndex(fromX, fromY)] ?? 0;
+    const toElevation = elevations[getIndex(toX, toY)] ?? fromElevation;
+    const centerElevation = (fromElevation + toElevation) * 0.5;
+    const perpX = -dy;
+    const perpY = dx;
+    const leftA = getElevationAt(fromX + perpX, fromY + perpY, centerElevation);
+    const leftB = getElevationAt(toX + perpX, toY + perpY, centerElevation);
+    const rightA = getElevationAt(fromX - perpX, fromY - perpY, centerElevation);
+    const rightB = getElevationAt(toX - perpX, toY - perpY, centerElevation);
+    return Math.abs((leftA + leftB) * 0.5 - (rightA + rightB) * 0.5) * 0.5;
+  };
+  const roadCenterY = (tileX: number, tileY: number): number =>
+    heightAtTileCoord(tileX + 0.5, tileY + 0.5) * heightScale + ROAD_SURFACE_OFFSET + ROAD_DECK_SURFACE_LIFT;
+
+  const needsDeck = new Uint8Array(total);
+  for (let idx = 0; idx < total; idx += 1) {
+    if (!isRoadSurfaceTile(idx)) {
+      continue;
+    }
+    if ((wallMask?.[idx] ?? 0) !== 0) {
+      needsDeck[idx] = 1;
+      continue;
+    }
+    const tileX = idx % cols;
+    const tileY = Math.floor(idx / cols);
+    const centerElevation = elevations[idx] ?? 0;
+    let localRelief = 0;
+    for (let dy = -1; dy <= 1; dy += 1) {
+      for (let dx = -1; dx <= 1; dx += 1) {
+        if (dx === 0 && dy === 0) {
+          continue;
+        }
+        const nx = tileX + dx;
+        const ny = tileY + dy;
+        if (!inBounds(nx, ny)) {
+          continue;
+        }
+        const neighborIdx = getIndex(nx, ny);
+        if (isRoadSurfaceTile(neighborIdx)) {
+          continue;
+        }
+        localRelief = Math.max(localRelief, Math.abs(centerElevation - (elevations[neighborIdx] ?? centerElevation)));
+      }
+    }
+    if (localRelief >= ROAD_DECK_RELIEF_THRESHOLD) {
+      needsDeck[idx] = 1;
+    }
+  }
+
+  for (let idx = 0; idx < total; idx += 1) {
+    if (!isRoadSurfaceTile(idx)) {
+      continue;
+    }
+    const mask = getRoadMaskAtIndex(idx);
+    if (mask === 0) {
+      continue;
+    }
+    const tileX = idx % cols;
+    const tileY = Math.floor(idx / cols);
+    for (let i = 0; i < ROAD_EDGE_DIRS.length; i += 1) {
+      const dir = ROAD_EDGE_DIRS[i];
+      if ((mask & dir.bit) === 0) {
+        continue;
+      }
+      const nx = tileX + dir.dx;
+      const ny = tileY + dir.dy;
+      if (!inBounds(nx, ny)) {
+        continue;
+      }
+      const neighborIdx = getIndex(nx, ny);
+      if (!isRoadSurfaceTile(neighborIdx) || neighborIdx < idx) {
+        continue;
+      }
+      if (computeCrossfallAtSegment(tileX, tileY, nx, ny) >= ROAD_DECK_CROSSFALL_THRESHOLD) {
+        needsDeck[idx] = 1;
+        needsDeck[neighborIdx] = 1;
+      }
+    }
+  }
+
+  const positions: number[] = [];
+  const uvs: number[] = [];
+  const indices: number[] = [];
+  const addQuad = (
+    ax: number,
+    ay: number,
+    az: number,
+    bx: number,
+    by: number,
+    bz: number,
+    cx: number,
+    cy: number,
+    cz: number,
+    dx: number,
+    dy: number,
+    dz: number
+  ): void => {
+    const base = positions.length / 3;
+    positions.push(ax, ay, az, bx, by, bz, cx, cy, cz, dx, dy, dz);
+    uvs.push(
+      ax / safeWidth + 0.5,
+      0.5 - az / safeDepth,
+      bx / safeWidth + 0.5,
+      0.5 - bz / safeDepth,
+      cx / safeWidth + 0.5,
+      0.5 - cz / safeDepth,
+      dx / safeWidth + 0.5,
+      0.5 - dz / safeDepth
+    );
+    indices.push(base, base + 1, base + 2, base, base + 2, base + 3);
+  };
+
+  for (let idx = 0; idx < total; idx += 1) {
+    if (!isRoadSurfaceTile(idx) || needsDeck[idx] === 0) {
+      continue;
+    }
+    const mask = getRoadMaskAtIndex(idx);
+    const tileX = idx % cols;
+    const tileY = Math.floor(idx / cols);
+    const centerX = edgeToWorldX(tileX + 0.5);
+    const centerZ = edgeToWorldZ(tileY + 0.5);
+    const centerY = roadCenterY(tileX, tileY);
+    const connections = countBits(mask);
+    if (connections !== 2 || !isStraightMask(mask)) {
+      addQuad(
+        centerX - halfCapSize,
+        centerY,
+        centerZ - halfCapSize,
+        centerX + halfCapSize,
+        centerY,
+        centerZ - halfCapSize,
+        centerX + halfCapSize,
+        centerY,
+        centerZ + halfCapSize,
+        centerX - halfCapSize,
+        centerY,
+        centerZ + halfCapSize
+      );
+    }
+    for (let i = 0; i < ROAD_EDGE_DIRS.length; i += 1) {
+      const dir = ROAD_EDGE_DIRS[i];
+      if ((mask & dir.bit) === 0) {
+        continue;
+      }
+      const nx = tileX + dir.dx;
+      const ny = tileY + dir.dy;
+      if (!inBounds(nx, ny)) {
+        continue;
+      }
+      const neighborIdx = getIndex(nx, ny);
+      if (!isRoadSurfaceTile(neighborIdx) || needsDeck[neighborIdx] === 0 || neighborIdx < idx) {
+        continue;
+      }
+      const nextX = edgeToWorldX(nx + 0.5);
+      const nextZ = edgeToWorldZ(ny + 0.5);
+      const nextY = roadCenterY(nx, ny);
+      const tangentX = nextX - centerX;
+      const tangentZ = nextZ - centerZ;
+      const tangentLength = Math.hypot(tangentX, tangentZ);
+      if (tangentLength <= 1e-6) {
+        continue;
+      }
+      const rightX = -tangentZ / tangentLength;
+      const rightZ = tangentX / tangentLength;
+      addQuad(
+        centerX - rightX * halfRoadWidth,
+        centerY,
+        centerZ - rightZ * halfRoadWidth,
+        centerX + rightX * halfRoadWidth,
+        centerY,
+        centerZ + rightZ * halfRoadWidth,
+        nextX + rightX * halfRoadWidth,
+        nextY,
+        nextZ + rightZ * halfRoadWidth,
+        nextX - rightX * halfRoadWidth,
+        nextY,
+        nextZ - rightZ * halfRoadWidth
+      );
+    }
+  }
+
+  if (positions.length === 0 || indices.length === 0) {
+    return null;
+  }
+
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute("position", new THREE.Float32BufferAttribute(new Float32Array(positions), 3));
+  geometry.setAttribute("uv", new THREE.Float32BufferAttribute(new Float32Array(uvs), 2));
+  geometry.setIndex(indices);
+  geometry.computeVertexNormals();
+
+  const roadColor = TILE_COLOR_RGB.road;
+  const deckMaterial = new THREE.MeshStandardMaterial({
+    color: new THREE.Color(
+      clamp((roadColor.r + 6) / 255, 0, 1),
+      clamp((roadColor.g + 5) / 255, 0, 1),
+      clamp((roadColor.b + 4) / 255, 0, 1)
+    ),
+    roughness: 0.9,
+    metalness: 0.04
+  });
+  const baseMesh = new THREE.Mesh(geometry, deckMaterial);
+  baseMesh.castShadow = true;
+  baseMesh.receiveShadow = true;
+
+  const group = new THREE.Group();
+  group.userData.roadDeck = true;
+  group.add(baseMesh);
+
+  if (roadOverlay) {
+    const overlayMaterial = new THREE.MeshStandardMaterial({
+      map: roadOverlay,
+      color: new THREE.Color(0xffffff),
+      transparent: true,
+      depthWrite: false,
+      roughness: 0.9,
+      metalness: 0.05,
+      side: THREE.DoubleSide,
+      polygonOffset: true,
+      polygonOffsetFactor: -2,
+      polygonOffsetUnits: -2
+    });
+    overlayMaterial.alphaTest = 0.02;
+    const overlayMesh = new THREE.Mesh(geometry.clone(), overlayMaterial);
+    overlayMesh.castShadow = false;
+    overlayMesh.receiveShadow = true;
+    overlayMesh.renderOrder = 2;
+    overlayMesh.userData.roadDeck = true;
+    group.add(overlayMesh);
+  }
+
+  return group;
+};
+
 const buildBridgePolylineLengths = (points: THREE.Vector3[]): { cumulative: number[]; total: number } => {
   const cumulative = new Array<number>(points.length).fill(0);
   let total = 0;
@@ -6248,6 +6560,169 @@ const buildBridgeDeckMesh = (
   return bridgeGroup;
 };
 
+const buildRoadRetainingWallMesh = (
+  sample: TerrainSample,
+  width: number,
+  depth: number,
+  heightScale: number,
+  roadId: number,
+  baseId: number,
+  heightAtTileCoord: (tileX: number, tileY: number) => number
+): THREE.Mesh | null => {
+  const wallMask = sample.roadWallEdges;
+  const tileTypes = sample.tileTypes;
+  if (!wallMask || wallMask.length === 0 || !tileTypes) {
+    return null;
+  }
+  const { cols, rows } = sample;
+  const total = cols * rows;
+  if (wallMask.length !== total) {
+    return null;
+  }
+
+  const isRoadSurfaceTile = (idx: number): boolean => {
+    const type = tileTypes[idx];
+    return type === roadId || type === baseId;
+  };
+  const edgeToWorldX = (edgeX: number): number => (edgeX / Math.max(1, cols) - 0.5) * width;
+  const edgeToWorldZ = (edgeY: number): number => (edgeY / Math.max(1, rows) - 0.5) * depth;
+  const positions: number[] = [];
+  const indices: number[] = [];
+  const addQuad = (
+    ax: number,
+    ay: number,
+    az: number,
+    bx: number,
+    by: number,
+    bz: number,
+    cx: number,
+    cy: number,
+    cz: number,
+    dx: number,
+    dy: number,
+    dz: number
+  ): void => {
+    const base = positions.length / 3;
+    positions.push(ax, ay, az, bx, by, bz, cx, cy, cz, dx, dy, dz);
+    indices.push(base, base + 1, base + 2, base, base + 2, base + 3);
+  };
+
+  const resolveEdgeCoords = (
+    tileX: number,
+    tileY: number,
+    bit: number
+  ): {
+    topA: { x: number; y: number };
+    topB: { x: number; y: number };
+    bottomA: { x: number; y: number };
+    bottomB: { x: number; y: number };
+  } | null => {
+    if (bit === ROAD_EDGE_N) {
+      return {
+        topA: { x: tileX, y: tileY + ROAD_WALL_TOP_INSET },
+        topB: { x: tileX + 1, y: tileY + ROAD_WALL_TOP_INSET },
+        bottomA: { x: tileX, y: tileY - ROAD_WALL_OUTSET },
+        bottomB: { x: tileX + 1, y: tileY - ROAD_WALL_OUTSET }
+      };
+    }
+    if (bit === ROAD_EDGE_E) {
+      return {
+        topA: { x: tileX + 1 - ROAD_WALL_TOP_INSET, y: tileY },
+        topB: { x: tileX + 1 - ROAD_WALL_TOP_INSET, y: tileY + 1 },
+        bottomA: { x: tileX + 1 + ROAD_WALL_OUTSET, y: tileY },
+        bottomB: { x: tileX + 1 + ROAD_WALL_OUTSET, y: tileY + 1 }
+      };
+    }
+    if (bit === ROAD_EDGE_S) {
+      return {
+        topA: { x: tileX + 1, y: tileY + 1 - ROAD_WALL_TOP_INSET },
+        topB: { x: tileX, y: tileY + 1 - ROAD_WALL_TOP_INSET },
+        bottomA: { x: tileX + 1, y: tileY + 1 + ROAD_WALL_OUTSET },
+        bottomB: { x: tileX, y: tileY + 1 + ROAD_WALL_OUTSET }
+      };
+    }
+    if (bit === ROAD_EDGE_W) {
+      return {
+        topA: { x: tileX + ROAD_WALL_TOP_INSET, y: tileY + 1 },
+        topB: { x: tileX + ROAD_WALL_TOP_INSET, y: tileY },
+        bottomA: { x: tileX - ROAD_WALL_OUTSET, y: tileY + 1 },
+        bottomB: { x: tileX - ROAD_WALL_OUTSET, y: tileY }
+      };
+    }
+    return null;
+  };
+
+  for (let idx = 0; idx < total; idx += 1) {
+    const mask = wallMask[idx] ?? 0;
+    if (mask === 0 || !isRoadSurfaceTile(idx)) {
+      continue;
+    }
+    const tileX = idx % cols;
+    const tileY = Math.floor(idx / cols);
+    for (let i = 0; i < 4; i += 1) {
+      const dir = ROAD_EDGE_DIRS[i];
+      if ((mask & dir.bit) === 0) {
+        continue;
+      }
+      const coords = resolveEdgeCoords(tileX, tileY, dir.bit);
+      if (!coords) {
+        continue;
+      }
+      const topAY = heightAtTileCoord(coords.topA.x, coords.topA.y) * heightScale + ROAD_SURFACE_OFFSET;
+      const topBY = heightAtTileCoord(coords.topB.x, coords.topB.y) * heightScale + ROAD_SURFACE_OFFSET;
+      const bottomAY = Math.min(
+        topAY - ROAD_WALL_BOTTOM_DROP,
+        heightAtTileCoord(coords.bottomA.x, coords.bottomA.y) * heightScale - 0.01
+      );
+      const bottomBY = Math.min(
+        topBY - ROAD_WALL_BOTTOM_DROP,
+        heightAtTileCoord(coords.bottomB.x, coords.bottomB.y) * heightScale - 0.01
+      );
+      if (topAY - bottomAY < ROAD_WALL_MIN_HEIGHT && topBY - bottomBY < ROAD_WALL_MIN_HEIGHT) {
+        continue;
+      }
+      addQuad(
+        edgeToWorldX(coords.topA.x),
+        topAY,
+        edgeToWorldZ(coords.topA.y),
+        edgeToWorldX(coords.topB.x),
+        topBY,
+        edgeToWorldZ(coords.topB.y),
+        edgeToWorldX(coords.bottomB.x),
+        bottomBY,
+        edgeToWorldZ(coords.bottomB.y),
+        edgeToWorldX(coords.bottomA.x),
+        bottomAY,
+        edgeToWorldZ(coords.bottomA.y)
+      );
+    }
+  }
+
+  if (positions.length === 0 || indices.length === 0) {
+    return null;
+  }
+
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+  geometry.setIndex(indices);
+  geometry.computeVertexNormals();
+  const roadColor = TILE_COLOR_RGB.road;
+  const material = new THREE.MeshStandardMaterial({
+    color: new THREE.Color(
+      clamp((roadColor.r - 34) / 255, 0, 1),
+      clamp((roadColor.g - 38) / 255, 0, 1),
+      clamp((roadColor.b - 42) / 255, 0, 1)
+    ),
+    roughness: 0.92,
+    metalness: 0.03
+  });
+  const mesh = new THREE.Mesh(geometry, material);
+  mesh.castShadow = true;
+  mesh.receiveShadow = true;
+  mesh.userData.roadRetainingWall = true;
+  return mesh;
+};
+
 const buildWaterSurfaceHeights = (
   sampleHeights: Float32Array,
   supportMask: Uint8Array,
@@ -6813,8 +7288,6 @@ export const buildTerrainMesh = (
   const oceanMask = sample.tileTypes ? buildOceanMask(cols, rows, sample.tileTypes, waterId) : null;
   const riverMask = sample.riverMask ?? null;
   const waterLevel = computeWaterLevel(sample, waterId, oceanMask, riverMask);
-  const parcelTargetElev = sample.tileTypes ? new Float32Array(cols * rows).fill(Number.NaN) : null;
-  let baseTargetElev: number | null = null;
   const sampleTypes = buildSampleTypeMap(
     sample,
     sampleCols,
@@ -6986,66 +7459,14 @@ export const buildTerrainMesh = (
   const elmId = TREE_TYPE_IDS[TreeType.Elm];
   const houseMask = sample.tileTypes
     ? (() => {
-        const mask = new Uint8Array(cols * rows);
-        const tiles = sample.tileTypes!;
-        const elevations = sample.elevations;
-        const applyFlatten = (bounds: { minX: number; maxX: number; minY: number; maxY: number }, targetElev: number) => {
-          const minX = clamp(bounds.minX, 0, cols - 1);
-          const maxX = clamp(bounds.maxX, 0, cols - 1);
-          const minY = clamp(bounds.minY, 0, rows - 1);
-          const maxY = clamp(bounds.maxY, 0, rows - 1);
-          const startCol = clamp(Math.floor(minX / step), 0, sampleCols - 1);
-          const endCol = clamp(Math.floor(maxX / step), 0, sampleCols - 1);
-          const startRow = clamp(Math.floor(minY / step), 0, sampleRows - 1);
-          const endRow = clamp(Math.floor(maxY / step), 0, sampleRows - 1);
-          for (let row = startRow; row <= endRow; row += 1) {
-            const rowBase = row * sampleCols;
-            for (let col = startCol; col <= endCol; col += 1) {
-              sampleHeights[rowBase + col] = targetElev;
-            }
-          }
-        };
-        const computeAverageElev = (bounds: { minX: number; maxX: number; minY: number; maxY: number }): number => {
-          const minX = clamp(bounds.minX, 0, cols - 1);
-          const maxX = clamp(bounds.maxX, 0, cols - 1);
-          const minY = clamp(bounds.minY, 0, rows - 1);
-          const maxY = clamp(bounds.maxY, 0, rows - 1);
-          let sum = 0;
-          let count = 0;
-          for (let y = minY; y <= maxY; y += 1) {
-            const rowBase = y * cols;
-            for (let x = minX; x <= maxX; x += 1) {
-              sum += elevations[rowBase + x] ?? 0;
-              count += 1;
-            }
-          }
-          if (count === 0) {
-            return 0;
-          }
-          return clamp(sum / count, 0, 1);
-        };
-
-        let baseMinX = cols;
-        let baseMaxX = -1;
-        let baseMinY = rows;
-        let baseMaxY = -1;
-        let baseSum = 0;
-        let baseCount = 0;
+      const mask = new Uint8Array(cols * rows);
+      const tiles = sample.tileTypes!;
 
         for (let tileY = 0; tileY < rows; tileY += 1) {
           const rowBase = tileY * cols;
           for (let tileX = 0; tileX < cols; tileX += 1) {
             const idx = rowBase + tileX;
             const type = tiles[idx];
-            if (type === baseId) {
-              baseMinX = Math.min(baseMinX, tileX);
-              baseMaxX = Math.max(baseMaxX, tileX);
-              baseMinY = Math.min(baseMinY, tileY);
-              baseMaxY = Math.max(baseMaxY, tileY);
-              baseSum += elevations[idx] ?? 0;
-              baseCount += 1;
-              continue;
-            }
             if (type !== houseId) {
               continue;
             }
@@ -7065,19 +7486,7 @@ export const buildTerrainMesh = (
                 mask[row + fx] = 1;
               }
             }
-            const targetElev = computeAverageElev(bounds);
-            if (parcelTargetElev) {
-              parcelTargetElev[idx] = targetElev;
-            }
-            applyFlatten(bounds, targetElev);
           }
-        }
-
-        if (baseCount > 0) {
-          const bounds = { minX: baseMinX, maxX: baseMaxX, minY: baseMinY, maxY: baseMaxY };
-          const targetElev = clamp(baseSum / baseCount, 0, 1);
-          baseTargetElev = targetElev;
-          applyFlatten(bounds, targetElev);
         }
 
         return mask;
@@ -7379,6 +7788,10 @@ export const buildTerrainMesh = (
     roadMesh.userData.roadOverlayVersion = getRoadAtlasVersion();
     mesh.add(roadMesh);
   }
+  const roadDeckMesh = buildRoadDeckMesh(sample, width, depth, heightScale, roadOverlay, roadId, baseId, heightAtTileCoord);
+  if (roadDeckMesh) {
+    mesh.add(roadDeckMesh);
+  }
   const bridgeDeckMesh = buildBridgeDeckMesh(
     sample,
     width,
@@ -7392,6 +7805,10 @@ export const buildTerrainMesh = (
   );
   if (bridgeDeckMesh) {
     mesh.add(bridgeDeckMesh);
+  }
+  const roadWallMesh = buildRoadRetainingWallMesh(sample, width, depth, heightScale, roadId, baseId, heightAtTileCoord);
+  if (roadWallMesh) {
+    mesh.add(roadWallMesh);
   }
   const treeBurnMeshStates: TreeBurnMeshState[] = [];
   if (hasTreeAssets && treeInstances.length > 0) {
@@ -7705,11 +8122,6 @@ export const buildTerrainMesh = (
             groundMin = height;
             groundMax = height;
           }
-          if (parcelTargetElev && Number.isFinite(parcelTargetElev[seed])) {
-            const parcelElev = parcelTargetElev[seed] * heightScale;
-            groundMin = parcelElev;
-            groundMax = parcelElev;
-          }
           houseSpots.push({
             x,
             y: height,
@@ -7748,11 +8160,6 @@ export const buildTerrainMesh = (
       const baseFootprintZ = Math.max(1, maxTileY - minTileY + 1);
       let groundMin = Math.min(...baseTiles.map((tile) => tile.groundMin));
       let groundMax = Math.max(...baseTiles.map((tile) => tile.groundMax));
-      if (baseTargetElev !== null) {
-        const elev = baseTargetElev * heightScale;
-        groundMin = elev;
-        groundMax = elev;
-      }
       const rotation = baseFootprintX >= baseFootprintZ ? 0 : Math.PI / 2;
 
       if (useDetailedStructures && firestationAsset && firestationAsset.meshes.length > 0) {
@@ -7900,7 +8307,7 @@ export const buildTerrainMesh = (
           const sizeX = Math.max(0.01, variant.size?.x ?? 0);
           const sizeZ = Math.max(0.01, variant.size?.z ?? 0);
           const fitScale = Math.min(footprintX / sizeX, footprintZ / sizeZ);
-          const scale = Math.max(0.01, fitScale * 0.98);
+          const scale = Math.max(0.01, fitScale * 0.98 * (variant.scaleBias ?? 1));
           const baseY = foundationTop + variant.baseOffset * scale;
           const variantId = variantIds.get(variant) ?? 0;
           variant.meshes.forEach((meshTemplate, meshIndex) => {

@@ -84,7 +84,11 @@ const defaultPanelData: PanelDataMap = {
   budgetReport: {
     summary: "Summary to be populated from seasonal results.",
     continueLabel: "Continue",
-    sections: []
+    multiplierPills: [],
+    rails: [],
+    propertyDetails: [],
+    lifeDetails: [],
+    stageTotals: []
   }
 };
 
