@@ -76,7 +76,6 @@ const RULES: Record<Phase, PhaseUiRules> = {
       "fireDeploy",
       "fireUnitList",
       "fireSelectedUnit",
-      "budgetReport",
       "bottomControls"
     ],
     allowedInputs: ["pan", "zoom", "select", "retask", "formation", "deploy", "clearFuelBreak", "timeControl"],

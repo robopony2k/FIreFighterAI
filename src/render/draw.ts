@@ -1253,7 +1253,7 @@ const drawDebugCellPanel = (
     `cell ${tileX},${tileY}`,
     `type=${tile.type} id=${state.tileTypeId[idx] ?? "n/a"} base=${tile.isBase ? "1" : "0"}`,
     `phase=${state.phase} paused=${state.paused ? "1" : "0"} fireDay=${formatNumber(state.fireSeasonDay, 2)}`,
-    `simAcc=${formatNumber(state.fireSimAccumulator, 2)} active=${state.lastActiveFires}`,
+    `substeps=${state.firePerfSubsteps} fireDays=${formatNumber(state.firePerfSimulatedDays, 2)} active=${state.lastActiveFires}`,
     `fire=${formatNumber(tile.fire)} heat=${formatNumber(tile.heat)} fuel=${formatNumber(tile.fuel)}`,
     `ignite=${formatNumber(tile.ignitionPoint)} burn=${formatNumber(tile.burnRate)} heatOut=${formatNumber(tile.heatOutput)}`,
     `spread=${formatOptional(tile.spreadBoost)} cap=${formatOptional(tile.heatTransferCap)} retain=${formatOptional(tile.heatRetention)}`,

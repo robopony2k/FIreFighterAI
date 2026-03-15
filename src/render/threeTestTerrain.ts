@@ -9,6 +9,7 @@ import {
   TILE_SIZE
 } from "../core/config.js";
 import { getHouseFootprintBounds, pickHouseFootprint } from "../core/houseFootprints.js";
+import { getVegetationRenderHeightMultiplier } from "../core/vegetation.js";
 import { TILE_ID_TO_TYPE, TILE_TYPE_IDS } from "../core/state.js";
 import { TreeType, TREE_TYPE_IDS, type Town } from "../core/types.js";
 import type { WorldState } from "../core/state.js";
@@ -22,8 +23,14 @@ export type TerrainSample = {
   elevations: Float32Array;
   tileTypes?: Uint8Array;
   treeTypes?: Uint8Array;
+  tileFire?: Float32Array;
+  tileHeat?: Float32Array;
   tileFuel?: Float32Array;
+  heatCap?: number;
   tileMoisture?: Float32Array;
+  tileVegetationAge?: Float32Array;
+  tileCanopyCover?: Float32Array;
+  tileStemDensity?: Uint8Array;
   riverMask?: Uint8Array;
   roadBridgeMask?: Uint8Array;
   roadEdges?: Uint8Array;
@@ -38,6 +45,7 @@ export type TerrainSample = {
   fullResolution?: boolean;
   worldSeed?: number;
   towns?: Town[];
+  vegetationRevision?: number;
   structureRevision?: number;
   dynamicStructures?: boolean;
 };
@@ -481,6 +489,7 @@ export type TerrainWaterData = {
   river?: RiverWaterData;
   // Packed x,z,top,drop,dirX,dirZ,width; top/drop are world-space offsets relative to `level`.
   waterfallInstances?: Float32Array;
+  waterfallDebug?: WaterfallDebugData;
 };
 
 type HouseSpot = {
@@ -512,6 +521,31 @@ type WaterfallCandidate = {
   dirX: number;
   dirZ: number;
   width: number;
+};
+
+export const WATERFALL_DEBUG_FLAG_WATER = 1 << 0;
+export const WATERFALL_DEBUG_FLAG_RIVER = 1 << 1;
+export const WATERFALL_DEBUG_FLAG_OCEANISH = 1 << 2;
+export const WATERFALL_DEBUG_FLAG_STEP_OK = 1 << 3;
+export const WATERFALL_DEBUG_FLAG_BEST_DROP_OK = 1 << 4;
+export const WATERFALL_DEBUG_FLAG_LOCAL_DROP_OK = 1 << 5;
+export const WATERFALL_DEBUG_FLAG_CANDIDATE = 1 << 6;
+export const WATERFALL_DEBUG_FLAG_EMITTED = 1 << 7;
+
+export type WaterfallDebugData = {
+  sampleCols: number;
+  sampleRows: number;
+  sampleStep: number;
+  minDrop: number;
+  stepThreshold: number;
+  localDropThreshold: number;
+  candidateCount: number;
+  clusterCount: number;
+  emittedCount: number;
+  flags: Uint8Array;
+  stepStrength: Float32Array;
+  bestNeighborDrop: Float32Array;
+  localDrop: Float32Array;
 };
 
 type RiverContourVertex = {
@@ -2089,24 +2123,50 @@ const buildRapidMapTexture = (
   return createDataTexture(data, sampleCols, sampleRows, THREE.LinearFilter, THREE.LinearFilter);
 };
 
+type BuildWaterfallResult = {
+  instances?: Float32Array;
+  debug: WaterfallDebugData;
+};
+
 const buildWaterfallInstances = (
   waterHeights: Float32Array,
   supportMask: Uint8Array,
   oceanRatio: Float32Array,
   sampleCols: number,
   sampleRows: number,
+  sampleStep: number,
   riverRatio: Float32Array,
   riverStepStrength: Float32Array | undefined,
   minDrop: number,
   width: number,
   depth: number,
   riverDomain?: RiverRenderDomain
-): Float32Array | undefined => {
+): BuildWaterfallResult => {
   const candidates: WaterfallCandidate[] = [];
   const total = sampleCols * sampleRows;
   const cellWorldX = width / Math.max(1, sampleCols);
   const cellWorldZ = depth / Math.max(1, sampleRows);
   const cellWorld = Math.max(1e-4, Math.min(cellWorldX, cellWorldZ));
+  const localDropThreshold = minDrop * 0.9;
+  const flags = new Uint8Array(total);
+  const stepStrengthDebug = new Float32Array(total).fill(-1);
+  const bestNeighborDropDebug = new Float32Array(total).fill(-1);
+  const localDropDebug = new Float32Array(total).fill(-1);
+  const debug: WaterfallDebugData = {
+    sampleCols,
+    sampleRows,
+    sampleStep,
+    minDrop,
+    stepThreshold: WATERFALL_MIN_STEP_STRENGTH,
+    localDropThreshold,
+    candidateCount: 0,
+    clusterCount: 0,
+    emittedCount: 0,
+    flags,
+    stepStrength: stepStrengthDebug,
+    bestNeighborDrop: bestNeighborDropDebug,
+    localDrop: localDropDebug
+  };
   const isWaterCell = (idx: number): boolean => (supportMask[idx] ?? 0) > 0;
   const isRiverCell = (idx: number): boolean => (riverRatio[idx] ?? 0) >= WATERFALL_MIN_RIVER_RATIO;
   const isOceanish = (idx: number): boolean => (oceanRatio[idx] ?? 0) >= WATERFALL_MAX_OCEAN_RATIO;
@@ -2330,14 +2390,21 @@ const buildWaterfallInstances = (
       if (!isWaterCell(idx)) {
         continue;
       }
+      flags[idx] |= WATERFALL_DEBUG_FLAG_WATER;
       if (!isRiverCell(idx)) {
         continue;
       }
+      flags[idx] |= WATERFALL_DEBUG_FLAG_RIVER;
+      if (isOceanish(idx)) {
+        flags[idx] |= WATERFALL_DEBUG_FLAG_OCEANISH;
+      }
       const rawStepStrength = riverStepStrength ? riverStepStrength[idx] : 0;
       const stepStrength = Number.isFinite(rawStepStrength) ? clamp(rawStepStrength as number, 0, 1) : 0;
+      stepStrengthDebug[idx] = stepStrength;
       if (stepStrength < WATERFALL_MIN_STEP_STRENGTH) {
         continue;
       }
+      flags[idx] |= WATERFALL_DEBUG_FLAG_STEP_OK;
       if (isOceanish(idx)) {
         continue;
       }
@@ -2378,9 +2445,11 @@ const buildWaterfallInstances = (
           bestDy = dir.dy;
         }
       });
+      bestNeighborDropDebug[idx] = bestDrop;
       if (bestDrop < minDrop) {
         continue;
       }
+      flags[idx] |= WATERFALL_DEBUG_FLAG_BEST_DROP_OK;
       const nx1 = col + bestDx;
       const ny1 = row + bestDy;
       const nx2 = col + bestDx * 2;
@@ -2418,9 +2487,11 @@ const buildWaterfallInstances = (
         downstreamMin = Math.min(downstreamMin, h);
       }
       const localDrop = center - downstreamMin;
-      if (localDrop < minDrop * 0.9) {
+      localDropDebug[idx] = localDrop;
+      if (localDrop < localDropThreshold) {
         continue;
       }
+      flags[idx] |= WATERFALL_DEBUG_FLAG_LOCAL_DROP_OK;
       const x0 = toWorldX(col);
       const z0 = toWorldZ(row);
       const x1 = toWorldX(nx2);
@@ -2436,6 +2507,7 @@ const buildWaterfallInstances = (
       const halfWidth = clamp(cross.halfWidth * (0.96 + stepStrength * 0.08), cellWorld * 0.45, cellWorld * 2.8);
       const centerX = lipX + (-dirZ) * cross.centerShift;
       const centerZ = lipZ + dirX * cross.centerShift;
+      flags[idx] |= WATERFALL_DEBUG_FLAG_CANDIDATE;
       candidates.push({
         sampleCol: col,
         sampleRow: row,
@@ -2449,8 +2521,9 @@ const buildWaterfallInstances = (
       });
     }
   }
+  debug.candidateCount = candidates.length;
   if (candidates.length === 0) {
-    return undefined;
+    return { debug };
   }
   candidates.sort((a, b) => b.drop - a.drop);
 
@@ -2467,6 +2540,8 @@ const buildWaterfallInstances = (
     maxCol: number;
     minRow: number;
     maxRow: number;
+    anchorCol: number;
+    anchorRow: number;
     count: number;
   };
   const clusters: Cluster[] = [];
@@ -2511,11 +2586,14 @@ const buildWaterfallInstances = (
         maxCol: candidate.sampleCol,
         minRow: candidate.sampleRow,
         maxRow: candidate.sampleRow,
+        anchorCol: candidate.sampleCol,
+        anchorRow: candidate.sampleRow,
         count: 1
       });
       continue;
     }
     const cluster = clusters[bestCluster];
+    const nextCount = cluster.count + 1;
     const totalWeight = cluster.weight + candidateWeight;
     cluster.x = (cluster.x * cluster.weight + candidate.x * candidateWeight) / totalWeight;
     cluster.z = (cluster.z * cluster.weight + candidate.z * candidateWeight) / totalWeight;
@@ -2530,11 +2608,14 @@ const buildWaterfallInstances = (
     cluster.maxCol = Math.max(cluster.maxCol, candidate.sampleCol);
     cluster.minRow = Math.min(cluster.minRow, candidate.sampleRow);
     cluster.maxRow = Math.max(cluster.maxRow, candidate.sampleRow);
-    cluster.count += 1;
+    cluster.anchorCol = Math.round((cluster.anchorCol * cluster.count + candidate.sampleCol) / nextCount);
+    cluster.anchorRow = Math.round((cluster.anchorRow * cluster.count + candidate.sampleRow) / nextCount);
+    cluster.count = nextCount;
   }
 
+  debug.clusterCount = clusters.length;
   if (clusters.length === 0) {
-    return undefined;
+    return { debug };
   }
 
   clusters.sort((a, b) => b.drop - a.drop);
@@ -2648,6 +2729,9 @@ const buildWaterfallInstances = (
     out[base + 4] = cluster.dirX;
     out[base + 5] = cluster.dirZ;
     out[base + 6] = clusteredWidth;
+    const emittedCol = clamp(cluster.anchorCol, 0, sampleCols - 1);
+    const emittedRow = clamp(cluster.anchorRow, 0, sampleRows - 1);
+    flags[emittedRow * sampleCols + emittedCol] |= WATERFALL_DEBUG_FLAG_EMITTED;
     const sampledSurface = sampleRiverHeight(
       contourSpace.edgeToGridX(contourSpace.worldToEdgeX(cluster.x)),
       contourSpace.edgeToGridY(contourSpace.worldToEdgeY(cluster.z))
@@ -2668,7 +2752,8 @@ const buildWaterfallInstances = (
       );
     }
   }
-  return out;
+  debug.emittedCount = limit;
+  return { instances: out, debug };
 };
 
 const buildWaterfallInfluenceMap = (
@@ -7134,10 +7219,23 @@ export const buildTileTexture = (
           const expectedFuel = Math.max(0.01, baseFuel * (1 - localMoisture * 0.6));
           const fuelNow = clamp(sample.tileFuel[idx] ?? expectedFuel, 0, expectedFuel);
           const fuelDepletion = clamp(1 - fuelNow / expectedFuel, 0, 1);
+          const liveFire = clamp(sample.tileFire?.[idx] ?? 0, 0, 1);
+          const liveHeat = clamp(
+            (sample.tileHeat?.[idx] ?? 0) / Math.max(0.01, sample.heatCap ?? 5),
+            0,
+            1
+          );
+          const activeBurnHold = clamp(
+            smoothstep(0.02, 0.12, liveFire) * 0.92 + smoothstep(0.08, 0.32, liveHeat) * 0.42,
+            0,
+            1
+          );
           const warmScorch = smoothstep(0.3, 0.85, fuelDepletion);
           const charScorch = smoothstep(0.62, 0.98, fuelDepletion);
-          const warmMix = (typeId === forestId ? 0.46 : 0.34) * warmScorch;
-          const charMix = (typeId === forestId ? 0.54 : 0.4) * charScorch;
+          const warmMixBase = (typeId === forestId ? 0.46 : 0.34) * warmScorch;
+          const charMixBase = (typeId === forestId ? 0.54 : 0.4) * charScorch;
+          const warmMix = clamp(warmMixBase * (1 - activeBurnHold * 0.48) + activeBurnHold * 0.1, 0, 1);
+          const charMix = clamp(charMixBase * (1 - activeBurnHold * 0.96), 0, 1);
           color = [
             color[0] * (1 - warmMix) + SCORCH_WARM_TINT[0] * warmMix,
             color[1] * (1 - warmMix) + SCORCH_WARM_TINT[1] * warmMix,
@@ -7452,6 +7550,9 @@ export const buildTerrainMesh = (
   };
   const hasNativeScrubVariants = (treeAssets?.[TreeType.Scrub]?.length ?? 0) > 0;
   const treeTypes = sample.treeTypes;
+  const tileVegetationAge = sample.tileVegetationAge;
+  const tileCanopyCover = sample.tileCanopyCover;
+  const tileStemDensity = sample.tileStemDensity;
   const birchId = TREE_TYPE_IDS[TreeType.Birch];
   const pineId = TREE_TYPE_IDS[TreeType.Pine];
   const oakId = TREE_TYPE_IDS[TreeType.Oak];
@@ -7544,18 +7645,21 @@ export const buildTerrainMesh = (
       const densityScale = Math.min(1.5, 1 + Math.max(0, step - 1) * 0.2) * treeDensitySafetyScale;
       const centerX = ((tileX + 0.5) / Math.max(1, cols) - 0.5) * width;
       const centerZ = ((tileY + 0.5) / Math.max(1, rows) - 0.5) * depth;
-      let treeChance = 0;
-      if (typeId === forestId) {
-        treeChance = 0.85 * densityScale;
-      } else if (typeId === scrubId) {
-        treeChance = 0.18 * densityScale;
-      } else if (typeId === floodplainId) {
-        treeChance = 0.12 * densityScale;
-      } else if (typeId === grassId) {
-        treeChance = 0.08 * densityScale;
-      }
+      const vegetationType =
+        typeId === forestId
+          ? "forest"
+          : typeId === scrubId
+            ? "scrub"
+            : typeId === floodplainId
+              ? "floodplain"
+              : typeId === grassId
+                ? "grass"
+                : null;
+      const stemDensity = Math.max(0, tileStemDensity?.[idx] ?? 0);
+      const canopyCover = clamp(tileCanopyCover?.[idx] ?? 0, 0, 1);
+      const vegetationAgeYears = Math.max(0, tileVegetationAge?.[idx] ?? 0);
       let placedTreeOnTile = false;
-      if (treeChance > 0 && treeInstances.length < treeInstanceBudget) {
+      if (vegetationType && stemDensity > 0 && canopyCover > 0.015 && treeInstances.length < treeInstanceBudget) {
         const dominantId = treeTypes ? treeTypes[idx] : 255;
         const isForest = typeId === forestId;
         const forestScale =
@@ -7573,6 +7677,8 @@ export const buildTerrainMesh = (
         const baseScale =
           TREE_SCALE_BASE + Math.min(TREE_SCALE_STEP_CAP, Math.max(0, step - 1) * TREE_SCALE_STEP_GAIN);
         const typeScale = isForest ? forestScale : typeId === scrubId ? 0.75 : 0.6;
+        const vegetationHeightScale = getVegetationRenderHeightMultiplier(vegetationType, vegetationAgeYears);
+        const canopyHeightScale = clamp(0.72 + canopyCover * 0.55, 0.72, 1.28);
         let treeType: TreeType = TreeType.Scrub;
         if (isForest) {
           if (dominantId === birchId) {
@@ -7588,13 +7694,22 @@ export const buildTerrainMesh = (
           }
         }
         const variants = hasTreeAssets ? getTreeVariants(treeType) : [];
-        const attempts = isForest ? Math.min(treeAttemptCap, 1 + Math.floor(noiseAt(idx + 11.7) * (1 + densityScale))) : 1;
+        const rawCount =
+          stemDensity *
+          (isForest ? 0.45 : typeId === scrubId ? 0.4 : 0.35) *
+          densityScale *
+          (0.4 + canopyCover * 0.8);
+        let attempts = Math.min(Math.max(1, treeAttemptCap * 2 + 1), Math.floor(rawCount));
+        const fractionalCount = rawCount - Math.floor(rawCount);
+        if (
+          attempts < Math.max(1, treeAttemptCap * 2 + 1) &&
+          noiseAt(idx + 11.7) < fractionalCount
+        ) {
+          attempts += 1;
+        }
         for (let attempt = 0; attempt < attempts; attempt += 1) {
           if (treeInstances.length >= treeInstanceBudget) {
             break;
-          }
-          if (noiseAt(idx + 5.1 + attempt * 0.37) >= treeChance) {
-            continue;
           }
           const jitterRange = Math.max(0.1, step * 0.42);
           const jitterX = (noiseAt(idx + 0.27 + attempt * 0.31) - 0.5) * jitterRange;
@@ -7602,7 +7717,7 @@ export const buildTerrainMesh = (
           const variantIndex =
             variants.length > 0 ? Math.floor(noiseAt(idx + 9.7 + attempt * 0.53) * variants.length) : 0;
           const variant = variants.length > 0 ? variants[variantIndex] ?? variants[0] : null;
-          const targetHeight = baseScale * typeScale * TREE_HEIGHT_FACTOR;
+          const targetHeight = baseScale * typeScale * vegetationHeightScale * canopyHeightScale * TREE_HEIGHT_FACTOR;
           const sourceHeight = Math.max(0.35, variant?.height ?? 1.5);
           const scale = (targetHeight / sourceHeight) * (0.85 + noiseAt(idx + 7.9 + attempt * 0.41) * 0.3);
           const rotation = noiseAt(idx + 3.3 + attempt * 0.23) * Math.PI * 2;
@@ -7646,7 +7761,10 @@ export const buildTerrainMesh = (
         !placedTreeOnTile &&
         scrubPlaceholderInstances.length < SCRUB_PLACEHOLDER_MAX_INSTANCES
       ) {
-        const placeholderChance = Math.min(0.68, SCRUB_PLACEHOLDER_BASE_CHANCE * densityScale);
+        const placeholderChance = Math.min(
+          0.68,
+          SCRUB_PLACEHOLDER_BASE_CHANCE * densityScale * (0.45 + canopyCover * 0.9)
+        );
         if (noiseAt(idx + 14.39) < placeholderChance) {
           const jitterRange = Math.max(0.1, step * 0.34);
           const jitterX = (noiseAt(idx + 2.91) - 0.5) * jitterRange;
@@ -7658,7 +7776,12 @@ export const buildTerrainMesh = (
             const variant = scrubVariants.length > 0 ? scrubVariants[variantIndex] ?? scrubVariants[0] : null;
             const baseScale =
               TREE_SCALE_BASE + Math.min(TREE_SCALE_STEP_CAP, Math.max(0, step - 1) * TREE_SCALE_STEP_GAIN);
-            const targetHeight = baseScale * 0.75 * TREE_HEIGHT_FACTOR;
+            const targetHeight =
+              baseScale *
+              0.75 *
+              getVegetationRenderHeightMultiplier("scrub", vegetationAgeYears) *
+              clamp(0.76 + canopyCover * 0.5, 0.76, 1.18) *
+              TREE_HEIGHT_FACTOR;
             const sourceHeight = Math.max(0.35, variant?.height ?? 1.5);
             const scale = (targetHeight / sourceHeight) * (0.82 + noiseAt(idx + 6.41) * 0.24);
             const rotation = noiseAt(idx + 8.23) * Math.PI * 2;
@@ -8574,12 +8697,13 @@ export const buildTerrainMesh = (
       }
     }
     const waterfallMinDrop = Math.max(0.12, WATERFALL_MIN_DROP_NORM * heightScale);
-    const waterfallInstances = buildWaterfallInstances(
+    const waterfall = buildWaterfallInstances(
       waterHeights,
       supportMask,
       ratios.ocean,
       sampleCols,
       sampleRows,
+      step,
       ratios.river,
       sampledRiverStepStrength,
       waterfallMinDrop,
@@ -8587,6 +8711,7 @@ export const buildTerrainMesh = (
       depth,
       riverRenderDomain
     );
+    const waterfallInstances = waterfall.instances;
     const river = buildRiverMeshData(
       sample,
       waterId,
@@ -8613,7 +8738,8 @@ export const buildTerrainMesh = (
         heights: oceanHeights
       },
       river,
-      waterfallInstances
+      waterfallInstances,
+      waterfallDebug: waterfall.debug
     };
   }
 

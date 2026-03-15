@@ -75,6 +75,8 @@ const FIRE_HEIGHT = 260;
 const FIRE_LEVELS = 48;
 const FIRE_UPDATE_MS = 34;
 const EMITTER_REBUILD_MS = 64;
+const TAU = Math.PI * 2;
+const TITLE_FLAME_MOTION_TIME_SCALE = 0.44;
 const INTRO_EMBER_DELAY_MS = 0;
 const INTRO_FLAME_DELAY_MS = 420;
 const INTRO_SILHOUETTE_DELAY_MS = 1360;
@@ -85,6 +87,14 @@ const INTRO_SILHOUETTE_FADE_MS = 900;
 const INTRO_OUTLINE_FADE_MS = 1200;
 
 const clamp = (value: number, min: number, max: number): number => Math.min(max, Math.max(min, value));
+const fract = (value: number): number => value - Math.floor(value);
+const smoothstep = (edge0: number, edge1: number, x: number): number => {
+  if (edge0 === edge1) {
+    return x < edge0 ? 0 : 1;
+  }
+  const t = clamp((x - edge0) / (edge1 - edge0), 0, 1);
+  return t * t * (3 - 2 * t);
+};
 const hash01 = (n: number): number => {
   let x = n | 0;
   x = (x ^ 61) ^ (x >>> 16);
@@ -376,6 +386,7 @@ export const showTitleScreen = (deps: TitleScreenDeps): TitleScreenHandle => {
   let lastFrameNow = performance.now();
   let noiseOffset = 0;
   let emitterPhase = Math.random() * 1000;
+  let flameMotionSeconds = Math.random() * 8;
   let windCurrent = 0;
   let windTarget = (Math.random() * 2 - 1) * 1.2;
   const glyphSeedA = new Float32Array(TITLE_WORD.length);
@@ -882,131 +893,141 @@ export const showTitleScreen = (deps: TitleScreenDeps): TitleScreenHandle => {
     const sy = height / FIRE_HEIGHT;
     const topEdgeY = centerY - fontSize * 0.58;
     const bottomEdgeY = centerY + fontSize * 0.48;
+    // Keep the title flamelets on the same motion cadence as the active 3D fire renderer.
+    const flameTimeSeconds = flameMotionSeconds * TITLE_FLAME_MOTION_TIME_SCALE;
 
     jetCtx.save();
     jetCtx.globalCompositeOperation = "lighter";
     for (let i = 0; i < emitterPoints.length; i += 1) {
       const point = emitterPoints[i] as FlameEmitterPoint;
       const heat = clamp(firePixels[point.idx] / (FIRE_LEVELS - 1), 0, 1);
-      if (heat < 0.16) {
+      if (heat < 0.14) {
         continue;
       }
       const px = point.x * sx;
       const py = point.y * sy;
       const localNoise = noiseField[(point.idx + noiseOffset * 11) % firePixelCount];
-      const phase = emitterPhase * (0.44 + localNoise * 0.34) + point.seed * 4.7;
-      const activity = 0.5 + 0.5 * Math.sin(phase * 0.72 + point.seed * 1.9);
-      const minActivity = clamp(0.24 - heat * 0.12 - point.strength * 0.1, 0.05, 0.34);
-      const activityLevel = clamp((activity - minActivity) / Math.max(1e-5, 1 - minActivity), 0, 1);
-      if (activityLevel <= 0.04) {
-        continue;
-      }
-      const flicker = 0.5 + 0.5 * Math.sin(phase * 0.88);
-      const ripple = 0.5 + 0.5 * Math.sin(phase * 1.26 + point.seed * 2.7);
-      const intensity = clamp(
-        heat * (0.62 + flicker * 0.74) * (0.68 + ripple * 0.58) * (0.58 + point.strength * 0.82) * (0.4 + activityLevel),
-        0,
-        1.85
-      );
-      if (intensity < 0.12) {
+      const s1 = hash01(point.idx * 37 + 11);
+      const s2 = hash01(point.idx * 53 + 19);
+      const s3 = hash01(point.idx * 79 + 31);
+      const emitterSeed = hash01(point.idx * 97 + 41);
+      const isHero = s3 < 0.24;
+      const sizeVariation = 0.75 + s1 * 0.6;
+      const leanVariation = 0.02 + s2 * 0.18;
+      const flickerRate = 0.34 + s2 * 1.61;
+      const phaseRate = isHero ? 0.18 + flickerRate * 0.14 : 0.46 + flickerRate * 0.55;
+      const phase = fract(flameTimeSeconds * phaseRate + s3 + emitterSeed * 0.41 + (isHero ? i * 0.03 : i * 0.09));
+      const riseT = isHero ? Math.pow(phase, 1.35) : Math.pow(phase, 2.0);
+      const breath = 0.82 + 0.18 * Math.sin(flameTimeSeconds * (0.24 + emitterSeed * 0.28) + emitterSeed * TAU);
+      const flicker = 0.76 + 0.24 * Math.sin(flameTimeSeconds * 2.1 + s2 * TAU);
+      const heat01 = clamp((heat - 0.06) / 0.94, 0, 1);
+      const activity =
+        heat01 * (0.78 + point.strength * 0.62) * breath * (0.82 + localNoise * 0.26);
+      const activityLevel = clamp(activity / 1.2, 0, 1);
+      if (activityLevel <= 0.08) {
         continue;
       }
 
       const nearTop = Math.abs(py - topEdgeY) < fontSize * 0.2;
       const nearBottom = Math.abs(py - bottomEdgeY) < fontSize * 0.24;
-      const tierSeed = point.seed / (Math.PI * 2);
-      const phaseSeedA = 0.5 + 0.5 * Math.sin(point.seed * 1.93 + 1.37);
-      const phaseSeedB = 0.5 + 0.5 * Math.sin(point.seed * 2.71 + 4.91);
-
-      let maxPhaseDuration = 0.95;
-      let riseHeightFactor = 0.72;
-      let startSizeFactor = 0.86;
-      let alphaFactor = 0.88;
-      let tierIsLarge = false;
-      let tierIsSmall = false;
-
-      if (tierSeed < 0.24) {
-        tierIsLarge = true;
-        maxPhaseDuration = 1.08 + phaseSeedA * 0.58;
-        riseHeightFactor = 0.88 + phaseSeedB * 0.24;
-        startSizeFactor = 1.06 + phaseSeedA * 0.22;
-        alphaFactor = 1.0;
-      } else if (tierSeed > 0.62) {
-        tierIsSmall = true;
-        maxPhaseDuration = 0.56 + phaseSeedA * 0.28;
-        riseHeightFactor = 0.34 + phaseSeedB * 0.18;
-        startSizeFactor = 0.58 + phaseSeedA * 0.22;
-        alphaFactor = 0.72;
-      }
-
-      const phaseRate = ((0.72 + localNoise * 0.26) / maxPhaseDuration) * 0.05;
-      const lifePhase = (emitterPhase * phaseRate + phaseSeedB) % 1;
-      const riseT = Math.pow(lifePhase, 2.2);
-      const upwardBias = clamp(0.7 + point.topBias * 0.62 + (nearTop ? 0.08 : 0), 0.2, 1.18);
-      const spreadX = (tierSeed - 0.5) * (outline * 0.88 + fontSize * 0.014);
-      const spreadY = (phaseSeedA - 0.5) * (outline * 0.34 + fontSize * 0.006);
-      const spawnX = px + spreadX;
-      const spawnY = py + spreadY;
-      const riseHeight =
-        (outline * 5.3 + fontSize * 0.22) *
-        (0.56 + intensity * 0.96) *
-        riseHeightFactor *
-        (0.66 + upwardBias * 0.54) *
-        1.3;
-      const curlAmp = (outline * 1.55 + fontSize * 0.02) * (1 - riseT);
-      const curl = Math.sin(lifePhase * 17.2 + tierSeed * Math.PI * 2) * curlAmp;
-      const windFlicker = 0.74 + 0.26 * Math.sin(emitterPhase * 0.86 + phaseSeedA * Math.PI * 2);
+      const upwardBias = clamp(0.74 + point.topBias * 0.56 + (nearTop ? 0.08 : 0), 0.24, 1.2);
+      const baseSpread =
+        (outline * (isHero ? 0.9 : 1.14) + fontSize * (isHero ? 0.02 : 0.028)) *
+        (0.72 + heat01 * 0.62) *
+        breath;
+      const spawnX = px + (s1 - 0.5) * baseSpread;
+      const spawnY = py + (s2 - 0.5) * baseSpread * 0.24;
+      const jetSpin =
+        flameTimeSeconds * (0.62 + flickerRate * 0.38 + emitterSeed * 0.24) +
+        emitterSeed * TAU +
+        i * 0.21;
+      const helixRadius =
+        (outline * (isHero ? 0.42 : 0.28) + fontSize * 0.01) * (0.35 + riseT * 1.1 + s2 * 0.3);
+      const helixX = Math.cos(jetSpin + riseT * 6.2) * helixRadius;
+      const curlAmp =
+        (outline * (isHero ? 0.52 : 0.34) + fontSize * 0.016) *
+        sizeVariation *
+        (0.24 + heat01 * 0.76);
+      const curlX = Math.sin(phase * (isHero ? 6.4 : 10.4) + s1 * TAU) * curlAmp;
+      const lashPhase =
+        flameTimeSeconds * (isHero ? 0.74 + flickerRate * 0.92 : 0.92 + flickerRate * 1.2) +
+        s1 * TAU +
+        phase * 4.2;
+      const lashDamp = 1 - smoothstep(0.64, 1.0, riseT);
+      const lashAmp =
+        (outline * (isHero ? 0.64 : 0.38) + fontSize * 0.02) *
+        (0.22 + heat01 * 0.88) *
+        lashDamp;
+      const lashX = Math.sin(lashPhase) * lashAmp;
       const windScale =
-        (outline * 1.32 + fontSize * 0.016) * (0.34 + intensity * 0.78) * windFlicker * (0.6 + activityLevel * 0.4);
-      const windOffsetX = windCurrent * windScale * riseT;
-      const flameletX = spawnX + curl + windOffsetX;
+        (outline * 0.18 + fontSize * 0.012) *
+        (0.42 + heat01 * 0.92 + leanVariation * 0.7) *
+        flicker;
+      const windOffsetX = windCurrent * windScale * (0.22 + riseT * 0.52);
+      const riseHeight =
+        (outline * (isHero ? 5.7 : 4.3) + fontSize * (isHero ? 0.12 : 0.09)) *
+        (0.7 + heat01 * 0.88 + point.strength * 0.18) *
+        sizeVariation *
+        (0.72 + upwardBias * 0.48) *
+        (0.74 + activityLevel * 0.52);
+      const flameletX = spawnX + helixX + curlX + lashX + windOffsetX;
       const flameletY = spawnY - riseT * riseHeight;
 
-      const startSize = (outline * 1.9 + fontSize * 0.042) * (0.58 + intensity * 1.1) * startSizeFactor;
-      const heightDecay = Math.pow(1 - lifePhase, 1.02);
-      const widthDecay = Math.pow(1 - lifePhase, 2.2);
-      const flameHeight = startSize * heightDecay;
-      const flameWidth = Math.max(1.1, startSize * (0.62 + point.strength * 0.36) * widthDecay);
-      if (flameHeight < 1.1) {
+      const heightPulse = isHero ? 0.92 + 0.08 * (1 - phase * phase) : 0.9 + 0.1 * (1 - phase);
+      const flameHeightBase =
+        (outline * (isHero ? 3.8 : 2.9) + fontSize * (isHero ? 0.05 : 0.042)) *
+        (0.4 + heat01 * 0.92 + point.strength * 0.24) *
+        sizeVariation *
+        heightPulse *
+        (0.68 + activityLevel * 0.52);
+      const flameWidthBase =
+        flameHeightBase *
+        (isHero ? 0.84 + 0.18 * s1 : 0.68 + 0.18 * s1) *
+        (0.84 + point.strength * 0.16);
+      const flameHeight = Math.max(1.2, flameHeightBase * (0.88 + heat01 * 0.22));
+      const flameWidth = Math.max(1.05, flameWidthBase * (1 - smoothstep(0.72, 1.0, phase) * 0.28));
+
+      const alphaT = Math.pow(Math.sin(Math.PI * phase), isHero ? 1.15 : 1.35);
+      const alpha = clamp(alphaT * (0.46 + heat01 * 0.48) * (0.72 + activityLevel * 0.28), 0, 1);
+      if (alpha <= 0.04) {
         continue;
       }
 
-      const alphaT = Math.pow(Math.sin(Math.PI * lifePhase), 1.45);
-      const alpha = alphaT * (0.58 + 0.42 * intensity) * alphaFactor * (0.74 + activityLevel * 0.26);
-      const phaseColor = clamp(lifePhase, 0, 1);
+      const phaseColor = clamp(phase, 0, 1);
       let red = 255;
-      let green = 205;
-      let blue = 120;
-      if (phaseColor < 0.25) {
-        const t = phaseColor / 0.25;
-        green = Math.round(210 + (165 - 210) * t);
-        blue = Math.round(140 + (60 - 140) * t);
+      let green = 210;
+      let blue = 144;
+      if (phaseColor < 0.22) {
+        const t = phaseColor / 0.22;
+        green = Math.round(216 + (166 - 216) * t);
+        blue = Math.round(148 + (68 - 148) * t);
       } else if (phaseColor < 0.6) {
-        const t = (phaseColor - 0.25) / 0.35;
-        green = Math.round(165 + (95 - 165) * t);
-        blue = Math.round(60 + (20 - 60) * t);
+        const t = (phaseColor - 0.22) / 0.38;
+        green = Math.round(166 + (92 - 166) * t);
+        blue = Math.round(68 + (18 - 68) * t);
       } else {
         const t = (phaseColor - 0.6) / 0.4;
-        red = Math.round(235 + (195 - 235) * t);
-        green = Math.round(95 + (35 - 95) * t);
-        blue = Math.round(20 + (10 - 20) * t);
+        red = Math.round(238 + (188 - 238) * t);
+        green = Math.round(92 + (34 - 92) * t);
+        blue = Math.round(18 + (8 - 18) * t);
       }
 
-      const tilt = clamp(windCurrent * 0.55, -0.72, 0.72) * (0.35 + 0.65 * riseT);
+      const tilt =
+        clamp(windCurrent * (0.42 + leanVariation * 1.35), -0.86, 0.86) * (0.24 + riseT * 0.76);
       jetCtx.globalAlpha = alpha;
       jetCtx.fillStyle = `rgb(${red}, ${green}, ${blue})`;
       jetCtx.beginPath();
       jetCtx.ellipse(flameletX, flameletY, flameWidth, flameHeight, tilt, 0, Math.PI * 2);
       jetCtx.fill();
 
-      if (!tierIsSmall && lifePhase < 0.72) {
-        jetCtx.globalAlpha = alpha * (tierIsLarge ? 0.52 : 0.42);
+      if (isHero || phase < 0.76) {
+        jetCtx.globalAlpha = alpha * (isHero ? 0.56 : 0.42);
         jetCtx.beginPath();
         jetCtx.ellipse(
           flameletX,
-          flameletY - flameHeight * 0.36,
-          flameWidth * 0.84,
-          flameHeight * 0.9,
+          flameletY - flameHeight * 0.3,
+          flameWidth * (isHero ? 0.8 : 0.74),
+          flameHeight * (isHero ? 0.96 : 0.86),
           tilt,
           0,
           Math.PI * 2
@@ -1014,16 +1035,16 @@ export const showTitleScreen = (deps: TitleScreenDeps): TitleScreenHandle => {
         jetCtx.fill();
       }
 
-      jetCtx.globalAlpha = clamp(alpha * 0.55, 0.1, 0.44);
-      jetCtx.fillStyle = `rgba(255, 242, ${Math.round(172 + 56 * heat)}, 1)`;
+      jetCtx.globalAlpha = clamp(alpha * 0.5, 0.1, 0.42);
+      jetCtx.fillStyle = `rgba(255, 242, ${Math.round(176 + 52 * heat01)}, 1)`;
       jetCtx.beginPath();
-      jetCtx.arc(spawnX, spawnY, Math.max(1, flameWidth * 0.52), 0, Math.PI * 2);
+      jetCtx.arc(spawnX, spawnY, Math.max(1, flameWidth * (isHero ? 0.42 : 0.34)), 0, Math.PI * 2);
       jetCtx.fill();
 
-      if (Math.random() < 0.009 + intensity * 0.03) {
-        spawnEmber(flameletX + windOffsetX * 0.14, flameletY - flameHeight * 0.26, true, intensity);
-      } else if (nearBottom && Math.random() < 0.001 + intensity * 0.005) {
-        spawnEmber(spawnX, spawnY + flameHeight * 0.2, false, intensity * 0.76);
+      if (Math.random() < 0.007 + activityLevel * 0.022) {
+        spawnEmber(flameletX + windOffsetX * 0.12, flameletY - flameHeight * 0.26, true, activityLevel);
+      } else if (nearBottom && Math.random() < 0.001 + activityLevel * 0.004) {
+        spawnEmber(spawnX, spawnY + flameHeight * 0.2, false, activityLevel * 0.76);
       }
     }
     jetCtx.restore();
@@ -1241,6 +1262,7 @@ export const showTitleScreen = (deps: TitleScreenDeps): TitleScreenHandle => {
     }
     const deltaMs = Math.min(120, Math.max(0, now - lastFrameNow));
     lastFrameNow = now;
+    flameMotionSeconds += deltaMs / 1000;
     fireAccumulatorMs += deltaMs;
     emitterAccumulatorMs += deltaMs;
     while (emitterAccumulatorMs >= EMITTER_REBUILD_MS) {

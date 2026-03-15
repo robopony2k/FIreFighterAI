@@ -64,10 +64,11 @@ const buildBudgetReportData = (world: WorldState): BudgetReportData => {
   const multipliedPositivePoints = summary
     ? summary.multipliedPositivePoints
     : world.scoring.seasonMultipliedPositivePoints;
+  const reportYear = world.annualReportOpen && world.phase === "maintenance" ? Math.max(1, world.year - 1) : world.year;
 
   return {
-    summary: `Year ${world.year} ledger: extinguish gains, losses, multiplier, and carry-over.`,
-    continueLabel: "Continue",
+    summary: `Year ${reportYear} ledger: extinguish gains, losses, multiplier, and carry-over.`,
+    continueLabel: world.annualReportOpen ? "Begin Winter Prep" : "Continue",
     multiplierPills: [
       {
         id: "difficulty",
@@ -273,13 +274,15 @@ export const initPhaseUI = (container: HTMLElement): PhaseUiApi => {
     const progress = phaseInfo.duration > 0 ? world.phaseDay / phaseInfo.duration : 0;
     state.setPhase(world.phase);
     state.setPhaseProgress(progress);
+    state.setAnnualReportOpen(world.annualReportOpen);
     state.setSelection(getSelection(world));
     state.setInteractionMode(getInteractionMode(world, inputState));
     state.setPaused(world.paused);
+    state.setSimTimeMode(world.simTimeMode);
     state.setTimeSpeedIndex(world.timeSpeedIndex);
     state.setSkipToNextFireState(
       !!world.skipToNextFire,
-      !world.gameOver && world.lastActiveFires <= 0 && !world.skipToNextFire
+      !world.gameOver && world.simTimeMode === "strategic" && world.lastActiveFires <= 0 && !world.skipToNextFire
     );
     state.setAlert(world.statusMessage && world.statusMessage !== "Ready." ? world.statusMessage : null);
     const windStrength = Math.round(world.wind.strength * 10);
@@ -311,6 +314,7 @@ export const initPhaseUI = (container: HTMLElement): PhaseUiApi => {
       nextApprovalTier: world.scoring.nextApprovalTier,
       nextApprovalThreshold01: world.scoring.nextApprovalThreshold01,
       nextTierProgress01: world.scoring.nextTierProgress01,
+      activeFireCount: world.lastActiveFires,
       extinguishedCount: world.scoring.seasonExtinguishedCount,
       propertyDamageCount: world.scoring.seasonPropertyDamageCount,
       livesLostCount: world.scoring.seasonLivesLostCount,
@@ -322,6 +326,14 @@ export const initPhaseUI = (container: HTMLElement): PhaseUiApi => {
         severity: event.severity,
         remainingSeconds: event.remainingSeconds,
         detail: event.detail
+      })),
+      flowEvents: world.scoring.flowEvents.map((event) => ({
+        id: event.id,
+        kind: event.kind,
+        deltaCount: event.deltaCount,
+        remainingSeconds: event.remainingSeconds,
+        tileX: event.tileX,
+        tileY: event.tileY
       }))
     });
     const budgetReportData = buildBudgetReportData(world);

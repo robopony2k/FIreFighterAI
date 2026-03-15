@@ -42,7 +42,7 @@ const SCENE_TO_TRACK: Record<MusicScene, TrackId> = {
   growth: "growth",
   maintenance: "maintenance",
   fire: "fire",
-  budget: "budget",
+  budget: "fire",
   victory: "victory",
   defeat: "defeat"
 };

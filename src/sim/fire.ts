@@ -6,13 +6,16 @@ import { ensureTileSoA } from "../core/tileCache.js";
 import { getFuelProfiles } from "../core/tiles.js";
 import { TILE_TYPE_IDS } from "../core/state.js";
 import { destroyHouse } from "../core/towns.js";
+import { clearVegetationState } from "../core/vegetation.js";
 import { recordTownHouseLoss } from "./towns.js";
 import { emitSmokeAt } from "./particles.js";
 import type { EffectsState } from "../core/effectsState.js";
 import { resetFireBounds } from "./fire/bounds.js";
 import { igniteRandomFire } from "./fire/ignite.js";
 import { sampleIgnitionFireSeed, sampleIgnitionHeatMultiplier } from "./fire/ignitionTuning.js";
+import type { FireWeatherResponse } from "./fire/fireWeather.js";
 import { buildFireWorkBlocks, ensureFireBlocks, finalizeFireBlocks, markFireBlockNextByTile } from "./fire/activeBlocks.js";
+import { markAttributedFireLossTile, queueScoreFlowEvent } from "./scoring.js";
 import { profEnd, profStart } from "./prof.js";
 const CARDINAL_DIRS = [
     { dx: 1, dy: 0 },
@@ -52,6 +55,18 @@ const BASELINE_FIRE_EPS = 0.04;
 const BASELINE_HEAT_EPS = 0.08;
 let baselineTickCounter = 0;
 
+const createFxRng = (seed: number) => {
+    let state = seed >>> 0;
+    return {
+        next: () => {
+            let t = (state += 0x6d2b79f5);
+            t = Math.imul(t ^ (t >>> 15), t | 1);
+            t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+            return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+        }
+    };
+};
+
 const isIgnitableTile = (tile) =>
     tile.type !== "water" &&
         tile.type !== "beach" &&
@@ -61,7 +76,7 @@ const isIgnitableTile = (tile) =>
         tile.type !== "firebreak" &&
         tile.type !== "road";
 
-function stepFireBaseline(state, rng, delta, spreadScale, dayFactor, burnoutFactor = 0) {
+function stepFireBaseline(state, rng, delta, spreadScale, dayFactor, burnoutFactor = 0, weatherResponse: FireWeatherResponse | null = null, climateIgnitionMultiplier = state.climateIgnitionMultiplier || 1) {
     const cols = state.grid.cols;
     const rows = state.grid.rows;
     const boundsActive = state.fireBoundsActive;
@@ -121,7 +136,11 @@ function stepFireBaseline(state, rng, delta, spreadScale, dayFactor, burnoutFact
         }
     }
     const tiles = state.tiles;
-    const ignitionBoost = Math.max(0.2, state.climateIgnitionMultiplier || 1);
+    const weatherIgnitionRaw = weatherResponse?.ignition ?? 1;
+    const weatherIgnition = Math.max(0.01, weatherIgnitionRaw);
+    const weatherCooling = Math.max(0.5, weatherResponse?.cooling ?? 1);
+    const coolingAmbient = weatherResponse?.effectiveAmbient ?? state.climateTemp;
+    const ignitionBoost = Math.max(0.2, climateIgnitionMultiplier * weatherIgnition);
     const igniteMask = state.igniteMask;
     for (let y = diffMinY; y <= diffMaxY; y += 1) {
         const rowBase = y * cols;
@@ -142,8 +161,8 @@ function stepFireBaseline(state, rng, delta, spreadScale, dayFactor, burnoutFact
                 currentHeat = candidateHeat * BASELINE_HEAT_DECAY;
             }
             if (burnoutFactor > 0 && currentFire > 0) {
-                const coolingDt = delta * (0.35 + burnoutFactor * 0.65);
-                currentHeat = coolCellTemp(currentHeat, state.climateTemp, coolingDt, DEFAULT_COOLING_PARAMS);
+                const coolingDt = delta * (0.35 + burnoutFactor * 0.65) * weatherCooling;
+                currentHeat = coolCellTemp(currentHeat, coolingAmbient, coolingDt, DEFAULT_COOLING_PARAMS);
                 currentFire = Math.max(0, currentFire - delta * (0.12 + burnoutFactor * 0.25));
             }
             fire[idx] = currentFire;
@@ -225,9 +244,9 @@ function stepFireBaseline(state, rng, delta, spreadScale, dayFactor, burnoutFact
     }
     return activeFires;
 }
-export function stepFire(state, effects: EffectsState, rng, delta, spreadScale, dayFactor, burnoutFactor = 0) {
+export function stepFire(state, effects: EffectsState, rng, delta, spreadScale, dayFactor, burnoutFactor = 0, weatherResponse: FireWeatherResponse | null = null, climateIgnitionMultiplier = state.climateIgnitionMultiplier || 1) {
     if (BASELINE_FIRE) {
-        return stepFireBaseline(state, rng, delta, spreadScale, dayFactor, burnoutFactor);
+        return stepFireBaseline(state, rng, delta, spreadScale, dayFactor, burnoutFactor, weatherResponse, climateIgnitionMultiplier);
     }
     const tickStart = profStart();
     const fuelProfiles = getFuelProfiles();
@@ -247,7 +266,14 @@ export function stepFire(state, effects: EffectsState, rng, delta, spreadScale, 
     const cols = state.grid.cols;
     const rows = state.grid.rows;
     const heatCap = Math.max(0.01, state.fireSettings.heatCap);
-    const ignitionBoost = Math.max(0.2, state.climateIgnitionMultiplier || 1);
+    const weatherIgnitionRaw = weatherResponse?.ignition ?? 1;
+    const weatherIgnition = Math.max(0.01, weatherIgnitionRaw);
+    const weatherSpread = Math.max(0.15, weatherResponse?.spread ?? 1);
+    const weatherSustain = Math.max(0.15, weatherResponse?.sustain ?? 1);
+    const weatherCooling = Math.max(0.5, weatherResponse?.cooling ?? 1);
+    const winterDamping = weatherIgnitionRaw < 0.12 ? (0.12 - weatherIgnitionRaw) / 0.12 : 0;
+    const coolingAmbient = weatherResponse?.effectiveAmbient ?? state.climateTemp;
+    const ignitionBoost = Math.max(0.2, climateIgnitionMultiplier * weatherIgnition);
     const currentTime = state.fireSeasonDay;
     const fire = state.tileFire;
     const fuel = state.tileFuel;
@@ -361,31 +387,38 @@ export function stepFire(state, effects: EffectsState, rng, delta, spreadScale, 
                 if (scheduledAt <= currentTime) {
                     const hasNeighborFire = hasNeighborFireAt(x, y);
                     const ignitionThreshold = ignitionPoint[idx] / ignitionBoost;
-                    const residualHeatIgnitionReady = heatValue >= ignitionThreshold * 1.18;
+                    const winterIgnitionSuppressed = weatherIgnition < 0.12;
+                    const residualHeatIgnitionReady = heatValue >= ignitionThreshold * (winterIgnitionSuppressed ? 1.45 : 1.18);
                     if (fireValue <= fireEps &&
                         fuelValue > 0 &&
                         isIgnitableTypeId(tid) &&
+                        !winterIgnitionSuppressed &&
                         (hasNeighborFire || residualHeatIgnitionReady)) {
                         igniteBuffer[igniteCount] = idx;
                         igniteCount += 1;
                     }
                     clearScheduled(idx);
                 } else if (scheduledAt < Number.POSITIVE_INFINITY) {
-                    markFireBlockNextByTile(state, idx);
+                    if (weatherIgnitionRaw < 0.04) {
+                        clearScheduled(idx);
+                    } else {
+                        markFireBlockNextByTile(state, idx);
+                    }
                 }
                 const burning = fireValue > fireEps;
                 if (burning) {
                     if (smokeSampleRate <= 1 || ((idx + smokeSeed) % smokeSampleRate) === 0) {
-                        emitSmokeAt(state, effects, rng, x + 0.5, y + 0.5, fireValue);
+                        const smokeRng = createFxRng(state.seed ^ (idx * 73856093) ^ smokeSeed);
+                        emitSmokeAt(state, effects, smokeRng, x + 0.5, y + 0.5, fireValue);
                     }
                     const baseHeat = (0.25 + fireValue * 0.45) * heatOutput[idx];
                     const moistureFactor = fireQuality === 0 ? 1 : Math.max(0, 1 - moisture[idx] * diffuseMoisture);
                     const intensity = Math.max(0.25, fireDelta * (0.45 + spreadScale * 0.12));
                     const dayBoost = 0.65 + dayFactor * 0.4;
                     const spreadMultiplier = fireQuality === 0 ? 1 : Math.max(0, spreadBoost[idx] || 1);
-                    const primary = baseHeat * spreadMultiplier * moistureFactor * intensity * dayBoost;
+                    const primary = baseHeat * spreadMultiplier * moistureFactor * intensity * dayBoost * weatherSpread * (0.45 + weatherSustain * 0.55);
                     const neighborBoost = 1 + Math.min(0.6, fireValue * 0.45 + spreadScale * 0.25);
-                    heatValue = Math.min(heatCap, heatValue + primary * 0.45);
+                    heatValue = Math.min(heatCap, heatValue + primary * (0.12 + weatherSustain * 0.18));
                     heat[idx] = heatValue;
                     if (primary > 0) {
                         const cardinalScale = diffuseCardinal * (1 + spreadScale * 0.12);
@@ -444,19 +477,39 @@ export function stepFire(state, effects: EffectsState, rng, delta, spreadScale, 
                         }
                     }
                 } else if (fireValue > 0) {
-                    fireValue = Math.max(0, fireValue - fireDelta * 0.5);
+                    fireValue = Math.max(0, fireValue - fireDelta * 0.5 * Math.max(1, weatherCooling * 0.8));
                     if (fireValue <= fireEps) {
                         fireValue = 0;
                     }
                 }
-                if (burnoutFactor > 0 && fireValue > fireEps) {
-                    const coolingDt = delta * (0.4 + burnoutFactor * 0.8);
+                if (burning && weatherCooling > 1) {
+                    const coolingDt = delta * (weatherCooling - 1) * 0.45;
+                    if (coolingDt > 0) {
+                        if (fireQuality >= 2) {
+                            heatValue = coolCellTemp(heatValue, coolingAmbient, coolingDt, DEFAULT_COOLING_PARAMS);
+                        } else {
+                            heatValue = Math.max(0, heatValue - coolingDt * 0.36);
+                        }
+                    }
+                }
+                if (burning && winterDamping > 0) {
+                    const winterCoolingDt = delta * (0.65 + winterDamping * 0.9);
                     if (fireQuality >= 2) {
-                        heatValue = coolCellTemp(heatValue, state.climateTemp, coolingDt, DEFAULT_COOLING_PARAMS);
+                        heatValue = coolCellTemp(heatValue, coolingAmbient, winterCoolingDt, DEFAULT_COOLING_PARAMS);
+                    } else {
+                        heatValue = Math.max(0, heatValue - winterCoolingDt * 0.4);
+                    }
+                    const winterHeatMultiplier = Math.max(0, 1 - delta * (0.55 + winterDamping * 0.65));
+                    heatValue *= winterHeatMultiplier;
+                }
+                if (burnoutFactor > 0 && fireValue > fireEps) {
+                    const coolingDt = delta * (0.4 + burnoutFactor * 0.8) * weatherCooling;
+                    if (fireQuality >= 2) {
+                        heatValue = coolCellTemp(heatValue, coolingAmbient, coolingDt, DEFAULT_COOLING_PARAMS);
                     } else {
                         heatValue = Math.max(0, heatValue - coolingDt * 0.35);
                     }
-                    fireValue = Math.max(0, fireValue - fireDelta * (0.12 + burnoutFactor * 0.35));
+                    fireValue = Math.max(0, fireValue - fireDelta * (0.12 + burnoutFactor * 0.35) * Math.max(1, weatherCooling * 1.1));
                     if (fireValue <= fireEps) {
                         fireValue = 0;
                     }
@@ -464,20 +517,24 @@ export function stepFire(state, effects: EffectsState, rng, delta, spreadScale, 
                 if (!burning && fireValue <= fireEps && heatValue > 0) {
                     const retention = Number.isFinite(heatRetention[idx]) ? heatRetention[idx] : 0.9;
                     if (fireQuality >= 2) {
-                        const coolingDt = delta * (0.35 + (1 - retention) * 0.35);
-                        heatValue = coolCellTemp(heatValue, state.climateTemp, coolingDt, DEFAULT_COOLING_PARAMS);
+                        const coolingDt = delta * (0.35 + (1 - retention) * 0.35) * weatherCooling;
+                        heatValue = coolCellTemp(heatValue, coolingAmbient, coolingDt, DEFAULT_COOLING_PARAMS);
                     } else {
-                        heatValue *= 0.92 + retention * 0.08;
+                        heatValue *= Math.max(0, Math.min(1, (0.92 + retention * 0.08) - (weatherCooling - 1) * 0.08));
                     }
-                    if (heatValue < ignitionPoint[idx]) {
+                    if (weatherIgnitionRaw < 0.04) {
+                        heatValue = Math.min(heatValue, ignitionPoint[idx] * 0.1);
+                        clearScheduled(idx);
+                    }
+                    if (heatValue < ignitionPoint[idx] * (weatherIgnition < 0.15 ? 1.15 : 1)) {
                         clearScheduled(idx);
                     }
                 }
                 if (!burning && fuelValue > 0 && heatValue >= ignitionPoint[idx] / ignitionBoost && isIgnitableTypeId(tid)) {
                     if (tileIgniteAt[idx] === Number.POSITIVE_INFINITY) {
                         const hasNeighborFire = hasNeighborFireAt(x, y);
-                        if (hasNeighborFire) {
-                            const hazard = (heatValue - ignitionPoint[idx] / ignitionBoost) * 0.55 * ignitionBoost;
+                        if (hasNeighborFire && weatherIgnition >= 0.12) {
+                            const hazard = (heatValue - ignitionPoint[idx] / ignitionBoost) * 0.55 * ignitionBoost * weatherIgnition;
                             if (hazard > 0) {
                                 if (fireQuality === 0) {
                                     igniteBuffer[igniteCount] = idx;
@@ -496,10 +553,30 @@ export function stepFire(state, effects: EffectsState, rng, delta, spreadScale, 
                     const ignition = Math.max(ignitionPoint[idx], 0.0001);
                     const heatRatio = heatValue / (ignition * 1.6);
                     const overheatFactor = Math.max(0, (heatValue - ignition) / ignition);
-                    const growth = fireDelta * burnRate[idx] * (heatRatio - 0.45 + overheatFactor * state.fireSettings.conflagrationHeatBoost);
+                    const sustainDrag = Math.max(0, (1 - weatherSustain) * 1.4 + Math.max(0, weatherCooling - 1) * 0.35);
+                    const growth = fireDelta * burnRate[idx] * (weatherSustain * (heatRatio - 0.45 + overheatFactor * state.fireSettings.conflagrationHeatBoost) - sustainDrag);
                     fireValue = Math.min(1, Math.max(0, fireValue + growth));
+                    const climateDecay = Math.max(0, (1 - weatherSustain) * 0.35 + Math.max(0, weatherCooling - 1) * 0.12);
+                    if (climateDecay > 0) {
+                        fireValue = Math.max(0, fireValue - fireDelta * climateDecay);
+                    }
                     const fuelDrain = fireDelta * burnRate[idx] * (0.6 + fireValue * 0.9 + overheatFactor * state.fireSettings.conflagrationFuelBoost);
                     fuelValue = Math.max(0, fuelValue - fuelDrain);
+                    if (winterDamping > 0) {
+                        fireValue = Math.max(0, fireValue - delta * (0.55 + winterDamping * 1.1));
+                        const winterFireMultiplier = Math.max(0, 1 - delta * (1.1 + winterDamping * 1.35));
+                        fireValue *= winterFireMultiplier;
+                        if (winterDamping > 0.6 && (fireValue < 0.75 || heatValue < ignition * 2.2)) {
+                            fireValue = 0;
+                            heatValue = Math.min(heatValue, ignition * 0.2);
+                            clearScheduled(idx);
+                        }
+                    }
+                    if (weatherIgnitionRaw < 0.04) {
+                        fireValue = 0;
+                        heatValue = Math.min(heatValue, ignition * 0.15);
+                        clearScheduled(idx);
+                    }
                     if (fuelValue <= 0.02 && tid !== TILE_TYPE_IDS.ash) {
                         const tile = state.tiles[idx];
                         if (tile.type === "house" && !tile.houseDestroyed) {
@@ -517,10 +594,16 @@ export function stepFire(state, effects: EffectsState, rng, delta, spreadScale, 
                             state.lostResidents += tile.houseResidents;
                             state.yearPropertyLost += tile.houseValue;
                             state.yearLivesLost += tile.houseResidents;
+                            markAttributedFireLossTile(state, idx);
+                            queueScoreFlowEvent(state, "property", 1, undefined, x, y);
+                            if (tile.houseResidents > 0) {
+                                queueScoreFlowEvent(state, "lives", tile.houseResidents, undefined, x, y);
+                            }
                         }
                         tile.type = "ash";
                         tile.fuel = 0;
                         tile.ashAge = 0;
+                        clearVegetationState(tile);
                         tile.dominantTreeType = null;
                         tile.treeType = null;
                         tile.heat *= 0.4;
@@ -530,11 +613,15 @@ export function stepFire(state, effects: EffectsState, rng, delta, spreadScale, 
                         }
                         state.terrainDirty = true;
                         state.terrainTypeRevision += 1;
+                        state.vegetationRevision += 1;
                         tile.spreadBoost = ashProfile.spreadBoost;
                         tile.heatTransferCap = ashProfile.heatTransferCap;
                         tile.heatRetention = ashProfile.heatRetention;
                         tile.windFactor = ashProfile.windFactor;
                         typeId[idx] = TILE_TYPE_IDS.ash;
+                        state.tileVegetationAge[idx] = 0;
+                        state.tileCanopyCover[idx] = 0;
+                        state.tileStemDensity[idx] = 0;
                         spreadBoost[idx] = tile.spreadBoost ?? 1;
                         heatRetention[idx] = tile.heatRetention ?? 0.9;
                         windFactor[idx] = tile.windFactor ?? 0;

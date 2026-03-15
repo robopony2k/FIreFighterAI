@@ -2,7 +2,7 @@ import type { WorldState } from "../../core/state.js";
 import type { InputState } from "../../core/inputState.js";
 import { indexFor } from "../../core/grid.js";
 import { DEFAULT_MOISTURE_PARAMS } from "../../core/climate.js";
-import { TIME_SPEED_OPTIONS } from "../../core/config.js";
+import { getTimeSpeedOptions } from "../../core/config.js";
 import { buildHudLayout, WidgetSlot, WidgetType, type Rect } from "./hudLayout.js";
 import type { HudState } from "./hudState.js";
 import { addToast, cycleWidget, stepToasts, toggleCompact } from "./hudState.js";
@@ -10,11 +10,21 @@ import type { HudInput, HudWidget } from "./widgets/hudWidget.js";
 import { ClimateChartWidget } from "./widgets/ClimateChartWidget.js";
 import { MinimapWidget } from "./widgets/MinimapWidget.js";
 import { DebugWidget } from "./widgets/DebugWidget.js";
+import { cancelSkipToNextFire } from "../../sim/index.js";
 
 const clamp = (value: number, min: number, max: number): number => Math.min(max, Math.max(min, value));
 const formatNumber = (value: number, digits = 3): string => (Number.isFinite(value) ? value.toFixed(digits) : "inf");
 const formatOptional = (value: number | undefined | null, digits = 3): string =>
   typeof value === "number" ? value.toFixed(digits) : "n/a";
+const formatSpeedValue = (value: number): string => {
+  if (Number.isInteger(value)) {
+    return `${value.toFixed(0)}x`;
+  }
+  if (value >= 0.1) {
+    return `${value.toFixed(2).replace(/0+$/, "").replace(/\.$/, "")}x`;
+  }
+  return `${value.toFixed(3).replace(/0+$/, "").replace(/\.$/, "")}x`;
+};
 
 const drawRoundedRect = (ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, radius: number) => {
   const r = Math.min(radius, w * 0.5, h * 0.5);
@@ -128,8 +138,9 @@ const renderTopBar = (ctx: CanvasRenderingContext2D, world: WorldState, ui: HudS
   const totalHouses = Number.isFinite(world.totalHouses) ? Math.max(0, Math.floor(world.totalHouses)) : 0;
   const destroyedHouses = Number.isFinite(world.destroyedHouses) ? Math.max(0, Math.floor(world.destroyedHouses)) : 0;
   const liveHouses = Math.max(0, totalHouses - destroyedHouses);
-  const speedIndex = Math.min(Math.max(world.timeSpeedIndex ?? 0, 0), TIME_SPEED_OPTIONS.length - 1);
-  const speed = TIME_SPEED_OPTIONS[speedIndex] ?? 1;
+  const activeSpeedOptions = getTimeSpeedOptions(world.simTimeMode);
+  const speedIndex = Math.min(Math.max(world.timeSpeedIndex ?? 0, 0), activeSpeedOptions.length - 1);
+  const speed = activeSpeedOptions[speedIndex] ?? 1;
   const rightText = `APPROVAL ${approval} | HOUSES ${liveHouses}`;
 
   ctx.fillStyle = theme.textPrimary;
@@ -152,7 +163,11 @@ const renderTopBar = (ctx: CanvasRenderingContext2D, world: WorldState, ui: HudS
   ctx.fillText("-", speedRect.x + SPEED_BUTTON_SIDE * 0.5, speedRect.y + speedRect.height / 2);
   ctx.fillText("+", speedRect.x + speedRect.width - SPEED_BUTTON_SIDE * 0.5, speedRect.y + speedRect.height / 2);
   ctx.font = "600 11px ui-sans-serif, system-ui, sans-serif";
-  ctx.fillText(`SPEED ${speed}x`, speedRect.x + speedRect.width / 2, speedRect.y + speedRect.height / 2);
+  ctx.fillText(
+    `${world.simTimeMode === "incident" ? "INC" : "STR"} ${formatSpeedValue(speed)}`,
+    speedRect.x + speedRect.width / 2,
+    speedRect.y + speedRect.height / 2
+  );
   ctx.textAlign = "right";
   ctx.font = "600 12px ui-sans-serif, system-ui, sans-serif";
   ctx.fillText(rightText, speedRect.x - 12, rect.y + rect.height / 2);
@@ -251,7 +266,7 @@ const renderDebugCellOverlay = (
     `cell ${tileX},${tileY}`,
     `type=${tile.type} id=${world.tileTypeId[idx] ?? "n/a"} base=${tile.isBase ? "1" : "0"}`,
     `phase=${world.phase} paused=${world.paused ? "1" : "0"} fireDay=${formatNumber(world.fireSeasonDay, 2)}`,
-    `simAcc=${formatNumber(world.fireSimAccumulator, 2)} active=${world.lastActiveFires}`,
+    `substeps=${world.firePerfSubsteps} fireDays=${formatNumber(world.firePerfSimulatedDays, 2)} active=${world.lastActiveFires}`,
     `fire=${formatNumber(tile.fire)} heat=${formatNumber(tile.heat)} fuel=${formatNumber(tile.fuel)}`,
     `ignite=${formatNumber(tile.ignitionPoint)} burn=${formatNumber(tile.burnRate)} heatOut=${formatNumber(tile.heatOutput)}`,
     `spread=${formatOptional(tile.spreadBoost)} cap=${formatOptional(tile.heatTransferCap)} retain=${formatOptional(tile.heatRetention)}`,
@@ -380,7 +395,8 @@ export const handleHudClick = (
   const layout = buildHudLayout({ width: ui.viewport.width, height: ui.viewport.height });
   const speedRect = getSpeedButtonRect(layout.topBar);
   if (x >= speedRect.x && x <= speedRect.x + speedRect.width && y >= speedRect.y && y <= speedRect.y + speedRect.height) {
-    const len = TIME_SPEED_OPTIONS.length;
+    const activeSpeedOptions = getTimeSpeedOptions(world.simTimeMode);
+    const len = activeSpeedOptions.length;
     const current = Math.min(Math.max(world.timeSpeedIndex ?? 0, 0), len - 1);
     let next = current;
     if (x < speedRect.x + SPEED_BUTTON_SIDE) {
@@ -390,8 +406,23 @@ export const handleHudClick = (
     } else {
       next = (current + 1) % len;
     }
+    if (world.skipToNextFire) {
+      cancelSkipToNextFire(world, "Skip to next fire cancelled.");
+    }
     world.timeSpeedIndex = next;
-    addToast(ui, `Time speed ${TIME_SPEED_OPTIONS[next]}x.`, "info", 2200);
+    if (world.simTimeMode === "incident") {
+      world.incidentTimeSpeedIndex = next;
+    } else {
+      world.strategicTimeSpeedIndex = next;
+    }
+    addToast(
+      ui,
+      `${world.simTimeMode === "incident" ? "Incident" : "Strategic"} time ${formatSpeedValue(
+        activeSpeedOptions[next] ?? 1
+      )}.`,
+      "info",
+      2200
+    );
     return true;
   }
   const slots = [WidgetSlot.A, WidgetSlot.B];

@@ -56,6 +56,7 @@ export type UnitSkill = "speed" | "power" | "range" | "resilience";
 export type RosterStatus = "available" | "deployed" | "lost";
 
 export type SeasonPhase = "growth" | "maintenance" | "fire" | "budget";
+export type SimTimeMode = "strategic" | "incident";
 
 export type DeployMode = UnitKind | "clear";
 
@@ -151,6 +152,7 @@ export interface Tile {
   moisture: number;
   waterDist: number;
 
+  vegetationAgeYears: number;
   canopy: number;
   canopyCover: number;
   stemDensity: number;
@@ -480,6 +482,8 @@ export type ScoreEventSeverity = "positive" | "negative" | "info";
 
 export type ScoreEventLane = "extinguished" | "property" | "lives" | "info";
 
+export type ScoreFlowKind = "gain" | "extinguished" | "property" | "lives" | "decay";
+
 export type ScoreEvent = {
   id: number;
   lane: ScoreEventLane;
@@ -488,6 +492,15 @@ export type ScoreEvent = {
   severity: ScoreEventSeverity;
   remainingSeconds: number;
   detail?: string;
+};
+
+export type ScoreFlowEvent = {
+  id: number;
+  kind: ScoreFlowKind;
+  deltaCount: number;
+  remainingSeconds: number;
+  tileX?: number;
+  tileY?: number;
 };
 
 export type ScoringSeasonSummary = {
@@ -565,13 +578,17 @@ export type ScoringState = {
   seasonSampleSeconds: number;
   seasonSummary: ScoringSeasonSummary | null;
   events: ScoreEvent[];
+  flowEvents: ScoreFlowEvent[];
   nextEventId: number;
+  nextFlowEventId: number;
   previousDestroyedHouses: number;
   previousLostResidents: number;
   previousLostFirefighters: number;
   previousTownHousesLost: Int32Array;
   burnStartFuel: Float32Array;
   lastSuppressedAt: Float32Array;
+  pendingFlowEvents: Array<Omit<ScoreFlowEvent, "id">>;
+  attributedFireLossTiles: Set<number>;
   prevFireBoundsActive: boolean;
   prevFireMinX: number;
   prevFireMaxX: number;

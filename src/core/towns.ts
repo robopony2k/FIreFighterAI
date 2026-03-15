@@ -1,7 +1,7 @@
 import type { TileType } from "./types.js";
 import type { WorldState } from "./state.js";
-import { clamp } from "./utils.js";
 import { syncTileSoAIndex } from "./tileCache.js";
+import { clearVegetationState, syncDerivedVegetationState } from "./vegetation.js";
 
 export const STRUCTURE_NONE = 0;
 export const STRUCTURE_HOUSE = 1;
@@ -53,14 +53,16 @@ const applyRestoredBiomeState = (state: WorldState, idx: number): void => {
   tile.treeType = null;
 
   if (nextType === "forest") {
-    tile.canopy = clamp(0.48 + tile.moisture * 0.3, 0.35, 0.95);
+    tile.vegetationAgeYears = 8 + tile.moisture * 4;
   } else if (nextType === "grass" || nextType === "scrub" || nextType === "floodplain") {
-    tile.canopy = clamp(0.15 + tile.moisture * 0.35, 0.08, 0.6);
+    tile.vegetationAgeYears = 1.5 + tile.moisture * 1.5;
   } else {
-    tile.canopy = 0;
+    clearVegetationState(tile);
+    return;
   }
-  tile.canopyCover = tile.canopy;
-  tile.stemDensity = nextType === "forest" ? 3 : 0;
+  const x = idx % state.grid.cols;
+  const y = Math.floor(idx / state.grid.cols);
+  syncDerivedVegetationState(tile, state.seed, x, y);
 };
 
 const clearHouseAnchor = (state: WorldState, idx: number): void => {
@@ -103,9 +105,7 @@ export function placeHouse(state: WorldState, idx: number, townId: number): bool
 
   tile.type = "house";
   tile.isBase = false;
-  tile.canopy = 0;
-  tile.canopyCover = 0;
-  tile.stemDensity = 0;
+  clearVegetationState(tile);
   tile.dominantTreeType = null;
   tile.treeType = null;
   tile.houseValue = houseValue;

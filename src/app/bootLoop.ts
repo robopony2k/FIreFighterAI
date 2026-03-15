@@ -43,13 +43,14 @@ export type AppBootLoopDeps = {
   baseStep: number;
   mainHitchThresholdMs: number;
   frameCapFps: number;
-  timeSpeedOptions: readonly number[];
+  getTimeSpeedOptions: () => readonly number[];
   isGenerating: () => boolean;
   isTitleScreenVisible?: () => boolean;
   isCharacterScreenVisible: () => boolean;
   isStartMenuVisible: () => boolean;
   isDocumentHidden: () => boolean;
   isThreeTestVisible: () => boolean;
+  isIncidentMode: () => boolean;
   getTimeSpeedIndex: () => number;
   isThreeTestNoSim: boolean;
   isPausedOrGameOver: () => boolean;
@@ -105,9 +106,14 @@ export const startAppBootLoop = (deps: AppBootLoopDeps): void => {
     const delta = Math.min(0.25, (now - lastTick) / 1000);
     lastTick = now;
     accumulator += delta;
-    const speedIndex = Math.min(Math.max(deps.getTimeSpeedIndex(), 0), deps.timeSpeedOptions.length - 1);
-    const simStep = deps.baseStep * (deps.timeSpeedOptions[speedIndex] ?? 1);
-    const maxStepsPerFrame = threeTestVisible ? 1 : 8;
+    const incidentMode = deps.isIncidentMode();
+    if (incidentMode) {
+      accumulator = Math.min(accumulator, deps.baseStep);
+    }
+    const timeSpeedOptions = deps.getTimeSpeedOptions();
+    const speedIndex = Math.min(Math.max(deps.getTimeSpeedIndex(), 0), timeSpeedOptions.length - 1);
+    const simStep = deps.baseStep * (timeSpeedOptions[speedIndex] ?? 1);
+    const maxStepsPerFrame = incidentMode ? 1 : threeTestVisible ? 1 : 8;
     let simStepsThisFrame = 0;
     let simFrameMs = 0;
     const skipSimThisFrame = threeTestVisible && deps.isThreeTestNoSim;
@@ -125,7 +131,9 @@ export const startAppBootLoop = (deps: AppBootLoopDeps): void => {
     if (simStepsThisFrame > 0) {
       deps.recordPerfSample("sim.step", simFrameMs / simStepsThisFrame);
     }
-    if (simStepsThisFrame >= maxStepsPerFrame && accumulator >= deps.baseStep) {
+    if (incidentMode) {
+      accumulator = Math.min(accumulator, deps.baseStep);
+    } else if (simStepsThisFrame >= maxStepsPerFrame && accumulator >= deps.baseStep) {
       accumulator = Math.min(accumulator, deps.baseStep);
     }
 

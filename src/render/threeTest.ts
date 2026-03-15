@@ -1,6 +1,6 @@
 import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
-import { CAREER_YEARS, TILE_SIZE, TIME_SPEED_OPTIONS, TOWN_ALERT_MAX_POSTURE } from "../core/config.js";
+import { CAREER_YEARS, TILE_SIZE, TIME_SPEED_OPTIONS, TOWN_ALERT_MAX_POSTURE, getTimeSpeedOptions } from "../core/config.js";
 import { VIRTUAL_CLIMATE_PARAMS } from "../core/climate.js";
 import type { EffectsState } from "../core/effectsState.js";
 import { getHouseFootprintBounds, pickHouseFootprint } from "../core/houseFootprints.js";
@@ -13,6 +13,7 @@ import { createHudState, setHudViewport, type HudTheme } from "./hud/hudState.js
 import { handleHudClick, handleHudKey, renderHud } from "./hud/hud.js";
 import { buildEnvironmentPalette, computeFireLoad01 } from "./environmentPalette.js";
 import { buildLightingDirectorState, type LightingDirectorState } from "./lightingDirector.js";
+import { buildThermalBackdropField, buildThermalHotspotField, paintThermalField } from "./minimapRaster.js";
 import {
   getFirestationAssetCache,
   getHouseAssetsCache,
@@ -55,7 +56,17 @@ import {
   buildOceanMask,
   type TreeSeasonVisualConfig,
   type TreeBurnController,
-  type TerrainSample
+  type TerrainSample,
+  type TerrainWaterData,
+  type WaterfallDebugData,
+  WATERFALL_DEBUG_FLAG_BEST_DROP_OK,
+  WATERFALL_DEBUG_FLAG_CANDIDATE,
+  WATERFALL_DEBUG_FLAG_EMITTED,
+  WATERFALL_DEBUG_FLAG_LOCAL_DROP_OK,
+  WATERFALL_DEBUG_FLAG_OCEANISH,
+  WATERFALL_DEBUG_FLAG_RIVER,
+  WATERFALL_DEBUG_FLAG_STEP_OK,
+  WATERFALL_DEBUG_FLAG_WATER
 } from "./threeTestTerrain.js";
 import { createThreeTestFireFx, type SparkMode } from "./threeTestFireFx.js";
 import { createThreeTestCinematicGrade, type ThreeTestCinematicGradeConfig } from "./threeTestCinematicGrade.js";
@@ -117,6 +128,7 @@ export type ThreeTestController = {
   stop: () => void;
   resize: () => void;
   prime: () => void;
+  captureFireSnapshot: (world: RenderSim) => void;
   setSimulationAlpha: (alpha: number) => void;
   isCameraInteracting: () => boolean;
   setTerrain: (sample: TerrainSample) => void;
@@ -284,11 +296,17 @@ const TOWN_LABEL_MAX_Z_INDEX = 20000;
 const BASE_LABEL_LIFT_METERS = 115;
 const BASE_LABEL_SCREEN_OFFSET_Y = -22;
 const BASE_LABEL_CONNECTOR_ORIGIN_X = 12;
+const HOVER_DEBUG_LABEL_LIFT_METERS = 88;
+const HOVER_DEBUG_LABEL_SCREEN_OFFSET_Y = -18;
+const HOVER_DEBUG_LABEL_CONNECTOR_ORIGIN_X = 16;
 const MINIMAP_REDRAW_INTERVAL_MS = 140;
 const UNIT_TRAY_UPDATE_INTERVAL_MS = 90;
 const UNIT_COMMAND_PATH_LIFT = 0.07;
 const UNIT_COMMAND_MARKER_LIFT = 0.1;
 const UNIT_COMMAND_MARKER_RADIUS = 0.06;
+const SCORE_FLOW_PULSE_POOL_SIZE = 18;
+const SCORE_FLOW_PULSE_DURATION_MS = 1050;
+const SCORE_FLOW_PULSE_LIFT = 0.05;
 const CLIMATE_RISK_LABELS = ["Low", "Moderate", "High", "Extreme"] as const;
 const CLIMATE_TEMP_DOMAIN_MIN = Math.floor(
   VIRTUAL_CLIMATE_PARAMS.tMid - VIRTUAL_CLIMATE_PARAMS.tAmp - VIRTUAL_CLIMATE_PARAMS.noiseAmp
@@ -301,11 +319,53 @@ const CLIMATE_TEMP_DOMAIN_MAX = Math.ceil(
     VIRTUAL_CLIMATE_PARAMS.warmingPerYear * Math.max(0, CAREER_YEARS - 1)
 );
 
+type MinimapMode = "terrain" | "fire" | "moisture";
+
 const clamp01 = (value: number): number => Math.max(0, Math.min(1, value));
+const mixChannel = (a: number, b: number, t: number): number => a + (b - a) * t;
+const mixRgb = (
+  a: { r: number; g: number; b: number },
+  b: { r: number; g: number; b: number },
+  t: number
+): { r: number; g: number; b: number } => ({
+  r: Math.round(mixChannel(a.r, b.r, t)),
+  g: Math.round(mixChannel(a.g, b.g, t)),
+  b: Math.round(mixChannel(a.b, b.b, t))
+});
+const getMinimapMoistureColor = (moisture: number): { r: number; g: number; b: number } => {
+  const dry = { r: 125, g: 92, b: 58 };
+  const damp = { r: 94, g: 129, b: 84 };
+  const wet = { r: 60, g: 128, b: 179 };
+  const clamped = clamp01(moisture);
+  if (clamped <= 0.5) {
+    return mixRgb(dry, damp, clamped / 0.5);
+  }
+  return mixRgb(damp, wet, (clamped - 0.5) / 0.5);
+};
+const MINIMAP_FIRE_PALETTE = {
+  low: { r: 20, g: 20, b: 22 },
+  mid: { r: 192, g: 70, b: 40 },
+  high: { r: 242, g: 201, b: 76 }
+};
+const formatTimeSpeedValue = (value: number): string => {
+  if (Number.isInteger(value)) {
+    return `${value.toFixed(0)}x`;
+  }
+  if (value >= 0.1) {
+    return `${value.toFixed(2).replace(/0+$/, "").replace(/\.$/, "")}x`;
+  }
+  return `${value.toFixed(3).replace(/0+$/, "").replace(/\.$/, "")}x`;
+};
+const getDisplayedTimeSpeedIndices = (options: readonly number[]): number[] => {
+  const last = Math.max(0, options.length - 1);
+  return [...new Set([0, Math.min(1, last), Math.min(2, last), last])];
+};
 const wrap01 = (value: number): number => {
   const wrapped = value % 1;
   return wrapped < 0 ? wrapped + 1 : wrapped;
 };
+const formatDebugNumber = (value: number, digits = 2): string =>
+  Number.isFinite(value) ? value.toFixed(digits) : "n/a";
 const lerpWrapped01 = (current: number, target: number, alpha: number): number => {
   const c = wrap01(current);
   const t = wrap01(target);
@@ -512,15 +572,26 @@ export const createThreeTest = (
     sparkDebug: THREE_TEST_SPARK_DEBUG,
     sparkMode: THREE_TEST_SPARK_MODE
   });
+  fireFx.captureSnapshot(world);
   const unitsLayer = createThreeTestUnitsLayer(scene);
   const unitFxLayer = createThreeTestUnitFxLayer(scene);
   type UnitCommandVisual = {
     line: THREE.Line;
     destination: THREE.Mesh;
   };
+  type ScoreFlowPulse = {
+    mesh: THREE.Mesh;
+    material: THREE.MeshBasicMaterial;
+    startAt: number;
+    endAt: number;
+    baseScale: number;
+  };
   const unitCommandVisualGroup = new THREE.Group();
   unitCommandVisualGroup.name = "three-test-unit-commands";
   scene.add(unitCommandVisualGroup);
+  const scoreFlowPulseGroup = new THREE.Group();
+  scoreFlowPulseGroup.name = "three-test-score-flow-pulses";
+  scene.add(scoreFlowPulseGroup);
   const unitCommandPathMaterial = new THREE.LineBasicMaterial({
     color: 0xb8e6ff,
     transparent: true,
@@ -528,6 +599,7 @@ export const createThreeTest = (
     depthWrite: false
   });
   const unitCommandMarkerGeometry = new THREE.SphereGeometry(UNIT_COMMAND_MARKER_RADIUS, 10, 10);
+  const scoreFlowPulseGeometry = new THREE.RingGeometry(0.34, 0.5, 32);
   const unitCommandMarkerMaterial = new THREE.MeshStandardMaterial({
     color: 0xfff0b8,
     emissive: 0x5b4b17,
@@ -536,6 +608,30 @@ export const createThreeTest = (
     metalness: 0.05
   });
   const unitCommandVisuals = new Map<number, UnitCommandVisual>();
+  const scoreFlowPulses: ScoreFlowPulse[] = [];
+  let lastConsumedScoreFlowEventId = 0;
+  for (let i = 0; i < SCORE_FLOW_PULSE_POOL_SIZE; i += 1) {
+    const material = new THREE.MeshBasicMaterial({
+      color: 0xffa357,
+      transparent: true,
+      opacity: 0,
+      depthWrite: false,
+      side: THREE.DoubleSide
+    });
+    const mesh = new THREE.Mesh(scoreFlowPulseGeometry, material);
+    mesh.rotation.x = -Math.PI * 0.5;
+    mesh.visible = false;
+    mesh.frustumCulled = false;
+    mesh.renderOrder = 7;
+    scoreFlowPulseGroup.add(mesh);
+    scoreFlowPulses.push({
+      mesh,
+      material,
+      startAt: Number.NEGATIVE_INFINITY,
+      endAt: Number.NEGATIVE_INFINITY,
+      baseScale: 1
+    });
+  }
 
   const hudState = createHudState();
   const hudCanvas = document.createElement("canvas");
@@ -586,6 +682,23 @@ export const createThreeTest = (
   canvas.parentElement?.appendChild(sparkDebugOverlay);
   let sparkDebugLastUiAt = -Infinity;
   let sparkDebugLastLogAt = -Infinity;
+  const hoverDebugRoot = document.createElement("div");
+  hoverDebugRoot.className = "three-test-debug-nameplate hidden";
+  const hoverDebugConnector = document.createElement("div");
+  hoverDebugConnector.className = "three-test-town-connector three-test-debug-connector";
+  const hoverDebugHeader = document.createElement("div");
+  hoverDebugHeader.className = "three-test-debug-nameplate-header";
+  const hoverDebugTitle = document.createElement("div");
+  hoverDebugTitle.className = "three-test-debug-title";
+  const hoverDebugBadge = document.createElement("span");
+  hoverDebugBadge.className = "three-test-debug-badge";
+  hoverDebugHeader.append(hoverDebugTitle, hoverDebugBadge);
+  const hoverDebugMeta = document.createElement("div");
+  hoverDebugMeta.className = "three-test-debug-meta";
+  const hoverDebugDetails = document.createElement("div");
+  hoverDebugDetails.className = "three-test-debug-details";
+  hoverDebugRoot.append(hoverDebugHeader, hoverDebugMeta, hoverDebugDetails);
+  townOverlayRoot.append(hoverDebugRoot, hoverDebugConnector);
 
   const TOWN_ICON_HOUSES = "H";
   const TOWN_ICON_BURNING = "F";
@@ -613,6 +726,23 @@ export const createThreeTest = (
   };
   let removeUiAudioChangeListener: (() => void) | null = null;
   let removeMusicControlsChangeListener: (() => void) | null = null;
+  type HoverDebugTone = "default" | "watch" | "high" | "critical";
+  type HoverDebugSection = {
+    key: string;
+    label: string;
+    lines: string[];
+    tone?: HoverDebugTone;
+  };
+  type HoverDebugContext = {
+    tileX: number;
+    tileY: number;
+    tileIndex: number;
+    hoverGrid: { x: number; y: number } | null;
+    sample: TerrainSample;
+    terrainWater: TerrainWaterData | null;
+    heightScale: number;
+  };
+  type HoverDebugSectionBuilder = (context: HoverDebugContext) => HoverDebugSection | null;
 
   type TownLabelElements = {
     root: HTMLDivElement;
@@ -1004,6 +1134,7 @@ export const createThreeTest = (
 
   const createDockCard = (id: string, title: string, indicator: string): DockCardElements => {
     dockCardState.register(id);
+    dockCardState.setPinned(id, true);
     const root = document.createElement("div");
     root.className = "three-test-dock-card";
     root.dataset.cardId = id;
@@ -1024,7 +1155,7 @@ export const createThreeTest = (
     const pinButton = document.createElement("button");
     pinButton.type = "button";
     pinButton.className = "three-test-dock-card-pin";
-    applyPinButtonState(pinButton, false);
+    applyPinButtonState(pinButton, true);
     const closeButton = document.createElement("button");
     closeButton.type = "button";
     closeButton.className = "three-test-dock-card-close";
@@ -1137,22 +1268,25 @@ export const createThreeTest = (
   minimapCanvas.className = "three-test-minimap-canvas";
   const minimapLayersWrap = document.createElement("div");
   minimapLayersWrap.className = "three-test-minimap-layers";
-  const minimapLayers = {
-    terrain: true,
-    fire: true,
-    moisture: false,
+  const minimapModeGroupName = `three-test-minimap-mode-${threeTestInitCount}`;
+  let minimapMode: MinimapMode = "terrain";
+  const minimapOverlays = {
     wind: true,
     units: true
   };
-  const addLayerToggle = (key: keyof typeof minimapLayers, label: string): void => {
+  const addModeToggle = (mode: MinimapMode, label: string): void => {
     const wrap = document.createElement("label");
     wrap.className = "three-test-minimap-layer";
     const input = document.createElement("input");
-    input.type = "checkbox";
-    input.checked = minimapLayers[key];
+    input.type = "radio";
+    input.name = minimapModeGroupName;
+    input.checked = minimapMode === mode;
     input.addEventListener("change", () => {
+      if (!input.checked) {
+        return;
+      }
       playUiCue("toggle");
-      minimapLayers[key] = input.checked;
+      minimapMode = mode;
       lastMinimapRasterAt = -Infinity;
     });
     const text = document.createElement("span");
@@ -1160,11 +1294,27 @@ export const createThreeTest = (
     wrap.append(input, text);
     minimapLayersWrap.appendChild(wrap);
   };
-  addLayerToggle("terrain", "Terrain");
-  addLayerToggle("fire", "Heat");
-  addLayerToggle("moisture", "Moisture");
-  addLayerToggle("wind", "Wind");
-  addLayerToggle("units", "Units");
+  const addOverlayToggle = (key: keyof typeof minimapOverlays, label: string): void => {
+    const wrap = document.createElement("label");
+    wrap.className = "three-test-minimap-layer";
+    const input = document.createElement("input");
+    input.type = "checkbox";
+    input.checked = minimapOverlays[key];
+    input.addEventListener("change", () => {
+      playUiCue("toggle");
+      minimapOverlays[key] = input.checked;
+      lastMinimapRasterAt = -Infinity;
+    });
+    const text = document.createElement("span");
+    text.textContent = label;
+    wrap.append(input, text);
+    minimapLayersWrap.appendChild(wrap);
+  };
+  addModeToggle("terrain", "Terrain");
+  addModeToggle("fire", "Heat");
+  addModeToggle("moisture", "Moisture");
+  addOverlayToggle("wind", "Wind");
+  addOverlayToggle("units", "Units");
   minimapDock.summary.append(minimapCanvas);
   minimapDock.details.append(minimapLayersWrap);
 
@@ -1199,34 +1349,27 @@ export const createThreeTest = (
     dispatchPhaseUiCommand({ type: "action", action: "pause" });
   });
   timeControls.appendChild(pauseButton);
-  const speedButtons: Array<{ index: number; button: HTMLButtonElement }> = [];
-  const speedPresets = [
-    { index: 0, label: "1/2", title: "0.5x" },
-    { index: 1, label: "1", title: "1x" },
-    { index: 2, label: "2", title: "2x" },
-    { index: Math.max(0, TIME_SPEED_OPTIONS.length - 1), label: ">>", title: "Max speed" }
-  ];
-  const usedSpeedIndices = new Set<number>();
-  speedPresets.forEach((preset) => {
-    if (!Number.isFinite(preset.index) || preset.index < 0 || preset.index >= TIME_SPEED_OPTIONS.length) {
-      return;
-    }
-    if (usedSpeedIndices.has(preset.index)) {
-      return;
-    }
-    usedSpeedIndices.add(preset.index);
+  const speedButtons: HTMLButtonElement[] = [];
+  Array.from({ length: 4 }).forEach(() => {
     const button = document.createElement("button");
     button.type = "button";
     button.className = "three-test-time-button";
-    button.textContent = preset.label;
-    button.dataset.speedLabel = preset.title;
+    button.textContent = "--";
     button.addEventListener("click", (event) => {
       event.preventDefault();
       event.stopPropagation();
-      dispatchPhaseUiCommand({ type: "action", action: `time-speed-${preset.index}` });
+      const rawIndex = button.dataset.speedIndex;
+      if (!rawIndex) {
+        return;
+      }
+      const index = Number(rawIndex);
+      if (!Number.isFinite(index)) {
+        return;
+      }
+      dispatchPhaseUiCommand({ type: "action", action: `time-speed-${index}` });
     });
     timeControls.appendChild(button);
-    speedButtons.push({ index: preset.index, button });
+    speedButtons.push(button);
   });
   const nextFireButton = document.createElement("button");
   nextFireButton.type = "button";
@@ -1597,6 +1740,10 @@ export const createThreeTest = (
   };
 
   let lastMinimapRasterAt = -Infinity;
+  let lastMinimapThermalBackdrop: ReturnType<typeof buildThermalBackdropField> = new Float32Array(0);
+  let lastMinimapThermalBackdropWidth = 0;
+  let lastMinimapThermalBackdropHeight = 0;
+  let lastMinimapThermalBackdropRevision = -1;
   const drawMinimapCanvas = (canvasElement: HTMLCanvasElement): void => {
     const rect = canvasElement.getBoundingClientRect();
     if (rect.width <= 2 || rect.height <= 2 || world.grid.cols <= 0 || world.grid.rows <= 0) {
@@ -1616,42 +1763,41 @@ export const createThreeTest = (
     const data = image.data;
     const cols = world.grid.cols;
     const rows = world.grid.rows;
-    for (let py = 0; py < height; py += 1) {
-      const ty = Math.max(0, Math.min(rows - 1, Math.floor((py / height) * rows)));
-      for (let px = 0; px < width; px += 1) {
-        const tx = Math.max(0, Math.min(cols - 1, Math.floor((px / width) * cols)));
-        const idx = ty * cols + tx;
-        let r = 35;
-        let g = 38;
-        let b = 42;
-        if (minimapLayers.terrain) {
-          const color = getTileColor(world.tileTypeId[idx] ?? 0);
-          r = color.r;
-          g = color.g;
-          b = color.b;
+    if (minimapMode === "fire") {
+      const terrainRevision = world.terrainTypeRevision ?? 0;
+      if (
+        lastMinimapThermalBackdrop.length !== width * height ||
+        lastMinimapThermalBackdropWidth !== width ||
+        lastMinimapThermalBackdropHeight !== height ||
+        lastMinimapThermalBackdropRevision !== terrainRevision
+      ) {
+        lastMinimapThermalBackdrop = buildThermalBackdropField(world, width, height);
+        lastMinimapThermalBackdropWidth = width;
+        lastMinimapThermalBackdropHeight = height;
+        lastMinimapThermalBackdropRevision = terrainRevision;
+      }
+      const hotspots = buildThermalHotspotField(world, width, height);
+      paintThermalField(data, lastMinimapThermalBackdrop, hotspots, MINIMAP_FIRE_PALETTE);
+    } else {
+      for (let py = 0; py < height; py += 1) {
+        const ty = Math.max(0, Math.min(rows - 1, Math.floor((py / height) * rows)));
+        for (let px = 0; px < width; px += 1) {
+          const tx = Math.max(0, Math.min(cols - 1, Math.floor((px / width) * cols)));
+          const idx = ty * cols + tx;
+          const color =
+            minimapMode === "terrain"
+              ? getTileColor(world.tileTypeId[idx] ?? 0)
+              : getMinimapMoistureColor(world.tileMoisture[idx] ?? 0);
+          const base = (py * width + px) * 4;
+          data[base] = color.r;
+          data[base + 1] = color.g;
+          data[base + 2] = color.b;
+          data[base + 3] = 255;
         }
-        if (minimapLayers.moisture) {
-          const moisture = clamp01(world.tileMoisture[idx] ?? 0);
-          b = Math.min(255, b + Math.round(moisture * 120));
-          g = Math.min(255, g + Math.round(moisture * 55));
-        }
-        if (minimapLayers.fire) {
-          const heat = clamp01(world.tileFire[idx] ?? 0);
-          if (heat > 0.01) {
-            r = Math.max(r, Math.round(180 + heat * 75));
-            g = Math.min(g, Math.round(70 + (1 - heat) * 80));
-            b = Math.min(b, Math.round(40 + (1 - heat) * 60));
-          }
-        }
-        const base = (py * width + px) * 4;
-        data[base] = r;
-        data[base + 1] = g;
-        data[base + 2] = b;
-        data[base + 3] = 255;
       }
     }
     ctx.putImageData(image, 0, 0);
-    if (minimapLayers.units && world.units.length > 0) {
+    if (minimapOverlays.units && world.units.length > 0) {
       ctx.save();
       world.units.forEach((unit) => {
         if (unit.kind === "firefighter" && unit.carrierId !== null) {
@@ -1666,7 +1812,7 @@ export const createThreeTest = (
       });
       ctx.restore();
     }
-    if (minimapLayers.wind) {
+    if (minimapOverlays.wind) {
       const centerX = width * 0.14;
       const centerY = height * 0.14;
       const len = Math.max(8, Math.min(width, height) * 0.08) * Math.max(0.4, world.wind?.strength ?? 0.4);
@@ -1679,7 +1825,7 @@ export const createThreeTest = (
       ctx.lineTo(centerX + dx, centerY + dy);
       ctx.stroke();
     }
-    if (lastTerrainSize && minimapLayers.units) {
+    if (lastTerrainSize && minimapOverlays.units) {
       const worldWidth = Math.max(1, lastTerrainSize.width);
       const worldDepth = Math.max(1, lastTerrainSize.depth);
       const tx = clamp01(camera.position.x / worldWidth + 0.5);
@@ -1775,16 +1921,19 @@ export const createThreeTest = (
       lastMinimapRasterAt = time;
     }
 
-    const activeSpeedIndex = Math.max(0, Math.min(TIME_SPEED_OPTIONS.length - 1, world.timeSpeedIndex ?? 0));
-    const speedValue = TIME_SPEED_OPTIONS[activeSpeedIndex] ?? 1;
-    const speedLabel = Number.isInteger(speedValue) ? speedValue.toFixed(0) : speedValue.toFixed(1);
+    const activeSpeedOptions = getTimeSpeedOptions(world.simTimeMode);
+    const activeSpeedIndex = Math.max(0, Math.min(activeSpeedOptions.length - 1, world.timeSpeedIndex ?? 0));
+    const speedValue = activeSpeedOptions[activeSpeedIndex] ?? 1;
+    const speedLabel = formatTimeSpeedValue(speedValue);
+    const timeModeLabel = world.simTimeMode === "incident" ? "Incident" : "Strategic";
     const skipToNextFireActive = !!world.skipToNextFire;
-    const canSkipToNextFire = !world.gameOver && world.lastActiveFires <= 0 && !skipToNextFireActive;
+    const canSkipToNextFire =
+      !world.gameOver && world.simTimeMode === "strategic" && world.lastActiveFires <= 0 && !skipToNextFireActive;
     timeSummary.innerHTML = "";
     const timeLine = document.createElement("div");
     timeLine.textContent = world.paused ? "State Paused" : "State Running";
     const speedLine = document.createElement("div");
-    speedLine.textContent = `Speed ${speedLabel}x`;
+    speedLine.textContent = `${timeModeLabel} ${speedLabel}`;
     const phaseLine = document.createElement("div");
     phaseLine.textContent = `Phase ${world.phase}`;
     const skipLine = document.createElement("div");
@@ -1797,11 +1946,24 @@ export const createThreeTest = (
     pauseButton.textContent = world.paused ? ">" : "||";
     pauseButton.title = world.paused ? "Resume simulation" : "Pause simulation";
     pauseButton.setAttribute("aria-label", world.paused ? "Resume simulation" : "Pause simulation");
-    speedButtons.forEach(({ index, button }) => {
+    const displayedSpeedIndices = getDisplayedTimeSpeedIndices(activeSpeedOptions);
+    speedButtons.forEach((button, slot) => {
+      const index = displayedSpeedIndices[slot];
+      if (index === undefined || index < 0 || index >= activeSpeedOptions.length) {
+        button.disabled = true;
+        button.classList.add("hidden");
+        return;
+      }
+      const buttonLabel = formatTimeSpeedValue(activeSpeedOptions[index] ?? 1);
+      button.classList.remove("hidden");
+      button.disabled = false;
+      button.dataset.speedIndex = String(index);
+      button.dataset.speedLabel = buttonLabel;
+      button.textContent = slot === speedButtons.length - 1 && index === activeSpeedOptions.length - 1 ? ">>" : buttonLabel;
       button.classList.toggle("is-active", index === activeSpeedIndex);
       const speedLabelText = button.dataset.speedLabel ?? button.textContent ?? "";
-      button.title = `Set speed to ${speedLabelText}`;
-      button.setAttribute("aria-label", `Set speed to ${speedLabelText}`);
+      button.title = `Set ${timeModeLabel.toLowerCase()} speed to ${speedLabelText}`;
+      button.setAttribute("aria-label", `Set ${timeModeLabel.toLowerCase()} speed to ${speedLabelText}`);
     });
     nextFireButton.disabled = !canSkipToNextFire || skipToNextFireActive;
     nextFireButton.textContent = skipToNextFireActive ? "..." : ">>>";
@@ -2885,6 +3047,312 @@ export const createThreeTest = (
     fireAlertCardElements.root.classList.remove("hidden");
   };
 
+  const hideHoverDebugBillboard = (): void => {
+    hoverDebugRoot.classList.add("hidden");
+    hoverDebugConnector.style.display = "none";
+  };
+
+  const hoverDebugToneRank: Record<HoverDebugTone, number> = {
+    default: 0,
+    watch: 1,
+    high: 2,
+    critical: 3
+  };
+
+  const mergeHoverDebugTone = (current: HoverDebugTone, next?: HoverDebugTone): HoverDebugTone => {
+    if (!next) {
+      return current;
+    }
+    return hoverDebugToneRank[next] > hoverDebugToneRank[current] ? next : current;
+  };
+
+  const formatWaterfallStatus = (flags: number, debug: WaterfallDebugData): string => {
+    if ((flags & WATERFALL_DEBUG_FLAG_WATER) === 0) {
+      return "dry";
+    }
+    if ((flags & WATERFALL_DEBUG_FLAG_RIVER) === 0) {
+      return "not-river";
+    }
+    const parts: string[] = [];
+    if (flags & WATERFALL_DEBUG_FLAG_OCEANISH) {
+      parts.push("oceanish");
+    }
+    if ((flags & WATERFALL_DEBUG_FLAG_STEP_OK) === 0) {
+      parts.push(`step<${formatDebugNumber(debug.stepThreshold, 2)}`);
+    } else if ((flags & WATERFALL_DEBUG_FLAG_BEST_DROP_OK) === 0) {
+      parts.push(`best<${formatDebugNumber(debug.minDrop, 2)}`);
+    } else if ((flags & WATERFALL_DEBUG_FLAG_LOCAL_DROP_OK) === 0) {
+      parts.push(`local<${formatDebugNumber(debug.localDropThreshold, 2)}`);
+    } else {
+      parts.push("pass");
+    }
+    if (flags & WATERFALL_DEBUG_FLAG_CANDIDATE) {
+      parts.push("candidate");
+    }
+    if (flags & WATERFALL_DEBUG_FLAG_EMITTED) {
+      parts.push("emitted");
+    }
+    return parts.join(" | ");
+  };
+
+  type NearestWaterfallInstance = {
+    index: number;
+    distanceTiles: number;
+    gridX: number;
+    gridY: number;
+    drop: number;
+    width: number;
+    top: number;
+    dirX: number;
+    dirZ: number;
+  };
+
+  const findNearestWaterfallInstance = (
+    hoverGridX: number,
+    hoverGridY: number,
+    sample: TerrainSample
+  ): NearestWaterfallInstance | null => {
+    const instances = lastTerrainWater?.waterfallInstances;
+    if (!instances || instances.length < 7 || !lastTerrainSize) {
+      return null;
+    }
+    const instanceCount = Math.floor(instances.length / 7);
+    let best: NearestWaterfallInstance | null = null;
+    for (let i = 0; i < instanceCount; i += 1) {
+      const base = i * 7;
+      const gridX = (instances[base] / Math.max(1e-4, lastTerrainSize.width) + 0.5) * sample.cols - 0.5;
+      const gridY = (instances[base + 1] / Math.max(1e-4, lastTerrainSize.depth) + 0.5) * sample.rows - 0.5;
+      const distanceTiles = Math.hypot(gridX - hoverGridX, gridY - hoverGridY);
+      if (best && distanceTiles >= best.distanceTiles) {
+        continue;
+      }
+      best = {
+        index: i,
+        distanceTiles,
+        gridX,
+        gridY,
+        top: instances[base + 2],
+        drop: instances[base + 3],
+        dirX: instances[base + 4],
+        dirZ: instances[base + 5],
+        width: instances[base + 6]
+      };
+    }
+    return best;
+  };
+
+  const buildHoverCellSection: HoverDebugSectionBuilder = (context) => {
+    const tile = world.tiles[context.tileIndex];
+    if (!tile) {
+      return null;
+    }
+    const hoveredUnits = world.units.filter((unit) => {
+      if (unit.kind === "firefighter" && unit.carrierId !== null) {
+        return false;
+      }
+      return Math.floor(unit.x) === context.tileX && Math.floor(unit.y) === context.tileY;
+    });
+    const lines = [
+      `type=${tile.type} id=${world.tileTypeId[context.tileIndex] ?? "n/a"} base=${tile.isBase ? "1" : "0"}`,
+      `elev=${formatDebugNumber(world.tileElevation[context.tileIndex] ?? tile.elevation, 3)} y=${formatDebugNumber((world.tileElevation[context.tileIndex] ?? 0) * context.heightScale, 2)} moist=${formatDebugNumber(world.tileMoisture[context.tileIndex] ?? tile.moisture, 2)}`,
+      `fire=${formatDebugNumber(world.tileFire[context.tileIndex] ?? tile.fire, 2)} heat=${formatDebugNumber(world.tileHeat[context.tileIndex] ?? tile.heat, 2)} fuel=${formatDebugNumber(world.tileFuel[context.tileIndex] ?? tile.fuel, 2)}`
+    ];
+    if (hoveredUnits.length > 0) {
+      const summary = hoveredUnits
+        .slice(0, 2)
+        .map((unit) => `${unit.kind === "truck" ? "T" : "C"}#${unit.id}${unit.selected ? "*" : ""}`)
+        .join(" ");
+      lines.push(`units=${summary}${hoveredUnits.length > 2 ? ` +${hoveredUnits.length - 2}` : ""}`);
+    }
+    return {
+      key: "cell",
+      label: "CELL",
+      lines
+    };
+  };
+
+  const buildHoverWaterfallSection: HoverDebugSectionBuilder = (context) => {
+    const debug = context.terrainWater?.waterfallDebug ?? null;
+    const riverMask = context.sample.riverMask?.[context.tileIndex] ?? 0;
+    if (!debug && riverMask <= 0 && (world.tileTypeId[context.tileIndex] ?? -1) !== TILE_TYPE_IDS.water) {
+      return null;
+    }
+    const sampleStep = Math.max(1, debug?.sampleStep ?? getTerrainStep(Math.max(context.sample.cols, context.sample.rows), context.sample.fullResolution ?? false));
+    const sampleCols = debug?.sampleCols ?? Math.floor((context.sample.cols - 1) / sampleStep) + 1;
+    const sampleRows = debug?.sampleRows ?? Math.floor((context.sample.rows - 1) / sampleStep) + 1;
+    const sampleCol = Math.max(0, Math.min(sampleCols - 1, Math.floor(context.tileX / sampleStep)));
+    const sampleRow = Math.max(0, Math.min(sampleRows - 1, Math.floor(context.tileY / sampleStep)));
+    const sampleIdx = sampleRow * sampleCols + sampleCol;
+    const flags = debug ? debug.flags[sampleIdx] ?? 0 : 0;
+    const riverSurfaceRaw = context.sample.riverSurface?.[context.tileIndex];
+    const riverSurfaceWorld = Number.isFinite(riverSurfaceRaw) ? (riverSurfaceRaw as number) * context.heightScale : Number.NaN;
+    const tileStep = context.sample.riverStepStrength?.[context.tileIndex] ?? Number.NaN;
+    const hoverGridX = context.hoverGrid?.x ?? context.tileX + 0.5;
+    const hoverGridY = context.hoverGrid?.y ?? context.tileY + 0.5;
+    const nearestInstance = findNearestWaterfallInstance(hoverGridX, hoverGridY, context.sample);
+    const lines = [`river=${riverMask > 0 ? "1" : "0"} surfaceY=${formatDebugNumber(riverSurfaceWorld, 2)} tileStep=${formatDebugNumber(tileStep, 2)}`];
+    if (debug) {
+      lines.push(
+        `sample=${sampleCol},${sampleRow} step=${formatDebugNumber(debug.stepStrength[sampleIdx] ?? Number.NaN, 2)} best=${formatDebugNumber(debug.bestNeighborDrop[sampleIdx] ?? Number.NaN, 2)} local=${formatDebugNumber(debug.localDrop[sampleIdx] ?? Number.NaN, 2)}`
+      );
+      lines.push(`status=${formatWaterfallStatus(flags, debug)}`);
+    } else {
+      lines.push("status=no sampled waterfall debug");
+    }
+    if (nearestInstance) {
+      lines.push(
+        `fx#${nearestInstance.index} d=${formatDebugNumber(nearestInstance.distanceTiles, 2)} drop=${formatDebugNumber(nearestInstance.drop, 2)} width=${formatDebugNumber(nearestInstance.width, 2)} top=${formatDebugNumber(nearestInstance.top, 2)}`
+      );
+    } else {
+      lines.push("fx=none emitted");
+    }
+    if (debug) {
+      let summary = `emit=${debug.emittedCount}/${debug.candidateCount} clusters=${debug.clusterCount}`;
+      const riverStats = context.terrainWater?.river?.debugRiverDomainStats;
+      if (riverStats) {
+        summary += ` anchorMax=${formatDebugNumber(riverStats.waterfallAnchorErrorMax, 3)}`;
+      }
+      lines.push(summary);
+    }
+    let tone: HoverDebugTone = "default";
+    if (flags & WATERFALL_DEBUG_FLAG_EMITTED) {
+      tone = "watch";
+    } else if (flags & WATERFALL_DEBUG_FLAG_CANDIDATE) {
+      tone = "watch";
+    } else if ((flags & WATERFALL_DEBUG_FLAG_RIVER) && (flags & WATERFALL_DEBUG_FLAG_LOCAL_DROP_OK) === 0) {
+      tone = "high";
+    }
+    return {
+      key: "waterfall",
+      label: "WATERFALL",
+      lines,
+      tone
+    };
+  };
+
+  // Add builders here to extend the hover debug billboard for other systems.
+  const hoverDebugSectionBuilders: HoverDebugSectionBuilder[] = [buildHoverCellSection, buildHoverWaterfallSection];
+
+  const updateHoverDebugBillboard = (
+    viewportWidth: number,
+    viewportHeight: number,
+    width: number,
+    depth: number,
+    heightScale: number
+  ): void => {
+    if (!inputState.debugCellEnabled || !inputState.debugHoverTile || !lastSample || !lastTerrainSize) {
+      hideHoverDebugBillboard();
+      return;
+    }
+    const cols = Math.max(1, world.grid.cols);
+    const rows = Math.max(1, world.grid.rows);
+    const tileX = Math.max(0, Math.min(cols - 1, Math.floor(inputState.debugHoverTile.x)));
+    const tileY = Math.max(0, Math.min(rows - 1, Math.floor(inputState.debugHoverTile.y)));
+    const tileIndex = indexFor(world.grid, tileX, tileY);
+    if (!world.tiles[tileIndex]) {
+      hideHoverDebugBillboard();
+      return;
+    }
+    const hoverGrid = inputState.debugHoverWorld ? { x: inputState.debugHoverWorld.x, y: inputState.debugHoverWorld.y } : null;
+    const context: HoverDebugContext = {
+      tileX,
+      tileY,
+      tileIndex,
+      hoverGrid,
+      sample: lastSample,
+      terrainWater: lastTerrainWater,
+      heightScale
+    };
+    const sections = hoverDebugSectionBuilders
+      .map((buildSection) => buildSection(context))
+      .filter((section): section is HoverDebugSection => !!section && section.lines.length > 0);
+    if (sections.length <= 0) {
+      hideHoverDebugBillboard();
+      return;
+    }
+    let tone: HoverDebugTone = "default";
+    sections.forEach((section) => {
+      tone = mergeHoverDebugTone(tone, section.tone);
+    });
+    const tile = world.tiles[tileIndex];
+    const detailFragment = document.createDocumentFragment();
+    sections.forEach((section) => {
+      const sectionRoot = document.createElement("div");
+      sectionRoot.className = "three-test-debug-section";
+      const label = document.createElement("div");
+      label.className = "three-test-debug-section-label";
+      label.textContent = section.label;
+      sectionRoot.appendChild(label);
+      section.lines.forEach((line) => {
+        const lineNode = document.createElement("div");
+        lineNode.className = "three-test-debug-line";
+        lineNode.textContent = line;
+        sectionRoot.appendChild(lineNode);
+      });
+      detailFragment.appendChild(sectionRoot);
+    });
+    hoverDebugTitle.textContent = `Cell ${tileX},${tileY}`;
+    hoverDebugBadge.textContent = tile.type.toUpperCase();
+    hoverDebugMeta.textContent =
+      `${hoverGrid ? `grid ${formatDebugNumber(hoverGrid.x, 2)},${formatDebugNumber(hoverGrid.y, 2)}` : "grid n/a"} | y ${formatDebugNumber((world.tileElevation[tileIndex] ?? 0) * heightScale, 2)}`;
+    hoverDebugDetails.replaceChildren(detailFragment);
+    hoverDebugRoot.dataset.tone = tone;
+    const worldX = ((tileX + 0.5) / cols - 0.5) * width;
+    const worldZ = ((tileY + 0.5) / rows - 0.5) * depth;
+    const groundY = (world.tileElevation[tileIndex] ?? 0) * heightScale;
+    const labelLift = HOVER_DEBUG_LABEL_LIFT_METERS / Math.max(0.001, TILE_SIZE);
+    hoverDebugGroundWorld.set(worldX, groundY, worldZ);
+    hoverDebugLabelWorld.set(worldX, groundY + labelLift, worldZ);
+    hoverDebugLabelProjected.copy(hoverDebugLabelWorld).project(camera);
+    hoverDebugGroundProjected.copy(hoverDebugGroundWorld).project(camera);
+    const isVisible =
+      hoverDebugLabelProjected.z > -1 &&
+      hoverDebugLabelProjected.z < 1 &&
+      hoverDebugLabelProjected.x >= -1.1 &&
+      hoverDebugLabelProjected.x <= 1.1 &&
+      hoverDebugLabelProjected.y >= -1.2 &&
+      hoverDebugLabelProjected.y <= 1.2;
+    if (!isVisible) {
+      hideHoverDebugBillboard();
+      return;
+    }
+    const screenX = (hoverDebugLabelProjected.x * 0.5 + 0.5) * viewportWidth;
+    const screenY = (-hoverDebugLabelProjected.y * 0.5 + 0.5) * viewportHeight;
+    const groundScreenX = (hoverDebugGroundProjected.x * 0.5 + 0.5) * viewportWidth;
+    const groundScreenY = (-hoverDebugGroundProjected.y * 0.5 + 0.5) * viewportHeight;
+    const viewportPadding = 8;
+    hoverDebugRoot.classList.remove("hidden");
+    const rootWidth = Math.max(244, hoverDebugRoot.offsetWidth);
+    const rootHeight = Math.max(96, hoverDebugRoot.offsetHeight);
+    const unclampedX = screenX - HOVER_DEBUG_LABEL_CONNECTOR_ORIGIN_X;
+    const unclampedY = screenY + HOVER_DEBUG_LABEL_SCREEN_OFFSET_Y;
+    const rootX = Math.max(viewportPadding, Math.min(viewportWidth - rootWidth - viewportPadding, unclampedX));
+    const rootY = Math.max(viewportPadding, Math.min(viewportHeight - rootHeight - viewportPadding, unclampedY));
+    const depth01 = Math.max(0, Math.min(1, (hoverDebugLabelProjected.z + 1) * 0.5));
+    const zIndex = Math.max(1, Math.min(TOWN_LABEL_MAX_Z_INDEX, Math.round((1 - depth01) * TOWN_LABEL_MAX_Z_INDEX)));
+    hoverDebugRoot.style.zIndex = `${Math.max(2, zIndex + 1)}`;
+    hoverDebugRoot.style.transform = `translate3d(${rootX.toFixed(1)}px, ${rootY.toFixed(1)}px, 0)`;
+    const isGroundProjectedVisible =
+      hoverDebugGroundProjected.z > -1 &&
+      hoverDebugGroundProjected.z < 1 &&
+      hoverDebugGroundProjected.x >= -1.5 &&
+      hoverDebugGroundProjected.x <= 1.5 &&
+      hoverDebugGroundProjected.y >= -1.5 &&
+      hoverDebugGroundProjected.y <= 1.5;
+    const connectorAnchorX = rootX + HOVER_DEBUG_LABEL_CONNECTOR_ORIGIN_X;
+    const connectorStartScreenY = Math.max(rootY + 1, rootY + rootHeight - 1);
+    const connectorLength = groundScreenY - connectorStartScreenY;
+    const connectorXError = Math.abs(groundScreenX - connectorAnchorX);
+    if (isGroundProjectedVisible && connectorLength >= 4 && connectorXError <= viewportWidth * 0.18) {
+      hoverDebugConnector.style.display = "block";
+      hoverDebugConnector.style.width = `${connectorLength.toFixed(1)}px`;
+      hoverDebugConnector.style.zIndex = `${Math.max(1, zIndex - 1)}`;
+      hoverDebugConnector.style.transform = `translate3d(${connectorAnchorX.toFixed(1)}px, ${connectorStartScreenY.toFixed(1)}px, 0) rotate(90deg)`;
+    } else {
+      hoverDebugConnector.style.display = "none";
+    }
+  };
+
   const handleTownOverlayPointerDown = (event: PointerEvent): void => {
     const target = event.target;
     if (!(target instanceof Node)) {
@@ -2948,12 +3416,17 @@ export const createThreeTest = (
   const baseGroundWorld = new THREE.Vector3();
   const baseLabelProjected = new THREE.Vector3();
   const baseGroundProjected = new THREE.Vector3();
+  const hoverDebugLabelWorld = new THREE.Vector3();
+  const hoverDebugGroundWorld = new THREE.Vector3();
+  const hoverDebugLabelProjected = new THREE.Vector3();
+  const hoverDebugGroundProjected = new THREE.Vector3();
 
   const updateTownOverlay = (time: number): void => {
     if (!lastSample || !lastTerrainSize) {
       townOverlayRoot.classList.add("hidden");
       townAnchors.clear();
       baseAnchor = null;
+      hideHoverDebugBillboard();
       townCardElements.root.classList.add("hidden");
       fireAlertCardElements.root.classList.add("hidden");
       visibleFireAlertId = null;
@@ -3143,6 +3616,7 @@ export const createThreeTest = (
         baseCardElements.cardRoot.style.zIndex = `${Math.max(2, baseAnchor.zIndex + 4)}`;
       }
     }
+    updateHoverDebugBillboard(viewportWidth, viewportHeight, width, depth, heightScale);
     updateBaseCardState();
   };
 
@@ -3444,6 +3918,7 @@ export const createThreeTest = (
   let houseAssets: HouseAssets | null = getHouseAssetsCache();
   let firestationAsset: FirestationAsset | null = getFirestationAssetCache();
   let lastSample: TerrainSample | null = null;
+  let lastTerrainWater: TerrainWaterData | null = null;
   let assetRebuildPending = false;
   let lastTerrainSize: { width: number; depth: number } | null = null;
   let structureOverlayGroup: THREE.Group | null = null;
@@ -3718,6 +4193,65 @@ export const createThreeTest = (
     const z = (tileY / rows - 0.5) * lastTerrainSize.depth;
     const y = sampleWorldHeight(tileX, tileY) + lift;
     return new THREE.Vector3(x, y, z);
+  };
+
+  const acquireScoreFlowPulse = (): ScoreFlowPulse => {
+    let candidate = scoreFlowPulses[0];
+    for (let i = 1; i < scoreFlowPulses.length; i += 1) {
+      if (scoreFlowPulses[i].endAt < candidate.endAt) {
+        candidate = scoreFlowPulses[i];
+      }
+    }
+    return candidate;
+  };
+
+  const spawnScoreFlowPulse = (kind: "property" | "lives", tileX: number, tileY: number, time: number): void => {
+    const worldPoint = toWorldCommandPoint(tileX + 0.5, tileY + 0.5, SCORE_FLOW_PULSE_LIFT);
+    if (!worldPoint) {
+      return;
+    }
+    const pulse = acquireScoreFlowPulse();
+    pulse.startAt = time;
+    pulse.endAt = time + SCORE_FLOW_PULSE_DURATION_MS;
+    pulse.baseScale = kind === "property" ? 0.95 : 1.18;
+    pulse.mesh.visible = true;
+    pulse.mesh.position.copy(worldPoint);
+    pulse.mesh.scale.setScalar(pulse.baseScale);
+    pulse.material.color.setHex(kind === "property" ? 0xffa357 : 0xff6f74);
+    pulse.material.opacity = kind === "property" ? 0.82 : 0.9;
+  };
+
+  const updateScoreFlowPulses = (time: number): void => {
+    const flowEvents = world.scoring?.flowEvents ?? [];
+    for (const event of flowEvents) {
+      if (event.id <= lastConsumedScoreFlowEventId) {
+        continue;
+      }
+      if (
+        (event.kind === "property" || event.kind === "lives") &&
+        Number.isFinite(event.tileX) &&
+        Number.isFinite(event.tileY)
+      ) {
+        spawnScoreFlowPulse(event.kind, event.tileX!, event.tileY!, time);
+      }
+      lastConsumedScoreFlowEventId = Math.max(lastConsumedScoreFlowEventId, event.id);
+    }
+
+    for (const pulse of scoreFlowPulses) {
+      if (time >= pulse.endAt) {
+        pulse.mesh.visible = false;
+        pulse.material.opacity = 0;
+        continue;
+      }
+      if (time < pulse.startAt) {
+        continue;
+      }
+      const duration = Math.max(1, pulse.endAt - pulse.startAt);
+      const progress = Math.max(0, Math.min(1, (time - pulse.startAt) / duration));
+      pulse.mesh.visible = true;
+      pulse.mesh.scale.setScalar(pulse.baseScale * (0.65 + progress * 1.75));
+      pulse.material.opacity = (1 - progress) * (pulse.baseScale > 1 ? 0.88 : 0.78);
+    }
   };
 
   const getInterpolatedUnitTile = (unit: (typeof world.units)[number]): { x: number; y: number } => {
@@ -4278,6 +4812,7 @@ export const createThreeTest = (
     clearDebugHover();
     cancelFormationDrag();
     clearTownHoverDelay();
+    lastTerrainWater = null;
     disposeStructureOverlay();
     clearUnitCommandVisuals();
     lastStructureOverlayKey = "";
@@ -4303,6 +4838,9 @@ export const createThreeTest = (
     fireFx.dispose();
     unitsLayer.dispose();
     unitFxLayer.dispose();
+    scene.remove(scoreFlowPulseGroup);
+    scoreFlowPulses.forEach((pulse) => pulse.material.dispose());
+    scoreFlowPulseGeometry.dispose();
     scene.remove(unitCommandVisualGroup);
     unitCommandPathMaterial.dispose();
     unitCommandMarkerGeometry.dispose();
@@ -4536,6 +5074,7 @@ export const createThreeTest = (
     unitsLayer.update(world, lastSample, lastTerrainSize, simulationAlpha);
     unitFxLayer.update(world, effectsState, lastSample, lastTerrainSize, simulationAlpha, time);
     updateUnitCommandVisuals();
+    updateScoreFlowPulses(time);
     updateTownOverlay(time);
     updateDockOverlay(time);
     updateUnitTrayOverlay(time);
@@ -4746,6 +5285,11 @@ export const createThreeTest = (
 
   const setSimulationAlpha = (alpha: number): void => {
     simulationAlpha = clamp01(alpha);
+    fireFx.setSimulationAlpha(simulationAlpha);
+  };
+
+  const captureFireSnapshot = (nextWorld: RenderSim): void => {
+    fireFx.captureSnapshot(nextWorld);
   };
 
   const panToTile = (tileX: number, tileY: number): void => {
@@ -5184,6 +5728,7 @@ export const createThreeTest = (
       treeBurnController = null;
     }
     waterSystem.clear();
+      lastTerrainWater = null;
       if (nextSample.cols <= 1 || nextSample.rows <= 1 || nextSample.elevations.length === 0) {
         disposeStructureOverlay();
         lastStructureRevision = nextSample.structureRevision ?? -1;
@@ -5220,6 +5765,7 @@ export const createThreeTest = (
     }
 
     if (water) {
+      lastTerrainWater = water;
       waterSystem.rebuild(mesh, water);
     }
     if (lastLightingApplied) {
@@ -5340,6 +5886,7 @@ export const createThreeTest = (
     stop,
     resize,
     prime,
+    captureFireSnapshot,
     setSimulationAlpha,
     isCameraInteracting,
     setTerrain,

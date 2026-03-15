@@ -1,4 +1,6 @@
 import type { UiAudioSettings } from "../../../audio/uiAudio.js";
+import { getTimeSpeedOptions } from "../../../core/config.js";
+import type { SimTimeMode } from "../../../core/types.js";
 
 type ChannelSettings = {
   muted: boolean;
@@ -9,6 +11,7 @@ export type BottomControlsData = {
   showTimeControls: boolean;
   showSpeedControl: boolean;
   paused: boolean;
+  simTimeMode: SimTimeMode;
   timeSpeedIndex: number;
   skipToNextFireActive: boolean;
   canSkipToNextFire: boolean;
@@ -27,6 +30,20 @@ export type BottomControlsView = {
 };
 
 export const createBottomLeftControls = (): BottomControlsView => {
+  const formatSpeedValue = (value: number): string => {
+    if (Number.isInteger(value)) {
+      return `${value.toFixed(0)}x`;
+    }
+    if (value >= 0.1) {
+      return `${value.toFixed(2).replace(/0+$/, "").replace(/\.$/, "")}x`;
+    }
+    return `${value.toFixed(3).replace(/0+$/, "").replace(/\.$/, "")}x`;
+  };
+  const getDisplayedIndices = (mode: SimTimeMode): number[] => {
+    const options = getTimeSpeedOptions(mode);
+    const last = Math.max(0, options.length - 1);
+    return [...new Set([0, Math.min(1, last), Math.min(2, last), last])];
+  };
   const element = document.createElement("div");
   element.className = "phase-panel phase-bottom-controls";
   element.dataset.panel = "bottomControls";
@@ -35,15 +52,15 @@ export const createBottomLeftControls = (): BottomControlsView => {
   timeGroup.className = "phase-control-group phase-time-group";
   const titleRow = document.createElement("div");
   titleRow.className = "phase-control-title";
-  titleRow.textContent = "Time";
+  titleRow.textContent = "Strategic Time";
   const speedRow = document.createElement("div");
   speedRow.className = "phase-control-row phase-time-speed-row";
   speedRow.innerHTML = `
     <button data-action="pause" aria-label="Pause" title="Pause">||</button>
-    <button data-action="time-speed-0" data-speed-index="0" aria-label="Speed 0.5x" title="Speed 0.5x">0.5x</button>
-    <button data-action="time-speed-1" data-speed-index="1" aria-label="Speed 1x" title="Speed 1x">1x</button>
-    <button data-action="time-speed-2" data-speed-index="2" aria-label="Speed 2x" title="Speed 2x">2x</button>
-    <button data-action="time-speed-8" data-speed-index="8" aria-label="Speed Max" title="Speed Max">MAX</button>
+    <button data-role="time-speed"></button>
+    <button data-role="time-speed"></button>
+    <button data-role="time-speed"></button>
+    <button data-role="time-speed"></button>
     <button data-action="time-skip-next-fire" aria-label="Skip to Next Fire" title="Skip to Next Fire">Next Fire</button>
   `;
   timeGroup.append(titleRow, speedRow);
@@ -85,7 +102,7 @@ export const createBottomLeftControls = (): BottomControlsView => {
 
   const pauseButton = speedRow.querySelector('[data-action="pause"]') as HTMLButtonElement;
   const nextFireButton = speedRow.querySelector('[data-action="time-skip-next-fire"]') as HTMLButtonElement;
-  const speedButtons = Array.from(speedRow.querySelectorAll<HTMLButtonElement>("[data-speed-index]"));
+  const speedButtons = Array.from(speedRow.querySelectorAll<HTMLButtonElement>('[data-role="time-speed"]'));
   let audioState: ChannelSettings = { muted: false, volume: 0.65 };
   let musicState: ChannelSettings = { muted: false, volume: 0.35 };
   let onAudioMuteToggleHandler: (() => void) | null = null;
@@ -151,8 +168,24 @@ export const createBottomLeftControls = (): BottomControlsView => {
     update: (data) => {
       timeGroup.classList.toggle("is-hidden", !data.showTimeControls);
       speedRow.classList.toggle("is-hidden", !data.showSpeedControl);
-      speedButtons.forEach((button) => {
-        const index = Number(button.dataset.speedIndex ?? 0);
+      titleRow.textContent = data.simTimeMode === "incident" ? "Incident Time" : "Strategic Time";
+      const displayedIndices = getDisplayedIndices(data.simTimeMode);
+      const activeOptions = getTimeSpeedOptions(data.simTimeMode);
+      speedButtons.forEach((button, slot) => {
+        const index = displayedIndices[slot];
+        if (index === undefined || index < 0 || index >= activeOptions.length) {
+          button.classList.add("is-hidden");
+          button.disabled = true;
+          return;
+        }
+        const speedLabel = formatSpeedValue(activeOptions[index] ?? 1);
+        button.classList.remove("is-hidden");
+        button.disabled = false;
+        button.dataset.speedIndex = String(index);
+        button.dataset.action = `time-speed-${index}`;
+        button.textContent = slot === speedButtons.length - 1 && index === activeOptions.length - 1 ? "MAX" : speedLabel;
+        button.setAttribute("title", `Speed ${speedLabel}`);
+        button.setAttribute("aria-label", `Speed ${speedLabel}`);
         button.classList.toggle("is-active", data.timeSpeedIndex === index);
       });
       const nextFireDisabled = data.skipToNextFireActive || !data.canSkipToNextFire;

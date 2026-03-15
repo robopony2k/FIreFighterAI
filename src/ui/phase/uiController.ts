@@ -1,6 +1,6 @@
 import type { GameUiSnapshot, InteractionMode, PanelId, Phase, SelectedEntity } from "./types.js";
 import { getPhaseRules } from "./uiRules.js";
-import { TIME_SPEED_OPTIONS } from "../../core/config.js";
+import { getTimeSpeedOptions } from "../../core/config.js";
 import type { GameState } from "./gameState.js";
 import { createBottomLeftControls } from "./components/BottomLeftControls.js";
 import { createBudgetReportView } from "./components/BudgetReportView.js";
@@ -228,11 +228,14 @@ export class UIController {
     const bottomStatus =
       snapshot.interactionMode === "fuelBreak"
         ? "Fuel break tool armed."
-        : `Time speed ${TIME_SPEED_OPTIONS[snapshot.timeSpeedIndex]}x`;
+        : `${snapshot.simTimeMode === "incident" ? "Incident" : "Strategic"} time ${
+            getTimeSpeedOptions(snapshot.simTimeMode)[snapshot.timeSpeedIndex] ?? 1
+          }x`;
     const bottomData: BottomControlsData = {
       showTimeControls: rules.allowedInputs.includes("timeControl"),
       showSpeedControl: true,
       paused: snapshot.paused,
+      simTimeMode: snapshot.simTimeMode,
       timeSpeedIndex: snapshot.timeSpeedIndex,
       skipToNextFireActive: snapshot.skipToNextFireActive,
       canSkipToNextFire: snapshot.canSkipToNextFire,
@@ -251,9 +254,10 @@ export class UIController {
     }
     this.budgetReport.update(this.panelData.budgetReport ?? defaultPanelData.budgetReport);
 
-    const visiblePanels = isThreeTest
-      ? rules.visiblePanels.filter((panelId) => !THREE_TEST_LEGACY_PANELS.has(panelId))
-      : rules.visiblePanels;
+    let visiblePanels = isThreeTest ? rules.visiblePanels.filter((panelId) => !THREE_TEST_LEGACY_PANELS.has(panelId)) : rules.visiblePanels;
+    if (snapshot.annualReportOpen) {
+      visiblePanels = ["topbar", "budgetReport"];
+    }
     this.applyVisibility(visiblePanels);
   }
 

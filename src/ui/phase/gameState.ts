@@ -12,10 +12,12 @@ export class GameState {
   private snapshot: GameUiSnapshot = {
     phase: "growth",
     phaseProgress: 0,
+    annualReportOpen: false,
     selection: { kind: "none" },
     interactionMode: "default",
     paused: false,
     alert: null,
+    simTimeMode: "strategic",
     timeSpeedIndex: 1,
     skipToNextFireActive: false,
     canSkipToNextFire: false,
@@ -56,6 +58,14 @@ export class GameState {
     this.emitChange();
   }
 
+  setAnnualReportOpen(open: boolean): void {
+    if (this.snapshot.annualReportOpen === open) {
+      return;
+    }
+    this.snapshot.annualReportOpen = open;
+    this.emitChange();
+  }
+
   setSelection(selection: SelectedEntity): void {
     const current = this.snapshot.selection;
     if (current.kind === selection.kind && current.kind === "unit" && selection.kind === "unit" && current.id === selection.id) {
@@ -89,6 +99,14 @@ export class GameState {
       return;
     }
     this.snapshot.alert = message;
+    this.emitChange();
+  }
+
+  setSimTimeMode(mode: GameUiSnapshot["simTimeMode"]): void {
+    if (this.snapshot.simTimeMode === mode) {
+      return;
+    }
+    this.snapshot.simTimeMode = mode;
     this.emitChange();
   }
 

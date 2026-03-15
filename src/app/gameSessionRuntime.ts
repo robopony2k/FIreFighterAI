@@ -1,4 +1,4 @@
-import { BASE_BUDGET, TILE_SIZE, MAP_SCALE, TIME_SPEED_OPTIONS, MAP_SIZE_PRESETS } from "../core/config.js";
+import { BASE_BUDGET, TILE_SIZE, MAP_SCALE, MAP_SIZE_PRESETS } from "../core/config.js";
 import type { MapSizeId } from "../core/config.js";
 import { getCharacterBaseBudget } from "../core/characters.js";
 import { RNG } from "../core/rng.js";
@@ -33,7 +33,7 @@ import { saveLeaderboard } from "../persistence/leaderboard.js";
 import { loadFuelProfileOverrides } from "../persistence/fuelProfiles.js";
 import { loadLastRunConfig } from "../persistence/lastRunConfig.js";
 import { randomizeWind } from "../sim/wind.js";
-import { endGame, setGameEventBus, setPhase, stepSim } from "../sim/index.js";
+import { endGame, getActiveTimeSpeedOptions, setGameEventBus, setPhase, stepSim } from "../sim/index.js";
 import { initScoringForRun } from "../sim/scoring.js";
 import { seedStartingRoster } from "../sim/units.js";
 import { PHASES } from "../core/time.js";
@@ -43,6 +43,11 @@ import type { GameUiSnapshot } from "../ui/phase/types.js";
 import { createRenderBackend, resolveRenderBackend, type RenderBackend } from "./renderBackend.js";
 import { updatePerfCounter } from "./perfDiagnostics.js";
 import { startAppBootLoop } from "./bootLoop.js";
+import {
+  shouldRebuildThreeTestTreeTypeMap,
+  shouldSyncThreeTestTerrain,
+  type ThreeTestTerrainRevisionState
+} from "./threeTestTerrainSync.js";
 import { createUiAudioController } from "../audio/uiAudio.js";
 import { createMusicController } from "../audio/musicController.js";
 import { showTitleScreen as mountTitleScreen, type TitleScreenHandle } from "../ui/titleScreen.js";
@@ -400,9 +405,12 @@ export const createAppRuntime = (): AppRuntime => {
   let lastThreeTestUiSeasonT01 = Number.NaN;
   let lastThreeTestUiSeasonMode = "";
   let lastThreeTestTerrainTypeRevision = -1;
+  let lastThreeTestVegetationRevision = -1;
   let lastThreeTestStructureRevision = -1;
   let lastThreeTestDebugTypeColors = false;
   let cachedThreeTestTreeTypeMap: Uint8Array | null = null;
+  let cachedThreeTestTreeTypeTerrainRevision = -1;
+  let cachedThreeTestTreeTypeVegetationRevision = -1;
   let savedThreeTestSmokeRate: number | null = null;
   let activeRenderMode: ActiveRenderMode = legacy2dEnabled ? "2d" : "3d";
   const perfStats = new Map<string, PerfStat>();
@@ -644,12 +652,23 @@ export const createAppRuntime = (): AppRuntime => {
   };
   
   const getThreeTestTreeTypeMap = (forceRefresh = false): Uint8Array => {
-    const needsBuild =
-      forceRefresh ||
-      !cachedThreeTestTreeTypeMap ||
-      cachedThreeTestTreeTypeMap.length !== state.grid.totalTiles;
+    const needsBuild = shouldRebuildThreeTestTreeTypeMap(
+      {
+        cachedLength: cachedThreeTestTreeTypeMap?.length ?? 0,
+        totalTiles: state.grid.totalTiles,
+        cachedTerrainTypeRevision: cachedThreeTestTreeTypeTerrainRevision,
+        cachedVegetationRevision: cachedThreeTestTreeTypeVegetationRevision
+      },
+      {
+        terrainTypeRevision: state.terrainTypeRevision,
+        vegetationRevision: state.vegetationRevision
+      },
+      forceRefresh || !cachedThreeTestTreeTypeMap
+    );
     if (needsBuild) {
       cachedThreeTestTreeTypeMap = buildTreeTypeMap();
+      cachedThreeTestTreeTypeTerrainRevision = state.terrainTypeRevision;
+      cachedThreeTestTreeTypeVegetationRevision = state.vegetationRevision;
     }
     return cachedThreeTestTreeTypeMap!;
   };
@@ -689,10 +708,24 @@ export const createAppRuntime = (): AppRuntime => {
         return;
       }
       const nextTypeRevision = state.terrainTypeRevision;
+      const nextVegetationRevision = state.vegetationRevision;
       const nextStructureRevision = state.structureRevision;
+      const nextRevisionState: ThreeTestTerrainRevisionState = {
+        terrainTypeRevision: nextTypeRevision,
+        vegetationRevision: nextVegetationRevision,
+        structureRevision: nextStructureRevision,
+        debugTypeColors: inputState.debugTypeColors
+      };
+      const prevRevisionState: ThreeTestTerrainRevisionState = {
+        terrainTypeRevision: lastThreeTestTerrainTypeRevision,
+        vegetationRevision: lastThreeTestVegetationRevision,
+        structureRevision: lastThreeTestStructureRevision,
+        debugTypeColors: lastThreeTestDebugTypeColors
+      };
       const debugChanged = lastThreeTestDebugTypeColors !== inputState.debugTypeColors;
+      const terrainTypesChanged = nextTypeRevision !== lastThreeTestTerrainTypeRevision;
       const structuresChanged = nextStructureRevision !== lastThreeTestStructureRevision;
-      if (!force && !debugChanged && !structuresChanged && nextTypeRevision === lastThreeTestTerrainTypeRevision) {
+      if (!shouldSyncThreeTestTerrain(prevRevisionState, nextRevisionState, force)) {
         state.terrainDirty = false;
         return;
       }
@@ -701,13 +734,14 @@ export const createAppRuntime = (): AppRuntime => {
         hasActiveFireTerrainPressure()
           ? THREE_TEST_TERRAIN_COOLDOWN_ACTIVE_FIRE_MS
           : THREE_TEST_TERRAIN_COOLDOWN_MS;
-      if (!force && !structuresChanged && now - lastThreeTestTerrainSync < cooldownMs) {
+      if (!force && !structuresChanged && !terrainTypesChanged && now - lastThreeTestTerrainSync < cooldownMs) {
         return;
       }
       lastThreeTestTerrainSync = now;
       ensureTileSoA(state);
       threeTestController.setTerrain(buildThreeTestSample(!force));
       lastThreeTestTerrainTypeRevision = nextTypeRevision;
+      lastThreeTestVegetationRevision = nextVegetationRevision;
       lastThreeTestStructureRevision = nextStructureRevision;
       lastThreeTestDebugTypeColors = inputState.debugTypeColors;
       state.terrainDirty = false;
@@ -908,9 +942,12 @@ export const createAppRuntime = (): AppRuntime => {
     lastThreeTestUiSeasonT01 = Number.NaN;
     lastThreeTestUiSeasonMode = "";
     lastThreeTestTerrainTypeRevision = -1;
+    lastThreeTestVegetationRevision = -1;
     lastThreeTestStructureRevision = -1;
     lastThreeTestDebugTypeColors = inputState.debugTypeColors;
     cachedThreeTestTreeTypeMap = null;
+    cachedThreeTestTreeTypeTerrainRevision = -1;
+    cachedThreeTestTreeTypeVegetationRevision = -1;
     updateThreeTestSeasonUi(threeTestManualSeasonT01, threeTestSeasonMode);
     if (!threeTestStepController) {
       let auto = true;
@@ -988,6 +1025,7 @@ export const createAppRuntime = (): AppRuntime => {
     } else {
       updateThreeTestSeasonUi(threeTestManualSeasonT01, threeTestSeasonMode);
     }
+    threeTestController.captureFireSnapshot(asRenderSim(state));
     threeTestController.prime();
     if (!previewDuringMapgen) {
       threeTestController.start();
@@ -1326,19 +1364,21 @@ export const createAppRuntime = (): AppRuntime => {
       baseStep,
       mainHitchThresholdMs: MAIN_HITCH_THRESHOLD_MS,
       frameCapFps,
-      timeSpeedOptions: TIME_SPEED_OPTIONS,
+      getTimeSpeedOptions: () => getActiveTimeSpeedOptions(state),
       isGenerating: () => isGenerating,
       isTitleScreenVisible: () => titleScreenVisible,
       isCharacterScreenVisible: () => !characterScreen.classList.contains("hidden"),
       isStartMenuVisible: () => (startMenu ? !startMenu.classList.contains("hidden") : false),
       isDocumentHidden: () => document.hidden,
       isThreeTestVisible: () => activeRenderMode === "3d" && !!threeTestController,
+      isIncidentMode: () => state.simTimeMode === "incident",
       getTimeSpeedIndex: () => state.timeSpeedIndex,
       isThreeTestNoSim: threeTestNoSim,
       isPausedOrGameOver: () => state.paused || state.gameOver,
       stepSimulation: (simStep: number) => {
         const simStartedAt = performance.now();
         stepSim(state, effectsState, rng, simStep);
+        threeTestController?.captureFireSnapshot(asRenderSim(state));
         return performance.now() - simStartedAt;
       },
       onThreeTestFrame: (alpha: number) => {

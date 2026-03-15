@@ -7,6 +7,7 @@ import type { Rect, WidgetSlot, WidgetType } from "../hudLayout.js";
 import { HUD_PLANE_Y, WidgetType as WidgetKind } from "../hudLayout.js";
 import type { HudInput, HudWidget } from "./hudWidget.js";
 import { computeViewportCenterOnPlane } from "../minimapViewport.js";
+import { buildThermalBackdropField, buildThermalHotspotField, paintThermalField } from "../../minimapRaster.js";
 
 type RGB = { r: number; g: number; b: number };
 
@@ -28,6 +29,7 @@ export class MinimapWidget implements HudWidget {
   private lastMapHeight = 0;
   private lastTerrainRevision = -1;
   private lastRasterMs = -Infinity;
+  private thermalBackdrop: Float32Array = new Float32Array(0);
 
   constructor(slot: WidgetSlot) {
     this.slot = slot;
@@ -135,6 +137,7 @@ export class MinimapWidget implements HudWidget {
       sizeChanged ||
       mode !== this.lastMode ||
       (mode === "terrain" && terrainRevision !== this.lastTerrainRevision) ||
+      (mode === "thermal" && terrainRevision !== this.lastTerrainRevision) ||
       thermalDue;
 
     if (needsRaster) {
@@ -142,33 +145,42 @@ export class MinimapWidget implements HudWidget {
       const data = image.data;
       const tileTypes = world.tileTypeId;
       const elevations = world.tileElevation;
-      const fire = world.tileFire;
-      for (let y = 0; y < mapHeight; y += 1) {
-        const ty = Math.min(rows - 1, Math.floor((y / mapHeight) * rows));
-        for (let x = 0; x < mapWidth; x += 1) {
-          const tx = Math.min(cols - 1, Math.floor((x / mapWidth) * cols));
-          const idx = ty * cols + tx;
-          let color: RGB = { r: 40, g: 40, b: 42 };
-          if (mode === "terrain") {
-            const typeId = tileTypes[idx] ?? 0;
-            const tileType = TILE_ID_TO_TYPE[typeId] ?? "grass";
-            color = TILE_COLOR_RGB[tileType] ?? color;
-          } else if (mode === "elevation") {
-            const elev = clamp(elevations[idx] ?? 0, 0, 1);
-            color = mix(ELEVATION_TINT_LOW, ELEVATION_TINT_HIGH, elev);
-          } else {
-            const heat = clamp(fire[idx] ?? 0, 0, 1);
-            if (heat <= 0.5) {
-              color = mix(ui.theme.thermalLow, ui.theme.thermalMid, heat / 0.5);
+      if (mode === "thermal") {
+        const pixelCount = mapWidth * mapHeight;
+        const thermalBackdropDirty =
+          this.thermalBackdrop.length !== pixelCount ||
+          sizeChanged ||
+          terrainRevision !== this.lastTerrainRevision;
+        if (thermalBackdropDirty) {
+          this.thermalBackdrop = buildThermalBackdropField(world, mapWidth, mapHeight);
+        }
+        const hotspots = buildThermalHotspotField(world, mapWidth, mapHeight);
+        paintThermalField(data, this.thermalBackdrop, hotspots, {
+          low: ui.theme.thermalLow,
+          mid: ui.theme.thermalMid,
+          high: ui.theme.thermalHigh
+        });
+      } else {
+        for (let y = 0; y < mapHeight; y += 1) {
+          const ty = Math.min(rows - 1, Math.floor((y / mapHeight) * rows));
+          for (let x = 0; x < mapWidth; x += 1) {
+            const tx = Math.min(cols - 1, Math.floor((x / mapWidth) * cols));
+            const idx = ty * cols + tx;
+            let color: RGB = { r: 40, g: 40, b: 42 };
+            if (mode === "terrain") {
+              const typeId = tileTypes[idx] ?? 0;
+              const tileType = TILE_ID_TO_TYPE[typeId] ?? "grass";
+              color = TILE_COLOR_RGB[tileType] ?? color;
             } else {
-              color = mix(ui.theme.thermalMid, ui.theme.thermalHigh, (heat - 0.5) / 0.5);
+              const elev = clamp(elevations[idx] ?? 0, 0, 1);
+              color = mix(ELEVATION_TINT_LOW, ELEVATION_TINT_HIGH, elev);
             }
+            const base = (y * mapWidth + x) * 4;
+            data[base] = color.r;
+            data[base + 1] = color.g;
+            data[base + 2] = color.b;
+            data[base + 3] = 255;
           }
-          const base = (y * mapWidth + x) * 4;
-          data[base] = color.r;
-          data[base + 1] = color.g;
-          data[base + 2] = color.b;
-          data[base + 3] = 255;
         }
       }
       this.mapCtx.putImageData(image, 0, 0);

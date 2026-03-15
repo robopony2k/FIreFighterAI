@@ -36,9 +36,18 @@ const FLAME_CELL_LATERAL_LIMIT = 0.45;
 const FLAME_WIND_GAIN = 1.7;
 const SMOKE_LAYER_MAX = 3;
 const TAU = Math.PI * 2;
+const ENABLE_FLAME_FRONT_PASS = true;
 const DEFAULT_FIRE_WALL_BLEND = 0.62;
 const DEFAULT_FIRE_HERO_VOLUMETRIC_SHARE = 0.55;
 const DEFAULT_FIRE_BUDGET_SCALE = 1.0;
+const FIRE_RENDER_SNAPSHOT_PADDING = 2;
+const FIRE_FRONT_MAX_INSTANCES = 320;
+const FIRE_FRONT_MIN_INSTANCES = 48;
+const FIRE_FRONT_RUN_MAX_SEGMENTS = 9;
+const FIRE_FRONT_VISUAL_MIN = 0.08;
+const FIRE_FRONT_PASS_MIN_WEIGHT = 6;
+const FIRE_FRONT_NEIGHBOUR_RATIO = 0.72;
+const FIRE_FRONT_NEIGHBOUR_HEAT_RATIO = 0.76;
 const FIRE_VISUAL_TUNING = {
   tongueSpawnMin: 0,
   tongueSpawnMax: 8,
@@ -63,6 +72,7 @@ const FLAME_BILLBOARD_OVERSCAN_X = 1.32;
 const FLAME_BILLBOARD_OVERSCAN_Y = 1.28;
 const FLAME_CORE_BILLBOARD_OVERSCAN_X = 1.16;
 const FLAME_CORE_BILLBOARD_OVERSCAN_Y = 1.1;
+const FLAME_RENDER_SIZE_SCALE = 0.88;
 const FLAME_JET_KERNEL_MIN = 2;
 const FLAME_JET_KERNEL_MAX = 5;
 const CLUSTER_UPDATE_MS = 48;
@@ -71,10 +81,10 @@ const CLUSTER_FULL_BLEND_TILES = 9;
 const INTERIOR_NEIGHBOR_MIN = 6;
 const CLUSTER_BED_MAX_PER_CLUSTER = 32;
 const CLUSTER_PLUME_MAX_PER_CLUSTER = 3;
-const CLUSTER_EDGE_HEIGHT_SCALE = 0.82;
-const CLUSTER_INTERIOR_HEIGHT_SCALE = 0.58;
-const CLUSTER_EDGE_WIDTH_SCALE = 1.15;
-const CLUSTER_INTERIOR_WIDTH_SCALE = 1.35;
+const CLUSTER_EDGE_HEIGHT_SCALE = 0.74;
+const CLUSTER_INTERIOR_HEIGHT_SCALE = 0.5;
+const CLUSTER_EDGE_WIDTH_SCALE = 1.3;
+const CLUSTER_INTERIOR_WIDTH_SCALE = 1.62;
 const CLUSTER_INTERIOR_KERNEL_CAP = 2;
 const CLUSTER_EDGE_KERNEL_CAP = 3;
 const SMOKE_OCCL_STRENGTH_ALPHA = 0.65;
@@ -84,6 +94,19 @@ const EMISSIVE_KNEE = 1.25;
 const IGNITION_RAMP_SECONDS_BASE = 0.8;
 const IGNITION_RAMP_SECONDS_MIN = 0.24;
 const IGNITION_RAMP_ACCELERATION = 0.68;
+const SCHEDULED_PREHEAT_MAX_SCALE = 0.25;
+const ASH_PREVIEW_FIRE_MAX = 0.04;
+const ASH_PREVIEW_HEAT_MAX = 0.12;
+const ASH_PREVIEW_FLAME_MAX = 0.05;
+const FLAME_VISUAL_RELEASE_SECONDS = 0.15;
+const SPARK_VISIBLE_FLAME_MIN = 0.12;
+const SPARK_VISIBLE_HEAT_MIN = 0.08;
+const LOCAL_FLAME_MIN_HEIGHT_TILES = 0.13;
+const LOCAL_FLAME_MIN_WIDTH_TILES = 0.095;
+const OBJECT_FLAME_MIN_HEIGHT_TILES = 0.15;
+const OBJECT_FLAME_MIN_WIDTH_TILES = 0.105;
+const GROUND_FLAME_MIN_HEIGHT_TILES = 0.085;
+const GROUND_FLAME_MIN_WIDTH_TILES = 0.06;
 
 const ASH_PREVIEW_BASE_FUEL_BY_TYPE_ID = TILE_ID_TO_TYPE.map((tileType) => Math.max(0, FUEL_PROFILES[tileType].baseFuel));
 
@@ -177,7 +200,381 @@ type NeighbourFireFront = {
   centerTileY: number;
   strength: number;
 };
-const getNeighbourFireBias = (world: RenderSim, cols: number, rows: number, x: number, y: number): number => {
+type FireRenderSnapshot = {
+  cols: number;
+  rows: number;
+  minX: number;
+  maxX: number;
+  minY: number;
+  maxY: number;
+  width: number;
+  height: number;
+  tileFire: Float32Array;
+  tileHeat: Float32Array;
+  tileFuel: Float32Array;
+  scheduled: Uint8Array;
+  lastActiveFires: number;
+  fireScheduledCount: number;
+  fireBoundsActive: boolean;
+};
+
+type FireFieldView = {
+  alpha: number;
+  minX: number;
+  maxX: number;
+  minY: number;
+  maxY: number;
+  hasBounds: boolean;
+  lastActiveFires: number;
+  fireScheduledCount: number;
+  getFireAt: (x: number, y: number) => number;
+  getFireByIndex: (tileIdx: number) => number;
+  getHeat01At: (x: number, y: number) => number;
+  getHeat01ByIndex: (tileIdx: number) => number;
+  getFuelAt: (x: number, y: number) => number;
+  getFuelByIndex: (tileIdx: number) => number;
+  getScheduledAt: (x: number, y: number) => number;
+  getScheduledByIndex: (tileIdx: number) => number;
+};
+
+const createEmptyFireRenderSnapshot = (
+  cols: number,
+  rows: number,
+  lastActiveFires = 0,
+  fireScheduledCount = 0,
+  fireBoundsActive = false
+): FireRenderSnapshot => ({
+  cols,
+  rows,
+  minX: 0,
+  maxX: -1,
+  minY: 0,
+  maxY: -1,
+  width: 0,
+  height: 0,
+  tileFire: new Float32Array(0),
+  tileHeat: new Float32Array(0),
+  tileFuel: new Float32Array(0),
+  scheduled: new Uint8Array(0),
+  lastActiveFires,
+  fireScheduledCount,
+  fireBoundsActive
+});
+
+const snapshotHasSourceBounds = (snapshot: FireRenderSnapshot | null): boolean =>
+  !!snapshot &&
+  snapshot.width > 0 &&
+  (snapshot.fireBoundsActive || snapshot.lastActiveFires > 0 || snapshot.fireScheduledCount > 0);
+
+const clampSnapshotBounds = (
+  cols: number,
+  rows: number,
+  minX: number,
+  maxX: number,
+  minY: number,
+  maxY: number
+): { minX: number; maxX: number; minY: number; maxY: number } => ({
+  minX: clamp(minX, 0, Math.max(0, cols - 1)),
+  maxX: clamp(maxX, 0, Math.max(0, cols - 1)),
+  minY: clamp(minY, 0, Math.max(0, rows - 1)),
+  maxY: clamp(maxY, 0, Math.max(0, rows - 1))
+});
+
+const captureFireRenderSnapshot = (
+  world: RenderSim,
+  previousSnapshot: FireRenderSnapshot | null
+): FireRenderSnapshot => {
+  const cols = world.grid.cols;
+  const rows = world.grid.rows;
+  const lastActiveFires = Math.max(0, world.lastActiveFires ?? 0);
+  const fireScheduledCount = Math.max(0, world.fireScheduledCount ?? 0);
+  const fireBoundsActive = world.fireBoundsActive === true;
+  const heatCap = Math.max(0.01, world.fireSettings.heatCap);
+  const simFireEps = getSimFireEps(world);
+  const heatEps = Math.max(0.06, (world.simPerf?.diffusionEps || 0.02) * 2.5);
+  if (cols <= 0 || rows <= 0) {
+    return createEmptyFireRenderSnapshot(cols, rows, lastActiveFires, fireScheduledCount, fireBoundsActive);
+  }
+  let hasBounds = false;
+  let minX = cols;
+  let maxX = -1;
+  let minY = rows;
+  let maxY = -1;
+  const scanMinX = fireBoundsActive ? clamp(world.fireMinX, 0, cols - 1) : 0;
+  const scanMaxX = fireBoundsActive ? clamp(world.fireMaxX, 0, cols - 1) : cols - 1;
+  const scanMinY = fireBoundsActive ? clamp(world.fireMinY, 0, rows - 1) : 0;
+  const scanMaxY = fireBoundsActive ? clamp(world.fireMaxY, 0, rows - 1) : rows - 1;
+  for (let y = scanMinY; y <= scanMaxY; y += 1) {
+    const rowBase = y * cols;
+    for (let x = scanMinX; x <= scanMaxX; x += 1) {
+      const idx = rowBase + x;
+      const scheduled = world.tileIgniteAt[idx] < Number.POSITIVE_INFINITY;
+      const fire = Math.max(0, world.tileFire[idx] ?? 0);
+      const heat01 = clamp((world.tileHeat[idx] ?? 0) / heatCap, 0, 1);
+      if (fire <= simFireEps && heat01 <= heatEps && !scheduled) {
+        continue;
+      }
+      if (!hasBounds) {
+        minX = maxX = x;
+        minY = maxY = y;
+        hasBounds = true;
+        continue;
+      }
+      if (x < minX) {
+        minX = x;
+      }
+      if (x > maxX) {
+        maxX = x;
+      }
+      if (y < minY) {
+        minY = y;
+      }
+      if (y > maxY) {
+        maxY = y;
+      }
+    }
+  }
+  if (hasBounds) {
+    const clamped = clampSnapshotBounds(
+      cols,
+      rows,
+      minX - FIRE_RENDER_SNAPSHOT_PADDING,
+      maxX + FIRE_RENDER_SNAPSHOT_PADDING,
+      minY - FIRE_RENDER_SNAPSHOT_PADDING,
+      maxY + FIRE_RENDER_SNAPSHOT_PADDING
+    );
+    minX = clamped.minX;
+    maxX = clamped.maxX;
+    minY = clamped.minY;
+    maxY = clamped.maxY;
+  }
+  const previousBoundsSnapshot = snapshotHasSourceBounds(previousSnapshot) ? previousSnapshot : null;
+  if (previousBoundsSnapshot) {
+    if (!hasBounds) {
+      minX = previousBoundsSnapshot.minX;
+      maxX = previousBoundsSnapshot.maxX;
+      minY = previousBoundsSnapshot.minY;
+      maxY = previousBoundsSnapshot.maxY;
+      hasBounds = true;
+    } else {
+      minX = Math.min(minX, previousBoundsSnapshot.minX);
+      maxX = Math.max(maxX, previousBoundsSnapshot.maxX);
+      minY = Math.min(minY, previousBoundsSnapshot.minY);
+      maxY = Math.max(maxY, previousBoundsSnapshot.maxY);
+    }
+  }
+  if (!hasBounds || minX > maxX || minY > maxY) {
+    return createEmptyFireRenderSnapshot(cols, rows, lastActiveFires, fireScheduledCount, fireBoundsActive);
+  }
+  const width = maxX - minX + 1;
+  const height = maxY - minY + 1;
+  const count = width * height;
+  const tileFire = new Float32Array(count);
+  const tileHeat = new Float32Array(count);
+  const tileFuel = new Float32Array(count);
+  const scheduled = new Uint8Array(count);
+  let scheduledWithinBounds = 0;
+  let write = 0;
+  for (let y = minY; y <= maxY; y += 1) {
+    const rowBase = y * cols;
+    for (let x = minX; x <= maxX; x += 1) {
+      const idx = rowBase + x;
+      tileFire[write] = Math.max(0, world.tileFire[idx] ?? 0);
+      tileHeat[write] = Math.max(0, world.tileHeat[idx] ?? 0);
+      tileFuel[write] = clamp(world.tileFuel[idx] ?? 0, 0, 1);
+      const scheduledNow = world.tileIgniteAt[idx] < Number.POSITIVE_INFINITY ? 1 : 0;
+      scheduled[write] = scheduledNow;
+      scheduledWithinBounds += scheduledNow;
+      write += 1;
+    }
+  }
+  return {
+    cols,
+    rows,
+    minX,
+    maxX,
+    minY,
+    maxY,
+    width,
+    height,
+    tileFire,
+    tileHeat,
+    tileFuel,
+    scheduled,
+    lastActiveFires,
+    fireScheduledCount: Math.max(fireScheduledCount, scheduledWithinBounds),
+    fireBoundsActive
+  };
+};
+
+const snapshotOffsetAt = (snapshot: FireRenderSnapshot, x: number, y: number): number => {
+  if (
+    snapshot.width <= 0 ||
+    x < snapshot.minX ||
+    x > snapshot.maxX ||
+    y < snapshot.minY ||
+    y > snapshot.maxY
+  ) {
+    return -1;
+  }
+  return (y - snapshot.minY) * snapshot.width + (x - snapshot.minX);
+};
+
+const snapshotOffsetByIndex = (snapshot: FireRenderSnapshot, tileIdx: number): number => {
+  if (snapshot.width <= 0 || snapshot.cols <= 0) {
+    return -1;
+  }
+  const x = tileIdx % snapshot.cols;
+  const y = Math.floor(tileIdx / snapshot.cols);
+  return snapshotOffsetAt(snapshot, x, y);
+};
+
+const snapshotReadFloatAt = (
+  snapshot: FireRenderSnapshot,
+  x: number,
+  y: number,
+  source: Float32Array
+): number => {
+  const offset = snapshotOffsetAt(snapshot, x, y);
+  return offset >= 0 ? source[offset] ?? 0 : 0;
+};
+
+const snapshotReadFloatByIndex = (
+  snapshot: FireRenderSnapshot,
+  tileIdx: number,
+  source: Float32Array
+): number => {
+  const offset = snapshotOffsetByIndex(snapshot, tileIdx);
+  return offset >= 0 ? source[offset] ?? 0 : 0;
+};
+
+const snapshotReadByteAt = (
+  snapshot: FireRenderSnapshot,
+  x: number,
+  y: number,
+  source: Uint8Array
+): number => {
+  const offset = snapshotOffsetAt(snapshot, x, y);
+  return offset >= 0 ? source[offset] ?? 0 : 0;
+};
+
+const snapshotReadByteByIndex = (
+  snapshot: FireRenderSnapshot,
+  tileIdx: number,
+  source: Uint8Array
+): number => {
+  const offset = snapshotOffsetByIndex(snapshot, tileIdx);
+  return offset >= 0 ? source[offset] ?? 0 : 0;
+};
+
+const createFireFieldView = (
+  previousSnapshot: FireRenderSnapshot,
+  currentSnapshot: FireRenderSnapshot,
+  alpha: number,
+  heatCap: number
+): FireFieldView => {
+  const clampedAlpha = clamp(alpha, 0, 1);
+  const lerpFloat = (prevValue: number, nextValue: number): number =>
+    prevValue + (nextValue - prevValue) * clampedAlpha;
+  const previousHasBounds = previousSnapshot.width > 0;
+  const currentHasBounds = currentSnapshot.width > 0;
+  const minX = previousHasBounds && currentHasBounds
+    ? Math.min(previousSnapshot.minX, currentSnapshot.minX)
+    : currentHasBounds
+      ? currentSnapshot.minX
+      : previousSnapshot.minX;
+  const maxX = previousHasBounds && currentHasBounds
+    ? Math.max(previousSnapshot.maxX, currentSnapshot.maxX)
+    : currentHasBounds
+      ? currentSnapshot.maxX
+      : previousSnapshot.maxX;
+  const minY = previousHasBounds && currentHasBounds
+    ? Math.min(previousSnapshot.minY, currentSnapshot.minY)
+    : currentHasBounds
+      ? currentSnapshot.minY
+      : previousSnapshot.minY;
+  const maxY = previousHasBounds && currentHasBounds
+    ? Math.max(previousSnapshot.maxY, currentSnapshot.maxY)
+    : currentHasBounds
+      ? currentSnapshot.maxY
+      : previousSnapshot.maxY;
+  return {
+    alpha: clampedAlpha,
+    minX,
+    maxX,
+    minY,
+    maxY,
+    hasBounds: previousHasBounds || currentHasBounds,
+    lastActiveFires: Math.max(previousSnapshot.lastActiveFires, currentSnapshot.lastActiveFires),
+    fireScheduledCount: Math.max(previousSnapshot.fireScheduledCount, currentSnapshot.fireScheduledCount),
+    getFireAt: (x: number, y: number): number =>
+      lerpFloat(
+        snapshotReadFloatAt(previousSnapshot, x, y, previousSnapshot.tileFire),
+        snapshotReadFloatAt(currentSnapshot, x, y, currentSnapshot.tileFire)
+      ),
+    getFireByIndex: (tileIdx: number): number =>
+      lerpFloat(
+        snapshotReadFloatByIndex(previousSnapshot, tileIdx, previousSnapshot.tileFire),
+        snapshotReadFloatByIndex(currentSnapshot, tileIdx, currentSnapshot.tileFire)
+      ),
+    getHeat01At: (x: number, y: number): number =>
+      clamp(
+        lerpFloat(
+          snapshotReadFloatAt(previousSnapshot, x, y, previousSnapshot.tileHeat),
+          snapshotReadFloatAt(currentSnapshot, x, y, currentSnapshot.tileHeat)
+        ) / Math.max(0.01, heatCap),
+        0,
+        1
+      ),
+    getHeat01ByIndex: (tileIdx: number): number =>
+      clamp(
+        lerpFloat(
+          snapshotReadFloatByIndex(previousSnapshot, tileIdx, previousSnapshot.tileHeat),
+          snapshotReadFloatByIndex(currentSnapshot, tileIdx, currentSnapshot.tileHeat)
+        ) / Math.max(0.01, heatCap),
+        0,
+        1
+      ),
+    getFuelAt: (x: number, y: number): number =>
+      clamp(
+        lerpFloat(
+          snapshotReadFloatAt(previousSnapshot, x, y, previousSnapshot.tileFuel),
+          snapshotReadFloatAt(currentSnapshot, x, y, currentSnapshot.tileFuel)
+        ),
+        0,
+        1
+      ),
+    getFuelByIndex: (tileIdx: number): number =>
+      clamp(
+        lerpFloat(
+          snapshotReadFloatByIndex(previousSnapshot, tileIdx, previousSnapshot.tileFuel),
+          snapshotReadFloatByIndex(currentSnapshot, tileIdx, currentSnapshot.tileFuel)
+        ),
+        0,
+        1
+      ),
+    getScheduledAt: (x: number, y: number): number =>
+      clamp(
+        lerpFloat(
+          snapshotReadByteAt(previousSnapshot, x, y, previousSnapshot.scheduled),
+          snapshotReadByteAt(currentSnapshot, x, y, currentSnapshot.scheduled)
+        ),
+        0,
+        1
+      ),
+    getScheduledByIndex: (tileIdx: number): number =>
+      clamp(
+        lerpFloat(
+          snapshotReadByteByIndex(previousSnapshot, tileIdx, previousSnapshot.scheduled),
+          snapshotReadByteByIndex(currentSnapshot, tileIdx, currentSnapshot.scheduled)
+        ),
+        0,
+        1
+      )
+  };
+};
+
+const getNeighbourFireBias = (fireView: FireFieldView, cols: number, rows: number, x: number, y: number): number => {
   let sum = 0;
   let count = 0;
   for (let oy = -1; oy <= 1; oy += 1) {
@@ -185,7 +582,6 @@ const getNeighbourFireBias = (world: RenderSim, cols: number, rows: number, x: n
     if (ny < 0 || ny >= rows) {
       continue;
     }
-    const row = ny * cols;
     for (let ox = -1; ox <= 1; ox += 1) {
       if (ox === 0 && oy === 0) {
         continue;
@@ -194,15 +590,14 @@ const getNeighbourFireBias = (world: RenderSim, cols: number, rows: number, x: n
       if (nx < 0 || nx >= cols) {
         continue;
       }
-      const nIdx = row + nx;
-      sum += world.tileFire[nIdx] ?? 0;
+      sum += fireView.getFireAt(nx, ny);
       count += 1;
     }
   }
   return count > 0 ? sum / count : 0;
 };
 const getNeighbourFireFront = (
-  world: RenderSim,
+  fireView: FireFieldView,
   cols: number,
   rows: number,
   x: number,
@@ -211,8 +606,7 @@ const getNeighbourFireFront = (
   windX: number,
   windY: number
 ): NeighbourFireFront => {
-  const idx = y * cols + x;
-  const localFire = world.tileFire[idx] ?? 0;
+  const localFire = fireView.getFireAt(x, y);
   let weightedX = 0;
   let weightedY = 0;
   let weightedDirX = 0;
@@ -225,7 +619,6 @@ const getNeighbourFireFront = (
     if (ny < 0 || ny >= rows) {
       continue;
     }
-    const row = ny * cols;
     for (let ox = -1; ox <= 1; ox += 1) {
       if (ox === 0 && oy === 0) {
         continue;
@@ -234,7 +627,7 @@ const getNeighbourFireFront = (
       if (nx < 0 || nx >= cols) {
         continue;
       }
-      const nFire = world.tileFire[row + nx] ?? 0;
+      const nFire = fireView.getFireAt(nx, ny);
       if (nFire <= simFireEps) {
         continue;
       }
@@ -321,6 +714,10 @@ type FireCluster = {
   tileCount: number;
   centroidX: number;
   centroidZ: number;
+  spanAxisX: number;
+  spanAxisZ: number;
+  depthAxisX: number;
+  depthAxisZ: number;
   radius: number;
   minX: number;
   maxX: number;
@@ -366,12 +763,21 @@ const fireVertexShader = `
 
     vec3 transformed = position;
     float windMag = length(uWind);
+    float frontRole = step(2.5, aRole);
     float edgeFade = 1.0 - uv.y;
     float wobblePhase = uTime * (1.25 + windMag * 0.7) + aSeed * 31.7 + uv.y * 7.5;
     float windPhase = uTime * (1.45 + windMag * 0.85) + aSeed * 17.9;
     float windGust = 0.7 + 0.3 * sin(windPhase);
     transformed.x += (sin(wobblePhase) + 0.35 * sin(wobblePhase * 1.5 + 1.4)) * 0.0075 * (0.32 + aIntensity) * edgeFade;
     transformed.y += sin(uTime * 1.3 + aSeed * 17.3) * 0.0048 * (0.3 + aIntensity) * edgeFade;
+    float frontTopMask = smoothstep(0.28, 1.0, uv.y);
+    float frontTongueA = sin(uTime * 12.6 + aSeed * 41.0 + uv.x * 18.0);
+    float frontTongueB = sin(uTime * 17.7 + aSeed * 19.0 + uv.x * 31.0 + uv.y * 2.6);
+    float frontTongueC = sin(uTime * 22.8 + aSeed * 53.0 + uv.x * 43.0 - uv.y * 5.1);
+    float frontTongue = frontTongueA + 0.7 * frontTongueB + 0.34 * frontTongueC;
+    float frontTongueLift = pow(max(0.0, frontTongue * 0.44), 1.24) * frontTopMask * frontTopMask;
+    transformed.x += frontTongue * 0.0064 * frontRole * frontTopMask;
+    transformed.y += frontTongueLift * 0.104 * frontRole;
     transformed.x += uWind.x * (0.006 + uv.y * uv.y * 0.038) * windGust * (0.2 + aIntensity * 0.5);
     transformed.z += uWind.y * (0.006 + uv.y * uv.y * 0.038) * windGust * (0.2 + aIntensity * 0.5);
 
@@ -429,14 +835,15 @@ const fireFragmentShader = `
   void main() {
     float clusterBlend = clamp(vClusterBlend, 0.0, 1.0);
     float smokeOcc = clamp(vSmokeOcc, 0.0, 1.0);
+    float frontRole = smoothstep(2.5, 3.5, vRole);
     float role01 = clamp(vRole * 0.5, 0.0, 1.0);
-    float x = (vUv.x * 2.0 - 1.0) * 1.38;
-    float y = clamp(vUv.y * 1.16 - 0.06, 0.0, 1.06);
+    float x = (vUv.x * 2.0 - 1.0) * 1.12;
+    float y = clamp(vUv.y * 1.08 - 0.04, 0.0, 1.02);
     float uvEdge = min(min(vUv.x, 1.0 - vUv.x), min(vUv.y, 1.0 - vUv.y));
     float boundaryFade = smoothstep(0.0, 0.095, uvEdge);
 
-    float rise = uTime * (0.58 + vIntensity * 0.66 + vSeed * 0.09);
-    vec2 flowUv = vec2(x * 1.18 + (vSeed - 0.5) * 0.8, y * 2.18 + rise);
+    float rise = uTime * (1.2 + vIntensity * 0.98 + vSeed * 0.24 + frontRole * 0.94);
+    vec2 flowUv = vec2(x * 1.18 + (vSeed - 0.5) * 0.8, y * 2.18 - rise);
     float curlA = fbm(flowUv + vec2(uTime * 0.12, uTime * 0.31));
     float curlB = fbm(flowUv * 1.72 + vec2(vSeed * 7.0, uTime * 0.53));
     float curlC = fbm(flowUv * 2.3 + vec2(4.1, uTime * 0.86 + vSeed * 11.0));
@@ -444,15 +851,17 @@ const fireFragmentShader = `
     float detail = mix(curlB, curlC, 0.38);
 
     float xWarp = x +
-      (turbulence - 0.5) * (0.18 - 0.07 * y) +
-      sin(y * 8.0 + uTime * 2.2 + vSeed * 13.0) * 0.035 * (0.55 + vIntensity);
+      (turbulence - 0.5) * (0.16 - 0.09 * y) +
+      sin(y * 9.4 + uTime * 3.0 + vSeed * 13.0) * 0.028 * (0.52 + vIntensity);
 
-    float taper = mix(1.0, 0.42, smoothstep(0.06, 1.0, y));
-    float coreRadius = (0.26 + vIntensity * 0.28 + uCore * 0.06) * taper;
-    float lobeShiftA = (0.22 + 0.06 * sin(vSeed * 6.283 + y * 7.2 + uTime * 1.35)) * taper;
-    float lobeShiftB = (-0.2 + 0.07 * cos(vSeed * 8.61 + y * 6.4 + uTime * 1.2)) * taper;
-    float lobeRadiusA = coreRadius * (0.56 + 0.14 * curlA);
-    float lobeRadiusB = coreRadius * (0.5 + 0.16 * detail);
+    float taper = mix(1.0, mix(0.56, 0.34, frontRole), smoothstep(0.05, 1.0, y));
+    float frontRadiusScale = mix(1.0, 0.76, frontRole);
+    float coreRadius = (0.24 + vIntensity * 0.22 + uCore * 0.05) * taper * frontRadiusScale;
+    float lobeSpread = mix(1.0, 1.08, frontRole);
+    float lobeShiftA = (0.22 + 0.05 * sin(vSeed * 6.283 + y * 6.6 + uTime * 1.2)) * taper * lobeSpread;
+    float lobeShiftB = (-0.2 + 0.06 * cos(vSeed * 8.61 + y * 5.9 + uTime * 1.08)) * taper * lobeSpread;
+    float lobeRadiusA = coreRadius * (0.46 + 0.1 * curlA);
+    float lobeRadiusB = coreRadius * (0.4 + 0.1 * detail);
 
     float dCore = abs(xWarp) - coreRadius;
     float dLobeA = abs(xWarp - lobeShiftA) - lobeRadiusA;
@@ -465,11 +874,35 @@ const fireFragmentShader = `
     float curlMask = smoothstep(0.22, 0.93, detail + (1.0 - y) * 0.42);
     float curveLift = clamp(vBaseCurve, 0.0, 1.0) * pow(abs(xWarp), 1.25) * 0.14;
     float baseFade = smoothstep(curveLift, curveLift + 0.05, y);
-    float topFade = 1.0 - smoothstep(0.76, 1.03, y + (detail - 0.5) * 0.09);
+    float topTongueNoise = fbm(vec2(xWarp * 4.8 + vSeed * 13.7, y * 7.0 - uTime * 8.1));
+    float topTongueWave = sin(xWarp * 19.2 - uTime * 17.7 + vSeed * 21.0) * 0.16;
+    float tongueColumnsA = 0.5 + 0.5 * sin(xWarp * 15.8 - uTime * (14.4 + frontRole * 7.2) + vSeed * 17.0);
+    float tongueColumnsB = 0.5 + 0.5 * sin(xWarp * 10.6 + uTime * (10.8 + frontRole * 5.1) + vSeed * 31.0);
+    float tongueColumns = clamp(tongueColumnsA * 0.84 + tongueColumnsB * 0.58 + topTongueNoise * 0.86 - 0.7, 0.0, 1.0);
+    float tongueShape = pow(tongueColumns, mix(1.0, 1.55, frontRole));
+    float tongueSurge = 0.5 + 0.5 * sin(uTime * (9.6 + vSeed * 6.0) + xWarp * 4.8 + vSeed * 27.0);
+    float tongueLift = frontRole * (tongueShape * (0.16 + tongueSurge * 0.14) + (topTongueNoise - 0.5) * 0.12);
+    float topEdgeShift = frontRole * ((topTongueNoise - 0.5) * 0.54 + topTongueWave + tongueLift);
+    float topFade = 1.0 - smoothstep(0.62, 0.94, y + (detail - 0.5) * 0.05 - topEdgeShift);
+    float tongueGap = smoothstep(0.3, 0.9, y) * (1.0 - smoothstep(0.14, 0.58, tongueShape + (topTongueNoise - 0.5) * 0.16));
+    float forkColumnsA = pow(max(0.0, 0.5 + 0.5 * sin(xWarp * 23.4 - uTime * 21.6 + vSeed * 29.0)), 5.6);
+    float forkColumnsB = pow(max(0.0, 0.5 + 0.5 * sin(xWarp * 31.6 + uTime * 26.1 + vSeed * 43.0)), 6.4);
+    float forkColumns = max(forkColumnsA, forkColumnsB * 0.9);
+    float forkPeak = 0.48 + tongueShape * 0.2 + forkColumns * 0.28 + (topTongueNoise - 0.5) * 0.16;
+    float forkCut = 1.0 - smoothstep(forkPeak, 1.02, y);
+    float prongColumns = pow(max(0.0, 0.5 + 0.5 * sin(xWarp * 37.0 - uTime * 29.7 + vSeed * 37.0)), 6.8);
+    float prongGap = smoothstep(0.56, 0.98, y) * smoothstep(0.52, 0.9, max(prongColumns, forkColumns * 0.84) + (topTongueNoise - 0.5) * 0.18);
+    float splitPulse = 0.5 + 0.5 * sin(uTime * (11.7 + vSeed * 4.8) + xWarp * 6.2 + vSeed * 33.0);
+    float splitGap = smoothstep(0.68, 1.0, y) * smoothstep(0.62, 0.92, splitPulse * prongColumns + (topTongueNoise - 0.5) * 0.22);
     float alpha = shellMask * radialFalloff * curlMask * baseFade * topFade * boundaryFade;
     float alphaBase = (0.42 + vIntensity * 0.66) * mix(1.0, 1.14, uCore);
     alpha *= alphaBase * uAlphaScale;
     alpha *= 0.78 + detail * 0.22;
+    alpha *= mix(1.0, 0.56 + tongueShape * 0.56, frontRole);
+    alpha *= 1.0 - frontRole * tongueGap * 0.9;
+    alpha *= mix(1.0, forkCut, frontRole);
+    alpha *= 1.0 - frontRole * prongGap * 0.86;
+    alpha *= 1.0 - frontRole * splitGap * 0.72;
     alpha *= 1.0 - smokeOcc * smoothstep(0.35, 1.0, y) * clusterBlend * ${SMOKE_OCCL_STRENGTH_ALPHA.toFixed(2)};
     if (alpha < 0.012) {
       discard;
@@ -484,19 +917,19 @@ const fireFragmentShader = `
       0.0,
       1.0
     );
-    vec3 deepRed = vec3(0.42, 0.06, 0.01);
-    vec3 orange = vec3(0.85, 0.22, 0.03);
-    vec3 yellow = vec3(0.98, 0.58, 0.1);
-    vec3 whiteHot = vec3(1.0, 0.9, 0.72);
+    vec3 deepRed = vec3(0.33, 0.03, 0.01);
+    vec3 emberRed = vec3(0.68, 0.09, 0.02);
+    vec3 orange = vec3(0.95, 0.31, 0.05);
+    vec3 whiteHot = vec3(1.0, 0.78, 0.5);
     float baseHot = smoothstep(0.0, 0.52, heat);
-    vec3 color = mix(deepRed, orange, baseHot);
-    color = mix(color, yellow, smoothstep(0.38, 0.86, heat));
+    vec3 color = mix(deepRed, emberRed, baseHot);
+    color = mix(color, orange, smoothstep(0.28, 0.84, heat));
 
     float thickness = radialFalloff * (0.8 + detail * 0.2) * (1.0 - y * 0.24);
     float whiteMask = smoothstep(0.9, 1.0, heat) * (1.0 - smoothstep(0.26, 0.78, y)) * (1.0 - smoothstep(0.38, 0.92, radialNorm));
-    color = mix(color, whiteHot, whiteMask * 0.34);
+    color = mix(color, whiteHot, whiteMask * 0.18);
     float edgeCool = smoothstep(0.32, 1.0, radialNorm);
-    vec3 edgeColor = mix(deepRed, orange, 0.28);
+    vec3 edgeColor = mix(deepRed, emberRed, 0.5);
     color = mix(color, edgeColor, edgeCool * 0.76);
     float baseBand = mix(1.0, 1.32, clusterBlend) * mix(1.0, 1.12, role01) * (1.0 - smoothstep(0.28, 0.92, y));
     float topBand = 1.0 - clusterBlend * smoothstep(0.42, 1.0, y) * 0.34;
@@ -656,6 +1089,8 @@ const createRadialTexture = (size: number, stops: Array<{ stop: number; color: s
 };
 
 export type ThreeTestFireFx = {
+  captureSnapshot: (world: RenderSim) => void;
+  setSimulationAlpha: (alpha: number) => void;
   update: (
     time: number,
     world: RenderSim,
@@ -681,8 +1116,8 @@ export const createThreeTestFireFx = (
   const flameIntensityBoost = clamp(options.flameIntensityBoost ?? 1, 0.5, 2);
   const groundGlowBoost = clamp(options.groundGlowBoost ?? 1, 0.5, 2);
   const emberBoost = clamp(options.emberBoost ?? 1, 0.5, 2);
-  const flameHeightBoost = clamp(1 + (flameIntensityBoost - 1) * 0.9, 0.85, 1.5);
-  const flameWidthBoost = clamp(1 + (flameIntensityBoost - 1) * 0.28, 0.85, 1.3);
+  const flameHeightBoost = clamp(0.94 + (flameIntensityBoost - 1) * 0.72, 0.8, 1.4);
+  const flameWidthBoost = clamp((1 + (flameIntensityBoost - 1) * 0.28) * 1.18, 0.96, 1.55);
   const groundGlowSizeBoost = clamp(1 + (groundGlowBoost - 1) * 0.9, 0.85, 1.8);
   const groundGlowCountBoost = clamp(1 + (groundGlowBoost - 1) * 0.75, 0.8, 1.6);
   const emberEjectBoost = clamp(1 + (emberBoost - 1) * 1.15, 0.85, 2.2);
@@ -700,8 +1135,8 @@ export const createThreeTestFireFx = (
   const smokeCoolHot = new THREE.Color(0.54, 0.42, 0.34);
   const smokeStainBase = new THREE.Color(0.74, 0.33, 0.11);
   const smokeStainHot = new THREE.Color(0.96, 0.39, 0.12);
-  const smokeUnderglowBase = new THREE.Color(0.95, 0.42, 0.16);
-  const smokeUnderglowHot = new THREE.Color(1.0, 0.5, 0.18);
+  const smokeUnderglowBase = new THREE.Color(0.92, 0.32, 0.12);
+  const smokeUnderglowHot = new THREE.Color(0.99, 0.4, 0.14);
   const smokeWarmScratch = new THREE.Color();
   const smokeCoolScratch = new THREE.Color();
   const smokeStainScratch = new THREE.Color();
@@ -732,21 +1167,21 @@ export const createThreeTestFireFx = (
     smokeTint: smokeTintCurrent.clone()
   };
   const glowTexture = createRadialTexture(96, [
-    { stop: 0, color: "rgba(255, 232, 165, 0.96)" },
-    { stop: 0.2, color: "rgba(255, 176, 72, 0.72)" },
-    { stop: 0.52, color: "rgba(255, 108, 38, 0.34)" },
-    { stop: 0.82, color: "rgba(160, 48, 12, 0.12)" },
+    { stop: 0, color: "rgba(255, 198, 118, 0.94)" },
+    { stop: 0.18, color: "rgba(255, 126, 48, 0.74)" },
+    { stop: 0.5, color: "rgba(232, 78, 28, 0.38)" },
+    { stop: 0.82, color: "rgba(136, 28, 10, 0.14)" },
     { stop: 1, color: "rgba(0, 0, 0, 0)" }
   ]);
   const emberTexture = createRadialTexture(64, [
-    { stop: 0, color: "rgba(255, 250, 210, 1)" },
-    { stop: 0.4, color: "rgba(255, 165, 80, 0.92)" },
+    { stop: 0, color: "rgba(255, 216, 156, 1)" },
+    { stop: 0.4, color: "rgba(255, 132, 56, 0.92)" },
     { stop: 1, color: "rgba(0, 0, 0, 0)" }
   ]);
   const sparkStreakTexture = createRadialTexture(96, [
-    { stop: 0, color: "rgba(255, 248, 220, 1)" },
-    { stop: 0.24, color: "rgba(255, 212, 140, 0.95)" },
-    { stop: 0.58, color: "rgba(255, 126, 54, 0.58)" },
+    { stop: 0, color: "rgba(255, 220, 170, 1)" },
+    { stop: 0.24, color: "rgba(255, 164, 90, 0.95)" },
+    { stop: 0.58, color: "rgba(246, 108, 42, 0.58)" },
     { stop: 1, color: "rgba(0, 0, 0, 0)" }
   ]);
   const fireMaterial = createFireShaderMaterial(0, 0.92 * flameIntensityBoost);
@@ -843,9 +1278,9 @@ export const createThreeTestFireFx = (
   });
   const runtimeEmberMaterial = sparkDebug ? sparkDebugEmberMaterial : emberMaterial;
   const runtimeSparkStreakMaterial = sparkDebug ? sparkDebugStreakMaterial : sparkStreakMaterial;
-  const fireGeometry = new THREE.PlaneGeometry(1, 1);
-  const fireCrossGeometry = new THREE.PlaneGeometry(1, 1);
-  const fireCoreGeometry = new THREE.PlaneGeometry(1, 1);
+  const fireGeometry = new THREE.PlaneGeometry(1, 1, 6, 10);
+  const fireCrossGeometry = new THREE.PlaneGeometry(1, 1, 4, 8);
+  const fireCoreGeometry = new THREE.PlaneGeometry(1, 1, 4, 8);
   const smokeBuffers = createParticleBuffers(SMOKE_MAX_INSTANCES);
   const ashPreviewGeometry = new THREE.PlaneGeometry(1, 1);
   const groundGlowGeometry = new THREE.PlaneGeometry(1, 1);
@@ -994,6 +1429,7 @@ export const createThreeTestFireFx = (
   let tileIgnitionAgeSeconds = new Float32Array(0);
   let tileAshPreviewVisual = new Float32Array(0);
   let tileSmokeVisual = new Float32Array(0);
+  let tileFrontStrength = new Float32Array(0);
   let tileFuelReference = new Float32Array(0);
   let tileSmokeSpawnAccum = new Float32Array(0);
   let tileActiveFlag = new Uint8Array(0);
@@ -1034,9 +1470,13 @@ export const createThreeTestFireFx = (
   const cameraWorldPos = new THREE.Vector3();
   const cameraForward = new THREE.Vector3();
   const sparkSizeScratch = new THREE.Vector3();
+  const sparkDirectionScratch = new THREE.Vector3();
   let pendingDeltaSeconds = 0;
   let lastRebuildTimeMs = -Infinity;
   let visualsCleared = true;
+  let fireSimulationAlpha = 1;
+  let previousFireSnapshot: FireRenderSnapshot | null = null;
+  let currentFireSnapshot: FireRenderSnapshot | null = null;
   let smokeBudgetScale = 1;
   let flameBudgetScale = 1;
   let smokeFallbackAccum = 0;
@@ -1085,6 +1525,26 @@ export const createThreeTestFireFx = (
     visualsCleared = true;
   };
 
+  const setSimulationAlpha = (alpha: number): void => {
+    fireSimulationAlpha = clamp(alpha, 0, 1);
+  };
+
+  const captureSnapshot = (world: RenderSim): void => {
+    const gridChanged =
+      !currentFireSnapshot ||
+      currentFireSnapshot.cols !== world.grid.cols ||
+      currentFireSnapshot.rows !== world.grid.rows;
+    const previousSource = gridChanged ? null : currentFireSnapshot;
+    const nextSnapshot = captureFireRenderSnapshot(world, previousSource);
+    if (gridChanged || !currentFireSnapshot) {
+      previousFireSnapshot = nextSnapshot;
+      currentFireSnapshot = nextSnapshot;
+      return;
+    }
+    previousFireSnapshot = currentFireSnapshot;
+    currentFireSnapshot = nextSnapshot;
+  };
+
   const ensureClusterState = (count: number): void => {
     if (tileActiveFlag.length !== count) {
       tileActiveFlag = new Uint8Array(count);
@@ -1131,6 +1591,7 @@ export const createThreeTestFireFx = (
     tileIgnitionAgeSeconds = new Float32Array(count);
     tileAshPreviewVisual = new Float32Array(count);
     tileSmokeVisual = new Float32Array(count);
+    tileFrontStrength = new Float32Array(count);
     tileFuelReference = new Float32Array(count);
     tileSmokeSpawnAccum = new Float32Array(count);
     ensureClusterState(count);
@@ -1162,6 +1623,10 @@ export const createThreeTestFireFx = (
       cluster.tileCount = 0;
       cluster.centroidX = 0;
       cluster.centroidZ = 0;
+      cluster.spanAxisX = 1;
+      cluster.spanAxisZ = 0;
+      cluster.depthAxisX = 0;
+      cluster.depthAxisZ = 1;
       cluster.radius = 0;
       cluster.minX = 0;
       cluster.maxX = 0;
@@ -1181,6 +1646,10 @@ export const createThreeTestFireFx = (
       tileCount: 0,
       centroidX: 0,
       centroidZ: 0,
+      spanAxisX: 1,
+      spanAxisZ: 0,
+      depthAxisX: 0,
+      depthAxisZ: 1,
       radius: 0,
       minX: 0,
       maxX: 0,
@@ -1199,6 +1668,7 @@ export const createThreeTestFireFx = (
 
   const buildFireClusters = (
     world: RenderSim,
+    fireView: FireFieldView,
     cols: number,
     rows: number,
     minX: number,
@@ -1207,7 +1677,8 @@ export const createThreeTestFireFx = (
     maxY: number,
     sampleStep: number,
     simFireEps: number,
-    heatCap: number,
+    windX: number,
+    windZ: number,
     treeBurn: TreeBurnController | null,
     terrainSize: { width: number; depth: number },
     heightScale: number
@@ -1221,12 +1692,11 @@ export const createThreeTestFireFx = (
     let queueTail = 0;
 
     for (let y = minY; y <= maxY; y += sampleStep) {
-      const rowBase = y * cols;
       for (let x = minX; x <= maxX; x += sampleStep) {
-        const idx = rowBase + x;
-        const fire = world.tileFire[idx] ?? 0;
-        const heat = clamp((world.tileHeat[idx] ?? 0) / heatCap, 0, 1);
-        const fuel = clamp(world.tileFuel[idx] ?? 0, 0, 1);
+        const idx = y * cols + x;
+        const fire = fireView.getFireByIndex(idx);
+        const heat = fireView.getHeat01ByIndex(idx);
+        const fuel = fireView.getFuelByIndex(idx);
         const isAshTile = (world.tileTypeId[idx] ?? -1) === TILE_TYPE_IDS.ash;
         const flameProfile: TreeFlameProfile | null = treeBurn?.getTileFlameProfile(idx) ?? null;
         const burnProgress = treeBurn?.getTileBurnProgress(idx) ?? 0;
@@ -1246,9 +1716,9 @@ export const createThreeTestFireFx = (
 
     let clusterId = 0;
     let clusteredTiles = 0;
-    for (let y = minY; y <= maxY; y += sampleStep) {
+    for (let y = minY; y <= maxY; y += 1) {
       const rowBase = y * cols;
-      for (let x = minX; x <= maxX; x += sampleStep) {
+      for (let x = minX; x <= maxX; x += 1) {
         const idx = rowBase + x;
         if (tileActiveFlag[idx] === 0 || tileClusterId[idx] >= 0) {
           continue;
@@ -1287,8 +1757,8 @@ export const createThreeTestFireFx = (
           if (cy > cluster.maxY) {
             cluster.maxY = cy;
           }
-          const fire = world.tileFire[current] ?? 0;
-          const heat = clamp((world.tileHeat[current] ?? 0) / heatCap, 0, 1);
+          const fire = fireView.getFireByIndex(current);
+          const heat = fireView.getHeat01ByIndex(current);
           const treeBurnVisual = treeBurn?.getTileBurnVisual(current) ?? 0;
           const w = clamp(Math.max(fire, heat * 0.5, treeBurnVisual * 0.75), 0.01, 1.4);
           const worldTileX = ((cx + 0.5) / cols - 0.5) * terrainSize.width;
@@ -1338,12 +1808,20 @@ export const createThreeTestFireFx = (
         let radius = 0;
         let edgeTiles = 0;
         let interiorTiles = 0;
+        let covXX = 0;
+        let covXZ = 0;
+        let covZZ = 0;
         for (let i = 0; i < cluster.tiles.length; i += 1) {
           const tid = cluster.tiles[i];
           const tx = tid % cols;
           const ty = Math.floor(tid / cols);
           const wx = ((tx + 0.5) / cols - 0.5) * terrainSize.width;
           const wz = ((ty + 0.5) / rows - 0.5) * terrainSize.depth;
+          const dx = wx - cluster.centroidX;
+          const dz = wz - cluster.centroidZ;
+          covXX += dx * dx;
+          covXZ += dx * dz;
+          covZZ += dz * dz;
           radius = Math.max(radius, Math.hypot(wx - cluster.centroidX, wz - cluster.centroidZ));
           let neighborCount = 0;
           for (let oy = -sampleStep; oy <= sampleStep; oy += sampleStep) {
@@ -1370,6 +1848,43 @@ export const createThreeTestFireFx = (
             edgeTiles += 1;
           }
         }
+        let spanAxisX = 1;
+        let spanAxisZ = 0;
+        const covTrace = covXX + covZZ;
+        if (covTrace > 0.0001) {
+          const angle = 0.5 * Math.atan2(2 * covXZ, covXX - covZZ);
+          spanAxisX = Math.cos(angle);
+          spanAxisZ = Math.sin(angle);
+        }
+        const windLen = Math.hypot(windX, windZ);
+        if (windLen > 0.0001) {
+          const crossWindAxisX = -windZ / windLen;
+          const crossWindAxisZ = windX / windLen;
+          if (spanAxisX * crossWindAxisX + spanAxisZ * crossWindAxisZ < 0) {
+            spanAxisX *= -1;
+            spanAxisZ *= -1;
+          }
+          const crossWindBlend = cluster.tileCount >= CLUSTER_FULL_BLEND_TILES ? 0.45 : 0.22;
+          spanAxisX += (crossWindAxisX - spanAxisX) * crossWindBlend;
+          spanAxisZ += (crossWindAxisZ - spanAxisZ) * crossWindBlend;
+          const spanLen = Math.hypot(spanAxisX, spanAxisZ) || 1;
+          spanAxisX /= spanLen;
+          spanAxisZ /= spanLen;
+        }
+        let depthAxisX = -spanAxisZ;
+        let depthAxisZ = spanAxisX;
+        if (windLen > 0.0001) {
+          const windNormX = windX / windLen;
+          const windNormZ = windZ / windLen;
+          if (depthAxisX * windNormX + depthAxisZ * windNormZ < 0) {
+            depthAxisX *= -1;
+            depthAxisZ *= -1;
+          }
+        }
+        cluster.spanAxisX = spanAxisX;
+        cluster.spanAxisZ = spanAxisZ;
+        cluster.depthAxisX = depthAxisX;
+        cluster.depthAxisZ = depthAxisZ;
         cluster.radius = Math.max(radius, Math.min(terrainSize.width / cols, terrainSize.depth / rows) * 0.8);
         cluster.edgeTiles = edgeTiles;
         cluster.interiorTiles = interiorTiles;
@@ -1384,15 +1899,17 @@ export const createThreeTestFireFx = (
   const computeClusterBudgets = (
     flameBudgetScale: number,
     activeFlameTileCount: number,
-    clusteredTiles: number
+    clusteredTiles: number,
+    availableFlameInstances: number
   ): ClusterBudgetState => {
     const clusterCoverage = clusteredTiles / Math.max(1, activeFlameTileCount);
-    const reserveBed = Math.max(0, Math.round(FIRE_MAX_INSTANCES * clusterCoverage * 0.22 * flameBudgetScale));
-    const reservePlume = Math.max(0, Math.round(FIRE_MAX_INSTANCES * clusterCoverage * 0.1 * flameBudgetScale));
+    const flameCapacity = Math.max(96, availableFlameInstances);
+    const reserveBed = Math.max(0, Math.round(flameCapacity * clusterCoverage * 0.14 * flameBudgetScale));
+    const reservePlume = Math.max(0, Math.round(flameCapacity * clusterCoverage * 0.08 * flameBudgetScale));
     const reserveTileJets = clamp(
-      FIRE_MAX_INSTANCES - reserveBed - reservePlume,
-      Math.max(120, Math.round(FIRE_MAX_INSTANCES * 0.28)),
-      FIRE_MAX_INSTANCES
+      flameCapacity - reserveBed - reservePlume,
+      Math.max(80, Math.round(flameCapacity * 0.3)),
+      flameCapacity
     );
     let weightSum = 0;
     for (let i = 0; i < fireClusters.length; i += 1) {
@@ -1452,11 +1969,26 @@ export const createThreeTestFireFx = (
       return;
     }
     ensureTileState(cols, rows);
+    if (
+      !currentFireSnapshot ||
+      !previousFireSnapshot ||
+      currentFireSnapshot.cols !== cols ||
+      currentFireSnapshot.rows !== rows ||
+      previousFireSnapshot.cols !== cols ||
+      previousFireSnapshot.rows !== rows
+    ) {
+      captureSnapshot(world);
+    }
+    const previousSnapshot = previousFireSnapshot ?? captureFireRenderSnapshot(world, null);
+    const currentSnapshot = currentFireSnapshot ?? previousSnapshot;
     const treeBounds = treeBurn?.getVisualBounds() ?? null;
-    const hasActiveFire = (world.lastActiveFires ?? 0) > 0;
-    const hasPendingIgnition = (world.fireScheduledCount ?? 0) > 0;
-    const hasFireWork = hasActiveFire || hasPendingIgnition;
-    const useFireBounds = hasFireWork && world.fireBoundsActive;
+    const heatCap = Math.max(0.01, world.fireSettings.heatCap);
+    const fireAlpha = world.simTimeMode === "incident" ? 1 : fireSimulationAlpha;
+    const fireView = createFireFieldView(previousSnapshot, currentSnapshot, fireAlpha, heatCap);
+    const hasActiveFire = fireView.lastActiveFires > 0;
+    const hasPendingIgnition = fireView.fireScheduledCount > 0;
+    const hasFireWork = hasActiveFire || hasPendingIgnition || fireView.hasBounds;
+    const useFireBounds = fireView.hasBounds;
     if (!useFireBounds && !treeBounds) {
       if (!visualsCleared) {
         clearVisuals();
@@ -1538,19 +2070,19 @@ export const createThreeTestFireFx = (
     }
     const minX =
       useFireBounds || treeBounds
-        ? Math.max(0, Math.min(useFireBounds ? world.fireMinX : cols - 1, treeBounds?.minX ?? cols - 1))
+        ? Math.max(0, Math.min(useFireBounds ? fireView.minX : cols - 1, treeBounds?.minX ?? cols - 1))
         : 0;
     const maxX =
       useFireBounds || treeBounds
-        ? Math.min(cols - 1, Math.max(useFireBounds ? world.fireMaxX : 0, treeBounds?.maxX ?? 0))
+        ? Math.min(cols - 1, Math.max(useFireBounds ? fireView.maxX : 0, treeBounds?.maxX ?? 0))
         : cols - 1;
     const minY =
       useFireBounds || treeBounds
-        ? Math.max(0, Math.min(useFireBounds ? world.fireMinY : rows - 1, treeBounds?.minY ?? rows - 1))
+        ? Math.max(0, Math.min(useFireBounds ? fireView.minY : rows - 1, treeBounds?.minY ?? rows - 1))
         : 0;
     const maxY =
       useFireBounds || treeBounds
-        ? Math.min(rows - 1, Math.max(useFireBounds ? world.fireMaxY : 0, treeBounds?.maxY ?? 0))
+        ? Math.min(rows - 1, Math.max(useFireBounds ? fireView.maxY : 0, treeBounds?.maxY ?? 0))
         : rows - 1;
     const width = Math.max(1, maxX - minX + 1);
     const height = Math.max(1, maxY - minY + 1);
@@ -1562,11 +2094,10 @@ export const createThreeTestFireFx = (
     const tileSpanX = terrainSize.width / Math.max(1, cols);
     const tileSpanZ = terrainSize.depth / Math.max(1, rows);
     const tileSpan = Math.max(0.0001, Math.min(tileSpanX, tileSpanZ));
-    const sampleFootprint = tileSpan * sampleStep;
-    const sparkFootprint = tileSpan * Math.min(sampleStep, 2);
+    const sampleFootprint = tileSpan;
+    const sparkFootprint = tileSpan;
     const viewportHeightPx = typeof window !== "undefined" ? Math.max(1, window.innerHeight) : 1080;
     const heightScale = getTerrainHeightScale(cols, rows);
-    const heatCap = Math.max(0.01, world.fireSettings.heatCap);
     const simFireEps = getSimFireEps(world);
     const flamePresenceEps = Math.max(FIRE_FLAME_VISUAL_FLOOR, simFireEps * 0.9);
     const wind = world.wind;
@@ -1614,6 +2145,7 @@ export const createThreeTestFireFx = (
     smokeMaterial.uniforms.uZoomScale.value = zoomScale;
     camera.getWorldPosition(cameraWorldPos);
     camera.getWorldDirection(cameraForward);
+    const topView01 = smoothstep(0.18, 0.78, Math.abs(cameraForward.y));
     const terrainMinX = -terrainSize.width * 0.5;
     const terrainMaxX = terrainSize.width * 0.5;
     const terrainMinZ = -terrainSize.depth * 0.5;
@@ -1674,6 +2206,7 @@ export const createThreeTestFireFx = (
     let droppedByInstanceCap = 0;
     let clusterCount = 0;
     let clusteredTiles = 0;
+    let frontSegmentCount = 0;
     let clusterBedInstances = 0;
     let clusterPlumeSpawns = 0;
     let smokeSpawnsThisFrame = 0;
@@ -1690,25 +2223,54 @@ export const createThreeTestFireFx = (
       sparkPointColors[base + 2] = b;
       sparkPointCount += 1;
     };
+    const setSparkStreakTransform = (
+      x: number,
+      y: number,
+      z: number,
+      width: number,
+      height: number,
+      dirX: number,
+      dirY: number,
+      dirZ: number
+    ): void => {
+      sparkStreakBillboard.position.set(x, y, z);
+      sparkStreakBillboard.quaternion.copy(camera.quaternion);
+      sparkDirectionScratch.set(dirX, dirY, dirZ);
+      if (sparkDirectionScratch.lengthSq() > 0.000001) {
+        sparkDirectionScratch.transformDirection(camera.matrixWorldInverse);
+        const screenLen = Math.hypot(sparkDirectionScratch.x, sparkDirectionScratch.y);
+        if (screenLen > 0.0001) {
+          sparkStreakBillboard.rotateZ(-Math.atan2(sparkDirectionScratch.x, sparkDirectionScratch.y));
+        }
+      }
+      sparkStreakBillboard.scale.set(width, height, width);
+      sparkStreakBillboard.updateMatrix();
+    };
     const smokeSpawnFrameCap = Math.max(24, Math.floor(SMOKE_MAX_INSTANCES * 0.26 * smokeBudgetScale));
     const smokeRenderCap = Math.max(180, Math.floor(SMOKE_MAX_INSTANCES * smokeBudgetScale));
     const smokeRenderStride =
       smokeBudgetScale >= 0.9 ? 1 : smokeBudgetScale >= 0.7 ? 2 : smokeBudgetScale >= 0.5 ? 3 : 4;
     let activeFlameTileCount = 0;
-    for (let y = minY; y <= maxY; y += sampleStep) {
+    let visualActiveWeight = 0;
+    for (let y = minY; y <= maxY; y += 1) {
       const rowBase = y * cols;
-      for (let x = minX; x <= maxX; x += sampleStep) {
+      for (let x = minX; x <= maxX; x += 1) {
         const idx = rowBase + x;
-        const fire = world.tileFire[idx] ?? 0;
+        const fire = fireView.getFireByIndex(idx);
         if (fire > simFireEps) {
           activeFlameTileCount += 1;
+          visualActiveWeight += clamp(
+            smoothstep(simFireEps * 0.5, 0.45, fire) + fire * 0.2 + fireView.getHeat01ByIndex(idx) * 0.14,
+            0,
+            1.2
+          );
           continue;
         }
-        const heat = clamp((world.tileHeat[idx] ?? 0) / heatCap, 0, 1);
+        const heat = fireView.getHeat01ByIndex(idx);
         if (heat <= 0.08) {
           continue;
         }
-        const fuel = clamp(world.tileFuel[idx] ?? 0, 0, 1);
+        const fuel = fireView.getFuelByIndex(idx);
         const isAshTile = (world.tileTypeId[idx] ?? -1) === TILE_TYPE_IDS.ash;
         if (fuel <= TREE_BURN_CARRY_FUEL_MIN || isAshTile) {
           continue;
@@ -1721,6 +2283,7 @@ export const createThreeTestFireFx = (
         const burnProgress = treeBurn?.getTileBurnProgress(idx) ?? 0;
         if (treeBurnVisual > TREE_BURN_FLAME_VISUAL_MIN && burnProgress > TREE_BURN_CARRY_PROGRESS_MIN) {
           activeFlameTileCount += 1;
+          visualActiveWeight += clamp(treeBurnVisual * 0.72 + heat * 0.18, 0, 0.95);
         }
       }
     }
@@ -1737,6 +2300,7 @@ export const createThreeTestFireFx = (
     if (shouldRebuildClusters) {
       const clusterBuild = buildFireClusters(
         world,
+        fireView,
         cols,
         rows,
         minX,
@@ -1745,7 +2309,8 @@ export const createThreeTestFireFx = (
         maxY,
         sampleStep,
         simFireEps,
-        heatCap,
+        windX,
+        windZ,
         treeBurn,
         terrainSize,
         heightScale
@@ -1763,31 +2328,537 @@ export const createThreeTestFireFx = (
       clusterCount = fireClusters.length;
       clusteredTiles = fireClusters.reduce((sum, cluster) => sum + cluster.tileCount, 0);
     }
-    const clusterBudgetState = computeClusterBudgets(flameBudgetScale, activeFlameTileCount, clusteredTiles);
+    const windDirLen = Math.hypot(windX, windZ);
+    const windNormX = windDirLen > 0.0001 ? windX / windDirLen : 0;
+    const windNormZ = windDirLen > 0.0001 ? windZ / windDirLen : 0;
+    const getHeat01 = (tileIdx: number): number => fireView.getHeat01ByIndex(tileIdx);
+    const getGroundY = (tileIdx: number): number => clamp(world.tileElevation[tileIdx] ?? 0, -1, 1) * heightScale;
+    const getFrontEdgeStrength = (
+      activeIdx: number,
+      neighbourIdx: number,
+      normalX: number,
+      normalZ: number
+    ): number => {
+      const activeFire = fireView.getFireByIndex(activeIdx);
+      if (activeFire <= simFireEps) {
+        return 0;
+      }
+      const activeHeat = getHeat01(activeIdx);
+      const neighbourFire = neighbourIdx >= 0 ? fireView.getFireByIndex(neighbourIdx) : 0;
+      const neighbourHeat = neighbourIdx >= 0 ? getHeat01(neighbourIdx) : 0;
+      const unburntNeighbour = neighbourIdx < 0 || neighbourFire <= simFireEps;
+      const fireRatio = activeFire / Math.max(simFireEps, neighbourFire + simFireEps);
+      const heatRatio = activeHeat / Math.max(0.04, neighbourHeat + 0.04);
+      if (
+        !unburntNeighbour &&
+        fireRatio < FIRE_FRONT_NEIGHBOUR_RATIO &&
+        heatRatio < FIRE_FRONT_NEIGHBOUR_HEAT_RATIO &&
+        neighbourFire >= activeFire * 0.82
+      ) {
+        return 0;
+      }
+      const fireDrop = Math.max(0, activeFire - neighbourFire);
+      const heatDrop = Math.max(0, activeHeat - neighbourHeat);
+      const windPush = windDirLen > 0.0001 ? Math.max(0, normalX * windNormX + normalZ * windNormZ) : 0;
+      return clamp(
+        activeFire * 0.56 +
+          activeHeat * 0.22 +
+          fireDrop * 0.68 +
+          heatDrop * 0.26 +
+          (unburntNeighbour ? 0.2 : 0) +
+          windPush * 0.24,
+        0,
+        1.35
+      );
+    };
+    const getFrontEdgeVisualStrength = (
+      activeIdx: number,
+      neighbourIdx: number,
+      normalX: number,
+      normalZ: number
+    ): number => {
+      const targetStrength = getFrontEdgeStrength(activeIdx, neighbourIdx, normalX, normalZ);
+      const smoothedFront = activeIdx >= 0 ? tileFrontStrength[activeIdx] ?? 0 : 0;
+      return Math.min(targetStrength, smoothedFront * 1.08 + 0.1);
+    };
+    let visualFrontWeight = 0;
+    if (ENABLE_FLAME_FRONT_PASS) {
+      for (let y = minY; y <= maxY; y += sampleStep) {
+        const rowBase = y * cols;
+        for (let x = minX; x <= maxX; x += sampleStep) {
+          const idx = rowBase + x;
+          const fire = fireView.getFireByIndex(idx);
+          let frontStrengthTarget = 0;
+          if (fire > simFireEps) {
+            const westIdx = x - sampleStep >= minX ? idx - sampleStep : -1;
+            const eastIdx = x + sampleStep <= maxX ? idx + sampleStep : -1;
+            const northIdx = y - sampleStep >= minY ? idx - sampleStep * cols : -1;
+            const southIdx = y + sampleStep <= maxY ? idx + sampleStep * cols : -1;
+            frontStrengthTarget = Math.max(frontStrengthTarget, getFrontEdgeStrength(idx, westIdx, -1, 0));
+            frontStrengthTarget = Math.max(frontStrengthTarget, getFrontEdgeStrength(idx, eastIdx, 1, 0));
+            frontStrengthTarget = Math.max(frontStrengthTarget, getFrontEdgeStrength(idx, northIdx, 0, -1));
+            frontStrengthTarget = Math.max(frontStrengthTarget, getFrontEdgeStrength(idx, southIdx, 0, 1));
+          }
+          const smoothedFront = smoothApproach(tileFrontStrength[idx] ?? 0, frontStrengthTarget, 14.0, 10.0, deltaSeconds);
+          tileFrontStrength[idx] = smoothedFront;
+          if (fire > simFireEps && frontStrengthTarget > FIRE_FRONT_VISUAL_MIN) {
+            visualFrontWeight += smoothstep(FIRE_FRONT_VISUAL_MIN * 0.4, 0.42, frontStrengthTarget);
+          }
+        }
+      }
+    }
+    const frontBudgetFloor =
+      visualFrontWeight >= 8
+        ? Math.min(FIRE_FRONT_MIN_INSTANCES, Math.round(visualFrontWeight * 2.5))
+        : 0;
+    const frontPassActive =
+      ENABLE_FLAME_FRONT_PASS &&
+      visualFrontWeight >= FIRE_FRONT_PASS_MIN_WEIGHT &&
+      activeFlameTileCount >= 4;
+    const frontSegmentBudget = frontPassActive
+      ? clamp(
+          Math.round(
+            Math.min(FIRE_FRONT_MAX_INSTANCES, visualFrontWeight * 2.35 + visualActiveWeight * 0.16) *
+              clamp(flameDensityScale, 0.28, 1.05)
+          ),
+          frontBudgetFloor,
+          FIRE_FRONT_MAX_INSTANCES
+        )
+      : 0;
+    const flameTileCapacity = clamp(FIRE_MAX_INSTANCES - frontSegmentBudget, 96, FIRE_MAX_INSTANCES);
+    const clusterBudgetState = computeClusterBudgets(
+      flameBudgetScale,
+      Math.max(activeFlameTileCount, Math.round(Math.max(1, visualActiveWeight))),
+      clusteredTiles,
+      flameTileCapacity
+    );
     const perTileFlameCap =
-      activeFlameTileCount > 0
+      visualActiveWeight > 0.01
         ? clamp(
-            Math.floor(clusterBudgetState.reserveTileJets / activeFlameTileCount),
+            Math.floor(clusterBudgetState.reserveTileJets / Math.max(1, visualActiveWeight)),
             1,
             FIRE_VISUAL_TUNING.tongueSpawnMax
           )
         : FIRE_VISUAL_TUNING.tongueSpawnMax;
     const perTileCrossCap =
-      activeFlameTileCount > 0
-        ? clamp(Math.floor(FIRE_CROSS_MAX_INSTANCES / activeFlameTileCount), 0, 5)
+      visualActiveWeight > 0.01
+        ? clamp(Math.floor(FIRE_CROSS_MAX_INSTANCES / Math.max(1, visualActiveWeight)), 0, 5)
         : 5;
     const guaranteedFlameInstances =
-      activeFlameTileCount > 0
-        ? Math.min(clusterBudgetState.reserveTileJets, activeFlameTileCount * perTileFlameCap)
+      visualActiveWeight > 0.01
+        ? Math.min(clusterBudgetState.reserveTileJets, Math.round(visualActiveWeight * perTileFlameCap))
         : 0;
     const perTileGroundCap =
-      activeFlameTileCount > 0
+      visualActiveWeight > 0.01
         ? clamp(
-            Math.floor(Math.max(0, clusterBudgetState.reserveTileJets - guaranteedFlameInstances) / activeFlameTileCount),
+            Math.floor(Math.max(0, clusterBudgetState.reserveTileJets - guaranteedFlameInstances) / Math.max(1, visualActiveWeight)),
             0,
             FIRE_VISUAL_TUNING.groundFlameSpawnMax
           )
         : FIRE_VISUAL_TUNING.groundFlameSpawnMax;
+    const emitFrontRun = (
+      orientation: "horizontal" | "vertical",
+      fixedCoord: number,
+      startCoord: number,
+      endCoord: number,
+      normalX: number,
+      normalZ: number,
+      strengthSum: number,
+      heatSum: number,
+      fireSum: number,
+      groundYSum: number,
+      sampleCount: number
+    ): void => {
+      if (!ENABLE_FLAME_FRONT_PASS || sampleCount <= 0 || frontSegmentCount >= frontSegmentBudget) {
+        return;
+      }
+      const avgStrength = strengthSum / sampleCount;
+      if (avgStrength <= FIRE_FRONT_VISUAL_MIN) {
+        return;
+      }
+      const frontScale01 = smoothstep(FIRE_FRONT_VISUAL_MIN * 0.4, 0.42, avgStrength);
+      if (frontScale01 <= 0.02) {
+        return;
+      }
+      const avgHeat = heatSum / sampleCount;
+      const avgFire = fireSum / sampleCount;
+      const avgGroundY = groundYSum / sampleCount;
+      const blockSpan = (orientation === "horizontal" ? tileSpanX : tileSpanZ) * sampleStep;
+      const runBlockCount = Math.floor((endCoord - startCoord) / sampleStep) + 1;
+      const runSpan = Math.max(blockSpan, runBlockCount * blockSpan);
+      const tangentX = orientation === "horizontal" ? 1 : 0;
+      const tangentZ = orientation === "horizontal" ? 0 : 1;
+      let runCenterX = 0;
+      let runCenterZ = 0;
+      if (orientation === "horizontal") {
+        const startCenterX = ((startCoord + sampleStep * 0.5) / cols - 0.5) * terrainSize.width;
+        const endCenterX = ((endCoord + sampleStep * 0.5) / cols - 0.5) * terrainSize.width;
+        const sourceRow = clamp(normalZ < 0 ? fixedCoord : fixedCoord - sampleStep, minY, maxY);
+        const sourceCenterZ = ((sourceRow + sampleStep * 0.5) / rows - 0.5) * terrainSize.depth;
+        runCenterX = (startCenterX + endCenterX) * 0.5;
+        runCenterZ = sourceCenterZ + normalZ * tileSpanZ * sampleStep * 0.5;
+      } else {
+        const startCenterZ = ((startCoord + sampleStep * 0.5) / rows - 0.5) * terrainSize.depth;
+        const endCenterZ = ((endCoord + sampleStep * 0.5) / rows - 0.5) * terrainSize.depth;
+        const sourceCol = clamp(normalX < 0 ? fixedCoord : fixedCoord - sampleStep, minX, maxX);
+        const sourceCenterX = ((sourceCol + sampleStep * 0.5) / cols - 0.5) * terrainSize.width;
+        runCenterX = sourceCenterX + normalX * tileSpanX * sampleStep * 0.5;
+        runCenterZ = (startCenterZ + endCenterZ) * 0.5;
+      }
+      const maxSegments = Math.min(
+        FIRE_FRONT_RUN_MAX_SEGMENTS,
+        frontSegmentBudget - frontSegmentCount,
+        FIRE_MAX_INSTANCES - fireCount
+      );
+      if (maxSegments <= 0) {
+        return;
+      }
+      const baseSegments = Math.max(1, Math.ceil(runSpan / Math.max(sampleFootprint * 1.45, blockSpan * 0.82)));
+      const idealSegmentCount = clamp(
+        Math.round(baseSegments * (0.9 + avgStrength * 0.7)),
+        1,
+        FIRE_FRONT_RUN_MAX_SEGMENTS
+      );
+      const segmentStride = idealSegmentCount > maxSegments ? Math.ceil(idealSegmentCount / Math.max(1, maxSegments)) : 1;
+      const segmentPhase =
+        segmentStride > 1
+          ? Math.floor(
+              hash1(fixedCoord * 0.731 + startCoord * 0.173 + endCoord * 0.097 + normalX * 11.3 + normalZ * 7.1) *
+                segmentStride
+            )
+          : 0;
+      const segmentSpacing = runSpan / Math.max(1, idealSegmentCount);
+      const windPush = windDirLen > 0.0001 ? Math.max(0, normalX * windNormX + normalZ * windNormZ) : 0;
+      const tangentYaw = Math.atan2(tangentX + windX * 0.16, tangentZ + windZ * 0.16);
+      for (let segment = 0; segment < idealSegmentCount && fireCount < FIRE_MAX_INSTANCES; segment += 1) {
+        if (segmentStride > 1 && segment % segmentStride !== segmentPhase) {
+          continue;
+        }
+        if (frontSegmentCount >= frontSegmentBudget) {
+          break;
+        }
+        const s1 = hash1(fixedCoord * 0.731 + startCoord * 0.173 + endCoord * 0.097 + segment * 3.17 + normalX * 11.3 + normalZ * 7.1);
+        const s2 = hash1(fixedCoord * 1.131 + startCoord * 0.217 + endCoord * 0.119 + segment * 5.41 + 2.7);
+        const s3 = hash1(fixedCoord * 0.593 + startCoord * 0.149 + endCoord * 0.181 + segment * 7.03 + 9.4);
+        const along =
+          -runSpan * 0.5 +
+          segmentSpacing * (segment + 0.5) +
+          (s1 - 0.5) * segmentSpacing * 0.48;
+        const centerX =
+          clamp(runCenterX + tangentX * along + normalX * (s2 - 0.5) * sampleFootprint * 0.18, terrainMinX, terrainMaxX);
+        const centerZ =
+          clamp(runCenterZ + tangentZ * along + normalZ * (s2 - 0.5) * sampleFootprint * 0.18, terrainMinZ, terrainMaxZ);
+        const surge =
+          0.72 +
+          Math.pow(s2, 1.55) * 0.74 +
+          0.24 * Math.sin(flameTimeSeconds * (4.1 + s3 * 3.1) + s1 * TAU);
+        const collapse =
+          0.62 +
+          0.38 * (0.5 + 0.5 * Math.sin(flameTimeSeconds * (2.3 + s1 * 2.1) + s2 * TAU));
+        const heightRaw =
+          sampleFootprint *
+          (0.34 + avgStrength * 0.78 + avgHeat * 0.14 + windPush * 0.12) *
+          (0.76 + s2 * 0.36) *
+          surge *
+          collapse *
+          flameHeightBoost *
+          0.8 *
+          FLAME_RENDER_SIZE_SCALE *
+          frontScale01;
+        const widthRaw =
+          Math.max(blockSpan * 0.74, segmentSpacing * (0.88 + s1 * 0.12)) *
+          (0.91 + windPush * 0.07) *
+          flameWidthBoost *
+          FLAME_RENDER_SIZE_SCALE *
+          frontScale01;
+        const height = Math.min(heightRaw, sampleFootprint * 1.6 * flameHeightBoost * FLAME_RENDER_SIZE_SCALE);
+        const width = Math.min(widthRaw, sampleFootprint * 1.35);
+        const baseY = avgGroundY - sampleFootprint * 0.015;
+        const cameraYaw = Math.atan2(cameraWorldPos.x - centerX, cameraWorldPos.z - centerZ);
+        const yaw = cameraYaw * 0.88 + tangentYaw * 0.12 + Math.sin(flameTimeSeconds * 0.92 + s3 * TAU) * 0.06;
+        const mainPitch = topView01 * 0.18;
+        fireBillboard.position.set(centerX, baseY, centerZ);
+        fireBillboard.rotation.set(mainPitch, yaw, 0);
+        fireBillboard.scale.set(
+          width * FLAME_BILLBOARD_OVERSCAN_X,
+          height * FLAME_BILLBOARD_OVERSCAN_Y,
+          width * FLAME_BILLBOARD_OVERSCAN_X
+        );
+        fireBillboard.updateMatrix();
+        fireMesh.setMatrixAt(fireCount, fireBillboard.matrix);
+        fireIntensityAttr.setX(fireCount, clamp(0.62 + avgFire * 0.36 + avgStrength * 0.24 + windPush * 0.12, 0, 1.25));
+        fireSeedAttr.setX(fireCount, fract(s1 + s3 + segment * 0.13));
+        fireBaseCurveAttr.setX(fireCount, 0.08 + avgHeat * 0.22);
+        fireClusterBlendAttr.setX(fireCount, 0.08);
+        fireSmokeOccAttr.setX(fireCount, clamp(0.06 + avgHeat * 0.12, 0, 0.22));
+        fireRoleAttr.setX(fireCount, 3);
+        const sliceOffset = (0.14 + topView01 * 0.26) * (s1 > 0.5 ? 1 : -1);
+        fireBillboard.position.set(centerX, baseY + sampleFootprint * 0.01, centerZ);
+        fireBillboard.rotation.set(mainPitch * 0.7, yaw + sliceOffset, 0);
+        fireBillboard.scale.set(
+          width * 0.52 * FLAME_CORE_BILLBOARD_OVERSCAN_X,
+          height * 0.46 * FLAME_CORE_BILLBOARD_OVERSCAN_Y,
+          width * 0.52 * FLAME_CORE_BILLBOARD_OVERSCAN_X
+        );
+        fireBillboard.updateMatrix();
+        fireCoreMesh.setMatrixAt(fireCount, fireBillboard.matrix);
+        if (topView01 > 0.24 && fireCrossCount < FIRE_CROSS_MAX_INSTANCES) {
+          fireCrossBillboard.position.set(centerX, baseY + sampleFootprint * 0.005, centerZ);
+          fireCrossBillboard.rotation.set(mainPitch * 0.52, yaw - sliceOffset * 0.82, 0);
+          fireCrossBillboard.scale.set(
+            width * 0.82 * FLAME_BILLBOARD_OVERSCAN_X,
+            height * 0.82 * FLAME_BILLBOARD_OVERSCAN_Y,
+            width * 0.82 * FLAME_BILLBOARD_OVERSCAN_X
+          );
+          fireCrossBillboard.updateMatrix();
+          fireCrossMesh.setMatrixAt(fireCrossCount, fireCrossBillboard.matrix);
+          fireCrossIntensityAttr.setX(fireCrossCount, clamp(0.56 + avgFire * 0.32 + avgStrength * 0.2, 0, 1.12));
+          fireCrossSeedAttr.setX(fireCrossCount, fract(s2 + s3 + segment * 0.17));
+          fireCrossBaseCurveAttr.setX(fireCrossCount, 0.08 + avgHeat * 0.18);
+          fireCrossClusterBlendAttr.setX(fireCrossCount, 0.08);
+          fireCrossSmokeOccAttr.setX(fireCrossCount, clamp(0.05 + avgHeat * 0.1, 0, 0.2));
+          fireCrossRoleAttr.setX(fireCrossCount, 3);
+          fireCrossCount += 1;
+        }
+        fireCount += 1;
+        frontSegmentCount += 1;
+        if (glowCount < GLOW_MAX_INSTANCES) {
+          const glowLength = Math.max(blockSpan * 0.9, width * 0.72);
+          const glowDepth = sampleFootprint * (0.36 + avgStrength * 0.28) * groundGlowSizeBoost;
+          groundGlowBillboard.position.set(
+            centerX + normalX * sampleFootprint * 0.03,
+            baseY + 0.03,
+            centerZ + normalZ * sampleFootprint * 0.03
+          );
+          groundGlowBillboard.rotation.set(0, tangentYaw, 0);
+          groundGlowBillboard.scale.set(glowLength, glowDepth, 1);
+          groundGlowBillboard.updateMatrix();
+          groundGlowMesh.setMatrixAt(glowCount, groundGlowBillboard.matrix);
+          const frontGlow = clamp((0.38 + avgStrength * 0.9 + s2 * 0.18) * groundGlowBoost, 0, 3.2);
+          groundGlowMesh.instanceColor?.setXYZ(
+            glowCount,
+            frontGlow * 1.16,
+            frontGlow * (0.38 + s2 * 0.14),
+            frontGlow * (0.04 + s1 * 0.03)
+          );
+          glowCount += 1;
+        }
+        if (sparkPointCount < SPARK_POINT_MAX_INSTANCES && avgStrength > 0.3 && s3 > 0.56) {
+          const sparkDrift = sampleFootprint * (0.18 + windStrength * 0.44 + s2 * 0.2);
+          pushSparkPoint(
+            clamp(centerX + windX * sparkDrift + tangentX * (s1 - 0.5) * segmentSpacing * 0.16, terrainMinX, terrainMaxX),
+            baseY + height * (0.52 + s3 * 0.24),
+            clamp(centerZ + windZ * sparkDrift + tangentZ * (s2 - 0.5) * segmentSpacing * 0.16, terrainMinZ, terrainMaxZ),
+            1.2 + avgStrength * 0.3,
+            0.58 + avgHeat * 0.18,
+            0.12
+          );
+        }
+      }
+    };
+    const emitFrontRuns = (): void => {
+      if (!ENABLE_FLAME_FRONT_PASS || frontSegmentBudget <= 0) {
+        return;
+      }
+      for (let yEdge = minY; yEdge <= maxY + sampleStep; yEdge += sampleStep) {
+        let runStart = -1;
+        let runEnd = -1;
+        let runNormalZ = 0;
+        let strengthSum = 0;
+        let heatSum = 0;
+        let fireSum = 0;
+        let groundYSum = 0;
+        let sampleCount = 0;
+        for (let x = minX; x <= maxX; x += sampleStep) {
+          const northY = yEdge - sampleStep;
+          const southY = yEdge;
+          const northIdx = northY >= minY && northY <= maxY ? northY * cols + x : -1;
+          const southIdx = southY >= minY && southY <= maxY ? southY * cols + x : -1;
+          let edgeStrength = 0;
+          let normalZ = 0;
+          let activeIdx = -1;
+          const northStrength = northIdx >= 0 ? getFrontEdgeVisualStrength(northIdx, southIdx, 0, 1) : 0;
+          const southStrength = southIdx >= 0 ? getFrontEdgeVisualStrength(southIdx, northIdx, 0, -1) : 0;
+          if (northStrength >= southStrength && northStrength > FIRE_FRONT_VISUAL_MIN) {
+            edgeStrength = northStrength;
+            normalZ = 1;
+            activeIdx = northIdx;
+          } else if (southStrength > FIRE_FRONT_VISUAL_MIN) {
+            edgeStrength = southStrength;
+            normalZ = -1;
+            activeIdx = southIdx;
+          }
+          if (activeIdx >= 0) {
+            if (runStart < 0 || normalZ !== runNormalZ || x !== runEnd + sampleStep) {
+              if (runStart >= 0) {
+                emitFrontRun(
+                  "horizontal",
+                  yEdge,
+                  runStart,
+                  runEnd,
+                  0,
+                  runNormalZ,
+                  strengthSum,
+                  heatSum,
+                  fireSum,
+                  groundYSum,
+                  sampleCount
+                );
+              }
+              runStart = x;
+              runNormalZ = normalZ;
+              strengthSum = 0;
+              heatSum = 0;
+              fireSum = 0;
+              groundYSum = 0;
+              sampleCount = 0;
+            }
+            runEnd = x;
+            strengthSum += edgeStrength;
+            heatSum += getHeat01(activeIdx);
+            fireSum += fireView.getFireByIndex(activeIdx);
+            groundYSum += getGroundY(activeIdx);
+            sampleCount += 1;
+          } else if (runStart >= 0) {
+            emitFrontRun(
+              "horizontal",
+              yEdge,
+              runStart,
+              runEnd,
+              0,
+              runNormalZ,
+              strengthSum,
+              heatSum,
+              fireSum,
+              groundYSum,
+              sampleCount
+            );
+            runStart = -1;
+            runEnd = -1;
+            runNormalZ = 0;
+            strengthSum = 0;
+            heatSum = 0;
+            fireSum = 0;
+            groundYSum = 0;
+            sampleCount = 0;
+          }
+        }
+        if (runStart >= 0) {
+          emitFrontRun(
+            "horizontal",
+            yEdge,
+            runStart,
+            runEnd,
+            0,
+            runNormalZ,
+            strengthSum,
+            heatSum,
+            fireSum,
+            groundYSum,
+            sampleCount
+          );
+        }
+      }
+      for (let xEdge = minX; xEdge <= maxX + sampleStep; xEdge += sampleStep) {
+        let runStart = -1;
+        let runEnd = -1;
+        let runNormalX = 0;
+        let strengthSum = 0;
+        let heatSum = 0;
+        let fireSum = 0;
+        let groundYSum = 0;
+        let sampleCount = 0;
+        for (let y = minY; y <= maxY; y += sampleStep) {
+          const westX = xEdge - sampleStep;
+          const eastX = xEdge;
+          const westIdx = westX >= minX && westX <= maxX ? y * cols + westX : -1;
+          const eastIdx = eastX >= minX && eastX <= maxX ? y * cols + eastX : -1;
+          let edgeStrength = 0;
+          let normalX = 0;
+          let activeIdx = -1;
+          const westStrength = westIdx >= 0 ? getFrontEdgeVisualStrength(westIdx, eastIdx, 1, 0) : 0;
+          const eastStrength = eastIdx >= 0 ? getFrontEdgeVisualStrength(eastIdx, westIdx, -1, 0) : 0;
+          if (westStrength >= eastStrength && westStrength > FIRE_FRONT_VISUAL_MIN) {
+            edgeStrength = westStrength;
+            normalX = 1;
+            activeIdx = westIdx;
+          } else if (eastStrength > FIRE_FRONT_VISUAL_MIN) {
+            edgeStrength = eastStrength;
+            normalX = -1;
+            activeIdx = eastIdx;
+          }
+          if (activeIdx >= 0) {
+            if (runStart < 0 || normalX !== runNormalX || y !== runEnd + sampleStep) {
+              if (runStart >= 0) {
+                emitFrontRun(
+                  "vertical",
+                  xEdge,
+                  runStart,
+                  runEnd,
+                  runNormalX,
+                  0,
+                  strengthSum,
+                  heatSum,
+                  fireSum,
+                  groundYSum,
+                  sampleCount
+                );
+              }
+              runStart = y;
+              runNormalX = normalX;
+              strengthSum = 0;
+              heatSum = 0;
+              fireSum = 0;
+              groundYSum = 0;
+              sampleCount = 0;
+            }
+            runEnd = y;
+            strengthSum += edgeStrength;
+            heatSum += getHeat01(activeIdx);
+            fireSum += fireView.getFireByIndex(activeIdx);
+            groundYSum += getGroundY(activeIdx);
+            sampleCount += 1;
+          } else if (runStart >= 0) {
+            emitFrontRun(
+              "vertical",
+              xEdge,
+              runStart,
+              runEnd,
+              runNormalX,
+              0,
+              strengthSum,
+              heatSum,
+              fireSum,
+              groundYSum,
+              sampleCount
+            );
+            runStart = -1;
+            runEnd = -1;
+            runNormalX = 0;
+            strengthSum = 0;
+            heatSum = 0;
+            fireSum = 0;
+            groundYSum = 0;
+            sampleCount = 0;
+          }
+        }
+        if (runStart >= 0) {
+          emitFrontRun(
+            "vertical",
+            xEdge,
+            runStart,
+            runEnd,
+            runNormalX,
+            0,
+            strengthSum,
+            heatSum,
+            fireSum,
+            groundYSum,
+            sampleCount
+          );
+        }
+      }
+    };
 
     const emitClusterFlameBed = (cluster: FireCluster): void => {
       if (cluster.bedBudget <= 0) {
@@ -1799,7 +2870,11 @@ export const createThreeTestFireFx = (
         Math.min(CLUSTER_BED_MAX_PER_CLUSTER, cluster.bedBudget)
       );
       const radius = Math.max(tileSpan * 0.8, cluster.radius * 1.1);
-      const clusterBlend = clamp((cluster.tileCount - CLUSTER_MIN_TILES) / Math.max(1, CLUSTER_FULL_BLEND_TILES - CLUSTER_MIN_TILES), 0, 1);
+      const clusterBlend = clamp(
+        (cluster.tileCount - CLUSTER_MIN_TILES) / Math.max(1, CLUSTER_FULL_BLEND_TILES - CLUSTER_MIN_TILES),
+        0,
+        1
+      );
       const smokeOccBase = clamp(0.25 + cluster.intensity * 0.45, 0, 1);
       if (sparkDebug) {
         const centroidR = 0.6 + cluster.intensity * 2.2;
@@ -1817,18 +2892,28 @@ export const createThreeTestFireFx = (
         const b2 = hash1(cluster.id * 0.913 + bi * 11.7 + 3.21);
         const b3 = hash1(cluster.id * 1.777 + bi * 4.91 + 6.73);
         const theta = b1 * TAU;
-        const radial = Math.sqrt(b2) * radius;
-        const windStretch = 1 + windStrength * 0.32;
-        const x = cluster.centroidX + Math.cos(theta) * radial * windStretch + crossWindX * (b3 - 0.5) * radius * 0.2;
-        const z = cluster.centroidZ + Math.sin(theta) * radial + crossWindZ * (b3 - 0.5) * radius * 0.2;
+        const spanRadius = radius * (1.15 + clusterBlend * 0.38 + windStrength * 0.18);
+        const depthRadius = radius * (0.34 + cluster.intensity * 0.12);
+        const spanOffset = Math.cos(theta) * Math.sqrt(b2) * spanRadius;
+        const depthOffset = Math.sin(theta) * Math.pow(b2, 0.72) * depthRadius;
+        const x =
+          cluster.centroidX +
+          cluster.spanAxisX * spanOffset +
+          cluster.depthAxisX * depthOffset +
+          cluster.depthAxisX * (b3 - 0.5) * radius * 0.12;
+        const z =
+          cluster.centroidZ +
+          cluster.spanAxisZ * spanOffset +
+          cluster.depthAxisZ * depthOffset +
+          cluster.depthAxisZ * (b3 - 0.5) * radius * 0.12;
         const wX = clamp(x, terrainMinX, terrainMaxX);
         const wZ = clamp(z, terrainMinZ, terrainMaxZ);
         const pulse = 0.85 + 0.15 * Math.sin(flameTimeSeconds * (0.5 + b3 * 0.7) + b2 * TAU);
-        const h = tileSpan * (0.08 + cluster.intensity * 0.14) * (0.78 + b3 * 0.44) * pulse;
-        const w = Math.max(tileSpan * 0.08, h * (1.65 + b2 * 0.95));
+        const h = tileSpan * (0.055 + cluster.intensity * 0.085) * (0.84 + b3 * 0.4) * pulse * FLAME_RENDER_SIZE_SCALE;
+        const w = Math.max(tileSpan * 0.12, h * (2.35 + b2 * 1.2)) * FLAME_RENDER_SIZE_SCALE;
         const yaw = Math.atan2(cameraWorldPos.x - wX, cameraWorldPos.z - wZ) + Math.sin(flameTimeSeconds * 0.45 + b1 * TAU) * 0.08;
         const intensity = clamp((0.35 + cluster.intensity * 0.7) * pulse, 0, 1);
-        fireBillboard.position.set(wX, cluster.baseY + h * 0.46, wZ);
+        fireBillboard.position.set(wX, cluster.baseY + h * 0.4, wZ);
         fireBillboard.rotation.set(0, yaw, 0);
         fireBillboard.scale.set(w * FLAME_BILLBOARD_OVERSCAN_X, h * FLAME_BILLBOARD_OVERSCAN_Y, w * FLAME_BILLBOARD_OVERSCAN_X);
         fireBillboard.updateMatrix();
@@ -1841,9 +2926,9 @@ export const createThreeTestFireFx = (
         fireRoleAttr.setX(fireCount, 2);
         fireBillboard.rotation.set(0, yaw + Math.PI * 0.5, 0);
         fireBillboard.scale.set(
-          w * 0.7 * FLAME_CORE_BILLBOARD_OVERSCAN_X,
-          h * 0.54 * FLAME_CORE_BILLBOARD_OVERSCAN_Y,
-          w * 0.7 * FLAME_CORE_BILLBOARD_OVERSCAN_X
+          w * 0.64 * FLAME_CORE_BILLBOARD_OVERSCAN_X,
+          h * 0.48 * FLAME_CORE_BILLBOARD_OVERSCAN_Y,
+          w * 0.64 * FLAME_CORE_BILLBOARD_OVERSCAN_X
         );
         fireBillboard.updateMatrix();
         fireCoreMesh.setMatrixAt(fireCount, fireBillboard.matrix);
@@ -1913,6 +2998,7 @@ export const createThreeTestFireFx = (
       }
     };
 
+    emitFrontRuns();
     for (let i = 0; i < fireClusters.length; i += 1) {
       emitClusterFlameBed(fireClusters[i]);
       emitClusterPlumes(fireClusters[i]);
@@ -1921,12 +3007,15 @@ export const createThreeTestFireFx = (
       const rowBase = y * cols;
       for (let x = minX; x <= maxX; x += sampleStep) {
         const idx = rowBase + x;
-        const fire = world.tileFire[idx] ?? 0;
-        const heat = clamp((world.tileHeat[idx] ?? 0) / heatCap, 0, 1);
-        const fuel = clamp(world.tileFuel[idx] ?? 0, 0, 1);
+        const fire = fireView.getFireByIndex(idx);
+        const heat = fireView.getHeat01ByIndex(idx);
+        const fuel = fireView.getFuelByIndex(idx);
+        const scheduled = fireView.getScheduledByIndex(idx);
+        const typeId = world.tileTypeId[idx] ?? -1;
         const isAshTile = (world.tileTypeId[idx] ?? -1) === TILE_TYPE_IDS.ash;
         const flameProfile: TreeFlameProfile | null = treeBurn?.getTileFlameProfile(idx) ?? null;
         const burnProgress = treeBurn?.getTileBurnProgress(idx) ?? 0;
+        const isStructureTile = typeId === TILE_TYPE_IDS.house || typeId === TILE_TYPE_IDS.base;
         const hasActiveFire = fire > simFireEps;
         const treeBurnVisual = treeBurn?.getTileBurnVisual(idx) ?? 0;
         const hasCarryFuel = fuel > TREE_BURN_CARRY_FUEL_MIN && !isAshTile;
@@ -1937,26 +3026,35 @@ export const createThreeTestFireFx = (
           treeBurnVisual > TREE_BURN_FLAME_VISUAL_MIN &&
           burnProgress > TREE_BURN_CARRY_PROGRESS_MIN &&
           heat > 0.08;
-        const hasVisualFlame = hasActiveFire || hasTreeCarryFlame;
-        if (hasVisualFlame) {
-          visibleFlameTiles += 1;
-        }
-        const neighbourFire = getNeighbourFireBias(world, cols, rows, x, y);
+        const neighbourFire = getNeighbourFireBias(fireView, cols, rows, x, y);
         const flameVisual = hasActiveFire
           ? Math.max(fire, treeBurnVisual * 0.95)
           : hasTreeCarryFlame
             ? treeBurnVisual * 0.72
             : 0;
+        const scheduledPreheat = !hasActiveFire
+          ? clamp(scheduled * smoothstep(0.03, 0.18, heat) * SCHEDULED_PREHEAT_MAX_SCALE, 0, SCHEDULED_PREHEAT_MAX_SCALE)
+          : 0;
+        const hasVisualFlame = hasActiveFire || hasTreeCarryFlame || scheduledPreheat > 0.01;
+        if (hasVisualFlame) {
+          visibleFlameTiles += 1;
+        }
         const targetFlameBase = hasActiveFire
           ? clamp(flameVisual * 0.6 + heat * 0.28 + treeBurnVisual * 0.16, 0, 1)
           : hasTreeCarryFlame
             ? clamp(flameVisual * 0.8 + heat * 0.24, 0, 1)
-            : 0;
+            : scheduledPreheat;
+        const previousFlame = tileFlameVisual[idx] ?? 0;
         let ignitionAgeSeconds = tileIgnitionAgeSeconds[idx] ?? 0;
-        if (hasActiveFire) {
+        const sustainIgnitionAge =
+          hasActiveFire ||
+          scheduledPreheat > 0.01 ||
+          fire > simFireEps * 0.35 ||
+          previousFlame > 0.04;
+        if (sustainIgnitionAge) {
           ignitionAgeSeconds = Math.min(8, ignitionAgeSeconds + deltaSeconds);
         } else {
-          ignitionAgeSeconds = 0;
+          ignitionAgeSeconds = Math.max(0, ignitionAgeSeconds - deltaSeconds * 6);
         }
         tileIgnitionAgeSeconds[idx] = ignitionAgeSeconds;
         const radiantDrive = clamp(heat * 0.62 + neighbourFire * 0.88, 0, 1.2);
@@ -1969,22 +3067,35 @@ export const createThreeTestFireFx = (
           ? smoothstep(0, rampSecondsEffective, ignitionAgeSeconds)
           : hasTreeCarryFlame
             ? 1
-            : 0;
-        const rampFloor = hasActiveFire ? 0.15 : 1;
+            : scheduledPreheat > 0.01
+              ? smoothstep(0, rampSecondsEffective * 0.7, ignitionAgeSeconds) * scheduledPreheat / SCHEDULED_PREHEAT_MAX_SCALE
+              : 0;
+        const rampFloor = hasActiveFire ? 0.1 : scheduledPreheat > 0.01 ? 0.02 : 1;
         const targetFlame = hasActiveFire
           ? clamp(targetFlameBase * (rampFloor + (1 - rampFloor) * ignitionRamp01), 0, 1)
           : clamp(targetFlameBase, 0, 1);
-        const previousFlame = tileFlameVisual[idx] ?? 0;
         let smoothedFlame = hasVisualFlame
-          ? smoothApproach(previousFlame, targetFlame, 8.2, 4.8, deltaSeconds)
-          : 0;
+          ? smoothApproach(
+              previousFlame,
+              targetFlame,
+              9.4,
+              Math.max(7.6, 1 / Math.max(0.001, FLAME_VISUAL_RELEASE_SECONDS)),
+              deltaSeconds
+            )
+          : smoothApproach(
+              previousFlame,
+              0,
+              0,
+              Math.max(8.2, 1 / Math.max(0.001, FLAME_VISUAL_RELEASE_SECONDS)),
+              deltaSeconds
+            );
         tileFlameVisual[idx] = smoothedFlame;
-        const targetSmoke = hasVisualFlame
+        const targetSmoke = hasActiveFire || hasTreeCarryFlame
           ? clamp(Math.max(targetFlameBase * 0.85, heat * 0.95, treeBurnVisual * 0.8), 0, 1.2)
           : 0;
-        const smoothedSmoke = hasVisualFlame
-          ? smoothApproach(tileSmokeVisual[idx] ?? 0, targetSmoke, 10.0, 0.18, deltaSeconds)
-          : smoothApproach(tileSmokeVisual[idx] ?? 0, 0, 0, 12.0, deltaSeconds);
+        const smoothedSmoke = hasActiveFire || hasTreeCarryFlame
+          ? smoothApproach(tileSmokeVisual[idx] ?? 0, targetSmoke, 10.0, 6.6, deltaSeconds)
+          : smoothApproach(tileSmokeVisual[idx] ?? 0, 0, 0, 9.4, deltaSeconds);
         tileSmokeVisual[idx] = smoothedSmoke;
         const tileCluster = tileClusterId[idx] >= 0 ? fireClusters[tileClusterId[idx]] ?? null : null;
         const tileRole = tileCluster ? (tileClusterRole[idx] as ClusterRole) : 0;
@@ -1995,6 +3106,7 @@ export const createThreeTestFireFx = (
               1
             )
           : 0;
+        const frontDominance = clamp((tileFrontStrength[idx] ?? 0) * (hasActiveFire ? 1 : 0.18), 0, 1.25);
         if (tileCluster) {
           const tileCenterXOcc = ((x + 0.5) / cols - 0.5) * terrainSize.width;
           const tileCenterZOcc = ((y + 0.5) / rows - 0.5) * terrainSize.depth;
@@ -2010,18 +3122,24 @@ export const createThreeTestFireFx = (
           tileSmokeOcclusion01[idx] = clamp(smoothedSmoke * 0.16, 0, 1);
         }
         const hasFlame = smoothedFlame > flamePresenceEps;
-        const hasPlume = hasFlame || (hasVisualFlame && smoothedSmoke > 0.02);
-        const typeId = world.tileTypeId[idx] ?? -1;
+        const hasPlume = hasFlame || smoothedSmoke > 0.02;
+        const sparkVisibleThreshold = Math.max(flamePresenceEps * 1.6, SPARK_VISIBLE_FLAME_MIN);
         const canPreviewAsh = isAshPreviewCandidateType(typeId);
         let targetAshPreview = 0;
-        if (canPreviewAsh) {
+        const ashSuppressed =
+          fire > ASH_PREVIEW_FIRE_MAX ||
+          heat > ASH_PREVIEW_HEAT_MAX ||
+          smoothedFlame > ASH_PREVIEW_FLAME_MAX ||
+          scheduled > 0.05 ||
+          hasTreeCarryFlame;
+        if (canPreviewAsh && !ashSuppressed) {
           const baseFuelRef = ASH_PREVIEW_BASE_FUEL_BY_TYPE_ID[typeId] ?? 0;
           const fallbackFuelRef = Math.max(0.01, baseFuelRef * 0.42);
           const previousFuelRef = tileFuelReference[idx] ?? 0;
           const nextFuelRef = Math.max(previousFuelRef, fuel, fallbackFuelRef);
           tileFuelReference[idx] = nextFuelRef;
           const fuelDepletion = clamp(1 - fuel / Math.max(0.01, nextFuelRef), 0, 1);
-          const heatDrive = clamp((heat - 0.04) * 1.2 + fire * 0.62 + treeBurnVisual * 0.38, 0, 1);
+          const heatDrive = clamp((heat - 0.05) * 0.62 + treeBurnVisual * 0.18, 0, 1);
           targetAshPreview = clamp(Math.max(fuelDepletion * 1.08, heatDrive * 0.82), 0, 1);
         } else {
           tileFuelReference[idx] = 0;
@@ -2074,6 +3192,7 @@ export const createThreeTestFireFx = (
         }
         const intensity = clamp(Math.max(smoothedFlame, heat * 0.5), 0, 1);
         const flameIntensity = clamp(smoothedFlame, 0, 1);
+        const flameSize01 = smoothstep(0.0, 0.3, flameIntensity);
         const normX = (x + 0.5) / cols;
         const normZ = (y + 0.5) / rows;
         const tileCenterX = (normX - 0.5) * terrainSize.width;
@@ -2090,11 +3209,11 @@ export const createThreeTestFireFx = (
         const worldX = anchor ? clamp(anchor.x, minTileX, maxTileX) : tileCenterX;
         const worldZ = anchor ? clamp(anchor.z, minTileZ, maxTileZ) : tileCenterZ;
         const frontSample = hasActiveFire
-          ? getNeighbourFireFront(world, cols, rows, x, y, simFireEps, windX, windZ)
+          ? getNeighbourFireFront(fireView, cols, rows, x, y, simFireEps, windX, windZ)
           : { centerTileX: x + 0.5, centerTileY: y + 0.5, strength: 0 };
         const frontWorldX = (frontSample.centerTileX / cols - 0.5) * terrainSize.width;
         const frontWorldZ = (frontSample.centerTileY / rows - 0.5) * terrainSize.depth;
-        const frontBlend = clamp(wallBlend * frontSample.strength, 0, 0.9);
+        const frontBlend = clamp(wallBlend * frontSample.strength, 0, 0.72);
         const flameSourceX = clamp(worldX * (1 - frontBlend) + frontWorldX * frontBlend, terrainMinX, terrainMaxX);
         const flameSourceZ = clamp(worldZ * (1 - frontBlend) + frontWorldZ * frontBlend, terrainMinZ, terrainMaxZ);
         const elevation = world.tileElevation[idx] ?? 0;
@@ -2142,26 +3261,94 @@ export const createThreeTestFireFx = (
         flameletCount = Math.max(0, Math.min(FIRE_VISUAL_TUNING.tongueSpawnMax, flameletCount));
         flameletCount = Math.min(flameletCount, perTileFlameCap);
         flameletCount = Math.round(flameletCount * (0.45 + ignitionRamp01 * 0.55));
+        const hasObjectAnchorFlame = flameProfile !== null || isStructureTile;
+        const frontRead01 =
+          frontPassActive
+            ? smoothstep(FIRE_FRONT_VISUAL_MIN, 0.56, frontDominance) * smoothstep(FIRE_FRONT_PASS_MIN_WEIGHT, 12, visualFrontWeight)
+            : 0;
+        const preserveLocalDetail =
+          flameProfile !== null
+            ? 0.34
+            : isStructureTile
+              ? 0.28
+              : frontPassActive
+                ? 0.18
+                : hasActiveFire
+                  ? 0.58
+                  : 0.22;
+        const localDetailScale = clamp(
+          preserveLocalDetail +
+            frontRead01 * (flameProfile !== null ? 0.22 : isStructureTile ? 0.16 : 0.08) +
+            (tileRole === 1 ? 0.08 : 0),
+          preserveLocalDetail,
+          hasObjectAnchorFlame ? 0.62 : frontPassActive ? 0.28 : 0.74
+        );
+        const sparkVisual01 = clamp(
+          smoothstep(sparkVisibleThreshold, 0.5, smoothedFlame) *
+            smoothstep(
+              SPARK_VISIBLE_HEAT_MIN,
+              0.4,
+              Math.max(heat, treeBurnVisual * 0.72 + smoothedFlame * 0.42 + frontRead01 * 0.16)
+            ),
+          0,
+          1
+        );
+        const sparkWindFactor = clamp(0.42 + windStrength * 1.18, 0.42, 1.7);
+        const sparkFrontFactor = frontPassActive
+          ? clamp(0.22 + frontRead01 * 0.9 + (tileRole === 1 ? 0.12 : 0), 0.22, 1.18)
+          : 0.58;
+        const sparkActive =
+          hasFlame &&
+          sparkVisual01 > 0.035 &&
+          (hasActiveFire || hasTreeCarryFlame || treeBurnVisual > TREE_BURN_FLAME_VISUAL_MIN);
+        flameletCount = Math.round(flameletCount * localDetailScale);
+        if (frontPassActive && tileRole === 2 && frontDominance < FIRE_FRONT_VISUAL_MIN && flameProfile === null) {
+          flameletCount = 0;
+        }
+        const sustainInteriorFlame =
+          hasActiveFire &&
+          flameProfile === null &&
+          fire > 0.16 &&
+          heat > 0.2 &&
+          smoothedFlame > Math.max(flamePresenceEps * 1.1, 0.08);
+        if (sustainInteriorFlame && flameletCount <= 0) {
+          flameletCount = 1;
+        }
         const heroCount =
           flameletCount <= 0
             ? 0
             : Math.max(
                 hasActiveFire ? (ignitionRamp01 >= 0.45 ? 1 : 0) : 1,
-                Math.min(4, Math.round(flameletCount * (0.24 + ignitionRamp01 * 0.2) + (1 - crownToTrunk) * 0.7))
+                Math.min(
+                  tileRole === 2 ? 1 : tileRole === 1 ? 2 : 4,
+                  Math.round(flameletCount * (0.22 + ignitionRamp01 * 0.16) + (1 - crownToTrunk) * 0.55)
+                )
               );
         const windStrengthBoost = 0.35 + windStrength * windStrength * 0.9;
         const crownRadius = flameProfile ? flameProfile.crownRadius * (0.9 + Math.min(0.5, flameProfile.treeCount * 0.08)) : tileSpan * FLAME_CELL_LATERAL_LIMIT;
         const trunkRadius = flameProfile ? Math.max(tileSpan * 0.1, crownRadius * 0.22) : tileSpan * 0.16;
-        const sourceRadius = crownRadius * (1 - crownToTrunk) + trunkRadius * crownToTrunk;
+        const sourceRadius =
+          (crownRadius * (1 - crownToTrunk) + trunkRadius * crownToTrunk) *
+          (tileRole === 2 ? 1.08 : tileRole === 1 ? 1.04 : 1);
         const lateralLimit = Math.max(
-          tileSpan * 0.1,
-          sourceRadius * (1.1 - crownToTrunk * 0.55) + sampleFootprint * (0.16 + wallBlend * frontSample.strength * 0.95)
+          tileSpan * 0.14,
+          sourceRadius * (1.26 - crownToTrunk * 0.46) + sampleFootprint * (0.22 + wallBlend * frontSample.strength * 1.05)
         );
         const crownSourceY = flameProfile ? flameProfile.y + flameProfile.crownHeight * 0.72 : baseY + tileSpan * 0.45;
         const trunkSourceY = flameProfile
           ? flameProfile.y + flameProfile.trunkHeight * (0.95 + (0.2 - 0.95) * trunkDescent)
           : baseY + tileSpan * (0.28 + (0.12 - 0.28) * trunkDescent);
         const sourceYBase = crownSourceY * (1 - crownToTrunk) + trunkSourceY * crownToTrunk;
+        const roofSourceY = baseY + tileSpan * (typeId === TILE_TYPE_IDS.base ? 0.42 : 0.34);
+        const objectSourceY = flameProfile !== null ? crownSourceY : roofSourceY;
+        const objectSourceX = flameProfile !== null ? flameProfile.x : worldX;
+        const objectSourceZ = flameProfile !== null ? flameProfile.z : worldZ;
+        const objectFlameDrive = clamp(
+          smoothedFlame * (hasActiveFire ? clamp(0.22 + ignitionRamp01 * 0.78, 0.22, 1) : 1),
+          0,
+          1
+        );
+        const objectFlameScale01 = smoothstep(0.04, 0.32, objectFlameDrive);
         const frontDirXRaw = frontWorldX - worldX;
         const frontDirZRaw = frontWorldZ - worldZ;
         const frontDirLen = Math.hypot(frontDirXRaw, frontDirZRaw);
@@ -2185,7 +3372,7 @@ export const createThreeTestFireFx = (
           : tileRole === 1
             ? Math.min(emitterLobeCount, CLUSTER_EDGE_KERNEL_CAP)
             : emitterLobeCount;
-        const emitterBaseRadius = sourceRadius * (0.2 + flameIntensity * 0.18 + frontSample.strength * 0.22);
+        const emitterBaseRadius = sourceRadius * (0.28 + flameIntensity * 0.2 + frontSample.strength * 0.24);
         const kernelDriftPhase = flameTimeSeconds * (0.22 + tileSeed * 0.31) + tileSeed * TAU;
         let jetClusterX = clamp(
           flameSourceX +
@@ -2202,9 +3389,31 @@ export const createThreeTestFireFx = (
           terrainMaxZ
         );
         if (tileCluster) {
-          const clusterCenterBlend = clusterBlend * (tileRole === 2 ? 0.58 : 0.24);
-          jetClusterX = clamp(jetClusterX * (1 - clusterCenterBlend) + tileCluster.centroidX * clusterCenterBlend, terrainMinX, terrainMaxX);
-          jetClusterZ = clamp(jetClusterZ * (1 - clusterCenterBlend) + tileCluster.centroidZ * clusterCenterBlend, terrainMinZ, terrainMaxZ);
+          const clusterOffsetX = flameSourceX - tileCluster.centroidX;
+          const clusterOffsetZ = flameSourceZ - tileCluster.centroidZ;
+          const spanOffset = clusterOffsetX * tileCluster.spanAxisX + clusterOffsetZ * tileCluster.spanAxisZ;
+          const depthOffset = clusterOffsetX * tileCluster.depthAxisX + clusterOffsetZ * tileCluster.depthAxisZ;
+          const spanPreserve = tileRole === 2 ? 1.08 : 0.94;
+          const depthCompress = tileRole === 2 ? 0.18 : 0.4;
+          const bandCenterX =
+            tileCluster.centroidX +
+            tileCluster.spanAxisX * spanOffset * spanPreserve +
+            tileCluster.depthAxisX * depthOffset * depthCompress;
+          const bandCenterZ =
+            tileCluster.centroidZ +
+            tileCluster.spanAxisZ * spanOffset * spanPreserve +
+            tileCluster.depthAxisZ * depthOffset * depthCompress;
+          const clusterCenterBlend = clusterBlend * (tileRole === 2 ? 0.24 : 0.12);
+          jetClusterX = clamp(
+            jetClusterX * (1 - clusterCenterBlend) + bandCenterX * clusterCenterBlend,
+            terrainMinX,
+            terrainMaxX
+          );
+          jetClusterZ = clamp(
+            jetClusterZ * (1 - clusterCenterBlend) + bandCenterZ * clusterCenterBlend,
+            terrainMinZ,
+            terrainMaxZ
+          );
         }
         let tileTipSparkEmitted = 0;
         let tileCrossSlices = 0;
@@ -2242,8 +3451,8 @@ export const createThreeTestFireFx = (
           );
           const riseT = isHero ? Math.pow(phase, 1.35) : Math.pow(phase, 2.0);
           const baseSpread =
-            sourceRadius * (isHero ? 0.18 + flameIntensity * 0.3 : 0.26 + flameIntensity * 0.46) +
-            sampleFootprint * (isHero ? 0.06 : 0.13);
+            sourceRadius * (isHero ? 0.24 + flameIntensity * 0.34 : 0.34 + flameIntensity * 0.5) +
+            sampleFootprint * (isHero ? 0.1 : 0.18);
           const spawnX = emitterX + (s1 - 0.5) * baseSpread;
           const spawnZ = emitterZ + (s2 - 0.5) * baseSpread;
           const heroLaneT = isHero && heroCount > 1 ? fract((flamelet + s3 * 0.7) / heroCount + emitterSeed * 0.19) : 0.5;
@@ -2275,9 +3484,15 @@ export const createThreeTestFireFx = (
           const windOffsetZ = windZ * windScale * (0.22 + riseT * 0.52);
           const riseHeight =
             (sampleFootprint * (0.14 + flameIntensity * 0.34 + heat * 0.2) + sourceRadius * 0.42) * tierScale;
-          const flameRise = riseT * riseHeight * (isHero ? 0.5 : 0.28) * flameHeightBoost;
+          const flameRise =
+            riseT *
+            riseHeight *
+            (isHero ? 0.4 : 0.22) *
+            flameHeightBoost *
+            FLAME_RENDER_SIZE_SCALE *
+            flameSize01;
           const heightPulse = isHero ? 0.92 + 0.08 * (1 - phase * phase) : 0.9 + 0.1 * (1 - phase);
-          const flameHeight = Math.max(
+          const flameHeightBase = Math.max(
             tileSpan * (isHero ? 0.18 : 0.1),
             (sampleFootprint * (0.2 + heat * 0.25 + flameIntensity * 0.2) + sourceRadius * 0.32) *
               tierScale *
@@ -2285,14 +3500,24 @@ export const createThreeTestFireFx = (
               flameHeightBoost *
               roleHeightScale
           );
-          const flameWidth = Math.max(
-            tileSpan * (isHero ? 0.13 : 0.08),
-            flameHeight * (isHero ? 0.56 + 0.15 * s1 : 0.42 + 0.16 * s1) * flameWidthBoost * roleWidthScale
+          const flameWidthBase = Math.max(
+            tileSpan * (isHero ? 0.18 : 0.11),
+            flameHeightBase * (isHero ? 0.86 + 0.18 * s1 : 0.66 + 0.18 * s1) * flameWidthBoost * roleWidthScale
           );
+          const flameHeight =
+            Math.max(
+              tileSpan * (isHero ? LOCAL_FLAME_MIN_HEIGHT_TILES * 1.12 : LOCAL_FLAME_MIN_HEIGHT_TILES),
+              flameHeightBase * FLAME_RENDER_SIZE_SCALE
+            ) * flameSize01;
+          const flameWidth =
+            Math.max(
+              tileSpan * (isHero ? LOCAL_FLAME_MIN_WIDTH_TILES * 1.1 : LOCAL_FLAME_MIN_WIDTH_TILES),
+              flameWidthBase * FLAME_RENDER_SIZE_SCALE
+            ) * flameSize01;
           const flameY = sourceYBase + flameRise;
           let lateralX = spawnX + heroLaneX + helixX + bendX + curlX + lashX + windOffsetX;
           let lateralZ = spawnZ + heroLaneZ + helixZ + bendZ + curlZ + lashZ + windOffsetZ;
-          const softLimit = lateralLimit * (isHero ? 0.48 : 0.78) * (0.85 + s3 * 0.2);
+          const softLimit = lateralLimit * (isHero ? 0.7 : 0.92) * (0.88 + s3 * 0.22);
           if (Math.abs(lateralX) > softLimit) {
             lateralX = Math.sign(lateralX) * (softLimit + (Math.abs(lateralX) - softLimit) * 0.1);
           }
@@ -2382,12 +3607,16 @@ export const createThreeTestFireFx = (
             tileCrossSlices += 1;
           }
           fireCount += 1;
-          if (isHero && useTipStreaks) {
+          if (isHero && useTipStreaks && sparkActive) {
             const flameScale = clamp(flameHeight / Math.max(tileSpan * 0.55, 0.001), 0.7, 2.8);
             const streakCount = clamp(
-              Math.round(3 + intensity * 4 + (flameScale - 1) * 3 + Math.max(0, flameIntensity - 0.35) * 2),
-              3,
-              11
+              Math.round(
+                (1 + intensity * 2.2 + windStrength * 1.7 + Math.max(0, flameScale - 1) * 1.3) *
+                  (0.45 + sparkVisual01 * 0.9) *
+                  (0.72 + sparkFrontFactor * 0.18)
+              ),
+              1,
+              6
             );
             heroTipSparkAttempts += streakCount;
             for (let streak = 0; streak < streakCount; streak += 1) {
@@ -2398,29 +3627,51 @@ export const createThreeTestFireFx = (
               const streakSeed = fract(s1 * 0.43 + s2 * 0.71 + streak * 0.37);
               const tipPulse = 0.6 + 0.4 * Math.sin(sparkTimeSeconds * (2.4 + streakSeed * 0.9) + streakSeed * TAU);
               const tipAge = fract(sparkTimeSeconds * (0.92 + streakSeed * 0.45) + streakSeed * 4.7 + streak * 0.23);
-              const tipFade = smoothstep(0.02, 0.2, tipAge) * (1 - smoothstep(0.66, 1.0, tipAge));
+              const tipFade =
+                smoothstep(0.02, 0.18, tipAge) *
+                (1 - smoothstep(0.58, 1.0, tipAge)) *
+                (0.72 + sparkVisual01 * 0.5);
               const tipLift = flameHeight * (0.56 + tipAge * 1.28 + streakSeed * 0.2 + streak * 0.015);
               const tipDrift =
-                sampleFootprint * (0.06 + windStrength * 0.2) * (0.38 + streakSeed * 0.36 + tipAge * 0.82);
+                sampleFootprint *
+                (0.1 + windStrength * 0.34) *
+                (0.48 + streakSeed * 0.26 + tipAge * 1.12) *
+                sparkFrontFactor;
               const laneSpin = sparkTimeSeconds * (0.42 + streakSeed * 0.32) + tipAge * (1.35 + intensity * 0.95);
               const laneAngle = streakSeed * TAU + s2 * TAU * 0.5 + streak * 0.57 + laneSpin;
-              const laneSpread = sampleFootprint * (0.08 + intensity * 0.16) * (0.58 + flameScale * 0.34);
-              const laneRadius = laneSpread * (0.32 + 0.92 * tipAge);
+              const laneSpread =
+                sampleFootprint *
+                (0.03 + intensity * 0.08 + (1 - clamp(windStrength, 0, 1)) * 0.05) *
+                (0.46 + flameScale * 0.2);
+              const laneRadius = laneSpread * (0.12 + 0.56 * tipAge);
               const laneX = Math.cos(laneAngle) * laneRadius;
               const laneZ = Math.sin(laneAngle) * laneRadius;
               const jitterPhase = sparkTimeSeconds * (2.8 + streakSeed * 1.7) + streak * 1.9 + s3 * TAU + tipAge * 7.6;
-              const jitterAmp = sampleFootprint * (0.018 + 0.052 * tipAge + 0.02 * flameScale);
+              const jitterAmp = sampleFootprint * (0.008 + 0.022 * tipAge + 0.01 * flameScale);
               const jitterX = Math.sin(jitterPhase) * jitterAmp + Math.cos(jitterPhase * 0.63 + laneAngle) * jitterAmp * 0.55;
               const jitterZ =
                 Math.cos(jitterPhase * 1.13) * jitterAmp + Math.sin(jitterPhase * 0.71 + laneAngle) * jitterAmp * 0.48;
-              const sideDrift = (tipAge - 0.5) * sampleFootprint * (0.18 + intensity * 0.28 + windStrength * 0.24);
+              const sideDrift =
+                (tipAge - 0.5) * sampleFootprint * (0.05 + intensity * 0.12 + (1 - clamp(windStrength, 0, 1)) * 0.08);
+              const tipDownwind =
+                sampleFootprint * (0.08 + windStrength * 0.34 + tipAge * (0.16 + intensity * 0.12)) * sparkWindFactor;
+              const tipCrossScatter =
+                sampleFootprint * (0.014 + (1 - clamp(windStrength, 0, 1)) * 0.028 + streakSeed * 0.016);
               const tipX = clamp(
-                flameWorldX + laneX + jitterX + windX * tipDrift + crossWindX * ((streakSeed - 0.5) * tipDrift * 0.7 + sideDrift),
+                flameWorldX +
+                  laneX * 0.45 +
+                  jitterX * 0.6 +
+                  windX * (tipDrift + tipDownwind) +
+                  crossWindX * ((streakSeed - 0.5) * tipCrossScatter + sideDrift * 0.42),
                 terrainMinX,
                 terrainMaxX
               );
               const tipZ = clamp(
-                flameWorldZ + laneZ + jitterZ + windZ * tipDrift + crossWindZ * ((s3 - 0.5) * tipDrift * 0.7 + sideDrift * 0.85),
+                flameWorldZ +
+                  laneZ * 0.45 +
+                  jitterZ * 0.6 +
+                  windZ * (tipDrift + tipDownwind) +
+                  crossWindZ * ((s3 - 0.5) * tipCrossScatter + sideDrift * 0.38),
                 terrainMinZ,
                 terrainMaxZ
               );
@@ -2440,19 +3691,25 @@ export const createThreeTestFireFx = (
               );
               const streakWidth = Math.max(
                 sparkDebug ? tileSpan * 0.16 : tileSpan * 0.055,
-                sparkFootprint * (0.055 + intensity * 0.08 + streakSeed * 0.03),
+                sparkFootprint * (0.042 + intensity * 0.06 + streakSeed * 0.022),
                 minPixelWidth
               );
               const streakHeight = Math.max(
                 sparkDebug ? tileSpan * 0.42 : tileSpan * 0.2,
-                sparkFootprint * (0.38 + intensity * 0.78 + tipPulse * 0.28 + streakSeed * 0.14),
-                flameHeight * (0.24 + tipPulse * 0.24 + streakSeed * 0.1),
+                sparkFootprint * (0.44 + intensity * 0.82 + tipPulse * 0.24 + windStrength * 0.22 + streakSeed * 0.1),
+                flameHeight * (0.28 + tipPulse * 0.22 + windStrength * 0.16 + streakSeed * 0.08),
                 minPixelHeight
               );
-              sparkStreakBillboard.position.set(tipX, tipY, tipZ);
-              sparkStreakBillboard.quaternion.copy(camera.quaternion);
-              sparkStreakBillboard.scale.set(streakWidth, streakHeight, streakWidth);
-              sparkStreakBillboard.updateMatrix();
+              const streakDirX =
+                windX * (0.7 + tipAge * 1.55 + windStrength * 1.2) +
+                jetTangentX * (0.05 + tipAge * 0.07) +
+                crossWindX * ((streakSeed - 0.5) * 0.14);
+              const streakDirY = 0.9 + tipAge * 1.45 + intensity * 0.32;
+              const streakDirZ =
+                windZ * (0.7 + tipAge * 1.55 + windStrength * 1.2) +
+                jetTangentZ * (0.05 + tipAge * 0.07) +
+                crossWindZ * ((s3 - 0.5) * 0.14);
+              setSparkStreakTransform(tipX, tipY, tipZ, streakWidth, streakHeight, streakDirX, streakDirY, streakDirZ);
               sparkStreakMesh.setMatrixAt(sparkStreakCount, sparkStreakBillboard.matrix);
               if (sparkDebug) {
                 const debugPhase = streak % 3;
@@ -2487,18 +3744,15 @@ export const createThreeTestFireFx = (
                   dotG,
                   dotB
                 );
-                pushSparkPoint(tipX, primaryDotY - streakHeight * 0.16, tipZ, dotR * 0.58, dotG * 0.58, dotB * 0.58);
-                if (flameScale > 1.45) {
-                  const extraDotAge = fract(tipAge + 0.31 + streakSeed * 0.2);
-                  const extraDotFade = smoothstep(0.02, 0.18, extraDotAge) * (1 - smoothstep(0.62, 1.0, extraDotAge));
-                  const extraDotY = tipY + streakHeight * (0.06 + extraDotAge * 0.44);
+                if (sparkVisual01 > 0.58 && streakSeed > 0.42) {
+                  const trailFade = smoothstep(0.06, 0.3, tipAge) * (0.45 + sparkVisual01 * 0.3);
                   pushSparkPoint(
-                    tipX + laneX * 0.12 + jitterX * 0.8,
-                    extraDotY,
-                    tipZ + laneZ * 0.12 + jitterZ * 0.8,
-                    dotR * 0.72 * extraDotFade,
-                    dotG * 0.72 * extraDotFade,
-                    dotB * 0.72 * extraDotFade
+                    tipX + windX * streakWidth * 0.42,
+                    primaryDotY - streakHeight * 0.08,
+                    tipZ + windZ * streakWidth * 0.42,
+                    dotR * 0.46 * trailFade,
+                    dotG * 0.46 * trailFade,
+                    dotB * 0.46 * trailFade
                   );
                 }
               }
@@ -2509,131 +3763,258 @@ export const createThreeTestFireFx = (
           }
         }
         }
-        if (useTipStreaks && hasVisualFlame && tileTipSparkEmitted === 0) {
+        if (hasObjectAnchorFlame && hasFlame && objectFlameDrive > 0.08) {
+          const objectFlameCount = Math.min(
+            flameProfile !== null ? 2 : 1,
+            Math.max(1, Math.round((0.5 + objectFlameDrive * 0.75) * sliceComplexityScale))
+          );
+          const objectRadius = flameProfile !== null
+            ? Math.max(tileSpan * 0.08, crownRadius * 0.22)
+            : tileSpan * (typeId === TILE_TYPE_IDS.base ? 0.18 : 0.14);
+          const objectRole = 0;
+          for (let objectFlame = 0; objectFlame < objectFlameCount && fireCount < FIRE_MAX_INSTANCES; objectFlame += 1) {
+            const o1 = hash1(idx * 0.613 + objectFlame * 7.17 + 3.9);
+            const o2 = hash1(idx * 1.231 + objectFlame * 5.71 + 13.3);
+            const o3 = hash1(idx * 0.887 + objectFlame * 9.41 + 29.7);
+            const objectPhase = flameTimeSeconds * (0.72 + o2 * 0.8) + o3 * TAU;
+            const objectPulse = 0.8 + 0.2 * Math.sin(objectPhase);
+            const objectHeightBase =
+              tileSpan *
+              (flameProfile !== null ? 0.18 + objectFlameDrive * 0.22 : 0.13 + objectFlameDrive * 0.18) *
+              (0.82 + o2 * 0.22) *
+              flameHeightBoost *
+              objectPulse;
+            const objectWidthBase = Math.max(
+              objectRadius * 0.44,
+              objectHeightBase * (flameProfile !== null ? 0.4 + o1 * 0.12 : 0.5 + o1 * 0.12) * flameWidthBoost
+            );
+            const objectHeight =
+              Math.max(
+                tileSpan *
+                  (flameProfile !== null ? OBJECT_FLAME_MIN_HEIGHT_TILES * 1.08 : OBJECT_FLAME_MIN_HEIGHT_TILES),
+                objectHeightBase * FLAME_RENDER_SIZE_SCALE
+              ) * objectFlameScale01;
+            const objectWidth =
+              Math.max(
+                tileSpan *
+                  (flameProfile !== null ? OBJECT_FLAME_MIN_WIDTH_TILES * 1.08 : OBJECT_FLAME_MIN_WIDTH_TILES),
+                objectWidthBase * FLAME_RENDER_SIZE_SCALE
+              ) * objectFlameScale01;
+            const objectOffsetAngle = o1 * TAU + Math.sin(objectPhase * 0.46) * 0.4;
+            const objectOffsetRadius = objectRadius * (flameProfile !== null ? 0.52 : 0.28) * Math.sqrt(o2);
+            const objectWorldX = clamp(
+              objectSourceX + Math.cos(objectOffsetAngle) * objectOffsetRadius + windX * objectRadius * 0.08,
+              terrainMinX,
+              terrainMaxX
+            );
+            const objectWorldZ = clamp(
+              objectSourceZ + Math.sin(objectOffsetAngle) * objectOffsetRadius + windZ * objectRadius * 0.08,
+              terrainMinZ,
+              terrainMaxZ
+            );
+            const objectYaw = Math.atan2(cameraWorldPos.x - objectWorldX, cameraWorldPos.z - objectWorldZ);
+            const objectSliceYaw = objectYaw + Math.sin(objectPhase * 0.7 + o1 * TAU) * 0.08;
+            fireBillboard.position.set(objectWorldX, objectSourceY + objectHeight * 0.42, objectWorldZ);
+            fireBillboard.rotation.set(0, objectSliceYaw, 0);
+            fireBillboard.scale.set(
+              objectWidth * FLAME_BILLBOARD_OVERSCAN_X,
+              objectHeight * FLAME_BILLBOARD_OVERSCAN_Y,
+              objectWidth * FLAME_BILLBOARD_OVERSCAN_X
+            );
+            fireBillboard.updateMatrix();
+            fireMesh.setMatrixAt(fireCount, fireBillboard.matrix);
+            fireIntensityAttr.setX(
+              fireCount,
+              clamp(
+                (flameProfile !== null ? 0.22 : 0.18) +
+                  objectFlameDrive * 0.52 +
+                  treeBurnVisual * 0.12 +
+                  heat * 0.08,
+                0,
+                1
+              )
+            );
+            fireSeedAttr.setX(fireCount, fract(tileSeed + o3 + objectFlame * 0.23));
+            fireBaseCurveAttr.setX(fireCount, flameProfile !== null ? 0.38 : 0.12);
+            fireClusterBlendAttr.setX(fireCount, Math.min(clusterBlend, 0.16));
+            fireSmokeOccAttr.setX(fireCount, tileSmokeOcclusion01[idx] ?? 0);
+            fireRoleAttr.setX(fireCount, objectRole);
+            fireBillboard.rotation.set(0, objectSliceYaw + Math.PI * 0.5, 0);
+            fireBillboard.scale.set(
+              objectWidth * 0.62 * FLAME_CORE_BILLBOARD_OVERSCAN_X,
+              objectHeight * 0.58 * FLAME_CORE_BILLBOARD_OVERSCAN_Y,
+              objectWidth * 0.62 * FLAME_CORE_BILLBOARD_OVERSCAN_X
+            );
+            fireBillboard.updateMatrix();
+            fireCoreMesh.setMatrixAt(fireCount, fireBillboard.matrix);
+            if (topView01 > 0.32 && fireCrossCount < FIRE_CROSS_MAX_INSTANCES && o3 > 0.28 && objectFlameDrive > 0.32) {
+              fireCrossBillboard.position.set(objectWorldX, objectSourceY + objectHeight * 0.42, objectWorldZ);
+              fireCrossBillboard.rotation.set(0, objectSliceYaw + Math.PI * 0.26, 0);
+              fireCrossBillboard.scale.set(
+                objectWidth * 0.84 * FLAME_BILLBOARD_OVERSCAN_X,
+                objectHeight * 0.88 * FLAME_BILLBOARD_OVERSCAN_Y,
+                objectWidth * 0.84 * FLAME_BILLBOARD_OVERSCAN_X
+              );
+              fireCrossBillboard.updateMatrix();
+              fireCrossMesh.setMatrixAt(fireCrossCount, fireCrossBillboard.matrix);
+              fireCrossIntensityAttr.setX(fireCrossCount, clamp(0.52 + flameIntensity * 0.34 + heat * 0.1, 0, 1));
+              fireCrossSeedAttr.setX(fireCrossCount, fract(tileSeed + o2 + objectFlame * 0.31));
+              fireCrossBaseCurveAttr.setX(fireCrossCount, flameProfile !== null ? 0.34 : 0.1);
+              fireCrossClusterBlendAttr.setX(fireCrossCount, Math.min(clusterBlend, 0.16));
+              fireCrossSmokeOccAttr.setX(fireCrossCount, tileSmokeOcclusion01[idx] ?? 0);
+              fireCrossRoleAttr.setX(fireCrossCount, objectRole);
+              fireCrossCount += 1;
+            }
+            fireCount += 1;
+          }
+        }
+        if (useTipStreaks && sparkActive && tileTipSparkEmitted === 0 && sparkVisual01 > 0.26) {
           heroTipSparkAttempts += 1;
           if (sparkStreakCount < sparkStreakCap) {
             const fallbackSeed = hash1(idx * 0.777 + 71.3);
             const fallbackPulse =
               0.68 + 0.32 * Math.sin(sparkTimeSeconds * (2.1 + fallbackSeed * 0.9) + fallbackSeed * TAU);
-            const fallbackAge = fract(sparkTimeSeconds * (0.85 + fallbackSeed * 0.35) + fallbackSeed * 2.6);
-            const fallbackFade = smoothstep(0.02, 0.2, fallbackAge) * (1 - smoothstep(0.68, 1.0, fallbackAge));
-            const fallbackYBase = sourceYBase + sampleFootprint * (0.62 + flameIntensity * 0.85 + fallbackAge * 0.75);
-            const fallbackLaneSpin = sparkTimeSeconds * (0.38 + fallbackSeed * 0.28) + fallbackAge * 1.2;
-            const fallbackLaneAngle = fallbackSeed * TAU + hash1(idx * 0.183 + 11.2) * TAU * 0.35 + fallbackLaneSpin;
-            const fallbackLaneRadius = sampleFootprint * (0.06 + flameIntensity * 0.11) * (0.28 + fallbackAge * 0.88);
-            const fallbackLaneX = Math.cos(fallbackLaneAngle) * fallbackLaneRadius;
-            const fallbackLaneZ = Math.sin(fallbackLaneAngle) * fallbackLaneRadius;
-            const fallbackJitterPhase = sparkTimeSeconds * (2.9 + fallbackSeed * 1.9) + fallbackSeed * 6.1 + fallbackAge * 6.8;
-            const fallbackJitterAmp = sampleFootprint * (0.016 + fallbackAge * 0.04);
-            const fallbackJitterX =
-              Math.sin(fallbackJitterPhase) * fallbackJitterAmp + Math.cos(fallbackJitterPhase * 0.66) * fallbackJitterAmp * 0.52;
-            const fallbackJitterZ =
-              Math.cos(fallbackJitterPhase * 1.2) * fallbackJitterAmp + Math.sin(fallbackJitterPhase * 0.8) * fallbackJitterAmp * 0.46;
-            const fallbackSideDrift = (fallbackAge - 0.5) * sampleFootprint * (0.12 + flameIntensity * 0.24);
-            const fallbackX = clamp(
-              jetClusterX +
-                fallbackLaneX +
-                fallbackJitterX +
-                crossWindX * ((fallbackSeed - 0.5) * sampleFootprint * 0.16 + fallbackSideDrift),
-              terrainMinX,
-              terrainMaxX
+            const fallbackGate = clamp(
+              fallbackPulse * (sparkVisual01 * 0.82 + windStrength * 0.18 + sparkFrontFactor * 0.12),
+              0,
+              1
             );
-            const fallbackZ = clamp(
-              jetClusterZ +
-                fallbackLaneZ +
-                fallbackJitterZ +
-                crossWindZ * ((fallbackSeed - 0.5) * sampleFootprint * 0.16 + fallbackSideDrift * 0.85),
-              terrainMinZ,
-              terrainMaxZ
-            );
-            const fallbackY = fallbackYBase + Math.sin(fallbackJitterPhase * 0.38) * sampleFootprint * 0.02;
-            const fallbackDistance = sparkSizeScratch.set(fallbackX, fallbackY, fallbackZ).distanceTo(cameraWorldPos);
-            const fallbackPixelWidth = worldUnitsForPixels(
-              camera,
-              fallbackDistance,
-              sparkDebug ? 7 : 1.8,
-              viewportHeightPx
-            );
-            const fallbackPixelHeight = worldUnitsForPixels(
-              camera,
-              fallbackDistance,
-              sparkDebug ? 15 : 5,
-              viewportHeightPx
-            );
-            const fallbackWidth = Math.max(
-              sparkDebug ? tileSpan * 0.14 : tileSpan * 0.05,
-              sparkFootprint * (0.05 + flameIntensity * 0.08),
-              fallbackPixelWidth
-            );
-            const fallbackHeight = Math.max(
-              sparkDebug ? tileSpan * 0.35 : tileSpan * 0.18,
-              sparkFootprint * (0.3 + flameIntensity * 0.6 + fallbackPulse * 0.2),
-              fallbackPixelHeight
-            );
-            sparkStreakBillboard.position.set(fallbackX, fallbackY, fallbackZ);
-            sparkStreakBillboard.quaternion.copy(camera.quaternion);
-            sparkStreakBillboard.scale.set(fallbackWidth, fallbackHeight, fallbackWidth);
-            sparkStreakBillboard.updateMatrix();
-            sparkStreakMesh.setMatrixAt(sparkStreakCount, sparkStreakBillboard.matrix);
-            if (sparkDebug) {
-              sparkStreakMesh.instanceColor?.setXYZ(sparkStreakCount, 3.0, 1.3, 0.14);
-              pushSparkPoint(
+            if (fallbackGate > 0.48) {
+              const fallbackAge = fract(sparkTimeSeconds * (0.85 + fallbackSeed * 0.35) + fallbackSeed * 2.6);
+              const fallbackFade =
+                smoothstep(0.02, 0.18, fallbackAge) *
+                (1 - smoothstep(0.58, 1.0, fallbackAge)) *
+                (0.72 + sparkVisual01 * 0.45);
+              const fallbackYBase = sourceYBase + sampleFootprint * (0.62 + flameIntensity * 0.85 + fallbackAge * 0.75);
+              const fallbackLaneSpin = sparkTimeSeconds * (0.38 + fallbackSeed * 0.28) + fallbackAge * 1.2;
+              const fallbackLaneAngle = fallbackSeed * TAU + hash1(idx * 0.183 + 11.2) * TAU * 0.35 + fallbackLaneSpin;
+              const fallbackLaneRadius =
+                sampleFootprint *
+                (0.03 + flameIntensity * 0.07 + (1 - clamp(windStrength, 0, 1)) * 0.03) *
+                (0.16 + fallbackAge * 0.52);
+              const fallbackLaneX = Math.cos(fallbackLaneAngle) * fallbackLaneRadius;
+              const fallbackLaneZ = Math.sin(fallbackLaneAngle) * fallbackLaneRadius;
+              const fallbackJitterPhase = sparkTimeSeconds * (2.9 + fallbackSeed * 1.9) + fallbackSeed * 6.1 + fallbackAge * 6.8;
+              const fallbackJitterAmp = sampleFootprint * (0.008 + fallbackAge * 0.02);
+              const fallbackJitterX =
+                Math.sin(fallbackJitterPhase) * fallbackJitterAmp + Math.cos(fallbackJitterPhase * 0.66) * fallbackJitterAmp * 0.52;
+              const fallbackJitterZ =
+                Math.cos(fallbackJitterPhase * 1.2) * fallbackJitterAmp + Math.sin(fallbackJitterPhase * 0.8) * fallbackJitterAmp * 0.46;
+              const fallbackSideDrift =
+                (fallbackAge - 0.5) * sampleFootprint * (0.04 + flameIntensity * 0.12 + (1 - clamp(windStrength, 0, 1)) * 0.06);
+              const fallbackDownwind = sampleFootprint * (0.1 + windStrength * 0.3 + fallbackAge * 0.22) * sparkWindFactor;
+              const fallbackX = clamp(
+                jetClusterX +
+                  fallbackLaneX * 0.42 +
+                  fallbackJitterX * 0.55 +
+                  windX * fallbackDownwind +
+                  crossWindX * ((fallbackSeed - 0.5) * sampleFootprint * 0.08 + fallbackSideDrift),
+                terrainMinX,
+                terrainMaxX
+              );
+              const fallbackZ = clamp(
+                jetClusterZ +
+                  fallbackLaneZ * 0.42 +
+                  fallbackJitterZ * 0.55 +
+                  windZ * fallbackDownwind +
+                  crossWindZ * ((fallbackSeed - 0.5) * sampleFootprint * 0.08 + fallbackSideDrift * 0.85),
+                terrainMinZ,
+                terrainMaxZ
+              );
+              const fallbackY = fallbackYBase + Math.sin(fallbackJitterPhase * 0.38) * sampleFootprint * 0.02;
+              const fallbackDistance = sparkSizeScratch.set(fallbackX, fallbackY, fallbackZ).distanceTo(cameraWorldPos);
+              const fallbackPixelWidth = worldUnitsForPixels(
+                camera,
+                fallbackDistance,
+                sparkDebug ? 7 : 1.8,
+                viewportHeightPx
+              );
+              const fallbackPixelHeight = worldUnitsForPixels(
+                camera,
+                fallbackDistance,
+                sparkDebug ? 15 : 5,
+                viewportHeightPx
+              );
+              const fallbackWidth = Math.max(
+                sparkDebug ? tileSpan * 0.14 : tileSpan * 0.05,
+                sparkFootprint * (0.04 + flameIntensity * 0.05),
+                fallbackPixelWidth
+              );
+              const fallbackHeight = Math.max(
+                sparkDebug ? tileSpan * 0.35 : tileSpan * 0.18,
+                sparkFootprint * (0.34 + flameIntensity * 0.5 + fallbackPulse * 0.18 + windStrength * 0.18),
+                fallbackPixelHeight
+              );
+              const fallbackDirX =
+                windX * (0.78 + fallbackAge * 1.6 + windStrength * 1.15) + crossWindX * ((fallbackSeed - 0.5) * 0.12);
+              const fallbackDirY = 0.92 + fallbackAge * 1.2 + flameIntensity * 0.24;
+              const fallbackDirZ =
+                windZ * (0.78 + fallbackAge * 1.6 + windStrength * 1.15) + crossWindZ * ((fallbackSeed - 0.5) * 0.12);
+              setSparkStreakTransform(
                 fallbackX,
-                fallbackY + fallbackHeight * (0.1 + fallbackAge * 0.16),
+                fallbackY,
                 fallbackZ,
-                3.0 * fallbackFade,
-                1.3 * fallbackFade,
-                0.14 * fallbackFade
+                fallbackWidth,
+                fallbackHeight,
+                fallbackDirX,
+                fallbackDirY,
+                fallbackDirZ
               );
-            } else {
-              const fallbackBright = clamp(
-                (1.05 + flameIntensity * 1.15 + fallbackPulse * 0.4) * emberBoost * fallbackFade,
-                0,
-                2.3
-              );
-              sparkStreakMesh.instanceColor?.setXYZ(
-                sparkStreakCount,
-                fallbackBright,
-                clamp(fallbackBright * 0.72, 0, 1.85),
-                clamp(fallbackBright * 0.14, 0, 0.55)
-              );
-              const fallbackDotBright = clamp(
-                (1.18 + flameIntensity * 1.3 + fallbackPulse * 0.35) * emberBoost * fallbackFade,
-                0,
-                2.7
-              );
-              const fallbackDotR = fallbackDotBright;
-              const fallbackDotG = clamp(fallbackDotBright * 0.7, 0, 1.95);
-              const fallbackDotB = clamp(fallbackDotBright * 0.12, 0, 0.65);
-              const fallbackDotY = fallbackY + fallbackHeight * (0.1 + fallbackAge * 0.16);
-              pushSparkPoint(
-                fallbackX,
-                fallbackDotY,
-                fallbackZ,
-                fallbackDotR,
-                fallbackDotG,
-                fallbackDotB
-              );
-              pushSparkPoint(
-                fallbackX,
-                fallbackDotY - fallbackHeight * 0.14,
-                fallbackZ,
-                fallbackDotR * 0.56,
-                fallbackDotG * 0.56,
-                fallbackDotB * 0.56
-              );
-              pushSparkPoint(
-                fallbackX + fallbackLaneX * 0.18,
-                fallbackDotY + fallbackHeight * 0.12,
-                fallbackZ + fallbackLaneZ * 0.18,
-                fallbackDotR * 0.45,
-                fallbackDotG * 0.45,
-                fallbackDotB * 0.45
-              );
+              sparkStreakMesh.setMatrixAt(sparkStreakCount, sparkStreakBillboard.matrix);
+              if (sparkDebug) {
+                sparkStreakMesh.instanceColor?.setXYZ(sparkStreakCount, 3.0, 1.3, 0.14);
+                pushSparkPoint(
+                  fallbackX,
+                  fallbackY + fallbackHeight * (0.1 + fallbackAge * 0.16),
+                  fallbackZ,
+                  3.0 * fallbackFade,
+                  1.3 * fallbackFade,
+                  0.14 * fallbackFade
+                );
+              } else {
+                const fallbackBright = clamp(
+                  (1.05 + flameIntensity * 1.15 + fallbackPulse * 0.4) * emberBoost * fallbackFade,
+                  0,
+                  2.3
+                );
+                sparkStreakMesh.instanceColor?.setXYZ(
+                  sparkStreakCount,
+                  fallbackBright,
+                  clamp(fallbackBright * 0.72, 0, 1.85),
+                  clamp(fallbackBright * 0.14, 0, 0.55)
+                );
+                const fallbackDotBright = clamp(
+                  (1.18 + flameIntensity * 1.3 + fallbackPulse * 0.35) * emberBoost * fallbackFade,
+                  0,
+                  2.7
+                );
+                const fallbackDotR = fallbackDotBright;
+                const fallbackDotG = clamp(fallbackDotBright * 0.7, 0, 1.95);
+                const fallbackDotB = clamp(fallbackDotBright * 0.12, 0, 0.65);
+                const fallbackDotY = fallbackY + fallbackHeight * (0.1 + fallbackAge * 0.16);
+                pushSparkPoint(
+                  fallbackX,
+                  fallbackDotY,
+                  fallbackZ,
+                  fallbackDotR,
+                  fallbackDotG,
+                  fallbackDotB
+                );
+                if (sparkVisual01 > 0.62) {
+                  pushSparkPoint(
+                    fallbackX + windX * fallbackWidth * 0.34,
+                    fallbackDotY - fallbackHeight * 0.08,
+                    fallbackZ + windZ * fallbackWidth * 0.34,
+                    fallbackDotR * 0.42,
+                    fallbackDotG * 0.42,
+                    fallbackDotB * 0.42
+                  );
+                }
+              }
+              sparkStreakCount += 1;
+              heroTipSparkEmitted += 1;
+              tileTipSparkEmitted = 1;
             }
-            sparkStreakCount += 1;
-            heroTipSparkEmitted += 1;
-            tileTipSparkEmitted = 1;
           } else {
             droppedByInstanceCap += 1;
           }
@@ -2652,7 +4033,21 @@ export const createThreeTestFireFx = (
         if (groundFlameDrive < 0.2 && slowFlicker < 0.35) {
           groundFlameCount = Math.max(0, groundFlameCount - 2);
         }
+        const groundDetailScale = clamp(
+          (frontPassActive ? 0.08 : 0.26) + (1 - clamp(frontRead01, 0, 1)) * 0.42 + (flameProfile !== null ? 0.08 : 0),
+          0.06,
+          frontPassActive ? 0.58 : 0.82
+        );
+        groundFlameCount = Math.round(groundFlameCount * groundDetailScale);
         groundFlameCount = Math.min(groundFlameCount, perTileGroundCap);
+        const sustainGroundFlame =
+          hasActiveFire &&
+          fire > 0.22 &&
+          heat > 0.24 &&
+          smoothedFlame > Math.max(flamePresenceEps * 1.1, 0.1);
+        if (sustainGroundFlame && groundFlameCount <= 0) {
+          groundFlameCount = 1;
+        }
         for (let groundFlame = 0; groundFlame < groundFlameCount && fireCount < FIRE_MAX_INSTANCES; groundFlame += 1) {
           const g1 = hash1(idx * 1.621 + groundFlame * 7.11 + 13.7);
           const g2 = hash1(idx * 0.743 + groundFlame * 9.31 + 23.1);
@@ -2667,14 +4062,18 @@ export const createThreeTestFireFx = (
           const gOffsetR = Math.sqrt(g2) * gRadius;
           const gX = Math.cos(gTheta) * gOffsetR;
           const gZ = Math.sin(gTheta) * gOffsetR;
-          const gHeight =
+          const gHeightBase =
             tileSpan *
             (0.08 + groundFlameDrive * 0.22) *
             (0.74 + gFlicker * 0.45) *
             (0.85 + g3 * 0.4) *
             flameHeightBoost *
             roleHeightScale;
-          const gWidth = Math.max(tileSpan * 0.06, gHeight * (0.56 + g2 * 0.26) * flameWidthBoost * roleWidthScale);
+          const gWidthBase = Math.max(tileSpan * 0.06, gHeightBase * (0.56 + g2 * 0.26) * flameWidthBoost * roleWidthScale);
+          const gHeight =
+            Math.max(tileSpan * GROUND_FLAME_MIN_HEIGHT_TILES, gHeightBase * FLAME_RENDER_SIZE_SCALE) * flameSize01;
+          const gWidth =
+            Math.max(tileSpan * GROUND_FLAME_MIN_WIDTH_TILES, gWidthBase * FLAME_RENDER_SIZE_SCALE) * flameSize01;
           const gWindLean = tileSpan * (0.015 + groundFlameDrive * 0.05 + windStrength * 0.03);
           const groundWorldX = clamp(jetClusterX + gX + windX * gWindLean, terrainMinX, terrainMaxX);
           const groundWorldZ = clamp(jetClusterZ + gZ + windZ * gWindLean, terrainMinZ, terrainMaxZ);
@@ -2713,9 +4112,13 @@ export const createThreeTestFireFx = (
           );
           const glowBaseInstances = glowDrive > 0.8 ? 4 : glowDrive > 0.46 ? 3 : glowDrive > 0.2 ? 2 : 1;
           const glowPerTileMax = envOrange > 0.75 ? 5 : 4;
+          const frontGlowScale = clamp(0.22 + frontDominance * 0.86, 0.16, 1);
           const glowInstances = Math.max(
             glowDrive > 0.08 ? 1 : 0,
-            Math.min(glowPerTileMax, Math.round(glowBaseInstances * groundGlowCountBoost * ignitionRampStrength))
+            Math.min(
+              glowPerTileMax,
+              Math.round(glowBaseInstances * groundGlowCountBoost * ignitionRampStrength * frontGlowScale)
+            )
           );
           for (let gi = 0; gi < glowInstances && glowCount < GLOW_MAX_INSTANCES; gi += 1) {
             const g1 = hash1(idx * 1.27 + gi * 7.37 + 0.9);
@@ -2741,25 +4144,28 @@ export const createThreeTestFireFx = (
             const glowBase = (0.24 + glowDrive * FIRE_VISUAL_TUNING.glowStrength * 1.15) * pulse * groundGlowBoost;
             const glow = clamp(glowBase * (1 + envOrange * 0.72), 0, 3.4);
             const glowR = glow * 1.12;
-            const glowG = glow * (0.58 + g2 * 0.24 + envOrange * 0.22);
-            const glowB = glow * (0.08 + g1 * 0.06) * (1 - envOrange * 0.35);
+            const glowG = glow * (0.42 + g2 * 0.18 + envOrange * 0.14);
+            const glowB = glow * (0.04 + g1 * 0.04) * (1 - envOrange * 0.45);
             groundGlowMesh.instanceColor?.setXYZ(glowCount, glowR, glowG, glowB);
             glowCount += 1;
           }
         }
-        if (useFreeEmbers && hasVisualFlame && emberCount < emberCap) {
+        if (useFreeEmbers && sparkActive && emberCount < emberCap) {
           const sparkPulse = 0.84 + 0.16 * Math.sin(sparkTimeSeconds * (1.3 + tileSeed * 0.8) + tileSeed * TAU);
           const sparkDrive = Math.max(
             0,
-            (flameIntensity * 2.35 +
-              intensity * 1.4 +
-              heat * 1.15 +
-              Math.max(0, clusterBias) * 1.1 +
-              (hasActiveFire ? 0.35 : 0.12)) *
+            (sparkVisual01 * 2.6 +
+              flameIntensity * 0.9 +
+              intensity * 0.65 +
+              heat * 0.48 +
+              Math.max(0, clusterBias) * 0.26 +
+              windStrength * 0.9 +
+              frontRead01 * 0.55 +
+              (hasActiveFire ? 0.22 : 0.08)) *
               ignitionRampStrength -
-              0.12
+              0.44
           );
-          const emberBurstCap = Math.max(9, Math.min(13, Math.round(9 + (emberBoost - 1) * 8)));
+          const emberBurstCap = Math.max(4, Math.min(6, Math.round(4 + (emberBoost - 1) * 4)));
           const emberBursts = Math.max(
             0,
             Math.min(
@@ -2791,33 +4197,42 @@ export const createThreeTestFireFx = (
             );
             const swirlPhase = sparkTimeSeconds * (1.7 + emberSeed * 1.1) + emberSeed * 35.0 + lifeT * 8.4;
             const swirl =
-              (1.25 - lifeT * 0.7) *
-              (0.36 + windStrength * 0.28) *
+              (1.0 - lifeT * 0.82) *
+              (0.12 + (1 - clamp(windStrength, 0, 1)) * 0.18) *
               sampleFootprint *
-              (1 + (emberEjectBoost - 1) * 0.45);
+              (1 + (emberEjectBoost - 1) * 0.18);
             const outwardPhase = emberSeed * TAU + lifeT * (4.4 + intensity * 2.3);
-            const outward = sampleFootprint * (0.05 + lifeT * (0.34 + intensity * 0.2));
+            const outward = sampleFootprint * (0.015 + lifeT * (0.09 + intensity * 0.08));
             const outwardX = Math.cos(outwardPhase) * outward;
             const outwardZ = Math.sin(outwardPhase * 1.08 + emberSeed * 2.7) * outward;
-            const lateralX = Math.sin(swirlPhase) * swirl + outwardX + (emberSeed - 0.5) * 0.26 * sampleFootprint;
+            const lateralX =
+              (Math.sin(swirlPhase) * swirl + outwardX + (emberSeed - 0.5) * 0.08 * sampleFootprint) *
+              (0.5 + (1 - clamp(windStrength, 0, 1)) * 0.32);
             const lateralZ =
-              Math.cos(swirlPhase * 1.13) * swirl + outwardZ + (fract(emberSeed * 7.1) - 0.5) * 0.26 * sampleFootprint;
+              (Math.cos(swirlPhase * 1.13) * swirl + outwardZ + (fract(emberSeed * 7.1) - 0.5) * 0.08 * sampleFootprint) *
+              (0.5 + (1 - clamp(windStrength, 0, 1)) * 0.32);
             const downwind =
               windStrength *
-              (0.42 + lifeT * (2.05 + intensity * 1.5)) *
+              (0.86 + lifeT * (3.5 + intensity * 2.1)) *
               sampleFootprint *
-              (1 + (emberEjectBoost - 1) * 0.4);
-            const weave = Math.sin(swirlPhase * 0.71 + lifeT * 5.2) * sampleFootprint * (0.03 + lifeT * 0.16 + windStrength * 0.08);
+              (1 + (emberEjectBoost - 1) * 0.28) *
+              sparkWindFactor;
+            const weave =
+              Math.sin(swirlPhase * 0.71 + lifeT * 5.2) *
+              sampleFootprint *
+              (0.008 + lifeT * 0.045 + (1 - clamp(windStrength, 0, 1)) * 0.018);
             const crosswind =
               (fract(emberSeed * 11.9) - 0.5) *
-              (0.36 + lifeT * 1.05 + windStrength * 0.7) *
+              (0.12 + lifeT * 0.34 + (1 - clamp(windStrength, 0, 1)) * 0.12) *
               sampleFootprint *
-              (1 + (emberEjectBoost - 1) * 0.3) +
+              (1 + (emberEjectBoost - 1) * 0.15) +
               weave;
+            const launchDownwind =
+              sampleFootprint * (0.06 + windStrength * 0.24 + sparkVisual01 * 0.08 + frontRead01 * 0.06);
             emberBillboard.position.set(
-              jetClusterX + lateralX + windX * downwind + crossWindX * crosswind,
+              jetClusterX + lateralX + windX * (launchDownwind + downwind) + crossWindX * crosswind,
               sourceYBase + sourceLift + riseHeight,
-              jetClusterZ + lateralZ + windZ * downwind + crossWindZ * crosswind
+              jetClusterZ + lateralZ + windZ * (launchDownwind + downwind) + crossWindZ * crosswind
             );
             const emberSize =
               (0.16 + (1 - lifeT) * 0.32 + intensity * 0.12 + windStrength * 0.06) *
@@ -2871,9 +4286,9 @@ export const createThreeTestFireFx = (
         const smokeDrive = Math.max(smokeIntensity01, targetSmoke * 0.85);
         if (hasActiveFire && smokeDrive > 0.005 && smokeSpawnsThisFrame < smokeSpawnFrameCap) {
           const roleSmokeScale = tileRole === 2 ? 1.22 : tileRole === 1 ? 1.08 : 1;
-          const fuel = clamp(world.tileFuel[idx] ?? 1, 0, 1);
+          const fuelNow = fireView.getFuelByIndex(idx);
           const sootBase = clamp(
-            0.16 + smokeDrive * 0.34 + (1 - fuel) * 0.3 + heat * 0.08 + clusterBlend * 0.12 * roleSmokeScale,
+            0.16 + smokeDrive * 0.34 + (1 - fuelNow) * 0.3 + heat * 0.08 + clusterBlend * 0.12 * roleSmokeScale,
             0,
             1
           );
@@ -2928,9 +4343,10 @@ export const createThreeTestFireFx = (
         continue;
       }
       const sourceIdx = smokeParticleSourceIdx[i];
-      const sourceFire = sourceIdx >= 0 ? world.tileFire[sourceIdx] ?? 0 : 0;
-      const sourceHeat = sourceIdx >= 0 ? clamp((world.tileHeat[sourceIdx] ?? 0) / heatCap, 0, 1) : 0;
-      if (sourceIdx < 0 || (sourceFire <= simFireEps && sourceHeat < 0.08)) {
+      const sourceFire = sourceIdx >= 0 ? fireView.getFireByIndex(sourceIdx) : 0;
+      const sourceHeat = sourceIdx >= 0 ? fireView.getHeat01ByIndex(sourceIdx) : 0;
+      const sourceSmoke = sourceIdx >= 0 ? tileSmokeVisual[sourceIdx] ?? 0 : 0;
+      if (sourceIdx < 0 || (sourceFire <= simFireEps && sourceHeat < 0.08 && sourceSmoke < 0.06)) {
         smokeParticleActive[i] = 0;
         smokeParticleSourceIdx[i] = -1;
         continue;
@@ -3118,5 +4534,5 @@ export const createThreeTestFireFx = (
 
   const getSparkDebugSnapshot = (): SparkDebugSnapshot => ({ ...sparkDebugSnapshot });
 
-  return { update, setEnvironmentSignals, getSparkDebugSnapshot, dispose };
+  return { captureSnapshot, setSimulationAlpha, update, setEnvironmentSignals, getSparkDebugSnapshot, dispose };
 };

@@ -1,4 +1,13 @@
-import type { ApprovalTier, ClimateForecast, Formation, RiskTier, ScoreEventLane, ScoreEventSeverity } from "../../core/types.js";
+import type {
+  ApprovalTier,
+  ClimateForecast,
+  Formation,
+  RiskTier,
+  ScoreEventLane,
+  ScoreEventSeverity,
+  ScoreFlowKind,
+  SimTimeMode
+} from "../../core/types.js";
 export type Phase = "growth" | "maintenance" | "fire" | "budget";
 
 export type InteractionMode = "default" | "deploy" | "fuelBreak" | "formation" | "inspect";
@@ -45,10 +54,12 @@ export type PrimaryCta = {
 export type GameUiSnapshot = {
   phase: Phase;
   phaseProgress: number;
+  annualReportOpen: boolean;
   selection: SelectedEntity;
   interactionMode: InteractionMode;
   paused: boolean;
   alert: string | null;
+  simTimeMode: SimTimeMode;
   timeSpeedIndex: number;
   skipToNextFireActive: boolean;
   canSkipToNextFire: boolean;
@@ -71,6 +82,7 @@ export type GameUiSnapshot = {
     nextApprovalTier: ApprovalTier | null;
     nextApprovalThreshold01: number | null;
     nextTierProgress01: number;
+    activeFireCount: number;
     extinguishedCount: number;
     propertyDamageCount: number;
     livesLostCount: number;
@@ -82,6 +94,14 @@ export type GameUiSnapshot = {
       severity: ScoreEventSeverity;
       remainingSeconds: number;
       detail?: string;
+    }>;
+    flowEvents: Array<{
+      id: number;
+      kind: ScoreFlowKind;
+      deltaCount: number;
+      remainingSeconds: number;
+      tileX?: number;
+      tileY?: number;
     }>;
   } | null;
 };

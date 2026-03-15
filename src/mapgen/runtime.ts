@@ -3,6 +3,15 @@ import { TreeType } from "../core/types.js";
 import type { WorldState } from "../core/state.js";
 import { clamp } from "../core/utils.js";
 import { inBounds, indexFor } from "../core/grid.js";
+import {
+  DOMINANT_FOREST_TYPES,
+  clearVegetationState,
+  computeForestTreeWeights,
+  isForestType,
+  isVegetationType,
+  pickWeightedTreeType,
+  syncDerivedVegetationState
+} from "../core/vegetation.js";
 import { applyFuel } from "../core/tiles.js";
 import { TILE_TYPE_IDS } from "../core/state.js";
 import { markTileSoADirty } from "../core/tileCache.js";
@@ -306,14 +315,6 @@ const BAND_SCALE_RANGE_M = 2000;
 const getWorldX = (settings: MapGenSettings, x: number): number => settings.worldOffsetXM + x * settings.cellSizeM;
 const getWorldY = (settings: MapGenSettings, y: number): number => settings.worldOffsetYM + y * settings.cellSizeM;
 
-const DOMINANT_FOREST_TYPES: TreeType[] = [
-  TreeType.Pine,
-  TreeType.Oak,
-  TreeType.Maple,
-  TreeType.Birch,
-  TreeType.Elm
-];
-
 const FOREST_MACRO_WEIGHT = 0.85;
 const FOREST_DETAIL_WEIGHT = 0.15;
 
@@ -498,44 +499,6 @@ function softenPeaks(value: number, cap: number, softness: number): number {
   }
   const excess = value - cap;
   return cap + (1 - cap) * (1 - Math.exp(-excess * softness));
-}
-
-function pickWeightedTreeType(seed: number, candidates: TreeType[], weights: Record<TreeType, number>): TreeType {
-  let total = 0;
-  candidates.forEach((type) => {
-    total += Math.max(0.0001, weights[type] ?? 0.0001);
-  });
-  const target = seed * total;
-  let running = 0;
-  for (const type of candidates) {
-    running += Math.max(0.0001, weights[type] ?? 0.0001);
-    if (target <= running) {
-      return type;
-    }
-  }
-  return candidates[candidates.length - 1] ?? TreeType.Pine;
-}
-
-function computeForestTreeWeights(
-  moisture: number,
-  elevation: number,
-  seedX: number,
-  seedY: number,
-  seedBase: number
-): Record<TreeType, number> {
-  const dry = clamp(1 - moisture, 0, 1);
-  const wet = clamp(moisture, 0, 1);
-  const high = clamp(elevation, 0, 1);
-  const low = 1 - high;
-  const jitter = (offset: number) => 0.85 + hash2D(seedX, seedY, seedBase + offset) * 0.3;
-  return {
-    [TreeType.Pine]: (1 + dry * 0.8 + high * 0.5) * jitter(11),
-    [TreeType.Oak]: (1 + (0.5 - Math.abs(wet - 0.5)) * 0.4) * jitter(23),
-    [TreeType.Maple]: (1 + wet * 0.35 + low * 0.2) * jitter(37),
-    [TreeType.Birch]: (1 + dry * 0.25 + low * 0.2) * jitter(41),
-    [TreeType.Elm]: (1 + wet * 0.8 + low * 0.6) * jitter(59),
-    [TreeType.Scrub]: 0.4 * jitter(71)
-  };
 }
 
 function assignForestComposition(state: WorldState): void {
@@ -2521,6 +2484,217 @@ function clampRiverMouthDepthsToSeaLevel(
   }
 }
 
+const getOpenVegetationSeedAge = (
+  state: WorldState,
+  tile: Tile,
+  type: TileType,
+  x: number,
+  y: number,
+  meadowMask = 0,
+  micro = 0.5
+): number => {
+  const waterInfluence = clamp(1 - tile.waterDist / 18, 0, 1);
+  const meadowSuppression = 1 - clamp(meadowMask, 0, 1) * 0.45;
+  const fertility =
+    clamp(0.3 + tile.moisture * 0.4 + waterInfluence * 0.2 + clamp(micro, 0, 1) * 0.1, 0, 1) * meadowSuppression;
+  const noise = hash2D(x, y, state.seed + 11027);
+  const baseAge = 0.5 + noise * 2.5;
+  if (type === "scrub") {
+    return clamp(baseAge * (0.95 + fertility * 0.3), 0.5, 3);
+  }
+  if (type === "floodplain") {
+    return clamp(baseAge * (0.9 + fertility * 0.25), 0.5, 3);
+  }
+  return clamp(baseAge * (0.8 + fertility * 0.25), 0.5, 3);
+};
+
+function seedInitialVegetationState(
+  state: WorldState,
+  biomeSuitabilityMap?: ArrayLike<number> | null,
+  microMap?: ArrayLike<number> | null,
+  meadowMaskMap?: ArrayLike<number> | null
+): void {
+  const total = state.grid.totalTiles;
+  const visited = new Uint8Array(total);
+  const edgeDistance = new Int16Array(total);
+  edgeDistance.fill(-1);
+  const queue = new Int32Array(total);
+  const { cols, rows } = state.grid;
+
+  for (let i = 0; i < total; i += 1) {
+    const tile = state.tiles[i];
+    const x = i % cols;
+    const y = Math.floor(i / cols);
+    if (!isVegetationType(tile.type)) {
+      clearVegetationState(tile);
+      tile.dominantTreeType = null;
+      tile.treeType = null;
+      continue;
+    }
+    if (!isForestType(tile.type)) {
+      tile.vegetationAgeYears = getOpenVegetationSeedAge(
+        state,
+        tile,
+        tile.type,
+        x,
+        y,
+        meadowMaskMap?.[i] ?? 0,
+        microMap?.[i] ?? 0.5
+      );
+      syncDerivedVegetationState(tile, state.seed, x, y);
+      tile.dominantTreeType = null;
+      tile.treeType = null;
+    }
+  }
+
+  for (let i = 0; i < total; i += 1) {
+    if (visited[i] || state.tiles[i].type !== "forest") {
+      continue;
+    }
+    let head = 0;
+    let tail = 0;
+    const component: number[] = [];
+    visited[i] = 1;
+    queue[tail] = i;
+    tail += 1;
+    while (head < tail) {
+      const idx = queue[head];
+      head += 1;
+      component.push(idx);
+      const x = idx % cols;
+      const y = Math.floor(idx / cols);
+      if (x > 0) {
+        const nIdx = idx - 1;
+        if (!visited[nIdx] && state.tiles[nIdx].type === "forest") {
+          visited[nIdx] = 1;
+          queue[tail] = nIdx;
+          tail += 1;
+        }
+      }
+      if (x < cols - 1) {
+        const nIdx = idx + 1;
+        if (!visited[nIdx] && state.tiles[nIdx].type === "forest") {
+          visited[nIdx] = 1;
+          queue[tail] = nIdx;
+          tail += 1;
+        }
+      }
+      if (y > 0) {
+        const nIdx = idx - cols;
+        if (!visited[nIdx] && state.tiles[nIdx].type === "forest") {
+          visited[nIdx] = 1;
+          queue[tail] = nIdx;
+          tail += 1;
+        }
+      }
+      if (y < rows - 1) {
+        const nIdx = idx + cols;
+        if (!visited[nIdx] && state.tiles[nIdx].type === "forest") {
+          visited[nIdx] = 1;
+          queue[tail] = nIdx;
+          tail += 1;
+        }
+      }
+    }
+
+    head = 0;
+    tail = 0;
+    for (let c = 0; c < component.length; c += 1) {
+      const idx = component[c];
+      edgeDistance[idx] = -1;
+      const x = idx % cols;
+      const y = Math.floor(idx / cols);
+      const leftForest = x > 0 && state.tiles[idx - 1].type === "forest";
+      const rightForest = x < cols - 1 && state.tiles[idx + 1].type === "forest";
+      const upForest = y > 0 && state.tiles[idx - cols].type === "forest";
+      const downForest = y < rows - 1 && state.tiles[idx + cols].type === "forest";
+      const isEdge = !leftForest || !rightForest || !upForest || !downForest;
+      if (isEdge) {
+        edgeDistance[idx] = 0;
+        queue[tail] = idx;
+        tail += 1;
+      }
+    }
+    if (tail === 0 && component.length > 0) {
+      edgeDistance[component[0]] = 0;
+      queue[tail] = component[0];
+      tail += 1;
+    }
+    while (head < tail) {
+      const idx = queue[head];
+      head += 1;
+      const distance = edgeDistance[idx];
+      const x = idx % cols;
+      const y = Math.floor(idx / cols);
+      if (x > 0) {
+        const nIdx = idx - 1;
+        if (state.tiles[nIdx].type === "forest" && edgeDistance[nIdx] < 0) {
+          edgeDistance[nIdx] = (distance + 1) as number;
+          queue[tail] = nIdx;
+          tail += 1;
+        }
+      }
+      if (x < cols - 1) {
+        const nIdx = idx + 1;
+        if (state.tiles[nIdx].type === "forest" && edgeDistance[nIdx] < 0) {
+          edgeDistance[nIdx] = (distance + 1) as number;
+          queue[tail] = nIdx;
+          tail += 1;
+        }
+      }
+      if (y > 0) {
+        const nIdx = idx - cols;
+        if (state.tiles[nIdx].type === "forest" && edgeDistance[nIdx] < 0) {
+          edgeDistance[nIdx] = (distance + 1) as number;
+          queue[tail] = nIdx;
+          tail += 1;
+        }
+      }
+      if (y < rows - 1) {
+        const nIdx = idx + cols;
+        if (state.tiles[nIdx].type === "forest" && edgeDistance[nIdx] < 0) {
+          edgeDistance[nIdx] = (distance + 1) as number;
+          queue[tail] = nIdx;
+          tail += 1;
+        }
+      }
+    }
+
+    for (let c = 0; c < component.length; c += 1) {
+      const idx = component[c];
+      const x = idx % cols;
+      const y = Math.floor(idx / cols);
+      const tile = state.tiles[idx];
+      let forestNeighbors = 0;
+      if (x > 0 && state.tiles[idx - 1].type === "forest") {
+        forestNeighbors += 1;
+      }
+      if (x < cols - 1 && state.tiles[idx + 1].type === "forest") {
+        forestNeighbors += 1;
+      }
+      if (y > 0 && state.tiles[idx - cols].type === "forest") {
+        forestNeighbors += 1;
+      }
+      if (y < rows - 1 && state.tiles[idx + cols].type === "forest") {
+        forestNeighbors += 1;
+      }
+
+      const suitability =
+        biomeSuitabilityMap?.[idx] ??
+        clamp(0.28 + tile.moisture * 0.42 + (1 - tile.elevation) * 0.18, 0, 1);
+      const micro = clamp(microMap?.[idx] ?? 0.5, 0, 1);
+      const edgeDepth = Math.max(0, edgeDistance[idx]);
+      const edgeDepth01 = clamp(edgeDepth / 3.5, 0, 1);
+      const interiorBias = clamp((forestNeighbors - 1) / 3, 0, 1);
+      const maturityBias = clamp(edgeDepth01 * 0.68 + interiorBias * 0.12 + suitability * 0.14 + micro * 0.06, 0, 1);
+      const edgeAge = 8 + hash2D(x, y, state.seed + 12031) * 8;
+      const upperAge = 22 + hash2D(x, y, state.seed + 12067) * 12;
+      tile.vegetationAgeYears = clamp(edgeAge * (1 - maturityBias) + upperAge * maturityBias, 8, 34);
+      syncDerivedVegetationState(tile, state.seed, x, y);
+    }
+  }
+}
+
 function countMaskTiles(mask: Uint8Array): number {
   let total = 0;
   for (let i = 0; i < mask.length; i += 1) {
@@ -3783,6 +3957,7 @@ async function generateMapLegacy(
         windFactor: 0,
         moisture: 0,
         waterDist: 0,
+        vegetationAgeYears: 0,
         canopy: 0,
         canopyCover: 0,
         stemDensity: 0,
@@ -3973,17 +4148,17 @@ async function generateMapLegacy(
     const y = Math.floor(i / state.grid.cols);
     if (oceanMask[i]) {
       tile.type = "water";
-      tile.canopy = 0;
-      tile.canopyCover = 0;
-      tile.stemDensity = 0;
+      clearVegetationState(tile);
+      tile.dominantTreeType = null;
+      tile.treeType = null;
       tile.moisture = moistureMap[i];
       continue;
     }
     if (riverMask[i] > 0) {
       tile.type = "water";
-      tile.canopy = 0;
-      tile.canopyCover = 0;
-      tile.stemDensity = 0;
+      clearVegetationState(tile);
+      tile.dominantTreeType = null;
+      tile.treeType = null;
       tile.moisture = moistureMap[i];
       continue;
     }
@@ -4066,9 +4241,7 @@ async function generateMapLegacy(
         const idx = indexFor(state.grid, nx, ny);
         state.tiles[idx].type = "base";
         state.tiles[idx].isBase = true;
-        state.tiles[idx].canopy = 0;
-        state.tiles[idx].canopyCover = 0;
-        state.tiles[idx].stemDensity = 0;
+        clearVegetationState(state.tiles[idx]);
         state.tiles[idx].dominantTreeType = null;
         state.tiles[idx].treeType = null;
       }
@@ -4082,7 +4255,6 @@ async function generateMapLegacy(
   });
   connectSettlementsByRoad(state, rng, legacySettlementPlan);
   flattenSettlementGround(state);
-  assignForestComposition(state);
 
   for (let i = 0; i < state.tiles.length; i += 1) {
     if (riverMask[i] === 0) {
@@ -4090,13 +4262,15 @@ async function generateMapLegacy(
     }
     const tile = state.tiles[i];
     tile.type = "water";
-    tile.canopy = 0;
-    tile.canopyCover = 0;
-    tile.stemDensity = 0;
+    clearVegetationState(tile);
     tile.dominantTreeType = null;
     tile.treeType = null;
     tile.isBase = false;
   }
+
+  seedInitialVegetationState(state, null, microMap, meadowMaskMap);
+  assignForestComposition(state);
+  state.vegetationRevision += 1;
 
   state.totalLandTiles = 0;
   state.tiles.forEach((tile) => {
@@ -4169,6 +4343,7 @@ const createBlankTile = (elevation: number): Tile => ({
   windFactor: 0,
   moisture: 0,
   waterDist: 0,
+  vegetationAgeYears: 0,
   canopy: 0,
   canopyCover: 0,
   stemDensity: 0,
@@ -4908,6 +5083,8 @@ export async function runBiomeClassificationStage(ctx: MapGenContext): Promise<v
     }
   }
 
+  seedInitialVegetationState(state, biomeSuitabilityMap, microMap, meadowMaskMap);
+  assignForestComposition(state);
   assertEdgeWater(state);
   await emitStageSnapshot(ctx, "biome:classify");
 }
@@ -4947,9 +5124,7 @@ export async function runSettlementPlacementStage(ctx: MapGenContext): Promise<v
         const tile = state.tiles[idx];
         tile.type = "base";
         tile.isBase = true;
-        tile.canopy = 0;
-        tile.canopyCover = 0;
-        tile.stemDensity = 0;
+        clearVegetationState(tile);
         tile.dominantTreeType = null;
         tile.treeType = null;
       }
@@ -4971,7 +5146,6 @@ export async function runRoadNetworkStage(ctx: MapGenContext): Promise<void> {
   connectSettlementsByRoad(ctx.state, ctx.rng, ctx.settlementPlan ?? null);
   flattenSettlementGround(ctx.state);
   const roadSurfaceMetrics = gradeRoadNetworkTerrain(ctx.state);
-  assignForestComposition(ctx.state);
   if (ctx.riverMask) {
     for (let i = 0; i < ctx.state.tiles.length; i += 1) {
       if (ctx.riverMask[i] === 0) {
@@ -4979,14 +5153,14 @@ export async function runRoadNetworkStage(ctx: MapGenContext): Promise<void> {
       }
       const tile = ctx.state.tiles[i];
       tile.type = "water";
-      tile.canopy = 0;
-      tile.canopyCover = 0;
-      tile.stemDensity = 0;
+      clearVegetationState(tile);
       tile.dominantTreeType = null;
       tile.treeType = null;
       tile.isBase = false;
     }
   }
+  seedInitialVegetationState(ctx.state, ctx.biomeSuitabilityMap, ctx.microMap, ctx.meadowMaskMap);
+  assignForestComposition(ctx.state);
   if (DEBUG_TERRAIN) {
     const stats = getRoadGenerationStats();
     const finalMetrics: RoadSurfaceMetrics = roadSurfaceMetrics;
@@ -5069,16 +5243,16 @@ export async function runPostSettlementReconcileStage(ctx: MapGenContext): Promi
 
         if (ctx.oceanMask[idx] || ctx.riverMask[idx] > 0) {
           tile.type = "water";
-          tile.canopy = 0;
-          tile.canopyCover = 0;
-          tile.stemDensity = 0;
+          clearVegetationState(tile);
+          tile.dominantTreeType = null;
+          tile.treeType = null;
           processed += 1;
           continue;
         }
         if (tile.type === "road" || tile.type === "house" || tile.type === "base") {
-          tile.canopy = 0;
-          tile.canopyCover = 0;
-          tile.stemDensity = 0;
+          clearVegetationState(tile);
+          tile.dominantTreeType = null;
+          tile.treeType = null;
           processed += 1;
           continue;
         }
@@ -5193,11 +5367,16 @@ export async function runPostSettlementReconcileStage(ctx: MapGenContext): Promi
       }
     }
   }
+  seedInitialVegetationState(state, ctx.biomeSuitabilityMap, ctx.microMap, ctx.meadowMaskMap);
+  assignForestComposition(state);
   await emitStageSnapshot(ctx, "reconcile:postSettlement");
 }
 
 export async function runFinalizeStage(ctx: MapGenContext): Promise<void> {
   const { state, rng, settings, cellSizeM } = ctx;
+  seedInitialVegetationState(state, ctx.biomeSuitabilityMap, ctx.microMap, ctx.meadowMaskMap);
+  assignForestComposition(state);
+  state.vegetationRevision += 1;
   state.totalLandTiles = 0;
   state.tiles.forEach((tile) => {
     applyFuel(tile, tile.moisture, rng);

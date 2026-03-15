@@ -2,6 +2,7 @@ import type { Point, RNG } from "../core/types.js";
 import type { WorldState } from "../core/state.js";
 import { inBounds, indexFor } from "../core/grid.js";
 import { applyFuel } from "../core/tiles.js";
+import { clearVegetationState } from "../core/vegetation.js";
 
 export const ROAD_GRADE_LIMIT_START = 0.09;
 export const ROAD_GRADE_LIMIT_RELAX_STEP = 0.015;
@@ -733,9 +734,7 @@ export function setRoadAt(state: WorldState, rng: RNG, x: number, y: number, opt
       return;
     }
     state.tileRoadBridge[idx] = 1;
-    tile.canopy = 0;
-    tile.canopyCover = 0;
-    tile.stemDensity = 0;
+    clearVegetationState(tile);
     tile.dominantTreeType = null;
     tile.treeType = null;
     tile.ashAge = 0;
@@ -744,9 +743,7 @@ export function setRoadAt(state: WorldState, rng: RNG, x: number, y: number, opt
   }
   state.tileRoadBridge[idx] = 0;
   tile.type = "road";
-  tile.canopy = 0;
-  tile.canopyCover = 0;
-  tile.stemDensity = 0;
+  clearVegetationState(tile);
   tile.dominantTreeType = null;
   tile.treeType = null;
   tile.ashAge = 0;

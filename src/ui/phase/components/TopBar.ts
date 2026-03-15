@@ -1,5 +1,5 @@
 import type { Phase, PrimaryCta } from "../types.js";
-import type { ClimateForecast } from "../../../core/types.js";
+import type { ClimateForecast, ScoreFlowKind } from "../../../core/types.js";
 import {
   FORECAST_CHART,
   RISK_BANDS,
@@ -34,6 +34,7 @@ export type TopBarData = {
     nextApprovalTier: "S" | "A" | "B" | "C" | "D" | null;
     nextApprovalThreshold01: number | null;
     nextTierProgress01: number;
+    activeFireCount: number;
     extinguishedCount: number;
     propertyDamageCount: number;
     livesLostCount: number;
@@ -45,6 +46,14 @@ export type TopBarData = {
       severity: "positive" | "negative" | "info";
       remainingSeconds: number;
       detail?: string;
+    }>;
+    flowEvents: Array<{
+      id: number;
+      kind: ScoreFlowKind;
+      deltaCount: number;
+      remainingSeconds: number;
+      tileX?: number;
+      tileY?: number;
     }>;
   } | null;
 };
@@ -60,21 +69,51 @@ const phaseLabels: Record<Phase, string> = {
   growth: "Growth",
   maintenance: "Maintenance",
   fire: "Fire Season",
-  budget: "Budget"
+  budget: "Autumn Ops"
 };
 
 const SVG_NS = "http://www.w3.org/2000/svg";
 const { width: CHART_WIDTH, height: CHART_HEIGHT, padding: CHART_PADDING } = FORECAST_CHART;
 const SCORE_EVENT_LIFETIME_SECONDS: Record<NonNullable<TopBarData["scoring"]>["events"][number]["severity"], number> = {
-  positive: 1.1,
-  negative: 1.6,
-  info: 1.1
+  positive: 0.8,
+  negative: 1.05,
+  info: 0.8
 };
+const FLOW_EVENT_LIFETIME_SECONDS: Record<ScoreFlowKind, number> = {
+  gain: 0.78,
+  extinguished: 0.82,
+  property: 1.05,
+  lives: 1.05,
+  decay: 0.68
+};
+const ACTIVE_QUEUE_MOVE_SECONDS: Record<"incoming" | "outgoing", number> = {
+  incoming: 0.22,
+  outgoing: 0.16
+};
+const MIN_DIRECT_BEAD_THRESHOLD = 18;
+const LEDGER_CHIP_WIDTH_PX = 8;
+const LEDGER_BUNDLE_GAP_PX = 3;
+const ACTIVE_QUEUE_SLOT_PX = LEDGER_CHIP_WIDTH_PX + LEDGER_BUNDLE_GAP_PX;
+type LedgerRailId = "active" | "extinguished" | "property" | "lives";
 const LEDGER_RAILS = [
   { lane: "extinguished", label: "Extinguished" },
+  { lane: "active", label: "Active Fires" },
   { lane: "property", label: "Property Damage" },
   { lane: "lives", label: "Lives Lost" }
 ] as const;
+
+const getFlowTargetLane = (kind: ScoreFlowKind): Exclude<LedgerRailId, "active"> | null => {
+  if (kind === "extinguished") {
+    return "extinguished";
+  }
+  if (kind === "property") {
+    return "property";
+  }
+  if (kind === "lives") {
+    return "lives";
+  }
+  return null;
+};
 
 const formatSignedPoints = (value: number): string => `${value >= 0 ? "+" : "-"}${Math.round(Math.abs(value)).toLocaleString()}`;
 
@@ -99,10 +138,23 @@ const triggerPulse = (element: HTMLElement): void => {
   element.classList.add("is-pulsing");
 };
 
-const createRailIcon = (lane: (typeof LEDGER_RAILS)[number]["lane"]): SVGSVGElement => {
+const createRailIcon = (lane: LedgerRailId): SVGSVGElement => {
   const svg = document.createElementNS(SVG_NS, "svg");
   svg.classList.add("phase-score-rail-icon");
   svg.setAttribute("viewBox", "0 0 16 16");
+  if (lane === "active") {
+    const flame = document.createElementNS(SVG_NS, "path");
+    flame.setAttribute(
+      "d",
+      "M8.2 1.5C9.3 3.1 9 4.3 8.1 5.4C9.7 5.1 11.3 6.4 11.3 8.3C11.3 10.8 9.8 13.3 8 14.5C5.9 13.3 4.5 11 4.5 8.6C4.5 6.6 5.9 5.3 7 4.2C7.9 3.3 8.4 2.6 8.2 1.5Z"
+    );
+    flame.setAttribute("fill", "currentColor");
+    const core = document.createElementNS(SVG_NS, "path");
+    core.setAttribute("d", "M8 6.2C8.8 7 9.2 7.8 9.2 8.9C9.2 10.3 8.4 11.6 8 12.1C7.1 11.4 6.7 10.3 6.7 9.3C6.7 8.1 7.3 7 8 6.2Z");
+    core.setAttribute("fill", "rgba(22, 16, 12, 0.38)");
+    svg.append(flame, core);
+    return svg;
+  }
   if (lane === "extinguished") {
     const circle = document.createElementNS(SVG_NS, "circle");
     circle.setAttribute("cx", "8");
@@ -141,8 +193,8 @@ const createRailIcon = (lane: (typeof LEDGER_RAILS)[number]["lane"]): SVGSVGElem
   return svg;
 };
 
-const buildLedgerBundles = (count: number): Array<{ magnitude: number; digit: number; label: string }> => {
-  const bundles: Array<{ magnitude: number; digit: number; label: string }> = [];
+const buildLedgerBundles = (count: number): Array<{ magnitude: number; digit: number }> => {
+  const bundles: Array<{ magnitude: number; digit: number }> = [];
   let remaining = Math.max(0, Math.floor(count));
   let magnitude = 1;
   while (remaining > 0) {
@@ -150,8 +202,7 @@ const buildLedgerBundles = (count: number): Array<{ magnitude: number; digit: nu
     if (digit > 0) {
       bundles.push({
         magnitude,
-        digit,
-        label: magnitude === 1 ? "" : `x${magnitude.toLocaleString()}`
+        digit
       });
     }
     remaining = Math.floor(remaining / 10);
@@ -173,52 +224,516 @@ const getBundleUnitsBucket = (magnitude: number): string => {
   return "1";
 };
 
-const renderLedgerBundles = (
+const syncLedgerBundleGroup = (
+  group: HTMLElement,
+  magnitude: number,
+  chipCount: number,
+  className: string
+): void => {
+  const unitsBucket = getBundleUnitsBucket(magnitude);
+  group.className = "phase-score-bundle";
+  group.dataset.units = unitsBucket;
+  group.dataset.magnitude = magnitude.toString();
+  while (group.childElementCount > chipCount) {
+    group.lastElementChild?.remove();
+  }
+  while (group.childElementCount < chipCount) {
+    const chip = document.createElement("span");
+    group.appendChild(chip);
+  }
+  Array.from(group.children).forEach((node) => {
+    const chip = node as HTMLElement;
+    chip.className = `phase-score-chip ${className}`;
+    chip.dataset.units = unitsBucket;
+  });
+};
+
+const syncLedgerBundles = (
   container: HTMLElement,
   count: number,
   className: string,
   clipDigits = 9
 ): void => {
-  container.innerHTML = "";
   const bundles = buildLedgerBundles(count);
-  for (const bundle of bundles) {
-    const group = document.createElement("div");
-    group.className = "phase-score-bundle";
-    const unitsBucket = getBundleUnitsBucket(bundle.magnitude);
-    group.dataset.units = unitsBucket;
-    if (bundle.label) {
-      const badge = document.createElement("span");
-      badge.className = "phase-score-bundle-label";
-      badge.textContent = bundle.label;
-      badge.dataset.units = unitsBucket;
-      group.appendChild(badge);
+  const existing = new Map<number, HTMLElement>();
+  Array.from(container.children).forEach((node) => {
+    const element = node as HTMLElement;
+    const magnitude = Number(element.dataset.magnitude ?? Number.NaN);
+    if (Number.isFinite(magnitude)) {
+      existing.set(magnitude, element);
     }
+  });
+  bundles.forEach((bundle, index) => {
+    const magnitude = bundle.magnitude;
     const digit = Math.min(bundle.digit, clipDigits);
-    for (let i = 0; i < digit; i += 1) {
-      const chip = document.createElement("span");
-      chip.className = `phase-score-chip ${className}`;
-      chip.dataset.units = unitsBucket;
-      group.appendChild(chip);
+    let group = existing.get(magnitude) ?? null;
+    if (!group) {
+      group = document.createElement("div");
     }
+    syncLedgerBundleGroup(group, magnitude, digit, className);
+    const anchor = container.children[index] ?? null;
+    if (anchor !== group) {
+      container.insertBefore(group, anchor);
+    }
+    existing.delete(magnitude);
+  });
+  existing.forEach((group) => group.remove());
+};
+
+const getTrackPortAnchor = (
+  track: HTMLElement,
+  overlayRect: DOMRect,
+  side: "left" | "right",
+  insetPx = 10
+): { x: number; y: number } => {
+  const rect = track.getBoundingClientRect();
+  return {
+    x: side === "left" ? rect.left - overlayRect.left + insetPx : rect.right - overlayRect.left - insetPx,
+    y: rect.top - overlayRect.top + rect.height * 0.5
+  };
+};
+
+const getTrackPipeJoinX = (track: HTMLElement, overlayRect: DOMRect): number => {
+  const rect = track.getBoundingClientRect();
+  return Math.max(16, rect.left - overlayRect.left - 18);
+};
+
+const getDirectBeadCapacity = (container: HTMLElement): number => {
+  const width = container.clientWidth;
+  if (width <= 0) {
+    return MIN_DIRECT_BEAD_THRESHOLD;
+  }
+  return Math.max(
+    MIN_DIRECT_BEAD_THRESHOLD,
+    Math.floor((width + LEDGER_BUNDLE_GAP_PX) / (LEDGER_CHIP_WIDTH_PX + LEDGER_BUNDLE_GAP_PX))
+  );
+};
+
+const syncSingleBundle = (
+  container: HTMLElement,
+  magnitude: number,
+  chipCount: number,
+  className: string
+): void => {
+  let group = (container.firstElementChild as HTMLElement | null) ?? null;
+  if (!group) {
+    group = document.createElement("div");
     container.appendChild(group);
+  }
+  syncLedgerBundleGroup(group, magnitude, chipCount, className);
+  while (container.childElementCount > 1) {
+    container.lastElementChild?.remove();
   }
 };
 
-const layoutIncomingLedgerGroups = (settled: HTMLElement, incoming: HTMLElement): void => {
-  const trackWidth = incoming.clientWidth;
-  if (trackWidth <= 0) {
+const syncSettledRailBundles = (container: HTMLElement, count: number): void => {
+  if (count <= getDirectBeadCapacity(container)) {
+    if (count <= 0) {
+      container.replaceChildren();
+      return;
+    }
+    syncSingleBundle(container, 1, count, "is-settled");
     return;
   }
-  const settledWidth = settled.scrollWidth;
-  const wrappers = Array.from(incoming.children) as HTMLElement[];
-  let occupiedWidth = settledWidth;
-  wrappers.forEach((wrapper, index) => {
-    const wrapperWidth = wrapper.offsetWidth;
-    const remainingWidth = Math.max(0, trackWidth - occupiedWidth - wrapperWidth);
-    wrapper.style.setProperty("--incoming-travel", `${remainingWidth}px`);
-    wrapper.style.setProperty("--incoming-stagger", `${Math.min(index * 10, 36)}px`);
-    occupiedWidth += wrapperWidth + 6;
+  syncLedgerBundles(container, count, "is-settled");
+};
+
+const clearManagedNodes = (nodeMap: Map<number, HTMLElement>): void => {
+  nodeMap.forEach((node) => node.remove());
+  nodeMap.clear();
+};
+
+type ActiveQueueDirection = "incoming" | "outgoing";
+
+type ActiveQueueToken = {
+  id: number;
+  direction: ActiveQueueDirection;
+  progress01: number;
+};
+
+type PipeTransferKind = "extinguished" | "property" | "lives";
+
+type PipeRoutePoint = {
+  x: number;
+  y: number;
+};
+
+type PipeTransferToken = {
+  id: number;
+  kind: PipeTransferKind;
+  progress01: number;
+  route: PipeRoutePoint[];
+};
+
+type LedgerRailRefs = {
+  rail: HTMLElement;
+  track: HTMLElement;
+  settled: HTMLElement;
+  incoming: HTMLElement;
+  fading: HTMLElement;
+  count: HTMLElement;
+};
+
+const isPipeTransferKind = (kind: ScoreFlowKind): kind is PipeTransferKind =>
+  kind === "extinguished" || kind === "property" || kind === "lives";
+
+const getFlowProgress01 = (event: NonNullable<TopBarData["scoring"]>["flowEvents"][number]): number => {
+  const lifetime = FLOW_EVENT_LIFETIME_SECONDS[event.kind] ?? 1.1;
+  return Math.max(0, Math.min(1, 1 - event.remainingSeconds / lifetime));
+};
+
+const advanceActiveQueueTokens = (tokens: ActiveQueueToken[], deltaMs: number): ActiveQueueToken[] => {
+  if (tokens.length === 0 || deltaMs <= 0) {
+    return tokens;
+  }
+  const stepMs = Math.max(0, Math.min(deltaMs, 80));
+  const next: ActiveQueueToken[] = [];
+  for (const token of tokens) {
+    const durationMs = ACTIVE_QUEUE_MOVE_SECONDS[token.direction] * 1000;
+    const progress01 = token.progress01 + (durationMs > 0 ? stepMs / durationMs : 1);
+    if (progress01 < 1) {
+      next.push({
+        ...token,
+        progress01
+      });
+    }
+  }
+  return next;
+};
+
+const reverseActiveQueueTokens = (
+  tokens: ActiveQueueToken[],
+  fromDirection: ActiveQueueDirection,
+  toDirection: ActiveQueueDirection,
+  count: number
+): number => {
+  let remaining = count;
+  for (let index = tokens.length - 1; index >= 0 && remaining > 0; index -= 1) {
+    const token = tokens[index];
+    if (token.direction !== fromDirection) {
+      continue;
+    }
+    tokens.splice(index, 1);
+    tokens.push({
+      ...token,
+      direction: toDirection,
+      progress01: Math.max(0, Math.min(0.999, 1 - token.progress01))
+    });
+    remaining -= 1;
+  }
+  return remaining;
+};
+
+const applyActiveQueueDelta = (
+  tokens: ActiveQueueToken[],
+  nextTokenId: { current: number },
+  direction: ActiveQueueDirection,
+  count: number,
+  progress01: number
+): void => {
+  const desiredCount = Math.max(0, Math.floor(count));
+  if (desiredCount <= 0) {
+    return;
+  }
+  const oppositeDirection = direction === "incoming" ? "outgoing" : "incoming";
+  let remaining = reverseActiveQueueTokens(tokens, oppositeDirection, direction, desiredCount);
+  while (remaining > 0) {
+    tokens.push({
+      id: nextTokenId.current,
+      direction,
+      progress01: Math.max(0, Math.min(0.999, progress01))
+    });
+    nextTokenId.current += 1;
+    remaining -= 1;
+  }
+};
+
+const getPipeTrunkX = (activeTrack: HTMLElement, overlayRect: DOMRect): number => {
+  const rect = activeTrack.getBoundingClientRect();
+  return Math.max(16, rect.left - overlayRect.left - 34);
+};
+
+const buildPipeRoute = (
+  sourceTrack: HTMLElement,
+  targetTrack: HTMLElement,
+  overlayRect: DOMRect,
+  trunkX: number,
+  yOffsetPx = 0
+): PipeRoutePoint[] => {
+  const start = getTrackPortAnchor(sourceTrack, overlayRect, "left");
+  const end = getTrackPortAnchor(targetTrack, overlayRect, "left");
+  const startY = start.y + yOffsetPx;
+  const endY = end.y + yOffsetPx;
+  return [
+    { x: start.x, y: startY },
+    { x: getTrackPipeJoinX(sourceTrack, overlayRect), y: startY },
+    { x: trunkX, y: startY },
+    { x: trunkX, y: endY },
+    { x: getTrackPipeJoinX(targetTrack, overlayRect), y: endY },
+    { x: end.x, y: endY }
+  ];
+};
+
+const buildPipePathD = (route: PipeRoutePoint[]): string => {
+  if (route.length === 0) {
+    return "";
+  }
+  return route.map((point, index) => `${index === 0 ? "M" : "L"}${point.x.toFixed(1)} ${point.y.toFixed(1)}`).join(" ");
+};
+
+const syncLedgerPipePaths = (
+  svg: SVGSVGElement,
+  pathMap: Map<Exclude<LedgerRailId, "active">, SVGPathElement>,
+  railMap: Map<LedgerRailId, LedgerRailRefs>
+): void => {
+  const overlayRect = svg.getBoundingClientRect();
+  const activeRefs = railMap.get("active");
+  if (!activeRefs || overlayRect.width <= 0 || overlayRect.height <= 0) {
+    pathMap.forEach((path) => path.setAttribute("d", ""));
+    return;
+  }
+  const trunkX = getPipeTrunkX(activeRefs.track, overlayRect);
+  (["extinguished", "property", "lives"] as const).forEach((lane) => {
+    const targetRefs = railMap.get(lane);
+    const path = pathMap.get(lane);
+    if (!targetRefs || !path) {
+      return;
+    }
+    path.setAttribute("d", buildPipePathD(buildPipeRoute(activeRefs.track, targetRefs.track, overlayRect, trunkX)));
   });
+};
+
+const getPolylinePosition = (route: PipeRoutePoint[], progress01: number): PipeRoutePoint => {
+  if (route.length === 0) {
+    return { x: 0, y: 0 };
+  }
+  if (route.length === 1) {
+    return route[0];
+  }
+  const clampedProgress = Math.max(0, Math.min(1, progress01));
+  const segments = route.slice(1).map((point, index) => {
+    const from = route[index];
+    const dx = point.x - from.x;
+    const dy = point.y - from.y;
+    return {
+      from,
+      to: point,
+      length: Math.hypot(dx, dy)
+    };
+  });
+  const totalLength = segments.reduce((sum, segment) => sum + segment.length, 0);
+  if (totalLength <= 0) {
+    return route[route.length - 1];
+  }
+  let remaining = totalLength * clampedProgress;
+  for (const segment of segments) {
+    if (segment.length <= 0) {
+      continue;
+    }
+    if (remaining <= segment.length) {
+      const ratio = remaining / segment.length;
+      return {
+        x: segment.from.x + (segment.to.x - segment.from.x) * ratio,
+        y: segment.from.y + (segment.to.y - segment.from.y) * ratio
+      };
+    }
+    remaining -= segment.length;
+  }
+  return route[route.length - 1];
+};
+
+const advancePipeTransferTokens = (tokens: PipeTransferToken[], deltaMs: number): PipeTransferToken[] => {
+  if (tokens.length === 0 || deltaMs <= 0) {
+    return tokens;
+  }
+  const stepMs = Math.max(0, Math.min(deltaMs, 80));
+  const next: PipeTransferToken[] = [];
+  for (const token of tokens) {
+    const durationMs = (FLOW_EVENT_LIFETIME_SECONDS[token.kind] ?? 1.1) * 1000;
+    const progress01 = token.progress01 + (durationMs > 0 ? stepMs / durationMs : 1);
+    if (progress01 < 1) {
+      next.push({
+        ...token,
+        progress01
+      });
+    }
+  }
+  return next;
+};
+
+const spawnPipeTransferTokens = (
+  tokens: PipeTransferToken[],
+  nextTokenId: { current: number },
+  event: NonNullable<TopBarData["scoring"]>["flowEvents"][number],
+  activeRefs: LedgerRailRefs,
+  targetRefs: LedgerRailRefs,
+  overlayRect: DOMRect,
+  trunkX: number
+): void => {
+  if (!isPipeTransferKind(event.kind)) {
+    return;
+  }
+  const count = Math.max(0, Math.floor(event.deltaCount));
+  if (count <= 0) {
+    return;
+  }
+  const progress01 = getFlowProgress01(event);
+  for (let index = 0; index < count; index += 1) {
+    const offset = (index - (count - 1) * 0.5) * 3;
+    tokens.push({
+      id: nextTokenId.current,
+      kind: event.kind,
+      progress01: Math.max(0, Math.min(0.999, progress01 - index * 0.08)),
+      route: buildPipeRoute(activeRefs.track, targetRefs.track, overlayRect, trunkX, offset)
+    });
+    nextTokenId.current += 1;
+  }
+};
+
+const syncActiveQueueLayer = (
+  container: HTMLElement,
+  settled: HTMLElement,
+  tokens: ActiveQueueToken[],
+  direction: ActiveQueueDirection,
+  nodeMap: Map<number, HTMLElement>
+): void => {
+  const relevantTokens = tokens
+    .filter((token) => token.direction === direction)
+    .sort((left, right) => right.id - left.id);
+  if (relevantTokens.length === 0 || container.clientWidth <= 0) {
+    clearManagedNodes(nodeMap);
+    return;
+  }
+  const activeIds = new Set<number>();
+  const containerWidth = container.clientWidth;
+  const settledWidth = settled.scrollWidth;
+  const tailX = Math.max(0, Math.min(containerWidth - LEDGER_CHIP_WIDTH_PX, settledWidth + LEDGER_BUNDLE_GAP_PX));
+
+  relevantTokens.forEach((token, index) => {
+    activeIds.add(token.id);
+    let wrapper = nodeMap.get(token.id) ?? null;
+    if (!wrapper) {
+      wrapper = document.createElement("div");
+      nodeMap.set(token.id, wrapper);
+    }
+    wrapper.className = `phase-score-active-queue is-${direction}`;
+    syncSingleBundle(
+      wrapper,
+      1,
+      1,
+      direction === "incoming" ? "is-queue-in is-active" : "is-queue-out"
+    );
+
+    let left = tailX;
+    if (direction === "incoming") {
+      const targetX = Math.max(0, Math.min(containerWidth - LEDGER_CHIP_WIDTH_PX, tailX + index * ACTIVE_QUEUE_SLOT_PX));
+      const startX = Math.max(
+        targetX,
+        containerWidth - LEDGER_CHIP_WIDTH_PX - ACTIVE_QUEUE_SLOT_PX * (relevantTokens.length - index - 1)
+      );
+      left = targetX + (1 - token.progress01) * (startX - targetX);
+      wrapper.style.opacity = `${(0.36 + token.progress01 * 0.64).toFixed(3)}`;
+    } else {
+      const startX = Math.max(0, Math.min(containerWidth - LEDGER_CHIP_WIDTH_PX, tailX + index * ACTIVE_QUEUE_SLOT_PX));
+      const endX = Math.max(startX, containerWidth - LEDGER_CHIP_WIDTH_PX - ACTIVE_QUEUE_SLOT_PX * (relevantTokens.length - index - 1));
+      left = startX + token.progress01 * (endX - startX);
+      wrapper.style.opacity = `${(0.84 - token.progress01 * 0.56).toFixed(3)}`;
+    }
+
+    wrapper.style.left = `${left.toFixed(1)}px`;
+    wrapper.style.top = "50%";
+    wrapper.style.setProperty("--queue-progress", token.progress01.toFixed(3));
+    const anchor = container.children[index] ?? null;
+    if (anchor !== wrapper) {
+      container.insertBefore(wrapper, anchor);
+    }
+  });
+
+  Array.from(nodeMap.keys()).forEach((id) => {
+    if (!activeIds.has(id)) {
+      nodeMap.get(id)?.remove();
+      nodeMap.delete(id);
+    }
+  });
+};
+
+const syncPipeTransferTokens = (
+  overlay: HTMLElement,
+  tokens: PipeTransferToken[],
+  nodeMap: Map<number, HTMLElement>
+): void => {
+  if (overlay.getBoundingClientRect().width <= 0 || overlay.getBoundingClientRect().height <= 0) {
+    clearManagedNodes(nodeMap);
+    return;
+  }
+  const activeIds = new Set<number>();
+  tokens.forEach((token, index) => {
+    activeIds.add(token.id);
+    let wrapper = nodeMap.get(token.id) ?? null;
+    if (!wrapper) {
+      wrapper = document.createElement("div");
+      nodeMap.set(token.id, wrapper);
+    }
+    wrapper.className = `phase-score-transfer is-${token.kind}`;
+    const current = getPolylinePosition(token.route, token.progress01);
+    const currentX = current.x;
+    const currentY = current.y;
+    wrapper.style.left = `${currentX.toFixed(1)}px`;
+    wrapper.style.top = `${currentY.toFixed(1)}px`;
+    wrapper.style.setProperty("--transfer-progress", token.progress01.toFixed(3));
+    wrapper.style.opacity = `${(0.24 + Math.sin(token.progress01 * Math.PI) * 0.72).toFixed(3)}`;
+    syncSingleBundle(wrapper, 1, 1, "is-transfer");
+    const anchor = overlay.children[index] ?? null;
+    if (anchor !== wrapper) {
+      overlay.insertBefore(wrapper, anchor);
+    }
+  });
+  Array.from(nodeMap.keys()).forEach((id) => {
+    if (!activeIds.has(id)) {
+      nodeMap.get(id)?.remove();
+      nodeMap.delete(id);
+    }
+  });
+};
+
+type EventClock = {
+  remainingSeconds: number;
+  seenAtMs: number;
+};
+
+const syncEventClock = <T extends { id: number; remainingSeconds: number }>(
+  clock: Map<number, EventClock>,
+  events: T[],
+  now: number
+): void => {
+  const activeIds = new Set<number>();
+  for (const event of events) {
+    activeIds.add(event.id);
+    const tracked = clock.get(event.id);
+    if (!tracked || Math.abs(tracked.remainingSeconds - event.remainingSeconds) > 0.0005) {
+      clock.set(event.id, {
+        remainingSeconds: event.remainingSeconds,
+        seenAtMs: now
+      });
+    }
+  }
+  for (const id of Array.from(clock.keys())) {
+    if (!activeIds.has(id)) {
+      clock.delete(id);
+    }
+  }
+};
+
+const getAnimatedRemainingSeconds = (
+  clock: Map<number, EventClock>,
+  event: { id: number; remainingSeconds: number },
+  now: number
+): number => {
+  const tracked = clock.get(event.id);
+  if (!tracked) {
+    return event.remainingSeconds;
+  }
+  return Math.max(0, tracked.remainingSeconds - (now - tracked.seenAtMs) / 1000);
 };
 
 const syncThreeTestTopClearance = (element: HTMLElement, scoreStrip: HTMLElement): void => {
@@ -408,17 +923,26 @@ export const createTopBar = (): TopBarView => {
   ledgerPills.append(ledgerDifficultyPill, ledgerApprovalPill, ledgerStreakPill, ledgerRiskPill);
   ledgerHeader.appendChild(ledgerPills);
 
+  const ledgerBody = document.createElement("div");
+  ledgerBody.className = "phase-score-ledger-body";
   const ledgerRails = document.createElement("div");
   ledgerRails.className = "phase-score-ledger-rails";
-  const ledgerRailMap = new Map<
-    (typeof LEDGER_RAILS)[number]["lane"],
-    {
-      rail: HTMLElement;
-      settled: HTMLElement;
-      incoming: HTMLElement;
-      count: HTMLElement;
-    }
-  >();
+  const ledgerPipes = document.createElementNS(SVG_NS, "svg");
+  ledgerPipes.classList.add("phase-score-ledger-pipes");
+  ledgerPipes.setAttribute("aria-hidden", "true");
+  const ledgerPipePathMap = new Map<Exclude<LedgerRailId, "active">, SVGPathElement>();
+  (["extinguished", "property", "lives"] as const).forEach((lane) => {
+    const path = document.createElementNS(SVG_NS, "path");
+    path.classList.add("phase-score-pipe", `is-${lane}`);
+    ledgerPipes.appendChild(path);
+    ledgerPipePathMap.set(lane, path);
+  });
+  const ledgerTransfers = document.createElement("div");
+  ledgerTransfers.className = "phase-score-ledger-transfers";
+  const ledgerPipeTransfers = document.createElement("div");
+  ledgerPipeTransfers.className = "phase-score-ledger-transfer-layer";
+  ledgerTransfers.append(ledgerPipeTransfers);
+  const ledgerRailMap = new Map<LedgerRailId, LedgerRailRefs>();
   for (const config of LEDGER_RAILS) {
     const rail = document.createElement("div");
     rail.className = `phase-score-rail is-${config.lane}`;
@@ -431,20 +955,23 @@ export const createTopBar = (): TopBarView => {
     meta.appendChild(label);
 
     const track = document.createElement("div");
-    track.className = "phase-score-track";
+    track.className = `phase-score-track is-${config.lane}`;
     const settled = document.createElement("div");
     settled.className = "phase-score-track-settled";
     const incoming = document.createElement("div");
     incoming.className = "phase-score-track-incoming";
-    track.append(settled, incoming);
+    const fading = document.createElement("div");
+    fading.className = "phase-score-track-fading";
+    track.append(settled, fading, incoming);
 
     const count = document.createElement("span");
     count.className = "phase-score-rail-count";
     rail.append(meta, track, count);
     ledgerRails.appendChild(rail);
-    ledgerRailMap.set(config.lane, { rail, settled, incoming, count });
+    ledgerRailMap.set(config.lane, { rail, track, settled, incoming, fading, count });
   }
-  ledgerBoard.append(ledgerHeader, ledgerRails);
+  ledgerBody.append(ledgerRails, ledgerPipes, ledgerTransfers);
+  ledgerBoard.append(ledgerHeader, ledgerBody);
   scoreStrip.append(legacyScoreContent, ledgerBoard);
 
   const scoreEvents = document.createElement("div");
@@ -460,6 +987,17 @@ export const createTopBar = (): TopBarView => {
   let currentAction: string | null = null;
   let previousApprovalSignature = "";
   let previousRiskSignature = "";
+  const scoreEventClock = new Map<number, EventClock>();
+  const flowEventClock = new Map<number, EventClock>();
+  const activeIncomingQueueMap = new Map<number, HTMLElement>();
+  const activeOutgoingQueueMap = new Map<number, HTMLElement>();
+  const pipeTransferWrapperMap = new Map<number, HTMLElement>();
+  const nextActiveQueueTokenId = { current: 1 };
+  const nextPipeTransferTokenId = { current: 1 };
+  let activeQueueTokens: ActiveQueueToken[] = [];
+  let pipeTransferTokens: PipeTransferToken[] = [];
+  let lastProcessedVisualFlowId = 0;
+  let lastActiveQueueUpdateMs: number | null = null;
   cta.addEventListener("click", () => {
     if (currentAction && ctaHandler) {
       ctaHandler(currentAction);
@@ -498,54 +1036,103 @@ export const createTopBar = (): TopBarView => {
     previousRiskSignature = riskSignature;
   };
 
-  const renderLedgerBoard = (data: NonNullable<TopBarData["scoring"]>): void => {
+  const renderLedgerBoard = (data: NonNullable<TopBarData["scoring"]>, now: number): void => {
     const countsByLane = {
       extinguished: Math.max(0, Math.floor(data.extinguishedCount)),
       property: Math.max(0, Math.floor(data.propertyDamageCount)),
       lives: Math.max(0, Math.floor(data.livesLostCount))
     };
-    const activeEvents = new Map<
-      (typeof LEDGER_RAILS)[number]["lane"],
-      Array<NonNullable<TopBarData["scoring"]>["events"][number]>
-    >();
-    LEDGER_RAILS.forEach(({ lane }) => activeEvents.set(lane, []));
+    const scoreLaneEvents = new Map<Exclude<LedgerRailId, "active">, Array<NonNullable<TopBarData["scoring"]>["events"][number]>>([
+      ["extinguished", []],
+      ["property", []],
+      ["lives", []]
+    ]);
     for (const event of data.events) {
       if (event.lane === "info") {
         continue;
       }
-      const laneEvents = activeEvents.get(event.lane);
+      const laneEvents = scoreLaneEvents.get(event.lane);
       if (laneEvents) {
         laneEvents.push(event);
       }
     }
+
+    const flowEvents = data.flowEvents;
+    const activeFireCount = Math.max(0, Math.floor(data.activeFireCount));
+    const activeRefs = ledgerRailMap.get("active") ?? null;
+    const overlayRect = ledgerPipeTransfers.getBoundingClientRect();
+    const trunkX = activeRefs && overlayRect.width > 0 && overlayRect.height > 0 ? getPipeTrunkX(activeRefs.track, overlayRect) : 16;
+
+    if (lastActiveQueueUpdateMs !== null) {
+      activeQueueTokens = advanceActiveQueueTokens(activeQueueTokens, now - lastActiveQueueUpdateMs);
+      pipeTransferTokens = advancePipeTransferTokens(pipeTransferTokens, now - lastActiveQueueUpdateMs);
+    }
+    lastActiveQueueUpdateMs = now;
+
+    for (const event of flowEvents) {
+      if (event.id <= lastProcessedVisualFlowId) {
+        continue;
+      }
+      if (event.kind === "gain") {
+        applyActiveQueueDelta(activeQueueTokens, nextActiveQueueTokenId, "incoming", event.deltaCount, getFlowProgress01(event));
+      } else if (event.kind === "decay") {
+        applyActiveQueueDelta(activeQueueTokens, nextActiveQueueTokenId, "outgoing", event.deltaCount, getFlowProgress01(event));
+      } else if (isPipeTransferKind(event.kind) && activeRefs && overlayRect.width > 0 && overlayRect.height > 0) {
+        const targetLane = getFlowTargetLane(event.kind);
+        const targetRefs = targetLane ? ledgerRailMap.get(targetLane) ?? null : null;
+        if (targetRefs) {
+          spawnPipeTransferTokens(
+            pipeTransferTokens,
+            nextPipeTransferTokenId,
+            event,
+            activeRefs,
+            targetRefs,
+            overlayRect,
+            trunkX
+          );
+        }
+      }
+      lastProcessedVisualFlowId = Math.max(lastProcessedVisualFlowId, event.id);
+    }
+
+    const queuedIncomingCount = activeQueueTokens.reduce(
+      (sum, token) => sum + (token.direction === "incoming" ? 1 : 0),
+      0
+    );
 
     for (const { lane } of LEDGER_RAILS) {
       const refs = ledgerRailMap.get(lane);
       if (!refs) {
         continue;
       }
-      const laneEvents = activeEvents.get(lane) ?? [];
-      const pendingCount = laneEvents.reduce((sum, event) => sum + Math.max(0, Math.floor(event.deltaCount)), 0);
-      const settledCount = Math.max(0, countsByLane[lane] - pendingCount);
+      if (lane !== "active" && refs.fading.childElementCount > 0) {
+        refs.fading.replaceChildren();
+      }
+
+      if (lane === "active") {
+        refs.count.textContent = activeFireCount.toLocaleString();
+        syncSettledRailBundles(refs.settled, Math.max(0, activeFireCount - queuedIncomingCount));
+        refs.rail.classList.toggle(
+          "is-hot",
+          flowEvents.some((event) => event.kind === "property" || event.kind === "lives")
+        );
+        syncActiveQueueLayer(refs.incoming, refs.settled, activeQueueTokens, "incoming", activeIncomingQueueMap);
+        syncActiveQueueLayer(refs.fading, refs.settled, activeQueueTokens, "outgoing", activeOutgoingQueueMap);
+        continue;
+      }
+
+      const laneEvents = scoreLaneEvents.get(lane) ?? [];
       refs.count.textContent = countsByLane[lane].toLocaleString();
-      renderLedgerBundles(refs.settled, settledCount, "is-settled");
-      refs.incoming.innerHTML = "";
+      syncSettledRailBundles(refs.settled, countsByLane[lane]);
       refs.rail.classList.toggle(
         "is-hot",
         laneEvents.some((event) => event.severity === "negative" && event.remainingSeconds > 0)
       );
-
-      laneEvents.forEach((event) => {
-        const wrapper = document.createElement("div");
-        wrapper.className = `phase-score-incoming-group is-${event.severity}`;
-        const lifetime = SCORE_EVENT_LIFETIME_SECONDS[event.severity] ?? 1.1;
-        const progress = Math.max(0, Math.min(1, 1 - event.remainingSeconds / lifetime));
-        wrapper.style.setProperty("--incoming-progress", progress.toFixed(3));
-        renderLedgerBundles(wrapper, Math.max(0, Math.floor(event.deltaCount)), "is-incoming", 9);
-        refs.incoming.appendChild(wrapper);
-      });
-      layoutIncomingLedgerGroups(refs.settled, refs.incoming);
+      refs.incoming.replaceChildren();
+      refs.fading.replaceChildren();
     }
+    syncLedgerPipePaths(ledgerPipes, ledgerPipePathMap, ledgerRailMap);
+    syncPipeTransferTokens(ledgerPipeTransfers, pipeTransferTokens, pipeTransferWrapperMap);
   };
 
   const updateYearMarkers = (startDay: number, yearDays: number, windowDays: number): void => {
@@ -692,8 +1279,26 @@ export const createTopBar = (): TopBarView => {
         currentAction = null;
       }
       if (data.scoring) {
+        const now = performance.now();
+        syncEventClock(scoreEventClock, data.scoring.events, now);
+        syncEventClock(flowEventClock, data.scoring.flowEvents, now);
+        const animatedScoring = {
+          ...data.scoring,
+          events: data.scoring.events
+            .map((event) => ({
+              ...event,
+              remainingSeconds: getAnimatedRemainingSeconds(scoreEventClock, event, now)
+            }))
+            .filter((event) => event.remainingSeconds > 0),
+          flowEvents: data.scoring.flowEvents
+            .map((event) => ({
+              ...event,
+              remainingSeconds: getAnimatedRemainingSeconds(flowEventClock, event, now)
+            }))
+            .filter((event) => event.remainingSeconds > 0)
+        };
         scoreStrip.classList.remove("is-hidden");
-        applyMultiplierLabels(data.scoring, isThreeTest);
+        applyMultiplierLabels(animatedScoring, isThreeTest);
         if (isThreeTest) {
           scoreCounter.classList.add("is-hidden");
           scoreCounter.textContent = "";
@@ -701,30 +1306,39 @@ export const createTopBar = (): TopBarView => {
           ledgerBoard.classList.remove("is-hidden");
           scoreEvents.classList.add("is-hidden");
           scoreEvents.innerHTML = "";
-          renderLedgerBoard(data.scoring);
+          renderLedgerBoard(animatedScoring, now);
         } else {
+          activeQueueTokens = [];
+          pipeTransferTokens = [];
+          lastProcessedVisualFlowId = 0;
+          lastActiveQueueUpdateMs = null;
+          nextActiveQueueTokenId.current = 1;
+          nextPipeTransferTokenId.current = 1;
+          clearManagedNodes(activeIncomingQueueMap);
+          clearManagedNodes(activeOutgoingQueueMap);
+          clearManagedNodes(pipeTransferWrapperMap);
           scoreCounter.classList.remove("is-hidden");
-          scoreCounter.textContent = `Score ${Math.round(data.scoring.score).toLocaleString()}`;
+          scoreCounter.textContent = `Score ${Math.round(animatedScoring.score).toLocaleString()}`;
           legacyScoreContent.classList.remove("is-hidden");
           ledgerBoard.classList.add("is-hidden");
-          scoreNumber.textContent = Math.round(data.scoring.score).toLocaleString();
-          streakLabel.textContent = `No-loss streaks: Houses ${data.scoring.noHouseLossDays}d | Lives ${data.scoring.noLifeLossDays}d`;
-          if (data.scoring.nextApprovalTier && data.scoring.nextApprovalThreshold01 !== null) {
-            approvalMeta.textContent = `Approval Tier ${data.scoring.approvalTier} -> ${data.scoring.nextApprovalTier} at ${Math.round(
-              data.scoring.nextApprovalThreshold01 * 100
-            )}% (Risk ${data.scoring.riskTier})`;
+          scoreNumber.textContent = Math.round(animatedScoring.score).toLocaleString();
+          streakLabel.textContent = `No-loss streaks: Houses ${animatedScoring.noHouseLossDays}d | Lives ${animatedScoring.noLifeLossDays}d`;
+          if (animatedScoring.nextApprovalTier && animatedScoring.nextApprovalThreshold01 !== null) {
+            approvalMeta.textContent = `Approval Tier ${animatedScoring.approvalTier} -> ${animatedScoring.nextApprovalTier} at ${Math.round(
+              animatedScoring.nextApprovalThreshold01 * 100
+            )}% (Risk ${animatedScoring.riskTier})`;
           } else {
-            approvalMeta.textContent = `Approval Tier ${data.scoring.approvalTier} (max) | Risk ${data.scoring.riskTier}`;
+            approvalMeta.textContent = `Approval Tier ${animatedScoring.approvalTier} (max) | Risk ${animatedScoring.riskTier}`;
           }
           approvalProgressFill.style.width = `${Math.round(
-            Math.max(0, Math.min(1, data.scoring.nextTierProgress01)) * 100
+            Math.max(0, Math.min(1, animatedScoring.nextTierProgress01)) * 100
           )}%`;
 
           scoreEvents.innerHTML = "";
-          if (data.scoring.events.length > 0) {
+          if (animatedScoring.events.length > 0) {
             scoreEvents.classList.remove("is-hidden");
-            for (let i = data.scoring.events.length - 1; i >= 0; i -= 1) {
-              const event = data.scoring.events[i];
+            for (let i = animatedScoring.events.length - 1; i >= 0; i -= 1) {
+              const event = animatedScoring.events[i];
               const row = document.createElement("div");
               row.className = `phase-score-event is-${event.severity}`;
               const parsed = formatScoreEvent(event);
@@ -751,6 +1365,17 @@ export const createTopBar = (): TopBarView => {
           }
         }
       } else {
+        scoreEventClock.clear();
+        flowEventClock.clear();
+        activeQueueTokens = [];
+        pipeTransferTokens = [];
+        lastProcessedVisualFlowId = 0;
+        lastActiveQueueUpdateMs = null;
+        nextActiveQueueTokenId.current = 1;
+        nextPipeTransferTokenId.current = 1;
+        clearManagedNodes(activeIncomingQueueMap);
+        clearManagedNodes(activeOutgoingQueueMap);
+        clearManagedNodes(pipeTransferWrapperMap);
         scoreCounter.classList.add("is-hidden");
         scoreStrip.classList.add("is-hidden");
         scoreEvents.classList.add("is-hidden");

@@ -1,6 +1,7 @@
 
 import type { WorldState } from "../../core/state.js";
 import type { Tile } from "../../core/types.js";
+import { clearVegetationState } from "../../core/vegetation.js";
 import { getFuelProfiles } from "../../core/tiles.js";
 import { destroyHouse } from "../../core/towns.js";
 import { clamp } from "../../core/utils.js";
@@ -41,6 +42,7 @@ export function burnTile(state: WorldState, tile: Tile, fireDelta: number): bool
     tile.type = "ash";
     tile.fuel = 0;
     tile.ashAge = 0;
+    clearVegetationState(tile);
     tile.dominantTreeType = null;
     tile.treeType = null;
     tile.heat *= 0.4;
@@ -50,6 +52,7 @@ export function burnTile(state: WorldState, tile: Tile, fireDelta: number): bool
     }
     state.terrainDirty = true;
     state.terrainTypeRevision += 1;
+    state.vegetationRevision += 1;
     const ashProfile = fuelProfiles.ash;
     tile.spreadBoost = ashProfile.spreadBoost;
     tile.heatTransferCap = ashProfile.heatTransferCap;

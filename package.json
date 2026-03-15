@@ -11,6 +11,8 @@
     "build": "tsc --project tsconfig.json",
     "predev": "npm run generate-fuel-profiles",
     "dev": "node scripts/dev-server.cjs",
+    "fire:regression": "npm run build && node scripts/fire-regression.mjs",
+    "growth:regression": "npm run build && node scripts/growth-regression.mjs",
     "mapgen:regression": "npm run build && node scripts/mapgen-regression.mjs",
     "mapgen:regression:full": "npm run build && node scripts/mapgen-regression.mjs --full",
     "mapgen:regression:baseline": "npm run build && node scripts/mapgen-regression.mjs --write-baseline",

@@ -3,7 +3,7 @@ import type { WorldState } from "../../../core/state.js";
 import type { InputState } from "../../../core/inputState.js";
 import type { UiState } from "../../../core/uiState.js";
 import type { RenderState } from "../../../render/renderState.js";
-import { TIME_SPEED_OPTIONS, ZOOM_STEP } from "../../../core/config.js";
+import { ZOOM_STEP } from "../../../core/config.js";
 import { inBounds } from "../../../core/grid.js";
 import { screenToWorld, zoomAtPointer } from "../../../render/inputProjection.js";
 import { setStatus } from "../../../core/state.js";
@@ -11,10 +11,14 @@ import {
   advancePhase,
   beginFireSeason,
   cancelSkipToNextFire,
+  closeAnnualReport,
+  getActiveTimeSpeedOptions,
+  getActiveTimeSpeedValue,
   handleDeployAction,
   handleEscape,
   isSkipToNextFireAvailable,
   requestSkipToNextFire,
+  syncActiveTimeSpeedIndex,
   togglePause
 } from "../../../sim/index.js";
 import {
@@ -385,9 +389,8 @@ export const bindPhaseUi = ({
     if (isOverlayLocked()) {
       return;
     }
-    if (actionId === "continue" && state.phase === "budget") {
-      advancePhase(state, rng);
-      state.paused = false;
+    if (actionId === "continue" && state.annualReportOpen) {
+      closeAnnualReport(state);
     }
   };
   phaseUi.state.on("cta", onCta);
@@ -539,22 +542,25 @@ export const bindPhaseUi = ({
   const runUiAction = (action: string, actionTarget?: HTMLElement | null, event?: Event): void => {
     playUiActionAudio(action);
     if (action === "continue") {
-      if (state.phase === "budget") {
-        advancePhase(state, rng);
-        state.paused = false;
+      if (state.annualReportOpen) {
+        closeAnnualReport(state);
       }
       return;
     }
     const speedMatch = action.match(/^time-speed-(\d+)$/);
     if (speedMatch) {
       const nextIndex = Number(speedMatch[1]);
-      if (!Number.isNaN(nextIndex) && nextIndex >= 0 && nextIndex < TIME_SPEED_OPTIONS.length) {
+      const activeOptions = getActiveTimeSpeedOptions(state);
+      if (!Number.isNaN(nextIndex) && nextIndex >= 0 && nextIndex < activeOptions.length) {
         gate("timeControl", () => {
           if (state.skipToNextFire) {
             cancelSkipToNextFire(state, "Skip to next fire cancelled.");
           }
-          state.timeSpeedIndex = nextIndex;
-          setStatus(state, `Time speed ${TIME_SPEED_OPTIONS[nextIndex]}x.`);
+          syncActiveTimeSpeedIndex(state, nextIndex);
+          setStatus(
+            state,
+            `${state.simTimeMode === "incident" ? "Incident" : "Strategic"} time ${getActiveTimeSpeedValue(state)}x.`
+          );
           phaseUi.sync(state, inputState);
         });
       }

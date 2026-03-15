@@ -15,6 +15,7 @@ const { createInitialState, resetState } = await import(distImport(["core", "sta
 const { RNG } = await import(distImport(["core", "rng.js"]));
 const { MAP_SIZE_PRESETS } = await import(distImport(["core", "config.js"]));
 const { HOUSE_VARIANTS } = await import(distImport(["core", "buildingFootprints.js"]));
+const { getVegetationMaturity01 } = await import(distImport(["core", "vegetation.js"]));
 const { generateMap } = await import(distImport(["mapgen", "index.js"]));
 const { analyzeRoadSurfaceMetrics } = await import(distImport(["mapgen", "roads.js"]));
 
@@ -529,6 +530,8 @@ const runCase = async (sizeId, seed) => {
   let houses = 0;
   let roads = 0;
   let river = 0;
+  let forestAgeSum = 0;
+  const forestMaturities = [];
   let elevationMin = Number.POSITIVE_INFINITY;
   let elevationMax = Number.NEGATIVE_INFINITY;
   let elevationSum = 0;
@@ -544,6 +547,8 @@ const runCase = async (sizeId, seed) => {
       water += 1;
     } else if (tile.type === "forest") {
       forest += 1;
+      forestAgeSum += tile.vegetationAgeYears ?? 0;
+      forestMaturities.push(getVegetationMaturity01(tile.type, tile.vegetationAgeYears ?? 0));
     } else if (tile.type === "house") {
       houses += 1;
     } else if (tile.type === "road") {
@@ -559,6 +564,11 @@ const runCase = async (sizeId, seed) => {
   const roadMetrics = analyzeRoadEdgeQuality(state);
   const roadSurfaceMetrics = analyzeRoadSurfaceMetrics(state);
   const coastMetrics = analyzeCoastalClassification(state);
+  forestMaturities.sort((a, b) => a - b);
+  const forestMaturityP95 =
+    forestMaturities.length > 0
+      ? forestMaturities[Math.min(forestMaturities.length - 1, Math.floor((forestMaturities.length - 1) * 0.95))]
+      : 0;
   const biomeSpreadMs = phaseTimingsMs["biome:spread"] ?? 0;
   const biomeClassifyMs = phaseTimingsMs["biome:classify"] ?? 0;
   return {
@@ -570,6 +580,8 @@ const runCase = async (sizeId, seed) => {
     elevationMean: Number((elevationSum / total).toFixed(4)),
     waterPct: Number(((water / total) * 100).toFixed(2)),
     forestPct: Number(((forest / total) * 100).toFixed(2)),
+    forestAgeMean: Number((forestAgeSum / Math.max(1, forest)).toFixed(2)),
+    forestMaturityP95: Number(forestMaturityP95.toFixed(3)),
     houseCount: houses,
     requestedHouseCount: state.settlementRequestedHouses ?? houses,
     placedHouseCount: state.settlementPlacedHouses ?? houses,
@@ -594,7 +606,7 @@ const runAll = async () => {
       const metrics = await runCase(sizeId, seed);
       results.push(metrics);
       console.log(
-        `[mapgen] size=${metrics.sizeId} seed=${metrics.seed} ms=${metrics.durationMs.toFixed(2)} biome=${metrics.biomeSpreadClassifyMs.toFixed(2)}ms water=${metrics.waterPct.toFixed(2)}% forest=${metrics.forestPct.toFixed(2)}% patches=${metrics.forestPatchCount} meanPatch=${metrics.forestPatchMean} p95Patch=${metrics.forestPatchP95} houses=${metrics.houseCount} placed=${metrics.placedHouseCount}/${metrics.requestedHouseCount} padReliefMax=${metrics.settlementPadReliefMax.toFixed(4)} padReliefMean=${metrics.settlementPadReliefMean.toFixed(4)} roads=${metrics.roadCount} rivers=${metrics.riverCount} roadIgnoredDiag=${metrics.ignoredDiagonalCount} roadUnmatched=${metrics.unmatchedPatternCount} roadGrade=${metrics.maxRoadGrade.toFixed(3)} roadCrossfall=${metrics.maxRoadCrossfall.toFixed(3)} roadGradeChange=${metrics.maxRoadGradeChange.toFixed(3)} roadWalls=${metrics.wallEdgeCount} riverDiagOnly=${metrics.riverDiagOnlyLinks} riverIso=${metrics.riverIsolatedCells} riverOrthRatio=${metrics.riverOrthConnectivityRatio.toFixed(4)} riverComps=${metrics.riverComponentCount} riverDetachedComps=${metrics.detachedRiverComponents} riverDetachedCells=${metrics.detachedRiverCells} coastNatural=${metrics.coastalNaturalCount} coastBeach=${metrics.coastalBeachCount} coastRocky=${metrics.coastalRockyCount} coastOther=${metrics.coastalOtherCount}`
+        `[mapgen] size=${metrics.sizeId} seed=${metrics.seed} ms=${metrics.durationMs.toFixed(2)} biome=${metrics.biomeSpreadClassifyMs.toFixed(2)}ms water=${metrics.waterPct.toFixed(2)}% forest=${metrics.forestPct.toFixed(2)}% forestAgeMean=${metrics.forestAgeMean.toFixed(2)} forestMaturityP95=${metrics.forestMaturityP95.toFixed(3)} patches=${metrics.forestPatchCount} meanPatch=${metrics.forestPatchMean} p95Patch=${metrics.forestPatchP95} houses=${metrics.houseCount} placed=${metrics.placedHouseCount}/${metrics.requestedHouseCount} padReliefMax=${metrics.settlementPadReliefMax.toFixed(4)} padReliefMean=${metrics.settlementPadReliefMean.toFixed(4)} roads=${metrics.roadCount} rivers=${metrics.riverCount} roadIgnoredDiag=${metrics.ignoredDiagonalCount} roadUnmatched=${metrics.unmatchedPatternCount} roadGrade=${metrics.maxRoadGrade.toFixed(3)} roadCrossfall=${metrics.maxRoadCrossfall.toFixed(3)} roadGradeChange=${metrics.maxRoadGradeChange.toFixed(3)} roadWalls=${metrics.wallEdgeCount} riverDiagOnly=${metrics.riverDiagOnlyLinks} riverIso=${metrics.riverIsolatedCells} riverOrthRatio=${metrics.riverOrthConnectivityRatio.toFixed(4)} riverComps=${metrics.riverComponentCount} riverDetachedComps=${metrics.detachedRiverComponents} riverDetachedCells=${metrics.detachedRiverCells} coastNatural=${metrics.coastalNaturalCount} coastBeach=${metrics.coastalBeachCount} coastRocky=${metrics.coastalRockyCount} coastOther=${metrics.coastalOtherCount}`
       );
     }
   }
@@ -656,6 +668,10 @@ const compareAgainstBaseline = async (results) => {
       console.error(
         `[mapgen] settlement pad relief too high for ${key}: ${result.settlementPadReliefMax.toFixed(4)}`
       );
+    }
+    if (result.forestMaturityP95 >= 0.95) {
+      failures += 1;
+      console.error(`[mapgen] forest maturity p95 too high for ${key}: ${result.forestMaturityP95.toFixed(3)}`);
     }
     if (hasBaseline) {
       const expected = index.get(key);

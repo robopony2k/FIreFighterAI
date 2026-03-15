@@ -24,8 +24,10 @@ import { getCharacterDefinition, getCharacterFirebreakCost } from "../core/chara
 import { inBounds, indexFor } from "../core/grid.js";
 import { applyFuel } from "../core/tiles.js";
 import { syncTileSoAIndex } from "../core/tileCache.js";
+import { clearVegetationState } from "../core/vegetation.js";
 import { findPath, getMoveSpeedMultiplier, isPassable } from "./pathing.js";
 import { emitWaterSpray } from "./particles.js";
+import { queueScoreFlowEvent } from "./scoring.js";
 
 const FIRST_NAMES = ["Alex", "Casey", "Drew", "Jordan", "Parker", "Quinn", "Riley", "Sawyer", "Taylor", "Wyatt"];
 const LAST_NAMES = ["Cedar", "Hawk", "Keel", "Marsh", "Reed", "Stone", "Sutter", "Vale", "Wells", "Yates"];
@@ -583,9 +585,8 @@ export function clearFuelAt(state: WorldState, rng: RNG, tileX: number, tileY: n
   }
   tile.type = "firebreak";
   state.terrainTypeRevision += 1;
-  tile.canopy = 0;
-  tile.canopyCover = 0;
-  tile.stemDensity = 0;
+  state.vegetationRevision += 1;
+  clearVegetationState(tile);
   tile.dominantTreeType = null;
   tile.treeType = null;
   tile.ashAge = 0;
@@ -1261,6 +1262,9 @@ export function applyUnitHazards(state: WorldState, rng: RNG, delta: number): vo
     const baseRisk = unit.kind === "truck" ? 0.06 : 0.1;
     const risk = baseRisk * (fireValue - UNIT_LOSS_FIRE_THRESHOLD + 0.15) * (1 - resilience) * delta;
     if (rng.next() < risk) {
+      if (unit.kind === "firefighter") {
+        queueScoreFlowEvent(state, "lives", 1, undefined, Math.floor(unit.x), Math.floor(unit.y));
+      }
       if (rosterEntry) {
         rosterEntry.status = "lost";
         if (rosterEntry.kind === "truck") {
@@ -1327,232 +1331,301 @@ export function recallUnits(state: WorldState): void {
   });
 }
 
-export function applyExtinguish(state: WorldState, effects: EffectsState, rng: RNG, delta: number): void {
-  const powerMultiplier = delta;
-  const suppressionTimestamp = state.careerDay;
-  effects.waterStreams = [];
-  const clearScheduled = (idx: number): void => {
-    if (state.tileIgniteAt[idx] < Number.POSITIVE_INFINITY) {
-      state.tileIgniteAt[idx] = Number.POSITIVE_INFINITY;
-      state.fireScheduledCount = Math.max(0, state.fireScheduledCount - 1);
+type SuppressionProfile = {
+  radius: number;
+  power: number;
+  suppressionRadius: number;
+  hoseRange: number;
+};
+
+const getSuppressionProfile = (unit: Unit): SuppressionProfile => {
+  let radius = unit.radius;
+  let power = unit.power;
+
+  if (unit.kind === "firefighter") {
+    switch (unit.formation) {
+      case "narrow":
+        // Precision mode: tighter stream, longer throw, higher knockdown.
+        radius *= 1.22;
+        power *= 1.34;
+        break;
+      case "wide":
+        // Suppression mode: broad coverage with lower per-tile intensity.
+        radius *= 1.56;
+        power *= 0.62;
+        break;
+      case "medium":
+      default:
+        break;
     }
+  }
+
+  const suppressionRadius = radius + 0.18;
+  return {
+    radius,
+    power,
+    suppressionRadius,
+    hoseRange: Math.max(suppressionRadius + 0.5, unit.hoseRange)
   };
+};
+
+const clearScheduledIgnition = (state: WorldState, idx: number): void => {
+  if (state.tileIgniteAt[idx] < Number.POSITIVE_INFINITY) {
+    state.tileIgniteAt[idx] = Number.POSITIVE_INFINITY;
+    state.fireScheduledCount = Math.max(0, state.fireScheduledCount - 1);
+  }
+};
+
+const resolvePreferredAim = (unit: Unit): Point | null =>
+  unit.attackTarget ??
+  unit.sprayTarget ??
+  (unit.target && unit.pathIndex < unit.path.length
+    ? {
+        x: unit.target.x + 0.5,
+        y: unit.target.y + 0.5
+      }
+    : null);
+
+const resolveSuppressionImpactTarget = (
+  state: WorldState,
+  unit: Unit,
+  profile: SuppressionProfile
+): Point | null => {
+  const preferredAim = resolvePreferredAim(unit);
+  let forwardDirX = 1;
+  let forwardDirY = 0;
+  if (preferredAim) {
+    const aimMag = Math.hypot(preferredAim.x - unit.x, preferredAim.y - unit.y);
+    if (aimMag > 0.0001) {
+      forwardDirX = (preferredAim.x - unit.x) / aimMag;
+      forwardDirY = (preferredAim.y - unit.y) / aimMag;
+    }
+  }
+
+  const searchMinX = Math.max(0, Math.floor(unit.x - profile.hoseRange));
+  const searchMaxX = Math.min(state.grid.cols - 1, Math.ceil(unit.x + profile.hoseRange));
+  const searchMinY = Math.max(0, Math.floor(unit.y - profile.hoseRange));
+  const searchMaxY = Math.min(state.grid.rows - 1, Math.ceil(unit.y + profile.hoseRange));
+  let bestFireTarget: Point | null = null;
+  let bestFireScore = 0;
+  let bestHeatTarget: Point | null = null;
+  let bestHeatScore = 0;
+
+  for (let y = searchMinY; y <= searchMaxY; y += 1) {
+    for (let x = searchMinX; x <= searchMaxX; x += 1) {
+      const tileCenterX = x + 0.5;
+      const tileCenterY = y + 0.5;
+      const dist = Math.hypot(unit.x - tileCenterX, unit.y - tileCenterY);
+      if (dist > profile.hoseRange) {
+        continue;
+      }
+      const idx = indexFor(state.grid, x, y);
+      const fireValue = state.tileFire[idx];
+      const heatValue = state.tileHeat[idx];
+      if (fireValue <= 0 && heatValue <= 0.05) {
+        continue;
+      }
+      const forwardDot =
+        dist > 0.0001 ? ((tileCenterX - unit.x) * forwardDirX + (tileCenterY - unit.y) * forwardDirY) / dist : 1;
+      if (preferredAim && forwardDot < -0.05) {
+        continue;
+      }
+      const forwardWeight = preferredAim ? clamp((forwardDot + 0.1) / 1.1, 0, 1) : 1;
+      if (forwardWeight <= 0) {
+        continue;
+      }
+      const distanceWeight = clamp(1 - dist / Math.max(0.0001, profile.hoseRange), 0, 1);
+      const targetDistance = preferredAim ? Math.hypot(tileCenterX - preferredAim.x, tileCenterY - preferredAim.y) : 0;
+      const targetWeight =
+        preferredAim ? clamp(1 - targetDistance / Math.max(profile.hoseRange * 0.9, 0.0001), 0, 1) : 1;
+      const areaScore = getClusterSuppressionScore(
+        state,
+        tileCenterX,
+        tileCenterY,
+        Math.max(1.05, Math.min(2.1, profile.suppressionRadius * 1.15))
+      );
+      const areaWeight = clamp(areaScore / 4.2, 0, 1);
+      const stickyDistance = unit.sprayTarget
+        ? Math.hypot(tileCenterX - unit.sprayTarget.x, tileCenterY - unit.sprayTarget.y)
+        : 0;
+      const stickyWeight = unit.sprayTarget
+        ? clamp(1 - stickyDistance / Math.max(profile.hoseRange * 0.5, profile.suppressionRadius * 2, 0.9), 0, 1)
+        : 0;
+      const combinedWeight =
+        (0.28 + forwardWeight * 0.72) *
+        (0.3 + distanceWeight * 0.7) *
+        (0.42 + areaWeight * 0.58) *
+        (0.34 + targetWeight * 0.66) *
+        (unit.sprayTarget ? 0.84 + stickyWeight * 0.52 : 1);
+      if (fireValue > 0) {
+        const fireScore = (0.2 + fireValue) * combinedWeight;
+        if (fireScore > bestFireScore) {
+          bestFireScore = fireScore;
+          bestFireTarget = { x: tileCenterX, y: tileCenterY };
+        }
+      }
+      if (heatValue > 0.05) {
+        const heatScore = (0.15 + heatValue * 0.85) * combinedWeight;
+        if (heatScore > bestHeatScore) {
+          bestHeatScore = heatScore;
+          bestHeatTarget = { x: tileCenterX, y: tileCenterY };
+        }
+      }
+    }
+  }
+
+  const rawImpactTarget = bestFireTarget ?? bestHeatTarget;
+  if (!rawImpactTarget) {
+    return null;
+  }
+
+  const refineRadius = Math.max(1.1, Math.min(profile.suppressionRadius * 1.55, profile.hoseRange * 0.42));
+  const refineMinX = Math.max(0, Math.floor(rawImpactTarget.x - refineRadius));
+  const refineMaxX = Math.min(state.grid.cols - 1, Math.ceil(rawImpactTarget.x + refineRadius));
+  const refineMinY = Math.max(0, Math.floor(rawImpactTarget.y - refineRadius));
+  const refineMaxY = Math.min(state.grid.rows - 1, Math.ceil(rawImpactTarget.y + refineRadius));
+  let refinedWeightTotal = 0;
+  let refinedTargetX = 0;
+  let refinedTargetY = 0;
+
+  for (let y = refineMinY; y <= refineMaxY; y += 1) {
+    for (let x = refineMinX; x <= refineMaxX; x += 1) {
+      const tileCenterX = x + 0.5;
+      const tileCenterY = y + 0.5;
+      const distToCenter = Math.hypot(rawImpactTarget.x - tileCenterX, rawImpactTarget.y - tileCenterY);
+      if (distToCenter > refineRadius) {
+        continue;
+      }
+      const idx = indexFor(state.grid, x, y);
+      const fireValue = state.tileFire[idx];
+      const heatValue = state.tileHeat[idx];
+      if (fireValue <= 0 && heatValue <= 0.05) {
+        continue;
+      }
+      const distanceWeight = clamp(1 - distToCenter / Math.max(0.0001, refineRadius), 0, 1);
+      const stickyDistance = unit.sprayTarget
+        ? Math.hypot(tileCenterX - unit.sprayTarget.x, tileCenterY - unit.sprayTarget.y)
+        : 0;
+      const stickyWeight = unit.sprayTarget
+        ? clamp(1 - stickyDistance / Math.max(refineRadius * 2.1, 0.9), 0, 1)
+        : 0;
+      const weight =
+        (fireValue * 1.45 + heatValue * 0.82) *
+        distanceWeight *
+        (unit.sprayTarget ? 0.9 + stickyWeight * 0.24 : 1);
+      if (weight <= 0) {
+        continue;
+      }
+      refinedWeightTotal += weight;
+      refinedTargetX += tileCenterX * weight;
+      refinedTargetY += tileCenterY * weight;
+    }
+  }
+
+  return refinedWeightTotal > 0.0001
+    ? { x: refinedTargetX / refinedWeightTotal, y: refinedTargetY / refinedWeightTotal }
+    : rawImpactTarget;
+};
+
+const applySuppressionAtTarget = (
+  state: WorldState,
+  unit: Unit,
+  impactTarget: Point,
+  profile: SuppressionProfile,
+  powerMultiplier: number,
+  suppressionTimestamp: number
+): void => {
+  const impactMinX = Math.max(0, Math.floor(impactTarget.x - profile.suppressionRadius));
+  const impactMaxX = Math.min(state.grid.cols - 1, Math.ceil(impactTarget.x + profile.suppressionRadius));
+  const impactMinY = Math.max(0, Math.floor(impactTarget.y - profile.suppressionRadius));
+  const impactMaxY = Math.min(state.grid.rows - 1, Math.ceil(impactTarget.y + profile.suppressionRadius));
+  const radiusSafe = Math.max(0.0001, profile.suppressionRadius);
+
+  for (let y = impactMinY; y <= impactMaxY; y += 1) {
+    for (let x = impactMinX; x <= impactMaxX; x += 1) {
+      const tileCenterX = x + 0.5;
+      const tileCenterY = y + 0.5;
+      const dist = Math.hypot(impactTarget.x - tileCenterX, impactTarget.y - tileCenterY);
+      if (dist > profile.suppressionRadius) {
+        continue;
+      }
+      const idx = indexFor(state.grid, x, y);
+      const tile = state.tiles[idx];
+      const proximityWeight = Math.max(0, 1 - dist / radiusSafe);
+      let heatValue = state.tileHeat[idx];
+      if (heatValue > 0) {
+        const prevHeatValue = heatValue;
+        heatValue = Math.max(0, heatValue - profile.power * 1.1 * powerMultiplier * (0.45 + proximityWeight * 0.55));
+        state.tileHeat[idx] = heatValue;
+        tile.heat = heatValue;
+        if (heatValue < prevHeatValue && idx < state.scoring.lastSuppressedAt.length) {
+          state.scoring.lastSuppressedAt[idx] = suppressionTimestamp;
+        }
+        if (heatValue < tile.ignitionPoint) {
+          clearScheduledIgnition(state, idx);
+        }
+      }
+      let fireValue = state.tileFire[idx];
+      if (fireValue > 0) {
+        const before = fireValue;
+        fireValue = Math.max(0, fireValue - profile.power * powerMultiplier * (0.45 + proximityWeight * 0.55));
+        state.tileFire[idx] = fireValue;
+        tile.fire = fireValue;
+        if (fireValue < before && idx < state.scoring.lastSuppressedAt.length) {
+          state.scoring.lastSuppressedAt[idx] = suppressionTimestamp;
+        }
+        if (before > 0 && fireValue === 0) {
+          heatValue = Math.min(state.tileHeat[idx], tile.ignitionPoint * 0.25);
+          state.tileHeat[idx] = heatValue;
+          tile.heat = heatValue;
+          clearScheduledIgnition(state, idx);
+          if (state.tileFuel[idx] > 0) {
+            state.containedCount += 1;
+          }
+        }
+      }
+    }
+  }
+};
+
+export function prepareExtinguish(state: WorldState, effects: EffectsState, rng: RNG): void {
+  effects.waterStreams = [];
   state.units.forEach((unit) => {
     if (unit.kind === "firefighter" && unit.carrierId !== null) {
       setSprayTarget(unit, null);
       return;
     }
-
-    let radius = unit.radius;
-    let power = unit.power;
-
-    if (unit.kind === "firefighter") {
-      switch (unit.formation) {
-        case "narrow":
-          // Precision mode: tighter stream, longer throw, higher knockdown.
-          radius *= 1.22;
-          power *= 1.34;
-          break;
-        case "wide":
-          // Suppression mode: broad coverage with lower per-tile intensity.
-          radius *= 1.56;
-          power *= 0.62;
-          break;
-        case "medium":
-        default:
-          break;
-      }
-    }
-
-    const suppressionRadius = radius + 0.18;
-    const hoseRange = Math.max(suppressionRadius + 0.5, unit.hoseRange);
-    const preferredAim =
-      unit.attackTarget ??
-      unit.sprayTarget ??
-      (unit.target && unit.pathIndex < unit.path.length
-        ? {
-            x: unit.target.x + 0.5,
-            y: unit.target.y + 0.5
-          }
-        : null);
-    let forwardDirX = 1;
-    let forwardDirY = 0;
-    if (preferredAim) {
-      const aimMag = Math.hypot(preferredAim.x - unit.x, preferredAim.y - unit.y);
-      if (aimMag > 0.0001) {
-        forwardDirX = (preferredAim.x - unit.x) / aimMag;
-        forwardDirY = (preferredAim.y - unit.y) / aimMag;
-      }
-    }
-
-    const searchMinX = Math.max(0, Math.floor(unit.x - hoseRange));
-    const searchMaxX = Math.min(state.grid.cols - 1, Math.ceil(unit.x + hoseRange));
-    const searchMinY = Math.max(0, Math.floor(unit.y - hoseRange));
-    const searchMaxY = Math.min(state.grid.rows - 1, Math.ceil(unit.y + hoseRange));
-    let bestFireTarget: Point | null = null;
-    let bestFireScore = 0;
-    let bestHeatTarget: Point | null = null;
-    let bestHeatScore = 0;
-    for (let y = searchMinY; y <= searchMaxY; y += 1) {
-      for (let x = searchMinX; x <= searchMaxX; x += 1) {
-        const tileCenterX = x + 0.5;
-        const tileCenterY = y + 0.5;
-        const dist = Math.hypot(unit.x - tileCenterX, unit.y - tileCenterY);
-        if (dist > hoseRange) {
-          continue;
-        }
-        const idx = indexFor(state.grid, x, y);
-        const fireValue = state.tileFire[idx];
-        const heatValue = state.tileHeat[idx];
-        if (fireValue <= 0 && heatValue <= 0.05) {
-          continue;
-        }
-        const forwardDot =
-          dist > 0.0001 ? ((tileCenterX - unit.x) * forwardDirX + (tileCenterY - unit.y) * forwardDirY) / dist : 1;
-        if (preferredAim && forwardDot < -0.05) {
-          continue;
-        }
-        const forwardWeight = preferredAim ? clamp((forwardDot + 0.1) / 1.1, 0, 1) : 1;
-        if (forwardWeight <= 0) {
-          continue;
-        }
-        const distanceWeight = clamp(1 - dist / Math.max(0.0001, hoseRange), 0, 1);
-        const targetDistance = preferredAim ? Math.hypot(tileCenterX - preferredAim.x, tileCenterY - preferredAim.y) : 0;
-        const targetWeight = preferredAim ? clamp(1 - targetDistance / Math.max(hoseRange * 0.9, 0.0001), 0, 1) : 1;
-        const areaScore = getClusterSuppressionScore(
-          state,
-          tileCenterX,
-          tileCenterY,
-          Math.max(1.05, Math.min(2.1, suppressionRadius * 1.15))
-        );
-        const areaWeight = clamp(areaScore / 4.2, 0, 1);
-        const stickyDistance = unit.sprayTarget ? Math.hypot(tileCenterX - unit.sprayTarget.x, tileCenterY - unit.sprayTarget.y) : 0;
-        const stickyWeight = unit.sprayTarget
-          ? clamp(1 - stickyDistance / Math.max(hoseRange * 0.5, suppressionRadius * 2, 0.9), 0, 1)
-          : 0;
-        const combinedWeight =
-          (0.28 + forwardWeight * 0.72) *
-          (0.3 + distanceWeight * 0.7) *
-          (0.42 + areaWeight * 0.58) *
-          (0.34 + targetWeight * 0.66) *
-          (unit.sprayTarget ? 0.84 + stickyWeight * 0.52 : 1);
-        if (fireValue > 0) {
-          const fireScore = (0.2 + fireValue) * combinedWeight;
-          if (fireScore > bestFireScore) {
-            bestFireScore = fireScore;
-            bestFireTarget = { x: tileCenterX, y: tileCenterY };
-          }
-        }
-        if (heatValue > 0.05) {
-          const heatScore = (0.15 + heatValue * 0.85) * combinedWeight;
-          if (heatScore > bestHeatScore) {
-            bestHeatScore = heatScore;
-            bestHeatTarget = { x: tileCenterX, y: tileCenterY };
-          }
-        }
-      }
-    }
-
-    const rawImpactTarget = bestFireTarget ?? bestHeatTarget;
-    if (!rawImpactTarget) {
+    const profile = getSuppressionProfile(unit);
+    const impactTarget = resolveSuppressionImpactTarget(state, unit, profile);
+    if (!impactTarget) {
       setSprayTarget(unit, null);
       return;
     }
-
-    const refineRadius = Math.max(1.1, Math.min(suppressionRadius * 1.55, hoseRange * 0.42));
-    const refineMinX = Math.max(0, Math.floor(rawImpactTarget.x - refineRadius));
-    const refineMaxX = Math.min(state.grid.cols - 1, Math.ceil(rawImpactTarget.x + refineRadius));
-    const refineMinY = Math.max(0, Math.floor(rawImpactTarget.y - refineRadius));
-    const refineMaxY = Math.min(state.grid.rows - 1, Math.ceil(rawImpactTarget.y + refineRadius));
-    let refinedWeightTotal = 0;
-    let refinedTargetX = 0;
-    let refinedTargetY = 0;
-    for (let y = refineMinY; y <= refineMaxY; y += 1) {
-      for (let x = refineMinX; x <= refineMaxX; x += 1) {
-        const tileCenterX = x + 0.5;
-        const tileCenterY = y + 0.5;
-        const distToCenter = Math.hypot(rawImpactTarget.x - tileCenterX, rawImpactTarget.y - tileCenterY);
-        if (distToCenter > refineRadius) {
-          continue;
-        }
-        const idx = indexFor(state.grid, x, y);
-        const fireValue = state.tileFire[idx];
-        const heatValue = state.tileHeat[idx];
-        if (fireValue <= 0 && heatValue <= 0.05) {
-          continue;
-        }
-        const distanceWeight = clamp(1 - distToCenter / Math.max(0.0001, refineRadius), 0, 1);
-        const stickyDistance = unit.sprayTarget ? Math.hypot(tileCenterX - unit.sprayTarget.x, tileCenterY - unit.sprayTarget.y) : 0;
-        const stickyWeight = unit.sprayTarget
-          ? clamp(1 - stickyDistance / Math.max(refineRadius * 2.1, 0.9), 0, 1)
-          : 0;
-        const weight = (fireValue * 1.45 + heatValue * 0.82) * distanceWeight * (unit.sprayTarget ? 0.9 + stickyWeight * 0.24 : 1);
-        if (weight <= 0) {
-          continue;
-        }
-        refinedWeightTotal += weight;
-        refinedTargetX += tileCenterX * weight;
-        refinedTargetY += tileCenterY * weight;
-      }
-    }
-
-    const impactTarget =
-      refinedWeightTotal > 0.0001
-        ? { x: refinedTargetX / refinedWeightTotal, y: refinedTargetY / refinedWeightTotal }
-        : rawImpactTarget;
     setSprayTarget(unit, impactTarget);
-
-    const impactMinX = Math.max(0, Math.floor(impactTarget.x - suppressionRadius));
-    const impactMaxX = Math.min(state.grid.cols - 1, Math.ceil(impactTarget.x + suppressionRadius));
-    const impactMinY = Math.max(0, Math.floor(impactTarget.y - suppressionRadius));
-    const impactMaxY = Math.min(state.grid.rows - 1, Math.ceil(impactTarget.y + suppressionRadius));
-    const radiusSafe = Math.max(0.0001, suppressionRadius);
-    for (let y = impactMinY; y <= impactMaxY; y += 1) {
-      for (let x = impactMinX; x <= impactMaxX; x += 1) {
-        const tileCenterX = x + 0.5;
-        const tileCenterY = y + 0.5;
-        const dist = Math.hypot(impactTarget.x - tileCenterX, impactTarget.y - tileCenterY);
-        if (dist > suppressionRadius) {
-          continue;
-        }
-        const idx = indexFor(state.grid, x, y);
-        const tile = state.tiles[idx];
-        const proximityWeight = Math.max(0, 1 - dist / radiusSafe);
-        let heatValue = state.tileHeat[idx];
-        if (heatValue > 0) {
-          const prevHeatValue = heatValue;
-          heatValue = Math.max(0, heatValue - power * 1.1 * powerMultiplier * (0.45 + proximityWeight * 0.55));
-          state.tileHeat[idx] = heatValue;
-          tile.heat = heatValue;
-          if (heatValue < prevHeatValue && idx < state.scoring.lastSuppressedAt.length) {
-            state.scoring.lastSuppressedAt[idx] = suppressionTimestamp;
-          }
-          if (heatValue < tile.ignitionPoint) {
-            clearScheduled(idx);
-          }
-        }
-        let fireValue = state.tileFire[idx];
-        if (fireValue > 0) {
-          const before = fireValue;
-          fireValue = Math.max(0, fireValue - power * powerMultiplier * (0.45 + proximityWeight * 0.55));
-          state.tileFire[idx] = fireValue;
-          tile.fire = fireValue;
-          if (fireValue < before && idx < state.scoring.lastSuppressedAt.length) {
-            state.scoring.lastSuppressedAt[idx] = suppressionTimestamp;
-          }
-          if (before > 0 && fireValue === 0) {
-            heatValue = Math.min(state.tileHeat[idx], tile.ignitionPoint * 0.25);
-            state.tileHeat[idx] = heatValue;
-            tile.heat = heatValue;
-            clearScheduled(idx);
-            if (state.tileFuel[idx] > 0) {
-              state.containedCount += 1;
-            }
-          }
-        }
-      }
-    }
     emitWaterSpray(state, effects, rng, unit, impactTarget);
   });
+}
+
+export function applyExtinguishStep(state: WorldState, delta: number, suppressionScale = 1): void {
+  const powerMultiplier = Math.max(0, delta) * Math.max(0, suppressionScale);
+  if (powerMultiplier <= 0) {
+    return;
+  }
+  const suppressionTimestamp = state.careerDay;
+  state.units.forEach((unit) => {
+    if (unit.kind === "firefighter" && unit.carrierId !== null) {
+      return;
+    }
+    if (!unit.sprayTarget) {
+      return;
+    }
+    const profile = getSuppressionProfile(unit);
+    applySuppressionAtTarget(state, unit, unit.sprayTarget, profile, powerMultiplier, suppressionTimestamp);
+  });
+}
+
+export function applyExtinguish(state: WorldState, effects: EffectsState, rng: RNG, delta: number): void {
+  prepareExtinguish(state, effects, rng);
+  applyExtinguishStep(state, delta);
 }
 

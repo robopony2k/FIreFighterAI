@@ -1,6 +1,7 @@
 import type { WorldState } from "../../../core/state.js";
 import { TILE_ID_TO_TYPE } from "../../../core/state.js";
 import { ELEVATION_TINT_HIGH, ELEVATION_TINT_LOW, TILE_COLOR_RGB } from "../../../core/config.js";
+import { buildThermalBackdropField, buildThermalHotspotField, paintThermalField } from "../../../render/minimapRaster.js";
 
 type RGB = { r: number; g: number; b: number };
 type MiniMapMode = "terrain" | "elevation" | "thermal";
@@ -64,6 +65,7 @@ export const createMiniMapPanel = (): MiniMapPanelView => {
   let lastRasterWidth = 0;
   let lastRasterHeight = 0;
   let lastRasterMs = -Infinity;
+  let thermalBackdrop: Float32Array = new Float32Array(0);
 
   const updateModeLabel = (): void => {
     modeButton.textContent = MODES[modeIndex].charAt(0).toUpperCase() + MODES[modeIndex].slice(1);
@@ -90,29 +92,34 @@ export const createMiniMapPanel = (): MiniMapPanelView => {
     const rows = world.grid.rows;
     const tileTypes = world.tileTypeId;
     const elevations = world.tileElevation;
-    const fire = world.tileFire;
-    for (let y = 0; y < mapHeight; y += 1) {
-      const ty = Math.min(rows - 1, Math.floor((y / mapHeight) * rows));
-      for (let x = 0; x < mapWidth; x += 1) {
-        const tx = Math.min(cols - 1, Math.floor((x / mapWidth) * cols));
-        const idx = ty * cols + tx;
-        let color: RGB = { r: 40, g: 40, b: 42 };
-        if (mode === "terrain") {
-          const typeId = tileTypes[idx] ?? 0;
-          const tileType = TILE_ID_TO_TYPE[typeId] ?? "grass";
-          color = TILE_COLOR_RGB[tileType] ?? color;
-        } else if (mode === "elevation") {
-          const elev = clamp(elevations[idx] ?? 0, 0, 1);
-          color = mix(ELEVATION_TINT_LOW, ELEVATION_TINT_HIGH, elev);
-        } else {
-          const heat = clamp(fire[idx] ?? 0, 0, 1);
-          color = heat <= 0.5 ? mix(THERMAL_LOW, THERMAL_MID, heat / 0.5) : mix(THERMAL_MID, THERMAL_HIGH, (heat - 0.5) / 0.5);
+    if (mode === "thermal") {
+      const hotspots = buildThermalHotspotField(world, mapWidth, mapHeight);
+      paintThermalField(data, thermalBackdrop, hotspots, {
+        low: THERMAL_LOW,
+        mid: THERMAL_MID,
+        high: THERMAL_HIGH
+      });
+    } else {
+      for (let y = 0; y < mapHeight; y += 1) {
+        const ty = Math.min(rows - 1, Math.floor((y / mapHeight) * rows));
+        for (let x = 0; x < mapWidth; x += 1) {
+          const tx = Math.min(cols - 1, Math.floor((x / mapWidth) * cols));
+          const idx = ty * cols + tx;
+          let color: RGB = { r: 40, g: 40, b: 42 };
+          if (mode === "terrain") {
+            const typeId = tileTypes[idx] ?? 0;
+            const tileType = TILE_ID_TO_TYPE[typeId] ?? "grass";
+            color = TILE_COLOR_RGB[tileType] ?? color;
+          } else {
+            const elev = clamp(elevations[idx] ?? 0, 0, 1);
+            color = mix(ELEVATION_TINT_LOW, ELEVATION_TINT_HIGH, elev);
+          }
+          const base = (y * mapWidth + x) * 4;
+          data[base] = color.r;
+          data[base + 1] = color.g;
+          data[base + 2] = color.b;
+          data[base + 3] = 255;
         }
-        const base = (y * mapWidth + x) * 4;
-        data[base] = color.r;
-        data[base + 1] = color.g;
-        data[base + 2] = color.b;
-        data[base + 3] = 255;
       }
     }
     rasterCtx.putImageData(image, 0, 0);
@@ -157,8 +164,18 @@ export const createMiniMapPanel = (): MiniMapPanelView => {
         mapHeight !== lastRasterHeight ||
         mode !== lastMode ||
         (mode === "terrain" && terrainRevision !== lastTerrainRevision) ||
+        (mode === "thermal" && terrainRevision !== lastTerrainRevision) ||
         thermalDue;
       if (needsRaster) {
+        if (
+          mode === "thermal" &&
+          (thermalBackdrop.length !== mapWidth * mapHeight ||
+            mapWidth !== lastRasterWidth ||
+            mapHeight !== lastRasterHeight ||
+            terrainRevision !== lastTerrainRevision)
+        ) {
+          thermalBackdrop = buildThermalBackdropField(world, mapWidth, mapHeight);
+        }
         drawRaster(world, mode, mapWidth, mapHeight);
         lastMode = mode;
         lastRasterWidth = mapWidth;
@@ -178,4 +195,3 @@ export const createMiniMapPanel = (): MiniMapPanelView => {
     }
   };
 };
-

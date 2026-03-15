@@ -14,8 +14,14 @@ export type RenderTerrainSample = {
   elevations: Float32Array;
   tileTypes?: Uint8Array;
   treeTypes?: Uint8Array;
+  tileFire?: Float32Array;
+  tileHeat?: Float32Array;
   tileFuel?: Float32Array;
+  heatCap?: number;
   tileMoisture?: Float32Array;
+  tileVegetationAge?: Float32Array;
+  tileCanopyCover?: Float32Array;
+  tileStemDensity?: Uint8Array;
   riverMask?: Uint8Array;
   roadBridgeMask?: Uint8Array;
   roadEdges?: Uint8Array;
@@ -30,6 +36,7 @@ export type RenderTerrainSample = {
   fullResolution?: boolean;
   worldSeed?: number;
   towns?: Town[];
+  vegetationRevision?: number;
   structureRevision?: number;
   dynamicStructures?: boolean;
 };
@@ -53,8 +60,14 @@ export const buildRenderTerrainSample = (
   elevations: state.tileElevation,
   tileTypes: state.tileTypeId,
   treeTypes,
+  tileFire: state.tileFire,
+  tileHeat: state.tileHeat,
   tileFuel: state.tileFuel,
+  heatCap: Math.max(0.01, state.fireSettings.heatCap),
   tileMoisture: state.tileMoisture,
+  tileVegetationAge: state.tileVegetationAge,
+  tileCanopyCover: state.tileCanopyCover,
+  tileStemDensity: state.tileStemDensity,
   riverMask: state.tileRiverMask,
   roadBridgeMask: state.tileRoadBridge,
   roadEdges: state.tileRoadEdges,
@@ -69,6 +82,7 @@ export const buildRenderTerrainSample = (
   fullResolution,
   worldSeed: state.seed,
   towns: state.towns,
+  vegetationRevision: state.vegetationRevision,
   structureRevision: state.structureRevision,
   dynamicStructures: true
 });

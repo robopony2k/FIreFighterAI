@@ -1,6 +1,19 @@
 import type { RNG } from "../core/types.js";
 import type { WorldState } from "../core/state.js";
 import { DEBUG_GROWTH_METRICS } from "../core/config.js";
+import {
+  CANOPY_FOREST_THRESHOLD,
+  DOMINANT_FOREST_TYPES,
+  FOREST_RECRUIT_AGE_YEARS,
+  clearVegetationState,
+  computeForestTreeWeights,
+  getVegetationAgeCapYears,
+  getVegetationFuelCapMultiplier,
+  isForestType,
+  isVegetationType,
+  pickWeightedTreeType,
+  syncDerivedVegetationState
+} from "../core/vegetation.js";
 import { clamp } from "../core/utils.js";
 import { applyFuel, getFuelProfiles } from "../core/tiles.js";
 import { syncTileSoAIndex } from "../core/tileCache.js";
@@ -22,10 +35,9 @@ const ASH_RECOVERY_RAMP_DAYS = 80;
 const ASH_RECOVERY_RATE = 0.045;
 const FIREBREAK_RECOVERY_RATE = 0.008;
 const FUEL_GROWTH_RATE = 0.04;
-const CANOPY_GROWTH_RATE_GRASS = 0.008;
-const CANOPY_GROWTH_RATE_FOREST = 0.009;
+const OPEN_VEGETATION_AGE_RATE = 0.025;
+const FOREST_AGE_RATE = 0.075;
 const FOREST_RECRUIT_RATE = 0.03;
-const CANOPY_FOREST_THRESHOLD = 0.35;
 const LONG_DISTANCE_RECRUIT_FACTOR = 0.25;
 const SEED_NORMALIZE = 3.4;
 const CANOPY_DIRTY_THRESHOLD = 0.02;
@@ -114,42 +126,32 @@ function getElevationFactor(elevation: number): number {
   return clamp(0.35 + (1 - elevation) * 0.65, 0.35, 1);
 }
 
-const computeStemDensity = (
-  state: WorldState,
-  type: WorldState["tiles"][number]["type"],
-  canopyCover: number,
-  x: number,
-  y: number
-): number => {
-  if (canopyCover <= 0) {
-    return 0;
+const getForestSeedType = (state: WorldState, x: number, y: number) => {
+  let bestType: WorldState["tiles"][number]["treeType"] = null;
+  let bestWeight = 0;
+  for (const neighbor of SEED_NEIGHBORS) {
+    const nx = x + neighbor.x;
+    const ny = y + neighbor.y;
+    if (nx < 0 || ny < 0 || nx >= state.grid.cols || ny >= state.grid.rows) {
+      continue;
+    }
+    const nIdx = indexFor(state.grid, nx, ny);
+    const neighborTile = state.tiles[nIdx];
+    if (neighborTile.type !== "forest") {
+      continue;
+    }
+    const candidate = neighborTile.treeType ?? neighborTile.dominantTreeType;
+    if (!candidate) {
+      continue;
+    }
+    const weight = neighbor.weight * (0.6 + neighborTile.canopyCover * 0.6);
+    if (weight > bestWeight) {
+      bestWeight = weight;
+      bestType = candidate;
+    }
   }
-  const jitter = (hash2D(x, y, state.seed + 1729) - 0.5) * 2;
-  if (type === "forest") {
-    const base = 2 + canopyCover * 9;
-    return Math.round(clamp(base + jitter * 2, 0, 12));
-  }
-  if (type === "grass" || type === "scrub" || type === "floodplain") {
-    const base = canopyCover * 3;
-    return Math.round(clamp(base + jitter, 0, 3));
-  }
-  return 0;
+  return bestType;
 };
-
-const syncCanopyMetrics = (
-  state: WorldState,
-  tile: WorldState["tiles"][number],
-  x: number,
-  y: number
-): void => {
-  tile.canopyCover = tile.canopy;
-  tile.stemDensity = computeStemDensity(state, tile.type, tile.canopyCover, x, y);
-};
-
-const isVegetationType = (type: WorldState["tiles"][number]["type"]): boolean =>
-  type === "grass" || type === "scrub" || type === "floodplain" || type === "forest";
-
-const isForestType = (type: WorldState["tiles"][number]["type"]): boolean => type === "forest";
 
 function logGrowthMetrics(state: WorldState): void {
   let ashCount = 0;
@@ -488,6 +490,7 @@ export function stepGrowth(state: WorldState, dayDelta: number, rng: RNG): void 
 
   const { canopy: canopyValues, forest: forestValues } = ensureSeedSnapshots(state);
   let terrainDirty = false;
+  let vegetationDirty = false;
   const blockCount = Math.max(1, state.fireBlockCount);
   const blocksPerTick = Math.max(1, Math.floor(state.simPerf.growthBlocksPerTick || 1));
   const blockSize = Math.max(4, state.fireBlockSize || 16);
@@ -525,7 +528,9 @@ export function stepGrowth(state: WorldState, dayDelta: number, rng: RNG): void 
 
         const prevType = tile.type;
         const prevCanopy = tile.canopy;
-        let soaChanged = false;
+        const prevAge = tile.vegetationAgeYears;
+        let typeChanged = false;
+        let tileStateChanged = false;
 
         const waterFactor = getWaterFactor(tile.waterDist);
         const elevFactor = getElevationFactor(tile.elevation);
@@ -533,36 +538,53 @@ export function stepGrowth(state: WorldState, dayDelta: number, rng: RNG): void 
           (0.35 + 0.65 * tile.moisture) * (0.6 + 0.8 * waterFactor) * (0.4 + 0.6 * elevFactor);
 
         if (tile.type === "ash") {
-          tile.canopy = 0;
-        if (tile.houseDestroyed) {
-          syncCanopyMetrics(state, tile, x, y);
-          if (tile.type !== prevType || Math.abs(tile.canopy - prevCanopy) >= CANOPY_DIRTY_THRESHOLD) {
-            terrainDirty = true;
+          clearVegetationState(tile);
+          if (tile.houseDestroyed) {
+            state.tileVegetationAge[idx] = 0;
+            state.tileCanopyCover[idx] = 0;
+            state.tileStemDensity[idx] = 0;
+            canopyValues[idx] = 0;
+            forestValues[idx] = 0;
+            state.tileFuel[idx] = tile.fuel;
+            if (Math.abs(prevCanopy) >= CANOPY_DIRTY_THRESHOLD || prevAge > 0) {
+              terrainDirty = true;
+              vegetationDirty = true;
+            }
+            continue;
           }
-          canopyValues[idx] = 0;
-          forestValues[idx] = 0;
-          continue;
-        }
           tile.ashAge += dayDelta;
           const ageFactor = clamp(tile.ashAge / ASH_RECOVERY_RAMP_DAYS, 0, 1);
           const recoverChance = dayDelta * ASH_RECOVERY_RATE * env * (0.25 + 0.75 * ageFactor);
           if (rng.next() < recoverChance) {
             tile.type = "grass";
-            tile.canopy = clamp(0.05 + tile.moisture * 0.2 + waterFactor * 0.15, 0.05, 0.35);
+            tile.vegetationAgeYears = 0.25 + rng.next() * 0.35;
             tile.ashAge = 0;
+            tile.dominantTreeType = null;
+            tile.treeType = null;
+            syncDerivedVegetationState(tile, state.seed, x, y);
             applyFuel(tile, tile.moisture, rng);
             state.burnedTiles = Math.max(0, state.burnedTiles - 1);
-            soaChanged = true;
+            typeChanged = true;
+            tileStateChanged = true;
           }
-          syncCanopyMetrics(state, tile, x, y);
-          if (tile.type !== prevType || Math.abs(tile.canopy - prevCanopy) >= CANOPY_DIRTY_THRESHOLD) {
-            terrainDirty = true;
-          }
-          if (tile.type !== prevType) {
+          if (typeChanged) {
             state.terrainTypeRevision += 1;
           }
-          if (soaChanged || tile.type !== prevType) {
+          if (
+            typeChanged ||
+            Math.abs(tile.canopy - prevCanopy) >= CANOPY_DIRTY_THRESHOLD ||
+            Math.abs(tile.vegetationAgeYears - prevAge) >= 0.2
+          ) {
+            terrainDirty = true;
+            vegetationDirty = true;
+          }
+          if (typeChanged) {
             syncTileSoAIndex(state, idx);
+          } else {
+            state.tileVegetationAge[idx] = tile.vegetationAgeYears;
+            state.tileCanopyCover[idx] = tile.canopyCover;
+            state.tileStemDensity[idx] = tile.stemDensity;
+            state.tileFuel[idx] = tile.fuel;
           }
           canopyValues[idx] = isVegetationType(tile.type) ? tile.canopy : 0;
           forestValues[idx] = isForestType(tile.type) ? 1 : 0;
@@ -570,21 +592,35 @@ export function stepGrowth(state: WorldState, dayDelta: number, rng: RNG): void 
         }
 
         if (tile.type === "firebreak") {
+          clearVegetationState(tile);
           if (!tile.houseDestroyed && rng.next() < dayDelta * FIREBREAK_RECOVERY_RATE * env) {
             tile.type = "grass";
-            tile.canopy = clamp(0.1 + tile.moisture * 0.2 + waterFactor * 0.1, 0.1, 0.35);
+            tile.vegetationAgeYears = 0.2 + rng.next() * 0.3;
+            tile.dominantTreeType = null;
+            tile.treeType = null;
+            syncDerivedVegetationState(tile, state.seed, x, y);
             applyFuel(tile, tile.moisture, rng);
-            soaChanged = true;
+            typeChanged = true;
+            tileStateChanged = true;
           }
-          syncCanopyMetrics(state, tile, x, y);
-          if (tile.type !== prevType || Math.abs(tile.canopy - prevCanopy) >= CANOPY_DIRTY_THRESHOLD) {
-            terrainDirty = true;
-          }
-          if (tile.type !== prevType) {
+          if (typeChanged) {
             state.terrainTypeRevision += 1;
           }
-          if (soaChanged || tile.type !== prevType) {
+          if (
+            typeChanged ||
+            Math.abs(tile.canopy - prevCanopy) >= CANOPY_DIRTY_THRESHOLD ||
+            Math.abs(tile.vegetationAgeYears - prevAge) >= 0.2
+          ) {
+            terrainDirty = true;
+            vegetationDirty = true;
+          }
+          if (typeChanged) {
             syncTileSoAIndex(state, idx);
+          } else {
+            state.tileVegetationAge[idx] = tile.vegetationAgeYears;
+            state.tileCanopyCover[idx] = tile.canopyCover;
+            state.tileStemDensity[idx] = tile.stemDensity;
+            state.tileFuel[idx] = tile.fuel;
           }
           canopyValues[idx] = isVegetationType(tile.type) ? tile.canopy : 0;
           forestValues[idx] = isForestType(tile.type) ? 1 : 0;
@@ -594,14 +630,19 @@ export function stepGrowth(state: WorldState, dayDelta: number, rng: RNG): void 
         if (tile.type === "grass" || tile.type === "scrub" || tile.type === "floodplain" || tile.type === "forest") {
           const seedPressure = getSeedPressure(state, x, y, canopyValues, forestValues);
           const profile = fuelProfiles[tile.type];
-          const maxFuel = profile.baseFuel * (1.1 + waterFactor * 0.2);
+          const ageCap = getVegetationAgeCapYears(tile.type);
+          const maturity01 = ageCap > 0 ? clamp(tile.vegetationAgeYears / ageCap, 0, 1) : 0;
+          const ageRate = tile.type === "forest" ? FOREST_AGE_RATE : OPEN_VEGETATION_AGE_RATE;
+          const seedBoost = tile.type === "forest" ? 0.45 + seedPressure * 0.85 : 0.6 + seedPressure * 0.45;
+          const maturityDrag = 0.2 + 0.8 * (1 - maturity01);
+          tile.vegetationAgeYears += dayDelta * ageRate * env * seedBoost * maturityDrag;
+          syncDerivedVegetationState(tile, state.seed, x, y);
+          const maxFuel =
+            profile.baseFuel *
+            getVegetationFuelCapMultiplier(tile.type, tile.vegetationAgeYears) *
+            (1.1 + waterFactor * 0.2);
           const fuelGrowth = dayDelta * FUEL_GROWTH_RATE * (0.4 + 0.6 * env);
           tile.fuel = clamp(tile.fuel + fuelGrowth, 0, maxFuel);
-          state.tileFuel[idx] = tile.fuel;
-
-          const canopyRate = tile.type === "forest" ? CANOPY_GROWTH_RATE_FOREST : CANOPY_GROWTH_RATE_GRASS;
-          const seedBoost = 0.5 + seedPressure * 0.9;
-          tile.canopy = clamp(tile.canopy + dayDelta * canopyRate * env * seedBoost, 0, 1);
 
           if (
             (tile.type === "grass" || tile.type === "scrub" || tile.type === "floodplain") &&
@@ -610,20 +651,49 @@ export function stepGrowth(state: WorldState, dayDelta: number, rng: RNG): void 
             const recruitChance = dayDelta * FOREST_RECRUIT_RATE * env * (LONG_DISTANCE_RECRUIT_FACTOR + seedPressure);
             if (rng.next() < recruitChance) {
               tile.type = "forest";
-              tile.canopy = Math.max(tile.canopy, CANOPY_FOREST_THRESHOLD + 0.02);
+              tile.vegetationAgeYears = FOREST_RECRUIT_AGE_YEARS;
+              const neighborForestType = getForestSeedType(state, x, y);
+              if (neighborForestType) {
+                tile.dominantTreeType = neighborForestType;
+                tile.treeType = neighborForestType;
+              } else {
+                const weights = computeForestTreeWeights(tile.moisture, tile.elevation, x, y, state.seed + 9001);
+                const dominant = pickWeightedTreeType(
+                  hash2D(x, y, state.seed + 9011),
+                  DOMINANT_FOREST_TYPES,
+                  weights
+                );
+                tile.dominantTreeType = dominant;
+                tile.treeType = dominant;
+              }
+              syncDerivedVegetationState(tile, state.seed, x, y);
               applyFuel(tile, tile.moisture, rng);
-              soaChanged = true;
+              typeChanged = true;
+              tileStateChanged = true;
             }
+          } else if (!isForestType(tile.type)) {
+            tile.dominantTreeType = null;
+            tile.treeType = null;
           }
-          syncCanopyMetrics(state, tile, x, y);
-          if (tile.type !== prevType || Math.abs(tile.canopy - prevCanopy) >= CANOPY_DIRTY_THRESHOLD) {
+          if (
+            typeChanged ||
+            tileStateChanged ||
+            Math.abs(tile.canopy - prevCanopy) >= CANOPY_DIRTY_THRESHOLD ||
+            Math.abs(tile.vegetationAgeYears - prevAge) >= 0.2
+          ) {
             terrainDirty = true;
+            vegetationDirty = true;
           }
-          if (tile.type !== prevType) {
+          if (typeChanged) {
             state.terrainTypeRevision += 1;
           }
-          if (soaChanged || tile.type !== prevType) {
+          if (typeChanged) {
             syncTileSoAIndex(state, idx);
+          } else {
+            state.tileVegetationAge[idx] = tile.vegetationAgeYears;
+            state.tileCanopyCover[idx] = tile.canopyCover;
+            state.tileStemDensity[idx] = tile.stemDensity;
+            state.tileFuel[idx] = tile.fuel;
           }
           canopyValues[idx] = isVegetationType(tile.type) ? tile.canopy : 0;
           forestValues[idx] = isForestType(tile.type) ? 1 : 0;
@@ -635,6 +705,9 @@ export function stepGrowth(state: WorldState, dayDelta: number, rng: RNG): void 
 
   if (terrainDirty) {
     state.terrainDirty = true;
+  }
+  if (vegetationDirty) {
+    state.vegetationRevision += 1;
   }
   profEnd("growth", profStartAt);
 }

@@ -8,6 +8,7 @@ import type {
   Grid,
   Point,
   ScoringState,
+  SimTimeMode,
   SkipToNextFireState,
   Town,
   SeasonPhase,
@@ -20,7 +21,7 @@ import type {
 } from "./types.js";
 import type { CampaignState } from "./campaign.js";
 
-import { BASE_BUDGET, DEFAULT_FIRE_SETTINGS } from "./config.js";
+import { BASE_BUDGET, DEFAULT_FIRE_SETTINGS, DEFAULT_INCIDENT_TIME_SPEED_INDEX } from "./config.js";
 import { createCampaignState } from "./campaign.js";
 import { DEFAULT_CLIMATE_PARAMS, DEFAULT_MOISTURE_PARAMS } from "./climate.js";
 import { buildNeighborOffsets } from "./grid.js";
@@ -122,6 +123,9 @@ export interface WorldState {
 
   tileElevation: Float32Array;
   tileMoisture: Float32Array;
+  tileVegetationAge: Float32Array;
+  tileCanopyCover: Float32Array;
+  tileStemDensity: Uint8Array;
   tileSpreadBoost: Float32Array;
   tileHeatRetention: Float32Array;
   tileWindFactor: Float32Array;
@@ -155,6 +159,7 @@ export interface WorldState {
 
   terrainDirty: boolean;
   terrainTypeRevision: number;
+  vegetationRevision: number;
   structureRevision: number;
 
   basePoint: Point;
@@ -189,7 +194,10 @@ export interface WorldState {
 
   selectedUnitIds: number[];
 
+  simTimeMode: SimTimeMode;
   timeSpeedIndex: number;
+  strategicTimeSpeedIndex: number;
+  incidentTimeSpeedIndex: number;
 
   year: number;
 
@@ -223,6 +231,7 @@ export interface WorldState {
   scoring: ScoringState;
 
   pendingBudget: number;
+  annualReportOpen: boolean;
 
   totalPropertyValue: number;
 
@@ -287,6 +296,8 @@ export interface WorldState {
   firePerfWorkBlocks: number;
   firePerfFireBoundsArea: number;
   firePerfHeatBoundsArea: number;
+  firePerfSubsteps: number;
+  firePerfSimulatedDays: number;
   growthBlockCursor: number;
   pathPrev: Int32Array;
   pathGScore: Float32Array;
@@ -350,13 +361,17 @@ const createInitialScoringState = (grid: Grid): ScoringState => ({
   seasonSampleSeconds: 0,
   seasonSummary: null,
   events: [],
+  flowEvents: [],
   nextEventId: 1,
+  nextFlowEventId: 1,
   previousDestroyedHouses: 0,
   previousLostResidents: 0,
   previousLostFirefighters: 0,
   previousTownHousesLost: new Int32Array(0),
   burnStartFuel: new Float32Array(grid.totalTiles).fill(-1),
   lastSuppressedAt: new Float32Array(grid.totalTiles).fill(Number.NEGATIVE_INFINITY),
+  pendingFlowEvents: [],
+  attributedFireLossTiles: new Set<number>(),
   prevFireBoundsActive: false,
   prevFireMinX: 0,
   prevFireMaxX: 0,
@@ -401,6 +416,9 @@ export function createInitialState(seed: number, grid: Grid): WorldState {
     baselineNextHeat: new Float32Array(grid.totalTiles),
     tileElevation: new Float32Array(grid.totalTiles),
     tileMoisture: new Float32Array(grid.totalTiles),
+    tileVegetationAge: new Float32Array(grid.totalTiles),
+    tileCanopyCover: new Float32Array(grid.totalTiles),
+    tileStemDensity: new Uint8Array(grid.totalTiles),
     tileSpreadBoost: new Float32Array(grid.totalTiles),
     tileHeatRetention: new Float32Array(grid.totalTiles),
     tileWindFactor: new Float32Array(grid.totalTiles),
@@ -465,6 +483,7 @@ export function createInitialState(seed: number, grid: Grid): WorldState {
 
     terrainDirty: true,
     terrainTypeRevision: 0,
+    vegetationRevision: 0,
     structureRevision: 0,
 
     basePoint: { x: 0, y: 0 },
@@ -499,7 +518,10 @@ export function createInitialState(seed: number, grid: Grid): WorldState {
 
     selectedUnitIds: [],
 
+    simTimeMode: "strategic",
     timeSpeedIndex: 1,
+    strategicTimeSpeedIndex: 1,
+    incidentTimeSpeedIndex: DEFAULT_INCIDENT_TIME_SPEED_INDEX,
 
     year: 1,
 
@@ -533,6 +555,7 @@ export function createInitialState(seed: number, grid: Grid): WorldState {
     scoring: createInitialScoringState(grid),
 
     pendingBudget: BASE_BUDGET,
+    annualReportOpen: false,
 
     totalPropertyValue: 0,
 
@@ -599,6 +622,8 @@ export function createInitialState(seed: number, grid: Grid): WorldState {
     firePerfWorkBlocks: 0,
     firePerfFireBoundsArea: 0,
     firePerfHeatBoundsArea: 0,
+    firePerfSubsteps: 0,
+    firePerfSimulatedDays: 0,
     growthBlockCursor: 0,
     pathPrev: new Int32Array(grid.totalTiles),
     pathGScore: new Float32Array(grid.totalTiles),
@@ -624,6 +649,9 @@ export function syncTileSoA(state: WorldState): void {
 
   if (
     state.tileFire.length !== total ||
+    state.tileVegetationAge.length !== total ||
+    state.tileCanopyCover.length !== total ||
+    state.tileStemDensity.length !== total ||
     state.tileRoadBridge.length !== total ||
     state.tileRoadEdges.length !== total ||
     state.tileRoadWallEdges.length !== total ||
@@ -643,6 +671,9 @@ export function syncTileSoA(state: WorldState): void {
     state.tileHeatOutput = new Float32Array(total);
     state.tileElevation = new Float32Array(total);
     state.tileMoisture = new Float32Array(total);
+    state.tileVegetationAge = new Float32Array(total);
+    state.tileCanopyCover = new Float32Array(total);
+    state.tileStemDensity = new Uint8Array(total);
     state.tileSpreadBoost = new Float32Array(total);
     state.tileHeatRetention = new Float32Array(total);
     state.tileWindFactor = new Float32Array(total);
@@ -719,6 +750,9 @@ export function syncTileSoA(state: WorldState): void {
 
   const typeId = state.tileTypeId;
   const moisture = state.tileMoisture;
+  const vegetationAge = state.tileVegetationAge;
+  const canopyCover = state.tileCanopyCover;
+  const stemDensity = state.tileStemDensity;
   const spreadBoost = state.tileSpreadBoost;
   const heatRetention = state.tileHeatRetention;
   const windFactor = state.tileWindFactor;
@@ -746,6 +780,9 @@ export function syncTileSoA(state: WorldState): void {
 
     typeId[i] = TILE_TYPE_IDS[tile.type];
     moisture[i] = tile.moisture;
+    vegetationAge[i] = tile.vegetationAgeYears ?? 0;
+    canopyCover[i] = tile.canopyCover ?? tile.canopy ?? 0;
+    stemDensity[i] = Math.max(0, Math.round(tile.stemDensity ?? 0));
     spreadBoost[i] = tile.spreadBoost ?? 1;
     heatRetention[i] = tile.heatRetention ?? 0.9;
     windFactor[i] = tile.windFactor ?? 0;
@@ -804,6 +841,9 @@ export function syncTileSoAIndex(state: WorldState, idx: number): void {
   state.tileElevation[idx] = tile.elevation;
   state.tileTypeId[idx] = TILE_TYPE_IDS[tile.type];
   state.tileMoisture[idx] = tile.moisture;
+  state.tileVegetationAge[idx] = tile.vegetationAgeYears ?? 0;
+  state.tileCanopyCover[idx] = tile.canopyCover ?? tile.canopy ?? 0;
+  state.tileStemDensity[idx] = Math.max(0, Math.round(tile.stemDensity ?? 0));
   state.tileSpreadBoost[idx] = tile.spreadBoost ?? 1;
   state.tileHeatRetention[idx] = tile.heatRetention ?? 0.9;
   state.tileWindFactor[idx] = tile.windFactor ?? 0;

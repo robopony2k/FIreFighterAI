@@ -26,7 +26,7 @@ export const SEASONS: SeasonDefinition[] = [
     id: "autumn",
     label: "Autumn",
     phases: ["budget"],
-    notes: "Performance review and budget outcomes."
+    notes: "Late-season containment and mop-up before winter review."
   },
   {
     id: "winter",

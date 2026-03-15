@@ -6,7 +6,7 @@ export const PHASES: { id: SeasonPhase; label: string; duration: number }[] = [
   { id: "maintenance", label: "Maintenance", duration: 90 },
   { id: "growth", label: "Growth", duration: 90 },
   { id: "fire", label: "Fire Season", duration: 90 },
-  { id: "budget", label: "Budget", duration: 90 }
+  { id: "budget", label: "Autumn Ops", duration: 90 }
 ];
 
 export const FIRE_SEASON_DURATION = PHASES.find((phase) => phase.id === "fire")?.duration ?? 90;
@@ -25,9 +25,6 @@ export function getPhaseInfo(phaseIndex: number): { id: SeasonPhase; label: stri
 
 export function formatPhaseStatus(phase: SeasonPhase, phaseIndex: number, phaseDay: number): string {
   const current = getPhaseInfo(phaseIndex);
-  if (phase === "maintenance") {
-    return `${current.label} (Budget)`;
-  }
   const day = clamp(Math.ceil(phaseDay + 0.0001), 1, current.duration);
   return `${current.label} ${day}/${current.duration}`;
 }

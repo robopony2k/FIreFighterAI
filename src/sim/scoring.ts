@@ -1,5 +1,13 @@
 import type { WorldState } from "../core/state.js";
-import type { ApprovalTier, RiskTier, ScoreEventLane, ScoreEventSeverity, ScoringSeasonSummary } from "../core/types.js";
+import type {
+  ApprovalTier,
+  RiskTier,
+  ScoreEventLane,
+  ScoreEventSeverity,
+  ScoreFlowEvent,
+  ScoreFlowKind,
+  ScoringSeasonSummary
+} from "../core/types.js";
 import {
   DAYS_PER_SECOND,
   SCORE_APPROVAL_HOUSE_LOSS_DISAPPROVAL,
@@ -19,9 +27,13 @@ import {
 import { clamp } from "../core/utils.js";
 
 const FIRE_EPS = 0.0001;
-const DEFAULT_EVENT_TTL_SECONDS = 1.1;
-const NEGATIVE_EVENT_TTL_SECONDS = 1.6;
+const DEFAULT_EVENT_TTL_SECONDS = 0.8;
+const NEGATIVE_EVENT_TTL_SECONDS = 1.05;
+const DEFAULT_FLOW_EVENT_TTL_SECONDS = 0.8;
+const NEGATIVE_FLOW_EVENT_TTL_SECONDS = 1.05;
+const DECAY_FLOW_EVENT_TTL_SECONDS = 0.68;
 const MAX_EVENT_COUNT = 12;
+const MAX_FLOW_EVENT_COUNT = 24;
 const APPROVAL_TIER_ORDER: ApprovalTier[] = ["D", "C", "B", "A", "S"];
 
 type LaneDelta = {
@@ -31,6 +43,19 @@ type LaneDelta = {
   severity: ScoreEventSeverity;
   ttlSeconds?: number;
   detail?: string;
+};
+
+type FlowDelta = {
+  kind: ScoreFlowKind;
+  deltaCount: number;
+  ttlSeconds?: number;
+  tileX?: number;
+  tileY?: number;
+};
+
+type FireTransitionDelta = {
+  extinguishDelta: LaneDelta | null;
+  flowDeltas: FlowDelta[];
 };
 
 const getApprovalTierFloor = (tier: ApprovalTier): number => {
@@ -79,6 +104,87 @@ const stepScoreEvents = (state: WorldState, stepSeconds: number): void => {
     event.remainingSeconds -= stepSeconds;
   }
   state.scoring.events = state.scoring.events.filter((event) => event.remainingSeconds > 0);
+};
+
+const stepScoreFlowEvents = (state: WorldState, stepSeconds: number): void => {
+  if (stepSeconds <= 0 || state.scoring.flowEvents.length === 0) {
+    return;
+  }
+  for (const event of state.scoring.flowEvents) {
+    event.remainingSeconds -= stepSeconds;
+  }
+  state.scoring.flowEvents = state.scoring.flowEvents.filter((event) => event.remainingSeconds > 0);
+};
+
+const getFlowEventTtl = (kind: ScoreFlowKind): number => {
+  if (kind === "property" || kind === "lives") {
+    return NEGATIVE_FLOW_EVENT_TTL_SECONDS;
+  }
+  if (kind === "decay") {
+    return DECAY_FLOW_EVENT_TTL_SECONDS;
+  }
+  return DEFAULT_FLOW_EVENT_TTL_SECONDS;
+};
+
+const pushScoreFlowEvent = (
+  state: WorldState,
+  kind: ScoreFlowKind,
+  deltaCount: number,
+  ttlSeconds = getFlowEventTtl(kind),
+  tileX?: number,
+  tileY?: number
+): void => {
+  if (deltaCount <= 0) {
+    return;
+  }
+  state.scoring.flowEvents.push({
+    id: state.scoring.nextFlowEventId++,
+    kind,
+    deltaCount,
+    remainingSeconds: ttlSeconds,
+    tileX,
+    tileY
+  });
+  if (state.scoring.flowEvents.length > MAX_FLOW_EVENT_COUNT) {
+    state.scoring.flowEvents = state.scoring.flowEvents.slice(state.scoring.flowEvents.length - MAX_FLOW_EVENT_COUNT);
+  }
+};
+
+const flushPendingScoreFlowEvents = (state: WorldState): void => {
+  if (state.scoring.pendingFlowEvents.length === 0) {
+    return;
+  }
+  for (const event of state.scoring.pendingFlowEvents) {
+    pushScoreFlowEvent(state, event.kind, event.deltaCount, event.remainingSeconds, event.tileX, event.tileY);
+  }
+  state.scoring.pendingFlowEvents = [];
+};
+
+export const queueScoreFlowEvent = (
+  state: WorldState,
+  kind: ScoreFlowKind,
+  deltaCount: number,
+  ttlSeconds = getFlowEventTtl(kind),
+  tileX?: number,
+  tileY?: number
+): void => {
+  if (deltaCount <= 0) {
+    return;
+  }
+  state.scoring.pendingFlowEvents.push({
+    kind,
+    deltaCount,
+    remainingSeconds: ttlSeconds,
+    tileX,
+    tileY
+  });
+};
+
+export const markAttributedFireLossTile = (state: WorldState, tileIndex: number): void => {
+  if (!Number.isInteger(tileIndex) || tileIndex < 0) {
+    return;
+  }
+  state.scoring.attributedFireLossTiles.add(tileIndex);
 };
 
 const pushScoreEvent = (
@@ -271,9 +377,11 @@ const applyStreakProgress = (state: WorldState, dayDelta: number): void => {
   }
 };
 
-const scoreExtinguishTransitions = (state: WorldState): LaneDelta | null => {
+const scoreFireTransitions = (state: WorldState): FireTransitionDelta => {
   const scoring = state.scoring;
   let extinguishCount = 0;
+  let gainCount = 0;
+  let decayCount = 0;
   const cols = state.grid.cols;
   const rows = state.grid.rows;
 
@@ -316,14 +424,18 @@ const scoreExtinguishTransitions = (state: WorldState): LaneDelta | null => {
           const currentFireValue = state.tileFire[idx] ?? 0;
           const currentFire = currentFireValue > FIRE_EPS;
           if (previousFire && !currentFire) {
+            const attributedLoss = scoring.attributedFireLossTiles.has(idx);
             const assisted =
               assistWindowDays > 0 && state.careerDay - scoring.lastSuppressedAt[idx] <= assistWindowDays;
             if (assisted) {
               extinguishCount += 1;
+            } else if (!attributedLoss) {
+              decayCount += 1;
             }
             scoring.lastSuppressedAt[idx] = Number.NEGATIVE_INFINITY;
             scoring.burnStartFuel[idx] = -1;
           } else if (!previousFire && currentFire) {
+            gainCount += 1;
             scoring.burnStartFuel[idx] = Math.max(0, state.tileFuel[idx] ?? 0);
           }
           state.fireSnapshot[idx] = currentFireValue;
@@ -337,9 +449,21 @@ const scoreExtinguishTransitions = (state: WorldState): LaneDelta | null => {
   scoring.prevFireMaxX = state.fireMaxX;
   scoring.prevFireMinY = state.fireMinY;
   scoring.prevFireMaxY = state.fireMaxY;
+  scoring.attributedFireLossTiles.clear();
+
+  const flowDeltas: FlowDelta[] = [];
+  if (gainCount > 0) {
+    flowDeltas.push({ kind: "gain", deltaCount: gainCount });
+  }
+  if (extinguishCount > 0) {
+    flowDeltas.push({ kind: "extinguished", deltaCount: extinguishCount });
+  }
+  if (decayCount > 0) {
+    flowDeltas.push({ kind: "decay", deltaCount: decayCount });
+  }
 
   if (extinguishCount <= 0) {
-    return null;
+    return { extinguishDelta: null, flowDeltas };
   }
 
   const points = extinguishCount * SCORE_EXTINGUISHED_TILE_POINTS;
@@ -347,12 +471,15 @@ const scoreExtinguishTransitions = (state: WorldState): LaneDelta | null => {
   scoring.seasonExtinguishedCount += extinguishCount;
   scoring.seasonExtinguishPoints += points;
   return {
-    lane: "extinguished",
-    deltaCount: extinguishCount,
-    deltaPoints: points,
-    severity: "positive",
-    ttlSeconds: DEFAULT_EVENT_TTL_SECONDS,
-    detail: `${extinguishCount} assisted tile${extinguishCount === 1 ? "" : "s"}`
+    extinguishDelta: {
+      lane: "extinguished",
+      deltaCount: extinguishCount,
+      deltaPoints: points,
+      severity: "positive",
+      ttlSeconds: DEFAULT_EVENT_TTL_SECONDS,
+      detail: `${extinguishCount} assisted tile${extinguishCount === 1 ? "" : "s"}`
+    },
+    flowDeltas
   };
 };
 
@@ -465,6 +592,7 @@ export const initScoringForRun = (state: WorldState): void => {
   state.scoring.seasonSampleSeconds = 0;
   state.scoring.seasonSummary = null;
   state.scoring.events = [];
+  state.scoring.flowEvents = [];
   state.scoring.nextEventId = 1;
   state.scoring.previousDestroyedHouses = Math.max(0, Math.floor(state.destroyedHouses));
   state.scoring.previousLostResidents = Math.max(0, Math.floor(state.lostResidents));
@@ -475,6 +603,8 @@ export const initScoringForRun = (state: WorldState): void => {
   }
   state.scoring.burnStartFuel.fill(-1);
   state.scoring.lastSuppressedAt.fill(Number.NEGATIVE_INFINITY);
+  state.scoring.pendingFlowEvents = [];
+  state.scoring.attributedFireLossTiles.clear();
   for (let i = 0; i < state.grid.totalTiles; i += 1) {
     state.fireSnapshot[i] = state.tileFire[i] ?? 0;
   }
@@ -514,6 +644,9 @@ export const startScoringSeason = (state: WorldState): void => {
   state.scoring.seasonSampleSeconds = 0;
   state.scoring.seasonSummary = null;
   state.scoring.events = [];
+  state.scoring.flowEvents = [];
+  state.scoring.pendingFlowEvents = [];
+  state.scoring.attributedFireLossTiles.clear();
   state.scoring.seasonStartScore = state.scoring.score;
   state.scoring.seasonFinalScore = state.scoring.score;
 };
@@ -572,25 +705,30 @@ export const stepScoring = (state: WorldState, dayDelta: number, climateRisk: nu
   ensureScoringBuffers(state);
   syncTownLossSnapshotLength(state);
   stepScoreEvents(state, stepDays);
+  stepScoreFlowEvents(state, stepDays);
 
   applyTownHouseLossApprovalHit(state);
   const lossDeltas = applyLossPenalties(state);
   recomputeGlobalApproval(state);
 
-  const extinguishDelta = scoreExtinguishTransitions(state);
-  if (extinguishDelta) {
+  const fireTransitionDelta = scoreFireTransitions(state);
+  flushPendingScoreFlowEvents(state);
+  if (fireTransitionDelta.extinguishDelta) {
     pushScoreEvent(
       state,
-      extinguishDelta.lane,
-      extinguishDelta.deltaCount,
-      extinguishDelta.deltaPoints,
-      extinguishDelta.severity,
-      extinguishDelta.ttlSeconds,
-      extinguishDelta.detail
+      fireTransitionDelta.extinguishDelta.lane,
+      fireTransitionDelta.extinguishDelta.deltaCount,
+      fireTransitionDelta.extinguishDelta.deltaPoints,
+      fireTransitionDelta.extinguishDelta.severity,
+      fireTransitionDelta.extinguishDelta.ttlSeconds,
+      fireTransitionDelta.extinguishDelta.detail
     );
   }
   for (const delta of lossDeltas) {
     pushScoreEvent(state, delta.lane, delta.deltaCount, delta.deltaPoints, delta.severity, delta.ttlSeconds, delta.detail);
+  }
+  for (const delta of fireTransitionDelta.flowDeltas) {
+    pushScoreFlowEvent(state, delta.kind, delta.deltaCount, delta.ttlSeconds, delta.tileX, delta.tileY);
   }
 
   applyStreakProgress(state, stepDays);
