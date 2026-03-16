@@ -94,6 +94,8 @@ const MIN_DIRECT_BEAD_THRESHOLD = 18;
 const LEDGER_CHIP_WIDTH_PX = 8;
 const LEDGER_BUNDLE_GAP_PX = 3;
 const ACTIVE_QUEUE_SLOT_PX = LEDGER_CHIP_WIDTH_PX + LEDGER_BUNDLE_GAP_PX;
+const LEDGER_TRACK_CONTENT_INSET_PX = 8;
+const LEDGER_PIPE_GUTTER_PX = 16;
 type LedgerRailId = "active" | "extinguished" | "property" | "lives";
 const LEDGER_RAILS = [
   { lane: "extinguished", label: "Extinguished" },
@@ -136,6 +138,12 @@ const triggerPulse = (element: HTMLElement): void => {
   element.classList.remove("is-pulsing");
   void element.offsetWidth;
   element.classList.add("is-pulsing");
+};
+
+const restartTransientClass = (element: HTMLElement, className: string): void => {
+  element.classList.remove(className);
+  void element.offsetWidth;
+  element.classList.add(className);
 };
 
 const createRailIcon = (lane: LedgerRailId): SVGSVGElement => {
@@ -231,6 +239,8 @@ const syncLedgerBundleGroup = (
   className: string
 ): void => {
   const unitsBucket = getBundleUnitsBucket(magnitude);
+  const previousUnitsBucket = group.dataset.units ?? "";
+  const previousChipCount = group.childElementCount;
   group.className = "phase-score-bundle";
   group.dataset.units = unitsBucket;
   group.dataset.magnitude = magnitude.toString();
@@ -246,15 +256,20 @@ const syncLedgerBundleGroup = (
     chip.className = `phase-score-chip ${className}`;
     chip.dataset.units = unitsBucket;
   });
+  if (magnitude > 1 && (previousUnitsBucket !== unitsBucket || previousChipCount !== chipCount)) {
+    restartTransientClass(group, "is-combining");
+  }
 };
 
 const syncLedgerBundles = (
   container: HTMLElement,
   count: number,
   className: string,
-  clipDigits = 9
+  clipDigits = 9,
+  reverseOrder = false
 ): void => {
   const bundles = buildLedgerBundles(count);
+  const orderedBundles = reverseOrder ? [...bundles].reverse() : bundles;
   const existing = new Map<number, HTMLElement>();
   Array.from(container.children).forEach((node) => {
     const element = node as HTMLElement;
@@ -263,7 +278,7 @@ const syncLedgerBundles = (
       existing.set(magnitude, element);
     }
   });
-  bundles.forEach((bundle, index) => {
+  orderedBundles.forEach((bundle, index) => {
     const magnitude = bundle.magnitude;
     const digit = Math.min(bundle.digit, clipDigits);
     let group = existing.get(magnitude) ?? null;
@@ -280,22 +295,56 @@ const syncLedgerBundles = (
   existing.forEach((group) => group.remove());
 };
 
-const getTrackPortAnchor = (
+const getTrackContentBounds = (
   track: HTMLElement,
-  overlayRect: DOMRect,
-  side: "left" | "right",
-  insetPx = 10
-): { x: number; y: number } => {
+  overlayRect: DOMRect
+): { left: number; right: number; width: number; centerY: number } => {
   const rect = track.getBoundingClientRect();
+  const left = rect.left - overlayRect.left + LEDGER_TRACK_CONTENT_INSET_PX;
+  const right = rect.right - overlayRect.left - LEDGER_TRACK_CONTENT_INSET_PX;
   return {
-    x: side === "left" ? rect.left - overlayRect.left + insetPx : rect.right - overlayRect.left - insetPx,
-    y: rect.top - overlayRect.top + rect.height * 0.5
+    left,
+    right,
+    width: Math.max(0, right - left),
+    centerY: rect.top - overlayRect.top + rect.height * 0.5
   };
 };
 
-const getTrackPipeJoinX = (track: HTMLElement, overlayRect: DOMRect): number => {
-  const rect = track.getBoundingClientRect();
-  return Math.max(16, rect.left - overlayRect.left - 18);
+const getTrackPortAnchor = (track: HTMLElement, overlayRect: DOMRect): { x: number; y: number } => {
+  const bounds = getTrackContentBounds(track, overlayRect);
+  return {
+    x: bounds.right - LEDGER_CHIP_WIDTH_PX * 0.5,
+    y: bounds.centerY
+  };
+};
+
+const getTrackTailAnchor = (
+  track: HTMLElement,
+  settled: HTMLElement,
+  overlayRect: DOMRect,
+  slotOffset = 0
+): { x: number; y: number } => {
+  const bounds = getTrackContentBounds(track, overlayRect);
+  const settledWidth = Math.max(0, Math.min(bounds.width, getRenderedContentWidth(settled)));
+  const baseLeft = settledWidth > 0 ? settledWidth + LEDGER_BUNDLE_GAP_PX : 0;
+  const left = Math.max(0, Math.min(bounds.width - LEDGER_CHIP_WIDTH_PX, baseLeft + slotOffset * ACTIVE_QUEUE_SLOT_PX));
+  return {
+    x: bounds.left + left + LEDGER_CHIP_WIDTH_PX * 0.5,
+    y: bounds.centerY
+  };
+};
+
+const getRenderedContentWidth = (container: HTMLElement): number => {
+  if (container.childElementCount <= 0) {
+    return 0;
+  }
+  const containerRect = container.getBoundingClientRect();
+  let maxRight = 0;
+  Array.from(container.children).forEach((node) => {
+    const rect = (node as HTMLElement).getBoundingClientRect();
+    maxRight = Math.max(maxRight, rect.right - containerRect.left);
+  });
+  return maxRight;
 };
 
 const getDirectBeadCapacity = (container: HTMLElement): number => {
@@ -326,7 +375,7 @@ const syncSingleBundle = (
   }
 };
 
-const syncSettledRailBundles = (container: HTMLElement, count: number): void => {
+const syncSettledRailBundles = (container: HTMLElement, count: number, reverseOrder = false): void => {
   if (count <= getDirectBeadCapacity(container)) {
     if (count <= 0) {
       container.replaceChildren();
@@ -335,7 +384,83 @@ const syncSettledRailBundles = (container: HTMLElement, count: number): void => 
     syncSingleBundle(container, 1, count, "is-settled");
     return;
   }
+  syncLedgerBundles(container, count, "is-settled", 9, reverseOrder);
+};
+
+const captureBundleRects = (container: HTMLElement): Map<number, DOMRect> => {
+  const rects = new Map<number, DOMRect>();
+  Array.from(container.children).forEach((node) => {
+    const element = node as HTMLElement;
+    const magnitude = Number(element.dataset.magnitude ?? Number.NaN);
+    if (Number.isFinite(magnitude)) {
+      rects.set(magnitude, element.getBoundingClientRect());
+    }
+  });
+  return rects;
+};
+
+const animateBundleLayout = (container: HTMLElement, previousRects: Map<number, DOMRect>, nextCount: number): void => {
+  const previousCount = Math.max(0, Math.floor(Number(container.dataset.renderedCount ?? "0")));
+  const nextRects = captureBundleRects(container);
+  const removedRects = Array.from(previousRects.entries())
+    .filter(([magnitude]) => !nextRects.has(magnitude))
+    .map(([, rect]) => rect)
+    .sort((left, right) => left.left - right.left);
+  const rightmostRemovedRect = removedRects.length > 0 ? removedRects[removedRects.length - 1] : null;
+
+  Array.from(container.children).forEach((node) => {
+    const element = node as HTMLElement;
+    const magnitude = Number(element.dataset.magnitude ?? Number.NaN);
+    if (!Number.isFinite(magnitude)) {
+      return;
+    }
+    const nextRect = nextRects.get(magnitude);
+    if (!nextRect) {
+      return;
+    }
+    const previousRect =
+      previousRects.get(magnitude) ?? (previousCount < nextCount && magnitude > 1 ? rightmostRemovedRect : null);
+    if (!previousRect) {
+      return;
+    }
+    const dx = previousRect.left - nextRect.left;
+    const dy = previousRect.top - nextRect.top;
+    const scaleX = previousRect.width / Math.max(1, nextRect.width);
+    const scaleY = previousRect.height / Math.max(1, nextRect.height);
+    if (Math.abs(dx) < 0.5 && Math.abs(dy) < 0.5 && Math.abs(scaleX - 1) < 0.02 && Math.abs(scaleY - 1) < 0.02) {
+      return;
+    }
+    element.getAnimations().forEach((animation) => animation.cancel());
+    element.animate(
+      [
+        {
+          transform: `translate(${dx.toFixed(2)}px, ${dy.toFixed(2)}px) scale(${scaleX.toFixed(3)}, ${scaleY.toFixed(3)})`,
+          opacity: previousRects.has(magnitude) ? 1 : 0.88
+        },
+        {
+          transform: "translate(0px, 0px) scale(1, 1)",
+          opacity: 1
+        }
+      ],
+      {
+        duration: 320,
+        easing: "cubic-bezier(0.16, 0.82, 0.2, 1)",
+        fill: "both"
+      }
+    );
+  });
+  container.dataset.renderedCount = String(nextCount);
+};
+
+const syncAccumulatedRailBundles = (container: HTMLElement, count: number): void => {
+  const previousRects = captureBundleRects(container);
+  if (count <= 0) {
+    container.replaceChildren();
+    container.dataset.renderedCount = "0";
+    return;
+  }
   syncLedgerBundles(container, count, "is-settled");
+  animateBundleLayout(container, previousRects, count);
 };
 
 const clearManagedNodes = (nodeMap: Map<number, HTMLElement>): void => {
@@ -448,9 +573,11 @@ const applyActiveQueueDelta = (
   }
 };
 
-const getPipeTrunkX = (activeTrack: HTMLElement, overlayRect: DOMRect): number => {
-  const rect = activeTrack.getBoundingClientRect();
-  return Math.max(16, rect.left - overlayRect.left - 34);
+const getPipeTrunkX = (activeRefs: LedgerRailRefs, overlayRect: DOMRect): number => {
+  const port = getTrackPortAnchor(activeRefs.track, overlayRect);
+  const countRect = activeRefs.count.getBoundingClientRect();
+  const preferred = countRect.left - overlayRect.left - LEDGER_PIPE_GUTTER_PX;
+  return Math.max(port.x + 10, preferred);
 };
 
 const buildPipeRoute = (
@@ -460,17 +587,40 @@ const buildPipeRoute = (
   trunkX: number,
   yOffsetPx = 0
 ): PipeRoutePoint[] => {
-  const start = getTrackPortAnchor(sourceTrack, overlayRect, "left");
-  const end = getTrackPortAnchor(targetTrack, overlayRect, "left");
+  const start = getTrackPortAnchor(sourceTrack, overlayRect);
+  const end = getTrackPortAnchor(targetTrack, overlayRect);
   const startY = start.y + yOffsetPx;
   const endY = end.y + yOffsetPx;
   return [
     { x: start.x, y: startY },
-    { x: getTrackPipeJoinX(sourceTrack, overlayRect), y: startY },
     { x: trunkX, y: startY },
     { x: trunkX, y: endY },
-    { x: getTrackPipeJoinX(targetTrack, overlayRect), y: endY },
     { x: end.x, y: endY }
+  ];
+};
+
+const buildPipeTransferRoute = (
+  sourceRefs: LedgerRailRefs,
+  targetRefs: LedgerRailRefs,
+  overlayRect: DOMRect,
+  trunkX: number,
+  sourceTailOffset: number,
+  targetTailOffset: number,
+  yOffsetPx = 0
+): PipeRoutePoint[] => {
+  const sourceTail = getTrackTailAnchor(sourceRefs.track, sourceRefs.settled, overlayRect, sourceTailOffset);
+  const sourcePort = getTrackPortAnchor(sourceRefs.track, overlayRect);
+  const targetPort = getTrackPortAnchor(targetRefs.track, overlayRect);
+  const targetTail = getTrackTailAnchor(targetRefs.track, targetRefs.settled, overlayRect, targetTailOffset);
+  const sourceY = sourceTail.y + yOffsetPx;
+  const targetY = targetTail.y + yOffsetPx;
+  return [
+    { x: sourceTail.x, y: sourceY },
+    { x: sourcePort.x, y: sourceY },
+    { x: trunkX, y: sourceY },
+    { x: trunkX, y: targetY },
+    { x: targetPort.x, y: targetY },
+    { x: targetTail.x, y: targetY }
   ];
 };
 
@@ -492,7 +642,7 @@ const syncLedgerPipePaths = (
     pathMap.forEach((path) => path.setAttribute("d", ""));
     return;
   }
-  const trunkX = getPipeTrunkX(activeRefs.track, overlayRect);
+  const trunkX = getPipeTrunkX(activeRefs, overlayRect);
   (["extinguished", "property", "lives"] as const).forEach((lane) => {
     const targetRefs = railMap.get(lane);
     const path = pathMap.get(lane);
@@ -561,6 +711,23 @@ const advancePipeTransferTokens = (tokens: PipeTransferToken[], deltaMs: number)
   return next;
 };
 
+const getPendingPipeTransferCounts = (
+  tokens: PipeTransferToken[]
+): Record<Exclude<LedgerRailId, "active">, number> => {
+  const counts = {
+    extinguished: 0,
+    property: 0,
+    lives: 0
+  };
+  for (const token of tokens) {
+    const lane = getFlowTargetLane(token.kind);
+    if (lane) {
+      counts[lane] += 1;
+    }
+  }
+  return counts;
+};
+
 const spawnPipeTransferTokens = (
   tokens: PipeTransferToken[],
   nextTokenId: { current: number },
@@ -568,7 +735,8 @@ const spawnPipeTransferTokens = (
   activeRefs: LedgerRailRefs,
   targetRefs: LedgerRailRefs,
   overlayRect: DOMRect,
-  trunkX: number
+  trunkX: number,
+  pendingTargetCount: number
 ): void => {
   if (!isPipeTransferKind(event.kind)) {
     return;
@@ -577,14 +745,22 @@ const spawnPipeTransferTokens = (
   if (count <= 0) {
     return;
   }
-  const progress01 = getFlowProgress01(event);
   for (let index = 0; index < count; index += 1) {
     const offset = (index - (count - 1) * 0.5) * 3;
+    const sourceTailOffset = event.kind === "lives" ? 0 : index;
     tokens.push({
       id: nextTokenId.current,
       kind: event.kind,
-      progress01: Math.max(0, Math.min(0.999, progress01 - index * 0.08)),
-      route: buildPipeRoute(activeRefs.track, targetRefs.track, overlayRect, trunkX, offset)
+      progress01: 0,
+      route: buildPipeTransferRoute(
+        activeRefs,
+        targetRefs,
+        overlayRect,
+        trunkX,
+        sourceTailOffset,
+        pendingTargetCount + index,
+        offset
+      )
     });
     nextTokenId.current += 1;
   }
@@ -606,7 +782,7 @@ const syncActiveQueueLayer = (
   }
   const activeIds = new Set<number>();
   const containerWidth = container.clientWidth;
-  const settledWidth = settled.scrollWidth;
+  const settledWidth = getRenderedContentWidth(settled);
   const tailX = Math.max(0, Math.min(containerWidth - LEDGER_CHIP_WIDTH_PX, settledWidth + LEDGER_BUNDLE_GAP_PX));
 
   relevantTokens.forEach((token, index) => {
@@ -682,7 +858,7 @@ const syncPipeTransferTokens = (
     wrapper.style.top = `${currentY.toFixed(1)}px`;
     wrapper.style.setProperty("--transfer-progress", token.progress01.toFixed(3));
     wrapper.style.opacity = `${(0.24 + Math.sin(token.progress01 * Math.PI) * 0.72).toFixed(3)}`;
-    syncSingleBundle(wrapper, 1, 1, "is-transfer");
+    syncSingleBundle(wrapper, 1, 1, "is-settled");
     const anchor = overlay.children[index] ?? null;
     if (anchor !== wrapper) {
       overlay.insertBefore(wrapper, anchor);
@@ -1061,7 +1237,7 @@ export const createTopBar = (): TopBarView => {
     const activeFireCount = Math.max(0, Math.floor(data.activeFireCount));
     const activeRefs = ledgerRailMap.get("active") ?? null;
     const overlayRect = ledgerPipeTransfers.getBoundingClientRect();
-    const trunkX = activeRefs && overlayRect.width > 0 && overlayRect.height > 0 ? getPipeTrunkX(activeRefs.track, overlayRect) : 16;
+    const trunkX = activeRefs && overlayRect.width > 0 && overlayRect.height > 0 ? getPipeTrunkX(activeRefs, overlayRect) : 16;
 
     if (lastActiveQueueUpdateMs !== null) {
       activeQueueTokens = advanceActiveQueueTokens(activeQueueTokens, now - lastActiveQueueUpdateMs);
@@ -1081,6 +1257,7 @@ export const createTopBar = (): TopBarView => {
         const targetLane = getFlowTargetLane(event.kind);
         const targetRefs = targetLane ? ledgerRailMap.get(targetLane) ?? null : null;
         if (targetRefs) {
+          const pendingPipeTransferCounts = getPendingPipeTransferCounts(pipeTransferTokens);
           spawnPipeTransferTokens(
             pipeTransferTokens,
             nextPipeTransferTokenId,
@@ -1088,7 +1265,8 @@ export const createTopBar = (): TopBarView => {
             activeRefs,
             targetRefs,
             overlayRect,
-            trunkX
+            trunkX,
+            targetLane ? pendingPipeTransferCounts[targetLane] : 0
           );
         }
       }
@@ -1099,6 +1277,7 @@ export const createTopBar = (): TopBarView => {
       (sum, token) => sum + (token.direction === "incoming" ? 1 : 0),
       0
     );
+    const pendingPipeTransferCounts = getPendingPipeTransferCounts(pipeTransferTokens);
 
     for (const { lane } of LEDGER_RAILS) {
       const refs = ledgerRailMap.get(lane);
@@ -1123,7 +1302,7 @@ export const createTopBar = (): TopBarView => {
 
       const laneEvents = scoreLaneEvents.get(lane) ?? [];
       refs.count.textContent = countsByLane[lane].toLocaleString();
-      syncSettledRailBundles(refs.settled, countsByLane[lane]);
+      syncAccumulatedRailBundles(refs.settled, Math.max(0, countsByLane[lane] - pendingPipeTransferCounts[lane]));
       refs.rail.classList.toggle(
         "is-hot",
         laneEvents.some((event) => event.severity === "negative" && event.remainingSeconds > 0)

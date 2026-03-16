@@ -331,6 +331,10 @@ const recordLatestFireAlert = (state: WorldState, tileX: number, tileY: number):
   };
 };
 
+const clearLatestFireAlert = (state: WorldState): void => {
+  state.latestFireAlert = null;
+};
+
 const isGrowthWeather = (state: WorldState): boolean =>
   state.climateTemp >= GROWTH_WEATHER_TEMP_MIN &&
   state.climateTemp <= GROWTH_WEATHER_TEMP_MAX &&
@@ -386,6 +390,7 @@ const extinguishSeasonCarryoverFires = (state: WorldState): void => {
   clearFireBlocks(state);
   state.lastActiveFires = 0;
   resetFireBounds(state);
+  clearLatestFireAlert(state);
 };
 
 const showSeasonOverlay = (state: WorldState): void => {
@@ -450,6 +455,7 @@ export function extinguishAllFires(state: WorldState, effects: EffectsState): vo
   effects.waterStreams = [];
   state.lastActiveFires = 0;
   resetFireBounds(state);
+  clearLatestFireAlert(state);
 }
 
 export function calculateBudgetOutcome(state: WorldState): void {
@@ -806,7 +812,9 @@ export function stepSim(state: WorldState, effects: EffectsState, rng: RNG, delt
     stepWind(state, delta, rng);
   }
   state.lastActiveFires = activeFires;
-  const incidentPressure = activeFires > 0 || state.fireScheduledCount > 0 || state.fireBoundsActive;
+  if (activeFires <= 0) {
+    clearLatestFireAlert(state);
+  }
   if (!hadActiveFires && activeFires > 0) {
     const strongest = findStrongestFireTile(state);
     if (strongest) {
@@ -827,7 +835,7 @@ export function stepSim(state: WorldState, effects: EffectsState, rng: RNG, delt
         setStatus(state, "Fire incident detected. Simulation paused.");
       }
     }
-  } else if (state.simTimeMode === "incident" && !incidentPressure) {
+  } else if (state.simTimeMode === "incident" && activeFires <= 0) {
     exitIncidentMode(state);
   }
 

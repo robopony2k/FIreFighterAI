@@ -178,6 +178,8 @@ type ThreeTestRenderState = {
 type ThreeTestCinematicLookConfig = ThreeTestCinematicGradeConfig & {
   exposure: number;
   fogDensity: number;
+  fogStartDistance: number;
+  fogRampDistance: number;
   fireFlameIntensityBoost: number;
   fireGlowBoost: number;
   emberBoost: number;
@@ -265,6 +267,8 @@ const THREE_TEST_CINEMATIC_GRADE_CONFIG: ThreeTestCinematicLookConfig = {
   exposure: 0.94,
   fogColor: 0x2f3238,
   fogDensity: 0.0065,
+  fogStartDistance: 28,
+  fogRampDistance: 54,
   heightHazeStrength: 0.09,
   heightHazeHorizon: 0.58,
   heightHazeCurve: 1.6,
@@ -463,9 +467,10 @@ export const createThreeTest = (
   camera.lookAt(0, 0, 0);
   const uiCamera = new THREE.OrthographicCamera(0, 1, 1, 0, -10, 10);
   uiCamera.position.set(0, 0, 5);
-  const cinematicFog = new THREE.FogExp2(
+  const cinematicFog = new THREE.Fog(
     THREE_TEST_CINEMATIC_GRADE_CONFIG.fogColor,
-    THREE_TEST_CINEMATIC_GRADE_CONFIG.fogDensity
+    THREE_TEST_CINEMATIC_GRADE_CONFIG.fogStartDistance,
+    THREE_TEST_CINEMATIC_GRADE_CONFIG.fogStartDistance + THREE_TEST_CINEMATIC_GRADE_CONFIG.fogRampDistance
   );
   const applyCinematicLook = (enabled: boolean): void => {
     renderer.toneMappingExposure = enabled
@@ -3013,9 +3018,40 @@ export const createThreeTest = (
     }
   };
 
+  const findCurrentStrongestFireTile = (): { x: number; y: number } | null => {
+    if (world.lastActiveFires <= 0) {
+      return null;
+    }
+    const cols = world.grid.cols;
+    const rows = world.grid.rows;
+    const minX = world.fireBoundsActive ? Math.max(0, world.fireMinX) : 0;
+    const maxX = world.fireBoundsActive ? Math.min(cols - 1, world.fireMaxX) : cols - 1;
+    const minY = world.fireBoundsActive ? Math.max(0, world.fireMinY) : 0;
+    const maxY = world.fireBoundsActive ? Math.min(rows - 1, world.fireMaxY) : rows - 1;
+    let bestScore = 0;
+    let bestTile: { x: number; y: number } | null = null;
+    for (let y = minY; y <= maxY; y += 1) {
+      for (let x = minX; x <= maxX; x += 1) {
+        const idx = indexFor(world.grid, x, y);
+        const fire = world.tileFire[idx] ?? 0;
+        if (fire <= 0) {
+          continue;
+        }
+        const heat = world.tileHeat[idx] ?? 0;
+        const score = fire * 2 + heat * 0.15;
+        if (score > bestScore || !bestTile) {
+          bestScore = score;
+          bestTile = { x, y };
+        }
+      }
+    }
+    return bestTile;
+  };
+
   const updateFireAlertCard = (): void => {
     const alert = world.latestFireAlert;
-    if (!alert) {
+    const strongestTile = findCurrentStrongestFireTile();
+    if (!alert || !strongestTile) {
       visibleFireAlertId = null;
       activeFireAlertTownId = null;
       activeFireAlertTile = null;
@@ -3029,17 +3065,17 @@ export const createThreeTest = (
       return;
     }
     visibleFireAlertId = alert.id;
-    activeFireAlertTile = { x: alert.tileX, y: alert.tileY };
+    activeFireAlertTile = strongestTile;
     activeFireAlertTownId = alert.townId >= 0 ? alert.townId : null;
     const town = activeFireAlertTownId !== null ? getTownById(activeFireAlertTownId) : null;
     if (town) {
       const snapshot = readTownUiSnapshot(town);
-      fireAlertCardElements.summary.textContent = `${town.name} | Tile ${alert.tileX},${alert.tileY}`;
+      fireAlertCardElements.summary.textContent = `${town.name} | Tile ${strongestTile.x},${strongestTile.y}`;
       fireAlertCardElements.details.textContent = `Burning ${snapshot.burning} | Houses ${snapshot.houses} | Alert ${snapshot.postureLabel}`;
       fireAlertCardElements.openTownButton.disabled = false;
       fireAlertCardElements.openTownButton.title = `Open ${town.name} card`;
     } else {
-      fireAlertCardElements.summary.textContent = `Incident Tile ${alert.tileX},${alert.tileY}`;
+      fireAlertCardElements.summary.textContent = `Incident Tile ${strongestTile.x},${strongestTile.y}`;
       fireAlertCardElements.details.textContent = "No nearby town linked to this ignition.";
       fireAlertCardElements.openTownButton.disabled = true;
       fireAlertCardElements.openTownButton.title = "No nearby town for this incident.";
@@ -3955,6 +3991,20 @@ export const createThreeTest = (
   const lastShadowFocusPoint = new THREE.Vector3(Number.NaN, Number.NaN, Number.NaN);
   let lastShadowExtent = Number.NaN;
   let lastShadowFar = Number.NaN;
+  const syncCinematicFogDistance = (fogDensity: number): void => {
+    const densityScale = THREE.MathUtils.clamp(
+      fogDensity / Math.max(0.0001, THREE_TEST_CINEMATIC_GRADE_CONFIG.fogDensity),
+      0.75,
+      1.85
+    );
+    const cameraDistance = Math.max(1, camera.position.distanceTo(controls.target));
+    const startBase = Math.max(THREE_TEST_CINEMATIC_GRADE_CONFIG.fogStartDistance, cameraDistance * 0.65);
+    const rampBase = Math.max(THREE_TEST_CINEMATIC_GRADE_CONFIG.fogRampDistance, cameraDistance * 1.2);
+    const startDistance = startBase / Math.pow(densityScale, 0.35);
+    const rampDistance = rampBase / Math.pow(densityScale, 0.85);
+    cinematicFog.near = Math.max(8, startDistance);
+    cinematicFog.far = Math.max(cinematicFog.near + 12, cinematicFog.near + rampDistance);
+  };
   const requestShadowRefresh = (): void => {
     shadowRefreshPending = true;
   };
@@ -4078,7 +4128,7 @@ export const createThreeTest = (
     texture.needsUpdate = true;
     if (THREE_TEST_ENV_FOG_ENABLED) {
       cinematicFog.color.set(rgbToHex(lighting.fogColor));
-      cinematicFog.density = lighting.fogDensity;
+      syncCinematicFogDistance(lighting.fogDensity);
       cinematicGradePost?.setFogColor(rgbToHex(lighting.fogColor));
       cinematicGradePost?.setHeightHazeStrength(lighting.hazeStrength);
     }
@@ -5025,6 +5075,9 @@ export const createThreeTest = (
     updateCameraFlight(time);
     controls.update();
     threePerf.controlsMs = smoothPerf(threePerf.controlsMs, performance.now() - controlsStart);
+    if (THREE_TEST_ENV_FOG_ENABLED) {
+      syncCinematicFogDistance(lastLightingApplied?.fogDensity ?? THREE_TEST_CINEMATIC_GRADE_CONFIG.fogDensity);
+    }
     if (lastLightingApplied) {
       syncDirectionalLightRig(lastLightingApplied);
     }

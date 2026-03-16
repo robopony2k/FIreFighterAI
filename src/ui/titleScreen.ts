@@ -112,12 +112,12 @@ const buildFirePalette = (): Uint8ClampedArray => {
   const palette = new Uint8ClampedArray(FIRE_LEVELS * 4);
   const stops = [
     { t: 0, color: [0, 0, 0, 0] as const },
-    { t: 0.14, color: [58, 6, 0, 255] as const },
-    { t: 0.32, color: [138, 24, 2, 255] as const },
-    { t: 0.56, color: [218, 66, 8, 255] as const },
-    { t: 0.78, color: [252, 138, 26, 255] as const },
-    { t: 0.92, color: [255, 202, 82, 255] as const },
-    { t: 1, color: [255, 244, 186, 255] as const }
+    { t: 0.14, color: [44, 8, 2, 208] as const },
+    { t: 0.32, color: [108, 26, 10, 228] as const },
+    { t: 0.56, color: [178, 64, 18, 240] as const },
+    { t: 0.78, color: [224, 116, 34, 232] as const },
+    { t: 0.92, color: [244, 168, 66, 204] as const },
+    { t: 1, color: [255, 212, 116, 164] as const }
   ];
   for (let i = 0; i < FIRE_LEVELS; i += 1) {
     const t = i / (FIRE_LEVELS - 1);
@@ -846,8 +846,8 @@ export const showTitleScreen = (deps: TitleScreenDeps): TitleScreenHandle => {
       data[pixelIndex] = FIRE_PALETTE[paletteIndex];
       data[pixelIndex + 1] = FIRE_PALETTE[paletteIndex + 1];
       data[pixelIndex + 2] = FIRE_PALETTE[paletteIndex + 2];
-      const alphaGain = Math.pow(level / (FIRE_LEVELS - 1), 0.62);
-      data[pixelIndex + 3] = clamp(Math.round(FIRE_PALETTE[paletteIndex + 3] * alphaGain * 1.18), 0, 255);
+      const alphaGain = Math.pow(level / (FIRE_LEVELS - 1), 0.84);
+      data[pixelIndex + 3] = clamp(Math.round(FIRE_PALETTE[paletteIndex + 3] * alphaGain * 0.94), 0, 255);
     }
     fireCtx.putImageData(fireImageData, 0, 0);
   };
@@ -982,33 +982,34 @@ export const showTitleScreen = (deps: TitleScreenDeps): TitleScreenHandle => {
         (0.68 + activityLevel * 0.52);
       const flameWidthBase =
         flameHeightBase *
-        (isHero ? 0.84 + 0.18 * s1 : 0.68 + 0.18 * s1) *
-        (0.84 + point.strength * 0.16);
-      const flameHeight = Math.max(1.2, flameHeightBase * (0.88 + heat01 * 0.22));
-      const flameWidth = Math.max(1.05, flameWidthBase * (1 - smoothstep(0.72, 1.0, phase) * 0.28));
+        (isHero ? 0.62 + 0.14 * s1 : 0.46 + 0.14 * s1) *
+        (0.74 + point.strength * 0.12);
+      const flameHeight = Math.max(1.2, flameHeightBase * (0.94 + heat01 * 0.16));
+      const flameWidth = Math.max(0.95, flameWidthBase * (0.84 - smoothstep(0.68, 1.0, phase) * 0.22));
 
       const alphaT = Math.pow(Math.sin(Math.PI * phase), isHero ? 1.15 : 1.35);
-      const alpha = clamp(alphaT * (0.46 + heat01 * 0.48) * (0.72 + activityLevel * 0.28), 0, 1);
+      const alpha = clamp(alphaT * (0.4 + heat01 * 0.34) * (0.58 + activityLevel * 0.2), 0, 0.82);
       if (alpha <= 0.04) {
         continue;
       }
 
       const phaseColor = clamp(phase, 0, 1);
-      let red = 255;
-      let green = 210;
-      let blue = 144;
+      let red = 248;
+      let green = 188;
+      let blue = 106;
       if (phaseColor < 0.22) {
         const t = phaseColor / 0.22;
-        green = Math.round(216 + (166 - 216) * t);
-        blue = Math.round(148 + (68 - 148) * t);
+        green = Math.round(194 + (156 - 194) * t);
+        blue = Math.round(112 + (58 - 112) * t);
       } else if (phaseColor < 0.6) {
         const t = (phaseColor - 0.22) / 0.38;
-        green = Math.round(166 + (92 - 166) * t);
-        blue = Math.round(68 + (18 - 68) * t);
+        red = Math.round(244 + (216 - 244) * t);
+        green = Math.round(156 + (84 - 156) * t);
+        blue = Math.round(58 + (18 - 58) * t);
       } else {
         const t = (phaseColor - 0.6) / 0.4;
-        red = Math.round(238 + (188 - 238) * t);
-        green = Math.round(92 + (34 - 92) * t);
+        red = Math.round(216 + (168 - 216) * t);
+        green = Math.round(84 + (28 - 84) * t);
         blue = Math.round(18 + (8 - 18) * t);
       }
 
@@ -1020,14 +1021,14 @@ export const showTitleScreen = (deps: TitleScreenDeps): TitleScreenHandle => {
       jetCtx.ellipse(flameletX, flameletY, flameWidth, flameHeight, tilt, 0, Math.PI * 2);
       jetCtx.fill();
 
-      if (isHero || phase < 0.76) {
-        jetCtx.globalAlpha = alpha * (isHero ? 0.56 : 0.42);
+      if (isHero || phase < 0.62) {
+        jetCtx.globalAlpha = alpha * (isHero ? 0.34 : 0.24);
         jetCtx.beginPath();
         jetCtx.ellipse(
           flameletX,
-          flameletY - flameHeight * 0.3,
-          flameWidth * (isHero ? 0.8 : 0.74),
-          flameHeight * (isHero ? 0.96 : 0.86),
+          flameletY - flameHeight * 0.24,
+          flameWidth * (isHero ? 0.72 : 0.64),
+          flameHeight * (isHero ? 0.82 : 0.74),
           tilt,
           0,
           Math.PI * 2
@@ -1035,10 +1036,10 @@ export const showTitleScreen = (deps: TitleScreenDeps): TitleScreenHandle => {
         jetCtx.fill();
       }
 
-      jetCtx.globalAlpha = clamp(alpha * 0.5, 0.1, 0.42);
-      jetCtx.fillStyle = `rgba(255, 242, ${Math.round(176 + 52 * heat01)}, 1)`;
+      jetCtx.globalAlpha = clamp(alpha * 0.28, 0.05, 0.22);
+      jetCtx.fillStyle = `rgba(255, 210, ${Math.round(132 + 36 * heat01)}, 1)`;
       jetCtx.beginPath();
-      jetCtx.arc(spawnX, spawnY, Math.max(1, flameWidth * (isHero ? 0.42 : 0.34)), 0, Math.PI * 2);
+      jetCtx.arc(spawnX, spawnY, Math.max(0.75, flameWidth * (isHero ? 0.26 : 0.22)), 0, Math.PI * 2);
       jetCtx.fill();
 
       if (Math.random() < 0.007 + activityLevel * 0.022) {
@@ -1167,39 +1168,36 @@ export const showTitleScreen = (deps: TitleScreenDeps): TitleScreenHandle => {
 
     titleCtx.save();
     titleCtx.globalCompositeOperation = "lighter";
-    titleCtx.globalAlpha = 0.3 * flameReveal;
+    titleCtx.globalAlpha = 0.18 * flameReveal;
     titleCtx.filter = `blur(${Math.max(16, Math.round(outline * 3.6))}px)`;
-    titleCtx.drawImage(glowFireCanvas, windVisualShift * 0.34, -plumeLift * 1.6, width, Math.round(height * 1.58));
+    titleCtx.drawImage(glowFireCanvas, windVisualShift * 0.28, -plumeLift * 1.35, width, Math.round(height * 1.42));
     titleCtx.restore();
 
     titleCtx.save();
     titleCtx.globalCompositeOperation = "lighter";
-    titleCtx.globalAlpha = 0.44 * flameReveal;
+    titleCtx.globalAlpha = 0.26 * flameReveal;
     titleCtx.filter = `blur(${Math.max(9, Math.round(outline * 1.95))}px)`;
-    titleCtx.drawImage(glowFireCanvas, windVisualShift * 0.24, -plumeLift * 0.9, width, Math.round(height * 1.28));
-    titleCtx.drawImage(glowFireCanvas, windVisualShift * 0.18, plumeDrop * 0.35, width, Math.round(height * 1.02));
+    titleCtx.drawImage(glowFireCanvas, windVisualShift * 0.18, -plumeLift * 0.7, width, Math.round(height * 1.18));
+    titleCtx.drawImage(glowFireCanvas, windVisualShift * 0.12, plumeDrop * 0.2, width, Math.round(height * 0.98));
     titleCtx.restore();
 
     titleCtx.save();
     titleCtx.globalCompositeOperation = "lighter";
-    titleCtx.globalAlpha = 0.84 * flameReveal;
+    titleCtx.globalAlpha = 0.62 * flameReveal;
     titleCtx.drawImage(coreFireCanvas, windVisualShift * 0.1, -Math.max(1, Math.round(outline * 0.2)), width, height);
-    titleCtx.drawImage(coreFireCanvas, windVisualShift * 0.06, plumeDrop * 0.26, width, Math.round(height * 0.98));
     titleCtx.restore();
 
     titleCtx.save();
     titleCtx.globalCompositeOperation = "lighter";
-    titleCtx.globalAlpha = 0.6 * flameReveal;
+    titleCtx.globalAlpha = 0.28 * flameReveal;
     titleCtx.filter = `blur(${Math.max(6, Math.round(outline * 1.24))}px)`;
     titleCtx.drawImage(jetCanvas, windVisualShift * 0.18, -Math.max(2, Math.round(outline * 0.44)));
-    titleCtx.drawImage(jetCanvas, windVisualShift * 0.08, Math.max(4, Math.round(outline * 0.74)));
     titleCtx.restore();
 
     titleCtx.save();
     titleCtx.globalCompositeOperation = "lighter";
-    titleCtx.globalAlpha = 0.97 * flameReveal;
+    titleCtx.globalAlpha = 0.78 * flameReveal;
     titleCtx.drawImage(jetCanvas, 0, 0);
-    titleCtx.drawImage(jetCanvas, windVisualShift * 0.08, Math.max(2, Math.round(outline * 0.35)));
     titleCtx.restore();
 
     if (silhouetteReveal > 0.001) {
