@@ -1625,6 +1625,68 @@ canvas {
   gap: 12px;
 }
 
+.title-screen-settings-shell {
+  display: grid;
+  gap: 14px;
+}
+
+.title-screen-settings-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.title-screen-settings-tab {
+  min-height: 34px;
+  padding: 0 14px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 204, 146, 0.2);
+  background: rgba(255, 255, 255, 0.04);
+  color: rgba(239, 228, 211, 0.82);
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  font-size: 11px;
+}
+
+.title-screen-settings-tab:hover,
+.title-screen-settings-tab:focus-visible {
+  border-color: rgba(240, 143, 58, 0.45);
+  background: rgba(240, 143, 58, 0.1);
+}
+
+.title-screen-settings-tab--active {
+  border-color: rgba(240, 143, 58, 0.58);
+  background: linear-gradient(180deg, rgba(240, 143, 58, 0.26), rgba(240, 143, 58, 0.12));
+  color: rgba(255, 244, 227, 0.96);
+}
+
+.title-screen-settings-panels {
+  display: grid;
+}
+
+.title-screen-settings-tab-panel {
+  display: grid;
+  gap: 14px;
+}
+
+.title-screen-runtime-settings {
+  display: grid;
+  gap: 14px;
+}
+
+.title-screen-settings-section {
+  display: grid;
+  gap: 10px;
+}
+
+.title-screen-settings-section-title {
+  margin: 0;
+  font-size: 12px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: rgba(255, 218, 176, 0.86);
+}
+
 .title-screen-setting {
   display: grid;
   gap: 7px;
@@ -1634,10 +1696,34 @@ canvas {
   background: rgba(255, 255, 255, 0.02);
 }
 
+.title-screen-setting--feature {
+  border-color: rgba(240, 143, 58, 0.28);
+  background:
+    linear-gradient(180deg, rgba(240, 143, 58, 0.08), rgba(255, 255, 255, 0.02));
+}
+
+.title-screen-setting--disabled {
+  opacity: 0.58;
+}
+
 .title-screen-setting-inline {
   display: flex;
   align-items: center;
   gap: 10px;
+}
+
+.title-screen-setting-description {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.45;
+  color: rgba(214, 202, 182, 0.78);
+}
+
+.title-screen-setting-detail {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.45;
+  color: rgba(255, 223, 183, 0.84);
 }
 
 .title-screen-setting-inline input[type="range"] {
@@ -1665,6 +1751,43 @@ canvas {
 .title-screen-setting input[type="range"] {
   width: 100%;
   accent-color: #f08f3a;
+}
+
+.title-screen-setting-select,
+.title-screen-setting-number {
+  width: 100%;
+  min-height: 34px;
+  border-radius: 7px;
+  border: 1px solid rgba(255, 204, 146, 0.24);
+  background: rgba(24, 18, 14, 0.88);
+  color: rgba(248, 236, 217, 0.94);
+  padding: 6px 8px;
+}
+
+.title-screen-setting-select:focus,
+.title-screen-setting-number:focus {
+  outline: 1px solid rgba(240, 143, 58, 0.5);
+  border-color: rgba(240, 143, 58, 0.5);
+}
+
+.title-screen-setting-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.title-screen-setting-reset {
+  min-height: 34px;
+  padding: 0 12px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 204, 146, 0.24);
+  background: rgba(255, 255, 255, 0.05);
+  color: rgba(248, 236, 217, 0.94);
+}
+
+.title-screen-setting-reset:hover,
+.title-screen-setting-reset:focus-visible {
+  background: rgba(240, 143, 58, 0.12);
+  border-color: rgba(240, 143, 58, 0.5);
 }
 
 .title-screen-score-list {

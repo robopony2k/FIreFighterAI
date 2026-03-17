@@ -1,25 +1,25 @@
+import { getRuntimeSettings, subscribeRuntimeSettings } from "../persistence/runtimeSettings.js";
+
 type Stat = {
   count: number;
   total: number;
   max: number;
 };
 
-const ENABLED_FROM_QUERY = (() => {
-  if (typeof window === "undefined") {
-    return false;
-  }
-  const params = new URLSearchParams(window.location.search);
-  return params.get("simprof") === "1";
-})();
-const ENABLE_SIM_PROF = ENABLED_FROM_QUERY;
+let enableSimProf = getRuntimeSettings().simprof;
+if (typeof window !== "undefined") {
+  subscribeRuntimeSettings((settings) => {
+    enableSimProf = settings.simprof;
+  });
+}
 const stats = new Map<string, Stat>();
 const REPORT_INTERVAL_MS = 2000;
 let lastReport = 0;
 
-export const profStart = (): number => (ENABLE_SIM_PROF ? performance.now() : 0);
+export const profStart = (): number => (enableSimProf ? performance.now() : 0);
 
 export const profEnd = (name: string, start: number): void => {
-  if (!ENABLE_SIM_PROF) {
+  if (!enableSimProf) {
     return;
   }
   const dt = performance.now() - start;
@@ -44,7 +44,7 @@ export const maybeReport = (state: {
   pathMaxOpenSize: number;
   pathLastNodesExpanded: number;
 }): void => {
-  if (!ENABLE_SIM_PROF) {
+  if (!enableSimProf) {
     return;
   }
   const now = performance.now();

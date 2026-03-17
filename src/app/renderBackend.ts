@@ -1,4 +1,5 @@
 export type RenderBackend = "3d" | "legacy2d";
+type RenderBackendSource = RenderBackend | (() => RenderBackend);
 
 export type RuntimeRenderBackend = {
   mode: RenderBackend;
@@ -19,11 +20,14 @@ export const resolveRenderBackend = (params: URLSearchParams): RenderBackend => 
   return render === "2d" ? "legacy2d" : "3d";
 };
 
-export const createRenderBackend = (mode: RenderBackend, deps: CreateRenderBackendDeps): RuntimeRenderBackend => {
+export const createRenderBackend = (mode: RenderBackendSource, deps: CreateRenderBackendDeps): RuntimeRenderBackend => {
+  const resolveMode = (): RenderBackend => (typeof mode === "function" ? mode() : mode);
   return {
-    mode,
+    get mode() {
+      return resolveMode();
+    },
     frame: (alpha: number) => {
-      if (mode === "legacy2d") {
+      if (resolveMode() === "legacy2d") {
         deps.renderLegacy2d(alpha);
         return;
       }

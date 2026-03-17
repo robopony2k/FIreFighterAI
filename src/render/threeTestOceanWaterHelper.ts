@@ -23,6 +23,9 @@ type OceanUniforms = {
   u_skyTopColor: { value: THREE.Color };
   u_skyHorizonColor: { value: THREE.Color };
   u_sunColor: { value: THREE.Color };
+  u_fogColor: { value: THREE.Color };
+  u_fogNear: { value: number };
+  u_fogFar: { value: number };
   u_waveAmp: { value: number };
   u_waveFreq: { value: THREE.Vector2 };
   u_waveVariance: { value: number };
@@ -54,6 +57,9 @@ type ThreeTestOceanWaterHelperOptions = {
   keyLight: THREE.DirectionalLight;
   skyTopColor: number;
   skyHorizonColor: number;
+  fogColor: THREE.ColorRepresentation;
+  fogNear: number;
+  fogFar: number;
 };
 
 type OceanWaterPalette = {
@@ -62,6 +68,34 @@ type OceanWaterPalette = {
   shallowColor: THREE.ColorRepresentation;
   deepColor: THREE.ColorRepresentation;
   sunColor: THREE.ColorRepresentation;
+};
+
+type OceanWaterFog = {
+  color: THREE.ColorRepresentation;
+  near: number;
+  far: number;
+};
+
+type OceanBackdropEntry = {
+  mesh: THREE.Mesh;
+  uniforms: OceanUniforms;
+  material: THREE.ShaderMaterial;
+};
+
+const DISTANT_OCEAN_EXTENSION_SCALE = 10.5;
+const DISTANT_OCEAN_EXTENSION_MIN = 1400;
+const DISTANT_OCEAN_EDGE_OVERLAP = 0;
+const DISTANT_OCEAN_SEGMENT_WORLD_SIZE = 220;
+
+const createSolidTexture = (r: number, g: number, b: number, a = 255): THREE.DataTexture => {
+  const texture = new THREE.DataTexture(new Uint8Array([r, g, b, a]), 1, 1, THREE.RGBAFormat);
+  texture.needsUpdate = true;
+  texture.wrapS = THREE.ClampToEdgeWrapping;
+  texture.wrapT = THREE.ClampToEdgeWrapping;
+  texture.minFilter = THREE.LinearFilter;
+  texture.magFilter = THREE.LinearFilter;
+  texture.generateMipmaps = false;
+  return texture;
 };
 
 export class ThreeTestOceanWaterHelper {
@@ -74,7 +108,13 @@ export class ThreeTestOceanWaterHelper {
     deepColor: THREE.Color;
     sunColor: THREE.Color;
   };
+  private fogState: {
+    color: THREE.Color;
+    near: number;
+    far: number;
+  };
   private mesh: THREE.Mesh | null = null;
+  private backdropEntries: OceanBackdropEntry[] = [];
   private uniforms: OceanUniforms | null = null;
   private mask: THREE.Texture | null = null;
   private supportMap: THREE.Texture | null = null;
@@ -84,6 +124,10 @@ export class ThreeTestOceanWaterHelper {
   private rapidMap: THREE.Texture | null = null;
   private normal1: THREE.Texture | null = null;
   private normal2: THREE.Texture | null = null;
+  private readonly backdropMask: THREE.DataTexture;
+  private readonly backdropSupportMap: THREE.DataTexture;
+  private readonly backdropDomainMap: THREE.DataTexture;
+  private readonly backdropShoreSdf: THREE.DataTexture;
 
   constructor(options: ThreeTestOceanWaterHelperOptions) {
     this.scene = options.scene;
@@ -95,6 +139,158 @@ export class ThreeTestOceanWaterHelper {
       deepColor: new THREE.Color(0x1b5078),
       sunColor: new THREE.Color(0xfff0cf)
     };
+    this.fogState = {
+      color: new THREE.Color(options.fogColor),
+      near: options.fogNear,
+      far: options.fogFar
+    };
+    this.backdropMask = createSolidTexture(255, 255, 255, 255);
+    this.backdropSupportMap = createSolidTexture(255, 255, 255, 255);
+    this.backdropDomainMap = createSolidTexture(255, 0, 255, 255);
+    this.backdropShoreSdf = createSolidTexture(255, 255, 255, 255);
+  }
+
+  private forEachUniformSet(visitor: (uniforms: OceanUniforms) => void): void {
+    if (this.uniforms) {
+      visitor(this.uniforms);
+    }
+    this.backdropEntries.forEach((entry) => visitor(entry.uniforms));
+  }
+
+  private createOceanUniforms(
+    mask: THREE.Texture,
+    supportMap: THREE.Texture,
+    domainMap: THREE.Texture,
+    shoreSdf: THREE.Texture,
+    width: number,
+    depth: number,
+    sampleCols: number,
+    sampleRows: number,
+    qualityUniform: number
+  ): OceanUniforms {
+    return {
+      u_time: { value: 0 },
+      u_mask: { value: mask },
+      u_supportMap: { value: supportMap },
+      u_domainMap: { value: domainMap },
+      u_shoreSdf: { value: shoreSdf },
+      u_color: { value: this.currentPalette.shallowColor.clone() },
+      u_deepColor: { value: this.currentPalette.deepColor.clone() },
+      u_opacity: { value: 0.97 },
+      u_waveScale: { value: 0.115 },
+      u_normalMap1: { value: this.normal1 as THREE.Texture },
+      u_normalMap2: { value: this.normal2 as THREE.Texture },
+      u_scroll1: { value: new THREE.Vector2(0.0024, 0.0012) },
+      u_scroll2: { value: new THREE.Vector2(-0.0018, 0.0021) },
+      u_normalScale: { value: 0.046 },
+      u_normalStrength: { value: 0.68 },
+      u_shininess: { value: 62.0 },
+      u_lightDir: { value: this.keyLight.position.clone().normalize() },
+      u_specular: { value: 0.44 },
+      u_skyTopColor: { value: this.currentPalette.skyTopColor.clone() },
+      u_skyHorizonColor: { value: this.currentPalette.skyHorizonColor.clone() },
+      u_sunColor: { value: this.currentPalette.sunColor.clone() },
+      u_fogColor: { value: this.fogState.color.clone() },
+      u_fogNear: { value: this.fogState.near },
+      u_fogFar: { value: this.fogState.far },
+      u_waveAmp: { value: 1.0 },
+      u_waveFreq: { value: new THREE.Vector2(22.0, 34.0) },
+      u_waveVariance: { value: 0.68 },
+      u_cellGrid: {
+        value: new THREE.Vector2(
+          Math.max(4, Math.floor((sampleCols - 1) * 0.14)),
+          Math.max(4, Math.floor((sampleRows - 1) * 0.14))
+        )
+      },
+      u_worldStep: {
+        value: new THREE.Vector2(
+          Math.max(0.1, width / Math.max(1, sampleCols - 1)),
+          Math.max(0.1, depth / Math.max(1, sampleRows - 1))
+        )
+      },
+      u_uvStep: {
+        value: new THREE.Vector2(
+          1 / Math.max(1, sampleCols - 1),
+          1 / Math.max(1, sampleRows - 1)
+        )
+      },
+      u_tideAmp: { value: 0.18 },
+      u_tideFreq: { value: 0.085 },
+      u_quality: { value: qualityUniform }
+    };
+  }
+
+  private sampleHeightProfile(profile: Float32Array, t: number): number {
+    if (profile.length === 0) {
+      return 0;
+    }
+    const clampedT = THREE.MathUtils.clamp(t, 0, 1);
+    const scaledIndex = clampedT * Math.max(0, profile.length - 1);
+    const index = Math.floor(scaledIndex);
+    const nextIndex = Math.min(profile.length - 1, index + 1);
+    const mixT = scaledIndex - index;
+    return THREE.MathUtils.lerp(profile[index] ?? 0, profile[nextIndex] ?? 0, mixT);
+  }
+
+  private getOceanEdgeProfiles(ocean: OceanWaterData): {
+    north: Float32Array;
+    south: Float32Array;
+    west: Float32Array;
+    east: Float32Array;
+  } | null {
+    if (!ocean.heights || ocean.heights.length !== ocean.sampleCols * ocean.sampleRows) {
+      return null;
+    }
+    const north = ocean.heights.slice(0, ocean.sampleCols);
+    const southStart = Math.max(0, (ocean.sampleRows - 1) * ocean.sampleCols);
+    const south = ocean.heights.slice(southStart, southStart + ocean.sampleCols);
+    const west = new Float32Array(ocean.sampleRows);
+    const east = new Float32Array(ocean.sampleRows);
+    for (let row = 0; row < ocean.sampleRows; row += 1) {
+      const base = row * ocean.sampleCols;
+      west[row] = ocean.heights[base] ?? 0;
+      east[row] = ocean.heights[base + Math.max(0, ocean.sampleCols - 1)] ?? 0;
+    }
+    return { north, south, west, east };
+  }
+
+  private applyBackdropEdgeProfile(
+    geometry: THREE.PlaneGeometry,
+    ocean: OceanWaterData,
+    edge: "north" | "south" | "west" | "east",
+    width: number,
+    depth: number
+  ): void {
+    const profiles = this.getOceanEdgeProfiles(ocean);
+    if (!profiles) {
+      return;
+    }
+    const positions = geometry.attributes.position as THREE.BufferAttribute;
+    const oceanHalfWidth = ocean.width * 0.5;
+    const oceanHalfDepth = ocean.depth * 0.5;
+    const fadeDistance = Math.max(140, Math.min(360, Math.min(width, depth) * 0.35));
+    const halfWidth = width * 0.5;
+    const halfDepth = depth * 0.5;
+    for (let i = 0; i < positions.count; i += 1) {
+      const x = positions.getX(i);
+      const z = positions.getZ(i);
+      let profileHeight = 0;
+      let distFromInnerEdge = 0;
+      if (edge === "north" || edge === "south") {
+        const sampleX = THREE.MathUtils.clamp(x, -oceanHalfWidth, oceanHalfWidth);
+        const t = ocean.width > 0 ? sampleX / ocean.width + 0.5 : 0.5;
+        profileHeight = this.sampleHeightProfile(edge === "north" ? profiles.north : profiles.south, t);
+        distFromInnerEdge = edge === "north" ? halfDepth - z : z + halfDepth;
+      } else {
+        const sampleZ = THREE.MathUtils.clamp(z, -oceanHalfDepth, oceanHalfDepth);
+        const t = ocean.depth > 0 ? sampleZ / ocean.depth + 0.5 : 0.5;
+        profileHeight = this.sampleHeightProfile(edge === "west" ? profiles.west : profiles.east, t);
+        distFromInnerEdge = edge === "west" ? halfWidth - x : x + halfWidth;
+      }
+      const fade = THREE.MathUtils.smoothstep(distFromInnerEdge, 0, fadeDistance);
+      positions.setY(i, profileHeight * (1 - fade));
+    }
+    positions.needsUpdate = true;
   }
 
   public setPalette(palette: OceanWaterPalette): void {
@@ -103,147 +299,60 @@ export class ThreeTestOceanWaterHelper {
     this.currentPalette.shallowColor.set(palette.shallowColor);
     this.currentPalette.deepColor.set(palette.deepColor);
     this.currentPalette.sunColor.set(palette.sunColor);
-    if (!this.uniforms) {
-      return;
-    }
-    this.uniforms.u_skyTopColor.value.copy(this.currentPalette.skyTopColor);
-    this.uniforms.u_skyHorizonColor.value.copy(this.currentPalette.skyHorizonColor);
-    this.uniforms.u_color.value.copy(this.currentPalette.shallowColor);
-    this.uniforms.u_deepColor.value.copy(this.currentPalette.deepColor);
-    this.uniforms.u_sunColor.value.copy(this.currentPalette.sunColor);
+    this.forEachUniformSet((uniforms) => {
+      uniforms.u_skyTopColor.value.copy(this.currentPalette.skyTopColor);
+      uniforms.u_skyHorizonColor.value.copy(this.currentPalette.skyHorizonColor);
+      uniforms.u_color.value.copy(this.currentPalette.shallowColor);
+      uniforms.u_deepColor.value.copy(this.currentPalette.deepColor);
+      uniforms.u_sunColor.value.copy(this.currentPalette.sunColor);
+    });
   }
 
   public setNormalMaps(normal1: THREE.Texture, normal2: THREE.Texture): void {
     this.normal1 = normal1;
     this.normal2 = normal2;
-    if (this.uniforms) {
-      this.uniforms.u_normalMap1.value = normal1;
-      this.uniforms.u_normalMap2.value = normal2;
-    }
+    this.forEachUniformSet((uniforms) => {
+      uniforms.u_normalMap1.value = normal1;
+      uniforms.u_normalMap2.value = normal2;
+    });
   }
 
   public setQuality(qualityUniform: number): void {
-    if (this.uniforms) {
-      this.uniforms.u_quality.value = qualityUniform;
-    }
+    this.forEachUniformSet((uniforms) => {
+      uniforms.u_quality.value = qualityUniform;
+    });
+  }
+
+  public setFog(fog: OceanWaterFog): void {
+    this.fogState.color.set(fog.color);
+    this.fogState.near = fog.near;
+    this.fogState.far = fog.far;
+    this.forEachUniformSet((uniforms) => {
+      uniforms.u_fogColor.value.copy(this.fogState.color);
+      uniforms.u_fogNear.value = this.fogState.near;
+      uniforms.u_fogFar.value = this.fogState.far;
+    });
   }
 
   public setLightDirectionFromKeyLight(): void {
-    if (!this.uniforms) {
-      return;
-    }
-    this.uniforms.u_lightDir.value.copy(this.keyLight.position).normalize();
+    this.forEachUniformSet((uniforms) => {
+      uniforms.u_lightDir.value.copy(this.keyLight.position).normalize();
+    });
   }
 
   public update(timeMs: number): void {
-    if (this.uniforms) {
-      this.uniforms.u_time.value = timeMs * 0.001;
-    }
+    this.forEachUniformSet((uniforms) => {
+      uniforms.u_time.value = timeMs * 0.001;
+    });
   }
 
-  public clear(): void {
-    if (this.mesh) {
-      this.scene.remove(this.mesh);
-      this.mesh.geometry.dispose();
-      disposeMaterial(this.mesh.material);
-      this.mesh = null;
-      this.uniforms = null;
-    }
-    disposeTexture(this.mask);
-    disposeTexture(this.supportMap);
-    disposeTexture(this.domainMap);
-    disposeTexture(this.shoreSdf);
-    disposeTexture(this.flowMap);
-    disposeTexture(this.rapidMap);
-    this.mask = null;
-    this.supportMap = null;
-    this.domainMap = null;
-    this.shoreSdf = null;
-    this.flowMap = null;
-    this.rapidMap = null;
-  }
-
-  public dispose(): void {
-    this.clear();
-  }
-
-  public rebuild(baseMesh: THREE.Mesh, ocean: OceanWaterData, qualityUniform: number): void {
-    this.clear();
-    this.mask = ocean.mask;
-    this.supportMap = ocean.supportMap;
-    this.domainMap = ocean.domainMap;
-    this.shoreSdf = ocean.shoreSdf;
-    this.flowMap = ocean.flowMap;
-    this.rapidMap = ocean.rapidMap;
-
-    const geometry = new THREE.PlaneGeometry(
-      ocean.width,
-      ocean.depth,
-      Math.max(1, ocean.sampleCols - 1),
-      Math.max(1, ocean.sampleRows - 1)
-    );
-    geometry.rotateX(-Math.PI / 2);
-    if (ocean.heights) {
-      const positions = geometry.attributes.position as THREE.BufferAttribute;
-      const count = Math.min(positions.count, ocean.heights.length);
-      for (let i = 0; i < count; i += 1) {
-        positions.setY(i, ocean.heights[i]);
-      }
-      positions.needsUpdate = true;
-    }
-
-    this.uniforms = {
-      u_time: { value: 0 },
-      u_mask: { value: this.mask },
-      u_supportMap: { value: this.supportMap },
-      u_domainMap: { value: this.domainMap },
-      u_shoreSdf: { value: this.shoreSdf },
-      u_color: { value: this.currentPalette.shallowColor.clone() },
-      u_deepColor: { value: this.currentPalette.deepColor.clone() },
-      u_opacity: { value: 0.985 },
-      u_waveScale: { value: 0.38 },
-      u_normalMap1: { value: this.normal1 as THREE.Texture },
-      u_normalMap2: { value: this.normal2 as THREE.Texture },
-      u_scroll1: { value: new THREE.Vector2(0.02, 0.01) },
-      u_scroll2: { value: new THREE.Vector2(-0.015, 0.018) },
-      u_normalScale: { value: 0.08 },
-      u_normalStrength: { value: 1.0 },
-      u_shininess: { value: 72.0 },
-      u_lightDir: { value: this.keyLight.position.clone().normalize() },
-      u_specular: { value: 0.42 },
-      u_skyTopColor: { value: this.currentPalette.skyTopColor.clone() },
-      u_skyHorizonColor: { value: this.currentPalette.skyHorizonColor.clone() },
-      u_sunColor: { value: this.currentPalette.sunColor.clone() },
-      u_waveAmp: { value: 0.088 },
-      u_waveFreq: { value: new THREE.Vector2(0.44, 0.39) },
-      u_waveVariance: { value: 1.62 },
-      u_cellGrid: {
-        value: new THREE.Vector2(
-          Math.max(6, Math.floor((ocean.sampleCols - 1) * 0.5)),
-          Math.max(6, Math.floor((ocean.sampleRows - 1) * 0.5))
-        )
-      },
-      u_worldStep: {
-        value: new THREE.Vector2(
-          Math.max(0.1, ocean.width / Math.max(1, ocean.sampleCols - 1)),
-          Math.max(0.1, ocean.depth / Math.max(1, ocean.sampleRows - 1))
-        )
-      },
-      u_uvStep: {
-        value: new THREE.Vector2(
-          1 / Math.max(1, ocean.sampleCols - 1),
-          1 / Math.max(1, ocean.sampleRows - 1)
-        )
-      },
-      u_tideAmp: { value: 0.036 },
-      u_tideFreq: { value: 0.38 },
-      u_quality: { value: qualityUniform }
-    };
-
-    const material = new THREE.ShaderMaterial({
-      uniforms: this.uniforms as any,
+  private createMainOceanMaterial(uniforms: OceanUniforms): THREE.ShaderMaterial {
+    return new THREE.ShaderMaterial({
+      uniforms: uniforms as any,
       transparent: true,
-      depthWrite: false,
+      depthWrite: true,
+      depthTest: true,
+      side: THREE.FrontSide,
       vertexShader: `
         varying vec2 vUv;
         varying vec3 vWorldPos;
@@ -268,48 +377,105 @@ export class ThreeTestOceanWaterHelper {
           q += dot(q, q + 45.32);
           return fract(q.x * q.y);
         }
-        float computeDisplacement(vec3 p, vec2 uvCoord, float ocean, float shoreDamp, float qualityFactor, float highQuality) {
-          float waveA = sin((p.x * u_waveFreq.x) + u_time * 0.75) * cos((p.z * u_waveFreq.y) - u_time * 0.62);
-          float waveB = sin((p.x + p.z) * (u_waveFreq.x * 0.58) + u_time * 1.12);
-          vec2 cellCoord = floor(uvCoord * u_cellGrid);
-          float cellNoiseA = hash21(cellCoord + vec2(0.17, 0.61));
-          float cellNoiseB = hash21(cellCoord.yx + vec2(2.91, 1.37));
-          float cellAmp = mix(0.82, 1.32, cellNoiseA);
-          float cellWaveA = sin(p.x * (u_waveFreq.x * 1.8) + p.z * (u_waveFreq.y * 1.4) + u_time * (0.9 + cellNoiseA * 0.7));
-          float cellWaveB = cos(p.x * (u_waveFreq.x * 2.1) - p.z * (u_waveFreq.y * 1.9) - u_time * (1.05 + cellNoiseB * 0.65));
-          float cellWave = (cellWaveA * 0.62 + cellWaveB * 0.38) * cellAmp;
-          float tide = sin(u_time * u_tideFreq);
-          float displacement =
-            ocean * shoreDamp * qualityFactor *
-            (((waveA + waveB * (0.55 + 0.2 * highQuality)) + cellWave * u_waveVariance * (0.72 + 0.4 * highQuality)) * u_waveAmp + tide * u_tideAmp);
-          float troughLimit = u_waveAmp * mix(0.18, 0.33, highQuality) * (0.66 + 0.34 * shoreDamp);
-          float crestLimit = u_waveAmp * (4.1 + 0.85 * highQuality);
-          float crestBias = ocean * shoreDamp * qualityFactor * u_waveAmp * 0.4;
-          return clamp(displacement + crestBias, -troughLimit, crestLimit);
+        float valueNoise21(vec2 p) {
+          vec2 cell = floor(p);
+          vec2 f = fract(p);
+          vec2 smoothF = f * f * (3.0 - 2.0 * f);
+          float a = hash21(cell);
+          float b = hash21(cell + vec2(1.0, 0.0));
+          float c = hash21(cell + vec2(0.0, 1.0));
+          float d = hash21(cell + vec2(1.0, 1.0));
+          return mix(mix(a, b, smoothF.x), mix(c, d, smoothF.x), smoothF.y);
+        }
+        vec3 getDisplacementWeights(float quality) {
+          if (quality < 0.5) {
+            return vec3(0.7, 0.35, 0.72);
+          }
+          if (quality < 1.5) {
+            return vec3(1.0, 1.0, 1.0);
+          }
+          return vec3(1.18, 1.08, 1.08);
+        }
+        vec3 gerstnerWave(
+          vec2 samplePos,
+          vec2 dir,
+          float wavelength,
+          float amplitude,
+          float steepness,
+          float speed,
+          float phaseOffset
+        ) {
+          vec2 d = normalize(dir);
+          float waveLengthSafe = max(1.0, wavelength);
+          float k = 6.28318530718 / waveLengthSafe;
+          float phase = k * dot(d, samplePos) - speed * u_time + phaseOffset;
+          float s = sin(phase);
+          float c = cos(phase);
+          float qa = steepness / max(k * amplitude * 3.0, 1.0);
+          return vec3(d.x * qa * amplitude * c, amplitude * s, d.y * qa * amplitude * c);
+        }
+        vec3 computeDisplacedPosition(vec3 p, vec2 uvCoord, out float ocean, out float sdf) {
+          vec2 worldXZ = (modelMatrix * vec4(p, 1.0)).xz;
+          ocean = texture2D(u_domainMap, uvCoord).r;
+          sdf = texture2D(u_shoreSdf, uvCoord).r * 2.0 - 1.0;
+          float shoreDamp = smoothstep(0.01, 0.35, max(0.0, sdf));
+          vec3 weights = getDisplacementWeights(u_quality);
+          float domainStrength = clamp(ocean * 1.45, 0.0, 1.0);
+          float swellAmp = u_waveAmp * weights.x * mix(0.45, 1.0, shoreDamp) * domainStrength;
+          vec2 noiseUv = worldXZ * vec2(0.013, 0.011);
+          float cellNoiseA = valueNoise21(noiseUv + vec2(0.17, 0.61));
+          float cellNoiseB = valueNoise21(noiseUv * 1.13 + vec2(2.91, 1.37));
+          float cellNoiseC = valueNoise21(noiseUv * 0.72 + vec2(4.73, 0.29));
+          float lenVarianceA = mix(0.09, 0.2, clamp(u_waveVariance, 0.0, 1.0));
+          float lenVarianceB = mix(0.12, 0.24, clamp(u_waveVariance, 0.0, 1.0));
+          float wave1Len = mix(u_waveFreq.x * (1.0 - lenVarianceA), u_waveFreq.x * (1.0 + lenVarianceA), cellNoiseA);
+          float wave2Len = mix(u_waveFreq.y * (1.0 - lenVarianceB), u_waveFreq.y * (1.0 + lenVarianceB), cellNoiseB);
+          float wave3Len = mix(
+            u_waveFreq.x * mix(0.34, 0.28, clamp(u_waveVariance, 0.0, 1.0)),
+            u_waveFreq.y * mix(0.46, 0.54, clamp(u_waveVariance, 0.0, 1.0)),
+            clamp(0.5 + (cellNoiseC - 0.5) * 0.72, 0.0, 1.0)
+          );
+          vec3 disp = vec3(0.0);
+          disp += gerstnerWave(worldXZ, vec2(0.96, 0.28), wave1Len, swellAmp * 0.7, 0.98, 1.62, 0.0);
+          disp += gerstnerWave(worldXZ, vec2(-0.42, 0.91), wave2Len, swellAmp * 0.46, 0.86, 1.28, 1.7);
+          disp += gerstnerWave(worldXZ, vec2(0.63, -0.78), wave3Len, swellAmp * 0.24 * weights.y, 0.76, 2.08, 3.1);
+          float tide = sin(u_time * u_tideFreq + dot(worldXZ, vec2(0.012, -0.01))) * u_tideAmp * weights.z * domainStrength;
+          vec3 displaced = p + disp;
+          displaced.y += tide;
+          return displaced;
         }
         void main() {
           vUv = uv;
-          float ocean = texture2D(u_domainMap, vUv).r;
-          float sdf = texture2D(u_shoreSdf, vUv).r * 2.0 - 1.0;
-          float qualityFactor = step(0.5, u_quality);
-          float highQuality = step(1.5, u_quality);
-          float shoreDamp = smoothstep(0.02, 0.2, max(0.0, sdf));
-          float displacement = computeDisplacement(position, vUv, ocean, shoreDamp, qualityFactor, highQuality);
-          float dispX = computeDisplacement(position + vec3(u_worldStep.x, 0.0, 0.0), vUv + vec2(u_uvStep.x, 0.0), ocean, shoreDamp, qualityFactor, highQuality);
-          float dispZ = computeDisplacement(position + vec3(0.0, 0.0, u_worldStep.y), vUv + vec2(0.0, u_uvStep.y), ocean, shoreDamp, qualityFactor, highQuality);
-          vec3 tangentX = vec3(u_worldStep.x, dispX - displacement, 0.0);
-          vec3 tangentZ = vec3(0.0, dispZ - displacement, u_worldStep.y);
+          float ocean;
+          float sdf;
+          vec3 displaced = computeDisplacedPosition(position, vUv, ocean, sdf);
+          float oceanX;
+          float sdfX;
+          float oceanZ;
+          float sdfZ;
+          vec3 displacedX = computeDisplacedPosition(
+            position + vec3(u_worldStep.x, 0.0, 0.0),
+            vUv + vec2(u_uvStep.x, 0.0),
+            oceanX,
+            sdfX
+          );
+          vec3 displacedZ = computeDisplacedPosition(
+            position + vec3(0.0, 0.0, u_worldStep.y),
+            vUv + vec2(0.0, u_uvStep.y),
+            oceanZ,
+            sdfZ
+          );
+          vec3 tangentX = displacedX - displaced;
+          vec3 tangentZ = displacedZ - displaced;
           vec3 geomNormalLocal = cross(tangentZ, tangentX);
           if (length(geomNormalLocal) < 1e-4) {
             geomNormalLocal = vec3(0.0, 1.0, 0.0);
           }
           geomNormalLocal = normalize(geomNormalLocal);
-          vec3 displaced = position;
-          displaced.y += displacement;
           vec4 worldPos = modelMatrix * vec4(displaced, 1.0);
           vWorldPos = worldPos.xyz;
           vGeomNormal = normalize(mat3(modelMatrix) * geomNormalLocal);
-          vDisp = displacement;
+          vDisp = displaced.y - position.y;
           vSdf = sdf;
           vOcean = ocean;
           gl_Position = projectionMatrix * viewMatrix * worldPos;
@@ -338,68 +504,262 @@ export class ThreeTestOceanWaterHelper {
         uniform vec3 u_skyTopColor;
         uniform vec3 u_skyHorizonColor;
         uniform vec3 u_sunColor;
+        uniform vec3 u_fogColor;
+        uniform float u_fogNear;
+        uniform float u_fogFar;
         uniform sampler2D u_normalMap1;
         uniform sampler2D u_normalMap2;
         uniform vec2 u_scroll1;
         uniform vec2 u_scroll2;
         uniform float u_quality;
+        vec3 getSurfaceWeights(float quality) {
+          if (quality < 0.5) {
+            return vec3(0.85, 0.15, 0.8);
+          }
+          if (quality < 1.5) {
+            return vec3(1.0, 1.0, 1.0);
+          }
+          return vec3(1.1, 1.15, 1.08);
+        }
         void main() {
           float support = texture2D(u_supportMap, vUv).r;
           if (support < 0.5) discard;
           float mask = texture2D(u_mask, vUv).a;
           float domainWater = texture2D(u_domainMap, vUv).b;
           float shoreFade = smoothstep(-0.02, 0.08, vSdf);
-          float alpha = u_opacity * max(mask * mix(0.34, 1.0, shoreFade), domainWater * 0.92);
+          float alpha = u_opacity * max(mask * mix(0.48, 1.0, shoreFade), domainWater * 0.94);
           if (alpha < 0.01) discard;
+          vec3 surfaceWeights = getSurfaceWeights(u_quality);
           vec2 worldUv = vWorldPos.xz * u_waveScale;
           float viewDist = length(cameraPosition - vWorldPos);
           float farT = smoothstep(70.0, 240.0, viewDist);
           vec3 viewDir = normalize(cameraPosition - vWorldPos);
           float grazing = 1.0 - clamp(abs(viewDir.y), 0.0, 1.0);
-          vec2 uv1 = worldUv * 6.2 + u_scroll1 * (u_time * 2.1);
-          vec2 uv2 = worldUv * 9.4 + u_scroll2 * (u_time * 2.7);
-          vec2 farUv = worldUv * 0.56;
-          vec2 uvFar1 = farUv * 2.2 + u_scroll1 * (u_time * 0.72);
-          vec2 uvFar2 = farUv * 3.1 + u_scroll2 * (u_time * 0.86);
-          vec2 nearXY = texture2D(u_normalMap1, uv1).xy * 2.0 - 1.0 + (texture2D(u_normalMap2, uv2).xy * 2.0 - 1.0) * 0.9;
-          vec2 farXY = texture2D(u_normalMap1, uvFar1).xy * 2.0 - 1.0 + (texture2D(u_normalMap2, uvFar2).xy * 2.0 - 1.0) * 0.85;
-          vec2 nXY = mix(nearXY, farXY, farT * 0.88);
-          float qualityFactor = step(0.5, u_quality);
-          float normalScale = u_normalScale * (0.7 + qualityFactor * 0.6) * (1.0 + farT * 0.28) * (1.0 + grazing * 0.42);
+          vec2 uv1 = worldUv * 3.4 + u_scroll1 * (u_time * 0.95);
+          vec2 uv2 = worldUv * 5.4 + u_scroll2 * (u_time * 1.15);
+          vec2 farUv = worldUv * 0.36;
+          vec2 uvFar1 = farUv * 2.0 + u_scroll1 * (u_time * 0.36);
+          vec2 uvFar2 = farUv * 2.8 + u_scroll2 * (u_time * 0.42);
+          vec2 nearXY = texture2D(u_normalMap1, uv1).xy * 2.0 - 1.0 + (texture2D(u_normalMap2, uv2).xy * 2.0 - 1.0) * 0.58;
+          vec2 farXY = texture2D(u_normalMap1, uvFar1).xy * 2.0 - 1.0 + (texture2D(u_normalMap2, uvFar2).xy * 2.0 - 1.0) * 0.4;
+          vec2 nXY = mix(nearXY, farXY, farT * 0.82);
+          float normalScale = u_normalScale * 1.16 * surfaceWeights.x * (1.0 + farT * 0.14) * (1.0 + grazing * 0.22);
           vec3 normalMapN = normalize(vec3(nXY.x * normalScale * u_normalStrength, 1.0, nXY.y * normalScale * u_normalStrength));
           vec3 geomN = normalize(vGeomNormal);
-          vec3 n = normalize(mix(geomN, normalMapN, clamp(0.68 + qualityFactor * 0.22 - grazing * 0.1, 0.54, 0.9)));
+          float normalMix = clamp(0.26 + surfaceWeights.x * 0.18 - grazing * 0.02, 0.24, 0.48);
+          vec3 n = normalize(mix(geomN, normalMapN, normalMix));
           vec3 lightDir = normalize(u_lightDir);
           float diffuse = max(dot(n, lightDir), 0.0);
           vec3 halfDir = normalize(lightDir + viewDir);
           float specBase = pow(max(dot(n, halfDir), 0.0), max(1.0, u_shininess));
-          float crestMask = clamp(smoothstep(0.012, 0.08, max(0.0, vDisp)) * 0.7 + smoothstep(0.997, 0.82, geomN.y) * 0.3, 0.0, 1.0);
-          float spec = specBase * u_specular * (0.25 + qualityFactor * 0.34) * mix(0.14, 1.0, crestMask) * (0.72 + 0.6 * grazing);
-          float fresnel = pow(1.0 - max(dot(viewDir, n), 0.0), 4.0);
+          float crestMask = clamp(smoothstep(0.14, 0.68, max(0.0, vDisp)) * 0.7 + smoothstep(0.995, 0.72, geomN.y) * 0.3, 0.0, 1.0);
+          float spec = specBase * u_specular * 0.64 * surfaceWeights.z * mix(0.18, 1.0, crestMask) * (0.82 + 0.58 * grazing);
+          float fresnel = pow(1.0 - max(dot(viewDir, n), 0.0), 3.1);
           float shoreDist = max(0.0, vSdf);
           float depthFactor = clamp(pow(shoreDist, 0.55), 0.0, 1.0);
           vec3 baseColor = mix(u_color, u_deepColor, depthFactor * (0.28 + 0.32 * vOcean));
           float foamBand = 1.0 - smoothstep(0.01, 0.19, shoreDist);
           float lappingA = sin(u_time * 1.9 + dot(vWorldPos.xz, vec2(1.9, 1.3))) * 0.5 + 0.5;
           float lappingB = sin(u_time * 2.7 - dot(vWorldPos.xz, vec2(1.1, -1.7))) * 0.5 + 0.5;
-          float foam = foamBand * (0.26 + (lappingA * 0.65 + lappingB * 0.35) * 0.54) * (0.32 + qualityFactor * 0.48);
+          float crestFoam = smoothstep(0.46, 0.96, max(0.0, vDisp)) * 0.06;
+          float foam = (foamBand * (0.18 + (lappingA * 0.65 + lappingB * 0.35) * 0.34) + crestFoam) * 0.42 * surfaceWeights.y;
           vec3 foamColor = vec3(0.95, 0.98, 1.0);
           vec3 litBase = mix(baseColor, foamColor, clamp(foam, 0.0, 1.0) * 0.52);
           float skyT = clamp(0.58 + 0.42 * viewDir.y, 0.0, 1.0);
           vec3 skyReflect = mix(u_skyHorizonColor, u_skyTopColor, skyT);
-          float sunExp = mix(160.0, 88.0, grazing);
-          float sunGlitter = pow(max(dot(reflect(-viewDir, n), lightDir), 0.0), sunExp) * (0.08 + 0.92 * vOcean) * (0.2 + 0.8 * crestMask) * (0.7 + 0.5 * grazing);
-          vec3 reflection = skyReflect * (fresnel * 0.3) + u_sunColor * (sunGlitter * 0.18);
-          vec3 color = litBase * (0.8 + diffuse * 0.24) + skyReflect * (0.05 + 0.03 * grazing) + reflection + u_sunColor * spec;
+          float sunExp = mix(176.0, 100.0, grazing);
+          float sunGlitter = pow(max(dot(reflect(-viewDir, n), lightDir), 0.0), sunExp) * (0.12 + 0.96 * vOcean) * (0.18 + 0.64 * crestMask) * (0.8 + 0.56 * grazing);
+          vec3 reflection = skyReflect * (fresnel * 0.36) + u_sunColor * (sunGlitter * 0.25);
+          float swellShade = clamp(0.94 + vDisp * 0.24 + (1.0 - geomN.y) * 0.52, 0.84, 1.24);
+          vec3 color = litBase * (0.78 + diffuse * 0.2) * swellShade + skyReflect * (0.08 + 0.07 * grazing) + reflection + u_sunColor * spec;
+          float fogFactor = pow(smoothstep(u_fogNear, u_fogFar, viewDist), 1.15);
+          color = mix(color, u_fogColor, fogFactor);
+          alpha = mix(alpha, 1.0, fogFactor * 0.18);
           gl_FragColor = vec4(color, alpha);
         }
       `
     });
+  }
+
+  private createBackdropMaterial(uniforms: OceanUniforms): THREE.ShaderMaterial {
+    return this.createMainOceanMaterial(uniforms);
+  }
+
+  private buildDistantOceanBackdrop(
+    baseMesh: THREE.Mesh,
+    ocean: OceanWaterData,
+    qualityUniform: number
+  ): void {
+    const span = Math.max(ocean.width, ocean.depth);
+    const extension = Math.max(DISTANT_OCEAN_EXTENSION_MIN, span * DISTANT_OCEAN_EXTENSION_SCALE);
+    const oceanStepX = ocean.width / Math.max(1, ocean.sampleCols - 1);
+    const oceanStepZ = ocean.depth / Math.max(1, ocean.sampleRows - 1);
+    const extensionSegmentsX = Math.max(1, Math.ceil(extension / Math.max(1e-3, oceanStepX)));
+    const extensionSegmentsZ = Math.max(1, Math.ceil(extension / Math.max(1e-3, oceanStepZ)));
+    const alignedExtensionX = extensionSegmentsX * oceanStepX;
+    const alignedExtensionZ = extensionSegmentsZ * oceanStepZ;
+    const overlap = DISTANT_OCEAN_EDGE_OVERLAP;
+    const halfWidth = ocean.width * 0.5;
+    const halfDepth = ocean.depth * 0.5;
+    const fullWidth = ocean.width + alignedExtensionX * 2 + overlap * 2;
+    const stripDepth = alignedExtensionZ + overlap;
+    const stripWidth = alignedExtensionX + overlap;
+    const createBackdropStrip = (
+      width: number,
+      depth: number,
+      x: number,
+      z: number,
+      segmentsX: number,
+      segmentsY: number,
+      edge: "north" | "south" | "west" | "east"
+    ): void => {
+      const geometry = new THREE.PlaneGeometry(width, depth, segmentsX, segmentsY);
+      geometry.rotateX(-Math.PI / 2);
+      this.applyBackdropEdgeProfile(geometry, ocean, edge, width, depth);
+      const uniforms = this.createOceanUniforms(
+        this.backdropMask,
+        this.backdropSupportMap,
+        this.backdropDomainMap,
+        this.backdropShoreSdf,
+        width,
+        depth,
+        segmentsX + 1,
+        segmentsY + 1,
+        qualityUniform
+      );
+      const material = this.createBackdropMaterial(uniforms);
+      const mesh = new THREE.Mesh(geometry, material);
+      mesh.position.copy(baseMesh.position);
+      mesh.position.x += x;
+      mesh.position.y += ocean.level;
+      mesh.position.z += z;
+      mesh.renderOrder = 1;
+      mesh.castShadow = false;
+      mesh.receiveShadow = false;
+      mesh.frustumCulled = false;
+      this.scene.add(mesh);
+      this.backdropEntries.push({ mesh, uniforms, material });
+    };
+
+    createBackdropStrip(
+      fullWidth,
+      stripDepth,
+      0,
+      -(halfDepth + (alignedExtensionZ - overlap) * 0.5),
+      Math.max(1, ocean.sampleCols - 1 + extensionSegmentsX * 2),
+      Math.max(2, extensionSegmentsZ),
+      "north"
+    );
+    createBackdropStrip(
+      fullWidth,
+      stripDepth,
+      0,
+      halfDepth + (alignedExtensionZ - overlap) * 0.5,
+      Math.max(1, ocean.sampleCols - 1 + extensionSegmentsX * 2),
+      Math.max(2, extensionSegmentsZ),
+      "south"
+    );
+    createBackdropStrip(
+      stripWidth,
+      ocean.depth + overlap * 2,
+      halfWidth + (alignedExtensionX - overlap) * 0.5,
+      0,
+      Math.max(2, extensionSegmentsX),
+      Math.max(1, ocean.sampleRows - 1),
+      "east"
+    );
+    createBackdropStrip(
+      stripWidth,
+      ocean.depth + overlap * 2,
+      -(halfWidth + (alignedExtensionX - overlap) * 0.5),
+      0,
+      Math.max(2, extensionSegmentsX),
+      Math.max(1, ocean.sampleRows - 1),
+      "west"
+    );
+  }
+
+  public clear(): void {
+    if (this.mesh) {
+      this.scene.remove(this.mesh);
+      this.mesh.geometry.dispose();
+      disposeMaterial(this.mesh.material);
+      this.mesh = null;
+      this.uniforms = null;
+    }
+    this.backdropEntries.forEach((entry) => {
+      this.scene.remove(entry.mesh);
+      entry.mesh.geometry.dispose();
+      entry.material.dispose();
+    });
+    this.backdropEntries = [];
+    disposeTexture(this.mask);
+    disposeTexture(this.supportMap);
+    disposeTexture(this.domainMap);
+    disposeTexture(this.shoreSdf);
+    disposeTexture(this.flowMap);
+    disposeTexture(this.rapidMap);
+    this.mask = null;
+    this.supportMap = null;
+    this.domainMap = null;
+    this.shoreSdf = null;
+    this.flowMap = null;
+    this.rapidMap = null;
+  }
+
+  public dispose(): void {
+    this.clear();
+    this.backdropMask.dispose();
+    this.backdropSupportMap.dispose();
+    this.backdropDomainMap.dispose();
+    this.backdropShoreSdf.dispose();
+  }
+
+  public rebuild(baseMesh: THREE.Mesh, ocean: OceanWaterData, qualityUniform: number): void {
+    this.clear();
+    this.mask = ocean.mask;
+    this.supportMap = ocean.supportMap;
+    this.domainMap = ocean.domainMap;
+    this.shoreSdf = ocean.shoreSdf;
+    this.flowMap = ocean.flowMap;
+    this.rapidMap = ocean.rapidMap;
+
+    const geometry = new THREE.PlaneGeometry(
+      ocean.width,
+      ocean.depth,
+      Math.max(1, ocean.sampleCols - 1),
+      Math.max(1, ocean.sampleRows - 1)
+    );
+    geometry.rotateX(-Math.PI / 2);
+    if (ocean.heights) {
+      const positions = geometry.attributes.position as THREE.BufferAttribute;
+      const count = Math.min(positions.count, ocean.heights.length);
+      for (let i = 0; i < count; i += 1) {
+        positions.setY(i, ocean.heights[i]);
+      }
+      positions.needsUpdate = true;
+    }
+
+    this.uniforms = this.createOceanUniforms(
+      this.mask,
+      this.supportMap,
+      this.domainMap,
+      this.shoreSdf,
+      ocean.width,
+      ocean.depth,
+      ocean.sampleCols,
+      ocean.sampleRows,
+      qualityUniform
+    );
+
+    const material = this.createMainOceanMaterial(this.uniforms);
     this.mesh = new THREE.Mesh(geometry, material);
-    this.mesh.position.y = baseMesh.position.y + ocean.level;
+    this.mesh.position.copy(baseMesh.position);
+    this.mesh.position.y += ocean.level;
     this.mesh.renderOrder = 2;
     this.mesh.castShadow = false;
     this.mesh.receiveShadow = false;
     this.scene.add(this.mesh);
+    this.buildDistantOceanBackdrop(baseMesh, ocean, qualityUniform);
   }
 }

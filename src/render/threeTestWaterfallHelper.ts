@@ -6,6 +6,9 @@ type WaterfallUniforms = {
   u_time: { value: number };
   u_color: { value: THREE.Color };
   u_opacity: { value: number };
+  u_fogColor: { value: THREE.Color };
+  u_fogNear: { value: number };
+  u_fogFar: { value: number };
   u_quality: { value: number };
 };
 
@@ -19,15 +22,34 @@ const disposeMaterial = (material: THREE.Material | THREE.Material[]): void => {
 
 type ThreeTestWaterfallHelperOptions = {
   scene: THREE.Scene;
+  fogColor: THREE.ColorRepresentation;
+  fogNear: number;
+  fogFar: number;
+};
+
+type WaterfallFog = {
+  color: THREE.ColorRepresentation;
+  near: number;
+  far: number;
 };
 
 export class ThreeTestWaterfallHelper {
   private readonly scene: THREE.Scene;
   private mesh: THREE.InstancedMesh | null = null;
   private uniforms: WaterfallUniforms | null = null;
+  private fogState: {
+    color: THREE.Color;
+    near: number;
+    far: number;
+  };
 
   constructor(options: ThreeTestWaterfallHelperOptions) {
     this.scene = options.scene;
+    this.fogState = {
+      color: new THREE.Color(options.fogColor),
+      near: options.fogNear,
+      far: options.fogFar
+    };
   }
 
   public setQuality(qualityUniform: number): void {
@@ -37,6 +59,18 @@ export class ThreeTestWaterfallHelper {
     if (this.mesh) {
       this.mesh.visible = qualityUniform > 0.5;
     }
+  }
+
+  public setFog(fog: WaterfallFog): void {
+    this.fogState.color.set(fog.color);
+    this.fogState.near = fog.near;
+    this.fogState.far = fog.far;
+    if (!this.uniforms) {
+      return;
+    }
+    this.uniforms.u_fogColor.value.copy(this.fogState.color);
+    this.uniforms.u_fogNear.value = this.fogState.near;
+    this.uniforms.u_fogFar.value = this.fogState.far;
   }
 
   public update(timeMs: number): void {
@@ -79,6 +113,9 @@ export class ThreeTestWaterfallHelper {
       u_time: { value: 0 },
       u_color: { value: new THREE.Color(0xa8ddff) },
       u_opacity: { value: 0.84 },
+      u_fogColor: { value: this.fogState.color.clone() },
+      u_fogNear: { value: this.fogState.near },
+      u_fogFar: { value: this.fogState.far },
       u_quality: { value: qualityUniform }
     };
 
@@ -91,20 +128,26 @@ export class ThreeTestWaterfallHelper {
       vertexShader: `
         varying vec2 vUv;
         varying float vDropNorm;
+        varying vec3 vWorldPos;
         attribute float aDropNorm;
         void main() {
           vUv = uv;
           vDropNorm = aDropNorm;
           vec4 worldPos = modelMatrix * instanceMatrix * vec4(position, 1.0);
+          vWorldPos = worldPos.xyz;
           gl_Position = projectionMatrix * viewMatrix * worldPos;
         }
       `,
       fragmentShader: `
         varying vec2 vUv;
         varying float vDropNorm;
+        varying vec3 vWorldPos;
         uniform float u_time;
         uniform vec3 u_color;
         uniform float u_opacity;
+        uniform vec3 u_fogColor;
+        uniform float u_fogNear;
+        uniform float u_fogFar;
         uniform float u_quality;
         float hash21(vec2 p) {
           vec2 q = fract(p * vec2(123.34, 456.21));
@@ -141,6 +184,10 @@ export class ThreeTestWaterfallHelper {
           vec3 color = mix(u_color, foamColor, foamMix);
           color *= diffuse * (0.92 + rim * 0.2);
           color += foamColor * sparkle;
+          float viewDist = length(cameraPosition - vWorldPos);
+          float fogFactor = pow(smoothstep(u_fogNear, u_fogFar, viewDist), 1.1);
+          color = mix(color, u_fogColor, fogFactor);
+          alpha = mix(alpha, 1.0, fogFactor * 0.2);
           gl_FragColor = vec4(color, alpha);
         }
       `

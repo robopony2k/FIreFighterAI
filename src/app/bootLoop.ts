@@ -42,7 +42,7 @@ export const createBootLoop = (deps: BootLoopDeps) => {
 export type AppBootLoopDeps = {
   baseStep: number;
   mainHitchThresholdMs: number;
-  frameCapFps: number;
+  getFrameCapFps: () => number;
   getTimeSpeedOptions: () => readonly number[];
   isGenerating: () => boolean;
   isTitleScreenVisible?: () => boolean;
@@ -52,7 +52,7 @@ export type AppBootLoopDeps = {
   isThreeTestVisible: () => boolean;
   isIncidentMode: () => boolean;
   getTimeSpeedIndex: () => number;
-  isThreeTestNoSim: boolean;
+  isThreeTestNoSim: () => boolean;
   isPausedOrGameOver: () => boolean;
   stepSimulation: (simStep: number) => number;
   onThreeTestFrame: (alpha: number) => void;
@@ -66,10 +66,11 @@ export const startAppBootLoop = (deps: AppBootLoopDeps): void => {
   let accumulator = 0;
   let lastMainRafAt = 0;
   let lastMainStepAt = 0;
-  const mainFrameMinMs = deps.frameCapFps > 0 ? 1000 / deps.frameCapFps : 0;
 
   const frame = (now: number): void => {
     const frameStartedAt = performance.now();
+    const frameCapFps = deps.getFrameCapFps();
+    const mainFrameMinMs = frameCapFps > 0 ? 1000 / frameCapFps : 0;
     if (lastMainRafAt > 0) {
       const rafGapMs = Math.max(0, now - lastMainRafAt);
       deps.recordPerfSample("main.rafGap", rafGapMs);
@@ -116,7 +117,7 @@ export const startAppBootLoop = (deps: AppBootLoopDeps): void => {
     const maxStepsPerFrame = incidentMode ? 1 : threeTestVisible ? 1 : 8;
     let simStepsThisFrame = 0;
     let simFrameMs = 0;
-    const skipSimThisFrame = threeTestVisible && deps.isThreeTestNoSim;
+    const skipSimThisFrame = threeTestVisible && deps.isThreeTestNoSim();
     if (skipSimThisFrame) {
       accumulator = 0;
     } else {

@@ -12,7 +12,8 @@ import type { RenderSim } from "./simView.js";
 import { createHudState, setHudViewport, type HudTheme } from "./hud/hudState.js";
 import { handleHudClick, handleHudKey, renderHud } from "./hud/hud.js";
 import { buildEnvironmentPalette, computeFireLoad01 } from "./environmentPalette.js";
-import { buildLightingDirectorState, type LightingDirectorState } from "./lightingDirector.js";
+import { buildLightingDirectorState, type LightingDirectorInput, type LightingDirectorState } from "./lightingDirector.js";
+import { createSeasonalSkyDome } from "./seasonalSky.js";
 import { buildThermalBackdropField, buildThermalHotspotField, paintThermalField } from "./minimapRaster.js";
 import {
   getFirestationAssetCache,
@@ -69,14 +70,16 @@ import {
   WATERFALL_DEBUG_FLAG_WATER
 } from "./threeTestTerrain.js";
 import { createThreeTestFireFx, type SparkMode } from "./threeTestFireFx.js";
-import { createThreeTestCinematicGrade, type ThreeTestCinematicGradeConfig } from "./threeTestCinematicGrade.js";
 import { createThreeTestUnitFxLayer } from "./threeTestUnitFx.js";
 import { ThreeTestWaterSystem, type WaterQualityProfile } from "./threeTestWater.js";
 import { createThreeTestUnitsLayer } from "./threeTestUnits.js";
+import { createThreeTestPostPipeline, type DepthOfFieldSettings } from "./post/dofPipeline.js";
+import type { ThreeTestCinematicGradeConfig } from "./post/cinematicGradePass.js";
 import { CardStateModel } from "../ui/cards/cardState.js";
 import { dispatchPhaseUiCommand } from "../ui/phase/commandChannel.js";
 import { RISK_THRESHOLDS, SEASON_LABELS, computeSeasonLayout } from "../ui/phase/forecastLayout.js";
 import type { UiAudioController } from "../audio/uiAudio.js";
+import { getRuntimeSettings } from "../persistence/runtimeSettings.js";
 
 export type SeasonVisualState = {
   seasonT01: number;
@@ -89,7 +92,6 @@ type EnvironmentSignalState = {
   seasonT01: number;
   risk01: number;
   fireLoad01: number;
-  timeSpeedIndex: number;
 };
 
 export type ThreeTestPerfSnapshot = {
@@ -100,6 +102,8 @@ export type ThreeTestPerfSnapshot = {
   fireFxMs: number;
   sceneRenderMs: number;
   sceneRenderLastMs: number;
+  postMs: number;
+  dofMs: number;
   hudMs: number;
   uiRenderMs: number;
   fps: number;
@@ -169,6 +173,7 @@ type HudMusicControls = {
 
 type ThreeTestRenderFlags = {
   cinematicGrade: boolean;
+  dof: boolean;
 };
 
 type ThreeTestRenderState = {
@@ -188,24 +193,6 @@ type ThreeTestCinematicLookConfig = ThreeTestCinematicGradeConfig & {
 let threeTestInitCount = 0;
 let activeThreeTestCleanup: (() => void) | null = null;
 const HUD_REDRAW_INTERVAL_MS = 120;
-const THREE_TEST_QUERY = typeof window !== "undefined" ? new URLSearchParams(window.location.search) : null;
-const ENABLE_THREE_TEST_SEASONAL_RECOLOR = THREE_TEST_QUERY?.get("seasonal") !== "0";
-const THREE_TEST_HUD_MODE = (THREE_TEST_QUERY?.get("hud") ?? "dom").toLowerCase();
-const THREE_TEST_DISABLE_HUD = THREE_TEST_QUERY?.get("nohud") === "1" || THREE_TEST_HUD_MODE !== "canvas";
-const THREE_TEST_DISABLE_FX = THREE_TEST_QUERY?.get("nofx") === "1";
-const THREE_TEST_DPR_PARAM = Number(THREE_TEST_QUERY?.get("dpr"));
-const THREE_TEST_MAX_DPR = Number.isFinite(THREE_TEST_DPR_PARAM) ? Math.max(0.5, Math.min(4, THREE_TEST_DPR_PARAM)) : 1.5;
-const THREE_TEST_ADAPTIVE_DPR_ENABLED = THREE_TEST_QUERY?.get("autodpr") !== "0";
-const THREE_TEST_MIN_DPR_PARAM = Number(THREE_TEST_QUERY?.get("mindpr"));
-const THREE_TEST_MIN_DPR = Number.isFinite(THREE_TEST_MIN_DPR_PARAM)
-  ? Math.max(0.5, Math.min(THREE_TEST_MAX_DPR, THREE_TEST_MIN_DPR_PARAM))
-  : Math.min(1, THREE_TEST_MAX_DPR);
-const THREE_TEST_FPS_PARAM = Number(THREE_TEST_QUERY?.get("fps"));
-// Safety cap in all modes to avoid runaway GPU usage from uncapped render loops.
-const THREE_TEST_FRAME_CAP_FPS = !Number.isFinite(THREE_TEST_FPS_PARAM)
-  ? 60
-  : Math.max(30, Math.min(120, THREE_TEST_FPS_PARAM > 0 ? THREE_TEST_FPS_PARAM : 60));
-const THREE_TEST_FRAME_MIN_MS = 1000 / THREE_TEST_FRAME_CAP_FPS;
 const ADAPTIVE_DPR_FALLBACK_FPS = 55;
 const ADAPTIVE_DPR_RECOVERY_FPS = 60;
 const ADAPTIVE_DPR_FALLBACK_SCENE_MS = 13.2;
@@ -214,43 +201,7 @@ const ADAPTIVE_DPR_FALLBACK_SECONDS = 1.1;
 const ADAPTIVE_DPR_RECOVERY_SECONDS = 7.5;
 const ADAPTIVE_DPR_STEP_DOWN = 0.2;
 const ADAPTIVE_DPR_STEP_UP = 0.1;
-const THREE_TEST_WATER_QUALITY_PARAM = (THREE_TEST_QUERY?.get("waterq") ?? "").toLowerCase();
-const THREE_TEST_DEFAULT_WATER_QUALITY: WaterQualityProfile =
-  THREE_TEST_WATER_QUALITY_PARAM === "fast" ||
-  THREE_TEST_WATER_QUALITY_PARAM === "balanced" ||
-  THREE_TEST_WATER_QUALITY_PARAM === "high"
-    ? THREE_TEST_WATER_QUALITY_PARAM
-    : "balanced";
-const THREE_TEST_RIVER_VIEW = (THREE_TEST_QUERY?.get("rivercam") ?? "").toLowerCase();
-const THREE_TEST_RIVER_VIEW_LOCK = THREE_TEST_QUERY?.get("rivercamlock") === "1";
-const THREE_TEST_FIRE_WALL_PARAM = Number(THREE_TEST_QUERY?.get("firewall"));
-const THREE_TEST_FIRE_WALL_BLEND = Number.isFinite(THREE_TEST_FIRE_WALL_PARAM)
-  ? Math.max(0, Math.min(1, THREE_TEST_FIRE_WALL_PARAM))
-  : 0.62;
-const THREE_TEST_FIRE_VOL_PARAM = Number(THREE_TEST_QUERY?.get("firevol"));
-const THREE_TEST_FIRE_HERO_VOL = Number.isFinite(THREE_TEST_FIRE_VOL_PARAM)
-  ? Math.max(0, Math.min(1, THREE_TEST_FIRE_VOL_PARAM))
-  : 0.55;
-const THREE_TEST_FX_BUDGET_PARAM = Number(THREE_TEST_QUERY?.get("fxbudget"));
-const THREE_TEST_FIRE_BUDGET_SCALE = Number.isFinite(THREE_TEST_FX_BUDGET_PARAM)
-  ? Math.max(0.4, Math.min(1.25, THREE_TEST_FX_BUDGET_PARAM))
-  : 1.0;
-const THREE_TEST_FX_FALLBACK_PARAM = (THREE_TEST_QUERY?.get("fxfallback") ?? "").toLowerCase();
-const THREE_TEST_FX_FALLBACK =
-  THREE_TEST_FX_FALLBACK_PARAM === "gentle" || THREE_TEST_FX_FALLBACK_PARAM === "off"
-    ? THREE_TEST_FX_FALLBACK_PARAM
-    : "aggressive";
-const THREE_TEST_SPARK_DEBUG = THREE_TEST_QUERY?.get("sparkdebug") === "1";
-const THREE_TEST_SPARK_MODE_PARAM = (THREE_TEST_QUERY?.get("sparkmode") ?? "").toLowerCase();
-const THREE_TEST_SPARK_MODE: SparkMode =
-  THREE_TEST_SPARK_MODE_PARAM === "mixed" || THREE_TEST_SPARK_MODE_PARAM === "embers"
-    ? THREE_TEST_SPARK_MODE_PARAM
-    : "tip";
 const THREE_TEST_ENV_FOG_ENABLED = true;
-const THREE_TEST_SHADOW_RES_PARAM = Number(THREE_TEST_QUERY?.get("shadowres"));
-const THREE_TEST_SHADOW_MAP_SIZE = Number.isFinite(THREE_TEST_SHADOW_RES_PARAM) && THREE_TEST_SHADOW_RES_PARAM > 0
-  ? Math.max(512, Math.min(4096, 2 ** Math.round(Math.log2(THREE_TEST_SHADOW_RES_PARAM))))
-  : 2048;
 const THREE_TEST_SHADOW_VIEW_PADDING = 1.08;
 const THREE_TEST_SHADOW_HEIGHT_PADDING = 1.28;
 const THREE_TEST_SHADOW_MIN_EXTENT = 12;
@@ -260,18 +211,16 @@ const THREE_TEST_SHADOW_EXTENT_EPSILON = 0.35;
 const THREE_TEST_SHADOW_FAR_EPSILON = 1;
 const THREE_TEST_SHADOW_AZIMUTH_EPSILON_DEG = 0.25;
 const THREE_TEST_SHADOW_ELEVATION_EPSILON_DEG = 0.5;
-const THREE_TEST_CINEMATIC_PARAM = (THREE_TEST_QUERY?.get("cinematic") ?? "").trim();
-const THREE_TEST_CINEMATIC_GRADE_ENABLED = THREE_TEST_CINEMATIC_PARAM !== "0";
 const THREE_TEST_LEGACY_EXPOSURE = 1.05;
 const THREE_TEST_CINEMATIC_GRADE_CONFIG: ThreeTestCinematicLookConfig = {
   exposure: 0.94,
   fogColor: 0x2f3238,
   fogDensity: 0.0065,
-  fogStartDistance: 28,
-  fogRampDistance: 54,
-  heightHazeStrength: 0.09,
-  heightHazeHorizon: 0.58,
-  heightHazeCurve: 1.6,
+  fogStartDistance: 40,
+  fogRampDistance: 52,
+  heightHazeStrength: 0.07,
+  heightHazeHorizon: 0.7,
+  heightHazeCurve: 2.1,
   contrast: 1.08,
   midtoneDesaturation: 0.12,
   vignetteStrength: 0.2,
@@ -410,12 +359,46 @@ export const createThreeTest = (
     activeThreeTestCleanup();
     activeThreeTestCleanup = null;
   }
+  const runtimeSettings = getRuntimeSettings();
+  const ENABLE_THREE_TEST_SEASONAL_RECOLOR = runtimeSettings.seasonal;
+  const THREE_TEST_HUD_MODE = runtimeSettings.hud;
+  const THREE_TEST_DISABLE_HUD = runtimeSettings.nohud || THREE_TEST_HUD_MODE !== "canvas";
+  const THREE_TEST_DISABLE_FX = runtimeSettings.nofx;
+  const THREE_TEST_MAX_DPR = Math.max(0.5, Math.min(4, runtimeSettings.dpr));
+  const THREE_TEST_ADAPTIVE_DPR_ENABLED = runtimeSettings.autodpr;
+  const THREE_TEST_MIN_DPR = Math.max(0.5, Math.min(THREE_TEST_MAX_DPR, runtimeSettings.mindpr));
+  const THREE_TEST_FRAME_CAP_FPS = Math.max(30, Math.min(120, runtimeSettings.fps > 0 ? runtimeSettings.fps : 60));
+  const THREE_TEST_FRAME_MIN_MS = 1000 / THREE_TEST_FRAME_CAP_FPS;
+  const THREE_TEST_DEFAULT_WATER_QUALITY: WaterQualityProfile = runtimeSettings.waterq;
+  const THREE_TEST_RIVER_VIEW = runtimeSettings.rivercam;
+  const THREE_TEST_RIVER_VIEW_LOCK = runtimeSettings.rivercamlock;
+  const THREE_TEST_FIRE_WALL_BLEND = Math.max(0, Math.min(1, runtimeSettings.firewall));
+  const THREE_TEST_FIRE_HERO_VOL = Math.max(0, Math.min(1, runtimeSettings.firevol));
+  const THREE_TEST_FIRE_BUDGET_SCALE = Math.max(0.4, Math.min(1.25, runtimeSettings.fxbudget));
+  const THREE_TEST_FX_FALLBACK = runtimeSettings.fxfallback;
+  const THREE_TEST_SPARK_DEBUG = runtimeSettings.sparkdebug;
+  const THREE_TEST_SPARK_MODE: SparkMode = runtimeSettings.sparkmode;
+  const THREE_TEST_SHADOW_MAP_SIZE = Math.max(
+    512,
+    Math.min(4096, 2 ** Math.round(Math.log2(Math.max(1, runtimeSettings.shadowres))))
+  );
+  const THREE_TEST_CINEMATIC_GRADE_ENABLED = runtimeSettings.cinematic;
+  const THREE_TEST_DOF_ENABLED = runtimeSettings.dof;
+  const THREE_TEST_DOF_FOCUS_PARAM = runtimeSettings.doffocus;
+  const THREE_TEST_DOF_FOCUS_MODE: DepthOfFieldSettings["focusMode"] = THREE_TEST_DOF_FOCUS_PARAM === null ? "target" : "manual";
+  const THREE_TEST_DOF_FOCUS_RANGE = Math.max(4, Math.min(120, runtimeSettings.dofrange));
+  const THREE_TEST_DOF_APERTURE = Math.max(0, Math.min(1.5, runtimeSettings.dofaperture));
+  const THREE_TEST_DOF_MAX_BLUR_RADIUS = Math.max(1, Math.min(18, runtimeSettings.dofradius));
+  const THREE_TEST_DOF_BASE_BLUR_SCALE = Math.max(0.25, Math.min(0.5, runtimeSettings.dofscale));
+  const THREE_TEST_DOF_NEAR_ENABLED = runtimeSettings.dofnear;
   const render: ThreeTestRenderState = {
     flags: {
-      cinematicGrade: THREE_TEST_CINEMATIC_GRADE_ENABLED
+      cinematicGrade: THREE_TEST_CINEMATIC_GRADE_ENABLED,
+      dof: THREE_TEST_DOF_ENABLED
     }
   };
   let cinematicGradeEnabled = render.flags.cinematicGrade;
+  let dofEnabled = render.flags.dof;
   const renderer = new THREE.WebGLRenderer({
     canvas,
     antialias: true,
@@ -439,28 +422,9 @@ export const createThreeTest = (
   const uiScene = new THREE.Scene();
   const horizonColor = cinematicGradeEnabled ? 0x2a2019 : 0xffdab9;
   const zenithColor = cinematicGradeEnabled ? 0x1a212c : 0x87ceeb;
-  const gradientCanvas = document.createElement("canvas");
-  gradientCanvas.width = 2;
-  gradientCanvas.height = 256;
-  const skyContext = gradientCanvas.getContext("2d")!;
-  const repaintSkyGradient = (topColor: THREE.ColorRepresentation, horizonColorValue: THREE.ColorRepresentation): void => {
-    const top = new THREE.Color(topColor);
-    const horizon = new THREE.Color(horizonColorValue);
-    const gradient = skyContext.createLinearGradient(0, 0, 0, gradientCanvas.height);
-    gradient.addColorStop(0, top.getStyle());
-    gradient.addColorStop(0.45, top.getStyle());
-    gradient.addColorStop(0.55, horizon.getStyle());
-    gradient.addColorStop(1, horizon.getStyle());
-    skyContext.fillStyle = gradient;
-    skyContext.fillRect(0, 0, gradientCanvas.width, gradientCanvas.height);
-  };
-  repaintSkyGradient(zenithColor, horizonColor);
-  const texture = new THREE.CanvasTexture(gradientCanvas);
-  texture.magFilter = THREE.LinearFilter;
-  texture.minFilter = THREE.LinearFilter;
-  texture.wrapS = THREE.ClampToEdgeWrapping;
-  texture.wrapT = THREE.ClampToEdgeWrapping;
-  scene.background = texture;
+  scene.background = null;
+  const seasonalSky = createSeasonalSkyDome();
+  scene.add(seasonalSky.mesh);
 
   const camera = new THREE.PerspectiveCamera(45, 1, 0.1, 100);
   camera.position.set(2.6, 2.2, 3.4);
@@ -472,33 +436,14 @@ export const createThreeTest = (
     THREE_TEST_CINEMATIC_GRADE_CONFIG.fogStartDistance,
     THREE_TEST_CINEMATIC_GRADE_CONFIG.fogStartDistance + THREE_TEST_CINEMATIC_GRADE_CONFIG.fogRampDistance
   );
+  let environmentFogEnabled = THREE_TEST_ENV_FOG_ENABLED;
   const applyCinematicLook = (enabled: boolean): void => {
     renderer.toneMappingExposure = enabled
       ? THREE_TEST_CINEMATIC_GRADE_CONFIG.exposure
       : THREE_TEST_LEGACY_EXPOSURE;
-    scene.fog = THREE_TEST_ENV_FOG_ENABLED ? cinematicFog : null;
+    scene.fog = environmentFogEnabled ? cinematicFog : null;
   };
   applyCinematicLook(cinematicGradeEnabled);
-  let cinematicGradePost: ReturnType<typeof createThreeTestCinematicGrade> | null = null;
-  try {
-    cinematicGradePost = createThreeTestCinematicGrade(renderer, {
-      contrast: THREE_TEST_CINEMATIC_GRADE_CONFIG.contrast,
-      midtoneDesaturation: THREE_TEST_CINEMATIC_GRADE_CONFIG.midtoneDesaturation,
-      vignetteStrength: THREE_TEST_CINEMATIC_GRADE_CONFIG.vignetteStrength,
-      vignetteSoftness: THREE_TEST_CINEMATIC_GRADE_CONFIG.vignetteSoftness,
-      warmHighlightStrength: THREE_TEST_CINEMATIC_GRADE_CONFIG.warmHighlightStrength,
-      heightHazeStrength: THREE_TEST_ENV_FOG_ENABLED ? THREE_TEST_CINEMATIC_GRADE_CONFIG.heightHazeStrength : 0,
-      heightHazeHorizon: THREE_TEST_CINEMATIC_GRADE_CONFIG.heightHazeHorizon,
-      heightHazeCurve: THREE_TEST_CINEMATIC_GRADE_CONFIG.heightHazeCurve,
-      fogColor: THREE_TEST_CINEMATIC_GRADE_CONFIG.fogColor
-    });
-    cinematicGradePost.setEnabled(cinematicGradeEnabled);
-  } catch (error) {
-    cinematicGradeEnabled = false;
-    render.flags.cinematicGrade = false;
-    console.warn("[threeTest] CinematicGrade setup failed; using legacy scene rendering.", error);
-    applyCinematicLook(false);
-  }
 
   const hemisphere = new THREE.HemisphereLight(zenithColor, 0x4d433b, 0.65);
   scene.add(hemisphere);
@@ -511,6 +456,7 @@ export const createThreeTest = (
   keyLight.shadow.mapSize.height = THREE_TEST_SHADOW_MAP_SIZE;
   keyLight.shadow.bias = -0.00035;
   keyLight.shadow.normalBias = 0.02;
+  keyLight.shadow.intensity = 1;
   scene.add(keyLight);
   const fillLight = new THREE.DirectionalLight(0x88a9c9, 0.35);
   fillLight.position.set(-4, 2.5, -2);
@@ -526,6 +472,46 @@ export const createThreeTest = (
   controls.minDistance = 3;
   controls.maxDistance = 120;
   controls.target.set(0, 0, 0);
+  const dofSettings: DepthOfFieldSettings = {
+    enabled: dofEnabled,
+    focusMode: THREE_TEST_DOF_FOCUS_MODE,
+    focusDistance: Math.max(0.001, camera.position.distanceTo(controls.target)),
+    manualFocusDistance: THREE_TEST_DOF_FOCUS_PARAM !== null
+      ? Math.max(camera.near, THREE_TEST_DOF_FOCUS_PARAM)
+      : Math.max(0.001, camera.position.distanceTo(controls.target)),
+    focusRange: THREE_TEST_DOF_FOCUS_RANGE,
+    aperture: THREE_TEST_DOF_APERTURE,
+    maxBlurRadius: THREE_TEST_DOF_MAX_BLUR_RADIUS,
+    blurScale: THREE_TEST_DOF_BASE_BLUR_SCALE,
+    nearBlurEnabled: THREE_TEST_DOF_NEAR_ENABLED
+  };
+  let postPipeline: ReturnType<typeof createThreeTestPostPipeline> | null = null;
+  try {
+    postPipeline = createThreeTestPostPipeline({
+      renderer,
+      camera,
+      gradeConfig: {
+        contrast: THREE_TEST_CINEMATIC_GRADE_CONFIG.contrast,
+        midtoneDesaturation: THREE_TEST_CINEMATIC_GRADE_CONFIG.midtoneDesaturation,
+        vignetteStrength: THREE_TEST_CINEMATIC_GRADE_CONFIG.vignetteStrength,
+        vignetteSoftness: THREE_TEST_CINEMATIC_GRADE_CONFIG.vignetteSoftness,
+        warmHighlightStrength: THREE_TEST_CINEMATIC_GRADE_CONFIG.warmHighlightStrength,
+        heightHazeStrength: environmentFogEnabled ? THREE_TEST_CINEMATIC_GRADE_CONFIG.heightHazeStrength : 0,
+        heightHazeHorizon: THREE_TEST_CINEMATIC_GRADE_CONFIG.heightHazeHorizon,
+        heightHazeCurve: THREE_TEST_CINEMATIC_GRADE_CONFIG.heightHazeCurve,
+        fogColor: THREE_TEST_CINEMATIC_GRADE_CONFIG.fogColor
+      },
+      dofSettings,
+      gradeEnabled: cinematicGradeEnabled
+    });
+  } catch (error) {
+    cinematicGradeEnabled = false;
+    dofEnabled = false;
+    render.flags.cinematicGrade = false;
+    render.flags.dof = false;
+    console.warn("[threeTest] Post pipeline setup failed; using direct scene rendering.", error);
+    applyCinematicLook(false);
+  }
   type CameraFlightState = {
     startedAt: number;
     durationMs: number;
@@ -3749,6 +3735,13 @@ export const createThreeTest = (
     if (!running) {
       return;
     }
+    if (event.key === "F8") {
+      environmentFogEnabled = !environmentFogEnabled;
+      event.preventDefault();
+      applyCinematicLook(cinematicGradeEnabled);
+      syncFogState(lastLightingApplied);
+      return;
+    }
     if (event.key === "Escape") {
       selectedTownId = null;
       hoverPeekTownId = null;
@@ -3905,6 +3898,10 @@ export const createThreeTest = (
     keyLight,
     skyTopColor: zenithColor,
     skyHorizonColor: horizonColor,
+    fogColor: THREE_TEST_CINEMATIC_GRADE_CONFIG.fogColor,
+    fogNear: THREE_TEST_CINEMATIC_GRADE_CONFIG.fogStartDistance,
+    fogFar:
+      THREE_TEST_CINEMATIC_GRADE_CONFIG.fogStartDistance + THREE_TEST_CINEMATIC_GRADE_CONFIG.fogRampDistance,
     preferredQuality: THREE_TEST_DEFAULT_WATER_QUALITY
   });
   const applyDomEnvironmentTheme = (theme: ReturnType<typeof buildEnvironmentPalette>["hud"]["dom"]): void => {
@@ -3977,11 +3974,11 @@ export const createThreeTest = (
   let environmentTarget: EnvironmentSignalState = {
     seasonT01: initialSeasonT01,
     risk01: 0.35,
-    fireLoad01: computeFireLoad01(world.lastActiveFires, world.grid.totalTiles),
-    timeSpeedIndex: Math.max(0, Math.min(TIME_SPEED_OPTIONS.length - 1, world.timeSpeedIndex ?? 0))
+    fireLoad01: computeFireLoad01(world.lastActiveFires, world.grid.totalTiles)
   };
   let environmentCurrent: EnvironmentSignalState = { ...environmentTarget };
   let lastEnvironmentApplied: EnvironmentSignalState | null = null;
+  let currentEnvironmentPalette = buildEnvironmentPalette(environmentCurrent);
   let lastLightingApplied: LightingDirectorState | null = null;
   let shadowRefreshPending = true;
   let lastShadowRefreshAt = -Infinity;
@@ -3991,19 +3988,121 @@ export const createThreeTest = (
   const lastShadowFocusPoint = new THREE.Vector3(Number.NaN, Number.NaN, Number.NaN);
   let lastShadowExtent = Number.NaN;
   let lastShadowFar = Number.NaN;
+  const glareProjection = new THREE.Vector3();
+  const glareForward = new THREE.Vector3();
+  const getCurrentLightingInput = (): LightingDirectorInput => {
+    const speedOptions = getTimeSpeedOptions(world.simTimeMode);
+    const timeSpeedIndex = Math.max(0, Math.min(speedOptions.length - 1, world.timeSpeedIndex ?? 0));
+    return {
+      seasonT01: environmentCurrent.seasonT01,
+      risk01: environmentCurrent.risk01,
+      careerDay: world.careerDay ?? 0,
+      windDx: world.wind?.dx ?? 0,
+      windDy: world.wind?.dy ?? 0,
+      windStrength: world.wind?.strength ?? 0,
+      timeSpeedValue: speedOptions[timeSpeedIndex] ?? 1,
+      timeSpeedIndex
+    };
+  };
+  const collectFarSidePerimeterDistances = (): { min: number; max: number; terrainSpan: number; focusDistance: number } => {
+    const focusDistance = Math.max(1, camera.position.distanceTo(controls.target));
+    const terrainWidth = lastTerrainSize?.width ?? focusDistance * 1.8;
+    const terrainDepth = lastTerrainSize?.depth ?? focusDistance * 1.8;
+    const terrainSpan = Math.max(terrainWidth, terrainDepth);
+    const halfWidth = terrainWidth * 0.5;
+    const halfDepth = terrainDepth * 0.5;
+    const sampleY = controls.target.y;
+    let viewDirX = controls.target.x - camera.position.x;
+    let viewDirY = controls.target.y - camera.position.y;
+    let viewDirZ = controls.target.z - camera.position.z;
+    const viewDirLength = Math.max(1e-4, Math.hypot(viewDirX, viewDirY, viewDirZ));
+    viewDirX /= viewDirLength;
+    viewDirY /= viewDirLength;
+    viewDirZ /= viewDirLength;
+    let farMin = Number.POSITIVE_INFINITY;
+    let farMax = 0;
+    let farCount = 0;
+    const accumulateFarDistance = (x: number, z: number, relaxed = false): void => {
+      const offsetX = x - controls.target.x;
+      const offsetY = sampleY - controls.target.y;
+      const offsetZ = z - controls.target.z;
+      const forward = offsetX * viewDirX + offsetY * viewDirY + offsetZ * viewDirZ;
+      if (!relaxed && forward < -terrainSpan * 0.04) {
+        return;
+      }
+      const dist = Math.hypot(camera.position.x - x, camera.position.y - sampleY, camera.position.z - z);
+      farMin = Math.min(farMin, dist);
+      farMax = Math.max(farMax, dist);
+      farCount += 1;
+    };
+    accumulateFarDistance(-halfWidth, -halfDepth);
+    accumulateFarDistance(0, -halfDepth);
+    accumulateFarDistance(halfWidth, -halfDepth);
+    accumulateFarDistance(halfWidth, 0);
+    accumulateFarDistance(halfWidth, halfDepth);
+    accumulateFarDistance(0, halfDepth);
+    accumulateFarDistance(-halfWidth, halfDepth);
+    accumulateFarDistance(-halfWidth, 0);
+    if (farCount === 0) {
+      farMin = Number.POSITIVE_INFINITY;
+      farMax = 0;
+      accumulateFarDistance(-halfWidth, -halfDepth, true);
+      accumulateFarDistance(0, -halfDepth, true);
+      accumulateFarDistance(halfWidth, -halfDepth, true);
+      accumulateFarDistance(halfWidth, 0, true);
+      accumulateFarDistance(halfWidth, halfDepth, true);
+      accumulateFarDistance(0, halfDepth, true);
+      accumulateFarDistance(-halfWidth, halfDepth, true);
+      accumulateFarDistance(-halfWidth, 0, true);
+    }
+    return {
+      min: farMin,
+      max: farMax,
+      terrainSpan,
+      focusDistance
+    };
+  };
   const syncCinematicFogDistance = (fogDensity: number): void => {
     const densityScale = THREE.MathUtils.clamp(
       fogDensity / Math.max(0.0001, THREE_TEST_CINEMATIC_GRADE_CONFIG.fogDensity),
       0.75,
       1.85
     );
-    const cameraDistance = Math.max(1, camera.position.distanceTo(controls.target));
-    const startBase = Math.max(THREE_TEST_CINEMATIC_GRADE_CONFIG.fogStartDistance, cameraDistance * 0.65);
-    const rampBase = Math.max(THREE_TEST_CINEMATIC_GRADE_CONFIG.fogRampDistance, cameraDistance * 1.2);
-    const startDistance = startBase / Math.pow(densityScale, 0.35);
-    const rampDistance = rampBase / Math.pow(densityScale, 0.85);
-    cinematicFog.near = Math.max(8, startDistance);
-    cinematicFog.far = Math.max(cinematicFog.near + 12, cinematicFog.near + rampDistance);
+    const { min: farSideMin, max: farSideMax, terrainSpan, focusDistance } = collectFarSidePerimeterDistances();
+    const focusBuffer = Math.max(16, terrainSpan * 0.08);
+    const startGap = Math.max(focusBuffer, (farSideMin - focusDistance) * 0.35);
+    const fullGap = Math.max(
+      startGap + Math.max(14, terrainSpan * 0.08),
+      terrainSpan * 0.18,
+      (farSideMax - focusDistance) * 0.92
+    );
+    cinematicFog.near = Math.max(
+      focusDistance + 10,
+      focusDistance + startGap / Math.pow(densityScale, 0.18)
+    );
+    cinematicFog.far = Math.max(
+      cinematicFog.near + 14,
+      focusDistance + fullGap / Math.pow(densityScale, 0.72)
+    );
+    waterSystem.setFog(cinematicFog.color.getHex(), cinematicFog.near, cinematicFog.far);
+  };
+  const syncFogState = (lighting: LightingDirectorState | null): void => {
+    scene.fog = environmentFogEnabled ? cinematicFog : null;
+    const fogColorHex = lighting ? rgbToHex(lighting.fogColor) : cinematicFog.color.getHex();
+    postPipeline?.setFogColor(fogColorHex);
+    if (!environmentFogEnabled) {
+      postPipeline?.setHeightHazeStrength(0);
+      waterSystem.setFog(fogColorHex, 1_000_000, 1_000_001);
+      return;
+    }
+    if (lighting) {
+      cinematicFog.color.set(fogColorHex);
+      syncCinematicFogDistance(lighting.fogDensity);
+      postPipeline?.setHeightHazeStrength(lighting.hazeStrength);
+      return;
+    }
+    postPipeline?.setHeightHazeStrength(THREE_TEST_CINEMATIC_GRADE_CONFIG.heightHazeStrength);
+    waterSystem.setFog(cinematicFog.color.getHex(), cinematicFog.near, cinematicFog.far);
   };
   const requestShadowRefresh = (): void => {
     shadowRefreshPending = true;
@@ -4067,12 +4166,53 @@ export const createThreeTest = (
   const applyLightingState = (lighting: LightingDirectorState): void => {
     keyLight.color.set(rgbToHex(lighting.sunColor));
     keyLight.intensity = lighting.sunIntensity;
+    keyLight.shadow.intensity = lighting.shadowContrast;
     fillLight.color.set(rgbToHex(lighting.fillColor));
     fillLight.intensity = lighting.fillIntensity;
     ambient.color.set(rgbToHex(lighting.fogColor));
     ambient.intensity = lighting.ambientIntensity;
-    hemisphere.intensity = Math.min(0.9, 0.56 + lighting.ambientIntensity * 1.08);
+    hemisphere.color.set(rgbToHex(mixRgb(lighting.skyTopColor, lighting.skyHorizonColor, 0.24)));
+    hemisphere.groundColor.set(
+      rgbToHex(mixRgb(lighting.skyHorizonColor, { r: 118, g: 112, b: 102 }, 0.72 + lighting.overcastStrength * 0.08))
+    );
+    hemisphere.intensity = Math.min(1, 0.48 + lighting.ambientIntensity * 1.18);
     syncDirectionalLightRig(lighting);
+  };
+  const syncWaterEnvironment = (lighting: LightingDirectorState): void => {
+    const waterSkyHorizon = mixRgb(lighting.skyHorizonColor, lighting.skyTopColor, 0.32);
+    waterSystem.setPalette({
+      ...currentEnvironmentPalette.water,
+      skyTop: lighting.skyTopColor,
+      skyHorizon: waterSkyHorizon,
+      sun: lighting.waterSunColor
+    });
+  };
+  const syncSunGlare = (lighting: LightingDirectorState | null): void => {
+    if (!postPipeline || !lighting) {
+      return;
+    }
+    camera.getWorldDirection(glareForward);
+    const alignment = Math.max(0, glareForward.dot(lighting.sunDirection));
+    if (alignment <= 0.001) {
+      postPipeline.setSunGlare(0.5, 0.5, 0);
+      return;
+    }
+    glareProjection.copy(camera.position).addScaledVector(lighting.sunDirection, 2400).project(camera);
+    if (glareProjection.z < -1 || glareProjection.z > 1) {
+      postPipeline.setSunGlare(0.5, 0.5, 0);
+      return;
+    }
+    const screenX = glareProjection.x * 0.5 + 0.5;
+    const screenY = glareProjection.y * 0.5 + 0.5;
+    const screenMax = Math.max(Math.abs(glareProjection.x), Math.abs(glareProjection.y));
+    if (screenMax >= 1.02) {
+      postPipeline.setSunGlare(0.5, 0.5, 0);
+      return;
+    }
+    const screenFade = 1 - THREE.MathUtils.smoothstep(screenMax, 0.72, 1.02);
+    const forwardFade = Math.pow(THREE.MathUtils.smoothstep(alignment, 0.55, 0.98), 1.7);
+    const glare = Math.max(0, Math.min(0.18, lighting.glareIntensity * forwardFade * screenFade));
+    postPipeline.setSunGlare(screenX, screenY, glare, rgbToHex(lighting.sunColor));
   };
   const maybeRefreshShadowMap = (time: number, lighting: LightingDirectorState | null, cameraInteracting: boolean): void => {
     if (!renderer.shadowMap.enabled || !keyLight.castShadow || !lighting) {
@@ -4100,6 +4240,26 @@ export const createThreeTest = (
     lastShadowElevationDeg = lighting.sunElevationDeg;
     shadowRefreshPending = false;
   };
+  const applyDynamicEnvironmentState = (force = false): void => {
+    const lighting = buildLightingDirectorState(getCurrentLightingInput());
+    seasonalSky.setState(lighting);
+    syncFogState(lighting);
+    fireFx.setEnvironmentSignals({
+      smoke01: currentEnvironmentPalette.signals.smoke01,
+      denseSmoke01: currentEnvironmentPalette.signals.denseSmoke01,
+      fireLoad01: currentEnvironmentPalette.signals.fireLoad01,
+      orangeGlow01: currentEnvironmentPalette.signals.orangeGlow01,
+      sunDirection: lighting.sunDirection,
+      sunTint: rgbToHex(lighting.sunColor),
+      smokeTint: rgbToHex(lighting.smokeTint)
+    });
+    applyLightingState(lighting);
+    syncWaterEnvironment(lighting);
+    lastLightingApplied = lighting;
+    if (force) {
+      requestShadowRefresh();
+    }
+  };
   applyEnvironmentPalette = (force = false): void => {
     if (!ENABLE_THREE_TEST_SEASONAL_RECOLOR) {
       return;
@@ -4108,46 +4268,24 @@ export const createThreeTest = (
       !lastEnvironmentApplied ||
       Math.abs(environmentCurrent.seasonT01 - lastEnvironmentApplied.seasonT01) >= SEASON_VISUAL_EPSILON ||
       Math.abs(environmentCurrent.risk01 - lastEnvironmentApplied.risk01) >= SEASON_VISUAL_EPSILON ||
-      Math.abs(environmentCurrent.fireLoad01 - lastEnvironmentApplied.fireLoad01) >= SEASON_VISUAL_EPSILON ||
-      environmentCurrent.timeSpeedIndex !== lastEnvironmentApplied.timeSpeedIndex;
+      Math.abs(environmentCurrent.fireLoad01 - lastEnvironmentApplied.fireLoad01) >= SEASON_VISUAL_EPSILON;
     if (!force && !changed) {
       return;
     }
-    const palette = buildEnvironmentPalette(environmentCurrent);
-    const lighting = buildLightingDirectorState(environmentCurrent);
-    fireFx.setEnvironmentSignals({
-      smoke01: palette.signals.smoke01,
-      denseSmoke01: palette.signals.denseSmoke01,
-      fireLoad01: palette.signals.fireLoad01,
-      orangeGlow01: palette.signals.orangeGlow01,
-      sunDirection: lighting.sunDirection,
-      sunTint: rgbToHex(lighting.sunColor),
-      smokeTint: rgbToHex(lighting.smokeTint)
-    });
-    repaintSkyGradient(rgbToHex(palette.atmosphere.skyTop), rgbToHex(palette.atmosphere.skyHorizon));
-    texture.needsUpdate = true;
-    if (THREE_TEST_ENV_FOG_ENABLED) {
-      cinematicFog.color.set(rgbToHex(lighting.fogColor));
-      syncCinematicFogDistance(lighting.fogDensity);
-      cinematicGradePost?.setFogColor(rgbToHex(lighting.fogColor));
-      cinematicGradePost?.setHeightHazeStrength(lighting.hazeStrength);
-    }
-    hemisphere.color.set(rgbToHex(palette.atmosphere.hemisphereSky));
-    hemisphere.groundColor.set(rgbToHex(palette.atmosphere.hemisphereGround));
-    applyLightingState(lighting);
-    waterSystem.setPalette({
-      ...palette.water,
-      sun: lighting.waterSunColor
-    });
-    hudState.theme = cloneHudTheme(palette.hud.canvas);
-    applyDomEnvironmentTheme(palette.hud.dom);
+    currentEnvironmentPalette = buildEnvironmentPalette(environmentCurrent);
+    hudState.theme = cloneHudTheme(currentEnvironmentPalette.hud.canvas);
+    applyDomEnvironmentTheme(currentEnvironmentPalette.hud.dom);
     lastEnvironmentApplied = { ...environmentCurrent };
-    lastLightingApplied = lighting;
-    if (force) {
-      requestShadowRefresh();
-    }
+    applyDynamicEnvironmentState(force);
   };
-  applyEnvironmentPalette(true);
+  if (ENABLE_THREE_TEST_SEASONAL_RECOLOR) {
+    applyEnvironmentPalette(true);
+  } else {
+    currentEnvironmentPalette = buildEnvironmentPalette(environmentCurrent);
+    hudState.theme = cloneHudTheme(currentEnvironmentPalette.hud.canvas);
+    applyDomEnvironmentTheme(currentEnvironmentPalette.hud.dom);
+    applyDynamicEnvironmentState(true);
+  }
   const treeSeasonVisualConfig: TreeSeasonVisualConfig = {
     enabled: ENABLE_THREE_TEST_SEASONAL_RECOLOR,
     uniforms: terrainClimateUniforms,
@@ -4186,6 +4324,8 @@ export const createThreeTest = (
     fireFxMs: 0,
     sceneRenderMs: 0,
     sceneRenderLastMs: 0,
+    postMs: 0,
+    dofMs: 0,
     hudMs: 0,
     uiRenderMs: 0,
     fps: 0,
@@ -4895,8 +5035,10 @@ export const createThreeTest = (
     unitCommandPathMaterial.dispose();
     unitCommandMarkerGeometry.dispose();
     unitCommandMarkerMaterial.dispose();
-    cinematicGradePost?.dispose();
-    cinematicGradePost = null;
+    postPipeline?.dispose();
+    postPipeline = null;
+    scene.remove(seasonalSky.mesh);
+    seasonalSky.dispose();
     waterSystem.dispose();
     renderer.dispose();
   };
@@ -4921,7 +5063,7 @@ export const createThreeTest = (
     const effectiveDpr = THREE_TEST_ADAPTIVE_DPR_ENABLED ? adaptiveDpr : deviceDpr;
     renderer.setPixelRatio(effectiveDpr);
     renderer.setSize(width, height, false);
-    cinematicGradePost?.resize(width, height, effectiveDpr);
+    postPipeline?.resize(width, height, effectiveDpr);
     camera.aspect = width / height;
     camera.updateProjectionMatrix();
     uiCamera.left = 0;
@@ -4984,14 +5126,47 @@ export const createThreeTest = (
     markCameraMotion();
   };
 
+  const resolveActiveDofBlurScale = (): number => {
+    const deviceDpr = Math.min(window.devicePixelRatio ?? 1, THREE_TEST_MAX_DPR);
+    if (!THREE_TEST_ADAPTIVE_DPR_ENABLED || adaptiveDpr >= deviceDpr - 0.15) {
+      return THREE_TEST_DOF_BASE_BLUR_SCALE;
+    }
+    return Math.min(THREE_TEST_DOF_BASE_BLUR_SCALE, 0.25);
+  };
+
+  const syncDofSettings = (): void => {
+    if (!postPipeline) {
+      return;
+    }
+    postPipeline.setDofSettings({
+      enabled: dofEnabled,
+      focusDistance: Math.max(0.001, camera.position.distanceTo(controls.target)),
+      blurScale: resolveActiveDofBlurScale()
+    });
+  };
+
+  const disableDof = (): void => {
+    if (!dofEnabled) {
+      return;
+    }
+    dofEnabled = false;
+    render.flags.dof = false;
+    postPipeline?.setDofSettings({ enabled: false });
+  };
+
   const disableCinematicGrade = (): void => {
     if (!cinematicGradeEnabled) {
       return;
     }
     cinematicGradeEnabled = false;
     render.flags.cinematicGrade = false;
-    cinematicGradePost?.setEnabled(false);
+    postPipeline?.setGradeEnabled(false);
     applyCinematicLook(false);
+  };
+
+  const disablePostProcessing = (): void => {
+    disableDof();
+    disableCinematicGrade();
   };
 
   const renderWorldScene = (): void => {
@@ -5000,10 +5175,10 @@ export const createThreeTest = (
   };
 
   const renderWorldPass = (): void => {
-    if (cinematicGradeEnabled && cinematicGradePost) {
-      const renderedWithPost = cinematicGradePost.renderSceneToScreen(renderWorldScene);
+    if ((cinematicGradeEnabled || dofEnabled) && postPipeline) {
+      const renderedWithPost = postPipeline.render(renderWorldScene);
       if (!renderedWithPost) {
-        disableCinematicGrade();
+        disablePostProcessing();
       }
       return;
     }
@@ -5037,14 +5212,12 @@ export const createThreeTest = (
       const nextEnvironmentTarget: EnvironmentSignalState = {
         seasonT01: seasonVisualState.seasonT01,
         risk01: seasonVisualState.risk01,
-        fireLoad01: computeFireLoad01(world.lastActiveFires, world.grid.totalTiles),
-        timeSpeedIndex: Math.max(0, Math.min(TIME_SPEED_OPTIONS.length - 1, world.timeSpeedIndex ?? 0))
+        fireLoad01: computeFireLoad01(world.lastActiveFires, world.grid.totalTiles)
       };
       const targetChanged =
         Math.abs(nextEnvironmentTarget.seasonT01 - environmentTarget.seasonT01) >= SEASON_VISUAL_EPSILON ||
         Math.abs(nextEnvironmentTarget.risk01 - environmentTarget.risk01) >= SEASON_VISUAL_EPSILON ||
-        Math.abs(nextEnvironmentTarget.fireLoad01 - environmentTarget.fireLoad01) >= SEASON_VISUAL_EPSILON ||
-        nextEnvironmentTarget.timeSpeedIndex !== environmentTarget.timeSpeedIndex;
+        Math.abs(nextEnvironmentTarget.fireLoad01 - environmentTarget.fireLoad01) >= SEASON_VISUAL_EPSILON;
       if (targetChanged) {
         environmentTarget = nextEnvironmentTarget;
       }
@@ -5056,9 +5229,9 @@ export const createThreeTest = (
       } else {
         environmentCurrent = { ...environmentTarget };
       }
-      environmentCurrent.timeSpeedIndex = environmentTarget.timeSpeedIndex;
       applyEnvironmentPalette();
     }
+    applyDynamicEnvironmentState();
     let instantFps = 0;
     if (dt > 0) {
       instantFps = 1 / Math.max(1 / 240, dt);
@@ -5075,13 +5248,16 @@ export const createThreeTest = (
     updateCameraFlight(time);
     controls.update();
     threePerf.controlsMs = smoothPerf(threePerf.controlsMs, performance.now() - controlsStart);
-    if (THREE_TEST_ENV_FOG_ENABLED) {
+    seasonalSky.syncToCamera(camera);
+    if (environmentFogEnabled) {
       syncCinematicFogDistance(lastLightingApplied?.fogDensity ?? THREE_TEST_CINEMATIC_GRADE_CONFIG.fogDensity);
     }
     if (lastLightingApplied) {
       syncDirectionalLightRig(lastLightingApplied);
     }
+    syncSunGlare(lastLightingApplied);
     maybeRefreshShadowMap(time, lastLightingApplied, isCameraInteracting());
+    syncDofSettings();
     const treeBurnStart = performance.now();
     if (
       !THREE_TEST_DISABLE_FX &&
@@ -5134,10 +5310,13 @@ export const createThreeTest = (
     refreshRoadOverlayIfNeeded();
     const sceneRenderStart = performance.now();
     renderWorldPass();
+    const postStats = postPipeline?.getStats() ?? null;
     renderer.clearDepth();
     const sceneRenderRawMs = performance.now() - sceneRenderStart;
     threePerf.sceneRenderLastMs = sceneRenderRawMs;
     threePerf.sceneRenderMs = smoothPerf(threePerf.sceneRenderMs, sceneRenderRawMs);
+    threePerf.postMs = smoothPerf(threePerf.postMs, postStats?.postMs ?? 0);
+    threePerf.dofMs = smoothPerf(threePerf.dofMs, postStats?.dofMs ?? 0);
     threePerf.sceneCalls = smoothPerf(threePerf.sceneCalls, renderer.info.render.calls);
     threePerf.sceneTriangles = smoothPerf(threePerf.sceneTriangles, renderer.info.render.triangles);
     threePerf.sceneLines = smoothPerf(threePerf.sceneLines, renderer.info.render.lines);
@@ -5224,8 +5403,10 @@ export const createThreeTest = (
       pendingResize = null;
     }
     renderer.compile(scene, camera);
+    seasonalSky.syncToCamera(camera);
     if (lastLightingApplied) {
       syncDirectionalLightRig(lastLightingApplied);
+      syncSunGlare(lastLightingApplied);
     }
     maybeRefreshShadowMap(performance.now(), lastLightingApplied, false);
     renderWorldPass();
@@ -5279,8 +5460,7 @@ export const createThreeTest = (
     environmentTarget = {
       seasonT01,
       risk01,
-      fireLoad01: computeFireLoad01(world.lastActiveFires, world.grid.totalTiles),
-      timeSpeedIndex: Math.max(0, Math.min(TIME_SPEED_OPTIONS.length - 1, world.timeSpeedIndex ?? 0))
+      fireLoad01: computeFireLoad01(world.lastActiveFires, world.grid.totalTiles)
     };
     if (!running) {
       environmentCurrent = { ...environmentTarget };
@@ -5377,6 +5557,8 @@ export const createThreeTest = (
     fireFxMs: threePerf.fireFxMs,
     sceneRenderMs: threePerf.sceneRenderMs,
     sceneRenderLastMs: threePerf.sceneRenderLastMs,
+    postMs: threePerf.postMs,
+    dofMs: threePerf.dofMs,
     hudMs: threePerf.hudMs,
     uiRenderMs: threePerf.uiRenderMs,
     fps: threePerf.fps,
@@ -5424,8 +5606,10 @@ export const createThreeTest = (
     }
     camera.updateProjectionMatrix();
     controls.update();
+    seasonalSky.syncToCamera(camera);
     if (lastLightingApplied) {
       syncDirectionalLightRig(lastLightingApplied);
+      syncSunGlare(lastLightingApplied);
     }
     requestShadowRefresh();
   };
@@ -5823,6 +6007,7 @@ export const createThreeTest = (
     }
     if (lastLightingApplied) {
       applyLightingState(lastLightingApplied);
+      syncWaterEnvironment(lastLightingApplied);
     }
     rebuildStructureOverlay(nextSample);
     requestShadowRefresh();

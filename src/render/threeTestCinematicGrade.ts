@@ -18,6 +18,12 @@ export type ThreeTestCinematicGrade = {
   setEnabled: (enabled: boolean) => void;
   setFogColor: (color: THREE.ColorRepresentation) => void;
   setHeightHazeStrength: (value: number) => void;
+  setSunGlare: (
+    x: number,
+    y: number,
+    intensity: number,
+    color?: THREE.ColorRepresentation
+  ) => void;
   dispose: () => void;
 };
 
@@ -41,6 +47,10 @@ const fullscreenFragmentShader = `
   uniform float uHeightHazeStrength;
   uniform float uHeightHazeHorizon;
   uniform float uHeightHazeCurve;
+  uniform vec2 uSunGlareCenter;
+  uniform vec3 uSunGlareColor;
+  uniform float uSunGlareIntensity;
+  uniform float uViewportAspect;
 
   varying vec2 vUv;
 
@@ -64,6 +74,15 @@ const fullscreenFragmentShader = `
     float topHaze = smoothstep(uHeightHazeHorizon, 1.0, vUv.y);
     float haze = pow(clamp(topHaze, 0.0, 1.0), max(0.01, uHeightHazeCurve)) * uHeightHazeStrength;
     color = mix(color, uFogColor, clamp(haze, 0.0, 1.0));
+
+    vec2 glareDelta = vUv - uSunGlareCenter;
+    glareDelta.x *= max(0.001, uViewportAspect);
+    float glareDistance = length(glareDelta);
+    float glareCore = exp(-glareDistance * glareDistance * 38.0);
+    float glareHalo = pow(max(1.0 - glareDistance * 1.7, 0.0), 4.0);
+    float glareSweep = pow(max(1.0 - abs(glareDelta.y) * 4.4, 0.0), 6.0) * pow(max(1.0 - glareDistance * 1.08, 0.0), 3.0);
+    float glare = (glareCore * 0.58 + glareHalo * 0.28 + glareSweep * 0.14) * clamp(uSunGlareIntensity, 0.0, 1.0);
+    color += uSunGlareColor * glare;
 
     vec2 centeredUv = vUv * 2.0 - 1.0;
     float edge = smoothstep(uVignetteSoftness, 1.2, length(centeredUv));
@@ -90,7 +109,11 @@ export const createThreeTestCinematicGrade = (
     uWarmHighlightStrength: { value: config.warmHighlightStrength },
     uHeightHazeStrength: { value: config.heightHazeStrength },
     uHeightHazeHorizon: { value: config.heightHazeHorizon },
-    uHeightHazeCurve: { value: config.heightHazeCurve }
+    uHeightHazeCurve: { value: config.heightHazeCurve },
+    uSunGlareCenter: { value: new THREE.Vector2(0.5, 0.5) },
+    uSunGlareColor: { value: new THREE.Color(1.0, 0.88, 0.68) },
+    uSunGlareIntensity: { value: 0 },
+    uViewportAspect: { value: 1 }
   };
   const postMaterial = new THREE.ShaderMaterial({
     uniforms,
@@ -161,6 +184,7 @@ export const createThreeTestCinematicGrade = (
     viewportWidth = Math.max(1, Math.floor(width));
     viewportHeight = Math.max(1, Math.floor(height));
     viewportDpr = Math.max(0.5, dpr);
+    uniforms.uViewportAspect.value = viewportWidth / Math.max(1, viewportHeight);
     if (!renderTarget) {
       return;
     }
@@ -169,6 +193,7 @@ export const createThreeTestCinematicGrade = (
         Math.max(1, Math.round(viewportWidth * viewportDpr)),
         Math.max(1, Math.round(viewportHeight * viewportDpr))
       );
+      uniforms.uViewportAspect.value = viewportWidth / Math.max(1, viewportHeight);
     } catch (error) {
       failAndDisable(error);
     }
@@ -219,6 +244,17 @@ export const createThreeTestCinematicGrade = (
     uniforms.uHeightHazeStrength.value = Math.max(0, value);
   };
 
+  const setSunGlare = (
+    x: number,
+    y: number,
+    intensity: number,
+    color: THREE.ColorRepresentation = 0xffe0ad
+  ): void => {
+    uniforms.uSunGlareCenter.value.set(x, y);
+    uniforms.uSunGlareIntensity.value = Math.max(0, intensity);
+    uniforms.uSunGlareColor.value.set(color);
+  };
+
   const dispose = (): void => {
     disposeRenderTarget();
     postMesh.geometry.dispose();
@@ -231,6 +267,7 @@ export const createThreeTestCinematicGrade = (
     setEnabled,
     setFogColor,
     setHeightHazeStrength,
+    setSunGlare,
     dispose
   };
 };

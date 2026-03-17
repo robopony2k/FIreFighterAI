@@ -13,6 +13,9 @@ type ThreeTestWaterSystemOptions = {
   keyLight: THREE.DirectionalLight;
   skyTopColor: number;
   skyHorizonColor: number;
+  fogColor: THREE.ColorRepresentation;
+  fogNear: number;
+  fogFar: number;
   preferredQuality: WaterQualityProfile;
 };
 
@@ -44,11 +47,17 @@ export class ThreeTestWaterSystem {
   private readonly riverHelper: ThreeTestRiverWaterHelper;
   private readonly waterfallHelper: ThreeTestWaterfallHelper;
   private palette: WaterEnvironmentPalette;
+  private fogState: {
+    color: THREE.ColorRepresentation;
+    near: number;
+    far: number;
+  };
 
   private waterNormal1: THREE.Texture | null = null;
   private waterNormal2: THREE.Texture | null = null;
   private waterNormalLoading = false;
   private waterNormalsPending = 0;
+  private readonly warnedNormalTextureFailures = new Set<string>();
   private readonly defaultNormal1: THREE.DataTexture;
   private readonly defaultNormal2: THREE.DataTexture;
 
@@ -69,20 +78,34 @@ export class ThreeTestWaterSystem {
       riverShallow: { r: 63, g: 134, b: 191 },
       riverDeep: { r: 26, g: 77, b: 121 }
     };
+    this.fogState = {
+      color: options.fogColor,
+      near: options.fogNear,
+      far: options.fogFar
+    };
     this.oceanHelper = new ThreeTestOceanWaterHelper({
       scene: options.scene,
       keyLight: options.keyLight,
       skyTopColor: options.skyTopColor,
-      skyHorizonColor: options.skyHorizonColor
+      skyHorizonColor: options.skyHorizonColor,
+      fogColor: options.fogColor,
+      fogNear: options.fogNear,
+      fogFar: options.fogFar
     });
     this.riverHelper = new ThreeTestRiverWaterHelper({
       scene: options.scene,
       keyLight: options.keyLight,
       skyTopColor: options.skyTopColor,
-      skyHorizonColor: options.skyHorizonColor
+      skyHorizonColor: options.skyHorizonColor,
+      fogColor: options.fogColor,
+      fogNear: options.fogNear,
+      fogFar: options.fogFar
     });
     this.waterfallHelper = new ThreeTestWaterfallHelper({
-      scene: options.scene
+      scene: options.scene,
+      fogColor: options.fogColor,
+      fogNear: options.fogNear,
+      fogFar: options.fogFar
     });
     this.setPalette(this.palette);
     this.applyQualityProfile(this.quality);
@@ -130,42 +153,48 @@ export class ThreeTestWaterSystem {
     this.waterNormalsPending = 2;
     const loader = new THREE.TextureLoader();
     const maxAniso = this.renderer.capabilities.getMaxAnisotropy();
+    const warnMissingNormalTextureOnce = (path: string, error: unknown): void => {
+      if (this.warnedNormalTextureFailures.has(path)) {
+        return;
+      }
+      this.warnedNormalTextureFailures.add(path);
+      console.warn(`[threeTestWater] Failed to load ${path}; using fallback neutral water normal.`, error);
+    };
     const markDone = (): void => {
       this.waterNormalsPending = Math.max(0, this.waterNormalsPending - 1);
       if (this.waterNormalsPending === 0) {
         this.waterNormalLoading = false;
       }
     };
-    loader.load(
-      "assets/textures/water1.png",
-      (tex) => {
-        tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
-        tex.minFilter = THREE.LinearFilter;
-        tex.magFilter = THREE.LinearFilter;
-        tex.anisotropy = maxAniso;
-        tex.generateMipmaps = false;
-        this.waterNormal1 = tex;
-        this.pushNormalMapsToHelpers();
-        markDone();
-      },
-      undefined,
-      () => markDone()
-    );
-    loader.load(
-      "assets/textures/water2.png",
-      (tex) => {
-        tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
-        tex.minFilter = THREE.LinearFilter;
-        tex.magFilter = THREE.LinearFilter;
-        tex.anisotropy = maxAniso;
-        tex.generateMipmaps = false;
-        this.waterNormal2 = tex;
-        this.pushNormalMapsToHelpers();
-        markDone();
-      },
-      undefined,
-      () => markDone()
-    );
+    const loadNormal = (
+      path: string,
+      assign: (texture: THREE.Texture) => void
+    ): void => {
+      loader.load(
+        path,
+        (tex) => {
+          tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+          tex.minFilter = THREE.LinearFilter;
+          tex.magFilter = THREE.LinearFilter;
+          tex.anisotropy = maxAniso;
+          tex.generateMipmaps = false;
+          assign(tex);
+          this.pushNormalMapsToHelpers();
+          markDone();
+        },
+        undefined,
+        (error) => {
+          warnMissingNormalTextureOnce(path, error);
+          markDone();
+        }
+      );
+    };
+    loadNormal("assets/textures/water1.png", (tex) => {
+      this.waterNormal1 = tex;
+    });
+    loadNormal("assets/textures/water2.png", (tex) => {
+      this.waterNormal2 = tex;
+    });
   }
 
   private applyQualityProfile(next: WaterQualityProfile): void {
@@ -229,6 +258,13 @@ export class ThreeTestWaterSystem {
     this.waterfallHelper.clear();
   }
 
+  public setFog(color: THREE.ColorRepresentation, near: number, far: number): void {
+    this.fogState = { color, near, far };
+    this.oceanHelper.setFog(this.fogState);
+    this.riverHelper.setFog(this.fogState);
+    this.waterfallHelper.setFog(this.fogState);
+  }
+
   public setPalette(palette: WaterEnvironmentPalette): void {
     this.palette = {
       skyTop: { ...palette.skyTop },
@@ -281,6 +317,7 @@ export class ThreeTestWaterSystem {
     }
     this.waterfallHelper.rebuild(baseMesh, water.ocean.level, water.waterfallInstances, qualityValue);
     this.setPalette(this.palette);
+    this.setFog(this.fogState.color, this.fogState.near, this.fogState.far);
     this.applyQualityProfile(this.quality);
   }
 }

@@ -40,7 +40,7 @@ import { PHASES } from "../core/time.js";
 import { DEFAULT_MAP_SIZE, DEFAULT_RUN_OPTIONS, DEFAULT_RUN_SEED, normalizeFireSettings } from "../ui/run-config.js";
 import type { NewRunConfig } from "../ui/run-config.js";
 import type { GameUiSnapshot } from "../ui/phase/types.js";
-import { createRenderBackend, resolveRenderBackend, type RenderBackend } from "./renderBackend.js";
+import { createRenderBackend, type RenderBackend } from "./renderBackend.js";
 import { updatePerfCounter } from "./perfDiagnostics.js";
 import { startAppBootLoop } from "./bootLoop.js";
 import {
@@ -52,6 +52,13 @@ import { createUiAudioController } from "../audio/uiAudio.js";
 import { createMusicController } from "../audio/musicController.js";
 import { showTitleScreen as mountTitleScreen, type TitleScreenHandle } from "../ui/titleScreen.js";
 import { loadMusicAudioSettings, saveMusicAudioSettings } from "../persistence/audioSettings.js";
+import {
+  getRuntimeSettings,
+  resetRuntimeSettings,
+  setRuntimeSetting,
+  updateRuntimeSettings,
+  subscribeRuntimeSettings
+} from "../persistence/runtimeSettings.js";
 
 
 export type { RenderBackend } from "./renderBackend.js";
@@ -157,31 +164,21 @@ export const createAppRuntime = (): AppRuntime => {
   const grid = buildGrid(activeMapSize);
   
   const params = new URLSearchParams(window.location.search);
-  const selectedRenderBackend: RenderBackend = resolveRenderBackend(params);
-  const legacy2dEnabled = selectedRenderBackend === "legacy2d";
+  let runtimeSettings = getRuntimeSettings();
+  const getConfiguredRenderBackend = (): RenderBackend => (runtimeSettings.render === "2d" ? "legacy2d" : "3d");
+  const isLegacy2dEnabled = (): boolean => getConfiguredRenderBackend() === "legacy2d";
+  const isHeadless = (): boolean => runtimeSettings.headless;
+  const isThreeTestNoSimEnabled = (): boolean => runtimeSettings.nosim;
+  const isThreeTestSeasonalEnabled = (): boolean => runtimeSettings.seasonal;
+  const isThreeTestTerrainSyncDisabled = (): boolean => runtimeSettings.noterrain;
+  const getThreeTestDprCap = (): number => runtimeSettings.dpr;
+  const getFrameCapFps = (): number => runtimeSettings.fps;
+  const isPerfConsoleAlways = (): boolean => runtimeSettings.perflog;
   const seedParam = params.get("seed");
   const initialSeed = seedParam && !Number.isNaN(Number(seedParam)) ? Number(seedParam) : Math.floor(Date.now() % 1000000);
-  const headless = params.get("headless") === "1";
-  const threeTestNoSim = params.get("nosim") === "1";
-  const threeTestSeasonal = params.get("seasonal") !== "0";
-  const threeTestNoTerrainSync = params.get("noterrain") === "1";
-  if (legacy2dEnabled) {
+  if (isLegacy2dEnabled()) {
     console.warn("[render] Legacy 2D renderer is deprecated. Prefer 3D mode.");
   }
-  const threeTestDprCap = (() => {
-    const raw = Number(params.get("dpr"));
-    if (!Number.isFinite(raw)) {
-      return 1.5;
-    }
-    return Math.max(0.5, Math.min(4, raw));
-  })();
-  const frameCapFps = (() => {
-    const raw = Number(params.get("fps"));
-    if (!Number.isFinite(raw)) {
-      return 60;
-    }
-    return Math.max(30, Math.min(120, raw > 0 ? raw : 60));
-  })();
   
   const state = createInitialState(initialSeed, grid);
   const inputState = createInputState();
@@ -307,10 +304,11 @@ export const createAppRuntime = (): AppRuntime => {
   const threeTestPhaseHudMount = document.getElementById("threeTestPhaseHudMount") as HTMLDivElement | null;
   const threeTestCanvas = document.getElementById("threeTestCanvas") as HTMLCanvasElement | null;
   const threeTestEndRunButton = document.getElementById("threeTestEndRun") as HTMLButtonElement | null;
+  const threeTestMainMenuButton = document.getElementById("threeTestMainMenu") as HTMLButtonElement | null;
   const isMenuActive = (): boolean =>
     (startMenu ? !startMenu.classList.contains("hidden") : false) || !characterScreen.classList.contains("hidden");
   const syncMusicContext = (): void => {
-    if (headless) {
+    if (isHeadless()) {
       return;
     }
     applyMusicOutputState();
@@ -323,7 +321,7 @@ export const createAppRuntime = (): AppRuntime => {
   };
   const DEBUG_TYPE_EVENT = "debug-type-colors-changed";
   const CLIMATE_SEASONS = ["Winter", "Spring", "Summer", "Autumn"] as const;
-  const ENABLE_THREE_TEST_SEASONAL_RECOLOR = threeTestSeasonal;
+  const isThreeTestSeasonalRecolorEnabled = (): boolean => runtimeSettings.seasonal;
   type ThreeTestSeasonMode = "auto" | "manual";
   type ActiveRenderMode = "2d" | "3d";
   const THREE_TEST_VISUAL_EPSILON = 0.0005;
@@ -363,7 +361,7 @@ export const createAppRuntime = (): AppRuntime => {
   };
   
   let isGenerating = false;
-  const titleScreenEnabled = ENABLE_TITLE_SCREEN && !headless;
+  const titleScreenEnabled = ENABLE_TITLE_SCREEN && !isHeadless();
   let titleScreenVisible = false;
   let titleScreen: TitleScreenHandle | null = null;
   const showMapgenOverlay = (): void => {
@@ -412,18 +410,17 @@ export const createAppRuntime = (): AppRuntime => {
   let cachedThreeTestTreeTypeTerrainRevision = -1;
   let cachedThreeTestTreeTypeVegetationRevision = -1;
   let savedThreeTestSmokeRate: number | null = null;
-  let activeRenderMode: ActiveRenderMode = legacy2dEnabled ? "2d" : "3d";
+  let activeRenderMode: ActiveRenderMode = isLegacy2dEnabled() ? "2d" : "3d";
   const perfStats = new Map<string, PerfStat>();
   const perfOverlay = document.createElement("pre");
-  let perfOverlayVisible = params.get("perf") === "1";
-  const perfConsoleAlways = params.get("perflog") === "1";
+  let perfOverlayVisible = runtimeSettings.perf;
   let lastPerfOverlayUpdate = 0;
   let lastPerfConsoleLog = 0;
   type LongTaskStats = { count: number; totalMs: number; maxMs: number; lastMs: number; lastAt: number; lastDetail: string };
   const longTaskStats: LongTaskStats = { count: 0, totalMs: 0, maxMs: 0, lastMs: 0, lastAt: 0, lastDetail: "n/a" };
   
   const setRenderMode = (mode: ActiveRenderMode): void => {
-    if (!legacy2dEnabled && mode === "2d") {
+    if (!isLegacy2dEnabled() && mode === "2d") {
       return;
     }
     activeRenderMode = mode;
@@ -492,6 +489,18 @@ export const createAppRuntime = (): AppRuntime => {
     setPerfOverlayVisible(perfOverlayVisible);
   };
   
+  const unsubscribeRuntimeSettings = subscribeRuntimeSettings((nextSettings) => {
+    const previousRender = runtimeSettings.render;
+    runtimeSettings = nextSettings;
+    setPerfOverlayVisible(runtimeSettings.perf);
+    if (previousRender !== runtimeSettings.render && isLegacy2dEnabled()) {
+      console.warn("[render] Legacy 2D renderer is deprecated. Prefer 3D mode.");
+    }
+    if (!threeTestOverlay || threeTestOverlay.classList.contains("hidden")) {
+      setRenderMode(isLegacy2dEnabled() ? "2d" : "3d");
+    }
+  });
+  
   const buildPerfOverlayText = (threePerf: ThreeTestPerfSnapshot | null, now: number): string => {
     const mainFrame = readRecentPerf("main.frame", now);
     const mainRafGap = readRecentPerf("main.rafGap", now);
@@ -507,7 +516,7 @@ export const createAppRuntime = (): AppRuntime => {
     const terrainDeferred3d = readRecentPerf("3d.terrainDeferred", now);
     const lines = [
       `Perf (${activeRenderMode.toUpperCase()})  |  Ctrl+Shift+P toggle`,
-      `Flags: seasonal=${threeTestSeasonal ? "1" : "0"} nosim=${threeTestNoSim ? "1" : "0"} noterrain=${threeTestNoTerrainSync ? "1" : "0"} dpr=${threeTestDprCap.toFixed(2)} fps=${frameCapFps > 0 ? frameCapFps.toFixed(0) : "off"}`,
+      `Flags: seasonal=${isThreeTestSeasonalEnabled() ? "1" : "0"} nosim=${isThreeTestNoSimEnabled() ? "1" : "0"} noterrain=${isThreeTestTerrainSyncDisabled() ? "1" : "0"} dpr=${getThreeTestDprCap().toFixed(2)} fps=${getFrameCapFps() > 0 ? getFrameCapFps().toFixed(0) : "off"}`,
       `Main:  ${formatMs(mainFrame?.avg)} avg  ${formatMs(mainFrame?.last)} last  ${formatMs(mainFrame?.max)} max`,
       `Main gap: ${formatMs(mainRafGap?.avg)} avg  ${formatMs(mainRafGap?.last)} last  hitch ${formatMs(mainHitch?.last)}`,
       `Sim:   ${formatMs(simFrame?.avg)} frame  ${formatMs(simStep?.avg)} step  steps/frame ${formatNum(simSteps?.avg)}`
@@ -521,10 +530,10 @@ export const createAppRuntime = (): AppRuntime => {
       if (threePerf) {
         lines.push(`3D frame: ${formatMs(threePerf.frameMs)}  fps ${formatNum(threePerf.fps)}`);
         lines.push(
-          `3D slices: scene ${formatMs(threePerf.sceneRenderMs)}  fx ${formatMs(threePerf.fireFxMs)}  hud ${formatMs(threePerf.hudMs)}`
+          `3D slices: scene ${formatMs(threePerf.sceneRenderMs)}  post ${formatMs(threePerf.postMs)}  dof ${formatMs(threePerf.dofMs)}`
         );
         lines.push(
-          `3D misc: controls ${formatMs(threePerf.controlsMs)}  treeBurn ${formatMs(threePerf.treeBurnMs)}  ui ${formatMs(threePerf.uiRenderMs)}`
+          `3D misc: fx ${formatMs(threePerf.fireFxMs)}  controls ${formatMs(threePerf.controlsMs)}  hud ${formatMs(threePerf.hudMs)}  ui ${formatMs(threePerf.uiRenderMs)}`
         );
         lines.push(
           `3D terrain set: avg ${formatMs(threePerf.terrainSetMs)} last ${formatMs(threePerf.terrainSetLastMs)} max ${formatMs(threePerf.terrainSetMaxMs)} n ${formatInt(threePerf.terrainSetCount)}`
@@ -556,6 +565,8 @@ export const createAppRuntime = (): AppRuntime => {
     if (threePerf) {
       recordPerfSample("3d.frame", threePerf.frameMs);
       recordPerfSample("3d.scene", threePerf.sceneRenderMs);
+      recordPerfSample("3d.post", threePerf.postMs);
+      recordPerfSample("3d.dof", threePerf.dofMs);
       recordPerfSample("3d.fx", threePerf.fireFxMs);
       recordPerfSample("3d.hud", threePerf.hudMs);
       recordPerfSample("3d.controls", threePerf.controlsMs);
@@ -566,6 +577,7 @@ export const createAppRuntime = (): AppRuntime => {
       perfOverlay.textContent = buildPerfOverlayText(threePerf, now);
       lastPerfOverlayUpdate = now;
     }
+    const perfConsoleAlways = isPerfConsoleAlways();
     if ((perfOverlayVisible || perfConsoleAlways) && now - lastPerfConsoleLog >= PERF_CONSOLE_INTERVAL_MS) {
       if (activeRenderMode === "3d") {
         const mainAvg = readRecentPerf("main.frame", now)?.avg ?? 0;
@@ -575,6 +587,8 @@ export const createAppRuntime = (): AppRuntime => {
         const terrainDeferred = readRecentPerf("3d.terrainDeferred", now)?.avg ?? 0;
         const threeFrame = readRecentPerf("3d.frame", now)?.avg ?? 0;
         const threeScene = readRecentPerf("3d.scene", now)?.avg ?? 0;
+        const threePost = readRecentPerf("3d.post", now)?.avg ?? 0;
+        const threeDof = readRecentPerf("3d.dof", now)?.avg ?? 0;
         const threeFx = readRecentPerf("3d.fx", now)?.avg ?? 0;
         const threeHud = readRecentPerf("3d.hud", now)?.avg ?? 0;
         const sceneCalls = threePerf?.sceneCalls ?? 0;
@@ -588,12 +602,12 @@ export const createAppRuntime = (): AppRuntime => {
         const terrainSetCount = threePerf?.terrainSetCount ?? 0;
         console.log(
           `[perf] mode=3d main=${mainAvg.toFixed(2)}ms sim=${simAvg.toFixed(2)}ms ` +
-            `seasonal=${threeTestSeasonal ? 1 : 0} ` +
-            `nosim=${threeTestNoSim ? 1 : 0} ` +
-            `noterrain=${threeTestNoTerrainSync ? 1 : 0} ` +
+            `seasonal=${isThreeTestSeasonalEnabled() ? 1 : 0} ` +
+            `nosim=${isThreeTestNoSimEnabled() ? 1 : 0} ` +
+            `noterrain=${isThreeTestTerrainSyncDisabled() ? 1 : 0} ` +
             `gap=${mainGap.toFixed(2)}ms hitch=${hitch.toFixed(2)}ms ` +
             `sync(climate=${climateAvg.toFixed(2)} terrain=${terrainAvg.toFixed(2)} defer=${terrainDeferred.toFixed(2)}) ` +
-            `3dFrame=${threeFrame.toFixed(2)}ms scene=${threeScene.toFixed(2)} sceneLast=${(threePerf?.sceneRenderLastMs ?? 0).toFixed(2)} ` +
+            `3dFrame=${threeFrame.toFixed(2)}ms scene=${threeScene.toFixed(2)} post=${threePost.toFixed(2)} dof=${threeDof.toFixed(2)} sceneLast=${(threePerf?.sceneRenderLastMs ?? 0).toFixed(2)} ` +
             `gap3d=${(threePerf?.rafGapLastMs ?? 0).toFixed(2)} terrainSetLast=${terrainSetLast.toFixed(2)} terrainSetMax=${terrainSetMax.toFixed(2)} terrainSetN=${Math.round(terrainSetCount)} ` +
             `fx=${threeFx.toFixed(2)} hud=${threeHud.toFixed(2)} ctxLoss=${Math.round(contextLosses)} ctxRestore=${Math.round(contextRestores)} ` +
             `calls=${Math.round(sceneCalls)} tri=${Math.round(sceneTriangles)}`
@@ -608,9 +622,9 @@ export const createAppRuntime = (): AppRuntime => {
         const hitch = readRecentPerf("main.hitch", now)?.last ?? 0;
         console.log(
           `[perf] mode=2d main=${mainAvg.toFixed(2)}ms sim=${simAvg.toFixed(2)}ms ` +
-            `seasonal=${threeTestSeasonal ? 1 : 0} ` +
-            `nosim=${threeTestNoSim ? 1 : 0} ` +
-            `noterrain=${threeTestNoTerrainSync ? 1 : 0} ` +
+            `seasonal=${isThreeTestSeasonalEnabled() ? 1 : 0} ` +
+            `nosim=${isThreeTestNoSimEnabled() ? 1 : 0} ` +
+            `noterrain=${isThreeTestTerrainSyncDisabled() ? 1 : 0} ` +
             `gap=${mainGap.toFixed(2)}ms hitch=${hitch.toFixed(2)}ms ` +
             `draw=${drawAvg.toFixed(2)}ms ui=${uiAvg.toFixed(2)}ms overlay=${overlayAvg.toFixed(2)}ms`
         );
@@ -643,7 +657,7 @@ export const createAppRuntime = (): AppRuntime => {
   const updateThreeTestSeasonUi = (seasonT01: number, mode: ThreeTestSeasonMode): number => {
     const clamped = clamp01(seasonT01);
     const label = getSeasonLabelFromT01(clamped);
-    if (ENABLE_THREE_TEST_SEASONAL_RECOLOR) {
+    if (isThreeTestSeasonalRecolorEnabled()) {
       threeTestController?.setSeasonLabel(`Season: ${label} (${mode.toUpperCase()})`);
     } else {
       threeTestController?.setSeasonLabel("Seasonal visuals disabled");
@@ -767,7 +781,7 @@ export const createAppRuntime = (): AppRuntime => {
         lastThreeTestUiSeasonT01 = seasonT01;
         lastThreeTestUiSeasonMode = threeTestSeasonMode;
       }
-      if (!ENABLE_THREE_TEST_SEASONAL_RECOLOR) {
+      if (!isThreeTestSeasonalRecolorEnabled()) {
         return;
       }
       const risk01 = getClimateRisk01();
@@ -908,8 +922,8 @@ export const createAppRuntime = (): AppRuntime => {
       return;
     }
     console.info(
-      `[threeTest] opening 3D mode with flags seasonal=${ENABLE_THREE_TEST_SEASONAL_RECOLOR ? 1 : 0} ` +
-        `nosim=${threeTestNoSim ? 1 : 0} noterrain=${threeTestNoTerrainSync ? 1 : 0} dpr=${threeTestDprCap.toFixed(2)} fps=${frameCapFps > 0 ? frameCapFps.toFixed(0) : "off"}`
+      `[threeTest] opening 3D mode with flags seasonal=${isThreeTestSeasonalRecolorEnabled() ? 1 : 0} ` +
+        `nosim=${isThreeTestNoSimEnabled() ? 1 : 0} noterrain=${isThreeTestTerrainSyncDisabled() ? 1 : 0} dpr=${getThreeTestDprCap().toFixed(2)} fps=${getFrameCapFps() > 0 ? getFrameCapFps().toFixed(0) : "off"}`
     );
     await preloadThreeTestAssets();
     if (savedThreeTestSmokeRate === null) {
@@ -1020,7 +1034,7 @@ export const createAppRuntime = (): AppRuntime => {
       syncTileSoA(state);
     }
     syncThreeTestTerrain(true, "initial");
-    if (ENABLE_THREE_TEST_SEASONAL_RECOLOR) {
+    if (isThreeTestSeasonalRecolorEnabled()) {
       syncThreeTestClimateVisuals();
     } else {
       updateThreeTestSeasonUi(threeTestManualSeasonT01, threeTestSeasonMode);
@@ -1033,7 +1047,7 @@ export const createAppRuntime = (): AppRuntime => {
   };
   
   const closeThreeTest = (force = false): void => {
-    if (!legacy2dEnabled && !force) {
+    if (!isLegacy2dEnabled() && !force) {
       return;
     }
     if (!threeTestOverlay) {
@@ -1062,6 +1076,24 @@ export const createAppRuntime = (): AppRuntime => {
     startMenu?.classList.remove("hidden");
     state.paused = true;
     setStatus(state, "Run ended. Ready to start a new run.");
+    syncMusicContext();
+  };
+
+  const returnToMainMenu = (): void => {
+    closeThreeTest(true);
+    uiState.overlayVisible = false;
+    uiState.overlayAction = "dismiss";
+    updateOverlay(overlayRefs, uiState);
+    characterScreen.classList.add("hidden");
+    state.paused = true;
+    if (titleScreenEnabled) {
+      startMenu?.classList.add("hidden");
+      showTitleScreen();
+      setStatus(state, "Run ended. Returned to the title screen.");
+    } else {
+      startMenu?.classList.remove("hidden");
+      setStatus(state, "Run ended. Ready to start a new run.");
+    }
     syncMusicContext();
   };
 
@@ -1115,6 +1147,13 @@ export const createAppRuntime = (): AppRuntime => {
           setVolume: musicControls.setVolume,
           onChange: musicControls.onChange
         }
+      },
+      runtimeSettings: {
+        getSettings: getRuntimeSettings,
+        setSetting: setRuntimeSetting,
+        updateSettings: updateRuntimeSettings,
+        reset: resetRuntimeSettings,
+        onChange: subscribeRuntimeSettings
       },
       onNewGame: () => {
         destroyTitleScreen();
@@ -1206,7 +1245,7 @@ export const createAppRuntime = (): AppRuntime => {
   };
   const initialRunConfig: NewRunConfig = resolveRunConfig(defaultRunConfig, persistedLastRunConfig);
 
-  const renderBackend = createRenderBackend(selectedRenderBackend, {
+  const renderBackend = createRenderBackend(() => getConfiguredRenderBackend(), {
     renderLegacy2d: (alpha: number) => {
       const stats = renderLegacy2dFrame({
         state,
@@ -1232,6 +1271,12 @@ export const createAppRuntime = (): AppRuntime => {
       returnToStartMenu();
     });
   }
+  if (threeTestMainMenuButton) {
+    threeTestMainMenuButton.addEventListener("click", () => {
+      endGame(state, false, "Run ended from 3D test.");
+      returnToMainMenu();
+    });
+  }
   if (threeTestOverlay) {
     threeTestOverlay.addEventListener("click", (event) => {
       if (event.target === threeTestOverlay) {
@@ -1245,7 +1290,7 @@ export const createAppRuntime = (): AppRuntime => {
       return;
     }
     event.preventDefault();
-    setPerfOverlayVisible(!perfOverlayVisible);
+    setRuntimeSetting("perf", !perfOverlayVisible);
   });
   
   applyPerfOverlayStyle();
@@ -1300,7 +1345,7 @@ export const createAppRuntime = (): AppRuntime => {
           onThreeTest: openThreeTest,
           overlayRefs,
           showStartMenuOnBind: false,
-          startThreeOnConfirm: !legacy2dEnabled,
+          startThreeOnConfirm: () => !isLegacy2dEnabled(),
           onMinimapPan: (tile) => {
             if (threeTestController) {
               threeTestController.panToTile(tile.x, tile.y);
@@ -1319,7 +1364,7 @@ export const createAppRuntime = (): AppRuntime => {
       showTitleScreen();
     } else {
       await resetGame(initialRunConfig);
-      if (!headless && phaseUi) {
+      if (!isHeadless() && phaseUi) {
         phaseUiDisposer?.();
         phaseUiDisposer = bindPhaseUi({
           phaseUi,
@@ -1333,7 +1378,7 @@ export const createAppRuntime = (): AppRuntime => {
           onThreeTest: openThreeTest,
           overlayRefs,
           showStartMenuOnBind: true,
-          startThreeOnConfirm: !legacy2dEnabled,
+          startThreeOnConfirm: () => !isLegacy2dEnabled(),
           onMinimapPan: (tile) => {
             if (threeTestController) {
               threeTestController.panToTile(tile.x, tile.y);
@@ -1349,7 +1394,7 @@ export const createAppRuntime = (): AppRuntime => {
   
     const baseStep = 0.25;
   
-    if (headless) {
+    if (isHeadless()) {
       const ticks = 10000;
       const step = baseStep;
       for (let i = 0; i < ticks; i += 1) {
@@ -1363,7 +1408,7 @@ export const createAppRuntime = (): AppRuntime => {
     startAppBootLoop({
       baseStep,
       mainHitchThresholdMs: MAIN_HITCH_THRESHOLD_MS,
-      frameCapFps,
+      getFrameCapFps,
       getTimeSpeedOptions: () => getActiveTimeSpeedOptions(state),
       isGenerating: () => isGenerating,
       isTitleScreenVisible: () => titleScreenVisible,
@@ -1373,7 +1418,7 @@ export const createAppRuntime = (): AppRuntime => {
       isThreeTestVisible: () => activeRenderMode === "3d" && !!threeTestController,
       isIncidentMode: () => state.simTimeMode === "incident",
       getTimeSpeedIndex: () => state.timeSpeedIndex,
-      isThreeTestNoSim: threeTestNoSim,
+      isThreeTestNoSim: isThreeTestNoSimEnabled,
       isPausedOrGameOver: () => state.paused || state.gameOver,
       stepSimulation: (simStep: number) => {
         const simStartedAt = performance.now();
@@ -1390,12 +1435,12 @@ export const createAppRuntime = (): AppRuntime => {
         if (state.gameOver) {
           closeThreeTest();
         }
-        if (ENABLE_THREE_TEST_SEASONAL_RECOLOR) {
+        if (isThreeTestSeasonalRecolorEnabled()) {
           syncThreeTestClimateVisuals();
         }
         if (controller && state.terrainDirty) {
           const activeFireTerrainPressure = hasActiveFireTerrainPressure();
-          if (threeTestNoTerrainSync) {
+          if (isThreeTestTerrainSyncDisabled()) {
             state.terrainDirty = false;
             recordPerfSample("3d.terrainDeferred", 0);
           } else if (controller.isCameraInteracting() && !activeFireTerrainPressure) {
@@ -1424,6 +1469,7 @@ export const createAppRuntime = (): AppRuntime => {
     renderBackend.dispose();
     phaseUiDisposer?.();
     phaseUiDisposer = null;
+    unsubscribeRuntimeSettings();
     musicController.dispose();
     if (resizeObserver) {
       resizeObserver.disconnect();

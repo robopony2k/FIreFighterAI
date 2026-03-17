@@ -1,4 +1,9 @@
 import { loadLeaderboard } from "../persistence/leaderboard.js";
+import {
+  RUNTIME_SETTING_DEFINITIONS,
+  type RuntimeSettingKey,
+  type RuntimeSettings
+} from "../persistence/runtimeSettings.js";
 
 type TitleMenuAction = "new-game" | "settings" | "high-score" | "credits" | "quit";
 
@@ -46,11 +51,20 @@ export type TitleAudioControls = {
   music: TitleAudioChannelControls;
 };
 
+export type TitleRuntimeSettingsControls = {
+  getSettings: () => RuntimeSettings;
+  setSetting: (key: RuntimeSettingKey, value: RuntimeSettings[RuntimeSettingKey]) => void;
+  updateSettings: (settings: Partial<RuntimeSettings>) => void;
+  reset: () => void;
+  onChange: (listener: (settings: RuntimeSettings) => void) => () => void;
+};
+
 export type TitleScreenDeps = {
   mount?: HTMLElement;
   onNewGame: () => void;
   onQuit: () => void;
   audioControls?: TitleAudioControls;
+  runtimeSettings?: TitleRuntimeSettingsControls;
 };
 
 export type TitleScreenHandle = {
@@ -143,28 +157,129 @@ const buildFirePalette = (): Uint8ClampedArray => {
 
 const FIRE_PALETTE = buildFirePalette();
 
+type SettingsTabId = "sound" | "graphics" | "debug";
+type SettingsTabSpec = {
+  id: SettingsTabId;
+  label: string;
+  panel: HTMLElement;
+};
+
+type RuntimeSettingsSectionSpec = {
+  title: string;
+  keys: ReadonlyArray<RuntimeSettingKey>;
+};
+
+type GraphicsQualityPresetId = "auto" | "performance" | "balanced" | "quality";
+type GraphicsQualityPreset = {
+  id: GraphicsQualityPresetId;
+  label: string;
+  description: string;
+  settings: Pick<RuntimeSettings, "autodpr" | "dpr" | "mindpr" | "waterq" | "shadowres">;
+};
+
+const GRAPHICS_QUALITY_CUSTOM_ID = "custom";
+const GRAPHICS_QUALITY_PRESETS: ReadonlyArray<GraphicsQualityPreset> = [
+  {
+    id: "auto",
+    label: "Auto",
+    description: "Uses adaptive scaling to hold frame rate without exposing raw render-scale values.",
+    settings: {
+      autodpr: true,
+      dpr: 1.5,
+      mindpr: 1,
+      waterq: "balanced",
+      shadowres: 2048
+    }
+  },
+  {
+    id: "performance",
+    label: "Performance",
+    description: "Prioritizes smoother frame time on slower GPUs and higher-resolution displays.",
+    settings: {
+      autodpr: false,
+      dpr: 1,
+      mindpr: 0.75,
+      waterq: "fast",
+      shadowres: 1024
+    }
+  },
+  {
+    id: "balanced",
+    label: "Balanced",
+    description: "Keeps image quality solid while leaving adaptive headroom for heavier scenes.",
+    settings: {
+      autodpr: true,
+      dpr: 1.25,
+      mindpr: 0.9,
+      waterq: "balanced",
+      shadowres: 2048
+    }
+  },
+  {
+    id: "quality",
+    label: "Quality",
+    description: "Sharper rendering, heavier shadows, and higher water quality at a higher GPU cost.",
+    settings: {
+      autodpr: false,
+      dpr: 2,
+      mindpr: 1,
+      waterq: "high",
+      shadowres: 4096
+    }
+  }
+];
+
+const GRAPHICS_SETTINGS_SECTIONS: ReadonlyArray<RuntimeSettingsSectionSpec> = [
+  {
+    title: "Overview",
+    keys: ["render", "fps", "seasonal", "cinematic"]
+  },
+  {
+    title: "Depth of Field",
+    keys: ["dof", "doffocus", "dofrange", "dofaperture", "dofradius", "dofscale", "dofnear"]
+  }
+];
+
+const DEBUG_SETTINGS_SECTIONS: ReadonlyArray<RuntimeSettingsSectionSpec> = [
+  {
+    title: "Diagnostics",
+    keys: ["perf", "perflog", "simprof"]
+  },
+  {
+    title: "Advanced Rendering",
+    keys: ["hud", "nohud", "autodpr", "dpr", "mindpr", "waterq", "shadowres", "nofx", "fxbudget", "fxfallback", "firewall", "firevol"]
+  },
+  {
+    title: "3D Debug",
+    keys: ["nosim", "noterrain", "rivercam", "rivercamlock", "sparkdebug", "sparkmode", "headless"]
+  }
+];
+
 const buildSettingsPanel = (
   body: HTMLElement,
   audioControls: TitleAudioControls | undefined,
+  runtimeSettings: TitleRuntimeSettingsControls | undefined,
   registerDispose: (dispose: () => void) => void
 ): void => {
-  if (!audioControls) {
+  if (!audioControls && !runtimeSettings) {
     const note = document.createElement("p");
     note.className = "title-screen-panel-note";
-    note.textContent = "Audio controls are unavailable in this build.";
+    note.textContent = "Settings are unavailable in this build.";
     body.appendChild(note);
     return;
   }
 
-  const settings = document.createElement("div");
-  settings.className = "title-screen-settings";
+  const createSection = (titleText: string): HTMLElement => {
+    const section = document.createElement("section");
+    section.className = "title-screen-settings-section";
+    const title = document.createElement("h3");
+    title.className = "title-screen-settings-section-title";
+    title.textContent = titleText;
+    section.appendChild(title);
+    return section;
+  };
 
-  const createChannelControls = (
-    label: string,
-    controls: TitleAudioChannelControls,
-    sliderId: string,
-    muteId: string
-  ): HTMLDivElement => {
+  const createChannelControls = (label: string, controls: TitleAudioChannelControls, sliderId: string, muteId: string): HTMLDivElement => {
     const row = document.createElement("div");
     row.className = "title-screen-setting";
 
@@ -222,15 +337,403 @@ const buildSettingsPanel = (
     return row;
   };
 
-  settings.append(
-    createChannelControls("Music", audioControls.music, "title-settings-music-volume", "title-settings-music-mute"),
-    createChannelControls("Sound FX", audioControls.sfx, "title-settings-sfx-volume", "title-settings-sfx-mute")
-  );
+  const tabs: SettingsTabSpec[] = [];
 
-  const note = document.createElement("p");
-  note.className = "title-screen-panel-note";
-  note.textContent = "These audio settings are shared with in-game controls.";
-  body.append(settings, note);
+  if (audioControls) {
+    const panel = document.createElement("div");
+    panel.className = "title-screen-settings-tab-panel";
+
+    const audioSection = createSection("Audio");
+    const settings = document.createElement("div");
+    settings.className = "title-screen-settings";
+    settings.append(
+      createChannelControls("Music", audioControls.music, "title-settings-music-volume", "title-settings-music-mute"),
+      createChannelControls("Sound FX", audioControls.sfx, "title-settings-sfx-volume", "title-settings-sfx-mute")
+    );
+    const note = document.createElement("p");
+    note.className = "title-screen-panel-note";
+    note.textContent = "These audio settings are shared with in-game controls.";
+    audioSection.append(settings, note);
+    panel.appendChild(audioSection);
+    tabs.push({ id: "sound", label: "Sound", panel });
+  }
+
+  if (runtimeSettings) {
+    const definitionByKey = new Map(
+      RUNTIME_SETTING_DEFINITIONS.map((definition) => [definition.key, definition] as const)
+    );
+    const rows = new Map<RuntimeSettingKey, HTMLDivElement>();
+    const dofDetailKeys: ReadonlyArray<RuntimeSettingKey> = ["doffocus", "dofrange", "dofaperture", "dofradius", "dofscale", "dofnear"];
+
+    let qualitySelect: HTMLSelectElement | null = null;
+    let qualityDescription: HTMLParagraphElement | null = null;
+
+    const getDefinition = (key: RuntimeSettingKey) => definitionByKey.get(key);
+
+    const createBooleanRow = (key: RuntimeSettingKey, label: string, description: string): HTMLDivElement => {
+      const row = document.createElement("div");
+      row.className = "title-screen-setting";
+      const title = document.createElement("span");
+      title.textContent = label;
+      const desc = document.createElement("p");
+      desc.className = "title-screen-setting-description";
+      desc.textContent = description;
+
+      const wrap = document.createElement("label");
+      wrap.className = "title-screen-setting-inline";
+      const input = document.createElement("input");
+      input.type = "checkbox";
+      input.addEventListener("change", () => {
+        runtimeSettings.setSetting(key, input.checked as RuntimeSettings[RuntimeSettingKey]);
+      });
+      const stateLabel = document.createElement("span");
+      stateLabel.textContent = "Enabled";
+      wrap.append(input, stateLabel);
+      row.append(title, desc, wrap);
+      rows.set(key, row);
+      return row;
+    };
+
+    const createNumberRow = (
+      key: RuntimeSettingKey,
+      label: string,
+      description: string,
+      min?: number,
+      max?: number,
+      step?: number,
+      optional = false
+    ): HTMLDivElement => {
+      const row = document.createElement("div");
+      row.className = "title-screen-setting";
+      const title = document.createElement("span");
+      title.textContent = label;
+      const desc = document.createElement("p");
+      desc.className = "title-screen-setting-description";
+      desc.textContent = description;
+
+      const wrap = document.createElement("label");
+      wrap.className = "title-screen-setting-inline";
+      const valueText = document.createElement("span");
+      valueText.textContent = optional ? "Value (blank = auto)" : "Value";
+      const input = document.createElement("input");
+      input.className = "title-screen-setting-number";
+      input.type = "number";
+      if (min !== undefined) {
+        input.min = `${min}`;
+      }
+      if (max !== undefined) {
+        input.max = `${max}`;
+      }
+      if (step !== undefined) {
+        input.step = `${step}`;
+      }
+      input.addEventListener("change", () => {
+        if (optional && input.value.trim().length === 0) {
+          runtimeSettings.setSetting(key, null as RuntimeSettings[RuntimeSettingKey]);
+          return;
+        }
+        const next = Number(input.value);
+        if (!Number.isFinite(next)) {
+          return;
+        }
+        runtimeSettings.setSetting(key, next as RuntimeSettings[RuntimeSettingKey]);
+      });
+      wrap.append(valueText, input);
+      row.append(title, desc, wrap);
+      rows.set(key, row);
+      return row;
+    };
+
+    const createEnumRow = (
+      key: RuntimeSettingKey,
+      label: string,
+      description: string,
+      options: ReadonlyArray<{ value: RuntimeSettings[RuntimeSettingKey]; label: string }>
+    ): HTMLDivElement => {
+      const row = document.createElement("div");
+      row.className = "title-screen-setting";
+      const title = document.createElement("span");
+      title.textContent = label;
+      const desc = document.createElement("p");
+      desc.className = "title-screen-setting-description";
+      desc.textContent = description;
+
+      const wrap = document.createElement("label");
+      wrap.className = "title-screen-setting-inline";
+      const valueText = document.createElement("span");
+      valueText.textContent = "Mode";
+      const select = document.createElement("select");
+      select.className = "title-screen-setting-select";
+      options.forEach((option) => {
+        const entry = document.createElement("option");
+        entry.value = `${option.value}`;
+        entry.textContent = option.label;
+        select.appendChild(entry);
+      });
+      select.addEventListener("change", () => {
+        const selected = options.find((option) => `${option.value}` === select.value);
+        if (!selected) {
+          return;
+        }
+        runtimeSettings.setSetting(key, selected.value);
+      });
+      wrap.append(valueText, select);
+      row.append(title, desc, wrap);
+      rows.set(key, row);
+      return row;
+    };
+
+    const buildRowForKey = (key: RuntimeSettingKey): HTMLDivElement | null => {
+      const definition = getDefinition(key);
+      if (!definition) {
+        return null;
+      }
+      if (definition.kind === "boolean") {
+        return createBooleanRow(definition.key, definition.label, definition.description);
+      }
+      if (definition.kind === "enum") {
+        return createEnumRow(definition.key, definition.label, definition.description, definition.options);
+      }
+      return createNumberRow(
+        definition.key,
+        definition.label,
+        definition.description,
+        definition.min,
+        definition.max,
+        definition.step,
+        definition.kind === "optionalNumber"
+      );
+    };
+
+    const createRuntimeSections = (sections: ReadonlyArray<RuntimeSettingsSectionSpec>): HTMLElement => {
+      const root = document.createElement("div");
+      root.className = "title-screen-runtime-settings";
+      sections.forEach((sectionSpec) => {
+        const section = createSection(sectionSpec.title);
+        const sectionBody = document.createElement("div");
+        sectionBody.className = "title-screen-settings";
+        sectionSpec.keys.forEach((key) => {
+          const row = buildRowForKey(key);
+          if (row) {
+            sectionBody.appendChild(row);
+          }
+        });
+        section.appendChild(sectionBody);
+        root.appendChild(section);
+      });
+      return root;
+    };
+
+    const resolveGraphicsQualityPreset = (settingsSnapshot: RuntimeSettings): GraphicsQualityPresetId | typeof GRAPHICS_QUALITY_CUSTOM_ID => {
+      const match = GRAPHICS_QUALITY_PRESETS.find((preset) => {
+        const presetSettings = preset.settings;
+        return (
+          settingsSnapshot.autodpr === presetSettings.autodpr &&
+          settingsSnapshot.dpr === presetSettings.dpr &&
+          settingsSnapshot.mindpr === presetSettings.mindpr &&
+          settingsSnapshot.waterq === presetSettings.waterq &&
+          settingsSnapshot.shadowres === presetSettings.shadowres
+        );
+      });
+      return match?.id ?? GRAPHICS_QUALITY_CUSTOM_ID;
+    };
+
+    const createGraphicsQualityRow = (): HTMLDivElement => {
+      const row = document.createElement("div");
+      row.className = "title-screen-setting title-screen-setting--feature";
+      const title = document.createElement("span");
+      title.textContent = "Graphics Quality";
+      const desc = document.createElement("p");
+      desc.className = "title-screen-setting-description";
+      desc.textContent = "Choose a preset instead of tuning render scale directly. Raw render-scale controls remain under Debug.";
+
+      const wrap = document.createElement("label");
+      wrap.className = "title-screen-setting-inline";
+      const valueText = document.createElement("span");
+      valueText.textContent = "Preset";
+      qualitySelect = document.createElement("select");
+      qualitySelect.className = "title-screen-setting-select";
+      GRAPHICS_QUALITY_PRESETS.forEach((preset) => {
+        const entry = document.createElement("option");
+        entry.value = preset.id;
+        entry.textContent = preset.label;
+        qualitySelect?.appendChild(entry);
+      });
+      const customEntry = document.createElement("option");
+      customEntry.value = GRAPHICS_QUALITY_CUSTOM_ID;
+      customEntry.textContent = "Custom";
+      qualitySelect.appendChild(customEntry);
+      qualitySelect.addEventListener("change", () => {
+        const nextPreset = GRAPHICS_QUALITY_PRESETS.find((preset) => preset.id === qualitySelect?.value);
+        if (!nextPreset) {
+          return;
+        }
+        runtimeSettings.updateSettings(nextPreset.settings);
+      });
+      wrap.append(valueText, qualitySelect);
+
+      qualityDescription = document.createElement("p");
+      qualityDescription.className = "title-screen-setting-detail";
+      row.append(title, desc, wrap, qualityDescription);
+      return row;
+    };
+
+    const createGraphicsPanel = (): HTMLElement => {
+      const panel = document.createElement("div");
+      panel.className = "title-screen-settings-tab-panel";
+
+      const qualitySection = createSection("Quality");
+      const qualityBody = document.createElement("div");
+      qualityBody.className = "title-screen-settings";
+      qualityBody.appendChild(createGraphicsQualityRow());
+      qualitySection.appendChild(qualityBody);
+
+      const graphicsNote = document.createElement("p");
+      graphicsNote.className = "title-screen-panel-note";
+      graphicsNote.textContent = "Graphics presets update resolution scaling, water quality, and shadow resolution together.";
+
+      panel.append(qualitySection, graphicsNote, createRuntimeSections(GRAPHICS_SETTINGS_SECTIONS));
+      return panel;
+    };
+
+    const createDebugPanel = (): HTMLElement => {
+      const panel = document.createElement("div");
+      panel.className = "title-screen-settings-tab-panel";
+      const note = document.createElement("p");
+      note.className = "title-screen-panel-note";
+      note.textContent = "Lower-level renderer and diagnostics controls. Most players can leave these alone.";
+      panel.append(note, createRuntimeSections(DEBUG_SETTINGS_SECTIONS));
+      return panel;
+    };
+
+    const applyRuntimeSettings = (settingsSnapshot: RuntimeSettings): void => {
+      RUNTIME_SETTING_DEFINITIONS.forEach((definition) => {
+        const row = rows.get(definition.key);
+        if (!row) {
+          return;
+        }
+        if (definition.kind === "boolean") {
+          const input = row.querySelector<HTMLInputElement>('input[type="checkbox"]');
+          if (input) {
+            input.checked = Boolean(settingsSnapshot[definition.key]);
+          }
+          return;
+        }
+        if (definition.kind === "enum") {
+          const select = row.querySelector<HTMLSelectElement>("select");
+          if (select) {
+            select.value = `${settingsSnapshot[definition.key]}`;
+          }
+          return;
+        }
+        const input = row.querySelector<HTMLInputElement>('input[type="number"]');
+        if (!input) {
+          return;
+        }
+        const value = settingsSnapshot[definition.key];
+        input.value = value === null || value === undefined ? "" : `${value}`;
+      });
+
+      const qualityPreset = resolveGraphicsQualityPreset(settingsSnapshot);
+      if (qualitySelect) {
+        qualitySelect.value = qualityPreset;
+      }
+      if (qualityDescription) {
+        if (qualityPreset === GRAPHICS_QUALITY_CUSTOM_ID) {
+          qualityDescription.textContent = "Using a custom mix of render scale, water quality, and shadow settings.";
+        } else {
+          qualityDescription.textContent =
+            GRAPHICS_QUALITY_PRESETS.find((preset) => preset.id === qualityPreset)?.description ?? "";
+        }
+      }
+
+      dofDetailKeys.forEach((key) => {
+        const row = rows.get(key);
+        if (!row) {
+          return;
+        }
+        const disabled = !settingsSnapshot.dof;
+        row.classList.toggle("title-screen-setting--disabled", disabled);
+        row.querySelectorAll<HTMLInputElement | HTMLSelectElement>("input, select").forEach((input) => {
+          input.disabled = disabled;
+        });
+      });
+    };
+
+    const graphicsPanel = createGraphicsPanel();
+    const debugPanel = createDebugPanel();
+    applyRuntimeSettings(runtimeSettings.getSettings());
+    registerDispose(runtimeSettings.onChange(applyRuntimeSettings));
+
+    tabs.push({ id: "graphics", label: "Graphics", panel: graphicsPanel });
+    tabs.push({ id: "debug", label: "Debug", panel: debugPanel });
+  }
+
+  const shell = document.createElement("div");
+  shell.className = "title-screen-settings-shell";
+  const tabList = document.createElement("div");
+  tabList.className = "title-screen-settings-tabs";
+  tabList.setAttribute("role", "tablist");
+  const panelRoot = document.createElement("div");
+  panelRoot.className = "title-screen-settings-panels";
+  const tabButtons = new Map<SettingsTabId, HTMLButtonElement>();
+
+  const setActiveTab = (tabId: SettingsTabId): void => {
+    tabs.forEach((tab) => {
+      const active = tab.id === tabId;
+      tab.panel.classList.toggle("hidden", !active);
+      tab.panel.setAttribute("aria-hidden", active ? "false" : "true");
+      const button = tabButtons.get(tab.id);
+      if (button) {
+        button.classList.toggle("title-screen-settings-tab--active", active);
+        button.setAttribute("aria-selected", active ? "true" : "false");
+      }
+    });
+  };
+
+  tabs.forEach((tab) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "title-screen-settings-tab";
+    button.textContent = tab.label;
+    button.setAttribute("role", "tab");
+    button.setAttribute("aria-selected", "false");
+    button.addEventListener("click", () => setActiveTab(tab.id));
+    tabButtons.set(tab.id, button);
+    tabList.appendChild(button);
+    panelRoot.appendChild(tab.panel);
+  });
+
+  if (tabs.length > 1) {
+    shell.append(tabList, panelRoot);
+  } else if (tabs[0]) {
+    shell.appendChild(tabs[0].panel);
+  }
+
+  if (runtimeSettings) {
+    const actions = document.createElement("div");
+    actions.className = "title-screen-setting-actions";
+    const resetButton = document.createElement("button");
+    resetButton.type = "button";
+    resetButton.className = "title-screen-setting-reset";
+    resetButton.textContent = "Reset Runtime Settings";
+    resetButton.addEventListener("click", () => {
+      runtimeSettings.reset();
+    });
+    actions.appendChild(resetButton);
+
+    const note = document.createElement("p");
+    note.className = "title-screen-panel-note";
+    note.textContent =
+      "Runtime settings are saved automatically. URL parameters still work as overrides and are imported into saved settings.";
+
+    shell.append(actions, note);
+  }
+
+  body.appendChild(shell);
+  if (tabs[0]) {
+    setActiveTab(tabs[0].id);
+  }
 };
 
 const buildHighScorePanel = (body: HTMLElement): void => {
@@ -432,7 +935,7 @@ export const showTitleScreen = (deps: TitleScreenDeps): TitleScreenHandle => {
     panelBody.innerHTML = "";
     if (action === "settings") {
       panelTitle.textContent = "Settings";
-      buildSettingsPanel(panelBody, deps.audioControls, (dispose) => {
+      buildSettingsPanel(panelBody, deps.audioControls, deps.runtimeSettings, (dispose) => {
         panelDisposers.push(dispose);
       });
     } else if (action === "high-score") {

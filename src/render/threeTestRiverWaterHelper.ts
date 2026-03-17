@@ -19,6 +19,9 @@ type RiverUniforms = {
   u_skyTopColor: { value: THREE.Color };
   u_skyHorizonColor: { value: THREE.Color };
   u_sunColor: { value: THREE.Color };
+  u_fogColor: { value: THREE.Color };
+  u_fogNear: { value: number };
+  u_fogFar: { value: number };
   u_quality: { value: number };
   u_waterfallInfluenceMap: { value: THREE.Texture };
 };
@@ -43,6 +46,9 @@ type ThreeTestRiverWaterHelperOptions = {
   keyLight: THREE.DirectionalLight;
   skyTopColor: number;
   skyHorizonColor: number;
+  fogColor: THREE.ColorRepresentation;
+  fogNear: number;
+  fogFar: number;
 };
 
 type RiverWaterPalette = {
@@ -51,6 +57,12 @@ type RiverWaterPalette = {
   shallowColor: THREE.ColorRepresentation;
   deepColor: THREE.ColorRepresentation;
   sunColor: THREE.ColorRepresentation;
+};
+
+type RiverWaterFog = {
+  color: THREE.ColorRepresentation;
+  near: number;
+  far: number;
 };
 
 export class ThreeTestRiverWaterHelper {
@@ -62,6 +74,11 @@ export class ThreeTestRiverWaterHelper {
     shallowColor: THREE.Color;
     deepColor: THREE.Color;
     sunColor: THREE.Color;
+  };
+  private fogState: {
+    color: THREE.Color;
+    near: number;
+    far: number;
   };
   private mesh: THREE.Mesh | null = null;
   private wallMesh: THREE.Mesh | null = null;
@@ -83,6 +100,11 @@ export class ThreeTestRiverWaterHelper {
       shallowColor: new THREE.Color(0x3f86bf),
       deepColor: new THREE.Color(0x1a4d79),
       sunColor: new THREE.Color(0xfff0cf)
+    };
+    this.fogState = {
+      color: new THREE.Color(options.fogColor),
+      near: options.fogNear,
+      far: options.fogFar
     };
   }
 
@@ -115,6 +137,18 @@ export class ThreeTestRiverWaterHelper {
     if (this.uniforms) {
       this.uniforms.u_quality.value = qualityUniform;
     }
+  }
+
+  public setFog(fog: RiverWaterFog): void {
+    this.fogState.color.set(fog.color);
+    this.fogState.near = fog.near;
+    this.fogState.far = fog.far;
+    if (!this.uniforms) {
+      return;
+    }
+    this.uniforms.u_fogColor.value.copy(this.fogState.color);
+    this.uniforms.u_fogNear.value = this.fogState.near;
+    this.uniforms.u_fogFar.value = this.fogState.far;
   }
 
   public setLightDirectionFromKeyLight(): void {
@@ -196,6 +230,9 @@ export class ThreeTestRiverWaterHelper {
       u_skyTopColor: { value: this.currentPalette.skyTopColor.clone() },
       u_skyHorizonColor: { value: this.currentPalette.skyHorizonColor.clone() },
       u_sunColor: { value: this.currentPalette.sunColor.clone() },
+      u_fogColor: { value: this.fogState.color.clone() },
+      u_fogNear: { value: this.fogState.near },
+      u_fogFar: { value: this.fogState.far },
       u_quality: { value: qualityUniform },
       u_waterfallInfluenceMap: { value: this.waterfallInfluenceMap }
     };
@@ -262,6 +299,9 @@ export class ThreeTestRiverWaterHelper {
         uniform vec3 u_skyTopColor;
         uniform vec3 u_skyHorizonColor;
         uniform vec3 u_sunColor;
+        uniform vec3 u_fogColor;
+        uniform float u_fogNear;
+        uniform float u_fogFar;
         uniform float u_quality;
         uniform sampler2D u_waterfallInfluenceMap;
         void main() {
@@ -276,6 +316,7 @@ export class ThreeTestRiverWaterHelper {
           vec2 uv2 = worldUv * 10.4 - flowOffset.yx * 1.4 + u_scroll2 * (u_time * 2.2);
           vec2 nXY = texture2D(u_normalMap1, uv1).xy * 2.0 - 1.0 + (texture2D(u_normalMap2, uv2).xy * 2.0 - 1.0) * 0.85;
           vec3 viewDir = normalize(cameraPosition - vWorldPos);
+          float viewDist = length(cameraPosition - vWorldPos);
           float grazing = 1.0 - clamp(abs(viewDir.y), 0.0, 1.0);
           vec3 normalMapN = normalize(vec3(nXY.x * u_normalScale * u_normalStrength, 1.0, nXY.y * u_normalScale * u_normalStrength));
           vec3 geomN = normalize(vGeomNormal);
@@ -301,6 +342,8 @@ export class ThreeTestRiverWaterHelper {
           float sunGlitter = pow(max(dot(reflect(-viewDir, n), lightDir), 0.0), mix(130.0, 74.0, grazing)) * (0.24 + rapid * 0.7);
           vec3 reflection = skyReflect * (fresnel * 0.22) + u_sunColor * (sunGlitter * 0.12);
           vec3 color = litBase * (0.82 + diffuse * 0.2) + reflection + u_sunColor * spec;
+          float fogFactor = pow(smoothstep(u_fogNear, u_fogFar, viewDist), 1.15);
+          color = mix(color, u_fogColor, fogFactor);
           gl_FragColor = vec4(color, 1.0);
         }
       `

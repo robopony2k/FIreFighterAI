@@ -139,7 +139,7 @@ export type PhaseUiBindingDeps = {
   onThreeTest: (config: NewRunConfig) => void | Promise<void>;
   overlayRefs: OverlayRefs;
   showStartMenuOnBind?: boolean;
-  startThreeOnConfirm?: boolean;
+  startThreeOnConfirm?: boolean | (() => boolean);
   onMinimapPan?: (tile: { x: number; y: number }) => void;
   uiAudio?: UiAudioController;
   musicControls?: HudMusicControls;
@@ -344,7 +344,10 @@ export const bindPhaseUi = ({
   };
   let lastRunConfig: NewRunConfig = resolveRunConfig(defaultRunConfig, loadLastRunConfig());
 
-  const launchSession = async (config: NewRunConfig, openThreeTest = startThreeOnConfirm): Promise<void> => {
+  const launchSession = async (
+    config: NewRunConfig,
+    openThreeTest = typeof startThreeOnConfirm === "function" ? startThreeOnConfirm() : startThreeOnConfirm
+  ): Promise<void> => {
     const nextConfig = resolveRunConfig(defaultRunConfig, cloneRunConfig(config));
     lastRunConfig = nextConfig;
     saveLastRunConfig(nextConfig);

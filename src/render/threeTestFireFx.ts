@@ -33,7 +33,7 @@ const TREE_BURN_CARRY_FUEL_MIN = 0.03;
 const ASH_PREVIEW_Y_OFFSET = 0.06;
 const WORLD_UP = new THREE.Vector3(0, 1, 0);
 const FLAME_CELL_LATERAL_LIMIT = 0.45;
-const FLAME_WIND_GAIN = 1.7;
+const FLAME_WIND_GAIN = 2.1;
 const SMOKE_LAYER_MAX = 3;
 const TAU = Math.PI * 2;
 const ENABLE_FLAME_FRONT_PASS = true;
@@ -130,6 +130,19 @@ const smoothApproach = (current: number, target: number, riseRate: number, fallR
   const rate = target >= current ? riseRate : fallRate;
   const k = 1 - Math.exp(-Math.max(0, rate) * Math.max(0, dtSeconds));
   return current + (target - current) * k;
+};
+const getVisualWindResponse = (
+  windStrength: number
+): { flame: number; spark: number; smoke: number; smokeUpwind: number } => {
+  const wind01 = clamp(windStrength, 0, 1);
+  const eased = smoothstep(0, 1, wind01);
+  const shared = 0.42 + eased * 0.72;
+  return {
+    flame: shared * 1.02,
+    spark: shared * 0.92,
+    smoke: shared * 1.14,
+    smokeUpwind: 0.22 + (1 - eased) * 0.14
+  };
 };
 const worldUnitsForPixels = (
   camera: THREE.Camera,
@@ -2104,10 +2117,11 @@ export const createThreeTestFireFx = (
     const windX = wind?.dx ?? 0;
     const windZ = wind?.dy ?? 0;
     const windStrength = wind?.strength ?? 0;
+    const windResponse = getVisualWindResponse(windStrength);
     const crossWindX = -windZ;
     const crossWindZ = windX;
-    const windLeanX = windX * windStrength;
-    const windLeanZ = windZ * windStrength;
+    const windLeanX = windX * windStrength * windResponse.flame;
+    const windLeanZ = windZ * windStrength * windResponse.flame;
     const timeSeconds = time * 0.001;
     const flameTimeSeconds = timeSeconds * FLAME_MOTION_TIME_SCALE;
     const sparkTimeSeconds = timeSeconds * SPARK_MOTION_TIME_SCALE;
@@ -2949,12 +2963,12 @@ export const createThreeTestFireFx = (
         const anchorTheta = a1 * TAU;
         const anchorR = Math.sqrt(a2) * cluster.radius * 0.42;
         const anchorX = clamp(
-          cluster.centroidX + Math.cos(anchorTheta) * anchorR + windX * cluster.radius * 0.18,
+          cluster.centroidX + Math.cos(anchorTheta) * anchorR + windX * cluster.radius * 0.18 * windResponse.smoke,
           terrainMinX,
           terrainMaxX
         );
         const anchorZ = clamp(
-          cluster.centroidZ + Math.sin(anchorTheta) * anchorR + windZ * cluster.radius * 0.18,
+          cluster.centroidZ + Math.sin(anchorTheta) * anchorR + windZ * cluster.radius * 0.18 * windResponse.smoke,
           terrainMinZ,
           terrainMaxZ
         );
@@ -2971,16 +2985,17 @@ export const createThreeTestFireFx = (
           const radial = Math.sqrt(r2) * cluster.radius * 0.28;
           const offsetX = Math.cos(theta) * radial;
           const offsetZ = Math.sin(theta) * radial;
-          const velAlongWind = windStrength * tileSpan * (0.74 + cluster.intensity * 1.9 + r3 * 1.1);
+          const velAlongWind = windStrength * windResponse.smoke * tileSpan * (0.74 + cluster.intensity * 1.9 + r3 * 1.1);
           const velCross = (r2 - 0.5) * tileSpan * (0.3 + cluster.intensity * 0.72);
+          const spawnDownwind = velAlongWind * 0.08;
           const slot = smokeSpawnCursor;
           smokeSpawnCursor = (smokeSpawnCursor + 1) % SMOKE_MAX_INSTANCES;
           smokeParticleActive[slot] = 1;
           smokeParticleAge[slot] = 0;
           smokeParticleLife[slot] = 10.5 + cluster.intensity * 13.5 + r1 * 4.4 + windStrength * 2.8;
-          smokeParticleX[slot] = anchorX + offsetX + crossWindX * velCross * 0.24;
+          smokeParticleX[slot] = anchorX + offsetX + crossWindX * velCross * 0.24 + windX * spawnDownwind;
           smokeParticleY[slot] = cluster.baseY + 0.16 + r3 * tileSpan * 0.42;
-          smokeParticleZ[slot] = anchorZ + offsetZ + crossWindZ * velCross * 0.24;
+          smokeParticleZ[slot] = anchorZ + offsetZ + crossWindZ * velCross * 0.24 + windZ * spawnDownwind;
           smokeParticleVx[slot] = windX * velAlongWind + crossWindX * velCross;
           smokeParticleVy[slot] = tileSpan * (0.62 + cluster.intensity * 1.22 + r3 * 0.42);
           smokeParticleVz[slot] = windZ * velAlongWind + crossWindZ * velCross;
@@ -3293,7 +3308,7 @@ export const createThreeTestFireFx = (
           0,
           1
         );
-        const sparkWindFactor = clamp(0.42 + windStrength * 1.18, 0.42, 1.7);
+        const sparkWindFactor = windResponse.spark;
         const sparkFrontFactor = frontPassActive
           ? clamp(0.22 + frontRead01 * 0.9 + (tileRole === 1 ? 0.12 : 0), 0.22, 1.18)
           : 0.58;
@@ -3324,7 +3339,7 @@ export const createThreeTestFireFx = (
                   Math.round(flameletCount * (0.22 + ignitionRamp01 * 0.16) + (1 - crownToTrunk) * 0.55)
                 )
               );
-        const windStrengthBoost = 0.35 + windStrength * windStrength * 0.9;
+        const windStrengthBoost = (0.35 + windStrength * windStrength * 0.9) * windResponse.flame;
         const crownRadius = flameProfile ? flameProfile.crownRadius * (0.9 + Math.min(0.5, flameProfile.treeCount * 0.08)) : tileSpan * FLAME_CELL_LATERAL_LIMIT;
         const trunkRadius = flameProfile ? Math.max(tileSpan * 0.1, crownRadius * 0.22) : tileSpan * 0.16;
         const sourceRadius =
@@ -3352,7 +3367,6 @@ export const createThreeTestFireFx = (
         const frontDirXRaw = frontWorldX - worldX;
         const frontDirZRaw = frontWorldZ - worldZ;
         const frontDirLen = Math.hypot(frontDirXRaw, frontDirZRaw);
-        const windDirLen = Math.hypot(windX, windZ);
         const fallbackDirX = windDirLen > 0.0001 ? windX / windDirLen : Math.cos(tileSeed * TAU);
         const fallbackDirZ = windDirLen > 0.0001 ? windZ / windDirLen : Math.sin(tileSeed * TAU);
         const frontDirX = frontDirLen > 0.0001 ? frontDirXRaw / frontDirLen : fallbackDirX;
@@ -3465,7 +3479,7 @@ export const createThreeTestFireFx = (
           const helixRadius = sourceRadius * (isHero ? 0.12 : 0.08) * (0.35 + riseT * 1.1 + s2 * 0.3);
           const helixX = Math.cos(jetSpin + riseT * 6.2) * helixRadius;
           const helixZ = Math.sin(jetSpin * 1.08 + riseT * 5.6) * helixRadius;
-          const jetBend = windStrength * sampleFootprint * (0.018 + riseT * 0.22);
+          const jetBend = windStrength * windResponse.flame * sampleFootprint * (0.018 + riseT * 0.22);
           const bendX = windX * jetBend + sideDirX * (s3 - 0.5) * sampleFootprint * (0.04 + riseT * 0.1);
           const bendZ = windZ * jetBend + sideDirZ * (s1 - 0.5) * sampleFootprint * (0.04 + riseT * 0.1);
           const curlAmp = sourceRadius * (isHero ? 0.2 : 0.16) * tierScale;
@@ -3636,7 +3650,8 @@ export const createThreeTestFireFx = (
                 sampleFootprint *
                 (0.1 + windStrength * 0.34) *
                 (0.48 + streakSeed * 0.26 + tipAge * 1.12) *
-                sparkFrontFactor;
+                sparkFrontFactor *
+                (0.62 + sparkWindFactor * 0.38);
               const laneSpin = sparkTimeSeconds * (0.42 + streakSeed * 0.32) + tipAge * (1.35 + intensity * 0.95);
               const laneAngle = streakSeed * TAU + s2 * TAU * 0.5 + streak * 0.57 + laneSpin;
               const laneSpread =
@@ -3701,12 +3716,12 @@ export const createThreeTestFireFx = (
                 minPixelHeight
               );
               const streakDirX =
-                windX * (0.7 + tipAge * 1.55 + windStrength * 1.2) +
+                windX * sparkWindFactor * (0.7 + tipAge * 1.55 + windStrength * 1.2) +
                 jetTangentX * (0.05 + tipAge * 0.07) +
                 crossWindX * ((streakSeed - 0.5) * 0.14);
               const streakDirY = 0.9 + tipAge * 1.45 + intensity * 0.32;
               const streakDirZ =
-                windZ * (0.7 + tipAge * 1.55 + windStrength * 1.2) +
+                windZ * sparkWindFactor * (0.7 + tipAge * 1.55 + windStrength * 1.2) +
                 jetTangentZ * (0.05 + tipAge * 0.07) +
                 crossWindZ * ((s3 - 0.5) * 0.14);
               setSparkStreakTransform(tipX, tipY, tipZ, streakWidth, streakHeight, streakDirX, streakDirY, streakDirZ);
@@ -3946,10 +3961,12 @@ export const createThreeTestFireFx = (
                 fallbackPixelHeight
               );
               const fallbackDirX =
-                windX * (0.78 + fallbackAge * 1.6 + windStrength * 1.15) + crossWindX * ((fallbackSeed - 0.5) * 0.12);
+                windX * sparkWindFactor * (0.78 + fallbackAge * 1.6 + windStrength * 1.15) +
+                crossWindX * ((fallbackSeed - 0.5) * 0.12);
               const fallbackDirY = 0.92 + fallbackAge * 1.2 + flameIntensity * 0.24;
               const fallbackDirZ =
-                windZ * (0.78 + fallbackAge * 1.6 + windStrength * 1.15) + crossWindZ * ((fallbackSeed - 0.5) * 0.12);
+                windZ * sparkWindFactor * (0.78 + fallbackAge * 1.6 + windStrength * 1.15) +
+                crossWindZ * ((fallbackSeed - 0.5) * 0.12);
               setSparkStreakTransform(
                 fallbackX,
                 fallbackY,
@@ -4074,7 +4091,7 @@ export const createThreeTestFireFx = (
             Math.max(tileSpan * GROUND_FLAME_MIN_HEIGHT_TILES, gHeightBase * FLAME_RENDER_SIZE_SCALE) * flameSize01;
           const gWidth =
             Math.max(tileSpan * GROUND_FLAME_MIN_WIDTH_TILES, gWidthBase * FLAME_RENDER_SIZE_SCALE) * flameSize01;
-          const gWindLean = tileSpan * (0.015 + groundFlameDrive * 0.05 + windStrength * 0.03);
+          const gWindLean = tileSpan * windResponse.flame * (0.015 + groundFlameDrive * 0.05 + windStrength * 0.03);
           const groundWorldX = clamp(jetClusterX + gX + windX * gWindLean, terrainMinX, terrainMaxX);
           const groundWorldZ = clamp(jetClusterZ + gZ + windZ * gWindLean, terrainMinZ, terrainMaxZ);
           const groundYaw = Math.atan2(cameraWorldPos.x - groundWorldX, cameraWorldPos.z - groundWorldZ);
@@ -4312,16 +4329,17 @@ export const createThreeTestFireFx = (
             const radial = Math.sqrt(r2) * plumeRadius;
             const offsetX = Math.cos(theta) * radial;
             const offsetZ = Math.sin(theta) * radial;
-            const velAlongWind = windStrength * tileSpan * (0.52 + smokeDrive * 1.6 + r3 * 0.8);
+            const velAlongWind = windStrength * windResponse.smoke * tileSpan * (0.52 + smokeDrive * 1.6 + r3 * 0.8);
             const velCross = (r2 - 0.5) * tileSpan * (0.22 + smokeDrive * 0.55);
+            const spawnDownwind = velAlongWind * (0.06 + smokeDrive * 0.02);
             const slot = smokeSpawnCursor;
             smokeSpawnCursor = (smokeSpawnCursor + 1) % SMOKE_MAX_INSTANCES;
             smokeParticleActive[slot] = 1;
             smokeParticleAge[slot] = 0;
             smokeParticleLife[slot] = 8.5 + smokeDrive * 11.5 + r1 * 3.8 + windStrength * 2.2;
-            smokeParticleX[slot] = jetClusterX + offsetX + crossWindX * velCross * 0.22;
+            smokeParticleX[slot] = jetClusterX + offsetX + crossWindX * velCross * 0.22 + windX * spawnDownwind;
             smokeParticleY[slot] = sourceYBase + 0.18 + r3 * tileSpan * 0.34;
-            smokeParticleZ[slot] = jetClusterZ + offsetZ + crossWindZ * velCross * 0.22;
+            smokeParticleZ[slot] = jetClusterZ + offsetZ + crossWindZ * velCross * 0.22 + windZ * spawnDownwind;
             smokeParticleVx[slot] = windX * velAlongWind + crossWindX * velCross;
             smokeParticleVy[slot] = tileSpan * (0.46 + smokeDrive * 0.95 + r3 * 0.36);
             smokeParticleVz[slot] = windZ * velAlongWind + crossWindZ * velCross;
@@ -4365,27 +4383,39 @@ export const createThreeTestFireFx = (
       const age3 = age2 * age;
       const sourceX = smokeParticleSourceX[i];
       const sourceZ = smokeParticleSourceZ[i];
-      const downwindOffset = windStrength * tileSpan * (age2 * (6.2 + intensity * 12.2) + age3 * 10.4);
+      const downwindOffset = windStrength * windResponse.smoke * tileSpan * (age2 * (6.2 + intensity * 12.2) + age3 * 10.4);
       const centerX = sourceX + windX * downwindOffset;
       const centerZ = sourceZ + windZ * downwindOffset;
       const drag = Math.exp(-deltaSeconds * (0.08 + age * 0.14));
       const shear = 0.28 + age * 3.4 + windStrength * (0.8 + age * 2.2);
       smokeParticleVx[i] =
         smokeParticleVx[i] * drag +
-        windX * windStrength * tileSpan * deltaSeconds * 0.12 * shear;
+        windX * windStrength * windResponse.smoke * tileSpan * deltaSeconds * 0.12 * shear;
       smokeParticleVz[i] =
         smokeParticleVz[i] * drag +
-        windZ * windStrength * tileSpan * deltaSeconds * 0.12 * shear;
+        windZ * windStrength * windResponse.smoke * tileSpan * deltaSeconds * 0.12 * shear;
       // Widen plume with age and wind: older smoke spreads into larger downwind lobes.
       const seedAngle = seed * TAU;
       const seedDirX = Math.cos(seedAngle);
       const seedDirZ = Math.sin(seedAngle);
       const spreadAge = Math.pow(age, 1.35);
       const baseSpread = tileSpan * spreadAge * (1.4 + intensity * 3.2);
-      const windSpread = tileSpan * spreadAge * windStrength * (4.8 + intensity * 3.4);
+      const windSpread = tileSpan * spreadAge * windStrength * windResponse.smoke * (4.8 + intensity * 3.4);
       const crossJitter = seed * 2 - 1;
-      const spreadTargetX = centerX + seedDirX * (baseSpread + windSpread * 0.35) + crossWindX * (crossJitter * windSpread);
-      const spreadTargetZ = centerZ + seedDirZ * (baseSpread + windSpread * 0.35) + crossWindZ * (crossJitter * windSpread);
+      let spreadTargetX = centerX + seedDirX * (baseSpread + windSpread * 0.35) + crossWindX * (crossJitter * windSpread);
+      let spreadTargetZ = centerZ + seedDirZ * (baseSpread + windSpread * 0.35) + crossWindZ * (crossJitter * windSpread);
+      if (windDirLen > 0.0001) {
+        const seedAlong = seedDirX * windNormX + seedDirZ * windNormZ;
+        const seedCross = seedDirX * crossWindX + seedDirZ * crossWindZ;
+        const alongSpread =
+          windSpread * (0.44 + Math.max(0, seedAlong) * 0.82) -
+          baseSpread * windResponse.smokeUpwind * Math.max(0, -seedAlong);
+        const crossSpread =
+          seedCross * (baseSpread * 0.9 + windSpread * 0.22) +
+          crossJitter * windSpread * 0.38;
+        spreadTargetX = centerX + windNormX * alongSpread + crossWindX * crossSpread;
+        spreadTargetZ = centerZ + windNormZ * alongSpread + crossWindZ * crossSpread;
+      }
       const cohesion = (1 - age) * (0.95 + intensity * 0.6) + 0.04;
       smokeParticleVx[i] += (spreadTargetX - smokeParticleX[i]) * cohesion * deltaSeconds;
       smokeParticleVz[i] += (spreadTargetZ - smokeParticleZ[i]) * cohesion * deltaSeconds;
