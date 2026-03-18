@@ -4524,7 +4524,15 @@ export const createThreeTest = (
       const visual = acquireUnitCommandVisual(unit.id);
       activeUnitIds.add(unit.id);
       if (worldPoints.length >= 2) {
-        visual.line.geometry.setFromPoints(worldPoints);
+        const lineGeometry = visual.line.geometry;
+        const positionAttr = lineGeometry.getAttribute("position");
+        if (!positionAttr || positionAttr.count < worldPoints.length) {
+          lineGeometry.dispose();
+          visual.line.geometry = new THREE.BufferGeometry().setFromPoints(worldPoints);
+        } else {
+          lineGeometry.setFromPoints(worldPoints);
+          lineGeometry.setDrawRange(0, worldPoints.length);
+        }
         visual.line.geometry.computeBoundingSphere();
         visual.line.visible = true;
       } else {
