@@ -683,17 +683,66 @@ const getNeighbourFireFront = (
 export type FireFxFallbackMode = "aggressive" | "gentle" | "off";
 export type SparkMode = "tip" | "mixed" | "embers";
 
-export type ThreeTestFireFxOptions = {
-  wallBlend?: number;
-  heroVolumetricShare?: number;
-  budgetScale?: number;
-  fallbackMode?: FireFxFallbackMode;
-  flameIntensityBoost?: number;
-  groundGlowBoost?: number;
-  emberBoost?: number;
-  sparkDebug?: boolean;
-  sparkMode?: SparkMode;
+export type FireFxDebugControls = {
+  wallBlend: number;
+  heroVolumetricShare: number;
+  budgetScale: number;
+  fallbackMode: FireFxFallbackMode;
+  flameIntensityBoost: number;
+  groundGlowBoost: number;
+  emberBoost: number;
+  sparkDebug: boolean;
+  sparkMode: SparkMode;
+  smokeDensityScale: number;
 };
+
+export type ThreeTestFireFxOptions = Partial<FireFxDebugControls>;
+
+export const DEFAULT_FIRE_FX_DEBUG_CONTROLS: FireFxDebugControls = {
+  wallBlend: DEFAULT_FIRE_WALL_BLEND,
+  heroVolumetricShare: DEFAULT_FIRE_HERO_VOLUMETRIC_SHARE,
+  budgetScale: DEFAULT_FIRE_BUDGET_SCALE,
+  fallbackMode: "aggressive",
+  flameIntensityBoost: 1,
+  groundGlowBoost: 1,
+  emberBoost: 1,
+  sparkDebug: false,
+  sparkMode: "tip",
+  smokeDensityScale: 1
+};
+
+export const normalizeFireFxDebugControls = (
+  controls: Partial<FireFxDebugControls> | undefined
+): FireFxDebugControls => ({
+  wallBlend: clamp(controls?.wallBlend ?? DEFAULT_FIRE_FX_DEBUG_CONTROLS.wallBlend, 0, 1),
+  heroVolumetricShare: clamp(
+    controls?.heroVolumetricShare ?? DEFAULT_FIRE_FX_DEBUG_CONTROLS.heroVolumetricShare,
+    0,
+    1
+  ),
+  budgetScale: clamp(controls?.budgetScale ?? DEFAULT_FIRE_FX_DEBUG_CONTROLS.budgetScale, 0.4, 1.25),
+  fallbackMode:
+    controls?.fallbackMode === "gentle" || controls?.fallbackMode === "off"
+      ? controls.fallbackMode
+      : DEFAULT_FIRE_FX_DEBUG_CONTROLS.fallbackMode,
+  flameIntensityBoost: clamp(
+    controls?.flameIntensityBoost ?? DEFAULT_FIRE_FX_DEBUG_CONTROLS.flameIntensityBoost,
+    0.5,
+    2
+  ),
+  groundGlowBoost: clamp(controls?.groundGlowBoost ?? DEFAULT_FIRE_FX_DEBUG_CONTROLS.groundGlowBoost, 0.5, 2),
+  emberBoost: clamp(controls?.emberBoost ?? DEFAULT_FIRE_FX_DEBUG_CONTROLS.emberBoost, 0.5, 2),
+  sparkDebug: controls?.sparkDebug === true,
+  sparkMode:
+    controls?.sparkMode === "mixed" || controls?.sparkMode === "embers"
+      ? controls.sparkMode
+      : DEFAULT_FIRE_FX_DEBUG_CONTROLS.sparkMode,
+  smokeDensityScale: clamp(
+    controls?.smokeDensityScale ?? DEFAULT_FIRE_FX_DEBUG_CONTROLS.smokeDensityScale,
+    0.35,
+    2.5
+  )
+});
 
 export type FireFxEnvironmentSignals = {
   smoke01: number;
@@ -1114,6 +1163,8 @@ export type ThreeTestFireFx = {
     sceneRenderMs: number
   ) => void;
   setEnvironmentSignals: (signals: FireFxEnvironmentSignals) => void;
+  setDebugControls: (controls: Partial<FireFxDebugControls>) => void;
+  getDebugControls: () => FireFxDebugControls;
   getSparkDebugSnapshot: () => SparkDebugSnapshot;
   dispose: () => void;
 };
@@ -1123,25 +1174,7 @@ export const createThreeTestFireFx = (
   camera: THREE.Camera,
   options: ThreeTestFireFxOptions = {}
 ): ThreeTestFireFx => {
-  const wallBlend = clamp(options.wallBlend ?? DEFAULT_FIRE_WALL_BLEND, 0, 1);
-  const heroVolumetricShare = clamp(options.heroVolumetricShare ?? DEFAULT_FIRE_HERO_VOLUMETRIC_SHARE, 0, 1);
-  const flameBudgetBaseScale = clamp(options.budgetScale ?? DEFAULT_FIRE_BUDGET_SCALE, 0.4, 1.25);
-  const flameIntensityBoost = clamp(options.flameIntensityBoost ?? 1, 0.5, 2);
-  const groundGlowBoost = clamp(options.groundGlowBoost ?? 1, 0.5, 2);
-  const emberBoost = clamp(options.emberBoost ?? 1, 0.5, 2);
-  const flameHeightBoost = clamp(0.94 + (flameIntensityBoost - 1) * 0.72, 0.8, 1.4);
-  const flameWidthBoost = clamp((1 + (flameIntensityBoost - 1) * 0.28) * 1.18, 0.96, 1.55);
-  const groundGlowSizeBoost = clamp(1 + (groundGlowBoost - 1) * 0.9, 0.85, 1.8);
-  const groundGlowCountBoost = clamp(1 + (groundGlowBoost - 1) * 0.75, 0.8, 1.6);
-  const emberEjectBoost = clamp(1 + (emberBoost - 1) * 1.15, 0.85, 2.2);
-  const sparkDebug = options.sparkDebug === true;
-  const sparkMode: SparkMode =
-    options.sparkMode === "mixed" || options.sparkMode === "embers" ? options.sparkMode : "tip";
-  const useTipStreaks = sparkMode !== "embers";
-  const useFreeEmbers = sparkMode !== "tip";
-  const freeEmberModeScale = sparkMode === "mixed" ? 0.4 : 1;
-  const fallbackMode: FireFxFallbackMode =
-    options.fallbackMode === "gentle" || options.fallbackMode === "off" ? options.fallbackMode : "aggressive";
+  let debugControls = normalizeFireFxDebugControls(options);
   const smokeWarmBase = new THREE.Color(0.56, 0.46, 0.37);
   const smokeWarmHot = new THREE.Color(0.8, 0.46, 0.24);
   const smokeCoolBase = new THREE.Color(0.43, 0.41, 0.4);
@@ -1197,9 +1230,9 @@ export const createThreeTestFireFx = (
     { stop: 0.58, color: "rgba(246, 108, 42, 0.58)" },
     { stop: 1, color: "rgba(0, 0, 0, 0)" }
   ]);
-  const fireMaterial = createFireShaderMaterial(0, 0.92 * flameIntensityBoost);
-  const fireCrossMaterial = createFireShaderMaterial(0, 0.58 * flameIntensityBoost);
-  const fireCoreMaterial = createFireShaderMaterial(1, 0.68 * flameIntensityBoost);
+  const fireMaterial = createFireShaderMaterial(0, 0.92 * debugControls.flameIntensityBoost);
+  const fireCrossMaterial = createFireShaderMaterial(0, 0.58 * debugControls.flameIntensityBoost);
+  const fireCoreMaterial = createFireShaderMaterial(1, 0.68 * debugControls.flameIntensityBoost);
   const ashPreviewMaterial = createAshPreviewMaterial();
   const smokeMaterial = createSmokeShaderMaterial({
     pointScale: 240,
@@ -1284,13 +1317,11 @@ export const createThreeTestFireFx = (
     depthTest: true,
     blending: THREE.AdditiveBlending,
     vertexColors: true,
-    size: sparkDebug ? 4 : 1.4,
+    size: debugControls.sparkDebug ? 4 : 1.4,
     sizeAttenuation: false,
-    opacity: sparkDebug ? 1 : 0.95,
+    opacity: debugControls.sparkDebug ? 1 : 0.95,
     toneMapped: false
   });
-  const runtimeEmberMaterial = sparkDebug ? sparkDebugEmberMaterial : emberMaterial;
-  const runtimeSparkStreakMaterial = sparkDebug ? sparkDebugStreakMaterial : sparkStreakMaterial;
   const fireGeometry = new THREE.PlaneGeometry(1, 1, 6, 10);
   const fireCrossGeometry = new THREE.PlaneGeometry(1, 1, 4, 8);
   const fireCoreGeometry = new THREE.PlaneGeometry(1, 1, 4, 8);
@@ -1390,17 +1421,21 @@ export const createThreeTestFireFx = (
   smokePoints.renderOrder = 5;
   smokePoints.frustumCulled = false;
   scene.add(smokePoints);
-  const emberMesh = new THREE.InstancedMesh(emberGeometry, runtimeEmberMaterial, EMBER_MAX_INSTANCES);
+  const emberMesh = new THREE.InstancedMesh(
+    emberGeometry,
+    debugControls.sparkDebug ? sparkDebugEmberMaterial : emberMaterial,
+    EMBER_MAX_INSTANCES
+  );
   emberMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
   emberMesh.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(EMBER_MAX_INSTANCES * 3), 3);
   emberMesh.instanceColor.setUsage(THREE.DynamicDrawUsage);
-  emberMesh.renderOrder = sparkDebug ? 12 : 9;
+  emberMesh.renderOrder = debugControls.sparkDebug ? 12 : 9;
   emberMesh.frustumCulled = false;
   emberMesh.count = 0;
   scene.add(emberMesh);
   const sparkStreakMesh = new THREE.InstancedMesh(
     sparkStreakGeometry,
-    runtimeSparkStreakMaterial,
+    debugControls.sparkDebug ? sparkDebugStreakMaterial : sparkStreakMaterial,
     SPARK_STREAK_MAX_INSTANCES
   );
   sparkStreakMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
@@ -1409,7 +1444,7 @@ export const createThreeTestFireFx = (
     3
   );
   sparkStreakMesh.instanceColor.setUsage(THREE.DynamicDrawUsage);
-  sparkStreakMesh.renderOrder = sparkDebug ? 13 : 10;
+  sparkStreakMesh.renderOrder = debugControls.sparkDebug ? 13 : 10;
   sparkStreakMesh.frustumCulled = false;
   sparkStreakMesh.count = 0;
   scene.add(sparkStreakMesh);
@@ -1423,9 +1458,22 @@ export const createThreeTestFireFx = (
   sparkPointGeometry.setAttribute("color", sparkPointColorAttr);
   sparkPointGeometry.setDrawRange(0, 0);
   const sparkPoints = new THREE.Points(sparkPointGeometry, sparkPointMaterial);
-  sparkPoints.renderOrder = sparkDebug ? 14 : 11;
+  sparkPoints.renderOrder = debugControls.sparkDebug ? 14 : 11;
   sparkPoints.frustumCulled = false;
   scene.add(sparkPoints);
+
+  const applySparkDebugPresentation = (): void => {
+    const sparkDebug = debugControls.sparkDebug;
+    emberMesh.material = sparkDebug ? sparkDebugEmberMaterial : emberMaterial;
+    sparkStreakMesh.material = sparkDebug ? sparkDebugStreakMaterial : sparkStreakMaterial;
+    emberMesh.renderOrder = sparkDebug ? 12 : 9;
+    sparkStreakMesh.renderOrder = sparkDebug ? 13 : 10;
+    sparkPoints.renderOrder = sparkDebug ? 14 : 11;
+    sparkPointMaterial.size = sparkDebug ? 4 : 1.4;
+    sparkPointMaterial.opacity = sparkDebug ? 1 : 0.95;
+    sparkPointMaterial.needsUpdate = true;
+  };
+  applySparkDebugPresentation();
 
   const fireBillboard = new THREE.Object3D();
   const fireCrossBillboard = new THREE.Object3D();
@@ -1508,7 +1556,7 @@ export const createThreeTestFireFx = (
     clusteredTiles: 0,
     clusterBedInstances: 0,
     clusterPlumeSpawns: 0,
-    mode: sparkMode
+    mode: debugControls.sparkMode
   };
 
   const clearVisuals = (): void => {
@@ -1533,7 +1581,7 @@ export const createThreeTestFireFx = (
       clusteredTiles: 0,
       clusterBedInstances: 0,
       clusterPlumeSpawns: 0,
-      mode: sparkMode
+      mode: debugControls.sparkMode
     };
     visualsCleared = true;
   };
@@ -2025,6 +2073,24 @@ export const createThreeTestFireFx = (
     sunTintCurrent.lerp(sunTintTarget, envAlpha);
     smokeTintCurrent.lerp(smokeTintTarget, envAlpha);
     const envOrange = clamp(envCurrent.orangeGlow01, 0, 1);
+    const wallBlend = debugControls.wallBlend;
+    const heroVolumetricShare = debugControls.heroVolumetricShare;
+    const flameBudgetBaseScale = debugControls.budgetScale;
+    const flameIntensityBoost = debugControls.flameIntensityBoost;
+    const groundGlowBoost = debugControls.groundGlowBoost;
+    const emberBoost = debugControls.emberBoost;
+    const flameHeightBoost = clamp(0.94 + (debugControls.flameIntensityBoost - 1) * 0.72, 0.8, 1.4);
+    const flameWidthBoost = clamp((1 + (debugControls.flameIntensityBoost - 1) * 0.28) * 1.18, 0.96, 1.55);
+    const groundGlowSizeBoost = clamp(1 + (debugControls.groundGlowBoost - 1) * 0.9, 0.85, 1.8);
+    const groundGlowCountBoost = clamp(1 + (debugControls.groundGlowBoost - 1) * 0.75, 0.8, 1.6);
+    const emberEjectBoost = clamp(1 + (debugControls.emberBoost - 1) * 1.15, 0.85, 2.2);
+    const sparkDebug = debugControls.sparkDebug;
+    const sparkMode = debugControls.sparkMode;
+    const useTipStreaks = sparkMode !== "embers";
+    const useFreeEmbers = sparkMode !== "tip";
+    const freeEmberModeScale = sparkMode === "mixed" ? 0.4 : 1;
+    const fallbackMode = debugControls.fallbackMode;
+    const smokeDensityScale = debugControls.smokeDensityScale;
     if (Number.isFinite(fpsEstimate) && fpsEstimate > 0 && Number.isFinite(sceneRenderMs) && sceneRenderMs > 0) {
       const overloaded = fpsEstimate < SMOKE_QUALITY_FALLBACK_FPS || sceneRenderMs > SMOKE_QUALITY_FALLBACK_SCENE_MS;
       if (overloaded) {
@@ -2129,6 +2195,9 @@ export const createThreeTestFireFx = (
     fireMaterial.uniforms.uTime.value = fireShaderTime;
     fireCrossMaterial.uniforms.uTime.value = fireShaderTime;
     fireCoreMaterial.uniforms.uTime.value = fireShaderTime;
+    fireMaterial.uniforms.uAlphaScale.value = 0.92 * flameIntensityBoost;
+    fireCrossMaterial.uniforms.uAlphaScale.value = 0.58 * flameIntensityBoost;
+    fireCoreMaterial.uniforms.uAlphaScale.value = 0.68 * flameIntensityBoost;
     ashPreviewMaterial.uniforms.uTime.value = timeSeconds;
     fireMaterial.uniforms.uWind.value.set(windLeanX * FLAME_WIND_GAIN, windLeanZ * FLAME_WIND_GAIN);
     fireCrossMaterial.uniforms.uWind.value.set(windLeanX * FLAME_WIND_GAIN, windLeanZ * FLAME_WIND_GAIN);
@@ -2260,10 +2329,11 @@ export const createThreeTestFireFx = (
       sparkStreakBillboard.scale.set(width, height, width);
       sparkStreakBillboard.updateMatrix();
     };
-    const smokeSpawnFrameCap = Math.max(24, Math.floor(SMOKE_MAX_INSTANCES * 0.26 * smokeBudgetScale));
-    const smokeRenderCap = Math.max(180, Math.floor(SMOKE_MAX_INSTANCES * smokeBudgetScale));
+    const effectiveSmokeBudgetScale = clamp(smokeBudgetScale * smokeDensityScale, 0.2, 2.5);
+    const smokeSpawnFrameCap = Math.max(24, Math.floor(SMOKE_MAX_INSTANCES * 0.26 * effectiveSmokeBudgetScale));
+    const smokeRenderCap = Math.max(180, Math.floor(SMOKE_MAX_INSTANCES * effectiveSmokeBudgetScale));
     const smokeRenderStride =
-      smokeBudgetScale >= 0.9 ? 1 : smokeBudgetScale >= 0.7 ? 2 : smokeBudgetScale >= 0.5 ? 3 : 4;
+      effectiveSmokeBudgetScale >= 0.9 ? 1 : effectiveSmokeBudgetScale >= 0.7 ? 2 : effectiveSmokeBudgetScale >= 0.5 ? 3 : 4;
     let activeFlameTileCount = 0;
     let visualActiveWeight = 0;
     for (let y = minY; y <= maxY; y += 1) {
@@ -2973,7 +3043,7 @@ export const createThreeTestFireFx = (
           terrainMaxZ
         );
         const spawnCount = clamp(
-          Math.round((2 + cluster.intensity * 5 + cluster.tileCount * 0.08) * smokeBudgetScale),
+          Math.round((2 + cluster.intensity * 5 + cluster.tileCount * 0.08) * effectiveSmokeBudgetScale),
           1,
           8
         );
@@ -4312,7 +4382,8 @@ export const createThreeTestFireFx = (
           const emissionRate =
             (0.18 + Math.pow(smokeDrive, 1.5) * 6.8 + heat * 0.55 + windStrength * 0.28) *
             (0.75 + sampleStep * 0.22) *
-            roleSmokeScale;
+            roleSmokeScale *
+            smokeDensityScale;
           let spawnCarry = (tileSmokeSpawnAccum[idx] ?? 0) + emissionRate * deltaSeconds;
           const spawnCount = Math.min(9, Math.floor(spawnCarry));
           spawnCarry -= spawnCount;
@@ -4484,7 +4555,7 @@ export const createThreeTestFireFx = (
       clusteredTiles,
       clusterBedInstances,
       clusterPlumeSpawns,
-      mode: sparkMode
+      mode: debugControls.sparkMode
     };
     visualsCleared = false;
     fireMesh.instanceMatrix.needsUpdate = true;
@@ -4564,5 +4635,28 @@ export const createThreeTestFireFx = (
 
   const getSparkDebugSnapshot = (): SparkDebugSnapshot => ({ ...sparkDebugSnapshot });
 
-  return { captureSnapshot, setSimulationAlpha, update, setEnvironmentSignals, getSparkDebugSnapshot, dispose };
+  const setDebugControls = (controls: Partial<FireFxDebugControls>): void => {
+    if (Object.keys(controls).length === 0) {
+      return;
+    }
+    const next = normalizeFireFxDebugControls({ ...debugControls, ...controls });
+    const sparkPresentationChanged = next.sparkDebug !== debugControls.sparkDebug;
+    debugControls = next;
+    if (sparkPresentationChanged) {
+      applySparkDebugPresentation();
+    }
+  };
+
+  const getDebugControls = (): FireFxDebugControls => ({ ...debugControls });
+
+  return {
+    captureSnapshot,
+    setSimulationAlpha,
+    update,
+    setEnvironmentSignals,
+    setDebugControls,
+    getDebugControls,
+    getSparkDebugSnapshot,
+    dispose
+  };
 };

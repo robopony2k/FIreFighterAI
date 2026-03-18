@@ -478,6 +478,210 @@ canvas {
   z-index: 8;
 }
 
+.fx-lab-shell {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  justify-content: flex-end;
+  align-items: stretch;
+  padding: 14px;
+  pointer-events: none;
+  z-index: 12;
+}
+
+.fx-lab-panel {
+  width: min(380px, 100%);
+  max-width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  overflow: auto;
+  padding: 14px 14px 16px;
+  border-radius: 16px;
+  border: 1px solid color-mix(in srgb, var(--three-test-card-border) 82%, rgba(148, 218, 255, 0.22));
+  background:
+    linear-gradient(180deg, rgba(18, 21, 26, 0.92) 0%, rgba(10, 13, 17, 0.95) 100%);
+  box-shadow: 0 20px 42px rgba(0, 0, 0, 0.32);
+  color: var(--three-test-text-primary);
+  pointer-events: auto;
+  backdrop-filter: blur(10px);
+}
+
+.fx-lab-panel-header {
+  display: grid;
+  gap: 6px;
+}
+
+.fx-lab-panel-header h2 {
+  margin: 0;
+  font-size: 22px;
+  letter-spacing: 0.02em;
+}
+
+.fx-lab-panel-header p {
+  margin: 0;
+  color: var(--three-test-text-muted);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.fx-lab-panel-badge {
+  display: inline-flex;
+  align-self: flex-start;
+  padding: 4px 8px;
+  border-radius: 999px;
+  background: rgba(255, 199, 112, 0.16);
+  color: #ffe0a7;
+  font-size: 11px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.fx-lab-section {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border-radius: 12px;
+  border: 1px solid color-mix(in srgb, var(--three-test-card-border) 74%, transparent);
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.fx-lab-section h3 {
+  margin: 0;
+  font-size: 14px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.fx-lab-section-note {
+  margin: 0;
+  color: var(--three-test-text-muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.fx-lab-controls {
+  display: grid;
+  gap: 10px;
+}
+
+.fx-lab-control {
+  display: grid;
+  gap: 7px;
+  padding: 10px;
+  border-radius: 10px;
+  background: rgba(7, 10, 15, 0.44);
+  border: 1px solid rgba(255, 255, 255, 0.04);
+}
+
+.fx-lab-control-heading {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 10px;
+  font-size: 13px;
+}
+
+.fx-lab-control-heading strong {
+  color: #ffe6b0;
+  font-weight: 700;
+}
+
+.fx-lab-control-description {
+  margin: 0;
+  color: var(--three-test-text-muted);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.fx-lab-control-inputs {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 92px;
+  gap: 10px;
+  align-items: center;
+}
+
+.fx-lab-range {
+  width: 100%;
+}
+
+.fx-lab-number,
+.fx-lab-select {
+  width: 100%;
+  border-radius: 8px;
+  border: 1px solid var(--three-test-button-border);
+  background: rgba(17, 21, 27, 0.92);
+  color: var(--three-test-text-primary);
+  padding: 8px 10px;
+}
+
+.fx-lab-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+}
+
+.fx-lab-inline-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.fx-lab-inline-actions > button,
+.fx-lab-section-button {
+  border: 1px solid var(--three-test-button-border);
+  border-radius: 9px;
+  background: linear-gradient(135deg, var(--three-test-button-bg) 0%, rgba(34, 27, 22, 0.95) 100%);
+  color: var(--three-test-text-primary);
+  padding: 8px 10px;
+  font-size: 12px;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+}
+
+.fx-lab-inline-actions > button:hover,
+.fx-lab-section-button:hover {
+  background: linear-gradient(135deg, var(--three-test-button-bg-hover) 0%, rgba(40, 30, 24, 0.98) 100%);
+}
+
+.fx-lab-inline-actions > button[aria-pressed="true"] {
+  background: linear-gradient(135deg, rgba(251, 191, 36, 0.34) 0%, rgba(106, 60, 12, 0.96) 100%);
+  border-color: rgba(251, 191, 36, 0.6);
+  color: #fff6d6;
+}
+
+.fx-lab-inline-field {
+  display: grid;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--three-test-text-muted);
+}
+
+.fx-lab-payload {
+  min-height: 170px;
+  resize: vertical;
+  border-radius: 10px;
+  border: 1px solid var(--three-test-button-border);
+  background: rgba(8, 10, 14, 0.9);
+  color: #d9f1ff;
+  padding: 10px 12px;
+  font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+@media (max-width: 900px) {
+  .fx-lab-shell {
+    justify-content: stretch;
+    align-items: flex-end;
+    padding: 10px;
+  }
+
+  .fx-lab-panel {
+    width: 100%;
+    max-height: min(62vh, 680px);
+  }
+}
+
 .three-test-town-overlay {
   position: absolute;
   inset: 0;

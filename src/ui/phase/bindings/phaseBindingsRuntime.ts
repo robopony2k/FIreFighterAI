@@ -137,6 +137,7 @@ export type PhaseUiBindingDeps = {
   canvas: HTMLCanvasElement;
   onNewRun: (config: NewRunConfig) => void | Promise<void>;
   onThreeTest: (config: NewRunConfig) => void | Promise<void>;
+  onFxLab: () => void | Promise<void>;
   overlayRefs: OverlayRefs;
   showStartMenuOnBind?: boolean;
   startThreeOnConfirm?: boolean | (() => boolean);
@@ -169,6 +170,7 @@ export const bindPhaseUi = ({
   canvas,
   onNewRun,
   onThreeTest,
+  onFxLab,
   overlayRefs,
   showStartMenuOnBind = true,
   startThreeOnConfirm = false,
@@ -299,6 +301,7 @@ export const bindPhaseUi = ({
   const startMenu = document.getElementById("startMenu") as HTMLDivElement | null;
   const startNewRunButton = document.getElementById("startNewRun") as HTMLButtonElement | null;
   const startMenuThreeTestButton = document.getElementById("startMenuThreeTest") as HTMLButtonElement | null;
+  const startMenuFxLabButton = document.getElementById("startMenuFxLab") as HTMLButtonElement | null;
   const startThreeTestButton = document.getElementById("startThreeTest") as HTMLButtonElement | null;
 
   const showStartMenuPanel = (): void => showStartMenuView(startMenu, () => {
@@ -385,6 +388,11 @@ export const bindPhaseUi = ({
   if (startMenuThreeTestButton) {
     listenElement(startMenuThreeTestButton, "click", () => {
       void startThreeTest();
+    });
+  }
+  if (startMenuFxLabButton) {
+    listenElement(startMenuFxLabButton, "click", () => {
+      void onFxLab();
     });
   }
 

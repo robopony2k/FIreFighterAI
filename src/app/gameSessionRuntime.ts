@@ -59,6 +59,9 @@ import {
   updateRuntimeSettings,
   subscribeRuntimeSettings
 } from "../persistence/runtimeSettings.js";
+import { createFxLabController, type FxLabController } from "../render/fxLab/controller.js";
+import { createFxLabPanel, type FxLabPanelHandle } from "../render/fxLab/panel.js";
+import { normalizeFxLabScenarioId, type FxLabScenarioId } from "../render/fxLab/types.js";
 
 
 export type { RenderBackend } from "./renderBackend.js";
@@ -105,6 +108,7 @@ export type AppRuntime = {
   boot: () => Promise<void>;
   resetGame: (config: NewRunConfig) => Promise<void>;
   openThreeTest: (config: NewRunConfig) => Promise<void>;
+  openFxLab: (scenarioId?: FxLabScenarioId) => Promise<void>;
   dispose: () => void;
 };
 
@@ -164,6 +168,9 @@ export const createAppRuntime = (): AppRuntime => {
   const grid = buildGrid(activeMapSize);
   
   const params = new URLSearchParams(window.location.search);
+  const initialLabParam = (params.get("lab") ?? "").toLowerCase();
+  const initialFxLabEnabled = initialLabParam === "fx";
+  const initialFxLabScene = normalizeFxLabScenarioId(params.get("scene"));
   let runtimeSettings = getRuntimeSettings();
   const getConfiguredRenderBackend = (): RenderBackend => (runtimeSettings.render === "2d" ? "legacy2d" : "3d");
   const isLegacy2dEnabled = (): boolean => getConfiguredRenderBackend() === "legacy2d";
@@ -361,7 +368,7 @@ export const createAppRuntime = (): AppRuntime => {
   };
   
   let isGenerating = false;
-  const titleScreenEnabled = ENABLE_TITLE_SCREEN && !isHeadless();
+  const titleScreenEnabled = ENABLE_TITLE_SCREEN && !isHeadless() && !initialFxLabEnabled;
   let titleScreenVisible = false;
   let titleScreen: TitleScreenHandle | null = null;
   const showMapgenOverlay = (): void => {
@@ -387,6 +394,8 @@ export const createAppRuntime = (): AppRuntime => {
   };
   
   let threeTestController: ReturnType<typeof createThreeTest> | null = null;
+  let fxLabController: FxLabController | null = null;
+  let fxLabPanel: FxLabPanelHandle | null = null;
   let phaseUiDisposer: (() => void) | null = null;
   let threeTestStepController: {
     waitForStep: () => Promise<void>;
@@ -410,6 +419,7 @@ export const createAppRuntime = (): AppRuntime => {
   let cachedThreeTestTreeTypeTerrainRevision = -1;
   let cachedThreeTestTreeTypeVegetationRevision = -1;
   let savedThreeTestSmokeRate: number | null = null;
+  let activeThreeOverlayMode: "run" | "fx-lab" | null = null;
   let activeRenderMode: ActiveRenderMode = isLegacy2dEnabled() ? "2d" : "3d";
   const perfStats = new Map<string, PerfStat>();
   const perfOverlay = document.createElement("pre");
@@ -806,6 +816,7 @@ export const createAppRuntime = (): AppRuntime => {
   
   const handleThreeResize = (): void => {
     threeTestController?.resize();
+    fxLabController?.resize();
   };
 
   const mountPhaseUiIntoThreeTest = (): void => {
@@ -833,16 +844,30 @@ export const createAppRuntime = (): AppRuntime => {
     }
     phaseUiOriginalParent.appendChild(phaseUiRoot);
   };
-  
-  const setThreeTestVisible = (visible: boolean): void => {
+
+  const clearThreeOverlayHudMount = (): void => {
+    if (!threeTestPhaseHudMount) {
+      return;
+    }
+    Array.from(threeTestPhaseHudMount.children).forEach((child) => {
+      if (child === phaseUiRoot) {
+        return;
+      }
+      child.remove();
+    });
+  };
+
+  const setThreeOverlayVisible = (visible: boolean, mountPhaseUi = false): void => {
     if (!threeTestOverlay) {
       return;
     }
     setRenderMode(visible ? "3d" : "2d");
-    if (visible) {
+    if (visible && mountPhaseUi) {
+      clearThreeOverlayHudMount();
       mountPhaseUiIntoThreeTest();
     } else {
       restorePhaseUiMount();
+      clearThreeOverlayHudMount();
     }
     threeTestOverlay.classList.toggle("hidden", !visible);
     threeTestOverlay.setAttribute("aria-hidden", visible ? "false" : "true");
@@ -916,11 +941,60 @@ export const createAppRuntime = (): AppRuntime => {
       recordPerfSample("3d.assetPreload", performance.now() - startedAt);
     }
   };
+
+  const configureThreeOverlayMode = (mode: "run" | "fx-lab" | null): void => {
+    activeThreeOverlayMode = mode;
+    if (threeTestEndRunButton) {
+      threeTestEndRunButton.textContent = mode === "fx-lab" ? "Close Lab" : "End Run";
+    }
+    if (threeTestMainMenuButton) {
+      threeTestMainMenuButton.textContent = "Main Menu";
+    }
+    threeTestOverlay?.classList.toggle("three-test-overlay--fx-lab", mode === "fx-lab");
+  };
+
+  const closeFxLab = (): void => {
+    if (activeThreeOverlayMode !== "fx-lab" && !fxLabController && !fxLabPanel) {
+      return;
+    }
+    fxLabPanel?.destroy();
+    fxLabPanel = null;
+    fxLabController?.stop();
+    fxLabController?.dispose();
+    fxLabController = null;
+    setThreeOverlayVisible(false);
+    window.removeEventListener("resize", handleThreeResize);
+    configureThreeOverlayMode(null);
+    state.paused = true;
+    syncMusicContext();
+  };
+
+  const openFxLab = async (scenarioId: FxLabScenarioId = initialFxLabScene): Promise<void> => {
+    if (!threeTestOverlay || !threeTestCanvas || !threeTestPhaseHudMount) {
+      return;
+    }
+    closeThreeTest(true);
+    fxLabPanel?.destroy();
+    fxLabPanel = null;
+    fxLabController?.stop();
+    fxLabController?.dispose();
+    fxLabController = null;
+    configureThreeOverlayMode("fx-lab");
+    setThreeOverlayVisible(true, false);
+    fxLabController = createFxLabController(threeTestCanvas, scenarioId);
+    fxLabPanel = createFxLabPanel(threeTestPhaseHudMount, fxLabController);
+    handleThreeResize();
+    window.addEventListener("resize", handleThreeResize);
+    fxLabController.start();
+    state.paused = true;
+    syncMusicContext();
+  };
   
   const openThreeTest = async (config: NewRunConfig): Promise<void> => {
     if (!threeTestOverlay || !threeTestCanvas) {
       return;
     }
+    closeFxLab();
     console.info(
       `[threeTest] opening 3D mode with flags seasonal=${isThreeTestSeasonalRecolorEnabled() ? 1 : 0} ` +
         `nosim=${isThreeTestNoSimEnabled() ? 1 : 0} noterrain=${isThreeTestTerrainSyncDisabled() ? 1 : 0} dpr=${getThreeTestDprCap().toFixed(2)} fps=${getFrameCapFps() > 0 ? getFrameCapFps().toFixed(0) : "off"}`
@@ -999,7 +1073,8 @@ export const createAppRuntime = (): AppRuntime => {
     }
     threeTestStepController.setAuto(true);
     const previewDuringMapgen = state.tiles.length === 0;
-    setThreeTestVisible(true);
+    configureThreeOverlayMode("run");
+    setThreeOverlayVisible(true, true);
     handleThreeResize();
     window.addEventListener("resize", handleThreeResize);
     if (previewDuringMapgen) {
@@ -1047,7 +1122,13 @@ export const createAppRuntime = (): AppRuntime => {
   };
   
   const closeThreeTest = (force = false): void => {
-    if (!isLegacy2dEnabled() && !force) {
+    if (activeThreeOverlayMode === "fx-lab") {
+      if (force) {
+        closeFxLab();
+      }
+      return;
+    }
+    if (!isLegacy2dEnabled() && !force && activeThreeOverlayMode !== "run") {
       return;
     }
     if (!threeTestOverlay) {
@@ -1057,7 +1138,7 @@ export const createAppRuntime = (): AppRuntime => {
       state.simPerf.smokeRate = savedThreeTestSmokeRate;
       savedThreeTestSmokeRate = null;
     }
-    setThreeTestVisible(false);
+    setThreeOverlayVisible(false);
     threeTestController?.stop();
     window.removeEventListener("resize", handleThreeResize);
     threeTestStepController?.setAuto(true);
@@ -1065,9 +1146,11 @@ export const createAppRuntime = (): AppRuntime => {
       phaseUi.state.off("change", threeTestUiListener);
       threeTestUiListener = null;
     }
+    configureThreeOverlayMode(null);
   };
 
   const returnToStartMenu = (): void => {
+    const closingFxLab = activeThreeOverlayMode === "fx-lab";
     closeThreeTest(true);
     uiState.overlayVisible = false;
     uiState.overlayAction = "dismiss";
@@ -1075,11 +1158,12 @@ export const createAppRuntime = (): AppRuntime => {
     characterScreen.classList.add("hidden");
     startMenu?.classList.remove("hidden");
     state.paused = true;
-    setStatus(state, "Run ended. Ready to start a new run.");
+    setStatus(state, closingFxLab ? "FX Lab closed. Ready to start a new run." : "Run ended. Ready to start a new run.");
     syncMusicContext();
   };
 
   const returnToMainMenu = (): void => {
+    const closingFxLab = activeThreeOverlayMode === "fx-lab";
     closeThreeTest(true);
     uiState.overlayVisible = false;
     uiState.overlayAction = "dismiss";
@@ -1089,10 +1173,10 @@ export const createAppRuntime = (): AppRuntime => {
     if (titleScreenEnabled) {
       startMenu?.classList.add("hidden");
       showTitleScreen();
-      setStatus(state, "Run ended. Returned to the title screen.");
+      setStatus(state, closingFxLab ? "FX Lab closed. Returned to the title screen." : "Run ended. Returned to the title screen.");
     } else {
       startMenu?.classList.remove("hidden");
-      setStatus(state, "Run ended. Ready to start a new run.");
+      setStatus(state, closingFxLab ? "FX Lab closed. Ready to start a new run." : "Run ended. Ready to start a new run.");
     }
     syncMusicContext();
   };
@@ -1164,6 +1248,12 @@ export const createAppRuntime = (): AppRuntime => {
         startMenu?.classList.remove("hidden");
         state.paused = true;
         syncMusicContext();
+      },
+      onFxLab: () => {
+        destroyTitleScreen();
+        startMenu?.classList.add("hidden");
+        characterScreen.classList.add("hidden");
+        void openFxLab();
       },
       onQuit: () => requestQuit()
     });
@@ -1267,12 +1357,20 @@ export const createAppRuntime = (): AppRuntime => {
   
   if (threeTestEndRunButton) {
     threeTestEndRunButton.addEventListener("click", () => {
+      if (activeThreeOverlayMode === "fx-lab") {
+        returnToStartMenu();
+        return;
+      }
       endGame(state, false, "Run ended from 3D test.");
       returnToStartMenu();
     });
   }
   if (threeTestMainMenuButton) {
     threeTestMainMenuButton.addEventListener("click", () => {
+      if (activeThreeOverlayMode === "fx-lab") {
+        returnToMainMenu();
+        return;
+      }
       endGame(state, false, "Run ended from 3D test.");
       returnToMainMenu();
     });
@@ -1280,6 +1378,10 @@ export const createAppRuntime = (): AppRuntime => {
   if (threeTestOverlay) {
     threeTestOverlay.addEventListener("click", (event) => {
       if (event.target === threeTestOverlay) {
+        if (activeThreeOverlayMode === "fx-lab") {
+          closeFxLab();
+          return;
+        }
         closeThreeTest();
       }
     });
@@ -1343,6 +1445,7 @@ export const createAppRuntime = (): AppRuntime => {
           canvas,
           onNewRun: resetGame,
           onThreeTest: openThreeTest,
+          onFxLab: () => openFxLab(),
           overlayRefs,
           showStartMenuOnBind: false,
           startThreeOnConfirm: () => !isLegacy2dEnabled(),
@@ -1363,7 +1466,9 @@ export const createAppRuntime = (): AppRuntime => {
       syncMusicContext();
       showTitleScreen();
     } else {
-      await resetGame(initialRunConfig);
+      if (!initialFxLabEnabled) {
+        await resetGame(initialRunConfig);
+      }
       if (!isHeadless() && phaseUi) {
         phaseUiDisposer?.();
         phaseUiDisposer = bindPhaseUi({
@@ -1376,8 +1481,9 @@ export const createAppRuntime = (): AppRuntime => {
           canvas,
           onNewRun: resetGame,
           onThreeTest: openThreeTest,
+          onFxLab: () => openFxLab(),
           overlayRefs,
-          showStartMenuOnBind: true,
+          showStartMenuOnBind: !initialFxLabEnabled,
           startThreeOnConfirm: () => !isLegacy2dEnabled(),
           onMinimapPan: (tile) => {
             if (threeTestController) {
@@ -1389,6 +1495,12 @@ export const createAppRuntime = (): AppRuntime => {
           uiAudio,
           musicControls
         });
+      }
+      if (initialFxLabEnabled) {
+        startMenu?.classList.add("hidden");
+        characterScreen.classList.add("hidden");
+        state.paused = true;
+        syncMusicContext();
       }
     }
   
@@ -1403,6 +1515,10 @@ export const createAppRuntime = (): AppRuntime => {
       }
       console.log(`checksum:${computeChecksum(state)}`);
       return;
+    }
+
+    if (initialFxLabEnabled) {
+      await openFxLab(initialFxLabScene);
     }
   
     startAppBootLoop({
@@ -1466,6 +1582,7 @@ export const createAppRuntime = (): AppRuntime => {
   const dispose = (): void => {
     destroyTitleScreen();
     closeThreeTest(true);
+    closeFxLab();
     renderBackend.dispose();
     phaseUiDisposer?.();
     phaseUiDisposer = null;
@@ -1481,6 +1598,7 @@ export const createAppRuntime = (): AppRuntime => {
     boot,
     resetGame,
     openThreeTest,
+    openFxLab,
     dispose
   };
 };

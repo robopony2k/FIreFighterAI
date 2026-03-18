@@ -368,13 +368,24 @@ export const createThreeTestUnitsLayer = (scene: THREE.Scene): ThreeTestUnitsLay
   const resolveYaw = (unit: WorldState["units"][number], x: number, y: number): number => {
     let targetX: number | null = null;
     let targetY: number | null = null;
-    if (unit.pathIndex < unit.path.length) {
+    if (unit.kind === "firefighter" && unit.sprayTarget) {
+      const sprayRange = unit.hoseRange + Math.max(0.35, unit.radius * 0.35);
+      const sprayDist = Math.hypot(unit.sprayTarget.x - x, unit.sprayTarget.y - y);
+      if (sprayDist <= sprayRange || unit.pathIndex >= unit.path.length) {
+        targetX = unit.sprayTarget.x;
+        targetY = unit.sprayTarget.y;
+      }
+    }
+    if (targetX === null && targetY === null && unit.pathIndex < unit.path.length) {
       const waypoint = unit.path[unit.pathIndex];
       targetX = waypoint.x + 0.5;
       targetY = waypoint.y + 0.5;
-    } else if (unit.target) {
+    } else if (targetX === null && targetY === null && unit.target) {
       targetX = unit.target.x + 0.5;
       targetY = unit.target.y + 0.5;
+    } else if (targetX === null && targetY === null && unit.kind === "firefighter" && unit.attackTarget) {
+      targetX = unit.attackTarget.x;
+      targetY = unit.attackTarget.y;
     } else {
       const motionX = unit.x - unit.prevX;
       const motionY = unit.y - unit.prevY;
