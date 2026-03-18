@@ -2,6 +2,13 @@ import * as THREE from "three";
 import type { EffectsState } from "../core/effectsState.js";
 import type { WorldState } from "../core/state.js";
 import type { WaterSprayMode } from "../core/types.js";
+import {
+  FIREFIGHTER_MODEL_ROOT_Y_OFFSET,
+  createFirefighterVisualState,
+  updateFirefighterVisualState,
+  writeFirefighterGripWorldPosition
+} from "./firefighterVisuals.js";
+import { approachAngleExp, resolveDesiredUnitYaw } from "./unitAimVisuals.js";
 import { getTerrainHeightScale, type TerrainSample } from "./threeTestTerrain.js";
 
 const MAX_HOSE_SEGMENTS = 1024;
@@ -23,6 +30,11 @@ const WATER_SHELL_EDGE_COLOR = new THREE.Color(0xb2edff);
 const WATER_IMPACT_CORE_COLOR = new THREE.Color(0xf5fcff);
 const WATER_IMPACT_EDGE_COLOR = new THREE.Color(0x8edcff);
 const TAU = Math.PI * 2;
+const DEFAULT_FIREFIGHTER_TURN_RESPONSE = 18;
+const ENGAGED_FIREFIGHTER_TURN_RESPONSE = 10.5;
+const STREAM_NOZZLE_RESPONSE = 12.5;
+const STREAM_TIP_RESPONSE = 7.2;
+const STREAM_LENGTH_RESPONSE = 11;
 
 const clamp = (value: number, min: number, max: number): number => Math.max(min, Math.min(max, value));
 const fract = (value: number): number => value - Math.floor(value);
@@ -30,6 +42,20 @@ const expFactor = (rate: number, dtSeconds: number): number =>
   1 - Math.exp(-Math.max(0, rate) * Math.max(0, dtSeconds));
 const approachExp = (current: number, target: number, rate: number, dtSeconds: number): number =>
   current + (target - current) * expFactor(rate, dtSeconds);
+const approachUnitVectorExp = (
+  current: THREE.Vector3,
+  target: THREE.Vector3,
+  rate: number,
+  dtSeconds: number
+): THREE.Vector3 => {
+  current.lerp(target, expFactor(rate, dtSeconds));
+  if (current.lengthSq() <= 1e-8) {
+    current.copy(target);
+  } else {
+    current.normalize();
+  }
+  return current;
+};
 
 const bilerp = (h00: number, h10: number, h01: number, h11: number, tx: number, ty: number): number => {
   const hx0 = h00 * (1 - tx) + h10 * tx;
@@ -548,6 +574,8 @@ type SprayStreamAggregate = {
 
 type SprayStreamVisualState = {
   direction: THREE.Vector3;
+  nozzleDirection: THREE.Vector3;
+  tipDirection: THREE.Vector3;
   sourceX: number;
   sourceY: number;
   sourceZ: number;
@@ -563,6 +591,55 @@ type SprayStreamVisualState = {
   intensity: number;
   flow: number;
   seed: number;
+};
+
+const writeStreamCurveControlPoint = (
+  visual: SprayStreamVisualState,
+  target: THREE.Vector3
+): THREE.Vector3 => {
+  const controlRatio = visual.mode <= 0.5 ? 0.46 : visual.mode >= 1.5 ? 0.38 : 0.42;
+  const controlDistance = visual.length * controlRatio;
+  return target.set(
+    visual.sourceX + visual.nozzleDirection.x * controlDistance,
+    visual.sourceY + visual.nozzleDirection.y * controlDistance,
+    visual.sourceZ + visual.nozzleDirection.z * controlDistance
+  );
+};
+
+const sampleStreamCurvePoint = (
+  visual: SprayStreamVisualState,
+  along01: number,
+  controlPoint: THREE.Vector3,
+  target: THREE.Vector3
+): THREE.Vector3 => {
+  const t = clamp(along01, 0, 1);
+  const invT = 1 - t;
+  return target.set(
+    invT * invT * visual.sourceX + 2 * invT * t * controlPoint.x + t * t * visual.tipX,
+    invT * invT * visual.sourceY + 2 * invT * t * controlPoint.y + t * t * visual.tipY,
+    invT * invT * visual.sourceZ + 2 * invT * t * controlPoint.z + t * t * visual.tipZ
+  );
+};
+
+const sampleStreamCurveTangent = (
+  visual: SprayStreamVisualState,
+  along01: number,
+  controlPoint: THREE.Vector3,
+  target: THREE.Vector3
+): THREE.Vector3 => {
+  const t = clamp(along01, 0, 1);
+  const invT = 1 - t;
+  target.set(
+    2 * invT * (controlPoint.x - visual.sourceX) + 2 * t * (visual.tipX - controlPoint.x),
+    2 * invT * (controlPoint.y - visual.sourceY) + 2 * t * (visual.tipY - controlPoint.y),
+    2 * invT * (controlPoint.z - visual.sourceZ) + 2 * t * (visual.tipZ - controlPoint.z)
+  );
+  if (target.lengthSq() <= 1e-8) {
+    target.copy(visual.tipDirection);
+  } else {
+    target.normalize();
+  }
+  return target;
 };
 
 export type WaterFxDebugControls = {
@@ -954,9 +1031,13 @@ export const createThreeTestUnitFxLayer = (scene: THREE.Scene): ThreeTestUnitFxL
   const swayAxisA = new THREE.Vector3();
   const swayAxisB = new THREE.Vector3();
   const swayTargetPoint = new THREE.Vector3();
+  const streamCurveControlPoint = new THREE.Vector3();
+  const streamCurvePoint = new THREE.Vector3();
+  const streamCurveTangent = new THREE.Vector3();
   const swayFallbackAxis = new THREE.Vector3(1, 0, 0);
   const fallbackStreamDirection = new THREE.Vector3(0, -0.04, 1).normalize();
   const sprayVisualBySourceId = new Map<number, SprayStreamVisualState>();
+  const lastFirefighterYawByUnitId = new Map<number, number>();
   let lastUpdateTimeMs: number | null = null;
   const getModeVolumeScale = (modeValue: number): number => {
     if (modeValue <= 0.5) {
@@ -1002,6 +1083,8 @@ export const createThreeTestUnitFxLayer = (scene: THREE.Scene): ThreeTestUnitFxL
       mistShells.count = 0;
       impactGeometry.setDrawRange(0, 0);
       sprayVisualBySourceId.clear();
+      lastFirefighterYawByUnitId.clear();
+      lastUpdateTimeMs = null;
       debugSnapshot = {
         streamCount: 0,
         particleCount: 0,
@@ -1031,9 +1114,30 @@ export const createThreeTestUnitFxLayer = (scene: THREE.Scene): ThreeTestUnitFxL
         y: unit.prevY + (unit.y - unit.prevY) * alpha
       };
     };
+    const resolveFirefighterYaw = (
+      unit: WorldState["units"][number],
+      x: number,
+      y: number
+    ): number => {
+      const fallbackYaw = lastFirefighterYawByUnitId.get(unit.id) ?? 0;
+      const desiredYaw = resolveDesiredUnitYaw(unit, x, y, fallbackYaw);
+      if (!lastFirefighterYawByUnitId.has(unit.id)) {
+        lastFirefighterYawByUnitId.set(unit.id, desiredYaw);
+        return desiredYaw;
+      }
+      const engaged = unit.sprayTarget !== null || unit.attackTarget !== null;
+      const response = engaged ? ENGAGED_FIREFIGHTER_TURN_RESPONSE : DEFAULT_FIREFIGHTER_TURN_RESPONSE;
+      const yaw = approachAngleExp(fallbackYaw, desiredYaw, response, deltaSeconds);
+      lastFirefighterYawByUnitId.set(unit.id, yaw);
+      return yaw;
+    };
 
     const trucks = new Map<number, { unit: WorldState["units"][number]; x: number; y: number }>();
     const nozzleByUnitId = new Map<number, { x: number; y: number; z: number }>();
+    const firefighterPose = createFirefighterVisualState();
+    const firefighterRoot = new THREE.Vector3();
+    const firefighterNozzle = new THREE.Vector3();
+    const activeFirefighterIds = new Set<number>();
     for (let i = 0; i < world.units.length; i += 1) {
       const unit = world.units[i];
       if (!unit) {
@@ -1043,12 +1147,35 @@ export const createThreeTestUnitFxLayer = (scene: THREE.Scene): ThreeTestUnitFxL
       if (unit.kind === "truck") {
         trucks.set(unit.id, { unit, x: unitTile.x, y: unitTile.y });
       }
-      const nozzleX = toWorldX(unitTile.x, cols, terrainSize.width);
-      const nozzleZ = toWorldZ(unitTile.y, rows, terrainSize.depth);
-      const nozzleY =
-        sampleHeight(sample, unitTile.x, unitTile.y) * heightScale + (unit.kind === "truck" ? HOSE_BASE_Y + 0.13 : HOSE_BASE_Y + 0.2);
-      nozzleByUnitId.set(unit.id, { x: nozzleX, y: nozzleY, z: nozzleZ });
+      if (unit.kind === "firefighter" && unit.carrierId === null) {
+        activeFirefighterIds.add(unit.id);
+        const yaw = resolveFirefighterYaw(unit, unitTile.x, unitTile.y);
+        firefighterRoot.set(
+          toWorldX(unitTile.x, cols, terrainSize.width),
+          sampleHeight(sample, unitTile.x, unitTile.y) * heightScale + FIREFIGHTER_MODEL_ROOT_Y_OFFSET,
+          toWorldZ(unitTile.y, rows, terrainSize.depth)
+        );
+        updateFirefighterVisualState(unit, timeSec, firefighterPose);
+        writeFirefighterGripWorldPosition(firefighterRoot, yaw, firefighterPose, firefighterNozzle);
+        nozzleByUnitId.set(unit.id, {
+          x: firefighterNozzle.x,
+          y: firefighterNozzle.y,
+          z: firefighterNozzle.z
+        });
+      } else {
+        const nozzleX = toWorldX(unitTile.x, cols, terrainSize.width);
+        const nozzleZ = toWorldZ(unitTile.y, rows, terrainSize.depth);
+        const nozzleY =
+          sampleHeight(sample, unitTile.x, unitTile.y) * heightScale +
+          (unit.kind === "truck" ? HOSE_BASE_Y + 0.13 : HOSE_BASE_Y + 0.2);
+        nozzleByUnitId.set(unit.id, { x: nozzleX, y: nozzleY, z: nozzleZ });
+      }
     }
+    Array.from(lastFirefighterYawByUnitId.keys()).forEach((unitId) => {
+      if (!activeFirefighterIds.has(unitId)) {
+        lastFirefighterYawByUnitId.delete(unitId);
+      }
+    });
 
     let hoseSegments = 0;
     for (let i = 0; i < world.units.length; i += 1) {
@@ -1063,22 +1190,25 @@ export const createThreeTestUnitFxLayer = (scene: THREE.Scene): ThreeTestUnitFxL
       if (hoseSegments >= MAX_HOSE_SEGMENTS) {
         break;
       }
-      const crewTile = resolveInterpolatedPosition(unit);
-      const crewX = toWorldX(crewTile.x, cols, terrainSize.width);
-      const crewZ = toWorldZ(crewTile.y, rows, terrainSize.depth);
-      const crewY = sampleHeight(sample, crewTile.x, crewTile.y) * heightScale + HOSE_BASE_Y + 0.18;
-
       const truckX = toWorldX(truckRef.x, cols, terrainSize.width);
       const truckZ = toWorldZ(truckRef.y, rows, terrainSize.depth);
       const truckY = sampleHeight(sample, truckRef.x, truckRef.y) * heightScale + HOSE_BASE_Y + 0.11;
+      const crewSource = nozzleByUnitId.get(unit.id) ?? null;
+      if (!crewSource) {
+        continue;
+      }
 
-      hoseDirection.set(crewX - truckX, crewY - truckY, crewZ - truckZ);
+      hoseDirection.set(crewSource.x - truckX, crewSource.y - truckY, crewSource.z - truckZ);
       const hoseLength = hoseDirection.length();
       if (hoseLength <= 0.0001) {
         continue;
       }
       hoseDirection.multiplyScalar(1 / hoseLength);
-      hoseMidpoint.set((truckX + crewX) * 0.5, (truckY + crewY) * 0.5, (truckZ + crewZ) * 0.5);
+      hoseMidpoint.set(
+        (truckX + crewSource.x) * 0.5,
+        (truckY + crewSource.y) * 0.5,
+        (truckZ + crewSource.z) * 0.5
+      );
       hoseQuaternion.setFromUnitVectors(hoseUpAxis, hoseDirection);
       hoseScale.set(1, hoseLength, 1);
       hoseMatrix.compose(hoseMidpoint, hoseQuaternion, hoseScale);
@@ -1148,8 +1278,20 @@ export const createThreeTestUnitFxLayer = (scene: THREE.Scene): ThreeTestUnitFxL
         if (!aggregate) {
           return;
         }
+        streamTargetPoint.set(
+          aggregate.targetX - aggregate.sourceX,
+          aggregate.targetY - aggregate.sourceY,
+          aggregate.targetZ - aggregate.sourceZ
+        );
+        if (streamTargetPoint.lengthSq() <= 1e-8) {
+          streamTargetDirection.copy(fallbackStreamDirection);
+        } else {
+          streamTargetDirection.copy(streamTargetPoint).normalize();
+        }
         visual = {
-          direction: fallbackStreamDirection.clone(),
+          direction: streamTargetDirection.clone(),
+          nozzleDirection: streamTargetDirection.clone(),
+          tipDirection: streamTargetDirection.clone(),
           sourceX: aggregate.sourceX,
           sourceY: aggregate.sourceY,
           sourceZ: aggregate.sourceZ,
@@ -1206,11 +1348,9 @@ export const createThreeTestUnitFxLayer = (scene: THREE.Scene): ThreeTestUnitFxL
         );
         const targetLength = Math.max(0.0001, streamTargetPoint.length());
         streamTargetDirection.copy(streamTargetPoint).multiplyScalar(1 / targetLength);
-        visual.direction.copy(streamTargetDirection);
-        visual.length = targetLength;
-        visual.tipX = aggregate.targetX;
-        visual.tipY = aggregate.targetY;
-        visual.tipZ = aggregate.targetZ;
+        approachUnitVectorExp(visual.nozzleDirection, streamTargetDirection, STREAM_NOZZLE_RESPONSE, deltaSeconds);
+        approachUnitVectorExp(visual.tipDirection, streamTargetDirection, STREAM_TIP_RESPONSE, deltaSeconds);
+        visual.length = approachExp(visual.length, targetLength, STREAM_LENGTH_RESPONSE, deltaSeconds);
         visual.mode = approachExp(visual.mode, aggregate.mode, 18, deltaSeconds);
         visual.volume = approachExp(visual.volume, aggregate.volume, 16, deltaSeconds);
         visual.flow = approachExp(
@@ -1269,6 +1409,16 @@ export const createThreeTestUnitFxLayer = (scene: THREE.Scene): ThreeTestUnitFxL
         );
       }
 
+      visual.tipX = visual.sourceX + visual.tipDirection.x * visual.length;
+      visual.tipY = visual.sourceY + visual.tipDirection.y * visual.length;
+      visual.tipZ = visual.sourceZ + visual.tipDirection.z * visual.length;
+      streamTargetPoint.set(visual.tipX - visual.sourceX, visual.tipY - visual.sourceY, visual.tipZ - visual.sourceZ);
+      if (streamTargetPoint.lengthSq() <= 1e-8) {
+        visual.direction.copy(visual.tipDirection);
+      } else {
+        visual.direction.copy(streamTargetPoint).normalize();
+      }
+
       if (!source && !aggregate && visual.intensity <= 0.015 && visual.flow <= 0.015) {
         sprayVisualBySourceId.delete(sourceId);
         return;
@@ -1320,6 +1470,7 @@ export const createThreeTestUnitFxLayer = (scene: THREE.Scene): ThreeTestUnitFxL
         coneEnvelopeRadius * (precisionModeVisual ? 0.78 : suppressionModeVisual ? 0.98 : 0.88),
         bodyRadius * (precisionModeVisual ? 1.025 : suppressionModeVisual ? 1.04 : 1.03)
       );
+      writeStreamCurveControlPoint(visual, streamCurveControlPoint);
       const sharedNozzleRadius = HOSE_RADIUS * (precisionModeVisual ? 1.18 : suppressionModeVisual ? 1.42 : 1.28);
       const bodyNozzleRatio = clamp(sharedNozzleRadius / Math.max(bodyRadius * 0.42, 0.0001), 0.02, 1);
       if (debugControls.showStreamBody && streamBodyCount < MAX_WATER_STREAMS) {
@@ -1390,11 +1541,14 @@ export const createThreeTestUnitFxLayer = (scene: THREE.Scene): ThreeTestUnitFxL
           0,
           Math.min(visual.length, shellLength - Math.max(worldPerTile * 0.04, mistRenderRadius * 0.04))
         );
-        const impactCenterX = visual.sourceX + visual.direction.x * impactAnchorDistance;
-        const impactCenterZ = visual.sourceZ + visual.direction.z * impactAnchorDistance;
+        const impactAlong01 = clamp(impactAnchorDistance / Math.max(visual.length, 0.0001), 0, 1);
+        sampleStreamCurvePoint(visual, impactAlong01, streamCurveControlPoint, streamCurvePoint);
+        sampleStreamCurveTangent(visual, impactAlong01, streamCurveControlPoint, streamCurveTangent);
+        const impactCenterX = streamCurvePoint.x;
+        const impactCenterZ = streamCurvePoint.z;
         const impactTerrainY =
           sampleWorldHeight(sample, terrainSize, cols, rows, heightScale, impactCenterX, impactCenterZ) + 0.03;
-        const impactCenterY = Math.max(impactTerrainY, visual.sourceY + visual.direction.y * impactAnchorDistance);
+        const impactCenterY = Math.max(impactTerrainY, streamCurvePoint.y);
         const impactFootprintRadius = Math.max(
           visual.impactRadius,
           bodyRadius * (precisionModeVisual ? 0.96 : suppressionModeVisual ? 1.08 : 1),
@@ -1408,7 +1562,7 @@ export const createThreeTestUnitFxLayer = (scene: THREE.Scene): ThreeTestUnitFxL
           1
         );
         const impactBaseSize = clamp((impactFootprintRadius / Math.max(worldPerTile, 0.0001)) * 34, 12, 60);
-        swayAxisA.crossVectors(visual.direction, hoseUpAxis);
+        swayAxisA.crossVectors(streamCurveTangent, hoseUpAxis);
         if (swayAxisA.lengthSq() <= 0.000001) {
           swayAxisA.copy(swayFallbackAxis);
         } else {
@@ -1543,7 +1697,14 @@ export const createThreeTestUnitFxLayer = (scene: THREE.Scene): ThreeTestUnitFxL
       if (breakupInfluence <= 0.02 || particleLife01 < 0.32) {
         continue;
       }
-      const expectedY = visual.sourceY + visual.direction.y * Math.min(visual.length, Math.max(0, distFromSource));
+      writeStreamCurveControlPoint(visual, streamCurveControlPoint);
+      sampleStreamCurvePoint(
+        visual,
+        clamp(distFromSource / Math.max(visual.length, 0.0001), 0, 1),
+        streamCurveControlPoint,
+        streamCurvePoint
+      );
+      const expectedY = streamCurvePoint.y;
       const terrainY = sampleWorldHeight(sample, terrainSize, cols, rows, heightScale, wx, wz) + 0.03;
       const wy = Math.max(terrainY, expectedY - worldPerTile * 0.04);
       const drawAlpha = clamp(
@@ -1596,23 +1757,7 @@ export const createThreeTestUnitFxLayer = (scene: THREE.Scene): ThreeTestUnitFxL
         const volume = clamp(visual.volume, 0, 1);
         const suppressionMode = modeValue >= 1.5;
         const precisionMode = modeValue <= 0.5;
-        streamBaseDirection.copy(visual.direction);
-        if (streamBaseDirection.lengthSq() <= 0.000001) {
-          streamBaseDirection.copy(fallbackStreamDirection);
-        }
-        streamBaseDirection.normalize();
-        swayAxisA.crossVectors(streamBaseDirection, hoseUpAxis);
-        if (swayAxisA.lengthSq() <= 0.000001) {
-          swayAxisA.copy(swayFallbackAxis);
-        } else {
-          swayAxisA.normalize();
-        }
-        swayAxisB.crossVectors(swayAxisA, streamBaseDirection);
-        if (swayAxisB.lengthSq() <= 0.000001) {
-          swayAxisB.copy(hoseUpAxis);
-        } else {
-          swayAxisB.normalize();
-        }
+        writeStreamCurveControlPoint(visual, streamCurveControlPoint);
 
         const sheetCount = precisionMode ? 16 : suppressionMode ? 36 : 24;
         const sheetSpeed = precisionMode ? 1.7 : suppressionMode ? 1.02 : 1.34;
@@ -1638,10 +1783,24 @@ export const createThreeTestUnitFxLayer = (scene: THREE.Scene): ThreeTestUnitFxL
           const radial = widthEnvelope * (shellBias + seedC * (1 - shellBias));
           const lateralA = Math.cos(angle) * radial;
           const lateralB = Math.sin(angle) * radial * (precisionMode ? 0.3 : suppressionMode ? 0.78 : 0.52);
+          sampleStreamCurvePoint(visual, along, streamCurveControlPoint, streamCurvePoint);
+          sampleStreamCurveTangent(visual, along, streamCurveControlPoint, streamBaseDirection);
+          swayAxisA.crossVectors(streamBaseDirection, hoseUpAxis);
+          if (swayAxisA.lengthSq() <= 0.000001) {
+            swayAxisA.copy(swayFallbackAxis);
+          } else {
+            swayAxisA.normalize();
+          }
+          swayAxisB.crossVectors(swayAxisA, streamBaseDirection);
+          if (swayAxisB.lengthSq() <= 0.000001) {
+            swayAxisB.copy(hoseUpAxis);
+          } else {
+            swayAxisB.normalize();
+          }
           swayTargetPoint.set(
-            visual.sourceX + streamBaseDirection.x * visual.length * along + swayAxisA.x * lateralA + swayAxisB.x * lateralB,
-            visual.sourceY + streamBaseDirection.y * visual.length * along + swayAxisA.y * lateralA + swayAxisB.y * lateralB,
-            visual.sourceZ + streamBaseDirection.z * visual.length * along + swayAxisA.z * lateralA + swayAxisB.z * lateralB
+            streamCurvePoint.x + swayAxisA.x * lateralA + swayAxisB.x * lateralB,
+            streamCurvePoint.y + swayAxisA.y * lateralA + swayAxisB.y * lateralB,
+            streamCurvePoint.z + swayAxisA.z * lateralA + swayAxisB.z * lateralB
           );
           const terrainY =
             sampleWorldHeight(sample, terrainSize, cols, rows, heightScale, swayTargetPoint.x, swayTargetPoint.z) + 0.03;
@@ -1666,6 +1825,19 @@ export const createThreeTestUnitFxLayer = (scene: THREE.Scene): ThreeTestUnitFxL
         }
 
         const tipCount = precisionMode ? 18 : suppressionMode ? 40 : 28;
+        sampleStreamCurveTangent(visual, 0.96, streamCurveControlPoint, streamBaseDirection);
+        swayAxisA.crossVectors(streamBaseDirection, hoseUpAxis);
+        if (swayAxisA.lengthSq() <= 0.000001) {
+          swayAxisA.copy(swayFallbackAxis);
+        } else {
+          swayAxisA.normalize();
+        }
+        swayAxisB.crossVectors(swayAxisA, streamBaseDirection);
+        if (swayAxisB.lengthSq() <= 0.000001) {
+          swayAxisB.copy(hoseUpAxis);
+        } else {
+          swayAxisB.normalize();
+        }
         for (let j = 0; j < tipCount && breakupCount < MAX_WATER_PARTICLES; j += 1) {
           const seed = fract(visual.seed * 1.37 + j * 0.754877666);
           const seedA = fract(seed * 1.61 + 0.27);

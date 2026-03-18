@@ -1,7 +1,19 @@
 import * as THREE from "three";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import { TILE_TYPE_IDS, type WorldState } from "../core/state.js";
+import {
+  FIREFIGHTER_MODEL_ROOT_Y_OFFSET,
+  classifyFirefighterModelPart,
+  createFirefighterVisualState,
+  resolveFirefighterPartPivot,
+  updateFirefighterVisualState,
+  writeFirefighterGripDirection,
+  writeFirefighterGripWorldPosition,
+  writeFirefighterPartPoseMatrix,
+  type FirefighterModelPart
+} from "./firefighterVisuals.js";
 import { buildSampleHeightMap, getTerrainHeightScale, getTerrainStep, type TerrainSample } from "./threeTestTerrain.js";
+import { approachAngleExp, resolveDesiredUnitYaw } from "./unitAimVisuals.js";
 import { registerPbrSpecularGlossiness } from "./gltfSpecGloss.js";
 
 const TRUCK_BASE_COLOR = new THREE.Color(0xe0311d);
@@ -20,15 +32,22 @@ const TRUCK_MODEL_GROUND_OFFSET = 0.03;
 const FIREFIGHTER_MODEL_PATH = "assets/3d/GLTF/units/low-poly_test_dummy..glb";
 const FIREFIGHTER_MODEL_TARGET_HEIGHT = 0.34;
 const FIREFIGHTER_MODEL_YAW_OFFSET = 0;
-const FIREFIGHTER_MODEL_GROUND_OFFSET = 0.03;
+const FIREFIGHTER_NOZZLE_LENGTH = 0.08;
+const FIREFIGHTER_NOZZLE_RADIUS = 0.011;
 const TRUCK_NORMAL_SAMPLE_TILES = 0.24;
 const TRUCK_SELECTION_RING_INNER_RADIUS = 0.32;
 const TRUCK_SELECTION_RING_OUTER_RADIUS = 0.4;
 const TRUCK_SELECTION_RING_Y_OFFSET = 0.04;
 const MAX_TRUCK_INSTANCES = 512;
 const MAX_FIREFIGHTER_INSTANCES = 1024;
+const DEFAULT_UNIT_TURN_RESPONSE = 18;
+const ENGAGED_FIREFIGHTER_TURN_RESPONSE = 10.5;
+const ENGAGED_NOZZLE_RESPONSE = 12.5;
+const IDLE_NOZZLE_RESPONSE = 18;
 
 const clamp = (value: number, min: number, max: number): number => Math.max(min, Math.min(max, value));
+const expFactor = (rate: number, dtSeconds: number): number =>
+  1 - Math.exp(-Math.max(0, rate) * Math.max(0, dtSeconds));
 
 const bilerp = (h00: number, h10: number, h01: number, h11: number, tx: number, ty: number): number => {
   const hx0 = h00 * (1 - tx) + h10 * tx;
@@ -75,6 +94,8 @@ type UnitModelTemplate = {
   geometry: THREE.BufferGeometry;
   material: THREE.Material | THREE.Material[];
   baseMatrix: THREE.Matrix4;
+  bounds: THREE.Box3;
+  ancestorNames: string[];
 };
 
 export const createThreeTestUnitsLayer = (scene: THREE.Scene): ThreeTestUnitsLayer => {
@@ -116,10 +137,15 @@ export const createThreeTestUnitsLayer = (scene: THREE.Scene): ThreeTestUnitsLay
   let useTruckModel = false;
   let truckModelScale = 1;
   let truckModelLift = 0.11 + UNIT_BASE_Y_OFFSET;
-  const firefighterModelMeshes: Array<{ mesh: THREE.InstancedMesh; baseMatrix: THREE.Matrix4 }> = [];
+  const firefighterModelMeshes: Array<{
+    mesh: THREE.InstancedMesh;
+    baseMatrix: THREE.Matrix4;
+    part: FirefighterModelPart;
+    pivot: THREE.Vector3;
+  }> = [];
   let useFirefighterModel = false;
   let firefighterModelScale = 1;
-  let firefighterModelLift = 0.17 + UNIT_BASE_Y_OFFSET;
+  let firefighterModelLift = FIREFIGHTER_MODEL_ROOT_Y_OFFSET;
   let disposed = false;
 
   const disposeMaterial = (material: THREE.Material | THREE.Material[]): void => {
@@ -169,7 +195,19 @@ export const createThreeTestUnitsLayer = (scene: THREE.Scene): ThreeTestUnitsLay
         ? child.material.map((entry) => entry.clone())
         : child.material.clone();
       const baseMatrix = child.matrixWorld.clone().premultiply(recenter);
-      templates.push({ geometry, material, baseMatrix });
+      geometry.computeBoundingBox();
+      const bounds = geometry.boundingBox
+        ? geometry.boundingBox.clone().applyMatrix4(baseMatrix)
+        : new THREE.Box3().setFromObject(child).applyMatrix4(recenter);
+      const ancestorNames: string[] = [];
+      let parent: THREE.Object3D | null = child.parent;
+      while (parent && parent !== root.parent) {
+        if (parent.name) {
+          ancestorNames.push(parent.name);
+        }
+        parent = parent.parent;
+      }
+      templates.push({ geometry, material, baseMatrix, bounds, ancestorNames });
     });
     if (templates.length <= 0) {
       return null;
@@ -177,6 +215,35 @@ export const createThreeTestUnitsLayer = (scene: THREE.Scene): ThreeTestUnitsLay
     const size = new THREE.Vector3();
     worldBounds.getSize(size);
     return { templates, size };
+  };
+
+  const extractFirefighterTemplates = (
+    root: THREE.Object3D
+  ): { templates: Array<UnitModelTemplate & { part: FirefighterModelPart; pivot: THREE.Vector3 }>; size: THREE.Vector3 } | null => {
+    const extracted = extractModelTemplates(root);
+    if (!extracted) {
+      return null;
+    }
+    const partBounds = new Map<FirefighterModelPart, THREE.Box3>();
+    const templates = extracted.templates.map((template) => {
+      const part = classifyFirefighterModelPart(template.ancestorNames, template.bounds, extracted.size);
+      const existingBounds = partBounds.get(part);
+      if (existingBounds) {
+        existingBounds.union(template.bounds);
+      } else {
+        partBounds.set(part, template.bounds.clone());
+      }
+      return {
+        ...template,
+        part,
+        pivot: new THREE.Vector3()
+      };
+    });
+    templates.forEach((template) => {
+      const bounds = partBounds.get(template.part) ?? template.bounds;
+      template.pivot.copy(resolveFirefighterPartPivot(template.part, bounds));
+    });
+    return { templates, size: extracted.size };
   };
 
   const loader = registerPbrSpecularGlossiness(new GLTFLoader());
@@ -220,13 +287,13 @@ export const createThreeTestUnitsLayer = (scene: THREE.Scene): ThreeTestUnitsLay
       if (disposed) {
         return;
       }
-      const extracted = extractModelTemplates(gltf.scene);
+      const extracted = extractFirefighterTemplates(gltf.scene);
       if (!extracted) {
         return;
       }
       clearFirefighterModelMeshes();
       firefighterModelScale = FIREFIGHTER_MODEL_TARGET_HEIGHT / Math.max(0.01, extracted.size.y);
-      firefighterModelLift = FIREFIGHTER_MODEL_GROUND_OFFSET + UNIT_BASE_Y_OFFSET;
+      firefighterModelLift = FIREFIGHTER_MODEL_ROOT_Y_OFFSET;
       extracted.templates.forEach((template) => {
         const mesh = new THREE.InstancedMesh(template.geometry, template.material, MAX_FIREFIGHTER_INSTANCES);
         mesh.count = 0;
@@ -236,7 +303,9 @@ export const createThreeTestUnitsLayer = (scene: THREE.Scene): ThreeTestUnitsLay
         scene.add(mesh);
         firefighterModelMeshes.push({
           mesh,
-          baseMatrix: template.baseMatrix
+          baseMatrix: template.baseMatrix,
+          part: template.part,
+          pivot: template.pivot
         });
       });
       useFirefighterModel = firefighterModelMeshes.length > 0;
@@ -264,17 +333,43 @@ export const createThreeTestUnitsLayer = (scene: THREE.Scene): ThreeTestUnitsLay
   firefighterMesh.count = 0;
   firefighterMesh.frustumCulled = false;
   scene.add(firefighterMesh);
+  const firefighterNozzleGeometry = new THREE.CylinderGeometry(
+    FIREFIGHTER_NOZZLE_RADIUS,
+    FIREFIGHTER_NOZZLE_RADIUS * 1.18,
+    FIREFIGHTER_NOZZLE_LENGTH,
+    6
+  );
+  const firefighterNozzleMaterial = new THREE.MeshStandardMaterial({
+    color: 0x242c34,
+    emissive: new THREE.Color(0x0b1218),
+    emissiveIntensity: 0.3,
+    roughness: 0.38,
+    metalness: 0.55
+  });
+  const firefighterNozzleMesh = new THREE.InstancedMesh(
+    firefighterNozzleGeometry,
+    firefighterNozzleMaterial,
+    MAX_FIREFIGHTER_INSTANCES
+  );
+  firefighterNozzleMesh.count = 0;
+  firefighterNozzleMesh.frustumCulled = false;
+  scene.add(firefighterNozzleMesh);
 
   const truckMatrix = new THREE.Matrix4();
   const firefighterMatrix = new THREE.Matrix4();
+  const firefighterNozzleMatrix = new THREE.Matrix4();
   const truckPos = new THREE.Vector3();
   const firefighterPos = new THREE.Vector3();
+  const firefighterNozzlePos = new THREE.Vector3();
   const truckQuat = new THREE.Quaternion();
   const firefighterQuat = new THREE.Quaternion();
+  const firefighterNozzleQuat = new THREE.Quaternion();
   const truckScale = new THREE.Vector3(1, 1, 1);
   const firefighterScale = new THREE.Vector3(1, 1, 1);
+  const firefighterNozzleScale = new THREE.Vector3(1, 1, 1);
   const worldUp = new THREE.Vector3(0, 1, 0);
   const worldForward = new THREE.Vector3(0, 0, 1);
+  const worldRight = new THREE.Vector3(1, 0, 0);
   const truckModelYawOffsetQuat = new THREE.Quaternion().setFromAxisAngle(worldUp, TRUCK_MODEL_YAW_OFFSET);
   const firefighterModelYawOffsetQuat = new THREE.Quaternion().setFromAxisAngle(worldUp, FIREFIGHTER_MODEL_YAW_OFFSET);
   const surfaceNormal = new THREE.Vector3();
@@ -284,12 +379,19 @@ export const createThreeTestUnitsLayer = (scene: THREE.Scene): ThreeTestUnitsLay
   const truckBasis = new THREE.Matrix4();
   const truckTemplateMatrix = new THREE.Matrix4();
   const firefighterTemplateMatrix = new THREE.Matrix4();
+  const firefighterPartPoseMatrix = new THREE.Matrix4();
   const truckSelectionMatrix = new THREE.Matrix4();
   const truckSelectionPos = new THREE.Vector3();
   const truckSelectionQuat = new THREE.Quaternion();
   const truckSelectionScale = new THREE.Vector3(1, 1, 1);
+  const firefighterNozzleDirection = new THREE.Vector3();
+  const firefighterNozzleAim = new THREE.Vector3();
+  const firefighterDesiredNozzleDirection = new THREE.Vector3();
+  const firefighterPose = createFirefighterVisualState();
   const lastYawByUnitId = new Map<number, number>();
   const lastForwardByUnitId = new Map<number, THREE.Vector3>();
+  const lastNozzleDirectionByUnitId = new Map<number, THREE.Vector3>();
+  let lastUpdateTimeMs: number | null = null;
   let cachedSurfaceHeights: Float32Array | null = null;
   let cachedSurfaceCols = 0;
   let cachedSurfaceRows = 0;
@@ -365,46 +467,57 @@ export const createThreeTestUnitsLayer = (scene: THREE.Scene): ThreeTestUnitsLay
     };
   };
 
-  const resolveYaw = (unit: WorldState["units"][number], x: number, y: number): number => {
-    let targetX: number | null = null;
-    let targetY: number | null = null;
-    if (unit.kind === "firefighter" && unit.sprayTarget) {
-      const sprayRange = unit.hoseRange + Math.max(0.35, unit.radius * 0.35);
-      const sprayDist = Math.hypot(unit.sprayTarget.x - x, unit.sprayTarget.y - y);
-      if (sprayDist <= sprayRange || unit.pathIndex >= unit.path.length) {
-        targetX = unit.sprayTarget.x;
-        targetY = unit.sprayTarget.y;
-      }
+  const resolveYaw = (
+    unit: WorldState["units"][number],
+    x: number,
+    y: number,
+    deltaSeconds: number
+  ): number => {
+    const fallbackYaw = lastYawByUnitId.get(unit.id) ?? 0;
+    const desiredYaw = resolveDesiredUnitYaw(unit, x, y, fallbackYaw);
+    if (!lastYawByUnitId.has(unit.id)) {
+      lastYawByUnitId.set(unit.id, desiredYaw);
+      return desiredYaw;
     }
-    if (targetX === null && targetY === null && unit.pathIndex < unit.path.length) {
-      const waypoint = unit.path[unit.pathIndex];
-      targetX = waypoint.x + 0.5;
-      targetY = waypoint.y + 0.5;
-    } else if (targetX === null && targetY === null && unit.target) {
-      targetX = unit.target.x + 0.5;
-      targetY = unit.target.y + 0.5;
-    } else if (targetX === null && targetY === null && unit.kind === "firefighter" && unit.attackTarget) {
-      targetX = unit.attackTarget.x;
-      targetY = unit.attackTarget.y;
-    } else {
-      const motionX = unit.x - unit.prevX;
-      const motionY = unit.y - unit.prevY;
-      if (motionX * motionX + motionY * motionY > 1e-8) {
-        targetX = x + motionX;
-        targetY = y + motionY;
-      }
-    }
-    if (targetX === null || targetY === null) {
-      return lastYawByUnitId.get(unit.id) ?? 0;
-    }
-    const dirX = targetX - x;
-    const dirY = targetY - y;
-    if (dirX * dirX + dirY * dirY <= 1e-8) {
-      return lastYawByUnitId.get(unit.id) ?? 0;
-    }
-    const yaw = Math.atan2(dirX, dirY);
+    const engaged = unit.kind === "firefighter" && (unit.sprayTarget !== null || unit.attackTarget !== null);
+    const response = engaged ? ENGAGED_FIREFIGHTER_TURN_RESPONSE : DEFAULT_UNIT_TURN_RESPONSE;
+    const yaw = approachAngleExp(fallbackYaw, desiredYaw, response, deltaSeconds);
     lastYawByUnitId.set(unit.id, yaw);
     return yaw;
+  };
+
+  const resolveNozzleDirection = (
+    unit: WorldState["units"][number],
+    yaw: number,
+    source: THREE.Vector3,
+    pose: typeof firefighterPose,
+    deltaSeconds: number,
+    aimPoint: THREE.Vector3 | null
+  ): THREE.Vector3 => {
+    if (aimPoint) {
+      firefighterDesiredNozzleDirection.copy(aimPoint).sub(source);
+    } else {
+      writeFirefighterGripDirection(yaw, pose.gripPitch, firefighterDesiredNozzleDirection);
+    }
+    if (firefighterDesiredNozzleDirection.lengthSq() <= 0.000001) {
+      writeFirefighterGripDirection(yaw, pose.gripPitch, firefighterDesiredNozzleDirection);
+    } else {
+      firefighterDesiredNozzleDirection.normalize();
+    }
+    let smoothedDirection = lastNozzleDirectionByUnitId.get(unit.id) ?? null;
+    if (!smoothedDirection) {
+      smoothedDirection = firefighterDesiredNozzleDirection.clone();
+      lastNozzleDirectionByUnitId.set(unit.id, smoothedDirection);
+      return smoothedDirection;
+    }
+    const response = aimPoint ? ENGAGED_NOZZLE_RESPONSE : IDLE_NOZZLE_RESPONSE;
+    smoothedDirection.lerp(firefighterDesiredNozzleDirection, expFactor(response, deltaSeconds));
+    if (smoothedDirection.lengthSq() <= 0.000001) {
+      smoothedDirection.copy(firefighterDesiredNozzleDirection);
+    } else {
+      smoothedDirection.normalize();
+    }
+    return smoothedDirection;
   };
 
   const sampleSurfaceNormal = (
@@ -452,11 +565,14 @@ export const createThreeTestUnitsLayer = (scene: THREE.Scene): ThreeTestUnitsLay
         mesh.count = 0;
       });
       firefighterMesh.count = 0;
+      firefighterNozzleMesh.count = 0;
       firefighterModelMeshes.forEach(({ mesh }) => {
         mesh.count = 0;
       });
       lastYawByUnitId.clear();
       lastForwardByUnitId.clear();
+      lastNozzleDirectionByUnitId.clear();
+      lastUpdateTimeMs = null;
       return;
     }
 
@@ -467,9 +583,15 @@ export const createThreeTestUnitsLayer = (scene: THREE.Scene): ThreeTestUnitsLay
     const normalSampleOffset = Math.max(TRUCK_NORMAL_SAMPLE_TILES, renderedSurface.step * 0.35);
     const sampleHeightAt = (tileX: number, tileY: number): number =>
       sampleRenderedHeight(renderedSurface, sample, tileX, tileY);
+    const timeMs = performance.now();
+    const timeSec = timeMs * 0.001;
+    const deltaSeconds =
+      lastUpdateTimeMs === null ? 1 / 60 : clamp((timeMs - lastUpdateTimeMs) * 0.001, 1 / 240, 0.12);
+    lastUpdateTimeMs = timeMs;
     let truckCount = 0;
     let selectedTruckCount = 0;
     let firefighterCount = 0;
+    let firefighterNozzleCount = 0;
     const activeUnitIds = new Set<number>();
 
     for (let i = 0; i < world.units.length; i += 1) {
@@ -485,7 +607,7 @@ export const createThreeTestUnitsLayer = (scene: THREE.Scene): ThreeTestUnitsLay
       const wx = toWorldX(interpolated.x, cols, terrainSize.width);
       const wz = toWorldZ(interpolated.y, rows, terrainSize.depth);
       const wy = sampleHeightAt(interpolated.x, interpolated.y) * heightScale;
-      const yaw = resolveYaw(unit, interpolated.x, interpolated.y);
+      const yaw = resolveYaw(unit, interpolated.x, interpolated.y, deltaSeconds);
 
       if (unit.kind === "truck") {
         if (truckCount >= MAX_TRUCK_INSTANCES) {
@@ -569,28 +691,60 @@ export const createThreeTestUnitsLayer = (scene: THREE.Scene): ThreeTestUnitsLay
       if (firefighterCount >= MAX_FIREFIGHTER_INSTANCES) {
         continue;
       }
+      updateFirefighterVisualState(unit, timeSec, firefighterPose);
+      firefighterPos.set(wx, wy + firefighterModelLift + firefighterPose.bodyBob, wz);
       if (useFirefighterModel && firefighterModelMeshes.length > 0) {
-        firefighterPos.set(wx, wy + firefighterModelLift, wz);
         firefighterQuat.setFromAxisAngle(worldUp, yaw);
         firefighterQuat.multiply(firefighterModelYawOffsetQuat);
         firefighterScale.setScalar(firefighterModelScale);
         firefighterMatrix.compose(firefighterPos, firefighterQuat, firefighterScale);
         const tint = unit.selected ? FIREFIGHTER_MODEL_SELECTED_TINT : FIREFIGHTER_MODEL_BASE_TINT;
-        firefighterModelMeshes.forEach(({ mesh, baseMatrix }) => {
-          firefighterTemplateMatrix.copy(firefighterMatrix).multiply(baseMatrix);
+        firefighterModelMeshes.forEach(({ mesh, baseMatrix, part, pivot }) => {
+          writeFirefighterPartPoseMatrix(part, pivot, firefighterPose, firefighterPartPoseMatrix);
+          firefighterTemplateMatrix.copy(firefighterMatrix).multiply(firefighterPartPoseMatrix).multiply(baseMatrix);
           mesh.setMatrixAt(firefighterCount, firefighterTemplateMatrix);
           mesh.setColorAt(firefighterCount, tint);
         });
       } else {
-        firefighterPos.set(wx, wy + 0.17 + UNIT_BASE_Y_OFFSET, wz);
         firefighterQuat.setFromAxisAngle(worldUp, yaw);
+        firefighterNozzleDirection.copy(worldRight);
+        firefighterNozzleQuat.setFromAxisAngle(firefighterNozzleDirection, firefighterPose.rootPitch);
+        firefighterQuat.multiply(firefighterNozzleQuat);
         firefighterScale.set(1, 1, 1);
-        firefighterMatrix.compose(firefighterPos, firefighterQuat, firefighterScale);
+        firefighterNozzlePos.copy(firefighterPos).addScaledVector(worldUp, 0.14);
+        firefighterMatrix.compose(firefighterNozzlePos, firefighterQuat, firefighterScale);
         firefighterMesh.setMatrixAt(firefighterCount, firefighterMatrix);
         firefighterMesh.setColorAt(
           firefighterCount,
           unit.selected ? FIREFIGHTER_SELECTED_COLOR : FIREFIGHTER_BASE_COLOR
         );
+      }
+      if (firefighterNozzleCount < MAX_FIREFIGHTER_INSTANCES && unit.assignedTruckId !== null) {
+        writeFirefighterGripWorldPosition(firefighterPos, yaw, firefighterPose, firefighterNozzlePos);
+        let aimPoint: THREE.Vector3 | null = null;
+        if (unit.sprayTarget) {
+          firefighterNozzleAim.set(
+            toWorldX(unit.sprayTarget.x, cols, terrainSize.width),
+            sampleHeightAt(unit.sprayTarget.x, unit.sprayTarget.y) * heightScale + 0.05,
+            toWorldZ(unit.sprayTarget.y, rows, terrainSize.depth)
+          );
+          aimPoint = firefighterNozzleAim;
+        } else if (unit.attackTarget) {
+          firefighterNozzleAim.set(
+            toWorldX(unit.attackTarget.x, cols, terrainSize.width),
+            sampleHeightAt(unit.attackTarget.x, unit.attackTarget.y) * heightScale + 0.08,
+            toWorldZ(unit.attackTarget.y, rows, terrainSize.depth)
+          );
+          aimPoint = firefighterNozzleAim;
+        }
+        firefighterNozzleDirection.copy(
+          resolveNozzleDirection(unit, yaw, firefighterNozzlePos, firefighterPose, deltaSeconds, aimPoint)
+        );
+        firefighterNozzleQuat.setFromUnitVectors(worldUp, firefighterNozzleDirection);
+        firefighterNozzleScale.set(1, 1, 1);
+        firefighterNozzleMatrix.compose(firefighterNozzlePos, firefighterNozzleQuat, firefighterNozzleScale);
+        firefighterNozzleMesh.setMatrixAt(firefighterNozzleCount, firefighterNozzleMatrix);
+        firefighterNozzleCount += 1;
       }
       firefighterCount += 1;
     }
@@ -603,6 +757,11 @@ export const createThreeTestUnitsLayer = (scene: THREE.Scene): ThreeTestUnitsLay
     Array.from(lastForwardByUnitId.keys()).forEach((unitId) => {
       if (!activeUnitIds.has(unitId)) {
         lastForwardByUnitId.delete(unitId);
+      }
+    });
+    Array.from(lastNozzleDirectionByUnitId.keys()).forEach((unitId) => {
+      if (!activeUnitIds.has(unitId)) {
+        lastNozzleDirectionByUnitId.delete(unitId);
       }
     });
 
@@ -640,6 +799,8 @@ export const createThreeTestUnitsLayer = (scene: THREE.Scene): ThreeTestUnitsLay
         firefighterMesh.instanceColor.needsUpdate = true;
       }
     }
+    firefighterNozzleMesh.count = firefighterNozzleCount;
+    firefighterNozzleMesh.instanceMatrix.needsUpdate = true;
   };
 
   const dispose = (): void => {
@@ -649,12 +810,15 @@ export const createThreeTestUnitsLayer = (scene: THREE.Scene): ThreeTestUnitsLay
     scene.remove(truckMesh);
     scene.remove(truckSelectionMesh);
     scene.remove(firefighterMesh);
+    scene.remove(firefighterNozzleMesh);
     truckGeometry.dispose();
     truckMaterial.dispose();
     truckSelectionRingGeometry.dispose();
     truckSelectionRingMaterial.dispose();
     firefighterGeometry.dispose();
     firefighterMaterial.dispose();
+    firefighterNozzleGeometry.dispose();
+    firefighterNozzleMaterial.dispose();
   };
 
   return { update, dispose };
