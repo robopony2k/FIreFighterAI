@@ -113,6 +113,7 @@ export interface WorldState {
   tileFuel: Float32Array;
 
   tileHeat: Float32Array;
+  tileSuppressionWetness: Float32Array;
   tileIgniteAt: Float32Array;
 
   tileIgnitionPoint: Float32Array;
@@ -407,6 +408,7 @@ export function createInitialState(seed: number, grid: Grid): WorldState {
     tileFire: new Float32Array(grid.totalTiles),
     tileFuel: new Float32Array(grid.totalTiles),
     tileHeat: new Float32Array(grid.totalTiles),
+    tileSuppressionWetness: new Float32Array(grid.totalTiles),
     tileIgniteAt: new Float32Array(grid.totalTiles).fill(Number.POSITIVE_INFINITY),
     tileIgnitionPoint: new Float32Array(grid.totalTiles),
     tileBurnRate: new Float32Array(grid.totalTiles),
@@ -649,6 +651,8 @@ export function syncTileSoA(state: WorldState): void {
 
   if (
     state.tileFire.length !== total ||
+    !state.tileSuppressionWetness ||
+    state.tileSuppressionWetness.length !== total ||
     state.tileVegetationAge.length !== total ||
     state.tileCanopyCover.length !== total ||
     state.tileStemDensity.length !== total ||
@@ -664,6 +668,7 @@ export function syncTileSoA(state: WorldState): void {
     state.tileFuel = new Float32Array(total);
 
     state.tileHeat = new Float32Array(total);
+    state.tileSuppressionWetness = new Float32Array(total);
     state.tileIgniteAt = new Float32Array(total).fill(Number.POSITIVE_INFINITY);
 
     state.tileIgnitionPoint = new Float32Array(total);

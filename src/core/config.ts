@@ -7,7 +7,7 @@ export const ZOOM_MAX = 4.5;
 export const ZOOM_STEP = 0.1;
 export const ISO_TILE_WIDTH = TILE_SIZE * 2;
 export const ISO_TILE_HEIGHT = TILE_SIZE;
-export const HEIGHT_SCALE = TILE_SIZE * 10;
+export const HEIGHT_SCALE = TILE_SIZE * 14;
 export const HEIGHT_WATER_DROP = TILE_SIZE * 0.7;
 export const MAP_SCALE = 0.65;
 export const MAP_SIZE_PRESETS = {
@@ -85,7 +85,7 @@ export const DEFAULT_FIRE_SETTINGS: FireSettings = {
   seasonMinIntensity: FIRE_SEASON_MIN_INTENSITY,
   diffusionCardinal: 0.35,
   diffusionDiagonal: 0.25,
-  diffusionSecondary: 0.4,
+  diffusionSecondary: 0.28,
   diffusionMoisture: 0.35,
   heatCap: 5,
   conflagrationHeatBoost: 0.3,
@@ -117,7 +117,7 @@ export const WATER_BASELINE_ELEV = 0.00;
 export const ELEVATION_PEAK_CAP = 0.9;
 export const ELEVATION_PEAK_SOFTNESS = 1.3;
 export const ELEVATION_CONTRAST = 1.05;
-export const HEIGHT_MAP_RATIO = 0.1;
+export const HEIGHT_MAP_RATIO = 0.16;
 export const MOISTURE_WATER_DIST_CAP = 40;
 export const MOISTURE_ELEV_DRYNESS_WEIGHT = 0.35;
 export const MOISTURE_ELEV_WET_REF = 0.45;
@@ -133,6 +133,11 @@ export const TRAINING_SPEED_GAIN = 0.08;
 export const TRAINING_POWER_GAIN = 0.12;
 export const TRAINING_RANGE_GAIN = 0.1;
 export const TRAINING_RESILIENCE_GAIN = 0.12;
+export const SUPPRESSION_WETNESS_IGNITION_BONUS = 0.6;
+export const SUPPRESSION_WETNESS_SPREAD_REDUCTION = 0.45;
+export const SUPPRESSION_WETNESS_BLOCK_THRESHOLD = 0.25;
+export const SUPPRESSION_WETNESS_COOLING_BOOST = 0.55;
+export const SUPPRESSION_WETNESS_HALF_LIFE_DAYS = 0.09;
 export const UNIT_LOSS_FIRE_THRESHOLD = 0.55;
 export const TRUCK_CAPACITY = 3;
 export const TRUCK_BOARD_RADIUS = 1.6;
@@ -228,8 +233,8 @@ export const UNIT_CONFIG: Record<
   UnitKind,
   { cost: number; speed: number; radius: number; hoseRange: number; power: number; color: string }
 > = {
-  firefighter: { cost: 50, speed: 3.2, radius: 1.1, hoseRange: 4.5, power: 0.5, color: "#f0b33b" },
-  truck: { cost: 120, speed: 5.4, radius: 2.2, hoseRange: 6.0, power: 0.75, color: "#c0462c" }
+  firefighter: { cost: 50, speed: 3.2, radius: 1.1, hoseRange: 4.5, power: 0.65, color: "#f0b33b" },
+  truck: { cost: 120, speed: 5.4, radius: 2.2, hoseRange: 6.0, power: 0.95, color: "#c0462c" }
 };
 
 export const WATER_PARTICLE_COLOR = "#7ad4ff";

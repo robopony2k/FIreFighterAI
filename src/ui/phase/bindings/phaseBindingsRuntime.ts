@@ -39,6 +39,7 @@ import { gateInput, isInputAllowed } from "../inputGate.js";
 import type { InteractionMode, InputAction } from "../types.js";
 import { DEFAULT_MAP_SIZE, DEFAULT_RUN_OPTIONS, DEFAULT_RUN_SEED } from "../../run-config.js";
 import type { NewRunConfig } from "../../run-config.js";
+import { cloneTerrainRecipe } from "../../../mapgen/terrainProfile.js";
 import { loadFuelProfileOverrides } from "../../../persistence/fuelProfiles.js";
 import { loadLastRunConfig, saveLastRunConfig } from "../../../persistence/lastRunConfig.js";
 import { bindCanvasMouseHandlers } from "./canvasMouse.js";
@@ -69,7 +70,7 @@ const cloneRunConfig = (config: NewRunConfig): NewRunConfig => ({
   options: {
     ...DEFAULT_RUN_OPTIONS,
     ...config.options,
-    mapGen: { ...DEFAULT_RUN_OPTIONS.mapGen, ...config.options.mapGen },
+    terrain: cloneTerrainRecipe(config.options.terrain ?? DEFAULT_RUN_OPTIONS.terrain),
     fire: { ...DEFAULT_RUN_OPTIONS.fire, ...config.options.fire },
     fuelProfiles: { ...(config.options.fuelProfiles ?? {}) }
   }
@@ -87,7 +88,7 @@ const resolveRunConfig = (defaults: NewRunConfig, persisted?: NewRunConfig | nul
     options: {
       ...defaults.options,
       ...persisted.options,
-      mapGen: { ...defaults.options.mapGen, ...persisted.options.mapGen },
+      terrain: cloneTerrainRecipe(persisted.options.terrain ?? defaults.options.terrain),
       fire: { ...defaults.options.fire, ...persisted.options.fire },
       fuelProfiles: { ...(persisted.options.fuelProfiles ?? {}) }
     }
@@ -137,6 +138,7 @@ export type PhaseUiBindingDeps = {
   canvas: HTMLCanvasElement;
   onNewRun: (config: NewRunConfig) => void | Promise<void>;
   onThreeTest: (config: NewRunConfig) => void | Promise<void>;
+  onMapEditor: () => void | Promise<void>;
   onFxLab: () => void | Promise<void>;
   overlayRefs: OverlayRefs;
   showStartMenuOnBind?: boolean;
@@ -170,6 +172,7 @@ export const bindPhaseUi = ({
   canvas,
   onNewRun,
   onThreeTest,
+  onMapEditor,
   onFxLab,
   overlayRefs,
   showStartMenuOnBind = true,
@@ -300,6 +303,7 @@ export const bindPhaseUi = ({
 
   const startMenu = document.getElementById("startMenu") as HTMLDivElement | null;
   const startNewRunButton = document.getElementById("startNewRun") as HTMLButtonElement | null;
+  const startMapEditorButton = document.getElementById("startMapEditor") as HTMLButtonElement | null;
   const startMenuThreeTestButton = document.getElementById("startMenuThreeTest") as HTMLButtonElement | null;
   const startMenuFxLabButton = document.getElementById("startMenuFxLab") as HTMLButtonElement | null;
   const startThreeTestButton = document.getElementById("startThreeTest") as HTMLButtonElement | null;
@@ -323,10 +327,11 @@ export const bindPhaseUi = ({
     runMapSizeInputs: Array.from(
       document.querySelectorAll<HTMLInputElement>('#characterScreen input[name="mapSize"]')
     ),
+    runScenarioSelect: document.getElementById("runScenarioSelect") as HTMLSelectElement,
+    runScenarioLoad: document.getElementById("runScenarioLoad") as HTMLButtonElement,
+    runScenarioState: document.getElementById("runScenarioState") as HTMLDivElement,
     runUnlimitedMoney: document.getElementById("runUnlimitedMoney") as HTMLInputElement,
-    mapGenInputs: Array.from(
-      document.querySelectorAll<HTMLInputElement>('#characterScreen input[data-mapgen-key]')
-    ),
+    terrainControls: document.getElementById("terrainControls") as HTMLDivElement,
     fireInputs: Array.from(
       document.querySelectorAll<HTMLInputElement>('#characterScreen input[data-fire-key]')
     ),
@@ -338,7 +343,7 @@ export const bindPhaseUi = ({
     mapSize: DEFAULT_MAP_SIZE,
     options: {
       ...DEFAULT_RUN_OPTIONS,
-      mapGen: { ...DEFAULT_RUN_OPTIONS.mapGen },
+      terrain: cloneTerrainRecipe(DEFAULT_RUN_OPTIONS.terrain),
       fire: { ...DEFAULT_RUN_OPTIONS.fire },
       fuelProfiles: { ...loadFuelProfileOverrides() }
     },
@@ -371,6 +376,12 @@ export const bindPhaseUi = ({
     listenElement(startNewRunButton, "click", () => {
       hideStartMenuPanel();
       characterSelect.open(lastRunConfig);
+    });
+  }
+  if (startMapEditorButton) {
+    listenElement(startMapEditorButton, "click", () => {
+      hideStartMenuPanel();
+      void onMapEditor();
     });
   }
 

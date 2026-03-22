@@ -16,10 +16,11 @@ import {
   TRAINING_RESILIENCE_GAIN,
   TRAINING_SPEED_GAIN,
   UNIT_CONFIG,
-  UNIT_LOSS_FIRE_THRESHOLD
+  UNIT_LOSS_FIRE_THRESHOLD,
+  SUPPRESSION_WETNESS_BLOCK_THRESHOLD
 } from "../core/config.js";
 import { formatCurrency } from "../core/utils.js";
-import { setStatus, resetStatus } from "../core/state.js";
+import { setStatus, resetStatus, TILE_TYPE_IDS } from "../core/state.js";
 import { getCharacterDefinition, getCharacterFirebreakCost } from "../core/characters.js";
 import { inBounds, indexFor } from "../core/grid.js";
 import { applyFuel } from "../core/tiles.js";
@@ -28,15 +29,30 @@ import { clearVegetationState } from "../core/vegetation.js";
 import { findPath, getMoveSpeedMultiplier, isPassable } from "./pathing.js";
 import { emitWaterSpray } from "./particles.js";
 import { queueScoreFlowEvent } from "./scoring.js";
+import { markFireBlockActiveByTile } from "./fire/activeBlocks.js";
 
 const FIRST_NAMES = ["Alex", "Casey", "Drew", "Jordan", "Parker", "Quinn", "Riley", "Sawyer", "Taylor", "Wyatt"];
 const LAST_NAMES = ["Cedar", "Hawk", "Keel", "Marsh", "Reed", "Stone", "Sutter", "Vale", "Wells", "Yates"];
 const TRUCK_PREFIX = ["Engine", "Tanker", "Brush", "Rescue"];
 const clamp = (value: number, min: number, max: number): number => Math.max(min, Math.min(max, value));
-const MOVING_SPRAY_SPEED_FACTOR = 0.42;
+const MOVING_SPRAY_SPEED_FACTOR = 0.6;
 const TRUCK_SUPPORT_POSITION_TOLERANCE = 1.85;
 const CREW_REISSUE_DISTANCE = 0.7;
 const FIRE_FOCUS_CLUSTER_RADIUS = 1.8;
+const THREAT_FIRE_EPS = 0.03;
+const THREAT_HOLDOVER_HEAT_EPS = 0.08;
+const THREAT_HOLDOVER_WETNESS_EPS = 0.06;
+const THREAT_ASSET_RADIUS = 2;
+const THREAT_NEIGHBOR_DIRS = [
+  { dx: 1, dy: 0 },
+  { dx: -1, dy: 0 },
+  { dx: 0, dy: 1 },
+  { dx: 0, dy: -1 },
+  { dx: 1, dy: 1 },
+  { dx: 1, dy: -1 },
+  { dx: -1, dy: 1 },
+  { dx: -1, dy: -1 }
+];
 
 const createTraining = (): RosterUnit["training"] => ({
   speed: 0,
@@ -761,6 +777,108 @@ export function stepUnits(state: WorldState, delta: number): void {
   });
 }
 
+type SuppressionThreatClass = "burning" | "pending" | "holdover" | "cold";
+
+const isSuppressionIgnitableTypeId = (tid: number): boolean =>
+  tid !== TILE_TYPE_IDS.water &&
+  tid !== TILE_TYPE_IDS.ash &&
+  tid !== TILE_TYPE_IDS.firebreak &&
+  tid !== TILE_TYPE_IDS.beach &&
+  tid !== TILE_TYPE_IDS.rocky &&
+  tid !== TILE_TYPE_IDS.bare &&
+  tid !== TILE_TYPE_IDS.road;
+
+const getSuppressionThreatClass = (state: WorldState, idx: number): SuppressionThreatClass => {
+  const fireValue = state.tileFire[idx] ?? 0;
+  const heatValue = state.tileHeat[idx] ?? 0;
+  const wetnessValue = state.tileSuppressionWetness[idx] ?? 0;
+  const scheduled = state.tileIgniteAt[idx] < Number.POSITIVE_INFINITY;
+  const ignitionPoint = Math.max(0.0001, state.tileIgnitionPoint[idx] ?? 0.0001);
+
+  if (fireValue > THREAT_FIRE_EPS) {
+    return "burning";
+  }
+  if (scheduled || heatValue >= ignitionPoint * 0.78) {
+    return "pending";
+  }
+  if (heatValue >= Math.max(THREAT_HOLDOVER_HEAT_EPS, ignitionPoint * 0.45) || (wetnessValue > THREAT_HOLDOVER_WETNESS_EPS && heatValue > 0.04)) {
+    return "holdover";
+  }
+  return "cold";
+};
+
+const getNearbyAssetWeight = (state: WorldState, x: number, y: number): number => {
+  let weight = 1;
+  for (let dy = -THREAT_ASSET_RADIUS; dy <= THREAT_ASSET_RADIUS; dy += 1) {
+    for (let dx = -THREAT_ASSET_RADIUS; dx <= THREAT_ASSET_RADIUS; dx += 1) {
+      const nx = x + dx;
+      const ny = y + dy;
+      if (!inBounds(state.grid, nx, ny)) {
+        continue;
+      }
+      const tid = state.tileTypeId[indexFor(state.grid, nx, ny)] ?? -1;
+      if (tid === TILE_TYPE_IDS.base) {
+        weight = Math.max(weight, 1.85);
+      } else if (tid === TILE_TYPE_IDS.house) {
+        weight = Math.max(weight, 1.5);
+      }
+    }
+  }
+  return weight;
+};
+
+const getSuppressionThreatScore = (state: WorldState, x: number, y: number): number => {
+  const idx = indexFor(state.grid, x, y);
+  const threatClass = getSuppressionThreatClass(state, idx);
+  if (threatClass === "cold") {
+    return 0;
+  }
+
+  const fireValue = state.tileFire[idx] ?? 0;
+  const heatValue = state.tileHeat[idx] ?? 0;
+  const wetnessValue = state.tileSuppressionWetness[idx] ?? 0;
+  const scheduled = state.tileIgniteAt[idx] < Number.POSITIVE_INFINITY;
+  let burningNeighbors = 0;
+  let exposedNeighbors = 0;
+  let supportiveNeighbors = 0;
+
+  for (const offset of THREAT_NEIGHBOR_DIRS) {
+    const nx = x + offset.dx;
+    const ny = y + offset.dy;
+    if (!inBounds(state.grid, nx, ny)) {
+      continue;
+    }
+    const nidx = indexFor(state.grid, nx, ny);
+    const neighborFire = state.tileFire[nidx] ?? 0;
+    const neighborFuel = state.tileFuel[nidx] ?? 0;
+    const neighborTypeId = state.tileTypeId[nidx] ?? -1;
+    const neighborThreat = getSuppressionThreatClass(state, nidx);
+    if (neighborFire > THREAT_FIRE_EPS) {
+      burningNeighbors += 1;
+      supportiveNeighbors += 1;
+    } else if (neighborThreat === "pending" || neighborThreat === "holdover") {
+      supportiveNeighbors += 1;
+    }
+    if (neighborFuel > 0 && isSuppressionIgnitableTypeId(neighborTypeId) && neighborFire <= THREAT_FIRE_EPS) {
+      exposedNeighbors += 1;
+    }
+  }
+
+  const classWeight =
+    threatClass === "burning"
+      ? 1.3 + fireValue * 1.15
+      : threatClass === "pending"
+        ? 0.95 + heatValue * 0.82 + (scheduled ? 0.18 : 0)
+        : 0.6 + heatValue * 0.45 + wetnessValue * 0.28;
+  const assetWeight = getNearbyAssetWeight(state, x, y);
+  const flankWeight =
+    threatClass === "burning" || threatClass === "pending"
+      ? clamp(0.75 + exposedNeighbors * 0.2 - Math.max(0, burningNeighbors - 4) * 0.1, 0.55, 1.8)
+      : clamp(0.85 + supportiveNeighbors * 0.08 + exposedNeighbors * 0.06, 0.7, 1.4);
+  const continuityWeight = clamp(0.8 + supportiveNeighbors * 0.08, 0.8, 1.5);
+  return classWeight * assetWeight * flankWeight * continuityWeight;
+};
+
 const getClusterSuppressionScore = (state: WorldState, centerX: number, centerY: number, radius: number): number => {
   const minX = Math.max(0, Math.floor(centerX - radius));
   const maxX = Math.min(state.grid.cols - 1, Math.ceil(centerX + radius));
@@ -775,14 +893,12 @@ const getClusterSuppressionScore = (state: WorldState, centerX: number, centerY:
       if (dist > radius) {
         continue;
       }
-      const idx = indexFor(state.grid, x, y);
-      const fireValue = state.tileFire[idx];
-      const heatValue = state.tileHeat[idx];
-      if (fireValue <= 0 && heatValue <= 0.05) {
+      const threatScore = getSuppressionThreatScore(state, x, y);
+      if (threatScore <= 0) {
         continue;
       }
       const falloff = clamp(1 - dist / Math.max(0.0001, radius), 0, 1);
-      total += (fireValue * 1.35 + heatValue * 0.58) * (0.28 + falloff * 0.72);
+      total += threatScore * (0.28 + falloff * 0.72);
     }
   }
   return total;
@@ -804,14 +920,12 @@ const refineSuppressionFocus = (state: WorldState, origin: Point, radius: number
       if (dist > radius) {
         continue;
       }
-      const idx = indexFor(state.grid, x, y);
-      const fireValue = state.tileFire[idx];
-      const heatValue = state.tileHeat[idx];
-      if (fireValue <= 0 && heatValue <= 0.05) {
+      const threatScore = getSuppressionThreatScore(state, x, y);
+      if (threatScore <= 0) {
         continue;
       }
       const falloff = clamp(1 - dist / Math.max(0.0001, radius), 0, 1);
-      const weight = (fireValue * 1.45 + heatValue * 0.62) * (0.35 + falloff * 0.65);
+      const weight = threatScore * (0.35 + falloff * 0.65);
       if (weight <= 0) {
         continue;
       }
@@ -1187,24 +1301,12 @@ export function autoAssignTargets(state: WorldState): void {
       continue;
     }
     const scanRadius = unit.kind === "truck" ? 8 : 6;
-    let best: Point | null = null;
-    let bestFire = 0;
-    const minX = Math.max(0, Math.floor(unit.x - scanRadius));
-    const maxX = Math.min(state.grid.cols - 1, Math.floor(unit.x + scanRadius));
-    const minY = Math.max(0, Math.floor(unit.y - scanRadius));
-    const maxY = Math.min(state.grid.rows - 1, Math.floor(unit.y + scanRadius));
-    for (let y = minY; y <= maxY; y += 1) {
-      for (let x = minX; x <= maxX; x += 1) {
-        const idx = indexFor(state.grid, x, y);
-        const fireValue = state.tileFire[idx];
-        if (fireValue > bestFire) {
-          bestFire = fireValue;
-          best = { x, y };
-        }
+    const threatFocus = findFireTargetNear(state, { x: unit.x, y: unit.y }, scanRadius, unit.attackTarget ?? unit.sprayTarget ?? null);
+    if (threatFocus) {
+      const best = findNearestPassable(state, Math.floor(threatFocus.x), Math.floor(threatFocus.y), 2);
+      if (best) {
+        setUnitTarget(state, unit, best.x, best.y, false, { silent: true });
       }
-    }
-    if (best && bestFire > 0.15) {
-      setUnitTarget(state, unit, best.x, best.y, false, { silent: true });
     }
   }
 }
@@ -1336,23 +1438,27 @@ type SuppressionProfile = {
   power: number;
   suppressionRadius: number;
   hoseRange: number;
+  wetness: number;
 };
 
 const getSuppressionProfile = (unit: Unit): SuppressionProfile => {
   let radius = unit.radius;
   let power = unit.power;
+  let hoseRange = unit.hoseRange;
+  let wetness = 1;
 
   if (unit.kind === "firefighter") {
     switch (unit.formation) {
       case "narrow":
-        // Precision mode: tighter stream, longer throw, higher knockdown.
-        radius *= 1.22;
-        power *= 1.34;
+        radius *= 0.95;
+        power *= 1.45;
+        hoseRange *= 1.15;
+        wetness *= 0.85;
         break;
       case "wide":
-        // Suppression mode: broad coverage with lower per-tile intensity.
-        radius *= 1.56;
-        power *= 0.62;
+        radius *= 1.35;
+        power *= 0.9;
+        wetness *= 1.25;
         break;
       case "medium":
       default:
@@ -1365,7 +1471,8 @@ const getSuppressionProfile = (unit: Unit): SuppressionProfile => {
     radius,
     power,
     suppressionRadius,
-    hoseRange: Math.max(suppressionRadius + 0.5, unit.hoseRange)
+    hoseRange: Math.max(suppressionRadius + 0.5, hoseRange),
+    wetness
   };
 };
 
@@ -1406,10 +1513,8 @@ const resolveSuppressionImpactTarget = (
   const searchMaxX = Math.min(state.grid.cols - 1, Math.ceil(unit.x + profile.hoseRange));
   const searchMinY = Math.max(0, Math.floor(unit.y - profile.hoseRange));
   const searchMaxY = Math.min(state.grid.rows - 1, Math.ceil(unit.y + profile.hoseRange));
-  let bestFireTarget: Point | null = null;
-  let bestFireScore = 0;
-  let bestHeatTarget: Point | null = null;
-  let bestHeatScore = 0;
+  let bestTarget: Point | null = null;
+  let bestScore = 0;
 
   for (let y = searchMinY; y <= searchMaxY; y += 1) {
     for (let x = searchMinX; x <= searchMaxX; x += 1) {
@@ -1420,9 +1525,12 @@ const resolveSuppressionImpactTarget = (
         continue;
       }
       const idx = indexFor(state.grid, x, y);
-      const fireValue = state.tileFire[idx];
-      const heatValue = state.tileHeat[idx];
-      if (fireValue <= 0 && heatValue <= 0.05) {
+      const threatClass = getSuppressionThreatClass(state, idx);
+      if (threatClass === "cold") {
+        continue;
+      }
+      const threatScore = getSuppressionThreatScore(state, x, y);
+      if (threatScore <= 0) {
         continue;
       }
       const forwardDot =
@@ -1451,30 +1559,23 @@ const resolveSuppressionImpactTarget = (
       const stickyWeight = unit.sprayTarget
         ? clamp(1 - stickyDistance / Math.max(profile.hoseRange * 0.5, profile.suppressionRadius * 2, 0.9), 0, 1)
         : 0;
+      const threatPriority =
+        threatClass === "burning" ? 1.2 : threatClass === "pending" ? 0.9 : 0.68;
       const combinedWeight =
         (0.28 + forwardWeight * 0.72) *
         (0.3 + distanceWeight * 0.7) *
         (0.42 + areaWeight * 0.58) *
         (0.34 + targetWeight * 0.66) *
         (unit.sprayTarget ? 0.84 + stickyWeight * 0.52 : 1);
-      if (fireValue > 0) {
-        const fireScore = (0.2 + fireValue) * combinedWeight;
-        if (fireScore > bestFireScore) {
-          bestFireScore = fireScore;
-          bestFireTarget = { x: tileCenterX, y: tileCenterY };
-        }
-      }
-      if (heatValue > 0.05) {
-        const heatScore = (0.15 + heatValue * 0.85) * combinedWeight;
-        if (heatScore > bestHeatScore) {
-          bestHeatScore = heatScore;
-          bestHeatTarget = { x: tileCenterX, y: tileCenterY };
-        }
+      const score = threatScore * threatPriority * combinedWeight;
+      if (score > bestScore) {
+        bestScore = score;
+        bestTarget = { x: tileCenterX, y: tileCenterY };
       }
     }
   }
 
-  const rawImpactTarget = bestFireTarget ?? bestHeatTarget;
+  const rawImpactTarget = bestTarget;
   if (!rawImpactTarget) {
     return null;
   }
@@ -1496,10 +1597,8 @@ const resolveSuppressionImpactTarget = (
       if (distToCenter > refineRadius) {
         continue;
       }
-      const idx = indexFor(state.grid, x, y);
-      const fireValue = state.tileFire[idx];
-      const heatValue = state.tileHeat[idx];
-      if (fireValue <= 0 && heatValue <= 0.05) {
+      const threatScore = getSuppressionThreatScore(state, x, y);
+      if (threatScore <= 0) {
         continue;
       }
       const distanceWeight = clamp(1 - distToCenter / Math.max(0.0001, refineRadius), 0, 1);
@@ -1509,10 +1608,7 @@ const resolveSuppressionImpactTarget = (
       const stickyWeight = unit.sprayTarget
         ? clamp(1 - stickyDistance / Math.max(refineRadius * 2.1, 0.9), 0, 1)
         : 0;
-      const weight =
-        (fireValue * 1.45 + heatValue * 0.82) *
-        distanceWeight *
-        (unit.sprayTarget ? 0.9 + stickyWeight * 0.24 : 1);
+      const weight = threatScore * distanceWeight * (unit.sprayTarget ? 0.9 + stickyWeight * 0.24 : 1);
       if (weight <= 0) {
         continue;
       }
@@ -1552,23 +1648,26 @@ const applySuppressionAtTarget = (
       const idx = indexFor(state.grid, x, y);
       const tile = state.tiles[idx];
       const proximityWeight = Math.max(0, 1 - dist / radiusSafe);
+      const wetnessGain = profile.power * profile.wetness * powerMultiplier * (0.75 + proximityWeight * 0.85);
+      state.tileSuppressionWetness[idx] = clamp((state.tileSuppressionWetness[idx] ?? 0) + wetnessGain, 0, 1);
+      clearScheduledIgnition(state, idx);
       let heatValue = state.tileHeat[idx];
       if (heatValue > 0) {
         const prevHeatValue = heatValue;
-        heatValue = Math.max(0, heatValue - profile.power * 1.1 * powerMultiplier * (0.45 + proximityWeight * 0.55));
+        heatValue = Math.max(0, heatValue - profile.power * 1.55 * powerMultiplier * (0.45 + proximityWeight * 0.55));
         state.tileHeat[idx] = heatValue;
         tile.heat = heatValue;
         if (heatValue < prevHeatValue && idx < state.scoring.lastSuppressedAt.length) {
           state.scoring.lastSuppressedAt[idx] = suppressionTimestamp;
         }
-        if (heatValue < tile.ignitionPoint) {
+        if (heatValue < tile.ignitionPoint * (1 + SUPPRESSION_WETNESS_BLOCK_THRESHOLD)) {
           clearScheduledIgnition(state, idx);
         }
       }
       let fireValue = state.tileFire[idx];
       if (fireValue > 0) {
         const before = fireValue;
-        fireValue = Math.max(0, fireValue - profile.power * powerMultiplier * (0.45 + proximityWeight * 0.55));
+        fireValue = Math.max(0, fireValue - profile.power * 1.05 * powerMultiplier * (0.45 + proximityWeight * 0.55));
         state.tileFire[idx] = fireValue;
         tile.fire = fireValue;
         if (fireValue < before && idx < state.scoring.lastSuppressedAt.length) {
@@ -1583,6 +1682,9 @@ const applySuppressionAtTarget = (
             state.containedCount += 1;
           }
         }
+      }
+      if (heatValue > 0.01 || fireValue > THREAT_FIRE_EPS || state.tileSuppressionWetness[idx] > 0.01) {
+        markFireBlockActiveByTile(state, idx);
       }
     }
   }

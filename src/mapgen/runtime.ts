@@ -1,6 +1,7 @@
 import type { RNG, Point, Tile, TileType } from "../core/types.js";
 import { TreeType } from "../core/types.js";
 import type { WorldState } from "../core/state.js";
+import { getTerrainHeightScale } from "../core/terrainScale.js";
 import { clamp } from "../core/utils.js";
 import { inBounds, indexFor } from "../core/grid.js";
 import {
@@ -60,6 +61,7 @@ import {
   createSettlementPlacementPlan,
   connectSettlementsByRoad
 } from "./communities.js";
+import { ISLAND_ARCHETYPE_DEFINITIONS } from "./islandArchetypes.js";
 import { DEFAULT_MAP_GEN_SETTINGS, type MapGenSettings } from "./settings.js";
 import type { MapGenDebug, MapGenDebugPhase, MapGenReporter } from "./mapgenTypes.js";
 import type { MapGenContext } from "./pipeline/MapGenContext.js";
@@ -240,6 +242,12 @@ const buildDebugTypeIds = (
   return typeIds;
 };
 
+const buildSolidLandTypeIds = (state: WorldState): Uint8Array => {
+  const typeIds = new Uint8Array(state.grid.totalTiles);
+  typeIds.fill(TILE_TYPE_IDS.grass);
+  return typeIds;
+};
+
 const emitDebugPhase = async (
   debug: MapGenDebug | undefined,
   phase: MapGenDebugPhase,
@@ -270,6 +278,16 @@ const getLandBias = (x: number, y: number, cols: number, rows: number, seed: num
   const jitter = getEdgeJitter(x, y, Math.max(12, width), seed + 4301, Math.max(2, width * 0.08));
   const adjusted = Math.max(0, edgeDist + jitter);
   return clamp(adjusted / width, 0, 1);
+};
+
+const mix = (a: number, b: number, t: number): number => a + (b - a) * clamp(t, 0, 1);
+
+const smoothstep = (edge0: number, edge1: number, value: number): number => {
+  if (Math.abs(edge1 - edge0) < 1e-6) {
+    return value < edge0 ? 0 : 1;
+  }
+  const t = clamp((value - edge0) / (edge1 - edge0), 0, 1);
+  return t * t * (3 - 2 * t);
 };
 
 const assertEdgeWater = (state: WorldState): void => {
@@ -501,6 +519,10 @@ function softenPeaks(value: number, cap: number, softness: number): number {
   return cap + (1 - cap) * (1 - Math.exp(-excess * softness));
 }
 
+function computeNormalizedHeightPressure(maxHeight01: number): number {
+  return clamp(1 - (clamp(maxHeight01, 0, 1) - 0.62) * 0.45, 0.82, 1.16);
+}
+
 function assignForestComposition(state: WorldState): void {
   const total = state.grid.totalTiles;
   const visited = new Uint8Array(total);
@@ -669,7 +691,7 @@ function carveRiverValleys(
   valleyDepth: number,
   riverBias: number,
   settings: MapGenSettings,
-  seaLevelBase: number,
+  seaLevelMap: ArrayLike<number>,
   oceanMask?: Uint8Array
 ): void {
   state.valleyMap = Array.from({ length: state.grid.totalTiles }, () => 0);
@@ -720,14 +742,8 @@ function carveRiverValleys(
   const RIVER_WIDTH_SLOPE_GAIN = 6.5;
   const RIVER_WIDTH_STEP_GAIN = 0.38;
   const RIVER_MIN_CHANNEL_WIDTH = 1;
-  const cellSizeM = Math.max(0.1, settings.cellSizeM);
-  const edgeDenomM = (Math.min(state.grid.cols, state.grid.rows) * cellSizeM) / 2;
   const edgeWidth = getEdgeWidth(state.grid.cols, state.grid.rows);
-  const seaLevelAt = (x: number, y: number): number => {
-    const edgeDistM = Math.min(x, y, state.grid.cols - 1 - x, state.grid.rows - 1 - y) * cellSizeM;
-    const edgeFactor = clamp(edgeDistM / edgeDenomM, 0, 1);
-    return clampSeaLevel(seaLevelBase + (1 - edgeFactor) * settings.edgeWaterBias, settings);
-  };
+  const seaLevelAt = (x: number, y: number): number => seaLevelMap[idxAt(x, y)] ?? 0;
   const touchesOceanConnectedWater = (x: number, y: number): boolean => {
     if (!oceanMask || !isInside(x, y)) {
       return false;
@@ -1571,49 +1587,793 @@ async function buildElevationMapCoarse(
   const coarseElevation = Array.from({ length: coarseTotal }, () => 0);
   const coarseTemp = Array.from({ length: coarseTotal }, () => 0);
   const coarseValleyMap = Array.from({ length: coarseTotal }, () => 0);
+  const coarseShapeMap = Array.from({ length: coarseTotal }, () => 0);
+  const coarseSampleXMap = Array.from({ length: coarseTotal }, () => 0);
+  const coarseSampleYMap = Array.from({ length: coarseTotal }, () => 0);
   const cellSizeM = Math.max(0.1, settings.cellSizeM);
   const worldOffsetXM = settings.worldOffsetXM;
   const worldOffsetYM = settings.worldOffsetYM;
   const worldWidthM = cols * cellSizeM;
   const worldHeightM = rows * cellSizeM;
   const minDimM = Math.min(worldWidthM, worldHeightM);
-  const maxDim = Math.max(cols, rows);
-  const elevationScaleMax = maxDim >= 1024 ? 4.5 : maxDim >= 512 ? 3.8 : 3;
-  const elevationScale = clamp(settings.elevationScale, 0.6, elevationScaleMax);
+  const elevationScale = clamp(settings.elevationScale, 0.72, 2.45);
   const elevationExponent = clamp(settings.elevationExponent, 0.6, 2.6);
-  const mountainScale = clamp(settings.mountainScale, 0.6, 2.6);
-  const ridgeStrength = clamp(settings.ridgeStrength, 0, 0.35);
+  const mountainScale = clamp(settings.mountainScale, 0.68, 1.6);
+  const ridgeStrength = clamp(settings.ridgeStrength, 0, 0.42);
   const valleyDepth = clamp(settings.valleyDepth, 0.4, 3);
+  const terrainArchetype = settings.terrainArchetype;
+  const relief01 = clamp(settings.relief, 0, 1);
+  const maxHeight01 = clamp(settings.maxHeight, 0, 1);
+  const normalizedHeightPressure = computeNormalizedHeightPressure(maxHeight01);
+  const reliefCurve = Math.pow(relief01, 1.4);
+  const reliefPeakCurve = Math.pow(relief01, 1.85);
+  const ruggedness01 = clamp(settings.ruggedness, 0, 1);
+  const coastComplexity = clamp(settings.coastComplexity, 0, 1);
+  const riverIntensity = clamp(settings.riverIntensity, 0, 1);
+  const interiorRise = clamp(settings.interiorRise, 0, 1);
+  const islandCompactness = clamp(settings.islandCompactness, 0, 1);
+  const ridgeFrequency = clamp(settings.ridgeFrequency, 0, 1);
+  const basinStrength = clamp(settings.basinStrength, 0, 1);
+  const coastalShelfWidth = clamp(settings.coastalShelfWidth, 0, 1);
+  const bridgeAllowance = clamp(settings.bridgeAllowance, 0, 1);
   const centerFactorM = minDimM / 2;
   const warpScaleM = WARP_WAVELENGTH_M * mountainScale;
   const macroScaleM = MACRO_WAVELENGTH_M * mountainScale * ELEVATION_MACRO_SCALE;
   const midScaleM = MID_WAVELENGTH_M * mountainScale;
   const detailScaleM = DETAIL_WAVELENGTH_M * mountainScale;
-  const ridgeScaleM = RIDGE_WAVELENGTH_M * mountainScale;
+  const ridgeScaleM = RIDGE_WAVELENGTH_M * mountainScale * mix(1.15, 0.6, ridgeFrequency);
   const bandAngle = rng.next() * Math.PI;
   const bandDir = { x: Math.cos(bandAngle), y: Math.sin(bandAngle) };
-  const bandScaleM = (BAND_SCALE_BASE_M + rng.next() * BAND_SCALE_RANGE_M) * mountainScale;
+  const bandScaleM = (BAND_SCALE_BASE_M + rng.next() * BAND_SCALE_RANGE_M) * mix(1.2, 0.75, ridgeFrequency);
   const bandPhase = rng.next() * Math.PI * 2;
-  const bandStrength = 0.18 + rng.next() * 0.1;
+  const bandStrength = mix(0.12, 0.28, ruggedness01);
+  const ridgeSpineAngle = bandAngle + (rng.next() - 0.5) * Math.PI * mix(0.08, 0.28, coastComplexity);
+  const ridgeSpineDir = { x: Math.cos(ridgeSpineAngle), y: Math.sin(ridgeSpineAngle) };
+  const ridgeSpineCurvePhaseA = rng.next() * Math.PI * 2;
+  const ridgeSpineCurvePhaseB = rng.next() * Math.PI * 2;
+  const splitStraitAngle = bandAngle + (rng.next() - 0.5) * Math.PI * mix(0.06, 0.24, coastComplexity);
+  const splitStraitDir = { x: Math.cos(splitStraitAngle), y: Math.sin(splitStraitAngle) };
+  const splitStraitCurvePhaseA = rng.next() * Math.PI * 2;
+  const splitStraitCurvePhaseB = rng.next() * Math.PI * 2;
+  const splitStraitCurvePhaseC = rng.next() * Math.PI * 2;
+  const splitStraitAsymmetry = (rng.next() - 0.5) * mix(0.08, 0.26, clamp(coastComplexity * 0.6 + ruggedness01 * 0.4, 0, 1));
+  const archetypeDefinition = ISLAND_ARCHETYPE_DEFINITIONS[terrainArchetype];
+  const longSpineAngle = ridgeSpineAngle;
+  const longSpineDir = ridgeSpineDir;
+  const longSpineCurvePhaseA = ridgeSpineCurvePhaseA;
+  const longSpineCurvePhaseB = ridgeSpineCurvePhaseB;
+  const twinBayAngle = splitStraitAngle;
+  const twinBayDir = splitStraitDir;
+  const twinBayCurvePhaseA = splitStraitCurvePhaseA;
+  const twinBayCurvePhaseB = splitStraitCurvePhaseB;
+  const twinBayCurvePhaseC = splitStraitCurvePhaseC;
+  const twinBayAsymmetry = splitStraitAsymmetry;
+  const shapeRotation = (rng.next() - 0.5) * Math.PI * mix(0.18, 0.68, clamp(coastComplexity * 0.65 + ruggedness01 * 0.35, 0, 1));
+  const shapeRotationCos = Math.cos(shapeRotation);
+  const shapeRotationSin = Math.sin(shapeRotation);
+  const shapeDriftX = (rng.next() - 0.5) * mix(0.08, 0.26, coastComplexity);
+  const shapeDriftY = (rng.next() - 0.5) * mix(0.08, 0.26, coastComplexity);
+  const shapeLobeCountA = 2 + Math.floor(rng.next() * 3);
+  const shapeLobeCountB = shapeLobeCountA + 1 + Math.floor(rng.next() * 2);
+  const shapeLobePhaseA = rng.next() * Math.PI * 2;
+  const shapeLobePhaseB = rng.next() * Math.PI * 2;
+  const macroShapeLobeCountA = 1 + Math.floor(rng.next() * 2);
+  const macroShapeLobeCountB = macroShapeLobeCountA + 1 + Math.floor(rng.next() * 2);
+  const macroShapeLobePhaseA = rng.next() * Math.PI * 2;
+  const macroShapeLobePhaseB = rng.next() * Math.PI * 2;
+  const shapeLobeAmpA = mix(0.02, 0.1, coastComplexity);
+  const shapeLobeAmpB = mix(0.01, 0.06, clamp(coastComplexity * 0.55 + ruggedness01 * 0.45, 0, 1));
+  const macroShapeLobeAmpA = mix(0.015, 0.2, Math.pow(coastComplexity, 1.08));
+  const macroShapeLobeAmpB = mix(0.008, 0.11, clamp(coastComplexity * 0.72 + ruggedness01 * 0.28, 0, 1));
+  const macroCoastStrength = smoothstep(0.12, 0.96, coastComplexity);
+  const landPeakSharpness = mix(2.1, 4.2, clamp(reliefCurve * 0.65 + ruggedness01 * 0.35, 0, 1));
 
   const insetM = Math.min(minDimM * LAND_CENTER_INSET_FRACTION, Math.min(worldWidthM, worldHeightM) * 0.45);
   const landMinX = worldOffsetXM + insetM;
   const landMaxX = worldOffsetXM + Math.max(0, worldWidthM - insetM);
   const landMinY = worldOffsetYM + insetM;
   const landMaxY = worldOffsetYM + Math.max(0, worldHeightM - insetM);
-  const landCenters = Array.from({ length: 3 }, () => ({
-    x: landMinX + rng.next() * Math.max(0, landMaxX - landMinX),
-    y: landMinY + rng.next() * Math.max(0, landMaxY - landMinY),
-    radius: (minDimM * (0.45 + rng.next() * 0.25)) / 2,
-    height: (0.28 + rng.next() * 0.28) * LAND_CENTER_HEIGHT_SCALE
-  }));
+  const toWorldCenter = (u: number, v: number, radius: number, height: number) => ({
+    x: landMinX + (landMaxX - landMinX) * clamp(u, 0, 1),
+    y: landMinY + (landMaxY - landMinY) * clamp(v, 0, 1),
+    radius: minDimM * radius,
+    height
+  });
+  const createLandCenter = (
+    u: number,
+    v: number,
+    radius: number,
+    height: number,
+    jitter = 0.08
+  ) => {
+    const jitterScale = jitter * mix(0.45, 1.08, clamp(coastComplexity * 0.5 + ruggedness01 * 0.5, 0, 1));
+    const jitteredU = clamp(u + (rng.next() - 0.5) * jitterScale, 0.08, 0.92);
+    const jitteredV = clamp(v + (rng.next() - 0.5) * jitterScale, 0.08, 0.92);
+    const radiusScale = mix(0.84, 1.22, rng.next());
+    const heightScale = mix(0.82, 1.3, rng.next());
+    return toWorldCenter(jitteredU, jitteredV, radius * radiusScale, height * heightScale);
+  };
+  type SilhouetteBlob = {
+    x: number;
+    y: number;
+    radiusX: number;
+    radiusY: number;
+    weight: number;
+    inner: number;
+    outer: number;
+    cos: number;
+    sin: number;
+  };
+  const createSilhouetteBlob = (
+    u: number,
+    v: number,
+    radiusX: number,
+    radiusY: number,
+    weight: number,
+    jitter = 0.1
+  ): SilhouetteBlob => {
+    const jitterScale = jitter * mix(0.5, 1.25, clamp(coastComplexity * 0.6 + ruggedness01 * 0.4, 0, 1));
+    const centerU = clamp(u + (rng.next() - 0.5) * jitterScale, 0.04, 0.96);
+    const centerV = clamp(v + (rng.next() - 0.5) * jitterScale, 0.04, 0.96);
+    const scaleX = Math.max(0.08, radiusX * mix(0.68, 1.42, rng.next()));
+    const scaleY = Math.max(0.08, radiusY * mix(0.68, 1.42, rng.next()));
+    const angle = rng.next() * Math.PI * 2;
+    return {
+      x: centerU * 2 - 1,
+      y: centerV * 2 - 1,
+      radiusX: scaleX,
+      radiusY: scaleY,
+      weight: weight * mix(0.76, 1.28, rng.next()),
+      inner: mix(0.14, 0.34, rng.next()),
+      outer: mix(0.88, 1.22, rng.next()),
+      cos: Math.cos(angle),
+      sin: Math.sin(angle)
+    };
+  };
+  const createAlignedSilhouetteBlob = (
+    u: number,
+    v: number,
+    radiusAlong: number,
+    radiusAcross: number,
+    weight: number,
+    angle: number,
+    jitter = 0.1
+  ): SilhouetteBlob => {
+    const blob = createSilhouetteBlob(u, v, radiusAlong, radiusAcross, weight, jitter);
+    return {
+      ...blob,
+      cos: Math.cos(angle),
+      sin: Math.sin(angle)
+    };
+  };
+  const longSpineToUV = (along: number, across: number) => ({
+    u: 0.5 + (along * longSpineDir.x - across * longSpineDir.y) * 0.5,
+    v: 0.5 + (along * longSpineDir.y + across * longSpineDir.x) * 0.5
+  });
+  const twinBayToUV = (along: number, across: number) => ({
+    u: 0.5 + (along * twinBayDir.x - across * twinBayDir.y) * 0.5,
+    v: 0.5 + (along * twinBayDir.y + across * twinBayDir.x) * 0.5
+  });
+  const createDistributedAngles = (
+    count: number,
+    baseAngle: number,
+    span: number,
+    jitter = 0.18
+  ): number[] => {
+    if (count <= 0) {
+      return [];
+    }
+    return Array.from({ length: count }, (_, index) => {
+      const offset =
+        span >= Math.PI * 1.99
+          ? (index / Math.max(1, count)) * span
+          : mix(-span * 0.5, span * 0.5, count <= 1 ? 0.5 : index / Math.max(1, count - 1));
+      return baseAngle + offset + (rng.next() - 0.5) * jitter;
+    });
+  };
+  const polarToUV = (angle: number, radius: number) => ({
+    u: 0.5 + Math.cos(angle) * radius * 0.5,
+    v: 0.5 + Math.sin(angle) * radius * 0.5
+  });
+  const createCoastMacroBlob = (
+    angle: number,
+    radialDistance: number,
+    tangentRadius: number,
+    radialRadius: number,
+    weight: number,
+    orientation: "tangent" | "radial" = "tangent",
+    jitter = 0.06
+  ): SilhouetteBlob => {
+    const point = polarToUV(radialDistance > 0 ? angle : angle + Math.PI, Math.abs(radialDistance));
+    const majorRadius = orientation === "tangent" ? tangentRadius : radialRadius;
+    const minorRadius = orientation === "tangent" ? radialRadius : tangentRadius;
+    const rotation =
+      (orientation === "tangent" ? angle + Math.PI * 0.5 : angle)
+      + (rng.next() - 0.5) * Math.PI * mix(0.04, 0.18, macroCoastStrength);
+    return createAlignedSilhouetteBlob(point.u, point.v, majorRadius, minorRadius, weight, rotation, jitter);
+  };
+  const sampleSilhouetteBlob = (blob: SilhouetteBlob, px: number, py: number): number => {
+    const dx = px - blob.x;
+    const dy = py - blob.y;
+    const lx = dx * blob.cos + dy * blob.sin;
+    const ly = -dx * blob.sin + dy * blob.cos;
+    const normalized = Math.hypot(lx / Math.max(0.08, blob.radiusX), ly / Math.max(0.08, blob.radiusY));
+    return (1 - smoothstep(blob.inner, blob.outer, normalized)) * blob.weight;
+  };
+  const sampleSilhouetteField = (blobs: readonly SilhouetteBlob[], px: number, py: number): number => {
+    let sum = 0;
+    let peak = 0;
+    for (const blob of blobs) {
+      const contribution = sampleSilhouetteBlob(blob, px, py);
+      peak = Math.max(peak, contribution);
+      sum += contribution;
+    }
+    return clamp(peak * 0.72 + sum * 0.34, 0, 1.25);
+  };
+  type RidgeSpineNode = {
+    along: number;
+    across: number;
+    length: number;
+    width: number;
+    weight: number;
+  };
+  const ridgeSpineNodeCount = terrainArchetype === "LONG_SPINE" ? 4 + Math.floor(rng.next() * 3) : 0;
+  const ridgeSpineNodes: RidgeSpineNode[] =
+    terrainArchetype === "LONG_SPINE"
+      ? Array.from({ length: ridgeSpineNodeCount }, (_, index) => {
+          const t = ridgeSpineNodeCount <= 1 ? 0.5 : index / Math.max(1, ridgeSpineNodeCount - 1);
+          return {
+            along: mix(-0.66, 0.66, t) + (rng.next() - 0.5) * 0.12,
+            across: (rng.next() - 0.5) * mix(0.04, 0.16, ruggedness01),
+            length: mix(0.14, 0.3, rng.next()),
+            width: mix(0.05, 0.12, rng.next()),
+            weight: mix(0.3, 0.74, rng.next())
+          };
+        })
+      : [];
+  const sampleRidgeSpineProfile = (
+    px: number,
+    py: number
+  ): { footprint: number; crest: number } => {
+    const along = px * ridgeSpineDir.x + py * ridgeSpineDir.y;
+    const across = -px * ridgeSpineDir.y + py * ridgeSpineDir.x;
+    const primaryCurve =
+      Math.sin(along * Math.PI * mix(0.75, 1.3, coastComplexity) + ridgeSpineCurvePhaseA) * mix(0.04, 0.18, coastComplexity);
+    const secondaryCurve =
+      Math.sin(along * Math.PI * mix(1.4, 2.7, ruggedness01) + ridgeSpineCurvePhaseB) * mix(0.015, 0.055, ruggedness01);
+    const bentAcross = across - primaryCurve - secondaryCurve;
+    const widthMod = Math.max(
+      0.74,
+      1 + Math.sin(along * Math.PI * mix(1.1, 2.2, ridgeFrequency) - shapeLobePhaseB) * mix(0.08, 0.22, ruggedness01)
+    );
+    const endTaper = 1 - smoothstep(
+      mix(0.72, 0.88, islandCompactness),
+      mix(1.0, 1.18, islandCompactness),
+      Math.abs(along)
+    );
+    const bodyWidth = Math.max(0.05, mix(0.22, 0.08, ridgeFrequency) * widthMod);
+    const shoulderWidth = Math.max(bodyWidth * 1.9, mix(0.44, 0.18, ridgeFrequency) * widthMod);
+    const body = Math.exp(-(bentAcross * bentAcross) / Math.max(0.012, bodyWidth * bodyWidth * 2.2));
+    const shoulders = Math.exp(-(bentAcross * bentAcross) / Math.max(0.024, shoulderWidth * shoulderWidth * 2.4));
+    let nodeField = 0;
+    for (const node of ridgeSpineNodes) {
+      const alongDelta = along - node.along;
+      const acrossDelta = bentAcross - node.across;
+      const contribution =
+        Math.exp(-(alongDelta * alongDelta) / Math.max(0.018, node.length * node.length * 2))
+        * Math.exp(-(acrossDelta * acrossDelta) / Math.max(0.008, node.width * node.width * 2))
+        * node.weight;
+      nodeField = Math.max(nodeField, contribution);
+    }
+    const footprint = clamp(Math.max(shoulders * endTaper, nodeField * 0.7), 0, 1);
+    const crest = clamp((body * 0.82 + nodeField * 0.68) * endTaper, 0, 1);
+    return { footprint, crest };
+  };
+  type SplitStraitShelfNode = {
+    along: number;
+    across: number;
+    length: number;
+    width: number;
+    weight: number;
+  };
+  type SplitStraitPinch = {
+    along: number;
+    radius: number;
+    strength: number;
+  };
+  const splitStraitShelfNodeCount = terrainArchetype === "TWIN_BAY" ? 3 + Math.floor(rng.next() * 2) : 0;
+  const splitStraitShelfNodes: SplitStraitShelfNode[] =
+    terrainArchetype === "TWIN_BAY"
+      ? Array.from({ length: splitStraitShelfNodeCount * 2 }, (_, index) => {
+          const side = index < splitStraitShelfNodeCount ? -1 : 1;
+          const sideIndex = index % splitStraitShelfNodeCount;
+          const t = splitStraitShelfNodeCount <= 1 ? 0.5 : sideIndex / Math.max(1, splitStraitShelfNodeCount - 1);
+          return {
+            along: mix(-0.72, 0.72, t) + (rng.next() - 0.5) * 0.16,
+            across:
+              side * mix(0.18, 0.34, Math.pow(rng.next(), 0.84))
+              + splitStraitAsymmetry * side * 0.2
+              + (rng.next() - 0.5) * 0.06,
+            length: mix(0.18, 0.34, rng.next()),
+            width: mix(0.05, 0.12, rng.next()),
+            weight: mix(0.28, 0.68, rng.next())
+          };
+        })
+      : [];
+  const splitStraitPinches: SplitStraitPinch[] =
+    terrainArchetype === "TWIN_BAY"
+      ? Array.from({ length: 2 + Math.floor(rng.next() * 2) }, () => ({
+          along: mix(-0.56, 0.56, rng.next()),
+          radius: mix(0.1, 0.22, rng.next()),
+          strength: mix(0.12, 0.3, rng.next())
+        }))
+      : [];
+  const sampleSplitStraitProfile = (
+    px: number,
+    py: number
+  ): { footprint: number; crest: number } => {
+    const along = px * splitStraitDir.x + py * splitStraitDir.y;
+    const across = -px * splitStraitDir.y + py * splitStraitDir.x;
+    const coastlineCurve =
+      Math.sin(along * Math.PI * mix(0.72, 1.2, coastComplexity) + splitStraitCurvePhaseA) * mix(0.03, 0.11, coastComplexity)
+      + Math.sin(along * Math.PI * mix(1.5, 2.5, ruggedness01) + splitStraitCurvePhaseB) * mix(0.01, 0.04, ruggedness01)
+      + splitStraitAsymmetry * mix(0.04, 0.12, coastComplexity);
+    const curvedAcross = across - coastlineCurve;
+    const endTaper = 1 - smoothstep(
+      mix(0.82, 0.92, islandCompactness),
+      mix(1.02, 1.16, islandCompactness),
+      Math.abs(along)
+    );
+    const parentShelf = 1 - smoothstep(
+      mix(0.68, 0.86, islandCompactness),
+      mix(0.94, 1.1, islandCompactness),
+      Math.hypot(
+        along * mix(0.8, 0.7, coastComplexity),
+        (curvedAcross - splitStraitAsymmetry * 0.04) * mix(1.04, 0.92, coastComplexity)
+      )
+    );
+    const centralWaistWidth = mix(0.18, 0.26, islandCompactness);
+    const centralWaist = Math.exp(
+      -(curvedAcross * curvedAcross) / Math.max(0.02, centralWaistWidth * centralWaistWidth * 2.2)
+    ) * endTaper;
+    const centralShield =
+      Math.exp(-(along * along) / Math.max(0.06, mix(0.32, 0.52, islandCompactness) ** 2 * 2.1))
+      * Math.exp(-(curvedAcross * curvedAcross) / Math.max(0.03, mix(0.18, 0.26, islandCompactness) ** 2 * 2.2));
+    const shelfOffset = mix(0.18, 0.28, 1 - ruggedness01 * 0.3);
+    const shelfWidth = Math.max(0.08, mix(0.16, 0.24, 1 - ruggedness01 * 0.4));
+    const leftShelf = Math.exp(-((curvedAcross + shelfOffset) * (curvedAcross + shelfOffset)) / Math.max(0.02, shelfWidth * shelfWidth * 2.1));
+    const rightShelf = Math.exp(-((curvedAcross - shelfOffset) * (curvedAcross - shelfOffset)) / Math.max(0.02, shelfWidth * shelfWidth * 2.1));
+    const bayAlongOffset = mix(0.2, 0.34, coastComplexity);
+    const bayAcrossOffset = mix(0.54, 0.7, clamp(coastComplexity * 0.7 + settings.waterLevel * 0.3, 0, 1));
+    const bayAlongRadius = mix(0.16, 0.26, coastComplexity);
+    const bayAcrossRadius = mix(0.11, 0.18, coastComplexity);
+    const bayA = Math.exp(
+      -((along + bayAlongOffset + splitStraitAsymmetry * 0.18) * (along + bayAlongOffset + splitStraitAsymmetry * 0.18))
+        / Math.max(0.02, bayAlongRadius * bayAlongRadius * 2)
+    ) * Math.exp(
+      -((curvedAcross + bayAcrossOffset) * (curvedAcross + bayAcrossOffset))
+        / Math.max(0.016, bayAcrossRadius * bayAcrossRadius * 2)
+    );
+    const bayB = Math.exp(
+      -((along - bayAlongOffset + splitStraitAsymmetry * 0.18) * (along - bayAlongOffset + splitStraitAsymmetry * 0.18))
+        / Math.max(0.02, bayAlongRadius * bayAlongRadius * 2)
+    ) * Math.exp(
+      -((curvedAcross - bayAcrossOffset) * (curvedAcross - bayAcrossOffset))
+        / Math.max(0.016, bayAcrossRadius * bayAcrossRadius * 2)
+    );
+    let minorBayField = 0;
+    for (let index = 0; index < splitStraitPinches.length; index += 1) {
+      if (index > 0 && coastComplexity < 0.75) {
+        break;
+      }
+      const pinch = splitStraitPinches[index]!;
+      const side = index % 2 === 0 ? -1 : 1;
+      const alongDelta = along - pinch.along * 0.42;
+      const acrossDelta = curvedAcross - side * mix(0.62, 0.76, coastComplexity);
+      const contribution =
+        Math.exp(-(alongDelta * alongDelta) / Math.max(0.02, pinch.radius * pinch.radius * 2.1))
+        * Math.exp(-(acrossDelta * acrossDelta) / Math.max(0.018, pinch.radius * pinch.radius * 1.6))
+        * pinch.strength;
+      minorBayField = Math.max(minorBayField, contribution);
+    }
+    let shelfNodeField = 0;
+    for (const node of splitStraitShelfNodes) {
+      const alongDelta = along - node.along;
+      const acrossDelta = curvedAcross - node.across;
+      const contribution =
+        Math.exp(-(alongDelta * alongDelta) / Math.max(0.02, node.length * node.length * 2))
+        * Math.exp(-(acrossDelta * acrossDelta) / Math.max(0.008, node.width * node.width * 2))
+        * node.weight;
+      shelfNodeField = Math.max(shelfNodeField, contribution);
+    }
+    const shelfFootprint = Math.max(leftShelf, rightShelf) * endTaper;
+    const footprint = clamp(
+      parentShelf * 0.52
+      + centralShield * 0.2
+      + centralWaist * 0.18
+      + shelfFootprint * 0.2
+      + shelfNodeField * 0.2
+      - bayA * 0.22
+      - bayB * 0.22
+      - minorBayField * 0.12,
+      0,
+      1
+    );
+    const crest = clamp(
+      (centralWaist * 0.46 + centralShield * 0.22 + shelfFootprint * 0.26 + shelfNodeField * 0.72) * endTaper
+      - (bayA + bayB) * 0.04,
+      0,
+      1
+    );
+    return { footprint, crest };
+  };
+  const silhouetteBlobs = (() => {
+    switch (terrainArchetype) {
+      case "LONG_SPINE": {
+        const nodeCount = 4 + Math.floor(rng.next() * 2);
+        return Array.from({ length: nodeCount }, (_, index) => {
+          const t = nodeCount <= 1 ? 0.5 : index / (nodeCount - 1);
+          const along = mix(-0.68, 0.68, t) + (rng.next() - 0.5) * 0.1;
+          const across =
+            Math.sin(t * Math.PI * mix(0.8, 1.4, coastComplexity) + ridgeSpineCurvePhaseA) * mix(0.04, 0.16, coastComplexity)
+            + (rng.next() - 0.5) * 0.06;
+          const point = longSpineToUV(along, across);
+          return createAlignedSilhouetteBlob(
+            point.u,
+            point.v,
+            mix(0.22, 0.42, rng.next()),
+            mix(0.08, 0.16, rng.next()),
+            mix(0.34, 0.62, rng.next()),
+            ridgeSpineAngle,
+            0.06
+          );
+        });
+      }
+      case "TWIN_BAY": {
+        const core = createAlignedSilhouetteBlob(0.5, 0.5, 0.44, 0.32, 0.96, twinBayAngle, 0.04);
+        const bayShoulders = [
+          { along: -0.2 + twinBayAsymmetry * 0.18, across: -0.16, radiusAlong: 0.32, radiusAcross: 0.18, weight: 0.56 },
+          { along: 0.2 + twinBayAsymmetry * 0.18, across: 0.16, radiusAlong: 0.32, radiusAcross: 0.18, weight: 0.56 }
+        ];
+        return [
+          core,
+          ...bayShoulders.map((shoulder) => {
+            const point = twinBayToUV(shoulder.along, shoulder.across);
+            return createAlignedSilhouetteBlob(
+              point.u,
+              point.v,
+              shoulder.radiusAlong,
+              shoulder.radiusAcross,
+              shoulder.weight,
+              twinBayAngle,
+              0.05
+            );
+          }),
+          ...splitStraitShelfNodes.slice(0, 4).map((node) => {
+            const point = twinBayToUV(node.along * 0.72, node.across * 0.84);
+            return createAlignedSilhouetteBlob(
+              point.u,
+              point.v,
+              mix(0.18, 0.28, rng.next()),
+              mix(0.08, 0.14, rng.next()),
+              mix(0.14, 0.28, node.weight),
+              twinBayAngle,
+              0.05
+            );
+          })
+        ];
+      }
+      case "SHELF": {
+        const plateauBlobs = [
+          createAlignedSilhouetteBlob(0.5, 0.5, 0.48, 0.34, 0.98, shapeRotation, 0.04),
+          createAlignedSilhouetteBlob(0.38, 0.52, 0.26, 0.22, 0.62, shapeRotation + 0.24, 0.05),
+          createAlignedSilhouetteBlob(0.64, 0.46, 0.24, 0.2, 0.58, shapeRotation - 0.22, 0.05)
+        ];
+        if (coastComplexity > 0.55) {
+          plateauBlobs.push(createAlignedSilhouetteBlob(0.54, 0.66, 0.18, 0.16, 0.38, shapeRotation + 0.1, 0.05));
+        }
+        return plateauBlobs;
+      }
+      case "MASSIF":
+      default: {
+        const blobs = [
+          createSilhouetteBlob(0.5, 0.5, mix(0.3, 0.48, rng.next()), mix(0.28, 0.44, rng.next()), 0.96, 0.08)
+        ];
+        const supportCount = 2 + Math.floor(rng.next() * 3);
+        for (let i = 0; i < supportCount; i += 1) {
+          const angle = rng.next() * Math.PI * 2;
+          const dist = mix(0.12, 0.28, rng.next());
+          blobs.push(
+            createSilhouetteBlob(
+              0.5 + Math.cos(angle) * dist,
+              0.5 + Math.sin(angle) * dist * mix(0.84, 1.12, rng.next()),
+              mix(0.12, 0.24, rng.next()),
+              mix(0.12, 0.22, rng.next()),
+              mix(0.42, 0.74, rng.next()),
+              0.12
+            )
+          );
+        }
+        return blobs;
+      }
+    }
+  })();
+  const silhouetteCuts = (() => {
+    if (terrainArchetype === "LONG_SPINE") {
+      const cutCount = 2 + Math.floor(rng.next() * 2);
+      return Array.from({ length: cutCount }, (_, index) => {
+        const side = index % 2 === 0 ? -1 : 1;
+        const along = mix(-0.72, 0.72, rng.next());
+        const across = side * mix(0.28, 0.5, rng.next());
+        const point = longSpineToUV(along, across);
+        return createAlignedSilhouetteBlob(
+          point.u,
+          point.v,
+          mix(0.14, 0.24, rng.next()),
+          mix(0.08, 0.16, rng.next()),
+          mix(0.1, 0.22, rng.next()),
+          ridgeSpineAngle,
+          0.05
+        );
+      });
+    }
+    if (terrainArchetype === "TWIN_BAY") {
+      const bayCuts = [
+        { along: -0.22 + twinBayAsymmetry * 0.2, across: -0.74, radiusAlong: 0.24, radiusAcross: 0.18, weight: 0.34 },
+        { along: 0.22 + twinBayAsymmetry * 0.2, across: 0.74, radiusAlong: 0.24, radiusAcross: 0.18, weight: 0.34 }
+      ];
+      if (coastComplexity >= 0.75) {
+        bayCuts.push({
+          along: twinBayAsymmetry * 0.18,
+          across: rng.next() < 0.5 ? -0.66 : 0.66,
+          radiusAlong: 0.18,
+          radiusAcross: 0.14,
+          weight: 0.18
+        });
+      }
+      return bayCuts.map((bay) => {
+        const point = twinBayToUV(bay.along, bay.across);
+        return createAlignedSilhouetteBlob(
+          point.u,
+          point.v,
+          bay.radiusAlong,
+          bay.radiusAcross,
+          bay.weight,
+          twinBayAngle + Math.sign(bay.across) * Math.PI * 0.08,
+          0.04
+        );
+      });
+    }
+    const cutCount =
+      terrainArchetype === "SHELF"
+        ? (coastComplexity > 0.64 ? 1 : 0)
+        : 1 + Math.floor(rng.next() * (coastComplexity > 0.48 ? 3 : 2));
+    return Array.from({ length: cutCount }, () => {
+      const angle = rng.next() * Math.PI * 2;
+      const dist = terrainArchetype === "SHELF" ? mix(0.38, 0.5, rng.next()) : mix(0.28, 0.46, rng.next());
+      return createSilhouetteBlob(
+        0.5 + Math.cos(angle) * dist,
+        0.5 + Math.sin(angle) * dist * mix(0.84, 1.16, rng.next()),
+        terrainArchetype === "SHELF" ? mix(0.08, 0.14, rng.next()) : mix(0.08, 0.18, rng.next()),
+        terrainArchetype === "SHELF" ? mix(0.08, 0.14, rng.next()) : mix(0.08, 0.18, rng.next()),
+        terrainArchetype === "SHELF" ? mix(0.08, 0.18, rng.next()) : mix(0.18, 0.46, rng.next()),
+        0.04
+      );
+    });
+  })();
+  const coastHeadlands = (() => {
+    if (macroCoastStrength <= 0.001) {
+      return [];
+    }
+    switch (terrainArchetype) {
+      case "LONG_SPINE": {
+        const sideAngles = [ridgeSpineAngle + Math.PI * 0.5, ridgeSpineAngle - Math.PI * 0.5];
+        return sideAngles.flatMap((sideAngle, sideIndex) => {
+          const featureCount = 1 + Math.floor(mix(0.8, 2.2, macroCoastStrength) + rng.next() * 0.6);
+          return createDistributedAngles(
+            featureCount,
+            sideAngle + sideIndex * 0.18,
+            mix(0.7, 1.45, macroCoastStrength),
+            mix(0.16, 0.42, macroCoastStrength)
+          ).map((angle) =>
+            createCoastMacroBlob(
+              angle,
+              mix(0.68, 0.9, rng.next()),
+              mix(0.12, 0.28, macroCoastStrength * 0.7 + rng.next() * 0.3),
+              mix(0.07, 0.16, macroCoastStrength * 0.65 + rng.next() * 0.35),
+              mix(0.08, 0.22, macroCoastStrength * 0.8 + rng.next() * 0.2),
+              rng.next() < 0.24 ? "radial" : "tangent",
+              0.05
+            )
+          );
+        });
+      }
+      case "TWIN_BAY": {
+        const outerAngles = [twinBayAngle + Math.PI * 0.5, twinBayAngle - Math.PI * 0.5];
+        return outerAngles.flatMap((outerAngle, sideIndex) => {
+          const featureCount = 1 + Math.floor(mix(0.6, 1.4, macroCoastStrength) + rng.next() * 0.4);
+          return createDistributedAngles(
+            featureCount,
+            outerAngle + sideIndex * 0.14,
+            mix(0.48, 0.9, macroCoastStrength),
+            mix(0.12, 0.26, macroCoastStrength)
+          ).map((angle) =>
+            createCoastMacroBlob(
+              angle,
+              mix(0.64, 0.82, rng.next()),
+              mix(0.1, 0.2, macroCoastStrength * 0.65 + rng.next() * 0.35),
+              mix(0.06, 0.12, macroCoastStrength * 0.55 + rng.next() * 0.45),
+              mix(0.06, 0.14, macroCoastStrength * 0.72 + rng.next() * 0.28),
+              "tangent",
+              0.05
+            )
+          );
+        });
+      }
+      case "SHELF": {
+        const featureCount = Math.max(1, Math.floor(mix(0.4, 1.4, macroCoastStrength) + rng.next() * 0.4));
+        return createDistributedAngles(
+          featureCount,
+          rng.next() * Math.PI * 2,
+          Math.PI * 2,
+          mix(0.12, 0.26, macroCoastStrength)
+        ).map((angle) =>
+          createCoastMacroBlob(
+            angle,
+            mix(0.58, 0.76, rng.next()),
+            mix(0.1, 0.18, macroCoastStrength * 0.52 + rng.next() * 0.48),
+            mix(0.06, 0.12, macroCoastStrength * 0.48 + rng.next() * 0.52),
+            mix(0.04, 0.1, macroCoastStrength * 0.55 + rng.next() * 0.45),
+            "tangent",
+            0.06
+          )
+        );
+      }
+      case "MASSIF":
+      default: {
+        const featureCount = 1 + Math.floor(mix(1.1, 3.8, macroCoastStrength) + rng.next() * 0.8);
+        return createDistributedAngles(
+          featureCount,
+          rng.next() * Math.PI * 2,
+          Math.PI * 2,
+          mix(0.18, 0.44, macroCoastStrength)
+        ).map((angle) =>
+          createCoastMacroBlob(
+            angle,
+            mix(0.62, 0.92, rng.next()),
+            mix(0.16, 0.34, macroCoastStrength * 0.72 + rng.next() * 0.28),
+            mix(0.08, 0.2, macroCoastStrength * 0.6 + rng.next() * 0.4),
+            mix(0.1, 0.26, macroCoastStrength * 0.78 + rng.next() * 0.22),
+            rng.next() < 0.28 ? "radial" : "tangent",
+            0.06
+          )
+        );
+      }
+    }
+  })();
+  const coastBays = (() => {
+    if (macroCoastStrength <= 0.001) {
+      return [];
+    }
+    switch (terrainArchetype) {
+      case "LONG_SPINE": {
+        const flankAngles = [ridgeSpineAngle + Math.PI * 0.5, ridgeSpineAngle - Math.PI * 0.5];
+        return flankAngles.flatMap((flankAngle, sideIndex) => {
+          const featureCount = 1 + Math.floor(mix(0.9, 2.5, macroCoastStrength) + rng.next() * 0.8);
+          return createDistributedAngles(
+            featureCount,
+            flankAngle + sideIndex * 0.12,
+            mix(0.8, 1.55, macroCoastStrength),
+            mix(0.18, 0.46, macroCoastStrength)
+          ).map((angle) =>
+            createCoastMacroBlob(
+              angle,
+              mix(0.86, 1.08, rng.next()),
+              mix(0.18, 0.34, macroCoastStrength * 0.76 + rng.next() * 0.24),
+              mix(0.1, 0.22, macroCoastStrength * 0.7 + rng.next() * 0.3),
+              mix(0.12, 0.3, macroCoastStrength * 0.82 + rng.next() * 0.18),
+              rng.next() < 0.16 ? "radial" : "tangent",
+              0.05
+            )
+          );
+        });
+      }
+      case "TWIN_BAY": {
+        const outerAngles = [twinBayAngle + Math.PI * 0.5, twinBayAngle - Math.PI * 0.5];
+        return outerAngles.flatMap((outerAngle, sideIndex) => {
+          const featureCount = 1 + Math.floor(mix(0.9, 1.4, macroCoastStrength) + rng.next() * 0.2);
+          return createDistributedAngles(
+            featureCount,
+            outerAngle + sideIndex * 0.12,
+            mix(0.54, 0.94, macroCoastStrength),
+            mix(0.12, 0.24, macroCoastStrength)
+          ).map((angle) =>
+            createCoastMacroBlob(
+              angle,
+              mix(0.88, 1.02, rng.next()),
+              mix(0.18, 0.28, macroCoastStrength * 0.72 + rng.next() * 0.28),
+              mix(0.1, 0.18, macroCoastStrength * 0.64 + rng.next() * 0.36),
+              mix(0.18, 0.26, macroCoastStrength * 0.74 + rng.next() * 0.26),
+              "tangent",
+              0.05
+            )
+          );
+        });
+      }
+      case "SHELF": {
+        const featureCount = coastComplexity > 0.72 ? 1 : 0;
+        return createDistributedAngles(
+          featureCount,
+          rng.next() * Math.PI * 2 + Math.PI / Math.max(2, featureCount),
+          Math.PI * 2,
+          mix(0.12, 0.22, macroCoastStrength)
+        ).map((angle) =>
+          createCoastMacroBlob(
+            angle,
+            mix(0.86, 0.98, rng.next()),
+            mix(0.16, 0.24, macroCoastStrength * 0.62 + rng.next() * 0.38),
+            mix(0.1, 0.16, macroCoastStrength * 0.58 + rng.next() * 0.42),
+            mix(0.08, 0.16, macroCoastStrength * 0.58 + rng.next() * 0.42),
+            "tangent",
+            0.06
+          )
+        );
+      }
+      case "MASSIF":
+      default: {
+        const featureCount = 1 + Math.floor(mix(1.2, 4.2, macroCoastStrength) + rng.next() * 0.8);
+        return createDistributedAngles(
+          featureCount,
+          rng.next() * Math.PI * 2 + Math.PI / Math.max(2, featureCount),
+          Math.PI * 2,
+          mix(0.2, 0.52, macroCoastStrength)
+        ).map((angle) =>
+          createCoastMacroBlob(
+            angle,
+            mix(0.84, 1.08, rng.next()),
+            mix(0.2, 0.4, macroCoastStrength * 0.8 + rng.next() * 0.2),
+            mix(0.12, 0.28, macroCoastStrength * 0.72 + rng.next() * 0.28),
+            mix(0.14, 0.34, macroCoastStrength * 0.84 + rng.next() * 0.16),
+            rng.next() < 0.22 ? "radial" : "tangent",
+            0.06
+          )
+        );
+      }
+    }
+  })();
+  const landCenters = (() => {
+    switch (terrainArchetype) {
+      case "LONG_SPINE":
+        return [];
+      case "TWIN_BAY":
+        return [
+          createLandCenter(0.5, 0.52, 0.22, 0.22 + relief01 * 0.14, 0.08),
+          createLandCenter(0.34, 0.42, 0.14, 0.12 + ruggedness01 * 0.08, 0.08),
+          createLandCenter(0.66, 0.58, 0.14, 0.12 + ruggedness01 * 0.08, 0.08)
+        ];
+      case "SHELF":
+        return [createLandCenter(0.58, 0.44, 0.14, 0.12 + relief01 * 0.08, 0.08)];
+      case "MASSIF":
+      default:
+        return [
+          createLandCenter(0.5, 0.52, 0.34, 0.34 + relief01 * 0.28, 0.08),
+          createLandCenter(0.36, 0.38, 0.2, 0.18 + ruggedness01 * 0.14, 0.11),
+          createLandCenter(0.66, 0.64, 0.18, 0.16 + ruggedness01 * 0.12, 0.11)
+        ];
+    }
+  })();
 
-  const basinCenters = Array.from({ length: 2 + Math.floor(rng.next() * 2) }, () => ({
-    x: landMinX + rng.next() * Math.max(0, landMaxX - landMinX),
-    y: landMinY + rng.next() * Math.max(0, landMaxY - landMinY),
-    radius: (minDimM * (0.22 + rng.next() * 0.18)) / 2,
-    depth: (0.12 + rng.next() * 0.18) * valleyDepth * BASIN_DEPTH_SCALE
-  }));
+  const basinCount = Math.max(1, Math.round(1 + basinStrength * 3));
+  const basinCenters = Array.from({ length: basinCount }, (_, index) => {
+    const arc = bandAngle + (index / basinCount) * Math.PI * 2 + rng.next() * 0.7;
+    const radiusT = mix(0.12, 0.28, rng.next());
+    return {
+      x: mix(landMinX, landMaxX, 0.5 + Math.cos(arc) * radiusT),
+      y: mix(landMinY, landMaxY, 0.5 + Math.sin(arc) * radiusT),
+      radius: minDimM * mix(0.08, 0.18, basinStrength + rng.next() * 0.25),
+      depth: mix(0.06, 0.18, basinStrength) * valleyDepth * BASIN_DEPTH_SCALE
+    };
+  });
 
   const macroWeight = clamp(ELEVATION_MACRO_WEIGHT, 0, 1);
   const detailWeight = clamp(ELEVATION_DETAIL_WEIGHT, 0, 1);
@@ -1626,6 +2386,157 @@ async function buildElevationMapCoarse(
     { x: 0.75, y: 0.75 },
     { x: 0.5, y: 0.5 }
   ];
+  const sampleIslandShapeAt = (sampleX: number, sampleY: number): number => {
+    const u = sampleX / Math.max(1, cols - 1);
+    const v = sampleY / Math.max(1, rows - 1);
+    const nx = u * 2 - 1;
+    const ny = v * 2 - 1;
+    const shiftedNX = nx + shapeDriftX;
+    const shiftedNY = ny + shapeDriftY;
+    const rotatedNX = shiftedNX * shapeRotationCos - shiftedNY * shapeRotationSin;
+    const rotatedNY = shiftedNX * shapeRotationSin + shiftedNY * shapeRotationCos;
+    const radial = Math.hypot(rotatedNX, rotatedNY);
+    const theta = Math.atan2(rotatedNY, rotatedNX);
+    const worldX = worldOffsetXM + sampleX * cellSizeM;
+    const worldY = worldOffsetYM + sampleY * cellSizeM;
+    const coastNoise = fractalNoise(worldX / Math.max(700, macroScaleM * 0.58), worldY / Math.max(700, macroScaleM * 0.58), state.seed + 1877);
+    const coastNoiseB = fractalNoise(worldX / Math.max(420, macroScaleM * 0.36), worldY / Math.max(420, macroScaleM * 0.36), state.seed + 1919);
+    const coastlineDistortionCap = mix(0.04, archetypeDefinition.coastlineDistortionCap, coastComplexity);
+    const coastWarp = clamp(
+      (coastNoise * 2 - 1) * mix(0.04, 0.18, coastComplexity)
+      + (coastNoiseB * 2 - 1) * mix(0.02, 0.12, clamp(coastComplexity * 0.55 + ruggedness01 * 0.45, 0, 1)),
+      -coastlineDistortionCap,
+      coastlineDistortionCap
+    );
+    const macroHarmonicWarp = clamp(
+      Math.sin(theta * macroShapeLobeCountA + macroShapeLobePhaseA) * macroShapeLobeAmpA
+      + Math.sin(theta * macroShapeLobeCountB - macroShapeLobePhaseB) * macroShapeLobeAmpB,
+      -coastlineDistortionCap * 0.9,
+      coastlineDistortionCap * 0.9
+    );
+    const harmonicWarp = clamp(
+      Math.sin(theta * shapeLobeCountA + shapeLobePhaseA) * shapeLobeAmpA
+      + Math.sin(theta * shapeLobeCountB - shapeLobePhaseB) * shapeLobeAmpB,
+      -coastlineDistortionCap * 0.72,
+      coastlineDistortionCap * 0.72
+    );
+    const blobShape = sampleSilhouetteField(silhouetteBlobs, rotatedNX, rotatedNY);
+    const cutShape = sampleSilhouetteField(silhouetteCuts, rotatedNX, rotatedNY);
+    const headlandShape = sampleSilhouetteField(coastHeadlands, rotatedNX, rotatedNY);
+    const bayShape = sampleSilhouetteField(coastBays, rotatedNX, rotatedNY);
+    switch (terrainArchetype) {
+      case "LONG_SPINE": {
+        const spineProfile = sampleRidgeSpineProfile(rotatedNX, rotatedNY);
+        const ellipse = 1 - smoothstep(
+          mix(0.62, 0.84, islandCompactness),
+          mix(0.94, 1.12, islandCompactness),
+          Math.hypot(rotatedNX * 0.74, rotatedNY * 1.18) - coastWarp * 0.62 - harmonicWarp * 0.16 - macroHarmonicWarp * 0.34
+        );
+        return clamp(
+          ellipse * 0.24
+          + spineProfile.footprint * 0.7
+          + spineProfile.crest * 0.24
+          + blobShape * 0.16
+          + headlandShape * 0.1
+          - cutShape * 0.08
+          - bayShape * 0.12
+          + harmonicWarp * 0.03
+          + macroHarmonicWarp * 0.07,
+          0,
+          1
+        );
+      }
+      case "TWIN_BAY": {
+        const splitStraitProfile = sampleSplitStraitProfile(rotatedNX, rotatedNY);
+        const compactShield = 1 - smoothstep(
+          mix(0.66, 0.82, islandCompactness),
+          mix(0.92, 1.06, islandCompactness),
+          Math.hypot(rotatedNX * 0.78, rotatedNY * 0.92) - coastWarp * 0.42 - harmonicWarp * 0.12 - macroHarmonicWarp * 0.16
+        );
+        return clamp(
+          compactShield * 0.28
+          + splitStraitProfile.footprint * 0.62
+          + splitStraitProfile.crest * 0.18
+          + blobShape * 0.12
+          + headlandShape * 0.08
+          - cutShape * 0.1
+          - bayShape * 0.18
+          + coastWarp * 0.03
+          + harmonicWarp * 0.02
+          + macroHarmonicWarp * 0.04,
+          0,
+          1
+        );
+      }
+      case "SHELF": {
+        const plateau = 1 - smoothstep(
+          mix(0.72, 0.9, islandCompactness),
+          mix(0.96, 1.1, islandCompactness),
+          Math.hypot(rotatedNX * 0.82, rotatedNY * 0.9) - coastWarp * 0.28 - harmonicWarp * 0.08 - macroHarmonicWarp * 0.1
+        );
+        return clamp(
+          plateau * 0.58
+          + blobShape * 0.34
+          + headlandShape * 0.06
+          - cutShape * 0.04
+          - bayShape * 0.08
+          + coastWarp * 0.02
+          + harmonicWarp * 0.01
+          + macroHarmonicWarp * 0.02,
+          0,
+          1
+        );
+      }
+      case "MASSIF":
+      default: {
+        const baseRadius = mix(0.72, 0.9, islandCompactness);
+        const lobe =
+          macroHarmonicWarp * mix(0.7, 1.25, coastComplexity)
+          + harmonicWarp * mix(0.45, 1.0, coastComplexity)
+          + coastWarp * mix(0.5, 0.88, coastComplexity);
+        const base = 1 - smoothstep(baseRadius - 0.28, baseRadius + 0.06, radial - lobe);
+        return clamp(
+          base * 0.18
+          + blobShape * 0.72
+          + headlandShape * 0.18
+          - cutShape * 0.14
+          - bayShape * 0.2,
+          0,
+          1
+        );
+      }
+    }
+  };
+
+  const sampleCarvingAt = (sampleX: number, sampleY: number): { carve: number; landShape: number } => {
+    const worldX = worldOffsetXM + sampleX * cellSizeM;
+    const worldY = worldOffsetYM + sampleY * cellSizeM;
+    const drainageA = fractalNoise(worldX / Math.max(600, midScaleM * 0.8), worldY / Math.max(600, midScaleM * 0.8), state.seed + 4001);
+    const drainageB = fractalNoise(worldX / Math.max(400, detailScaleM * 1.15), worldY / Math.max(400, detailScaleM * 1.15), state.seed + 4027);
+    const valleyNoise = 1 - Math.abs(drainageA * 2 - 1);
+    const basinNoise = 1 - Math.abs(drainageB * 2 - 1);
+    const u = sampleX / Math.max(1, cols - 1);
+    const v = sampleY / Math.max(1, rows - 1);
+    const interior = Math.pow(clamp(1 - Math.hypot(u * 2 - 1, v * 2 - 1), 0, 1), 1.15);
+    const islandShape = clamp(sampleIslandShapeAt(sampleX, sampleY), 0, 1);
+    const landEnvelope = smoothstep(0.14, 0.6, islandShape);
+    const channelSignal = smoothstep(
+      mix(0.54, 0.64, 1 - riverIntensity),
+      mix(0.82, 0.94, riverIntensity),
+      valleyNoise
+    );
+    const basinSignal = smoothstep(0.72, 0.94, basinNoise) * interior;
+    const coastGuard = smoothstep(0.08, 0.3, landEnvelope * 0.7 + interior * 0.3);
+    return {
+      carve: clamp(
+        channelSignal * mix(0.42, 0.88, riverIntensity) * landEnvelope
+        + basinSignal * mix(0.04, 0.24, basinStrength) * coastGuard,
+        0,
+        1
+      ),
+      landShape: islandShape
+    };
+  };
   const sampleElevationAt = (sampleX: number, sampleY: number): number => {
     const edgeDistM = Math.min(sampleX, sampleY, cols - 1 - sampleX, rows - 1 - sampleY) * cellSizeM;
     const edgeFactor = clamp(edgeDistM / centerFactorM, 0, 1);
@@ -1643,29 +2554,114 @@ async function buildElevationMapCoarse(
     const ridgeNoise = fractalNoise(worldNX / ridgeScaleM, worldNY / ridgeScaleM, state.seed + 703);
     const ridge = 1 - Math.abs(ridgeNoise * 2 - 1);
     const ridgeCentered = ridge * 2 - 1;
+    const lowFreqWeight = 0.72 + archetypeDefinition.lowFreqAmplitude * 1.4;
+    const midFreqWeight = 0.48 + archetypeDefinition.midFreqAmplitude * 1.7;
+    const highFreqWeight = 0.22 + archetypeDefinition.highFreqAmplitude * 2.3;
     const bandCoord = (worldX * bandDir.x + worldY * bandDir.y) / bandScaleM;
     const band = (Math.sin(bandCoord + bandPhase) + 1) * 0.5;
     const bandBoost = (band - 0.5) * bandStrength;
-    let macroElevation = macroNoise * 2 - 1;
+    let macroElevation = (macroNoise * 2 - 1) * lowFreqWeight;
     const landBias = getLandBias(sampleX, sampleY, cols, rows, state.seed);
     macroElevation = clamp(macroElevation + (landBias - 0.5) * LAND_MASS_BIAS_STRENGTH, -1, 1);
-    let detailElevation = (detailNoiseA * 0.7 + detailNoiseB * 0.3) * 2 - 1;
-    detailElevation = clamp(detailElevation + ridgeCentered * ridgeStrength, -1, 1);
-    let elevation = (macroElevation * macroWeight + detailElevation * detailWeight) / weightSum;
+    const detailElevationBase =
+      ((detailNoiseA * 2 - 1) * midFreqWeight + (detailNoiseB * 2 - 1) * highFreqWeight)
+      / Math.max(0.0001, midFreqWeight + highFreqWeight);
+    let detailElevation = clamp(
+      detailElevationBase + ridgeCentered * ridgeStrength * mix(0.72, 1.18, midFreqWeight / Math.max(0.0001, midFreqWeight + highFreqWeight)),
+      -1,
+      1
+    );
+    let elevation =
+      (macroElevation * macroWeight + detailElevation * detailWeight)
+      / Math.max(0.0001, macroWeight * lowFreqWeight + detailWeight);
     elevation = elevation * 0.5 + 0.5;
-    elevation += edgeFactor * 0.06;
-    elevation = elevation * (0.75 + band * 0.5) + bandBoost;
+    const u = sampleX / Math.max(1, cols - 1);
+    const v = sampleY / Math.max(1, rows - 1);
+    const radial = Math.hypot(u * 2 - 1, v * 2 - 1);
+    const islandShape = clamp(sampleIslandShapeAt(sampleX, sampleY), 0, 1);
+    const nx = u * 2 - 1;
+    const ny = v * 2 - 1;
+    const shiftedNX = nx + shapeDriftX;
+    const shiftedNY = ny + shapeDriftY;
+    const rotatedNX = shiftedNX * shapeRotationCos - shiftedNY * shapeRotationSin;
+    const rotatedNY = shiftedNX * shapeRotationSin + shiftedNY * shapeRotationCos;
+    const interiorField = Math.pow(clamp(1 - radial / mix(1.08, 0.74, islandCompactness), 0, 1), mix(1.8, 0.95, interiorRise));
+    const upliftNoise = fractalNoise(worldNX / Math.max(260, macroScaleM * 0.42), worldNY / Math.max(260, macroScaleM * 0.42), state.seed + 1187);
+    const peakNoise = fractalNoise(worldNX / Math.max(140, detailScaleM * 0.72), worldNY / Math.max(140, detailScaleM * 0.72), state.seed + 1229);
+    elevation += edgeFactor * 0.03;
+    elevation = elevation * (0.7 + band * 0.38) + bandBoost * 0.45;
     let landBoost = 0;
     for (const land of landCenters) {
       const dx = (worldX - land.x) / land.radius;
       const dy = (worldY - land.y) / land.radius;
       const d = Math.hypot(dx, dy);
       if (d < 1) {
-        landBoost = Math.max(landBoost, (1 - d) * (1 - d) * land.height);
+        landBoost = Math.max(landBoost, Math.pow(1 - d, landPeakSharpness) * land.height);
       }
     }
     const landEdgeFactor = edgeFactor * edgeFactor * edgeFactor;
-    elevation += landBoost * landEdgeFactor;
+    const islandUpliftScale =
+      archetypeDefinition.upliftProfile === "central_peak"
+        ? 1.08
+        : archetypeDefinition.upliftProfile === "spine_ridge"
+          ? 0.92
+          : archetypeDefinition.upliftProfile === "bay_shield"
+            ? 0.88
+            : 0.72;
+    const interiorUpliftScale =
+      archetypeDefinition.upliftProfile === "shelf_plateau"
+        ? 1.12
+        : archetypeDefinition.upliftProfile === "bay_shield"
+          ? 0.92
+          : 0.86;
+    const peakFieldScale =
+      archetypeDefinition.upliftProfile === "central_peak"
+        ? 1.18
+        : archetypeDefinition.upliftProfile === "spine_ridge"
+          ? 0.94
+          : archetypeDefinition.upliftProfile === "bay_shield"
+            ? 0.82
+            : 0.56;
+    const islandUplift = islandShape * mix(0.15, 0.46, reliefCurve) * mix(0.68, 1.16, upliftNoise) * islandUpliftScale;
+    const interiorUplift =
+      interiorField
+      * mix(0.06, 0.2, interiorRise)
+      * mix(0.86, 1.12, upliftNoise)
+      * mix(0.82, 1.04, reliefCurve)
+      * interiorUpliftScale;
+    const peakField =
+      landBoost * landEdgeFactor * mix(0.06, 0.64, reliefPeakCurve) * mix(0.84, 1.18, peakNoise) * peakFieldScale;
+    const ridgeSpineProfile = terrainArchetype === "LONG_SPINE" ? sampleRidgeSpineProfile(rotatedNX, rotatedNY) : null;
+    const splitStraitProfile = terrainArchetype === "TWIN_BAY" ? sampleSplitStraitProfile(rotatedNX, rotatedNY) : null;
+    const ridgeSpineUplift =
+      ridgeSpineProfile
+        ? ridgeSpineProfile.footprint * mix(0.06, 0.24, reliefCurve) * mix(0.92, 1.1, upliftNoise)
+          + ridgeSpineProfile.crest * mix(0.08, 0.34, reliefPeakCurve) * mix(0.88, 1.2, peakNoise)
+        : 0;
+    const splitStraitUplift =
+      splitStraitProfile
+        ? splitStraitProfile.footprint * mix(0.04, 0.18, reliefCurve) * mix(0.9, 1.08, upliftNoise)
+          + splitStraitProfile.crest * mix(0.08, 0.28, reliefPeakCurve) * mix(0.86, 1.16, peakNoise)
+        : 0;
+    const ridgeUplift =
+      ridge * ridge * mix(0.03, 0.2, ruggedness01) * clamp(islandShape * 0.5 + upliftNoise * 0.52, 0, 1.1) * mix(0.76, 1.04, reliefCurve);
+    const rawElevation =
+      elevation * mix(0.4, 0.58, ruggedness01)
+      + islandUplift
+      + interiorUplift
+      + peakField
+      + ridgeSpineUplift
+      + splitStraitUplift
+      + ridgeUplift;
+    elevation = clamp(
+      softenPeaks(
+        rawElevation,
+        mix(0.78, 0.97, clamp(reliefCurve * 0.38 + maxHeight01 * 0.32, 0, 1)),
+        mix(3.4, 0.6, clamp(reliefCurve * 0.22 + maxHeight01 * 0.5, 0, 1))
+      ),
+      0,
+      1
+    );
     let basinDrop = 0;
     for (const basin of basinCenters) {
       const dx = (worldX - basin.x) / basin.radius;
@@ -1677,15 +2673,63 @@ async function buildElevationMapCoarse(
     }
     elevation = clamp(elevation - basinDrop, 0, 1);
     const edgeWeight = Math.pow(clamp(edgeFactor, 0, 1), EDGE_LAND_EXPONENT);
-    const edgeScale = 1 - EDGE_LAND_ATTENUATION * (1 - edgeWeight);
+    const edgeScale = 1 - mix(0.16, 0.42, 1 - coastalShelfWidth) * (1 - edgeWeight);
     const seaLevel = clampSeaLevel(
       settings.baseWaterThreshold + (1 - edgeFactor) * settings.edgeWaterBias,
       settings
     );
-    const baseline = Math.max(WATER_BASELINE_ELEV, seaLevel - EDGE_WATER_BASE_OFFSET);
+    const baseline = Math.max(WATER_BASELINE_ELEV, seaLevel - EDGE_WATER_BASE_OFFSET * mix(0.6, 1.8, coastalShelfWidth));
     elevation = baseline + (elevation - baseline) * edgeScale;
     elevation = clamp((elevation - 0.5) * ELEVATION_CONTRAST + 0.5, 0, 1);
     return elevation;
+  };
+  const totalTiles = state.grid.totalTiles;
+  const riverMask = new Uint8Array(totalTiles);
+  const sampleCoarse = (arr: ArrayLike<number>, gx: number, gy: number): number => {
+    const x0 = Math.floor(gx);
+    const y0 = Math.floor(gy);
+    const x1 = Math.min(coarseCols - 1, x0 + 1);
+    const y1 = Math.min(coarseRows - 1, y0 + 1);
+    const tx = clamp(gx - x0, 0, 1);
+    const ty = clamp(gy - y0, 0, 1);
+    const i00 = y0 * coarseCols + x0;
+    const i10 = y0 * coarseCols + x1;
+    const i01 = y1 * coarseCols + x0;
+    const i11 = y1 * coarseCols + x1;
+    const v00 = arr[i00] ?? 0;
+    const v10 = arr[i10] ?? 0;
+    const v01 = arr[i01] ?? 0;
+    const v11 = arr[i11] ?? 0;
+    const v0 = v00 + (v10 - v00) * tx;
+    const v1 = v01 + (v11 - v01) * tx;
+    return v0 + (v1 - v0) * ty;
+  };
+  const edgeWidth = Math.max(8, Math.floor(getEdgeWidth(cols, rows) * mix(0.72, 1.6, coastalShelfWidth)));
+  const edgeDenomM = (Math.min(cols, rows) * cellSizeM) / 2;
+  const shouldStopAfter = (phase: MapGenDebugPhase): boolean => debug?.stopAfterPhase === phase;
+  const buildPreviewElevationFromCoarse = (source: ArrayLike<number>): number[] => {
+    const elevationMap = Array.from({ length: totalTiles }, () => 0);
+    state.valleyMap = Array.from({ length: totalTiles }, () => 0);
+    for (let y = 0; y < rows; y += 1) {
+      const rowBase = y * cols;
+      const gy = y / blockSize;
+      for (let x = 0; x < cols; x += 1) {
+        const gx = x / blockSize;
+        const idx = rowBase + x;
+        const falloff = getEdgeFalloff(x, y, cols, rows, edgeWidth, state.seed);
+        const softened = sampleCoarse(source, gx, gy);
+        const edgeDistM = Math.min(x, y, cols - 1 - x, rows - 1 - y) * cellSizeM;
+        const edgeFactor = clamp(edgeDistM / edgeDenomM, 0, 1);
+        const seaLevel = clampSeaLevel(
+          settings.baseWaterThreshold + (1 - edgeFactor) * settings.edgeWaterBias,
+          settings
+        );
+        const baseline = Math.max(WATER_BASELINE_ELEV, seaLevel - EDGE_WATER_BASE_OFFSET);
+        elevationMap[idx] = clamp(baseline + (softened - baseline) * falloff, 0, 1);
+        state.valleyMap[idx] = sampleCoarse(coarseValleyMap, gx, gy);
+      }
+    }
+    return elevationMap;
   };
 
   for (let cy = 0; cy < coarseRows; cy += 1) {
@@ -1709,7 +2753,15 @@ async function buildElevationMapCoarse(
       }
       const avg = count > 0 ? sum / count : 0;
       const blended = avg * (1 - peakWeight) + maxValue * peakWeight;
-      coarseElevation[cy * coarseCols + cx] = clamp(blended, 0, 1);
+      const coarseIndex = cy * coarseCols + cx;
+      const centerX = Math.min(cols - 1, startX + width * 0.5);
+      const centerY = Math.min(rows - 1, startY + height * 0.5);
+      const carvingSample = sampleCarvingAt(centerX, centerY);
+      coarseElevation[coarseIndex] = clamp(blended, 0, 1);
+      coarseValleyMap[coarseIndex] = carvingSample.carve;
+      coarseShapeMap[coarseIndex] = carvingSample.landShape;
+      coarseSampleXMap[coarseIndex] = centerX;
+      coarseSampleYMap[coarseIndex] = centerY;
     }
     if (yieldIfNeeded && report) {
       if (await yieldIfNeeded()) {
@@ -1756,9 +2808,16 @@ async function buildElevationMapCoarse(
 
   for (let i = 0; i < coarseElevation.length; i += 1) {
     const value = coarseElevation[i];
-    const shaped = Math.pow(value, elevationExponent) * (0.55 + value * 0.9);
+    const shaped =
+      Math.pow(value, mix(0.98, elevationExponent, reliefCurve * 0.75))
+      * mix(0.82, 1.04, reliefCurve)
+      * normalizedHeightPressure;
     const scaled = shaped * elevationScale;
-    const softened = softenPeaks(scaled, ELEVATION_PEAK_CAP, ELEVATION_PEAK_SOFTNESS);
+    const softened = softenPeaks(
+      scaled,
+      mix(0.84, 0.992, clamp(reliefCurve * 0.22 + ruggedness01 * 0.12 + maxHeight01 * 0.36, 0, 1)),
+      mix(2.8, 0.34, clamp(reliefCurve * 0.14 + maxHeight01 * 0.62, 0, 1))
+    );
     coarseElevation[i] = clamp(softened, 0, 1);
     if (yieldIfNeeded && report && i % coarseCols === coarseCols - 1) {
       if (await yieldIfNeeded()) {
@@ -1768,30 +2827,50 @@ async function buildElevationMapCoarse(
     }
   }
 
-  const elevationMap = Array.from({ length: state.grid.totalTiles }, () => 0);
-  const riverMask = new Uint8Array(state.grid.totalTiles);
-  state.valleyMap = Array.from({ length: state.grid.totalTiles }, () => 0);
-  const edgeWidth = getEdgeWidth(cols, rows);
-  const sampleCoarse = (arr: ArrayLike<number>, gx: number, gy: number): number => {
-    const x0 = Math.floor(gx);
-    const y0 = Math.floor(gy);
-    const x1 = Math.min(coarseCols - 1, x0 + 1);
-    const y1 = Math.min(coarseRows - 1, y0 + 1);
-    const tx = clamp(gx - x0, 0, 1);
-    const ty = clamp(gy - y0, 0, 1);
-    const i00 = y0 * coarseCols + x0;
-    const i10 = y0 * coarseCols + x1;
-    const i01 = y1 * coarseCols + x0;
-    const i11 = y1 * coarseCols + x1;
-    const v00 = arr[i00] ?? 0;
-    const v10 = arr[i10] ?? 0;
-    const v01 = arr[i01] ?? 0;
-    const v11 = arr[i11] ?? 0;
-    const v0 = v00 + (v10 - v00) * tx;
-    const v1 = v01 + (v11 - v01) * tx;
-    return v0 + (v1 - v0) * ty;
-  };
-  const edgeDenomM = (Math.min(cols, rows) * cellSizeM) / 2;
+  const reliefElevationMap = buildPreviewElevationFromCoarse(coarseElevation);
+  const reliefSeaLevelBase = resolveSeaLevelBase(state, settings, reliefElevationMap, cellSizeM);
+  if (debug) {
+    await emitDebugPhase(
+      debug,
+      "terrain:relief",
+      state,
+      settings,
+      reliefElevationMap,
+      undefined,
+      buildSolidLandTypeIds(state),
+      reliefSeaLevelBase
+    );
+    if (shouldStopAfter("terrain:relief")) {
+      return { elevationMap: reliefElevationMap, riverMask, seaLevelBase: reliefSeaLevelBase };
+    }
+  }
+
+  if (!settings.skipCarving) {
+    const carvingStrength =
+      mix(0.02, 0.11, clamp(riverIntensity * 0.55 + basinStrength * 0.45, 0, 1))
+      * mix(0.42, 1, reliefCurve);
+    for (let i = 0; i < coarseElevation.length; i += 1) {
+      const sampleX = coarseSampleXMap[i];
+      const sampleY = coarseSampleYMap[i];
+      const edgeDistM = Math.min(sampleX, sampleY, cols - 1 - sampleX, rows - 1 - sampleY) * cellSizeM;
+      const edgeFactor = clamp(edgeDistM / edgeDenomM, 0, 1);
+      const localSeaLevel = clampSeaLevel(
+        reliefSeaLevelBase + (1 - edgeFactor) * settings.edgeWaterBias,
+        settings
+      );
+      const landShape = smoothstep(0.14, 0.7, coarseShapeMap[i]);
+      const carveSignal = smoothstep(0.16, 0.74, coarseValleyMap[i]) * landShape;
+      const headroom = Math.max(0, coarseElevation[i] - localSeaLevel);
+      const coastGuard = smoothstep(0.025, 0.14, headroom);
+      const maxCut = Math.max(0, headroom - mix(0.02, 0.05, coastalShelfWidth));
+      const requestedCut = carveSignal * coastGuard * carvingStrength * valleyDepth;
+      const carved = coarseElevation[i] - Math.min(requestedCut, maxCut);
+      coarseElevation[i] = clamp(carved, 0, 1);
+    }
+  }
+
+  const elevationMap = Array.from({ length: totalTiles }, () => 0);
+  state.valleyMap = Array.from({ length: totalTiles }, () => 0);
   for (let y = 0; y < rows; y += 1) {
     const rowBase = y * cols;
     const gy = y / blockSize;
@@ -1816,38 +2895,28 @@ async function buildElevationMapCoarse(
       }
     }
   }
-  await emitDebugPhase(debug, "terrain:elevation", state, settings, elevationMap);
-
   const seaLevelBase = resolveSeaLevelBase(state, settings, elevationMap, cellSizeM);
-  const preSeaLevelMap = buildSeaLevelMap(state, settings, cellSizeM, seaLevelBase);
-  let preOceanMask = buildOceanMaskFromElevation(state, elevationMap, preSeaLevelMap);
-  const preOceanLevel = computeOceanLevel(elevationMap, preOceanMask);
-  if (preOceanLevel !== null) {
-    preOceanMask = expandOceanMaskByElevation(
-      state,
-      elevationMap,
-      preSeaLevelMap,
-      preOceanMask,
-      undefined,
-      preOceanLevel
-    );
-  }
-
-  if (report) {
-    await report("Carving rivers...", 0.8);
-  }
-  carveRiverValleys(
+  await emitDebugPhase(
+    debug,
+    "terrain:carving",
     state,
-    rng,
-    elevationMap,
-    riverMask,
-    valleyDepth,
-    settings.riverWaterBias,
     settings,
-    seaLevelBase,
-    preOceanMask
+    elevationMap,
+    undefined,
+    buildSolidLandTypeIds(state),
+    seaLevelBase
   );
-  await emitDebugPhase(debug, "hydro:rivers", state, settings, elevationMap, riverMask, undefined, seaLevelBase);
+  if (shouldStopAfter("terrain:carving")) {
+    return { elevationMap, riverMask, seaLevelBase };
+  }
+  await emitDebugPhase(debug, "terrain:flooding", state, settings, elevationMap, undefined, undefined, seaLevelBase);
+  if (shouldStopAfter("terrain:flooding")) {
+    return { elevationMap, riverMask, seaLevelBase };
+  }
+  await emitDebugPhase(debug, "terrain:elevation", state, settings, elevationMap, undefined, undefined, seaLevelBase);
+  if (shouldStopAfter("terrain:elevation")) {
+    return { elevationMap, riverMask, seaLevelBase };
+  }
 
   const edgeSmoothRadius = edgeWidth * 3;
   const temp = new Float32Array(elevationMap.length);
@@ -1886,7 +2955,6 @@ async function buildElevationMapCoarse(
   for (let i = 0; i < elevationMap.length; i += 1) {
     elevationMap[i] = temp[i];
   }
-  await emitDebugPhase(debug, "terrain:erosion", state, settings, elevationMap, riverMask, undefined, seaLevelBase);
 
   return { elevationMap, riverMask, seaLevelBase };
 }
@@ -3229,12 +4297,16 @@ const buildRoadSegmentProfile = (
   state: WorldState,
   indices: number[],
   loop: boolean,
-  originalElevations: Float32Array
+  originalElevations: Float32Array,
+  heightScaleMultiplier = 1
 ): number[] => {
   if (indices.length <= 1) {
     return indices.map((idx) => state.tiles[idx]?.elevation ?? 0);
   }
   const original = indices.map((idx) => state.tiles[idx]?.elevation ?? 0);
+  const elevationToGradeScale = getTerrainHeightScale(state.grid.cols, state.grid.rows, heightScaleMultiplier);
+  const gradeTargetLimit = ROAD_GRADE_TARGET_LIMIT / Math.max(1e-6, elevationToGradeScale);
+  const gradeChangeTargetLimit = ROAD_GRADE_CHANGE_TARGET_LIMIT / Math.max(1e-6, elevationToGradeScale);
   const runs = new Array<number>(indices.length - 1);
   const cumulative = new Array<number>(indices.length).fill(0);
   let totalRun = 0;
@@ -3287,12 +4359,12 @@ const buildRoadSegmentProfile = (
     let prevSlope: number | null = null;
     for (let i = 1; i < forward.length; i += 1) {
       let slope = (forward[i] - forward[i - 1]) / runs[i - 1];
-      slope = clamp(slope, -ROAD_GRADE_TARGET_LIMIT, ROAD_GRADE_TARGET_LIMIT);
+      slope = clamp(slope, -gradeTargetLimit, gradeTargetLimit);
       if (prevSlope !== null) {
         slope = clamp(
           slope,
-          prevSlope - ROAD_GRADE_CHANGE_TARGET_LIMIT,
-          prevSlope + ROAD_GRADE_CHANGE_TARGET_LIMIT
+          prevSlope - gradeChangeTargetLimit,
+          prevSlope + gradeChangeTargetLimit
         );
       }
       forward[i] = clamp(forward[i - 1] + slope * runs[i - 1], 0, 1);
@@ -3303,12 +4375,12 @@ const buildRoadSegmentProfile = (
     prevSlope = null;
     for (let i = backward.length - 2; i >= 0; i -= 1) {
       let slope = (backward[i + 1] - backward[i]) / runs[i];
-      slope = clamp(slope, -ROAD_GRADE_TARGET_LIMIT, ROAD_GRADE_TARGET_LIMIT);
+      slope = clamp(slope, -gradeTargetLimit, gradeTargetLimit);
       if (prevSlope !== null) {
         slope = clamp(
           slope,
-          prevSlope - ROAD_GRADE_CHANGE_TARGET_LIMIT,
-          prevSlope + ROAD_GRADE_CHANGE_TARGET_LIMIT
+          prevSlope - gradeChangeTargetLimit,
+          prevSlope + gradeChangeTargetLimit
         );
       }
       backward[i] = clamp(backward[i + 1] - slope * runs[i], 0, 1);
@@ -3325,8 +4397,8 @@ const buildRoadSegmentProfile = (
     let prevSlope = 0;
     for (let i = 1; i < target.length; i += 1) {
       let slope = (target[i] - target[i - 1]) / runs[i - 1];
-      slope = clamp(slope, -ROAD_GRADE_TARGET_LIMIT, ROAD_GRADE_TARGET_LIMIT);
-      slope = clamp(slope, prevSlope - ROAD_GRADE_CHANGE_TARGET_LIMIT, prevSlope + ROAD_GRADE_CHANGE_TARGET_LIMIT);
+      slope = clamp(slope, -gradeTargetLimit, gradeTargetLimit);
+      slope = clamp(slope, prevSlope - gradeChangeTargetLimit, prevSlope + gradeChangeTargetLimit);
       target[i] = clamp(target[i - 1] + slope * runs[i - 1], 0, 1);
       prevSlope = slope;
     }
@@ -3343,7 +4415,7 @@ const buildRoadSegmentProfile = (
   return target;
 };
 
-function gradeRoadNetworkTerrain(state: WorldState): RoadSurfaceMetrics {
+function gradeRoadNetworkTerrain(state: WorldState, heightScaleMultiplier = 1): RoadSurfaceMetrics {
   const total = state.grid.totalTiles;
   const originalElevations = new Float32Array(total);
   for (let i = 0; i < total; i += 1) {
@@ -3445,7 +4517,7 @@ function gradeRoadNetworkTerrain(state: WorldState): RoadSurfaceMetrics {
 
   for (let i = 0; i < segments.length; i += 1) {
     const segment = segments[i];
-    const profile = buildRoadSegmentProfile(state, segment.indices, segment.loop, originalElevations);
+    const profile = buildRoadSegmentProfile(state, segment.indices, segment.loop, originalElevations, heightScaleMultiplier);
     for (let j = 0; j < segment.indices.length; j += 1) {
       const idx = segment.indices[j];
       const tile = state.tiles[idx];
@@ -3551,7 +4623,7 @@ function gradeRoadNetworkTerrain(state: WorldState): RoadSurfaceMetrics {
     }
   }
 
-  return analyzeRoadSurfaceMetrics(state);
+  return analyzeRoadSurfaceMetrics(state, heightScaleMultiplier);
 }
 
 function flattenSettlementGround(state: WorldState): void {
@@ -4249,6 +5321,7 @@ async function generateMapLegacy(
   }
 
   const legacySettlementPlan = createSettlementPlacementPlan({
+    heightScaleMultiplier: mapSettings.heightScaleMultiplier,
     diagonalPenalty: mapSettings.road.diagonalPenalty,
     pruneRedundantDiagonals: mapSettings.road.pruneRedundantDiagonals,
     bridgeTransitions: mapSettings.road.bridgeTransitions
@@ -4845,6 +5918,64 @@ export async function runShorelinePolishStage(ctx: MapGenContext): Promise<void>
   await emitStageSnapshot(ctx, "terrain:shoreline");
 }
 
+export async function runRiverStage(ctx: MapGenContext): Promise<void> {
+  const { state, settings, elevationMap, seaLevelMap, oceanMask, riverMask } = ctx;
+  if (!elevationMap || !seaLevelMap || !oceanMask || !riverMask) {
+    throw new Error("River stage missing terrain or shoreline fields.");
+  }
+
+  const total = state.grid.totalTiles;
+  riverMask.fill(0);
+  if (state.tileRiverMask.length !== total) {
+    state.tileRiverMask = new Uint8Array(total);
+  } else {
+    state.tileRiverMask.fill(0);
+  }
+  if (state.tileRiverBed.length !== total) {
+    state.tileRiverBed = new Float32Array(total).fill(Number.NaN);
+  } else {
+    state.tileRiverBed.fill(Number.NaN);
+  }
+  if (state.tileRiverSurface.length !== total) {
+    state.tileRiverSurface = new Float32Array(total).fill(Number.NaN);
+  } else {
+    state.tileRiverSurface.fill(Number.NaN);
+  }
+  if (state.tileRiverStepStrength.length !== total) {
+    state.tileRiverStepStrength = new Float32Array(total);
+  } else {
+    state.tileRiverStepStrength.fill(0);
+  }
+
+  await ctx.reportStage("Routing rivers to final coast...", 0.2);
+  carveRiverValleys(
+    state,
+    ctx.rng,
+    elevationMap,
+    riverMask,
+    clamp(settings.valleyDepth, 0.4, 3),
+    settings.riverWaterBias,
+    settings,
+    seaLevelMap,
+    oceanMask
+  );
+
+  for (let i = 0; i < total; i += 1) {
+    state.tiles[i].elevation = elevationMap[i] ?? state.tiles[i].elevation;
+    if (riverMask[i] > 0) {
+      state.tiles[i].type = "water";
+      clearVegetationState(state.tiles[i]);
+      state.tiles[i].dominantTreeType = null;
+      state.tiles[i].treeType = null;
+      state.tiles[i].isBase = false;
+    }
+  }
+  state.tileRiverMask = riverMask;
+  clampRiverMouthDepthsToSeaLevel(state, oceanMask, riverMask, seaLevelMap);
+  await ctx.reportStage("Rivers carved.", 1);
+  await emitStageSnapshot(ctx, "hydro:rivers");
+}
+
 export async function runBiomeFieldsStage(ctx: MapGenContext): Promise<void> {
   const { state, elevationMap } = ctx;
   if (!elevationMap) {
@@ -5133,9 +6264,15 @@ export async function runSettlementPlacementStage(ctx: MapGenContext): Promise<v
 
   await ctx.reportStage("Planning settlements...", 0.4);
   ctx.settlementPlan = createSettlementPlacementPlan({
+    heightScaleMultiplier: ctx.settings.heightScaleMultiplier,
     diagonalPenalty: ctx.settings.road.diagonalPenalty,
     pruneRedundantDiagonals: ctx.settings.road.pruneRedundantDiagonals,
-    bridgeTransitions: ctx.settings.road.bridgeTransitions
+    bridgeTransitions: ctx.settings.road.bridgeTransitions,
+    layout: ctx.settings.townLayout,
+    townDensity: ctx.settings.townDensity,
+    bridgeAllowance: ctx.settings.bridgeAllowance,
+    settlementSpacing: ctx.settings.settlementSpacing,
+    roadStrictness: ctx.settings.roadStrictness
   });
 
   await ctx.reportStage("Settlement plan ready.", 1);
@@ -5145,7 +6282,7 @@ export async function runSettlementPlacementStage(ctx: MapGenContext): Promise<v
 export async function runRoadNetworkStage(ctx: MapGenContext): Promise<void> {
   connectSettlementsByRoad(ctx.state, ctx.rng, ctx.settlementPlan ?? null);
   flattenSettlementGround(ctx.state);
-  const roadSurfaceMetrics = gradeRoadNetworkTerrain(ctx.state);
+  const roadSurfaceMetrics = gradeRoadNetworkTerrain(ctx.state, ctx.settings.heightScaleMultiplier);
   if (ctx.riverMask) {
     for (let i = 0; i < ctx.state.tiles.length; i += 1) {
       if (ctx.riverMask[i] === 0) {

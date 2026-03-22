@@ -1,26 +1,38 @@
 import type { Point, RNG } from "../core/types.js";
 import type { WorldState } from "../core/state.js";
 import { inBounds, indexFor } from "../core/grid.js";
+import { getTerrainHeightScale } from "../core/terrainScale.js";
 import { applyFuel } from "../core/tiles.js";
 import { clearVegetationState } from "../core/vegetation.js";
 
 export const ROAD_GRADE_LIMIT_START = 0.09;
 export const ROAD_GRADE_LIMIT_RELAX_STEP = 0.015;
 export const ROAD_GRADE_LIMIT_MAX = 0.13;
+const ROAD_SWITCHBACK_GRADE_LIMIT_START = 0.12;
+const ROAD_SWITCHBACK_GRADE_LIMIT_RELAX_STEP = 0.02;
+const ROAD_SWITCHBACK_GRADE_LIMIT_MAX = 0.22;
 export const ROAD_SLOPE_PENALTY_WEIGHT = 22;
 export const ROAD_CROSSFALL_LIMIT_START = 0.06;
 export const ROAD_CROSSFALL_LIMIT_RELAX_STEP = 0.012;
 export const ROAD_CROSSFALL_LIMIT_MAX = 0.1;
+const ROAD_SWITCHBACK_CROSSFALL_LIMIT_START = 0.08;
+const ROAD_SWITCHBACK_CROSSFALL_LIMIT_RELAX_STEP = 0.018;
+const ROAD_SWITCHBACK_CROSSFALL_LIMIT_MAX = 0.16;
 export const ROAD_CROSSFALL_PENALTY_WEIGHT = 18;
 export const ROAD_GRADE_CHANGE_LIMIT_START = 0.06;
 export const ROAD_GRADE_CHANGE_LIMIT_RELAX_STEP = 0.012;
 export const ROAD_GRADE_CHANGE_LIMIT_MAX = 0.1;
+const ROAD_SWITCHBACK_GRADE_CHANGE_LIMIT_START = 0.08;
+const ROAD_SWITCHBACK_GRADE_CHANGE_LIMIT_RELAX_STEP = 0.018;
+const ROAD_SWITCHBACK_GRADE_CHANGE_LIMIT_MAX = 0.16;
 export const ROAD_GRADE_CHANGE_PENALTY_WEIGHT = 16;
 export const ROAD_RIVER_BLOCK_DIST = 1;
 export const ROAD_RIVER_PENALTY_DIST = 3;
 export const ROAD_RIVER_PENALTY_WEIGHT = 8;
 export const ROAD_TURN_PENALTY = 0.2;
 export const ROAD_DIAGONAL_PENALTY = 0.18;
+const ROAD_SWITCHBACK_TURN_PENALTY = 0.04;
+const ROAD_SWITCHBACK_DIAGONAL_PENALTY = 0.04;
 export const ROAD_BRIDGE_STEP_COST = 24;
 export const ROAD_BRIDGE_MAX_CONSEC_WATER = 3;
 export const ROAD_BRIDGE_MAX_WATER_TILES_PER_PATH = 6;
@@ -31,6 +43,7 @@ type RoadBridgePolicy = "never" | "allow";
 export type RoadPathOptions = {
   allowWater?: boolean;
   bridgePolicy?: RoadBridgePolicy;
+  heightScaleMultiplier?: number;
   gradeLimitStart?: number;
   gradeLimitRelaxStep?: number;
   gradeLimitMax?: number;
@@ -55,6 +68,7 @@ export type RoadPathOptions = {
 
 type RoadPathOptionsResolved = {
   bridgePolicy: RoadBridgePolicy;
+  heightScaleMultiplier: number;
   gradeLimitStart: number;
   gradeLimitRelaxStep: number;
   gradeLimitMax: number;
@@ -185,6 +199,7 @@ const resolveRoadPathOptions = (options: RoadPathOptions = {}): RoadPathOptionsR
   const gradeChangeLimitStart = Math.max(0.01, options.gradeChangeLimitStart ?? ROAD_GRADE_CHANGE_LIMIT_START);
   return {
     bridgePolicy,
+    heightScaleMultiplier: Math.max(0.1, options.heightScaleMultiplier ?? 1),
     gradeLimitStart,
     gradeLimitRelaxStep,
     gradeLimitMax,
@@ -214,6 +229,21 @@ const resolveRoadPathOptions = (options: RoadPathOptions = {}): RoadPathOptionsR
   };
 };
 
+const buildSwitchbackFallbackOptions = (options: RoadPathOptionsResolved): RoadPathOptionsResolved => ({
+  ...options,
+  gradeLimitStart: Math.max(options.gradeLimitStart, ROAD_SWITCHBACK_GRADE_LIMIT_START),
+  gradeLimitRelaxStep: Math.max(options.gradeLimitRelaxStep, ROAD_SWITCHBACK_GRADE_LIMIT_RELAX_STEP),
+  gradeLimitMax: Math.max(options.gradeLimitMax, ROAD_SWITCHBACK_GRADE_LIMIT_MAX),
+  crossfallLimitStart: Math.max(options.crossfallLimitStart, ROAD_SWITCHBACK_CROSSFALL_LIMIT_START),
+  crossfallLimitRelaxStep: Math.max(options.crossfallLimitRelaxStep, ROAD_SWITCHBACK_CROSSFALL_LIMIT_RELAX_STEP),
+  crossfallLimitMax: Math.max(options.crossfallLimitMax, ROAD_SWITCHBACK_CROSSFALL_LIMIT_MAX),
+  gradeChangeLimitStart: Math.max(options.gradeChangeLimitStart, ROAD_SWITCHBACK_GRADE_CHANGE_LIMIT_START),
+  gradeChangeLimitRelaxStep: Math.max(options.gradeChangeLimitRelaxStep, ROAD_SWITCHBACK_GRADE_CHANGE_LIMIT_RELAX_STEP),
+  gradeChangeLimitMax: Math.max(options.gradeChangeLimitMax, ROAD_SWITCHBACK_GRADE_CHANGE_LIMIT_MAX),
+  turnPenalty: Math.min(options.turnPenalty, ROAD_SWITCHBACK_TURN_PENALTY),
+  diagonalPenalty: Math.min(options.diagonalPenalty, ROAD_SWITCHBACK_DIAGONAL_PENALTY)
+});
+
 const toPoint = (idx: number, cols: number): Point => ({ x: idx % cols, y: Math.floor(idx / cols) });
 
 const getElevationAt = (state: WorldState, x: number, y: number, fallback: number): number => {
@@ -223,8 +253,15 @@ const getElevationAt = (state: WorldState, x: number, y: number, fallback: numbe
   return state.tiles[indexFor(state.grid, x, y)]?.elevation ?? fallback;
 };
 
-const computeStepSignedGrade = (fromElevation: number, toElevation: number, runCost: number): number =>
-  (toElevation - fromElevation) / Math.max(1, runCost);
+const getRoadGradeScale = (state: WorldState, heightScaleMultiplier: number): number =>
+  getTerrainHeightScale(state.grid.cols, state.grid.rows, heightScaleMultiplier);
+
+const computeStepSignedGrade = (
+  fromElevation: number,
+  toElevation: number,
+  runCost: number,
+  elevationToGradeScale = 1
+): number => ((toElevation - fromElevation) * elevationToGradeScale) / Math.max(1, runCost);
 
 const computeCrossfallAtStep = (
   state: WorldState,
@@ -233,7 +270,8 @@ const computeCrossfallAtStep = (
   toX: number,
   toY: number,
   fromElevation: number,
-  toElevation: number
+  toElevation: number,
+  elevationToGradeScale = 1
 ): number => {
   const dx = Math.sign(toX - fromX);
   const dy = Math.sign(toY - fromY);
@@ -249,7 +287,7 @@ const computeCrossfallAtStep = (
   const rightB = getElevationAt(state, toX - perpX, toY - perpY, centerElevation);
   const leftElevation = (leftA + leftB) * 0.5;
   const rightElevation = (rightA + rightB) * 0.5;
-  return Math.abs(leftElevation - rightElevation) * 0.5;
+  return Math.abs(leftElevation - rightElevation) * 0.5 * elevationToGradeScale;
 };
 
 const getRoadEdgeMaskAtIndex = (state: WorldState, idx: number): number => {
@@ -827,9 +865,11 @@ const heapPop = (openIdx: number[], openF: number[]): number => {
 const buildPathResult = (
   state: WorldState,
   pathIndices: number[],
-  riverDistance: Int16Array
+  riverDistance: Int16Array,
+  options: RoadPathOptionsResolved
 ): RoadPathResult => {
   const path = pathIndices.map((idx) => toPoint(idx, state.grid.cols));
+  const elevationToGradeScale = getRoadGradeScale(state, options.heightScaleMultiplier);
   const bridgeTileIndices: number[] = [];
   let maxGrade = 0;
   let maxCrossfall = 0;
@@ -866,7 +906,7 @@ const buildPathResult = (
     const point = path[i];
     const prevPoint = path[i - 1];
     const runCost = Math.hypot(point.x - prevPoint.x, point.y - prevPoint.y);
-    const signedGrade = computeStepSignedGrade(prevTile.elevation, tile.elevation, runCost);
+    const signedGrade = computeStepSignedGrade(prevTile.elevation, tile.elevation, runCost, elevationToGradeScale);
     const grade = Math.abs(signedGrade);
     if (grade > maxGrade) {
       maxGrade = grade;
@@ -878,7 +918,8 @@ const buildPathResult = (
       point.x,
       point.y,
       prevTile.elevation,
-      tile.elevation
+      tile.elevation,
+      elevationToGradeScale
     );
     if (crossfall > maxCrossfall) {
       maxCrossfall = crossfall;
@@ -937,6 +978,7 @@ const runAStar = (
   const startIdx = indexFor(state.grid, start.x, start.y);
   const endIdx = end ? indexFor(state.grid, end.x, end.y) : -1;
   const riverDistance = getRiverDistanceField(state);
+  const elevationToGradeScale = getRoadGradeScale(state, options.heightScaleMultiplier);
 
   if (
     !canTraverseTileIndex(state, startIdx, true, allowBridge, options, riverDistance) ||
@@ -1055,12 +1097,21 @@ const runAStar = (
         currentIsWater === false &&
         state.tiles[prev[currentIdx]]?.type !== "water";
       if (!currentIsWater && !nextIsWater) {
-        signedGrade = computeStepSignedGrade(currentTile.elevation, nextTile.elevation, dir.cost);
+        signedGrade = computeStepSignedGrade(currentTile.elevation, nextTile.elevation, dir.cost, elevationToGradeScale);
         grade = Math.abs(signedGrade);
         if (grade > gradeLimit) {
           continue;
         }
-        crossfall = computeCrossfallAtStep(state, cx, cy, nx, ny, currentTile.elevation, nextTile.elevation);
+        crossfall = computeCrossfallAtStep(
+          state,
+          cx,
+          cy,
+          nx,
+          ny,
+          currentTile.elevation,
+          nextTile.elevation,
+          elevationToGradeScale
+        );
         if (crossfall > crossfallLimit) {
           continue;
         }
@@ -1142,7 +1193,7 @@ const runAStar = (
   }
   pathIndices.push(startIdx);
   pathIndices.reverse();
-  return buildPathResult(state, pathIndices, riverDistance);
+  return buildPathResult(state, pathIndices, riverDistance, options);
 };
 
 const findPathWithGradeRelaxation = (
@@ -1153,28 +1204,45 @@ const findPathWithGradeRelaxation = (
   options: RoadPathOptionsResolved,
   allowBridge: boolean
 ): RoadPathResult | null => {
-  let gradeLimit = options.gradeLimitStart;
-  let crossfallLimit = options.crossfallLimitStart;
-  let gradeChangeLimit = options.gradeChangeLimitStart;
-  while (true) {
-    const result = runAStar(state, start, end, isTarget, options, allowBridge, gradeLimit, crossfallLimit, gradeChangeLimit);
-    if (result) {
-      return result;
+  const tryOptions = (candidate: RoadPathOptionsResolved): RoadPathResult | null => {
+    let gradeLimit = candidate.gradeLimitStart;
+    let crossfallLimit = candidate.crossfallLimitStart;
+    let gradeChangeLimit = candidate.gradeChangeLimitStart;
+    while (true) {
+      const result = runAStar(
+        state,
+        start,
+        end,
+        isTarget,
+        candidate,
+        allowBridge,
+        gradeLimit,
+        crossfallLimit,
+        gradeChangeLimit
+      );
+      if (result) {
+        return result;
+      }
+      const atMaxGrade = gradeLimit >= candidate.gradeLimitMax - 1e-9;
+      const atMaxCrossfall = crossfallLimit >= candidate.crossfallLimitMax - 1e-9;
+      const atMaxGradeChange = gradeChangeLimit >= candidate.gradeChangeLimitMax - 1e-9;
+      if (atMaxGrade && atMaxCrossfall && atMaxGradeChange) {
+        return null;
+      }
+      gradeLimit += candidate.gradeLimitRelaxStep;
+      crossfallLimit += candidate.crossfallLimitRelaxStep;
+      gradeChangeLimit += candidate.gradeChangeLimitRelaxStep;
+      gradeLimit = Math.min(candidate.gradeLimitMax, gradeLimit);
+      crossfallLimit = Math.min(candidate.crossfallLimitMax, crossfallLimit);
+      gradeChangeLimit = Math.min(candidate.gradeChangeLimitMax, gradeChangeLimit);
     }
-    const atMaxGrade = gradeLimit >= options.gradeLimitMax - 1e-9;
-    const atMaxCrossfall = crossfallLimit >= options.crossfallLimitMax - 1e-9;
-    const atMaxGradeChange = gradeChangeLimit >= options.gradeChangeLimitMax - 1e-9;
-    if (atMaxGrade && atMaxCrossfall && atMaxGradeChange) {
-      break;
-    }
-    gradeLimit += options.gradeLimitRelaxStep;
-    crossfallLimit += options.crossfallLimitRelaxStep;
-    gradeChangeLimit += options.gradeChangeLimitRelaxStep;
-    gradeLimit = Math.min(options.gradeLimitMax, gradeLimit);
-    crossfallLimit = Math.min(options.crossfallLimitMax, crossfallLimit);
-    gradeChangeLimit = Math.min(options.gradeChangeLimitMax, gradeChangeLimit);
+  };
+
+  const standard = tryOptions(options);
+  if (standard) {
+    return standard;
   }
-  return null;
+  return tryOptions(buildSwitchbackFallbackOptions(options));
 };
 
 const findRoadPathDetailed = (
@@ -1254,6 +1322,24 @@ export function findRoadPathToTarget(
   return findRoadPathToTargetDetailed(state, start, isTarget, options).path;
 }
 
+export function carveRoadToTarget(
+  state: WorldState,
+  rng: RNG,
+  start: Point,
+  isTarget: (x: number, y: number) => boolean,
+  options: RoadCarveOptions = {}
+): Point | null {
+  const bridgePolicy =
+    options.bridgePolicy ?? (typeof options.allowBridge === "boolean" ? (options.allowBridge ? "allow" : "never") : "allow");
+  const result = findRoadPathToTargetDetailed(state, start, isTarget, { ...options, bridgePolicy });
+  if (result.path.length === 0) {
+    return null;
+  }
+  const bridgeSet = new Set<number>(result.bridgeTileIndices);
+  carveRoadPath(state, rng, result.path, { allowBridgeIndices: bridgeSet });
+  return result.path[result.path.length - 1] ?? null;
+}
+
 export function carveRoadPath(
   state: WorldState,
   rng: RNG,
@@ -1305,11 +1391,15 @@ export function collectRoadTiles(state: WorldState): Point[] {
 }
 
 export function findNearestRoadTile(state: WorldState, origin: Point): Point {
-  let best = state.basePoint;
-  let bestDist = Math.abs(origin.x - state.basePoint.x) + Math.abs(origin.y - state.basePoint.y);
+  let best: Point | null = null;
+  let bestDist = Number.POSITIVE_INFINITY;
   for (let y = 0; y < state.grid.rows; y += 1) {
     for (let x = 0; x < state.grid.cols; x += 1) {
       if (!isRoadLikeTile(state, x, y)) {
+        continue;
+      }
+      const idx = indexFor(state.grid, x, y);
+      if (state.structureMask[idx] > 0 || state.tiles[idx]?.type === "house") {
         continue;
       }
       const dist = Math.abs(origin.x - x) + Math.abs(origin.y - y);
@@ -1319,12 +1409,33 @@ export function findNearestRoadTile(state: WorldState, origin: Point): Point {
       }
     }
   }
-  return best;
+  if (best) {
+    return best;
+  }
+
+  let fallback = state.basePoint;
+  bestDist = Number.POSITIVE_INFINITY;
+  for (let y = 0; y < state.grid.rows; y += 1) {
+    for (let x = 0; x < state.grid.cols; x += 1) {
+      const idx = indexFor(state.grid, x, y);
+      const tile = state.tiles[idx];
+      if (!tile || tile.type === "water" || state.structureMask[idx] > 0) {
+        continue;
+      }
+      const dist = Math.abs(origin.x - x) + Math.abs(origin.y - y);
+      if (dist < bestDist) {
+        bestDist = dist;
+        fallback = { x, y };
+      }
+    }
+  }
+  return fallback;
 }
 
-export const analyzeRoadSurfaceMetrics = (state: WorldState): RoadSurfaceMetrics => {
+export const analyzeRoadSurfaceMetrics = (state: WorldState, heightScaleMultiplier = 1): RoadSurfaceMetrics => {
   const total = state.grid.totalTiles;
   const cols = state.grid.cols;
+  const elevationToGradeScale = getRoadGradeScale(state, heightScaleMultiplier);
   let maxRoadGrade = 0;
   let maxRoadCrossfall = 0;
   let maxRoadGradeChange = 0;
@@ -1358,13 +1469,27 @@ export const analyzeRoadSurfaceMetrics = (state: WorldState): RoadSurfaceMetrics
       if (!isRoadLikeIndex(state, neighborIdx) || state.tiles[neighborIdx]?.type === "water") {
         continue;
       }
-      const signedGrade = computeStepSignedGrade(state.tiles[idx].elevation, state.tiles[neighborIdx].elevation, Math.hypot(dir.dx, dir.dy));
+      const signedGrade = computeStepSignedGrade(
+        state.tiles[idx].elevation,
+        state.tiles[neighborIdx].elevation,
+        Math.hypot(dir.dx, dir.dy),
+        elevationToGradeScale
+      );
       connectedSignedGrades.push(signedGrade);
       if (neighborIdx > idx) {
         maxRoadGrade = Math.max(maxRoadGrade, Math.abs(signedGrade));
         maxRoadCrossfall = Math.max(
           maxRoadCrossfall,
-          computeCrossfallAtStep(state, x, y, nx, ny, state.tiles[idx].elevation, state.tiles[neighborIdx].elevation)
+          computeCrossfallAtStep(
+            state,
+            x,
+            y,
+            nx,
+            ny,
+            state.tiles[idx].elevation,
+            state.tiles[neighborIdx].elevation,
+            elevationToGradeScale
+          )
         );
       }
     }

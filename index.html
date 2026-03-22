@@ -23,6 +23,7 @@
           <p>Coordinate crews, cut firebreaks, and keep the region standing.</p>
           <div class="start-menu-actions">
             <button id="startNewRun" type="button">New Run</button>
+            <button id="startMapEditor" type="button">Map Editor</button>
             <button id="startMenuThreeTest" type="button">3D Test Run</button>
             <button id="startMenuFxLab" type="button">FX Lab</button>
           </div>
@@ -84,19 +85,32 @@
             </section>
             <section class="run-tab-panel" data-tab-panel="terrain">
               <div class="run-settings">
+                <div class="run-settings-card run-settings-card--wide">
+                  <div class="run-settings-title">Map Scenario</div>
+                  <div class="run-scenario-row">
+                    <label class="run-input">
+                      Saved scenario
+                      <select id="runScenarioSelect">
+                        <option value="">No saved scenarios yet</option>
+                      </select>
+                    </label>
+                    <button id="runScenarioLoad" type="button">Load Scenario</button>
+                  </div>
+                  <div id="runScenarioState" class="run-settings-note">Current terrain: Custom</div>
+                </div>
                 <div class="run-settings-card">
                   <div class="run-settings-title">Seed</div>
                   <label class="run-input">
-                    Seed value
-                    <input id="runSeedInput" type="number" inputmode="numeric" min="0" step="1" value="1337" />
+                    Seed code
+                    <input id="runSeedInput" type="text" spellcheck="false" autocomplete="off" value="1337" />
                   </label>
-                  <div class="run-settings-note">Deterministic terrain seed for this run.</div>
+                  <div class="run-settings-note">Encodes the random seed and terrain sliders for this run.</div>
                 </div>
                 <div class="run-settings-card">
                   <div class="run-settings-title">Map Size</div>
                   <div class="run-size-options">
                     <label class="run-size-option">
-                      <input type="radio" name="mapSize" value="medium" checked />
+                      <input type="radio" name="mapSize" value="medium" />
                       <div>
                         <div class="run-size-name">Medium</div>
                         <div class="run-size-meta">64 x 64</div>
@@ -110,7 +124,7 @@
                       </div>
                     </label>
                     <label class="run-size-option">
-                      <input type="radio" name="mapSize" value="colossal" />
+                      <input type="radio" name="mapSize" value="colossal" checked />
                       <div>
                         <div class="run-size-name">Colossal</div>
                         <div class="run-size-meta">256 x 256</div>
@@ -132,7 +146,7 @@
                     </label>
                   </div>
                 </div>
-                <div id="mapGenControls" class="run-settings-slot"></div>
+                <div id="terrainControls" class="run-settings-slot"></div>
                 <div class="run-settings-card run-settings-card--wide">
                   <div class="run-settings-title">Fuel Profiles</div>
                   <div id="fuelProfileGrid" class="fuel-grid" role="table" aria-label="Fuel profile grid"></div>
@@ -237,6 +251,205 @@
               <button id="startThreeTest" type="button">3D Test</button>
               <button id="characterConfirm" disabled>Begin Command</button>
             </div>
+          </div>
+        </div>
+      </div>
+      <div id="mapEditorScreen" class="map-editor-screen hidden">
+        <div class="map-editor-panel">
+          <div class="character-header">
+            <div class="badge">MAP EDITOR</div>
+            <h2>Author Terrain Scenarios</h2>
+            <p>Step through terrain parameters, preview the region in 3D, and save reusable map scenarios.</p>
+          </div>
+          <div class="map-editor-layout">
+            <section class="map-editor-preview-panel">
+              <div class="map-editor-preview-header">
+                <div>
+                  <div class="run-settings-title">3D Preview</div>
+                  <div id="mapEditorPreviewMeta" class="map-editor-preview-meta">Preview idle</div>
+                </div>
+                <button id="mapEditorResetView" type="button">Reset View</button>
+              </div>
+              <div class="three-test-canvas-wrap map-editor-preview-wrap">
+                <canvas id="mapEditorPreviewCanvas"></canvas>
+                <div id="mapEditorPreviewOverlay" class="map-editor-preview-overlay hidden" data-state="loading">
+                  <div class="map-editor-preview-card">
+                    <div id="mapEditorPreviewMessage" class="map-editor-preview-message">Loading preview...</div>
+                    <div class="map-editor-preview-progress">
+                      <div id="mapEditorPreviewProgressBar" class="map-editor-preview-progress-bar"></div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </section>
+            <section class="map-editor-controls-panel">
+              <div class="map-editor-toolbar">
+                <label class="run-checkbox">
+                  <input id="mapEditorAdvancedToggle" type="checkbox" />
+                  Show advanced tuning
+                </label>
+              </div>
+              <div class="run-tabs map-editor-steps" role="tablist">
+                <button type="button" class="run-tab map-editor-step is-active" data-step="scenario" aria-selected="true">
+                  Scenario
+                </button>
+                <button type="button" class="run-tab map-editor-step" data-step="relief" aria-selected="false">
+                  Relief
+                </button>
+                <button type="button" class="run-tab map-editor-step" data-step="carving" aria-selected="false">
+                  Carving
+                </button>
+                <button type="button" class="run-tab map-editor-step" data-step="flooding" aria-selected="false">
+                  Flooding
+                </button>
+                <button type="button" class="run-tab map-editor-step" data-step="rivers" aria-selected="false">
+                  Rivers
+                </button>
+                <button type="button" class="run-tab map-editor-step" data-step="settlements" aria-selected="false">
+                  Settlements
+                </button>
+                <button type="button" class="run-tab map-editor-step" data-step="vegetation" aria-selected="false">
+                  Vegetation
+                </button>
+                <button type="button" class="run-tab map-editor-step" data-step="final" aria-selected="false">
+                  Final
+                </button>
+              </div>
+              <div class="map-editor-step-panels">
+                <section class="map-editor-step-panel is-active" data-step-panel="scenario">
+                  <div class="run-settings">
+                    <div class="run-settings-card run-settings-card--wide">
+                      <div class="run-settings-title">Start Point</div>
+                      <div class="run-scenario-row">
+                        <label class="run-input">
+                          Saved scenario
+                          <select id="mapEditorScenarioList" class="map-editor-scenario-list">
+                            <option value="">No saved scenarios yet</option>
+                          </select>
+                        </label>
+                        <button id="mapEditorScenarioLoad" type="button" disabled>Load Scenario</button>
+                        <button id="mapEditorResetDefaults" type="button">New Scenario</button>
+                      </div>
+                      <div id="mapEditorLegacyNotice" class="run-settings-note hidden"></div>
+                      <div id="mapEditorScenarioEntryStatus" class="run-settings-note">
+                        Import a share code, load a saved scenario, or start a new draft.
+                      </div>
+                    </div>
+                    <div class="run-settings-card">
+                      <div class="run-settings-title">Scenario</div>
+                      <label class="run-input">
+                        Seed code
+                        <div class="character-input-row">
+                          <input id="mapEditorSeedInput" type="text" spellcheck="false" autocomplete="off" value="1337" />
+                          <button id="mapEditorSeedImport" type="button">Import</button>
+                          <button id="mapEditorSeedRandom" type="button">Randomize</button>
+                        </div>
+                      </label>
+                      <div class="run-settings-note">Encodes the random seed, current terrain settings, and scenario name.</div>
+                    </div>
+                    <div class="run-settings-card">
+                      <div class="run-settings-title">Map Size</div>
+                      <div class="run-size-options">
+                        <label class="run-size-option">
+                          <input type="radio" name="mapEditorMapSize" value="medium" />
+                          <div>
+                            <div class="run-size-name">Medium</div>
+                            <div class="run-size-meta">64 x 64</div>
+                          </div>
+                        </label>
+                        <label class="run-size-option">
+                          <input type="radio" name="mapEditorMapSize" value="massive" />
+                          <div>
+                            <div class="run-size-name">Massive</div>
+                            <div class="run-size-meta">128 x 128</div>
+                          </div>
+                        </label>
+                        <label class="run-size-option">
+                          <input type="radio" name="mapEditorMapSize" value="colossal" checked />
+                          <div>
+                            <div class="run-size-name">Colossal</div>
+                            <div class="run-size-meta">256 x 256</div>
+                          </div>
+                        </label>
+                        <label class="run-size-option">
+                          <input type="radio" name="mapEditorMapSize" value="gigantic" />
+                          <div>
+                            <div class="run-size-name">Gigantic</div>
+                            <div class="run-size-meta">512 x 512</div>
+                          </div>
+                        </label>
+                        <label class="run-size-option">
+                          <input type="radio" name="mapEditorMapSize" value="titanic" />
+                          <div>
+                            <div class="run-size-name">Titanic</div>
+                            <div class="run-size-meta">1024 x 1024</div>
+                          </div>
+                        </label>
+                      </div>
+                    </div>
+                    <div id="mapEditorScenarioControls" class="run-settings-card run-settings-card--wide"></div>
+                  </div>
+                </section>
+                <section class="map-editor-step-panel" data-step-panel="relief">
+                  <div id="mapEditorReliefControls" class="run-settings"></div>
+                </section>
+                <section class="map-editor-step-panel" data-step-panel="carving">
+                  <div id="mapEditorCarvingControls" class="run-settings"></div>
+                </section>
+                <section class="map-editor-step-panel" data-step-panel="flooding">
+                  <div id="mapEditorFloodingControls" class="run-settings"></div>
+                </section>
+                <section class="map-editor-step-panel" data-step-panel="rivers">
+                  <div id="mapEditorRiverControls" class="run-settings"></div>
+                </section>
+                <section class="map-editor-step-panel" data-step-panel="settlements">
+                  <div id="mapEditorSettlementControls" class="run-settings"></div>
+                </section>
+                <section class="map-editor-step-panel" data-step-panel="vegetation">
+                  <div id="mapEditorVegetationControls" class="run-settings"></div>
+                </section>
+                <section class="map-editor-step-panel" data-step-panel="final">
+                  <div class="run-settings">
+                    <div class="run-settings-card">
+                      <div class="run-settings-title">Final Preview</div>
+                      <div class="run-settings-note">
+                        Final combines the authored island shape, hydrology, settlement network, and vegetation into the saved scenario.
+                      </div>
+                    </div>
+                    <div class="run-settings-card">
+                      <div class="run-settings-title">Save + Share</div>
+                      <label class="run-input">
+                        Scenario name
+                        <input id="mapEditorScenarioName" type="text" maxlength="40" />
+                      </label>
+                      <label class="run-input">
+                        Share code
+                        <div class="character-input-row">
+                          <input id="mapEditorFinalShareCode" type="text" spellcheck="false" autocomplete="off" readonly />
+                          <button id="mapEditorCopyShareCode" type="button">Copy Share Code</button>
+                        </div>
+                      </label>
+                      <div id="mapEditorShareCodeStatus" class="run-settings-note">Copy the share code or save this terrain as a named scenario.</div>
+                      <div id="mapEditorScenarioStatus" class="run-settings-note">Set a name, then save the current terrain draft.</div>
+                    </div>
+                    <div class="run-settings-card run-settings-card--wide">
+                      <div class="run-settings-title">Save Actions</div>
+                      <div class="map-editor-action-row">
+                        <button id="mapEditorSaveNew" type="button">Save New</button>
+                        <button id="mapEditorOverwrite" type="button" disabled>Overwrite</button>
+                        <button id="mapEditorDelete" type="button" disabled>Delete</button>
+                      </div>
+                      <div class="run-settings-note">Overwrite and delete apply to the currently loaded scenario.</div>
+                    </div>
+                  </div>
+                </section>
+              </div>
+              <div class="character-footer map-editor-footer">
+                <div class="character-footer-actions">
+                  <button id="mapEditorBackToMenu" type="button">Back to Menu</button>
+                </div>
+              </div>
+            </section>
           </div>
         </div>
       </div>

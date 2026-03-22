@@ -1,8 +1,9 @@
-import { FX_LAB_FIRE_CONTROLS, FX_LAB_WATER_CONTROLS } from "./controls.js";
+import { FX_LAB_FIRE_CONTROLS, FX_LAB_TERRAIN_WATER_CONTROLS, FX_LAB_WATER_CONTROLS } from "./controls.js";
 import { FX_LAB_SCENARIOS } from "./scenarios.js";
 import type { FxLabController } from "./controller.js";
 import type { WaterSprayMode } from "../../core/types.js";
 import type { FireFxDebugControls } from "../threeTestFireFx.js";
+import type { TerrainWaterDebugControls } from "../terrainWaterDebug.js";
 import type { WaterFxDebugControls } from "../threeTestUnitFx.js";
 import type { FxLabPlacementMode, FxLabScenarioId } from "./types.js";
 
@@ -14,6 +15,11 @@ export type FxLabPanelHandle = {
   destroy: () => void;
   sync: () => void;
 };
+
+type FxLabToolTab = "scene" | "fire" | "hose" | "river" | "export";
+
+const getRecommendedToolTab = (scenarioId: FxLabScenarioId): FxLabToolTab =>
+  scenarioId === "river-waterfall" ? "river" : scenarioId.startsWith("water-") ? "hose" : "fire";
 
 const formatValue = (value: number, step: number): string => {
   if (step >= 1) {
@@ -45,6 +51,51 @@ export const createFxLabPanel = (mount: HTMLElement, controller: FxLabController
   header.append(badge, title, intro);
   panel.appendChild(header);
 
+  const toolTabBar = document.createElement("div");
+  toolTabBar.className = "fx-lab-tabbar";
+  panel.appendChild(toolTabBar);
+
+  const toolTabButtons = new Map<FxLabToolTab, HTMLButtonElement>();
+  const tabSections = new Map<FxLabToolTab, HTMLElement[]>();
+  let activeToolTab: FxLabToolTab = getRecommendedToolTab(controller.getScenario());
+
+  const registerTabSection = (tab: FxLabToolTab, section: HTMLElement): void => {
+    const sections = tabSections.get(tab) ?? [];
+    sections.push(section);
+    tabSections.set(tab, sections);
+    panel.appendChild(section);
+  };
+
+  const setActiveToolTab = (tab: FxLabToolTab): void => {
+    activeToolTab = tab;
+    toolTabButtons.forEach((button, buttonTab) => {
+      button.setAttribute("aria-pressed", `${buttonTab === tab}`);
+    });
+    tabSections.forEach((sections, sectionTab) => {
+      sections.forEach((section) => {
+        section.hidden = sectionTab !== tab;
+      });
+    });
+  };
+
+  ([
+    { id: "scene", label: "Scene" },
+    { id: "fire", label: "Fire" },
+    { id: "hose", label: "Hose" },
+    { id: "river", label: "River" },
+    { id: "export", label: "Export" }
+  ] as const).forEach((tab) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "fx-lab-tab";
+    button.textContent = tab.label;
+    button.addEventListener("click", () => {
+      setActiveToolTab(tab.id);
+    });
+    toolTabButtons.set(tab.id, button);
+    toolTabBar.appendChild(button);
+  });
+
   const scenarioSection = document.createElement("section");
   scenarioSection.className = "fx-lab-section";
   const scenarioTitle = document.createElement("h3");
@@ -60,7 +111,7 @@ export const createFxLabPanel = (mount: HTMLElement, controller: FxLabController
   const scenarioDescription = document.createElement("p");
   scenarioDescription.className = "fx-lab-section-note";
   scenarioSection.append(scenarioTitle, scenarioSelect, scenarioDescription);
-  panel.appendChild(scenarioSection);
+  registerTabSection("scene", scenarioSection);
 
   const playbackSection = document.createElement("section");
   playbackSection.className = "fx-lab-section";
@@ -91,7 +142,7 @@ export const createFxLabPanel = (mount: HTMLElement, controller: FxLabController
   });
   timeScaleLabel.append(timeScaleText, timeScaleSelect);
   playbackSection.append(playbackTitle, playbackRow, timeScaleLabel);
-  panel.appendChild(playbackSection);
+  registerTabSection("scene", playbackSection);
 
   const placementSection = document.createElement("section");
   placementSection.className = "fx-lab-section";
@@ -112,7 +163,7 @@ export const createFxLabPanel = (mount: HTMLElement, controller: FxLabController
   const placementNote = document.createElement("p");
   placementNote.className = "fx-lab-section-note";
   placementSection.append(placementTitle, placementActions, placementNote);
-  panel.appendChild(placementSection);
+  registerTabSection("scene", placementSection);
 
   const spraySection = document.createElement("section");
   spraySection.className = "fx-lab-section";
@@ -150,20 +201,20 @@ export const createFxLabPanel = (mount: HTMLElement, controller: FxLabController
   const sprayNote = document.createElement("p");
   sprayNote.className = "fx-lab-section-note";
   spraySection.append(sprayTitle, sprayActions, sprayModeLabel, sprayNote);
-  panel.appendChild(spraySection);
+  registerTabSection("scene", spraySection);
 
   const waterSection = document.createElement("section");
   waterSection.className = "fx-lab-section";
   const waterTitle = document.createElement("h3");
-  waterTitle.textContent = "Water Controls";
+  waterTitle.textContent = "Hose Water";
   const waterControlsRoot = document.createElement("div");
   waterControlsRoot.className = "fx-lab-controls";
   const waterResetButton = document.createElement("button");
   waterResetButton.type = "button";
-  waterResetButton.textContent = "Reset Water";
+  waterResetButton.textContent = "Reset Hose Water";
   waterResetButton.className = "fx-lab-section-button";
   waterSection.append(waterTitle, waterControlsRoot, waterResetButton);
-  panel.appendChild(waterSection);
+  registerTabSection("hose", waterSection);
 
   const fireSection = document.createElement("section");
   fireSection.className = "fx-lab-section";
@@ -176,7 +227,20 @@ export const createFxLabPanel = (mount: HTMLElement, controller: FxLabController
   fireResetButton.textContent = "Reset Fire";
   fireResetButton.className = "fx-lab-section-button";
   fireSection.append(fireTitle, fireControlsRoot, fireResetButton);
-  panel.appendChild(fireSection);
+  registerTabSection("fire", fireSection);
+
+  const terrainWaterSection = document.createElement("section");
+  terrainWaterSection.className = "fx-lab-section";
+  const terrainWaterTitle = document.createElement("h3");
+  terrainWaterTitle.textContent = "River / Waterfall";
+  const terrainWaterControlsRoot = document.createElement("div");
+  terrainWaterControlsRoot.className = "fx-lab-controls";
+  const terrainWaterResetButton = document.createElement("button");
+  terrainWaterResetButton.type = "button";
+  terrainWaterResetButton.textContent = "Reset River / Waterfall";
+  terrainWaterResetButton.className = "fx-lab-section-button";
+  terrainWaterSection.append(terrainWaterTitle, terrainWaterControlsRoot, terrainWaterResetButton);
+  registerTabSection("river", terrainWaterSection);
 
   const exportSection = document.createElement("section");
   exportSection.className = "fx-lab-section";
@@ -198,10 +262,32 @@ export const createFxLabPanel = (mount: HTMLElement, controller: FxLabController
   payloadPreview.className = "fx-lab-payload";
   payloadPreview.readOnly = true;
   exportSection.append(exportTitle, exportActions, exportStatus, payloadPreview);
-  panel.appendChild(exportSection);
+  registerTabSection("export", exportSection);
 
   const fireBindings = new Map<keyof FireFxDebugControls & string, ControlBinding>();
   const waterBindings = new Map<keyof WaterFxDebugControls & string, ControlBinding>();
+  const terrainWaterBindings = new Map<keyof TerrainWaterDebugControls & string, ControlBinding>();
+
+  const createControlGroupRoot = (
+    container: HTMLElement,
+    titleText: string,
+    groups: Map<string, HTMLElement>
+  ): HTMLElement => {
+    const existing = groups.get(titleText);
+    if (existing) {
+      return existing;
+    }
+    const group = document.createElement("div");
+    group.className = "fx-lab-control-group";
+    const title = document.createElement("h4");
+    title.textContent = titleText;
+    const body = document.createElement("div");
+    body.className = "fx-lab-controls";
+    group.append(title, body);
+    container.appendChild(group);
+    groups.set(titleText, body);
+    return body;
+  };
 
   const createRangeRow = <K extends string>(
     container: HTMLElement,
@@ -400,6 +486,33 @@ export const createFxLabPanel = (mount: HTMLElement, controller: FxLabController
     waterBindings.set(key, binding);
   });
 
+  const terrainWaterGroups = new Map<string, HTMLElement>();
+  FX_LAB_TERRAIN_WATER_CONTROLS.forEach((definition) => {
+    const key = definition.key;
+    const groupRoot = createControlGroupRoot(terrainWaterControlsRoot, definition.section, terrainWaterGroups);
+    let binding: ControlBinding;
+    if (definition.kind === "range") {
+      binding = createRangeRow(
+        groupRoot,
+        definition.label,
+        definition.description,
+        definition.min,
+        definition.max,
+        definition.step,
+        (value) => {
+          controller.setTerrainWaterDebugControls({ [key]: value } as Partial<TerrainWaterDebugControls>);
+          sync();
+        }
+      );
+    } else {
+      binding = createBooleanRow(groupRoot, definition.label, definition.description, (value) => {
+        controller.setTerrainWaterDebugControls({ [key]: value } as Partial<TerrainWaterDebugControls>);
+        sync();
+      });
+    }
+    terrainWaterBindings.set(key, binding);
+  });
+
   const sync = (): void => {
     const currentScenario = controller.getScenario();
     const placementMode = controller.getPlacementMode();
@@ -444,11 +557,17 @@ export const createFxLabPanel = (mount: HTMLElement, controller: FxLabController
     FX_LAB_WATER_CONTROLS.forEach((definition) => {
       waterBindings.get(definition.key)?.apply(waterControls[definition.key]);
     });
+    const terrainWaterControls = controller.getTerrainWaterDebugControls();
+    FX_LAB_TERRAIN_WATER_CONTROLS.forEach((definition) => {
+      terrainWaterBindings.get(definition.key)?.apply(terrainWaterControls[definition.key]);
+    });
     payloadPreview.value = controller.getOverridePayloadText();
   };
 
   scenarioSelect.addEventListener("change", () => {
-    controller.setScenario(scenarioSelect.value as FxLabScenarioId);
+    const nextScenario = scenarioSelect.value as FxLabScenarioId;
+    controller.setScenario(nextScenario);
+    setActiveToolTab(getRecommendedToolTab(nextScenario));
     sync();
   });
   playPauseButton.addEventListener("click", () => {
@@ -506,6 +625,10 @@ export const createFxLabPanel = (mount: HTMLElement, controller: FxLabController
     controller.resetWaterDebugControls();
     sync();
   });
+  terrainWaterResetButton.addEventListener("click", () => {
+    controller.resetTerrainWaterDebugControls();
+    sync();
+  });
   resetAllButton.addEventListener("click", () => {
     controller.resetAllDebugControls();
     sync();
@@ -520,6 +643,7 @@ export const createFxLabPanel = (mount: HTMLElement, controller: FxLabController
     }
   });
 
+  setActiveToolTab(activeToolTab);
   sync();
 
   return {

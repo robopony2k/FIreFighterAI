@@ -385,6 +385,7 @@ const extinguishSeasonCarryoverFires = (state: WorldState): void => {
   });
   state.tileFire.fill(0);
   state.tileHeat.fill(0);
+  state.tileSuppressionWetness.fill(0);
   state.tileIgniteAt.fill(Number.POSITIVE_INFINITY);
   state.fireScheduledCount = 0;
   clearFireBlocks(state);
@@ -447,6 +448,7 @@ export function extinguishAllFires(state: WorldState, effects: EffectsState): vo
   });
   state.tileFire.fill(0);
   state.tileHeat.fill(0);
+  state.tileSuppressionWetness.fill(0);
   state.tileIgniteAt.fill(Number.POSITIVE_INFINITY);
   state.fireScheduledCount = 0;
   clearFireBlocks(state);

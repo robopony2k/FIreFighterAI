@@ -58,8 +58,8 @@ export const TILE_FUEL_PROFILES: Record<TileType, FuelProfile> = {
     burnRate: 0.38,
     heatOutput: 1.35,
     spreadBoost: 1.05,
-    heatTransferCap: 3.6,
-    heatRetention: 0.92,
+    heatTransferCap: 3,
+    heatRetention: 0.86,
     windFactor: 0.65
   },
   rocky: {
@@ -98,8 +98,8 @@ export const TILE_FUEL_PROFILES: Record<TileType, FuelProfile> = {
     burnRate: 0.3,
     heatOutput: 1.15,
     spreadBoost: 1,
-    heatTransferCap: 4,
-    heatRetention: 0.9,
+    heatTransferCap: 3.4,
+    heatRetention: 0.85,
     windFactor: 0.7
   },
   house: {
@@ -108,8 +108,8 @@ export const TILE_FUEL_PROFILES: Record<TileType, FuelProfile> = {
     burnRate: 0.22,
     heatOutput: 1.65,
     spreadBoost: 1.05,
-    heatTransferCap: 4.5,
-    heatRetention: 0.88,
+    heatTransferCap: 3.8,
+    heatRetention: 0.84,
     windFactor: 0.8
   },
   firebreak: {

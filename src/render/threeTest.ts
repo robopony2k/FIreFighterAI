@@ -67,6 +67,7 @@ import {
   WATERFALL_DEBUG_FLAG_OCEANISH,
   WATERFALL_DEBUG_FLAG_RIVER,
   WATERFALL_DEBUG_FLAG_STEP_OK,
+  WATERFALL_VERTICALITY_MIN,
   WATERFALL_DEBUG_FLAG_WATER
 } from "./threeTestTerrain.js";
 import { createThreeTestFireFx, type SparkMode } from "./threeTestFireFx.js";
@@ -246,6 +247,11 @@ const TOWN_LABEL_UPDATE_INTERVAL_MS = 120;
 const TOWN_LABEL_SCREEN_OFFSET_Y = -24;
 const TOWN_LABEL_CONNECTOR_ORIGIN_X = 12;
 const TOWN_LABEL_MAX_Z_INDEX = 20000;
+const TRUCK_BEACON_LIFT_METERS = 122;
+const TRUCK_BEACON_SCREEN_OFFSET_Y = -18;
+const TRUCK_BEACON_STACK_OFFSET_PX = 20;
+const TRUCK_BEACON_CLUSTER_X_PX = 132;
+const TRUCK_BEACON_CLUSTER_Y_PX = 44;
 const BASE_LABEL_LIFT_METERS = 115;
 const BASE_LABEL_SCREEN_OFFSET_Y = -22;
 const BASE_LABEL_CONNECTOR_ORIGIN_X = 12;
@@ -274,6 +280,7 @@ const CLIMATE_TEMP_DOMAIN_MAX = Math.ceil(
 
 type MinimapMode = "terrain" | "fire" | "moisture";
 
+const clampScalar = (value: number, min: number, max: number): number => Math.max(min, Math.min(max, value));
 const clamp01 = (value: number): number => Math.max(0, Math.min(1, value));
 const mixChannel = (a: number, b: number, t: number): number => a + (b - a) * t;
 const mixRgb = (
@@ -317,6 +324,34 @@ const wrap01 = (value: number): number => {
   const wrapped = value % 1;
   return wrapped < 0 ? wrapped + 1 : wrapped;
 };
+const bilerp = (h00: number, h10: number, h01: number, h11: number, tx: number, ty: number): number => {
+  const hx0 = h00 * (1 - tx) + h10 * tx;
+  const hx1 = h01 * (1 - tx) + h11 * tx;
+  return hx0 * (1 - ty) + hx1 * ty;
+};
+const sampleTerrainHeight = (sample: TerrainSample, tileX: number, tileY: number): number => {
+  const cols = Math.max(1, sample.cols);
+  const rows = Math.max(1, sample.rows);
+  const x = clampScalar(tileX - 0.5, 0, cols - 1);
+  const y = clampScalar(tileY - 0.5, 0, rows - 1);
+  const x0 = Math.floor(x);
+  const y0 = Math.floor(y);
+  const x1 = Math.min(cols - 1, x0 + 1);
+  const y1 = Math.min(rows - 1, y0 + 1);
+  const tx = x - x0;
+  const ty = y - y0;
+  const idx00 = y0 * cols + x0;
+  const idx10 = y0 * cols + x1;
+  const idx01 = y1 * cols + x0;
+  const idx11 = y1 * cols + x1;
+  const h00 = sample.elevations[idx00] ?? 0;
+  const h10 = sample.elevations[idx10] ?? h00;
+  const h01 = sample.elevations[idx01] ?? h00;
+  const h11 = sample.elevations[idx11] ?? h00;
+  return bilerp(h00, h10, h01, h11, tx, ty);
+};
+const toWorldX = (tileX: number, cols: number, width: number): number => (tileX / Math.max(1, cols) - 0.5) * width;
+const toWorldZ = (tileY: number, rows: number, depth: number): number => (tileY / Math.max(1, rows) - 0.5) * depth;
 const formatDebugNumber = (value: number, digits = 2): string =>
   Number.isFinite(value) ? value.toFixed(digits) : "n/a";
 const lerpWrapped01 = (current: number, target: number, alpha: number): number => {
@@ -652,6 +687,9 @@ export const createThreeTest = (
   const townOverlayRoot = document.createElement("div");
   townOverlayRoot.className = "three-test-town-overlay hidden";
   canvas.parentElement?.appendChild(townOverlayRoot);
+  const truckBeaconOverlayRoot = document.createElement("div");
+  truckBeaconOverlayRoot.className = "three-test-truck-beacon-overlay hidden";
+  canvas.parentElement?.appendChild(truckBeaconOverlayRoot);
 
   const cardState = new CardStateModel();
   const worldCardState = new CardStateModel();
@@ -745,6 +783,12 @@ export const createThreeTest = (
     metaText: HTMLSpanElement;
     metaAlert: HTMLSpanElement;
   };
+  type TruckBeaconElements = {
+    root: HTMLButtonElement;
+    connector: HTMLDivElement;
+    name: HTMLSpanElement;
+    status: HTMLSpanElement;
+  };
   type TownCardElements = {
     root: HTMLDivElement;
     pinButton: HTMLButtonElement;
@@ -825,8 +869,20 @@ export const createThreeTest = (
     deployCrewButton: HTMLButtonElement;
     dismissButton: HTMLButtonElement;
   };
+  type TruckBeaconLayoutEntry = {
+    unitId: number;
+    anchorScreenX: number;
+    anchorScreenY: number;
+    baseRootY: number;
+    rootWidth: number;
+    rootHeight: number;
+    zIndex: number;
+    selected: boolean;
+    distanceSq: number;
+  };
 
   const townLabelElements = new Map<number, TownLabelElements>();
+  const truckBeaconElements = new Map<number, TruckBeaconElements>();
   const townAnchors = new Map<number, TownScreenAnchor>();
   let baseAnchor: TownScreenAnchor | null = null;
   const pinnedTownCards = new Map<number, TownCardElements>();
@@ -2009,6 +2065,70 @@ export const createThreeTest = (
     return "Balanced";
   };
 
+  const resolveInterpolatedUnitPosition = (unit: RenderSim["units"][number]): { x: number; y: number } => {
+    const alpha = clamp01(simulationAlpha);
+    return {
+      x: unit.prevX + (unit.x - unit.prevX) * alpha,
+      y: unit.prevY + (unit.y - unit.prevY) * alpha
+    };
+  };
+
+  const selectAndPanToUnit = (unitId: number, tileX: number, tileY: number): void => {
+    playUiCue("click");
+    dispatchPhaseUiCommand({ type: "action", action: "select-unit", payload: { unitId: String(unitId) } });
+    dispatchPhaseUiCommand({
+      type: "minimap-pan",
+      tile: {
+        x: Math.floor(tileX),
+        y: Math.floor(tileY)
+      }
+    });
+  };
+
+  const removeTruckBeacon = (unitId: number): void => {
+    const entry = truckBeaconElements.get(unitId);
+    if (!entry) {
+      return;
+    }
+    entry.connector.remove();
+    entry.root.remove();
+    truckBeaconElements.delete(unitId);
+  };
+
+  const ensureTruckBeacon = (unitId: number): TruckBeaconElements => {
+    const existing = truckBeaconElements.get(unitId);
+    if (existing) {
+      return existing;
+    }
+    const root = document.createElement("button");
+    root.type = "button";
+    root.className = "three-test-truck-beacon hidden";
+    const name = document.createElement("span");
+    name.className = "three-test-truck-beacon-name";
+    const status = document.createElement("span");
+    status.className = "three-test-truck-beacon-status";
+    const connector = document.createElement("div");
+    connector.className = "three-test-truck-beacon-connector";
+    root.append(name, status);
+    root.addEventListener("pointerdown", (event) => {
+      event.stopPropagation();
+    });
+    root.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      const unit = world.units.find((entry) => entry.id === unitId && entry.kind === "truck") ?? null;
+      if (!unit) {
+        return;
+      }
+      const interpolated = resolveInterpolatedUnitPosition(unit);
+      selectAndPanToUnit(unit.id, interpolated.x, interpolated.y);
+    });
+    truckBeaconOverlayRoot.append(root, connector);
+    const created: TruckBeaconElements = { root, connector, name, status };
+    truckBeaconElements.set(unitId, created);
+    return created;
+  };
+
   const ensureUnitTrayCard = (unitId: number): UnitTrayCardElements => {
     const existing = unitTrayCards.get(unitId);
     if (existing) {
@@ -2037,6 +2157,16 @@ export const createThreeTest = (
     root.addEventListener("click", (event) => {
       event.preventDefault();
       event.stopPropagation();
+      const unit = world.units.find((entry) => entry.id === unitId) ?? null;
+      if (!unit) {
+        return;
+      }
+      if (unit.kind === "truck") {
+        const interpolated = resolveInterpolatedUnitPosition(unit);
+        selectAndPanToUnit(unit.id, interpolated.x, interpolated.y);
+        return;
+      }
+      playUiCue("click");
       dispatchPhaseUiCommand({ type: "action", action: "select-unit", payload: { unitId: String(unitId) } });
     });
     unitTrayList.appendChild(root);
@@ -2071,6 +2201,10 @@ export const createThreeTest = (
       const crewMode = unit.kind === "truck" ? unit.crewMode : "foot";
       const sprayMode = unit.kind === "truck" ? getSprayModeLabel(unit.formation) : "n/a";
       card.metrics.textContent = `Move ${getUnitMoveStatus(unit)} | Crew ${crewMode} | Spray ${sprayMode}`;
+      const focusHint =
+        unit.kind === "truck" ? "Click to select and center the camera on this truck." : "Click to select this unit.";
+      card.root.title = `${rosterLabel}. ${focusHint}`;
+      card.root.setAttribute("aria-label", `${rosterLabel}. ${focusHint}`);
       if (unit.kind === "truck") {
         card.actionA.disabled = false;
         card.actionA.textContent = unit.crewMode === "boarded" ? "Deploy" : "Board";
@@ -2189,6 +2323,149 @@ export const createThreeTest = (
     }
   };
 
+  const updateTruckBeaconOverlay = (): void => {
+    if (!lastSample || !lastTerrainSize) {
+      truckBeaconOverlayRoot.classList.add("hidden");
+      truckBeaconElements.forEach((entry) => {
+        entry.root.classList.add("hidden");
+        entry.connector.style.display = "none";
+      });
+      return;
+    }
+
+    const trucks = world.units.filter((unit) => unit.kind === "truck");
+    if (trucks.length <= 0) {
+      truckBeaconOverlayRoot.classList.add("hidden");
+      Array.from(truckBeaconElements.keys()).forEach((unitId) => removeTruckBeacon(unitId));
+      return;
+    }
+
+    truckBeaconOverlayRoot.classList.remove("hidden");
+    const cols = Math.max(1, world.grid.cols);
+    const rows = Math.max(1, world.grid.rows);
+    const width = lastTerrainSize.width;
+    const depth = lastTerrainSize.depth;
+    const heightScale = getSampleHeightScale(cols, rows);
+    const labelLift = TRUCK_BEACON_LIFT_METERS / Math.max(0.001, TILE_SIZE);
+    const viewportWidth = Math.max(1, hudState.viewport.width);
+    const viewportHeight = Math.max(1, hudState.viewport.height);
+    const beaconWorld = new THREE.Vector3();
+    const beaconProjected = new THREE.Vector3();
+    const liveIds = new Set<number>();
+    const layoutEntries: TruckBeaconLayoutEntry[] = [];
+
+    for (const unit of trucks) {
+      liveIds.add(unit.id);
+      const entry = ensureTruckBeacon(unit.id);
+      const rosterLabel = unit.rosterId !== null ? getUnitLabel(unit.rosterId) : getUnitLabel(unit.id);
+      const moveStatus = getUnitMoveStatus(unit);
+      const selected = world.selectedUnitIds.includes(unit.id);
+      const interpolated = resolveInterpolatedUnitPosition(unit);
+      const worldX = toWorldX(interpolated.x, cols, width);
+      const worldZ = toWorldZ(interpolated.y, rows, depth);
+      const worldY = sampleTerrainHeight(lastSample, interpolated.x, interpolated.y) * heightScale;
+      beaconWorld.set(worldX, worldY + labelLift, worldZ);
+      beaconProjected.copy(beaconWorld).project(camera);
+      const isVisible =
+        beaconProjected.z > -1 &&
+        beaconProjected.z < 1 &&
+        beaconProjected.x >= -1.1 &&
+        beaconProjected.x <= 1.1 &&
+        beaconProjected.y >= -1.2 &&
+        beaconProjected.y <= 1.2;
+      entry.name.textContent = rosterLabel;
+      entry.status.textContent = moveStatus;
+      entry.status.dataset.state = moveStatus.toLowerCase();
+      entry.root.classList.toggle("is-selected", selected);
+      entry.root.title = `${rosterLabel}. ${moveStatus}. Click to select and center the camera.`;
+      entry.root.setAttribute(
+        "aria-label",
+        `${rosterLabel}. ${moveStatus}. Click to select and center the camera.`
+      );
+      if (!isVisible) {
+        entry.root.classList.add("hidden");
+        entry.connector.style.display = "none";
+        continue;
+      }
+
+      const screenX = (beaconProjected.x * 0.5 + 0.5) * viewportWidth;
+      const screenY = (-beaconProjected.y * 0.5 + 0.5) * viewportHeight;
+      const depth01 = clamp01((beaconProjected.z + 1) * 0.5);
+      const zIndex = Math.max(1, Math.min(TOWN_LABEL_MAX_Z_INDEX, Math.round((1 - depth01) * TOWN_LABEL_MAX_Z_INDEX)));
+      entry.root.classList.remove("hidden");
+      const rootWidth = Math.max(120, entry.root.offsetWidth);
+      const rootHeight = Math.max(30, entry.root.offsetHeight);
+      layoutEntries.push({
+        unitId: unit.id,
+        anchorScreenX: screenX,
+        anchorScreenY: screenY,
+        baseRootY: screenY + TRUCK_BEACON_SCREEN_OFFSET_Y,
+        rootWidth,
+        rootHeight,
+        zIndex,
+        selected,
+        distanceSq: camera.position.distanceToSquared(beaconWorld)
+      });
+    }
+
+    Array.from(truckBeaconElements.keys()).forEach((unitId) => {
+      if (!liveIds.has(unitId)) {
+        removeTruckBeacon(unitId);
+      }
+    });
+
+    if (layoutEntries.length <= 0) {
+      truckBeaconOverlayRoot.classList.add("hidden");
+      return;
+    }
+
+    layoutEntries.sort((a, b) => {
+      if (a.selected !== b.selected) {
+        return a.selected ? -1 : 1;
+      }
+      if (a.distanceSq !== b.distanceSq) {
+        return a.distanceSq - b.distanceSq;
+      }
+      return a.unitId - b.unitId;
+    });
+
+    const placedEntries: Array<{ anchorScreenX: number; baseRootY: number; stackDepth: number }> = [];
+    for (const layout of layoutEntries) {
+      const entry = truckBeaconElements.get(layout.unitId);
+      if (!entry) {
+        continue;
+      }
+      let stackDepth = 0;
+      for (const placed of placedEntries) {
+        const sameCluster =
+          Math.abs(layout.anchorScreenX - placed.anchorScreenX) <= TRUCK_BEACON_CLUSTER_X_PX &&
+          Math.abs(layout.baseRootY - placed.baseRootY) <= TRUCK_BEACON_CLUSTER_Y_PX;
+        if (sameCluster) {
+          stackDepth = Math.max(stackDepth, placed.stackDepth + 1);
+        }
+      }
+      const rootX = layout.anchorScreenX - layout.rootWidth * 0.5;
+      const rootY = layout.baseRootY - stackDepth * TRUCK_BEACON_STACK_OFFSET_PX;
+      entry.root.style.zIndex = `${layout.selected ? layout.zIndex + 2 : layout.zIndex}`;
+      entry.root.style.transform = `translate3d(${rootX.toFixed(1)}px, ${rootY.toFixed(1)}px, 0)`;
+      const connectorStartY = Math.max(rootY + layout.rootHeight - 3, rootY + 10);
+      const connectorLength = layout.anchorScreenY - connectorStartY;
+      if (connectorLength >= 6) {
+        entry.connector.style.display = "block";
+        entry.connector.style.height = `${connectorLength.toFixed(1)}px`;
+        entry.connector.style.zIndex = `${Math.max(1, layout.zIndex - 1)}`;
+        entry.connector.style.transform = `translate3d(${(layout.anchorScreenX - 1).toFixed(1)}px, ${connectorStartY.toFixed(1)}px, 0)`;
+      } else {
+        entry.connector.style.display = "none";
+      }
+      placedEntries.push({
+        anchorScreenX: layout.anchorScreenX,
+        baseRootY: layout.baseRootY,
+        stackDepth
+      });
+    }
+  };
+
   const getTownCenterX = (town: Town): number => (Number.isFinite(town.cx) ? town.cx : town.x);
   const getTownCenterY = (town: Town): number => (Number.isFinite(town.cy) ? town.cy : town.y);
 
@@ -2233,7 +2510,7 @@ export const createThreeTest = (
     const worldX = ((clampedX + 0.5) / cols - 0.5) * lastTerrainSize.width;
     const worldZ = ((clampedY + 0.5) / rows - 0.5) * lastTerrainSize.depth;
     const idx = indexFor(world.grid, clampedX, clampedY);
-    const worldY = (world.tileElevation[idx] ?? 0) * getTerrainHeightScale(cols, rows);
+    const worldY = (world.tileElevation[idx] ?? 0) * getSampleHeightScale(cols, rows);
     const target = new THREE.Vector3(worldX, worldY, worldZ);
     const currentDistance = Math.max(0.001, camera.position.distanceTo(controls.target));
     const desiredDistance = Math.max(
@@ -3088,7 +3365,7 @@ export const createThreeTest = (
     return hoverDebugToneRank[next] > hoverDebugToneRank[current] ? next : current;
   };
 
-  const formatWaterfallStatus = (flags: number, debug: WaterfallDebugData): string => {
+  const formatWaterfallStatus = (flags: number, debug: WaterfallDebugData, sampleIdx: number): string => {
     if ((flags & WATERFALL_DEBUG_FLAG_WATER) === 0) {
       return "dry";
     }
@@ -3105,6 +3382,14 @@ export const createThreeTest = (
       parts.push(`best<${formatDebugNumber(debug.minDrop, 2)}`);
     } else if ((flags & WATERFALL_DEBUG_FLAG_LOCAL_DROP_OK) === 0) {
       parts.push(`local<${formatDebugNumber(debug.localDropThreshold, 2)}`);
+    } else if (Number.isFinite(debug.verticality[sampleIdx]) && (debug.verticality[sampleIdx] ?? 0) < WATERFALL_VERTICALITY_MIN) {
+      parts.push(`vertical<${formatDebugNumber(WATERFALL_VERTICALITY_MIN, 2)}`);
+    } else if (
+      Number.isFinite(debug.runToPool[sampleIdx]) &&
+      Number.isFinite(debug.runLimit[sampleIdx]) &&
+      (debug.runToPool[sampleIdx] ?? 0) > (debug.runLimit[sampleIdx] ?? Number.POSITIVE_INFINITY)
+    ) {
+      parts.push(`run>${formatDebugNumber(debug.runLimit[sampleIdx] ?? Number.NaN, 2)}`);
     } else {
       parts.push("pass");
     }
@@ -3217,7 +3502,10 @@ export const createThreeTest = (
       lines.push(
         `sample=${sampleCol},${sampleRow} step=${formatDebugNumber(debug.stepStrength[sampleIdx] ?? Number.NaN, 2)} best=${formatDebugNumber(debug.bestNeighborDrop[sampleIdx] ?? Number.NaN, 2)} local=${formatDebugNumber(debug.localDrop[sampleIdx] ?? Number.NaN, 2)}`
       );
-      lines.push(`status=${formatWaterfallStatus(flags, debug)}`);
+      lines.push(
+        `profile immediate=${formatDebugNumber(debug.immediateDrop[sampleIdx] ?? Number.NaN, 2)} total=${formatDebugNumber(debug.totalDrop[sampleIdx] ?? Number.NaN, 2)} vertical=${formatDebugNumber(debug.verticality[sampleIdx] ?? Number.NaN, 2)} run=${formatDebugNumber(debug.runToPool[sampleIdx] ?? Number.NaN, 2)}/${formatDebugNumber(debug.runLimit[sampleIdx] ?? Number.NaN, 2)}`
+      );
+      lines.push(`status=${formatWaterfallStatus(flags, debug, sampleIdx)}`);
     } else {
       lines.push("status=no sampled waterfall debug");
     }
@@ -3229,7 +3517,7 @@ export const createThreeTest = (
       lines.push("fx=none emitted");
     }
     if (debug) {
-      let summary = `emit=${debug.emittedCount}/${debug.candidateCount} clusters=${debug.clusterCount}`;
+      let summary = `emit=${debug.emittedCount}/${debug.candidateCount} clusters=${debug.clusterCount} lowVert=${debug.lowVerticalityRejectedCount} longRun=${debug.longRunRejectedCount}`;
       const riverStats = context.terrainWater?.river?.debugRiverDomainStats;
       if (riverStats) {
         summary += ` anchorMax=${formatDebugNumber(riverStats.waterfallAnchorErrorMax, 3)}`;
@@ -3380,7 +3668,7 @@ export const createThreeTest = (
     if (!(target instanceof Node)) {
       return;
     }
-    if (dockOverlayRoot.contains(target) || unitTrayRoot.contains(target)) {
+    if (dockOverlayRoot.contains(target) || unitTrayRoot.contains(target) || truckBeaconOverlayRoot.contains(target)) {
       return;
     }
     if (fireAlertCardElements.root.contains(target)) {
@@ -3478,7 +3766,7 @@ export const createThreeTest = (
     const rows = Math.max(1, world.grid.rows);
     const width = lastTerrainSize.width;
     const depth = lastTerrainSize.depth;
-    const heightScale = getTerrainHeightScale(cols, rows);
+    const heightScale = getSampleHeightScale(cols, rows);
     const labelLift = TOWN_LABEL_LIFT_METERS / Math.max(0.001, TILE_SIZE);
     const baseLabelLift = BASE_LABEL_LIFT_METERS / Math.max(0.001, TILE_SIZE);
     const viewportWidth = Math.max(1, hudState.viewport.width);
@@ -3907,7 +4195,15 @@ export const createThreeTest = (
   const applyDomEnvironmentTheme = (theme: ReturnType<typeof buildEnvironmentPalette>["hud"]["dom"]): void => {
     const overlayRoot = canvas.closest(".three-test-overlay") as HTMLElement | null;
     const cardRoot = canvas.closest(".three-test-card") as HTMLElement | null;
-    const targets = [overlayRoot, cardRoot, canvas.parentElement, townOverlayRoot, dockOverlayRoot, unitTrayRoot];
+    const targets = [
+      overlayRoot,
+      cardRoot,
+      canvas.parentElement,
+      townOverlayRoot,
+      truckBeaconOverlayRoot,
+      dockOverlayRoot,
+      unitTrayRoot
+    ];
     targets.forEach((target) => {
       if (!target) {
         return;
@@ -3951,6 +4247,11 @@ export const createThreeTest = (
   let houseAssets: HouseAssets | null = getHouseAssetsCache();
   let firestationAsset: FirestationAsset | null = getFirestationAssetCache();
   let lastSample: TerrainSample | null = null;
+  const getSampleHeightScale = (
+    cols: number,
+    rows: number,
+    sample: Pick<TerrainSample, "heightScaleMultiplier"> | null = lastSample
+  ): number => getTerrainHeightScale(cols, rows, sample?.heightScaleMultiplier ?? 1);
   let lastTerrainWater: TerrainWaterData | null = null;
   let assetRebuildPending = false;
   let lastTerrainSize: { width: number; depth: number } | null = null;
@@ -4370,7 +4671,7 @@ export const createThreeTest = (
     const hx0 = h00 * (1 - tx) + h10 * tx;
     const hx1 = h01 * (1 - tx) + h11 * tx;
     const elevation = hx0 * (1 - ty) + hx1 * ty;
-    return elevation * getTerrainHeightScale(cols, rows);
+    return elevation * getSampleHeightScale(cols, rows);
   };
 
   const toWorldCommandPoint = (tileX: number, tileY: number, lift: number): THREE.Vector3 | null => {
@@ -4606,7 +4907,7 @@ export const createThreeTest = (
     const elevations = sample.elevations;
     const width = lastTerrainSize.width;
     const depth = lastTerrainSize.depth;
-    const heightScale = getTerrainHeightScale(cols, rows);
+    const heightScale = getSampleHeightScale(cols, rows, sample);
     const toWorldX = (tileX: number): number => ((tileX + 0.5) / cols - 0.5) * width;
     const toWorldZ = (tileY: number): number => ((tileY + 0.5) / rows - 0.5) * depth;
     const clampToRange = (value: number, min: number, max: number): number => Math.max(min, Math.min(max, value));
@@ -5016,6 +5317,7 @@ export const createThreeTest = (
     lastStructureOverlayKey = "";
     lastStructureRevision = -1;
     townLabelElements.clear();
+    truckBeaconElements.clear();
     pinnedTownCards.clear();
     dockCards.clear();
     unitTrayCards.clear();
@@ -5023,6 +5325,7 @@ export const createThreeTest = (
     focusedTownId = null;
     baseFocused = false;
     townOverlayRoot.remove();
+    truckBeaconOverlayRoot.remove();
     dockOverlayRoot.remove();
     unitTrayRoot.remove();
     sparkDebugOverlay.remove();
@@ -5313,6 +5616,7 @@ export const createThreeTest = (
     updateUnitCommandVisuals();
     updateScoreFlowPulses(time);
     updateTownOverlay(time);
+    updateTruckBeaconOverlay();
     updateDockOverlay(time);
     updateUnitTrayOverlay(time);
     refreshRoadOverlayIfNeeded();
@@ -5545,7 +5849,7 @@ export const createThreeTest = (
     const worldX = ((clampedX + 0.5) / cols - 0.5) * lastTerrainSize.width;
     const worldZ = ((clampedY + 0.5) / rows - 0.5) * lastTerrainSize.depth;
     const idx = indexFor(world.grid, clampedX, clampedY);
-    const worldY = (world.tileElevation[idx] ?? 0) * getTerrainHeightScale(cols, rows);
+    const worldY = (world.tileElevation[idx] ?? 0) * getSampleHeightScale(cols, rows);
     const cameraOffset = camera.position.clone().sub(controls.target);
     controls.target.set(worldX, worldY, worldZ);
     camera.position.copy(controls.target.clone().add(cameraOffset));
@@ -5834,7 +6138,7 @@ export const createThreeTest = (
         }
       }
     }
-    const heightScale = getTerrainHeightScale(sample.cols, sample.rows);
+    const heightScale = getSampleHeightScale(sample.cols, sample.rows, sample);
     const tileTexture = buildTileTexture(
       sample,
       sampleCols,

@@ -27,7 +27,7 @@ import { asRenderSim, buildRenderTerrainSample } from "../render/simView.js";
 import { createRenderState, syncRenderState } from "../render/renderState.js";
 import { initPhaseUI } from "../ui/phase/index.js";
 import { bindPhaseUi } from "../ui/phase/bindings.js";
-import { buildMapGenControls } from "../ui/mapgen-controls.js";
+import { getMapEditorRefs, initMapEditor, type MapEditorHandle } from "../ui/map-editor.js";
 import { getOverlayRefs, updateOverlay } from "../ui/overlay.js";
 import { saveLeaderboard } from "../persistence/leaderboard.js";
 import { loadFuelProfileOverrides } from "../persistence/fuelProfiles.js";
@@ -39,6 +39,7 @@ import { seedStartingRoster } from "../sim/units.js";
 import { PHASES } from "../core/time.js";
 import { DEFAULT_MAP_SIZE, DEFAULT_RUN_OPTIONS, DEFAULT_RUN_SEED, normalizeFireSettings } from "../ui/run-config.js";
 import type { NewRunConfig } from "../ui/run-config.js";
+import { cloneTerrainRecipe, getTerrainHeightScaleMultiplier } from "../mapgen/terrainProfile.js";
 import type { GameUiSnapshot } from "../ui/phase/types.js";
 import { createRenderBackend, type RenderBackend } from "./renderBackend.js";
 import { updatePerfCounter } from "./perfDiagnostics.js";
@@ -120,7 +121,7 @@ const cloneRunConfig = (config: NewRunConfig): NewRunConfig => ({
   options: {
     ...DEFAULT_RUN_OPTIONS,
     ...config.options,
-    mapGen: { ...DEFAULT_RUN_OPTIONS.mapGen, ...config.options.mapGen },
+    terrain: cloneTerrainRecipe(config.options.terrain ?? DEFAULT_RUN_OPTIONS.terrain),
     fire: { ...DEFAULT_RUN_OPTIONS.fire, ...config.options.fire },
     fuelProfiles: { ...(config.options.fuelProfiles ?? {}) }
   }
@@ -138,7 +139,7 @@ const resolveRunConfig = (defaults: NewRunConfig, persisted?: NewRunConfig | nul
     options: {
       ...defaults.options,
       ...persisted.options,
-      mapGen: { ...defaults.options.mapGen, ...persisted.options.mapGen },
+      terrain: cloneTerrainRecipe(persisted.options.terrain ?? defaults.options.terrain),
       fire: { ...defaults.options.fire, ...persisted.options.fire },
       fuelProfiles: { ...(persisted.options.fuelProfiles ?? {}) }
     }
@@ -165,6 +166,7 @@ export const createAppRuntime = (): AppRuntime => {
     };
   };
   let activeMapSize: MapSizeId = DEFAULT_MAP_SIZE;
+  let activeTerrainSource = cloneTerrainRecipe(DEFAULT_RUN_OPTIONS.terrain);
   const grid = buildGrid(activeMapSize);
   
   const params = new URLSearchParams(window.location.search);
@@ -298,8 +300,8 @@ export const createAppRuntime = (): AppRuntime => {
   const phaseUiOriginalParent = phaseUiRoot?.parentNode ?? null;
   const phaseUiOriginalNextSibling = phaseUiRoot?.nextSibling ?? null;
   const overlayRefs = getOverlayRefs();
-  buildMapGenControls();
   const characterScreen = document.getElementById("characterScreen") as HTMLDivElement;
+  const mapEditorScreen = document.getElementById("mapEditorScreen") as HTMLDivElement;
   const startMenu = document.getElementById("startMenu") as HTMLDivElement | null;
   const startNewRunButton = document.getElementById("startNewRun") as HTMLButtonElement | null;
   const canvasWrap = canvas.parentElement as HTMLElement | null;
@@ -313,7 +315,9 @@ export const createAppRuntime = (): AppRuntime => {
   const threeTestEndRunButton = document.getElementById("threeTestEndRun") as HTMLButtonElement | null;
   const threeTestMainMenuButton = document.getElementById("threeTestMainMenu") as HTMLButtonElement | null;
   const isMenuActive = (): boolean =>
-    (startMenu ? !startMenu.classList.contains("hidden") : false) || !characterScreen.classList.contains("hidden");
+    (startMenu ? !startMenu.classList.contains("hidden") : false) ||
+    !characterScreen.classList.contains("hidden") ||
+    !mapEditorScreen.classList.contains("hidden");
   const syncMusicContext = (): void => {
     if (isHeadless()) {
       return;
@@ -698,13 +702,15 @@ export const createAppRuntime = (): AppRuntime => {
   };
   
   const buildThreeTestSample = (fastUpdate = false) => {
+    const terrainHeightScaleMultiplier = getTerrainHeightScaleMultiplier(activeTerrainSource, activeMapSize);
     const sample = buildRenderTerrainSample(
       state,
       getThreeTestTreeTypeMap(!fastUpdate),
       inputState.debugTypeColors,
       true,
       fastUpdate,
-      true
+      true,
+      terrainHeightScaleMultiplier
     );
     // Climate tinting is shader-driven in 3D; avoid terrain texture rebuild pressure from moisture deltas.
     sample.tileMoisture = undefined;
@@ -885,6 +891,7 @@ export const createAppRuntime = (): AppRuntime => {
         state.grid = buildGrid(mapSize);
         syncRenderState(renderState, state.grid);
       }
+      activeTerrainSource = cloneTerrainRecipe(config.options.terrain);
       resetTerrainCaches();
       resetState(state, seed);
       rng.setState(seed);
@@ -896,7 +903,7 @@ export const createAppRuntime = (): AppRuntime => {
         state,
         rng,
         (message, progress) => updateMapgenOverlay(message, progress),
-        config.options.mapGen,
+        config.options.terrain,
         debug
       );
     } finally {
@@ -973,6 +980,7 @@ export const createAppRuntime = (): AppRuntime => {
     if (!threeTestOverlay || !threeTestCanvas || !threeTestPhaseHudMount) {
       return;
     }
+    mapEditor?.close();
     closeThreeTest(true);
     fxLabPanel?.destroy();
     fxLabPanel = null;
@@ -1219,6 +1227,7 @@ export const createAppRuntime = (): AppRuntime => {
     if (!titleScreenEnabled || titleScreen) {
       return;
     }
+    mapEditor?.close();
     const mount = appRoot ?? document.body;
     titleScreenVisible = true;
     titleScreen = mountTitleScreen({
@@ -1245,12 +1254,14 @@ export const createAppRuntime = (): AppRuntime => {
           startNewRunButton.click();
           return;
         }
-        startMenu?.classList.remove("hidden");
-        state.paused = true;
-        syncMusicContext();
+        showFallbackMenu();
+      },
+      onMapEditor: () => {
+        openMapEditor();
       },
       onFxLab: () => {
         destroyTitleScreen();
+        mapEditor?.close();
         startMenu?.classList.add("hidden");
         characterScreen.classList.add("hidden");
         void openFxLab();
@@ -1275,6 +1286,7 @@ export const createAppRuntime = (): AppRuntime => {
     if (isGenerating) {
       return;
     }
+    mapEditor?.close();
     isGenerating = true;
     const { seed, mapSize, characterId, callsign } = config;
     try {
@@ -1288,6 +1300,7 @@ export const createAppRuntime = (): AppRuntime => {
         state.grid = buildGrid(mapSize);
         syncRenderState(renderState, state.grid);
       }
+      activeTerrainSource = cloneTerrainRecipe(config.options.terrain);
       resetTerrainCaches();
       resetState(state, seed);
       state.fireSettings = normalizeFireSettings(config.options.fire);
@@ -1304,7 +1317,7 @@ export const createAppRuntime = (): AppRuntime => {
       updateMapgenOverlay("Reticulating splines...", 0);
       await generateMap(state, rng, (message, progress) => {
         updateMapgenOverlay(message, progress);
-      }, config.options.mapGen);
+      }, config.options.terrain);
       state.paused = false;
     } finally {
       hideMapgenOverlay();
@@ -1326,7 +1339,7 @@ export const createAppRuntime = (): AppRuntime => {
     mapSize: activeMapSize,
     options: {
       ...DEFAULT_RUN_OPTIONS,
-      mapGen: { ...DEFAULT_RUN_OPTIONS.mapGen },
+      terrain: cloneTerrainRecipe(DEFAULT_RUN_OPTIONS.terrain),
       fire: { ...DEFAULT_RUN_OPTIONS.fire },
       fuelProfiles: { ...persistedFuelProfiles }
     },
@@ -1334,6 +1347,33 @@ export const createAppRuntime = (): AppRuntime => {
     callsign: state.campaign.callsign
   };
   const initialRunConfig: NewRunConfig = resolveRunConfig(defaultRunConfig, persistedLastRunConfig);
+  activeTerrainSource = cloneTerrainRecipe(initialRunConfig.options.terrain);
+  let mapEditor: MapEditorHandle | null = null;
+  const getLatestRunConfig = (): NewRunConfig => resolveRunConfig(defaultRunConfig, loadLastRunConfig());
+  const showFallbackMenu = (): void => {
+    startMenu?.classList.remove("hidden");
+    characterScreen.classList.add("hidden");
+    mapEditor?.close();
+    state.paused = true;
+    syncMusicContext();
+  };
+  mapEditor = initMapEditor(getMapEditorRefs(), {
+    onBackToMenu: () => {
+      if (titleScreenEnabled) {
+        showTitleScreen();
+        return;
+      }
+      showFallbackMenu();
+    }
+  });
+  const openMapEditor = (): void => {
+    destroyTitleScreen();
+    startMenu?.classList.add("hidden");
+    characterScreen.classList.add("hidden");
+    mapEditor?.open(getLatestRunConfig());
+    state.paused = true;
+    syncMusicContext();
+  };
 
   const renderBackend = createRenderBackend(() => getConfiguredRenderBackend(), {
     renderLegacy2d: (alpha: number) => {
@@ -1445,6 +1485,7 @@ export const createAppRuntime = (): AppRuntime => {
           canvas,
           onNewRun: resetGame,
           onThreeTest: openThreeTest,
+          onMapEditor: openMapEditor,
           onFxLab: () => openFxLab(),
           overlayRefs,
           showStartMenuOnBind: false,
@@ -1462,6 +1503,7 @@ export const createAppRuntime = (): AppRuntime => {
       }
       startMenu?.classList.add("hidden");
       characterScreen.classList.add("hidden");
+      mapEditorScreen.classList.add("hidden");
       state.paused = true;
       syncMusicContext();
       showTitleScreen();
@@ -1481,6 +1523,7 @@ export const createAppRuntime = (): AppRuntime => {
           canvas,
           onNewRun: resetGame,
           onThreeTest: openThreeTest,
+          onMapEditor: openMapEditor,
           onFxLab: () => openFxLab(),
           overlayRefs,
           showStartMenuOnBind: !initialFxLabEnabled,
@@ -1499,6 +1542,7 @@ export const createAppRuntime = (): AppRuntime => {
       if (initialFxLabEnabled) {
         startMenu?.classList.add("hidden");
         characterScreen.classList.add("hidden");
+        mapEditorScreen.classList.add("hidden");
         state.paused = true;
         syncMusicContext();
       }

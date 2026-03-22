@@ -1,10 +1,10 @@
 import { CHARACTERS, type CharacterId } from "../core/characters.js";
 import { MAP_SIZE_PRESETS, type MapSizeId } from "../core/config.js";
 import type { FireSettings } from "../core/types.js";
-import { DEFAULT_MAP_GEN_SETTINGS, type MapGenSettings } from "../mapgen/settings.js";
 import { sanitizeFuelProfileOverrides } from "./fuelProfiles.js";
 import { DEFAULT_MAP_SIZE, DEFAULT_RUN_OPTIONS, DEFAULT_RUN_SEED, normalizeFireSettings } from "../ui/run-config.js";
 import type { NewRunConfig } from "../ui/run-config.js";
+import { resolveTerrainProfile, sanitizeTerrainRecipe } from "../mapgen/terrainProfile.js";
 
 const LAST_RUN_CONFIG_KEY = "fireline.lastRunConfig";
 const CHARACTER_IDS = new Set<CharacterId>(CHARACTERS.map((character) => character.id));
@@ -44,28 +44,6 @@ const sanitizeCallsign = (value: unknown): string => {
   return value.trim().slice(0, 24);
 };
 
-const sanitizeMapGenSettings = (value: unknown): MapGenSettings => {
-  const sanitized: MapGenSettings = {
-    ...DEFAULT_RUN_OPTIONS.mapGen,
-    road: { ...DEFAULT_RUN_OPTIONS.mapGen.road }
-  };
-  if (!isRecord(value)) {
-    return sanitized;
-  }
-  const numericDefaults = DEFAULT_MAP_GEN_SETTINGS as Record<string, number | string | object>;
-  Object.keys(numericDefaults).forEach((key) => {
-    const fallback = numericDefaults[key];
-    if (typeof fallback !== "number") {
-      return;
-    }
-    const parsed = toFiniteNumber(value[key]);
-    if (parsed !== null) {
-      (sanitized as unknown as Record<string, number>)[key] = parsed;
-    }
-  });
-  return sanitized;
-};
-
 const sanitizeFireSettings = (value: unknown): FireSettings =>
   normalizeFireSettings(isRecord(value) ? (value as Partial<FireSettings>) : undefined);
 
@@ -82,7 +60,9 @@ const sanitizeNewRunConfig = (value: unknown): NewRunConfig | null => {
     options: {
       ...DEFAULT_RUN_OPTIONS,
       unlimitedMoney: typeof options.unlimitedMoney === "boolean" ? options.unlimitedMoney : DEFAULT_RUN_OPTIONS.unlimitedMoney,
-      mapGen: sanitizeMapGenSettings(options.mapGen),
+      terrain: isRecord(options.terrain)
+        ? sanitizeTerrainRecipe(options.terrain)
+        : resolveTerrainProfile(isRecord(options.mapGen) ? options.mapGen : undefined, sanitizeMapSize(value.mapSize ?? DEFAULT_MAP_SIZE)).recipe,
       fire: sanitizeFireSettings(options.fire),
       fuelProfiles: sanitizeFuelProfileOverrides(options.fuelProfiles)
     }

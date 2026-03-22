@@ -5,7 +5,7 @@ import {
   type RuntimeSettings
 } from "../persistence/runtimeSettings.js";
 
-type TitleMenuAction = "new-game" | "fx-lab" | "settings" | "high-score" | "credits" | "quit";
+type TitleMenuAction = "new-game" | "map-editor" | "fx-lab" | "settings" | "high-score" | "credits" | "quit";
 
 type TitleMenuOption = {
   id: TitleMenuAction;
@@ -62,6 +62,7 @@ export type TitleRuntimeSettingsControls = {
 export type TitleScreenDeps = {
   mount?: HTMLElement;
   onNewGame: () => void;
+  onMapEditor: () => void;
   onFxLab: () => void;
   onQuit: () => void;
   audioControls?: TitleAudioControls;
@@ -79,6 +80,7 @@ const TITLE_FONT_WEIGHT = 800;
 const TITLE_FONT_FAMILY = '"Impact", "Arial Black", "Franklin Gothic Heavy", "Segoe UI", sans-serif';
 const TITLE_MENU_OPTIONS: readonly TitleMenuOption[] = [
   { id: "new-game", label: "New Game" },
+  { id: "map-editor", label: "Map Editor" },
   { id: "fx-lab", label: "FX Lab" },
   { id: "settings", label: "Settings" },
   { id: "high-score", label: "High Score" },
@@ -932,7 +934,7 @@ export const showTitleScreen = (deps: TitleScreenDeps): TitleScreenHandle => {
     setSelectedIndex(selectedIndex, true);
   };
 
-  const showPanel = (action: Exclude<TitleMenuAction, "new-game" | "fx-lab" | "quit">): void => {
+  const showPanel = (action: Exclude<TitleMenuAction, "new-game" | "map-editor" | "fx-lab" | "quit">): void => {
     clearPanelDisposers();
     panelBody.innerHTML = "";
     if (action === "settings") {
@@ -980,6 +982,10 @@ export const showTitleScreen = (deps: TitleScreenDeps): TitleScreenHandle => {
   const activate = (action: TitleMenuAction): void => {
     if (action === "new-game") {
       deps.onNewGame();
+      return;
+    }
+    if (action === "map-editor") {
+      deps.onMapEditor();
       return;
     }
     if (action === "fx-lab") {

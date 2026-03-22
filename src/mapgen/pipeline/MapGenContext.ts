@@ -3,6 +3,7 @@ import type { WorldState } from "../../core/state.js";
 import type { MapGenDebug, MapGenDebugPhase, MapGenReporter } from "../mapgenTypes.js";
 import type { MapGenSettings } from "../settings.js";
 import { DEFAULT_MAP_GEN_SETTINGS, DEFAULT_ROAD_GEN_SETTINGS } from "../settings.js";
+import { mapSizeIdFromDimensions, resolveTerrainProfile, type ResolvedTerrainProfile, type TerrainRecipe } from "../terrainProfile.js";
 import { DirtyRegionTracker } from "./DirtyRegionTracker.js";
 import type { SettlementPlacementResult } from "../communities.js";
 
@@ -14,6 +15,7 @@ export type SettlementStageData = {
 export class MapGenContext {
   readonly state: WorldState;
   readonly rng: RNG;
+  readonly profile: ResolvedTerrainProfile;
   readonly settings: MapGenSettings;
   readonly report?: MapGenReporter;
   readonly debug?: MapGenDebug;
@@ -53,19 +55,20 @@ export class MapGenContext {
     state: WorldState,
     rng: RNG,
     report: MapGenReporter | undefined,
-    settings: MapGenSettings | undefined,
+    terrain: MapGenSettings | TerrainRecipe | ResolvedTerrainProfile | undefined,
     debug: MapGenDebug | undefined,
     yieldIfNeeded: () => Promise<boolean>
   ) {
     this.state = state;
     this.rng = rng;
     this.report = report;
+    this.profile = resolveTerrainProfile(terrain, mapSizeIdFromDimensions(state.grid.cols));
     this.settings = {
       ...DEFAULT_MAP_GEN_SETTINGS,
-      ...(settings ?? {}),
+      ...this.profile.settings,
       road: {
         ...DEFAULT_ROAD_GEN_SETTINGS,
-        ...(settings?.road ?? {})
+        ...(this.profile.settings.road ?? {})
       }
     };
     this.debug = debug;

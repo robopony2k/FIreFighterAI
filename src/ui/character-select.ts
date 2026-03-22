@@ -5,12 +5,22 @@ import { FUEL_PROFILES, type MapSizeId } from "../core/config.js";
 import type { FireSettings, FuelProfile, TileType } from "../core/types.js";
 import { DEFAULT_MAP_SIZE, DEFAULT_RUN_OPTIONS, DEFAULT_RUN_SEED, normalizeFireSettings } from "./run-config.js";
 import type { FuelProfileOverrides, NewRunConfig, RunOptions } from "./run-config.js";
-import type { MapGenSettings } from "../mapgen/settings.js";
+import { cloneTerrainRecipe, createDefaultTerrainRecipe, terrainRecipeEqual, type TerrainRecipe } from "../mapgen/terrainProfile.js";
 import { loadFuelProfileOverrides, saveFuelProfileOverrides } from "../persistence/fuelProfiles.js";
-
-type NumericMapGenKey = {
-  [K in keyof MapGenSettings]: MapGenSettings[K] extends number ? K : never;
-}[keyof MapGenSettings];
+import { loadMapScenarios, type MapScenario } from "../persistence/mapScenarios.js";
+import { buildTerrainControls } from "./terrain-controls.js";
+import {
+  coerceTerrainSeedNumber,
+  decodeTerrainSeedCode,
+  encodeTerrainSeedCode
+} from "./terrainSeedCode.js";
+import {
+  applyTerrainRecipeToControls,
+  collectTerrainControlElements,
+  readTerrainRecipeFromControls,
+  syncTerrainControlOutputs,
+  TERRAIN_RUN_GROUPS
+} from "./terrain-schema.js";
 export type CharacterSelectRefs = {
   characterScreen: HTMLDivElement;
   characterGrid: HTMLDivElement;
@@ -23,8 +33,11 @@ export type CharacterSelectRefs = {
   characterNameRandom: HTMLButtonElement;
   runSeedInput: HTMLInputElement;
   runMapSizeInputs: HTMLInputElement[];
+  runScenarioSelect: HTMLSelectElement;
+  runScenarioLoad: HTMLButtonElement;
+  runScenarioState: HTMLDivElement;
   runUnlimitedMoney: HTMLInputElement;
-  mapGenInputs: HTMLInputElement[];
+  terrainControls: HTMLDivElement;
   fireInputs: HTMLInputElement[];
   fuelProfileGrid: HTMLDivElement;
 };
@@ -235,7 +248,7 @@ const buildFuelProfileOverrides = (profiles: Record<TileType, FuelProfile>): Fue
 const cloneRunOptions = (options: RunOptions): RunOptions => ({
   ...DEFAULT_RUN_OPTIONS,
   ...options,
-  mapGen: { ...DEFAULT_RUN_OPTIONS.mapGen, ...options.mapGen },
+  terrain: cloneTerrainRecipe(options.terrain ?? DEFAULT_RUN_OPTIONS.terrain),
   fire: normalizeFireSettings(options.fire),
   fuelProfiles: { ...(options.fuelProfiles ?? {}) }
 });
@@ -316,7 +329,7 @@ export function initCharacterSelect(
       mapSize: DEFAULT_MAP_SIZE,
       options: {
         ...DEFAULT_RUN_OPTIONS,
-        mapGen: { ...DEFAULT_RUN_OPTIONS.mapGen },
+        terrain: cloneTerrainRecipe(DEFAULT_RUN_OPTIONS.terrain),
         fire: { ...DEFAULT_RUN_OPTIONS.fire },
         fuelProfiles: { ...loadFuelProfileOverrides() }
       },
@@ -331,6 +344,8 @@ export function initCharacterSelect(
   const fuelProfileHeaderCells = new Map<keyof FuelProfile, HTMLDivElement>();
   const fuelProfileTypeCells = new Map<TileType, HTMLDivElement>();
   const cards = new Map<CharacterId, HTMLButtonElement>();
+  let mapScenarios: MapScenario[] = [];
+  let selectedScenarioOptionId = "";
 
   ui.characterGrid.innerHTML = "";
   CHARACTERS.forEach((character) => {
@@ -396,18 +411,6 @@ export function initCharacterSelect(
     updateConfirmState();
   };
 
-  const coerceSeed = (value: string): number => {
-    const trimmed = value.trim();
-    if (trimmed.length === 0) {
-      return DEFAULT_RUN_SEED;
-    }
-    const parsed = Number(trimmed);
-    if (!Number.isFinite(parsed)) {
-      return DEFAULT_RUN_SEED;
-    }
-    return Math.floor(parsed);
-  };
-
   const setSelectedMapSize = (mapSize: MapSizeId): void => {
     let matched = false;
     ui.runMapSizeInputs.forEach((input) => {
@@ -432,17 +435,14 @@ export function initCharacterSelect(
     return (selected?.value as MapSizeId) ?? DEFAULT_MAP_SIZE;
   };
 
-  const mapGenOutputs = new Map<HTMLInputElement, HTMLElement>();
-  ui.mapGenInputs.forEach((input) => {
-    const outputId = input.dataset.output;
-    if (!outputId) {
-      return;
-    }
-    const output = document.getElementById(outputId);
-    if (output) {
-      mapGenOutputs.set(input, output);
-    }
-  });
+  if (ui.terrainControls.childElementCount === 0) {
+    buildTerrainControls({
+      container: ui.terrainControls,
+      groups: TERRAIN_RUN_GROUPS,
+      idPrefix: "runTerrain"
+    });
+  }
+  const terrainControlElements = collectTerrainControlElements(ui.terrainControls);
 
   const tabButtons = Array.from(document.querySelectorAll<HTMLButtonElement>("#characterScreen .run-tab"));
   const tabPanels = Array.from(document.querySelectorAll<HTMLElement>("#characterScreen .run-tab-panel"));
@@ -475,54 +475,91 @@ export function initCharacterSelect(
     setActiveTab(defaultTab);
   }
 
-  const formatMapGenValue = (input: HTMLInputElement): string => {
-    const raw = Number(input.value);
-    if (!Number.isFinite(raw)) {
-      return input.value;
-    }
-    const format = input.dataset.format;
-    if (format === "int") {
-      return Math.round(raw).toString();
-    }
-    if (format === "percent") {
-      return `${Math.round(raw * 100)}%`;
-    }
-    return raw.toFixed(2);
-  };
-
-  const syncMapGenOutput = (input: HTMLInputElement): void => {
-    const output = mapGenOutputs.get(input);
-    if (!output) {
-      return;
-    }
-    output.textContent = formatMapGenValue(input);
-  };
-
-  const getMapGenSettings = (): MapGenSettings => {
-    const settings: MapGenSettings = { ...DEFAULT_RUN_OPTIONS.mapGen };
-    ui.mapGenInputs.forEach((input) => {
-      const key = input.dataset.mapgenKey as NumericMapGenKey | undefined;
-      if (!key) {
-        return;
-      }
-      const value = Number(input.value);
-      if (Number.isFinite(value)) {
-        settings[key] = value;
-      }
+  const getTerrainRecipe = (): TerrainRecipe =>
+    cloneTerrainRecipe({
+      ...readTerrainRecipeFromControls(terrainControlElements, createDefaultTerrainRecipe(getSelectedMapSize())),
+      mapSize: getSelectedMapSize()
     });
-    return settings;
+
+  const applyTerrainRecipe = (recipe: TerrainRecipe): void => {
+    applyTerrainRecipeToControls(
+      cloneTerrainRecipe({
+        ...recipe,
+        mapSize: recipe.mapSize ?? getSelectedMapSize()
+      }),
+      terrainControlElements
+    );
   };
 
-  const applyMapGenSettings = (settings: MapGenSettings): void => {
-    const nextSettings = { ...DEFAULT_RUN_OPTIONS.mapGen, ...settings };
-    ui.mapGenInputs.forEach((input) => {
-      const key = input.dataset.mapgenKey as NumericMapGenKey | undefined;
-      if (!key) {
-        return;
-      }
-      input.value = `${nextSettings[key]}`;
-      syncMapGenOutput(input);
+  const readSeedNumber = (): number =>
+    decodeTerrainSeedCode(ui.runSeedInput.value)?.seed
+    ?? coerceTerrainSeedNumber(ui.runSeedInput.value, DEFAULT_RUN_SEED);
+
+  const syncSeedField = (seedNumber = readSeedNumber()): void => {
+    ui.runSeedInput.value = encodeTerrainSeedCode({
+      seed: seedNumber,
+      mapSize: getSelectedMapSize(),
+      terrain: getTerrainRecipe()
     });
+  };
+
+  const applySeedFieldIfEncoded = (): boolean => {
+    const decoded = decodeTerrainSeedCode(ui.runSeedInput.value);
+    if (!decoded) {
+      return false;
+    }
+    setSelectedMapSize(decoded.mapSize);
+    applyTerrainRecipe(decoded.terrain);
+    ui.runSeedInput.value = encodeTerrainSeedCode(decoded);
+    return true;
+  };
+
+  const findMatchingScenario = (
+    seed: number,
+    mapSize: MapSizeId,
+    terrain: TerrainRecipe
+  ): MapScenario | null =>
+    mapScenarios.find(
+      (scenario) =>
+        scenario.seed === seed &&
+        scenario.mapSize === mapSize &&
+        terrainRecipeEqual(scenario.terrain, terrain)
+    ) ?? null;
+
+  const syncScenarioLoadButton = (): void => {
+    ui.runScenarioLoad.disabled =
+      !selectedScenarioOptionId || !mapScenarios.some((scenario) => scenario.id === selectedScenarioOptionId);
+  };
+
+  const syncCurrentScenarioState = (): void => {
+    const match = findMatchingScenario(readSeedNumber(), getSelectedMapSize(), getTerrainRecipe());
+    ui.runScenarioState.textContent = `Current terrain: ${match ? match.name : "Custom"}`;
+  };
+
+  const refreshScenarioOptions = (preferredScenarioId?: string): void => {
+    mapScenarios = loadMapScenarios();
+    const preferred = preferredScenarioId ?? selectedScenarioOptionId;
+    ui.runScenarioSelect.innerHTML = "";
+    const placeholder = document.createElement("option");
+    placeholder.value = "";
+    placeholder.textContent = mapScenarios.length > 0 ? "Select a saved scenario" : "No saved scenarios yet";
+    placeholder.disabled = mapScenarios.length === 0;
+    ui.runScenarioSelect.appendChild(placeholder);
+    mapScenarios.forEach((scenario) => {
+      const option = document.createElement("option");
+      option.value = scenario.id;
+      option.textContent = `${scenario.name} · ${scenario.mapSize} · seed ${scenario.seed}`;
+      ui.runScenarioSelect.appendChild(option);
+    });
+    if (preferred && mapScenarios.some((scenario) => scenario.id === preferred)) {
+      selectedScenarioOptionId = preferred;
+      ui.runScenarioSelect.value = preferred;
+    } else {
+      selectedScenarioOptionId = "";
+      ui.runScenarioSelect.value = "";
+    }
+    syncScenarioLoadButton();
+    syncCurrentScenarioState();
   };
 
   const getFireSettings = (): FireSettings => {
@@ -673,7 +710,7 @@ export function initCharacterSelect(
   const getRunOptions = (): RunOptions => ({
     ...DEFAULT_RUN_OPTIONS,
     unlimitedMoney: ui.runUnlimitedMoney.checked,
-    mapGen: getMapGenSettings(),
+    terrain: getTerrainRecipe(),
     fire: getFireSettings(),
     fuelProfiles: fuelProfileOverrides
   });
@@ -684,12 +721,14 @@ export function initCharacterSelect(
     state.campaign.characterId = selectedId;
     state.campaign.callsign = nextConfig.callsign;
     ui.characterNameInput.value = nextConfig.callsign;
-    ui.runSeedInput.value = coerceSeed(`${nextConfig.seed}`).toString();
     setSelectedMapSize(nextConfig.mapSize);
     ui.runUnlimitedMoney.checked = nextConfig.options.unlimitedMoney;
-    applyMapGenSettings(nextConfig.options.mapGen);
+    applyTerrainRecipe(nextConfig.options.terrain);
+    syncSeedField(nextConfig.seed);
     applyFireSettings(nextConfig.options.fire);
     applyFuelProfileOverrides(nextConfig.options.fuelProfiles ?? {});
+    const matchingScenario = findMatchingScenario(nextConfig.seed, nextConfig.mapSize, nextConfig.options.terrain);
+    refreshScenarioOptions(matchingScenario?.id ?? selectedScenarioOptionId);
     setActiveTab("roster");
     if (fillMissingCallsign && ui.characterNameInput.value.trim().length === 0) {
       applyRandomName();
@@ -703,24 +742,60 @@ export function initCharacterSelect(
     updateConfirmState();
   });
 
-  ui.runSeedInput.value = coerceSeed(ui.runSeedInput.value).toString();
+  syncSeedField(readSeedNumber());
+  ui.runSeedInput.addEventListener("input", () => {
+    applySeedFieldIfEncoded();
+    syncCurrentScenarioState();
+  });
   ui.runSeedInput.addEventListener("blur", () => {
-    ui.runSeedInput.value = coerceSeed(ui.runSeedInput.value).toString();
+    if (!applySeedFieldIfEncoded()) {
+      syncSeedField(readSeedNumber());
+    }
+    syncCurrentScenarioState();
+  });
+
+  ui.runMapSizeInputs.forEach((input) => {
+    input.addEventListener("change", () => {
+      syncSeedField();
+      syncCurrentScenarioState();
+    });
+  });
+
+  ui.runScenarioSelect.addEventListener("change", () => {
+    selectedScenarioOptionId = ui.runScenarioSelect.value;
+    syncScenarioLoadButton();
+  });
+
+  ui.runScenarioLoad.addEventListener("click", () => {
+    const scenario = mapScenarios.find((entry) => entry.id === selectedScenarioOptionId);
+    if (!scenario) {
+      return;
+    }
+    setSelectedMapSize(scenario.mapSize);
+    applyTerrainRecipe(scenario.terrain);
+    syncSeedField(scenario.seed);
+    syncCurrentScenarioState();
   });
 
   ui.characterNameRandom.addEventListener("click", () => {
     applyRandomName();
   });
 
-  ui.mapGenInputs.forEach((input) => {
-    input.addEventListener("input", () => syncMapGenOutput(input));
-    syncMapGenOutput(input);
+  terrainControlElements.inputs.forEach((input) => {
+    const sync = (): void => {
+      syncTerrainControlOutputs(terrainControlElements);
+      syncSeedField();
+      syncCurrentScenarioState();
+    };
+    input.addEventListener(input instanceof HTMLSelectElement ? "change" : "input", sync);
   });
+  syncTerrainControlOutputs(terrainControlElements);
   ui.fireInputs.forEach((input) => {
     input.addEventListener("input", syncFuelProfileTooltips);
   });
   buildFuelProfileGrid();
   syncFuelProfileTooltips();
+  refreshScenarioOptions();
   applyConfigToForm(defaultConfig, false);
 
   const flushConfirmation = (config: NewRunConfig): void => {
@@ -736,7 +811,7 @@ export function initCharacterSelect(
     state.campaign.callsign = callsign;
     ui.characterNameInput.value = callsign;
     const config: NewRunConfig = {
-      seed: coerceSeed(ui.runSeedInput.value),
+      seed: readSeedNumber(),
       mapSize: getSelectedMapSize(),
       options: getRunOptions(),
       characterId: selectedId,
@@ -751,7 +826,7 @@ export function initCharacterSelect(
     const trimmed = ui.characterNameInput.value.trim();
     const callsign = trimmed || state.campaign.callsign || buildCallsign(selectedId);
     return {
-      seed: coerceSeed(ui.runSeedInput.value),
+      seed: readSeedNumber(),
       mapSize: getSelectedMapSize(),
       options: getRunOptions(),
       characterId: selectedId,

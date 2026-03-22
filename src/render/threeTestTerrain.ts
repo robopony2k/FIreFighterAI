@@ -3,12 +3,11 @@ import {
   DEBUG_TERRAIN_RENDER,
   ENABLE_GRASS_DETAIL_FX,
   FUEL_PROFILES,
-  HEIGHT_MAP_RATIO,
-  HEIGHT_SCALE,
   TILE_COLOR_RGB,
   TILE_SIZE
 } from "../core/config.js";
 import { getHouseFootprintBounds, pickHouseFootprint } from "../core/houseFootprints.js";
+import { getTerrainHeightScale } from "../core/terrainScale.js";
 import { getVegetationRenderHeightMultiplier } from "../core/vegetation.js";
 import { TILE_ID_TO_TYPE, TILE_TYPE_IDS } from "../core/state.js";
 import { TreeType, TREE_TYPE_IDS, type Town } from "../core/types.js";
@@ -17,10 +16,13 @@ import type { FirestationAsset, HouseAssets, HouseVariant, TreeAssets, TreeMeshT
 import { TREE_MODEL_PATHS } from "./threeTestAssets.js";
 import { applyGrassDetailFx } from "./grassDetailFx.js";
 
+export { getTerrainHeightScale };
+
 export type TerrainSample = {
   cols: number;
   rows: number;
   elevations: Float32Array;
+  heightScaleMultiplier?: number;
   tileTypes?: Uint8Array;
   treeTypes?: Uint8Array;
   tileFire?: Float32Array;
@@ -65,6 +67,7 @@ export type TreeSeasonVisualConfig = {
 type RGB = { r: number; g: number; b: number };
 
 const clamp = (value: number, min: number, max: number): number => Math.min(max, Math.max(min, value));
+const lerp = (a: number, b: number, t: number): number => a + (b - a) * t;
 const mixRgb = (a: RGB, b: RGB, t: number): RGB => ({
   r: a.r + (b.r - a.r) * t,
   g: a.g + (b.g - a.g) * t,
@@ -212,7 +215,6 @@ const computeBoundaryMismatchStats = (
   };
 };
 
-const TERRAIN_HEIGHT_EXAGGERATION = 1.35;
 const HEIGHT_SAMPLE_PEAK_WEIGHT = 0.65;
 const WATER_ALPHA_MIN_RATIO = 0.1;
 const OCEAN_RATIO_MIN = 0.1;
@@ -221,12 +223,13 @@ const OCEAN_SAMPLE_SUPPORT_FLOOR = 0.12;
 const WATER_ALPHA_POWER = 0.85;
 const SHORE_SDF_MAX_DISTANCE = 7;
 const RIVER_BANK_MAX_DISTANCE = 5;
-const WATERFALL_MAX_INSTANCES = 96;
-const WATERFALL_MIN_DROP_NORM = 0.006;
+const WATERFALL_MAX_INSTANCES = 48;
+const WATERFALL_MIN_DROP_NORM = 0.007;
 const WATERFALL_MIN_RIVER_RATIO = 0.28;
 const WATERFALL_MAX_DROP = 1.6;
 const WATERFALL_MAX_OCEAN_RATIO = 0.08;
 const WATERFALL_MIN_STEP_STRENGTH = 0.12;
+export const WATERFALL_VERTICALITY_MIN = 0.58;
 const WATER_SURFACE_LIFT_OCEAN = 0.08;
 const WATER_SURFACE_LIFT_RIVER = 0.012;
 const RIVER_SURFACE_BANK_CLEARANCE = 0.02;
@@ -244,6 +247,28 @@ const BANK_INSET = 0.004;
 const WALL_MIN_HEIGHT = 0.02;
 const WALL_RISE_GUARD = 0.001;
 const WALL_TOP_OVERLAP = 0.0012;
+const describeWaterfallShape = (
+  drop: number,
+  halfWidth: number
+): {
+  fallStyle: number;
+  rapidness: number;
+  run: number;
+  plungeForward: number;
+} => {
+  const aspect = drop / Math.max(0.12, halfWidth * 1.8);
+  const fallStyle = clamp((aspect - 0.2) / 0.48, 0, 1);
+  const rapidness = 1 - fallStyle;
+  const apronRun = Math.max(halfWidth * 0.16, drop * 0.12);
+  const curtainRun = Math.max(halfWidth * 0.06, drop * 0.035);
+  const run = lerp(apronRun, curtainRun, fallStyle);
+  return {
+    fallStyle,
+    rapidness,
+    run,
+    plungeForward: run * lerp(0.78, 0.96, fallStyle)
+  };
+};
 const WALL_TOP_MAX_UNDERCUT = 0.0004;
 const WALL_WATER_OVERLAP = 0.002;
 const RIVER_EDGE_SURFACE_UNDERSHOOT = 0.002;
@@ -542,10 +567,17 @@ export type WaterfallDebugData = {
   candidateCount: number;
   clusterCount: number;
   emittedCount: number;
+  lowVerticalityRejectedCount: number;
+  longRunRejectedCount: number;
   flags: Uint8Array;
   stepStrength: Float32Array;
   bestNeighborDrop: Float32Array;
   localDrop: Float32Array;
+  immediateDrop: Float32Array;
+  totalDrop: Float32Array;
+  runToPool: Float32Array;
+  verticality: Float32Array;
+  runLimit: Float32Array;
 };
 
 type RiverContourVertex = {
@@ -2147,11 +2179,16 @@ const buildWaterfallInstances = (
   const cellWorldX = width / Math.max(1, sampleCols);
   const cellWorldZ = depth / Math.max(1, sampleRows);
   const cellWorld = Math.max(1e-4, Math.min(cellWorldX, cellWorldZ));
-  const localDropThreshold = minDrop * 0.9;
+  const localDropThreshold = minDrop * 0.95;
   const flags = new Uint8Array(total);
   const stepStrengthDebug = new Float32Array(total).fill(-1);
   const bestNeighborDropDebug = new Float32Array(total).fill(-1);
   const localDropDebug = new Float32Array(total).fill(-1);
+  const immediateDropDebug = new Float32Array(total).fill(Number.NaN);
+  const totalDropDebug = new Float32Array(total).fill(Number.NaN);
+  const runToPoolDebug = new Float32Array(total).fill(Number.NaN);
+  const verticalityDebug = new Float32Array(total).fill(Number.NaN);
+  const runLimitDebug = new Float32Array(total).fill(Number.NaN);
   const debug: WaterfallDebugData = {
     sampleCols,
     sampleRows,
@@ -2162,10 +2199,17 @@ const buildWaterfallInstances = (
     candidateCount: 0,
     clusterCount: 0,
     emittedCount: 0,
+    lowVerticalityRejectedCount: 0,
+    longRunRejectedCount: 0,
     flags,
     stepStrength: stepStrengthDebug,
     bestNeighborDrop: bestNeighborDropDebug,
-    localDrop: localDropDebug
+    localDrop: localDropDebug,
+    immediateDrop: immediateDropDebug,
+    totalDrop: totalDropDebug,
+    runToPool: runToPoolDebug,
+    verticality: verticalityDebug,
+    runLimit: runLimitDebug
   };
   const isWaterCell = (idx: number): boolean => (supportMask[idx] ?? 0) > 0;
   const isRiverCell = (idx: number): boolean => (riverRatio[idx] ?? 0) >= WATERFALL_MIN_RIVER_RATIO;
@@ -2317,19 +2361,31 @@ const buildWaterfallInstances = (
     const neg = sampleSpan(-1);
     const pos = sampleSpan(1);
     const shift = clamp((pos - neg) * 0.5, -cellWorld * 1.2, cellWorld * 1.2);
-    const halfWidth = clamp(Math.max(cellWorld * 0.45, (neg + pos) * 0.5 + cellWorld * 0.2), cellWorld * 0.45, cellWorld * 3.2);
+    const halfWidth = clamp(Math.max(cellWorld * 0.45, (neg + pos) * 0.5 + cellWorld * 0.2), cellWorld * 0.45, cellWorld * 4.2);
     return { halfWidth, shiftX: perpX * shift, shiftZ: perpZ * shift };
   };
-  const sampleLocalDropAtWorld = (
+  const measureTrueFallProfileAtWorld = (
     centerX: number,
     centerZ: number,
     dirX: number,
     dirZ: number,
-    lipHeight: number
-  ): number => {
-    let minHeight = lipHeight;
-    const stepDist = Math.max(cellWorld * 0.55, 0.08);
-    const maxDist = Math.max(cellWorld * 4.2, 0.9);
+    lipHeight: number,
+    halfWidth: number
+  ): {
+    immediateDrop: number;
+    totalDrop: number;
+    runToPool: number;
+    verticality: number;
+    runLimit: number;
+  } => {
+    let immediateMin = lipHeight;
+    let poolMin = lipHeight;
+    let poolDist = Math.max(cellWorld * 0.25, 0.05);
+    const stepDist = Math.max(cellWorld * 0.25, 0.05);
+    const immediateWindow = Math.max(cellWorld * 0.9, halfWidth * 0.4);
+    const maxDist = Math.max(cellWorld * 5.5, halfWidth * 1.8, 0.9);
+    let seenSample = false;
+    let stableSamples = 0;
     for (let dist = stepDist; dist <= maxDist; dist += stepDist) {
       const wx = centerX + dirX * dist;
       const wz = centerZ + dirZ * dist;
@@ -2337,9 +2393,33 @@ const buildWaterfallInstances = (
       if (!Number.isFinite(h)) {
         continue;
       }
-      minHeight = Math.min(minHeight, h);
+      seenSample = true;
+      if (dist <= immediateWindow + stepDist * 0.5) {
+        immediateMin = Math.min(immediateMin, h);
+      }
+      if (h < poolMin - 1e-4) {
+        poolMin = h;
+        poolDist = dist;
+        stableSamples = 0;
+      } else if (dist >= immediateWindow && h >= poolMin - 0.0025) {
+        stableSamples += 1;
+        if (stableSamples >= 2) {
+          break;
+        }
+      }
     }
-    return clamp(lipHeight - minHeight + WATERFALL_DROP_PADDING * 0.6, minDrop * 0.85, WATERFALL_MAX_DROP);
+    const totalDrop = seenSample ? clamp(lipHeight - poolMin, 0, WATERFALL_MAX_DROP) : 0;
+    const immediateDrop = seenSample
+      ? clamp(lipHeight - Math.min(immediateMin, poolMin), 0, WATERFALL_MAX_DROP)
+      : 0;
+    const runLimit = Math.max(cellWorld * 1.5, halfWidth * 0.85);
+    return {
+      immediateDrop,
+      totalDrop,
+      runToPool: seenSample ? poolDist : runLimit + cellWorld,
+      verticality: totalDrop > 1e-4 ? clamp(immediateDrop / totalDrop, 0, 1) : 0,
+      runLimit
+    };
   };
   const measureCrossSection = (
     centerCol: number,
@@ -2379,7 +2459,7 @@ const buildWaterfallInstances = (
     const halfCells = 0.5 + 0.5 * (negSpan + posSpan);
     const shiftCells = (posSpan - negSpan) * 0.5;
     return {
-      halfWidth: clamp(halfCells * cellWorld, cellWorld * 0.45, cellWorld * 2.6),
+      halfWidth: clamp(halfCells * cellWorld, cellWorld * 0.45, cellWorld * 3.4),
       centerShift: shiftCells * cellWorld
     };
   };
@@ -2507,14 +2587,36 @@ const buildWaterfallInstances = (
       const halfWidth = clamp(cross.halfWidth * (0.96 + stepStrength * 0.08), cellWorld * 0.45, cellWorld * 2.8);
       const centerX = lipX + (-dirZ) * cross.centerShift;
       const centerZ = lipZ + dirX * cross.centerShift;
+      const lipHeight = sampleRiverHeight(worldToGridX(centerX), worldToGridY(centerZ));
+      const profile = measureTrueFallProfileAtWorld(centerX, centerZ, dirX, dirZ, lipHeight, halfWidth);
+      immediateDropDebug[idx] = profile.immediateDrop;
+      totalDropDebug[idx] = profile.totalDrop;
+      runToPoolDebug[idx] = profile.runToPool;
+      verticalityDebug[idx] = profile.verticality;
+      runLimitDebug[idx] = profile.runLimit;
+      if (profile.totalDrop < minDrop) {
+        continue;
+      }
+      if (profile.verticality < WATERFALL_VERTICALITY_MIN) {
+        debug.lowVerticalityRejectedCount += 1;
+        continue;
+      }
+      if (profile.runToPool > profile.runLimit) {
+        debug.longRunRejectedCount += 1;
+        continue;
+      }
+      const candidateDrop = Math.min(
+        WATERFALL_MAX_DROP,
+        profile.totalDrop + WATERFALL_DROP_PADDING + stepStrength * minDrop * 0.7
+      );
       flags[idx] |= WATERFALL_DEBUG_FLAG_CANDIDATE;
       candidates.push({
         sampleCol: col,
         sampleRow: row,
         x: centerX,
         z: centerZ,
-        top: center + WATERFALL_TOP_OFFSET,
-        drop: Math.min(WATERFALL_MAX_DROP, localDrop + WATERFALL_DROP_PADDING + stepStrength * minDrop * 0.7),
+        top: lipHeight + WATERFALL_TOP_OFFSET,
+        drop: candidateDrop,
         dirX,
         dirZ,
         width: halfWidth
@@ -2619,8 +2721,6 @@ const buildWaterfallInstances = (
   }
 
   clusters.sort((a, b) => b.drop - a.drop);
-  const limit = Math.min(WATERFALL_MAX_INSTANCES, clusters.length);
-  const out = new Float32Array(limit * 7);
   const contourEdges = riverDomain?.boundaryEdges;
   const contourCols = riverDomain?.cols ?? sampleCols;
   const contourRows = riverDomain?.rows ?? sampleRows;
@@ -2630,7 +2730,7 @@ const buildWaterfallInstances = (
   let anchorErrMax = 0;
   let anchorErrCount = 0;
 
-  const snapClusterToContour = (cluster: Cluster): Cluster => {
+  const snapClusterToContour = (cluster: Cluster): Cluster | null => {
     const snapped = { ...cluster };
     if (contourEdges && contourEdges.length >= 4) {
       const pX = contourSpace.worldToEdgeX(cluster.x);
@@ -2672,20 +2772,6 @@ const buildWaterfallInstances = (
         }
       }
       if (Number.isFinite(bestDistSq) && bestDistSq <= 4) {
-        const targetX = contourSpace.edgeToWorldX(bestEdgeX);
-        const targetZ = contourSpace.edgeToWorldY(bestEdgeY);
-        const toTargetX = targetX - snapped.x;
-        const toTargetZ = targetZ - snapped.z;
-        const snapWorldDist = Math.hypot(toTargetX, toTargetZ);
-        const maxSnapWorld = Math.max(cellWorld * 0.18, Math.min(snapped.width * 0.35, cellWorld * 0.95));
-        if (snapWorldDist > maxSnapWorld && snapWorldDist > 1e-5) {
-          const t = maxSnapWorld / snapWorldDist;
-          snapped.x += toTargetX * t;
-          snapped.z += toTargetZ * t;
-        } else {
-          snapped.x = targetX;
-          snapped.z = targetZ;
-        }
         if (bestSegmentLenWorld > 0) {
           const tangentDot = bestTanX * snapped.dirX + bestTanZ * snapped.dirZ;
           if (Math.abs(tangentDot) >= 0.35) {
@@ -2703,7 +2789,7 @@ const buildWaterfallInstances = (
     const localCross = measureWorldCrossSection(snapped.x, snapped.z, snapped.dirX, snapped.dirZ);
     snapped.x += localCross.shiftX;
     snapped.z += localCross.shiftZ;
-    snapped.width = clamp(Math.max(snapped.width * 0.82, localCross.halfWidth), cellWorld * 0.45, cellWorld * 3.2);
+    snapped.width = clamp(Math.max(snapped.width * 0.82, localCross.halfWidth), cellWorld * 0.45, cellWorld * 4.2);
 
     const sampleX = contourSpace.edgeToGridX(contourSpace.worldToEdgeX(snapped.x));
     const sampleY = contourSpace.edgeToGridY(contourSpace.worldToEdgeY(snapped.z));
@@ -2712,15 +2798,36 @@ const buildWaterfallInstances = (
       const targetTop = sampledHeight + WATERFALL_TOP_OFFSET;
       const maxAdjust = Math.max(0.08, Math.min(0.55, snapped.drop * 0.7));
       snapped.top = clamp(targetTop, cluster.top - maxAdjust, cluster.top + maxAdjust);
-      const measuredDrop = sampleLocalDropAtWorld(snapped.x, snapped.z, snapped.dirX, snapped.dirZ, sampledHeight);
-      snapped.drop = clamp(Math.max(snapped.drop * 0.65, measuredDrop), minDrop * 0.8, WATERFALL_MAX_DROP);
+      const profile = measureTrueFallProfileAtWorld(snapped.x, snapped.z, snapped.dirX, snapped.dirZ, sampledHeight, snapped.width);
+      if (
+        profile.totalDrop < minDrop ||
+        profile.verticality < WATERFALL_VERTICALITY_MIN ||
+        profile.runToPool > profile.runLimit
+      ) {
+        return null;
+      }
+      snapped.drop = clamp(profile.totalDrop + WATERFALL_DROP_PADDING * 0.85, minDrop * 0.8, WATERFALL_MAX_DROP);
+      return snapped;
     }
-    return snapped;
+    return null;
   };
 
-  for (let i = 0; i < limit; i += 1) {
+  const emitted: Cluster[] = [];
+  for (let i = 0; i < clusters.length && emitted.length < WATERFALL_MAX_INSTANCES; i += 1) {
     const cluster = snapClusterToContour(clusters[i]);
-    const clusteredWidth = clamp(cluster.width, cellWorld * 0.45, cellWorld * 2.9);
+    if (!cluster) {
+      continue;
+    }
+    emitted.push(cluster);
+  }
+  if (emitted.length === 0) {
+    return { debug };
+  }
+
+  const out = new Float32Array(emitted.length * 7);
+  for (let i = 0; i < emitted.length; i += 1) {
+    const cluster = emitted[i];
+    const clusteredWidth = clamp(cluster.width, cellWorld * 0.45, cellWorld * 3.8);
     const base = i * 7;
     out[base] = cluster.x;
     out[base + 1] = cluster.z;
@@ -2752,7 +2859,7 @@ const buildWaterfallInstances = (
       );
     }
   }
-  debug.emittedCount = limit;
+  debug.emittedCount = emitted.length;
   return { instances: out, debug };
 };
 
@@ -2762,15 +2869,55 @@ const buildWaterfallInfluenceMap = (
   width: number,
   depth: number,
   supportMask: Uint8Array,
+  waterHeights?: Float32Array,
+  riverStepStrength?: Float32Array,
   waterfallInstances?: Float32Array
 ): THREE.DataTexture => {
   const total = sampleCols * sampleRows;
   const lipField = new Float32Array(total);
   const plungeField = new Float32Array(total);
+  const seamField = new Float32Array(total);
+  const cellWorldX = width / Math.max(1, sampleCols - 1);
+  const cellWorldZ = depth / Math.max(1, sampleRows - 1);
+  const cellWorld = Math.max(0.001, Math.min(cellWorldX, cellWorldZ));
+  const stamp = (cx: number, cy: number, radius: number, target: Float32Array, strengthScale: number): void => {
+    const minY = Math.max(0, cy - radius);
+    const maxY = Math.min(sampleRows - 1, cy + radius);
+    const minX = Math.max(0, cx - radius);
+    const maxX = Math.min(sampleCols - 1, cx + radius);
+    for (let y = minY; y <= maxY; y += 1) {
+      const rowBase = y * sampleCols;
+      for (let xCell = minX; xCell <= maxX; xCell += 1) {
+        const idx = rowBase + xCell;
+        if (!supportMask[idx]) {
+          continue;
+        }
+        const dx = xCell - cx;
+        const dy = y - cy;
+        const dist = Math.hypot(dx, dy);
+        if (dist > radius) {
+          continue;
+        }
+        const t = 1 - dist / Math.max(1, radius);
+        const influence = t * t * strengthScale;
+        target[idx] = Math.max(target[idx], influence);
+      }
+    }
+  };
+  const stampWorld = (
+    cxWorld: number,
+    czWorld: number,
+    radius: number,
+    target: Float32Array,
+    strengthScale: number
+  ): void => {
+    const u = clamp(cxWorld / Math.max(1e-4, width) + 0.5, 0, 1);
+    const v = clamp(czWorld / Math.max(1e-4, depth) + 0.5, 0, 1);
+    const cx = Math.round(u * Math.max(1, sampleCols - 1));
+    const cy = Math.round(v * Math.max(1, sampleRows - 1));
+    stamp(cx, cy, radius, target, strengthScale);
+  };
   if (waterfallInstances && waterfallInstances.length >= 7) {
-    const cellWorldX = width / Math.max(1, sampleCols - 1);
-    const cellWorldZ = depth / Math.max(1, sampleRows - 1);
-    const cellWorld = Math.max(0.001, Math.min(cellWorldX, cellWorldZ));
     const waterfallCount = Math.floor(waterfallInstances.length / 7);
     for (let i = 0; i < waterfallCount; i += 1) {
       const base = i * 7;
@@ -2780,50 +2927,105 @@ const buildWaterfallInfluenceMap = (
       const dirX = waterfallInstances[base + 4];
       const dirZ = waterfallInstances[base + 5];
       const halfWidth = Math.max(0.08, waterfallInstances[base + 6]);
+      const shape = describeWaterfallShape(drop, halfWidth);
       const influenceStrength = clamp(drop / 1.6, 0, 1);
-      const streamLen = Math.max(halfWidth * 1.6, drop * 0.6);
-      const lipX = x - dirX * (streamLen * 0.35);
-      const lipZ = z - dirZ * (streamLen * 0.35);
-      const plungeX = x + dirX * (streamLen * 0.6);
-      const plungeZ = z + dirZ * (streamLen * 0.6);
-      const lipRadius = Math.max(1, Math.round((halfWidth * 1.45) / cellWorld));
-      const plungeRadius = Math.max(1, Math.round((halfWidth * 1.95 + drop * 0.35) / cellWorld));
-      const stamp = (
-        cxWorld: number,
-        czWorld: number,
-        radius: number,
-        target: Float32Array,
-        strengthScale: number
-      ): void => {
-        const u = clamp(cxWorld / Math.max(1e-4, width) + 0.5, 0, 1);
-        const v = clamp(czWorld / Math.max(1e-4, depth) + 0.5, 0, 1);
-        const cx = Math.round(u * Math.max(1, sampleCols - 1));
-        const cy = Math.round(v * Math.max(1, sampleRows - 1));
-        const minY = Math.max(0, cy - radius);
-        const maxY = Math.min(sampleRows - 1, cy + radius);
-        const minX = Math.max(0, cx - radius);
-        const maxX = Math.min(sampleCols - 1, cx + radius);
-        for (let y = minY; y <= maxY; y += 1) {
-          const rowBase = y * sampleCols;
-          for (let xCell = minX; xCell <= maxX; xCell += 1) {
-            const idx = rowBase + xCell;
-            if (!supportMask[idx]) {
-              continue;
-            }
-            const dx = xCell - cx;
-            const dy = y - cy;
-            const dist = Math.hypot(dx, dy);
-            if (dist > radius) {
-              continue;
-            }
-            const t = 1 - dist / Math.max(1, radius);
-            const influence = t * t * strengthScale * influenceStrength;
-            target[idx] = Math.max(target[idx], influence);
+      const streamLen = Math.max(halfWidth * 0.9, shape.run);
+      const lipX = x;
+      const lipZ = z;
+      const plungeX = x + dirX * shape.plungeForward;
+      const plungeZ = z + dirZ * shape.plungeForward;
+      const lipRadius = Math.max(
+        1,
+        Math.round((halfWidth * lerp(2.35, 1.75, shape.fallStyle) + drop * 0.15) / cellWorld)
+      );
+      const seamRadius = Math.max(
+        1,
+        Math.round((halfWidth * lerp(1.25, 0.9, shape.fallStyle) + drop * 0.08) / cellWorld)
+      );
+      const plungeRadius = Math.max(
+        1,
+        Math.round((halfWidth * lerp(1.4, 2.25, shape.fallStyle) + drop * lerp(0.18, 0.55, shape.fallStyle)) / cellWorld)
+      );
+      stampWorld(lipX, lipZ, lipRadius, lipField, 1.15 * influenceStrength);
+      const seamSteps = Math.max(1, Math.min(6, Math.round(streamLen / Math.max(cellWorld * 0.8, halfWidth * 0.42))));
+      for (let step = 1; step <= seamSteps; step += 1) {
+        const t = step / seamSteps;
+        const seamX = x + dirX * streamLen * t;
+        const seamZ = z + dirZ * streamLen * t;
+        stampWorld(
+          seamX,
+          seamZ,
+          seamRadius,
+          seamField,
+          lerp(0.78, 0.24, t) * lerp(1.0, 0.72, shape.fallStyle) * influenceStrength
+        );
+      }
+      stampWorld(plungeX, plungeZ, plungeRadius, plungeField, lerp(0.86, 1.28, shape.fallStyle) * influenceStrength);
+    }
+  }
+  if (waterHeights && riverStepStrength) {
+    const dirs = [
+      { dx: -1, dy: 0 },
+      { dx: 1, dy: 0 },
+      { dx: 0, dy: -1 },
+      { dx: 0, dy: 1 }
+    ];
+    for (let y = 1; y < sampleRows - 1; y += 1) {
+      for (let x = 1; x < sampleCols - 1; x += 1) {
+        const idx = y * sampleCols + x;
+        if (!supportMask[idx]) {
+          continue;
+        }
+        const rawStep = riverStepStrength[idx];
+        const stepStrength = Number.isFinite(rawStep) ? clamp(rawStep, 0, 1) : 0;
+        if (stepStrength < WATERFALL_MIN_STEP_STRENGTH * 0.72) {
+          continue;
+        }
+        const center = waterHeights[idx];
+        if (!Number.isFinite(center)) {
+          continue;
+        }
+        let bestDrop = 0;
+        let bestDx = 0;
+        let bestDy = 0;
+        for (let i = 0; i < dirs.length; i += 1) {
+          const dir = dirs[i];
+          const nIdx = (y + dir.dy) * sampleCols + (x + dir.dx);
+          if (!supportMask[nIdx]) {
+            continue;
+          }
+          const neighbor = waterHeights[nIdx];
+          if (!Number.isFinite(neighbor)) {
+            continue;
+          }
+          const drop = center - neighbor;
+          if (drop > bestDrop) {
+            bestDrop = drop;
+            bestDx = dir.dx;
+            bestDy = dir.dy;
           }
         }
-      };
-      stamp(lipX, lipZ, lipRadius, lipField, 0.92);
-      stamp(plungeX, plungeZ, plungeRadius, plungeField, 1.0);
+        if (bestDrop <= 1e-4) {
+          continue;
+        }
+        const seamStrength = clamp(stepStrength * (0.58 + bestDrop * 26), 0, 1);
+        const seamRadius = Math.max(1, Math.round(lerp(1.05, 1.7, stepStrength)));
+        stamp(x, y, seamRadius, seamField, seamStrength * 0.82);
+        const seamSteps = Math.max(1, Math.min(3, Math.round(lerp(1.0, 2.8, seamStrength))));
+        for (let step = 1; step <= seamSteps; step += 1) {
+          const seamX = x + bestDx * step;
+          const seamY = y + bestDy * step;
+          if (seamX < 0 || seamY < 0 || seamX >= sampleCols || seamY >= sampleRows) {
+            break;
+          }
+          const seamIdx = seamY * sampleCols + seamX;
+          if (!supportMask[seamIdx]) {
+            break;
+          }
+          const t = step / Math.max(1, seamSteps);
+          stamp(seamX, seamY, seamRadius, seamField, seamStrength * lerp(0.68, 0.24, t));
+        }
+      }
     }
   }
   const data = new Uint8Array(total * 4);
@@ -2831,11 +3033,12 @@ const buildWaterfallInfluenceMap = (
     const base = i * 4;
     const lip = clamp(lipField[i], 0, 1);
     const plunge = clamp(plungeField[i], 0, 1);
-    const combined = clamp(lip * 0.55 + plunge * 0.85, 0, 1);
+    const seam = clamp(seamField[i], 0, 1);
+    const combined = clamp(lip * 0.72 + plunge * 1.0, 0, 1);
     data[base] = Math.round(lip * 255);
     data[base + 1] = Math.round(plunge * 255);
     data[base + 2] = Math.round(combined * 255);
-    data[base + 3] = Math.round(combined * 255);
+    data[base + 3] = Math.round(seam * 255);
   }
   return createDataTexture(data, sampleCols, sampleRows, THREE.LinearFilter, THREE.LinearFilter);
 };
@@ -4214,12 +4417,19 @@ const buildRiverMeshData = (
       const dirX = waterfallInstances[base + 4];
       const dirZ = waterfallInstances[base + 5];
       const halfWidth = Math.max(0.08, waterfallInstances[base + 6]);
+      const shape = describeWaterfallShape(drop, halfWidth);
       const lipSurface = waterLevelWorld + topOffset - WATERFALL_TOP_OFFSET;
       const poolSurface = lipSurface - drop + Math.min(0.018, drop * 0.12);
-      const upstreamLen = Math.max(cellWorld * 4.2, halfWidth * 2.6);
-      const downstreamLen = Math.max(cellWorld * 4.8, halfWidth * 3.0);
-      const transitionHalfLen = Math.max(cellWorld * 0.28, halfWidth * 0.22);
-      const radiusWorld = Math.max(upstreamLen, downstreamLen, halfWidth * 1.35);
+      const lipShelfLen = Math.max(cellWorld * 0.42, halfWidth * lerp(0.18, 0.3, shape.fallStyle));
+      const descentLen = clamp(
+        Math.max(cellWorld * lerp(0.08, 0.16, shape.fallStyle), halfWidth * lerp(0.03, 0.06, shape.fallStyle)),
+        cellWorld * 0.08,
+        cellWorld * 0.2
+      );
+      const plungePoolLen = Math.max(cellWorld * lerp(0.6, 0.9, shape.fallStyle), halfWidth * lerp(0.32, 0.48, shape.fallStyle));
+      const recoveryLen = Math.max(cellWorld * lerp(0.46, 0.72, shape.fallStyle), halfWidth * 0.28);
+      const downstreamLen = descentLen + plungePoolLen + recoveryLen;
+      const radiusWorld = Math.max(lipShelfLen, downstreamLen, halfWidth * 1.45);
       const radiusCells = Math.max(1, Math.ceil(radiusWorld / cellWorld));
       const u = clamp(centerX / Math.max(1e-4, width) + 0.5, 0, 1);
       const v = clamp(centerZ / Math.max(1e-4, depth) + 0.5, 0, 1);
@@ -4240,35 +4450,49 @@ const buildRiverMeshData = (
           const wz = ((y + 0.5) / Math.max(1, rows) - 0.5) * depth - centerZ;
           const along = wx * dirX + wz * dirZ;
           const perp = Math.abs(wx * -dirZ + wz * dirX);
-          if (along < -upstreamLen || along > downstreamLen) {
+          if (along < -lipShelfLen || along > downstreamLen) {
             continue;
           }
-          if (perp > Math.max(cellWorld * 0.85, halfWidth * 1.05)) {
+          const crossLimit = Math.max(cellWorld * lerp(1.05, 0.9, shape.fallStyle), halfWidth * lerp(1.28, 1.06, shape.fallStyle));
+          if (perp > crossLimit) {
             continue;
           }
           const baseSurface = surfaceWorld[idx];
-          if (along <= -transitionHalfLen) {
-            const maxLipLift = Math.max(0.03, Math.min(0.42, drop * 0.62));
-            const upstreamFade = clamp((-along - transitionHalfLen) / Math.max(cellWorld, upstreamLen), 0, 1);
-            const upstreamSurface = lipSurface - upstreamFade * Math.min(0.018, drop * 0.1);
-            const clampedUpstream = clamp(upstreamSurface, baseSurface, baseSurface + maxLipLift);
-            surfaceWorld[idx] = Math.max(baseSurface, clampedUpstream);
+          const crossFade = 1 - smoothstep(crossLimit * 0.62, crossLimit, perp);
+          if (crossFade <= 1e-3) {
+            continue;
+          }
+          if (along <= 0) {
+            const shelfT = clamp((along + lipShelfLen) / Math.max(cellWorld * 0.3, lipShelfLen), 0, 1);
+            const shelfDip = Math.min(0.006, drop * 0.04) * smoothstep(0.0, 1.0, shelfT);
+            const shelfSurface = lipSurface - shelfDip;
+            const maxLipLift = Math.max(0.025, Math.min(0.22, drop * 0.36));
+            const clampedUpstream = clamp(shelfSurface, baseSurface, baseSurface + maxLipLift);
+            surfaceWorld[idx] = lerp(baseSurface, Math.max(baseSurface, clampedUpstream), crossFade * 0.92);
             const prevLip = lipSurfaceOverride[idx];
             lipSurfaceOverride[idx] = Number.isFinite(prevLip)
               ? Math.max(prevLip, clampedUpstream)
               : clampedUpstream;
             continue;
           }
-          if (along >= transitionHalfLen) {
-            const poolFade = clamp((along - transitionHalfLen) / Math.max(cellWorld, downstreamLen), 0, 1);
-            const poolRise = poolFade * Math.min(0.014, drop * 0.08);
-            const targetPoolSurface = poolSurface + poolRise;
-            surfaceWorld[idx] = Math.min(baseSurface, targetPoolSurface);
+          if (along <= descentLen) {
+            const t = clamp(along / Math.max(cellWorld * 0.25, descentLen), 0, 1);
+            const dropT = smoothstep(0.46, 0.54, t);
+            const targetSurface = lerp(lipSurface, poolSurface, dropT);
+            surfaceWorld[idx] = lerp(baseSurface, targetSurface, crossFade * 0.96);
             continue;
           }
-          const t = clamp((along + transitionHalfLen) / Math.max(1e-4, transitionHalfLen * 2), 0, 1);
-          const seamSurface = lipSurface * (1 - t) + poolSurface * t;
-          surfaceWorld[idx] = baseSurface * 0.35 + seamSurface * 0.65;
+          if (along <= descentLen + plungePoolLen) {
+            const poolT = clamp((along - descentLen) / Math.max(cellWorld * 0.35, plungePoolLen), 0, 1);
+            const poolRise = smoothstep(0.0, 1.0, poolT) * Math.min(0.012, drop * lerp(0.03, 0.06, shape.fallStyle));
+            const targetPoolSurface = poolSurface + poolRise;
+            surfaceWorld[idx] = lerp(baseSurface, Math.min(baseSurface, targetPoolSurface), crossFade * 0.92);
+            continue;
+          }
+          const recoveryT = clamp((along - descentLen - plungePoolLen) / Math.max(cellWorld * 0.35, recoveryLen), 0, 1);
+          const recoveryRise = smoothstep(0.0, 1.0, recoveryT) * Math.min(0.01, drop * 0.04);
+          const recoverySurface = poolSurface + recoveryRise;
+          surfaceWorld[idx] = lerp(baseSurface, Math.min(baseSurface, recoverySurface), crossFade * 0.82);
         }
       }
     }
@@ -4281,6 +4505,7 @@ const buildRiverMeshData = (
         continue;
       }
       const center = surfaceWorld[idx];
+      surfaceNorm[idx] = clamp(center / Math.max(1e-4, heightScale), 0, 1);
       const left = isValid(x - 1, y) && renderSupport[idxAt(x - 1, y)] ? surfaceWorld[idxAt(x - 1, y)] : center;
       const right = isValid(x + 1, y) && renderSupport[idxAt(x + 1, y)] ? surfaceWorld[idxAt(x + 1, y)] : center;
       const up = isValid(x, y - 1) && renderSupport[idxAt(x, y - 1)] ? surfaceWorld[idxAt(x, y - 1)] : center;
@@ -4315,6 +4540,8 @@ const buildRiverMeshData = (
     width,
     depth,
     renderSupport,
+    surfaceNorm,
+    riverStepStrength,
     waterfallInstances
   );
 
@@ -7336,11 +7563,6 @@ export const getTerrainStep = (size: number, fullResolution = false): number => 
   return 1;
 };
 
-export const getTerrainHeightScale = (cols: number, rows: number): number => {
-  const baseScale = Math.max(HEIGHT_SCALE / TILE_SIZE, Math.min(cols, rows) * HEIGHT_MAP_RATIO);
-  return baseScale * TERRAIN_HEIGHT_EXAGGERATION;
-};
-
 export const buildTerrainMesh = (
   sample: TerrainSample,
   treeAssets: TreeAssets | null,
@@ -7502,7 +7724,7 @@ export const buildTerrainMesh = (
   geometry.rotateX(-Math.PI / 2);
 
   const positions = geometry.attributes.position;
-  const heightScale = getTerrainHeightScale(cols, rows);
+  const heightScale = getTerrainHeightScale(cols, rows, sample.heightScaleMultiplier ?? 1);
   let minHeight = Number.POSITIVE_INFINITY;
   let maxHeight = Number.NEGATIVE_INFINITY;
   let waterHeightSum = 0;

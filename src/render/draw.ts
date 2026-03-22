@@ -1235,6 +1235,7 @@ const drawDebugCellPanel = (
   const cachedFire = state.tileFire[idx];
   const cachedHeat = state.tileHeat[idx];
   const cachedFuel = state.tileFuel[idx];
+  const cachedWetness = state.tileSuppressionWetness[idx];
   const cachedIgniteAt = state.tileIgniteAt[idx];
   const cachedIgnition = state.tileIgnitionPoint[idx];
   const cachedBurnRate = state.tileBurnRate[idx];
@@ -1259,7 +1260,7 @@ const drawDebugCellPanel = (
     `spread=${formatOptional(tile.spreadBoost)} cap=${formatOptional(tile.heatTransferCap)} retain=${formatOptional(tile.heatRetention)}`,
     `wind=${formatOptional(tile.windFactor)} moist=${formatNumber(tile.moisture)} canopy=${formatNumber(tile.canopy)}`,
     `ashAge=${formatNumber(tile.ashAge, 2)} elev=${formatNumber(tile.elevation)} height=${formatNumber(height, 2)}`,
-    `cache fire=${formatNumber(cachedFire)} heat=${formatNumber(cachedHeat)} fuel=${formatNumber(cachedFuel)}`,
+    `cache fire=${formatNumber(cachedFire)} heat=${formatNumber(cachedHeat)} fuel=${formatNumber(cachedFuel)} wet=${formatNumber(cachedWetness)}`,
     `cache ignite=${formatNumber(cachedIgnition)} burn=${formatNumber(cachedBurnRate)} heatOut=${formatNumber(cachedHeatOutput)}`,
     `igniteAt=${formatNumber(cachedIgniteAt, 3)} smooth=${formatNumber(smoothFire)}`,
     `bounds active=${state.fireBoundsActive ? "1" : "0"} in=${inBounds ? "1" : "0"}`,

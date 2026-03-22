@@ -225,6 +225,7 @@ type FireRenderSnapshot = {
   tileFire: Float32Array;
   tileHeat: Float32Array;
   tileFuel: Float32Array;
+  tileWetness: Float32Array;
   scheduled: Uint8Array;
   lastActiveFires: number;
   fireScheduledCount: number;
@@ -246,6 +247,8 @@ type FireFieldView = {
   getHeat01ByIndex: (tileIdx: number) => number;
   getFuelAt: (x: number, y: number) => number;
   getFuelByIndex: (tileIdx: number) => number;
+  getWetnessAt: (x: number, y: number) => number;
+  getWetnessByIndex: (tileIdx: number) => number;
   getScheduledAt: (x: number, y: number) => number;
   getScheduledByIndex: (tileIdx: number) => number;
 };
@@ -268,6 +271,7 @@ const createEmptyFireRenderSnapshot = (
   tileFire: new Float32Array(0),
   tileHeat: new Float32Array(0),
   tileFuel: new Float32Array(0),
+  tileWetness: new Float32Array(0),
   scheduled: new Uint8Array(0),
   lastActiveFires,
   fireScheduledCount,
@@ -324,7 +328,8 @@ const captureFireRenderSnapshot = (
       const scheduled = world.tileIgniteAt[idx] < Number.POSITIVE_INFINITY;
       const fire = Math.max(0, world.tileFire[idx] ?? 0);
       const heat01 = clamp((world.tileHeat[idx] ?? 0) / heatCap, 0, 1);
-      if (fire <= simFireEps && heat01 <= heatEps && !scheduled) {
+      const wetness = Math.max(0, world.tileSuppressionWetness[idx] ?? 0);
+      if (fire <= simFireEps && heat01 <= heatEps && !scheduled && wetness <= 0.01) {
         continue;
       }
       if (!hasBounds) {
@@ -385,6 +390,7 @@ const captureFireRenderSnapshot = (
   const tileFire = new Float32Array(count);
   const tileHeat = new Float32Array(count);
   const tileFuel = new Float32Array(count);
+  const tileWetness = new Float32Array(count);
   const scheduled = new Uint8Array(count);
   let scheduledWithinBounds = 0;
   let write = 0;
@@ -395,6 +401,7 @@ const captureFireRenderSnapshot = (
       tileFire[write] = Math.max(0, world.tileFire[idx] ?? 0);
       tileHeat[write] = Math.max(0, world.tileHeat[idx] ?? 0);
       tileFuel[write] = clamp(world.tileFuel[idx] ?? 0, 0, 1);
+      tileWetness[write] = clamp(world.tileSuppressionWetness[idx] ?? 0, 0, 1);
       const scheduledNow = world.tileIgniteAt[idx] < Number.POSITIVE_INFINITY ? 1 : 0;
       scheduled[write] = scheduledNow;
       scheduledWithinBounds += scheduledNow;
@@ -413,6 +420,7 @@ const captureFireRenderSnapshot = (
     tileFire,
     tileHeat,
     tileFuel,
+    tileWetness,
     scheduled,
     lastActiveFires,
     fireScheduledCount: Math.max(fireScheduledCount, scheduledWithinBounds),
@@ -562,6 +570,24 @@ const createFireFieldView = (
         lerpFloat(
           snapshotReadFloatByIndex(previousSnapshot, tileIdx, previousSnapshot.tileFuel),
           snapshotReadFloatByIndex(currentSnapshot, tileIdx, currentSnapshot.tileFuel)
+        ),
+        0,
+        1
+      ),
+    getWetnessAt: (x: number, y: number): number =>
+      clamp(
+        lerpFloat(
+          snapshotReadFloatAt(previousSnapshot, x, y, previousSnapshot.tileWetness),
+          snapshotReadFloatAt(currentSnapshot, x, y, currentSnapshot.tileWetness)
+        ),
+        0,
+        1
+      ),
+    getWetnessByIndex: (tileIdx: number): number =>
+      clamp(
+        lerpFloat(
+          snapshotReadFloatByIndex(previousSnapshot, tileIdx, previousSnapshot.tileWetness),
+          snapshotReadFloatByIndex(currentSnapshot, tileIdx, currentSnapshot.tileWetness)
         ),
         0,
         1
@@ -2166,8 +2192,13 @@ export const createThreeTestFireFx = (
     const width = Math.max(1, maxX - minX + 1);
     const height = Math.max(1, maxY - minY + 1);
     const area = width * height;
+    const trackedFireTiles = Math.max(0, fireView.lastActiveFires + fireView.fireScheduledCount);
+    const tilesPerTrackedFire = trackedFireTiles > 0 ? area / trackedFireTiles : area;
+    // Sparse incidents can disappear entirely if we subsample only by bounds area.
+    // Keep full-resolution sampling while active/scheduled tiles are thinly spread out.
+    const preferSparseFullResolution = trackedFireTiles > 0 && tilesPerTrackedFire >= 32;
     const sampleStep =
-      area <= 8192
+      preferSparseFullResolution || area <= 8192
         ? 1
         : Math.max(1, Math.ceil(Math.sqrt(area / Math.max(1, FIRE_MAX_INSTANCES))));
     const tileSpanX = terrainSize.width / Math.max(1, cols);
@@ -2176,7 +2207,7 @@ export const createThreeTestFireFx = (
     const sampleFootprint = tileSpan;
     const sparkFootprint = tileSpan;
     const viewportHeightPx = typeof window !== "undefined" ? Math.max(1, window.innerHeight) : 1080;
-    const heightScale = getTerrainHeightScale(cols, rows);
+    const heightScale = getTerrainHeightScale(cols, rows, sample.heightScaleMultiplier ?? 1);
     const simFireEps = getSimFireEps(world);
     const flamePresenceEps = Math.max(FIRE_FLAME_VISUAL_FLOOR, simFireEps * 0.9);
     const wind = world.wind;
@@ -3095,6 +3126,7 @@ export const createThreeTestFireFx = (
         const fire = fireView.getFireByIndex(idx);
         const heat = fireView.getHeat01ByIndex(idx);
         const fuel = fireView.getFuelByIndex(idx);
+        const wetness = fireView.getWetnessByIndex(idx);
         const scheduled = fireView.getScheduledByIndex(idx);
         const typeId = world.tileTypeId[idx] ?? -1;
         const isAshTile = (world.tileTypeId[idx] ?? -1) === TILE_TYPE_IDS.ash;
@@ -3111,16 +3143,24 @@ export const createThreeTestFireFx = (
           treeBurnVisual > TREE_BURN_FLAME_VISUAL_MIN &&
           burnProgress > TREE_BURN_CARRY_PROGRESS_MIN &&
           heat > 0.08;
+        const hasSuppressedHoldover = !hasActiveFire && !isAshTile && wetness > 0.08 && heat > 0.04;
         const neighbourFire = getNeighbourFireBias(fireView, cols, rows, x, y);
         const flameVisual = hasActiveFire
           ? Math.max(fire, treeBurnVisual * 0.95)
           : hasTreeCarryFlame
             ? treeBurnVisual * 0.72
             : 0;
-        const scheduledPreheat = !hasActiveFire
-          ? clamp(scheduled * smoothstep(0.03, 0.18, heat) * SCHEDULED_PREHEAT_MAX_SCALE, 0, SCHEDULED_PREHEAT_MAX_SCALE)
+        const holdoverEmber = !hasActiveFire
+          ? clamp(wetness * heat * (hasSuppressedHoldover ? 0.32 : 0.18), 0, hasSuppressedHoldover ? 0.12 : 0.08)
           : 0;
-        const hasVisualFlame = hasActiveFire || hasTreeCarryFlame || scheduledPreheat > 0.01;
+        const scheduledPreheat = !hasActiveFire
+          ? clamp(
+              scheduled * (1 - wetness * 0.75) * smoothstep(0.03, 0.18, heat) * SCHEDULED_PREHEAT_MAX_SCALE * 0.42,
+              0,
+              SCHEDULED_PREHEAT_MAX_SCALE * 0.42
+            )
+          : 0;
+        const hasVisualFlame = hasActiveFire || hasTreeCarryFlame || scheduledPreheat > 0.01 || holdoverEmber > 0.015;
         if (hasVisualFlame) {
           visibleFlameTiles += 1;
         }
@@ -3128,7 +3168,7 @@ export const createThreeTestFireFx = (
           ? clamp(flameVisual * 0.6 + heat * 0.28 + treeBurnVisual * 0.16, 0, 1)
           : hasTreeCarryFlame
             ? clamp(flameVisual * 0.8 + heat * 0.24, 0, 1)
-            : scheduledPreheat;
+            : Math.max(scheduledPreheat, holdoverEmber);
         const previousFlame = tileFlameVisual[idx] ?? 0;
         let ignitionAgeSeconds = tileIgnitionAgeSeconds[idx] ?? 0;
         const sustainIgnitionAge =
@@ -3177,8 +3217,10 @@ export const createThreeTestFireFx = (
         tileFlameVisual[idx] = smoothedFlame;
         const targetSmoke = hasActiveFire || hasTreeCarryFlame
           ? clamp(Math.max(targetFlameBase * 0.85, heat * 0.95, treeBurnVisual * 0.8), 0, 1.2)
-          : 0;
-        const smoothedSmoke = hasActiveFire || hasTreeCarryFlame
+          : hasSuppressedHoldover
+            ? clamp(wetness * 0.42 + heat * 0.28 + holdoverEmber * 0.8, 0, 0.42)
+            : 0;
+        const smoothedSmoke = hasActiveFire || hasTreeCarryFlame || hasSuppressedHoldover
           ? smoothApproach(tileSmokeVisual[idx] ?? 0, targetSmoke, 10.0, 6.6, deltaSeconds)
           : smoothApproach(tileSmokeVisual[idx] ?? 0, 0, 0, 9.4, deltaSeconds);
         tileSmokeVisual[idx] = smoothedSmoke;

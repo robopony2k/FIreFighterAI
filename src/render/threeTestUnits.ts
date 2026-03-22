@@ -578,7 +578,7 @@ export const createThreeTestUnitsLayer = (scene: THREE.Scene): ThreeTestUnitsLay
 
     const cols = Math.max(1, sample.cols);
     const rows = Math.max(1, sample.rows);
-    const heightScale = getTerrainHeightScale(cols, rows);
+    const heightScale = getTerrainHeightScale(cols, rows, sample.heightScaleMultiplier ?? 1);
     const renderedSurface = ensureRenderedSurfaceCache(sample);
     const normalSampleOffset = Math.max(TRUCK_NORMAL_SAMPLE_TILES, renderedSurface.step * 0.35);
     const sampleHeightAt = (tileX: number, tileY: number): number =>

@@ -1,9 +1,11 @@
 import type { FireFxDebugControls } from "../threeTestFireFx.js";
+import type { TerrainWaterDebugControls } from "../terrainWaterDebug.js";
 import type { WaterFxDebugControls } from "../threeTestUnitFx.js";
 
 export type FxLabScenarioId =
   | "fire-line"
   | "fire-patch"
+  | "river-waterfall"
   | "water-precision"
   | "water-suppression"
   | "water-sweep";
@@ -11,6 +13,7 @@ export type FxLabScenarioId =
 export type FxLabOverrides = {
   fire?: Partial<FireFxDebugControls>;
   water?: Partial<WaterFxDebugControls>;
+  riverWater?: Partial<TerrainWaterDebugControls>;
 };
 
 export type FxLabPlacementMode = "none" | "firefighter" | "truck" | "spray-target";
@@ -18,6 +21,7 @@ export type FxLabPlacementMode = "none" | "firefighter" | "truck" | "spray-targe
 export const FX_LAB_SCENARIO_IDS: readonly FxLabScenarioId[] = [
   "fire-line",
   "fire-patch",
+  "river-waterfall",
   "water-precision",
   "water-suppression",
   "water-sweep"

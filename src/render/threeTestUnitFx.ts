@@ -1100,7 +1100,7 @@ export const createThreeTestUnitFxLayer = (scene: THREE.Scene): ThreeTestUnitFxL
 
     const cols = Math.max(1, sample.cols);
     const rows = Math.max(1, sample.rows);
-    const heightScale = getTerrainHeightScale(cols, rows);
+    const heightScale = getTerrainHeightScale(cols, rows, sample.heightScaleMultiplier ?? 1);
     const worldPerTileX = terrainSize.width / cols;
     const worldPerTileZ = terrainSize.depth / rows;
     const worldPerTile = (worldPerTileX + worldPerTileZ) * 0.5;

@@ -55,6 +55,11 @@ export const FX_LAB_SCENARIOS: ReadonlyArray<FxLabScenarioDefinition> = [
     description: "A dense core fire with a ring of pending ignition for smoke and glow tuning."
   },
   {
+    id: "river-waterfall",
+    label: "River Waterfall",
+    description: "A narrow stepped river corridor with engine-like 2-3 tile widths, a clear drop, and a plunge pool for waterfall tuning."
+  },
+  {
     id: "water-precision",
     label: "Water Precision",
     description: "A narrow precision stream against a small target fire."
@@ -97,6 +102,13 @@ export const applyFxLabScenarioFrame = (scenarioId: FxLabScenarioId, ctx: FxLabS
     ctx.addFireDisk(40, 31, 8.2, 0.88 * patchPulse, 4.8);
     ctx.addFireDisk(38, 29, 5.1, 0.64 * pulse(timeSeconds + 1.2, 0.38, 0.86, 1.18), 4.1);
     ctx.addScheduledRing(40, 31, 8.8, 12.4);
+    return;
+  }
+  if (scenarioId === "river-waterfall") {
+    ctx.setWind(0.18, -0.98, 0.22, "N");
+    ctx.placeTruck(38.8, 44.6, "medium");
+    ctx.placeFirefighter(41.2, 42.7);
+    ctx.addFireDisk(49.6, 28.8, 2.4, 0.28 * pulse(timeSeconds, 0.2, 0.92, 1.08), 2.6);
     return;
   }
   if (scenarioId === "water-precision") {

@@ -4,6 +4,11 @@ import type { WaterEnvironmentPalette } from "./environmentPalette.js";
 import { ThreeTestOceanWaterHelper } from "./threeTestOceanWaterHelper.js";
 import { ThreeTestRiverWaterHelper } from "./threeTestRiverWaterHelper.js";
 import { ThreeTestWaterfallHelper } from "./threeTestWaterfallHelper.js";
+import {
+  DEFAULT_TERRAIN_WATER_DEBUG_CONTROLS,
+  normalizeTerrainWaterDebugControls,
+  type TerrainWaterDebugControls
+} from "./terrainWaterDebug.js";
 
 export type WaterQualityProfile = "fast" | "balanced" | "high";
 
@@ -60,6 +65,7 @@ export class ThreeTestWaterSystem {
   private readonly warnedNormalTextureFailures = new Set<string>();
   private readonly defaultNormal1: THREE.DataTexture;
   private readonly defaultNormal2: THREE.DataTexture;
+  private debugControls: TerrainWaterDebugControls = { ...DEFAULT_TERRAIN_WATER_DEBUG_CONTROLS };
 
   constructor(options: ThreeTestWaterSystemOptions) {
     this.renderer = options.renderer;
@@ -108,6 +114,7 @@ export class ThreeTestWaterSystem {
       fogFar: options.fogFar
     });
     this.setPalette(this.palette);
+    this.setDebugControls(this.debugControls);
     this.applyQualityProfile(this.quality);
   }
 
@@ -210,6 +217,16 @@ export class ThreeTestWaterSystem {
     this.applyQualityProfile(next);
     this.fallbackAccum = 0;
     this.recoveryAccum = 0;
+  }
+
+  public setDebugControls(controls: Partial<TerrainWaterDebugControls>): void {
+    this.debugControls = normalizeTerrainWaterDebugControls({ ...this.debugControls, ...controls });
+    this.riverHelper.setDebugControls(this.debugControls);
+    this.waterfallHelper.setDebugControls(this.debugControls);
+  }
+
+  public getDebugControls(): TerrainWaterDebugControls {
+    return { ...this.debugControls };
   }
 
   public update(timeMs: number, dtSeconds: number, fpsEstimate: number, sceneRenderMs: number): void {

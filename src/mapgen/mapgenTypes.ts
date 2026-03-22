@@ -3,6 +3,11 @@ import type { MapGenContext } from "./pipeline/MapGenContext.js";
 export type MapGenReporter = (message: string, progress: number) => void | Promise<void>;
 
 export type MapGenDebugPhase =
+  | "terrain:relief"
+  | "terrain:landmass"
+  | "terrain:mountains"
+  | "terrain:carving"
+  | "terrain:flooding"
   | "terrain:elevation"
   | "terrain:erosion"
   | "terrain:shoreline"
@@ -26,6 +31,7 @@ export type MapGenDebugSnapshot = {
 export type MapGenDebug = {
   onPhase: (snapshot: MapGenDebugSnapshot) => void | Promise<void>;
   waitForStep?: () => Promise<void>;
+  stopAfterPhase?: MapGenDebugPhase;
 };
 
 export type MapGenStage = {

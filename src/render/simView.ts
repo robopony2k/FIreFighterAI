@@ -12,6 +12,7 @@ export type RenderTerrainSample = {
   cols: number;
   rows: number;
   elevations: Float32Array;
+  heightScaleMultiplier?: number;
   tileTypes?: Uint8Array;
   treeTypes?: Uint8Array;
   tileFire?: Float32Array;
@@ -53,11 +54,13 @@ export const buildRenderTerrainSample = (
   debugTypeColors: boolean,
   treesEnabled: boolean,
   fastUpdate = false,
-  fullResolution = false
+  fullResolution = false,
+  heightScaleMultiplier = 1
 ): RenderTerrainSample => ({
   cols: state.grid.cols,
   rows: state.grid.rows,
   elevations: state.tileElevation,
+  heightScaleMultiplier,
   tileTypes: state.tileTypeId,
   treeTypes,
   tileFire: state.tileFire,

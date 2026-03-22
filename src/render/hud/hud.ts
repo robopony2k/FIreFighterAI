@@ -251,6 +251,7 @@ const renderDebugCellOverlay = (
   const cachedFire = world.tileFire[idx];
   const cachedHeat = world.tileHeat[idx];
   const cachedFuel = world.tileFuel[idx];
+  const cachedWetness = world.tileSuppressionWetness[idx];
   const cachedIgniteAt = world.tileIgniteAt[idx];
   const cachedIgnition = world.tileIgnitionPoint[idx];
   const cachedBurnRate = world.tileBurnRate[idx];
@@ -272,7 +273,7 @@ const renderDebugCellOverlay = (
     `spread=${formatOptional(tile.spreadBoost)} cap=${formatOptional(tile.heatTransferCap)} retain=${formatOptional(tile.heatRetention)}`,
     `wind=${formatOptional(tile.windFactor)} moist=${formatNumber(tile.moisture)} canopy=${formatNumber(tile.canopy)}`,
     `ashAge=${formatNumber(tile.ashAge, 2)} elev=${formatNumber(tile.elevation)} height=n/a`,
-    `cache fire=${formatNumber(cachedFire)} heat=${formatNumber(cachedHeat)} fuel=${formatNumber(cachedFuel)}`,
+    `cache fire=${formatNumber(cachedFire)} heat=${formatNumber(cachedHeat)} fuel=${formatNumber(cachedFuel)} wet=${formatNumber(cachedWetness)}`,
     `cache ignite=${formatNumber(cachedIgnition)} burn=${formatNumber(cachedBurnRate)} heatOut=${formatNumber(cachedHeatOutput)}`,
     `igniteAt=${formatNumber(cachedIgniteAt, 3)} smooth=n/a`,
     `bounds active=${world.fireBoundsActive ? "1" : "0"} in=${inBounds ? "1" : "0"}`,

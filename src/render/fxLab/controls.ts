@@ -10,9 +10,14 @@ import {
   normalizeWaterFxDebugControls,
   type WaterFxDebugControls
 } from "../threeTestUnitFx.js";
+import {
+  DEFAULT_TERRAIN_WATER_DEBUG_CONTROLS,
+  normalizeTerrainWaterDebugControls,
+  type TerrainWaterDebugControls
+} from "../terrainWaterDebug.js";
 import type { FxLabOverrides } from "./types.js";
 
-type FxLabControlSection = "Fire" | "Water";
+type FxLabControlSection = "Fire" | "Hose" | "River" | "Waterfall";
 
 type FxLabControlBase<K extends string> = {
   key: K;
@@ -46,6 +51,11 @@ export type FxLabWaterControlDefinition =
   | FxLabRangeControl<keyof WaterFxDebugControls & string>
   | FxLabBooleanControl<keyof WaterFxDebugControls & string>
   | FxLabEnumControl<keyof WaterFxDebugControls & string, never>;
+
+export type FxLabTerrainWaterControlDefinition =
+  | FxLabRangeControl<keyof TerrainWaterDebugControls & string>
+  | FxLabBooleanControl<keyof TerrainWaterDebugControls & string>
+  | FxLabEnumControl<keyof TerrainWaterDebugControls & string, never>;
 
 export const FX_LAB_FIRE_CONTROLS: ReadonlyArray<FxLabFireControlDefinition> = [
   {
@@ -154,7 +164,7 @@ export const FX_LAB_FIRE_CONTROLS: ReadonlyArray<FxLabFireControlDefinition> = [
 export const FX_LAB_WATER_CONTROLS: ReadonlyArray<FxLabWaterControlDefinition> = [
   {
     key: "streamBodyWidthScale",
-    section: "Water",
+    section: "Hose",
     kind: "range",
     label: "Body Width",
     description: "Scale the primary shared stream body width.",
@@ -164,7 +174,7 @@ export const FX_LAB_WATER_CONTROLS: ReadonlyArray<FxLabWaterControlDefinition> =
   },
   {
     key: "streamBodyOpacityScale",
-    section: "Water",
+    section: "Hose",
     kind: "range",
     label: "Body Opacity",
     description: "Scale the primary shared stream body opacity.",
@@ -174,42 +184,42 @@ export const FX_LAB_WATER_CONTROLS: ReadonlyArray<FxLabWaterControlDefinition> =
   },
   {
     key: "showStreamBody",
-    section: "Water",
+    section: "Hose",
     kind: "boolean",
     label: "Show Body",
     description: "Toggle the primary stream body pass."
   },
   {
     key: "showJetCore",
-    section: "Water",
+    section: "Hose",
     kind: "boolean",
     label: "Show Core",
     description: "Toggle the smaller inner hose core."
   },
   {
     key: "showMistShell",
-    section: "Water",
+    section: "Hose",
     kind: "boolean",
     label: "Show Mist",
     description: "Toggle the secondary mist shell."
   },
   {
     key: "showBreakup",
-    section: "Water",
+    section: "Hose",
     kind: "boolean",
     label: "Show Breakup",
     description: "Toggle breakup particles near the target."
   },
   {
     key: "showImpact",
-    section: "Water",
+    section: "Hose",
     kind: "boolean",
     label: "Show Impact",
     description: "Toggle the terminal splash/impact pass."
   },
   {
     key: "coreRadiusScale",
-    section: "Water",
+    section: "Hose",
     kind: "range",
     label: "Core Radius",
     description: "Scale jet core radius.",
@@ -219,7 +229,7 @@ export const FX_LAB_WATER_CONTROLS: ReadonlyArray<FxLabWaterControlDefinition> =
   },
   {
     key: "mistRadiusScale",
-    section: "Water",
+    section: "Hose",
     kind: "range",
     label: "Mist Radius",
     description: "Scale mist shell width.",
@@ -229,7 +239,7 @@ export const FX_LAB_WATER_CONTROLS: ReadonlyArray<FxLabWaterControlDefinition> =
   },
   {
     key: "impactRadiusScale",
-    section: "Water",
+    section: "Hose",
     kind: "range",
     label: "Impact Radius",
     description: "Scale splash/impact size.",
@@ -239,7 +249,7 @@ export const FX_LAB_WATER_CONTROLS: ReadonlyArray<FxLabWaterControlDefinition> =
   },
   {
     key: "breakupAlphaScale",
-    section: "Water",
+    section: "Hose",
     kind: "range",
     label: "Breakup Alpha",
     description: "Scale breakup particle opacity.",
@@ -249,7 +259,7 @@ export const FX_LAB_WATER_CONTROLS: ReadonlyArray<FxLabWaterControlDefinition> =
   },
   {
     key: "breakupSizeScale",
-    section: "Water",
+    section: "Hose",
     kind: "range",
     label: "Breakup Size",
     description: "Scale breakup particle size.",
@@ -259,7 +269,7 @@ export const FX_LAB_WATER_CONTROLS: ReadonlyArray<FxLabWaterControlDefinition> =
   },
   {
     key: "pulseRateScale",
-    section: "Water",
+    section: "Hose",
     kind: "range",
     label: "Pulse Rate",
     description: "Scale breakup pulse frequency.",
@@ -269,7 +279,7 @@ export const FX_LAB_WATER_CONTROLS: ReadonlyArray<FxLabWaterControlDefinition> =
   },
   {
     key: "precisionVolumeScale",
-    section: "Water",
+    section: "Hose",
     kind: "range",
     label: "Precision Volume",
     description: "Scale precision-mode stream volume.",
@@ -279,7 +289,7 @@ export const FX_LAB_WATER_CONTROLS: ReadonlyArray<FxLabWaterControlDefinition> =
   },
   {
     key: "balancedVolumeScale",
-    section: "Water",
+    section: "Hose",
     kind: "range",
     label: "Balanced Volume",
     description: "Scale balanced-mode stream volume.",
@@ -289,7 +299,7 @@ export const FX_LAB_WATER_CONTROLS: ReadonlyArray<FxLabWaterControlDefinition> =
   },
   {
     key: "suppressionVolumeScale",
-    section: "Water",
+    section: "Hose",
     kind: "range",
     label: "Suppression Volume",
     description: "Scale suppression-mode stream volume.",
@@ -299,7 +309,7 @@ export const FX_LAB_WATER_CONTROLS: ReadonlyArray<FxLabWaterControlDefinition> =
   },
   {
     key: "precisionResponseScale",
-    section: "Water",
+    section: "Hose",
     kind: "range",
     label: "Precision Response",
     description: "Scale precision-mode render response.",
@@ -309,7 +319,7 @@ export const FX_LAB_WATER_CONTROLS: ReadonlyArray<FxLabWaterControlDefinition> =
   },
   {
     key: "balancedResponseScale",
-    section: "Water",
+    section: "Hose",
     kind: "range",
     label: "Balanced Response",
     description: "Scale balanced-mode render response.",
@@ -319,12 +329,119 @@ export const FX_LAB_WATER_CONTROLS: ReadonlyArray<FxLabWaterControlDefinition> =
   },
   {
     key: "suppressionResponseScale",
-    section: "Water",
+    section: "Hose",
     kind: "range",
     label: "Suppression Response",
     description: "Scale suppression-mode render response.",
     min: 0.25,
     max: 2,
+    step: 0.01
+  }
+];
+
+export const FX_LAB_TERRAIN_WATER_CONTROLS: ReadonlyArray<FxLabTerrainWaterControlDefinition> = [
+  {
+    key: "showRiver",
+    section: "River",
+    kind: "boolean",
+    label: "Show River",
+    description: "Toggle the river surface mesh."
+  },
+  {
+    key: "riverFlowSpeedScale",
+    section: "River",
+    kind: "range",
+    label: "Flow Speed",
+    description: "Scale river flow animation speed.",
+    min: 0.25,
+    max: 2.5,
+    step: 0.01
+  },
+  {
+    key: "riverNormalStrengthScale",
+    section: "River",
+    kind: "range",
+    label: "Surface Normals",
+    description: "Scale river normal-map strength.",
+    min: 0.25,
+    max: 2.5,
+    step: 0.01
+  },
+  {
+    key: "riverFoamScale",
+    section: "River",
+    kind: "range",
+    label: "River Foam",
+    description: "Scale rapid and edge foam intensity.",
+    min: 0,
+    max: 2.5,
+    step: 0.01
+  },
+  {
+    key: "riverSpecularScale",
+    section: "River",
+    kind: "range",
+    label: "River Specular",
+    description: "Scale river highlight intensity.",
+    min: 0,
+    max: 2.5,
+    step: 0.01
+  },
+  {
+    key: "showWaterfalls",
+    section: "Waterfall",
+    kind: "boolean",
+    label: "Show Falls",
+    description: "Toggle the waterfall mesh."
+  },
+  {
+    key: "waterfallWidthScale",
+    section: "Waterfall",
+    kind: "range",
+    label: "Fall Width",
+    description: "Scale waterfall sheet width.",
+    min: 0.5,
+    max: 2,
+    step: 0.01
+  },
+  {
+    key: "waterfallOpacityScale",
+    section: "Waterfall",
+    kind: "range",
+    label: "Fall Opacity",
+    description: "Scale waterfall body opacity.",
+    min: 0.2,
+    max: 2,
+    step: 0.01
+  },
+  {
+    key: "waterfallFoamScale",
+    section: "Waterfall",
+    kind: "range",
+    label: "Fall Foam",
+    description: "Scale waterfall lip and plunge foam.",
+    min: 0,
+    max: 2.5,
+    step: 0.01
+  },
+  {
+    key: "waterfallMistScale",
+    section: "Waterfall",
+    kind: "range",
+    label: "Fall Mist",
+    description: "Scale waterfall mist density.",
+    min: 0,
+    max: 2.5,
+    step: 0.01
+  },
+  {
+    key: "waterfallSpeedScale",
+    section: "Waterfall",
+    kind: "range",
+    label: "Fall Speed",
+    description: "Scale waterfall animation speed.",
+    min: 0.25,
+    max: 2.5,
     step: 0.01
   }
 ];
@@ -344,19 +461,25 @@ const hasOwnDiff = <T extends Record<string, string | number | boolean>>(
 
 export const buildFxLabOverrides = (
   fireControls: FireFxDebugControls,
-  waterControls: WaterFxDebugControls
+  waterControls: WaterFxDebugControls,
+  terrainWaterControls: TerrainWaterDebugControls
 ): FxLabOverrides => ({
   fire: hasOwnDiff(fireControls, DEFAULT_FIRE_FX_DEBUG_CONTROLS),
-  water: hasOwnDiff(waterControls, DEFAULT_WATER_FX_DEBUG_CONTROLS)
+  water: hasOwnDiff(waterControls, DEFAULT_WATER_FX_DEBUG_CONTROLS),
+  riverWater: hasOwnDiff(terrainWaterControls, DEFAULT_TERRAIN_WATER_DEBUG_CONTROLS)
 });
 
 export const formatFxLabOverrides = (
   fireControls: FireFxDebugControls,
-  waterControls: WaterFxDebugControls
-): string => JSON.stringify(buildFxLabOverrides(fireControls, waterControls), null, 2);
+  waterControls: WaterFxDebugControls,
+  terrainWaterControls: TerrainWaterDebugControls
+): string => JSON.stringify(buildFxLabOverrides(fireControls, waterControls, terrainWaterControls), null, 2);
 
 export const cloneDefaultFireFxDebugControls = (): FireFxDebugControls =>
   normalizeFireFxDebugControls(DEFAULT_FIRE_FX_DEBUG_CONTROLS);
 
 export const cloneDefaultWaterFxDebugControls = (): WaterFxDebugControls =>
   normalizeWaterFxDebugControls(DEFAULT_WATER_FX_DEBUG_CONTROLS);
+
+export const cloneDefaultTerrainWaterDebugControls = (): TerrainWaterDebugControls =>
+  normalizeTerrainWaterDebugControls(DEFAULT_TERRAIN_WATER_DEBUG_CONTROLS);

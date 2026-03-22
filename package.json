@@ -13,6 +13,8 @@
     "dev": "node scripts/dev-server.cjs",
     "fire:regression": "npm run build && node scripts/fire-regression.mjs",
     "growth:regression": "npm run build && node scripts/growth-regression.mjs",
+    "terrain:eval": "npm run build && node scripts/terrain-eval.mjs",
+    "terrain:eval:quick": "npm run build && node scripts/terrain-eval.mjs --size=massive --samples=1",
     "mapgen:regression": "npm run build && node scripts/mapgen-regression.mjs",
     "mapgen:regression:full": "npm run build && node scripts/mapgen-regression.mjs --full",
     "mapgen:regression:baseline": "npm run build && node scripts/mapgen-regression.mjs --write-baseline",
