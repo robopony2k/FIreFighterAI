@@ -55,6 +55,11 @@ export const FX_LAB_SCENARIOS: ReadonlyArray<FxLabScenarioDefinition> = [
     description: "A dense core fire with a ring of pending ignition for smoke and glow tuning."
   },
   {
+    id: "ocean-shoreline",
+    label: "Ocean Shoreline",
+    description: "A shoreline-focused calibration view using the live in-game ocean and beach system."
+  },
+  {
     id: "river-waterfall",
     label: "River Waterfall",
     description: "A narrow stepped river corridor with engine-like 2-3 tile widths, a clear drop, and a plunge pool for waterfall tuning."
@@ -102,6 +107,12 @@ export const applyFxLabScenarioFrame = (scenarioId: FxLabScenarioId, ctx: FxLabS
     ctx.addFireDisk(40, 31, 8.2, 0.88 * patchPulse, 4.8);
     ctx.addFireDisk(38, 29, 5.1, 0.64 * pulse(timeSeconds + 1.2, 0.38, 0.86, 1.18), 4.1);
     ctx.addScheduledRing(40, 31, 8.8, 12.4);
+    return;
+  }
+  if (scenarioId === "ocean-shoreline") {
+    ctx.setWind(0.58, -0.81, 0.34, "NE");
+    ctx.placeTruck(27.5, 52.5, "medium");
+    ctx.placeFirefighter(29.2, 50.7);
     return;
   }
   if (scenarioId === "river-waterfall") {

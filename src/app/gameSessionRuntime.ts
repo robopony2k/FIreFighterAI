@@ -426,7 +426,33 @@ export const createAppRuntime = (): AppRuntime => {
   let activeThreeOverlayMode: "run" | "fx-lab" | null = null;
   let activeRenderMode: ActiveRenderMode = isLegacy2dEnabled() ? "2d" : "3d";
   const perfStats = new Map<string, PerfStat>();
-  const perfOverlay = document.createElement("pre");
+  const perfOverlay = document.createElement("div");
+  const perfOverlayText = document.createElement("pre");
+  const perfOverlayControls = document.createElement("div");
+  const perfOverlayControlsTitle = document.createElement("div");
+  type PerfOverlayCheckbox = {
+    row: HTMLLabelElement;
+    input: HTMLInputElement;
+  };
+  const createPerfOverlayCheckbox = (label: string, shortcut: string): PerfOverlayCheckbox => {
+    const row = document.createElement("label");
+    row.style.display = "flex";
+    row.style.alignItems = "center";
+    row.style.gap = "8px";
+    row.style.cursor = "pointer";
+    row.style.userSelect = "none";
+    row.style.pointerEvents = "auto";
+    const input = document.createElement("input");
+    input.type = "checkbox";
+    input.style.margin = "0";
+    input.style.accentColor = "#7baf8d";
+    const text = document.createElement("span");
+    text.textContent = `${label} (${shortcut})`;
+    row.append(input, text);
+    return { row, input };
+  };
+  const perfOverlayFogToggle = createPerfOverlayCheckbox("Fog", "F8");
+  const perfOverlayWaterfallToggle = createPerfOverlayCheckbox("Waterfall X-Ray", "F9");
   let perfOverlayVisible = runtimeSettings.perf;
   let lastPerfOverlayUpdate = 0;
   let lastPerfConsoleLog = 0;
@@ -476,10 +502,60 @@ export const createAppRuntime = (): AppRuntime => {
     typeof value === "number" && Number.isFinite(value) ? value.toFixed(2) : "n/a";
   const formatInt = (value: number | null | undefined): string =>
     typeof value === "number" && Number.isFinite(value) ? Math.round(value).toString() : "n/a";
+  const canUsePerfOverlayRunToggles = (): boolean =>
+    activeRenderMode === "3d" &&
+    activeThreeOverlayMode === "run" &&
+    !!threeTestController &&
+    !!threeTestOverlay &&
+    !threeTestOverlay.classList.contains("hidden");
+  const syncPerfOverlayControls = (): void => {
+    const canToggle = canUsePerfOverlayRunToggles();
+    perfOverlayControls.style.display = canToggle ? "flex" : "none";
+    perfOverlayFogToggle.input.disabled = !canToggle;
+    perfOverlayWaterfallToggle.input.disabled = !canToggle;
+    if (!canToggle || !threeTestController) {
+      perfOverlayFogToggle.input.checked = false;
+      perfOverlayWaterfallToggle.input.checked = false;
+      return;
+    }
+    perfOverlayFogToggle.input.checked = threeTestController.getEnvironmentFogEnabled();
+    perfOverlayWaterfallToggle.input.checked =
+      threeTestController.getTerrainWaterDebugControls().waterfallDebugHighlight;
+  };
+  const setRunFogEnabled = (enabled: boolean): void => {
+    if (!canUsePerfOverlayRunToggles() || !threeTestController) {
+      syncPerfOverlayControls();
+      return;
+    }
+    threeTestController.setEnvironmentFogEnabled(enabled);
+    setStatus(state, enabled ? "Environment fog enabled. Press F8 to disable." : "Environment fog disabled.");
+    syncPerfOverlayControls();
+  };
+  const setRunWaterfallHighlightEnabled = (enabled: boolean): void => {
+    if (!canUsePerfOverlayRunToggles() || !threeTestController) {
+      syncPerfOverlayControls();
+      return;
+    }
+    const controls = threeTestController.getTerrainWaterDebugControls();
+    threeTestController.setTerrainWaterDebugControls({
+      showWaterfalls: enabled ? true : controls.showWaterfalls,
+      waterfallDebugHighlight: enabled
+    });
+    setStatus(
+      state,
+      enabled
+        ? "Waterfall x-ray highlight enabled. Press F9 to disable."
+        : "Waterfall x-ray highlight disabled."
+    );
+    syncPerfOverlayControls();
+  };
   
   const setPerfOverlayVisible = (visible: boolean): void => {
     perfOverlayVisible = visible;
-    perfOverlay.style.display = visible ? "block" : "none";
+    perfOverlay.style.display = visible ? "flex" : "none";
+    if (visible) {
+      syncPerfOverlayControls();
+    }
   };
   
   const applyPerfOverlayStyle = (): void => {
@@ -490,8 +566,10 @@ export const createAppRuntime = (): AppRuntime => {
     perfOverlay.style.margin = "0";
     perfOverlay.style.padding = "10px 12px";
     perfOverlay.style.maxWidth = "460px";
-    perfOverlay.style.whiteSpace = "pre";
-    perfOverlay.style.pointerEvents = "none";
+    perfOverlay.style.display = "flex";
+    perfOverlay.style.flexDirection = "column";
+    perfOverlay.style.gap = "8px";
+    perfOverlay.style.pointerEvents = "auto";
     perfOverlay.style.zIndex = "80";
     perfOverlay.style.color = "#d7f0dd";
     perfOverlay.style.background = "rgba(9, 13, 17, 0.84)";
@@ -499,6 +577,34 @@ export const createAppRuntime = (): AppRuntime => {
     perfOverlay.style.borderRadius = "8px";
     perfOverlay.style.font = "12px/1.35 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace";
     perfOverlay.style.boxShadow = "0 8px 20px rgba(0, 0, 0, 0.35)";
+    perfOverlay.addEventListener("pointerdown", (event) => event.stopPropagation());
+    perfOverlay.addEventListener("click", (event) => event.stopPropagation());
+    perfOverlayText.style.margin = "0";
+    perfOverlayText.style.whiteSpace = "pre";
+    perfOverlayText.style.pointerEvents = "none";
+    perfOverlayText.style.color = "inherit";
+    perfOverlayText.style.font = "inherit";
+    perfOverlayControls.style.display = "none";
+    perfOverlayControls.style.flexDirection = "column";
+    perfOverlayControls.style.gap = "6px";
+    perfOverlayControls.style.paddingTop = "8px";
+    perfOverlayControls.style.borderTop = "1px solid rgba(123, 175, 141, 0.28)";
+    perfOverlayControls.style.pointerEvents = "auto";
+    perfOverlayControlsTitle.textContent = "Run Toggles";
+    perfOverlayControlsTitle.style.fontWeight = "600";
+    perfOverlayControlsTitle.style.color = "#b8d8c2";
+    perfOverlayFogToggle.input.addEventListener("change", () => {
+      setRunFogEnabled(perfOverlayFogToggle.input.checked);
+    });
+    perfOverlayWaterfallToggle.input.addEventListener("change", () => {
+      setRunWaterfallHighlightEnabled(perfOverlayWaterfallToggle.input.checked);
+    });
+    perfOverlayControls.append(
+      perfOverlayControlsTitle,
+      perfOverlayFogToggle.row,
+      perfOverlayWaterfallToggle.row
+    );
+    perfOverlay.append(perfOverlayText, perfOverlayControls);
     document.body.appendChild(perfOverlay);
     setPerfOverlayVisible(perfOverlayVisible);
   };
@@ -559,6 +665,15 @@ export const createAppRuntime = (): AppRuntime => {
           `3D geo: calls ${formatInt(threePerf.sceneCalls)} tri ${formatInt(threePerf.sceneTriangles)} line ${formatInt(threePerf.sceneLines)} pt ${formatInt(threePerf.scenePoints)}`
         );
         lines.push(
+          `3D falls: inst ${formatInt(threePerf.waterfallCount)} cand ${formatInt(threePerf.waterfallCandidateCount)} cluster ${formatInt(threePerf.waterfallClusterCount)} emit ${formatInt(threePerf.waterfallEmittedCount)} wallQ ${formatInt(threePerf.waterfallWallQuadCount)} tri ${formatInt(threePerf.waterfallWallTriangleCount)}`
+        );
+        lines.push(
+          `3D fall dbg: rejVert ${formatInt(threePerf.waterfallRejectedVerticalCount)} rejRun ${formatInt(threePerf.waterfallRejectedLongRunCount)} anchor ${formatNum(threePerf.waterfallAnchorErrorMean)}/${formatNum(threePerf.waterfallAnchorErrorMax)} gap ${formatNum(threePerf.waterfallWallTopGapMean)}/${formatNum(threePerf.waterfallWallTopGapMax)}`
+        );
+        lines.push(`3D fall span: q/f ${threePerf.waterfallWallQuadBreakdown}`);
+        lines.push(`3D env: fog ${threePerf.environmentFogEnabled ? "on" : "off"}  F8 toggle`);
+        lines.push(`3D fall viz: ${threePerf.waterfallDebugHighlightEnabled ? "xray on" : "xray off"}  F9 toggle`);
+        lines.push(
           `3D mem: geom ${formatInt(threePerf.memoryGeometries)} tex ${formatInt(threePerf.memoryTextures)} totalCalls ${formatInt(threePerf.totalCalls)}`
         );
         lines.push(
@@ -588,7 +703,8 @@ export const createAppRuntime = (): AppRuntime => {
       recordPerfSample("3d.uiRender", threePerf.uiRenderMs);
     }
     if (perfOverlayVisible && now - lastPerfOverlayUpdate >= PERF_OVERLAY_REFRESH_MS) {
-      perfOverlay.textContent = buildPerfOverlayText(threePerf, now);
+      perfOverlayText.textContent = buildPerfOverlayText(threePerf, now);
+      syncPerfOverlayControls();
       lastPerfOverlayUpdate = now;
     }
     const perfConsoleAlways = isPerfConsoleAlways();
@@ -1102,7 +1218,12 @@ export const createAppRuntime = (): AppRuntime => {
             tileTypes: snapshot.tileTypes,
             treeTypes: buildTreeTypeMap(),
             riverMask: snapshot.riverMask,
+            oceanMask: snapshot.oceanMask,
+            seaLevel: snapshot.seaLevel,
+            coastDistance: snapshot.coastDistance,
+            coastClass: snapshot.coastClass,
             debugTypeColors: inputState.debugTypeColors,
+            fullResolution: true,
             treesEnabled:
               snapshot.phase === "biome:spread" ||
               snapshot.phase === "biome:classify" ||
@@ -1428,11 +1549,21 @@ export const createAppRuntime = (): AppRuntime => {
   }
   window.addEventListener(DEBUG_TYPE_EVENT, () => refreshThreeTestDebug());
   document.addEventListener("keydown", (event) => {
-    if (!event.ctrlKey || !event.shiftKey || event.key.toLowerCase() !== "p") {
+    const key = event.key.toLowerCase();
+    if (event.ctrlKey && event.shiftKey && key === "p") {
+      event.preventDefault();
+      setRuntimeSetting("perf", !perfOverlayVisible);
+      return;
+    }
+    if (key !== "f9" || event.ctrlKey || event.shiftKey || event.altKey || event.metaKey) {
+      return;
+    }
+    if (!canUsePerfOverlayRunToggles() || !threeTestController) {
       return;
     }
     event.preventDefault();
-    setRuntimeSetting("perf", !perfOverlayVisible);
+    const nextHighlight = !threeTestController.getTerrainWaterDebugControls().waterfallDebugHighlight;
+    setRunWaterfallHighlightEnabled(nextHighlight);
   });
   
   applyPerfOverlayStyle();

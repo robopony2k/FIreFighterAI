@@ -510,7 +510,7 @@ export class ThreeTestWaterfallHelper {
     this.sourceBaseMeshY = baseMesh.position.y;
     this.qualityUniform = qualityUniform;
 
-    const geometry = new THREE.PlaneGeometry(1, 1, 6, 14);
+    const geometry = new THREE.PlaneGeometry(1, 1, 8, 24);
     geometry.translate(0, -0.5, 0);
     this.dropNormAttr = new THREE.InstancedBufferAttribute(new Float32Array(waterfallCount), 1);
     this.fallStyleAttr = new THREE.InstancedBufferAttribute(new Float32Array(waterfallCount), 1);
@@ -552,12 +552,25 @@ export class ThreeTestWaterfallHelper {
           vec3 localPos = position;
           float down01 = 1.0 - uv.y;
           float centerWeight = 1.0 - smoothstep(0.26, 0.94, abs(uv.x - 0.5) * 2.0);
-          float forwardBow = down01 * down01;
-          float rapidCurve = (1.0 - aFallStyle) * forwardBow;
+          float forwardBow = down01 * mix(0.42, 1.0, down01);
+          float shoulder = smoothstep(0.0, 0.78, down01);
+          float rapidCurve = (1.0 - aFallStyle) * shoulder;
+          float lipLead = smoothstep(0.62, 1.0, uv.y);
           float curtainRipple = sin(uv.y * 22.0 + uv.x * 9.0 + u_time * (2.6 + aDropNorm * 1.8) * u_speedScale);
           localPos.x += curtainRipple * centerWeight * (0.012 + aDropNorm * 0.016);
-          localPos.z += centerWeight * ((0.012 + aDropNorm * 0.028) * forwardBow + rapidCurve * (0.022 + aDropNorm * 0.028));
+          localPos.z += centerWeight * ((0.018 + aDropNorm * 0.034) * shoulder + rapidCurve * (0.026 + aDropNorm * 0.036));
           vec4 worldPos = modelMatrix * instanceMatrix * vec4(localPos, 1.0);
+          vec3 forwardVec = (instanceMatrix * vec4(0.0, 0.0, 1.0, 0.0)).xyz;
+          float forwardLen = max(length(forwardVec), 1e-4);
+          vec3 forwardDir = forwardVec / forwardLen;
+          float worldBend =
+            centerWeight *
+            (
+              lipLead * mix(0.05, 0.14, aFallStyle) +
+              forwardBow * mix(0.08, 0.26, aFallStyle) * (0.65 + aDropNorm * 0.55) +
+              rapidCurve * (0.03 + aDropNorm * 0.06)
+            );
+          worldPos.xyz += forwardDir * worldBend;
           vWorldPos = worldPos.xyz;
           gl_Position = projectionMatrix * viewMatrix * worldPos;
         }

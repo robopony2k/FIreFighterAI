@@ -72,6 +72,7 @@ import {
 } from "./threeTestTerrain.js";
 import { createThreeTestFireFx, type SparkMode } from "./threeTestFireFx.js";
 import { createThreeTestUnitFxLayer } from "./threeTestUnitFx.js";
+import type { TerrainWaterDebugControls } from "./terrainWaterDebug.js";
 import { ThreeTestWaterSystem, type WaterQualityProfile } from "./threeTestWater.js";
 import { createThreeTestUnitsLayer } from "./threeTestUnits.js";
 import { createThreeTestPostPipeline, type DepthOfFieldSettings } from "./post/dofPipeline.js";
@@ -126,6 +127,21 @@ export type ThreeTestPerfSnapshot = {
   memoryTextures: number;
   contextLosses: number;
   contextRestores: number;
+  waterfallCount: number;
+  waterfallCandidateCount: number;
+  waterfallClusterCount: number;
+  waterfallEmittedCount: number;
+  waterfallRejectedVerticalCount: number;
+  waterfallRejectedLongRunCount: number;
+  waterfallWallQuadCount: number;
+  waterfallWallTriangleCount: number;
+  waterfallWallQuadBreakdown: string;
+  environmentFogEnabled: boolean;
+  waterfallDebugHighlightEnabled: boolean;
+  waterfallAnchorErrorMean: number;
+  waterfallAnchorErrorMax: number;
+  waterfallWallTopGapMean: number;
+  waterfallWallTopGapMax: number;
 };
 
 export type ThreeTestController = {
@@ -151,6 +167,10 @@ export type ThreeTestController = {
   ) => void;
   setBaseCardOpen: (open: boolean) => void;
   panToTile: (tileX: number, tileY: number) => void;
+  setEnvironmentFogEnabled: (enabled: boolean) => void;
+  getEnvironmentFogEnabled: () => boolean;
+  setTerrainWaterDebugControls: (controls: Partial<TerrainWaterDebugControls>) => void;
+  getTerrainWaterDebugControls: () => TerrainWaterDebugControls;
   getPerfSnapshot: () => ThreeTestPerfSnapshot;
 };
 
@@ -4024,10 +4044,8 @@ export const createThreeTest = (
       return;
     }
     if (event.key === "F8") {
-      environmentFogEnabled = !environmentFogEnabled;
+      setEnvironmentFogEnabled(!environmentFogEnabled);
       event.preventDefault();
-      applyCinematicLook(cinematicGradeEnabled);
-      syncFogState(lastLightingApplied);
       return;
     }
     if (event.key === "Escape") {
@@ -4405,6 +4423,12 @@ export const createThreeTest = (
     postPipeline?.setHeightHazeStrength(THREE_TEST_CINEMATIC_GRADE_CONFIG.heightHazeStrength);
     waterSystem.setFog(cinematicFog.color.getHex(), cinematicFog.near, cinematicFog.far);
   };
+  const setEnvironmentFogEnabled = (enabled: boolean): void => {
+    environmentFogEnabled = enabled;
+    applyCinematicLook(cinematicGradeEnabled);
+    syncFogState(lastLightingApplied);
+  };
+  const getEnvironmentFogEnabled = (): boolean => environmentFogEnabled;
   const requestShadowRefresh = (): void => {
     shadowRefreshPending = true;
   };
@@ -4647,7 +4671,22 @@ export const createThreeTest = (
     memoryGeometries: 0,
     memoryTextures: 0,
     contextLosses: 0,
-    contextRestores: 0
+    contextRestores: 0,
+    waterfallCount: 0,
+    waterfallCandidateCount: 0,
+    waterfallClusterCount: 0,
+    waterfallEmittedCount: 0,
+    waterfallRejectedVerticalCount: 0,
+    waterfallRejectedLongRunCount: 0,
+    waterfallWallQuadCount: 0,
+    waterfallWallTriangleCount: 0,
+    waterfallWallQuadBreakdown: "n/a",
+    environmentFogEnabled: true,
+    waterfallDebugHighlightEnabled: false,
+    waterfallAnchorErrorMean: Number.NaN,
+    waterfallAnchorErrorMax: Number.NaN,
+    waterfallWallTopGapMean: Number.NaN,
+    waterfallWallTopGapMax: Number.NaN
   };
   const smoothPerf = (current: number, next: number): number => (current > 0 ? current * 0.86 + next * 0.14 : next);
   let lastRafAt = 0;
@@ -5861,38 +5900,76 @@ export const createThreeTest = (
     setBaseCardOpenInternal(open);
   };
 
-  const getPerfSnapshot = (): ThreeTestPerfSnapshot => ({
-    frameMs: threePerf.frameMs,
-    frameLastMs: threePerf.frameLastMs,
-    controlsMs: threePerf.controlsMs,
-    treeBurnMs: threePerf.treeBurnMs,
-    fireFxMs: threePerf.fireFxMs,
-    sceneRenderMs: threePerf.sceneRenderMs,
-    sceneRenderLastMs: threePerf.sceneRenderLastMs,
-    postMs: threePerf.postMs,
-    dofMs: threePerf.dofMs,
-    hudMs: threePerf.hudMs,
-    uiRenderMs: threePerf.uiRenderMs,
-    fps: threePerf.fps,
-    rafGapMs: threePerf.rafGapMs,
-    rafGapLastMs: threePerf.rafGapLastMs,
-    rafGapMaxMs: threePerf.rafGapMaxMs,
-    hitchCount: threePerf.hitchCount,
-    lastHitchMs: threePerf.lastHitchMs,
-    terrainSetMs: threePerf.terrainSetMs,
-    terrainSetLastMs: threePerf.terrainSetLastMs,
-    terrainSetMaxMs: threePerf.terrainSetMaxMs,
-    terrainSetCount: threePerf.terrainSetCount,
-    sceneCalls: threePerf.sceneCalls,
-    sceneTriangles: threePerf.sceneTriangles,
-    sceneLines: threePerf.sceneLines,
-    scenePoints: threePerf.scenePoints,
-    totalCalls: threePerf.totalCalls,
-    memoryGeometries: threePerf.memoryGeometries,
-    memoryTextures: threePerf.memoryTextures,
-    contextLosses: threePerf.contextLosses,
-    contextRestores: threePerf.contextRestores
-  });
+  const setTerrainWaterDebugControls = (controls: Partial<TerrainWaterDebugControls>): void => {
+    waterSystem.setDebugControls(controls);
+  };
+
+  const getTerrainWaterDebugControls = (): TerrainWaterDebugControls => waterSystem.getDebugControls();
+
+  const getPerfSnapshot = (): ThreeTestPerfSnapshot => {
+    const waterfallDebug = lastTerrainWater?.waterfallDebug ?? null;
+    const riverDebug = lastTerrainWater?.river?.debugRiverDomainStats;
+    const waterDebugControls = waterSystem.getDebugControls();
+    const waterfallCount = Math.floor((lastTerrainWater?.waterfallInstances?.length ?? 0) / 7);
+    const waterfallWallTriangleCount = Math.floor((lastTerrainWater?.river?.waterfallWallIndices?.length ?? 0) / 3);
+    const waterfallWallQuadCount =
+      riverDebug?.wallQuadCount && Number.isFinite(riverDebug.wallQuadCount)
+        ? Math.max(0, Math.round((lastTerrainWater?.river?.waterfallWallIndices?.length ?? 0) / 6))
+        : Math.max(0, Math.round((lastTerrainWater?.river?.waterfallWallIndices?.length ?? 0) / 6));
+    const waterfallWallQuadBreakdown = riverDebug?.waterfallWallQuadCounts?.length
+      ? riverDebug.waterfallWallQuadCounts
+          .slice(0, 8)
+          .map((count) => Math.max(0, Math.round(count)).toString())
+          .join("/")
+      : "n/a";
+    return {
+      frameMs: threePerf.frameMs,
+      frameLastMs: threePerf.frameLastMs,
+      controlsMs: threePerf.controlsMs,
+      treeBurnMs: threePerf.treeBurnMs,
+      fireFxMs: threePerf.fireFxMs,
+      sceneRenderMs: threePerf.sceneRenderMs,
+      sceneRenderLastMs: threePerf.sceneRenderLastMs,
+      postMs: threePerf.postMs,
+      dofMs: threePerf.dofMs,
+      hudMs: threePerf.hudMs,
+      uiRenderMs: threePerf.uiRenderMs,
+      fps: threePerf.fps,
+      rafGapMs: threePerf.rafGapMs,
+      rafGapLastMs: threePerf.rafGapLastMs,
+      rafGapMaxMs: threePerf.rafGapMaxMs,
+      hitchCount: threePerf.hitchCount,
+      lastHitchMs: threePerf.lastHitchMs,
+      terrainSetMs: threePerf.terrainSetMs,
+      terrainSetLastMs: threePerf.terrainSetLastMs,
+      terrainSetMaxMs: threePerf.terrainSetMaxMs,
+      terrainSetCount: threePerf.terrainSetCount,
+      sceneCalls: threePerf.sceneCalls,
+      sceneTriangles: threePerf.sceneTriangles,
+      sceneLines: threePerf.sceneLines,
+      scenePoints: threePerf.scenePoints,
+      totalCalls: threePerf.totalCalls,
+      memoryGeometries: threePerf.memoryGeometries,
+      memoryTextures: threePerf.memoryTextures,
+      contextLosses: threePerf.contextLosses,
+      contextRestores: threePerf.contextRestores,
+      waterfallCount,
+      waterfallCandidateCount: waterfallDebug?.candidateCount ?? 0,
+      waterfallClusterCount: waterfallDebug?.clusterCount ?? 0,
+      waterfallEmittedCount: waterfallDebug?.emittedCount ?? 0,
+      waterfallRejectedVerticalCount: waterfallDebug?.lowVerticalityRejectedCount ?? 0,
+      waterfallRejectedLongRunCount: waterfallDebug?.longRunRejectedCount ?? 0,
+      waterfallWallQuadCount,
+      waterfallWallTriangleCount,
+      waterfallWallQuadBreakdown,
+      environmentFogEnabled: getEnvironmentFogEnabled(),
+      waterfallDebugHighlightEnabled: waterDebugControls.waterfallDebugHighlight,
+      waterfallAnchorErrorMean: riverDebug?.waterfallAnchorErrorMean ?? Number.NaN,
+      waterfallAnchorErrorMax: riverDebug?.waterfallAnchorErrorMax ?? Number.NaN,
+      waterfallWallTopGapMean: riverDebug?.wallTopGapMean ?? Number.NaN,
+      waterfallWallTopGapMax: riverDebug?.wallTopGapMax ?? Number.NaN
+    };
+  };
 
   const updateCameraForSize = (size: number): void => {
     cancelCameraFlight();
@@ -6155,6 +6232,7 @@ export const createThreeTest = (
       heightScale,
       sampleHeights,
       sampleTypes,
+      undefined,
       waterRatio,
       oceanRatio,
       riverRatio,
@@ -6448,6 +6526,10 @@ export const createThreeTest = (
     setClimateForecast,
     setBaseCardOpen,
     panToTile,
+    setEnvironmentFogEnabled,
+    getEnvironmentFogEnabled,
+    setTerrainWaterDebugControls,
+    getTerrainWaterDebugControls,
     getPerfSnapshot
   };
 };

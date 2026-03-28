@@ -1,8 +1,7 @@
 import type {
   TerrainAdvancedOverrides,
   TerrainArchetypeId,
-  TerrainRecipe,
-  TownLayoutId
+  TerrainRecipe
 } from "../mapgen/terrainProfile.js";
 import { cloneTerrainRecipe, createDefaultTerrainRecipe } from "../mapgen/terrainProfile.js";
 
@@ -18,7 +17,7 @@ export type TerrainSliderKey =
   | "townDensity"
   | "bridgeAllowance";
 
-export type TerrainSelectKey = "archetype" | "townLayout";
+export type TerrainSelectKey = "archetype";
 
 export type TerrainAdvancedNumericKey = Exclude<keyof TerrainAdvancedOverrides, "skipCarving">;
 
@@ -118,21 +117,12 @@ export const TERRAIN_ARCHETYPE_OPTIONS: Array<{ value: TerrainArchetypeId; label
   { value: "SHELF", label: "Shelf" }
 ];
 
-export const TOWN_LAYOUT_OPTIONS: Array<{ value: TownLayoutId; label: string }> = [
-  { value: "auto", label: "Auto" },
-  { value: "coastal_ring", label: "Coastal Ring" },
-  { value: "bridge_chain", label: "Bridge Chain" },
-  { value: "inland_valley", label: "Inland Valley" },
-  { value: "hub_spokes", label: "Hub + Spokes" }
-];
-
 export const TERRAIN_RUN_GROUPS: readonly TerrainControlGroup[] = [
   {
     id: "terrain-shape",
     title: "Island Shape",
     fields: [
       selectField("archetype", "archetype", "Archetype", "Primary island layout and relief style.", TERRAIN_ARCHETYPE_OPTIONS),
-      selectField("townLayout", "townLayout", "Town layout", "How towns and routes are biased across the island.", TOWN_LAYOUT_OPTIONS),
       sliderField("recipe", "relief", "relief", "Relief", "How much the terrain rises and falls across the island."),
       sliderField(
         "advanced",
@@ -142,6 +132,30 @@ export const TERRAIN_RUN_GROUPS: readonly TerrainControlGroup[] = [
         "How high the tallest mountains are allowed to climb before peak compression kicks in."
       ),
       sliderField("recipe", "ruggedness", "ruggedness", "Ruggedness", "How broken, ridged, and difficult the terrain becomes.")
+    ]
+  },
+  {
+    id: "terrain-shape-advanced",
+    title: "Shape Overrides",
+    advanced: true,
+    fields: [
+      sliderField("advanced", "embayment", "embayment", "Embayment", "How strongly the coastline opens into coves, bays, and inlets."),
+      sliderField("advanced", "anisotropy", "anisotropy", "Anisotropy", "How strongly the island is stretched into a directional landform."),
+      sliderField("advanced", "asymmetry", "asymmetry", "Asymmetry", "How much the island mass shifts away from a balanced center."),
+      sliderField(
+        "advanced",
+        "ridgeAlignment",
+        "ridgeAlignment",
+        "Ridge alignment",
+        "How strongly uplands align into coherent ridge corridors instead of scattered lumps."
+      ),
+      sliderField(
+        "advanced",
+        "uplandDistribution",
+        "uplandDistribution",
+        "Upland distribution",
+        "Whether high ground concentrates into one core or spreads across multiple upland shoulders."
+      )
     ]
   },
   {
@@ -171,8 +185,31 @@ export const MAP_EDITOR_TERRAIN_GROUPS = {
       id: "scenario-shape",
       title: "World Plan",
       fields: [
-        selectField("archetype", "archetype", "Archetype", "Primary island layout and relief style.", TERRAIN_ARCHETYPE_OPTIONS),
-        selectField("townLayout", "townLayout", "Town layout", "How towns and routes are biased across the island.", TOWN_LAYOUT_OPTIONS)
+        selectField("archetype", "archetype", "Archetype", "Primary island layout and relief style.", TERRAIN_ARCHETYPE_OPTIONS)
+      ]
+    },
+    {
+      id: "scenario-shape-advanced",
+      title: "Shape Overrides",
+      advanced: true,
+      fields: [
+        sliderField("advanced", "embayment", "embayment", "Embayment", "How strongly the coastline opens into coves, bays, and inlets."),
+        sliderField("advanced", "anisotropy", "anisotropy", "Anisotropy", "How strongly the island is stretched into a directional landform."),
+        sliderField("advanced", "asymmetry", "asymmetry", "Asymmetry", "How much the island mass shifts away from a balanced center."),
+        sliderField(
+          "advanced",
+          "ridgeAlignment",
+          "ridgeAlignment",
+          "Ridge alignment",
+          "How strongly uplands align into coherent ridge corridors instead of scattered lumps."
+        ),
+        sliderField(
+          "advanced",
+          "uplandDistribution",
+          "uplandDistribution",
+          "Upland distribution",
+          "Whether high ground concentrates into one core or spreads across multiple upland shoulders."
+        )
       ]
     }
   ],
@@ -404,7 +441,7 @@ export const readTerrainRecipeFromControls = (
     if (!scope || !key) {
       return;
     }
-    if (scope === "recipe" && (key === "archetype" || key === "townLayout")) {
+    if (scope === "recipe" && key === "archetype") {
       (recipe as Record<string, unknown>)[key] = input.value;
       return;
     }

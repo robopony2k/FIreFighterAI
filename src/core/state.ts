@@ -96,6 +96,17 @@ export const TILE_ID_TO_TYPE: TileType[] = [
   "bare"
 ];
 
+export const COAST_CLASS_NONE = 0;
+export const COAST_CLASS_BEACH = 1;
+export const COAST_CLASS_CLIFF = 2;
+export const COAST_CLASS_SHELF_WATER = 3;
+
+export type CoastClassId =
+  | typeof COAST_CLASS_NONE
+  | typeof COAST_CLASS_BEACH
+  | typeof COAST_CLASS_CLIFF
+  | typeof COAST_CLASS_SHELF_WATER;
+
 
 
 export interface WorldState {
@@ -133,6 +144,10 @@ export interface WorldState {
   tileHeatTransferCap: Float32Array;
   tileTypeId: Uint8Array;
   tileRiverMask: Uint8Array;
+  tileOceanMask: Uint8Array;
+  tileSeaLevel: Float32Array;
+  tileCoastDistance: Uint16Array;
+  tileCoastClass: Uint8Array;
   tileRoadBridge: Uint8Array;
   tileRoadEdges: Uint8Array;
   tileRoadWallEdges: Uint8Array;
@@ -427,6 +442,10 @@ export function createInitialState(seed: number, grid: Grid): WorldState {
     tileHeatTransferCap: new Float32Array(grid.totalTiles),
     tileTypeId: new Uint8Array(grid.totalTiles),
     tileRiverMask: new Uint8Array(grid.totalTiles),
+    tileOceanMask: new Uint8Array(grid.totalTiles),
+    tileSeaLevel: new Float32Array(grid.totalTiles),
+    tileCoastDistance: new Uint16Array(grid.totalTiles),
+    tileCoastClass: new Uint8Array(grid.totalTiles),
     tileRoadBridge: new Uint8Array(grid.totalTiles),
     tileRoadEdges: new Uint8Array(grid.totalTiles),
     tileRoadWallEdges: new Uint8Array(grid.totalTiles),
@@ -656,6 +675,14 @@ export function syncTileSoA(state: WorldState): void {
     state.tileVegetationAge.length !== total ||
     state.tileCanopyCover.length !== total ||
     state.tileStemDensity.length !== total ||
+    !state.tileOceanMask ||
+    state.tileOceanMask.length !== total ||
+    !state.tileSeaLevel ||
+    state.tileSeaLevel.length !== total ||
+    !state.tileCoastDistance ||
+    state.tileCoastDistance.length !== total ||
+    !state.tileCoastClass ||
+    state.tileCoastClass.length !== total ||
     state.tileRoadBridge.length !== total ||
     state.tileRoadEdges.length !== total ||
     state.tileRoadWallEdges.length !== total ||
@@ -685,6 +712,10 @@ export function syncTileSoA(state: WorldState): void {
     state.tileHeatTransferCap = new Float32Array(total);
     state.tileTypeId = new Uint8Array(total);
     state.tileRiverMask = new Uint8Array(total);
+    state.tileOceanMask = new Uint8Array(total);
+    state.tileSeaLevel = new Float32Array(total);
+    state.tileCoastDistance = new Uint16Array(total);
+    state.tileCoastClass = new Uint8Array(total);
     state.tileRoadBridge = new Uint8Array(total);
     state.tileRoadEdges = new Uint8Array(total);
     state.tileRoadWallEdges = new Uint8Array(total);

@@ -7,6 +7,7 @@ export type TerrainWaterDebugControls = {
   riverFoamScale: number;
   riverSpecularScale: number;
   showWaterfalls: boolean;
+  waterfallDebugHighlight: boolean;
   waterfallWidthScale: number;
   waterfallOpacityScale: number;
   waterfallFoamScale: number;
@@ -21,6 +22,7 @@ export const DEFAULT_TERRAIN_WATER_DEBUG_CONTROLS: TerrainWaterDebugControls = {
   riverFoamScale: 1,
   riverSpecularScale: 1,
   showWaterfalls: true,
+  waterfallDebugHighlight: false,
   waterfallWidthScale: 1,
   waterfallOpacityScale: 1,
   waterfallFoamScale: 1,
@@ -53,6 +55,8 @@ export const normalizeTerrainWaterDebugControls = (
     2.5
   ),
   showWaterfalls: controls?.showWaterfalls ?? DEFAULT_TERRAIN_WATER_DEBUG_CONTROLS.showWaterfalls,
+  waterfallDebugHighlight:
+    controls?.waterfallDebugHighlight ?? DEFAULT_TERRAIN_WATER_DEBUG_CONTROLS.waterfallDebugHighlight,
   waterfallWidthScale: clamp(
     controls?.waterfallWidthScale ?? DEFAULT_TERRAIN_WATER_DEBUG_CONTROLS.waterfallWidthScale,
     0.5,

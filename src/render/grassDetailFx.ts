@@ -61,14 +61,21 @@ const buildGrassMaskTexture = (
     data[base + 2] = on;
     data[base + 3] = 255;
   }
-  const texture = new THREE.DataTexture(data, sampleCols, sampleRows, THREE.RGBAFormat);
+  const flipped = new Uint8Array(data.length);
+  const rowStride = sampleCols * 4;
+  for (let y = 0; y < sampleRows; y += 1) {
+    const src = y * rowStride;
+    const dst = (sampleRows - 1 - y) * rowStride;
+    flipped.set(data.subarray(src, src + rowStride), dst);
+  }
+  const texture = new THREE.DataTexture(flipped, sampleCols, sampleRows, THREE.RGBAFormat);
   texture.needsUpdate = true;
   texture.colorSpace = THREE.LinearSRGBColorSpace;
   texture.minFilter = THREE.NearestFilter;
   texture.magFilter = THREE.NearestFilter;
   texture.wrapS = THREE.ClampToEdgeWrapping;
   texture.wrapT = THREE.ClampToEdgeWrapping;
-  texture.flipY = true;
+  texture.flipY = false;
   texture.generateMipmaps = false;
   return texture;
 };

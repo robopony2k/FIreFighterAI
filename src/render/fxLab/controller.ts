@@ -1,7 +1,15 @@
 import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { createEffectsState, type EffectsState } from "../../core/effectsState.js";
-import { createInitialState, TILE_TYPE_IDS, type WorldState } from "../../core/state.js";
+import {
+  COAST_CLASS_BEACH,
+  COAST_CLASS_CLIFF,
+  COAST_CLASS_NONE,
+  COAST_CLASS_SHELF_WATER,
+  createInitialState,
+  TILE_TYPE_IDS,
+  type WorldState
+} from "../../core/state.js";
 import { TREE_TYPE_IDS, TreeType, type Formation, type Grid, type Unit, type WaterSprayMode } from "../../core/types.js";
 import { buildTerrainMesh, getTerrainHeightScale, type TerrainSample } from "../threeTestTerrain.js";
 import { ThreeTestWaterSystem } from "../threeTestWater.js";
@@ -23,10 +31,12 @@ import { getTreeAssetsCache, loadTreeAssets, type TreeAssets } from "../threeTes
 import {
   buildFxLabOverrides,
   cloneDefaultFireFxDebugControls,
+  cloneDefaultOceanWaterDebugControls,
   cloneDefaultTerrainWaterDebugControls,
   cloneDefaultWaterFxDebugControls,
   formatFxLabOverrides
 } from "./controls.js";
+import type { OceanWaterDebugControls } from "../oceanWaterDebug.js";
 import type { TerrainWaterDebugControls } from "../terrainWaterDebug.js";
 import { applyFxLabScenarioFrame, type FxLabScenarioFrameContext } from "./scenarios.js";
 import {
@@ -39,6 +49,14 @@ import {
 const FX_LAB_GRID_SIZE = 72;
 const FX_LAB_SEED = 18032026;
 const DEFAULT_STEP_SECONDS = 1 / 30;
+const FX_LAB_OCEAN_SEA_LEVEL = 0.12;
+const FX_LAB_COAST_BEACH_MAX_SLOPE = 0.3;
+const FX_LAB_COAST_BEACH_MAX_RELIEF = 0.16;
+const FX_LAB_COAST_BEACH_MAX_HEIGHT_ABOVE_SEA = 0.28;
+const FX_LAB_COAST_BEACH_LAND_BAND = 2;
+const FX_LAB_COAST_BEACH_SHELF_BAND = 6;
+const FX_LAB_COAST_BEACH_DRY_HEIGHTS = [0.01, 0.024] as const;
+const FX_LAB_COAST_BEACH_WET_DEPTHS = [0.003, 0.006, 0.01, 0.015, 0.021, 0.028] as const;
 
 const clamp = (value: number, min: number, max: number): number => Math.max(min, Math.min(max, value));
 const fract = (value: number): number => value - Math.floor(value);
@@ -48,6 +66,220 @@ const smoothstep = (edge0: number, edge1: number, value: number): number => {
   }
   const t = clamp((value - edge0) / (edge1 - edge0), 0, 1);
   return t * t * (3 - 2 * t);
+};
+
+const getCoastBandValue = (values: readonly number[], distance: number): number => {
+  if (distance <= 0) {
+    return values[0] ?? 0;
+  }
+  return values[Math.min(values.length - 1, distance - 1)] ?? values[values.length - 1] ?? 0;
+};
+
+const buildDistanceField = (
+  cols: number,
+  rows: number,
+  isSource: (idx: number) => boolean
+): Uint16Array => {
+  const total = cols * rows;
+  const maxDistance = cols + rows + 4;
+  const distances = new Uint16Array(total);
+  distances.fill(maxDistance);
+  const queue = new Int32Array(total);
+  let head = 0;
+  let tail = 0;
+  for (let i = 0; i < total; i += 1) {
+    if (!isSource(i)) {
+      continue;
+    }
+    distances[i] = 0;
+    queue[tail] = i;
+    tail += 1;
+  }
+  while (head < tail) {
+    const idx = queue[head];
+    head += 1;
+    const nextDistance = distances[idx] + 1;
+    const x = idx % cols;
+    const y = Math.floor(idx / cols);
+    if (x > 0) {
+      const nIdx = idx - 1;
+      if (nextDistance < distances[nIdx]) {
+        distances[nIdx] = nextDistance;
+        queue[tail] = nIdx;
+        tail += 1;
+      }
+    }
+    if (x + 1 < cols) {
+      const nIdx = idx + 1;
+      if (nextDistance < distances[nIdx]) {
+        distances[nIdx] = nextDistance;
+        queue[tail] = nIdx;
+        tail += 1;
+      }
+    }
+    if (y > 0) {
+      const nIdx = idx - cols;
+      if (nextDistance < distances[nIdx]) {
+        distances[nIdx] = nextDistance;
+        queue[tail] = nIdx;
+        tail += 1;
+      }
+    }
+    if (y + 1 < rows) {
+      const nIdx = idx + cols;
+      if (nextDistance < distances[nIdx]) {
+        distances[nIdx] = nextDistance;
+        queue[tail] = nIdx;
+        tail += 1;
+      }
+    }
+  }
+  return distances;
+};
+
+const applyOceanShorelineClassification = (
+  world: WorldState,
+  treeTypes: Uint8Array,
+  baseFuel: Float32Array
+): void => {
+  const { cols, rows, totalTiles } = world.grid;
+  const seaLevel = FX_LAB_OCEAN_SEA_LEVEL;
+  const shorelineByColumn = new Float32Array(cols);
+  for (let x = 0; x < cols; x += 1) {
+    const bayA = Math.exp(-((x - cols * 0.22) * (x - cols * 0.22)) / 84);
+    const bayB = Math.exp(-((x - cols * 0.72) * (x - cols * 0.72)) / 96);
+    const headland = Math.exp(-((x - cols * 0.5) * (x - cols * 0.5)) / 220);
+    const macro =
+      11.8 +
+      Math.sin(x * 0.11 + 0.6) * 1.4 +
+      Math.sin(x * 0.047 + 1.9) * 1.1 +
+      bayA * 1.6 +
+      bayB * 1.3 -
+      headland * 1.1;
+    shorelineByColumn[x] = clamp(macro, 8.2, 17.8);
+  }
+
+  for (let i = 0; i < totalTiles; i += 1) {
+    world.tileSeaLevel[i] = seaLevel;
+    world.tileOceanMask[i] = 0;
+    world.tileCoastDistance[i] = 0;
+    world.tileCoastClass[i] = COAST_CLASS_NONE;
+  }
+
+  for (let y = 0; y < rows; y += 1) {
+    for (let x = 0; x < cols; x += 1) {
+      const idx = y * cols + x;
+      if (world.tileRiverMask[idx] > 0) {
+        continue;
+      }
+      const shoreline =
+        shorelineByColumn[x] +
+        Math.sin(x * 0.37 + y * 0.21 + 0.9) * 0.34 +
+        Math.sin(x * 0.13 - y * 0.19 + 1.7) * 0.21;
+      if (y + 0.5 > shoreline) {
+        continue;
+      }
+      world.tileOceanMask[idx] = 1;
+      world.tileTypeId[idx] = TILE_TYPE_IDS.water;
+      world.tileMoisture[idx] = 1;
+      world.tileVegetationAge[idx] = 0;
+      world.tileCanopyCover[idx] = 0;
+      world.tileStemDensity[idx] = 0;
+      world.tileHeatRetention[idx] = 0.28;
+      world.tileWindFactor[idx] = 1.04;
+      world.tileHeatTransferCap[idx] = 0.18;
+      treeTypes[idx] = TREE_TYPE_IDS[TreeType.Scrub];
+      baseFuel[idx] = 0.02;
+      world.tileFuel[idx] = 0.02;
+    }
+  }
+
+  const distToOcean = buildDistanceField(cols, rows, (idx) => world.tileOceanMask[idx] > 0);
+  const distToLand = buildDistanceField(cols, rows, (idx) => world.tileOceanMask[idx] === 0);
+
+  for (let y = 0; y < rows; y += 1) {
+    for (let x = 0; x < cols; x += 1) {
+      const idx = y * cols + x;
+      const elevation = world.tileElevation[idx] ?? 0;
+      if (world.tileRiverMask[idx] > 0) {
+        world.tileCoastDistance[idx] = 0;
+        world.tileCoastClass[idx] = COAST_CLASS_NONE;
+        continue;
+      }
+      if (world.tileOceanMask[idx] > 0) {
+        const distance = distToLand[idx] ?? 0;
+        world.tileCoastDistance[idx] = distance;
+        if (distance >= 1 && distance <= FX_LAB_COAST_BEACH_SHELF_BAND) {
+          world.tileCoastClass[idx] = COAST_CLASS_SHELF_WATER;
+          const targetDepth = getCoastBandValue(FX_LAB_COAST_BEACH_WET_DEPTHS, distance);
+          world.tileElevation[idx] = Math.min(elevation, seaLevel - targetDepth);
+        } else {
+          const deepDistance = Math.max(0, distance - FX_LAB_COAST_BEACH_SHELF_BAND);
+          const depth = 0.03 + deepDistance * 0.0035;
+          world.tileElevation[idx] = Math.min(elevation, seaLevel - depth);
+        }
+        continue;
+      }
+
+      const distance = distToOcean[idx] ?? 0;
+      world.tileCoastDistance[idx] = distance;
+      if (distance < 1 || distance > FX_LAB_COAST_BEACH_LAND_BAND) {
+        continue;
+      }
+
+      let minElevation = elevation;
+      let maxElevation = elevation;
+      let localSlope = 0;
+      for (let dy = -1; dy <= 1; dy += 1) {
+        const ny = y + dy;
+        if (ny < 0 || ny >= rows) {
+          continue;
+        }
+        for (let dx = -1; dx <= 1; dx += 1) {
+          const nx = x + dx;
+          if (nx < 0 || nx >= cols) {
+            continue;
+          }
+          const nIdx = ny * cols + nx;
+          if (world.tileOceanMask[nIdx] > 0 || world.tileRiverMask[nIdx] > 0) {
+            continue;
+          }
+          const neighborElevation = world.tileElevation[nIdx] ?? elevation;
+          minElevation = Math.min(minElevation, neighborElevation);
+          maxElevation = Math.max(maxElevation, neighborElevation);
+          if (nIdx !== idx) {
+            localSlope = Math.max(localSlope, Math.abs(elevation - neighborElevation));
+          }
+        }
+      }
+
+      const relief = maxElevation - minElevation;
+      const isBeach =
+        localSlope <= FX_LAB_COAST_BEACH_MAX_SLOPE &&
+        relief <= FX_LAB_COAST_BEACH_MAX_RELIEF &&
+        elevation - seaLevel <= FX_LAB_COAST_BEACH_MAX_HEIGHT_ABOVE_SEA &&
+        world.tileTypeId[idx] !== TILE_TYPE_IDS.base &&
+        world.tileTypeId[idx] !== TILE_TYPE_IDS.road;
+
+      world.tileCoastClass[idx] = isBeach ? COAST_CLASS_BEACH : COAST_CLASS_CLIFF;
+      if (!isBeach) {
+        continue;
+      }
+
+      world.tileTypeId[idx] = TILE_TYPE_IDS.beach;
+      world.tileElevation[idx] = Math.min(
+        world.tileElevation[idx],
+        seaLevel + getCoastBandValue(FX_LAB_COAST_BEACH_DRY_HEIGHTS, distance)
+      );
+      world.tileMoisture[idx] = Math.max(world.tileMoisture[idx], 0.42);
+      world.tileVegetationAge[idx] = 0;
+      world.tileCanopyCover[idx] = 0;
+      world.tileStemDensity[idx] = 0;
+      treeTypes[idx] = TREE_TYPE_IDS[TreeType.Scrub];
+      baseFuel[idx] = Math.min(baseFuel[idx], 0.08);
+      world.tileFuel[idx] = Math.min(world.tileFuel[idx], baseFuel[idx]);
+    }
+  }
 };
 
 type FxLabSceneState = {
@@ -99,6 +331,9 @@ export type FxLabController = {
   setWaterDebugControls: (controls: Partial<WaterFxDebugControls>) => void;
   getWaterDebugControls: () => WaterFxDebugControls;
   resetWaterDebugControls: () => void;
+  setOceanWaterDebugControls: (controls: Partial<OceanWaterDebugControls>) => void;
+  getOceanWaterDebugControls: () => OceanWaterDebugControls;
+  resetOceanWaterDebugControls: () => void;
   setTerrainWaterDebugControls: (controls: Partial<TerrainWaterDebugControls>) => void;
   getTerrainWaterDebugControls: () => TerrainWaterDebugControls;
   resetTerrainWaterDebugControls: () => void;
@@ -379,6 +614,7 @@ const applyTerrainLayout = (world: WorldState): { treeTypes: Uint8Array; baseFue
     }
   }
   applyRiverWaterfallCorridor(world, treeTypes, baseFuel);
+  applyOceanShorelineClassification(world, treeTypes, baseFuel);
   let landTiles = 0;
   for (let i = 0; i < total; i += 1) {
     const tileType = world.tileTypeId[i];
@@ -428,6 +664,10 @@ const createSceneState = (): FxLabSceneState => {
     tileCanopyCover: world.tileCanopyCover,
     tileStemDensity: world.tileStemDensity,
     riverMask: world.tileRiverMask,
+    oceanMask: world.tileOceanMask,
+    seaLevel: world.tileSeaLevel,
+    coastDistance: world.tileCoastDistance,
+    coastClass: world.tileCoastClass,
     roadBridgeMask: world.tileRoadBridge,
     roadEdges: world.tileRoadEdges,
     roadWallEdges: world.tileRoadWallEdges,
@@ -533,6 +773,7 @@ export const createFxLabController = (
   let currentScenarioId = normalizeFxLabScenarioId(initialScenarioId);
   let fireDebugControls = cloneDefaultFireFxDebugControls();
   let waterDebugControls = cloneDefaultWaterFxDebugControls();
+  let oceanWaterDebugControls = cloneDefaultOceanWaterDebugControls();
   let terrainWaterDebugControls = cloneDefaultTerrainWaterDebugControls();
   let terrainMesh: THREE.Mesh | null = null;
   let terrainSize: { width: number; depth: number } | null = null;
@@ -574,10 +815,45 @@ export const createFxLabController = (
   fireFx.setSimulationAlpha(1);
   fireFx.setDebugControls(fireDebugControls);
   unitFxLayer.setDebugControls(waterDebugControls);
+  waterSystem.setOceanDebugControls(oceanWaterDebugControls);
   waterSystem.setDebugControls(terrainWaterDebugControls);
 
   const fitCameraToTerrain = (): void => {
     if (!terrainSize) {
+      return;
+    }
+    if (currentScenarioId === "ocean-shoreline") {
+      const shoreFocus = (() => {
+        const coastDistance = sceneState.sample.coastDistance;
+        const oceanMask = sceneState.sample.oceanMask;
+        if (!coastDistance || !oceanMask || coastDistance.length !== oceanMask.length) {
+          return { x: FX_LAB_GRID_SIZE * 0.5, y: FX_LAB_GRID_SIZE * 0.12 };
+        }
+        let sumX = 0;
+        let sumY = 0;
+        let count = 0;
+        for (let i = 0; i < oceanMask.length; i += 1) {
+          if ((oceanMask[i] ?? 0) <= 0 || (coastDistance[i] ?? 0) > 2) {
+            continue;
+          }
+          sumX += i % FX_LAB_GRID_SIZE;
+          sumY += Math.floor(i / FX_LAB_GRID_SIZE);
+          count += 1;
+        }
+        if (count <= 0) {
+          return { x: FX_LAB_GRID_SIZE * 0.5, y: FX_LAB_GRID_SIZE * 0.12 };
+        }
+        return { x: sumX / count, y: sumY / count };
+      })();
+      const focusWorldX = (shoreFocus.x / FX_LAB_GRID_SIZE - 0.5) * terrainSize.width;
+      const focusWorldZ = (shoreFocus.y / FX_LAB_GRID_SIZE - 0.5) * terrainSize.depth;
+      const distance = Math.max(9, Math.max(terrainSize.width, terrainSize.depth) * 0.18);
+      camera.position.set(focusWorldX - distance * 0.3, Math.max(4.2, distance * 0.18), focusWorldZ + distance * 0.56);
+      controls.target.set(focusWorldX, 0.85, focusWorldZ - distance * 0.04);
+      controls.minDistance = Math.max(4, distance * 0.32);
+      controls.maxDistance = Math.max(24, distance * 2.6);
+      camera.updateProjectionMatrix();
+      controls.update();
       return;
     }
     if (currentScenarioId === "river-waterfall") {
@@ -1194,6 +1470,7 @@ export const createFxLabController = (
       manualTruckPlacement = null;
       manualFirefighterPlacement = null;
       labTimeMs = 0;
+      fitCameraToTerrain();
       renderOnce();
     },
     getScenario: () => currentScenarioId,
@@ -1254,6 +1531,17 @@ export const createFxLabController = (
       unitFxLayer.setDebugControls(waterDebugControls);
       renderOnce();
     },
+    setOceanWaterDebugControls: (controls: Partial<OceanWaterDebugControls>) => {
+      waterSystem.setOceanDebugControls(controls);
+      oceanWaterDebugControls = waterSystem.getOceanDebugControls();
+      renderOnce();
+    },
+    getOceanWaterDebugControls: () => ({ ...oceanWaterDebugControls }),
+    resetOceanWaterDebugControls: () => {
+      oceanWaterDebugControls = cloneDefaultOceanWaterDebugControls();
+      waterSystem.setOceanDebugControls(oceanWaterDebugControls);
+      renderOnce();
+    },
     setTerrainWaterDebugControls: (controls: Partial<TerrainWaterDebugControls>) => {
       waterSystem.setDebugControls(controls);
       terrainWaterDebugControls = waterSystem.getDebugControls();
@@ -1268,13 +1556,15 @@ export const createFxLabController = (
     resetAllDebugControls: () => {
       fireDebugControls = cloneDefaultFireFxDebugControls();
       waterDebugControls = cloneDefaultWaterFxDebugControls();
+      oceanWaterDebugControls = cloneDefaultOceanWaterDebugControls();
       terrainWaterDebugControls = cloneDefaultTerrainWaterDebugControls();
       fireFx.setDebugControls(fireDebugControls);
       unitFxLayer.setDebugControls(waterDebugControls);
+      waterSystem.setOceanDebugControls(oceanWaterDebugControls);
       waterSystem.setDebugControls(terrainWaterDebugControls);
       renderOnce();
     },
-    getOverridePayload: () => buildFxLabOverrides(fireDebugControls, waterDebugControls, terrainWaterDebugControls),
-    getOverridePayloadText: () => formatFxLabOverrides(fireDebugControls, waterDebugControls, terrainWaterDebugControls)
+    getOverridePayload: () => buildFxLabOverrides(fireDebugControls, waterDebugControls, terrainWaterDebugControls, oceanWaterDebugControls),
+    getOverridePayloadText: () => formatFxLabOverrides(fireDebugControls, waterDebugControls, terrainWaterDebugControls, oceanWaterDebugControls)
   };
 };

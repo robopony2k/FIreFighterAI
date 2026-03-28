@@ -281,6 +281,30 @@
                   </div>
                 </div>
               </div>
+              <div id="mapEditorBridgeDebugPanel" class="map-editor-bridge-debug">
+                <div class="map-editor-bridge-debug-header">
+                  <div>
+                    <div class="run-settings-title">Bridge Debug</div>
+                    <div id="mapEditorBridgeDebugMeta" class="map-editor-bridge-debug-meta">
+                      Click a rendered bridge in the preview to inspect it.
+                    </div>
+                  </div>
+                  <button id="mapEditorBridgeDebugCopy" type="button" disabled>Copy Debug</button>
+                </div>
+                <pre id="mapEditorBridgeDebugOutput" class="map-editor-bridge-debug-output" tabindex="0">No bridge selected.</pre>
+              </div>
+              <div id="mapEditorCoastDebugPanel" class="map-editor-bridge-debug">
+                <div class="map-editor-bridge-debug-header">
+                  <div>
+                    <div class="run-settings-title">Coastline Probes</div>
+                    <div id="mapEditorCoastDebugMeta" class="map-editor-bridge-debug-meta">
+                      Coastline probes will appear after a coastline-bearing preview step is cached.
+                    </div>
+                  </div>
+                  <button id="mapEditorCoastDebugCopy" type="button" disabled>Copy Debug</button>
+                </div>
+                <pre id="mapEditorCoastDebugOutput" class="map-editor-bridge-debug-output" tabindex="0">No coastline probes available yet.</pre>
+              </div>
             </section>
             <section class="map-editor-controls-panel">
               <div class="map-editor-toolbar">

@@ -26,6 +26,10 @@ export type MapGenDebugSnapshot = {
   elevations: Float32Array;
   tileTypes?: Uint8Array;
   riverMask?: Uint8Array;
+  oceanMask?: Uint8Array;
+  seaLevel?: Float32Array;
+  coastDistance?: Uint16Array;
+  coastClass?: Uint8Array;
 };
 
 export type MapGenDebug = {

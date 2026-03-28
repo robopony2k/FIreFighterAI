@@ -14,7 +14,13 @@ import {
   syncDerivedVegetationState
 } from "../core/vegetation.js";
 import { applyFuel } from "../core/tiles.js";
-import { TILE_TYPE_IDS } from "../core/state.js";
+import {
+  COAST_CLASS_BEACH,
+  COAST_CLASS_CLIFF,
+  COAST_CLASS_NONE,
+  COAST_CLASS_SHELF_WATER,
+  TILE_TYPE_IDS
+} from "../core/state.js";
 import { markTileSoADirty } from "../core/tileCache.js";
 import {
   DEBUG_TERRAIN,
@@ -31,11 +37,8 @@ import {
   BASIN_DEPTH_SCALE,
   LAND_CENTER_INSET_FRACTION,
   EDGE_LAND_ATTENUATION,
-  EDGE_LAND_EXPONENT,
   EDGE_WATER_BASE_OFFSET,
-  ELEVATION_DETAIL_WEIGHT,
   ELEVATION_MACRO_SCALE,
-  ELEVATION_MACRO_WEIGHT,
   ELEVATION_PEAK_CAP,
   ELEVATION_PEAK_SOFTNESS,
   ELEVATION_CONTRAST,
@@ -290,6 +293,18 @@ const smoothstep = (edge0: number, edge1: number, value: number): number => {
   return t * t * (3 - 2 * t);
 };
 
+const quantile = (values: number[], q: number): number => {
+  if (values.length === 0) {
+    return 0;
+  }
+  const sorted = [...values].sort((left, right) => left - right);
+  const position = clamp(q, 0, 1) * (sorted.length - 1);
+  const lower = Math.floor(position);
+  const upper = Math.min(sorted.length - 1, Math.ceil(position));
+  const t = position - lower;
+  return mix(sorted[lower] ?? 0, sorted[upper] ?? 0, t);
+};
+
 const assertEdgeWater = (state: WorldState): void => {
   if (!DEBUG_TERRAIN_EDGE) {
     return;
@@ -399,21 +414,22 @@ const SHORELINE_NOISE_SCALE_BROAD_M = 420;
 const SHORELINE_NOISE_AMPLITUDE = 0.016;
 const SHORELINE_SMOOTH_PASSES = 2;
 
-const COAST_BEACH_MAX_SLOPE = 0.22;
-const COAST_BEACH_MAX_RELIEF = 0.1;
-const COAST_BEACH_MAX_HEIGHT_ABOVE_SEA = 0.1;
-const COAST_BEACH_SCULPT_MAX_HEIGHT_ABOVE_SEA = 0.12;
-const COAST_BEACH_NEAR_TARGET = 0.012;
-const COAST_BEACH_FAR_TARGET = 0.022;
-const COAST_BEACH_NEAR_BLEND = 0.82;
-const COAST_BEACH_FAR_BLEND = 0.58;
-const COAST_BEACH_NEAR_MAX_DROP = 0.025;
-const COAST_BEACH_FAR_MAX_DROP = 0.015;
-const COAST_CLIFF_NEAR_MIN = 0.04;
-const COAST_CLIFF_FAR_MIN = 0.055;
-const COAST_CLIFF_NEAR_BLEND = 0.2;
-const COAST_CLIFF_FAR_BLEND = 0.12;
-const COAST_OCEAN_SHELF_DEEPEN = 0.006;
+const COAST_BEACH_MAX_SLOPE = 0.3;
+const COAST_BEACH_MAX_RELIEF = 0.16;
+// Gentle flooded coasts can still sit well above the local sea reference before
+// shoreline sculpting runs. Keep the beach gate generous so those tiles can be
+// pulled down into a beach ramp instead of defaulting the whole coastline to cliffs.
+const COAST_BEACH_MAX_HEIGHT_ABOVE_SEA = 0.28;
+const COAST_BEACH_SCULPT_MAX_HEIGHT_ABOVE_SEA = COAST_BEACH_MAX_HEIGHT_ABOVE_SEA;
+const COAST_BEACH_LAND_BAND = 2;
+const COAST_BEACH_SHELF_BAND = 6;
+const COAST_BEACH_DRY_HEIGHTS = [0.01, 0.024] as const;
+const COAST_BEACH_WET_DEPTHS = [0.003, 0.006, 0.01, 0.015, 0.021, 0.028] as const;
+const COAST_CLIFF_MIN_HEIGHTS = [0.02, 0.042] as const;
+const COAST_LAND_EASE_BAND = 4;
+const COAST_LAND_EASE_MAX_HEIGHTS = [0.016, 0.04, 0.078, 0.128] as const;
+const COAST_CLIFF_BARE_HEIGHT = 0.16;
+const COAST_CLIFF_BARE_DRYNESS = 0.36;
 const COAST_LOCAL_SEA_MARGIN = 0.0005;
 const COAST_MIN_LAND_ABOVE_SEA = 0.001;
 const OCEAN_BATHY_DEPTH_MIN = 0.012;
@@ -421,6 +437,16 @@ const OCEAN_BATHY_DEPTH_MAX = 0.036;
 const OCEAN_BATHY_BLEND = 0.75;
 const RIVER_MOUTH_MAX_BED_BELOW_SEA = 0.008;
 const RIVER_MOUTH_SURFACE_ABOVE_SEA = 0.0005;
+
+const getCoastBandValue = (values: readonly number[], distance: number): number =>
+  values[Math.max(0, Math.min(values.length - 1, distance - 1))] ?? values[values.length - 1] ?? 0;
+
+const classifyCoastDryTileType = (slope: number, elevationAboveSea: number, moisture = 0.5): TileType => {
+  if (elevationAboveSea >= COAST_CLIFF_BARE_HEIGHT && moisture <= COAST_CLIFF_BARE_DRYNESS && slope < 0.38) {
+    return "bare";
+  }
+  return "rocky";
+};
 
 type SeedSpreadClassificationInput = {
   elevation: number;
@@ -459,6 +485,86 @@ const classifySeedSpreadTile = (input: SeedSpreadClassificationInput): TileType 
   return "grass";
 };
 
+const persistSeaLevelMapToState = (state: WorldState, seaLevelMap: ArrayLike<number>): void => {
+  for (let i = 0; i < state.grid.totalTiles; i += 1) {
+    state.tileSeaLevel[i] = clamp(seaLevelMap[i] ?? 0, 0, 1);
+  }
+};
+
+const persistCoastMetadataToState = (
+  state: WorldState,
+  oceanMask: Uint8Array,
+  distToOcean: Uint16Array,
+  distToLand: Uint16Array,
+  slopeMap: Float32Array,
+  moistureMap: ArrayLike<number> | null | undefined,
+  seaLevelMap: ArrayLike<number>
+): void => {
+  for (let i = 0; i < state.grid.totalTiles; i += 1) {
+    state.tileOceanMask[i] = oceanMask[i] > 0 ? 1 : 0;
+    state.tileCoastDistance[i] = oceanMask[i] > 0 ? distToLand[i] ?? 0 : distToOcean[i] ?? 0;
+    state.tileCoastClass[i] = COAST_CLASS_NONE;
+  }
+  for (let i = 0; i < state.grid.totalTiles; i += 1) {
+    if (state.tileRiverMask[i] > 0) {
+      continue;
+    }
+    const seaLevel = seaLevelMap[i] ?? 0;
+    const elevation = state.tiles[i]?.elevation ?? 0;
+    if (oceanMask[i] > 0) {
+      const distLand = distToLand[i] ?? 0;
+      if (distLand >= 1 && distLand <= COAST_BEACH_SHELF_BAND) {
+        state.tileCoastClass[i] = COAST_CLASS_SHELF_WATER;
+      }
+      continue;
+    }
+    const distOceanLocal = distToOcean[i] ?? 0;
+    if (distOceanLocal < 1 || distOceanLocal > COAST_BEACH_LAND_BAND) {
+      continue;
+    }
+    const moisture = moistureMap ? clamp(moistureMap[i] ?? 0.5, 0, 1) : 0.5;
+    const x = i % state.grid.cols;
+    const y = Math.floor(i / state.grid.cols);
+    let minElevation = Number.POSITIVE_INFINITY;
+    let maxElevation = Number.NEGATIVE_INFINITY;
+    let localSlope = 0;
+    for (let dy = -1; dy <= 1; dy += 1) {
+      const ny = y + dy;
+      if (ny < 0 || ny >= state.grid.rows) {
+        continue;
+      }
+      for (let dx = -1; dx <= 1; dx += 1) {
+        const nx = x + dx;
+        if (nx < 0 || nx >= state.grid.cols) {
+          continue;
+        }
+        const nIdx = ny * state.grid.cols + nx;
+        if (oceanMask[nIdx] > 0 || state.tileRiverMask[nIdx] > 0) {
+          continue;
+        }
+        const value = state.tiles[nIdx]?.elevation ?? elevation;
+        minElevation = Math.min(minElevation, value);
+        maxElevation = Math.max(maxElevation, value);
+        if (nIdx !== i) {
+          localSlope = Math.max(localSlope, Math.abs(elevation - value));
+        }
+      }
+    }
+    if (!Number.isFinite(minElevation) || !Number.isFinite(maxElevation)) {
+      minElevation = elevation;
+      maxElevation = elevation;
+    }
+    const relief = maxElevation - minElevation;
+    const slope = Math.min(1, localSlope > 0 ? localSlope : (slopeMap[i] ?? 0));
+    const isBeach =
+      slope <= COAST_BEACH_MAX_SLOPE &&
+      relief <= COAST_BEACH_MAX_RELIEF &&
+      elevation - seaLevel <= COAST_BEACH_SCULPT_MAX_HEIGHT_ABOVE_SEA &&
+      moisture >= 0.14;
+    state.tileCoastClass[i] = isBeach ? COAST_CLASS_BEACH : COAST_CLASS_CLIFF;
+  }
+};
+
 const classifyOceanCoastTile = (
   state: WorldState,
   idx: number,
@@ -475,31 +581,18 @@ const classifyOceanCoastTile = (
   if (!tile || tile.type === "water" || tile.type === "road" || tile.type === "base" || tile.type === "house") {
     return null;
   }
-  const cols = state.grid.cols;
-  const rows = state.grid.rows;
-  const x = idx % cols;
-  const y = Math.floor(idx / cols);
-  let touchesOcean = false;
-  if (x > 0 && oceanMask[idx - 1]) {
-    touchesOcean = true;
-  } else if (x < cols - 1 && oceanMask[idx + 1]) {
-    touchesOcean = true;
-  } else if (y > 0 && oceanMask[idx - cols]) {
-    touchesOcean = true;
-  } else if (y < rows - 1 && oceanMask[idx + cols]) {
-    touchesOcean = true;
-  }
-  if (!touchesOcean) {
-    return null;
-  }
+  const coastClass = state.tileCoastClass[idx] ?? COAST_CLASS_NONE;
   const seaLevel = seaLevelMap[idx] ?? 0;
   if (elevation <= seaLevel + COAST_LOCAL_SEA_MARGIN) {
     return null;
   }
-  if (slope <= COAST_BEACH_MAX_SLOPE && elevation - seaLevel <= COAST_BEACH_MAX_HEIGHT_ABOVE_SEA) {
+  if (coastClass === COAST_CLASS_BEACH) {
     return "beach";
   }
-  return "rocky";
+  if (coastClass === COAST_CLASS_CLIFF) {
+    return classifyCoastDryTileType(slope, elevation - seaLevel);
+  }
+  return null;
 };
 
 const shapeOceanFloorAtSeaLevel = (current: number, seaLevel: number, noise01: number): number => {
@@ -1606,17 +1699,25 @@ async function buildElevationMapCoarse(
   const maxHeight01 = clamp(settings.maxHeight, 0, 1);
   const normalizedHeightPressure = computeNormalizedHeightPressure(maxHeight01);
   const reliefCurve = Math.pow(relief01, 1.4);
-  const reliefPeakCurve = Math.pow(relief01, 1.85);
   const ruggedness01 = clamp(settings.ruggedness, 0, 1);
   const coastComplexity = clamp(settings.coastComplexity, 0, 1);
   const riverIntensity = clamp(settings.riverIntensity, 0, 1);
   const interiorRise = clamp(settings.interiorRise, 0, 1);
+  const embayment = clamp(settings.embayment, 0, 1);
+  const anisotropy = clamp(settings.anisotropy, 0, 1);
+  const asymmetry = clamp(settings.asymmetry, 0, 1);
+  const ridgeAlignment = clamp(settings.ridgeAlignment, 0, 1);
+  const uplandDistribution = clamp(settings.uplandDistribution, 0, 1);
   const islandCompactness = clamp(settings.islandCompactness, 0, 1);
   const ridgeFrequency = clamp(settings.ridgeFrequency, 0, 1);
   const basinStrength = clamp(settings.basinStrength, 0, 1);
   const coastalShelfWidth = clamp(settings.coastalShelfWidth, 0, 1);
-  const bridgeAllowance = clamp(settings.bridgeAllowance, 0, 1);
   const centerFactorM = minDimM / 2;
+  const coastEdgeBandTiles = Math.max(6, Math.floor(getEdgeWidth(cols, rows) * mix(0.7, 1.15, coastalShelfWidth)));
+  const perimeterOceanBandTiles = Math.max(
+    coastEdgeBandTiles * 2,
+    Math.floor(Math.min(cols, rows) * mix(0.12, 0.2, coastalShelfWidth))
+  );
   const warpScaleM = WARP_WAVELENGTH_M * mountainScale;
   const macroScaleM = MACRO_WAVELENGTH_M * mountainScale * ELEVATION_MACRO_SCALE;
   const midScaleM = MID_WAVELENGTH_M * mountainScale;
@@ -1635,24 +1736,20 @@ async function buildElevationMapCoarse(
   const splitStraitDir = { x: Math.cos(splitStraitAngle), y: Math.sin(splitStraitAngle) };
   const splitStraitCurvePhaseA = rng.next() * Math.PI * 2;
   const splitStraitCurvePhaseB = rng.next() * Math.PI * 2;
-  const splitStraitCurvePhaseC = rng.next() * Math.PI * 2;
-  const splitStraitAsymmetry = (rng.next() - 0.5) * mix(0.08, 0.26, clamp(coastComplexity * 0.6 + ruggedness01 * 0.4, 0, 1));
+  const splitStraitAsymmetry =
+    (rng.next() - 0.5)
+    * mix(0.08, 0.26, clamp(coastComplexity * 0.35 + ruggedness01 * 0.15 + embayment * 0.5, 0, 1));
   const archetypeDefinition = ISLAND_ARCHETYPE_DEFINITIONS[terrainArchetype];
-  const longSpineAngle = ridgeSpineAngle;
-  const longSpineDir = ridgeSpineDir;
-  const longSpineCurvePhaseA = ridgeSpineCurvePhaseA;
-  const longSpineCurvePhaseB = ridgeSpineCurvePhaseB;
-  const twinBayAngle = splitStraitAngle;
-  const twinBayDir = splitStraitDir;
-  const twinBayCurvePhaseA = splitStraitCurvePhaseA;
-  const twinBayCurvePhaseB = splitStraitCurvePhaseB;
-  const twinBayCurvePhaseC = splitStraitCurvePhaseC;
-  const twinBayAsymmetry = splitStraitAsymmetry;
-  const shapeRotation = (rng.next() - 0.5) * Math.PI * mix(0.18, 0.68, clamp(coastComplexity * 0.65 + ruggedness01 * 0.35, 0, 1));
+  const shapeRotation =
+    (rng.next() - 0.5)
+    * Math.PI
+    * mix(0.18, 0.68, clamp(coastComplexity * 0.35 + ruggedness01 * 0.15 + anisotropy * 0.5, 0, 1));
   const shapeRotationCos = Math.cos(shapeRotation);
   const shapeRotationSin = Math.sin(shapeRotation);
-  const shapeDriftX = (rng.next() - 0.5) * mix(0.08, 0.26, coastComplexity);
-  const shapeDriftY = (rng.next() - 0.5) * mix(0.08, 0.26, coastComplexity);
+  const shapeAxisAngle = mix(shapeRotation, ridgeSpineAngle, clamp(ridgeAlignment * 0.72 + anisotropy * 0.18, 0, 1));
+  const shapeAxisDir = { x: Math.cos(shapeAxisAngle), y: Math.sin(shapeAxisAngle) };
+  const shapeDriftX = (rng.next() - 0.5) * mix(0.06, 0.28, clamp(coastComplexity * 0.3 + asymmetry * 0.7, 0, 1));
+  const shapeDriftY = (rng.next() - 0.5) * mix(0.06, 0.28, clamp(coastComplexity * 0.25 + asymmetry * 0.75, 0, 1));
   const shapeLobeCountA = 2 + Math.floor(rng.next() * 3);
   const shapeLobeCountB = shapeLobeCountA + 1 + Math.floor(rng.next() * 2);
   const shapeLobePhaseA = rng.next() * Math.PI * 2;
@@ -1746,13 +1843,9 @@ async function buildElevationMapCoarse(
       sin: Math.sin(angle)
     };
   };
-  const longSpineToUV = (along: number, across: number) => ({
-    u: 0.5 + (along * longSpineDir.x - across * longSpineDir.y) * 0.5,
-    v: 0.5 + (along * longSpineDir.y + across * longSpineDir.x) * 0.5
-  });
-  const twinBayToUV = (along: number, across: number) => ({
-    u: 0.5 + (along * twinBayDir.x - across * twinBayDir.y) * 0.5,
-    v: 0.5 + (along * twinBayDir.y + across * twinBayDir.x) * 0.5
+  const toShapeUV = (along: number, across: number) => ({
+    u: 0.5 + (along * shapeAxisDir.x - across * shapeAxisDir.y) * 0.5,
+    v: 0.5 + (along * shapeAxisDir.y + across * shapeAxisDir.x) * 0.5
   });
   const createDistributedAngles = (
     count: number,
@@ -1817,20 +1910,22 @@ async function buildElevationMapCoarse(
     width: number;
     weight: number;
   };
-  const ridgeSpineNodeCount = terrainArchetype === "LONG_SPINE" ? 4 + Math.floor(rng.next() * 3) : 0;
-  const ridgeSpineNodes: RidgeSpineNode[] =
-    terrainArchetype === "LONG_SPINE"
-      ? Array.from({ length: ridgeSpineNodeCount }, (_, index) => {
-          const t = ridgeSpineNodeCount <= 1 ? 0.5 : index / Math.max(1, ridgeSpineNodeCount - 1);
-          return {
-            along: mix(-0.66, 0.66, t) + (rng.next() - 0.5) * 0.12,
-            across: (rng.next() - 0.5) * mix(0.04, 0.16, ruggedness01),
-            length: mix(0.14, 0.3, rng.next()),
-            width: mix(0.05, 0.12, rng.next()),
-            weight: mix(0.3, 0.74, rng.next())
-          };
-        })
-      : [];
+  const ridgeSpineNodeCount = Math.max(
+    0,
+    Math.round(mix(-1.2, 5.4, clamp(ridgeAlignment * 0.72 + anisotropy * 0.28, 0, 1)) + rng.next() * 1.2)
+  );
+  const ridgeSpineNodes: RidgeSpineNode[] = Array.from({ length: ridgeSpineNodeCount }, (_, index) => {
+    const t = ridgeSpineNodeCount <= 1 ? 0.5 : index / Math.max(1, ridgeSpineNodeCount - 1);
+    return {
+      along: mix(-0.72, 0.72, t) + (rng.next() - 0.5) * mix(0.08, 0.16, ruggedness01),
+      across:
+        Math.sin(t * Math.PI * mix(0.9, 1.8, ridgeFrequency) + ridgeSpineCurvePhaseA) * mix(0.02, 0.14, ridgeAlignment)
+        + (rng.next() - 0.5) * mix(0.03, 0.12, ruggedness01),
+      length: mix(0.14, 0.32, rng.next()),
+      width: mix(0.05, 0.12, rng.next()),
+      weight: mix(0.22, 0.72, clamp(ridgeAlignment * 0.7 + rng.next() * 0.3, 0, 1))
+    };
+  });
   const sampleRidgeSpineProfile = (
     px: number,
     py: number
@@ -1881,33 +1976,30 @@ async function buildElevationMapCoarse(
     radius: number;
     strength: number;
   };
-  const splitStraitShelfNodeCount = terrainArchetype === "TWIN_BAY" ? 3 + Math.floor(rng.next() * 2) : 0;
-  const splitStraitShelfNodes: SplitStraitShelfNode[] =
-    terrainArchetype === "TWIN_BAY"
-      ? Array.from({ length: splitStraitShelfNodeCount * 2 }, (_, index) => {
-          const side = index < splitStraitShelfNodeCount ? -1 : 1;
-          const sideIndex = index % splitStraitShelfNodeCount;
-          const t = splitStraitShelfNodeCount <= 1 ? 0.5 : sideIndex / Math.max(1, splitStraitShelfNodeCount - 1);
-          return {
-            along: mix(-0.72, 0.72, t) + (rng.next() - 0.5) * 0.16,
-            across:
-              side * mix(0.18, 0.34, Math.pow(rng.next(), 0.84))
-              + splitStraitAsymmetry * side * 0.2
-              + (rng.next() - 0.5) * 0.06,
-            length: mix(0.18, 0.34, rng.next()),
-            width: mix(0.05, 0.12, rng.next()),
-            weight: mix(0.28, 0.68, rng.next())
-          };
-        })
-      : [];
-  const splitStraitPinches: SplitStraitPinch[] =
-    terrainArchetype === "TWIN_BAY"
-      ? Array.from({ length: 2 + Math.floor(rng.next() * 2) }, () => ({
-          along: mix(-0.56, 0.56, rng.next()),
-          radius: mix(0.1, 0.22, rng.next()),
-          strength: mix(0.12, 0.3, rng.next())
-        }))
-      : [];
+  const splitStraitShelfNodeCount = Math.max(0, Math.round(mix(-0.8, 4.8, embayment) + rng.next() * 0.8));
+  const splitStraitShelfNodes: SplitStraitShelfNode[] = Array.from({ length: splitStraitShelfNodeCount * 2 }, (_, index) => {
+    const side = index < splitStraitShelfNodeCount ? -1 : 1;
+    const sideIndex = index % Math.max(1, splitStraitShelfNodeCount);
+    const t = splitStraitShelfNodeCount <= 1 ? 0.5 : sideIndex / Math.max(1, splitStraitShelfNodeCount - 1);
+    return {
+      along: mix(-0.72, 0.72, t) + (rng.next() - 0.5) * mix(0.06, 0.16, embayment),
+      across:
+        side * mix(0.18, 0.36, Math.pow(rng.next(), 0.84))
+        + splitStraitAsymmetry * side * mix(0.12, 0.28, asymmetry)
+        + (rng.next() - 0.5) * mix(0.04, 0.08, embayment),
+      length: mix(0.18, 0.34, rng.next()),
+      width: mix(0.05, 0.12, rng.next()),
+      weight: mix(0.22, 0.66, clamp(embayment * 0.8 + rng.next() * 0.2, 0, 1))
+    };
+  });
+  const splitStraitPinches: SplitStraitPinch[] = Array.from(
+    { length: Math.max(0, Math.round(mix(-0.6, 3.6, embayment) + rng.next() * 0.8)) },
+    () => ({
+      along: mix(-0.56, 0.56, rng.next()),
+      radius: mix(0.1, 0.22, rng.next()),
+      strength: mix(0.08, 0.28, clamp(embayment * 0.7 + rng.next() * 0.3, 0, 1))
+    })
+  );
   const sampleSplitStraitProfile = (
     px: number,
     py: number
@@ -2008,156 +2100,56 @@ async function buildElevationMapCoarse(
     return { footprint, crest };
   };
   const silhouetteBlobs = (() => {
-    switch (terrainArchetype) {
-      case "LONG_SPINE": {
-        const nodeCount = 4 + Math.floor(rng.next() * 2);
-        return Array.from({ length: nodeCount }, (_, index) => {
-          const t = nodeCount <= 1 ? 0.5 : index / (nodeCount - 1);
-          const along = mix(-0.68, 0.68, t) + (rng.next() - 0.5) * 0.1;
-          const across =
-            Math.sin(t * Math.PI * mix(0.8, 1.4, coastComplexity) + ridgeSpineCurvePhaseA) * mix(0.04, 0.16, coastComplexity)
-            + (rng.next() - 0.5) * 0.06;
-          const point = longSpineToUV(along, across);
-          return createAlignedSilhouetteBlob(
-            point.u,
-            point.v,
-            mix(0.22, 0.42, rng.next()),
-            mix(0.08, 0.16, rng.next()),
-            mix(0.34, 0.62, rng.next()),
-            ridgeSpineAngle,
-            0.06
-          );
-        });
-      }
-      case "TWIN_BAY": {
-        const core = createAlignedSilhouetteBlob(0.5, 0.5, 0.44, 0.32, 0.96, twinBayAngle, 0.04);
-        const bayShoulders = [
-          { along: -0.2 + twinBayAsymmetry * 0.18, across: -0.16, radiusAlong: 0.32, radiusAcross: 0.18, weight: 0.56 },
-          { along: 0.2 + twinBayAsymmetry * 0.18, across: 0.16, radiusAlong: 0.32, radiusAcross: 0.18, weight: 0.56 }
-        ];
-        return [
-          core,
-          ...bayShoulders.map((shoulder) => {
-            const point = twinBayToUV(shoulder.along, shoulder.across);
-            return createAlignedSilhouetteBlob(
-              point.u,
-              point.v,
-              shoulder.radiusAlong,
-              shoulder.radiusAcross,
-              shoulder.weight,
-              twinBayAngle,
-              0.05
-            );
-          }),
-          ...splitStraitShelfNodes.slice(0, 4).map((node) => {
-            const point = twinBayToUV(node.along * 0.72, node.across * 0.84);
-            return createAlignedSilhouetteBlob(
-              point.u,
-              point.v,
-              mix(0.18, 0.28, rng.next()),
-              mix(0.08, 0.14, rng.next()),
-              mix(0.14, 0.28, node.weight),
-              twinBayAngle,
-              0.05
-            );
-          })
-        ];
-      }
-      case "SHELF": {
-        const plateauBlobs = [
-          createAlignedSilhouetteBlob(0.5, 0.5, 0.48, 0.34, 0.98, shapeRotation, 0.04),
-          createAlignedSilhouetteBlob(0.38, 0.52, 0.26, 0.22, 0.62, shapeRotation + 0.24, 0.05),
-          createAlignedSilhouetteBlob(0.64, 0.46, 0.24, 0.2, 0.58, shapeRotation - 0.22, 0.05)
-        ];
-        if (coastComplexity > 0.55) {
-          plateauBlobs.push(createAlignedSilhouetteBlob(0.54, 0.66, 0.18, 0.16, 0.38, shapeRotation + 0.1, 0.05));
-        }
-        return plateauBlobs;
-      }
-      case "MASSIF":
-      default: {
-        const blobs = [
-          createSilhouetteBlob(0.5, 0.5, mix(0.3, 0.48, rng.next()), mix(0.28, 0.44, rng.next()), 0.96, 0.08)
-        ];
-        const supportCount = 2 + Math.floor(rng.next() * 3);
-        for (let i = 0; i < supportCount; i += 1) {
-          const angle = rng.next() * Math.PI * 2;
-          const dist = mix(0.12, 0.28, rng.next());
-          blobs.push(
-            createSilhouetteBlob(
-              0.5 + Math.cos(angle) * dist,
-              0.5 + Math.sin(angle) * dist * mix(0.84, 1.12, rng.next()),
-              mix(0.12, 0.24, rng.next()),
-              mix(0.12, 0.22, rng.next()),
-              mix(0.42, 0.74, rng.next()),
-              0.12
-            )
-          );
-        }
-        return blobs;
-      }
+    const blobs = [
+      createAlignedSilhouetteBlob(
+        0.5,
+        0.5,
+        mix(0.34, 0.56, 1 - anisotropy * 0.55),
+        mix(0.22, 0.38, 1 - uplandDistribution * 0.35),
+        mix(0.74, 1.02, 1 - embayment * 0.4),
+        shapeAxisAngle,
+        0.04
+      )
+    ];
+    const supportCount = Math.max(1, Math.round(mix(1.4, 5.4, uplandDistribution) + rng.next() * 1.4));
+    const alongSpread = mix(0.1, 0.78, anisotropy);
+    const acrossSpread = mix(0.08, 0.26, clamp(asymmetry * 0.5 + (1 - anisotropy) * 0.5, 0, 1));
+    for (let index = 0; index < supportCount; index += 1) {
+      const t = supportCount <= 1 ? 0.5 : index / Math.max(1, supportCount - 1);
+      const along = mix(-alongSpread, alongSpread, t) + (rng.next() - 0.5) * mix(0.06, 0.14, anisotropy);
+      const across =
+        Math.sin(t * Math.PI * mix(0.8, 2.1, uplandDistribution) + ridgeSpineCurvePhaseA) * acrossSpread
+        + (rng.next() - 0.5) * mix(0.04, 0.12, asymmetry);
+      const point = toShapeUV(along, across);
+      blobs.push(
+        createAlignedSilhouetteBlob(
+          point.u,
+          point.v,
+          mix(0.18, 0.36, rng.next()),
+          mix(0.1, 0.24, rng.next()),
+          mix(0.28, 0.68, rng.next()),
+          shapeAxisAngle + (rng.next() - 0.5) * Math.PI * mix(0.04, 0.24, ruggedness01),
+          0.08
+        )
+      );
     }
+    return blobs;
   })();
   const silhouetteCuts = (() => {
-    if (terrainArchetype === "LONG_SPINE") {
-      const cutCount = 2 + Math.floor(rng.next() * 2);
-      return Array.from({ length: cutCount }, (_, index) => {
-        const side = index % 2 === 0 ? -1 : 1;
-        const along = mix(-0.72, 0.72, rng.next());
-        const across = side * mix(0.28, 0.5, rng.next());
-        const point = longSpineToUV(along, across);
-        return createAlignedSilhouetteBlob(
-          point.u,
-          point.v,
-          mix(0.14, 0.24, rng.next()),
-          mix(0.08, 0.16, rng.next()),
-          mix(0.1, 0.22, rng.next()),
-          ridgeSpineAngle,
-          0.05
-        );
-      });
-    }
-    if (terrainArchetype === "TWIN_BAY") {
-      const bayCuts = [
-        { along: -0.22 + twinBayAsymmetry * 0.2, across: -0.74, radiusAlong: 0.24, radiusAcross: 0.18, weight: 0.34 },
-        { along: 0.22 + twinBayAsymmetry * 0.2, across: 0.74, radiusAlong: 0.24, radiusAcross: 0.18, weight: 0.34 }
-      ];
-      if (coastComplexity >= 0.75) {
-        bayCuts.push({
-          along: twinBayAsymmetry * 0.18,
-          across: rng.next() < 0.5 ? -0.66 : 0.66,
-          radiusAlong: 0.18,
-          radiusAcross: 0.14,
-          weight: 0.18
-        });
-      }
-      return bayCuts.map((bay) => {
-        const point = twinBayToUV(bay.along, bay.across);
-        return createAlignedSilhouetteBlob(
-          point.u,
-          point.v,
-          bay.radiusAlong,
-          bay.radiusAcross,
-          bay.weight,
-          twinBayAngle + Math.sign(bay.across) * Math.PI * 0.08,
-          0.04
-        );
-      });
-    }
-    const cutCount =
-      terrainArchetype === "SHELF"
-        ? (coastComplexity > 0.64 ? 1 : 0)
-        : 1 + Math.floor(rng.next() * (coastComplexity > 0.48 ? 3 : 2));
-    return Array.from({ length: cutCount }, () => {
-      const angle = rng.next() * Math.PI * 2;
-      const dist = terrainArchetype === "SHELF" ? mix(0.38, 0.5, rng.next()) : mix(0.28, 0.46, rng.next());
-      return createSilhouetteBlob(
-        0.5 + Math.cos(angle) * dist,
-        0.5 + Math.sin(angle) * dist * mix(0.84, 1.16, rng.next()),
-        terrainArchetype === "SHELF" ? mix(0.08, 0.14, rng.next()) : mix(0.08, 0.18, rng.next()),
-        terrainArchetype === "SHELF" ? mix(0.08, 0.14, rng.next()) : mix(0.08, 0.18, rng.next()),
-        terrainArchetype === "SHELF" ? mix(0.08, 0.18, rng.next()) : mix(0.18, 0.46, rng.next()),
-        0.04
+    const cutCount = Math.max(0, Math.round(mix(-0.6, 4.4, clamp(embayment * 0.82 + coastComplexity * 0.18, 0, 1)) + rng.next()));
+    return Array.from({ length: cutCount }, (_, index) => {
+      const side = index % 2 === 0 ? -1 : 1;
+      const along = mix(-0.72, 0.72, rng.next()) + (rng.next() - 0.5) * mix(0.04, 0.16, anisotropy);
+      const across = side * mix(0.34, 0.82, embayment) + (rng.next() - 0.5) * mix(0.03, 0.1, asymmetry);
+      const point = toShapeUV(along, across);
+      return createAlignedSilhouetteBlob(
+        point.u,
+        point.v,
+        mix(0.12, 0.24, rng.next()),
+        mix(0.08, 0.18, rng.next()),
+        mix(0.08, 0.34, embayment * 0.7 + rng.next() * 0.3),
+        shapeAxisAngle + Math.sign(across) * Math.PI * mix(0.02, 0.14, embayment),
+        0.05
       );
     });
   })();
@@ -2165,202 +2157,76 @@ async function buildElevationMapCoarse(
     if (macroCoastStrength <= 0.001) {
       return [];
     }
-    switch (terrainArchetype) {
-      case "LONG_SPINE": {
-        const sideAngles = [ridgeSpineAngle + Math.PI * 0.5, ridgeSpineAngle - Math.PI * 0.5];
-        return sideAngles.flatMap((sideAngle, sideIndex) => {
-          const featureCount = 1 + Math.floor(mix(0.8, 2.2, macroCoastStrength) + rng.next() * 0.6);
-          return createDistributedAngles(
-            featureCount,
-            sideAngle + sideIndex * 0.18,
-            mix(0.7, 1.45, macroCoastStrength),
-            mix(0.16, 0.42, macroCoastStrength)
-          ).map((angle) =>
-            createCoastMacroBlob(
-              angle,
-              mix(0.68, 0.9, rng.next()),
-              mix(0.12, 0.28, macroCoastStrength * 0.7 + rng.next() * 0.3),
-              mix(0.07, 0.16, macroCoastStrength * 0.65 + rng.next() * 0.35),
-              mix(0.08, 0.22, macroCoastStrength * 0.8 + rng.next() * 0.2),
-              rng.next() < 0.24 ? "radial" : "tangent",
-              0.05
-            )
-          );
-        });
-      }
-      case "TWIN_BAY": {
-        const outerAngles = [twinBayAngle + Math.PI * 0.5, twinBayAngle - Math.PI * 0.5];
-        return outerAngles.flatMap((outerAngle, sideIndex) => {
-          const featureCount = 1 + Math.floor(mix(0.6, 1.4, macroCoastStrength) + rng.next() * 0.4);
-          return createDistributedAngles(
-            featureCount,
-            outerAngle + sideIndex * 0.14,
-            mix(0.48, 0.9, macroCoastStrength),
-            mix(0.12, 0.26, macroCoastStrength)
-          ).map((angle) =>
-            createCoastMacroBlob(
-              angle,
-              mix(0.64, 0.82, rng.next()),
-              mix(0.1, 0.2, macroCoastStrength * 0.65 + rng.next() * 0.35),
-              mix(0.06, 0.12, macroCoastStrength * 0.55 + rng.next() * 0.45),
-              mix(0.06, 0.14, macroCoastStrength * 0.72 + rng.next() * 0.28),
-              "tangent",
-              0.05
-            )
-          );
-        });
-      }
-      case "SHELF": {
-        const featureCount = Math.max(1, Math.floor(mix(0.4, 1.4, macroCoastStrength) + rng.next() * 0.4));
-        return createDistributedAngles(
-          featureCount,
-          rng.next() * Math.PI * 2,
-          Math.PI * 2,
-          mix(0.12, 0.26, macroCoastStrength)
-        ).map((angle) =>
-          createCoastMacroBlob(
-            angle,
-            mix(0.58, 0.76, rng.next()),
-            mix(0.1, 0.18, macroCoastStrength * 0.52 + rng.next() * 0.48),
-            mix(0.06, 0.12, macroCoastStrength * 0.48 + rng.next() * 0.52),
-            mix(0.04, 0.1, macroCoastStrength * 0.55 + rng.next() * 0.45),
-            "tangent",
-            0.06
-          )
-        );
-      }
-      case "MASSIF":
-      default: {
-        const featureCount = 1 + Math.floor(mix(1.1, 3.8, macroCoastStrength) + rng.next() * 0.8);
-        return createDistributedAngles(
-          featureCount,
-          rng.next() * Math.PI * 2,
-          Math.PI * 2,
-          mix(0.18, 0.44, macroCoastStrength)
-        ).map((angle) =>
-          createCoastMacroBlob(
-            angle,
-            mix(0.62, 0.92, rng.next()),
-            mix(0.16, 0.34, macroCoastStrength * 0.72 + rng.next() * 0.28),
-            mix(0.08, 0.2, macroCoastStrength * 0.6 + rng.next() * 0.4),
-            mix(0.1, 0.26, macroCoastStrength * 0.78 + rng.next() * 0.22),
-            rng.next() < 0.28 ? "radial" : "tangent",
-            0.06
-          )
-        );
-      }
-    }
+    const featureCount = Math.max(
+      1,
+      Math.floor(mix(0.8, 3.6, clamp(macroCoastStrength * 0.72 + anisotropy * 0.18 + (1 - embayment) * 0.1, 0, 1)) + rng.next() * 0.8)
+    );
+    return createDistributedAngles(
+      featureCount,
+      shapeAxisAngle + Math.PI / Math.max(2, featureCount),
+      Math.PI * 2,
+      mix(0.12, 0.42, macroCoastStrength)
+    ).map((angle) =>
+      createCoastMacroBlob(
+        angle,
+        mix(0.62, 0.92, rng.next()),
+        mix(0.12, 0.32, macroCoastStrength * 0.68 + rng.next() * 0.32),
+        mix(0.08, 0.2, macroCoastStrength * 0.56 + rng.next() * 0.44),
+        mix(0.06, 0.22, macroCoastStrength * 0.72 + rng.next() * 0.28),
+        rng.next() < mix(0.14, 0.34, anisotropy) ? "radial" : "tangent",
+        0.06
+      )
+    );
   })();
   const coastBays = (() => {
     if (macroCoastStrength <= 0.001) {
       return [];
     }
-    switch (terrainArchetype) {
-      case "LONG_SPINE": {
-        const flankAngles = [ridgeSpineAngle + Math.PI * 0.5, ridgeSpineAngle - Math.PI * 0.5];
-        return flankAngles.flatMap((flankAngle, sideIndex) => {
-          const featureCount = 1 + Math.floor(mix(0.9, 2.5, macroCoastStrength) + rng.next() * 0.8);
-          return createDistributedAngles(
-            featureCount,
-            flankAngle + sideIndex * 0.12,
-            mix(0.8, 1.55, macroCoastStrength),
-            mix(0.18, 0.46, macroCoastStrength)
-          ).map((angle) =>
-            createCoastMacroBlob(
-              angle,
-              mix(0.86, 1.08, rng.next()),
-              mix(0.18, 0.34, macroCoastStrength * 0.76 + rng.next() * 0.24),
-              mix(0.1, 0.22, macroCoastStrength * 0.7 + rng.next() * 0.3),
-              mix(0.12, 0.3, macroCoastStrength * 0.82 + rng.next() * 0.18),
-              rng.next() < 0.16 ? "radial" : "tangent",
-              0.05
-            )
-          );
-        });
-      }
-      case "TWIN_BAY": {
-        const outerAngles = [twinBayAngle + Math.PI * 0.5, twinBayAngle - Math.PI * 0.5];
-        return outerAngles.flatMap((outerAngle, sideIndex) => {
-          const featureCount = 1 + Math.floor(mix(0.9, 1.4, macroCoastStrength) + rng.next() * 0.2);
-          return createDistributedAngles(
-            featureCount,
-            outerAngle + sideIndex * 0.12,
-            mix(0.54, 0.94, macroCoastStrength),
-            mix(0.12, 0.24, macroCoastStrength)
-          ).map((angle) =>
-            createCoastMacroBlob(
-              angle,
-              mix(0.88, 1.02, rng.next()),
-              mix(0.18, 0.28, macroCoastStrength * 0.72 + rng.next() * 0.28),
-              mix(0.1, 0.18, macroCoastStrength * 0.64 + rng.next() * 0.36),
-              mix(0.18, 0.26, macroCoastStrength * 0.74 + rng.next() * 0.26),
-              "tangent",
-              0.05
-            )
-          );
-        });
-      }
-      case "SHELF": {
-        const featureCount = coastComplexity > 0.72 ? 1 : 0;
-        return createDistributedAngles(
-          featureCount,
-          rng.next() * Math.PI * 2 + Math.PI / Math.max(2, featureCount),
-          Math.PI * 2,
-          mix(0.12, 0.22, macroCoastStrength)
-        ).map((angle) =>
-          createCoastMacroBlob(
-            angle,
-            mix(0.86, 0.98, rng.next()),
-            mix(0.16, 0.24, macroCoastStrength * 0.62 + rng.next() * 0.38),
-            mix(0.1, 0.16, macroCoastStrength * 0.58 + rng.next() * 0.42),
-            mix(0.08, 0.16, macroCoastStrength * 0.58 + rng.next() * 0.42),
-            "tangent",
-            0.06
-          )
-        );
-      }
-      case "MASSIF":
-      default: {
-        const featureCount = 1 + Math.floor(mix(1.2, 4.2, macroCoastStrength) + rng.next() * 0.8);
-        return createDistributedAngles(
-          featureCount,
-          rng.next() * Math.PI * 2 + Math.PI / Math.max(2, featureCount),
-          Math.PI * 2,
-          mix(0.2, 0.52, macroCoastStrength)
-        ).map((angle) =>
-          createCoastMacroBlob(
-            angle,
-            mix(0.84, 1.08, rng.next()),
-            mix(0.2, 0.4, macroCoastStrength * 0.8 + rng.next() * 0.2),
-            mix(0.12, 0.28, macroCoastStrength * 0.72 + rng.next() * 0.28),
-            mix(0.14, 0.34, macroCoastStrength * 0.84 + rng.next() * 0.16),
-            rng.next() < 0.22 ? "radial" : "tangent",
-            0.06
-          )
-        );
-      }
-    }
+    const featureCount = Math.max(
+      0,
+      Math.floor(mix(-0.2, 4.6, clamp(macroCoastStrength * 0.32 + embayment * 0.68, 0, 1)) + rng.next() * 0.9)
+    );
+    return createDistributedAngles(
+      featureCount,
+      shapeAxisAngle + Math.PI / Math.max(2, Math.max(1, featureCount)),
+      Math.PI * 2,
+      mix(0.14, 0.5, macroCoastStrength)
+    ).map((angle) =>
+      createCoastMacroBlob(
+        angle,
+        mix(0.84, 1.08, rng.next()),
+        mix(0.18, 0.38, macroCoastStrength * 0.72 + rng.next() * 0.28),
+        mix(0.1, 0.24, macroCoastStrength * 0.66 + rng.next() * 0.34),
+        mix(0.12, 0.34, clamp(embayment * 0.82 + rng.next() * 0.18, 0, 1)),
+        rng.next() < mix(0.12, 0.28, embayment) ? "radial" : "tangent",
+        0.06
+      )
+    );
   })();
   const landCenters = (() => {
-    switch (terrainArchetype) {
-      case "LONG_SPINE":
-        return [];
-      case "TWIN_BAY":
-        return [
-          createLandCenter(0.5, 0.52, 0.22, 0.22 + relief01 * 0.14, 0.08),
-          createLandCenter(0.34, 0.42, 0.14, 0.12 + ruggedness01 * 0.08, 0.08),
-          createLandCenter(0.66, 0.58, 0.14, 0.12 + ruggedness01 * 0.08, 0.08)
-        ];
-      case "SHELF":
-        return [createLandCenter(0.58, 0.44, 0.14, 0.12 + relief01 * 0.08, 0.08)];
-      case "MASSIF":
-      default:
-        return [
-          createLandCenter(0.5, 0.52, 0.34, 0.34 + relief01 * 0.28, 0.08),
-          createLandCenter(0.36, 0.38, 0.2, 0.18 + ruggedness01 * 0.14, 0.11),
-          createLandCenter(0.66, 0.64, 0.18, 0.16 + ruggedness01 * 0.12, 0.11)
-        ];
-    }
+    const centerCount = Math.max(1, Math.round(mix(1.2, 4.4, uplandDistribution) + rng.next() * 0.8));
+    return Array.from({ length: centerCount }, (_, index) => {
+      if (index === 0) {
+        return createLandCenter(
+          0.5 + shapeDriftX * 0.16,
+          0.5 + shapeDriftY * 0.16,
+          mix(0.18, 0.34, 1 - uplandDistribution * 0.42),
+          mix(0.18, 0.34, 1 - embayment * 0.3) + relief01 * 0.18,
+          0.06
+        );
+      }
+      const t = centerCount <= 2 ? rng.next() : (index - 1) / Math.max(1, centerCount - 2);
+      const along = mix(-mix(0.12, 0.62, anisotropy), mix(0.12, 0.62, anisotropy), t) + (rng.next() - 0.5) * 0.12;
+      const across = (rng.next() - 0.5) * mix(0.08, 0.34, clamp(asymmetry * 0.55 + uplandDistribution * 0.45, 0, 1));
+      const point = toShapeUV(along, across);
+      return createLandCenter(
+        point.u,
+        point.v,
+        mix(0.1, 0.24, rng.next()),
+        mix(0.1, 0.24, rng.next()) + ruggedness01 * 0.08,
+        0.08
+      );
+    });
   })();
 
   const basinCount = Math.max(1, Math.round(1 + basinStrength * 3));
@@ -2375,9 +2241,6 @@ async function buildElevationMapCoarse(
     };
   });
 
-  const macroWeight = clamp(ELEVATION_MACRO_WEIGHT, 0, 1);
-  const detailWeight = clamp(ELEVATION_DETAIL_WEIGHT, 0, 1);
-  const weightSum = Math.max(0.0001, macroWeight + detailWeight);
   const peakWeight = 0.65;
   const sampleOffsets = [
     { x: 0.25, y: 0.25 },
@@ -2424,88 +2287,45 @@ async function buildElevationMapCoarse(
     const cutShape = sampleSilhouetteField(silhouetteCuts, rotatedNX, rotatedNY);
     const headlandShape = sampleSilhouetteField(coastHeadlands, rotatedNX, rotatedNY);
     const bayShape = sampleSilhouetteField(coastBays, rotatedNX, rotatedNY);
-    switch (terrainArchetype) {
-      case "LONG_SPINE": {
-        const spineProfile = sampleRidgeSpineProfile(rotatedNX, rotatedNY);
-        const ellipse = 1 - smoothstep(
-          mix(0.62, 0.84, islandCompactness),
-          mix(0.94, 1.12, islandCompactness),
-          Math.hypot(rotatedNX * 0.74, rotatedNY * 1.18) - coastWarp * 0.62 - harmonicWarp * 0.16 - macroHarmonicWarp * 0.34
-        );
-        return clamp(
-          ellipse * 0.24
-          + spineProfile.footprint * 0.7
-          + spineProfile.crest * 0.24
-          + blobShape * 0.16
-          + headlandShape * 0.1
-          - cutShape * 0.08
-          - bayShape * 0.12
-          + harmonicWarp * 0.03
-          + macroHarmonicWarp * 0.07,
-          0,
-          1
-        );
-      }
-      case "TWIN_BAY": {
-        const splitStraitProfile = sampleSplitStraitProfile(rotatedNX, rotatedNY);
-        const compactShield = 1 - smoothstep(
-          mix(0.66, 0.82, islandCompactness),
-          mix(0.92, 1.06, islandCompactness),
-          Math.hypot(rotatedNX * 0.78, rotatedNY * 0.92) - coastWarp * 0.42 - harmonicWarp * 0.12 - macroHarmonicWarp * 0.16
-        );
-        return clamp(
-          compactShield * 0.28
-          + splitStraitProfile.footprint * 0.62
-          + splitStraitProfile.crest * 0.18
-          + blobShape * 0.12
-          + headlandShape * 0.08
-          - cutShape * 0.1
-          - bayShape * 0.18
-          + coastWarp * 0.03
-          + harmonicWarp * 0.02
-          + macroHarmonicWarp * 0.04,
-          0,
-          1
-        );
-      }
-      case "SHELF": {
-        const plateau = 1 - smoothstep(
-          mix(0.72, 0.9, islandCompactness),
-          mix(0.96, 1.1, islandCompactness),
-          Math.hypot(rotatedNX * 0.82, rotatedNY * 0.9) - coastWarp * 0.28 - harmonicWarp * 0.08 - macroHarmonicWarp * 0.1
-        );
-        return clamp(
-          plateau * 0.58
-          + blobShape * 0.34
-          + headlandShape * 0.06
-          - cutShape * 0.04
-          - bayShape * 0.08
-          + coastWarp * 0.02
-          + harmonicWarp * 0.01
-          + macroHarmonicWarp * 0.02,
-          0,
-          1
-        );
-      }
-      case "MASSIF":
-      default: {
-        const baseRadius = mix(0.72, 0.9, islandCompactness);
-        const lobe =
-          macroHarmonicWarp * mix(0.7, 1.25, coastComplexity)
-          + harmonicWarp * mix(0.45, 1.0, coastComplexity)
-          + coastWarp * mix(0.5, 0.88, coastComplexity);
-        const base = 1 - smoothstep(baseRadius - 0.28, baseRadius + 0.06, radial - lobe);
-        return clamp(
-          base * 0.18
-          + blobShape * 0.72
-          + headlandShape * 0.18
-          - cutShape * 0.14
-          - bayShape * 0.2,
-          0,
-          1
-        );
-      }
-    }
+    const ridgeProfile = sampleRidgeSpineProfile(rotatedNX, rotatedNY);
+    const embaymentProfile = sampleSplitStraitProfile(rotatedNX, rotatedNY);
+    const axisMajor = mix(1.02, 1.82, anisotropy);
+    const axisMinor = mix(1.02, 0.68, anisotropy);
+    const stretchedRadial = Math.hypot(rotatedNX / axisMajor, rotatedNY / axisMinor);
+    const asymmetryWarp =
+      rotatedNX * mix(-0.12, 0.16, asymmetry) * 0.35
+      + rotatedNY * mix(-0.08, 0.12, asymmetry) * 0.2;
+    const baseRadius = mix(0.7, 0.9, islandCompactness) - embayment * 0.06 + uplandDistribution * 0.02;
+    const baseMask = 1 - smoothstep(
+      baseRadius - mix(0.14, 0.24, 1 - embayment),
+      baseRadius + mix(0.03, 0.09, embayment),
+      stretchedRadial
+      - macroHarmonicWarp * mix(0.24, 0.96, clamp(coastComplexity * 0.32 + embayment * 0.68, 0, 1))
+      - harmonicWarp * mix(0.18, 0.72, coastComplexity)
+      - coastWarp * mix(0.2, 0.86, clamp(coastComplexity * 0.4 + embayment * 0.6, 0, 1))
+      - asymmetryWarp
+    );
+    const supportField = blobShape * mix(0.34, 0.76, clamp(uplandDistribution * 0.62 + (1 - anisotropy) * 0.38, 0, 1));
+    const ridgeField =
+      ridgeProfile.footprint * mix(0.04, 0.42, clamp(ridgeAlignment * 0.78 + anisotropy * 0.22, 0, 1))
+      + ridgeProfile.crest * mix(0.02, 0.14, ridgeAlignment);
+    const bayShoulders =
+      embaymentProfile.footprint * mix(0.02, 0.24, embayment)
+      + embaymentProfile.crest * mix(0.01, 0.08, embayment * 0.7);
+    const headlandField = headlandShape * mix(0.04, 0.18, clamp(coastComplexity * 0.72 + anisotropy * 0.12, 0, 1));
+    const embaymentCuts =
+      cutShape * mix(0.04, 0.24, embayment)
+      + bayShape * mix(0.06, 0.34, clamp(embayment * 0.82 + coastComplexity * 0.18, 0, 1));
+    return clamp(
+      baseMask * mix(0.28, 0.5, 1 - embayment * 0.35)
+      + supportField
+      + ridgeField
+      + bayShoulders
+      + headlandField
+      - embaymentCuts,
+      0,
+      1
+    );
   };
 
   const sampleCarvingAt = (sampleX: number, sampleY: number): { carve: number; landShape: number } => {
@@ -2537,6 +2357,7 @@ async function buildElevationMapCoarse(
       landShape: islandShape
     };
   };
+  const shapeToLandEnvelope = (shape: number): number => smoothstep(0.12, 0.62, clamp(shape, 0, 1));
   const sampleElevationAt = (sampleX: number, sampleY: number): number => {
     const edgeDistM = Math.min(sampleX, sampleY, cols - 1 - sampleX, rows - 1 - sampleY) * cellSizeM;
     const edgeFactor = clamp(edgeDistM / centerFactorM, 0, 1);
@@ -2571,25 +2392,30 @@ async function buildElevationMapCoarse(
       -1,
       1
     );
-    let elevation =
-      (macroElevation * macroWeight + detailElevation * detailWeight)
-      / Math.max(0.0001, macroWeight * lowFreqWeight + detailWeight);
-    elevation = elevation * 0.5 + 0.5;
     const u = sampleX / Math.max(1, cols - 1);
     const v = sampleY / Math.max(1, rows - 1);
     const radial = Math.hypot(u * 2 - 1, v * 2 - 1);
-    const islandShape = clamp(sampleIslandShapeAt(sampleX, sampleY), 0, 1);
+    const landMaskField = clamp(sampleIslandShapeAt(sampleX, sampleY), 0, 1);
+    const landEnvelope = shapeToLandEnvelope(landMaskField);
     const nx = u * 2 - 1;
     const ny = v * 2 - 1;
     const shiftedNX = nx + shapeDriftX;
     const shiftedNY = ny + shapeDriftY;
     const rotatedNX = shiftedNX * shapeRotationCos - shiftedNY * shapeRotationSin;
     const rotatedNY = shiftedNX * shapeRotationSin + shiftedNY * shapeRotationCos;
-    const interiorField = Math.pow(clamp(1 - radial / mix(1.08, 0.74, islandCompactness), 0, 1), mix(1.8, 0.95, interiorRise));
+    const coastRiseField = Math.pow(landEnvelope, mix(1.9, 0.92, interiorRise));
+    const interiorField = Math.pow(
+      clamp(
+        landEnvelope * mix(0.88, 1.04, 1 - embayment * 0.2)
+        + (1 - radial) * mix(0.04, 0.14, uplandDistribution)
+        + edgeFactor * 0.06,
+        0,
+        1
+      ),
+      mix(1.7, 0.9, interiorRise)
+    );
     const upliftNoise = fractalNoise(worldNX / Math.max(260, macroScaleM * 0.42), worldNY / Math.max(260, macroScaleM * 0.42), state.seed + 1187);
     const peakNoise = fractalNoise(worldNX / Math.max(140, detailScaleM * 0.72), worldNY / Math.max(140, detailScaleM * 0.72), state.seed + 1229);
-    elevation += edgeFactor * 0.03;
-    elevation = elevation * (0.7 + band * 0.38) + bandBoost * 0.45;
     let landBoost = 0;
     for (const land of landCenters) {
       const dx = (worldX - land.x) / land.radius;
@@ -2599,66 +2425,68 @@ async function buildElevationMapCoarse(
         landBoost = Math.max(landBoost, Math.pow(1 - d, landPeakSharpness) * land.height);
       }
     }
-    const landEdgeFactor = edgeFactor * edgeFactor * edgeFactor;
-    const islandUpliftScale =
-      archetypeDefinition.upliftProfile === "central_peak"
-        ? 1.08
-        : archetypeDefinition.upliftProfile === "spine_ridge"
-          ? 0.92
-          : archetypeDefinition.upliftProfile === "bay_shield"
-            ? 0.88
-            : 0.72;
-    const interiorUpliftScale =
-      archetypeDefinition.upliftProfile === "shelf_plateau"
-        ? 1.12
-        : archetypeDefinition.upliftProfile === "bay_shield"
-          ? 0.92
-          : 0.86;
-    const peakFieldScale =
-      archetypeDefinition.upliftProfile === "central_peak"
-        ? 1.18
-        : archetypeDefinition.upliftProfile === "spine_ridge"
-          ? 0.94
-          : archetypeDefinition.upliftProfile === "bay_shield"
-            ? 0.82
-            : 0.56;
-    const islandUplift = islandShape * mix(0.15, 0.46, reliefCurve) * mix(0.68, 1.16, upliftNoise) * islandUpliftScale;
-    const interiorUplift =
-      interiorField
-      * mix(0.06, 0.2, interiorRise)
-      * mix(0.86, 1.12, upliftNoise)
-      * mix(0.82, 1.04, reliefCurve)
-      * interiorUpliftScale;
-    const peakField =
-      landBoost * landEdgeFactor * mix(0.06, 0.64, reliefPeakCurve) * mix(0.84, 1.18, peakNoise) * peakFieldScale;
-    const ridgeSpineProfile = terrainArchetype === "LONG_SPINE" ? sampleRidgeSpineProfile(rotatedNX, rotatedNY) : null;
-    const splitStraitProfile = terrainArchetype === "TWIN_BAY" ? sampleSplitStraitProfile(rotatedNX, rotatedNY) : null;
-    const ridgeSpineUplift =
-      ridgeSpineProfile
-        ? ridgeSpineProfile.footprint * mix(0.06, 0.24, reliefCurve) * mix(0.92, 1.1, upliftNoise)
-          + ridgeSpineProfile.crest * mix(0.08, 0.34, reliefPeakCurve) * mix(0.88, 1.2, peakNoise)
-        : 0;
-    const splitStraitUplift =
-      splitStraitProfile
-        ? splitStraitProfile.footprint * mix(0.04, 0.18, reliefCurve) * mix(0.9, 1.08, upliftNoise)
-          + splitStraitProfile.crest * mix(0.08, 0.28, reliefPeakCurve) * mix(0.86, 1.16, peakNoise)
-        : 0;
-    const ridgeUplift =
-      ridge * ridge * mix(0.03, 0.2, ruggedness01) * clamp(islandShape * 0.5 + upliftNoise * 0.52, 0, 1.1) * mix(0.76, 1.04, reliefCurve);
-    const rawElevation =
-      elevation * mix(0.4, 0.58, ruggedness01)
-      + islandUplift
-      + interiorUplift
-      + peakField
-      + ridgeSpineUplift
-      + splitStraitUplift
-      + ridgeUplift;
-    elevation = clamp(
-      softenPeaks(
-        rawElevation,
-        mix(0.78, 0.97, clamp(reliefCurve * 0.38 + maxHeight01 * 0.32, 0, 1)),
-        mix(3.4, 0.6, clamp(reliefCurve * 0.22 + maxHeight01 * 0.5, 0, 1))
+    const macroBaseField = clamp(
+      0.5
+      + macroElevation * mix(0.18, 0.4, reliefCurve)
+      + bandBoost * mix(0.12, 0.28, ruggedness01),
+      0,
+      1
+    );
+    const ridgeProfile = sampleRidgeSpineProfile(rotatedNX, rotatedNY);
+    const embaymentProfile = sampleSplitStraitProfile(rotatedNX, rotatedNY);
+    const uplandField = clamp(landBoost * mix(0.78, 1.08, upliftNoise), 0, 1.35);
+    const macroReliefField = clamp(
+      coastRiseField * mix(0.24, 0.38, interiorRise)
+      + interiorField * mix(0.18, 0.36, reliefCurve)
+      + uplandField * mix(0.12, 0.34, uplandDistribution)
+      + ridgeProfile.footprint * mix(0.04, 0.18, ridgeAlignment)
+      + ridgeProfile.crest * mix(0.02, 0.12, clamp(ridgeAlignment * 0.65 + anisotropy * 0.35, 0, 1))
+      + embaymentProfile.footprint * mix(0.01, 0.1, embayment)
+      + macroBaseField * mix(0.04, 0.12, reliefCurve),
+      0,
+      1
+    );
+    const microReliefField = clamp(
+      0.5
+      + detailElevation * mix(0.12, 0.28, ruggedness01)
+      + ridgeCentered * mix(0.03, 0.14, clamp(ruggedness01 * 0.5 + ridgeFrequency * 0.5, 0, 1))
+      + bandBoost * mix(0.08, 0.18, ruggedness01),
+      0,
+      1
+    );
+    const coastalPlinth =
+      landEnvelope * mix(0.016, 0.06, interiorRise) * mix(0.94, 1.04, 1 - embayment * 0.45);
+    const midslopeLift =
+      landEnvelope * macroReliefField * mix(0.1, 0.26, reliefCurve) * mix(0.9, 1.08, uplandDistribution);
+    const summitSeed = Math.pow(
+      clamp(
+        macroReliefField * mix(0.86, 1.12, upliftNoise)
+        + uplandField * mix(0.08, 0.22, uplandDistribution)
+        - mix(0.22, 0.08, maxHeight01),
+        0,
+        1
       ),
+      mix(1.8, 0.82, maxHeight01)
+    );
+    const summitLift =
+      summitSeed
+      * interiorField
+      * landEnvelope
+      * mix(0.08, 0.42, maxHeight01)
+      * mix(0.9, 1.08, peakNoise);
+    const ridgeLift =
+      ridgeProfile.crest * landEnvelope * mix(0.02, 0.12, ridgeAlignment)
+      + embaymentProfile.crest * landEnvelope * mix(0.01, 0.06, embayment);
+    const microLift =
+      (microReliefField - 0.5)
+      * smoothstep(0.16, 0.62, landEnvelope)
+      * mix(0.03, 0.14, ruggedness01);
+    let elevation = clamp(
+      coastalPlinth
+      + midslopeLift
+      + summitLift
+      + ridgeLift
+      + microLift,
       0,
       1
     );
@@ -2672,15 +2500,14 @@ async function buildElevationMapCoarse(
       }
     }
     elevation = clamp(elevation - basinDrop, 0, 1);
-    const edgeWeight = Math.pow(clamp(edgeFactor, 0, 1), EDGE_LAND_EXPONENT);
-    const edgeScale = 1 - mix(0.16, 0.42, 1 - coastalShelfWidth) * (1 - edgeWeight);
-    const seaLevel = clampSeaLevel(
-      settings.baseWaterThreshold + (1 - edgeFactor) * settings.edgeWaterBias,
-      settings
+    const edgeDistanceTiles = Math.min(sampleX, sampleY, cols - 1 - sampleX, rows - 1 - sampleY);
+    const perimeterEdgeEnvelope = Math.pow(
+      smoothstep(0, Math.max(1, perimeterOceanBandTiles), edgeDistanceTiles),
+      mix(1.35, 1.05, coastalShelfWidth)
     );
-    const baseline = Math.max(WATER_BASELINE_ELEV, seaLevel - EDGE_WATER_BASE_OFFSET * mix(0.6, 1.8, coastalShelfWidth));
-    elevation = baseline + (elevation - baseline) * edgeScale;
-    elevation = clamp((elevation - 0.5) * ELEVATION_CONTRAST + 0.5, 0, 1);
+    const terrainEnvelope = Math.min(perimeterEdgeEnvelope, landEnvelope);
+    elevation = WATER_BASELINE_ELEV + (elevation - WATER_BASELINE_ELEV) * terrainEnvelope;
+    elevation = clamp((elevation - 0.5) * mix(1.02, ELEVATION_CONTRAST, 0.48) + 0.5, 0, 1);
     return elevation;
   };
   const totalTiles = state.grid.totalTiles;
@@ -2707,6 +2534,34 @@ async function buildElevationMapCoarse(
   const edgeWidth = Math.max(8, Math.floor(getEdgeWidth(cols, rows) * mix(0.72, 1.6, coastalShelfWidth)));
   const edgeDenomM = (Math.min(cols, rows) * cellSizeM) / 2;
   const shouldStopAfter = (phase: MapGenDebugPhase): boolean => debug?.stopAfterPhase === phase;
+  const terrainEnvelopeMap = new Float32Array(totalTiles);
+  const valleySampleMap = new Float32Array(totalTiles);
+  const populateFullResolutionSupportMaps = async (
+    progressLabel: string,
+    progressStart: number,
+    progressSpan: number
+  ): Promise<void> => {
+    for (let y = 0; y < rows; y += 1) {
+      const rowBase = y * cols;
+      const gy = y / blockSize;
+      for (let x = 0; x < cols; x += 1) {
+        const gx = x / blockSize;
+        const idx = rowBase + x;
+        const falloff = getEdgeFalloff(x, y, cols, rows, edgeWidth, state.seed);
+        const landShape = sampleCoarse(coarseShapeMap, gx, gy);
+        const edgeDistanceTiles = Math.min(x, y, cols - 1 - x, rows - 1 - y);
+        const edgeCoastT = smoothstep(0, Math.max(1, perimeterOceanBandTiles), edgeDistanceTiles);
+        const edgeEnvelope = Math.min(falloff, Math.pow(edgeCoastT, mix(1.45, 1.1, coastalShelfWidth)));
+        terrainEnvelopeMap[idx] = Math.min(edgeEnvelope, shapeToLandEnvelope(landShape));
+        valleySampleMap[idx] = sampleCoarse(coarseValleyMap, gx, gy);
+      }
+      if (yieldIfNeeded && report) {
+        if (await yieldIfNeeded()) {
+          await report(progressLabel, progressStart + ((y + 1) / rows) * progressSpan);
+        }
+      }
+    }
+  };
   const buildPreviewElevationFromCoarse = (source: ArrayLike<number>): number[] => {
     const elevationMap = Array.from({ length: totalTiles }, () => 0);
     state.valleyMap = Array.from({ length: totalTiles }, () => 0);
@@ -2716,20 +2571,85 @@ async function buildElevationMapCoarse(
       for (let x = 0; x < cols; x += 1) {
         const gx = x / blockSize;
         const idx = rowBase + x;
-        const falloff = getEdgeFalloff(x, y, cols, rows, edgeWidth, state.seed);
         const softened = sampleCoarse(source, gx, gy);
-        const edgeDistM = Math.min(x, y, cols - 1 - x, rows - 1 - y) * cellSizeM;
-        const edgeFactor = clamp(edgeDistM / edgeDenomM, 0, 1);
-        const seaLevel = clampSeaLevel(
-          settings.baseWaterThreshold + (1 - edgeFactor) * settings.edgeWaterBias,
-          settings
-        );
-        const baseline = Math.max(WATER_BASELINE_ELEV, seaLevel - EDGE_WATER_BASE_OFFSET);
-        elevationMap[idx] = clamp(baseline + (softened - baseline) * falloff, 0, 1);
-        state.valleyMap[idx] = sampleCoarse(coarseValleyMap, gx, gy);
+        elevationMap[idx] = clamp(softened * terrainEnvelopeMap[idx], 0, 1);
+        state.valleyMap[idx] = valleySampleMap[idx];
       }
     }
     return elevationMap;
+  };
+  const naturalizeCoarseTerrain = async (
+    passes: number,
+    progressLabel: string,
+    progressStart: number,
+    progressSpan: number
+  ): Promise<void> => {
+    for (let pass = 0; pass < passes; pass += 1) {
+      for (let cy = 0; cy < coarseRows; cy += 1) {
+        for (let cx = 0; cx < coarseCols; cx += 1) {
+          const idx = cy * coarseCols + cx;
+          const current = coarseElevation[idx];
+          const landEnvelope = shapeToLandEnvelope(coarseShapeMap[idx]);
+          if (landEnvelope <= 0.01) {
+            coarseTemp[idx] = current;
+            continue;
+          }
+          let sum = 0;
+          let count = 0;
+          let lowerSum = 0;
+          let lowerCount = 0;
+          let maxDelta = 0;
+          for (let dy = -1; dy <= 1; dy += 1) {
+            for (let dx = -1; dx <= 1; dx += 1) {
+              if (dx === 0 && dy === 0) {
+                continue;
+              }
+              const nx = cx + dx;
+              const ny = cy + dy;
+              if (nx < 0 || ny < 0 || nx >= coarseCols || ny >= coarseRows) {
+                continue;
+              }
+              const nIdx = ny * coarseCols + nx;
+              const neighborLandEnvelope = shapeToLandEnvelope(coarseShapeMap[nIdx]);
+              if (neighborLandEnvelope <= 0.01) {
+                continue;
+              }
+              const neighbor = coarseElevation[nIdx];
+              sum += neighbor;
+              count += 1;
+              maxDelta = Math.max(maxDelta, Math.abs(current - neighbor));
+              if (neighbor <= current) {
+                lowerSum += neighbor;
+                lowerCount += 1;
+              }
+            }
+          }
+          if (count === 0) {
+            coarseTemp[idx] = current;
+            continue;
+          }
+          const average = sum / count;
+          const lowerAverage = lowerCount > 0 ? lowerSum / lowerCount : average;
+          const coastFactor = 1 - smoothstep(0.18, 0.72, landEnvelope);
+          const preserveFactor =
+            smoothstep(0.52, 0.84, coarseValleyMap[idx]) * 0.34
+            + smoothstep(0.5, 0.82, current) * 0.24;
+          const steepness = smoothstep(0.03, 0.12, maxDelta);
+          const target = mix(average, lowerAverage, coastFactor * 0.48);
+          const blend = steepness * mix(0.12, 0.44, coastFactor) * (1 - preserveFactor);
+          coarseTemp[idx] = clamp(mix(current, target, blend), 0, 1);
+        }
+        if (yieldIfNeeded && report) {
+          if (await yieldIfNeeded()) {
+            const passProgress = (pass + (cy + 1) / coarseRows) / Math.max(1, passes);
+            await report(progressLabel, progressStart + passProgress * progressSpan);
+          }
+        }
+      }
+      for (let i = 0; i < coarseElevation.length; i += 1) {
+        coarseElevation[i] = coarseTemp[i];
+      }
+    }
   };
 
   for (let cy = 0; cy < coarseRows; cy += 1) {
@@ -2827,6 +2747,9 @@ async function buildElevationMapCoarse(
     }
   }
 
+  await naturalizeCoarseTerrain(2, "Naturalizing terrain...", 0.9, 0.04);
+
+  await populateFullResolutionSupportMaps("Projecting terrain...", 0.94, 0.03);
   const reliefElevationMap = buildPreviewElevationFromCoarse(coarseElevation);
   const reliefSeaLevelBase = resolveSeaLevelBase(state, settings, reliefElevationMap, cellSizeM);
   if (debug) {
@@ -2837,7 +2760,7 @@ async function buildElevationMapCoarse(
       settings,
       reliefElevationMap,
       undefined,
-      buildSolidLandTypeIds(state),
+      undefined,
       reliefSeaLevelBase
     );
     if (shouldStopAfter("terrain:relief")) {
@@ -2869,6 +2792,8 @@ async function buildElevationMapCoarse(
     }
   }
 
+  await naturalizeCoarseTerrain(1, "Naturalizing terrain...", 0.98, 0.01);
+
   const elevationMap = Array.from({ length: totalTiles }, () => 0);
   state.valleyMap = Array.from({ length: totalTiles }, () => 0);
   for (let y = 0; y < rows; y += 1) {
@@ -2877,21 +2802,13 @@ async function buildElevationMapCoarse(
     for (let x = 0; x < cols; x += 1) {
       const gx = x / blockSize;
       const idx = rowBase + x;
-      const falloff = getEdgeFalloff(x, y, cols, rows, edgeWidth, state.seed);
       const softened = sampleCoarse(coarseElevation, gx, gy);
-      const edgeDistM = Math.min(x, y, cols - 1 - x, rows - 1 - y) * cellSizeM;
-      const edgeFactor = clamp(edgeDistM / edgeDenomM, 0, 1);
-      const seaLevel = clampSeaLevel(
-        settings.baseWaterThreshold + (1 - edgeFactor) * settings.edgeWaterBias,
-        settings
-      );
-      const baseline = Math.max(WATER_BASELINE_ELEV, seaLevel - EDGE_WATER_BASE_OFFSET);
-      elevationMap[idx] = clamp(baseline + (softened - baseline) * falloff, 0, 1);
-      state.valleyMap[idx] = sampleCoarse(coarseValleyMap, gx, gy);
+      elevationMap[idx] = clamp(softened * terrainEnvelopeMap[idx], 0, 1);
+      state.valleyMap[idx] = valleySampleMap[idx];
     }
     if (yieldIfNeeded && report) {
       if (await yieldIfNeeded()) {
-        await report("Reticulating splines...", 0.55 + (y + 1) / rows * 0.05);
+        await report("Applying terrain envelope...", 0.55 + (y + 1) / rows * 0.05);
       }
     }
   }
@@ -2903,7 +2820,7 @@ async function buildElevationMapCoarse(
     settings,
     elevationMap,
     undefined,
-    buildSolidLandTypeIds(state),
+    undefined,
     seaLevelBase
   );
   if (shouldStopAfter("terrain:carving")) {
@@ -3827,6 +3744,10 @@ function enforceEdgeOceanMask(
       const margin = edgeDist === 0 ? 0.08 : 0.04;
       if (elev <= localSea + margin) {
         forced[idx] = 1;
+        if (elev > localSea) {
+          elevationMap[idx] = localSea;
+          state.tiles[idx].elevation = localSea;
+        }
         added += 1;
       }
     }
@@ -3963,18 +3884,17 @@ function buildOceanMaskFromElevation(
   seaLevelMap: ArrayLike<number>
 ): Uint8Array {
   const { cols, rows, totalTiles } = state.grid;
-  const edgeWidth = getEdgeWidth(cols, rows);
   const waterMask = new Uint8Array(totalTiles);
   for (let y = 0; y < rows; y += 1) {
     const rowBase = y * cols;
     for (let x = 0; x < cols; x += 1) {
       const idx = rowBase + x;
       const localSea = seaLevelMap[idx] ?? 0;
-      const baseline = Math.max(WATER_BASELINE_ELEV, localSea - EDGE_WATER_BASE_OFFSET);
-      const falloff = getEdgeFalloff(x, y, cols, rows, edgeWidth, state.seed);
       const elev = elevationMap[idx] ?? 0;
-      const coastElev = baseline + (elev - baseline) * falloff;
-      if (coastElev <= localSea) {
+      // `elevationMap` is already the post-falloff terrain surface. Re-applying
+      // edge attenuation here pushes ocean membership inland onto tiles that are
+      // still visibly high above sea level.
+      if (elev <= localSea + COAST_LOCAL_SEA_MARGIN) {
         waterMask[idx] = 1;
       }
     }
@@ -4111,12 +4031,9 @@ function expandOceanMaskByElevation(
       const edgeT = clamp(1 - edgeDist / Math.max(1, edgeWidth), 0, 1);
       const seaMargin = edgeT * coastMarginBase;
       const localSea = seaLevelMap[nIdx] ?? seaLevel;
-      const baseline = Math.max(WATER_BASELINE_ELEV, localSea - EDGE_WATER_BASE_OFFSET);
-      const falloff = getEdgeFalloff(nx, ny, cols, rows, edgeWidth, state.seed);
       const elev = elevationMap[nIdx] ?? 0;
-      const coastElev = baseline + (elev - baseline) * falloff;
       const threshold = Math.max(seaLevel, localSea) + seaMargin;
-      if (coastElev <= threshold) {
+      if (elev <= threshold) {
         mask[nIdx] = 1;
         queue[tail] = nIdx;
         tail += 1;
@@ -4143,6 +4060,11 @@ type RoadSegmentTrace = {
   loop: boolean;
 };
 
+type ShortBridgeApproachComponent = {
+  tiles: number[];
+  connectorRoads: number[];
+};
+
 const ROAD_GRADE_TARGET_LIMIT = 0.085;
 const ROAD_GRADE_CHANGE_TARGET_LIMIT = 0.055;
 const ROAD_SHOULDER_BLEND_RADIUS = 2;
@@ -4154,6 +4076,8 @@ const ROAD_SHOULDER_MAX_FILL_NEAR = 0.028;
 const ROAD_SHOULDER_MAX_FILL_FAR = 0.014;
 const ROAD_SHOULDER_MAX_CUT_NEAR = 0.1;
 const ROAD_SHOULDER_MAX_CUT_FAR = 0.05;
+const SHORT_BRIDGE_APPROACH_MAX_COMPONENT_TILES = 2;
+const SHORT_BRIDGE_APPROACH_MAX_CONNECTOR_DISTANCE = 3.1;
 
 const isRoadLikeIndex = (state: WorldState, idx: number): boolean => {
   const type = state.tiles[idx]?.type;
@@ -4293,6 +4217,95 @@ const traceRoadSegment = (
   return { indices: segment, loop };
 };
 
+const collectShortBridgeApproachComponents = (state: WorldState): ShortBridgeApproachComponent[] => {
+  const total = state.grid.totalTiles;
+  const visited = new Uint8Array(total);
+  const components: ShortBridgeApproachComponent[] = [];
+  for (let idx = 0; idx < total; idx += 1) {
+    if (state.tileRoadBridge[idx] === 0 || visited[idx] > 0) {
+      continue;
+    }
+    const tiles: number[] = [];
+    const connectorRoads: number[] = [];
+    const connectorSeen = new Set<number>();
+    const queue = [idx];
+    visited[idx] = 1;
+    for (let head = 0; head < queue.length; head += 1) {
+      const currentIdx = queue[head]!;
+      tiles.push(currentIdx);
+      const x = currentIdx % state.grid.cols;
+      const y = Math.floor(currentIdx / state.grid.cols);
+      const mask = getRoadMaskAtIndex(state, currentIdx, false);
+      for (let i = 0; i < ROAD_EDGE_DIRS.length; i += 1) {
+        const dir = ROAD_EDGE_DIRS[i]!;
+        if ((mask & dir.bit) === 0) {
+          continue;
+        }
+        const nx = x + dir.dx;
+        const ny = y + dir.dy;
+        if (!inBounds(state.grid, nx, ny)) {
+          continue;
+        }
+        const neighborIdx = indexFor(state.grid, nx, ny);
+        if (state.tileRoadBridge[neighborIdx] > 0) {
+          if (visited[neighborIdx] === 0) {
+            visited[neighborIdx] = 1;
+            queue.push(neighborIdx);
+          }
+          continue;
+        }
+        if (!isLandRoadLikeIndex(state, neighborIdx) || connectorSeen.has(neighborIdx)) {
+          continue;
+        }
+        connectorSeen.add(neighborIdx);
+        connectorRoads.push(neighborIdx);
+      }
+    }
+    components.push({ tiles, connectorRoads });
+  }
+  return components;
+};
+
+const prepareShortBridgeApproaches = (state: WorldState): void => {
+  const components = collectShortBridgeApproachComponents(state);
+  for (let i = 0; i < components.length; i += 1) {
+    const component = components[i]!;
+    if (
+      component.tiles.length === 0 ||
+      component.tiles.length > SHORT_BRIDGE_APPROACH_MAX_COMPONENT_TILES ||
+      component.connectorRoads.length !== 2
+    ) {
+      continue;
+    }
+    const startRoadIdx = component.connectorRoads[0]!;
+    const endRoadIdx = component.connectorRoads[1]!;
+    const startX = startRoadIdx % state.grid.cols;
+    const startY = Math.floor(startRoadIdx / state.grid.cols);
+    const endX = endRoadIdx % state.grid.cols;
+    const endY = Math.floor(endRoadIdx / state.grid.cols);
+    if (Math.hypot(startX - endX, startY - endY) > SHORT_BRIDGE_APPROACH_MAX_CONNECTOR_DISTANCE) {
+      continue;
+    }
+    const startTile = state.tiles[startRoadIdx];
+    const endTile = state.tiles[endRoadIdx];
+    if (!startTile || !endTile || startTile.type === "water" || endTile.type === "water") {
+      continue;
+    }
+    const startMin = Math.max(0, startTile.elevation - ROAD_PROFILE_MAX_CUT);
+    const startMax = Math.min(1, startTile.elevation + ROAD_PROFILE_MAX_FILL);
+    const endMin = Math.max(0, endTile.elevation - ROAD_PROFILE_MAX_CUT);
+    const endMax = Math.min(1, endTile.elevation + ROAD_PROFILE_MAX_FILL);
+    const commonMin = Math.max(startMin, endMin);
+    const commonMax = Math.min(startMax, endMax);
+    if (commonMin > commonMax) {
+      continue;
+    }
+    const targetElevation = clamp((startTile.elevation + endTile.elevation) * 0.5, commonMin, commonMax);
+    startTile.elevation = targetElevation;
+    endTile.elevation = targetElevation;
+  }
+};
+
 const buildRoadSegmentProfile = (
   state: WorldState,
   indices: number[],
@@ -4417,6 +4430,7 @@ const buildRoadSegmentProfile = (
 
 function gradeRoadNetworkTerrain(state: WorldState, heightScaleMultiplier = 1): RoadSurfaceMetrics {
   const total = state.grid.totalTiles;
+  prepareShortBridgeApproaches(state);
   const originalElevations = new Float32Array(total);
   for (let i = 0; i < total; i += 1) {
     originalElevations[i] = state.tiles[i]?.elevation ?? 0;
@@ -5150,8 +5164,72 @@ async function generateMapLegacy(
   if (trackTerrainStats) {
     const mean = elevSum / Math.max(1, totalTiles);
     const waterShare = (waterCount / Math.max(1, totalTiles)) * 100;
+    const borderElevations: number[] = [];
+    const coastalAboveSea: number[] = [];
+    const coastalSlopes: number[] = [];
+    const interiorSlopes: number[] = [];
+    const summitElevations: number[] = [];
+    let landCount = 0;
+    for (let y = 0; y < state.grid.rows; y += 1) {
+      for (let x = 0; x < state.grid.cols; x += 1) {
+        const idx = indexFor(state.grid, x, y);
+        const tile = state.tiles[idx];
+        const elevation = tile.elevation;
+        const edgeDist = Math.min(x, y, state.grid.cols - 1 - x, state.grid.rows - 1 - y);
+        if (edgeDist <= 4) {
+          borderElevations.push(elevation);
+        }
+        if (tile.type !== "water") {
+          landCount += 1;
+          summitElevations.push(elevation);
+          if (edgeDist >= Math.max(6, Math.floor(Math.min(state.grid.cols, state.grid.rows) * 0.12))) {
+            interiorSlopes.push(slopeMap[idx] ?? 0);
+          }
+        }
+        if (tile.type === "water") {
+          continue;
+        }
+        let adjacentWater = false;
+        const neighbors = [
+          idx - 1,
+          idx + 1,
+          idx - state.grid.cols,
+          idx + state.grid.cols
+        ];
+        if (x === 0) {
+          neighbors[0] = idx;
+        }
+        if (x === state.grid.cols - 1) {
+          neighbors[1] = idx;
+        }
+        if (y === 0) {
+          neighbors[2] = idx;
+        }
+        if (y === state.grid.rows - 1) {
+          neighbors[3] = idx;
+        }
+        for (let n = 0; n < neighbors.length; n += 1) {
+          const nIdx = neighbors[n]!;
+          if (nIdx === idx) {
+            adjacentWater = true;
+            break;
+          }
+          if (state.tiles[nIdx]?.type === "water") {
+            adjacentWater = true;
+            break;
+          }
+        }
+        if (adjacentWater) {
+          coastalAboveSea.push(Math.max(0, elevation - seaLevelMap[idx]));
+          coastalSlopes.push(slopeMap[idx] ?? 0);
+        }
+      }
+    }
     console.log(
       `MapGen elevation: min=${elevMin.toFixed(3)} max=${elevMax.toFixed(3)} mean=${mean.toFixed(3)} water=${waterShare.toFixed(1)}%`
+    );
+    console.log(
+      `[terrainshape] archetype=${mapSettings.terrainArchetype} embayment=${mapSettings.embayment.toFixed(2)} anisotropy=${mapSettings.anisotropy.toFixed(2)} asymmetry=${mapSettings.asymmetry.toFixed(2)} ridgeAlignment=${mapSettings.ridgeAlignment.toFixed(2)} uplandDistribution=${mapSettings.uplandDistribution.toFixed(2)} land=${((landCount / Math.max(1, totalTiles)) * 100).toFixed(1)}% borderP90=${quantile(borderElevations, 0.9).toFixed(3)} coastAboveSeaP50=${quantile(coastalAboveSea, 0.5).toFixed(3)} coastSlopeP90=${quantile(coastalSlopes, 0.9).toFixed(3)} interiorSlopeP90=${quantile(interiorSlopes, 0.9).toFixed(3)} summitP95=${quantile(summitElevations, 0.95).toFixed(3)} summitP99=${quantile(summitElevations, 0.99).toFixed(3)}`
     );
   }
   if (debug) {
@@ -5279,7 +5357,12 @@ async function generateMapLegacy(
   }
   for (let i = 0; i < state.tiles.length; i += 1) {
     const tile = state.tiles[i];
-    if (tile.type === "water" && oceanMask[i] && riverMask[i] === 0) {
+    if (
+      tile.type === "water" &&
+      oceanMask[i] &&
+      riverMask[i] === 0 &&
+      (state.tileCoastClass[i] ?? COAST_CLASS_NONE) !== COAST_CLASS_SHELF_WATER
+    ) {
       tile.elevation = shapeOceanFloorAtSeaLevel(tile.elevation, seaLevelMap[i] ?? tile.elevation, rng.next());
     }
   }
@@ -5393,7 +5476,11 @@ const emitStageSnapshot = async (ctx: MapGenContext, phase: MapGenDebugPhase): P
     phase,
     elevations: Float32Array.from(ctx.elevationMap),
     tileTypes: buildTypeIdsFromState(ctx.state),
-    riverMask: ctx.riverMask ? Uint8Array.from(ctx.riverMask) : undefined
+    riverMask: ctx.riverMask ? Uint8Array.from(ctx.riverMask) : undefined,
+    oceanMask: ctx.oceanMask ? Uint8Array.from(ctx.oceanMask) : undefined,
+    seaLevel: ctx.seaLevelMap ? Float32Array.from(ctx.seaLevelMap) : undefined,
+    coastDistance: ctx.state.tileCoastDistance.length > 0 ? Uint16Array.from(ctx.state.tileCoastDistance) : undefined,
+    coastClass: ctx.state.tileCoastClass.length > 0 ? Uint8Array.from(ctx.state.tileCoastClass) : undefined
   });
   if (ctx.debug.waitForStep) {
     await ctx.debug.waitForStep();
@@ -5609,6 +5696,7 @@ export async function runHydrologyStage(ctx: MapGenContext): Promise<void> {
       await ctx.reportStage("Solving coastlines...", (y + 1) / state.grid.rows * 0.7);
     }
   }
+  persistSeaLevelMapToState(state, seaLevelMap);
 
   for (let i = 0; i < riverMask.length; i += 1) {
     if (riverMask[i] > 0) {
@@ -5658,6 +5746,11 @@ export async function runHydrologyStage(ctx: MapGenContext): Promise<void> {
   }
 
   ctx.oceanMask = oceanMask;
+  for (let i = 0; i < totalTiles; i += 1) {
+    state.tileOceanMask[i] = oceanMask[i] > 0 ? 1 : 0;
+    state.tileCoastDistance[i] = 0;
+    state.tileCoastClass[i] = COAST_CLASS_NONE;
+  }
   state.tileRiverMask = riverMask;
   await ctx.reportStage("Hydrology solved.", 1);
   await emitStageSnapshot(ctx, "hydro:solve");
@@ -5810,6 +5903,22 @@ export async function runShorelinePolishStage(ctx: MapGenContext): Promise<void>
   }
   const distToOcean = buildDistanceFromMask(polishedOceanMask, cols, rows);
   const distToLand = buildDistanceFromMask(landMask, cols, rows);
+  const shorelineBaseElevations = Float32Array.from(elevationMap);
+  const shorelineSeaLevelMap = Float32Array.from(seaLevelMap);
+  const shorelineSurfaceLevel = computeOceanLevel(shorelineBaseElevations, polishedOceanMask, riverMask);
+  if (shorelineSurfaceLevel !== null) {
+    // Hydrology establishes a shared flooded ocean surface. Shoreline polish should
+    // sculpt beaches/shelf against that surface near the coast, not against the
+    // lower edge-bias threshold field that was only used to seed ocean membership.
+    for (let i = 0; i < totalTiles; i += 1) {
+      if (riverMask[i] > 0) {
+        continue;
+      }
+      if (polishedOceanMask[i] > 0 || ((distToOcean[i] ?? 0) >= 1 && (distToOcean[i] ?? 0) <= COAST_BEACH_LAND_BAND)) {
+        shorelineSeaLevelMap[i] = shorelineSurfaceLevel;
+      }
+    }
+  }
   const reliefAt = (x: number, y: number): number => {
     let min = Number.POSITIVE_INFINITY;
     let max = Number.NEGATIVE_INFINITY;
@@ -5823,7 +5932,7 @@ export async function runShorelinePolishStage(ctx: MapGenContext): Promise<void>
         if (nx < 0 || nx >= cols) {
           continue;
         }
-        const value = elevationMap[ny * cols + nx] ?? 0;
+        const value = shorelineBaseElevations[ny * cols + nx] ?? 0;
         min = Math.min(min, value);
         max = Math.max(max, value);
       }
@@ -5838,22 +5947,24 @@ export async function runShorelinePolishStage(ctx: MapGenContext): Promise<void>
     const rowBase = y * cols;
     for (let x = 0; x < cols; x += 1) {
       const idx = rowBase + x;
-      const seaLevel = seaLevelMap[idx] ?? 0;
+      const seaLevel = shorelineSeaLevelMap[idx] ?? 0;
       const current = elevationMap[idx] ?? 0;
+      const baseCurrent = shorelineBaseElevations[idx] ?? current;
       if (riverMask[idx] > 0) {
         continue;
       }
       if (polishedOceanMask[idx] > 0) {
-        if (distToLand[idx] === 1) {
-          const deepened = Math.min(current - COAST_OCEAN_SHELF_DEEPEN, seaLevel - 0.002);
-          const nextElevation = clamp(deepened, 0, 1);
+        const dist = distToLand[idx] ?? 0;
+        if (dist >= 1 && dist <= COAST_BEACH_SHELF_BAND) {
+          const depth = getCoastBandValue(COAST_BEACH_WET_DEPTHS, dist);
+          const nextElevation = clamp(Math.min(current, seaLevel - depth), 0, Math.max(0, seaLevel - 0.001));
           elevationMap[idx] = nextElevation;
           state.tiles[idx].elevation = nextElevation;
         }
         continue;
       }
       const dist = distToOcean[idx];
-      if (dist !== 1 && dist !== 2) {
+      if (dist < 1 || dist > COAST_BEACH_LAND_BAND) {
         continue;
       }
       const slope = slopeMap[idx] ?? 0;
@@ -5861,19 +5972,18 @@ export async function runShorelinePolishStage(ctx: MapGenContext): Promise<void>
       const beachCandidate =
         slope <= COAST_BEACH_MAX_SLOPE &&
         relief <= COAST_BEACH_MAX_RELIEF &&
-        current - seaLevel <= COAST_BEACH_SCULPT_MAX_HEIGHT_ABOVE_SEA;
+        baseCurrent - seaLevel <= COAST_BEACH_SCULPT_MAX_HEIGHT_ABOVE_SEA;
       let nextElevation = current;
       if (beachCandidate) {
-        const target = seaLevel + (dist === 1 ? COAST_BEACH_NEAR_TARGET : COAST_BEACH_FAR_TARGET);
-        const blend = dist === 1 ? COAST_BEACH_NEAR_BLEND : COAST_BEACH_FAR_BLEND;
-        const maxDrop = dist === 1 ? COAST_BEACH_NEAR_MAX_DROP : COAST_BEACH_FAR_MAX_DROP;
-        const blended = current * (1 - blend) + target * blend;
-        nextElevation = clamp(Math.max(current - maxDrop, blended), 0, 1);
+        const target = seaLevel + getCoastBandValue(COAST_BEACH_DRY_HEIGHTS, dist);
+        nextElevation = clamp(Math.min(current, Math.max(target, seaLevel + COAST_MIN_LAND_ABOVE_SEA)), 0, 1);
       } else {
-        const minTarget = seaLevel + (dist === 1 ? COAST_CLIFF_NEAR_MIN : COAST_CLIFF_FAR_MIN);
-        const blend = dist === 1 ? COAST_CLIFF_NEAR_BLEND : COAST_CLIFF_FAR_BLEND;
-        const blended = current * (1 - blend) + minTarget * blend;
-        nextElevation = clamp(Math.max(current, blended, seaLevel + 0.02), 0, 1);
+        const minTarget = seaLevel + getCoastBandValue(COAST_CLIFF_MIN_HEIGHTS, dist);
+        nextElevation = clamp(Math.max(current, minTarget), 0, 1);
+      }
+      if (dist <= COAST_LAND_EASE_BAND) {
+        const easedMax = seaLevel + getCoastBandValue(COAST_LAND_EASE_MAX_HEIGHTS, dist);
+        nextElevation = Math.min(nextElevation, easedMax);
       }
       elevationMap[idx] = nextElevation;
       state.tiles[idx].elevation = nextElevation;
@@ -5885,7 +5995,7 @@ export async function runShorelinePolishStage(ctx: MapGenContext): Promise<void>
 
   polishedOceanMask = expandOceanMaskByLocalSeaLevel(
     elevationMap,
-    seaLevelMap,
+    shorelineSeaLevelMap,
     polishedOceanMask,
     riverMask,
     cols,
@@ -5897,7 +6007,7 @@ export async function runShorelinePolishStage(ctx: MapGenContext): Promise<void>
     if (riverMask[i] > 0 || polishedOceanMask[i] > 0) {
       continue;
     }
-    const sea = seaLevelMap[i] ?? 0;
+    const sea = shorelineSeaLevelMap[i] ?? 0;
     if ((elevationMap[i] ?? 0) <= sea + COAST_LOCAL_SEA_MARGIN) {
       const lifted = sea + COAST_MIN_LAND_ABOVE_SEA;
       elevationMap[i] = lifted;
@@ -5905,14 +6015,44 @@ export async function runShorelinePolishStage(ctx: MapGenContext): Promise<void>
     }
   }
 
+  const finalLandMask = new Uint8Array(totalTiles);
+  for (let i = 0; i < totalTiles; i += 1) {
+    if (!polishedOceanMask[i] && riverMask[i] === 0) {
+      finalLandMask[i] = 1;
+    }
+  }
+  const finalDistToOcean = buildDistanceFromMask(polishedOceanMask, cols, rows);
+  const finalDistToLand = buildDistanceFromMask(finalLandMask, cols, rows);
+  persistCoastMetadataToState(
+    state,
+    polishedOceanMask,
+    finalDistToOcean,
+    finalDistToLand,
+    slopeMap,
+    null,
+    shorelineSeaLevelMap
+  );
+
   for (let i = 0; i < totalTiles; i += 1) {
     if (riverMask[i] > 0 || polishedOceanMask[i] > 0) {
       state.tiles[i].type = "water";
-    } else {
-      state.tiles[i].type = "grass";
+      continue;
     }
+    const coastClass = state.tileCoastClass[i] ?? COAST_CLASS_NONE;
+    if (coastClass === COAST_CLASS_BEACH) {
+      state.tiles[i].type = "beach";
+      continue;
+    }
+    if (coastClass === COAST_CLASS_CLIFF) {
+      const seaLevel = shorelineSeaLevelMap[i] ?? 0;
+      state.tiles[i].type = classifyCoastDryTileType(slopeMap[i] ?? 0, state.tiles[i].elevation - seaLevel);
+      continue;
+    }
+    state.tiles[i].type = "grass";
   }
-  clampRiverMouthDepthsToSeaLevel(state, polishedOceanMask, riverMask, seaLevelMap);
+  ctx.seaLevelMap = shorelineSeaLevelMap;
+  persistSeaLevelMapToState(state, shorelineSeaLevelMap);
+  clampRiverMouthDepthsToSeaLevel(state, polishedOceanMask, riverMask, shorelineSeaLevelMap);
   ctx.oceanMask = polishedOceanMask;
   await ctx.reportStage("Shoreline polished.", 1);
   await emitStageSnapshot(ctx, "terrain:shoreline");
@@ -6196,7 +6336,12 @@ export async function runBiomeClassificationStage(ctx: MapGenContext): Promise<v
       tile.canopyCover = tile.canopy;
       tile.stemDensity = nextStemDensity[idx] ?? 0;
       const seaLevel = seaLevelMap[idx] ?? tile.elevation;
-      if (tile.type === "water" && oceanMask[idx] && riverMask[idx] === 0) {
+      if (
+        tile.type === "water" &&
+        oceanMask[idx] &&
+        riverMask[idx] === 0 &&
+        (state.tileCoastClass[idx] ?? COAST_CLASS_NONE) !== COAST_CLASS_SHELF_WATER
+      ) {
         tile.elevation = shapeOceanFloorAtSeaLevel(
           tile.elevation,
           seaLevel,
@@ -6268,7 +6413,6 @@ export async function runSettlementPlacementStage(ctx: MapGenContext): Promise<v
     diagonalPenalty: ctx.settings.road.diagonalPenalty,
     pruneRedundantDiagonals: ctx.settings.road.pruneRedundantDiagonals,
     bridgeTransitions: ctx.settings.road.bridgeTransitions,
-    layout: ctx.settings.townLayout,
     townDensity: ctx.settings.townDensity,
     bridgeAllowance: ctx.settings.bridgeAllowance,
     settlementSpacing: ctx.settings.settlementSpacing,

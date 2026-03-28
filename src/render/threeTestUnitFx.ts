@@ -677,7 +677,7 @@ export type WaterFxDebugSnapshot = {
 
 export const DEFAULT_WATER_FX_DEBUG_CONTROLS: WaterFxDebugControls = {
   streamBodyWidthScale: 1.71,
-  streamBodyOpacityScale: 0.15,
+  streamBodyOpacityScale: 0.25,
   coreRadiusScale: 1.06,
   mistRadiusScale: 0.96,
   impactRadiusScale: 1.15,

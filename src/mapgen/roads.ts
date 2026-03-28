@@ -31,6 +31,7 @@ export const ROAD_RIVER_PENALTY_DIST = 3;
 export const ROAD_RIVER_PENALTY_WEIGHT = 8;
 export const ROAD_TURN_PENALTY = 0.2;
 export const ROAD_DIAGONAL_PENALTY = 0.18;
+export const ROAD_EXISTING_SEGMENT_COST_MULTIPLIER = 0.3;
 const ROAD_SWITCHBACK_TURN_PENALTY = 0.04;
 const ROAD_SWITCHBACK_DIAGONAL_PENALTY = 0.04;
 export const ROAD_BRIDGE_STEP_COST = 24;
@@ -1020,7 +1021,8 @@ const runAStar = (
     const dx = Math.abs(x - end.x);
     const dy = Math.abs(y - end.y);
     const diagonal = Math.min(dx, dy);
-    return dx + dy + (Math.SQRT2 - 2) * diagonal;
+    const octile = dx + dy + (Math.SQRT2 - 2) * diagonal;
+    return octile * Math.min(1, ROAD_EXISTING_SEGMENT_COST_MULTIPLIER);
   };
 
   const startWater = state.tiles[startIdx].type === "water" && state.tileRoadBridge[startIdx] === 0 ? 1 : 0;
@@ -1055,6 +1057,9 @@ const runAStar = (
         continue;
       }
       const nIdx = indexFor(state.grid, nx, ny);
+      if (closed[nIdx]) {
+        continue;
+      }
       const neighborIsGoal = end ? nIdx === endIdx : false;
       if (!canTraverseTileIndex(state, nIdx, neighborIsGoal, allowBridge, options, riverDistance)) {
         continue;
@@ -1141,6 +1146,9 @@ const runAStar = (
           stepCost += riverPenaltyRatio * options.riverPenaltyWeight;
         }
       }
+      if (isRoadLikeIndex(state, nIdx)) {
+        stepCost *= ROAD_EXISTING_SEGMENT_COST_MULTIPLIER;
+      }
       if (prev[currentIdx] !== currentIdx && (stepDx[currentIdx] !== dir.x || stepDy[currentIdx] !== dir.y)) {
         let turnPenalty = options.turnPenalty;
         if (!currentIsWater && !nextIsWater && hasPreviousLandStep) {
@@ -1184,7 +1192,12 @@ const runAStar = (
 
   const pathIndices: number[] = [];
   let current = goalIdx;
+  const pathGuard = new Uint8Array(total);
   while (current !== startIdx) {
+    if (pathGuard[current] > 0) {
+      return null;
+    }
+    pathGuard[current] = 1;
     pathIndices.push(current);
     current = prev[current];
     if (current < 0) {

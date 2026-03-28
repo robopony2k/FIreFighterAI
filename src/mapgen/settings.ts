@@ -4,8 +4,6 @@ export type RoadTopologyMode = "eight_dir";
 
 export type TerrainArchetypeMode = "MASSIF" | "LONG_SPINE" | "TWIN_BAY" | "SHELF";
 
-export type TownLayoutMode = "coastal_ring" | "bridge_chain" | "inland_valley" | "hub_spokes";
-
 export type RoadGenSettings = {
   topology: RoadTopologyMode;
   diagonalPenalty: number;
@@ -41,7 +39,6 @@ export type MapGenSettings = {
   biomeClassifierMode: BiomeClassifierMode;
   road: RoadGenSettings;
   terrainArchetype: TerrainArchetypeMode;
-  townLayout: TownLayoutMode;
   relief: number;
   ruggedness: number;
   coastComplexity: number;
@@ -52,6 +49,11 @@ export type MapGenSettings = {
   bridgeAllowance: number;
   interiorRise: number;
   maxHeight: number;
+  embayment: number;
+  anisotropy: number;
+  asymmetry: number;
+  ridgeAlignment: number;
+  uplandDistribution: number;
   islandCompactness: number;
   ridgeFrequency: number;
   basinStrength: number;
@@ -98,7 +100,6 @@ export const DEFAULT_MAP_GEN_SETTINGS: MapGenSettings = {
   biomeClassifierMode: "seedSpread",
   road: { ...DEFAULT_ROAD_GEN_SETTINGS },
   terrainArchetype: "MASSIF",
-  townLayout: "coastal_ring",
   relief: 0.7,
   ruggedness: 0.55,
   coastComplexity: 0.42,
@@ -109,6 +110,11 @@ export const DEFAULT_MAP_GEN_SETTINGS: MapGenSettings = {
   bridgeAllowance: 0.18,
   interiorRise: 0.78,
   maxHeight: 0.6,
+  embayment: 0.28,
+  anisotropy: 0.32,
+  asymmetry: 0.46,
+  ridgeAlignment: 0.34,
+  uplandDistribution: 0.42,
   islandCompactness: 0.72,
   ridgeFrequency: 0.34,
   basinStrength: 0.3,

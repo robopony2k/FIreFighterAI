@@ -12,11 +12,14 @@ import {
 
 export type TerrainArchetypeId = IslandArchetypeId;
 
-export type TownLayoutId = "auto" | "coastal_ring" | "bridge_chain" | "inland_valley" | "hub_spokes";
-
 export type TerrainAdvancedOverrides = {
   interiorRise?: number;
   maxHeight?: number;
+  embayment?: number;
+  anisotropy?: number;
+  asymmetry?: number;
+  ridgeAlignment?: number;
+  uplandDistribution?: number;
   islandCompactness?: number;
   ridgeFrequency?: number;
   basinStrength?: number;
@@ -30,7 +33,6 @@ export type TerrainAdvancedOverrides = {
 
 export type TerrainRecipe = {
   archetype: TerrainArchetypeId;
-  townLayout: TownLayoutId;
   mapSize: MapSizeId;
   relief: number;
   ruggedness: number;
@@ -45,7 +47,6 @@ export type TerrainRecipe = {
 
 export type ResolvedTerrainProfile = {
   recipe: TerrainRecipe;
-  resolvedTownLayout: Exclude<TownLayoutId, "auto">;
   settings: MapGenSettings;
 };
 
@@ -53,7 +54,6 @@ export type TerrainSource = TerrainRecipe | ResolvedTerrainProfile | MapGenSetti
 
 const MAP_SIZE_IDS = new Set<MapSizeId>(Object.keys(MAP_SIZE_PRESETS) as MapSizeId[]);
 const TERRAIN_ARCHETYPE_IDS = new Set<TerrainArchetypeId>(ISLAND_ARCHETYPE_IDS);
-const TOWN_LAYOUT_IDS = new Set<TownLayoutId>(["auto", "coastal_ring", "bridge_chain", "inland_valley", "hub_spokes"]);
 
 const clamp01 = (value: number): number => Math.max(0, Math.min(1, value));
 const clamp = (value: number, min: number, max: number): number => Math.max(min, Math.min(max, value));
@@ -114,6 +114,11 @@ const parseBooleanOverride = (value: unknown, fallback: boolean): boolean => {
 const DEFAULT_ADVANCED_OVERRIDES: Required<TerrainAdvancedOverrides> = {
   interiorRise: 0.62,
   maxHeight: 0.58,
+  embayment: 0.32,
+  anisotropy: 0.4,
+  asymmetry: 0.46,
+  ridgeAlignment: 0.42,
+  uplandDistribution: 0.42,
   islandCompactness: 0.6,
   ridgeFrequency: 0.48,
   basinStrength: 0.42,
@@ -137,7 +142,6 @@ const ARCHETYPE_PRESETS: Record<
     townDensity: number;
     bridgeAllowance: number;
     advanced: Required<TerrainAdvancedOverrides>;
-    layout: Exclude<TownLayoutId, "auto">;
   }
 > = {
   MASSIF: {
@@ -150,19 +154,23 @@ const ARCHETYPE_PRESETS: Record<
     townDensity: 0.48,
     bridgeAllowance: 0.18,
     advanced: {
-      interiorRise: 0.78,
-      maxHeight: 0.62,
+      interiorRise: ISLAND_ARCHETYPE_DEFINITIONS.MASSIF.interiorRise,
+      maxHeight: ISLAND_ARCHETYPE_DEFINITIONS.MASSIF.maxHeight,
+      embayment: ISLAND_ARCHETYPE_DEFINITIONS.MASSIF.embayment,
+      anisotropy: ISLAND_ARCHETYPE_DEFINITIONS.MASSIF.anisotropy,
+      asymmetry: ISLAND_ARCHETYPE_DEFINITIONS.MASSIF.asymmetry,
+      ridgeAlignment: ISLAND_ARCHETYPE_DEFINITIONS.MASSIF.ridgeAlignment,
+      uplandDistribution: ISLAND_ARCHETYPE_DEFINITIONS.MASSIF.uplandDistribution,
       islandCompactness: 0.72,
-      ridgeFrequency: 0.34,
-      basinStrength: 0.3,
-      coastalShelfWidth: 0.46,
+      ridgeFrequency: ISLAND_ARCHETYPE_DEFINITIONS.MASSIF.ridgeFrequency,
+      basinStrength: ISLAND_ARCHETYPE_DEFINITIONS.MASSIF.basinStrength,
+      coastalShelfWidth: ISLAND_ARCHETYPE_DEFINITIONS.MASSIF.coastalShelfWidth,
       skipCarving: false,
       riverBudget: 0.44,
       settlementSpacing: 0.62,
       roadStrictness: 0.56,
       forestPatchiness: 0.42
-    },
-    layout: ISLAND_ARCHETYPE_DEFINITIONS.MASSIF.preferredTownLayout
+    }
   },
   LONG_SPINE: {
     relief: 0.72,
@@ -174,19 +182,23 @@ const ARCHETYPE_PRESETS: Record<
     townDensity: 0.5,
     bridgeAllowance: 0.3,
     advanced: {
-      interiorRise: 0.7,
-      maxHeight: 0.72,
+      interiorRise: ISLAND_ARCHETYPE_DEFINITIONS.LONG_SPINE.interiorRise,
+      maxHeight: ISLAND_ARCHETYPE_DEFINITIONS.LONG_SPINE.maxHeight,
+      embayment: ISLAND_ARCHETYPE_DEFINITIONS.LONG_SPINE.embayment,
+      anisotropy: ISLAND_ARCHETYPE_DEFINITIONS.LONG_SPINE.anisotropy,
+      asymmetry: ISLAND_ARCHETYPE_DEFINITIONS.LONG_SPINE.asymmetry,
+      ridgeAlignment: ISLAND_ARCHETYPE_DEFINITIONS.LONG_SPINE.ridgeAlignment,
+      uplandDistribution: ISLAND_ARCHETYPE_DEFINITIONS.LONG_SPINE.uplandDistribution,
       islandCompactness: 0.6,
-      ridgeFrequency: 0.82,
-      basinStrength: 0.4,
-      coastalShelfWidth: 0.38,
+      ridgeFrequency: ISLAND_ARCHETYPE_DEFINITIONS.LONG_SPINE.ridgeFrequency,
+      basinStrength: ISLAND_ARCHETYPE_DEFINITIONS.LONG_SPINE.basinStrength,
+      coastalShelfWidth: ISLAND_ARCHETYPE_DEFINITIONS.LONG_SPINE.coastalShelfWidth,
       skipCarving: false,
       riverBudget: 0.58,
       settlementSpacing: 0.6,
       roadStrictness: 0.56,
       forestPatchiness: 0.5
-    },
-    layout: ISLAND_ARCHETYPE_DEFINITIONS.LONG_SPINE.preferredTownLayout
+    }
   },
   TWIN_BAY: {
     relief: 0.62,
@@ -198,19 +210,23 @@ const ARCHETYPE_PRESETS: Record<
     townDensity: 0.52,
     bridgeAllowance: 0.24,
     advanced: {
-      interiorRise: 0.64,
-      maxHeight: 0.56,
+      interiorRise: ISLAND_ARCHETYPE_DEFINITIONS.TWIN_BAY.interiorRise,
+      maxHeight: ISLAND_ARCHETYPE_DEFINITIONS.TWIN_BAY.maxHeight,
+      embayment: ISLAND_ARCHETYPE_DEFINITIONS.TWIN_BAY.embayment,
+      anisotropy: ISLAND_ARCHETYPE_DEFINITIONS.TWIN_BAY.anisotropy,
+      asymmetry: ISLAND_ARCHETYPE_DEFINITIONS.TWIN_BAY.asymmetry,
+      ridgeAlignment: ISLAND_ARCHETYPE_DEFINITIONS.TWIN_BAY.ridgeAlignment,
+      uplandDistribution: ISLAND_ARCHETYPE_DEFINITIONS.TWIN_BAY.uplandDistribution,
       islandCompactness: 0.62,
-      ridgeFrequency: 0.46,
-      basinStrength: 0.34,
-      coastalShelfWidth: 0.4,
+      ridgeFrequency: ISLAND_ARCHETYPE_DEFINITIONS.TWIN_BAY.ridgeFrequency,
+      basinStrength: ISLAND_ARCHETYPE_DEFINITIONS.TWIN_BAY.basinStrength,
+      coastalShelfWidth: ISLAND_ARCHETYPE_DEFINITIONS.TWIN_BAY.coastalShelfWidth,
       skipCarving: false,
       riverBudget: 0.52,
       settlementSpacing: 0.58,
       roadStrictness: 0.52,
       forestPatchiness: 0.48
-    },
-    layout: ISLAND_ARCHETYPE_DEFINITIONS.TWIN_BAY.preferredTownLayout
+    }
   },
   SHELF: {
     relief: 0.44,
@@ -222,19 +238,23 @@ const ARCHETYPE_PRESETS: Record<
     townDensity: 0.54,
     bridgeAllowance: 0.12,
     advanced: {
-      interiorRise: 0.38,
-      maxHeight: 0.4,
+      interiorRise: ISLAND_ARCHETYPE_DEFINITIONS.SHELF.interiorRise,
+      maxHeight: ISLAND_ARCHETYPE_DEFINITIONS.SHELF.maxHeight,
+      embayment: ISLAND_ARCHETYPE_DEFINITIONS.SHELF.embayment,
+      anisotropy: ISLAND_ARCHETYPE_DEFINITIONS.SHELF.anisotropy,
+      asymmetry: ISLAND_ARCHETYPE_DEFINITIONS.SHELF.asymmetry,
+      ridgeAlignment: ISLAND_ARCHETYPE_DEFINITIONS.SHELF.ridgeAlignment,
+      uplandDistribution: ISLAND_ARCHETYPE_DEFINITIONS.SHELF.uplandDistribution,
       islandCompactness: 0.78,
-      ridgeFrequency: 0.18,
-      basinStrength: 0.24,
-      coastalShelfWidth: 0.72,
+      ridgeFrequency: ISLAND_ARCHETYPE_DEFINITIONS.SHELF.ridgeFrequency,
+      basinStrength: ISLAND_ARCHETYPE_DEFINITIONS.SHELF.basinStrength,
+      coastalShelfWidth: ISLAND_ARCHETYPE_DEFINITIONS.SHELF.coastalShelfWidth,
       skipCarving: false,
       riverBudget: 0.28,
       settlementSpacing: 0.56,
       roadStrictness: 0.54,
       forestPatchiness: 0.54
-    },
-    layout: ISLAND_ARCHETYPE_DEFINITIONS.SHELF.preferredTownLayout
+    }
   }
 };
 
@@ -245,7 +265,6 @@ export const createDefaultTerrainRecipe = (
   const preset = ARCHETYPE_PRESETS[archetype];
   return {
     archetype,
-    townLayout: "auto",
     mapSize,
     relief: preset.relief,
     ruggedness: preset.ruggedness,
@@ -270,7 +289,6 @@ export const cloneTerrainRecipe = (recipe?: Partial<TerrainRecipe>): TerrainReci
   const sourceAdvanced = isRecord(recipe?.advancedOverrides) ? recipe.advancedOverrides : {};
   return {
     archetype,
-    townLayout: TOWN_LAYOUT_IDS.has(recipe?.townLayout as TownLayoutId) ? (recipe?.townLayout as TownLayoutId) : defaults.townLayout,
     mapSize: defaults.mapSize,
     relief: clampOverride(recipe?.relief, defaults.relief),
     ruggedness: clampOverride(recipe?.ruggedness, defaults.ruggedness),
@@ -283,6 +301,17 @@ export const cloneTerrainRecipe = (recipe?: Partial<TerrainRecipe>): TerrainReci
     advancedOverrides: {
       interiorRise: clampOverride(sourceAdvanced.interiorRise, defaults.advancedOverrides?.interiorRise ?? DEFAULT_ADVANCED_OVERRIDES.interiorRise),
       maxHeight: clampOverride(sourceAdvanced.maxHeight, defaults.advancedOverrides?.maxHeight ?? DEFAULT_ADVANCED_OVERRIDES.maxHeight),
+      embayment: clampOverride(sourceAdvanced.embayment, defaults.advancedOverrides?.embayment ?? DEFAULT_ADVANCED_OVERRIDES.embayment),
+      anisotropy: clampOverride(sourceAdvanced.anisotropy, defaults.advancedOverrides?.anisotropy ?? DEFAULT_ADVANCED_OVERRIDES.anisotropy),
+      asymmetry: clampOverride(sourceAdvanced.asymmetry, defaults.advancedOverrides?.asymmetry ?? DEFAULT_ADVANCED_OVERRIDES.asymmetry),
+      ridgeAlignment: clampOverride(
+        sourceAdvanced.ridgeAlignment,
+        defaults.advancedOverrides?.ridgeAlignment ?? DEFAULT_ADVANCED_OVERRIDES.ridgeAlignment
+      ),
+      uplandDistribution: clampOverride(
+        sourceAdvanced.uplandDistribution,
+        defaults.advancedOverrides?.uplandDistribution ?? DEFAULT_ADVANCED_OVERRIDES.uplandDistribution
+      ),
       islandCompactness: clampOverride(
         sourceAdvanced.islandCompactness,
         defaults.advancedOverrides?.islandCompactness ?? DEFAULT_ADVANCED_OVERRIDES.islandCompactness
@@ -333,7 +362,6 @@ export const sanitizeTerrainRecipe = (value: unknown): TerrainRecipe => {
 export const terrainRecipeEqual = (a: TerrainRecipe, b: TerrainRecipe): boolean => {
   if (
     a.archetype !== b.archetype ||
-    a.townLayout !== b.townLayout ||
     a.mapSize !== b.mapSize ||
     Math.abs(a.relief - b.relief) > 1e-6 ||
     Math.abs(a.ruggedness - b.ruggedness) > 1e-6 ||
@@ -351,6 +379,11 @@ export const terrainRecipeEqual = (a: TerrainRecipe, b: TerrainRecipe): boolean 
   return (
     Math.abs((aAdvanced.interiorRise ?? 0) - (bAdvanced.interiorRise ?? 0)) <= 1e-6 &&
     Math.abs((aAdvanced.maxHeight ?? 0) - (bAdvanced.maxHeight ?? 0)) <= 1e-6 &&
+    Math.abs((aAdvanced.embayment ?? 0) - (bAdvanced.embayment ?? 0)) <= 1e-6 &&
+    Math.abs((aAdvanced.anisotropy ?? 0) - (bAdvanced.anisotropy ?? 0)) <= 1e-6 &&
+    Math.abs((aAdvanced.asymmetry ?? 0) - (bAdvanced.asymmetry ?? 0)) <= 1e-6 &&
+    Math.abs((aAdvanced.ridgeAlignment ?? 0) - (bAdvanced.ridgeAlignment ?? 0)) <= 1e-6 &&
+    Math.abs((aAdvanced.uplandDistribution ?? 0) - (bAdvanced.uplandDistribution ?? 0)) <= 1e-6 &&
     Math.abs((aAdvanced.islandCompactness ?? 0) - (bAdvanced.islandCompactness ?? 0)) <= 1e-6 &&
     Math.abs((aAdvanced.ridgeFrequency ?? 0) - (bAdvanced.ridgeFrequency ?? 0)) <= 1e-6 &&
     Math.abs((aAdvanced.basinStrength ?? 0) - (bAdvanced.basinStrength ?? 0)) <= 1e-6 &&
@@ -368,15 +401,17 @@ export const mapSizeIdFromDimensions = (size: number): MapSizeId => {
   return exact?.[0] ?? "colossal";
 };
 
-const resolveAutoTownLayout = (archetype: TerrainArchetypeId): Exclude<TownLayoutId, "auto"> =>
-  ARCHETYPE_PRESETS[archetype].layout;
-
 const resolveAdvancedOverrides = (recipe: TerrainRecipe): Required<TerrainAdvancedOverrides> => {
   const preset = ARCHETYPE_PRESETS[recipe.archetype].advanced;
   const advanced = recipe.advancedOverrides ?? {};
   return {
     interiorRise: clampOverride(advanced.interiorRise, preset.interiorRise),
     maxHeight: clampOverride(advanced.maxHeight, preset.maxHeight),
+    embayment: clampOverride(advanced.embayment, preset.embayment),
+    anisotropy: clampOverride(advanced.anisotropy, preset.anisotropy),
+    asymmetry: clampOverride(advanced.asymmetry, preset.asymmetry),
+    ridgeAlignment: clampOverride(advanced.ridgeAlignment, preset.ridgeAlignment),
+    uplandDistribution: clampOverride(advanced.uplandDistribution, preset.uplandDistribution),
     islandCompactness: clampOverride(advanced.islandCompactness, preset.islandCompactness),
     ridgeFrequency: clampOverride(advanced.ridgeFrequency, preset.ridgeFrequency),
     basinStrength: clampOverride(advanced.basinStrength, preset.basinStrength),
@@ -392,8 +427,6 @@ const resolveAdvancedOverrides = (recipe: TerrainRecipe): Required<TerrainAdvanc
 export const compileTerrainRecipe = (recipeInput: TerrainRecipe): ResolvedTerrainProfile => {
   const recipe = cloneTerrainRecipe(recipeInput);
   const advanced = resolveAdvancedOverrides(recipe);
-  const preset = ARCHETYPE_PRESETS[recipe.archetype];
-  const resolvedTownLayout = recipe.townLayout === "auto" ? resolveAutoTownLayout(recipe.archetype) : recipe.townLayout;
   const mapSizeTiles = MAP_SIZE_PRESETS[recipe.mapSize];
   const sizeScale = Math.sqrt(mapSizeTiles / MAP_SIZE_PRESETS.colossal);
   const relief = clamp01(recipe.relief);
@@ -406,16 +439,21 @@ export const compileTerrainRecipe = (recipeInput: TerrainRecipe): ResolvedTerrai
   const bridgeAllowance = clamp01(recipe.bridgeAllowance);
   const reliefCurve = Math.pow(relief, 1.35);
   const maxHeight = clamp01(advanced.maxHeight);
+  const embayment = clamp01(advanced.embayment);
+  const anisotropy = clamp01(advanced.anisotropy);
+  const asymmetry = clamp01(advanced.asymmetry);
+  const ridgeAlignment = clamp01(advanced.ridgeAlignment);
+  const uplandDistribution = clamp01(advanced.uplandDistribution);
   const heightScaleMultiplier = computeTerrainHeightScaleMultiplier(maxHeight);
   const normalizedHeightPressure = computeNormalizedHeightPressure(maxHeight);
   const valleyDepthScale = mix(0.74, 1, reliefCurve);
 
   const mountainScale =
     recipe.archetype === "SHELF"
-      ? mix(0.74, 0.98, 1 - advanced.islandCompactness)
+      ? mix(0.72, 0.96, 1 - advanced.islandCompactness)
       : recipe.archetype === "LONG_SPINE"
-        ? mix(0.94, 1.18, 1 - advanced.islandCompactness)
-        : mix(0.86, 1.34, 1 - advanced.islandCompactness);
+        ? mix(0.92, 1.12, mix(1 - advanced.islandCompactness, anisotropy, 0.55))
+        : mix(0.84, 1.18, mix(1 - advanced.islandCompactness, uplandDistribution, 0.35));
 
   const riverBudget = clamp01(mix(advanced.riverBudget, riverIntensity, 0.35));
   const nominalRiverCount = Math.round(mix(1, 7, riverBudget) * Math.max(0.75, sizeScale));
@@ -435,12 +473,17 @@ export const compileTerrainRecipe = (recipeInput: TerrainRecipe): ResolvedTerrai
     microScaleM: mix(32, 58, ruggedness),
     heightScaleMultiplier,
     elevationScale:
-      mix(0.9, 1.34, reliefCurve)
+      mix(0.84, 1.18, reliefCurve)
       * normalizedHeightPressure
-      * mix(0.92, 1.16, advanced.interiorRise),
-    elevationExponent: mix(0.94, 1.14, Math.pow(relief, 1.08)),
+      * mix(0.9, 1.14, advanced.interiorRise)
+      * mix(0.94, 1.06, uplandDistribution),
+    elevationExponent: mix(0.9, 1.06, Math.pow(relief, 1.04)),
     mountainScale,
-    ridgeStrength: mix(0.04, 0.28, clamp01(ruggedness * 0.6 + advanced.ridgeFrequency * 0.4)),
+    ridgeStrength: mix(
+      0.03,
+      0.22,
+      clamp01(ruggedness * 0.42 + advanced.ridgeFrequency * 0.22 + ridgeAlignment * 0.36)
+    ),
     valleyDepth:
       mix(0.7, 2.15, clamp01(riverIntensity * 0.45 + ruggedness * 0.2 + advanced.basinStrength * 0.35))
       * valleyDepthScale,
@@ -467,7 +510,6 @@ export const compileTerrainRecipe = (recipeInput: TerrainRecipe): ResolvedTerrai
       bridgeTransitions: bridgeAllowance >= 0.14
     },
     terrainArchetype: recipe.archetype,
-    townLayout: resolvedTownLayout,
     relief,
     ruggedness,
     coastComplexity,
@@ -478,6 +520,11 @@ export const compileTerrainRecipe = (recipeInput: TerrainRecipe): ResolvedTerrai
     bridgeAllowance,
     interiorRise: advanced.interiorRise,
     maxHeight,
+    embayment,
+    anisotropy,
+    asymmetry,
+    ridgeAlignment,
+    uplandDistribution,
     islandCompactness: advanced.islandCompactness,
     ridgeFrequency: advanced.ridgeFrequency,
     basinStrength: advanced.basinStrength,
@@ -491,7 +538,6 @@ export const compileTerrainRecipe = (recipeInput: TerrainRecipe): ResolvedTerrai
 
   return {
     recipe,
-    resolvedTownLayout,
     settings
   };
 };
@@ -499,8 +545,7 @@ export const compileTerrainRecipe = (recipeInput: TerrainRecipe): ResolvedTerrai
 export const isResolvedTerrainProfile = (value: unknown): value is ResolvedTerrainProfile =>
   isRecord(value)
   && isRecord(value.settings)
-  && isRecord(value.recipe)
-  && typeof value.resolvedTownLayout === "string";
+  && isRecord(value.recipe);
 
 const inferRecipeFromSettings = (settingsInput: Partial<MapGenSettings>, mapSize: MapSizeId): TerrainRecipe => {
   const settings = {
@@ -516,7 +561,6 @@ const inferRecipeFromSettings = (settingsInput: Partial<MapGenSettings>, mapSize
     : "MASSIF";
   return cloneTerrainRecipe({
     archetype,
-    townLayout: TOWN_LAYOUT_IDS.has(settings.townLayout) ? settings.townLayout : "auto",
     mapSize,
     relief: clamp01((settings.relief ?? ((settings.elevationScale - 0.88) / Math.max(0.0001, 1.58 - 0.88)))),
     ruggedness: clamp01(settings.ruggedness ?? (settings.ridgeStrength / 0.24)),
@@ -531,6 +575,11 @@ const inferRecipeFromSettings = (settingsInput: Partial<MapGenSettings>, mapSize
     advancedOverrides: {
       interiorRise: clamp01(settings.interiorRise ?? DEFAULT_ADVANCED_OVERRIDES.interiorRise),
       maxHeight: clamp01(settings.maxHeight ?? inferMaxHeightFromScaleMultiplier(settings.heightScaleMultiplier)),
+      embayment: clamp01(settings.embayment ?? DEFAULT_ADVANCED_OVERRIDES.embayment),
+      anisotropy: clamp01(settings.anisotropy ?? DEFAULT_ADVANCED_OVERRIDES.anisotropy),
+      asymmetry: clamp01(settings.asymmetry ?? DEFAULT_ADVANCED_OVERRIDES.asymmetry),
+      ridgeAlignment: clamp01(settings.ridgeAlignment ?? DEFAULT_ADVANCED_OVERRIDES.ridgeAlignment),
+      uplandDistribution: clamp01(settings.uplandDistribution ?? DEFAULT_ADVANCED_OVERRIDES.uplandDistribution),
       islandCompactness: clamp01(settings.islandCompactness ?? DEFAULT_ADVANCED_OVERRIDES.islandCompactness),
       ridgeFrequency: clamp01(settings.ridgeFrequency ?? DEFAULT_ADVANCED_OVERRIDES.ridgeFrequency),
       basinStrength: clamp01(settings.basinStrength ?? DEFAULT_ADVANCED_OVERRIDES.basinStrength),
@@ -551,7 +600,6 @@ export const resolveTerrainProfile = (
   if (isResolvedTerrainProfile(source)) {
     return {
       recipe: cloneTerrainRecipe(source.recipe),
-      resolvedTownLayout: source.resolvedTownLayout,
       settings: {
         ...DEFAULT_MAP_GEN_SETTINGS,
         ...source.settings,

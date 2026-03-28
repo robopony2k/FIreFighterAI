@@ -10,7 +10,12 @@ import {
   loadTreeAssets
 } from "./threeTestAssets.js";
 import { createSeasonalSkyDome } from "./seasonalSky.js";
-import { buildTerrainMesh, type TerrainSample } from "./threeTestTerrain.js";
+import {
+  buildTerrainMesh,
+  type TerrainBridgeDebug,
+  type TerrainBridgeSpanDebug,
+  type TerrainSample
+} from "./threeTestTerrain.js";
 import { ThreeTestWaterSystem } from "./threeTestWater.js";
 
 export type TerrainPreviewAssetProgress = {
@@ -24,12 +29,18 @@ export type TerrainPreviewSetTerrainOptions = {
   recenter?: boolean;
 };
 
+export type TerrainPreviewBridgeSelection = {
+  selectedSpan: TerrainBridgeSpanDebug | null;
+  bridgeDebug: TerrainBridgeDebug | null;
+};
+
 export type TerrainPreviewController = {
   prepareAssets: (onProgress?: (progress: TerrainPreviewAssetProgress) => void) => Promise<void>;
   start: () => void;
   stop: () => void;
   resize: () => void;
   setTerrain: (sample: TerrainSample, options?: TerrainPreviewSetTerrainOptions) => void;
+  setBridgeSelectionListener: (listener: ((selection: TerrainPreviewBridgeSelection) => void) | null) => void;
   resetView: () => void;
   dispose: () => void;
 };
@@ -166,9 +177,64 @@ export const createTerrainPreviewController = (canvas: HTMLCanvasElement): Terra
 
   let terrainMesh: THREE.Mesh | null = null;
   let lastTerrainFrame: TerrainPreviewFrame | null = null;
+  let bridgeDebug: TerrainBridgeDebug | null = null;
+  let selectedBridgeSpan: TerrainBridgeSpanDebug | null = null;
+  let bridgeSelectionListener: ((selection: TerrainPreviewBridgeSelection) => void) | null = null;
   let running = false;
   let rafId = 0;
   let lastFrameTime = performance.now();
+  const raycaster = new THREE.Raycaster();
+  const pointerNdc = new THREE.Vector2();
+
+  const emitBridgeSelection = (): void => {
+    bridgeSelectionListener?.({
+      selectedSpan: selectedBridgeSpan,
+      bridgeDebug
+    });
+  };
+
+  const setBridgeSelection = (selection: TerrainBridgeSpanDebug | null): void => {
+    selectedBridgeSpan = selection;
+    emitBridgeSelection();
+  };
+
+  const resolveBridgeSpanDebug = (object: THREE.Object3D | null): TerrainBridgeSpanDebug | null => {
+    let current: THREE.Object3D | null = object;
+    while (current) {
+      const debug = current.userData.bridgeSpanDebug as TerrainBridgeSpanDebug | undefined;
+      if (debug) {
+        return debug;
+      }
+      current = current.parent;
+    }
+    return null;
+  };
+
+  const pickBridgeSpan = (clientX: number, clientY: number): TerrainBridgeSpanDebug | null => {
+    if (!terrainMesh) {
+      return null;
+    }
+    const rect = canvas.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) {
+      return null;
+    }
+    pointerNdc.x = ((clientX - rect.left) / rect.width) * 2 - 1;
+    pointerNdc.y = -(((clientY - rect.top) / rect.height) * 2 - 1);
+    raycaster.setFromCamera(pointerNdc, camera);
+    const hits = raycaster.intersectObject(terrainMesh, true);
+    for (let i = 0; i < hits.length; i += 1) {
+      const debug = resolveBridgeSpanDebug(hits[i]?.object ?? null);
+      if (debug) {
+        return debug;
+      }
+    }
+    return null;
+  };
+
+  const handleCanvasClick = (event: MouseEvent): void => {
+    setBridgeSelection(pickBridgeSpan(event.clientX, event.clientY));
+  };
+  canvas.addEventListener("click", handleCanvasClick);
 
   const syncCameraForTerrain = (frame: TerrainPreviewFrame): void => {
     const verticalFov = THREE.MathUtils.degToRad(camera.fov);
@@ -276,6 +342,9 @@ export const createTerrainPreviewController = (canvas: HTMLCanvasElement): Terra
     disposeTerrainMesh(terrainMesh, scene);
     terrainMesh = null;
     waterSystem.clear();
+    bridgeDebug = null;
+    selectedBridgeSpan = null;
+    emitBridgeSelection();
     if (sample.cols <= 1 || sample.rows <= 1 || sample.elevations.length === 0) {
       lastTerrainFrame = null;
       return;
@@ -286,6 +355,8 @@ export const createTerrainPreviewController = (canvas: HTMLCanvasElement): Terra
       getHouseAssetsCache(),
       getFirestationAssetCache()
     );
+    bridgeDebug = (mesh.userData.bridgeDebug as TerrainBridgeDebug | undefined) ?? null;
+    emitBridgeSelection();
     terrainMesh = mesh;
     scene.add(mesh);
     const terrainBounds = new THREE.Box3().setFromObject(mesh);
@@ -331,8 +402,16 @@ export const createTerrainPreviewController = (canvas: HTMLCanvasElement): Terra
     syncCameraForTerrain(lastTerrainFrame);
   };
 
+  const setBridgeSelectionListener = (
+    listener: ((selection: TerrainPreviewBridgeSelection) => void) | null
+  ): void => {
+    bridgeSelectionListener = listener;
+    emitBridgeSelection();
+  };
+
   const dispose = (): void => {
     stop();
+    canvas.removeEventListener("click", handleCanvasClick);
     disposeTerrainMesh(terrainMesh, scene);
     terrainMesh = null;
     waterSystem.dispose();
@@ -348,6 +427,7 @@ export const createTerrainPreviewController = (canvas: HTMLCanvasElement): Terra
     stop,
     resize,
     setTerrain,
+    setBridgeSelectionListener,
     resetView,
     dispose
   };

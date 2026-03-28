@@ -32,6 +32,23 @@ type RiverUniforms = {
   u_normalStrengthScale: { value: number };
   u_foamScale: { value: number };
   u_specularScale: { value: number };
+  u_debugWaterfallHighlight: { value: number };
+};
+
+type WaterfallWallUniforms = {
+  u_time: { value: number };
+  u_color: { value: THREE.Color };
+  u_sunColor: { value: THREE.Color };
+  u_fogColor: { value: THREE.Color };
+  u_fogNear: { value: number };
+  u_fogFar: { value: number };
+  u_lightDir: { value: THREE.Vector3 };
+  u_quality: { value: number };
+  u_opacity: { value: number };
+  u_foamScale: { value: number };
+  u_mistScale: { value: number };
+  u_speedScale: { value: number };
+  u_debugHighlight: { value: number };
 };
 
 const disposeMaterial = (material: THREE.Material | THREE.Material[]): void => {
@@ -90,7 +107,10 @@ export class ThreeTestRiverWaterHelper {
   };
   private mesh: THREE.Mesh | null = null;
   private wallMesh: THREE.Mesh | null = null;
+  private waterfallWallMesh: THREE.Mesh | null = null;
+  private waterfallWallFallbackMesh: THREE.Mesh | null = null;
   private uniforms: RiverUniforms | null = null;
+  private waterfallWallUniforms: WaterfallWallUniforms | null = null;
   private normal1: THREE.Texture | null = null;
   private normal2: THREE.Texture | null = null;
   private supportMap: THREE.Texture | null = null;
@@ -99,6 +119,21 @@ export class ThreeTestRiverWaterHelper {
   private riverBankMap: THREE.Texture | null = null;
   private waterfallInfluenceMap: THREE.Texture | null = null;
   private debugControls: TerrainWaterDebugControls = { ...DEFAULT_TERRAIN_WATER_DEBUG_CONTROLS };
+
+  private applyWaterfallDebugMaterialState(): void {
+    if (!this.waterfallWallMesh) {
+      return;
+    }
+    const material = this.waterfallWallMesh.material;
+    if (!(material instanceof THREE.ShaderMaterial)) {
+      return;
+    }
+    const debugHighlight = this.debugControls.waterfallDebugHighlight;
+    material.depthTest = !debugHighlight;
+    material.depthWrite = !debugHighlight;
+    material.needsUpdate = true;
+    this.waterfallWallMesh.renderOrder = debugHighlight ? 40 : 4;
+  }
 
   constructor(options: ThreeTestRiverWaterHelperOptions) {
     this.scene = options.scene;
@@ -123,14 +158,20 @@ export class ThreeTestRiverWaterHelper {
     this.currentPalette.shallowColor.set(palette.shallowColor);
     this.currentPalette.deepColor.set(palette.deepColor);
     this.currentPalette.sunColor.set(palette.sunColor);
-    if (!this.uniforms) {
+    if (!this.uniforms && !this.waterfallWallUniforms) {
       return;
     }
-    this.uniforms.u_skyTopColor.value.copy(this.currentPalette.skyTopColor);
-    this.uniforms.u_skyHorizonColor.value.copy(this.currentPalette.skyHorizonColor);
-    this.uniforms.u_color.value.copy(this.currentPalette.shallowColor);
-    this.uniforms.u_deepColor.value.copy(this.currentPalette.deepColor);
-    this.uniforms.u_sunColor.value.copy(this.currentPalette.sunColor);
+    if (this.uniforms) {
+      this.uniforms.u_skyTopColor.value.copy(this.currentPalette.skyTopColor);
+      this.uniforms.u_skyHorizonColor.value.copy(this.currentPalette.skyHorizonColor);
+      this.uniforms.u_color.value.copy(this.currentPalette.shallowColor);
+      this.uniforms.u_deepColor.value.copy(this.currentPalette.deepColor);
+      this.uniforms.u_sunColor.value.copy(this.currentPalette.sunColor);
+    }
+    if (this.waterfallWallUniforms) {
+      this.waterfallWallUniforms.u_color.value.copy(this.currentPalette.shallowColor);
+      this.waterfallWallUniforms.u_sunColor.value.copy(this.currentPalette.sunColor);
+    }
   }
 
   public setNormalMaps(normal1: THREE.Texture, normal2: THREE.Texture): void {
@@ -146,6 +187,9 @@ export class ThreeTestRiverWaterHelper {
     if (this.uniforms) {
       this.uniforms.u_quality.value = qualityUniform;
     }
+    if (this.waterfallWallUniforms) {
+      this.waterfallWallUniforms.u_quality.value = qualityUniform;
+    }
   }
 
   public setDebugControls(controls: TerrainWaterDebugControls): void {
@@ -156,13 +200,31 @@ export class ThreeTestRiverWaterHelper {
     if (this.wallMesh) {
       this.wallMesh.visible = this.debugControls.showRiver;
     }
-    if (!this.uniforms) {
-      return;
+    if (this.waterfallWallMesh) {
+      this.waterfallWallMesh.visible = this.debugControls.showWaterfalls;
     }
-    this.uniforms.u_flowSpeedScale.value = this.debugControls.riverFlowSpeedScale;
-    this.uniforms.u_normalStrengthScale.value = this.debugControls.riverNormalStrengthScale;
-    this.uniforms.u_foamScale.value = this.debugControls.riverFoamScale;
-    this.uniforms.u_specularScale.value = this.debugControls.riverSpecularScale;
+    if (this.waterfallWallFallbackMesh) {
+      this.waterfallWallFallbackMesh.visible = this.debugControls.showRiver && !this.debugControls.showWaterfalls;
+    }
+    if (!this.uniforms) {
+      if (!this.waterfallWallUniforms) {
+        return;
+      }
+    } else {
+      this.uniforms.u_flowSpeedScale.value = this.debugControls.riverFlowSpeedScale;
+      this.uniforms.u_normalStrengthScale.value = this.debugControls.riverNormalStrengthScale;
+      this.uniforms.u_foamScale.value = this.debugControls.riverFoamScale;
+      this.uniforms.u_specularScale.value = this.debugControls.riverSpecularScale;
+      this.uniforms.u_debugWaterfallHighlight.value = this.debugControls.waterfallDebugHighlight ? 1 : 0;
+    }
+    if (this.waterfallWallUniforms) {
+      this.waterfallWallUniforms.u_opacity.value = 0.84 * this.debugControls.waterfallOpacityScale;
+      this.waterfallWallUniforms.u_foamScale.value = this.debugControls.waterfallFoamScale;
+      this.waterfallWallUniforms.u_mistScale.value = this.debugControls.waterfallMistScale;
+      this.waterfallWallUniforms.u_speedScale.value = this.debugControls.waterfallSpeedScale;
+      this.waterfallWallUniforms.u_debugHighlight.value = this.debugControls.waterfallDebugHighlight ? 1 : 0;
+    }
+    this.applyWaterfallDebugMaterialState();
   }
 
   public setFog(fog: RiverWaterFog): void {
@@ -170,23 +232,40 @@ export class ThreeTestRiverWaterHelper {
     this.fogState.near = fog.near;
     this.fogState.far = fog.far;
     if (!this.uniforms) {
-      return;
+      if (!this.waterfallWallUniforms) {
+        return;
+      }
+    } else {
+      this.uniforms.u_fogColor.value.copy(this.fogState.color);
+      this.uniforms.u_fogNear.value = this.fogState.near;
+      this.uniforms.u_fogFar.value = this.fogState.far;
     }
-    this.uniforms.u_fogColor.value.copy(this.fogState.color);
-    this.uniforms.u_fogNear.value = this.fogState.near;
-    this.uniforms.u_fogFar.value = this.fogState.far;
+    if (this.waterfallWallUniforms) {
+      this.waterfallWallUniforms.u_fogColor.value.copy(this.fogState.color);
+      this.waterfallWallUniforms.u_fogNear.value = this.fogState.near;
+      this.waterfallWallUniforms.u_fogFar.value = this.fogState.far;
+    }
   }
 
   public setLightDirectionFromKeyLight(): void {
     if (!this.uniforms) {
-      return;
+      if (!this.waterfallWallUniforms) {
+        return;
+      }
+    } else {
+      this.uniforms.u_lightDir.value.copy(this.keyLight.position).normalize();
     }
-    this.uniforms.u_lightDir.value.copy(this.keyLight.position).normalize();
+    if (this.waterfallWallUniforms) {
+      this.waterfallWallUniforms.u_lightDir.value.copy(this.keyLight.position).normalize();
+    }
   }
 
   public update(timeMs: number): void {
     if (this.uniforms) {
       this.uniforms.u_time.value = timeMs * 0.001;
+    }
+    if (this.waterfallWallUniforms) {
+      this.waterfallWallUniforms.u_time.value = timeMs * 0.001;
     }
   }
 
@@ -204,6 +283,19 @@ export class ThreeTestRiverWaterHelper {
       disposeMaterial(this.wallMesh.material);
       this.wallMesh = null;
     }
+    if (this.waterfallWallMesh) {
+      this.scene.remove(this.waterfallWallMesh);
+      this.waterfallWallMesh.geometry.dispose();
+      disposeMaterial(this.waterfallWallMesh.material);
+      this.waterfallWallMesh = null;
+      this.waterfallWallUniforms = null;
+    }
+    if (this.waterfallWallFallbackMesh) {
+      this.scene.remove(this.waterfallWallFallbackMesh);
+      this.waterfallWallFallbackMesh.geometry.dispose();
+      disposeMaterial(this.waterfallWallFallbackMesh.material);
+      this.waterfallWallFallbackMesh = null;
+    }
     disposeTexture(this.supportMap);
     disposeTexture(this.flowMap);
     disposeTexture(this.rapidMap);
@@ -218,6 +310,189 @@ export class ThreeTestRiverWaterHelper {
 
   public dispose(): void {
     this.clear();
+  }
+
+  private buildWaterfallWallMesh(baseMesh: THREE.Mesh, river: RiverWaterData, qualityUniform: number): void {
+    if (
+      !river.waterfallWallPositions ||
+      !river.waterfallWallUvs ||
+      !river.waterfallWallIndices ||
+      !river.waterfallWallDropNorm ||
+      !river.waterfallWallFallStyle
+    ) {
+      return;
+    }
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute("position", new THREE.BufferAttribute(river.waterfallWallPositions, 3));
+    geometry.setAttribute("uv", new THREE.BufferAttribute(river.waterfallWallUvs, 2));
+    geometry.setAttribute("a_dropNorm", new THREE.BufferAttribute(river.waterfallWallDropNorm, 1));
+    geometry.setAttribute("a_fallStyle", new THREE.BufferAttribute(river.waterfallWallFallStyle, 1));
+    geometry.setIndex(new THREE.BufferAttribute(river.waterfallWallIndices, 1));
+    geometry.computeVertexNormals();
+
+    this.waterfallWallUniforms = {
+      u_time: { value: 0 },
+      u_color: { value: this.currentPalette.shallowColor.clone() },
+      u_sunColor: { value: this.currentPalette.sunColor.clone() },
+      u_fogColor: { value: this.fogState.color.clone() },
+      u_fogNear: { value: this.fogState.near },
+      u_fogFar: { value: this.fogState.far },
+      u_lightDir: { value: this.keyLight.position.clone().normalize() },
+      u_quality: { value: qualityUniform },
+      u_opacity: { value: 0.84 * this.debugControls.waterfallOpacityScale },
+      u_foamScale: { value: this.debugControls.waterfallFoamScale },
+      u_mistScale: { value: this.debugControls.waterfallMistScale },
+      u_speedScale: { value: this.debugControls.waterfallSpeedScale },
+      u_debugHighlight: { value: this.debugControls.waterfallDebugHighlight ? 1 : 0 }
+    };
+
+    const material = new THREE.ShaderMaterial({
+      uniforms: this.waterfallWallUniforms as any,
+      transparent: false,
+      depthWrite: true,
+      depthTest: true,
+      side: THREE.DoubleSide,
+      vertexShader: `
+        varying vec2 vUv;
+        varying float vDropNorm;
+        varying float vFallStyle;
+        varying vec3 vWorldPos;
+        varying vec3 vWorldNormal;
+        attribute float a_dropNorm;
+        attribute float a_fallStyle;
+        uniform float u_time;
+        uniform float u_speedScale;
+        uniform float u_quality;
+        void main() {
+          vUv = uv;
+          vDropNorm = a_dropNorm;
+          vFallStyle = a_fallStyle;
+          vec4 worldPos = modelMatrix * vec4(position, 1.0);
+          vWorldPos = worldPos.xyz;
+          vWorldNormal = normalize(mat3(modelMatrix) * normal);
+          gl_Position = projectionMatrix * viewMatrix * worldPos;
+        }
+      `,
+      fragmentShader: `
+        varying vec2 vUv;
+        varying float vDropNorm;
+        varying float vFallStyle;
+        varying vec3 vWorldPos;
+        varying vec3 vWorldNormal;
+        uniform float u_time;
+        uniform vec3 u_color;
+        uniform vec3 u_sunColor;
+        uniform vec3 u_fogColor;
+        uniform float u_fogNear;
+        uniform float u_fogFar;
+        uniform vec3 u_lightDir;
+        uniform float u_quality;
+        uniform float u_opacity;
+        uniform float u_foamScale;
+        uniform float u_mistScale;
+        uniform float u_speedScale;
+        uniform float u_debugHighlight;
+        float hash21(vec2 p) {
+          vec2 q = fract(p * vec2(123.34, 456.21));
+          q += dot(q, q + 45.32);
+          return fract(q.x * q.y);
+        }
+        void main() {
+          if (u_debugHighlight > 0.5) {
+            float stripe = step(0.5, fract(vUv.y * 14.0 + vUv.x * 2.5));
+            vec3 debugA = vec3(1.0, 0.12, 0.88);
+            vec3 debugB = vec3(0.08, 1.0, 0.92);
+            vec3 debugColor = mix(debugA, debugB, stripe);
+            debugColor += vec3(0.25) * smoothstep(0.42, 0.0, abs(vUv.x - 0.5));
+            gl_FragColor = vec4(debugColor, 1.0);
+            return;
+          }
+          float qualityFactor = clamp(u_quality * 0.5, 0.0, 1.0);
+          float centerBand = 1.0 - smoothstep(mix(0.2, 0.32, vFallStyle), 0.5, abs(vUv.x - 0.5));
+          float edgeFade = smoothstep(0.0, 0.08, vUv.x) * (1.0 - smoothstep(0.92, 1.0, vUv.x));
+          float t = u_time * (2.2 + vDropNorm * 1.6) * u_speedScale;
+          vec2 pixelUv = floor(vUv * vec2(26.0, 68.0)) / vec2(26.0, 68.0);
+          float streamA = sin((pixelUv.y * 22.0 + t * 4.0) + pixelUv.x * 16.0);
+          float streamB = cos((pixelUv.y * 34.0 + t * 4.7) - pixelUv.x * 11.0);
+          float streak = clamp(streamA * 0.35 + streamB * 0.25 + 0.55, 0.0, 1.0);
+          float breakup = hash21(vec2(floor(pixelUv.x * 18.0), floor((pixelUv.y + t * 0.35) * 28.0)));
+          float body = (mix(0.36, 0.5, vFallStyle) + streak * mix(0.42, 0.58, vFallStyle)) * mix(0.72, 1.0, breakup);
+          float topFoam = smoothstep(0.66, 1.0, vUv.y) * mix(0.34, 0.22, vFallStyle) * (0.62 + vDropNorm * 0.46) * u_foamScale;
+          float plungeZone = 1.0 - smoothstep(0.0, 0.24, vUv.y);
+          float splashCells = step(0.57, hash21(vec2(floor(pixelUv.x * 24.0), floor((pixelUv.y + t * 0.55) * 14.0))));
+          float bottomFoam =
+            plungeZone *
+            (0.58 + 0.42 * streak) *
+            mix(0.62, 0.9, vFallStyle) *
+            (0.74 + vDropNorm * 0.58) *
+            mix(0.82, 1.18, splashCells) *
+            u_foamScale;
+          float mistPulse = 0.72 + 0.28 * sin(t * 2.1 + vUv.x * 18.0);
+          float mist =
+            (1.0 - smoothstep(0.0, 0.16, vUv.y)) *
+            mistPulse *
+            mix(0.64, 1.0, vFallStyle) *
+            (0.8 + vDropNorm * 0.7) *
+            u_mistScale;
+          vec3 geomN = normalize(vWorldNormal);
+          vec3 pseudoN = normalize(
+            mix(geomN, vec3((vUv.x - 0.5) * 1.7, max(0.18, geomN.y), 0.65 + (streak - 0.5) * 0.8), 0.24 + centerBand * 0.12)
+          );
+          vec3 lightDir = normalize(u_lightDir);
+          vec3 viewDir = normalize(cameraPosition - vWorldPos);
+          float diffuse = 0.58 + 0.42 * max(dot(pseudoN, lightDir), 0.0);
+          float rim = pow(1.0 - clamp(max(dot(viewDir, pseudoN), 0.0), 0.0, 1.0), 2.0);
+          float sparkle = pow(max(dot(reflect(-lightDir, pseudoN), viewDir), 0.0), 14.0) * (0.18 + vDropNorm * 0.36);
+          vec3 foamColor = vec3(0.94, 0.98, 1.0);
+          float foamMix =
+            clamp(
+              bottomFoam * 0.9 * qualityFactor +
+              mist * 0.4 * qualityFactor +
+              topFoam * 0.42 * qualityFactor +
+              plungeZone * splashCells * 0.26 * qualityFactor +
+              centerBand * 0.16 +
+              edgeFade * 0.08,
+              0.0,
+              1.0
+            );
+          vec3 baseColor = mix(u_color * mix(0.72, 0.86, edgeFade) * u_opacity, foamColor, foamMix);
+          vec3 color = baseColor * (0.72 + diffuse * 0.28) + foamColor * rim * 0.1 + u_sunColor * sparkle * 0.16;
+          float viewDist = length(cameraPosition - vWorldPos);
+          float fogFactor = pow(smoothstep(u_fogNear, u_fogFar, viewDist), 1.15);
+          color = mix(color, u_fogColor, fogFactor);
+          gl_FragColor = vec4(color, 1.0);
+        }
+      `
+    });
+
+    this.waterfallWallMesh = new THREE.Mesh(geometry, material);
+    this.waterfallWallMesh.position.y = baseMesh.position.y + river.level;
+    this.waterfallWallMesh.renderOrder = 4;
+    this.waterfallWallMesh.castShadow = false;
+    this.waterfallWallMesh.receiveShadow = false;
+    this.waterfallWallMesh.visible = this.debugControls.showWaterfalls;
+    this.scene.add(this.waterfallWallMesh);
+    this.applyWaterfallDebugMaterialState();
+
+    const fallbackGeometry = geometry.clone();
+    const fallbackMaterial = new THREE.MeshStandardMaterial({
+      color: 0x8f825f,
+      roughness: 0.9,
+      metalness: 0.02,
+      depthWrite: true,
+      depthTest: true,
+      polygonOffset: true,
+      polygonOffsetFactor: 1,
+      polygonOffsetUnits: 1,
+      side: THREE.DoubleSide
+    });
+    this.waterfallWallFallbackMesh = new THREE.Mesh(fallbackGeometry, fallbackMaterial);
+    this.waterfallWallFallbackMesh.position.y = baseMesh.position.y + river.level;
+    this.waterfallWallFallbackMesh.renderOrder = 2;
+    this.waterfallWallFallbackMesh.castShadow = false;
+    this.waterfallWallFallbackMesh.receiveShadow = true;
+    this.waterfallWallFallbackMesh.visible = this.debugControls.showRiver && !this.debugControls.showWaterfalls;
+    this.scene.add(this.waterfallWallFallbackMesh);
   }
 
   public rebuild(baseMesh: THREE.Mesh, river: RiverWaterData, qualityUniform: number): void {
@@ -264,7 +539,8 @@ export class ThreeTestRiverWaterHelper {
       u_flowSpeedScale: { value: this.debugControls.riverFlowSpeedScale },
       u_normalStrengthScale: { value: this.debugControls.riverNormalStrengthScale },
       u_foamScale: { value: this.debugControls.riverFoamScale },
-      u_specularScale: { value: this.debugControls.riverSpecularScale }
+      u_specularScale: { value: this.debugControls.riverSpecularScale },
+      u_debugWaterfallHighlight: { value: this.debugControls.waterfallDebugHighlight ? 1 : 0 }
     };
 
     const material = new THREE.ShaderMaterial({
@@ -379,6 +655,7 @@ export class ThreeTestRiverWaterHelper {
         uniform float u_normalStrengthScale;
         uniform float u_foamScale;
         uniform float u_specularScale;
+        uniform float u_debugWaterfallHighlight;
         void main() {
           float qualityFactor = step(0.5, u_quality);
           float edge = smoothstep(0.02, 0.25, vBankDist);
@@ -416,6 +693,19 @@ export class ThreeTestRiverWaterHelper {
           float plungeFoam = smoothstep(0.05, 0.82, fall.g);
           float seamRapid = smoothstep(0.05, 0.78, fall.a);
           float fallBoost = clamp(fall.b * 1.35 + lipFoam * 0.28 + plungeFoam * 0.42, 0.0, 1.0);
+          if (u_debugWaterfallHighlight > 0.5) {
+            float highlightMask = clamp(max(max(fall.r, fall.g), max(fall.b, fall.a)), 0.0, 1.0);
+            if (highlightMask > 0.04) {
+              float stripe = step(0.5, fract(vUv.y * 14.0 + vUv.x * 2.5));
+              vec3 debugA = vec3(1.0, 0.12, 0.88);
+              vec3 debugB = vec3(0.08, 1.0, 0.92);
+              vec3 debugColor = mix(debugA, debugB, stripe);
+              debugColor += vec3(0.25) * smoothstep(0.42, 0.0, abs(vUv.x - 0.5));
+              debugColor = mix(vec3(0.04, 0.08, 0.12), debugColor, smoothstep(0.04, 0.28, highlightMask));
+              gl_FragColor = vec4(debugColor, 1.0);
+              return;
+            }
+          }
           float rapid = clamp(vRapid * (0.68 + qualityFactor * 0.38) + fallBoost * 0.62 + seamRapid * 0.82 + plungeFoam * 0.2, 0.0, 1.0);
           float spec = specBase * u_specular * u_specularScale * (0.4 + rapid * 0.8 + seamRapid * 0.26) * (0.7 + 0.45 * grazing);
           spec *= mix(0.82, 1.14, crestMask);
@@ -482,6 +772,7 @@ export class ThreeTestRiverWaterHelper {
       this.wallMesh.visible = this.debugControls.showRiver;
       this.scene.add(this.wallMesh);
     }
+    this.buildWaterfallWallMesh(baseMesh, river, qualityUniform);
     this.setDebugControls(this.debugControls);
   }
 }

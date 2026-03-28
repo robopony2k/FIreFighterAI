@@ -1,5 +1,10 @@
 import * as THREE from "three";
 import type { OceanWaterData } from "./threeTestTerrain.js";
+import {
+  DEFAULT_OCEAN_WATER_DEBUG_CONTROLS,
+  normalizeOceanWaterDebugControls,
+  type OceanWaterDebugControls
+} from "./oceanWaterDebug.js";
 
 type OceanUniforms = {
   u_time: { value: number };
@@ -35,6 +40,11 @@ type OceanUniforms = {
   u_tideAmp: { value: number };
   u_tideFreq: { value: number };
   u_quality: { value: number };
+  u_shoreParamsA: { value: THREE.Vector4 };
+  u_shoreParamsB: { value: THREE.Vector4 };
+  u_shoreFeatureMix: { value: THREE.Vector4 };
+  u_shoreTuning: { value: THREE.Vector4 };
+  u_shoreWaveShape: { value: THREE.Vector4 };
 };
 
 const disposeMaterial = (material: THREE.Material | THREE.Material[]): void => {
@@ -84,7 +94,7 @@ type OceanBackdropEntry = {
 
 const DISTANT_OCEAN_EXTENSION_SCALE = 10.5;
 const DISTANT_OCEAN_EXTENSION_MIN = 1400;
-const DISTANT_OCEAN_EDGE_OVERLAP = 0;
+const DISTANT_OCEAN_EDGE_OVERLAP_STEPS = 1;
 const DISTANT_OCEAN_SEGMENT_WORLD_SIZE = 220;
 
 const createSolidTexture = (r: number, g: number, b: number, a = 255): THREE.DataTexture => {
@@ -128,6 +138,7 @@ export class ThreeTestOceanWaterHelper {
   private readonly backdropSupportMap: THREE.DataTexture;
   private readonly backdropDomainMap: THREE.DataTexture;
   private readonly backdropShoreSdf: THREE.DataTexture;
+  private debugControls: OceanWaterDebugControls = { ...DEFAULT_OCEAN_WATER_DEBUG_CONTROLS };
 
   constructor(options: ThreeTestOceanWaterHelperOptions) {
     this.scene = options.scene;
@@ -157,6 +168,50 @@ export class ThreeTestOceanWaterHelper {
     this.backdropEntries.forEach((entry) => visitor(entry.uniforms));
   }
 
+  private applyDebugControlsToUniforms(): void {
+    this.forEachUniformSet((uniforms) => {
+      uniforms.u_shoreParamsA.value.set(
+        this.debugControls.shoreSwashStart,
+        this.debugControls.shoreSwashEnd,
+        this.debugControls.shoreShoalEnd,
+        this.debugControls.organicEdgeInset
+      );
+      uniforms.u_shoreParamsB.value.set(
+        this.debugControls.swashPushMax,
+        this.debugControls.swashPushFeather,
+        this.debugControls.swashCoverageMin,
+        this.debugControls.swashCoverageFadeEnd
+      );
+      uniforms.u_shoreFeatureMix.value.set(
+        this.debugControls.enableOrganicEdge ? 1 : 0,
+        this.debugControls.enableShorePulses ? 1 : 0,
+        this.debugControls.enableTroughClamp ? 1 : 0,
+        this.debugControls.enableSwashMotion ? 1 : 0
+      );
+      uniforms.u_shoreTuning.value.set(
+        this.debugControls.enableSwashSheet ? 1 : 0,
+        this.debugControls.waveAmpScale,
+        this.debugControls.waveLengthScale,
+        this.debugControls.shoreFoamScale
+      );
+      uniforms.u_shoreWaveShape.value.set(
+        this.debugControls.shoreWaveAmpMinScale,
+        this.debugControls.shoreWaveLengthMinScale,
+        this.debugControls.enableShoreWaveModulation ? 1 : 0,
+        0
+      );
+    });
+  }
+
+  private applyDebugVisibility(): void {
+    if (this.mesh) {
+      this.mesh.visible = this.debugControls.showOcean;
+    }
+    this.backdropEntries.forEach((entry) => {
+      entry.mesh.visible = this.debugControls.showOcean;
+    });
+  }
+
   private createOceanUniforms(
     mask: THREE.Texture,
     supportMap: THREE.Texture,
@@ -166,8 +221,18 @@ export class ThreeTestOceanWaterHelper {
     depth: number,
     sampleCols: number,
     sampleRows: number,
-    qualityUniform: number
+    qualityUniform: number,
+    worldStepOverride?: THREE.Vector2,
+    uvStepOverride?: THREE.Vector2
   ): OceanUniforms {
+    const worldStep = worldStepOverride?.clone() ?? new THREE.Vector2(
+      Math.max(0.1, width / Math.max(1, sampleCols - 1)),
+      Math.max(0.1, depth / Math.max(1, sampleRows - 1))
+    );
+    const uvStep = uvStepOverride?.clone() ?? new THREE.Vector2(
+      1 / Math.max(1, sampleCols - 1),
+      1 / Math.max(1, sampleRows - 1)
+    );
     return {
       u_time: { value: 0 },
       u_mask: { value: mask },
@@ -177,13 +242,13 @@ export class ThreeTestOceanWaterHelper {
       u_color: { value: this.currentPalette.shallowColor.clone() },
       u_deepColor: { value: this.currentPalette.deepColor.clone() },
       u_opacity: { value: 0.97 },
-      u_waveScale: { value: 0.115 },
+      u_waveScale: { value: 0.145 },
       u_normalMap1: { value: this.normal1 as THREE.Texture },
       u_normalMap2: { value: this.normal2 as THREE.Texture },
       u_scroll1: { value: new THREE.Vector2(0.0024, 0.0012) },
       u_scroll2: { value: new THREE.Vector2(-0.0018, 0.0021) },
-      u_normalScale: { value: 0.046 },
-      u_normalStrength: { value: 0.68 },
+      u_normalScale: { value: 0.056 },
+      u_normalStrength: { value: 0.78 },
       u_shininess: { value: 62.0 },
       u_lightDir: { value: this.keyLight.position.clone().normalize() },
       u_specular: { value: 0.44 },
@@ -193,30 +258,60 @@ export class ThreeTestOceanWaterHelper {
       u_fogColor: { value: this.fogState.color.clone() },
       u_fogNear: { value: this.fogState.near },
       u_fogFar: { value: this.fogState.far },
-      u_waveAmp: { value: 1.0 },
-      u_waveFreq: { value: new THREE.Vector2(22.0, 34.0) },
-      u_waveVariance: { value: 0.68 },
+      u_waveAmp: { value: 1.35 },
+      u_waveFreq: { value: new THREE.Vector2(11.0, 17.5) },
+      u_waveVariance: { value: 0.84 },
       u_cellGrid: {
         value: new THREE.Vector2(
           Math.max(4, Math.floor((sampleCols - 1) * 0.14)),
           Math.max(4, Math.floor((sampleRows - 1) * 0.14))
         )
       },
-      u_worldStep: {
-        value: new THREE.Vector2(
-          Math.max(0.1, width / Math.max(1, sampleCols - 1)),
-          Math.max(0.1, depth / Math.max(1, sampleRows - 1))
-        )
-      },
-      u_uvStep: {
-        value: new THREE.Vector2(
-          1 / Math.max(1, sampleCols - 1),
-          1 / Math.max(1, sampleRows - 1)
-        )
-      },
+      u_worldStep: { value: worldStep },
+      u_uvStep: { value: uvStep },
       u_tideAmp: { value: 0.18 },
       u_tideFreq: { value: 0.085 },
-      u_quality: { value: qualityUniform }
+      u_quality: { value: qualityUniform },
+      u_shoreParamsA: {
+        value: new THREE.Vector4(
+          this.debugControls.shoreSwashStart,
+          this.debugControls.shoreSwashEnd,
+          this.debugControls.shoreShoalEnd,
+          this.debugControls.organicEdgeInset
+        )
+      },
+      u_shoreParamsB: {
+        value: new THREE.Vector4(
+          this.debugControls.swashPushMax,
+          this.debugControls.swashPushFeather,
+          this.debugControls.swashCoverageMin,
+          this.debugControls.swashCoverageFadeEnd
+        )
+      },
+      u_shoreFeatureMix: {
+        value: new THREE.Vector4(
+          this.debugControls.enableOrganicEdge ? 1 : 0,
+          this.debugControls.enableShorePulses ? 1 : 0,
+          this.debugControls.enableTroughClamp ? 1 : 0,
+          this.debugControls.enableSwashMotion ? 1 : 0
+        )
+      },
+      u_shoreTuning: {
+        value: new THREE.Vector4(
+          this.debugControls.enableSwashSheet ? 1 : 0,
+          this.debugControls.waveAmpScale,
+          this.debugControls.waveLengthScale,
+          this.debugControls.shoreFoamScale
+        )
+      },
+      u_shoreWaveShape: {
+        value: new THREE.Vector4(
+          this.debugControls.shoreWaveAmpMinScale,
+          this.debugControls.shoreWaveLengthMinScale,
+          this.debugControls.enableShoreWaveModulation ? 1 : 0,
+          0
+        )
+      }
     };
   }
 
@@ -340,6 +435,16 @@ export class ThreeTestOceanWaterHelper {
     });
   }
 
+  public setDebugControls(controls: Partial<OceanWaterDebugControls>): void {
+    this.debugControls = normalizeOceanWaterDebugControls({ ...this.debugControls, ...controls });
+    this.applyDebugControlsToUniforms();
+    this.applyDebugVisibility();
+  }
+
+  public getDebugControls(): OceanWaterDebugControls {
+    return { ...this.debugControls };
+  }
+
   public update(timeMs: number): void {
     this.forEachUniformSet((uniforms) => {
       uniforms.u_time.value = timeMs * 0.001;
@@ -360,6 +465,7 @@ export class ThreeTestOceanWaterHelper {
         varying float vDisp;
         varying float vSdf;
         varying float vOcean;
+        varying float vSurfAtten;
         uniform float u_time;
         uniform sampler2D u_domainMap;
         uniform sampler2D u_shoreSdf;
@@ -372,6 +478,11 @@ export class ThreeTestOceanWaterHelper {
         uniform float u_tideAmp;
         uniform float u_tideFreq;
         uniform float u_quality;
+        uniform vec4 u_shoreParamsA;
+        uniform vec4 u_shoreParamsB;
+        uniform vec4 u_shoreFeatureMix;
+        uniform vec4 u_shoreTuning;
+        uniform vec4 u_shoreWaveShape;
         float hash21(vec2 p) {
           vec2 q = fract(p * vec2(123.34, 456.21));
           q += dot(q, q + 45.32);
@@ -396,6 +507,36 @@ export class ThreeTestOceanWaterHelper {
           }
           return vec3(1.18, 1.08, 1.08);
         }
+        vec2 sampleShoreGradient(vec2 uvCoord) {
+          vec2 stepX = vec2(u_uvStep.x, 0.0);
+          vec2 stepY = vec2(0.0, u_uvStep.y);
+          float sdfPosX = texture2D(u_shoreSdf, uvCoord + stepX).r * 2.0 - 1.0;
+          float sdfNegX = texture2D(u_shoreSdf, uvCoord - stepX).r * 2.0 - 1.0;
+          float sdfPosY = texture2D(u_shoreSdf, uvCoord + stepY).r * 2.0 - 1.0;
+          float sdfNegY = texture2D(u_shoreSdf, uvCoord - stepY).r * 2.0 - 1.0;
+          vec2 grad = vec2(sdfPosX - sdfNegX, sdfPosY - sdfNegY);
+          float gradLen = length(grad);
+          if (gradLen < 1e-4) {
+            return vec2(0.93, 0.37);
+          }
+          return grad / gradLen;
+        }
+        float computeOrganicShoreInset(vec2 worldXZ, float positiveSdf) {
+          float surfBand = 1.0 - smoothstep(
+            u_shoreParamsA.y,
+            u_shoreParamsA.z,
+            positiveSdf
+          );
+          float edgePresence = smoothstep(
+            u_shoreParamsA.x * 0.25,
+            u_shoreParamsA.z,
+            positiveSdf
+          );
+          float edgeNoiseA = valueNoise21(worldXZ * vec2(0.082, 0.069) + vec2(17.3, 9.1));
+          float edgeNoiseB = valueNoise21(worldXZ * vec2(0.163, 0.141) + vec2(-4.7, 13.6));
+          float edgeNoise = smoothstep(0.18, 0.86, edgeNoiseA * 0.68 + edgeNoiseB * 0.32);
+          return mix(0.34, 1.0, edgeNoise) * u_shoreParamsA.w * edgePresence * surfBand * u_shoreFeatureMix.x;
+        }
         vec3 gerstnerWave(
           vec2 samplePos,
           vec2 dir,
@@ -414,32 +555,160 @@ export class ThreeTestOceanWaterHelper {
           float qa = steepness / max(k * amplitude * 3.0, 1.0);
           return vec3(d.x * qa * amplitude * c, amplitude * s, d.y * qa * amplitude * c);
         }
-        vec3 computeDisplacedPosition(vec3 p, vec2 uvCoord, out float ocean, out float sdf) {
+        vec3 computeDisplacedPosition(vec3 p, vec2 uvCoord, out float ocean, out float sdf, out float surfAtten) {
           vec2 worldXZ = (modelMatrix * vec4(p, 1.0)).xz;
-          ocean = texture2D(u_domainMap, uvCoord).r;
+          vec4 domain = texture2D(u_domainMap, uvCoord);
+          ocean = domain.r;
+          float shoreTerrainBase = domain.g * 10.0;
+          float coverage = domain.b;
+          surfAtten = domain.a;
           sdf = texture2D(u_shoreSdf, uvCoord).r * 2.0 - 1.0;
-          float shoreDamp = smoothstep(0.01, 0.35, max(0.0, sdf));
+          float positiveSdf = max(0.0, sdf);
+          float shorelineSdf = max(0.0, positiveSdf - computeOrganicShoreInset(worldXZ, positiveSdf));
+          vec2 shoreOut = sampleShoreGradient(uvCoord);
+          vec2 shoreIn = -shoreOut;
+          vec2 shoreAlong = vec2(-shoreIn.y, shoreIn.x);
+          vec2 inlandUvStep = vec2(shoreIn.x * u_uvStep.x, shoreIn.y * u_uvStep.y);
+          vec2 alongUvStep = vec2(shoreAlong.x * u_uvStep.x, shoreAlong.y * u_uvStep.y);
+          vec2 inlandUvA = clamp(uvCoord + inlandUvStep * 0.75, vec2(0.0), vec2(1.0));
+          vec2 inlandUvB = clamp(uvCoord + inlandUvStep * 1.6, vec2(0.0), vec2(1.0));
+          vec2 inlandUvC = clamp(uvCoord + inlandUvStep * 2.9 + alongUvStep * 0.35, vec2(0.0), vec2(1.0));
+          vec2 inlandUvD = clamp(uvCoord + inlandUvStep * 4.4 - alongUvStep * 0.35, vec2(0.0), vec2(1.0));
+          float shoreTerrainA = texture2D(u_domainMap, inlandUvA).g * 10.0;
+          float shoreTerrainB = texture2D(u_domainMap, inlandUvB).g * 10.0;
+          float shoreTerrainC = texture2D(u_domainMap, inlandUvC).g * 10.0;
+          float shoreTerrainD = texture2D(u_domainMap, inlandUvD).g * 10.0;
+          float shoreTerrainFloor = max(
+            max(shoreTerrainBase, shoreTerrainA),
+            max(shoreTerrainB, max(shoreTerrainC, shoreTerrainD))
+          );
+          float shoreWaveBlend = smoothstep(
+            u_shoreParamsA.x,
+            u_shoreParamsA.z,
+            shorelineSdf
+          );
+          float localWaveAmpScale = mix(
+            1.0,
+            mix(u_shoreWaveShape.x, 1.0, shoreWaveBlend),
+            u_shoreWaveShape.z
+          );
+          float localWaveLengthScale = mix(
+            1.0,
+            mix(u_shoreWaveShape.y, 1.0, shoreWaveBlend),
+            u_shoreWaveShape.z
+          );
+          float shoreWaveMod = (1.0 - shoreWaveBlend) * u_shoreWaveShape.z;
+          float shoreWaveSuppression = max(0.0, 1.0 - localWaveAmpScale) * shoreWaveMod;
+          float shorePresence = smoothstep(
+            -u_shoreParamsB.y,
+            u_shoreParamsA.y,
+            shorelineSdf
+          );
+          float shoalBlend = smoothstep(
+            u_shoreParamsA.y,
+            u_shoreParamsA.z,
+            shorelineSdf
+          );
+          float swashWeight = 1.0 - smoothstep(
+            u_shoreParamsA.x,
+            u_shoreParamsA.y,
+            shorelineSdf
+          );
+          float shoalWeight =
+            smoothstep(u_shoreParamsA.x, u_shoreParamsA.y, shorelineSdf) *
+            (1.0 - smoothstep(u_shoreParamsA.y, u_shoreParamsA.z, shorelineSdf));
+          float surfWeight = max(swashWeight, shoalWeight);
+          float swashCoverage = smoothstep(
+            u_shoreParamsB.z,
+            u_shoreParamsB.w,
+            coverage
+          );
+          float coverageStrength = mix(1.0, swashCoverage, swashWeight);
           vec3 weights = getDisplacementWeights(u_quality);
-          float domainStrength = clamp(ocean * 1.45, 0.0, 1.0);
-          float swellAmp = u_waveAmp * weights.x * mix(0.45, 1.0, shoreDamp) * domainStrength;
+          float domainStrength = clamp(ocean * 1.35, 0.0, 1.0) * coverageStrength;
+          float attenuation = clamp(surfAtten, 0.0, 0.94);
+          float swellAmp =
+            u_waveAmp *
+            u_shoreTuning.y *
+            weights.x *
+            mix(0.2, 1.0, shoalBlend) *
+            localWaveAmpScale *
+            domainStrength *
+            shorePresence *
+            (1.0 - attenuation * (shoalWeight * 0.42 + swashWeight * 0.68));
+          float baseAmp = max(1e-4, swellAmp);
           vec2 noiseUv = worldXZ * vec2(0.013, 0.011);
           float cellNoiseA = valueNoise21(noiseUv + vec2(0.17, 0.61));
           float cellNoiseB = valueNoise21(noiseUv * 1.13 + vec2(2.91, 1.37));
           float cellNoiseC = valueNoise21(noiseUv * 0.72 + vec2(4.73, 0.29));
           float lenVarianceA = mix(0.09, 0.2, clamp(u_waveVariance, 0.0, 1.0));
           float lenVarianceB = mix(0.12, 0.24, clamp(u_waveVariance, 0.0, 1.0));
-          float wave1Len = mix(u_waveFreq.x * (1.0 - lenVarianceA), u_waveFreq.x * (1.0 + lenVarianceA), cellNoiseA);
-          float wave2Len = mix(u_waveFreq.y * (1.0 - lenVarianceB), u_waveFreq.y * (1.0 + lenVarianceB), cellNoiseB);
+          float wave1Len =
+            mix(u_waveFreq.x * (1.0 - lenVarianceA), u_waveFreq.x * (1.0 + lenVarianceA), cellNoiseA) *
+            u_shoreTuning.z *
+            localWaveLengthScale;
+          float wave2Len =
+            mix(u_waveFreq.y * (1.0 - lenVarianceB), u_waveFreq.y * (1.0 + lenVarianceB), cellNoiseB) *
+            u_shoreTuning.z *
+            localWaveLengthScale;
           float wave3Len = mix(
             u_waveFreq.x * mix(0.34, 0.28, clamp(u_waveVariance, 0.0, 1.0)),
             u_waveFreq.y * mix(0.46, 0.54, clamp(u_waveVariance, 0.0, 1.0)),
             clamp(0.5 + (cellNoiseC - 0.5) * 0.72, 0.0, 1.0)
-          );
+          ) * u_shoreTuning.z * localWaveLengthScale;
           vec3 disp = vec3(0.0);
-          disp += gerstnerWave(worldXZ, vec2(0.96, 0.28), wave1Len, swellAmp * 0.7, 0.98, 1.62, 0.0);
-          disp += gerstnerWave(worldXZ, vec2(-0.42, 0.91), wave2Len, swellAmp * 0.46, 0.86, 1.28, 1.7);
-          disp += gerstnerWave(worldXZ, vec2(0.63, -0.78), wave3Len, swellAmp * 0.24 * weights.y, 0.76, 2.08, 3.1);
-          float tide = sin(u_time * u_tideFreq + dot(worldXZ, vec2(0.012, -0.01))) * u_tideAmp * weights.z * domainStrength;
+          disp += gerstnerWave(worldXZ, vec2(0.96, 0.28), wave1Len, swellAmp * 0.78, 0.98, 1.82, 0.0);
+          disp += gerstnerWave(worldXZ, vec2(-0.42, 0.91), wave2Len, swellAmp * 0.54, 0.86, 1.46, 1.7);
+          disp += gerstnerWave(worldXZ, vec2(0.63, -0.78), wave3Len, swellAmp * 0.32 * weights.y, 0.76, 2.24, 3.1);
+          float shorePhaseA =
+            dot(worldXZ, normalize(shoreIn + shoreAlong * 0.26)) *
+              (6.28318530718 / max(4.2, wave1Len * 0.42)) -
+            u_time * mix(2.8, 3.6, cellNoiseA) +
+            cellNoiseB * 6.28318530718;
+          float shorePhaseB =
+            dot(worldXZ, normalize(shoreIn - shoreAlong * 0.31)) *
+              (6.28318530718 / max(5.6, wave2Len * 0.36)) -
+            u_time * mix(3.2, 4.1, cellNoiseC) +
+            1.7;
+          float shorePulseA = max(0.0, sin(shorePhaseA));
+          float shorePulseB = max(0.0, sin(shorePhaseB));
+          shorePulseA *= shorePulseA;
+          shorePulseB *= shorePulseB;
+          float shorePulse =
+            smoothstep(0.12, 0.92, shorePulseA * 0.62 + shorePulseB * 0.38) *
+            (1.0 - smoothstep(u_shoreParamsA.x * 0.4, u_shoreParamsA.z, shorelineSdf));
+          float surfImpact = shoalWeight * 0.78 + swashWeight;
+          float lappingLift =
+            shorePulse *
+            baseAmp *
+            (0.82 + attenuation * 0.34 + shoreWaveSuppression * 0.28) *
+            mix(0.34, 1.18, surfImpact) *
+            u_shoreFeatureMix.y;
+          disp.y += lappingLift;
+          float crestOnlyDisp = max(0.0, disp.y);
+          disp.y = mix(
+            disp.y,
+            crestOnlyDisp,
+            clamp(swashWeight * 0.86 + shoreWaveSuppression * 0.42, 0.0, 1.0)
+          );
+          float waveModMinDisp = -baseAmp * mix(
+            1.0,
+            0.06,
+            clamp(shoreWaveSuppression * 1.1 + swashWeight * 0.52, 0.0, 1.0)
+          );
+          disp.y = mix(disp.y, max(disp.y, waveModMinDisp), shoreWaveMod);
+          float tide =
+            sin(u_time * u_tideFreq + dot(worldXZ, vec2(0.012, -0.01))) *
+            u_tideAmp *
+            weights.z *
+            domainStrength *
+            mix(0.35, 1.0, shoalBlend) *
+            shorePresence;
+          float minDisp = -baseAmp * mix(1.0, 0.15, surfWeight);
+          float shoreFloorWeight = 1.0 - smoothstep(u_shoreParamsA.x, u_shoreParamsA.z, shorelineSdf);
+          float shoreFloorDisp = shoreTerrainFloor - 0.02 - p.y - tide;
+          minDisp = max(minDisp, mix(-1e4, shoreFloorDisp, shoreFloorWeight));
+          disp.y = mix(disp.y, max(disp.y, minDisp), u_shoreFeatureMix.z);
           vec3 displaced = p + disp;
           displaced.y += tide;
           return displaced;
@@ -448,22 +717,27 @@ export class ThreeTestOceanWaterHelper {
           vUv = uv;
           float ocean;
           float sdf;
-          vec3 displaced = computeDisplacedPosition(position, vUv, ocean, sdf);
+          float surfAtten;
+          vec3 displaced = computeDisplacedPosition(position, vUv, ocean, sdf, surfAtten);
           float oceanX;
           float sdfX;
+          float surfAttenX;
           float oceanZ;
           float sdfZ;
+          float surfAttenZ;
           vec3 displacedX = computeDisplacedPosition(
             position + vec3(u_worldStep.x, 0.0, 0.0),
             vUv + vec2(u_uvStep.x, 0.0),
             oceanX,
-            sdfX
+            sdfX,
+            surfAttenX
           );
           vec3 displacedZ = computeDisplacedPosition(
             position + vec3(0.0, 0.0, u_worldStep.y),
             vUv + vec2(0.0, u_uvStep.y),
             oceanZ,
-            sdfZ
+            sdfZ,
+            surfAttenZ
           );
           vec3 tangentX = displacedX - displaced;
           vec3 tangentZ = displacedZ - displaced;
@@ -478,6 +752,7 @@ export class ThreeTestOceanWaterHelper {
           vDisp = displaced.y - position.y;
           vSdf = sdf;
           vOcean = ocean;
+          vSurfAtten = surfAtten;
           gl_Position = projectionMatrix * viewMatrix * worldPos;
         }
       `,
@@ -488,16 +763,21 @@ export class ThreeTestOceanWaterHelper {
         varying float vDisp;
         varying float vSdf;
         varying float vOcean;
+        varying float vSurfAtten;
         uniform sampler2D u_mask;
         uniform sampler2D u_supportMap;
         uniform sampler2D u_domainMap;
+        uniform sampler2D u_shoreSdf;
         uniform vec3 u_color;
         uniform vec3 u_deepColor;
         uniform float u_opacity;
         uniform float u_time;
         uniform float u_waveScale;
+        uniform vec2 u_waveFreq;
+        uniform float u_waveVariance;
         uniform float u_normalScale;
         uniform float u_normalStrength;
+        uniform vec2 u_uvStep;
         uniform float u_shininess;
         uniform vec3 u_lightDir;
         uniform float u_specular;
@@ -512,6 +792,26 @@ export class ThreeTestOceanWaterHelper {
         uniform vec2 u_scroll1;
         uniform vec2 u_scroll2;
         uniform float u_quality;
+        uniform vec4 u_shoreParamsA;
+        uniform vec4 u_shoreParamsB;
+        uniform vec4 u_shoreFeatureMix;
+        uniform vec4 u_shoreTuning;
+        uniform vec4 u_shoreWaveShape;
+        float hash21(vec2 p) {
+          vec2 q = fract(p * vec2(123.34, 456.21));
+          q += dot(q, q + 45.32);
+          return fract(q.x * q.y);
+        }
+        float valueNoise21(vec2 p) {
+          vec2 cell = floor(p);
+          vec2 f = fract(p);
+          vec2 smoothF = f * f * (3.0 - 2.0 * f);
+          float a = hash21(cell);
+          float b = hash21(cell + vec2(1.0, 0.0));
+          float c = hash21(cell + vec2(0.0, 1.0));
+          float d = hash21(cell + vec2(1.0, 1.0));
+          return mix(mix(a, b, smoothF.x), mix(c, d, smoothF.x), smoothF.y);
+        }
         vec3 getSurfaceWeights(float quality) {
           if (quality < 0.5) {
             return vec3(0.85, 0.15, 0.8);
@@ -521,13 +821,212 @@ export class ThreeTestOceanWaterHelper {
           }
           return vec3(1.1, 1.15, 1.08);
         }
+        vec2 sampleShoreGradient(vec2 uvCoord) {
+          vec2 stepX = vec2(u_uvStep.x, 0.0);
+          vec2 stepY = vec2(0.0, u_uvStep.y);
+          float sdfPosX = texture2D(u_shoreSdf, uvCoord + stepX).r * 2.0 - 1.0;
+          float sdfNegX = texture2D(u_shoreSdf, uvCoord - stepX).r * 2.0 - 1.0;
+          float sdfPosY = texture2D(u_shoreSdf, uvCoord + stepY).r * 2.0 - 1.0;
+          float sdfNegY = texture2D(u_shoreSdf, uvCoord - stepY).r * 2.0 - 1.0;
+          vec2 grad = vec2(sdfPosX - sdfNegX, sdfPosY - sdfNegY);
+          float gradLen = length(grad);
+          if (gradLen < 1e-4) {
+            return vec2(0.93, 0.37);
+          }
+          return grad / gradLen;
+        }
+        float computeOrganicShoreInset(vec2 worldXZ, float positiveSdf) {
+          float surfBand = 1.0 - smoothstep(
+            u_shoreParamsA.y,
+            u_shoreParamsA.z,
+            positiveSdf
+          );
+          float edgePresence = smoothstep(
+            u_shoreParamsA.x * 0.25,
+            u_shoreParamsA.z,
+            positiveSdf
+          );
+          float edgeNoiseA = valueNoise21(worldXZ * vec2(0.082, 0.069) + vec2(17.3, 9.1));
+          float edgeNoiseB = valueNoise21(worldXZ * vec2(0.163, 0.141) + vec2(-4.7, 13.6));
+          float edgeNoise = smoothstep(0.18, 0.86, edgeNoiseA * 0.68 + edgeNoiseB * 0.32);
+          return mix(0.34, 1.0, edgeNoise) * u_shoreParamsA.w * edgePresence * surfBand * u_shoreFeatureMix.x;
+        }
+        float computeShorePulse(vec2 worldXZ, vec2 uvCoord, float shorelineSdf) {
+          vec2 noiseUv = worldXZ * vec2(0.013, 0.011);
+          float cellNoiseA = valueNoise21(noiseUv + vec2(0.17, 0.61));
+          float cellNoiseB = valueNoise21(noiseUv * 1.13 + vec2(2.91, 1.37));
+          float cellNoiseC = valueNoise21(noiseUv * 0.72 + vec2(4.73, 0.29));
+          float lenVarianceA = mix(0.09, 0.2, clamp(u_waveVariance, 0.0, 1.0));
+          float lenVarianceB = mix(0.12, 0.24, clamp(u_waveVariance, 0.0, 1.0));
+          float shoreWaveBlend = smoothstep(
+            u_shoreParamsA.x,
+            u_shoreParamsA.z,
+            shorelineSdf
+          );
+          float localWaveLengthScale = mix(
+            1.0,
+            mix(u_shoreWaveShape.y, 1.0, shoreWaveBlend),
+            u_shoreWaveShape.z
+          );
+          float wave1Len =
+            mix(u_waveFreq.x * (1.0 - lenVarianceA), u_waveFreq.x * (1.0 + lenVarianceA), cellNoiseA) *
+            u_shoreTuning.z *
+            localWaveLengthScale;
+          float wave2Len =
+            mix(u_waveFreq.y * (1.0 - lenVarianceB), u_waveFreq.y * (1.0 + lenVarianceB), cellNoiseB) *
+            u_shoreTuning.z *
+            localWaveLengthScale;
+          vec2 shoreOut = sampleShoreGradient(uvCoord);
+          vec2 shoreIn = -shoreOut;
+          vec2 shoreAlong = vec2(-shoreIn.y, shoreIn.x);
+          float shorePhaseA =
+            dot(worldXZ, normalize(shoreIn + shoreAlong * 0.26)) *
+              (6.28318530718 / max(4.2, wave1Len * 0.42)) -
+            u_time * mix(2.8, 3.6, cellNoiseA) +
+            cellNoiseB * 6.28318530718;
+          float shorePhaseB =
+            dot(worldXZ, normalize(shoreIn - shoreAlong * 0.31)) *
+              (6.28318530718 / max(5.6, wave2Len * 0.36)) -
+            u_time * mix(3.2, 4.1, cellNoiseC) +
+            1.7;
+          float shorePulseA = max(0.0, sin(shorePhaseA));
+          float shorePulseB = max(0.0, sin(shorePhaseB));
+          shorePulseA *= shorePulseA;
+          shorePulseB *= shorePulseB;
+          float pulseMix = smoothstep(0.12, 0.92, shorePulseA * 0.62 + shorePulseB * 0.38);
+          float surfBand = 1.0 - smoothstep(u_shoreParamsA.x * 0.4, u_shoreParamsA.z, shorelineSdf);
+          return pulseMix * surfBand * u_shoreFeatureMix.y;
+        }
         void main() {
           float support = texture2D(u_supportMap, vUv).r;
-          if (support < 0.5) discard;
-          float mask = texture2D(u_mask, vUv).a;
+          float sdf = texture2D(u_shoreSdf, vUv).r * 2.0 - 1.0;
           float domainWater = texture2D(u_domainMap, vUv).b;
-          float shoreFade = smoothstep(-0.02, 0.08, vSdf);
-          float alpha = u_opacity * max(mask * mix(0.48, 1.0, shoreFade), domainWater * 0.94);
+          float positiveSdf = max(0.0, sdf);
+          float inlandDepth = max(0.0, -sdf);
+          float shorelineSdf = max(0.0, positiveSdf - computeOrganicShoreInset(vWorldPos.xz, positiveSdf));
+          float shoreWaveBlend = smoothstep(
+            u_shoreParamsA.x,
+            u_shoreParamsA.z,
+            shorelineSdf
+          );
+          float localWaveAmpScale = mix(
+            1.0,
+            mix(u_shoreWaveShape.x, 1.0, shoreWaveBlend),
+            u_shoreWaveShape.z
+          );
+          float localWaveLengthScale = mix(
+            1.0,
+            mix(u_shoreWaveShape.y, 1.0, shoreWaveBlend),
+            u_shoreWaveShape.z
+          );
+          float shoreWaveMod = (1.0 - shoreWaveBlend) * u_shoreWaveShape.z;
+          float shoreWaveSuppression = max(0.0, 1.0 - localWaveAmpScale) * shoreWaveMod;
+          float shoreWaveCompression = max(0.0, 1.0 - localWaveLengthScale) * shoreWaveMod;
+          float shorePresence = smoothstep(
+            -u_shoreParamsB.y,
+            u_shoreParamsA.y,
+            shorelineSdf
+          );
+          float shoalBlend = smoothstep(
+            u_shoreParamsA.y,
+            u_shoreParamsA.z,
+            shorelineSdf
+          );
+          float swashWeight = 1.0 - smoothstep(
+            u_shoreParamsA.x,
+            u_shoreParamsA.y,
+            shorelineSdf
+          );
+          float shoalWeight =
+            smoothstep(u_shoreParamsA.x, u_shoreParamsA.y, shorelineSdf) *
+            (1.0 - smoothstep(u_shoreParamsA.y, u_shoreParamsA.z, shorelineSdf));
+          float surfWeight = max(swashWeight, shoalWeight);
+          float swashCoverage = smoothstep(
+            u_shoreParamsB.z,
+            u_shoreParamsB.w,
+            domainWater
+          );
+          float coverageStrength = mix(
+            1.0,
+            swashCoverage,
+            clamp(swashWeight * 0.92 + shoreWaveSuppression * 0.24, 0.0, 1.0)
+          );
+          float shoreImpact = shoalWeight * 0.76 + swashWeight;
+          float shorePulse = computeShorePulse(vWorldPos.xz, vUv, shorelineSdf);
+          float swashBand = 1.0 - smoothstep(0.0, u_shoreParamsA.y + u_shoreParamsB.y, shorelineSdf);
+          float inlandReach = max(0.016, u_shoreParamsB.y * 0.7 + u_shoreParamsB.x * 0.22);
+          float inlandFade = 1.0 - smoothstep(0.0, inlandReach, inlandDepth);
+          float shoreMotionMask = swashBand * inlandFade;
+          float coastalMask = max(
+            shoreMotionMask,
+            surfWeight * smoothstep(0.02, 0.25, domainWater)
+          );
+          float pulseWash = shorePulse * (
+            0.03 +
+            0.065 * shoreImpact +
+            shoreWaveCompression * 0.03
+          ) * coastalMask;
+          float waveModWash = shoreWaveSuppression * (
+            0.025 +
+            0.05 * max(surfWeight, shorePresence) +
+            shoreWaveCompression * 0.025
+          ) * coastalMask;
+          float swashAdvance =
+            shorePulse *
+            u_shoreParamsB.x *
+            clamp(0.14 + swashWeight * 1.04 + shoalWeight * 0.42 + clamp(vSurfAtten, 0.0, 1.0) * 0.18, 0.0, 1.0) *
+            shoreMotionMask *
+            u_shoreFeatureMix.w;
+          float shorelineAdvance = swashAdvance + pulseWash + waveModWash;
+          float shoreRenderSdf = shorelineSdf - shorelineAdvance;
+          float renderShoreClip = smoothstep(
+            -u_shoreParamsB.y,
+            u_shoreParamsA.y,
+            shoreRenderSdf
+          );
+          renderShoreClip *= max(
+            shoreMotionMask,
+            smoothstep(u_shoreParamsA.x, u_shoreParamsA.z, shorelineSdf)
+          );
+          float effectiveCoverage = mix(
+            domainWater,
+            domainWater * swashCoverage,
+            clamp(swashWeight + shoreWaveSuppression * 0.22, 0.0, 1.0)
+          );
+          float swashCoverBand = max(
+            swashWeight + shoalWeight * 0.34,
+            max(shoreMotionMask * 0.42, shoreWaveSuppression * 0.28 * coastalMask)
+          );
+          float swashSheet =
+            smoothstep(-u_shoreParamsB.y, 0.055, shoreRenderSdf) *
+            (0.12 + 0.46 * shorePulse) *
+            swashCoverBand *
+            u_shoreTuning.x *
+            coastalMask;
+          float shorelineCover = clamp(shorelineAdvance * 4.2, 0.0, 1.0) * coastalMask;
+          float renderCoverage = max(max(effectiveCoverage, swashSheet * 1.02), shorelineCover);
+          if (
+            (support < 0.5 && swashSheet < 0.02 && sdf <= 0.0) ||
+            renderShoreClip < 0.01 ||
+            (swashWeight > 1e-3 && renderCoverage < u_shoreParamsB.z)
+          ) discard;
+          float mask = texture2D(u_mask, vUv).a;
+          float shoreFade = smoothstep(-u_shoreParamsB.y * 0.4, u_shoreParamsA.z, shoreRenderSdf);
+          float shorelineFilm = shorelineCover * mix(0.24, 0.52, min(1.0, shoreImpact + shorePulse * 0.18));
+          float alpha =
+            u_opacity *
+            max(
+              max(
+                renderShoreClip *
+                  max(
+                    mask * mix(0.54, 1.0, shoreFade),
+                    domainWater * mix(0.48, 1.0, shoalBlend)
+                  ),
+                shorelineFilm
+              ),
+              swashSheet * mix(0.66, 0.92, shoreImpact)
+            );
+          alpha *= max(max(coverageStrength, swashSheet * 1.24), shorelineCover);
           if (alpha < 0.01) discard;
           vec3 surfaceWeights = getSurfaceWeights(u_quality);
           vec2 worldUv = vWorldPos.xz * u_waveScale;
@@ -555,16 +1054,22 @@ export class ThreeTestOceanWaterHelper {
           float crestMask = clamp(smoothstep(0.14, 0.68, max(0.0, vDisp)) * 0.7 + smoothstep(0.995, 0.72, geomN.y) * 0.3, 0.0, 1.0);
           float spec = specBase * u_specular * 0.64 * surfaceWeights.z * mix(0.18, 1.0, crestMask) * (0.82 + 0.58 * grazing);
           float fresnel = pow(1.0 - max(dot(viewDir, n), 0.0), 3.1);
-          float shoreDist = max(0.0, vSdf);
+          float shoreDist = max(0.0, shoreRenderSdf);
           float depthFactor = clamp(pow(shoreDist, 0.55), 0.0, 1.0);
           vec3 baseColor = mix(u_color, u_deepColor, depthFactor * (0.28 + 0.32 * vOcean));
-          float foamBand = 1.0 - smoothstep(0.01, 0.19, shoreDist);
+          float foamWidth = mix(0.22, 0.4, clamp(vSurfAtten * 1.05 + shoreImpact * 0.55, 0.0, 1.0));
+          float foamBand = 1.0 - smoothstep(-u_shoreParamsB.y * 0.65, foamWidth, shoreRenderSdf);
           float lappingA = sin(u_time * 1.9 + dot(vWorldPos.xz, vec2(1.9, 1.3))) * 0.5 + 0.5;
           float lappingB = sin(u_time * 2.7 - dot(vWorldPos.xz, vec2(1.1, -1.7))) * 0.5 + 0.5;
-          float crestFoam = smoothstep(0.46, 0.96, max(0.0, vDisp)) * 0.06;
-          float foam = (foamBand * (0.18 + (lappingA * 0.65 + lappingB * 0.35) * 0.34) + crestFoam) * 0.42 * surfaceWeights.y;
+          float crestFoam = smoothstep(0.3, 0.92, max(0.0, vDisp)) * mix(0.06, 0.18, shoreImpact);
+          float lappingStrength = mix(1.0, 1.28, clamp(vSurfAtten, 0.0, 1.0)) + shoreImpact * 0.18 + shorePulse * 0.22;
+          float foam =
+            (foamBand * (0.22 + (lappingA * 0.65 + lappingB * 0.35) * 0.38 + shorePulse * 0.16) * (lappingStrength + shoreImpact * 0.2) + crestFoam) *
+            mix(0.42, 0.72, shoreImpact) *
+            surfaceWeights.y *
+            u_shoreTuning.w;
           vec3 foamColor = vec3(0.95, 0.98, 1.0);
-          vec3 litBase = mix(baseColor, foamColor, clamp(foam, 0.0, 1.0) * 0.52);
+          vec3 litBase = mix(baseColor, foamColor, clamp(foam, 0.0, 1.0) * mix(0.52, 0.76, shoreImpact));
           float skyT = clamp(0.58 + 0.42 * viewDir.y, 0.0, 1.0);
           vec3 skyReflect = mix(u_skyHorizonColor, u_skyTopColor, skyT);
           float sunExp = mix(176.0, 100.0, grazing);
@@ -598,12 +1103,19 @@ export class ThreeTestOceanWaterHelper {
     const extensionSegmentsZ = Math.max(1, Math.ceil(extension / Math.max(1e-3, oceanStepZ)));
     const alignedExtensionX = extensionSegmentsX * oceanStepX;
     const alignedExtensionZ = extensionSegmentsZ * oceanStepZ;
-    const overlap = DISTANT_OCEAN_EDGE_OVERLAP;
+    const overlapSteps = DISTANT_OCEAN_EDGE_OVERLAP_STEPS;
+    const overlapX = oceanStepX * overlapSteps;
+    const overlapZ = oceanStepZ * overlapSteps;
+    const mainWorldStep = new THREE.Vector2(Math.max(0.1, oceanStepX), Math.max(0.1, oceanStepZ));
+    const mainUvStep = new THREE.Vector2(
+      1 / Math.max(1, ocean.sampleCols - 1),
+      1 / Math.max(1, ocean.sampleRows - 1)
+    );
     const halfWidth = ocean.width * 0.5;
     const halfDepth = ocean.depth * 0.5;
-    const fullWidth = ocean.width + alignedExtensionX * 2 + overlap * 2;
-    const stripDepth = alignedExtensionZ + overlap;
-    const stripWidth = alignedExtensionX + overlap;
+    const fullWidth = ocean.width + alignedExtensionX * 2 + overlapX * 2;
+    const stripDepth = alignedExtensionZ + overlapZ;
+    const stripWidth = alignedExtensionX + overlapX;
     const createBackdropStrip = (
       width: number,
       depth: number,
@@ -625,7 +1137,9 @@ export class ThreeTestOceanWaterHelper {
         depth,
         segmentsX + 1,
         segmentsY + 1,
-        qualityUniform
+        qualityUniform,
+        mainWorldStep,
+        mainUvStep
       );
       const material = this.createBackdropMaterial(uniforms);
       const mesh = new THREE.Mesh(geometry, material);
@@ -645,36 +1159,36 @@ export class ThreeTestOceanWaterHelper {
       fullWidth,
       stripDepth,
       0,
-      -(halfDepth + (alignedExtensionZ - overlap) * 0.5),
-      Math.max(1, ocean.sampleCols - 1 + extensionSegmentsX * 2),
-      Math.max(2, extensionSegmentsZ),
+      -(halfDepth + (alignedExtensionZ - overlapZ) * 0.5),
+      Math.max(1, ocean.sampleCols - 1 + extensionSegmentsX * 2 + overlapSteps * 2),
+      Math.max(2, extensionSegmentsZ + overlapSteps),
       "north"
     );
     createBackdropStrip(
       fullWidth,
       stripDepth,
       0,
-      halfDepth + (alignedExtensionZ - overlap) * 0.5,
-      Math.max(1, ocean.sampleCols - 1 + extensionSegmentsX * 2),
-      Math.max(2, extensionSegmentsZ),
+      halfDepth + (alignedExtensionZ - overlapZ) * 0.5,
+      Math.max(1, ocean.sampleCols - 1 + extensionSegmentsX * 2 + overlapSteps * 2),
+      Math.max(2, extensionSegmentsZ + overlapSteps),
       "south"
     );
     createBackdropStrip(
       stripWidth,
-      ocean.depth + overlap * 2,
-      halfWidth + (alignedExtensionX - overlap) * 0.5,
+      ocean.depth + overlapZ * 2,
+      halfWidth + (alignedExtensionX - overlapX) * 0.5,
       0,
-      Math.max(2, extensionSegmentsX),
-      Math.max(1, ocean.sampleRows - 1),
+      Math.max(2, extensionSegmentsX + overlapSteps),
+      Math.max(1, ocean.sampleRows - 1 + overlapSteps * 2),
       "east"
     );
     createBackdropStrip(
       stripWidth,
-      ocean.depth + overlap * 2,
-      -(halfWidth + (alignedExtensionX - overlap) * 0.5),
+      ocean.depth + overlapZ * 2,
+      -(halfWidth + (alignedExtensionX - overlapX) * 0.5),
       0,
-      Math.max(2, extensionSegmentsX),
-      Math.max(1, ocean.sampleRows - 1),
+      Math.max(2, extensionSegmentsX + overlapSteps),
+      Math.max(1, ocean.sampleRows - 1 + overlapSteps * 2),
       "west"
     );
   }
@@ -761,5 +1275,7 @@ export class ThreeTestOceanWaterHelper {
     this.mesh.receiveShadow = false;
     this.scene.add(this.mesh);
     this.buildDistantOceanBackdrop(baseMesh, ocean, qualityUniform);
+    this.applyDebugControlsToUniforms();
+    this.applyDebugVisibility();
   }
 }

@@ -43,6 +43,7 @@ const DETACHED_TOWN_WAYPOINT_SLOPE_LIMIT = 0.11;
 const DETACHED_TOWN_WAYPOINT_SCORE_WEIGHT = 12;
 const DETACHED_TOWN_WAYPOINT_OFFSET_MIN = 6;
 const DETACHED_TOWN_WAYPOINT_OFFSET_MAX = 18;
+const ENABLE_DEBUG_DETACHED_LAND_RECOVERY = false;
 
 type DetachedTownConnectorRoadOptions = NonNullable<Parameters<typeof carveRoad>[4]>;
 
@@ -65,7 +66,6 @@ export type SettlementPlacementResult = {
   pruneRedundantDiagonals?: boolean;
   bridgeTransitions?: boolean;
   heightScaleMultiplier?: number;
-  layout?: "coastal_ring" | "bridge_chain" | "inland_valley" | "hub_spokes";
   townDensity?: number;
   bridgeAllowance?: number;
   settlementSpacing?: number;
@@ -691,6 +691,49 @@ function findNearestConnectedRoadTile(state: WorldState, origin: Point, networkO
   return best;
 }
 
+function buildConnectedRoadMask(state: WorldState, networkOrigin: Point): Uint8Array {
+  const visited = new Uint8Array(state.grid.totalTiles);
+  const start = findNearestRoadTile(state, networkOrigin);
+  const startIdx = indexFor(state.grid, start.x, start.y);
+  if (!isRoadLikeTile(state, start.x, start.y)) {
+    return visited;
+  }
+  const queue = new Int32Array(state.grid.totalTiles);
+  let head = 0;
+  let tail = 0;
+  queue[tail] = startIdx;
+  tail += 1;
+  visited[startIdx] = 1;
+
+  while (head < tail) {
+    const idx = queue[head];
+    head += 1;
+    const x = idx % state.grid.cols;
+    const y = Math.floor(idx / state.grid.cols);
+    const mask = state.tileRoadEdges[idx] ?? 0;
+    for (let i = 0; i < ROAD_EDGE_DIRS.length; i += 1) {
+      const dir = ROAD_EDGE_DIRS[i];
+      if ((mask & dir.bit) === 0) {
+        continue;
+      }
+      const nx = x + dir.dx;
+      const ny = y + dir.dy;
+      if (!inBounds(state.grid, nx, ny)) {
+        continue;
+      }
+      const nIdx = indexFor(state.grid, nx, ny);
+      if (visited[nIdx] > 0 || !isRoadLikeTile(state, nx, ny)) {
+        continue;
+      }
+      visited[nIdx] = 1;
+      queue[tail] = nIdx;
+      tail += 1;
+    }
+  }
+
+  return visited;
+}
+
 type RoadComponentSnapshot = {
   componentByIdx: Int32Array;
   componentCount: number;
@@ -963,18 +1006,113 @@ function buildDetachedTownConnectorRoadOptions(
   return {
     bridgePolicy: bridgeTransitions ? "allow" : "never",
     heightScaleMultiplier,
-    diagonalPenalty: Math.min(diagonalPenalty, 0.02),
-    turnPenalty: 0.01,
-    gradeLimitStart: 0.12,
-    gradeLimitRelaxStep: 0.02,
-    gradeLimitMax: 0.4,
-    crossfallLimitStart: 0.08,
-    crossfallLimitRelaxStep: 0.02,
-    crossfallLimitMax: 0.3,
-    gradeChangeLimitStart: 0.08,
-    gradeChangeLimitRelaxStep: 0.02,
-    gradeChangeLimitMax: 0.3
+    diagonalPenalty: Math.min(diagonalPenalty, 0.01),
+    turnPenalty: 0.002,
+    gradeLimitStart: 0.14,
+    gradeLimitRelaxStep: 0.03,
+    gradeLimitMax: 0.55,
+    slopePenaltyWeight: 10,
+    crossfallLimitStart: 0.1,
+    crossfallLimitRelaxStep: 0.025,
+    crossfallLimitMax: 0.4,
+    crossfallPenaltyWeight: 8,
+    gradeChangeLimitStart: 0.1,
+    gradeChangeLimitRelaxStep: 0.025,
+    gradeChangeLimitMax: 0.4,
+    gradeChangePenaltyWeight: 8,
+    riverBlockDistance: 0,
+    riverPenaltyDistance: 1,
+    riverPenaltyWeight: 2,
+    bridgeStepCost: 12,
+    bridgeMaxConsecutiveWater: 5,
+    bridgeMaxWaterTilesPerPath: 10
   };
+}
+
+function buildFallbackTownConnectorRoadOptions(
+  bridgeTransitions: boolean,
+  heightScaleMultiplier: number
+): DetachedTownConnectorRoadOptions {
+  return {
+    bridgePolicy: bridgeTransitions ? "allow" : "never",
+    heightScaleMultiplier,
+    diagonalPenalty: 0,
+    turnPenalty: 0,
+    gradeLimitStart: 0.2,
+    gradeLimitRelaxStep: 0.05,
+    gradeLimitMax: 0.8,
+    slopePenaltyWeight: 4,
+    crossfallLimitStart: 0.12,
+    crossfallLimitRelaxStep: 0.03,
+    crossfallLimitMax: 0.5,
+    crossfallPenaltyWeight: 4,
+    gradeChangeLimitStart: 0.12,
+    gradeChangeLimitRelaxStep: 0.03,
+    gradeChangeLimitMax: 0.5,
+    gradeChangePenaltyWeight: 4,
+    riverBlockDistance: 0,
+    riverPenaltyDistance: 0,
+    riverPenaltyWeight: 0,
+    bridgeStepCost: 8,
+    bridgeMaxConsecutiveWater: 6,
+    bridgeMaxWaterTilesPerPath: 16
+  };
+}
+
+function buildEmergencyTownConnectorRoadOptions(
+  bridgeTransitions: boolean,
+  heightScaleMultiplier: number
+): DetachedTownConnectorRoadOptions {
+  return {
+    bridgePolicy: bridgeTransitions ? "allow" : "never",
+    heightScaleMultiplier,
+    diagonalPenalty: 0,
+    turnPenalty: 0,
+    gradeLimitStart: 0.35,
+    gradeLimitRelaxStep: 0.1,
+    gradeLimitMax: 1,
+    slopePenaltyWeight: 1,
+    crossfallLimitStart: 0.18,
+    crossfallLimitRelaxStep: 0.05,
+    crossfallLimitMax: 0.7,
+    crossfallPenaltyWeight: 1,
+    gradeChangeLimitStart: 0.18,
+    gradeChangeLimitRelaxStep: 0.05,
+    gradeChangeLimitMax: 0.7,
+    gradeChangePenaltyWeight: 1,
+    riverBlockDistance: 0,
+    riverPenaltyDistance: 0,
+    riverPenaltyWeight: 0,
+    bridgeStepCost: 6,
+    bridgeMaxConsecutiveWater: 8,
+    bridgeMaxWaterTilesPerPath: 24
+  };
+}
+
+function carveRoadToRoadComponent(
+  state: WorldState,
+  rng: RNG,
+  start: Point,
+  snapshot: RoadComponentSnapshot,
+  targetComponentId: number,
+  options: DetachedTownConnectorRoadOptions
+): boolean {
+  const startIdx = indexFor(state.grid, start.x, start.y);
+  if (snapshot.componentByIdx[startIdx] === targetComponentId) {
+    return true;
+  }
+  return (
+    carveRoadToTarget(
+      state,
+      rng,
+      start,
+      (x, y) => {
+        const idx = indexFor(state.grid, x, y);
+        return snapshot.componentByIdx[idx] === targetComponentId && idx !== startIdx;
+      },
+      options
+    ) !== null
+  );
 }
 
 function connectDetachedTownRoadPairViaWaypoint(
@@ -1081,11 +1219,14 @@ function connectDetachedTownRoadComponents(
         );
         for (let startIndex = 0; startIndex < startCandidates.length && !connected; startIndex += 1) {
           const start = startCandidates[startIndex]!;
-          for (let endIndex = 0; endIndex < endCandidates.length && !connected; endIndex += 1) {
-            const end = endCandidates[endIndex]!;
-            if (carveRoad(state, rng, start, end, connectorOptions)) {
-              connected = true;
-            }
+          if (carveRoadToRoadComponent(state, rng, start, snapshot, pair.b, connectorOptions)) {
+            connected = true;
+          }
+        }
+        for (let endIndex = 0; endIndex < endCandidates.length && !connected; endIndex += 1) {
+          const end = endCandidates[endIndex]!;
+          if (carveRoadToRoadComponent(state, rng, end, snapshot, pair.a, connectorOptions)) {
+            connected = true;
           }
         }
         const waypointStartCandidates = startCandidates.slice(0, 2);
@@ -1529,48 +1670,30 @@ const distanceToNearestRiver = (state: WorldState, x: number, y: number, radius:
   return best;
 };
 
-const scoreBridgeOpportunity = (state: WorldState, x: number, y: number): number => {
-  const dirs = [
-    { x: 1, y: 0 },
-    { x: -1, y: 0 },
-    { x: 0, y: 1 },
-    { x: 0, y: -1 }
-  ];
-  let best = 0;
-  dirs.forEach((dir) => {
-    let waterRun = 0;
-    for (let step = 1; step <= 4; step += 1) {
-      const nx = x + dir.x * step;
-      const ny = y + dir.y * step;
+const distanceToNearestWater = (state: WorldState, x: number, y: number, radius: number): number => {
+  let best = radius + 1;
+  for (let dy = -radius; dy <= radius; dy += 1) {
+    for (let dx = -radius; dx <= radius; dx += 1) {
+      const nx = x + dx;
+      const ny = y + dy;
       if (!inBounds(state.grid, nx, ny)) {
-        break;
-      }
-      const idx = indexFor(state.grid, nx, ny);
-      if (state.tiles[idx].type === "water") {
-        waterRun += 1;
         continue;
       }
-      if (waterRun > 0) {
-        best = Math.max(best, 1 - Math.abs(waterRun - 2) * 0.25);
+      const idx = indexFor(state.grid, nx, ny);
+      if (state.tiles[idx].type !== "water") {
+        continue;
       }
-      break;
+      best = Math.min(best, Math.abs(dx) + Math.abs(dy));
     }
-  });
-  return clamp01(best);
+  }
+  return best;
 };
 
 type TownCandidate = Point & {
   score: number;
-  angle: number;
-  distFromBase: number;
 };
 
-const collectLayoutCandidates = (
-  state: WorldState,
-  layout: NonNullable<SettlementPlacementResult["layout"]>,
-  townDensity: number,
-  bridgeAllowance: number
-): TownCandidate[] => {
+const collectSettlementCandidates = (state: WorldState, townDensity: number): TownCandidate[] => {
   const candidates: TownCandidate[] = [];
   const step = Math.max(1, Math.floor(Math.max(state.grid.cols, state.grid.rows) / 192));
   const minDim = Math.min(state.grid.cols, state.grid.rows);
@@ -1585,44 +1708,34 @@ const collectLayoutCandidates = (
         continue;
       }
       const edgeDist = Math.min(x, y, state.grid.cols - 1 - x, state.grid.rows - 1 - y);
-      const edgeNorm = clamp01(edgeDist / Math.max(1, minDim * 0.5));
+      const edgeNorm = clamp01(edgeDist / Math.max(1, minDim * 0.28));
       const coastalness = countNeighborWater(state, x, y) / 4;
-      const riverNear = 1 - Math.min(7, distanceToNearestRiver(state, x, y, 7)) / 7;
-      const bridgeScore = scoreBridgeOpportunity(state, x, y);
-      const baseRing = 1 - Math.abs(distFromBase / Math.max(1, minDim * 0.42) - 1);
+      const waterDistanceNorm = clamp01(Math.min(10, distanceToNearestWater(state, x, y, 10)) / 10);
+      const riverDistanceNorm = clamp01(Math.min(10, distanceToNearestRiver(state, x, y, 10)) / 10);
+      const riverSuitability = 1 - Math.min(1, Math.abs(riverDistanceNorm - 0.45) / 0.45);
+      const baseBand = 1 - Math.min(1, Math.abs(distFromBase / Math.max(1, minDim * 0.36) - 1));
       const localRelief = [
         x > 0 ? Math.abs(tile.elevation - state.tiles[indexFor(state.grid, x - 1, y)].elevation) : 0,
         x < state.grid.cols - 1 ? Math.abs(tile.elevation - state.tiles[indexFor(state.grid, x + 1, y)].elevation) : 0,
         y > 0 ? Math.abs(tile.elevation - state.tiles[indexFor(state.grid, x, y - 1)].elevation) : 0,
         y < state.grid.rows - 1 ? Math.abs(tile.elevation - state.tiles[indexFor(state.grid, x, y + 1)].elevation) : 0
       ].reduce((best, value) => Math.max(best, value), 0);
-      const slopePenalty = clamp01(localRelief * 7.5);
-      let score = 0.15 - slopePenalty * 0.7;
-      switch (layout) {
-        case "coastal_ring":
-          score += coastalness * 0.95 + edgeNorm * 0.22 + baseRing * 0.34 + bridgeScore * 0.12;
-          break;
-        case "bridge_chain":
-          score += coastalness * 0.7 + bridgeScore * 0.95 + baseRing * 0.24 + edgeNorm * 0.1;
-          break;
-        case "inland_valley":
-          score += riverNear * 0.9 + edgeNorm * 0.45 + baseRing * 0.18 - coastalness * 0.18;
-          break;
-        case "hub_spokes":
-        default:
-          score += baseRing * 0.72 + edgeNorm * 0.25 + riverNear * 0.18 + bridgeScore * bridgeAllowance * 0.12;
-          break;
-      }
-      score += (townDensity - 0.5) * 0.08;
-      if (score <= 0.15) {
+      const flatness = 1 - clamp01(localRelief * 8.5);
+      let score = 0.1;
+      score += flatness * 0.92;
+      score += edgeNorm * 0.4;
+      score += waterDistanceNorm * 0.38;
+      score += riverSuitability * 0.18;
+      score += baseBand * 0.16;
+      score -= coastalness * 0.42;
+      score += (townDensity - 0.5) * 0.05;
+      if (score <= 0.35) {
         continue;
       }
       candidates.push({
         x,
         y,
-        score,
-        angle: Math.atan2(y - state.basePoint.y, x - state.basePoint.x),
-        distFromBase
+        score
       });
     }
   }
@@ -1630,32 +1743,367 @@ const collectLayoutCandidates = (
   return candidates;
 };
 
-const selectVillageCentersForLayout = (
+const selectVillageCenters = (
   state: WorldState,
-  layout: NonNullable<SettlementPlacementResult["layout"]>,
   townDensity: number,
   spacing01: number,
-  bridgeAllowance: number,
   requestedCount: number,
   selectionCount = requestedCount
 ): Point[] => {
-  const candidates = collectLayoutCandidates(state, layout, townDensity, bridgeAllowance);
+  const candidates = collectSettlementCandidates(state, townDensity);
   const minDim = Math.min(state.grid.cols, state.grid.rows);
   const minSpacing = Math.max(12, Math.round(minDim * (0.08 + spacing01 * 0.1)));
-  const minAngleSeparation = layout === "hub_spokes" ? Math.PI / Math.max(3, requestedCount + 1) * 0.7 : 0;
   const chosen: TownCandidate[] = [];
   for (let i = 0; i < candidates.length && chosen.length < selectionCount; i += 1) {
     const candidate = candidates[i];
     if (chosen.some((existing) => Math.hypot(existing.x - candidate.x, existing.y - candidate.y) < minSpacing)) {
       continue;
     }
-    if (minAngleSeparation > 0 && chosen.some((existing) => Math.abs(existing.angle - candidate.angle) < minAngleSeparation)) {
-      continue;
-    }
     chosen.push(candidate);
   }
   return chosen.map(({ x, y }) => ({ x, y }));
 };
+
+type TownConnectionEdge = {
+  a: number;
+  b: number;
+  distance: number;
+};
+
+type TownRoadConnectivitySnapshot = {
+  componentByTownId: Map<number, number>;
+  componentCount: number;
+};
+
+const createTownConnectionEdgeKey = (a: number, b: number): string => (a < b ? `${a}:${b}` : `${b}:${a}`);
+
+const compareTownConnectionEdges = (left: TownConnectionEdge, right: TownConnectionEdge): number => {
+  if (left.distance !== right.distance) {
+    return left.distance - right.distance;
+  }
+  if (left.a !== right.a) {
+    return left.a - right.a;
+  }
+  return left.b - right.b;
+};
+
+const collectAllTownConnectionEdges = (towns: Town[]): TownConnectionEdge[] => {
+  const edges: TownConnectionEdge[] = [];
+  for (let i = 0; i < towns.length; i += 1) {
+    const town = towns[i]!;
+    for (let j = i + 1; j < towns.length; j += 1) {
+      const other = towns[j]!;
+      edges.push({
+        a: town.id,
+        b: other.id,
+        distance: Math.hypot(town.x - other.x, town.y - other.y)
+      });
+    }
+  }
+  edges.sort(compareTownConnectionEdges);
+  return edges;
+};
+
+export function buildTownConnectionPlan(towns: Town[]): Array<[Town, Town]> {
+  if (towns.length <= 1) {
+    return [];
+  }
+
+  const allEdges = collectAllTownConnectionEdges(towns);
+  const neighborEdges: TownConnectionEdge[] = [];
+  const neighborEdgeKeys = new Set<string>();
+
+  for (let i = 0; i < towns.length; i += 1) {
+    const town = towns[i]!;
+    const neighbors: TownConnectionEdge[] = [];
+    for (let j = i + 1; j < towns.length; j += 1) {
+      const other = towns[j]!;
+      neighbors.push({
+        a: town.id,
+        b: other.id,
+        distance: Math.hypot(town.x - other.x, town.y - other.y)
+      });
+    }
+    for (let j = 0; j < i; j += 1) {
+      const other = towns[j]!;
+      neighbors.push({
+        a: other.id,
+        b: town.id,
+        distance: Math.hypot(town.x - other.x, town.y - other.y)
+      });
+    }
+    neighbors.sort(compareTownConnectionEdges);
+    const nearestCount = Math.min(2, neighbors.length);
+    for (let k = 0; k < nearestCount; k += 1) {
+      const edge = neighbors[k]!;
+      const key = createTownConnectionEdgeKey(edge.a, edge.b);
+      if (neighborEdgeKeys.has(key)) {
+        continue;
+      }
+      neighborEdgeKeys.add(key);
+      neighborEdges.push(edge);
+    }
+  }
+
+  neighborEdges.sort(compareTownConnectionEdges);
+
+  const parent = new Int32Array(towns.length);
+  for (let i = 0; i < towns.length; i += 1) {
+    parent[i] = i;
+  }
+  const find = (value: number): number => {
+    let current = value;
+    while (parent[current] !== current) {
+      parent[current] = parent[parent[current]!]!;
+      current = parent[current]!;
+    }
+    return current;
+  };
+  const union = (leftId: number, rightId: number): boolean => {
+    const leftRoot = find(leftId);
+    const rightRoot = find(rightId);
+    if (leftRoot === rightRoot) {
+      return false;
+    }
+    parent[rightRoot] = leftRoot;
+    return true;
+  };
+
+  const townById = new Map<number, Town>(towns.map((town) => [town.id, town]));
+  const selected: TownConnectionEdge[] = [];
+  const selectedKeys = new Set<string>();
+  const addIfConnecting = (edge: TownConnectionEdge): void => {
+    const key = createTownConnectionEdgeKey(edge.a, edge.b);
+    if (selectedKeys.has(key)) {
+      return;
+    }
+    if (!union(edge.a, edge.b)) {
+      return;
+    }
+    selectedKeys.add(key);
+    selected.push(edge);
+  };
+
+  for (let i = 0; i < neighborEdges.length; i += 1) {
+    addIfConnecting(neighborEdges[i]!);
+  }
+  for (let i = 0; i < allEdges.length; i += 1) {
+    if (selected.length >= towns.length - 1) {
+      break;
+    }
+    addIfConnecting(allEdges[i]!);
+  }
+
+  selected.sort(compareTownConnectionEdges);
+  return selected
+    .map((edge) => {
+      const left = townById.get(edge.a);
+      const right = townById.get(edge.b);
+      return left && right ? ([left, right] as [Town, Town]) : null;
+    })
+    .filter((pair): pair is [Town, Town] => pair !== null);
+}
+
+function buildTownRoadConnectivitySnapshot(
+  state: WorldState,
+  towns: Town[],
+  townRoadHubs: Map<number, Point>
+): TownRoadConnectivitySnapshot {
+  const roadSnapshot = buildRoadComponentSnapshot(state);
+  const componentByTownId = new Map<number, number>();
+  const componentIds = new Set<number>();
+  for (let i = 0; i < towns.length; i += 1) {
+    const town = towns[i]!;
+    const hub = townRoadHubs.get(town.id) ?? { x: town.x, y: town.y };
+    const road = findNearestRoadTile(state, hub);
+    const roadIdx = indexFor(state.grid, road.x, road.y);
+    const componentId = roadSnapshot.componentByIdx[roadIdx];
+    if (componentId < 0) {
+      continue;
+    }
+    componentByTownId.set(town.id, componentId);
+    componentIds.add(componentId);
+  }
+  return {
+    componentByTownId,
+    componentCount: componentIds.size
+  };
+}
+
+function carveTownPairConnection(
+  state: WorldState,
+  rng: RNG,
+  leftTown: Town,
+  rightTown: Town,
+  townRoadHubs: Map<number, Point>,
+  bridgeTransitions: boolean,
+  diagonalPenalty: number,
+  heightScaleMultiplier: number
+): boolean {
+  const leftHub = townRoadHubs.get(leftTown.id) ?? { x: leftTown.x, y: leftTown.y };
+  const rightHub = townRoadHubs.get(rightTown.id) ?? { x: rightTown.x, y: rightTown.y };
+  const connectorOptions = buildDetachedTownConnectorRoadOptions(
+    bridgeTransitions,
+    diagonalPenalty,
+    Math.min(heightScaleMultiplier, DETACHED_TOWN_CONNECTOR_HEIGHT_SCALE_CAP)
+  );
+  const roadSnapshot = buildRoadComponentSnapshot(state);
+  const leftRoad = findNearestRoadTile(state, leftHub);
+  const rightRoad = findNearestRoadTile(state, rightHub);
+  const leftComponent = roadSnapshot.componentByIdx[indexFor(state.grid, leftRoad.x, leftRoad.y)];
+  const rightComponent = roadSnapshot.componentByIdx[indexFor(state.grid, rightRoad.x, rightRoad.y)];
+
+  if (leftComponent >= 0 && rightComponent >= 0) {
+    if (leftComponent === rightComponent) {
+      return true;
+    }
+    const startAnchor =
+      findNearestRoadTileInComponent(state, roadSnapshot, leftComponent, rightHub) ?? leftRoad;
+    if (carveRoadToRoadComponent(state, rng, startAnchor, roadSnapshot, rightComponent, connectorOptions)) {
+      return true;
+    }
+    const fallbackOptions = buildFallbackTownConnectorRoadOptions(
+      bridgeTransitions,
+      Math.min(heightScaleMultiplier, DETACHED_TOWN_CONNECTOR_HEIGHT_SCALE_CAP)
+    );
+    if (carveRoadToRoadComponent(state, rng, startAnchor, roadSnapshot, rightComponent, fallbackOptions)) {
+      return true;
+    }
+    const emergencyOptions = buildEmergencyTownConnectorRoadOptions(
+      bridgeTransitions,
+      Math.min(heightScaleMultiplier, DETACHED_TOWN_CONNECTOR_HEIGHT_SCALE_CAP)
+    );
+    return carveRoadToRoadComponent(state, rng, startAnchor, roadSnapshot, rightComponent, emergencyOptions);
+  }
+
+  if (leftHub.x === rightHub.x && leftHub.y === rightHub.y) {
+    return false;
+  }
+  if (carveRoad(state, rng, leftHub, rightHub, connectorOptions)) {
+    return true;
+  }
+  const fallbackOptions = buildFallbackTownConnectorRoadOptions(
+    bridgeTransitions,
+    Math.min(heightScaleMultiplier, DETACHED_TOWN_CONNECTOR_HEIGHT_SCALE_CAP)
+  );
+  if (carveRoad(state, rng, leftHub, rightHub, fallbackOptions)) {
+    return true;
+  }
+  const emergencyOptions = buildEmergencyTownConnectorRoadOptions(
+    bridgeTransitions,
+    Math.min(heightScaleMultiplier, DETACHED_TOWN_CONNECTOR_HEIGHT_SCALE_CAP)
+  );
+  return carveRoad(state, rng, leftHub, rightHub, emergencyOptions);
+}
+
+function ensureTownRoadGraphConnected(
+  state: WorldState,
+  rng: RNG,
+  towns: Town[],
+  townRoadHubs: Map<number, Point>,
+  attemptedEdgeKeys: Set<string>,
+  bridgeTransitions: boolean,
+  diagonalPenalty: number,
+  heightScaleMultiplier: number
+): void {
+  if (towns.length <= 1) {
+    return;
+  }
+  const townById = new Map<number, Town>(towns.map((town) => [town.id, town]));
+  const candidateEdges = collectAllTownConnectionEdges(towns);
+
+  while (true) {
+    const connectivity = buildTownRoadConnectivitySnapshot(state, towns, townRoadHubs);
+    if (connectivity.componentCount <= 1) {
+      return;
+    }
+
+    let nextEdge: TownConnectionEdge | null = null;
+    for (let i = 0; i < candidateEdges.length; i += 1) {
+      const edge = candidateEdges[i]!;
+      const key = createTownConnectionEdgeKey(edge.a, edge.b);
+      if (attemptedEdgeKeys.has(key)) {
+        continue;
+      }
+      const leftComponent = connectivity.componentByTownId.get(edge.a);
+      const rightComponent = connectivity.componentByTownId.get(edge.b);
+      if (leftComponent === undefined || rightComponent === undefined || leftComponent === rightComponent) {
+        continue;
+      }
+      nextEdge = edge;
+      break;
+    }
+
+    if (!nextEdge) {
+      return;
+    }
+
+    attemptedEdgeKeys.add(createTownConnectionEdgeKey(nextEdge.a, nextEdge.b));
+    const leftTown = townById.get(nextEdge.a);
+    const rightTown = townById.get(nextEdge.b);
+    if (!leftTown || !rightTown) {
+      continue;
+    }
+    carveTownPairConnection(
+      state,
+      rng,
+      leftTown,
+      rightTown,
+      townRoadHubs,
+      bridgeTransitions,
+      diagonalPenalty,
+      heightScaleMultiplier
+    );
+  }
+}
+
+function createTownLocalRoadHub(
+  state: WorldState,
+  rng: RNG,
+  center: Point,
+  options: {
+    hubMinRadius: number;
+    hubMaxRadius: number;
+    localRadius: number;
+    branchLength: number;
+    bridgeTransitions: boolean;
+    diagonalPenalty: number;
+    heightScaleMultiplier: number;
+  }
+): Point {
+  const hubCandidate = findSettlementRoadHub(state, center, options.hubMinRadius, options.hubMaxRadius);
+  const hub =
+    (hubCandidate.x !== center.x || hubCandidate.y !== center.y) &&
+    carveRoad(state, rng, center, hubCandidate, {
+      bridgePolicy: "never",
+      diagonalPenalty: options.diagonalPenalty,
+      heightScaleMultiplier: options.heightScaleMultiplier
+    })
+      ? hubCandidate
+      : center;
+
+  carveRoadRing(state, rng, hub, options.localRadius);
+
+  const localEnds = [
+    { x: hub.x + options.branchLength, y: hub.y },
+    { x: hub.x - options.branchLength, y: hub.y },
+    { x: hub.x, y: hub.y + options.branchLength },
+    { x: hub.x, y: hub.y - options.branchLength }
+  ];
+  localEnds.forEach((end) => {
+    if (!inBounds(state.grid, end.x, end.y)) {
+      return;
+    }
+    carveRoadToBuildableArea(state, rng, hub, end, {
+      radius: 2,
+      bridgePolicy: options.bridgeTransitions ? "allow" : "never",
+      diagonalPenalty: options.diagonalPenalty,
+      heightScaleMultiplier: options.heightScaleMultiplier
+    });
+  });
+
+  return hub;
+}
 
 function connectDetachedLand(
   state: WorldState,
@@ -1680,7 +2128,6 @@ export function placeSettlements(
   const bridgeAllowance = clamp01(plan?.bridgeAllowance ?? (plan?.bridgeTransitions ? 0.7 : 0.2));
   const bridgeTransitions = plan?.bridgeTransitions ?? bridgeAllowance >= 0.14;
   const heightScaleMultiplier = Math.max(0.1, plan?.heightScaleMultiplier ?? 1);
-  const layout = plan?.layout ?? "coastal_ring";
   const townDensity = clamp01(plan?.townDensity ?? 0.5);
   const settlementSpacing = clamp01(plan?.settlementSpacing ?? 0.55);
   state.totalPropertyValue = 0;
@@ -1720,32 +2167,19 @@ export function placeSettlements(
   const fastMode = maxDim >= 1024;
   const centralRadius = 7 + Math.floor(rng.next() * 3);
   const ringRadius = 3 + Math.floor(rng.next() * 2);
-  const spokeCount = Math.max(3, Math.round(3 + townDensity * 4));
-  const spokeLength = ringRadius + 6 + Math.floor(3 + townDensity * 6);
-  const baseRoadHubCandidate = findSettlementRoadHub(state, state.basePoint, 6, Math.max(12, ringRadius + 7));
-  const baseRoadHub =
-    carveRoadToBuildableArea(state, rng, state.basePoint, baseRoadHubCandidate, {
-      radius: 2,
-      bridgePolicy: "never",
-      diagonalPenalty,
-      heightScaleMultiplier
-    }) ?? baseRoadHubCandidate;
-
-  carveRoadRing(state, rng, baseRoadHub, ringRadius);
+  const baseTownSeed = { x: state.basePoint.x, y: state.basePoint.y, radius: centralRadius + 2 };
 
   if (fastMode) {
-    assignTownNames(state, [{ x: state.basePoint.x, y: state.basePoint.y, radius: centralRadius + 2 }]);
-    const fastSpokes = Math.min(4, spokeCount);
-    for (let i = 0; i < fastSpokes; i += 1) {
-      const angle = (Math.PI * 2 * i) / fastSpokes;
-      const target = {
-        x: Math.round(baseRoadHub.x + Math.cos(angle) * spokeLength),
-        y: Math.round(baseRoadHub.y + Math.sin(angle) * spokeLength)
-      };
-      if (inBounds(state.grid, target.x, target.y)) {
-        carveRoadLine(state, rng, baseRoadHub, target);
-      }
-    }
+    assignTownNames(state, [baseTownSeed]);
+    createTownLocalRoadHub(state, rng, state.basePoint, {
+      hubMinRadius: 6,
+      hubMaxRadius: Math.max(12, ringRadius + 7),
+      localRadius: ringRadius,
+      branchLength: ringRadius + 2,
+      bridgeTransitions,
+      diagonalPenalty,
+      heightScaleMultiplier
+    });
     const centralHouseCount = 12 + Math.floor(rng.next() * 8);
     state.settlementRequestedHouses += centralHouseCount;
     placeVillageHouses(state, rng, state.basePoint, centralRadius, centralHouseCount, 150, 320, 2, 5, 0.85, context);
@@ -1762,47 +2196,17 @@ export function placeSettlements(
       pruneRedundantDiagonals,
       bridgeTransitions,
       heightScaleMultiplier,
-      layout,
       townDensity,
       bridgeAllowance,
       settlementSpacing
     };
   }
 
-  assignTownNames(state, [{ x: state.basePoint.x, y: state.basePoint.y, radius: centralRadius + 2 }]);
-
-  for (let i = 0; i < spokeCount; i += 1) {
-    const angle = (Math.PI * 2 * i) / spokeCount + (rng.next() - 0.5) * 0.5;
-    const rawTarget = {
-      x: Math.round(baseRoadHub.x + Math.cos(angle) * spokeLength),
-      y: Math.round(baseRoadHub.y + Math.sin(angle) * spokeLength)
-    };
-    const nearby = findNearbyBuildable(state, rawTarget, 6);
-    const target = nearby ?? (isBuildable(state, rawTarget.x, rawTarget.y) ? rawTarget : null);
-    if (target && inBounds(state.grid, target.x, target.y)) {
-      carveRoadToBuildableArea(state, rng, baseRoadHub, target, {
-        radius: 4,
-        bridgePolicy: bridgeTransitions ? "allow" : "never",
-        diagonalPenalty,
-        heightScaleMultiplier
-      });
-    }
-  }
-
-  const centralHouseCount = 22 + Math.floor(rng.next() * 12);
-  state.settlementRequestedHouses += centralHouseCount;
-  placeVillageHouses(state, rng, state.basePoint, centralRadius, centralHouseCount, 150, 320, 2, 5, 0.85, context);
-
-  const requestedVillageCount = Math.max(
-    2,
-    Math.round(2 + townDensity * 4 + (layout === "bridge_chain" || layout === "coastal_ring" ? 1 : 0))
-  );
-  const villageCenterCandidates = selectVillageCentersForLayout(
+  const requestedVillageCount = Math.max(2, Math.round(2 + townDensity * 4));
+  const villageCenterCandidates = selectVillageCenters(
     state,
-    layout,
     townDensity,
     settlementSpacing,
-    bridgeAllowance,
     requestedVillageCount,
     requestedVillageCount * 5
   );
@@ -1817,50 +2221,62 @@ export function placeSettlements(
     villageCenters.push(candidate);
   }
 
-  assignTownNames(state, [
-    { x: state.basePoint.x, y: state.basePoint.y, radius: centralRadius + 2 },
-    ...villageCenters.map((center) => ({ x: center.x, y: center.y, radius: 6 }))
-  ]);
-  remapHousesToNearestTown(state);
+  assignTownNames(state, [baseTownSeed, ...villageCenters.map((center) => ({ x: center.x, y: center.y, radius: 6 }))]);
 
-  villageCenters.forEach((center) => {
-    const anchor = findNearestConnectedRoadTile(state, center, baseRoadHub);
-    const roadHub =
-      carveRoadToBuildableArea(state, rng, anchor, center, {
-        radius: 5,
-        bridgePolicy: bridgeTransitions ? "allow" : "never",
-        diagonalPenalty,
-        heightScaleMultiplier
-      }) ?? center;
-    carveRoadToBuildableArea(state, rng, roadHub, center, {
-      radius: 3,
-      bridgePolicy: bridgeTransitions ? "allow" : "never",
+  const townRoadHubs = new Map<number, Point>();
+  for (let i = 0; i < state.towns.length; i += 1) {
+    const town = state.towns[i]!;
+    const isBaseTown = i === 0;
+    const localRadius = isBaseTown ? ringRadius : 2 + Math.floor(rng.next() * 2);
+    const hub = createTownLocalRoadHub(state, rng, { x: town.x, y: town.y }, {
+      hubMinRadius: isBaseTown ? 6 : 2,
+      hubMaxRadius: isBaseTown ? Math.max(12, ringRadius + 7) : 7,
+      localRadius,
+      branchLength: localRadius + (isBaseTown ? 2 : 1),
+      bridgeTransitions,
       diagonalPenalty,
       heightScaleMultiplier
     });
+    townRoadHubs.set(town.id, hub);
+  }
 
-    const localSize = 2 + Math.floor(rng.next() * 2);
-    const localEnds = [
-      { x: roadHub.x + localSize, y: roadHub.y },
-      { x: roadHub.x - localSize, y: roadHub.y },
-      { x: roadHub.x, y: roadHub.y + localSize },
-      { x: roadHub.x, y: roadHub.y - localSize }
-    ];
-    localEnds.forEach((end) => {
-      if (inBounds(state.grid, end.x, end.y)) {
-        carveRoadToBuildableArea(state, rng, roadHub, end, {
-          radius: 2,
-          bridgePolicy: bridgeTransitions ? "allow" : "never",
-          diagonalPenalty,
-          heightScaleMultiplier
-        });
-      }
-    });
+  const connectionPlan = buildTownConnectionPlan(state.towns);
+  const attemptedTownEdges = new Set<string>();
+  for (let i = 0; i < connectionPlan.length; i += 1) {
+    const [leftTown, rightTown] = connectionPlan[i]!;
+    carveTownPairConnection(
+      state,
+      rng,
+      leftTown,
+      rightTown,
+      townRoadHubs,
+      bridgeTransitions,
+      diagonalPenalty,
+      heightScaleMultiplier
+    );
+  }
+  ensureTownRoadGraphConnected(
+    state,
+    rng,
+    state.towns,
+    townRoadHubs,
+    attemptedTownEdges,
+    bridgeTransitions,
+    diagonalPenalty,
+    heightScaleMultiplier
+  );
 
+  const centralHouseCount = 22 + Math.floor(rng.next() * 12);
+  state.settlementRequestedHouses += centralHouseCount;
+  placeVillageHouses(state, rng, state.basePoint, centralRadius, centralHouseCount, 150, 320, 2, 5, 0.85, context);
+
+  villageCenters.forEach((center) => {
     const houseCount = 9 + Math.floor(rng.next() * 8);
     state.settlementRequestedHouses += houseCount;
     placeVillageHouses(state, rng, center, 6, houseCount, 120, 260, 1, 4, 0.75, context);
   });
+
+  remapHousesToNearestTown(state);
 
   const roadTiles = collectRoadTiles(state);
   const roadsideTarget = 8 + Math.floor(rng.next() * 8);
@@ -1889,8 +2305,9 @@ export function placeSettlements(
     }
   }
 
-  connectDetachedTownRoadComponents(state, rng, bridgeTransitions, diagonalPenalty, heightScaleMultiplier);
-  connectDetachedLand(state, rng, diagonalPenalty, bridgeTransitions, heightScaleMultiplier);
+  if (ENABLE_DEBUG_DETACHED_LAND_RECOVERY) {
+    connectDetachedLand(state, rng, diagonalPenalty, bridgeTransitions, heightScaleMultiplier);
+  }
   backfillRoadEdgesFromAdjacency(state);
   if (pruneRedundantDiagonals) {
     pruneRoadDiagonalStubs(state);
@@ -1919,7 +2336,6 @@ export function placeSettlements(
     pruneRedundantDiagonals,
     bridgeTransitions,
     heightScaleMultiplier,
-    layout,
     townDensity,
     bridgeAllowance,
     settlementSpacing
@@ -1947,7 +2363,6 @@ export const createSettlementPlacementPlan = (
     pruneRedundantDiagonals?: boolean;
     bridgeTransitions?: boolean;
     heightScaleMultiplier?: number;
-    layout?: SettlementPlacementResult["layout"];
     townDensity?: number;
     bridgeAllowance?: number;
     settlementSpacing?: number;
@@ -1960,7 +2375,6 @@ export const createSettlementPlacementPlan = (
     pruneRedundantDiagonals: options.pruneRedundantDiagonals ?? true,
     bridgeTransitions: options.bridgeTransitions ?? true,
     heightScaleMultiplier: Math.max(0.1, options.heightScaleMultiplier ?? 1),
-    layout: options.layout ?? "coastal_ring",
     townDensity: clamp01(options.townDensity ?? 0.5),
     bridgeAllowance: clamp01(options.bridgeAllowance ?? (options.bridgeTransitions ? 0.7 : 0.2)),
     settlementSpacing: clamp01(options.settlementSpacing ?? 0.55),
@@ -1972,4 +2386,3 @@ export function populateCommunities(state: WorldState, rng: RNG): void {
   const plan = placeSettlements(state, rng);
   connectSettlementsByRoad(state, rng, plan);
 }
-

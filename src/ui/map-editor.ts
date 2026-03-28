@@ -1,6 +1,17 @@
 import { MAP_SIZE_PRESETS, type MapSizeId } from "../core/config.js";
 import { RNG } from "../core/rng.js";
-import { createInitialState, resetState, type WorldState } from "../core/state.js";
+import {
+  COAST_CLASS_BEACH,
+  COAST_CLASS_CLIFF,
+  COAST_CLASS_NONE,
+  COAST_CLASS_SHELF_WATER,
+  createInitialState,
+  resetState,
+  TILE_ID_TO_TYPE,
+  TILE_TYPE_IDS,
+  type WorldState
+} from "../core/state.js";
+import { getTerrainHeightScale } from "../core/terrainScale.js";
 import { TREE_TYPE_IDS } from "../core/types.js";
 import { syncTileSoA } from "../core/tileCache.js";
 import { generateMap, type MapGenDebug, type MapGenDebugPhase, type MapGenDebugSnapshot } from "../mapgen/index.js";
@@ -20,7 +31,10 @@ import {
   type MapScenario
 } from "../persistence/mapScenarios.js";
 import { buildRenderTerrainSample } from "../render/simView.js";
-import { createTerrainPreviewController } from "../render/terrainPreview.js";
+import {
+  createTerrainPreviewController,
+  type TerrainPreviewBridgeSelection
+} from "../render/terrainPreview.js";
 import { resetTerrainCaches } from "../render/terrainCache.js";
 import { DEFAULT_MAP_SIZE, DEFAULT_RUN_SEED, type NewRunConfig } from "./run-config.js";
 import { buildTerrainControls } from "./terrain-controls.js";
@@ -47,6 +61,14 @@ type MapEditorRefs = {
   previewProgressBar: HTMLDivElement;
   previewMeta: HTMLDivElement;
   previewResetView: HTMLButtonElement;
+  bridgeDebugPanel: HTMLDivElement;
+  bridgeDebugMeta: HTMLDivElement;
+  bridgeDebugOutput: HTMLPreElement;
+  bridgeDebugCopy: HTMLButtonElement;
+  coastDebugPanel: HTMLDivElement;
+  coastDebugMeta: HTMLDivElement;
+  coastDebugOutput: HTMLPreElement;
+  coastDebugCopy: HTMLButtonElement;
   scenarioList: HTMLSelectElement;
   scenarioLoad: HTMLButtonElement;
   scenarioEntryStatus: HTMLDivElement;
@@ -214,6 +236,11 @@ const buildSnapshotSample = (
   heightScaleMultiplier,
   tileTypes: snapshot.tileTypes,
   riverMask: snapshot.riverMask,
+  oceanMask: snapshot.oceanMask,
+  seaLevel: snapshot.seaLevel,
+  coastDistance: snapshot.coastDistance,
+  coastClass: snapshot.coastClass,
+  fullResolution: true,
   treesEnabled,
   worldSeed
 });
@@ -230,7 +257,7 @@ const buildWorldPreviewSample = (
     false,
     treesEnabled,
     false,
-    false,
+    true,
     heightScaleMultiplier
   );
 };
@@ -238,6 +265,314 @@ const buildWorldPreviewSample = (
 type SnapshotPreviewSample = ReturnType<typeof buildSnapshotSample>;
 type WorldPreviewSample = ReturnType<typeof buildWorldPreviewSample>;
 type PreviewRenderableSample = SnapshotPreviewSample | WorldPreviewSample;
+type CoastlineProbe = {
+  label: string;
+  x: number;
+  y: number;
+  dx: number;
+  dy: number;
+  angle: number;
+};
+
+const MAP_EDITOR_STEP_SEQUENCE: readonly MapEditorStepId[] = [
+  "scenario",
+  "relief",
+  "carving",
+  "flooding",
+  "rivers",
+  "settlements",
+  "vegetation",
+  "final"
+] as const;
+const COASTLINE_DEBUG_PROBE_COUNT = 4;
+const COASTLINE_DEBUG_TRANSECT_OFFSETS = [-1, 0, 1, 2] as const;
+const CARDINAL_DIRS = [
+  { dx: 0, dy: -1 },
+  { dx: 1, dy: 0 },
+  { dx: 0, dy: 1 },
+  { dx: -1, dy: 0 }
+] as const;
+
+const inSampleBounds = (sample: PreviewRenderableSample, x: number, y: number): boolean =>
+  x >= 0 && y >= 0 && x < sample.cols && y < sample.rows;
+
+const sampleIndexFor = (sample: PreviewRenderableSample, x: number, y: number): number => y * sample.cols + x;
+
+const angularDistance = (left: number, right: number): number => {
+  const raw = Math.abs(left - right) % (Math.PI * 2);
+  return raw > Math.PI ? Math.PI * 2 - raw : raw;
+};
+
+const getCompassLabel = (angle: number): string => {
+  const directions = ["E", "SE", "S", "SW", "W", "NW", "N", "NE"];
+  const normalized = (angle + Math.PI * 2) % (Math.PI * 2);
+  const bucket = Math.round(normalized / (Math.PI / 4)) % directions.length;
+  return directions[bucket] ?? "coast";
+};
+
+const formatCoastClassLabel = (coastClass: number | undefined): string => {
+  switch (coastClass ?? COAST_CLASS_NONE) {
+    case COAST_CLASS_BEACH:
+      return "beach";
+    case COAST_CLASS_CLIFF:
+      return "cliff";
+    case COAST_CLASS_SHELF_WATER:
+      return "shelf";
+    case COAST_CLASS_NONE:
+    default:
+      return "-";
+  }
+};
+
+const formatTileTypeLabel = (typeId: number | undefined): string =>
+  typeId === undefined ? "n/a" : TILE_ID_TO_TYPE[typeId] ?? `id${typeId}`;
+
+const findCoastlineProbeReferenceSample = (
+  samples: Partial<Record<MapEditorStepId, PreviewRenderableSample>>
+): { stepId: MapEditorStepId; sample: PreviewRenderableSample } | null => {
+  const preferredSteps: readonly MapEditorStepId[] = ["flooding", "rivers", "settlements", "vegetation", "final"];
+  for (let i = 0; i < preferredSteps.length; i += 1) {
+    const stepId = preferredSteps[i]!;
+    const sample = samples[stepId];
+    if (sample?.tileTypes && sample.tileTypes.length === sample.cols * sample.rows) {
+      return { stepId, sample };
+    }
+  }
+  for (let i = 0; i < MAP_EDITOR_STEP_SEQUENCE.length; i += 1) {
+    const stepId = MAP_EDITOR_STEP_SEQUENCE[i]!;
+    const sample = samples[stepId];
+    if (sample?.tileTypes && sample.tileTypes.length === sample.cols * sample.rows) {
+      return { stepId, sample };
+    }
+  }
+  return null;
+};
+
+const collectCoastlineProbes = (sample: PreviewRenderableSample, desiredCount = COASTLINE_DEBUG_PROBE_COUNT): CoastlineProbe[] => {
+  if (!sample.tileTypes || sample.tileTypes.length !== sample.cols * sample.rows) {
+    return [];
+  }
+  const centerX = (sample.cols - 1) * 0.5;
+  const centerY = (sample.rows - 1) * 0.5;
+  const minDim = Math.min(sample.cols, sample.rows);
+  const maxEdgeDist = Math.max(10, Math.floor(minDim * 0.32));
+  const minProbeSpacing = Math.max(12, Math.floor(minDim * 0.16));
+  const oceanMask = sample.oceanMask;
+  const riverMask = sample.riverMask;
+  let hasOceanMask = false;
+  if (oceanMask) {
+    for (let i = 0; i < oceanMask.length; i += 1) {
+      if ((oceanMask[i] ?? 0) > 0) {
+        hasOceanMask = true;
+        break;
+      }
+    }
+  }
+
+  const candidates: Array<CoastlineProbe & { edgeDist: number; score: number }> = [];
+  for (let y = 1; y < sample.rows - 1; y += 1) {
+    for (let x = 1; x < sample.cols - 1; x += 1) {
+      const idx = sampleIndexFor(sample, x, y);
+      const typeId = sample.tileTypes[idx];
+      if (typeId === TILE_TYPE_IDS.water || (riverMask?.[idx] ?? 0) > 0) {
+        continue;
+      }
+      const edgeDist = Math.min(x, y, sample.cols - 1 - x, sample.rows - 1 - y);
+      if (edgeDist > maxEdgeDist) {
+        continue;
+      }
+
+      let bestDir: { dx: number; dy: number } | null = null;
+      let bestNeighborEdgeDist = Number.POSITIVE_INFINITY;
+      let bestNeighborOcean = 0;
+      for (let dirIndex = 0; dirIndex < CARDINAL_DIRS.length; dirIndex += 1) {
+        const dir = CARDINAL_DIRS[dirIndex]!;
+        const nx = x + dir.dx;
+        const ny = y + dir.dy;
+        const nIdx = sampleIndexFor(sample, nx, ny);
+        const neighborTypeId = sample.tileTypes[nIdx];
+        const neighborOcean = oceanMask?.[nIdx] ?? 0;
+        const neighborRiver = riverMask?.[nIdx] ?? 0;
+        const neighborIsWater = neighborTypeId === TILE_TYPE_IDS.water;
+        const neighborIsOcean = neighborOcean > 0;
+        if (hasOceanMask) {
+          if (!neighborIsOcean) {
+            continue;
+          }
+        } else if (!neighborIsWater || neighborRiver > 0) {
+          continue;
+        }
+        const neighborEdgeDist = Math.min(nx, ny, sample.cols - 1 - nx, sample.rows - 1 - ny);
+        if (
+          !bestDir ||
+          neighborOcean > bestNeighborOcean ||
+          (neighborOcean === bestNeighborOcean && neighborEdgeDist < bestNeighborEdgeDist)
+        ) {
+          bestDir = dir;
+          bestNeighborEdgeDist = neighborEdgeDist;
+          bestNeighborOcean = neighborOcean;
+        }
+      }
+
+      if (!bestDir) {
+        continue;
+      }
+
+      const angle = Math.atan2(y - centerY, x - centerX);
+      const coastScore = (bestNeighborOcean > 0 ? 3 : 0) + (maxEdgeDist - edgeDist) / Math.max(1, maxEdgeDist);
+      candidates.push({
+        label: getCompassLabel(angle),
+        x,
+        y,
+        dx: bestDir.dx,
+        dy: bestDir.dy,
+        angle,
+        edgeDist,
+        score: coastScore
+      });
+    }
+  }
+
+  if (candidates.length === 0) {
+    return [];
+  }
+
+  const targets = Array.from({ length: desiredCount }, (_, index) => (index / desiredCount) * Math.PI * 2);
+  const selected: CoastlineProbe[] = [];
+  const used = new Set<number>();
+
+  targets.forEach((targetAngle) => {
+    let bestIndex = -1;
+    let bestScore = Number.POSITIVE_INFINITY;
+    for (let i = 0; i < candidates.length; i += 1) {
+      if (used.has(i)) {
+        continue;
+      }
+      const candidate = candidates[i]!;
+      if (selected.some((probe) => Math.hypot(probe.x - candidate.x, probe.y - candidate.y) < minProbeSpacing)) {
+        continue;
+      }
+      const score =
+        angularDistance((candidate.angle + Math.PI * 2) % (Math.PI * 2), targetAngle)
+        + candidate.edgeDist / Math.max(1, maxEdgeDist) * 0.35
+        - candidate.score * 0.08;
+      if (score < bestScore) {
+        bestScore = score;
+        bestIndex = i;
+      }
+    }
+    if (bestIndex >= 0) {
+      used.add(bestIndex);
+      selected.push(candidates[bestIndex]!);
+    }
+  });
+
+  const rankedFallback = [...candidates].sort((left, right) => {
+    if (left.edgeDist !== right.edgeDist) {
+      return left.edgeDist - right.edgeDist;
+    }
+    return right.score - left.score;
+  });
+  for (let i = 0; i < rankedFallback.length && selected.length < desiredCount; i += 1) {
+    const candidate = rankedFallback[i]!;
+    if (selected.some((probe) => Math.hypot(probe.x - candidate.x, probe.y - candidate.y) < minProbeSpacing)) {
+      continue;
+    }
+    selected.push(candidate);
+  }
+
+  return selected.map((probe, index) => ({
+    ...probe,
+    label: `${probe.label}${index + 1}`
+  }));
+};
+
+const formatCoastlineProbePoint = (
+  sample: PreviewRenderableSample,
+  probe: CoastlineProbe,
+  offset: number
+): string => {
+  const x = probe.x + probe.dx * offset;
+  const y = probe.y + probe.dy * offset;
+  if (!inSampleBounds(sample, x, y)) {
+    return `${offset >= 0 ? "+" : ""}${offset}@oob`;
+  }
+  const idx = sampleIndexFor(sample, x, y);
+  const elevation = sample.elevations[idx] ?? 0;
+  const seaLevel = sample.seaLevel?.[idx];
+  const heightScale = getTerrainHeightScale(sample.cols, sample.rows, sample.heightScaleMultiplier ?? 1);
+  const deltaSea = Number.isFinite(seaLevel) ? elevation - (seaLevel ?? 0) : Number.NaN;
+  return [
+    `${offset >= 0 ? "+" : ""}${offset}@${x},${y}`,
+    formatTileTypeLabel(sample.tileTypes?.[idx]),
+    `e=${elevation.toFixed(4)}`,
+    `y=${(elevation * heightScale).toFixed(2)}`,
+    `ds=${Number.isFinite(deltaSea) ? `${deltaSea >= 0 ? "+" : ""}${deltaSea.toFixed(4)}` : "n/a"}`,
+    `oc=${sample.oceanMask?.[idx] ?? 0}`,
+    `rv=${sample.riverMask?.[idx] ?? 0}`,
+    `cc=${formatCoastClassLabel(sample.coastClass?.[idx])}`,
+    `cd=${sample.coastDistance?.[idx] ?? 0}`
+  ].join(" ");
+};
+
+const buildCoastlineDebugReport = (
+  samples: Partial<Record<MapEditorStepId, PreviewRenderableSample>>,
+  activeStep: MapEditorStepId,
+  shareCode: string
+): { meta: string; text: string; copyEnabled: boolean } => {
+  const cachedSteps = MAP_EDITOR_STEP_SEQUENCE.filter((stepId) => Boolean(samples[stepId]));
+  const reference = findCoastlineProbeReferenceSample(samples);
+  if (!reference) {
+    return {
+      meta: "Coastline probes will appear after a coastline-bearing preview step is cached.",
+      text: "No coastline probes available yet.",
+      copyEnabled: false
+    };
+  }
+
+  const probes = collectCoastlineProbes(reference.sample);
+  if (probes.length === 0) {
+    return {
+      meta: `No outer coastline probes found in ${MAP_EDITOR_PREVIEW_BY_STEP[reference.stepId].label}.`,
+      text: [
+        `shareCode=${shareCode || "n/a"}`,
+        `activeStep=${activeStep}`,
+        `probeSource=${reference.stepId}`,
+        `cachedSteps=${cachedSteps.join(",") || "none"}`,
+        "note=No coastline probes matched the outer ocean edge filter."
+      ].join("\n"),
+      copyEnabled: false
+    };
+  }
+
+  const lines = [
+    `shareCode=${shareCode || "n/a"}`,
+    `activeStep=${activeStep} (${MAP_EDITOR_PREVIEW_BY_STEP[activeStep].label})`,
+    `probeSource=${reference.stepId} (${MAP_EDITOR_PREVIEW_BY_STEP[reference.stepId].label})`,
+    `cachedSteps=${cachedSteps.join(",")}`,
+    "note=Offsets -1/0/+1/+2 follow the outward coast normal toward open water."
+  ];
+
+  probes.forEach((probe) => {
+    lines.push("");
+    lines.push(`probe=${probe.label} coast=${probe.x},${probe.y} dir=${probe.dx},${probe.dy}`);
+    cachedSteps.forEach((stepId) => {
+      const sample = samples[stepId];
+      if (!sample) {
+        return;
+      }
+      lines.push(
+        `${stepId.padEnd(10)} ${COASTLINE_DEBUG_TRANSECT_OFFSETS.map((offset) => formatCoastlineProbePoint(sample, probe, offset)).join(" | ")}`
+      );
+    });
+  });
+
+  return {
+    meta: `${probes.length} coastline probe${probes.length === 1 ? "" : "s"} sampled from ${MAP_EDITOR_PREVIEW_BY_STEP[reference.stepId].label} and compared across ${cachedSteps.length} cached step${cachedSteps.length === 1 ? "" : "s"}.`,
+    text: lines.join("\n"),
+    copyEnabled: true
+  };
+};
 
 const cloneFloat32Array = (values: Float32Array | undefined): Float32Array | undefined =>
   values ? Float32Array.from(values) : undefined;
@@ -261,6 +596,10 @@ const clonePreviewSample = (sample: PreviewRenderableSample): PreviewRenderableS
       tileCanopyCover: cloneFloat32Array(worldSample.tileCanopyCover),
       tileStemDensity: cloneUint8Array(worldSample.tileStemDensity),
       riverMask: cloneUint8Array(worldSample.riverMask),
+      oceanMask: cloneUint8Array(worldSample.oceanMask),
+      seaLevel: cloneFloat32Array(worldSample.seaLevel),
+      coastDistance: worldSample.coastDistance ? Uint16Array.from(worldSample.coastDistance) : undefined,
+      coastClass: cloneUint8Array(worldSample.coastClass),
       roadBridgeMask: cloneUint8Array(worldSample.roadBridgeMask),
       roadEdges: cloneUint8Array(worldSample.roadEdges),
       roadWallEdges: cloneUint8Array(worldSample.roadWallEdges),
@@ -275,7 +614,11 @@ const clonePreviewSample = (sample: PreviewRenderableSample): PreviewRenderableS
     ...snapshotSample,
     elevations: Float32Array.from(snapshotSample.elevations),
     tileTypes: cloneUint8Array(snapshotSample.tileTypes),
-    riverMask: cloneUint8Array(snapshotSample.riverMask)
+    riverMask: cloneUint8Array(snapshotSample.riverMask),
+    oceanMask: cloneUint8Array(snapshotSample.oceanMask),
+    seaLevel: cloneFloat32Array(snapshotSample.seaLevel),
+    coastDistance: snapshotSample.coastDistance ? Uint16Array.from(snapshotSample.coastDistance) : undefined,
+    coastClass: cloneUint8Array(snapshotSample.coastClass)
   };
 };
 
@@ -296,6 +639,14 @@ export const getMapEditorRefs = (): MapEditorRefs => ({
   previewProgressBar: document.getElementById("mapEditorPreviewProgressBar") as HTMLDivElement,
   previewMeta: document.getElementById("mapEditorPreviewMeta") as HTMLDivElement,
   previewResetView: document.getElementById("mapEditorResetView") as HTMLButtonElement,
+  bridgeDebugPanel: document.getElementById("mapEditorBridgeDebugPanel") as HTMLDivElement,
+  bridgeDebugMeta: document.getElementById("mapEditorBridgeDebugMeta") as HTMLDivElement,
+  bridgeDebugOutput: document.getElementById("mapEditorBridgeDebugOutput") as HTMLPreElement,
+  bridgeDebugCopy: document.getElementById("mapEditorBridgeDebugCopy") as HTMLButtonElement,
+  coastDebugPanel: document.getElementById("mapEditorCoastDebugPanel") as HTMLDivElement,
+  coastDebugMeta: document.getElementById("mapEditorCoastDebugMeta") as HTMLDivElement,
+  coastDebugOutput: document.getElementById("mapEditorCoastDebugOutput") as HTMLPreElement,
+  coastDebugCopy: document.getElementById("mapEditorCoastDebugCopy") as HTMLButtonElement,
   scenarioList: document.getElementById("mapEditorScenarioList") as HTMLSelectElement,
   scenarioLoad: document.getElementById("mapEditorScenarioLoad") as HTMLButtonElement,
   scenarioEntryStatus: document.getElementById("mapEditorScenarioEntryStatus") as HTMLDivElement,
@@ -362,7 +713,6 @@ export const initMapEditor = (refs: MapEditorRefs, deps: MapEditorDeps): MapEdit
     idPrefix: "mapEditorVegetation",
     groups: MAP_EDITOR_TERRAIN_GROUPS.vegetation
   });
-
   const preview = createTerrainPreviewController(refs.previewCanvas);
   const terrainControlElements = collectTerrainControlElements(refs.screen);
   refs.legacyNotice.textContent = "Older saved map scenarios used the legacy slider model and are not loaded in this editor.";
@@ -409,6 +759,7 @@ export const initMapEditor = (refs: MapEditorRefs, deps: MapEditorDeps): MapEdit
       panel.classList.toggle("is-active", panel.dataset.stepPanel === stepId);
     });
     syncCurrentScenarioLabel();
+    updateCoastlineDebugPanel();
     const draft = collectDraft();
     const cacheKey = syncPreviewCacheDraft(draft);
     if (tryRenderCachedActiveStep()) {
@@ -466,6 +817,7 @@ export const initMapEditor = (refs: MapEditorRefs, deps: MapEditorDeps): MapEdit
   const syncShareCodeOutput = (shareCode: string): void => {
     refs.scenarioSeedInput.value = shareCode;
     refs.finalShareCodeInput.value = shareCode;
+    updateCoastlineDebugPanel();
   };
 
   const syncSeedField = (seedNumber = readSeedNumber()): void => {
@@ -515,15 +867,10 @@ export const initMapEditor = (refs: MapEditorRefs, deps: MapEditorDeps): MapEdit
   const buildRandomTerrainRecipe = (mapSize: MapSizeId, seed: number): TerrainRecipe => {
     const rng = new RNG(seed ^ 0x7f4a7c15);
     const archetype = pickRandom(rng, ["MASSIF", "LONG_SPINE", "TWIN_BAY", "SHELF"] as const);
-    const explicitTownLayout = pickRandom(
-      rng,
-      ["coastal_ring", "bridge_chain", "inland_valley", "hub_spokes"] as const
-    );
     const base = createDefaultTerrainRecipe(mapSize, archetype);
     const advanced = base.advancedOverrides ?? {};
     return cloneTerrainRecipe({
       ...base,
-      townLayout: rng.next() < 0.68 ? "auto" : explicitTownLayout,
       relief: jitterValue(rng, base.relief, archetype === "SHELF" ? 0.1 : 0.16),
       ruggedness: jitterValue(rng, base.ruggedness, archetype === "SHELF" ? 0.08 : 0.16),
       coastComplexity: jitterValue(rng, base.coastComplexity, archetype === "TWIN_BAY" ? 0.16 : 0.12),
@@ -536,6 +883,11 @@ export const initMapEditor = (refs: MapEditorRefs, deps: MapEditorDeps): MapEdit
         ...advanced,
         interiorRise: jitterValue(rng, advanced.interiorRise ?? 0.5, archetype === "SHELF" ? 0.1 : 0.14),
         maxHeight: jitterValue(rng, advanced.maxHeight ?? 0.5, archetype === "SHELF" ? 0.08 : 0.12),
+        embayment: jitterValue(rng, advanced.embayment ?? 0.5, archetype === "TWIN_BAY" ? 0.14 : 0.1),
+        anisotropy: jitterValue(rng, advanced.anisotropy ?? 0.5, archetype === "LONG_SPINE" ? 0.14 : 0.1),
+        asymmetry: jitterValue(rng, advanced.asymmetry ?? 0.5, 0.12),
+        ridgeAlignment: jitterValue(rng, advanced.ridgeAlignment ?? 0.5, archetype === "LONG_SPINE" ? 0.12 : 0.1),
+        uplandDistribution: jitterValue(rng, advanced.uplandDistribution ?? 0.5, 0.12),
         islandCompactness: jitterValue(rng, advanced.islandCompactness ?? 0.5, 0.12),
         ridgeFrequency: jitterValue(rng, advanced.ridgeFrequency ?? 0.5, archetype === "LONG_SPINE" ? 0.1 : 0.14),
         basinStrength: jitterValue(rng, advanced.basinStrength ?? 0.5, 0.12),
@@ -577,6 +929,7 @@ export const initMapEditor = (refs: MapEditorRefs, deps: MapEditorDeps): MapEdit
       previewCacheKey = cacheKey;
       previewCachedSamples = {};
       previewWarmToken += 1;
+      updateCoastlineDebugPanel();
     }
     return cacheKey;
   };
@@ -585,6 +938,7 @@ export const initMapEditor = (refs: MapEditorRefs, deps: MapEditorDeps): MapEdit
     previewCacheKey = null;
     previewCachedSamples = {};
     previewWarmToken += 1;
+    updateCoastlineDebugPanel();
   };
 
   const cachePreviewSample = (
@@ -596,6 +950,7 @@ export const initMapEditor = (refs: MapEditorRefs, deps: MapEditorDeps): MapEdit
       return;
     }
     previewCachedSamples[stepId] = clonePreviewSample(sample);
+    updateCoastlineDebugPanel();
   };
 
   const cacheEquivalentPreviewSample = (
@@ -682,6 +1037,78 @@ export const initMapEditor = (refs: MapEditorRefs, deps: MapEditorDeps): MapEdit
   const setScenarioStatus = (message: string): void => {
     refs.scenarioStatus.textContent = message;
   };
+
+  let bridgeDebugClipboardText = "No bridge selected.";
+  let coastDebugClipboardText = "No coastline probes available yet.";
+
+  const formatBridgeTile = (tile: { x: number; y: number }): string => `(${tile.x}, ${tile.y})`;
+
+  const updateBridgeDebugPanel = (selection: TerrainPreviewBridgeSelection): void => {
+    const shareCode = refs.finalShareCodeInput.value || refs.scenarioSeedInput.value;
+    const summary = selection.bridgeDebug;
+    if (!summary) {
+      refs.bridgeDebugMeta.textContent = "Click a rendered bridge in the preview to inspect it.";
+      refs.bridgeDebugOutput.textContent = "No bridge selected.";
+      refs.bridgeDebugCopy.disabled = true;
+      bridgeDebugClipboardText = "No bridge selected.";
+      return;
+    }
+    if (!selection.selectedSpan) {
+      refs.bridgeDebugMeta.textContent =
+        summary.renderedSpanCount > 0
+          ? `${summary.renderedSpanCount} rendered bridge span${summary.renderedSpanCount === 1 ? "" : "s"}, ${summary.orphanComponentCount} orphan component${summary.orphanComponentCount === 1 ? "" : "s"}. Click a rendered bridge in the preview to inspect it.`
+          : `No rendered bridge spans. Orphan bridge components: ${summary.orphanComponentCount}.`;
+      refs.bridgeDebugOutput.textContent = [
+        `shareCode=${shareCode}`,
+        `previewStep=${getActivePreviewConfig().label}`,
+        `renderedBridgeSpans=${summary.renderedSpanCount}`,
+        `orphanBridgeComponents=${summary.orphanComponentCount}`,
+        summary.orphanComponentCount > 0 ? "note=Some bridge mask components do not have a valid two-sided rendered span." : "note=Click a rendered bridge to inspect it."
+      ].join("\n");
+      refs.bridgeDebugCopy.disabled = true;
+      bridgeDebugClipboardText = refs.bridgeDebugOutput.textContent;
+      return;
+    }
+
+    const span = selection.selectedSpan;
+    refs.bridgeDebugMeta.textContent = `Bridge ${span.spanIndex + 1} of ${Math.max(1, summary.renderedSpanCount)} selected.`;
+    refs.bridgeDebugOutput.textContent = [
+      `shareCode=${shareCode}`,
+      `previewStep=${getActivePreviewConfig().label}`,
+      `bridgeSpan=${span.spanIndex + 1}/${Math.max(1, summary.renderedSpanCount)}`,
+      `componentIndex=${span.componentIndex}`,
+      `routeMode=${span.routeMode}`,
+      `componentTiles=${span.componentTileCount}`,
+      `connectors=${span.connectorCount}`,
+      `bridgePathTiles=${span.bridgePath.length}`,
+      `componentBounds=${span.componentBounds.minX},${span.componentBounds.minY} -> ${span.componentBounds.maxX},${span.componentBounds.maxY}`,
+      `startRoad=${formatBridgeTile(span.startRoad)}`,
+      `endRoad=${formatBridgeTile(span.endRoad)}`,
+      `startAnchor=edge(${span.startAnchor.edgeX.toFixed(2)}, ${span.startAnchor.edgeY.toFixed(2)}) terrain=${span.startAnchor.terrainY.toFixed(3)} deck=${span.startAnchor.baseY.toFixed(3)}`,
+      `endAnchor=edge(${span.endAnchor.edgeX.toFixed(2)}, ${span.endAnchor.edgeY.toFixed(2)}) terrain=${span.endAnchor.terrainY.toFixed(3)} deck=${span.endAnchor.baseY.toFixed(3)}`,
+      `spanLength=${span.worldSpanLength.toFixed(3)}`,
+      `deckY=${span.minDeckY.toFixed(3)}..${span.maxDeckY.toFixed(3)}`,
+      `terrainClearanceMin=${span.minTerrainClearance.toFixed(3)}`,
+      `waterClearanceMin=${span.minWaterClearance === null ? "n/a" : span.minWaterClearance.toFixed(3)}`,
+      `bridgeTiles=${span.bridgePath.map(formatBridgeTile).join(" ")}`
+    ].join("\n");
+    refs.bridgeDebugCopy.disabled = false;
+    bridgeDebugClipboardText = refs.bridgeDebugOutput.textContent;
+  };
+
+  const updateCoastlineDebugPanel = (): void => {
+    const shareCode = refs.finalShareCodeInput.value || refs.scenarioSeedInput.value;
+    const report = buildCoastlineDebugReport(previewCachedSamples, activeStep, shareCode);
+    refs.coastDebugMeta.textContent = report.meta;
+    refs.coastDebugOutput.textContent = report.text;
+    refs.coastDebugCopy.disabled = !report.copyEnabled;
+    coastDebugClipboardText = report.text;
+  };
+
+  preview.setBridgeSelectionListener((selection) => {
+    updateBridgeDebugPanel(selection);
+  });
+  updateCoastlineDebugPanel();
 
   const describePreviewState = (draft: TerrainDraft): string => {
     const match = findMatchingScenario(draft);
@@ -1038,6 +1465,7 @@ export const initMapEditor = (refs: MapEditorRefs, deps: MapEditorDeps): MapEdit
     const sessionToken = previewSessionToken;
     visible = true;
     assetsReadyForSession = false;
+    updateBridgeDebugPanel({ selectedSpan: null, bridgeDebug: null });
     resetPreviewCache();
     refs.screen.classList.remove("hidden");
     setActiveStep(activeStep);
@@ -1080,6 +1508,7 @@ export const initMapEditor = (refs: MapEditorRefs, deps: MapEditorDeps): MapEdit
     visible = false;
     previewSessionToken += 1;
     assetsReadyForSession = false;
+    updateBridgeDebugPanel({ selectedSpan: null, bridgeDebug: null });
     resetPreviewCache();
     if (previewDebounceHandle) {
       window.clearTimeout(previewDebounceHandle);
@@ -1307,6 +1736,46 @@ export const initMapEditor = (refs: MapEditorRefs, deps: MapEditorDeps): MapEdit
       refs.finalShareCodeInput.focus();
       refs.finalShareCodeInput.select();
       setShareCodeStatus("Clipboard access failed. The share code has been selected for manual copy.");
+    }
+  });
+
+  refs.bridgeDebugCopy.addEventListener("click", async () => {
+    if (refs.bridgeDebugCopy.disabled || bridgeDebugClipboardText.trim().length === 0) {
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(bridgeDebugClipboardText);
+      refs.bridgeDebugMeta.textContent = "Copied bridge debug to the clipboard.";
+    } catch {
+      refs.bridgeDebugOutput.focus();
+      const selection = window.getSelection();
+      if (selection) {
+        selection.removeAllRanges();
+        const range = document.createRange();
+        range.selectNodeContents(refs.bridgeDebugOutput);
+        selection.addRange(range);
+      }
+      refs.bridgeDebugMeta.textContent = "Clipboard access failed. Bridge debug has been selected for manual copy.";
+    }
+  });
+
+  refs.coastDebugCopy.addEventListener("click", async () => {
+    if (refs.coastDebugCopy.disabled || coastDebugClipboardText.trim().length === 0) {
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(coastDebugClipboardText);
+      refs.coastDebugMeta.textContent = "Copied coastline probe debug to the clipboard.";
+    } catch {
+      refs.coastDebugOutput.focus();
+      const selection = window.getSelection();
+      if (selection) {
+        selection.removeAllRanges();
+        const range = document.createRange();
+        range.selectNodeContents(refs.coastDebugOutput);
+        selection.addRange(range);
+      }
+      refs.coastDebugMeta.textContent = "Clipboard access failed. Coastline probe debug has been selected for manual copy.";
     }
   });
 

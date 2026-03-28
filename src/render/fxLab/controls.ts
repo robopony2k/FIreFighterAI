@@ -15,9 +15,14 @@ import {
   normalizeTerrainWaterDebugControls,
   type TerrainWaterDebugControls
 } from "../terrainWaterDebug.js";
+import {
+  DEFAULT_OCEAN_WATER_DEBUG_CONTROLS,
+  normalizeOceanWaterDebugControls,
+  type OceanWaterDebugControls
+} from "../oceanWaterDebug.js";
 import type { FxLabOverrides } from "./types.js";
 
-type FxLabControlSection = "Fire" | "Hose" | "River" | "Waterfall";
+type FxLabControlSection = "Fire" | "Hose" | "Ocean" | "Shoreline" | "River" | "Waterfall";
 
 type FxLabControlBase<K extends string> = {
   key: K;
@@ -56,6 +61,11 @@ export type FxLabTerrainWaterControlDefinition =
   | FxLabRangeControl<keyof TerrainWaterDebugControls & string>
   | FxLabBooleanControl<keyof TerrainWaterDebugControls & string>
   | FxLabEnumControl<keyof TerrainWaterDebugControls & string, never>;
+
+export type FxLabOceanWaterControlDefinition =
+  | FxLabRangeControl<keyof OceanWaterDebugControls & string>
+  | FxLabBooleanControl<keyof OceanWaterDebugControls & string>
+  | FxLabEnumControl<keyof OceanWaterDebugControls & string, never>;
 
 export const FX_LAB_FIRE_CONTROLS: ReadonlyArray<FxLabFireControlDefinition> = [
   {
@@ -392,17 +402,14 @@ export const FX_LAB_TERRAIN_WATER_CONTROLS: ReadonlyArray<FxLabTerrainWaterContr
     section: "Waterfall",
     kind: "boolean",
     label: "Show Falls",
-    description: "Toggle the waterfall mesh."
+    description: "Toggle the waterfall wall material."
   },
   {
-    key: "waterfallWidthScale",
+    key: "waterfallDebugHighlight",
     section: "Waterfall",
-    kind: "range",
-    label: "Fall Width",
-    description: "Scale waterfall sheet width.",
-    min: 0.5,
-    max: 2,
-    step: 0.01
+    kind: "boolean",
+    label: "Highlight Falls",
+    description: "Render waterfalls in high-contrast x-ray colors for validation."
   },
   {
     key: "waterfallOpacityScale",
@@ -446,6 +453,188 @@ export const FX_LAB_TERRAIN_WATER_CONTROLS: ReadonlyArray<FxLabTerrainWaterContr
   }
 ];
 
+export const FX_LAB_OCEAN_WATER_CONTROLS: ReadonlyArray<FxLabOceanWaterControlDefinition> = [
+  {
+    key: "showOcean",
+    section: "Ocean",
+    kind: "boolean",
+    label: "Show Ocean",
+    description: "Toggle the live ocean surface and its backdrop."
+  },
+  {
+    key: "waveAmpScale",
+    section: "Ocean",
+    kind: "range",
+    label: "Wave Amp",
+    description: "Scale the ocean displacement amplitude without changing the underlying shoreline system.",
+    min: 0,
+    max: 2.5,
+    step: 0.01
+  },
+  {
+    key: "waveLengthScale",
+    section: "Ocean",
+    kind: "range",
+    label: "Wave Length",
+    description: "Scale ocean wavelength so you can tune how quickly crests read near shore.",
+    min: 0.5,
+    max: 2,
+    step: 0.01
+  },
+  {
+    key: "shoreFoamScale",
+    section: "Ocean",
+    kind: "range",
+    label: "Shore Foam",
+    description: "Scale shoreline foam intensity on the live ocean shader.",
+    min: 0,
+    max: 2.5,
+    step: 0.01
+  },
+  {
+    key: "enableOrganicEdge",
+    section: "Shoreline",
+    kind: "boolean",
+    label: "Organic Edge",
+    description: "Toggle the noisy shoreline inset used to break up the coast edge."
+  },
+  {
+    key: "enableShorePulses",
+    section: "Shoreline",
+    kind: "boolean",
+    label: "Shore Pulses",
+    description: "Toggle the shore-facing pulse train that drives lapping and swash timing."
+  },
+  {
+    key: "enableTroughClamp",
+    section: "Shoreline",
+    kind: "boolean",
+    label: "Trough Clamp",
+    description: "Prevent near-shore troughs from dropping too far below the beach."
+  },
+  {
+    key: "enableSwashMotion",
+    section: "Shoreline",
+    kind: "boolean",
+    label: "Swash Motion",
+    description: "Toggle animated run-up so the visible shoreline advances and retreats with the waves."
+  },
+  {
+    key: "enableSwashSheet",
+    section: "Shoreline",
+    kind: "boolean",
+    label: "Swash Sheet",
+    description: "Toggle the thin water-film coverage that hides dry beach patches between wave run-up and open water."
+  },
+  {
+    key: "enableShoreWaveModulation",
+    section: "Shoreline",
+    kind: "boolean",
+    label: "Wave Mod",
+    description: "Moderate wave amplitude and wavelength as waves enter the shoreline band."
+  },
+  {
+    key: "shoreSwashStart",
+    section: "Shoreline",
+    kind: "range",
+    label: "Swash Start",
+    description: "Distance where shoreline fade-in begins.",
+    min: 0,
+    max: 0.12,
+    step: 0.001
+  },
+  {
+    key: "shoreSwashEnd",
+    section: "Shoreline",
+    kind: "range",
+    label: "Swash End",
+    description: "Distance where the swash band becomes full-strength water.",
+    min: 0.01,
+    max: 0.45,
+    step: 0.001
+  },
+  {
+    key: "shoreShoalEnd",
+    section: "Shoreline",
+    kind: "range",
+    label: "Shoal End",
+    description: "Outer distance where shoreline-specific shaping blends fully back to open ocean.",
+    min: 0.05,
+    max: 0.8,
+    step: 0.001
+  },
+  {
+    key: "organicEdgeInset",
+    section: "Shoreline",
+    kind: "range",
+    label: "Edge Inset",
+    description: "Max inland retreat from the noisy shoreline inset.",
+    min: 0,
+    max: 0.22,
+    step: 0.001
+  },
+  {
+    key: "swashPushMax",
+    section: "Shoreline",
+    kind: "range",
+    label: "Swash Reach",
+    description: "Maximum extra inland run-up driven by the crest pulse.",
+    min: 0,
+    max: 0.28,
+    step: 0.001
+  },
+  {
+    key: "swashPushFeather",
+    section: "Shoreline",
+    kind: "range",
+    label: "Swash Feather",
+    description: "Feather width for the moving shoreline sheet.",
+    min: 0.01,
+    max: 0.2,
+    step: 0.001
+  },
+  {
+    key: "swashCoverageMin",
+    section: "Shoreline",
+    kind: "range",
+    label: "Coverage Min",
+    description: "Minimum shoreline coverage before the swash band starts to fade out.",
+    min: 0,
+    max: 1,
+    step: 0.01
+  },
+  {
+    key: "swashCoverageFadeEnd",
+    section: "Shoreline",
+    kind: "range",
+    label: "Coverage Fade",
+    description: "Coverage level where the shoreline fade-out completes.",
+    min: 0,
+    max: 1,
+    step: 0.01
+  },
+  {
+    key: "shoreWaveAmpMinScale",
+    section: "Shoreline",
+    kind: "range",
+    label: "Shore Amp Min",
+    description: "Minimum local amplitude scale at the shoreline before blending back to open-ocean waves.",
+    min: 0.05,
+    max: 1,
+    step: 0.01
+  },
+  {
+    key: "shoreWaveLengthMinScale",
+    section: "Shoreline",
+    kind: "range",
+    label: "Shore Length Min",
+    description: "Minimum local wavelength scale at the shoreline before blending back to open-ocean waves.",
+    min: 0.2,
+    max: 1,
+    step: 0.01
+  }
+];
+
 const hasOwnDiff = <T extends Record<string, string | number | boolean>>(
   current: T,
   defaults: T
@@ -462,18 +651,21 @@ const hasOwnDiff = <T extends Record<string, string | number | boolean>>(
 export const buildFxLabOverrides = (
   fireControls: FireFxDebugControls,
   waterControls: WaterFxDebugControls,
-  terrainWaterControls: TerrainWaterDebugControls
+  terrainWaterControls: TerrainWaterDebugControls,
+  oceanWaterControls: OceanWaterDebugControls
 ): FxLabOverrides => ({
   fire: hasOwnDiff(fireControls, DEFAULT_FIRE_FX_DEBUG_CONTROLS),
   water: hasOwnDiff(waterControls, DEFAULT_WATER_FX_DEBUG_CONTROLS),
+  oceanWater: hasOwnDiff(oceanWaterControls, DEFAULT_OCEAN_WATER_DEBUG_CONTROLS),
   riverWater: hasOwnDiff(terrainWaterControls, DEFAULT_TERRAIN_WATER_DEBUG_CONTROLS)
 });
 
 export const formatFxLabOverrides = (
   fireControls: FireFxDebugControls,
   waterControls: WaterFxDebugControls,
-  terrainWaterControls: TerrainWaterDebugControls
-): string => JSON.stringify(buildFxLabOverrides(fireControls, waterControls, terrainWaterControls), null, 2);
+  terrainWaterControls: TerrainWaterDebugControls,
+  oceanWaterControls: OceanWaterDebugControls
+): string => JSON.stringify(buildFxLabOverrides(fireControls, waterControls, terrainWaterControls, oceanWaterControls), null, 2);
 
 export const cloneDefaultFireFxDebugControls = (): FireFxDebugControls =>
   normalizeFireFxDebugControls(DEFAULT_FIRE_FX_DEBUG_CONTROLS);
@@ -483,3 +675,6 @@ export const cloneDefaultWaterFxDebugControls = (): WaterFxDebugControls =>
 
 export const cloneDefaultTerrainWaterDebugControls = (): TerrainWaterDebugControls =>
   normalizeTerrainWaterDebugControls(DEFAULT_TERRAIN_WATER_DEBUG_CONTROLS);
+
+export const cloneDefaultOceanWaterDebugControls = (): OceanWaterDebugControls =>
+  normalizeOceanWaterDebugControls(DEFAULT_OCEAN_WATER_DEBUG_CONTROLS);

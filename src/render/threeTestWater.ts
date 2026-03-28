@@ -1,9 +1,13 @@
 import * as THREE from "three";
 import type { TerrainWaterData } from "./threeTestTerrain.js";
+import {
+  DEFAULT_OCEAN_WATER_DEBUG_CONTROLS,
+  normalizeOceanWaterDebugControls,
+  type OceanWaterDebugControls
+} from "./oceanWaterDebug.js";
 import type { WaterEnvironmentPalette } from "./environmentPalette.js";
 import { ThreeTestOceanWaterHelper } from "./threeTestOceanWaterHelper.js";
 import { ThreeTestRiverWaterHelper } from "./threeTestRiverWaterHelper.js";
-import { ThreeTestWaterfallHelper } from "./threeTestWaterfallHelper.js";
 import {
   DEFAULT_TERRAIN_WATER_DEBUG_CONTROLS,
   normalizeTerrainWaterDebugControls,
@@ -50,7 +54,6 @@ export class ThreeTestWaterSystem {
   private recoveryAccum = 0;
   private readonly oceanHelper: ThreeTestOceanWaterHelper;
   private readonly riverHelper: ThreeTestRiverWaterHelper;
-  private readonly waterfallHelper: ThreeTestWaterfallHelper;
   private palette: WaterEnvironmentPalette;
   private fogState: {
     color: THREE.ColorRepresentation;
@@ -66,6 +69,7 @@ export class ThreeTestWaterSystem {
   private readonly defaultNormal1: THREE.DataTexture;
   private readonly defaultNormal2: THREE.DataTexture;
   private debugControls: TerrainWaterDebugControls = { ...DEFAULT_TERRAIN_WATER_DEBUG_CONTROLS };
+  private oceanDebugControls: OceanWaterDebugControls = { ...DEFAULT_OCEAN_WATER_DEBUG_CONTROLS };
 
   constructor(options: ThreeTestWaterSystemOptions) {
     this.renderer = options.renderer;
@@ -107,13 +111,8 @@ export class ThreeTestWaterSystem {
       fogNear: options.fogNear,
       fogFar: options.fogFar
     });
-    this.waterfallHelper = new ThreeTestWaterfallHelper({
-      scene: options.scene,
-      fogColor: options.fogColor,
-      fogNear: options.fogNear,
-      fogFar: options.fogFar
-    });
     this.setPalette(this.palette);
+    this.oceanHelper.setDebugControls(this.oceanDebugControls);
     this.setDebugControls(this.debugControls);
     this.applyQualityProfile(this.quality);
   }
@@ -209,7 +208,6 @@ export class ThreeTestWaterSystem {
     const qualityValue = waterQualityToUniform(next);
     this.oceanHelper.setQuality(qualityValue);
     this.riverHelper.setQuality(qualityValue);
-    this.waterfallHelper.setQuality(qualityValue);
   }
 
   public setPreferredQuality(next: WaterQualityProfile): void {
@@ -222,17 +220,24 @@ export class ThreeTestWaterSystem {
   public setDebugControls(controls: Partial<TerrainWaterDebugControls>): void {
     this.debugControls = normalizeTerrainWaterDebugControls({ ...this.debugControls, ...controls });
     this.riverHelper.setDebugControls(this.debugControls);
-    this.waterfallHelper.setDebugControls(this.debugControls);
   }
 
   public getDebugControls(): TerrainWaterDebugControls {
     return { ...this.debugControls };
   }
 
+  public setOceanDebugControls(controls: Partial<OceanWaterDebugControls>): void {
+    this.oceanDebugControls = normalizeOceanWaterDebugControls({ ...this.oceanDebugControls, ...controls });
+    this.oceanHelper.setDebugControls(this.oceanDebugControls);
+  }
+
+  public getOceanDebugControls(): OceanWaterDebugControls {
+    return { ...this.oceanDebugControls };
+  }
+
   public update(timeMs: number, dtSeconds: number, fpsEstimate: number, sceneRenderMs: number): void {
     this.oceanHelper.update(timeMs);
     this.riverHelper.update(timeMs);
-    this.waterfallHelper.update(timeMs);
     if (!(dtSeconds > 0) || !Number.isFinite(fpsEstimate) || fpsEstimate <= 0) {
       return;
     }
@@ -272,14 +277,12 @@ export class ThreeTestWaterSystem {
   public clear(): void {
     this.oceanHelper.clear();
     this.riverHelper.clear();
-    this.waterfallHelper.clear();
   }
 
   public setFog(color: THREE.ColorRepresentation, near: number, far: number): void {
     this.fogState = { color, near, far };
     this.oceanHelper.setFog(this.fogState);
     this.riverHelper.setFog(this.fogState);
-    this.waterfallHelper.setFog(this.fogState);
   }
 
   public setPalette(palette: WaterEnvironmentPalette): void {
@@ -312,7 +315,6 @@ export class ThreeTestWaterSystem {
     this.clear();
     this.oceanHelper.dispose();
     this.riverHelper.dispose();
-    this.waterfallHelper.dispose();
     disposeTexture(this.waterNormal1);
     disposeTexture(this.waterNormal2);
     this.waterNormal1 = null;
@@ -327,12 +329,12 @@ export class ThreeTestWaterSystem {
     this.ensureWaterNormals();
     const qualityValue = waterQualityToUniform(this.quality);
     this.oceanHelper.rebuild(baseMesh, water.ocean, qualityValue);
+    this.oceanHelper.setDebugControls(this.oceanDebugControls);
     if (water.river) {
       this.riverHelper.rebuild(baseMesh, water.river, qualityValue);
     } else {
       this.riverHelper.clear();
     }
-    this.waterfallHelper.rebuild(baseMesh, water.ocean.level, water.waterfallInstances, qualityValue);
     this.setPalette(this.palette);
     this.setFog(this.fogState.color, this.fogState.near, this.fogState.far);
     this.applyQualityProfile(this.quality);
