@@ -88,24 +88,38 @@ export type TerrainBridgeComponentDebug = {
   }>;
 };
 
+export type TerrainBridgeAnchorDebug = {
+  edgeX: number;
+  edgeY: number;
+  roadContactEdgeX: number;
+  roadContactEdgeY: number;
+  bankContactEdgeX: number;
+  bankContactEdgeY: number;
+  terrainY: number;
+  roadY: number;
+  waterY: number | null;
+  baseY: number;
+  searchDistance: number;
+  fallback: boolean;
+};
+
+export type TerrainBridgeAbutmentDebug = {
+  length: number;
+  minHeight: number;
+  maxHeight: number;
+  suppressed: boolean;
+};
+
 export type TerrainBridgeSpanDebug = TerrainBridgeComponentDebug & {
   spanIndex: number;
   routeMode: "tile_path" | "single_tile_direct";
   bridgePath: TerrainBridgeTileDebug[];
   startRoad: TerrainBridgeTileDebug;
   endRoad: TerrainBridgeTileDebug;
-  startAnchor: {
-    edgeX: number;
-    edgeY: number;
-    terrainY: number;
-    baseY: number;
-  };
-  endAnchor: {
-    edgeX: number;
-    edgeY: number;
-    terrainY: number;
-    baseY: number;
-  };
+  startAnchor: TerrainBridgeAnchorDebug;
+  endAnchor: TerrainBridgeAnchorDebug;
+  startAbutment: TerrainBridgeAbutmentDebug;
+  endAbutment: TerrainBridgeAbutmentDebug;
   worldSpanLength: number;
   minDeckY: number;
   maxDeckY: number;
@@ -434,6 +448,7 @@ const BRIDGE_RAIL_EDGE_INSET = 0.022;
 const BRIDGE_POST_SIZE = 0.034;
 const BRIDGE_POST_SPACING = 0.95;
 const BRIDGE_ABUTMENT_LENGTH = 0.1;
+const BRIDGE_ABUTMENT_MIN_HEIGHT = 0.015;
 const BRIDGE_BEAM_RADIUS = 0.022;
 const BRIDGE_BEAM_END_INSET = 0.16;
 const BRIDGE_BEAM_DROP_FACTOR = 0.08;
@@ -442,6 +457,9 @@ const BRIDGE_BEAM_MIN_LENGTH = 1.4;
 const BRIDGE_ANCHOR_MAX_BANK_RISE = 0.04;
 const BRIDGE_ANCHOR_ROAD_OVERLAP = 0.08;
 const BRIDGE_ANCHOR_ROAD_OVERLAP_SHORT_SPAN = 0.18;
+const BRIDGE_ANCHOR_SEARCH_STEP = 0.04;
+const BRIDGE_ANCHOR_WATER_MARGIN = 0.02;
+const BRIDGE_ANCHOR_WATER_COVERAGE_MAX = 0.42;
 const ROAD_ATLAS_V2_METADATA_PATH = "assets/textures/road_atlas_v2.json";
 const ROAD_ATLAS_FALLBACK_IMAGE_PATH = "assets/textures/ROAD_TILES.png";
 const ROAD_ATLAS_FALLBACK_TILE_SIZE = 64;
@@ -707,7 +725,7 @@ type RiverDomainDebugStats = {
   wallTopGapMax: number;
 };
 
-type RiverRenderDomain = {
+export type RiverRenderDomain = {
   cols: number;
   rows: number;
   baseSupport: Uint8Array;
@@ -723,7 +741,7 @@ type RiverRenderDomain = {
   debugStats?: RiverDomainDebugStats;
 };
 
-type WaterSampleRatios = {
+export type WaterSampleRatios = {
   water: Float32Array;
   ocean: Float32Array;
   river: Float32Array;
@@ -2100,7 +2118,7 @@ const buildSampleMaskCoverage = (
   return sampled;
 };
 
-type SampledCoastData = {
+export type SampledCoastData = {
   oceanCoverage?: Float32Array;
   seaLevel?: Float32Array;
   coastDistance?: Uint16Array;
@@ -2108,6 +2126,40 @@ type SampledCoastData = {
   beachWeight?: Float32Array;
   cliffWeight?: Float32Array;
   shelfWeight?: Float32Array;
+};
+
+export type TerrainRenderSurface = {
+  sample: TerrainSample;
+  cols: number;
+  rows: number;
+  step: number;
+  sampleCols: number;
+  sampleRows: number;
+  width: number;
+  depth: number;
+  size: { width: number; depth: number };
+  heightScale: number;
+  sampleHeights: Float32Array;
+  sampleTypes: Uint8Array;
+  coastData: SampledCoastData;
+  sampleOceanCoverage?: Float32Array;
+  sampleCoastDistance?: Uint16Array;
+  sampleCoastClass?: Uint8Array;
+  oceanMask: Uint8Array | null;
+  riverMask: Uint8Array | null;
+  waterLevel: number | null;
+  waterRatios: WaterSampleRatios;
+  waterSupportMask: Uint8Array;
+  waterSurfaceHeights: Float32Array;
+  sampledRiverSurface?: Float32Array;
+  sampledRiverStepStrength?: Float32Array;
+  sampledRiverCoverage?: Float32Array;
+  riverRenderDomain?: RiverRenderDomain;
+  heightAtSample: (x: number, y: number) => number;
+  heightAtTileCoord: (tileX: number, tileY: number) => number;
+  heightAtTile: (tileX: number, tileY: number) => number;
+  toWorldX: (tileX: number) => number;
+  toWorldZ: (tileY: number) => number;
 };
 
 const buildSampleCoastData = (
@@ -6518,13 +6570,13 @@ type BridgeProfilePoint = {
   rightBottom: THREE.Vector3;
 };
 
-type BridgeAnchor = {
-  edgeX: number;
-  edgeY: number;
+type BridgeAnchor = TerrainBridgeAnchorDebug & {
   x: number;
   z: number;
-  baseY: number;
-  terrainY: number;
+  roadContactX: number;
+  roadContactZ: number;
+  bankContactX: number;
+  bankContactZ: number;
 };
 
 const buildBridgeTileDebug = (idx: number, cols: number): TerrainBridgeTileDebug => ({
@@ -7130,16 +7182,12 @@ const createBridgeBoxMesh = (
 };
 
 const buildBridgeDeckMesh = (
-  sample: TerrainSample,
-  width: number,
-  depth: number,
-  heightScale: number,
+  surface: TerrainRenderSurface,
   roadOverlay: THREE.Texture | null,
   roadId: number,
-  baseId: number,
-  heightAtTileCoord: (tileX: number, tileY: number) => number,
-  riverDomain?: RiverRenderDomain
+  baseId: number
 ): { group: THREE.Group | null; debug: TerrainBridgeDebug } => {
+  const sample = surface.sample;
   const bridgeMask = sample.roadBridgeMask;
   const tileTypes = sample.tileTypes;
   if (!bridgeMask || bridgeMask.length === 0 || !tileTypes) {
@@ -7155,8 +7203,21 @@ const buildBridgeDeckMesh = (
       }
     };
   }
-  const { cols, rows, elevations } = sample;
-  const riverSurface = sample.riverSurface;
+  const {
+    cols,
+    rows,
+    width,
+    depth,
+    step,
+    sampleCols,
+    sampleRows,
+    heightScale,
+    heightAtTileCoord,
+    toWorldX,
+    toWorldZ,
+    waterRatios,
+    waterSurfaceHeights
+  } = surface;
   const roadEdges = sample.roadEdges;
   const total = cols * rows;
   const hasRoadEdges = !!roadEdges && roadEdges.length === total;
@@ -7166,10 +7227,55 @@ const buildBridgeDeckMesh = (
     const type = tileTypes[idx];
     return type === roadId || type === baseId || isBridgeIndex(idx);
   };
-  const edgeToWorldX = (edgeX: number): number => (edgeX / Math.max(1, cols) - 0.5) * width;
-  const edgeToWorldZ = (edgeY: number): number => (edgeY / Math.max(1, rows) - 0.5) * depth;
+  const edgeToWorldX = (edgeX: number): number => toWorldX(edgeX);
+  const edgeToWorldZ = (edgeY: number): number => toWorldZ(edgeY);
   const worldToEdgeX = (worldX: number): number => (worldX / Math.max(1e-5, width) + 0.5) * Math.max(1, cols);
   const worldToEdgeY = (worldZ: number): number => (worldZ / Math.max(1e-5, depth) + 0.5) * Math.max(1, rows);
+  const sampleGridValueAtTileCoord = (data: ArrayLike<number> | undefined, tileX: number, tileY: number): number | null => {
+    if (!data || data.length === 0) {
+      return null;
+    }
+    const sx = clamp(tileX / Math.max(1e-5, step), 0, sampleCols - 1);
+    const sy = clamp(tileY / Math.max(1e-5, step), 0, sampleRows - 1);
+    const x0 = Math.floor(sx);
+    const y0 = Math.floor(sy);
+    const x1 = Math.min(sampleCols - 1, x0 + 1);
+    const y1 = Math.min(sampleRows - 1, y0 + 1);
+    const tx = sx - x0;
+    const ty = sy - y0;
+    const idx00 = y0 * sampleCols + x0;
+    const idx10 = y0 * sampleCols + x1;
+    const idx01 = y1 * sampleCols + x0;
+    const idx11 = y1 * sampleCols + x1;
+    const v00 = Number(data[idx00] ?? 0);
+    const v10 = Number(data[idx10] ?? 0);
+    const v01 = Number(data[idx01] ?? 0);
+    const v11 = Number(data[idx11] ?? 0);
+    if (![v00, v10, v01, v11].every(Number.isFinite)) {
+      return null;
+    }
+    const vx0 = v00 * (1 - tx) + v10 * tx;
+    const vx1 = v01 * (1 - tx) + v11 * tx;
+    const value = vx0 * (1 - ty) + vx1 * ty;
+    return Number.isFinite(value) ? value : null;
+  };
+  const sampleTerrainWorldAtTileCoord = (tileX: number, tileY: number): number => heightAtTileCoord(tileX, tileY) * heightScale;
+  const sampleTerrainWorldAtWorld = (worldX: number, worldZ: number): number =>
+    sampleTerrainWorldAtTileCoord(worldToEdgeX(worldX), worldToEdgeY(worldZ));
+  const sampleWaterCoverageAtTileCoord = (tileX: number, tileY: number): number =>
+    clamp(sampleGridValueAtTileCoord(waterRatios.water, tileX, tileY) ?? 0, 0, 1);
+  const sampleWaterSurfaceYAtTileCoord = (tileX: number, tileY: number): number | null => {
+    if (sampleWaterCoverageAtTileCoord(tileX, tileY) <= 0.01) {
+      return null;
+    }
+    const height = sampleGridValueAtTileCoord(waterSurfaceHeights, tileX, tileY);
+    if (!Number.isFinite(height)) {
+      return null;
+    }
+    return clamp(height as number, 0, 1) * heightScale;
+  };
+  const roadSurfaceWorldYAtTileCoord = (tileX: number, tileY: number): number =>
+    sampleTerrainWorldAtTileCoord(tileX, tileY) + ROAD_SURFACE_OFFSET + BRIDGE_DECK_SURFACE_LIFT;
   const getRoadMaskAtIndex = (idx: number): number => {
     if (!isRoadLikeIndex(idx)) {
       return 0;
@@ -7439,6 +7545,12 @@ const buildBridgeDeckMesh = (
     roughness: 0.84,
     metalness: 0.09
   });
+  const abutmentMaterial = new THREE.MeshStandardMaterial({
+    color: beamColor.clone().lerp(deckColor, 0.22),
+    roughness: 0.9,
+    metalness: 0.02,
+    side: THREE.DoubleSide
+  });
   const bridgeOverlay = getBridgeStraightOverlayTexture() ?? roadOverlay;
   const overlayMaterial = bridgeOverlay
     ? new THREE.MeshStandardMaterial({
@@ -7459,6 +7571,65 @@ const buildBridgeDeckMesh = (
   }
   const unitBox = new THREE.BoxGeometry(1, 1, 1);
   const bridgeGroup = new THREE.Group();
+  type BridgeRoutePoint = {
+    idx?: number;
+    x: number;
+    z: number;
+    baseY: number;
+    terrainY?: number;
+    riverSurfaceY?: number;
+  };
+  type BridgeAnchorCandidate = {
+    edgeX: number;
+    edgeY: number;
+    terrainY: number;
+    waterY: number | null;
+    searchDistance: number;
+  };
+  const addBridgeObject = (group: THREE.Group, object: THREE.Object3D): void => {
+    object.userData.bridgeDeck = true;
+    group.add(object);
+  };
+  const finalizeBridgeAnchor = (
+    roadContactEdgeX: number,
+    roadContactEdgeY: number,
+    bankContactEdgeX: number,
+    bankContactEdgeY: number,
+    roadY: number,
+    waterY: number | null,
+    searchDistance: number,
+    fallback: boolean
+  ): BridgeAnchor => {
+    const terrainY = sampleTerrainWorldAtTileCoord(bankContactEdgeX, bankContactEdgeY);
+    const terrainSurfaceY = terrainY + ROAD_SURFACE_OFFSET + BRIDGE_DECK_SURFACE_LIFT;
+    const effectiveWaterY = waterY ?? sampleWaterSurfaceYAtTileCoord(bankContactEdgeX, bankContactEdgeY);
+    const baseY = Math.max(
+      roadY,
+      terrainSurfaceY,
+      terrainY + BRIDGE_DECK_CLEARANCE_BANK,
+      effectiveWaterY === null ? Number.NEGATIVE_INFINITY : effectiveWaterY + BRIDGE_DECK_CLEARANCE_WATER
+    );
+    return {
+      edgeX: bankContactEdgeX,
+      edgeY: bankContactEdgeY,
+      roadContactEdgeX,
+      roadContactEdgeY,
+      bankContactEdgeX,
+      bankContactEdgeY,
+      terrainY,
+      roadY,
+      waterY: effectiveWaterY ?? null,
+      baseY,
+      searchDistance,
+      fallback,
+      x: edgeToWorldX(bankContactEdgeX),
+      z: edgeToWorldZ(bankContactEdgeY),
+      roadContactX: edgeToWorldX(roadContactEdgeX),
+      roadContactZ: edgeToWorldZ(roadContactEdgeY),
+      bankContactX: edgeToWorldX(bankContactEdgeX),
+      bankContactZ: edgeToWorldZ(bankContactEdgeY)
+    };
+  };
   const resolveBridgeAnchor = (
     roadIdx: number,
     bridgeIdx: number,
@@ -7472,42 +7643,175 @@ const buildBridgeDeckMesh = (
     const roadEdgeY = roadTileY + 0.5;
     const bridgeEdgeX = bridgeTileX + 0.5;
     const bridgeEdgeY = bridgeTileY + 0.5;
-    let dirX = roadEdgeX - bridgeEdgeX;
-    let dirY = roadEdgeY - bridgeEdgeY;
+    let dirX = bridgeEdgeX - roadEdgeX;
+    let dirY = bridgeEdgeY - roadEdgeY;
     const dirLength = Math.hypot(dirX, dirY) || 1;
     dirX /= dirLength;
     dirY /= dirLength;
-    const defaultAnchorEdgeX = (roadEdgeX + bridgeEdgeX) * 0.5 + dirX * roadOverlap;
-    const defaultAnchorEdgeY = (roadEdgeY + bridgeEdgeY) * 0.5 + dirY * roadOverlap;
-    let anchorEdgeX = defaultAnchorEdgeX;
-    let anchorEdgeY = defaultAnchorEdgeY;
+    const roadY = roadSurfaceWorldYAtTileCoord(roadEdgeX, roadEdgeY);
+    const roadContactDistance = Math.min(Math.max(roadOverlap, BRIDGE_ANCHOR_SEARCH_STEP), dirLength * 0.35);
+    const roadContactEdgeX = clamp(roadEdgeX + dirX * roadContactDistance, 0, cols);
+    const roadContactEdgeY = clamp(roadEdgeY + dirY * roadContactDistance, 0, rows);
+    const defaultBankDistance = clamp(dirLength * 0.5 - roadOverlap, roadContactDistance, dirLength);
+    const defaultBankEdgeX = clamp(roadEdgeX + dirX * defaultBankDistance, 0, cols);
+    const defaultBankEdgeY = clamp(roadEdgeY + dirY * defaultBankDistance, 0, rows);
+    const defaultWaterY =
+      sampleWaterSurfaceYAtTileCoord(bridgeEdgeX, bridgeEdgeY) ??
+      sampleWaterSurfaceYAtTileCoord(defaultBankEdgeX, defaultBankEdgeY);
+    const fallbackAnchor = finalizeBridgeAnchor(
+      roadContactEdgeX,
+      roadContactEdgeY,
+      defaultBankEdgeX,
+      defaultBankEdgeY,
+      roadY,
+      defaultWaterY,
+      Math.hypot(defaultBankEdgeX - roadContactEdgeX, defaultBankEdgeY - roadContactEdgeY),
+      true
+    );
 
-    anchorEdgeX = clamp(anchorEdgeX, 0, cols);
-    anchorEdgeY = clamp(anchorEdgeY, 0, rows);
-    const terrainY = heightAtTileCoord(anchorEdgeX, anchorEdgeY) * heightScale;
-    const roadY = heightAtTileCoord(roadEdgeX, roadEdgeY) * heightScale;
-    const anchorY = Math.min(Math.max(terrainY, roadY), roadY + BRIDGE_ANCHOR_MAX_BANK_RISE);
-    const baseY = anchorY + ROAD_SURFACE_OFFSET + BRIDGE_DECK_SURFACE_LIFT;
+    let lastStable: BridgeAnchorCandidate | null = null;
+    let preferredStable: BridgeAnchorCandidate | null = null;
+    const searchStart = Math.min(dirLength, roadContactDistance + BRIDGE_ANCHOR_SEARCH_STEP * 0.5);
+    for (let dist = searchStart; dist <= dirLength + BRIDGE_ANCHOR_SEARCH_STEP * 0.5; dist += BRIDGE_ANCHOR_SEARCH_STEP) {
+      const clampedDistance = clamp(dist, searchStart, dirLength);
+      const edgeX = clamp(roadEdgeX + dirX * clampedDistance, 0, cols);
+      const edgeY = clamp(roadEdgeY + dirY * clampedDistance, 0, rows);
+      const terrainY = sampleTerrainWorldAtTileCoord(edgeX, edgeY);
+      const waterCoverage = sampleWaterCoverageAtTileCoord(edgeX, edgeY);
+      const localWaterY = sampleWaterSurfaceYAtTileCoord(edgeX, edgeY) ?? defaultWaterY ?? null;
+      const stableAboveWater = localWaterY === null || terrainY >= localWaterY + BRIDGE_ANCHOR_WATER_MARGIN;
+      const stableLand = stableAboveWater && waterCoverage <= BRIDGE_ANCHOR_WATER_COVERAGE_MAX;
+      if (!stableLand) {
+        if (lastStable) {
+          break;
+        }
+        continue;
+      }
+      const candidate: BridgeAnchorCandidate = {
+        edgeX,
+        edgeY,
+        terrainY,
+        waterY: localWaterY,
+        searchDistance: Math.hypot(edgeX - roadContactEdgeX, edgeY - roadContactEdgeY)
+      };
+      lastStable = candidate;
+      const terrainSurfaceY = terrainY + ROAD_SURFACE_OFFSET + BRIDGE_DECK_SURFACE_LIFT;
+      if (terrainSurfaceY <= roadY + BRIDGE_ANCHOR_MAX_BANK_RISE) {
+        preferredStable = candidate;
+      }
+      if (clampedDistance >= dirLength - 1e-5) {
+        break;
+      }
+    }
+
+    const chosen = preferredStable ?? lastStable;
+    if (!chosen) {
+      return fallbackAnchor;
+    }
+    return finalizeBridgeAnchor(
+      roadContactEdgeX,
+      roadContactEdgeY,
+      chosen.edgeX,
+      chosen.edgeY,
+      roadY,
+      chosen.waterY,
+      chosen.searchDistance,
+      false
+    );
+  };
+  const buildBridgeTileRoutePoint = (idx: number): BridgeRoutePoint => {
+    const tileX = idx % cols;
+    const tileY = Math.floor(idx / cols);
+    const terrainY = sampleTerrainWorldAtTileCoord(tileX + 0.5, tileY + 0.5);
+    const riverSurfaceY = sampleWaterSurfaceYAtTileCoord(tileX + 0.5, tileY + 0.5);
+    const baseY = Math.max(
+      terrainY + ROAD_SURFACE_OFFSET + BRIDGE_DECK_SURFACE_LIFT,
+      terrainY + BRIDGE_DECK_CLEARANCE_BANK,
+      riverSurfaceY === null ? Number.NEGATIVE_INFINITY : riverSurfaceY + BRIDGE_DECK_CLEARANCE_WATER
+    );
     return {
-      edgeX: anchorEdgeX,
-      edgeY: anchorEdgeY,
-      x: edgeToWorldX(anchorEdgeX),
-      z: edgeToWorldZ(anchorEdgeY),
+      idx,
+      x: edgeToWorldX(tileX + 0.5),
+      z: edgeToWorldZ(tileY + 0.5),
       baseY,
-      terrainY
+      terrainY,
+      riverSurfaceY: riverSurfaceY ?? undefined
     };
   };
-  type BridgeRoutePoint = {
-    idx?: number;
-    x: number;
-    z: number;
-    baseY: number;
-    terrainY?: number;
-    riverSurfaceY?: number;
-  };
-  const addBridgeObject = (group: THREE.Group, object: THREE.Object3D): void => {
-    object.userData.bridgeDeck = true;
-    group.add(object);
+  const buildBridgeAbutment = (
+    roadPoint: BridgeProfilePoint,
+    bankPoint: BridgeProfilePoint
+  ): { mesh: THREE.Mesh | null; debug: TerrainBridgeAbutmentDebug } => {
+    const length = roadPoint.center.distanceTo(bankPoint.center);
+    if (length <= 1e-4) {
+      return {
+        mesh: null,
+        debug: { length, minHeight: 0, maxHeight: 0, suppressed: true }
+      };
+    }
+    const clampBottom = (topVertex: THREE.Vector3): THREE.Vector3 => {
+      const terrainY = sampleTerrainWorldAtWorld(topVertex.x, topVertex.z);
+      return new THREE.Vector3(topVertex.x, Math.min(topVertex.y - 0.002, terrainY), topVertex.z);
+    };
+    const roadLeftTop = roadPoint.leftBottom.clone();
+    const roadRightTop = roadPoint.rightBottom.clone();
+    const bankLeftTop = bankPoint.leftBottom.clone();
+    const bankRightTop = bankPoint.rightBottom.clone();
+    const roadLeftBottom = clampBottom(roadLeftTop);
+    const roadRightBottom = clampBottom(roadRightTop);
+    const bankLeftBottom = clampBottom(bankLeftTop);
+    const bankRightBottom = clampBottom(bankRightTop);
+    const heights = [
+      roadLeftTop.y - roadLeftBottom.y,
+      roadRightTop.y - roadRightBottom.y,
+      bankLeftTop.y - bankLeftBottom.y,
+      bankRightTop.y - bankRightBottom.y
+    ];
+    const minHeight = Math.max(0, Math.min(...heights));
+    const maxHeight = Math.max(0, Math.max(...heights));
+    if (maxHeight < BRIDGE_ABUTMENT_MIN_HEIGHT) {
+      return {
+        mesh: null,
+        debug: { length, minHeight, maxHeight, suppressed: true }
+      };
+    }
+
+    const vertices = [
+      roadLeftTop,
+      roadRightTop,
+      bankRightTop,
+      bankLeftTop,
+      roadLeftBottom,
+      roadRightBottom,
+      bankRightBottom,
+      bankLeftBottom
+    ];
+    const positions: number[] = [];
+    for (let i = 0; i < vertices.length; i += 1) {
+      positions.push(vertices[i].x, vertices[i].y, vertices[i].z);
+    }
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute("position", new THREE.Float32BufferAttribute(new Float32Array(positions), 3));
+    geometry.setIndex([
+      4, 6, 5,
+      4, 7, 6,
+      0, 3, 7,
+      0, 7, 4,
+      1, 5, 6,
+      1, 6, 2,
+      0, 4, 5,
+      0, 5, 1,
+      3, 2, 6,
+      3, 6, 7
+    ]);
+    geometry.computeVertexNormals();
+    const mesh = new THREE.Mesh(geometry, abutmentMaterial);
+    mesh.castShadow = true;
+    mesh.receiveShadow = true;
+    return {
+      mesh,
+      debug: { length, minHeight, maxHeight, suppressed: false }
+    };
   };
 
   for (let i = 0; i < spans.length; i += 1) {
@@ -7521,57 +7825,56 @@ const buildBridgeDeckMesh = (
       span.bridgePath[span.bridgePath.length - 1],
       anchorRoadOverlap
     );
-    const routePoints: BridgeRoutePoint[] = [
-      { x: startAnchor.x, z: startAnchor.z, baseY: startAnchor.baseY, terrainY: startAnchor.terrainY }
-    ];
+    const routePoints: BridgeRoutePoint[] = [];
+    const pushRoutePoint = (point: BridgeRoutePoint): void => {
+      const previous = routePoints[routePoints.length - 1];
+      if (previous && Math.hypot(previous.x - point.x, previous.z - point.z) <= 1e-4) {
+        previous.baseY = Math.max(previous.baseY, point.baseY);
+        if (Number.isFinite(point.terrainY)) {
+          previous.terrainY = point.terrainY;
+        }
+        if (Number.isFinite(point.riverSurfaceY)) {
+          previous.riverSurfaceY = point.riverSurfaceY;
+        }
+        return;
+      }
+      routePoints.push(point);
+    };
     const routeMode: TerrainBridgeSpanDebug["routeMode"] =
       span.bridgePath.length === 1 ? "single_tile_direct" : "tile_path";
+    pushRoutePoint({
+      x: startAnchor.roadContactX,
+      z: startAnchor.roadContactZ,
+      baseY: startAnchor.roadY,
+      terrainY: sampleTerrainWorldAtTileCoord(startAnchor.roadContactEdgeX, startAnchor.roadContactEdgeY)
+    });
+    pushRoutePoint({
+      x: startAnchor.bankContactX,
+      z: startAnchor.bankContactZ,
+      baseY: startAnchor.baseY,
+      terrainY: startAnchor.terrainY,
+      riverSurfaceY: startAnchor.waterY ?? undefined
+    });
     if (routeMode === "single_tile_direct") {
-      const idx = span.bridgePath[0];
-      const tileX = idx % cols;
-      const tileY = Math.floor(idx / cols);
-      const terrainY = heightAtTileCoord(tileX + 0.5, tileY + 0.5) * heightScale;
-      const rawSurface = Number.isFinite(riverSurface?.[idx]) ? (riverSurface?.[idx] as number) : elevations[idx] ?? 0;
-      const riverSurfaceY = clamp(rawSurface, 0, 1) * heightScale;
-      const baseY = Math.max(
-        terrainY + ROAD_SURFACE_OFFSET + BRIDGE_DECK_SURFACE_LIFT,
-        terrainY + BRIDGE_DECK_CLEARANCE_BANK,
-        riverSurfaceY + BRIDGE_DECK_CLEARANCE_WATER
-      );
-      routePoints.push({
-        idx,
-        x: (startAnchor.x + endAnchor.x) * 0.5,
-        z: (startAnchor.z + endAnchor.z) * 0.5,
-        baseY,
-        terrainY,
-        riverSurfaceY
-      });
+      pushRoutePoint(buildBridgeTileRoutePoint(span.bridgePath[0]));
     } else {
       for (let j = 0; j < span.bridgePath.length; j += 1) {
-        const idx = span.bridgePath[j];
-        const tileX = idx % cols;
-        const tileY = Math.floor(idx / cols);
-        const x = edgeToWorldX(tileX + 0.5);
-        const z = edgeToWorldZ(tileY + 0.5);
-        const prev = routePoints[routePoints.length - 1];
-        if (Math.hypot(prev.x - x, prev.z - z) <= 1e-4) {
-          continue;
-        }
-        const terrainY = heightAtTileCoord(tileX + 0.5, tileY + 0.5) * heightScale;
-        const rawSurface = Number.isFinite(riverSurface?.[idx]) ? (riverSurface?.[idx] as number) : elevations[idx] ?? 0;
-        const riverSurfaceY = clamp(rawSurface, 0, 1) * heightScale;
-        const baseY = Math.max(
-          terrainY + ROAD_SURFACE_OFFSET + BRIDGE_DECK_SURFACE_LIFT,
-          terrainY + BRIDGE_DECK_CLEARANCE_BANK,
-          riverSurfaceY + BRIDGE_DECK_CLEARANCE_WATER
-        );
-        routePoints.push({ idx, x, z, baseY, terrainY, riverSurfaceY });
+        pushRoutePoint(buildBridgeTileRoutePoint(span.bridgePath[j]));
       }
     }
-    const tail = routePoints[routePoints.length - 1];
-    if (Math.hypot(tail.x - endAnchor.x, tail.z - endAnchor.z) > 1e-4) {
-      routePoints.push({ x: endAnchor.x, z: endAnchor.z, baseY: endAnchor.baseY, terrainY: endAnchor.terrainY });
-    }
+    pushRoutePoint({
+      x: endAnchor.bankContactX,
+      z: endAnchor.bankContactZ,
+      baseY: endAnchor.baseY,
+      terrainY: endAnchor.terrainY,
+      riverSurfaceY: endAnchor.waterY ?? undefined
+    });
+    pushRoutePoint({
+      x: endAnchor.roadContactX,
+      z: endAnchor.roadContactZ,
+      baseY: endAnchor.roadY,
+      terrainY: sampleTerrainWorldAtTileCoord(endAnchor.roadContactEdgeX, endAnchor.roadContactEdgeY)
+    });
 
     if (routePoints.length < 2) {
       continue;
@@ -7646,6 +7949,21 @@ const buildBridgeDeckMesh = (
         overlayMesh.renderOrder = 2;
         addBridgeObject(spanGroup, overlayMesh);
       }
+    }
+
+    const startAbutment =
+      profilePoints.length >= 2
+        ? buildBridgeAbutment(profilePoints[0], profilePoints[1])
+        : { mesh: null, debug: { length: 0, minHeight: 0, maxHeight: 0, suppressed: true } };
+    if (startAbutment.mesh) {
+      addBridgeObject(spanGroup, startAbutment.mesh);
+    }
+    const endAbutment =
+      profilePoints.length >= 2
+        ? buildBridgeAbutment(profilePoints[profilePoints.length - 1], profilePoints[profilePoints.length - 2])
+        : { mesh: null, debug: { length: 0, minHeight: 0, maxHeight: 0, suppressed: true } };
+    if (endAbutment.mesh) {
+      addBridgeObject(spanGroup, endAbutment.mesh);
     }
 
     const { cumulative, total: spanLength } = buildBridgePolylineLengths(centerPoints);
@@ -7780,18 +8098,10 @@ const buildBridgeDeckMesh = (
       bridgePath: span.bridgePath.map((idx) => buildBridgeTileDebug(idx, cols)),
       startRoad: buildBridgeTileDebug(span.startRoadIdx, cols),
       endRoad: buildBridgeTileDebug(span.endRoadIdx, cols),
-      startAnchor: {
-        edgeX: startAnchor.edgeX,
-        edgeY: startAnchor.edgeY,
-        terrainY: startAnchor.terrainY,
-        baseY: startAnchor.baseY
-      },
-      endAnchor: {
-        edgeX: endAnchor.edgeX,
-        edgeY: endAnchor.edgeY,
-        terrainY: endAnchor.terrainY,
-        baseY: endAnchor.baseY
-      },
+      startAnchor,
+      endAnchor,
+      startAbutment: startAbutment.debug,
+      endAbutment: endAbutment.debug,
       worldSpanLength: spanLength,
       minDeckY,
       maxDeckY,
@@ -8548,24 +8858,11 @@ export const getTerrainStep = (size: number, fullResolution = false): number => 
   return 1;
 };
 
-export const buildTerrainMesh = (
+export const prepareTerrainRenderSurface = (
   sample: TerrainSample,
-  treeAssets: TreeAssets | null,
-  houseAssets: HouseAssets | null,
-  firestationAsset: FirestationAsset | null,
-  seasonVisualConfig?: TreeSeasonVisualConfig
-): {
-  mesh: THREE.Mesh;
-  size: { width: number; depth: number };
-  water?: TerrainWaterData;
-  treeBurn?: TreeBurnController;
-} => {
-  const { cols, rows, elevations } = sample;
-  const palette = buildPalette();
+): TerrainRenderSurface => {
+  const { cols, rows } = sample;
   const grassId = TILE_TYPE_IDS.grass;
-  const scrubId = TILE_TYPE_IDS.scrub;
-  const floodplainId = TILE_TYPE_IDS.floodplain;
-  const forestId = TILE_TYPE_IDS.forest;
   const beachId = TILE_TYPE_IDS.beach;
   const rockyId = TILE_TYPE_IDS.rocky;
   const waterId = TILE_TYPE_IDS.water;
@@ -8574,19 +8871,7 @@ export const buildTerrainMesh = (
   const roadId = TILE_TYPE_IDS.road;
   const firebreakId = TILE_TYPE_IDS.firebreak;
   const ashId = TILE_TYPE_IDS.ash;
-  const maxMapSpan = Math.max(cols, rows);
-  const step = getTerrainStep(maxMapSpan, sample.fullResolution ?? false);
-  const isLargeTerrain = maxMapSpan >= LARGE_TERRAIN_DETAIL_THRESHOLD;
-  const isMediumTerrain = !isLargeTerrain && maxMapSpan >= MEDIUM_TERRAIN_DETAIL_THRESHOLD;
-  const treeDensitySafetyScale = isLargeTerrain ? TREE_DENSITY_SCALE_LARGE : isMediumTerrain ? TREE_DENSITY_SCALE_MEDIUM : 1;
-  const treeAttemptCap = isLargeTerrain ? TREE_ATTEMPT_CAP_LARGE : isMediumTerrain ? TREE_ATTEMPT_CAP_MEDIUM : 3;
-  const treeVariantCap = isLargeTerrain ? TREE_VARIANT_CAP_LARGE : isMediumTerrain ? TREE_VARIANT_CAP_MEDIUM : Number.POSITIVE_INFINITY;
-  const treeInstanceBudget = isLargeTerrain
-    ? TREE_INSTANCE_BUDGET_LARGE
-    : isMediumTerrain
-      ? TREE_INSTANCE_BUDGET_MEDIUM
-      : Number.POSITIVE_INFINITY;
-  const useDetailedStructures = maxMapSpan < DETAILED_STRUCTURE_THRESHOLD;
+  const step = getTerrainStep(Math.max(cols, rows), sample.fullResolution ?? false);
   const sampleCols = Math.floor((cols - 1) / step) + 1;
   const sampleRows = Math.floor((rows - 1) / step) + 1;
   const width = (sampleCols - 1) * step;
@@ -8652,9 +8937,6 @@ export const buildTerrainMesh = (
         const touchesWorldBorder = sampleTouchesWorldBorder(tileX, tileY, endX, endY, cols, rows);
         const coastalDistanceToLand =
           sampleDistanceToLand[idx] >= 0 ? sampleDistanceToLand[idx] : sampleCols + sampleRows;
-        // The ocean mesh is rendered at a single shared sea reference. If we lift
-        // border/ocean terrain to the authored per-tile sea field here, we can
-        // create an above-water rim at the map edge and a moat just inside it.
         const renderSeaLevel = waterLevel;
         const coastDistance = sampleCoastDistance?.[idx] ?? coastalDistanceToLand;
         const coastClass = sampleCoastClass?.[idx] ?? COAST_CLASS_NONE;
@@ -8664,12 +8946,12 @@ export const buildTerrainMesh = (
           for (let y = tileY; y < endY && !isOcean; y += 1) {
             const rowBase = y * cols;
             for (let x = tileX; x < endX; x += 1) {
-              const idx = rowBase + x;
-              if (riverMask && riverMask[idx]) {
+              const tileIndex = rowBase + x;
+              if (riverMask && riverMask[tileIndex]) {
                 isRiver = true;
                 break;
               }
-              if (oceanMask[idx]) {
+              if (oceanMask[tileIndex]) {
                 isOcean = true;
                 break;
               }
@@ -8697,9 +8979,6 @@ export const buildTerrainMesh = (
   }
   const waterRatios = buildSampleWaterRatios(sample, sampleCols, sampleRows, step, waterId, oceanMask, riverMask);
   if (waterLevel !== null && !hasAuthoritativeCoastProfile) {
-    // Legacy/downsampled samples can benefit from a light inland shoreline relax pass,
-    // but authoritative coast metadata from mapgen already encodes the final beach/cliff ramp.
-    // Re-applying that shaping here creates a rendered moat ring that is not present in the data.
     const total = sampleCols * sampleRows;
     const sampleOceanSupport = new Uint8Array(total);
     for (let i = 0; i < total; i += 1) {
@@ -8753,8 +9032,7 @@ export const buildTerrainMesh = (
       if (sampleHeights[i] <= targetHeight) {
         continue;
       }
-      const relax =
-        1 - smoothstep(1, COAST_GEOMETRY_LAND_RELAX_BAND + 1, coastalDistanceToOcean);
+      const relax = 1 - smoothstep(1, COAST_GEOMETRY_LAND_RELAX_BAND + 1, coastalDistanceToOcean);
       sampleHeights[i] = clamp(sampleHeights[i] * (1 - relax) + targetHeight * relax, 0, 1);
     }
   }
@@ -8783,6 +9061,18 @@ export const buildTerrainMesh = (
     sampleCols,
     sampleRows,
     step
+  );
+  const waterSupportMask = buildWaterSupportMask(sampleTypes, waterId);
+  const waterSurfaceHeights = buildWaterSurfaceHeights(
+    sampleHeights,
+    waterSupportMask,
+    waterRatios.ocean,
+    waterRatios.river,
+    sampleCols,
+    sampleRows,
+    waterLevel,
+    sampledRiverSurface,
+    sampledRiverStepStrength
   );
   if (DEBUG_TERRAIN_RENDER && riverRenderDomain) {
     const transform = createRiverSpaceTransform(
@@ -8820,15 +9110,112 @@ export const buildTerrainMesh = (
     const hx1 = h01 * (1 - tx) + h11 * tx;
     return hx0 * (1 - ty) + hx1 * ty;
   };
-  const heightAtTile = (tileX: number, tileY: number): number => {
-    return heightAtTileCoord(tileX + 0.5, tileY + 0.5);
+  const heightAtTile = (tileX: number, tileY: number): number => heightAtTileCoord(tileX + 0.5, tileY + 0.5);
+  const heightScale = getTerrainHeightScale(cols, rows, sample.heightScaleMultiplier ?? 1);
+  return {
+    sample,
+    cols,
+    rows,
+    step,
+    sampleCols,
+    sampleRows,
+    width,
+    depth,
+    size: { width, depth },
+    heightScale,
+    sampleHeights,
+    sampleTypes,
+    coastData,
+    sampleOceanCoverage,
+    sampleCoastDistance,
+    sampleCoastClass,
+    oceanMask,
+    riverMask,
+    waterLevel,
+    waterRatios,
+    waterSupportMask,
+    waterSurfaceHeights,
+    sampledRiverSurface,
+    sampledRiverStepStrength,
+    sampledRiverCoverage,
+    riverRenderDomain,
+    heightAtSample,
+    heightAtTileCoord,
+    heightAtTile,
+    toWorldX: (tileX: number): number => (tileX / Math.max(1, cols) - 0.5) * width,
+    toWorldZ: (tileY: number): number => (tileY / Math.max(1, rows) - 0.5) * depth
   };
+};
 
+export const buildTerrainMesh = (
+  surface: TerrainRenderSurface,
+  treeAssets: TreeAssets | null,
+  houseAssets: HouseAssets | null,
+  firestationAsset: FirestationAsset | null,
+  seasonVisualConfig?: TreeSeasonVisualConfig
+): {
+  mesh: THREE.Mesh;
+  size: { width: number; depth: number };
+  water?: TerrainWaterData;
+  treeBurn?: TreeBurnController;
+} => {
+  const sample = surface.sample;
+  const { cols, rows, elevations } = sample;
+  const palette = buildPalette();
+  const grassId = TILE_TYPE_IDS.grass;
+  const scrubId = TILE_TYPE_IDS.scrub;
+  const floodplainId = TILE_TYPE_IDS.floodplain;
+  const forestId = TILE_TYPE_IDS.forest;
+  const beachId = TILE_TYPE_IDS.beach;
+  const rockyId = TILE_TYPE_IDS.rocky;
+  const waterId = TILE_TYPE_IDS.water;
+  const baseId = TILE_TYPE_IDS.base;
+  const houseId = TILE_TYPE_IDS.house;
+  const roadId = TILE_TYPE_IDS.road;
+  const firebreakId = TILE_TYPE_IDS.firebreak;
+  const ashId = TILE_TYPE_IDS.ash;
+  const maxMapSpan = Math.max(cols, rows);
+  const {
+    step,
+    sampleCols,
+    sampleRows,
+    width,
+    depth,
+    sampleHeights,
+    sampleTypes,
+    coastData,
+    sampleOceanCoverage,
+    sampleCoastDistance,
+    sampleCoastClass,
+    oceanMask,
+    riverMask,
+    waterLevel,
+    waterRatios,
+    waterSupportMask,
+    waterSurfaceHeights,
+    sampledRiverSurface,
+    sampledRiverStepStrength,
+    sampledRiverCoverage,
+    riverRenderDomain,
+    heightAtTileCoord,
+    heightAtTile,
+    heightScale
+  } = surface;
+  const isLargeTerrain = maxMapSpan >= LARGE_TERRAIN_DETAIL_THRESHOLD;
+  const isMediumTerrain = !isLargeTerrain && maxMapSpan >= MEDIUM_TERRAIN_DETAIL_THRESHOLD;
+  const treeDensitySafetyScale = isLargeTerrain ? TREE_DENSITY_SCALE_LARGE : isMediumTerrain ? TREE_DENSITY_SCALE_MEDIUM : 1;
+  const treeAttemptCap = isLargeTerrain ? TREE_ATTEMPT_CAP_LARGE : isMediumTerrain ? TREE_ATTEMPT_CAP_MEDIUM : 3;
+  const treeVariantCap = isLargeTerrain ? TREE_VARIANT_CAP_LARGE : isMediumTerrain ? TREE_VARIANT_CAP_MEDIUM : Number.POSITIVE_INFINITY;
+  const treeInstanceBudget = isLargeTerrain
+    ? TREE_INSTANCE_BUDGET_LARGE
+    : isMediumTerrain
+      ? TREE_INSTANCE_BUDGET_MEDIUM
+      : Number.POSITIVE_INFINITY;
+  const useDetailedStructures = maxMapSpan < DETAILED_STRUCTURE_THRESHOLD;
   const geometry = new THREE.PlaneGeometry(width, depth, sampleCols - 1, sampleRows - 1);
   geometry.rotateX(-Math.PI / 2);
 
   const positions = geometry.attributes.position;
-  const heightScale = getTerrainHeightScale(cols, rows, sample.heightScaleMultiplier ?? 1);
   let minHeight = Number.POSITIVE_INFINITY;
   let maxHeight = Number.NEGATIVE_INFINITY;
   let waterHeightSum = 0;
@@ -9242,17 +9629,7 @@ export const buildTerrainMesh = (
   if (roadDeckMesh) {
     mesh.add(roadDeckMesh);
   }
-  const bridgeDeck = buildBridgeDeckMesh(
-    sample,
-    width,
-    depth,
-    heightScale,
-    roadOverlay,
-    roadId,
-    baseId,
-    heightAtTileCoord,
-    riverRenderDomain
-  );
+  const bridgeDeck = buildBridgeDeckMesh(surface, roadOverlay, roadId, baseId);
   mesh.userData.bridgeDebug = bridgeDeck.debug;
   if (bridgeDeck.group) {
     mesh.add(bridgeDeck.group);
@@ -9855,9 +10232,9 @@ export const buildTerrainMesh = (
   }
 
   let water: TerrainWaterData | undefined;
-  const oceanLevel = computeWaterLevel(sample, waterId, oceanMask, riverMask);
+  const oceanLevel = waterLevel;
   const ratios = waterRatios;
-  const supportMask = buildWaterSupportMask(sampleTypes, waterId);
+  const supportMask = waterSupportMask;
   let hasVisibleWater = false;
   for (let i = 0; i < supportMask.length; i += 1) {
     if (supportMask[i] > 0 || (ratios.water[i] ?? 0) > 0) {
@@ -9929,17 +10306,7 @@ export const buildTerrainMesh = (
       undefined,
       undefined
     );
-    const normalizedWaterHeights = buildWaterSurfaceHeights(
-      sampleHeights,
-      supportMask,
-      ratios.ocean,
-      ratios.river,
-      sampleCols,
-      sampleRows,
-      oceanLevel,
-      sampledRiverSurface,
-      sampledRiverStepStrength
-    );
+    const normalizedWaterHeights = waterSurfaceHeights;
     const oceanFlowMap = buildRiverFlowTexture(
       normalizedOceanHeights,
       sampleTypes,

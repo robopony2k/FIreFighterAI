@@ -6,7 +6,7 @@ import type { EffectsState } from "../core/effectsState.js";
 import { getHouseFootprintBounds, pickHouseFootprint } from "../core/houseFootprints.js";
 import type { InputState } from "../core/inputState.js";
 import { indexFor } from "../core/grid.js";
-import { TILE_ID_TO_TYPE, TILE_TYPE_IDS } from "../core/state.js";
+import { setStatus, TILE_ID_TO_TYPE, TILE_TYPE_IDS } from "../core/state.js";
 import type { ClimateForecast, Town } from "../core/types.js";
 import type { RenderSim } from "./simView.js";
 import { createHudState, setHudViewport, type HudTheme } from "./hud/hudState.js";
@@ -43,18 +43,15 @@ import {
 import {
   buildPalette,
   buildRoadOverlayTexture,
-  buildSampleHeightMap,
-  buildSampleTypeMap,
   buildTerrainMesh,
   buildTileTexture,
-  computeWaterLevel,
-  getTerrainHeightScale,
-  getTerrainStep,
   getRoadAtlasVersion,
+  getTerrainStep,
+  prepareTerrainRenderSurface,
   ROAD_SURFACE_WIDTH,
   ROAD_TEX_SCALE,
   setRoadOverlayMaxSize,
-  buildOceanMask,
+  type TerrainRenderSurface,
   type TreeSeasonVisualConfig,
   type TreeBurnController,
   type TerrainSample,
@@ -71,6 +68,7 @@ import {
   WATERFALL_DEBUG_FLAG_WATER
 } from "./threeTestTerrain.js";
 import { createThreeTestFireFx, type SparkMode } from "./threeTestFireFx.js";
+import { createThreeTestWorldAudio, type WorldAudioChannelControls } from "./threeTestWorldAudio.js";
 import { createThreeTestUnitFxLayer } from "./threeTestUnitFx.js";
 import type { TerrainWaterDebugControls } from "./terrainWaterDebug.js";
 import { ThreeTestWaterSystem, type WaterQualityProfile } from "./threeTestWater.js";
@@ -180,16 +178,16 @@ type TerrainClimateUniforms = {
   uWorldSeed: { value: number };
 };
 
-type HudMusicSettings = {
+type HudAudioChannelSettings = {
   muted: boolean;
   volume: number;
 };
 
-type HudMusicControls = {
-  getSettings: () => HudMusicSettings;
+type HudAudioChannelControls = {
+  getSettings: () => HudAudioChannelSettings;
   toggleMuted: () => void;
   setVolume: (value: number) => void;
-  onChange: (listener: (settings: HudMusicSettings) => void) => () => void;
+  onChange: (listener: (settings: HudAudioChannelSettings) => void) => () => void;
 };
 
 type ThreeTestRenderFlags = {
@@ -251,7 +249,6 @@ const THREE_TEST_CINEMATIC_GRADE_CONFIG: ThreeTestCinematicLookConfig = {
   fireGlowBoost: 1.36,
   emberBoost: 1.42
 };
-const FAST_OCEAN_SAMPLE_SUPPORT_FLOOR = 0.12;
 const GROUND_PHASE_SHIFT_MAX = 0.06;
 const TREE_PHASE_SHIFT_MAX = 0.08;
 const TREE_RATE_JITTER = 0.1;
@@ -278,6 +275,14 @@ const BASE_LABEL_CONNECTOR_ORIGIN_X = 12;
 const HOVER_DEBUG_LABEL_LIFT_METERS = 88;
 const HOVER_DEBUG_LABEL_SCREEN_OFFSET_Y = -18;
 const HOVER_DEBUG_LABEL_CONNECTOR_ORIGIN_X = 16;
+const HOVER_DEBUG_PANEL_GAP_X = 28;
+const HOVER_DEBUG_PANEL_GAP_Y = 20;
+const HOVER_DEBUG_TILE_SAFE_RADIUS_PX = 34;
+const HOVER_DEBUG_TILE_BORDER_INSET = 0.08;
+const HOVER_DEBUG_TILE_BORDER_LIFT = 0.05;
+const HOVER_DEBUG_TILE_WATCH_COLOR = 0xffd447;
+const HOVER_DEBUG_TILE_HIGH_COLOR = 0xff9738;
+const HOVER_DEBUG_TILE_CRITICAL_COLOR = 0xd13232;
 const MINIMAP_REDRAW_INTERVAL_MS = 140;
 const UNIT_TRAY_UPDATE_INTERVAL_MS = 90;
 const UNIT_COMMAND_PATH_LIFT = 0.07;
@@ -300,7 +305,6 @@ const CLIMATE_TEMP_DOMAIN_MAX = Math.ceil(
 
 type MinimapMode = "terrain" | "fire" | "moisture";
 
-const clampScalar = (value: number, min: number, max: number): number => Math.max(min, Math.min(max, value));
 const clamp01 = (value: number): number => Math.max(0, Math.min(1, value));
 const mixChannel = (a: number, b: number, t: number): number => a + (b - a) * t;
 const mixRgb = (
@@ -344,34 +348,6 @@ const wrap01 = (value: number): number => {
   const wrapped = value % 1;
   return wrapped < 0 ? wrapped + 1 : wrapped;
 };
-const bilerp = (h00: number, h10: number, h01: number, h11: number, tx: number, ty: number): number => {
-  const hx0 = h00 * (1 - tx) + h10 * tx;
-  const hx1 = h01 * (1 - tx) + h11 * tx;
-  return hx0 * (1 - ty) + hx1 * ty;
-};
-const sampleTerrainHeight = (sample: TerrainSample, tileX: number, tileY: number): number => {
-  const cols = Math.max(1, sample.cols);
-  const rows = Math.max(1, sample.rows);
-  const x = clampScalar(tileX - 0.5, 0, cols - 1);
-  const y = clampScalar(tileY - 0.5, 0, rows - 1);
-  const x0 = Math.floor(x);
-  const y0 = Math.floor(y);
-  const x1 = Math.min(cols - 1, x0 + 1);
-  const y1 = Math.min(rows - 1, y0 + 1);
-  const tx = x - x0;
-  const ty = y - y0;
-  const idx00 = y0 * cols + x0;
-  const idx10 = y0 * cols + x1;
-  const idx01 = y1 * cols + x0;
-  const idx11 = y1 * cols + x1;
-  const h00 = sample.elevations[idx00] ?? 0;
-  const h10 = sample.elevations[idx10] ?? h00;
-  const h01 = sample.elevations[idx01] ?? h00;
-  const h11 = sample.elevations[idx11] ?? h00;
-  return bilerp(h00, h10, h01, h11, tx, ty);
-};
-const toWorldX = (tileX: number, cols: number, width: number): number => (tileX / Math.max(1, cols) - 0.5) * width;
-const toWorldZ = (tileY: number, rows: number, depth: number): number => (tileY / Math.max(1, rows) - 0.5) * depth;
 const formatDebugNumber = (value: number, digits = 2): string =>
   Number.isFinite(value) ? value.toFixed(digits) : "n/a";
 const lerpWrapped01 = (current: number, target: number, alpha: number): number => {
@@ -404,7 +380,8 @@ export const createThreeTest = (
   inputState: InputState,
   effectsState: EffectsState | null = null,
   uiAudio: UiAudioController | null = null,
-  musicControls: HudMusicControls | null = null
+  musicControls: HudAudioChannelControls | null = null,
+  worldAudioControls: WorldAudioChannelControls | null = null
 ): ThreeTestController => {
   threeTestInitCount += 1;
   if (threeTestInitCount > 1) {
@@ -618,6 +595,7 @@ export const createThreeTest = (
     sparkDebug: THREE_TEST_SPARK_DEBUG,
     sparkMode: THREE_TEST_SPARK_MODE
   });
+  const worldAudio = worldAudioControls ? createThreeTestWorldAudio(camera, worldAudioControls) : null;
   fireFx.captureSnapshot(world);
   const unitsLayer = createThreeTestUnitsLayer(scene);
   const unitFxLayer = createThreeTestUnitFxLayer(scene);
@@ -638,6 +616,40 @@ export const createThreeTest = (
   const scoreFlowPulseGroup = new THREE.Group();
   scoreFlowPulseGroup.name = "three-test-score-flow-pulses";
   scene.add(scoreFlowPulseGroup);
+  const hoverDebugTileHighlightPositions = new Float32Array(8 * 3);
+  const hoverDebugTileHighlightGeometry = new THREE.BufferGeometry();
+  hoverDebugTileHighlightGeometry.setAttribute(
+    "position",
+    new THREE.BufferAttribute(hoverDebugTileHighlightPositions, 3)
+  );
+  hoverDebugTileHighlightGeometry.setIndex([
+    0, 1, 5,
+    0, 5, 4,
+    1, 2, 6,
+    1, 6, 5,
+    2, 3, 7,
+    2, 7, 6,
+    3, 0, 4,
+    3, 4, 7
+  ]);
+  const hoverDebugTileHighlightMaterial = new THREE.MeshBasicMaterial({
+    color: 0x99d6ff,
+    transparent: true,
+    opacity: 0.88,
+    side: THREE.DoubleSide,
+    depthTest: false,
+    depthWrite: false
+  });
+  hoverDebugTileHighlightMaterial.toneMapped = false;
+  const hoverDebugTileHighlight = new THREE.Mesh(
+    hoverDebugTileHighlightGeometry,
+    hoverDebugTileHighlightMaterial
+  );
+  hoverDebugTileHighlight.name = "three-test-hover-debug-tile";
+  hoverDebugTileHighlight.visible = false;
+  hoverDebugTileHighlight.frustumCulled = false;
+  hoverDebugTileHighlight.renderOrder = 4;
+  scene.add(hoverDebugTileHighlight);
   const unitCommandPathMaterial = new THREE.LineBasicMaterial({
     color: 0xb8e6ff,
     transparent: true,
@@ -775,6 +787,7 @@ export const createThreeTest = (
   };
   let removeUiAudioChangeListener: (() => void) | null = null;
   let removeMusicControlsChangeListener: (() => void) | null = null;
+  let removeWorldAudioChangeListener: (() => void) | null = null;
   type HoverDebugTone = "default" | "watch" | "high" | "critical";
   type HoverDebugSection = {
     key: string;
@@ -1476,8 +1489,9 @@ export const createThreeTest = (
     return { root, muteButton, volumeLabel, volumeSlider };
   };
   const sfxControls = createTimeVolumeControls();
+  const worldTimeControls = createTimeVolumeControls();
   const musicTimeControls = createTimeVolumeControls();
-  timeAudioControls.append(sfxControls.root, musicTimeControls.root);
+  timeAudioControls.append(sfxControls.root, worldTimeControls.root, musicTimeControls.root);
 
   const applyDockAudioState = (settings: { muted: boolean; volume: number }): void => {
     const volumePct = Math.round(Math.max(0, Math.min(1, settings.volume)) * 100);
@@ -1501,6 +1515,18 @@ export const createThreeTest = (
     musicTimeControls.volumeSlider.value = settings.volume.toFixed(2);
     musicTimeControls.muteButton.disabled = !musicControls;
     musicTimeControls.volumeSlider.disabled = !musicControls || settings.muted;
+  };
+
+  const applyDockWorldState = (settings: { muted: boolean; volume: number }): void => {
+    const volumePct = Math.round(Math.max(0, Math.min(1, settings.volume)) * 100);
+    worldTimeControls.muteButton.textContent = settings.muted ? "ðŸ”‡" : "ðŸ”Š";
+    worldTimeControls.muteButton.title = settings.muted ? "Unmute world audio" : "Mute world audio";
+    worldTimeControls.muteButton.setAttribute("aria-pressed", settings.muted ? "true" : "false");
+    worldTimeControls.muteButton.setAttribute("aria-label", settings.muted ? "Unmute world audio" : "Mute world audio");
+    worldTimeControls.volumeLabel.textContent = `World ${volumePct}%`;
+    worldTimeControls.volumeSlider.value = settings.volume.toFixed(2);
+    worldTimeControls.muteButton.disabled = !worldAudioControls;
+    worldTimeControls.volumeSlider.disabled = !worldAudioControls || settings.muted;
   };
 
   if (uiAudio) {
@@ -1553,6 +1579,31 @@ export const createThreeTest = (
     applyDockMusicState({ muted: false, volume: 0.35 });
   }
 
+  if (worldAudioControls) {
+    removeWorldAudioChangeListener = worldAudioControls.onChange((settings) => {
+      applyDockWorldState(settings);
+    });
+    worldTimeControls.muteButton.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      playUiCue("toggle");
+      worldAudioControls.toggleMuted();
+    });
+    worldTimeControls.volumeSlider.addEventListener("input", (event) => {
+      const target = event.target;
+      if (!(target instanceof HTMLInputElement)) {
+        return;
+      }
+      const next = Number(target.value);
+      if (!Number.isFinite(next)) {
+        return;
+      }
+      worldAudioControls.setVolume(next);
+    });
+  } else {
+    applyDockWorldState({ muted: false, volume: 0.55 });
+  }
+
   timeDock.summary.append(timeSummary);
   timeDock.details.append(timeControls, timeAudioControls);
 
@@ -1577,6 +1628,24 @@ export const createThreeTest = (
         return { r: 99, g: 113, b: 71 };
       default:
         return { r: 90, g: 143, b: 78 };
+    }
+  };
+
+  const resolveHoverDebugTileHighlightHex = (tileId: number, tone: HoverDebugTone): number => {
+    switch (tone) {
+      case "watch":
+        return HOVER_DEBUG_TILE_WATCH_COLOR;
+      case "high":
+        return HOVER_DEBUG_TILE_HIGH_COLOR;
+      case "critical":
+        return HOVER_DEBUG_TILE_CRITICAL_COLOR;
+      default: {
+        const base = getTileColor(tileId);
+        const r = Math.round(base.r + (255 - base.r) * 0.38);
+        const g = Math.round(base.g + (255 - base.g) * 0.38);
+        const b = Math.round(base.b + (255 - base.b) * 0.38);
+        return (r << 16) | (g << 8) | b;
+      }
     }
   };
 
@@ -2344,7 +2413,7 @@ export const createThreeTest = (
   };
 
   const updateTruckBeaconOverlay = (): void => {
-    if (!lastSample || !lastTerrainSize) {
+    if (!lastTerrainSurface || !lastTerrainSize) {
       truckBeaconOverlayRoot.classList.add("hidden");
       truckBeaconElements.forEach((entry) => {
         entry.root.classList.add("hidden");
@@ -2361,11 +2430,6 @@ export const createThreeTest = (
     }
 
     truckBeaconOverlayRoot.classList.remove("hidden");
-    const cols = Math.max(1, world.grid.cols);
-    const rows = Math.max(1, world.grid.rows);
-    const width = lastTerrainSize.width;
-    const depth = lastTerrainSize.depth;
-    const heightScale = getSampleHeightScale(cols, rows);
     const labelLift = TRUCK_BEACON_LIFT_METERS / Math.max(0.001, TILE_SIZE);
     const viewportWidth = Math.max(1, hudState.viewport.width);
     const viewportHeight = Math.max(1, hudState.viewport.height);
@@ -2381,9 +2445,9 @@ export const createThreeTest = (
       const moveStatus = getUnitMoveStatus(unit);
       const selected = world.selectedUnitIds.includes(unit.id);
       const interpolated = resolveInterpolatedUnitPosition(unit);
-      const worldX = toWorldX(interpolated.x, cols, width);
-      const worldZ = toWorldZ(interpolated.y, rows, depth);
-      const worldY = sampleTerrainHeight(lastSample, interpolated.x, interpolated.y) * heightScale;
+      const worldX = lastTerrainSurface.toWorldX(interpolated.x);
+      const worldZ = lastTerrainSurface.toWorldZ(interpolated.y);
+      const worldY = lastTerrainSurface.heightAtTileCoord(interpolated.x, interpolated.y) * lastTerrainSurface.heightScale;
       beaconWorld.set(worldX, worldY + labelLift, worldZ);
       beaconProjected.copy(beaconWorld).project(camera);
       const isVisible =
@@ -2520,17 +2584,16 @@ export const createThreeTest = (
   };
 
   const focusCameraOnTile = (tileX: number, tileY: number): void => {
-    if (!lastTerrainSize) {
+    if (!lastTerrainSurface) {
       return;
     }
     const cols = Math.max(1, world.grid.cols);
     const rows = Math.max(1, world.grid.rows);
     const clampedX = Math.max(0, Math.min(cols - 1, Math.floor(tileX)));
     const clampedY = Math.max(0, Math.min(rows - 1, Math.floor(tileY)));
-    const worldX = ((clampedX + 0.5) / cols - 0.5) * lastTerrainSize.width;
-    const worldZ = ((clampedY + 0.5) / rows - 0.5) * lastTerrainSize.depth;
-    const idx = indexFor(world.grid, clampedX, clampedY);
-    const worldY = (world.tileElevation[idx] ?? 0) * getSampleHeightScale(cols, rows);
+    const worldX = lastTerrainSurface.toWorldX(clampedX + 0.5);
+    const worldZ = lastTerrainSurface.toWorldZ(clampedY + 0.5);
+    const worldY = lastTerrainSurface.heightAtTile(clampedX, clampedY) * lastTerrainSurface.heightScale;
     const target = new THREE.Vector3(worldX, worldY, worldZ);
     const currentDistance = Math.max(0.001, camera.position.distanceTo(controls.target));
     const desiredDistance = Math.max(
@@ -3369,6 +3432,7 @@ export const createThreeTest = (
   const hideHoverDebugBillboard = (): void => {
     hoverDebugRoot.classList.add("hidden");
     hoverDebugConnector.style.display = "none";
+    hoverDebugTileHighlight.visible = false;
   };
 
   const hoverDebugToneRank: Record<HoverDebugTone, number> = {
@@ -3383,6 +3447,41 @@ export const createThreeTest = (
       return current;
     }
     return hoverDebugToneRank[next] > hoverDebugToneRank[current] ? next : current;
+  };
+
+  const updateHoverDebugTileHighlight = (
+    tileX: number,
+    tileY: number,
+    tone: HoverDebugTone,
+    tileId: number
+  ): void => {
+    if (!lastTerrainSurface) {
+      hoverDebugTileHighlight.visible = false;
+      return;
+    }
+    const surface = lastTerrainSurface;
+    const inset = HOVER_DEBUG_TILE_BORDER_INSET;
+    const setVertex = (index: number, gridX: number, gridY: number): void => {
+      const offset = index * 3;
+      hoverDebugTileHighlightPositions[offset] = surface.toWorldX(gridX);
+      hoverDebugTileHighlightPositions[offset + 1] =
+        surface.heightAtTileCoord(gridX, gridY) * surface.heightScale + HOVER_DEBUG_TILE_BORDER_LIFT;
+      hoverDebugTileHighlightPositions[offset + 2] = surface.toWorldZ(gridY);
+    };
+    setVertex(0, tileX, tileY);
+    setVertex(1, tileX + 1, tileY);
+    setVertex(2, tileX + 1, tileY + 1);
+    setVertex(3, tileX, tileY + 1);
+    setVertex(4, tileX + inset, tileY + inset);
+    setVertex(5, tileX + 1 - inset, tileY + inset);
+    setVertex(6, tileX + 1 - inset, tileY + 1 - inset);
+    setVertex(7, tileX + inset, tileY + 1 - inset);
+    const positionAttribute = hoverDebugTileHighlightGeometry.getAttribute("position");
+    if (positionAttribute) {
+      positionAttribute.needsUpdate = true;
+    }
+    hoverDebugTileHighlightMaterial.color.setHex(resolveHoverDebugTileHighlightHex(tileId, tone));
+    hoverDebugTileHighlight.visible = true;
   };
 
   const formatWaterfallStatus = (flags: number, debug: WaterfallDebugData, sampleIdx: number): string => {
@@ -3468,21 +3567,28 @@ export const createThreeTest = (
     return best;
   };
 
+  const getUnitsAtTile = (tileX: number, tileY: number): Array<(typeof world.units)[number]> => {
+    return world.units.filter((unit) => {
+      if (unit.kind === "firefighter" && unit.carrierId !== null) {
+        return false;
+      }
+      return Math.floor(unit.x) === tileX && Math.floor(unit.y) === tileY;
+    });
+  };
+
   const buildHoverCellSection: HoverDebugSectionBuilder = (context) => {
     const tile = world.tiles[context.tileIndex];
     if (!tile) {
       return null;
     }
-    const hoveredUnits = world.units.filter((unit) => {
-      if (unit.kind === "firefighter" && unit.carrierId !== null) {
-        return false;
-      }
-      return Math.floor(unit.x) === context.tileX && Math.floor(unit.y) === context.tileY;
-    });
+    const hoveredUnits = getUnitsAtTile(context.tileX, context.tileY);
+    const cachedWetness = world.tileSuppressionWetness[context.tileIndex] ?? 0;
+    const cachedIgniteAt = world.tileIgniteAt[context.tileIndex];
     const lines = [
       `type=${tile.type} id=${world.tileTypeId[context.tileIndex] ?? "n/a"} base=${tile.isBase ? "1" : "0"}`,
       `elev=${formatDebugNumber(world.tileElevation[context.tileIndex] ?? tile.elevation, 3)} y=${formatDebugNumber((world.tileElevation[context.tileIndex] ?? 0) * context.heightScale, 2)} moist=${formatDebugNumber(world.tileMoisture[context.tileIndex] ?? tile.moisture, 2)}`,
-      `fire=${formatDebugNumber(world.tileFire[context.tileIndex] ?? tile.fire, 2)} heat=${formatDebugNumber(world.tileHeat[context.tileIndex] ?? tile.heat, 2)} fuel=${formatDebugNumber(world.tileFuel[context.tileIndex] ?? tile.fuel, 2)}`
+      `fire=${formatDebugNumber(world.tileFire[context.tileIndex] ?? tile.fire, 2)} heat=${formatDebugNumber(world.tileHeat[context.tileIndex] ?? tile.heat, 2)} fuel=${formatDebugNumber(world.tileFuel[context.tileIndex] ?? tile.fuel, 2)}`,
+      `wet=${formatDebugNumber(cachedWetness, 2)} igniteAt=${Number.isFinite(cachedIgniteAt) ? formatDebugNumber(cachedIgniteAt, 3) : "n/a"}`
     ];
     if (hoveredUnits.length > 0) {
       const summary = hoveredUnits
@@ -3563,6 +3669,126 @@ export const createThreeTest = (
   // Add builders here to extend the hover debug billboard for other systems.
   const hoverDebugSectionBuilders: HoverDebugSectionBuilder[] = [buildHoverCellSection, buildHoverWaterfallSection];
 
+  const buildCellClipboardPayload = (
+    tileX: number,
+    tileY: number,
+    hoverGrid: { x: number; y: number } | null
+  ): string | null => {
+    const tileIndex = indexFor(world.grid, tileX, tileY);
+    const tile = world.tiles[tileIndex];
+    if (!tile) {
+      return null;
+    }
+    const sample = lastSample;
+    const terrainSurface = lastTerrainSurface;
+    const units = getUnitsAtTile(tileX, tileY).map((unit) => ({
+      id: unit.id,
+      kind: unit.kind,
+      selected: unit.selected,
+      x: unit.x,
+      y: unit.y,
+      target: unit.target ? { x: unit.target.x, y: unit.target.y } : null,
+      pathLength: unit.path.length,
+      pathIndex: unit.pathIndex,
+      carrierId: unit.carrierId,
+      assignedTruckId: unit.assignedTruckId
+    }));
+    const sections =
+      sample && terrainSurface
+        ? hoverDebugSectionBuilders
+            .map((buildSection) =>
+              buildSection({
+                tileX,
+                tileY,
+                tileIndex,
+                hoverGrid,
+                sample,
+                terrainWater: lastTerrainWater,
+                heightScale: terrainSurface.heightScale
+              })
+            )
+            .filter((section): section is HoverDebugSection => !!section && section.lines.length > 0)
+            .map((section) => ({
+              key: section.key,
+              label: section.label,
+              tone: section.tone ?? "default",
+              lines: [...section.lines]
+            }))
+        : [];
+    const payload = {
+      copiedAt: new Date().toISOString(),
+      cell: {
+        x: tileX,
+        y: tileY,
+        index: tileIndex
+      },
+      hoverGrid,
+      worldPosition: terrainSurface
+        ? {
+            x: terrainSurface.toWorldX(tileX + 0.5),
+            y: sampleSurfaceHeightAtTile(tileX, tileY),
+            z: terrainSurface.toWorldZ(tileY + 0.5)
+          }
+        : null,
+      tile,
+      soa: {
+        typeId: world.tileTypeId[tileIndex] ?? null,
+        elevation: world.tileElevation[tileIndex] ?? null,
+        moisture: world.tileMoisture[tileIndex] ?? null,
+        fire: world.tileFire[tileIndex] ?? null,
+        heat: world.tileHeat[tileIndex] ?? null,
+        fuel: world.tileFuel[tileIndex] ?? null,
+        ignitionPoint: world.tileIgnitionPoint[tileIndex] ?? null,
+        burnRate: world.tileBurnRate[tileIndex] ?? null,
+        heatOutput: world.tileHeatOutput[tileIndex] ?? null,
+        spreadBoost: world.tileSpreadBoost[tileIndex] ?? null,
+        heatTransferCap: world.tileHeatTransferCap[tileIndex] ?? null,
+        heatRetention: world.tileHeatRetention[tileIndex] ?? null,
+        windFactor: world.tileWindFactor[tileIndex] ?? null,
+        vegetationAge: world.tileVegetationAge[tileIndex] ?? null,
+        canopyCover: world.tileCanopyCover[tileIndex] ?? null,
+        stemDensity: world.tileStemDensity[tileIndex] ?? null,
+        riverMask: world.tileRiverMask[tileIndex] ?? null,
+        oceanMask: world.tileOceanMask[tileIndex] ?? null,
+        seaLevel: world.tileSeaLevel[tileIndex] ?? null,
+        coastDistance: world.tileCoastDistance[tileIndex] ?? null,
+        coastClass: world.tileCoastClass[tileIndex] ?? null,
+        roadBridge: world.tileRoadBridge[tileIndex] ?? null,
+        roadEdges: world.tileRoadEdges[tileIndex] ?? null,
+        roadWallEdges: world.tileRoadWallEdges[tileIndex] ?? null,
+        riverBed: world.tileRiverBed[tileIndex] ?? null,
+        riverSurface: world.tileRiverSurface[tileIndex] ?? null,
+        riverStepStrength: world.tileRiverStepStrength[tileIndex] ?? null,
+        structureMask: world.structureMask[tileIndex] ?? null,
+        townId: world.tileTownId[tileIndex] ?? null,
+        structure: world.tileStructure[tileIndex] ?? null
+      },
+      units,
+      hoverDebug: sections
+    };
+    return JSON.stringify(payload, null, 2);
+  };
+
+  const copyCellStateToClipboard = async (
+    payload: string,
+    tileX: number,
+    tileY: number,
+    suppressSuccessStatus = false
+  ): Promise<void> => {
+    if (!navigator.clipboard?.writeText) {
+      setStatus(world, `Clipboard is unavailable for cell ${tileX}, ${tileY}.`);
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(payload);
+      if (!suppressSuccessStatus) {
+        setStatus(world, `Copied cell ${tileX}, ${tileY} to the clipboard.`);
+      }
+    } catch {
+      setStatus(world, `Clipboard access failed for cell ${tileX}, ${tileY}.`);
+    }
+  };
+
   const updateHoverDebugBillboard = (
     viewportWidth: number,
     viewportHeight: number,
@@ -3570,7 +3796,7 @@ export const createThreeTest = (
     depth: number,
     heightScale: number
   ): void => {
-    if (!inputState.debugCellEnabled || !inputState.debugHoverTile || !lastSample || !lastTerrainSize) {
+    if (!inputState.debugCellEnabled || !inputState.debugHoverTile || !lastSample || !lastTerrainSize || !lastTerrainSurface) {
       hideHoverDebugBillboard();
       return;
     }
@@ -3604,6 +3830,7 @@ export const createThreeTest = (
     sections.forEach((section) => {
       tone = mergeHoverDebugTone(tone, section.tone);
     });
+    updateHoverDebugTileHighlight(tileX, tileY, tone, world.tileTypeId[tileIndex] ?? 0);
     const tile = world.tiles[tileIndex];
     const detailFragment = document.createDocumentFragment();
     sections.forEach((section) => {
@@ -3623,13 +3850,13 @@ export const createThreeTest = (
     });
     hoverDebugTitle.textContent = `Cell ${tileX},${tileY}`;
     hoverDebugBadge.textContent = tile.type.toUpperCase();
+    const groundY = sampleSurfaceHeightAtTile(tileX, tileY) ?? 0;
     hoverDebugMeta.textContent =
-      `${hoverGrid ? `grid ${formatDebugNumber(hoverGrid.x, 2)},${formatDebugNumber(hoverGrid.y, 2)}` : "grid n/a"} | y ${formatDebugNumber((world.tileElevation[tileIndex] ?? 0) * heightScale, 2)}`;
+      `${hoverGrid ? `grid ${formatDebugNumber(hoverGrid.x, 2)},${formatDebugNumber(hoverGrid.y, 2)}` : "grid n/a"} | y ${formatDebugNumber(groundY, 2)}`;
     hoverDebugDetails.replaceChildren(detailFragment);
     hoverDebugRoot.dataset.tone = tone;
-    const worldX = ((tileX + 0.5) / cols - 0.5) * width;
-    const worldZ = ((tileY + 0.5) / rows - 0.5) * depth;
-    const groundY = (world.tileElevation[tileIndex] ?? 0) * heightScale;
+    const worldX = lastTerrainSurface ? lastTerrainSurface.toWorldX(tileX + 0.5) : ((tileX + 0.5) / cols - 0.5) * width;
+    const worldZ = lastTerrainSurface ? lastTerrainSurface.toWorldZ(tileY + 0.5) : ((tileY + 0.5) / rows - 0.5) * depth;
     const labelLift = HOVER_DEBUG_LABEL_LIFT_METERS / Math.max(0.001, TILE_SIZE);
     hoverDebugGroundWorld.set(worldX, groundY, worldZ);
     hoverDebugLabelWorld.set(worldX, groundY + labelLift, worldZ);
@@ -3654,10 +3881,42 @@ export const createThreeTest = (
     hoverDebugRoot.classList.remove("hidden");
     const rootWidth = Math.max(244, hoverDebugRoot.offsetWidth);
     const rootHeight = Math.max(96, hoverDebugRoot.offsetHeight);
-    const unclampedX = screenX - HOVER_DEBUG_LABEL_CONNECTOR_ORIGIN_X;
-    const unclampedY = screenY + HOVER_DEBUG_LABEL_SCREEN_OFFSET_Y;
-    const rootX = Math.max(viewportPadding, Math.min(viewportWidth - rootWidth - viewportPadding, unclampedX));
-    const rootY = Math.max(viewportPadding, Math.min(viewportHeight - rootHeight - viewportPadding, unclampedY));
+    const clampRootX = (value: number): number =>
+      Math.max(viewportPadding, Math.min(viewportWidth - rootWidth - viewportPadding, value));
+    const clampRootY = (value: number): number =>
+      Math.max(viewportPadding, Math.min(viewportHeight - rootHeight - viewportPadding, value));
+    const preferRight = groundScreenX <= viewportWidth * 0.5;
+    const sideCandidates = preferRight
+      ? [
+          { x: groundScreenX + HOVER_DEBUG_PANEL_GAP_X, y: groundScreenY - rootHeight * 0.5 },
+          { x: groundScreenX - rootWidth - HOVER_DEBUG_PANEL_GAP_X, y: groundScreenY - rootHeight * 0.5 }
+        ]
+      : [
+          { x: groundScreenX - rootWidth - HOVER_DEBUG_PANEL_GAP_X, y: groundScreenY - rootHeight * 0.5 },
+          { x: groundScreenX + HOVER_DEBUG_PANEL_GAP_X, y: groundScreenY - rootHeight * 0.5 }
+        ];
+    const placementCandidates = [
+      ...sideCandidates,
+      { x: screenX - rootWidth * 0.5, y: groundScreenY - rootHeight - HOVER_DEBUG_PANEL_GAP_Y },
+      { x: screenX - rootWidth * 0.5, y: groundScreenY + HOVER_DEBUG_PANEL_GAP_Y }
+    ];
+    let rootX = clampRootX(screenX - HOVER_DEBUG_LABEL_CONNECTOR_ORIGIN_X);
+    let rootY = clampRootY(screenY + HOVER_DEBUG_LABEL_SCREEN_OFFSET_Y);
+    for (let i = 0; i < placementCandidates.length; i += 1) {
+      const candidate = placementCandidates[i];
+      const candidateX = clampRootX(candidate.x);
+      const candidateY = clampRootY(candidate.y);
+      const obscuresHoverTile =
+        groundScreenX >= candidateX - HOVER_DEBUG_TILE_SAFE_RADIUS_PX &&
+        groundScreenX <= candidateX + rootWidth + HOVER_DEBUG_TILE_SAFE_RADIUS_PX &&
+        groundScreenY >= candidateY - HOVER_DEBUG_TILE_SAFE_RADIUS_PX &&
+        groundScreenY <= candidateY + rootHeight + HOVER_DEBUG_TILE_SAFE_RADIUS_PX;
+      rootX = candidateX;
+      rootY = candidateY;
+      if (!obscuresHoverTile) {
+        break;
+      }
+    }
     const depth01 = Math.max(0, Math.min(1, (hoverDebugLabelProjected.z + 1) * 0.5));
     const zIndex = Math.max(1, Math.min(TOWN_LABEL_MAX_Z_INDEX, Math.round((1 - depth01) * TOWN_LABEL_MAX_Z_INDEX)));
     hoverDebugRoot.style.zIndex = `${Math.max(2, zIndex + 1)}`;
@@ -3669,15 +3928,16 @@ export const createThreeTest = (
       hoverDebugGroundProjected.x <= 1.5 &&
       hoverDebugGroundProjected.y >= -1.5 &&
       hoverDebugGroundProjected.y <= 1.5;
-    const connectorAnchorX = rootX + HOVER_DEBUG_LABEL_CONNECTOR_ORIGIN_X;
-    const connectorStartScreenY = Math.max(rootY + 1, rootY + rootHeight - 1);
-    const connectorLength = groundScreenY - connectorStartScreenY;
-    const connectorXError = Math.abs(groundScreenX - connectorAnchorX);
-    if (isGroundProjectedVisible && connectorLength >= 4 && connectorXError <= viewportWidth * 0.18) {
+    const connectorStartX = Math.max(rootX, Math.min(groundScreenX, rootX + rootWidth));
+    const connectorStartY = Math.max(rootY, Math.min(groundScreenY, rootY + rootHeight));
+    const connectorDx = groundScreenX - connectorStartX;
+    const connectorDy = groundScreenY - connectorStartY;
+    const connectorLength = Math.hypot(connectorDx, connectorDy);
+    if (isGroundProjectedVisible && connectorLength >= 4) {
       hoverDebugConnector.style.display = "block";
       hoverDebugConnector.style.width = `${connectorLength.toFixed(1)}px`;
       hoverDebugConnector.style.zIndex = `${Math.max(1, zIndex - 1)}`;
-      hoverDebugConnector.style.transform = `translate3d(${connectorAnchorX.toFixed(1)}px, ${connectorStartScreenY.toFixed(1)}px, 0) rotate(90deg)`;
+      hoverDebugConnector.style.transform = `translate3d(${connectorStartX.toFixed(1)}px, ${connectorStartY.toFixed(1)}px, 0) rotate(${Math.atan2(connectorDy, connectorDx).toFixed(4)}rad)`;
     } else {
       hoverDebugConnector.style.display = "none";
     }
@@ -3752,7 +4012,7 @@ export const createThreeTest = (
   const hoverDebugGroundProjected = new THREE.Vector3();
 
   const updateTownOverlay = (time: number): void => {
-    if (!lastSample || !lastTerrainSize) {
+    if (!lastSample || !lastTerrainSize || !lastTerrainSurface) {
       townOverlayRoot.classList.add("hidden");
       townAnchors.clear();
       baseAnchor = null;
@@ -3786,7 +4046,7 @@ export const createThreeTest = (
     const rows = Math.max(1, world.grid.rows);
     const width = lastTerrainSize.width;
     const depth = lastTerrainSize.depth;
-    const heightScale = getSampleHeightScale(cols, rows);
+    const heightScale = lastTerrainSurface.heightScale;
     const labelLift = TOWN_LABEL_LIFT_METERS / Math.max(0.001, TILE_SIZE);
     const baseLabelLift = BASE_LABEL_LIFT_METERS / Math.max(0.001, TILE_SIZE);
     const viewportWidth = Math.max(1, hudState.viewport.width);
@@ -3824,10 +4084,9 @@ export const createThreeTest = (
       }
       const tileX = Math.max(0, Math.min(cols - 1, Math.floor(getTownCenterX(town))));
       const tileY = Math.max(0, Math.min(rows - 1, Math.floor(getTownCenterY(town))));
-      const idx = indexFor(world.grid, tileX, tileY);
-      const worldX = ((tileX + 0.5) / cols - 0.5) * width;
-      const worldZ = ((tileY + 0.5) / rows - 0.5) * depth;
-      const groundY = (world.tileElevation[idx] ?? 0) * heightScale;
+      const worldX = lastTerrainSurface.toWorldX(tileX + 0.5);
+      const worldZ = lastTerrainSurface.toWorldZ(tileY + 0.5);
+      const groundY = lastTerrainSurface.heightAtTile(tileX, tileY) * heightScale;
       townGroundWorld.set(worldX, groundY, worldZ);
       townLabelWorld.set(worldX, groundY + labelLift, worldZ);
       townLabelProjected.copy(townLabelWorld).project(camera);
@@ -3883,10 +4142,9 @@ export const createThreeTest = (
 
     const baseTileX = Math.max(0, Math.min(cols - 1, Math.floor(world.basePoint.x)));
     const baseTileY = Math.max(0, Math.min(rows - 1, Math.floor(world.basePoint.y)));
-    const baseIdx = indexFor(world.grid, baseTileX, baseTileY);
-    const baseWorldX = ((baseTileX + 0.5) / cols - 0.5) * width;
-    const baseWorldZ = ((baseTileY + 0.5) / rows - 0.5) * depth;
-    const baseGroundY = (world.tileElevation[baseIdx] ?? 0) * heightScale;
+    const baseWorldX = lastTerrainSurface.toWorldX(baseTileX + 0.5);
+    const baseWorldZ = lastTerrainSurface.toWorldZ(baseTileY + 0.5);
+    const baseGroundY = lastTerrainSurface.heightAtTile(baseTileX, baseTileY) * heightScale;
     baseGroundWorld.set(baseWorldX, baseGroundY, baseWorldZ);
     baseLabelWorld.set(baseWorldX, baseGroundY + baseLabelLift, baseWorldZ);
     baseLabelProjected.copy(baseLabelWorld).project(camera);
@@ -4087,6 +4345,9 @@ export const createThreeTest = (
       return;
     }
     const mapTile = { x: tile.tileX, y: tile.tileY };
+    const clipboardPayload = inputState.debugCellEnabled
+      ? buildCellClipboardPayload(tile.tileX, tile.tileY, { x: tile.worldX, y: tile.worldY })
+      : null;
     const handledPrimary = handleMapPrimaryTileClick({
       state: world,
       inputState,
@@ -4094,17 +4355,18 @@ export const createThreeTest = (
       tile: mapTile,
       shiftKey: event.shiftKey
     });
-    if (handledPrimary) {
-      inputState.lastInteractionTime = performance.now();
-      return;
+    const handledClear = !handledPrimary
+      ? handleClearFuelBreakTileClick({
+          state: world,
+          inputState,
+          rng: pointerCommandRng,
+          tile: mapTile
+        })
+      : false;
+    if (clipboardPayload) {
+      void copyCellStateToClipboard(clipboardPayload, tile.tileX, tile.tileY, handledPrimary || handledClear);
     }
-    const handledClear = handleClearFuelBreakTileClick({
-      state: world,
-      inputState,
-      rng: pointerCommandRng,
-      tile: mapTile
-    });
-    if (handledClear) {
+    if (handledPrimary || handledClear) {
       inputState.lastInteractionTime = performance.now();
     }
   };
@@ -4265,11 +4527,7 @@ export const createThreeTest = (
   let houseAssets: HouseAssets | null = getHouseAssetsCache();
   let firestationAsset: FirestationAsset | null = getFirestationAssetCache();
   let lastSample: TerrainSample | null = null;
-  const getSampleHeightScale = (
-    cols: number,
-    rows: number,
-    sample: Pick<TerrainSample, "heightScaleMultiplier"> | null = lastSample
-  ): number => getTerrainHeightScale(cols, rows, sample?.heightScaleMultiplier ?? 1);
+  let lastTerrainSurface: TerrainRenderSurface | null = null;
   let lastTerrainWater: TerrainWaterData | null = null;
   let assetRebuildPending = false;
   let lastTerrainSize: { width: number; depth: number } | null = null;
@@ -4692,37 +4950,24 @@ export const createThreeTest = (
   let lastRafAt = 0;
   let lastPresentedAt = 0;
 
-  const sampleWorldHeight = (tileX: number, tileY: number): number => {
-    const cols = Math.max(1, world.grid.cols);
-    const rows = Math.max(1, world.grid.rows);
-    const x = Math.max(0, Math.min(cols - 1, tileX - 0.5));
-    const y = Math.max(0, Math.min(rows - 1, tileY - 0.5));
-    const x0 = Math.floor(x);
-    const y0 = Math.floor(y);
-    const x1 = Math.min(cols - 1, x0 + 1);
-    const y1 = Math.min(rows - 1, y0 + 1);
-    const tx = x - x0;
-    const ty = y - y0;
-    const h00 = world.tileElevation[indexFor(world.grid, x0, y0)] ?? 0;
-    const h10 = world.tileElevation[indexFor(world.grid, x1, y0)] ?? h00;
-    const h01 = world.tileElevation[indexFor(world.grid, x0, y1)] ?? h00;
-    const h11 = world.tileElevation[indexFor(world.grid, x1, y1)] ?? h00;
-    const hx0 = h00 * (1 - tx) + h10 * tx;
-    const hx1 = h01 * (1 - tx) + h11 * tx;
-    const elevation = hx0 * (1 - ty) + hx1 * ty;
-    return elevation * getSampleHeightScale(cols, rows);
-  };
+  const sampleSurfaceHeightAtTileCoord = (tileX: number, tileY: number): number | null =>
+    lastTerrainSurface ? lastTerrainSurface.heightAtTileCoord(tileX, tileY) * lastTerrainSurface.heightScale : null;
+
+  const sampleSurfaceHeightAtTile = (tileX: number, tileY: number): number | null =>
+    lastTerrainSurface ? lastTerrainSurface.heightAtTile(tileX, tileY) * lastTerrainSurface.heightScale : null;
 
   const toWorldCommandPoint = (tileX: number, tileY: number, lift: number): THREE.Vector3 | null => {
-    if (!lastTerrainSize) {
+    if (!lastTerrainSurface) {
       return null;
     }
-    const cols = Math.max(1, world.grid.cols);
-    const rows = Math.max(1, world.grid.rows);
-    const x = (tileX / cols - 0.5) * lastTerrainSize.width;
-    const z = (tileY / rows - 0.5) * lastTerrainSize.depth;
-    const y = sampleWorldHeight(tileX, tileY) + lift;
-    return new THREE.Vector3(x, y, z);
+    const y = sampleSurfaceHeightAtTileCoord(tileX, tileY);
+    if (y === null) {
+      return null;
+    }
+    const x = lastTerrainSurface.toWorldX(tileX);
+    const z = lastTerrainSurface.toWorldZ(tileY);
+    const worldY = y + lift;
+    return new THREE.Vector3(x, worldY, z);
   };
 
   const acquireScoreFlowPulse = (): ScoreFlowPulse => {
@@ -4912,7 +5157,10 @@ export const createThreeTest = (
     structureOverlayGroup = null;
   };
 
-  const rebuildStructureOverlay = (sample: TerrainSample): void => {
+  const rebuildStructureOverlay = (
+    sample: TerrainSample,
+    surface: TerrainRenderSurface | null = lastTerrainSurface
+  ): void => {
     const structureRevision = sample.structureRevision ?? -1;
     const structureAssetKey = `${houseAssets?.variants.length ?? 0}:${firestationAsset ? 1 : 0}`;
     const structureOverlayKey = `${sample.cols}x${sample.rows}:${sample.worldSeed ?? -1}:${structureAssetKey}`;
@@ -4932,7 +5180,7 @@ export const createThreeTest = (
       return;
     }
     disposeStructureOverlay();
-    if (!sample.tileTypes || !lastTerrainSize || sample.cols <= 0 || sample.rows <= 0) {
+    if (!sample.tileTypes || !surface || sample.cols <= 0 || sample.rows <= 0) {
       lastStructureRevision = structureRevision;
       lastStructureOverlayKey = structureOverlayKey;
       return;
@@ -4943,12 +5191,6 @@ export const createThreeTest = (
     const cols = sample.cols;
     const rows = sample.rows;
     const tileTypes = sample.tileTypes;
-    const elevations = sample.elevations;
-    const width = lastTerrainSize.width;
-    const depth = lastTerrainSize.depth;
-    const heightScale = getSampleHeightScale(cols, rows, sample);
-    const toWorldX = (tileX: number): number => ((tileX + 0.5) / cols - 0.5) * width;
-    const toWorldZ = (tileY: number): number => ((tileY + 0.5) / rows - 0.5) * depth;
     const clampToRange = (value: number, min: number, max: number): number => Math.max(min, Math.min(max, value));
     const noiseAt = (value: number): number => {
       const s = Math.sin(value * 12.9898 + 78.233) * 43758.5453;
@@ -4978,9 +5220,9 @@ export const createThreeTest = (
       return noiseAt(seed + 9.1) < 0.5 ? 0 : Math.PI / 2;
     };
     const elevationAt = (tileX: number, tileY: number): number => {
-      const clampedX = clampToRange(tileX, 0, cols - 1);
-      const clampedY = clampToRange(tileY, 0, rows - 1);
-      return (elevations[clampedY * cols + clampedX] ?? 0) * heightScale;
+      const clampedX = clampToRange(tileX, 0, cols);
+      const clampedY = clampToRange(tileY, 0, rows);
+      return surface.heightAtTileCoord(clampedX, clampedY) * surface.heightScale;
     };
 
     type OverlayHouseSpot = {
@@ -5028,8 +5270,8 @@ export const createThreeTest = (
           groundMax = fallbackH;
         }
         houseSpots.push({
-          x: toWorldX(tileX),
-          z: toWorldZ(tileY),
+          x: surface.toWorldX(tileX + 0.5),
+          z: surface.toWorldZ(tileY + 0.5),
           footprintX: bounds.width,
           footprintZ: bounds.depth,
           rotation,
@@ -5240,8 +5482,8 @@ export const createThreeTest = (
     if (baseMinX <= baseMaxX && baseMinY <= baseMaxY) {
       const centerTileX = (baseMinX + baseMaxX) * 0.5;
       const centerTileY = (baseMinY + baseMaxY) * 0.5;
-      const centerX = ((centerTileX + 0.5) / cols - 0.5) * width;
-      const centerZ = ((centerTileY + 0.5) / rows - 0.5) * depth;
+      const centerX = surface.toWorldX(centerTileX + 0.5);
+      const centerZ = surface.toWorldZ(centerTileY + 0.5);
       const baseFootprintX = Math.max(1, baseMaxX - baseMinX + 1);
       const baseFootprintZ = Math.max(1, baseMaxY - baseMinY + 1);
       const rotation = baseFootprintX >= baseFootprintZ ? 0 : Math.PI / 2;
@@ -5351,6 +5593,8 @@ export const createThreeTest = (
     cancelFormationDrag();
     clearTownHoverDelay();
     lastTerrainWater = null;
+    lastTerrainSurface = null;
+    lastTerrainSize = null;
     disposeStructureOverlay();
     clearUnitCommandVisuals();
     lastStructureOverlayKey = "";
@@ -5372,15 +5616,21 @@ export const createThreeTest = (
     removeUiAudioChangeListener = null;
     removeMusicControlsChangeListener?.();
     removeMusicControlsChangeListener = null;
+    removeWorldAudioChangeListener?.();
+    removeWorldAudioChangeListener = null;
     uiScene.remove(hudSprite);
     hudTexture.dispose();
     hudMaterial.dispose();
     fireFx.dispose();
+    worldAudio?.dispose();
     unitsLayer.dispose();
     unitFxLayer.dispose();
     scene.remove(scoreFlowPulseGroup);
     scoreFlowPulses.forEach((pulse) => pulse.material.dispose());
     scoreFlowPulseGeometry.dispose();
+    scene.remove(hoverDebugTileHighlight);
+    hoverDebugTileHighlightGeometry.dispose();
+    hoverDebugTileHighlightMaterial.dispose();
     scene.remove(unitCommandVisualGroup);
     unitCommandPathMaterial.dispose();
     unitCommandMarkerGeometry.dispose();
@@ -5624,7 +5874,9 @@ export const createThreeTest = (
         world,
         lastSample,
         lastTerrainSize,
+        lastTerrainSurface,
         treeBurnController,
+        null,
         threePerf.fps > 0 ? threePerf.fps : instantFps,
         threePerf.sceneRenderMs
       );
@@ -5649,9 +5901,17 @@ export const createThreeTest = (
         }
       }
     }
+    worldAudio?.update(
+      time,
+      dt,
+      world,
+      lastTerrainSurface,
+      fireFx.getAudioClusterSnapshot(),
+      simulationAlpha
+    );
     threePerf.fireFxMs = smoothPerf(threePerf.fireFxMs, performance.now() - fireFxStart);
-    unitsLayer.update(world, lastSample, lastTerrainSize, simulationAlpha);
-    unitFxLayer.update(world, effectsState, lastSample, lastTerrainSize, simulationAlpha, time);
+    unitsLayer.update(world, lastTerrainSurface, simulationAlpha);
+    unitFxLayer.update(world, effectsState, lastTerrainSurface, simulationAlpha, time);
     updateUnitCommandVisuals();
     updateScoreFlowPulses(time);
     updateTownOverlay(time);
@@ -5742,6 +6002,7 @@ export const createThreeTest = (
       return;
     }
     running = true;
+    worldAudio?.setRunning(true);
     controls.enabled = true;
     lastPresentedAt = 0;
     resize();
@@ -5777,6 +6038,7 @@ export const createThreeTest = (
   const stop = (): void => {
     cancelCameraFlight();
     running = false;
+    worldAudio?.setRunning(false);
     controls.enabled = false;
     clearDebugHover();
     lastRafAt = 0;
@@ -5877,7 +6139,7 @@ export const createThreeTest = (
   };
 
   const panToTile = (tileX: number, tileY: number): void => {
-    if (!lastTerrainSize) {
+    if (!lastTerrainSurface) {
       return;
     }
     cancelCameraFlight();
@@ -5885,10 +6147,9 @@ export const createThreeTest = (
     const rows = Math.max(1, world.grid.rows);
     const clampedX = Math.max(0, Math.min(cols - 1, Math.floor(tileX)));
     const clampedY = Math.max(0, Math.min(rows - 1, Math.floor(tileY)));
-    const worldX = ((clampedX + 0.5) / cols - 0.5) * lastTerrainSize.width;
-    const worldZ = ((clampedY + 0.5) / rows - 0.5) * lastTerrainSize.depth;
-    const idx = indexFor(world.grid, clampedX, clampedY);
-    const worldY = (world.tileElevation[idx] ?? 0) * getSampleHeightScale(cols, rows);
+    const worldX = lastTerrainSurface.toWorldX(clampedX + 0.5);
+    const worldZ = lastTerrainSurface.toWorldZ(clampedY + 0.5);
+    const worldY = lastTerrainSurface.heightAtTile(clampedX, clampedY) * lastTerrainSurface.heightScale;
     const cameraOffset = camera.position.clone().sub(controls.target);
     controls.target.set(worldX, worldY, worldZ);
     camera.position.copy(controls.target.clone().add(cameraOffset));
@@ -6093,8 +6354,59 @@ export const createThreeTest = (
     patchTerrainClimateMaterial(material);
   };
 
-  const updateTerrainSurface = (sample: TerrainSample): boolean => {
-    if (!terrainMesh || !lastSample || !lastTerrainSize || !sample.fastUpdate) {
+  const typedArrayEqual = (
+    a: ArrayLike<number> | null | undefined,
+    b: ArrayLike<number> | null | undefined,
+    epsilon = 1e-6
+  ): boolean => {
+    if (!a || !b) {
+      return !a && !b;
+    }
+    if (a.length !== b.length) {
+      return false;
+    }
+    for (let i = 0; i < a.length; i += 1) {
+      if (Math.abs((a[i] ?? 0) - (b[i] ?? 0)) > epsilon) {
+        return false;
+      }
+    }
+    return true;
+  };
+
+  const geometryRelevantTileTypesEqual = (previous: TerrainSample, next: TerrainSample): boolean => {
+    const previousTypes = previous.tileTypes;
+    const nextTypes = next.tileTypes;
+    if (!previousTypes || !nextTypes) {
+      return previousTypes === nextTypes;
+    }
+    if (previousTypes.length !== nextTypes.length) {
+      return false;
+    }
+    const roadId = TILE_TYPE_IDS.road;
+    const baseId = TILE_TYPE_IDS.base;
+    const houseId = TILE_TYPE_IDS.house;
+    const waterId = TILE_TYPE_IDS.water;
+    const trackStructureTiles = !previous.dynamicStructures || !next.dynamicStructures;
+    for (let i = 0; i < previousTypes.length; i += 1) {
+      const previousType = previousTypes[i];
+      const nextType = nextTypes[i];
+      const previousRelevant =
+        previousType === roadId ||
+        previousType === waterId ||
+        (trackStructureTiles && (previousType === baseId || previousType === houseId));
+      const nextRelevant =
+        nextType === roadId ||
+        nextType === waterId ||
+        (trackStructureTiles && (nextType === baseId || nextType === houseId));
+      if ((previousRelevant || nextRelevant) && previousType !== nextType) {
+        return false;
+      }
+    }
+    return true;
+  };
+
+  const canReuseTerrainSurface = (sample: TerrainSample, surface: TerrainRenderSurface): boolean => {
+    if (!lastSample || !lastTerrainSurface || !lastTerrainSize) {
       return false;
     }
     if (sample.cols !== lastSample.cols || sample.rows !== lastSample.rows) {
@@ -6103,124 +6415,56 @@ export const createThreeTest = (
     if (sample.elevations.length !== lastSample.elevations.length) {
       return false;
     }
+    if (sample.dynamicStructures !== lastSample.dynamicStructures) {
+      return false;
+    }
+    if (!sample.dynamicStructures && (sample.structureRevision ?? -1) !== (lastSample.structureRevision ?? -1)) {
+      return false;
+    }
+    if (!geometryRelevantTileTypesEqual(lastSample, sample)) {
+      return false;
+    }
+    if (
+      Math.abs(lastTerrainSurface.size.width - surface.size.width) > 1e-6 ||
+      Math.abs(lastTerrainSurface.size.depth - surface.size.depth) > 1e-6 ||
+      Math.abs(lastTerrainSurface.heightScale - surface.heightScale) > 1e-6 ||
+      lastTerrainSurface.step !== surface.step ||
+      lastTerrainSurface.sampleCols !== surface.sampleCols ||
+      lastTerrainSurface.sampleRows !== surface.sampleRows ||
+      !typedArrayEqual(lastTerrainSurface.sampleHeights, surface.sampleHeights) ||
+      !typedArrayEqual(lastTerrainSurface.oceanMask, surface.oceanMask, 0) ||
+      !typedArrayEqual(lastTerrainSurface.riverMask, surface.riverMask, 0) ||
+      !typedArrayEqual(lastTerrainSurface.waterRatios.water, surface.waterRatios.water) ||
+      !typedArrayEqual(lastTerrainSurface.waterRatios.ocean, surface.waterRatios.ocean) ||
+      !typedArrayEqual(lastTerrainSurface.waterRatios.river, surface.waterRatios.river) ||
+      !typedArrayEqual(lastTerrainSurface.sampledRiverSurface, surface.sampledRiverSurface) ||
+      !typedArrayEqual(lastTerrainSurface.sampledRiverStepStrength, surface.sampledRiverStepStrength) ||
+      !typedArrayEqual(lastTerrainSurface.sampledRiverCoverage, surface.sampledRiverCoverage)
+    ) {
+      return false;
+    }
+    const previousWaterLevel = lastTerrainSurface.waterLevel;
+    const nextWaterLevel = surface.waterLevel;
+    if (previousWaterLevel === null || nextWaterLevel === null) {
+      return previousWaterLevel === nextWaterLevel;
+    }
+    return Math.abs(previousWaterLevel - nextWaterLevel) <= 1e-6;
+  };
+
+  const updateTerrainSurface = (sample: TerrainSample, surface: TerrainRenderSurface): boolean => {
+    if (!terrainMesh || !sample.fastUpdate || !canReuseTerrainSurface(sample, surface)) {
+      return false;
+    }
     const palette = buildPalette();
     const grassId = TILE_TYPE_IDS.grass;
     const forestId = TILE_TYPE_IDS.forest;
     const waterId = TILE_TYPE_IDS.water;
-    const baseId = TILE_TYPE_IDS.base;
-    const houseId = TILE_TYPE_IDS.house;
     const roadId = TILE_TYPE_IDS.road;
-    const firebreakId = TILE_TYPE_IDS.firebreak;
-    const ashId = TILE_TYPE_IDS.ash;
-    const step = getTerrainStep(Math.max(sample.cols, sample.rows), sample.fullResolution ?? false);
-    const sampleCols = Math.floor((sample.cols - 1) / step) + 1;
-    const sampleRows = Math.floor((sample.rows - 1) / step) + 1;
-    const sampleHeights = buildSampleHeightMap(sample, sampleCols, sampleRows, step, waterId);
-    const oceanMask = sample.tileTypes ? buildOceanMask(sample.cols, sample.rows, sample.tileTypes, waterId) : null;
-    const riverMask = sample.riverMask ?? null;
-    const waterLevel = computeWaterLevel(sample, waterId, oceanMask, riverMask);
-    const sampleTypes = buildSampleTypeMap(
-      sample,
-      sampleCols,
-      sampleRows,
-      step,
-      grassId,
-      waterId,
-      TILE_ID_TO_TYPE.length,
-      [baseId, houseId, roadId, firebreakId, ashId]
-    );
-    if (waterLevel !== null) {
-      for (let row = 0; row < sampleRows; row += 1) {
-        const tileY = Math.min(sample.rows - 1, row * step);
-        const endY = Math.min(sample.rows, tileY + step);
-        for (let col = 0; col < sampleCols; col += 1) {
-          const tileX = Math.min(sample.cols - 1, col * step);
-          const endX = Math.min(sample.cols, tileX + step);
-          const idx = row * sampleCols + col;
-          if (sampleTypes[idx] !== waterId) {
-            continue;
-          }
-          let isOcean = false;
-          let isRiver = false;
-          if (oceanMask) {
-            for (let y = tileY; y < endY && !isOcean; y += 1) {
-              const rowBase = y * sample.cols;
-              for (let x = tileX; x < endX; x += 1) {
-                const tileIdx = rowBase + x;
-                if (riverMask && riverMask[tileIdx]) {
-                  isRiver = true;
-                  break;
-                }
-                if (oceanMask[tileIdx]) {
-                  isOcean = true;
-                  break;
-                }
-              }
-            }
-          }
-          if ((!oceanMask || isOcean) && !isRiver) {
-            sampleHeights[idx] = waterLevel;
-          }
-        }
-      }
-    }
-    let waterRatio: Float32Array | null = null;
-    let oceanRatio: Float32Array | null = null;
-    let riverRatio: Float32Array | null = null;
-    if (sample.tileTypes) {
-      waterRatio = new Float32Array(sampleCols * sampleRows);
-      oceanRatio = new Float32Array(sampleCols * sampleRows);
-      riverRatio = new Float32Array(sampleCols * sampleRows);
-      let offset = 0;
-      for (let row = 0; row < sampleRows; row += 1) {
-        const tileY = Math.min(sample.rows - 1, row * step);
-        const endY = Math.min(sample.rows, tileY + step);
-        for (let col = 0; col < sampleCols; col += 1) {
-          const tileX = Math.min(sample.cols - 1, col * step);
-          const endX = Math.min(sample.cols, tileX + step);
-          let waterCount = 0;
-          let oceanCount = 0;
-          let riverCount = 0;
-          let count = 0;
-          for (let y = tileY; y < endY; y += 1) {
-            const rowBase = y * sample.cols;
-            for (let x = tileX; x < endX; x += 1) {
-              const idx = rowBase + x;
-              count += 1;
-              if (sample.tileTypes[idx] !== waterId) {
-                continue;
-              }
-              waterCount += 1;
-              if (riverMask && riverMask[idx]) {
-                riverCount += 1;
-                continue;
-              }
-              if (!oceanMask || oceanMask[idx]) {
-                oceanCount += 1;
-              }
-            }
-          }
-          const inv = count > 0 ? 1 / count : 0;
-          let localWaterRatio = waterCount * inv;
-          let localOceanRatio = oceanCount * inv;
-          const localRiverRatio = riverCount * inv;
-          if (oceanCount > 0) {
-            localOceanRatio = Math.max(localOceanRatio, FAST_OCEAN_SAMPLE_SUPPORT_FLOOR);
-            localWaterRatio = Math.max(localWaterRatio, localOceanRatio);
-          }
-          waterRatio[offset] = Math.min(1, Math.max(0, localWaterRatio));
-          oceanRatio[offset] = Math.min(1, Math.max(0, localOceanRatio));
-          riverRatio[offset] = Math.min(1, Math.max(0, localRiverRatio));
-          offset += 1;
-        }
-      }
-    }
-    const heightScale = getSampleHeightScale(sample.cols, sample.rows, sample);
     const tileTexture = buildTileTexture(
       sample,
-      sampleCols,
-      sampleRows,
-      step,
+      surface.sampleCols,
+      surface.sampleRows,
+      surface.step,
       palette,
       grassId,
       TILE_TYPE_IDS.scrub,
@@ -6229,15 +6473,15 @@ export const createThreeTest = (
       forestId,
       waterId,
       roadId,
-      heightScale,
-      sampleHeights,
-      sampleTypes,
-      undefined,
-      waterRatio,
-      oceanRatio,
-      riverRatio,
-      null,
-      null,
+      surface.heightScale,
+      surface.sampleHeights,
+      surface.sampleTypes,
+      surface.sampleCoastClass,
+      surface.waterRatios.water,
+      surface.waterRatios.ocean,
+      surface.waterRatios.river,
+      surface.sampledRiverCoverage ?? null,
+      surface.sampledRiverStepStrength,
       sample.debugTypeColors ?? false
     );
     const material = terrainMesh.material;
@@ -6266,7 +6510,7 @@ export const createThreeTest = (
       const nextRoadVersion = getRoadAtlasVersion();
       const roadOverlayVersion = roadMesh.userData?.roadOverlayVersion ?? -1;
       if (nextRoadVersion !== roadOverlayVersion) {
-        const roadOverlay = buildRoadOverlayTexture(sample, roadId, baseId, ROAD_SURFACE_WIDTH, ROAD_TEX_SCALE);
+        const roadOverlay = buildRoadOverlayTexture(sample, roadId, TILE_TYPE_IDS.base, ROAD_SURFACE_WIDTH, ROAD_TEX_SCALE);
         if (roadOverlay) {
           const roadMaterial = roadMesh.material as THREE.Material & { map?: THREE.Texture | null };
           if (roadMaterial.map) {
@@ -6278,6 +6522,8 @@ export const createThreeTest = (
         }
       }
     }
+    lastTerrainSurface = surface;
+    lastTerrainSize = surface.size;
     return true;
   };
 
@@ -6299,9 +6545,15 @@ export const createThreeTest = (
       if (!nextSample.fastUpdate) {
         assetRebuildPending = false;
       }
-      if (updateTerrainSurface(nextSample)) {
+      const nextSurface =
+        nextSample.cols > 1 && nextSample.rows > 1 && nextSample.elevations.length > 0
+          ? prepareTerrainRenderSurface(nextSample)
+          : null;
+      if (nextSurface && updateTerrainSurface(nextSample, nextSurface)) {
         lastSample = nextSample;
-        rebuildStructureOverlay(nextSample);
+        lastTerrainSurface = nextSurface;
+        lastTerrainSize = nextSurface.size;
+        rebuildStructureOverlay(nextSample, nextSurface);
         requestShadowRefresh();
         return;
       }
@@ -6357,14 +6609,20 @@ export const createThreeTest = (
     waterSystem.clear();
       lastTerrainWater = null;
       if (nextSample.cols <= 1 || nextSample.rows <= 1 || nextSample.elevations.length === 0) {
+        lastTerrainSurface = null;
+        lastTerrainSize = null;
         disposeStructureOverlay();
         lastStructureRevision = nextSample.structureRevision ?? -1;
         lastStructureOverlayKey = `${nextSample.cols}x${nextSample.rows}:${nextSample.worldSeed ?? -1}`;
         ground.visible = true;
         return;
       }
+      if (!nextSurface) {
+        ground.visible = true;
+        return;
+      }
       const { mesh, size, water, treeBurn } = buildTerrainMesh(
-      nextSample,
+      nextSurface,
       treeAssets,
       houseAssets,
       firestationAsset,
@@ -6399,7 +6657,8 @@ export const createThreeTest = (
       applyLightingState(lastLightingApplied);
       syncWaterEnvironment(lastLightingApplied);
     }
-    rebuildStructureOverlay(nextSample);
+    lastTerrainSurface = nextSurface;
+    rebuildStructureOverlay(nextSample, nextSurface);
     requestShadowRefresh();
     } finally {
       const terrainSetMs = performance.now() - setTerrainStartedAt;

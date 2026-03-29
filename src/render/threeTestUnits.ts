@@ -1,6 +1,6 @@
 import * as THREE from "three";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
-import { TILE_TYPE_IDS, type WorldState } from "../core/state.js";
+import type { WorldState } from "../core/state.js";
 import {
   FIREFIGHTER_MODEL_ROOT_Y_OFFSET,
   classifyFirefighterModelPart,
@@ -12,7 +12,7 @@ import {
   writeFirefighterPartPoseMatrix,
   type FirefighterModelPart
 } from "./firefighterVisuals.js";
-import { buildSampleHeightMap, getTerrainHeightScale, getTerrainStep, type TerrainSample } from "./threeTestTerrain.js";
+import type { TerrainRenderSurface } from "./threeTestTerrain.js";
 import { approachAngleExp, resolveDesiredUnitYaw } from "./unitAimVisuals.js";
 import { registerPbrSpecularGlossiness } from "./gltfSpecGloss.js";
 
@@ -49,42 +49,10 @@ const clamp = (value: number, min: number, max: number): number => Math.max(min,
 const expFactor = (rate: number, dtSeconds: number): number =>
   1 - Math.exp(-Math.max(0, rate) * Math.max(0, dtSeconds));
 
-const bilerp = (h00: number, h10: number, h01: number, h11: number, tx: number, ty: number): number => {
-  const hx0 = h00 * (1 - tx) + h10 * tx;
-  const hx1 = h01 * (1 - tx) + h11 * tx;
-  return hx0 * (1 - ty) + hx1 * ty;
-};
-
-const sampleHeight = (sample: TerrainSample, tileX: number, tileY: number): number => {
-  const cols = Math.max(1, sample.cols);
-  const rows = Math.max(1, sample.rows);
-  const x = clamp(tileX - 0.5, 0, cols - 1);
-  const y = clamp(tileY - 0.5, 0, rows - 1);
-  const x0 = Math.floor(x);
-  const y0 = Math.floor(y);
-  const x1 = Math.min(cols - 1, x0 + 1);
-  const y1 = Math.min(rows - 1, y0 + 1);
-  const tx = x - x0;
-  const ty = y - y0;
-  const idx00 = y0 * cols + x0;
-  const idx10 = y0 * cols + x1;
-  const idx01 = y1 * cols + x0;
-  const idx11 = y1 * cols + x1;
-  const h00 = sample.elevations[idx00] ?? 0;
-  const h10 = sample.elevations[idx10] ?? h00;
-  const h01 = sample.elevations[idx01] ?? h00;
-  const h11 = sample.elevations[idx11] ?? h00;
-  return bilerp(h00, h10, h01, h11, tx, ty);
-};
-
-const toWorldX = (tileX: number, cols: number, width: number): number => (tileX / Math.max(1, cols) - 0.5) * width;
-const toWorldZ = (tileY: number, rows: number, depth: number): number => (tileY / Math.max(1, rows) - 0.5) * depth;
-
 export type ThreeTestUnitsLayer = {
   update: (
     world: WorldState,
-    sample: TerrainSample | null,
-    terrainSize: { width: number; depth: number } | null,
+    surface: TerrainRenderSurface | null,
     interpolationAlpha: number
   ) => void;
   dispose: () => void;
@@ -392,69 +360,6 @@ export const createThreeTestUnitsLayer = (scene: THREE.Scene): ThreeTestUnitsLay
   const lastForwardByUnitId = new Map<number, THREE.Vector3>();
   const lastNozzleDirectionByUnitId = new Map<number, THREE.Vector3>();
   let lastUpdateTimeMs: number | null = null;
-  let cachedSurfaceHeights: Float32Array | null = null;
-  let cachedSurfaceCols = 0;
-  let cachedSurfaceRows = 0;
-  let cachedSurfaceStep = 1;
-  let cachedSurfaceElevationsRef: Float32Array | null = null;
-  let cachedSurfaceTileTypesRef: Uint8Array | undefined;
-
-  const ensureRenderedSurfaceCache = (
-    sample: TerrainSample
-  ): { heights: Float32Array | null; cols: number; rows: number; step: number } => {
-    const step = getTerrainStep(Math.max(sample.cols, sample.rows), sample.fullResolution ?? false);
-    const sampleCols = Math.floor((sample.cols - 1) / step) + 1;
-    const sampleRows = Math.floor((sample.rows - 1) / step) + 1;
-    const needsRebuild =
-      !cachedSurfaceHeights ||
-      cachedSurfaceCols !== sampleCols ||
-      cachedSurfaceRows !== sampleRows ||
-      cachedSurfaceStep !== step ||
-      cachedSurfaceElevationsRef !== sample.elevations ||
-      cachedSurfaceTileTypesRef !== sample.tileTypes;
-    if (needsRebuild) {
-      cachedSurfaceHeights = buildSampleHeightMap(sample, sampleCols, sampleRows, step, TILE_TYPE_IDS.water);
-      cachedSurfaceCols = sampleCols;
-      cachedSurfaceRows = sampleRows;
-      cachedSurfaceStep = step;
-      cachedSurfaceElevationsRef = sample.elevations;
-      cachedSurfaceTileTypesRef = sample.tileTypes;
-    }
-    return {
-      heights: cachedSurfaceHeights,
-      cols: cachedSurfaceCols,
-      rows: cachedSurfaceRows,
-      step: cachedSurfaceStep
-    };
-  };
-
-  const sampleRenderedHeight = (
-    surface: { heights: Float32Array | null; cols: number; rows: number; step: number },
-    sample: TerrainSample,
-    tileX: number,
-    tileY: number
-  ): number => {
-    if (!surface.heights || surface.step <= 1 || surface.cols <= 1 || surface.rows <= 1) {
-      return sampleHeight(sample, tileX, tileY);
-    }
-    const sx = clamp((tileX - 0.5) / surface.step, 0, surface.cols - 1);
-    const sy = clamp((tileY - 0.5) / surface.step, 0, surface.rows - 1);
-    const x0 = Math.floor(sx);
-    const y0 = Math.floor(sy);
-    const x1 = Math.min(surface.cols - 1, x0 + 1);
-    const y1 = Math.min(surface.rows - 1, y0 + 1);
-    const tx = sx - x0;
-    const ty = sy - y0;
-    const idx00 = y0 * surface.cols + x0;
-    const idx10 = y0 * surface.cols + x1;
-    const idx01 = y1 * surface.cols + x0;
-    const idx11 = y1 * surface.cols + x1;
-    const h00 = surface.heights[idx00] ?? 0;
-    const h10 = surface.heights[idx10] ?? h00;
-    const h01 = surface.heights[idx01] ?? h00;
-    const h11 = surface.heights[idx11] ?? h00;
-    return bilerp(h00, h10, h01, h11, tx, ty);
-  };
 
   const resolveInterpolatedPosition = (
     unit: WorldState["units"][number],
@@ -554,11 +459,10 @@ export const createThreeTestUnitsLayer = (scene: THREE.Scene): ThreeTestUnitsLay
 
   const update = (
     world: WorldState,
-    sample: TerrainSample | null,
-    terrainSize: { width: number; depth: number } | null,
+    surface: TerrainRenderSurface | null,
     interpolationAlpha: number
   ): void => {
-    if (!sample || !terrainSize || world.units.length === 0) {
+    if (!surface || world.units.length === 0) {
       truckMesh.count = 0;
       truckSelectionMesh.count = 0;
       truckModelMeshes.forEach(({ mesh }) => {
@@ -576,13 +480,12 @@ export const createThreeTestUnitsLayer = (scene: THREE.Scene): ThreeTestUnitsLay
       return;
     }
 
-    const cols = Math.max(1, sample.cols);
-    const rows = Math.max(1, sample.rows);
-    const heightScale = getTerrainHeightScale(cols, rows, sample.heightScaleMultiplier ?? 1);
-    const renderedSurface = ensureRenderedSurfaceCache(sample);
-    const normalSampleOffset = Math.max(TRUCK_NORMAL_SAMPLE_TILES, renderedSurface.step * 0.35);
-    const sampleHeightAt = (tileX: number, tileY: number): number =>
-      sampleRenderedHeight(renderedSurface, sample, tileX, tileY);
+    const cols = Math.max(1, surface.cols);
+    const rows = Math.max(1, surface.rows);
+    const terrainSize = surface.size;
+    const heightScale = surface.heightScale;
+    const normalSampleOffset = Math.max(TRUCK_NORMAL_SAMPLE_TILES, surface.step * 0.35);
+    const sampleHeightAt = (tileX: number, tileY: number): number => surface.heightAtTileCoord(tileX, tileY);
     const timeMs = performance.now();
     const timeSec = timeMs * 0.001;
     const deltaSeconds =
@@ -604,8 +507,8 @@ export const createThreeTestUnitsLayer = (scene: THREE.Scene): ThreeTestUnitsLay
       }
       activeUnitIds.add(unit.id);
       const interpolated = resolveInterpolatedPosition(unit, interpolationAlpha);
-      const wx = toWorldX(interpolated.x, cols, terrainSize.width);
-      const wz = toWorldZ(interpolated.y, rows, terrainSize.depth);
+      const wx = surface.toWorldX(interpolated.x);
+      const wz = surface.toWorldZ(interpolated.y);
       const wy = sampleHeightAt(interpolated.x, interpolated.y) * heightScale;
       const yaw = resolveYaw(unit, interpolated.x, interpolated.y, deltaSeconds);
 
@@ -724,16 +627,16 @@ export const createThreeTestUnitsLayer = (scene: THREE.Scene): ThreeTestUnitsLay
         let aimPoint: THREE.Vector3 | null = null;
         if (unit.sprayTarget) {
           firefighterNozzleAim.set(
-            toWorldX(unit.sprayTarget.x, cols, terrainSize.width),
+            surface.toWorldX(unit.sprayTarget.x),
             sampleHeightAt(unit.sprayTarget.x, unit.sprayTarget.y) * heightScale + 0.05,
-            toWorldZ(unit.sprayTarget.y, rows, terrainSize.depth)
+            surface.toWorldZ(unit.sprayTarget.y)
           );
           aimPoint = firefighterNozzleAim;
         } else if (unit.attackTarget) {
           firefighterNozzleAim.set(
-            toWorldX(unit.attackTarget.x, cols, terrainSize.width),
+            surface.toWorldX(unit.attackTarget.x),
             sampleHeightAt(unit.attackTarget.x, unit.attackTarget.y) * heightScale + 0.08,
-            toWorldZ(unit.attackTarget.y, rows, terrainSize.depth)
+            surface.toWorldZ(unit.attackTarget.y)
           );
           aimPoint = firefighterNozzleAim;
         }

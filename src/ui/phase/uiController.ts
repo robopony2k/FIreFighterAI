@@ -137,6 +137,10 @@ export class UIController {
     this.bottomControls.setAudioState(settings);
   }
 
+  setWorldState(settings: UiAudioSettings): void {
+    this.bottomControls.setWorldState(settings);
+  }
+
   setMusicState(settings: UiAudioSettings): void {
     this.bottomControls.setMusicState(settings);
   }
@@ -147,6 +151,14 @@ export class UIController {
 
   onAudioVolumeChange(handler: (value: number) => void): void {
     this.bottomControls.onAudioVolumeChange(handler);
+  }
+
+  onWorldMuteToggle(handler: () => void): void {
+    this.bottomControls.onWorldMuteToggle(handler);
+  }
+
+  onWorldVolumeChange(handler: (value: number) => void): void {
+    this.bottomControls.onWorldVolumeChange(handler);
   }
 
   onMusicMuteToggle(handler: () => void): void {

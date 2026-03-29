@@ -1,8 +1,15 @@
 import * as THREE from "three";
 import type { RenderSim } from "./simView.js";
 import { createParticleBuffers, createSmokeShaderMaterial } from "./particles.js";
-import type { TerrainSample, TreeBurnController, TreeFlameProfile } from "./threeTestTerrain.js";
+import type { TerrainRenderSurface, TerrainSample, TreeBurnController, TreeFlameProfile } from "./threeTestTerrain.js";
 import { getTerrainHeightScale } from "./threeTestTerrain.js";
+import {
+  createFireAnchorResolver,
+  type FireAnchorSource,
+  type FireStructureAnchorProvider,
+  type ResolvedFireAnchor
+} from "./fireAnchorResolver.js";
+import { computeFireAudioIntensity } from "./threeTestWorldAudioMath.js";
 import { FUEL_PROFILES, TILE_COLORS } from "../core/config.js";
 import { TILE_ID_TO_TYPE, TILE_TYPE_IDS } from "../core/state.js";
 
@@ -43,11 +50,23 @@ const DEFAULT_FIRE_BUDGET_SCALE = 1.0;
 const FIRE_RENDER_SNAPSHOT_PADDING = 2;
 const FIRE_FRONT_MAX_INSTANCES = 320;
 const FIRE_FRONT_MIN_INSTANCES = 48;
-const FIRE_FRONT_RUN_MAX_SEGMENTS = 9;
+const FIRE_FRONT_CORRIDOR_MAX_SEGMENTS = 14;
 const FIRE_FRONT_VISUAL_MIN = 0.08;
 const FIRE_FRONT_PASS_MIN_WEIGHT = 6;
-const FIRE_FRONT_NEIGHBOUR_RATIO = 0.72;
-const FIRE_FRONT_NEIGHBOUR_HEAT_RATIO = 0.76;
+const FIRE_EMITTER_SLOT_VISIBLE_CUTOFF = 0.08;
+const FIRE_FRONT_SLOT_VISIBLE_CUTOFF = 0.06;
+const FIRE_LOCAL_SLOT_RISE_RATE = 19;
+const FIRE_LOCAL_SLOT_FALL_RATE = 6.4;
+const FIRE_GROUND_SLOT_RISE_RATE = 15.5;
+const FIRE_GROUND_SLOT_FALL_RATE = 5.4;
+const FIRE_OBJECT_SLOT_RISE_RATE = 16.5;
+const FIRE_OBJECT_SLOT_FALL_RATE = 4.1;
+const FIRE_FRONT_SLOT_RISE_RATE = 15.2;
+const FIRE_FRONT_SLOT_FALL_RATE = 5.2;
+const FIRE_FRONT_BUDGET_RISE_RATE = 6.2;
+const FIRE_FRONT_BUDGET_FALL_RATE = 7.4;
+const FIRE_TILE_CAP_RISE_RATE = 7.8;
+const FIRE_TILE_CAP_FALL_RATE = 9.6;
 const FIRE_VISUAL_TUNING = {
   tongueSpawnMin: 0,
   tongueSpawnMax: 8,
@@ -109,6 +128,22 @@ const GROUND_FLAME_MIN_HEIGHT_TILES = 0.085;
 const GROUND_FLAME_MIN_WIDTH_TILES = 0.06;
 
 const ASH_PREVIEW_BASE_FUEL_BY_TYPE_ID = TILE_ID_TO_TYPE.map((tileType) => Math.max(0, FUEL_PROFILES[tileType].baseFuel));
+const FIRE_ANCHOR_DEBUG_TINT_STRENGTH = 0.82;
+const GLOW_ANCHOR_DEBUG_TINT_STRENGTH = 0.74;
+const FIRE_ANCHOR_DEBUG_COLORS: Record<FireAnchorSource, readonly [number, number, number]> = {
+  tree: [0.24, 1.08, 0.34],
+  structure: [0.24, 0.74, 1.08],
+  terrainSurface: [1.16, 0.66, 0.12],
+  rawFallback: [1.2, 0.2, 1.2]
+};
+const FIRE_FRONT_SLOT_ORDER = [7, 3, 10, 1, 5, 8, 12, 0, 2, 4, 6, 9, 11, 13] as const;
+const FIRE_FRONT_SLOT_RANK = (() => {
+  const rank = new Uint8Array(FIRE_FRONT_CORRIDOR_MAX_SEGMENTS);
+  for (let i = 0; i < FIRE_FRONT_SLOT_ORDER.length; i += 1) {
+    rank[FIRE_FRONT_SLOT_ORDER[i]!] = i;
+  }
+  return rank;
+})();
 
 const isAshPreviewCandidateType = (typeId: number): boolean =>
   typeId === TILE_TYPE_IDS.grass ||
@@ -117,6 +152,65 @@ const isAshPreviewCandidateType = (typeId: number): boolean =>
   typeId === TILE_TYPE_IDS.forest;
 
 const clamp = (value: number, min: number, max: number): number => Math.min(max, Math.max(min, value));
+const getFireAnchorDebugColor = (source: FireAnchorSource): readonly [number, number, number] =>
+  FIRE_ANCHOR_DEBUG_COLORS[source];
+const mixColorChannel = (base: number, target: number, alpha: number): number => base * (1 - alpha) + target * alpha;
+const applyAnchorDebugGlowTint = (
+  source: FireAnchorSource,
+  r: number,
+  g: number,
+  b: number,
+  tintStrength: number
+): readonly [number, number, number] => {
+  if (tintStrength <= 0) {
+    return [r, g, b] as const;
+  }
+  const peak = Math.max(1, r, g, b);
+  const [debugR, debugG, debugB] = getFireAnchorDebugColor(source);
+  return [
+    mixColorChannel(r, debugR * peak, tintStrength),
+    mixColorChannel(g, debugG * peak, tintStrength),
+    mixColorChannel(b, debugB * peak, tintStrength)
+  ] as const;
+};
+const getAnchorSourceWeightSlot = (source: FireAnchorSource): number => {
+  switch (source) {
+    case "tree":
+      return 0;
+    case "structure":
+      return 1;
+    case "terrainSurface":
+      return 2;
+    case "rawFallback":
+    default:
+      return 3;
+  }
+};
+const accumulateAnchorSourceWeight = (weights: number[], source: FireAnchorSource, weight: number): void => {
+  weights[getAnchorSourceWeightSlot(source)] += weight;
+};
+const pickDominantAnchorSource = (weights: number[]): FireAnchorSource => {
+  let bestIndex = 0;
+  let bestWeight = weights[0] ?? 0;
+  for (let i = 1; i < 4; i += 1) {
+    const weight = weights[i] ?? 0;
+    if (weight > bestWeight) {
+      bestWeight = weight;
+      bestIndex = i;
+    }
+  }
+  switch (bestIndex) {
+    case 0:
+      return "tree";
+    case 1:
+      return "structure";
+    case 2:
+      return "terrainSurface";
+    case 3:
+    default:
+      return "rawFallback";
+  }
+};
 const fract = (value: number): number => value - Math.floor(value);
 const hash1 = (value: number): number => fract(Math.sin(value * 12.9898) * 43758.5453);
 const smoothstep = (edge0: number, edge1: number, x: number): number => {
@@ -208,10 +302,92 @@ const sortSmokeParticlesByDepth = (depth: Float32Array, order: Uint16Array, coun
     sortDepthBackToFront(depth, order, 0, count - 1);
   }
 };
-type NeighbourFireFront = {
-  centerTileX: number;
-  centerTileY: number;
-  strength: number;
+type FrontDirection = 0 | 1 | 2 | 3;
+type FrontEdgeOrientation = "horizontal" | "vertical";
+type DirectedFrontEdgeState = {
+  key: number;
+  sourceTileIdx: number;
+  destTileIdx: number;
+  sourceTileX: number;
+  sourceTileY: number;
+  destTileX: number;
+  destTileY: number;
+  dir: FrontDirection;
+  normalX: number;
+  normalZ: number;
+  tangentX: number;
+  tangentZ: number;
+  orientation: FrontEdgeOrientation;
+  fixedCoord: number;
+  alongCoord: number;
+  edgeCenterX: number;
+  edgeCenterY: number;
+  edgeCenterZ: number;
+  normalY: number;
+  dominantSource: FireAnchorSource;
+  presence01: number;
+  advance01: number;
+  sourceDrive01: number;
+  destIgnition01: number;
+  passed01: number;
+  lastActiveFrame: number;
+};
+type FrontCorridor = {
+  dir: FrontDirection;
+  orientation: FrontEdgeOrientation;
+  fixedCoord: number;
+  startCoord: number;
+  endCoord: number;
+  states: DirectedFrontEdgeState[];
+  dominantSource: FireAnchorSource;
+  presence01: number;
+  advance01: number;
+  sourceDrive01: number;
+  destIgnition01: number;
+  passed01: number;
+};
+type TileFrontInfluence = {
+  perimeter01: number;
+  arrival01: number;
+  advance01: number;
+  directionX: number;
+  directionZ: number;
+};
+type TileEmitterSlotState = number;
+type FrontCorridorSlotState = {
+  activation: number;
+  lastActiveFrame: number;
+};
+type FireRenderContinuityState = {
+  smoothedFrontSegmentBudget: number;
+  smoothedPerTileFlameCap: number;
+  smoothedPerTileGroundCap: number;
+  localSlotChurn: number;
+  objectSlotChurn: number;
+  frontSlotChurn: number;
+  budgetClampedDrops: number;
+};
+const FRONT_DIRECTION_DATA: ReadonlyArray<{
+  dx: number;
+  dy: number;
+  normalX: number;
+  normalZ: number;
+  tangentX: number;
+  tangentZ: number;
+  orientation: FrontEdgeOrientation;
+}> = [
+  { dx: -1, dy: 0, normalX: -1, normalZ: 0, tangentX: 0, tangentZ: 1, orientation: "vertical" },
+  { dx: 1, dy: 0, normalX: 1, normalZ: 0, tangentX: 0, tangentZ: 1, orientation: "vertical" },
+  { dx: 0, dy: -1, normalX: 0, normalZ: -1, tangentX: 1, tangentZ: 0, orientation: "horizontal" },
+  { dx: 0, dy: 1, normalX: 0, normalZ: 1, tangentX: 1, tangentZ: 0, orientation: "horizontal" }
+] as const;
+const getFrontEdgeKey = (sourceTileIdx: number, dir: FrontDirection): number => sourceTileIdx * 4 + dir;
+const normalizeFrontDirection = (x: number, z: number): { x: number; z: number } => {
+  const length = Math.hypot(x, z);
+  if (length <= 1e-5) {
+    return { x: 0, z: 0 };
+  }
+  return { x: x / length, z: z / length };
 };
 type FireRenderSnapshot = {
   cols: number;
@@ -635,79 +811,10 @@ const getNeighbourFireBias = (fireView: FireFieldView, cols: number, rows: numbe
   }
   return count > 0 ? sum / count : 0;
 };
-const getNeighbourFireFront = (
-  fireView: FireFieldView,
-  cols: number,
-  rows: number,
-  x: number,
-  y: number,
-  simFireEps: number,
-  windX: number,
-  windY: number
-): NeighbourFireFront => {
-  const localFire = fireView.getFireAt(x, y);
-  let weightedX = 0;
-  let weightedY = 0;
-  let weightedDirX = 0;
-  let weightedDirY = 0;
-  let weightedSum = 0;
-  let neighborSum = 0;
-  let neighborCount = 0;
-  for (let oy = -1; oy <= 1; oy += 1) {
-    const ny = y + oy;
-    if (ny < 0 || ny >= rows) {
-      continue;
-    }
-    for (let ox = -1; ox <= 1; ox += 1) {
-      if (ox === 0 && oy === 0) {
-        continue;
-      }
-      const nx = x + ox;
-      if (nx < 0 || nx >= cols) {
-        continue;
-      }
-      const nFire = fireView.getFireAt(nx, ny);
-      if (nFire <= simFireEps) {
-        continue;
-      }
-      const distWeight = ox === 0 || oy === 0 ? 1 : 0.72;
-      const weight = Math.max(0, nFire - localFire * 0.35) * distWeight;
-      if (weight <= 0) {
-        continue;
-      }
-      weightedX += (nx + 0.5) * weight;
-      weightedY += (ny + 0.5) * weight;
-      weightedDirX += ox * weight;
-      weightedDirY += oy * weight;
-      weightedSum += weight;
-      neighborSum += nFire;
-      neighborCount += 1;
-    }
-  }
-  if (weightedSum <= 0.0001) {
-    return { centerTileX: x + 0.5, centerTileY: y + 0.5, strength: 0 };
-  }
-  const centerTileX = weightedX / weightedSum;
-  const centerTileY = weightedY / weightedSum;
-  const neighborAvg = neighborCount > 0 ? neighborSum / neighborCount : 0;
-  const dirLen = Math.hypot(weightedDirX, weightedDirY);
-  const windLen = Math.hypot(windX, windY);
-  let windAlign = 0;
-  if (dirLen > 0.0001 && windLen > 0.0001) {
-    const dirX = weightedDirX / dirLen;
-    const dirY = weightedDirY / dirLen;
-    const normWindX = windX / windLen;
-    const normWindY = windY / windLen;
-    windAlign = Math.max(0, dirX * normWindX + dirY * normWindY);
-  }
-  const cluster = clamp(weightedSum / 2.6, 0, 1);
-  const gradient = clamp(neighborAvg - localFire + 0.15, 0, 1);
-  const strength = clamp(gradient * 0.62 + cluster * 0.24 + windAlign * 0.34, 0, 1);
-  return { centerTileX, centerTileY, strength };
-};
 
 export type FireFxFallbackMode = "aggressive" | "gentle" | "off";
 export type SparkMode = "tip" | "mixed" | "embers";
+export type FireAnchorDebugMode = "off" | "tint" | "logRawFallbacks";
 
 export type FireFxDebugControls = {
   wallBlend: number;
@@ -720,6 +827,7 @@ export type FireFxDebugControls = {
   sparkDebug: boolean;
   sparkMode: SparkMode;
   smokeDensityScale: number;
+  anchorDebugMode: FireAnchorDebugMode;
 };
 
 export type ThreeTestFireFxOptions = Partial<FireFxDebugControls>;
@@ -734,7 +842,8 @@ export const DEFAULT_FIRE_FX_DEBUG_CONTROLS: FireFxDebugControls = {
   emberBoost: 1,
   sparkDebug: false,
   sparkMode: "tip",
-  smokeDensityScale: 1
+  smokeDensityScale: 1,
+  anchorDebugMode: "off"
 };
 
 export const normalizeFireFxDebugControls = (
@@ -767,7 +876,11 @@ export const normalizeFireFxDebugControls = (
     controls?.smokeDensityScale ?? DEFAULT_FIRE_FX_DEBUG_CONTROLS.smokeDensityScale,
     0.35,
     2.5
-  )
+  ),
+  anchorDebugMode:
+    controls?.anchorDebugMode === "tint" || controls?.anchorDebugMode === "logRawFallbacks"
+      ? controls.anchorDebugMode
+      : DEFAULT_FIRE_FX_DEBUG_CONTROLS.anchorDebugMode
 });
 
 export type FireFxEnvironmentSignals = {
@@ -792,7 +905,24 @@ export type SparkDebugSnapshot = {
   clusteredTiles: number;
   clusterBedInstances: number;
   clusterPlumeSpawns: number;
+  localSlotChurn: number;
+  objectSlotChurn: number;
+  frontSlotChurn: number;
+  budgetClampedDrops: number;
   mode: SparkMode;
+};
+
+export type FireAudioClusterSnapshot = {
+  id: number;
+  x: number;
+  y: number;
+  z: number;
+  radius: number;
+  tileCount: number;
+  heatMean01: number;
+  heatSum01: number;
+  fuelMean01: number;
+  intensity01: number;
 };
 
 type ClusterRole = 0 | 1 | 2;
@@ -818,6 +948,13 @@ type FireCluster = {
   plumeBudget: number;
   sourceIdx: number;
   baseY: number;
+  anchorSource: FireAnchorSource;
+  frontPerimeter01: number;
+  frontArrival01: number;
+  heatMean01: number;
+  heatSum01: number;
+  fuelMean01: number;
+  intensity01: number;
   tiles: number[];
 };
 
@@ -828,6 +965,7 @@ const fireVertexShader = `
   attribute float aClusterBlend;
   attribute float aSmokeOcc;
   attribute float aRole;
+  attribute vec3 aDebugColor;
 
   uniform float uTime;
   uniform vec2 uWind;
@@ -839,6 +977,7 @@ const fireVertexShader = `
   varying float vClusterBlend;
   varying float vSmokeOcc;
   varying float vRole;
+  varying vec3 vDebugColor;
 
   void main() {
     vUv = uv;
@@ -848,6 +987,7 @@ const fireVertexShader = `
     vClusterBlend = aClusterBlend;
     vSmokeOcc = aSmokeOcc;
     vRole = aRole;
+    vDebugColor = aDebugColor;
 
     vec3 transformed = position;
     float windMag = length(uWind);
@@ -883,6 +1023,7 @@ const fireFragmentShader = `
   uniform float uTime;
   uniform float uCore;
   uniform float uAlphaScale;
+  uniform float uDebugTintStrength;
 
   varying vec2 vUv;
   varying float vIntensity;
@@ -891,6 +1032,7 @@ const fireFragmentShader = `
   varying float vClusterBlend;
   varying float vSmokeOcc;
   varying float vRole;
+  varying vec3 vDebugColor;
 
   float hash(vec2 p) {
     p = fract(p * vec2(123.34, 345.45));
@@ -1028,6 +1170,7 @@ const fireFragmentShader = `
       EMISSIVE_CLAMP - EMISSIVE_KNEE
     ).toFixed(2)})));
     color *= emissive * (1.0 - edgeCool * 0.18);
+    color = mix(color, mix(vDebugColor, vec3(1.0), 0.18), clamp(uDebugTintStrength, 0.0, 1.0) * ${FIRE_ANCHOR_DEBUG_TINT_STRENGTH.toFixed(2)});
 
     gl_FragColor = vec4(color, max(alpha, 0.0));
   }
@@ -1041,7 +1184,8 @@ const createFireShaderMaterial = (core: number, alphaScale: number): THREE.Shade
       uTime: { value: 0 },
       uCore: { value: core },
       uAlphaScale: { value: alphaScale },
-      uWind: { value: new THREE.Vector2() }
+      uWind: { value: new THREE.Vector2() },
+      uDebugTintStrength: { value: 0 }
     },
     transparent: true,
     premultipliedAlpha: true,
@@ -1055,15 +1199,18 @@ const createFireShaderMaterial = (core: number, alphaScale: number): THREE.Shade
 const ashPreviewVertexShader = `
   attribute float aProgress;
   attribute float aSeed;
+  attribute vec3 aDebugColor;
 
   varying vec2 vUv;
   varying float vProgress;
   varying float vSeed;
+  varying vec3 vDebugColor;
 
   void main() {
     vUv = uv;
     vProgress = clamp(aProgress, 0.0, 1.2);
     vSeed = aSeed;
+    vDebugColor = aDebugColor;
     vec4 worldPosition = instanceMatrix * vec4(position, 1.0);
     gl_Position = projectionMatrix * modelViewMatrix * worldPosition;
   }
@@ -1076,10 +1223,12 @@ const ashPreviewFragmentShader = `
   uniform vec3 uAshBaseColor;
   uniform vec3 uAshWarmScorchColor;
   uniform vec3 uAshCharScorchColor;
+  uniform float uDebugTintStrength;
 
   varying vec2 vUv;
   varying float vProgress;
   varying float vSeed;
+  varying vec3 vDebugColor;
 
   float hash(vec2 p) {
     p = fract(p * vec2(443.897, 441.423));
@@ -1122,6 +1271,7 @@ const ashPreviewFragmentShader = `
     color = mix(color, ashNear, ashT);
     color *= mix(0.92, 1.03, ashNoise);
     float alpha = (0.22 + progress * 0.62) * edgeFade;
+    color = mix(color, mix(vDebugColor, vec3(1.0), 0.24), clamp(uDebugTintStrength, 0.0, 1.0) * ${FIRE_ANCHOR_DEBUG_TINT_STRENGTH.toFixed(2)});
     gl_FragColor = vec4(color * alpha, alpha);
   }
 `;
@@ -1137,7 +1287,8 @@ const createAshPreviewMaterial = (): THREE.ShaderMaterial => {
       uTime: { value: 0 },
       uAshBaseColor: { value: ashBaseColor },
       uAshWarmScorchColor: { value: ashWarmScorchColor },
-      uAshCharScorchColor: { value: ashCharScorchColor }
+      uAshCharScorchColor: { value: ashCharScorchColor },
+      uDebugTintStrength: { value: 0 }
     },
     transparent: true,
     premultipliedAlpha: true,
@@ -1184,7 +1335,9 @@ export type ThreeTestFireFx = {
     world: RenderSim,
     sample: TerrainSample | null,
     terrainSize: { width: number; depth: number } | null,
+    terrainSurface: TerrainRenderSurface | null,
     treeBurn: TreeBurnController | null,
+    structureAnchorProvider: FireStructureAnchorProvider | null,
     fpsEstimate: number,
     sceneRenderMs: number
   ) => void;
@@ -1192,6 +1345,7 @@ export type ThreeTestFireFx = {
   setDebugControls: (controls: Partial<FireFxDebugControls>) => void;
   getDebugControls: () => FireFxDebugControls;
   getSparkDebugSnapshot: () => SparkDebugSnapshot;
+  getAudioClusterSnapshot: () => FireAudioClusterSnapshot[];
   dispose: () => void;
 };
 
@@ -1369,48 +1523,58 @@ export const createThreeTestFireFx = (
   const fireClusterBlendAttr = new THREE.InstancedBufferAttribute(new Float32Array(FIRE_MAX_INSTANCES), 1);
   const fireSmokeOccAttr = new THREE.InstancedBufferAttribute(new Float32Array(FIRE_MAX_INSTANCES), 1);
   const fireRoleAttr = new THREE.InstancedBufferAttribute(new Float32Array(FIRE_MAX_INSTANCES), 1);
+  const fireDebugColorAttr = new THREE.InstancedBufferAttribute(new Float32Array(FIRE_MAX_INSTANCES * 3), 3);
   const fireCrossIntensityAttr = new THREE.InstancedBufferAttribute(new Float32Array(FIRE_CROSS_MAX_INSTANCES), 1);
   const fireCrossSeedAttr = new THREE.InstancedBufferAttribute(new Float32Array(FIRE_CROSS_MAX_INSTANCES), 1);
   const fireCrossBaseCurveAttr = new THREE.InstancedBufferAttribute(new Float32Array(FIRE_CROSS_MAX_INSTANCES), 1);
   const fireCrossClusterBlendAttr = new THREE.InstancedBufferAttribute(new Float32Array(FIRE_CROSS_MAX_INSTANCES), 1);
   const fireCrossSmokeOccAttr = new THREE.InstancedBufferAttribute(new Float32Array(FIRE_CROSS_MAX_INSTANCES), 1);
   const fireCrossRoleAttr = new THREE.InstancedBufferAttribute(new Float32Array(FIRE_CROSS_MAX_INSTANCES), 1);
+  const fireCrossDebugColorAttr = new THREE.InstancedBufferAttribute(new Float32Array(FIRE_CROSS_MAX_INSTANCES * 3), 3);
   const ashPreviewProgressAttr = new THREE.InstancedBufferAttribute(new Float32Array(ASH_PREVIEW_MAX_INSTANCES), 1);
   const ashPreviewSeedAttr = new THREE.InstancedBufferAttribute(new Float32Array(ASH_PREVIEW_MAX_INSTANCES), 1);
+  const ashPreviewDebugColorAttr = new THREE.InstancedBufferAttribute(new Float32Array(ASH_PREVIEW_MAX_INSTANCES * 3), 3);
   fireIntensityAttr.setUsage(THREE.DynamicDrawUsage);
   fireSeedAttr.setUsage(THREE.DynamicDrawUsage);
   fireBaseCurveAttr.setUsage(THREE.DynamicDrawUsage);
   fireClusterBlendAttr.setUsage(THREE.DynamicDrawUsage);
   fireSmokeOccAttr.setUsage(THREE.DynamicDrawUsage);
   fireRoleAttr.setUsage(THREE.DynamicDrawUsage);
+  fireDebugColorAttr.setUsage(THREE.DynamicDrawUsage);
   fireCrossIntensityAttr.setUsage(THREE.DynamicDrawUsage);
   fireCrossSeedAttr.setUsage(THREE.DynamicDrawUsage);
   fireCrossBaseCurveAttr.setUsage(THREE.DynamicDrawUsage);
   fireCrossClusterBlendAttr.setUsage(THREE.DynamicDrawUsage);
   fireCrossSmokeOccAttr.setUsage(THREE.DynamicDrawUsage);
   fireCrossRoleAttr.setUsage(THREE.DynamicDrawUsage);
+  fireCrossDebugColorAttr.setUsage(THREE.DynamicDrawUsage);
   ashPreviewProgressAttr.setUsage(THREE.DynamicDrawUsage);
   ashPreviewSeedAttr.setUsage(THREE.DynamicDrawUsage);
+  ashPreviewDebugColorAttr.setUsage(THREE.DynamicDrawUsage);
   fireGeometry.setAttribute("aIntensity", fireIntensityAttr);
   fireGeometry.setAttribute("aSeed", fireSeedAttr);
   fireGeometry.setAttribute("aBaseCurve", fireBaseCurveAttr);
   fireGeometry.setAttribute("aClusterBlend", fireClusterBlendAttr);
   fireGeometry.setAttribute("aSmokeOcc", fireSmokeOccAttr);
   fireGeometry.setAttribute("aRole", fireRoleAttr);
+  fireGeometry.setAttribute("aDebugColor", fireDebugColorAttr);
   fireCrossGeometry.setAttribute("aIntensity", fireCrossIntensityAttr);
   fireCrossGeometry.setAttribute("aSeed", fireCrossSeedAttr);
   fireCrossGeometry.setAttribute("aBaseCurve", fireCrossBaseCurveAttr);
   fireCrossGeometry.setAttribute("aClusterBlend", fireCrossClusterBlendAttr);
   fireCrossGeometry.setAttribute("aSmokeOcc", fireCrossSmokeOccAttr);
   fireCrossGeometry.setAttribute("aRole", fireCrossRoleAttr);
+  fireCrossGeometry.setAttribute("aDebugColor", fireCrossDebugColorAttr);
   ashPreviewGeometry.setAttribute("aProgress", ashPreviewProgressAttr);
   ashPreviewGeometry.setAttribute("aSeed", ashPreviewSeedAttr);
+  ashPreviewGeometry.setAttribute("aDebugColor", ashPreviewDebugColorAttr);
   fireCoreGeometry.setAttribute("aIntensity", fireIntensityAttr);
   fireCoreGeometry.setAttribute("aSeed", fireSeedAttr);
   fireCoreGeometry.setAttribute("aBaseCurve", fireBaseCurveAttr);
   fireCoreGeometry.setAttribute("aClusterBlend", fireClusterBlendAttr);
   fireCoreGeometry.setAttribute("aSmokeOcc", fireSmokeOccAttr);
   fireCoreGeometry.setAttribute("aRole", fireRoleAttr);
+  fireCoreGeometry.setAttribute("aDebugColor", fireDebugColorAttr);
   const fireMesh = new THREE.InstancedMesh(fireGeometry, fireMaterial, FIRE_MAX_INSTANCES);
   fireMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
   fireMesh.renderOrder = 6;
@@ -1500,6 +1664,25 @@ export const createThreeTestFireFx = (
     sparkPointMaterial.needsUpdate = true;
   };
   applySparkDebugPresentation();
+  const setFireDebugColor = (
+    attr: THREE.InstancedBufferAttribute,
+    index: number,
+    source: FireAnchorSource
+  ): void => {
+    const [r, g, b] = getFireAnchorDebugColor(source);
+    attr.setXYZ(index, r, g, b);
+  };
+  const setGlowColor = (
+    index: number,
+    source: FireAnchorSource,
+    r: number,
+    g: number,
+    b: number,
+    tintStrength: number
+  ): void => {
+    const [tintedR, tintedG, tintedB] = applyAnchorDebugGlowTint(source, r, g, b, tintStrength);
+    groundGlowMesh.instanceColor?.setXYZ(index, tintedR, tintedG, tintedB);
+  };
 
   const fireBillboard = new THREE.Object3D();
   const fireCrossBillboard = new THREE.Object3D();
@@ -1516,7 +1699,14 @@ export const createThreeTestFireFx = (
   let tileIgnitionAgeSeconds = new Float32Array(0);
   let tileAshPreviewVisual = new Float32Array(0);
   let tileSmokeVisual = new Float32Array(0);
-  let tileFrontStrength = new Float32Array(0);
+  let tileLocalFlameSlotActivation = new Float32Array(0);
+  let tileGroundFlameSlotActivation = new Float32Array(0);
+  let tileObjectFlameSlotActivation = new Float32Array(0);
+  let tileFrontPerimeter01 = new Float32Array(0);
+  let tileFrontArrival01 = new Float32Array(0);
+  let tileFrontAdvance01 = new Float32Array(0);
+  let tileFrontDirX = new Float32Array(0);
+  let tileFrontDirZ = new Float32Array(0);
   let tileFuelReference = new Float32Array(0);
   let tileSmokeSpawnAccum = new Float32Array(0);
   let tileActiveFlag = new Uint8Array(0);
@@ -1570,6 +1760,19 @@ export const createThreeTestFireFx = (
   let smokeRecoveryAccum = 0;
   let flameFallbackAccum = 0;
   let flameRecoveryAccum = 0;
+  let lastAnchorFallbackLogMs = -Infinity;
+  let frontUpdateSerial = 0;
+  const frontEdgeStates = new Map<number, DirectedFrontEdgeState>();
+  const frontCorridorSlotStates = new Map<number, FrontCorridorSlotState>();
+  let renderContinuityState: FireRenderContinuityState = {
+    smoothedFrontSegmentBudget: 0,
+    smoothedPerTileFlameCap: FIRE_VISUAL_TUNING.tongueSpawnMax,
+    smoothedPerTileGroundCap: FIRE_VISUAL_TUNING.groundFlameSpawnMax,
+    localSlotChurn: 0,
+    objectSlotChurn: 0,
+    frontSlotChurn: 0,
+    budgetClampedDrops: 0
+  };
   let sparkDebugSnapshot: SparkDebugSnapshot = {
     visibleFlameTiles: 0,
     heroTipSparkAttempts: 0,
@@ -1582,8 +1785,13 @@ export const createThreeTestFireFx = (
     clusteredTiles: 0,
     clusterBedInstances: 0,
     clusterPlumeSpawns: 0,
+    localSlotChurn: 0,
+    objectSlotChurn: 0,
+    frontSlotChurn: 0,
+    budgetClampedDrops: 0,
     mode: debugControls.sparkMode
   };
+  const audioClusterSnapshots: FireAudioClusterSnapshot[] = [];
 
   const clearVisuals = (): void => {
     fireMesh.count = 0;
@@ -1607,8 +1815,34 @@ export const createThreeTestFireFx = (
       clusteredTiles: 0,
       clusterBedInstances: 0,
       clusterPlumeSpawns: 0,
+      localSlotChurn: 0,
+      objectSlotChurn: 0,
+      frontSlotChurn: 0,
+      budgetClampedDrops: 0,
       mode: debugControls.sparkMode
     };
+    frontEdgeStates.clear();
+    frontCorridorSlotStates.clear();
+    releaseFireClusters();
+    audioClusterSnapshots.length = 0;
+    renderContinuityState = {
+      smoothedFrontSegmentBudget: 0,
+      smoothedPerTileFlameCap: FIRE_VISUAL_TUNING.tongueSpawnMax,
+      smoothedPerTileGroundCap: FIRE_VISUAL_TUNING.groundFlameSpawnMax,
+      localSlotChurn: 0,
+      objectSlotChurn: 0,
+      frontSlotChurn: 0,
+      budgetClampedDrops: 0
+    };
+    tileLocalFlameSlotActivation.fill(0);
+    tileGroundFlameSlotActivation.fill(0);
+    tileObjectFlameSlotActivation.fill(0);
+    tileFlameVisual.fill(0);
+    tileIgnitionAgeSeconds.fill(0);
+    tileAshPreviewVisual.fill(0);
+    tileSmokeVisual.fill(0);
+    tileFuelReference.fill(0);
+    tileSmokeSpawnAccum.fill(0);
     visualsCleared = true;
   };
 
@@ -1678,10 +1912,127 @@ export const createThreeTestFireFx = (
     tileIgnitionAgeSeconds = new Float32Array(count);
     tileAshPreviewVisual = new Float32Array(count);
     tileSmokeVisual = new Float32Array(count);
-    tileFrontStrength = new Float32Array(count);
+    tileLocalFlameSlotActivation = new Float32Array(count * FIRE_VISUAL_TUNING.tongueSpawnMax);
+    tileGroundFlameSlotActivation = new Float32Array(count * FIRE_VISUAL_TUNING.groundFlameSpawnMax);
+    tileObjectFlameSlotActivation = new Float32Array(count * 2);
+    tileFrontPerimeter01 = new Float32Array(count);
+    tileFrontArrival01 = new Float32Array(count);
+    tileFrontAdvance01 = new Float32Array(count);
+    tileFrontDirX = new Float32Array(count);
+    tileFrontDirZ = new Float32Array(count);
     tileFuelReference = new Float32Array(count);
     tileSmokeSpawnAccum = new Float32Array(count);
+    frontEdgeStates.clear();
+    frontCorridorSlotStates.clear();
+    renderContinuityState = {
+      smoothedFrontSegmentBudget: 0,
+      smoothedPerTileFlameCap: FIRE_VISUAL_TUNING.tongueSpawnMax,
+      smoothedPerTileGroundCap: FIRE_VISUAL_TUNING.groundFlameSpawnMax,
+      localSlotChurn: 0,
+      objectSlotChurn: 0,
+      frontSlotChurn: 0,
+      budgetClampedDrops: 0
+    };
     ensureClusterState(count);
+  };
+
+  const getTileEmitterSlotIndex = (tileIdx: number, slot: number, maxSlots: number): number =>
+    tileIdx * maxSlots + slot;
+
+  const readTileEmitterSlotState = (slots: Float32Array, slotIndex: number): TileEmitterSlotState =>
+    slots[slotIndex] ?? 0;
+
+  const clearTileEmitterSlots = (slots: Float32Array, tileIdx: number, maxSlots: number): void => {
+    const baseIndex = tileIdx * maxSlots;
+    for (let slot = 0; slot < maxSlots; slot += 1) {
+      slots[baseIndex + slot] = 0;
+    }
+  };
+
+  const updateTileEmitterSlots = (
+    slots: Float32Array,
+    tileIdx: number,
+    maxSlots: number,
+    targetCount: number,
+    riseRate: number,
+    fallRate: number,
+    dtSeconds: number,
+    visibleCutoff: number,
+    churnKey: "localSlotChurn" | "objectSlotChurn" | null
+  ): { activationSum: number; maxActivation: number; visibleCount: number } => {
+    const baseIndex = tileIdx * maxSlots;
+    let activationSum = 0;
+    let maxActivation = 0;
+    let visibleCount = 0;
+    for (let slot = 0; slot < maxSlots; slot += 1) {
+      const slotIndex = baseIndex + slot;
+      const previous = readTileEmitterSlotState(slots, slotIndex);
+      const targetActivation = clamp(targetCount - slot, 0, 1);
+      const next = smoothApproach(previous, targetActivation, riseRate, fallRate, dtSeconds);
+      slots[slotIndex] = next;
+      if (churnKey && (previous > visibleCutoff) !== (next > visibleCutoff)) {
+        renderContinuityState[churnKey] += 1;
+      }
+      activationSum += next;
+      if (next > maxActivation) {
+        maxActivation = next;
+      }
+      if (next > visibleCutoff) {
+        visibleCount += 1;
+      }
+    }
+    return {
+      activationSum,
+      maxActivation,
+      visibleCount
+    };
+  };
+
+  const getFrontCorridorKey = (corridor: FrontCorridor): number =>
+    ((((corridor.dir * 257 + corridor.fixedCoord) * 257 + corridor.startCoord) * 257 + corridor.endCoord) >>> 0);
+
+  const getFrontCorridorSlotKey = (corridorKey: number, slot: number): number =>
+    corridorKey * FIRE_FRONT_CORRIDOR_MAX_SEGMENTS + slot;
+
+  const updateFrontCorridorSlotActivation = (
+    corridorKey: number,
+    slot: number,
+    targetActivation: number,
+    frameId: number,
+    dtSeconds: number
+  ): number => {
+    const slotKey = getFrontCorridorSlotKey(corridorKey, slot);
+    let state = frontCorridorSlotStates.get(slotKey);
+    if (!state) {
+      state = {
+        activation: 0,
+        lastActiveFrame: frameId
+      };
+      frontCorridorSlotStates.set(slotKey, state);
+    }
+    const previous = state.activation;
+    state.activation = smoothApproach(previous, targetActivation, FIRE_FRONT_SLOT_RISE_RATE, FIRE_FRONT_SLOT_FALL_RATE, dtSeconds);
+    state.lastActiveFrame = frameId;
+    if ((previous > FIRE_FRONT_SLOT_VISIBLE_CUTOFF) !== (state.activation > FIRE_FRONT_SLOT_VISIBLE_CUTOFF)) {
+      renderContinuityState.frontSlotChurn += 1;
+    }
+    return state.activation;
+  };
+
+  const decayInactiveFrontCorridorSlots = (frameId: number, dtSeconds: number): void => {
+    for (const [slotKey, state] of frontCorridorSlotStates) {
+      if (state.lastActiveFrame === frameId) {
+        continue;
+      }
+      const previous = state.activation;
+      state.activation = smoothApproach(previous, 0, 0, FIRE_FRONT_SLOT_FALL_RATE, dtSeconds);
+      if ((previous > FIRE_FRONT_SLOT_VISIBLE_CUTOFF) !== (state.activation > FIRE_FRONT_SLOT_VISIBLE_CUTOFF)) {
+        renderContinuityState.frontSlotChurn += 1;
+      }
+      if (state.activation <= 0.01) {
+        frontCorridorSlotStates.delete(slotKey);
+      }
+    }
   };
 
   type ClusterBudgetState = {
@@ -1726,6 +2077,13 @@ export const createThreeTestFireFx = (
       cluster.plumeBudget = 0;
       cluster.sourceIdx = -1;
       cluster.baseY = 0;
+      cluster.anchorSource = "terrainSurface";
+      cluster.frontPerimeter01 = 0;
+      cluster.frontArrival01 = 0;
+      cluster.heatMean01 = 0;
+      cluster.heatSum01 = 0;
+      cluster.fuelMean01 = 0;
+      cluster.intensity01 = 0;
       return cluster;
     }
     return {
@@ -1749,6 +2107,13 @@ export const createThreeTestFireFx = (
       plumeBudget: 0,
       sourceIdx: -1,
       baseY: 0,
+      anchorSource: "terrainSurface",
+      frontPerimeter01: 0,
+      frontArrival01: 0,
+      heatMean01: 0,
+      heatSum01: 0,
+      fuelMean01: 0,
+      intensity01: 0,
       tiles: []
     };
   };
@@ -1768,7 +2133,7 @@ export const createThreeTestFireFx = (
     windZ: number,
     treeBurn: TreeBurnController | null,
     terrainSize: { width: number; depth: number },
-    heightScale: number
+    resolveGroundAnchor: (tileIdx: number) => ResolvedFireAnchor
   ): { clusterCount: number; clusteredTiles: number } => {
     tileActiveFlag.fill(0);
     tileClusterId.fill(-1);
@@ -1817,11 +2182,15 @@ export const createThreeTestFireFx = (
         cluster.minY = y;
         cluster.maxY = y;
         cluster.sourceIdx = idx;
+        cluster.anchorSource = "terrainSurface";
         let weightedX = 0;
         let weightedZ = 0;
         let weightedY = 0;
         let weightSum = 0;
         let weightMax = 0;
+        let heatSum01 = 0;
+        let fuelSum01 = 0;
+        const anchorSourceWeights = [0, 0, 0, 0];
         queueHead = 0;
         queueTail = 0;
         clusterQueue[queueTail++] = idx;
@@ -1846,17 +2215,20 @@ export const createThreeTestFireFx = (
           }
           const fire = fireView.getFireByIndex(current);
           const heat = fireView.getHeat01ByIndex(current);
+          const fuel = fireView.getFuelByIndex(current);
           const treeBurnVisual = treeBurn?.getTileBurnVisual(current) ?? 0;
           const w = clamp(Math.max(fire, heat * 0.5, treeBurnVisual * 0.75), 0.01, 1.4);
-          const worldTileX = ((cx + 0.5) / cols - 0.5) * terrainSize.width;
-          const worldTileZ = ((cy + 0.5) / rows - 0.5) * terrainSize.depth;
-          const tileY = clamp(world.tileElevation[current] ?? 0, -1, 1) * heightScale;
-          weightedX += worldTileX * w;
-          weightedZ += worldTileZ * w;
-          weightedY += tileY * w;
+          heatSum01 += heat;
+          fuelSum01 += fuel;
+          const groundAnchor = resolveGroundAnchor(current);
+          weightedX += groundAnchor.position.x * w;
+          weightedZ += groundAnchor.position.z * w;
+          weightedY += groundAnchor.position.y * w;
           weightSum += w;
+          accumulateAnchorSourceWeight(anchorSourceWeights, groundAnchor.source, w);
           if (w > weightMax) {
             weightMax = w;
+            cluster.sourceIdx = current;
           }
           for (let oy = -sampleStep; oy <= sampleStep; oy += sampleStep) {
             for (let ox = -sampleStep; ox <= sampleStep; ox += sampleStep) {
@@ -1890,8 +2262,13 @@ export const createThreeTestFireFx = (
         cluster.centroidX = weightedX / Math.max(0.0001, weightSum);
         cluster.centroidZ = weightedZ / Math.max(0.0001, weightSum);
         cluster.baseY = weightedY / Math.max(0.0001, weightSum);
+        cluster.anchorSource = pickDominantAnchorSource(anchorSourceWeights);
         const avgWeight = weightSum / Math.max(1, cluster.tileCount);
         cluster.intensity = clamp(avgWeight * 0.7 + weightMax * 0.3, 0, 1.25);
+        cluster.heatSum01 = heatSum01;
+        cluster.heatMean01 = heatSum01 / Math.max(1, cluster.tileCount);
+        cluster.fuelMean01 = fuelSum01 / Math.max(1, cluster.tileCount);
+        cluster.intensity01 = computeFireAudioIntensity(cluster.heatMean01, cluster.fuelMean01);
         let radius = 0;
         let edgeTiles = 0;
         let interiorTiles = 0;
@@ -1902,8 +2279,9 @@ export const createThreeTestFireFx = (
           const tid = cluster.tiles[i];
           const tx = tid % cols;
           const ty = Math.floor(tid / cols);
-          const wx = ((tx + 0.5) / cols - 0.5) * terrainSize.width;
-          const wz = ((ty + 0.5) / rows - 0.5) * terrainSize.depth;
+          const tileAnchor = resolveGroundAnchor(tid);
+          const wx = tileAnchor.position.x;
+          const wz = tileAnchor.position.z;
           const dx = wx - cluster.centroidX;
           const dz = wz - cluster.centroidZ;
           covXX += dx * dx;
@@ -2037,7 +2415,9 @@ export const createThreeTestFireFx = (
     world: RenderSim,
     sample: TerrainSample | null,
     terrainSize: { width: number; depth: number } | null,
+    terrainSurface: TerrainRenderSurface | null,
     treeBurn: TreeBurnController | null,
+    structureAnchorProvider: FireStructureAnchorProvider | null,
     fpsEstimate: number,
     sceneRenderMs: number
   ): void => {
@@ -2090,6 +2470,10 @@ export const createThreeTestFireFx = (
     lastRebuildTimeMs = time;
     const deltaSeconds = clamp(pendingDeltaSeconds, 1 / 240, 0.08);
     pendingDeltaSeconds = 0;
+    renderContinuityState.localSlotChurn = 0;
+    renderContinuityState.objectSlotChurn = 0;
+    renderContinuityState.frontSlotChurn = 0;
+    renderContinuityState.budgetClampedDrops = 0;
     const envAlpha = 1 - Math.exp(-deltaSeconds / 1.2);
     envCurrent.smoke01 += (envTarget.smoke01 - envCurrent.smoke01) * envAlpha;
     envCurrent.denseSmoke01 += (envTarget.denseSmoke01 - envCurrent.denseSmoke01) * envAlpha;
@@ -2207,7 +2591,7 @@ export const createThreeTestFireFx = (
     const sampleFootprint = tileSpan;
     const sparkFootprint = tileSpan;
     const viewportHeightPx = typeof window !== "undefined" ? Math.max(1, window.innerHeight) : 1080;
-    const heightScale = getTerrainHeightScale(cols, rows, sample.heightScaleMultiplier ?? 1);
+    const heightScale = terrainSurface?.heightScale ?? getTerrainHeightScale(cols, rows, sample.heightScaleMultiplier ?? 1);
     const simFireEps = getSimFireEps(world);
     const flamePresenceEps = Math.max(FIRE_FLAME_VISUAL_FLOOR, simFireEps * 0.9);
     const wind = world.wind;
@@ -2223,13 +2607,32 @@ export const createThreeTestFireFx = (
     const flameTimeSeconds = timeSeconds * FLAME_MOTION_TIME_SCALE;
     const sparkTimeSeconds = timeSeconds * SPARK_MOTION_TIME_SCALE;
     const fireShaderTime = timeSeconds * FIRE_SHADER_TIME_SCALE;
+    const anchorDebugTintStrength = debugControls.anchorDebugMode === "tint" ? 1 : 0;
+    const glowAnchorDebugTintStrength =
+      debugControls.anchorDebugMode === "tint" ? GLOW_ANCHOR_DEBUG_TINT_STRENGTH : 0;
+    const fireAnchorResolver = createFireAnchorResolver({
+      world,
+      cols,
+      rows,
+      terrainSize,
+      heightScale,
+      terrainSurface,
+      treeBurn,
+      structureAnchorProvider
+    });
+    const resolveGroundAnchor = (tileIdx: number): ResolvedFireAnchor => fireAnchorResolver.resolveTile(tileIdx, "ground");
+    const resolveObjectAnchor = (tileIdx: number): ResolvedFireAnchor => fireAnchorResolver.resolveTile(tileIdx, "object");
     fireMaterial.uniforms.uTime.value = fireShaderTime;
     fireCrossMaterial.uniforms.uTime.value = fireShaderTime;
     fireCoreMaterial.uniforms.uTime.value = fireShaderTime;
     fireMaterial.uniforms.uAlphaScale.value = 0.92 * flameIntensityBoost;
     fireCrossMaterial.uniforms.uAlphaScale.value = 0.58 * flameIntensityBoost;
     fireCoreMaterial.uniforms.uAlphaScale.value = 0.68 * flameIntensityBoost;
+    fireMaterial.uniforms.uDebugTintStrength.value = anchorDebugTintStrength;
+    fireCrossMaterial.uniforms.uDebugTintStrength.value = anchorDebugTintStrength;
+    fireCoreMaterial.uniforms.uDebugTintStrength.value = anchorDebugTintStrength;
     ashPreviewMaterial.uniforms.uTime.value = timeSeconds;
+    ashPreviewMaterial.uniforms.uDebugTintStrength.value = anchorDebugTintStrength;
     fireMaterial.uniforms.uWind.value.set(windLeanX * FLAME_WIND_GAIN, windLeanZ * FLAME_WIND_GAIN);
     fireCrossMaterial.uniforms.uWind.value.set(windLeanX * FLAME_WIND_GAIN, windLeanZ * FLAME_WIND_GAIN);
     fireCoreMaterial.uniforms.uWind.value.set(windLeanX * FLAME_WIND_GAIN, windLeanZ * FLAME_WIND_GAIN);
@@ -2428,7 +2831,7 @@ export const createThreeTestFireFx = (
         windZ,
         treeBurn,
         terrainSize,
-        heightScale
+        resolveGroundAnchor
       );
       clusterCount = clusterBuild.clusterCount;
       clusteredTiles = clusterBuild.clusteredTiles;
@@ -2447,99 +2850,276 @@ export const createThreeTestFireFx = (
     const windNormX = windDirLen > 0.0001 ? windX / windDirLen : 0;
     const windNormZ = windDirLen > 0.0001 ? windZ / windDirLen : 0;
     const getHeat01 = (tileIdx: number): number => fireView.getHeat01ByIndex(tileIdx);
-    const getGroundY = (tileIdx: number): number => clamp(world.tileElevation[tileIdx] ?? 0, -1, 1) * heightScale;
-    const getFrontEdgeStrength = (
-      activeIdx: number,
-      neighbourIdx: number,
-      normalX: number,
-      normalZ: number
-    ): number => {
-      const activeFire = fireView.getFireByIndex(activeIdx);
-      if (activeFire <= simFireEps) {
-        return 0;
-      }
-      const activeHeat = getHeat01(activeIdx);
-      const neighbourFire = neighbourIdx >= 0 ? fireView.getFireByIndex(neighbourIdx) : 0;
-      const neighbourHeat = neighbourIdx >= 0 ? getHeat01(neighbourIdx) : 0;
-      const unburntNeighbour = neighbourIdx < 0 || neighbourFire <= simFireEps;
-      const fireRatio = activeFire / Math.max(simFireEps, neighbourFire + simFireEps);
-      const heatRatio = activeHeat / Math.max(0.04, neighbourHeat + 0.04);
-      if (
-        !unburntNeighbour &&
-        fireRatio < FIRE_FRONT_NEIGHBOUR_RATIO &&
-        heatRatio < FIRE_FRONT_NEIGHBOUR_HEAT_RATIO &&
-        neighbourFire >= activeFire * 0.82
-      ) {
-        return 0;
-      }
-      const fireDrop = Math.max(0, activeFire - neighbourFire);
-      const heatDrop = Math.max(0, activeHeat - neighbourHeat);
-      const windPush = windDirLen > 0.0001 ? Math.max(0, normalX * windNormX + normalZ * windNormZ) : 0;
+    const getFrontTileVisualDrive = (tileIdx: number): number => {
+      const fire = fireView.getFireByIndex(tileIdx);
+      const heat = getHeat01(tileIdx);
+      const scheduled = fireView.getScheduledByIndex(tileIdx);
+      const flameVisual = tileFlameVisual[tileIdx] ?? 0;
+      const ignitionAge = tileIgnitionAgeSeconds[tileIdx] ?? 0;
+      const treeBurnVisual = treeBurn?.getTileBurnVisual(tileIdx) ?? 0;
+      const fuel = fireView.getFuelByIndex(tileIdx);
+      const isAshTile = (world.tileTypeId[tileIdx] ?? -1) === TILE_TYPE_IDS.ash;
+      const treeCarryVisual =
+        !isAshTile && fuel > TREE_BURN_CARRY_FUEL_MIN
+          ? treeBurnVisual * (0.54 + smoothstep(0.08, 0.72, heat) * 0.34)
+          : 0;
+      const freshIgnitionVisual =
+        smoothstep(Math.max(simFireEps * 0.25, 0.02), 0.22, fire) *
+        (1 - smoothstep(1.6, 4.6, ignitionAge));
       return clamp(
-        activeFire * 0.56 +
-          activeHeat * 0.22 +
-          fireDrop * 0.68 +
-          heatDrop * 0.26 +
-          (unburntNeighbour ? 0.2 : 0) +
-          windPush * 0.24,
+        Math.max(
+          fire * 0.88 + heat * 0.32 + flameVisual * 0.18,
+          flameVisual * 0.96 + heat * 0.28,
+          treeCarryVisual + heat * 0.16,
+          scheduled * 0.12 + heat * 0.08 + freshIgnitionVisual * 0.22
+        ),
         0,
         1.35
       );
     };
-    const getFrontEdgeVisualStrength = (
-      activeIdx: number,
-      neighbourIdx: number,
-      normalX: number,
-      normalZ: number
-    ): number => {
-      const targetStrength = getFrontEdgeStrength(activeIdx, neighbourIdx, normalX, normalZ);
-      const smoothedFront = activeIdx >= 0 ? tileFrontStrength[activeIdx] ?? 0 : 0;
-      return Math.min(targetStrength, smoothedFront * 1.08 + 0.1);
+    const getFrontTileIgnitionSignal = (tileIdx: number): number => {
+      const fire = fireView.getFireByIndex(tileIdx);
+      const heat = getHeat01(tileIdx);
+      const scheduled = fireView.getScheduledByIndex(tileIdx);
+      const flameVisual = tileFlameVisual[tileIdx] ?? 0;
+      const ignitionAge = tileIgnitionAgeSeconds[tileIdx] ?? 0;
+      const wetness = fireView.getWetnessByIndex(tileIdx);
+      const freshIgnition01 =
+        smoothstep(Math.max(simFireEps * 0.18, 0.02), 0.2, fire) *
+        (1 - smoothstep(1.3, 4.4, ignitionAge));
+      return clamp(
+        scheduled * 0.58 +
+          heat * (0.58 - wetness * 0.18) +
+          flameVisual * 0.34 +
+          freshIgnition01 * 0.62,
+        0,
+        1.2
+      );
     };
+    tileFrontPerimeter01.fill(0);
+    tileFrontArrival01.fill(0);
+    tileFrontAdvance01.fill(0);
+    tileFrontDirX.fill(0);
+    tileFrontDirZ.fill(0);
+    const activeFrontStates: DirectedFrontEdgeState[] = [];
     let visualFrontWeight = 0;
+    const frontFrameId = ENABLE_FLAME_FRONT_PASS ? (frontUpdateSerial += 1) : frontUpdateSerial;
     if (ENABLE_FLAME_FRONT_PASS) {
-      for (let y = minY; y <= maxY; y += sampleStep) {
+      for (let y = minY; y <= maxY; y += 1) {
         const rowBase = y * cols;
-        for (let x = minX; x <= maxX; x += sampleStep) {
-          const idx = rowBase + x;
-          const fire = fireView.getFireByIndex(idx);
-          let frontStrengthTarget = 0;
-          if (fire > simFireEps) {
-            const westIdx = x - sampleStep >= minX ? idx - sampleStep : -1;
-            const eastIdx = x + sampleStep <= maxX ? idx + sampleStep : -1;
-            const northIdx = y - sampleStep >= minY ? idx - sampleStep * cols : -1;
-            const southIdx = y + sampleStep <= maxY ? idx + sampleStep * cols : -1;
-            frontStrengthTarget = Math.max(frontStrengthTarget, getFrontEdgeStrength(idx, westIdx, -1, 0));
-            frontStrengthTarget = Math.max(frontStrengthTarget, getFrontEdgeStrength(idx, eastIdx, 1, 0));
-            frontStrengthTarget = Math.max(frontStrengthTarget, getFrontEdgeStrength(idx, northIdx, 0, -1));
-            frontStrengthTarget = Math.max(frontStrengthTarget, getFrontEdgeStrength(idx, southIdx, 0, 1));
+        for (let x = minX; x <= maxX; x += 1) {
+          const sourceIdx = rowBase + x;
+          const sourceDriveTarget = getFrontTileVisualDrive(sourceIdx);
+          if (sourceDriveTarget <= 0.06) {
+            continue;
           }
-          const smoothedFront = smoothApproach(tileFrontStrength[idx] ?? 0, frontStrengthTarget, 14.0, 10.0, deltaSeconds);
-          tileFrontStrength[idx] = smoothedFront;
-          if (fire > simFireEps && frontStrengthTarget > FIRE_FRONT_VISUAL_MIN) {
-            visualFrontWeight += smoothstep(FIRE_FRONT_VISUAL_MIN * 0.4, 0.42, frontStrengthTarget);
+          for (let dir = 0; dir < FRONT_DIRECTION_DATA.length; dir += 1) {
+            const direction = FRONT_DIRECTION_DATA[dir]!;
+            const destX = x + direction.dx;
+            const destY = y + direction.dy;
+            if (destX < minX || destX > maxX || destY < minY || destY > maxY) {
+              continue;
+            }
+            const destIdx = destY * cols + destX;
+            const destFuel = fireView.getFuelByIndex(destIdx);
+            const destTypeId = world.tileTypeId[destIdx] ?? -1;
+            if (destFuel <= 0.01 || destTypeId === TILE_TYPE_IDS.ash) {
+              continue;
+            }
+            const destFire = fireView.getFireByIndex(destIdx);
+            const destHeat = getHeat01(destIdx);
+            const destFlameVisual = tileFlameVisual[destIdx] ?? 0;
+            const destIgnitionAge = tileIgnitionAgeSeconds[destIdx] ?? 0;
+            const destIgnitionTarget = getFrontTileIgnitionSignal(destIdx);
+            const windPush = windDirLen > 0.0001 ? Math.max(0, direction.normalX * windNormX + direction.normalZ * windNormZ) : 0;
+            const neighbourCarry = clamp(destFire * 0.76 + destHeat * 0.38 + destFlameVisual * 0.72, 0, 1.3);
+            const spreadGradient = sourceDriveTarget - neighbourCarry * 0.72 + windPush * 0.16;
+            const destFreshFire01 =
+              smoothstep(Math.max(simFireEps * 0.16, 0.02), 0.24, destFire) *
+              (1 - smoothstep(1.4, 5.1, destIgnitionAge));
+            const destBurnMature01 = clamp(
+              smoothstep(Math.max(simFireEps * 0.25, 0.04), 0.42, destFire) * 0.64 +
+                smoothstep(0.08, 0.54, destFlameVisual) * 0.42 +
+                smoothstep(0.9, 3.4, destIgnitionAge) * 0.34,
+              0,
+              1.15
+            );
+            const shouldExplainSpread =
+              destIgnitionTarget > 0.05 ||
+              destFreshFire01 > 0.04 ||
+              (destFire <= simFireEps * 0.6 && spreadGradient > 0.04);
+            if (!shouldExplainSpread || (destBurnMature01 > 0.92 && spreadGradient < 0.14)) {
+              continue;
+            }
+            const sourceAnchor = resolveGroundAnchor(sourceIdx);
+            const destAnchor = resolveGroundAnchor(destIdx);
+            const stateKey = getFrontEdgeKey(sourceIdx, dir as FrontDirection);
+            let state = frontEdgeStates.get(stateKey);
+            if (!state) {
+              state = {
+                key: stateKey,
+                sourceTileIdx: sourceIdx,
+                destTileIdx: destIdx,
+                sourceTileX: x,
+                sourceTileY: y,
+                destTileX: destX,
+                destTileY: destY,
+                dir: dir as FrontDirection,
+                normalX: direction.normalX,
+                normalZ: direction.normalZ,
+                tangentX: direction.tangentX,
+                tangentZ: direction.tangentZ,
+                orientation: direction.orientation,
+                fixedCoord: 0,
+                alongCoord: 0,
+                edgeCenterX: 0,
+                edgeCenterY: 0,
+                edgeCenterZ: 0,
+                normalY: 1,
+                dominantSource: "terrainSurface",
+                presence01: 0,
+                advance01: 0,
+                sourceDrive01: 0,
+                destIgnition01: 0,
+                passed01: 0,
+                lastActiveFrame: frontFrameId
+              };
+              frontEdgeStates.set(stateKey, state);
+            }
+            state.sourceTileIdx = sourceIdx;
+            state.destTileIdx = destIdx;
+            state.sourceTileX = x;
+            state.sourceTileY = y;
+            state.destTileX = destX;
+            state.destTileY = destY;
+            state.fixedCoord =
+              direction.orientation === "horizontal"
+                ? direction.normalZ < 0
+                  ? y
+                  : y + 1
+                : direction.normalX < 0
+                  ? x
+                  : x + 1;
+            state.alongCoord = direction.orientation === "horizontal" ? x : y;
+            state.edgeCenterX = (sourceAnchor.position.x + destAnchor.position.x) * 0.5;
+            state.edgeCenterY = (sourceAnchor.position.y + destAnchor.position.y) * 0.5;
+            state.edgeCenterZ = (sourceAnchor.position.z + destAnchor.position.z) * 0.5;
+            state.normalX = direction.normalX;
+            state.normalZ = direction.normalZ;
+            state.normalY = clamp((sourceAnchor.normal.y + destAnchor.normal.y) * 0.5, 0.2, 1);
+            state.tangentX = direction.tangentX;
+            state.tangentZ = direction.tangentZ;
+            {
+              const sourceWeights = [0, 0, 0, 0];
+              accumulateAnchorSourceWeight(sourceWeights, sourceAnchor.source, 1);
+              accumulateAnchorSourceWeight(sourceWeights, destAnchor.source, 1);
+              state.dominantSource = pickDominantAnchorSource(sourceWeights);
+            }
+            const passedTarget = clamp(
+              destBurnMature01 * smoothstep(0.12, 0.62, destIgnitionTarget + destFreshFire01 * 0.38),
+              0,
+              1
+            );
+            const presenceTarget = clamp(
+              sourceDriveTarget * 0.68 +
+                destIgnitionTarget * 0.32 +
+                Math.max(0, spreadGradient) * 0.42 +
+                windPush * 0.18 -
+                passedTarget * 0.7,
+              0,
+              1.25
+            );
+            const advanceTarget = clamp(
+              destIgnitionTarget * 0.16 +
+                destFreshFire01 * 0.8 +
+                smoothstep(0.03, 0.68, Math.max(0, spreadGradient)) * 0.12 +
+                windPush * 0.08 -
+                passedTarget * 0.28,
+              0,
+              1
+            );
+            state.sourceDrive01 = smoothApproach(state.sourceDrive01, sourceDriveTarget, 8.8, 8.4, deltaSeconds);
+            state.destIgnition01 = smoothApproach(state.destIgnition01, destIgnitionTarget, 6.8, 7.6, deltaSeconds);
+            state.passed01 = smoothApproach(state.passed01, passedTarget, 5.6, 8.6, deltaSeconds);
+            state.presence01 = smoothApproach(state.presence01, presenceTarget, 10.6, 7.2, deltaSeconds);
+            state.advance01 = smoothApproach(state.advance01, advanceTarget, 7.2, 8.8, deltaSeconds);
+            state.lastActiveFrame = frontFrameId;
+            if (state.presence01 <= FIRE_FRONT_VISUAL_MIN * 0.35 || state.passed01 >= 0.98) {
+              continue;
+            }
+            activeFrontStates.push(state);
+            const outgoingWeight = clamp(
+              state.presence01 * (0.54 + state.sourceDrive01 * 0.46) * (1 - state.passed01 * 0.3),
+              0,
+              1.35
+            );
+            const incomingWeight = clamp(
+              state.presence01 * (0.3 + state.advance01 * 0.7) * (1 - state.passed01 * 0.48),
+              0,
+              1.35
+            );
+            tileFrontPerimeter01[sourceIdx] = Math.max(tileFrontPerimeter01[sourceIdx] ?? 0, outgoingWeight);
+            tileFrontArrival01[destIdx] = Math.max(tileFrontArrival01[destIdx] ?? 0, incomingWeight);
+            tileFrontAdvance01[destIdx] = Math.max(tileFrontAdvance01[destIdx] ?? 0, state.advance01);
+            tileFrontDirX[destIdx] += direction.normalX * incomingWeight;
+            tileFrontDirZ[destIdx] += direction.normalZ * incomingWeight;
+            visualFrontWeight += smoothstep(FIRE_FRONT_VISUAL_MIN * 0.4, 0.82, state.presence01) * (0.45 + state.advance01 * 0.55);
           }
+        }
+      }
+      for (const [stateKey, state] of frontEdgeStates) {
+        if (state.lastActiveFrame === frontFrameId) {
+          continue;
+        }
+        state.presence01 = smoothApproach(state.presence01, 0, 0, 9.8, deltaSeconds);
+        state.advance01 = smoothApproach(state.advance01, 0, 0, 10.8, deltaSeconds);
+        state.sourceDrive01 = smoothApproach(state.sourceDrive01, 0, 0, 9.4, deltaSeconds);
+        state.destIgnition01 = smoothApproach(state.destIgnition01, 0, 0, 9.2, deltaSeconds);
+        state.passed01 = smoothApproach(state.passed01, 0, 0, 10.4, deltaSeconds);
+        if (
+          state.presence01 <= 0.02 &&
+          state.advance01 <= 0.02 &&
+          state.sourceDrive01 <= 0.02 &&
+          state.destIgnition01 <= 0.02 &&
+          state.passed01 <= 0.02
+        ) {
+          frontEdgeStates.delete(stateKey);
         }
       }
     }
     const frontBudgetFloor =
-      visualFrontWeight >= 8
-        ? Math.min(FIRE_FRONT_MIN_INSTANCES, Math.round(visualFrontWeight * 2.5))
+      visualFrontWeight >= 4
+        ? Math.min(FIRE_FRONT_MIN_INSTANCES, Math.round(visualFrontWeight * 2.2))
         : 0;
     const frontPassActive =
       ENABLE_FLAME_FRONT_PASS &&
-      visualFrontWeight >= FIRE_FRONT_PASS_MIN_WEIGHT &&
-      activeFlameTileCount >= 4;
-    const frontSegmentBudget = frontPassActive
+      activeFrontStates.length >= 2 &&
+      visualFrontWeight >= FIRE_FRONT_PASS_MIN_WEIGHT * 0.55 &&
+      activeFlameTileCount >= 2;
+    const frontSegmentBudgetTarget = frontPassActive
       ? clamp(
           Math.round(
-            Math.min(FIRE_FRONT_MAX_INSTANCES, visualFrontWeight * 2.35 + visualActiveWeight * 0.16) *
+            Math.min(
+              FIRE_FRONT_MAX_INSTANCES,
+              visualFrontWeight * 2.8 + activeFrontStates.length * 0.95 + visualActiveWeight * 0.14
+            ) *
               clamp(flameDensityScale, 0.28, 1.05)
           ),
           frontBudgetFloor,
           FIRE_FRONT_MAX_INSTANCES
         )
       : 0;
+    renderContinuityState.smoothedFrontSegmentBudget = smoothApproach(
+      renderContinuityState.smoothedFrontSegmentBudget,
+      frontSegmentBudgetTarget,
+      FIRE_FRONT_BUDGET_RISE_RATE,
+      FIRE_FRONT_BUDGET_FALL_RATE,
+      deltaSeconds
+    );
+    const frontSegmentBudget = frontPassActive
+      ? clamp(Math.round(renderContinuityState.smoothedFrontSegmentBudget), frontBudgetFloor, FIRE_FRONT_MAX_INSTANCES)
+      : 0;
+    const frontFieldReadScale = frontPassActive ? smoothstep(FIRE_FRONT_PASS_MIN_WEIGHT * 0.55, 14, visualFrontWeight) : 0;
     const flameTileCapacity = clamp(FIRE_MAX_INSTANCES - frontSegmentBudget, 96, FIRE_MAX_INSTANCES);
     const clusterBudgetState = computeClusterBudgets(
       flameBudgetScale,
@@ -2571,127 +3151,230 @@ export const createThreeTestFireFx = (
             FIRE_VISUAL_TUNING.groundFlameSpawnMax
           )
         : FIRE_VISUAL_TUNING.groundFlameSpawnMax;
-    const emitFrontRun = (
-      orientation: "horizontal" | "vertical",
-      fixedCoord: number,
-      startCoord: number,
-      endCoord: number,
-      normalX: number,
-      normalZ: number,
-      strengthSum: number,
-      heatSum: number,
-      fireSum: number,
-      groundYSum: number,
-      sampleCount: number
-    ): void => {
-      if (!ENABLE_FLAME_FRONT_PASS || sampleCount <= 0 || frontSegmentCount >= frontSegmentBudget) {
+    renderContinuityState.smoothedPerTileFlameCap = smoothApproach(
+      renderContinuityState.smoothedPerTileFlameCap,
+      perTileFlameCap,
+      FIRE_TILE_CAP_RISE_RATE,
+      FIRE_TILE_CAP_FALL_RATE,
+      deltaSeconds
+    );
+    renderContinuityState.smoothedPerTileGroundCap = smoothApproach(
+      renderContinuityState.smoothedPerTileGroundCap,
+      perTileGroundCap,
+      FIRE_TILE_CAP_RISE_RATE,
+      FIRE_TILE_CAP_FALL_RATE,
+      deltaSeconds
+    );
+    const smoothedPerTileFlameCap = clamp(
+      renderContinuityState.smoothedPerTileFlameCap,
+      0,
+      FIRE_VISUAL_TUNING.tongueSpawnMax
+    );
+    const smoothedPerTileGroundCap = clamp(
+      renderContinuityState.smoothedPerTileGroundCap,
+      0,
+      FIRE_VISUAL_TUNING.groundFlameSpawnMax
+    );
+    for (let i = 0; i < fireClusters.length; i += 1) {
+      const cluster = fireClusters[i]!;
+      let perimeterSum = 0;
+      let arrivalMax = 0;
+      let weightSum = 0;
+      for (let tileIndex = 0; tileIndex < cluster.tiles.length; tileIndex += 1) {
+        const tid = cluster.tiles[tileIndex]!;
+        const roleWeight = tileClusterRole[tid] === 1 ? 1 : tileClusterRole[tid] === 2 ? 0.5 : 0.72;
+        perimeterSum += (tileFrontPerimeter01[tid] ?? 0) * roleWeight;
+        arrivalMax = Math.max(arrivalMax, tileFrontArrival01[tid] ?? 0);
+        weightSum += roleWeight;
+      }
+      cluster.frontPerimeter01 = weightSum > 0 ? perimeterSum / weightSum : 0;
+      cluster.frontArrival01 = arrivalMax;
+    }
+    const stitchFrontCorridors = (): FrontCorridor[] => {
+      const groups = new Map<number, DirectedFrontEdgeState[]>();
+      for (let i = 0; i < activeFrontStates.length; i += 1) {
+        const state = activeFrontStates[i]!;
+        const groupKey = state.fixedCoord * 8 + state.dir;
+        let group = groups.get(groupKey);
+        if (!group) {
+          group = [];
+          groups.set(groupKey, group);
+        }
+        group.push(state);
+      }
+      const corridors: FrontCorridor[] = [];
+      for (const group of groups.values()) {
+        group.sort((a, b) => a.alongCoord - b.alongCoord);
+        let start = 0;
+        while (start < group.length) {
+          let end = start;
+          while (end + 1 < group.length && group[end + 1]!.alongCoord === group[end]!.alongCoord + 1) {
+            end += 1;
+          }
+          const states = group.slice(start, end + 1);
+          const sourceWeights = [0, 0, 0, 0];
+          let presenceSum = 0;
+          let advanceSum = 0;
+          let sourceDriveSum = 0;
+          let destIgnitionSum = 0;
+          let passedSum = 0;
+          for (let i = 0; i < states.length; i += 1) {
+            const state = states[i]!;
+            presenceSum += state.presence01;
+            advanceSum += state.advance01;
+            sourceDriveSum += state.sourceDrive01;
+            destIgnitionSum += state.destIgnition01;
+            passedSum += state.passed01;
+            accumulateAnchorSourceWeight(sourceWeights, state.dominantSource, state.presence01);
+          }
+          const first = states[0]!;
+          const last = states[states.length - 1]!;
+          corridors.push({
+            dir: first.dir,
+            orientation: first.orientation,
+            fixedCoord: first.fixedCoord,
+            startCoord: first.alongCoord,
+            endCoord: last.alongCoord,
+            states,
+            dominantSource: pickDominantAnchorSource(sourceWeights),
+            presence01: presenceSum / Math.max(1, states.length),
+            advance01: advanceSum / Math.max(1, states.length),
+            sourceDrive01: sourceDriveSum / Math.max(1, states.length),
+            destIgnition01: destIgnitionSum / Math.max(1, states.length),
+            passed01: passedSum / Math.max(1, states.length)
+          });
+          start = end + 1;
+        }
+      }
+      return corridors;
+    };
+    const emitFrontCorridor = (corridor: FrontCorridor): void => {
+      if (!ENABLE_FLAME_FRONT_PASS || frontSegmentBudget <= 0 || frontSegmentCount >= frontSegmentBudget) {
         return;
       }
-      const avgStrength = strengthSum / sampleCount;
-      if (avgStrength <= FIRE_FRONT_VISUAL_MIN) {
+      if (corridor.presence01 <= FIRE_FRONT_VISUAL_MIN * 0.45 || corridor.states.length <= 0) {
         return;
       }
-      const frontScale01 = smoothstep(FIRE_FRONT_VISUAL_MIN * 0.4, 0.42, avgStrength);
-      if (frontScale01 <= 0.02) {
-        return;
-      }
-      const avgHeat = heatSum / sampleCount;
-      const avgFire = fireSum / sampleCount;
-      const avgGroundY = groundYSum / sampleCount;
-      const blockSpan = (orientation === "horizontal" ? tileSpanX : tileSpanZ) * sampleStep;
-      const runBlockCount = Math.floor((endCoord - startCoord) / sampleStep) + 1;
-      const runSpan = Math.max(blockSpan, runBlockCount * blockSpan);
-      const tangentX = orientation === "horizontal" ? 1 : 0;
-      const tangentZ = orientation === "horizontal" ? 0 : 1;
-      let runCenterX = 0;
-      let runCenterZ = 0;
-      if (orientation === "horizontal") {
-        const startCenterX = ((startCoord + sampleStep * 0.5) / cols - 0.5) * terrainSize.width;
-        const endCenterX = ((endCoord + sampleStep * 0.5) / cols - 0.5) * terrainSize.width;
-        const sourceRow = clamp(normalZ < 0 ? fixedCoord : fixedCoord - sampleStep, minY, maxY);
-        const sourceCenterZ = ((sourceRow + sampleStep * 0.5) / rows - 0.5) * terrainSize.depth;
-        runCenterX = (startCenterX + endCenterX) * 0.5;
-        runCenterZ = sourceCenterZ + normalZ * tileSpanZ * sampleStep * 0.5;
-      } else {
-        const startCenterZ = ((startCoord + sampleStep * 0.5) / rows - 0.5) * terrainSize.depth;
-        const endCenterZ = ((endCoord + sampleStep * 0.5) / rows - 0.5) * terrainSize.depth;
-        const sourceCol = clamp(normalX < 0 ? fixedCoord : fixedCoord - sampleStep, minX, maxX);
-        const sourceCenterX = ((sourceCol + sampleStep * 0.5) / cols - 0.5) * terrainSize.width;
-        runCenterX = sourceCenterX + normalX * tileSpanX * sampleStep * 0.5;
-        runCenterZ = (startCenterZ + endCenterZ) * 0.5;
-      }
+      const blockSpan = corridor.orientation === "horizontal" ? tileSpanX : tileSpanZ;
       const maxSegments = Math.min(
-        FIRE_FRONT_RUN_MAX_SEGMENTS,
+        FIRE_FRONT_CORRIDOR_MAX_SEGMENTS,
         frontSegmentBudget - frontSegmentCount,
         FIRE_MAX_INSTANCES - fireCount
       );
-      if (maxSegments <= 0) {
+      const corridorCapacity = maxSegments;
+      if (maxSegments <= 0 || corridorCapacity <= 0) {
         return;
       }
-      const baseSegments = Math.max(1, Math.ceil(runSpan / Math.max(sampleFootprint * 1.45, blockSpan * 0.82)));
       const idealSegmentCount = clamp(
-        Math.round(baseSegments * (0.9 + avgStrength * 0.7)),
-        1,
-        FIRE_FRONT_RUN_MAX_SEGMENTS
+        corridor.states.length * (1.08 + corridor.presence01 * 0.92),
+        0,
+        FIRE_FRONT_CORRIDOR_MAX_SEGMENTS
       );
-      const segmentStride = idealSegmentCount > maxSegments ? Math.ceil(idealSegmentCount / Math.max(1, maxSegments)) : 1;
-      const segmentPhase =
-        segmentStride > 1
-          ? Math.floor(
-              hash1(fixedCoord * 0.731 + startCoord * 0.173 + endCoord * 0.097 + normalX * 11.3 + normalZ * 7.1) *
-                segmentStride
-            )
-          : 0;
-      const segmentSpacing = runSpan / Math.max(1, idealSegmentCount);
-      const windPush = windDirLen > 0.0001 ? Math.max(0, normalX * windNormX + normalZ * windNormZ) : 0;
-      const tangentYaw = Math.atan2(tangentX + windX * 0.16, tangentZ + windZ * 0.16);
-      for (let segment = 0; segment < idealSegmentCount && fireCount < FIRE_MAX_INSTANCES; segment += 1) {
-        if (segmentStride > 1 && segment % segmentStride !== segmentPhase) {
-          continue;
-        }
+      const corridorPresenceScale = clamp(
+        smoothstep(FIRE_FRONT_VISUAL_MIN * 0.38, 0.88, corridor.presence01) * (1 - corridor.passed01 * 0.46),
+        0,
+        1
+      );
+      const targetVisibleCount = clamp(
+        idealSegmentCount * corridorPresenceScale,
+        0,
+        FIRE_FRONT_CORRIDOR_MAX_SEGMENTS
+      );
+      if (targetVisibleCount <= FIRE_FRONT_SLOT_VISIBLE_CUTOFF) {
+        return;
+      }
+      if (targetVisibleCount > corridorCapacity + 0.001) {
+        renderContinuityState.budgetClampedDrops += targetVisibleCount - corridorCapacity;
+      }
+      const corridorKey = getFrontCorridorKey(corridor);
+      const tangentX = corridor.states[0]!.tangentX;
+      const tangentZ = corridor.states[0]!.tangentZ;
+      const tangentYaw = Math.atan2(tangentX + windX * 0.18, tangentZ + windZ * 0.18);
+      const windPush = windDirLen > 0.0001
+        ? Math.max(0, corridor.states[0]!.normalX * windNormX + corridor.states[0]!.normalZ * windNormZ)
+        : 0;
+      const frontScale01 = smoothstep(FIRE_FRONT_VISUAL_MIN * 0.4, 0.9, corridor.presence01);
+      for (let orderIndex = 0; orderIndex < FIRE_FRONT_SLOT_ORDER.length && fireCount < FIRE_MAX_INSTANCES; orderIndex += 1) {
         if (frontSegmentCount >= frontSegmentBudget) {
           break;
         }
-        const s1 = hash1(fixedCoord * 0.731 + startCoord * 0.173 + endCoord * 0.097 + segment * 3.17 + normalX * 11.3 + normalZ * 7.1);
-        const s2 = hash1(fixedCoord * 1.131 + startCoord * 0.217 + endCoord * 0.119 + segment * 5.41 + 2.7);
-        const s3 = hash1(fixedCoord * 0.593 + startCoord * 0.149 + endCoord * 0.181 + segment * 7.03 + 9.4);
-        const along =
-          -runSpan * 0.5 +
-          segmentSpacing * (segment + 0.5) +
-          (s1 - 0.5) * segmentSpacing * 0.48;
-        const centerX =
-          clamp(runCenterX + tangentX * along + normalX * (s2 - 0.5) * sampleFootprint * 0.18, terrainMinX, terrainMaxX);
-        const centerZ =
-          clamp(runCenterZ + tangentZ * along + normalZ * (s2 - 0.5) * sampleFootprint * 0.18, terrainMinZ, terrainMaxZ);
+        const segment = FIRE_FRONT_SLOT_ORDER[orderIndex]!;
+        const targetActivation = clamp(targetVisibleCount - (FIRE_FRONT_SLOT_RANK[segment] ?? orderIndex), 0, 1);
+        const slotActivation = updateFrontCorridorSlotActivation(
+          corridorKey,
+          segment,
+          targetActivation,
+          frontFrameId,
+          deltaSeconds
+        );
+        if (slotActivation <= FIRE_FRONT_SLOT_VISIBLE_CUTOFF) {
+          continue;
+        }
+        const s1 = hash1(corridor.fixedCoord * 0.731 + corridor.startCoord * 0.173 + segment * 3.17 + corridor.dir * 11.3);
+        const s2 = hash1(corridor.fixedCoord * 1.131 + corridor.endCoord * 0.217 + segment * 5.41 + corridor.dir * 7.1);
+        const s3 = hash1(corridor.fixedCoord * 0.593 + corridor.startCoord * 0.149 + segment * 7.03 + corridor.dir * 9.7);
+        const baseT = FIRE_FRONT_CORRIDOR_MAX_SEGMENTS <= 1 ? 0.5 : segment / Math.max(1, FIRE_FRONT_CORRIDOR_MAX_SEGMENTS - 1);
+        const corridorT = clamp(baseT + (s1 - 0.5) * 0.18 / Math.max(1, idealSegmentCount), 0, 1);
+        const statePos = corridorT * Math.max(0, corridor.states.length - 1);
+        const stateIndex0 = Math.floor(statePos);
+        const stateIndex1 = Math.min(corridor.states.length - 1, stateIndex0 + 1);
+        const stateMix = statePos - stateIndex0;
+        const state0 = corridor.states[stateIndex0]!;
+        const state1 = corridor.states[stateIndex1]!;
+        const edgeCenterX = state0.edgeCenterX * (1 - stateMix) + state1.edgeCenterX * stateMix;
+        const edgeCenterY = state0.edgeCenterY * (1 - stateMix) + state1.edgeCenterY * stateMix;
+        const edgeCenterZ = state0.edgeCenterZ * (1 - stateMix) + state1.edgeCenterZ * stateMix;
+        const normalX = state0.normalX * (1 - stateMix) + state1.normalX * stateMix;
+        const normalZ = state0.normalZ * (1 - stateMix) + state1.normalZ * stateMix;
+        const normalY = state0.normalY * (1 - stateMix) + state1.normalY * stateMix;
+        const presence01 = state0.presence01 * (1 - stateMix) + state1.presence01 * stateMix;
+        const advance01 = state0.advance01 * (1 - stateMix) + state1.advance01 * stateMix;
+        const sourceDrive01 = state0.sourceDrive01 * (1 - stateMix) + state1.sourceDrive01 * stateMix;
+        const destIgnition01 = state0.destIgnition01 * (1 - stateMix) + state1.destIgnition01 * stateMix;
+        const passed01 = state0.passed01 * (1 - stateMix) + state1.passed01 * stateMix;
+        const travelled01 = clamp(advance01 * (0.78 + s2 * 0.24) - passed01 * 0.12, 0, 1);
+        const inwardOffset = sampleFootprint * ((travelled01 - 0.5) * 0.82 + (s2 - 0.5) * 0.08);
+        const alongJitter = (s1 - 0.5) * blockSpan * 0.26;
+        const centerX = clamp(edgeCenterX + normalX * inwardOffset + tangentX * alongJitter, terrainMinX, terrainMaxX);
+        const centerZ = clamp(edgeCenterZ + normalZ * inwardOffset + tangentZ * alongJitter, terrainMinZ, terrainMaxZ);
+        const slotScale01 = clamp(0.28 + slotActivation * 0.72, 0.28, 1);
+        const frontHeight01 = clamp(
+          sourceDrive01 * 0.56 +
+            destIgnition01 * 0.42 +
+            frontScale01 * 0.34 +
+            travelled01 * 0.26 -
+            passed01 * 0.22,
+          0,
+          1.45
+        );
         const surge =
-          0.72 +
-          Math.pow(s2, 1.55) * 0.74 +
-          0.24 * Math.sin(flameTimeSeconds * (4.1 + s3 * 3.1) + s1 * TAU);
-        const collapse =
-          0.62 +
-          0.38 * (0.5 + 0.5 * Math.sin(flameTimeSeconds * (2.3 + s1 * 2.1) + s2 * TAU));
+          0.74 +
+          Math.pow(s2, 1.45) * 0.82 +
+          0.22 * Math.sin(flameTimeSeconds * (4.2 + s3 * 3.3) + s1 * TAU);
+        const crownBreak =
+          0.76 +
+          0.24 * (0.5 + 0.5 * Math.sin(flameTimeSeconds * (7.4 + s1 * 3.2) + s2 * TAU));
         const heightRaw =
           sampleFootprint *
-          (0.34 + avgStrength * 0.78 + avgHeat * 0.14 + windPush * 0.12) *
-          (0.76 + s2 * 0.36) *
+          (0.22 + frontHeight01 * 0.84 + windPush * 0.08) *
+          (0.82 + s2 * 0.42) *
           surge *
-          collapse *
+          crownBreak *
           flameHeightBoost *
-          0.8 *
-          FLAME_RENDER_SIZE_SCALE *
-          frontScale01;
+          FLAME_RENDER_SIZE_SCALE;
         const widthRaw =
-          Math.max(blockSpan * 0.74, segmentSpacing * (0.88 + s1 * 0.12)) *
-          (0.91 + windPush * 0.07) *
+          Math.max(blockSpan * 0.7, sampleFootprint * (0.56 + presence01 * 0.46 + s1 * 0.18)) *
+          (0.92 + windPush * 0.08) *
           flameWidthBoost *
-          FLAME_RENDER_SIZE_SCALE *
-          frontScale01;
-        const height = Math.min(heightRaw, sampleFootprint * 1.6 * flameHeightBoost * FLAME_RENDER_SIZE_SCALE);
-        const width = Math.min(widthRaw, sampleFootprint * 1.35);
-        const baseY = avgGroundY - sampleFootprint * 0.015;
+          FLAME_RENDER_SIZE_SCALE;
+        const height =
+          Math.min(heightRaw, sampleFootprint * 1.85 * flameHeightBoost * FLAME_RENDER_SIZE_SCALE) *
+          slotScale01;
+        const width = Math.min(widthRaw, sampleFootprint * 1.42) * slotScale01;
+        const baseY = edgeCenterY - sampleFootprint * 0.02;
         const cameraYaw = Math.atan2(cameraWorldPos.x - centerX, cameraWorldPos.z - centerZ);
-        const yaw = cameraYaw * 0.88 + tangentYaw * 0.12 + Math.sin(flameTimeSeconds * 0.92 + s3 * TAU) * 0.06;
-        const mainPitch = topView01 * 0.18;
+        const yaw = cameraYaw * 0.84 + tangentYaw * 0.16 + Math.sin(flameTimeSeconds * 0.96 + s3 * TAU) * 0.08;
+        const mainPitch = topView01 * (0.14 + travelled01 * 0.07);
         fireBillboard.position.set(centerX, baseY, centerZ);
         fireBillboard.rotation.set(mainPitch, yaw, 0);
         fireBillboard.scale.set(
@@ -2701,45 +3384,63 @@ export const createThreeTestFireFx = (
         );
         fireBillboard.updateMatrix();
         fireMesh.setMatrixAt(fireCount, fireBillboard.matrix);
-        fireIntensityAttr.setX(fireCount, clamp(0.62 + avgFire * 0.36 + avgStrength * 0.24 + windPush * 0.12, 0, 1.25));
-        fireSeedAttr.setX(fireCount, fract(s1 + s3 + segment * 0.13));
-        fireBaseCurveAttr.setX(fireCount, 0.08 + avgHeat * 0.22);
+        fireIntensityAttr.setX(
+          fireCount,
+          clamp(
+            (0.58 + sourceDrive01 * 0.26 + destIgnition01 * 0.22 + travelled01 * 0.14 + windPush * 0.08) *
+              (0.24 + slotActivation * 0.76),
+            0,
+            1.24
+          )
+        );
+        fireSeedAttr.setX(fireCount, fract(s1 + s3 + segment * 0.17));
+        fireBaseCurveAttr.setX(fireCount, clamp(0.08 + travelled01 * 0.14 + (1 - normalY) * 0.18, 0.06, 0.38));
         fireClusterBlendAttr.setX(fireCount, 0.08);
-        fireSmokeOccAttr.setX(fireCount, clamp(0.06 + avgHeat * 0.12, 0, 0.22));
+        fireSmokeOccAttr.setX(fireCount, clamp(0.06 + destIgnition01 * 0.12, 0, 0.24));
         fireRoleAttr.setX(fireCount, 3);
-        const sliceOffset = (0.14 + topView01 * 0.26) * (s1 > 0.5 ? 1 : -1);
+        setFireDebugColor(fireDebugColorAttr, fireCount, corridor.dominantSource);
+        const sliceOffset = (0.16 + topView01 * 0.24) * (s1 > 0.5 ? 1 : -1);
         fireBillboard.position.set(centerX, baseY + sampleFootprint * 0.01, centerZ);
-        fireBillboard.rotation.set(mainPitch * 0.7, yaw + sliceOffset, 0);
+        fireBillboard.rotation.set(mainPitch * 0.68, yaw + sliceOffset, 0);
         fireBillboard.scale.set(
-          width * 0.52 * FLAME_CORE_BILLBOARD_OVERSCAN_X,
-          height * 0.46 * FLAME_CORE_BILLBOARD_OVERSCAN_Y,
-          width * 0.52 * FLAME_CORE_BILLBOARD_OVERSCAN_X
+          width * 0.54 * FLAME_CORE_BILLBOARD_OVERSCAN_X,
+          height * 0.48 * FLAME_CORE_BILLBOARD_OVERSCAN_Y,
+          width * 0.54 * FLAME_CORE_BILLBOARD_OVERSCAN_X
         );
         fireBillboard.updateMatrix();
         fireCoreMesh.setMatrixAt(fireCount, fireBillboard.matrix);
         if (topView01 > 0.24 && fireCrossCount < FIRE_CROSS_MAX_INSTANCES) {
           fireCrossBillboard.position.set(centerX, baseY + sampleFootprint * 0.005, centerZ);
-          fireCrossBillboard.rotation.set(mainPitch * 0.52, yaw - sliceOffset * 0.82, 0);
+          fireCrossBillboard.rotation.set(mainPitch * 0.5, yaw - sliceOffset * 0.84, 0);
           fireCrossBillboard.scale.set(
-            width * 0.82 * FLAME_BILLBOARD_OVERSCAN_X,
-            height * 0.82 * FLAME_BILLBOARD_OVERSCAN_Y,
-            width * 0.82 * FLAME_BILLBOARD_OVERSCAN_X
+            width * 0.84 * FLAME_BILLBOARD_OVERSCAN_X,
+            height * 0.84 * FLAME_BILLBOARD_OVERSCAN_Y,
+            width * 0.84 * FLAME_BILLBOARD_OVERSCAN_X
           );
           fireCrossBillboard.updateMatrix();
           fireCrossMesh.setMatrixAt(fireCrossCount, fireCrossBillboard.matrix);
-          fireCrossIntensityAttr.setX(fireCrossCount, clamp(0.56 + avgFire * 0.32 + avgStrength * 0.2, 0, 1.12));
-          fireCrossSeedAttr.setX(fireCrossCount, fract(s2 + s3 + segment * 0.17));
-          fireCrossBaseCurveAttr.setX(fireCrossCount, 0.08 + avgHeat * 0.18);
+          fireCrossIntensityAttr.setX(
+            fireCrossCount,
+            clamp(
+              (0.54 + sourceDrive01 * 0.24 + destIgnition01 * 0.18 + travelled01 * 0.12) *
+                (0.24 + slotActivation * 0.76),
+              0,
+              1.1
+            )
+          );
+          fireCrossSeedAttr.setX(fireCrossCount, fract(s2 + s3 + segment * 0.21));
+          fireCrossBaseCurveAttr.setX(fireCrossCount, clamp(0.08 + travelled01 * 0.12, 0.06, 0.34));
           fireCrossClusterBlendAttr.setX(fireCrossCount, 0.08);
-          fireCrossSmokeOccAttr.setX(fireCrossCount, clamp(0.05 + avgHeat * 0.1, 0, 0.2));
+          fireCrossSmokeOccAttr.setX(fireCrossCount, clamp(0.05 + destIgnition01 * 0.1, 0, 0.2));
           fireCrossRoleAttr.setX(fireCrossCount, 3);
+          setFireDebugColor(fireCrossDebugColorAttr, fireCrossCount, corridor.dominantSource);
           fireCrossCount += 1;
         }
         fireCount += 1;
         frontSegmentCount += 1;
         if (glowCount < GLOW_MAX_INSTANCES) {
-          const glowLength = Math.max(blockSpan * 0.9, width * 0.72);
-          const glowDepth = sampleFootprint * (0.36 + avgStrength * 0.28) * groundGlowSizeBoost;
+          const glowLength = Math.max(blockSpan * 0.92, width * (0.78 + travelled01 * 0.18));
+          const glowDepth = sampleFootprint * (0.3 + presence01 * 0.36 + travelled01 * 0.16) * groundGlowSizeBoost;
           groundGlowBillboard.position.set(
             centerX + normalX * sampleFootprint * 0.03,
             baseY + 0.03,
@@ -2749,238 +3450,43 @@ export const createThreeTestFireFx = (
           groundGlowBillboard.scale.set(glowLength, glowDepth, 1);
           groundGlowBillboard.updateMatrix();
           groundGlowMesh.setMatrixAt(glowCount, groundGlowBillboard.matrix);
-          const frontGlow = clamp((0.38 + avgStrength * 0.9 + s2 * 0.18) * groundGlowBoost, 0, 3.2);
-          groundGlowMesh.instanceColor?.setXYZ(
+          const frontGlow = clamp(
+            (0.34 + presence01 * 0.9 + travelled01 * 0.18) * (0.28 + slotActivation * 0.72) * groundGlowBoost,
+            0,
+            3.2
+          );
+          setGlowColor(
             glowCount,
+            corridor.dominantSource,
             frontGlow * 1.16,
             frontGlow * (0.38 + s2 * 0.14),
-            frontGlow * (0.04 + s1 * 0.03)
+            frontGlow * (0.04 + s1 * 0.03),
+            glowAnchorDebugTintStrength
           );
           glowCount += 1;
         }
-        if (sparkPointCount < SPARK_POINT_MAX_INSTANCES && avgStrength > 0.3 && s3 > 0.56) {
-          const sparkDrift = sampleFootprint * (0.18 + windStrength * 0.44 + s2 * 0.2);
+        if (sparkPointCount < SPARK_POINT_MAX_INSTANCES && presence01 > 0.28 && s3 > 0.54) {
+          const sparkDrift = sampleFootprint * (0.14 + windStrength * 0.32 + s2 * 0.18);
           pushSparkPoint(
-            clamp(centerX + windX * sparkDrift + tangentX * (s1 - 0.5) * segmentSpacing * 0.16, terrainMinX, terrainMaxX),
-            baseY + height * (0.52 + s3 * 0.24),
-            clamp(centerZ + windZ * sparkDrift + tangentZ * (s2 - 0.5) * segmentSpacing * 0.16, terrainMinZ, terrainMaxZ),
-            1.2 + avgStrength * 0.3,
-            0.58 + avgHeat * 0.18,
+            clamp(centerX + windX * sparkDrift + tangentX * (s1 - 0.5) * blockSpan * 0.18, terrainMinX, terrainMaxX),
+            baseY + height * (0.54 + s3 * 0.22),
+            clamp(centerZ + windZ * sparkDrift + tangentZ * (s2 - 0.5) * blockSpan * 0.18, terrainMinZ, terrainMaxZ),
+            1.12 + presence01 * 0.32,
+            0.54 + destIgnition01 * 0.18,
             0.12
           );
         }
       }
     };
-    const emitFrontRuns = (): void => {
-      if (!ENABLE_FLAME_FRONT_PASS || frontSegmentBudget <= 0) {
-        return;
-      }
-      for (let yEdge = minY; yEdge <= maxY + sampleStep; yEdge += sampleStep) {
-        let runStart = -1;
-        let runEnd = -1;
-        let runNormalZ = 0;
-        let strengthSum = 0;
-        let heatSum = 0;
-        let fireSum = 0;
-        let groundYSum = 0;
-        let sampleCount = 0;
-        for (let x = minX; x <= maxX; x += sampleStep) {
-          const northY = yEdge - sampleStep;
-          const southY = yEdge;
-          const northIdx = northY >= minY && northY <= maxY ? northY * cols + x : -1;
-          const southIdx = southY >= minY && southY <= maxY ? southY * cols + x : -1;
-          let edgeStrength = 0;
-          let normalZ = 0;
-          let activeIdx = -1;
-          const northStrength = northIdx >= 0 ? getFrontEdgeVisualStrength(northIdx, southIdx, 0, 1) : 0;
-          const southStrength = southIdx >= 0 ? getFrontEdgeVisualStrength(southIdx, northIdx, 0, -1) : 0;
-          if (northStrength >= southStrength && northStrength > FIRE_FRONT_VISUAL_MIN) {
-            edgeStrength = northStrength;
-            normalZ = 1;
-            activeIdx = northIdx;
-          } else if (southStrength > FIRE_FRONT_VISUAL_MIN) {
-            edgeStrength = southStrength;
-            normalZ = -1;
-            activeIdx = southIdx;
-          }
-          if (activeIdx >= 0) {
-            if (runStart < 0 || normalZ !== runNormalZ || x !== runEnd + sampleStep) {
-              if (runStart >= 0) {
-                emitFrontRun(
-                  "horizontal",
-                  yEdge,
-                  runStart,
-                  runEnd,
-                  0,
-                  runNormalZ,
-                  strengthSum,
-                  heatSum,
-                  fireSum,
-                  groundYSum,
-                  sampleCount
-                );
-              }
-              runStart = x;
-              runNormalZ = normalZ;
-              strengthSum = 0;
-              heatSum = 0;
-              fireSum = 0;
-              groundYSum = 0;
-              sampleCount = 0;
-            }
-            runEnd = x;
-            strengthSum += edgeStrength;
-            heatSum += getHeat01(activeIdx);
-            fireSum += fireView.getFireByIndex(activeIdx);
-            groundYSum += getGroundY(activeIdx);
-            sampleCount += 1;
-          } else if (runStart >= 0) {
-            emitFrontRun(
-              "horizontal",
-              yEdge,
-              runStart,
-              runEnd,
-              0,
-              runNormalZ,
-              strengthSum,
-              heatSum,
-              fireSum,
-              groundYSum,
-              sampleCount
-            );
-            runStart = -1;
-            runEnd = -1;
-            runNormalZ = 0;
-            strengthSum = 0;
-            heatSum = 0;
-            fireSum = 0;
-            groundYSum = 0;
-            sampleCount = 0;
-          }
-        }
-        if (runStart >= 0) {
-          emitFrontRun(
-            "horizontal",
-            yEdge,
-            runStart,
-            runEnd,
-            0,
-            runNormalZ,
-            strengthSum,
-            heatSum,
-            fireSum,
-            groundYSum,
-            sampleCount
-          );
-        }
-      }
-      for (let xEdge = minX; xEdge <= maxX + sampleStep; xEdge += sampleStep) {
-        let runStart = -1;
-        let runEnd = -1;
-        let runNormalX = 0;
-        let strengthSum = 0;
-        let heatSum = 0;
-        let fireSum = 0;
-        let groundYSum = 0;
-        let sampleCount = 0;
-        for (let y = minY; y <= maxY; y += sampleStep) {
-          const westX = xEdge - sampleStep;
-          const eastX = xEdge;
-          const westIdx = westX >= minX && westX <= maxX ? y * cols + westX : -1;
-          const eastIdx = eastX >= minX && eastX <= maxX ? y * cols + eastX : -1;
-          let edgeStrength = 0;
-          let normalX = 0;
-          let activeIdx = -1;
-          const westStrength = westIdx >= 0 ? getFrontEdgeVisualStrength(westIdx, eastIdx, 1, 0) : 0;
-          const eastStrength = eastIdx >= 0 ? getFrontEdgeVisualStrength(eastIdx, westIdx, -1, 0) : 0;
-          if (westStrength >= eastStrength && westStrength > FIRE_FRONT_VISUAL_MIN) {
-            edgeStrength = westStrength;
-            normalX = 1;
-            activeIdx = westIdx;
-          } else if (eastStrength > FIRE_FRONT_VISUAL_MIN) {
-            edgeStrength = eastStrength;
-            normalX = -1;
-            activeIdx = eastIdx;
-          }
-          if (activeIdx >= 0) {
-            if (runStart < 0 || normalX !== runNormalX || y !== runEnd + sampleStep) {
-              if (runStart >= 0) {
-                emitFrontRun(
-                  "vertical",
-                  xEdge,
-                  runStart,
-                  runEnd,
-                  runNormalX,
-                  0,
-                  strengthSum,
-                  heatSum,
-                  fireSum,
-                  groundYSum,
-                  sampleCount
-                );
-              }
-              runStart = y;
-              runNormalX = normalX;
-              strengthSum = 0;
-              heatSum = 0;
-              fireSum = 0;
-              groundYSum = 0;
-              sampleCount = 0;
-            }
-            runEnd = y;
-            strengthSum += edgeStrength;
-            heatSum += getHeat01(activeIdx);
-            fireSum += fireView.getFireByIndex(activeIdx);
-            groundYSum += getGroundY(activeIdx);
-            sampleCount += 1;
-          } else if (runStart >= 0) {
-            emitFrontRun(
-              "vertical",
-              xEdge,
-              runStart,
-              runEnd,
-              runNormalX,
-              0,
-              strengthSum,
-              heatSum,
-              fireSum,
-              groundYSum,
-              sampleCount
-            );
-            runStart = -1;
-            runEnd = -1;
-            runNormalX = 0;
-            strengthSum = 0;
-            heatSum = 0;
-            fireSum = 0;
-            groundYSum = 0;
-            sampleCount = 0;
-          }
-        }
-        if (runStart >= 0) {
-          emitFrontRun(
-            "vertical",
-            xEdge,
-            runStart,
-            runEnd,
-            runNormalX,
-            0,
-            strengthSum,
-            heatSum,
-            fireSum,
-            groundYSum,
-            sampleCount
-          );
-        }
-      }
-    };
+    const frontCorridors = frontPassActive ? stitchFrontCorridors() : [];
 
     const emitClusterFlameBed = (cluster: FireCluster): void => {
       if (cluster.bedBudget <= 0) {
         return;
       }
+      const clusterFront01 = clamp(cluster.frontPerimeter01 * 0.88 + cluster.frontArrival01 * 0.72, 0, 1.2);
       const bedCount = clamp(
-        Math.round(cluster.tileCount * (0.9 + cluster.intensity * 0.7) * flameBudgetScale),
+        Math.round(cluster.tileCount * (0.56 + cluster.intensity * 0.52 + clusterFront01 * 0.42) * flameBudgetScale),
         2,
         Math.min(CLUSTER_BED_MAX_PER_CLUSTER, cluster.bedBudget)
       );
@@ -2990,7 +3496,7 @@ export const createThreeTestFireFx = (
         0,
         1
       );
-      const smokeOccBase = clamp(0.25 + cluster.intensity * 0.45, 0, 1);
+      const smokeOccBase = clamp(0.2 + cluster.intensity * 0.4 + clusterFront01 * 0.12, 0, 1);
       if (sparkDebug) {
         const centroidR = 0.6 + cluster.intensity * 2.2;
         const centroidG = 0.45 + cluster.intensity * 0.95;
@@ -3024,10 +3530,14 @@ export const createThreeTestFireFx = (
         const wX = clamp(x, terrainMinX, terrainMaxX);
         const wZ = clamp(z, terrainMinZ, terrainMaxZ);
         const pulse = 0.85 + 0.15 * Math.sin(flameTimeSeconds * (0.5 + b3 * 0.7) + b2 * TAU);
-        const h = tileSpan * (0.055 + cluster.intensity * 0.085) * (0.84 + b3 * 0.4) * pulse * FLAME_RENDER_SIZE_SCALE;
+        const h = tileSpan *
+          (0.048 + cluster.intensity * 0.07 + clusterFront01 * 0.028) *
+          (0.84 + b3 * 0.4) *
+          pulse *
+          FLAME_RENDER_SIZE_SCALE;
         const w = Math.max(tileSpan * 0.12, h * (2.35 + b2 * 1.2)) * FLAME_RENDER_SIZE_SCALE;
         const yaw = Math.atan2(cameraWorldPos.x - wX, cameraWorldPos.z - wZ) + Math.sin(flameTimeSeconds * 0.45 + b1 * TAU) * 0.08;
-        const intensity = clamp((0.35 + cluster.intensity * 0.7) * pulse, 0, 1);
+        const intensity = clamp((0.28 + cluster.intensity * 0.56 + clusterFront01 * 0.22) * pulse, 0, 1);
         fireBillboard.position.set(wX, cluster.baseY + h * 0.4, wZ);
         fireBillboard.rotation.set(0, yaw, 0);
         fireBillboard.scale.set(w * FLAME_BILLBOARD_OVERSCAN_X, h * FLAME_BILLBOARD_OVERSCAN_Y, w * FLAME_BILLBOARD_OVERSCAN_X);
@@ -3039,6 +3549,7 @@ export const createThreeTestFireFx = (
         fireClusterBlendAttr.setX(fireCount, clusterBlend);
         fireSmokeOccAttr.setX(fireCount, smokeOccBase);
         fireRoleAttr.setX(fireCount, 2);
+        setFireDebugColor(fireDebugColorAttr, fireCount, cluster.anchorSource);
         fireBillboard.rotation.set(0, yaw + Math.PI * 0.5, 0);
         fireBillboard.scale.set(
           w * 0.64 * FLAME_CORE_BILLBOARD_OVERSCAN_X,
@@ -3056,6 +3567,7 @@ export const createThreeTestFireFx = (
       if (cluster.plumeBudget <= 0 || smokeSpawnsThisFrame >= smokeSpawnFrameCap) {
         return;
       }
+      const clusterFront01 = clamp(cluster.frontPerimeter01 * 0.78 + cluster.frontArrival01 * 0.86, 0, 1.2);
       const plumeAnchors = clamp(cluster.plumeBudget, 1, CLUSTER_PLUME_MAX_PER_CLUSTER);
       for (let anchor = 0; anchor < plumeAnchors && smokeSpawnsThisFrame < smokeSpawnFrameCap; anchor += 1) {
         const a1 = hash1(cluster.id * 0.377 + anchor * 3.17 + 9.1);
@@ -3074,7 +3586,7 @@ export const createThreeTestFireFx = (
           terrainMaxZ
         );
         const spawnCount = clamp(
-          Math.round((2 + cluster.intensity * 5 + cluster.tileCount * 0.08) * effectiveSmokeBudgetScale),
+          Math.round((1.4 + cluster.intensity * 4.2 + cluster.tileCount * 0.06 + clusterFront01 * 2.2) * effectiveSmokeBudgetScale),
           1,
           8
         );
@@ -3114,7 +3626,10 @@ export const createThreeTestFireFx = (
       }
     };
 
-    emitFrontRuns();
+    for (let i = 0; i < frontCorridors.length; i += 1) {
+      emitFrontCorridor(frontCorridors[i]!);
+    }
+    decayInactiveFrontCorridorSlots(frontFrameId, deltaSeconds);
     for (let i = 0; i < fireClusters.length; i += 1) {
       emitClusterFlameBed(fireClusters[i]);
       emitClusterPlumes(fireClusters[i]);
@@ -3153,14 +3668,22 @@ export const createThreeTestFireFx = (
         const holdoverEmber = !hasActiveFire
           ? clamp(wetness * heat * (hasSuppressedHoldover ? 0.32 : 0.18), 0, hasSuppressedHoldover ? 0.12 : 0.08)
           : 0;
+        const scheduledFrontBias = smoothstep(0.02, 0.22, neighbourFire);
         const scheduledPreheat = !hasActiveFire
           ? clamp(
-              scheduled * (1 - wetness * 0.75) * smoothstep(0.03, 0.18, heat) * SCHEDULED_PREHEAT_MAX_SCALE * 0.42,
+              scheduled *
+                scheduledFrontBias *
+                (1 - wetness * 0.75) *
+                smoothstep(0.03, 0.18, heat) *
+                SCHEDULED_PREHEAT_MAX_SCALE *
+                0.42,
               0,
               SCHEDULED_PREHEAT_MAX_SCALE * 0.42
             )
           : 0;
-        const hasVisualFlame = hasActiveFire || hasTreeCarryFlame || scheduledPreheat > 0.01 || holdoverEmber > 0.015;
+        const suppressAshResidualFlame = isAshTile && !hasActiveFire;
+        const hasVisualFlame =
+          !suppressAshResidualFlame && (hasActiveFire || hasTreeCarryFlame || scheduledPreheat > 0.01 || holdoverEmber > 0.015);
         if (hasVisualFlame) {
           visibleFlameTiles += 1;
         }
@@ -3172,16 +3695,16 @@ export const createThreeTestFireFx = (
         const previousFlame = tileFlameVisual[idx] ?? 0;
         let ignitionAgeSeconds = tileIgnitionAgeSeconds[idx] ?? 0;
         const sustainIgnitionAge =
-          hasActiveFire ||
-          scheduledPreheat > 0.01 ||
-          fire > simFireEps * 0.35 ||
-          previousFlame > 0.04;
+          !suppressAshResidualFlame &&
+          (hasActiveFire ||
+            scheduledPreheat > 0.01 ||
+            fire > simFireEps * 0.35 ||
+            previousFlame > 0.04);
         if (sustainIgnitionAge) {
           ignitionAgeSeconds = Math.min(8, ignitionAgeSeconds + deltaSeconds);
         } else {
           ignitionAgeSeconds = Math.max(0, ignitionAgeSeconds - deltaSeconds * 6);
         }
-        tileIgnitionAgeSeconds[idx] = ignitionAgeSeconds;
         const radiantDrive = clamp(heat * 0.62 + neighbourFire * 0.88, 0, 1.2);
         const rampSecondsEffective = clamp(
           IGNITION_RAMP_SECONDS_BASE * (1 - radiantDrive * IGNITION_RAMP_ACCELERATION),
@@ -3199,21 +3722,30 @@ export const createThreeTestFireFx = (
         const targetFlame = hasActiveFire
           ? clamp(targetFlameBase * (rampFloor + (1 - rampFloor) * ignitionRamp01), 0, 1)
           : clamp(targetFlameBase, 0, 1);
-        let smoothedFlame = hasVisualFlame
-          ? smoothApproach(
-              previousFlame,
-              targetFlame,
-              9.4,
-              Math.max(7.6, 1 / Math.max(0.001, FLAME_VISUAL_RELEASE_SECONDS)),
-              deltaSeconds
-            )
-          : smoothApproach(
-              previousFlame,
-              0,
-              0,
-              Math.max(8.2, 1 / Math.max(0.001, FLAME_VISUAL_RELEASE_SECONDS)),
-              deltaSeconds
-            );
+        let smoothedFlame = suppressAshResidualFlame
+          ? 0
+          : hasVisualFlame
+            ? smoothApproach(
+                previousFlame,
+                targetFlame,
+                9.4,
+                Math.max(7.6, 1 / Math.max(0.001, FLAME_VISUAL_RELEASE_SECONDS)),
+                deltaSeconds
+              )
+            : smoothApproach(
+                previousFlame,
+                0,
+                0,
+                Math.max(8.2, 1 / Math.max(0.001, FLAME_VISUAL_RELEASE_SECONDS)),
+                deltaSeconds
+              );
+        if (suppressAshResidualFlame) {
+          ignitionAgeSeconds = 0;
+          clearTileEmitterSlots(tileLocalFlameSlotActivation, idx, FIRE_VISUAL_TUNING.tongueSpawnMax);
+          clearTileEmitterSlots(tileGroundFlameSlotActivation, idx, FIRE_VISUAL_TUNING.groundFlameSpawnMax);
+          clearTileEmitterSlots(tileObjectFlameSlotActivation, idx, 2);
+        }
+        tileIgnitionAgeSeconds[idx] = ignitionAgeSeconds;
         tileFlameVisual[idx] = smoothedFlame;
         const targetSmoke = hasActiveFire || hasTreeCarryFlame
           ? clamp(Math.max(targetFlameBase * 0.85, heat * 0.95, treeBurnVisual * 0.8), 0, 1.2)
@@ -3233,7 +3765,16 @@ export const createThreeTestFireFx = (
               1
             )
           : 0;
-        const frontDominance = clamp((tileFrontStrength[idx] ?? 0) * (hasActiveFire ? 1 : 0.18), 0, 1.25);
+        const frontPerimeter01 = tileFrontPerimeter01[idx] ?? 0;
+        const frontArrival01 = tileFrontArrival01[idx] ?? 0;
+        const frontAdvance01 = tileFrontAdvance01[idx] ?? 0;
+        const frontDirection = normalizeFrontDirection(tileFrontDirX[idx] ?? 0, tileFrontDirZ[idx] ?? 0);
+        const frontSteerStrength = clamp(
+          frontArrival01 * (0.48 + frontAdvance01 * 0.52) + frontPerimeter01 * 0.34,
+          0,
+          1.25
+        );
+        const frontDominance = clamp(frontPerimeter01 * (hasActiveFire ? 0.92 : 0.28) + frontArrival01 * 1.16, 0, 1.35);
         if (tileCluster) {
           const tileCenterXOcc = ((x + 0.5) / cols - 0.5) * terrainSize.width;
           const tileCenterZOcc = ((y + 0.5) / rows - 0.5) * terrainSize.depth;
@@ -3277,33 +3818,13 @@ export const createThreeTestFireFx = (
         const ashPreview = smoothApproach(tileAshPreviewVisual[idx] ?? 0, targetAshPreview, 7.2, 2.9, deltaSeconds);
         tileAshPreviewVisual[idx] = ashPreview;
         if (ashPreview > 0.03 && ashPreviewCount < ashPreviewCap) {
-          const tileCenterXPreview = ((x + 0.5) / cols - 0.5) * terrainSize.width;
-          const tileCenterZPreview = ((y + 0.5) / rows - 0.5) * terrainSize.depth;
-          const x1 = Math.min(cols - 1, x + sampleStep);
-          const y1 = Math.min(rows - 1, y + sampleStep);
-          const rowBase1 = y1 * cols;
-          const e00 = clamp(world.tileElevation[idx] ?? 0, -1, 1);
-          const e10 = clamp(world.tileElevation[rowBase + x1] ?? e00, -1, 1);
-          const e01 = clamp(world.tileElevation[rowBase1 + x] ?? e00, -1, 1);
-          const e11 = clamp(world.tileElevation[rowBase1 + x1] ?? e00, -1, 1);
-          const x0 = Math.max(0, x - sampleStep);
-          const y0 = Math.max(0, y - sampleStep);
-          const rowBase0 = y0 * cols;
-          const left = clamp(world.tileElevation[rowBase + x0] ?? e00, -1, 1);
-          const right = clamp(world.tileElevation[rowBase + x1] ?? e00, -1, 1);
-          const down = clamp(world.tileElevation[rowBase0 + x] ?? e00, -1, 1);
-          const up = clamp(world.tileElevation[rowBase1 + x] ?? e00, -1, 1);
-          const spanX = Math.max(0.0001, tileSpanX * Math.max(1, x1 - x0));
-          const spanZ = Math.max(0.0001, tileSpanZ * Math.max(1, y1 - y0));
-          const slopeX = ((right - left) * heightScale) / spanX;
-          const slopeZ = ((up - down) * heightScale) / spanZ;
-          ashPreviewNormal.set(-slopeX, 1, -slopeZ).normalize();
-          const groundPreviewY = (e00 + e10 + e01 + e11) * 0.25 * heightScale;
+          const groundAnchor = resolveGroundAnchor(idx);
+          ashPreviewNormal.set(groundAnchor.normal.x, groundAnchor.normal.y, groundAnchor.normal.z).normalize();
           ashPreviewOffset.copy(ashPreviewNormal).multiplyScalar(ASH_PREVIEW_Y_OFFSET);
           ashPreviewBillboard.position.set(
-            tileCenterXPreview + ashPreviewOffset.x,
-            groundPreviewY + ashPreviewOffset.y,
-            tileCenterZPreview + ashPreviewOffset.z
+            groundAnchor.position.x + ashPreviewOffset.x,
+            groundAnchor.position.y + ashPreviewOffset.y,
+            groundAnchor.position.z + ashPreviewOffset.z
           );
           ashPreviewBillboard.quaternion.setFromUnitVectors(WORLD_UP, ashPreviewNormal);
           ashPreviewBillboard.scale.set(tileSpanX * sampleStep * 0.96, tileSpanZ * sampleStep * 0.96, 1);
@@ -3311,11 +3832,11 @@ export const createThreeTestFireFx = (
           ashPreviewMesh.setMatrixAt(ashPreviewCount, ashPreviewBillboard.matrix);
           ashPreviewProgressAttr.setX(ashPreviewCount, ashPreview);
           ashPreviewSeedAttr.setX(ashPreviewCount, hash1(idx * 0.137 + 17.3));
+          setFireDebugColor(ashPreviewDebugColorAttr, ashPreviewCount, groundAnchor.source);
           ashPreviewCount += 1;
         }
         if (!hasPlume) {
           tileSmokeSpawnAccum[idx] = Math.max(0, (tileSmokeSpawnAccum[idx] ?? 0) - deltaSeconds * 0.6);
-          continue;
         }
         const intensity = clamp(Math.max(smoothedFlame, heat * 0.5), 0, 1);
         const flameIntensity = clamp(smoothedFlame, 0, 1);
@@ -3330,21 +3851,25 @@ export const createThreeTestFireFx = (
         const maxTileX = tileCenterX + tileHalfX;
         const minTileZ = tileCenterZ - tileHalfZ;
         const maxTileZ = tileCenterZ + tileHalfZ;
-        const anchor = treeBurn?.getTileAnchor(idx);
+        const tileAnchor = resolveObjectAnchor(idx);
         const crownToTrunk = smoothstep(0.32, 0.88, burnProgress);
         const trunkDescent = smoothstep(0.58, 1.0, burnProgress);
-        const worldX = anchor ? clamp(anchor.x, minTileX, maxTileX) : tileCenterX;
-        const worldZ = anchor ? clamp(anchor.z, minTileZ, maxTileZ) : tileCenterZ;
-        const frontSample = hasActiveFire
-          ? getNeighbourFireFront(fireView, cols, rows, x, y, simFireEps, windX, windZ)
-          : { centerTileX: x + 0.5, centerTileY: y + 0.5, strength: 0 };
-        const frontWorldX = (frontSample.centerTileX / cols - 0.5) * terrainSize.width;
-        const frontWorldZ = (frontSample.centerTileY / rows - 0.5) * terrainSize.depth;
-        const frontBlend = clamp(wallBlend * frontSample.strength, 0, 0.72);
+        const worldX = clamp(tileAnchor.position.x, minTileX, maxTileX);
+        const worldZ = clamp(tileAnchor.position.z, minTileZ, maxTileZ);
+        const frontWorldX = clamp(
+          worldX + frontDirection.x * sampleFootprint * ((frontAdvance01 - 0.5) * 0.84),
+          minTileX,
+          maxTileX
+        );
+        const frontWorldZ = clamp(
+          worldZ + frontDirection.z * sampleFootprint * ((frontAdvance01 - 0.5) * 0.84),
+          minTileZ,
+          maxTileZ
+        );
+        const frontBlend = clamp(wallBlend * frontSteerStrength, 0, 0.76);
         const flameSourceX = clamp(worldX * (1 - frontBlend) + frontWorldX * frontBlend, terrainMinX, terrainMaxX);
         const flameSourceZ = clamp(worldZ * (1 - frontBlend) + frontWorldZ * frontBlend, terrainMinZ, terrainMaxZ);
-        const elevation = world.tileElevation[idx] ?? 0;
-        const baseY = anchor ? anchor.y : clamp(elevation, -1, 1) * heightScale;
+        const baseY = tileAnchor.position.y;
         const tileSeed = hash1(idx + 0.123);
         const clusterNoise = hash1(idx * 0.173 + 5.17);
         const clusterBias = clamp(
@@ -3375,23 +3900,22 @@ export const createThreeTestFireFx = (
         const tongueCountRaw =
           FIRE_VISUAL_TUNING.tongueSpawnMin +
           (FIRE_VISUAL_TUNING.tongueSpawnMax - FIRE_VISUAL_TUNING.tongueSpawnMin) * clamp(tongueDrive, 0, 1);
-        let flameletCount = Math.round(tongueCountRaw);
-        if (tongueDrive < 0.24 && slowFlicker < 0.42) {
-          flameletCount = 0;
-        }
-        flameletCount = Math.round(flameletCount * flameDensityScale * sliceComplexityScale);
+        let flameletTargetCount = tongueCountRaw * flameDensityScale * sliceComplexityScale;
         if (tileRole === 2) {
-          flameletCount = Math.min(flameletCount, flameBudgetScale < 0.62 ? 1 : CLUSTER_INTERIOR_KERNEL_CAP);
+          flameletTargetCount = Math.min(flameletTargetCount, flameBudgetScale < 0.62 ? 1 : CLUSTER_INTERIOR_KERNEL_CAP);
         } else if (tileRole === 1) {
-          flameletCount = Math.min(flameletCount, CLUSTER_EDGE_KERNEL_CAP);
+          flameletTargetCount = Math.min(flameletTargetCount, CLUSTER_EDGE_KERNEL_CAP);
         }
-        flameletCount = Math.max(0, Math.min(FIRE_VISUAL_TUNING.tongueSpawnMax, flameletCount));
-        flameletCount = Math.min(flameletCount, perTileFlameCap);
-        flameletCount = Math.round(flameletCount * (0.45 + ignitionRamp01 * 0.55));
+        flameletTargetCount = Math.max(0, Math.min(FIRE_VISUAL_TUNING.tongueSpawnMax, flameletTargetCount));
+        if (flameletTargetCount > smoothedPerTileFlameCap + 0.001) {
+          renderContinuityState.budgetClampedDrops += flameletTargetCount - smoothedPerTileFlameCap;
+        }
+        flameletTargetCount = Math.min(flameletTargetCount, smoothedPerTileFlameCap);
+        flameletTargetCount *= 0.45 + ignitionRamp01 * 0.55;
         const hasObjectAnchorFlame = flameProfile !== null || isStructureTile;
         const frontRead01 =
           frontPassActive
-            ? smoothstep(FIRE_FRONT_VISUAL_MIN, 0.56, frontDominance) * smoothstep(FIRE_FRONT_PASS_MIN_WEIGHT, 12, visualFrontWeight)
+            ? clamp(frontArrival01 * 0.96 + frontPerimeter01 * 0.52, 0, 1.25) * frontFieldReadScale
             : 0;
         const preserveLocalDetail =
           flameProfile !== null
@@ -3406,8 +3930,9 @@ export const createThreeTestFireFx = (
         const localDetailScale = clamp(
           preserveLocalDetail +
             frontRead01 * (flameProfile !== null ? 0.22 : isStructureTile ? 0.16 : 0.08) +
+            frontArrival01 * (hasObjectAnchorFlame ? -0.1 : -0.22) +
             (tileRole === 1 ? 0.08 : 0),
-          preserveLocalDetail,
+          Math.max(0.06, preserveLocalDetail * (hasObjectAnchorFlame ? 0.72 : 0.38)),
           hasObjectAnchorFlame ? 0.62 : frontPassActive ? 0.28 : 0.74
         );
         const sparkVisual01 = clamp(
@@ -3422,15 +3947,15 @@ export const createThreeTestFireFx = (
         );
         const sparkWindFactor = windResponse.spark;
         const sparkFrontFactor = frontPassActive
-          ? clamp(0.22 + frontRead01 * 0.9 + (tileRole === 1 ? 0.12 : 0), 0.22, 1.18)
+          ? clamp(0.22 + frontRead01 * 0.72 + frontSteerStrength * 0.3 + (tileRole === 1 ? 0.12 : 0), 0.22, 1.18)
           : 0.58;
         const sparkActive =
           hasFlame &&
           sparkVisual01 > 0.035 &&
           (hasActiveFire || hasTreeCarryFlame || treeBurnVisual > TREE_BURN_FLAME_VISUAL_MIN);
-        flameletCount = Math.round(flameletCount * localDetailScale);
+        flameletTargetCount *= localDetailScale;
         if (frontPassActive && tileRole === 2 && frontDominance < FIRE_FRONT_VISUAL_MIN && flameProfile === null) {
-          flameletCount = 0;
+          flameletTargetCount = 0;
         }
         const sustainInteriorFlame =
           hasActiveFire &&
@@ -3438,9 +3963,21 @@ export const createThreeTestFireFx = (
           fire > 0.16 &&
           heat > 0.2 &&
           smoothedFlame > Math.max(flamePresenceEps * 1.1, 0.08);
-        if (sustainInteriorFlame && flameletCount <= 0) {
-          flameletCount = 1;
+        if (sustainInteriorFlame) {
+          flameletTargetCount = Math.max(flameletTargetCount, 0.36);
         }
+        const localSlotStats = updateTileEmitterSlots(
+          tileLocalFlameSlotActivation,
+          idx,
+          FIRE_VISUAL_TUNING.tongueSpawnMax,
+          flameletTargetCount,
+          FIRE_LOCAL_SLOT_RISE_RATE,
+          FIRE_LOCAL_SLOT_FALL_RATE,
+          deltaSeconds,
+          FIRE_EMITTER_SLOT_VISIBLE_CUTOFF,
+          "localSlotChurn"
+        );
+        const flameletCount = localSlotStats.visibleCount;
         const heroCount =
           flameletCount <= 0
             ? 0
@@ -3448,7 +3985,7 @@ export const createThreeTestFireFx = (
                 hasActiveFire ? (ignitionRamp01 >= 0.45 ? 1 : 0) : 1,
                 Math.min(
                   tileRole === 2 ? 1 : tileRole === 1 ? 2 : 4,
-                  Math.round(flameletCount * (0.22 + ignitionRamp01 * 0.16) + (1 - crownToTrunk) * 0.55)
+                  Math.round(localSlotStats.activationSum * (0.22 + ignitionRamp01 * 0.16) + (1 - crownToTrunk) * 0.55)
                 )
               );
         const windStrengthBoost = (0.35 + windStrength * windStrength * 0.9) * windResponse.flame;
@@ -3459,7 +3996,7 @@ export const createThreeTestFireFx = (
           (tileRole === 2 ? 1.08 : tileRole === 1 ? 1.04 : 1);
         const lateralLimit = Math.max(
           tileSpan * 0.14,
-          sourceRadius * (1.26 - crownToTrunk * 0.46) + sampleFootprint * (0.22 + wallBlend * frontSample.strength * 1.05)
+          sourceRadius * (1.26 - crownToTrunk * 0.46) + sampleFootprint * (0.22 + wallBlend * frontSteerStrength * 1.05)
         );
         const crownSourceY = flameProfile ? flameProfile.y + flameProfile.crownHeight * 0.72 : baseY + tileSpan * 0.45;
         const trunkSourceY = flameProfile
@@ -3470,24 +4007,24 @@ export const createThreeTestFireFx = (
         const objectSourceY = flameProfile !== null ? crownSourceY : roofSourceY;
         const objectSourceX = flameProfile !== null ? flameProfile.x : worldX;
         const objectSourceZ = flameProfile !== null ? flameProfile.z : worldZ;
+        const objectFrontSuppression = hasObjectAnchorFlame
+          ? clamp(frontArrival01 * (0.26 + (1 - frontAdvance01) * 0.34), 0, 0.58)
+          : 0;
         const objectFlameDrive = clamp(
-          smoothedFlame * (hasActiveFire ? clamp(0.22 + ignitionRamp01 * 0.78, 0.22, 1) : 1),
+          smoothedFlame * (hasActiveFire ? clamp(0.22 + ignitionRamp01 * 0.78, 0.22, 1) : 1) * (1 - objectFrontSuppression),
           0,
           1
         );
         const objectFlameScale01 = smoothstep(0.04, 0.32, objectFlameDrive);
-        const frontDirXRaw = frontWorldX - worldX;
-        const frontDirZRaw = frontWorldZ - worldZ;
-        const frontDirLen = Math.hypot(frontDirXRaw, frontDirZRaw);
         const fallbackDirX = windDirLen > 0.0001 ? windX / windDirLen : Math.cos(tileSeed * TAU);
         const fallbackDirZ = windDirLen > 0.0001 ? windZ / windDirLen : Math.sin(tileSeed * TAU);
-        const frontDirX = frontDirLen > 0.0001 ? frontDirXRaw / frontDirLen : fallbackDirX;
-        const frontDirZ = frontDirLen > 0.0001 ? frontDirZRaw / frontDirLen : fallbackDirZ;
+        const frontDirX = Math.abs(frontDirection.x) > 0.0001 || Math.abs(frontDirection.z) > 0.0001 ? frontDirection.x : fallbackDirX;
+        const frontDirZ = Math.abs(frontDirection.x) > 0.0001 || Math.abs(frontDirection.z) > 0.0001 ? frontDirection.z : fallbackDirZ;
         const sideDirX = -frontDirZ;
         const sideDirZ = frontDirX;
         const emitterLobeCountBase = Math.max(
           FLAME_JET_KERNEL_MIN,
-          Math.min(FLAME_JET_KERNEL_MAX, Math.round(2 + flameIntensity * 2 + frontSample.strength * 2.1))
+          Math.min(FLAME_JET_KERNEL_MAX, Math.round(2 + flameIntensity * 2 + frontSteerStrength * 2.1))
         );
         const emitterLobeCount = Math.max(
           FLAME_JET_KERNEL_MIN,
@@ -3498,7 +4035,7 @@ export const createThreeTestFireFx = (
           : tileRole === 1
             ? Math.min(emitterLobeCount, CLUSTER_EDGE_KERNEL_CAP)
             : emitterLobeCount;
-        const emitterBaseRadius = sourceRadius * (0.28 + flameIntensity * 0.2 + frontSample.strength * 0.24);
+        const emitterBaseRadius = sourceRadius * (0.28 + flameIntensity * 0.2 + frontSteerStrength * 0.24);
         const kernelDriftPhase = flameTimeSeconds * (0.22 + tileSeed * 0.31) + tileSeed * TAU;
         let jetClusterX = clamp(
           flameSourceX +
@@ -3543,12 +4080,20 @@ export const createThreeTestFireFx = (
         }
         let tileTipSparkEmitted = 0;
         let tileCrossSlices = 0;
-        if (hasFlame) {
-          for (let flamelet = 0; flamelet < flameletCount && fireCount < FIRE_MAX_INSTANCES; flamelet += 1) {
+        if (hasFlame || localSlotStats.visibleCount > 0) {
+          for (let flamelet = 0; flamelet < FIRE_VISUAL_TUNING.tongueSpawnMax && fireCount < FIRE_MAX_INSTANCES; flamelet += 1) {
+          const flameletActivation = readTileEmitterSlotState(
+            tileLocalFlameSlotActivation,
+            getTileEmitterSlotIndex(idx, flamelet, FIRE_VISUAL_TUNING.tongueSpawnMax)
+          );
+          if (flameletActivation <= FIRE_EMITTER_SLOT_VISIBLE_CUTOFF) {
+            continue;
+          }
           const s1 = hash1(idx * 1.173 + flamelet * 11.0 + 19.7);
           const s2 = hash1(idx * 0.917 + flamelet * 17.0 + 41.3);
           const s3 = hash1(idx * 1.411 + flamelet * 23.0 + 67.9);
           const isHero = flamelet < heroCount;
+          const flameletScale01 = clamp(0.26 + flameletActivation * 0.74, 0.26, 1);
           const sizeVar =
             FIRE_VISUAL_TUNING.sizeVariationMin +
             s1 * (FIRE_VISUAL_TUNING.sizeVariationMax - FIRE_VISUAL_TUNING.sizeVariationMin);
@@ -3634,12 +4179,12 @@ export const createThreeTestFireFx = (
             Math.max(
               tileSpan * (isHero ? LOCAL_FLAME_MIN_HEIGHT_TILES * 1.12 : LOCAL_FLAME_MIN_HEIGHT_TILES),
               flameHeightBase * FLAME_RENDER_SIZE_SCALE
-            ) * flameSize01;
+            ) * Math.max(flameSize01, flameletScale01 * 0.88);
           const flameWidth =
             Math.max(
               tileSpan * (isHero ? LOCAL_FLAME_MIN_WIDTH_TILES * 1.1 : LOCAL_FLAME_MIN_WIDTH_TILES),
               flameWidthBase * FLAME_RENDER_SIZE_SCALE
-            ) * flameSize01;
+            ) * Math.max(flameSize01, flameletScale01 * 0.86);
           const flameY = sourceYBase + flameRise;
           let lateralX = spawnX + heroLaneX + helixX + bendX + curlX + lashX + windOffsetX;
           let lateralZ = spawnZ + heroLaneZ + helixZ + bendZ + curlZ + lashZ + windOffsetZ;
@@ -3650,7 +4195,7 @@ export const createThreeTestFireFx = (
           if (Math.abs(lateralZ) > softLimit) {
             lateralZ = Math.sign(lateralZ) * (softLimit + (Math.abs(lateralZ) - softLimit) * 0.1);
           }
-          const localLimit = lateralLimit * (1.02 + emitterSeed * 0.34 + frontSample.strength * 0.2);
+          const localLimit = lateralLimit * (1.02 + emitterSeed * 0.34 + frontSteerStrength * 0.2);
           lateralX = clamp(lateralX, -localLimit, localLimit);
           lateralZ = clamp(lateralZ, -localLimit, localLimit);
           const flameWorldX = clamp(flameSourceX + lateralX, terrainMinX, terrainMaxX);
@@ -3679,7 +4224,13 @@ export const createThreeTestFireFx = (
           fireMesh.setMatrixAt(fireCount, fireBillboard.matrix);
           const stageBoost = 0.85 + (1 - crownToTrunk) * 0.2;
           const flickerIntensity = clamp(
-            (flameIntensity * (isHero ? 0.78 : 0.56) * (0.78 + 0.22 * (1 - phase)) + heat * (isHero ? 0.18 : 0.1)) * stageBoost,
+            (
+              0.1 * flameletActivation +
+              flameIntensity * (isHero ? 0.78 : 0.56) * (0.78 + 0.22 * (1 - phase)) +
+              heat * (isHero ? 0.18 : 0.1)
+            ) *
+              stageBoost *
+              (0.22 + flameletActivation * 0.78),
             0,
             1
           );
@@ -3690,6 +4241,7 @@ export const createThreeTestFireFx = (
           fireClusterBlendAttr.setX(fireCount, clusterBlend);
           fireSmokeOccAttr.setX(fireCount, tileSmokeOcclusion01[idx] ?? 0);
           fireRoleAttr.setX(fireCount, tileRole);
+          setFireDebugColor(fireDebugColorAttr, fireCount, tileAnchor.source);
           fireBillboard.rotation.set(0, sliceYawB, 0);
           fireBillboard.scale.set(
             flameWidth * 0.62 * FLAME_CORE_BILLBOARD_OVERSCAN_X,
@@ -3729,6 +4281,7 @@ export const createThreeTestFireFx = (
             fireCrossClusterBlendAttr.setX(fireCrossCount, clusterBlend);
             fireCrossSmokeOccAttr.setX(fireCrossCount, tileSmokeOcclusion01[idx] ?? 0);
             fireCrossRoleAttr.setX(fireCrossCount, tileRole);
+            setFireDebugColor(fireCrossDebugColorAttr, fireCrossCount, tileAnchor.source);
             fireCrossCount += 1;
             tileCrossSlices += 1;
           }
@@ -3890,21 +4443,44 @@ export const createThreeTestFireFx = (
           }
         }
         }
-        if (hasObjectAnchorFlame && hasFlame && objectFlameDrive > 0.08) {
-          const objectFlameCount = Math.min(
-            flameProfile !== null ? 2 : 1,
-            Math.max(1, Math.round((0.5 + objectFlameDrive * 0.75) * sliceComplexityScale))
-          );
+        let objectFlameTargetCount = 0;
+        if (hasObjectAnchorFlame) {
+          objectFlameTargetCount =
+            Math.min(
+              2,
+              (flameProfile !== null ? 0.5 + objectFlameDrive * 1.15 : 0.42 + objectFlameDrive * 0.92) * sliceComplexityScale
+            );
+        }
+        const objectSlotStats = updateTileEmitterSlots(
+          tileObjectFlameSlotActivation,
+          idx,
+          2,
+          objectFlameTargetCount,
+          FIRE_OBJECT_SLOT_RISE_RATE,
+          FIRE_OBJECT_SLOT_FALL_RATE,
+          deltaSeconds,
+          FIRE_EMITTER_SLOT_VISIBLE_CUTOFF,
+          "objectSlotChurn"
+        );
+        if (hasObjectAnchorFlame && objectSlotStats.visibleCount > 0) {
           const objectRadius = flameProfile !== null
             ? Math.max(tileSpan * 0.08, crownRadius * 0.22)
             : tileSpan * (typeId === TILE_TYPE_IDS.base ? 0.18 : 0.14);
           const objectRole = 0;
-          for (let objectFlame = 0; objectFlame < objectFlameCount && fireCount < FIRE_MAX_INSTANCES; objectFlame += 1) {
+          for (let objectFlame = 0; objectFlame < 2 && fireCount < FIRE_MAX_INSTANCES; objectFlame += 1) {
+            const objectActivation = readTileEmitterSlotState(
+              tileObjectFlameSlotActivation,
+              getTileEmitterSlotIndex(idx, objectFlame, 2)
+            );
+            if (objectActivation <= FIRE_EMITTER_SLOT_VISIBLE_CUTOFF) {
+              continue;
+            }
             const o1 = hash1(idx * 0.613 + objectFlame * 7.17 + 3.9);
             const o2 = hash1(idx * 1.231 + objectFlame * 5.71 + 13.3);
             const o3 = hash1(idx * 0.887 + objectFlame * 9.41 + 29.7);
             const objectPhase = flameTimeSeconds * (0.72 + o2 * 0.8) + o3 * TAU;
             const objectPulse = 0.8 + 0.2 * Math.sin(objectPhase);
+            const objectActivationScale01 = clamp(0.24 + objectActivation * 0.76, 0.24, 1);
             const objectHeightBase =
               tileSpan *
               (flameProfile !== null ? 0.18 + objectFlameDrive * 0.22 : 0.13 + objectFlameDrive * 0.18) *
@@ -3920,13 +4496,13 @@ export const createThreeTestFireFx = (
                 tileSpan *
                   (flameProfile !== null ? OBJECT_FLAME_MIN_HEIGHT_TILES * 1.08 : OBJECT_FLAME_MIN_HEIGHT_TILES),
                 objectHeightBase * FLAME_RENDER_SIZE_SCALE
-              ) * objectFlameScale01;
+              ) * Math.max(objectFlameScale01, objectActivationScale01 * 0.88);
             const objectWidth =
               Math.max(
                 tileSpan *
                   (flameProfile !== null ? OBJECT_FLAME_MIN_WIDTH_TILES * 1.08 : OBJECT_FLAME_MIN_WIDTH_TILES),
                 objectWidthBase * FLAME_RENDER_SIZE_SCALE
-              ) * objectFlameScale01;
+              ) * Math.max(objectFlameScale01, objectActivationScale01 * 0.86);
             const objectOffsetAngle = o1 * TAU + Math.sin(objectPhase * 0.46) * 0.4;
             const objectOffsetRadius = objectRadius * (flameProfile !== null ? 0.52 : 0.28) * Math.sqrt(o2);
             const objectWorldX = clamp(
@@ -3954,9 +4530,7 @@ export const createThreeTestFireFx = (
               fireCount,
               clamp(
                 (flameProfile !== null ? 0.22 : 0.18) +
-                  objectFlameDrive * 0.52 +
-                  treeBurnVisual * 0.12 +
-                  heat * 0.08,
+                  (objectFlameDrive * 0.52 + treeBurnVisual * 0.12 + heat * 0.08) * (0.22 + objectActivation * 0.78),
                 0,
                 1
               )
@@ -3966,6 +4540,7 @@ export const createThreeTestFireFx = (
             fireClusterBlendAttr.setX(fireCount, Math.min(clusterBlend, 0.16));
             fireSmokeOccAttr.setX(fireCount, tileSmokeOcclusion01[idx] ?? 0);
             fireRoleAttr.setX(fireCount, objectRole);
+            setFireDebugColor(fireDebugColorAttr, fireCount, tileAnchor.source);
             fireBillboard.rotation.set(0, objectSliceYaw + Math.PI * 0.5, 0);
             fireBillboard.scale.set(
               objectWidth * 0.62 * FLAME_CORE_BILLBOARD_OVERSCAN_X,
@@ -3974,7 +4549,12 @@ export const createThreeTestFireFx = (
             );
             fireBillboard.updateMatrix();
             fireCoreMesh.setMatrixAt(fireCount, fireBillboard.matrix);
-            if (topView01 > 0.32 && fireCrossCount < FIRE_CROSS_MAX_INSTANCES && o3 > 0.28 && objectFlameDrive > 0.32) {
+            if (
+              topView01 > 0.32 &&
+              fireCrossCount < FIRE_CROSS_MAX_INSTANCES &&
+              o3 > 0.28 &&
+              (objectFlameDrive > 0.22 || objectActivation > 0.32)
+            ) {
               fireCrossBillboard.position.set(objectWorldX, objectSourceY + objectHeight * 0.42, objectWorldZ);
               fireCrossBillboard.rotation.set(0, objectSliceYaw + Math.PI * 0.26, 0);
               fireCrossBillboard.scale.set(
@@ -3984,12 +4564,16 @@ export const createThreeTestFireFx = (
               );
               fireCrossBillboard.updateMatrix();
               fireCrossMesh.setMatrixAt(fireCrossCount, fireCrossBillboard.matrix);
-              fireCrossIntensityAttr.setX(fireCrossCount, clamp(0.52 + flameIntensity * 0.34 + heat * 0.1, 0, 1));
+              fireCrossIntensityAttr.setX(
+                fireCrossCount,
+                clamp((0.52 + flameIntensity * 0.34 + heat * 0.1) * (0.22 + objectActivation * 0.78), 0, 1)
+              );
               fireCrossSeedAttr.setX(fireCrossCount, fract(tileSeed + o2 + objectFlame * 0.31));
               fireCrossBaseCurveAttr.setX(fireCrossCount, flameProfile !== null ? 0.34 : 0.1);
               fireCrossClusterBlendAttr.setX(fireCrossCount, Math.min(clusterBlend, 0.16));
               fireCrossSmokeOccAttr.setX(fireCrossCount, tileSmokeOcclusion01[idx] ?? 0);
               fireCrossRoleAttr.setX(fireCrossCount, objectRole);
+              setFireDebugColor(fireCrossDebugColorAttr, fireCrossCount, tileAnchor.source);
               fireCrossCount += 1;
             }
             fireCount += 1;
@@ -4158,26 +4742,46 @@ export const createThreeTestFireFx = (
         const groundCountRaw =
           FIRE_VISUAL_TUNING.groundFlameSpawnMin +
           (FIRE_VISUAL_TUNING.groundFlameSpawnMax - FIRE_VISUAL_TUNING.groundFlameSpawnMin) * clamp(groundFlameDrive, 0, 1);
-        let groundFlameCount = Math.round(groundCountRaw * groundDensityScale);
-        if (groundFlameDrive < 0.2 && slowFlicker < 0.35) {
-          groundFlameCount = Math.max(0, groundFlameCount - 2);
-        }
+        let groundFlameTargetCount = groundCountRaw * groundDensityScale;
         const groundDetailScale = clamp(
-          (frontPassActive ? 0.08 : 0.26) + (1 - clamp(frontRead01, 0, 1)) * 0.42 + (flameProfile !== null ? 0.08 : 0),
-          0.06,
-          frontPassActive ? 0.58 : 0.82
+          (frontPassActive ? 0.06 : 0.26) +
+            (1 - clamp(frontRead01 + frontArrival01 * 0.32, 0, 1)) * 0.42 +
+            (flameProfile !== null ? 0.08 : 0),
+          0.04,
+          frontPassActive ? 0.52 : 0.82
         );
-        groundFlameCount = Math.round(groundFlameCount * groundDetailScale);
-        groundFlameCount = Math.min(groundFlameCount, perTileGroundCap);
+        groundFlameTargetCount *= groundDetailScale;
+        if (groundFlameTargetCount > smoothedPerTileGroundCap + 0.001) {
+          renderContinuityState.budgetClampedDrops += groundFlameTargetCount - smoothedPerTileGroundCap;
+        }
+        groundFlameTargetCount = Math.min(groundFlameTargetCount, smoothedPerTileGroundCap);
         const sustainGroundFlame =
           hasActiveFire &&
           fire > 0.22 &&
           heat > 0.24 &&
           smoothedFlame > Math.max(flamePresenceEps * 1.1, 0.1);
-        if (sustainGroundFlame && groundFlameCount <= 0) {
-          groundFlameCount = 1;
+        if (sustainGroundFlame) {
+          groundFlameTargetCount = Math.max(groundFlameTargetCount, 0.34);
         }
-        for (let groundFlame = 0; groundFlame < groundFlameCount && fireCount < FIRE_MAX_INSTANCES; groundFlame += 1) {
+        updateTileEmitterSlots(
+          tileGroundFlameSlotActivation,
+          idx,
+          FIRE_VISUAL_TUNING.groundFlameSpawnMax,
+          groundFlameTargetCount,
+          FIRE_GROUND_SLOT_RISE_RATE,
+          FIRE_GROUND_SLOT_FALL_RATE,
+          deltaSeconds,
+          FIRE_EMITTER_SLOT_VISIBLE_CUTOFF,
+          null
+        );
+        for (let groundFlame = 0; groundFlame < FIRE_VISUAL_TUNING.groundFlameSpawnMax && fireCount < FIRE_MAX_INSTANCES; groundFlame += 1) {
+          const groundActivation = readTileEmitterSlotState(
+            tileGroundFlameSlotActivation,
+            getTileEmitterSlotIndex(idx, groundFlame, FIRE_VISUAL_TUNING.groundFlameSpawnMax)
+          );
+          if (groundActivation <= FIRE_EMITTER_SLOT_VISIBLE_CUTOFF) {
+            continue;
+          }
           const g1 = hash1(idx * 1.621 + groundFlame * 7.11 + 13.7);
           const g2 = hash1(idx * 0.743 + groundFlame * 9.31 + 23.1);
           const g3 = hash1(idx * 1.177 + groundFlame * 5.93 + 31.9);
@@ -4186,6 +4790,7 @@ export const createThreeTestFireFx = (
             g2 * (FIRE_VISUAL_TUNING.flickerRateMax - FIRE_VISUAL_TUNING.flickerRateMin);
           const gPhase = fract(flameTimeSeconds * gRate + g3 * 7.1);
           const gFlicker = 0.72 + 0.28 * Math.sin(gPhase * TAU + g1 * TAU);
+          const groundActivationScale01 = clamp(0.22 + groundActivation * 0.78, 0.22, 1);
           const gRadius = tileSpan * (0.16 + groundFlameDrive * 0.26);
           const gTheta = g1 * TAU;
           const gOffsetR = Math.sqrt(g2) * gRadius;
@@ -4200,9 +4805,11 @@ export const createThreeTestFireFx = (
             roleHeightScale;
           const gWidthBase = Math.max(tileSpan * 0.06, gHeightBase * (0.56 + g2 * 0.26) * flameWidthBoost * roleWidthScale);
           const gHeight =
-            Math.max(tileSpan * GROUND_FLAME_MIN_HEIGHT_TILES, gHeightBase * FLAME_RENDER_SIZE_SCALE) * flameSize01;
+            Math.max(tileSpan * GROUND_FLAME_MIN_HEIGHT_TILES, gHeightBase * FLAME_RENDER_SIZE_SCALE) *
+            Math.max(flameSize01, groundActivationScale01 * 0.82);
           const gWidth =
-            Math.max(tileSpan * GROUND_FLAME_MIN_WIDTH_TILES, gWidthBase * FLAME_RENDER_SIZE_SCALE) * flameSize01;
+            Math.max(tileSpan * GROUND_FLAME_MIN_WIDTH_TILES, gWidthBase * FLAME_RENDER_SIZE_SCALE) *
+            Math.max(flameSize01, groundActivationScale01 * 0.8);
           const gWindLean = tileSpan * windResponse.flame * (0.015 + groundFlameDrive * 0.05 + windStrength * 0.03);
           const groundWorldX = clamp(jetClusterX + gX + windX * gWindLean, terrainMinX, terrainMaxX);
           const groundWorldZ = clamp(jetClusterZ + gZ + windZ * gWindLean, terrainMinZ, terrainMaxZ);
@@ -4216,13 +4823,18 @@ export const createThreeTestFireFx = (
           );
           fireBillboard.updateMatrix();
           fireMesh.setMatrixAt(fireCount, fireBillboard.matrix);
-          const groundIntensity = clamp(groundFlameDrive * (0.38 + 0.38 * gFlicker), 0, 1);
+          const groundIntensity = clamp(
+            (0.08 * groundActivation + groundFlameDrive * (0.38 + 0.38 * gFlicker)) * (0.22 + groundActivation * 0.78),
+            0,
+            1
+          );
           fireIntensityAttr.setX(fireCount, groundIntensity);
           fireSeedAttr.setX(fireCount, fract(tileSeed * 0.71 + g3 + groundFlame * 0.11));
           fireBaseCurveAttr.setX(fireCount, 0);
           fireClusterBlendAttr.setX(fireCount, clusterBlend);
           fireSmokeOccAttr.setX(fireCount, tileSmokeOcclusion01[idx] ?? 0);
           fireRoleAttr.setX(fireCount, tileRole);
+          setFireDebugColor(fireDebugColorAttr, fireCount, tileAnchor.source);
           fireBillboard.scale.set(
             gWidth * 0.66 * FLAME_CORE_BILLBOARD_OVERSCAN_X,
             gHeight * 0.52 * FLAME_CORE_BILLBOARD_OVERSCAN_Y,
@@ -4241,7 +4853,7 @@ export const createThreeTestFireFx = (
           );
           const glowBaseInstances = glowDrive > 0.8 ? 4 : glowDrive > 0.46 ? 3 : glowDrive > 0.2 ? 2 : 1;
           const glowPerTileMax = envOrange > 0.75 ? 5 : 4;
-          const frontGlowScale = clamp(0.22 + frontDominance * 0.86, 0.16, 1);
+          const frontGlowScale = clamp(0.18 + frontDominance * 0.74 + frontArrival01 * 0.18, 0.14, 1.05);
           const glowInstances = Math.max(
             glowDrive > 0.08 ? 1 : 0,
             Math.min(
@@ -4275,7 +4887,7 @@ export const createThreeTestFireFx = (
             const glowR = glow * 1.12;
             const glowG = glow * (0.42 + g2 * 0.18 + envOrange * 0.14);
             const glowB = glow * (0.04 + g1 * 0.04) * (1 - envOrange * 0.45);
-            groundGlowMesh.instanceColor?.setXYZ(glowCount, glowR, glowG, glowB);
+            setGlowColor(glowCount, tileAnchor.source, glowR, glowG, glowB, glowAnchorDebugTintStrength);
             glowCount += 1;
           }
         }
@@ -4415,6 +5027,9 @@ export const createThreeTestFireFx = (
         const smokeDrive = Math.max(smokeIntensity01, targetSmoke * 0.85);
         if (hasActiveFire && smokeDrive > 0.005 && smokeSpawnsThisFrame < smokeSpawnFrameCap) {
           const roleSmokeScale = tileRole === 2 ? 1.22 : tileRole === 1 ? 1.08 : 1;
+          const frontSmokeScale = frontPassActive
+            ? clamp(0.72 + frontPerimeter01 * 0.22 + frontArrival01 * 0.34 - (tileRole === 2 ? 0.14 : 0), 0.52, 1.24)
+            : 1;
           const fuelNow = fireView.getFuelByIndex(idx);
           const sootBase = clamp(
             0.16 + smokeDrive * 0.34 + (1 - fuelNow) * 0.3 + heat * 0.08 + clusterBlend * 0.12 * roleSmokeScale,
@@ -4425,7 +5040,8 @@ export const createThreeTestFireFx = (
             (0.18 + Math.pow(smokeDrive, 1.5) * 6.8 + heat * 0.55 + windStrength * 0.28) *
             (0.75 + sampleStep * 0.22) *
             roleSmokeScale *
-            smokeDensityScale;
+            smokeDensityScale *
+            frontSmokeScale;
           let spawnCarry = (tileSmokeSpawnAccum[idx] ?? 0) + emissionRate * deltaSeconds;
           const spawnCount = Math.min(9, Math.floor(spawnCarry));
           spawnCarry -= spawnCount;
@@ -4597,8 +5213,22 @@ export const createThreeTestFireFx = (
       clusteredTiles,
       clusterBedInstances,
       clusterPlumeSpawns,
+      localSlotChurn: renderContinuityState.localSlotChurn,
+      objectSlotChurn: renderContinuityState.objectSlotChurn,
+      frontSlotChurn: renderContinuityState.frontSlotChurn,
+      budgetClampedDrops: renderContinuityState.budgetClampedDrops,
       mode: debugControls.sparkMode
     };
+    if (debugControls.anchorDebugMode === "logRawFallbacks") {
+      const rawFallbackTileIndices = fireAnchorResolver.getRawFallbackTileIndices();
+      if (rawFallbackTileIndices.length > 0 && time - lastAnchorFallbackLogMs >= 1000) {
+        console.info("[threeTest:fire-anchor-fallback]", {
+          count: rawFallbackTileIndices.length,
+          sample: rawFallbackTileIndices.slice(0, 16)
+        });
+        lastAnchorFallbackLogMs = time;
+      }
+    }
     visualsCleared = false;
     fireMesh.instanceMatrix.needsUpdate = true;
     fireCrossMesh.instanceMatrix.needsUpdate = true;
@@ -4619,14 +5249,17 @@ export const createThreeTestFireFx = (
     fireClusterBlendAttr.needsUpdate = true;
     fireSmokeOccAttr.needsUpdate = true;
     fireRoleAttr.needsUpdate = true;
+    fireDebugColorAttr.needsUpdate = true;
     fireCrossIntensityAttr.needsUpdate = true;
     fireCrossSeedAttr.needsUpdate = true;
     fireCrossBaseCurveAttr.needsUpdate = true;
     fireCrossClusterBlendAttr.needsUpdate = true;
     fireCrossSmokeOccAttr.needsUpdate = true;
     fireCrossRoleAttr.needsUpdate = true;
+    fireCrossDebugColorAttr.needsUpdate = true;
     ashPreviewProgressAttr.needsUpdate = true;
     ashPreviewSeedAttr.needsUpdate = true;
+    ashPreviewDebugColorAttr.needsUpdate = true;
     if (groundGlowMesh.instanceColor) {
       groundGlowMesh.instanceColor.needsUpdate = true;
     }
@@ -4676,6 +5309,37 @@ export const createThreeTestFireFx = (
   };
 
   const getSparkDebugSnapshot = (): SparkDebugSnapshot => ({ ...sparkDebugSnapshot });
+  const getAudioClusterSnapshot = (): FireAudioClusterSnapshot[] => {
+    audioClusterSnapshots.length = fireClusters.length;
+    for (let i = 0; i < fireClusters.length; i += 1) {
+      const cluster = fireClusters[i]!;
+      const existing = audioClusterSnapshots[i];
+      const nextSnapshot = existing ?? {
+        id: cluster.id,
+        x: cluster.centroidX,
+        y: cluster.baseY,
+        z: cluster.centroidZ,
+        radius: cluster.radius,
+        tileCount: cluster.tileCount,
+        heatMean01: cluster.heatMean01,
+        heatSum01: cluster.heatSum01,
+        fuelMean01: cluster.fuelMean01,
+        intensity01: cluster.intensity01
+      };
+      nextSnapshot.id = cluster.id;
+      nextSnapshot.x = cluster.centroidX;
+      nextSnapshot.y = cluster.baseY;
+      nextSnapshot.z = cluster.centroidZ;
+      nextSnapshot.radius = cluster.radius;
+      nextSnapshot.tileCount = cluster.tileCount;
+      nextSnapshot.heatMean01 = cluster.heatMean01;
+      nextSnapshot.heatSum01 = cluster.heatSum01;
+      nextSnapshot.fuelMean01 = cluster.fuelMean01;
+      nextSnapshot.intensity01 = cluster.intensity01;
+      audioClusterSnapshots[i] = nextSnapshot;
+    }
+    return audioClusterSnapshots;
+  };
 
   const setDebugControls = (controls: Partial<FireFxDebugControls>): void => {
     if (Object.keys(controls).length === 0) {
@@ -4699,6 +5363,7 @@ export const createThreeTestFireFx = (
     setDebugControls,
     getDebugControls,
     getSparkDebugSnapshot,
+    getAudioClusterSnapshot,
     dispose
   };
 };

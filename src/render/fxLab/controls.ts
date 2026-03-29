@@ -2,6 +2,7 @@ import {
   DEFAULT_FIRE_FX_DEBUG_CONTROLS,
   normalizeFireFxDebugControls,
   type FireFxDebugControls,
+  type FireAnchorDebugMode,
   type FireFxFallbackMode,
   type SparkMode
 } from "../threeTestFireFx.js";
@@ -50,7 +51,7 @@ type FxLabEnumControl<K extends string, V extends string> = FxLabControlBase<K> 
 export type FxLabFireControlDefinition =
   | FxLabRangeControl<keyof FireFxDebugControls & string>
   | FxLabBooleanControl<keyof FireFxDebugControls & string>
-  | FxLabEnumControl<keyof FireFxDebugControls & string, FireFxFallbackMode | SparkMode>;
+  | FxLabEnumControl<keyof FireFxDebugControls & string, FireAnchorDebugMode | FireFxFallbackMode | SparkMode>;
 
 export type FxLabWaterControlDefinition =
   | FxLabRangeControl<keyof WaterFxDebugControls & string>
@@ -120,6 +121,18 @@ export const FX_LAB_FIRE_CONTROLS: ReadonlyArray<FxLabFireControlDefinition> = [
       { value: "tip", label: "Tip" },
       { value: "mixed", label: "Mixed" },
       { value: "embers", label: "Embers" }
+    ]
+  },
+  {
+    key: "anchorDebugMode",
+    section: "Fire",
+    kind: "enum",
+    label: "Anchor Debug",
+    description: "Tint anchors by source or log raw-fallback usage.",
+    options: [
+      { value: "off", label: "Off" },
+      { value: "tint", label: "Tint" },
+      { value: "logRawFallbacks", label: "Log Fallbacks" }
     ]
   },
   {

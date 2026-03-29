@@ -9,7 +9,7 @@ import {
   writeFirefighterGripWorldPosition
 } from "./firefighterVisuals.js";
 import { approachAngleExp, resolveDesiredUnitYaw } from "./unitAimVisuals.js";
-import { getTerrainHeightScale, type TerrainSample } from "./threeTestTerrain.js";
+import type { TerrainRenderSurface } from "./threeTestTerrain.js";
 
 const MAX_HOSE_SEGMENTS = 1024;
 const MAX_WATER_PARTICLES = 4096;
@@ -56,48 +56,6 @@ const approachUnitVectorExp = (
   }
   return current;
 };
-
-const bilerp = (h00: number, h10: number, h01: number, h11: number, tx: number, ty: number): number => {
-  const hx0 = h00 * (1 - tx) + h10 * tx;
-  const hx1 = h01 * (1 - tx) + h11 * tx;
-  return hx0 * (1 - ty) + hx1 * ty;
-};
-
-const sampleHeight = (sample: TerrainSample, tileX: number, tileY: number): number => {
-  const cols = Math.max(1, sample.cols);
-  const rows = Math.max(1, sample.rows);
-  const x = clamp(tileX - 0.5, 0, cols - 1);
-  const y = clamp(tileY - 0.5, 0, rows - 1);
-  const x0 = Math.floor(x);
-  const y0 = Math.floor(y);
-  const x1 = Math.min(cols - 1, x0 + 1);
-  const y1 = Math.min(rows - 1, y0 + 1);
-  const tx = x - x0;
-  const ty = y - y0;
-  const idx00 = y0 * cols + x0;
-  const idx10 = y0 * cols + x1;
-  const idx01 = y1 * cols + x0;
-  const idx11 = y1 * cols + x1;
-  const h00 = sample.elevations[idx00] ?? 0;
-  const h10 = sample.elevations[idx10] ?? h00;
-  const h01 = sample.elevations[idx01] ?? h00;
-  const h11 = sample.elevations[idx11] ?? h00;
-  return bilerp(h00, h10, h01, h11, tx, ty);
-};
-
-const toWorldX = (tileX: number, cols: number, width: number): number => (tileX / Math.max(1, cols) - 0.5) * width;
-const toWorldZ = (tileY: number, rows: number, depth: number): number => (tileY / Math.max(1, rows) - 0.5) * depth;
-const toTileX = (worldX: number, cols: number, width: number): number => (worldX / Math.max(0.0001, width) + 0.5) * cols;
-const toTileY = (worldZ: number, rows: number, depth: number): number => (worldZ / Math.max(0.0001, depth) + 0.5) * rows;
-const sampleWorldHeight = (
-  sample: TerrainSample,
-  terrainSize: { width: number; depth: number },
-  cols: number,
-  rows: number,
-  heightScale: number,
-  worldX: number,
-  worldZ: number
-): number => sampleHeight(sample, toTileX(worldX, cols, terrainSize.width), toTileY(worldZ, rows, terrainSize.depth)) * heightScale;
 
 const sprayModeToValue = (mode?: WaterSprayMode): number => {
   if (mode === "precision") {
@@ -765,8 +723,7 @@ export type ThreeTestUnitFxLayer = {
   update: (
     world: WorldState,
     effects: EffectsState | null,
-    sample: TerrainSample | null,
-    terrainSize: { width: number; depth: number } | null,
+    surface: TerrainRenderSurface | null,
     interpolationAlpha: number,
     timeMs: number
   ) => void;
@@ -1061,8 +1018,7 @@ export const createThreeTestUnitFxLayer = (scene: THREE.Scene): ThreeTestUnitFxL
   const update = (
     world: WorldState,
     effects: EffectsState | null,
-    sample: TerrainSample | null,
-    terrainSize: { width: number; depth: number } | null,
+    surface: TerrainRenderSurface | null,
     interpolationAlpha: number,
     timeMs: number
   ): void => {
@@ -1075,7 +1031,7 @@ export const createThreeTestUnitFxLayer = (scene: THREE.Scene): ThreeTestUnitFxL
     const deltaSeconds =
       lastUpdateTimeMs === null ? 1 / 60 : clamp((timeMs - lastUpdateTimeMs) * 0.001, 1 / 240, 0.12);
     lastUpdateTimeMs = timeMs;
-    if (!sample || !terrainSize) {
+    if (!surface) {
       hoses.count = 0;
       waterGeometry.setDrawRange(0, 0);
       jetCores.count = 0;
@@ -1098,12 +1054,19 @@ export const createThreeTestUnitFxLayer = (scene: THREE.Scene): ThreeTestUnitFxL
       return;
     }
 
-    const cols = Math.max(1, sample.cols);
-    const rows = Math.max(1, sample.rows);
-    const heightScale = getTerrainHeightScale(cols, rows, sample.heightScaleMultiplier ?? 1);
+    const cols = Math.max(1, surface.cols);
+    const rows = Math.max(1, surface.rows);
+    const terrainSize = surface.size;
+    const heightScale = surface.heightScale;
     const worldPerTileX = terrainSize.width / cols;
     const worldPerTileZ = terrainSize.depth / rows;
     const worldPerTile = (worldPerTileX + worldPerTileZ) * 0.5;
+    const sampleHeightAt = (tileX: number, tileY: number): number => surface.heightAtTileCoord(tileX, tileY) * heightScale;
+    const sampleWorldHeightAt = (worldX: number, worldZ: number): number => {
+      const tileX = (worldX / Math.max(0.0001, terrainSize.width) + 0.5) * cols;
+      const tileY = (worldZ / Math.max(0.0001, terrainSize.depth) + 0.5) * rows;
+      return sampleHeightAt(tileX, tileY);
+    };
 
     const resolveInterpolatedPosition = (
       unit: WorldState["units"][number]
@@ -1151,9 +1114,9 @@ export const createThreeTestUnitFxLayer = (scene: THREE.Scene): ThreeTestUnitFxL
         activeFirefighterIds.add(unit.id);
         const yaw = resolveFirefighterYaw(unit, unitTile.x, unitTile.y);
         firefighterRoot.set(
-          toWorldX(unitTile.x, cols, terrainSize.width),
-          sampleHeight(sample, unitTile.x, unitTile.y) * heightScale + FIREFIGHTER_MODEL_ROOT_Y_OFFSET,
-          toWorldZ(unitTile.y, rows, terrainSize.depth)
+          surface.toWorldX(unitTile.x),
+          sampleHeightAt(unitTile.x, unitTile.y) + FIREFIGHTER_MODEL_ROOT_Y_OFFSET,
+          surface.toWorldZ(unitTile.y)
         );
         updateFirefighterVisualState(unit, timeSec, firefighterPose);
         writeFirefighterGripWorldPosition(firefighterRoot, yaw, firefighterPose, firefighterNozzle);
@@ -1163,10 +1126,10 @@ export const createThreeTestUnitFxLayer = (scene: THREE.Scene): ThreeTestUnitFxL
           z: firefighterNozzle.z
         });
       } else {
-        const nozzleX = toWorldX(unitTile.x, cols, terrainSize.width);
-        const nozzleZ = toWorldZ(unitTile.y, rows, terrainSize.depth);
+        const nozzleX = surface.toWorldX(unitTile.x);
+        const nozzleZ = surface.toWorldZ(unitTile.y);
         const nozzleY =
-          sampleHeight(sample, unitTile.x, unitTile.y) * heightScale +
+          sampleHeightAt(unitTile.x, unitTile.y) +
           (unit.kind === "truck" ? HOSE_BASE_Y + 0.13 : HOSE_BASE_Y + 0.2);
         nozzleByUnitId.set(unit.id, { x: nozzleX, y: nozzleY, z: nozzleZ });
       }
@@ -1190,9 +1153,9 @@ export const createThreeTestUnitFxLayer = (scene: THREE.Scene): ThreeTestUnitFxL
       if (hoseSegments >= MAX_HOSE_SEGMENTS) {
         break;
       }
-      const truckX = toWorldX(truckRef.x, cols, terrainSize.width);
-      const truckZ = toWorldZ(truckRef.y, rows, terrainSize.depth);
-      const truckY = sampleHeight(sample, truckRef.x, truckRef.y) * heightScale + HOSE_BASE_Y + 0.11;
+      const truckX = surface.toWorldX(truckRef.x);
+      const truckZ = surface.toWorldZ(truckRef.y);
+      const truckY = sampleHeightAt(truckRef.x, truckRef.y) + HOSE_BASE_Y + 0.11;
       const crewSource = nozzleByUnitId.get(unit.id) ?? null;
       if (!crewSource) {
         continue;
@@ -1231,19 +1194,19 @@ export const createThreeTestUnitFxLayer = (scene: THREE.Scene): ThreeTestUnitFxL
       const precisionMode = modeValue <= 0.5;
       const suppressionMode = modeValue >= 1.5;
       const modeVolumeScale = getModeVolumeScale(modeValue);
-      const targetX = toWorldX(stream.targetX, cols, terrainSize.width);
-      const targetZ = toWorldZ(stream.targetY, rows, terrainSize.depth);
+      const targetX = surface.toWorldX(stream.targetX);
+      const targetZ = surface.toWorldZ(stream.targetY);
       const targetY =
-        sampleHeight(sample, stream.targetX, stream.targetY) * heightScale +
+        sampleHeightAt(stream.targetX, stream.targetY) +
         (precisionMode ? 0.05 : suppressionMode ? 0.02 : 0.035);
       streamBySource.set(sourceId, {
-        sourceX: source?.x ?? toWorldX(stream.sourceX, cols, terrainSize.width),
+        sourceX: source?.x ?? surface.toWorldX(stream.sourceX),
         sourceY:
           source?.y ??
-          sampleHeight(sample, stream.sourceX, stream.sourceY) * heightScale +
+          sampleHeightAt(stream.sourceX, stream.sourceY) +
             HOSE_BASE_Y +
             0.18,
-        sourceZ: source?.z ?? toWorldZ(stream.sourceY, rows, terrainSize.depth),
+        sourceZ: source?.z ?? surface.toWorldZ(stream.sourceY),
         targetX,
         targetY,
         targetZ,
@@ -1546,8 +1509,7 @@ export const createThreeTestUnitFxLayer = (scene: THREE.Scene): ThreeTestUnitFxL
         sampleStreamCurveTangent(visual, impactAlong01, streamCurveControlPoint, streamCurveTangent);
         const impactCenterX = streamCurvePoint.x;
         const impactCenterZ = streamCurvePoint.z;
-        const impactTerrainY =
-          sampleWorldHeight(sample, terrainSize, cols, rows, heightScale, impactCenterX, impactCenterZ) + 0.03;
+        const impactTerrainY = sampleWorldHeightAt(impactCenterX, impactCenterZ) + 0.03;
         const impactCenterY = Math.max(impactTerrainY, streamCurvePoint.y);
         const impactFootprintRadius = Math.max(
           visual.impactRadius,
@@ -1677,8 +1639,8 @@ export const createThreeTestUnitFxLayer = (scene: THREE.Scene): ThreeTestUnitFxL
       }
       const modeValue = sprayModeToValue(particle.sprayMode);
       const volume = clamp(particle.sprayVolume ?? defaultVolumeForMode(modeValue), 0, 1);
-      const wx = toWorldX(particle.x, cols, terrainSize.width);
-      const wz = toWorldZ(particle.y, rows, terrainSize.depth);
+      const wx = surface.toWorldX(particle.x);
+      const wz = surface.toWorldZ(particle.y);
       const particleAlpha = clamp(particle.alpha, 0, 1);
       const particleLife01 =
         particle.maxLife > 0
@@ -1705,7 +1667,7 @@ export const createThreeTestUnitFxLayer = (scene: THREE.Scene): ThreeTestUnitFxL
         streamCurvePoint
       );
       const expectedY = streamCurvePoint.y;
-      const terrainY = sampleWorldHeight(sample, terrainSize, cols, rows, heightScale, wx, wz) + 0.03;
+      const terrainY = sampleWorldHeightAt(wx, wz) + 0.03;
       const wy = Math.max(terrainY, expectedY - worldPerTile * 0.04);
       const drawAlpha = clamp(
         particleAlpha *
@@ -1802,8 +1764,7 @@ export const createThreeTestUnitFxLayer = (scene: THREE.Scene): ThreeTestUnitFxL
             streamCurvePoint.y + swayAxisA.y * lateralA + swayAxisB.y * lateralB,
             streamCurvePoint.z + swayAxisA.z * lateralA + swayAxisB.z * lateralB
           );
-          const terrainY =
-            sampleWorldHeight(sample, terrainSize, cols, rows, heightScale, swayTargetPoint.x, swayTargetPoint.z) + 0.03;
+          const terrainY = sampleWorldHeightAt(swayTargetPoint.x, swayTargetPoint.z) + 0.03;
           const pointY = Math.max(terrainY, swayTargetPoint.y);
           const drawAlpha =
             (0.05 + renderIntensity * 0.07) *
@@ -1862,8 +1823,7 @@ export const createThreeTestUnitFxLayer = (scene: THREE.Scene): ThreeTestUnitFxL
             visual.tipY + streamBaseDirection.y * forward + swayAxisA.y * Math.cos(angle) * radial + swayAxisB.y * Math.sin(angle) * radial * 0.72 + upward,
             visual.tipZ + streamBaseDirection.z * forward + swayAxisA.z * Math.cos(angle) * radial + swayAxisB.z * Math.sin(angle) * radial * 0.72
           );
-          const terrainY =
-            sampleWorldHeight(sample, terrainSize, cols, rows, heightScale, swayTargetPoint.x, swayTargetPoint.z) + 0.03;
+          const terrainY = sampleWorldHeightAt(swayTargetPoint.x, swayTargetPoint.z) + 0.03;
           const pointY = Math.max(terrainY, swayTargetPoint.y);
           appendBreakupPoint(
             swayTargetPoint.x,

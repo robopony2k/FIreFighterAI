@@ -3,8 +3,11 @@ export type AudioSettingsRecord = {
   volume: number;
 };
 
+export type WorldAudioSettings = AudioSettingsRecord;
+
 const UI_AUDIO_SETTINGS_KEY = "fireline.uiAudio";
 const MUSIC_AUDIO_SETTINGS_KEY = "fireline.musicAudio";
+const WORLD_AUDIO_SETTINGS_KEY = "fireline.worldAudio";
 
 const DEFAULT_UI_AUDIO_SETTINGS: AudioSettingsRecord = {
   muted: false,
@@ -13,6 +16,10 @@ const DEFAULT_UI_AUDIO_SETTINGS: AudioSettingsRecord = {
 const DEFAULT_MUSIC_AUDIO_SETTINGS: AudioSettingsRecord = {
   muted: false,
   volume: 0.35
+};
+const DEFAULT_WORLD_AUDIO_SETTINGS: WorldAudioSettings = {
+  muted: false,
+  volume: 0.55
 };
 
 const clamp01 = (value: number): number => Math.max(0, Math.min(1, value));
@@ -76,3 +83,9 @@ export const loadMusicAudioSettings = (): AudioSettingsRecord =>
 
 export const saveMusicAudioSettings = (settings: AudioSettingsRecord): void =>
   saveSettings(MUSIC_AUDIO_SETTINGS_KEY, settings, DEFAULT_MUSIC_AUDIO_SETTINGS);
+
+export const loadWorldAudioSettings = (): WorldAudioSettings =>
+  loadSettings(WORLD_AUDIO_SETTINGS_KEY, DEFAULT_WORLD_AUDIO_SETTINGS);
+
+export const saveWorldAudioSettings = (settings: WorldAudioSettings): void =>
+  saveSettings(WORLD_AUDIO_SETTINGS_KEY, settings, DEFAULT_WORLD_AUDIO_SETTINGS);

@@ -11,6 +11,7 @@
     "build": "tsc --project tsconfig.json",
     "predev": "npm run generate-fuel-profiles",
     "dev": "node scripts/dev-server.cjs",
+    "world-audio:regression": "npm run build && node scripts/world-audio-regression.mjs",
     "fire:regression": "npm run build && node scripts/fire-regression.mjs",
     "growth:regression": "npm run build && node scripts/growth-regression.mjs",
     "terrain:eval": "npm run build && node scripts/terrain-eval.mjs",

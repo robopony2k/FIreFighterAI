@@ -24,6 +24,9 @@ export type BottomControlsView = {
   onAudioMuteToggle: (handler: () => void) => void;
   onAudioVolumeChange: (handler: (value: number) => void) => void;
   setAudioState: (settings: UiAudioSettings) => void;
+  onWorldMuteToggle: (handler: () => void) => void;
+  onWorldVolumeChange: (handler: (value: number) => void) => void;
+  setWorldState: (settings: ChannelSettings) => void;
   onMusicMuteToggle: (handler: () => void) => void;
   onMusicVolumeChange: (handler: (value: number) => void) => void;
   setMusicState: (settings: ChannelSettings) => void;
@@ -92,8 +95,9 @@ export const createBottomLeftControls = (): BottomControlsView => {
   };
 
   const sfxControls = createAudioRow();
+  const worldControls = createAudioRow();
   const musicControls = createAudioRow();
-  timeGroup.append(sfxControls.row, musicControls.row);
+  timeGroup.append(sfxControls.row, worldControls.row, musicControls.row);
 
   const status = document.createElement("div");
   status.className = "phase-control-status";
@@ -104,9 +108,12 @@ export const createBottomLeftControls = (): BottomControlsView => {
   const nextFireButton = speedRow.querySelector('[data-action="time-skip-next-fire"]') as HTMLButtonElement;
   const speedButtons = Array.from(speedRow.querySelectorAll<HTMLButtonElement>('[data-role="time-speed"]'));
   let audioState: ChannelSettings = { muted: false, volume: 0.65 };
+  let worldState: ChannelSettings = { muted: false, volume: 0.55 };
   let musicState: ChannelSettings = { muted: false, volume: 0.35 };
   let onAudioMuteToggleHandler: (() => void) | null = null;
   let onAudioVolumeChangeHandler: ((value: number) => void) | null = null;
+  let onWorldMuteToggleHandler: (() => void) | null = null;
+  let onWorldVolumeChangeHandler: ((value: number) => void) | null = null;
   let onMusicMuteToggleHandler: (() => void) | null = null;
   let onMusicVolumeChangeHandler: ((value: number) => void) | null = null;
 
@@ -114,6 +121,10 @@ export const createBottomLeftControls = (): BottomControlsView => {
     const sfxEnabled = onAudioMuteToggleHandler !== null && onAudioVolumeChangeHandler !== null;
     sfxControls.muteButton.disabled = !sfxEnabled;
     sfxControls.volumeSlider.disabled = !sfxEnabled || audioState.muted;
+
+    const worldEnabled = onWorldMuteToggleHandler !== null && onWorldVolumeChangeHandler !== null;
+    worldControls.muteButton.disabled = !worldEnabled;
+    worldControls.volumeSlider.disabled = !worldEnabled || worldState.muted;
 
     const musicEnabled = onMusicMuteToggleHandler !== null && onMusicVolumeChangeHandler !== null;
     musicControls.muteButton.disabled = !musicEnabled;
@@ -127,6 +138,13 @@ export const createBottomLeftControls = (): BottomControlsView => {
     sfxControls.muteButton.setAttribute("title", audioState.muted ? "Unmute UI SFX" : "Mute UI SFX");
     sfxControls.volumeLabel.textContent = `SFX ${sfxVolumePct}%`;
     sfxControls.volumeSlider.value = audioState.volume.toFixed(2);
+
+    const worldVolumePct = Math.round(Math.max(0, Math.min(1, worldState.volume)) * 100);
+    worldControls.muteButton.textContent = worldState.muted ? "Unmute World" : "Mute World";
+    worldControls.muteButton.setAttribute("aria-pressed", worldState.muted ? "true" : "false");
+    worldControls.muteButton.setAttribute("title", worldState.muted ? "Unmute world audio" : "Mute world audio");
+    worldControls.volumeLabel.textContent = `World ${worldVolumePct}%`;
+    worldControls.volumeSlider.value = worldState.volume.toFixed(2);
 
     const musicVolumePct = Math.round(Math.max(0, Math.min(1, musicState.volume)) * 100);
     musicControls.muteButton.textContent = musicState.muted ? "Unmute Music" : "Mute Music";
@@ -148,6 +166,18 @@ export const createBottomLeftControls = (): BottomControlsView => {
       return;
     }
     onAudioVolumeChangeHandler?.(next);
+  });
+
+  worldControls.muteButton.addEventListener("click", (event) => {
+    event.preventDefault();
+    onWorldMuteToggleHandler?.();
+  });
+  worldControls.volumeSlider.addEventListener("input", () => {
+    const next = Number(worldControls.volumeSlider.value);
+    if (!Number.isFinite(next)) {
+      return;
+    }
+    onWorldVolumeChangeHandler?.(next);
   });
 
   musicControls.muteButton.addEventListener("click", (event) => {
@@ -218,6 +248,21 @@ export const createBottomLeftControls = (): BottomControlsView => {
     },
     setAudioState: (settings) => {
       audioState = {
+        muted: settings.muted,
+        volume: Math.max(0, Math.min(1, settings.volume))
+      };
+      refreshAudioControls();
+    },
+    onWorldMuteToggle: (handler) => {
+      onWorldMuteToggleHandler = handler;
+      setAudioControlsEnabled();
+    },
+    onWorldVolumeChange: (handler) => {
+      onWorldVolumeChangeHandler = handler;
+      setAudioControlsEnabled();
+    },
+    setWorldState: (settings) => {
+      worldState = {
         muted: settings.muted,
         volume: Math.max(0, Math.min(1, settings.volume))
       };

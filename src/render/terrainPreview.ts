@@ -12,6 +12,7 @@ import {
 import { createSeasonalSkyDome } from "./seasonalSky.js";
 import {
   buildTerrainMesh,
+  prepareTerrainRenderSurface,
   type TerrainBridgeDebug,
   type TerrainBridgeSpanDebug,
   type TerrainSample
@@ -349,8 +350,9 @@ export const createTerrainPreviewController = (canvas: HTMLCanvasElement): Terra
       lastTerrainFrame = null;
       return;
     }
+    const surface = prepareTerrainRenderSurface(sample);
     const { mesh, size, water } = buildTerrainMesh(
-      sample,
+      surface,
       getTreeAssetsCache(),
       getHouseAssetsCache(),
       getFirestationAssetCache()

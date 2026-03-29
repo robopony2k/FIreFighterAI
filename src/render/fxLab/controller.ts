@@ -11,7 +11,7 @@ import {
   type WorldState
 } from "../../core/state.js";
 import { TREE_TYPE_IDS, TreeType, type Formation, type Grid, type Unit, type WaterSprayMode } from "../../core/types.js";
-import { buildTerrainMesh, getTerrainHeightScale, type TerrainSample } from "../threeTestTerrain.js";
+import { buildTerrainMesh, prepareTerrainRenderSurface, type TerrainRenderSurface, type TerrainSample } from "../threeTestTerrain.js";
 import { ThreeTestWaterSystem } from "../threeTestWater.js";
 import {
   createThreeTestFireFx,
@@ -777,6 +777,7 @@ export const createFxLabController = (
   let terrainWaterDebugControls = cloneDefaultTerrainWaterDebugControls();
   let terrainMesh: THREE.Mesh | null = null;
   let terrainSize: { width: number; depth: number } | null = null;
+  let terrainSurface: TerrainRenderSurface | null = null;
   let treeAssets: TreeAssets | null = getTreeAssetsCache();
   let disposed = false;
   let running = false;
@@ -889,7 +890,8 @@ export const createFxLabController = (
       disposeTerrainMesh(terrainMesh);
       terrainMesh = null;
     }
-    const result = buildTerrainMesh(sceneState.sample, treeAssets, null, null);
+    terrainSurface = prepareTerrainRenderSurface(sceneState.sample);
+    const result = buildTerrainMesh(terrainSurface, treeAssets, null, null);
     terrainMesh = result.mesh;
     terrainSize = result.size;
     scene.add(terrainMesh);
@@ -1306,20 +1308,14 @@ export const createFxLabController = (
 
   const updateSprayTargetMarker = (timeMs: number): void => {
     const showMarker = manualSprayEnabled || placementMode === "spray-target" || manualSprayTarget !== null;
-    if (!showMarker || !terrainSize) {
+    if (!showMarker || !terrainSurface) {
       sprayTargetMarker.visible = false;
       return;
     }
     const target = getActiveManualSprayTarget();
-    const { cols, rows } = sceneState.world.grid;
-    const heightScale = getTerrainHeightScale(cols, rows);
-    const worldX = (target.x / Math.max(1, cols) - 0.5) * terrainSize.width;
-    const worldZ = (target.y / Math.max(1, rows) - 0.5) * terrainSize.depth;
-    const worldY = sceneState.sample.elevations.length > 0
-      ? sceneState.sample.elevations[
-          Math.max(0, Math.min(sceneState.sample.elevations.length - 1, Math.floor(target.y - 0.5) * cols + Math.floor(target.x - 0.5)))
-        ] * heightScale + 0.06
-      : 0.06;
+    const worldX = terrainSurface.toWorldX(target.x);
+    const worldZ = terrainSurface.toWorldZ(target.y);
+    const worldY = terrainSurface.heightAtTileCoord(target.x, target.y) * terrainSurface.heightScale + 0.06;
     const pulse = 1 + Math.sin(timeMs * 0.006) * 0.08;
     sprayTargetMarker.visible = true;
     sprayTargetMarker.position.set(worldX, worldY, worldZ);
@@ -1389,9 +1385,9 @@ export const createFxLabController = (
     waterSystem.setLightDirectionFromKeyLight();
     waterSystem.update(now, frameDeltaMs * 0.001, 1000 / Math.max(1, frameDeltaMs), lastSceneRenderMs);
     applyScenarioFrame();
-    fireFx.update(now, sceneState.world, sceneState.sample, terrainSize, null, 60, lastSceneRenderMs);
-    unitsLayer.update(sceneState.world, sceneState.sample, terrainSize, 1);
-    unitFxLayer.update(sceneState.world, sceneState.effects, sceneState.sample, terrainSize, 1, now);
+    fireFx.update(now, sceneState.world, sceneState.sample, terrainSize, terrainSurface, null, null, 60, lastSceneRenderMs);
+    unitsLayer.update(sceneState.world, terrainSurface, 1);
+    unitFxLayer.update(sceneState.world, sceneState.effects, terrainSurface, 1, now);
     updateSprayTargetMarker(now);
     const renderStartedAt = performance.now();
     renderer.render(scene, camera);
@@ -1462,6 +1458,7 @@ export const createFxLabController = (
         disposeTerrainMesh(terrainMesh);
         terrainMesh = null;
       }
+      terrainSurface = null;
       renderer.dispose();
     },
     setScenario: (scenarioId: FxLabScenarioId) => {

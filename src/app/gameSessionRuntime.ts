@@ -15,6 +15,7 @@ import { generateMap, type MapGenDebug, type MapGenDebugSnapshot } from "../mapg
 import { resetTerrainCaches } from "../render/terrainCache.js";
 import { renderLegacy2dFrame } from "../render/legacy2d/index.js";
 import { createThreeTest, type ThreeTestPerfSnapshot } from "../render/threeTest.js";
+import { preloadThreeTestWorldAudioAssets } from "../render/threeTestWorldAudio.js";
 import {
   getFirestationAssetCache,
   getHouseAssetsCache,
@@ -52,7 +53,12 @@ import {
 import { createUiAudioController } from "../audio/uiAudio.js";
 import { createMusicController } from "../audio/musicController.js";
 import { showTitleScreen as mountTitleScreen, type TitleScreenHandle } from "../ui/titleScreen.js";
-import { loadMusicAudioSettings, saveMusicAudioSettings } from "../persistence/audioSettings.js";
+import {
+  loadMusicAudioSettings,
+  loadWorldAudioSettings,
+  saveMusicAudioSettings,
+  saveWorldAudioSettings
+} from "../persistence/audioSettings.js";
 import {
   getRuntimeSettings,
   resetRuntimeSettings,
@@ -69,6 +75,19 @@ export type { RenderBackend } from "./renderBackend.js";
 
 // Single switch for removing the startup title layer.
 const ENABLE_TITLE_SCREEN = true;
+
+type HudAudioChannelSettings = {
+  muted: boolean;
+  volume: number;
+};
+
+type HudAudioChannelControls = {
+  getSettings: () => HudAudioChannelSettings;
+  setMuted: (muted: boolean) => void;
+  toggleMuted: () => void;
+  setVolume: (value: number) => void;
+  onChange: (listener: (settings: HudAudioChannelSettings) => void) => () => void;
+};
 
 type ElectronBridge = {
   quit?: () => void;
@@ -200,57 +219,68 @@ export const createAppRuntime = (): AppRuntime => {
   const persistedLastRunConfig = loadLastRunConfig();
   const uiAudio = createUiAudioController();
   const musicController = createMusicController();
-  type HudMusicSettings = { muted: boolean; volume: number };
-  const clampMusic01 = (value: number): number => Math.max(0, Math.min(1, value));
-  const hudMusicListeners = new Set<(settings: HudMusicSettings) => void>();
-  const persistedMusicSettings = loadMusicAudioSettings();
-  let musicMutedByUser = persistedMusicSettings.muted;
-  let musicVolume = clampMusic01(persistedMusicSettings.volume);
-  const getHudMusicSettings = (): HudMusicSettings => ({ muted: musicMutedByUser, volume: musicVolume });
-  const saveHudMusicSettings = (): void => {
-    saveMusicAudioSettings(getHudMusicSettings());
+  const clampChannel01 = (value: number): number => Math.max(0, Math.min(1, value));
+  const createHudAudioChannelControls = (
+    initialSettings: HudAudioChannelSettings,
+    persist: (settings: HudAudioChannelSettings) => void,
+    onApply?: (settings: HudAudioChannelSettings) => void
+  ): HudAudioChannelControls => {
+    const listeners = new Set<(settings: HudAudioChannelSettings) => void>();
+    let mutedByUser = Boolean(initialSettings.muted);
+    let volume = clampChannel01(initialSettings.volume);
+    const getSettings = (): HudAudioChannelSettings => ({ muted: mutedByUser, volume });
+    const notify = (): void => {
+      const snapshot = getSettings();
+      listeners.forEach((listener) => listener(snapshot));
+    };
+    const apply = (): void => {
+      onApply?.(getSettings());
+    };
+    const controls: HudAudioChannelControls = {
+      getSettings,
+      setMuted: (muted: boolean): void => {
+        const nextMuted = Boolean(muted);
+        if (mutedByUser === nextMuted) {
+          return;
+        }
+        mutedByUser = nextMuted;
+        apply();
+        persist(getSettings());
+        notify();
+      },
+      toggleMuted: (): void => {
+        controls.setMuted(!mutedByUser);
+      },
+      setVolume: (value: number): void => {
+        const nextVolume = clampChannel01(value);
+        if (Math.abs(volume - nextVolume) < 0.0001) {
+          return;
+        }
+        volume = nextVolume;
+        apply();
+        persist(getSettings());
+        notify();
+      },
+      onChange: (listener: (settings: HudAudioChannelSettings) => void): (() => void) => {
+        listeners.add(listener);
+        listener(getSettings());
+        return () => {
+          listeners.delete(listener);
+        };
+      }
+    };
+    apply();
+    return controls;
   };
-  const notifyHudMusicSettings = (): void => {
-    const snapshot = getHudMusicSettings();
-    hudMusicListeners.forEach((listener) => listener(snapshot));
-  };
+  const musicControls = createHudAudioChannelControls(loadMusicAudioSettings(), saveMusicAudioSettings, (settings) => {
+    musicController.setVolume(settings.volume);
+    musicController.setMuted(document.hidden || settings.muted);
+  });
+  const worldAudioControls = createHudAudioChannelControls(loadWorldAudioSettings(), saveWorldAudioSettings);
   const applyMusicOutputState = (): void => {
-    musicController.setVolume(musicVolume);
-    musicController.setMuted(document.hidden || musicMutedByUser);
-  };
-  applyMusicOutputState();
-  const musicControls = {
-    getSettings: getHudMusicSettings,
-    setMuted: (muted: boolean): void => {
-      const nextMuted = Boolean(muted);
-      if (musicMutedByUser === nextMuted) {
-        return;
-      }
-      musicMutedByUser = nextMuted;
-      applyMusicOutputState();
-      saveHudMusicSettings();
-      notifyHudMusicSettings();
-    },
-    toggleMuted: (): void => {
-      musicControls.setMuted(!musicMutedByUser);
-    },
-    setVolume: (value: number): void => {
-      const nextVolume = clampMusic01(value);
-      if (Math.abs(musicVolume - nextVolume) < 0.0001) {
-        return;
-      }
-      musicVolume = nextVolume;
-      applyMusicOutputState();
-      saveHudMusicSettings();
-      notifyHudMusicSettings();
-    },
-    onChange: (listener: (settings: HudMusicSettings) => void): (() => void) => {
-      hudMusicListeners.add(listener);
-      listener(getHudMusicSettings());
-      return () => {
-        hudMusicListeners.delete(listener);
-      };
-    }
+    const settings = musicControls.getSettings();
+    musicController.setVolume(settings.volume);
+    musicController.setMuted(document.hidden || settings.muted);
   };
   
   setGameEventBus(gameEvents);
@@ -1039,7 +1069,8 @@ export const createAppRuntime = (): AppRuntime => {
     const tasks: Array<{ label: string; run: () => Promise<unknown> }> = [
       { label: "trees", run: () => loadTreeAssets() },
       { label: "houses", run: () => loadHouseAssets() },
-      { label: "firestation", run: () => loadFirestationAsset() }
+      { label: "firestation", run: () => loadFirestationAsset() },
+      { label: "world-audio", run: () => preloadThreeTestWorldAudioAssets() }
     ];
     let completed = 0;
     const updateProgress = (label: string): void => {
@@ -1137,7 +1168,8 @@ export const createAppRuntime = (): AppRuntime => {
         inputState,
         effectsState,
         uiAudio,
-        musicControls
+        musicControls,
+        worldAudioControls
       );
     }
     if (threeTestController) {
@@ -1360,6 +1392,12 @@ export const createAppRuntime = (): AppRuntime => {
           setMuted: musicControls.setMuted,
           setVolume: musicControls.setVolume,
           onChange: musicControls.onChange
+        },
+        world: {
+          getSettings: worldAudioControls.getSettings,
+          setMuted: worldAudioControls.setMuted,
+          setVolume: worldAudioControls.setVolume,
+          onChange: worldAudioControls.onChange
         }
       },
       runtimeSettings: {
@@ -1629,7 +1667,8 @@ export const createAppRuntime = (): AppRuntime => {
             renderState.cameraCenter = { x: tile.x + 0.5, y: tile.y + 0.5 };
           },
           uiAudio,
-          musicControls
+          musicControls,
+          worldAudioControls
         });
       }
       startMenu?.classList.add("hidden");
@@ -1667,7 +1706,8 @@ export const createAppRuntime = (): AppRuntime => {
             renderState.cameraCenter = { x: tile.x + 0.5, y: tile.y + 0.5 };
           },
           uiAudio,
-          musicControls
+          musicControls,
+          worldAudioControls
         });
       }
       if (initialFxLabEnabled) {

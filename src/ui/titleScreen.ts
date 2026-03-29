@@ -49,6 +49,7 @@ export type TitleAudioChannelControls = {
 export type TitleAudioControls = {
   sfx: TitleAudioChannelControls;
   music: TitleAudioChannelControls;
+  world: TitleAudioChannelControls;
 };
 
 export type TitleRuntimeSettingsControls = {
@@ -352,7 +353,8 @@ const buildSettingsPanel = (
     settings.className = "title-screen-settings";
     settings.append(
       createChannelControls("Music", audioControls.music, "title-settings-music-volume", "title-settings-music-mute"),
-      createChannelControls("Sound FX", audioControls.sfx, "title-settings-sfx-volume", "title-settings-sfx-mute")
+      createChannelControls("Sound FX", audioControls.sfx, "title-settings-sfx-volume", "title-settings-sfx-mute"),
+      createChannelControls("World", audioControls.world, "title-settings-world-volume", "title-settings-world-mute")
     );
     const note = document.createElement("p");
     note.className = "title-screen-panel-note";

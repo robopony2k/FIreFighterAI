@@ -50,16 +50,16 @@ import { getActionTarget } from "./uiActions.js";
 import { listenPhaseUiCommand, type PhaseUiCommand } from "../commandChannel.js";
 import type { UiAudioController, UiAudioCue } from "../../../audio/uiAudio.js";
 
-type HudMusicSettings = {
+type HudAudioChannelSettings = {
   muted: boolean;
   volume: number;
 };
 
-type HudMusicControls = {
-  getSettings: () => HudMusicSettings;
+type HudAudioChannelControls = {
+  getSettings: () => HudAudioChannelSettings;
   toggleMuted: () => void;
   setVolume: (value: number) => void;
-  onChange: (listener: (settings: HudMusicSettings) => void) => () => void;
+  onChange: (listener: (settings: HudAudioChannelSettings) => void) => () => void;
 };
 
 const cloneRunConfig = (config: NewRunConfig): NewRunConfig => ({
@@ -145,7 +145,8 @@ export type PhaseUiBindingDeps = {
   startThreeOnConfirm?: boolean | (() => boolean);
   onMinimapPan?: (tile: { x: number; y: number }) => void;
   uiAudio?: UiAudioController;
-  musicControls?: HudMusicControls;
+  musicControls?: HudAudioChannelControls;
+  worldAudioControls?: HudAudioChannelControls;
 };
 
 const getWorldFromPointer = (
@@ -179,7 +180,8 @@ export const bindPhaseUi = ({
   startThreeOnConfirm = false,
   onMinimapPan,
   uiAudio,
-  musicControls
+  musicControls,
+  worldAudioControls
 }: PhaseUiBindingDeps): (() => void) => {
   let isSpaceDown = false;
   const disposers: Array<() => void> = [];
@@ -538,6 +540,24 @@ export const bindPhaseUi = ({
     disposers.push(
       musicControls.onChange((settings) => {
         phaseUi.controller.setMusicState(settings);
+      })
+    );
+  }
+
+  if (worldAudioControls) {
+    phaseUi.controller.setWorldState(worldAudioControls.getSettings());
+    phaseUi.controller.onWorldMuteToggle(() => {
+      noteInteraction();
+      uiAudio?.play("toggle");
+      worldAudioControls.toggleMuted();
+    });
+    phaseUi.controller.onWorldVolumeChange((value) => {
+      noteInteraction();
+      worldAudioControls.setVolume(value);
+    });
+    disposers.push(
+      worldAudioControls.onChange((settings) => {
+        phaseUi.controller.setWorldState(settings);
       })
     );
   }
