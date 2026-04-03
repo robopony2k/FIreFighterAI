@@ -1,13 +1,22 @@
 import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
-import { CAREER_YEARS, TILE_SIZE, TIME_SPEED_OPTIONS, TOWN_ALERT_MAX_POSTURE, getTimeSpeedOptions } from "../core/config.js";
+import { CAREER_YEARS, TILE_SIZE, TIME_SPEED_OPTIONS, TOWN_ALERT_MAX_POSTURE, TRUCK_CAPACITY, getTimeSpeedOptions } from "../core/config.js";
 import { VIRTUAL_CLIMATE_PARAMS } from "../core/climate.js";
 import type { EffectsState } from "../core/effectsState.js";
 import { getHouseFootprintBounds, pickHouseFootprint } from "../core/houseFootprints.js";
 import type { InputState } from "../core/inputState.js";
 import { indexFor } from "../core/grid.js";
 import { setStatus, TILE_ID_TO_TYPE, TILE_TYPE_IDS } from "../core/state.js";
-import type { ClimateForecast, Town } from "../core/types.js";
+import type {
+  BehaviourMode,
+  ClimateForecast,
+  CommandIntent,
+  CommandType,
+  CommandUnit,
+  CommandUnitAlert,
+  CommandUnitStatus,
+  Town
+} from "../core/types.js";
 import type { RenderSim } from "./simView.js";
 import { createHudState, setHudViewport, type HudTheme } from "./hud/hudState.js";
 import { handleHudClick, handleHudKey, renderHud } from "./hud/hud.js";
@@ -67,7 +76,7 @@ import {
   WATERFALL_VERTICALITY_MIN,
   WATERFALL_DEBUG_FLAG_WATER
 } from "./threeTestTerrain.js";
-import { createThreeTestFireFx, type SparkMode } from "./threeTestFireFx.js";
+import { createThreeTestFireFx } from "./threeTestFireFx.js";
 import { createThreeTestWorldAudio, type WorldAudioChannelControls } from "./threeTestWorldAudio.js";
 import { createThreeTestUnitFxLayer } from "./threeTestUnitFx.js";
 import type { TerrainWaterDebugControls } from "./terrainWaterDebug.js";
@@ -75,6 +84,7 @@ import { ThreeTestWaterSystem, type WaterQualityProfile } from "./threeTestWater
 import { createThreeTestUnitsLayer } from "./threeTestUnits.js";
 import { createThreeTestPostPipeline, type DepthOfFieldSettings } from "./post/dofPipeline.js";
 import type { ThreeTestCinematicGradeConfig } from "./post/cinematicGradePass.js";
+import { getRequiredWebGLContext } from "./webglContext.js";
 import { CardStateModel } from "../ui/cards/cardState.js";
 import { dispatchPhaseUiCommand } from "../ui/phase/commandChannel.js";
 import { RISK_THRESHOLDS, SEASON_LABELS, computeSeasonLayout } from "../ui/phase/forecastLayout.js";
@@ -409,7 +419,6 @@ export const createThreeTest = (
   const THREE_TEST_FIRE_BUDGET_SCALE = Math.max(0.4, Math.min(1.25, runtimeSettings.fxbudget));
   const THREE_TEST_FX_FALLBACK = runtimeSettings.fxfallback;
   const THREE_TEST_SPARK_DEBUG = runtimeSettings.sparkdebug;
-  const THREE_TEST_SPARK_MODE: SparkMode = runtimeSettings.sparkmode;
   const THREE_TEST_SHADOW_MAP_SIZE = Math.max(
     512,
     Math.min(4096, 2 ** Math.round(Math.log2(Math.max(1, runtimeSettings.shadowres))))
@@ -433,6 +442,7 @@ export const createThreeTest = (
   let dofEnabled = render.flags.dof;
   const renderer = new THREE.WebGLRenderer({
     canvas,
+    context: getRequiredWebGLContext(canvas, "3D mode"),
     antialias: true,
     alpha: false,
     powerPreference: "default"
@@ -592,8 +602,7 @@ export const createThreeTest = (
     flameIntensityBoost: cinematicGradeEnabled ? THREE_TEST_CINEMATIC_GRADE_CONFIG.fireFlameIntensityBoost : 1,
     groundGlowBoost: cinematicGradeEnabled ? THREE_TEST_CINEMATIC_GRADE_CONFIG.fireGlowBoost : 1,
     emberBoost: cinematicGradeEnabled ? THREE_TEST_CINEMATIC_GRADE_CONFIG.emberBoost : 1,
-    sparkDebug: THREE_TEST_SPARK_DEBUG,
-    sparkMode: THREE_TEST_SPARK_MODE
+    sparkDebug: THREE_TEST_SPARK_DEBUG
   });
   const worldAudio = worldAudioControls ? createThreeTestWorldAudio(camera, worldAudioControls) : null;
   fireFx.captureSnapshot(world);
@@ -2116,21 +2125,30 @@ export const createThreeTest = (
     applyDockCardStates();
   };
 
-  type UnitTrayCardElements = {
-    root: HTMLDivElement;
-    name: HTMLDivElement;
-    metrics: HTMLDivElement;
-    actionA: HTMLButtonElement;
-    actionB: HTMLButtonElement;
-  };
-  const unitTrayList = document.createElement("div");
-  unitTrayList.className = "three-test-unit-tray-list";
-  const unitTrayDetailCard = document.createElement("div");
-  unitTrayDetailCard.className = "three-test-unit-detail hidden";
-  const unitTrayGroupCard = document.createElement("div");
-  unitTrayGroupCard.className = "three-test-unit-detail hidden";
-  unitTrayRoot.append(unitTrayList, unitTrayDetailCard, unitTrayGroupCard);
-  const unitTrayCards = new Map<number, UnitTrayCardElements>();
+  type CommandBarSeverity = "none" | "warning" | "critical";
+  const commandBarRoot = document.createElement("div");
+  commandBarRoot.className = "three-test-command-bar";
+  const commandBarLeft = document.createElement("div");
+  commandBarLeft.className = "three-test-command-bar-left";
+  const commandUnitRow = document.createElement("div");
+  commandUnitRow.className = "three-test-command-unit-row";
+  const truckStrip = document.createElement("div");
+  truckStrip.className = "three-test-truck-strip hidden";
+  const truckStripHeader = document.createElement("div");
+  truckStripHeader.className = "three-test-truck-strip-header";
+  const truckStripTitle = document.createElement("div");
+  truckStripTitle.className = "three-test-truck-strip-title";
+  const truckStripMeta = document.createElement("div");
+  truckStripMeta.className = "three-test-truck-strip-meta";
+  truckStripHeader.append(truckStripTitle, truckStripMeta);
+  const truckStripRow = document.createElement("div");
+  truckStripRow.className = "three-test-truck-strip-row";
+  truckStrip.append(truckStripHeader, truckStripRow);
+  commandBarLeft.append(commandUnitRow, truckStrip);
+  const commandBarRight = document.createElement("div");
+  commandBarRight.className = "three-test-command-panel";
+  commandBarRoot.append(commandBarLeft, commandBarRight);
+  unitTrayRoot.append(commandBarRoot);
   let lastUnitTrayUpdateAt = -Infinity;
 
   const getUnitLabel = (unitId: number): string => {
@@ -2144,16 +2162,6 @@ export const createThreeTest = (
   const getUnitMoveStatus = (unit: RenderSim["units"][number]): string =>
     unit.target && unit.pathIndex < unit.path.length ? "Moving" : "Holding";
 
-  const getSprayModeLabel = (formation: "narrow" | "medium" | "wide"): string => {
-    if (formation === "narrow") {
-      return "Precision";
-    }
-    if (formation === "wide") {
-      return "Suppression";
-    }
-    return "Balanced";
-  };
-
   const resolveInterpolatedUnitPosition = (unit: RenderSim["units"][number]): { x: number; y: number } => {
     const alpha = clamp01(simulationAlpha);
     return {
@@ -2162,16 +2170,231 @@ export const createThreeTest = (
     };
   };
 
-  const selectAndPanToUnit = (unitId: number, tileX: number, tileY: number): void => {
-    playUiCue("click");
-    dispatchPhaseUiCommand({ type: "action", action: "select-unit", payload: { unitId: String(unitId) } });
+  const dispatchSelectionAction = (action: string, payload?: Record<string, string>): void => {
+    dispatchPhaseUiCommand({ type: "action", action, payload });
+  };
+
+  const selectAndPanToTruck = (
+    truck: RenderSim["units"][number],
+    options?: { truckScope?: boolean; toggle?: boolean; append?: boolean }
+  ): void => {
+    const payload: Record<string, string> = {};
+    if (options?.toggle) {
+      payload.toggle = "1";
+    }
+    if (options?.append) {
+      payload.append = "1";
+    }
+    if (options?.truckScope || truck.commandUnitId === null) {
+      payload.truckId = String(truck.id);
+      dispatchSelectionAction("select-truck", payload);
+    } else {
+      payload.commandUnitId = String(truck.commandUnitId);
+      dispatchSelectionAction("select-command-unit", payload);
+    }
     dispatchPhaseUiCommand({
       type: "minimap-pan",
       tile: {
-        x: Math.floor(tileX),
-        y: Math.floor(tileY)
+        x: Math.floor(truck.x),
+        y: Math.floor(truck.y)
       }
     });
+  };
+
+  const getTruckLabel = (truck: RenderSim["units"][number]): string =>
+    truck.rosterId !== null ? getUnitLabel(truck.rosterId) : getUnitLabel(truck.id);
+
+  const getCommandUnitTrucks = (commandUnit: CommandUnit): RenderSim["units"][number][] =>
+    commandUnit.truckIds
+      .map((truckId) => world.units.find((entry) => entry.id === truckId && entry.kind === "truck") ?? null)
+      .filter((entry): entry is RenderSim["units"][number] => !!entry)
+      .sort((left, right) => (left.rosterId ?? left.id) - (right.rosterId ?? right.id));
+
+  const getEffectiveTruckIntent = (
+    truck: RenderSim["units"][number],
+    commandUnitById: Map<number, CommandUnit>
+  ): CommandIntent | null => {
+    if (truck.truckOverrideIntent) {
+      return truck.truckOverrideIntent;
+    }
+    if (truck.commandUnitId === null) {
+      return null;
+    }
+    return commandUnitById.get(truck.commandUnitId)?.currentIntent ?? null;
+  };
+
+  const getCommandTypeLabel = (type: CommandType | null): string => {
+    if (!type) {
+      return "Auto";
+    }
+    return type[0]!.toUpperCase() + type.slice(1);
+  };
+
+  const getBehaviourLabel = (mode: BehaviourMode): string => mode[0]!.toUpperCase() + mode.slice(1);
+
+  const getStatusIcon = (status: CommandUnitStatus): string => {
+    if (status === "suppressing") {
+      return "F";
+    }
+    if (status === "moving") {
+      return ">";
+    }
+    if (status === "retreating") {
+      return "!";
+    }
+    return "O";
+  };
+
+  const getWaterRatio = (current: number, capacity: number): number =>
+    capacity > 0 ? clamp01(current / capacity) : 1;
+
+  const getWaterGlyph = (ratio: number): string => {
+    if (ratio <= 0.2) {
+      return "▁";
+    }
+    if (ratio <= 0.4) {
+      return "▃";
+    }
+    if (ratio <= 0.7) {
+      return "▆";
+    }
+    return "▇";
+  };
+
+  const getWaterGlyphLevel = (ratio: number): "empty" | "low" | "mid" | "high" => {
+    if (ratio <= 0.2) {
+      return "empty";
+    }
+    if (ratio <= 0.4) {
+      return "low";
+    }
+    if (ratio <= 0.7) {
+      return "mid";
+    }
+    return "high";
+  };
+
+  const getAlertPriority = (alert: CommandUnitAlert): number => {
+    switch (alert) {
+      case "danger":
+      case "empty":
+      case "critical":
+        return 3;
+      case "warning":
+      case "crew_low":
+        return 2;
+      case "low":
+        return 1;
+      default:
+        return 0;
+    }
+  };
+
+  const getAlertText = (alert: CommandUnitAlert): string => {
+    switch (alert) {
+      case "danger":
+        return "Danger";
+      case "empty":
+        return "Empty";
+      case "critical":
+        return "Critical";
+      case "warning":
+        return "Warning";
+      case "crew_low":
+        return "Crew";
+      case "low":
+        return "Low";
+      default:
+        return "Alert";
+    }
+  };
+
+  const resolveHighestAlert = (alerts: readonly CommandUnitAlert[]): CommandUnitAlert | null => {
+    let best: CommandUnitAlert | null = null;
+    let bestPriority = -1;
+    alerts.forEach((alert) => {
+      const priority = getAlertPriority(alert);
+      if (priority > bestPriority) {
+        bestPriority = priority;
+        best = alert;
+      }
+    });
+    return best;
+  };
+
+  const getSeverityForAlert = (alert: CommandUnitAlert | null): CommandBarSeverity => {
+    if (!alert) {
+      return "none";
+    }
+    return getAlertPriority(alert) >= 3 ? "critical" : "warning";
+  };
+
+  const getCommandUnitStatusGlyph = (status: CommandUnitStatus): string => {
+    switch (status) {
+      case "suppressing":
+        return "🔥";
+      case "moving":
+        return "➡";
+      case "retreating":
+        return "⚠";
+      default:
+        return "🛡";
+    }
+  };
+
+  const getAlertGlyphs = (alerts: readonly CommandUnitAlert[]): string[] => {
+    const glyphs: string[] = [];
+    if (alerts.some((alert) => alert === "empty" || alert === "critical" || alert === "low")) {
+      glyphs.push("💧");
+    }
+    if (alerts.some((alert) => alert === "warning" || alert === "crew_low" || alert === "danger")) {
+      glyphs.push("⚠");
+    }
+    return glyphs;
+  };
+
+  const resolveMajorityStatus = (trucks: RenderSim["units"][number][]): CommandUnitStatus => {
+    const counts = new Map<CommandUnitStatus, number>();
+    trucks.forEach((truck) => {
+      counts.set(truck.currentStatus, (counts.get(truck.currentStatus) ?? 0) + 1);
+    });
+    const priority: CommandUnitStatus[] = ["retreating", "suppressing", "moving", "holding"];
+    let bestStatus: CommandUnitStatus = "holding";
+    let bestCount = -1;
+    priority.forEach((status) => {
+      const count = counts.get(status) ?? 0;
+      if (count > bestCount) {
+        bestCount = count;
+        bestStatus = status;
+      }
+    });
+    return bestStatus;
+  };
+
+  const getSelectionSummary = (focusedCommandUnit: CommandUnit | null): { title: string; summary: string } => {
+    if (world.selectionScope === "truck" && world.selectedTruckIds.length > 0) {
+      const unitName = focusedCommandUnit?.name ?? "Unit";
+      return {
+        title: "Truck Control",
+        summary: `${world.selectedTruckIds.length} truck(s) selected in ${unitName}.`
+      };
+    }
+    if (world.selectedCommandUnitIds.length === 1 && focusedCommandUnit) {
+      return {
+        title: "Command Unit",
+        summary: `${focusedCommandUnit.name} selected with ${focusedCommandUnit.truckIds.length} truck(s).`
+      };
+    }
+    if (world.selectedCommandUnitIds.length > 1) {
+      return {
+        title: "Command Units",
+        summary: `${world.selectedCommandUnitIds.length} command units selected.`
+      };
+    }
+    return {
+      title: "Command",
+      summary: "Select a command unit or Alt-click a truck for direct control."
+    };
   };
 
   const removeTruckBeacon = (unitId: number): void => {
@@ -2209,58 +2432,11 @@ export const createThreeTest = (
       if (!unit) {
         return;
       }
-      const interpolated = resolveInterpolatedUnitPosition(unit);
-      selectAndPanToUnit(unit.id, interpolated.x, interpolated.y);
+      selectAndPanToTruck(unit, { truckScope: event.altKey, toggle: event.shiftKey });
     });
     truckBeaconOverlayRoot.append(root, connector);
     const created: TruckBeaconElements = { root, connector, name, status };
     truckBeaconElements.set(unitId, created);
-    return created;
-  };
-
-  const ensureUnitTrayCard = (unitId: number): UnitTrayCardElements => {
-    const existing = unitTrayCards.get(unitId);
-    if (existing) {
-      return existing;
-    }
-    cardState.register(`unit:${unitId}`);
-    const root = document.createElement("div");
-    root.className = "three-test-unit-card";
-    const name = document.createElement("div");
-    name.className = "three-test-unit-name";
-    const metrics = document.createElement("div");
-    metrics.className = "three-test-unit-metrics";
-    const actions = document.createElement("div");
-    actions.className = "three-test-unit-actions";
-    const actionA = document.createElement("button");
-    actionA.type = "button";
-    actionA.className = "three-test-unit-action";
-    const actionB = document.createElement("button");
-    actionB.type = "button";
-    actionB.className = "three-test-unit-action";
-    actions.append(actionA, actionB);
-    root.append(name, metrics, actions);
-    root.addEventListener("pointerdown", (event) => {
-      event.stopPropagation();
-    });
-    root.addEventListener("click", (event) => {
-      event.preventDefault();
-      event.stopPropagation();
-      const unit = world.units.find((entry) => entry.id === unitId) ?? null;
-      if (!unit) {
-        return;
-      }
-      if (unit.kind === "truck") {
-        const interpolated = resolveInterpolatedUnitPosition(unit);
-        selectAndPanToUnit(unit.id, interpolated.x, interpolated.y);
-        return;
-      }
-      playUiCue("click");
-      dispatchPhaseUiCommand({ type: "action", action: "select-unit", payload: { unitId: String(unitId) } });
-    });
-    unitTrayList.appendChild(root);
-    const created: UnitTrayCardElements = { root, name, metrics, actionA, actionB };
-    unitTrayCards.set(unitId, created);
     return created;
   };
 
@@ -2273,142 +2449,280 @@ export const createThreeTest = (
       return;
     }
     lastUnitTrayUpdateAt = time;
-    if (world.units.length <= 0) {
+    if (world.commandUnits.length <= 0) {
       unitTrayRoot.classList.add("hidden");
       return;
     }
     unitTrayRoot.classList.remove("hidden");
-    const visibleUnits = world.units.filter((unit) => unit.kind === "truck" || unit.carrierId === null);
-    const liveIds = new Set<number>();
-    visibleUnits.forEach((unit) => {
-      liveIds.add(unit.id);
-      const card = ensureUnitTrayCard(unit.id);
-      const rosterLabel = unit.rosterId !== null ? getUnitLabel(unit.rosterId) : getUnitLabel(unit.id);
-      const selected = world.selectedUnitIds.includes(unit.id);
-      card.root.classList.toggle("is-selected", selected);
-      card.name.textContent = `${rosterLabel} (${unit.kind})`;
-      const crewMode = unit.kind === "truck" ? unit.crewMode : "foot";
-      const sprayMode = unit.kind === "truck" ? getSprayModeLabel(unit.formation) : "n/a";
-      card.metrics.textContent = `Move ${getUnitMoveStatus(unit)} | Crew ${crewMode} | Spray ${sprayMode}`;
-      const focusHint =
-        unit.kind === "truck" ? "Click to select and center the camera on this truck." : "Click to select this unit.";
-      card.root.title = `${rosterLabel}. ${focusHint}`;
-      card.root.setAttribute("aria-label", `${rosterLabel}. ${focusHint}`);
-      if (unit.kind === "truck") {
-        card.actionA.disabled = false;
-        card.actionA.textContent = unit.crewMode === "boarded" ? "Deploy" : "Board";
-        card.actionA.onclick = (event) => {
-          event.preventDefault();
-          event.stopPropagation();
-          dispatchPhaseUiCommand({ type: "action", action: "select-unit", payload: { unitId: String(unit.id) } });
-          dispatchPhaseUiCommand({
-            type: "action",
-            action: unit.crewMode === "boarded" ? "crew-deploy" : "crew-board"
-          });
-        };
-        card.actionB.disabled = false;
-        card.actionB.textContent = "Backburn";
-        card.actionB.onclick = (event) => {
-          event.preventDefault();
-          event.stopPropagation();
-          dispatchPhaseUiCommand({ type: "action", action: "select-unit", payload: { unitId: String(unit.id) } });
-          dispatchPhaseUiCommand({ type: "action", action: "backburn" });
-        };
-      } else {
-        card.actionA.disabled = true;
-        card.actionA.textContent = "Crew";
-        card.actionA.onclick = null;
-        card.actionB.disabled = true;
-        card.actionB.textContent = "Task";
-        card.actionB.onclick = null;
-      }
-    });
+    const commandUnits = [...world.commandUnits].sort((left, right) => left.id - right.id);
+    const commandUnitById = new Map(commandUnits.map((entry) => [entry.id, entry] as const));
+    const focusedCommandUnit =
+      (world.focusedCommandUnitId !== null ? commandUnitById.get(world.focusedCommandUnitId) ?? null : null) ??
+      (world.selectedCommandUnitIds.length === 1 ? commandUnitById.get(world.selectedCommandUnitIds[0]!) ?? null : null);
+    const showTruckStrip =
+      !!focusedCommandUnit && (world.selectionScope === "truck" || world.selectedCommandUnitIds.length === 1);
 
-    Array.from(unitTrayCards.keys()).forEach((unitId) => {
-      if (liveIds.has(unitId)) {
+    commandUnitRow.replaceChildren();
+    commandUnits.forEach((commandUnit) => {
+      const trucks = getCommandUnitTrucks(commandUnit);
+      if (trucks.length <= 0) {
         return;
       }
-      const card = unitTrayCards.get(unitId);
-      if (card) {
-        card.root.remove();
-      }
-      unitTrayCards.delete(unitId);
-      cardState.remove(`unit:${unitId}`);
+      const totalCrew = trucks.reduce((sum, truck) => sum + truck.crewIds.length, 0);
+      const totalCrewCapacity = trucks.length * TRUCK_CAPACITY;
+      const totalWater = trucks.reduce((sum, truck) => sum + truck.water, 0);
+      const totalCapacity = trucks.reduce((sum, truck) => sum + truck.waterCapacity, 0);
+      const waterRatio = getWaterRatio(totalWater, totalCapacity);
+      const aggregateAlerts = trucks.flatMap((truck) => truck.currentAlerts);
+      const highestAlert = resolveHighestAlert(aggregateAlerts);
+      const effectiveStatus = resolveMajorityStatus(trucks);
+      const overrideCount = trucks.filter((truck) => truck.truckOverrideIntent !== null).length;
+      const alertGlyphs = getAlertGlyphs(aggregateAlerts);
+
+      const card = document.createElement("button");
+      card.type = "button";
+      card.className = "three-test-command-unit-card";
+      const selected =
+        world.selectedCommandUnitIds.includes(commandUnit.id) ||
+        (world.selectionScope === "truck" && world.focusedCommandUnitId === commandUnit.id);
+      card.classList.toggle("is-selected", selected);
+      card.classList.toggle("is-focused", world.focusedCommandUnitId === commandUnit.id);
+
+      const header = document.createElement("div");
+      header.className = "three-test-command-unit-header";
+      const name = document.createElement("div");
+      name.className = "three-test-command-unit-name";
+      name.textContent = commandUnit.name;
+      header.append(name);
+
+      const metrics = document.createElement("div");
+      metrics.className = "three-test-command-unit-stats";
+      const truckStat = document.createElement("span");
+      truckStat.className = "three-test-command-unit-stat";
+      truckStat.textContent = `🚒×${trucks.length}`;
+      const crewStat = document.createElement("span");
+      crewStat.className = "three-test-command-unit-stat";
+      crewStat.textContent = `👨 ${totalCrew}/${totalCrewCapacity}`;
+      metrics.append(truckStat, crewStat);
+
+      const waterLine = document.createElement("div");
+      waterLine.className = "three-test-command-unit-waterline";
+      const waterIcon = document.createElement("span");
+      waterIcon.className = "three-test-command-unit-watericon";
+      waterIcon.textContent = "💧";
+      const waterBars = document.createElement("div");
+      waterBars.className = "three-test-command-unit-waterbars";
+      trucks.forEach((truck) => {
+        const truckWaterRatio = getWaterRatio(truck.water, truck.waterCapacity);
+        const glyph = document.createElement("span");
+        glyph.className = "three-test-command-unit-waterbar";
+        glyph.dataset.level = getWaterGlyphLevel(truckWaterRatio);
+        glyph.textContent = getWaterGlyph(truckWaterRatio);
+        glyph.title = `${getTruckLabel(truck)} ${Math.round(truckWaterRatio * 100)}% water`;
+        waterBars.appendChild(glyph);
+      });
+      waterLine.append(waterIcon, waterBars);
+
+      const signals = document.createElement("div");
+      signals.className = "three-test-command-unit-signals";
+      const statusSignal = document.createElement("span");
+      statusSignal.className = "three-test-command-unit-signal";
+      statusSignal.dataset.kind = "status";
+      statusSignal.textContent = getCommandUnitStatusGlyph(effectiveStatus);
+      statusSignal.title = effectiveStatus;
+      signals.appendChild(statusSignal);
+      alertGlyphs.forEach((glyphText) => {
+        const signal = document.createElement("span");
+        signal.className = "three-test-command-unit-signal";
+        signal.dataset.kind = "alert";
+        if (highestAlert && getSeverityForAlert(highestAlert) === "critical") {
+          signal.classList.add("three-test-alert-pulse");
+        }
+        signal.textContent = glyphText;
+        signal.title = highestAlert ? getAlertText(highestAlert) : "Alert";
+        signals.appendChild(signal);
+      });
+
+      const intentLabel = commandUnit.currentIntent
+        ? `${getCommandTypeLabel(commandUnit.currentIntent.type)} ${getBehaviourLabel(commandUnit.currentIntent.behaviourMode)}`
+        : "Auto";
+      card.append(header, metrics, waterLine, signals);
+      card.title = `${commandUnit.name}. ${trucks.length} truck(s), ${totalCrew}/${totalCrewCapacity} crew, ${Math.round(
+        waterRatio * 100
+      )}% water. ${overrideCount > 0 ? `${intentLabel} with ${overrideCount} override.` : `${intentLabel}.`}`;
+      card.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        dispatchSelectionAction("select-command-unit", {
+          commandUnitId: String(commandUnit.id),
+          ...(event.shiftKey ? { toggle: "1" } : {})
+        });
+      });
+      commandUnitRow.appendChild(card);
     });
 
-    const selectedUnits = world.units.filter((unit) => world.selectedUnitIds.includes(unit.id));
-    if (selectedUnits.length === 1) {
-      const unit = selectedUnits[0];
-      const rosterLabel = unit.rosterId !== null ? getUnitLabel(unit.rosterId) : getUnitLabel(unit.id);
-      const etaSteps = Math.max(0, unit.path.length - unit.pathIndex);
-      const targetText = unit.target ? `${unit.target.x},${unit.target.y}` : "--";
-      unitTrayGroupCard.classList.add("hidden");
-      unitTrayDetailCard.classList.remove("hidden");
-      unitTrayDetailCard.innerHTML = "";
-      const title = document.createElement("div");
-      title.className = "three-test-unit-detail-title";
-      title.textContent = `${rosterLabel} (${unit.kind})`;
-      const stats = document.createElement("div");
-      stats.className = "three-test-unit-detail-stats";
-      stats.textContent = `Crew ${unit.crewIds.length} | Passengers ${unit.passengerIds.length} | Target ${targetText} | ETA ${etaSteps} | Speed ${unit.speed.toFixed(
-        2
-      )} | Radius ${unit.radius.toFixed(2)} | Power ${unit.power.toFixed(2)}`;
-      const actions = document.createElement("div");
-      actions.className = "three-test-unit-detail-actions";
-      const addAction = (label: string, action: string): void => {
-        const button = document.createElement("button");
-        button.type = "button";
-        button.className = "three-test-unit-action";
-        button.textContent = label;
-        button.addEventListener("click", (event) => {
+    if (showTruckStrip && focusedCommandUnit) {
+      const focusedTrucks = getCommandUnitTrucks(focusedCommandUnit);
+      truckStrip.classList.remove("hidden");
+      truckStripTitle.textContent = `${focusedCommandUnit.name} trucks`;
+      truckStripMeta.textContent =
+        world.selectionScope === "truck"
+          ? `${world.selectedTruckIds.length} selected`
+          : `${focusedTrucks.length} available`;
+      truckStripRow.replaceChildren();
+      focusedTrucks.forEach((truck) => {
+        const waterRatio = getWaterRatio(truck.water, truck.waterCapacity);
+        const effectiveIntent = getEffectiveTruckIntent(truck, commandUnitById);
+        const highestAlert = resolveHighestAlert(truck.currentAlerts);
+        const tile = document.createElement("button");
+        tile.type = "button";
+        tile.className = "three-test-truck-tile";
+        tile.classList.toggle("is-selected", world.selectedTruckIds.includes(truck.id));
+        if (highestAlert && getSeverityForAlert(highestAlert) === "critical") {
+          tile.classList.add("three-test-alert-pulse");
+        }
+
+        const tileHeader = document.createElement("div");
+        tileHeader.className = "three-test-truck-tile-header";
+        const tileName = document.createElement("div");
+        tileName.className = "three-test-truck-tile-name";
+        tileName.textContent = getTruckLabel(truck);
+        const tileStatus = document.createElement("span");
+        tileStatus.className = "three-test-truck-tile-status";
+        tileStatus.dataset.status = truck.currentStatus;
+        tileStatus.textContent = `${getStatusIcon(truck.currentStatus)} ${truck.currentStatus}`;
+        tileHeader.append(tileName, tileStatus);
+
+        const tileWater = document.createElement("div");
+        tileWater.className = "three-test-command-unit-water";
+        const tileWaterFill = document.createElement("div");
+        tileWaterFill.className = "three-test-command-unit-water-fill";
+        tileWaterFill.style.width = `${Math.round(waterRatio * 100)}%`;
+        tileWater.appendChild(tileWaterFill);
+
+        const tileMeta = document.createElement("div");
+        tileMeta.className = "three-test-truck-tile-meta";
+        tileMeta.textContent = `${getWaterGlyph(waterRatio)} ${Math.round(waterRatio * 100)}% | ${
+          effectiveIntent ? getCommandTypeLabel(effectiveIntent.type) : "Auto"
+        }`;
+        tile.append(tileHeader, tileWater, tileMeta);
+
+        if (truck.truckOverrideIntent || highestAlert) {
+          const chips = document.createElement("div");
+          chips.className = "three-test-truck-tile-chips";
+          if (truck.truckOverrideIntent) {
+            const chip = document.createElement("span");
+            chip.className = "three-test-truck-chip";
+            chip.textContent = "Override";
+            chips.appendChild(chip);
+          }
+          if (highestAlert) {
+            const chip = document.createElement("span");
+            chip.className = "three-test-truck-chip";
+            chip.dataset.severity = getSeverityForAlert(highestAlert);
+            chip.textContent = getAlertText(highestAlert);
+            chips.appendChild(chip);
+          }
+          tile.appendChild(chips);
+        }
+
+        tile.addEventListener("click", (event) => {
           event.preventDefault();
           event.stopPropagation();
-          dispatchPhaseUiCommand({ type: "action", action: "select-unit", payload: { unitId: String(unit.id) } });
-          dispatchPhaseUiCommand({ type: "action", action });
+          dispatchSelectionAction("select-truck", {
+            truckId: String(truck.id),
+            ...(event.shiftKey ? { toggle: "1" } : {})
+          });
         });
-        actions.appendChild(button);
-      };
-      if (unit.kind === "truck") {
-        addAction(unit.crewMode === "boarded" ? "Deploy Crew" : "Board Crew", unit.crewMode === "boarded" ? "crew-deploy" : "crew-board");
-        addAction("Spray Precision", "formation-narrow");
-        addAction("Spray Balanced", "formation-medium");
-        addAction("Spray Suppression", "formation-wide");
-      }
-      unitTrayDetailCard.append(title, stats, actions);
-    } else if (selectedUnits.length > 1) {
-      const selectedTrucks = selectedUnits.filter((unit) => unit.kind === "truck");
-      unitTrayDetailCard.classList.add("hidden");
-      unitTrayGroupCard.classList.remove("hidden");
-      unitTrayGroupCard.innerHTML = "";
-      const title = document.createElement("div");
-      title.className = "three-test-unit-detail-title";
-      title.textContent = `${selectedUnits.length} units selected`;
-      const stats = document.createElement("div");
-      stats.className = "three-test-unit-detail-stats";
-      stats.textContent = `Shared truck actions apply to ${selectedTrucks.length} selected trucks.`;
-      const actions = document.createElement("div");
-      actions.className = "three-test-unit-detail-actions";
-      const addShared = (label: string, action: string): void => {
-        const button = document.createElement("button");
-        button.type = "button";
-        button.className = "three-test-unit-action";
-        button.textContent = label;
-        button.addEventListener("click", (event) => {
-          event.preventDefault();
-          event.stopPropagation();
-          dispatchPhaseUiCommand({ type: "action", action });
-        });
-        actions.appendChild(button);
-      };
-      addShared("Board Crew", "crew-board");
-      addShared("Deploy Crew", "crew-deploy");
-      addShared("Precision", "formation-narrow");
-      addShared("Balanced", "formation-medium");
-      addShared("Suppression", "formation-wide");
-      unitTrayGroupCard.append(title, stats, actions);
+        truckStripRow.appendChild(tile);
+      });
     } else {
-      unitTrayDetailCard.classList.add("hidden");
-      unitTrayGroupCard.classList.add("hidden");
+      truckStrip.classList.add("hidden");
+      truckStripRow.replaceChildren();
+    }
+
+    commandBarRight.replaceChildren();
+    const selectionSummary = getSelectionSummary(focusedCommandUnit);
+    const title = document.createElement("div");
+    title.className = "three-test-command-panel-title";
+    title.textContent = selectionSummary.title;
+    const summary = document.createElement("div");
+    summary.className = "three-test-command-panel-summary";
+    summary.textContent = selectionSummary.summary;
+    const hint = document.createElement("div");
+    hint.className = "three-test-command-panel-hint";
+    hint.textContent =
+      world.selectionScope === "truck"
+        ? "Truck overrides take priority over the parent unit until rejoined."
+        : "Right-click places a point order. Drag right-click for line or area orders.";
+    commandBarRight.append(title, summary, hint);
+
+    const commandModeSection = document.createElement("div");
+    commandModeSection.className = "three-test-command-panel-section";
+    const commandModeLabel = document.createElement("div");
+    commandModeLabel.className = "three-test-command-panel-label";
+    commandModeLabel.textContent = `Mode ${getCommandTypeLabel(inputState.commandMode)}`;
+    const commandModeGrid = document.createElement("div");
+    commandModeGrid.className = "three-test-command-panel-grid";
+    const addPanelButton = (
+      container: HTMLElement,
+      labelText: string,
+      action: string,
+      active = false,
+      options?: { danger?: boolean; disabled?: boolean }
+    ): void => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "three-test-command-button";
+      if (active) {
+        button.classList.add("is-active");
+      }
+      if (options?.danger) {
+        button.classList.add("is-danger");
+      }
+      button.disabled = options?.disabled ?? false;
+      button.textContent = labelText;
+      button.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        dispatchSelectionAction(action);
+      });
+      container.appendChild(button);
+    };
+    addPanelButton(commandModeGrid, "Auto", "command-clear", inputState.commandMode === null);
+    addPanelButton(commandModeGrid, "Move", "command-mode-move", inputState.commandMode === "move");
+    addPanelButton(commandModeGrid, "Suppress", "command-mode-suppress", inputState.commandMode === "suppress");
+    addPanelButton(commandModeGrid, "Contain", "command-mode-contain", inputState.commandMode === "contain");
+    addPanelButton(commandModeGrid, "Backburn", "command-mode-backburn", inputState.commandMode === "backburn", {
+      danger: true
+    });
+    commandModeSection.append(commandModeLabel, commandModeGrid);
+    commandBarRight.appendChild(commandModeSection);
+
+    const behaviourSection = document.createElement("div");
+    behaviourSection.className = "three-test-command-panel-section";
+    const behaviourLabel = document.createElement("div");
+    behaviourLabel.className = "three-test-command-panel-label";
+    behaviourLabel.textContent = `Behavior ${getBehaviourLabel(inputState.behaviourMode)}`;
+    const behaviourGrid = document.createElement("div");
+    behaviourGrid.className = "three-test-command-panel-grid three-test-command-panel-grid--triple";
+    addPanelButton(behaviourGrid, "Aggressive", "behaviour-aggressive", inputState.behaviourMode === "aggressive");
+    addPanelButton(behaviourGrid, "Balanced", "behaviour-balanced", inputState.behaviourMode === "balanced");
+    addPanelButton(behaviourGrid, "Defensive", "behaviour-defensive", inputState.behaviourMode === "defensive");
+    behaviourSection.append(behaviourLabel, behaviourGrid);
+    commandBarRight.appendChild(behaviourSection);
+
+    if (world.selectionScope === "truck" && world.selectedTruckIds.length > 0) {
+      const rejoinSection = document.createElement("div");
+      rejoinSection.className = "three-test-command-panel-section";
+      const rejoinLabel = document.createElement("div");
+      rejoinLabel.className = "three-test-command-panel-label";
+      rejoinLabel.textContent = "Truck Overrides";
+      const rejoinButtonWrap = document.createElement("div");
+      rejoinButtonWrap.className = "three-test-command-panel-grid";
+      addPanelButton(rejoinButtonWrap, "Rejoin Unit", "rejoin-command-unit");
+      rejoinSection.append(rejoinLabel, rejoinButtonWrap);
+      commandBarRight.appendChild(rejoinSection);
     }
   };
 
@@ -4353,7 +4667,8 @@ export const createThreeTest = (
       inputState,
       rng: pointerCommandRng,
       tile: mapTile,
-      shiftKey: event.shiftKey
+      shiftKey: event.shiftKey,
+      altKey: event.altKey
     });
     const handledClear = !handledPrimary
       ? handleClearFuelBreakTileClick({
@@ -4408,13 +4723,13 @@ export const createThreeTest = (
       return;
     }
     if (dragDistance < FORMATION_DRAG_THRESHOLD_PX) {
-      const handledRetask = handleMapRetaskTileCommand({ state: world, tile: end });
+      const handledRetask = handleMapRetaskTileCommand({ state: world, inputState, tile: end });
       if (handledRetask) {
         inputState.lastInteractionTime = performance.now();
       }
       return;
     }
-    const handledFormation = handleMapFormationDragCommand({ state: world, start, end });
+    const handledFormation = handleMapFormationDragCommand({ state: world, inputState, start, end });
     if (handledFormation) {
       inputState.lastInteractionTime = performance.now();
     }
@@ -5603,7 +5918,6 @@ export const createThreeTest = (
     truckBeaconElements.clear();
     pinnedTownCards.clear();
     dockCards.clear();
-    unitTrayCards.clear();
     selectedTownId = null;
     focusedTownId = null;
     baseFocused = false;
@@ -5884,13 +6198,12 @@ export const createThreeTest = (
         const snapshot = fireFx.getSparkDebugSnapshot();
         if (time - sparkDebugLastUiAt >= 100) {
           sparkDebugOverlay.textContent =
-            `SPARK DEBUG (${snapshot.mode})` +
+            `SPARK DEBUG` +
             ` | flames:${snapshot.visibleFlameTiles}` +
             ` | clusters:${snapshot.clusterCount}/${snapshot.clusteredTiles}` +
             ` | bed:${snapshot.clusterBedInstances}` +
             ` | plume:${snapshot.clusterPlumeSpawns}` +
             ` | tip:${snapshot.heroTipSparkEmitted}/${snapshot.heroTipSparkAttempts}` +
-            ` | embers:${snapshot.freeEmberEmitted}/${snapshot.freeEmberAttempts}` +
             ` | dropped:${snapshot.droppedByInstanceCap}` +
             ` | total:${snapshot.finalSparkInstanceCount}`;
           sparkDebugLastUiAt = time;

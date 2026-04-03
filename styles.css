@@ -1755,6 +1755,315 @@ canvas {
   z-index: 13;
 }
 
+.three-test-command-bar {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(260px, 320px);
+  gap: 8px;
+  align-items: end;
+}
+
+.three-test-command-bar-left {
+  min-width: 0;
+  display: grid;
+  gap: 8px;
+}
+
+.three-test-command-unit-row,
+.three-test-truck-strip-row {
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  padding-bottom: 4px;
+}
+
+.three-test-command-unit-card,
+.three-test-truck-tile {
+  appearance: none;
+  border: 1px solid var(--three-test-unit-card-border);
+  background: var(--three-test-unit-card-bg);
+  color: var(--three-test-text-primary);
+  border-radius: 12px;
+  padding: 10px;
+  display: grid;
+  gap: 7px;
+  text-align: left;
+  cursor: pointer;
+  box-shadow: none;
+}
+
+.three-test-command-unit-card {
+  flex: 0 0 216px;
+}
+
+.three-test-truck-tile {
+  flex: 0 0 180px;
+}
+
+.three-test-command-unit-card:hover,
+.three-test-command-unit-card:focus-visible,
+.three-test-truck-tile:hover,
+.three-test-truck-tile:focus-visible {
+  border-color: color-mix(in srgb, var(--three-test-unit-card-border) 54%, var(--three-test-accent));
+  transform: none;
+}
+
+.three-test-command-unit-card.is-selected,
+.three-test-command-unit-card.is-focused,
+.three-test-truck-tile.is-selected {
+  border-color: var(--three-test-accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--three-test-accent) 26%, transparent);
+}
+
+.three-test-command-unit-header,
+.three-test-truck-tile-header,
+.three-test-truck-strip-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.three-test-command-unit-name,
+.three-test-truck-tile-name,
+.three-test-command-panel-title,
+.three-test-truck-strip-title {
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.three-test-command-unit-header {
+  justify-content: flex-start;
+}
+
+.three-test-command-unit-stats,
+.three-test-command-unit-waterline,
+.three-test-command-unit-signals {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  white-space: nowrap;
+}
+
+.three-test-command-unit-stat,
+.three-test-command-unit-watericon,
+.three-test-command-unit-signal {
+  font-size: 12px;
+  line-height: 1;
+}
+
+.three-test-command-unit-waterbars {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.three-test-command-unit-waterbar {
+  font-size: 15px;
+  line-height: 1;
+  letter-spacing: 0.04em;
+}
+
+.three-test-command-unit-waterbar[data-level="high"] {
+  color: #8fd9f0;
+}
+
+.three-test-command-unit-waterbar[data-level="mid"] {
+  color: #75bae4;
+}
+
+.three-test-command-unit-waterbar[data-level="low"] {
+  color: #d6be6c;
+}
+
+.three-test-command-unit-waterbar[data-level="empty"] {
+  color: #d66b5f;
+}
+
+.three-test-command-unit-signal[data-kind="status"] {
+  filter: saturate(1.05);
+}
+
+.three-test-command-unit-signal[data-kind="alert"] {
+  opacity: 0.96;
+}
+
+.three-test-command-unit-status,
+.three-test-truck-tile-status {
+  font-size: 10px;
+  line-height: 1;
+  padding: 4px 6px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.06);
+  text-transform: capitalize;
+  white-space: nowrap;
+}
+
+.three-test-command-unit-status[data-status="suppressing"],
+.three-test-truck-tile-status[data-status="suppressing"] {
+  background: rgba(209, 109, 54, 0.18);
+  border-color: rgba(233, 148, 90, 0.32);
+}
+
+.three-test-command-unit-status[data-status="moving"],
+.three-test-truck-tile-status[data-status="moving"] {
+  background: rgba(82, 128, 198, 0.18);
+  border-color: rgba(134, 168, 222, 0.32);
+}
+
+.three-test-command-unit-status[data-status="retreating"],
+.three-test-truck-tile-status[data-status="retreating"] {
+  background: rgba(184, 68, 53, 0.22);
+  border-color: rgba(230, 115, 96, 0.36);
+}
+
+.three-test-command-unit-alert,
+.three-test-truck-chip {
+  font-size: 10px;
+  line-height: 1;
+  padding: 4px 6px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.05);
+  white-space: nowrap;
+}
+
+.three-test-command-unit-alert[data-severity="warning"],
+.three-test-truck-chip[data-severity="warning"] {
+  background: rgba(165, 126, 38, 0.22);
+  border-color: rgba(236, 192, 77, 0.34);
+}
+
+.three-test-command-unit-alert[data-severity="critical"],
+.three-test-truck-chip[data-severity="critical"] {
+  background: rgba(184, 68, 53, 0.24);
+  border-color: rgba(233, 112, 93, 0.38);
+}
+
+.three-test-command-unit-water {
+  position: relative;
+  height: 8px;
+  border-radius: 999px;
+  overflow: hidden;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.three-test-command-unit-water-fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  background: linear-gradient(90deg, rgba(81, 162, 219, 0.94), rgba(119, 201, 230, 0.96));
+}
+
+.three-test-command-unit-metrics,
+.three-test-command-unit-meta,
+.three-test-truck-tile-meta,
+.three-test-command-panel-summary,
+.three-test-command-panel-hint,
+.three-test-truck-strip-meta {
+  font-size: 11px;
+  color: color-mix(in srgb, var(--three-test-text-primary) 82%, transparent);
+  min-width: 0;
+}
+
+.three-test-command-unit-meta,
+.three-test-truck-tile-meta,
+.three-test-command-panel-hint {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.three-test-truck-tile-chips {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.three-test-truck-strip {
+  border-radius: 12px;
+  border: 1px solid var(--three-test-card-border);
+  background: var(--three-test-card-bg);
+  padding: 9px 10px;
+  display: grid;
+  gap: 8px;
+}
+
+.three-test-command-panel {
+  border-radius: 12px;
+  border: 1px solid var(--three-test-card-border);
+  background: var(--three-test-card-bg);
+  color: var(--three-test-text-primary);
+  padding: 10px;
+  display: grid;
+  gap: 10px;
+}
+
+.three-test-command-panel-section {
+  display: grid;
+  gap: 6px;
+}
+
+.three-test-command-panel-label {
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: color-mix(in srgb, var(--three-test-text-primary) 72%, transparent);
+}
+
+.three-test-command-panel-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.three-test-command-panel-grid--triple {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.three-test-command-button {
+  border: 1px solid var(--three-test-button-border);
+  background: var(--three-test-button-bg);
+  border-radius: 9px;
+  box-shadow: none;
+  padding: 7px 8px;
+  font-size: 11px;
+}
+
+.three-test-command-button:hover,
+.three-test-command-button:focus-visible {
+  transform: none;
+  background: var(--three-test-button-bg-hover);
+}
+
+.three-test-command-button.is-active {
+  border-color: var(--three-test-accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--three-test-accent) 22%, transparent);
+}
+
+.three-test-command-button.is-danger {
+  border-color: rgba(214, 104, 78, 0.3);
+  color: #ffd7cb;
+}
+
+.three-test-alert-pulse {
+  animation: three-test-alert-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes three-test-alert-pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 rgba(231, 122, 95, 0);
+  }
+
+  50% {
+    box-shadow: 0 0 0 3px rgba(231, 122, 95, 0.16);
+  }
+}
+
 .three-test-unit-tray-list {
   display: flex;
   gap: 8px;
@@ -5509,6 +5818,18 @@ input[type="text"] {
     width: min(270px, 45vw);
   }
 
+  .three-test-command-bar {
+    grid-template-columns: minmax(0, 1fr) minmax(240px, 280px);
+  }
+
+  .three-test-command-unit-card {
+    flex-basis: 196px;
+  }
+
+  .three-test-truck-tile {
+    flex-basis: 168px;
+  }
+
   .three-test-unit-card {
     flex-basis: 200px;
   }
@@ -5556,6 +5877,22 @@ input[type="text"] {
     left: 8px;
     right: 8px;
     bottom: 8px;
+  }
+
+  .three-test-command-bar {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .three-test-command-panel-grid--triple {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .three-test-command-unit-card {
+    flex-basis: 180px;
+  }
+
+  .three-test-truck-tile {
+    flex-basis: 156px;
   }
 
   .three-test-unit-card {

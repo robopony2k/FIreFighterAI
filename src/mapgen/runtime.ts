@@ -74,6 +74,7 @@ import {
   isFloodplainCandidate
 } from "./biome/BiomeSuitability.js";
 import { buildForestMask } from "./biome/ForestSpread.js";
+import { sampleDirectionalErosionDetail } from "./erosionDetail.js";
 
 const nextFrame = () =>
   new Promise<void>((resolve) => {
@@ -5567,6 +5568,8 @@ const computeMoistureValue = (elevation: number, waterDist: number): number => {
   return clamp(Math.pow(moisture, gamma), 0, 1);
 };
 
+const MAX_EROSION_OFFSET = 0.03;
+
 export async function runElevationStage(ctx: MapGenContext): Promise<void> {
   ctx.state.tiles = new Array(ctx.state.grid.totalTiles);
   await ctx.reportStage("Reticulating splines...", 0);
@@ -5585,42 +5588,100 @@ export async function runElevationStage(ctx: MapGenContext): Promise<void> {
 }
 
 export async function runErosionStage(ctx: MapGenContext): Promise<void> {
-  const { state } = ctx;
+  const { state, settings, cellSizeM, edgeDenomM } = ctx;
   if (!ctx.elevationMap) {
     throw new Error("Erosion stage missing elevation map.");
   }
   const input = ctx.elevationMap;
   const temp = new Float32Array(input.length);
+  const detailStrength = Math.min(MAX_EROSION_OFFSET, Math.max(0, settings.erosionDetailStrength));
+  const slopeMin = Math.max(0.0001, settings.erosionSlopeMaskMin);
+  const slopeMax = Math.max(slopeMin + 1e-4, settings.erosionSlopeMaskMax);
+  const coastFadeStart = Math.max(0.0005, settings.erosionCoastFade);
+  const coastFadeEnd = Math.max(coastFadeStart + 0.02, coastFadeStart * 3.2 + 0.02);
+  const trackStats = DEBUG_TERRAIN;
+  let coverage = 0;
+  let absOffsetSum = 0;
+  const absOffsets: number[] = [];
   for (let y = 0; y < state.grid.rows; y += 1) {
     for (let x = 0; x < state.grid.cols; x += 1) {
       const idx = indexFor(state.grid, x, y);
-      let sum = input[idx] ?? 0;
-      let count = 1;
-      if (x > 0) {
-        sum += input[idx - 1] ?? 0;
-        count += 1;
+      const center = input[idx] ?? 0;
+      const left = x > 0 ? (input[idx - 1] ?? center) : center;
+      const right = x < state.grid.cols - 1 ? (input[idx + 1] ?? center) : center;
+      const up = y > 0 ? (input[idx - state.grid.cols] ?? center) : center;
+      const down = y < state.grid.rows - 1 ? (input[idx + state.grid.cols] ?? center) : center;
+      const gradX = (right - left) * 0.5;
+      const gradY = (down - up) * 0.5;
+      const slope = Math.hypot(gradX, gradY);
+      const slopeMask = smoothstep(slopeMin, slopeMax, slope);
+      const steepMask = 1 - smoothstep(slopeMax * 3.25, Math.max(slopeMax * 7.5, slopeMax + 0.09), slope);
+      const edgeDistM = Math.min(x, y, state.grid.cols - 1 - x, state.grid.rows - 1 - y) * cellSizeM;
+      const edgeFactor = clamp(edgeDistM / edgeDenomM, 0, 1);
+      const seaLevel = clampSeaLevel(ctx.seaLevelBase + (1 - edgeFactor) * settings.edgeWaterBias, settings);
+      const headroom = center - seaLevel;
+      const coastMask = smoothstep(coastFadeStart, coastFadeEnd, headroom);
+      const mask = Math.pow(slopeMask * steepMask * coastMask, 0.78);
+      if (mask <= 0.001 || headroom <= 0.002) {
+        temp[idx] = center;
+        continue;
       }
-      if (x < state.grid.cols - 1) {
-        sum += input[idx + 1] ?? 0;
-        count += 1;
+
+      const worldX = getWorldX(settings, x);
+      const worldY = getWorldY(settings, y);
+      const detail = sampleDirectionalErosionDetail(
+        worldX,
+        worldY,
+        -gradX,
+        -gradY,
+        state.seed + 5407,
+        {
+          scaleM: settings.erosionDetailScaleM,
+          octaves: settings.erosionDetailOctaves,
+          slopeStrength: settings.erosionSlopeStrength,
+          branchStrength: settings.erosionBranchStrength
+        }
+      );
+      const downhillLength = Math.max(1e-6, Math.hypot(gradX, gradY));
+      const flowX = -gradX / downhillLength;
+      const flowY = -gradY / downhillLength;
+      const flowResponse = detail.derivX * flowX + detail.derivY * flowY;
+      const groove = -Math.pow(Math.max(0, detail.value), 1.35);
+      const ridge = Math.pow(Math.max(0, -detail.value), 1.08) * 0.42;
+      const branchBias = clamp(-flowResponse * 0.18, -0.65, 0.65);
+      const shapedDetail = clamp(groove + ridge + branchBias, -1.2, 1.2);
+      const reliefBoost = 0.9 + mask * 1.5 + smoothstep(0.015, 0.12, headroom) * 0.35;
+      const offset = clamp(
+        shapedDetail * detailStrength * reliefBoost * mask,
+        -detailStrength * 0.8,
+        detailStrength
+      );
+      temp[idx] = clamp(center + offset, 0, 1);
+      if (trackStats) {
+        const absOffset = Math.abs(offset);
+        absOffsetSum += absOffset;
+        absOffsets.push(absOffset);
+        if (absOffset >= 0.001) {
+          coverage += 1;
+        }
       }
-      if (y > 0) {
-        sum += input[idx - state.grid.cols] ?? 0;
-        count += 1;
-      }
-      if (y < state.grid.rows - 1) {
-        sum += input[idx + state.grid.cols] ?? 0;
-        count += 1;
-      }
-      const avg = sum / count;
-      temp[idx] = clamp((input[idx] ?? avg) * 0.88 + avg * 0.12, 0, 1);
     }
     if (await ctx.yieldIfNeeded()) {
-      await ctx.reportStage("Applying erosion...", (y + 1) / state.grid.rows);
+      await ctx.reportStage("Applying directional erosion...", (y + 1) / state.grid.rows);
     }
   }
   for (let i = 0; i < input.length; i += 1) {
     input[i] = temp[i] ?? input[i];
+  }
+  ctx.seaLevelBase = resolveSeaLevelBase(state, settings, input, cellSizeM);
+  if (trackStats && absOffsets.length > 0) {
+    absOffsets.sort((left, right) => left - right);
+    const p95Index = Math.min(absOffsets.length - 1, Math.floor((absOffsets.length - 1) * 0.95));
+    const meanAbsOffset = absOffsetSum / Math.max(1, input.length);
+    const coverageRatio = coverage / Math.max(1, input.length);
+    console.log(
+      `[erosiondetail] coverage=${coverageRatio.toFixed(4)} meanAbs=${meanAbsOffset.toFixed(5)} p95=${(absOffsets[p95Index] ?? 0).toFixed(5)}`
+    );
   }
   await emitStageSnapshot(ctx, "terrain:erosion");
 }

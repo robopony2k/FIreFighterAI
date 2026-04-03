@@ -1,4 +1,22 @@
-import type { RNG, Point, Unit, UnitKind, UnitSkill, RosterUnit, Formation } from "../core/types.js";
+import type {
+  AreaTarget,
+  BehaviourMode,
+  CommandFormation,
+  CommandIntent,
+  CommandTarget,
+  CommandType,
+  CommandUnit,
+  CommandUnitAlert,
+  CommandUnitStatus,
+  LineTarget,
+  Point,
+  RNG,
+  RosterUnit,
+  Unit,
+  UnitKind,
+  UnitSkill,
+  Formation
+} from "../core/types.js";
 import type { WorldState } from "../core/state.js";
 import type { EffectsState } from "../core/effectsState.js";
 import {
@@ -34,6 +52,7 @@ import { markFireBlockActiveByTile } from "./fire/activeBlocks.js";
 const FIRST_NAMES = ["Alex", "Casey", "Drew", "Jordan", "Parker", "Quinn", "Riley", "Sawyer", "Taylor", "Wyatt"];
 const LAST_NAMES = ["Cedar", "Hawk", "Keel", "Marsh", "Reed", "Stone", "Sutter", "Vale", "Wells", "Yates"];
 const TRUCK_PREFIX = ["Engine", "Tanker", "Brush", "Rescue"];
+const COMMAND_UNIT_NAMES = ["Alpha", "Bravo", "Charlie", "Delta"];
 const clamp = (value: number, min: number, max: number): number => Math.max(min, Math.min(max, value));
 const MOVING_SPRAY_SPEED_FACTOR = 0.6;
 const TRUCK_SUPPORT_POSITION_TOLERANCE = 1.85;
@@ -53,6 +72,15 @@ const THREAT_NEIGHBOR_DIRS = [
   { dx: -1, dy: 1 },
   { dx: -1, dy: -1 }
 ];
+const TRUCK_WATER_CAPACITY = 100;
+const TRUCK_WATER_REFILL_RATE = 18;
+const TRUCK_WATER_USE_RATE = 2.4;
+const FIREFIGHTER_WATER_USE_RATE = 1.6;
+const TRUCK_RIVER_REFILL_RADIUS = 2;
+const TRUCK_WATER_LOW_RATIO = 0.35;
+const TRUCK_WATER_CRITICAL_RATIO = 0.2;
+const BACKBURN_IGNITE_INTERVAL_DAYS = 0.18;
+const BACKBURN_IGNITE_RADIUS = 3.5;
 
 const createTraining = (): RosterUnit["training"] => ({
   speed: 0,
@@ -151,6 +179,780 @@ const nextFirefighterName = (rng: RNG): string => {
   const first = FIRST_NAMES[Math.floor(rng.next() * FIRST_NAMES.length)];
   const last = LAST_NAMES[Math.floor(rng.next() * LAST_NAMES.length)];
   return `${first} ${last}`;
+};
+
+const getTruckSortKey = (unit: Unit): number => unit.rosterId ?? unit.id;
+
+const getCommandUnitById = (state: WorldState, commandUnitId: number | null): CommandUnit | null => {
+  if (commandUnitId === null) {
+    return null;
+  }
+  return state.commandUnits.find((entry) => entry.id === commandUnitId) ?? null;
+};
+
+const getCommandUnitTruckIds = (state: WorldState, commandUnitId: number): number[] => {
+  const commandUnit = getCommandUnitById(state, commandUnitId);
+  if (!commandUnit) {
+    return [];
+  }
+  return commandUnit.truckIds.filter((truckId) => getUnitById(state, truckId)?.kind === "truck");
+};
+
+const getCommandUnitName = (index: number): string => {
+  if (index < COMMAND_UNIT_NAMES.length) {
+    return COMMAND_UNIT_NAMES[index]!;
+  }
+  return `Unit ${index + 1}`;
+};
+
+const normalizeCommandUnitSelection = (state: WorldState): void => {
+  const validCommandUnitIds = new Set(state.commandUnits.map((entry) => entry.id));
+  state.selectedCommandUnitIds = state.selectedCommandUnitIds.filter((id) => validCommandUnitIds.has(id));
+  const validTruckIds = new Set(state.units.filter((unit) => unit.kind === "truck").map((unit) => unit.id));
+  state.selectedTruckIds = state.selectedTruckIds.filter((id) => validTruckIds.has(id));
+  if (state.focusedCommandUnitId !== null && !validCommandUnitIds.has(state.focusedCommandUnitId)) {
+    state.focusedCommandUnitId = null;
+  }
+  if (state.focusedCommandUnitId === null) {
+    if (state.selectedTruckIds.length > 0) {
+      const focusedTruck = getUnitById(state, state.selectedTruckIds[0]!) ?? null;
+      state.focusedCommandUnitId = focusedTruck?.commandUnitId ?? null;
+    } else if (state.selectedCommandUnitIds.length > 0) {
+      state.focusedCommandUnitId = state.selectedCommandUnitIds[0]!;
+    }
+  }
+};
+
+const syncMirroredTruckSelection = (state: WorldState): void => {
+  let selectedTruckIds: number[] = [];
+  if (state.selectionScope === "truck") {
+    selectedTruckIds = [...state.selectedTruckIds];
+  } else {
+    const truckIds = new Set<number>();
+    state.selectedCommandUnitIds.forEach((commandUnitId) => {
+      getCommandUnitTruckIds(state, commandUnitId).forEach((truckId) => truckIds.add(truckId));
+    });
+    selectedTruckIds = [...truckIds];
+  }
+  state.selectedUnitIds = selectedTruckIds;
+  state.units.forEach((unit) => {
+    unit.selected = unit.kind === "truck" && selectedTruckIds.includes(unit.id);
+  });
+};
+
+export const syncCommandUnits = (state: WorldState): void => {
+  const deployedTrucks = state.units
+    .filter((unit) => unit.kind === "truck")
+    .sort((left, right) => getTruckSortKey(left) - getTruckSortKey(right));
+  const previousByName = new Map(state.commandUnits.map((entry, index) => [entry.name, { entry, index }] as const));
+  if (deployedTrucks.length === 0) {
+    state.commandUnits = [];
+    state.selectedCommandUnitIds = [];
+    state.selectedTruckIds = [];
+    state.focusedCommandUnitId = null;
+    state.commandUnitsRevision += 1;
+    syncMirroredTruckSelection(state);
+    return;
+  }
+
+  const nextGroupCount =
+    deployedTrucks.length <= 1
+      ? 1
+      : Math.min(deployedTrucks.length, Math.max(2, Math.min(4, Math.ceil(deployedTrucks.length / 5))));
+  const nextCommandUnits: CommandUnit[] = [];
+  let cursor = 0;
+  for (let groupIndex = 0; groupIndex < nextGroupCount; groupIndex += 1) {
+    const remainingGroups = nextGroupCount - groupIndex;
+    const remainingTrucks = deployedTrucks.length - cursor;
+    const chunkSize = Math.max(1, Math.ceil(remainingTrucks / remainingGroups));
+    const chunk = deployedTrucks.slice(cursor, cursor + chunkSize);
+    cursor += chunkSize;
+    const name = getCommandUnitName(groupIndex);
+    const previous = previousByName.get(name)?.entry ?? null;
+    nextCommandUnits.push({
+      id: previous?.id ?? state.nextCommandUnitId++,
+      name,
+      truckIds: chunk.map((unit) => unit.id),
+      currentIntent: previous?.currentIntent ?? null,
+      status: previous?.status ?? "holding",
+      revision: (previous?.revision ?? 0) + 1
+    });
+  }
+
+  state.units.forEach((unit) => {
+    unit.commandUnitId = null;
+  });
+  nextCommandUnits.forEach((commandUnit) => {
+    commandUnit.truckIds.forEach((truckId) => {
+      const truck = getUnitById(state, truckId);
+      if (!truck) {
+        return;
+      }
+      truck.commandUnitId = commandUnit.id;
+      truck.crewIds.forEach((crewId) => {
+        const crew = getUnitById(state, crewId);
+        if (crew) {
+          crew.commandUnitId = commandUnit.id;
+        }
+      });
+    });
+  });
+  state.commandUnits = nextCommandUnits;
+  state.commandUnitsRevision += 1;
+  normalizeCommandUnitSelection(state);
+  syncMirroredTruckSelection(state);
+};
+
+const setSelectionStatus = (state: WorldState): void => {
+  if (state.selectionScope === "truck") {
+    if (state.selectedTruckIds.length > 0) {
+      setStatus(state, `${state.selectedTruckIds.length} truck(s) selected. Right-click to issue orders.`);
+    } else {
+      resetStatus(state);
+    }
+    return;
+  }
+  if (state.selectedCommandUnitIds.length > 0) {
+    const label =
+      state.selectedCommandUnitIds.length === 1
+        ? getCommandUnitById(state, state.selectedCommandUnitIds[0]!)?.name ?? "Command unit"
+        : `${state.selectedCommandUnitIds.length} command units`;
+    setStatus(state, `${label} selected. Right-click to issue orders.`);
+  } else {
+    resetStatus(state);
+  }
+};
+
+export const clearCommandSelection = (state: WorldState): void => {
+  state.selectedCommandUnitIds = [];
+  state.selectedTruckIds = [];
+  state.focusedCommandUnitId = null;
+  state.selectionScope = "commandUnit";
+  syncMirroredTruckSelection(state);
+  resetStatus(state);
+};
+
+export const selectCommandUnit = (
+  state: WorldState,
+  commandUnitId: number | null,
+  options?: { append?: boolean; toggle?: boolean }
+): void => {
+  if (commandUnitId === null) {
+    clearCommandSelection(state);
+    return;
+  }
+  const commandUnit = getCommandUnitById(state, commandUnitId);
+  if (!commandUnit) {
+    return;
+  }
+  state.selectionScope = "commandUnit";
+  if (options?.toggle) {
+    if (state.selectedCommandUnitIds.includes(commandUnitId)) {
+      state.selectedCommandUnitIds = state.selectedCommandUnitIds.filter((id) => id !== commandUnitId);
+    } else {
+      state.selectedCommandUnitIds = [...state.selectedCommandUnitIds, commandUnitId];
+    }
+  } else if (options?.append) {
+    if (!state.selectedCommandUnitIds.includes(commandUnitId)) {
+      state.selectedCommandUnitIds = [...state.selectedCommandUnitIds, commandUnitId];
+    }
+  } else {
+    state.selectedCommandUnitIds = [commandUnitId];
+  }
+  state.selectedTruckIds = [];
+  state.focusedCommandUnitId = commandUnitId;
+  syncMirroredTruckSelection(state);
+  setSelectionStatus(state);
+};
+
+export const selectTruck = (
+  state: WorldState,
+  truck: Unit | null,
+  options?: { append?: boolean; toggle?: boolean }
+): void => {
+  if (!truck || truck.kind !== "truck") {
+    clearCommandSelection(state);
+    return;
+  }
+  state.selectionScope = "truck";
+  if (options?.toggle) {
+    if (state.selectedTruckIds.includes(truck.id)) {
+      state.selectedTruckIds = state.selectedTruckIds.filter((id) => id !== truck.id);
+    } else {
+      state.selectedTruckIds = [...state.selectedTruckIds, truck.id];
+    }
+  } else if (options?.append) {
+    if (!state.selectedTruckIds.includes(truck.id)) {
+      state.selectedTruckIds = [...state.selectedTruckIds, truck.id];
+    }
+  } else {
+    state.selectedTruckIds = [truck.id];
+  }
+  state.selectedCommandUnitIds = [];
+  state.focusedCommandUnitId = truck.commandUnitId;
+  syncMirroredTruckSelection(state);
+  setSelectionStatus(state);
+};
+
+export const returnToFocusedCommandUnitSelection = (state: WorldState): void => {
+  if (state.selectionScope !== "truck") {
+    return;
+  }
+  const focusedCommandUnitId =
+    state.focusedCommandUnitId ??
+    (state.selectedTruckIds.length > 0 ? getUnitById(state, state.selectedTruckIds[0]!)?.commandUnitId ?? null : null);
+  state.selectionScope = "commandUnit";
+  state.selectedTruckIds = [];
+  state.selectedCommandUnitIds = focusedCommandUnitId !== null ? [focusedCommandUnitId] : [];
+  state.focusedCommandUnitId = focusedCommandUnitId;
+  syncMirroredTruckSelection(state);
+  setSelectionStatus(state);
+};
+
+export const getSelectedTrucks = (state: WorldState): Unit[] =>
+  state.units.filter((unit) => unit.kind === "truck" && state.selectedUnitIds.includes(unit.id));
+
+export const getSelectedCommandUnits = (state: WorldState): CommandUnit[] =>
+  state.commandUnits.filter((entry) => state.selectedCommandUnitIds.includes(entry.id));
+
+const cloneCommandTarget = (target: CommandTarget): CommandTarget => {
+  if (target.kind === "point") {
+    return {
+      kind: "point",
+      point: { x: target.point.x, y: target.point.y }
+    };
+  }
+  if (target.kind === "line") {
+    return {
+      kind: "line",
+      start: { x: target.start.x, y: target.start.y },
+      end: { x: target.end.x, y: target.end.y }
+    };
+  }
+  return {
+    kind: "area",
+    start: { x: target.start.x, y: target.start.y },
+    end: { x: target.end.x, y: target.end.y }
+  };
+};
+
+const cloneCommandIntent = (intent: CommandIntent): CommandIntent => ({
+  type: intent.type,
+  target: cloneCommandTarget(intent.target),
+  formation: intent.formation,
+  behaviourMode: intent.behaviourMode
+});
+
+const commandTargetsEqual = (left: CommandTarget | null, right: CommandTarget | null): boolean => {
+  if (left === right) {
+    return true;
+  }
+  if (!left || !right || left.kind !== right.kind) {
+    return false;
+  }
+  switch (left.kind) {
+    case "point":
+      return right.kind === "point" && left.point.x === right.point.x && left.point.y === right.point.y;
+    case "line":
+    case "area":
+      return (
+        right.kind === left.kind &&
+        left.start.x === right.start.x &&
+        left.start.y === right.start.y &&
+        left.end.x === right.end.x &&
+        left.end.y === right.end.y
+      );
+  }
+};
+
+const commandIntentsEqual = (left: CommandIntent | null, right: CommandIntent | null): boolean => {
+  if (left === right) {
+    return true;
+  }
+  if (!left || !right) {
+    return false;
+  }
+  return (
+    left.type === right.type &&
+    left.formation === right.formation &&
+    left.behaviourMode === right.behaviourMode &&
+    commandTargetsEqual(left.target, right.target)
+  );
+};
+
+export const clearTruckOverrideIntents = (state: WorldState, truckIds?: number[]): void => {
+  const clearSet = truckIds ? new Set(truckIds) : null;
+  state.units.forEach((unit) => {
+    if (unit.kind !== "truck") {
+      return;
+    }
+    if (clearSet && !clearSet.has(unit.id)) {
+      return;
+    }
+    unit.truckOverrideIntent = null;
+  });
+};
+
+export const clearSelectedTruckOverrides = (state: WorldState): void => {
+  if (state.selectedTruckIds.length === 0) {
+    return;
+  }
+  clearTruckOverrideIntents(state, state.selectedTruckIds);
+  setStatus(state, "Selected trucks rejoined their command unit.");
+};
+
+const getSelectionCommandTargets = (state: WorldState): Unit[] => {
+  if (state.selectionScope === "truck") {
+    return getSelectedTrucks(state);
+  }
+  const truckIds = new Set<number>();
+  getSelectedCommandUnits(state).forEach((commandUnit) => {
+    commandUnit.truckIds.forEach((truckId) => truckIds.add(truckId));
+  });
+  return state.units.filter((unit) => unit.kind === "truck" && truckIds.has(unit.id));
+};
+
+export const applyCommandIntentToSelection = (state: WorldState, intent: CommandIntent): void => {
+  if (state.selectionScope === "truck") {
+    const selectedTrucks = getSelectedTrucks(state);
+    selectedTrucks.forEach((truck) => {
+      truck.truckOverrideIntent = cloneCommandIntent(intent);
+    });
+    if (selectedTrucks.length > 0) {
+      setStatus(state, `${selectedTrucks.length} truck(s) assigned ${intent.type} orders.`);
+    }
+    return;
+  }
+  const selectedCommandUnits = getSelectedCommandUnits(state);
+  selectedCommandUnits.forEach((commandUnit) => {
+    commandUnit.currentIntent = cloneCommandIntent(intent);
+    commandUnit.revision += 1;
+  });
+  clearTruckOverrideIntents(
+    state,
+    selectedCommandUnits.flatMap((commandUnit) => commandUnit.truckIds)
+  );
+  if (selectedCommandUnits.length > 0) {
+    const label = selectedCommandUnits.length === 1 ? selectedCommandUnits[0]!.name : `${selectedCommandUnits.length} command units`;
+    setStatus(state, `${label} assigned ${intent.type} orders.`);
+  }
+};
+
+export const getEffectiveTruckIntent = (state: WorldState, truck: Unit): CommandIntent | null => {
+  if (truck.kind !== "truck") {
+    return null;
+  }
+  if (truck.truckOverrideIntent) {
+    return truck.truckOverrideIntent;
+  }
+  return getCommandUnitById(state, truck.commandUnitId)?.currentIntent ?? null;
+};
+
+const getCommandTargetBounds = (target: CommandTarget): { minX: number; maxX: number; minY: number; maxY: number } => {
+  if (target.kind === "point") {
+    return {
+      minX: target.point.x,
+      maxX: target.point.x,
+      minY: target.point.y,
+      maxY: target.point.y
+    };
+  }
+  return {
+    minX: Math.min(target.start.x, target.end.x),
+    maxX: Math.max(target.start.x, target.end.x),
+    minY: Math.min(target.start.y, target.end.y),
+    maxY: Math.max(target.start.y, target.end.y)
+  };
+};
+
+const getCommandTargetCenter = (target: CommandTarget): Point => {
+  if (target.kind === "point") {
+    return target.point;
+  }
+  if (target.kind === "line") {
+    return {
+      x: Math.round((target.start.x + target.end.x) * 0.5),
+      y: Math.round((target.start.y + target.end.y) * 0.5)
+    };
+  }
+  return {
+    x: Math.round((target.start.x + target.end.x) * 0.5),
+    y: Math.round((target.start.y + target.end.y) * 0.5)
+  };
+};
+
+const pointToSegmentDistance = (point: Point, start: Point, end: Point): number => {
+  const abX = end.x - start.x;
+  const abY = end.y - start.y;
+  const abLenSq = abX * abX + abY * abY;
+  if (abLenSq <= 1e-6) {
+    return Math.hypot(point.x - start.x, point.y - start.y);
+  }
+  const t = clamp(((point.x - start.x) * abX + (point.y - start.y) * abY) / abLenSq, 0, 1);
+  const qx = start.x + abX * t;
+  const qy = start.y + abY * t;
+  return Math.hypot(point.x - qx, point.y - qy);
+};
+
+const pointInCommandTarget = (point: Point, target: CommandTarget): boolean => {
+  if (target.kind === "point") {
+    return Math.abs(point.x - target.point.x) <= 2 && Math.abs(point.y - target.point.y) <= 2;
+  }
+  if (target.kind === "line") {
+    return pointToSegmentDistance(point, target.start, target.end) <= 3.5;
+  }
+  const bounds = getCommandTargetBounds(target);
+  return point.x >= bounds.minX && point.x <= bounds.maxX && point.y >= bounds.minY && point.y <= bounds.maxY;
+};
+
+const resolveLooseSlotTarget = (state: WorldState, target: Point, count: number, index: number): Point => {
+  if (count <= 1) {
+    return target;
+  }
+  const angle = (Math.PI * 2 * index) / count;
+  const radius = count <= 2 ? 1 : count <= 4 ? 2 : 3;
+  const rawX = Math.round(target.x + Math.cos(angle) * radius);
+  const rawY = Math.round(target.y + Math.sin(angle) * radius);
+  return findNearestPassable(state, rawX, rawY, 2) ?? target;
+};
+
+const resolveAreaSlotTarget = (state: WorldState, target: AreaTarget, count: number, index: number): Point => {
+  const bounds = getCommandTargetBounds(target);
+  const width = Math.max(1, bounds.maxX - bounds.minX + 1);
+  const height = Math.max(1, bounds.maxY - bounds.minY + 1);
+  const columns = Math.max(1, Math.ceil(Math.sqrt(count)));
+  const rows = Math.max(1, Math.ceil(count / columns));
+  const column = index % columns;
+  const row = Math.floor(index / columns);
+  const rawX = Math.round(bounds.minX + ((column + 0.5) / columns) * width);
+  const rawY = Math.round(bounds.minY + ((row + 0.5) / rows) * height);
+  return findNearestPassable(state, rawX, rawY, 2) ?? getCommandTargetCenter(target);
+};
+
+const resolveLineSlotTarget = (state: WorldState, target: LineTarget, count: number, index: number): Point => {
+  const t = count <= 1 ? 0.5 : index / Math.max(1, count - 1);
+  const rawX = Math.round(target.start.x + (target.end.x - target.start.x) * t);
+  const rawY = Math.round(target.start.y + (target.end.y - target.start.y) * t);
+  return findNearestPassable(state, rawX, rawY, 2) ?? getCommandTargetCenter(target);
+};
+
+const resolveIntentSlotTarget = (state: WorldState, intent: CommandIntent, count: number, index: number): Point => {
+  if (intent.formation === "area" && intent.target.kind === "area") {
+    return resolveAreaSlotTarget(state, intent.target, count, index);
+  }
+  if (intent.formation === "line" && intent.target.kind === "line") {
+    return resolveLineSlotTarget(state, intent.target, count, index);
+  }
+  return resolveLooseSlotTarget(state, getCommandTargetCenter(intent.target), count, index);
+};
+
+const findNearestThreatForTarget = (state: WorldState, origin: Point, target: CommandTarget): Point | null => {
+  let best: Point | null = null;
+  let bestScore = Number.POSITIVE_INFINITY;
+  const bounds = getCommandTargetBounds(target);
+  const minX = Math.max(0, bounds.minX - 4);
+  const maxX = Math.min(state.grid.cols - 1, bounds.maxX + 4);
+  const minY = Math.max(0, bounds.minY - 4);
+  const maxY = Math.min(state.grid.rows - 1, bounds.maxY + 4);
+  for (let y = minY; y <= maxY; y += 1) {
+    for (let x = minX; x <= maxX; x += 1) {
+      const point = { x, y };
+      const idx = indexFor(state.grid, x, y);
+      const fireValue = state.tileFire[idx] ?? 0;
+      const heatValue = state.tileHeat[idx] ?? 0;
+      if (fireValue <= THREAT_FIRE_EPS && heatValue <= 0.08) {
+        continue;
+      }
+      const nearTarget = pointInCommandTarget(point, target);
+      const score =
+        Math.hypot(origin.x - x, origin.y - y) +
+        (nearTarget ? 0 : 6) -
+        fireValue * 4 -
+        heatValue * 0.5;
+      if (score < bestScore) {
+        bestScore = score;
+        best = point;
+      }
+    }
+  }
+  return best;
+};
+
+const isTruckUnsafe = (state: WorldState, truck: Unit): boolean => {
+  const tile = getUnitTile(truck);
+  const idx = indexFor(state.grid, tile.x, tile.y);
+  return (state.tileFire[idx] ?? 0) >= 0.2 || (state.tileHeat[idx] ?? 0) >= 0.45;
+};
+
+const moveTruckAwayFromThreat = (state: WorldState, truck: Unit, threatPoint: Point): void => {
+  const tile = getUnitTile(truck);
+  const dx = tile.x - threatPoint.x;
+  const dy = tile.y - threatPoint.y;
+  const scale = Math.max(1, Math.hypot(dx, dy));
+  const retreatX = Math.round(tile.x + (dx / scale) * 3);
+  const retreatY = Math.round(tile.y + (dy / scale) * 3);
+  const retreatTile = findNearestPassable(state, retreatX, retreatY, 3) ?? tile;
+  setUnitTargetIfNeeded(state, truck, retreatTile.x, retreatTile.y, false, { silent: true }, 0.8);
+  truck.currentStatus = "retreating";
+};
+
+const igniteBackburnTile = (state: WorldState, tileX: number, tileY: number): boolean => {
+  if (!inBounds(state.grid, tileX, tileY)) {
+    return false;
+  }
+  const idx = indexFor(state.grid, tileX, tileY);
+  const target = state.tiles[idx];
+  if (!target || target.fuel <= 0 || target.type === "water" || target.type === "road" || target.type === "base" || target.type === "house") {
+    return false;
+  }
+  if ((state.tileFire[idx] ?? 0) > THREAT_FIRE_EPS) {
+    return false;
+  }
+  target.fire = Math.min(1, 0.4 + target.fuel * 0.2);
+  target.heat = Math.max(target.heat, target.ignitionPoint * 1.1);
+  state.tileFire[idx] = target.fire;
+  state.tileHeat[idx] = target.heat;
+  clearScheduledIgnition(state, idx);
+  markFireBlockActiveByTile(state, idx);
+  return true;
+};
+
+const maybeIgniteBackburn = (state: WorldState, truck: Unit, intent: CommandIntent, slotTarget: Point): void => {
+  if (intent.type !== "backburn" || intent.target.kind !== "area") {
+    return;
+  }
+  if (truck.pathIndex < truck.path.length) {
+    return;
+  }
+  if (state.careerDay - truck.lastBackburnAt < BACKBURN_IGNITE_INTERVAL_DAYS) {
+    return;
+  }
+  const bounds = getCommandTargetBounds(intent.target);
+  let best: Point | null = null;
+  let bestScore = Number.POSITIVE_INFINITY;
+  for (let y = Math.max(0, bounds.minY); y <= Math.min(state.grid.rows - 1, bounds.maxY); y += 1) {
+    for (let x = Math.max(0, bounds.minX); x <= Math.min(state.grid.cols - 1, bounds.maxX); x += 1) {
+      const point = { x, y };
+      if (Math.hypot(point.x - slotTarget.x, point.y - slotTarget.y) > BACKBURN_IGNITE_RADIUS) {
+        continue;
+      }
+      const idx = indexFor(state.grid, x, y);
+      const fireValue = state.tileFire[idx] ?? 0;
+      if (fireValue > THREAT_FIRE_EPS) {
+        continue;
+      }
+      const tile = state.tiles[idx];
+      if (!tile || tile.fuel <= 0 || tile.type === "water" || tile.type === "road" || tile.type === "base" || tile.type === "house") {
+        continue;
+      }
+      const score = Math.hypot(x - slotTarget.x, y - slotTarget.y);
+      if (score < bestScore) {
+        bestScore = score;
+        best = point;
+      }
+    }
+  }
+  if (!best) {
+    return;
+  }
+  if (igniteBackburnTile(state, best.x, best.y)) {
+    truck.lastBackburnAt = state.careerDay;
+  }
+};
+
+const updateTruckAlerts = (state: WorldState, truck: Unit): void => {
+  const alerts: CommandUnitAlert[] = [];
+  const waterRatio = truck.waterCapacity > 0 ? truck.water / truck.waterCapacity : 1;
+  if (waterRatio <= 0) {
+    alerts.push("empty");
+  } else if (waterRatio <= TRUCK_WATER_CRITICAL_RATIO) {
+    alerts.push("critical");
+  } else if (waterRatio <= TRUCK_WATER_LOW_RATIO) {
+    alerts.push("low");
+  }
+  if (truck.crewIds.length <= 1) {
+    alerts.push("crew_low");
+  }
+  if (isTruckUnsafe(state, truck)) {
+    alerts.push("danger");
+  }
+  truck.currentAlerts = alerts;
+};
+
+const isTruckNearRiverWaterSource = (state: WorldState, truck: Unit): boolean => {
+  const tile = getUnitTile(truck);
+  for (let dy = -TRUCK_RIVER_REFILL_RADIUS; dy <= TRUCK_RIVER_REFILL_RADIUS; dy += 1) {
+    for (let dx = -TRUCK_RIVER_REFILL_RADIUS; dx <= TRUCK_RIVER_REFILL_RADIUS; dx += 1) {
+      const nx = tile.x + dx;
+      const ny = tile.y + dy;
+      if (!inBounds(state.grid, nx, ny)) {
+        continue;
+      }
+      const idx = indexFor(state.grid, nx, ny);
+      if (state.tileRiverMask[idx] > 0) {
+        return true;
+      }
+    }
+  }
+  return false;
+};
+
+const isTruckGroupActivelySpraying = (state: WorldState, truck: Unit): boolean => {
+  if (truck.water <= 0.01) {
+    return false;
+  }
+  if (truck.sprayTarget) {
+    return true;
+  }
+  return state.units.some(
+    (unit) =>
+      unit.kind === "firefighter" &&
+      unit.carrierId === null &&
+      unit.assignedTruckId === truck.id &&
+      unit.sprayTarget !== null
+  );
+};
+
+const updateTruckWater = (state: WorldState, truck: Unit, delta: number): void => {
+  if (truck.kind !== "truck" || truck.waterCapacity <= 0) {
+    return;
+  }
+  const tile = getUnitTile(truck);
+  const idx = indexFor(state.grid, tile.x, tile.y);
+  if (state.tiles[idx]?.type === "base") {
+    truck.water = clamp(truck.water + truck.waterRefillRate * delta, 0, truck.waterCapacity);
+    return;
+  }
+  if (isTruckNearRiverWaterSource(state, truck) && !isTruckGroupActivelySpraying(state, truck)) {
+    truck.water = clamp(truck.water + TRUCK_WATER_USE_RATE * delta, 0, truck.waterCapacity);
+  }
+};
+
+const getUnitWaterSourceTruck = (state: WorldState, unit: Unit): Unit | null => {
+  if (unit.kind === "truck") {
+    return unit;
+  }
+  if (unit.assignedTruckId === null) {
+    return null;
+  }
+  const truck = getUnitById(state, unit.assignedTruckId);
+  return truck && truck.kind === "truck" ? truck : null;
+};
+
+const canUnitSpray = (state: WorldState, unit: Unit): boolean => {
+  const truck = getUnitWaterSourceTruck(state, unit);
+  if (!truck || truck.waterCapacity <= 0) {
+    return true;
+  }
+  return truck.water > 0.01;
+};
+
+const spendUnitWater = (state: WorldState, unit: Unit, delta: number): void => {
+  const truck = getUnitWaterSourceTruck(state, unit);
+  if (!truck || truck.waterCapacity <= 0) {
+    return;
+  }
+  const useRate = unit.kind === "truck" ? TRUCK_WATER_USE_RATE : FIREFIGHTER_WATER_USE_RATE;
+  const spend = delta * useRate;
+  truck.water = clamp(truck.water - spend, 0, truck.waterCapacity);
+  const truckTile = getUnitTile(truck);
+  const truckIdx = indexFor(state.grid, truckTile.x, truckTile.y);
+  if (state.tiles[truckIdx]?.type !== "base" && isTruckNearRiverWaterSource(state, truck)) {
+    truck.water = clamp(truck.water + spend, 0, truck.waterCapacity);
+  }
+};
+
+const applyTruckCommandIntent = (state: WorldState, truck: Unit, selectedTrucks: Unit[], selectedIndex: number): void => {
+  const intent = getEffectiveTruckIntent(state, truck);
+  if (!intent) {
+    truck.behaviourMode = "balanced";
+    updateTruckAlerts(state, truck);
+    if (truck.pathIndex < truck.path.length) {
+      truck.currentStatus = "moving";
+    } else if (truck.attackTarget || truck.sprayTarget) {
+      truck.currentStatus = "suppressing";
+    } else {
+      truck.currentStatus = "holding";
+    }
+    return;
+  }
+
+  truck.behaviourMode = intent.behaviourMode;
+  const slotTarget = resolveIntentSlotTarget(state, intent, selectedTrucks.length, selectedIndex);
+  const nearbyThreat = findNearestThreatForTarget(state, slotTarget, intent.target);
+
+  if (intent.type === "move") {
+    clearSuppressionTargets(truck);
+    truck.autonomous = false;
+    setTruckCrewMode(state, truck.id, "boarded", { silent: true });
+    setUnitTargetIfNeeded(state, truck, slotTarget.x, slotTarget.y, false, { silent: true }, 0.8);
+    truck.currentStatus = truck.pathIndex < truck.path.length ? "moving" : "holding";
+    updateTruckAlerts(state, truck);
+    return;
+  }
+
+  truck.autonomous = true;
+  setAttackTarget(truck, nearbyThreat ? { x: nearbyThreat.x + 0.5, y: nearbyThreat.y + 0.5 } : null);
+  if (intent.behaviourMode === "defensive" && nearbyThreat && isTruckUnsafe(state, truck)) {
+    moveTruckAwayFromThreat(state, truck, nearbyThreat);
+    updateTruckAlerts(state, truck);
+    return;
+  }
+  if (truck.pathIndex >= truck.path.length) {
+    const distToSlot = Math.hypot(truck.x - (slotTarget.x + 0.5), truck.y - (slotTarget.y + 0.5));
+    if (distToSlot > TRUCK_SUPPORT_POSITION_TOLERANCE * 0.75) {
+      setTruckCrewMode(state, truck.id, "boarded", { silent: true });
+      setUnitTargetIfNeeded(state, truck, slotTarget.x, slotTarget.y, false, { silent: true }, 0.8);
+    }
+  } else {
+    setTruckCrewMode(state, truck.id, "boarded", { silent: true });
+  }
+  if (intent.type === "backburn") {
+    maybeIgniteBackburn(state, truck, intent, slotTarget);
+  }
+  if (truck.pathIndex < truck.path.length) {
+    truck.currentStatus = "moving";
+  } else if (nearbyThreat) {
+    truck.currentStatus = intent.behaviourMode === "defensive" && isTruckUnsafe(state, truck) ? "retreating" : "suppressing";
+  } else {
+    truck.currentStatus = "holding";
+  }
+  updateTruckAlerts(state, truck);
+};
+
+const updateCommandUnitStatuses = (state: WorldState): void => {
+  state.commandUnits.forEach((commandUnit) => {
+    const trucks = commandUnit.truckIds
+      .map((truckId) => getUnitById(state, truckId))
+      .filter((truck): truck is Unit => !!truck && truck.kind === "truck");
+    const priority: CommandUnitStatus[] = ["retreating", "suppressing", "moving", "holding"];
+    commandUnit.status = priority.find((status) => trucks.some((truck) => truck.currentStatus === status)) ?? "holding";
+  });
+};
+
+const applyCommandIntentControl = (state: WorldState, delta: number): void => {
+  syncCommandUnits(state);
+  state.units.forEach((unit) => {
+    if (unit.kind === "truck") {
+      updateTruckWater(state, unit, delta);
+    }
+  });
+  const trucks = state.units
+    .filter((unit) => unit.kind === "truck")
+    .sort((left, right) => getTruckSortKey(left) - getTruckSortKey(right));
+  trucks.forEach((truck) => {
+    const cohort = truck.truckOverrideIntent
+      ? trucks.filter((entry) => entry.truckOverrideIntent && commandIntentsEqual(entry.truckOverrideIntent, truck.truckOverrideIntent))
+      : truck.commandUnitId !== null
+        ? getCommandUnitTruckIds(state, truck.commandUnitId)
+            .map((truckId) => getUnitById(state, truckId))
+            .filter((entry): entry is Unit => !!entry && entry.kind === "truck")
+            .sort((left, right) => getTruckSortKey(left) - getTruckSortKey(right))
+        : [truck];
+    const selectedIndex = Math.max(0, cohort.findIndex((entry) => entry.id === truck.id));
+    applyTruckCommandIntent(state, truck, cohort, selectedIndex);
+  });
+  updateCommandUnitStatuses(state);
 };
 
 export function seedStartingRoster(state: WorldState, rng: RNG): void {
@@ -370,42 +1172,43 @@ export function setDeployMode(state: WorldState, mode: UnitKind | "clear" | null
 }
 
 export function clearUnitSelection(state: WorldState): void {
-  state.units.forEach((current) => {
-    current.selected = false;
-  });
-  state.selectedUnitIds = [];
-  resetStatus(state);
+  clearCommandSelection(state);
 }
 
 export function selectUnit(state: WorldState, unit: Unit | null): void {
-  state.units.forEach((current) => {
-    current.selected = unit ? current.id === unit.id : false;
-  });
-  state.selectedUnitIds = unit ? [unit.id] : [];
-  if (unit) {
-    setStatus(state, `Unit ${unit.kind} selected. Click a tile to retask.`);
-  } else {
-    resetStatus(state);
+  if (!unit) {
+    clearCommandSelection(state);
+    return;
   }
+  if (unit.kind === "firefighter" && unit.assignedTruckId !== null) {
+    const assignedTruck = getUnitById(state, unit.assignedTruckId);
+    if (assignedTruck) {
+      selectCommandUnit(state, assignedTruck.commandUnitId);
+      return;
+    }
+  }
+  if (unit.kind === "truck") {
+    selectCommandUnit(state, unit.commandUnitId);
+    return;
+  }
+  clearCommandSelection(state);
 }
 
 export function toggleUnitSelection(state: WorldState, unit: Unit): void {
-  if (unit.selected) {
-    unit.selected = false;
-    state.selectedUnitIds = state.selectedUnitIds.filter((id) => id !== unit.id);
-  } else {
-    unit.selected = true;
-    state.selectedUnitIds = [...state.selectedUnitIds, unit.id];
+  if (unit.kind === "firefighter" && unit.assignedTruckId !== null) {
+    const assignedTruck = getUnitById(state, unit.assignedTruckId);
+    if (assignedTruck) {
+      selectCommandUnit(state, assignedTruck.commandUnitId, { toggle: true });
+    }
+    return;
   }
-  if (state.selectedUnitIds.length > 0) {
-    setStatus(state, `${state.selectedUnitIds.length} unit(s) selected. Click to retask.`);
-  } else {
-    resetStatus(state);
+  if (unit.kind === "truck") {
+    selectCommandUnit(state, unit.commandUnitId, { toggle: true });
   }
 }
 
 export function getSelectedUnits(state: WorldState): Unit[] {
-  return state.units.filter((unit) => unit.selected);
+  return getSelectedTrucks(state);
 }
 
 export function createUnit(state: WorldState, kind: UnitKind, rng: RNG, rosterEntry?: RosterUnit | null): Unit {
@@ -435,11 +1238,20 @@ export function createUnit(state: WorldState, kind: UnitKind, rng: RNG, rosterEn
     carrierId: null,
     passengerIds: [],
     assignedTruckId: null,
+    commandUnitId: null,
     crewIds: [],
     crewMode: "deployed",
     formation: rosterUnit ? rosterUnit.formation : "medium",
+    behaviourMode: "balanced",
     attackTarget: null,
-    sprayTarget: null
+    sprayTarget: null,
+    truckOverrideIntent: null,
+    water: kind === "truck" ? TRUCK_WATER_CAPACITY : 0,
+    waterCapacity: kind === "truck" ? TRUCK_WATER_CAPACITY : 0,
+    waterRefillRate: kind === "truck" ? TRUCK_WATER_REFILL_RATE : 0,
+    lastBackburnAt: Number.NEGATIVE_INFINITY,
+    currentStatus: "holding",
+    currentAlerts: []
   };
 }
 
@@ -537,6 +1349,7 @@ export function deployUnit(state: WorldState, rng: RNG, kind: UnitKind, tileX: n
       const truckTile = getUnitTile(assignedTruck);
       setUnitTarget(state, unit, truckTile.x, truckTile.y, false, { silent: true });
     }
+    syncCommandUnits(state);
     return;
   }
   if (kind === "truck") {
@@ -564,6 +1377,7 @@ export function deployUnit(state: WorldState, rng: RNG, kind: UnitKind, tileX: n
     setTruckCrewMode(state, unit.id, "boarded", { silent: true });
   }
   setUnitTarget(state, unit, tileX, tileY, false);
+  syncCommandUnits(state);
 }
 
 export function clearFuelAt(state: WorldState, rng: RNG, tileX: number, tileY: number, showStatus = true): boolean {
@@ -700,6 +1514,7 @@ export function getUnitAt(state: WorldState, tileX: number, tileY: number): Unit
 }
 
 export function stepUnits(state: WorldState, delta: number): void {
+  applyCommandIntentControl(state, delta);
   state.units.forEach((unit) => {
     unit.prevX = unit.x;
     unit.prevY = unit.y;
@@ -1026,8 +1841,16 @@ const getAverageHoseRange = (crew: Unit[]): number => {
   return total / crew.length;
 };
 
-const getStandoffDistance = (hoseRange: number): number =>
-  clamp(hoseRange * 0.85, 2.75, Math.max(2.75, hoseRange - 0.5));
+const getStandoffDistance = (hoseRange: number, behaviourMode: BehaviourMode = "balanced"): number => {
+  const base = clamp(hoseRange * 0.85, 2.75, Math.max(2.75, hoseRange - 0.5));
+  if (behaviourMode === "aggressive") {
+    return Math.max(2.35, base - 0.65);
+  }
+  if (behaviourMode === "defensive") {
+    return base + 0.9;
+  }
+  return base;
+};
 
 const findPassableStandoffSlot = (
   state: WorldState,
@@ -1118,7 +1941,9 @@ const updateTruckCrewOrders = (state: WorldState, truck: Unit): void => {
     const dirMag = Math.hypot(dirX, dirY);
     const attackDirX = dirMag > 0.0001 ? dirX / dirMag : 1;
     const attackDirY = dirMag > 0.0001 ? dirY / dirMag : 0;
-    const averageStandoff = deployedCrew.reduce((sum, crew) => sum + getStandoffDistance(crew.hoseRange), 0) / deployedCrew.length;
+    const averageStandoff =
+      deployedCrew.reduce((sum, crew) => sum + getStandoffDistance(crew.hoseRange, truck.behaviourMode), 0) /
+      deployedCrew.length;
     const desiredSupportX = fireFocus.x - attackDirX * (averageStandoff + 2.0);
     const desiredSupportY = fireFocus.y - attackDirY * (averageStandoff + 2.0);
     const supportTile =
@@ -1161,7 +1986,9 @@ const updateTruckCrewOrders = (state: WorldState, truck: Unit): void => {
   const attackDirY = dirMag > 0.0001 ? dirY / dirMag : 0;
   const perpX = -attackDirY;
   const perpY = attackDirX;
-  const averageStandoff = deployedCrew.reduce((sum, crew) => sum + getStandoffDistance(crew.hoseRange), 0) / deployedCrew.length;
+  const averageStandoff =
+    deployedCrew.reduce((sum, crew) => sum + getStandoffDistance(crew.hoseRange, truck.behaviourMode), 0) /
+    deployedCrew.length;
   const desiredSupportX = fireFocus.x - attackDirX * (averageStandoff + 2.0);
   const desiredSupportY = fireFocus.y - attackDirY * (averageStandoff + 2.0);
   const supportTile =
@@ -1221,7 +2048,7 @@ const updateTruckCrewOrders = (state: WorldState, truck: Unit): void => {
   const crewSize = deployedCrew.length;
   deployedCrew.forEach((crew, i) => {
     const offset = (i - (crewSize - 1) / 2) * spacing;
-    const standoffDistance = getStandoffDistance(crew.hoseRange);
+    const standoffDistance = getStandoffDistance(crew.hoseRange, truck.behaviourMode);
     const desiredX = fireFocus.x - attackDirX * standoffDistance + perpX * offset;
     const desiredY = fireFocus.y - attackDirY * standoffDistance + perpY * offset;
     const finalTarget =
@@ -1284,6 +2111,7 @@ export function setCrewFormation(state: WorldState, truckId: number, formation: 
 }
 
 export function autoAssignTargets(state: WorldState): void {
+  applyCommandIntentControl(state, 0);
   state.units.forEach((unit) => {
     if (unit.kind === "truck") {
       updateTruckCrewOrders(state, unit);
@@ -1352,6 +2180,7 @@ export function assignFormationTargets(state: WorldState, units: Unit[], start: 
 }
 
 export function applyUnitHazards(state: WorldState, rng: RNG, delta: number): void {
+  let lostUnit = false;
   for (let i = state.units.length - 1; i >= 0; i -= 1) {
     const unit = state.units[i];
     const idx = indexFor(state.grid, Math.floor(unit.x), Math.floor(unit.y));
@@ -1418,19 +2247,24 @@ export function applyUnitHazards(state: WorldState, rng: RNG, delta: number): vo
         state.selectedUnitIds = state.selectedUnitIds.filter((id) => id !== unit.id);
       }
       state.units.splice(i, 1);
+      lostUnit = true;
       setStatus(state, `${unit.kind === "truck" ? "Truck" : "Firefighter"} lost in the fire.`);
     }
+  }
+  if (lostUnit) {
+    syncCommandUnits(state);
   }
 }
 
 export function recallUnits(state: WorldState): void {
   state.units = [];
-  state.selectedUnitIds = [];
   state.roster.forEach((entry) => {
     if (entry.status === "deployed") {
       entry.status = "available";
     }
   });
+  syncCommandUnits(state);
+  clearCommandSelection(state);
 }
 
 type SuppressionProfile = {
@@ -1697,6 +2531,10 @@ export function prepareExtinguish(state: WorldState, effects: EffectsState, rng:
       setSprayTarget(unit, null);
       return;
     }
+    if (!canUnitSpray(state, unit)) {
+      setSprayTarget(unit, null);
+      return;
+    }
     const profile = getSuppressionProfile(unit);
     const impactTarget = resolveSuppressionImpactTarget(state, unit, profile);
     if (!impactTarget) {
@@ -1721,8 +2559,13 @@ export function applyExtinguishStep(state: WorldState, delta: number, suppressio
     if (!unit.sprayTarget) {
       return;
     }
+    if (!canUnitSpray(state, unit)) {
+      setSprayTarget(unit, null);
+      return;
+    }
     const profile = getSuppressionProfile(unit);
     applySuppressionAtTarget(state, unit, unit.sprayTarget, profile, powerMultiplier, suppressionTimestamp);
+    spendUnitWater(state, unit, delta);
   });
 }
 

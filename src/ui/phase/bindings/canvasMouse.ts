@@ -6,7 +6,7 @@ import type { InputAction } from "../types.js";
 import { inBounds } from "../../../core/grid.js";
 import { panCameraByPixels, screenToWorld, zoomAtPointer } from "../../../render/inputProjection.js";
 import { resetStatus, setStatus } from "../../../core/state.js";
-import { clearUnitSelection } from "../../../sim/units.js";
+import { clearUnitSelection, selectCommandUnit } from "../../../sim/units.js";
 import {
   beginClearFuelBreakLine,
   completeClearFuelBreakLine,
@@ -97,6 +97,7 @@ export const bindCanvasMouseHandlers = ({
       rng,
       tile,
       shiftKey: (event as MouseEvent).shiftKey,
+      altKey: (event as MouseEvent).altKey,
       debugIgniteMode: isDebugIgniteMode(),
       gate
     });
@@ -170,12 +171,12 @@ export const bindCanvasMouseHandlers = ({
             ? Math.hypot(canvasPos.x - rightDragStart.x, canvasPos.y - rightDragStart.y)
             : 0;
         if (tile && dragDistance < 6) {
-          handleMapRetaskTileCommand({ state, tile, gate });
+          handleMapRetaskTileCommand({ state, inputState, tile, gate });
         } else {
           const start = inputState.formationStart;
           const end = inputState.formationEnd;
           if (start && end) {
-            handleMapFormationDragCommand({ state, start, end, gate });
+            handleMapFormationDragCommand({ state, inputState, start, end, gate });
           }
         }
         isFormationDrag = false;
@@ -185,7 +186,7 @@ export const bindCanvasMouseHandlers = ({
       } else if (state.selectedUnitIds.length > 0) {
         const tile = getTileFromPointer(mouseEvent);
         if (tile) {
-          handleMapRetaskTileCommand({ state, tile, gate });
+          handleMapRetaskTileCommand({ state, inputState, tile, gate });
         }
       }
       return;
@@ -212,27 +213,28 @@ export const bindCanvasMouseHandlers = ({
           if (!mouseEvent.shiftKey) {
             clearUnitSelection(state);
           }
-          const newlySelectedTrucks = new Set<number>();
+          const newlySelectedCommandUnits = new Set<number>();
           state.units.forEach((unit) => {
             if (unit.x >= minX && unit.x <= maxX && unit.y >= minY && unit.y <= maxY) {
-              if (unit.kind === "truck") {
-                newlySelectedTrucks.add(unit.id);
-              } else if (unit.kind === "firefighter" && unit.assignedTruckId) {
-                newlySelectedTrucks.add(unit.assignedTruckId);
+              if (unit.kind === "truck" && unit.commandUnitId !== null) {
+                newlySelectedCommandUnits.add(unit.commandUnitId);
+              } else if (unit.kind === "firefighter") {
+                const assignedTruck = unit.assignedTruckId
+                  ? state.units.find((entry) => entry.id === unit.assignedTruckId && entry.kind === "truck") ?? null
+                  : null;
+                const commandUnitId = assignedTruck?.commandUnitId ?? unit.commandUnitId;
+                if (commandUnitId !== null) {
+                  newlySelectedCommandUnits.add(commandUnitId);
+                }
               }
             }
           });
-          newlySelectedTrucks.forEach((truckId) => {
-            const truck = state.units.find((u) => u.id === truckId);
-            if (truck) {
-              truck.selected = true;
-              if (!state.selectedUnitIds.includes(truck.id)) {
-                state.selectedUnitIds.push(truck.id);
-              }
-            }
+          Array.from(newlySelectedCommandUnits).forEach((commandUnitId, index) => {
+            selectCommandUnit(state, commandUnitId, mouseEvent.shiftKey || index > 0 ? { append: true } : undefined);
           });
-          if (state.selectedUnitIds.length > 0) {
-            setStatus(state, `${state.selectedUnitIds.length} truck(s) selected. Right-click to move.`);
+          if (state.selectedCommandUnitIds.length > 0) {
+            const noun = state.selectedCommandUnitIds.length === 1 ? "command unit" : "command units";
+            setStatus(state, `${state.selectedCommandUnitIds.length} ${noun} selected. Right-click to issue orders.`);
           } else {
             resetStatus(state);
           }

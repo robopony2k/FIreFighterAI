@@ -62,6 +62,10 @@ export type DeployMode = UnitKind | "clear";
 
 export type Formation = "narrow" | "medium" | "wide";
 export type WaterSprayMode = "precision" | "balanced" | "suppression";
+export type CommandType = "move" | "suppress" | "contain" | "backburn";
+export type BehaviourMode = "aggressive" | "balanced" | "defensive";
+export type CommandFormation = "loose" | "line" | "area";
+export type SelectionScope = "commandUnit" | "truck";
 
 export type FireSimPhase = "snapshot" | "heat-clear" | "heat-pass1" | "heat-pass2" | "fire" | "ignite";
 
@@ -75,6 +79,52 @@ export interface Point {
 
   y: number;
 
+}
+
+export type LineTarget = {
+  kind: "line";
+  start: Point;
+  end: Point;
+};
+
+export type AreaTarget = {
+  kind: "area";
+  start: Point;
+  end: Point;
+};
+
+export type CommandTarget =
+  | {
+      kind: "point";
+      point: Point;
+    }
+  | LineTarget
+  | AreaTarget;
+
+export interface CommandIntent {
+  type: CommandType;
+  target: CommandTarget;
+  formation: CommandFormation;
+  behaviourMode: BehaviourMode;
+}
+
+export type CommandUnitStatus = "suppressing" | "moving" | "holding" | "retreating";
+
+export type CommandUnitAlert =
+  | "empty"
+  | "critical"
+  | "low"
+  | "warning"
+  | "crew_low"
+  | "danger";
+
+export interface CommandUnit {
+  id: number;
+  name: string;
+  truckIds: number[];
+  currentIntent: CommandIntent | null;
+  status: CommandUnitStatus;
+  revision: number;
 }
 
 
@@ -211,15 +261,33 @@ export interface Unit {
 
   assignedTruckId: number | null;
 
+  commandUnitId: number | null;
+
     crewIds: number[];
 
     crewMode: "boarded" | "deployed";
 
   formation: Formation;
 
+  behaviourMode: BehaviourMode;
+
   attackTarget: Point | null;
 
   sprayTarget: Point | null;
+
+  truckOverrideIntent: CommandIntent | null;
+
+  water: number;
+
+  waterCapacity: number;
+
+  waterRefillRate: number;
+
+  lastBackburnAt: number;
+
+  currentStatus: CommandUnitStatus;
+
+  currentAlerts: CommandUnitAlert[];
 
   }
 

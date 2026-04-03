@@ -69,6 +69,7 @@ import {
 import { createFxLabController, type FxLabController } from "../render/fxLab/controller.js";
 import { createFxLabPanel, type FxLabPanelHandle } from "../render/fxLab/panel.js";
 import { normalizeFxLabScenarioId, type FxLabScenarioId } from "../render/fxLab/types.js";
+import { describeWebGLError } from "../render/webglContext.js";
 
 
 export type { RenderBackend } from "./renderBackend.js";
@@ -193,7 +194,9 @@ export const createAppRuntime = (): AppRuntime => {
   const initialFxLabEnabled = initialLabParam === "fx";
   const initialFxLabScene = normalizeFxLabScenarioId(params.get("scene"));
   let runtimeSettings = getRuntimeSettings();
-  const getConfiguredRenderBackend = (): RenderBackend => (runtimeSettings.render === "2d" ? "legacy2d" : "3d");
+  let forcedRenderBackend: RenderBackend | null = null;
+  const getConfiguredRenderBackend = (): RenderBackend =>
+    forcedRenderBackend ?? (runtimeSettings.render === "2d" ? "legacy2d" : "3d");
   const isLegacy2dEnabled = (): boolean => getConfiguredRenderBackend() === "legacy2d";
   const isHeadless = (): boolean => runtimeSettings.headless;
   const isThreeTestNoSimEnabled = (): boolean => runtimeSettings.nosim;
@@ -507,6 +510,15 @@ export const createAppRuntime = (): AppRuntime => {
     longTaskStats.lastAt = 0;
     longTaskStats.lastDetail = "n/a";
   };
+
+  const forceLegacy2dFallback = (): void => {
+    forcedRenderBackend = "legacy2d";
+    setRenderMode("2d");
+  };
+
+  const formatRendererUnavailableStatus = (featureLabel: string, error: unknown): string =>
+    `${featureLabel} unavailable: ${describeWebGLError(error)} Switched to Legacy 2D for this session.`;
+
   setRenderMode(activeRenderMode);
   
   const recordPerfSample = (name: string, value: number): void => {
@@ -1107,6 +1119,14 @@ export const createAppRuntime = (): AppRuntime => {
     threeTestOverlay?.classList.toggle("three-test-overlay--fx-lab", mode === "fx-lab");
   };
 
+  const handleThreeRendererUnavailable = (featureLabel: string, error: unknown): void => {
+    forceLegacy2dFallback();
+    setThreeOverlayVisible(false);
+    configureThreeOverlayMode(null);
+    setStatus(state, formatRendererUnavailableStatus(featureLabel, error));
+    syncMusicContext();
+  };
+
   const closeFxLab = (): void => {
     if (activeThreeOverlayMode !== "fx-lab" && !fxLabController && !fxLabPanel) {
       return;
@@ -1135,8 +1155,20 @@ export const createAppRuntime = (): AppRuntime => {
     fxLabController?.dispose();
     fxLabController = null;
     configureThreeOverlayMode("fx-lab");
-    setThreeOverlayVisible(true, false);
-    fxLabController = createFxLabController(threeTestCanvas, scenarioId);
+    try {
+      setThreeOverlayVisible(true, false);
+      fxLabController = createFxLabController(threeTestCanvas, scenarioId);
+    } catch (error) {
+      handleThreeRendererUnavailable("FX Lab", error);
+      if (state.tiles.length === 0) {
+        if (titleScreenEnabled) {
+          showTitleScreen();
+        } else {
+          showFallbackMenu();
+        }
+      }
+      return;
+    }
     fxLabPanel = createFxLabPanel(threeTestPhaseHudMount, fxLabController);
     handleThreeResize();
     window.addEventListener("resize", handleThreeResize);
@@ -1162,15 +1194,24 @@ export const createAppRuntime = (): AppRuntime => {
     effectsState.smokeParticles.length = 0;
     effectsState.waterParticles.length = 0;
     if (!threeTestController) {
-      threeTestController = createThreeTest(
-        threeTestCanvas,
-        asRenderSim(state),
-        inputState,
-        effectsState,
-        uiAudio,
-        musicControls,
-        worldAudioControls
-      );
+      try {
+        threeTestController = createThreeTest(
+          threeTestCanvas,
+          asRenderSim(state),
+          inputState,
+          effectsState,
+          uiAudio,
+          musicControls,
+          worldAudioControls
+        );
+      } catch (error) {
+        if (savedThreeTestSmokeRate !== null) {
+          state.simPerf.smokeRate = savedThreeTestSmokeRate;
+          savedThreeTestSmokeRate = null;
+        }
+        handleThreeRendererUnavailable("3D mode", error);
+        return;
+      }
     }
     if (threeTestController) {
       threeTestController.setBaseCardOpen(false);
@@ -1508,6 +1549,21 @@ export const createAppRuntime = (): AppRuntime => {
   const initialRunConfig: NewRunConfig = resolveRunConfig(defaultRunConfig, persistedLastRunConfig);
   activeTerrainSource = cloneTerrainRecipe(initialRunConfig.options.terrain);
   let mapEditor: MapEditorHandle | null = null;
+  const ensureMapEditor = (): MapEditorHandle => {
+    if (mapEditor) {
+      return mapEditor;
+    }
+    mapEditor = initMapEditor(getMapEditorRefs(), {
+      onBackToMenu: () => {
+        if (titleScreenEnabled) {
+          showTitleScreen();
+          return;
+        }
+        showFallbackMenu();
+      }
+    });
+    return mapEditor;
+  };
   const getLatestRunConfig = (): NewRunConfig => resolveRunConfig(defaultRunConfig, loadLastRunConfig());
   const showFallbackMenu = (): void => {
     startMenu?.classList.remove("hidden");
@@ -1516,20 +1572,11 @@ export const createAppRuntime = (): AppRuntime => {
     state.paused = true;
     syncMusicContext();
   };
-  mapEditor = initMapEditor(getMapEditorRefs(), {
-    onBackToMenu: () => {
-      if (titleScreenEnabled) {
-        showTitleScreen();
-        return;
-      }
-      showFallbackMenu();
-    }
-  });
   const openMapEditor = (): void => {
     destroyTitleScreen();
     startMenu?.classList.add("hidden");
     characterScreen.classList.add("hidden");
-    mapEditor?.open(getLatestRunConfig());
+    ensureMapEditor().open(getLatestRunConfig());
     state.paused = true;
     syncMusicContext();
   };
@@ -1796,6 +1843,8 @@ export const createAppRuntime = (): AppRuntime => {
 
   const dispose = (): void => {
     destroyTitleScreen();
+    mapEditor?.destroy();
+    mapEditor = null;
     closeThreeTest(true);
     closeFxLab();
     renderBackend.dispose();

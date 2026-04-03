@@ -1,4 +1,5 @@
 import type {
+  CommandUnit,
   ClimateForecast,
   ClimateTimeline,
   DeployMode,
@@ -8,6 +9,7 @@ import type {
   Grid,
   Point,
   ScoringState,
+  SelectionScope,
   SimTimeMode,
   SkipToNextFireState,
   Town,
@@ -209,6 +211,13 @@ export interface WorldState {
   deployMode: DeployMode | null;
 
   selectedUnitIds: number[];
+  selectedCommandUnitIds: number[];
+  selectedTruckIds: number[];
+  selectionScope: SelectionScope;
+  focusedCommandUnitId: number | null;
+  commandUnits: CommandUnit[];
+  nextCommandUnitId: number;
+  commandUnitsRevision: number;
 
   simTimeMode: SimTimeMode;
   timeSpeedIndex: number;
@@ -538,6 +547,13 @@ export function createInitialState(seed: number, grid: Grid): WorldState {
     deployMode: null,
 
     selectedUnitIds: [],
+    selectedCommandUnitIds: [],
+    selectedTruckIds: [],
+    selectionScope: "commandUnit",
+    focusedCommandUnitId: null,
+    commandUnits: [],
+    nextCommandUnitId: 1,
+    commandUnitsRevision: 0,
 
     simTimeMode: "strategic",
     timeSpeedIndex: 1,

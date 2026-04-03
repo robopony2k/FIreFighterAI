@@ -18,7 +18,7 @@ import {
   type TerrainSample
 } from "./threeTestTerrain.js";
 import { ThreeTestWaterSystem } from "./threeTestWater.js";
-
+import { getRequiredWebGLContext } from "./webglContext.js";
 export type TerrainPreviewAssetProgress = {
   label: string;
   completed: number;
@@ -105,8 +105,10 @@ const disposeTerrainMesh = (mesh: THREE.Mesh | null, scene: THREE.Scene): void =
 
 export const createTerrainPreviewController = (canvas: HTMLCanvasElement): TerrainPreviewController => {
   const runtimeSettings = getRuntimeSettings();
+  const context = getRequiredWebGLContext(canvas, "The 3D terrain preview");
   const renderer = new THREE.WebGLRenderer({
     canvas,
+    context,
     antialias: true,
     alpha: false,
     powerPreference: "default"

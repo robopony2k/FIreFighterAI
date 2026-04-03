@@ -28,6 +28,7 @@ import {
 } from "../threeTestUnitFx.js";
 import { createThreeTestUnitsLayer, type ThreeTestUnitsLayer } from "../threeTestUnits.js";
 import { getTreeAssetsCache, loadTreeAssets, type TreeAssets } from "../threeTestAssets.js";
+import { getRequiredWebGLContext } from "../webglContext.js";
 import {
   buildFxLabOverrides,
   cloneDefaultFireFxDebugControls,
@@ -369,11 +370,20 @@ const createLabUnit = (
   carrierId: null,
   passengerIds: [],
   assignedTruckId,
+  commandUnitId: kind === "truck" ? 1 : assignedTruckId ? 1 : null,
   crewIds: kind === "truck" ? [2] : [],
   crewMode: kind === "truck" ? "deployed" : "deployed",
   formation,
+  behaviourMode: "balanced",
   attackTarget: null,
-  sprayTarget: null
+  sprayTarget: null,
+  truckOverrideIntent: null,
+  water: kind === "truck" ? 100 : 0,
+  waterCapacity: kind === "truck" ? 100 : 0,
+  waterRefillRate: kind === "truck" ? 18 : 0,
+  lastBackburnAt: Number.NEGATIVE_INFINITY,
+  currentStatus: "holding",
+  currentAlerts: []
 });
 
 const applyRiverWaterfallCorridor = (world: WorldState, treeTypes: Uint8Array, baseFuel: Float32Array): void => {
@@ -725,6 +735,7 @@ export const createFxLabController = (
 ): FxLabController => {
   const renderer = new THREE.WebGLRenderer({
     canvas,
+    context: getRequiredWebGLContext(canvas, "FX Lab"),
     antialias: true,
     alpha: false,
     powerPreference: "default"

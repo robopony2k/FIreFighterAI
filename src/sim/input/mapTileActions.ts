@@ -1,15 +1,17 @@
 import { setStatus } from "../../core/state.js";
 import type { WorldState } from "../../core/state.js";
 import type { InputState } from "../../core/inputState.js";
-import type { Point, RNG, Unit } from "../../core/types.js";
-import { handleUnitDeployment, handleUnitRetask } from "../index.js";
+import type { AreaTarget, CommandIntent, CommandType, LineTarget, Point, RNG, Unit } from "../../core/types.js";
+import { handleUnitDeployment } from "../index.js";
 import { igniteDebugFireAt } from "../fire/debugIgnite.js";
 import {
+  applyCommandIntentToSelection,
   assignFormationTargets,
   clearFuelLine,
   clearUnitSelection,
   getSelectedUnits,
   getUnitAt,
+  selectTruck,
   selectUnit,
   setDeployMode,
   toggleUnitSelection
@@ -57,8 +59,97 @@ export type HandleMapPrimaryTileClickParams = {
   rng: RNG;
   tile: MapTile;
   shiftKey?: boolean;
+  altKey?: boolean;
   debugIgniteMode?: boolean;
   gate?: MapActionGate;
+};
+
+const isNearFire = (state: WorldState, tile: MapTile, radius: number): boolean => {
+  for (let y = Math.max(0, tile.y - radius); y <= Math.min(state.grid.rows - 1, tile.y + radius); y += 1) {
+    for (let x = Math.max(0, tile.x - radius); x <= Math.min(state.grid.cols - 1, tile.x + radius); x += 1) {
+      const idx = y * state.grid.cols + x;
+      if ((state.tileFire[idx] ?? 0) > 0.05) {
+        return true;
+      }
+    }
+  }
+  return false;
+};
+
+const resolveContextCommandType = (state: WorldState, tile: MapTile): CommandType => {
+  const idx = tile.y * state.grid.cols + tile.x;
+  const fire = state.tileFire[idx] ?? 0;
+  const heat = state.tileHeat[idx] ?? 0;
+  const fuel = state.tileFuel[idx] ?? 0;
+  if (fire > 0.45 || heat > 0.5) {
+    return "suppress";
+  }
+  if (fire > 0.05 || heat > 0.12) {
+    return "suppress";
+  }
+  if (fuel > 0.2 && isNearFire(state, tile, 3)) {
+    return "contain";
+  }
+  return "move";
+};
+
+const makePointIntent = (
+  state: WorldState,
+  inputState: InputState,
+  tile: MapTile,
+  commandType?: CommandType
+): CommandIntent => {
+  const resolvedType = commandType ?? inputState.commandMode ?? resolveContextCommandType(state, tile);
+  return {
+    type: resolvedType,
+    target: {
+      kind: "point",
+      point: { x: tile.x, y: tile.y }
+    },
+    formation: "loose",
+    behaviourMode:
+      inputState.commandMode === null && resolvedType === "suppress" && (state.tileFire[tile.y * state.grid.cols + tile.x] ?? 0) > 0.45
+        ? "aggressive"
+        : inputState.behaviourMode
+  };
+};
+
+const makeLineIntent = (
+  state: WorldState,
+  inputState: InputState,
+  start: MapTile,
+  end: MapTile
+): CommandIntent => {
+  const target: LineTarget = {
+    kind: "line",
+    start: { x: start.x, y: start.y },
+    end: { x: end.x, y: end.y }
+  };
+  return {
+    type: inputState.commandMode ?? "contain",
+    target,
+    formation: "line",
+    behaviourMode: inputState.behaviourMode
+  };
+};
+
+const makeAreaIntent = (
+  state: WorldState,
+  inputState: InputState,
+  start: MapTile,
+  end: MapTile
+): CommandIntent => {
+  const target: AreaTarget = {
+    kind: "area",
+    start: { x: start.x, y: start.y },
+    end: { x: end.x, y: end.y }
+  };
+  return {
+    type: inputState.commandMode ?? "backburn",
+    target,
+    formation: "area",
+    behaviourMode: inputState.behaviourMode
+  };
 };
 
 export const handleMapPrimaryTileClick = ({
@@ -67,6 +158,7 @@ export const handleMapPrimaryTileClick = ({
   rng,
   tile,
   shiftKey = false,
+  altKey = false,
   debugIgniteMode = inputState.debugIgniteMode,
   gate
 }: HandleMapPrimaryTileClickParams): boolean => {
@@ -89,7 +181,13 @@ export const handleMapPrimaryTileClick = ({
         return;
       }
       if (resolved.unit) {
-        if (shiftKey) {
+        if (altKey && resolved.unit.kind === "truck") {
+          if (shiftKey) {
+            selectTruck(state, resolved.unit, { toggle: true });
+          } else {
+            selectTruck(state, resolved.unit);
+          }
+        } else if (shiftKey) {
           toggleUnitSelection(state, resolved.unit);
         } else {
           selectUnit(state, resolved.unit);
@@ -116,15 +214,18 @@ export const handleMapPrimaryTileClick = ({
 
 export type HandleMapRetaskTileCommandParams = {
   state: WorldState;
+  inputState: InputState;
   tile: MapTile;
   gate?: MapActionGate;
 };
 
-export const handleMapRetaskTileCommand = ({ state, tile, gate }: HandleMapRetaskTileCommandParams): boolean => {
+export const handleMapRetaskTileCommand = ({ state, inputState, tile, gate }: HandleMapRetaskTileCommandParams): boolean => {
   if (state.selectedUnitIds.length === 0) {
     return false;
   }
-  runAction({ gate }, "retask", () => handleUnitRetask(state, tile.x, tile.y));
+  runAction({ gate }, "retask", () => {
+    applyCommandIntentToSelection(state, makePointIntent(state, inputState, tile));
+  });
   return true;
 };
 
@@ -137,10 +238,11 @@ export type HandleMapFormationDragCommandParams = {
 
 export const handleMapFormationDragCommand = ({
   state,
+  inputState,
   start,
   end,
   gate
-}: HandleMapFormationDragCommandParams): boolean => {
+}: HandleMapFormationDragCommandParams & { inputState: InputState }): boolean => {
   if (state.selectedUnitIds.length === 0) {
     return false;
   }
@@ -149,7 +251,17 @@ export const handleMapFormationDragCommand = ({
     return false;
   }
   runAction({ gate }, "formation", () => {
-    assignFormationTargets(state, selectedUnits, start, end);
+    const dx = Math.abs(end.x - start.x);
+    const dy = Math.abs(end.y - start.y);
+    if (dx >= 2 && dy >= 2) {
+      applyCommandIntentToSelection(state, makeAreaIntent(state, inputState, start, end));
+      return;
+    }
+    if (inputState.commandMode === "move" && state.selectionScope === "truck") {
+      assignFormationTargets(state, selectedUnits, start, end);
+      return;
+    }
+    applyCommandIntentToSelection(state, makeLineIntent(state, inputState, start, end));
   });
   return true;
 };

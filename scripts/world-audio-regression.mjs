@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 
 import {
   assignFireAudioEmitterSlots,
+  computeFireDistanceGain,
   computeFireAudioIntensity,
   computeTerrainOcclusion01,
   computeWindLoudnessGain,
@@ -18,6 +19,12 @@ const approxEqual = (actual, expected, epsilon = 1e-6) => {
 const intensity = computeFireAudioIntensity(0.8, 0.5);
 approxEqual(intensity, 0.4);
 approxEqual(computeFireAudioIntensity(1.2, 0.9), 1);
+
+const closeFireGain = computeFireDistanceGain(0, 4, 68);
+const nearFireGain = computeFireDistanceGain(4, 4, 68);
+const farFireGain = computeFireDistanceGain(24, 4, 68);
+assert.ok(closeFireGain > nearFireGain, "Point-blank fire should sound louder than merely nearby fire.");
+assert.ok(nearFireGain > farFireGain, "Nearby fire should sound louder than distant fire.");
 
 const prioritized = selectPrioritizedFireAudioClusters(
   [

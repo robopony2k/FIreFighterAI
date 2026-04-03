@@ -33,7 +33,8 @@ import {
 import { buildRenderTerrainSample } from "../render/simView.js";
 import {
   createTerrainPreviewController,
-  type TerrainPreviewBridgeSelection
+  type TerrainPreviewBridgeSelection,
+  type TerrainPreviewController
 } from "../render/terrainPreview.js";
 import { resetTerrainCaches } from "../render/terrainCache.js";
 import { DEFAULT_MAP_SIZE, DEFAULT_RUN_SEED, type NewRunConfig } from "./run-config.js";
@@ -51,7 +52,16 @@ import {
   syncTerrainControlOutputs
 } from "./terrain-schema.js";
 
-type MapEditorStepId = "scenario" | "relief" | "carving" | "flooding" | "rivers" | "settlements" | "vegetation" | "final";
+type MapEditorStepId =
+  | "scenario"
+  | "relief"
+  | "carving"
+  | "erosion"
+  | "flooding"
+  | "rivers"
+  | "settlements"
+  | "vegetation"
+  | "final";
 
 type MapEditorRefs = {
   screen: HTMLDivElement;
@@ -85,6 +95,7 @@ type MapEditorRefs = {
   copyShareCodeButton: HTMLButtonElement;
   shareCodeStatus: HTMLDivElement;
   advancedToggle: HTMLInputElement;
+  erosionCompareToggle: HTMLInputElement;
   legacyNotice: HTMLDivElement;
   backToMenu: HTMLButtonElement;
   mapSizeInputs: HTMLInputElement[];
@@ -93,6 +104,7 @@ type MapEditorRefs = {
   scenarioControls: HTMLDivElement;
   reliefControls: HTMLDivElement;
   carvingControls: HTMLDivElement;
+  erosionControls: HTMLDivElement;
   floodingControls: HTMLDivElement;
   riverControls: HTMLDivElement;
   settlementControls: HTMLDivElement;
@@ -118,6 +130,23 @@ export type MapEditorHandle = {
 };
 
 const PREVIEW_DEBOUNCE_MS = 450;
+
+const createUnavailableTerrainPreviewController = (): TerrainPreviewController => ({
+  prepareAssets: async () => {},
+  start: () => {},
+  stop: () => {},
+  resize: () => {},
+  setTerrain: () => {},
+  setBridgeSelectionListener: () => {},
+  resetView: () => {},
+  dispose: () => {}
+});
+
+const formatPreviewUnavailableMessage = (reason: string | null): string =>
+  reason
+    ? `3D preview unavailable: ${reason}`
+    : "3D preview unavailable in this environment.";
+
 const MAP_EDITOR_PHASE_ORDER: MapGenDebugPhase[] = [
   "terrain:relief",
   "terrain:carving",
@@ -162,6 +191,12 @@ const MAP_EDITOR_PREVIEW_BY_STEP: Record<MapEditorStepId, StepPreviewConfig> = {
   carving: {
     label: "Terrain Carving",
     stopAfterPhase: "terrain:carving",
+    sampleSource: "snapshot",
+    treesEnabled: false
+  },
+  erosion: {
+    label: "Erosion Detail",
+    stopAfterPhase: "terrain:erosion",
     sampleSource: "snapshot",
     treesEnabled: false
   },
@@ -278,12 +313,19 @@ const MAP_EDITOR_STEP_SEQUENCE: readonly MapEditorStepId[] = [
   "scenario",
   "relief",
   "carving",
+  "erosion",
   "flooding",
   "rivers",
   "settlements",
   "vegetation",
   "final"
 ] as const;
+const MAP_EDITOR_EROSION_COMPARE_PREVIEW: StepPreviewConfig = {
+  label: "Pre-Erosion Baseline",
+  stopAfterPhase: "terrain:elevation",
+  sampleSource: "snapshot",
+  treesEnabled: false
+};
 const COASTLINE_DEBUG_PROBE_COUNT = 4;
 const COASTLINE_DEBUG_TRANSECT_OFFSETS = [-1, 0, 1, 2] as const;
 const CARDINAL_DIRS = [
@@ -663,6 +705,7 @@ export const getMapEditorRefs = (): MapEditorRefs => ({
   copyShareCodeButton: document.getElementById("mapEditorCopyShareCode") as HTMLButtonElement,
   shareCodeStatus: document.getElementById("mapEditorShareCodeStatus") as HTMLDivElement,
   advancedToggle: document.getElementById("mapEditorAdvancedToggle") as HTMLInputElement,
+  erosionCompareToggle: document.getElementById("mapEditorErosionCompareToggle") as HTMLInputElement,
   legacyNotice: document.getElementById("mapEditorLegacyNotice") as HTMLDivElement,
   backToMenu: document.getElementById("mapEditorBackToMenu") as HTMLButtonElement,
   mapSizeInputs: Array.from(document.querySelectorAll<HTMLInputElement>('#mapEditorScreen input[name="mapEditorMapSize"]')),
@@ -671,6 +714,7 @@ export const getMapEditorRefs = (): MapEditorRefs => ({
   scenarioControls: document.getElementById("mapEditorScenarioControls") as HTMLDivElement,
   reliefControls: document.getElementById("mapEditorReliefControls") as HTMLDivElement,
   carvingControls: document.getElementById("mapEditorCarvingControls") as HTMLDivElement,
+  erosionControls: document.getElementById("mapEditorErosionControls") as HTMLDivElement,
   floodingControls: document.getElementById("mapEditorFloodingControls") as HTMLDivElement,
   riverControls: document.getElementById("mapEditorRiverControls") as HTMLDivElement,
   settlementControls: document.getElementById("mapEditorSettlementControls") as HTMLDivElement,
@@ -694,6 +738,11 @@ export const initMapEditor = (refs: MapEditorRefs, deps: MapEditorDeps): MapEdit
     groups: MAP_EDITOR_TERRAIN_GROUPS.carving
   });
   buildTerrainControls({
+    container: refs.erosionControls,
+    idPrefix: "mapEditorErosion",
+    groups: MAP_EDITOR_TERRAIN_GROUPS.erosion
+  });
+  buildTerrainControls({
     container: refs.floodingControls,
     idPrefix: "mapEditorFlooding",
     groups: MAP_EDITOR_TERRAIN_GROUPS.flooding
@@ -713,7 +762,14 @@ export const initMapEditor = (refs: MapEditorRefs, deps: MapEditorDeps): MapEdit
     idPrefix: "mapEditorVegetation",
     groups: MAP_EDITOR_TERRAIN_GROUPS.vegetation
   });
-  const preview = createTerrainPreviewController(refs.previewCanvas);
+  let previewUnavailableReason: string | null = null;
+  let preview: TerrainPreviewController;
+  try {
+    preview = createTerrainPreviewController(refs.previewCanvas);
+  } catch (error) {
+    previewUnavailableReason = error instanceof Error ? error.message : "Failed to start the 3D terrain preview.";
+    preview = createUnavailableTerrainPreviewController();
+  }
   const terrainControlElements = collectTerrainControlElements(refs.screen);
   refs.legacyNotice.textContent = "Older saved map scenarios used the legacy slider model and are not loaded in this editor.";
   refs.legacyNotice.classList.toggle("hidden", !hasLegacyMapScenarios());
@@ -733,19 +789,30 @@ export const initMapEditor = (refs: MapEditorRefs, deps: MapEditorDeps): MapEdit
   let previewBuildToken = 0;
   let previewCacheKey: string | null = null;
   let previewCachedSamples: Partial<Record<MapEditorStepId, PreviewRenderableSample>> = {};
+  let previewErosionBaselineSample: PreviewRenderableSample | null = null;
   let previewWarmRunning = false;
   let previewWarmCacheKey: string | null = null;
   let previewWarmToken = 0;
   let assetsReadyForSession = false;
   let advancedMode = false;
 
-  const getActivePreviewConfig = (): StepPreviewConfig => MAP_EDITOR_PREVIEW_BY_STEP[activeStep];
+  const isPreviewAvailable = (): boolean => previewUnavailableReason === null;
+  refs.previewResetView.disabled = !isPreviewAvailable();
+
+  const isErosionCompareEnabled = (): boolean => activeStep === "erosion" && refs.erosionCompareToggle.checked;
+
+  const getActivePreviewConfig = (): StepPreviewConfig =>
+    isErosionCompareEnabled() ? MAP_EDITOR_EROSION_COMPARE_PREVIEW : MAP_EDITOR_PREVIEW_BY_STEP[activeStep];
 
   const syncAdvancedVisibility = (): void => {
     advancedMode = refs.advancedToggle.checked;
     refs.screen.querySelectorAll<HTMLElement>("[data-terrain-advanced='true']").forEach((element) => {
       element.classList.toggle("hidden", !advancedMode);
     });
+  };
+
+  const syncErosionCompareToggleAvailability = (): void => {
+    refs.erosionCompareToggle.disabled = activeStep !== "erosion";
   };
 
   const setActiveStep = (stepId: MapEditorStepId): void => {
@@ -758,6 +825,7 @@ export const initMapEditor = (refs: MapEditorRefs, deps: MapEditorDeps): MapEdit
     refs.stepPanels.forEach((panel) => {
       panel.classList.toggle("is-active", panel.dataset.stepPanel === stepId);
     });
+    syncErosionCompareToggleAvailability();
     syncCurrentScenarioLabel();
     updateCoastlineDebugPanel();
     const draft = collectDraft();
@@ -928,6 +996,7 @@ export const initMapEditor = (refs: MapEditorRefs, deps: MapEditorDeps): MapEdit
     if (previewCacheKey !== cacheKey) {
       previewCacheKey = cacheKey;
       previewCachedSamples = {};
+      previewErosionBaselineSample = null;
       previewWarmToken += 1;
       updateCoastlineDebugPanel();
     }
@@ -937,6 +1006,7 @@ export const initMapEditor = (refs: MapEditorRefs, deps: MapEditorDeps): MapEdit
   const resetPreviewCache = (): void => {
     previewCacheKey = null;
     previewCachedSamples = {};
+    previewErosionBaselineSample = null;
     previewWarmToken += 1;
     updateCoastlineDebugPanel();
   };
@@ -950,6 +1020,17 @@ export const initMapEditor = (refs: MapEditorRefs, deps: MapEditorDeps): MapEdit
       return;
     }
     previewCachedSamples[stepId] = clonePreviewSample(sample);
+    updateCoastlineDebugPanel();
+  };
+
+  const cacheErosionBaselineSample = (
+    cacheKey: string,
+    sample: PreviewRenderableSample
+  ): void => {
+    if (previewCacheKey !== cacheKey) {
+      return;
+    }
+    previewErosionBaselineSample = clonePreviewSample(sample);
     updateCoastlineDebugPanel();
   };
 
@@ -971,11 +1052,17 @@ export const initMapEditor = (refs: MapEditorRefs, deps: MapEditorDeps): MapEdit
     stepId: MapEditorStepId,
     recenter: boolean
   ): boolean => {
+    if (!isPreviewAvailable()) {
+      return false;
+    }
     const cacheKey = buildPreviewCacheKey(draft);
     if (previewCacheKey !== cacheKey) {
       return false;
     }
-    const sample = previewCachedSamples[stepId];
+    const sample =
+      stepId === "erosion" && refs.erosionCompareToggle.checked
+        ? previewErosionBaselineSample
+        : previewCachedSamples[stepId];
     if (!sample) {
       return false;
     }
@@ -1044,6 +1131,13 @@ export const initMapEditor = (refs: MapEditorRefs, deps: MapEditorDeps): MapEdit
   const formatBridgeTile = (tile: { x: number; y: number }): string => `(${tile.x}, ${tile.y})`;
 
   const updateBridgeDebugPanel = (selection: TerrainPreviewBridgeSelection): void => {
+    if (!isPreviewAvailable()) {
+      refs.bridgeDebugMeta.textContent = "3D preview unavailable. Bridge inspection is disabled.";
+      refs.bridgeDebugOutput.textContent = formatPreviewUnavailableMessage(previewUnavailableReason);
+      refs.bridgeDebugCopy.disabled = true;
+      bridgeDebugClipboardText = refs.bridgeDebugOutput.textContent;
+      return;
+    }
     const shareCode = refs.finalShareCodeInput.value || refs.scenarioSeedInput.value;
     const summary = selection.bridgeDebug;
     if (!summary) {
@@ -1097,8 +1191,19 @@ export const initMapEditor = (refs: MapEditorRefs, deps: MapEditorDeps): MapEdit
   };
 
   const updateCoastlineDebugPanel = (): void => {
+    if (!isPreviewAvailable()) {
+      refs.coastDebugMeta.textContent = "3D preview unavailable. Coastline probe preview data is disabled.";
+      refs.coastDebugOutput.textContent = formatPreviewUnavailableMessage(previewUnavailableReason);
+      refs.coastDebugCopy.disabled = true;
+      coastDebugClipboardText = refs.coastDebugOutput.textContent;
+      return;
+    }
     const shareCode = refs.finalShareCodeInput.value || refs.scenarioSeedInput.value;
-    const report = buildCoastlineDebugReport(previewCachedSamples, activeStep, shareCode);
+    const samplesForReport =
+      activeStep === "erosion" && refs.erosionCompareToggle.checked && previewErosionBaselineSample
+        ? { ...previewCachedSamples, erosion: previewErosionBaselineSample }
+        : previewCachedSamples;
+    const report = buildCoastlineDebugReport(samplesForReport, activeStep, shareCode);
     refs.coastDebugMeta.textContent = report.meta;
     refs.coastDebugOutput.textContent = report.text;
     refs.coastDebugCopy.disabled = !report.copyEnabled;
@@ -1111,6 +1216,9 @@ export const initMapEditor = (refs: MapEditorRefs, deps: MapEditorDeps): MapEdit
   updateCoastlineDebugPanel();
 
   const describePreviewState = (draft: TerrainDraft): string => {
+    if (!isPreviewAvailable()) {
+      return "3D preview unavailable";
+    }
     const match = findMatchingScenario(draft);
     const sourceLabel = match ? `linked to "${match.name}"` : "custom draft";
     return `Preview layer: ${getActivePreviewConfig().label} - ${sourceLabel}`;
@@ -1166,6 +1274,13 @@ export const initMapEditor = (refs: MapEditorRefs, deps: MapEditorDeps): MapEdit
     setElementHidden(refs.previewOverlay, true);
   };
 
+  const showPreviewUnavailableState = (): void => {
+    showPreviewOverlay(formatPreviewUnavailableMessage(previewUnavailableReason), 1, "error");
+    refs.previewMeta.textContent = "3D preview unavailable";
+    updateBridgeDebugPanel({ selectedSpan: null, bridgeDebug: null });
+    updateCoastlineDebugPanel();
+  };
+
   const ensurePreviewWorld = (mapSize: MapSizeId, seed: number): WorldState => {
     if (!previewWorld || previewWorldMapSize !== mapSize) {
       previewWorld = createInitialState(seed, buildGrid(mapSize));
@@ -1177,6 +1292,9 @@ export const initMapEditor = (refs: MapEditorRefs, deps: MapEditorDeps): MapEdit
   };
 
   const warmPreviewCache = async (draft: TerrainDraft): Promise<void> => {
+    if (!isPreviewAvailable()) {
+      return;
+    }
     if (!visible || !assetsReadyForSession || previewRunning || previewWarmRunning) {
       return;
     }
@@ -1219,6 +1337,23 @@ export const initMapEditor = (refs: MapEditorRefs, deps: MapEditorDeps): MapEdit
                 buildSnapshotSample(snapshot, warmWorld.grid, warmWorld.seed, terrainHeightScaleMultiplier, false)
               );
               maybeRenderCachedActiveStep(cacheKey, "carving");
+              break;
+            }
+            case "terrain:elevation": {
+              cacheErosionBaselineSample(
+                cacheKey,
+                buildSnapshotSample(snapshot, warmWorld.grid, warmWorld.seed, terrainHeightScaleMultiplier, false)
+              );
+              maybeRenderCachedActiveStep(cacheKey, "erosion");
+              break;
+            }
+            case "terrain:erosion": {
+              cacheEquivalentPreviewSample(
+                cacheKey,
+                "erosion",
+                buildSnapshotSample(snapshot, warmWorld.grid, warmWorld.seed, terrainHeightScaleMultiplier, false)
+              );
+              maybeRenderCachedActiveStep(cacheKey, "erosion");
               break;
             }
             case "hydro:solve": {
@@ -1303,6 +1438,14 @@ export const initMapEditor = (refs: MapEditorRefs, deps: MapEditorDeps): MapEdit
   };
 
   const runPreviewBuild = async (): Promise<void> => {
+    if (!isPreviewAvailable()) {
+      previewPending = false;
+      previewRecenterPending = false;
+      if (visible) {
+        showPreviewUnavailableState();
+      }
+      return;
+    }
     if (!visible || !assetsReadyForSession || previewRunning || !previewPending) {
       return;
     }
@@ -1382,7 +1525,11 @@ export const initMapEditor = (refs: MapEditorRefs, deps: MapEditorDeps): MapEdit
           terrainHeightScaleMultiplier,
           previewConfig.treesEnabled
         );
-        cacheEquivalentPreviewSample(cacheKey, activeStep, sample);
+        if (activeStep === "erosion" && refs.erosionCompareToggle.checked) {
+          cacheErosionBaselineSample(cacheKey, sample);
+        } else {
+          cacheEquivalentPreviewSample(cacheKey, activeStep, sample);
+        }
         preview.setTerrain(sample, { recenter: recenter && !appliedStageCamera });
       } else {
         const sample = buildWorldPreviewSample(world, previewConfig.treesEnabled, terrainHeightScaleMultiplier);
@@ -1409,6 +1556,14 @@ export const initMapEditor = (refs: MapEditorRefs, deps: MapEditorDeps): MapEdit
 
   const requestPreviewBuild = (recenter = false, immediate = false): void => {
     syncPreviewCacheDraft(collectDraft());
+    if (!isPreviewAvailable()) {
+      previewPending = false;
+      previewRecenterPending = false;
+      if (visible) {
+        showPreviewUnavailableState();
+      }
+      return;
+    }
     previewPending = true;
     previewRecenterPending = previewRecenterPending || recenter;
     if (!visible || !assetsReadyForSession) {
@@ -1488,6 +1643,10 @@ export const initMapEditor = (refs: MapEditorRefs, deps: MapEditorDeps): MapEdit
       setShareCodeStatus("Copy the share code or save this terrain as a named scenario.");
     }
     setActiveStep("scenario");
+    if (!isPreviewAvailable()) {
+      showPreviewUnavailableState();
+      return;
+    }
     refs.previewMeta.textContent = "Loading preview assets...";
     showPreviewOverlay("Loading preview assets...", 0);
     void preview.prepareAssets((progress) => {
@@ -1604,8 +1763,20 @@ export const initMapEditor = (refs: MapEditorRefs, deps: MapEditorDeps): MapEdit
     input.addEventListener(input instanceof HTMLSelectElement ? "change" : "input", sync);
   });
   refs.advancedToggle.addEventListener("change", syncAdvancedVisibility);
+  refs.erosionCompareToggle.addEventListener("change", () => {
+    syncCurrentScenarioLabel();
+    updateCoastlineDebugPanel();
+    if (activeStep !== "erosion") {
+      return;
+    }
+    if (tryRenderCachedActiveStep()) {
+      return;
+    }
+    requestPreviewBuild(false, true);
+  });
   syncTerrainControlOutputs(terrainControlElements);
   syncAdvancedVisibility();
+  syncErosionCompareToggleAvailability();
   refs.scenarioNameInput.addEventListener("input", () => {
     syncSeedField();
     updateScenarioButtons();

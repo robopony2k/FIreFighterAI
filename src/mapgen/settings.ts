@@ -58,6 +58,14 @@ export type MapGenSettings = {
   ridgeFrequency: number;
   basinStrength: number;
   coastalShelfWidth: number;
+  erosionDetailStrength: number;
+  erosionDetailScaleM: number;
+  erosionDetailOctaves: number;
+  erosionSlopeStrength: number;
+  erosionBranchStrength: number;
+  erosionCoastFade: number;
+  erosionSlopeMaskMin: number;
+  erosionSlopeMaskMax: number;
   skipCarving: boolean;
   riverBudget: number;
   settlementSpacing: number;
@@ -119,6 +127,14 @@ export const DEFAULT_MAP_GEN_SETTINGS: MapGenSettings = {
   ridgeFrequency: 0.34,
   basinStrength: 0.3,
   coastalShelfWidth: 0.46,
+  erosionDetailStrength: 0.014,
+  erosionDetailScaleM: 220,
+  erosionDetailOctaves: 4,
+  erosionSlopeStrength: 1.5,
+  erosionBranchStrength: 1.25,
+  erosionCoastFade: 0.035,
+  erosionSlopeMaskMin: 0.005,
+  erosionSlopeMaskMax: 0.05,
   skipCarving: false,
   riverBudget: 0.44,
   settlementSpacing: 0.62,

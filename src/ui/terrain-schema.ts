@@ -263,6 +263,18 @@ export const MAP_EDITOR_TERRAIN_GROUPS = {
       ]
     }
   ],
+  erosion: [
+    {
+      id: "erosion-simple",
+      title: "Erosion Drivers",
+      fields: [
+        sliderField("recipe", "relief", "relief", "Relief", "How much the terrain rises and falls across the island."),
+        sliderField("recipe", "ruggedness", "ruggedness", "Ruggedness", "How broken, ridged, and difficult the terrain becomes."),
+        sliderField("recipe", "riverIntensity", "riverIntensity", "River intensity", "River presence, carve strength, and drainage emphasis."),
+        sliderField("recipe", "waterLevel", "waterLevel", "Water level", "How much of the relief ends up flooded into ocean and straits.")
+      ]
+    }
+  ],
   flooding: [
     {
       id: "flooding-simple",

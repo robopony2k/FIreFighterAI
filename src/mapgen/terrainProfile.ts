@@ -464,6 +464,15 @@ export const compileTerrainRecipe = (recipeInput: TerrainRecipe): ResolvedTerrai
   const forestPatchScale = Math.round(mix(32, 16, forestPatchiness));
   const meadowPatchScale = Math.round(mix(28, 12, forestPatchiness));
   const roadStrictness = advanced.roadStrictness;
+  const erosionTightness = clamp01(ruggedness * 0.65 + riverIntensity * 0.35);
+  const erosionArchetypeScale =
+    recipe.archetype === "SHELF"
+      ? 0.62
+      : recipe.archetype === "LONG_SPINE"
+        ? 1.08
+        : recipe.archetype === "TWIN_BAY"
+          ? 0.92
+          : 1;
 
   const settings: MapGenSettings = {
     ...DEFAULT_MAP_GEN_SETTINGS,
@@ -529,6 +538,20 @@ export const compileTerrainRecipe = (recipeInput: TerrainRecipe): ResolvedTerrai
     ridgeFrequency: advanced.ridgeFrequency,
     basinStrength: advanced.basinStrength,
     coastalShelfWidth: advanced.coastalShelfWidth,
+    erosionDetailStrength:
+      mix(0.01, 0.026, erosionTightness)
+      * mix(0.96, 1.16, relief)
+      * erosionArchetypeScale,
+    erosionDetailScaleM:
+      mix(360, 150, erosionTightness)
+      * mix(1.08, 0.9, clamp01(mountainScale - 0.68))
+      * mix(1.02, 0.9, advanced.islandCompactness),
+    erosionDetailOctaves: 4,
+    erosionSlopeStrength: mix(1.1, 2.5, clamp01(ruggedness * 0.75 + relief * 0.25)),
+    erosionBranchStrength: mix(0.7, 2.1, clamp01(ruggedness * 0.55 + riverIntensity * 0.45)),
+    erosionCoastFade: mix(0.015, 0.075, clamp01(waterLevel * 0.7 + advanced.coastalShelfWidth * 0.3)),
+    erosionSlopeMaskMin: mix(0.008, 0.003, ruggedness),
+    erosionSlopeMaskMax: mix(0.024, 0.07, clamp01(ruggedness * 0.65 + relief * 0.35)),
     skipCarving: advanced.skipCarving,
     riverBudget,
     settlementSpacing: advanced.settlementSpacing,

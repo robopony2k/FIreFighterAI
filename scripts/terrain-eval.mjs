@@ -136,6 +136,34 @@ const analyzeSettlements = (state) => {
   };
 };
 
+const analyzeErosionDelta = (before, after) => {
+  if (!before || !after || before.length !== after.length) {
+    return {
+      erosionCoverage: 0,
+      erosionMeanAbsOffset: 0,
+      erosionP95AbsOffset: 0
+    };
+  }
+  let coverage = 0;
+  let absOffsetSum = 0;
+  const absOffsets = new Array(before.length);
+  for (let i = 0; i < before.length; i += 1) {
+    const absOffset = Math.abs((after[i] ?? 0) - (before[i] ?? 0));
+    absOffsets[i] = absOffset;
+    absOffsetSum += absOffset;
+    if (absOffset >= 0.001) {
+      coverage += 1;
+    }
+  }
+  absOffsets.sort((left, right) => left - right);
+  const p95Index = Math.min(absOffsets.length - 1, Math.floor((absOffsets.length - 1) * 0.95));
+  return {
+    erosionCoverage: Number((coverage / Math.max(1, before.length)).toFixed(4)),
+    erosionMeanAbsOffset: Number((absOffsetSum / Math.max(1, before.length)).toFixed(5)),
+    erosionP95AbsOffset: Number((absOffsets[p95Index] ?? 0).toFixed(5))
+  };
+};
+
 const runs = [];
 const rng = new RNG(baseSeed);
 
@@ -147,7 +175,17 @@ for (const archetype of archetypes) {
     rng.setState(seed);
     const recipe = createDefaultTerrainRecipe(sizeId, archetype);
     recipe.mapSize = sizeId;
-    await generateMap(world, rng, undefined, recipe);
+    let elevationBeforeErosion = null;
+    let elevationAfterErosion = null;
+    await generateMap(world, rng, undefined, recipe, {
+      onPhase: async (snapshot) => {
+        if (snapshot.phase === "terrain:elevation") {
+          elevationBeforeErosion = snapshot.elevations;
+        } else if (snapshot.phase === "terrain:erosion") {
+          elevationAfterErosion = snapshot.elevations;
+        }
+      }
+    });
     const roadMetrics = analyzeRoadSurfaceMetrics(world);
     runs.push({
       archetype,
@@ -155,6 +193,7 @@ for (const archetype of archetypes) {
       recipe: compileTerrainRecipe(recipe).recipe,
       ...analyzeLandAndCoast(world),
       ...analyzeRelief(world),
+      ...analyzeErosionDelta(elevationBeforeErosion, elevationAfterErosion),
       ...analyzeRivers(world),
       ...analyzeSettlements(world),
       roadMetrics: {

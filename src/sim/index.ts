@@ -52,6 +52,7 @@ import {
   clearFuelLine,
   deployUnit,
   prepareExtinguish,
+  returnToFocusedCommandUnitSelection,
   seedStartingRoster,
   selectUnit,
   setDeployMode,
@@ -863,7 +864,11 @@ export function togglePause(state: WorldState): void {
 }
 
 export function handleEscape(state: WorldState, inputState: InputState): void {
-  selectUnit(state, null);
+  if (state.selectionScope === "truck" && state.selectedTruckIds.length > 0) {
+    returnToFocusedCommandUnitSelection(state);
+  } else {
+    selectUnit(state, null);
+  }
   setDeployMode(state, null);
   inputState.formationStart = null;
   inputState.formationEnd = null;

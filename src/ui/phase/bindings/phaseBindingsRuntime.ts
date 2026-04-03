@@ -23,7 +23,10 @@ import {
 } from "../../../sim/index.js";
 import {
   assignRosterCrew,
+  clearSelectedTruckOverrides,
   recruitUnit,
+  selectCommandUnit,
+  selectTruck,
   selectUnit,
   setCrewFormation,
   setDeployMode,
@@ -461,13 +464,32 @@ export const bindPhaseUi = ({
   };
 
   const getUiActionAudioCue = (action: string): UiAudioCue | null => {
-    if (action === "pause" || action === "crew-board" || action === "crew-deploy" || action === "toggle-fuel-break" || action === "backburn") {
+    if (
+      action === "pause" ||
+      action === "crew-board" ||
+      action === "crew-deploy" ||
+      action === "toggle-fuel-break" ||
+      action === "backburn" ||
+      action === "command-clear" ||
+      action.startsWith("command-mode-") ||
+      action.startsWith("behaviour-")
+    ) {
       return "toggle";
+    }
+    if (action === "rejoin-command-unit") {
+      return "confirm";
     }
     if (action === "time-skip-next-fire" || /^time-speed-\d+$/.test(action) || /^formation-(narrow|medium|wide)$/.test(action)) {
       return "toggle";
     }
-    if (action === "select-unit" || action === "select-truck" || action === "select-roster" || action === "zoom-in" || action === "zoom-out") {
+    if (
+      action === "select-unit" ||
+      action === "select-command-unit" ||
+      action === "select-truck" ||
+      action === "select-roster" ||
+      action === "zoom-in" ||
+      action === "zoom-out"
+    ) {
       return "click";
     }
     if (
@@ -583,6 +605,11 @@ export const bindPhaseUi = ({
 
   const runUiAction = (action: string, actionTarget?: HTMLElement | null, event?: Event): void => {
     playUiActionAudio(action);
+    const getPayloadFlag = (key: string): boolean => {
+      const value = actionTarget?.dataset[key];
+      return value === "1" || value === "true";
+    };
+    const resolvedAction = action === "backburn" ? "command-mode-backburn" : action;
     if (action === "continue") {
       if (state.annualReportOpen) {
         closeAnnualReport(state);
@@ -626,7 +653,7 @@ export const bindPhaseUi = ({
       );
       return;
     }
-    if (action === "pause") {
+    if (resolvedAction === "pause") {
       gate("timeControl", () => {
         if (state.skipToNextFire) {
           cancelSkipToNextFire(state, "Skip to next fire cancelled.");
@@ -641,7 +668,7 @@ export const bindPhaseUi = ({
       });
       return;
     }
-    if (action === "time-skip-next-fire") {
+    if (resolvedAction === "time-skip-next-fire") {
       gate("timeControl", () => {
         if (!isSkipToNextFireAvailable(state)) {
           if (state.skipToNextFire) {
@@ -660,56 +687,58 @@ export const bindPhaseUi = ({
       });
       return;
     }
-    if (action === "debug-ignite-toggle") {
+    if (resolvedAction === "debug-ignite-toggle") {
       toggleDebugIgniteMode();
       return;
     }
-    if (action === "debug-type-colors-toggle") {
+    if (resolvedAction === "debug-type-colors-toggle") {
       toggleDebugTypeColors();
       return;
     }
-    if (action === "toggle-fuel-break") {
+    if (resolvedAction === "toggle-fuel-break") {
       gate("clearFuelBreak", () => handleDeployAction(state, "clear"));
       return;
     }
-    if (action === "deploy-firefighter") {
+    if (resolvedAction === "deploy-firefighter") {
       gate("deploy", () => handleDeployAction(state, "firefighter"));
       return;
     }
-    if (action === "deploy-truck") {
+    if (resolvedAction === "deploy-truck") {
       gate("deploy", () => handleDeployAction(state, "truck"));
       return;
     }
-    if (action === "backburn") {
-      const selectedTruck = state.units.find((unit) => unit.kind === "truck" && unit.selected) ?? null;
-      if (!selectedTruck) {
-        setStatus(state, "Select a truck to issue a backburn.");
-        return;
+    if (resolvedAction === "select-command-unit") {
+      const id = Number(actionTarget?.dataset.commandUnitId ?? "");
+      if (Number.isFinite(id)) {
+        gate("select", () => {
+          selectCommandUnit(
+            state,
+            id,
+            getPayloadFlag("toggle") ? { toggle: true } : getPayloadFlag("append") ? { append: true } : undefined
+          );
+          setDeployMode(state, null);
+        });
       }
-      gate("select", () => {
-        debugIgniteMode = !debugIgniteMode;
-        inputState.debugIgniteMode = debugIgniteMode;
-        setStatus(
-          state,
-          debugIgniteMode ? "Fuel break (backburn) mode enabled. Click to ignite." : "Fuel break mode disabled."
-        );
-      });
       return;
     }
-    if (action === "select-truck") {
+    if (resolvedAction === "select-truck") {
       const id = Number(actionTarget?.dataset.truckId ?? "");
       if (Number.isFinite(id)) {
         const truck = state.units.find((unit) => unit.kind === "truck" && unit.id === id) ?? null;
         if (truck) {
           gate("select", () => {
-            selectUnit(state, truck);
+            selectTruck(
+              state,
+              truck,
+              getPayloadFlag("toggle") ? { toggle: true } : getPayloadFlag("append") ? { append: true } : undefined
+            );
             setDeployMode(state, null);
           });
         }
       }
       return;
     }
-    if (action === "select-unit") {
+    if (resolvedAction === "select-unit") {
       const id = Number(actionTarget?.dataset.unitId ?? "");
       if (Number.isFinite(id)) {
         const unit = state.units.find((entry) => entry.id === id) ?? null;
@@ -722,31 +751,61 @@ export const bindPhaseUi = ({
       }
       return;
     }
-    if (action === "recruit-firefighter") {
+    if (resolvedAction === "command-clear") {
+      inputState.commandMode = null;
+      setStatus(state, "Auto command mode enabled. Right-click chooses the order from context.");
+      phaseUi.sync(state, inputState);
+      return;
+    }
+    const commandModeMatch = resolvedAction.match(/^command-mode-(move|suppress|contain|backburn)$/);
+    if (commandModeMatch) {
+      inputState.commandMode = commandModeMatch[1] as InputState["commandMode"];
+      setStatus(state, `${commandModeMatch[1][0]!.toUpperCase()}${commandModeMatch[1].slice(1)} mode armed. Right-click to issue orders.`);
+      phaseUi.sync(state, inputState);
+      return;
+    }
+    const behaviourMatch = resolvedAction.match(/^behaviour-(aggressive|balanced|defensive)$/);
+    if (behaviourMatch) {
+      inputState.behaviourMode = behaviourMatch[1] as InputState["behaviourMode"];
+      setStatus(
+        state,
+        `${behaviourMatch[1][0]!.toUpperCase()}${behaviourMatch[1].slice(1)} behavior selected for the next command.`
+      );
+      phaseUi.sync(state, inputState);
+      return;
+    }
+    if (resolvedAction === "rejoin-command-unit") {
+      gate("select", () => {
+        clearSelectedTruckOverrides(state);
+      });
+      phaseUi.sync(state, inputState);
+      return;
+    }
+    if (resolvedAction === "recruit-firefighter") {
       recruitUnit(state, rng, "firefighter");
       return;
     }
-    if (action === "recruit-truck") {
+    if (resolvedAction === "recruit-truck") {
       recruitUnit(state, rng, "truck");
       return;
     }
-    if (action === "train-speed") {
+    if (resolvedAction === "train-speed") {
       trainSelectedUnit(state, "speed");
       return;
     }
-    if (action === "train-power") {
+    if (resolvedAction === "train-power") {
       trainSelectedUnit(state, "power");
       return;
     }
-    if (action === "train-range") {
+    if (resolvedAction === "train-range") {
       trainSelectedUnit(state, "range");
       return;
     }
-    if (action === "train-resilience") {
+    if (resolvedAction === "train-resilience") {
       trainSelectedUnit(state, "resilience");
       return;
     }
-    if (action === "crew-assign") {
+    if (resolvedAction === "crew-assign") {
       const selected = state.roster.find((unit) => unit.id === state.selectedRosterId) ?? null;
       if (!selected || selected.kind !== "firefighter") {
         return;
@@ -758,7 +817,7 @@ export const bindPhaseUi = ({
       assignRosterCrew(state, selected.id, Number(select.value));
       return;
     }
-    if (action === "crew-unassign") {
+    if (resolvedAction === "crew-unassign") {
       const selected = state.roster.find((unit) => unit.id === state.selectedRosterId) ?? null;
       if (!selected || selected.kind !== "firefighter") {
         return;
@@ -766,15 +825,15 @@ export const bindPhaseUi = ({
       unassignRosterCrew(state, selected.id);
       return;
     }
-    if (action === "crew-board") {
+    if (resolvedAction === "crew-board") {
       applyCrewModeToSelection("boarded");
       return;
     }
-    if (action === "crew-deploy") {
+    if (resolvedAction === "crew-deploy") {
       applyCrewModeToSelection("deployed");
       return;
     }
-    const formationMatch = action.match(/^formation-(narrow|medium|wide)$/);
+    const formationMatch = resolvedAction.match(/^formation-(narrow|medium|wide)$/);
     if (formationMatch) {
       applyFormationToSelection(formationMatch[1] as Formation);
       return;

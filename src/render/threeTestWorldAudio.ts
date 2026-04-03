@@ -5,6 +5,8 @@ import type { TerrainRenderSurface } from "./threeTestTerrain.js";
 import {
   assignFireAudioEmitterSlots,
   clamp01,
+  computeDistanceAttenuation,
+  computeFireDistanceGain,
   computeTerrainOcclusion01,
   computeWindLoudnessGain,
   selectPrioritizedFireAudioClusters,
@@ -61,6 +63,8 @@ const SIREN_GAIN_RESPONSE = 6.5;
 const WORLD_AUDIO_ROLL_OFF_MIN = 900;
 const WORLD_AUDIO_ROLL_OFF_MAX = 18000;
 const SIREN_Y_OFFSET = 0.16;
+const SIREN_LOOP_START_SECONDS = 0;
+const SIREN_LOOP_END_SECONDS = 26.4;
 const FIRE_Y_OFFSET = 0.06;
 const FIRE_BASE_GAIN = 0.64;
 const FIRE_MID_GAIN = 0.42;
@@ -111,8 +115,6 @@ const worldToTileX = (terrainSurface: TerrainRenderSurface, worldX: number): num
   (worldX / Math.max(1e-5, terrainSurface.width) + 0.5) * terrainSurface.cols;
 const worldToTileY = (terrainSurface: TerrainRenderSurface, worldZ: number): number =>
   (worldZ / Math.max(1e-5, terrainSurface.depth) + 0.5) * terrainSurface.rows;
-const resolveDistanceAttenuation = (distance: number, nearDistance: number, farDistance: number): number =>
-  1 - smoothstep(nearDistance, farDistance, distance);
 const resolveDistanceCutoff = (distance01: number): number =>
   lerp(WORLD_AUDIO_ROLL_OFF_MAX, WORLD_AUDIO_ROLL_OFF_MIN, Math.pow(clamp01(1 - distance01), 0.5));
 const pickFireBaseLoop = (size01: number): string =>
@@ -551,9 +553,15 @@ export const createThreeTestWorldAudio = (
       const source = context.createBufferSource();
       source.buffer = buffer;
       source.loop = true;
+      source.loopStart = SIREN_LOOP_START_SECONDS;
+      source.loopEnd = Math.max(
+        SIREN_LOOP_START_SECONDS + 0.1,
+        Math.min(buffer.duration, SIREN_LOOP_END_SECONDS)
+      );
       source.playbackRate.value = 0.99 + (slot.seed - 0.5) * 0.03;
       source.connect(slot.gain);
-      const offset = buffer.duration > 0 ? (slot.seed * buffer.duration) % buffer.duration : 0;
+      const loopDuration = Math.max(0.1, source.loopEnd - source.loopStart);
+      const offset = source.loopStart + ((slot.seed * loopDuration) % loopDuration);
       source.start(context.currentTime, offset);
       slot.source = source;
     });
@@ -653,7 +661,7 @@ export const createThreeTestWorldAudio = (
       const dirY = firePoint.y - tmpCameraPosition.y;
       const dirZ = firePoint.z - tmpCameraPosition.z;
       const distance = Math.hypot(dirX, dirY, dirZ);
-      const distanceGain = resolveDistanceAttenuation(distance, tileSpan * 4, hearingDistance);
+      const distanceGain = computeFireDistanceGain(distance, tileSpan * 4, hearingDistance);
       const distance01 = clamp01(distance / Math.max(1e-4, hearingDistance));
       const pan =
         distance > 1e-5
@@ -688,18 +696,31 @@ export const createThreeTestWorldAudio = (
         0.08
       );
       const size01 = getEmitterSize01(slot.currentTileCount);
+      const baseSourcePath = pickFireBaseLoop(size01);
+      const midSourcePath = pickFireAccentLoop(size01);
+      const highSourcePath = pickFireHighLoop(size01);
       const pitchBase = clamp(1 + (slot.smoothedIntensity - 0.5) * 0.05 + (slot.seed - 0.5) * 0.03 - size01 * 0.02, 0.96, 1.06);
       const baseGain =
-        slot.smoothedIntensity <= 0.001 ? 0 : (0.08 + slot.smoothedIntensity * 0.84) * (0.58 + size01 * 0.42) * FIRE_BASE_GAIN;
-      const midGain = smoothstep(0.3, 0.82, slot.smoothedIntensity) * (0.3 + size01 * 0.4) * FIRE_MID_GAIN;
-      const highGain = smoothstep(0.7, 1, slot.smoothedIntensity) * (0.22 + size01 * 0.25) * FIRE_HIGH_GAIN;
+        slot.smoothedIntensity <= 0.001
+          ? 0
+          : (0.08 + slot.smoothedIntensity * 0.84) *
+            (0.58 + size01 * 0.42) *
+            FIRE_BASE_GAIN;
+      const midGain =
+        smoothstep(0.3, 0.82, slot.smoothedIntensity) *
+        (0.3 + size01 * 0.4) *
+        FIRE_MID_GAIN;
+      const highGain =
+        smoothstep(0.7, 1, slot.smoothedIntensity) *
+        (0.22 + size01 * 0.25) *
+        FIRE_HIGH_GAIN;
       slot.baseLayer.levelGain.gain.setTargetAtTime(baseGain, audioContext.currentTime, 0.08);
       slot.midLayer.levelGain.gain.setTargetAtTime(midGain, audioContext.currentTime, 0.08);
       slot.highLayer.levelGain.gain.setTargetAtTime(highGain, audioContext.currentTime, 0.08);
       if (cluster) {
-        syncLayerLoop(slot.baseLayer, pickFireBaseLoop(size01), pitchBase, slot.seed * 1.13);
-        syncLayerLoop(slot.midLayer, pickFireAccentLoop(size01), clamp(pitchBase + 0.012, 0.96, 1.08), slot.seed * 1.71);
-        syncLayerLoop(slot.highLayer, pickFireHighLoop(size01), clamp(pitchBase + 0.026, 0.97, 1.08), slot.seed * 2.19);
+        syncLayerLoop(slot.baseLayer, baseSourcePath, pitchBase, slot.seed * 1.13);
+        syncLayerLoop(slot.midLayer, midSourcePath, clamp(pitchBase + 0.012, 0.96, 1.08), slot.seed * 1.71);
+        syncLayerLoop(slot.highLayer, highSourcePath, clamp(pitchBase + 0.026, 0.97, 1.08), slot.seed * 2.19);
         const transientRate = FIRE_TRANSIENT_RATE * slot.smoothedIntensity;
         if (transientRate > 0.01) {
           if (slot.nextTransientAt <= 0) {
@@ -817,7 +838,7 @@ export const createThreeTestWorldAudio = (
       const dirY = truckPoint.y - tmpCameraPosition.y;
       const dirZ = truckPoint.z - tmpCameraPosition.z;
       const distance = Math.hypot(dirX, dirY, dirZ);
-      const distanceGain = resolveDistanceAttenuation(distance, tileSpan * 5, hearingDistance);
+      const distanceGain = computeDistanceAttenuation(distance, tileSpan * 5, hearingDistance);
       const distance01 = clamp01(distance / Math.max(1e-4, hearingDistance));
       const pan =
         distance > 1e-5

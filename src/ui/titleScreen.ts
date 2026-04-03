@@ -256,7 +256,7 @@ const DEBUG_SETTINGS_SECTIONS: ReadonlyArray<RuntimeSettingsSectionSpec> = [
   },
   {
     title: "3D Debug",
-    keys: ["nosim", "noterrain", "rivercam", "rivercamlock", "sparkdebug", "sparkmode", "headless"]
+    keys: ["nosim", "noterrain", "rivercam", "rivercamlock", "sparkdebug", "headless"]
   }
 ];
 

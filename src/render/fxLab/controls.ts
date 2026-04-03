@@ -3,8 +3,7 @@ import {
   normalizeFireFxDebugControls,
   type FireFxDebugControls,
   type FireAnchorDebugMode,
-  type FireFxFallbackMode,
-  type SparkMode
+  type FireFxFallbackMode
 } from "../threeTestFireFx.js";
 import {
   DEFAULT_WATER_FX_DEBUG_CONTROLS,
@@ -51,7 +50,7 @@ type FxLabEnumControl<K extends string, V extends string> = FxLabControlBase<K> 
 export type FxLabFireControlDefinition =
   | FxLabRangeControl<keyof FireFxDebugControls & string>
   | FxLabBooleanControl<keyof FireFxDebugControls & string>
-  | FxLabEnumControl<keyof FireFxDebugControls & string, FireAnchorDebugMode | FireFxFallbackMode | SparkMode>;
+  | FxLabEnumControl<keyof FireFxDebugControls & string, FireAnchorDebugMode | FireFxFallbackMode>;
 
 export type FxLabWaterControlDefinition =
   | FxLabRangeControl<keyof WaterFxDebugControls & string>
@@ -109,18 +108,6 @@ export const FX_LAB_FIRE_CONTROLS: ReadonlyArray<FxLabFireControlDefinition> = [
       { value: "aggressive", label: "Aggressive" },
       { value: "gentle", label: "Gentle" },
       { value: "off", label: "Off" }
-    ]
-  },
-  {
-    key: "sparkMode",
-    section: "Fire",
-    kind: "enum",
-    label: "Spark Mode",
-    description: "Tip streaks versus free embers.",
-    options: [
-      { value: "tip", label: "Tip" },
-      { value: "mixed", label: "Mixed" },
-      { value: "embers", label: "Embers" }
     ]
   },
   {
