@@ -795,11 +795,12 @@ canvas {
   position: absolute;
   left: 0;
   top: 0;
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
+  display: grid;
+  gap: 6px;
+  inline-size: 192px;
+  min-block-size: 58px;
   border: 1px solid color-mix(in srgb, var(--three-test-card-border) 78%, rgba(136, 174, 212, 0.42));
-  border-radius: 999px;
+  border-radius: 14px;
   background: color-mix(in srgb, var(--three-test-card-bg) 88%, rgba(12, 20, 28, 0.84));
   color: var(--three-test-text-primary);
   padding: 6px 10px;
@@ -807,7 +808,7 @@ canvas {
   box-shadow: 0 6px 16px rgba(0, 0, 0, 0.32);
   pointer-events: auto;
   text-align: left;
-  white-space: nowrap;
+  white-space: normal;
   will-change: transform;
   transform-origin: center bottom;
   isolation: isolate;
@@ -824,9 +825,51 @@ canvas {
   box-shadow: 0 0 0 2px color-mix(in srgb, var(--three-test-accent) 28%, transparent), 0 6px 16px rgba(0, 0, 0, 0.32);
 }
 
+.three-test-truck-beacon-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+}
+
 .three-test-truck-beacon-name {
   font-weight: 700;
   letter-spacing: 0.01em;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.three-test-truck-beacon-stats {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.three-test-truck-beacon-stat {
+  display: inline-grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  border-radius: 999px;
+  padding: 3px 6px;
+  font-size: 10px;
+  line-height: 1;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+  color: color-mix(in srgb, var(--three-test-text-primary) 86%, transparent);
+  background: color-mix(in srgb, var(--three-test-button-bg) 80%, transparent);
+  border: 1px solid color-mix(in srgb, var(--three-test-card-border) 72%, transparent);
+  overflow: hidden;
+}
+
+.three-test-truck-beacon-stat::before {
+  content: attr(data-icon);
+  font-size: 11px;
+  line-height: 1;
 }
 
 .three-test-truck-beacon-status {
@@ -4027,6 +4070,7 @@ input[type="text"] {
   display: grid;
   grid-template-columns: minmax(240px, 320px);
   align-items: stretch;
+  position: relative;
 }
 
 .phase-column {
@@ -4076,6 +4120,194 @@ input[type="text"] {
   flex-wrap: wrap;
   flex: 1 1 auto;
   min-width: 0;
+}
+
+.phase-progression-strip {
+  display: grid;
+  gap: 10px;
+  width: min(100%, 780px);
+  padding: 10px 12px 12px;
+  border-radius: 16px;
+  border: 1px solid rgba(255, 214, 155, 0.2);
+  background:
+    linear-gradient(180deg, rgba(22, 20, 16, 0.965), rgba(16, 14, 12, 0.94)),
+    radial-gradient(circle at top left, rgba(255, 181, 93, 0.08), transparent 38%);
+  box-shadow: 0 16px 28px rgba(0, 0, 0, 0.34);
+}
+
+.phase-progression-strip.is-hidden {
+  display: none;
+}
+
+.phase-progression-header {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 16px;
+  align-items: flex-start;
+  justify-content: space-between;
+}
+
+.phase-progression-copy,
+.phase-progression-meta {
+  display: grid;
+  gap: 4px;
+}
+
+.phase-progression-meta {
+  justify-items: end;
+  text-align: right;
+}
+
+.phase-progression-level {
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.8px;
+  text-transform: uppercase;
+  color: rgba(255, 205, 141, 0.92);
+}
+
+.phase-progression-summary,
+.phase-progression-status {
+  font-size: 11px;
+  color: rgba(227, 205, 177, 0.74);
+}
+
+.phase-progression-status.is-alert {
+  color: #ffe0a7;
+  font-weight: 700;
+}
+
+.phase-progression-bar,
+.phase-progress-bar {
+  position: relative;
+  width: 100%;
+  height: 8px;
+  border-radius: 999px;
+  overflow: hidden;
+  border: 1px solid rgba(255, 214, 155, 0.12);
+  background:
+    linear-gradient(90deg, rgba(10, 10, 10, 0.18), rgba(255, 255, 255, 0.02)),
+    repeating-linear-gradient(90deg, rgba(255, 214, 155, 0.04) 0, rgba(255, 214, 155, 0.04) 14px, transparent 14px, transparent 28px);
+}
+
+.phase-progression-fill,
+.phase-progress-fill {
+  height: 100%;
+  width: 0;
+  border-radius: inherit;
+  background: linear-gradient(135deg, rgba(240, 179, 59, 0.96), rgba(209, 74, 44, 0.86));
+  transition: width 180ms ease;
+}
+
+.phase-progression-rewards {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.phase-progression-empty {
+  font-size: 11px;
+  color: rgba(227, 205, 177, 0.74);
+}
+
+.phase-progression-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 8px;
+  border-radius: 999px;
+  background: rgba(44, 35, 27, 0.96);
+  border: 1px solid rgba(255, 203, 141, 0.2);
+  box-shadow: inset 0 0 0 1px rgba(255, 211, 154, 0.04);
+}
+
+.phase-progression-chip-label {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.8px;
+  color: rgba(255, 205, 141, 0.92);
+}
+
+.phase-progression-chip-stack {
+  font-size: 11px;
+  font-weight: 700;
+  color: rgba(248, 236, 216, 0.96);
+}
+
+.phase-progression-review {
+  padding: 7px 11px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 203, 141, 0.26);
+  background: linear-gradient(135deg, rgba(58, 43, 29, 0.98) 0%, rgba(28, 23, 18, 0.98) 100%);
+  color: rgba(248, 236, 216, 0.96);
+  box-shadow: none;
+  font-size: 11px;
+  letter-spacing: 0.55px;
+  text-transform: uppercase;
+}
+
+.phase-progression-draft {
+  position: absolute;
+  inset: 0;
+  z-index: 46;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: radial-gradient(circle at center, rgba(10, 10, 12, 0.4) 0%, rgba(10, 10, 12, 0.16) 34%, rgba(10, 10, 12, 0) 72%);
+  pointer-events: none;
+}
+
+.phase-progression-draft.is-idle {
+  display: none;
+}
+
+.phase-progression-draft-shell {
+  width: min(1040px, calc(100vw - 72px));
+  max-height: calc(100vh - 132px);
+  display: grid;
+  gap: 12px;
+  padding: 18px 18px 20px;
+  border-radius: 22px;
+  border: 1px solid rgba(255, 214, 155, 0.22);
+  background:
+    radial-gradient(circle at top left, rgba(255, 181, 93, 0.14), transparent 36%),
+    radial-gradient(circle at bottom right, rgba(111, 155, 201, 0.12), transparent 34%),
+    linear-gradient(180deg, rgba(22, 20, 16, 0.982), rgba(16, 14, 12, 0.962));
+  box-shadow: 0 28px 56px rgba(0, 0, 0, 0.38);
+  color: rgba(248, 236, 216, 0.96);
+  pointer-events: auto;
+  overflow: auto;
+}
+
+.phase-progression-draft-eyebrow {
+  font-size: 11px;
+  letter-spacing: 1.4px;
+  text-transform: uppercase;
+  color: rgba(255, 205, 141, 0.92);
+}
+
+.phase-progression-draft-title {
+  font-size: 26px;
+  line-height: 1;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.phase-progression-draft-summary {
+  max-width: 72ch;
+  font-size: 13px;
+  line-height: 1.45;
+  color: rgba(227, 205, 177, 0.78);
+}
+
+.phase-progression-review:hover {
+  transform: translateY(-1px);
+  background: linear-gradient(135deg, rgba(71, 52, 35, 0.98) 0%, rgba(34, 28, 22, 0.98) 100%);
+  box-shadow: none;
+}
+
+.phase-progression-review.is-hidden {
+  display: none;
 }
 
 .phase-badge {
@@ -5541,6 +5773,172 @@ input[type="text"] {
   background: linear-gradient(135deg, var(--accent) 0%, #b43a22 100%);
 }
 
+.phase-progress-meta,
+.phase-progress-queue {
+  font-size: 11px;
+  color: rgba(227, 205, 177, 0.74);
+}
+
+.phase-progress-queue.is-alert {
+  color: #ffe0a7;
+  font-weight: 700;
+}
+
+.phase-progress-options {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px;
+  margin-top: 4px;
+}
+
+.phase-progression-option {
+  display: grid;
+  gap: 12px;
+  align-content: start;
+  text-align: left;
+  min-height: 230px;
+  padding: 14px;
+  border-radius: 18px;
+  border: 1px solid var(--progression-card-border, rgba(255, 214, 155, 0.24));
+  background:
+    linear-gradient(180deg, var(--progression-card-top, rgba(37, 30, 23, 0.98)), var(--progression-card-bottom, rgba(22, 18, 14, 0.96))),
+    radial-gradient(circle at top right, var(--progression-card-glow, rgba(255, 191, 102, 0.12)), transparent 38%);
+  box-shadow: 0 16px 26px rgba(0, 0, 0, 0.28);
+  color: rgba(248, 236, 216, 0.96);
+}
+
+.phase-progression-option:hover {
+  transform: translateY(-2px);
+  border-color: color-mix(in srgb, var(--progression-card-border) 74%, rgba(255, 232, 196, 0.88));
+  background:
+    linear-gradient(180deg, var(--progression-card-top, rgba(37, 30, 23, 0.98)), var(--progression-card-bottom, rgba(22, 18, 14, 0.96))),
+    radial-gradient(circle at top right, var(--progression-card-glow, rgba(255, 191, 102, 0.12)), transparent 38%);
+  box-shadow: 0 18px 30px rgba(0, 0, 0, 0.32);
+}
+
+.phase-progression-option.is-standard {
+  --progression-card-border: rgba(255, 205, 141, 0.26);
+  --progression-card-top: rgba(40, 31, 23, 0.98);
+  --progression-card-bottom: rgba(23, 18, 14, 0.96);
+  --progression-card-glow: rgba(255, 191, 102, 0.12);
+}
+
+.phase-progression-option.is-rare {
+  --progression-card-border: rgba(132, 182, 219, 0.32);
+  --progression-card-top: rgba(25, 34, 43, 0.98);
+  --progression-card-bottom: rgba(16, 22, 28, 0.96);
+  --progression-card-glow: rgba(106, 179, 230, 0.14);
+}
+
+.phase-progression-option.is-elite {
+  --progression-card-border: rgba(255, 141, 115, 0.34);
+  --progression-card-top: rgba(52, 26, 21, 0.98);
+  --progression-card-bottom: rgba(31, 15, 14, 0.96);
+  --progression-card-glow: rgba(255, 112, 83, 0.14);
+}
+
+.phase-progression-option-topline,
+.phase-progression-option-footer,
+.phase-progression-option-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.phase-progression-option-topline {
+  align-items: flex-start;
+}
+
+.phase-progression-option-type,
+.phase-progression-option-rarity,
+.phase-progression-option-stack,
+.phase-progression-option-prompt {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  padding: 4px 8px;
+  border-radius: 999px;
+  font-size: 10px;
+  letter-spacing: 0.85px;
+  text-transform: uppercase;
+}
+
+.phase-progression-option-type {
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 214, 155, 0.16);
+  color: rgba(255, 229, 195, 0.84);
+}
+
+.phase-progression-option-rarity {
+  background: color-mix(in srgb, var(--progression-card-border) 16%, transparent);
+  border: 1px solid color-mix(in srgb, var(--progression-card-border) 84%, transparent);
+  color: color-mix(in srgb, var(--progression-card-border) 72%, rgba(255, 239, 222, 0.94));
+}
+
+.phase-progression-option-head {
+  align-items: flex-start;
+  justify-content: flex-start;
+}
+
+.phase-progression-option-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 52px;
+  height: 52px;
+  padding: 0 10px;
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--progression-card-border) 18%, rgba(255, 255, 255, 0.04));
+  border: 1px solid color-mix(in srgb, var(--progression-card-border) 72%, transparent);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 1.1px;
+}
+
+.phase-progression-option-copy {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.phase-progression-option-title {
+  font-size: 18px;
+  font-weight: 700;
+}
+
+.phase-progression-option-meta,
+.phase-progression-option-description {
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.phase-progression-option-meta {
+  color: rgba(227, 205, 177, 0.74);
+}
+
+.phase-progression-option-description {
+  color: rgba(240, 228, 210, 0.92);
+  min-height: 70px;
+}
+
+.phase-progression-option-footer {
+  margin-top: auto;
+}
+
+.phase-progression-option-stack {
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 214, 155, 0.12);
+  color: rgba(227, 205, 177, 0.82);
+}
+
+.phase-progression-option-prompt {
+  background: linear-gradient(135deg, rgba(240, 179, 59, 0.28), rgba(209, 74, 44, 0.24));
+  border: 1px solid rgba(255, 191, 121, 0.24);
+  color: rgba(255, 239, 222, 0.96);
+}
+
 .phase-roster-list {
   display: grid;
   gap: 8px;
@@ -5595,6 +5993,10 @@ input[type="text"] {
 
   .phase-score-rail-count {
     text-align: left;
+  }
+
+  .phase-progress-options {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .phase-ledger-carry-grid {
@@ -5865,6 +6267,29 @@ input[type="text"] {
   .phase-topbar-content {
     width: 100%;
     justify-content: space-between;
+  }
+
+  .phase-progression-header,
+  .phase-progression-meta {
+    width: 100%;
+  }
+
+  .phase-progression-meta {
+    justify-items: start;
+    text-align: left;
+  }
+
+  .phase-progress-options {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .phase-progression-draft {
+    padding: 16px;
+  }
+
+  .phase-progression-draft-shell {
+    width: min(100%, 640px);
+    padding: 16px;
   }
 
   .three-test-right-dock {

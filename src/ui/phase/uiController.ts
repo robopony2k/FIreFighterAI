@@ -11,6 +11,7 @@ import { createFuelBreakPanel } from "./components/FuelBreakPanel.js";
 import { createMaintenanceCrewPanel } from "./components/MaintenanceCrewPanel.js";
 import { createMaintenanceRosterPanel } from "./components/MaintenanceRosterPanel.js";
 import { createMiniMapPanel } from "./components/MiniMapPanel.js";
+import { createProgressionDraftPanel } from "./components/ProgressionDraftPanel.js";
 import { createTopBar } from "./components/TopBar.js";
 import type { FireDeployPanelData } from "./components/FireDeployPanel.js";
 import type { BudgetReportData } from "./components/BudgetReportView.js";
@@ -21,11 +22,13 @@ import type { FuelBreakPanelData } from "./components/FuelBreakPanel.js";
 import type { CrewPanelData } from "./components/MaintenanceCrewPanel.js";
 import type { MaintenanceRosterPanelData } from "./components/MaintenanceRosterPanel.js";
 import type { MiniMapPanelData } from "./components/MiniMapPanel.js";
+import type { ProgressionDraftPanelData } from "./components/ProgressionDraftPanel.js";
 import type { TopBarData } from "./components/TopBar.js";
 import type { UiAudioSettings } from "../../audio/uiAudio.js";
 
 type PanelDataMap = {
   miniMap: MiniMapPanelData;
+  progressionDraft: ProgressionDraftPanelData;
   maintenanceRoster: MaintenanceRosterPanelData;
   maintenanceCrew: CrewPanelData;
   fuelBreak: FuelBreakPanelData;
@@ -38,6 +41,15 @@ type PanelDataMap = {
 const defaultPanelData: PanelDataMap = {
   miniMap: {
     world: null
+  },
+  progressionDraft: {
+    active: false,
+    title: "Command Upgrade",
+    summary: "Next command upgrade will unlock from assisted extinguishes.",
+    progressText: "0/25 assisted extinguishes",
+    progress01: 0,
+    queuedCount: 0,
+    options: []
   },
   maintenanceRoster: {
     totalFirefighters: 0,
@@ -111,6 +123,7 @@ export class UIController {
 
   private topBar = createTopBar();
   private bottomControls = createBottomLeftControls();
+  private progressionDraft = createProgressionDraftPanel();
   private maintenanceRoster = createMaintenanceRosterPanel();
   private maintenanceCrew = createMaintenanceCrewPanel();
   private miniMap = createMiniMapPanel();
@@ -197,12 +210,13 @@ export class UIController {
 
     body.append(left);
     this.topBar.attachControls(this.bottomControls.element);
-    shell.append(this.topBar.element, body);
+    shell.append(this.topBar.element, body, this.progressionDraft.element);
     this.root.append(shell);
 
     [
       this.topBar.element,
       this.bottomControls.element,
+      this.progressionDraft.element,
       this.maintenanceRoster.element,
       this.maintenanceCrew.element,
       this.miniMap.element,
@@ -233,6 +247,7 @@ export class UIController {
       forecastStartDay: snapshot.forecastStartDay,
       forecastYearDays: snapshot.forecastYearDays,
       forecastMeta: snapshot.forecastMeta,
+      progression: snapshot.progression,
       scoring: snapshot.scoring
     };
     this.topBar.update(topBarData);
@@ -256,6 +271,7 @@ export class UIController {
     this.bottomControls.update(bottomData);
 
     if (!isThreeTest) {
+      this.progressionDraft.update(this.panelData.progressionDraft ?? defaultPanelData.progressionDraft);
       this.maintenanceRoster.update(this.panelData.maintenanceRoster ?? defaultPanelData.maintenanceRoster);
       this.maintenanceCrew.update(this.panelData.maintenanceCrew ?? defaultPanelData.maintenanceCrew);
       this.miniMap.update(this.panelData.miniMap ?? defaultPanelData.miniMap);
@@ -263,6 +279,8 @@ export class UIController {
       this.fireDeploy.update(this.panelData.fireDeploy ?? defaultPanelData.fireDeploy);
       this.fireUnitList.update(this.panelData.fireUnitList ?? defaultPanelData.fireUnitList);
       this.fireSelectedUnit.update({ selection: snapshot.selection });
+    } else {
+      this.progressionDraft.update(this.panelData.progressionDraft ?? defaultPanelData.progressionDraft);
     }
     this.budgetReport.update(this.panelData.budgetReport ?? defaultPanelData.budgetReport);
 

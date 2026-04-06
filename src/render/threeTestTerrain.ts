@@ -56,6 +56,7 @@ import {
   type WaterfallRiverDomainInput
 } from "./terrain/water/waterfallBuilder.js";
 import { buildRiverMeshData as buildRiverMeshDataInternal, type RiverWaterData } from "./terrain/water/riverMeshData.js";
+import { buildWaterSurfaceHeights } from "./terrain/water/waterSurfaceHeights.js";
 import {
   createRiverSpaceTransform,
   validateRiverSpaceTransform
@@ -66,6 +67,12 @@ import {
   buildWaterSupportMapTexture,
   type WaterSampleRatios
 } from "./terrain/water/waterTextures.js";
+import {
+  buildShoreTransitionData,
+  buildShoreTransitionMapTexture,
+  type ShoreTransitionData
+} from "./terrain/water/shoreTransition.js";
+import { applyShoreTransitionTerrainMaterial } from "./terrain/water/shoreTransitionTerrainMaterial.js";
 import {
   applyTreeSeasonShader,
   applyTrunkTopCropShader,
@@ -138,6 +145,7 @@ export type TerrainSample = {
   roadBridgeMask?: Uint8Array;
   roadEdges?: Uint8Array;
   roadWallEdges?: Uint8Array;
+  erosionWear?: Float32Array;
   riverBed?: Float32Array;
   riverSurface?: Float32Array;
   riverStepStrength?: Float32Array;
@@ -263,7 +271,6 @@ const RIVER_BANK_MAX_DISTANCE = 5;
 const WATER_SURFACE_LIFT_OCEAN = 0.08;
 const WATER_SURFACE_LIFT_RIVER = 0.012;
 const RIVER_SURFACE_BANK_CLEARANCE = 0.02;
-const RIVER_STEP_BLEND_BLOCK_THRESHOLD = 0.26;
 const RIVER_CUTOUT_FIELD_DILATE = 0;
 const STEP_ROCKY_TINT_MAX = 0.28;
 const TREE_SCALE_BASE = 0.75;
@@ -342,6 +349,7 @@ export type OceanWaterData = {
   supportMap: THREE.DataTexture;
   domainMap: THREE.DataTexture;
   shoreSdf: THREE.DataTexture;
+  shoreTransitionMap: THREE.DataTexture;
   flowMap: THREE.DataTexture;
   rapidMap: THREE.DataTexture;
   // World-space base Y for the water mesh.
@@ -374,11 +382,6 @@ type HouseSpot = {
   groundMax: number;
   variantKey: string | null;
   variantSource: string | null;
-};
-
-type WaterComponent = {
-  indices: number[];
-  min: number;
 };
 
 type SampleFloatReducer = "mean" | "min" | "max";
@@ -908,6 +911,11 @@ export type TerrainRenderSurface = {
   waterRatios: WaterSampleRatios;
   waterSupportMask: Uint8Array;
   waterSurfaceHeights: Float32Array;
+  oceanRenderRatios?: WaterSampleRatios;
+  oceanSupportMask?: Uint8Array;
+  oceanSurfAttenuation?: Float32Array;
+  shoreTransition?: ShoreTransitionData;
+  sampledErosionWear?: Float32Array;
   sampledRiverSurface?: Float32Array;
   sampledRiverStepStrength?: Float32Array;
   sampledRiverCoverage?: Float32Array;
@@ -1074,6 +1082,78 @@ const buildShoreSdfTextureFromSupportMask = (
     data[base + 3] = 255;
   }
   return createDataTexture(data, sampleCols, sampleRows, THREE.LinearFilter, THREE.LinearFilter);
+};
+
+type OceanRenderSupportData = {
+  oceanRatios: WaterSampleRatios;
+  oceanSupportMask: Uint8Array;
+  surfAttenuation: Float32Array;
+};
+
+const buildOceanRenderSupportData = (
+  cols: number,
+  rows: number,
+  sampleCols: number,
+  sampleRows: number,
+  step: number,
+  sampleTypes: Uint8Array,
+  waterId: number,
+  ratios: WaterSampleRatios,
+  sampleOceanCoverage: Float32Array | undefined,
+  sampleCoastClass: Uint8Array | undefined,
+  sampleCoastDistance: Uint16Array | undefined,
+  coastData: SampledCoastData
+): OceanRenderSupportData => {
+  const total = sampleCols * sampleRows;
+  const oceanSupportMask = new Uint8Array(total);
+  const oceanRatios: WaterSampleRatios = {
+    water: new Float32Array(total),
+    ocean: new Float32Array(total),
+    river: new Float32Array(total)
+  };
+  const surfAttenuation = new Float32Array(total);
+  for (let i = 0; i < total; i += 1) {
+    const sampleX = i % sampleCols;
+    const sampleY = Math.floor(i / sampleCols);
+    const tileX = Math.min(cols - 1, sampleX * step);
+    const tileY = Math.min(rows - 1, sampleY * step);
+    const endX = Math.min(cols, tileX + step);
+    const endY = Math.min(rows, tileY + step);
+    const touchesWorldBorder = sampleTouchesWorldBorder(tileX, tileY, endX, endY, cols, rows);
+    const ocean = clamp(sampleOceanCoverage?.[i] ?? ratios.ocean[i] ?? 0, 0, 1);
+    const coastClass = sampleCoastClass?.[i] ?? COAST_CLASS_NONE;
+    const coastDistance = sampleCoastDistance?.[i] ?? 0;
+    const bandT = coastDistance > 0
+      ? clamp(1 - (coastDistance - 1) / COAST_SAMPLE_BEACH_WET_DEPTHS.length, 0, 1)
+      : 0;
+    const beachInfluence = clamp(
+      (coastData.beachWeight?.[i] ?? 0) + (coastData.shelfWeight?.[i] ?? 0) + (coastClass === COAST_CLASS_SHELF_WATER ? 0.65 : 0),
+      0,
+      1
+    );
+    const cliffInfluence = clamp(coastData.cliffWeight?.[i] ?? 0, 0, 1);
+    const borderOpenOcean =
+      touchesWorldBorder &&
+      ocean >= OCEAN_RATIO_MIN &&
+      coastDistance > OCEAN_BORDER_OPEN_WATER_DISTANCE_MIN;
+    oceanRatios.water[i] = ocean;
+    oceanRatios.ocean[i] = ocean;
+    if (borderOpenOcean) {
+      oceanSupportMask[i] = 1;
+      surfAttenuation[i] = 0;
+      continue;
+    }
+    oceanSupportMask[i] =
+      ((coastClass === COAST_CLASS_SHELF_WATER || sampleTypes[i] === waterId) && ocean >= OCEAN_RATIO_MIN)
+        ? 1
+        : 0;
+    surfAttenuation[i] = clamp(
+      bandT * Math.max(beachInfluence * OCEAN_BEACH_WAVE_DAMP_MAX, cliffInfluence * OCEAN_CLIFF_WAVE_DAMP_MAX),
+      0,
+      1
+    );
+  }
+  return { oceanRatios, oceanSupportMask, surfAttenuation };
 };
 
 const buildRiverCutoutAlphaMap = (
@@ -1652,215 +1732,6 @@ export const buildRoadOverlayTexture = (
 ): THREE.Texture | null =>
   buildRoadOverlayTextureInternal(sample, roadId, baseId, roadWidth, scale);
 
-const buildWaterSurfaceHeights = (
-  sampleHeights: Float32Array,
-  supportMask: Uint8Array,
-  oceanRatio: Float32Array,
-  riverRatio: Float32Array,
-  sampleCols: number,
-  sampleRows: number,
-  oceanLevel: number | null,
-  sampledRiverSurface?: Float32Array,
-  sampledRiverStepStrength?: Float32Array
-): Float32Array => {
-  const total = sampleCols * sampleRows;
-  const heights = new Float32Array(total).fill(Number.NaN);
-  const visited = new Uint8Array(total);
-  const queue = new Int32Array(total);
-  const components: WaterComponent[] = [];
-  let head = 0;
-  let tail = 0;
-
-  const push = (idx: number) => {
-    visited[idx] = 1;
-    queue[tail] = idx;
-    tail += 1;
-  };
-
-  const hasWater = (idx: number): boolean => (supportMask[idx] ?? 0) > 0;
-  const hasOcean = (idx: number): boolean =>
-    hasWater(idx) && (oceanRatio[idx] ?? 0) >= OCEAN_RATIO_MIN;
-  const isRiverCell = (idx: number): boolean =>
-    hasWater(idx) && (riverRatio[idx] ?? 0) >= RIVER_RATIO_MIN;
-
-  for (let i = 0; i < total; i += 1) {
-    if (!hasWater(i) || !isRiverCell(i) || !sampledRiverSurface) {
-      continue;
-    }
-    const riverSurface = sampledRiverSurface[i];
-    if (!Number.isFinite(riverSurface)) {
-      continue;
-    }
-    heights[i] = clamp(riverSurface, 0, 1);
-  }
-
-  const floodComponent = (seed: number, predicate: (idx: number) => boolean): WaterComponent | null => {
-    if (visited[seed] || !predicate(seed)) {
-      return null;
-    }
-    head = 0;
-    tail = 0;
-    push(seed);
-    const component: WaterComponent = { indices: [], min: Number.POSITIVE_INFINITY };
-    while (head < tail) {
-      const idx = queue[head];
-      head += 1;
-      component.indices.push(idx);
-      component.min = Math.min(component.min, sampleHeights[idx] ?? 0);
-      const x = idx % sampleCols;
-      const y = Math.floor(idx / sampleCols);
-      const neighbors = [idx - 1, idx + 1, idx - sampleCols, idx + sampleCols];
-      for (const nIdx of neighbors) {
-        if (nIdx < 0 || nIdx >= total) {
-          continue;
-        }
-        if (visited[nIdx] || !predicate(nIdx)) {
-          continue;
-        }
-        const nx = nIdx % sampleCols;
-        const ny = Math.floor(nIdx / sampleCols);
-        if (Math.abs(nx - x) + Math.abs(ny - y) !== 1) {
-          continue;
-        }
-        push(nIdx);
-      }
-    }
-    return component;
-  };
-
-  for (let i = 0; i < total; i += 1) {
-    if (visited[i] || !hasOcean(i)) {
-      continue;
-    }
-    const component = floodComponent(i, hasOcean);
-    if (!component) {
-      continue;
-    }
-    components.push(component);
-  }
-
-  for (const component of components) {
-    const level = oceanLevel !== null ? clamp(oceanLevel, 0, 1) : clamp(component.min + 0.01, 0, 1);
-    component.indices.forEach((idx) => {
-      heights[idx] = level;
-    });
-  }
-
-  visited.fill(0);
-  for (let i = 0; i < total; i += 1) {
-    if (visited[i] || !hasWater(i) || Number.isFinite(heights[i])) {
-      continue;
-    }
-    const component = floodComponent(i, (idx) => hasWater(idx) && !Number.isFinite(heights[idx]));
-    if (!component) {
-      continue;
-    }
-    const level = clamp(component.min + 0.01, 0, 1);
-    component.indices.forEach((idx) => {
-      heights[idx] = level;
-    });
-  }
-
-  for (let i = 0; i < total; i += 1) {
-    if (!Number.isFinite(heights[i])) {
-      heights[i] = sampleHeights[i] ?? 0;
-    }
-  }
-
-  if (sampledRiverSurface && oceanLevel !== null) {
-    const oceanLevelClamped = clamp(oceanLevel, 0, 1);
-    for (let i = 0; i < total; i += 1) {
-      if (!hasWater(i)) {
-        continue;
-      }
-      const river = clamp(riverRatio[i] ?? 0, 0, 1);
-      const ocean = clamp(oceanRatio[i] ?? 0, 0, 1);
-      if (river <= 0.01 || ocean <= 0.01) {
-        continue;
-      }
-      const riverSurface = sampledRiverSurface[i];
-      if (!Number.isFinite(riverSurface)) {
-        continue;
-      }
-      const rawStepStrength = sampledRiverStepStrength ? sampledRiverStepStrength[i] : 0;
-      const stepStrength = Number.isFinite(rawStepStrength) ? clamp(rawStepStrength as number, 0, 1) : 0;
-      if (stepStrength >= RIVER_STEP_BLEND_BLOCK_THRESHOLD) {
-        continue;
-      }
-      const estuaryBlend = clamp((Math.min(river, ocean) - 0.06) / 0.24, 0, 1);
-      if (estuaryBlend <= 0) {
-        continue;
-      }
-      const blended = clamp(riverSurface * (1 - estuaryBlend) + oceanLevelClamped * estuaryBlend, 0, 1);
-      heights[i] = blended;
-    }
-  }
-
-  const smoothed = new Float32Array(total);
-  for (let row = 0; row < sampleRows; row += 1) {
-    for (let col = 0; col < sampleCols; col += 1) {
-      const idx = row * sampleCols + col;
-      if (!hasWater(idx)) {
-        smoothed[idx] = heights[idx];
-        continue;
-      }
-      const center = heights[idx];
-      let sum = center;
-      let count = 1;
-      const neighbors = [idx - 1, idx + 1, idx - sampleCols, idx + sampleCols];
-      for (const nIdx of neighbors) {
-        if (nIdx < 0 || nIdx >= total || !hasWater(nIdx)) {
-          continue;
-        }
-        sum += heights[nIdx];
-        count += 1;
-      }
-      const avg = sum / Math.max(1, count);
-      const river = clamp(riverRatio[idx] ?? 0, 0, 1);
-      const ocean = clamp(oceanRatio[idx] ?? 0, 0, 1);
-      const rawStepStrength = sampledRiverStepStrength ? sampledRiverStepStrength[idx] : 0;
-      const stepStrength = Number.isFinite(rawStepStrength) ? clamp(rawStepStrength as number, 0, 1) : 0;
-      const estuary = clamp((Math.min(river, ocean) - 0.05) / 0.2, 0, 1);
-      const inlandRiver = clamp((river - ocean * 0.6 - 0.06) / 0.55, 0, 1);
-      const stepBlend = clamp((stepStrength - 0.14) / (0.5 - 0.14), 0, 1);
-      const stepDampen = 1 - stepBlend;
-      const smoothAmt = (0.03 + estuary * 0.2) * (1 - inlandRiver * 0.72) * stepDampen;
-      const target = center * (1 - smoothAmt) + avg * smoothAmt;
-      const maxDelta = (0.004 + estuary * 0.035) * (1 - inlandRiver * 0.65) * stepDampen;
-      if (maxDelta <= 1e-5) {
-        smoothed[idx] = center;
-      } else {
-        smoothed[idx] = clamp(target, center - maxDelta, center + maxDelta);
-      }
-    }
-  }
-  heights.set(smoothed);
-  if (sampledRiverSurface) {
-    for (let i = 0; i < total; i += 1) {
-      if (!hasWater(i)) {
-        continue;
-      }
-      const riverSurface = sampledRiverSurface[i];
-      if (!Number.isFinite(riverSurface)) {
-        continue;
-      }
-      const river = clamp(riverRatio[i] ?? 0, 0, 1);
-      const ocean = clamp(oceanRatio[i] ?? 0, 0, 1);
-      const rawStepStrength = sampledRiverStepStrength ? sampledRiverStepStrength[i] : 0;
-      const stepStrength = Number.isFinite(rawStepStrength) ? clamp(rawStepStrength as number, 0, 1) : 0;
-      const riverDominance = clamp((river - ocean * 0.65 - 0.04) / 0.55, 0, 1);
-      const stepKeep = clamp((stepStrength - 0.08) / 0.26, 0, 1);
-      const preserve = clamp(riverDominance * 0.25 + stepKeep * 0.7, 0, 0.92);
-      if (preserve <= 1e-5) {
-        continue;
-      }
-      heights[i] = clamp(heights[i] * (1 - preserve) + riverSurface * preserve, 0, 1);
-    }
-  }
-
-  return heights;
-};
-
 export const buildTileTexture = (
   sample: TerrainSample,
   sampleCols: number,
@@ -1877,10 +1748,10 @@ export const buildTileTexture = (
   heightScale: number,
   sampleHeights: Float32Array,
   sampleTypes: Uint8Array,
-  sampleCoastClass: Uint8Array | undefined,
   waterRatio: Float32Array | null,
   oceanRatio: Float32Array | null,
   riverRatio: Float32Array | null,
+  sampledErosionWear: Float32Array | null,
   sampledRiverCoverage: Float32Array | null,
   riverStepStrength: Float32Array | null | undefined,
   debugTypeColors: boolean
@@ -1901,10 +1772,10 @@ export const buildTileTexture = (
     heightScale,
     sampleHeights,
     sampleTypes,
-    sampleCoastClass,
     waterRatio,
     oceanRatio,
     riverRatio,
+    sampledErosionWear,
     sampledRiverCoverage,
     riverStepStrength,
     debugTypeColors,
@@ -1956,6 +1827,7 @@ export const prepareTerrainRenderSurface = (
   const sampleRows = Math.floor((rows - 1) / step) + 1;
   const width = (sampleCols - 1) * step;
   const depth = (sampleRows - 1) * step;
+  const heightScale = getTerrainHeightScale(cols, rows, sample.heightScaleMultiplier ?? 1);
   const sampleHeights = buildSampleHeightMap(sample, sampleCols, sampleRows, step, waterId);
   const coastData = buildSampleCoastData(sample, sampleCols, sampleRows, step);
   const oceanMask = sample.oceanMask ?? (sample.tileTypes ? buildOceanMask(cols, rows, sample.tileTypes, waterId) : null);
@@ -2134,6 +2006,15 @@ export const prepareTerrainRenderSurface = (
     riverMask,
     "max"
   );
+  const sampledErosionWear = buildSampleOptionalFloatMap(
+    sample,
+    sample.erosionWear,
+    sampleCols,
+    sampleRows,
+    step,
+    undefined,
+    "mean"
+  );
   const riverRenderDomain = buildRiverRenderDomain(sample, waterId);
   const sampledRiverCoverage = buildSampleMaskCoverage(
     sample,
@@ -2152,8 +2033,42 @@ export const prepareTerrainRenderSurface = (
     sampleRows,
     waterLevel,
     sampledRiverSurface,
-    sampledRiverStepStrength
+    sampledRiverStepStrength,
+    {
+      oceanRatioMin: OCEAN_RATIO_MIN,
+      riverRatioMin: RIVER_RATIO_MIN
+    }
   );
+  const { oceanRatios: oceanRenderRatios, oceanSupportMask, surfAttenuation: oceanSurfAttenuation } =
+    buildOceanRenderSupportData(
+      cols,
+      rows,
+      sampleCols,
+      sampleRows,
+      step,
+      sampleTypes,
+      waterId,
+      waterRatios,
+      sampleOceanCoverage,
+      sampleCoastClass,
+      sampleCoastDistance,
+      coastData
+    );
+  const shoreTerrainHeightAboveWater = new Float32Array(sampleCols * sampleRows);
+  const waterLevelWorld = waterLevel !== null ? clamp(waterLevel, 0, 1) * heightScale : 0;
+  for (let i = 0; i < sampleCols * sampleRows; i += 1) {
+    const terrainWorld = (sampleHeights[i] ?? 0) * heightScale;
+    shoreTerrainHeightAboveWater[i] = Math.max(0, terrainWorld - waterLevelWorld);
+  }
+  const shoreTransition = buildShoreTransitionData({
+    sampleCols,
+    sampleRows,
+    oceanSupportMask,
+    sampleCoastClass,
+    coastData,
+    shoreTerrainHeightAboveWater,
+    oceanRatio: oceanRenderRatios.ocean
+  });
   if (DEBUG_TERRAIN_RENDER && riverRenderDomain) {
     const transform = createRiverSpaceTransform(
       riverRenderDomain.cols,
@@ -2191,7 +2106,6 @@ export const prepareTerrainRenderSurface = (
     return hx0 * (1 - ty) + hx1 * ty;
   };
   const heightAtTile = (tileX: number, tileY: number): number => heightAtTileCoord(tileX + 0.5, tileY + 0.5);
-  const heightScale = getTerrainHeightScale(cols, rows, sample.heightScaleMultiplier ?? 1);
   return {
     sample,
     cols,
@@ -2215,6 +2129,11 @@ export const prepareTerrainRenderSurface = (
     waterRatios,
     waterSupportMask,
     waterSurfaceHeights,
+    oceanRenderRatios,
+    oceanSupportMask,
+    oceanSurfAttenuation,
+    shoreTransition,
+    sampledErosionWear,
     sampledRiverSurface,
     sampledRiverStepStrength,
     sampledRiverCoverage,
@@ -2273,6 +2192,11 @@ export const buildTerrainMesh = (
     waterRatios,
     waterSupportMask,
     waterSurfaceHeights,
+    oceanRenderRatios,
+    oceanSupportMask: surfaceOceanSupportMask,
+    oceanSurfAttenuation,
+    shoreTransition,
+    sampledErosionWear,
     sampledRiverSurface,
     sampledRiverStepStrength,
     sampledRiverCoverage,
@@ -2654,10 +2578,10 @@ export const buildTerrainMesh = (
     heightScale,
     sampleHeights,
     sampleTypes,
-    sampleCoastClass,
     waterRatios.water,
     waterRatios.ocean,
     waterRatios.river,
+    sampledErosionWear ?? null,
     sampledRiverCoverage ?? null,
     sampledRiverStepStrength,
     sample.debugTypeColors ?? false
@@ -3334,68 +3258,49 @@ export const buildTerrainMesh = (
     }
   }
   if (hasVisibleWater) {
-    const oceanSupportMask = new Uint8Array(sampleCols * sampleRows);
-    const oceanRatios: WaterSampleRatios = {
-      water: new Float32Array(sampleCols * sampleRows),
-      ocean: new Float32Array(sampleCols * sampleRows),
-      river: new Float32Array(sampleCols * sampleRows)
-    };
-    const surfAttenuation = new Float32Array(sampleCols * sampleRows);
-    for (let i = 0; i < sampleCols * sampleRows; i += 1) {
-      const sampleX = i % sampleCols;
-      const sampleY = Math.floor(i / sampleCols);
-      const tileX = Math.min(cols - 1, sampleX * step);
-      const tileY = Math.min(rows - 1, sampleY * step);
-      const endX = Math.min(cols, tileX + step);
-      const endY = Math.min(rows, tileY + step);
-      const touchesWorldBorder = sampleTouchesWorldBorder(tileX, tileY, endX, endY, cols, rows);
-      const ocean = clamp(sampleOceanCoverage?.[i] ?? ratios.ocean[i] ?? 0, 0, 1);
-      const coastClass = sampleCoastClass?.[i] ?? COAST_CLASS_NONE;
-      const coastDistance = sampleCoastDistance?.[i] ?? 0;
-      const bandT = coastDistance > 0
-        ? clamp(1 - (coastDistance - 1) / COAST_SAMPLE_BEACH_WET_DEPTHS.length, 0, 1)
-        : 0;
-      const beachInfluence = clamp(
-        (coastData.beachWeight?.[i] ?? 0) + (coastData.shelfWeight?.[i] ?? 0) + (coastClass === COAST_CLASS_SHELF_WATER ? 0.65 : 0),
-        0,
-        1
+    let resolvedOceanRatios = oceanRenderRatios;
+    let resolvedOceanSupportMask = surfaceOceanSupportMask;
+    let resolvedSurfAttenuation = oceanSurfAttenuation;
+    if (!resolvedOceanRatios || !resolvedOceanSupportMask || !resolvedSurfAttenuation) {
+      const oceanRenderSupport = buildOceanRenderSupportData(
+        cols,
+        rows,
+        sampleCols,
+        sampleRows,
+        step,
+        sampleTypes,
+        waterId,
+        ratios,
+        sampleOceanCoverage,
+        sampleCoastClass,
+        sampleCoastDistance,
+        coastData
       );
-      const cliffInfluence = clamp(coastData.cliffWeight?.[i] ?? 0, 0, 1);
-      const borderOpenOcean =
-        touchesWorldBorder &&
-        ocean >= OCEAN_RATIO_MIN &&
-        coastDistance > OCEAN_BORDER_OPEN_WATER_DISTANCE_MIN;
-      oceanRatios.water[i] = ocean;
-      oceanRatios.ocean[i] = ocean;
-      if (borderOpenOcean) {
-        oceanSupportMask[i] = 1;
-        surfAttenuation[i] = 0;
-        continue;
-      }
-      oceanSupportMask[i] =
-        ((coastClass === COAST_CLASS_SHELF_WATER || sampleTypes[i] === waterId) && ocean >= OCEAN_RATIO_MIN)
-          ? 1
-          : 0;
-      surfAttenuation[i] = clamp(
-        bandT * Math.max(beachInfluence * OCEAN_BEACH_WAVE_DAMP_MAX, cliffInfluence * OCEAN_CLIFF_WAVE_DAMP_MAX),
-        0,
-        1
-      );
+      resolvedOceanRatios = oceanRenderSupport.oceanRatios;
+      resolvedOceanSupportMask = oceanRenderSupport.oceanSupportMask;
+      resolvedSurfAttenuation = oceanRenderSupport.surfAttenuation;
+      surface.oceanRenderRatios = resolvedOceanRatios;
+      surface.oceanSupportMask = resolvedOceanSupportMask;
+      surface.oceanSurfAttenuation = resolvedSurfAttenuation;
     }
     const zeroRiver = new Float32Array(sampleCols * sampleRows);
-    const oceanMaskTexture = buildWaterMaskTexture(sampleCols, sampleRows, oceanRatios);
-    const oceanSupportMap = buildWaterSupportMapTexture(sampleCols, sampleRows, oceanSupportMask);
-    const shoreSdf = buildShoreSdfTextureFromSupportMask(oceanSupportMask, sampleCols, sampleRows);
+    const oceanMaskTexture = buildWaterMaskTexture(sampleCols, sampleRows, resolvedOceanRatios);
+    const oceanSupportMap = buildWaterSupportMapTexture(sampleCols, sampleRows, resolvedOceanSupportMask);
+    const shoreSdf = buildShoreSdfTextureFromSupportMask(resolvedOceanSupportMask, sampleCols, sampleRows);
     const normalizedOceanHeights = buildWaterSurfaceHeights(
       sampleHeights,
-      oceanSupportMask,
-      oceanRatios.ocean,
+      resolvedOceanSupportMask,
+      resolvedOceanRatios.ocean,
       zeroRiver,
       sampleCols,
       sampleRows,
       oceanLevel,
       undefined,
-      undefined
+      undefined,
+      {
+        oceanRatioMin: OCEAN_RATIO_MIN,
+        riverRatioMin: RIVER_RATIO_MIN
+      }
     );
     const normalizedWaterHeights = waterSurfaceHeights;
     const oceanFlowMap = buildRiverFlowTexture(
@@ -3410,7 +3315,7 @@ export const buildTerrainMesh = (
       normalizedOceanHeights,
       sampleCols,
       sampleRows,
-      oceanRatios,
+      resolvedOceanRatios,
       undefined
     );
     let representativeLevel = oceanLevel;
@@ -3419,12 +3324,12 @@ export const buildTerrainMesh = (
       let oceanWeightedCount = 0;
       const fallbackWeightedValues: number[] = [];
       for (let i = 0; i < normalizedOceanHeights.length; i += 1) {
-        const waterRatio = oceanRatios.water[i] ?? 0;
+        const waterRatio = resolvedOceanRatios.water[i] ?? 0;
         if (waterRatio < WATER_ALPHA_MIN_RATIO) {
           continue;
         }
         const h = clamp(normalizedOceanHeights[i] ?? 0, 0, 1);
-        const oceanWeight = clamp(oceanRatios.ocean[i] ?? 0, 0, 1);
+        const oceanWeight = clamp(resolvedOceanRatios.ocean[i] ?? 0, 0, 1);
         if (oceanWeight >= OCEAN_RATIO_MIN * 0.5) {
           const weight = Math.max(oceanWeight, 0.001);
           oceanWeightedSum += h * weight;
@@ -3455,10 +3360,24 @@ export const buildTerrainMesh = (
     const oceanDomainMap = buildWaterDomainMapTexture(
       sampleCols,
       sampleRows,
-      oceanRatios,
-      surfAttenuation,
+      resolvedOceanRatios,
+      resolvedSurfAttenuation,
       shoreTerrainHeightAboveWater
     );
+    const resolvedShoreTransition =
+      shoreTransition ??
+      buildShoreTransitionData({
+        sampleCols,
+        sampleRows,
+        oceanSupportMask: resolvedOceanSupportMask,
+        sampleCoastClass,
+        coastData,
+        shoreTerrainHeightAboveWater,
+        oceanRatio: resolvedOceanRatios.ocean
+      });
+    surface.shoreTransition = resolvedShoreTransition;
+    const shoreTransitionMap = buildShoreTransitionMapTexture(sampleCols, sampleRows, resolvedShoreTransition);
+    applyShoreTransitionTerrainMaterial(material, { shoreTransitionMap });
     const oceanHeights = new Float32Array(normalizedOceanHeights.length);
     for (let i = 0; i < normalizedOceanHeights.length; i += 1) {
       const surfaceWorld = clamp(normalizedOceanHeights[i] ?? 0, 0, 1) * heightScale;
@@ -3570,6 +3489,7 @@ export const buildTerrainMesh = (
         supportMap: oceanSupportMap,
         domainMap: oceanDomainMap,
         shoreSdf,
+        shoreTransitionMap,
         flowMap: oceanFlowMap,
         rapidMap: oceanRapidMap,
         level: waterLevelWorld,

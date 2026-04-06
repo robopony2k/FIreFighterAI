@@ -20,6 +20,21 @@ export type TopBarData = {
   forecastStartDay: number;
   forecastYearDays: number;
   forecastMeta: string | null;
+  progression: {
+    level: number;
+    totalAssistedExtinguishes: number;
+    currentThreshold: number;
+    nextThreshold: number | null;
+    progress01: number;
+    queuedDraftCount: number;
+    hasActiveDraft: boolean;
+    ownedRewards: Array<{
+      id: string;
+      label: string;
+      name: string;
+      stacks: number;
+    }>;
+  } | null;
   scoring: {
     score: number;
     difficultyMult: number;
@@ -1157,7 +1172,38 @@ export const createTopBar = (): TopBarView => {
   content.className = "phase-topbar-content";
   content.append(badge, scoreCounter, alert, cta);
 
-  element.append(content, scoreStrip, scoreEvents, forecast);
+  const progressionStrip = document.createElement("div");
+  progressionStrip.className = "phase-progression-strip is-hidden";
+  const progressionHeader = document.createElement("div");
+  progressionHeader.className = "phase-progression-header";
+  const progressionCopy = document.createElement("div");
+  progressionCopy.className = "phase-progression-copy";
+  const progressionLevel = document.createElement("span");
+  progressionLevel.className = "phase-progression-level";
+  const progressionSummary = document.createElement("span");
+  progressionSummary.className = "phase-progression-summary";
+  progressionCopy.append(progressionLevel, progressionSummary);
+  const progressionMeta = document.createElement("div");
+  progressionMeta.className = "phase-progression-meta";
+  const progressionStatus = document.createElement("span");
+  progressionStatus.className = "phase-progression-status";
+  const progressionReview = document.createElement("button");
+  progressionReview.type = "button";
+  progressionReview.className = "phase-progression-review is-hidden";
+  progressionReview.dataset.action = "progression-open";
+  progressionReview.textContent = "Review Draft";
+  progressionMeta.append(progressionStatus, progressionReview);
+  progressionHeader.append(progressionCopy, progressionMeta);
+  const progressionBar = document.createElement("div");
+  progressionBar.className = "phase-progression-bar";
+  const progressionBarFill = document.createElement("div");
+  progressionBarFill.className = "phase-progression-fill";
+  progressionBar.appendChild(progressionBarFill);
+  const progressionRewards = document.createElement("div");
+  progressionRewards.className = "phase-progression-rewards";
+  progressionStrip.append(progressionHeader, progressionBar, progressionRewards);
+
+  element.append(content, progressionStrip, scoreStrip, scoreEvents, forecast);
 
   let ctaHandler: ((actionId: string) => void) | null = null;
   let currentAction: string | null = null;
@@ -1456,6 +1502,52 @@ export const createTopBar = (): TopBarView => {
         cta.textContent = "";
         cta.classList.add("is-hidden");
         currentAction = null;
+      }
+      if (data.progression) {
+        progressionStrip.classList.remove("is-hidden");
+        progressionLevel.textContent = `Command L${data.progression.level}`;
+        progressionSummary.textContent =
+          data.progression.nextThreshold !== null
+            ? `${data.progression.totalAssistedExtinguishes}/${data.progression.nextThreshold} assisted extinguishes`
+            : `${data.progression.totalAssistedExtinguishes} assisted extinguishes`;
+        const statusParts: string[] = [];
+        if (data.progression.hasActiveDraft) {
+          statusParts.push("Draft Ready");
+        }
+        if (data.progression.queuedDraftCount > 0) {
+          statusParts.push(`Queue +${data.progression.queuedDraftCount}`);
+        }
+        progressionStatus.textContent =
+          statusParts.join(" | ") ||
+          (data.progression.nextThreshold !== null ? "Next command upgrade in progress" : "All authored levels unlocked");
+        progressionStatus.classList.toggle("is-alert", data.progression.hasActiveDraft || data.progression.queuedDraftCount > 0);
+        progressionReview.classList.toggle(
+          "is-hidden",
+          data.progression.hasActiveDraft || data.progression.queuedDraftCount <= 0
+        );
+        progressionBarFill.style.width = `${Math.round(Math.max(0, Math.min(1, data.progression.progress01)) * 100)}%`;
+        progressionRewards.replaceChildren();
+        if (data.progression.ownedRewards.length === 0) {
+          const placeholder = document.createElement("span");
+          placeholder.className = "phase-progression-empty";
+          placeholder.textContent = "No command upgrades selected yet.";
+          progressionRewards.appendChild(placeholder);
+        } else {
+          data.progression.ownedRewards.forEach((reward) => {
+            const chip = document.createElement("span");
+            chip.className = "phase-progression-chip";
+            chip.title = reward.name;
+            chip.innerHTML = `
+              <span class="phase-progression-chip-label">${reward.label}</span>
+              <span class="phase-progression-chip-stack">x${reward.stacks}</span>
+            `;
+            progressionRewards.appendChild(chip);
+          });
+        }
+      } else {
+        progressionStrip.classList.add("is-hidden");
+        progressionReview.classList.add("is-hidden");
+        progressionRewards.replaceChildren();
       }
       if (data.scoring) {
         const now = performance.now();

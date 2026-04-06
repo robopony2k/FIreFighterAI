@@ -1331,7 +1331,7 @@ export type ThreeTestFireFx = {
   captureSnapshot: (world: RenderSim) => void;
   setSimulationAlpha: (alpha: number) => void;
   update: (
-    time: number,
+    frameTimeMs: number,
     world: RenderSim,
     sample: TerrainSample | null,
     terrainSize: { width: number; depth: number } | null,
@@ -1339,7 +1339,8 @@ export type ThreeTestFireFx = {
     treeBurn: TreeBurnController | null,
     structureAnchorProvider: FireStructureAnchorProvider | null,
     fpsEstimate: number,
-    sceneRenderMs: number
+    sceneRenderMs: number,
+    animationRate?: number
   ) => void;
   setEnvironmentSignals: (signals: FireFxEnvironmentSignals) => void;
   setDebugControls: (controls: Partial<FireFxDebugControls>) => void;
@@ -1692,7 +1693,8 @@ export const createThreeTestFireFx = (
   const sparkStreakBillboard = new THREE.Object3D();
   const ashPreviewNormal = new THREE.Vector3(0, 1, 0);
   const ashPreviewOffset = new THREE.Vector3();
-  let previousTimeMs: number | null = null;
+  let previousFrameTimeMs: number | null = null;
+  let animationTimeMs = 0;
   let tileStateCols = 0;
   let tileStateRows = 0;
   let tileFlameVisual = new Float32Array(0);
@@ -2411,7 +2413,7 @@ export const createThreeTestFireFx = (
   };
 
   const update = (
-    time: number,
+    frameTimeMs: number,
     world: RenderSim,
     sample: TerrainSample | null,
     terrainSize: { width: number; depth: number } | null,
@@ -2419,12 +2421,19 @@ export const createThreeTestFireFx = (
     treeBurn: TreeBurnController | null,
     structureAnchorProvider: FireStructureAnchorProvider | null,
     fpsEstimate: number,
-    sceneRenderMs: number
+    sceneRenderMs: number,
+    animationRate = 1
   ): void => {
     const frameDeltaSeconds =
-      previousTimeMs === null ? 1 / 60 : clamp((time - previousTimeMs) * 0.001, 1 / 240, 0.2);
-    previousTimeMs = time;
-    pendingDeltaSeconds = Math.min(0.3, pendingDeltaSeconds + frameDeltaSeconds);
+      previousFrameTimeMs === null ? 1 / 60 : clamp((frameTimeMs - previousFrameTimeMs) * 0.001, 1 / 240, 0.2);
+    previousFrameTimeMs = frameTimeMs;
+    const scaledDeltaSeconds = Math.max(0, frameDeltaSeconds * animationRate);
+    pendingDeltaSeconds = Math.min(0.3, pendingDeltaSeconds + scaledDeltaSeconds);
+    if (scaledDeltaSeconds > 0) {
+      animationTimeMs += scaledDeltaSeconds * 1000;
+    } else if (animationTimeMs <= 0 && Number.isFinite(frameTimeMs)) {
+      animationTimeMs = Math.max(0, frameTimeMs);
+    }
     if (!sample || !terrainSize) {
       clearVisuals();
       return;
@@ -2464,11 +2473,11 @@ export const createThreeTestFireFx = (
       return;
     }
     const minIntervalMs = hasFireWork ? FIRE_FX_ACTIVE_UPDATE_INTERVAL_MS : FIRE_FX_IDLE_UPDATE_INTERVAL_MS;
-    if (time - lastRebuildTimeMs < minIntervalMs) {
+    if (frameTimeMs - lastRebuildTimeMs < minIntervalMs) {
       return;
     }
-    lastRebuildTimeMs = time;
-    const deltaSeconds = clamp(pendingDeltaSeconds, 1 / 240, 0.08);
+    lastRebuildTimeMs = frameTimeMs;
+    const deltaSeconds = pendingDeltaSeconds > 0 ? clamp(pendingDeltaSeconds, 1 / 240, 0.08) : 0;
     pendingDeltaSeconds = 0;
     renderContinuityState.localSlotChurn = 0;
     renderContinuityState.objectSlotChurn = 0;
@@ -2603,7 +2612,7 @@ export const createThreeTestFireFx = (
     const crossWindZ = windX;
     const windLeanX = windX * windStrength * windResponse.flame;
     const windLeanZ = windZ * windStrength * windResponse.flame;
-    const timeSeconds = time * 0.001;
+    const timeSeconds = animationTimeMs * 0.001;
     const flameTimeSeconds = timeSeconds * FLAME_MOTION_TIME_SCALE;
     const sparkTimeSeconds = timeSeconds * SPARK_MOTION_TIME_SCALE;
     const fireShaderTime = timeSeconds * FIRE_SHADER_TIME_SCALE;
@@ -2814,7 +2823,7 @@ export const createThreeTestFireFx = (
     const activeCountChanged =
       Math.abs(activeFlameTileCount - lastClusterActiveTileCount) / Math.max(1, lastClusterActiveTileCount) > 0.15;
     const shouldRebuildClusters =
-      time - lastClusterRebuildMs >= CLUSTER_UPDATE_MS || activeCountChanged || boundsChanged;
+      frameTimeMs - lastClusterRebuildMs >= CLUSTER_UPDATE_MS || activeCountChanged || boundsChanged;
     if (shouldRebuildClusters) {
       const clusterBuild = buildFireClusters(
         world,
@@ -2835,7 +2844,7 @@ export const createThreeTestFireFx = (
       );
       clusterCount = clusterBuild.clusterCount;
       clusteredTiles = clusterBuild.clusteredTiles;
-      lastClusterRebuildMs = time;
+      lastClusterRebuildMs = frameTimeMs;
       lastClusterActiveTileCount = activeFlameTileCount;
       lastClusterSampleStep = sampleStep;
       lastClusterMinX = minX;
@@ -5221,12 +5230,12 @@ export const createThreeTestFireFx = (
     };
     if (debugControls.anchorDebugMode === "logRawFallbacks") {
       const rawFallbackTileIndices = fireAnchorResolver.getRawFallbackTileIndices();
-      if (rawFallbackTileIndices.length > 0 && time - lastAnchorFallbackLogMs >= 1000) {
+      if (rawFallbackTileIndices.length > 0 && frameTimeMs - lastAnchorFallbackLogMs >= 1000) {
         console.info("[threeTest:fire-anchor-fallback]", {
           count: rawFallbackTileIndices.length,
           sample: rawFallbackTileIndices.slice(0, 16)
         });
-        lastAnchorFallbackLogMs = time;
+        lastAnchorFallbackLogMs = frameTimeMs;
       }
     }
     visualsCleared = false;

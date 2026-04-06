@@ -1392,11 +1392,23 @@ export const createFxLabController = (
     } else if (!paused) {
       labTimeMs += frameDeltaMs * timeScale;
     }
+    const fireAnimationRate = paused ? 0 : timeScale;
     controls.update();
     waterSystem.setLightDirectionFromKeyLight();
     waterSystem.update(now, frameDeltaMs * 0.001, 1000 / Math.max(1, frameDeltaMs), lastSceneRenderMs);
     applyScenarioFrame();
-    fireFx.update(now, sceneState.world, sceneState.sample, terrainSize, terrainSurface, null, null, 60, lastSceneRenderMs);
+    fireFx.update(
+      now,
+      sceneState.world,
+      sceneState.sample,
+      terrainSize,
+      terrainSurface,
+      null,
+      null,
+      60,
+      lastSceneRenderMs,
+      fireAnimationRate
+    );
     unitsLayer.update(sceneState.world, terrainSurface, 1);
     unitFxLayer.update(sceneState.world, sceneState.effects, terrainSurface, 1, now);
     updateSprayTargetMarker(now);

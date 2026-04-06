@@ -26,6 +26,7 @@ export class GameState {
     forecastStartDay: 0,
     forecastYearDays: 360,
     forecastMeta: null,
+    progression: null,
     scoring: null
   };
 
@@ -148,6 +149,14 @@ export class GameState {
     this.snapshot.forecastStartDay = startDay;
     this.snapshot.forecastYearDays = yearDays;
     this.snapshot.forecastMeta = meta;
+    this.emitChange();
+  }
+
+  setProgression(progression: GameUiSnapshot["progression"]): void {
+    if (this.snapshot.progression === progression) {
+      return;
+    }
+    this.snapshot.progression = progression;
     this.emitChange();
   }
 

@@ -18,6 +18,7 @@ export type PanelId =
   | "miniMap"
   | "rightDock"
   | "unitTray"
+  | "progressionDraft"
   | "maintenanceRoster"
   | "maintenanceCrew"
   | "fuelBreak"
@@ -68,6 +69,21 @@ export type GameUiSnapshot = {
   forecastStartDay: number;
   forecastYearDays: number;
   forecastMeta: string | null;
+  progression: {
+    level: number;
+    totalAssistedExtinguishes: number;
+    currentThreshold: number;
+    nextThreshold: number | null;
+    progress01: number;
+    queuedDraftCount: number;
+    hasActiveDraft: boolean;
+    ownedRewards: Array<{
+      id: string;
+      label: string;
+      name: string;
+      stacks: number;
+    }>;
+  } | null;
   scoring: {
     score: number;
     difficultyMult: number;

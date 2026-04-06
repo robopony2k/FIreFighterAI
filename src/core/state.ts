@@ -22,11 +22,13 @@ import type {
   RosterUnit
 } from "./types.js";
 import type { CampaignState } from "./campaign.js";
+import type { ProgressionState } from "../systems/progression/types.js";
 
 import { BASE_BUDGET, DEFAULT_FIRE_SETTINGS, DEFAULT_INCIDENT_TIME_SPEED_INDEX } from "./config.js";
 import { createCampaignState } from "./campaign.js";
 import { DEFAULT_CLIMATE_PARAMS, DEFAULT_MOISTURE_PARAMS } from "./climate.js";
 import { buildNeighborOffsets } from "./grid.js";
+import { createProgressionState } from "../systems/progression/state.js";
 
 
 
@@ -153,6 +155,7 @@ export interface WorldState {
   tileRoadBridge: Uint8Array;
   tileRoadEdges: Uint8Array;
   tileRoadWallEdges: Uint8Array;
+  tileErosionWear: Float32Array;
   tileRiverBed: Float32Array;
   tileRiverSurface: Float32Array;
   tileRiverStepStrength: Float32Array;
@@ -283,6 +286,7 @@ export interface WorldState {
   finalScore: number;
 
   campaign: CampaignState;
+  progression: ProgressionState;
 
   fireSnapshot: Float32Array;
   roster: RosterUnit[];
@@ -458,6 +462,7 @@ export function createInitialState(seed: number, grid: Grid): WorldState {
     tileRoadBridge: new Uint8Array(grid.totalTiles),
     tileRoadEdges: new Uint8Array(grid.totalTiles),
     tileRoadWallEdges: new Uint8Array(grid.totalTiles),
+    tileErosionWear: new Float32Array(grid.totalTiles),
     tileRiverBed: new Float32Array(grid.totalTiles).fill(Number.NaN),
     tileRiverSurface: new Float32Array(grid.totalTiles).fill(Number.NaN),
     tileRiverStepStrength: new Float32Array(grid.totalTiles),
@@ -619,6 +624,7 @@ export function createInitialState(seed: number, grid: Grid): WorldState {
     finalScore: 0,
 
     campaign: createCampaignState(),
+    progression: createProgressionState(),
 
     climateDay: 0,
     climateYear: 0,
@@ -702,6 +708,8 @@ export function syncTileSoA(state: WorldState): void {
     state.tileRoadBridge.length !== total ||
     state.tileRoadEdges.length !== total ||
     state.tileRoadWallEdges.length !== total ||
+    !state.tileErosionWear ||
+    state.tileErosionWear.length !== total ||
     state.tileTownId.length !== total ||
     state.tileStructure.length !== total
   ) {
@@ -735,6 +743,7 @@ export function syncTileSoA(state: WorldState): void {
     state.tileRoadBridge = new Uint8Array(total);
     state.tileRoadEdges = new Uint8Array(total);
     state.tileRoadWallEdges = new Uint8Array(total);
+    state.tileErosionWear = new Float32Array(total);
     state.tileRiverBed = new Float32Array(total).fill(Number.NaN);
     state.tileRiverSurface = new Float32Array(total).fill(Number.NaN);
     state.tileRiverStepStrength = new Float32Array(total);

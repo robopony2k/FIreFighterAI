@@ -25,6 +25,7 @@ import {
   SCORE_SUPPRESSION_ASSIST_SECONDS
 } from "../core/config.js";
 import { clamp } from "../core/utils.js";
+import { registerAssistedExtinguishProgress } from "../systems/progression/index.js";
 
 const FIRE_EPS = 0.0001;
 const DEFAULT_EVENT_TTL_SECONDS = 0.8;
@@ -470,6 +471,7 @@ const scoreFireTransitions = (state: WorldState): FireTransitionDelta => {
   scoring.grossPoints += points;
   scoring.seasonExtinguishedCount += extinguishCount;
   scoring.seasonExtinguishPoints += points;
+  registerAssistedExtinguishProgress(state, extinguishCount);
   return {
     extinguishDelta: {
       lane: "extinguished",

@@ -1,24 +1,25 @@
 import type { WorldState } from "../../core/state.js";
 import type { InputState } from "../../core/inputState.js";
 import {
-  FIREBREAK_COST_PER_TILE,
   RECRUIT_FIREFIGHTER_COST,
   RECRUIT_TRUCK_COST,
   SCORE_EXTINGUISHED_TILE_POINTS,
   SCORE_HOUSE_LOSS_PENALTY,
   SCORE_LIFE_LOSS_PENALTY,
-  TRAINING_COST,
   TRUCK_CAPACITY
 } from "../../core/config.js";
+import { getCommandRewardDefinition, getCommandRewardDefinitions } from "../../config/progression/rewardCatalog.js";
 import { formatCurrency } from "../../core/utils.js";
 import { getPhaseInfo } from "../../core/time.js";
-import { getCharacterFirebreakCost } from "../../core/characters.js";
 import type { SelectedEntity } from "./types.js";
 import type { Formation } from "../../core/types.js";
 import type { CrewPanelData } from "./components/MaintenanceCrewPanel.js";
 import type { BudgetReportData } from "./components/BudgetReportView.js";
+import type { ProgressionDraftPanelData } from "./components/ProgressionDraftPanel.js";
 import { GameState } from "./gameState.js";
 import { UIController } from "./uiController.js";
+import { getProgressionLevelFloor, getProgressionNextLevelThreshold, getProgressionProgress01 } from "../../systems/progression/index.js";
+import { getFirebreakCostForState, getTrainingCostForState } from "../../sim/units.js";
 
 export type PhaseUiApi = {
   sync: (world: WorldState, inputState: InputState) => void;
@@ -261,6 +262,48 @@ const getInteractionMode = (world: WorldState, inputState: InputState) => {
   return "default";
 };
 
+const toRewardChipLabel = (icon: string): string => icon.slice(0, 3).toUpperCase();
+const formatRewardCategory = (category: string): string => `${category.slice(0, 1).toUpperCase()}${category.slice(1)}`;
+
+const buildProgressionPanelData = (world: WorldState): ProgressionDraftPanelData => {
+  const level = world.progression.level;
+  const nextThreshold = getProgressionNextLevelThreshold(level);
+  const progress01 = getProgressionProgress01(level, world.progression.totalAssistedExtinguishes);
+  const activeDraft = world.progression.activeDraft;
+  const draftLevel = activeDraft?.level ?? level;
+  return {
+    active: activeDraft !== null,
+    title: activeDraft ? `Command Upgrade L${draftLevel}` : `Command Upgrade L${level}`,
+    summary: activeDraft
+      ? `Level ${draftLevel} reward ready. Pick while the run continues.`
+      : nextThreshold !== null
+        ? `Next command upgrade unlocks at ${nextThreshold} assisted extinguishes.`
+        : "All authored command upgrades unlocked.",
+    progressText:
+      nextThreshold !== null
+        ? `${world.progression.totalAssistedExtinguishes}/${nextThreshold} assisted extinguishes`
+        : `${world.progression.totalAssistedExtinguishes} assisted extinguishes total`,
+    progress01,
+    queuedCount: world.progression.queuedDraftOrdinals.length,
+    options: activeDraft
+      ? activeDraft.options.map((rewardId) => {
+          const definition = getCommandRewardDefinition(rewardId);
+          return {
+            id: rewardId,
+            name: definition.name,
+            description: definition.description,
+            icon: definition.icon,
+            category: definition.category,
+            categoryLabel: formatRewardCategory(definition.category),
+            rarity: definition.rarity,
+            stacks: Math.max(0, Math.floor(world.progression.rewardStacks[rewardId] ?? 0)),
+            maxStacks: definition.maxStacks
+          };
+        })
+      : []
+  };
+};
+
 export const initPhaseUI = (container: HTMLElement): PhaseUiApi => {
   const state = new GameState();
   const root = document.createElement("div");
@@ -300,6 +343,25 @@ export const initPhaseUI = (container: HTMLElement): PhaseUiApi => {
       world.climateTimeline?.daysPerYear ?? 360,
       forecastMeta
     );
+    const progressionLevel = world.progression.level;
+    const nextProgressionThreshold = getProgressionNextLevelThreshold(progressionLevel);
+    state.setProgression({
+      level: progressionLevel,
+      totalAssistedExtinguishes: world.progression.totalAssistedExtinguishes,
+      currentThreshold: getProgressionLevelFloor(progressionLevel),
+      nextThreshold: nextProgressionThreshold,
+      progress01: getProgressionProgress01(progressionLevel, world.progression.totalAssistedExtinguishes),
+      queuedDraftCount: world.progression.queuedDraftOrdinals.length,
+      hasActiveDraft: world.progression.activeDraft !== null,
+      ownedRewards: getCommandRewardDefinitions()
+        .map((definition) => ({
+          id: definition.id,
+          label: toRewardChipLabel(definition.icon),
+          name: definition.name,
+          stacks: Math.max(0, Math.floor(world.progression.rewardStacks[definition.id] ?? 0))
+        }))
+        .filter((entry) => entry.stacks > 0)
+    });
     state.setScoring({
       score: world.scoring.score,
       difficultyMult: world.scoring.difficultyMult,
@@ -337,6 +399,7 @@ export const initPhaseUI = (container: HTMLElement): PhaseUiApi => {
       }))
     });
     const budgetReportData = buildBudgetReportData(world);
+    controller.setPanelData("progressionDraft", buildProgressionPanelData(world));
     if (isThreeTest) {
       controller.setPanelData("budgetReport", budgetReportData);
       return;
@@ -382,7 +445,7 @@ export const initPhaseUI = (container: HTMLElement): PhaseUiApi => {
       selectedId: world.selectedRosterId ?? null,
       recruitFirefighterCost: formatCurrency(RECRUIT_FIREFIGHTER_COST),
       recruitTruckCost: formatCurrency(RECRUIT_TRUCK_COST),
-      trainingCost: formatCurrency(TRAINING_COST),
+      trainingCost: formatCurrency(getTrainingCostForState(world)),
       canTrain
     });
 
@@ -453,7 +516,7 @@ export const initPhaseUI = (container: HTMLElement): PhaseUiApi => {
 
     controller.setPanelData("fuelBreak", {
       active: world.deployMode === "clear",
-      costPerTile: formatCurrency(getCharacterFirebreakCost(world.campaign.characterId, FIREBREAK_COST_PER_TILE)),
+      costPerTile: formatCurrency(getFirebreakCostForState(world)),
       toolLabel: "Drag to carve a fire break"
     });
 

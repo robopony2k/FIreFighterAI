@@ -46,7 +46,6 @@ export const drawFireFx = (
   state: WorldState,
   renderState: RenderState,
   ctx: CanvasRenderingContext2D,
-  now: number,
   visibleBounds: Bounds,
   view: ViewTransform
 ) => {
@@ -61,7 +60,7 @@ export const drawFireFx = (
   const samplingEnabled = sampleStep > 1;
 
   const pColor: RGB = { r: 0, g: 0, b: 0 };
-  const timeSeconds = now / 1000;
+  const timeSeconds = renderState.fireAnimationTimeMs / 1000;
   const flameTimeSeconds = timeSeconds * 0.56;
 
   ctx.globalCompositeOperation = "lighter";

@@ -4,6 +4,8 @@ import {
   type RuntimeSettingKey,
   type RuntimeSettings
 } from "../persistence/runtimeSettings.js";
+import { renderTitleFlameField } from "./title-screen/titleFlameField.js";
+import { createTitleFlameProgram, type TitleFlameProgram } from "./title-screen/titleFlameProgram.js";
 
 type TitleMenuAction = "new-game" | "map-editor" | "fx-lab" | "settings" | "high-score" | "credits" | "quit";
 
@@ -25,13 +27,37 @@ type EmberParticle = {
   brightness: number;
 };
 
-type FlameEmitterPoint = {
-  idx: number;
+type TrackedGlyphSpan = {
+  glyph: string;
+  index: number;
   x: number;
-  y: number;
+  width: number;
+  leftX: number;
+  rightX: number;
+  centerX: number;
+};
+
+type TitleLayout = {
+  width: number;
+  height: number;
+  fontSize: number;
+  letterSpacing: number;
+  centerX: number;
+  centerY: number;
+  outline: number;
+  font: string;
+  spans: TrackedGlyphSpan[];
+};
+
+type FlameEmitterAnchor = {
+  index: number;
+  centerX: number;
+  leftX: number;
+  rightX: number;
+  halfWidth: number;
+  baseY: number;
   strength: number;
   seed: number;
-  topBias: number;
 };
 
 export type TitleAudioChannelSettings = {
@@ -88,13 +114,14 @@ const TITLE_MENU_OPTIONS: readonly TitleMenuOption[] = [
   { id: "credits", label: "Credits" },
   { id: "quit", label: "Quit" }
 ];
+const TITLE_MAX_FLAME_GLYPHS = 16;
+const TITLE_ACTIVE_FLAME_GLYPHS = Math.min(TITLE_WORD.length, TITLE_MAX_FLAME_GLYPHS);
 
 const FIRE_WIDTH = 400;
 const FIRE_HEIGHT = 260;
 const FIRE_LEVELS = 48;
 const FIRE_UPDATE_MS = 34;
 const EMITTER_REBUILD_MS = 64;
-const TAU = Math.PI * 2;
 const TITLE_FLAME_MOTION_TIME_SCALE = 0.44;
 const INTRO_EMBER_DELAY_MS = 0;
 const INTRO_FLAME_DELAY_MS = 420;
@@ -106,14 +133,6 @@ const INTRO_SILHOUETTE_FADE_MS = 900;
 const INTRO_OUTLINE_FADE_MS = 1200;
 
 const clamp = (value: number, min: number, max: number): number => Math.min(max, Math.max(min, value));
-const fract = (value: number): number => value - Math.floor(value);
-const smoothstep = (edge0: number, edge1: number, x: number): number => {
-  if (edge0 === edge1) {
-    return x < edge0 ? 0 : 1;
-  }
-  const t = clamp((x - edge0) / (edge1 - edge0), 0, 1);
-  return t * t * (3 - 2 * t);
-};
 const hash01 = (n: number): number => {
   let x = n | 0;
   x = (x ^ 61) ^ (x >>> 16);
@@ -126,41 +145,6 @@ const hash01 = (n: number): number => {
 
 const isEditableTarget = (target: EventTarget | null): boolean =>
   target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement || target instanceof HTMLSelectElement;
-
-const buildFirePalette = (): Uint8ClampedArray => {
-  const palette = new Uint8ClampedArray(FIRE_LEVELS * 4);
-  const stops = [
-    { t: 0, color: [0, 0, 0, 0] as const },
-    { t: 0.14, color: [44, 8, 2, 208] as const },
-    { t: 0.32, color: [108, 26, 10, 228] as const },
-    { t: 0.56, color: [178, 64, 18, 240] as const },
-    { t: 0.78, color: [224, 116, 34, 232] as const },
-    { t: 0.92, color: [244, 168, 66, 204] as const },
-    { t: 1, color: [255, 212, 116, 164] as const }
-  ];
-  for (let i = 0; i < FIRE_LEVELS; i += 1) {
-    const t = i / (FIRE_LEVELS - 1);
-    let a = stops[0];
-    let b = stops[stops.length - 1];
-    for (let j = 1; j < stops.length; j += 1) {
-      if (t <= stops[j].t) {
-        a = stops[j - 1];
-        b = stops[j];
-        break;
-      }
-    }
-    const range = Math.max(1e-6, b.t - a.t);
-    const local = clamp((t - a.t) / range, 0, 1);
-    const base = i * 4;
-    palette[base] = Math.round(a.color[0] + (b.color[0] - a.color[0]) * local);
-    palette[base + 1] = Math.round(a.color[1] + (b.color[1] - a.color[1]) * local);
-    palette[base + 2] = Math.round(a.color[2] + (b.color[2] - a.color[2]) * local);
-    palette[base + 3] = Math.round(a.color[3] + (b.color[3] - a.color[3]) * local);
-  }
-  return palette;
-};
-
-const FIRE_PALETTE = buildFirePalette();
 
 type SettingsTabId = "sound" | "graphics" | "debug";
 type SettingsTabSpec = {
@@ -832,12 +816,28 @@ export const showTitleScreen = (deps: TitleScreenDeps): TitleScreenHandle => {
   if (!titleCtx) {
     throw new Error("Title screen canvas not supported.");
   }
-  const fireCanvas = document.createElement("canvas");
+  let fireCanvas = document.createElement("canvas");
   fireCanvas.width = FIRE_WIDTH;
   fireCanvas.height = FIRE_HEIGHT;
-  const fireCtx = fireCanvas.getContext("2d");
-  if (!fireCtx) {
-    throw new Error("Offscreen fire canvas not supported.");
+  let fireProgram: TitleFlameProgram | null = null;
+  let fireCtx: CanvasRenderingContext2D | null = null;
+  let fireImageData: ImageData | null = null;
+  try {
+    fireProgram = createTitleFlameProgram(fireCanvas);
+  } catch {
+    fireCanvas = document.createElement("canvas");
+    fireCanvas.width = FIRE_WIDTH;
+    fireCanvas.height = FIRE_HEIGHT;
+    fireCtx = fireCanvas.getContext("2d");
+    if (!fireCtx) {
+      throw new Error("Offscreen fire canvas not supported.");
+    }
+    fireImageData = fireCtx.createImageData(FIRE_WIDTH, FIRE_HEIGHT);
+  }
+  const glyphMaskCanvas = document.createElement("canvas");
+  const glyphMaskCtx = glyphMaskCanvas.getContext("2d");
+  if (!glyphMaskCtx) {
+    throw new Error("Glyph mask canvas not supported.");
   }
   const strokeMaskCanvas = document.createElement("canvas");
   const strokeMaskCtx = strokeMaskCanvas.getContext("2d");
@@ -859,11 +859,6 @@ export const showTitleScreen = (deps: TitleScreenDeps): TitleScreenHandle => {
   if (!coreFireCtx) {
     throw new Error("Core fire canvas not supported.");
   }
-  const jetCanvas = document.createElement("canvas");
-  const jetCtx = jetCanvas.getContext("2d");
-  if (!jetCtx) {
-    throw new Error("Jet canvas not supported.");
-  }
   const emitterCanvas = document.createElement("canvas");
   emitterCanvas.width = FIRE_WIDTH;
   emitterCanvas.height = FIRE_HEIGHT;
@@ -872,20 +867,8 @@ export const showTitleScreen = (deps: TitleScreenDeps): TitleScreenHandle => {
     throw new Error("Emitter canvas not supported.");
   }
   const firePixelCount = FIRE_WIDTH * FIRE_HEIGHT;
-  const firePixels = new Float32Array(firePixelCount);
+  const cpuFirePixels = new Float32Array(firePixelCount);
   const emitterPixels = new Uint8Array(firePixelCount);
-  const noiseField = new Float32Array(firePixelCount);
-  for (let i = 0; i < noiseField.length; i += 1) {
-    noiseField[i] = Math.random();
-  }
-  const columnPulse = new Float32Array(FIRE_WIDTH);
-  const columnTarget = new Float32Array(FIRE_WIDTH);
-  for (let x = 0; x < FIRE_WIDTH; x += 1) {
-    const seed = 0.78 + Math.random() * 0.42;
-    columnPulse[x] = seed;
-    columnTarget[x] = seed;
-  }
-  const fireImageData = fireCtx.createImageData(FIRE_WIDTH, FIRE_HEIGHT);
 
   let visible = true;
   let selectedIndex = 0;
@@ -893,18 +876,15 @@ export const showTitleScreen = (deps: TitleScreenDeps): TitleScreenHandle => {
   let fireAccumulatorMs = 0;
   let emitterAccumulatorMs = 0;
   let lastFrameNow = performance.now();
-  let noiseOffset = 0;
   let emitterPhase = Math.random() * 1000;
   let flameMotionSeconds = Math.random() * 8;
   let windCurrent = 0;
   let windTarget = (Math.random() * 2 - 1) * 1.2;
-  const glyphSeedA = new Float32Array(TITLE_WORD.length);
-  const glyphSeedB = new Float32Array(TITLE_WORD.length);
-  for (let i = 0; i < TITLE_WORD.length; i += 1) {
-    glyphSeedA[i] = Math.random();
-    glyphSeedB[i] = Math.random();
-  }
-  const emitterPoints: FlameEmitterPoint[] = [];
+  let emitterTextureDirty = true;
+  let activeFlameGlyphCount = TITLE_ACTIVE_FLAME_GLYPHS;
+  const flameGlyphCenters = new Float32Array(TITLE_MAX_FLAME_GLYPHS);
+  const flameGlyphHalfWidths = new Float32Array(TITLE_MAX_FLAME_GLYPHS);
+  const emitterAnchors: FlameEmitterAnchor[] = [];
   const emberParticles: EmberParticle[] = [];
   const MAX_EMBER_PARTICLES = 280;
   const introStartMs = performance.now();
@@ -1022,10 +1002,10 @@ export const showTitleScreen = (deps: TitleScreenDeps): TitleScreenHandle => {
     text: string,
     centerX: number,
     spacingPx: number
-  ): Array<{ glyph: string; index: number; x: number; width: number; centerX: number }> => {
+  ): TrackedGlyphSpan[] => {
     const layout = measureTrackedTextLayout(ctx, text, spacingPx);
     let x = centerX - layout.width * 0.5;
-    const spans: Array<{ glyph: string; index: number; x: number; width: number; centerX: number }> = [];
+    const spans: TrackedGlyphSpan[] = [];
     for (let i = 0; i < text.length; i += 1) {
       const glyph = text[i] ?? "";
       const width = Math.max(0, layout.advances[i] ?? ctx.measureText(glyph).width);
@@ -1034,6 +1014,8 @@ export const showTitleScreen = (deps: TitleScreenDeps): TitleScreenHandle => {
         index: i,
         x,
         width,
+        leftX: x,
+        rightX: x + width,
         centerX: x + width * 0.5
       });
       x += width + (i < text.length - 1 ? spacingPx : 0);
@@ -1041,14 +1023,53 @@ export const showTitleScreen = (deps: TitleScreenDeps): TitleScreenHandle => {
     return spans;
   };
 
-  const strokeSpacedText = (
+  const buildTitleLayout = (
     ctx: CanvasRenderingContext2D,
-    text: string,
-    centerX: number,
-    y: number,
-    spacingPx: number
+    width: number,
+    height: number
+  ): TitleLayout => {
+    const fontSize = Math.min(height * 0.54, width / 7.8);
+    const letterSpacing = Math.max(1.6, fontSize * 0.05);
+    const centerX = width * 0.5;
+    const centerY = height * 0.72;
+    const outline = Math.max(1, Math.round(fontSize * 0.052));
+    const font = `${TITLE_FONT_WEIGHT} ${fontSize}px ${TITLE_FONT_FAMILY}`;
+    ctx.font = font;
+    ctx.textAlign = "left";
+    ctx.textBaseline = "middle";
+    return {
+      width,
+      height,
+      fontSize,
+      letterSpacing,
+      centerX,
+      centerY,
+      outline,
+      font,
+      spans: getTrackedGlyphSpans(ctx, TITLE_WORD, centerX, letterSpacing)
+    };
+  };
+
+  const buildFlameEmitterAnchors = (layout: TitleLayout): FlameEmitterAnchor[] =>
+    layout.spans.slice(0, TITLE_MAX_FLAME_GLYPHS).map((span) => {
+      const halfWidth = Math.max(span.width * 0.58, layout.fontSize * 0.16);
+      return {
+        index: span.index,
+        centerX: span.centerX,
+        leftX: span.leftX,
+        rightX: span.rightX,
+        halfWidth,
+        baseY: layout.centerY + layout.fontSize * 0.18,
+        strength: clamp(span.width / Math.max(1, layout.fontSize), 0.72, 1.24),
+        seed: hash01(span.index * 137 + 17)
+      };
+    });
+
+  const strokeGlyphSpans = (
+    ctx: CanvasRenderingContext2D,
+    spans: readonly TrackedGlyphSpan[],
+    y: number
   ): void => {
-    const spans = getTrackedGlyphSpans(ctx, text, centerX, spacingPx);
     const previousTextAlign = ctx.textAlign;
     ctx.textAlign = "left";
     for (let i = 0; i < spans.length; i += 1) {
@@ -1058,14 +1079,11 @@ export const showTitleScreen = (deps: TitleScreenDeps): TitleScreenHandle => {
     ctx.textAlign = previousTextAlign;
   };
 
-  const fillSpacedText = (
+  const fillGlyphSpans = (
     ctx: CanvasRenderingContext2D,
-    text: string,
-    centerX: number,
-    y: number,
-    spacingPx: number
+    spans: readonly TrackedGlyphSpan[],
+    y: number
   ): void => {
-    const spans = getTrackedGlyphSpans(ctx, text, centerX, spacingPx);
     const previousTextAlign = ctx.textAlign;
     ctx.textAlign = "left";
     for (let i = 0; i < spans.length; i += 1) {
@@ -1076,101 +1094,73 @@ export const showTitleScreen = (deps: TitleScreenDeps): TitleScreenHandle => {
   };
 
   const rebuildEmitter = (): void => {
-    const fontSize = Math.min(FIRE_HEIGHT * 0.56, FIRE_WIDTH / 7.8);
-    const letterSpacing = Math.max(1.2, fontSize * 0.045);
-    const centerX = FIRE_WIDTH * 0.5;
-    const centerY = FIRE_HEIGHT * 0.72;
-    const strokeWidth = Math.max(1.6, fontSize * 0.072);
-    const jitterX = Math.sin(emitterPhase * 0.63) * 0.25;
-    const jitterY = Math.cos(emitterPhase * 0.47) * 0.18;
-
+    const layout = buildTitleLayout(emitterCtx, FIRE_WIDTH, FIRE_HEIGHT);
     emitterCtx.clearRect(0, 0, FIRE_WIDTH, FIRE_HEIGHT);
-    emitterCtx.font = `${TITLE_FONT_WEIGHT} ${fontSize}px ${TITLE_FONT_FAMILY}`;
-    emitterCtx.textAlign = "left";
-    emitterCtx.textBaseline = "middle";
-    emitterCtx.lineJoin = "round";
-    emitterCtx.lineCap = "round";
-    const spans = getTrackedGlyphSpans(emitterCtx, TITLE_WORD, centerX, letterSpacing);
+    flameGlyphCenters.fill(0);
+    flameGlyphHalfWidths.fill(0);
+    emitterAnchors.length = 0;
+    const anchors = buildFlameEmitterAnchors(layout).slice(0, TITLE_ACTIVE_FLAME_GLYPHS);
+    activeFlameGlyphCount = anchors.length;
 
-    for (let i = 0; i < spans.length; i += 1) {
-      const span = spans[i];
-      const seedA = glyphSeedA[span.index] ?? 0.5;
-      const seedB = glyphSeedB[span.index] ?? 0.5;
-      const phase = emitterPhase * (1.08 + seedA * 1.04) + seedB * 11.7;
-      const localJx = jitterX * (0.26 + seedA * 0.36) + Math.sin(phase) * (0.16 + strokeWidth * 0.14);
-      const localJy = jitterY * (0.26 + seedB * 0.36) + Math.cos(phase * 1.27) * (0.14 + strokeWidth * 0.12);
+    emitterCtx.save();
+    emitterCtx.filter = `blur(${Math.max(1, layout.outline * 0.22)}px)`;
+    for (let i = 0; i < anchors.length; i += 1) {
+      const anchor = anchors[i] as FlameEmitterAnchor;
+      emitterAnchors.push(anchor);
+      flameGlyphCenters[i] = anchor.centerX / FIRE_WIDTH;
+      flameGlyphHalfWidths[i] = Math.max(anchor.halfWidth / FIRE_WIDTH, 0.01);
 
-      emitterCtx.strokeStyle = "rgba(255, 255, 255, 0.96)";
-      emitterCtx.lineWidth = strokeWidth * (0.76 + 0.36 * (0.5 + 0.5 * Math.sin(phase * 1.63)));
-      emitterCtx.strokeText(span.glyph, span.x + localJx, centerY + localJy);
+      const emitterHalfWidth = anchor.halfWidth * (1.12 + anchor.strength * 0.08);
+      const topHalfWidth = Math.max(emitterHalfWidth * 0.32, layout.fontSize * 0.05);
+      const stemHeight = layout.fontSize * (1.02 + anchor.strength * 0.22);
+      const topY = anchor.baseY - stemHeight;
+      const bottomY = anchor.baseY + layout.fontSize * 0.05;
+      const gradient = emitterCtx.createLinearGradient(anchor.centerX, bottomY, anchor.centerX, topY);
+      gradient.addColorStop(0, "rgba(255, 255, 255, 1)");
+      gradient.addColorStop(0.28, "rgba(255, 255, 255, 0.98)");
+      gradient.addColorStop(0.7, "rgba(255, 255, 255, 0.58)");
+      gradient.addColorStop(1, "rgba(255, 255, 255, 0)");
+      emitterCtx.fillStyle = gradient;
+      emitterCtx.beginPath();
+      emitterCtx.moveTo(anchor.centerX - emitterHalfWidth, bottomY);
+      emitterCtx.quadraticCurveTo(
+        anchor.centerX - emitterHalfWidth * 0.94,
+        anchor.baseY - stemHeight * 0.34,
+        anchor.centerX - topHalfWidth,
+        topY
+      );
+      emitterCtx.lineTo(anchor.centerX + topHalfWidth, topY);
+      emitterCtx.quadraticCurveTo(
+        anchor.centerX + emitterHalfWidth * 0.94,
+        anchor.baseY - stemHeight * 0.34,
+        anchor.centerX + emitterHalfWidth,
+        bottomY
+      );
+      emitterCtx.quadraticCurveTo(anchor.centerX + emitterHalfWidth * 0.42, bottomY + stemHeight * 0.14, anchor.centerX, bottomY + stemHeight * 0.18);
+      emitterCtx.quadraticCurveTo(anchor.centerX - emitterHalfWidth * 0.42, bottomY + stemHeight * 0.14, anchor.centerX - emitterHalfWidth, bottomY);
+      emitterCtx.closePath();
+      emitterCtx.fill();
 
-      emitterCtx.strokeStyle = "rgba(255, 255, 255, 0.64)";
-      emitterCtx.lineWidth = strokeWidth * (0.48 + 0.3 * (0.5 + 0.5 * Math.cos(phase * 1.33)));
-      emitterCtx.strokeText(span.glyph, span.x - localJx * 0.52, centerY - localJy * 0.52);
+      emitterCtx.fillStyle = "rgba(255, 255, 255, 0.88)";
+      emitterCtx.beginPath();
+      emitterCtx.ellipse(
+        anchor.centerX,
+        bottomY,
+        emitterHalfWidth * 0.94,
+        Math.max(1.5, layout.fontSize * 0.08),
+        0,
+        0,
+        Math.PI * 2
+      );
+      emitterCtx.fill();
     }
+    emitterCtx.restore();
 
     const emitterData = emitterCtx.getImageData(0, 0, FIRE_WIDTH, FIRE_HEIGHT).data;
-    for (let y = 0; y < FIRE_HEIGHT; y += 1) {
-      const row = y * FIRE_WIDTH;
-      for (let x = 0; x < FIRE_WIDTH; x += 1) {
-        const idx = row + x;
-        const alpha = emitterData[idx * 4 + 3] / 255;
-        if (alpha <= 0.001) {
-          emitterPixels[idx] = 0;
-          continue;
-        }
-        const noisy = noiseField[(idx + noiseOffset) % firePixelCount];
-        const rough = 0.72 + noisy * 0.5;
-        emitterPixels[idx] = clamp(Math.round(alpha * rough * 255), 0, 255);
-      }
+    for (let i = 0; i < firePixelCount; i += 1) {
+      emitterPixels[i] = emitterData[i * 4 + 3] ?? 0;
     }
-
-    emitterPoints.length = 0;
-    const verticalScale = Math.max(18, fontSize * 0.65);
-    for (let y = 1; y < FIRE_HEIGHT - 1; y += 1) {
-      const row = y * FIRE_WIDTH;
-      for (let x = 1; x < FIRE_WIDTH - 1; x += 1) {
-        const idx = row + x;
-        const value = emitterPixels[idx];
-        if (value < 152) {
-          continue;
-        }
-        const up = emitterPixels[idx - FIRE_WIDTH];
-        const down = emitterPixels[idx + FIRE_WIDTH];
-        const left = emitterPixels[idx - 1];
-        const right = emitterPixels[idx + 1];
-        const minNeighbor = Math.min(up, down, left, right);
-        if (minNeighbor > value * 0.88) {
-          continue;
-        }
-        const edgeStrength = clamp((value - minNeighbor) / 255, 0, 1);
-        if (edgeStrength < 0.08) {
-          continue;
-        }
-        const sampleGate = hash01(idx * 13 + 17);
-        if (sampleGate > 0.22 + edgeStrength * 0.26) {
-          continue;
-        }
-        emitterPoints.push({
-          idx,
-          x,
-          y,
-          strength: edgeStrength,
-          seed: hash01(idx * 31 + 7) * Math.PI * 2,
-          topBias: clamp((centerY - y) / verticalScale, -1, 1)
-        });
-      }
-    }
-
-    if (emitterPoints.length > 420) {
-      const stride = Math.ceil(emitterPoints.length / 420);
-      let write = 0;
-      for (let read = 0; read < emitterPoints.length; read += stride) {
-        emitterPoints[write] = emitterPoints[read] as FlameEmitterPoint;
-        write += 1;
-      }
-      emitterPoints.length = write;
-    }
+    emitterTextureDirty = true;
   };
 
   const spawnEmber = (x: number, y: number, upward = true, intensity = 1): void => {
@@ -1254,118 +1244,43 @@ export const showTitleScreen = (deps: TitleScreenDeps): TitleScreenHandle => {
   };
 
   const stepFire = (): void => {
-    noiseOffset = (noiseOffset + 23) % firePixelCount;
     emitterPhase += 0.018;
     if (Math.random() < 0.1) {
       windTarget = (Math.random() * 2 - 1) * (0.8 + Math.random() * 1.6);
     }
     windCurrent += (windTarget - windCurrent) * 0.06;
-    const windGust =
-      windCurrent + Math.sin(emitterPhase * 0.93) * 0.35 + Math.sin(emitterPhase * 2.37 + 0.7) * 0.18;
-
-    const noiseRefreshCount = Math.max(32, Math.floor(firePixelCount / 30));
-    for (let i = 0; i < noiseRefreshCount; i += 1) {
-      const idx = (noiseOffset + i * 53) % firePixelCount;
-      noiseField[idx] = noiseField[idx] * 0.86 + Math.random() * 0.14;
-    }
-
-    for (let x = 0; x < FIRE_WIDTH; x += 1) {
-      if (Math.random() < 0.26) {
-        const sourceNoise = noiseField[(x * 17 + noiseOffset) % firePixelCount];
-        columnTarget[x] = 0.74 + sourceNoise * 0.68;
-      }
-      columnPulse[x] += (columnTarget[x] - columnPulse[x]) * 0.09;
-    }
-
-    for (let i = 0; i < firePixelCount; i += 1) {
-      const emitter = emitterPixels[i] / 255;
-      if (emitter > 0) {
-        const x = i % FIRE_WIDTH;
-        const boost = 0.74 + columnPulse[x] * 0.28;
-        const flicker = 0.7 + noiseField[(i + noiseOffset * 3) % firePixelCount] * 0.5;
-        const pulse = 0.76 + 0.24 * Math.sin(x * 0.17 + emitterPhase * 1.35);
-        const shimmer = 0.86 + 0.28 * Math.sin(i * 0.031 + emitterPhase * 3.2);
-        const spark = Math.random() < 0.014 ? 5 + Math.random() * 11 : 0;
-        const targetHeat = (FIRE_LEVELS - 1) * emitter * boost * flicker * pulse * shimmer + spark;
-        firePixels[i] += (targetHeat - firePixels[i]) * 0.22;
-      } else {
-        firePixels[i] = Math.max(0, firePixels[i] - 0.19);
-      }
-      firePixels[i] *= 0.995;
-    }
-
-    for (let y = 1; y < FIRE_HEIGHT; y += 1) {
-      const row = y * FIRE_WIDTH;
-      const aboveRow = row - FIRE_WIDTH;
-      const topExposure = 1 - y / (FIRE_HEIGHT - 1);
-      for (let x = 0; x < FIRE_WIDTH; x += 1) {
-        const source = row + x;
-        const value = firePixels[source];
-        if (value <= 0.02) {
-          continue;
-        }
-        const n = noiseField[(source + noiseOffset) % firePixelCount];
-        const decay = (0.09 + n * 0.36) * (1 + topExposure * 0.42) * (0.82 + Math.random() * 0.35);
-        const driftRoll = n * 0.6 + Math.random() * 0.4;
-        const drift = driftRoll < 0.32 ? -1 : driftRoll > 0.68 ? 1 : 0;
-        const windDrift = windGust * (0.35 + topExposure * 1.05);
-        const destX = clamp(Math.round(x + drift + windDrift), 0, FIRE_WIDTH - 1);
-        const cooled = Math.max(0, value - decay);
-        const dest = aboveRow + destX;
-        if (cooled > firePixels[dest]) {
-          firePixels[dest] = cooled;
-        }
-        if (y > 1) {
-          const twoUpRow = aboveRow - FIRE_WIDTH;
-          const lifted = cooled * (0.52 + topExposure * 0.18);
-          const twoUpX = clamp(Math.round(destX + windDrift * 0.35), 0, FIRE_WIDTH - 1);
-          const twoUp = twoUpRow + twoUpX;
-          if (lifted > firePixels[twoUp]) {
-            firePixels[twoUp] = lifted;
-          }
-        }
-      }
-    }
-
-    // Weak downward branch to create chaotic trailing licks below the outline.
-    for (let y = 0; y < FIRE_HEIGHT - 1; y += 1) {
-      const row = y * FIRE_WIDTH;
-      const belowRow = row + FIRE_WIDTH;
-      const depth = y / (FIRE_HEIGHT - 1);
-      for (let x = 0; x < FIRE_WIDTH; x += 1) {
-        const source = row + x;
-        const value = firePixels[source];
-        if (value <= FIRE_LEVELS * 0.18) {
-          continue;
-        }
-        if (Math.random() > (0.13 + (1 - depth) * 0.17)) {
-          continue;
-        }
-        const n = noiseField[(source * 3 + noiseOffset) % firePixelCount];
-        const drift = n < 0.38 ? -1 : n > 0.62 ? 1 : 0;
-        const downWind = windGust * (0.18 + depth * 0.32);
-        const destX = clamp(Math.round(x + drift + downWind), 0, FIRE_WIDTH - 1);
-        const lick = value * (0.22 + Math.random() * 0.23);
-        const dest = belowRow + destX;
-        if (lick > firePixels[dest]) {
-          firePixels[dest] = lick;
-        }
-      }
-    }
+    spawnTitleSparks();
   };
 
   const renderFireBuffer = (): void => {
-    const data = fireImageData.data;
-    for (let i = 0; i < firePixelCount; i += 1) {
-      const level = clamp(Math.floor(firePixels[i]), 0, FIRE_LEVELS - 1);
-      const paletteIndex = level * 4;
-      const pixelIndex = i * 4;
-      data[pixelIndex] = FIRE_PALETTE[paletteIndex];
-      data[pixelIndex + 1] = FIRE_PALETTE[paletteIndex + 1];
-      data[pixelIndex + 2] = FIRE_PALETTE[paletteIndex + 2];
-      const alphaGain = Math.pow(level / (FIRE_LEVELS - 1), 0.84);
-      data[pixelIndex + 3] = clamp(Math.round(FIRE_PALETTE[paletteIndex + 3] * alphaGain * 0.94), 0, 255);
+    if (fireProgram) {
+      if (emitterTextureDirty) {
+        fireProgram.uploadEmitterMask(emitterPixels, FIRE_WIDTH, FIRE_HEIGHT);
+        emitterTextureDirty = false;
+      }
+      fireProgram.render(
+        flameMotionSeconds * TITLE_FLAME_MOTION_TIME_SCALE,
+        windCurrent,
+        activeFlameGlyphCount,
+        flameGlyphCenters,
+        flameGlyphHalfWidths
+      );
+      return;
     }
+    if (!fireCtx || !fireImageData) {
+      return;
+    }
+    renderTitleFlameField({
+      fireImageData,
+      firePixels: cpuFirePixels,
+      emitterPixels,
+      glyphCount: activeFlameGlyphCount,
+      glyphCenters: flameGlyphCenters,
+      glyphHalfWidths: flameGlyphHalfWidths,
+      levels: FIRE_LEVELS,
+      timeSeconds: flameMotionSeconds * TITLE_FLAME_MOTION_TIME_SCALE,
+      wind: windCurrent
+    });
     fireCtx.putImageData(fireImageData, 0, 0);
   };
 
@@ -1377,6 +1292,8 @@ export const showTitleScreen = (deps: TitleScreenDeps): TitleScreenHandle => {
     if (titleCanvas.width !== targetWidth || titleCanvas.height !== targetHeight) {
       titleCanvas.width = targetWidth;
       titleCanvas.height = targetHeight;
+      glyphMaskCanvas.width = targetWidth;
+      glyphMaskCanvas.height = targetHeight;
       strokeMaskCanvas.width = targetWidth;
       strokeMaskCanvas.height = targetHeight;
       glowMaskCanvas.width = targetWidth;
@@ -1385,187 +1302,30 @@ export const showTitleScreen = (deps: TitleScreenDeps): TitleScreenHandle => {
       glowFireCanvas.height = targetHeight;
       coreFireCanvas.width = targetWidth;
       coreFireCanvas.height = targetHeight;
-      jetCanvas.width = targetWidth;
-      jetCanvas.height = targetHeight;
     }
   };
 
-  const drawFlameJets = (
-    width: number,
-    height: number,
-    centerY: number,
-    fontSize: number,
-    outline: number
-  ): void => {
-    jetCtx.save();
-    jetCtx.globalCompositeOperation = "destination-out";
-    jetCtx.fillStyle = "rgba(0, 0, 0, 0.24)";
-    jetCtx.fillRect(0, 0, width, height);
-    jetCtx.restore();
-    if (emitterPoints.length === 0) {
+  const spawnTitleSparks = (): void => {
+    if (emitterAnchors.length === 0 || titleCanvas.width < 2 || titleCanvas.height < 2) {
       return;
     }
-
-    const sx = width / FIRE_WIDTH;
-    const sy = height / FIRE_HEIGHT;
-    const topEdgeY = centerY - fontSize * 0.58;
-    const bottomEdgeY = centerY + fontSize * 0.48;
-    // Keep the title flamelets on the same motion cadence as the active 3D fire renderer.
-    const flameTimeSeconds = flameMotionSeconds * TITLE_FLAME_MOTION_TIME_SCALE;
-
-    jetCtx.save();
-    jetCtx.globalCompositeOperation = "lighter";
-    for (let i = 0; i < emitterPoints.length; i += 1) {
-      const point = emitterPoints[i] as FlameEmitterPoint;
-      const heat = clamp(firePixels[point.idx] / (FIRE_LEVELS - 1), 0, 1);
-      if (heat < 0.14) {
+    const sx = titleCanvas.width / FIRE_WIDTH;
+    const sy = titleCanvas.height / FIRE_HEIGHT;
+    const attempts = emberParticles.length < MAX_EMBER_PARTICLES * 0.55 ? 2 : 1;
+    for (let i = 0; i < attempts; i += 1) {
+      const anchor = emitterAnchors[Math.floor(Math.random() * emitterAnchors.length)];
+      if (!anchor) {
         continue;
       }
-      const px = point.x * sx;
-      const py = point.y * sy;
-      const localNoise = noiseField[(point.idx + noiseOffset * 11) % firePixelCount];
-      const s1 = hash01(point.idx * 37 + 11);
-      const s2 = hash01(point.idx * 53 + 19);
-      const s3 = hash01(point.idx * 79 + 31);
-      const emitterSeed = hash01(point.idx * 97 + 41);
-      const isHero = s3 < 0.24;
-      const sizeVariation = 0.75 + s1 * 0.6;
-      const leanVariation = 0.02 + s2 * 0.18;
-      const flickerRate = 0.34 + s2 * 1.61;
-      const phaseRate = isHero ? 0.18 + flickerRate * 0.14 : 0.46 + flickerRate * 0.55;
-      const phase = fract(flameTimeSeconds * phaseRate + s3 + emitterSeed * 0.41 + (isHero ? i * 0.03 : i * 0.09));
-      const riseT = isHero ? Math.pow(phase, 1.35) : Math.pow(phase, 2.0);
-      const breath = 0.82 + 0.18 * Math.sin(flameTimeSeconds * (0.24 + emitterSeed * 0.28) + emitterSeed * TAU);
-      const flicker = 0.76 + 0.24 * Math.sin(flameTimeSeconds * 2.1 + s2 * TAU);
-      const heat01 = clamp((heat - 0.06) / 0.94, 0, 1);
-      const activity =
-        heat01 * (0.78 + point.strength * 0.62) * breath * (0.82 + localNoise * 0.26);
-      const activityLevel = clamp(activity / 1.2, 0, 1);
-      if (activityLevel <= 0.08) {
+      const sparkChance = 0.012 + anchor.strength * 0.018;
+      if (Math.random() > sparkChance) {
         continue;
       }
-
-      const nearTop = Math.abs(py - topEdgeY) < fontSize * 0.2;
-      const nearBottom = Math.abs(py - bottomEdgeY) < fontSize * 0.24;
-      const upwardBias = clamp(0.74 + point.topBias * 0.56 + (nearTop ? 0.08 : 0), 0.24, 1.2);
-      const baseSpread =
-        (outline * (isHero ? 0.9 : 1.14) + fontSize * (isHero ? 0.02 : 0.028)) *
-        (0.72 + heat01 * 0.62) *
-        breath;
-      const spawnX = px + (s1 - 0.5) * baseSpread;
-      const spawnY = py + (s2 - 0.5) * baseSpread * 0.24;
-      const jetSpin =
-        flameTimeSeconds * (0.62 + flickerRate * 0.38 + emitterSeed * 0.24) +
-        emitterSeed * TAU +
-        i * 0.21;
-      const helixRadius =
-        (outline * (isHero ? 0.42 : 0.28) + fontSize * 0.01) * (0.35 + riseT * 1.1 + s2 * 0.3);
-      const helixX = Math.cos(jetSpin + riseT * 6.2) * helixRadius;
-      const curlAmp =
-        (outline * (isHero ? 0.52 : 0.34) + fontSize * 0.016) *
-        sizeVariation *
-        (0.24 + heat01 * 0.76);
-      const curlX = Math.sin(phase * (isHero ? 6.4 : 10.4) + s1 * TAU) * curlAmp;
-      const lashPhase =
-        flameTimeSeconds * (isHero ? 0.74 + flickerRate * 0.92 : 0.92 + flickerRate * 1.2) +
-        s1 * TAU +
-        phase * 4.2;
-      const lashDamp = 1 - smoothstep(0.64, 1.0, riseT);
-      const lashAmp =
-        (outline * (isHero ? 0.64 : 0.38) + fontSize * 0.02) *
-        (0.22 + heat01 * 0.88) *
-        lashDamp;
-      const lashX = Math.sin(lashPhase) * lashAmp;
-      const windScale =
-        (outline * 0.18 + fontSize * 0.012) *
-        (0.42 + heat01 * 0.92 + leanVariation * 0.7) *
-        flicker;
-      const windOffsetX = windCurrent * windScale * (0.22 + riseT * 0.52);
-      const riseHeight =
-        (outline * (isHero ? 5.7 : 4.3) + fontSize * (isHero ? 0.12 : 0.09)) *
-        (0.7 + heat01 * 0.88 + point.strength * 0.18) *
-        sizeVariation *
-        (0.72 + upwardBias * 0.48) *
-        (0.74 + activityLevel * 0.52);
-      const flameletX = spawnX + helixX + curlX + lashX + windOffsetX;
-      const flameletY = spawnY - riseT * riseHeight;
-
-      const heightPulse = isHero ? 0.92 + 0.08 * (1 - phase * phase) : 0.9 + 0.1 * (1 - phase);
-      const flameHeightBase =
-        (outline * (isHero ? 3.8 : 2.9) + fontSize * (isHero ? 0.05 : 0.042)) *
-        (0.4 + heat01 * 0.92 + point.strength * 0.24) *
-        sizeVariation *
-        heightPulse *
-        (0.68 + activityLevel * 0.52);
-      const flameWidthBase =
-        flameHeightBase *
-        (isHero ? 0.62 + 0.14 * s1 : 0.46 + 0.14 * s1) *
-        (0.74 + point.strength * 0.12);
-      const flameHeight = Math.max(1.2, flameHeightBase * (0.94 + heat01 * 0.16));
-      const flameWidth = Math.max(0.95, flameWidthBase * (0.84 - smoothstep(0.68, 1.0, phase) * 0.22));
-
-      const alphaT = Math.pow(Math.sin(Math.PI * phase), isHero ? 1.15 : 1.35);
-      const alpha = clamp(alphaT * (0.4 + heat01 * 0.34) * (0.58 + activityLevel * 0.2), 0, 0.82);
-      if (alpha <= 0.04) {
-        continue;
-      }
-
-      const phaseColor = clamp(phase, 0, 1);
-      let red = 248;
-      let green = 188;
-      let blue = 106;
-      if (phaseColor < 0.22) {
-        const t = phaseColor / 0.22;
-        green = Math.round(194 + (156 - 194) * t);
-        blue = Math.round(112 + (58 - 112) * t);
-      } else if (phaseColor < 0.6) {
-        const t = (phaseColor - 0.22) / 0.38;
-        red = Math.round(244 + (216 - 244) * t);
-        green = Math.round(156 + (84 - 156) * t);
-        blue = Math.round(58 + (18 - 58) * t);
-      } else {
-        const t = (phaseColor - 0.6) / 0.4;
-        red = Math.round(216 + (168 - 216) * t);
-        green = Math.round(84 + (28 - 84) * t);
-        blue = Math.round(18 + (8 - 18) * t);
-      }
-
-      const tilt =
-        clamp(windCurrent * (0.42 + leanVariation * 1.35), -0.86, 0.86) * (0.24 + riseT * 0.76);
-      jetCtx.globalAlpha = alpha;
-      jetCtx.fillStyle = `rgb(${red}, ${green}, ${blue})`;
-      jetCtx.beginPath();
-      jetCtx.ellipse(flameletX, flameletY, flameWidth, flameHeight, tilt, 0, Math.PI * 2);
-      jetCtx.fill();
-
-      if (isHero || phase < 0.62) {
-        jetCtx.globalAlpha = alpha * (isHero ? 0.34 : 0.24);
-        jetCtx.beginPath();
-        jetCtx.ellipse(
-          flameletX,
-          flameletY - flameHeight * 0.24,
-          flameWidth * (isHero ? 0.72 : 0.64),
-          flameHeight * (isHero ? 0.82 : 0.74),
-          tilt,
-          0,
-          Math.PI * 2
-        );
-        jetCtx.fill();
-      }
-
-      jetCtx.globalAlpha = clamp(alpha * 0.28, 0.05, 0.22);
-      jetCtx.fillStyle = `rgba(255, 210, ${Math.round(132 + 36 * heat01)}, 1)`;
-      jetCtx.beginPath();
-      jetCtx.arc(spawnX, spawnY, Math.max(0.75, flameWidth * (isHero ? 0.26 : 0.22)), 0, Math.PI * 2);
-      jetCtx.fill();
-
-      if (Math.random() < 0.007 + activityLevel * 0.022) {
-        spawnEmber(flameletX + windOffsetX * 0.12, flameletY - flameHeight * 0.26, true, activityLevel);
-      } else if (nearBottom && Math.random() < 0.001 + activityLevel * 0.004) {
-        spawnEmber(spawnX, spawnY + flameHeight * 0.2, false, activityLevel * 0.76);
-      }
+      const jitterX = (Math.random() * 2 - 1) * Math.max(2, anchor.halfWidth * sx * 0.52);
+      const jitterY = (Math.random() * 2 - 1) * Math.max(2, sy * 2.2);
+      const intensity = clamp(0.44 + anchor.strength * 0.42 + anchor.seed * 0.18, 0.34, 1.1);
+      spawnEmber(anchor.centerX * sx + jitterX, anchor.baseY * sy + jitterY, true, intensity);
     }
-    jetCtx.restore();
   };
 
   const drawTitle = (): void => {
@@ -1574,90 +1334,40 @@ export const showTitleScreen = (deps: TitleScreenDeps): TitleScreenHandle => {
     if (width < 2 || height < 2) {
       return;
     }
-    const fontSize = Math.min(height * 0.54, width / 7.8);
-    const letterSpacing = Math.max(1.6, fontSize * 0.05);
-    const centerX = width * 0.5;
-    const centerY = height * 0.72;
-    const outline = Math.max(2, Math.round(fontSize * 0.074));
-    const font = `${TITLE_FONT_WEIGHT} ${fontSize}px ${TITLE_FONT_FAMILY}`;
+    const layout = buildTitleLayout(strokeMaskCtx, width, height);
 
-    strokeMaskCtx.font = font;
-    strokeMaskCtx.textAlign = "left";
-    strokeMaskCtx.textBaseline = "middle";
-    const spans = getTrackedGlyphSpans(strokeMaskCtx, TITLE_WORD, centerX, letterSpacing);
+    glyphMaskCtx.clearRect(0, 0, width, height);
+    glyphMaskCtx.save();
+    glyphMaskCtx.font = layout.font;
+    glyphMaskCtx.textAlign = "left";
+    glyphMaskCtx.textBaseline = "middle";
+    glyphMaskCtx.fillStyle = "rgba(255, 255, 255, 1)";
+    fillGlyphSpans(glyphMaskCtx, layout.spans, layout.centerY);
+    glyphMaskCtx.restore();
 
     strokeMaskCtx.clearRect(0, 0, width, height);
     strokeMaskCtx.save();
-    strokeMaskCtx.font = font;
+    strokeMaskCtx.font = layout.font;
     strokeMaskCtx.textAlign = "left";
     strokeMaskCtx.textBaseline = "middle";
     strokeMaskCtx.lineJoin = "round";
     strokeMaskCtx.lineCap = "round";
-    for (let i = 0; i < spans.length; i += 1) {
-      const span = spans[i];
-      const seedA = glyphSeedA[span.index] ?? 0.5;
-      const seedB = glyphSeedB[span.index] ?? 0.5;
-      const phase = emitterPhase * (1.2 + seedA * 0.92) + seedB * 13.7;
-      const offsetX = Math.sin(phase) * (0.8 + outline * 0.5);
-      const offsetY = Math.cos(phase * 1.23) * (0.6 + outline * 0.42);
-      const widthA = outline * (0.76 + 0.34 * (0.5 + 0.5 * Math.sin(phase * 1.81)));
-      const widthB = outline * (0.52 + 0.28 * (0.5 + 0.5 * Math.cos(phase * 1.37)));
-
-      strokeMaskCtx.strokeStyle = "rgba(255, 255, 255, 0.98)";
-      strokeMaskCtx.lineWidth = widthA;
-      strokeMaskCtx.strokeText(span.glyph, span.x + offsetX, centerY + offsetY);
-
-      strokeMaskCtx.strokeStyle = "rgba(255, 255, 255, 0.72)";
-      strokeMaskCtx.lineWidth = widthB;
-      strokeMaskCtx.strokeText(span.glyph, span.x - offsetX * 0.54, centerY - offsetY * 0.54);
-    }
+    strokeMaskCtx.strokeStyle = "rgba(255, 255, 255, 0.94)";
+    strokeMaskCtx.lineWidth = Math.max(0.75, layout.outline * 0.34);
+    strokeGlyphSpans(strokeMaskCtx, layout.spans, layout.centerY);
+    strokeMaskCtx.strokeStyle = "rgba(255, 255, 255, 0.42)";
+    strokeMaskCtx.lineWidth = Math.max(0.4, layout.outline * 0.16);
+    strokeGlyphSpans(strokeMaskCtx, layout.spans, layout.centerY);
     strokeMaskCtx.restore();
 
     glowMaskCtx.clearRect(0, 0, width, height);
     glowMaskCtx.save();
-    glowMaskCtx.globalAlpha = 0.86;
-    glowMaskCtx.filter = `blur(${Math.max(5, Math.round(outline * 1.05))}px)`;
-    glowMaskCtx.drawImage(strokeMaskCanvas, 0, -Math.max(2, Math.round(outline * 0.6)));
-    glowMaskCtx.restore();
-    glowMaskCtx.save();
-    glowMaskCtx.globalAlpha = 0.74;
-    glowMaskCtx.filter = `blur(${Math.max(3, Math.round(outline * 0.62))}px)`;
-    glowMaskCtx.drawImage(strokeMaskCanvas, 0, 0);
-    glowMaskCtx.restore();
-    glowMaskCtx.save();
-    glowMaskCtx.globalAlpha = 0.58;
-    glowMaskCtx.filter = `blur(${Math.max(4, Math.round(outline * 0.95))}px)`;
-    glowMaskCtx.drawImage(strokeMaskCanvas, 0, Math.max(2, Math.round(outline * 0.55)));
-    glowMaskCtx.restore();
-    glowMaskCtx.save();
-    glowMaskCtx.globalAlpha = 0.56;
-    glowMaskCtx.filter = `blur(${Math.max(10, Math.round(outline * 2.9))}px)`;
-    glowMaskCtx.drawImage(strokeMaskCanvas, 0, -Math.max(12, Math.round(outline * 4.6)));
-    glowMaskCtx.restore();
-    glowMaskCtx.save();
-    glowMaskCtx.globalAlpha = 0.38;
-    glowMaskCtx.filter = `blur(${Math.max(14, Math.round(outline * 4.2))}px)`;
-    glowMaskCtx.drawImage(strokeMaskCanvas, 0, -Math.max(18, Math.round(outline * 6.6)));
-    glowMaskCtx.restore();
-    glowMaskCtx.save();
-    glowMaskCtx.globalAlpha = 0.22;
-    glowMaskCtx.filter = `blur(${Math.max(18, Math.round(outline * 5.2))}px)`;
-    glowMaskCtx.drawImage(strokeMaskCanvas, 0, -Math.max(24, Math.round(outline * 8.8)));
-    glowMaskCtx.restore();
-    glowMaskCtx.save();
     glowMaskCtx.globalAlpha = 0.24;
-    glowMaskCtx.filter = `blur(${Math.max(16, Math.round(outline * 3.9))}px)`;
-    glowMaskCtx.drawImage(
-      strokeMaskCanvas,
-      0,
-      0,
-      width,
-      height,
-      0,
-      -Math.max(26, Math.round(outline * 9.8)),
-      width,
-      Math.round(height * 1.62)
-    );
+    glowMaskCtx.filter = `blur(${Math.max(2, Math.round(layout.outline * 0.42))}px)`;
+    glowMaskCtx.drawImage(glyphMaskCanvas, 0, 0);
+    glowMaskCtx.globalAlpha = 0.36;
+    glowMaskCtx.filter = `blur(${Math.max(1, Math.round(layout.outline * 0.18))}px)`;
+    glowMaskCtx.drawImage(strokeMaskCanvas, 0, 0);
     glowMaskCtx.restore();
 
     glowFireCtx.clearRect(0, 0, width, height);
@@ -1669,85 +1379,49 @@ export const showTitleScreen = (deps: TitleScreenDeps): TitleScreenHandle => {
     coreFireCtx.clearRect(0, 0, width, height);
     coreFireCtx.drawImage(fireCanvas, 0, 0, width, height);
     coreFireCtx.globalCompositeOperation = "destination-in";
-    coreFireCtx.drawImage(strokeMaskCanvas, 0, 0);
+    coreFireCtx.drawImage(glyphMaskCanvas, 0, 0);
     coreFireCtx.globalCompositeOperation = "source-over";
-
-    drawFlameJets(width, height, centerY, fontSize, outline);
 
     titleCtx.clearRect(0, 0, width, height);
     const emberReveal = introReveal(INTRO_EMBER_DELAY_MS, INTRO_EMBER_FADE_MS);
     const flameReveal = introReveal(INTRO_FLAME_DELAY_MS, INTRO_FLAME_FADE_MS);
-    const silhouetteReveal = introReveal(INTRO_SILHOUETTE_DELAY_MS, INTRO_SILHOUETTE_FADE_MS);
     const outlineReveal = introReveal(INTRO_OUTLINE_DELAY_MS, INTRO_OUTLINE_FADE_MS);
-    const windVisualShift = windCurrent * Math.max(2.1, outline * 0.62);
-    const plumeLift = Math.max(18, Math.round(outline * 4.4));
-    const plumeDrop = Math.max(3, Math.round(outline * 0.85));
 
     titleCtx.save();
     titleCtx.globalCompositeOperation = "lighter";
     titleCtx.globalAlpha = 0.18 * flameReveal;
-    titleCtx.filter = `blur(${Math.max(16, Math.round(outline * 3.6))}px)`;
-    titleCtx.drawImage(glowFireCanvas, windVisualShift * 0.28, -plumeLift * 1.35, width, Math.round(height * 1.42));
+    titleCtx.filter = `blur(${Math.max(3, Math.round(layout.outline * 0.72))}px)`;
+    titleCtx.drawImage(glowFireCanvas, 0, 0);
     titleCtx.restore();
 
     titleCtx.save();
     titleCtx.globalCompositeOperation = "lighter";
-    titleCtx.globalAlpha = 0.26 * flameReveal;
-    titleCtx.filter = `blur(${Math.max(9, Math.round(outline * 1.95))}px)`;
-    titleCtx.drawImage(glowFireCanvas, windVisualShift * 0.18, -plumeLift * 0.7, width, Math.round(height * 1.18));
-    titleCtx.drawImage(glowFireCanvas, windVisualShift * 0.12, plumeDrop * 0.2, width, Math.round(height * 0.98));
+    titleCtx.globalAlpha = 1.0 * flameReveal;
+    titleCtx.drawImage(coreFireCanvas, 0, 0);
     titleCtx.restore();
 
     titleCtx.save();
-    titleCtx.globalCompositeOperation = "lighter";
-    titleCtx.globalAlpha = 0.62 * flameReveal;
-    titleCtx.drawImage(coreFireCanvas, windVisualShift * 0.1, -Math.max(1, Math.round(outline * 0.2)), width, height);
-    titleCtx.restore();
-
-    titleCtx.save();
-    titleCtx.globalCompositeOperation = "lighter";
-    titleCtx.globalAlpha = 0.28 * flameReveal;
-    titleCtx.filter = `blur(${Math.max(6, Math.round(outline * 1.24))}px)`;
-    titleCtx.drawImage(jetCanvas, windVisualShift * 0.18, -Math.max(2, Math.round(outline * 0.44)));
-    titleCtx.restore();
-
-    titleCtx.save();
-    titleCtx.globalCompositeOperation = "lighter";
-    titleCtx.globalAlpha = 0.78 * flameReveal;
-    titleCtx.drawImage(jetCanvas, 0, 0);
-    titleCtx.restore();
-
-    if (silhouetteReveal > 0.001) {
-      titleCtx.save();
-      titleCtx.globalCompositeOperation = "destination-out";
-      titleCtx.font = font;
-      titleCtx.textAlign = "center";
-      titleCtx.textBaseline = "middle";
-      titleCtx.fillStyle = `rgba(0, 0, 0, ${silhouetteReveal})`;
-      fillSpacedText(titleCtx, TITLE_WORD, centerX, centerY, letterSpacing);
-      titleCtx.restore();
-
-      titleCtx.save();
-      titleCtx.globalCompositeOperation = "source-over";
-      titleCtx.font = font;
-      titleCtx.textAlign = "center";
-      titleCtx.textBaseline = "middle";
-      const interiorFillAlpha = 0.95 * silhouetteReveal;
-      titleCtx.fillStyle = `rgba(18, 18, 22, ${interiorFillAlpha})`;
-      fillSpacedText(titleCtx, TITLE_WORD, centerX, centerY, letterSpacing);
-      titleCtx.restore();
-    }
-
-    titleCtx.save();
-    titleCtx.globalCompositeOperation = "screen";
-    titleCtx.font = font;
-    titleCtx.textAlign = "center";
+    titleCtx.globalCompositeOperation = "destination-out";
+    titleCtx.globalAlpha = 0.72 * flameReveal;
+    titleCtx.font = layout.font;
+    titleCtx.textAlign = "left";
     titleCtx.textBaseline = "middle";
     titleCtx.lineJoin = "round";
     titleCtx.lineCap = "round";
-    titleCtx.strokeStyle = `rgba(255, 238, 204, ${0.72 * outlineReveal})`;
-    titleCtx.lineWidth = Math.max(0.65, outline * 0.14);
-    strokeSpacedText(titleCtx, TITLE_WORD, centerX, centerY, letterSpacing);
+    titleCtx.lineWidth = Math.max(0.55, layout.outline * 0.24);
+    strokeGlyphSpans(titleCtx, layout.spans, layout.centerY);
+    titleCtx.restore();
+
+    titleCtx.save();
+    titleCtx.globalCompositeOperation = "screen";
+    titleCtx.font = layout.font;
+    titleCtx.textAlign = "left";
+    titleCtx.textBaseline = "middle";
+    titleCtx.lineJoin = "round";
+    titleCtx.lineCap = "round";
+    titleCtx.strokeStyle = `rgba(245, 244, 240, ${0.14 * outlineReveal})`;
+    titleCtx.lineWidth = Math.max(0.12, layout.outline * 0.018);
+    strokeGlyphSpans(titleCtx, layout.spans, layout.centerY);
     titleCtx.restore();
 
     if (emberReveal > 0.001) {
@@ -1761,7 +1435,7 @@ export const showTitleScreen = (deps: TitleScreenDeps): TitleScreenHandle => {
     // before the canvas boundary clip.
     titleCtx.save();
     titleCtx.globalCompositeOperation = "destination-out";
-    const fadeHeight = Math.max(24, Math.round(fontSize * 0.26 + outline * 2));
+    const fadeHeight = Math.max(24, Math.round(layout.fontSize * 0.26 + layout.outline * 2));
     const fadeStart = Math.max(0, height - fadeHeight);
     const bottomFade = titleCtx.createLinearGradient(0, fadeStart, 0, height);
     bottomFade.addColorStop(0, "rgba(0, 0, 0, 0)");
@@ -1780,16 +1454,21 @@ export const showTitleScreen = (deps: TitleScreenDeps): TitleScreenHandle => {
     flameMotionSeconds += deltaMs / 1000;
     fireAccumulatorMs += deltaMs;
     emitterAccumulatorMs += deltaMs;
+    let fireDirty = false;
     while (emitterAccumulatorMs >= EMITTER_REBUILD_MS) {
       rebuildEmitter();
       emitterAccumulatorMs -= EMITTER_REBUILD_MS;
+      fireDirty = true;
     }
     while (fireAccumulatorMs >= FIRE_UPDATE_MS) {
       stepFire();
       fireAccumulatorMs -= FIRE_UPDATE_MS;
+      fireDirty = true;
     }
     updateEmbers(deltaMs, titleCanvas.width, titleCanvas.height);
-    renderFireBuffer();
+    if (fireProgram || fireDirty) {
+      renderFireBuffer();
+    }
     drawTitle();
     rafId = window.requestAnimationFrame(tick);
   };
@@ -1884,6 +1563,7 @@ export const showTitleScreen = (deps: TitleScreenDeps): TitleScreenHandle => {
       document.removeEventListener("keydown", onKeyDown, true);
       panel.removeEventListener("keydown", stopPanelKeydown);
       clearPanelDisposers();
+      fireProgram?.destroy();
       root.remove();
     },
     isVisible: () => visible

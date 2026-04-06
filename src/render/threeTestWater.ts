@@ -52,6 +52,7 @@ export class ThreeTestWaterSystem {
   private quality: WaterQualityProfile;
   private fallbackAccum = 0;
   private recoveryAccum = 0;
+  private animationTimeMs = 0;
   private readonly oceanHelper: ThreeTestOceanWaterHelper;
   private readonly riverHelper: ThreeTestRiverWaterHelper;
   private palette: WaterEnvironmentPalette;
@@ -235,9 +236,20 @@ export class ThreeTestWaterSystem {
     return { ...this.oceanDebugControls };
   }
 
-  public update(timeMs: number, dtSeconds: number, fpsEstimate: number, sceneRenderMs: number): void {
-    this.oceanHelper.update(timeMs);
-    this.riverHelper.update(timeMs);
+  public update(
+    timeMs: number,
+    dtSeconds: number,
+    fpsEstimate: number,
+    sceneRenderMs: number,
+    animationRate = 1
+  ): void {
+    if (dtSeconds > 0 && Number.isFinite(dtSeconds)) {
+      this.animationTimeMs += Math.max(0, dtSeconds * 1000 * animationRate);
+    } else if (this.animationTimeMs <= 0 && Number.isFinite(timeMs)) {
+      this.animationTimeMs = Math.max(0, timeMs);
+    }
+    this.oceanHelper.update(this.animationTimeMs);
+    this.riverHelper.update(this.animationTimeMs);
     if (!(dtSeconds > 0) || !Number.isFinite(fpsEstimate) || fpsEstimate <= 0) {
       return;
     }

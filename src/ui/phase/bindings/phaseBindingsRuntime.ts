@@ -30,10 +30,13 @@ import {
   selectUnit,
   setCrewFormation,
   setDeployMode,
+  syncProgressionUnitStats,
   setTruckCrewMode,
   trainSelectedUnit,
   unassignRosterCrew
 } from "../../../sim/units.js";
+import { getCommandRewardDefinition } from "../../../config/progression/rewardCatalog.js";
+import { openNextProgressionDraft, selectProgressionReward } from "../../../systems/progression/index.js";
 import { initCharacterSelect } from "../../character-select.js";
 import { updateOverlay } from "../../overlay.js";
 import type { OverlayRefs } from "../../overlay.js";
@@ -496,6 +499,8 @@ export const bindPhaseUi = ({
       /^deploy-(firefighter|truck)$/.test(action) ||
       /^recruit-(firefighter|truck)$/.test(action) ||
       /^train-(speed|power|range|resilience)$/.test(action) ||
+      action === "progression-open" ||
+      action === "progression-pick" ||
       action === "crew-assign" ||
       action === "crew-unassign"
     ) {
@@ -518,6 +523,35 @@ export const bindPhaseUi = ({
     }
     const actionable = target.closest("[data-action], button, [data-roster-id], .phase-truck-row");
     return actionable instanceof HTMLElement ? actionable : null;
+  };
+
+  const getHoverActionableKey = (element: HTMLElement | null): string | null => {
+    if (!element) {
+      return null;
+    }
+    const action = element.dataset.action;
+    if (action) {
+      const detail =
+        element.dataset.rewardId ??
+        element.dataset.commandUnitId ??
+        element.dataset.truckId ??
+        element.dataset.unitId ??
+        element.dataset.rosterId ??
+        element.dataset.role ??
+        element.textContent?.trim() ??
+        "";
+      return `action:${action}:${detail}`;
+    }
+    if (element.dataset.rosterId) {
+      return `roster:${element.dataset.rosterId}`;
+    }
+    if (element.classList.contains("phase-truck-row")) {
+      return `truck-row:${element.dataset.truckId ?? element.textContent?.trim() ?? ""}`;
+    }
+    if (element instanceof HTMLButtonElement) {
+      return `button:${element.textContent?.trim() ?? ""}`;
+    }
+    return null;
   };
 
   const isHoverActionable = (element: HTMLElement): boolean => {
@@ -584,7 +618,7 @@ export const bindPhaseUi = ({
     );
   }
 
-  let lastHoverActionable: HTMLElement | null = null;
+  let lastHoverActionableKey: string | null = null;
   listenElement(phaseUi.controller.root, "pointerover", (event) => {
     if (isOverlayLocked()) {
       return;
@@ -593,14 +627,20 @@ export const bindPhaseUi = ({
     if (!actionable || !phaseUi.controller.root.contains(actionable) || !isHoverActionable(actionable)) {
       return;
     }
-    if (actionable === lastHoverActionable) {
+    const nextHoverKey = getHoverActionableKey(actionable);
+    if (!nextHoverKey) {
       return;
     }
-    lastHoverActionable = actionable;
+    const previousActionable = findHoverActionable((event as PointerEvent).relatedTarget);
+    const previousHoverKey = getHoverActionableKey(previousActionable);
+    if (nextHoverKey === lastHoverActionableKey || nextHoverKey === previousHoverKey) {
+      return;
+    }
+    lastHoverActionableKey = nextHoverKey;
     uiAudio?.play("hover");
   });
   listenElement(phaseUi.controller.root, "pointerleave", () => {
-    lastHoverActionable = null;
+    lastHoverActionableKey = null;
   });
 
   const runUiAction = (action: string, actionTarget?: HTMLElement | null, event?: Event): void => {
@@ -803,6 +843,37 @@ export const bindPhaseUi = ({
     }
     if (resolvedAction === "train-resilience") {
       trainSelectedUnit(state, "resilience");
+      return;
+    }
+    if (resolvedAction === "progression-pick") {
+      const rewardId = actionTarget?.dataset.rewardId ?? "";
+      if (!rewardId) {
+        return;
+      }
+      gate("select", () => {
+        if (!selectProgressionReward(state, rewardId)) {
+          return;
+        }
+        syncProgressionUnitStats(state);
+        const reward = getCommandRewardDefinition(rewardId);
+        setStatus(
+          state,
+          state.progression.queuedDraftOrdinals.length > 0
+            ? `${reward.name} selected. Review the next command upgrade from the top bar.`
+            : `${reward.name} selected.`
+        );
+        phaseUi.sync(state, inputState);
+      });
+      return;
+    }
+    if (resolvedAction === "progression-open") {
+      gate("select", () => {
+        if (!openNextProgressionDraft(state)) {
+          return;
+        }
+        setStatus(state, "Queued command upgrade ready.");
+        phaseUi.sync(state, inputState);
+      });
       return;
     }
     if (resolvedAction === "crew-assign") {

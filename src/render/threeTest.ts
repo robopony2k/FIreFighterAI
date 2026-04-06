@@ -830,6 +830,9 @@ export const createThreeTest = (
     connector: HTMLDivElement;
     name: HTMLSpanElement;
     status: HTMLSpanElement;
+    waterStat: HTMLSpanElement;
+    crewStat: HTMLSpanElement;
+    speedStat: HTMLSpanElement;
   };
   type TownCardElements = {
     root: HTMLDivElement;
@@ -1501,10 +1504,12 @@ export const createThreeTest = (
   const worldTimeControls = createTimeVolumeControls();
   const musicTimeControls = createTimeVolumeControls();
   timeAudioControls.append(sfxControls.root, worldTimeControls.root, musicTimeControls.root);
+  const mutedAudioIcon = "\u{1F507}";
+  const unmutedAudioIcon = "\u{1F50A}";
 
   const applyDockAudioState = (settings: { muted: boolean; volume: number }): void => {
     const volumePct = Math.round(Math.max(0, Math.min(1, settings.volume)) * 100);
-    sfxControls.muteButton.textContent = settings.muted ? "🔇" : "🔊";
+    sfxControls.muteButton.textContent = settings.muted ? mutedAudioIcon : unmutedAudioIcon;
     sfxControls.muteButton.title = settings.muted ? "Unmute UI SFX" : "Mute UI SFX";
     sfxControls.muteButton.setAttribute("aria-pressed", settings.muted ? "true" : "false");
     sfxControls.muteButton.setAttribute("aria-label", settings.muted ? "Unmute UI sound effects" : "Mute UI sound effects");
@@ -1516,7 +1521,7 @@ export const createThreeTest = (
 
   const applyDockMusicState = (settings: { muted: boolean; volume: number }): void => {
     const volumePct = Math.round(Math.max(0, Math.min(1, settings.volume)) * 100);
-    musicTimeControls.muteButton.textContent = settings.muted ? "🔇" : "🔊";
+    musicTimeControls.muteButton.textContent = settings.muted ? mutedAudioIcon : unmutedAudioIcon;
     musicTimeControls.muteButton.title = settings.muted ? "Unmute music" : "Mute music";
     musicTimeControls.muteButton.setAttribute("aria-pressed", settings.muted ? "true" : "false");
     musicTimeControls.muteButton.setAttribute("aria-label", settings.muted ? "Unmute music" : "Mute music");
@@ -1528,7 +1533,7 @@ export const createThreeTest = (
 
   const applyDockWorldState = (settings: { muted: boolean; volume: number }): void => {
     const volumePct = Math.round(Math.max(0, Math.min(1, settings.volume)) * 100);
-    worldTimeControls.muteButton.textContent = settings.muted ? "ðŸ”‡" : "ðŸ”Š";
+    worldTimeControls.muteButton.textContent = settings.muted ? mutedAudioIcon : unmutedAudioIcon;
     worldTimeControls.muteButton.title = settings.muted ? "Unmute world audio" : "Mute world audio";
     worldTimeControls.muteButton.setAttribute("aria-pressed", settings.muted ? "true" : "false");
     worldTimeControls.muteButton.setAttribute("aria-label", settings.muted ? "Unmute world audio" : "Mute world audio");
@@ -2248,6 +2253,27 @@ export const createThreeTest = (
   const getWaterRatio = (current: number, capacity: number): number =>
     capacity > 0 ? clamp01(current / capacity) : 1;
 
+  const truckBeaconWaterIcon = "\u{1F4A7}";
+  const truckBeaconCrewIcon = "\u{1F465}";
+  const truckBeaconSpeedIcon = "\u{27A4}";
+
+  const getTruckWaterStatValue = (truck: RenderSim["units"][number]): string =>
+    `${Math.round(getWaterRatio(truck.water, truck.waterCapacity) * 100)}%`;
+
+  const getTruckWaterStatLabel = (truck: RenderSim["units"][number]): string =>
+    `Water ${getTruckWaterStatValue(truck)}`;
+
+  const getTruckCrewStatValue = (truck: RenderSim["units"][number]): string => `${truck.crewIds.length}/${TRUCK_CAPACITY}`;
+
+  const getTruckCrewStatLabel = (truck: RenderSim["units"][number]): string => `Crew ${getTruckCrewStatValue(truck)}`;
+
+  const getTruckSpeedKmh = (truck: RenderSim["units"][number]): number => Math.max(1, Math.round(truck.speed * TILE_SIZE));
+
+  const getTruckSpeedStatValue = (truck: RenderSim["units"][number]): string => `${getTruckSpeedKmh(truck)}`;
+
+  const getTruckSpeedStatLabel = (truck: RenderSim["units"][number]): string =>
+    `Speed ${getTruckSpeedKmh(truck)} km/h`;
+
   const getWaterGlyph = (ratio: number): string => {
     if (ratio <= 0.2) {
       return "▁";
@@ -2415,13 +2441,28 @@ export const createThreeTest = (
     const root = document.createElement("button");
     root.type = "button";
     root.className = "three-test-truck-beacon hidden";
+    const header = document.createElement("div");
+    header.className = "three-test-truck-beacon-header";
     const name = document.createElement("span");
     name.className = "three-test-truck-beacon-name";
     const status = document.createElement("span");
     status.className = "three-test-truck-beacon-status";
+    const stats = document.createElement("div");
+    stats.className = "three-test-truck-beacon-stats";
+    const waterStat = document.createElement("span");
+    waterStat.className = "three-test-truck-beacon-stat";
+    waterStat.dataset.icon = truckBeaconWaterIcon;
+    const crewStat = document.createElement("span");
+    crewStat.className = "three-test-truck-beacon-stat";
+    crewStat.dataset.icon = truckBeaconCrewIcon;
+    const speedStat = document.createElement("span");
+    speedStat.className = "three-test-truck-beacon-stat";
+    speedStat.dataset.icon = truckBeaconSpeedIcon;
     const connector = document.createElement("div");
     connector.className = "three-test-truck-beacon-connector";
-    root.append(name, status);
+    header.append(name, status);
+    stats.append(waterStat, crewStat, speedStat);
+    root.append(header, stats);
     root.addEventListener("pointerdown", (event) => {
       event.stopPropagation();
     });
@@ -2435,7 +2476,7 @@ export const createThreeTest = (
       selectAndPanToTruck(unit, { truckScope: event.altKey, toggle: event.shiftKey });
     });
     truckBeaconOverlayRoot.append(root, connector);
-    const created: TruckBeaconElements = { root, connector, name, status };
+    const created: TruckBeaconElements = { root, connector, name, status, waterStat, crewStat, speedStat };
     truckBeaconElements.set(unitId, created);
     return created;
   };
@@ -2757,6 +2798,12 @@ export const createThreeTest = (
       const entry = ensureTruckBeacon(unit.id);
       const rosterLabel = unit.rosterId !== null ? getUnitLabel(unit.rosterId) : getUnitLabel(unit.id);
       const moveStatus = getUnitMoveStatus(unit);
+      const waterValue = getTruckWaterStatValue(unit);
+      const waterLabel = getTruckWaterStatLabel(unit);
+      const crewValue = getTruckCrewStatValue(unit);
+      const crewLabel = getTruckCrewStatLabel(unit);
+      const speedValue = getTruckSpeedStatValue(unit);
+      const speedLabel = getTruckSpeedStatLabel(unit);
       const selected = world.selectedUnitIds.includes(unit.id);
       const interpolated = resolveInterpolatedUnitPosition(unit);
       const worldX = lastTerrainSurface.toWorldX(interpolated.x);
@@ -2774,11 +2821,17 @@ export const createThreeTest = (
       entry.name.textContent = rosterLabel;
       entry.status.textContent = moveStatus;
       entry.status.dataset.state = moveStatus.toLowerCase();
+      entry.waterStat.textContent = waterValue;
+      entry.waterStat.title = waterLabel;
+      entry.crewStat.textContent = crewValue;
+      entry.crewStat.title = crewLabel;
+      entry.speedStat.textContent = speedValue;
+      entry.speedStat.title = speedLabel;
       entry.root.classList.toggle("is-selected", selected);
-      entry.root.title = `${rosterLabel}. ${moveStatus}. Click to select and center the camera.`;
+      entry.root.title = `${rosterLabel}. ${moveStatus}. ${waterLabel}. ${crewLabel}. ${speedLabel}. Click to select and center the camera.`;
       entry.root.setAttribute(
         "aria-label",
-        `${rosterLabel}. ${moveStatus}. Click to select and center the camera.`
+        `${rosterLabel}. ${moveStatus}. ${waterLabel}. ${crewLabel}. ${speedLabel}. Click to select and center the camera.`
       );
       if (!isVisible) {
         entry.root.classList.add("hidden");
@@ -6157,7 +6210,16 @@ export const createThreeTest = (
     }
     cube.rotation.y = time * 0.0006;
     cube.rotation.x = time * 0.00035;
-    waterSystem.update(time, dt, threePerf.fps > 0 ? threePerf.fps : instantFps, threePerf.sceneRenderMs);
+    const waterSpeedOptions = getTimeSpeedOptions(world.simTimeMode);
+    const waterSpeedIndex = Math.max(0, Math.min(waterSpeedOptions.length - 1, world.timeSpeedIndex ?? 0));
+    const simulationAnimationRate = world.paused ? 0 : (waterSpeedOptions[waterSpeedIndex] ?? 1);
+    waterSystem.update(
+      time,
+      dt,
+      threePerf.fps > 0 ? threePerf.fps : instantFps,
+      threePerf.sceneRenderMs,
+      simulationAnimationRate
+    );
     const controlsStart = performance.now();
     updateCameraFlight(time);
     controls.update();
@@ -6192,7 +6254,8 @@ export const createThreeTest = (
         treeBurnController,
         null,
         threePerf.fps > 0 ? threePerf.fps : instantFps,
-        threePerf.sceneRenderMs
+        threePerf.sceneRenderMs,
+        simulationAnimationRate
       );
       if (THREE_TEST_SPARK_DEBUG) {
         const snapshot = fireFx.getSparkDebugSnapshot();
@@ -6789,10 +6852,10 @@ export const createThreeTest = (
       surface.heightScale,
       surface.sampleHeights,
       surface.sampleTypes,
-      surface.sampleCoastClass,
       surface.waterRatios.water,
       surface.waterRatios.ocean,
       surface.waterRatios.river,
+      surface.sampledErosionWear ?? null,
       surface.sampledRiverCoverage ?? null,
       surface.sampledRiverStepStrength,
       sample.debugTypeColors ?? false

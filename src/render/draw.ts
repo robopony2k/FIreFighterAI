@@ -1,7 +1,7 @@
 import type { WorldState } from "../core/state.js";
 import type { InputState } from "../core/inputState.js";
 import type { EffectsState } from "../core/effectsState.js";
-import { DEBUG_TERRAIN_RENDER, TILE_SIZE, TILE_COLOR_RGB } from "../core/config.js";
+import { DEBUG_TERRAIN_RENDER, TILE_SIZE, TILE_COLOR_RGB, getTimeSpeedOptions } from "../core/config.js";
 import { indexFor } from "../core/grid.js";
 import { getHeightScale, getTileHeight, getViewTransform, isoProject, setHeightScale } from "./iso.js";
 import { ensureTileSoA } from "../core/tileCache.js";
@@ -1322,6 +1322,15 @@ export function draw(
 
   const view = getViewTransform(state, renderState, canvas);
   const now = performance.now();
+  const frameDeltaMs = renderState.lastRenderTime > 0 ? Math.min(200, Math.max(0, now - renderState.lastRenderTime)) : 16.6667;
+  const timeSpeedOptions = getTimeSpeedOptions(state.simTimeMode);
+  const timeSpeedIndex = Math.max(0, Math.min(timeSpeedOptions.length - 1, state.timeSpeedIndex ?? 0));
+  const fireAnimationRate = state.paused ? 0 : (timeSpeedOptions[timeSpeedIndex] ?? 1);
+  if (renderState.fireAnimationTimeMs <= 0) {
+    renderState.fireAnimationTimeMs = now;
+  } else if (frameDeltaMs > 0 && fireAnimationRate > 0) {
+    renderState.fireAnimationTimeMs += frameDeltaMs * fireAnimationRate;
+  }
 
   // Update smoothed fire values for rendering
   updateFireSmoothing(state, renderState, now);
@@ -1374,7 +1383,7 @@ export function draw(
     const visibleBounds = getVisibleBounds(state, renderState, canvas, view);
 
     // Draw all fire effects
-    drawFireFx(state, renderState, ctx, now, visibleBounds, view);
+    drawFireFx(state, renderState, ctx, visibleBounds, view);
 
     // Draw all units and their related effects (selection, hoses)
     drawUnits(state, ctx, alpha);

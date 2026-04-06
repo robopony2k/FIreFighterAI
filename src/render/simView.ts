@@ -31,6 +31,7 @@ export type RenderTerrainSample = {
   roadBridgeMask?: Uint8Array;
   roadEdges?: Uint8Array;
   roadWallEdges?: Uint8Array;
+  erosionWear?: Float32Array;
   riverBed?: Float32Array;
   riverSurface?: Float32Array;
   riverStepStrength?: Float32Array;
@@ -83,6 +84,7 @@ export const buildRenderTerrainSample = (
   roadBridgeMask: state.tileRoadBridge,
   roadEdges: state.tileRoadEdges,
   roadWallEdges: state.tileRoadWallEdges,
+  erosionWear: state.tileErosionWear,
   riverBed: state.tileRiverBed,
   riverSurface: state.tileRiverSurface,
   riverStepStrength: state.tileRiverStepStrength,

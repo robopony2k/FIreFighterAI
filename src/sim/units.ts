@@ -1018,12 +1018,13 @@ export function trainSelectedUnit(state: WorldState, skill: UnitSkill): boolean 
     setStatus(state, "Training level maxed.");
     return false;
   }
-  if (state.budget < TRAINING_COST) {
+  const trainingCost = getTrainingCostForState(state);
+  if (state.budget < trainingCost) {
     setStatus(state, "Insufficient budget for training.");
     return false;
   }
   unit.training[skill] += 1;
-  state.budget -= TRAINING_COST;
+  state.budget -= trainingCost;
   setStatus(state, `${unit.name} trained: ${skill} level ${unit.training[skill]}.`);
   return true;
 }
@@ -1034,6 +1035,65 @@ const getTrainingMultiplier = (training: RosterUnit["training"]) => ({
   range: 1 + training.range * TRAINING_RANGE_GAIN,
   resilience: training.resilience * TRAINING_RESILIENCE_GAIN
 });
+
+const getFallbackTrainingMultiplier = () => ({
+  speed: 1,
+  power: 1,
+  range: 1,
+  resilience: 0
+});
+
+type DerivedUnitStats = {
+  speed: number;
+  radius: number;
+  hoseRange: number;
+  power: number;
+  waterCapacity: number;
+  waterRefillRate: number;
+};
+
+export const getTrainingCostForState = (state: WorldState): number =>
+  Math.max(1, Math.round(TRAINING_COST * state.progression.resolved.trainingCostMultiplier));
+
+export const getFirebreakCostForState = (state: WorldState): number =>
+  Math.max(
+    1,
+    Math.round(
+      getCharacterFirebreakCost(state.campaign.characterId, FIREBREAK_COST_PER_TILE) *
+        state.progression.resolved.firebreakCostMultiplier
+    )
+  );
+
+const buildUnitDerivedStats = (state: WorldState, kind: UnitKind, rosterUnit?: RosterUnit | null): DerivedUnitStats => {
+  const config = UNIT_CONFIG[kind];
+  const characterModifiers = getCharacterDefinition(state.campaign.characterId).modifiers;
+  const progressionModifiers = state.progression.resolved;
+  const training = rosterUnit ? getTrainingMultiplier(rosterUnit.training) : getFallbackTrainingMultiplier();
+  return {
+    speed: config.speed * characterModifiers.unitSpeedMultiplier * progressionModifiers.unitSpeedMultiplier * training.speed,
+    radius: config.radius * training.range,
+    hoseRange: config.hoseRange * progressionModifiers.unitHoseRangeMultiplier * training.range,
+    power: config.power * characterModifiers.unitPowerMultiplier * progressionModifiers.unitPowerMultiplier * training.power,
+    waterCapacity: kind === "truck" ? TRUCK_WATER_CAPACITY * progressionModifiers.truckWaterCapacityMultiplier : 0,
+    waterRefillRate: kind === "truck" ? TRUCK_WATER_REFILL_RATE * progressionModifiers.truckWaterRefillRateMultiplier : 0
+  };
+};
+
+export const syncProgressionUnitStats = (state: WorldState): void => {
+  state.units.forEach((unit) => {
+    const rosterUnit = getRosterUnit(state, unit.rosterId);
+    const derivedStats = buildUnitDerivedStats(state, unit.kind, rosterUnit);
+    const waterRatio =
+      unit.kind === "truck" && unit.waterCapacity > 0 ? clamp(unit.water / unit.waterCapacity, 0, 1) : 1;
+    unit.speed = derivedStats.speed;
+    unit.radius = derivedStats.radius;
+    unit.hoseRange = derivedStats.hoseRange;
+    unit.power = derivedStats.power;
+    unit.waterCapacity = derivedStats.waterCapacity;
+    unit.waterRefillRate = derivedStats.waterRefillRate;
+    unit.water = unit.kind === "truck" ? clamp(derivedStats.waterCapacity * waterRatio, 0, derivedStats.waterCapacity) : 0;
+  });
+};
 
 const getUnitTile = (unit: Unit): Point => ({
   x: Math.floor(unit.x),
@@ -1161,7 +1221,7 @@ export function setDeployMode(state: WorldState, mode: UnitKind | "clear" | null
   if (options?.silent) {
     return;
   }
-  const firebreakCost = getCharacterFirebreakCost(state.campaign.characterId, FIREBREAK_COST_PER_TILE);
+  const firebreakCost = getFirebreakCostForState(state);
   if (mode === "firefighter" || mode === "truck") {
     setStatus(state, `Deploy ${mode === "firefighter" ? "firefighter" : "truck"} units.`);
   } else if (mode === "clear") {
@@ -1212,10 +1272,8 @@ export function getSelectedUnits(state: WorldState): Unit[] {
 }
 
 export function createUnit(state: WorldState, kind: UnitKind, rng: RNG, rosterEntry?: RosterUnit | null): Unit {
-  const config = UNIT_CONFIG[kind];
-  const modifiers = getCharacterDefinition(state.campaign.characterId).modifiers;
   const rosterUnit = rosterEntry ?? state.roster.find((entry) => entry.kind === kind && entry.status === "available") ?? null;
-  const training = rosterUnit ? getTrainingMultiplier(rosterUnit.training) : { speed: 1, power: 1, range: 1, resilience: 0 };
+  const derivedStats = buildUnitDerivedStats(state, kind, rosterUnit);
   const spawnX = state.basePoint.x + 0.5;
   const spawnY = state.basePoint.y + 0.5;
   return {
@@ -1230,10 +1288,10 @@ export function createUnit(state: WorldState, kind: UnitKind, rng: RNG, rosterEn
     target: null,
     path: [],
     pathIndex: 0,
-    speed: config.speed * modifiers.unitSpeedMultiplier * training.speed,
-    radius: config.radius * training.range,
-    hoseRange: config.hoseRange * training.range,
-    power: config.power * modifiers.unitPowerMultiplier * training.power,
+    speed: derivedStats.speed,
+    radius: derivedStats.radius,
+    hoseRange: derivedStats.hoseRange,
+    power: derivedStats.power,
     selected: false,
     carrierId: null,
     passengerIds: [],
@@ -1246,9 +1304,9 @@ export function createUnit(state: WorldState, kind: UnitKind, rng: RNG, rosterEn
     attackTarget: null,
     sprayTarget: null,
     truckOverrideIntent: null,
-    water: kind === "truck" ? TRUCK_WATER_CAPACITY : 0,
-    waterCapacity: kind === "truck" ? TRUCK_WATER_CAPACITY : 0,
-    waterRefillRate: kind === "truck" ? TRUCK_WATER_REFILL_RATE : 0,
+    water: derivedStats.waterCapacity,
+    waterCapacity: derivedStats.waterCapacity,
+    waterRefillRate: derivedStats.waterRefillRate,
     lastBackburnAt: Number.NEGATIVE_INFINITY,
     currentStatus: "holding",
     currentAlerts: []
@@ -1390,7 +1448,7 @@ export function clearFuelAt(state: WorldState, rng: RNG, tileX: number, tileY: n
   if (!inBounds(state.grid, tileX, tileY)) {
     return false;
   }
-  const firebreakCost = getCharacterFirebreakCost(state.campaign.characterId, FIREBREAK_COST_PER_TILE);
+  const firebreakCost = getFirebreakCostForState(state);
   const tile = state.tiles[indexFor(state.grid, tileX, tileY)];
   if (tile.type === "water" || tile.type === "base" || tile.type === "house" || tile.type === "road") {
     if (showStatus) {
@@ -1444,7 +1502,7 @@ export function clearFuelLine(state: WorldState, rng: RNG, start: Point, end: Po
     setStatus(state, "Invalid fuel break coordinates.");
     return;
   }
-  const firebreakCost = getCharacterFirebreakCost(state.campaign.characterId, FIREBREAK_COST_PER_TILE);
+  const firebreakCost = getFirebreakCostForState(state);
   if (state.budget < firebreakCost) {
     setStatus(state, "Insufficient budget.");
     return;

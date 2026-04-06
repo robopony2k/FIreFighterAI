@@ -1,6 +1,6 @@
 import * as THREE from "three";
 import { FUEL_PROFILES } from "../../../core/config.js";
-import { COAST_CLASS_NONE, TILE_ID_TO_TYPE, TILE_TYPE_IDS } from "../../../core/state.js";
+import { TILE_ID_TO_TYPE, TILE_TYPE_IDS } from "../../../core/state.js";
 import { buildDistanceField } from "../shared/distanceField.js";
 
 type Rgb = { r: number; g: number; b: number };
@@ -10,6 +10,7 @@ type TileTextureSample = {
   rows: number;
   treeTypes?: Uint8Array;
   riverMask?: Uint8Array;
+  erosionWear?: Float32Array;
   tileMoisture?: Float32Array;
   climateDryness?: number;
   tileFuel?: Float32Array;
@@ -104,10 +105,10 @@ export const buildTileTexture = (
   heightScale: number,
   sampleHeights: Float32Array,
   sampleTypes: Uint8Array,
-  sampleCoastClass: Uint8Array | undefined,
   waterRatio: Float32Array | null,
   oceanRatio: Float32Array | null,
   riverRatio: Float32Array | null,
+  sampledErosionWear: Float32Array | null,
   sampledRiverCoverage: Float32Array | null,
   riverStepStrength: Float32Array | null | undefined,
   debugTypeColors: boolean,
@@ -185,9 +186,11 @@ export const buildTileTexture = (
       const localWaterRatio = waterRatio ? clamp(waterRatio[sampleIndex] ?? 0, 0, 1) : typeId === waterId ? 1 : 0;
       const localOceanRatio = oceanRatio ? clamp(oceanRatio[sampleIndex] ?? 0, 0, 1) : localWaterRatio;
       const localRiverRatio = riverRatio ? clamp(riverRatio[sampleIndex] ?? 0, 0, 1) : 0;
+      const rawErosionWear = sampledErosionWear ? sampledErosionWear[sampleIndex] : 0;
+      const localErosionWear = Number.isFinite(rawErosionWear) ? clamp(rawErosionWear as number, 0, 1) : 0;
       const localRiverCoverage = sampledRiverCoverage ? clamp(sampledRiverCoverage[sampleIndex] ?? 0, 0, 1) : localRiverRatio;
       const coastalDistanceToLand = distanceToLand[sampleIndex] >= 0 ? distanceToLand[sampleIndex] : sampleCols + sampleRows;
-      const coastClass = sampleCoastClass?.[sampleIndex] ?? COAST_CLASS_NONE;
+      const localMoisture = tileMoisture ? clamp(tileMoisture[idx] ?? 0.5, 0, 1) : 0.5;
       const riverMaskAtTile = riverMask ? riverMask[idx] > 0 : false;
       const riverMaskNearby = (() => {
         if (!riverMask) {
@@ -231,23 +234,10 @@ export const buildTileTexture = (
             colorType = grassId;
           }
         } else if (typeId === waterId) {
-          const oceanShoreDominant = localOceanRatio >= Math.max(0.22, localRiverRatio * 1.35);
-          const borderOpenOcean =
-            touchesWorldBorder &&
-            coastalDistanceToLand > deps.oceanBorderOpenWaterDistanceMin;
-          const shoreUnderlayBand =
-            touchesWorldBorder
-              ? deps.oceanBorderOpenWaterDistanceMin
-              : deps.oceanSurfaceShoreClipBand;
-          const renderShoreUnderlay =
-            oceanShoreDominant &&
-            !borderOpenOcean &&
-            coastalDistanceToLand <= shoreUnderlayBand &&
-            (coastClass !== COAST_CLASS_NONE || localOceanRatio >= deps.oceanRatioMin);
           if (riverDominant) {
             colorType = floodplainId;
           } else {
-            colorType = renderShoreUnderlay ? beachId : waterId;
+            colorType = waterId;
           }
         }
       }
@@ -277,7 +267,6 @@ export const buildTileTexture = (
         ];
       }
       if (!debugTypeColors && (typeId === grassId || typeId === scrubId || typeId === floodplainId || typeId === forestId)) {
-        const localMoisture = tileMoisture ? clamp(tileMoisture[idx] ?? 0.5, 0, 1) : 0.5;
         const localDryness = 1 - localMoisture;
         const effectiveDryness = clamp(climateDryness * 0.72 + localDryness * 0.28, 0, 1);
         const dryTint = DRY_TINT_BY_TILE[typeId] ?? DRY_TINT_BY_TILE[grassId];
@@ -303,7 +292,6 @@ export const buildTileTexture = (
       if (!debugTypeColors && sample.tileFuel && (typeId === grassId || typeId === scrubId || typeId === floodplainId || typeId === forestId)) {
         const baseFuel = BASE_FUEL_BY_TILE_ID[typeId] ?? 0;
         if (baseFuel > 0) {
-          const localMoisture = tileMoisture ? clamp(tileMoisture[idx] ?? 0.5, 0, 1) : 0.5;
           const expectedFuel = Math.max(0.01, baseFuel * (1 - localMoisture * 0.6));
           const fuelNow = clamp(sample.tileFuel[idx] ?? expectedFuel, 0, expectedFuel);
           const fuelDepletion = clamp(1 - fuelNow / expectedFuel, 0, 1);
@@ -366,6 +354,8 @@ export const buildTileTexture = (
       const heightRight = heightAtSample(col + 1, row);
       const heightUp = heightAtSample(col, row - 1);
       const heightDown = heightAtSample(col, row + 1);
+      const neighborAverage = (heightLeft + heightRight + heightUp + heightDown) * 0.25;
+      const curvature = neighborAverage - height;
       const dx = (heightRight - heightLeft) * heightScale;
       const dz = (heightDown - heightUp) * heightScale;
       const nx = -dx;
@@ -377,8 +367,58 @@ export const buildTileTexture = (
       const shade = clamp(0.68 + light * 0.32, 0.55, 1);
       const slope = Math.sqrt(dx * dx + dz * dz);
       const occlusion = clamp(1 - slope * 0.06, 0.7, 1);
+      if (
+        !debugTypeColors &&
+        localErosionWear > 0.001 &&
+        (
+          typeId === grassId ||
+          typeId === scrubId ||
+          typeId === floodplainId ||
+          typeId === forestId ||
+          typeId === beachId ||
+          typeId === TILE_TYPE_IDS.rocky ||
+          typeId === TILE_TYPE_IDS.bare
+        )
+      ) {
+        const rockyColor = palette[TILE_TYPE_IDS.rocky] ?? color;
+        const floodColor = palette[floodplainId] ?? palette[grassId] ?? color;
+        const beachColor = palette[beachId] ?? rockyColor;
+        const gravelColor: [number, number, number] = [
+          floodColor[0] * 0.38 + beachColor[0] * 0.42 + rockyColor[0] * 0.2,
+          floodColor[1] * 0.42 + beachColor[1] * 0.34 + rockyColor[1] * 0.24,
+          floodColor[2] * 0.44 + beachColor[2] * 0.26 + rockyColor[2] * 0.3
+        ];
+        const depositionalMask =
+          localErosionWear *
+          smoothstep(0.0015, 0.012, curvature) *
+          (1 - smoothstep(0.11, 0.42, slope)) *
+          (0.35 + localMoisture * 0.65);
+        const shoulderMask =
+          localErosionWear *
+          smoothstep(0.1, 0.34, slope) *
+          smoothstep(-0.012, 0.002, -curvature);
+        const depositionalBlend = clamp(depositionalMask * 0.28, 0, 0.28);
+        const rockyBlend = clamp(shoulderMask * 0.34, 0, 0.34);
+        color = [
+          color[0] * (1 - depositionalBlend) + gravelColor[0] * depositionalBlend,
+          color[1] * (1 - depositionalBlend) + gravelColor[1] * depositionalBlend,
+          color[2] * (1 - depositionalBlend) + gravelColor[2] * depositionalBlend
+        ];
+        color = [
+          color[0] * (1 - rockyBlend) + rockyColor[0] * rockyBlend,
+          color[1] * (1 - rockyBlend) + rockyColor[1] * rockyBlend,
+          color[2] * (1 - rockyBlend) + rockyColor[2] * rockyBlend
+        ];
+      }
       const ashToneBoost = !debugTypeColors && typeId === ashId ? 1.18 : 1;
-      const tone = heightTone * shade * occlusion * ashToneBoost;
+      const erosionLowlandDarken =
+        !debugTypeColors
+          ? localErosionWear *
+            smoothstep(0.0015, 0.012, curvature) *
+            (1 - smoothstep(0.18, 0.58, height)) *
+            0.12
+          : 0;
+      const tone = heightTone * shade * occlusion * ashToneBoost * (1 - erosionLowlandDarken);
       const rawR = color[0];
       const rawG = color[1];
       const rawB = color[2];

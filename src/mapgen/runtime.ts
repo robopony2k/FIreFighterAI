@@ -75,6 +75,7 @@ import {
 } from "./biome/BiomeSuitability.js";
 import { buildForestMask } from "./biome/ForestSpread.js";
 import { sampleDirectionalErosionDetail } from "./erosionDetail.js";
+import { buildPreRiverErosionFields } from "./preRiverErosion.js";
 
 const nextFrame = () =>
   new Promise<void>((resolve) => {
@@ -1651,6 +1652,15 @@ function carveRiverValleys(
   state.tileRiverStepStrength = riverStepStrengthField;
 }
 
+type ElevationBuildResult = {
+  elevationMap: number[];
+  riverMask: Uint8Array;
+  seaLevelBase: number;
+  erosionWearMap: Float32Array;
+  erosionFlowXMap: Float32Array;
+  erosionFlowYMap: Float32Array;
+};
+
 async function buildElevationMap(
   state: WorldState,
   rng: RNG,
@@ -1658,7 +1668,7 @@ async function buildElevationMap(
   report?: MapGenReporter,
   yieldIfNeeded?: () => Promise<boolean>,
   debug?: MapGenDebug
-): Promise<{ elevationMap: number[]; riverMask: Uint8Array; seaLevelBase: number }> {
+): Promise<ElevationBuildResult> {
   const maxDim = Math.max(state.grid.cols, state.grid.rows);
   const elevationBlock = maxDim >= 1024 ? 8 : maxDim >= 512 ? 4 : 2;
   return buildElevationMapCoarse(state, rng, elevationBlock, settings, report, yieldIfNeeded, debug);
@@ -1672,7 +1682,7 @@ async function buildElevationMapCoarse(
   report?: MapGenReporter,
   yieldIfNeeded?: () => Promise<boolean>,
   debug?: MapGenDebug
-): Promise<{ elevationMap: number[]; riverMask: Uint8Array; seaLevelBase: number }> {
+): Promise<ElevationBuildResult> {
   const cols = state.grid.cols;
   const rows = state.grid.rows;
   const coarseCols = Math.ceil(cols / blockSize);
@@ -1681,7 +1691,10 @@ async function buildElevationMapCoarse(
   const coarseElevation = Array.from({ length: coarseTotal }, () => 0);
   const coarseTemp = Array.from({ length: coarseTotal }, () => 0);
   const coarseValleyMap = Array.from({ length: coarseTotal }, () => 0);
+  const coarseBasinMap = Array.from({ length: coarseTotal }, () => 0);
   const coarseShapeMap = Array.from({ length: coarseTotal }, () => 0);
+  const coarseFlowXMap = Array.from({ length: coarseTotal }, () => 0);
+  const coarseFlowYMap = Array.from({ length: coarseTotal }, () => 0);
   const coarseSampleXMap = Array.from({ length: coarseTotal }, () => 0);
   const coarseSampleYMap = Array.from({ length: coarseTotal }, () => 0);
   const cellSizeM = Math.max(0.1, settings.cellSizeM);
@@ -2332,29 +2345,17 @@ async function buildElevationMapCoarse(
   const sampleCarvingAt = (sampleX: number, sampleY: number): { carve: number; landShape: number } => {
     const worldX = worldOffsetXM + sampleX * cellSizeM;
     const worldY = worldOffsetYM + sampleY * cellSizeM;
-    const drainageA = fractalNoise(worldX / Math.max(600, midScaleM * 0.8), worldY / Math.max(600, midScaleM * 0.8), state.seed + 4001);
     const drainageB = fractalNoise(worldX / Math.max(400, detailScaleM * 1.15), worldY / Math.max(400, detailScaleM * 1.15), state.seed + 4027);
-    const valleyNoise = 1 - Math.abs(drainageA * 2 - 1);
     const basinNoise = 1 - Math.abs(drainageB * 2 - 1);
     const u = sampleX / Math.max(1, cols - 1);
     const v = sampleY / Math.max(1, rows - 1);
     const interior = Math.pow(clamp(1 - Math.hypot(u * 2 - 1, v * 2 - 1), 0, 1), 1.15);
     const islandShape = clamp(sampleIslandShapeAt(sampleX, sampleY), 0, 1);
     const landEnvelope = smoothstep(0.14, 0.6, islandShape);
-    const channelSignal = smoothstep(
-      mix(0.54, 0.64, 1 - riverIntensity),
-      mix(0.82, 0.94, riverIntensity),
-      valleyNoise
-    );
     const basinSignal = smoothstep(0.72, 0.94, basinNoise) * interior;
     const coastGuard = smoothstep(0.08, 0.3, landEnvelope * 0.7 + interior * 0.3);
     return {
-      carve: clamp(
-        channelSignal * mix(0.42, 0.88, riverIntensity) * landEnvelope
-        + basinSignal * mix(0.04, 0.24, basinStrength) * coastGuard,
-        0,
-        1
-      ),
+      carve: clamp(basinSignal * mix(0.04, 0.24, basinStrength) * coastGuard, 0, 1),
       landShape: islandShape
     };
   };
@@ -2537,6 +2538,9 @@ async function buildElevationMapCoarse(
   const shouldStopAfter = (phase: MapGenDebugPhase): boolean => debug?.stopAfterPhase === phase;
   const terrainEnvelopeMap = new Float32Array(totalTiles);
   const valleySampleMap = new Float32Array(totalTiles);
+  const erosionWearMap = new Float32Array(totalTiles);
+  const erosionFlowXMap = new Float32Array(totalTiles);
+  const erosionFlowYMap = new Float32Array(totalTiles);
   const populateFullResolutionSupportMaps = async (
     progressLabel: string,
     progressStart: number,
@@ -2554,7 +2558,16 @@ async function buildElevationMapCoarse(
         const edgeCoastT = smoothstep(0, Math.max(1, perimeterOceanBandTiles), edgeDistanceTiles);
         const edgeEnvelope = Math.min(falloff, Math.pow(edgeCoastT, mix(1.45, 1.1, coastalShelfWidth)));
         terrainEnvelopeMap[idx] = Math.min(edgeEnvelope, shapeToLandEnvelope(landShape));
-        valleySampleMap[idx] = sampleCoarse(coarseValleyMap, gx, gy);
+        const sampledWear = sampleCoarse(coarseValleyMap, gx, gy);
+        valleySampleMap[idx] = sampledWear;
+        erosionWearMap[idx] = clamp(sampledWear * terrainEnvelopeMap[idx], 0, 1);
+        const sampledFlowX = sampleCoarse(coarseFlowXMap, gx, gy);
+        const sampledFlowY = sampleCoarse(coarseFlowYMap, gx, gy);
+        const sampledFlowLength = Math.hypot(sampledFlowX, sampledFlowY);
+        if (sampledFlowLength > 1e-6) {
+          erosionFlowXMap[idx] = sampledFlowX / sampledFlowLength;
+          erosionFlowYMap[idx] = sampledFlowY / sampledFlowLength;
+        }
       }
       if (yieldIfNeeded && report) {
         if (await yieldIfNeeded()) {
@@ -2583,7 +2596,8 @@ async function buildElevationMapCoarse(
     passes: number,
     progressLabel: string,
     progressStart: number,
-    progressSpan: number
+    progressSpan: number,
+    preserveMap?: ArrayLike<number> | null
   ): Promise<void> => {
     for (let pass = 0; pass < passes; pass += 1) {
       for (let cy = 0; cy < coarseRows; cy += 1) {
@@ -2629,12 +2643,13 @@ async function buildElevationMapCoarse(
             coarseTemp[idx] = current;
             continue;
           }
+          const preserveValue = clamp(preserveMap?.[idx] ?? coarseValleyMap[idx] ?? 0, 0, 1);
           const average = sum / count;
           const lowerAverage = lowerCount > 0 ? lowerSum / lowerCount : average;
           const coastFactor = 1 - smoothstep(0.18, 0.72, landEnvelope);
           const preserveFactor =
-            smoothstep(0.52, 0.84, coarseValleyMap[idx]) * 0.34
-            + smoothstep(0.5, 0.82, current) * 0.24;
+            smoothstep(0.3, 0.82, preserveValue) * 0.5
+            + smoothstep(0.5, 0.82, current) * 0.2;
           const steepness = smoothstep(0.03, 0.12, maxDelta);
           const target = mix(average, lowerAverage, coastFactor * 0.48);
           const blend = steepness * mix(0.12, 0.44, coastFactor) * (1 - preserveFactor);
@@ -2679,7 +2694,7 @@ async function buildElevationMapCoarse(
       const centerY = Math.min(rows - 1, startY + height * 0.5);
       const carvingSample = sampleCarvingAt(centerX, centerY);
       coarseElevation[coarseIndex] = clamp(blended, 0, 1);
-      coarseValleyMap[coarseIndex] = carvingSample.carve;
+      coarseBasinMap[coarseIndex] = carvingSample.carve;
       coarseShapeMap[coarseIndex] = carvingSample.landShape;
       coarseSampleXMap[coarseIndex] = centerX;
       coarseSampleYMap[coarseIndex] = centerY;
@@ -2750,6 +2765,29 @@ async function buildElevationMapCoarse(
 
   await naturalizeCoarseTerrain(2, "Naturalizing terrain...", 0.9, 0.04);
 
+  const preRiverErosion = buildPreRiverErosionFields({
+    cols: coarseCols,
+    rows: coarseRows,
+    elevations: coarseElevation,
+    landShape: coarseShapeMap,
+    basinSignal: coarseBasinMap,
+    ruggedness: ruggedness01,
+    riverIntensity,
+    basinStrength,
+    coastalShelfWidth
+  });
+  for (let i = 0; i < coarseTotal; i += 1) {
+    const flowWear = clamp(preRiverErosion.wear[i] ?? 0, 0, 1);
+    const basinWear = clamp(coarseBasinMap[i] ?? 0, 0, 1);
+    coarseValleyMap[i] = clamp(
+      Math.max(flowWear, basinWear * mix(0.32, 0.68, basinStrength)),
+      0,
+      1
+    );
+    coarseFlowXMap[i] = preRiverErosion.flowX[i] ?? 0;
+    coarseFlowYMap[i] = preRiverErosion.flowY[i] ?? 0;
+  }
+
   await populateFullResolutionSupportMaps("Projecting terrain...", 0.94, 0.03);
   const reliefElevationMap = buildPreviewElevationFromCoarse(coarseElevation);
   const reliefSeaLevelBase = resolveSeaLevelBase(state, settings, reliefElevationMap, cellSizeM);
@@ -2765,7 +2803,14 @@ async function buildElevationMapCoarse(
       reliefSeaLevelBase
     );
     if (shouldStopAfter("terrain:relief")) {
-      return { elevationMap: reliefElevationMap, riverMask, seaLevelBase: reliefSeaLevelBase };
+      return {
+        elevationMap: reliefElevationMap,
+        riverMask,
+        seaLevelBase: reliefSeaLevelBase,
+        erosionWearMap,
+        erosionFlowXMap,
+        erosionFlowYMap
+      };
     }
   }
 
@@ -2793,7 +2838,7 @@ async function buildElevationMapCoarse(
     }
   }
 
-  await naturalizeCoarseTerrain(1, "Naturalizing terrain...", 0.98, 0.01);
+  await naturalizeCoarseTerrain(1, "Naturalizing terrain...", 0.98, 0.01, coarseValleyMap);
 
   const elevationMap = Array.from({ length: totalTiles }, () => 0);
   state.valleyMap = Array.from({ length: totalTiles }, () => 0);
@@ -2825,15 +2870,15 @@ async function buildElevationMapCoarse(
     seaLevelBase
   );
   if (shouldStopAfter("terrain:carving")) {
-    return { elevationMap, riverMask, seaLevelBase };
+    return { elevationMap, riverMask, seaLevelBase, erosionWearMap, erosionFlowXMap, erosionFlowYMap };
   }
   await emitDebugPhase(debug, "terrain:flooding", state, settings, elevationMap, undefined, undefined, seaLevelBase);
   if (shouldStopAfter("terrain:flooding")) {
-    return { elevationMap, riverMask, seaLevelBase };
+    return { elevationMap, riverMask, seaLevelBase, erosionWearMap, erosionFlowXMap, erosionFlowYMap };
   }
   await emitDebugPhase(debug, "terrain:elevation", state, settings, elevationMap, undefined, undefined, seaLevelBase);
   if (shouldStopAfter("terrain:elevation")) {
-    return { elevationMap, riverMask, seaLevelBase };
+    return { elevationMap, riverMask, seaLevelBase, erosionWearMap, erosionFlowXMap, erosionFlowYMap };
   }
 
   const edgeSmoothRadius = edgeWidth * 3;
@@ -2874,7 +2919,7 @@ async function buildElevationMapCoarse(
     elevationMap[i] = temp[i];
   }
 
-  return { elevationMap, riverMask, seaLevelBase };
+  return { elevationMap, riverMask, seaLevelBase, erosionWearMap, erosionFlowXMap, erosionFlowYMap };
 }
 
 async function buildMoistureMap(
@@ -4877,7 +4922,7 @@ async function generateMapLegacy(
     meadowMask: number;
   };
 
-  const { elevationMap, riverMask, seaLevelBase } = await buildElevationMap(
+  const { elevationMap, riverMask, seaLevelBase, erosionWearMap } = await buildElevationMap(
     state,
     rng,
     mapSettings,
@@ -4889,6 +4934,10 @@ async function generateMapLegacy(
     yieldIfNeeded,
     debug
   );
+  if (state.tileErosionWear.length !== erosionWearMap.length) {
+    state.tileErosionWear = new Float32Array(erosionWearMap.length);
+  }
+  state.tileErosionWear.set(erosionWearMap);
 
   const slopeMap = new Float32Array(state.grid.totalTiles);
   for (let y = 0; y < state.grid.rows; y += 1) {
@@ -5573,7 +5622,7 @@ const MAX_EROSION_OFFSET = 0.03;
 export async function runElevationStage(ctx: MapGenContext): Promise<void> {
   ctx.state.tiles = new Array(ctx.state.grid.totalTiles);
   await ctx.reportStage("Reticulating splines...", 0);
-  const { elevationMap, riverMask, seaLevelBase } = await buildElevationMap(
+  const { elevationMap, riverMask, seaLevelBase, erosionWearMap, erosionFlowXMap, erosionFlowYMap } = await buildElevationMap(
     ctx.state,
     ctx.rng,
     ctx.settings,
@@ -5584,6 +5633,13 @@ export async function runElevationStage(ctx: MapGenContext): Promise<void> {
   ctx.elevationMap = elevationMap;
   ctx.riverMask = riverMask;
   ctx.seaLevelBase = seaLevelBase;
+  ctx.erosionWearMap = erosionWearMap;
+  ctx.erosionFlowXMap = erosionFlowXMap;
+  ctx.erosionFlowYMap = erosionFlowYMap;
+  if (ctx.state.tileErosionWear.length !== erosionWearMap.length) {
+    ctx.state.tileErosionWear = new Float32Array(erosionWearMap.length);
+  }
+  ctx.state.tileErosionWear.set(erosionWearMap);
   await emitStageSnapshot(ctx, "terrain:elevation");
 }
 
@@ -5594,6 +5650,10 @@ export async function runErosionStage(ctx: MapGenContext): Promise<void> {
   }
   const input = ctx.elevationMap;
   const temp = new Float32Array(input.length);
+  const wearMap = ctx.erosionWearMap;
+  const flowXMap = ctx.erosionFlowXMap;
+  const flowYMap = ctx.erosionFlowYMap;
+  const nextWear = new Float32Array(input.length);
   const detailStrength = Math.min(MAX_EROSION_OFFSET, Math.max(0, settings.erosionDetailStrength));
   const slopeMin = Math.max(0.0001, settings.erosionSlopeMaskMin);
   const slopeMax = Math.max(slopeMin + 1e-4, settings.erosionSlopeMaskMax);
@@ -5611,6 +5671,8 @@ export async function runErosionStage(ctx: MapGenContext): Promise<void> {
       const right = x < state.grid.cols - 1 ? (input[idx + 1] ?? center) : center;
       const up = y > 0 ? (input[idx - state.grid.cols] ?? center) : center;
       const down = y < state.grid.rows - 1 ? (input[idx + state.grid.cols] ?? center) : center;
+      const neighborAverage = (left + right + up + down) * 0.25;
+      const curvature = neighborAverage - center;
       const gradX = (right - left) * 0.5;
       const gradY = (down - up) * 0.5;
       const slope = Math.hypot(gradX, gradY);
@@ -5621,19 +5683,38 @@ export async function runErosionStage(ctx: MapGenContext): Promise<void> {
       const seaLevel = clampSeaLevel(ctx.seaLevelBase + (1 - edgeFactor) * settings.edgeWaterBias, settings);
       const headroom = center - seaLevel;
       const coastMask = smoothstep(coastFadeStart, coastFadeEnd, headroom);
-      const mask = Math.pow(slopeMask * steepMask * coastMask, 0.78);
-      if (mask <= 0.001 || headroom <= 0.002) {
+      const baseWear = Number.isFinite(wearMap?.[idx] ?? Number.NaN) ? clamp(wearMap?.[idx] ?? 0, 0, 1) : 0;
+      const wearMask = smoothstep(0.03, 0.42, baseWear);
+      const concavityMask = smoothstep(0.0002, 0.008, curvature);
+      const shoulderMask =
+        smoothstep(slopeMax * 0.9, Math.max(slopeMax * 3.2, slopeMax + 0.04), slope) *
+        smoothstep(-0.012, 0.002, -curvature) *
+        (1 - wearMask * 0.68);
+      const erosionEnvelope = Math.pow(coastMask * clamp(slopeMask * 0.45 + wearMask * 0.9, 0, 1), 0.78);
+      if (erosionEnvelope <= 0.001 || headroom <= 0.002) {
         temp[idx] = center;
+        nextWear[idx] = baseWear;
         continue;
       }
 
+      const downhillLength = Math.max(1e-6, Math.hypot(gradX, gradY));
+      let flowX = Number.isFinite(flowXMap?.[idx] ?? Number.NaN) ? flowXMap?.[idx] ?? 0 : 0;
+      let flowY = Number.isFinite(flowYMap?.[idx] ?? Number.NaN) ? flowYMap?.[idx] ?? 0 : 0;
+      const storedFlowLength = Math.hypot(flowX, flowY);
+      if (storedFlowLength > 1e-6) {
+        flowX /= storedFlowLength;
+        flowY /= storedFlowLength;
+      } else {
+        flowX = -gradX / downhillLength;
+        flowY = -gradY / downhillLength;
+      }
       const worldX = getWorldX(settings, x);
       const worldY = getWorldY(settings, y);
       const detail = sampleDirectionalErosionDetail(
         worldX,
         worldY,
-        -gradX,
-        -gradY,
+        flowX,
+        flowY,
         state.seed + 5407,
         {
           scaleM: settings.erosionDetailScaleM,
@@ -5642,21 +5723,46 @@ export async function runErosionStage(ctx: MapGenContext): Promise<void> {
           branchStrength: settings.erosionBranchStrength
         }
       );
-      const downhillLength = Math.max(1e-6, Math.hypot(gradX, gradY));
-      const flowX = -gradX / downhillLength;
-      const flowY = -gradY / downhillLength;
       const flowResponse = detail.derivX * flowX + detail.derivY * flowY;
       const groove = -Math.pow(Math.max(0, detail.value), 1.35);
-      const ridge = Math.pow(Math.max(0, -detail.value), 1.08) * 0.42;
-      const branchBias = clamp(-flowResponse * 0.18, -0.65, 0.65);
-      const shapedDetail = clamp(groove + ridge + branchBias, -1.2, 1.2);
-      const reliefBoost = 0.9 + mask * 1.5 + smoothstep(0.015, 0.12, headroom) * 0.35;
-      const offset = clamp(
-        shapedDetail * detailStrength * reliefBoost * mask,
-        -detailStrength * 0.8,
-        detailStrength
+      const ridge = Math.pow(Math.max(0, -detail.value), 1.08) * 0.24;
+      const branchBias = clamp(-flowResponse * 0.12, -0.45, 0.45);
+      const shapedDetail = clamp(groove + ridge + branchBias, -1.3, 1.1);
+      const channelOffset =
+        -detailStrength *
+        (0.12 + wearMask * 0.42 + concavityMask * 0.28) *
+        wearMask *
+        coastMask *
+        smoothstep(0.003, 0.05, headroom);
+      const incisionMask =
+        erosionEnvelope *
+        (0.86 + wearMask * 0.85 + concavityMask * 0.55) *
+        (0.68 + steepMask * 0.32);
+      const reliefBoost =
+        0.82 +
+        smoothstep(0.015, 0.12, headroom) * 0.35 +
+        wearMask * 0.6;
+      const incisionOffset = clamp(
+        shapedDetail * detailStrength * reliefBoost * incisionMask,
+        -detailStrength * 0.95,
+        detailStrength * 0.55
       );
+      const talusBlend = shoulderMask * coastMask * smoothstep(0.002, 0.05, headroom);
+      const talusOffset = clamp(
+        (neighborAverage - center) * talusBlend * (0.18 + wearMask * 0.08),
+        -detailStrength * 0.18,
+        detailStrength * 0.32
+      );
+      const offset = clamp(channelOffset + incisionOffset + talusOffset, -detailStrength, detailStrength * 0.65);
       temp[idx] = clamp(center + offset, 0, 1);
+      nextWear[idx] = clamp(
+        Math.max(
+          baseWear,
+          wearMask * 0.85 + concavityMask * 0.1 + Math.abs(offset) / Math.max(detailStrength, 1e-4) * 0.12
+        ),
+        0,
+        1
+      );
       if (trackStats) {
         const absOffset = Math.abs(offset);
         absOffsetSum += absOffset;
@@ -5673,6 +5779,11 @@ export async function runErosionStage(ctx: MapGenContext): Promise<void> {
   for (let i = 0; i < input.length; i += 1) {
     input[i] = temp[i] ?? input[i];
   }
+  ctx.erosionWearMap = nextWear;
+  if (state.tileErosionWear.length !== nextWear.length) {
+    state.tileErosionWear = new Float32Array(nextWear.length);
+  }
+  state.tileErosionWear.set(nextWear);
   ctx.seaLevelBase = resolveSeaLevelBase(state, settings, input, cellSizeM);
   if (trackStats && absOffsets.length > 0) {
     absOffsets.sort((left, right) => left - right);

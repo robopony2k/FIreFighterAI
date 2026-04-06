@@ -41,7 +41,7 @@ export const DEFAULT_OCEAN_WATER_DEBUG_CONTROLS: OceanWaterDebugControls = {
   swashCoverageFadeEnd: 1,
   shoreWaveAmpMinScale: 1,
   shoreWaveLengthMinScale: 0.2,
-  waveAmpScale: 0.59,
+  waveAmpScale: 0.95,
   waveLengthScale: 0.8,
   shoreFoamScale: 1.91
 };
