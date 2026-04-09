@@ -148,7 +148,7 @@ export const buildPreRiverErosionFields = (input: PreRiverErosionInput): PreRive
     maxAccumulation = Math.max(maxAccumulation, accumulation[idx]);
   }
 
-  const slopeRef = Math.max(1e-4, maxSlope * mix(0.24, 0.46, ruggedness));
+  const slopeRef = Math.max(1e-4, maxSlope * mix(0.22, 0.42, ruggedness));
   const logAccumRef = Math.log1p(Math.max(1, maxAccumulation));
   for (let idx = 0; idx < total; idx += 1) {
     if (!landMask[idx]) {
@@ -157,14 +157,14 @@ export const buildPreRiverErosionFields = (input: PreRiverErosionInput): PreRive
     const shape = clamp(landShape[idx] ?? 0, 0, 1);
     const basin = clamp(basinSignal?.[idx] ?? 0, 0, 1);
     const accumNorm = logAccumRef > 1e-6 ? Math.log1p(accumulation[idx]) / logAccumRef : 0;
-    const slopeNorm = smoothstep(slopeRef * 0.08, slopeRef, localSlope[idx]);
+    const slopeNorm = smoothstep(slopeRef * 0.06, slopeRef * 0.92, localSlope[idx]);
     const donorNorm = smoothstep(0, 2.5, donorCount[idx]);
     const coastAttenuation = smoothstep(0.12, 0.44, shape) * mix(1, 0.9, coastalShelfWidth);
     const channelPower =
-      Math.pow(accumNorm, mix(0.92, 0.72, riverIntensity))
-      * Math.pow(slopeNorm, mix(0.98, 0.76, ruggedness));
-    const convergence = clamp(donorNorm * 0.52 + basin * mix(0.08, 0.26, basinStrength), 0, 1);
-    baseWear[idx] = clamp(channelPower * (0.74 + convergence * 0.44) * coastAttenuation, 0, 1);
+      Math.pow(accumNorm, mix(0.88, 0.66, riverIntensity))
+      * Math.pow(slopeNorm, mix(0.94, 0.72, ruggedness));
+    const convergence = clamp(donorNorm * 0.6 + basin * mix(0.1, 0.3, basinStrength), 0, 1);
+    baseWear[idx] = clamp(channelPower * (0.8 + convergence * 0.5) * coastAttenuation, 0, 1);
   }
 
   const wear = new Float32Array(total);
@@ -195,10 +195,10 @@ export const buildPreRiverErosionFields = (input: PreRiverErosionInput): PreRive
     }
     const averaged = totalWeight > 0 ? weightedSum / totalWeight : baseWear[idx];
     const shoulderSupport =
-      smoothstep(0.16, 0.54, averaged)
-      * (1 - smoothstep(0.28, 0.82, baseWear[idx]))
-      * 0.28;
-    wear[idx] = clamp(baseWear[idx] * 0.78 + averaged * 0.16 + maxNeighbor * 0.06 + shoulderSupport, 0, 1);
+      smoothstep(0.14, 0.5, averaged)
+      * (1 - smoothstep(0.24, 0.78, baseWear[idx]))
+      * 0.32;
+    wear[idx] = clamp(baseWear[idx] * 0.76 + averaged * 0.18 + maxNeighbor * 0.08 + shoulderSupport, 0, 1);
   }
 
   for (let idx = 0; idx < total; idx += 1) {

@@ -129,7 +129,7 @@ export type MapEditorHandle = {
   destroy: () => void;
 };
 
-const PREVIEW_DEBOUNCE_MS = 450;
+const PREVIEW_DEBOUNCE_MS = 200;
 
 const createUnavailableTerrainPreviewController = (): TerrainPreviewController => ({
   prepareAssets: async () => {},
@@ -831,7 +831,6 @@ export const initMapEditor = (refs: MapEditorRefs, deps: MapEditorDeps): MapEdit
     const draft = collectDraft();
     const cacheKey = syncPreviewCacheDraft(draft);
     if (tryRenderCachedActiveStep()) {
-      void warmPreviewCache(draft);
       return;
     }
     if (previewRunning) {
@@ -1538,7 +1537,6 @@ export const initMapEditor = (refs: MapEditorRefs, deps: MapEditorDeps): MapEdit
       }
       hidePreviewOverlay();
       syncCurrentScenarioLabel();
-      void warmPreviewCache(draft);
     } catch (error) {
       if (!visible || sessionToken !== previewSessionToken || buildToken !== previewBuildToken) {
         return;

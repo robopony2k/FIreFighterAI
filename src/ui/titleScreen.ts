@@ -119,9 +119,9 @@ const TITLE_ACTIVE_FLAME_GLYPHS = Math.min(TITLE_WORD.length, TITLE_MAX_FLAME_GL
 
 const FIRE_WIDTH = 400;
 const FIRE_HEIGHT = 260;
-const FIRE_LEVELS = 48;
+const CPU_FALLBACK_FIRE_WIDTH = 128;
+const CPU_FALLBACK_FIRE_HEIGHT = 84;
 const FIRE_UPDATE_MS = 34;
-const EMITTER_REBUILD_MS = 64;
 const TITLE_FLAME_MOTION_TIME_SCALE = 0.44;
 const INTRO_EMBER_DELAY_MS = 0;
 const INTRO_FLAME_DELAY_MS = 420;
@@ -816,23 +816,40 @@ export const showTitleScreen = (deps: TitleScreenDeps): TitleScreenHandle => {
   if (!titleCtx) {
     throw new Error("Title screen canvas not supported.");
   }
+  let fireBufferWidth = FIRE_WIDTH;
+  let fireBufferHeight = FIRE_HEIGHT;
   let fireCanvas = document.createElement("canvas");
-  fireCanvas.width = FIRE_WIDTH;
-  fireCanvas.height = FIRE_HEIGHT;
+  fireCanvas.width = fireBufferWidth;
+  fireCanvas.height = fireBufferHeight;
   let fireProgram: TitleFlameProgram | null = null;
   let fireCtx: CanvasRenderingContext2D | null = null;
   let fireImageData: ImageData | null = null;
+  let fireRendererMode: "gpu" | "cpu" = "gpu";
   try {
     fireProgram = createTitleFlameProgram(fireCanvas);
-  } catch {
+    console.info("[TitleScreen] GPU flame renderer active.", {
+      mode: "gpu",
+      width: fireBufferWidth,
+      height: fireBufferHeight
+    });
+  } catch (error) {
+    fireRendererMode = "cpu";
+    console.warn("[TitleScreen] Falling back to CPU flame renderer.", {
+      mode: "cpu",
+      width: CPU_FALLBACK_FIRE_WIDTH,
+      height: CPU_FALLBACK_FIRE_HEIGHT,
+      error
+    });
+    fireBufferWidth = CPU_FALLBACK_FIRE_WIDTH;
+    fireBufferHeight = CPU_FALLBACK_FIRE_HEIGHT;
     fireCanvas = document.createElement("canvas");
-    fireCanvas.width = FIRE_WIDTH;
-    fireCanvas.height = FIRE_HEIGHT;
+    fireCanvas.width = fireBufferWidth;
+    fireCanvas.height = fireBufferHeight;
     fireCtx = fireCanvas.getContext("2d");
     if (!fireCtx) {
       throw new Error("Offscreen fire canvas not supported.");
     }
-    fireImageData = fireCtx.createImageData(FIRE_WIDTH, FIRE_HEIGHT);
+    fireImageData = fireCtx.createImageData(fireBufferWidth, fireBufferHeight);
   }
   const glyphMaskCanvas = document.createElement("canvas");
   const glyphMaskCtx = glyphMaskCanvas.getContext("2d");
@@ -859,34 +876,40 @@ export const showTitleScreen = (deps: TitleScreenDeps): TitleScreenHandle => {
   if (!coreFireCtx) {
     throw new Error("Core fire canvas not supported.");
   }
+  const fadeMaskCanvas = document.createElement("canvas");
+  const fadeMaskCtx = fadeMaskCanvas.getContext("2d");
+  if (!fadeMaskCtx) {
+    throw new Error("Fade mask canvas not supported.");
+  }
   const emitterCanvas = document.createElement("canvas");
-  emitterCanvas.width = FIRE_WIDTH;
-  emitterCanvas.height = FIRE_HEIGHT;
+  emitterCanvas.width = fireBufferWidth;
+  emitterCanvas.height = fireBufferHeight;
   const emitterCtx = emitterCanvas.getContext("2d");
   if (!emitterCtx) {
     throw new Error("Emitter canvas not supported.");
   }
-  const firePixelCount = FIRE_WIDTH * FIRE_HEIGHT;
-  const cpuFirePixels = new Float32Array(firePixelCount);
+  const firePixelCount = fireBufferWidth * fireBufferHeight;
   const emitterPixels = new Uint8Array(firePixelCount);
 
   let visible = true;
   let selectedIndex = 0;
   let rafId = 0;
   let fireAccumulatorMs = 0;
-  let emitterAccumulatorMs = 0;
   let lastFrameNow = performance.now();
-  let emitterPhase = Math.random() * 1000;
   let flameMotionSeconds = Math.random() * 8;
   let windCurrent = 0;
   let windTarget = (Math.random() * 2 - 1) * 1.2;
   let emitterTextureDirty = true;
   let activeFlameGlyphCount = TITLE_ACTIVE_FLAME_GLYPHS;
+  let cachedTitleLayout: TitleLayout | null = null;
+  const usesCpuFireFallback = fireProgram === null;
+  (window as Window & { __titleFlameRendererMode?: "gpu" | "cpu" }).__titleFlameRendererMode = fireRendererMode;
+  const fireStepMs = usesCpuFireFallback ? 120 : FIRE_UPDATE_MS;
   const flameGlyphCenters = new Float32Array(TITLE_MAX_FLAME_GLYPHS);
   const flameGlyphHalfWidths = new Float32Array(TITLE_MAX_FLAME_GLYPHS);
   const emitterAnchors: FlameEmitterAnchor[] = [];
   const emberParticles: EmberParticle[] = [];
-  const MAX_EMBER_PARTICLES = 280;
+  const MAX_EMBER_PARTICLES = usesCpuFireFallback ? 150 : 360;
   const introStartMs = performance.now();
   const introReveal = (delayMs: number, durationMs: number): number => {
     const t = clamp((performance.now() - introStartMs - delayMs) / Math.max(1, durationMs), 0, 1);
@@ -1093,9 +1116,68 @@ export const showTitleScreen = (deps: TitleScreenDeps): TitleScreenHandle => {
     ctx.textAlign = previousTextAlign;
   };
 
+  const rebuildTitleArtwork = (): void => {
+    const width = titleCanvas.width;
+    const height = titleCanvas.height;
+    if (width < 2 || height < 2) {
+      cachedTitleLayout = null;
+      glyphMaskCtx.clearRect(0, 0, glyphMaskCanvas.width, glyphMaskCanvas.height);
+      strokeMaskCtx.clearRect(0, 0, strokeMaskCanvas.width, strokeMaskCanvas.height);
+      glowMaskCtx.clearRect(0, 0, glowMaskCanvas.width, glowMaskCanvas.height);
+      fadeMaskCtx.clearRect(0, 0, fadeMaskCanvas.width, fadeMaskCanvas.height);
+      return;
+    }
+
+    const layout = buildTitleLayout(glyphMaskCtx, width, height);
+    cachedTitleLayout = layout;
+
+    glyphMaskCtx.clearRect(0, 0, width, height);
+    glyphMaskCtx.save();
+    glyphMaskCtx.font = layout.font;
+    glyphMaskCtx.textAlign = "left";
+    glyphMaskCtx.textBaseline = "middle";
+    glyphMaskCtx.fillStyle = "rgba(255, 255, 255, 1)";
+    fillGlyphSpans(glyphMaskCtx, layout.spans, layout.centerY);
+    glyphMaskCtx.restore();
+
+    strokeMaskCtx.clearRect(0, 0, width, height);
+    strokeMaskCtx.save();
+    strokeMaskCtx.font = layout.font;
+    strokeMaskCtx.textAlign = "left";
+    strokeMaskCtx.textBaseline = "middle";
+    strokeMaskCtx.lineJoin = "round";
+    strokeMaskCtx.lineCap = "round";
+    strokeMaskCtx.strokeStyle = "rgba(255, 255, 255, 0.94)";
+    strokeMaskCtx.lineWidth = Math.max(0.75, layout.outline * 0.34);
+    strokeGlyphSpans(strokeMaskCtx, layout.spans, layout.centerY);
+    strokeMaskCtx.strokeStyle = "rgba(255, 255, 255, 0.42)";
+    strokeMaskCtx.lineWidth = Math.max(0.4, layout.outline * 0.16);
+    strokeGlyphSpans(strokeMaskCtx, layout.spans, layout.centerY);
+    strokeMaskCtx.restore();
+
+    glowMaskCtx.clearRect(0, 0, width, height);
+    glowMaskCtx.save();
+    glowMaskCtx.globalAlpha = 0.24;
+    glowMaskCtx.filter = `blur(${Math.max(2, Math.round(layout.outline * 0.42))}px)`;
+    glowMaskCtx.drawImage(glyphMaskCanvas, 0, 0);
+    glowMaskCtx.globalAlpha = 0.36;
+    glowMaskCtx.filter = `blur(${Math.max(1, Math.round(layout.outline * 0.18))}px)`;
+    glowMaskCtx.drawImage(strokeMaskCanvas, 0, 0);
+    glowMaskCtx.restore();
+
+    fadeMaskCtx.clearRect(0, 0, width, height);
+    const fadeHeight = Math.max(24, Math.round(layout.fontSize * 0.26 + layout.outline * 2));
+    const fadeStart = Math.max(0, height - fadeHeight);
+    const bottomFade = fadeMaskCtx.createLinearGradient(0, fadeStart, 0, height);
+    bottomFade.addColorStop(0, "rgba(0, 0, 0, 0)");
+    bottomFade.addColorStop(1, "rgba(0, 0, 0, 1)");
+    fadeMaskCtx.fillStyle = bottomFade;
+    fadeMaskCtx.fillRect(0, fadeStart, width, height - fadeStart);
+  };
+
   const rebuildEmitter = (): void => {
-    const layout = buildTitleLayout(emitterCtx, FIRE_WIDTH, FIRE_HEIGHT);
-    emitterCtx.clearRect(0, 0, FIRE_WIDTH, FIRE_HEIGHT);
+    const layout = buildTitleLayout(emitterCtx, fireBufferWidth, fireBufferHeight);
+    emitterCtx.clearRect(0, 0, fireBufferWidth, fireBufferHeight);
     flameGlyphCenters.fill(0);
     flameGlyphHalfWidths.fill(0);
     emitterAnchors.length = 0;
@@ -1107,8 +1189,8 @@ export const showTitleScreen = (deps: TitleScreenDeps): TitleScreenHandle => {
     for (let i = 0; i < anchors.length; i += 1) {
       const anchor = anchors[i] as FlameEmitterAnchor;
       emitterAnchors.push(anchor);
-      flameGlyphCenters[i] = anchor.centerX / FIRE_WIDTH;
-      flameGlyphHalfWidths[i] = Math.max(anchor.halfWidth / FIRE_WIDTH, 0.01);
+      flameGlyphCenters[i] = anchor.centerX / fireBufferWidth;
+      flameGlyphHalfWidths[i] = Math.max(anchor.halfWidth / fireBufferWidth, 0.01);
 
       const emitterHalfWidth = anchor.halfWidth * (1.12 + anchor.strength * 0.08);
       const topHalfWidth = Math.max(emitterHalfWidth * 0.32, layout.fontSize * 0.05);
@@ -1156,7 +1238,7 @@ export const showTitleScreen = (deps: TitleScreenDeps): TitleScreenHandle => {
     }
     emitterCtx.restore();
 
-    const emitterData = emitterCtx.getImageData(0, 0, FIRE_WIDTH, FIRE_HEIGHT).data;
+    const emitterData = emitterCtx.getImageData(0, 0, fireBufferWidth, fireBufferHeight).data;
     for (let i = 0; i < firePixelCount; i += 1) {
       emitterPixels[i] = emitterData[i * 4 + 3] ?? 0;
     }
@@ -1179,9 +1261,9 @@ export const showTitleScreen = (deps: TitleScreenDeps): TitleScreenHandle => {
       vx: vxBase,
       vy: vyBase,
       age: 0,
-      life: 0.55 + Math.random() * 1.15,
-      size: 0.9 + Math.random() * 1.5 + intensity * 0.4,
-      brightness: 0.55 + Math.random() * 0.7
+      life: 1.05 + Math.random() * 1.25,
+      size: 1.35 + Math.random() * 1.6 + intensity * 0.55,
+      brightness: 0.9 + Math.random() * 0.65
     });
   };
 
@@ -1226,7 +1308,7 @@ export const showTitleScreen = (deps: TitleScreenDeps): TitleScreenHandle => {
       const emberBlue = Math.round(26 + 30 * t);
       if ((ember.x - ember.px) * (ember.x - ember.px) + (ember.y - ember.py) * (ember.y - ember.py) > 0.25) {
         ctx.strokeStyle = `rgba(255, ${emberGreen}, ${emberBlue}, ${alpha * 0.55})`;
-        ctx.lineWidth = 1;
+        ctx.lineWidth = Math.max(1, ember.size * 0.42);
         ctx.beginPath();
         ctx.moveTo(ember.px, ember.py);
         ctx.lineTo(ember.x, ember.y);
@@ -1236,15 +1318,14 @@ export const showTitleScreen = (deps: TitleScreenDeps): TitleScreenHandle => {
       const size = Math.max(0.8, ember.size * (0.65 + 0.55 * t));
       ctx.fillRect(ember.x, ember.y, size, size);
       if (size > 1.4 && alpha > 0.16) {
-        ctx.fillStyle = `rgba(255, 240, 184, ${alpha * 0.52})`;
-        ctx.fillRect(ember.x + size * 0.26, ember.y + size * 0.26, 1, 1);
+        ctx.fillStyle = `rgba(255, 240, 184, ${alpha * 0.72})`;
+        ctx.fillRect(ember.x + size * 0.18, ember.y + size * 0.18, Math.max(1, size * 0.24), Math.max(1, size * 0.24));
       }
     }
     ctx.restore();
   };
 
   const stepFire = (): void => {
-    emitterPhase += 0.018;
     if (Math.random() < 0.1) {
       windTarget = (Math.random() * 2 - 1) * (0.8 + Math.random() * 1.6);
     }
@@ -1255,7 +1336,7 @@ export const showTitleScreen = (deps: TitleScreenDeps): TitleScreenHandle => {
   const renderFireBuffer = (): void => {
     if (fireProgram) {
       if (emitterTextureDirty) {
-        fireProgram.uploadEmitterMask(emitterPixels, FIRE_WIDTH, FIRE_HEIGHT);
+        fireProgram.uploadEmitterMask(emitterPixels, fireBufferWidth, fireBufferHeight);
         emitterTextureDirty = false;
       }
       fireProgram.render(
@@ -1272,12 +1353,10 @@ export const showTitleScreen = (deps: TitleScreenDeps): TitleScreenHandle => {
     }
     renderTitleFlameField({
       fireImageData,
-      firePixels: cpuFirePixels,
       emitterPixels,
       glyphCount: activeFlameGlyphCount,
       glyphCenters: flameGlyphCenters,
       glyphHalfWidths: flameGlyphHalfWidths,
-      levels: FIRE_LEVELS,
       timeSeconds: flameMotionSeconds * TITLE_FLAME_MOTION_TIME_SCALE,
       wind: windCurrent
     });
@@ -1302,6 +1381,9 @@ export const showTitleScreen = (deps: TitleScreenDeps): TitleScreenHandle => {
       glowFireCanvas.height = targetHeight;
       coreFireCanvas.width = targetWidth;
       coreFireCanvas.height = targetHeight;
+      fadeMaskCanvas.width = targetWidth;
+      fadeMaskCanvas.height = targetHeight;
+      rebuildTitleArtwork();
     }
   };
 
@@ -1309,21 +1391,27 @@ export const showTitleScreen = (deps: TitleScreenDeps): TitleScreenHandle => {
     if (emitterAnchors.length === 0 || titleCanvas.width < 2 || titleCanvas.height < 2) {
       return;
     }
-    const sx = titleCanvas.width / FIRE_WIDTH;
-    const sy = titleCanvas.height / FIRE_HEIGHT;
-    const attempts = emberParticles.length < MAX_EMBER_PARTICLES * 0.55 ? 2 : 1;
+    const sx = titleCanvas.width / fireBufferWidth;
+    const sy = titleCanvas.height / fireBufferHeight;
+    const attempts = usesCpuFireFallback
+      ? (emberParticles.length < MAX_EMBER_PARTICLES * 0.42 ? 5 : 3)
+      : (emberParticles.length < MAX_EMBER_PARTICLES * 0.6 ? 7 : 4);
     for (let i = 0; i < attempts; i += 1) {
       const anchor = emitterAnchors[Math.floor(Math.random() * emitterAnchors.length)];
       if (!anchor) {
         continue;
       }
-      const sparkChance = 0.012 + anchor.strength * 0.018;
+      const sparkChance = (usesCpuFireFallback ? 0.13 : 0.16) + anchor.strength * (usesCpuFireFallback ? 0.05 : 0.07);
       if (Math.random() > sparkChance) {
         continue;
       }
-      const jitterX = (Math.random() * 2 - 1) * Math.max(2, anchor.halfWidth * sx * 0.52);
-      const jitterY = (Math.random() * 2 - 1) * Math.max(2, sy * 2.2);
-      const intensity = clamp(0.44 + anchor.strength * 0.42 + anchor.seed * 0.18, 0.34, 1.1);
+      const side = Math.random() < 0.5 ? -1 : 1;
+      const outerSpreadX = anchor.halfWidth * sx * (1.08 + Math.random() * 1.12);
+      const edgeJitterX = (Math.random() * 2 - 1) * Math.max(2, anchor.halfWidth * sx * 0.22);
+      const centerJitterX = (Math.random() * 2 - 1) * Math.max(2, anchor.halfWidth * sx * 0.26);
+      const jitterX = Math.random() < 0.72 ? side * outerSpreadX + edgeJitterX : centerJitterX;
+      const jitterY = -Math.random() * Math.max(8, sy * 9.5) + (Math.random() * 2 - 1) * Math.max(2, sy * 2.1);
+      const intensity = clamp(0.66 + anchor.strength * 0.48 + anchor.seed * 0.22, 0.55, 1.35);
       spawnEmber(anchor.centerX * sx + jitterX, anchor.baseY * sy + jitterY, true, intensity);
     }
   };
@@ -1334,41 +1422,13 @@ export const showTitleScreen = (deps: TitleScreenDeps): TitleScreenHandle => {
     if (width < 2 || height < 2) {
       return;
     }
-    const layout = buildTitleLayout(strokeMaskCtx, width, height);
-
-    glyphMaskCtx.clearRect(0, 0, width, height);
-    glyphMaskCtx.save();
-    glyphMaskCtx.font = layout.font;
-    glyphMaskCtx.textAlign = "left";
-    glyphMaskCtx.textBaseline = "middle";
-    glyphMaskCtx.fillStyle = "rgba(255, 255, 255, 1)";
-    fillGlyphSpans(glyphMaskCtx, layout.spans, layout.centerY);
-    glyphMaskCtx.restore();
-
-    strokeMaskCtx.clearRect(0, 0, width, height);
-    strokeMaskCtx.save();
-    strokeMaskCtx.font = layout.font;
-    strokeMaskCtx.textAlign = "left";
-    strokeMaskCtx.textBaseline = "middle";
-    strokeMaskCtx.lineJoin = "round";
-    strokeMaskCtx.lineCap = "round";
-    strokeMaskCtx.strokeStyle = "rgba(255, 255, 255, 0.94)";
-    strokeMaskCtx.lineWidth = Math.max(0.75, layout.outline * 0.34);
-    strokeGlyphSpans(strokeMaskCtx, layout.spans, layout.centerY);
-    strokeMaskCtx.strokeStyle = "rgba(255, 255, 255, 0.42)";
-    strokeMaskCtx.lineWidth = Math.max(0.4, layout.outline * 0.16);
-    strokeGlyphSpans(strokeMaskCtx, layout.spans, layout.centerY);
-    strokeMaskCtx.restore();
-
-    glowMaskCtx.clearRect(0, 0, width, height);
-    glowMaskCtx.save();
-    glowMaskCtx.globalAlpha = 0.24;
-    glowMaskCtx.filter = `blur(${Math.max(2, Math.round(layout.outline * 0.42))}px)`;
-    glowMaskCtx.drawImage(glyphMaskCanvas, 0, 0);
-    glowMaskCtx.globalAlpha = 0.36;
-    glowMaskCtx.filter = `blur(${Math.max(1, Math.round(layout.outline * 0.18))}px)`;
-    glowMaskCtx.drawImage(strokeMaskCanvas, 0, 0);
-    glowMaskCtx.restore();
+    if (!cachedTitleLayout || cachedTitleLayout.width !== width || cachedTitleLayout.height !== height) {
+      rebuildTitleArtwork();
+    }
+    const layout = cachedTitleLayout;
+    if (!layout) {
+      return;
+    }
 
     glowFireCtx.clearRect(0, 0, width, height);
     glowFireCtx.drawImage(fireCanvas, 0, 0, width, height);
@@ -1390,7 +1450,6 @@ export const showTitleScreen = (deps: TitleScreenDeps): TitleScreenHandle => {
     titleCtx.save();
     titleCtx.globalCompositeOperation = "lighter";
     titleCtx.globalAlpha = 0.18 * flameReveal;
-    titleCtx.filter = `blur(${Math.max(3, Math.round(layout.outline * 0.72))}px)`;
     titleCtx.drawImage(glowFireCanvas, 0, 0);
     titleCtx.restore();
 
@@ -1403,25 +1462,13 @@ export const showTitleScreen = (deps: TitleScreenDeps): TitleScreenHandle => {
     titleCtx.save();
     titleCtx.globalCompositeOperation = "destination-out";
     titleCtx.globalAlpha = 0.72 * flameReveal;
-    titleCtx.font = layout.font;
-    titleCtx.textAlign = "left";
-    titleCtx.textBaseline = "middle";
-    titleCtx.lineJoin = "round";
-    titleCtx.lineCap = "round";
-    titleCtx.lineWidth = Math.max(0.55, layout.outline * 0.24);
-    strokeGlyphSpans(titleCtx, layout.spans, layout.centerY);
+    titleCtx.drawImage(strokeMaskCanvas, 0, 0);
     titleCtx.restore();
 
     titleCtx.save();
     titleCtx.globalCompositeOperation = "screen";
-    titleCtx.font = layout.font;
-    titleCtx.textAlign = "left";
-    titleCtx.textBaseline = "middle";
-    titleCtx.lineJoin = "round";
-    titleCtx.lineCap = "round";
-    titleCtx.strokeStyle = `rgba(245, 244, 240, ${0.14 * outlineReveal})`;
-    titleCtx.lineWidth = Math.max(0.12, layout.outline * 0.018);
-    strokeGlyphSpans(titleCtx, layout.spans, layout.centerY);
+    titleCtx.globalAlpha = 0.16 * outlineReveal;
+    titleCtx.drawImage(strokeMaskCanvas, 0, 0);
     titleCtx.restore();
 
     if (emberReveal > 0.001) {
@@ -1435,13 +1482,7 @@ export const showTitleScreen = (deps: TitleScreenDeps): TitleScreenHandle => {
     // before the canvas boundary clip.
     titleCtx.save();
     titleCtx.globalCompositeOperation = "destination-out";
-    const fadeHeight = Math.max(24, Math.round(layout.fontSize * 0.26 + layout.outline * 2));
-    const fadeStart = Math.max(0, height - fadeHeight);
-    const bottomFade = titleCtx.createLinearGradient(0, fadeStart, 0, height);
-    bottomFade.addColorStop(0, "rgba(0, 0, 0, 0)");
-    bottomFade.addColorStop(1, "rgba(0, 0, 0, 1)");
-    titleCtx.fillStyle = bottomFade;
-    titleCtx.fillRect(0, fadeStart, width, height - fadeStart);
+    titleCtx.drawImage(fadeMaskCanvas, 0, 0);
     titleCtx.restore();
   };
 
@@ -1453,16 +1494,10 @@ export const showTitleScreen = (deps: TitleScreenDeps): TitleScreenHandle => {
     lastFrameNow = now;
     flameMotionSeconds += deltaMs / 1000;
     fireAccumulatorMs += deltaMs;
-    emitterAccumulatorMs += deltaMs;
     let fireDirty = false;
-    while (emitterAccumulatorMs >= EMITTER_REBUILD_MS) {
-      rebuildEmitter();
-      emitterAccumulatorMs -= EMITTER_REBUILD_MS;
-      fireDirty = true;
-    }
-    while (fireAccumulatorMs >= FIRE_UPDATE_MS) {
+    while (fireAccumulatorMs >= fireStepMs) {
       stepFire();
-      fireAccumulatorMs -= FIRE_UPDATE_MS;
+      fireAccumulatorMs -= fireStepMs;
       fireDirty = true;
     }
     updateEmbers(deltaMs, titleCanvas.width, titleCanvas.height);

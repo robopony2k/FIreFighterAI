@@ -5617,7 +5617,7 @@ const computeMoistureValue = (elevation: number, waterDist: number): number => {
   return clamp(Math.pow(moisture, gamma), 0, 1);
 };
 
-const MAX_EROSION_OFFSET = 0.03;
+const MAX_EROSION_OFFSET = 0.036;
 
 export async function runElevationStage(ctx: MapGenContext): Promise<void> {
   ctx.state.tiles = new Array(ctx.state.grid.totalTiles);
@@ -5684,13 +5684,13 @@ export async function runErosionStage(ctx: MapGenContext): Promise<void> {
       const headroom = center - seaLevel;
       const coastMask = smoothstep(coastFadeStart, coastFadeEnd, headroom);
       const baseWear = Number.isFinite(wearMap?.[idx] ?? Number.NaN) ? clamp(wearMap?.[idx] ?? 0, 0, 1) : 0;
-      const wearMask = smoothstep(0.03, 0.42, baseWear);
-      const concavityMask = smoothstep(0.0002, 0.008, curvature);
+      const wearMask = smoothstep(0.025, 0.38, baseWear);
+      const concavityMask = smoothstep(0.00015, 0.007, curvature);
       const shoulderMask =
         smoothstep(slopeMax * 0.9, Math.max(slopeMax * 3.2, slopeMax + 0.04), slope) *
         smoothstep(-0.012, 0.002, -curvature) *
         (1 - wearMask * 0.68);
-      const erosionEnvelope = Math.pow(coastMask * clamp(slopeMask * 0.45 + wearMask * 0.9, 0, 1), 0.78);
+      const erosionEnvelope = Math.pow(coastMask * clamp(slopeMask * 0.42 + wearMask * 0.98, 0, 1), 0.76);
       if (erosionEnvelope <= 0.001 || headroom <= 0.002) {
         temp[idx] = center;
         nextWear[idx] = baseWear;
@@ -5730,22 +5730,22 @@ export async function runErosionStage(ctx: MapGenContext): Promise<void> {
       const shapedDetail = clamp(groove + ridge + branchBias, -1.3, 1.1);
       const channelOffset =
         -detailStrength *
-        (0.12 + wearMask * 0.42 + concavityMask * 0.28) *
+        (0.14 + wearMask * 0.48 + concavityMask * 0.34) *
         wearMask *
         coastMask *
         smoothstep(0.003, 0.05, headroom);
       const incisionMask =
         erosionEnvelope *
-        (0.86 + wearMask * 0.85 + concavityMask * 0.55) *
+        (0.9 + wearMask * 0.95 + concavityMask * 0.65) *
         (0.68 + steepMask * 0.32);
       const reliefBoost =
-        0.82 +
+        0.86 +
         smoothstep(0.015, 0.12, headroom) * 0.35 +
-        wearMask * 0.6;
+        wearMask * 0.66;
       const incisionOffset = clamp(
         shapedDetail * detailStrength * reliefBoost * incisionMask,
-        -detailStrength * 0.95,
-        detailStrength * 0.55
+        -detailStrength,
+        detailStrength * 0.58
       );
       const talusBlend = shoulderMask * coastMask * smoothstep(0.002, 0.05, headroom);
       const talusOffset = clamp(
@@ -5758,7 +5758,7 @@ export async function runErosionStage(ctx: MapGenContext): Promise<void> {
       nextWear[idx] = clamp(
         Math.max(
           baseWear,
-          wearMask * 0.85 + concavityMask * 0.1 + Math.abs(offset) / Math.max(detailStrength, 1e-4) * 0.12
+          wearMask * 0.88 + concavityMask * 0.12 + Math.abs(offset) / Math.max(detailStrength, 1e-4) * 0.14
         ),
         0,
         1

@@ -102,7 +102,11 @@ export const createTitleFlameProgram = (canvas: HTMLCanvasElement): TitleFlamePr
   `;
 
   const fragmentSource = `
+    #ifdef GL_FRAGMENT_PRECISION_HIGH
     precision highp float;
+    #else
+    precision mediump float;
+    #endif
 
     varying vec2 v_uv;
 
@@ -153,22 +157,23 @@ export const createTitleFlameProgram = (canvas: HTMLCanvasElement): TitleFlamePr
 
     void main() {
       vec2 uv = v_uv;
-      int glyphIndex = 0;
+      float glyphCenter = u_glyphCenters[0];
+      float glyphHalfWidth = max(u_glyphHalfWidths[0], 0.001);
+      float strength = 1.0;
       float minDist = 999.0;
       for (int i = 0; i < 16; i++) {
         if (i >= u_glyphCount) {
           break;
         }
-        float dist = abs(uv.x - u_glyphCenters[i]);
+        float center = u_glyphCenters[i];
+        float dist = abs(uv.x - center);
         if (dist < minDist) {
           minDist = dist;
-          glyphIndex = i;
+          glyphCenter = center;
+          glyphHalfWidth = max(u_glyphHalfWidths[i], 0.001);
+          strength = float(i + 1);
         }
       }
-
-      float glyphCenter = u_glyphCenters[glyphIndex];
-      float glyphHalfWidth = max(u_glyphHalfWidths[glyphIndex], 0.001);
-      float strength = float(glyphIndex + 1);
       float bandWarp = sin(uv.y * 6.4 + glyphCenter * 31.0 + u_time * 1.18) * 0.09 * glyphHalfWidth * uv.y;
       float qx = ((uv.x - glyphCenter) + bandWarp + u_wind * uv.y * uv.y * glyphHalfWidth * 0.9)
         / max(glyphHalfWidth * 4.2, 0.001);

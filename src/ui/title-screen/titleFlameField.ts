@@ -37,7 +37,7 @@ const fbm = (x: number, y: number): number => {
   let fy = y;
   let value = 0;
   let amplitude = 0.5;
-  for (let i = 0; i < 4; i += 1) {
+  for (let i = 0; i < 3; i += 1) {
     value += amplitude * simplexNoise(fx, fy);
     const nextX = 1.6 * fx + 1.2 * fy;
     const nextY = -1.2 * fx + 1.6 * fy;
@@ -50,24 +50,20 @@ const fbm = (x: number, y: number): number => {
 
 export type TitleFlameFieldRenderParams = {
   fireImageData: ImageData;
-  firePixels: Float32Array;
   emitterPixels: Uint8Array;
   glyphCount: number;
   glyphCenters: Float32Array;
   glyphHalfWidths: Float32Array;
-  levels: number;
   timeSeconds: number;
   wind: number;
 };
 
 export const renderTitleFlameField = ({
   fireImageData,
-  firePixels,
   emitterPixels,
   glyphCount,
   glyphCenters,
   glyphHalfWidths,
-  levels,
   timeSeconds,
   wind
 }: TitleFlameFieldRenderParams): void => {
@@ -121,7 +117,6 @@ export const renderTitleFlameField = ({
 
       const alpha = clamp(c * rowAlpha * (0.52 + c1 * 0.96), 0, 1);
       data[pixelIndex + 3] = Math.round(alpha * 255);
-      firePixels[idx] = clamp(c1 * (0.7 + alpha * 0.3), 0, 1) * (levels - 1);
     }
   }
 };
