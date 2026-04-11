@@ -12,8 +12,36 @@ export type PhaseUiCommand =
       payload?: Record<string, string>;
     }
   | {
+      type: "status";
+      message: string;
+    }
+  | {
       type: "minimap-pan";
       tile: PhaseUiTilePoint;
+    }
+  | {
+      type: "map-primary";
+      tile: PhaseUiTilePoint;
+      shiftKey?: boolean;
+      altKey?: boolean;
+    }
+  | {
+      type: "map-clear-fuel-break";
+      tile: PhaseUiTilePoint;
+    }
+  | {
+      type: "map-retask";
+      tile: PhaseUiTilePoint;
+    }
+  | {
+      type: "map-formation";
+      start: PhaseUiTilePoint;
+      end: PhaseUiTilePoint;
+    }
+  | {
+      type: "town-alert";
+      townId: number;
+      direction: "raise" | "lower";
     };
 
 export const dispatchPhaseUiCommand = (command: PhaseUiCommand): void => {

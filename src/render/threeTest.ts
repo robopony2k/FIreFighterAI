@@ -6,7 +6,7 @@ import type { EffectsState } from "../core/effectsState.js";
 import { getHouseFootprintBounds, pickHouseFootprint } from "../core/houseFootprints.js";
 import type { InputState } from "../core/inputState.js";
 import { indexFor } from "../core/grid.js";
-import { setStatus, TILE_ID_TO_TYPE, TILE_TYPE_IDS } from "../core/state.js";
+import { TILE_ID_TO_TYPE, TILE_TYPE_IDS } from "../core/state.js";
 import type {
   BehaviourMode,
   ClimateForecast,
@@ -36,18 +36,10 @@ import {
   type TreeAssets
 } from "./threeTestAssets.js";
 import {
-  handleClearFuelBreakTileClick,
-  handleMapFormationDragCommand,
-  handleMapPrimaryTileClick,
-  handleMapRetaskTileCommand
-} from "../sim/input/mapTileActions.js";
-import {
   getTownBurningHouseCount,
   getTownPostureLabel,
   getTownThreatLabel,
-  getTownThreatLevel,
-  lowerTownAlertPosture,
-  raiseTownAlertPosture
+  getTownThreatLevel
 } from "../sim/towns.js";
 import {
   buildPalette,
@@ -2179,6 +2171,50 @@ export const createThreeTest = (
     dispatchPhaseUiCommand({ type: "action", action, payload });
   };
 
+  const dispatchStatusCommand = (message: string): void => {
+    dispatchPhaseUiCommand({ type: "status", message });
+  };
+
+  const dispatchMapPrimaryCommand = (
+    tile: { x: number; y: number },
+    options?: { shiftKey?: boolean; altKey?: boolean }
+  ): void => {
+    dispatchPhaseUiCommand({
+      type: "map-primary",
+      tile,
+      shiftKey: options?.shiftKey,
+      altKey: options?.altKey
+    });
+  };
+
+  const dispatchClearFuelBreakCommand = (tile: { x: number; y: number }): void => {
+    dispatchPhaseUiCommand({ type: "map-clear-fuel-break", tile });
+  };
+
+  const dispatchRetaskCommand = (tile: { x: number; y: number }): void => {
+    dispatchPhaseUiCommand({ type: "map-retask", tile });
+  };
+
+  const dispatchFormationCommand = (start: { x: number; y: number }, end: { x: number; y: number }): void => {
+    dispatchPhaseUiCommand({ type: "map-formation", start, end });
+  };
+
+  const dispatchTownAlertCommand = (townId: number, direction: "raise" | "lower"): boolean => {
+    const town = world.towns.find((entry) => entry.id === townId) ?? null;
+    if (!town) {
+      return false;
+    }
+    const previousPosture = town.alertPosture;
+    const previousCooldown = town.alertCooldownDays;
+    const previousEvacState = town.evacState;
+    dispatchPhaseUiCommand({ type: "town-alert", townId, direction });
+    return (
+      town.alertPosture !== previousPosture ||
+      town.alertCooldownDays !== previousCooldown ||
+      town.evacState !== previousEvacState
+    );
+  };
+
   const selectAndPanToTruck = (
     truck: RenderSim["units"][number],
     options?: { truckScope?: boolean; toggle?: boolean; append?: boolean }
@@ -3230,7 +3266,7 @@ export const createThreeTest = (
       if (townId === null) {
         return;
       }
-      if (raiseTownAlertPosture(world, townId)) {
+      if (dispatchTownAlertCommand(townId, "raise")) {
         inputState.lastInteractionTime = performance.now();
       }
       updateTownMetrics();
@@ -3243,7 +3279,7 @@ export const createThreeTest = (
       if (townId === null) {
         return;
       }
-      if (lowerTownAlertPosture(world, townId)) {
+      if (dispatchTownAlertCommand(townId, "lower")) {
         inputState.lastInteractionTime = performance.now();
       }
       updateTownMetrics();
@@ -4143,16 +4179,16 @@ export const createThreeTest = (
     suppressSuccessStatus = false
   ): Promise<void> => {
     if (!navigator.clipboard?.writeText) {
-      setStatus(world, `Clipboard is unavailable for cell ${tileX}, ${tileY}.`);
+      dispatchStatusCommand(`Clipboard is unavailable for cell ${tileX}, ${tileY}.`);
       return;
     }
     try {
       await navigator.clipboard.writeText(payload);
       if (!suppressSuccessStatus) {
-        setStatus(world, `Copied cell ${tileX}, ${tileY} to the clipboard.`);
+        dispatchStatusCommand(`Copied cell ${tileX}, ${tileY} to the clipboard.`);
       }
     } catch {
-      setStatus(world, `Clipboard access failed for cell ${tileX}, ${tileY}.`);
+      dispatchStatusCommand(`Clipboard access failed for cell ${tileX}, ${tileY}.`);
     }
   };
 
@@ -4662,7 +4698,6 @@ export const createThreeTest = (
     clearDebugHover();
     cancelFormationDrag();
   };
-  const pointerCommandRng = { next: (): number => Math.random() };
 
   const handleKeyDown = (event: KeyboardEvent): void => {
     if (!running) {
@@ -4702,7 +4737,7 @@ export const createThreeTest = (
     const x = (event.clientX - rect.left) * scaleX;
     const y = (event.clientY - rect.top) * scaleY;
     if (!THREE_TEST_DISABLE_HUD) {
-      const handled = handleHudClick(x, y, world, hudState);
+      const handled = handleHudClick(x, y, world, hudState, dispatchSelectionAction);
       if (handled) {
         return;
       }
@@ -4715,22 +4750,14 @@ export const createThreeTest = (
     const clipboardPayload = inputState.debugCellEnabled
       ? buildCellClipboardPayload(tile.tileX, tile.tileY, { x: tile.worldX, y: tile.worldY })
       : null;
-    const handledPrimary = handleMapPrimaryTileClick({
-      state: world,
-      inputState,
-      rng: pointerCommandRng,
-      tile: mapTile,
-      shiftKey: event.shiftKey,
-      altKey: event.altKey
-    });
-    const handledClear = !handledPrimary
-      ? handleClearFuelBreakTileClick({
-          state: world,
-          inputState,
-          rng: pointerCommandRng,
-          tile: mapTile
-        })
-      : false;
+    const handledPrimary = world.deployMode !== "clear";
+    if (handledPrimary) {
+      dispatchMapPrimaryCommand(mapTile, { shiftKey: event.shiftKey, altKey: event.altKey });
+    }
+    const handledClear = !handledPrimary && world.deployMode === "clear" && world.phase === "maintenance";
+    if (handledClear) {
+      dispatchClearFuelBreakCommand(mapTile);
+    }
     if (clipboardPayload) {
       void copyCellStateToClipboard(clipboardPayload, tile.tileX, tile.tileY, handledPrimary || handledClear);
     }
@@ -4776,13 +4803,19 @@ export const createThreeTest = (
       return;
     }
     if (dragDistance < FORMATION_DRAG_THRESHOLD_PX) {
-      const handledRetask = handleMapRetaskTileCommand({ state: world, inputState, tile: end });
+      const handledRetask = world.selectedUnitIds.length > 0;
+      if (handledRetask) {
+        dispatchRetaskCommand(end);
+      }
       if (handledRetask) {
         inputState.lastInteractionTime = performance.now();
       }
       return;
     }
-    const handledFormation = handleMapFormationDragCommand({ state: world, inputState, start, end });
+    const handledFormation = world.selectedUnitIds.length > 0;
+    if (handledFormation) {
+      dispatchFormationCommand(start, end);
+    }
     if (handledFormation) {
       inputState.lastInteractionTime = performance.now();
     }

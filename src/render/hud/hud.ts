@@ -10,7 +10,6 @@ import type { HudInput, HudWidget } from "./widgets/hudWidget.js";
 import { ClimateChartWidget } from "./widgets/ClimateChartWidget.js";
 import { MinimapWidget } from "./widgets/MinimapWidget.js";
 import { DebugWidget } from "./widgets/DebugWidget.js";
-import { cancelSkipToNextFire } from "../../sim/index.js";
 
 const clamp = (value: number, min: number, max: number): number => Math.min(max, Math.max(min, value));
 const formatNumber = (value: number, digits = 3): string => (Number.isFinite(value) ? value.toFixed(digits) : "inf");
@@ -101,6 +100,8 @@ const wrapText = (ctx: CanvasRenderingContext2D, text: string, maxWidth: number)
 const SPEED_BUTTON_WIDTH = 124;
 const SPEED_BUTTON_HEIGHT = 24;
 const SPEED_BUTTON_SIDE = 22;
+
+type HudActionDispatcher = (action: string, payload?: Record<string, string>) => void;
 
 const getSpeedButtonRect = (rect: Rect): Rect => ({
   x: rect.x + rect.width - 12 - SPEED_BUTTON_WIDTH,
@@ -391,7 +392,8 @@ export const handleHudClick = (
   x: number,
   y: number,
   world: WorldState,
-  ui: HudState
+  ui: HudState,
+  dispatchAction: HudActionDispatcher
 ): boolean => {
   const layout = buildHudLayout({ width: ui.viewport.width, height: ui.viewport.height });
   const speedRect = getSpeedButtonRect(layout.topBar);
@@ -407,15 +409,7 @@ export const handleHudClick = (
     } else {
       next = (current + 1) % len;
     }
-    if (world.skipToNextFire) {
-      cancelSkipToNextFire(world, "Skip to next fire cancelled.");
-    }
-    world.timeSpeedIndex = next;
-    if (world.simTimeMode === "incident") {
-      world.incidentTimeSpeedIndex = next;
-    } else {
-      world.strategicTimeSpeedIndex = next;
-    }
+    dispatchAction(`time-speed-${next}`);
     addToast(
       ui,
       `${world.simTimeMode === "incident" ? "Incident" : "Strategic"} time ${formatSpeedValue(

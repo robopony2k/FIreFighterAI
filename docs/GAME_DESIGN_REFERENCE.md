@@ -75,6 +75,7 @@ Design intent:
 - Trucks carry crews; crews are not independently commanded.
 - Formations allow tactical positioning.
 - Deployments should be fast, readable, and predictable.
+- In 3D, hose streams should read as gravity-affected ballistic arcs; when terrain or structures mask the target, the visual stream should lift its attack angle and impact the first visible obstruction instead of drawing a straight-through cone.
 
 ## Progression and Unlocks
 

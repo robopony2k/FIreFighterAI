@@ -3,6 +3,12 @@ import type { EffectsState } from "../core/effectsState.js";
 import type { WorldState } from "../core/state.js";
 import type { WaterSprayMode } from "../core/types.js";
 import {
+  resolveWaterStreamTrajectory,
+  sampleWaterStreamTrajectoryPoint,
+  sampleWaterStreamTrajectoryTangent,
+  type WaterStreamTrajectory
+} from "../systems/fire/rendering/waterStreamTrajectory.js";
+import {
   FIREFIGHTER_MODEL_ROOT_Y_OFFSET,
   createFirefighterVisualState,
   updateFirefighterVisualState,
@@ -14,6 +20,7 @@ import type { TerrainRenderSurface } from "./threeTestTerrain.js";
 const MAX_HOSE_SEGMENTS = 1024;
 const MAX_WATER_PARTICLES = 4096;
 const MAX_WATER_STREAMS = 768;
+const MAX_WATER_TUBE_SEGMENTS = MAX_WATER_STREAMS * 10;
 const MAX_WATER_IMPACTS = MAX_WATER_STREAMS * 3;
 const HOSE_BASE_Y = 0.08;
 const HOSE_RADIUS = 0.017;
@@ -32,9 +39,6 @@ const WATER_IMPACT_EDGE_COLOR = new THREE.Color(0x8edcff);
 const TAU = Math.PI * 2;
 const DEFAULT_FIREFIGHTER_TURN_RESPONSE = 18;
 const ENGAGED_FIREFIGHTER_TURN_RESPONSE = 10.5;
-const STREAM_NOZZLE_RESPONSE = 12.5;
-const STREAM_TIP_RESPONSE = 7.2;
-const STREAM_LENGTH_RESPONSE = 11;
 
 const clamp = (value: number, min: number, max: number): number => Math.max(min, Math.min(max, value));
 const fract = (value: number): number => value - Math.floor(value);
@@ -42,20 +46,6 @@ const expFactor = (rate: number, dtSeconds: number): number =>
   1 - Math.exp(-Math.max(0, rate) * Math.max(0, dtSeconds));
 const approachExp = (current: number, target: number, rate: number, dtSeconds: number): number =>
   current + (target - current) * expFactor(rate, dtSeconds);
-const approachUnitVectorExp = (
-  current: THREE.Vector3,
-  target: THREE.Vector3,
-  rate: number,
-  dtSeconds: number
-): THREE.Vector3 => {
-  current.lerp(target, expFactor(rate, dtSeconds));
-  if (current.lengthSq() <= 1e-8) {
-    current.copy(target);
-  } else {
-    current.normalize();
-  }
-  return current;
-};
 
 const sprayModeToValue = (mode?: WaterSprayMode): number => {
   if (mode === "precision") {
@@ -65,6 +55,16 @@ const sprayModeToValue = (mode?: WaterSprayMode): number => {
     return 2;
   }
   return 1;
+};
+
+const sprayValueToMode = (modeValue: number): WaterSprayMode => {
+  if (modeValue <= 0.5) {
+    return "precision";
+  }
+  if (modeValue >= 1.5) {
+    return "suppression";
+  }
+  return "balanced";
 };
 
 const defaultVolumeForMode = (modeValue: number): number => {
@@ -86,6 +86,112 @@ const defaultPulseForMode = (modeValue: number): number => {
   }
   return 6.3;
 };
+
+const curvedTubeVertexShared = `
+  attribute vec3 aSource;
+  attribute vec2 aPlanarDir;
+  attribute vec4 aFxParamsA;
+  attribute vec4 aFxParamsB;
+  attribute vec4 aFxParamsC;
+
+  float streamMode() {
+    return aFxParamsA.x;
+  }
+
+  float streamVolume() {
+    return aFxParamsA.y;
+  }
+
+  float streamSeed() {
+    return aFxParamsA.z;
+  }
+
+  float streamIntensity() {
+    return aFxParamsA.w;
+  }
+
+  float streamNozzleRatio() {
+    return aFxParamsB.x;
+  }
+
+  float streamHorizontalDistance() {
+    return aFxParamsB.y;
+  }
+
+  float streamFlightTime() {
+    return aFxParamsB.z;
+  }
+
+  float streamLaunchVelocityY() {
+    return aFxParamsB.w;
+  }
+
+  float streamGravity() {
+    return aFxParamsC.x;
+  }
+
+  float streamAlongStart() {
+    return aFxParamsC.y;
+  }
+
+  float streamAlongSpan() {
+    return aFxParamsC.z;
+  }
+
+  float streamRadius() {
+    return aFxParamsC.w;
+  }
+
+  float resolveCurveAlong(float alongLocal) {
+    return clamp(streamAlongStart() + alongLocal * streamAlongSpan(), 0.0, 1.0);
+  }
+
+  vec3 sampleCurveCenter(float curveAlong) {
+    float along = clamp(curveAlong, 0.0, 1.0);
+    float dist = streamHorizontalDistance() * along;
+    float t = streamFlightTime() * along;
+    return vec3(
+      aSource.x + aPlanarDir.x * dist,
+      aSource.y + streamLaunchVelocityY() * t - 0.5 * streamGravity() * t * t,
+      aSource.z + aPlanarDir.y * dist
+    );
+  }
+
+  vec3 sampleCurveTangent(float curveAlong) {
+    float along = clamp(curveAlong, 0.0, 1.0);
+    float flightTime = max(streamFlightTime(), 0.0001);
+    float t = flightTime * along;
+    float horizontalSpeed = streamHorizontalDistance() / flightTime;
+    vec3 tangent = vec3(
+      aPlanarDir.x * horizontalSpeed,
+      streamLaunchVelocityY() - streamGravity() * t,
+      aPlanarDir.y * horizontalSpeed
+    );
+    float tangentLen = length(tangent);
+    if (tangentLen <= 0.0001) {
+      return normalize(vec3(aPlanarDir.x, 0.0, aPlanarDir.y));
+    }
+    return tangent / tangentLen;
+  }
+
+  void buildCurveBasis(vec3 tangent, out vec3 basisA, out vec3 basisB) {
+    vec3 refUp = abs(tangent.y) > 0.94 ? vec3(1.0, 0.0, 0.0) : vec3(0.0, 1.0, 0.0);
+    basisA = cross(tangent, refUp);
+    float basisALen = length(basisA);
+    if (basisALen <= 0.0001) {
+      basisA = vec3(1.0, 0.0, 0.0);
+    } else {
+      basisA /= basisALen;
+    }
+    basisB = cross(basisA, tangent);
+    float basisBLen = length(basisB);
+    if (basisBLen <= 0.0001) {
+      basisB = vec3(0.0, 0.0, 1.0);
+    } else {
+      basisB /= basisBLen;
+    }
+  }
+`;
 
 const waterVertexShader = `
   precision highp float;
@@ -179,11 +285,7 @@ const waterFragmentShader = `
 const waterJetCoreVertexShader = `
   precision highp float;
   uniform float uTimeSec;
-  attribute float aMode;
-  attribute float aVolume;
-  attribute float aSeed;
-  attribute float aIntensity;
-  attribute float aNozzleRatio;
+  ${curvedTubeVertexShared}
   varying float vAlong;
   varying float vRadial;
   varying float vMode;
@@ -195,35 +297,45 @@ const waterJetCoreVertexShader = `
   varying vec3 vWorldNormal;
   void main() {
     float along = clamp(position.y + 0.5, 0.0, 1.0);
-    float mode01 = clamp(aMode * 0.5, 0.0, 1.0);
-    float intensity = clamp(aIntensity, 0.0, 1.0);
-    float nozzleRatio = clamp(aNozzleRatio, 0.02, 1.0);
+    float curveAlong = resolveCurveAlong(along);
+    float mode = clamp(streamMode(), 0.0, 2.0);
+    float volume = clamp(streamVolume(), 0.0, 1.0);
+    float seed = streamSeed();
+    float intensity = clamp(streamIntensity(), 0.0, 1.0);
+    float nozzleRatio = clamp(streamNozzleRatio(), 0.02, 1.0);
+    float mode01 = clamp(mode * 0.5, 0.0, 1.0);
     vec3 localPos = position;
     float growth = pow(smoothstep(0.0, 0.92, along), 0.88);
     float tipBloom = smoothstep(0.54, 1.0, along);
     float taper = 1.0 - smoothstep(0.96, 1.0, along) * 0.08;
-    float ripple = sin(along * mix(10.0, 6.2, mode01) - uTimeSec * mix(11.0, 7.2, mode01) + aSeed * 31.4159);
-    float sway = sin(along * 4.8 - uTimeSec * 3.2 + aSeed * 19.1);
+    float ripple = sin(along * mix(10.0, 6.2, mode01) - uTimeSec * mix(11.0, 7.2, mode01) + seed * 31.4159);
+    float sway = sin(along * 4.8 - uTimeSec * 3.2 + seed * 19.1);
     float targetWidth = mix(0.66, 0.92, mode01);
     float widthProfile = mix(nozzleRatio, targetWidth, growth) * taper;
     widthProfile *= mix(0.98, 1.08, pow(tipBloom, 0.82) * mix(0.4, 0.8, mode01));
-    widthProfile *= mix(0.98, 1.12, clamp(aVolume, 0.0, 1.0));
+    widthProfile *= mix(0.98, 1.12, volume);
     widthProfile *= mix(0.9, 1.0, intensity);
     widthProfile *= 1.0 + ripple * 0.005 * smoothstep(0.22, 0.9, along);
-    localPos.xz *= widthProfile;
+    localPos.xz *= widthProfile * max(streamRadius(), 0.0001);
     localPos.x += ripple * 0.002 * smoothstep(0.28, 0.94, along);
     localPos.z += sway * 0.0018 * smoothstep(0.36, 1.0, along);
     vAlong = along;
     vRadial = clamp(length(position.xz), 0.0, 1.0);
-    vMode = clamp(aMode, 0.0, 2.0);
-    vVolume = clamp(aVolume, 0.0, 1.0);
-    vSeed = aSeed;
+    vMode = mode;
+    vVolume = volume;
+    vSeed = seed;
     vIntensity = intensity;
-    vec4 worldPos = modelMatrix * instanceMatrix * vec4(localPos, 1.0);
+    vec3 curveCenter = sampleCurveCenter(curveAlong);
+    vec3 curveTangent = sampleCurveTangent(curveAlong);
+    vec3 basisA;
+    vec3 basisB;
+    buildCurveBasis(curveTangent, basisA, basisB);
+    vec3 worldPos = curveCenter + basisA * localPos.x + basisB * localPos.z;
     vWrap = uv.x;
-    vWorldPos = worldPos.xyz;
-    vWorldNormal = normalize(mat3(modelMatrix * instanceMatrix) * normal);
-    gl_Position = projectionMatrix * viewMatrix * worldPos;
+    vWorldPos = worldPos;
+    vec3 radialNormal = basisA * position.x + basisB * position.z;
+    vWorldNormal = normalize(length(radialNormal) <= 0.0001 ? basisB : radialNormal);
+    gl_Position = projectionMatrix * viewMatrix * vec4(worldPos, 1.0);
   }
 `;
 
@@ -281,11 +393,7 @@ const waterJetCoreFragmentShader = `
 const waterMistVertexShader = `
   precision highp float;
   uniform float uTimeSec;
-  attribute float aMode;
-  attribute float aVolume;
-  attribute float aSeed;
-  attribute float aIntensity;
-  attribute float aNozzleRatio;
+  ${curvedTubeVertexShared}
   varying float vAlong;
   varying float vRadial;
   varying float vMode;
@@ -297,8 +405,13 @@ const waterMistVertexShader = `
   varying vec3 vWorldNormal;
   void main() {
     float along = clamp(position.y + 0.5, 0.0, 1.0);
-    float mode01 = clamp(aMode * 0.5, 0.0, 1.0);
-    float nozzleRatio = clamp(aNozzleRatio, 0.02, 1.0);
+    float curveAlong = resolveCurveAlong(along);
+    float mode = clamp(streamMode(), 0.0, 2.0);
+    float volume = clamp(streamVolume(), 0.0, 1.0);
+    float seed = streamSeed();
+    float intensity = clamp(streamIntensity(), 0.0, 1.0);
+    float nozzleRatio = clamp(streamNozzleRatio(), 0.02, 1.0);
+    float mode01 = clamp(mode * 0.5, 0.0, 1.0);
     vec3 localPos = position;
     float growth = smoothstep(0.0, 0.84, along);
     float tipBloom = smoothstep(0.68, 1.0, along);
@@ -306,21 +419,27 @@ const waterMistVertexShader = `
     float targetWidth = mix(0.76, 1.28, mode01);
     float widthProfile = mix(sourceWidth, targetWidth, pow(growth, 0.72));
     widthProfile *= 1.0 + tipBloom * mix(0.1, 0.28, mode01);
-    widthProfile *= mix(0.98, 1.12, clamp(aVolume, 0.0, 1.0));
-    float ripple = sin(along * mix(7.0, 5.1, mode01) - uTimeSec * mix(6.8, 4.7, mode01) + aSeed * 27.0);
-    localPos.xz *= widthProfile * (1.0 + ripple * 0.008 * growth);
+    widthProfile *= mix(0.98, 1.12, volume);
+    float ripple = sin(along * mix(7.0, 5.1, mode01) - uTimeSec * mix(6.8, 4.7, mode01) + seed * 27.0);
+    localPos.xz *= widthProfile * max(streamRadius(), 0.0001) * (1.0 + ripple * 0.008 * growth);
     localPos.x += ripple * 0.003 * growth;
     vAlong = along;
     vRadial = clamp(length(position.xz), 0.0, 1.0);
-    vMode = clamp(aMode, 0.0, 2.0);
-    vVolume = clamp(aVolume, 0.0, 1.0);
-    vSeed = aSeed;
-    vIntensity = clamp(aIntensity, 0.0, 1.0);
-    vec4 worldPos = modelMatrix * instanceMatrix * vec4(localPos, 1.0);
+    vMode = mode;
+    vVolume = volume;
+    vSeed = seed;
+    vIntensity = intensity;
+    vec3 curveCenter = sampleCurveCenter(curveAlong);
+    vec3 curveTangent = sampleCurveTangent(curveAlong);
+    vec3 basisA;
+    vec3 basisB;
+    buildCurveBasis(curveTangent, basisA, basisB);
+    vec3 worldPos = curveCenter + basisA * localPos.x + basisB * localPos.z;
     vWrap = uv.x;
-    vWorldPos = worldPos.xyz;
-    vWorldNormal = normalize(mat3(modelMatrix * instanceMatrix) * normal);
-    gl_Position = projectionMatrix * viewMatrix * worldPos;
+    vWorldPos = worldPos;
+    vec3 radialNormal = basisA * position.x + basisB * position.z;
+    vWorldNormal = normalize(length(radialNormal) <= 0.0001 ? basisB : radialNormal);
+    gl_Position = projectionMatrix * viewMatrix * vec4(worldPos, 1.0);
   }
 `;
 
@@ -374,11 +493,7 @@ const waterMistFragmentShader = `
 const waterStreamBodyVertexShader = `
   precision highp float;
   uniform float uTimeSec;
-  attribute float aMode;
-  attribute float aVolume;
-  attribute float aSeed;
-  attribute float aIntensity;
-  attribute float aNozzleRatio;
+  ${curvedTubeVertexShared}
   varying float vAlong;
   varying float vMode;
   varying float vVolume;
@@ -389,28 +504,38 @@ const waterStreamBodyVertexShader = `
   varying vec3 vWorldNormal;
   void main() {
     float along = clamp(position.y + 0.5, 0.0, 1.0);
-    float mode01 = clamp(aMode * 0.5, 0.0, 1.0);
-    float intensity = clamp(aIntensity, 0.0, 1.0);
-    float nozzleRatio = clamp(aNozzleRatio, 0.02, 1.0);
+    float curveAlong = resolveCurveAlong(along);
+    float mode = clamp(streamMode(), 0.0, 2.0);
+    float volume = clamp(streamVolume(), 0.0, 1.0);
+    float seed = streamSeed();
+    float intensity = clamp(streamIntensity(), 0.0, 1.0);
+    float nozzleRatio = clamp(streamNozzleRatio(), 0.02, 1.0);
+    float mode01 = clamp(mode * 0.5, 0.0, 1.0);
     vec3 localPos = position;
     float growth = pow(smoothstep(0.0, 0.94, along), 0.86);
     float tipBloom = smoothstep(0.72, 1.0, along);
-    float pulse = 1.0 + sin(along * mix(8.0, 5.6, mode01) - uTimeSec * mix(4.4, 3.0, mode01) + aSeed * 27.0) * 0.015;
+    float pulse = 1.0 + sin(along * mix(8.0, 5.6, mode01) - uTimeSec * mix(4.4, 3.0, mode01) + seed * 27.0) * 0.015;
     float widthProfile = mix(nozzleRatio, 1.0, growth);
     widthProfile *= pulse;
     widthProfile *= mix(0.98, 1.02, intensity);
     widthProfile *= 1.0 + tipBloom * mix(0.02, 0.05, mode01);
-    localPos.xz *= widthProfile;
+    localPos.xz *= widthProfile * max(streamRadius(), 0.0001);
     vAlong = along;
-    vMode = clamp(aMode, 0.0, 2.0);
-    vVolume = clamp(aVolume, 0.0, 1.0);
-    vSeed = aSeed;
+    vMode = mode;
+    vVolume = volume;
+    vSeed = seed;
     vIntensity = intensity;
-    vec4 worldPos = modelMatrix * instanceMatrix * vec4(localPos, 1.0);
+    vec3 curveCenter = sampleCurveCenter(curveAlong);
+    vec3 curveTangent = sampleCurveTangent(curveAlong);
+    vec3 basisA;
+    vec3 basisB;
+    buildCurveBasis(curveTangent, basisA, basisB);
+    vec3 worldPos = curveCenter + basisA * localPos.x + basisB * localPos.z;
     vWrap = uv.x;
-    vWorldPos = worldPos.xyz;
-    vWorldNormal = normalize(mat3(modelMatrix * instanceMatrix) * normal);
-    gl_Position = projectionMatrix * viewMatrix * worldPos;
+    vWorldPos = worldPos;
+    vec3 radialNormal = basisA * position.x + basisB * position.z;
+    vWorldNormal = normalize(length(radialNormal) <= 0.0001 ? basisB : radialNormal);
+    gl_Position = projectionMatrix * viewMatrix * vec4(worldPos, 1.0);
   }
 `;
 
@@ -531,6 +656,7 @@ type SprayStreamAggregate = {
 };
 
 type SprayStreamVisualState = {
+  trajectory: WaterStreamTrajectory;
   direction: THREE.Vector3;
   nozzleDirection: THREE.Vector3;
   tipDirection: THREE.Vector3;
@@ -551,54 +677,17 @@ type SprayStreamVisualState = {
   seed: number;
 };
 
-const writeStreamCurveControlPoint = (
-  visual: SprayStreamVisualState,
-  target: THREE.Vector3
-): THREE.Vector3 => {
-  const controlRatio = visual.mode <= 0.5 ? 0.46 : visual.mode >= 1.5 ? 0.38 : 0.42;
-  const controlDistance = visual.length * controlRatio;
-  return target.set(
-    visual.sourceX + visual.nozzleDirection.x * controlDistance,
-    visual.sourceY + visual.nozzleDirection.y * controlDistance,
-    visual.sourceZ + visual.nozzleDirection.z * controlDistance
-  );
-};
-
 const sampleStreamCurvePoint = (
   visual: SprayStreamVisualState,
   along01: number,
-  controlPoint: THREE.Vector3,
   target: THREE.Vector3
-): THREE.Vector3 => {
-  const t = clamp(along01, 0, 1);
-  const invT = 1 - t;
-  return target.set(
-    invT * invT * visual.sourceX + 2 * invT * t * controlPoint.x + t * t * visual.tipX,
-    invT * invT * visual.sourceY + 2 * invT * t * controlPoint.y + t * t * visual.tipY,
-    invT * invT * visual.sourceZ + 2 * invT * t * controlPoint.z + t * t * visual.tipZ
-  );
-};
+): THREE.Vector3 => sampleWaterStreamTrajectoryPoint(visual.trajectory, along01, target);
 
 const sampleStreamCurveTangent = (
   visual: SprayStreamVisualState,
   along01: number,
-  controlPoint: THREE.Vector3,
   target: THREE.Vector3
-): THREE.Vector3 => {
-  const t = clamp(along01, 0, 1);
-  const invT = 1 - t;
-  target.set(
-    2 * invT * (controlPoint.x - visual.sourceX) + 2 * t * (visual.tipX - controlPoint.x),
-    2 * invT * (controlPoint.y - visual.sourceY) + 2 * t * (visual.tipY - controlPoint.y),
-    2 * invT * (controlPoint.z - visual.sourceZ) + 2 * t * (visual.tipZ - controlPoint.z)
-  );
-  if (target.lengthSq() <= 1e-8) {
-    target.copy(visual.tipDirection);
-  } else {
-    target.normalize();
-  }
-  return target;
-};
+): THREE.Vector3 => sampleWaterStreamTrajectoryTangent(visual.trajectory, along01, target);
 
 export type WaterFxDebugControls = {
   streamBodyWidthScale: number;
@@ -819,58 +908,67 @@ export const createThreeTestUnitFxLayer = (scene: THREE.Scene): ThreeTestUnitFxL
   waterPoints.frustumCulled = false;
   waterPoints.renderOrder = 10;
   scene.add(waterPoints);
-  const createTubeBuffers = (): {
+  type CurvedTubeBuffers = {
     geometry: THREE.CylinderGeometry;
-    modeAttr: THREE.InstancedBufferAttribute;
-    volumeAttr: THREE.InstancedBufferAttribute;
-    seedAttr: THREE.InstancedBufferAttribute;
-    intensityAttr: THREE.InstancedBufferAttribute;
-    nozzleRatioAttr: THREE.InstancedBufferAttribute;
-  } => {
-    const geometry = new THREE.CylinderGeometry(1, 1, 1, 18, 12, true);
-    const modeAttr = new THREE.InstancedBufferAttribute(new Float32Array(MAX_WATER_STREAMS), 1);
-    const volumeAttr = new THREE.InstancedBufferAttribute(new Float32Array(MAX_WATER_STREAMS), 1);
-    const seedAttr = new THREE.InstancedBufferAttribute(new Float32Array(MAX_WATER_STREAMS), 1);
-    const intensityAttr = new THREE.InstancedBufferAttribute(new Float32Array(MAX_WATER_STREAMS), 1);
-    const nozzleRatioAttr = new THREE.InstancedBufferAttribute(new Float32Array(MAX_WATER_STREAMS), 1);
-    modeAttr.setUsage(THREE.DynamicDrawUsage);
-    volumeAttr.setUsage(THREE.DynamicDrawUsage);
-    seedAttr.setUsage(THREE.DynamicDrawUsage);
-    intensityAttr.setUsage(THREE.DynamicDrawUsage);
-    nozzleRatioAttr.setUsage(THREE.DynamicDrawUsage);
-    geometry.setAttribute("aMode", modeAttr);
-    geometry.setAttribute("aVolume", volumeAttr);
-    geometry.setAttribute("aSeed", seedAttr);
-    geometry.setAttribute("aIntensity", intensityAttr);
-    geometry.setAttribute("aNozzleRatio", nozzleRatioAttr);
-    return { geometry, modeAttr, volumeAttr, seedAttr, intensityAttr, nozzleRatioAttr };
+    sourceAttr: THREE.InstancedBufferAttribute;
+    planarDirAttr: THREE.InstancedBufferAttribute;
+    fxParamsAAttr: THREE.InstancedBufferAttribute;
+    fxParamsBAttr: THREE.InstancedBufferAttribute;
+    fxParamsCAttr: THREE.InstancedBufferAttribute;
   };
 
-  const createStreamBodyBuffers = (): {
-    geometry: THREE.CylinderGeometry;
-    modeAttr: THREE.InstancedBufferAttribute;
-    volumeAttr: THREE.InstancedBufferAttribute;
-    seedAttr: THREE.InstancedBufferAttribute;
-    intensityAttr: THREE.InstancedBufferAttribute;
-    nozzleRatioAttr: THREE.InstancedBufferAttribute;
-  } => {
+  const createTubeBuffers = (): CurvedTubeBuffers => {
+    const geometry = new THREE.CylinderGeometry(1, 1, 1, 18, 12, true);
+    const sourceAttr = new THREE.InstancedBufferAttribute(new Float32Array(MAX_WATER_TUBE_SEGMENTS * 3), 3);
+    const planarDirAttr = new THREE.InstancedBufferAttribute(new Float32Array(MAX_WATER_TUBE_SEGMENTS * 2), 2);
+    const fxParamsAAttr = new THREE.InstancedBufferAttribute(new Float32Array(MAX_WATER_TUBE_SEGMENTS * 4), 4);
+    const fxParamsBAttr = new THREE.InstancedBufferAttribute(new Float32Array(MAX_WATER_TUBE_SEGMENTS * 4), 4);
+    const fxParamsCAttr = new THREE.InstancedBufferAttribute(new Float32Array(MAX_WATER_TUBE_SEGMENTS * 4), 4);
+    sourceAttr.setUsage(THREE.DynamicDrawUsage);
+    planarDirAttr.setUsage(THREE.DynamicDrawUsage);
+    fxParamsAAttr.setUsage(THREE.DynamicDrawUsage);
+    fxParamsBAttr.setUsage(THREE.DynamicDrawUsage);
+    fxParamsCAttr.setUsage(THREE.DynamicDrawUsage);
+    geometry.setAttribute("aSource", sourceAttr);
+    geometry.setAttribute("aPlanarDir", planarDirAttr);
+    geometry.setAttribute("aFxParamsA", fxParamsAAttr);
+    geometry.setAttribute("aFxParamsB", fxParamsBAttr);
+    geometry.setAttribute("aFxParamsC", fxParamsCAttr);
+    return {
+      geometry,
+      sourceAttr,
+      planarDirAttr,
+      fxParamsAAttr,
+      fxParamsBAttr,
+      fxParamsCAttr
+    };
+  };
+
+  const createStreamBodyBuffers = (): CurvedTubeBuffers => {
     const geometry = new THREE.CylinderGeometry(1, 0.42, 1, 22, 14, false);
-    const modeAttr = new THREE.InstancedBufferAttribute(new Float32Array(MAX_WATER_STREAMS), 1);
-    const volumeAttr = new THREE.InstancedBufferAttribute(new Float32Array(MAX_WATER_STREAMS), 1);
-    const seedAttr = new THREE.InstancedBufferAttribute(new Float32Array(MAX_WATER_STREAMS), 1);
-    const intensityAttr = new THREE.InstancedBufferAttribute(new Float32Array(MAX_WATER_STREAMS), 1);
-    const nozzleRatioAttr = new THREE.InstancedBufferAttribute(new Float32Array(MAX_WATER_STREAMS), 1);
-    modeAttr.setUsage(THREE.DynamicDrawUsage);
-    volumeAttr.setUsage(THREE.DynamicDrawUsage);
-    seedAttr.setUsage(THREE.DynamicDrawUsage);
-    intensityAttr.setUsage(THREE.DynamicDrawUsage);
-    nozzleRatioAttr.setUsage(THREE.DynamicDrawUsage);
-    geometry.setAttribute("aMode", modeAttr);
-    geometry.setAttribute("aVolume", volumeAttr);
-    geometry.setAttribute("aSeed", seedAttr);
-    geometry.setAttribute("aIntensity", intensityAttr);
-    geometry.setAttribute("aNozzleRatio", nozzleRatioAttr);
-    return { geometry, modeAttr, volumeAttr, seedAttr, intensityAttr, nozzleRatioAttr };
+    const sourceAttr = new THREE.InstancedBufferAttribute(new Float32Array(MAX_WATER_TUBE_SEGMENTS * 3), 3);
+    const planarDirAttr = new THREE.InstancedBufferAttribute(new Float32Array(MAX_WATER_TUBE_SEGMENTS * 2), 2);
+    const fxParamsAAttr = new THREE.InstancedBufferAttribute(new Float32Array(MAX_WATER_TUBE_SEGMENTS * 4), 4);
+    const fxParamsBAttr = new THREE.InstancedBufferAttribute(new Float32Array(MAX_WATER_TUBE_SEGMENTS * 4), 4);
+    const fxParamsCAttr = new THREE.InstancedBufferAttribute(new Float32Array(MAX_WATER_TUBE_SEGMENTS * 4), 4);
+    sourceAttr.setUsage(THREE.DynamicDrawUsage);
+    planarDirAttr.setUsage(THREE.DynamicDrawUsage);
+    fxParamsAAttr.setUsage(THREE.DynamicDrawUsage);
+    fxParamsBAttr.setUsage(THREE.DynamicDrawUsage);
+    fxParamsCAttr.setUsage(THREE.DynamicDrawUsage);
+    geometry.setAttribute("aSource", sourceAttr);
+    geometry.setAttribute("aPlanarDir", planarDirAttr);
+    geometry.setAttribute("aFxParamsA", fxParamsAAttr);
+    geometry.setAttribute("aFxParamsB", fxParamsBAttr);
+    geometry.setAttribute("aFxParamsC", fxParamsCAttr);
+    return {
+      geometry,
+      sourceAttr,
+      planarDirAttr,
+      fxParamsAAttr,
+      fxParamsBAttr,
+      fxParamsCAttr
+    };
   };
 
   const jetCoreBuffers = createTubeBuffers();
@@ -921,17 +1019,17 @@ export const createThreeTestUnitFxLayer = (scene: THREE.Scene): ThreeTestUnitFxL
     blending: THREE.NormalBlending,
     toneMapped: false
   });
-  const jetCores = new THREE.InstancedMesh(jetCoreBuffers.geometry, jetCoreMaterial, MAX_WATER_STREAMS);
+  const jetCores = new THREE.InstancedMesh(jetCoreBuffers.geometry, jetCoreMaterial, MAX_WATER_TUBE_SEGMENTS);
   jetCores.count = 0;
   jetCores.frustumCulled = false;
   jetCores.renderOrder = 13.2;
   scene.add(jetCores);
-  const streamBodies = new THREE.InstancedMesh(streamBodyBuffers.geometry, streamBodyMaterial, MAX_WATER_STREAMS);
+  const streamBodies = new THREE.InstancedMesh(streamBodyBuffers.geometry, streamBodyMaterial, MAX_WATER_TUBE_SEGMENTS);
   streamBodies.count = 0;
   streamBodies.frustumCulled = false;
   streamBodies.renderOrder = 13;
   scene.add(streamBodies);
-  const mistShells = new THREE.InstancedMesh(mistShellBuffers.geometry, mistShellMaterial, MAX_WATER_STREAMS);
+  const mistShells = new THREE.InstancedMesh(mistShellBuffers.geometry, mistShellMaterial, MAX_WATER_TUBE_SEGMENTS);
   mistShells.count = 0;
   mistShells.frustumCulled = false;
   mistShells.renderOrder = 12.4;
@@ -979,16 +1077,12 @@ export const createThreeTestUnitFxLayer = (scene: THREE.Scene): ThreeTestUnitFxL
   scene.add(impactPoints);
 
   const sprayMatrix = new THREE.Matrix4();
-  const sprayMidpoint = new THREE.Vector3();
-  const sprayQuaternion = new THREE.Quaternion();
-  const sprayScale = new THREE.Vector3(1, 1, 1);
   const streamTargetDirection = new THREE.Vector3();
   const streamTargetPoint = new THREE.Vector3();
   const streamBaseDirection = new THREE.Vector3();
   const swayAxisA = new THREE.Vector3();
   const swayAxisB = new THREE.Vector3();
   const swayTargetPoint = new THREE.Vector3();
-  const streamCurveControlPoint = new THREE.Vector3();
   const streamCurvePoint = new THREE.Vector3();
   const streamCurveTangent = new THREE.Vector3();
   const swayFallbackAxis = new THREE.Vector3(1, 0, 0);
@@ -1066,6 +1160,13 @@ export const createThreeTestUnitFxLayer = (scene: THREE.Scene): ThreeTestUnitFxL
       const tileX = (worldX / Math.max(0.0001, terrainSize.width) + 0.5) * cols;
       const tileY = (worldZ / Math.max(0.0001, terrainSize.depth) + 0.5) * rows;
       return sampleHeightAt(tileX, tileY);
+    };
+    const sampleWorldObstructionAt = (worldX: number, worldZ: number): number => {
+      const tileX = (worldX / Math.max(0.0001, terrainSize.width) + 0.5) * cols;
+      const tileY = (worldZ / Math.max(0.0001, terrainSize.depth) + 0.5) * rows;
+      return surface.obstructionHeightAtTileCoordWorld
+        ? surface.obstructionHeightAtTileCoordWorld(tileX, tileY)
+        : sampleHeightAt(tileX, tileY);
     };
 
     const resolveInterpolatedPosition = (
@@ -1227,9 +1328,9 @@ export const createThreeTestUnitFxLayer = (scene: THREE.Scene): ThreeTestUnitFxL
     let impactCount = 0;
     activeSourceIds.forEach((sourceId) => {
       if (
-        streamBodyCount >= MAX_WATER_STREAMS &&
-        jetCoreCount >= MAX_WATER_STREAMS &&
-        mistShellCount >= MAX_WATER_STREAMS &&
+        streamBodyCount >= MAX_WATER_TUBE_SEGMENTS &&
+        jetCoreCount >= MAX_WATER_TUBE_SEGMENTS &&
+        mistShellCount >= MAX_WATER_TUBE_SEGMENTS &&
         impactCount >= MAX_WATER_IMPACTS
       ) {
         return;
@@ -1241,10 +1342,18 @@ export const createThreeTestUnitFxLayer = (scene: THREE.Scene): ThreeTestUnitFxL
         if (!aggregate) {
           return;
         }
+        streamCurvePoint.set(aggregate.sourceX, aggregate.sourceY, aggregate.sourceZ);
+        streamTargetPoint.set(aggregate.targetX, aggregate.targetY, aggregate.targetZ);
+        const initialTrajectory = resolveWaterStreamTrajectory(
+          surface,
+          streamCurvePoint,
+          streamTargetPoint,
+          sprayValueToMode(aggregate.mode)
+        );
         streamTargetPoint.set(
-          aggregate.targetX - aggregate.sourceX,
-          aggregate.targetY - aggregate.sourceY,
-          aggregate.targetZ - aggregate.sourceZ
+          initialTrajectory.impactX - initialTrajectory.sourceX,
+          initialTrajectory.impactY - initialTrajectory.sourceY,
+          initialTrajectory.impactZ - initialTrajectory.sourceZ
         );
         if (streamTargetPoint.lengthSq() <= 1e-8) {
           streamTargetDirection.copy(fallbackStreamDirection);
@@ -1252,16 +1361,25 @@ export const createThreeTestUnitFxLayer = (scene: THREE.Scene): ThreeTestUnitFxL
           streamTargetDirection.copy(streamTargetPoint).normalize();
         }
         visual = {
+          trajectory: initialTrajectory,
           direction: streamTargetDirection.clone(),
-          nozzleDirection: streamTargetDirection.clone(),
-          tipDirection: streamTargetDirection.clone(),
-          sourceX: aggregate.sourceX,
-          sourceY: aggregate.sourceY,
-          sourceZ: aggregate.sourceZ,
-          length: worldPerTile * 1.2,
-          tipX: aggregate.targetX,
-          tipY: aggregate.targetY,
-          tipZ: aggregate.targetZ,
+          nozzleDirection: new THREE.Vector3(
+            initialTrajectory.launchDirectionX,
+            initialTrajectory.launchDirectionY,
+            initialTrajectory.launchDirectionZ
+          ),
+          tipDirection: new THREE.Vector3(
+            initialTrajectory.impactDirectionX,
+            initialTrajectory.impactDirectionY,
+            initialTrajectory.impactDirectionZ
+          ),
+          sourceX: initialTrajectory.sourceX,
+          sourceY: initialTrajectory.sourceY,
+          sourceZ: initialTrajectory.sourceZ,
+          length: Math.max(worldPerTile * 0.45, initialTrajectory.arcLength),
+          tipX: initialTrajectory.impactX,
+          tipY: initialTrajectory.impactY,
+          tipZ: initialTrajectory.impactZ,
           coreRadius: worldPerTile * 0.14,
           mistRadius: worldPerTile * 0.28,
           impactRadius: worldPerTile * 0.18,
@@ -1304,16 +1422,37 @@ export const createThreeTestUnitFxLayer = (scene: THREE.Scene): ThreeTestUnitFxL
           worldPerTile * (precisionMode ? 0.08 : suppressionMode ? 0.3 : 0.16) * debugControls.impactRadiusScale,
           targetMistRadius * (precisionMode ? 0.9 : suppressionMode ? 1.48 : 1.12) * debugControls.impactRadiusScale
         );
-        streamTargetPoint.set(
-          aggregate.targetX - visual.sourceX,
-          aggregate.targetY - visual.sourceY,
-          aggregate.targetZ - visual.sourceZ
+        streamCurvePoint.set(visual.sourceX, visual.sourceY, visual.sourceZ);
+        streamTargetPoint.set(aggregate.targetX, aggregate.targetY, aggregate.targetZ);
+        visual.trajectory = resolveWaterStreamTrajectory(
+          surface,
+          streamCurvePoint,
+          streamTargetPoint,
+          sprayValueToMode(aggregate.mode)
         );
-        const targetLength = Math.max(0.0001, streamTargetPoint.length());
-        streamTargetDirection.copy(streamTargetPoint).multiplyScalar(1 / targetLength);
-        approachUnitVectorExp(visual.nozzleDirection, streamTargetDirection, STREAM_NOZZLE_RESPONSE, deltaSeconds);
-        approachUnitVectorExp(visual.tipDirection, streamTargetDirection, STREAM_TIP_RESPONSE, deltaSeconds);
-        visual.length = approachExp(visual.length, targetLength, STREAM_LENGTH_RESPONSE, deltaSeconds);
+        visual.sourceX = visual.trajectory.sourceX;
+        visual.sourceY = visual.trajectory.sourceY;
+        visual.sourceZ = visual.trajectory.sourceZ;
+        visual.tipX = visual.trajectory.impactX;
+        visual.tipY = visual.trajectory.impactY;
+        visual.tipZ = visual.trajectory.impactZ;
+        visual.length = Math.max(worldPerTile * 0.45, visual.trajectory.arcLength);
+        visual.nozzleDirection.set(
+          visual.trajectory.launchDirectionX,
+          visual.trajectory.launchDirectionY,
+          visual.trajectory.launchDirectionZ
+        );
+        visual.tipDirection.set(
+          visual.trajectory.impactDirectionX,
+          visual.trajectory.impactDirectionY,
+          visual.trajectory.impactDirectionZ
+        );
+        streamTargetPoint.set(visual.tipX - visual.sourceX, visual.tipY - visual.sourceY, visual.tipZ - visual.sourceZ);
+        if (streamTargetPoint.lengthSq() <= 1e-8) {
+          visual.direction.copy(visual.nozzleDirection);
+        } else {
+          visual.direction.copy(streamTargetPoint).normalize();
+        }
         visual.mode = approachExp(visual.mode, aggregate.mode, 18, deltaSeconds);
         visual.volume = approachExp(visual.volume, aggregate.volume, 16, deltaSeconds);
         visual.flow = approachExp(
@@ -1372,16 +1511,6 @@ export const createThreeTestUnitFxLayer = (scene: THREE.Scene): ThreeTestUnitFxL
         );
       }
 
-      visual.tipX = visual.sourceX + visual.tipDirection.x * visual.length;
-      visual.tipY = visual.sourceY + visual.tipDirection.y * visual.length;
-      visual.tipZ = visual.sourceZ + visual.tipDirection.z * visual.length;
-      streamTargetPoint.set(visual.tipX - visual.sourceX, visual.tipY - visual.sourceY, visual.tipZ - visual.sourceZ);
-      if (streamTargetPoint.lengthSq() <= 1e-8) {
-        visual.direction.copy(visual.tipDirection);
-      } else {
-        visual.direction.copy(streamTargetPoint).normalize();
-      }
-
       if (!source && !aggregate && visual.intensity <= 0.015 && visual.flow <= 0.015) {
         sprayVisualBySourceId.delete(sourceId);
         return;
@@ -1433,70 +1562,95 @@ export const createThreeTestUnitFxLayer = (scene: THREE.Scene): ThreeTestUnitFxL
         coneEnvelopeRadius * (precisionModeVisual ? 0.78 : suppressionModeVisual ? 0.98 : 0.88),
         bodyRadius * (precisionModeVisual ? 1.025 : suppressionModeVisual ? 1.04 : 1.03)
       );
-      writeStreamCurveControlPoint(visual, streamCurveControlPoint);
       const sharedNozzleRadius = HOSE_RADIUS * (precisionModeVisual ? 1.18 : suppressionModeVisual ? 1.42 : 1.28);
-      const bodyNozzleRatio = clamp(sharedNozzleRadius / Math.max(bodyRadius * 0.42, 0.0001), 0.02, 1);
-      if (debugControls.showStreamBody && streamBodyCount < MAX_WATER_STREAMS) {
-        sprayMidpoint.set(
-          visual.sourceX + visual.direction.x * bodyLength * 0.5,
-          visual.sourceY + visual.direction.y * bodyLength * 0.5,
-          visual.sourceZ + visual.direction.z * bodyLength * 0.5
+      const shellEndAlong = clamp(shellLength / Math.max(visual.length, 0.0001), 0.12, 1);
+      const bodyEndAlong = clamp(bodyLength / Math.max(visual.length, 0.0001), 0.08, shellEndAlong);
+      const appendCurvedTubeInstance = (
+        count: number,
+        mesh: THREE.InstancedMesh,
+        buffers: CurvedTubeBuffers,
+        alongStart: number,
+        alongSpan: number,
+        targetRadius: number,
+        nozzleRatio: number,
+        intensity: number,
+        seed: number
+      ): number => {
+        if (count >= MAX_WATER_TUBE_SEGMENTS || alongSpan <= 0.0001 || targetRadius <= 0.0001) {
+          return count;
+        }
+        sprayMatrix.identity();
+        mesh.setMatrixAt(count, sprayMatrix);
+        buffers.sourceAttr.setXYZ(count, visual.sourceX, visual.sourceY, visual.sourceZ);
+        buffers.planarDirAttr.setXY(
+          count,
+          visual.trajectory.horizontalDirectionX,
+          visual.trajectory.horizontalDirectionZ
         );
-        sprayQuaternion.setFromUnitVectors(hoseUpAxis, visual.direction);
-        sprayScale.set(bodyRadius, bodyLength, bodyRadius);
-        sprayMatrix.compose(sprayMidpoint, sprayQuaternion, sprayScale);
-        streamBodies.setMatrixAt(streamBodyCount, sprayMatrix);
-        streamBodyBuffers.modeAttr.setX(streamBodyCount, clamp(visual.mode, 0, 2));
-        streamBodyBuffers.volumeAttr.setX(streamBodyCount, clamp(visual.volume, 0, 1));
-        streamBodyBuffers.seedAttr.setX(streamBodyCount, visual.seed);
-        streamBodyBuffers.intensityAttr.setX(
+        buffers.fxParamsAAttr.setXYZW(
+          count,
+          clamp(visual.mode, 0, 2),
+          clamp(visual.volume, 0, 1),
+          seed,
+          intensity
+        );
+        buffers.fxParamsBAttr.setXYZW(
+          count,
+          clamp(nozzleRatio, 0.04, 1),
+          Math.max(visual.trajectory.horizontalDistance, 0.0001),
+          Math.max(visual.trajectory.flightTime, 0.0001),
+          visual.trajectory.launchVelocityY
+        );
+        buffers.fxParamsCAttr.setXYZW(
+          count,
+          visual.trajectory.gravity,
+          clamp(alongStart, 0, 1),
+          clamp(alongSpan, 0, 1),
+          targetRadius
+        );
+        return count + 1;
+      };
+
+      if (debugControls.showStreamBody && streamBodyCount < MAX_WATER_TUBE_SEGMENTS) {
+        streamBodyCount = appendCurvedTubeInstance(
           streamBodyCount,
-          clamp(bodyStrength * debugControls.streamBodyOpacityScale, 0, 1)
+          streamBodies,
+          streamBodyBuffers,
+          0,
+          bodyEndAlong,
+          bodyRadius,
+          sharedNozzleRadius / Math.max(bodyRadius * 0.42, 0.0001),
+          clamp(bodyStrength * debugControls.streamBodyOpacityScale, 0, 1),
+          visual.seed
         );
-        streamBodyBuffers.nozzleRatioAttr.setX(streamBodyCount, bodyNozzleRatio);
-        streamBodyCount += 1;
       }
 
-      if (debugControls.showJetCore && jetCoreCount < MAX_WATER_STREAMS) {
-        const coreLength = visual.length;
-        const coreNozzleRatio = clamp(HOSE_RADIUS / Math.max(visual.coreRadius, 0.0001), 0.04, 1);
-        sprayMidpoint.set(
-          visual.sourceX + visual.direction.x * coreLength * 0.5,
-          visual.sourceY + visual.direction.y * coreLength * 0.5,
-          visual.sourceZ + visual.direction.z * coreLength * 0.5
+      if (debugControls.showJetCore && jetCoreCount < MAX_WATER_TUBE_SEGMENTS) {
+        jetCoreCount = appendCurvedTubeInstance(
+          jetCoreCount,
+          jetCores,
+          jetCoreBuffers,
+          0,
+          1,
+          visual.coreRadius,
+          HOSE_RADIUS / Math.max(visual.coreRadius, 0.0001),
+          coreStrength,
+          visual.seed
         );
-        sprayQuaternion.setFromUnitVectors(hoseUpAxis, visual.direction);
-        sprayScale.set(visual.coreRadius, coreLength, visual.coreRadius);
-        sprayMatrix.compose(sprayMidpoint, sprayQuaternion, sprayScale);
-        jetCores.setMatrixAt(jetCoreCount, sprayMatrix);
-        jetCoreBuffers.modeAttr.setX(jetCoreCount, clamp(visual.mode, 0, 2));
-        jetCoreBuffers.volumeAttr.setX(jetCoreCount, clamp(visual.volume, 0, 1));
-        jetCoreBuffers.seedAttr.setX(jetCoreCount, visual.seed);
-        jetCoreBuffers.intensityAttr.setX(jetCoreCount, coreStrength);
-        jetCoreBuffers.nozzleRatioAttr.setX(jetCoreCount, coreNozzleRatio);
-        jetCoreCount += 1;
       }
 
-      if (debugControls.showMistShell && mistShellCount < MAX_WATER_STREAMS) {
-        const mistNozzleRatio = clamp(sharedNozzleRadius / Math.max(mistRenderRadius, 0.0001), 0.04, 1);
-        sprayMidpoint.set(
-          visual.sourceX + visual.direction.x * shellLength * 0.5,
-          visual.sourceY + visual.direction.y * shellLength * 0.5,
-          visual.sourceZ + visual.direction.z * shellLength * 0.5
-        );
-        sprayQuaternion.setFromUnitVectors(hoseUpAxis, visual.direction);
-        sprayScale.set(mistRenderRadius, shellLength, mistRenderRadius);
-        sprayMatrix.compose(sprayMidpoint, sprayQuaternion, sprayScale);
-        mistShells.setMatrixAt(mistShellCount, sprayMatrix);
-        mistShellBuffers.modeAttr.setX(mistShellCount, clamp(visual.mode, 0, 2));
-        mistShellBuffers.volumeAttr.setX(mistShellCount, clamp(visual.volume, 0, 1));
-        mistShellBuffers.seedAttr.setX(mistShellCount, visual.seed + 0.37);
-        mistShellBuffers.intensityAttr.setX(
+      if (debugControls.showMistShell && mistShellCount < MAX_WATER_TUBE_SEGMENTS) {
+        mistShellCount = appendCurvedTubeInstance(
           mistShellCount,
-          shellStrength * (visual.mode <= 0.5 ? 0.48 : visual.mode >= 1.5 ? 0.96 : 0.72)
+          mistShells,
+          mistShellBuffers,
+          0,
+          shellEndAlong,
+          mistRenderRadius,
+          sharedNozzleRadius / Math.max(mistRenderRadius, 0.0001),
+          shellStrength * (visual.mode <= 0.5 ? 0.48 : visual.mode >= 1.5 ? 0.96 : 0.72),
+          visual.seed + 0.37
         );
-        mistShellBuffers.nozzleRatioAttr.setX(mistShellCount, mistNozzleRatio);
-        mistShellCount += 1;
       }
 
       if (debugControls.showImpact && impactCount < MAX_WATER_IMPACTS && renderFlow > 0.16) {
@@ -1505,11 +1659,11 @@ export const createThreeTestUnitFxLayer = (scene: THREE.Scene): ThreeTestUnitFxL
           Math.min(visual.length, shellLength - Math.max(worldPerTile * 0.04, mistRenderRadius * 0.04))
         );
         const impactAlong01 = clamp(impactAnchorDistance / Math.max(visual.length, 0.0001), 0, 1);
-        sampleStreamCurvePoint(visual, impactAlong01, streamCurveControlPoint, streamCurvePoint);
-        sampleStreamCurveTangent(visual, impactAlong01, streamCurveControlPoint, streamCurveTangent);
+        sampleStreamCurvePoint(visual, impactAlong01, streamCurvePoint);
+        sampleStreamCurveTangent(visual, impactAlong01, streamCurveTangent);
         const impactCenterX = streamCurvePoint.x;
         const impactCenterZ = streamCurvePoint.z;
-        const impactTerrainY = sampleWorldHeightAt(impactCenterX, impactCenterZ) + 0.03;
+        const impactTerrainY = sampleWorldObstructionAt(impactCenterX, impactCenterZ) + 0.03;
         const impactCenterY = Math.max(impactTerrainY, streamCurvePoint.y);
         const impactFootprintRadius = Math.max(
           visual.impactRadius,
@@ -1565,25 +1719,25 @@ export const createThreeTestUnitFxLayer = (scene: THREE.Scene): ThreeTestUnitFxL
     });
     streamBodies.count = streamBodyCount;
     streamBodies.instanceMatrix.needsUpdate = true;
-    streamBodyBuffers.modeAttr.needsUpdate = true;
-    streamBodyBuffers.volumeAttr.needsUpdate = true;
-    streamBodyBuffers.seedAttr.needsUpdate = true;
-    streamBodyBuffers.intensityAttr.needsUpdate = true;
-    streamBodyBuffers.nozzleRatioAttr.needsUpdate = true;
+    streamBodyBuffers.sourceAttr.needsUpdate = true;
+    streamBodyBuffers.planarDirAttr.needsUpdate = true;
+    streamBodyBuffers.fxParamsAAttr.needsUpdate = true;
+    streamBodyBuffers.fxParamsBAttr.needsUpdate = true;
+    streamBodyBuffers.fxParamsCAttr.needsUpdate = true;
     jetCores.count = jetCoreCount;
     jetCores.instanceMatrix.needsUpdate = true;
-    jetCoreBuffers.modeAttr.needsUpdate = true;
-    jetCoreBuffers.volumeAttr.needsUpdate = true;
-    jetCoreBuffers.seedAttr.needsUpdate = true;
-    jetCoreBuffers.intensityAttr.needsUpdate = true;
-    jetCoreBuffers.nozzleRatioAttr.needsUpdate = true;
+    jetCoreBuffers.sourceAttr.needsUpdate = true;
+    jetCoreBuffers.planarDirAttr.needsUpdate = true;
+    jetCoreBuffers.fxParamsAAttr.needsUpdate = true;
+    jetCoreBuffers.fxParamsBAttr.needsUpdate = true;
+    jetCoreBuffers.fxParamsCAttr.needsUpdate = true;
     mistShells.count = mistShellCount;
     mistShells.instanceMatrix.needsUpdate = true;
-    mistShellBuffers.modeAttr.needsUpdate = true;
-    mistShellBuffers.volumeAttr.needsUpdate = true;
-    mistShellBuffers.seedAttr.needsUpdate = true;
-    mistShellBuffers.intensityAttr.needsUpdate = true;
-    mistShellBuffers.nozzleRatioAttr.needsUpdate = true;
+    mistShellBuffers.sourceAttr.needsUpdate = true;
+    mistShellBuffers.planarDirAttr.needsUpdate = true;
+    mistShellBuffers.fxParamsAAttr.needsUpdate = true;
+    mistShellBuffers.fxParamsBAttr.needsUpdate = true;
+    mistShellBuffers.fxParamsCAttr.needsUpdate = true;
     impactGeometry.setDrawRange(0, Math.min(impactCount, impactPosAttr.count));
     impactPosAttr.needsUpdate = true;
     impactAlphaAttr.needsUpdate = true;
@@ -1646,7 +1800,12 @@ export const createThreeTestUnitFxLayer = (scene: THREE.Scene): ThreeTestUnitFxL
         particle.maxLife > 0
           ? clamp(1 - particle.life / particle.maxLife, 0, 1)
           : clamp(1 - particle.alpha, 0, 1);
-      const distFromSource = Math.hypot(wx - visual.sourceX, wz - visual.sourceZ);
+      const distFromSource =
+        (wx - visual.sourceX) * visual.trajectory.horizontalDirectionX +
+        (wz - visual.sourceZ) * visual.trajectory.horizontalDirectionZ;
+      if (distFromSource <= -worldPerTile * 0.1 || distFromSource >= visual.trajectory.horizontalDistance + worldPerTile * 0.24) {
+        continue;
+      }
       const distToTip = Math.hypot(wx - visual.tipX, wz - visual.tipZ);
       const breakupStart = visual.length * (modeValue <= 0.5 ? 0.84 : modeValue >= 1.5 ? 0.78 : 0.8);
       const tailInfluence = clamp(
@@ -1659,15 +1818,9 @@ export const createThreeTestUnitFxLayer = (scene: THREE.Scene): ThreeTestUnitFxL
       if (breakupInfluence <= 0.02 || particleLife01 < 0.32) {
         continue;
       }
-      writeStreamCurveControlPoint(visual, streamCurveControlPoint);
-      sampleStreamCurvePoint(
-        visual,
-        clamp(distFromSource / Math.max(visual.length, 0.0001), 0, 1),
-        streamCurveControlPoint,
-        streamCurvePoint
-      );
+      sampleStreamCurvePoint(visual, clamp(distFromSource / Math.max(visual.trajectory.horizontalDistance, 0.0001), 0, 1), streamCurvePoint);
       const expectedY = streamCurvePoint.y;
-      const terrainY = sampleWorldHeightAt(wx, wz) + 0.03;
+      const terrainY = sampleWorldObstructionAt(wx, wz) + 0.03;
       const wy = Math.max(terrainY, expectedY - worldPerTile * 0.04);
       const drawAlpha = clamp(
         particleAlpha *
@@ -1719,7 +1872,6 @@ export const createThreeTestUnitFxLayer = (scene: THREE.Scene): ThreeTestUnitFxL
         const volume = clamp(visual.volume, 0, 1);
         const suppressionMode = modeValue >= 1.5;
         const precisionMode = modeValue <= 0.5;
-        writeStreamCurveControlPoint(visual, streamCurveControlPoint);
 
         const sheetCount = precisionMode ? 16 : suppressionMode ? 36 : 24;
         const sheetSpeed = precisionMode ? 1.7 : suppressionMode ? 1.02 : 1.34;
@@ -1745,8 +1897,8 @@ export const createThreeTestUnitFxLayer = (scene: THREE.Scene): ThreeTestUnitFxL
           const radial = widthEnvelope * (shellBias + seedC * (1 - shellBias));
           const lateralA = Math.cos(angle) * radial;
           const lateralB = Math.sin(angle) * radial * (precisionMode ? 0.3 : suppressionMode ? 0.78 : 0.52);
-          sampleStreamCurvePoint(visual, along, streamCurveControlPoint, streamCurvePoint);
-          sampleStreamCurveTangent(visual, along, streamCurveControlPoint, streamBaseDirection);
+          sampleStreamCurvePoint(visual, along, streamCurvePoint);
+          sampleStreamCurveTangent(visual, along, streamBaseDirection);
           swayAxisA.crossVectors(streamBaseDirection, hoseUpAxis);
           if (swayAxisA.lengthSq() <= 0.000001) {
             swayAxisA.copy(swayFallbackAxis);
@@ -1764,7 +1916,7 @@ export const createThreeTestUnitFxLayer = (scene: THREE.Scene): ThreeTestUnitFxL
             streamCurvePoint.y + swayAxisA.y * lateralA + swayAxisB.y * lateralB,
             streamCurvePoint.z + swayAxisA.z * lateralA + swayAxisB.z * lateralB
           );
-          const terrainY = sampleWorldHeightAt(swayTargetPoint.x, swayTargetPoint.z) + 0.03;
+          const terrainY = sampleWorldObstructionAt(swayTargetPoint.x, swayTargetPoint.z) + 0.03;
           const pointY = Math.max(terrainY, swayTargetPoint.y);
           const drawAlpha =
             (0.05 + renderIntensity * 0.07) *
@@ -1786,7 +1938,7 @@ export const createThreeTestUnitFxLayer = (scene: THREE.Scene): ThreeTestUnitFxL
         }
 
         const tipCount = precisionMode ? 18 : suppressionMode ? 40 : 28;
-        sampleStreamCurveTangent(visual, 0.96, streamCurveControlPoint, streamBaseDirection);
+        sampleStreamCurveTangent(visual, 0.96, streamBaseDirection);
         swayAxisA.crossVectors(streamBaseDirection, hoseUpAxis);
         if (swayAxisA.lengthSq() <= 0.000001) {
           swayAxisA.copy(swayFallbackAxis);
@@ -1823,7 +1975,7 @@ export const createThreeTestUnitFxLayer = (scene: THREE.Scene): ThreeTestUnitFxL
             visual.tipY + streamBaseDirection.y * forward + swayAxisA.y * Math.cos(angle) * radial + swayAxisB.y * Math.sin(angle) * radial * 0.72 + upward,
             visual.tipZ + streamBaseDirection.z * forward + swayAxisA.z * Math.cos(angle) * radial + swayAxisB.z * Math.sin(angle) * radial * 0.72
           );
-          const terrainY = sampleWorldHeightAt(swayTargetPoint.x, swayTargetPoint.z) + 0.03;
+          const terrainY = sampleWorldObstructionAt(swayTargetPoint.x, swayTargetPoint.z) + 0.03;
           const pointY = Math.max(terrainY, swayTargetPoint.y);
           appendBreakupPoint(
             swayTargetPoint.x,

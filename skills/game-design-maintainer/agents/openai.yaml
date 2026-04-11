@@ -1,0 +1,4 @@
+interface:
+  display_name: "Game Design Maintainer"
+  short_description: "Maintain design docs and work queue"
+  default_prompt: "Use $game-design-maintainer to update the design reference, deprecations log, and work queue for this repo."

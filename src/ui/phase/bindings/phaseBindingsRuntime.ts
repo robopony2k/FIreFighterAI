@@ -55,6 +55,13 @@ import { hideStartMenu as hideStartMenuView, showStartMenu as showStartMenuView 
 import { getActionTarget } from "./uiActions.js";
 import { listenPhaseUiCommand, type PhaseUiCommand } from "../commandChannel.js";
 import type { UiAudioController, UiAudioCue } from "../../../audio/uiAudio.js";
+import {
+  handleClearFuelBreakTileClick,
+  handleMapFormationDragCommand,
+  handleMapPrimaryTileClick,
+  handleMapRetaskTileCommand
+} from "../../../sim/input/mapTileActions.js";
+import { lowerTownAlertPosture, raiseTownAlertPosture } from "../../../sim/towns.js";
 
 type HudAudioChannelSettings = {
   muted: boolean;
@@ -932,25 +939,85 @@ export const bindPhaseUi = ({
     if (isOverlayLocked()) {
       return;
     }
-    if (command.type === "action") {
-      noteInteraction();
-      let syntheticTarget: HTMLElement | null = null;
-      if (command.payload) {
-        syntheticTarget = document.createElement("div");
-        Object.entries(command.payload).forEach(([key, value]) => {
-          syntheticTarget!.dataset[key] = value;
+    switch (command.type) {
+      case "action": {
+        noteInteraction();
+        let syntheticTarget: HTMLElement | null = null;
+        if (command.payload) {
+          syntheticTarget = document.createElement("div");
+          Object.entries(command.payload).forEach(([key, value]) => {
+            syntheticTarget!.dataset[key] = value;
+          });
+        }
+        runUiAction(command.action, syntheticTarget, undefined);
+        return;
+      }
+      case "status":
+        setStatus(state, command.message);
+        return;
+      case "minimap-pan":
+        noteInteraction();
+        if (onMinimapPan) {
+          onMinimapPan(command.tile);
+        } else {
+          renderState.cameraCenter = { x: command.tile.x + 0.5, y: command.tile.y + 0.5 };
+        }
+        return;
+      case "map-primary":
+        noteInteraction();
+        handleMapPrimaryTileClick({
+          state,
+          inputState,
+          rng,
+          tile: command.tile,
+          shiftKey: command.shiftKey,
+          altKey: command.altKey,
+          gate
         });
-      }
-      runUiAction(command.action, syntheticTarget, undefined);
-      return;
-    }
-    if (command.type === "minimap-pan") {
-      noteInteraction();
-      if (onMinimapPan) {
-        onMinimapPan(command.tile);
-      } else {
-        renderState.cameraCenter = { x: command.tile.x + 0.5, y: command.tile.y + 0.5 };
-      }
+        return;
+      case "map-clear-fuel-break":
+        noteInteraction();
+        handleClearFuelBreakTileClick({
+          state,
+          inputState,
+          rng,
+          tile: command.tile,
+          gate
+        });
+        return;
+      case "map-retask":
+        noteInteraction();
+        handleMapRetaskTileCommand({
+          state,
+          inputState,
+          tile: command.tile,
+          gate
+        });
+        return;
+      case "map-formation":
+        noteInteraction();
+        handleMapFormationDragCommand({
+          state,
+          inputState,
+          start: command.start,
+          end: command.end,
+          gate
+        });
+        return;
+      case "town-alert":
+        noteInteraction();
+        gate("select", () => {
+          const changed =
+            command.direction === "raise"
+              ? raiseTownAlertPosture(state, command.townId)
+              : lowerTownAlertPosture(state, command.townId);
+          if (changed) {
+            phaseUi.sync(state, inputState);
+          }
+        });
+        return;
+      default:
+        return;
     }
   };
   disposers.push(listenPhaseUiCommand(onCommand));

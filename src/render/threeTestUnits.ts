@@ -13,6 +13,7 @@ import {
   type FirefighterModelPart
 } from "./firefighterVisuals.js";
 import type { TerrainRenderSurface } from "./threeTestTerrain.js";
+import { resolveWaterStreamTrajectory } from "../systems/fire/rendering/waterStreamTrajectory.js";
 import { approachAngleExp, resolveDesiredUnitYaw } from "./unitAimVisuals.js";
 import { registerPbrSpecularGlossiness } from "./gltfSpecGloss.js";
 
@@ -48,6 +49,20 @@ const IDLE_NOZZLE_RESPONSE = 18;
 const clamp = (value: number, min: number, max: number): number => Math.max(min, Math.min(max, value));
 const expFactor = (rate: number, dtSeconds: number): number =>
   1 - Math.exp(-Math.max(0, rate) * Math.max(0, dtSeconds));
+const resolveUnitSprayMode = (
+  unit: WorldState["units"][number]
+): "precision" | "balanced" | "suppression" => {
+  if (unit.kind !== "firefighter") {
+    return "balanced";
+  }
+  if (unit.formation === "narrow") {
+    return "precision";
+  }
+  if (unit.formation === "wide") {
+    return "suppression";
+  }
+  return "balanced";
+};
 
 export type ThreeTestUnitsLayer = {
   update: (
@@ -354,6 +369,7 @@ export const createThreeTestUnitsLayer = (scene: THREE.Scene): ThreeTestUnitsLay
   const truckSelectionScale = new THREE.Vector3(1, 1, 1);
   const firefighterNozzleDirection = new THREE.Vector3();
   const firefighterNozzleAim = new THREE.Vector3();
+  const firefighterTrajectoryTarget = new THREE.Vector3();
   const firefighterDesiredNozzleDirection = new THREE.Vector3();
   const firefighterPose = createFirefighterVisualState();
   const lastYawByUnitId = new Map<number, number>();
@@ -626,17 +642,39 @@ export const createThreeTestUnitsLayer = (scene: THREE.Scene): ThreeTestUnitsLay
         writeFirefighterGripWorldPosition(firefighterPos, yaw, firefighterPose, firefighterNozzlePos);
         let aimPoint: THREE.Vector3 | null = null;
         if (unit.sprayTarget) {
-          firefighterNozzleAim.set(
+          firefighterTrajectoryTarget.set(
             surface.toWorldX(unit.sprayTarget.x),
             sampleHeightAt(unit.sprayTarget.x, unit.sprayTarget.y) * heightScale + 0.05,
             surface.toWorldZ(unit.sprayTarget.y)
           );
+          const sprayTrajectory = resolveWaterStreamTrajectory(
+            surface,
+            firefighterNozzlePos,
+            firefighterTrajectoryTarget,
+            resolveUnitSprayMode(unit)
+          );
+          firefighterNozzleAim.set(
+            firefighterNozzlePos.x + sprayTrajectory.launchDirectionX,
+            firefighterNozzlePos.y + sprayTrajectory.launchDirectionY,
+            firefighterNozzlePos.z + sprayTrajectory.launchDirectionZ
+          );
           aimPoint = firefighterNozzleAim;
         } else if (unit.attackTarget) {
-          firefighterNozzleAim.set(
+          firefighterTrajectoryTarget.set(
             surface.toWorldX(unit.attackTarget.x),
             sampleHeightAt(unit.attackTarget.x, unit.attackTarget.y) * heightScale + 0.08,
             surface.toWorldZ(unit.attackTarget.y)
+          );
+          const attackTrajectory = resolveWaterStreamTrajectory(
+            surface,
+            firefighterNozzlePos,
+            firefighterTrajectoryTarget,
+            resolveUnitSprayMode(unit)
+          );
+          firefighterNozzleAim.set(
+            firefighterNozzlePos.x + attackTrajectory.launchDirectionX,
+            firefighterNozzlePos.y + attackTrajectory.launchDirectionY,
+            firefighterNozzlePos.z + attackTrajectory.launchDirectionZ
           );
           aimPoint = firefighterNozzleAim;
         }

@@ -407,6 +407,10 @@ type HouseSpot = {
   z: number;
   footprintX: number;
   footprintZ: number;
+  minTileX: number;
+  maxTileX: number;
+  minTileY: number;
+  maxTileY: number;
   rotation: number;
   seed: number;
   groundMin: number;
@@ -1114,11 +1118,13 @@ export type TerrainRenderSurface = {
   sampledRiverStepStrength?: Float32Array;
   sampledRiverCoverage?: Float32Array;
   riverRenderDomain?: RiverRenderDomain;
+  structureTopHeightsWorld?: Float32Array;
   debugHeightAnomalies?: TerrainHeightAnomaly[];
   getHeightProvenance?: (tileX: number, tileY: number) => TerrainHeightProvenance | null;
   heightAtSample: (x: number, y: number) => number;
   heightAtTileCoord: (tileX: number, tileY: number) => number;
   heightAtTile: (tileX: number, tileY: number) => number;
+  obstructionHeightAtTileCoordWorld?: (tileX: number, tileY: number) => number;
   toWorldX: (tileX: number) => number;
   toWorldZ: (tileY: number) => number;
 };
@@ -2317,6 +2323,13 @@ export const prepareTerrainRenderSurface = (
     return hx0 * (1 - ty) + hx1 * ty;
   };
   const heightAtTile = (tileX: number, tileY: number): number => heightAtTileCoord(tileX + 0.5, tileY + 0.5);
+  const structureTopHeights = new Float32Array(cols * rows);
+  structureTopHeights.fill(Number.NEGATIVE_INFINITY);
+  const sampleStructureTopHeightAtTileCoord = (tileX: number, tileY: number): number => {
+    const ix = clamp(Math.floor(tileX), 0, cols - 1);
+    const iy = clamp(Math.floor(tileY), 0, rows - 1);
+    return structureTopHeights[iy * cols + ix] ?? Number.NEGATIVE_INFINITY;
+  };
   const surface: TerrainRenderSurface = {
     sample,
     cols,
@@ -2351,11 +2364,14 @@ export const prepareTerrainRenderSurface = (
     sampledRiverStepStrength,
     sampledRiverCoverage,
     riverRenderDomain,
+    structureTopHeightsWorld: structureTopHeights,
     debugHeightAnomalies: undefined,
     getHeightProvenance: undefined,
     heightAtSample,
     heightAtTileCoord,
     heightAtTile,
+    obstructionHeightAtTileCoordWorld: (tileX: number, tileY: number): number =>
+      Math.max(heightAtTileCoord(tileX, tileY) * heightScale, sampleStructureTopHeightAtTileCoord(tileX, tileY)),
     toWorldX: (tileX: number): number => (tileX / Math.max(1, cols) - 0.5) * width,
     toWorldZ: (tileY: number): number => (tileY / Math.max(1, rows) - 0.5) * depth
   };
@@ -3160,6 +3176,29 @@ export const buildTerrainMesh = (
     }
     mesh.add(shrubMesh);
   }
+  const markStructureTopHeight = (
+    minTileX: number,
+    maxTileX: number,
+    minTileY: number,
+    maxTileY: number,
+    topY: number
+  ): void => {
+    const structureTopHeights = surface.structureTopHeightsWorld;
+    if (!structureTopHeights || !Number.isFinite(topY)) {
+      return;
+    }
+    const clampedMinX = clamp(Math.floor(minTileX), 0, cols - 1);
+    const clampedMaxX = clamp(Math.floor(maxTileX), 0, cols - 1);
+    const clampedMinY = clamp(Math.floor(minTileY), 0, rows - 1);
+    const clampedMaxY = clamp(Math.floor(maxTileY), 0, rows - 1);
+    for (let y = clampedMinY; y <= clampedMaxY; y += 1) {
+      const rowBase = y * cols;
+      for (let x = clampedMinX; x <= clampedMaxX; x += 1) {
+        const idx = rowBase + x;
+        structureTopHeights[idx] = Math.max(structureTopHeights[idx] ?? Number.NEGATIVE_INFINITY, topY);
+      }
+    }
+  };
   if (sample.tileTypes && !sample.dynamicStructures) {
     const tileTypes = sample.tileTypes;
     const baseTiles: { tileX: number; tileY: number; x: number; z: number; groundMin: number; groundMax: number }[] = [];
@@ -3216,6 +3255,10 @@ export const buildTerrainMesh = (
             z,
             footprintX: bounds.width,
             footprintZ: bounds.depth,
+            minTileX: minX,
+            maxTileX: maxX,
+            minTileY: minY,
+            maxTileY: maxY,
             rotation,
             seed,
             groundMin,
@@ -3256,6 +3299,7 @@ export const buildTerrainMesh = (
         const scale = footprintTarget / Math.max(0.01, assetFootprint);
         const foundationTop = groundMax + 0.01;
         const baseY = foundationTop + firestationAsset.baseOffset * scale;
+        const topY = baseY + Math.max(0.2, firestationAsset.size.y * scale);
         const baseGroup = new THREE.Group();
         const tempMatrix = new THREE.Matrix4();
         firestationAsset.meshes.forEach((meshTemplate) => {
@@ -3281,8 +3325,10 @@ export const buildTerrainMesh = (
           foundation.receiveShadow = true;
           baseGroup.add(foundation);
         }
+        markStructureTopHeight(minTileX, maxTileX, minTileY, maxTileY, topY);
         mesh.add(baseGroup);
       } else {
+        const topY = groundMax + 0.6;
         const base = new THREE.Mesh(buildingGeometry, baseMaterial);
         base.scale.set(baseFootprintX, 0.6, baseFootprintZ);
         base.position.set(centerX, groundMax + 0.3, centerZ);
@@ -3300,6 +3346,7 @@ export const buildTerrainMesh = (
           foundation.receiveShadow = true;
           mesh.add(foundation);
         }
+        markStructureTopHeight(minTileX, maxTileX, minTileY, maxTileY, topY);
       }
     }
 
@@ -3394,10 +3441,13 @@ export const buildTerrainMesh = (
         if (useDetailedStructures && variant && variant.meshes.length > 0) {
           const sizeX = Math.max(0.01, variant.size?.x ?? 0);
           const sizeZ = Math.max(0.01, variant.size?.z ?? 0);
+          const sizeY = Math.max(0.2, variant.size?.y ?? 0.6);
           const fitScale = Math.min(footprintX / sizeX, footprintZ / sizeZ);
           const scale = Math.max(0.01, fitScale * 0.98 * (variant.scaleBias ?? 1));
           const baseY = foundationTop + variant.baseOffset * scale;
+          const topY = baseY + sizeY * scale;
           const variantId = variantIds.get(variant) ?? 0;
+          markStructureTopHeight(spot.minTileX, spot.maxTileX, spot.minTileY, spot.maxTileY, topY);
           variant.meshes.forEach((meshTemplate, meshIndex) => {
             const key = `${variantId}:${meshIndex}`;
             const existing = detailedBatches.get(key);
@@ -3411,6 +3461,7 @@ export const buildTerrainMesh = (
             }
           });
         } else {
+          markStructureTopHeight(spot.minTileX, spot.maxTileX, spot.minTileY, spot.maxTileY, foundationTop + 0.6);
           fallbackInstances.push(spot);
         }
       });

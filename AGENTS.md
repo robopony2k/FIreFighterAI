@@ -3,6 +3,9 @@
 - Apply these rules to all new files, refactors, and AI-generated changes.
 - Treat the current root-level drift under `src/` as transitional. Move touched code toward the target structure when practical.
 
+## Repo Skills
+- Use `skills/game-design-maintainer/SKILL.md` for requests that scope or ship features, update `docs/GAME_DESIGN_REFERENCE.md`, mark obsolete work in `docs/deprecations.md`, maintain `work_queue.md`, answer "what should I work on next?", or turn an accepted plan into a queued task for later implementation.
+
 ## Core Principles
 - Feature/domain-first organisation.
 - High cohesion, low coupling.
