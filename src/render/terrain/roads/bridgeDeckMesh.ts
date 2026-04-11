@@ -20,11 +20,6 @@ import {
   BRIDGE_ANCHOR_SEARCH_STEP,
   BRIDGE_ANCHOR_WATER_COVERAGE_MAX,
   BRIDGE_ANCHOR_WATER_MARGIN,
-  BRIDGE_BEAM_DROP_FACTOR,
-  BRIDGE_BEAM_DROP_MAX,
-  BRIDGE_BEAM_END_INSET,
-  BRIDGE_BEAM_MIN_LENGTH,
-  BRIDGE_BEAM_RADIUS,
   BRIDGE_DECK_CLEARANCE_BANK,
   BRIDGE_DECK_CLEARANCE_WATER,
   BRIDGE_DECK_SURFACE_LIFT,
@@ -119,6 +114,8 @@ type BridgeAnchorCandidate = {
 };
 
 const clamp = (value: number, min: number, max: number): number => Math.min(max, Math.max(min, value));
+const BRIDGE_ABUTMENT_MAX_HEIGHT = 0.42;
+const BRIDGE_ABUTMENT_HEIGHT_LENGTH_RATIO_MAX = 1.35;
 
 const buildEmptyBridgeDebug = (): TerrainBridgeDebug => ({
   totalBridgeTiles: 0,
@@ -704,11 +701,6 @@ export const buildBridgeDeckMesh = (
     roughness: 0.78,
     metalness: 0.08
   });
-  const beamMaterial = new THREE.MeshStandardMaterial({
-    color: beamColor,
-    roughness: 0.84,
-    metalness: 0.09
-  });
   const abutmentMaterial = new THREE.MeshStandardMaterial({
     color: beamColor.clone().lerp(deckColor, 0.22),
     roughness: 0.9,
@@ -739,6 +731,22 @@ export const buildBridgeDeckMesh = (
     object.userData.bridgeDeck = true;
     group.add(object);
   };
+  const sanitizeAnchorWaterY = (
+    terrainY: number,
+    roadY: number,
+    waterY: number | null
+  ): number | null => {
+    if (!Number.isFinite(waterY)) {
+      return null;
+    }
+    const resolved = waterY as number;
+    const maxPlausibleFromBank = terrainY - BRIDGE_ANCHOR_WATER_MARGIN * 0.5;
+    const maxPlausibleFromRoad = roadY + BRIDGE_ANCHOR_MAX_BANK_RISE;
+    if (resolved > maxPlausibleFromBank || resolved > maxPlausibleFromRoad) {
+      return null;
+    }
+    return resolved;
+  };
   const finalizeBridgeAnchor = (
     roadContactEdgeX: number,
     roadContactEdgeY: number,
@@ -751,9 +759,12 @@ export const buildBridgeDeckMesh = (
   ): BridgeAnchor => {
     const terrainY = sampleTerrainWorldAtTileCoord(bankContactEdgeX, bankContactEdgeY);
     const terrainSurfaceY = terrainY + ROAD_SURFACE_OFFSET + BRIDGE_DECK_SURFACE_LIFT;
-    const effectiveWaterY = waterY ?? sampleWaterSurfaceYAtTileCoord(bankContactEdgeX, bankContactEdgeY);
-    const baseY = Math.max(
+    const effectiveWaterY = sanitizeAnchorWaterY(
+      terrainY,
       roadY,
+      waterY ?? sampleWaterSurfaceYAtTileCoord(bankContactEdgeX, bankContactEdgeY)
+    );
+    const baseY = Math.max(
       terrainSurfaceY,
       terrainY + BRIDGE_DECK_CLEARANCE_BANK,
       effectiveWaterY === null ? Number.NEGATIVE_INFINITY : effectiveWaterY + BRIDGE_DECK_CLEARANCE_WATER
@@ -827,7 +838,11 @@ export const buildBridgeDeckMesh = (
       const edgeY = clamp(roadEdgeY + dirY * clampedDistance, 0, rows);
       const terrainY = sampleTerrainWorldAtTileCoord(edgeX, edgeY);
       const waterCoverage = sampleWaterCoverageAtTileCoord(edgeX, edgeY);
-      const localWaterY = sampleWaterSurfaceYAtTileCoord(edgeX, edgeY) ?? defaultWaterY ?? null;
+      const localWaterY = sanitizeAnchorWaterY(
+        terrainY,
+        roadY,
+        sampleWaterSurfaceYAtTileCoord(edgeX, edgeY) ?? defaultWaterY ?? null
+      );
       const stableAboveWater = localWaterY === null || terrainY >= localWaterY + BRIDGE_ANCHOR_WATER_MARGIN;
       const stableLand = stableAboveWater && waterCoverage <= BRIDGE_ANCHOR_WATER_COVERAGE_MAX;
       if (!stableLand) {
@@ -918,7 +933,12 @@ export const buildBridgeDeckMesh = (
     ];
     const minHeight = Math.max(0, Math.min(...heights));
     const maxHeight = Math.max(0, Math.max(...heights));
-    if (maxHeight < BRIDGE_ABUTMENT_MIN_HEIGHT) {
+    const heightToLength = maxHeight / Math.max(1e-4, length);
+    if (
+      maxHeight < BRIDGE_ABUTMENT_MIN_HEIGHT ||
+      maxHeight > BRIDGE_ABUTMENT_MAX_HEIGHT ||
+      heightToLength > BRIDGE_ABUTMENT_HEIGHT_LENGTH_RATIO_MAX
+    ) {
       return {
         mesh: null,
         debug: { length, minHeight, maxHeight, suppressed: true }
@@ -1043,11 +1063,36 @@ export const buildBridgeDeckMesh = (
 
     const startY = routePoints[0].baseY;
     const endY = routePoints[routePoints.length - 1].baseY;
+    const bankStartIndex = Math.min(1, routePoints.length - 1);
+    const bankEndIndex = Math.max(bankStartIndex, routePoints.length - 2);
+    const bankStartDistance = planarLengths[bankStartIndex] ?? 0;
+    const bankEndDistance = planarLengths[bankEndIndex] ?? planarTotal;
+    const bankSpanLength = Math.max(1e-5, bankEndDistance - bankStartDistance);
+    const bankStartY = routePoints[bankStartIndex]?.baseY ?? startY;
+    const bankEndY = routePoints[bankEndIndex]?.baseY ?? endY;
     const centerPoints: THREE.Vector3[] = [];
     for (let j = 0; j < routePoints.length; j += 1) {
       const point = routePoints[j];
-      const t = planarTotal > 1e-5 ? planarLengths[j] / planarTotal : 0;
-      const y = Math.max(point.baseY, startY * (1 - t) + endY * t);
+      const distance = planarLengths[j] ?? 0;
+      let targetY = point.baseY;
+      let minY = point.baseY;
+      if (j <= bankStartIndex) {
+        const t = bankStartDistance > 1e-5 ? distance / bankStartDistance : 0;
+        targetY = startY * (1 - t) + bankStartY * t;
+        minY = point.baseY;
+      } else if (j >= bankEndIndex) {
+        const denom = Math.max(1e-5, planarTotal - bankEndDistance);
+        const t = (distance - bankEndDistance) / denom;
+        targetY = bankEndY * (1 - t) + endY * t;
+        minY = point.baseY;
+      } else {
+        const t = (distance - bankStartDistance) / bankSpanLength;
+        targetY = bankStartY * (1 - t) + bankEndY * t;
+        minY = Number.isFinite(point.terrainY)
+          ? (point.terrainY as number) + BRIDGE_DECK_CLEARANCE_BANK
+          : Number.NEGATIVE_INFINITY;
+      }
+      const y = Math.max(minY, targetY);
       centerPoints.push(new THREE.Vector3(point.x, y, point.z));
     }
 
@@ -1163,39 +1208,6 @@ export const buildBridgeDeckMesh = (
         postMesh.updateMatrix();
         postMesh.matrixAutoUpdate = false;
         addBridgeObject(spanGroup, postMesh);
-      }
-    }
-
-    if (spanLength >= BRIDGE_BEAM_MIN_LENGTH) {
-      const beamInset = Math.min(BRIDGE_BEAM_END_INSET, spanLength * 0.18);
-      const beamLength = spanLength - beamInset * 2;
-      if (beamLength > 0.35) {
-        const beamSampleCount = Math.max(5, Math.ceil(beamLength / 0.5) + 1);
-        const beamOffset = halfWidth - BRIDGE_RAIL_EDGE_INSET - BRIDGE_POST_SIZE * 0.35;
-        const archDrop = Math.min(BRIDGE_BEAM_DROP_MAX, Math.max(0.12, beamLength * BRIDGE_BEAM_DROP_FACTOR));
-        for (const side of [-1, 1]) {
-          const beamPoints: THREE.Vector3[] = [];
-          for (let j = 0; j < beamSampleCount; j += 1) {
-            const t = beamSampleCount <= 1 ? 0 : j / (beamSampleCount - 1);
-            const distance = beamInset + beamLength * t;
-            const samplePoint = sampleBridgePolyline(profilePoints, cumulative, spanLength, distance);
-            const point = samplePoint.position.clone().addScaledVector(samplePoint.right, side * beamOffset);
-            point.y -= BRIDGE_DECK_THICKNESS * 0.55 + archDrop * 4 * t * (1 - t);
-            beamPoints.push(point);
-          }
-          const beamCurve = new THREE.CatmullRomCurve3(beamPoints, false, "centripetal");
-          const beamGeometry = new THREE.TubeGeometry(
-            beamCurve,
-            Math.max(8, Math.ceil(beamLength * 6)),
-            BRIDGE_BEAM_RADIUS,
-            6,
-            false
-          );
-          const beamMesh = new THREE.Mesh(beamGeometry, beamMaterial);
-          beamMesh.castShadow = true;
-          beamMesh.receiveShadow = true;
-          addBridgeObject(spanGroup, beamMesh);
-        }
       }
     }
 

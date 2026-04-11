@@ -1750,8 +1750,9 @@ canvas {
 
 .three-test-fire-alert-card {
   position: absolute;
-  left: 12px;
+  left: 50%;
   top: var(--three-test-top-clearance);
+  transform: translateX(-50%);
   z-index: 18;
   min-width: 320px;
   max-width: 420px;

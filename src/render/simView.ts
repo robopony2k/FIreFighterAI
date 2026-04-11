@@ -1,7 +1,9 @@
 import type { WorldState } from "../core/state.js";
+import { ensureTileSoA } from "../core/tileCache.js";
 import type { Town } from "../core/types.js";
 import { DEFAULT_MOISTURE_PARAMS } from "../core/climate.js";
 import { clamp } from "../core/utils.js";
+import type { TerrainRenderDebugOptions } from "./terrain/debug/terrainHeightProvenance.js";
 
 // Render-only view of simulation state (authoritative sim remains elsewhere).
 export type RenderSim = WorldState;
@@ -45,6 +47,7 @@ export type RenderTerrainSample = {
   vegetationRevision?: number;
   structureRevision?: number;
   dynamicStructures?: boolean;
+  debugRenderOptions?: TerrainRenderDebugOptions;
 };
 
 const getClimateDryness = (state: RenderSim): number => {
@@ -61,41 +64,44 @@ export const buildRenderTerrainSample = (
   fastUpdate = false,
   fullResolution = false,
   heightScaleMultiplier = 1
-): RenderTerrainSample => ({
-  cols: state.grid.cols,
-  rows: state.grid.rows,
-  elevations: state.tileElevation,
-  heightScaleMultiplier,
-  tileTypes: state.tileTypeId,
-  treeTypes,
-  tileFire: state.tileFire,
-  tileHeat: state.tileHeat,
-  tileFuel: state.tileFuel,
-  heatCap: Math.max(0.01, state.fireSettings.heatCap),
-  tileMoisture: state.tileMoisture,
-  tileVegetationAge: state.tileVegetationAge,
-  tileCanopyCover: state.tileCanopyCover,
-  tileStemDensity: state.tileStemDensity,
-  riverMask: state.tileRiverMask,
-  oceanMask: state.tileOceanMask,
-  seaLevel: state.tileSeaLevel,
-  coastDistance: state.tileCoastDistance,
-  coastClass: state.tileCoastClass,
-  roadBridgeMask: state.tileRoadBridge,
-  roadEdges: state.tileRoadEdges,
-  roadWallEdges: state.tileRoadWallEdges,
-  erosionWear: state.tileErosionWear,
-  riverBed: state.tileRiverBed,
-  riverSurface: state.tileRiverSurface,
-  riverStepStrength: state.tileRiverStepStrength,
-  climateDryness: getClimateDryness(state),
-  debugTypeColors,
-  treesEnabled,
-  fastUpdate,
-  fullResolution,
-  worldSeed: state.seed,
-  towns: state.towns,
-  vegetationRevision: state.vegetationRevision,
-  structureRevision: state.structureRevision,
-  dynamicStructures: true
-});
+): RenderTerrainSample => {
+  ensureTileSoA(state);
+  return {
+    cols: state.grid.cols,
+    rows: state.grid.rows,
+    elevations: state.tileElevation,
+    heightScaleMultiplier,
+    tileTypes: state.tileTypeId,
+    treeTypes,
+    tileFire: state.tileFire,
+    tileHeat: state.tileHeat,
+    tileFuel: state.tileFuel,
+    heatCap: Math.max(0.01, state.fireSettings.heatCap),
+    tileMoisture: state.tileMoisture,
+    tileVegetationAge: state.tileVegetationAge,
+    tileCanopyCover: state.tileCanopyCover,
+    tileStemDensity: state.tileStemDensity,
+    riverMask: state.tileRiverMask,
+    oceanMask: state.tileOceanMask,
+    seaLevel: state.tileSeaLevel,
+    coastDistance: state.tileCoastDistance,
+    coastClass: state.tileCoastClass,
+    roadBridgeMask: state.tileRoadBridge,
+    roadEdges: state.tileRoadEdges,
+    roadWallEdges: state.tileRoadWallEdges,
+    erosionWear: state.tileErosionWear,
+    riverBed: state.tileRiverBed,
+    riverSurface: state.tileRiverSurface,
+    riverStepStrength: state.tileRiverStepStrength,
+    climateDryness: getClimateDryness(state),
+    debugTypeColors,
+    treesEnabled,
+    fastUpdate,
+    fullResolution,
+    worldSeed: state.seed,
+    towns: state.towns,
+    vegetationRevision: state.vegetationRevision,
+    structureRevision: state.structureRevision,
+    dynamicStructures: true
+  };
+};

@@ -29,7 +29,14 @@ export class TerrainPipeline {
       ctx.setStageReporter(stage.id, async (message, localProgress) => {
         await tracker.reportStage(i, message, localProgress);
       });
+      const startedAt = typeof performance !== "undefined" ? performance.now() : Date.now();
       await stage.run(ctx);
+      const endedAt = typeof performance !== "undefined" ? performance.now() : Date.now();
+      const durationMs = Math.max(0, endedAt - startedAt);
+      if (ctx.debug?.onStageTiming) {
+        await ctx.debug.onStageTiming({ phase: stage.id, durationMs });
+      }
+      console.log(`[mapgenstage] ${stage.id} ${durationMs.toFixed(2)}ms`);
       if (stageLimit === stage.id) {
         break;
       }

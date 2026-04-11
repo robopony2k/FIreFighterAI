@@ -33,9 +33,16 @@ import {
 import { buildRenderTerrainSample } from "../render/simView.js";
 import {
   createTerrainPreviewController,
+  type TerrainPreviewHoverTile,
   type TerrainPreviewBridgeSelection,
   type TerrainPreviewController
 } from "../render/terrainPreview.js";
+import {
+  prepareTerrainRenderSurface,
+  type TerrainHeightAnomaly,
+  type TerrainHeightProvenance,
+  type TerrainRenderDebugOptions
+} from "../render/threeTestTerrain.js";
 import { resetTerrainCaches } from "../render/terrainCache.js";
 import { DEFAULT_MAP_SIZE, DEFAULT_RUN_SEED, type NewRunConfig } from "./run-config.js";
 import { buildTerrainControls } from "./terrain-controls.js";
@@ -138,6 +145,7 @@ const createUnavailableTerrainPreviewController = (): TerrainPreviewController =
   resize: () => {},
   setTerrain: () => {},
   setBridgeSelectionListener: () => {},
+  setHoverTileListener: () => {},
   resetView: () => {},
   dispose: () => {}
 });
@@ -173,6 +181,20 @@ type StepPreviewConfig = {
   stopAfterPhase: MapGenDebugPhase;
   sampleSource: "snapshot" | "state";
   treesEnabled: boolean;
+};
+
+type MapEditorRenderDebugState = {
+  terrainHeightMode: "final" | "raw";
+  riverWaterOff: boolean;
+  riverCutoutOff: boolean;
+  bridgesOff: boolean;
+};
+
+const DEFAULT_MAP_EDITOR_RENDER_DEBUG_STATE: MapEditorRenderDebugState = {
+  terrainHeightMode: "final",
+  riverWaterOff: false,
+  riverCutoutOff: false,
+  bridgesOff: false
 };
 
 const MAP_EDITOR_PREVIEW_BY_STEP: Record<MapEditorStepId, StepPreviewConfig> = {
@@ -300,6 +322,7 @@ const buildWorldPreviewSample = (
 type SnapshotPreviewSample = ReturnType<typeof buildSnapshotSample>;
 type WorldPreviewSample = ReturnType<typeof buildWorldPreviewSample>;
 type PreviewRenderableSample = SnapshotPreviewSample | WorldPreviewSample;
+type DebugPreviewRenderableSample = PreviewRenderableSample & { debugRenderOptions?: TerrainRenderDebugOptions };
 type CoastlineProbe = {
   label: string;
   x: number;
@@ -334,6 +357,28 @@ const CARDINAL_DIRS = [
   { dx: 0, dy: 1 },
   { dx: -1, dy: 0 }
 ] as const;
+
+const buildTerrainRenderDebugOptions = (
+  state: MapEditorRenderDebugState,
+  logHeightAnomalies = true
+): TerrainRenderDebugOptions => ({
+  enableHeightProvenance: true,
+  logHeightAnomalies,
+  anomalyLogLimit: 6,
+  terrainHeightMode: state.terrainHeightMode,
+  disableRiverWater: state.riverWaterOff,
+  disableRiverCutout: state.riverCutoutOff,
+  disableBridges: state.bridgesOff
+});
+
+const applyTerrainRenderDebugOptions = (
+  sample: PreviewRenderableSample,
+  state: MapEditorRenderDebugState,
+  logHeightAnomalies = true
+): DebugPreviewRenderableSample => ({
+  ...sample,
+  debugRenderOptions: buildTerrainRenderDebugOptions(state, logHeightAnomalies)
+});
 
 const inSampleBounds = (sample: PreviewRenderableSample, x: number, y: number): boolean =>
   x >= 0 && y >= 0 && x < sample.cols && y < sample.rows;
@@ -557,6 +602,109 @@ const formatCoastlineProbePoint = (
   ].join(" ");
 };
 
+const formatVertexContributors = (provenance: TerrainHeightProvenance): string =>
+  provenance.vertices
+    .map((vertex) => {
+      const contributorCoords = vertex.contributors.map((contributor) => `${contributor.x},${contributor.y}`).join(" ");
+      return [
+        `${vertex.label}@${vertex.sampleX},${vertex.sampleY}`,
+        `raw=${vertex.rawHeight.toFixed(4)}`,
+        `final=${vertex.finalHeight.toFixed(4)}`,
+        `shown=${vertex.displayedHeight.toFixed(4)}`,
+        `type=${formatTileTypeLabel(vertex.sampleTypeId ?? undefined)}`,
+        `wr=${vertex.waterRatio.toFixed(2)}`,
+        `or=${vertex.oceanRatio.toFixed(2)}`,
+        `rr=${vertex.riverRatio.toFixed(2)}`,
+        `ws=${vertex.waterSupport}`,
+        `cc=${formatCoastClassLabel(vertex.coastClass)}`,
+        `cd=${vertex.coastDistance}`,
+        `waterCells=${vertex.contributorWaterCount}`,
+        `contribMax=${vertex.maxContributorElevation.toFixed(4)}`,
+        `cells=${contributorCoords || "n/a"}`
+      ].join(" ");
+    })
+    .join("\n");
+
+const formatNeighborhoodCells = (provenance: TerrainHeightProvenance): string =>
+  provenance.neighborhood
+    .map((cell) =>
+      [
+        `${cell.x},${cell.y}`,
+        formatTileTypeLabel(cell.typeId ?? undefined),
+        `e=${cell.elevation.toFixed(4)}`,
+        `rv=${cell.riverMask}`,
+        `oc=${cell.oceanMask}`
+      ].join(" ")
+    )
+    .join(" | ");
+
+const formatHeightAnomaly = (anomaly: TerrainHeightAnomaly): string =>
+  [
+    `${anomaly.stage}`,
+    `tile=${anomaly.tileX},${anomaly.tileY}`,
+    `sample=${anomaly.sampleX},${anomaly.sampleY}`,
+    `delta=${anomaly.delta.toFixed(4)}`,
+    `value=${anomaly.value.toFixed(4)}`,
+    `base=${anomaly.baseline.toFixed(4)}`,
+    `type=${formatTileTypeLabel(anomaly.sampleTypeId ?? undefined)}`,
+    `ws=${anomaly.waterSupport}`,
+    `rr=${anomaly.riverRatio.toFixed(2)}`,
+    `or=${anomaly.oceanRatio.toFixed(2)}`
+  ].join(" ");
+
+const buildHeightProvenanceReport = (
+  sample: PreviewRenderableSample | null,
+  activeStep: MapEditorStepId,
+  hoveredTile: TerrainPreviewHoverTile | null,
+  renderDebugState: MapEditorRenderDebugState
+): { meta: string; text: string } => {
+  const modeLabel =
+    renderDebugState.terrainHeightMode === "raw" ? "terrain_raw_vertices" : "terrain_final_vertices";
+  const toggleLine = [
+    `renderMode=${modeLabel}`,
+    `river_water_off=${renderDebugState.riverWaterOff ? 1 : 0}`,
+    `river_cutout_off=${renderDebugState.riverCutoutOff ? 1 : 0}`,
+    `bridges_off=${renderDebugState.bridgesOff ? 1 : 0}`
+  ].join(" ");
+  if (!sample) {
+    return {
+      meta: "Height provenance unavailable until the active preview step is cached.",
+      text: ["heightProvenance=unavailable", toggleLine].join("\n")
+    };
+  }
+  if (!hoveredTile) {
+    return {
+      meta: "Hover a tile in the 3D preview to capture height provenance.",
+      text: ["heightProvenance=hover tile required", toggleLine, `activeStep=${activeStep}`].join("\n")
+    };
+  }
+  const debugSurface = prepareTerrainRenderSurface(applyTerrainRenderDebugOptions(sample, renderDebugState, false));
+  const provenance = debugSurface.getHeightProvenance?.(hoveredTile.tileX, hoveredTile.tileY) ?? null;
+  if (!provenance) {
+    return {
+      meta: `No provenance data available for ${hoveredTile.tileX},${hoveredTile.tileY}.`,
+      text: ["heightProvenance=missing", toggleLine, `hover=${hoveredTile.tileX},${hoveredTile.tileY}`].join("\n")
+    };
+  }
+  const anomalies = debugSurface.debugHeightAnomalies ?? [];
+  const lines = [
+    `heightProvenance=${provenance.tileX},${provenance.tileY}`,
+    toggleLine,
+    `authoritative=${provenance.authoritativeElevation.toFixed(4)} rawCenter=${provenance.rawCenterHeight.toFixed(4)} finalCenter=${provenance.finalCenterHeight.toFixed(4)} shownCenter=${provenance.displayedCenterHeight.toFixed(4)}`,
+    `tileFlags rv=${provenance.riverMask} oc=${provenance.oceanMask} sea=${Number.isFinite(provenance.seaLevel) ? provenance.seaLevel!.toFixed(4) : "n/a"}`,
+    `interp sx=${provenance.interpolation.sampleCoordX.toFixed(3)} sy=${provenance.interpolation.sampleCoordY.toFixed(3)} tx=${provenance.interpolation.tx.toFixed(3)} ty=${provenance.interpolation.ty.toFixed(3)} raw=${provenance.interpolation.rawHeight.toFixed(4)} final=${provenance.interpolation.finalHeight.toFixed(4)} shown=${provenance.interpolation.displayedHeight.toFixed(4)}`,
+    `neighborhood ${formatNeighborhoodCells(provenance)}`,
+    formatVertexContributors(provenance),
+    anomalies.length > 0
+      ? `anomalies ${anomalies.map((anomaly) => formatHeightAnomaly(anomaly)).join(" | ")}`
+      : "anomalies none"
+  ];
+  return {
+    meta: `Height provenance for hovered tile ${provenance.tileX},${provenance.tileY} on ${MAP_EDITOR_PREVIEW_BY_STEP[activeStep].label}.`,
+    text: lines.join("\n")
+  };
+};
+
 const buildCoastlineDebugReport = (
   samples: Partial<Record<MapEditorStepId, PreviewRenderableSample>>,
   activeStep: MapEditorStepId,
@@ -770,6 +918,51 @@ export const initMapEditor = (refs: MapEditorRefs, deps: MapEditorDeps): MapEdit
     previewUnavailableReason = error instanceof Error ? error.message : "Failed to start the 3D terrain preview.";
     preview = createUnavailableTerrainPreviewController();
   }
+  const renderDebugControlsRoot = document.createElement("fieldset");
+  renderDebugControlsRoot.className = "map-editor-debug-toggles";
+  const renderDebugLegend = document.createElement("legend");
+  renderDebugLegend.textContent = "Render Isolation";
+  renderDebugControlsRoot.appendChild(renderDebugLegend);
+
+  const createRenderDebugRadio = (
+    value: "final" | "raw",
+    labelText: string,
+    checked: boolean
+  ): HTMLInputElement => {
+    const label = document.createElement("label");
+    label.style.display = "inline-flex";
+    label.style.alignItems = "center";
+    label.style.gap = "0.35rem";
+    label.style.marginRight = "0.75rem";
+    const input = document.createElement("input");
+    input.type = "radio";
+    input.name = "mapEditorRenderHeightMode";
+    input.value = value;
+    input.checked = checked;
+    label.append(input, document.createTextNode(labelText));
+    renderDebugControlsRoot.appendChild(label);
+    return input;
+  };
+
+  const createRenderDebugCheckbox = (labelText: string): HTMLInputElement => {
+    const label = document.createElement("label");
+    label.style.display = "inline-flex";
+    label.style.alignItems = "center";
+    label.style.gap = "0.35rem";
+    label.style.marginRight = "0.75rem";
+    const input = document.createElement("input");
+    input.type = "checkbox";
+    label.append(input, document.createTextNode(labelText));
+    renderDebugControlsRoot.appendChild(label);
+    return input;
+  };
+
+  const terrainFinalVerticesToggle = createRenderDebugRadio("final", "terrain_final_vertices", true);
+  const terrainRawVerticesToggle = createRenderDebugRadio("raw", "terrain_raw_vertices", false);
+  const riverWaterOffToggle = createRenderDebugCheckbox("river_water_off");
+  const riverCutoutOffToggle = createRenderDebugCheckbox("river_cutout_off");
+  const bridgesOffToggle = createRenderDebugCheckbox("bridges_off");
+  refs.coastDebugOutput.parentElement?.insertBefore(renderDebugControlsRoot, refs.coastDebugOutput);
   const terrainControlElements = collectTerrainControlElements(refs.screen);
   refs.legacyNotice.textContent = "Older saved map scenarios used the legacy slider model and are not loaded in this editor.";
   refs.legacyNotice.classList.toggle("hidden", !hasLegacyMapScenarios());
@@ -795,6 +988,8 @@ export const initMapEditor = (refs: MapEditorRefs, deps: MapEditorDeps): MapEdit
   let previewWarmToken = 0;
   let assetsReadyForSession = false;
   let advancedMode = false;
+  let previewHoveredTile: TerrainPreviewHoverTile | null = null;
+  let previewRenderDebugState: MapEditorRenderDebugState = { ...DEFAULT_MAP_EDITOR_RENDER_DEBUG_STATE };
 
   const isPreviewAvailable = (): boolean => previewUnavailableReason === null;
   refs.previewResetView.disabled = !isPreviewAvailable();
@@ -1065,7 +1260,7 @@ export const initMapEditor = (refs: MapEditorRefs, deps: MapEditorDeps): MapEdit
     if (!sample) {
       return false;
     }
-    preview.setTerrain(sample, { recenter });
+    preview.setTerrain(applyTerrainRenderDebugOptions(sample, previewRenderDebugState), { recenter });
     hidePreviewOverlay();
     syncCurrentScenarioLabel();
     return true;
@@ -1080,6 +1275,11 @@ export const initMapEditor = (refs: MapEditorRefs, deps: MapEditorDeps): MapEdit
     previewRecenterPending = false;
     return true;
   };
+
+  const getActiveCachedPreviewSample = (): PreviewRenderableSample | null =>
+    activeStep === "erosion" && refs.erosionCompareToggle.checked
+      ? previewErosionBaselineSample
+      : previewCachedSamples[activeStep] ?? null;
 
   const maybeRenderCachedActiveStep = (cacheKey: string, stepId: MapEditorStepId): void => {
     if (!visible || previewRunning || previewCacheKey !== cacheKey) {
@@ -1203,16 +1403,52 @@ export const initMapEditor = (refs: MapEditorRefs, deps: MapEditorDeps): MapEdit
         ? { ...previewCachedSamples, erosion: previewErosionBaselineSample }
         : previewCachedSamples;
     const report = buildCoastlineDebugReport(samplesForReport, activeStep, shareCode);
-    refs.coastDebugMeta.textContent = report.meta;
-    refs.coastDebugOutput.textContent = report.text;
-    refs.coastDebugCopy.disabled = !report.copyEnabled;
-    coastDebugClipboardText = report.text;
+    const heightReport = buildHeightProvenanceReport(
+      getActiveCachedPreviewSample(),
+      activeStep,
+      previewHoveredTile,
+      previewRenderDebugState
+    );
+    refs.coastDebugMeta.textContent = `${report.meta} ${heightReport.meta}`;
+    refs.coastDebugOutput.textContent = `${report.text}\n\n${heightReport.text}`;
+    refs.coastDebugCopy.disabled = !report.copyEnabled && previewHoveredTile === null;
+    coastDebugClipboardText = refs.coastDebugOutput.textContent;
   };
 
   preview.setBridgeSelectionListener((selection) => {
     updateBridgeDebugPanel(selection);
   });
+  preview.setHoverTileListener((hover) => {
+    previewHoveredTile = hover;
+    updateCoastlineDebugPanel();
+  });
   updateCoastlineDebugPanel();
+
+  const syncPreviewRenderDebugState = (): void => {
+    previewRenderDebugState = {
+      terrainHeightMode: terrainRawVerticesToggle.checked ? "raw" : "final",
+      riverWaterOff: riverWaterOffToggle.checked,
+      riverCutoutOff: riverCutoutOffToggle.checked,
+      bridgesOff: bridgesOffToggle.checked
+    };
+    updateCoastlineDebugPanel();
+    if (!visible) {
+      return;
+    }
+    if (tryRenderCachedActiveStep()) {
+      return;
+    }
+    requestPreviewBuild(false, false);
+  };
+  [
+    terrainFinalVerticesToggle,
+    terrainRawVerticesToggle,
+    riverWaterOffToggle,
+    riverCutoutOffToggle,
+    bridgesOffToggle
+  ].forEach((input) => {
+    input.addEventListener("change", syncPreviewRenderDebugState);
+  });
 
   const describePreviewState = (draft: TerrainDraft): string => {
     if (!isPreviewAvailable()) {

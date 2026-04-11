@@ -1518,6 +1518,7 @@ export const createAppRuntime = (): AppRuntime => {
       await generateMap(state, rng, (message, progress) => {
         updateMapgenOverlay(message, progress);
       }, config.options.terrain);
+      syncTileSoA(state);
       state.paused = false;
     } finally {
       hideMapgenOverlay();

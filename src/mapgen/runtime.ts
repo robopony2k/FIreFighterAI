@@ -74,8 +74,9 @@ import {
   isFloodplainCandidate
 } from "./biome/BiomeSuitability.js";
 import { buildForestMask } from "./biome/ForestSpread.js";
-import { sampleDirectionalErosionDetail } from "./erosionDetail.js";
+import { runIterativeHydraulicErosion } from "./iterativeHydraulicErosion.js";
 import { buildPreRiverErosionFields } from "./preRiverErosion.js";
+import { buildTectonicProxySeed } from "./tectonicProxySeed.js";
 
 const nextFrame = () =>
   new Promise<void>((resolve) => {
@@ -810,7 +811,6 @@ function carveRiverValleys(
   const minRiverSteps = Math.max(10, Math.floor(minDim * 0.2));
   const pathWidth = 0;
   const edgePull = 0.06 + riverScale * 0.18;
-  const minRiverElev = 0.18;
   const bedSlope = 0.00012 + riverScale * 0.0001;
   const maxDepth = 0.03 + riverScale * 0.02;
   const SURFACE_DROP_MIN = 0.00025;
@@ -839,6 +839,13 @@ function carveRiverValleys(
   const RIVER_MIN_CHANNEL_WIDTH = 1;
   const edgeWidth = getEdgeWidth(state.grid.cols, state.grid.rows);
   const seaLevelAt = (x: number, y: number): number => seaLevelMap[idxAt(x, y)] ?? 0;
+  const riverBedFloorAt = (idx: number): number => {
+    const sea = seaLevelMap[idx] ?? 0;
+    const terrain = elevationMap[idx] ?? sea;
+    const terrainFloor = terrain - MIN_RIVER_DEPTH - BANK_CLEARANCE;
+    const seaFloor = sea - (MIN_RIVER_DEPTH + OUTLET_EPS);
+    return clamp(Math.min(terrainFloor, seaFloor), 0, 1);
+  };
   const touchesOceanConnectedWater = (x: number, y: number): boolean => {
     if (!oceanMask || !isInside(x, y)) {
       return false;
@@ -984,7 +991,7 @@ function carveRiverValleys(
     if (Number.isFinite(existing)) {
       return existing;
     }
-    return clamp(elevationMap[idx] - MIN_RIVER_DEPTH, 0, 1);
+    return clamp(elevationMap[idx] - MIN_RIVER_DEPTH, riverBedFloorAt(idx), 1);
   };
   const safeSurfaceAt = (idx: number): number => {
     const existing = riverSurfaceField[idx];
@@ -1075,13 +1082,18 @@ function carveRiverValleys(
       const surfaceB = safeSurfaceAt(bIdx);
       const stepA = safeStepAt(aIdx);
       const stepB = safeStepAt(bIdx);
-      const bed = Math.min(bedA, bedB);
-      const minElevation = bed + MIN_RIVER_DEPTH + BANK_CLEARANCE;
-      if ((elevationMap[targetIdx] ?? 0) < minElevation) {
-        elevationMap[targetIdx] = minElevation;
+      const terrainElevation = elevationMap[targetIdx] ?? 0;
+      const bedFloor = riverBedFloorAt(targetIdx);
+      const terrainCap = Math.max(0, terrainElevation - BANK_CLEARANCE);
+      let bed = Math.min(bedA, bedB);
+      const maxBed = Math.max(0, terrainCap - 0.0015);
+      if (bed > maxBed) {
+        bed = maxBed;
       }
-      const minSurface = bed + MIN_RIVER_DEPTH;
-      const maxSurface = Math.max(minSurface, (elevationMap[targetIdx] ?? 0) - BANK_CLEARANCE);
+      bed = Math.max(bedFloor, bed);
+      const effectiveDepth = Math.min(MIN_RIVER_DEPTH, Math.max(0.0015, terrainCap - bed));
+      const minSurface = Math.max(bed, bed + effectiveDepth);
+      const maxSurface = Math.max(minSurface, terrainCap);
       const surface = clamp((surfaceA + surfaceB) * 0.5, minSurface, maxSurface);
       const step = clamp(Math.max(stepA, stepB) * 0.7, 0, 1);
 
@@ -1416,11 +1428,11 @@ function carveRiverValleys(
       const localSlope = Math.max(0, prevElev - localElev);
       pathSlope.push(localSlope);
       if (i === 0) {
-        lastBed = Math.max(minRiverElev, localElev - 0.01);
+        lastBed = Math.max(riverBedFloorAt(idx), localElev - 0.01);
       } else {
         const slopeCarveBonus = clamp(localSlope * (1.1 + riverScale * 0.45), 0, 0.02);
         const target = Math.min(localElev - 0.004, lastBed - (bedSlope + slopeCarveBonus * 0.22));
-        lastBed = Math.max(minRiverElev, target);
+        lastBed = Math.max(riverBedFloorAt(idx), target);
       }
       riverBeds.push(lastBed);
       const minSurface = lastBed + MIN_RIVER_DEPTH;
@@ -1458,10 +1470,15 @@ function carveRiverValleys(
         continue;
       }
       const localElev = elevationMap[bridge.idx] ?? 0;
-      const prevBed = riverBeds[pos - 1] ?? minRiverElev;
+      const bridgeBedFloor = riverBedFloorAt(bridge.idx);
+      const prevBed = riverBeds[pos - 1] ?? bridgeBedFloor;
       const nextBed = riverBeds[pos + 1] ?? prevBed;
       const minBedForSurface = localElev - MIN_RIVER_DEPTH - BANK_CLEARANCE;
-      const bridgeBed = clamp((prevBed + nextBed) * 0.5, minRiverElev, Math.max(minRiverElev, minBedForSurface));
+      const bridgeBed = clamp(
+        (prevBed + nextBed) * 0.5,
+        bridgeBedFloor,
+        Math.max(bridgeBedFloor, minBedForSurface)
+      );
       riverBeds[pos] = bridgeBed;
       const minSurface = bridgeBed + MIN_RIVER_DEPTH;
       const terrainCap = Math.max(minSurface, localElev - BANK_CLEARANCE);
@@ -1476,7 +1493,7 @@ function carveRiverValleys(
     const outletIdx = riverPath[riverPath.length - 1];
     const outletX = outletIdx % state.grid.cols;
     const outletY = Math.floor(outletIdx / state.grid.cols);
-    const outletBed = riverBeds[riverBeds.length - 1] ?? minRiverElev;
+    const outletBed = riverBeds[riverBeds.length - 1] ?? riverBedFloorAt(outletIdx);
     const outletMinSurface = outletBed + MIN_RIVER_DEPTH;
     const outletCap = Math.max(outletMinSurface, elevationMap[outletIdx] - BANK_CLEARANCE);
     const outletTarget = reachedExistingRiver
@@ -1493,7 +1510,7 @@ function carveRiverValleys(
     }
     for (let i = 0; i < riverSurfaces.length; i += 1) {
       const idx = riverPath[i];
-      const bed = riverBeds[i] ?? minRiverElev;
+      const bed = riverBeds[i] ?? riverBedFloorAt(idx);
       const minSurface = bed + MIN_RIVER_DEPTH;
       const terrainCap = Math.max(minSurface, elevationMap[idx] - BANK_CLEARANCE);
       let surface = clamp(riverSurfaces[i] ?? minSurface, minSurface, terrainCap);
@@ -1531,7 +1548,7 @@ function carveRiverValleys(
     for (let i = 0; i < riverPath.length; i += 1) {
       const idx = riverPath[i];
       const width = riverWidths[i] ?? widthBase;
-      const bed = riverBeds[i] ?? minRiverElev;
+      const bed = riverBeds[i] ?? riverBedFloorAt(idx);
       const centerSurface = riverSurfaces[i] ?? (bed + MIN_RIVER_DEPTH);
       const localSlope = pathSlope[i] ?? 0;
       const stepStrength = clamp(riverStepProfile[i] ?? 0, 0, 1);
@@ -1638,9 +1655,14 @@ function carveRiverValleys(
   enforceOrthogonalRiverConnectivity();
   for (let i = 0; i < totalTiles; i += 1) {
     if (!riverMask[i]) {
+      riverBedField[i] = Number.NaN;
+      riverSurfaceField[i] = Number.NaN;
+      riverStepStrengthField[i] = 0;
       continue;
     }
-    const bed = Number.isFinite(riverBedField[i]) ? riverBedField[i] : clamp(elevationMap[i] - MIN_RIVER_DEPTH, 0, 1);
+    const bed = Number.isFinite(riverBedField[i])
+      ? riverBedField[i]
+      : clamp(elevationMap[i] - MIN_RIVER_DEPTH, riverBedFloorAt(i), 1);
     riverBedField[i] = bed;
     const minSurface = bed + MIN_RIVER_DEPTH;
     const maxSurface = Math.max(minSurface, elevationMap[i] - BANK_CLEARANCE);
@@ -1657,9 +1679,100 @@ type ElevationBuildResult = {
   riverMask: Uint8Array;
   seaLevelBase: number;
   erosionWearMap: Float32Array;
+  erosionDepositMap: Float32Array;
+  erosionHardnessMap: Float32Array;
   erosionFlowXMap: Float32Array;
   erosionFlowYMap: Float32Array;
+  tectonicStressMap?: Float32Array;
+  tectonicTrendXMap?: Float32Array;
+  tectonicTrendYMap?: Float32Array;
 };
+
+const TERRAIN_SPIKE_THRESHOLD = 0.014;
+const TERRAIN_SPIKE_MARGIN = 0.003;
+const TERRAIN_SPIKE_PASSES = 3;
+const TERRAIN_SPIKE_SUPPORTED_NEIGHBOR_MAX = 2;
+
+function suppressIsolatedElevationSpikes(
+  elevationMap: number[],
+  cols: number,
+  rows: number,
+  protectedMask?: ArrayLike<number> | null
+): void {
+  if (cols < 3 || rows < 3) {
+    return;
+  }
+  const next = new Float32Array(elevationMap.length);
+  const neighbors = new Float32Array(8);
+  for (let pass = 0; pass < TERRAIN_SPIKE_PASSES; pass += 1) {
+    let changed = false;
+    for (let i = 0; i < elevationMap.length; i += 1) {
+      next[i] = elevationMap[i] ?? 0;
+    }
+    for (let y = 1; y < rows - 1; y += 1) {
+      for (let x = 1; x < cols - 1; x += 1) {
+        const idx = y * cols + x;
+        if ((protectedMask?.[idx] ?? 0) > 0) {
+          continue;
+        }
+        const center = elevationMap[idx] ?? 0;
+        let sum = 0;
+        let count = 0;
+        let supportCount = 0;
+        let neighborWrite = 0;
+        for (let dy = -1; dy <= 1; dy += 1) {
+          for (let dx = -1; dx <= 1; dx += 1) {
+            if (dx === 0 && dy === 0) {
+              continue;
+            }
+            const value = elevationMap[(y + dy) * cols + (x + dx)] ?? center;
+            neighbors[neighborWrite] = value;
+            neighborWrite += 1;
+            sum += value;
+            count += 1;
+            if (value >= center - TERRAIN_SPIKE_THRESHOLD * 0.45) {
+              supportCount += 1;
+            }
+          }
+        }
+        if (count !== 8) {
+          continue;
+        }
+        for (let i = 1; i < neighbors.length; i += 1) {
+          const value = neighbors[i];
+          let j = i - 1;
+          while (j >= 0 && neighbors[j] > value) {
+            neighbors[j + 1] = neighbors[j];
+            j -= 1;
+          }
+          neighbors[j + 1] = value;
+        }
+        const avgNeighbor = sum / count;
+        const medianNeighbor = (neighbors[3] + neighbors[4]) * 0.5;
+        const supportedPeak = supportCount > TERRAIN_SPIKE_SUPPORTED_NEIGHBOR_MAX;
+        const isolatedPeak =
+          !supportedPeak &&
+          center - medianNeighbor > TERRAIN_SPIKE_THRESHOLD &&
+          center - avgNeighbor > TERRAIN_SPIKE_THRESHOLD * 0.7;
+        if (!isolatedPeak) {
+          continue;
+        }
+        const clampTarget = Math.max(avgNeighbor, medianNeighbor + TERRAIN_SPIKE_MARGIN);
+        if (clampTarget >= center) {
+          continue;
+        }
+        next[idx] = clampTarget;
+        changed = true;
+      }
+    }
+    for (let i = 0; i < elevationMap.length; i += 1) {
+      elevationMap[i] = next[i];
+    }
+    if (!changed) {
+      break;
+    }
+  }
+}
 
 async function buildElevationMap(
   state: WorldState,
@@ -1669,9 +1782,708 @@ async function buildElevationMap(
   yieldIfNeeded?: () => Promise<boolean>,
   debug?: MapGenDebug
 ): Promise<ElevationBuildResult> {
-  const maxDim = Math.max(state.grid.cols, state.grid.rows);
-  const elevationBlock = maxDim >= 1024 ? 8 : maxDim >= 512 ? 4 : 2;
-  return buildElevationMapCoarse(state, rng, elevationBlock, settings, report, yieldIfNeeded, debug);
+  return buildElevationMapTectonicProxy(state, rng, settings, report, yieldIfNeeded, debug);
+}
+
+type TectonicGridPlan = {
+  reliefCols: number;
+  reliefRows: number;
+  erosionCols: number;
+  erosionRows: number;
+  coarseIterations: number;
+  refinementIterations: number;
+  settlingIterations: number;
+  reliefSmoothPasses: number;
+};
+
+type TectonicField = {
+  data: ArrayLike<number>;
+  cols: number;
+  rows: number;
+};
+
+type WorkingTectonicLevel = {
+  cols: number;
+  rows: number;
+  height: Float32Array;
+  wear: Float32Array;
+  deposit: Float32Array;
+  flowX: Float32Array;
+  flowY: Float32Array;
+  hardness: Float32Array;
+  landShape: Float32Array;
+  basin: Float32Array;
+  tectonicStress: Float32Array;
+  tectonicTrendX: Float32Array;
+  tectonicTrendY: Float32Array;
+};
+
+const scaleGridToLongestSide = (
+  cols: number,
+  rows: number,
+  longestSide: number
+): { cols: number; rows: number } => {
+  if (cols >= rows) {
+    return {
+      cols: longestSide,
+      rows: Math.max(1, Math.round((rows / Math.max(1, cols)) * longestSide))
+    };
+  }
+  return {
+    cols: Math.max(1, Math.round((cols / Math.max(1, rows)) * longestSide)),
+    rows: longestSide
+  };
+};
+
+const resolveTectonicGridPlan = (cols: number, rows: number): TectonicGridPlan => {
+  const maxDim = Math.max(cols, rows);
+  if (maxDim <= 64) {
+    const reliefGrid = scaleGridToLongestSide(cols, rows, 48);
+    const erosionGrid = scaleGridToLongestSide(cols, rows, 64);
+    return {
+      reliefCols: reliefGrid.cols,
+      reliefRows: reliefGrid.rows,
+      erosionCols: erosionGrid.cols,
+      erosionRows: erosionGrid.rows,
+      coarseIterations: 8,
+      refinementIterations: 0,
+      settlingIterations: 0,
+      reliefSmoothPasses: 1
+    };
+  }
+  if (maxDim <= 128) {
+    const reliefGrid = scaleGridToLongestSide(cols, rows, 64);
+    const erosionGrid = scaleGridToLongestSide(cols, rows, 96);
+    return {
+      reliefCols: reliefGrid.cols,
+      reliefRows: reliefGrid.rows,
+      erosionCols: erosionGrid.cols,
+      erosionRows: erosionGrid.rows,
+      coarseIterations: 10,
+      refinementIterations: 4,
+      settlingIterations: 2,
+      reliefSmoothPasses: 1
+    };
+  }
+  const reliefGrid = scaleGridToLongestSide(cols, rows, 96);
+  const erosionGrid = scaleGridToLongestSide(cols, rows, 128);
+  return {
+    reliefCols: reliefGrid.cols,
+    reliefRows: reliefGrid.rows,
+    erosionCols: erosionGrid.cols,
+    erosionRows: erosionGrid.rows,
+    coarseIterations: 12,
+    refinementIterations: 8,
+    settlingIterations: 3,
+    reliefSmoothPasses: 2
+  };
+};
+
+async function buildElevationMapTectonicProxy(
+  state: WorldState,
+  rng: RNG,
+  settings: MapGenSettings,
+  report?: MapGenReporter,
+  yieldIfNeeded?: () => Promise<boolean>,
+  debug?: MapGenDebug
+): Promise<ElevationBuildResult> {
+  const cols = state.grid.cols;
+  const rows = state.grid.rows;
+  const totalTiles = state.grid.totalTiles;
+  const riverMask = new Uint8Array(totalTiles);
+  const cellSizeM = Math.max(0.1, settings.cellSizeM);
+  const worldOffsetXM = settings.worldOffsetXM;
+  const worldOffsetYM = settings.worldOffsetYM;
+  const maxDim = Math.max(cols, rows);
+  const relief01 = clamp(settings.relief, 0, 1);
+  const ruggedness01 = clamp(settings.ruggedness, 0, 1);
+  const riverIntensity = clamp(settings.riverIntensity, 0, 1);
+  const basinStrength = clamp(settings.basinStrength, 0, 1);
+  const coastalShelfWidth = clamp(settings.coastalShelfWidth, 0, 1);
+  const maxHeight01 = clamp(settings.maxHeight, 0, 1);
+  const reliefCurve = Math.pow(relief01, 1.4);
+  const normalizedHeightPressure = computeNormalizedHeightPressure(maxHeight01);
+  const elevationScale = clamp(settings.elevationScale, 0.72, 2.45);
+  const elevationExponent = clamp(settings.elevationExponent, 0.6, 2.6);
+  const edgeWidth = Math.max(8, Math.floor(getEdgeWidth(cols, rows) * mix(0.72, 1.6, coastalShelfWidth)));
+  const perimeterOceanBandTiles = Math.max(
+    Math.max(6, Math.floor(getEdgeWidth(cols, rows) * mix(0.7, 1.15, coastalShelfWidth))) * 2,
+    Math.floor(Math.min(cols, rows) * mix(0.12, 0.2, coastalShelfWidth))
+  );
+  const plan = resolveTectonicGridPlan(cols, rows);
+  const terrainEnvelopeMap = new Float32Array(totalTiles);
+  const erosionWearMap = new Float32Array(totalTiles);
+  const erosionDepositMap = new Float32Array(totalTiles);
+  const erosionHardnessMap = new Float32Array(totalTiles);
+  const erosionFlowXMap = new Float32Array(totalTiles);
+  const erosionFlowYMap = new Float32Array(totalTiles);
+  const tectonicStressMap = new Float32Array(totalTiles);
+  const tectonicTrendXMap = new Float32Array(totalTiles);
+  const tectonicTrendYMap = new Float32Array(totalTiles);
+  const shouldStopAfter = (phase: MapGenDebugPhase): boolean => debug?.stopAfterPhase === phase;
+  const landEnvelopeBoost = maxDim <= 128 ? 1.14 : 1;
+  const mediumCompatibilityLift = maxDim <= 128 ? 0.02 : 0;
+  const shapeToLandEnvelope = (shape: number): number =>
+    smoothstep(0.04, 0.44, clamp(shape, 0, 1));
+
+  const sampleGridBilinear = (
+    field: TectonicField,
+    x: number,
+    y: number
+  ): number => {
+    const gx = cols <= 1 ? 0 : (x / Math.max(1, cols - 1)) * Math.max(0, field.cols - 1);
+    const gy = rows <= 1 ? 0 : (y / Math.max(1, rows - 1)) * Math.max(0, field.rows - 1);
+    const x0 = Math.max(0, Math.min(field.cols - 1, Math.floor(gx)));
+    const y0 = Math.max(0, Math.min(field.rows - 1, Math.floor(gy)));
+    const x1 = Math.min(field.cols - 1, x0 + 1);
+    const y1 = Math.min(field.rows - 1, y0 + 1);
+    const tx = clamp(gx - x0, 0, 1);
+    const ty = clamp(gy - y0, 0, 1);
+    const i00 = y0 * field.cols + x0;
+    const i10 = y0 * field.cols + x1;
+    const i01 = y1 * field.cols + x0;
+    const i11 = y1 * field.cols + x1;
+    const v00 = field.data[i00] ?? 0;
+    const v10 = field.data[i10] ?? 0;
+    const v01 = field.data[i01] ?? 0;
+    const v11 = field.data[i11] ?? 0;
+    const v0 = v00 + (v10 - v00) * tx;
+    const v1 = v01 + (v11 - v01) * tx;
+    return v0 + (v1 - v0) * ty;
+  };
+
+  const resampleField = (
+    field: TectonicField,
+    targetCols: number,
+    targetRows: number,
+    normalizeVector = false
+  ): Float32Array => {
+    const result = new Float32Array(targetCols * targetRows);
+    for (let y = 0; y < targetRows; y += 1) {
+      const sourceY = targetRows <= 1 ? 0 : (y / Math.max(1, targetRows - 1)) * Math.max(0, field.rows - 1);
+      const y0 = Math.max(0, Math.min(field.rows - 1, Math.floor(sourceY)));
+      const y1 = Math.min(field.rows - 1, y0 + 1);
+      const ty = clamp(sourceY - y0, 0, 1);
+      for (let x = 0; x < targetCols; x += 1) {
+        const sourceX = targetCols <= 1 ? 0 : (x / Math.max(1, targetCols - 1)) * Math.max(0, field.cols - 1);
+        const x0 = Math.max(0, Math.min(field.cols - 1, Math.floor(sourceX)));
+        const x1 = Math.min(field.cols - 1, x0 + 1);
+        const tx = clamp(sourceX - x0, 0, 1);
+        const i00 = y0 * field.cols + x0;
+        const i10 = y0 * field.cols + x1;
+        const i01 = y1 * field.cols + x0;
+        const i11 = y1 * field.cols + x1;
+        const v00 = field.data[i00] ?? 0;
+        const v10 = field.data[i10] ?? 0;
+        const v01 = field.data[i01] ?? 0;
+        const v11 = field.data[i11] ?? 0;
+        const v0 = v00 + (v10 - v00) * tx;
+        const v1 = v01 + (v11 - v01) * tx;
+        result[y * targetCols + x] = v0 + (v1 - v0) * ty;
+      }
+    }
+    if (!normalizeVector) {
+      return result;
+    }
+    for (let i = 0; i < result.length; i += 1) {
+      if (!Number.isFinite(result[i])) {
+        result[i] = 0;
+      }
+    }
+    return result;
+  };
+
+  const blurHeight = (height: Float32Array, gridCols: number, gridRows: number, passes: number): Float32Array => {
+    if (passes <= 0) {
+      return height;
+    }
+    let current = Float32Array.from(height);
+    let next = new Float32Array(height.length);
+    for (let pass = 0; pass < passes; pass += 1) {
+      for (let y = 0; y < gridRows; y += 1) {
+        for (let x = 0; x < gridCols; x += 1) {
+          const idx = y * gridCols + x;
+          let sum = current[idx];
+          let count = 1;
+          if (x > 0) {
+            sum += current[idx - 1];
+            count += 1;
+          }
+          if (x < gridCols - 1) {
+            sum += current[idx + 1];
+            count += 1;
+          }
+          if (y > 0) {
+            sum += current[idx - gridCols];
+            count += 1;
+          }
+          if (y < gridRows - 1) {
+            sum += current[idx + gridCols];
+            count += 1;
+          }
+          next[idx] = current[idx] * 0.46 + (sum / count) * 0.54;
+        }
+      }
+      const swap = current;
+      current = next;
+      next = swap;
+    }
+    return current;
+  };
+
+  const buildField = (data: ArrayLike<number>, fieldCols: number, fieldRows: number): TectonicField => ({
+    data,
+    cols: fieldCols,
+    rows: fieldRows
+  });
+
+  const buildPreviewElevation = (
+    heightField: TectonicField,
+    wearField?: TectonicField | null
+  ): number[] => {
+    const elevationMap = Array.from({ length: totalTiles }, () => 0);
+    state.valleyMap = Array.from({ length: totalTiles }, () => 0);
+    for (let y = 0; y < rows; y += 1) {
+      for (let x = 0; x < cols; x += 1) {
+        const idx = y * cols + x;
+        elevationMap[idx] = clamp(sampleGridBilinear(heightField, x, y) * terrainEnvelopeMap[idx], 0, 1);
+        state.valleyMap[idx] = wearField ? clamp(sampleGridBilinear(wearField, x, y), 0, 1) : 0;
+      }
+    }
+    return elevationMap;
+  };
+
+  const populateTerrainEnvelopeMap = async (landShapeField: TectonicField, label: string, start: number, span: number): Promise<void> => {
+    for (let y = 0; y < rows; y += 1) {
+      for (let x = 0; x < cols; x += 1) {
+        const idx = y * cols + x;
+        const falloff = getEdgeFalloff(x, y, cols, rows, edgeWidth, state.seed);
+        const landShape = sampleGridBilinear(landShapeField, x, y);
+        const edgeDistanceTiles = Math.min(x, y, cols - 1 - x, rows - 1 - y);
+        const edgeCoastT = smoothstep(0, Math.max(1, perimeterOceanBandTiles), edgeDistanceTiles);
+        const edgeEnvelope = Math.min(falloff, Math.pow(edgeCoastT, mix(1.45, 1.1, coastalShelfWidth)));
+        terrainEnvelopeMap[idx] = Math.min(edgeEnvelope, clamp(shapeToLandEnvelope(landShape) * landEnvelopeBoost, 0, 1));
+      }
+      if (yieldIfNeeded && report && (y === rows - 1 || (y + 1) % 12 === 0)) {
+        if (await yieldIfNeeded()) {
+          await report(label, start + ((y + 1) / rows) * span);
+        }
+      }
+    }
+  };
+
+  const projectSupportMaps = async (
+    wearField: TectonicField,
+    depositField: TectonicField,
+    hardnessField: TectonicField,
+    flowXField: TectonicField,
+    flowYField: TectonicField,
+    stressField: TectonicField,
+    trendXField: TectonicField,
+    trendYField: TectonicField,
+    label: string,
+    start: number,
+    span: number
+  ): Promise<void> => {
+    for (let y = 0; y < rows; y += 1) {
+      for (let x = 0; x < cols; x += 1) {
+        const idx = y * cols + x;
+        const envelope = terrainEnvelopeMap[idx];
+        const wear = sampleGridBilinear(wearField, x, y);
+        const deposit = sampleGridBilinear(depositField, x, y);
+        const hardness = sampleGridBilinear(hardnessField, x, y);
+        const flowX = sampleGridBilinear(flowXField, x, y);
+        const flowY = sampleGridBilinear(flowYField, x, y);
+        const flowLength = Math.hypot(flowX, flowY);
+        const trendX = sampleGridBilinear(trendXField, x, y);
+        const trendY = sampleGridBilinear(trendYField, x, y);
+        const trendLength = Math.hypot(trendX, trendY);
+        erosionWearMap[idx] = clamp(wear * envelope, 0, 1);
+        erosionDepositMap[idx] = clamp(deposit * envelope, 0, 1);
+        erosionHardnessMap[idx] = clamp(hardness, 0, 1);
+        erosionFlowXMap[idx] = flowLength > 1e-6 ? flowX / flowLength : 0;
+        erosionFlowYMap[idx] = flowLength > 1e-6 ? flowY / flowLength : 0;
+        tectonicStressMap[idx] = clamp(sampleGridBilinear(stressField, x, y) * envelope, 0, 1);
+        tectonicTrendXMap[idx] = trendLength > 1e-6 ? trendX / trendLength : 0;
+        tectonicTrendYMap[idx] = trendLength > 1e-6 ? trendY / trendLength : 0;
+      }
+      if (yieldIfNeeded && report && (y === rows - 1 || (y + 1) % 12 === 0)) {
+        if (await yieldIfNeeded()) {
+          await report(label, start + ((y + 1) / rows) * span);
+        }
+      }
+    }
+  };
+
+  const resampleLevel = (level: WorkingTectonicLevel, targetCols: number, targetRows: number): WorkingTectonicLevel => ({
+    cols: targetCols,
+    rows: targetRows,
+    height: resampleField(buildField(level.height, level.cols, level.rows), targetCols, targetRows),
+    wear: resampleField(buildField(level.wear, level.cols, level.rows), targetCols, targetRows),
+    deposit: resampleField(buildField(level.deposit, level.cols, level.rows), targetCols, targetRows),
+    flowX: resampleField(buildField(level.flowX, level.cols, level.rows), targetCols, targetRows),
+    flowY: resampleField(buildField(level.flowY, level.cols, level.rows), targetCols, targetRows),
+    hardness: resampleField(buildField(level.hardness, level.cols, level.rows), targetCols, targetRows),
+    landShape: resampleField(buildField(level.landShape, level.cols, level.rows), targetCols, targetRows),
+    basin: resampleField(buildField(level.basin, level.cols, level.rows), targetCols, targetRows),
+    tectonicStress: resampleField(buildField(level.tectonicStress, level.cols, level.rows), targetCols, targetRows),
+    tectonicTrendX: resampleField(buildField(level.tectonicTrendX, level.cols, level.rows), targetCols, targetRows, true),
+    tectonicTrendY: resampleField(buildField(level.tectonicTrendY, level.cols, level.rows), targetCols, targetRows, true)
+  });
+
+  if (report) {
+    await report("Seeding tectonic terrain...", 0.05);
+  }
+
+  const reliefSeed = buildTectonicProxySeed({
+    seed: state.seed,
+    cols: plan.reliefCols,
+    rows: plan.reliefRows,
+    settings
+  });
+  let reliefHeight = blurHeight(reliefSeed.baseElevation, plan.reliefCols, plan.reliefRows, plan.reliefSmoothPasses);
+  const tectonicElevationScale =
+    mix(0.78, 1.04, clamp((elevationScale - 0.72) / (2.45 - 0.72), 0, 1))
+    * mix(0.76, 0.92, reliefCurve);
+  const tectonicExponent = mix(1.04, Math.min(1.32, elevationExponent * 0.82), reliefCurve * 0.65);
+  for (let i = 0; i < reliefHeight.length; i += 1) {
+    const shaped =
+      Math.pow(reliefHeight[i], tectonicExponent)
+      * mix(0.74, 0.9, reliefCurve)
+      * normalizedHeightPressure;
+    const scaled = shaped * tectonicElevationScale;
+    const softened = clamp(
+      softenPeaks(
+        scaled,
+        mix(0.84, 0.99, clamp(reliefCurve * 0.18 + ruggedness01 * 0.1 + maxHeight01 * 0.28, 0, 1)),
+        mix(2.8, 0.42, clamp(reliefCurve * 0.12 + maxHeight01 * 0.48, 0, 1))
+      ),
+      0,
+      1
+    );
+    const compressed = mix(0.04, 0.78, smoothstep(0.03, 0.9, softened));
+    reliefHeight[i] = clamp(
+      mix(softened, compressed, 0.55) + reliefSeed.landShape[i] * mediumCompatibilityLift,
+      0,
+      1
+    );
+  }
+
+  const reliefHeightField = buildField(reliefHeight, plan.reliefCols, plan.reliefRows);
+  const reliefLandShapeField = buildField(reliefSeed.landShape, plan.reliefCols, plan.reliefRows);
+  await populateTerrainEnvelopeMap(reliefLandShapeField, "Projecting relief...", 0.08, 0.12);
+  const reliefElevationMap = buildPreviewElevation(reliefHeightField);
+  const reliefSeaLevelBase = resolveSeaLevelBase(state, settings, reliefElevationMap, cellSizeM);
+  if (debug) {
+    await emitDebugPhase(
+      debug,
+      "terrain:relief",
+      state,
+      settings,
+      reliefElevationMap,
+      undefined,
+      undefined,
+      reliefSeaLevelBase
+    );
+    if (shouldStopAfter("terrain:relief")) {
+      return {
+        elevationMap: reliefElevationMap,
+        riverMask,
+        seaLevelBase: reliefSeaLevelBase,
+        erosionWearMap,
+        erosionDepositMap,
+        erosionHardnessMap,
+        erosionFlowXMap,
+        erosionFlowYMap,
+        tectonicStressMap,
+        tectonicTrendXMap,
+        tectonicTrendYMap
+      };
+    }
+  }
+
+  let currentLevel: WorkingTectonicLevel = {
+    cols: plan.reliefCols,
+    rows: plan.reliefRows,
+    height: Float32Array.from(reliefHeight),
+    wear: new Float32Array(plan.reliefCols * plan.reliefRows),
+    deposit: new Float32Array(plan.reliefCols * plan.reliefRows),
+    flowX: new Float32Array(plan.reliefCols * plan.reliefRows),
+    flowY: new Float32Array(plan.reliefCols * plan.reliefRows),
+    hardness: Float32Array.from(reliefSeed.tectonicStress),
+    landShape: Float32Array.from(reliefSeed.landShape),
+    basin: Float32Array.from(reliefSeed.basinBias),
+    tectonicStress: Float32Array.from(reliefSeed.tectonicStress),
+    tectonicTrendX: Float32Array.from(reliefSeed.tectonicTrendX),
+    tectonicTrendY: Float32Array.from(reliefSeed.tectonicTrendY)
+  };
+
+  if (plan.refinementIterations === 0 && (currentLevel.cols !== plan.erosionCols || currentLevel.rows !== plan.erosionRows)) {
+    currentLevel = resampleLevel(currentLevel, plan.erosionCols, plan.erosionRows);
+  }
+
+  const bootstrapPreRiver = buildPreRiverErosionFields({
+    cols: currentLevel.cols,
+    rows: currentLevel.rows,
+    elevations: Array.from(currentLevel.height),
+    landShape: Array.from(currentLevel.landShape),
+    basinSignal: Array.from(currentLevel.basin),
+    ruggedness: ruggedness01,
+    riverIntensity,
+    basinStrength,
+    coastalShelfWidth
+  });
+  currentLevel.wear = Float32Array.from(bootstrapPreRiver.wear);
+  currentLevel.flowX = Float32Array.from(bootstrapPreRiver.flowX);
+  currentLevel.flowY = Float32Array.from(bootstrapPreRiver.flowY);
+
+  if (!settings.skipCarving) {
+    const coarseHydraulic = await runIterativeHydraulicErosion({
+      seed: state.seed,
+      settings,
+      level: {
+        cols: currentLevel.cols,
+        rows: currentLevel.rows,
+        height: currentLevel.height,
+        landShape: currentLevel.landShape,
+        basinSignal: currentLevel.basin,
+        tectonicStress: currentLevel.tectonicStress,
+        tectonicTrendX: currentLevel.tectonicTrendX,
+        tectonicTrendY: currentLevel.tectonicTrendY,
+        bootstrapWear: currentLevel.wear,
+        bootstrapDeposit: currentLevel.deposit,
+        bootstrapFlowX: currentLevel.flowX,
+        bootstrapFlowY: currentLevel.flowY,
+        iterations: plan.coarseIterations,
+        cellSizeM: cellSizeM * (Math.max(cols, rows) / Math.max(currentLevel.cols, currentLevel.rows)),
+        worldOffsetXM,
+        worldOffsetYM
+      },
+      yieldIfNeeded,
+      reportProgress: report
+        ? async (progress) => {
+            await report("Simulating hydraulic erosion...", 0.22 + progress * 0.38);
+          }
+        : undefined
+    });
+    currentLevel.height = coarseHydraulic.height;
+    currentLevel.wear = coarseHydraulic.wear;
+    currentLevel.deposit = coarseHydraulic.deposit;
+    currentLevel.flowX = coarseHydraulic.flowX;
+    currentLevel.flowY = coarseHydraulic.flowY;
+    currentLevel.hardness = coarseHydraulic.hardness;
+
+    if (plan.refinementIterations > 0) {
+      if (currentLevel.cols !== plan.erosionCols || currentLevel.rows !== plan.erosionRows) {
+        currentLevel = resampleLevel(currentLevel, plan.erosionCols, plan.erosionRows);
+      }
+      const refinedHydraulic = await runIterativeHydraulicErosion({
+        seed: state.seed + 97,
+        settings,
+        level: {
+          cols: currentLevel.cols,
+          rows: currentLevel.rows,
+          height: currentLevel.height,
+          landShape: currentLevel.landShape,
+          basinSignal: currentLevel.basin,
+          tectonicStress: currentLevel.tectonicStress,
+          tectonicTrendX: currentLevel.tectonicTrendX,
+          tectonicTrendY: currentLevel.tectonicTrendY,
+          bootstrapWear: currentLevel.wear,
+          bootstrapDeposit: currentLevel.deposit,
+          bootstrapFlowX: currentLevel.flowX,
+          bootstrapFlowY: currentLevel.flowY,
+          iterations: plan.refinementIterations,
+          cellSizeM: cellSizeM * (Math.max(cols, rows) / Math.max(currentLevel.cols, currentLevel.rows)),
+          worldOffsetXM,
+          worldOffsetYM
+        },
+        yieldIfNeeded,
+        reportProgress: report
+          ? async (progress) => {
+              await report("Refining hydraulic erosion...", 0.6 + progress * 0.18);
+            }
+          : undefined
+      });
+      currentLevel.height = refinedHydraulic.height;
+      currentLevel.wear = refinedHydraulic.wear;
+      currentLevel.deposit = refinedHydraulic.deposit;
+      currentLevel.flowX = refinedHydraulic.flowX;
+      currentLevel.flowY = refinedHydraulic.flowY;
+      currentLevel.hardness = refinedHydraulic.hardness;
+    }
+
+    if (plan.settlingIterations > 0) {
+      if (currentLevel.cols !== plan.erosionCols || currentLevel.rows !== plan.erosionRows) {
+        currentLevel = resampleLevel(currentLevel, plan.erosionCols, plan.erosionRows);
+      }
+      const settledHydraulic = await runIterativeHydraulicErosion({
+        seed: state.seed + 211,
+        settings,
+        level: {
+          cols: currentLevel.cols,
+          rows: currentLevel.rows,
+          height: currentLevel.height,
+          landShape: currentLevel.landShape,
+          basinSignal: currentLevel.basin,
+          tectonicStress: currentLevel.tectonicStress,
+          tectonicTrendX: currentLevel.tectonicTrendX,
+          tectonicTrendY: currentLevel.tectonicTrendY,
+          bootstrapWear: currentLevel.wear,
+          bootstrapDeposit: currentLevel.deposit,
+          bootstrapFlowX: currentLevel.flowX,
+          bootstrapFlowY: currentLevel.flowY,
+          iterations: plan.settlingIterations,
+          cellSizeM: cellSizeM * (Math.max(cols, rows) / Math.max(currentLevel.cols, currentLevel.rows)),
+          worldOffsetXM,
+          worldOffsetYM
+        },
+        yieldIfNeeded,
+        reportProgress: report
+          ? async (progress) => {
+              await report("Settling erosional basins...", 0.72 + progress * 0.06);
+            }
+          : undefined
+      });
+      currentLevel.height = settledHydraulic.height;
+      currentLevel.wear = settledHydraulic.wear;
+      currentLevel.deposit = settledHydraulic.deposit;
+      currentLevel.flowX = settledHydraulic.flowX;
+      currentLevel.flowY = settledHydraulic.flowY;
+      currentLevel.hardness = settledHydraulic.hardness;
+    }
+  }
+
+  await projectSupportMaps(
+    buildField(currentLevel.wear, currentLevel.cols, currentLevel.rows),
+    buildField(currentLevel.deposit, currentLevel.cols, currentLevel.rows),
+    buildField(currentLevel.hardness, currentLevel.cols, currentLevel.rows),
+    buildField(currentLevel.flowX, currentLevel.cols, currentLevel.rows),
+    buildField(currentLevel.flowY, currentLevel.cols, currentLevel.rows),
+    buildField(currentLevel.tectonicStress, currentLevel.cols, currentLevel.rows),
+    buildField(currentLevel.tectonicTrendX, currentLevel.cols, currentLevel.rows),
+    buildField(currentLevel.tectonicTrendY, currentLevel.cols, currentLevel.rows),
+    "Projecting erosion fields...",
+    0.8,
+    0.08
+  );
+
+  const carvingElevationMap = buildPreviewElevation(
+    buildField(currentLevel.height, currentLevel.cols, currentLevel.rows),
+    buildField(currentLevel.wear, currentLevel.cols, currentLevel.rows)
+  );
+  const carvingSeaLevelBase = resolveSeaLevelBase(state, settings, carvingElevationMap, cellSizeM);
+  await emitDebugPhase(
+    debug,
+    "terrain:carving",
+    state,
+    settings,
+    carvingElevationMap,
+    undefined,
+    undefined,
+    carvingSeaLevelBase
+  );
+  if (shouldStopAfter("terrain:carving")) {
+    return {
+      elevationMap: carvingElevationMap,
+      riverMask,
+      seaLevelBase: carvingSeaLevelBase,
+      erosionWearMap,
+      erosionDepositMap,
+      erosionHardnessMap,
+      erosionFlowXMap,
+      erosionFlowYMap,
+      tectonicStressMap,
+      tectonicTrendXMap,
+      tectonicTrendYMap
+    };
+  }
+
+  const elevationMap = carvingElevationMap;
+  const temp = new Float32Array(elevationMap.length);
+  const edgeSmoothRadius = Math.max(12, edgeWidth * 2);
+  for (let y = 0; y < rows; y += 1) {
+    for (let x = 0; x < cols; x += 1) {
+      const idx = y * cols + x;
+      const edgeDist = Math.min(x, y, cols - 1 - x, rows - 1 - y);
+      if (edgeDist >= edgeSmoothRadius) {
+        temp[idx] = elevationMap[idx];
+        continue;
+      }
+      let sum = elevationMap[idx];
+      let count = 1;
+      if (x > 0) {
+        sum += elevationMap[idx - 1];
+        count += 1;
+      }
+      if (x < cols - 1) {
+        sum += elevationMap[idx + 1];
+        count += 1;
+      }
+      if (y > 0) {
+        sum += elevationMap[idx - cols];
+        count += 1;
+      }
+      if (y < rows - 1) {
+        sum += elevationMap[idx + cols];
+        count += 1;
+      }
+      const blend = 0.55 * (1 - clamp(edgeDist / edgeSmoothRadius, 0, 1));
+      temp[idx] = elevationMap[idx] * (1 - blend) + (sum / count) * blend;
+    }
+  }
+  for (let i = 0; i < elevationMap.length; i += 1) {
+    elevationMap[i] = temp[i];
+  }
+  suppressIsolatedElevationSpikes(elevationMap, cols, rows);
+
+  const seaLevelBase = resolveSeaLevelBase(state, settings, elevationMap, cellSizeM);
+  await emitDebugPhase(debug, "terrain:flooding", state, settings, elevationMap, undefined, undefined, seaLevelBase);
+  if (shouldStopAfter("terrain:flooding")) {
+    return {
+      elevationMap,
+      riverMask,
+      seaLevelBase,
+      erosionWearMap,
+      erosionDepositMap,
+      erosionHardnessMap,
+      erosionFlowXMap,
+      erosionFlowYMap,
+      tectonicStressMap,
+      tectonicTrendXMap,
+      tectonicTrendYMap
+    };
+  }
+  await emitDebugPhase(debug, "terrain:elevation", state, settings, elevationMap, undefined, undefined, seaLevelBase);
+  if (shouldStopAfter("terrain:elevation")) {
+    return {
+      elevationMap,
+      riverMask,
+      seaLevelBase,
+      erosionWearMap,
+      erosionDepositMap,
+      erosionHardnessMap,
+      erosionFlowXMap,
+      erosionFlowYMap,
+      tectonicStressMap,
+      tectonicTrendXMap,
+      tectonicTrendYMap
+    };
+  }
+
+  return {
+    elevationMap,
+    riverMask,
+    seaLevelBase,
+    erosionWearMap,
+    erosionDepositMap,
+    erosionHardnessMap,
+    erosionFlowXMap,
+    erosionFlowYMap,
+    tectonicStressMap,
+    tectonicTrendXMap,
+    tectonicTrendYMap
+  };
 }
 
 async function buildElevationMapCoarse(
@@ -1693,16 +2505,13 @@ async function buildElevationMapCoarse(
   const coarseValleyMap = Array.from({ length: coarseTotal }, () => 0);
   const coarseBasinMap = Array.from({ length: coarseTotal }, () => 0);
   const coarseShapeMap = Array.from({ length: coarseTotal }, () => 0);
-  const coarseFlowXMap = Array.from({ length: coarseTotal }, () => 0);
-  const coarseFlowYMap = Array.from({ length: coarseTotal }, () => 0);
-  const coarseSampleXMap = Array.from({ length: coarseTotal }, () => 0);
-  const coarseSampleYMap = Array.from({ length: coarseTotal }, () => 0);
   const cellSizeM = Math.max(0.1, settings.cellSizeM);
   const worldOffsetXM = settings.worldOffsetXM;
   const worldOffsetYM = settings.worldOffsetYM;
   const worldWidthM = cols * cellSizeM;
   const worldHeightM = rows * cellSizeM;
   const minDimM = Math.min(worldWidthM, worldHeightM);
+  const maxGridDim = Math.max(cols, rows);
   const elevationScale = clamp(settings.elevationScale, 0.72, 2.45);
   const elevationExponent = clamp(settings.elevationExponent, 0.6, 2.6);
   const mountainScale = clamp(settings.mountainScale, 0.68, 1.6);
@@ -2533,36 +3342,145 @@ async function buildElevationMapCoarse(
     const v1 = v01 + (v11 - v01) * tx;
     return v0 + (v1 - v0) * ty;
   };
+  const sampleGridBilinear = (
+    arr: ArrayLike<number>,
+    arrCols: number,
+    arrRows: number,
+    gx: number,
+    gy: number
+  ): number => {
+    const x0 = Math.max(0, Math.min(arrCols - 1, Math.floor(gx)));
+    const y0 = Math.max(0, Math.min(arrRows - 1, Math.floor(gy)));
+    const x1 = Math.min(arrCols - 1, x0 + 1);
+    const y1 = Math.min(arrRows - 1, y0 + 1);
+    const tx = clamp(gx - x0, 0, 1);
+    const ty = clamp(gy - y0, 0, 1);
+    const i00 = y0 * arrCols + x0;
+    const i10 = y0 * arrCols + x1;
+    const i01 = y1 * arrCols + x0;
+    const i11 = y1 * arrCols + x1;
+    const v00 = arr[i00] ?? 0;
+    const v10 = arr[i10] ?? 0;
+    const v01 = arr[i01] ?? 0;
+    const v11 = arr[i11] ?? 0;
+    const v0 = v00 + (v10 - v00) * tx;
+    const v1 = v01 + (v11 - v01) * tx;
+    return v0 + (v1 - v0) * ty;
+  };
+  type GridSource = {
+    data: ArrayLike<number>;
+    cols: number;
+    rows: number;
+    factor: number;
+  };
+  type WorkingErosionLevel = {
+    factor: number;
+    cols: number;
+    rows: number;
+    height: Float32Array;
+    wear: Float32Array;
+    deposit: Float32Array;
+    flowX: Float32Array;
+    flowY: Float32Array;
+    hardness: Float32Array;
+    landShape: Float32Array;
+    basin: Float32Array;
+  };
+  const buildGridSource = (
+    data: ArrayLike<number>,
+    sourceCols: number,
+    sourceRows: number,
+    factor: number
+  ): GridSource => ({
+    data,
+    cols: sourceCols,
+    rows: sourceRows,
+    factor
+  });
+  const sampleSourceAtTile = (source: GridSource, tileX: number, tileY: number): number =>
+    sampleGridBilinear(source.data, source.cols, source.rows, tileX / source.factor, tileY / source.factor);
+  const resampleSourceToFactor = (source: GridSource, targetFactor: number): Float32Array => {
+    const targetCols = Math.ceil(cols / targetFactor);
+    const targetRows = Math.ceil(rows / targetFactor);
+    const target = new Float32Array(targetCols * targetRows);
+    let offset = 0;
+    for (let y = 0; y < targetRows; y += 1) {
+      const tileY = Math.min(rows - 1, y * targetFactor);
+      for (let x = 0; x < targetCols; x += 1) {
+        const tileX = Math.min(cols - 1, x * targetFactor);
+        target[offset] = sampleSourceAtTile(source, tileX, tileY);
+        offset += 1;
+      }
+    }
+    return target;
+  };
   const edgeWidth = Math.max(8, Math.floor(getEdgeWidth(cols, rows) * mix(0.72, 1.6, coastalShelfWidth)));
   const edgeDenomM = (Math.min(cols, rows) * cellSizeM) / 2;
   const shouldStopAfter = (phase: MapGenDebugPhase): boolean => debug?.stopAfterPhase === phase;
+  const baseHydraulicIterations =
+    maxGridDim >= 1024 ? 18
+    : maxGridDim >= 512 ? 16
+    : 14;
+  const denseHydraulicIterations =
+    maxGridDim >= 1024 ? 10
+    : maxGridDim >= 512 ? 8
+    : 6;
+  const denseRefinementFactors =
+    maxGridDim >= 1024 ? [4, 2]
+    : maxGridDim >= 512 ? [2]
+    : maxGridDim >= 256 ? []
+    : [1];
   const terrainEnvelopeMap = new Float32Array(totalTiles);
   const valleySampleMap = new Float32Array(totalTiles);
   const erosionWearMap = new Float32Array(totalTiles);
+  const erosionDepositMap = new Float32Array(totalTiles);
+  const erosionHardnessMap = new Float32Array(totalTiles);
   const erosionFlowXMap = new Float32Array(totalTiles);
   const erosionFlowYMap = new Float32Array(totalTiles);
-  const populateFullResolutionSupportMaps = async (
+  const coarseLandShapeSource = buildGridSource(coarseShapeMap, coarseCols, coarseRows, blockSize);
+  const coarseBasinSource = buildGridSource(coarseBasinMap, coarseCols, coarseRows, blockSize);
+  const populateTerrainEnvelopeMap = async (
     progressLabel: string,
     progressStart: number,
     progressSpan: number
   ): Promise<void> => {
     for (let y = 0; y < rows; y += 1) {
-      const rowBase = y * cols;
-      const gy = y / blockSize;
       for (let x = 0; x < cols; x += 1) {
-        const gx = x / blockSize;
-        const idx = rowBase + x;
+        const idx = y * cols + x;
         const falloff = getEdgeFalloff(x, y, cols, rows, edgeWidth, state.seed);
-        const landShape = sampleCoarse(coarseShapeMap, gx, gy);
+        const landShape = sampleSourceAtTile(coarseLandShapeSource, x, y);
         const edgeDistanceTiles = Math.min(x, y, cols - 1 - x, rows - 1 - y);
         const edgeCoastT = smoothstep(0, Math.max(1, perimeterOceanBandTiles), edgeDistanceTiles);
         const edgeEnvelope = Math.min(falloff, Math.pow(edgeCoastT, mix(1.45, 1.1, coastalShelfWidth)));
         terrainEnvelopeMap[idx] = Math.min(edgeEnvelope, shapeToLandEnvelope(landShape));
-        const sampledWear = sampleCoarse(coarseValleyMap, gx, gy);
+      }
+      if (yieldIfNeeded && report) {
+        if (await yieldIfNeeded()) {
+          await report(progressLabel, progressStart + ((y + 1) / rows) * progressSpan);
+        }
+      }
+    }
+  };
+  const populateFullResolutionSupportMapsFromSources = async (
+    wearSource: GridSource,
+    depositSource: GridSource,
+    hardnessSource: GridSource,
+    flowXSource: GridSource,
+    flowYSource: GridSource,
+    progressLabel: string,
+    progressStart: number,
+    progressSpan: number
+  ): Promise<void> => {
+    for (let y = 0; y < rows; y += 1) {
+      for (let x = 0; x < cols; x += 1) {
+        const idx = y * cols + x;
+        const sampledWear = sampleSourceAtTile(wearSource, x, y);
         valleySampleMap[idx] = sampledWear;
         erosionWearMap[idx] = clamp(sampledWear * terrainEnvelopeMap[idx], 0, 1);
-        const sampledFlowX = sampleCoarse(coarseFlowXMap, gx, gy);
-        const sampledFlowY = sampleCoarse(coarseFlowYMap, gx, gy);
+        erosionDepositMap[idx] = clamp(sampleSourceAtTile(depositSource, x, y) * terrainEnvelopeMap[idx], 0, 1);
+        erosionHardnessMap[idx] = clamp(sampleSourceAtTile(hardnessSource, x, y), 0, 1);
+        const sampledFlowX = sampleSourceAtTile(flowXSource, x, y);
+        const sampledFlowY = sampleSourceAtTile(flowYSource, x, y);
         const sampledFlowLength = Math.hypot(sampledFlowX, sampledFlowY);
         if (sampledFlowLength > 1e-6) {
           erosionFlowXMap[idx] = sampledFlowX / sampledFlowLength;
@@ -2576,18 +3494,18 @@ async function buildElevationMapCoarse(
       }
     }
   };
-  const buildPreviewElevationFromCoarse = (source: ArrayLike<number>): number[] => {
+  const buildPreviewElevationFromSource = (
+    heightSource: GridSource,
+    wearSource?: GridSource | null
+  ): number[] => {
     const elevationMap = Array.from({ length: totalTiles }, () => 0);
     state.valleyMap = Array.from({ length: totalTiles }, () => 0);
     for (let y = 0; y < rows; y += 1) {
-      const rowBase = y * cols;
-      const gy = y / blockSize;
       for (let x = 0; x < cols; x += 1) {
-        const gx = x / blockSize;
-        const idx = rowBase + x;
-        const softened = sampleCoarse(source, gx, gy);
+        const idx = y * cols + x;
+        const softened = sampleSourceAtTile(heightSource, x, y);
         elevationMap[idx] = clamp(softened * terrainEnvelopeMap[idx], 0, 1);
-        state.valleyMap[idx] = valleySampleMap[idx];
+        state.valleyMap[idx] = wearSource ? clamp(sampleSourceAtTile(wearSource, x, y), 0, 1) : 0;
       }
     }
     return elevationMap;
@@ -2696,8 +3614,6 @@ async function buildElevationMapCoarse(
       coarseElevation[coarseIndex] = clamp(blended, 0, 1);
       coarseBasinMap[coarseIndex] = carvingSample.carve;
       coarseShapeMap[coarseIndex] = carvingSample.landShape;
-      coarseSampleXMap[coarseIndex] = centerX;
-      coarseSampleYMap[coarseIndex] = centerY;
     }
     if (yieldIfNeeded && report) {
       if (await yieldIfNeeded()) {
@@ -2765,31 +3681,8 @@ async function buildElevationMapCoarse(
 
   await naturalizeCoarseTerrain(2, "Naturalizing terrain...", 0.9, 0.04);
 
-  const preRiverErosion = buildPreRiverErosionFields({
-    cols: coarseCols,
-    rows: coarseRows,
-    elevations: coarseElevation,
-    landShape: coarseShapeMap,
-    basinSignal: coarseBasinMap,
-    ruggedness: ruggedness01,
-    riverIntensity,
-    basinStrength,
-    coastalShelfWidth
-  });
-  for (let i = 0; i < coarseTotal; i += 1) {
-    const flowWear = clamp(preRiverErosion.wear[i] ?? 0, 0, 1);
-    const basinWear = clamp(coarseBasinMap[i] ?? 0, 0, 1);
-    coarseValleyMap[i] = clamp(
-      Math.max(flowWear, basinWear * mix(0.32, 0.68, basinStrength)),
-      0,
-      1
-    );
-    coarseFlowXMap[i] = preRiverErosion.flowX[i] ?? 0;
-    coarseFlowYMap[i] = preRiverErosion.flowY[i] ?? 0;
-  }
-
-  await populateFullResolutionSupportMaps("Projecting terrain...", 0.94, 0.03);
-  const reliefElevationMap = buildPreviewElevationFromCoarse(coarseElevation);
+  await populateTerrainEnvelopeMap("Projecting relief...", 0.94, 0.03);
+  const reliefElevationMap = buildPreviewElevationFromSource(buildGridSource(coarseElevation, coarseCols, coarseRows, blockSize));
   const reliefSeaLevelBase = resolveSeaLevelBase(state, settings, reliefElevationMap, cellSizeM);
   if (debug) {
     await emitDebugPhase(
@@ -2808,79 +3701,178 @@ async function buildElevationMapCoarse(
         riverMask,
         seaLevelBase: reliefSeaLevelBase,
         erosionWearMap,
+        erosionDepositMap,
+        erosionHardnessMap,
         erosionFlowXMap,
         erosionFlowYMap
       };
     }
   }
 
+  const bootstrapPreRiver = buildPreRiverErosionFields({
+    cols: coarseCols,
+    rows: coarseRows,
+    elevations: coarseElevation,
+    landShape: coarseShapeMap,
+    basinSignal: coarseBasinMap,
+    ruggedness: ruggedness01,
+    riverIntensity,
+    basinStrength,
+    coastalShelfWidth
+  });
+
+  let currentLevel: WorkingErosionLevel = {
+    factor: blockSize,
+    cols: coarseCols,
+    rows: coarseRows,
+    height: Float32Array.from(coarseElevation),
+    wear: Float32Array.from(bootstrapPreRiver.wear),
+    deposit: new Float32Array(coarseTotal),
+    flowX: Float32Array.from(bootstrapPreRiver.flowX),
+    flowY: Float32Array.from(bootstrapPreRiver.flowY),
+    hardness: new Float32Array(coarseTotal),
+    landShape: Float32Array.from(coarseShapeMap),
+    basin: Float32Array.from(coarseBasinMap)
+  };
+
   if (!settings.skipCarving) {
-    const carvingStrength =
-      mix(0.02, 0.11, clamp(riverIntensity * 0.55 + basinStrength * 0.45, 0, 1))
-      * mix(0.42, 1, reliefCurve);
-    for (let i = 0; i < coarseElevation.length; i += 1) {
-      const sampleX = coarseSampleXMap[i];
-      const sampleY = coarseSampleYMap[i];
-      const edgeDistM = Math.min(sampleX, sampleY, cols - 1 - sampleX, rows - 1 - sampleY) * cellSizeM;
-      const edgeFactor = clamp(edgeDistM / edgeDenomM, 0, 1);
-      const localSeaLevel = clampSeaLevel(
-        reliefSeaLevelBase + (1 - edgeFactor) * settings.edgeWaterBias,
-        settings
+    const coarseHydraulic = await runIterativeHydraulicErosion({
+      seed: state.seed,
+      settings,
+      level: {
+        cols: coarseCols,
+        rows: coarseRows,
+        height: currentLevel.height,
+        landShape: currentLevel.landShape,
+        basinSignal: currentLevel.basin,
+        bootstrapWear: currentLevel.wear,
+        bootstrapDeposit: currentLevel.deposit,
+        bootstrapFlowX: currentLevel.flowX,
+        bootstrapFlowY: currentLevel.flowY,
+        iterations: baseHydraulicIterations,
+        cellSizeM: cellSizeM * blockSize,
+        worldOffsetXM,
+        worldOffsetYM
+      },
+      yieldIfNeeded,
+      reportProgress: report
+        ? async (progress) => {
+            await report("Simulating hydraulic erosion...", 0.97 + progress * 0.01);
+          }
+        : undefined
+    });
+    currentLevel = {
+      ...currentLevel,
+      height: coarseHydraulic.height,
+      wear: coarseHydraulic.wear,
+      deposit: coarseHydraulic.deposit,
+      flowX: coarseHydraulic.flowX,
+      flowY: coarseHydraulic.flowY,
+      hardness: coarseHydraulic.hardness
+    };
+
+    for (const targetFactor of denseRefinementFactors) {
+      const refinedHeight = resampleSourceToFactor(
+        buildGridSource(currentLevel.height, currentLevel.cols, currentLevel.rows, currentLevel.factor),
+        targetFactor
       );
-      const landShape = smoothstep(0.14, 0.7, coarseShapeMap[i]);
-      const carveSignal = smoothstep(0.16, 0.74, coarseValleyMap[i]) * landShape;
-      const headroom = Math.max(0, coarseElevation[i] - localSeaLevel);
-      const coastGuard = smoothstep(0.025, 0.14, headroom);
-      const maxCut = Math.max(0, headroom - mix(0.02, 0.05, coastalShelfWidth));
-      const requestedCut = carveSignal * coastGuard * carvingStrength * valleyDepth;
-      const carved = coarseElevation[i] - Math.min(requestedCut, maxCut);
-      coarseElevation[i] = clamp(carved, 0, 1);
+      const refinedWear = resampleSourceToFactor(
+        buildGridSource(currentLevel.wear, currentLevel.cols, currentLevel.rows, currentLevel.factor),
+        targetFactor
+      );
+      const refinedDeposit = resampleSourceToFactor(
+        buildGridSource(currentLevel.deposit, currentLevel.cols, currentLevel.rows, currentLevel.factor),
+        targetFactor
+      );
+      const refinedFlowX = resampleSourceToFactor(
+        buildGridSource(currentLevel.flowX, currentLevel.cols, currentLevel.rows, currentLevel.factor),
+        targetFactor
+      );
+      const refinedFlowY = resampleSourceToFactor(
+        buildGridSource(currentLevel.flowY, currentLevel.cols, currentLevel.rows, currentLevel.factor),
+        targetFactor
+      );
+      const refinedHydraulic = await runIterativeHydraulicErosion({
+        seed: state.seed + targetFactor * 97,
+        settings,
+        level: {
+          cols: Math.ceil(cols / targetFactor),
+          rows: Math.ceil(rows / targetFactor),
+          height: refinedHeight,
+          landShape: resampleSourceToFactor(coarseLandShapeSource, targetFactor),
+          basinSignal: resampleSourceToFactor(coarseBasinSource, targetFactor),
+          bootstrapWear: refinedWear,
+          bootstrapDeposit: refinedDeposit,
+          bootstrapFlowX: refinedFlowX,
+          bootstrapFlowY: refinedFlowY,
+          iterations: denseHydraulicIterations,
+          cellSizeM: cellSizeM * targetFactor,
+          worldOffsetXM,
+          worldOffsetYM
+        },
+        yieldIfNeeded,
+        reportProgress: report
+          ? async (progress) => {
+              await report("Refining hydraulic erosion...", 0.98 + progress * 0.01);
+            }
+          : undefined
+      });
+      currentLevel = {
+        factor: targetFactor,
+        cols: Math.ceil(cols / targetFactor),
+        rows: Math.ceil(rows / targetFactor),
+        height: refinedHydraulic.height,
+        wear: refinedHydraulic.wear,
+        deposit: refinedHydraulic.deposit,
+        flowX: refinedHydraulic.flowX,
+        flowY: refinedHydraulic.flowY,
+        hardness: refinedHydraulic.hardness,
+        landShape: resampleSourceToFactor(coarseLandShapeSource, targetFactor),
+        basin: resampleSourceToFactor(coarseBasinSource, targetFactor)
+      };
     }
   }
 
-  await naturalizeCoarseTerrain(1, "Naturalizing terrain...", 0.98, 0.01, coarseValleyMap);
+  await populateFullResolutionSupportMapsFromSources(
+    buildGridSource(currentLevel.wear, currentLevel.cols, currentLevel.rows, currentLevel.factor),
+    buildGridSource(currentLevel.deposit, currentLevel.cols, currentLevel.rows, currentLevel.factor),
+    buildGridSource(currentLevel.hardness, currentLevel.cols, currentLevel.rows, currentLevel.factor),
+    buildGridSource(currentLevel.flowX, currentLevel.cols, currentLevel.rows, currentLevel.factor),
+    buildGridSource(currentLevel.flowY, currentLevel.cols, currentLevel.rows, currentLevel.factor),
+    "Projecting erosion fields...",
+    0.99,
+    0.01
+  );
 
-  const elevationMap = Array.from({ length: totalTiles }, () => 0);
-  state.valleyMap = Array.from({ length: totalTiles }, () => 0);
-  for (let y = 0; y < rows; y += 1) {
-    const rowBase = y * cols;
-    const gy = y / blockSize;
-    for (let x = 0; x < cols; x += 1) {
-      const gx = x / blockSize;
-      const idx = rowBase + x;
-      const softened = sampleCoarse(coarseElevation, gx, gy);
-      elevationMap[idx] = clamp(softened * terrainEnvelopeMap[idx], 0, 1);
-      state.valleyMap[idx] = valleySampleMap[idx];
-    }
-    if (yieldIfNeeded && report) {
-      if (await yieldIfNeeded()) {
-        await report("Applying terrain envelope...", 0.55 + (y + 1) / rows * 0.05);
-      }
-    }
-  }
-  const seaLevelBase = resolveSeaLevelBase(state, settings, elevationMap, cellSizeM);
+  const carvingElevationMap = buildPreviewElevationFromSource(
+    buildGridSource(currentLevel.height, currentLevel.cols, currentLevel.rows, currentLevel.factor),
+    buildGridSource(currentLevel.wear, currentLevel.cols, currentLevel.rows, currentLevel.factor)
+  );
+  const carvingSeaLevelBase = resolveSeaLevelBase(state, settings, carvingElevationMap, cellSizeM);
   await emitDebugPhase(
     debug,
     "terrain:carving",
     state,
     settings,
-    elevationMap,
+    carvingElevationMap,
     undefined,
     undefined,
-    seaLevelBase
+    carvingSeaLevelBase
   );
   if (shouldStopAfter("terrain:carving")) {
-    return { elevationMap, riverMask, seaLevelBase, erosionWearMap, erosionFlowXMap, erosionFlowYMap };
-  }
-  await emitDebugPhase(debug, "terrain:flooding", state, settings, elevationMap, undefined, undefined, seaLevelBase);
-  if (shouldStopAfter("terrain:flooding")) {
-    return { elevationMap, riverMask, seaLevelBase, erosionWearMap, erosionFlowXMap, erosionFlowYMap };
-  }
-  await emitDebugPhase(debug, "terrain:elevation", state, settings, elevationMap, undefined, undefined, seaLevelBase);
-  if (shouldStopAfter("terrain:elevation")) {
-    return { elevationMap, riverMask, seaLevelBase, erosionWearMap, erosionFlowXMap, erosionFlowYMap };
+    return {
+      elevationMap: carvingElevationMap,
+      riverMask,
+      seaLevelBase: carvingSeaLevelBase,
+      erosionWearMap,
+      erosionDepositMap,
+      erosionHardnessMap,
+      erosionFlowXMap,
+      erosionFlowYMap
+    };
   }
 
+  const elevationMap = carvingElevationMap;
   const edgeSmoothRadius = edgeWidth * 3;
   const temp = new Float32Array(elevationMap.length);
   for (let y = 0; y < rows; y += 1) {
@@ -2918,8 +3910,46 @@ async function buildElevationMapCoarse(
   for (let i = 0; i < elevationMap.length; i += 1) {
     elevationMap[i] = temp[i];
   }
+  suppressIsolatedElevationSpikes(elevationMap, cols, rows);
 
-  return { elevationMap, riverMask, seaLevelBase, erosionWearMap, erosionFlowXMap, erosionFlowYMap };
+  const seaLevelBase = resolveSeaLevelBase(state, settings, elevationMap, cellSizeM);
+  await emitDebugPhase(debug, "terrain:flooding", state, settings, elevationMap, undefined, undefined, seaLevelBase);
+  if (shouldStopAfter("terrain:flooding")) {
+    return {
+      elevationMap,
+      riverMask,
+      seaLevelBase,
+      erosionWearMap,
+      erosionDepositMap,
+      erosionHardnessMap,
+      erosionFlowXMap,
+      erosionFlowYMap
+    };
+  }
+  await emitDebugPhase(debug, "terrain:elevation", state, settings, elevationMap, undefined, undefined, seaLevelBase);
+  if (shouldStopAfter("terrain:elevation")) {
+    return {
+      elevationMap,
+      riverMask,
+      seaLevelBase,
+      erosionWearMap,
+      erosionDepositMap,
+      erosionHardnessMap,
+      erosionFlowXMap,
+      erosionFlowYMap
+    };
+  }
+
+  return {
+    elevationMap,
+    riverMask,
+    seaLevelBase,
+    erosionWearMap,
+    erosionDepositMap,
+    erosionHardnessMap,
+    erosionFlowXMap,
+    erosionFlowYMap
+  };
 }
 
 async function buildMoistureMap(
@@ -5617,12 +6647,22 @@ const computeMoistureValue = (elevation: number, waterDist: number): number => {
   return clamp(Math.pow(moisture, gamma), 0, 1);
 };
 
-const MAX_EROSION_OFFSET = 0.036;
-
 export async function runElevationStage(ctx: MapGenContext): Promise<void> {
   ctx.state.tiles = new Array(ctx.state.grid.totalTiles);
   await ctx.reportStage("Reticulating splines...", 0);
-  const { elevationMap, riverMask, seaLevelBase, erosionWearMap, erosionFlowXMap, erosionFlowYMap } = await buildElevationMap(
+  const {
+    elevationMap,
+    riverMask,
+    seaLevelBase,
+    erosionWearMap,
+    erosionDepositMap,
+    erosionHardnessMap,
+    erosionFlowXMap,
+    erosionFlowYMap,
+    tectonicStressMap,
+    tectonicTrendXMap,
+    tectonicTrendYMap
+  } = await buildElevationMap(
     ctx.state,
     ctx.rng,
     ctx.settings,
@@ -5634,8 +6674,13 @@ export async function runElevationStage(ctx: MapGenContext): Promise<void> {
   ctx.riverMask = riverMask;
   ctx.seaLevelBase = seaLevelBase;
   ctx.erosionWearMap = erosionWearMap;
+  ctx.erosionDepositMap = erosionDepositMap;
+  ctx.erosionHardnessMap = erosionHardnessMap;
   ctx.erosionFlowXMap = erosionFlowXMap;
   ctx.erosionFlowYMap = erosionFlowYMap;
+  ctx.tectonicStressMap = tectonicStressMap ?? new Float32Array(erosionWearMap.length);
+  ctx.tectonicTrendXMap = tectonicTrendXMap ?? new Float32Array(erosionWearMap.length);
+  ctx.tectonicTrendYMap = tectonicTrendYMap ?? new Float32Array(erosionWearMap.length);
   if (ctx.state.tileErosionWear.length !== erosionWearMap.length) {
     ctx.state.tileErosionWear = new Float32Array(erosionWearMap.length);
   }
@@ -5649,17 +6694,23 @@ export async function runErosionStage(ctx: MapGenContext): Promise<void> {
     throw new Error("Erosion stage missing elevation map.");
   }
   const input = ctx.elevationMap;
-  const temp = new Float32Array(input.length);
-  const wearMap = ctx.erosionWearMap;
-  const flowXMap = ctx.erosionFlowXMap;
-  const flowYMap = ctx.erosionFlowYMap;
-  const nextWear = new Float32Array(input.length);
-  const detailStrength = Math.min(MAX_EROSION_OFFSET, Math.max(0, settings.erosionDetailStrength));
+  const total = input.length;
+  const wearMap = ctx.erosionWearMap ?? new Float32Array(total);
+  const depositMap = ctx.erosionDepositMap ?? new Float32Array(total);
+  const flowXMap = ctx.erosionFlowXMap ?? new Float32Array(total);
+  const flowYMap = ctx.erosionFlowYMap ?? new Float32Array(total);
+  const tectonicStressMap = ctx.tectonicStressMap ?? new Float32Array(total);
+  const tectonicTrendXMap = ctx.tectonicTrendXMap ?? new Float32Array(total);
+  const tectonicTrendYMap = ctx.tectonicTrendYMap ?? new Float32Array(total);
+  const activeMask = new Uint8Array(total);
   const slopeMin = Math.max(0.0001, settings.erosionSlopeMaskMin);
   const slopeMax = Math.max(slopeMin + 1e-4, settings.erosionSlopeMaskMax);
   const coastFadeStart = Math.max(0.0005, settings.erosionCoastFade);
   const coastFadeEnd = Math.max(coastFadeStart + 0.02, coastFadeStart * 3.2 + 0.02);
   const trackStats = DEBUG_TERRAIN;
+  const previousHeights = Float32Array.from(input);
+  const refinedHeights = Float32Array.from(input);
+  const nextWear = Float32Array.from(wearMap);
   let coverage = 0;
   let absOffsetSum = 0;
   const absOffsets: number[] = [];
@@ -5677,108 +6728,151 @@ export async function runErosionStage(ctx: MapGenContext): Promise<void> {
       const gradY = (down - up) * 0.5;
       const slope = Math.hypot(gradX, gradY);
       const slopeMask = smoothstep(slopeMin, slopeMax, slope);
-      const steepMask = 1 - smoothstep(slopeMax * 3.25, Math.max(slopeMax * 7.5, slopeMax + 0.09), slope);
       const edgeDistM = Math.min(x, y, state.grid.cols - 1 - x, state.grid.rows - 1 - y) * cellSizeM;
       const edgeFactor = clamp(edgeDistM / edgeDenomM, 0, 1);
       const seaLevel = clampSeaLevel(ctx.seaLevelBase + (1 - edgeFactor) * settings.edgeWaterBias, settings);
       const headroom = center - seaLevel;
       const coastMask = smoothstep(coastFadeStart, coastFadeEnd, headroom);
-      const baseWear = Number.isFinite(wearMap?.[idx] ?? Number.NaN) ? clamp(wearMap?.[idx] ?? 0, 0, 1) : 0;
+      const baseWear = clamp(wearMap[idx] ?? 0, 0, 1);
+      const baseDeposit = clamp(depositMap[idx] ?? 0, 0, 1);
       const wearMask = smoothstep(0.025, 0.38, baseWear);
       const concavityMask = smoothstep(0.00015, 0.007, curvature);
-      const shoulderMask =
-        smoothstep(slopeMax * 0.9, Math.max(slopeMax * 3.2, slopeMax + 0.04), slope) *
-        smoothstep(-0.012, 0.002, -curvature) *
-        (1 - wearMask * 0.68);
-      const erosionEnvelope = Math.pow(coastMask * clamp(slopeMask * 0.42 + wearMask * 0.98, 0, 1), 0.76);
-      if (erosionEnvelope <= 0.001 || headroom <= 0.002) {
-        temp[idx] = center;
-        nextWear[idx] = baseWear;
+      const tectonicStress = smoothstep(0.06, 0.7, tectonicStressMap[idx] ?? 0);
+      if (
+        coastMask > 0.05 &&
+        headroom > 0.002 &&
+        (
+          baseWear > 0.08 ||
+          baseDeposit > 0.08 ||
+          slopeMask > 0.14 ||
+          concavityMask > 0.12 ||
+          tectonicStress > 0.18
+        )
+      ) {
+        activeMask[idx] = 1;
+      }
+    }
+    if ((y === state.grid.rows - 1 || (y + 1) % 12 === 0) && (await ctx.yieldIfNeeded())) {
+      await ctx.reportStage("Preparing erosion refinement...", (y + 1) / state.grid.rows * 0.35);
+    }
+  }
+
+  const expandedMask = new Uint8Array(activeMask);
+  for (let y = 0; y < state.grid.rows; y += 1) {
+    for (let x = 0; x < state.grid.cols; x += 1) {
+      const idx = indexFor(state.grid, x, y);
+      if (activeMask[idx] === 0) {
         continue;
       }
-
-      const downhillLength = Math.max(1e-6, Math.hypot(gradX, gradY));
-      let flowX = Number.isFinite(flowXMap?.[idx] ?? Number.NaN) ? flowXMap?.[idx] ?? 0 : 0;
-      let flowY = Number.isFinite(flowYMap?.[idx] ?? Number.NaN) ? flowYMap?.[idx] ?? 0 : 0;
-      const storedFlowLength = Math.hypot(flowX, flowY);
-      if (storedFlowLength > 1e-6) {
-        flowX /= storedFlowLength;
-        flowY /= storedFlowLength;
-      } else {
-        flowX = -gradX / downhillLength;
-        flowY = -gradY / downhillLength;
-      }
-      const worldX = getWorldX(settings, x);
-      const worldY = getWorldY(settings, y);
-      const detail = sampleDirectionalErosionDetail(
-        worldX,
-        worldY,
-        flowX,
-        flowY,
-        state.seed + 5407,
-        {
-          scaleM: settings.erosionDetailScaleM,
-          octaves: settings.erosionDetailOctaves,
-          slopeStrength: settings.erosionSlopeStrength,
-          branchStrength: settings.erosionBranchStrength
+      for (let dy = -1; dy <= 1; dy += 1) {
+        for (let dx = -1; dx <= 1; dx += 1) {
+          const nx = x + dx;
+          const ny = y + dy;
+          if (!inBounds(state.grid, nx, ny)) {
+            continue;
+          }
+          expandedMask[indexFor(state.grid, nx, ny)] = 1;
         }
+      }
+    }
+  }
+
+  for (let y = 0; y < state.grid.rows; y += 1) {
+    for (let x = 0; x < state.grid.cols; x += 1) {
+      const idx = indexFor(state.grid, x, y);
+      if (expandedMask[idx] === 0) {
+        continue;
+      }
+      const center = input[idx] ?? 0;
+      const left = x > 0 ? (input[idx - 1] ?? center) : center;
+      const right = x < state.grid.cols - 1 ? (input[idx + 1] ?? center) : center;
+      const up = y > 0 ? (input[idx - state.grid.cols] ?? center) : center;
+      const down = y < state.grid.rows - 1 ? (input[idx + state.grid.cols] ?? center) : center;
+      const neighborAverage = (left + right + up + down) * 0.25;
+      const curvature = neighborAverage - center;
+      const gradX = (right - left) * 0.5;
+      const gradY = (down - up) * 0.5;
+      const slope = Math.hypot(gradX, gradY);
+      const slopeMask = smoothstep(slopeMin, slopeMax, slope);
+      const edgeDistM = Math.min(x, y, state.grid.cols - 1 - x, state.grid.rows - 1 - y) * cellSizeM;
+      const edgeFactor = clamp(edgeDistM / edgeDenomM, 0, 1);
+      const seaLevel = clampSeaLevel(ctx.seaLevelBase + (1 - edgeFactor) * settings.edgeWaterBias, settings);
+      const headroom = center - seaLevel;
+      const coastMask = smoothstep(coastFadeStart, coastFadeEnd, headroom);
+      const wearMask = smoothstep(0.06, 0.46, wearMap[idx] ?? 0);
+      const depositMask = smoothstep(0.06, 0.46, depositMap[idx] ?? 0);
+      const concavityMask = smoothstep(0.00008, 0.0035, curvature);
+      const convexityMask = smoothstep(0.00005, 0.003, -curvature);
+      const flatMask = 1 - smoothstep(slopeMin, Math.max(slopeMin * 2.4, slopeMax * 0.8), slope);
+      let flowX = flowXMap[idx] ?? 0;
+      let flowY = flowYMap[idx] ?? 0;
+      if (Math.hypot(flowX, flowY) <= 1e-6 && slope > 1e-6) {
+        flowX = -gradX / slope;
+        flowY = -gradY / slope;
+      }
+      const flowLength = Math.hypot(flowX, flowY);
+      if (flowLength > 1e-6) {
+        flowX /= flowLength;
+        flowY /= flowLength;
+      }
+      let trendX = tectonicTrendXMap[idx] ?? 0;
+      let trendY = tectonicTrendYMap[idx] ?? 0;
+      const trendLength = Math.hypot(trendX, trendY);
+      if (trendLength > 1e-6) {
+        trendX /= trendLength;
+        trendY /= trendLength;
+      }
+      const structuralAlign = trendLength > 1e-6 && flowLength > 1e-6 ? Math.abs(flowX * trendX + flowY * trendY) : 0;
+      const tectonicStress = smoothstep(0.06, 0.7, tectonicStressMap[idx] ?? 0);
+      const channelSharpen =
+        -0.0008
+        * coastMask
+        * wearMask
+        * (0.42 + concavityMask * 0.58)
+        * (0.34 + slopeMask * 0.66)
+        * (0.74 + structuralAlign * 0.14 + tectonicStress * 0.12);
+      const depositionalFill =
+        clamp(neighborAverage - center, -0.0012, 0.0012)
+        * coastMask
+        * depositMask
+        * flatMask
+        * (0.18 + structuralAlign * 0.08);
+      const shoulderRelax =
+        clamp(neighborAverage - center, -0.001, 0.001)
+        * coastMask
+        * convexityMask
+        * smoothstep(slopeMax * 0.8, Math.max(slopeMax * 2.4, slopeMax + 0.03), slope)
+        * (0.08 + depositMask * 0.08 + tectonicStress * 0.06);
+      const maxIncision = Math.max(0, headroom - 0.003);
+      const adjustment = clamp(
+        channelSharpen + depositionalFill + shoulderRelax,
+        -Math.min(0.0014, maxIncision),
+        0.0008
       );
-      const flowResponse = detail.derivX * flowX + detail.derivY * flowY;
-      const groove = -Math.pow(Math.max(0, detail.value), 1.35);
-      const ridge = Math.pow(Math.max(0, -detail.value), 1.08) * 0.24;
-      const branchBias = clamp(-flowResponse * 0.12, -0.45, 0.45);
-      const shapedDetail = clamp(groove + ridge + branchBias, -1.3, 1.1);
-      const channelOffset =
-        -detailStrength *
-        (0.14 + wearMask * 0.48 + concavityMask * 0.34) *
-        wearMask *
-        coastMask *
-        smoothstep(0.003, 0.05, headroom);
-      const incisionMask =
-        erosionEnvelope *
-        (0.9 + wearMask * 0.95 + concavityMask * 0.65) *
-        (0.68 + steepMask * 0.32);
-      const reliefBoost =
-        0.86 +
-        smoothstep(0.015, 0.12, headroom) * 0.35 +
-        wearMask * 0.66;
-      const incisionOffset = clamp(
-        shapedDetail * detailStrength * reliefBoost * incisionMask,
-        -detailStrength,
-        detailStrength * 0.58
-      );
-      const talusBlend = shoulderMask * coastMask * smoothstep(0.002, 0.05, headroom);
-      const talusOffset = clamp(
-        (neighborAverage - center) * talusBlend * (0.18 + wearMask * 0.08),
-        -detailStrength * 0.18,
-        detailStrength * 0.32
-      );
-      const offset = clamp(channelOffset + incisionOffset + talusOffset, -detailStrength, detailStrength * 0.65);
-      temp[idx] = clamp(center + offset, 0, 1);
+      refinedHeights[idx] = clamp(center + adjustment, 0, 1);
       nextWear[idx] = clamp(
-        Math.max(
-          baseWear,
-          wearMask * 0.88 + concavityMask * 0.12 + Math.abs(offset) / Math.max(detailStrength, 1e-4) * 0.14
-        ),
+        Math.max(wearMap[idx] ?? 0, wearMask * 0.92 + concavityMask * 0.08 + Math.abs(adjustment) * 220),
         0,
         1
       );
-      if (trackStats) {
-        const absOffset = Math.abs(offset);
-        absOffsetSum += absOffset;
-        absOffsets.push(absOffset);
-        if (absOffset >= 0.001) {
-          coverage += 1;
-        }
+    }
+    if ((y === state.grid.rows - 1 || (y + 1) % 12 === 0) && (await ctx.yieldIfNeeded())) {
+      await ctx.reportStage("Applying erosion refinement...", 0.35 + (y + 1) / state.grid.rows * 0.65);
+    }
+  }
+
+  for (let i = 0; i < input.length; i += 1) {
+    input[i] = refinedHeights[i] ?? input[i];
+    if (trackStats) {
+      const absOffset = Math.abs(input[i] - previousHeights[i]);
+      absOffsetSum += absOffset;
+      absOffsets.push(absOffset);
+      if (absOffset >= 0.001) {
+        coverage += 1;
       }
     }
-    if (await ctx.yieldIfNeeded()) {
-      await ctx.reportStage("Applying directional erosion...", (y + 1) / state.grid.rows);
-    }
   }
-  for (let i = 0; i < input.length; i += 1) {
-    input[i] = temp[i] ?? input[i];
-  }
+
   ctx.erosionWearMap = nextWear;
   if (state.tileErosionWear.length !== nextWear.length) {
     state.tileErosionWear = new Float32Array(nextWear.length);
@@ -6205,6 +7299,17 @@ export async function runShorelinePolishStage(ctx: MapGenContext): Promise<void>
     shorelineSeaLevelMap
   );
 
+  const protectedShoreWater = new Uint8Array(totalTiles);
+  for (let i = 0; i < totalTiles; i += 1) {
+    protectedShoreWater[i] = polishedOceanMask[i] > 0 || riverMask[i] > 0 ? 1 : 0;
+  }
+  suppressIsolatedElevationSpikes(elevationMap, cols, rows, protectedShoreWater);
+  for (let i = 0; i < totalTiles; i += 1) {
+    const resolvedElevation = elevationMap[i] ?? state.tiles[i].elevation;
+    state.tiles[i].elevation = resolvedElevation;
+    state.tileElevation[i] = resolvedElevation;
+  }
+
   for (let i = 0; i < totalTiles; i += 1) {
     if (riverMask[i] > 0 || polishedOceanMask[i] > 0) {
       state.tiles[i].type = "water";
@@ -6281,6 +7386,16 @@ export async function runRiverStage(ctx: MapGenContext): Promise<void> {
       state.tiles[i].treeType = null;
       state.tiles[i].isBase = false;
     }
+  }
+  const protectedRiverWater = new Uint8Array(total);
+  for (let i = 0; i < total; i += 1) {
+    protectedRiverWater[i] = oceanMask[i] > 0 || riverMask[i] > 0 ? 1 : 0;
+  }
+  suppressIsolatedElevationSpikes(elevationMap, state.grid.cols, state.grid.rows, protectedRiverWater);
+  for (let i = 0; i < total; i += 1) {
+    const resolvedElevation = elevationMap[i] ?? state.tiles[i].elevation;
+    state.tiles[i].elevation = resolvedElevation;
+    state.tileElevation[i] = resolvedElevation;
   }
   state.tileRiverMask = riverMask;
   clampRiverMouthDepthsToSeaLevel(state, oceanMask, riverMask, seaLevelMap);

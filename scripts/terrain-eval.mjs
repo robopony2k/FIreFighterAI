@@ -164,6 +164,13 @@ const analyzeErosionDelta = (before, after) => {
   };
 };
 
+const roundStageTimings = (timings) =>
+  Object.fromEntries(
+    Object.entries(timings)
+      .sort((left, right) => left[0].localeCompare(right[0]))
+      .map(([phase, durationMs]) => [phase, Number(durationMs.toFixed(2))])
+  );
+
 const runs = [];
 const rng = new RNG(baseSeed);
 
@@ -177,6 +184,7 @@ for (const archetype of archetypes) {
     recipe.mapSize = sizeId;
     let elevationBeforeErosion = null;
     let elevationAfterErosion = null;
+    const stageTimings = {};
     await generateMap(world, rng, undefined, recipe, {
       onPhase: async (snapshot) => {
         if (snapshot.phase === "terrain:elevation") {
@@ -184,6 +192,9 @@ for (const archetype of archetypes) {
         } else if (snapshot.phase === "terrain:erosion") {
           elevationAfterErosion = snapshot.elevations;
         }
+      },
+      onStageTiming: async (timing) => {
+        stageTimings[timing.phase] = timing.durationMs;
       }
     });
     const roadMetrics = analyzeRoadSurfaceMetrics(world);
@@ -196,6 +207,7 @@ for (const archetype of archetypes) {
       ...analyzeErosionDelta(elevationBeforeErosion, elevationAfterErosion),
       ...analyzeRivers(world),
       ...analyzeSettlements(world),
+      stageTimings: roundStageTimings(stageTimings),
       roadMetrics: {
         maxRoadGrade: Number(roadMetrics.maxRoadGrade.toFixed(4)),
         maxRoadCrossfall: Number(roadMetrics.maxRoadCrossfall.toFixed(4)),

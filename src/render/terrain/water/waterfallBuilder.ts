@@ -37,6 +37,7 @@ type WaterfallCandidate = {
   z: number;
   top: number;
   drop: number;
+  dropCap: number;
   dirX: number;
   dirZ: number;
   width: number;
@@ -66,10 +67,13 @@ const WATERFALL_MIN_RIVER_RATIO = 0.28;
 const WATERFALL_MAX_DROP = 1.6;
 const WATERFALL_MAX_OCEAN_RATIO = 0.08;
 const WATERFALL_MIN_STEP_STRENGTH = 0.12;
+const WATERFALL_MIN_ORTH_RIVER_NEIGHBORS = 2;
+const WATERFALL_MIN_LOCAL_RIVER_NEIGHBORS = 3;
 export const WATERFALL_VERTICALITY_MIN = 0.58;
 export const WATERFALL_TOP_OFFSET = 0.04;
 const WATERFALL_DROP_PADDING = 0.05;
 const WATERFALL_ANCHOR_ERR_WARN = 0.03;
+const ENABLE_TERRAIN_WATERFALL_INSTANCES = false;
 
 export const WATERFALL_DEBUG_FLAG_WATER = 1 << 0;
 export const WATERFALL_DEBUG_FLAG_RIVER = 1 << 1;
@@ -177,10 +181,38 @@ export const buildWaterfallInstances = (
     verticality: verticalityDebug,
     runLimit: runLimitDebug
   };
+  if (!ENABLE_TERRAIN_WATERFALL_INSTANCES) {
+    return { debug };
+  }
   const isWaterCell = (idx: number): boolean => (supportMask[idx] ?? 0) > 0;
   const isRiverCell = (idx: number): boolean => (riverRatio[idx] ?? 0) >= WATERFALL_MIN_RIVER_RATIO;
   const isOceanish = (idx: number): boolean => (oceanRatio[idx] ?? 0) >= WATERFALL_MAX_OCEAN_RATIO;
   const isValidCoord = (x: number, y: number): boolean => x >= 0 && y >= 0 && x < sampleCols && y < sampleRows;
+  const countLocalRiverSupport = (col: number, row: number): { orth: number; total: number } => {
+    let orth = 0;
+    let total = 0;
+    for (let dy = -1; dy <= 1; dy += 1) {
+      for (let dx = -1; dx <= 1; dx += 1) {
+        if (dx === 0 && dy === 0) {
+          continue;
+        }
+        const nx = col + dx;
+        const ny = row + dy;
+        if (!isValidCoord(nx, ny)) {
+          continue;
+        }
+        const nIdx = ny * sampleCols + nx;
+        if (!isWaterCell(nIdx) || !isRiverCell(nIdx) || isOceanish(nIdx)) {
+          continue;
+        }
+        total += 1;
+        if (dx === 0 || dy === 0) {
+          orth += 1;
+        }
+      }
+    }
+    return { orth, total };
+  };
   const toWorldX = (x: number): number => ((x + 0.5) / Math.max(1, sampleCols) - 0.5) * width;
   const toWorldZ = (y: number): number => ((y + 0.5) / Math.max(1, sampleRows) - 0.5) * depth;
   const sampleWaterHeight = (fx: number, fy: number): number => {
@@ -443,6 +475,13 @@ export const buildWaterfallInstances = (
       if (isOceanish(idx)) {
         flags[idx] |= WATERFALL_DEBUG_FLAG_OCEANISH;
       }
+      const support = countLocalRiverSupport(col, row);
+      if (
+        support.orth < WATERFALL_MIN_ORTH_RIVER_NEIGHBORS ||
+        support.total < WATERFALL_MIN_LOCAL_RIVER_NEIGHBORS
+      ) {
+        continue;
+      }
       const rawStepStrength = riverStepStrength ? riverStepStrength[idx] : 0;
       const stepStrength = Number.isFinite(rawStepStrength) ? clamp(rawStepStrength as number, 0, 1) : 0;
       stepStrengthDebug[idx] = stepStrength;
@@ -570,9 +609,14 @@ export const buildWaterfallInstances = (
         debug.longRunRejectedCount += 1;
         continue;
       }
+      const dropCap = Math.max(
+        minDrop * 1.05,
+        localDrop + WATERFALL_DROP_PADDING * 0.5 + stepStrength * minDrop * 0.35
+      );
       const candidateDrop = Math.min(
         WATERFALL_MAX_DROP,
-        profile.totalDrop + WATERFALL_DROP_PADDING + stepStrength * minDrop * 0.7
+        profile.totalDrop + WATERFALL_DROP_PADDING + stepStrength * minDrop * 0.7,
+        dropCap
       );
       flags[idx] |= WATERFALL_DEBUG_FLAG_CANDIDATE;
       candidates.push({
@@ -582,6 +626,7 @@ export const buildWaterfallInstances = (
         z: centerZ,
         top: lipHeight + WATERFALL_TOP_OFFSET,
         drop: candidateDrop,
+        dropCap,
         dirX,
         dirZ,
         width: halfWidth
@@ -599,6 +644,7 @@ export const buildWaterfallInstances = (
     z: number;
     top: number;
     drop: number;
+    dropCap: number;
     dirX: number;
     dirZ: number;
     width: number;
@@ -645,6 +691,7 @@ export const buildWaterfallInstances = (
         z: candidate.z,
         top: candidate.top,
         drop: candidate.drop,
+        dropCap: candidate.dropCap,
         dirX: candidate.dirX,
         dirZ: candidate.dirZ,
         width: candidate.width,
@@ -666,6 +713,7 @@ export const buildWaterfallInstances = (
     cluster.z = (cluster.z * cluster.weight + candidate.z * candidateWeight) / totalWeight;
     cluster.top = (cluster.top * cluster.weight + candidate.top * candidateWeight) / totalWeight;
     cluster.drop = Math.max(cluster.drop, candidate.drop);
+    cluster.dropCap = Math.max(cluster.dropCap, candidate.dropCap);
     cluster.width = Math.max(cluster.width, candidate.width);
     const dirLen = Math.hypot(cluster.dirX + candidate.dirX, cluster.dirZ + candidate.dirZ) || 1;
     cluster.dirX = (cluster.dirX + candidate.dirX) / dirLen;
@@ -778,7 +826,11 @@ export const buildWaterfallInstances = (
       ) {
         return null;
       }
-      snapped.drop = clamp(profile.totalDrop + WATERFALL_DROP_PADDING * 0.85, minDrop * 0.8, WATERFALL_MAX_DROP);
+      snapped.drop = clamp(
+        Math.min(profile.totalDrop + WATERFALL_DROP_PADDING * 0.85, snapped.dropCap),
+        minDrop * 0.8,
+        WATERFALL_MAX_DROP
+      );
       return snapped;
     }
     return null;

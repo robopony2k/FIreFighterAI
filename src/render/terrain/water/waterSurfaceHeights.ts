@@ -107,21 +107,6 @@ export const buildWaterSurfaceHeights = (
     });
   }
 
-  visited.fill(0);
-  for (let i = 0; i < total; i += 1) {
-    if (visited[i] || !hasWater(i) || Number.isFinite(heights[i])) {
-      continue;
-    }
-    const component = floodComponent(i, (idx) => hasWater(idx) && !Number.isFinite(heights[idx]));
-    if (!component) {
-      continue;
-    }
-    const level = clamp(component.min + 0.01, 0, 1);
-    component.indices.forEach((idx) => {
-      heights[idx] = level;
-    });
-  }
-
   for (let i = 0; i < total; i += 1) {
     if (!Number.isFinite(heights[i])) {
       heights[i] = sampleHeights[i] ?? 0;

@@ -32,8 +32,14 @@ export type MapGenDebugSnapshot = {
   coastClass?: Uint8Array;
 };
 
+export type MapGenStageTiming = {
+  phase: MapGenDebugPhase;
+  durationMs: number;
+};
+
 export type MapGenDebug = {
   onPhase: (snapshot: MapGenDebugSnapshot) => void | Promise<void>;
+  onStageTiming?: (timing: MapGenStageTiming) => void | Promise<void>;
   waitForStep?: () => Promise<void>;
   stopAfterPhase?: MapGenDebugPhase;
 };

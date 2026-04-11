@@ -75,6 +75,7 @@ const WALL_TOP_MAX_UNDERCUT = 0.0004;
 const WALL_WATER_OVERLAP = 0.002;
 const RIVER_EDGE_SURFACE_UNDERSHOOT = 0.002;
 const WALL_TOP_GAP_WARN = 0.05;
+const ENABLE_RIVER_WATERFALL_GEOMETRY = false;
 
 const clamp = (value: number, min: number, max: number): number => Math.min(max, Math.max(min, value));
 const lerp = (a: number, b: number, t: number): number => a + (b - a) * t;
@@ -243,7 +244,7 @@ export const buildRiverMeshData = (
     rapidAttrCenter[i] = step;
   }
 
-  if (waterfallInstances && waterfallInstances.length >= 7) {
+  if (ENABLE_RIVER_WATERFALL_GEOMETRY && waterfallInstances && waterfallInstances.length >= 7) {
     const instanceCount = Math.floor(waterfallInstances.length / 7);
     for (let i = 0; i < instanceCount; i += 1) {
       const base = i * 7;
@@ -1073,6 +1074,7 @@ export const buildRiverMeshData = (
     edgeIndex: number;
     match: WaterfallWallMatch;
   };
+  const WATERFALL_WALL_MIN_STRICT_SEEDS = 2;
   const seedMatchesByProfile = Array.from({ length: waterfallWallProfiles.length }, () => [] as WaterfallWallSeed[]);
   const relaxedSeedByProfile = new Array<WaterfallWallSeed | undefined>(waterfallWallProfiles.length);
   for (let edgeIndex = 0; edgeIndex < preparedWallEdges.length; edgeIndex += 1) {
@@ -1099,7 +1101,11 @@ export const buildRiverMeshData = (
     .map((seedMatches, profileIndex) => {
       const sortedSeedMatches = seedMatches.slice().sort((a, b) => a.match.score - b.match.score);
       const selectedSeeds = sortedSeedMatches.slice(0, 6);
-      if (selectedSeeds.length === 0 && relaxedSeedByProfile[profileIndex]) {
+      if (
+        selectedSeeds.length < WATERFALL_WALL_MIN_STRICT_SEEDS &&
+        selectedSeeds.length === 0 &&
+        relaxedSeedByProfile[profileIndex]
+      ) {
         selectedSeeds.push(relaxedSeedByProfile[profileIndex] as WaterfallWallSeed);
       }
       return {
@@ -1108,7 +1114,11 @@ export const buildRiverMeshData = (
         bestScore: selectedSeeds.length > 0 ? selectedSeeds[0].match.score : Number.POSITIVE_INFINITY
       };
     })
-    .filter((entry) => entry.seedMatches.length > 0)
+    .filter(
+      (entry) =>
+        entry.seedMatches.length >= WATERFALL_WALL_MIN_STRICT_SEEDS ||
+        (entry.seedMatches.length === 1 && entry.bestScore < 0.45)
+    )
     .sort((a, b) => a.bestScore - b.bestScore);
   for (let i = 0; i < profileOrder.length; i += 1) {
     const { profileIndex, seedMatches } = profileOrder[i];
@@ -1212,6 +1222,43 @@ export const buildRiverMeshData = (
     );
   }
 
+  if (wallPositions.length === 0 && waterfallWallPositions.length === 0 && wallEdges.length > 0) {
+    for (let i = 0; i < wallEdges.length; i += 1) {
+      const edge = wallEdges[i];
+      const profileA = resolveWallVertexProfile(edge.ax, edge.ay, edge.outX, edge.outY, edge.terrainWorldA);
+      const profileB = resolveWallVertexProfile(edge.bx, edge.by, edge.outX, edge.outY, edge.terrainWorldB);
+      const axWorld = worldXEdge(edge.ax);
+      const azWorld = worldZEdge(edge.ay);
+      const bxWorld = worldXEdge(edge.bx);
+      const bzWorld = worldZEdge(edge.by);
+      const edgeWorldLen = Math.hypot(bxWorld - axWorld, bzWorld - azWorld);
+      if (edgeWorldLen <= 1e-5) {
+        continue;
+      }
+      const wallHeight = Math.max(
+        WALL_MIN_HEIGHT,
+        ((profileA.top - profileA.bottom) + (profileB.top - profileB.bottom)) * 0.5
+      );
+      const vBase = wallPositions.length / 3;
+      wallPositions.push(
+        axWorld, profileA.top, azWorld,
+        bxWorld, profileB.top, bzWorld,
+        bxWorld, profileB.bottom, bzWorld,
+        axWorld, profileA.bottom, azWorld
+      );
+      wallUvs.push(
+        0, 0,
+        edgeWorldLen, 0,
+        edgeWorldLen, wallHeight,
+        0, wallHeight
+      );
+      wallIndices.push(
+        vBase, vBase + 1, vBase + 2,
+        vBase, vBase + 2, vBase + 3
+      );
+    }
+  }
+
   if (riverDomain.debugStats && positions.length >= 3) {
     let protruding = 0;
     for (let i = 0; i < positions.length; i += 3) {
@@ -1247,14 +1294,22 @@ export const buildRiverMeshData = (
     wallUvs: wallUvs.length > 0 ? new Float32Array(wallUvs) : undefined,
     wallIndices: wallIndices.length > 0 ? new Uint32Array(wallIndices) : undefined,
     waterfallWallPositions:
-      waterfallWallPositions.length > 0 ? new Float32Array(waterfallWallPositions) : undefined,
+      waterfallWallPositions.length > 0
+        ? new Float32Array(waterfallWallPositions)
+        : undefined,
     waterfallWallUvs: waterfallWallUvs.length > 0 ? new Float32Array(waterfallWallUvs) : undefined,
     waterfallWallIndices:
-      waterfallWallIndices.length > 0 ? new Uint32Array(waterfallWallIndices) : undefined,
+      waterfallWallIndices.length > 0
+        ? new Uint32Array(waterfallWallIndices)
+        : undefined,
     waterfallWallDropNorm:
-      waterfallWallDropNorm.length > 0 ? new Float32Array(waterfallWallDropNorm) : undefined,
+      waterfallWallDropNorm.length > 0
+        ? new Float32Array(waterfallWallDropNorm)
+        : undefined,
     waterfallWallFallStyle:
-      waterfallWallFallStyle.length > 0 ? new Float32Array(waterfallWallFallStyle) : undefined,
+      waterfallWallFallStyle.length > 0
+        ? new Float32Array(waterfallWallFallStyle)
+        : undefined,
     bankDist: new Float32Array(bankDist),
     flowDir: new Float32Array(flowDir),
     flowSpeed: new Float32Array(flowSpeed),

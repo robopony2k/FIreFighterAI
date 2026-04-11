@@ -97,12 +97,12 @@ const buildRenderRiverSupportMasks = (
   const render = new Uint8Array(base);
   const isValid = (x: number, y: number): boolean => x >= 0 && y >= 0 && x < cols && y < rows;
   const idxAt = (x: number, y: number): number => y * cols + x;
+  const isNonRiverWaterCell = (idx: number): boolean => tileTypes[idx] === waterId && riverMask[idx] === 0;
   for (let pass = 0; pass < RIVER_WIDTH_EXPAND_MAX_PASSES; pass += 1) {
     const source = render;
     const additions = new Map<number, number>();
     const isSourceActive = (idx: number): boolean => source[idx] > 0;
     const isTaken = (idx: number): boolean => source[idx] > 0 || additions.has(idx);
-    const isNonRiverWaterCell = (idx: number): boolean => tileTypes[idx] === waterId && riverMask[idx] === 0;
     const canAdd = (idx: number): boolean => !isTaken(idx) && !isNonRiverWaterCell(idx);
     const neighborSupport = (x: number, y: number): number => {
       let support = 0;
@@ -259,7 +259,6 @@ const buildRenderRiverSupportMasks = (
       render[ranked[i][0]] = 1;
     }
   }
-
   return { base, render };
 };
 

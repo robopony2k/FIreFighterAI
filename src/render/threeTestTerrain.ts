@@ -34,6 +34,13 @@ import {
 import { buildRoadRetainingWallMesh } from "./terrain/roads/roadRetainingWallMesh.js";
 import { buildDistanceField } from "./terrain/shared/distanceField.js";
 import {
+  buildTerrainHeightProvenance,
+  collectTerrainHeightAnomalies,
+  type TerrainHeightAnomaly,
+  type TerrainHeightProvenance,
+  type TerrainRenderDebugOptions
+} from "./terrain/debug/terrainHeightProvenance.js";
+import {
   RIVER_FIELD_THRESHOLD,
   buildBoundaryEdgesFromIndexedContour,
   buildRiverRenderDomain,
@@ -121,6 +128,7 @@ export type { RiverRenderDomain } from "./terrain/water/riverRenderDomain.js";
 export type { RiverWaterData } from "./terrain/water/riverMeshData.js";
 export type { WaterSampleRatios } from "./terrain/water/waterTextures.js";
 export type { WaterfallDebugData } from "./terrain/water/waterfallBuilder.js";
+export type { TerrainHeightAnomaly, TerrainHeightProvenance, TerrainRenderDebugOptions } from "./terrain/debug/terrainHeightProvenance.js";
 
 export type TerrainSample = {
   cols: number;
@@ -159,12 +167,24 @@ export type TerrainSample = {
   vegetationRevision?: number;
   structureRevision?: number;
   dynamicStructures?: boolean;
+  debugRenderOptions?: TerrainRenderDebugOptions;
 };
 
 type RGB = { r: number; g: number; b: number };
 
 const clamp = (value: number, min: number, max: number): number => Math.min(max, Math.max(min, value));
 const lerp = (a: number, b: number, t: number): number => a + (b - a) * t;
+const medianOfValues = (values: number[]): number => {
+  if (values.length === 0) {
+    return 0;
+  }
+  const sorted = values.slice().sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length * 0.5);
+  if ((sorted.length & 1) === 1) {
+    return sorted[mid] ?? 0;
+  }
+  return ((sorted[mid - 1] ?? 0) + (sorted[mid] ?? 0)) * 0.5;
+};
 const mixRgb = (a: RGB, b: RGB, t: number): RGB => ({
   r: a.r + (b.r - a.r) * t,
   g: a.g + (b.g - a.g) * t,
@@ -243,10 +263,21 @@ const computeBoundaryMismatchStats = (
   };
 };
 
-const HEIGHT_SAMPLE_PEAK_WEIGHT = 0.65;
+const HEIGHT_SAMPLE_NODE_WEIGHT = 0.85;
+const HEIGHT_SAMPLE_SPIKE_THRESHOLD = 0.014;
+const HEIGHT_SAMPLE_SPIKE_CLAMP_MARGIN = 0.003;
+const HEIGHT_SAMPLE_SPIKE_PASSES = 3;
+const HEIGHT_SAMPLE_SPIKE_SUPPORTED_NEIGHBOR_MAX = 2;
+const MIXED_WATER_VERTEX_MIN_COUNT = 2;
+const MIXED_WATER_VERTEX_LAND_BLEND = 0.28;
+const MIXED_WATER_VERTEX_MARGIN = 0.0015;
+const MIXED_SUPPORT_VERTEX_LAND_BLEND = 0.16;
+const MIXED_SUPPORT_VERTEX_MARGIN = 0.0008;
+const MIXED_SUPPORT_VERTEX_RANGE_THRESHOLD = 0.01;
 const WATER_ALPHA_MIN_RATIO = 0.1;
 const OCEAN_RATIO_MIN = 0.1;
 const RIVER_RATIO_MIN = 0.2;
+const RIVER_RENDER_SUPPORT_RATIO_MIN = 0.04;
 const OCEAN_SAMPLE_SUPPORT_FLOOR = 0.12;
 const EDGE_WATER_SAMPLE_RATIO = 0.2;
 const INTERIOR_WATER_SAMPLE_RATIO = 0.5;
@@ -443,22 +474,108 @@ export const buildSampleHeightMap = (
 ): Float32Array => {
   const { cols, rows, elevations, tileTypes } = sample;
   const heights = new Float32Array(sampleCols * sampleRows);
+  if (step <= 1) {
+    let offset = 0;
+    for (let row = 0; row < sampleRows; row += 1) {
+      for (let col = 0; col < sampleCols; col += 1) {
+        let sum = 0;
+        let count = 0;
+        let landSum = 0;
+        let landCount = 0;
+        let waterSum = 0;
+        let waterCount = 0;
+        let supportSum = 0;
+        let supportCount = 0;
+        let heightMin = Number.POSITIVE_INFINITY;
+        let heightMax = Number.NEGATIVE_INFINITY;
+        const contributorHeights: number[] = [];
+        const landHeights: number[] = [];
+        const minY = Math.max(0, row - 1);
+        const maxY = Math.min(rows - 1, row);
+        const minX = Math.max(0, col - 1);
+        const maxX = Math.min(cols - 1, col);
+        for (let y = minY; y <= maxY; y += 1) {
+          const rowBase = y * cols;
+          for (let x = minX; x <= maxX; x += 1) {
+            const idx = rowBase + x;
+            const height = elevations[idx] ?? 0;
+            sum += height;
+            count += 1;
+            contributorHeights.push(height);
+            if (height < heightMin) {
+              heightMin = height;
+            }
+            if (height > heightMax) {
+              heightMax = height;
+            }
+            const coastClass = sample.coastClass?.[idx] ?? COAST_CLASS_NONE;
+            const seaLevel = sample.seaLevel?.[idx];
+            const waterLike =
+              tileTypes?.[idx] === waterId ||
+              (sample.riverMask?.[idx] ?? 0) > 0 ||
+              (sample.oceanMask?.[idx] ?? 0) > 0 ||
+              coastClass === COAST_CLASS_SHELF_WATER ||
+              (seaLevel !== undefined && Number.isFinite(seaLevel) && height <= seaLevel + 0.0015);
+            if (tileTypes?.[idx] === waterId) {
+              waterSum += height;
+              waterCount += 1;
+            }
+            if (waterLike) {
+              supportSum += height;
+              supportCount += 1;
+            } else {
+              landSum += height;
+              landCount += 1;
+              landHeights.push(height);
+            }
+          }
+        }
+        const avg = count > 0 ? sum / count : 0;
+        const contributorMedian = medianOfValues(contributorHeights);
+        const heightRange =
+          Number.isFinite(heightMin) && Number.isFinite(heightMax) ? Math.max(0, heightMax - heightMin) : 0;
+        if (
+          supportCount >= MIXED_WATER_VERTEX_MIN_COUNT &&
+          landCount > 0 &&
+          heightRange >= MIXED_SUPPORT_VERTEX_RANGE_THRESHOLD
+        ) {
+          const supportAvg = supportSum / supportCount;
+          const landMedian = medianOfValues(landHeights);
+          const mixedTarget = Math.min(
+            avg,
+            contributorMedian + MIXED_SUPPORT_VERTEX_MARGIN,
+            supportAvg + (landMedian - supportAvg) * MIXED_SUPPORT_VERTEX_LAND_BLEND + MIXED_SUPPORT_VERTEX_MARGIN
+          );
+          heights[offset] = clamp(mixedTarget, 0, 1);
+        } else if (waterCount >= MIXED_WATER_VERTEX_MIN_COUNT && landCount > 0) {
+          const waterAvg = waterSum / waterCount;
+          const landAvg = landSum / landCount;
+          const mixedTarget =
+            waterAvg + (landAvg - waterAvg) * MIXED_WATER_VERTEX_LAND_BLEND + MIXED_WATER_VERTEX_MARGIN;
+          heights[offset] = clamp(Math.min(avg, mixedTarget), 0, 1);
+        } else if (waterCount > 0 && landCount > 0) {
+          const landAvg = landSum / landCount;
+          const waterAvg = waterSum / waterCount;
+          const waterBlend = clamp(waterCount / count, 0.25, 0.75);
+          heights[offset] = clamp(landAvg * (1 - waterBlend) + waterAvg * waterBlend, 0, 1);
+        } else {
+          heights[offset] = clamp(avg, 0, 1);
+        }
+        offset += 1;
+      }
+    }
+    return heights;
+  }
   let offset = 0;
   for (let row = 0; row < sampleRows; row += 1) {
     const tileY = Math.min(rows - 1, row * step);
     for (let col = 0; col < sampleCols; col += 1) {
       const tileX = Math.min(cols - 1, col * step);
       const idx = tileY * cols + tileX;
-      if (step <= 1) {
-        heights[offset] = elevations[idx] ?? 0;
-        offset += 1;
-        continue;
-      }
       const endX = Math.min(cols, tileX + step);
       const endY = Math.min(rows, tileY + step);
       let sum = 0;
       let count = 0;
-      let maxHeight = 0;
       let waterCount = 0;
       let waterSum = 0;
       let coastalLandCount = 0;
@@ -473,9 +590,6 @@ export const buildSampleHeightMap = (
           const height = elevations[tileIdx] ?? 0;
           sum += height;
           count += 1;
-          if (height > maxHeight) {
-            maxHeight = height;
-          }
           if (tileTypes && tileTypes[tileIdx] === waterId) {
             waterCount += 1;
             waterSum += height;
@@ -518,7 +632,8 @@ export const buildSampleHeightMap = (
         continue;
       }
       const avg = count > 0 ? sum / count : 0;
-      const blended = avg * (1 - HEIGHT_SAMPLE_PEAK_WEIGHT) + maxHeight * HEIGHT_SAMPLE_PEAK_WEIGHT;
+      const nodeHeight = elevations[idx] ?? avg;
+      const blended = nodeHeight * HEIGHT_SAMPLE_NODE_WEIGHT + avg * (1 - HEIGHT_SAMPLE_NODE_WEIGHT);
       heights[offset] = clamp(blended, 0, 1);
       offset += 1;
     }
@@ -567,6 +682,83 @@ export const buildOceanMask = (cols: number, rows: number, tileTypes: Uint8Array
     }
   }
   return mask;
+};
+
+const suppressIsolatedHeightSamples = (
+  heights: Float32Array,
+  sampleCols: number,
+  sampleRows: number,
+  sampleTypes?: Uint8Array,
+  waterId?: number
+): void => {
+  if (sampleCols < 3 || sampleRows < 3) {
+    return;
+  }
+  const next = new Float32Array(heights.length);
+  const neighbors = new Float32Array(8);
+  for (let pass = 0; pass < HEIGHT_SAMPLE_SPIKE_PASSES; pass += 1) {
+    let changed = false;
+    next.set(heights);
+    for (let row = 1; row < sampleRows - 1; row += 1) {
+      for (let col = 1; col < sampleCols - 1; col += 1) {
+        const idx = row * sampleCols + col;
+        if (sampleTypes && waterId !== undefined && sampleTypes[idx] === waterId) {
+          continue;
+        }
+        const center = heights[idx] ?? 0;
+        let neighborSum = 0;
+        let supportCount = 0;
+        let write = 0;
+        for (let oy = -1; oy <= 1; oy += 1) {
+          for (let ox = -1; ox <= 1; ox += 1) {
+            if (ox === 0 && oy === 0) {
+              continue;
+            }
+            const nIdx = (row + oy) * sampleCols + (col + ox);
+            const value = heights[nIdx] ?? center;
+            neighbors[write] = value;
+            write += 1;
+            neighborSum += value;
+            if (value >= center - HEIGHT_SAMPLE_SPIKE_THRESHOLD * 0.45) {
+              supportCount += 1;
+            }
+          }
+        }
+        if (write !== 8) {
+          continue;
+        }
+        for (let i = 1; i < neighbors.length; i += 1) {
+          const value = neighbors[i];
+          let j = i - 1;
+          while (j >= 0 && neighbors[j] > value) {
+            neighbors[j + 1] = neighbors[j];
+            j -= 1;
+          }
+          neighbors[j + 1] = value;
+        }
+        const neighborAvg = neighborSum / 8;
+        const neighborMedian = (neighbors[3] + neighbors[4]) * 0.5;
+        const supportedPeak = supportCount > HEIGHT_SAMPLE_SPIKE_SUPPORTED_NEIGHBOR_MAX;
+        if (
+          supportedPeak ||
+          center - neighborMedian <= HEIGHT_SAMPLE_SPIKE_THRESHOLD ||
+          center - neighborAvg <= HEIGHT_SAMPLE_SPIKE_THRESHOLD * 0.7
+        ) {
+          continue;
+        }
+        const clamped = Math.max(neighborAvg, neighborMedian + HEIGHT_SAMPLE_SPIKE_CLAMP_MARGIN);
+        if (clamped >= center) {
+          continue;
+        }
+        next[idx] = clamped;
+        changed = true;
+      }
+    }
+    heights.set(next);
+    if (!changed) {
+      break;
+    }
+  }
 };
 
 export const computeWaterLevel = (
@@ -900,6 +1092,8 @@ export type TerrainRenderSurface = {
   size: { width: number; depth: number };
   heightScale: number;
   sampleHeights: Float32Array;
+  rawSampleHeights?: Float32Array;
+  finalSampleHeights?: Float32Array;
   sampleTypes: Uint8Array;
   coastData: SampledCoastData;
   sampleOceanCoverage?: Float32Array;
@@ -920,6 +1114,8 @@ export type TerrainRenderSurface = {
   sampledRiverStepStrength?: Float32Array;
   sampledRiverCoverage?: Float32Array;
   riverRenderDomain?: RiverRenderDomain;
+  debugHeightAnomalies?: TerrainHeightAnomaly[];
+  getHeightProvenance?: (tileX: number, tileY: number) => TerrainHeightProvenance | null;
   heightAtSample: (x: number, y: number) => number;
   heightAtTileCoord: (tileX: number, tileY: number) => number;
   heightAtTile: (tileX: number, tileY: number) => number;
@@ -1028,12 +1224,17 @@ const buildWaterMaskTexture = (
 };
 
 const buildWaterSupportMask = (
-  sampleTypes: Uint8Array,
-  waterId: number
+  waterRatios: WaterSampleRatios,
+  oceanSupportMask: Uint8Array,
+  sampledRiverCoverage?: Float32Array
 ): Uint8Array => {
-  const support = new Uint8Array(sampleTypes.length);
-  for (let i = 0; i < sampleTypes.length; i += 1) {
-    support[i] = sampleTypes[i] === waterId ? 1 : 0;
+  const support = new Uint8Array(oceanSupportMask.length);
+  for (let i = 0; i < oceanSupportMask.length; i += 1) {
+    const riverCoverage = sampledRiverCoverage?.[i] ?? 0;
+    const riverRatio = waterRatios.river[i] ?? 0;
+    const riverBacked =
+      riverCoverage >= RIVER_RENDER_SUPPORT_RATIO_MIN || riverRatio >= RIVER_RATIO_MIN * 0.5;
+    support[i] = oceanSupportMask[i] > 0 || riverBacked ? 1 : 0;
   }
   return support;
 };
@@ -1813,6 +2014,7 @@ export const prepareTerrainRenderSurface = (
   sample: TerrainSample,
 ): TerrainRenderSurface => {
   const { cols, rows } = sample;
+  const debugRenderOptions = sample.debugRenderOptions;
   const grassId = TILE_TYPE_IDS.grass;
   const beachId = TILE_TYPE_IDS.beach;
   const rockyId = TILE_TYPE_IDS.rocky;
@@ -1828,7 +2030,8 @@ export const prepareTerrainRenderSurface = (
   const width = (sampleCols - 1) * step;
   const depth = (sampleRows - 1) * step;
   const heightScale = getTerrainHeightScale(cols, rows, sample.heightScaleMultiplier ?? 1);
-  const sampleHeights = buildSampleHeightMap(sample, sampleCols, sampleRows, step, waterId);
+  const rawSampleHeights = buildSampleHeightMap(sample, sampleCols, sampleRows, step, waterId);
+  const finalSampleHeights = new Float32Array(rawSampleHeights);
   const coastData = buildSampleCoastData(sample, sampleCols, sampleRows, step);
   const oceanMask = sample.oceanMask ?? (sample.tileTypes ? buildOceanMask(cols, rows, sample.tileTypes, waterId) : null);
   const riverMask = sample.riverMask ?? null;
@@ -1850,6 +2053,7 @@ export const prepareTerrainRenderSurface = (
     TILE_ID_TO_TYPE.length,
     [baseId, houseId, roadId, firebreakId, ashId]
   );
+  suppressIsolatedHeightSamples(finalSampleHeights, sampleCols, sampleRows, sampleTypes, waterId);
   const sampleOceanCoverage = coastData.oceanCoverage;
   const sampleCoastDistance = coastData.coastDistance;
   const sampleCoastClass = coastData.coastClass;
@@ -1912,7 +2116,7 @@ export const prepareTerrainRenderSurface = (
         }
         if ((!oceanMask || isOcean) && !isRiver) {
           if (touchesWorldBorder) {
-            sampleHeights[idx] = renderSeaLevel;
+            finalSampleHeights[idx] = renderSeaLevel;
             continue;
           }
           const targetSeabed =
@@ -1924,7 +2128,7 @@ export const prepareTerrainRenderSurface = (
                   0,
                   1
                 );
-          sampleHeights[idx] = Math.min(sampleHeights[idx], targetSeabed);
+          finalSampleHeights[idx] = Math.min(finalSampleHeights[idx], targetSeabed);
         }
       }
     }
@@ -1974,18 +2178,18 @@ export const prepareTerrainRenderSurface = (
                 1
               );
       if (coastClass === COAST_CLASS_CLIFF && coastDistance > 0) {
-        sampleHeights[i] = Math.max(sampleHeights[i], targetHeight);
+        finalSampleHeights[i] = Math.max(finalSampleHeights[i], targetHeight);
         continue;
       }
-      if (coastClass === COAST_CLASS_BEACH && coastDistance > 0 && sampleHeights[i] < targetHeight) {
-        sampleHeights[i] = targetHeight;
+      if (coastClass === COAST_CLASS_BEACH && coastDistance > 0 && finalSampleHeights[i] < targetHeight) {
+        finalSampleHeights[i] = targetHeight;
         continue;
       }
-      if (sampleHeights[i] <= targetHeight) {
+      if (finalSampleHeights[i] <= targetHeight) {
         continue;
       }
       const relax = 1 - smoothstep(1, COAST_GEOMETRY_LAND_RELAX_BAND + 1, coastalDistanceToOcean);
-      sampleHeights[i] = clamp(sampleHeights[i] * (1 - relax) + targetHeight * relax, 0, 1);
+      finalSampleHeights[i] = clamp(finalSampleHeights[i] * (1 - relax) + targetHeight * relax, 0, 1);
     }
   }
   const sampledRiverSurface = buildSampleOptionalFloatMap(
@@ -2023,22 +2227,6 @@ export const prepareTerrainRenderSurface = (
     sampleRows,
     step
   );
-  const waterSupportMask = buildWaterSupportMask(sampleTypes, waterId);
-  const waterSurfaceHeights = buildWaterSurfaceHeights(
-    sampleHeights,
-    waterSupportMask,
-    waterRatios.ocean,
-    waterRatios.river,
-    sampleCols,
-    sampleRows,
-    waterLevel,
-    sampledRiverSurface,
-    sampledRiverStepStrength,
-    {
-      oceanRatioMin: OCEAN_RATIO_MIN,
-      riverRatioMin: RIVER_RATIO_MIN
-    }
-  );
   const { oceanRatios: oceanRenderRatios, oceanSupportMask, surfAttenuation: oceanSurfAttenuation } =
     buildOceanRenderSupportData(
       cols,
@@ -2054,6 +2242,29 @@ export const prepareTerrainRenderSurface = (
       sampleCoastDistance,
       coastData
     );
+  const waterSupportMask = buildWaterSupportMask(waterRatios, oceanSupportMask, sampledRiverCoverage);
+  if (step === 1) {
+    suppressIsolatedHeightSamples(finalSampleHeights, sampleCols, sampleRows, sampleTypes, waterId);
+  }
+  const sampleHeights =
+    debugRenderOptions?.terrainHeightMode === "raw"
+      ? new Float32Array(rawSampleHeights)
+      : finalSampleHeights;
+  const waterSurfaceHeights = buildWaterSurfaceHeights(
+    sampleHeights,
+    waterSupportMask,
+    waterRatios.ocean,
+    waterRatios.river,
+    sampleCols,
+    sampleRows,
+    waterLevel,
+    sampledRiverSurface,
+    sampledRiverStepStrength,
+    {
+      oceanRatioMin: OCEAN_RATIO_MIN,
+      riverRatioMin: RIVER_RATIO_MIN
+    }
+  );
   const shoreTerrainHeightAboveWater = new Float32Array(sampleCols * sampleRows);
   const waterLevelWorld = waterLevel !== null ? clamp(waterLevel, 0, 1) * heightScale : 0;
   for (let i = 0; i < sampleCols * sampleRows; i += 1) {
@@ -2106,7 +2317,7 @@ export const prepareTerrainRenderSurface = (
     return hx0 * (1 - ty) + hx1 * ty;
   };
   const heightAtTile = (tileX: number, tileY: number): number => heightAtTileCoord(tileX + 0.5, tileY + 0.5);
-  return {
+  const surface: TerrainRenderSurface = {
     sample,
     cols,
     rows,
@@ -2118,6 +2329,8 @@ export const prepareTerrainRenderSurface = (
     size: { width, depth },
     heightScale,
     sampleHeights,
+    rawSampleHeights,
+    finalSampleHeights,
     sampleTypes,
     coastData,
     sampleOceanCoverage,
@@ -2138,12 +2351,30 @@ export const prepareTerrainRenderSurface = (
     sampledRiverStepStrength,
     sampledRiverCoverage,
     riverRenderDomain,
+    debugHeightAnomalies: undefined,
+    getHeightProvenance: undefined,
     heightAtSample,
     heightAtTileCoord,
     heightAtTile,
     toWorldX: (tileX: number): number => (tileX / Math.max(1, cols) - 0.5) * width,
     toWorldZ: (tileY: number): number => (tileY / Math.max(1, rows) - 0.5) * depth
   };
+  if (debugRenderOptions?.enableHeightProvenance) {
+    surface.getHeightProvenance = (tileX: number, tileY: number): TerrainHeightProvenance | null =>
+      buildTerrainHeightProvenance(surface, tileX, tileY);
+    const anomalies = collectTerrainHeightAnomalies(surface, Math.max(1, debugRenderOptions.anomalyLogLimit ?? 5));
+    surface.debugHeightAnomalies = anomalies;
+    if (debugRenderOptions.logHeightAnomalies !== false && anomalies.length > 0) {
+      const summary = anomalies
+        .map(
+          (anomaly) =>
+            `${anomaly.stage}@tile(${anomaly.tileX},${anomaly.tileY}) sample(${anomaly.sampleX},${anomaly.sampleY}) delta=${anomaly.delta.toFixed(4)} value=${anomaly.value.toFixed(4)} base=${anomaly.baseline.toFixed(4)}`
+        )
+        .join(" | ");
+      console.warn(`[threeTestTerrain] height anomalies ${summary}`);
+    }
+  }
+  return surface;
 };
 
 export const buildTerrainMesh = (
@@ -2159,6 +2390,7 @@ export const buildTerrainMesh = (
   treeBurn?: TreeBurnController;
 } => {
   const sample = surface.sample;
+  const debugRenderOptions = sample.debugRenderOptions;
   const { cols, rows, elevations } = sample;
   const palette = buildPalette();
   const grassId = TILE_TYPE_IDS.grass;
@@ -2553,7 +2785,9 @@ export const buildTerrainMesh = (
       vertexIndex += 1;
     }
   }
-  applyRiverTerrainTriangleCutout(geometry, sampleCols, sampleRows, riverRenderDomain);
+  if (!debugRenderOptions?.disableRiverCutout) {
+    applyRiverTerrainTriangleCutout(geometry, sampleCols, sampleRows, riverRenderDomain);
+  }
   geometry.computeVertexNormals();
   if (DEBUG_TERRAIN_RENDER && threeTestLoggedTotal !== cols * rows) {
     console.log(
@@ -2651,10 +2885,14 @@ export const buildTerrainMesh = (
     waterRatio: waterRatios.water,
     waterSurfaceHeights
   };
-  const bridgeDeck = buildBridgeDeckMesh(bridgeDeckSurface, roadOverlay, roadId, baseId);
-  mesh.userData.bridgeDebug = bridgeDeck.debug;
-  if (bridgeDeck.group) {
-    mesh.add(bridgeDeck.group);
+  if (!debugRenderOptions?.disableBridges) {
+    const bridgeDeck = buildBridgeDeckMesh(bridgeDeckSurface, roadOverlay, roadId, baseId);
+    mesh.userData.bridgeDebug = bridgeDeck.debug;
+    if (bridgeDeck.group) {
+      mesh.add(bridgeDeck.group);
+    }
+  } else {
+    mesh.userData.bridgeDebug = null;
   }
   const roadWallMesh = buildRoadRetainingWallMesh(sample, width, depth, heightScale, roadId, baseId, heightAtTileCoord);
   if (roadWallMesh) {
@@ -3252,7 +3490,7 @@ export const buildTerrainMesh = (
   const supportMask = waterSupportMask;
   let hasVisibleWater = false;
   for (let i = 0; i < supportMask.length; i += 1) {
-    if (supportMask[i] > 0 || (ratios.water[i] ?? 0) > 0) {
+    if (supportMask[i] > 0) {
       hasVisibleWater = true;
       break;
     }

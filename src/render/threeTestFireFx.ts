@@ -28,6 +28,8 @@ const SMOKE_QUALITY_RECOVERY_SCENE_MS = 11;
 const SMOKE_QUALITY_FALLBACK_SECONDS = 1.2;
 const SMOKE_QUALITY_RECOVERY_SECONDS = 5;
 const SMOKE_BUDGET_MIN_SCALE = 0.3;
+const SMOKE_MIN_ANIMATION_RATE = 0.35;
+const SMOKE_PAUSED_PREVIEW_RATE = 0.18;
 const FLAME_BUDGET_MIN_SCALE = 0.35;
 const FIRE_FX_ACTIVE_UPDATE_INTERVAL_MS = 16;
 const FIRE_FX_IDLE_UPDATE_INTERVAL_MS = 120;
@@ -1695,6 +1697,7 @@ export const createThreeTestFireFx = (
   const ashPreviewOffset = new THREE.Vector3();
   let previousFrameTimeMs: number | null = null;
   let animationTimeMs = 0;
+  let smokeAnimationTimeMs = 0;
   let tileStateCols = 0;
   let tileStateRows = 0;
   let tileFlameVisual = new Float32Array(0);
@@ -1751,6 +1754,7 @@ export const createThreeTestFireFx = (
   const sparkSizeScratch = new THREE.Vector3();
   const sparkDirectionScratch = new THREE.Vector3();
   let pendingDeltaSeconds = 0;
+  let pendingSmokeDeltaSeconds = 0;
   let lastRebuildTimeMs = -Infinity;
   let visualsCleared = true;
   let fireSimulationAlpha = 1;
@@ -2428,11 +2432,21 @@ export const createThreeTestFireFx = (
       previousFrameTimeMs === null ? 1 / 60 : clamp((frameTimeMs - previousFrameTimeMs) * 0.001, 1 / 240, 0.2);
     previousFrameTimeMs = frameTimeMs;
     const scaledDeltaSeconds = Math.max(0, frameDeltaSeconds * animationRate);
+    // Smoke needs a minimum visual cadence in slow incident time or after the auto-pause.
+    const smokeAnimationRate =
+      animationRate > 0 ? Math.max(animationRate, SMOKE_MIN_ANIMATION_RATE) : SMOKE_PAUSED_PREVIEW_RATE;
+    const scaledSmokeDeltaSeconds = Math.max(0, frameDeltaSeconds * smokeAnimationRate);
     pendingDeltaSeconds = Math.min(0.3, pendingDeltaSeconds + scaledDeltaSeconds);
+    pendingSmokeDeltaSeconds = Math.min(0.3, pendingSmokeDeltaSeconds + scaledSmokeDeltaSeconds);
     if (scaledDeltaSeconds > 0) {
       animationTimeMs += scaledDeltaSeconds * 1000;
     } else if (animationTimeMs <= 0 && Number.isFinite(frameTimeMs)) {
       animationTimeMs = Math.max(0, frameTimeMs);
+    }
+    if (scaledSmokeDeltaSeconds > 0) {
+      smokeAnimationTimeMs += scaledSmokeDeltaSeconds * 1000;
+    } else if (smokeAnimationTimeMs <= 0 && Number.isFinite(frameTimeMs)) {
+      smokeAnimationTimeMs = Math.max(0, frameTimeMs);
     }
     if (!sample || !terrainSize) {
       clearVisuals();
@@ -2470,6 +2484,7 @@ export const createThreeTestFireFx = (
         clearVisuals();
       }
       pendingDeltaSeconds = 0;
+      pendingSmokeDeltaSeconds = 0;
       return;
     }
     const minIntervalMs = hasFireWork ? FIRE_FX_ACTIVE_UPDATE_INTERVAL_MS : FIRE_FX_IDLE_UPDATE_INTERVAL_MS;
@@ -2478,7 +2493,9 @@ export const createThreeTestFireFx = (
     }
     lastRebuildTimeMs = frameTimeMs;
     const deltaSeconds = pendingDeltaSeconds > 0 ? clamp(pendingDeltaSeconds, 1 / 240, 0.08) : 0;
+    const smokeDeltaSeconds = pendingSmokeDeltaSeconds > 0 ? clamp(pendingSmokeDeltaSeconds, 1 / 240, 0.08) : 0;
     pendingDeltaSeconds = 0;
+    pendingSmokeDeltaSeconds = 0;
     renderContinuityState.localSlotChurn = 0;
     renderContinuityState.objectSlotChurn = 0;
     renderContinuityState.frontSlotChurn = 0;
@@ -2513,15 +2530,15 @@ export const createThreeTestFireFx = (
     if (Number.isFinite(fpsEstimate) && fpsEstimate > 0 && Number.isFinite(sceneRenderMs) && sceneRenderMs > 0) {
       const overloaded = fpsEstimate < SMOKE_QUALITY_FALLBACK_FPS || sceneRenderMs > SMOKE_QUALITY_FALLBACK_SCENE_MS;
       if (overloaded) {
-        smokeFallbackAccum += deltaSeconds;
+        smokeFallbackAccum += frameDeltaSeconds;
       } else {
-        smokeFallbackAccum = Math.max(0, smokeFallbackAccum - deltaSeconds * 0.7);
+        smokeFallbackAccum = Math.max(0, smokeFallbackAccum - frameDeltaSeconds * 0.7);
       }
       const healthy = fpsEstimate > SMOKE_QUALITY_RECOVERY_FPS && sceneRenderMs < SMOKE_QUALITY_RECOVERY_SCENE_MS;
       if (healthy) {
-        smokeRecoveryAccum += deltaSeconds;
+        smokeRecoveryAccum += frameDeltaSeconds;
       } else {
-        smokeRecoveryAccum = Math.max(0, smokeRecoveryAccum - deltaSeconds * 0.4);
+        smokeRecoveryAccum = Math.max(0, smokeRecoveryAccum - frameDeltaSeconds * 0.4);
       }
       if (smokeFallbackAccum >= SMOKE_QUALITY_FALLBACK_SECONDS) {
         smokeBudgetScale = Math.max(SMOKE_BUDGET_MIN_SCALE, smokeBudgetScale * 0.8);
@@ -2613,6 +2630,7 @@ export const createThreeTestFireFx = (
     const windLeanX = windX * windStrength * windResponse.flame;
     const windLeanZ = windZ * windStrength * windResponse.flame;
     const timeSeconds = animationTimeMs * 0.001;
+    const smokeTimeSeconds = smokeAnimationTimeMs * 0.001;
     const flameTimeSeconds = timeSeconds * FLAME_MOTION_TIME_SCALE;
     const sparkTimeSeconds = timeSeconds * SPARK_MOTION_TIME_SCALE;
     const fireShaderTime = timeSeconds * FIRE_SHADER_TIME_SCALE;
@@ -2645,7 +2663,7 @@ export const createThreeTestFireFx = (
     fireMaterial.uniforms.uWind.value.set(windLeanX * FLAME_WIND_GAIN, windLeanZ * FLAME_WIND_GAIN);
     fireCrossMaterial.uniforms.uWind.value.set(windLeanX * FLAME_WIND_GAIN, windLeanZ * FLAME_WIND_GAIN);
     fireCoreMaterial.uniforms.uWind.value.set(windLeanX * FLAME_WIND_GAIN, windLeanZ * FLAME_WIND_GAIN);
-    smokeMaterial.uniforms.uTime.value = timeSeconds;
+    smokeMaterial.uniforms.uTime.value = smokeTimeSeconds;
     smokeWarmScratch.copy(smokeWarmBase).lerp(smokeWarmHot, envOrange);
     smokeCoolScratch.copy(smokeCoolBase).lerp(smokeCoolHot, envOrange);
     smokeStainScratch.copy(smokeStainBase).lerp(smokeStainHot, envOrange);
@@ -3600,7 +3618,7 @@ export const createThreeTestFireFx = (
           8
         );
         for (let spawn = 0; spawn < spawnCount && smokeSpawnsThisFrame < smokeSpawnFrameCap; spawn += 1) {
-          const r1 = hash1(a1 * 17.0 + spawn * 1.31 + timeSeconds * 0.19);
+          const r1 = hash1(a1 * 17.0 + spawn * 1.31 + smokeTimeSeconds * 0.19);
           const r2 = hash1(a2 * 23.0 + spawn * 2.17 + 7.0);
           const r3 = hash1(a3 * 29.0 + spawn * 3.11 + 13.0);
           const theta = r1 * TAU;
@@ -3762,8 +3780,8 @@ export const createThreeTestFireFx = (
             ? clamp(wetness * 0.42 + heat * 0.28 + holdoverEmber * 0.8, 0, 0.42)
             : 0;
         const smoothedSmoke = hasActiveFire || hasTreeCarryFlame || hasSuppressedHoldover
-          ? smoothApproach(tileSmokeVisual[idx] ?? 0, targetSmoke, 10.0, 6.6, deltaSeconds)
-          : smoothApproach(tileSmokeVisual[idx] ?? 0, 0, 0, 9.4, deltaSeconds);
+          ? smoothApproach(tileSmokeVisual[idx] ?? 0, targetSmoke, 10.0, 6.6, smokeDeltaSeconds)
+          : smoothApproach(tileSmokeVisual[idx] ?? 0, 0, 0, 9.4, smokeDeltaSeconds);
         tileSmokeVisual[idx] = smoothedSmoke;
         const tileCluster = tileClusterId[idx] >= 0 ? fireClusters[tileClusterId[idx]] ?? null : null;
         const tileRole = tileCluster ? (tileClusterRole[idx] as ClusterRole) : 0;
@@ -3845,7 +3863,7 @@ export const createThreeTestFireFx = (
           ashPreviewCount += 1;
         }
         if (!hasPlume) {
-          tileSmokeSpawnAccum[idx] = Math.max(0, (tileSmokeSpawnAccum[idx] ?? 0) - deltaSeconds * 0.6);
+          tileSmokeSpawnAccum[idx] = Math.max(0, (tileSmokeSpawnAccum[idx] ?? 0) - smokeDeltaSeconds * 0.6);
         }
         const intensity = clamp(Math.max(smoothedFlame, heat * 0.5), 0, 1);
         const flameIntensity = clamp(smoothedFlame, 0, 1);
@@ -5051,7 +5069,7 @@ export const createThreeTestFireFx = (
             roleSmokeScale *
             smokeDensityScale *
             frontSmokeScale;
-          let spawnCarry = (tileSmokeSpawnAccum[idx] ?? 0) + emissionRate * deltaSeconds;
+          let spawnCarry = (tileSmokeSpawnAccum[idx] ?? 0) + emissionRate * smokeDeltaSeconds;
           const spawnCount = Math.min(9, Math.floor(spawnCarry));
           spawnCarry -= spawnCount;
           tileSmokeSpawnAccum[idx] = spawnCarry;
@@ -5060,7 +5078,7 @@ export const createThreeTestFireFx = (
           const baseSize = tileSpan * (0.9 + smokeDrive * 1.28);
           for (let spawn = 0; spawn < spawnLimit; spawn += 1) {
             const nonce = smokeSpawnSequence++;
-            const r1 = hash1(idx * 1.173 + nonce * 0.137 + timeSeconds * 0.19);
+            const r1 = hash1(idx * 1.173 + nonce * 0.137 + smokeTimeSeconds * 0.19);
             const r2 = hash1(idx * 0.917 + nonce * 0.223 + 17.0);
             const r3 = hash1(idx * 1.411 + nonce * 0.311 + 41.0);
             const theta = r1 * TAU;
@@ -5108,7 +5126,7 @@ export const createThreeTestFireFx = (
         continue;
       }
       const lifeSeconds = Math.max(0.5, smokeParticleLife[i]);
-      const age = smokeParticleAge[i] + deltaSeconds / lifeSeconds;
+      const age = smokeParticleAge[i] + smokeDeltaSeconds / lifeSeconds;
       if (age >= 1) {
         smokeParticleActive[i] = 0;
         smokeParticleSourceIdx[i] = -1;
@@ -5124,14 +5142,14 @@ export const createThreeTestFireFx = (
       const downwindOffset = windStrength * windResponse.smoke * tileSpan * (age2 * (6.2 + intensity * 12.2) + age3 * 10.4);
       const centerX = sourceX + windX * downwindOffset;
       const centerZ = sourceZ + windZ * downwindOffset;
-      const drag = Math.exp(-deltaSeconds * (0.08 + age * 0.14));
+      const drag = Math.exp(-smokeDeltaSeconds * (0.08 + age * 0.14));
       const shear = 0.28 + age * 3.4 + windStrength * (0.8 + age * 2.2);
       smokeParticleVx[i] =
         smokeParticleVx[i] * drag +
-        windX * windStrength * windResponse.smoke * tileSpan * deltaSeconds * 0.12 * shear;
+        windX * windStrength * windResponse.smoke * tileSpan * smokeDeltaSeconds * 0.12 * shear;
       smokeParticleVz[i] =
         smokeParticleVz[i] * drag +
-        windZ * windStrength * windResponse.smoke * tileSpan * deltaSeconds * 0.12 * shear;
+        windZ * windStrength * windResponse.smoke * tileSpan * smokeDeltaSeconds * 0.12 * shear;
       // Widen plume with age and wind: older smoke spreads into larger downwind lobes.
       const seedAngle = seed * TAU;
       const seedDirX = Math.cos(seedAngle);
@@ -5155,25 +5173,25 @@ export const createThreeTestFireFx = (
         spreadTargetZ = centerZ + windNormZ * alongSpread + crossWindZ * crossSpread;
       }
       const cohesion = (1 - age) * (0.95 + intensity * 0.6) + 0.04;
-      smokeParticleVx[i] += (spreadTargetX - smokeParticleX[i]) * cohesion * deltaSeconds;
-      smokeParticleVz[i] += (spreadTargetZ - smokeParticleZ[i]) * cohesion * deltaSeconds;
+      smokeParticleVx[i] += (spreadTargetX - smokeParticleX[i]) * cohesion * smokeDeltaSeconds;
+      smokeParticleVz[i] += (spreadTargetZ - smokeParticleZ[i]) * cohesion * smokeDeltaSeconds;
       // Monotonic convection: avoid any downward spring pull that creates visible dip/rebound motion.
       smokeParticleVy[i] =
-        smokeParticleVy[i] * (1 - deltaSeconds * (0.04 + age * 0.05)) +
-        tileSpan * deltaSeconds * (0.22 + intensity * 0.16 + age * 0.2);
+        smokeParticleVy[i] * (1 - smokeDeltaSeconds * (0.04 + age * 0.05)) +
+        tileSpan * smokeDeltaSeconds * (0.22 + intensity * 0.16 + age * 0.2);
       const minRise = tileSpan * (0.06 + intensity * 0.04 + age * 0.06);
       if (smokeParticleVy[i] < minRise) {
         smokeParticleVy[i] = minRise;
       }
       const prevY = smokeParticleY[i];
-      const swirlPhase = timeSeconds * (0.28 + seed * 0.62) + seed * 21.7 + age * 7.6;
-      const swirlAmp = tileSpan * deltaSeconds * (0.008 + age * 0.024 + intensity * 0.012);
-      smokeParticleX[i] += smokeParticleVx[i] * deltaSeconds + Math.sin(swirlPhase) * swirlAmp;
-      smokeParticleY[i] += smokeParticleVy[i] * deltaSeconds;
+      const swirlPhase = smokeTimeSeconds * (0.28 + seed * 0.62) + seed * 21.7 + age * 7.6;
+      const swirlAmp = tileSpan * smokeDeltaSeconds * (0.008 + age * 0.024 + intensity * 0.012);
+      smokeParticleX[i] += smokeParticleVx[i] * smokeDeltaSeconds + Math.sin(swirlPhase) * swirlAmp;
+      smokeParticleY[i] += smokeParticleVy[i] * smokeDeltaSeconds;
       if (smokeParticleY[i] < prevY) {
-        smokeParticleY[i] = prevY + tileSpan * deltaSeconds * 0.01;
+        smokeParticleY[i] = prevY + tileSpan * smokeDeltaSeconds * 0.01;
       }
-      smokeParticleZ[i] += smokeParticleVz[i] * deltaSeconds + Math.cos(swirlPhase * 1.17) * swirlAmp;
+      smokeParticleZ[i] += smokeParticleVz[i] * smokeDeltaSeconds + Math.cos(swirlPhase * 1.17) * swirlAmp;
       const dx = smokeParticleX[i] - cameraWorldPos.x;
       const dy = smokeParticleY[i] - cameraWorldPos.y;
       const dz = smokeParticleZ[i] - cameraWorldPos.z;

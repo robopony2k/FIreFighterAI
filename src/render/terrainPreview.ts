@@ -15,6 +15,7 @@ import {
   prepareTerrainRenderSurface,
   type TerrainBridgeDebug,
   type TerrainBridgeSpanDebug,
+  type TerrainRenderSurface,
   type TerrainSample
 } from "./threeTestTerrain.js";
 import { ThreeTestWaterSystem } from "./threeTestWater.js";
@@ -35,6 +36,11 @@ export type TerrainPreviewBridgeSelection = {
   bridgeDebug: TerrainBridgeDebug | null;
 };
 
+export type TerrainPreviewHoverTile = {
+  tileX: number;
+  tileY: number;
+};
+
 export type TerrainPreviewController = {
   prepareAssets: (onProgress?: (progress: TerrainPreviewAssetProgress) => void) => Promise<void>;
   start: () => void;
@@ -42,6 +48,7 @@ export type TerrainPreviewController = {
   resize: () => void;
   setTerrain: (sample: TerrainSample, options?: TerrainPreviewSetTerrainOptions) => void;
   setBridgeSelectionListener: (listener: ((selection: TerrainPreviewBridgeSelection) => void) | null) => void;
+  setHoverTileListener: (listener: ((hover: TerrainPreviewHoverTile | null) => void) | null) => void;
   resetView: () => void;
   dispose: () => void;
 };
@@ -179,10 +186,13 @@ export const createTerrainPreviewController = (canvas: HTMLCanvasElement): Terra
   waterSystem.setLightDirectionFromKeyLight();
 
   let terrainMesh: THREE.Mesh | null = null;
+  let terrainSurface: TerrainRenderSurface | null = null;
   let lastTerrainFrame: TerrainPreviewFrame | null = null;
   let bridgeDebug: TerrainBridgeDebug | null = null;
   let selectedBridgeSpan: TerrainBridgeSpanDebug | null = null;
   let bridgeSelectionListener: ((selection: TerrainPreviewBridgeSelection) => void) | null = null;
+  let hoverTileListener: ((hover: TerrainPreviewHoverTile | null) => void) | null = null;
+  let lastHoverTileKey = "";
   let running = false;
   let rafId = 0;
   let lastFrameTime = performance.now();
@@ -199,6 +209,27 @@ export const createTerrainPreviewController = (canvas: HTMLCanvasElement): Terra
   const setBridgeSelection = (selection: TerrainBridgeSpanDebug | null): void => {
     selectedBridgeSpan = selection;
     emitBridgeSelection();
+  };
+
+  const emitHoverTile = (hover: TerrainPreviewHoverTile | null): void => {
+    const nextKey = hover ? `${hover.tileX},${hover.tileY}` : "";
+    if (nextKey === lastHoverTileKey) {
+      return;
+    }
+    lastHoverTileKey = nextKey;
+    hoverTileListener?.(hover);
+  };
+
+  const resolveHoverTileFromWorldPoint = (worldX: number, worldZ: number): TerrainPreviewHoverTile | null => {
+    if (!terrainSurface || terrainSurface.width === 0 || terrainSurface.depth === 0) {
+      return null;
+    }
+    const tileX = Math.max(0, Math.min(terrainSurface.cols - 1, Math.floor((worldX / terrainSurface.width + 0.5) * terrainSurface.cols)));
+    const tileY = Math.max(0, Math.min(terrainSurface.rows - 1, Math.floor((worldZ / terrainSurface.depth + 0.5) * terrainSurface.rows)));
+    if (tileX < 0 || tileY < 0 || tileX >= terrainSurface.cols || tileY >= terrainSurface.rows) {
+      return null;
+    }
+    return { tileX, tileY };
   };
 
   const resolveBridgeSpanDebug = (object: THREE.Object3D | null): TerrainBridgeSpanDebug | null => {
@@ -238,6 +269,33 @@ export const createTerrainPreviewController = (canvas: HTMLCanvasElement): Terra
     setBridgeSelection(pickBridgeSpan(event.clientX, event.clientY));
   };
   canvas.addEventListener("click", handleCanvasClick);
+
+  const handleCanvasPointerMove = (event: MouseEvent): void => {
+    if (!terrainMesh) {
+      emitHoverTile(null);
+      return;
+    }
+    const rect = canvas.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) {
+      emitHoverTile(null);
+      return;
+    }
+    pointerNdc.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+    pointerNdc.y = -(((event.clientY - rect.top) / rect.height) * 2 - 1);
+    raycaster.setFromCamera(pointerNdc, camera);
+    const hits = raycaster.intersectObject(terrainMesh, false);
+    const hit = hits[0];
+    if (!hit) {
+      emitHoverTile(null);
+      return;
+    }
+    emitHoverTile(resolveHoverTileFromWorldPoint(hit.point.x, hit.point.z));
+  };
+  const handleCanvasPointerLeave = (): void => {
+    emitHoverTile(null);
+  };
+  canvas.addEventListener("mousemove", handleCanvasPointerMove);
+  canvas.addEventListener("mouseleave", handleCanvasPointerLeave);
 
   const syncCameraForTerrain = (frame: TerrainPreviewFrame): void => {
     const verticalFov = THREE.MathUtils.degToRad(camera.fov);
@@ -347,12 +405,15 @@ export const createTerrainPreviewController = (canvas: HTMLCanvasElement): Terra
     waterSystem.clear();
     bridgeDebug = null;
     selectedBridgeSpan = null;
+    terrainSurface = null;
+    emitHoverTile(null);
     emitBridgeSelection();
     if (sample.cols <= 1 || sample.rows <= 1 || sample.elevations.length === 0) {
       lastTerrainFrame = null;
       return;
     }
     const surface = prepareTerrainRenderSurface(sample);
+    terrainSurface = surface;
     const { mesh, size, water } = buildTerrainMesh(
       surface,
       getTreeAssetsCache(),
@@ -374,7 +435,21 @@ export const createTerrainPreviewController = (canvas: HTMLCanvasElement): Terra
     };
     if (water) {
       waterSystem.rebuild(mesh, water);
+      const riverVisible = !sample.debugRenderOptions?.disableRiverWater;
+      const currentWaterDebug = waterSystem.getDebugControls();
+      waterSystem.setDebugControls({
+        ...currentWaterDebug,
+        showRiver: riverVisible,
+        showWaterfalls: riverVisible
+      });
       waterSystem.setLightDirectionFromKeyLight();
+    } else {
+      const currentWaterDebug = waterSystem.getDebugControls();
+      waterSystem.setDebugControls({
+        ...currentWaterDebug,
+        showRiver: true,
+        showWaterfalls: true
+      });
     }
     if (options.recenter || !hadTerrain) {
       syncCameraForTerrain(lastTerrainFrame);
@@ -413,11 +488,29 @@ export const createTerrainPreviewController = (canvas: HTMLCanvasElement): Terra
     emitBridgeSelection();
   };
 
+  const setHoverTileListener = (
+    listener: ((hover: TerrainPreviewHoverTile | null) => void) | null
+  ): void => {
+    hoverTileListener = listener;
+    if (!hoverTileListener) {
+      return;
+    }
+    if (!lastHoverTileKey) {
+      hoverTileListener(null);
+      return;
+    }
+    const [tileX, tileY] = lastHoverTileKey.split(",").map((value) => Number.parseInt(value, 10));
+    hoverTileListener(Number.isFinite(tileX) && Number.isFinite(tileY) ? { tileX, tileY } : null);
+  };
+
   const dispose = (): void => {
     stop();
     canvas.removeEventListener("click", handleCanvasClick);
+    canvas.removeEventListener("mousemove", handleCanvasPointerMove);
+    canvas.removeEventListener("mouseleave", handleCanvasPointerLeave);
     disposeTerrainMesh(terrainMesh, scene);
     terrainMesh = null;
+    terrainSurface = null;
     waterSystem.dispose();
     controls.dispose();
     scene.remove(seasonalSky.mesh);
@@ -432,6 +525,7 @@ export const createTerrainPreviewController = (canvas: HTMLCanvasElement): Terra
     resize,
     setTerrain,
     setBridgeSelectionListener,
+    setHoverTileListener,
     resetView,
     dispose
   };

@@ -36,8 +36,13 @@ export class MapGenContext {
   riverMask: Uint8Array | null = null;
   seaLevelBase = 0;
   erosionWearMap: Float32Array | null = null;
+  erosionDepositMap: Float32Array | null = null;
+  erosionHardnessMap: Float32Array | null = null;
   erosionFlowXMap: Float32Array | null = null;
   erosionFlowYMap: Float32Array | null = null;
+  tectonicStressMap: Float32Array | null = null;
+  tectonicTrendXMap: Float32Array | null = null;
+  tectonicTrendYMap: Float32Array | null = null;
   slopeMap: Float32Array | null = null;
   microMap: Float32Array | null = null;
   forestNoiseMap: Float32Array | null = null;
