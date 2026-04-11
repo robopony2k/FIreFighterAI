@@ -228,7 +228,7 @@ export const createBottomLeftControls = (): BottomControlsView => {
         nextFireButton.setAttribute("title", "Advance time until the next fire starts.");
         nextFireButton.setAttribute("aria-label", "Skip to next fire");
       } else {
-        nextFireButton.setAttribute("title", "Available when no fires are currently active.");
+        nextFireButton.setAttribute("title", "Available when no active or holdover fires remain.");
         nextFireButton.setAttribute("aria-label", "Skip to next fire unavailable");
       }
       const pauseLabel = data.paused ? "Resume" : "Pause";

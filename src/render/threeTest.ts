@@ -41,6 +41,7 @@ import {
   getTownThreatLabel,
   getTownThreatLevel
 } from "../sim/towns.js";
+import { isSkipToNextFireAvailable } from "../sim/index.js";
 import {
   buildPalette,
   buildRoadOverlayTexture,
@@ -2069,8 +2070,7 @@ export const createThreeTest = (
     const speedLabel = formatTimeSpeedValue(speedValue);
     const timeModeLabel = world.simTimeMode === "incident" ? "Incident" : "Strategic";
     const skipToNextFireActive = !!world.skipToNextFire;
-    const canSkipToNextFire =
-      !world.gameOver && world.simTimeMode === "strategic" && world.lastActiveFires <= 0 && !skipToNextFireActive;
+    const canSkipToNextFire = isSkipToNextFireAvailable(world);
     timeSummary.innerHTML = "";
     const timeLine = document.createElement("div");
     timeLine.textContent = world.paused ? "State Paused" : "State Running";
@@ -2116,7 +2116,7 @@ export const createThreeTest = (
       nextFireButton.title = "Advance time until the next fire starts.";
       nextFireButton.setAttribute("aria-label", "Skip to next fire");
     } else {
-      nextFireButton.title = "Available when no fires are currently active.";
+      nextFireButton.title = "Available when no active or holdover fires remain.";
       nextFireButton.setAttribute("aria-label", "Skip to next fire unavailable");
     }
     applyDockCardStates();

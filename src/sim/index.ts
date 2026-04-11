@@ -336,13 +336,21 @@ const clearLatestFireAlert = (state: WorldState): void => {
   state.latestFireAlert = null;
 };
 
+const hasActiveOrScheduledFire = (
+  state: Pick<WorldState, "lastActiveFires" | "fireScheduledCount">
+): boolean => state.lastActiveFires > 0 || state.fireScheduledCount > 0;
+
+const hasFireSimulationWork = (
+  state: Pick<WorldState, "lastActiveFires" | "fireBoundsActive" | "fireScheduledCount">
+): boolean => hasActiveOrScheduledFire(state) || state.fireBoundsActive;
+
 const isGrowthWeather = (state: WorldState): boolean =>
   state.climateTemp >= GROWTH_WEATHER_TEMP_MIN &&
   state.climateTemp <= GROWTH_WEATHER_TEMP_MAX &&
   state.climateMoisture >= GROWTH_WEATHER_MOISTURE_MIN;
 
 export const isSkipToNextFireAvailable = (state: WorldState): boolean =>
-  !state.gameOver && state.simTimeMode === "strategic" && state.lastActiveFires <= 0 && !state.skipToNextFire;
+  !state.gameOver && state.simTimeMode === "strategic" && !hasActiveOrScheduledFire(state) && !state.skipToNextFire;
 
 export const requestSkipToNextFire = (state: WorldState): boolean => {
   if (!isSkipToNextFireAvailable(state)) {
@@ -729,13 +737,13 @@ export function stepSim(state: WorldState, effects: EffectsState, rng: RNG, delt
     state.lastActiveFires = 0;
     return;
   }
-  const hadActiveFires = state.lastActiveFires > 0;
+  const hadFireChainRisk = hasActiveOrScheduledFire(state);
   const climateRisk = getClimateRisk(state);
   stepTownSeasonScaling(state);
   stepTownAlertPosture(state, dayDelta);
   const allowGrowth = state.phase === "growth" && isGrowthWeather(state);
   const allowIgnition = state.phase === "fire" && climateRisk >= FIRE_WEATHER_RISK_MIN;
-  const allowFireSim = state.lastActiveFires > 0 || state.fireBoundsActive || allowIgnition;
+  const allowFireSim = hasFireSimulationWork(state) || allowIgnition;
 
   if (allowGrowth) {
     stepGrowth(state, dayDelta, rng);
@@ -815,10 +823,11 @@ export function stepSim(state: WorldState, effects: EffectsState, rng: RNG, delt
     stepWind(state, delta, rng);
   }
   state.lastActiveFires = activeFires;
-  if (activeFires <= 0) {
+  const hasActiveOrScheduledFireAfterStep = hasActiveOrScheduledFire(state);
+  if (!hasActiveOrScheduledFireAfterStep) {
     clearLatestFireAlert(state);
   }
-  if (!hadActiveFires && activeFires > 0) {
+  if (!hadFireChainRisk && activeFires > 0) {
     const strongest = findStrongestFireTile(state);
     if (strongest) {
       recordLatestFireAlert(state, strongest.x, strongest.y);

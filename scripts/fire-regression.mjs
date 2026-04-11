@@ -6,7 +6,7 @@ import { RNG } from "../dist/core/rng.js";
 import { createInitialState, syncTileSoA } from "../dist/core/state.js";
 import { PHASES } from "../dist/core/time.js";
 import { applyFuel } from "../dist/core/tiles.js";
-import { stepSim } from "../dist/sim/index.js";
+import { isSkipToNextFireAvailable, stepSim } from "../dist/sim/index.js";
 import { markFireBlockActiveByTile } from "../dist/sim/fire/activeBlocks.js";
 import { findIgnitionCandidate } from "../dist/sim/fire/ignite.js";
 import { createUnit } from "../dist/sim/units.js";
@@ -109,10 +109,47 @@ const igniteCenter = (state) => {
 const seedAlertIncident = (state) => {
   const idx = igniteCenter(state);
   state.lastActiveFires = 0;
+  state.fireBoundsActive = false;
+  state.fireMinX = 0;
+  state.fireMaxX = 0;
+  state.fireMinY = 0;
+  state.fireMaxY = 0;
   state.simTimeMode = "strategic";
   state.timeSpeedIndex = state.strategicTimeSpeedIndex;
   state.paused = false;
   state.latestFireAlert = null;
+  return idx;
+};
+
+const seedHoldoverIncident = (state) => {
+  const center = getCenter(state);
+  const idx = center * state.grid.cols + center;
+  const tile = state.tiles[idx];
+  tile.fire = 0;
+  tile.heat = Math.max(tile.ignitionPoint * 2.2, 2.2);
+  state.tileFire[idx] = 0;
+  state.tileHeat[idx] = tile.heat;
+  state.tileIgniteAt[idx] = state.fireSeasonDay;
+  state.fireScheduledCount = 1;
+  state.lastActiveFires = 0;
+  state.fireBoundsActive = true;
+  state.fireMinX = center - 1;
+  state.fireMaxX = center + 1;
+  state.fireMinY = center - 1;
+  state.fireMaxY = center + 1;
+  state.simTimeMode = "incident";
+  state.timeSpeedIndex = state.incidentTimeSpeedIndex;
+  state.paused = false;
+  state.latestFireAlert = {
+    id: state.nextFireAlertId++,
+    tileX: center,
+    tileY: center,
+    townId: -1,
+    year: state.year,
+    careerDay: state.careerDay,
+    phaseDay: state.phaseDay
+  };
+  markFireBlockActiveByTile(state, idx);
   return idx;
 };
 
@@ -237,6 +274,50 @@ const failures = [];
   );
   if (!state.paused || state.simTimeMode !== "incident" || !state.latestFireAlert) {
     failures.push("New incidents did not auto-pause and switch into incident mode.");
+  }
+}
+
+{
+  const { state, rng } = buildState(3902);
+  const effects = createEffectsState();
+  setCareerCursor(state, 225);
+  state.fireSettings.ignitionChancePerDay = 0;
+  seedHoldoverIncident(state);
+  stepSim(state, effects, rng, BASE_STEP);
+  console.log(
+    `\nHoldover Incident Continuity\npaused=${state.paused ? 1 : 0} mode=${state.simTimeMode} active=${state.lastActiveFires} scheduled=${state.fireScheduledCount} bounds=${state.fireBoundsActive ? 1 : 0}`
+  );
+  if (state.paused || state.simTimeMode !== "incident" || state.lastActiveFires <= 0) {
+    failures.push("Holdover reignition incorrectly re-triggered incident auto-pause.");
+  }
+}
+
+{
+  const { state, rng } = buildState(3903);
+  const effects = createEffectsState();
+  const center = getCenter(state);
+  const idx = center * state.grid.cols + center;
+  setCareerCursor(state, 225);
+  state.fireSettings.ignitionChancePerDay = 0;
+  state.tiles[idx].heat = 0.34;
+  state.tileHeat[idx] = state.tiles[idx].heat;
+  state.lastActiveFires = 0;
+  state.fireScheduledCount = 0;
+  state.fireBoundsActive = true;
+  state.fireMinX = center - 1;
+  state.fireMaxX = center + 1;
+  state.fireMinY = center - 1;
+  state.fireMaxY = center + 1;
+  state.simTimeMode = "incident";
+  state.timeSpeedIndex = state.incidentTimeSpeedIndex;
+  state.paused = false;
+  markFireBlockActiveByTile(state, idx);
+  stepSim(state, effects, rng, BASE_STEP);
+  console.log(
+    `\nCooling Incident Release\nmode=${state.simTimeMode} active=${state.lastActiveFires} scheduled=${state.fireScheduledCount} bounds=${state.fireBoundsActive ? 1 : 0} canSkip=${isSkipToNextFireAvailable(state) ? 1 : 0}`
+  );
+  if (state.simTimeMode !== "strategic" || !isSkipToNextFireAvailable(state)) {
+    failures.push("Cooling-only fire bounds incorrectly kept incident time or blocked next-fire skip.");
   }
 }
 

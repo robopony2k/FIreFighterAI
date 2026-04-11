@@ -722,6 +722,8 @@ export const bindPhaseUi = ({
             setStatus(state, "Already seeking next fire incident.");
           } else if (state.lastActiveFires > 0) {
             setStatus(state, "Cannot skip: active fires already on the map.");
+          } else if (state.fireScheduledCount > 0) {
+            setStatus(state, "Cannot skip: holdover fire risk is still active.");
           } else if (state.gameOver) {
             setStatus(state, "Cannot skip after game over.");
           }
