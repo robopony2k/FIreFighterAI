@@ -3,7 +3,7 @@ import type { WorldState } from "../core/state.js";
 import type { MapGenDebug, MapGenDebugSnapshot, MapGenReporter } from "./mapgenTypes.js";
 import type { MapGenSettings } from "./settings.js";
 import type { ResolvedTerrainProfile, TerrainRecipe } from "./terrainProfile.js";
-import { createYieldController } from "./runtime.js";
+import { createYieldController } from "./pipeline/yieldController.js";
 import { MapGenContext } from "./pipeline/MapGenContext.js";
 import { TerrainPipeline } from "./pipeline/TerrainPipeline.js";
 import { ElevationStage } from "./stages/ElevationStage.js";

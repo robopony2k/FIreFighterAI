@@ -44,6 +44,13 @@ Story: You are the new "Fire Warden" in charge of a region. Your mission is to p
 - A year is 360 days with four distinct seasons: (Winter = cold + moist, Spring = warm + moist, Summer = warm + dry, Autumn is Cool + dry)
 - Climate change is represented by a warming trend and drying bias.
 
+## Vegetation and Forest Identity
+
+- Vegetated tiles carry deterministic vegetation state that includes age, canopy cover, and stem density, so forests can look denser without changing the underlying simulation grid.
+- Forest stands are assigned one dominant tree identity from pine, oak, maple, birch, or elm. Large forest areas can also contain 1-2 clustered secondary species so they read as stands instead of noisy per-tile mixes.
+- Broad environmental bias already shapes composition: drier or higher terrain leans pine, wetter or lower terrain leans elm, and other hardwoods fill the middle ground.
+- Tree identity currently drives mapgen readability and rendering variety first. It is not yet a separate fire-fuel model.
+
 ## Design Intent
 
 - Cooler/wetter periods allow backburns and controlled fuel management (firebreaks).
@@ -189,7 +196,7 @@ This can be achieved by:
 - Fire simulation (heat diffusion, ignition scheduling).
 - Units (truck + firefighter logic).
 - Climate model (temperature + moisture).
-- Map generation (terrain, vegetation).
+- Map generation (terrain, vegetation age/density, forest stand composition).
 - UI system (phase UI, controls, overlays).
 
 ## Open Questions

@@ -24,6 +24,32 @@ const quickSizes = ["medium", "massive"];
 const fullMode = process.argv.includes("--full");
 const sizes = fullMode ? allSizes : quickSizes;
 const seeds = fullMode ? [1337] : [1337, 2, 4, 9001];
+const EXPECTED_STAGE_PHASE_ORDER = [
+  "terrain:elevation",
+  "terrain:erosion",
+  "hydro:solve",
+  "terrain:shoreline",
+  "hydro:rivers",
+  "biome:fields",
+  "biome:spread",
+  "biome:classify",
+  "settlement:place",
+  "roads:connect",
+  "reconcile:postSettlement",
+  "map:finalize"
+];
+const EXPECTED_DEBUG_PHASE_ORDER = [
+  "terrain:relief",
+  "terrain:carving",
+  "terrain:flooding",
+  "terrain:elevation",
+  ...EXPECTED_STAGE_PHASE_ORDER
+];
+const DEBUG_SMOKE_CASES = [
+  { sizeId: "medium", seed: 1337, stopAfterPhase: "terrain:elevation" },
+  { sizeId: "medium", seed: 1337, stopAfterPhase: "biome:spread" },
+  { sizeId: "medium", seed: 1337, stopAfterPhase: "reconcile:postSettlement" }
+];
 
 const createGrid = (sizeId) => {
   const dim = MAP_SIZE_PRESETS[sizeId];
@@ -42,6 +68,64 @@ const validateHouseParcels = () => {
     throw new Error(`[mapgen] invalid house parcel sizing: ${detail}`);
   }
 };
+
+const assertPhaseOrder = (actual, expected, label) => {
+  if (actual.length !== expected.length) {
+    throw new Error(
+      `[mapgen] ${label} phase count mismatch: expected ${expected.length}, got ${actual.length} (${actual.join(" -> ")})`
+    );
+  }
+  for (let i = 0; i < expected.length; i += 1) {
+    if (actual[i] !== expected[i]) {
+      throw new Error(
+        `[mapgen] ${label} phase order mismatch at index ${i}: expected ${expected[i]}, got ${actual[i]} (${actual.join(" -> ")})`
+      );
+    }
+  }
+};
+
+const assertSnapshotShape = (snapshot, totalTiles, label) => {
+  if (!(snapshot.elevations instanceof Float32Array) || snapshot.elevations.length !== totalTiles) {
+    throw new Error(`[mapgen] ${label} invalid elevations payload for ${snapshot.phase}`);
+  }
+  if (!(snapshot.tileTypes instanceof Uint8Array) || snapshot.tileTypes.length !== totalTiles) {
+    throw new Error(`[mapgen] ${label} invalid tileTypes payload for ${snapshot.phase}`);
+  }
+  if (snapshot.riverMask && (!(snapshot.riverMask instanceof Uint8Array) || snapshot.riverMask.length !== totalTiles)) {
+    throw new Error(`[mapgen] ${label} invalid riverMask payload for ${snapshot.phase}`);
+  }
+  if (snapshot.oceanMask && (!(snapshot.oceanMask instanceof Uint8Array) || snapshot.oceanMask.length !== totalTiles)) {
+    throw new Error(`[mapgen] ${label} invalid oceanMask payload for ${snapshot.phase}`);
+  }
+  if (snapshot.seaLevel && (!(snapshot.seaLevel instanceof Float32Array) || snapshot.seaLevel.length !== totalTiles)) {
+    throw new Error(`[mapgen] ${label} invalid seaLevel payload for ${snapshot.phase}`);
+  }
+  if (
+    snapshot.coastDistance &&
+    (!(snapshot.coastDistance instanceof Uint16Array) || snapshot.coastDistance.length !== totalTiles)
+  ) {
+    throw new Error(`[mapgen] ${label} invalid coastDistance payload for ${snapshot.phase}`);
+  }
+  if (snapshot.coastClass && (!(snapshot.coastClass instanceof Uint8Array) || snapshot.coastClass.length !== totalTiles)) {
+    throw new Error(`[mapgen] ${label} invalid coastClass payload for ${snapshot.phase}`);
+  }
+};
+
+const getExpectedStagePrefix = (stopAfterPhase) => {
+  const stopIndex = EXPECTED_STAGE_PHASE_ORDER.indexOf(stopAfterPhase);
+  if (stopIndex < 0) {
+    throw new Error(`[mapgen] unknown stage phase: ${stopAfterPhase}`);
+  }
+  return EXPECTED_STAGE_PHASE_ORDER.slice(0, stopIndex + 1);
+};
+
+const getExpectedDebugPrefix = (stopAfterPhase) => [
+  "terrain:relief",
+  "terrain:carving",
+  "terrain:flooding",
+  "terrain:elevation",
+  ...getExpectedStagePrefix(stopAfterPhase)
+];
 
 const analyzeForestPatches = (state) => {
   const { cols, rows, totalTiles } = state.grid;
@@ -514,15 +598,19 @@ const runCase = async (sizeId, seed) => {
   rng.setState(seed);
 
   const phaseTimingsMs = {};
+  const emittedPhases = [];
   let lastAt = performance.now();
   const started = lastAt;
   await generateMap(state, rng, undefined, undefined, {
     onPhase: async (snapshot) => {
+      emittedPhases.push(snapshot.phase);
+      assertSnapshotShape(snapshot, grid.totalTiles, `${sizeId}:${seed}`);
       const now = performance.now();
       phaseTimingsMs[snapshot.phase] = Number((now - lastAt).toFixed(2));
       lastAt = now;
     }
   });
+  assertPhaseOrder(emittedPhases, EXPECTED_DEBUG_PHASE_ORDER, `${sizeId}:${seed}`);
   const durationMs = performance.now() - started;
 
   let water = 0;
@@ -599,6 +687,46 @@ const runCase = async (sizeId, seed) => {
   };
 };
 
+const runDebugSmokeCase = async ({ sizeId, seed, stopAfterPhase }) => {
+  const grid = createGrid(sizeId);
+  const state = createInitialState(seed, grid);
+  const rng = new RNG(seed);
+  resetState(state, seed);
+  rng.setState(seed);
+
+  const emittedPhases = [];
+  const timedPhases = [];
+  let waitForStepCalls = 0;
+  await generateMap(state, rng, undefined, undefined, {
+    stopAfterPhase,
+    onPhase: async (snapshot) => {
+      emittedPhases.push(snapshot.phase);
+      assertSnapshotShape(snapshot, grid.totalTiles, `debug:${sizeId}:${seed}:${stopAfterPhase}`);
+    },
+    onStageTiming: async (timing) => {
+      timedPhases.push(timing.phase);
+      if (!Number.isFinite(timing.durationMs) || timing.durationMs < 0) {
+        throw new Error(
+          `[mapgen] invalid stage timing for ${sizeId}:${seed}:${stopAfterPhase}: ${timing.phase}=${timing.durationMs}`
+        );
+      }
+    },
+    waitForStep: async () => {
+      waitForStepCalls += 1;
+    }
+  });
+
+  const expectedSnapshotPhases = getExpectedDebugPrefix(stopAfterPhase);
+  const expectedTimedPhases = getExpectedStagePrefix(stopAfterPhase);
+  assertPhaseOrder(emittedPhases, expectedSnapshotPhases, `debug:${sizeId}:${seed}:${stopAfterPhase}:snapshots`);
+  assertPhaseOrder(timedPhases, expectedTimedPhases, `debug:${sizeId}:${seed}:${stopAfterPhase}:timings`);
+  if (waitForStepCalls !== expectedSnapshotPhases.length) {
+    throw new Error(
+      `[mapgen] waitForStep count mismatch for ${sizeId}:${seed}:${stopAfterPhase}: expected ${expectedSnapshotPhases.length}, got ${waitForStepCalls}`
+    );
+  }
+};
+
 const runAll = async () => {
   const results = [];
   for (const sizeId of sizes) {
@@ -611,6 +739,15 @@ const runAll = async () => {
     }
   }
   return results;
+};
+
+const runDebugSmokes = async () => {
+  for (const smokeCase of DEBUG_SMOKE_CASES) {
+    await runDebugSmokeCase(smokeCase);
+    console.log(
+      `[mapgen] debug-smoke size=${smokeCase.sizeId} seed=${smokeCase.seed} stop=${smokeCase.stopAfterPhase}`
+    );
+  }
 };
 
 const compareAgainstBaseline = async (results) => {
@@ -692,6 +829,7 @@ const compareAgainstBaseline = async (results) => {
 };
 
 validateHouseParcels();
+await runDebugSmokes();
 const results = await runAll();
 if (writeBaseline) {
   const payload = {

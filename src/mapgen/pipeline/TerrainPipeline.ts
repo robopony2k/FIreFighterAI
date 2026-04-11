@@ -1,4 +1,5 @@
 import type { MapGenDebugPhase } from "../mapgenTypes.js";
+import { resolveStageLimit } from "./stageDebug.js";
 import { ProgressTracker } from "./ProgressTracker.js";
 import type { MapGenContext } from "./MapGenContext.js";
 
@@ -43,39 +44,3 @@ export class TerrainPipeline {
     }
   }
 }
-
-const resolveStageLimit = (phase: MapGenDebugPhase | undefined): MapGenDebugPhase | null => {
-  switch (phase) {
-    case "terrain:relief":
-    case "terrain:landmass":
-    case "terrain:mountains":
-    case "terrain:carving":
-    case "terrain:flooding":
-    case "terrain:elevation":
-      return "terrain:elevation";
-    case "terrain:erosion":
-      return "terrain:erosion";
-    case "hydro:solve":
-      return "hydro:solve";
-    case "terrain:shoreline":
-      return "terrain:shoreline";
-    case "hydro:rivers":
-      return "hydro:rivers";
-    case "biome:fields":
-      return "biome:fields";
-    case "biome:spread":
-      return "biome:spread";
-    case "biome:classify":
-      return "biome:classify";
-    case "settlement:place":
-      return "settlement:place";
-    case "roads:connect":
-      return "roads:connect";
-    case "reconcile:postSettlement":
-      return "reconcile:postSettlement";
-    case "map:finalize":
-      return "map:finalize";
-    default:
-      return null;
-  }
-};

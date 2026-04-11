@@ -17,19 +17,21 @@ Context:
 2. `terrain:erosion`
 3. `hydro:solve`
 4. `terrain:shoreline`
-5. `biome:fields`
-6. `biome:spread`
-7. `biome:classify`
-8. `settlement:place`
-9. `roads:connect`
-10. `reconcile:postSettlement`
-11. `map:finalize`
+5. `hydro:rivers`
+6. `biome:fields`
+7. `biome:spread`
+8. `biome:classify`
+9. `settlement:place`
+10. `roads:connect`
+11. `reconcile:postSettlement`
+12. `map:finalize`
 
 ## Invariants
 - `generateMap(state, rng, report?, settings?, debug?)` remains the public API.
 - `MapGenContext` owns all transient mapgen fields (`elevationMap`, `riverMask`, `slopeMap`, `moistureMap`, etc).
 - Stage progress is normalized through `ProgressTracker`.
 - Debug snapshots are stage-labeled and emitted through `MapGenDebug`.
+- Elevation still emits its historical debug subphases (`terrain:relief`, `terrain:carving`, `terrain:flooding`) before the stage-level `terrain:elevation` snapshot.
 - `terrain:shoreline` performs an ocean-only coastal polish pass (organic shoreline smoothing + near-shore elevation sculpt).
 - `settlement:place` prepares settlement-road plan data only; road carving now happens in `roads:connect`.
 - `roads:connect` is non-noop and owns road/bridge network carving plus edge-mask stamping (`WorldState.tileRoadEdges`).
@@ -37,13 +39,13 @@ Context:
 - `biome:spread` builds deterministic suitability and `forestMask` layers before `biome:classify`.
 
 ## Maintenance Notes
-- Keep stage logic in `src/mapgen/stages/`.
-- Keep reusable heavy logic in `src/mapgen/runtime.ts`.
-- `src/mapgen/index.ts` should stay orchestration-only.
+- Active pipeline stage execution lives in `src/mapgen/stages/`.
+- `src/mapgen/runtime.ts` is reserved for `generateMapLegacy` and shared low-level helpers that are still consumed by both the legacy path and extracted stage modules.
+- `src/mapgen/index.ts` should stay orchestration-only and depend on pipeline utilities, not stage internals.
 
 ## Regression Harness
 - Quick baseline/regression run: `npm run mapgen:regression`
-  - Covers `medium`, `massive`, `colossal`.
+  - Covers `medium`, `massive` plus debug smoke checks for phase order, `stopAfterPhase`, `waitForStep`, and stage timings.
 - Full run (expensive): `npm run mapgen:regression:full`
   - Covers `medium`, `massive`, `colossal`, `gigantic`, `titanic`.
 - Baseline snapshots are written to `docs/mapgen-regression-baseline.json`.

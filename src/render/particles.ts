@@ -99,8 +99,8 @@ const smokeVertexShader = `
     vec4 mvPosition = viewMatrix * worldPos;
     float distance = max(1.0, -mvPosition.z);
 
-    // Keep per-sprite growth modest; plume expansion should come from clustered puffs.
-    float ageScale = mix(1.2, 2.35, pow(vAge01, 0.56));
+    // Let rising smoke broaden enough that old plumes disappear by dispersal, not a hard life cutoff.
+    float ageScale = mix(1.08, 3.75, pow(vAge01, 0.7));
     float intensityScale = mix(0.72, 1.68, sqrt(vIntensity));
     float distanceAtten = clamp(uPointScale / distance, 0.42, 8.5);
 
@@ -218,27 +218,26 @@ const smokeFragmentShader = `
         1.0
       );
 
+    float expansion01 = pow(vAge01, 0.84);
+    float spreadDilution = mix(1.0, 0.07, expansion01);
     float thickness =
       rho *
       mix(uThinThickness, uThickThickness, pow(vIntensity, 0.72)) *
       mix(0.95, 1.26, 1.0 - vAge01) *
-      mix(0.72, 1.0, coreEnvelope);
-    float fadeIn = smoothstep(0.04, 0.18, vAge01);
-    float fadeStart = mix(0.72, 0.97, vIntensity);
-    float fadeOut = 1.0 - smoothstep(fadeStart, 1.0, vAge01);
-    // Fade at both ends of the cycle so wrapped particles do not visibly snap back.
-    float lifeFade = fadeIn * fadeOut;
+      mix(0.72, 1.0, coreEnvelope) *
+      spreadDilution;
+    float fadeIn = smoothstep(0.0, 0.08, vAge01);
 
     // Beer-Lambert alpha approximation for near-opaque cores.
-    float sigmaT = uBaseSigma * mix(0.24, 1.55, pow(vIntensity, 0.7)) * lifeFade;
+    float sigmaT = uBaseSigma * mix(0.24, 1.55, pow(vIntensity, 0.7)) * fadeIn;
     float alpha = 1.0 - exp(-sigmaT * thickness);
     alpha *= mix(0.44, 0.88, sqrt(vIntensity));
     alpha *= 0.92;
-    alpha *= lifeFade;
-    // Heavier at source, then thinner as plume rises/spreads.
-    alpha *= mix(1.28, 0.52, pow(vAge01, 0.72));
+    alpha *= fadeIn;
+    // Keep the source dense, then let late plumes thin mainly because they have expanded.
+    alpha *= mix(1.18, 0.16, expansion01);
     alpha = clamp(alpha, 0.0, 1.0);
-    if (alpha < 0.01) {
+    if (alpha < 0.006) {
       discard;
     }
 
@@ -274,9 +273,9 @@ const smokeFragmentShader = `
 
     // Interior self-occlusion keeps core denser/darker.
     color *= exp(-uOcclK * thickness * mix(0.3, 0.66, coreEnvelope));
-    float heightFade = mix(1.06, 0.64, smoothstep(0.05, 0.95, heightT));
+    float heightFade = mix(1.04, 0.58, smoothstep(0.05, 0.95, heightT));
     color *= heightFade;
-    alpha *= mix(1.08, 0.7, smoothstep(0.1, 1.0, heightT));
+    alpha *= mix(1.06, 0.5, smoothstep(0.08, 1.0, heightT));
 
     gl_FragColor = vec4(color * alpha, alpha);
   }
