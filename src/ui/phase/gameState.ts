@@ -18,7 +18,9 @@ export class GameState {
     paused: false,
     alert: null,
     simTimeMode: "strategic",
+    timeSpeedControlMode: "buttons",
     timeSpeedIndex: 1,
+    timeSpeedValue: 1,
     skipToNextFireActive: false,
     canSkipToNextFire: false,
     forecast: null,
@@ -111,11 +113,27 @@ export class GameState {
     this.emitChange();
   }
 
+  setTimeSpeedControlMode(mode: GameUiSnapshot["timeSpeedControlMode"]): void {
+    if (this.snapshot.timeSpeedControlMode === mode) {
+      return;
+    }
+    this.snapshot.timeSpeedControlMode = mode;
+    this.emitChange();
+  }
+
   setTimeSpeedIndex(index: number): void {
     if (this.snapshot.timeSpeedIndex === index) {
       return;
     }
     this.snapshot.timeSpeedIndex = index;
+    this.emitChange();
+  }
+
+  setTimeSpeedValue(value: number): void {
+    if (this.snapshot.timeSpeedValue === value) {
+      return;
+    }
+    this.snapshot.timeSpeedValue = value;
     this.emitChange();
   }
 

@@ -1,5 +1,6 @@
 export type RuntimeSettings = {
   render: "3d" | "2d";
+  timespeedui: "buttons" | "slider";
   headless: boolean;
   nosim: boolean;
   seasonal: boolean;
@@ -97,6 +98,7 @@ const toFiniteNumber = (value: unknown): number | null => {
 
 export const DEFAULT_RUNTIME_SETTINGS: RuntimeSettings = {
   render: "3d",
+  timespeedui: "buttons",
   headless: false,
   nosim: false,
   seasonal: true,
@@ -142,6 +144,18 @@ export const RUNTIME_SETTING_DEFINITIONS: ReadonlyArray<RuntimeSettingDefinition
     options: [
       { value: "3d", label: "3D" },
       { value: "2d", label: "Legacy 2D" }
+    ]
+  },
+  {
+    key: "timespeedui",
+    section: "General",
+    kind: "enum",
+    label: "Time Speed UI",
+    description: "Choose between preset buttons and the experimental time-speed slider.",
+    defaultValue: DEFAULT_RUNTIME_SETTINGS.timespeedui,
+    options: [
+      { value: "buttons", label: "Buttons" },
+      { value: "slider", label: "Slider" }
     ]
   },
   {

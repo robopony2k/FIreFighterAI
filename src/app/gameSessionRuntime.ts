@@ -34,7 +34,14 @@ import { saveLeaderboard } from "../persistence/leaderboard.js";
 import { loadFuelProfileOverrides } from "../persistence/fuelProfiles.js";
 import { loadLastRunConfig } from "../persistence/lastRunConfig.js";
 import { randomizeWind } from "../sim/wind.js";
-import { endGame, getActiveTimeSpeedOptions, setGameEventBus, setPhase, stepSim } from "../sim/index.js";
+import {
+  endGame,
+  getActiveTimeSpeedValue,
+  isSimulationEffectivelyPaused,
+  setGameEventBus,
+  setPhase,
+  stepSim
+} from "../sim/index.js";
 import { initScoringForRun } from "../sim/scoring.js";
 import { seedStartingRoster } from "../sim/units.js";
 import { PHASES } from "../core/time.js";
@@ -212,6 +219,10 @@ export const createAppRuntime = (): AppRuntime => {
   }
   
   const state = createInitialState(initialSeed, grid);
+  const syncTimeSpeedControlMode = (): void => {
+    state.timeSpeedControlMode = runtimeSettings.timespeedui;
+  };
+  syncTimeSpeedControlMode();
   const inputState = createInputState();
   const renderState = createRenderState(state.grid);
   const effectsState = createEffectsState();
@@ -653,10 +664,15 @@ export const createAppRuntime = (): AppRuntime => {
   
   const unsubscribeRuntimeSettings = subscribeRuntimeSettings((nextSettings) => {
     const previousRender = runtimeSettings.render;
+    const previousTimeSpeedUi = runtimeSettings.timespeedui;
     runtimeSettings = nextSettings;
+    syncTimeSpeedControlMode();
     setPerfOverlayVisible(runtimeSettings.perf);
     if (previousRender !== runtimeSettings.render && isLegacy2dEnabled()) {
       console.warn("[render] Legacy 2D renderer is deprecated. Prefer 3D mode.");
+    }
+    if (previousTimeSpeedUi !== runtimeSettings.timespeedui) {
+      phaseUi?.sync(state, inputState);
     }
     if (!threeTestOverlay || threeTestOverlay.classList.contains("hidden")) {
       setRenderMode(isLegacy2dEnabled() ? "2d" : "3d");
@@ -1052,6 +1068,7 @@ export const createAppRuntime = (): AppRuntime => {
       activeTerrainSource = cloneTerrainRecipe(config.options.terrain);
       resetTerrainCaches();
       resetState(state, seed);
+      syncTimeSpeedControlMode();
       rng.setState(seed);
       state.paused = true;
       setFuelProfiles(config.options.fuelProfiles);
@@ -1503,6 +1520,7 @@ export const createAppRuntime = (): AppRuntime => {
       activeTerrainSource = cloneTerrainRecipe(config.options.terrain);
       resetTerrainCaches();
       resetState(state, seed);
+      syncTimeSpeedControlMode();
       state.fireSettings = normalizeFireSettings(config.options.fire);
       setFuelProfiles(config.options.fuelProfiles);
       state.campaign.characterId = characterId;
@@ -1788,7 +1806,7 @@ export const createAppRuntime = (): AppRuntime => {
       baseStep,
       mainHitchThresholdMs: MAIN_HITCH_THRESHOLD_MS,
       getFrameCapFps,
-      getTimeSpeedOptions: () => getActiveTimeSpeedOptions(state),
+      getTimeSpeedValue: () => getActiveTimeSpeedValue(state),
       isGenerating: () => isGenerating,
       isTitleScreenVisible: () => titleScreenVisible,
       isCharacterScreenVisible: () => !characterScreen.classList.contains("hidden"),
@@ -1796,9 +1814,8 @@ export const createAppRuntime = (): AppRuntime => {
       isDocumentHidden: () => document.hidden,
       isThreeTestVisible: () => activeRenderMode === "3d" && !!threeTestController,
       isIncidentMode: () => state.simTimeMode === "incident",
-      getTimeSpeedIndex: () => state.timeSpeedIndex,
       isThreeTestNoSim: isThreeTestNoSimEnabled,
-      isPausedOrGameOver: () => state.paused || state.gameOver,
+      isSimulationEffectivelyPaused: () => isSimulationEffectivelyPaused(state),
       stepSimulation: (simStep: number) => {
         const simStartedAt = performance.now();
         stepSim(state, effectsState, rng, simStep);

@@ -3,6 +3,7 @@ import type { InputState } from "../../core/inputState.js";
 import { indexFor } from "../../core/grid.js";
 import { DEFAULT_MOISTURE_PARAMS } from "../../core/climate.js";
 import { getTimeSpeedOptions } from "../../core/config.js";
+import { formatTimeSpeedValue, getResolvedTimeSpeedValue, stepTimeSpeedSliderValue } from "../../core/timeSpeed.js";
 import { buildHudLayout, WidgetSlot, WidgetType, type Rect } from "./hudLayout.js";
 import type { HudState } from "./hudState.js";
 import { addToast, cycleWidget, stepToasts, toggleCompact } from "./hudState.js";
@@ -15,15 +16,6 @@ const clamp = (value: number, min: number, max: number): number => Math.min(max,
 const formatNumber = (value: number, digits = 3): string => (Number.isFinite(value) ? value.toFixed(digits) : "inf");
 const formatOptional = (value: number | undefined | null, digits = 3): string =>
   typeof value === "number" ? value.toFixed(digits) : "n/a";
-const formatSpeedValue = (value: number): string => {
-  if (Number.isInteger(value)) {
-    return `${value.toFixed(0)}x`;
-  }
-  if (value >= 0.1) {
-    return `${value.toFixed(2).replace(/0+$/, "").replace(/\.$/, "")}x`;
-  }
-  return `${value.toFixed(3).replace(/0+$/, "").replace(/\.$/, "")}x`;
-};
 
 const drawRoundedRect = (ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, radius: number) => {
   const r = Math.min(radius, w * 0.5, h * 0.5);
@@ -139,9 +131,7 @@ const renderTopBar = (ctx: CanvasRenderingContext2D, world: WorldState, ui: HudS
   const totalHouses = Number.isFinite(world.totalHouses) ? Math.max(0, Math.floor(world.totalHouses)) : 0;
   const destroyedHouses = Number.isFinite(world.destroyedHouses) ? Math.max(0, Math.floor(world.destroyedHouses)) : 0;
   const liveHouses = Math.max(0, totalHouses - destroyedHouses);
-  const activeSpeedOptions = getTimeSpeedOptions(world.simTimeMode);
-  const speedIndex = Math.min(Math.max(world.timeSpeedIndex ?? 0, 0), activeSpeedOptions.length - 1);
-  const speed = activeSpeedOptions[speedIndex] ?? 1;
+  const speed = getResolvedTimeSpeedValue(world);
   const rightText = `APPROVAL ${approval} | HOUSES ${liveHouses}`;
 
   ctx.fillStyle = theme.textPrimary;
@@ -165,7 +155,7 @@ const renderTopBar = (ctx: CanvasRenderingContext2D, world: WorldState, ui: HudS
   ctx.fillText("+", speedRect.x + speedRect.width - SPEED_BUTTON_SIDE * 0.5, speedRect.y + speedRect.height / 2);
   ctx.font = "600 11px ui-sans-serif, system-ui, sans-serif";
   ctx.fillText(
-    `${world.simTimeMode === "incident" ? "INC" : "STR"} ${formatSpeedValue(speed)}`,
+    `${world.simTimeMode === "incident" ? "INC" : "STR"} ${formatTimeSpeedValue(speed)}`,
     speedRect.x + speedRect.width / 2,
     speedRect.y + speedRect.height / 2
   );
@@ -398,6 +388,19 @@ export const handleHudClick = (
   const layout = buildHudLayout({ width: ui.viewport.width, height: ui.viewport.height });
   const speedRect = getSpeedButtonRect(layout.topBar);
   if (x >= speedRect.x && x <= speedRect.x + speedRect.width && y >= speedRect.y && y <= speedRect.y + speedRect.height) {
+    if (world.timeSpeedControlMode === "slider") {
+      const delta = x < speedRect.x + SPEED_BUTTON_SIDE ? -1 : 1;
+      const nextValue = stepTimeSpeedSliderValue(world.timeSpeedSliderValue, delta);
+      dispatchAction("time-speed-step", { delta: String(delta) });
+      addToast(
+        ui,
+        `${world.simTimeMode === "incident" ? "Incident" : "Strategic"} time ${formatTimeSpeedValue(nextValue)}.`,
+        "info",
+        2200
+      );
+      return true;
+    }
+
     const activeSpeedOptions = getTimeSpeedOptions(world.simTimeMode);
     const len = activeSpeedOptions.length;
     const current = Math.min(Math.max(world.timeSpeedIndex ?? 0, 0), len - 1);
@@ -412,7 +415,7 @@ export const handleHudClick = (
     dispatchAction(`time-speed-${next}`);
     addToast(
       ui,
-      `${world.simTimeMode === "incident" ? "Incident" : "Strategic"} time ${formatSpeedValue(
+      `${world.simTimeMode === "incident" ? "Incident" : "Strategic"} time ${formatTimeSpeedValue(
         activeSpeedOptions[next] ?? 1
       )}.`,
       "info",

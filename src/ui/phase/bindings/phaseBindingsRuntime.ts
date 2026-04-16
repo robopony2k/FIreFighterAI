@@ -7,6 +7,7 @@ import { ZOOM_STEP } from "../../../core/config.js";
 import { inBounds } from "../../../core/grid.js";
 import { screenToWorld, zoomAtPointer } from "../../../render/inputProjection.js";
 import { setStatus } from "../../../core/state.js";
+import { formatTimeSpeedValue, stepTimeSpeedSliderValue } from "../../../core/timeSpeed.js";
 import {
   advancePhase,
   beginFireSeason,
@@ -19,6 +20,7 @@ import {
   isSkipToNextFireAvailable,
   requestSkipToNextFire,
   syncActiveTimeSpeedIndex,
+  syncTimeSpeedSliderValue,
   togglePause
 } from "../../../sim/index.js";
 import {
@@ -489,7 +491,12 @@ export const bindPhaseUi = ({
     if (action === "rejoin-command-unit") {
       return "confirm";
     }
-    if (action === "time-skip-next-fire" || /^time-speed-\d+$/.test(action) || /^formation-(narrow|medium|wide)$/.test(action)) {
+    if (
+      action === "time-skip-next-fire" ||
+      action === "time-speed-step" ||
+      /^time-speed-\d+$/.test(action) ||
+      /^formation-(narrow|medium|wide)$/.test(action)
+    ) {
       return "toggle";
     }
     if (
@@ -675,11 +682,56 @@ export const bindPhaseUi = ({
           syncActiveTimeSpeedIndex(state, nextIndex);
           setStatus(
             state,
-            `${state.simTimeMode === "incident" ? "Incident" : "Strategic"} time ${getActiveTimeSpeedValue(state)}x.`
+            `${state.simTimeMode === "incident" ? "Incident" : "Strategic"} time ${formatTimeSpeedValue(
+              getActiveTimeSpeedValue(state)
+            )}.`
           );
           phaseUi.sync(state, inputState);
         });
       }
+      return;
+    }
+    if (action === "time-speed-step") {
+      const rawDelta = actionTarget?.dataset.delta;
+      const delta = rawDelta ? Number(rawDelta) : 0;
+      if (!Number.isFinite(delta) || delta === 0 || state.timeSpeedControlMode !== "slider") {
+        return;
+      }
+      gate("timeControl", () => {
+        if (state.skipToNextFire) {
+          cancelSkipToNextFire(state, "Skip to next fire cancelled.");
+        }
+        syncTimeSpeedSliderValue(state, stepTimeSpeedSliderValue(state.timeSpeedSliderValue, delta));
+        setStatus(
+          state,
+          `${state.simTimeMode === "incident" ? "Incident" : "Strategic"} time ${formatTimeSpeedValue(
+            getActiveTimeSpeedValue(state)
+          )}.`
+        );
+        phaseUi.sync(state, inputState);
+      });
+      return;
+    }
+    if (action === "time-speed-slider-set") {
+      const rawValue =
+        actionTarget instanceof HTMLInputElement ? actionTarget.value : actionTarget?.dataset.value;
+      const nextValue = rawValue === undefined ? Number.NaN : Number(rawValue);
+      if (!Number.isFinite(nextValue) || state.timeSpeedControlMode !== "slider") {
+        return;
+      }
+      gate("timeControl", () => {
+        if (state.skipToNextFire) {
+          cancelSkipToNextFire(state, "Skip to next fire cancelled.");
+        }
+        syncTimeSpeedSliderValue(state, nextValue);
+        setStatus(
+          state,
+          `${state.simTimeMode === "incident" ? "Incident" : "Strategic"} time ${formatTimeSpeedValue(
+            getActiveTimeSpeedValue(state)
+          )}.`
+        );
+        phaseUi.sync(state, inputState);
+      });
       return;
     }
     if (action === "select-roster") {
@@ -931,6 +983,21 @@ export const bindPhaseUi = ({
     }
     const action = actionTarget.dataset.action;
     if (!action) {
+      return;
+    }
+    noteInteraction();
+    runUiAction(action, actionTarget, event);
+  });
+  listenElement(phaseUi.controller.root, "input", (event) => {
+    if (isOverlayLocked()) {
+      return;
+    }
+    const actionTarget = getActionTarget(event.target);
+    if (!(actionTarget instanceof HTMLInputElement)) {
+      return;
+    }
+    const action = actionTarget.dataset.action;
+    if (action !== "time-speed-slider-set") {
       return;
     }
     noteInteraction();

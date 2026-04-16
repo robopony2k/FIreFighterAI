@@ -1,6 +1,6 @@
 import type { GameUiSnapshot, InteractionMode, PanelId, Phase, SelectedEntity } from "./types.js";
 import { getPhaseRules } from "./uiRules.js";
-import { getTimeSpeedOptions } from "../../core/config.js";
+import { formatTimeSpeedValue, isTimeSpeedStopped } from "../../core/timeSpeed.js";
 import type { GameState } from "./gameState.js";
 import { createBottomLeftControls } from "./components/BottomLeftControls.js";
 import { createBudgetReportView } from "./components/BudgetReportView.js";
@@ -255,15 +255,17 @@ export class UIController {
     const bottomStatus =
       snapshot.interactionMode === "fuelBreak"
         ? "Fuel break tool armed."
-        : `${snapshot.simTimeMode === "incident" ? "Incident" : "Strategic"} time ${
-            getTimeSpeedOptions(snapshot.simTimeMode)[snapshot.timeSpeedIndex] ?? 1
-          }x`;
+        : `${snapshot.simTimeMode === "incident" ? "Incident" : "Strategic"} time ${formatTimeSpeedValue(
+            snapshot.timeSpeedValue
+          )}${isTimeSpeedStopped(snapshot.timeSpeedValue) ? " (stopped)" : ""}`;
     const bottomData: BottomControlsData = {
       showTimeControls: rules.allowedInputs.includes("timeControl"),
       showSpeedControl: true,
       paused: snapshot.paused,
       simTimeMode: snapshot.simTimeMode,
+      timeSpeedControlMode: snapshot.timeSpeedControlMode,
       timeSpeedIndex: snapshot.timeSpeedIndex,
+      timeSpeedValue: snapshot.timeSpeedValue,
       skipToNextFireActive: snapshot.skipToNextFireActive,
       canSkipToNextFire: snapshot.canSkipToNextFire,
       status: bottomStatus

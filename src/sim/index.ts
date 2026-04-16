@@ -17,6 +17,12 @@ import {
   TIME_SPEED_OPTIONS,
   getTimeSpeedOptions
 } from "../core/config.js";
+import {
+  clampTimeSpeedSliderValue,
+  getResolvedTimeSpeedValue,
+  isSimulationEffectivelyPaused as isCoreSimulationEffectivelyPaused,
+  TIME_SPEED_SLIDER_MAX
+} from "../core/timeSpeed.js";
 import { formatCurrency } from "../core/utils.js";
 import { getFireSeasonIntensity, getPhaseInfo, PHASES } from "../core/time.js";
 import { setStatus, resetStatus } from "../core/state.js";
@@ -230,11 +236,9 @@ const getMaxTimeSpeedIndex = (options: readonly number[]): number => Math.max(0,
 export const getActiveTimeSpeedOptions = (state: Pick<WorldState, "simTimeMode">): readonly number[] =>
   getTimeSpeedOptions(state.simTimeMode);
 
-export const getActiveTimeSpeedValue = (state: Pick<WorldState, "simTimeMode" | "timeSpeedIndex">): number => {
-  const options = getActiveTimeSpeedOptions(state);
-  const index = clamp(state.timeSpeedIndex, 0, getMaxTimeSpeedIndex(options));
-  return options[index] ?? 1;
-};
+export const getActiveTimeSpeedValue = (
+  state: Pick<WorldState, "simTimeMode" | "timeSpeedIndex" | "timeSpeedSliderValue" | "timeSpeedControlMode">
+): number => getResolvedTimeSpeedValue(state);
 
 export const syncActiveTimeSpeedIndex = (state: WorldState, nextIndex: number): void => {
   const options = getActiveTimeSpeedOptions(state);
@@ -246,6 +250,17 @@ export const syncActiveTimeSpeedIndex = (state: WorldState, nextIndex: number): 
     state.strategicTimeSpeedIndex = clampedIndex;
   }
 };
+
+export const syncTimeSpeedSliderValue = (state: WorldState, nextValue: number): void => {
+  state.timeSpeedSliderValue = clampTimeSpeedSliderValue(nextValue);
+};
+
+export const isSimulationEffectivelyPaused = (
+  state: Pick<
+    WorldState,
+    "paused" | "gameOver" | "simTimeMode" | "timeSpeedIndex" | "timeSpeedSliderValue" | "timeSpeedControlMode"
+  >
+): boolean => isCoreSimulationEffectivelyPaused(state);
 
 const enterIncidentMode = (state: WorldState, strategicIndexOverride?: number | null): void => {
   if (strategicIndexOverride !== undefined && strategicIndexOverride !== null) {
@@ -360,10 +375,12 @@ export const requestSkipToNextFire = (state: WorldState): boolean => {
     active: true,
     previousPaused: state.paused,
     previousTimeSpeedIndex: clamp(state.strategicTimeSpeedIndex, 0, getMaxTimeSpeedIndex(TIME_SPEED_OPTIONS)),
+    previousTimeSpeedSliderValue: state.timeSpeedSliderValue,
     startedCareerDay: state.careerDay
   };
   state.paused = false;
   state.timeSpeedIndex = getMaxTimeSpeedIndex(TIME_SPEED_OPTIONS);
+  state.timeSpeedSliderValue = TIME_SPEED_SLIDER_MAX;
   setStatus(state, "Seeking next fire incident...");
   return true;
 };
@@ -376,6 +393,7 @@ export const cancelSkipToNextFire = (state: WorldState, reason?: string): void =
   const restoredIndex = clamp(skip.previousTimeSpeedIndex, 0, getMaxTimeSpeedIndex(TIME_SPEED_OPTIONS));
   state.paused = skip.previousPaused;
   state.strategicTimeSpeedIndex = restoredIndex;
+  state.timeSpeedSliderValue = clampTimeSpeedSliderValue(skip.previousTimeSpeedSliderValue);
   if (state.simTimeMode === "strategic") {
     state.timeSpeedIndex = restoredIndex;
   }
@@ -711,7 +729,7 @@ export function stepSim(state: WorldState, effects: EffectsState, rng: RNG, delt
   if (state.skipToNextFire && state.gameOver) {
     cancelSkipToNextFire(state);
   }
-  if (state.paused || state.gameOver) {
+  if (isSimulationEffectivelyPaused(state)) {
     return;
   }
 
@@ -834,11 +852,15 @@ export function stepSim(state: WorldState, effects: EffectsState, rng: RNG, delt
       const previousSpeedIndex = state.skipToNextFire
         ? clamp(state.skipToNextFire.previousTimeSpeedIndex, 0, getMaxTimeSpeedIndex(TIME_SPEED_OPTIONS))
         : clamp(state.strategicTimeSpeedIndex, 0, getMaxTimeSpeedIndex(TIME_SPEED_OPTIONS));
+      const previousSliderValue = state.skipToNextFire
+        ? clampTimeSpeedSliderValue(state.skipToNextFire.previousTimeSpeedSliderValue)
+        : state.timeSpeedSliderValue;
       const incident = state.latestFireAlert;
       const nearestTown = incident && incident.townId >= 0
         ? state.towns.find((town) => town.id === incident.townId) ?? null
         : null;
       enterIncidentMode(state, previousSpeedIndex);
+      state.timeSpeedSliderValue = previousSliderValue;
       state.paused = true;
       state.skipToNextFire = null;
       if (nearestTown) {

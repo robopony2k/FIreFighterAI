@@ -19,7 +19,7 @@ import type { ProgressionDraftPanelData } from "./components/ProgressionDraftPan
 import { GameState } from "./gameState.js";
 import { UIController } from "./uiController.js";
 import { getProgressionLevelFloor, getProgressionNextLevelThreshold, getProgressionProgress01 } from "../../systems/progression/index.js";
-import { isSkipToNextFireAvailable } from "../../sim/index.js";
+import { getActiveTimeSpeedValue, isSkipToNextFireAvailable } from "../../sim/index.js";
 import { getFirebreakCostForState, getTrainingCostForState } from "../../sim/units.js";
 
 export type PhaseUiApi = {
@@ -323,7 +323,9 @@ export const initPhaseUI = (container: HTMLElement): PhaseUiApi => {
     state.setInteractionMode(getInteractionMode(world, inputState));
     state.setPaused(world.paused);
     state.setSimTimeMode(world.simTimeMode);
+    state.setTimeSpeedControlMode(world.timeSpeedControlMode);
     state.setTimeSpeedIndex(world.timeSpeedIndex);
+    state.setTimeSpeedValue(getActiveTimeSpeedValue(world));
     state.setSkipToNextFireState(
       !!world.skipToNextFire,
       isSkipToNextFireAvailable(world)

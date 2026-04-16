@@ -579,7 +579,8 @@ export const createThreeTestUnitsLayer = (scene: THREE.Scene): ThreeTestUnitsLay
         truckBasis.makeBasis(surfaceRight, surfaceNormal, surfaceForward);
         truckQuat.setFromRotationMatrix(truckBasis);
         if (useTruckModel && truckModelMeshes.length > 0) {
-          truckPos.set(wx, wy, wz).addScaledVector(surfaceNormal, truckModelLift);
+          // Keep the truck anchored to the sampled world position; only the visual lift should move upward.
+          truckPos.set(wx, wy + truckModelLift, wz);
           truckQuat.multiply(truckModelYawOffsetQuat);
           truckScale.setScalar(truckModelScale);
           truckMatrix.compose(truckPos, truckQuat, truckScale);
@@ -590,14 +591,14 @@ export const createThreeTestUnitsLayer = (scene: THREE.Scene): ThreeTestUnitsLay
             mesh.setColorAt(truckCount, tint);
           });
         } else {
-          truckPos.set(wx, wy, wz).addScaledVector(surfaceNormal, 0.11 + UNIT_BASE_Y_OFFSET);
+          truckPos.set(wx, wy + 0.11 + UNIT_BASE_Y_OFFSET, wz);
           truckScale.set(1, 1, 1);
           truckMatrix.compose(truckPos, truckQuat, truckScale);
           truckMesh.setMatrixAt(truckCount, truckMatrix);
           truckMesh.setColorAt(truckCount, unit.selected ? TRUCK_SELECTED_COLOR : TRUCK_BASE_COLOR);
         }
         if (unit.selected && selectedTruckCount < MAX_TRUCK_INSTANCES) {
-          truckSelectionPos.set(wx, wy, wz).addScaledVector(surfaceNormal, TRUCK_SELECTION_RING_Y_OFFSET);
+          truckSelectionPos.set(wx, wy + TRUCK_SELECTION_RING_Y_OFFSET, wz);
           truckSelectionQuat.setFromUnitVectors(worldUp, surfaceNormal);
           truckSelectionMatrix.compose(truckSelectionPos, truckSelectionQuat, truckSelectionScale);
           truckSelectionMesh.setMatrixAt(selectedTruckCount, truckSelectionMatrix);

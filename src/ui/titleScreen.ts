@@ -221,7 +221,7 @@ const GRAPHICS_QUALITY_PRESETS: ReadonlyArray<GraphicsQualityPreset> = [
 const GRAPHICS_SETTINGS_SECTIONS: ReadonlyArray<RuntimeSettingsSectionSpec> = [
   {
     title: "Overview",
-    keys: ["render", "fps", "seasonal", "cinematic"]
+    keys: ["render", "timespeedui", "fps", "seasonal", "cinematic"]
   },
   {
     title: "Depth of Field",

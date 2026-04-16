@@ -43,7 +43,7 @@ export type AppBootLoopDeps = {
   baseStep: number;
   mainHitchThresholdMs: number;
   getFrameCapFps: () => number;
-  getTimeSpeedOptions: () => readonly number[];
+  getTimeSpeedValue: () => number;
   isGenerating: () => boolean;
   isTitleScreenVisible?: () => boolean;
   isCharacterScreenVisible: () => boolean;
@@ -51,9 +51,8 @@ export type AppBootLoopDeps = {
   isDocumentHidden: () => boolean;
   isThreeTestVisible: () => boolean;
   isIncidentMode: () => boolean;
-  getTimeSpeedIndex: () => number;
   isThreeTestNoSim: () => boolean;
-  isPausedOrGameOver: () => boolean;
+  isSimulationEffectivelyPaused: () => boolean;
   stepSimulation: (simStep: number) => number;
   onThreeTestFrame: (alpha: number) => void;
   render2dFrame: (alpha: number) => void;
@@ -111,14 +110,14 @@ export const startAppBootLoop = (deps: AppBootLoopDeps): void => {
     if (incidentMode) {
       accumulator = Math.min(accumulator, deps.baseStep);
     }
-    const timeSpeedOptions = deps.getTimeSpeedOptions();
-    const speedIndex = Math.min(Math.max(deps.getTimeSpeedIndex(), 0), timeSpeedOptions.length - 1);
-    const simStep = deps.baseStep * (timeSpeedOptions[speedIndex] ?? 1);
+    const timeSpeedValue = deps.getTimeSpeedValue();
+    const simStep = deps.baseStep * timeSpeedValue;
     const maxStepsPerFrame = incidentMode ? 1 : threeTestVisible ? 1 : 8;
     let simStepsThisFrame = 0;
     let simFrameMs = 0;
     const skipSimThisFrame = threeTestVisible && deps.isThreeTestNoSim();
-    if (skipSimThisFrame) {
+    const simPaused = deps.isSimulationEffectivelyPaused();
+    if (skipSimThisFrame || simPaused) {
       accumulator = 0;
     } else {
       while (accumulator >= deps.baseStep && simStepsThisFrame < maxStepsPerFrame) {
@@ -138,7 +137,7 @@ export const startAppBootLoop = (deps: AppBootLoopDeps): void => {
       accumulator = Math.min(accumulator, deps.baseStep);
     }
 
-    const alpha = deps.isPausedOrGameOver() ? 1 : Math.min(1, Math.max(0, accumulator / deps.baseStep));
+    const alpha = simPaused ? 1 : Math.min(1, Math.max(0, accumulator / deps.baseStep));
     if (threeTestVisible) {
       deps.onThreeTestFrame(alpha);
     } else {

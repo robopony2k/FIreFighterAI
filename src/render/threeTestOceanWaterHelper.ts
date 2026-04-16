@@ -209,7 +209,7 @@ export class ThreeTestOceanWaterHelper {
       u_shoreTransitionMap: { value: shoreTransitionMap },
       u_color: { value: this.currentPalette.shallowColor.clone() },
       u_deepColor: { value: this.currentPalette.deepColor.clone() },
-      u_opacity: { value: 0.97 },
+      u_opacity: { value: 1.0 },
       u_waveScale: { value: 0.145 },
       u_normalMap1: { value: this.normal1 as THREE.Texture },
       u_normalMap2: { value: this.normal2 as THREE.Texture },
@@ -472,12 +472,15 @@ export class ThreeTestOceanWaterHelper {
         mainUvStep
       );
       const material = createOceanSurfaceMaterial(uniforms);
+      material.polygonOffset = true;
+      material.polygonOffsetFactor = 1;
+      material.polygonOffsetUnits = 1;
       const mesh = new THREE.Mesh(geometry, material);
       mesh.position.copy(baseMesh.position);
       mesh.position.x += x;
       mesh.position.y += ocean.level;
       mesh.position.z += z;
-      mesh.renderOrder = 1;
+      mesh.renderOrder = 2;
       mesh.castShadow = false;
       mesh.receiveShadow = false;
       mesh.frustumCulled = false;
@@ -605,7 +608,7 @@ export class ThreeTestOceanWaterHelper {
     this.mesh = new THREE.Mesh(geometry, material);
     this.mesh.position.copy(baseMesh.position);
     this.mesh.position.y += ocean.level;
-    this.mesh.renderOrder = 2;
+    this.mesh.renderOrder = 1;
     this.mesh.castShadow = false;
     this.mesh.receiveShadow = false;
     this.scene.add(this.mesh);

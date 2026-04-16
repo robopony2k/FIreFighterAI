@@ -145,6 +145,7 @@ Fire
 
 Other
 - Career/time pacing (career years, days/sec, phase durations, ash regrow delay, growth speed).
+- Time controls support persisted preset-button mode and an experimental slider mode; the slider spans 0x-80x in 0.25x steps, shares one value across strategic/incident time, and `Skip to Next Fire` temporarily forces max speed before restoring the prior value.
 - Economy baselines (base budget, approval min, hectares per tile, initial approval).
 - Progression toggles (available upgrades list).
 - Debug/perf toggles (simPerf, renderTrees/effects), unlimited money.

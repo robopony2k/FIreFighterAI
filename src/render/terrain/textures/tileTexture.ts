@@ -237,7 +237,7 @@ export const buildTileTexture = (
           if (riverDominant) {
             colorType = floodplainId;
           } else {
-            colorType = waterId;
+            colorType = beachId;
           }
         }
       }
@@ -425,14 +425,26 @@ export const buildTileTexture = (
       const r = clamp((debugTypeColors ? rawR : (rawR + noise) * tone + fineNoise), 0, 1) * 255;
       const g = clamp((debugTypeColors ? rawG : (rawG + noise) * tone + fineNoise), 0, 1) * 255;
       const b = clamp((debugTypeColors ? rawB : (rawB + noise) * tone + fineNoise), 0, 1) * 255;
+      const sampleBorderDistance = Math.min(
+        col,
+        row,
+        Math.max(0, sampleCols - 1 - col),
+        Math.max(0, sampleRows - 1 - row)
+      );
       const borderOpenOcean =
         touchesWorldBorder &&
         coastalDistanceToLand > deps.oceanBorderOpenWaterDistanceMin;
+      const borderOceanCutout =
+        sampleBorderDistance <= 1 &&
+        typeId === waterId &&
+        localOceanRatio >= deps.oceanRatioMin &&
+        !riverDominant;
       const shouldCutForOcean =
         !debugTypeColors &&
         !riverDominant &&
         localOceanRatio >= deps.waterAlphaMinRatio &&
-        (borderOpenOcean ||
+        (borderOceanCutout ||
+          borderOpenOcean ||
           (typeId === waterId &&
             coastalDistanceToLand > deps.oceanSurfaceShoreClipBand &&
             !touchesWorldBorder));

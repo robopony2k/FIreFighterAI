@@ -517,7 +517,7 @@ export class ThreeTestRiverWaterHelper {
       u_time: { value: 0 },
       u_color: { value: this.currentPalette.shallowColor.clone() },
       u_deepColor: { value: this.currentPalette.deepColor.clone() },
-      u_opacity: { value: 0.95 },
+      u_opacity: { value: 1.0 },
       u_normalMap1: { value: this.normal1 as THREE.Texture },
       u_normalMap2: { value: this.normal2 as THREE.Texture },
       u_waveScale: { value: 0.34 },

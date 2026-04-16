@@ -1,5 +1,5 @@
 import * as THREE from "three";
-import { TIME_SPEED_OPTIONS } from "../core/config.js";
+import { TIME_SPEED_FAST_PATH_VALUE } from "../core/timeSpeed.js";
 import { mixRgb, type RGB } from "./color.js";
 import {
   SEASONAL_SKY_BASELINE,
@@ -10,14 +10,13 @@ import {
 
 const SHADOW_NORMAL_REFRESH_MS = 160;
 const SHADOW_FAST_REFRESH_MS = 90;
-const MAX_SPEED_INDEX = Math.max(0, TIME_SPEED_OPTIONS.length - 1);
 
 const clamp01 = (value: number): number => Math.min(1, Math.max(0, value));
 const clamp = (value: number, min: number, max: number): number => Math.min(max, Math.max(min, value));
 const rgb = (r: number, g: number, b: number): RGB => ({ r, g, b });
 
 export type LightingDirectorInput = SeasonalSkyInput & {
-  timeSpeedIndex: number;
+  timeSpeedValue: number;
 };
 
 export type LightingDirectorState = SeasonalSkyState & {
@@ -51,7 +50,7 @@ export const buildLightingDirectorState = (input: LightingDirectorInput): Lighti
   const smokeTint = mixRgb(rgb(118, 122, 128), rgb(168, 150, 130), sky.overcastStrength * 0.2 + risk01 * 0.18);
   const waterSunColor = mixRgb(sky.sunColor, rgb(255, 250, 232), 0.24);
   const shadowRefreshMinMs =
-    input.timeSpeedIndex >= MAX_SPEED_INDEX ? SHADOW_FAST_REFRESH_MS : SHADOW_NORMAL_REFRESH_MS;
+    input.timeSpeedValue >= TIME_SPEED_FAST_PATH_VALUE ? SHADOW_FAST_REFRESH_MS : SHADOW_NORMAL_REFRESH_MS;
 
   return {
     ...sky,

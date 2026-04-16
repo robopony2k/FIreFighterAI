@@ -1,8 +1,17 @@
 import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
-import { CAREER_YEARS, TILE_SIZE, TIME_SPEED_OPTIONS, TOWN_ALERT_MAX_POSTURE, TRUCK_CAPACITY, getTimeSpeedOptions } from "../core/config.js";
+import { CAREER_YEARS, TILE_SIZE, TOWN_ALERT_MAX_POSTURE, TRUCK_CAPACITY, getTimeSpeedOptions } from "../core/config.js";
 import { VIRTUAL_CLIMATE_PARAMS } from "../core/climate.js";
 import type { EffectsState } from "../core/effectsState.js";
+import {
+  formatTimeSpeedValue,
+  getResolvedTimeSpeedValue,
+  isSimulationEffectivelyPaused,
+  stepTimeSpeedSliderValue,
+  TIME_SPEED_SLIDER_MAX,
+  TIME_SPEED_SLIDER_MIN,
+  TIME_SPEED_SLIDER_STEP
+} from "../core/timeSpeed.js";
 import { getHouseFootprintBounds, pickHouseFootprint } from "../core/houseFootprints.js";
 import type { InputState } from "../core/inputState.js";
 import { indexFor } from "../core/grid.js";
@@ -333,15 +342,6 @@ const MINIMAP_FIRE_PALETTE = {
   low: { r: 20, g: 20, b: 22 },
   mid: { r: 192, g: 70, b: 40 },
   high: { r: 242, g: 201, b: 76 }
-};
-const formatTimeSpeedValue = (value: number): string => {
-  if (Number.isInteger(value)) {
-    return `${value.toFixed(0)}x`;
-  }
-  if (value >= 0.1) {
-    return `${value.toFixed(2).replace(/0+$/, "").replace(/\.$/, "")}x`;
-  }
-  return `${value.toFixed(3).replace(/0+$/, "").replace(/\.$/, "")}x`;
 };
 const getDisplayedTimeSpeedIndices = (options: readonly number[]): number[] => {
   const last = Math.max(0, options.length - 1);
@@ -1456,6 +1456,36 @@ export const createThreeTest = (
     timeControls.appendChild(button);
     speedButtons.push(button);
   });
+  const speedSliderWrap = document.createElement("label");
+  speedSliderWrap.className = "three-test-time-slider hidden";
+  const speedSliderCaption = document.createElement("span");
+  speedSliderCaption.className = "three-test-time-slider-caption";
+  speedSliderCaption.textContent = "Speed";
+  const speedSlider = document.createElement("input");
+  speedSlider.type = "range";
+  speedSlider.className = "three-test-time-slider-input";
+  speedSlider.min = `${TIME_SPEED_SLIDER_MIN}`;
+  speedSlider.max = `${TIME_SPEED_SLIDER_MAX}`;
+  speedSlider.step = `${TIME_SPEED_SLIDER_STEP}`;
+  speedSlider.value = "1";
+  speedSlider.addEventListener("input", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const nextValue = Number(speedSlider.value);
+    if (!Number.isFinite(nextValue)) {
+      return;
+    }
+    dispatchPhaseUiCommand({
+      type: "action",
+      action: "time-speed-slider-set",
+      payload: { value: `${nextValue}` }
+    });
+  });
+  const speedSliderValue = document.createElement("span");
+  speedSliderValue.className = "three-test-time-slider-value";
+  speedSliderValue.textContent = "1x";
+  speedSliderWrap.append(speedSliderCaption, speedSlider, speedSliderValue);
+  timeControls.appendChild(speedSliderWrap);
   const nextFireButton = document.createElement("button");
   nextFireButton.type = "button";
   nextFireButton.className = "three-test-time-button";
@@ -2066,14 +2096,16 @@ export const createThreeTest = (
 
     const activeSpeedOptions = getTimeSpeedOptions(world.simTimeMode);
     const activeSpeedIndex = Math.max(0, Math.min(activeSpeedOptions.length - 1, world.timeSpeedIndex ?? 0));
-    const speedValue = activeSpeedOptions[activeSpeedIndex] ?? 1;
+    const speedValue = getResolvedTimeSpeedValue(world);
     const speedLabel = formatTimeSpeedValue(speedValue);
     const timeModeLabel = world.simTimeMode === "incident" ? "Incident" : "Strategic";
     const skipToNextFireActive = !!world.skipToNextFire;
     const canSkipToNextFire = isSkipToNextFireAvailable(world);
+    const usingSlider = world.timeSpeedControlMode === "slider";
+    const effectivelyPaused = isSimulationEffectivelyPaused(world);
     timeSummary.innerHTML = "";
     const timeLine = document.createElement("div");
-    timeLine.textContent = world.paused ? "State Paused" : "State Running";
+    timeLine.textContent = effectivelyPaused ? "State Paused" : "State Running";
     const speedLine = document.createElement("div");
     speedLine.textContent = `${timeModeLabel} ${speedLabel}`;
     const phaseLine = document.createElement("div");
@@ -2090,6 +2122,7 @@ export const createThreeTest = (
     pauseButton.setAttribute("aria-label", world.paused ? "Resume simulation" : "Pause simulation");
     const displayedSpeedIndices = getDisplayedTimeSpeedIndices(activeSpeedOptions);
     speedButtons.forEach((button, slot) => {
+      button.classList.toggle("hidden", usingSlider);
       const index = displayedSpeedIndices[slot];
       if (index === undefined || index < 0 || index >= activeSpeedOptions.length) {
         button.disabled = true;
@@ -2107,6 +2140,11 @@ export const createThreeTest = (
       button.title = `Set ${timeModeLabel.toLowerCase()} speed to ${speedLabelText}`;
       button.setAttribute("aria-label", `Set ${timeModeLabel.toLowerCase()} speed to ${speedLabelText}`);
     });
+    speedSliderWrap.classList.toggle("hidden", !usingSlider);
+    speedSlider.value = `${speedValue}`;
+    speedSlider.title = `Set ${timeModeLabel.toLowerCase()} speed to ${speedLabel}`;
+    speedSlider.setAttribute("aria-label", `Set ${timeModeLabel.toLowerCase()} speed`);
+    speedSliderValue.textContent = speedLabel;
     nextFireButton.disabled = !canSkipToNextFire || skipToNextFireActive;
     nextFireButton.textContent = skipToNextFireActive ? "..." : ">>>";
     if (skipToNextFireActive) {
@@ -4969,8 +5007,6 @@ export const createThreeTest = (
   const glareProjection = new THREE.Vector3();
   const glareForward = new THREE.Vector3();
   const getCurrentLightingInput = (): LightingDirectorInput => {
-    const speedOptions = getTimeSpeedOptions(world.simTimeMode);
-    const timeSpeedIndex = Math.max(0, Math.min(speedOptions.length - 1, world.timeSpeedIndex ?? 0));
     return {
       seasonT01: environmentCurrent.seasonT01,
       risk01: environmentCurrent.risk01,
@@ -4978,8 +5014,7 @@ export const createThreeTest = (
       windDx: world.wind?.dx ?? 0,
       windDy: world.wind?.dy ?? 0,
       windStrength: world.wind?.strength ?? 0,
-      timeSpeedValue: speedOptions[timeSpeedIndex] ?? 1,
-      timeSpeedIndex
+      timeSpeedValue: getResolvedTimeSpeedValue(world)
     };
   };
   const collectFarSidePerimeterDistances = (): { min: number; max: number; terrainSpan: number; focusDistance: number } => {
@@ -6243,9 +6278,7 @@ export const createThreeTest = (
     }
     cube.rotation.y = time * 0.0006;
     cube.rotation.x = time * 0.00035;
-    const waterSpeedOptions = getTimeSpeedOptions(world.simTimeMode);
-    const waterSpeedIndex = Math.max(0, Math.min(waterSpeedOptions.length - 1, world.timeSpeedIndex ?? 0));
-    const simulationAnimationRate = world.paused ? 0 : (waterSpeedOptions[waterSpeedIndex] ?? 1);
+    const simulationAnimationRate = isSimulationEffectivelyPaused(world) ? 0 : getResolvedTimeSpeedValue(world);
     waterSystem.update(
       time,
       dt,
@@ -6256,6 +6289,7 @@ export const createThreeTest = (
     const controlsStart = performance.now();
     updateCameraFlight(time);
     controls.update();
+    syncCameraClipPlanes();
     threePerf.controlsMs = smoothPerf(threePerf.controlsMs, performance.now() - controlsStart);
     seasonalSky.syncToCamera(camera);
     if (environmentFogEnabled) {
@@ -6641,11 +6675,22 @@ export const createThreeTest = (
     };
   };
 
+  const syncCameraClipPlanes = (): void => {
+    const terrainSpan = lastTerrainSize ? Math.max(lastTerrainSize.width, lastTerrainSize.depth) : 12;
+    const cameraDistance = Math.max(1, camera.position.distanceTo(controls.target));
+    const nextNear = Math.max(0.1, Math.min(1.5, cameraDistance * 0.002));
+    const nextFar = Math.max(500, terrainSpan * 14, controls.maxDistance * 3, cameraDistance * 10);
+    if (Math.abs(camera.near - nextNear) <= 1e-4 && Math.abs(camera.far - nextFar) <= 1e-2) {
+      return;
+    }
+    camera.near = nextNear;
+    camera.far = nextFar;
+    camera.updateProjectionMatrix();
+  };
+
   const updateCameraForSize = (size: number): void => {
     cancelCameraFlight();
     const distance = Math.max(8, size * 0.6);
-    camera.near = 0.1;
-    camera.far = Math.max(200, distance * 6);
     // Fog parameters are managed by CinematicGrade mode.
     camera.position.set(distance * 0.65, distance * 0.55, distance * 0.65);
     if (THREE_TEST_RIVER_VIEW === "top") {
@@ -6663,7 +6708,7 @@ export const createThreeTest = (
       controls.enablePan = false;
       controls.enableZoom = false;
     }
-    camera.updateProjectionMatrix();
+    syncCameraClipPlanes();
     controls.update();
     seasonalSky.syncToCamera(camera);
     if (lastLightingApplied) {

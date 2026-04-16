@@ -1322,6 +1322,12 @@ const buildOceanRenderSupportData = (
   for (let i = 0; i < total; i += 1) {
     const sampleX = i % sampleCols;
     const sampleY = Math.floor(i / sampleCols);
+    const worldBorderDistance = Math.min(
+      sampleX,
+      sampleY,
+      Math.max(0, sampleCols - 1 - sampleX),
+      Math.max(0, sampleRows - 1 - sampleY)
+    );
     const tileX = Math.min(cols - 1, sampleX * step);
     const tileY = Math.min(rows - 1, sampleY * step);
     const endX = Math.min(cols, tileX + step);
@@ -1343,6 +1349,17 @@ const buildOceanRenderSupportData = (
       touchesWorldBorder &&
       ocean >= OCEAN_RATIO_MIN &&
       coastDistance > OCEAN_BORDER_OPEN_WATER_DISTANCE_MIN;
+    const borderBlendOpenOcean =
+      worldBorderDistance <= 1 &&
+      ocean >= OCEAN_RATIO_MIN &&
+      coastDistance > OCEAN_SURFACE_SHORE_CLIP_BAND;
+    if (borderBlendOpenOcean) {
+      oceanRatios.water[i] = 1;
+      oceanRatios.ocean[i] = 1;
+      oceanSupportMask[i] = 1;
+      surfAttenuation[i] = 0;
+      continue;
+    }
     oceanRatios.water[i] = ocean;
     oceanRatios.ocean[i] = ocean;
     if (borderOpenOcean) {

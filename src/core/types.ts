@@ -57,6 +57,7 @@ export type RosterStatus = "available" | "deployed" | "lost";
 
 export type SeasonPhase = "growth" | "maintenance" | "fire" | "budget";
 export type SimTimeMode = "strategic" | "incident";
+export type TimeSpeedControlMode = "buttons" | "slider";
 
 export type DeployMode = UnitKind | "clear";
 
@@ -161,6 +162,7 @@ export interface SkipToNextFireState {
   active: boolean;
   previousPaused: boolean;
   previousTimeSpeedIndex: number;
+  previousTimeSpeedSliderValue: number;
   startedCareerDay: number;
 }
 

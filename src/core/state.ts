@@ -19,12 +19,14 @@ import type {
   Particle,
   Wind,
   TileType,
-  RosterUnit
+  RosterUnit,
+  TimeSpeedControlMode
 } from "./types.js";
 import type { CampaignState } from "./campaign.js";
 import type { ProgressionState } from "../systems/progression/types.js";
 
 import { BASE_BUDGET, DEFAULT_FIRE_SETTINGS, DEFAULT_INCIDENT_TIME_SPEED_INDEX } from "./config.js";
+import { DEFAULT_TIME_SPEED_SLIDER_VALUE } from "./timeSpeed.js";
 import { createCampaignState } from "./campaign.js";
 import { DEFAULT_CLIMATE_PARAMS, DEFAULT_MOISTURE_PARAMS } from "./climate.js";
 import { buildNeighborOffsets } from "./grid.js";
@@ -223,9 +225,11 @@ export interface WorldState {
   commandUnitsRevision: number;
 
   simTimeMode: SimTimeMode;
+  timeSpeedControlMode: TimeSpeedControlMode;
   timeSpeedIndex: number;
   strategicTimeSpeedIndex: number;
   incidentTimeSpeedIndex: number;
+  timeSpeedSliderValue: number;
 
   year: number;
 
@@ -561,9 +565,11 @@ export function createInitialState(seed: number, grid: Grid): WorldState {
     commandUnitsRevision: 0,
 
     simTimeMode: "strategic",
+    timeSpeedControlMode: "buttons",
     timeSpeedIndex: 1,
     strategicTimeSpeedIndex: 1,
     incidentTimeSpeedIndex: DEFAULT_INCIDENT_TIME_SPEED_INDEX,
+    timeSpeedSliderValue: DEFAULT_TIME_SPEED_SLIDER_VALUE,
 
     year: 1,
 

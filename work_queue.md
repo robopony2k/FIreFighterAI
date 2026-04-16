@@ -1,8 +1,6 @@
-TSK-0131: Extract real mapgen stage modules
+TSK-0131: Extract real mapgen stags
 
 Type: refactor
-
-Why: The stage pipeline exists, but most stage logic still lives inside `src/mapgen/runtime.ts`, so terrain generation remains effectively monolithic.
 
 Done when:
 - [x] Each pipeline stage owns its implementation outside `src/mapgen/runtime.ts`.
@@ -35,6 +33,25 @@ Constraints: preserve command semantics, selection UX, and current pathing behav
 Notes: Extract lookup helpers first to reduce repeated whole-array scans safely.
 
 Status: queued
+
+TSK-0135: Add experimental time-speed slider mode
+
+Type: feature
+
+Why: Playtesting needs a direct way to probe useful strategic and incident speeds before the final time model collapses toward skip-to-next-incident plus a smaller incident-time surface.
+
+Done when:
+- [x] A persisted runtime setting switches between preset button controls and slider controls live.
+- [x] Slider mode spans 0x-80x in 0.25x steps, displays the exact speed in DOM, 3D dock, and canvas HUD surfaces, and shares one value across strategic and incident time.
+- [x] 0x stops simulation without removing pause, and skip-to-next-fire temporarily forces max speed before restoring the previous slider/button value.
+
+Touchpoints: `src/core/timeSpeed.ts`, `src/persistence/runtimeSettings.ts`, `src/sim/index.ts`, `src/ui/phase/`, `src/render/hud/hud.ts`, `src/render/threeTest.ts`
+
+Constraints: preserve current button-mode behavior, pause flow, and skip-to-next-fire semantics
+
+Notes: `timespeedui` is persisted, but the slider value remains session-local so playtest experiments reset cleanly on a new run.
+
+Status: done
 
 TSK-0133: Type and isolate the fire simulation kernel
 

@@ -1677,6 +1677,38 @@ canvas {
   display: grid;
   grid-template-columns: repeat(6, minmax(0, 1fr));
   gap: 4px;
+  align-items: center;
+}
+
+.three-test-time-slider {
+  grid-column: span 4;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  padding: 4px 8px;
+  border: 1px solid var(--three-test-button-border);
+  border-radius: 8px;
+  background: var(--three-test-button-bg);
+}
+
+.three-test-time-slider-caption {
+  font-size: 10px;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  color: color-mix(in srgb, var(--three-test-text-primary) 78%, transparent);
+}
+
+.three-test-time-slider-input {
+  width: 100%;
+  min-width: 0;
+}
+
+.three-test-time-slider-value {
+  font-size: 11px;
+  letter-spacing: 0.4px;
+  color: var(--three-test-text-primary);
 }
 
 .three-test-time-audio {
@@ -6098,6 +6130,42 @@ input[type="text"] {
 .phase-time-speed-row button.is-active {
   background: linear-gradient(135deg, var(--accent), #b43a22);
   box-shadow: 0 8px 16px rgba(209, 74, 44, 0.35);
+}
+
+.phase-time-slider-row {
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  align-items: center;
+}
+
+.phase-time-slider-row button {
+  padding: 4px 6px;
+  font-size: 11px;
+  letter-spacing: 0.6px;
+  background: linear-gradient(135deg, #3a3530 0%, #1b1b1b 100%);
+}
+
+.phase-time-slider-field {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.phase-time-slider-caption {
+  text-transform: uppercase;
+  letter-spacing: 0.7px;
+}
+
+.phase-time-slider-field input {
+  width: 100%;
+  min-width: 0;
+}
+
+.phase-time-slider-value {
+  font-size: 12px;
+  letter-spacing: 0.4px;
+  color: var(--ink);
 }
 
 .phase-control-status {

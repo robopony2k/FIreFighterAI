@@ -6,7 +6,8 @@ import type {
   ScoreEventLane,
   ScoreEventSeverity,
   ScoreFlowKind,
-  SimTimeMode
+  SimTimeMode,
+  TimeSpeedControlMode
 } from "../../core/types.js";
 export type Phase = "growth" | "maintenance" | "fire" | "budget";
 
@@ -61,7 +62,9 @@ export type GameUiSnapshot = {
   paused: boolean;
   alert: string | null;
   simTimeMode: SimTimeMode;
+  timeSpeedControlMode: TimeSpeedControlMode;
   timeSpeedIndex: number;
+  timeSpeedValue: number;
   skipToNextFireActive: boolean;
   canSkipToNextFire: boolean;
   forecast: ClimateForecast | null;

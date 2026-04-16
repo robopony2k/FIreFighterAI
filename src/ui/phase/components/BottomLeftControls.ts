@@ -1,6 +1,12 @@
 import type { UiAudioSettings } from "../../../audio/uiAudio.js";
 import { getTimeSpeedOptions } from "../../../core/config.js";
-import type { SimTimeMode } from "../../../core/types.js";
+import {
+  formatTimeSpeedValue,
+  TIME_SPEED_SLIDER_MAX,
+  TIME_SPEED_SLIDER_MIN,
+  TIME_SPEED_SLIDER_STEP
+} from "../../../core/timeSpeed.js";
+import type { SimTimeMode, TimeSpeedControlMode } from "../../../core/types.js";
 
 type ChannelSettings = {
   muted: boolean;
@@ -12,7 +18,9 @@ export type BottomControlsData = {
   showSpeedControl: boolean;
   paused: boolean;
   simTimeMode: SimTimeMode;
+  timeSpeedControlMode: TimeSpeedControlMode;
   timeSpeedIndex: number;
+  timeSpeedValue: number;
   skipToNextFireActive: boolean;
   canSkipToNextFire: boolean;
   status?: string;
@@ -33,15 +41,6 @@ export type BottomControlsView = {
 };
 
 export const createBottomLeftControls = (): BottomControlsView => {
-  const formatSpeedValue = (value: number): string => {
-    if (Number.isInteger(value)) {
-      return `${value.toFixed(0)}x`;
-    }
-    if (value >= 0.1) {
-      return `${value.toFixed(2).replace(/0+$/, "").replace(/\.$/, "")}x`;
-    }
-    return `${value.toFixed(3).replace(/0+$/, "").replace(/\.$/, "")}x`;
-  };
   const getDisplayedIndices = (mode: SimTimeMode): number[] => {
     const options = getTimeSpeedOptions(mode);
     const last = Math.max(0, options.length - 1);
@@ -56,9 +55,10 @@ export const createBottomLeftControls = (): BottomControlsView => {
   const titleRow = document.createElement("div");
   titleRow.className = "phase-control-title";
   titleRow.textContent = "Strategic Time";
-  const speedRow = document.createElement("div");
-  speedRow.className = "phase-control-row phase-time-speed-row";
-  speedRow.innerHTML = `
+
+  const buttonSpeedRow = document.createElement("div");
+  buttonSpeedRow.className = "phase-control-row phase-time-speed-row";
+  buttonSpeedRow.innerHTML = `
     <button data-action="pause" aria-label="Pause" title="Pause">||</button>
     <button data-role="time-speed"></button>
     <button data-role="time-speed"></button>
@@ -66,7 +66,28 @@ export const createBottomLeftControls = (): BottomControlsView => {
     <button data-role="time-speed"></button>
     <button data-action="time-skip-next-fire" aria-label="Skip to Next Fire" title="Skip to Next Fire">Next Fire</button>
   `;
-  timeGroup.append(titleRow, speedRow);
+
+  const sliderSpeedRow = document.createElement("div");
+  sliderSpeedRow.className = "phase-control-row phase-time-slider-row is-hidden";
+  sliderSpeedRow.innerHTML = `
+    <button data-action="pause" aria-label="Pause" title="Pause">||</button>
+    <label class="phase-time-slider-field">
+      <span class="phase-time-slider-caption">Speed</span>
+      <input
+        type="range"
+        min="${TIME_SPEED_SLIDER_MIN}"
+        max="${TIME_SPEED_SLIDER_MAX}"
+        step="${TIME_SPEED_SLIDER_STEP}"
+        value="1"
+        data-action="time-speed-slider-set"
+        data-role="time-speed-slider"
+        aria-label="Time speed slider"
+      />
+    </label>
+    <span class="phase-time-slider-value">1x</span>
+    <button data-action="time-skip-next-fire" aria-label="Skip to Next Fire" title="Skip to Next Fire">Next Fire</button>
+  `;
+  timeGroup.append(titleRow, buttonSpeedRow, sliderSpeedRow);
 
   const createAudioRow = (): {
     row: HTMLDivElement;
@@ -104,9 +125,14 @@ export const createBottomLeftControls = (): BottomControlsView => {
 
   element.append(timeGroup, status);
 
-  const pauseButton = speedRow.querySelector('[data-action="pause"]') as HTMLButtonElement;
-  const nextFireButton = speedRow.querySelector('[data-action="time-skip-next-fire"]') as HTMLButtonElement;
-  const speedButtons = Array.from(speedRow.querySelectorAll<HTMLButtonElement>('[data-role="time-speed"]'));
+  const buttonPauseButton = buttonSpeedRow.querySelector('[data-action="pause"]') as HTMLButtonElement;
+  const sliderPauseButton = sliderSpeedRow.querySelector('[data-action="pause"]') as HTMLButtonElement;
+  const buttonNextFireButton = buttonSpeedRow.querySelector('[data-action="time-skip-next-fire"]') as HTMLButtonElement;
+  const sliderNextFireButton = sliderSpeedRow.querySelector('[data-action="time-skip-next-fire"]') as HTMLButtonElement;
+  const speedButtons = Array.from(buttonSpeedRow.querySelectorAll<HTMLButtonElement>('[data-role="time-speed"]'));
+  const speedSlider = sliderSpeedRow.querySelector('[data-role="time-speed-slider"]') as HTMLInputElement;
+  const speedSliderValue = sliderSpeedRow.querySelector(".phase-time-slider-value") as HTMLSpanElement;
+
   let audioState: ChannelSettings = { muted: false, volume: 0.65 };
   let worldState: ChannelSettings = { muted: false, volume: 0.55 };
   let musicState: ChannelSettings = { muted: false, volume: 0.35 };
@@ -196,9 +222,12 @@ export const createBottomLeftControls = (): BottomControlsView => {
   return {
     element,
     update: (data) => {
+      const usingSlider = data.timeSpeedControlMode === "slider";
       timeGroup.classList.toggle("is-hidden", !data.showTimeControls);
-      speedRow.classList.toggle("is-hidden", !data.showSpeedControl);
+      buttonSpeedRow.classList.toggle("is-hidden", !data.showSpeedControl || usingSlider);
+      sliderSpeedRow.classList.toggle("is-hidden", !data.showSpeedControl || !usingSlider);
       titleRow.textContent = data.simTimeMode === "incident" ? "Incident Time" : "Strategic Time";
+
       const displayedIndices = getDisplayedIndices(data.simTimeMode);
       const activeOptions = getTimeSpeedOptions(data.simTimeMode);
       speedButtons.forEach((button, slot) => {
@@ -208,7 +237,7 @@ export const createBottomLeftControls = (): BottomControlsView => {
           button.disabled = true;
           return;
         }
-        const speedLabel = formatSpeedValue(activeOptions[index] ?? 1);
+        const speedLabel = formatTimeSpeedValue(activeOptions[index] ?? 1);
         button.classList.remove("is-hidden");
         button.disabled = false;
         button.dataset.speedIndex = String(index);
@@ -218,23 +247,37 @@ export const createBottomLeftControls = (): BottomControlsView => {
         button.setAttribute("aria-label", `Speed ${speedLabel}`);
         button.classList.toggle("is-active", data.timeSpeedIndex === index);
       });
+
+      speedSlider.value = `${data.timeSpeedValue}`;
+      speedSlider.setAttribute(
+        "title",
+        `${data.simTimeMode === "incident" ? "Incident" : "Strategic"} time ${formatTimeSpeedValue(data.timeSpeedValue)}`
+      );
+      speedSliderValue.textContent = formatTimeSpeedValue(data.timeSpeedValue);
+
       const nextFireDisabled = data.skipToNextFireActive || !data.canSkipToNextFire;
-      nextFireButton.disabled = nextFireDisabled;
-      nextFireButton.textContent = data.skipToNextFireActive ? "Seeking..." : "Next Fire";
-      if (data.skipToNextFireActive) {
-        nextFireButton.setAttribute("title", "Advancing time to next fire incident.");
-        nextFireButton.setAttribute("aria-label", "Seeking next fire");
-      } else if (data.canSkipToNextFire) {
-        nextFireButton.setAttribute("title", "Advance time until the next fire starts.");
-        nextFireButton.setAttribute("aria-label", "Skip to next fire");
-      } else {
-        nextFireButton.setAttribute("title", "Available when no active or holdover fires remain.");
-        nextFireButton.setAttribute("aria-label", "Skip to next fire unavailable");
-      }
+      [buttonNextFireButton, sliderNextFireButton].forEach((nextFireButton) => {
+        nextFireButton.disabled = nextFireDisabled;
+        nextFireButton.textContent = data.skipToNextFireActive ? "Seeking..." : "Next Fire";
+        if (data.skipToNextFireActive) {
+          nextFireButton.setAttribute("title", "Advancing time to next fire incident.");
+          nextFireButton.setAttribute("aria-label", "Seeking next fire");
+        } else if (data.canSkipToNextFire) {
+          nextFireButton.setAttribute("title", "Advance time until the next fire starts.");
+          nextFireButton.setAttribute("aria-label", "Skip to next fire");
+        } else {
+          nextFireButton.setAttribute("title", "Available when no active or holdover fires remain.");
+          nextFireButton.setAttribute("aria-label", "Skip to next fire unavailable");
+        }
+      });
+
       const pauseLabel = data.paused ? "Resume" : "Pause";
-      pauseButton.textContent = data.paused ? ">" : "||";
-      pauseButton.setAttribute("aria-label", pauseLabel);
-      pauseButton.setAttribute("title", pauseLabel);
+      [buttonPauseButton, sliderPauseButton].forEach((pauseButton) => {
+        pauseButton.textContent = data.paused ? ">" : "||";
+        pauseButton.setAttribute("aria-label", pauseLabel);
+        pauseButton.setAttribute("title", pauseLabel);
+      });
+
       status.textContent = data.status ?? "";
       refreshAudioControls();
     },
