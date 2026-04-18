@@ -18,6 +18,7 @@ import { clamp } from "../core/utils.js";
 import { applyFuel, getFuelProfiles } from "../core/tiles.js";
 import { syncTileSoAIndex } from "../core/tileCache.js";
 import { indexFor } from "../core/grid.js";
+import { RNG as RuntimeRng } from "../core/rng.js";
 import {
   placeHouse,
   removeHouse,
@@ -27,6 +28,16 @@ import {
   STRUCTURE_NONE
 } from "../core/towns.js";
 import { hash2D } from "../mapgen/noise.js";
+import {
+  backfillRoadEdgesFromAdjacency,
+  carveRoad,
+  clearRoadEdges,
+  collectRoadTiles,
+  findNearestRoadTile,
+  pruneRoadDiagonalStubs
+} from "../mapgen/roads.js";
+import { stepRuntimeTownGrowth } from "../systems/settlements/sim/townGrowth.js";
+import type { SettlementRoadAdapter } from "../systems/settlements/types/settlementTypes.js";
 import { profEnd, profStart } from "./prof.js";
 
 const WATER_INFLUENCE_DIST = 18;
@@ -394,84 +405,16 @@ const updateTownRadius = (state: WorldState, town: WorldState["towns"][number]):
 };
 
 export function stepTownSeasonScaling(state: WorldState): void {
-  if (state.phase !== "growth" || state.townGrowthAppliedYear === state.year) {
-    return;
-  }
-
-  state.townGrowthAppliedYear = state.year;
-  if (state.towns.length === 0) {
-    return;
-  }
-
-  recountTownHouses(state);
-  const roadNetworkExists = hasRoadNetwork(state);
-
-  let anyRequestedDelta = false;
-  for (const town of state.towns) {
-    const delta = computeDesiredSeasonDelta(state, town);
-    town.desiredHouseDelta = delta;
-    town.lastSeasonHouseDelta = 0;
-    if (delta !== 0) {
-      anyRequestedDelta = true;
-    }
-  }
-
-  if (!anyRequestedDelta && state.towns.length > 0) {
-    let bestTown = state.towns[0];
-    let bestPressure = -1;
-    for (const town of state.towns) {
-      const cap = computeTownCap(town);
-      const pressure = Math.abs(cap - town.houseCount);
-      if (pressure > bestPressure || (pressure === bestPressure && town.id < bestTown.id)) {
-        bestPressure = pressure;
-        bestTown = town;
-      }
-    }
-    if (bestTown) {
-      bestTown.desiredHouseDelta = bestTown.houseCount <= computeTownCap(bestTown) ? 1 : -1;
-    }
-  }
-
-  for (const town of state.towns) {
-    const desiredDelta = Math.trunc(town.desiredHouseDelta ?? 0);
-    let appliedDelta = 0;
-    if (desiredDelta > 0) {
-      let candidates = collectGrowthCandidates(state, town, roadNetworkExists);
-      if (candidates.length === 0 && roadNetworkExists) {
-        candidates = collectGrowthCandidates(state, town, false);
-      }
-      for (let i = 0; i < candidates.length && appliedDelta < desiredDelta; i += 1) {
-        const idx = candidates[i];
-        const tile = state.tiles[idx];
-        if (!tile || state.tileStructure[idx] !== STRUCTURE_NONE || state.structureMask[idx] !== 0) {
-          continue;
-        }
-        tile.houseValue = computeDeterministicHouseValue(state, idx, town.id);
-        tile.houseResidents = computeDeterministicHouseResidents(state, idx, town.id);
-        tile.houseDestroyed = false;
-        if (placeHouse(state, idx, town.id)) {
-          appliedDelta += 1;
-        }
-      }
-    } else if (desiredDelta < 0) {
-      const removalsNeeded = Math.abs(desiredDelta);
-      const candidates = collectShrinkCandidates(state, town);
-      for (let i = 0; i < candidates.length && appliedDelta > -removalsNeeded; i += 1) {
-        if (removeHouse(state, candidates[i])) {
-          appliedDelta -= 1;
-        }
-      }
-    }
-    town.lastSeasonHouseDelta = appliedDelta;
-    updateTownRadius(state, town);
-  }
-
-  recountTownHouses(state);
-  const invariant = validateTownInvariants(state);
-  if (!invariant.ok) {
-    const details = invariant.errors.slice(0, 8).join(" | ");
-    console.warn(`[towns] growth invariant failure: ${details}`);
-  }
+  const rng = new RuntimeRng((state.seed ^ (state.year * 2654435761)) >>> 0);
+  const roadAdapter: SettlementRoadAdapter = {
+    carveRoad: (nextState, start, end, options = {}) => carveRoad(nextState, rng, start, end, options),
+    collectRoadTiles,
+    findNearestRoadTile,
+    clearRoadEdges,
+    backfillRoadEdgesFromAdjacency,
+    pruneRoadDiagonalStubs
+  };
+  stepRuntimeTownGrowth(state, roadAdapter);
 }
 
 export function stepGrowth(state: WorldState, dayDelta: number, rng: RNG): void {

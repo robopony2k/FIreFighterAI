@@ -9,7 +9,10 @@ const DEFAULT_HOUSE_FOOTPRINT: HouseVariantFootprint = {
   sizeY: 1,
   sizeZ: 1,
   parcelX: 1.25,
-  parcelZ: 1
+  parcelZ: 1,
+  roofType: "gable",
+  wallTint: "#c98f5b",
+  roofTint: "#6a4d38"
 };
 
 const noiseAt = (value: number): number => {

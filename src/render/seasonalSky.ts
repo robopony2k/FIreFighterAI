@@ -1,16 +1,12 @@
 import * as THREE from "three";
 import { mixRgb, scaleRgb, type RGB } from "./color.js";
+import {
+  EQUINOX_AZIMUTH_DEG,
+  sampleSeasonalSunTrajectory
+} from "../systems/climate/rendering/seasonalSunTrajectory.js";
 
 const TAU = Math.PI * 2;
 const PI = Math.PI;
-const SUMMER_MIDPOINT_T01 = 0.625;
-const EQUINOX_AZIMUTH_DEG = -100;
-const SEASONAL_AZIMUTH_DRIFT_DEG = 15;
-const DAYLIGHT_AZIMUTH_SWEEP_DEG = 54;
-const SUMMER_PEAK_ELEVATION_DEG = 52;
-const WINTER_PEAK_ELEVATION_DEG = 34;
-const SUMMER_FLOOR_ELEVATION_DEG = 18;
-const WINTER_FLOOR_ELEVATION_DEG = 12;
 const SKY_NOISE_SIZE = 128;
 
 const clamp01 = (value: number): number => Math.min(1, Math.max(0, value));
@@ -51,7 +47,6 @@ export type SeasonalSkyConfig = {
   ambientSoftnessWinter: number;
   shadowContrastSummer: number;
   shadowContrastWinter: number;
-  dayArcDaysPerCycle: number;
   sunOcclusionSampleRadius: number;
   sunOcclusionLightReduction: number;
   sunOcclusionGlareReduction: number;
@@ -75,7 +70,6 @@ export const SEASONAL_SKY_CONFIG: SeasonalSkyConfig = {
   ambientSoftnessWinter: 0.4,
   shadowContrastSummer: 0.96,
   shadowContrastWinter: 0.54,
-  dayArcDaysPerCycle: 240,
   sunOcclusionSampleRadius: 0.032,
   sunOcclusionLightReduction: 0.42,
   sunOcclusionGlareReduction: 0.76,
@@ -365,26 +359,11 @@ export const buildSeasonalSkyState = (
 ): SeasonalSkyState => {
   const seasonT01 = wrap01(input.seasonT01);
   const season = getSeasonWeights(seasonT01);
-  const annualBand = Math.cos((seasonT01 - SUMMER_MIDPOINT_T01) * TAU);
-  const summer01 = clamp01((annualBand + 1) * 0.5);
-  const winter01 = clamp01(1 - summer01);
+  const { sunAzimuthDeg, sunElevationDeg, summer01, winter01 } = sampleSeasonalSunTrajectory(seasonT01);
   const risk01 = clamp01(input.risk01);
 
-  // The sun follows a daylight-only arc derived from career day, then the season biases
-  // its azimuth/elevation so the same direction can drive the sky disc and scene lighting.
-  const dayPhase = wrap01(input.careerDay / Math.max(1, config.dayArcDaysPerCycle));
-  const daylight01 = Math.sin(dayPhase * Math.PI);
-  const seasonalPeakElevation = lerp(WINTER_PEAK_ELEVATION_DEG, SUMMER_PEAK_ELEVATION_DEG, summer01);
-  const elevationFloor = lerp(WINTER_FLOOR_ELEVATION_DEG, SUMMER_FLOOR_ELEVATION_DEG, summer01);
-  const sunElevationDeg = clamp(
-    elevationFloor + Math.pow(clamp01(daylight01), 0.82) * (seasonalPeakElevation - elevationFloor),
-    WINTER_FLOOR_ELEVATION_DEG,
-    SUMMER_PEAK_ELEVATION_DEG
-  );
-  const sunAzimuthDeg =
-    EQUINOX_AZIMUTH_DEG +
-    annualBand * SEASONAL_AZIMUTH_DRIFT_DEG +
-    (dayPhase - 0.5) * DAYLIGHT_AZIMUTH_SWEEP_DEG;
+  // The sun follows a continuous stylized analemma driven only by wrapped year
+  // position, so the sky dome and scene lighting stay continuous across seasons.
   const azimuthRad = degToRad(sunAzimuthDeg);
   const elevationRad = degToRad(sunElevationDeg);
   const horizontal = Math.cos(elevationRad);
@@ -680,6 +659,5 @@ export const createSeasonalSkyDome = (): SeasonalSkyDome => {
 };
 
 export const SEASONAL_SKY_BASELINE = {
-  equinoxAzimuthDeg: EQUINOX_AZIMUTH_DEG,
-  dayArcDaysPerCycle: SEASONAL_SKY_CONFIG.dayArcDaysPerCycle
+  equinoxAzimuthDeg: EQUINOX_AZIMUTH_DEG
 } as const;

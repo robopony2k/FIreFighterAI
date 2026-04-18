@@ -7,6 +7,7 @@ import { destroyHouse } from "../../core/towns.js";
 import { clamp } from "../../core/utils.js";
 import { markTileSoADirty } from "../../core/tileCache.js";
 import { recordTownHouseLoss } from "../towns.js";
+import { advanceHouseDamage } from "../../systems/settlements/sim/buildingLifecycle.js";
 
 const MIN_IGNITION_POINT = 0.0001;
 
@@ -22,6 +23,9 @@ export function burnTile(state: WorldState, tile: Tile, fireDelta: number): bool
   const fuelDrain = fireDelta * tile.burnRate * (0.6 + tile.fire * 0.9 + overheatFactor * conflagrationFuelBoost);
   tile.fuel = Math.max(0, tile.fuel - fuelDrain);
   const tileIndex = state.tiles.indexOf(tile);
+  if (tile.type === "house" && !tile.houseDestroyed) {
+    advanceHouseDamage(tile, clamp(tile.fire * 0.48 + overheatFactor * 0.24, 0, 1));
+  }
   if (tile.fuel <= 0.02 && tile.type !== "ash") {
     if (tile.type === "house" && !tile.houseDestroyed) {
       const townId = tileIndex >= 0 ? state.tileTownId[tileIndex] ?? -1 : -1;
@@ -32,12 +36,21 @@ export function burnTile(state: WorldState, tile: Tile, fireDelta: number): bool
         state.totalPropertyValue = Math.max(0, state.totalPropertyValue - Math.max(0, tile.houseValue));
         state.totalPopulation = Math.max(0, state.totalPopulation - Math.max(0, tile.houseResidents));
       }
-      tile.houseDestroyed = true;
       state.destroyedHouses += 1;
       state.lostPropertyValue += tile.houseValue;
       state.lostResidents += tile.houseResidents;
       state.yearPropertyLost += tile.houseValue;
       state.yearLivesLost += tile.houseResidents;
+      tile.fuel = 0;
+      tile.heat *= 0.4;
+      clearVegetationState(tile);
+      tile.dominantTreeType = null;
+      tile.treeType = null;
+      state.terrainDirty = true;
+      state.terrainTypeRevision += 1;
+      state.vegetationRevision += 1;
+      markTileSoADirty(state);
+      return true;
     }
     tile.type = "ash";
     tile.fuel = 0;

@@ -7,6 +7,8 @@ import {
 import { getHouseFootprintBounds, pickHouseFootprint } from "../core/houseFootprints.js";
 import { getTerrainHeightScale } from "../core/terrainScale.js";
 import { getVegetationRenderHeightMultiplier } from "../core/vegetation.js";
+import { getBuildingLifecycleStageFromId } from "../systems/settlements/sim/buildingLifecycle.js";
+import { getProceduralHouseVariantKey } from "../systems/settlements/rendering/proceduralHouseBuilder.js";
 import {
   COAST_CLASS_BEACH,
   COAST_CLASS_CLIFF,
@@ -33,6 +35,7 @@ import {
 } from "./terrain/roads/roadGeometryConstants.js";
 import { buildRoadRetainingWallMesh } from "./terrain/roads/roadRetainingWallMesh.js";
 import { buildDistanceField } from "./terrain/shared/distanceField.js";
+import { resolveStructureGrounding } from "./terrain/shared/structureGrounding.js";
 import {
   buildTerrainHeightProvenance,
   collectTerrainHeightAnomalies,
@@ -95,6 +98,10 @@ import {
   type TreeSeasonVisualConfig,
   type TreeBurnController
 } from "./terrain/vegetation/treeBurnController.js";
+import {
+  buildTerrainSurfaceColorField,
+  type BuildTerrainSurfaceColorFieldOptions
+} from "./terrain/textures/terrainSurfaceColorField.js";
 import {
   buildTileTexture as buildTileTextureInternal,
   sampleTouchesWorldBorder
@@ -167,6 +174,8 @@ export type TerrainSample = {
   vegetationRevision?: number;
   structureRevision?: number;
   dynamicStructures?: boolean;
+  houseLifecycleStages?: Uint8Array;
+  houseLifecycleSteps?: Uint8Array;
   debugRenderOptions?: TerrainRenderDebugOptions;
 };
 
@@ -413,10 +422,12 @@ type HouseSpot = {
   maxTileY: number;
   rotation: number;
   seed: number;
-  groundMin: number;
-  groundMax: number;
+  supportBottom: number;
+  supportTop: number;
   variantKey: string | null;
   variantSource: string | null;
+  lifecycleStageId: number;
+  lifecycleStep: number;
 };
 
 type SampleFloatReducer = "mean" | "min" | "max";
@@ -1978,7 +1989,8 @@ export const buildTileTexture = (
   sampledErosionWear: Float32Array | null,
   sampledRiverCoverage: Float32Array | null,
   riverStepStrength: Float32Array | null | undefined,
-  debugTypeColors: boolean
+  debugTypeColors: boolean,
+  colorMode: "legacy" | "mask"
 ): THREE.DataTexture =>
   buildTileTextureInternal(
     sample,
@@ -2003,6 +2015,7 @@ export const buildTileTexture = (
     sampledRiverCoverage,
     riverStepStrength,
     debugTypeColors,
+    colorMode,
     {
       forestToneBase: FOREST_TONE_BASE,
       forestTintById: FOREST_TINT_BY_ID,
@@ -2016,6 +2029,135 @@ export const buildTileTexture = (
       sunDir: SUN_DIR
     }
   );
+
+const applyTerrainSurfaceColorAttribute = (
+  geometry: THREE.BufferGeometry,
+  colorField: Float32Array,
+  sampleCols: number,
+  sampleRows: number
+): void => {
+  const positionAttr = geometry.getAttribute("position");
+  const uvAttr = geometry.getAttribute("uv");
+  if (!positionAttr || !uvAttr || !("getX" in uvAttr) || !("getY" in uvAttr)) {
+    return;
+  }
+  const colors = new Float32Array(positionAttr.count * 3);
+  const colorIndex = (x: number, y: number, channel: 0 | 1 | 2): number => (y * sampleCols + x) * 3 + channel;
+  for (let i = 0; i < positionAttr.count; i += 1) {
+    const u = clamp(uvAttr.getX(i), 0, 1);
+    const v = clamp(uvAttr.getY(i), 0, 1);
+    const sampleX = u * Math.max(0, sampleCols - 1);
+    const sampleY = (1 - v) * Math.max(0, sampleRows - 1);
+    const x0 = Math.floor(sampleX);
+    const y0 = Math.floor(sampleY);
+    const x1 = Math.min(sampleCols - 1, x0 + 1);
+    const y1 = Math.min(sampleRows - 1, y0 + 1);
+    const tx = sampleX - x0;
+    const ty = sampleY - y0;
+    const outBase = i * 3;
+    for (let channel = 0 as 0 | 1 | 2; channel < 3; channel = (channel + 1) as 0 | 1 | 2) {
+      const c00 = colorField[colorIndex(x0, y0, channel)] ?? 0;
+      const c10 = colorField[colorIndex(x1, y0, channel)] ?? c00;
+      const c01 = colorField[colorIndex(x0, y1, channel)] ?? c00;
+      const c11 = colorField[colorIndex(x1, y1, channel)] ?? c10;
+      const cx0 = c00 * (1 - tx) + c10 * tx;
+      const cx1 = c01 * (1 - tx) + c11 * tx;
+      colors[outBase + channel] = cx0 * (1 - ty) + cx1 * ty;
+    }
+  }
+  geometry.setAttribute("color", new THREE.Float32BufferAttribute(colors, 3));
+};
+
+const buildTerrainSurfaceColorFieldOptions = (
+  sample: TerrainSample,
+  surface: TerrainRenderSurface,
+  palette: number[][]
+): BuildTerrainSurfaceColorFieldOptions => ({
+  sample,
+  sampleCols: surface.sampleCols,
+  sampleRows: surface.sampleRows,
+  step: surface.step,
+  grassId: TILE_TYPE_IDS.grass,
+  scrubId: TILE_TYPE_IDS.scrub,
+  floodplainId: TILE_TYPE_IDS.floodplain,
+  beachId: TILE_TYPE_IDS.beach,
+  forestId: TILE_TYPE_IDS.forest,
+  waterId: TILE_TYPE_IDS.water,
+  roadId: TILE_TYPE_IDS.road,
+  heightScale: surface.heightScale,
+  sampleHeights: surface.sampleHeights,
+  sampleTypes: surface.sampleTypes,
+  riverRatio: surface.waterRatios.river,
+  oceanRatio: surface.waterRatios.ocean,
+  sampledErosionWear: surface.sampledErosionWear ?? null,
+  sampledRiverCoverage: surface.sampledRiverCoverage ?? null,
+  riverStepStrength: surface.sampledRiverStepStrength,
+  debugTypeColors: sample.debugTypeColors ?? false,
+  deps: {
+    palette,
+    forestToneBase: FOREST_TONE_BASE,
+    forestTintById: FOREST_TINT_BY_ID,
+    riverRatioMin: RIVER_RATIO_MIN,
+    stepRockyTintMax: STEP_ROCKY_TINT_MAX
+  }
+});
+
+export const applyTerrainSurfaceColors = (
+  geometry: THREE.BufferGeometry,
+  sample: TerrainSample,
+  surface: TerrainRenderSurface
+): void => {
+  const colorField = buildTerrainSurfaceColorField(
+    buildTerrainSurfaceColorFieldOptions(sample, surface, buildPalette())
+  );
+  applyTerrainSurfaceColorAttribute(geometry, colorField, surface.sampleCols, surface.sampleRows);
+};
+
+const smoothTerrainSharedVertexNormals = (geometry: THREE.BufferGeometry): void => {
+  const positionAttr = geometry.getAttribute("position");
+  const normalAttr = geometry.getAttribute("normal");
+  const uvAttr = geometry.getAttribute("uv");
+  if (
+    geometry.getIndex() ||
+    !positionAttr ||
+    !normalAttr ||
+    !uvAttr ||
+    !("getX" in normalAttr) ||
+    !("getY" in normalAttr) ||
+    !("getZ" in normalAttr) ||
+    !("setXYZ" in normalAttr) ||
+    !("getX" in uvAttr) ||
+    !("getY" in uvAttr)
+  ) {
+    return;
+  }
+  const keyScale = 100000;
+  const accum = new Map<string, { x: number; y: number; z: number }>();
+  for (let i = 0; i < positionAttr.count; i += 1) {
+    const key = `${Math.round(uvAttr.getX(i) * keyScale)},${Math.round(uvAttr.getY(i) * keyScale)}`;
+    const entry = accum.get(key);
+    const nx = normalAttr.getX(i);
+    const ny = normalAttr.getY(i);
+    const nz = normalAttr.getZ(i);
+    if (entry) {
+      entry.x += nx;
+      entry.y += ny;
+      entry.z += nz;
+    } else {
+      accum.set(key, { x: nx, y: ny, z: nz });
+    }
+  }
+  for (let i = 0; i < positionAttr.count; i += 1) {
+    const key = `${Math.round(uvAttr.getX(i) * keyScale)},${Math.round(uvAttr.getY(i) * keyScale)}`;
+    const entry = accum.get(key);
+    if (!entry) {
+      continue;
+    }
+    const len = Math.hypot(entry.x, entry.y, entry.z) || 1;
+    normalAttr.setXYZ(i, entry.x / len, entry.y / len, entry.z / len);
+  }
+  normalAttr.needsUpdate = true;
+};
 
 export const getTerrainStep = (size: number, fullResolution = false): number => {
   if (fullResolution) {
@@ -2424,6 +2566,8 @@ export const buildTerrainMesh = (
 } => {
   const sample = surface.sample;
   const debugRenderOptions = sample.debugRenderOptions;
+  const terrainSurfaceShadingMode = debugRenderOptions?.terrainSurfaceShadingMode ?? "refined";
+  const useLegacyFacetedTerrain = terrainSurfaceShadingMode === "legacyFaceted";
   const { cols, rows, elevations } = sample;
   const palette = buildPalette();
   const grassId = TILE_TYPE_IDS.grass;
@@ -2822,11 +2966,18 @@ export const buildTerrainMesh = (
     applyRiverTerrainTriangleCutout(geometry, sampleCols, sampleRows, riverRenderDomain);
   }
   geometry.computeVertexNormals();
+  if (!useLegacyFacetedTerrain) {
+    smoothTerrainSharedVertexNormals(geometry);
+  }
   if (DEBUG_TERRAIN_RENDER && threeTestLoggedTotal !== cols * rows) {
     console.log(
       `ThreeTest heights: min=${minHeight.toFixed(2)} max=${maxHeight.toFixed(2)} scale=${heightScale.toFixed(2)}`
     );
     threeTestLoggedTotal = cols * rows;
+  }
+
+  if (!useLegacyFacetedTerrain) {
+    applyTerrainSurfaceColors(geometry, sample, surface);
   }
 
   const tileTexture = buildTileTexture(
@@ -2851,12 +3002,14 @@ export const buildTerrainMesh = (
     sampledErosionWear ?? null,
     sampledRiverCoverage ?? null,
     sampledRiverStepStrength,
-    sample.debugTypeColors ?? false
+    sample.debugTypeColors ?? false,
+    useLegacyFacetedTerrain ? "legacy" : "mask"
   );
   const material = new THREE.MeshStandardMaterial({
     map: tileTexture,
     roughness: 0.88,
-    metalness: 0
+    metalness: 0,
+    vertexColors: !useLegacyFacetedTerrain
   });
   material.transparent = false;
   material.alphaTest = 0.5;
@@ -3218,7 +3371,7 @@ export const buildTerrainMesh = (
   };
   if (sample.tileTypes && !sample.dynamicStructures) {
     const tileTypes = sample.tileTypes;
-    const baseTiles: { tileX: number; tileY: number; x: number; z: number; groundMin: number; groundMax: number }[] = [];
+    const baseTiles: { tileX: number; tileY: number }[] = [];
     const houseSpots: HouseSpot[] = [];
     for (let tileY = 0; tileY < rows; tileY += 1) {
       const rowBase = tileY * cols;
@@ -3230,20 +3383,15 @@ export const buildTerrainMesh = (
         const z = (normZ - 0.5) * depth;
         const height = heightAtTile(tileX, tileY) * heightScale;
         const seed = rowBase + tileX;
-        const right = Math.min(cols, tileX + 1);
-        const bottom = Math.min(rows, tileY + 1);
-        const h00 = heightAtTileCoord(tileX, tileY) * heightScale;
-        const h10 = heightAtTileCoord(right, tileY) * heightScale;
-        const h01 = heightAtTileCoord(tileX, bottom) * heightScale;
-        const h11 = heightAtTileCoord(right, bottom) * heightScale;
-        const tileGroundMin = Math.min(h00, h10, h01, h11);
-        const tileGroundMax = Math.max(h00, h10, h01, h11);
         if (typeId !== baseId && typeId !== houseId) {
           continue;
         }
         if (typeId === baseId) {
-          baseTiles.push({ tileX, tileY, x, z, groundMin: tileGroundMin, groundMax: tileGroundMax });
+          baseTiles.push({ tileX, tileY });
         } else {
+          const lifecycleStageId = sample.houseLifecycleStages?.[rowBase + tileX] ?? 3;
+          const lifecycleStep = sample.houseLifecycleSteps?.[rowBase + tileX] ?? 0;
+          const lifecycleStage = getBuildingLifecycleStageFromId(lifecycleStageId);
           const rotation = pickHouseRotation(tileX, tileY, cols, rows, tileTypes, roadId, baseId, seed);
           const footprint = pickHouseFootprint(seed);
           const bounds = getHouseFootprintBounds(tileX, tileY, rotation, footprint);
@@ -3251,21 +3399,15 @@ export const buildTerrainMesh = (
           const maxX = clamp(bounds.maxX, 0, cols - 1);
           const minY = clamp(bounds.minY, 0, rows - 1);
           const maxY = clamp(bounds.maxY, 0, rows - 1);
-          let groundMin = Number.POSITIVE_INFINITY;
-          let groundMax = Number.NEGATIVE_INFINITY;
-          for (let fy = minY; fy <= maxY + 1; fy += 1) {
-            const clampedY = clamp(fy, 0, rows);
-            for (let fx = minX; fx <= maxX + 1; fx += 1) {
-              const clampedX = clamp(fx, 0, cols);
-              const h = heightAtTileCoord(clampedX, clampedY) * heightScale;
-              groundMin = Math.min(groundMin, h);
-              groundMax = Math.max(groundMax, h);
-            }
-          }
-          if (!Number.isFinite(groundMin) || !Number.isFinite(groundMax)) {
-            groundMin = height;
-            groundMax = height;
-          }
+          const grounding = resolveStructureGrounding({
+            surface: sample,
+            minTileX: minX,
+            maxTileX: maxX,
+            minTileY: minY,
+            maxTileY: maxY,
+            heightScale,
+            heightAtTileCoord
+          });
           houseSpots.push({
             x,
             y: height,
@@ -3278,10 +3420,12 @@ export const buildTerrainMesh = (
             maxTileY: maxY,
             rotation,
             seed,
-            groundMin,
-            groundMax,
-            variantKey: footprint.name ?? null,
-            variantSource: footprint.source ?? null
+            supportBottom: grounding.foundationBottom,
+            supportTop: grounding.foundationTop,
+            variantKey: getProceduralHouseVariantKey(footprint.name ?? "procedural", lifecycleStage, lifecycleStep),
+            variantSource: footprint.source ?? null,
+            lifecycleStageId,
+            lifecycleStep
           });
         }
       }
@@ -3306,16 +3450,24 @@ export const buildTerrainMesh = (
       const centerZ = (centerTileY / rows - 0.5) * depth;
       const baseFootprintX = Math.max(1, maxTileX - minTileX + 1);
       const baseFootprintZ = Math.max(1, maxTileY - minTileY + 1);
-      let groundMin = Math.min(...baseTiles.map((tile) => tile.groundMin));
-      let groundMax = Math.max(...baseTiles.map((tile) => tile.groundMax));
+      const grounding = resolveStructureGrounding({
+        surface: sample,
+        minTileX,
+        maxTileX,
+        minTileY,
+        maxTileY,
+        heightScale,
+        heightAtTileCoord
+      });
+      const supportBottom = grounding.foundationBottom;
+      const supportTop = grounding.foundationTop;
       const rotation = baseFootprintX >= baseFootprintZ ? 0 : Math.PI / 2;
 
       if (useDetailedStructures && firestationAsset && firestationAsset.meshes.length > 0) {
         const footprintTarget = Math.max(baseFootprintX, baseFootprintZ) * 0.85;
         const assetFootprint = Math.max(firestationAsset.size.x, firestationAsset.size.z);
         const scale = footprintTarget / Math.max(0.01, assetFootprint);
-        const foundationTop = groundMax + 0.01;
-        const baseY = foundationTop + firestationAsset.baseOffset * scale;
+        const baseY = supportTop + firestationAsset.baseOffset * scale;
         const topY = baseY + Math.max(0.2, firestationAsset.size.y * scale);
         const baseGroup = new THREE.Group();
         const tempMatrix = new THREE.Matrix4();
@@ -3332,11 +3484,11 @@ export const buildTerrainMesh = (
           instanced.instanceMatrix.needsUpdate = true;
           baseGroup.add(instanced);
         });
-        if (groundMin < foundationTop - 0.01) {
-          const foundationHeight = Math.max(0.1, foundationTop - groundMin);
+        if (supportBottom < supportTop - 0.01) {
+          const foundationHeight = Math.max(0.1, supportTop - supportBottom);
           const foundation = new THREE.Mesh(buildingGeometry, foundationMaterial);
           foundation.scale.set(baseFootprintX, foundationHeight, baseFootprintZ);
-          foundation.position.set(centerX, groundMin + foundationHeight / 2, centerZ);
+          foundation.position.set(centerX, supportBottom + foundationHeight / 2, centerZ);
           foundation.rotation.set(0, rotation, 0);
           foundation.castShadow = true;
           foundation.receiveShadow = true;
@@ -3345,19 +3497,19 @@ export const buildTerrainMesh = (
         markStructureTopHeight(minTileX, maxTileX, minTileY, maxTileY, topY);
         mesh.add(baseGroup);
       } else {
-        const topY = groundMax + 0.6;
+        const topY = supportTop + 0.6;
         const base = new THREE.Mesh(buildingGeometry, baseMaterial);
         base.scale.set(baseFootprintX, 0.6, baseFootprintZ);
-        base.position.set(centerX, groundMax + 0.3, centerZ);
+        base.position.set(centerX, supportTop + 0.3, centerZ);
         base.rotation.set(0, rotation, 0);
         base.castShadow = true;
         base.receiveShadow = true;
         mesh.add(base);
-        if (groundMin < groundMax - 0.01) {
-          const foundationHeight = Math.max(0.1, groundMax - groundMin);
+        if (supportBottom < supportTop - 0.01) {
+          const foundationHeight = Math.max(0.1, supportTop - supportBottom);
           const foundation = new THREE.Mesh(buildingGeometry, foundationMaterial);
           foundation.scale.set(baseFootprintX, foundationHeight, baseFootprintZ);
-          foundation.position.set(centerX, groundMin + foundationHeight / 2, centerZ);
+          foundation.position.set(centerX, supportBottom + foundationHeight / 2, centerZ);
           foundation.rotation.set(0, rotation, 0);
           foundation.castShadow = true;
           foundation.receiveShadow = true;
@@ -3420,7 +3572,13 @@ export const buildTerrainMesh = (
         const index = Math.floor(noiseAt(spot.seed + 0.2) * bucket.length);
         return bucket[Math.min(bucket.length - 1, Math.max(0, index))];
       };
-      type HouseBatchInstance = { spot: HouseSpot; scale: number; baseY: number };
+      type HouseBatchInstance = {
+        spot: HouseSpot;
+        scaleX: number;
+        scaleY: number;
+        scaleZ: number;
+        baseY: number;
+      };
       type FoundationInstance = {
         x: number;
         y: number;
@@ -3441,12 +3599,12 @@ export const buildTerrainMesh = (
       houseSpots.forEach((spot) => {
         const footprintX = Math.max(0.5, spot.footprintX);
         const footprintZ = Math.max(0.5, spot.footprintZ);
-        const foundationTop = spot.groundMax + 0.01;
-        if (spot.groundMin < foundationTop - 0.01) {
-          const foundationHeight = Math.max(0.1, foundationTop - spot.groundMin);
+        const supportTop = spot.supportTop;
+        if (spot.supportBottom < supportTop - 0.01) {
+          const foundationHeight = Math.max(0.1, supportTop - spot.supportBottom);
           foundationInstances.push({
             x: spot.x,
-            y: spot.groundMin + foundationHeight / 2,
+            y: spot.supportBottom + foundationHeight / 2,
             z: spot.z,
             scaleX: footprintX,
             scaleY: foundationHeight,
@@ -3456,29 +3614,35 @@ export const buildTerrainMesh = (
         }
         const variant = pickHouseVariant(spot);
         if (useDetailedStructures && variant && variant.meshes.length > 0) {
-          const sizeX = Math.max(0.01, variant.size?.x ?? 0);
-          const sizeZ = Math.max(0.01, variant.size?.z ?? 0);
+          const planSizeX = Math.max(0.01, variant.planFootprint?.x ?? variant.size?.x ?? 0);
+          const planSizeZ = Math.max(0.01, variant.planFootprint?.y ?? variant.size?.z ?? 0);
           const sizeY = Math.max(0.2, variant.size?.y ?? 0.6);
-          const fitScale = Math.min(footprintX / sizeX, footprintZ / sizeZ);
-          const scale = Math.max(0.01, fitScale * 0.98 * (variant.scaleBias ?? 1));
-          const baseY = foundationTop + variant.baseOffset * scale;
-          const topY = baseY + sizeY * scale;
+          const fitBias = 0.98 * (variant.scaleBias ?? 1);
+          const rawScaleX = Math.max(0.01, (footprintX / planSizeX) * fitBias);
+          const rawScaleZ = Math.max(0.01, (footprintZ / planSizeZ) * fitBias);
+          const useUniformScale = variant.heightScaleMode === "uniform";
+          const uniformScale = Math.min(rawScaleX, rawScaleZ);
+          const scaleX = useUniformScale ? uniformScale : rawScaleX;
+          const scaleY = useUniformScale ? uniformScale : 1;
+          const scaleZ = useUniformScale ? uniformScale : rawScaleZ;
+          const baseY = supportTop + variant.baseOffset * scaleY;
+          const topY = baseY + sizeY * scaleY;
           const variantId = variantIds.get(variant) ?? 0;
           markStructureTopHeight(spot.minTileX, spot.maxTileX, spot.minTileY, spot.maxTileY, topY);
           variant.meshes.forEach((meshTemplate, meshIndex) => {
             const key = `${variantId}:${meshIndex}`;
             const existing = detailedBatches.get(key);
             if (existing) {
-              existing.instances.push({ spot, scale, baseY });
+              existing.instances.push({ spot, scaleX, scaleY, scaleZ, baseY });
             } else {
               detailedBatches.set(key, {
                 template: meshTemplate,
-                instances: [{ spot, scale, baseY }]
+                instances: [{ spot, scaleX, scaleY, scaleZ, baseY }]
               });
             }
           });
         } else {
-          markStructureTopHeight(spot.minTileX, spot.maxTileX, spot.minTileY, spot.maxTileY, foundationTop + 0.6);
+          markStructureTopHeight(spot.minTileX, spot.maxTileX, spot.minTileY, spot.maxTileY, supportTop + 0.6);
           fallbackInstances.push(spot);
         }
       });
@@ -3495,7 +3659,7 @@ export const buildTerrainMesh = (
         instances.forEach((instance, index) => {
           dummy.position.set(instance.spot.x, instance.baseY, instance.spot.z);
           dummy.rotation.set(0, instance.spot.rotation, 0);
-          dummy.scale.set(instance.scale, instance.scale, instance.scale);
+          dummy.scale.set(instance.scaleX, instance.scaleY, instance.scaleZ);
           dummy.updateMatrix();
           tempMatrix.copy(dummy.matrix).multiply(template.baseMatrix);
           instanced.setMatrixAt(index, tempMatrix);
@@ -3511,8 +3675,7 @@ export const buildTerrainMesh = (
         fallbackInstances.forEach((spot, index) => {
           const footprintX = Math.max(0.5, spot.footprintX);
           const footprintZ = Math.max(0.5, spot.footprintZ);
-          const foundationTop = spot.groundMax + 0.01;
-          dummy.position.set(spot.x, foundationTop + 0.3, spot.z);
+          dummy.position.set(spot.x, spot.supportTop + 0.3, spot.z);
           dummy.rotation.set(0, spot.rotation, 0);
           dummy.scale.set(footprintX, 0.6, footprintZ);
           dummy.updateMatrix();

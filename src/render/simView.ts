@@ -4,6 +4,12 @@ import type { Town } from "../core/types.js";
 import { DEFAULT_MOISTURE_PARAMS } from "../core/climate.js";
 import { clamp } from "../core/utils.js";
 import type { TerrainRenderDebugOptions } from "./terrain/debug/terrainHeightProvenance.js";
+import {
+  getBuildingLifecycleStageId,
+  getFractionalSimulationYear,
+  resolveHouseLifecycleVisualStep,
+  resolveHouseLifecycleStage
+} from "../systems/settlements/sim/buildingLifecycle.js";
 
 // Render-only view of simulation state (authoritative sim remains elsewhere).
 export type RenderSim = WorldState;
@@ -47,6 +53,8 @@ export type RenderTerrainSample = {
   vegetationRevision?: number;
   structureRevision?: number;
   dynamicStructures?: boolean;
+  houseLifecycleStages?: Uint8Array;
+  houseLifecycleSteps?: Uint8Array;
   debugRenderOptions?: TerrainRenderDebugOptions;
 };
 
@@ -66,6 +74,19 @@ export const buildRenderTerrainSample = (
   heightScaleMultiplier = 1
 ): RenderTerrainSample => {
   ensureTileSoA(state);
+  const currentSimulationYear = getFractionalSimulationYear(state.careerDay);
+  const houseLifecycleStages = new Uint8Array(state.grid.totalTiles);
+  const houseLifecycleSteps = new Uint8Array(state.grid.totalTiles);
+  for (let idx = 0; idx < state.grid.totalTiles; idx += 1) {
+    const tile = state.tiles[idx];
+    if (!tile || tile.type !== "house") {
+      houseLifecycleStages[idx] = getBuildingLifecycleStageId("finished");
+      houseLifecycleSteps[idx] = 0;
+      continue;
+    }
+    houseLifecycleStages[idx] = getBuildingLifecycleStageId(resolveHouseLifecycleStage(tile, currentSimulationYear));
+    houseLifecycleSteps[idx] = resolveHouseLifecycleVisualStep(tile, currentSimulationYear);
+  }
   return {
     cols: state.grid.cols,
     rows: state.grid.rows,
@@ -102,6 +123,8 @@ export const buildRenderTerrainSample = (
     towns: state.towns,
     vegetationRevision: state.vegetationRevision,
     structureRevision: state.structureRevision,
-    dynamicStructures: true
+    dynamicStructures: true,
+    houseLifecycleStages,
+    houseLifecycleSteps
   };
 };

@@ -14,6 +14,7 @@ import { getFuelProfiles } from "../core/tiles.js";
 import { TILE_TYPE_IDS } from "../core/state.js";
 import { destroyHouse } from "../core/towns.js";
 import { clearVegetationState } from "../core/vegetation.js";
+import { advanceHouseDamage } from "../systems/settlements/sim/buildingLifecycle.js";
 import { recordTownHouseLoss } from "./towns.js";
 import { emitSmokeAt } from "./particles.js";
 import type { EffectsState } from "../core/effectsState.js";
@@ -658,6 +659,9 @@ export function stepFire(state, effects: EffectsState, rng, delta, spreadScale, 
                         heatValue = Math.min(heatValue, ignition * 0.15);
                         clearScheduled(idx);
                     }
+                    if (state.tiles[idx].type === "house" && !state.tiles[idx].houseDestroyed) {
+                        advanceHouseDamage(state.tiles[idx], clamp(fireValue * 0.48 + overheatFactor * 0.24, 0, 1));
+                    }
                     if (fuelValue <= 0.02 && tid !== TILE_TYPE_IDS.ash) {
                         const tile = state.tiles[idx];
                         if (tile.type === "house" && !tile.houseDestroyed) {
@@ -680,6 +684,40 @@ export function stepFire(state, effects: EffectsState, rng, delta, spreadScale, 
                             if (tile.houseResidents > 0) {
                                 queueScoreFlowEvent(state, "lives", tile.houseResidents, undefined, x, y);
                             }
+                        }
+                        if (tile.type === "house") {
+                            tile.fuel = 0;
+                            clearVegetationState(tile);
+                            tile.dominantTreeType = null;
+                            tile.treeType = null;
+                            tile.heat = Math.min(tile.heat * 0.4, 0.28);
+                            state.terrainDirty = true;
+                            state.terrainTypeRevision += 1;
+                            state.vegetationRevision += 1;
+                            tile.spreadBoost = ashProfile.spreadBoost;
+                            tile.ignitionPoint = ashProfile.ignition;
+                            tile.burnRate = ashProfile.burnRate;
+                            tile.heatOutput = ashProfile.heatOutput;
+                            tile.heatTransferCap = ashProfile.heatTransferCap;
+                            tile.heatRetention = ashProfile.heatRetention;
+                            tile.windFactor = ashProfile.windFactor;
+                            typeId[idx] = TILE_TYPE_IDS.house;
+                            suppressionWetness[idx] = 0;
+                            ignitionPoint[idx] = tile.ignitionPoint;
+                            burnRate[idx] = tile.burnRate;
+                            heatOutput[idx] = tile.heatOutput;
+                            state.tileVegetationAge[idx] = 0;
+                            state.tileCanopyCover[idx] = 0;
+                            state.tileStemDensity[idx] = 0;
+                            spreadBoost[idx] = tile.spreadBoost ?? 1;
+                            heatRetention[idx] = tile.heatRetention ?? 0.9;
+                            windFactor[idx] = tile.windFactor ?? 0;
+                            heatTransferCap[idx] = tile.heatTransferCap ?? 0;
+                            fireValue = 0;
+                            fuelValue = 0;
+                            heatValue = tile.heat;
+                            heat[idx] = heatValue;
+                            continue;
                         }
                         tile.type = "ash";
                         tile.fuel = 0;

@@ -11,6 +11,7 @@ import {
   type WorldState
 } from "../../core/state.js";
 import { TREE_TYPE_IDS, TreeType, type Formation, type Grid, type Unit, type WaterSprayMode } from "../../core/types.js";
+import { buildRenderTerrainSample } from "../simView.js";
 import { buildTerrainMesh, prepareTerrainRenderSurface, type TerrainRenderSurface, type TerrainSample } from "../threeTestTerrain.js";
 import { ThreeTestWaterSystem } from "../threeTestWater.js";
 import {
@@ -27,7 +28,14 @@ import {
   type WaterFxDebugControls
 } from "../threeTestUnitFx.js";
 import { createThreeTestUnitsLayer, type ThreeTestUnitsLayer } from "../threeTestUnits.js";
-import { getTreeAssetsCache, loadTreeAssets, type TreeAssets } from "../threeTestAssets.js";
+import {
+  getHouseAssetsCache,
+  getTreeAssetsCache,
+  loadHouseAssets,
+  loadTreeAssets,
+  type HouseAssets,
+  type TreeAssets
+} from "../threeTestAssets.js";
 import { getRequiredWebGLContext } from "../webglContext.js";
 import {
   buildFxLabOverrides,
@@ -789,6 +797,8 @@ export const createFxLabController = (
   let terrainMesh: THREE.Mesh | null = null;
   let terrainSize: { width: number; depth: number } | null = null;
   let terrainSurface: TerrainRenderSurface | null = null;
+  let lastTerrainStructureRevision = -1;
+  let houseAssets: HouseAssets | null = getHouseAssetsCache();
   let treeAssets: TreeAssets | null = getTreeAssetsCache();
   let disposed = false;
   let running = false;
@@ -882,6 +892,20 @@ export const createFxLabController = (
       controls.update();
       return;
     }
+    if (currentScenarioId === "house-lifecycle") {
+      const focusTileX = 18.0;
+      const focusTileY = 30.0;
+      const focusWorldX = (focusTileX / FX_LAB_GRID_SIZE - 0.5) * terrainSize.width;
+      const focusWorldZ = (focusTileY / FX_LAB_GRID_SIZE - 0.5) * terrainSize.depth;
+      const distance = Math.max(8, Math.max(terrainSize.width, terrainSize.depth) * 0.16);
+      camera.position.set(focusWorldX - distance * 0.34, Math.max(5, distance * 0.34), focusWorldZ + distance * 0.72);
+      controls.target.set(focusWorldX, 0.95, focusWorldZ);
+      controls.minDistance = Math.max(4, distance * 0.34);
+      controls.maxDistance = Math.max(28, distance * 2.4);
+      camera.updateProjectionMatrix();
+      controls.update();
+      return;
+    }
     const distance = Math.max(12, Math.max(terrainSize.width, terrainSize.depth) * 0.55);
     camera.position.set(distance * 0.62, distance * 0.42, distance * 0.74);
     controls.target.set(0, 1.5, 0);
@@ -902,7 +926,7 @@ export const createFxLabController = (
       terrainMesh = null;
     }
     terrainSurface = prepareTerrainRenderSurface(sceneState.sample);
-    const result = buildTerrainMesh(terrainSurface, treeAssets, null, null);
+    const result = buildTerrainMesh(terrainSurface, treeAssets, houseAssets, null);
     terrainMesh = result.mesh;
     terrainSize = result.size;
     scene.add(terrainMesh);
@@ -911,6 +935,21 @@ export const createFxLabController = (
     }
     waterSystem.setLightDirectionFromKeyLight();
     fitCameraToTerrain();
+    lastTerrainStructureRevision = sceneState.world.structureRevision;
+  };
+
+  const refreshTerrainSampleFromWorld = (): void => {
+    const treeTypes = sceneState.sample.treeTypes ?? new Uint8Array(sceneState.world.grid.totalTiles);
+    sceneState.sample = buildRenderTerrainSample(
+      sceneState.world,
+      treeTypes,
+      sceneState.sample.debugTypeColors ?? false,
+      sceneState.sample.treesEnabled ?? true,
+      false,
+      false,
+      sceneState.sample.heightScaleMultiplier ?? 1
+    );
+    sceneState.sample.dynamicStructures = false;
   };
 
   const hydrateTreeAssets = (): void => {
@@ -927,6 +966,23 @@ export const createFxLabController = (
       })
       .catch((error) => {
         console.warn("[fxLab] Failed to load tree assets for background hydration.", error);
+      });
+  };
+
+  const hydrateHouseAssets = (): void => {
+    if (houseAssets) {
+      return;
+    }
+    void loadHouseAssets()
+      .then((assets) => {
+        if (disposed) {
+          return;
+        }
+        houseAssets = assets;
+        rebuildTerrain();
+      })
+      .catch((error) => {
+        console.warn("[fxLab] Failed to load house assets for lifecycle preview.", error);
       });
   };
 
@@ -1397,6 +1453,10 @@ export const createFxLabController = (
     waterSystem.setLightDirectionFromKeyLight();
     waterSystem.update(now, frameDeltaMs * 0.001, 1000 / Math.max(1, frameDeltaMs), lastSceneRenderMs);
     applyScenarioFrame();
+    if (sceneState.world.structureRevision !== lastTerrainStructureRevision) {
+      refreshTerrainSampleFromWorld();
+      rebuildTerrain();
+    }
     fireFx.update(
       now,
       sceneState.world,
@@ -1437,6 +1497,7 @@ export const createFxLabController = (
 
   rebuildTerrain();
   hydrateTreeAssets();
+  hydrateHouseAssets();
   resize();
   renderOnce();
   canvas.addEventListener("pointerdown", handleCanvasPointerDown);

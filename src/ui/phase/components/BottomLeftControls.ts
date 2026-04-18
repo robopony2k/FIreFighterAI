@@ -6,25 +6,23 @@ import {
   TIME_SPEED_SLIDER_MIN,
   TIME_SPEED_SLIDER_STEP
 } from "../../../core/timeSpeed.js";
-import type { SimTimeMode, TimeSpeedControlMode } from "../../../core/types.js";
+import {
+  AUDIO_CONTROL_CHANNELS,
+  PHASE_DOM_SETTINGS_WIDGET_CONTAINER,
+  SIMULATION_TOGGLE_SPECS,
+  TIME_CONTROL_ACTIONS,
+  getRuntimeWidgetTitle,
+  getRuntimeWidgetsForContainer,
+  getTimeSpeedAction
+} from "../../runtime/widgets/registry.js";
+import type {
+  AudioChannelState,
+  SimulationSettingsWidgetModel,
+  TimeControlsWidgetModel
+} from "../../runtime/widgets/models.js";
+import type { AudioChannelId } from "../../runtime/widgets/types.js";
 
-type ChannelSettings = {
-  muted: boolean;
-  volume: number;
-};
-
-export type BottomControlsData = {
-  showTimeControls: boolean;
-  showSpeedControl: boolean;
-  paused: boolean;
-  simTimeMode: SimTimeMode;
-  timeSpeedControlMode: TimeSpeedControlMode;
-  timeSpeedIndex: number;
-  timeSpeedValue: number;
-  skipToNextFireActive: boolean;
-  canSkipToNextFire: boolean;
-  status?: string;
-};
+export type BottomControlsData = TimeControlsWidgetModel;
 
 export type BottomControlsView = {
   element: HTMLElement;
@@ -34,43 +32,61 @@ export type BottomControlsView = {
   setAudioState: (settings: UiAudioSettings) => void;
   onWorldMuteToggle: (handler: () => void) => void;
   onWorldVolumeChange: (handler: (value: number) => void) => void;
-  setWorldState: (settings: ChannelSettings) => void;
+  setWorldState: (settings: AudioChannelState) => void;
   onMusicMuteToggle: (handler: () => void) => void;
   onMusicVolumeChange: (handler: (value: number) => void) => void;
-  setMusicState: (settings: ChannelSettings) => void;
+  setMusicState: (settings: AudioChannelState) => void;
+  onRandomFireIgnitionToggle: (handler: (enabled: boolean) => void) => void;
+  onAnnualReportToggle: (handler: (enabled: boolean) => void) => void;
+  setSimulationToggleState: (settings: SimulationSettingsWidgetModel) => void;
+};
+
+type AudioRowControls = {
+  row: HTMLDivElement;
+  muteButton: HTMLButtonElement;
+  volumeLabel: HTMLSpanElement;
+  volumeSlider: HTMLInputElement;
+};
+
+type ToggleRowControls = {
+  row: HTMLLabelElement;
+  input: HTMLInputElement;
 };
 
 export const createBottomLeftControls = (): BottomControlsView => {
-  const getDisplayedIndices = (mode: SimTimeMode): number[] => {
+  const getDisplayedIndices = (mode: BottomControlsData["simTimeMode"]): number[] => {
     const options = getTimeSpeedOptions(mode);
     const last = Math.max(0, options.length - 1);
     return [...new Set([0, Math.min(1, last), Math.min(2, last), last])];
   };
+
   const element = document.createElement("div");
   element.className = "phase-panel phase-bottom-controls";
   element.dataset.panel = "bottomControls";
+  element.dataset.runtimeWidgetContainer = PHASE_DOM_SETTINGS_WIDGET_CONTAINER;
 
   const timeGroup = document.createElement("div");
   timeGroup.className = "phase-control-group phase-time-group";
+  timeGroup.dataset.runtimeWidget = "timeControls";
   const titleRow = document.createElement("div");
   titleRow.className = "phase-control-title";
-  titleRow.textContent = "Strategic Time";
+  titleRow.textContent = getRuntimeWidgetTitle("timeControls", "phaseDom");
 
   const buttonSpeedRow = document.createElement("div");
   buttonSpeedRow.className = "phase-control-row phase-time-speed-row";
   buttonSpeedRow.innerHTML = `
-    <button data-action="pause" aria-label="Pause" title="Pause">||</button>
+    <button data-action="${TIME_CONTROL_ACTIONS.pause.action}" aria-label="Pause" title="Pause">||</button>
     <button data-role="time-speed"></button>
     <button data-role="time-speed"></button>
     <button data-role="time-speed"></button>
     <button data-role="time-speed"></button>
-    <button data-action="time-skip-next-fire" aria-label="Skip to Next Fire" title="Skip to Next Fire">Next Fire</button>
+    <button data-action="${TIME_CONTROL_ACTIONS.skipToNextFire.action}" aria-label="Skip to Next Fire" title="Skip to Next Fire">Next Fire</button>
   `;
 
   const sliderSpeedRow = document.createElement("div");
   sliderSpeedRow.className = "phase-control-row phase-time-slider-row is-hidden";
   sliderSpeedRow.innerHTML = `
-    <button data-action="pause" aria-label="Pause" title="Pause">||</button>
+    <button data-action="${TIME_CONTROL_ACTIONS.pause.action}" aria-label="Pause" title="Pause">||</button>
     <label class="phase-time-slider-field">
       <span class="phase-time-slider-caption">Speed</span>
       <input
@@ -79,22 +95,17 @@ export const createBottomLeftControls = (): BottomControlsView => {
         max="${TIME_SPEED_SLIDER_MAX}"
         step="${TIME_SPEED_SLIDER_STEP}"
         value="1"
-        data-action="time-speed-slider-set"
+        data-action="${TIME_CONTROL_ACTIONS.sliderSet.action}"
         data-role="time-speed-slider"
         aria-label="Time speed slider"
       />
     </label>
     <span class="phase-time-slider-value">1x</span>
-    <button data-action="time-skip-next-fire" aria-label="Skip to Next Fire" title="Skip to Next Fire">Next Fire</button>
+    <button data-action="${TIME_CONTROL_ACTIONS.skipToNextFire.action}" aria-label="Skip to Next Fire" title="Skip to Next Fire">Next Fire</button>
   `;
   timeGroup.append(titleRow, buttonSpeedRow, sliderSpeedRow);
 
-  const createAudioRow = (): {
-    row: HTMLDivElement;
-    muteButton: HTMLButtonElement;
-    volumeLabel: HTMLSpanElement;
-    volumeSlider: HTMLInputElement;
-  } => {
+  const buildAudioRow = (): AudioRowControls => {
     const row = document.createElement("div");
     row.className = "phase-control-row phase-audio-row";
     const muteButton = document.createElement("button");
@@ -115,109 +126,223 @@ export const createBottomLeftControls = (): BottomControlsView => {
     return { row, muteButton, volumeLabel, volumeSlider };
   };
 
-  const sfxControls = createAudioRow();
-  const worldControls = createAudioRow();
-  const musicControls = createAudioRow();
-  timeGroup.append(sfxControls.row, worldControls.row, musicControls.row);
+  const audioGroup = document.createElement("div");
+  audioGroup.className = "phase-control-group phase-audio-group";
+  audioGroup.dataset.runtimeWidget = "audioControls";
+  const audioTitle = document.createElement("div");
+  audioTitle.className = "phase-control-title";
+  audioTitle.textContent = getRuntimeWidgetTitle("audioControls", "phaseDom");
+  audioGroup.appendChild(audioTitle);
+
+  const audioRows = new Map<AudioChannelId, AudioRowControls>();
+  AUDIO_CONTROL_CHANNELS.forEach((channel) => {
+    const controls = buildAudioRow();
+    controls.row.dataset.audioChannel = channel.id;
+    audioRows.set(channel.id, controls);
+    audioGroup.appendChild(controls.row);
+  });
+
+  const buildToggleRow = (labelText: string, descriptionText: string): ToggleRowControls => {
+    const row = document.createElement("label");
+    row.className = "phase-control-toggle";
+    const copy = document.createElement("span");
+    copy.className = "phase-control-toggle-copy";
+    const label = document.createElement("span");
+    label.className = "phase-control-toggle-label";
+    label.textContent = labelText;
+    const description = document.createElement("span");
+    description.className = "phase-control-toggle-description";
+    description.textContent = descriptionText;
+    copy.append(label, description);
+    const input = document.createElement("input");
+    input.type = "checkbox";
+    input.className = "phase-control-toggle-input";
+    row.append(copy, input);
+    return { row, input };
+  };
+
+  const simulationGroup = document.createElement("div");
+  simulationGroup.className = "phase-control-group phase-testing-group";
+  simulationGroup.dataset.runtimeWidget = "simulationSettings";
+  const simulationTitle = document.createElement("div");
+  simulationTitle.className = "phase-control-title";
+  simulationTitle.textContent = getRuntimeWidgetTitle("simulationSettings", "phaseDom");
+  simulationGroup.appendChild(simulationTitle);
+
+  const toggleRows = new Map<keyof SimulationSettingsWidgetModel, ToggleRowControls>();
+  SIMULATION_TOGGLE_SPECS.forEach((toggle) => {
+    const controls = buildToggleRow(toggle.title, toggle.description);
+    controls.row.dataset.runtimeSetting = toggle.setting;
+    toggleRows.set(toggle.setting, controls);
+    simulationGroup.appendChild(controls.row);
+  });
 
   const status = document.createElement("div");
   status.className = "phase-control-status";
 
-  element.append(timeGroup, status);
+  const widgetGroups = new Map<"timeControls" | "audioControls" | "simulationSettings", HTMLElement>([
+    ["timeControls", timeGroup],
+    ["audioControls", audioGroup],
+    ["simulationSettings", simulationGroup]
+  ]);
+  getRuntimeWidgetsForContainer("phaseDom", PHASE_DOM_SETTINGS_WIDGET_CONTAINER).forEach((spec) => {
+    const group = widgetGroups.get(spec.id as "timeControls" | "audioControls" | "simulationSettings");
+    if (group) {
+      element.appendChild(group);
+    }
+  });
+  element.appendChild(status);
 
-  const buttonPauseButton = buttonSpeedRow.querySelector('[data-action="pause"]') as HTMLButtonElement;
-  const sliderPauseButton = sliderSpeedRow.querySelector('[data-action="pause"]') as HTMLButtonElement;
-  const buttonNextFireButton = buttonSpeedRow.querySelector('[data-action="time-skip-next-fire"]') as HTMLButtonElement;
-  const sliderNextFireButton = sliderSpeedRow.querySelector('[data-action="time-skip-next-fire"]') as HTMLButtonElement;
+  const buttonPauseButton = buttonSpeedRow.querySelector(`[data-action="${TIME_CONTROL_ACTIONS.pause.action}"]`) as HTMLButtonElement;
+  const sliderPauseButton = sliderSpeedRow.querySelector(`[data-action="${TIME_CONTROL_ACTIONS.pause.action}"]`) as HTMLButtonElement;
+  const buttonNextFireButton = buttonSpeedRow.querySelector(
+    `[data-action="${TIME_CONTROL_ACTIONS.skipToNextFire.action}"]`
+  ) as HTMLButtonElement;
+  const sliderNextFireButton = sliderSpeedRow.querySelector(
+    `[data-action="${TIME_CONTROL_ACTIONS.skipToNextFire.action}"]`
+  ) as HTMLButtonElement;
   const speedButtons = Array.from(buttonSpeedRow.querySelectorAll<HTMLButtonElement>('[data-role="time-speed"]'));
   const speedSlider = sliderSpeedRow.querySelector('[data-role="time-speed-slider"]') as HTMLInputElement;
   const speedSliderValue = sliderSpeedRow.querySelector(".phase-time-slider-value") as HTMLSpanElement;
 
-  let audioState: ChannelSettings = { muted: false, volume: 0.65 };
-  let worldState: ChannelSettings = { muted: false, volume: 0.55 };
-  let musicState: ChannelSettings = { muted: false, volume: 0.35 };
+  const defaultAudioState: Record<AudioChannelId, AudioChannelState> = AUDIO_CONTROL_CHANNELS.reduce(
+    (result, channel) => ({
+      ...result,
+      [channel.id]: {
+        muted: false,
+        volume: channel.defaultVolume
+      }
+    }),
+    {} as Record<AudioChannelId, AudioChannelState>
+  );
+
+  let audioState = defaultAudioState.sfx;
+  let worldState = defaultAudioState.world;
+  let musicState = defaultAudioState.music;
   let onAudioMuteToggleHandler: (() => void) | null = null;
   let onAudioVolumeChangeHandler: ((value: number) => void) | null = null;
   let onWorldMuteToggleHandler: (() => void) | null = null;
   let onWorldVolumeChangeHandler: ((value: number) => void) | null = null;
   let onMusicMuteToggleHandler: (() => void) | null = null;
   let onMusicVolumeChangeHandler: ((value: number) => void) | null = null;
+  let simulationToggleState: SimulationSettingsWidgetModel = {
+    randomFireIgnition: true,
+    annualReportEnabled: true
+  };
+  let onRandomFireIgnitionToggleHandler: ((enabled: boolean) => void) | null = null;
+  let onAnnualReportToggleHandler: ((enabled: boolean) => void) | null = null;
 
-  const setAudioControlsEnabled = (): void => {
-    const sfxEnabled = onAudioMuteToggleHandler !== null && onAudioVolumeChangeHandler !== null;
-    sfxControls.muteButton.disabled = !sfxEnabled;
-    sfxControls.volumeSlider.disabled = !sfxEnabled || audioState.muted;
+  const getAudioControlState = (channelId: AudioChannelId): AudioChannelState => {
+    if (channelId === "world") {
+      return worldState;
+    }
+    if (channelId === "music") {
+      return musicState;
+    }
+    return audioState;
+  };
 
-    const worldEnabled = onWorldMuteToggleHandler !== null && onWorldVolumeChangeHandler !== null;
-    worldControls.muteButton.disabled = !worldEnabled;
-    worldControls.volumeSlider.disabled = !worldEnabled || worldState.muted;
-
-    const musicEnabled = onMusicMuteToggleHandler !== null && onMusicVolumeChangeHandler !== null;
-    musicControls.muteButton.disabled = !musicEnabled;
-    musicControls.volumeSlider.disabled = !musicEnabled || musicState.muted;
+  const getAudioHandlers = (
+    channelId: AudioChannelId
+  ): { mute: (() => void) | null; volume: ((value: number) => void) | null } => {
+    if (channelId === "world") {
+      return {
+        mute: onWorldMuteToggleHandler,
+        volume: onWorldVolumeChangeHandler
+      };
+    }
+    if (channelId === "music") {
+      return {
+        mute: onMusicMuteToggleHandler,
+        volume: onMusicVolumeChangeHandler
+      };
+    }
+    return {
+      mute: onAudioMuteToggleHandler,
+      volume: onAudioVolumeChangeHandler
+    };
   };
 
   const refreshAudioControls = (): void => {
-    const sfxVolumePct = Math.round(Math.max(0, Math.min(1, audioState.volume)) * 100);
-    sfxControls.muteButton.textContent = audioState.muted ? "Unmute SFX" : "Mute SFX";
-    sfxControls.muteButton.setAttribute("aria-pressed", audioState.muted ? "true" : "false");
-    sfxControls.muteButton.setAttribute("title", audioState.muted ? "Unmute UI SFX" : "Mute UI SFX");
-    sfxControls.volumeLabel.textContent = `SFX ${sfxVolumePct}%`;
-    sfxControls.volumeSlider.value = audioState.volume.toFixed(2);
-
-    const worldVolumePct = Math.round(Math.max(0, Math.min(1, worldState.volume)) * 100);
-    worldControls.muteButton.textContent = worldState.muted ? "Unmute World" : "Mute World";
-    worldControls.muteButton.setAttribute("aria-pressed", worldState.muted ? "true" : "false");
-    worldControls.muteButton.setAttribute("title", worldState.muted ? "Unmute world audio" : "Mute world audio");
-    worldControls.volumeLabel.textContent = `World ${worldVolumePct}%`;
-    worldControls.volumeSlider.value = worldState.volume.toFixed(2);
-
-    const musicVolumePct = Math.round(Math.max(0, Math.min(1, musicState.volume)) * 100);
-    musicControls.muteButton.textContent = musicState.muted ? "Unmute Music" : "Mute Music";
-    musicControls.muteButton.setAttribute("aria-pressed", musicState.muted ? "true" : "false");
-    musicControls.muteButton.setAttribute("title", musicState.muted ? "Unmute music" : "Mute music");
-    musicControls.volumeLabel.textContent = `Music ${musicVolumePct}%`;
-    musicControls.volumeSlider.value = musicState.volume.toFixed(2);
-
-    setAudioControlsEnabled();
+    AUDIO_CONTROL_CHANNELS.forEach((channel) => {
+      const controls = audioRows.get(channel.id);
+      if (!controls) {
+        return;
+      }
+      const settings = getAudioControlState(channel.id);
+      const handlers = getAudioHandlers(channel.id);
+      const volumePct = Math.round(Math.max(0, Math.min(1, settings.volume)) * 100);
+      controls.muteButton.textContent = settings.muted ? `Unmute ${channel.label}` : `Mute ${channel.label}`;
+      controls.muteButton.setAttribute("aria-pressed", settings.muted ? "true" : "false");
+      controls.muteButton.setAttribute("title", settings.muted ? channel.mutedTitle : channel.unmutedTitle);
+      controls.muteButton.setAttribute("aria-label", settings.muted ? channel.mutedAriaLabel : channel.unmutedAriaLabel);
+      controls.volumeLabel.textContent = `${channel.label} ${volumePct}%`;
+      controls.volumeSlider.value = settings.volume.toFixed(2);
+      controls.muteButton.disabled = handlers.mute === null || handlers.volume === null;
+      controls.volumeSlider.disabled = handlers.volume === null || settings.muted;
+    });
   };
 
-  sfxControls.muteButton.addEventListener("click", (event) => {
+  const refreshSimulationToggles = (): void => {
+    SIMULATION_TOGGLE_SPECS.forEach((toggle) => {
+      const controls = toggleRows.get(toggle.setting);
+      if (!controls) {
+        return;
+      }
+      const enabled = simulationToggleState[toggle.setting];
+      controls.input.checked = enabled;
+      controls.input.disabled =
+        toggle.setting === "randomFireIgnition"
+          ? onRandomFireIgnitionToggleHandler === null
+          : onAnnualReportToggleHandler === null;
+    });
+  };
+
+  audioRows.get("sfx")?.muteButton.addEventListener("click", (event) => {
     event.preventDefault();
     onAudioMuteToggleHandler?.();
   });
-  sfxControls.volumeSlider.addEventListener("input", () => {
-    const next = Number(sfxControls.volumeSlider.value);
+  audioRows.get("sfx")?.volumeSlider.addEventListener("input", () => {
+    const next = Number(audioRows.get("sfx")?.volumeSlider.value ?? Number.NaN);
     if (!Number.isFinite(next)) {
       return;
     }
     onAudioVolumeChangeHandler?.(next);
   });
 
-  worldControls.muteButton.addEventListener("click", (event) => {
+  audioRows.get("world")?.muteButton.addEventListener("click", (event) => {
     event.preventDefault();
     onWorldMuteToggleHandler?.();
   });
-  worldControls.volumeSlider.addEventListener("input", () => {
-    const next = Number(worldControls.volumeSlider.value);
+  audioRows.get("world")?.volumeSlider.addEventListener("input", () => {
+    const next = Number(audioRows.get("world")?.volumeSlider.value ?? Number.NaN);
     if (!Number.isFinite(next)) {
       return;
     }
     onWorldVolumeChangeHandler?.(next);
   });
 
-  musicControls.muteButton.addEventListener("click", (event) => {
+  audioRows.get("music")?.muteButton.addEventListener("click", (event) => {
     event.preventDefault();
     onMusicMuteToggleHandler?.();
   });
-  musicControls.volumeSlider.addEventListener("input", () => {
-    const next = Number(musicControls.volumeSlider.value);
+  audioRows.get("music")?.volumeSlider.addEventListener("input", () => {
+    const next = Number(audioRows.get("music")?.volumeSlider.value ?? Number.NaN);
     if (!Number.isFinite(next)) {
       return;
     }
     onMusicVolumeChangeHandler?.(next);
   });
+
+  toggleRows.get("randomFireIgnition")?.input.addEventListener("change", () => {
+    onRandomFireIgnitionToggleHandler?.(Boolean(toggleRows.get("randomFireIgnition")?.input.checked));
+  });
+  toggleRows.get("annualReportEnabled")?.input.addEventListener("change", () => {
+    onAnnualReportToggleHandler?.(Boolean(toggleRows.get("annualReportEnabled")?.input.checked));
+  });
+
   refreshAudioControls();
+  refreshSimulationToggles();
 
   return {
     element,
@@ -241,7 +366,7 @@ export const createBottomLeftControls = (): BottomControlsView => {
         button.classList.remove("is-hidden");
         button.disabled = false;
         button.dataset.speedIndex = String(index);
-        button.dataset.action = `time-speed-${index}`;
+        button.dataset.action = getTimeSpeedAction(index).action;
         button.textContent = slot === speedButtons.length - 1 && index === activeOptions.length - 1 ? "MAX" : speedLabel;
         button.setAttribute("title", `Speed ${speedLabel}`);
         button.setAttribute("aria-label", `Speed ${speedLabel}`);
@@ -283,11 +408,11 @@ export const createBottomLeftControls = (): BottomControlsView => {
     },
     onAudioMuteToggle: (handler) => {
       onAudioMuteToggleHandler = handler;
-      setAudioControlsEnabled();
+      refreshAudioControls();
     },
     onAudioVolumeChange: (handler) => {
       onAudioVolumeChangeHandler = handler;
-      setAudioControlsEnabled();
+      refreshAudioControls();
     },
     setAudioState: (settings) => {
       audioState = {
@@ -298,11 +423,11 @@ export const createBottomLeftControls = (): BottomControlsView => {
     },
     onWorldMuteToggle: (handler) => {
       onWorldMuteToggleHandler = handler;
-      setAudioControlsEnabled();
+      refreshAudioControls();
     },
     onWorldVolumeChange: (handler) => {
       onWorldVolumeChangeHandler = handler;
-      setAudioControlsEnabled();
+      refreshAudioControls();
     },
     setWorldState: (settings) => {
       worldState = {
@@ -313,11 +438,11 @@ export const createBottomLeftControls = (): BottomControlsView => {
     },
     onMusicMuteToggle: (handler) => {
       onMusicMuteToggleHandler = handler;
-      setAudioControlsEnabled();
+      refreshAudioControls();
     },
     onMusicVolumeChange: (handler) => {
       onMusicVolumeChangeHandler = handler;
-      setAudioControlsEnabled();
+      refreshAudioControls();
     },
     setMusicState: (settings) => {
       musicState = {
@@ -325,6 +450,21 @@ export const createBottomLeftControls = (): BottomControlsView => {
         volume: Math.max(0, Math.min(1, settings.volume))
       };
       refreshAudioControls();
+    },
+    onRandomFireIgnitionToggle: (handler) => {
+      onRandomFireIgnitionToggleHandler = handler;
+      refreshSimulationToggles();
+    },
+    onAnnualReportToggle: (handler) => {
+      onAnnualReportToggleHandler = handler;
+      refreshSimulationToggles();
+    },
+    setSimulationToggleState: (settings) => {
+      simulationToggleState = {
+        randomFireIgnition: Boolean(settings.randomFireIgnition),
+        annualReportEnabled: Boolean(settings.annualReportEnabled)
+      };
+      refreshSimulationToggles();
     }
   };
 };

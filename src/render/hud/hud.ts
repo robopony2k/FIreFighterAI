@@ -4,6 +4,7 @@ import { indexFor } from "../../core/grid.js";
 import { DEFAULT_MOISTURE_PARAMS } from "../../core/climate.js";
 import { getTimeSpeedOptions } from "../../core/config.js";
 import { formatTimeSpeedValue, getResolvedTimeSpeedValue, stepTimeSpeedSliderValue } from "../../core/timeSpeed.js";
+import { TIME_CONTROL_ACTIONS, getRuntimeWidgetTitle, getTimeSpeedAction } from "../../ui/runtime/widgets/registry.js";
 import { buildHudLayout, WidgetSlot, WidgetType, type Rect } from "./hudLayout.js";
 import type { HudState } from "./hudState.js";
 import { addToast, cycleWidget, stepToasts, toggleCompact } from "./hudState.js";
@@ -38,13 +39,13 @@ const getWidget = (slot: WidgetSlot, type: WidgetType): HudWidget => {
   }
   let widget: HudWidget;
   switch (type) {
-    case WidgetType.Minimap:
+    case "minimap":
       widget = new MinimapWidget(slot);
       break;
-    case WidgetType.Debug:
+    case "debug":
       widget = new DebugWidget(slot);
       break;
-    case WidgetType.ClimateChart:
+    case "climate":
     default:
       widget = new ClimateChartWidget(slot);
       break;
@@ -54,8 +55,7 @@ const getWidget = (slot: WidgetSlot, type: WidgetType): HudWidget => {
 };
 
 const widgetLabel = (type: WidgetType, compact: boolean): string => {
-  const name =
-    type === WidgetType.ClimateChart ? "Climate" : type === WidgetType.Minimap ? "Minimap" : "Debug";
+  const name = type === "debug" ? "Debug" : getRuntimeWidgetTitle(type, "canvasHud");
   return compact ? `${name} (Compact)` : name;
 };
 
@@ -391,7 +391,7 @@ export const handleHudClick = (
     if (world.timeSpeedControlMode === "slider") {
       const delta = x < speedRect.x + SPEED_BUTTON_SIDE ? -1 : 1;
       const nextValue = stepTimeSpeedSliderValue(world.timeSpeedSliderValue, delta);
-      dispatchAction("time-speed-step", { delta: String(delta) });
+      dispatchAction(TIME_CONTROL_ACTIONS.sliderStep.action, { delta: String(delta) });
       addToast(
         ui,
         `${world.simTimeMode === "incident" ? "Incident" : "Strategic"} time ${formatTimeSpeedValue(nextValue)}.`,
@@ -412,7 +412,7 @@ export const handleHudClick = (
     } else {
       next = (current + 1) % len;
     }
-    dispatchAction(`time-speed-${next}`);
+    dispatchAction(getTimeSpeedAction(next).action);
     addToast(
       ui,
       `${world.simTimeMode === "incident" ? "Incident" : "Strategic"} time ${formatTimeSpeedValue(

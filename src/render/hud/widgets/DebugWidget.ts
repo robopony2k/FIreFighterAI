@@ -1,11 +1,10 @@
 import type { WorldState } from "../../../core/state.js";
 import type { HudState } from "../hudState.js";
 import type { Rect, WidgetSlot, WidgetType } from "../hudLayout.js";
-import { WidgetType as WidgetKind } from "../hudLayout.js";
 import type { HudWidget } from "./hudWidget.js";
 
 export class DebugWidget implements HudWidget {
-  public readonly type: WidgetType = WidgetKind.Debug;
+  public readonly type: WidgetType = "debug";
   private slot: WidgetSlot;
 
   constructor(slot: WidgetSlot) {

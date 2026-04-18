@@ -1,6 +1,8 @@
 export type RuntimeSettings = {
   render: "3d" | "2d";
   timespeedui: "buttons" | "slider";
+  randomFireIgnition: boolean;
+  annualReportEnabled: boolean;
   headless: boolean;
   nosim: boolean;
   seasonal: boolean;
@@ -99,6 +101,8 @@ const toFiniteNumber = (value: unknown): number | null => {
 export const DEFAULT_RUNTIME_SETTINGS: RuntimeSettings = {
   render: "3d",
   timespeedui: "buttons",
+  randomFireIgnition: true,
+  annualReportEnabled: true,
   headless: false,
   nosim: false,
   seasonal: true,
@@ -157,6 +161,24 @@ export const RUNTIME_SETTING_DEFINITIONS: ReadonlyArray<RuntimeSettingDefinition
       { value: "buttons", label: "Buttons" },
       { value: "slider", label: "Slider" }
     ]
+  },
+  {
+    key: "randomFireIgnition",
+    section: "General",
+    kind: "boolean",
+    label: "Random Fire Ignition",
+    description: "Allow random fire starts during fire season simulation.",
+    defaultValue: DEFAULT_RUNTIME_SETTINGS.randomFireIgnition,
+    queryStyle: "0-false"
+  },
+  {
+    key: "annualReportEnabled",
+    section: "General",
+    kind: "boolean",
+    label: "Annual Report",
+    description: "Pause for the annual ledger at the winter rollover.",
+    defaultValue: DEFAULT_RUNTIME_SETTINGS.annualReportEnabled,
+    queryStyle: "0-false"
   },
   {
     key: "headless",

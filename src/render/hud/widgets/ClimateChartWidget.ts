@@ -1,8 +1,8 @@
 import type { WorldState } from "../../../core/state.js";
 import type { HudState } from "../hudState.js";
 import type { Rect, WidgetType, WidgetSlot } from "../hudLayout.js";
-import { WidgetType as WidgetKind } from "../hudLayout.js";
 import type { HudWidget } from "./hudWidget.js";
+import { getRuntimeWidgetTitle } from "../../../ui/runtime/widgets/registry.js";
 import {
   RISK_BANDS,
   RISK_THRESHOLDS,
@@ -41,7 +41,7 @@ const drawRoundedRect = (ctx: CanvasRenderingContext2D, x: number, y: number, w:
 };
 
 export class ClimateChartWidget implements HudWidget {
-  public readonly type: WidgetType = WidgetKind.ClimateChart;
+  public readonly type: WidgetType = "climate";
   private slot: WidgetSlot;
 
   constructor(slot: WidgetSlot) {
@@ -92,7 +92,7 @@ export class ClimateChartWidget implements HudWidget {
     ctx.font = `600 ${titleFont}px ui-sans-serif, system-ui, sans-serif`;
     ctx.textBaseline = "top";
     ctx.textAlign = "left";
-    ctx.fillText("Climate Forecast", rect.x + padding, rect.y + padding - 1);
+    ctx.fillText(getRuntimeWidgetTitle("climate"), rect.x + padding, rect.y + padding - 1);
 
     if (!forecast || forecast.risk.length === 0) {
       ctx.fillStyle = theme.chartLabel;

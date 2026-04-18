@@ -16,7 +16,8 @@ export type TerrainSeedPayload = {
 const SHARE_CODE_PREFIX_V1 = "MAP1";
 const SHARE_CODE_PREFIX_V2 = "MAP2";
 const SHARE_CODE_PREFIX_V3 = "MAP3";
-const SHARE_CODE_PREFIX = SHARE_CODE_PREFIX_V3;
+const SHARE_CODE_PREFIX_V4 = "MAP4";
+const SHARE_CODE_PREFIX = SHARE_CODE_PREFIX_V4;
 const MAP_SIZE_ORDER: readonly MapSizeId[] = ["medium", "massive", "colossal", "gigantic", "titanic"];
 const ARCHETYPE_ORDER: readonly TerrainArchetypeId[] = ["MASSIF", "LONG_SPINE", "TWIN_BAY", "SHELF"];
 const LEGACY_TOWN_LAYOUT_ORDER = ["auto", "coastal_ring", "bridge_chain", "inland_valley", "hub_spokes"] as const;
@@ -35,6 +36,20 @@ const decodePercent = (token: string): number | null => {
     return null;
   }
   return parsed / 100;
+};
+
+const encodeSmallInt = (value: number): string =>
+  Math.max(0, Math.min(63, Math.round(value))).toString(36).toUpperCase().padStart(2, "0");
+
+const decodeSmallInt = (token: string): number | null => {
+  if (token.length !== 2) {
+    return null;
+  }
+  const parsed = Number.parseInt(token, 36);
+  if (!Number.isFinite(parsed) || parsed < 0 || parsed > 63) {
+    return null;
+  }
+  return parsed;
 };
 
 const coerceNonNegativeSeed = (seed: number): number =>
@@ -138,6 +153,7 @@ export const encodeTerrainSeedCode = (payload: TerrainSeedPayload): string => {
     encodePercent(advanced.coastalShelfWidth ?? 0),
     encodePercent(advanced.riverBudget ?? 0),
     encodePercent(advanced.settlementSpacing ?? 0),
+    encodeSmallInt(advanced.settlementPreGrowthYears ?? 20),
     encodePercent(advanced.roadStrictness ?? 0),
     encodePercent(advanced.forestPatchiness ?? 0)
   ].join("");
@@ -151,7 +167,12 @@ export const decodeTerrainSeedCode = (value: string): TerrainSeedPayload | null 
   const trimmed = value.trim();
   const parts = trimmed.split("-");
   const prefix = (parts[0] ?? "").toUpperCase();
-  if (prefix !== SHARE_CODE_PREFIX_V1 && prefix !== SHARE_CODE_PREFIX_V2 && prefix !== SHARE_CODE_PREFIX_V3) {
+  if (
+    prefix !== SHARE_CODE_PREFIX_V1 &&
+    prefix !== SHARE_CODE_PREFIX_V2 &&
+    prefix !== SHARE_CODE_PREFIX_V3 &&
+    prefix !== SHARE_CODE_PREFIX_V4
+  ) {
     return null;
   }
   if (parts.length < 3 || parts.length > 4) {
@@ -160,9 +181,10 @@ export const decodeTerrainSeedCode = (value: string): TerrainSeedPayload | null 
   const seed = Number.parseInt(parts[1] ?? "", 36);
   const body = parts[2] ?? "";
   const nameToken = parts[3] ?? "";
-  const hasNameToken = prefix === SHARE_CODE_PREFIX_V2 || prefix === SHARE_CODE_PREFIX_V3;
+  const hasNameToken =
+    prefix === SHARE_CODE_PREFIX_V2 || prefix === SHARE_CODE_PREFIX_V3 || prefix === SHARE_CODE_PREFIX_V4;
   const name = hasNameToken ? decodeNameToken(nameToken, coerceNonNegativeSeed(seed)) : undefined;
-  const expectedBodyLength = prefix === SHARE_CODE_PREFIX_V3 ? 50 : 40;
+  const expectedBodyLength = prefix === SHARE_CODE_PREFIX_V4 ? 52 : prefix === SHARE_CODE_PREFIX_V3 ? 50 : 40;
   if (!Number.isFinite(seed) || seed < 0 || body.length !== expectedBodyLength) {
     return null;
   }
@@ -177,18 +199,56 @@ export const decodeTerrainSeedCode = (value: string): TerrainSeedPayload | null 
     return null;
   }
   const values: number[] = [];
-  for (let index = 4; index < body.length; index += 2) {
+  const bodyValueLimit = prefix === SHARE_CODE_PREFIX_V4 ? 46 : body.length;
+  for (let index = 4; index < bodyValueLimit; index += 2) {
     const decoded = decodePercent(body.slice(index, index + 2));
     if (decoded === null) {
       return null;
     }
     values.push(decoded);
   }
-  if ((prefix === SHARE_CODE_PREFIX_V3 && values.length !== 23) || (prefix !== SHARE_CODE_PREFIX_V3 && values.length !== 18)) {
+  const decodedPreGrowthYears =
+    prefix === SHARE_CODE_PREFIX_V4 ? decodeSmallInt(body.slice(46, 48)) : 20;
+  if (prefix === SHARE_CODE_PREFIX_V4 && decodedPreGrowthYears === null) {
+    return null;
+  }
+  const preGrowthYears = decodedPreGrowthYears ?? 20;
+  if (
+    (prefix === SHARE_CODE_PREFIX_V4 && values.length !== 21) ||
+    (prefix === SHARE_CODE_PREFIX_V3 && values.length !== 23) ||
+    (prefix !== SHARE_CODE_PREFIX_V3 && prefix !== SHARE_CODE_PREFIX_V4 && values.length !== 18)
+  ) {
     return null;
   }
   const advancedOverrides =
-    prefix === SHARE_CODE_PREFIX_V3
+    prefix === SHARE_CODE_PREFIX_V4
+      ? (() => {
+          const roadStrictness = decodePercent(body.slice(48, 50));
+          const forestPatchiness = decodePercent(body.slice(50, 52));
+          if (roadStrictness === null || forestPatchiness === null) {
+            return null;
+          }
+          return {
+          interiorRise: values[8],
+          maxHeight: values[9],
+          embayment: values[10],
+          anisotropy: values[11],
+          asymmetry: values[12],
+          ridgeAlignment: values[13],
+          uplandDistribution: values[14],
+          islandCompactness: values[15],
+          ridgeFrequency: values[16],
+          basinStrength: values[17],
+          coastalShelfWidth: values[18],
+          skipCarving,
+          riverBudget: values[19],
+          settlementSpacing: values[20],
+          settlementPreGrowthYears: preGrowthYears,
+          roadStrictness,
+          forestPatchiness
+        };
+        })()
+      : prefix === SHARE_CODE_PREFIX_V3
       ? {
           interiorRise: values[8],
           maxHeight: values[9],
@@ -204,6 +264,7 @@ export const decodeTerrainSeedCode = (value: string): TerrainSeedPayload | null 
           skipCarving,
           riverBudget: values[19],
           settlementSpacing: values[20],
+          settlementPreGrowthYears: 20,
           roadStrictness: values[21],
           forestPatchiness: values[22]
         }
@@ -217,9 +278,13 @@ export const decodeTerrainSeedCode = (value: string): TerrainSeedPayload | null 
           skipCarving,
           riverBudget: values[14],
           settlementSpacing: values[15],
+          settlementPreGrowthYears: 20,
           roadStrictness: values[16],
           forestPatchiness: values[17]
         };
+  if (!advancedOverrides) {
+    return null;
+  }
   const terrain = cloneTerrainRecipe({
     archetype,
     mapSize,

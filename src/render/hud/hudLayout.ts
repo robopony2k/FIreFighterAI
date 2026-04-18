@@ -1,27 +1,23 @@
+import { getCanvasHudSlotWidgetIds, type CanvasHudWidgetId } from "../../ui/runtime/widgets/registry.js";
+
 export type Rect = { x: number; y: number; width: number; height: number };
 
 export type HudViewport = { width: number; height: number };
 
-export enum WidgetType {
-  ClimateChart = "ClimateChart",
-  Minimap = "Minimap",
-  Debug = "Debug"
-}
+export type WidgetType = CanvasHudWidgetId | "debug";
 
 export enum WidgetSlot {
   A = "A",
   B = "B"
 }
 
-export const WIDGET_TYPES: WidgetType[] = [
-  WidgetType.ClimateChart,
-  WidgetType.Minimap,
-  WidgetType.Debug
-];
+const canvasHudWidgetIds = getCanvasHudSlotWidgetIds();
+
+export const WIDGET_TYPES: WidgetType[] = [...canvasHudWidgetIds, "debug"];
 
 export const DEFAULT_WIDGET_ASSIGNMENTS: Record<WidgetSlot, WidgetType> = {
-  [WidgetSlot.A]: WidgetType.ClimateChart,
-  [WidgetSlot.B]: WidgetType.Minimap
+  [WidgetSlot.A]: canvasHudWidgetIds[0] ?? "climate",
+  [WidgetSlot.B]: canvasHudWidgetIds[1] ?? canvasHudWidgetIds[0] ?? "minimap"
 };
 
 export const HUD_LAYOUT = {

@@ -5714,6 +5714,10 @@ export function gradeRoadNetworkTerrain(state: WorldState, heightScaleMultiplier
   return analyzeRoadSurfaceMetrics(state, heightScaleMultiplier);
 }
 
+const SETTLEMENT_PAD_BLEND_RADIUS = 4;
+const SETTLEMENT_PAD_RING_WEIGHTS = [0.88, 0.64, 0.38, 0.18] as const;
+const SETTLEMENT_PAD_ROAD_ADJUST_LIMIT = 0.03;
+
 export function flattenSettlementGround(state: WorldState): void {
   const tiles = state.tiles;
   const cols = state.grid.cols;
@@ -5721,7 +5725,6 @@ export function flattenSettlementGround(state: WorldState): void {
   const total = state.grid.totalTiles;
   const visited = new Uint8Array(total);
   const queue = new Int32Array(total);
-  const component: number[] = [];
   const ringInfluence = new Float32Array(total);
   const ringTarget = new Float32Array(total);
   const roadAdjustSum = new Float32Array(total);
@@ -5759,20 +5762,24 @@ export function flattenSettlementGround(state: WorldState): void {
     queue[tail] = i;
     tail += 1;
     visited[i] = 1;
-    component.length = 0;
-    const samples: number[] = [];
     let componentHasHouse = false;
+    let componentMinX = cols;
+    let componentMaxX = -1;
+    let componentMinY = rows;
+    let componentMaxY = -1;
 
     while (head < tail) {
       const idx = queue[head];
       head += 1;
-      component.push(idx);
-      samples.push(tiles[idx].elevation);
       if (tiles[idx].type === "house") {
         componentHasHouse = true;
       }
       const x = idx % cols;
       const y = Math.floor(idx / cols);
+      componentMinX = Math.min(componentMinX, x);
+      componentMaxX = Math.max(componentMaxX, x);
+      componentMinY = Math.min(componentMinY, y);
+      componentMaxY = Math.max(componentMaxY, y);
       if (x > 0) {
         const nIdx = idx - 1;
         if (!visited[nIdx]) {
@@ -5815,83 +5822,104 @@ export function flattenSettlementGround(state: WorldState): void {
       }
     }
 
-    if (component.length === 0) {
+    if (componentMaxX < componentMinX || componentMaxY < componentMinY) {
       continue;
     }
-    samples.sort((a, b) => a - b);
-    const middle = Math.floor(samples.length / 2);
+    const padTiles: number[] = [];
+    const padSamples: number[] = [];
+    for (let y = componentMinY; y <= componentMaxY; y += 1) {
+      const rowBase = y * cols;
+      for (let x = componentMinX; x <= componentMaxX; x += 1) {
+        const idx = rowBase + x;
+        const tile = tiles[idx];
+        if (!tile || tile.type === "water") {
+          continue;
+        }
+        const elevation = tile.elevation;
+        padTiles.push(idx);
+        padSamples.push(elevation);
+      }
+    }
+    if (padSamples.length === 0) {
+      continue;
+    }
+    padSamples.sort((a, b) => a - b);
+    const middle = Math.floor(padSamples.length / 2);
     const target =
-      samples.length % 2 === 0
-        ? clamp((samples[middle - 1] + samples[middle]) * 0.5, 0, 1)
-        : clamp(samples[middle] ?? 0, 0, 1);
-    component.forEach((idx) => {
+      padSamples.length % 2 === 0
+        ? clamp((padSamples[middle - 1] + padSamples[middle]) * 0.5, 0, 1)
+        : clamp(padSamples[middle] ?? 0, 0, 1);
+    padTiles.forEach((idx) => {
       tiles[idx].elevation = target;
     });
 
-    component.forEach((idx) => {
+    padTiles.forEach((idx) => {
       const cx = idx % cols;
       const cy = Math.floor(idx / cols);
       if (cx > 0) {
         const nIdx = idx - 1;
         if (tiles[nIdx].type === "road") {
-          roadAdjustSum[nIdx] += clamp(target - tiles[nIdx].elevation, -0.02, 0.02);
+          roadAdjustSum[nIdx] += clamp(target - tiles[nIdx].elevation, -SETTLEMENT_PAD_ROAD_ADJUST_LIMIT, SETTLEMENT_PAD_ROAD_ADJUST_LIMIT);
           roadAdjustCount[nIdx] += 1;
         }
       }
       if (cx < cols - 1) {
         const nIdx = idx + 1;
         if (tiles[nIdx].type === "road") {
-          roadAdjustSum[nIdx] += clamp(target - tiles[nIdx].elevation, -0.02, 0.02);
+          roadAdjustSum[nIdx] += clamp(target - tiles[nIdx].elevation, -SETTLEMENT_PAD_ROAD_ADJUST_LIMIT, SETTLEMENT_PAD_ROAD_ADJUST_LIMIT);
           roadAdjustCount[nIdx] += 1;
         }
       }
       if (cy > 0) {
         const nIdx = idx - cols;
         if (tiles[nIdx].type === "road") {
-          roadAdjustSum[nIdx] += clamp(target - tiles[nIdx].elevation, -0.02, 0.02);
+          roadAdjustSum[nIdx] += clamp(target - tiles[nIdx].elevation, -SETTLEMENT_PAD_ROAD_ADJUST_LIMIT, SETTLEMENT_PAD_ROAD_ADJUST_LIMIT);
           roadAdjustCount[nIdx] += 1;
         }
       }
       if (cy < rows - 1) {
         const nIdx = idx + cols;
         if (tiles[nIdx].type === "road") {
-          roadAdjustSum[nIdx] += clamp(target - tiles[nIdx].elevation, -0.02, 0.02);
+          roadAdjustSum[nIdx] += clamp(target - tiles[nIdx].elevation, -SETTLEMENT_PAD_ROAD_ADJUST_LIMIT, SETTLEMENT_PAD_ROAD_ADJUST_LIMIT);
           roadAdjustCount[nIdx] += 1;
         }
       }
     });
 
-    component.forEach((idx) => {
-      const cx = idx % cols;
-      const cy = Math.floor(idx / cols);
-      for (let dy = -2; dy <= 2; dy += 1) {
-        const ny = cy + dy;
-        if (ny < 0 || ny >= rows) {
+    for (let y = componentMinY - SETTLEMENT_PAD_BLEND_RADIUS; y <= componentMaxY + SETTLEMENT_PAD_BLEND_RADIUS; y += 1) {
+      if (y < 0 || y >= rows) {
+        continue;
+      }
+      for (let x = componentMinX - SETTLEMENT_PAD_BLEND_RADIUS; x <= componentMaxX + SETTLEMENT_PAD_BLEND_RADIUS; x += 1) {
+        if (x < 0 || x >= cols) {
           continue;
         }
-        for (let dx = -2; dx <= 2; dx += 1) {
-          const nx = cx + dx;
-          if (nx < 0 || nx >= cols) {
-            continue;
-          }
-          const chebyshev = Math.max(Math.abs(dx), Math.abs(dy));
-          if (chebyshev === 0 || chebyshev > 2) {
-            continue;
-          }
-          const nIdx = ny * cols + nx;
-          recordRingInfluence(nIdx, chebyshev === 1 ? 0.75 : 0.35, target);
+        const dx =
+          x < componentMinX ? componentMinX - x : x > componentMaxX ? x - componentMaxX : 0;
+        const dy =
+          y < componentMinY ? componentMinY - y : y > componentMaxY ? y - componentMaxY : 0;
+        const chebyshev = Math.max(dx, dy);
+        if (chebyshev <= 0 || chebyshev > SETTLEMENT_PAD_BLEND_RADIUS) {
+          continue;
         }
+        const weight = SETTLEMENT_PAD_RING_WEIGHTS[chebyshev - 1] ?? 0;
+        if (weight <= 0) {
+          continue;
+        }
+        const nIdx = y * cols + x;
+        recordRingInfluence(nIdx, weight, target);
       }
-    });
+    }
 
     if (componentHasHouse) {
       let minElevation = Number.POSITIVE_INFINITY;
       let maxElevation = Number.NEGATIVE_INFINITY;
-      component.forEach((idx) => {
+      padTiles.forEach((idx) => {
         minElevation = Math.min(minElevation, tiles[idx].elevation);
         maxElevation = Math.max(maxElevation, tiles[idx].elevation);
       });
-      const relief = Number.isFinite(minElevation) && Number.isFinite(maxElevation) ? maxElevation - minElevation : 0;
+      const relief =
+        Number.isFinite(minElevation) && Number.isFinite(maxElevation) ? maxElevation - minElevation : 0;
       housePadReliefMax = Math.max(housePadReliefMax, relief);
       housePadReliefSum += relief;
       housePadCount += 1;
@@ -5912,7 +5940,11 @@ export function flattenSettlementGround(state: WorldState): void {
     if (count === 0 || tiles[i].type !== "road") {
       continue;
     }
-    const delta = clamp(roadAdjustSum[i] / count, -0.02, 0.02);
+    const delta = clamp(
+      roadAdjustSum[i] / count,
+      -SETTLEMENT_PAD_ROAD_ADJUST_LIMIT,
+      SETTLEMENT_PAD_ROAD_ADJUST_LIMIT
+    );
     tiles[i].elevation = clamp(tiles[i].elevation + delta, 0, 1);
   }
   state.settlementPadReliefMax = Number(housePadReliefMax.toFixed(4));
@@ -6485,7 +6517,12 @@ async function generateMapLegacy(
     heightScaleMultiplier: mapSettings.heightScaleMultiplier,
     diagonalPenalty: mapSettings.road.diagonalPenalty,
     pruneRedundantDiagonals: mapSettings.road.pruneRedundantDiagonals,
-    bridgeTransitions: mapSettings.road.bridgeTransitions
+    bridgeTransitions: mapSettings.road.bridgeTransitions,
+    townDensity: mapSettings.townDensity,
+    bridgeAllowance: mapSettings.bridgeAllowance,
+    settlementSpacing: mapSettings.settlementSpacing,
+    roadStrictness: mapSettings.roadStrictness,
+    settlementPreGrowthYears: mapSettings.settlementPreGrowthYears
   });
   connectSettlementsByRoad(state, rng, legacySettlementPlan);
   flattenSettlementGround(state);
@@ -7701,7 +7738,8 @@ async function runSettlementPlacementStage(ctx: MapGenContext): Promise<void> {
     townDensity: ctx.settings.townDensity,
     bridgeAllowance: ctx.settings.bridgeAllowance,
     settlementSpacing: ctx.settings.settlementSpacing,
-    roadStrictness: ctx.settings.roadStrictness
+    roadStrictness: ctx.settings.roadStrictness,
+    settlementPreGrowthYears: ctx.settings.settlementPreGrowthYears
   });
 
   await ctx.reportStage("Settlement plan ready.", 1);

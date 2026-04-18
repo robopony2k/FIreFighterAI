@@ -68,6 +68,7 @@ import {
 import { getAdaptiveFireSubstepMax, getBurnoutFactorForRisk, sampleFireWeatherResponse } from "./fire/fireWeather.js";
 import type { InputState } from "../core/inputState.js";
 import type { EffectsState } from "../core/effectsState.js";
+import { getRuntimeSettings, subscribeRuntimeSettings } from "../persistence/runtimeSettings.js";
 export { updatePhaseControls };
 
 const FIRE_HEAT_PADDING = 8;
@@ -78,6 +79,13 @@ const PHASE_YEAR_DAYS = PHASES.reduce((sum, phase) => sum + phase.duration, 0);
 const VIRTUAL_YEAR_DAYS = Math.max(1, Math.floor(VIRTUAL_CLIMATE_PARAMS.seasonLen));
 const CAREER_TOTAL_DAYS = VIRTUAL_YEAR_DAYS * CAREER_YEARS;
 const CLIMATE_SEASONS = ["Winter", "Spring", "Summer", "Autumn"];
+let allowRandomFireIgnition = getRuntimeSettings().randomFireIgnition;
+let allowAnnualReport = getRuntimeSettings().annualReportEnabled;
+
+subscribeRuntimeSettings((settings) => {
+  allowRandomFireIgnition = settings.randomFireIgnition;
+  allowAnnualReport = settings.annualReportEnabled;
+});
 
 type PhaseTransitionOptions = {
   openAnnualReport?: boolean;
@@ -534,6 +542,21 @@ const openAnnualReportForWinter = (state: WorldState): void => {
   );
 };
 
+const resolveWinterRolloverWithoutReport = (state: WorldState): void => {
+  freezeScoringSeason(state);
+  extinguishSeasonCarryoverFires(state);
+  calculateBudgetOutcome(state);
+  if (state.gameOver) {
+    return;
+  }
+  startNewYear(state);
+  state.annualReportOpen = false;
+  setStatus(
+    state,
+    `Maintenance season: ${formatCurrency(state.budget)} available for recruitment, training, and fuel breaks.`
+  );
+};
+
 export function closeAnnualReport(state: WorldState): void {
   if (!state.annualReportOpen) {
     return;
@@ -560,6 +583,11 @@ export function setPhase(state: WorldState, rng: RNG, next: WorldState["phase"],
   }
   if (state.phase === "maintenance") {
     if (options.openAnnualReport) {
+      if (!allowAnnualReport) {
+        resolveWinterRolloverWithoutReport(state);
+        showSeasonOverlay(state);
+        return;
+      }
       openAnnualReportForWinter(state);
       return;
     }
@@ -809,7 +837,7 @@ export function stepSim(state: WorldState, effects: EffectsState, rng: RNG, delt
       state.fireSeasonDay += simDayDelta;
       const seasonIntensity = phaseSample.id === "fire" ? getFireSeasonIntensity(phaseSample.phaseDay, state.fireSettings) : 1;
       const spreadScale = state.fireSettings.simSpeed * (0.55 + seasonIntensity * 0.45);
-      if (phaseSample.id === "fire" && weather.climateRisk >= FIRE_WEATHER_RISK_MIN) {
+      if (allowRandomFireIgnition && phaseSample.id === "fire" && weather.climateRisk >= FIRE_WEATHER_RISK_MIN) {
         igniteRandomFire(state, rng, simDayDelta, clamp(weather.ignition, 0, 1.35));
       }
       if (state.units.length > 0) {

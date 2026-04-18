@@ -90,3 +90,22 @@ Constraints: preserve visual output and large-map performance characteristics
 Notes: Keep `prepareTerrainRenderSurface` and `buildTerrainMesh` as stable facade exports during the split.
 
 Status: queued
+
+TSK-0136: Refine 3D terrain surface shading
+
+Type: polish
+
+Why: Terrain land color was still carrying baked light/dark shading and high-frequency tile noise, while river cutout was leaving the terrain in a faceted-lighting state.
+
+Done when:
+- [x] Refined terrain uses render-only vertex colors plus shared-vertex normal smoothing so live sun/shadow drives the broad read.
+- [x] Legacy faceted shading remains available through map-editor terrain debug controls for A/B comparison.
+- [x] Terrain texture remains responsible for cutout/shoreline compatibility instead of owning refined land RGB.
+
+Touchpoints: `src/render/threeTestTerrain.ts`, `src/render/threeTest.ts`, `src/render/terrain/textures/`, `src/render/terrain/water/`, `src/ui/map-editor.ts`
+
+Constraints: preserve simulation determinism, terrain data, shoreline compatibility, and fast terrain-update reuse
+
+Notes: `npm run check` and `npm run build` passed after the render-path changes. Visual validation is still manual in the 3D preview/runtime.
+
+Status: done

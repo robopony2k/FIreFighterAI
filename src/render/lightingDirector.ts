@@ -68,6 +68,5 @@ export const buildLightingDirectorState = (input: LightingDirectorInput): Lighti
 };
 
 export const LIGHTING_DIRECTOR_BASELINE = {
-  equinoxAzimuthDeg: SEASONAL_SKY_BASELINE.equinoxAzimuthDeg,
-  dayArcDaysPerCycle: SEASONAL_SKY_BASELINE.dayArcDaysPerCycle
+  equinoxAzimuthDeg: SEASONAL_SKY_BASELINE.equinoxAzimuthDeg
 } as const;

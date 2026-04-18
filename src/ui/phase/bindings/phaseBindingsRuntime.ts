@@ -64,6 +64,11 @@ import {
   handleMapRetaskTileCommand
 } from "../../../sim/input/mapTileActions.js";
 import { lowerTownAlertPosture, raiseTownAlertPosture } from "../../../sim/towns.js";
+import {
+  getRuntimeSettings,
+  setRuntimeSetting,
+  subscribeRuntimeSettings
+} from "../../../persistence/runtimeSettings.js";
 
 type HudAudioChannelSettings = {
   muted: boolean;
@@ -631,6 +636,23 @@ export const bindPhaseUi = ({
       })
     );
   }
+
+  phaseUi.controller.setSimulationToggleState(getRuntimeSettings());
+  phaseUi.controller.onRandomFireIgnitionToggle((enabled) => {
+    noteInteraction();
+    uiAudio?.play("toggle");
+    setRuntimeSetting("randomFireIgnition", enabled);
+  });
+  phaseUi.controller.onAnnualReportToggle((enabled) => {
+    noteInteraction();
+    uiAudio?.play("toggle");
+    setRuntimeSetting("annualReportEnabled", enabled);
+  });
+  disposers.push(
+    subscribeRuntimeSettings((settings) => {
+      phaseUi.controller.setSimulationToggleState(settings);
+    })
+  );
 
   let lastHoverActionableKey: string | null = null;
   listenElement(phaseUi.controller.root, "pointerover", (event) => {

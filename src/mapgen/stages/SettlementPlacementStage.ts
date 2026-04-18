@@ -60,7 +60,8 @@ export const SettlementPlacementStage: PipelineStage = {
       townDensity: ctx.settings.townDensity,
       bridgeAllowance: ctx.settings.bridgeAllowance,
       settlementSpacing: ctx.settings.settlementSpacing,
-      roadStrictness: ctx.settings.roadStrictness
+      roadStrictness: ctx.settings.roadStrictness,
+      settlementPreGrowthYears: ctx.settings.settlementPreGrowthYears
     });
 
     await ctx.reportStage("Settlement plan ready.", 1);

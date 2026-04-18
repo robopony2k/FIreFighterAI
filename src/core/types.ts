@@ -128,6 +128,18 @@ export interface CommandUnit {
   revision: number;
 }
 
+export type BuildingClass = "residential_low" | "residential_mid" | "residential_high";
+
+export type TownIndustryProfile = "coastal" | "farming" | "mining" | "general";
+
+export type TownStreetArchetype = "ribbon" | "main_street" | "crossroads" | "contour";
+
+export interface TownGrowthFrontier extends Point {
+  dx: number;
+  dy: number;
+  active: boolean;
+  branchType: "primary" | "secondary";
+}
 
 export interface Town extends Point {
   id: number;
@@ -135,6 +147,11 @@ export interface Town extends Point {
   cx: number;
   cy: number;
   radius: number;
+  industryProfile: TownIndustryProfile;
+  streetArchetype: TownStreetArchetype;
+  growthFrontiers: TownGrowthFrontier[];
+  growthSeedYear: number;
+  simulatedGrowthYears: number;
   houseCount: number;
   housesLost: number;
   alertPosture: number;
@@ -183,6 +200,7 @@ export interface Grid {
 export interface Tile {
 
   type: TileType;
+  buildingClass?: BuildingClass | null;
 
   fuel: number;
 
@@ -216,6 +234,10 @@ export interface Tile {
   houseResidents: number;
 
   houseDestroyed: boolean;
+
+  houseConstructionYear?: number;
+
+  houseDamage01?: number;
 
   ashAge: number;
 

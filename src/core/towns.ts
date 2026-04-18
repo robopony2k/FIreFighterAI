@@ -4,7 +4,10 @@ import { syncTileSoAIndex } from "./tileCache.js";
 import { clearVegetationState, syncDerivedVegetationState } from "./vegetation.js";
 
 export const STRUCTURE_NONE = 0;
-export const STRUCTURE_HOUSE = 1;
+export const STRUCTURE_RESIDENTIAL_LOW = 1;
+export const STRUCTURE_RESIDENTIAL_MID = 2;
+export const STRUCTURE_RESIDENTIAL_HIGH = 3;
+export const STRUCTURE_HOUSE = STRUCTURE_RESIDENTIAL_LOW;
 
 const DEFAULT_HOUSE_VALUE = 160;
 const DEFAULT_HOUSE_RESIDENTS = 2;
@@ -48,7 +51,10 @@ const applyRestoredBiomeState = (state: WorldState, idx: number): void => {
   tile.houseValue = 0;
   tile.houseResidents = 0;
   tile.houseDestroyed = false;
+  tile.houseConstructionYear = undefined;
+  tile.houseDamage01 = 0;
   tile.ashAge = 0;
+  tile.buildingClass = null;
   tile.dominantTreeType = null;
   tile.treeType = null;
 
@@ -77,7 +83,7 @@ const clearHouseAnchor = (state: WorldState, idx: number): void => {
  * - Every house anchor must have `tileTownId[idx]` pointing at a valid town.
  * - `town.houseCount` mirrors the number of house anchors owned by that town.
  */
-export function placeHouse(state: WorldState, idx: number, townId: number): boolean {
+export function placeHouse(state: WorldState, idx: number, townId: number, constructionYear?: number): boolean {
   if (idx < 0 || idx >= state.grid.totalTiles || !isValidTownId(state, townId)) {
     return false;
   }
@@ -111,7 +117,10 @@ export function placeHouse(state: WorldState, idx: number, townId: number): bool
   tile.houseValue = houseValue;
   tile.houseResidents = houseResidents;
   tile.houseDestroyed = false;
+  tile.houseConstructionYear = Number.isFinite(constructionYear) ? constructionYear : state.year;
+  tile.houseDamage01 = 0;
   tile.ashAge = 0;
+  tile.buildingClass = "residential_low";
 
   state.tileStructure[idx] = STRUCTURE_HOUSE;
   state.tileTownId[idx] = townId;
@@ -149,6 +158,7 @@ export function removeHouse(state: WorldState, idx: number): boolean {
   state.totalPopulation = Math.max(0, state.totalPopulation - Math.max(0, tile.houseResidents));
 
   clearHouseAnchor(state, idx);
+  tile.buildingClass = null;
 
   const prevType = tile.type;
   applyRestoredBiomeState(state, idx);
@@ -180,6 +190,10 @@ export function destroyHouse(state: WorldState, idx: number): boolean {
   state.totalPopulation = Math.max(0, state.totalPopulation - Math.max(0, tile.houseResidents));
 
   clearHouseAnchor(state, idx);
+  tile.houseDestroyed = true;
+  tile.houseDamage01 = 1;
+  tile.houseConstructionYear = tile.houseConstructionYear ?? state.year;
+  tile.buildingClass = null;
   state.structureRevision += 1;
   state.terrainDirty = true;
   syncTileSoAIndex(state, idx);

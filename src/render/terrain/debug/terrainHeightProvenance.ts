@@ -4,11 +4,13 @@ import type { TerrainRenderSurface } from "../../threeTestTerrain.js";
 const clamp = (value: number, min: number, max: number): number => Math.max(min, Math.min(max, value));
 
 export type TerrainRenderHeightMode = "raw" | "final";
+export type TerrainSurfaceShadingMode = "refined" | "legacyFaceted";
 
 export type TerrainRenderDebugOptions = {
   enableHeightProvenance?: boolean;
   logHeightAnomalies?: boolean;
   terrainHeightMode?: TerrainRenderHeightMode;
+  terrainSurfaceShadingMode?: TerrainSurfaceShadingMode;
   disableRiverWater?: boolean;
   disableRiverCutout?: boolean;
   disableBridges?: boolean;

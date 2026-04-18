@@ -185,6 +185,7 @@ type StepPreviewConfig = {
 
 type MapEditorRenderDebugState = {
   terrainHeightMode: "final" | "raw";
+  terrainSurfaceShadingMode: "refined" | "legacyFaceted";
   riverWaterOff: boolean;
   riverCutoutOff: boolean;
   bridgesOff: boolean;
@@ -192,6 +193,7 @@ type MapEditorRenderDebugState = {
 
 const DEFAULT_MAP_EDITOR_RENDER_DEBUG_STATE: MapEditorRenderDebugState = {
   terrainHeightMode: "final",
+  terrainSurfaceShadingMode: "refined",
   riverWaterOff: false,
   riverCutoutOff: false,
   bridgesOff: false
@@ -366,6 +368,7 @@ const buildTerrainRenderDebugOptions = (
   logHeightAnomalies,
   anomalyLogLimit: 6,
   terrainHeightMode: state.terrainHeightMode,
+  terrainSurfaceShadingMode: state.terrainSurfaceShadingMode,
   disableRiverWater: state.riverWaterOff,
   disableRiverCutout: state.riverCutoutOff,
   disableBridges: state.bridgesOff
@@ -662,6 +665,7 @@ const buildHeightProvenanceReport = (
     renderDebugState.terrainHeightMode === "raw" ? "terrain_raw_vertices" : "terrain_final_vertices";
   const toggleLine = [
     `renderMode=${modeLabel}`,
+    `terrain_surface_shading=${renderDebugState.terrainSurfaceShadingMode}`,
     `river_water_off=${renderDebugState.riverWaterOff ? 1 : 0}`,
     `river_cutout_off=${renderDebugState.riverCutoutOff ? 1 : 0}`,
     `bridges_off=${renderDebugState.bridgesOff ? 1 : 0}`
@@ -959,6 +963,7 @@ export const initMapEditor = (refs: MapEditorRefs, deps: MapEditorDeps): MapEdit
 
   const terrainFinalVerticesToggle = createRenderDebugRadio("final", "terrain_final_vertices", true);
   const terrainRawVerticesToggle = createRenderDebugRadio("raw", "terrain_raw_vertices", false);
+  const legacyFacetedShadingToggle = createRenderDebugCheckbox("terrain_legacy_faceted");
   const riverWaterOffToggle = createRenderDebugCheckbox("river_water_off");
   const riverCutoutOffToggle = createRenderDebugCheckbox("river_cutout_off");
   const bridgesOffToggle = createRenderDebugCheckbox("bridges_off");
@@ -1157,6 +1162,7 @@ export const initMapEditor = (refs: MapEditorRefs, deps: MapEditorDeps): MapEdit
         skipCarving: rng.next() < 0.18,
         riverBudget: jitterValue(rng, advanced.riverBudget ?? 0.5, 0.14),
         settlementSpacing: jitterValue(rng, advanced.settlementSpacing ?? 0.5, 0.12),
+        settlementPreGrowthYears: Math.max(0, Math.min(40, Math.round((advanced.settlementPreGrowthYears ?? 20) + (rng.next() * 16 - 8)))),
         roadStrictness: jitterValue(rng, advanced.roadStrictness ?? 0.5, 0.12),
         forestPatchiness: jitterValue(rng, advanced.forestPatchiness ?? 0.5, 0.16)
       }
@@ -1427,6 +1433,7 @@ export const initMapEditor = (refs: MapEditorRefs, deps: MapEditorDeps): MapEdit
   const syncPreviewRenderDebugState = (): void => {
     previewRenderDebugState = {
       terrainHeightMode: terrainRawVerticesToggle.checked ? "raw" : "final",
+      terrainSurfaceShadingMode: legacyFacetedShadingToggle.checked ? "legacyFaceted" : "refined",
       riverWaterOff: riverWaterOffToggle.checked,
       riverCutoutOff: riverCutoutOffToggle.checked,
       bridgesOff: bridgesOffToggle.checked
@@ -1443,6 +1450,7 @@ export const initMapEditor = (refs: MapEditorRefs, deps: MapEditorDeps): MapEdit
   [
     terrainFinalVerticesToggle,
     terrainRawVerticesToggle,
+    legacyFacetedShadingToggle,
     riverWaterOffToggle,
     riverCutoutOffToggle,
     bridgesOffToggle

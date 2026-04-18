@@ -2,6 +2,8 @@ import type { WorldState } from "../../../core/state.js";
 import { TILE_ID_TO_TYPE } from "../../../core/state.js";
 import { ELEVATION_TINT_HIGH, ELEVATION_TINT_LOW, TILE_COLOR_RGB } from "../../../core/config.js";
 import { buildThermalBackdropField, buildThermalHotspotField, paintThermalField } from "../../../render/minimapRaster.js";
+import { getRuntimeWidgetTitle } from "../../runtime/widgets/registry.js";
+import type { MinimapWidgetModel } from "../../runtime/widgets/models.js";
 
 type RGB = { r: number; g: number; b: number };
 type MiniMapMode = "terrain" | "elevation" | "thermal";
@@ -19,9 +21,7 @@ const mix = (a: RGB, b: RGB, t: number): RGB => ({
   b: a.b + (b.b - a.b) * t
 });
 
-export type MiniMapPanelData = {
-  world: WorldState | null;
-};
+export type MiniMapPanelData = MinimapWidgetModel;
 
 export type MiniMapPanelView = {
   element: HTMLElement;
@@ -38,7 +38,7 @@ export const createMiniMapPanel = (): MiniMapPanelView => {
 
   const title = document.createElement("div");
   title.className = "phase-card-title";
-  title.textContent = "Map";
+  title.textContent = getRuntimeWidgetTitle("minimap", "phaseDom");
 
   const modeButton = document.createElement("button");
   modeButton.className = "phase-minimap-mode";

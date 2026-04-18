@@ -8,6 +8,7 @@ Story: You are the new "Fire Warden" in charge of a region. Your mission is to p
 - A strategic fire-response simulation with long-term planning and tactical firefighting.
 - Climate drives the world instead of fixed seasons; "seasons" are emergent from temperature and moisture.
 - The player manages a 20-year campaign where risk gradually increases due to climate change.
+- Towns are terrain-aware settlements that start from seeded street skeletons and keep growing over the campaign, increasing building exposure and fire risk over time.
 - Balance the competing demands of managing a budget, the firefighters under your command, and the community's preparedness.
 - The game should feel readable and decisive: clear cause and effect, no hidden "gotchas."
 
@@ -109,6 +110,13 @@ Design intent:
 - Top left of screen - Available trucks to select with key info
 - Bottom left of screen - Details on selected unit + available commands
 
+## 3D Terrain Presentation
+
+- Terrain land color should read primarily from the live sun/shadow rig instead of baking major lighting contrast into the albedo.
+- Grass, floodplain, beach, and scorched ground should vary in broad 10-20 tile patches so the land reads as cohesive terrain instead of per-tile checkerboarding.
+- Slopes should subtly desaturate toward rocky/bare tones while keeping terrain type identity readable.
+- Dev-facing terrain tools should retain a legacy faceted comparison mode for validating shading changes without affecting simulation data.
+
 ## New Run Configuration (Proposed)
 
 Purpose: expose tunable run constants before each campaign. Defaults are shown, players can keep last-used settings or save a default profile.
@@ -126,7 +134,7 @@ Terrain
 - Map generation sliders (forest/meadow/water settings).
 - Tile fuel profiles (baseFuel/ignition/burnRate/heatOutput/spreadBoost/heatTransferCap/heatRetention/windFactor per tile type).
 - Vegetation regrowth (water influence, ash recovery, canopy growth, forest recruit).
-- Community and road generation (village/house counts, value/resident ranges, road bias).
+- Community and road generation (town density, bridge allowance, settlement spacing, road strictness, pre-growth years).
 
 Climate
 - Climate params (seasonLen, peakDay, tMid, tAmp, warmingPerYear, noiseAmp, heatwavesPerYear).
@@ -198,6 +206,7 @@ This can be achieved by:
 - Units (truck + firefighter logic).
 - Climate model (temperature + moisture).
 - Map generation (terrain, vegetation age/density, forest stand composition).
+- Settlements (terrain-aware town seeding, street archetypes, frontage-based annual growth, expanding road networks).
 - UI system (phase UI, controls, overlays).
 
 ## Open Questions

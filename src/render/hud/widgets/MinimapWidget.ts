@@ -4,7 +4,7 @@ import { ELEVATION_TINT_HIGH, ELEVATION_TINT_LOW, TILE_COLOR_RGB } from "../../.
 import type { HudState } from "../hudState.js";
 import { cycleMinimapMode } from "../hudState.js";
 import type { Rect, WidgetSlot, WidgetType } from "../hudLayout.js";
-import { HUD_PLANE_Y, WidgetType as WidgetKind } from "../hudLayout.js";
+import { HUD_PLANE_Y } from "../hudLayout.js";
 import type { HudInput, HudWidget } from "./hudWidget.js";
 import { computeViewportCenterOnPlane } from "../minimapViewport.js";
 import { buildThermalBackdropField, buildThermalHotspotField, paintThermalField } from "../../minimapRaster.js";
@@ -19,7 +19,7 @@ const mix = (a: RGB, b: RGB, t: number): RGB => ({
 });
 
 export class MinimapWidget implements HudWidget {
-  public readonly type: WidgetType = WidgetKind.Minimap;
+  public readonly type: WidgetType = "minimap";
   private slot: WidgetSlot;
   private mapCanvas: HTMLCanvasElement;
   private mapCtx: CanvasRenderingContext2D | null;

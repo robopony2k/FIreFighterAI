@@ -67,9 +67,9 @@ const patchMaterial = (
       shader.fragmentShader;
 
     shader.fragmentShader = shader.fragmentShader.replace(
-      "#include <map_fragment>",
+      "#include <color_fragment>",
       [
-        "#include <map_fragment>",
+        "#include <color_fragment>",
         "#ifdef USE_MAP",
         "  vec4 shoreTransitionSample = texture2D(u_shoreTransitionMap, vMapUv);",
         "  float shoreLandwardFade = shoreTransitionSample.g;",

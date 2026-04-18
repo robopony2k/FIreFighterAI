@@ -32,6 +32,8 @@ type TileTextureBuildDeps = {
   sunDir: { x: number; y: number; z: number };
 };
 
+export type TileTextureColorMode = "legacy" | "mask";
+
 const DRY_TINT_BY_TILE: Record<number, [number, number, number]> = {
   [TILE_TYPE_IDS.grass]: [0.72, 0.62, 0.34],
   [TILE_TYPE_IDS.scrub]: [0.68, 0.58, 0.32],
@@ -112,6 +114,7 @@ export const buildTileTexture = (
   sampledRiverCoverage: Float32Array | null,
   riverStepStrength: Float32Array | null | undefined,
   debugTypeColors: boolean,
+  colorMode: TileTextureColorMode,
   deps: TileTextureBuildDeps
 ): THREE.DataTexture => {
   const { cols, rows } = sample;
@@ -422,9 +425,9 @@ export const buildTileTexture = (
       const rawR = color[0];
       const rawG = color[1];
       const rawB = color[2];
-      const r = clamp((debugTypeColors ? rawR : (rawR + noise) * tone + fineNoise), 0, 1) * 255;
-      const g = clamp((debugTypeColors ? rawG : (rawG + noise) * tone + fineNoise), 0, 1) * 255;
-      const b = clamp((debugTypeColors ? rawB : (rawB + noise) * tone + fineNoise), 0, 1) * 255;
+      const r = colorMode === "mask" ? 255 : clamp((debugTypeColors ? rawR : (rawR + noise) * tone + fineNoise), 0, 1) * 255;
+      const g = colorMode === "mask" ? 255 : clamp((debugTypeColors ? rawG : (rawG + noise) * tone + fineNoise), 0, 1) * 255;
+      const b = colorMode === "mask" ? 255 : clamp((debugTypeColors ? rawB : (rawB + noise) * tone + fineNoise), 0, 1) * 255;
       const sampleBorderDistance = Math.min(
         col,
         row,

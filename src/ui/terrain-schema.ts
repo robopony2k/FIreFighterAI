@@ -5,7 +5,7 @@ import type {
 } from "../mapgen/terrainProfile.js";
 import { cloneTerrainRecipe, createDefaultTerrainRecipe } from "../mapgen/terrainProfile.js";
 
-export type TerrainControlFormat = "percent";
+export type TerrainControlFormat = "percent" | "int";
 
 export type TerrainSliderKey =
   | "relief"
@@ -82,7 +82,8 @@ const sliderField = (
   key: TerrainSliderKey | TerrainAdvancedNumericKey,
   slug: string,
   label: string,
-  tooltip: string
+  tooltip: string,
+  options: Partial<Pick<Extract<TerrainControlField, { type: "slider" }>, "min" | "max" | "step" | "format">> = {}
 ): TerrainControlField => ({
   type: "slider",
   scope,
@@ -90,10 +91,10 @@ const sliderField = (
   slug,
   label,
   tooltip,
-  min: 0,
-  max: 1,
-  step: 0.01,
-  format: "percent"
+  min: options.min ?? 0,
+  max: options.max ?? 1,
+  step: options.step ?? 0.01,
+  format: options.format ?? "percent"
 });
 
 const checkboxField = (
@@ -337,6 +338,14 @@ export const MAP_EDITOR_TERRAIN_GROUPS = {
           "Settlement spacing",
           "How much space the planner tries to preserve between towns."
         ),
+        sliderField(
+          "advanced",
+          "settlementPreGrowthYears",
+          "settlementPreGrowthYears",
+          "Pre-growth years",
+          "How many yearly settlement-growth steps map generation simulates before the campaign begins.",
+          { min: 0, max: 40, step: 1, format: "int" }
+        ),
         sliderField("advanced", "roadStrictness", "roadStrictness", "Road strictness", "How slope-limited and conservative road routing remains.")
       ]
     }
@@ -367,6 +376,9 @@ export const MAP_EDITOR_TERRAIN_GROUPS = {
 } as const;
 
 export const formatTerrainControlValue = (value: number, format?: TerrainControlFormat): string => {
+  if (format === "int") {
+    return `${Math.round(value)}`;
+  }
   if (format === "percent") {
     return `${Math.round(value * 100)}%`;
   }

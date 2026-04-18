@@ -25,6 +25,7 @@ import type { MiniMapPanelData } from "./components/MiniMapPanel.js";
 import type { ProgressionDraftPanelData } from "./components/ProgressionDraftPanel.js";
 import type { TopBarData } from "./components/TopBar.js";
 import type { UiAudioSettings } from "../../audio/uiAudio.js";
+import type { RuntimeSettings } from "../../persistence/runtimeSettings.js";
 
 type PanelDataMap = {
   miniMap: MiniMapPanelData;
@@ -180,6 +181,18 @@ export class UIController {
 
   onMusicVolumeChange(handler: (value: number) => void): void {
     this.bottomControls.onMusicVolumeChange(handler);
+  }
+
+  onRandomFireIgnitionToggle(handler: (enabled: boolean) => void): void {
+    this.bottomControls.onRandomFireIgnitionToggle(handler);
+  }
+
+  onAnnualReportToggle(handler: (enabled: boolean) => void): void {
+    this.bottomControls.onAnnualReportToggle(handler);
+  }
+
+  setSimulationToggleState(settings: Pick<RuntimeSettings, "randomFireIgnition" | "annualReportEnabled">): void {
+    this.bottomControls.setSimulationToggleState(settings);
   }
 
   private buildLayout(): void {

@@ -3,7 +3,12 @@ import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import { HOUSE_VARIANTS } from "../core/buildingFootprints.js";
 import { TILE_COLOR_RGB } from "../core/config.js";
 import { TreeType } from "../core/types.js";
+import type {
+  HouseAssets as SettlementHouseAssets,
+  HouseVariant as SettlementHouseVariant
+} from "../systems/settlements/types/buildingTypes.js";
 import { registerPbrSpecularGlossiness } from "./gltfSpecGloss.js";
+import { createProceduralHouseAssets } from "../systems/settlements/rendering/proceduralHouseBuilder.js";
 
 type RGB = { r: number; g: number; b: number };
 
@@ -30,21 +35,9 @@ export type TreeVariant = {
 
 export type TreeAssets = Record<TreeType, TreeVariant[]>;
 
-export type HouseVariant = {
-  meshes: TreeMeshTemplate[];
-  height: number;
-  baseOffset: number;
-  size: THREE.Vector3;
-  doorWidth: number | null;
-  scaleBias: number;
-  theme: "brick" | "wood";
-  source: string;
-  buildKey?: string | null;
-};
+export type HouseVariant = SettlementHouseVariant;
 
-export type HouseAssets = {
-  variants: HouseVariant[];
-};
+export type HouseAssets = SettlementHouseAssets;
 
 export type FirestationAsset = {
   meshes: TreeMeshTemplate[];
@@ -270,16 +263,6 @@ export const TREE_MODEL_PATHS: Record<TreeType, string[]> = {
 };
 
 const createGLTFLoader = (): GLTFLoader => registerPbrSpecularGlossiness(new GLTFLoader());
-
-const HOUSE_MODEL_PATHS = [
-  "assets/3d/GLTF/Houses/house_001.glb",
-  "assets/3d/GLTF/Houses/house_002.glb",
-  "assets/3d/GLTF/Houses/house_003.glb",
-  "assets/3d/GLTF/Houses/house_004.glb",
-  "assets/3d/GLTF/Houses/house_005.glb",
-  "assets/3d/GLTF/Houses/house_006.glb",
-  "assets/3d/GLTF/Houses/suburb_house__001.glb"
-];
 const FIRESTATION_MODEL_PATH = "assets/3d/GLTF/Firestation/Classic Fire Station.glb";
 
 let treeAssetsCache: TreeAssets | null = null;
@@ -488,7 +471,21 @@ const buildVariantFromMeshes = (
       doorWidth = width;
     }
   }
-  return { meshes: templates, height, baseOffset, size, doorWidth, scaleBias: 1, theme, source, buildKey: buildKey ?? null };
+  return {
+    meshes: templates,
+    height,
+    baseOffset,
+    size,
+    planFootprint: new THREE.Vector2(size.x, size.z),
+    heightScaleMode: "uniform",
+    doorWidth,
+    scaleBias: 1,
+    theme,
+    source,
+    buildKey: buildKey ?? null,
+    styleId: source,
+    stage: "finished"
+  };
 };
 
 const extractHouseVariantsByBuildKey = (
@@ -551,70 +548,8 @@ export const loadHouseAssets = (): Promise<HouseAssets> => {
   if (houseAssetsPromise) {
     return houseAssetsPromise;
   }
-  const loader = createGLTFLoader();
-  const loads = HOUSE_MODEL_PATHS.map((path) =>
-    new Promise<HouseAssets>((resolve, reject) => {
-      loader.load(
-        path,
-        (gltf) => {
-          const isBrick = /brick/i.test(path);
-          const theme: "brick" | "wood" = isBrick ? "brick" : "wood";
-          resolve(extractHouseAssets(gltf.scene, theme, path));
-        },
-        undefined,
-        (error) => reject(error)
-      );
-    })
-  );
-  houseAssetsPromise = Promise.all(loads).then((loaded) => {
-    const variants: HouseVariant[] = [];
-    loaded.forEach((asset) => {
-      variants.push(...asset.variants);
-    });
-    const fittedDoorWidths = variants
-      .map((variant) => {
-        if (!variant.doorWidth) {
-          return null;
-        }
-        const footprint = houseFootprintBySource.get(variant.source.toLowerCase());
-        if (!footprint) {
-          return null;
-        }
-        const fitScale =
-          Math.min(
-            footprint.parcelX / Math.max(0.01, variant.size.x),
-            footprint.parcelZ / Math.max(0.01, variant.size.z)
-          ) * HOUSE_FIT_PADDING;
-        return variant.doorWidth * fitScale;
-      })
-      .filter((value): value is number => typeof value === "number" && Number.isFinite(value) && value > 0.01);
-    const targetDoorWidth = median(fittedDoorWidths);
-    if (targetDoorWidth !== null) {
-      variants.forEach((variant) => {
-        if (!variant.doorWidth) {
-          return;
-        }
-        const footprint = houseFootprintBySource.get(variant.source.toLowerCase());
-        if (!footprint) {
-          return;
-        }
-        const fitScale =
-          Math.min(
-            footprint.parcelX / Math.max(0.01, variant.size.x),
-            footprint.parcelZ / Math.max(0.01, variant.size.z)
-          ) * HOUSE_FIT_PADDING;
-        const fittedDoorWidth = variant.doorWidth * fitScale;
-        if (!Number.isFinite(fittedDoorWidth) || fittedDoorWidth <= 0.01) {
-          return;
-        }
-        variant.scaleBias = clamp(
-          targetDoorWidth / fittedDoorWidth,
-          HOUSE_DOOR_SCALE_BIAS_MIN,
-          HOUSE_DOOR_SCALE_BIAS_MAX
-        );
-      });
-    }
-    const assets = { variants };
+  houseAssetsPromise = Promise.resolve().then(() => {
+    const assets = createProceduralHouseAssets();
     houseAssetsCache = assets;
     return assets;
   });

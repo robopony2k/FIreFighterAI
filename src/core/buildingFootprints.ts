@@ -6,72 +6,60 @@ export type HouseVariantFootprint = {
   sizeZ: number;
   parcelX: number;
   parcelZ: number;
+  roofType: "gable" | "hip" | "shed";
+  wallTint: string;
+  roofTint: string;
 };
 
 export const HOUSE_VARIANTS: HouseVariantFootprint[] = [
   {
-    source: "assets/3d/GLTF/Houses/house_001.glb",
-    name: "sketchfab_model",
-    sizeX: 1.0371,
-    sizeY: 1.1389,
-    sizeZ: 0.7607,
-    parcelX: 2.2,
-    parcelZ: 1.8
+    source: "procedural/compact_gable",
+    name: "compact_gable",
+    sizeX: 0.92,
+    sizeY: 0.88,
+    sizeZ: 0.72,
+    parcelX: 1.45,
+    parcelZ: 1.12,
+    roofType: "gable",
+    wallTint: "#c98f5b",
+    roofTint: "#6a4d38"
   },
   {
-    source: "assets/3d/GLTF/Houses/house_002.glb",
-    name: "sketchfab_model",
-    sizeX: 0.5532,
-    sizeY: 0.6772,
-    sizeZ: 0.56,
-    parcelX: 1.3277,
-    parcelZ: 1.344
+    source: "procedural/broad_gable",
+    name: "broad_gable",
+    sizeX: 1.18,
+    sizeY: 0.92,
+    sizeZ: 0.84,
+    parcelX: 1.72,
+    parcelZ: 1.24,
+    roofType: "gable",
+    wallTint: "#be7c58",
+    roofTint: "#6f5646"
   },
   {
-    source: "assets/3d/GLTF/Houses/house_003.glb",
-    name: "sketchfab_model",
-    sizeX: 0.2459,
-    sizeY: 0.2031,
-    sizeZ: 0.1702,
-    parcelX: 1.25,
-    parcelZ: 1
+    source: "procedural/saltbox",
+    name: "saltbox",
+    sizeX: 1.02,
+    sizeY: 0.98,
+    sizeZ: 0.76,
+    parcelX: 1.56,
+    parcelZ: 1.18,
+    roofType: "shed",
+    wallTint: "#d19a72",
+    roofTint: "#5f4a3e"
   },
   {
-    source: "assets/3d/GLTF/Houses/house_004.glb",
-    name: "sketchfab_model",
-    sizeX: 0.5306,
-    sizeY: 0.4224,
-    sizeZ: 0.3302,
-    parcelX: 1.2734,
-    parcelZ: 1
-  },
-  {
-    source: "assets/3d/GLTF/Houses/house_005.glb",
-    name: "sketchfab_model",
-    sizeX: 0.2653,
-    sizeY: 0.2104,
-    sizeZ: 0.3311,
-    parcelX: 1.25,
-    parcelZ: 1
-  },
-  {
-    source: "assets/3d/GLTF/Houses/house_006.glb",
-    name: "sketchfab_model",
-    sizeX: 0.3772,
-    sizeY: 0.39,
-    sizeZ: 0.2785,
-    parcelX: 1.25,
-    parcelZ: 1
-  },
-  {
-    source: "assets/3d/GLTF/Houses/suburb_house__001.glb",
-    name: "sketchfab_model",
-    sizeX: 0.4095,
-    sizeY: 0.5148,
-    sizeZ: 0.4282,
-    parcelX: 1.25,
-    parcelZ: 1.0277
-  },
+    source: "procedural/hip_roof",
+    name: "hip_roof",
+    sizeX: 0.96,
+    sizeY: 0.9,
+    sizeZ: 0.9,
+    parcelX: 1.42,
+    parcelZ: 1.18,
+    roofType: "hip",
+    wallTint: "#c58a61",
+    roofTint: "#66493b"
+  }
 ];
 
 export const FIRESTATION_FOOTPRINT = {
@@ -82,8 +70,8 @@ export const FIRESTATION_FOOTPRINT = {
 };
 
 export const BUILDING_FOOTPRINTS_META = {
-  generatedAt: "2026-02-22T06:10:14.235Z",
+  generatedAt: "procedural",
   tileSize: 10,
-  houseSources: ["assets/3d/GLTF/Houses/house_001.glb","assets/3d/GLTF/Houses/house_002.glb","assets/3d/GLTF/Houses/house_003.glb","assets/3d/GLTF/Houses/house_004.glb","assets/3d/GLTF/Houses/house_005.glb","assets/3d/GLTF/Houses/house_006.glb","assets/3d/GLTF/Houses/suburb_house__001.glb"],
-  firestationSource: "assets/3d/GLTF/Firestation/Classic Fire Station.glb"
+  houseSources: HOUSE_VARIANTS.map((variant) => variant.source),
+  firestationSource: FIRESTATION_FOOTPRINT.source
 };

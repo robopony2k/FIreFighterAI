@@ -27,6 +27,7 @@ export type TerrainAdvancedOverrides = {
   skipCarving?: boolean;
   riverBudget?: number;
   settlementSpacing?: number;
+  settlementPreGrowthYears?: number;
   roadStrictness?: number;
   forestPatchiness?: number;
 };
@@ -57,6 +58,7 @@ const TERRAIN_ARCHETYPE_IDS = new Set<TerrainArchetypeId>(ISLAND_ARCHETYPE_IDS);
 
 const clamp01 = (value: number): number => Math.max(0, Math.min(1, value));
 const clamp = (value: number, min: number, max: number): number => Math.max(min, Math.min(max, value));
+const clampWhole = (value: number, min: number, max: number): number => Math.max(min, Math.min(max, Math.round(value)));
 const mix = (a: number, b: number, t: number): number => a + (b - a) * clamp01(t);
 const MAX_HEIGHT_REFERENCE = 0.62;
 
@@ -111,6 +113,11 @@ const parseBooleanOverride = (value: unknown, fallback: boolean): boolean => {
   return fallback;
 };
 
+const clampIntegerOverride = (value: unknown, fallback: number, min: number, max: number): number => {
+  const parsed = toFiniteNumber(value);
+  return parsed === null ? fallback : clampWhole(parsed, min, max);
+};
+
 const DEFAULT_ADVANCED_OVERRIDES: Required<TerrainAdvancedOverrides> = {
   interiorRise: 0.62,
   maxHeight: 0.58,
@@ -126,6 +133,7 @@ const DEFAULT_ADVANCED_OVERRIDES: Required<TerrainAdvancedOverrides> = {
   skipCarving: false,
   riverBudget: 0.42,
   settlementSpacing: 0.58,
+  settlementPreGrowthYears: 20,
   roadStrictness: 0.5,
   forestPatchiness: 0.46
 };
@@ -168,6 +176,7 @@ const ARCHETYPE_PRESETS: Record<
       skipCarving: false,
       riverBudget: 0.44,
       settlementSpacing: 0.62,
+      settlementPreGrowthYears: 20,
       roadStrictness: 0.56,
       forestPatchiness: 0.42
     }
@@ -196,6 +205,7 @@ const ARCHETYPE_PRESETS: Record<
       skipCarving: false,
       riverBudget: 0.58,
       settlementSpacing: 0.6,
+      settlementPreGrowthYears: 20,
       roadStrictness: 0.56,
       forestPatchiness: 0.5
     }
@@ -224,6 +234,7 @@ const ARCHETYPE_PRESETS: Record<
       skipCarving: false,
       riverBudget: 0.52,
       settlementSpacing: 0.58,
+      settlementPreGrowthYears: 20,
       roadStrictness: 0.52,
       forestPatchiness: 0.48
     }
@@ -252,6 +263,7 @@ const ARCHETYPE_PRESETS: Record<
       skipCarving: false,
       riverBudget: 0.28,
       settlementSpacing: 0.56,
+      settlementPreGrowthYears: 20,
       roadStrictness: 0.54,
       forestPatchiness: 0.54
     }
@@ -340,6 +352,12 @@ export const cloneTerrainRecipe = (recipe?: Partial<TerrainRecipe>): TerrainReci
         sourceAdvanced.settlementSpacing,
         defaults.advancedOverrides?.settlementSpacing ?? DEFAULT_ADVANCED_OVERRIDES.settlementSpacing
       ),
+      settlementPreGrowthYears: clampIntegerOverride(
+        sourceAdvanced.settlementPreGrowthYears,
+        defaults.advancedOverrides?.settlementPreGrowthYears ?? DEFAULT_ADVANCED_OVERRIDES.settlementPreGrowthYears,
+        0,
+        40
+      ),
       roadStrictness: clampOverride(
         sourceAdvanced.roadStrictness,
         defaults.advancedOverrides?.roadStrictness ?? DEFAULT_ADVANCED_OVERRIDES.roadStrictness
@@ -391,6 +409,7 @@ export const terrainRecipeEqual = (a: TerrainRecipe, b: TerrainRecipe): boolean 
     Boolean(aAdvanced.skipCarving) === Boolean(bAdvanced.skipCarving) &&
     Math.abs((aAdvanced.riverBudget ?? 0) - (bAdvanced.riverBudget ?? 0)) <= 1e-6 &&
     Math.abs((aAdvanced.settlementSpacing ?? 0) - (bAdvanced.settlementSpacing ?? 0)) <= 1e-6 &&
+    Math.abs((aAdvanced.settlementPreGrowthYears ?? 0) - (bAdvanced.settlementPreGrowthYears ?? 0)) <= 1e-6 &&
     Math.abs((aAdvanced.roadStrictness ?? 0) - (bAdvanced.roadStrictness ?? 0)) <= 1e-6 &&
     Math.abs((aAdvanced.forestPatchiness ?? 0) - (bAdvanced.forestPatchiness ?? 0)) <= 1e-6
   );
@@ -419,6 +438,7 @@ const resolveAdvancedOverrides = (recipe: TerrainRecipe): Required<TerrainAdvanc
     skipCarving: parseBooleanOverride(advanced.skipCarving, preset.skipCarving),
     riverBudget: clampOverride(advanced.riverBudget, preset.riverBudget),
     settlementSpacing: clampOverride(advanced.settlementSpacing, preset.settlementSpacing),
+    settlementPreGrowthYears: clampIntegerOverride(advanced.settlementPreGrowthYears, preset.settlementPreGrowthYears, 0, 40),
     roadStrictness: clampOverride(advanced.roadStrictness, preset.roadStrictness),
     forestPatchiness: clampOverride(advanced.forestPatchiness, preset.forestPatchiness)
   };
@@ -555,6 +575,7 @@ export const compileTerrainRecipe = (recipeInput: TerrainRecipe): ResolvedTerrai
     skipCarving: advanced.skipCarving,
     riverBudget,
     settlementSpacing: advanced.settlementSpacing,
+    settlementPreGrowthYears: advanced.settlementPreGrowthYears,
     roadStrictness,
     forestPatchiness
   };
@@ -610,6 +631,12 @@ const inferRecipeFromSettings = (settingsInput: Partial<MapGenSettings>, mapSize
       skipCarving: Boolean(settings.skipCarving ?? DEFAULT_ADVANCED_OVERRIDES.skipCarving),
       riverBudget: clamp01(settings.riverBudget ?? DEFAULT_ADVANCED_OVERRIDES.riverBudget),
       settlementSpacing: clamp01(settings.settlementSpacing ?? DEFAULT_ADVANCED_OVERRIDES.settlementSpacing),
+      settlementPreGrowthYears: clampIntegerOverride(
+        settings.settlementPreGrowthYears,
+        DEFAULT_ADVANCED_OVERRIDES.settlementPreGrowthYears,
+        0,
+        40
+      ),
       roadStrictness: clamp01(settings.roadStrictness ?? DEFAULT_ADVANCED_OVERRIDES.roadStrictness),
       forestPatchiness: clamp01(settings.forestPatchiness ?? DEFAULT_ADVANCED_OVERRIDES.forestPatchiness)
     }

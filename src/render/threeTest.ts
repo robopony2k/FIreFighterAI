@@ -13,6 +13,8 @@ import {
   TIME_SPEED_SLIDER_STEP
 } from "../core/timeSpeed.js";
 import { getHouseFootprintBounds, pickHouseFootprint } from "../core/houseFootprints.js";
+import { getBuildingLifecycleStageFromId } from "../systems/settlements/sim/buildingLifecycle.js";
+import { getProceduralHouseVariantKey } from "../systems/settlements/rendering/proceduralHouseBuilder.js";
 import type { InputState } from "../core/inputState.js";
 import { indexFor } from "../core/grid.js";
 import { TILE_ID_TO_TYPE, TILE_TYPE_IDS } from "../core/state.js";
@@ -52,6 +54,7 @@ import {
 } from "../sim/towns.js";
 import { isSkipToNextFireAvailable } from "../sim/index.js";
 import {
+  applyTerrainSurfaceColors,
   buildPalette,
   buildRoadOverlayTexture,
   buildTerrainMesh,
@@ -87,11 +90,21 @@ import { createThreeTestUnitsLayer } from "./threeTestUnits.js";
 import { createThreeTestPostPipeline, type DepthOfFieldSettings } from "./post/dofPipeline.js";
 import type { ThreeTestCinematicGradeConfig } from "./post/cinematicGradePass.js";
 import { getRequiredWebGLContext } from "./webglContext.js";
+import { resolveStructureGrounding } from "./terrain/shared/structureGrounding.js";
 import { CardStateModel } from "../ui/cards/cardState.js";
 import { dispatchPhaseUiCommand } from "../ui/phase/commandChannel.js";
 import { RISK_THRESHOLDS, SEASON_LABELS, computeSeasonLayout } from "../ui/phase/forecastLayout.js";
+import {
+  AUDIO_CONTROL_CHANNELS,
+  SIMULATION_TOGGLE_SPECS,
+  TIME_CONTROL_ACTIONS,
+  getRuntimeWidgetTitle,
+  getTimeSpeedAction
+} from "../ui/runtime/widgets/registry.js";
+import { getThreeDockCardSpec } from "../ui/runtime/widgets/threeDock.js";
+import type { AudioChannelId, RuntimeWidgetId } from "../ui/runtime/widgets/types.js";
 import type { UiAudioController } from "../audio/uiAudio.js";
-import { getRuntimeSettings } from "../persistence/runtimeSettings.js";
+import { getRuntimeSettings, setRuntimeSetting, subscribeRuntimeSettings } from "../persistence/runtimeSettings.js";
 
 export type SeasonVisualState = {
   seasonT01: number;
@@ -350,6 +363,15 @@ const getDisplayedTimeSpeedIndices = (options: readonly number[]): number[] => {
 const wrap01 = (value: number): number => {
   const wrapped = value % 1;
   return wrapped < 0 ? wrapped + 1 : wrapped;
+};
+const shortestAngleDeltaDeg = (fromDeg: number, toDeg: number): number => {
+  let delta = (toDeg - fromDeg) % 360;
+  if (delta > 180) {
+    delta -= 360;
+  } else if (delta < -180) {
+    delta += 360;
+  }
+  return delta;
 };
 const formatDebugNumber = (value: number, digits = 2): string =>
   Number.isFinite(value) ? value.toFixed(digits) : "n/a";
@@ -790,6 +812,7 @@ export const createThreeTest = (
   let removeUiAudioChangeListener: (() => void) | null = null;
   let removeMusicControlsChangeListener: (() => void) | null = null;
   let removeWorldAudioChangeListener: (() => void) | null = null;
+  let removeRuntimeSettingsChangeListener: (() => void) | null = null;
   type HoverDebugTone = "default" | "watch" | "high" | "critical";
   type HoverDebugSection = {
     key: string;
@@ -1330,27 +1353,34 @@ export const createThreeTest = (
     return card;
   };
 
-  const climateCardId = "dock:climate";
-  const minimapCardId = "dock:minimap";
-  const timeCardId = "dock:time";
-  const climateDock = createDockCard(climateCardId, "FIRE RISK", "--%");
-  const minimapDock = createDockCard(minimapCardId, "MINIMAP", "--");
-  const timeDock = createDockCard(timeCardId, "TIME", "Y1 WINTER");
-  climateDock.indicatorChip.classList.add("three-test-dock-card-icon-risk", "is-low");
-  climateDock.indicatorChip.title = "Forecast risk";
-  minimapDock.indicatorChip.classList.add("three-test-dock-card-icon-info");
-  minimapDock.indicatorChip.title = "Wind";
-  timeDock.indicatorChip.classList.add("three-test-dock-card-icon-info");
-  timeDock.indicatorChip.title = "Year and season";
+  const climateCardSpec = getThreeDockCardSpec("dock:climate");
+  const minimapCardSpec = getThreeDockCardSpec("dock:minimap");
+  const timeCardSpec = getThreeDockCardSpec("dock:time");
+  const createConfiguredDockCard = (spec: ReturnType<typeof getThreeDockCardSpec>, summary: string): DockCardElements => {
+    const card = createDockCard(spec.id, spec.title, summary);
+    spec.indicatorClassNames.forEach((className) => card.indicatorChip.classList.add(className));
+    card.indicatorChip.title = spec.indicatorTitle;
+    return card;
+  };
+  const climateCardId = climateCardSpec.id;
+  const minimapCardId = minimapCardSpec.id;
+  const timeCardId = timeCardSpec.id;
+  const climateDock = createConfiguredDockCard(climateCardSpec, "--%");
+  const minimapDock = createConfiguredDockCard(minimapCardSpec, "--");
+  const timeDock = createConfiguredDockCard(timeCardSpec, "Y1 WINTER");
 
   const climateChartCanvas = document.createElement("canvas");
   climateChartCanvas.className = "three-test-climate-chart";
   const climateKpis = document.createElement("div");
   climateKpis.className = "three-test-dock-kpis";
-  climateDock.summary.append(climateKpis, climateChartCanvas);
+  const climateSummaryContent = document.createElement("div");
+  climateSummaryContent.className = "three-test-dock-summary-block";
+  climateSummaryContent.append(climateKpis, climateChartCanvas);
 
   const minimapCanvas = document.createElement("canvas");
   minimapCanvas.className = "three-test-minimap-canvas";
+  const minimapSummaryContent = document.createElement("div");
+  minimapSummaryContent.className = "three-test-dock-summary-block";
   const minimapLayersWrap = document.createElement("div");
   minimapLayersWrap.className = "three-test-minimap-layers";
   const minimapModeGroupName = `three-test-minimap-mode-${threeTestInitCount}`;
@@ -1400,8 +1430,7 @@ export const createThreeTest = (
   addModeToggle("moisture", "Moisture");
   addOverlayToggle("wind", "Wind");
   addOverlayToggle("units", "Units");
-  minimapDock.summary.append(minimapCanvas);
-  minimapDock.details.append(minimapLayersWrap);
+  minimapSummaryContent.append(minimapCanvas);
 
   minimapCanvas.addEventListener("click", (event) => {
     event.preventDefault();
@@ -1431,7 +1460,7 @@ export const createThreeTest = (
   pauseButton.addEventListener("click", (event) => {
     event.preventDefault();
     event.stopPropagation();
-    dispatchPhaseUiCommand({ type: "action", action: "pause" });
+    dispatchPhaseUiCommand({ type: "action", action: TIME_CONTROL_ACTIONS.pause.action });
   });
   timeControls.appendChild(pauseButton);
   const speedButtons: HTMLButtonElement[] = [];
@@ -1451,7 +1480,7 @@ export const createThreeTest = (
       if (!Number.isFinite(index)) {
         return;
       }
-      dispatchPhaseUiCommand({ type: "action", action: `time-speed-${index}` });
+      dispatchPhaseUiCommand({ type: "action", action: getTimeSpeedAction(index).action });
     });
     timeControls.appendChild(button);
     speedButtons.push(button);
@@ -1477,7 +1506,7 @@ export const createThreeTest = (
     }
     dispatchPhaseUiCommand({
       type: "action",
-      action: "time-speed-slider-set",
+      action: TIME_CONTROL_ACTIONS.sliderSet.action,
       payload: { value: `${nextValue}` }
     });
   });
@@ -1493,9 +1522,18 @@ export const createThreeTest = (
   nextFireButton.addEventListener("click", (event) => {
     event.preventDefault();
     event.stopPropagation();
-    dispatchPhaseUiCommand({ type: "action", action: "time-skip-next-fire" });
+    dispatchPhaseUiCommand({ type: "action", action: TIME_CONTROL_ACTIONS.skipToNextFire.action });
   });
   timeControls.appendChild(nextFireButton);
+  const createDockSection = (titleText: string, content: HTMLElement): HTMLElement => {
+    const section = document.createElement("section");
+    section.className = "three-test-time-section";
+    const title = document.createElement("div");
+    title.className = "three-test-time-section-title";
+    title.textContent = titleText;
+    section.append(title, content);
+    return section;
+  };
   const timeAudioControls = document.createElement("div");
   timeAudioControls.className = "three-test-time-audio";
   const createTimeVolumeControls = (): {
@@ -1523,48 +1561,94 @@ export const createThreeTest = (
     root.append(muteButton, volumeWrap);
     return { root, muteButton, volumeLabel, volumeSlider };
   };
-  const sfxControls = createTimeVolumeControls();
-  const worldTimeControls = createTimeVolumeControls();
-  const musicTimeControls = createTimeVolumeControls();
-  timeAudioControls.append(sfxControls.root, worldTimeControls.root, musicTimeControls.root);
+  const dockAudioControls = new Map<
+    AudioChannelId,
+    ReturnType<typeof createTimeVolumeControls>
+  >();
+  AUDIO_CONTROL_CHANNELS.forEach((channel) => {
+    const controls = createTimeVolumeControls();
+    controls.root.dataset.audioChannel = channel.id;
+    dockAudioControls.set(channel.id, controls);
+    timeAudioControls.appendChild(controls.root);
+  });
+  const sfxControls = dockAudioControls.get("sfx")!;
+  const worldTimeControls = dockAudioControls.get("world")!;
+  const musicTimeControls = dockAudioControls.get("music")!;
+  const timeAudioSection = createDockSection(getRuntimeWidgetTitle("audioControls", "threeDock"), timeAudioControls);
+  const timeTestingControls = document.createElement("div");
+  timeTestingControls.className = "three-test-time-testing";
+  const createTimeToggleControls = (
+    labelText: string,
+    descriptionText: string
+  ): { root: HTMLLabelElement; input: HTMLInputElement } => {
+    const root = document.createElement("label");
+    root.className = "three-test-time-toggle";
+    const copy = document.createElement("span");
+    copy.className = "three-test-time-toggle-copy";
+    const label = document.createElement("span");
+    label.className = "three-test-time-toggle-label";
+    label.textContent = labelText;
+    const description = document.createElement("span");
+    description.className = "three-test-time-toggle-description";
+    description.textContent = descriptionText;
+    copy.append(label, description);
+    const input = document.createElement("input");
+    input.type = "checkbox";
+    input.className = "three-test-time-toggle-input";
+    root.append(copy, input);
+    return { root, input };
+  };
+  const dockToggleControls = new Map<
+    (typeof SIMULATION_TOGGLE_SPECS)[number]["setting"],
+    ReturnType<typeof createTimeToggleControls>
+  >();
+  SIMULATION_TOGGLE_SPECS.forEach((toggle) => {
+    const controls = createTimeToggleControls(toggle.title, toggle.description);
+    controls.root.dataset.runtimeSetting = toggle.setting;
+    dockToggleControls.set(toggle.setting, controls);
+    timeTestingControls.appendChild(controls.root);
+  });
+  const timeTestingSection = createDockSection(
+    getRuntimeWidgetTitle("simulationSettings", "threeDock"),
+    timeTestingControls
+  );
   const mutedAudioIcon = "\u{1F507}";
   const unmutedAudioIcon = "\u{1F50A}";
-
-  const applyDockAudioState = (settings: { muted: boolean; volume: number }): void => {
-    const volumePct = Math.round(Math.max(0, Math.min(1, settings.volume)) * 100);
-    sfxControls.muteButton.textContent = settings.muted ? mutedAudioIcon : unmutedAudioIcon;
-    sfxControls.muteButton.title = settings.muted ? "Unmute UI SFX" : "Mute UI SFX";
-    sfxControls.muteButton.setAttribute("aria-pressed", settings.muted ? "true" : "false");
-    sfxControls.muteButton.setAttribute("aria-label", settings.muted ? "Unmute UI sound effects" : "Mute UI sound effects");
-    sfxControls.volumeLabel.textContent = `SFX ${volumePct}%`;
-    sfxControls.volumeSlider.value = settings.volume.toFixed(2);
-    sfxControls.muteButton.disabled = !uiAudio;
-    sfxControls.volumeSlider.disabled = !uiAudio || settings.muted;
+  const applyRuntimeToggleState = (): void => {
+    const settings = getRuntimeSettings();
+    SIMULATION_TOGGLE_SPECS.forEach((toggle) => {
+      const controls = dockToggleControls.get(toggle.setting);
+      if (controls) {
+        controls.input.checked = Boolean(settings[toggle.setting]);
+      }
+    });
   };
 
-  const applyDockMusicState = (settings: { muted: boolean; volume: number }): void => {
+  const applyDockChannelState = (channelId: AudioChannelId, settings: { muted: boolean; volume: number }, available: boolean): void => {
+    const controls = dockAudioControls.get(channelId);
+    const channel = AUDIO_CONTROL_CHANNELS.find((entry) => entry.id === channelId);
+    if (!controls || !channel) {
+      return;
+    }
     const volumePct = Math.round(Math.max(0, Math.min(1, settings.volume)) * 100);
-    musicTimeControls.muteButton.textContent = settings.muted ? mutedAudioIcon : unmutedAudioIcon;
-    musicTimeControls.muteButton.title = settings.muted ? "Unmute music" : "Mute music";
-    musicTimeControls.muteButton.setAttribute("aria-pressed", settings.muted ? "true" : "false");
-    musicTimeControls.muteButton.setAttribute("aria-label", settings.muted ? "Unmute music" : "Mute music");
-    musicTimeControls.volumeLabel.textContent = `Music ${volumePct}%`;
-    musicTimeControls.volumeSlider.value = settings.volume.toFixed(2);
-    musicTimeControls.muteButton.disabled = !musicControls;
-    musicTimeControls.volumeSlider.disabled = !musicControls || settings.muted;
+    controls.muteButton.textContent = settings.muted ? mutedAudioIcon : unmutedAudioIcon;
+    controls.muteButton.title = settings.muted ? channel.mutedTitle : channel.unmutedTitle;
+    controls.muteButton.setAttribute("aria-pressed", settings.muted ? "true" : "false");
+    controls.muteButton.setAttribute("aria-label", settings.muted ? channel.mutedAriaLabel : channel.unmutedAriaLabel);
+    controls.volumeLabel.textContent = `${channel.label} ${volumePct}%`;
+    controls.volumeSlider.value = settings.volume.toFixed(2);
+    controls.muteButton.disabled = !available;
+    controls.volumeSlider.disabled = !available || settings.muted;
   };
 
-  const applyDockWorldState = (settings: { muted: boolean; volume: number }): void => {
-    const volumePct = Math.round(Math.max(0, Math.min(1, settings.volume)) * 100);
-    worldTimeControls.muteButton.textContent = settings.muted ? mutedAudioIcon : unmutedAudioIcon;
-    worldTimeControls.muteButton.title = settings.muted ? "Unmute world audio" : "Mute world audio";
-    worldTimeControls.muteButton.setAttribute("aria-pressed", settings.muted ? "true" : "false");
-    worldTimeControls.muteButton.setAttribute("aria-label", settings.muted ? "Unmute world audio" : "Mute world audio");
-    worldTimeControls.volumeLabel.textContent = `World ${volumePct}%`;
-    worldTimeControls.volumeSlider.value = settings.volume.toFixed(2);
-    worldTimeControls.muteButton.disabled = !worldAudioControls;
-    worldTimeControls.volumeSlider.disabled = !worldAudioControls || settings.muted;
-  };
+  const applyDockAudioState = (settings: { muted: boolean; volume: number }): void =>
+    applyDockChannelState("sfx", settings, !!uiAudio);
+
+  const applyDockMusicState = (settings: { muted: boolean; volume: number }): void =>
+    applyDockChannelState("music", settings, !!musicControls);
+
+  const applyDockWorldState = (settings: { muted: boolean; volume: number }): void =>
+    applyDockChannelState("world", settings, !!worldAudioControls);
 
   if (uiAudio) {
     removeUiAudioChangeListener = uiAudio.onChange((settings) => {
@@ -1588,7 +1672,7 @@ export const createThreeTest = (
       uiAudio.setVolume(next);
     });
   } else {
-    applyDockAudioState({ muted: false, volume: 0.65 });
+    applyDockAudioState({ muted: false, volume: AUDIO_CONTROL_CHANNELS.find((channel) => channel.id === "sfx")?.defaultVolume ?? 0.65 });
   }
 
   if (musicControls) {
@@ -1613,7 +1697,10 @@ export const createThreeTest = (
       musicControls.setVolume(next);
     });
   } else {
-    applyDockMusicState({ muted: false, volume: 0.35 });
+    applyDockMusicState({
+      muted: false,
+      volume: AUDIO_CONTROL_CHANNELS.find((channel) => channel.id === "music")?.defaultVolume ?? 0.35
+    });
   }
 
   if (worldAudioControls) {
@@ -1638,11 +1725,66 @@ export const createThreeTest = (
       worldAudioControls.setVolume(next);
     });
   } else {
-    applyDockWorldState({ muted: false, volume: 0.55 });
+    applyDockWorldState({
+      muted: false,
+      volume: AUDIO_CONTROL_CHANNELS.find((channel) => channel.id === "world")?.defaultVolume ?? 0.55
+    });
   }
 
-  timeDock.summary.append(timeSummary);
-  timeDock.details.append(timeControls, timeAudioControls);
+  SIMULATION_TOGGLE_SPECS.forEach((toggle) => {
+    const controls = dockToggleControls.get(toggle.setting);
+    controls?.input.addEventListener("change", (event) => {
+      event.stopPropagation();
+      playUiCue("toggle");
+      setRuntimeSetting(toggle.setting, controls.input.checked);
+    });
+  });
+  applyRuntimeToggleState();
+  removeRuntimeSettingsChangeListener = subscribeRuntimeSettings(() => {
+    applyRuntimeToggleState();
+  });
+
+  const summaryContentByWidget = new Map<RuntimeWidgetId, HTMLElement>([
+    ["climate", climateSummaryContent],
+    ["minimap", minimapSummaryContent],
+    ["timeControls", timeSummary]
+  ]);
+  const detailContentByWidget = new Map<RuntimeWidgetId, HTMLElement>([
+    ["minimap", minimapLayersWrap],
+    ["timeControls", timeControls],
+    ["audioControls", timeAudioSection],
+    ["simulationSettings", timeTestingSection]
+  ]);
+  climateCardSpec.summaryWidgets.forEach((widgetId) => {
+    const content = summaryContentByWidget.get(widgetId);
+    if (content) {
+      climateDock.summary.appendChild(content);
+    }
+  });
+  minimapCardSpec.summaryWidgets.forEach((widgetId) => {
+    const content = summaryContentByWidget.get(widgetId);
+    if (content) {
+      minimapDock.summary.appendChild(content);
+    }
+  });
+  minimapCardSpec.detailWidgets.forEach((widgetId) => {
+    const content = detailContentByWidget.get(widgetId);
+    if (content) {
+      minimapDock.details.appendChild(content);
+    }
+  });
+  timeCardSpec.summaryWidgets.forEach((widgetId) => {
+    const content = summaryContentByWidget.get(widgetId);
+    if (content) {
+      timeDock.summary.appendChild(content);
+    }
+  });
+  timeCardSpec.detailWidgets.forEach((widgetId) => {
+    const content = detailContentByWidget.get(widgetId);
+    if (content) {
+      timeDock.details.appendChild(content);
+    }
+  });
 
   const getTileColor = (tileId: number): { r: number; g: number; b: number } => {
     const type = TILE_ID_TO_TYPE[tileId] ?? "grass";
@@ -5243,7 +5385,7 @@ export const createThreeTest = (
     lastShadowCameraInteracting = cameraInteracting;
     const azimuthChanged =
       !Number.isFinite(lastShadowAzimuthDeg) ||
-      Math.abs(lighting.sunAzimuthDeg - lastShadowAzimuthDeg) >= THREE_TEST_SHADOW_AZIMUTH_EPSILON_DEG;
+      Math.abs(shortestAngleDeltaDeg(lastShadowAzimuthDeg, lighting.sunAzimuthDeg)) >= THREE_TEST_SHADOW_AZIMUTH_EPSILON_DEG;
     const elevationChanged =
       !Number.isFinite(lastShadowElevationDeg) ||
       Math.abs(lighting.sunElevationDeg - lastShadowElevationDeg) >= THREE_TEST_SHADOW_ELEVATION_EPSILON_DEG;
@@ -5668,10 +5810,12 @@ export const createThreeTest = (
       footprintZ: number;
       rotation: number;
       seed: number;
-      groundMin: number;
-      groundMax: number;
+      supportBottom: number;
+      supportTop: number;
       variantKey: string | null;
       variantSource: string | null;
+      lifecycleStageId: number;
+      lifecycleStep: number;
     };
     const houseSpots: OverlayHouseSpot[] = [];
     let baseMinX = cols;
@@ -5684,6 +5828,9 @@ export const createThreeTest = (
         const tileX = idx % cols;
         const tileY = Math.floor(idx / cols);
         const seed = Math.imul(idx + 1, 1103515245) >>> 0;
+        const lifecycleStageId = sample.houseLifecycleStages?.[idx] ?? 3;
+        const lifecycleStage = getBuildingLifecycleStageFromId(lifecycleStageId);
+        const lifecycleStep = sample.houseLifecycleSteps?.[idx] ?? 0;
         const rotation = pickHouseRotation(tileX, tileY, seed);
         const footprint = pickHouseFootprint(seed);
         const bounds = getHouseFootprintBounds(tileX, tileY, rotation, footprint);
@@ -5691,20 +5838,15 @@ export const createThreeTest = (
         const maxX = clampToRange(bounds.maxX, 0, cols - 1);
         const minY = clampToRange(bounds.minY, 0, rows - 1);
         const maxY = clampToRange(bounds.maxY, 0, rows - 1);
-        let groundMin = Number.POSITIVE_INFINITY;
-        let groundMax = Number.NEGATIVE_INFINITY;
-        for (let fy = minY; fy <= maxY + 1; fy += 1) {
-          for (let fx = minX; fx <= maxX + 1; fx += 1) {
-            const h = elevationAt(fx, fy);
-            groundMin = Math.min(groundMin, h);
-            groundMax = Math.max(groundMax, h);
-          }
-        }
-        if (!Number.isFinite(groundMin) || !Number.isFinite(groundMax)) {
-          const fallbackH = elevationAt(tileX, tileY);
-          groundMin = fallbackH;
-          groundMax = fallbackH;
-        }
+        const grounding = resolveStructureGrounding({
+          surface: sample,
+          minTileX: minX,
+          maxTileX: maxX,
+          minTileY: minY,
+          maxTileY: maxY,
+          heightScale: surface.heightScale,
+          heightAtTileCoord: surface.heightAtTileCoord
+        });
         houseSpots.push({
           x: surface.toWorldX(tileX + 0.5),
           z: surface.toWorldZ(tileY + 0.5),
@@ -5712,10 +5854,12 @@ export const createThreeTest = (
           footprintZ: bounds.depth,
           rotation,
           seed,
-          groundMin,
-          groundMax,
-          variantKey: footprint.name ?? null,
-          variantSource: footprint.source ?? null
+          supportBottom: grounding.foundationBottom,
+          supportTop: grounding.foundationTop,
+          variantKey: getProceduralHouseVariantKey(footprint.name ?? "procedural", lifecycleStage, lifecycleStep),
+          variantSource: footprint.source ?? null,
+          lifecycleStageId,
+          lifecycleStep
         });
         continue;
       }
@@ -5740,7 +5884,13 @@ export const createThreeTest = (
 
     if (houseSpots.length > 0) {
       type OverlayHouseVariant = HouseAssets["variants"][number];
-      type HouseBatchInstance = { spot: OverlayHouseSpot; scale: number; baseY: number };
+      type HouseBatchInstance = {
+        spot: OverlayHouseSpot;
+        scaleX: number;
+        scaleY: number;
+        scaleZ: number;
+        baseY: number;
+      };
       type FoundationInstance = {
         x: number;
         y: number;
@@ -5817,12 +5967,12 @@ export const createThreeTest = (
       houseSpots.forEach((spot) => {
         const footprintX = Math.max(0.5, spot.footprintX);
         const footprintZ = Math.max(0.5, spot.footprintZ);
-        const foundationTop = spot.groundMax + 0.01;
-        if (spot.groundMin < foundationTop - 0.01) {
-          const foundationHeight = Math.max(0.1, foundationTop - spot.groundMin);
+        const supportTop = spot.supportTop;
+        if (spot.supportBottom < supportTop - 0.01) {
+          const foundationHeight = Math.max(0.1, supportTop - spot.supportBottom);
           foundationInstances.push({
             x: spot.x,
-            y: spot.groundMin + foundationHeight / 2,
+            y: spot.supportBottom + foundationHeight / 2,
             z: spot.z,
             scaleX: footprintX,
             scaleY: foundationHeight,
@@ -5833,21 +5983,27 @@ export const createThreeTest = (
 
         const variant = pickHouseVariant(spot);
         if (variant && variant.meshes.length > 0) {
-          const sizeX = Math.max(0.01, variant.size?.x ?? 0);
-          const sizeZ = Math.max(0.01, variant.size?.z ?? 0);
-          const fitScale = Math.min(footprintX / sizeX, footprintZ / sizeZ);
-          const scale = Math.max(0.01, fitScale * 0.98 * (variant.scaleBias ?? 1));
-          const baseY = foundationTop + variant.baseOffset * scale;
+          const planSizeX = Math.max(0.01, variant.planFootprint?.x ?? variant.size?.x ?? 0);
+          const planSizeZ = Math.max(0.01, variant.planFootprint?.y ?? variant.size?.z ?? 0);
+          const fitBias = 0.98 * (variant.scaleBias ?? 1);
+          const rawScaleX = Math.max(0.01, (footprintX / planSizeX) * fitBias);
+          const rawScaleZ = Math.max(0.01, (footprintZ / planSizeZ) * fitBias);
+          const useUniformScale = variant.heightScaleMode === "uniform";
+          const uniformScale = Math.min(rawScaleX, rawScaleZ);
+          const scaleX = useUniformScale ? uniformScale : rawScaleX;
+          const scaleY = useUniformScale ? uniformScale : 1;
+          const scaleZ = useUniformScale ? uniformScale : rawScaleZ;
+          const baseY = supportTop + variant.baseOffset * scaleY;
           const variantId = variantIds.get(variant) ?? 0;
           variant.meshes.forEach((meshTemplate, meshIndex) => {
             const key = `${variantId}:${meshIndex}`;
             const existing = detailedBatches.get(key);
             if (existing) {
-              existing.instances.push({ spot, scale, baseY });
+              existing.instances.push({ spot, scaleX, scaleY, scaleZ, baseY });
             } else {
               detailedBatches.set(key, {
                 template: meshTemplate,
-                instances: [{ spot, scale, baseY }]
+                instances: [{ spot, scaleX, scaleY, scaleZ, baseY }]
               });
             }
           });
@@ -5872,7 +6028,7 @@ export const createThreeTest = (
         instances.forEach((instance, index) => {
           dummy.position.set(instance.spot.x, instance.baseY, instance.spot.z);
           dummy.rotation.set(0, instance.spot.rotation, 0);
-          dummy.scale.set(instance.scale, instance.scale, instance.scale);
+          dummy.scale.set(instance.scaleX, instance.scaleY, instance.scaleZ);
           dummy.updateMatrix();
           tempMatrix.copy(dummy.matrix).multiply(template.baseMatrix);
           instanced.setMatrixAt(index, tempMatrix);
@@ -5886,10 +6042,9 @@ export const createThreeTest = (
         fallbackMesh.castShadow = true;
         fallbackMesh.receiveShadow = true;
         fallbackInstances.forEach((spot, index) => {
-          const foundationTop = spot.groundMax + 0.01;
           const footprintX = Math.max(0.5, spot.footprintX);
           const footprintZ = Math.max(0.5, spot.footprintZ);
-          dummy.position.set(spot.x, foundationTop + 0.3, spot.z);
+          dummy.position.set(spot.x, spot.supportTop + 0.3, spot.z);
           dummy.rotation.set(0, spot.rotation, 0);
           dummy.scale.set(footprintX, 0.6, footprintZ);
           dummy.updateMatrix();
@@ -5923,27 +6078,23 @@ export const createThreeTest = (
       const baseFootprintX = Math.max(1, baseMaxX - baseMinX + 1);
       const baseFootprintZ = Math.max(1, baseMaxY - baseMinY + 1);
       const rotation = baseFootprintX >= baseFootprintZ ? 0 : Math.PI / 2;
-
-      let groundMin = Number.POSITIVE_INFINITY;
-      let groundMax = Number.NEGATIVE_INFINITY;
-      for (let fy = baseMinY; fy <= baseMaxY + 1; fy += 1) {
-        for (let fx = baseMinX; fx <= baseMaxX + 1; fx += 1) {
-          const h = elevationAt(fx, fy);
-          groundMin = Math.min(groundMin, h);
-          groundMax = Math.max(groundMax, h);
-        }
-      }
-      if (!Number.isFinite(groundMin) || !Number.isFinite(groundMax)) {
-        groundMin = elevationAt(Math.floor(centerTileX), Math.floor(centerTileY));
-        groundMax = groundMin;
-      }
+      const grounding = resolveStructureGrounding({
+        surface: sample,
+        minTileX: baseMinX,
+        maxTileX: baseMaxX,
+        minTileY: baseMinY,
+        maxTileY: baseMaxY,
+        heightScale: surface.heightScale,
+        heightAtTileCoord: surface.heightAtTileCoord
+      });
+      const supportBottom = grounding.foundationBottom;
+      const supportTop = grounding.foundationTop;
 
       if (firestationAsset && firestationAsset.meshes.length > 0) {
         const footprintTarget = Math.max(baseFootprintX, baseFootprintZ) * 0.85;
         const assetFootprint = Math.max(firestationAsset.size.x, firestationAsset.size.z);
         const scale = footprintTarget / Math.max(0.01, assetFootprint);
-        const foundationTop = groundMax + 0.01;
-        const baseY = foundationTop + firestationAsset.baseOffset * scale;
+        const baseY = supportTop + firestationAsset.baseOffset * scale;
         const tempMatrix = new THREE.Matrix4();
         firestationAsset.meshes.forEach((template) => {
           const geometry = template.geometry.clone();
@@ -5962,11 +6113,11 @@ export const createThreeTest = (
           instanced.instanceMatrix.needsUpdate = true;
           group.add(instanced);
         });
-        if (groundMin < foundationTop - 0.01) {
-          const foundationHeight = Math.max(0.1, foundationTop - groundMin);
+        if (supportBottom < supportTop - 0.01) {
+          const foundationHeight = Math.max(0.1, supportTop - supportBottom);
           const foundation = new THREE.Mesh(buildingGeometry, foundationMaterial);
           foundation.scale.set(baseFootprintX, foundationHeight, baseFootprintZ);
-          foundation.position.set(centerX, groundMin + foundationHeight / 2, centerZ);
+          foundation.position.set(centerX, supportBottom + foundationHeight / 2, centerZ);
           foundation.rotation.set(0, rotation, 0);
           foundation.castShadow = true;
           foundation.receiveShadow = true;
@@ -5977,13 +6128,13 @@ export const createThreeTest = (
         baseMesh.castShadow = true;
         baseMesh.receiveShadow = true;
         baseMesh.scale.set(baseFootprintX, 0.66, baseFootprintZ);
-        baseMesh.position.set(centerX, groundMax + baseMesh.scale.y * 0.5, centerZ);
+        baseMesh.position.set(centerX, supportTop + baseMesh.scale.y * 0.5, centerZ);
         group.add(baseMesh);
-        if (groundMin < groundMax - 0.01) {
-          const foundationHeight = Math.max(0.1, groundMax - groundMin);
+        if (supportBottom < supportTop - 0.01) {
+          const foundationHeight = Math.max(0.1, supportTop - supportBottom);
           const foundation = new THREE.Mesh(buildingGeometry, foundationMaterial);
           foundation.scale.set(baseFootprintX, foundationHeight, baseFootprintZ);
-          foundation.position.set(centerX, groundMin + foundationHeight / 2, centerZ);
+          foundation.position.set(centerX, supportBottom + foundationHeight / 2, centerZ);
           foundation.rotation.set(0, rotation, 0);
           foundation.castShadow = true;
           foundation.receiveShadow = true;
@@ -6053,6 +6204,8 @@ export const createThreeTest = (
     removeMusicControlsChangeListener = null;
     removeWorldAudioChangeListener?.();
     removeWorldAudioChangeListener = null;
+    removeRuntimeSettingsChangeListener?.();
+    removeRuntimeSettingsChangeListener = null;
     uiScene.remove(hudSprite);
     hudTexture.dispose();
     hudMaterial.dispose();
@@ -6909,11 +7062,20 @@ export const createThreeTest = (
     if (!terrainMesh || !sample.fastUpdate || !canReuseTerrainSurface(sample, surface)) {
       return false;
     }
+    const terrainSurfaceShadingMode = sample.debugRenderOptions?.terrainSurfaceShadingMode ?? "refined";
+    const useLegacyFacetedTerrain = terrainSurfaceShadingMode === "legacyFaceted";
     const palette = buildPalette();
     const grassId = TILE_TYPE_IDS.grass;
     const forestId = TILE_TYPE_IDS.forest;
     const waterId = TILE_TYPE_IDS.water;
     const roadId = TILE_TYPE_IDS.road;
+    if (terrainMesh.geometry instanceof THREE.BufferGeometry) {
+      if (useLegacyFacetedTerrain) {
+        terrainMesh.geometry.deleteAttribute("color");
+      } else {
+        applyTerrainSurfaceColors(terrainMesh.geometry, sample, surface);
+      }
+    }
     const tileTexture = buildTileTexture(
       sample,
       surface.sampleCols,
@@ -6936,7 +7098,8 @@ export const createThreeTest = (
       surface.sampledErosionWear ?? null,
       surface.sampledRiverCoverage ?? null,
       surface.sampledRiverStepStrength,
-      sample.debugTypeColors ?? false
+      sample.debugTypeColors ?? false,
+      useLegacyFacetedTerrain ? "legacy" : "mask"
     );
     const material = terrainMesh.material;
     let previousMap: THREE.Texture | null = null;

@@ -69,6 +69,7 @@ export type MapGenSettings = {
   skipCarving: boolean;
   riverBudget: number;
   settlementSpacing: number;
+  settlementPreGrowthYears: number;
   roadStrictness: number;
   forestPatchiness: number;
 };
@@ -138,6 +139,7 @@ export const DEFAULT_MAP_GEN_SETTINGS: MapGenSettings = {
   skipCarving: false,
   riverBudget: 0.44,
   settlementSpacing: 0.62,
+  settlementPreGrowthYears: 20,
   roadStrictness: 0.56,
   forestPatchiness: 0.42
 };
