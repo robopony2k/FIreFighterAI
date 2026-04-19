@@ -25,6 +25,7 @@ import {
 } from "../core/timeSpeed.js";
 import { formatCurrency } from "../core/utils.js";
 import { getFireSeasonIntensity, getPhaseInfo, PHASES } from "../core/time.js";
+import { RNG as RuntimeRng } from "../core/rng.js";
 import { setStatus, resetStatus } from "../core/state.js";
 import { maybeReport } from "./prof.js";
 import { inBounds, indexFor } from "../core/grid.js";
@@ -47,7 +48,7 @@ import { clearFireBlocks, markFireBlockActiveByTile } from "./fire/activeBlocks.
 import { advanceCareerDay, getClimateRisk } from "./climateRuntime.js";
 import { isBaseTileLost } from "./failure.js";
 import { updatePhaseControls } from "./lifecycle.js";
-import { stepGrowth, stepTownSeasonScaling } from "./growth.js";
+import { stepGrowth } from "./growth.js";
 import { stepTownAlertPosture } from "./towns.js";
 import { stepParticles } from "./particles.js";
 import { freezeScoringSeason, startScoringSeason, stepScoring } from "./scoring.js";
@@ -69,6 +70,16 @@ import { getAdaptiveFireSubstepMax, getBurnoutFactorForRisk, sampleFireWeatherRe
 import type { InputState } from "../core/inputState.js";
 import type { EffectsState } from "../core/effectsState.js";
 import { getRuntimeSettings, subscribeRuntimeSettings } from "../persistence/runtimeSettings.js";
+import {
+  backfillRoadEdgesFromAdjacency,
+  carveRoad,
+  clearRoadEdges,
+  collectRoadTiles,
+  findNearestRoadTile,
+  pruneRoadDiagonalStubs
+} from "../mapgen/roads.js";
+import type { SettlementRoadAdapter } from "../systems/settlements/types/settlementTypes.js";
+import { stepTownConstructionSchedule } from "../systems/settlements/sim/townConstruction.js";
 export { updatePhaseControls };
 
 const FIRE_HEAT_PADDING = 8;
@@ -240,6 +251,24 @@ const getTownCenterX = (town: WorldState["towns"][number]): number => (Number.is
 const getTownCenterY = (town: WorldState["towns"][number]): number => (Number.isFinite(town.cy) ? town.cy : town.y);
 
 const getMaxTimeSpeedIndex = (options: readonly number[]): number => Math.max(0, options.length - 1);
+
+const createRuntimeSettlementRoadAdapter = (state: WorldState): SettlementRoadAdapter => ({
+  carveRoad: (nextState, start, end, options = {}) => {
+    const routeSeed =
+      (nextState.seed ^
+        Math.imul(start.x + 1, 73856093) ^
+        Math.imul(start.y + 1, 19349663) ^
+        Math.imul(end.x + 1, 83492791) ^
+        Math.imul(end.y + 1, 2971215073 >>> 0)) >>>
+      0;
+    return carveRoad(nextState, new RuntimeRng(routeSeed), start, end, options);
+  },
+  collectRoadTiles,
+  findNearestRoadTile,
+  clearRoadEdges,
+  backfillRoadEdgesFromAdjacency,
+  pruneRoadDiagonalStubs
+});
 
 export const getActiveTimeSpeedOptions = (state: Pick<WorldState, "simTimeMode">): readonly number[] =>
   getTimeSpeedOptions(state.simTimeMode);
@@ -785,8 +814,8 @@ export function stepSim(state: WorldState, effects: EffectsState, rng: RNG, delt
   }
   const hadFireChainRisk = hasActiveOrScheduledFire(state);
   const climateRisk = getClimateRisk(state);
-  stepTownSeasonScaling(state);
   stepTownAlertPosture(state, dayDelta);
+  stepTownConstructionSchedule(state, createRuntimeSettlementRoadAdapter(state), dayDelta);
   const allowGrowth = state.phase === "growth" && isGrowthWeather(state);
   const allowIgnition = state.phase === "fire" && climateRisk >= FIRE_WEATHER_RISK_MIN;
   const allowFireSim = hasFireSimulationWork(state) || allowIgnition;

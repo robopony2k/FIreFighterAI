@@ -69,7 +69,7 @@ export const FX_LAB_SCENARIOS: ReadonlyArray<FxLabScenarioDefinition> = [
   {
     id: "house-lifecycle",
     label: "House Lifecycle",
-    description: "Procedural house previews showing frame, finished, and burnt-frame states from the same generator."
+    description: "Procedural house previews showing frame, roofed, and charred-remains states from the same generator."
   },
   {
     id: "water-precision",
@@ -93,7 +93,7 @@ const pulse = (timeSeconds: number, hz: number, min = 0.84, max = 1.16): number 
   return min + (max - min) * t;
 };
 
-type HousePreviewStage = "frame" | "finished" | "burnt_frame";
+type HousePreviewStage = "frame" | "roofed" | "charred_remains";
 
 type HousePreviewSpec = {
   tileX: number;
@@ -111,8 +111,8 @@ type HousePreviewSnapshotEntry = {
 
 const HOUSE_PREVIEW_TARGETS: readonly HousePreviewSpec[] = [
   { tileX: 12, tileY: 30, stage: "frame", constructionYearOffset: 0.06 },
-  { tileX: 18, tileY: 30, stage: "finished", constructionYearOffset: 0.24 },
-  { tileX: 24, tileY: 30, stage: "burnt_frame", constructionYearOffset: 0.24 }
+  { tileX: 18, tileY: 30, stage: "roofed", constructionYearOffset: 0.24 },
+  { tileX: 24, tileY: 30, stage: "charred_remains", constructionYearOffset: 0.24 }
 ] as const;
 const HOUSE_PREVIEW_PAD = {
   minTileX: 7,
@@ -199,8 +199,8 @@ const stampHousePreview = (
   tile.fuel = Math.max(0.01, tile.fuel);
   tile.fire = 0;
   tile.heat = 0;
-  tile.houseDamage01 = stage === "burnt_frame" ? 1 : 0;
-  tile.houseDestroyed = stage === "burnt_frame";
+  tile.houseDamage01 = stage === "charred_remains" ? 1 : 0;
+  tile.houseDestroyed = stage === "charred_remains";
   tile.houseConstructionYear = currentYear - constructionYearOffset;
   tile.dominantTreeType = null;
   tile.treeType = null;

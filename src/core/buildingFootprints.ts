@@ -6,7 +6,7 @@ export type HouseVariantFootprint = {
   sizeZ: number;
   parcelX: number;
   parcelZ: number;
-  roofType: "gable" | "hip" | "shed";
+  roofType: "gable" | "hip" | "lean_to";
   wallTint: string;
   roofTint: string;
 };
@@ -37,14 +37,14 @@ export const HOUSE_VARIANTS: HouseVariantFootprint[] = [
     roofTint: "#6f5646"
   },
   {
-    source: "procedural/saltbox",
-    name: "saltbox",
+    source: "procedural/lean_to_cottage",
+    name: "lean_to_cottage",
     sizeX: 1.02,
     sizeY: 0.98,
     sizeZ: 0.76,
     parcelX: 1.56,
     parcelZ: 1.18,
-    roofType: "shed",
+    roofType: "lean_to",
     wallTint: "#d19a72",
     roofTint: "#5f4a3e"
   },

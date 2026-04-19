@@ -1,14 +1,24 @@
 import * as THREE from "three";
 
 export type BuildingLifecycleStage =
-  | "foundation"
+  | "empty_lot"
+  | "site_prep"
   | "frame"
   | "enclosed"
-  | "finished"
-  | "damaged"
-  | "burnt_frame";
+  | "roofed"
+  | "charred_remains"
+  | "cleared_lot";
 
-export type BuildingRoofType = "gable" | "hip" | "shed";
+export type BuildingLotKind = "expansion" | "rebuild";
+
+export type BuildingLotStage =
+  | "empty_lot"
+  | "site_prep"
+  | "frame"
+  | "enclosed"
+  | "cleared_lot";
+
+export type BuildingRoofType = "gable" | "hip" | "lean_to";
 
 export type BuildingEntrySide = "front" | "left" | "right";
 
@@ -23,14 +33,40 @@ export type BuildingAnnexSpec = {
   roofType: BuildingRoofType;
 };
 
+export type BuildingStoreyCount = 1 | 2;
+
 export const BUILDING_LIFECYCLE_STAGE_ORDER: readonly BuildingLifecycleStage[] = [
-  "foundation",
+  "empty_lot",
+  "site_prep",
   "frame",
   "enclosed",
-  "finished",
-  "damaged",
-  "burnt_frame"
+  "roofed",
+  "charred_remains",
+  "cleared_lot"
 ] as const;
+
+export type BuildingLot = {
+  id: number;
+  townId: number;
+  kind: BuildingLotKind;
+  anchorIndex: number;
+  styleSeed: number;
+  stage: BuildingLotStage;
+  stageProgressDays: number;
+  startedDay: number;
+  houseValue: number;
+  houseResidents: number;
+};
+
+export type RenderBuildingLot = {
+  id: number;
+  townId: number;
+  kind: BuildingLotKind;
+  anchorIndex: number;
+  styleSeed: number;
+  stageId: number;
+  stageStep: number;
+};
 
 export type BuildingSpec = {
   seed: number;
@@ -48,6 +84,7 @@ export type BuildingSpec = {
   frontWindowCount: number;
   sideWindowCount: number;
   porchDepth: number;
+  storeys: BuildingStoreyCount;
   annex?: BuildingAnnexSpec | null;
 };
 

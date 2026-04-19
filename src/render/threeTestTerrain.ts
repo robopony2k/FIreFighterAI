@@ -7,7 +7,8 @@ import {
 import { getHouseFootprintBounds, pickHouseFootprint } from "../core/houseFootprints.js";
 import { getTerrainHeightScale } from "../core/terrainScale.js";
 import { getVegetationRenderHeightMultiplier } from "../core/vegetation.js";
-import { getBuildingLifecycleStageFromId } from "../systems/settlements/sim/buildingLifecycle.js";
+import { getBuildingLifecycleStageFromId, getBuildingLifecycleStageId } from "../systems/settlements/sim/buildingLifecycle.js";
+import type { RenderBuildingLot } from "../systems/settlements/types/buildingTypes.js";
 import { getProceduralHouseVariantKey } from "../systems/settlements/rendering/proceduralHouseBuilder.js";
 import {
   COAST_CLASS_BEACH,
@@ -176,6 +177,8 @@ export type TerrainSample = {
   dynamicStructures?: boolean;
   houseLifecycleStages?: Uint8Array;
   houseLifecycleSteps?: Uint8Array;
+  houseStyleSeeds?: Uint32Array;
+  buildingLots?: RenderBuildingLot[];
   debugRenderOptions?: TerrainRenderDebugOptions;
 };
 
@@ -2699,7 +2702,7 @@ export const buildTerrainMesh = (
             if (type !== houseId) {
               continue;
             }
-            const seed = idx;
+            const seed = sample.houseStyleSeeds?.[idx] ?? (idx >>> 0);
             const rotation = pickHouseRotation(tileX, tileY, cols, rows, tiles, roadId, baseId, seed);
             const footprint = pickHouseFootprint(seed);
             const bounds = getHouseFootprintBounds(tileX, tileY, rotation, footprint);
@@ -3382,14 +3385,14 @@ export const buildTerrainMesh = (
         const x = (normX - 0.5) * width;
         const z = (normZ - 0.5) * depth;
         const height = heightAtTile(tileX, tileY) * heightScale;
-        const seed = rowBase + tileX;
+        const seed = sample.houseStyleSeeds?.[rowBase + tileX] ?? ((rowBase + tileX) >>> 0);
         if (typeId !== baseId && typeId !== houseId) {
           continue;
         }
         if (typeId === baseId) {
           baseTiles.push({ tileX, tileY });
         } else {
-          const lifecycleStageId = sample.houseLifecycleStages?.[rowBase + tileX] ?? 3;
+          const lifecycleStageId = sample.houseLifecycleStages?.[rowBase + tileX] ?? getBuildingLifecycleStageId("roofed");
           const lifecycleStep = sample.houseLifecycleSteps?.[rowBase + tileX] ?? 0;
           const lifecycleStage = getBuildingLifecycleStageFromId(lifecycleStageId);
           const rotation = pickHouseRotation(tileX, tileY, cols, rows, tileTypes, roadId, baseId, seed);

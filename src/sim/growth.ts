@@ -405,16 +405,7 @@ const updateTownRadius = (state: WorldState, town: WorldState["towns"][number]):
 };
 
 export function stepTownSeasonScaling(state: WorldState): void {
-  const rng = new RuntimeRng((state.seed ^ (state.year * 2654435761)) >>> 0);
-  const roadAdapter: SettlementRoadAdapter = {
-    carveRoad: (nextState, start, end, options = {}) => carveRoad(nextState, rng, start, end, options),
-    collectRoadTiles,
-    findNearestRoadTile,
-    clearRoadEdges,
-    backfillRoadEdgesFromAdjacency,
-    pruneRoadDiagonalStubs
-  };
-  stepRuntimeTownGrowth(state, roadAdapter);
+  stepRuntimeTownGrowth(state);
 }
 
 export function stepGrowth(state: WorldState, dayDelta: number, rng: RNG): void {

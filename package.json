@@ -18,6 +18,7 @@
     "sun:regression": "node scripts/seasonal-sun-regression.mjs",
     "fire:regression": "npm run build && node scripts/fire-regression.mjs",
     "growth:regression": "npm run build && node scripts/growth-regression.mjs",
+    "settlement:regression": "npm run build && node scripts/settlement-lifecycle-regression.mjs",
     "terrain:eval": "npm run build && node scripts/terrain-eval.mjs",
     "terrain:eval:quick": "npm run build && node scripts/terrain-eval.mjs --size=massive --samples=1",
     "mapgen:regression": "npm run build && node scripts/mapgen-regression.mjs",

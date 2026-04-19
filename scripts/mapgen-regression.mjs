@@ -382,6 +382,9 @@ const ROAD_EDGE_DIRS = [
   { dx: 1, dy: 1, bit: ROAD_EDGE_SE },
   { dx: -1, dy: 1, bit: ROAD_EDGE_SW }
 ];
+const COMPACT_TOWN_MORPH_MIN_HOUSES = 4;
+const COMPACT_TOWN_MORPH_MIN_ROADS = 10;
+const COMPACT_TOWN_ASPECT_LIMIT = 2.85;
 
 const analyzeRoadEdgeQuality = (state) => {
   const { cols, rows, totalTiles } = state.grid;
@@ -590,6 +593,123 @@ const analyzeCoastalClassification = (state) => {
   };
 };
 
+const analyzeTownMorphologies = (state) => {
+  const { cols, rows } = state.grid;
+  const isRoadLike = (x, y) => {
+    if (x < 0 || y < 0 || x >= cols || y >= rows) {
+      return false;
+    }
+    const idx = y * cols + x;
+    const tile = state.tiles[idx];
+    return !!tile && (tile.type === "road" || tile.type === "base" || (state.tileRoadBridge[idx] ?? 0) > 0);
+  };
+  const getRoadDegree = (x, y) => {
+    const idx = y * cols + x;
+    let mask = state.tileRoadEdges[idx] ?? 0;
+    if (mask === 0) {
+      for (const dir of ROAD_EDGE_DIRS) {
+        if (isRoadLike(x + dir.dx, y + dir.dy)) {
+          mask |= dir.bit;
+        }
+      }
+    }
+    let degree = 0;
+    for (let bit = mask; bit !== 0; bit &= bit - 1) {
+      degree += 1;
+    }
+    return degree;
+  };
+  return state.towns.map((town) => {
+    const housePoints = [];
+    const frontierPoints = (town.growthFrontiers ?? []).filter((frontier) => frontier.active);
+    let minX = town.x;
+    let maxX = town.x;
+    let minY = town.y;
+    let maxY = town.y;
+    for (let idx = 0; idx < state.grid.totalTiles; idx += 1) {
+      if (state.tileTownId[idx] !== town.id || state.tiles[idx]?.type !== "house") {
+        continue;
+      }
+      const x = idx % cols;
+      const y = Math.floor(idx / cols);
+      housePoints.push({ x, y });
+      minX = Math.min(minX, x);
+      maxX = Math.max(maxX, x);
+      minY = Math.min(minY, y);
+      maxY = Math.max(maxY, y);
+    }
+    for (const frontier of frontierPoints) {
+      minX = Math.min(minX, frontier.x);
+      maxX = Math.max(maxX, frontier.x);
+      minY = Math.min(minY, frontier.y);
+      maxY = Math.max(maxY, frontier.y);
+    }
+    const shapePoints = [...housePoints, ...frontierPoints];
+    const centerPoint =
+      shapePoints.length > 0
+        ? {
+            x: shapePoints.reduce((sum, point) => sum + point.x, 0) / shapePoints.length,
+            y: shapePoints.reduce((sum, point) => sum + point.y, 0) / shapePoints.length
+          }
+        : { x: town.cx ?? town.x, y: town.cy ?? town.y };
+    const localCenterRadius = Math.max(4, Math.min(9, Math.max(maxX - minX + 1, maxY - minY + 1) * 0.5 + 2));
+    minX = Math.max(0, minX - 2);
+    maxX = Math.min(cols - 1, maxX + 2);
+    minY = Math.max(0, minY - 2);
+    maxY = Math.min(rows - 1, maxY + 2);
+    const localRoads = [];
+    for (let y = minY; y <= maxY; y += 1) {
+      for (let x = minX; x <= maxX; x += 1) {
+        if (!isRoadLike(x, y)) {
+          continue;
+        }
+        const nearHouse = housePoints.some((point) => Math.abs(point.x - x) + Math.abs(point.y - y) <= 5);
+        const nearFrontier = frontierPoints.some((frontier) => Math.abs(frontier.x - x) + Math.abs(frontier.y - y) <= 3);
+        const nearCenter = Math.hypot(x - centerPoint.x, y - centerPoint.y) <= localCenterRadius;
+        if (nearHouse || nearFrontier || nearCenter) {
+          localRoads.push({ x, y });
+        }
+      }
+    }
+    const footprint = [{ x: town.x, y: town.y }, ...housePoints, ...localRoads];
+    let shapeMinX = town.x;
+    let shapeMaxX = town.x;
+    let shapeMinY = town.y;
+    let shapeMaxY = town.y;
+    for (const point of footprint) {
+      shapeMinX = Math.min(shapeMinX, point.x);
+      shapeMaxX = Math.max(shapeMaxX, point.x);
+      shapeMinY = Math.min(shapeMinY, point.y);
+      shapeMaxY = Math.max(shapeMaxY, point.y);
+    }
+    const width = shapeMaxX - shapeMinX + 1;
+    const height = shapeMaxY - shapeMinY + 1;
+    const aspect = Number((Math.max(width, height) / Math.max(1, Math.min(width, height))).toFixed(2));
+    const roadNode3PlusCount = localRoads.filter((point) => getRoadDegree(point.x, point.y) >= 3).length;
+    const meaningful =
+      town.streetArchetype !== "ribbon" &&
+      (town.houseCount >= COMPACT_TOWN_MORPH_MIN_HOUSES || localRoads.length >= COMPACT_TOWN_MORPH_MIN_ROADS);
+    const violations = [];
+    if (meaningful && roadNode3PlusCount < 1) {
+      violations.push("missing_intersection");
+    }
+    if (meaningful && aspect > COMPACT_TOWN_ASPECT_LIMIT) {
+      violations.push("overelongated");
+    }
+    return {
+      id: town.id,
+      archetype: town.streetArchetype,
+      profile: town.industryProfile,
+      houseCount: town.houseCount,
+      roadTileCount: localRoads.length,
+      roadNode3PlusCount,
+      aspect,
+      meaningful,
+      violations
+    };
+  });
+};
+
 const runCase = async (sizeId, seed) => {
   const grid = createGrid(sizeId);
   const state = createInitialState(seed, grid);
@@ -652,6 +772,14 @@ const runCase = async (sizeId, seed) => {
   const roadMetrics = analyzeRoadEdgeQuality(state);
   const roadSurfaceMetrics = analyzeRoadSurfaceMetrics(state);
   const coastMetrics = analyzeCoastalClassification(state);
+  const townMorphologies = analyzeTownMorphologies(state);
+  const compactTownViolations = townMorphologies
+    .filter((town) => town.meaningful && town.violations.length > 0)
+    .map((town) => ({
+      id: town.id,
+      archetype: town.archetype,
+      violations: town.violations
+    }));
   forestMaturities.sort((a, b) => a - b);
   const forestMaturityP95 =
     forestMaturities.length > 0
@@ -679,6 +807,13 @@ const runCase = async (sizeId, seed) => {
     riverCount: river,
     phaseTimingsMs,
     biomeSpreadClassifyMs: Number((biomeSpreadMs + biomeClassifyMs).toFixed(2)),
+    compactTownEvalCount: townMorphologies.filter((town) => town.meaningful).length,
+    compactTownViolationCount: compactTownViolations.length,
+    compactTownMaxAspect: Number(
+      Math.max(1, ...townMorphologies.filter((town) => town.meaningful).map((town) => town.aspect)).toFixed(2)
+    ),
+    townMorphologies,
+    compactTownViolations,
     ...patchMetrics,
     ...riverMetrics,
     ...roadMetrics,
@@ -734,7 +869,7 @@ const runAll = async () => {
       const metrics = await runCase(sizeId, seed);
       results.push(metrics);
       console.log(
-        `[mapgen] size=${metrics.sizeId} seed=${metrics.seed} ms=${metrics.durationMs.toFixed(2)} biome=${metrics.biomeSpreadClassifyMs.toFixed(2)}ms water=${metrics.waterPct.toFixed(2)}% forest=${metrics.forestPct.toFixed(2)}% forestAgeMean=${metrics.forestAgeMean.toFixed(2)} forestMaturityP95=${metrics.forestMaturityP95.toFixed(3)} patches=${metrics.forestPatchCount} meanPatch=${metrics.forestPatchMean} p95Patch=${metrics.forestPatchP95} houses=${metrics.houseCount} placed=${metrics.placedHouseCount}/${metrics.requestedHouseCount} padReliefMax=${metrics.settlementPadReliefMax.toFixed(4)} padReliefMean=${metrics.settlementPadReliefMean.toFixed(4)} roads=${metrics.roadCount} rivers=${metrics.riverCount} roadIgnoredDiag=${metrics.ignoredDiagonalCount} roadUnmatched=${metrics.unmatchedPatternCount} roadGrade=${metrics.maxRoadGrade.toFixed(3)} roadCrossfall=${metrics.maxRoadCrossfall.toFixed(3)} roadGradeChange=${metrics.maxRoadGradeChange.toFixed(3)} roadWalls=${metrics.wallEdgeCount} riverDiagOnly=${metrics.riverDiagOnlyLinks} riverIso=${metrics.riverIsolatedCells} riverOrthRatio=${metrics.riverOrthConnectivityRatio.toFixed(4)} riverComps=${metrics.riverComponentCount} riverDetachedComps=${metrics.detachedRiverComponents} riverDetachedCells=${metrics.detachedRiverCells} coastNatural=${metrics.coastalNaturalCount} coastBeach=${metrics.coastalBeachCount} coastRocky=${metrics.coastalRockyCount} coastOther=${metrics.coastalOtherCount}`
+        `[mapgen] size=${metrics.sizeId} seed=${metrics.seed} ms=${metrics.durationMs.toFixed(2)} biome=${metrics.biomeSpreadClassifyMs.toFixed(2)}ms water=${metrics.waterPct.toFixed(2)}% forest=${metrics.forestPct.toFixed(2)}% forestAgeMean=${metrics.forestAgeMean.toFixed(2)} forestMaturityP95=${metrics.forestMaturityP95.toFixed(3)} patches=${metrics.forestPatchCount} meanPatch=${metrics.forestPatchMean} p95Patch=${metrics.forestPatchP95} houses=${metrics.houseCount} placed=${metrics.placedHouseCount}/${metrics.requestedHouseCount} compactEval=${metrics.compactTownEvalCount} compactViolations=${metrics.compactTownViolationCount} compactMaxAspect=${metrics.compactTownMaxAspect.toFixed(2)} padReliefMax=${metrics.settlementPadReliefMax.toFixed(4)} padReliefMean=${metrics.settlementPadReliefMean.toFixed(4)} roads=${metrics.roadCount} rivers=${metrics.riverCount} roadIgnoredDiag=${metrics.ignoredDiagonalCount} roadUnmatched=${metrics.unmatchedPatternCount} roadGrade=${metrics.maxRoadGrade.toFixed(3)} roadCrossfall=${metrics.maxRoadCrossfall.toFixed(3)} roadGradeChange=${metrics.maxRoadGradeChange.toFixed(3)} roadWalls=${metrics.wallEdgeCount} riverDiagOnly=${metrics.riverDiagOnlyLinks} riverIso=${metrics.riverIsolatedCells} riverOrthRatio=${metrics.riverOrthConnectivityRatio.toFixed(4)} riverComps=${metrics.riverComponentCount} riverDetachedComps=${metrics.detachedRiverComponents} riverDetachedCells=${metrics.detachedRiverCells} coastNatural=${metrics.coastalNaturalCount} coastBeach=${metrics.coastalBeachCount} coastRocky=${metrics.coastalRockyCount} coastOther=${metrics.coastalOtherCount}`
       );
     }
   }
@@ -809,6 +944,10 @@ const compareAgainstBaseline = async (results) => {
     if (result.forestMaturityP95 >= 0.95) {
       failures += 1;
       console.error(`[mapgen] forest maturity p95 too high for ${key}: ${result.forestMaturityP95.toFixed(3)}`);
+    }
+    if (result.compactTownViolationCount > 0) {
+      failures += 1;
+      console.error(`[mapgen] compact town morphology regressions for ${key}: ${JSON.stringify(result.compactTownViolations)}`);
     }
     if (hasBaseline) {
       const expected = index.get(key);

@@ -3,10 +3,12 @@ import { ensureTileSoA } from "../core/tileCache.js";
 import type { Town } from "../core/types.js";
 import { DEFAULT_MOISTURE_PARAMS } from "../core/climate.js";
 import { clamp } from "../core/utils.js";
+import type { RenderBuildingLot } from "../systems/settlements/types/buildingTypes.js";
 import type { TerrainRenderDebugOptions } from "./terrain/debug/terrainHeightProvenance.js";
 import {
   getBuildingLifecycleStageId,
   getFractionalSimulationYear,
+  resolveBuildingLotVisualStep,
   resolveHouseLifecycleVisualStep,
   resolveHouseLifecycleStage
 } from "../systems/settlements/sim/buildingLifecycle.js";
@@ -55,6 +57,8 @@ export type RenderTerrainSample = {
   dynamicStructures?: boolean;
   houseLifecycleStages?: Uint8Array;
   houseLifecycleSteps?: Uint8Array;
+  houseStyleSeeds?: Uint32Array;
+  buildingLots?: RenderBuildingLot[];
   debugRenderOptions?: TerrainRenderDebugOptions;
 };
 
@@ -77,10 +81,21 @@ export const buildRenderTerrainSample = (
   const currentSimulationYear = getFractionalSimulationYear(state.careerDay);
   const houseLifecycleStages = new Uint8Array(state.grid.totalTiles);
   const houseLifecycleSteps = new Uint8Array(state.grid.totalTiles);
+  const houseStyleSeeds = new Uint32Array(state.grid.totalTiles);
+  const buildingLots: RenderBuildingLot[] = state.buildingLots.map((lot) => ({
+    id: lot.id,
+    townId: lot.townId,
+    kind: lot.kind,
+    anchorIndex: lot.anchorIndex,
+    styleSeed: lot.styleSeed,
+    stageId: getBuildingLifecycleStageId(lot.stage),
+    stageStep: resolveBuildingLotVisualStep(lot)
+  }));
   for (let idx = 0; idx < state.grid.totalTiles; idx += 1) {
     const tile = state.tiles[idx];
+    houseStyleSeeds[idx] = Number.isFinite(tile?.houseStyleSeed) ? Math.trunc(tile.houseStyleSeed as number) >>> 0 : idx >>> 0;
     if (!tile || tile.type !== "house") {
-      houseLifecycleStages[idx] = getBuildingLifecycleStageId("finished");
+      houseLifecycleStages[idx] = getBuildingLifecycleStageId("roofed");
       houseLifecycleSteps[idx] = 0;
       continue;
     }
@@ -125,6 +140,8 @@ export const buildRenderTerrainSample = (
     structureRevision: state.structureRevision,
     dynamicStructures: true,
     houseLifecycleStages,
-    houseLifecycleSteps
+    houseLifecycleSteps,
+    houseStyleSeeds,
+    buildingLots
   };
 };

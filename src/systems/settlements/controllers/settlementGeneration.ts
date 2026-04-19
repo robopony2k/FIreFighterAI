@@ -7,9 +7,21 @@ import type {
   TownIndustryProfile,
   TownStreetArchetype
 } from "../../../core/types.js";
-import { BASE_PRE_GROWTH_YEARS, MAX_SETTLEMENT_PRE_GROWTH_YEARS, MIN_TOWN_RADIUS, TOWN_CORE_RADIUS } from "../constants/settlementConstants.js";
+import {
+  BASE_PRE_GROWTH_YEARS,
+  COASTAL_PROFILE_WATER_DISTANCE_MAX,
+  COMPACT_TOWN_BLOCK_OFFSET,
+  MAX_SETTLEMENT_PRE_GROWTH_YEARS,
+  MIN_TOWN_RADIUS,
+  RIBBON_TOWN_MIN_BUILD_SPAN,
+  RIBBON_TOWN_RELIEF_MIN,
+  RIBBON_TOWN_WATER_DISTANCE_MAX,
+  TOWN_CORE_RADIUS,
+  TOWN_INITIAL_BUILD_COOLDOWN_MAX_DAYS
+} from "../constants/settlementConstants.js";
 import { simulateTownGrowthYears } from "../sim/townGrowth.js";
 import type { SettlementPlacementResult, SettlementRoadAdapter, SettlementRoadOptions } from "../types/settlementTypes.js";
+import { hash2D } from "../../../mapgen/noise.js";
 
 type TownSeedCandidate = Point & {
   score: number;
@@ -179,16 +191,74 @@ const computeLocalRelief = (state: WorldState, x: number, y: number): number => 
   return maxDiff;
 };
 
+const getSecondaryDirection = (primaryDir: { dx: number; dy: number }): { dx: number; dy: number } => ({
+  dx: -primaryDir.dy,
+  dy: primaryDir.dx
+});
+
+const measureBuildableSpan = (
+  state: WorldState,
+  center: Point,
+  dx: number,
+  dy: number,
+  maxSteps: number
+): number => {
+  let span = 1;
+  for (const sign of [-1, 1] as const) {
+    for (let step = 1; step <= maxSteps; step += 1) {
+      const x = center.x + dx * step * sign;
+      const y = center.y + dy * step * sign;
+      if (!isBuildable(state, x, y)) {
+        break;
+      }
+      span += 1;
+    }
+  }
+  return span;
+};
+
+const scoreCompactParallelSide = (
+  state: WorldState,
+  center: Point,
+  primaryDir: { dx: number; dy: number },
+  sideDir: { dx: number; dy: number }
+): number => {
+  let score = 0;
+  const sampleCenter = {
+    x: center.x + sideDir.dx * COMPACT_TOWN_BLOCK_OFFSET,
+    y: center.y + sideDir.dy * COMPACT_TOWN_BLOCK_OFFSET
+  };
+  for (let step = -2; step <= 2; step += 1) {
+    const x = sampleCenter.x + primaryDir.dx * step;
+    const y = sampleCenter.y + primaryDir.dy * step;
+    if (!inBounds(state.grid, x, y)) {
+      continue;
+    }
+    if (isBuildable(state, x, y)) {
+      score += 1;
+      continue;
+    }
+    const tile = state.tiles[indexFor(state.grid, x, y)];
+    if (tile && tile.type !== "water") {
+      score += 0.15;
+    }
+  }
+  return score;
+};
+
+const isCompactTownArchetype = (archetype: TownStreetArchetype): boolean =>
+  archetype === "crossroads" || archetype === "main_street";
+
 const classifyTownProfile = (candidate: {
   waterDistance: number;
   localRelief: number;
   elevation: number;
 }): TownIndustryProfile => {
-  if (candidate.waterDistance <= 5 && candidate.elevation < 0.62) {
-    return "coastal";
-  }
   if (candidate.localRelief >= 0.038 || candidate.elevation >= 0.66) {
     return "mining";
+  }
+  if (candidate.waterDistance <= COASTAL_PROFILE_WATER_DISTANCE_MAX && candidate.elevation < 0.6) {
+    return "coastal";
   }
   if (candidate.localRelief <= 0.018 && candidate.waterDistance >= 6) {
     return "farming";
@@ -227,8 +297,9 @@ const collectSettlementCandidates = (state: WorldState, townDensity: number): To
       score += flatness * 0.92;
       score += edgeNorm * 0.24;
       score += baseBand * 0.18;
-      score += waterAffinity * (profile === "coastal" ? 0.36 : 0.14);
-      score += profile === "farming" ? 0.08 : profile === "general" ? 0.04 : 0;
+      score += waterAffinity * (profile === "coastal" ? 0.22 : profile === "farming" ? 0.16 : 0.12);
+      score += profile === "farming" ? 0.08 : profile === "general" ? 0.05 : profile === "coastal" ? 0.02 : 0;
+      score += flatness >= 0.82 ? 0.04 : 0;
       score += (townDensity - 0.5) * 0.05;
       if (score <= 0.42) {
         continue;
@@ -318,17 +389,29 @@ const selectVillageSeeds = (
   return chosen;
 };
 
-const pickStreetArchetype = (profile: TownIndustryProfile, localRelief: number): TownStreetArchetype => {
-  if (profile === "coastal") {
-    return "ribbon";
+const pickStreetArchetype = (
+  state: WorldState,
+  candidate: TownSeedCandidate,
+  primaryDir: { dx: number; dy: number }
+): TownStreetArchetype => {
+  if (candidate.profile === "coastal") {
+    const secondaryDir = getSecondaryDirection(primaryDir);
+    const buildSpan = measureBuildableSpan(state, candidate, secondaryDir.dx, secondaryDir.dy, COMPACT_TOWN_BLOCK_OFFSET + 1);
+    if (
+      candidate.waterDistance <= RIBBON_TOWN_WATER_DISTANCE_MAX &&
+      (candidate.localRelief >= RIBBON_TOWN_RELIEF_MIN || buildSpan < RIBBON_TOWN_MIN_BUILD_SPAN)
+    ) {
+      return "ribbon";
+    }
+    return candidate.localRelief <= 0.024 ? "crossroads" : "main_street";
   }
-  if (profile === "mining" && localRelief >= 0.032) {
+  if (candidate.profile === "mining" && candidate.localRelief >= 0.032) {
     return "contour";
   }
-  if (profile === "farming" && localRelief <= 0.022) {
+  if (candidate.profile === "farming" && candidate.localRelief <= 0.026) {
     return "crossroads";
   }
-  if (profile === "general" && localRelief <= 0.02) {
+  if (candidate.profile === "general" && candidate.localRelief <= 0.024) {
     return "crossroads";
   }
   return "main_street";
@@ -511,6 +594,48 @@ const pushFrontier = (
   });
 };
 
+const buildCompactStreetSkeleton = (
+  state: WorldState,
+  town: Town,
+  primaryDir: { dx: number; dy: number },
+  plan: SettlementPlacementResult,
+  roadAdapter: SettlementRoadAdapter,
+  isBaseTown: boolean
+): LocalStreetBuildResult | null => {
+  const archetype = isBaseTown ? "crossroads" : town.streetArchetype;
+  const center = { x: town.x, y: town.y };
+  const branchDir = getSecondaryDirection(primaryDir);
+  const primaryHalfLength = isBaseTown ? 4 : archetype === "crossroads" ? 4 : 3;
+  const secondaryHalfLength =
+    isBaseTown || archetype === "crossroads" ? Math.max(2, primaryHalfLength - 1) : 2;
+  const frontiers: TownGrowthFrontier[] = [];
+  const forward = carveStreetArm(state, roadAdapter, center, primaryDir.dx, primaryDir.dy, primaryHalfLength, plan);
+  const backward = carveStreetArm(state, roadAdapter, center, -primaryDir.dx, -primaryDir.dy, primaryHalfLength, plan);
+  pushFrontier(frontiers, center, forward, primaryDir.dx, primaryDir.dy, "primary", true);
+  pushFrontier(frontiers, center, backward, -primaryDir.dx, -primaryDir.dy, "primary", true);
+
+  if (isBaseTown || archetype === "crossroads") {
+    const left = carveStreetArm(state, roadAdapter, center, branchDir.dx, branchDir.dy, secondaryHalfLength, plan);
+    const right = carveStreetArm(state, roadAdapter, center, -branchDir.dx, -branchDir.dy, secondaryHalfLength, plan);
+    pushFrontier(frontiers, center, left, branchDir.dx, branchDir.dy, "secondary", true);
+    pushFrontier(frontiers, center, right, -branchDir.dx, -branchDir.dy, "secondary", true);
+    return {
+      frontiers,
+      streetArchetype: archetype
+    };
+  }
+
+  const positiveSide = scoreCompactParallelSide(state, center, primaryDir, branchDir);
+  const negativeSide = scoreCompactParallelSide(state, center, primaryDir, { dx: -branchDir.dx, dy: -branchDir.dy });
+  const sideDir = positiveSide >= negativeSide ? branchDir : { dx: -branchDir.dx, dy: -branchDir.dy };
+  const sideStreet = carveStreetArm(state, roadAdapter, center, sideDir.dx, sideDir.dy, secondaryHalfLength, plan);
+  pushFrontier(frontiers, center, sideStreet, sideDir.dx, sideDir.dy, "secondary", true);
+  return {
+    frontiers,
+    streetArchetype: archetype
+  };
+};
+
 const buildLocalStreetSkeleton = (
   state: WorldState,
   town: Town,
@@ -520,6 +645,12 @@ const buildLocalStreetSkeleton = (
   isBaseTown: boolean
 ): LocalStreetBuildResult => {
   const archetype = isBaseTown ? "crossroads" : town.streetArchetype;
+  if (isBaseTown || isCompactTownArchetype(archetype)) {
+    const compact = buildCompactStreetSkeleton(state, town, primaryDir, plan, roadAdapter, isBaseTown);
+    if (compact) {
+      return compact;
+    }
+  }
   const center = { x: town.x, y: town.y };
   const primaryHalfLength = isBaseTown ? 4 : archetype === "ribbon" ? 4 : 3;
   const secondaryHalfLength =
@@ -623,6 +754,7 @@ const buildTownConnectionPlan = (towns: Town[]): Array<[Town, Town]> => {
 
 const buildTownRecord = (
   id: number,
+  worldSeed: number,
   name: string,
   center: TownSeedCandidate,
   streetArchetype: TownStreetArchetype
@@ -649,7 +781,14 @@ const buildTownRecord = (
   evacProgress: 0,
   lastPostureChangeDay: 0,
   desiredHouseDelta: 0,
-  lastSeasonHouseDelta: 0
+  lastSeasonHouseDelta: 0,
+  growthPressure: 0,
+  recoveryPressure: 0,
+  buildStartCooldownDays: Math.floor(
+    hash2D(center.x + id * 17, center.y + id * 31, worldSeed ^ 0x51f15a1d) * (TOWN_INITIAL_BUILD_COOLDOWN_MAX_DAYS + 1)
+  ),
+  activeBuildCap: 1,
+  buildStartSerial: 0
 });
 
 const findStreetNearTown = (state: WorldState, origin: Point, radius: number): Point | null => {
@@ -841,6 +980,9 @@ const initializeSettlementState = (state: WorldState): void => {
   } else {
     state.tileStructure.fill(0);
   }
+  state.settlementBuildDayAccumulator = 0;
+  state.buildingLots = [];
+  state.nextBuildingLotId = 1;
 };
 
 const seedTowns = (state: WorldState, plan: SettlementPlacementResult): Town[] => {
@@ -869,10 +1011,12 @@ const seedTowns = (state: WorldState, plan: SettlementPlacementResult): Town[] =
   const towns: Town[] = [];
   for (let i = 0; i < ranked.length; i += 1) {
     const seed = ranked[i]!;
-    const streetArchetype = i === 0 ? "crossroads" : pickStreetArchetype(seed.profile, seed.localRelief);
+    const primaryDir = choosePrimaryDirection(state, seed);
+    const streetArchetype = i === 0 ? "crossroads" : pickStreetArchetype(state, seed, primaryDir);
     towns.push(
       buildTownRecord(
         i,
+        state.seed,
         `${shuffledNames[i % shuffledNames.length]}${i < shuffledNames.length ? "" : ` ${Math.floor(i / shuffledNames.length) + 1}`}`,
         seed,
         streetArchetype

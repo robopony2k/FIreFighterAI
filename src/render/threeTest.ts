@@ -13,8 +13,9 @@ import {
   TIME_SPEED_SLIDER_STEP
 } from "../core/timeSpeed.js";
 import { getHouseFootprintBounds, pickHouseFootprint } from "../core/houseFootprints.js";
-import { getBuildingLifecycleStageFromId } from "../systems/settlements/sim/buildingLifecycle.js";
+import { getBuildingLifecycleStageFromId, getBuildingLifecycleStageId } from "../systems/settlements/sim/buildingLifecycle.js";
 import { getProceduralHouseVariantKey } from "../systems/settlements/rendering/proceduralHouseBuilder.js";
+import type { RenderBuildingLot } from "../systems/settlements/types/buildingTypes.js";
 import type { InputState } from "../core/inputState.js";
 import { indexFor } from "../core/grid.js";
 import { TILE_ID_TO_TYPE, TILE_TYPE_IDS } from "../core/state.js";
@@ -4159,6 +4160,37 @@ export const createThreeTest = (
     });
   };
 
+  const resolveHouseRotationForDebug = (
+    tileX: number,
+    tileY: number,
+    seed: number,
+    tileTypes: ArrayLike<number>,
+    cols: number,
+    rows: number
+  ): number => {
+    const noiseAt = (value: number): number => {
+      const s = Math.sin(value * 12.9898 + 78.233) * 43758.5453;
+      return s - Math.floor(s);
+    };
+    const isRoadLike = (x: number, y: number): boolean => {
+      if (x < 0 || y < 0 || x >= cols || y >= rows) {
+        return false;
+      }
+      const typeId = tileTypes[y * cols + x] ?? -1;
+      return typeId === TILE_TYPE_IDS.road || typeId === TILE_TYPE_IDS.base;
+    };
+    const roadEW = isRoadLike(tileX - 1, tileY) || isRoadLike(tileX + 1, tileY);
+    const roadNS = isRoadLike(tileX, tileY - 1) || isRoadLike(tileX, tileY + 1);
+    const flip = noiseAt(seed + 21.4) < 0.5 ? 0 : Math.PI;
+    if (roadEW && !roadNS) {
+      return flip;
+    }
+    if (roadNS && !roadEW) {
+      return Math.PI * 0.5 + flip;
+    }
+    return noiseAt(seed + 9.1) < 0.5 ? 0 : Math.PI * 0.5;
+  };
+
   const buildHoverCellSection: HoverDebugSectionBuilder = (context) => {
     const tile = world.tiles[context.tileIndex];
     if (!tile) {
@@ -4179,6 +4211,40 @@ export const createThreeTest = (
         .map((unit) => `${unit.kind === "truck" ? "T" : "C"}#${unit.id}${unit.selected ? "*" : ""}`)
         .join(" ");
       lines.push(`units=${summary}${hoveredUnits.length > 2 ? ` +${hoveredUnits.length - 2}` : ""}`);
+    }
+    const tileTypeId = world.tileTypeId[context.tileIndex] ?? -1;
+    if (tileTypeId === TILE_TYPE_IDS.house && context.sample.tileTypes && lastTerrainSurface) {
+      const seed = context.sample.houseStyleSeeds?.[context.tileIndex] ?? (context.tileIndex >>> 0);
+      const rotation = resolveHouseRotationForDebug(
+        context.tileX,
+        context.tileY,
+        seed,
+        context.sample.tileTypes,
+        context.sample.cols,
+        context.sample.rows
+      );
+      const footprint = pickHouseFootprint(seed);
+      const bounds = getHouseFootprintBounds(context.tileX, context.tileY, rotation, footprint);
+      const lifecycleStage = getBuildingLifecycleStageFromId(
+        context.sample.houseLifecycleStages?.[context.tileIndex] ?? getBuildingLifecycleStageId("roofed")
+      );
+      const lifecycleStep = context.sample.houseLifecycleSteps?.[context.tileIndex] ?? 0;
+      const grounding = resolveStructureGrounding({
+        surface: context.sample,
+        minTileX: Math.max(0, Math.min(context.sample.cols - 1, bounds.minX)),
+        maxTileX: Math.max(0, Math.min(context.sample.cols - 1, bounds.maxX)),
+        minTileY: Math.max(0, Math.min(context.sample.rows - 1, bounds.minY)),
+        maxTileY: Math.max(0, Math.min(context.sample.rows - 1, bounds.maxY)),
+        heightScale: lastTerrainSurface.heightScale,
+        heightAtTileCoord: lastTerrainSurface.heightAtTileCoord
+      });
+      lines.push(`house=${footprint.name} roof=${footprint.roofType} stage=${lifecycleStage}:${lifecycleStep}`);
+      lines.push(
+        `bounds=${bounds.minX}..${bounds.maxX},${bounds.minY}..${bounds.maxY} footprint=${formatDebugNumber(bounds.width, 2)}x${formatDebugNumber(bounds.depth, 2)} rot=${formatDebugNumber((rotation * 180) / Math.PI, 0)}deg`
+      );
+      lines.push(
+        `worldCenter=${formatDebugNumber(lastTerrainSurface.toWorldX(context.tileX + 0.5), 2)},${formatDebugNumber(lastTerrainSurface.toWorldZ(context.tileY + 0.5), 2)} foundation=${formatDebugNumber(grounding.foundationBottom, 2)}..${formatDebugNumber(grounding.foundationTop, 2)}`
+      );
     }
     return {
       key: "cell",
@@ -4452,14 +4518,6 @@ export const createThreeTest = (
       hoverDebugLabelProjected.x <= 1.1 &&
       hoverDebugLabelProjected.y >= -1.2 &&
       hoverDebugLabelProjected.y <= 1.2;
-    if (!isVisible) {
-      hideHoverDebugBillboard();
-      return;
-    }
-    const screenX = (hoverDebugLabelProjected.x * 0.5 + 0.5) * viewportWidth;
-    const screenY = (-hoverDebugLabelProjected.y * 0.5 + 0.5) * viewportHeight;
-    const groundScreenX = (hoverDebugGroundProjected.x * 0.5 + 0.5) * viewportWidth;
-    const groundScreenY = (-hoverDebugGroundProjected.y * 0.5 + 0.5) * viewportHeight;
     const viewportPadding = 8;
     hoverDebugRoot.classList.remove("hidden");
     const rootWidth = Math.max(244, hoverDebugRoot.offsetWidth);
@@ -4468,6 +4526,16 @@ export const createThreeTest = (
       Math.max(viewportPadding, Math.min(viewportWidth - rootWidth - viewportPadding, value));
     const clampRootY = (value: number): number =>
       Math.max(viewportPadding, Math.min(viewportHeight - rootHeight - viewportPadding, value));
+    if (!isVisible) {
+      hoverDebugRoot.style.zIndex = "20001";
+      hoverDebugRoot.style.transform = `translate3d(${clampRootX(viewportPadding).toFixed(1)}px, ${clampRootY(viewportHeight - rootHeight - viewportPadding).toFixed(1)}px, 0)`;
+      hoverDebugConnector.style.display = "none";
+      return;
+    }
+    const screenX = (hoverDebugLabelProjected.x * 0.5 + 0.5) * viewportWidth;
+    const screenY = (-hoverDebugLabelProjected.y * 0.5 + 0.5) * viewportHeight;
+    const groundScreenX = (hoverDebugGroundProjected.x * 0.5 + 0.5) * viewportWidth;
+    const groundScreenY = (-hoverDebugGroundProjected.y * 0.5 + 0.5) * viewportHeight;
     const preferRight = groundScreenX <= viewportWidth * 0.5;
     const sideCandidates = preferRight
       ? [
@@ -4856,7 +4924,7 @@ export const createThreeTest = (
       clearDebugHover();
       return;
     }
-    if (event.buttons !== 0 || isCameraInteracting()) {
+    if (event.buttons !== 0) {
       clearDebugHover();
       return;
     }
@@ -5827,8 +5895,8 @@ export const createThreeTest = (
       if (type === houseId) {
         const tileX = idx % cols;
         const tileY = Math.floor(idx / cols);
-        const seed = Math.imul(idx + 1, 1103515245) >>> 0;
-        const lifecycleStageId = sample.houseLifecycleStages?.[idx] ?? 3;
+        const seed = sample.houseStyleSeeds?.[idx] ?? (idx >>> 0);
+        const lifecycleStageId = sample.houseLifecycleStages?.[idx] ?? getBuildingLifecycleStageId("roofed");
         const lifecycleStage = getBuildingLifecycleStageFromId(lifecycleStageId);
         const lifecycleStep = sample.houseLifecycleSteps?.[idx] ?? 0;
         const rotation = pickHouseRotation(tileX, tileY, seed);
@@ -5872,6 +5940,47 @@ export const createThreeTest = (
       baseMaxX = Math.max(baseMaxX, tileX);
       baseMinY = Math.min(baseMinY, tileY);
       baseMaxY = Math.max(baseMaxY, tileY);
+    }
+    const activeBuildingLots = sample.buildingLots ?? [];
+    for (let i = 0; i < activeBuildingLots.length; i += 1) {
+      const lot = activeBuildingLots[i] as RenderBuildingLot;
+      const anchorIndex = lot.anchorIndex;
+      const tileX = anchorIndex % cols;
+      const tileY = Math.floor(anchorIndex / cols);
+      const seed = lot.styleSeed;
+      const lifecycleStageId = lot.stageId;
+      const lifecycleStage = getBuildingLifecycleStageFromId(lifecycleStageId);
+      const lifecycleStep = lot.stageStep ?? 0;
+      const rotation = pickHouseRotation(tileX, tileY, seed);
+      const footprint = pickHouseFootprint(seed);
+      const bounds = getHouseFootprintBounds(tileX, tileY, rotation, footprint);
+      const minX = clampToRange(bounds.minX, 0, cols - 1);
+      const maxX = clampToRange(bounds.maxX, 0, cols - 1);
+      const minY = clampToRange(bounds.minY, 0, rows - 1);
+      const maxY = clampToRange(bounds.maxY, 0, rows - 1);
+      const grounding = resolveStructureGrounding({
+        surface: sample,
+        minTileX: minX,
+        maxTileX: maxX,
+        minTileY: minY,
+        maxTileY: maxY,
+        heightScale: surface.heightScale,
+        heightAtTileCoord: surface.heightAtTileCoord
+      });
+      houseSpots.push({
+        x: surface.toWorldX(tileX + 0.5),
+        z: surface.toWorldZ(tileY + 0.5),
+        footprintX: bounds.width,
+        footprintZ: bounds.depth,
+        rotation,
+        seed,
+        supportBottom: grounding.foundationBottom,
+        supportTop: grounding.foundationTop,
+        variantKey: getProceduralHouseVariantKey(footprint.name ?? "procedural", lifecycleStage, lifecycleStep),
+        variantSource: footprint.source ?? null,
+        lifecycleStageId,
+        lifecycleStep
+      });
     }
 
     const group = new THREE.Group();

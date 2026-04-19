@@ -484,7 +484,7 @@ const buildVariantFromMeshes = (
     source,
     buildKey: buildKey ?? null,
     styleId: source,
-    stage: "finished"
+    stage: "roofed"
   };
 };
 

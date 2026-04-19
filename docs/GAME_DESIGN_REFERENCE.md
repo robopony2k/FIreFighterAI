@@ -8,7 +8,7 @@ Story: You are the new "Fire Warden" in charge of a region. Your mission is to p
 - A strategic fire-response simulation with long-term planning and tactical firefighting.
 - Climate drives the world instead of fixed seasons; "seasons" are emergent from temperature and moisture.
 - The player manages a 20-year campaign where risk gradually increases due to climate change.
-- Towns are terrain-aware settlements that start from seeded street skeletons and keep growing over the campaign, increasing building exposure and fire risk over time.
+- Towns are terrain-aware settlements that start from seeded street skeletons, form compact blocks when terrain allows, and keep growing over the campaign, increasing building exposure and fire risk over time.
 - Balance the competing demands of managing a budget, the firefighters under your command, and the community's preparedness.
 - The game should feel readable and decisive: clear cause and effect, no hidden "gotchas."
 
@@ -206,7 +206,7 @@ This can be achieved by:
 - Units (truck + firefighter logic).
 - Climate model (temperature + moisture).
 - Map generation (terrain, vegetation age/density, forest stand composition).
-- Settlements (terrain-aware town seeding, street archetypes, frontage-based annual growth, expanding road networks).
+- Settlements (terrain-aware town seeding, constrained-ribbon vs compact street archetypes, frontage-based annual growth, block-forming road expansion).
 - UI system (phase UI, controls, overlays).
 
 ## Open Questions

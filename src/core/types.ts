@@ -163,6 +163,11 @@ export interface Town extends Point {
   lastPostureChangeDay?: number;
   desiredHouseDelta?: number;
   lastSeasonHouseDelta?: number;
+  growthPressure: number;
+  recoveryPressure: number;
+  buildStartCooldownDays: number;
+  activeBuildCap: number;
+  buildStartSerial: number;
 }
 
 export interface FireAlertIncident {
@@ -236,6 +241,9 @@ export interface Tile {
   houseDestroyed: boolean;
 
   houseConstructionYear?: number;
+  houseDestroyedAtDay?: number;
+  houseTownId?: number;
+  houseStyleSeed?: number;
 
   houseDamage01?: number;
 

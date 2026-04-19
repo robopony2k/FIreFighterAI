@@ -24,6 +24,7 @@ import type {
 } from "./types.js";
 import type { CampaignState } from "./campaign.js";
 import type { ProgressionState } from "../systems/progression/types.js";
+import type { BuildingLot } from "../systems/settlements/types/buildingTypes.js";
 
 import { BASE_BUDGET, DEFAULT_FIRE_SETTINGS, DEFAULT_INCIDENT_TIME_SPEED_INDEX } from "./config.js";
 import { DEFAULT_TIME_SPEED_SLIDER_VALUE } from "./timeSpeed.js";
@@ -189,6 +190,9 @@ export interface WorldState {
   towns: Town[];
   townGrowthAppliedYear: number;
   townAlertDayAccumulator: number;
+  settlementBuildDayAccumulator: number;
+  buildingLots: BuildingLot[];
+  nextBuildingLotId: number;
 
   seed: number;
   fireSettings: FireSettings;
@@ -529,6 +533,9 @@ export function createInitialState(seed: number, grid: Grid): WorldState {
     towns: [],
     townGrowthAppliedYear: -1,
     townAlertDayAccumulator: 0,
+    settlementBuildDayAccumulator: 0,
+    buildingLots: [],
+    nextBuildingLotId: 1,
 
     seed,
     fireSettings: { ...DEFAULT_FIRE_SETTINGS },

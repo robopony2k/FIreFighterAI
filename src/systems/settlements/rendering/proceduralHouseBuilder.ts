@@ -14,14 +14,15 @@ import type {
 } from "../types/buildingTypes.js";
 
 const STAGES: readonly BuildingLifecycleStage[] = [
-  "foundation",
+  "empty_lot",
+  "site_prep",
   "frame",
   "enclosed",
-  "finished",
-  "damaged",
-  "burnt_frame"
+  "roofed",
+  "charred_remains",
+  "cleared_lot"
 ] as const;
-const VARIANTS_PER_STYLE = 3;
+const VARIANTS_PER_STYLE = 5;
 const FOUNDATION_STEP_POST_THRESHOLDS = [0, 0.5, 1] as const;
 const FRAME_WALL_PROGRESS_STEPS = [0.16, 0.26, 0.38, 0.52, 0.68, 0.84, 1] as const;
 const FRAME_ROOF_PROGRESS_STEPS = [0, 0.08, 0.16, 0.3, 0.46, 0.68, 1] as const;
@@ -49,7 +50,7 @@ type BuildingMass = {
   wallHeight: number;
   roofHeight: number;
   roofType: BuildingRoofType;
-  isAnnex: boolean;
+  kind: "main" | "annex";
   attachedSide?: BuildingSide | null;
 };
 
@@ -110,6 +111,91 @@ const addBox = (
   });
 };
 
+const addBeamBetween = (
+  meshes: BuildingMeshTemplate[],
+  material: THREE.MeshStandardMaterial,
+  start: THREE.Vector3,
+  end: THREE.Vector3,
+  thickness: number
+): void => {
+  const direction = end.clone().sub(start);
+  const length = direction.length();
+  if (length <= 1e-5) {
+    return;
+  }
+  const midpoint = start.clone().add(end).multiplyScalar(0.5);
+  const rotation = new THREE.Quaternion().setFromUnitVectors(
+    new THREE.Vector3(0, 1, 0),
+    direction.normalize()
+  );
+  const matrix = new THREE.Matrix4().compose(
+    midpoint,
+    rotation,
+    new THREE.Vector3(thickness, length, thickness)
+  );
+  meshes.push({
+    geometry: BOX_GEOMETRY,
+    material,
+    baseMatrix: matrix
+  });
+};
+
+const addConvexPrism = (
+  meshes: BuildingMeshTemplate[],
+  material: THREE.MeshStandardMaterial,
+  outline: readonly THREE.Vector3[],
+  thickness: number,
+  outwardHint: THREE.Vector3
+): void => {
+  if (outline.length < 3) {
+    return;
+  }
+  const basePoints = outline.map((point) => point.clone());
+  const edgeA = basePoints[1].clone().sub(basePoints[0]);
+  const edgeB = basePoints[2].clone().sub(basePoints[0]);
+  const faceNormal = edgeA.cross(edgeB);
+  if (faceNormal.lengthSq() <= 1e-8) {
+    return;
+  }
+  if (faceNormal.dot(outwardHint) < 0) {
+    basePoints.reverse();
+    faceNormal.multiplyScalar(-1);
+  }
+  faceNormal.normalize();
+  const offset = faceNormal.clone().multiplyScalar(thickness * 0.5);
+  const positions: number[] = [];
+  const indices: number[] = [];
+  const pushPoint = (point: THREE.Vector3): void => {
+    positions.push(point.x, point.y, point.z);
+  };
+  const topPoints = basePoints.map((point) => point.clone().add(offset));
+  const bottomPoints = basePoints.map((point) => point.clone().sub(offset));
+  topPoints.forEach(pushPoint);
+  bottomPoints.forEach(pushPoint);
+  const count = basePoints.length;
+  for (let i = 1; i < count - 1; i += 1) {
+    indices.push(0, i, i + 1);
+  }
+  const bottomOffset = count;
+  for (let i = 1; i < count - 1; i += 1) {
+    indices.push(bottomOffset, bottomOffset + i + 1, bottomOffset + i);
+  }
+  for (let i = 0; i < count; i += 1) {
+    const next = (i + 1) % count;
+    indices.push(i, next, bottomOffset + next);
+    indices.push(i, bottomOffset + next, bottomOffset + i);
+  }
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+  geometry.setIndex(indices);
+  geometry.computeVertexNormals();
+  meshes.push({
+    geometry,
+    material,
+    baseMatrix: new THREE.Matrix4()
+  });
+};
+
 const addChimney = (
   meshes: BuildingMeshTemplate[],
   material: THREE.MeshStandardMaterial,
@@ -121,6 +207,40 @@ const addChimney = (
   sz: number
 ): void => {
   addBox(meshes, material, x, y, z, sx, sy, sz);
+};
+
+type HipRoofLayout = {
+  ridgeAxis: "x" | "z";
+  wallTopY: number;
+  ridgeY: number;
+  eaveHalfWidth: number;
+  eaveHalfDepth: number;
+  ridgeHalfLength: number;
+};
+
+const getHipRoofLayout = (mass: BuildingMass, baseY: number): HipRoofLayout => {
+  const wallTopY = getMassBaseY(baseY, mass) + mass.wallHeight;
+  const ridgeY = wallTopY + mass.roofHeight;
+  const eaveHalfWidth = mass.width * 0.5 + ROOF_EAVE_OVERHANG;
+  const eaveHalfDepth = mass.depth * 0.5 + ROOF_EAVE_OVERHANG;
+  if (eaveHalfWidth >= eaveHalfDepth) {
+    return {
+      ridgeAxis: "x",
+      wallTopY,
+      ridgeY,
+      eaveHalfWidth,
+      eaveHalfDepth,
+      ridgeHalfLength: Math.max(0, eaveHalfWidth - eaveHalfDepth)
+    };
+  }
+  return {
+    ridgeAxis: "z",
+    wallTopY,
+    ridgeY,
+    eaveHalfWidth,
+    eaveHalfDepth,
+    ridgeHalfLength: Math.max(0, eaveHalfDepth - eaveHalfWidth)
+  };
 };
 
 const distributePositions = (count: number, span: number, inset: number): number[] => {
@@ -139,6 +259,12 @@ const distributePositions = (count: number, span: number, inset: number): number
   return values;
 };
 
+const getSpanScaledWindowCount = (spanTiles: number, minCount: number, maxCount: number, targetSpacingMeters: number): number => {
+  const spanMeters = spanTiles * TILE_SIZE;
+  const count = Math.round(spanMeters / Math.max(1, targetSpacingMeters));
+  return Math.max(minCount, Math.min(maxCount, count));
+};
+
 const chooseEntrySide = (seed: number): BuildingEntrySide => {
   const options: readonly BuildingEntrySide[] = ["front", "left", "right"];
   return options[Math.floor(hash2D(8, 1, seed) * options.length)] ?? "front";
@@ -155,35 +281,51 @@ const chooseAnnex = (
   }
   const sideOptions: readonly BuildingAnnexSpec["side"][] = ["back", "left", "right"];
   const side = sideOptions[Math.floor(hash2D(9, 2, seed) * sideOptions.length)] ?? "back";
+  const matchingCompoundRoof =
+    roofType === "gable" && hash2D(9, 7, seed) > 0.36;
+  const cornerSign = hash2D(9, 8, seed) < 0.5 ? -1 : 1;
   return {
     side,
     width: clamp(footprintX * (0.34 + hash2D(9, 3, seed) * 0.18), 0.24, footprintX * 0.58),
     depth: clamp(footprintZ * (0.3 + hash2D(9, 4, seed) * 0.2), 0.22, footprintZ * 0.62),
-    offset: hash2D(9, 5, seed) * 0.56 - 0.28,
+    offset: matchingCompoundRoof
+      ? cornerSign * clamp(0.82 + hash2D(9, 5, seed) * 0.18, 0.82, 1)
+      : hash2D(9, 5, seed) * 0.56 - 0.28,
     heightScale: clamp(0.68 + hash2D(9, 6, seed) * 0.18, 0.68, 0.9),
-    roofType: side === "back" && roofType !== "hip" ? "gable" : "shed"
+    roofType: matchingCompoundRoof ? roofType : "lean_to"
   };
+};
+
+const chooseStoreys = (
+  footprintX: number,
+  footprintZ: number,
+  seed: number
+): 1 | 2 => {
+  const minSpan = Math.min(footprintX, footprintZ) * TILE_SIZE;
+  return minSpan >= 7.2 && hash2D(10, 1, seed) >= 0.58 ? 2 : 1;
 };
 
 const buildSpec = (footprintIndex: number, variationIndex: number): BuildingSpec => {
   const footprint = HOUSE_VARIANTS[footprintIndex % HOUSE_VARIANTS.length] ?? HOUSE_VARIANTS[0];
   const seed = footprintIndex * 811 + variationIndex * 271 + 137;
   const footprintX = clamp(
-    footprint.sizeX * (0.97 + hash2D(variationIndex, 1, seed) * 0.06),
-    footprint.sizeX * 0.94,
-    footprint.sizeX * 1.05
+    footprint.sizeX * (0.92 + hash2D(variationIndex, 1, seed) * 0.16),
+    footprint.sizeX * 0.9,
+    footprint.sizeX * 1.1
   );
   const footprintZ = clamp(
-    footprint.sizeZ * (0.97 + hash2D(variationIndex, 2, seed) * 0.06),
-    footprint.sizeZ * 0.94,
-    footprint.sizeZ * 1.05
+    footprint.sizeZ * (0.92 + hash2D(variationIndex, 2, seed) * 0.16),
+    footprint.sizeZ * 0.9,
+    footprint.sizeZ * 1.1
   );
+  const storeys = chooseStoreys(footprintX, footprintZ, seed);
   const roofPitch = clamp(0.48 + hash2D(variationIndex, 3, seed) * 0.32, 0.46, 0.8);
-  const wallHeight = clamp(
-    metersToTiles(2.45 + footprint.sizeY * 0.18 + hash2D(variationIndex, 4, seed) * 0.28),
+  const singleStoreyWallHeight = clamp(
+    metersToTiles(2.38 + footprint.sizeY * 0.16 + hash2D(variationIndex, 4, seed) * 0.44),
     metersToTiles(2.35),
-    metersToTiles(2.95)
+    metersToTiles(3.05)
   );
+  const wallHeight = singleStoreyWallHeight * storeys;
   const roofHeight = clamp(
     metersToTiles(1.15 + Math.min(footprintX, footprintZ) * TILE_SIZE * roofPitch * 0.12 + hash2D(variationIndex, 14, seed) * 0.25),
     metersToTiles(1.05),
@@ -202,19 +344,22 @@ const buildSpec = (footprintIndex: number, variationIndex: number): BuildingSpec
     studSpacing: clamp(metersToTiles(0.85 + hash2D(variationIndex, 6, seed) * 0.3), metersToTiles(0.85), metersToTiles(1.15)),
     entrySide: chooseEntrySide(seed),
     doorOffset: hash2D(variationIndex, 7, seed) * 0.32 - 0.16,
-    frontWindowCount: 1 + Math.floor(hash2D(variationIndex, 10, seed) * 3),
-    sideWindowCount: 1 + Math.floor(hash2D(variationIndex, 11, seed) * 2),
+    frontWindowCount: getSpanScaledWindowCount(footprintX, 1, 4, 4.1),
+    sideWindowCount: getSpanScaledWindowCount(footprintZ, 1, 3, 4.5),
     porchDepth: clamp(metersToTiles(0.8 + hash2D(variationIndex, 12, seed) * 0.6), metersToTiles(0.8), metersToTiles(1.4)),
+    storeys,
     annex: chooseAnnex(footprint.roofType, footprintX, footprintZ, seed)
   };
 };
 
 const makeStyleMaterials = (
   styleIndex: number,
+  variationIndex: number,
   stage: BuildingLifecycleStage
 ): StylePalette => {
   const footprint = HOUSE_VARIANTS[styleIndex % HOUSE_VARIANTS.length] ?? HOUSE_VARIANTS[0];
-  const darkenBy = stage === "burnt_frame" ? 0.54 : stage === "damaged" ? 0.22 : 0;
+  const isCharredStage = stage === "charred_remains" || stage === "cleared_lot";
+  const darkenBy = isCharredStage ? 0.54 : 0;
   const wallBase = new THREE.Color(footprint.wallTint);
   const roofBase = new THREE.Color(footprint.roofTint);
   const frameBase = wallBase.clone().lerp(new THREE.Color(0xe4c79f), 0.58);
@@ -223,19 +368,27 @@ const makeStyleMaterials = (
   const frameColor = frameBase.clone().lerp(new THREE.Color(0x1c140f), darkenBy);
   const charColor = new THREE.Color(0x2a211c).lerp(new THREE.Color(0x080604), darkenBy);
 
-  const foundation = makeMaterial(stage === "burnt_frame" ? 0x3b3129 : 0x675344, 0.95, 0);
-  const frame = makeMaterial(stage === "burnt_frame" ? charColor.getHex() : frameColor.getHex(), 0.84, 0.01);
-  const wall = makeMaterial(stage === "burnt_frame" ? charColor.getHex() : wallColor.getHex(), 0.82, 0.03);
-  const roof = makeMaterial(stage === "burnt_frame" ? charColor.getHex() : roofColor.getHex(), 0.86, 0.02);
-  const trim = makeMaterial(stage === "burnt_frame" ? charColor.getHex() : 0xead9c2, 0.72, 0);
-  const glass = makeMaterial(stage === "burnt_frame" ? charColor.getHex() : 0x9ec5d6, 0.42, 0);
-  const door = makeMaterial(stage === "burnt_frame" ? charColor.getHex() : 0x7e5432, 0.8, 0);
-  const recess = makeMaterial(stage === "burnt_frame" ? 0x110d0a : 0x251912, 0.98, 0);
+  const foundation = makeMaterial(isCharredStage ? 0x3b3129 : 0x675344, 0.95, 0);
+  const frame = makeMaterial(isCharredStage ? charColor.getHex() : frameColor.getHex(), 0.84, 0.01);
+  const wall = makeMaterial(isCharredStage ? charColor.getHex() : wallColor.getHex(), 0.82, 0.03);
+  const roof = makeMaterial(isCharredStage ? charColor.getHex() : roofColor.getHex(), 0.86, 0.02);
+  const trim = makeMaterial(isCharredStage ? charColor.getHex() : 0xead9c2, 0.72, 0);
+  const glass = new THREE.MeshStandardMaterial({
+    color: isCharredStage ? charColor.getHex() : 0xa9d2e2,
+    roughness: 0.1,
+    metalness: 0.18,
+    transparent: !isCharredStage,
+    opacity: !isCharredStage ? 0.72 : 1
+  });
+  glass.depthWrite = isCharredStage;
+  const door = makeMaterial(isCharredStage ? charColor.getHex() : 0x7e5432, 0.8, 0);
+  const recess = makeMaterial(isCharredStage ? 0x110d0a : 0x251912, 0.98, 0);
   const burn = makeMaterial(0x2b2118, 0.98, 0);
-  const smoke = makeMaterial(stage === "burnt_frame" ? 0x18110c : 0x5a4738, 0.96, 0);
+  const smoke = makeMaterial(isCharredStage ? 0x18110c : 0x5a4738, 0.96, 0);
 
-  wall.color.offsetHSL(0.02 * styleIndex, 0, 0);
-  roof.color.offsetHSL(0.01 * styleIndex, 0, 0);
+  wall.color.offsetHSL(0.014 * styleIndex + 0.012 * variationIndex, 0.02 * (variationIndex - 2), 0.014 * (variationIndex - 2));
+  roof.color.offsetHSL(0.01 * styleIndex - 0.008 * variationIndex, 0.015 * (variationIndex - 2), -0.01 * (variationIndex - 2));
+  frame.color.offsetHSL(0.008 * variationIndex, 0.01 * (variationIndex - 2), 0.02);
   return {
     foundation,
     frame,
@@ -260,45 +413,46 @@ const createMasses = (spec: BuildingSpec): BuildingMass[] => {
       wallHeight: spec.wallHeight,
       roofHeight: spec.roofHeight,
       roofType: spec.roofType,
-      isAnnex: false,
+      kind: "main",
       attachedSide: null
     }
   ];
-  if (!spec.annex) {
-    return masses;
+  if (spec.annex) {
+    const annex = spec.annex;
+    const halfMainWidth = spec.footprintX * 0.5;
+    const halfMainDepth = spec.footprintZ * 0.5;
+    let centerX = 0;
+    let centerZ = 0;
+    let attachedSide: BuildingSide | null = null;
+    if (annex.side === "back") {
+      centerX = annex.offset * spec.footprintX * 0.32;
+      centerZ = halfMainDepth + annex.depth * 0.42;
+      attachedSide = "back";
+    } else if (annex.side === "left") {
+      centerX = -(halfMainWidth + annex.width * 0.42);
+      centerZ = annex.offset * spec.footprintZ * 0.28;
+      attachedSide = "left";
+    } else {
+      centerX = halfMainWidth + annex.width * 0.42;
+      centerZ = annex.offset * spec.footprintZ * 0.28;
+      attachedSide = "right";
+    }
+    masses.push({
+      centerX,
+      centerZ,
+      width: annex.width,
+      depth: annex.depth,
+      wallHeight: (spec.wallHeight / spec.storeys) * annex.heightScale,
+      roofHeight: spec.roofHeight * annex.heightScale * 0.82,
+      roofType: annex.roofType,
+      kind: "annex",
+      attachedSide
+    });
   }
-  const annex = spec.annex;
-  const halfMainWidth = spec.footprintX * 0.5;
-  const halfMainDepth = spec.footprintZ * 0.5;
-  let centerX = 0;
-  let centerZ = 0;
-  let attachedSide: BuildingSide | null = null;
-  if (annex.side === "back") {
-    centerX = annex.offset * spec.footprintX * 0.32;
-    centerZ = halfMainDepth + annex.depth * 0.42;
-    attachedSide = "back";
-  } else if (annex.side === "left") {
-    centerX = -(halfMainWidth + annex.width * 0.42);
-    centerZ = annex.offset * spec.footprintZ * 0.28;
-    attachedSide = "left";
-  } else {
-    centerX = halfMainWidth + annex.width * 0.42;
-    centerZ = annex.offset * spec.footprintZ * 0.28;
-    attachedSide = "right";
-  }
-  masses.push({
-    centerX,
-    centerZ,
-    width: annex.width,
-    depth: annex.depth,
-    wallHeight: spec.wallHeight * annex.heightScale,
-    roofHeight: spec.roofHeight * annex.heightScale * 0.82,
-    roofType: annex.roofType,
-    isAnnex: true,
-    attachedSide
-  });
   return masses;
 };
+
+const getMassBaseY = (baseY: number, _mass: BuildingMass): number => baseY;
 
 const addWallOrientedBox = (
   meshes: BuildingMeshTemplate[],
@@ -367,41 +521,63 @@ const addWallOrientedBox = (
 const openingsForWall = (openings: Opening[], side: BuildingSide): Opening[] =>
   openings.filter((opening) => opening.side === side);
 
+const addWindowRow = (
+  openings: Opening[],
+  side: BuildingSide,
+  centers: readonly number[],
+  width: number,
+  bottom: number,
+  height: number,
+  blockedCenter?: number,
+  blockedWidth = 0
+): void => {
+  centers.forEach((center) => {
+    if (
+      blockedCenter !== undefined &&
+      blockedWidth > 0 &&
+      Math.abs(center - blockedCenter) < blockedWidth * 0.55 + width * 0.5
+    ) {
+      return;
+    }
+    openings.push({
+      side,
+      center,
+      width,
+      bottom,
+      height,
+      kind: "window"
+    });
+  });
+};
+
 const buildMainMassOpenings = (mass: BuildingMass, spec: BuildingSpec): Opening[] => {
+  const storeyHeight = mass.wallHeight / spec.storeys;
   const doorWidth = clamp(metersToTiles(0.95 + Math.max(0, mass.width * TILE_SIZE - 9) * 0.04), metersToTiles(0.9), metersToTiles(1.15));
-  const doorHeight = clamp(metersToTiles(2.05 + Math.max(0, mass.wallHeight * TILE_SIZE - 2.4) * 0.16), metersToTiles(2.0), metersToTiles(2.3));
+  const doorHeight = clamp(metersToTiles(2.02 + Math.max(0, storeyHeight * TILE_SIZE - 2.35) * 0.16), metersToTiles(2.0), metersToTiles(2.3));
   const frontWindowWidth = clamp(metersToTiles(0.95 + Math.max(0, mass.width * TILE_SIZE - 8.5) * 0.04), metersToTiles(0.9), metersToTiles(1.25));
   const sideWindowWidth = clamp(metersToTiles(0.85 + Math.max(0, mass.depth * TILE_SIZE - 7.2) * 0.05), metersToTiles(0.85), metersToTiles(1.15));
-  const windowHeight = clamp(metersToTiles(1.0 + Math.max(0, mass.wallHeight * TILE_SIZE - 2.4) * 0.08), metersToTiles(0.95), metersToTiles(1.2));
-  const windowBottom = clamp(metersToTiles(0.85 + Math.max(0, mass.wallHeight * TILE_SIZE - 2.4) * 0.04), metersToTiles(0.8), metersToTiles(1.0));
+  const windowHeight = clamp(metersToTiles(1.0 + Math.max(0, storeyHeight * TILE_SIZE - 2.35) * 0.08), metersToTiles(0.95), metersToTiles(1.2));
+  const windowBottom = clamp(metersToTiles(0.82 + Math.max(0, storeyHeight * TILE_SIZE - 2.35) * 0.04), metersToTiles(0.78), metersToTiles(0.98));
+  const upperWindowBottom = storeyHeight + windowBottom - metersToTiles(0.08);
   const openings: Opening[] = [];
 
   const frontWindowCenters =
     spec.entrySide === "front"
       ? [-mass.width * 0.26, mass.width * 0.26].slice(0, Math.max(1, Math.min(2, spec.frontWindowCount)))
       : distributePositions(spec.frontWindowCount, mass.width, mass.width * 0.22);
-  frontWindowCenters.forEach((center) => {
-    openings.push({
-      side: "front",
-      center,
-      width: frontWindowWidth,
-      bottom: windowBottom,
-      height: windowHeight,
-      kind: "window"
-    });
-  });
+  const frontDoorCenter = spec.entrySide === "front" ? spec.doorOffset * mass.width : undefined;
+  addWindowRow(openings, "front", frontWindowCenters, frontWindowWidth, windowBottom, windowHeight, frontDoorCenter, doorWidth);
+  if (spec.storeys === 2) {
+    const upperFrontCenters = distributePositions(Math.max(2, spec.frontWindowCount), mass.width, mass.width * 0.22);
+    addWindowRow(openings, "front", upperFrontCenters, frontWindowWidth, upperWindowBottom, windowHeight);
+  }
 
   const backWindowCount = spec.annex?.side === "back" ? 0 : Math.max(1, spec.frontWindowCount - 1);
-  distributePositions(backWindowCount, mass.width, mass.width * 0.24).forEach((center) => {
-    openings.push({
-      side: "back",
-      center,
-      width: frontWindowWidth,
-      bottom: windowBottom,
-      height: windowHeight,
-      kind: "window"
-    });
-  });
+  const backWindowCenters = distributePositions(backWindowCount, mass.width, mass.width * 0.24);
+  addWindowRow(openings, "back", backWindowCenters, frontWindowWidth, windowBottom, windowHeight);
+  if (spec.storeys === 2) {
+    addWindowRow(openings, "back", backWindowCenters, frontWindowWidth, upperWindowBottom, windowHeight);
+  }
 
   if (spec.entrySide === "front") {
     openings.push({
@@ -415,30 +591,37 @@ const buildMainMassOpenings = (mass: BuildingMass, spec: BuildingSpec): Opening[
   }
 
   const sideWindowCenters = distributePositions(spec.sideWindowCount, mass.depth, mass.depth * 0.22);
-  sideWindowCenters.forEach((center) => {
-    openings.push({
-      side: "left",
-      center,
-      width: sideWindowWidth,
-      bottom: windowBottom,
-      height: windowHeight,
-      kind: "window"
-    });
-    openings.push({
-      side: "right",
-      center,
-      width: sideWindowWidth,
-      bottom: windowBottom,
-      height: windowHeight,
-      kind: "window"
-    });
-  });
+  const sideDoorCenter = spec.entrySide === "left" || spec.entrySide === "right" ? spec.doorOffset * mass.depth : undefined;
+  addWindowRow(
+    openings,
+    "left",
+    sideWindowCenters,
+    sideWindowWidth,
+    windowBottom,
+    windowHeight,
+    spec.entrySide === "left" ? sideDoorCenter : undefined,
+    doorWidth
+  );
+  addWindowRow(
+    openings,
+    "right",
+    sideWindowCenters,
+    sideWindowWidth,
+    windowBottom,
+    windowHeight,
+    spec.entrySide === "right" ? sideDoorCenter : undefined,
+    doorWidth
+  );
+  if (spec.storeys === 2) {
+    addWindowRow(openings, "left", sideWindowCenters, sideWindowWidth, upperWindowBottom, windowHeight);
+    addWindowRow(openings, "right", sideWindowCenters, sideWindowWidth, upperWindowBottom, windowHeight);
+  }
 
   if (spec.entrySide === "left" || spec.entrySide === "right") {
     openings.push({
       side: spec.entrySide,
       center: spec.doorOffset * mass.depth,
-      width: clamp(mass.depth * 0.2, 0.12, 0.2),
+      width: clamp(metersToTiles(0.9 + Math.max(0, mass.depth * TILE_SIZE - 7) * 0.04), metersToTiles(0.9), metersToTiles(1.1)),
       bottom: 0,
       height: doorHeight,
       kind: "door"
@@ -470,12 +653,12 @@ const buildAnnexOpenings = (mass: BuildingMass): Opening[] => {
 };
 
 const resolveMassOpenings = (mass: BuildingMass, spec: BuildingSpec): Opening[] =>
-  mass.isAnnex ? buildAnnexOpenings(mass) : buildMainMassOpenings(mass, spec);
+  mass.kind === "annex" ? buildAnnexOpenings(mass) : buildMainMassOpenings(mass, spec);
 
 const FULL_WALL_SIDES: readonly BuildingSide[] = ["front", "back", "left", "right"];
 
 const getEnclosedWallSides = (mass: BuildingMass, spec: BuildingSpec): readonly BuildingSide[] => {
-  if (mass.isAnnex) {
+  if (mass.kind === "annex") {
     if (mass.attachedSide === "left") {
       return ["front", "back", "right"];
     }
@@ -494,7 +677,7 @@ const getEnclosedWallSides = (mass: BuildingMass, spec: BuildingSpec): readonly 
 };
 
 const getRaisedFrameSides = (mass: BuildingMass, spec: BuildingSpec): readonly BuildingSide[] => {
-  if (mass.isAnnex) {
+  if (mass.kind === "annex") {
     if (mass.attachedSide === "left") {
       return ["front", "right", "back"];
     }
@@ -573,9 +756,10 @@ const addWallShell = (
   wallThickness: number,
   sides: readonly BuildingSide[] = FULL_WALL_SIDES
 ): void => {
+  const massBaseY = getMassBaseY(baseY, mass);
   sides.forEach((side) => {
     const span = side === "front" || side === "back" ? mass.width : mass.depth;
-    addWallOrientedBox(meshes, material, mass, side, 0, baseY + mass.wallHeight * 0.5, span, mass.wallHeight, wallThickness);
+    addWallOrientedBox(meshes, material, mass, side, 0, massBaseY + mass.wallHeight * 0.5, span, mass.wallHeight, wallThickness);
   });
 };
 
@@ -585,6 +769,7 @@ const addWallTopTrim = (
   mass: BuildingMass,
   baseY: number
 ): void => {
+  const massBaseY = getMassBaseY(baseY, mass);
   FULL_WALL_SIDES.forEach((side) => {
     const span = side === "front" || side === "back" ? mass.width : mass.depth;
     addWallOrientedBox(
@@ -593,7 +778,7 @@ const addWallTopTrim = (
       mass,
       side,
       0,
-      baseY + mass.wallHeight + TOP_TRIM_THICKNESS * 0.5,
+      massBaseY + mass.wallHeight + TOP_TRIM_THICKNESS * 0.5,
       span,
       TOP_TRIM_THICKNESS,
       TOP_TRIM_THICKNESS
@@ -610,21 +795,24 @@ const addWallFrame = (
   thickness: number,
   studSpacing: number,
   openings: Opening[],
-  progress = 1
+  progress = 1,
+  surfaceInset = 0
 ): void => {
+  const massBaseY = getMassBaseY(baseY, mass);
   const span = side === "front" || side === "back" ? mass.width : mass.depth;
   const halfSpan = span * 0.5;
-  addWallOrientedBox(meshes, material, mass, side, 0, baseY + thickness * 0.5, span, thickness, thickness);
+  addWallOrientedBox(meshes, material, mass, side, 0, massBaseY + thickness * 0.5, span, thickness, thickness, surfaceInset);
   addWallOrientedBox(
     meshes,
     material,
     mass,
     side,
     0,
-    baseY + mass.wallHeight - thickness * 0.5,
+    massBaseY + mass.wallHeight - thickness * 0.5,
     span,
     thickness,
-    thickness
+    thickness,
+    surfaceInset
   );
 
   const positions = new Set<number>([-halfSpan, halfSpan]);
@@ -650,10 +838,11 @@ const addWallFrame = (
           mass,
           side,
           position,
-          baseY + thickness + studHeight * 0.5,
+          massBaseY + thickness + studHeight * 0.5,
           thickness,
           studHeight,
-          thickness
+          thickness,
+          surfaceInset
         );
         return;
       }
@@ -664,10 +853,11 @@ const addWallFrame = (
           mass,
           side,
           position,
-          baseY + thickness + opening.bottom * 0.5,
+          massBaseY + thickness + opening.bottom * 0.5,
           thickness,
           Math.max(0.04, opening.bottom),
-          thickness
+          thickness,
+          surfaceInset
         );
       }
       const upperBottom = opening.bottom + opening.height;
@@ -679,10 +869,11 @@ const addWallFrame = (
           mass,
           side,
           position,
-          baseY + upperBottom + upperHeight * 0.5,
+          massBaseY + upperBottom + upperHeight * 0.5,
           thickness,
           upperHeight,
-          thickness
+          thickness,
+          surfaceInset
         );
       }
     });
@@ -699,10 +890,11 @@ const addWallFrame = (
       mass,
       side,
       left,
-      baseY + mass.wallHeight * 0.5,
+      massBaseY + mass.wallHeight * 0.5,
       thickness,
       Math.max(0.08, mass.wallHeight - thickness),
-      thickness
+      thickness,
+      surfaceInset
     );
     addWallOrientedBox(
       meshes,
@@ -710,10 +902,11 @@ const addWallFrame = (
       mass,
       side,
       right,
-      baseY + mass.wallHeight * 0.5,
+      massBaseY + mass.wallHeight * 0.5,
       thickness,
       Math.max(0.08, mass.wallHeight - thickness),
-      thickness
+      thickness,
+      surfaceInset
     );
     addWallOrientedBox(
       meshes,
@@ -721,10 +914,11 @@ const addWallFrame = (
       mass,
       side,
       opening.center,
-      baseY + opening.bottom + opening.height + thickness * 0.5,
+      massBaseY + opening.bottom + opening.height + thickness * 0.5,
       opening.width + thickness * 1.2,
       thickness,
-      thickness
+      thickness,
+      surfaceInset
     );
     if (opening.kind === "window") {
       addWallOrientedBox(
@@ -733,10 +927,11 @@ const addWallFrame = (
         mass,
         side,
         opening.center,
-        baseY + opening.bottom - thickness * 0.5,
+        massBaseY + opening.bottom - thickness * 0.5,
         opening.width + thickness * 1.2,
         thickness,
-        thickness
+        thickness,
+        surfaceInset
       );
     }
   });
@@ -751,8 +946,8 @@ const addRoofFrame = (
   studSpacing: number,
   progress = 1
 ): void => {
-  const wallTopY = baseY + mass.wallHeight;
-  if (mass.roofType === "shed") {
+  const wallTopY = getMassBaseY(baseY, mass) + mass.wallHeight;
+  if (mass.roofType === "lean_to") {
     const roofRun = mass.depth + ROOF_EAVE_OVERHANG * 2;
     const rafterLength = Math.hypot(roofRun, mass.roofHeight);
     const positions = limitFramePositions(
@@ -786,11 +981,70 @@ const addRoofFrame = (
     );
     return;
   }
+  if (mass.roofType === "hip") {
+    const layout = getHipRoofLayout(mass, baseY);
+    const ridgeLength = Math.max(layout.ridgeHalfLength * 2, thickness * 1.2);
+    addBox(
+      meshes,
+      material,
+      mass.centerX,
+      layout.ridgeY,
+      mass.centerZ,
+      layout.ridgeAxis === "x" ? ridgeLength : thickness,
+      thickness,
+      layout.ridgeAxis === "z" ? ridgeLength : thickness
+    );
+    const leftX = mass.centerX - layout.eaveHalfWidth;
+    const rightX = mass.centerX + layout.eaveHalfWidth;
+    const frontZ = mass.centerZ - layout.eaveHalfDepth;
+    const backZ = mass.centerZ + layout.eaveHalfDepth;
+    if (layout.ridgeAxis === "x") {
+      const ridgeLeft = new THREE.Vector3(mass.centerX - layout.ridgeHalfLength, layout.ridgeY, mass.centerZ);
+      const ridgeRight = new THREE.Vector3(mass.centerX + layout.ridgeHalfLength, layout.ridgeY, mass.centerZ);
+      addBeamBetween(meshes, material, new THREE.Vector3(leftX, wallTopY, frontZ), ridgeLeft, thickness);
+      addBeamBetween(meshes, material, new THREE.Vector3(rightX, wallTopY, frontZ), ridgeRight, thickness);
+      addBeamBetween(meshes, material, new THREE.Vector3(leftX, wallTopY, backZ), ridgeLeft, thickness);
+      addBeamBetween(meshes, material, new THREE.Vector3(rightX, wallTopY, backZ), ridgeRight, thickness);
+      const rafterXPositions = limitFramePositions(
+        distributePositions(
+          Math.max(2, Math.round((layout.ridgeHalfLength * 2) / Math.max(studSpacing, 0.12))) + 1,
+          Math.max(thickness * 2, layout.ridgeHalfLength * 2),
+          thickness
+        ),
+        progress
+      );
+      rafterXPositions.forEach((xOffset) => {
+        const ridgePoint = new THREE.Vector3(mass.centerX + xOffset, layout.ridgeY, mass.centerZ);
+        addBeamBetween(meshes, material, ridgePoint, new THREE.Vector3(mass.centerX + xOffset, wallTopY, frontZ), thickness);
+        addBeamBetween(meshes, material, ridgePoint, new THREE.Vector3(mass.centerX + xOffset, wallTopY, backZ), thickness);
+      });
+      return;
+    }
+    const ridgeFront = new THREE.Vector3(mass.centerX, layout.ridgeY, mass.centerZ - layout.ridgeHalfLength);
+    const ridgeBack = new THREE.Vector3(mass.centerX, layout.ridgeY, mass.centerZ + layout.ridgeHalfLength);
+    addBeamBetween(meshes, material, new THREE.Vector3(leftX, wallTopY, frontZ), ridgeFront, thickness);
+    addBeamBetween(meshes, material, new THREE.Vector3(rightX, wallTopY, frontZ), ridgeFront, thickness);
+    addBeamBetween(meshes, material, new THREE.Vector3(leftX, wallTopY, backZ), ridgeBack, thickness);
+    addBeamBetween(meshes, material, new THREE.Vector3(rightX, wallTopY, backZ), ridgeBack, thickness);
+    const rafterZPositions = limitFramePositions(
+      distributePositions(
+        Math.max(2, Math.round((layout.ridgeHalfLength * 2) / Math.max(studSpacing, 0.12))) + 1,
+        Math.max(thickness * 2, layout.ridgeHalfLength * 2),
+        thickness
+      ),
+      progress
+    );
+    rafterZPositions.forEach((zOffset) => {
+      const ridgePoint = new THREE.Vector3(mass.centerX, layout.ridgeY, mass.centerZ + zOffset);
+      addBeamBetween(meshes, material, ridgePoint, new THREE.Vector3(leftX, wallTopY, mass.centerZ + zOffset), thickness);
+      addBeamBetween(meshes, material, ridgePoint, new THREE.Vector3(rightX, wallTopY, mass.centerZ + zOffset), thickness);
+    });
+    return;
+  }
 
   const roofRun = mass.depth * 0.5 + ROOF_EAVE_OVERHANG;
   const roofWidth = mass.width + ROOF_EAVE_OVERHANG * 2;
-  const ridgeLengthBase =
-    mass.roofType === "hip" ? Math.max(mass.width * 0.34, roofWidth - roofRun * 1.1) : roofWidth;
+  const ridgeLengthBase = roofWidth;
   const ridgeLength = ridgeLengthBase * (0.36 + clamp(progress, 0.2, 1) * 0.64);
   addBox(
     meshes,
@@ -845,7 +1099,7 @@ const addGableRoof = (
   partial = false
 ): void => {
   const panelThickness = Math.max(metersToTiles(0.08), mass.roofHeight * 0.14);
-  const wallTopY = baseY + mass.wallHeight;
+  const wallTopY = getMassBaseY(baseY, mass) + mass.wallHeight;
   const roofRun = mass.depth * 0.5 + ROOF_EAVE_OVERHANG;
   const slope = Math.atan2(mass.roofHeight, Math.max(0.1, roofRun));
   const slopeLength = Math.hypot(roofRun, mass.roofHeight);
@@ -901,71 +1155,116 @@ const addHipRoof = (
   partial = false
 ): void => {
   const panelThickness = Math.max(metersToTiles(0.08), mass.roofHeight * 0.14);
-  const ridgeY = baseY + mass.wallHeight + mass.roofHeight * 0.5;
-  const roofHalfDepth = mass.depth * 0.5 + ROOF_EAVE_OVERHANG;
-  const roofHalfWidth = mass.width * 0.5 + ROOF_EAVE_OVERHANG;
-  const depthSlope = Math.atan2(mass.roofHeight, Math.max(0.12, roofHalfDepth));
-  const widthSlope = Math.atan2(mass.roofHeight, Math.max(0.12, roofHalfWidth));
-  const frontBackPanelLength = Math.hypot(roofHalfDepth, mass.roofHeight);
-  const sidePanelLength = Math.hypot(roofHalfWidth, mass.roofHeight);
-  addBox(
+  const layout = getHipRoofLayout(mass, baseY);
+  const leftX = mass.centerX - layout.eaveHalfWidth;
+  const rightX = mass.centerX + layout.eaveHalfWidth;
+  const frontZ = mass.centerZ - layout.eaveHalfDepth;
+  const backZ = mass.centerZ + layout.eaveHalfDepth;
+  if (layout.ridgeAxis === "x") {
+    const ridgeLeft = new THREE.Vector3(mass.centerX - layout.ridgeHalfLength, layout.ridgeY, mass.centerZ);
+    const ridgeRight = new THREE.Vector3(mass.centerX + layout.ridgeHalfLength, layout.ridgeY, mass.centerZ);
+    const frontLeft = new THREE.Vector3(leftX, layout.wallTopY, frontZ);
+    const frontRight = new THREE.Vector3(rightX, layout.wallTopY, frontZ);
+    const backLeft = new THREE.Vector3(leftX, layout.wallTopY, backZ);
+    const backRight = new THREE.Vector3(rightX, layout.wallTopY, backZ);
+
+    if (layout.ridgeHalfLength <= metersToTiles(0.02)) {
+      const apex = new THREE.Vector3(mass.centerX, layout.ridgeY, mass.centerZ);
+      addConvexPrism(meshes, material, [frontLeft, frontRight, apex], panelThickness, new THREE.Vector3(0, 0, -1));
+      if (!partial) {
+        addConvexPrism(meshes, material, [backRight, backLeft, apex], panelThickness, new THREE.Vector3(0, 0, 1));
+        addConvexPrism(meshes, material, [backLeft, frontLeft, apex], panelThickness, new THREE.Vector3(-1, 0, 0));
+        addConvexPrism(meshes, material, [frontRight, backRight, apex], panelThickness, new THREE.Vector3(1, 0, 0));
+      }
+      return;
+    }
+
+    addConvexPrism(
+      meshes,
+      material,
+      [frontLeft, frontRight, ridgeRight, ridgeLeft],
+      panelThickness,
+      new THREE.Vector3(0, 0, -1)
+    );
+    if (partial) {
+      return;
+    }
+    addConvexPrism(
+      meshes,
+      material,
+      [backRight, backLeft, ridgeLeft, ridgeRight],
+      panelThickness,
+      new THREE.Vector3(0, 0, 1)
+    );
+    addConvexPrism(
+      meshes,
+      material,
+      [backLeft, frontLeft, ridgeLeft],
+      panelThickness,
+      new THREE.Vector3(-1, 0, 0)
+    );
+    addConvexPrism(
+      meshes,
+      material,
+      [frontRight, backRight, ridgeRight],
+      panelThickness,
+      new THREE.Vector3(1, 0, 0)
+    );
+    return;
+  }
+
+  const ridgeFront = new THREE.Vector3(mass.centerX, layout.ridgeY, mass.centerZ - layout.ridgeHalfLength);
+  const ridgeBack = new THREE.Vector3(mass.centerX, layout.ridgeY, mass.centerZ + layout.ridgeHalfLength);
+  const frontLeft = new THREE.Vector3(leftX, layout.wallTopY, frontZ);
+  const frontRight = new THREE.Vector3(rightX, layout.wallTopY, frontZ);
+  const backLeft = new THREE.Vector3(leftX, layout.wallTopY, backZ);
+  const backRight = new THREE.Vector3(rightX, layout.wallTopY, backZ);
+
+  if (layout.ridgeHalfLength <= metersToTiles(0.02)) {
+    const apex = new THREE.Vector3(mass.centerX, layout.ridgeY, mass.centerZ);
+    addConvexPrism(meshes, material, [frontLeft, frontRight, apex], panelThickness, new THREE.Vector3(0, 0, -1));
+    if (!partial) {
+      addConvexPrism(meshes, material, [backRight, backLeft, apex], panelThickness, new THREE.Vector3(0, 0, 1));
+      addConvexPrism(meshes, material, [backLeft, frontLeft, apex], panelThickness, new THREE.Vector3(-1, 0, 0));
+      addConvexPrism(meshes, material, [frontRight, backRight, apex], panelThickness, new THREE.Vector3(1, 0, 0));
+    }
+    return;
+  }
+
+  addConvexPrism(
     meshes,
     material,
-    mass.centerX,
-    ridgeY,
-    mass.centerZ - roofHalfDepth * 0.5,
-    mass.width + ROOF_EAVE_OVERHANG * 2,
+    [backLeft, frontLeft, ridgeFront, ridgeBack],
     panelThickness,
-    frontBackPanelLength,
-    -depthSlope,
-    0,
-    0
-  );
-  addBox(
-    meshes,
-    material,
-    mass.centerX,
-    ridgeY,
-    mass.centerZ + roofHalfDepth * 0.5,
-    mass.width + ROOF_EAVE_OVERHANG * 2,
-    panelThickness,
-    frontBackPanelLength,
-    depthSlope,
-    0,
-    0
+    new THREE.Vector3(-1, 0, 0)
   );
   if (partial) {
     return;
   }
-  addBox(
+  addConvexPrism(
     meshes,
     material,
-    mass.centerX - roofHalfWidth * 0.5,
-    ridgeY,
-    mass.centerZ,
-    mass.depth + ROOF_EAVE_OVERHANG * 2,
+    [frontRight, backRight, ridgeBack, ridgeFront],
     panelThickness,
-    sidePanelLength,
-    0,
-    Math.PI * 0.5,
-    widthSlope
+    new THREE.Vector3(1, 0, 0)
   );
-  addBox(
+  addConvexPrism(
     meshes,
     material,
-    mass.centerX + roofHalfWidth * 0.5,
-    ridgeY,
-    mass.centerZ,
-    mass.depth + ROOF_EAVE_OVERHANG * 2,
+    [frontLeft, frontRight, ridgeFront],
     panelThickness,
-    sidePanelLength,
-    0,
-    Math.PI * 0.5,
-    -widthSlope
+    new THREE.Vector3(0, 0, -1)
+  );
+  addConvexPrism(
+    meshes,
+    material,
+    [backRight, backLeft, ridgeBack],
+    panelThickness,
+    new THREE.Vector3(0, 0, 1)
   );
 };
 
-const addShedRoof = (
+const addLeanToRoof = (
   meshes: BuildingMeshTemplate[],
   material: THREE.MeshStandardMaterial,
   mass: BuildingMass,
@@ -977,7 +1276,7 @@ const addShedRoof = (
     meshes,
     material,
     mass.centerX + (partial ? -(mass.width + ROOF_EAVE_OVERHANG * 2) * 0.1 : 0),
-    baseY + mass.wallHeight + mass.roofHeight * 0.5,
+    getMassBaseY(baseY, mass) + mass.wallHeight + mass.roofHeight * 0.5,
     mass.centerZ,
     (mass.width + ROOF_EAVE_OVERHANG * 2) * (partial ? 0.76 : 1),
     Math.max(metersToTiles(0.08), mass.roofHeight * 0.14),
@@ -1003,7 +1302,7 @@ const addMassRoof = (
     addHipRoof(meshes, material, mass, baseY, partial);
     return;
   }
-  addShedRoof(meshes, material, mass, baseY, partial);
+  addLeanToRoof(meshes, material, mass, baseY, partial);
 };
 
 const addOpeningFeatures = (
@@ -1015,8 +1314,9 @@ const addOpeningFeatures = (
   stage: BuildingLifecycleStage,
   wallThickness: number
 ): void => {
-  const recessInset = Math.max(0, wallThickness * 0.28);
-  const panelInset = Math.max(0, wallThickness * 0.08);
+  const recessInset = Math.max(0, wallThickness * 0.4);
+  const surfaceInset = -wallThickness * 0.12;
+  const massBaseY = getMassBaseY(baseY, mass);
   openings.forEach((opening) => {
     addWallOrientedBox(
       meshes,
@@ -1024,7 +1324,7 @@ const addOpeningFeatures = (
       mass,
       opening.side,
       opening.center,
-      baseY + opening.bottom + opening.height * 0.5,
+      massBaseY + opening.bottom + opening.height * 0.5,
       opening.width * 0.9,
       opening.height * 0.92,
       wallThickness * 0.44,
@@ -1040,11 +1340,11 @@ const addOpeningFeatures = (
         mass,
         opening.side,
         opening.center,
-        baseY + opening.bottom + opening.height * 0.5,
+        massBaseY + opening.bottom + opening.height * 0.5,
         opening.width * 0.8,
         opening.height * 0.9,
         wallThickness * 0.18,
-        panelInset
+        surfaceInset
       );
       addWallOrientedBox(
         meshes,
@@ -1052,11 +1352,11 @@ const addOpeningFeatures = (
         mass,
         opening.side,
         opening.center,
-        baseY + opening.bottom + opening.height + wallThickness * 0.12,
+        massBaseY + opening.bottom + opening.height + wallThickness * 0.12,
         opening.width * 0.96,
         wallThickness * 0.18,
         wallThickness * 0.18,
-        panelInset
+        surfaceInset
       );
       return;
     }
@@ -1066,11 +1366,11 @@ const addOpeningFeatures = (
       mass,
       opening.side,
       opening.center,
-      baseY + opening.bottom + opening.height * 0.52,
+      massBaseY + opening.bottom + opening.height * 0.52,
       opening.width * 0.74,
       opening.height * 0.72,
       wallThickness * 0.16,
-      panelInset
+      surfaceInset
     );
     addWallOrientedBox(
       meshes,
@@ -1078,11 +1378,11 @@ const addOpeningFeatures = (
       mass,
       opening.side,
       opening.center,
-      baseY + opening.bottom + opening.height * 0.52,
+      massBaseY + opening.bottom + opening.height * 0.52,
       opening.width * 0.92,
       wallThickness * 0.14,
       wallThickness * 0.18,
-      panelInset
+      surfaceInset
     );
     addWallOrientedBox(
       meshes,
@@ -1090,11 +1390,11 @@ const addOpeningFeatures = (
       mass,
       opening.side,
       opening.center,
-      baseY + opening.bottom + opening.height * 0.52,
+      massBaseY + opening.bottom + opening.height * 0.52,
       wallThickness * 0.14,
       opening.height * 0.86,
       wallThickness * 0.18,
-      panelInset
+      surfaceInset
     );
   });
 };
@@ -1106,17 +1406,18 @@ const addFrontPorch = (
   mass: BuildingMass,
   baseY: number
 ): void => {
-  if (spec.entrySide !== "front" || spec.porchDepth < 0.08 || mass.isAnnex) {
+  if (spec.entrySide !== "front" || spec.porchDepth < 0.08 || mass.kind !== "main") {
     return;
   }
   const deckWidth = mass.width * 0.34;
   const deckDepth = spec.porchDepth;
   const frontZ = mass.centerZ - mass.depth * 0.5 - deckDepth * 0.36;
+  const massBaseY = getMassBaseY(baseY, mass);
   addBox(
     meshes,
     palette.foundation,
     mass.centerX + spec.doorOffset * mass.width * 0.18,
-    baseY + metersToTiles(0.12),
+    massBaseY + metersToTiles(0.12),
     frontZ,
     deckWidth,
     metersToTiles(0.14),
@@ -1126,7 +1427,7 @@ const addFrontPorch = (
     meshes,
     palette.trim,
     mass.centerX + spec.doorOffset * mass.width * 0.18,
-    baseY + spec.wallHeight * 0.74,
+    massBaseY + mass.wallHeight * 0.74,
     frontZ,
     deckWidth * 0.86,
     0.03,
@@ -1140,13 +1441,76 @@ const addFrontPorch = (
       meshes,
       palette.trim,
       mass.centerX + spec.doorOffset * mass.width * 0.18 + offsetX,
-      baseY + spec.wallHeight * 0.38,
+      massBaseY + mass.wallHeight * 0.38,
       frontZ,
       metersToTiles(0.12),
-      spec.wallHeight * 0.74,
+      mass.wallHeight * 0.74,
       metersToTiles(0.12)
     );
   });
+};
+
+const addLotMarkerLayout = (
+  meshes: BuildingMeshTemplate[],
+  palette: StylePalette,
+  width: number,
+  depth: number,
+  baseY: number
+): void => {
+  const stakeHeight = metersToTiles(0.58);
+  const stakeThickness = metersToTiles(0.08);
+  const halfWidth = Math.max(stakeThickness * 1.4, width * 0.5);
+  const halfDepth = Math.max(stakeThickness * 1.4, depth * 0.5);
+  const markerY = baseY + stakeHeight * 0.5;
+  const corners = [
+    { x: -halfWidth, z: -halfDepth },
+    { x: halfWidth, z: -halfDepth },
+    { x: -halfWidth, z: halfDepth },
+    { x: halfWidth, z: halfDepth }
+  ];
+  corners.forEach((corner) => {
+    addBox(meshes, palette.frame, corner.x, markerY, corner.z, stakeThickness, stakeHeight, stakeThickness);
+  });
+  addBox(
+    meshes,
+    palette.trim,
+    0,
+    baseY + stakeHeight * 0.84,
+    -halfDepth,
+    Math.max(stakeThickness, width),
+    stakeThickness * 0.45,
+    stakeThickness * 0.4
+  );
+  addBox(
+    meshes,
+    palette.trim,
+    0,
+    baseY + stakeHeight * 0.84,
+    halfDepth,
+    Math.max(stakeThickness, width),
+    stakeThickness * 0.45,
+    stakeThickness * 0.4
+  );
+  addBox(
+    meshes,
+    palette.trim,
+    -halfWidth,
+    baseY + stakeHeight * 0.84,
+    0,
+    stakeThickness * 0.4,
+    stakeThickness * 0.45,
+    Math.max(stakeThickness, depth)
+  );
+  addBox(
+    meshes,
+    palette.trim,
+    halfWidth,
+    baseY + stakeHeight * 0.84,
+    0,
+    stakeThickness * 0.4,
+    stakeThickness * 0.45,
+    Math.max(stakeThickness, depth)
+  );
 };
 
 const finalizeVariant = (
@@ -1219,16 +1583,24 @@ const buildVariantForStage = (
 ): HouseVariant | null => {
   const spec = buildSpec(footprintIndex, variationIndex);
   const theme: "brick" | "wood" = footprintIndex % 2 === 0 ? "wood" : "brick";
-  const palette = makeStyleMaterials(footprintIndex, stage);
+  const palette = makeStyleMaterials(footprintIndex, variationIndex, stage);
   const masses = createMasses(spec);
   const meshes: BuildingMeshTemplate[] = [];
   const baseY = metersToTiles(0.35);
   const foundationInset = metersToTiles(0.4);
   const foundationWidth = Math.max(...masses.map((mass) => Math.abs(mass.centerX) + mass.width * 0.5)) * 2 + foundationInset;
   const foundationDepth = Math.max(...masses.map((mass) => Math.abs(mass.centerZ) + mass.depth * 0.5)) * 2 + foundationInset;
-  addBox(meshes, palette.foundation, 0, baseY * 0.5, 0, foundationWidth, baseY, foundationDepth);
+  const includeFoundationBase = stage !== "empty_lot";
+  if (includeFoundationBase) {
+    addBox(meshes, palette.foundation, 0, baseY * 0.5, 0, foundationWidth, baseY, foundationDepth);
+  }
 
-  if (stage === "foundation") {
+  if (stage === "empty_lot") {
+    addLotMarkerLayout(meshes, palette, foundationWidth, foundationDepth, 0);
+    return finalizeVariant(meshes, spec, stage, visualStep, theme, foundationWidth, foundationDepth);
+  }
+
+  if (stage === "site_prep" || stage === "cleared_lot") {
     const foundationProgress = getSteppedValue(FOUNDATION_STEP_POST_THRESHOLDS, visualStep);
     masses.forEach((mass) => {
       addFoundationLayout(meshes, palette.frame, mass, baseY, Math.max(0.02, spec.frameThickness * 1.1), foundationProgress);
@@ -1236,10 +1608,11 @@ const buildVariantForStage = (
     return finalizeVariant(meshes, spec, stage, visualStep, theme, foundationWidth, foundationDepth);
   }
 
-  const frameMaterial = stage === "burnt_frame" ? palette.burn : palette.frame;
-  const roofFrameMaterial = stage === "burnt_frame" ? palette.burn : palette.frame;
+  const frameMaterial = stage === "charred_remains" ? palette.burn : palette.frame;
+  const roofFrameMaterial = stage === "charred_remains" ? palette.burn : palette.frame;
   const frameThickness = spec.frameThickness;
   const wallThickness = Math.max(0.05, frameThickness * 2.15);
+  const frameInset = Math.max(0, wallThickness - frameThickness) * 0.7;
 
   if (stage === "frame") {
     const wallProgress = getSteppedValue(FRAME_WALL_PROGRESS_STEPS, visualStep);
@@ -1249,7 +1622,18 @@ const buildVariantForStage = (
       const sideSequence = getRaisedFrameSides(mass, spec);
       const visibleSideCount = Math.ceil(wallProgress * sideSequence.length);
       takeFirstSides(sideSequence, visibleSideCount).forEach((side) => {
-        addWallFrame(meshes, frameMaterial, mass, side, baseY, frameThickness, spec.studSpacing, openings, wallProgress);
+        addWallFrame(
+          meshes,
+          frameMaterial,
+          mass,
+          side,
+          baseY,
+          frameThickness,
+          spec.studSpacing,
+          openings,
+          wallProgress,
+          frameInset
+        );
       });
       if (roofProgress > 0.01) {
         addRoofFrame(
@@ -1266,12 +1650,37 @@ const buildVariantForStage = (
     return finalizeVariant(meshes, spec, stage, visualStep, theme, foundationWidth, foundationDepth);
   }
 
+  if (stage === "charred_remains") {
+    masses.forEach((mass) => {
+      const burntMass = {
+        ...mass,
+        wallHeight: mass.wallHeight * 0.58,
+        roofHeight: 0
+      };
+      addWallFrame(meshes, palette.burn, burntMass, "front", baseY, frameThickness, spec.studSpacing, [], 1, frameInset);
+      addWallFrame(meshes, palette.burn, burntMass, "back", baseY, frameThickness, spec.studSpacing, [], 1, frameInset);
+      addWallFrame(meshes, palette.burn, burntMass, "left", baseY, frameThickness, spec.studSpacing, [], 1, frameInset);
+      addWallFrame(meshes, palette.burn, burntMass, "right", baseY, frameThickness, spec.studSpacing, [], 1, frameInset);
+    });
+    addBox(
+      meshes,
+      palette.burn,
+      0,
+      baseY + masses[0].wallHeight * 0.14,
+      0,
+      foundationWidth * 0.72,
+      0.05,
+      foundationDepth * 0.72
+    );
+    return finalizeVariant(meshes, spec, stage, visualStep, theme, foundationWidth, foundationDepth);
+  }
+
   masses.forEach((mass) => {
     const openings = resolveMassOpenings(mass, spec);
-    addWallFrame(meshes, frameMaterial, mass, "front", baseY, frameThickness, spec.studSpacing, openings);
-    addWallFrame(meshes, frameMaterial, mass, "back", baseY, frameThickness, spec.studSpacing, openings);
-    addWallFrame(meshes, frameMaterial, mass, "left", baseY, frameThickness, spec.studSpacing, openings);
-    addWallFrame(meshes, frameMaterial, mass, "right", baseY, frameThickness, spec.studSpacing, openings);
+    addWallFrame(meshes, frameMaterial, mass, "front", baseY, frameThickness, spec.studSpacing, openings, 1, frameInset);
+    addWallFrame(meshes, frameMaterial, mass, "back", baseY, frameThickness, spec.studSpacing, openings, 1, frameInset);
+    addWallFrame(meshes, frameMaterial, mass, "left", baseY, frameThickness, spec.studSpacing, openings, 1, frameInset);
+    addWallFrame(meshes, frameMaterial, mass, "right", baseY, frameThickness, spec.studSpacing, openings, 1, frameInset);
     addRoofFrame(meshes, roofFrameMaterial, mass, baseY, frameThickness, spec.studSpacing);
 
     if (stage === "enclosed") {
@@ -1286,69 +1695,29 @@ const buildVariantForStage = (
       return;
     }
 
-    if (stage === "finished" || stage === "damaged") {
+    if (stage === "roofed") {
       addWallShell(meshes, palette.wall, mass, baseY, wallThickness);
       addMassRoof(meshes, palette.roof, mass, baseY);
       addOpeningFeatures(meshes, palette, mass, openings, baseY, stage, wallThickness);
     }
   });
 
-  if (stage === "finished") {
+  if (stage === "roofed") {
     addFrontPorch(meshes, palette, spec, masses[0], baseY);
     masses.forEach((mass) => {
       addWallTopTrim(meshes, palette.trim, mass, baseY);
     });
+    const chimneyMass = masses.sort((left, right) => right.width * right.depth - left.width * left.depth)[0] ?? masses[0];
+    const chimneyBaseY = getMassBaseY(baseY, chimneyMass);
     addChimney(
       meshes,
       palette.smoke,
-      masses[0].centerX + masses[0].width * 0.26,
-      baseY + masses[0].wallHeight + masses[0].roofHeight * 0.58,
-      masses[0].centerZ + masses[0].depth * 0.12,
-      Math.max(0.05, masses[0].width * 0.08),
-      Math.max(0.08, masses[0].roofHeight * 0.34),
-      Math.max(0.05, masses[0].depth * 0.08)
-    );
-  }
-
-  if (stage === "damaged") {
-    addBox(
-      meshes,
-      palette.burn,
-      0,
-      baseY + masses[0].wallHeight * 0.36,
-      masses[0].centerZ + masses[0].depth * 0.08,
-      foundationWidth * 0.42,
-      masses[0].wallHeight * 0.28,
-      foundationDepth * 0.34,
-      0,
-      0.08,
-      0
-    );
-    addBox(
-      meshes,
-      palette.burn,
-      masses[0].centerX + masses[0].width * 0.16,
-      baseY + masses[0].wallHeight + masses[0].roofHeight * 0.18,
-      masses[0].centerZ - masses[0].depth * 0.14,
-      masses[0].width * 0.22,
-      masses[0].roofHeight * 0.24,
-      masses[0].depth * 0.18,
-      -0.18,
-      0.14,
-      0.06
-    );
-  }
-
-  if (stage === "burnt_frame") {
-    addBox(
-      meshes,
-      palette.burn,
-      0,
-      baseY + masses[0].wallHeight * 0.14,
-      0,
-      foundationWidth * 0.72,
-      0.05,
-      foundationDepth * 0.72
+      chimneyMass.centerX + chimneyMass.width * 0.26,
+      chimneyBaseY + chimneyMass.wallHeight + chimneyMass.roofHeight * 0.58,
+      chimneyMass.centerZ + chimneyMass.depth * 0.12,
+      Math.max(0.05, chimneyMass.width * 0.08),
+      Math.max(0.08, chimneyMass.roofHeight * 0.34),
+      Math.max(0.05, chimneyMass.depth * 0.08)
     );
   }
 

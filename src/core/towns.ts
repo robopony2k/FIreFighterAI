@@ -1,4 +1,4 @@
-import type { TileType } from "./types.js";
+import type { BuildingClass, TileType } from "./types.js";
 import type { WorldState } from "./state.js";
 import { syncTileSoAIndex } from "./tileCache.js";
 import { clearVegetationState, syncDerivedVegetationState } from "./vegetation.js";
@@ -51,7 +51,10 @@ const applyRestoredBiomeState = (state: WorldState, idx: number): void => {
   tile.houseValue = 0;
   tile.houseResidents = 0;
   tile.houseDestroyed = false;
+  tile.houseDestroyedAtDay = undefined;
   tile.houseConstructionYear = undefined;
+  tile.houseTownId = undefined;
+  tile.houseStyleSeed = undefined;
   tile.houseDamage01 = 0;
   tile.ashAge = 0;
   tile.buildingClass = null;
@@ -83,7 +86,13 @@ const clearHouseAnchor = (state: WorldState, idx: number): void => {
  * - Every house anchor must have `tileTownId[idx]` pointing at a valid town.
  * - `town.houseCount` mirrors the number of house anchors owned by that town.
  */
-export function placeHouse(state: WorldState, idx: number, townId: number, constructionYear?: number): boolean {
+export function placeHouse(
+  state: WorldState,
+  idx: number,
+  townId: number,
+  constructionYear?: number,
+  styleSeed?: number
+): boolean {
   if (idx < 0 || idx >= state.grid.totalTiles || !isValidTownId(state, townId)) {
     return false;
   }
@@ -117,7 +126,14 @@ export function placeHouse(state: WorldState, idx: number, townId: number, const
   tile.houseValue = houseValue;
   tile.houseResidents = houseResidents;
   tile.houseDestroyed = false;
+  tile.houseDestroyedAtDay = undefined;
   tile.houseConstructionYear = Number.isFinite(constructionYear) ? constructionYear : state.year;
+  tile.houseTownId = townId;
+  tile.houseStyleSeed = Number.isFinite(styleSeed)
+    ? Math.trunc(styleSeed as number)
+    : Number.isFinite(tile.houseStyleSeed)
+      ? Math.trunc(tile.houseStyleSeed as number)
+      : idx;
   tile.houseDamage01 = 0;
   tile.ashAge = 0;
   tile.buildingClass = "residential_low";
@@ -191,9 +207,95 @@ export function destroyHouse(state: WorldState, idx: number): boolean {
 
   clearHouseAnchor(state, idx);
   tile.houseDestroyed = true;
+  tile.houseDestroyedAtDay = state.careerDay;
   tile.houseDamage01 = 1;
   tile.houseConstructionYear = tile.houseConstructionYear ?? state.year;
+  tile.houseTownId = townId;
   tile.buildingClass = null;
+  state.towns[townId].recoveryPressure = Math.max(0, (state.towns[townId].recoveryPressure ?? 0) + 1);
+  state.structureRevision += 1;
+  state.terrainDirty = true;
+  syncTileSoAIndex(state, idx);
+  return true;
+}
+
+export function retireDestroyedHouseToLot(state: WorldState, idx: number): boolean {
+  if (idx < 0 || idx >= state.grid.totalTiles) {
+    return false;
+  }
+  const tile = state.tiles[idx];
+  if (!tile || tile.type !== "house" || !tile.houseDestroyed) {
+    return false;
+  }
+
+  tile.type = "bare";
+  tile.isBase = false;
+  clearVegetationState(tile);
+  tile.dominantTreeType = null;
+  tile.treeType = null;
+  tile.houseValue = 0;
+  tile.houseResidents = 0;
+  tile.houseDestroyed = false;
+  tile.houseDestroyedAtDay = undefined;
+  tile.houseConstructionYear = undefined;
+  tile.houseTownId = undefined;
+  tile.houseStyleSeed = undefined;
+  tile.houseDamage01 = 0;
+  tile.ashAge = 0;
+  tile.buildingClass = null;
+
+  state.terrainTypeRevision += 1;
+  state.structureRevision += 1;
+  state.terrainDirty = true;
+  syncTileSoAIndex(state, idx);
+  return true;
+}
+
+export function completePlannedHouse(
+  state: WorldState,
+  idx: number,
+  townId: number,
+  houseValue: number,
+  houseResidents: number,
+  constructionYear: number,
+  styleSeed?: number
+): boolean {
+  const tile = state.tiles[idx];
+  if (!tile) {
+    return false;
+  }
+  tile.houseValue = Math.max(0, Math.floor(houseValue));
+  tile.houseResidents = Math.max(0, Math.floor(houseResidents));
+  return placeHouse(state, idx, townId, constructionYear, styleSeed);
+}
+
+export function upgradeHouseDensity(
+  state: WorldState,
+  idx: number,
+  nextClass: BuildingClass,
+  residentDelta: number,
+  valueDelta: number
+): boolean {
+  if (idx < 0 || idx >= state.grid.totalTiles || state.tileStructure[idx] !== STRUCTURE_HOUSE) {
+    return false;
+  }
+  const tile = state.tiles[idx];
+  if (!tile || tile.type !== "house" || tile.houseDestroyed) {
+    return false;
+  }
+  const currentClass = tile.buildingClass ?? "residential_low";
+  if (currentClass === nextClass) {
+    return false;
+  }
+  const previousResidents = Math.max(0, Math.floor(tile.houseResidents || 0));
+  const previousValue = Math.max(0, Math.floor(tile.houseValue || 0));
+  const nextResidents = previousResidents + Math.max(1, Math.floor(residentDelta));
+  const nextValue = previousValue + Math.max(1, Math.floor(valueDelta));
+  tile.houseResidents = nextResidents;
+  tile.houseValue = nextValue;
+  tile.buildingClass = nextClass;
+  state.totalPopulation += nextResidents - previousResidents;
+  state.totalPropertyValue += nextValue - previousValue;
   state.structureRevision += 1;
   state.terrainDirty = true;
   syncTileSoAIndex(state, idx);
