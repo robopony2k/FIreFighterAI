@@ -690,7 +690,7 @@ const analyzeTownMorphologies = (state) => {
       town.streetArchetype !== "ribbon" &&
       (town.houseCount >= COMPACT_TOWN_MORPH_MIN_HOUSES || localRoads.length >= COMPACT_TOWN_MORPH_MIN_ROADS);
     const violations = [];
-    if (meaningful && roadNode3PlusCount < 1) {
+    if (meaningful && town.streetArchetype === "crossroads" && roadNode3PlusCount < 1) {
       violations.push("missing_intersection");
     }
     if (meaningful && aspect > COMPACT_TOWN_ASPECT_LIMIT) {

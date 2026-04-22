@@ -1,4 +1,15 @@
-import { getHouseFootprintBounds, pickHouseFootprint, type HouseFootprintBounds } from "../../../core/houseFootprints.js";
+import {
+  getHouseFootprintBounds,
+  getHouseFootprintDims,
+  pickHouseFootprint,
+  type HouseFootprintBounds
+} from "../../../core/houseFootprints.js";
+import {
+  findBestRoadReferenceForPlot,
+  getRoadConnectionOffsets,
+  getRoadFrontageOffsets,
+  pickHouseRotationFromRoadMask
+} from "../../../core/roadAlignment.js";
 import { inBounds, indexFor } from "../../../core/grid.js";
 import type { WorldState } from "../../../core/state.js";
 import { hash2D } from "../../../mapgen/noise.js";
@@ -33,7 +44,9 @@ import {
   MIN_TOWN_RADIUS,
   SECONDARY_BRANCH_MAX,
   SECONDARY_BRANCH_MIN,
-  TOWN_CORE_RADIUS
+  TOWN_CORE_RADIUS,
+  TOWN_FRONTIER_BOOTSTRAP_LENGTH,
+  TOWN_FRONTIER_RECOVERY_RADIUS_BONUS
 } from "../constants/settlementConstants.js";
 import type { SettlementRoadAdapter, SettlementRoadOptions } from "../types/settlementTypes.js";
 
@@ -41,12 +54,14 @@ type GrowthMode = "mapgen" | "runtime";
 
 export type GrowthContext = {
   footprints: Map<number, HouseFootprintBounds>;
+  clearanceRects: Map<number, HouseClearanceRect>;
 };
 
 type FrontageCandidate = {
   x: number;
   y: number;
   bounds: HouseFootprintBounds;
+  clearanceRect: HouseClearanceRect;
   styleSeed: number;
   score: number;
   distCenter: number;
@@ -79,10 +94,18 @@ type TownRoadAnchorCandidate = {
   score: number;
 };
 
+type HouseClearanceRect = {
+  minX: number;
+  maxX: number;
+  minY: number;
+  maxY: number;
+};
+
 const clamp01 = (value: number): number => clamp(value, 0, 1);
 const COMPACT_TOWN_BRANCH_ASPECT_LIMIT = 1.35;
 const TOWN_DENSIFY_RESIDENT_DELTA = 2;
 const TOWN_DENSIFY_VALUE_DELTA = 90;
+const HOUSE_CLEARANCE_MARGIN = 0.08;
 
 const noiseAt = (value: number): number => {
   const sample = Math.sin(value * 12.9898 + 78.233) * 43758.5453;
@@ -96,6 +119,13 @@ const isStreetTile = (state: WorldState, x: number, y: number): boolean => {
   const idx = indexFor(state.grid, x, y);
   const type = state.tiles[idx]?.type;
   return type === "road" || (state.tileRoadBridge[idx] ?? 0) > 0;
+};
+
+const getRoadMaskAt = (state: WorldState, x: number, y: number): number => {
+  if (!inBounds(state.grid, x, y)) {
+    return 0;
+  }
+  return state.tileRoadEdges[indexFor(state.grid, x, y)] ?? 0;
 };
 
 const isBuildableType = (type: WorldState["tiles"][number]["type"]): boolean =>
@@ -166,27 +196,19 @@ const isBuildable = (state: WorldState, x: number, y: number): boolean => {
 };
 
 const pickHouseRotationFromRoad = (state: WorldState, tileX: number, tileY: number, seed: number): number => {
-  const roadEW = isStreetTile(state, tileX - 1, tileY) || isStreetTile(state, tileX + 1, tileY);
-  const roadNS = isStreetTile(state, tileX, tileY - 1) || isStreetTile(state, tileX, tileY + 1);
-  const flip = noiseAt(seed + 21.4) < 0.5 ? 0 : Math.PI;
-  if (roadEW && !roadNS) {
-    return flip;
-  }
-  if (roadNS && !roadEW) {
-    return Math.PI / 2 + flip;
-  }
-  return noiseAt(seed + 9.1) < 0.5 ? 0 : Math.PI / 2;
+  const reference = findBestRoadReferenceForPlot(tileX, tileY, (x, y) => isStreetTile(state, x, y), (x, y) => getRoadMaskAt(state, x, y));
+  return pickHouseRotationFromRoadMask(reference?.roadMask ?? 0, seed);
 };
 
 const footprintTouchesStreet = (state: WorldState, bounds: HouseFootprintBounds): boolean => {
-  for (let x = bounds.minX; x <= bounds.maxX; x += 1) {
-    if (isStreetTile(state, x, bounds.minY - 1) || isStreetTile(state, x, bounds.maxY + 1)) {
-      return true;
-    }
-  }
-  for (let y = bounds.minY; y <= bounds.maxY; y += 1) {
-    if (isStreetTile(state, bounds.minX - 1, y) || isStreetTile(state, bounds.maxX + 1, y)) {
-      return true;
+  for (let y = bounds.minY - 1; y <= bounds.maxY + 1; y += 1) {
+    for (let x = bounds.minX - 1; x <= bounds.maxX + 1; x += 1) {
+      if (x >= bounds.minX && x <= bounds.maxX && y >= bounds.minY && y <= bounds.maxY) {
+        continue;
+      }
+      if (isStreetTile(state, x, y)) {
+        return true;
+      }
     }
   }
   return false;
@@ -215,6 +237,35 @@ const markHouseFootprint = (state: WorldState, bounds: HouseFootprintBounds, con
   }
 };
 
+const createHouseClearanceRect = (
+  tileX: number,
+  tileY: number,
+  rotation: number,
+  footprint: Parameters<typeof getHouseFootprintDims>[1]
+): HouseClearanceRect => {
+  const { width, depth } = getHouseFootprintDims(rotation, footprint);
+  const centerX = tileX + 0.5;
+  const centerY = tileY + 0.5;
+  return {
+    minX: centerX - width / 2 - HOUSE_CLEARANCE_MARGIN,
+    maxX: centerX + width / 2 + HOUSE_CLEARANCE_MARGIN,
+    minY: centerY - depth / 2 - HOUSE_CLEARANCE_MARGIN,
+    maxY: centerY + depth / 2 + HOUSE_CLEARANCE_MARGIN
+  };
+};
+
+const clearanceRectsOverlap = (left: HouseClearanceRect, right: HouseClearanceRect): boolean =>
+  left.minX < right.maxX && left.maxX > right.minX && left.minY < right.maxY && left.maxY > right.minY;
+
+const canPlaceHouseClearance = (context: GrowthContext, rect: HouseClearanceRect): boolean => {
+  for (const existing of context.clearanceRects.values()) {
+    if (clearanceRectsOverlap(existing, rect)) {
+      return false;
+    }
+  }
+  return true;
+};
+
 const canPlaceHouseFootprint = (state: WorldState, bounds: HouseFootprintBounds): boolean => {
   for (let y = bounds.minY; y <= bounds.maxY; y += 1) {
     for (let x = bounds.minX; x <= bounds.maxX; x += 1) {
@@ -241,7 +292,8 @@ const canPlaceHouseFootprint = (state: WorldState, bounds: HouseFootprintBounds)
 export const rebuildGrowthContext = (state: WorldState): GrowthContext => {
   state.structureMask.fill(0);
   const context: GrowthContext = {
-    footprints: new Map<number, HouseFootprintBounds>()
+    footprints: new Map<number, HouseFootprintBounds>(),
+    clearanceRects: new Map<number, HouseClearanceRect>()
   };
   for (let idx = 0; idx < state.grid.totalTiles; idx += 1) {
     const tile = state.tiles[idx];
@@ -252,9 +304,11 @@ export const rebuildGrowthContext = (state: WorldState): GrowthContext => {
     const y = Math.floor(idx / state.grid.cols);
     const styleSeed = Number.isFinite(tile.houseStyleSeed) ? Math.trunc(tile.houseStyleSeed as number) : idx;
     const rotation = pickHouseRotationFromRoad(state, x, y, styleSeed);
-    const bounds = getHouseFootprintBounds(x, y, rotation, pickHouseFootprint(styleSeed));
+    const footprint = pickHouseFootprint(styleSeed);
+    const bounds = getHouseFootprintBounds(x, y, rotation, footprint, "asset");
     markHouseFootprint(state, bounds, context);
     context.footprints.set(idx, bounds);
+    context.clearanceRects.set(idx, createHouseClearanceRect(x, y, rotation, footprint));
   }
   for (let i = 0; i < state.buildingLots.length; i += 1) {
     const lot = state.buildingLots[i]!;
@@ -262,9 +316,11 @@ export const rebuildGrowthContext = (state: WorldState): GrowthContext => {
     const x = anchorIndex % state.grid.cols;
     const y = Math.floor(anchorIndex / state.grid.cols);
     const rotation = pickHouseRotationFromRoad(state, x, y, lot.styleSeed);
-    const bounds = getHouseFootprintBounds(x, y, rotation, pickHouseFootprint(lot.styleSeed));
+    const footprint = pickHouseFootprint(lot.styleSeed);
+    const bounds = getHouseFootprintBounds(x, y, rotation, footprint, "asset");
     markHouseFootprint(state, bounds, context);
     context.footprints.set(anchorIndex, bounds);
+    context.clearanceRects.set(anchorIndex, createHouseClearanceRect(x, y, rotation, footprint));
   }
   return context;
 };
@@ -305,6 +361,7 @@ const placeFrontageHouse = (
   }
   markHouseFootprint(state, candidate.bounds, context);
   context.footprints.set(idx, candidate.bounds);
+  context.clearanceRects.set(idx, candidate.clearanceRect);
   return true;
 };
 
@@ -334,7 +391,7 @@ export const reserveTownExpansionLot = (
   let safety = 0;
   while (safety < 12) {
     safety += 1;
-    pruneInactiveGrowthFrontiers(town);
+    ensureTownGrowthFrontiers(state, town, roadAdapter);
     const metrics = buildTownEnvelopeMetrics(state, town);
     const roadGrowthCapped = isCompactTownRoadGrowthCapped(state, town);
     const needsSecondAxis = isCompactTownArchetype(town) && getActiveFrontierAxisCount(town) < 2 && town.houseCount >= 1;
@@ -353,6 +410,7 @@ export const reserveTownExpansionLot = (
       const anchorIndex = indexFor(state.grid, selected.x, selected.y);
       markHouseFootprint(state, selected.bounds, context);
       context.footprints.set(anchorIndex, selected.bounds);
+      context.clearanceRects.set(anchorIndex, selected.clearanceRect);
       return {
         anchorIndex,
         styleSeed: selected.styleSeed,
@@ -360,21 +418,23 @@ export const reserveTownExpansionLot = (
         houseResidents: computeDeterministicHouseResidents(state, anchorIndex, town.id, effectiveYear)
       };
     }
-    if (canCompactTownDensify(state, town, metrics, usableFrontage.length)) {
-      break;
-    }
     if (!roadGrowthCapped && shouldAddSecondaryStreetEarly(state, town, usableFrontage[0] ?? null, metrics) && addSecondaryStreet(state, town, roadAdapter, metrics)) {
       roadAdapter.backfillRoadEdgesFromAdjacency(state);
       continue;
     }
-    const activeFrontier = selectGrowthFrontier(town, metrics);
-    if (!roadGrowthCapped && activeFrontier && extendTownFrontier(state, town, roadAdapter, activeFrontier, metrics)) {
+    if (!roadGrowthCapped && tryExtendAnyGrowthFrontier(state, town, roadAdapter, metrics)) {
       roadAdapter.backfillRoadEdgesFromAdjacency(state);
       continue;
     }
     if (!roadGrowthCapped && addSecondaryStreet(state, town, roadAdapter, metrics)) {
       roadAdapter.backfillRoadEdgesFromAdjacency(state);
       continue;
+    }
+    if (!town.growthFrontiers.some((frontier) => frontier.active)) {
+      ensureTownGrowthFrontiers(state, town, roadAdapter);
+      if (town.growthFrontiers.some((frontier) => frontier.active)) {
+        continue;
+      }
     }
     break;
   }
@@ -495,6 +555,256 @@ const getActiveFrontierAxisCount = (town: Town): number =>
       .map((frontier) => (Math.abs(frontier.dx) > Math.abs(frontier.dy) ? "x" : "y"))
   ).size;
 
+const pushGrowthFrontier = (
+  town: Town,
+  point: Point,
+  dx: number,
+  dy: number,
+  branchType: TownGrowthFrontier["branchType"]
+): void => {
+  if (
+    town.growthFrontiers.some(
+      (frontier) => frontier.x === point.x && frontier.y === point.y && frontier.dx === dx && frontier.dy === dy
+    )
+  ) {
+    return;
+  }
+  town.growthFrontiers.push({
+    x: point.x,
+    y: point.y,
+    dx,
+    dy,
+    active: true,
+    branchType
+  });
+};
+
+const getRoadConnectionDirections = (state: WorldState, x: number, y: number): Array<{ dx: number; dy: number }> => {
+  const offsets = getRoadConnectionOffsets(getRoadMaskAt(state, x, y)).filter((dir) => isStreetTile(state, x + dir.dx, y + dir.dy));
+  if (offsets.length > 0) {
+    return offsets;
+  }
+  const fallback: Array<{ dx: number; dy: number }> = [];
+  for (let dy = -1; dy <= 1; dy += 1) {
+    for (let dx = -1; dx <= 1; dx += 1) {
+      if ((dx === 0 && dy === 0) || !isStreetTile(state, x + dx, y + dy)) {
+        continue;
+      }
+      fallback.push({ dx, dy });
+    }
+  }
+  return fallback;
+};
+
+const getRecoveredFrontierDirection = (
+  state: WorldState,
+  town: Town,
+  point: Point
+): { dx: number; dy: number } | null => {
+  const neighbors = getRoadConnectionDirections(state, point.x, point.y);
+  if (neighbors.length <= 0) {
+    return null;
+  }
+  if (neighbors.length === 1) {
+    return { dx: -neighbors[0]!.dx, dy: -neighbors[0]!.dy };
+  }
+  const centerX = getTownCenterX(town);
+  const centerY = getTownCenterY(town);
+  const offsetX = point.x - centerX;
+  const offsetY = point.y - centerY;
+  let best: { dx: number; dy: number } | null = null;
+  let bestScore = Number.NEGATIVE_INFINITY;
+  for (let i = 0; i < neighbors.length; i += 1) {
+    const outward = {
+      dx: -neighbors[i]!.dx,
+      dy: -neighbors[i]!.dy
+    };
+    const score = outward.dx * offsetX + outward.dy * offsetY;
+    if (score > bestScore) {
+      bestScore = score;
+      best = outward;
+    }
+  }
+  return best ?? { dx: -neighbors[0]!.dx, dy: -neighbors[0]!.dy };
+};
+
+const recoverGrowthFrontiersFromRoads = (state: WorldState, town: Town): boolean => {
+  if (town.growthFrontiers.some((frontier) => frontier.active)) {
+    return false;
+  }
+  const centerX = getTownCenterX(town);
+  const centerY = getTownCenterY(town);
+  const scanRadius = isCompactTownArchetype(town)
+    ? Math.min(COMPACT_TOWN_MAX_ROAD_RADIUS + TOWN_FRONTIER_RECOVERY_RADIUS_BONUS, Math.ceil(town.radius + TOWN_FRONTIER_RECOVERY_RADIUS_BONUS))
+    : Math.ceil(town.radius + TOWN_FRONTIER_RECOVERY_RADIUS_BONUS);
+  const candidates: Array<{
+    x: number;
+    y: number;
+    dx: number;
+    dy: number;
+    axis: "x" | "y";
+    branchType: TownGrowthFrontier["branchType"];
+    roadDegree: number;
+    distCenter: number;
+  }> = [];
+  for (let y = Math.max(0, Math.floor(centerY - scanRadius)); y <= Math.min(state.grid.rows - 1, Math.ceil(centerY + scanRadius)); y += 1) {
+    for (let x = Math.max(0, Math.floor(centerX - scanRadius)); x <= Math.min(state.grid.cols - 1, Math.ceil(centerX + scanRadius)); x += 1) {
+      if (!isStreetTile(state, x, y)) {
+        continue;
+      }
+      const distCenter = Math.hypot(x - centerX, y - centerY);
+      if (distCenter < TOWN_CORE_RADIUS - 0.5 || distCenter > scanRadius + 0.5) {
+        continue;
+      }
+      const roadDegree = countRoadDegree(state, x, y);
+      if (roadDegree <= 0 || roadDegree > 2) {
+        continue;
+      }
+      const dir = getRecoveredFrontierDirection(state, town, { x, y });
+      if (!dir || (dir.dx === 0 && dir.dy === 0)) {
+        continue;
+      }
+      const axis = Math.abs(dir.dx) >= Math.abs(dir.dy) ? "x" : "y";
+      candidates.push({
+        x,
+        y,
+        dx: dir.dx,
+        dy: dir.dy,
+        axis,
+        branchType: axis === "x" ? "primary" : "secondary",
+        roadDegree,
+        distCenter
+      });
+    }
+  }
+  candidates.sort((left, right) => {
+    if (left.roadDegree !== right.roadDegree) {
+      return left.roadDegree - right.roadDegree;
+    }
+    if (right.distCenter !== left.distCenter) {
+      return right.distCenter - left.distCenter;
+    }
+    if (left.y !== right.y) {
+      return left.y - right.y;
+    }
+    return left.x - right.x;
+  });
+  const selectedAxes = new Set<"x" | "y">();
+  const targetCount = isCompactTownArchetype(town) ? 2 : Math.min(2, MAX_FRONTIERS_BY_ARCHETYPE[town.streetArchetype]);
+  for (let i = 0; i < candidates.length && town.growthFrontiers.length < targetCount; i += 1) {
+    const candidate = candidates[i]!;
+    if (selectedAxes.has(candidate.axis) && isCompactTownArchetype(town)) {
+      continue;
+    }
+    pushGrowthFrontier(town, { x: candidate.x, y: candidate.y }, candidate.dx, candidate.dy, candidate.branchType);
+    selectedAxes.add(candidate.axis);
+  }
+  return town.growthFrontiers.some((frontier) => frontier.active);
+};
+
+const findCentralStreetAnchor = (state: WorldState, town: Town): Point | null => {
+  const centerX = Math.round(getTownCenterX(town));
+  const centerY = Math.round(getTownCenterY(town));
+  let best: Point | null = null;
+  let bestScore = Number.POSITIVE_INFINITY;
+  for (let y = centerY - (TOWN_CORE_RADIUS + 2); y <= centerY + (TOWN_CORE_RADIUS + 2); y += 1) {
+    for (let x = centerX - (TOWN_CORE_RADIUS + 2); x <= centerX + (TOWN_CORE_RADIUS + 2); x += 1) {
+      if (!isStreetTile(state, x, y)) {
+        continue;
+      }
+      const dist = Math.abs(x - centerX) + Math.abs(y - centerY);
+      const degreePenalty = countRoadDegree(state, x, y) > 2 ? 1 : 0;
+      const score = dist + degreePenalty;
+      if (score < bestScore) {
+        bestScore = score;
+        best = { x, y };
+      }
+    }
+  }
+  return best;
+};
+
+const bootstrapTownCoreRoads = (state: WorldState, town: Town, roadAdapter: SettlementRoadAdapter): boolean => {
+  if (town.growthFrontiers.some((frontier) => frontier.active)) {
+    return false;
+  }
+  const center = {
+    x: Math.round(getTownCenterX(town)),
+    y: Math.round(getTownCenterY(town))
+  };
+  const localAnchor = findCentralStreetAnchor(state, town) ?? center;
+  const axisPairs = [
+    [
+      { dx: 1, dy: 0 },
+      { dx: -1, dy: 0 }
+    ],
+    [
+      { dx: 0, dy: 1 },
+      { dx: 0, dy: -1 }
+    ]
+  ] as const;
+  const scoredPairs = axisPairs
+    .map((pair) => ({
+      pair,
+      score: pair.reduce((sum, dir) => {
+        const projected = {
+          x: localAnchor.x + dir.dx * TOWN_FRONTIER_BOOTSTRAP_LENGTH,
+          y: localAnchor.y + dir.dy * TOWN_FRONTIER_BOOTSTRAP_LENGTH
+        };
+        return sum + (findBuildableTargetNear(state, projected, 2) ? 1 : 0);
+      }, 0)
+    }))
+    .sort((left, right) => right.score - left.score);
+  const desiredPairs = town.streetArchetype === "crossroads" ? 2 : 1;
+  let seededPairs = 0;
+  for (let pairIndex = 0; pairIndex < scoredPairs.length && seededPairs < desiredPairs; pairIndex += 1) {
+    const entry = scoredPairs[pairIndex]!;
+    if (entry.score <= 0) {
+      continue;
+    }
+    let addedForPair = false;
+    for (let dirIndex = 0; dirIndex < entry.pair.length; dirIndex += 1) {
+      const dir = entry.pair[dirIndex]!;
+      const projected = {
+        x: localAnchor.x + dir.dx * TOWN_FRONTIER_BOOTSTRAP_LENGTH,
+        y: localAnchor.y + dir.dy * TOWN_FRONTIER_BOOTSTRAP_LENGTH
+      };
+      const target = findBuildableTargetNear(state, projected, 2);
+      if (!target) {
+        continue;
+      }
+      if (!roadAdapter.carveRoad(state, localAnchor, target, buildRoadOptions(state))) {
+        continue;
+      }
+      pushGrowthFrontier(town, target, dir.dx, dir.dy, pairIndex === 0 ? "primary" : "secondary");
+      addedForPair = true;
+    }
+    if (addedForPair) {
+      seededPairs += 1;
+    }
+  }
+  return town.growthFrontiers.some((frontier) => frontier.active);
+};
+
+const ensureTownGrowthFrontiers = (
+  state: WorldState,
+  town: Town,
+  roadAdapter: SettlementRoadAdapter
+): void => {
+  pruneInactiveGrowthFrontiers(town);
+  if (town.growthFrontiers.some((frontier) => frontier.active)) {
+    return;
+  }
+  if (recoverGrowthFrontiersFromRoads(state, town)) {
+    updateTownEnvelope(state, town);
+    return;
+  }
+  if (bootstrapTownCoreRoads(state, town, roadAdapter)) {
+    roadAdapter.backfillRoadEdgesFromAdjacency(state);
+    updateTownEnvelope(state, town);
+  }
+};
+
 const computeInteriorBranchEnvelopeImpact = (
   metrics: TownEnvelopeMetrics,
   anchor: Point,
@@ -568,6 +878,26 @@ const countRoadDegree = (state: WorldState, x: number, y: number): number => {
   return degree;
 };
 
+const hasTownIntersection = (state: WorldState, town: Town): boolean => {
+  const centerX = getTownCenterX(town);
+  const centerY = getTownCenterY(town);
+  const scanRadius = Math.max(TOWN_CORE_RADIUS + 2, Math.ceil(town.radius));
+  for (let y = Math.max(0, Math.floor(centerY - scanRadius)); y <= Math.min(state.grid.rows - 1, Math.ceil(centerY + scanRadius)); y += 1) {
+    for (let x = Math.max(0, Math.floor(centerX - scanRadius)); x <= Math.min(state.grid.cols - 1, Math.ceil(centerX + scanRadius)); x += 1) {
+      if (!isStreetTile(state, x, y)) {
+        continue;
+      }
+      if (Math.hypot(x - centerX, y - centerY) > scanRadius + 0.5) {
+        continue;
+      }
+      if (countRoadDegree(state, x, y) >= 3) {
+        return true;
+      }
+    }
+  }
+  return false;
+};
+
 const computeFrontageScore = (
   state: WorldState,
   town: Town,
@@ -607,7 +937,7 @@ const collectFrontageCandidates = (state: WorldState, town: Town, context: Growt
   const centerY = getTownCenterY(town);
   const compactRoadCoreRadius = Math.max(
     TOWN_CORE_RADIUS + 3,
-    Math.min(COMPACT_TOWN_MAX_ROAD_RADIUS, Math.max(MIN_TOWN_RADIUS, town.radius)) * 0.8
+    Math.min(COMPACT_TOWN_MAX_ROAD_RADIUS + 1, Math.max(MIN_TOWN_RADIUS, town.radius)) * 0.95
   );
   for (let y = bounds.minY; y <= bounds.maxY; y += 1) {
     for (let x = bounds.minX; x <= bounds.maxX; x += 1) {
@@ -616,22 +946,18 @@ const collectFrontageCandidates = (state: WorldState, town: Town, context: Growt
       }
       if (isCompactTownArchetype(town)) {
         const nearCompactFrontier = activeFrontiers.some(
-          (frontier) => Math.abs(frontier.x - x) + Math.abs(frontier.y - y) <= COMPACT_TOWN_BLOCK_OFFSET + 2
+          (frontier) => Math.abs(frontier.x - x) + Math.abs(frontier.y - y) <= COMPACT_TOWN_BLOCK_OFFSET + 4
         );
         const nearCompactCore = Math.hypot(x - centerX, y - centerY) <= compactRoadCoreRadius;
         if (!nearCompactFrontier && !nearCompactCore) {
           continue;
         }
       }
-      const roadNeighbors = [
-        { dx: 1, dy: 0 },
-        { dx: -1, dy: 0 },
-        { dx: 0, dy: 1 },
-        { dx: 0, dy: -1 }
-      ];
+      const roadNeighbors = getRoadFrontageOffsets(getRoadMaskAt(state, x, y));
       for (let i = 0; i < roadNeighbors.length; i += 1) {
         const side = roadNeighbors[i]!;
-        for (let setback = 1; setback <= 2; setback += 1) {
+        const maxSetback = side.dx !== 0 && side.dy !== 0 ? 1 : 2;
+        for (let setback = 1; setback <= maxSetback; setback += 1) {
           const point = {
             x: x + side.dx * setback,
             y: y + side.dy * setback
@@ -641,9 +967,15 @@ const collectFrontageCandidates = (state: WorldState, town: Town, context: Growt
           }
           const key = `${point.x},${point.y}`;
           const seed = indexFor(state.grid, point.x, point.y) + town.id * 101;
-          const rotation = pickHouseRotationFromRoad(state, point.x, point.y, seed);
-          const boundsAtPoint = getHouseFootprintBounds(point.x, point.y, rotation, pickHouseFootprint(seed));
-          if (!canPlaceHouseFootprint(state, boundsAtPoint) || !footprintTouchesStreet(state, boundsAtPoint)) {
+          const rotation = pickHouseRotationFromRoadMask(getRoadMaskAt(state, x, y), seed);
+          const footprint = pickHouseFootprint(seed);
+          const boundsAtPoint = getHouseFootprintBounds(point.x, point.y, rotation, footprint, "asset");
+          const clearanceRect = createHouseClearanceRect(point.x, point.y, rotation, footprint);
+          if (
+            !canPlaceHouseClearance(context, clearanceRect) ||
+            !canPlaceHouseFootprint(state, boundsAtPoint) ||
+            !footprintTouchesStreet(state, boundsAtPoint)
+          ) {
             continue;
           }
           const distCenter = Math.hypot(point.x - getTownCenterX(town), point.y - getTownCenterY(town));
@@ -665,6 +997,7 @@ const collectFrontageCandidates = (state: WorldState, town: Town, context: Growt
             x: point.x,
             y: point.y,
             bounds: boundsAtPoint,
+            clearanceRect,
             styleSeed: seed,
             score,
             distCenter,
@@ -883,13 +1216,81 @@ const addMissingCompactAxisStreet = (
       return true;
     }
   }
+  const presentAxes = new Set(
+    town.growthFrontiers
+      .filter((frontier) => frontier.active)
+      .map((frontier) => (Math.abs(frontier.dx) > Math.abs(frontier.dy) ? "x" : "y"))
+  );
+  const localAnchor = findCentralStreetAnchor(state, town);
+  if (!localAnchor) {
+    return false;
+  }
+  const fallbackDirs =
+    presentAxes.has("x") && !presentAxes.has("y")
+      ? [
+          { dx: 0, dy: 1 },
+          { dx: 0, dy: -1 }
+        ]
+      : presentAxes.has("y") && !presentAxes.has("x")
+        ? [
+            { dx: 1, dy: 0 },
+            { dx: -1, dy: 0 }
+          ]
+        : [
+            { dx: 1, dy: 0 },
+            { dx: -1, dy: 0 },
+            { dx: 0, dy: 1 },
+            { dx: 0, dy: -1 }
+          ];
+  for (let i = 0; i < fallbackDirs.length; i += 1) {
+    const dir = fallbackDirs[i]!;
+    const projected = {
+      x: localAnchor.x + dir.dx * COMPACT_TOWN_BLOCK_OFFSET,
+      y: localAnchor.y + dir.dy * COMPACT_TOWN_BLOCK_OFFSET
+    };
+    const target = findBuildableTargetNear(state, projected, COMPACT_TOWN_INTERIOR_BRANCH_SCAN_RADIUS);
+    if (!target || hasStreetTargetBuffer(state, target, COMPACT_TOWN_BRANCH_TARGET_ROAD_BUFFER)) {
+      continue;
+    }
+    if (!roadAdapter.carveRoad(state, localAnchor, target, buildRoadOptions(state))) {
+      continue;
+    }
+    town.growthFrontiers.push({
+      x: target.x,
+      y: target.y,
+      dx: dir.dx,
+      dy: dir.dy,
+      active: true,
+      branchType: "secondary"
+    });
+    return true;
+  }
   return false;
 };
 
 const buildRoadOptions = (state: WorldState): SettlementRoadOptions => ({
   bridgePolicy: "allow",
   heightScaleMultiplier: 1,
-  diagonalPenalty: Math.max(0, Math.min(0.4, state.tileRoadEdges.length > 0 ? 0.18 : 0.18))
+  diagonalPenalty: Math.max(0, Math.min(0.35, state.tileRoadEdges.length > 0 ? 0.14 : 0.14)),
+  gradeLimitStart: 0.12,
+  gradeLimitRelaxStep: 0.02,
+  gradeLimitMax: 0.24,
+  slopePenaltyWeight: 12,
+  crossfallLimitStart: 0.08,
+  crossfallLimitRelaxStep: 0.018,
+  crossfallLimitMax: 0.18,
+  crossfallPenaltyWeight: 10,
+  gradeChangeLimitStart: 0.08,
+  gradeChangeLimitRelaxStep: 0.018,
+  gradeChangeLimitMax: 0.18,
+  gradeChangePenaltyWeight: 8,
+  riverBlockDistance: 0,
+  riverPenaltyDistance: 1,
+  riverPenaltyWeight: 3,
+  turnPenalty: 0.03,
+  bridgeStepCost: 16,
+  bridgeMaxConsecutiveWater: 3,
+  bridgeMaxWaterTilesPerPath: 6
 });
 
 const determineExtensionLength = (town: Town, metrics?: TownEnvelopeMetrics): number => {
@@ -908,39 +1309,65 @@ const determineExtensionLength = (town: Town, metrics?: TownEnvelopeMetrics): nu
   return FRONTIER_EXTENSION_MIN + 1;
 };
 
+const getGrowthFrontierScore = (
+  town: Town,
+  frontier: TownGrowthFrontier,
+  metrics?: TownEnvelopeMetrics
+): number => {
+  const centerX = getTownCenterX(town);
+  const centerY = getTownCenterY(town);
+  const axisPenalty =
+    metrics &&
+    isCompactTownArchetype(town) &&
+    metrics.aspect >= COMPACT_TOWN_ASPECT_SOFT_LIMIT &&
+    ((metrics.longAxis === "x" && Math.abs(frontier.dx) > Math.abs(frontier.dy)) ||
+      (metrics.longAxis === "y" && Math.abs(frontier.dy) > Math.abs(frontier.dx)))
+      ? COMPACT_TOWN_LONG_AXIS_PENALTY * (1 + Math.max(0, metrics.aspect - COMPACT_TOWN_ASPECT_SOFT_LIMIT))
+      : 0;
+  const hardLimitPenalty =
+    axisPenalty > 0 && metrics && metrics.aspect >= COMPACT_TOWN_ASPECT_HARD_LIMIT ? 8 : 0;
+  return (
+    Math.hypot(frontier.x - centerX, frontier.y - centerY) +
+    (frontier.branchType === "primary" ? 0.55 : 0) +
+    (frontier.dx === 0 || frontier.dy === 0 ? 0 : 0.2) +
+    axisPenalty +
+    hardLimitPenalty
+  );
+};
+
 const selectGrowthFrontier = (town: Town, metrics?: TownEnvelopeMetrics): TownGrowthFrontier | null => {
   const active = town.growthFrontiers.filter((frontier) => frontier.active);
   if (active.length === 0) {
     return null;
   }
-  const centerX = getTownCenterX(town);
-  const centerY = getTownCenterY(town);
   let best = active[0]!;
   let bestScore = Number.POSITIVE_INFINITY;
   for (let i = 0; i < active.length; i += 1) {
     const frontier = active[i]!;
-    const axisPenalty =
-      metrics &&
-      isCompactTownArchetype(town) &&
-      metrics.aspect >= COMPACT_TOWN_ASPECT_SOFT_LIMIT &&
-      ((metrics.longAxis === "x" && Math.abs(frontier.dx) > Math.abs(frontier.dy)) ||
-        (metrics.longAxis === "y" && Math.abs(frontier.dy) > Math.abs(frontier.dx)))
-        ? COMPACT_TOWN_LONG_AXIS_PENALTY * (1 + Math.max(0, metrics.aspect - COMPACT_TOWN_ASPECT_SOFT_LIMIT))
-        : 0;
-    const hardLimitPenalty =
-      axisPenalty > 0 && metrics && metrics.aspect >= COMPACT_TOWN_ASPECT_HARD_LIMIT ? 8 : 0;
-    const score =
-      Math.hypot(frontier.x - centerX, frontier.y - centerY) +
-      (frontier.branchType === "primary" ? 0.55 : 0) +
-      (frontier.dx === 0 || frontier.dy === 0 ? 0 : 0.2) +
-      axisPenalty +
-      hardLimitPenalty;
+    const score = getGrowthFrontierScore(town, frontier, metrics);
     if (score < bestScore) {
       bestScore = score;
       best = frontier;
     }
   }
   return best;
+};
+
+const tryExtendAnyGrowthFrontier = (
+  state: WorldState,
+  town: Town,
+  roadAdapter: SettlementRoadAdapter,
+  metrics?: TownEnvelopeMetrics
+): boolean => {
+  const active = town.growthFrontiers
+    .filter((frontier) => frontier.active)
+    .sort((left, right) => getGrowthFrontierScore(town, left, metrics) - getGrowthFrontierScore(town, right, metrics));
+  for (let i = 0; i < active.length; i += 1) {
+    if (extendTownFrontier(state, town, roadAdapter, active[i]!, metrics)) {
+      return true;
+    }
+  }
+  return false;
 };
 
 const extendTownFrontier = (
@@ -1251,6 +1678,9 @@ export const updateTownEnvelope = (state: WorldState, town: Town): void => {
     maxRadius = Math.min(maxRadius, COMPACT_TOWN_MAX_ROAD_RADIUS + 2);
   }
   town.radius = Math.max(MIN_TOWN_RADIUS, maxRadius);
+  if (town.streetArchetype === "crossroads" && !hasTownIntersection(state, town)) {
+    town.streetArchetype = "main_street";
+  }
 };
 
 const computeRuntimePenalty = (town: Town): number => {
@@ -1328,7 +1758,7 @@ const growTown = (
   let safety = 0;
   while (placed < desiredDelta && safety < desiredDelta * 8 + 12) {
     safety += 1;
-    pruneInactiveGrowthFrontiers(town);
+    ensureTownGrowthFrontiers(state, town, roadAdapter);
     const metrics = buildTownEnvelopeMetrics(state, town);
     const roadGrowthCapped = isCompactTownRoadGrowthCapped(state, town);
     const needsSecondAxis = isCompactTownArchetype(town) && getActiveFrontierAxisCount(town) < 2 && town.houseCount >= 1;
@@ -1356,14 +1786,19 @@ const growTown = (
       roadAdapter.backfillRoadEdgesFromAdjacency(state);
       continue;
     }
-    const activeFrontier = selectGrowthFrontier(town, metrics);
-    if (!roadGrowthCapped && activeFrontier && extendTownFrontier(state, town, roadAdapter, activeFrontier, metrics)) {
+    if (!roadGrowthCapped && tryExtendAnyGrowthFrontier(state, town, roadAdapter, metrics)) {
       roadAdapter.backfillRoadEdgesFromAdjacency(state);
       continue;
     }
     if (!roadGrowthCapped && addSecondaryStreet(state, town, roadAdapter, metrics)) {
       roadAdapter.backfillRoadEdgesFromAdjacency(state);
       continue;
+    }
+    if (!town.growthFrontiers.some((frontier) => frontier.active)) {
+      ensureTownGrowthFrontiers(state, town, roadAdapter);
+      if (town.growthFrontiers.some((frontier) => frontier.active)) {
+        continue;
+      }
     }
     break;
   }

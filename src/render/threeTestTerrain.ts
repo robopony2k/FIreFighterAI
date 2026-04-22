@@ -5,6 +5,7 @@ import {
   TILE_COLOR_RGB
 } from "../core/config.js";
 import { getHouseFootprintBounds, pickHouseFootprint } from "../core/houseFootprints.js";
+import { findBestRoadReferenceForPlot, pickHouseRotationFromRoadMask } from "../core/roadAlignment.js";
 import { getTerrainHeightScale } from "../core/terrainScale.js";
 import { getVegetationRenderHeightMultiplier } from "../core/vegetation.js";
 import { getBuildingLifecycleStageFromId, getBuildingLifecycleStageId } from "../systems/settlements/sim/buildingLifecycle.js";
@@ -460,6 +461,7 @@ const pickHouseRotation = (
   cols: number,
   rows: number,
   tileTypes: Uint8Array,
+  roadEdges: Uint8Array | undefined,
   roadId: number,
   baseId: number,
   seed: number
@@ -471,16 +473,18 @@ const pickHouseRotation = (
     const typeId = tileTypes[y * cols + x];
     return typeId === roadId || typeId === baseId;
   };
-  const roadEW = isRoadLike(tileX - 1, tileY) || isRoadLike(tileX + 1, tileY);
-  const roadNS = isRoadLike(tileX, tileY - 1) || isRoadLike(tileX, tileY + 1);
-  const flip = noiseAt(seed + 21.4) < 0.5 ? 0 : Math.PI;
-  if (roadEW && !roadNS) {
-    return flip;
-  }
-  if (roadNS && !roadEW) {
-    return Math.PI / 2 + flip;
-  }
-  return noiseAt(seed + 9.1) < 0.5 ? 0 : Math.PI / 2;
+  const reference = findBestRoadReferenceForPlot(
+    tileX,
+    tileY,
+    isRoadLike,
+    (x, y) => {
+      if (!roadEdges || x < 0 || y < 0 || x >= cols || y >= rows) {
+        return 0;
+      }
+      return roadEdges[y * cols + x] ?? 0;
+    }
+  );
+  return pickHouseRotationFromRoadMask(reference?.roadMask ?? 0, seed);
 };
 
 export const buildSampleHeightMap = (
@@ -2219,7 +2223,9 @@ export const prepareTerrainRenderSurface = (
     grassId,
     waterId,
     TILE_ID_TO_TYPE.length,
-    [baseId, houseId, roadId, firebreakId, ashId]
+    // Preserve narrow structural features, but let ash stay majority-based so a
+    // single burned tile does not paint an oversized low-res ash patch.
+    [baseId, houseId, roadId, firebreakId]
   );
   suppressIsolatedHeightSamples(finalSampleHeights, sampleCols, sampleRows, sampleTypes, waterId);
   const sampleOceanCoverage = coastData.oceanCoverage;
@@ -2703,7 +2709,7 @@ export const buildTerrainMesh = (
               continue;
             }
             const seed = sample.houseStyleSeeds?.[idx] ?? (idx >>> 0);
-            const rotation = pickHouseRotation(tileX, tileY, cols, rows, tiles, roadId, baseId, seed);
+            const rotation = pickHouseRotation(tileX, tileY, cols, rows, tiles, sample.roadEdges, roadId, baseId, seed);
             const footprint = pickHouseFootprint(seed);
             const bounds = getHouseFootprintBounds(tileX, tileY, rotation, footprint);
             for (let fy = bounds.minY; fy <= bounds.maxY; fy += 1) {
@@ -3395,7 +3401,7 @@ export const buildTerrainMesh = (
           const lifecycleStageId = sample.houseLifecycleStages?.[rowBase + tileX] ?? getBuildingLifecycleStageId("roofed");
           const lifecycleStep = sample.houseLifecycleSteps?.[rowBase + tileX] ?? 0;
           const lifecycleStage = getBuildingLifecycleStageFromId(lifecycleStageId);
-          const rotation = pickHouseRotation(tileX, tileY, cols, rows, tileTypes, roadId, baseId, seed);
+          const rotation = pickHouseRotation(tileX, tileY, cols, rows, tileTypes, sample.roadEdges, roadId, baseId, seed);
           const footprint = pickHouseFootprint(seed);
           const bounds = getHouseFootprintBounds(tileX, tileY, rotation, footprint);
           const minX = clamp(bounds.minX, 0, cols - 1);

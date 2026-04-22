@@ -44,11 +44,12 @@ export const getHouseFootprintDims = (
   footprint: Pick<HouseVariantFootprint, "sizeX" | "sizeZ" | "parcelX" | "parcelZ">,
   mode: HouseFootprintMode = "parcel"
 ): { width: number; depth: number } => {
-  const rotate = Math.abs(Math.sin(rotation)) > 0.5;
   const sizeX = mode === "asset" ? footprint.sizeX : footprint.parcelX;
   const sizeZ = mode === "asset" ? footprint.sizeZ : footprint.parcelZ;
-  const width = rotate ? sizeZ : sizeX;
-  const depth = rotate ? sizeX : sizeZ;
+  const cos = Math.abs(Math.cos(rotation));
+  const sin = Math.abs(Math.sin(rotation));
+  const width = sizeX * cos + sizeZ * sin;
+  const depth = sizeX * sin + sizeZ * cos;
   return {
     width: Math.max(0.01, width),
     depth: Math.max(0.01, depth)

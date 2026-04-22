@@ -13,6 +13,7 @@ import {
   TIME_SPEED_SLIDER_STEP
 } from "../core/timeSpeed.js";
 import { getHouseFootprintBounds, pickHouseFootprint } from "../core/houseFootprints.js";
+import { findBestRoadReferenceForPlot, pickHouseRotationFromRoadMask } from "../core/roadAlignment.js";
 import { getBuildingLifecycleStageFromId, getBuildingLifecycleStageId } from "../systems/settlements/sim/buildingLifecycle.js";
 import { getProceduralHouseVariantKey } from "../systems/settlements/rendering/proceduralHouseBuilder.js";
 import type { RenderBuildingLot } from "../systems/settlements/types/buildingTypes.js";
@@ -4165,13 +4166,10 @@ export const createThreeTest = (
     tileY: number,
     seed: number,
     tileTypes: ArrayLike<number>,
+    roadEdges: ArrayLike<number> | undefined,
     cols: number,
     rows: number
   ): number => {
-    const noiseAt = (value: number): number => {
-      const s = Math.sin(value * 12.9898 + 78.233) * 43758.5453;
-      return s - Math.floor(s);
-    };
     const isRoadLike = (x: number, y: number): boolean => {
       if (x < 0 || y < 0 || x >= cols || y >= rows) {
         return false;
@@ -4179,16 +4177,18 @@ export const createThreeTest = (
       const typeId = tileTypes[y * cols + x] ?? -1;
       return typeId === TILE_TYPE_IDS.road || typeId === TILE_TYPE_IDS.base;
     };
-    const roadEW = isRoadLike(tileX - 1, tileY) || isRoadLike(tileX + 1, tileY);
-    const roadNS = isRoadLike(tileX, tileY - 1) || isRoadLike(tileX, tileY + 1);
-    const flip = noiseAt(seed + 21.4) < 0.5 ? 0 : Math.PI;
-    if (roadEW && !roadNS) {
-      return flip;
-    }
-    if (roadNS && !roadEW) {
-      return Math.PI * 0.5 + flip;
-    }
-    return noiseAt(seed + 9.1) < 0.5 ? 0 : Math.PI * 0.5;
+    const reference = findBestRoadReferenceForPlot(
+      tileX,
+      tileY,
+      isRoadLike,
+      (x, y) => {
+        if (!roadEdges || x < 0 || y < 0 || x >= cols || y >= rows) {
+          return 0;
+        }
+        return roadEdges[y * cols + x] ?? 0;
+      }
+    );
+    return pickHouseRotationFromRoadMask(reference?.roadMask ?? 0, seed);
   };
 
   const buildHoverCellSection: HoverDebugSectionBuilder = (context) => {
@@ -4220,6 +4220,7 @@ export const createThreeTest = (
         context.tileY,
         seed,
         context.sample.tileTypes,
+        context.sample.roadEdges,
         context.sample.cols,
         context.sample.rows
       );
@@ -5837,6 +5838,7 @@ export const createThreeTest = (
     const cols = sample.cols;
     const rows = sample.rows;
     const tileTypes = sample.tileTypes;
+    const roadEdges = sample.roadEdges;
     const clampToRange = (value: number, min: number, max: number): number => Math.max(min, Math.min(max, value));
     const noiseAt = (value: number): number => {
       const s = Math.sin(value * 12.9898 + 78.233) * 43758.5453;
@@ -5854,16 +5856,18 @@ export const createThreeTest = (
         const typeId = tileTypes[y * cols + x];
         return typeId === TILE_TYPE_IDS.road || typeId === baseId;
       };
-      const roadEW = isRoadLike(tileX - 1, tileY) || isRoadLike(tileX + 1, tileY);
-      const roadNS = isRoadLike(tileX, tileY - 1) || isRoadLike(tileX, tileY + 1);
-      const flip = noiseAt(seed + 21.4) < 0.5 ? 0 : Math.PI;
-      if (roadEW && !roadNS) {
-        return flip;
-      }
-      if (roadNS && !roadEW) {
-        return Math.PI / 2 + flip;
-      }
-      return noiseAt(seed + 9.1) < 0.5 ? 0 : Math.PI / 2;
+      const reference = findBestRoadReferenceForPlot(
+        tileX,
+        tileY,
+        isRoadLike,
+        (x, y) => {
+          if (!roadEdges || x < 0 || y < 0 || x >= cols || y >= rows) {
+            return 0;
+          }
+          return roadEdges[y * cols + x] ?? 0;
+        }
+      );
+      return pickHouseRotationFromRoadMask(reference?.roadMask ?? 0, seed);
     };
     const elevationAt = (tileX: number, tileY: number): number => {
       const clampedX = clampToRange(tileX, 0, cols);

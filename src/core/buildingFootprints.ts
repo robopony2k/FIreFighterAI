@@ -22,7 +22,7 @@ export const HOUSE_VARIANTS: HouseVariantFootprint[] = [
     parcelZ: 1.12,
     roofType: "gable",
     wallTint: "#c98f5b",
-    roofTint: "#6a4d38"
+    roofTint: "#5b4032"
   },
   {
     source: "procedural/broad_gable",
@@ -34,7 +34,7 @@ export const HOUSE_VARIANTS: HouseVariantFootprint[] = [
     parcelZ: 1.24,
     roofType: "gable",
     wallTint: "#be7c58",
-    roofTint: "#6f5646"
+    roofTint: "#7b3c2b"
   },
   {
     source: "procedural/lean_to_cottage",
@@ -46,7 +46,7 @@ export const HOUSE_VARIANTS: HouseVariantFootprint[] = [
     parcelZ: 1.18,
     roofType: "lean_to",
     wallTint: "#d19a72",
-    roofTint: "#5f4a3e"
+    roofTint: "#4d5663"
   },
   {
     source: "procedural/hip_roof",
@@ -58,7 +58,7 @@ export const HOUSE_VARIANTS: HouseVariantFootprint[] = [
     parcelZ: 1.18,
     roofType: "hip",
     wallTint: "#c58a61",
-    roofTint: "#66493b"
+    roofTint: "#6a2f2a"
   }
 ];
 

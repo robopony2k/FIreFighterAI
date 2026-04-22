@@ -22,7 +22,6 @@ import {
   rebuildGrowthContext,
   reserveTownExpansionLot,
   stepRuntimeTownGrowth,
-  tryDensifyTownHousing,
   updateTownEnvelope
 } from "./townGrowth.js";
 
@@ -385,12 +384,6 @@ const processConstructionDay = (
     );
     const expansionLot = startTownExpansionLot(state, town, dayContext.careerDay, effectiveYear, roadAdapter, context);
     if (!expansionLot) {
-      if (tryDensifyTownHousing(state, town)) {
-        town.buildStartSerial += 1;
-        town.buildStartCooldownDays = getNextTownBuildCooldownDays(state, town);
-        town.growthPressure = Math.max(0, town.growthPressure - 1);
-        updateTownEnvelope(state, town);
-      }
       continue;
     }
     town.buildStartSerial += 1;

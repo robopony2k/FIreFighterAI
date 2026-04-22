@@ -9,6 +9,10 @@ const distImport = (segments) => pathToFileURL(path.join(repoRoot, "dist", ...se
 
 const { createInitialState, syncTileSoA } = await import(distImport(["core", "state.js"]));
 const {
+  findBestRoadReferenceForPlot,
+  pickHouseRotationFromRoadMask
+} = await import(distImport(["core", "roadAlignment.js"]));
+const {
   placeHouse,
   destroyHouse
 } = await import(distImport(["core", "towns.js"]));
@@ -26,7 +30,7 @@ const {
 const { stepTownConstructionSchedule } = await import(
   distImport(["systems", "settlements", "sim", "townConstruction.js"])
 );
-const { simulateTownGrowthYears, tryDensifyTownHousing } = await import(
+const { reserveTownExpansionLot, rebuildGrowthContext, simulateTownGrowthYears, tryDensifyTownHousing } = await import(
   distImport(["systems", "settlements", "sim", "townGrowth.js"])
 );
 const { buildRenderTerrainSample } = await import(distImport(["render", "simView.js"]));
@@ -461,6 +465,62 @@ const runCompactGrowthBranchingCase = () => {
   };
 };
 
+const runDiagonalFrontageCase = () => {
+  const grid = { cols: 20, rows: 20, totalTiles: 20 * 20 };
+  const state = createInitialState(9393, grid);
+  state.tiles = Array.from({ length: grid.totalTiles }, () => buildTile("grass"));
+  for (let step = 5; step <= 14; step += 1) {
+    state.tiles[step * grid.cols + step] = buildTile("road", { fuel: 0 });
+  }
+  const town = buildTown(9393, 0, "Angleton", 10, 10, 10);
+  town.streetArchetype = "main_street";
+  town.growthFrontiers = [
+    { x: 14, y: 14, dx: 1, dy: 1, active: true, branchType: "primary" },
+    { x: 5, y: 5, dx: -1, dy: -1, active: true, branchType: "primary" }
+  ];
+  state.towns = [town];
+  placeHouse(state, 11 * grid.cols + 9, 0, 0.5);
+  backfillRoadEdgesFromAdjacency(state);
+  syncTileSoA(state);
+
+  const isRoadLike = (x, y) => {
+    if (x < 0 || y < 0 || x >= grid.cols || y >= grid.rows) {
+      return false;
+    }
+    const idx = y * grid.cols + x;
+    const tile = state.tiles[idx];
+    return !!tile && (tile.type === "road" || tile.type === "base" || (state.tileRoadBridge[idx] ?? 0) > 0);
+  };
+  const alignedReference = findBestRoadReferenceForPlot(
+    9,
+    11,
+    isRoadLike,
+    (x, y) => {
+      if (x < 0 || y < 0 || x >= grid.cols || y >= grid.rows) {
+        return 0;
+      }
+      return state.tileRoadEdges[y * grid.cols + x] ?? 0;
+    }
+  );
+  assert.ok(alignedReference?.matchesFrontage, "diagonal road plots should resolve a matched frontage source");
+
+  const rotation = pickHouseRotationFromRoadMask(alignedReference.roadMask, 0x9f31);
+  const axis = ((rotation % Math.PI) + Math.PI) % Math.PI;
+  assert.ok(Math.abs(axis - Math.PI * 0.25) < 1e-6, "diagonal frontage house should align to the road axis");
+
+  const context = rebuildGrowthContext(state);
+  const lot = reserveTownExpansionLot(state, state.towns[0], context, createRuntimeSettlementRoadAdapter(), 1);
+  assert.ok(lot, "diagonal frontage town should still reserve a visible expansion lot");
+  const tileX = lot.anchorIndex % grid.cols;
+  const tileY = Math.floor(lot.anchorIndex / grid.cols);
+
+  return {
+    anchor: `${tileX},${tileY}`,
+    road: `${alignedReference.roadX},${alignedReference.roadY}`,
+    axis: Number(axis.toFixed(2))
+  };
+};
+
 const runCompactDensificationCase = () => {
   const grid = { cols: 20, rows: 20, totalTiles: 20 * 20 };
   const state = createInitialState(9292, grid);
@@ -474,10 +534,10 @@ const runCompactDensificationCase = () => {
   const town = buildTown(9292, 0, "Stonecross", 10, 10, 10);
   town.streetArchetype = "crossroads";
   town.growthFrontiers = [
-    { x: 18, y: 10, dx: 1, dy: 0, active: true, branchType: "primary" },
-    { x: 2, y: 10, dx: -1, dy: 0, active: true, branchType: "primary" },
-    { x: 10, y: 18, dx: 0, dy: 1, active: true, branchType: "secondary" },
-    { x: 10, y: 2, dx: 0, dy: -1, active: true, branchType: "secondary" }
+    { x: 19, y: 10, dx: 1, dy: 0, active: true, branchType: "primary" },
+    { x: 1, y: 10, dx: -1, dy: 0, active: true, branchType: "primary" },
+    { x: 10, y: 19, dx: 0, dy: 1, active: true, branchType: "secondary" },
+    { x: 10, y: 1, dx: 0, dy: -1, active: true, branchType: "secondary" }
   ];
   state.towns = [town];
   [
@@ -589,6 +649,7 @@ const alert = runAlertSuppressionCase();
 const recovery = runRecoveryPriorityCase();
 const idle = runIdleRevisionCase();
 const compact = runCompactGrowthBranchingCase();
+const diagonal = runDiagonalFrontageCase();
 const densification = runCompactDensificationCase();
 const startup = runMapgenStartupCompletesStockCase();
 const style = runStyleContinuityCase();
@@ -603,6 +664,8 @@ console.log(
     `compactRoads=${compact.offAxisRoads}`,
     `compactJunctions=${compact.junctions}`,
     `compactAspect=${compact.aspect.toFixed(2)}`,
+    `diagonalAnchor=${diagonal.anchor}`,
+    `diagonalRoad=${diagonal.road}`,
     `compactDenseGain=${densification.populationGain}`,
     `startupHouses=${startup.houseCount}`,
     `styleSeed=${style.styleSeed}`
