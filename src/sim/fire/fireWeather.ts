@@ -7,7 +7,7 @@ import {
   VIRTUAL_CLIMATE_PARAMS
 } from "../../core/climate.js";
 import { FIRE_WEATHER_BURNOUT_RISK } from "../../core/config.js";
-import type { WorldState } from "../../core/state.js";
+import type { FireActivityState, WorldState } from "../../core/state.js";
 
 type SeasonBand = {
   ignition: [number, number];
@@ -151,16 +151,14 @@ export const getBurnoutFactorForRisk = (climateRisk: number): number =>
     : 0;
 
 export const getAdaptiveFireSubstepMax = (
-  activeFires: number,
-  scheduledCount: number,
-  fireBoundsActive: boolean,
+  fireActivityState: FireActivityState,
   climateRisk: number
 ): number => {
-  if (activeFires > 0) {
+  if (fireActivityState === "burning") {
     return climateRisk >= 0.4 ? 0.125 : 0.25;
   }
-  if (scheduledCount > 0 || fireBoundsActive) {
-    return 0.5;
+  if (fireActivityState === "holdover") {
+    return 0.25;
   }
   return 0.5;
 };

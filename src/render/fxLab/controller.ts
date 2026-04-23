@@ -17,6 +17,7 @@ import { ThreeTestWaterSystem } from "../threeTestWater.js";
 import {
   createThreeTestFireFx,
   normalizeFireFxDebugControls,
+  type FireFxDebugSnapshot,
   type FireFxDebugControls,
   type ThreeTestFireFx
 } from "../threeTestFireFx.js";
@@ -334,6 +335,7 @@ export type FxLabController = {
   clearManualSprayTarget: () => void;
   hasManualSprayTarget: () => boolean;
   getWaterDebugSnapshot: () => WaterFxDebugSnapshot;
+  getFireDebugSnapshot: () => FireFxDebugSnapshot;
   setFireDebugControls: (controls: Partial<FireFxDebugControls>) => void;
   getFireDebugControls: () => FireFxDebugControls;
   resetFireDebugControls: () => void;
@@ -1590,6 +1592,7 @@ export const createFxLabController = (
     clearManualSprayTarget,
     hasManualSprayTarget: () => manualSprayTarget !== null,
     getWaterDebugSnapshot: () => unitFxLayer.getDebugSnapshot(),
+    getFireDebugSnapshot: () => fireFx.getDebugSnapshot(),
     setFireDebugControls: (controls: Partial<FireFxDebugControls>) => {
       fireDebugControls = normalizeFireFxDebugControls({ ...fireDebugControls, ...controls });
       fireFx.setDebugControls(controls);

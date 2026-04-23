@@ -25,6 +25,7 @@ import type { FireWeatherResponse } from "./fire/fireWeather.js";
 import { buildFireWorkBlocks, ensureFireBlocks, finalizeFireBlocks, markFireBlockNextByTile } from "./fire/activeBlocks.js";
 import { markAttributedFireLossTile, queueScoreFlowEvent } from "./scoring.js";
 import { profEnd, profStart } from "./prof.js";
+import { applyFireActivityMetrics, countFireHoldoverTiles } from "../systems/fire/sim/fireActivityState.js";
 const CARDINAL_DIRS = [
     { dx: 1, dy: 0 },
     { dx: -1, dy: 0 },
@@ -118,6 +119,7 @@ function stepFireBaseline(state, rng, delta, spreadScale, dayFactor, burnoutFact
     const minY = boundsActive ? clamp(state.fireMinY - boundsPadding, 0, rows - 1) : 0;
     const maxY = boundsActive ? clamp(state.fireMaxY + boundsPadding, 0, rows - 1) : rows - 1;
     if (!boundsActive && state.lastActiveFires === 0) {
+        applyFireActivityMetrics(state, 0, 0);
         return 0;
     }
     ensureTileSoA(state);
@@ -273,6 +275,7 @@ function stepFireBaseline(state, rng, delta, spreadScale, dayFactor, burnoutFact
             `[BASELINE] tick=${baselineTickCounter} burning=${activeFires} newIgnitions=${newIgnitions} boundsArea=${boundsArea}`
         );
     }
+    applyFireActivityMetrics(state, activeFires, 0);
     return activeFires;
 }
 export function stepFire(state, effects: EffectsState, rng, delta, spreadScale, dayFactor, burnoutFactor = 0, weatherResponse: FireWeatherResponse | null = null, climateIgnitionMultiplier = state.climateIgnitionMultiplier || 1) {
@@ -291,9 +294,15 @@ export function stepFire(state, effects: EffectsState, rng, delta, spreadScale, 
     const heatEps = Math.max(0.002, perf.diffusionEps || 0.02);
     const fireEps = Math.max(0.001, heatEps * 0.5);
     if (state.fireBlockActiveCount === 0 && state.fireScheduledCount === 0) {
+        applyFireActivityMetrics(state, 0, 0);
         profEnd("fireTick", tickStart);
         return 0;
     }
+    const previousBoundsActive = state.fireBoundsActive;
+    const previousMinX = state.fireMinX;
+    const previousMaxX = state.fireMaxX;
+    const previousMinY = state.fireMinY;
+    const previousMaxY = state.fireMaxY;
     const cols = state.grid.cols;
     const rows = state.grid.rows;
     const heatCap = Math.max(0.01, state.fireSettings.heatCap);
@@ -832,6 +841,7 @@ export function stepFire(state, effects: EffectsState, rng, delta, spreadScale, 
     finalizeFireBlocks(state);
     state.fireScheduledCount = scheduledCount;
     state.firePerfActiveBlocks = state.fireBlockActiveCount;
+    const fireHoldoverTiles = countFireHoldoverTiles(state, fireEps, ignitionBoost, SUPPRESSION_WETNESS_BLOCK_THRESHOLD);
     let heatBoundsArea = 0;
     let heatMinX = 0;
     let heatMaxX = -1;
@@ -879,14 +889,19 @@ export function stepFire(state, effects: EffectsState, rng, delta, spreadScale, 
         state.fireMinY = heatMinY;
         state.fireMaxY = heatMaxY;
     } else if (scheduledCount > 0) {
-        state.fireBoundsActive = true;
-        state.fireMinX = 0;
-        state.fireMaxX = cols - 1;
-        state.fireMinY = 0;
-        state.fireMaxY = rows - 1;
+        if (previousBoundsActive) {
+            state.fireBoundsActive = true;
+            state.fireMinX = previousMinX;
+            state.fireMaxX = previousMaxX;
+            state.fireMinY = previousMinY;
+            state.fireMaxY = previousMaxY;
+        } else {
+            resetFireBounds(state);
+        }
     } else {
         resetFireBounds(state);
     }
+    applyFireActivityMetrics(state, activeFires, fireHoldoverTiles);
     profEnd("fireTick", tickStart);
     return activeFires;
 }

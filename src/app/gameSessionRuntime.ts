@@ -713,6 +713,17 @@ export const createAppRuntime = (): AppRuntime => {
         lines.push(
           `3D misc: fx ${formatMs(threePerf.fireFxMs)}  controls ${formatMs(threePerf.controlsMs)}  hud ${formatMs(threePerf.hudMs)}  ui ${formatMs(threePerf.uiRenderMs)}`
         );
+        if (threePerf.fireFxDebug) {
+          lines.push(
+            `3D fire: snap ${formatMs(threePerf.fireFxDebug.timingsMs.snapshot)} ana ${formatMs(threePerf.fireFxDebug.timingsMs.analysis)} flame ${formatMs(threePerf.fireFxDebug.timingsMs.flameWrite)} smoke ${formatMs(threePerf.fireFxDebug.timingsMs.smoke)} up ${formatMs(threePerf.fireFxDebug.timingsMs.upload)}`
+          );
+          lines.push(
+            `3D fire dbg: inst ${formatInt(threePerf.fireFxDebug.counts.fireInstances)} smoke ${formatInt(threePerf.fireFxDebug.counts.smokeParticles)} cluster ${formatInt(threePerf.fireFxDebug.counts.clusters)}/${formatInt(threePerf.fireFxDebug.counts.clusteredTiles)} front ${formatInt(threePerf.fireFxDebug.counts.frontSegments)} step ${formatInt(threePerf.fireFxDebug.counts.sampleStep)} stride ${formatInt(threePerf.fireFxDebug.counts.smokeRenderStride)} cap ${formatInt(threePerf.fireFxDebug.counts.smokeRenderCap)}`
+          );
+          lines.push(
+            `3D fire mode: ${threePerf.fireFxDebug.modes.emergencyOverload ? "emergency" : threePerf.fireFxDebug.modes.overloaded ? "overload" : "normal"} spark ${threePerf.fireFxDebug.modes.showSparks ? "on" : "off"} smoke ${threePerf.fireFxDebug.modes.showSmoke ? "on" : "off"} front ${threePerf.fireFxDebug.modes.showFrontPass ? "on" : "off"} raw ${formatInt(threePerf.fireFxDebug.counts.rawFallbackAnchorTiles)} churn ${formatInt(threePerf.fireFxDebug.continuity.localSlotChurn)}/${formatInt(threePerf.fireFxDebug.continuity.objectSlotChurn)}/${formatInt(threePerf.fireFxDebug.continuity.frontSlotChurn)}`
+          );
+        }
         lines.push(
           `3D terrain set: avg ${formatMs(threePerf.terrainSetMs)} last ${formatMs(threePerf.terrainSetLastMs)} max ${formatMs(threePerf.terrainSetMaxMs)} n ${formatInt(threePerf.terrainSetCount)}`
         );

@@ -3,21 +3,26 @@ import { performance } from "node:perf_hooks";
 import { DEFAULT_MOISTURE_PARAMS, VIRTUAL_CLIMATE_PARAMS, buildClimateTimeline } from "../dist/core/climate.js";
 import { createEffectsState } from "../dist/core/effectsState.js";
 import { RNG } from "../dist/core/rng.js";
-import { createInitialState, syncTileSoA } from "../dist/core/state.js";
+import { TILE_TYPE_IDS, createInitialState, syncTileSoA } from "../dist/core/state.js";
 import { PHASES } from "../dist/core/time.js";
 import { applyFuel } from "../dist/core/tiles.js";
+import { buildSampleTypeMap } from "../dist/render/threeTestTerrain.js";
 import { isSkipToNextFireAvailable, stepSim } from "../dist/sim/index.js";
 import { markFireBlockActiveByTile } from "../dist/sim/fire/activeBlocks.js";
 import { findIgnitionCandidate } from "../dist/sim/fire/ignite.js";
 import { createUnit } from "../dist/sim/units.js";
+import { applyFireActivityMetrics } from "../dist/systems/fire/sim/fireActivityState.js";
 
 const YEAR_DAYS = 360;
 const PHASE_DAYS = 90;
 const BASE_STEP = 0.25;
 const GRID_SIZE = 33;
 const MAX_SCENARIO_STEPS = 4096;
+const HOLDOVER_SEQUENCE_MAX_DAYS = 40;
 
 const getCenter = (state) => Math.floor(state.grid.cols / 2);
+const syncFireActivity = (state, activeFires = state.lastActiveFires, holdoverTiles = state.fireHoldoverTiles ?? 0) =>
+  applyFireActivityMetrics(state, activeFires, holdoverTiles);
 
 const createTile = (type, moisture) => ({
   type,
@@ -46,6 +51,10 @@ const createTile = (type, moisture) => ({
   houseDestroyed: false,
   ashAge: 0
 });
+
+const resetTile = (tile, type, moisture, overrides = {}) => {
+  Object.assign(tile, createTile(type, moisture), overrides);
+};
 
 const buildState = (seed, size = GRID_SIZE) => {
   const grid = { cols: size, rows: size, totalTiles: size * size };
@@ -86,6 +95,7 @@ const setCareerCursor = (state, careerDay) => {
   state.lastActiveFires = 0;
   state.fireBoundsActive = false;
   state.fireScheduledCount = 0;
+  syncFireActivity(state, 0, 0);
 };
 
 const igniteCenter = (state) => {
@@ -103,6 +113,7 @@ const igniteCenter = (state) => {
   state.fireMinY = center - 1;
   state.fireMaxY = center + 1;
   markFireBlockActiveByTile(state, idx);
+  syncFireActivity(state, 1, 0);
   return idx;
 };
 
@@ -118,17 +129,45 @@ const seedAlertIncident = (state) => {
   state.timeSpeedIndex = state.strategicTimeSpeedIndex;
   state.paused = false;
   state.latestFireAlert = null;
+  syncFireActivity(state, 0, 0);
   return idx;
 };
 
 const seedHoldoverIncident = (state) => {
   const center = getCenter(state);
   const idx = center * state.grid.cols + center;
-  const tile = state.tiles[idx];
-  tile.fire = 0;
-  tile.heat = Math.max(tile.ignitionPoint * 2.2, 2.2);
-  state.tileFire[idx] = 0;
-  state.tileHeat[idx] = tile.heat;
+  for (let y = center - 1; y <= center + 1; y += 1) {
+    for (let x = center - 1; x <= center + 1; x += 1) {
+      const ringIdx = y * state.grid.cols + x;
+      const tile = state.tiles[ringIdx];
+      if (x === center && y === center) {
+        resetTile(tile, "grass", 0.18, {
+          fuel: 3.2,
+          heat: 2.2,
+          fire: 0,
+          burnRate: 0.08,
+          heatOutput: 0.44,
+          spreadBoost: 0.12,
+          heatTransferCap: 2.4,
+          heatRetention: 0.9,
+          windFactor: 0.08
+        });
+        continue;
+      }
+      resetTile(tile, "bare", 0.98, {
+        fuel: 0,
+        fire: 0,
+        heat: 0,
+        burnRate: 0.2,
+        heatOutput: 0,
+        spreadBoost: 0,
+        heatTransferCap: 0.8,
+        heatRetention: 0.28,
+        windFactor: 0
+      });
+    }
+  }
+  syncTileSoA(state);
   state.tileIgniteAt[idx] = state.fireSeasonDay;
   state.fireScheduledCount = 1;
   state.lastActiveFires = 0;
@@ -150,7 +189,47 @@ const seedHoldoverIncident = (state) => {
     phaseDay: state.phaseDay
   };
   markFireBlockActiveByTile(state, idx);
+  syncFireActivity(state, 0, 1);
   return idx;
+};
+
+const captureDistinctActivitySequence = (state, transitions) => {
+  const nextState = state.fireActivityState;
+  if (transitions.length <= 0 || transitions[transitions.length - 1] !== nextState) {
+    transitions.push(nextState);
+  }
+};
+
+const runHoldoverSequence = (speed) => {
+  const { state, rng } = buildState(3904);
+  const effects = createEffectsState();
+  setCareerCursor(state, 225);
+  state.fireSettings.ignitionChancePerDay = 0;
+  seedHoldoverIncident(state);
+  const transitions = [];
+  captureDistinctActivitySequence(state, transitions);
+  let pauseResumes = 0;
+  const maxCareerDay = state.careerDay + HOLDOVER_SEQUENCE_MAX_DAYS;
+  while (state.careerDay < maxCareerDay && state.fireActivityState !== "idle" && !state.gameOver) {
+    stepSim(state, effects, rng, BASE_STEP * speed);
+    captureDistinctActivitySequence(state, transitions);
+    if (state.paused && state.fireActivityState !== "idle") {
+      pauseResumes += 1;
+      state.paused = false;
+    }
+  }
+  return {
+    speed,
+    transitions,
+    paused: state.paused,
+    pauseResumes,
+    mode: state.simTimeMode,
+    finalActivityState: state.fireActivityState,
+    finalActivityCount: state.fireActivityCount,
+    finalActiveFires: state.lastActiveFires,
+    finalHoldoverTiles: state.fireHoldoverTiles,
+    finalScheduledCount: state.fireScheduledCount
+  };
 };
 
 const addSupportTruck = (state, rng) => {
@@ -201,9 +280,8 @@ const runScenario = ({ seed, startDay, speed, durationDays, withTruck = false, s
     }
     if (
       extinguishedDay === null &&
-      state.lastActiveFires <= 0 &&
-      !state.fireBoundsActive &&
-      state.fireScheduledCount <= 0
+      state.fireActivityState === "idle" &&
+      !state.fireBoundsActive
     ) {
       extinguishedDay = state.careerDay;
     }
@@ -285,9 +363,9 @@ const failures = [];
   seedHoldoverIncident(state);
   stepSim(state, effects, rng, BASE_STEP);
   console.log(
-    `\nHoldover Incident Continuity\npaused=${state.paused ? 1 : 0} mode=${state.simTimeMode} active=${state.lastActiveFires} scheduled=${state.fireScheduledCount} bounds=${state.fireBoundsActive ? 1 : 0}`
+    `\nHoldover Incident Continuity\npaused=${state.paused ? 1 : 0} mode=${state.simTimeMode} state=${state.fireActivityState} active=${state.lastActiveFires} holdover=${state.fireHoldoverTiles} scheduled=${state.fireScheduledCount} bounds=${state.fireBoundsActive ? 1 : 0}`
   );
-  if (state.paused || state.simTimeMode !== "incident" || state.lastActiveFires <= 0) {
+  if (state.paused || state.simTimeMode !== "incident" || state.fireActivityState === "idle") {
     failures.push("Holdover reignition incorrectly re-triggered incident auto-pause.");
   }
 }
@@ -312,12 +390,119 @@ const failures = [];
   state.timeSpeedIndex = state.incidentTimeSpeedIndex;
   state.paused = false;
   markFireBlockActiveByTile(state, idx);
+  syncFireActivity(state, 0, 0);
   stepSim(state, effects, rng, BASE_STEP);
   console.log(
-    `\nCooling Incident Release\nmode=${state.simTimeMode} active=${state.lastActiveFires} scheduled=${state.fireScheduledCount} bounds=${state.fireBoundsActive ? 1 : 0} canSkip=${isSkipToNextFireAvailable(state) ? 1 : 0}`
+    `\nCooling Incident Release\nmode=${state.simTimeMode} state=${state.fireActivityState} active=${state.lastActiveFires} holdover=${state.fireHoldoverTiles} scheduled=${state.fireScheduledCount} bounds=${state.fireBoundsActive ? 1 : 0} canSkip=${isSkipToNextFireAvailable(state) ? 1 : 0}`
   );
   if (state.simTimeMode !== "strategic" || !isSkipToNextFireAvailable(state)) {
     failures.push("Cooling-only fire bounds incorrectly kept incident time or blocked next-fire skip.");
+  }
+}
+
+{
+  const { state } = buildState(3905);
+  setCareerCursor(state, 225);
+  seedHoldoverIncident(state);
+  console.log(
+    `\nHoldover Skip Gate\nmode=${state.simTimeMode} state=${state.fireActivityState} active=${state.lastActiveFires} holdover=${state.fireHoldoverTiles} scheduled=${state.fireScheduledCount} canSkip=${isSkipToNextFireAvailable(state) ? 1 : 0}`
+  );
+  if (isSkipToNextFireAvailable(state)) {
+    failures.push("Holdover activity incorrectly allowed skip-to-next-fire before the chain was idle.");
+  }
+}
+
+{
+  const holdoverRuns = [1, 20, 80].map((speed) => runHoldoverSequence(speed));
+  console.log("\nHoldover Speed Sequence");
+  holdoverRuns.forEach((scenario) => {
+    console.log(
+      [
+        `speed=${scenario.speed}x`,
+        `sequence=${scenario.transitions.join(">")}`,
+        `mode=${scenario.mode}`,
+        `paused=${scenario.paused ? 1 : 0}`,
+        `pauseResumes=${scenario.pauseResumes}`,
+        `finalState=${scenario.finalActivityState}`,
+        `active=${scenario.finalActiveFires}`,
+        `holdover=${scenario.finalHoldoverTiles}`,
+        `scheduled=${scenario.finalScheduledCount}`
+      ].join(" ")
+    );
+  });
+  if (holdoverRuns.some((scenario) => scenario.transitions[0] !== "holdover")) {
+    failures.push("Holdover fire-chain did not start in holdover state across all tested speeds.");
+  }
+  if (
+    holdoverRuns.some((scenario) => {
+      const idleIndex = scenario.transitions.indexOf("idle");
+      return idleIndex >= 0 && idleIndex < scenario.transitions.length - 1;
+    })
+  ) {
+    failures.push("Holdover fire-chain hit idle before the final transition in at least one speed scenario.");
+  }
+  if (
+    holdoverRuns.some((scenario) =>
+      scenario.transitions.some((value) => value !== "holdover" && value !== "burning" && value !== "idle")
+    )
+  ) {
+    failures.push("Holdover fire-chain emitted an unexpected activity state during the speed regression.");
+  }
+  if (
+    holdoverRuns.some(
+      (scenario) =>
+        scenario.pauseResumes > 0 ||
+        scenario.paused ||
+        scenario.mode !== "strategic" ||
+        scenario.finalActivityState !== "idle"
+    )
+  ) {
+    failures.push("Holdover fire-chain did not cleanly resolve back to strategic idle across all tested speeds.");
+  }
+}
+
+{
+  const cols = 4;
+  const rows = 4;
+  const sample = {
+    cols,
+    rows,
+    tileTypes: new Uint8Array([
+      TILE_TYPE_IDS.ash,
+      TILE_TYPE_IDS.grass,
+      TILE_TYPE_IDS.grass,
+      TILE_TYPE_IDS.grass,
+      TILE_TYPE_IDS.grass,
+      TILE_TYPE_IDS.grass,
+      TILE_TYPE_IDS.grass,
+      TILE_TYPE_IDS.grass,
+      TILE_TYPE_IDS.grass,
+      TILE_TYPE_IDS.grass,
+      TILE_TYPE_IDS.grass,
+      TILE_TYPE_IDS.grass,
+      TILE_TYPE_IDS.grass,
+      TILE_TYPE_IDS.grass,
+      TILE_TYPE_IDS.grass,
+      TILE_TYPE_IDS.grass
+    ])
+  };
+  const sampledTypes = buildSampleTypeMap(
+    sample,
+    2,
+    2,
+    2,
+    TILE_TYPE_IDS.grass,
+    TILE_TYPE_IDS.water,
+    Object.keys(TILE_TYPE_IDS).length,
+    [TILE_TYPE_IDS.base, TILE_TYPE_IDS.house, TILE_TYPE_IDS.road, TILE_TYPE_IDS.firebreak]
+  );
+  console.log(
+    `\nTerrain Ash Sampling\nsampled=${Array.from(sampledTypes)
+      .map((value) => value.toString())
+      .join(",")}`
+  );
+  if ((sampledTypes[0] ?? -1) === TILE_TYPE_IDS.ash) {
+    failures.push("Sparse ash tiles still overpaint an entire sampled terrain cell.");
   }
 }
 

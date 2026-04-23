@@ -200,7 +200,7 @@ export const buildThermalHotspotField = (
     maxX = clamp(world.fireMaxX + 2, 0, cols - 1);
     minY = clamp(world.fireMinY - 2, 0, rows - 1);
     maxY = clamp(world.fireMaxY + 2, 0, rows - 1);
-  } else if (world.lastActiveFires <= 0) {
+  } else if (world.fireActivityState === "idle") {
     return field;
   }
 

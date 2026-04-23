@@ -380,6 +380,8 @@ export const initPhaseUI = (container: HTMLElement): PhaseUiApi => {
       nextApprovalThreshold01: world.scoring.nextApprovalThreshold01,
       nextTierProgress01: world.scoring.nextTierProgress01,
       activeFireCount: world.lastActiveFires,
+      fireActivityCount: world.fireActivityCount,
+      fireActivityState: world.fireActivityState,
       extinguishedCount: world.scoring.seasonExtinguishedCount,
       propertyDamageCount: world.scoring.seasonPropertyDamageCount,
       livesLostCount: world.scoring.seasonLivesLostCount,

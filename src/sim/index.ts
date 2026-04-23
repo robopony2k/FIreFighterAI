@@ -80,6 +80,7 @@ import {
 } from "../mapgen/roads.js";
 import type { SettlementRoadAdapter } from "../systems/settlements/types/settlementTypes.js";
 import { stepTownConstructionSchedule } from "../systems/settlements/sim/townConstruction.js";
+import { applyFireActivityMetrics } from "../systems/fire/sim/fireActivityState.js";
 export { updatePhaseControls };
 
 const FIRE_HEAT_PADDING = 8;
@@ -325,7 +326,7 @@ const exitIncidentMode = (state: WorldState): void => {
 };
 
 const findStrongestFireTile = (state: WorldState): { x: number; y: number } | null => {
-  if (state.lastActiveFires <= 0 && !state.fireBoundsActive) {
+  if (state.fireActivityState === "idle" && !state.fireBoundsActive) {
     return null;
   }
   const cols = state.grid.cols;
@@ -340,11 +341,12 @@ const findStrongestFireTile = (state: WorldState): { x: number; y: number } | nu
     for (let x = minX; x <= maxX; x += 1) {
       const idx = indexFor(state.grid, x, y);
       const fire = state.tileFire[idx] ?? 0;
-      if (fire <= 0) {
+      const heat = state.tileHeat[idx] ?? 0;
+      const scheduled = state.tileIgniteAt[idx] < Number.POSITIVE_INFINITY ? 1 : 0;
+      if (fire <= 0 && heat <= 0 && scheduled === 0) {
         continue;
       }
-      const heat = state.tileHeat[idx] ?? 0;
-      const score = fire * 2 + heat * 0.15;
+      const score = fire * 2 + heat * 0.15 + scheduled * 0.35;
       if (score > bestScore || !best) {
         bestScore = score;
         best = { x, y };
@@ -388,13 +390,13 @@ const clearLatestFireAlert = (state: WorldState): void => {
   state.latestFireAlert = null;
 };
 
-const hasActiveOrScheduledFire = (
-  state: Pick<WorldState, "lastActiveFires" | "fireScheduledCount">
-): boolean => state.lastActiveFires > 0 || state.fireScheduledCount > 0;
+const hasFireActivity = (
+  state: Pick<WorldState, "fireActivityState">
+): boolean => state.fireActivityState !== "idle";
 
 const hasFireSimulationWork = (
-  state: Pick<WorldState, "lastActiveFires" | "fireBoundsActive" | "fireScheduledCount">
-): boolean => hasActiveOrScheduledFire(state) || state.fireBoundsActive;
+  state: Pick<WorldState, "fireActivityState" | "fireBoundsActive">
+): boolean => hasFireActivity(state) || state.fireBoundsActive;
 
 const isGrowthWeather = (state: WorldState): boolean =>
   state.climateTemp >= GROWTH_WEATHER_TEMP_MIN &&
@@ -402,7 +404,7 @@ const isGrowthWeather = (state: WorldState): boolean =>
   state.climateMoisture >= GROWTH_WEATHER_MOISTURE_MIN;
 
 export const isSkipToNextFireAvailable = (state: WorldState): boolean =>
-  !state.gameOver && state.simTimeMode === "strategic" && !hasActiveOrScheduledFire(state) && !state.skipToNextFire;
+  !state.gameOver && state.simTimeMode === "strategic" && state.fireActivityState === "idle" && !state.skipToNextFire;
 
 export const requestSkipToNextFire = (state: WorldState): boolean => {
   if (!isSkipToNextFireAvailable(state)) {
@@ -454,6 +456,7 @@ const extinguishSeasonCarryoverFires = (state: WorldState): void => {
   state.fireScheduledCount = 0;
   clearFireBlocks(state);
   state.lastActiveFires = 0;
+  applyFireActivityMetrics(state, 0, 0);
   resetFireBounds(state);
   clearLatestFireAlert(state);
 };
@@ -520,6 +523,7 @@ export function extinguishAllFires(state: WorldState, effects: EffectsState): vo
   effects.waterParticles = [];
   effects.waterStreams = [];
   state.lastActiveFires = 0;
+  applyFireActivityMetrics(state, 0, 0);
   resetFireBounds(state);
   clearLatestFireAlert(state);
 }
@@ -803,6 +807,7 @@ export function stepSim(state: WorldState, effects: EffectsState, rng: RNG, delt
       cancelSkipToNextFire(state);
     }
     state.lastActiveFires = 0;
+    applyFireActivityMetrics(state, 0, 0);
     return;
   }
   if (state.gameOver) {
@@ -810,9 +815,10 @@ export function stepSim(state: WorldState, effects: EffectsState, rng: RNG, delt
       cancelSkipToNextFire(state);
     }
     state.lastActiveFires = 0;
+    applyFireActivityMetrics(state, 0, 0);
     return;
   }
-  const hadFireChainRisk = hasActiveOrScheduledFire(state);
+  const hadFireChainRisk = hasFireActivity(state);
   const climateRisk = getClimateRisk(state);
   stepTownAlertPosture(state, dayDelta);
   stepTownConstructionSchedule(state, createRuntimeSettlementRoadAdapter(state), dayDelta);
@@ -832,6 +838,7 @@ export function stepSim(state: WorldState, effects: EffectsState, rng: RNG, delt
   }
 
   let activeFires = state.lastActiveFires;
+  let fireActivityState = state.fireActivityState;
   state.fireSimAccumulator = 0;
   state.firePerfSubsteps = 0;
   state.firePerfSimulatedDays = 0;
@@ -844,9 +851,7 @@ export function stepSim(state: WorldState, effects: EffectsState, rng: RNG, delt
     while (remaining > 0.0001) {
       const previewWeather = sampleFireWeatherResponse(state, careerCursor);
       const adaptiveSubstepDays = getAdaptiveFireSubstepMax(
-        activeFires,
-        state.fireScheduledCount,
-        state.fireBoundsActive,
+        fireActivityState,
         previewWeather.climateRisk
       );
       const adaptiveSubstepDelta = adaptiveSubstepDays / Math.max(DAYS_PER_SECOND, 0.0001);
@@ -883,9 +888,11 @@ export function stepSim(state: WorldState, effects: EffectsState, rng: RNG, delt
         weather,
         weather.climateIgnitionMultiplier
       );
+      fireActivityState = state.fireActivityState;
       if (weather.seasonIndex === 0 && weather.ignition < 0.04 && activeFires > 0) {
         extinguishAllFires(state, effects);
         activeFires = 0;
+        fireActivityState = state.fireActivityState;
       }
       remaining -= simDelta;
       careerCursor += simDayDelta;
@@ -896,13 +903,13 @@ export function stepSim(state: WorldState, effects: EffectsState, rng: RNG, delt
     state.firePerfSimulatedDays = fireDaysSimulated;
   } else {
     stepWind(state, delta, rng);
+    applyFireActivityMetrics(state, 0, 0);
   }
   state.lastActiveFires = activeFires;
-  const hasActiveOrScheduledFireAfterStep = hasActiveOrScheduledFire(state);
-  if (!hasActiveOrScheduledFireAfterStep) {
+  if (!hasFireActivity(state)) {
     clearLatestFireAlert(state);
   }
-  if (!hadFireChainRisk && activeFires > 0) {
+  if (!hadFireChainRisk && hasFireActivity(state)) {
     const strongest = findStrongestFireTile(state);
     if (strongest) {
       recordLatestFireAlert(state, strongest.x, strongest.y);
@@ -926,7 +933,7 @@ export function stepSim(state: WorldState, effects: EffectsState, rng: RNG, delt
         setStatus(state, "Fire incident detected. Simulation paused.");
       }
     }
-  } else if (state.simTimeMode === "incident" && activeFires <= 0) {
+  } else if (state.simTimeMode === "incident" && state.fireActivityState === "idle") {
     exitIncidentMode(state);
   }
 

@@ -83,7 +83,7 @@ import {
   WATERFALL_VERTICALITY_MIN,
   WATERFALL_DEBUG_FLAG_WATER
 } from "./threeTestTerrain.js";
-import { createThreeTestFireFx } from "./threeTestFireFx.js";
+import { createThreeTestFireFx, type FireFxDebugSnapshot } from "./threeTestFireFx.js";
 import { createThreeTestWorldAudio, type WorldAudioChannelControls } from "./threeTestWorldAudio.js";
 import { createThreeTestUnitFxLayer } from "./threeTestUnitFx.js";
 import type { TerrainWaterDebugControls } from "./terrainWaterDebug.js";
@@ -127,6 +127,7 @@ export type ThreeTestPerfSnapshot = {
   controlsMs: number;
   treeBurnMs: number;
   fireFxMs: number;
+  fireFxDebug: FireFxDebugSnapshot | null;
   sceneRenderMs: number;
   sceneRenderLastMs: number;
   postMs: number;
@@ -3950,7 +3951,7 @@ export const createThreeTest = (
   };
 
   const findCurrentStrongestFireTile = (): { x: number; y: number } | null => {
-    if (world.lastActiveFires <= 0) {
+    if (world.fireActivityState === "idle" && !world.fireBoundsActive) {
       return null;
     }
     const cols = world.grid.cols;
@@ -3965,11 +3966,12 @@ export const createThreeTest = (
       for (let x = minX; x <= maxX; x += 1) {
         const idx = indexFor(world.grid, x, y);
         const fire = world.tileFire[idx] ?? 0;
-        if (fire <= 0) {
+        const heat = world.tileHeat[idx] ?? 0;
+        const scheduled = (world.tileIgniteAt[idx] ?? Number.POSITIVE_INFINITY) < Number.POSITIVE_INFINITY ? 1 : 0;
+        const score = fire * 2 + heat * 0.15 + scheduled * 0.35;
+        if (score <= 0) {
           continue;
         }
-        const heat = world.tileHeat[idx] ?? 0;
-        const score = fire * 2 + heat * 0.15;
         if (score > bestScore || !bestTile) {
           bestScore = score;
           bestTile = { x, y };
@@ -5552,6 +5554,7 @@ export const createThreeTest = (
     controlsMs: 0,
     treeBurnMs: 0,
     fireFxMs: 0,
+    fireFxDebug: null,
     sceneRenderMs: 0,
     sceneRenderLastMs: 0,
     postMs: 0,
@@ -6590,6 +6593,7 @@ export const createThreeTest = (
         threePerf.sceneRenderMs,
         simulationAnimationRate
       );
+      threePerf.fireFxDebug = fireFx.getDebugSnapshot();
       if (THREE_TEST_SPARK_DEBUG) {
         const snapshot = fireFx.getSparkDebugSnapshot();
         if (time - sparkDebugLastUiAt >= 100) {
@@ -6609,6 +6613,8 @@ export const createThreeTest = (
           sparkDebugLastLogAt = time;
         }
       }
+    } else {
+      threePerf.fireFxDebug = null;
     }
     worldAudio?.update(
       time,
@@ -6898,6 +6904,15 @@ export const createThreeTest = (
       controlsMs: threePerf.controlsMs,
       treeBurnMs: threePerf.treeBurnMs,
       fireFxMs: threePerf.fireFxMs,
+      fireFxDebug: threePerf.fireFxDebug
+        ? {
+            timingsMs: { ...threePerf.fireFxDebug.timingsMs },
+            counts: { ...threePerf.fireFxDebug.counts },
+            budgets: { ...threePerf.fireFxDebug.budgets },
+            continuity: { ...threePerf.fireFxDebug.continuity },
+            modes: { ...threePerf.fireFxDebug.modes }
+          }
+        : null,
       sceneRenderMs: threePerf.sceneRenderMs,
       sceneRenderLastMs: threePerf.sceneRenderLastMs,
       postMs: threePerf.postMs,

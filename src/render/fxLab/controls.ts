@@ -130,6 +130,41 @@ export const FX_LAB_FIRE_CONTROLS: ReadonlyArray<FxLabFireControlDefinition> = [
     description: "Swap to debug spark presentation."
   },
   {
+    key: "showFrontPass",
+    section: "Fire",
+    kind: "boolean",
+    label: "Front Pass",
+    description: "Toggle advancing front ribbons."
+  },
+  {
+    key: "showClusterFlames",
+    section: "Fire",
+    kind: "boolean",
+    label: "Cluster Pass",
+    description: "Toggle cluster flame beds and plume anchors."
+  },
+  {
+    key: "showSmoke",
+    section: "Fire",
+    kind: "boolean",
+    label: "Smoke",
+    description: "Toggle smoke spawn, update, and rendering."
+  },
+  {
+    key: "showSparks",
+    section: "Fire",
+    kind: "boolean",
+    label: "Sparks",
+    description: "Toggle sparks, embers, and debug spark points."
+  },
+  {
+    key: "showGroundGlow",
+    section: "Fire",
+    kind: "boolean",
+    label: "Ground Glow",
+    description: "Toggle ground glow billboards."
+  },
+  {
     key: "flameIntensityBoost",
     section: "Fire",
     kind: "range",

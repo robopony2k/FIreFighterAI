@@ -1402,6 +1402,98 @@ const addLeanToRoof = (
   );
 };
 
+const addRoofWallInfill = (
+  meshes: BuildingMeshTemplate[],
+  material: THREE.MeshStandardMaterial,
+  mass: BuildingMass,
+  baseY: number,
+  wallThickness: number,
+  visibleSides: readonly BuildingSide[] = FULL_WALL_SIDES
+): void => {
+  const wallTopY = getMassBaseY(baseY, mass) + mass.wallHeight;
+  const infillThickness = Math.max(wallThickness, metersToTiles(0.08));
+  const topOverlap = Math.max(metersToTiles(0.02), wallThickness * 0.12);
+  const leftX = mass.centerX - mass.width * 0.5 + infillThickness * 0.5;
+  const rightX = mass.centerX + mass.width * 0.5 - infillThickness * 0.5;
+  const frontZ = mass.centerZ - mass.depth * 0.5;
+  const backZ = mass.centerZ + mass.depth * 0.5;
+  const roofTopY = wallTopY + mass.roofHeight + topOverlap;
+
+  if (mass.roofType === "gable") {
+    if (visibleSides.includes("left")) {
+      addConvexPrism(
+        meshes,
+        material,
+        [
+          new THREE.Vector3(leftX, wallTopY, frontZ),
+          new THREE.Vector3(leftX, wallTopY, backZ),
+          new THREE.Vector3(leftX, roofTopY, mass.centerZ)
+        ],
+        infillThickness,
+        new THREE.Vector3(-1, 0, 0)
+      );
+    }
+    if (visibleSides.includes("right")) {
+      addConvexPrism(
+        meshes,
+        material,
+        [
+          new THREE.Vector3(rightX, wallTopY, backZ),
+          new THREE.Vector3(rightX, wallTopY, frontZ),
+          new THREE.Vector3(rightX, roofTopY, mass.centerZ)
+        ],
+        infillThickness,
+        new THREE.Vector3(1, 0, 0)
+      );
+    }
+    return;
+  }
+
+  if (mass.roofType !== "lean_to") {
+    return;
+  }
+
+  if (visibleSides.includes("back")) {
+    addWallOrientedBox(
+      meshes,
+      material,
+      mass,
+      "back",
+      0,
+      wallTopY + (mass.roofHeight + topOverlap) * 0.5,
+      mass.width,
+      mass.roofHeight + topOverlap,
+      infillThickness
+    );
+  }
+  if (visibleSides.includes("left")) {
+    addConvexPrism(
+      meshes,
+      material,
+      [
+        new THREE.Vector3(leftX, wallTopY, frontZ),
+        new THREE.Vector3(leftX, wallTopY, backZ),
+        new THREE.Vector3(leftX, roofTopY, backZ)
+      ],
+      infillThickness,
+      new THREE.Vector3(-1, 0, 0)
+    );
+  }
+  if (visibleSides.includes("right")) {
+    addConvexPrism(
+      meshes,
+      material,
+      [
+        new THREE.Vector3(rightX, wallTopY, backZ),
+        new THREE.Vector3(rightX, wallTopY, frontZ),
+        new THREE.Vector3(rightX, roofTopY, backZ)
+      ],
+      infillThickness,
+      new THREE.Vector3(1, 0, 0)
+    );
+  }
+};
+
 const addMassRoof = (
   meshes: BuildingMeshTemplate[],
   material: THREE.MeshStandardMaterial,
@@ -1897,7 +1989,9 @@ const buildVariantForStage = (
         1,
         Math.min(wallSideSequence.length, getSteppedValue(ENCLOSED_WALL_COVERAGE_STEPS, visualStep))
       );
-      addWallShell(meshes, palette.wall, mass, baseY, wallThickness, openings, takeFirstSides(wallSideSequence, wallCoverageCount));
+      const visibleSides = takeFirstSides(wallSideSequence, wallCoverageCount);
+      addWallShell(meshes, palette.wall, mass, baseY, wallThickness, openings, visibleSides);
+      addRoofWallInfill(meshes, palette.wall, mass, baseY, wallThickness, visibleSides);
       addMassRoof(meshes, palette.roof, mass, baseY, visualStep >= ENCLOSED_ROOF_FULL_STEP ? false : true);
       addOpeningFeatures(meshes, palette, mass, openings, baseY, stage, wallThickness);
       return;
@@ -1905,6 +1999,7 @@ const buildVariantForStage = (
 
     if (stage === "roofed") {
       addWallShell(meshes, palette.wall, mass, baseY, wallThickness, openings);
+      addRoofWallInfill(meshes, palette.wall, mass, baseY, wallThickness);
       addMassRoof(meshes, palette.roof, mass, baseY);
       addOpeningFeatures(meshes, palette, mass, openings, baseY, stage, wallThickness);
     }

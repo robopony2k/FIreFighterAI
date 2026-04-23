@@ -9,6 +9,7 @@ import type {
   SimTimeMode,
   TimeSpeedControlMode
 } from "../../core/types.js";
+import type { FireActivityState } from "../../core/state.js";
 export type Phase = "growth" | "maintenance" | "fire" | "budget";
 
 export type InteractionMode = "default" | "deploy" | "fuelBreak" | "formation" | "inspect";
@@ -102,6 +103,8 @@ export type GameUiSnapshot = {
     nextApprovalThreshold01: number | null;
     nextTierProgress01: number;
     activeFireCount: number;
+    fireActivityCount: number;
+    fireActivityState: FireActivityState;
     extinguishedCount: number;
     propertyDamageCount: number;
     livesLostCount: number;

@@ -1,3 +1,4 @@
+import type { FireActivityState } from "../../../core/state.js";
 import type { Phase, PrimaryCta } from "../types.js";
 import type { ClimateForecast, ScoreFlowKind } from "../../../core/types.js";
 import {
@@ -50,6 +51,8 @@ export type TopBarData = {
     nextApprovalThreshold01: number | null;
     nextTierProgress01: number;
     activeFireCount: number;
+    fireActivityCount: number;
+    fireActivityState: FireActivityState;
     extinguishedCount: number;
     propertyDamageCount: number;
     livesLostCount: number;
@@ -507,6 +510,7 @@ type PipeTransferToken = {
 
 type LedgerRailRefs = {
   rail: HTMLElement;
+  label: HTMLElement;
   track: HTMLElement;
   settled: HTMLElement;
   incoming: HTMLElement;
@@ -1159,7 +1163,7 @@ export const createTopBar = (): TopBarView => {
     count.className = "phase-score-rail-count";
     rail.append(meta, track, count);
     ledgerRails.appendChild(rail);
-    ledgerRailMap.set(config.lane, { rail, track, settled, incoming, fading, count });
+    ledgerRailMap.set(config.lane, { rail, label, track, settled, incoming, fading, count });
   }
   ledgerBody.append(ledgerRails, ledgerPipes, ledgerTransfers);
   ledgerBoard.append(ledgerHeader, ledgerBody);
@@ -1280,7 +1284,11 @@ export const createTopBar = (): TopBarView => {
     }
 
     const flowEvents = data.flowEvents;
-    const activeFireCount = Math.max(0, Math.floor(data.activeFireCount));
+    const activeDisplayCount = Math.max(
+      0,
+      Math.floor(data.fireActivityState === "holdover" ? data.fireActivityCount : data.activeFireCount)
+    );
+    const activeRailLabel = data.fireActivityState === "holdover" ? "Holdover Risk" : "Active Fires";
     const activeRefs = ledgerRailMap.get("active") ?? null;
     const overlayRect = ledgerPipeTransfers.getBoundingClientRect();
     const trunkX = activeRefs && overlayRect.width > 0 && overlayRect.height > 0 ? getPipeTrunkX(activeRefs, overlayRect) : 16;
@@ -1335,8 +1343,9 @@ export const createTopBar = (): TopBarView => {
       }
 
       if (lane === "active") {
-        refs.count.textContent = activeFireCount.toLocaleString();
-        syncSettledRailBundles(refs.settled, Math.max(0, activeFireCount - queuedIncomingCount));
+        refs.label.textContent = activeRailLabel;
+        refs.count.textContent = activeDisplayCount.toLocaleString();
+        syncSettledRailBundles(refs.settled, Math.max(0, activeDisplayCount - queuedIncomingCount));
         refs.rail.classList.toggle(
           "is-hot",
           flowEvents.some((event) => event.kind === "property" || event.kind === "lives")

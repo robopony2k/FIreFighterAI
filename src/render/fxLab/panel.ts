@@ -7,7 +7,7 @@ import {
 import { FX_LAB_SCENARIOS } from "./scenarios.js";
 import type { FxLabController } from "./controller.js";
 import type { WaterSprayMode } from "../../core/types.js";
-import type { FireFxDebugControls } from "../threeTestFireFx.js";
+import type { FireFxDebugControls, FireFxDebugSnapshot } from "../threeTestFireFx.js";
 import type { OceanWaterDebugControls } from "../oceanWaterDebug.js";
 import type { TerrainWaterDebugControls } from "../terrainWaterDebug.js";
 import type { WaterFxDebugControls } from "../threeTestUnitFx.js";
@@ -257,7 +257,9 @@ export const createFxLabPanel = (mount: HTMLElement, controller: FxLabController
   fireResetButton.type = "button";
   fireResetButton.textContent = "Reset Fire";
   fireResetButton.className = "fx-lab-section-button";
-  fireSection.append(fireTitle, fireControlsRoot, fireResetButton);
+  const fireStatus = document.createElement("p");
+  fireStatus.className = "fx-lab-section-note";
+  fireSection.append(fireTitle, fireControlsRoot, fireResetButton, fireStatus);
   registerTabSection("fire", fireSection);
 
   const oceanWaterSection = document.createElement("section");
@@ -703,6 +705,7 @@ export const createFxLabPanel = (mount: HTMLElement, controller: FxLabController
     const placementMode = controller.getPlacementMode();
     const manualSprayEnabled = controller.isManualSprayEnabled();
     const waterDebug = controller.getWaterDebugSnapshot();
+    const fireDebug: FireFxDebugSnapshot = controller.getFireDebugSnapshot();
     scenarioSelect.value = currentScenario;
     scenarioDescription.textContent =
       FX_LAB_SCENARIOS.find((scenario) => scenario.id === currentScenario)?.description ?? "";
@@ -735,6 +738,16 @@ export const createFxLabPanel = (mount: HTMLElement, controller: FxLabController
         ? "A spray target is placed. Enable Force Spray to render water toward it."
         : "Enable Force Spray to test hose FX without gameplay logic, or place a spray target on the terrain.";
     const fireControls = controller.getFireDebugControls();
+    fireStatus.textContent =
+      `Fire stats: inst ${Math.round(fireDebug.counts.fireInstances)}` +
+      ` cross ${Math.round(fireDebug.counts.fireCrossInstances)}` +
+      ` glow ${Math.round(fireDebug.counts.groundGlowInstances)}` +
+      ` smoke ${Math.round(fireDebug.counts.smokeParticles)}` +
+      ` clusters ${Math.round(fireDebug.counts.clusters)}/${Math.round(fireDebug.counts.clusteredTiles)}` +
+      ` front ${Math.round(fireDebug.counts.frontSegments)}` +
+      ` step ${Math.round(fireDebug.counts.sampleStep)}` +
+      ` timings ${fireDebug.timingsMs.analysis.toFixed(2)}/${fireDebug.timingsMs.flameWrite.toFixed(2)}/${fireDebug.timingsMs.smoke.toFixed(2)}ms` +
+      ` mode ${fireDebug.modes.emergencyOverload ? "emergency" : fireDebug.modes.overloaded ? "overload" : "normal"}.`;
     FX_LAB_FIRE_CONTROLS.forEach((definition) => {
       fireBindings.get(definition.key)?.apply(fireControls[definition.key]);
     });

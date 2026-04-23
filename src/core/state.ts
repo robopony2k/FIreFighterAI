@@ -114,8 +114,7 @@ export type CoastClassId =
   | typeof COAST_CLASS_CLIFF
   | typeof COAST_CLASS_SHELF_WATER;
 
-
-
+export type FireActivityState = "idle" | "holdover" | "burning";
 export interface WorldState {
 
   grid: Grid;
@@ -205,6 +204,9 @@ export interface WorldState {
   totalLandTiles: number;
 
   lastActiveFires: number;
+  fireHoldoverTiles: number;
+  fireActivityCount: number;
+  fireActivityState: FireActivityState;
   latestFireAlert: FireAlertIncident | null;
   nextFireAlertId: number;
   skipToNextFire: SkipToNextFireState | null;
@@ -548,6 +550,9 @@ export function createInitialState(seed: number, grid: Grid): WorldState {
     totalLandTiles: 1,
 
     lastActiveFires: 0,
+    fireHoldoverTiles: 0,
+    fireActivityCount: 0,
+    fireActivityState: "idle",
     latestFireAlert: null,
     nextFireAlertId: 1,
     skipToNextFire: null,
