@@ -168,13 +168,6 @@ const moveTruckAwayFromThreat = (state: WorldState, truck: Unit, threatPoint: Po
   truck.currentStatus = "retreating";
 };
 
-export const clearScheduledIgnition = (state: WorldState, idx: number): void => {
-  if (state.tileIgniteAt[idx] < Number.POSITIVE_INFINITY) {
-    state.tileIgniteAt[idx] = Number.POSITIVE_INFINITY;
-    state.fireScheduledCount = Math.max(0, state.fireScheduledCount - 1);
-  }
-};
-
 const igniteBackburnTile = (state: WorldState, tileX: number, tileY: number): boolean => {
   if (!inBounds(state.grid, tileX, tileY)) {
     return false;
@@ -191,7 +184,8 @@ const igniteBackburnTile = (state: WorldState, tileX: number, tileY: number): bo
   target.heat = Math.max(target.heat, target.ignitionPoint * 1.1);
   state.tileFire[idx] = target.fire;
   state.tileHeat[idx] = target.heat;
-  clearScheduledIgnition(state, idx);
+  state.tileBurnAge[idx] = 0;
+  state.tileHeatRelease[idx] = Math.max(state.tileHeatRelease[idx] ?? 0, target.fire * target.heatOutput);
   markFireBlockActiveByTile(state, idx);
   return true;
 };

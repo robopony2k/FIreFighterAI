@@ -1237,7 +1237,8 @@ const drawDebugCellPanel = (
   const cachedHeat = state.tileHeat[idx];
   const cachedFuel = state.tileFuel[idx];
   const cachedWetness = state.tileSuppressionWetness[idx];
-  const cachedIgniteAt = state.tileIgniteAt[idx];
+  const cachedBurnAge = state.tileBurnAge[idx];
+  const cachedHeatRelease = state.tileHeatRelease[idx];
   const cachedIgnition = state.tileIgnitionPoint[idx];
   const cachedBurnRate = state.tileBurnRate[idx];
   const cachedHeatOutput = state.tileHeatOutput[idx];
@@ -1263,7 +1264,7 @@ const drawDebugCellPanel = (
     `ashAge=${formatNumber(tile.ashAge, 2)} elev=${formatNumber(tile.elevation)} height=${formatNumber(height, 2)}`,
     `cache fire=${formatNumber(cachedFire)} heat=${formatNumber(cachedHeat)} fuel=${formatNumber(cachedFuel)} wet=${formatNumber(cachedWetness)}`,
     `cache ignite=${formatNumber(cachedIgnition)} burn=${formatNumber(cachedBurnRate)} heatOut=${formatNumber(cachedHeatOutput)}`,
-    `igniteAt=${formatNumber(cachedIgniteAt, 3)} smooth=${formatNumber(smoothFire)}`,
+    `burnAge=${formatNumber(cachedBurnAge, 3)} release=${formatNumber(cachedHeatRelease, 3)} smooth=${formatNumber(smoothFire)}`,
     `bounds active=${state.fireBoundsActive ? "1" : "0"} in=${inBounds ? "1" : "0"}`,
     hoverWorld ? `world ${formatNumber(hoverWorld.x, 2)},${formatNumber(hoverWorld.y, 2)}` : "world n/a"
   ];

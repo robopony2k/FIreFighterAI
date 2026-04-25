@@ -49,6 +49,33 @@ import {
   type FireRenderSnapshot
 } from "./fireRenderSnapshot.js";
 import { createParticleBuffers, createSmokeShaderMaterial } from "./fireSmokeSystem.js";
+import {
+  analyzeFireRenderFrame,
+  buildFireRenderBudgetPlan,
+  createInitialFireRenderAnalysisState,
+  createInitialFireRenderAdaptiveState,
+  type FireRenderAdaptiveState
+} from "./fireRenderAnalysis.js";
+import { FIRE_FX_PAUSED_VISUAL_SETTLE_DELTA_SECONDS } from "../constants/fireRenderConstants.js";
+import {
+  decayInactiveFrontCorridorSlots,
+  ensureFireRenderAnalysisState,
+  getFrontCorridorKey,
+  getTileEmitterSlotIndex,
+  readTileEmitterSlotState,
+  resetFireRenderContinuityState,
+  resetFireRenderAnalysisVisualState,
+  updateFrontCorridorSlotActivation
+} from "./fireRenderAnalysisState.js";
+import {
+  clamp,
+  fract,
+  getVisualWindResponse,
+  hash1,
+  smoothApproach,
+  smoothstep,
+  sortSmokeParticlesByDepth
+} from "./fireRenderMath.js";
 
 const FIRE_MAX_INSTANCES = 720;
 const FIRE_CROSS_MAX_INSTANCES = 320;
@@ -180,73 +207,6 @@ const FIRE_FRONT_SLOT_RANK = (() => {
   }
   return rank;
 })();
-
-const clamp = (value: number, min: number, max: number): number => Math.min(max, Math.max(min, value));
-const getAnchorSourceWeightSlot = (source: FireAnchorSource): number => {
-  switch (source) {
-    case "tree":
-      return 0;
-    case "structure":
-      return 1;
-    case "terrainSurface":
-      return 2;
-    case "rawFallback":
-    default:
-      return 3;
-  }
-};
-const accumulateAnchorSourceWeight = (weights: number[], source: FireAnchorSource, weight: number): void => {
-  weights[getAnchorSourceWeightSlot(source)] += weight;
-};
-const pickDominantAnchorSource = (weights: number[]): FireAnchorSource => {
-  let bestIndex = 0;
-  let bestWeight = weights[0] ?? 0;
-  for (let i = 1; i < 4; i += 1) {
-    const weight = weights[i] ?? 0;
-    if (weight > bestWeight) {
-      bestWeight = weight;
-      bestIndex = i;
-    }
-  }
-  switch (bestIndex) {
-    case 0:
-      return "tree";
-    case 1:
-      return "structure";
-    case 2:
-      return "terrainSurface";
-    case 3:
-    default:
-      return "rawFallback";
-  }
-};
-const fract = (value: number): number => value - Math.floor(value);
-const hash1 = (value: number): number => fract(Math.sin(value * 12.9898) * 43758.5453);
-const smoothstep = (edge0: number, edge1: number, x: number): number => {
-  if (edge0 === edge1) {
-    return x < edge0 ? 0 : 1;
-  }
-  const t = clamp((x - edge0) / (edge1 - edge0), 0, 1);
-  return t * t * (3 - 2 * t);
-};
-const smoothApproach = (current: number, target: number, riseRate: number, fallRate: number, dtSeconds: number): number => {
-  const rate = target >= current ? riseRate : fallRate;
-  const k = 1 - Math.exp(-Math.max(0, rate) * Math.max(0, dtSeconds));
-  return current + (target - current) * k;
-};
-const getVisualWindResponse = (
-  windStrength: number
-): { flame: number; spark: number; smoke: number; smokeUpwind: number } => {
-  const wind01 = clamp(windStrength, 0, 1);
-  const eased = smoothstep(0, 1, wind01);
-  const shared = 0.42 + eased * 0.72;
-  return {
-    flame: shared * 1.02,
-    spark: shared * 0.92,
-    smoke: shared * 1.14,
-    smokeUpwind: 0.22 + (1 - eased) * 0.14
-  };
-};
 const worldUnitsForPixels = (
   camera: THREE.Camera,
   distance: number,
@@ -269,43 +229,6 @@ const worldUnitsForPixels = (
     return (verticalSpan * safePixels) / safeViewport;
   }
   return 0;
-};
-const swapDepthOrder = (depth: Float32Array, order: Uint16Array, a: number, b: number): void => {
-  const d = depth[a];
-  depth[a] = depth[b];
-  depth[b] = d;
-  const o = order[a];
-  order[a] = order[b];
-  order[b] = o;
-};
-const sortDepthBackToFront = (depth: Float32Array, order: Uint16Array, left: number, right: number): void => {
-  let i = left;
-  let j = right;
-  const pivot = depth[(left + right) >> 1];
-  while (i <= j) {
-    while (depth[i] > pivot) {
-      i += 1;
-    }
-    while (depth[j] < pivot) {
-      j -= 1;
-    }
-    if (i <= j) {
-      swapDepthOrder(depth, order, i, j);
-      i += 1;
-      j -= 1;
-    }
-  }
-  if (left < j) {
-    sortDepthBackToFront(depth, order, left, j);
-  }
-  if (i < right) {
-    sortDepthBackToFront(depth, order, i, right);
-  }
-};
-const sortSmokeParticlesByDepth = (depth: Float32Array, order: Uint16Array, count: number): void => {
-  if (count > 1) {
-    sortDepthBackToFront(depth, order, 0, count - 1);
-  }
 };
 type FrontDirection = 0 | 1 | 2 | 3;
 type FrontEdgeOrientation = "horizontal" | "vertical";
@@ -393,6 +316,28 @@ const normalizeFrontDirection = (x: number, z: number): { x: number; z: number }
     return { x: 0, z: 0 };
   }
   return { x: x / length, z: z / length };
+};
+const readTileEmitterSlotStats = (
+  slots: Float32Array,
+  tileIdx: number,
+  maxSlots: number,
+  visibleCutoff: number
+): { activationSum: number; maxActivation: number; visibleCount: number } => {
+  const baseIndex = tileIdx * maxSlots;
+  let activationSum = 0;
+  let maxActivation = 0;
+  let visibleCount = 0;
+  for (let slot = 0; slot < maxSlots; slot += 1) {
+    const activation = slots[baseIndex + slot] ?? 0;
+    activationSum += activation;
+    if (activation > maxActivation) {
+      maxActivation = activation;
+    }
+    if (activation > visibleCutoff) {
+      visibleCount += 1;
+    }
+  }
+  return { activationSum, maxActivation, visibleCount };
 };
 type ClusterRole = 0 | 1 | 2;
 
@@ -969,34 +914,8 @@ export const createThreeTestFireFx = (
   let previousFrameTimeMs: number | null = null;
   let animationTimeMs = 0;
   let smokeAnimationTimeMs = 0;
-  let tileStateCols = 0;
-  let tileStateRows = 0;
-  let tileFlameVisual = new Float32Array(0);
-  let tileIgnitionAgeSeconds = new Float32Array(0);
-  let tileSmokeVisual = new Float32Array(0);
-  let tileLocalFlameSlotActivation = new Float32Array(0);
-  let tileGroundFlameSlotActivation = new Float32Array(0);
-  let tileObjectFlameSlotActivation = new Float32Array(0);
-  let tileFrontPerimeter01 = new Float32Array(0);
-  let tileFrontArrival01 = new Float32Array(0);
-  let tileFrontAdvance01 = new Float32Array(0);
-  let tileFrontDirX = new Float32Array(0);
-  let tileFrontDirZ = new Float32Array(0);
+  const analysisState = createInitialFireRenderAnalysisState();
   let tileSmokeSpawnAccum = new Float32Array(0);
-  let tileActiveFlag = new Uint8Array(0);
-  let tileClusterId = new Int32Array(0);
-  let tileClusterRole = new Uint8Array(0);
-  let tileSmokeOcclusion01 = new Float32Array(0);
-  let clusterQueue = new Int32Array(0);
-  const fireClusterPool: FireCluster[] = [];
-  const fireClusters: FireCluster[] = [];
-  let lastClusterRebuildMs = -Infinity;
-  let lastClusterActiveTileCount = 0;
-  let lastClusterSampleStep = 1;
-  let lastClusterMinX = -1;
-  let lastClusterMaxX = -1;
-  let lastClusterMinY = -1;
-  let lastClusterMaxY = -1;
   let smokeSpawnCursor = 0;
   let smokeSpawnSequence = 0;
   const smokeParticleActive = new Uint8Array(SMOKE_MAX_INSTANCES);
@@ -1029,25 +948,8 @@ export const createThreeTestFireFx = (
   let fireSimulationAlpha = 1;
   let previousFireSnapshot: FireRenderSnapshot | null = null;
   let currentFireSnapshot: FireRenderSnapshot | null = null;
-  let smokeBudgetScale = 1;
-  let flameBudgetScale = 1;
-  let smokeFallbackAccum = 0;
-  let smokeRecoveryAccum = 0;
-  let flameFallbackAccum = 0;
-  let flameRecoveryAccum = 0;
+  let adaptiveState: FireRenderAdaptiveState = createInitialFireRenderAdaptiveState();
   let lastAnchorFallbackLogMs = -Infinity;
-  let frontUpdateSerial = 0;
-  const frontEdgeStates = new Map<number, DirectedFrontEdgeState>();
-  const frontCorridorSlotStates = new Map<number, FrontCorridorSlotState>();
-  let renderContinuityState: FireRenderContinuityState = {
-    smoothedFrontSegmentBudget: 0,
-    smoothedPerTileFlameCap: FIRE_VISUAL_TUNING.tongueSpawnMax,
-    smoothedPerTileGroundCap: FIRE_VISUAL_TUNING.groundFlameSpawnMax,
-    localSlotChurn: 0,
-    objectSlotChurn: 0,
-    frontSlotChurn: 0,
-    budgetClampedDrops: 0
-  };
   let sparkDebugSnapshot: SparkDebugSnapshot = {
     visibleFlameTiles: 0,
     heroTipSparkAttempts: 0,
@@ -1097,25 +999,8 @@ export const createThreeTestFireFx = (
       mode: debugControls.sparkMode
     };
     fireDebugSnapshot = createEmptyFireFxDebugSnapshot(debugControls);
-    frontEdgeStates.clear();
-    frontCorridorSlotStates.clear();
-    releaseFireClusters();
+    resetFireRenderAnalysisVisualState(analysisState);
     audioClusterSnapshots.length = 0;
-    renderContinuityState = {
-      smoothedFrontSegmentBudget: 0,
-      smoothedPerTileFlameCap: FIRE_VISUAL_TUNING.tongueSpawnMax,
-      smoothedPerTileGroundCap: FIRE_VISUAL_TUNING.groundFlameSpawnMax,
-      localSlotChurn: 0,
-      objectSlotChurn: 0,
-      frontSlotChurn: 0,
-      budgetClampedDrops: 0
-    };
-    tileLocalFlameSlotActivation.fill(0);
-    tileGroundFlameSlotActivation.fill(0);
-    tileObjectFlameSlotActivation.fill(0);
-    tileFlameVisual.fill(0);
-    tileIgnitionAgeSeconds.fill(0);
-    tileSmokeVisual.fill(0);
     tileSmokeSpawnAccum.fill(0);
     visualsCleared = true;
   };
@@ -1161,25 +1046,6 @@ export const createThreeTestFireFx = (
     currentFireSnapshot = nextSnapshot;
   };
 
-  const ensureClusterState = (count: number): void => {
-    if (tileActiveFlag.length !== count) {
-      tileActiveFlag = new Uint8Array(count);
-      tileClusterId = new Int32Array(count).fill(-1);
-      tileClusterRole = new Uint8Array(count);
-      tileSmokeOcclusion01 = new Float32Array(count);
-      clusterQueue = new Int32Array(count);
-      fireClusters.length = 0;
-      fireClusterPool.length = 0;
-      lastClusterRebuildMs = -Infinity;
-      lastClusterActiveTileCount = 0;
-      lastClusterSampleStep = 1;
-      lastClusterMinX = -1;
-      lastClusterMaxX = -1;
-      lastClusterMinY = -1;
-      lastClusterMaxY = -1;
-    }
-  };
-
   const setEnvironmentSignals = (signals: FireFxEnvironmentSignals): void => {
     envTarget.smoke01 = clamp(signals.smoke01, 0, 1);
     envTarget.denseSmoke01 = clamp(signals.denseSmoke01, 0, 1);
@@ -1197,510 +1063,11 @@ export const createThreeTestFireFx = (
   };
 
   const ensureTileState = (cols: number, rows: number): void => {
-    if (cols === tileStateCols && rows === tileStateRows) {
-      return;
-    }
     const count = Math.max(0, cols * rows);
-    tileStateCols = cols;
-    tileStateRows = rows;
-    tileFlameVisual = new Float32Array(count);
-    tileIgnitionAgeSeconds = new Float32Array(count);
-    tileSmokeVisual = new Float32Array(count);
-    tileLocalFlameSlotActivation = new Float32Array(count * FIRE_VISUAL_TUNING.tongueSpawnMax);
-    tileGroundFlameSlotActivation = new Float32Array(count * FIRE_VISUAL_TUNING.groundFlameSpawnMax);
-    tileObjectFlameSlotActivation = new Float32Array(count * 2);
-    tileFrontPerimeter01 = new Float32Array(count);
-    tileFrontArrival01 = new Float32Array(count);
-    tileFrontAdvance01 = new Float32Array(count);
-    tileFrontDirX = new Float32Array(count);
-    tileFrontDirZ = new Float32Array(count);
-    tileSmokeSpawnAccum = new Float32Array(count);
-    frontEdgeStates.clear();
-    frontCorridorSlotStates.clear();
-    renderContinuityState = {
-      smoothedFrontSegmentBudget: 0,
-      smoothedPerTileFlameCap: FIRE_VISUAL_TUNING.tongueSpawnMax,
-      smoothedPerTileGroundCap: FIRE_VISUAL_TUNING.groundFlameSpawnMax,
-      localSlotChurn: 0,
-      objectSlotChurn: 0,
-      frontSlotChurn: 0,
-      budgetClampedDrops: 0
-    };
-    ensureClusterState(count);
-  };
-
-  const getTileEmitterSlotIndex = (tileIdx: number, slot: number, maxSlots: number): number =>
-    tileIdx * maxSlots + slot;
-
-  const readTileEmitterSlotState = (slots: Float32Array, slotIndex: number): TileEmitterSlotState =>
-    slots[slotIndex] ?? 0;
-
-  const clearTileEmitterSlots = (slots: Float32Array, tileIdx: number, maxSlots: number): void => {
-    const baseIndex = tileIdx * maxSlots;
-    for (let slot = 0; slot < maxSlots; slot += 1) {
-      slots[baseIndex + slot] = 0;
+    ensureFireRenderAnalysisState(analysisState, cols, rows);
+    if (tileSmokeSpawnAccum.length !== count) {
+      tileSmokeSpawnAccum = new Float32Array(count);
     }
-  };
-
-  const updateTileEmitterSlots = (
-    slots: Float32Array,
-    tileIdx: number,
-    maxSlots: number,
-    targetCount: number,
-    riseRate: number,
-    fallRate: number,
-    dtSeconds: number,
-    visibleCutoff: number,
-    churnKey: "localSlotChurn" | "objectSlotChurn" | null
-  ): { activationSum: number; maxActivation: number; visibleCount: number } => {
-    const baseIndex = tileIdx * maxSlots;
-    let activationSum = 0;
-    let maxActivation = 0;
-    let visibleCount = 0;
-    for (let slot = 0; slot < maxSlots; slot += 1) {
-      const slotIndex = baseIndex + slot;
-      const previous = readTileEmitterSlotState(slots, slotIndex);
-      const targetActivation = clamp(targetCount - slot, 0, 1);
-      const next = smoothApproach(previous, targetActivation, riseRate, fallRate, dtSeconds);
-      slots[slotIndex] = next;
-      if (churnKey && (previous > visibleCutoff) !== (next > visibleCutoff)) {
-        renderContinuityState[churnKey] += 1;
-      }
-      activationSum += next;
-      if (next > maxActivation) {
-        maxActivation = next;
-      }
-      if (next > visibleCutoff) {
-        visibleCount += 1;
-      }
-    }
-    return {
-      activationSum,
-      maxActivation,
-      visibleCount
-    };
-  };
-
-  const getFrontCorridorKey = (corridor: FrontCorridor): number =>
-    ((((corridor.dir * 257 + corridor.fixedCoord) * 257 + corridor.startCoord) * 257 + corridor.endCoord) >>> 0);
-
-  const getFrontCorridorSlotKey = (corridorKey: number, slot: number): number =>
-    corridorKey * FIRE_FRONT_CORRIDOR_MAX_SEGMENTS + slot;
-
-  const updateFrontCorridorSlotActivation = (
-    corridorKey: number,
-    slot: number,
-    targetActivation: number,
-    frameId: number,
-    dtSeconds: number
-  ): number => {
-    const slotKey = getFrontCorridorSlotKey(corridorKey, slot);
-    let state = frontCorridorSlotStates.get(slotKey);
-    if (!state) {
-      state = {
-        activation: 0,
-        lastActiveFrame: frameId
-      };
-      frontCorridorSlotStates.set(slotKey, state);
-    }
-    const previous = state.activation;
-    state.activation = smoothApproach(previous, targetActivation, FIRE_FRONT_SLOT_RISE_RATE, FIRE_FRONT_SLOT_FALL_RATE, dtSeconds);
-    state.lastActiveFrame = frameId;
-    if ((previous > FIRE_FRONT_SLOT_VISIBLE_CUTOFF) !== (state.activation > FIRE_FRONT_SLOT_VISIBLE_CUTOFF)) {
-      renderContinuityState.frontSlotChurn += 1;
-    }
-    return state.activation;
-  };
-
-  const decayInactiveFrontCorridorSlots = (frameId: number, dtSeconds: number): void => {
-    for (const [slotKey, state] of frontCorridorSlotStates) {
-      if (state.lastActiveFrame === frameId) {
-        continue;
-      }
-      const previous = state.activation;
-      state.activation = smoothApproach(previous, 0, 0, FIRE_FRONT_SLOT_FALL_RATE, dtSeconds);
-      if ((previous > FIRE_FRONT_SLOT_VISIBLE_CUTOFF) !== (state.activation > FIRE_FRONT_SLOT_VISIBLE_CUTOFF)) {
-        renderContinuityState.frontSlotChurn += 1;
-      }
-      if (state.activation <= 0.01) {
-        frontCorridorSlotStates.delete(slotKey);
-      }
-    }
-  };
-
-  type ClusterBudgetState = {
-    clusteredTiles: number;
-    clusterCoverage: number;
-    reserveBed: number;
-    reservePlume: number;
-    reserveTileJets: number;
-  };
-
-  const releaseFireClusters = (): void => {
-    while (fireClusters.length > 0) {
-      const cluster = fireClusters.pop();
-      if (!cluster) {
-        break;
-      }
-      cluster.tiles.length = 0;
-      fireClusterPool.push(cluster);
-    }
-  };
-
-  const allocFireCluster = (): FireCluster => {
-    const cluster = fireClusterPool.pop();
-    if (cluster) {
-      cluster.tiles.length = 0;
-      cluster.tileCount = 0;
-      cluster.centroidX = 0;
-      cluster.centroidZ = 0;
-      cluster.spanAxisX = 1;
-      cluster.spanAxisZ = 0;
-      cluster.depthAxisX = 0;
-      cluster.depthAxisZ = 1;
-      cluster.radius = 0;
-      cluster.minX = 0;
-      cluster.maxX = 0;
-      cluster.minY = 0;
-      cluster.maxY = 0;
-      cluster.intensity = 0;
-      cluster.edgeTiles = 0;
-      cluster.interiorTiles = 0;
-      cluster.bedBudget = 0;
-      cluster.plumeBudget = 0;
-      cluster.sourceIdx = -1;
-      cluster.baseY = 0;
-      cluster.anchorSource = "terrainSurface";
-      cluster.frontPerimeter01 = 0;
-      cluster.frontArrival01 = 0;
-      cluster.heatMean01 = 0;
-      cluster.heatSum01 = 0;
-      cluster.fuelMean01 = 0;
-      cluster.intensity01 = 0;
-      return cluster;
-    }
-    return {
-      id: -1,
-      tileCount: 0,
-      centroidX: 0,
-      centroidZ: 0,
-      spanAxisX: 1,
-      spanAxisZ: 0,
-      depthAxisX: 0,
-      depthAxisZ: 1,
-      radius: 0,
-      minX: 0,
-      maxX: 0,
-      minY: 0,
-      maxY: 0,
-      intensity: 0,
-      edgeTiles: 0,
-      interiorTiles: 0,
-      bedBudget: 0,
-      plumeBudget: 0,
-      sourceIdx: -1,
-      baseY: 0,
-      anchorSource: "terrainSurface",
-      frontPerimeter01: 0,
-      frontArrival01: 0,
-      heatMean01: 0,
-      heatSum01: 0,
-      fuelMean01: 0,
-      intensity01: 0,
-      tiles: []
-    };
-  };
-
-  const buildFireClusters = (
-    world: FireFxWorldState,
-    fireView: FireFieldView,
-    cols: number,
-    rows: number,
-    minX: number,
-    maxX: number,
-    minY: number,
-    maxY: number,
-    sampleStep: number,
-    simFireEps: number,
-    windX: number,
-    windZ: number,
-    treeBurn: FireFxTreeBurnController | null,
-    terrainSize: FireFxTerrainSize,
-    resolveGroundAnchor: (tileIdx: number) => ResolvedFireAnchor
-  ): { clusterCount: number; clusteredTiles: number } => {
-    tileActiveFlag.fill(0);
-    tileClusterId.fill(-1);
-    tileClusterRole.fill(0);
-    tileSmokeOcclusion01.fill(0);
-    releaseFireClusters();
-    let queueHead = 0;
-    let queueTail = 0;
-
-    for (let y = minY; y <= maxY; y += sampleStep) {
-      for (let x = minX; x <= maxX; x += sampleStep) {
-        const idx = y * cols + x;
-        const fire = fireView.getFireByIndex(idx);
-        const heat = fireView.getHeat01ByIndex(idx);
-        const fuel = fireView.getFuelByIndex(idx);
-        const isAshTile = (world.tileTypeId[idx] ?? -1) === TILE_TYPE_IDS.ash;
-        const flameProfile: FireFxTreeFlameProfile | null = treeBurn?.getTileFlameProfile(idx) ?? null;
-        const burnProgress = treeBurn?.getTileBurnProgress(idx) ?? 0;
-        const treeBurnVisual = treeBurn?.getTileBurnVisual(idx) ?? 0;
-        const hasCarryFuel = fuel > TREE_BURN_CARRY_FUEL_MIN && !isAshTile;
-        const hasTreeCarryFlame =
-          hasCarryFuel &&
-          flameProfile !== null &&
-          treeBurnVisual > TREE_BURN_FLAME_VISUAL_MIN &&
-          burnProgress > TREE_BURN_CARRY_PROGRESS_MIN &&
-          heat > 0.08;
-        if (fire > simFireEps || hasTreeCarryFlame) {
-          tileActiveFlag[idx] = 1;
-        }
-      }
-    }
-
-    let clusterId = 0;
-    let clusteredTiles = 0;
-    for (let y = minY; y <= maxY; y += 1) {
-      const rowBase = y * cols;
-      for (let x = minX; x <= maxX; x += 1) {
-        const idx = rowBase + x;
-        if (tileActiveFlag[idx] === 0 || tileClusterId[idx] >= 0) {
-          continue;
-        }
-        const cluster = allocFireCluster();
-        cluster.id = clusterId;
-        cluster.minX = x;
-        cluster.maxX = x;
-        cluster.minY = y;
-        cluster.maxY = y;
-        cluster.sourceIdx = idx;
-        cluster.anchorSource = "terrainSurface";
-        let weightedX = 0;
-        let weightedZ = 0;
-        let weightedY = 0;
-        let weightSum = 0;
-        let weightMax = 0;
-        let heatSum01 = 0;
-        let fuelSum01 = 0;
-        const anchorSourceWeights = [0, 0, 0, 0];
-        queueHead = 0;
-        queueTail = 0;
-        clusterQueue[queueTail++] = idx;
-        tileClusterId[idx] = clusterId;
-        while (queueHead < queueTail) {
-          const current = clusterQueue[queueHead++];
-          const cx = current % cols;
-          const cy = Math.floor(current / cols);
-          cluster.tiles.push(current);
-          cluster.tileCount += 1;
-          if (cx < cluster.minX) {
-            cluster.minX = cx;
-          }
-          if (cx > cluster.maxX) {
-            cluster.maxX = cx;
-          }
-          if (cy < cluster.minY) {
-            cluster.minY = cy;
-          }
-          if (cy > cluster.maxY) {
-            cluster.maxY = cy;
-          }
-          const fire = fireView.getFireByIndex(current);
-          const heat = fireView.getHeat01ByIndex(current);
-          const fuel = fireView.getFuelByIndex(current);
-          const treeBurnVisual = treeBurn?.getTileBurnVisual(current) ?? 0;
-          const w = clamp(Math.max(fire, heat * 0.5, treeBurnVisual * 0.75), 0.01, 1.4);
-          heatSum01 += heat;
-          fuelSum01 += fuel;
-          const groundAnchor = resolveGroundAnchor(current);
-          weightedX += groundAnchor.position.x * w;
-          weightedZ += groundAnchor.position.z * w;
-          weightedY += groundAnchor.position.y * w;
-          weightSum += w;
-          accumulateAnchorSourceWeight(anchorSourceWeights, groundAnchor.source, w);
-          if (w > weightMax) {
-            weightMax = w;
-            cluster.sourceIdx = current;
-          }
-          for (let oy = -sampleStep; oy <= sampleStep; oy += sampleStep) {
-            for (let ox = -sampleStep; ox <= sampleStep; ox += sampleStep) {
-              if (ox === 0 && oy === 0) {
-                continue;
-              }
-              const nx = cx + ox;
-              const ny = cy + oy;
-              if (nx < minX || nx > maxX || ny < minY || ny > maxY) {
-                continue;
-              }
-              const nIdx = ny * cols + nx;
-              if (tileActiveFlag[nIdx] === 0 || tileClusterId[nIdx] >= 0) {
-                continue;
-              }
-              tileClusterId[nIdx] = clusterId;
-              clusterQueue[queueTail++] = nIdx;
-            }
-          }
-        }
-        if (cluster.tileCount < CLUSTER_MIN_TILES) {
-          for (let i = 0; i < cluster.tiles.length; i += 1) {
-            const tid = cluster.tiles[i];
-            tileClusterId[tid] = -1;
-            tileClusterRole[tid] = 0;
-          }
-          cluster.tiles.length = 0;
-          fireClusterPool.push(cluster);
-          continue;
-        }
-        cluster.centroidX = weightedX / Math.max(0.0001, weightSum);
-        cluster.centroidZ = weightedZ / Math.max(0.0001, weightSum);
-        cluster.baseY = weightedY / Math.max(0.0001, weightSum);
-        cluster.anchorSource = pickDominantAnchorSource(anchorSourceWeights);
-        const avgWeight = weightSum / Math.max(1, cluster.tileCount);
-        cluster.intensity = clamp(avgWeight * 0.7 + weightMax * 0.3, 0, 1.25);
-        cluster.heatSum01 = heatSum01;
-        cluster.heatMean01 = heatSum01 / Math.max(1, cluster.tileCount);
-        cluster.fuelMean01 = fuelSum01 / Math.max(1, cluster.tileCount);
-        cluster.intensity01 = computeFireAudioIntensity(cluster.heatMean01, cluster.fuelMean01);
-        let radius = 0;
-        let edgeTiles = 0;
-        let interiorTiles = 0;
-        let covXX = 0;
-        let covXZ = 0;
-        let covZZ = 0;
-        for (let i = 0; i < cluster.tiles.length; i += 1) {
-          const tid = cluster.tiles[i];
-          const tx = tid % cols;
-          const ty = Math.floor(tid / cols);
-          const tileAnchor = resolveGroundAnchor(tid);
-          const wx = tileAnchor.position.x;
-          const wz = tileAnchor.position.z;
-          const dx = wx - cluster.centroidX;
-          const dz = wz - cluster.centroidZ;
-          covXX += dx * dx;
-          covXZ += dx * dz;
-          covZZ += dz * dz;
-          radius = Math.max(radius, Math.hypot(wx - cluster.centroidX, wz - cluster.centroidZ));
-          let neighborCount = 0;
-          for (let oy = -sampleStep; oy <= sampleStep; oy += sampleStep) {
-            for (let ox = -sampleStep; ox <= sampleStep; ox += sampleStep) {
-              if (ox === 0 && oy === 0) {
-                continue;
-              }
-              const nx = tx + ox;
-              const ny = ty + oy;
-              if (nx < minX || nx > maxX || ny < minY || ny > maxY) {
-                continue;
-              }
-              const nIdx = ny * cols + nx;
-              if (tileClusterId[nIdx] === clusterId) {
-                neighborCount += 1;
-              }
-            }
-          }
-          if (neighborCount >= INTERIOR_NEIGHBOR_MIN) {
-            tileClusterRole[tid] = 2;
-            interiorTiles += 1;
-          } else {
-            tileClusterRole[tid] = 1;
-            edgeTiles += 1;
-          }
-        }
-        let spanAxisX = 1;
-        let spanAxisZ = 0;
-        const covTrace = covXX + covZZ;
-        if (covTrace > 0.0001) {
-          const angle = 0.5 * Math.atan2(2 * covXZ, covXX - covZZ);
-          spanAxisX = Math.cos(angle);
-          spanAxisZ = Math.sin(angle);
-        }
-        const windLen = Math.hypot(windX, windZ);
-        if (windLen > 0.0001) {
-          const crossWindAxisX = -windZ / windLen;
-          const crossWindAxisZ = windX / windLen;
-          if (spanAxisX * crossWindAxisX + spanAxisZ * crossWindAxisZ < 0) {
-            spanAxisX *= -1;
-            spanAxisZ *= -1;
-          }
-          const crossWindBlend = cluster.tileCount >= CLUSTER_FULL_BLEND_TILES ? 0.45 : 0.22;
-          spanAxisX += (crossWindAxisX - spanAxisX) * crossWindBlend;
-          spanAxisZ += (crossWindAxisZ - spanAxisZ) * crossWindBlend;
-          const spanLen = Math.hypot(spanAxisX, spanAxisZ) || 1;
-          spanAxisX /= spanLen;
-          spanAxisZ /= spanLen;
-        }
-        let depthAxisX = -spanAxisZ;
-        let depthAxisZ = spanAxisX;
-        if (windLen > 0.0001) {
-          const windNormX = windX / windLen;
-          const windNormZ = windZ / windLen;
-          if (depthAxisX * windNormX + depthAxisZ * windNormZ < 0) {
-            depthAxisX *= -1;
-            depthAxisZ *= -1;
-          }
-        }
-        cluster.spanAxisX = spanAxisX;
-        cluster.spanAxisZ = spanAxisZ;
-        cluster.depthAxisX = depthAxisX;
-        cluster.depthAxisZ = depthAxisZ;
-        cluster.radius = Math.max(radius, Math.min(terrainSize.width / cols, terrainSize.depth / rows) * 0.8);
-        cluster.edgeTiles = edgeTiles;
-        cluster.interiorTiles = interiorTiles;
-        fireClusters.push(cluster);
-        clusteredTiles += cluster.tileCount;
-        clusterId += 1;
-      }
-    }
-    return { clusterCount: fireClusters.length, clusteredTiles };
-  };
-
-  const computeClusterBudgets = (
-    flameBudgetScale: number,
-    activeFlameTileCount: number,
-    clusteredTiles: number,
-    availableFlameInstances: number
-  ): ClusterBudgetState => {
-    const clusterCoverage = clusteredTiles / Math.max(1, activeFlameTileCount);
-    const flameCapacity = Math.max(96, availableFlameInstances);
-    const reserveBed = Math.max(0, Math.round(flameCapacity * clusterCoverage * 0.14 * flameBudgetScale));
-    const reservePlume = Math.max(0, Math.round(flameCapacity * clusterCoverage * 0.08 * flameBudgetScale));
-    const reserveTileJets = clamp(
-      flameCapacity - reserveBed - reservePlume,
-      Math.max(80, Math.round(flameCapacity * 0.3)),
-      flameCapacity
-    );
-    let weightSum = 0;
-    for (let i = 0; i < fireClusters.length; i += 1) {
-      const cluster = fireClusters[i];
-      weightSum += cluster.tileCount * (0.65 + cluster.intensity * 0.35);
-    }
-    for (let i = 0; i < fireClusters.length; i += 1) {
-      const cluster = fireClusters[i];
-      const clusterWeight = cluster.tileCount * (0.65 + cluster.intensity * 0.35);
-      const normW = weightSum > 0 ? clusterWeight / weightSum : 1 / Math.max(1, fireClusters.length);
-      cluster.bedBudget =
-        reserveBed > 0
-          ? clamp(Math.round(reserveBed * normW), 2, CLUSTER_BED_MAX_PER_CLUSTER)
-          : 0;
-      let plumeAnchors = reservePlume > 0 ? (cluster.tileCount > 25 ? 3 : cluster.tileCount > 10 ? 2 : 1) : 0;
-      if (flameBudgetScale < 0.72) {
-        plumeAnchors = Math.min(plumeAnchors, 2);
-      }
-      if (flameBudgetScale < 0.5) {
-        plumeAnchors = 1;
-      }
-      if (cluster.intensity < 0.24) {
-        plumeAnchors = Math.min(plumeAnchors, 1);
-      }
-      cluster.plumeBudget = clamp(plumeAnchors, 0, CLUSTER_PLUME_MAX_PER_CLUSTER);
-    }
-    return {
-      clusteredTiles,
-      clusterCoverage,
-      reserveBed,
-      reservePlume,
-      reserveTileJets
-    };
   };
 
   const update = (
@@ -1772,8 +1139,7 @@ export const createThreeTestFireFx = (
     const fireAlpha = world.simTimeMode === "incident" ? 1 : fireSimulationAlpha;
     const fireView = createFireFieldView(previousSnapshot, currentSnapshot, fireAlpha, heatCap);
     const hasActiveFire = fireView.lastActiveFires > 0;
-    const hasPendingIgnition = fireView.fireScheduledCount > 0;
-    const hasFireWork = hasActiveFire || hasPendingIgnition || fireView.hasBounds;
+    const hasFireWork = hasActiveFire || fireView.hasBounds;
     const useFireBounds = fireView.hasBounds;
     const hasActiveSmoke = hasActiveSmokeParticles();
     const smokeOnlyMode = !useFireBounds && !treeBounds;
@@ -1787,135 +1153,6 @@ export const createThreeTestFireFx = (
     }
     snapshotMs = performance.now() - snapshotStartedAt;
     const analysisStartedAt = performance.now();
-    const minIntervalMs =
-      isRenderPaused
-        ? FIRE_FX_PAUSED_UPDATE_INTERVAL_MS
-        : hasFireWork || hasActiveSmoke
-          ? FIRE_FX_ACTIVE_UPDATE_INTERVAL_MS
-          : FIRE_FX_IDLE_UPDATE_INTERVAL_MS;
-    if (frameTimeMs - lastRebuildTimeMs < minIntervalMs) {
-      return;
-    }
-    lastRebuildTimeMs = frameTimeMs;
-    const deltaSeconds = pendingDeltaSeconds > 0 ? clamp(pendingDeltaSeconds, 1 / 240, 0.08) : 0;
-    const smokeDeltaSeconds = pendingSmokeDeltaSeconds > 0 ? clamp(pendingSmokeDeltaSeconds, 0, 0.08) : 0;
-    pendingDeltaSeconds = 0;
-    pendingSmokeDeltaSeconds = 0;
-    renderContinuityState.localSlotChurn = 0;
-    renderContinuityState.objectSlotChurn = 0;
-    renderContinuityState.frontSlotChurn = 0;
-    renderContinuityState.budgetClampedDrops = 0;
-    const envAlpha = 1 - Math.exp(-deltaSeconds / 1.2);
-    envCurrent.smoke01 += (envTarget.smoke01 - envCurrent.smoke01) * envAlpha;
-    envCurrent.denseSmoke01 += (envTarget.denseSmoke01 - envCurrent.denseSmoke01) * envAlpha;
-    envCurrent.fireLoad01 += (envTarget.fireLoad01 - envCurrent.fireLoad01) * envAlpha;
-    envCurrent.orangeGlow01 += (envTarget.orangeGlow01 - envCurrent.orangeGlow01) * envAlpha;
-    sunDirectionCurrent.lerp(sunDirectionTarget, envAlpha).normalize();
-    sunTintCurrent.lerp(sunTintTarget, envAlpha);
-    smokeTintCurrent.lerp(smokeTintTarget, envAlpha);
-    const envOrange = clamp(envCurrent.orangeGlow01, 0, 1);
-    const wallBlend = debugControls.wallBlend;
-    const heroVolumetricShare = debugControls.heroVolumetricShare;
-    const emergencyOverload =
-      (Number.isFinite(fpsEstimate) && fpsEstimate > 0 && fpsEstimate <= FIRE_FX_EMERGENCY_FPS) ||
-      (Number.isFinite(sceneRenderMs) && sceneRenderMs >= FIRE_FX_EMERGENCY_SCENE_MS);
-    const overloaded =
-      emergencyOverload ||
-      ((Number.isFinite(fpsEstimate) && fpsEstimate > 0 && fpsEstimate <= FIRE_FX_OVERLOAD_FPS) ||
-        (Number.isFinite(sceneRenderMs) && sceneRenderMs >= FIRE_FX_OVERLOAD_SCENE_MS));
-    const flameBudgetPressureScale = isRenderPaused
-      ? FIRE_FX_PAUSED_FLAME_BUDGET_SCALE
-      : emergencyOverload
-        ? FIRE_FX_EMERGENCY_FLAME_BUDGET_SCALE
-        : overloaded
-          ? FIRE_FX_OVERLOAD_FLAME_BUDGET_SCALE
-          : 1;
-    const flameBudgetBaseScale =
-      debugControls.budgetScale * flameBudgetPressureScale;
-    const flameIntensityBoost = debugControls.flameIntensityBoost;
-    const groundGlowBoost = debugControls.groundGlowBoost;
-    const emberBoost = debugControls.emberBoost;
-    const flameHeightBoost = clamp(0.94 + (debugControls.flameIntensityBoost - 1) * 0.72, 0.8, 1.4);
-    const flameWidthBoost = clamp((1 + (debugControls.flameIntensityBoost - 1) * 0.28) * 1.18, 0.96, 1.55);
-    const groundGlowSizeBoost = clamp(1 + (debugControls.groundGlowBoost - 1) * 0.9, 0.85, 1.8);
-    const groundGlowCountBoost = clamp(1 + (debugControls.groundGlowBoost - 1) * 0.75, 0.8, 1.6);
-    const emberEjectBoost = clamp(1 + (debugControls.emberBoost - 1) * 1.15, 0.85, 2.2);
-    const sparkDebug = debugControls.sparkDebug;
-    const sparkMode = debugControls.sparkMode;
-    const showFrontPass = debugControls.showFrontPass;
-    const showClusterFlames = debugControls.showClusterFlames;
-    const showSmoke = debugControls.showSmoke;
-    const showSparks = debugControls.showSparks;
-    const showGroundGlow = debugControls.showGroundGlow;
-    const useTipStreaks = showSparks && !isRenderPaused && !overloaded && sparkMode !== "embers";
-    const useFreeEmbers = showSparks && !isRenderPaused && !overloaded && sparkMode !== "tip";
-    const freeEmberModeScale = sparkMode === "mixed" ? 0.4 : 1;
-    const fallbackMode = debugControls.fallbackMode;
-    const smokeDensityScale =
-      debugControls.smokeDensityScale *
-      (isRenderPaused
-        ? FIRE_FX_PAUSED_SMOKE_DENSITY_SCALE
-        : emergencyOverload
-          ? FIRE_FX_EMERGENCY_SMOKE_DENSITY_SCALE
-          : overloaded
-            ? FIRE_FX_OVERLOAD_SMOKE_DENSITY_SCALE
-            : 1);
-    if (Number.isFinite(fpsEstimate) && fpsEstimate > 0 && Number.isFinite(sceneRenderMs) && sceneRenderMs > 0) {
-      const overloaded = fpsEstimate < SMOKE_QUALITY_FALLBACK_FPS || sceneRenderMs > SMOKE_QUALITY_FALLBACK_SCENE_MS;
-      if (overloaded) {
-        smokeFallbackAccum += frameDeltaSeconds;
-      } else {
-        smokeFallbackAccum = Math.max(0, smokeFallbackAccum - frameDeltaSeconds * 0.7);
-      }
-      const healthy = fpsEstimate > SMOKE_QUALITY_RECOVERY_FPS && sceneRenderMs < SMOKE_QUALITY_RECOVERY_SCENE_MS;
-      if (healthy) {
-        smokeRecoveryAccum += frameDeltaSeconds;
-      } else {
-        smokeRecoveryAccum = Math.max(0, smokeRecoveryAccum - frameDeltaSeconds * 0.4);
-      }
-      if (smokeFallbackAccum >= SMOKE_QUALITY_FALLBACK_SECONDS) {
-        smokeBudgetScale = Math.max(SMOKE_BUDGET_MIN_SCALE, smokeBudgetScale * 0.8);
-        smokeFallbackAccum = 0;
-        smokeRecoveryAccum = 0;
-      } else if (smokeRecoveryAccum >= SMOKE_QUALITY_RECOVERY_SECONDS) {
-        smokeBudgetScale = Math.min(1, smokeBudgetScale + 0.08);
-        smokeRecoveryAccum = 0;
-      }
-      if (fallbackMode !== "off") {
-        const fallbackFps = fallbackMode === "gentle" ? 54 : 58;
-        const recoveryFps = fallbackMode === "gentle" ? 60 : 62;
-        const fallbackSceneMs = fallbackMode === "gentle" ? 15 : 13;
-        const recoverySceneMs = fallbackMode === "gentle" ? 11.5 : 10.5;
-        const fallbackSeconds = fallbackMode === "gentle" ? 1.7 : 0.85;
-        const recoverySeconds = fallbackMode === "gentle" ? 4.2 : 5.5;
-        const overloadedFlames = fpsEstimate < fallbackFps || sceneRenderMs > fallbackSceneMs;
-        if (overloadedFlames) {
-          flameFallbackAccum += deltaSeconds;
-        } else {
-          flameFallbackAccum = Math.max(0, flameFallbackAccum - deltaSeconds * 0.75);
-        }
-        const healthyFlames = fpsEstimate > recoveryFps && sceneRenderMs < recoverySceneMs;
-        if (healthyFlames) {
-          flameRecoveryAccum += deltaSeconds;
-        } else {
-          flameRecoveryAccum = Math.max(0, flameRecoveryAccum - deltaSeconds * 0.45);
-        }
-        if (flameFallbackAccum >= fallbackSeconds) {
-          const decay = fallbackMode === "gentle" ? 0.88 : 0.74;
-          flameBudgetScale = Math.max(FLAME_BUDGET_MIN_SCALE, flameBudgetScale * decay);
-          flameFallbackAccum = 0;
-          flameRecoveryAccum = 0;
-        } else if (flameRecoveryAccum >= recoverySeconds) {
-          const recoveryStep = fallbackMode === "gentle" ? 0.05 : 0.1;
-          flameBudgetScale = Math.min(1, flameBudgetScale + recoveryStep);
-          flameRecoveryAccum = 0;
-        }
-      } else {
-        flameBudgetScale = 1;
-        flameFallbackAccum = 0;
-        flameRecoveryAccum = 0;
-      }
-    }
     const minX =
       smokeOnlyMode
         ? 0
@@ -1943,15 +1180,75 @@ export const createThreeTestFireFx = (
     const width = Math.max(1, maxX - minX + 1);
     const height = Math.max(1, maxY - minY + 1);
     const area = width * height;
-    const trackedFireTiles = Math.max(0, fireView.lastActiveFires + fireView.fireScheduledCount);
-    const tilesPerTrackedFire = trackedFireTiles > 0 ? area / trackedFireTiles : area;
-    // Sparse incidents can disappear entirely if we subsample only by bounds area.
-    // Keep full-resolution sampling while active/scheduled tiles are thinly spread out.
-    const preferSparseFullResolution = trackedFireTiles > 0 && tilesPerTrackedFire >= 32;
-    const sampleStep =
-      preferSparseFullResolution || area <= 8192
-        ? 1
-        : Math.max(1, Math.ceil(Math.sqrt(area / Math.max(1, FIRE_MAX_INSTANCES))));
+    const trackedFireTiles = Math.max(0, fireView.lastActiveFires);
+    const pausedVisualSettleDeltaSeconds =
+      isRenderPaused && hasFireWork
+        ? clamp(Math.max(frameDeltaSeconds, FIRE_FX_PAUSED_VISUAL_SETTLE_DELTA_SECONDS), 1 / 240, 0.08)
+        : 0;
+    const pendingFrameDeltaSeconds =
+      pendingDeltaSeconds > 0 ? clamp(pendingDeltaSeconds, 1 / 240, 0.08) : pausedVisualSettleDeltaSeconds;
+    const pendingFrameSmokeDeltaSeconds = pendingSmokeDeltaSeconds > 0 ? clamp(pendingSmokeDeltaSeconds, 0, 0.08) : 0;
+    const renderBudgetPlan = buildFireRenderBudgetPlan(adaptiveState, {
+      controls: debugControls,
+      frameDeltaSeconds,
+      deltaSeconds: pendingFrameDeltaSeconds,
+      fpsEstimate,
+      sceneRenderMs,
+      animationRate,
+      hasFireWork,
+      hasActiveSmoke,
+      trackedFireTiles,
+      area,
+      smokeOnlyMode,
+      fireMaxInstances: FIRE_MAX_INSTANCES,
+      smokeMaxInstances: SMOKE_MAX_INSTANCES
+    });
+    if (frameTimeMs - lastRebuildTimeMs < renderBudgetPlan.minIntervalMs) {
+      return;
+    }
+    lastRebuildTimeMs = frameTimeMs;
+    adaptiveState = renderBudgetPlan.nextAdaptiveState;
+    const deltaSeconds = pendingFrameDeltaSeconds;
+    const smokeDeltaSeconds = pendingFrameSmokeDeltaSeconds;
+    pendingDeltaSeconds = 0;
+    pendingSmokeDeltaSeconds = 0;
+    resetFireRenderContinuityState(analysisState);
+    const renderContinuityState = analysisState.renderContinuityState;
+    const envAlpha = 1 - Math.exp(-deltaSeconds / 1.2);
+    envCurrent.smoke01 += (envTarget.smoke01 - envCurrent.smoke01) * envAlpha;
+    envCurrent.denseSmoke01 += (envTarget.denseSmoke01 - envCurrent.denseSmoke01) * envAlpha;
+    envCurrent.fireLoad01 += (envTarget.fireLoad01 - envCurrent.fireLoad01) * envAlpha;
+    envCurrent.orangeGlow01 += (envTarget.orangeGlow01 - envCurrent.orangeGlow01) * envAlpha;
+    sunDirectionCurrent.lerp(sunDirectionTarget, envAlpha).normalize();
+    sunTintCurrent.lerp(sunTintTarget, envAlpha);
+    smokeTintCurrent.lerp(smokeTintTarget, envAlpha);
+    const envOrange = clamp(envCurrent.orangeGlow01, 0, 1);
+    const wallBlend = debugControls.wallBlend;
+    const flameIntensityBoost = debugControls.flameIntensityBoost;
+    const groundGlowBoost = debugControls.groundGlowBoost;
+    const emberBoost = debugControls.emberBoost;
+    const flameHeightBoost = clamp(0.94 + (debugControls.flameIntensityBoost - 1) * 0.72, 0.8, 1.4);
+    const flameWidthBoost = clamp((1 + (debugControls.flameIntensityBoost - 1) * 0.28) * 1.18, 0.96, 1.55);
+    const groundGlowSizeBoost = clamp(1 + (debugControls.groundGlowBoost - 1) * 0.9, 0.85, 1.8);
+    const groundGlowCountBoost = clamp(1 + (debugControls.groundGlowBoost - 1) * 0.75, 0.8, 1.6);
+    const emberEjectBoost = clamp(1 + (debugControls.emberBoost - 1) * 1.15, 0.85, 2.2);
+    const sparkDebug = debugControls.sparkDebug;
+    const sparkMode = debugControls.sparkMode;
+    const showFrontPass = debugControls.showFrontPass;
+    const showClusterFlames = debugControls.showClusterFlames;
+    const showSmoke = debugControls.showSmoke;
+    const showSparks = debugControls.showSparks;
+    const showGroundGlow = debugControls.showGroundGlow;
+    const overloaded = renderBudgetPlan.overloaded;
+    const emergencyOverload = renderBudgetPlan.emergencyOverload;
+    const useTipStreaks = showSparks && !isRenderPaused && !overloaded && sparkMode !== "embers";
+    const useFreeEmbers = showSparks && !isRenderPaused && !overloaded && sparkMode !== "tip";
+    const freeEmberModeScale = sparkMode === "mixed" ? 0.4 : 1;
+    const flameBudgetBaseScale = renderBudgetPlan.flameBudgetBaseScale;
+    const smokeDensityScale = renderBudgetPlan.smokeDensityScale;
+    const flameBudgetScale = adaptiveState.flameBudgetScale;
+    const smokeBudgetScale = adaptiveState.smokeBudgetScale;
+    const sampleStep = renderBudgetPlan.sampleStep;
     const tileSpanX = terrainSize.width / Math.max(1, cols);
     const tileSpanZ = terrainSize.depth / Math.max(1, rows);
     const tileSpan = Math.max(0.0001, Math.min(tileSpanX, tileSpanZ));
@@ -1966,6 +1263,9 @@ export const createThreeTestFireFx = (
     const windZ = wind?.dy ?? 0;
     const windStrength = wind?.strength ?? 0;
     const windResponse = getVisualWindResponse(windStrength);
+    const windDirLen = Math.hypot(windX, windZ);
+    const windNormX = windDirLen > 0.0001 ? windX / windDirLen : 0;
+    const windNormZ = windDirLen > 0.0001 ? windZ / windDirLen : 0;
     const crossWindX = -windZ;
     const crossWindZ = windX;
     const windLeanX = windX * windStrength * windResponse.flame;
@@ -2033,39 +1333,14 @@ export const createThreeTestFireFx = (
     const terrainMaxX = terrainSize.width * 0.5;
     const terrainMinZ = -terrainSize.depth * 0.5;
     const terrainMaxZ = terrainSize.depth * 0.5;
-    const flameFallbackPressure = clamp(1 - flameBudgetScale, 0, 1);
-    const flameDensityScale = clamp(
-      flameBudgetBaseScale * (1 - Math.max(0, flameFallbackPressure - 0.12) * 1.05),
-      0.2,
-      1.25
-    );
-    const groundDensityScale = clamp(
-      flameBudgetBaseScale * (1 - Math.max(0, flameFallbackPressure - 0.32) * 1.25),
-      0.18,
-      1.15
-    );
-    const heroCrossDensity = clamp(
-      heroVolumetricShare * flameBudgetBaseScale * (1 - flameFallbackPressure * 1.45),
-      0,
-      1
-    );
+    const flameDensityScale = renderBudgetPlan.flameDensityScale;
+    const groundDensityScale = renderBudgetPlan.groundDensityScale;
+    const heroCrossDensity = renderBudgetPlan.heroCrossDensity;
     const crossSliceBudget01 = clamp((flameBudgetScale - 0.38) / 0.62, 0, 1);
     const sliceComplexityScale = clamp(1 - crossSliceBudget01 * 0.18, 0.72, 1);
     const kernelBudgetScale = flameBudgetScale >= 0.8 ? 1 : flameBudgetScale >= 0.58 ? 0.78 : 0.6;
-    const sparkStreakCap = Math.max(
-      140,
-      Math.floor(
-        SPARK_STREAK_MAX_INSTANCES *
-          clamp(flameBudgetBaseScale * (0.66 + flameBudgetScale * 0.34), 0.35, 1)
-      )
-    );
-    const emberCap = Math.max(
-      120,
-      Math.floor(
-        EMBER_MAX_INSTANCES *
-          clamp(flameBudgetBaseScale * (0.62 + flameBudgetScale * 0.38), 0.32, 1)
-      )
-    );
+    const sparkStreakCap = renderBudgetPlan.sparkStreakCap;
+    const emberCap = renderBudgetPlan.emberCap;
     let fireCount = 0;
     let fireCrossCount = 0;
     let glowCount = 0;
@@ -2125,463 +1400,143 @@ export const createThreeTestFireFx = (
         dirY,
         dirZ
       );
-    const effectiveSmokeBudgetScale = clamp(
-      (showSmoke ? smokeBudgetScale * smokeDensityScale : 0),
-      isRenderPaused ? 0.08 : 0.2,
-      2.5
-    );
-    const smokeSpawnFrameCap = showSmoke
-      ? Math.max(
-          12,
-          Math.min(
-            emergencyOverload ? 48 : overloaded ? 96 : SMOKE_MAX_INSTANCES,
-            Math.floor(SMOKE_MAX_INSTANCES * 0.26 * effectiveSmokeBudgetScale)
-          )
-        )
-      : 0;
-    const smokeRenderCapTarget = Math.floor(SMOKE_MAX_INSTANCES * effectiveSmokeBudgetScale);
-    const smokeRenderCap = showSmoke
-      ? Math.max(
-          isRenderPaused ? FIRE_FX_PAUSED_MIN_SMOKE_RENDER_CAP : 180,
-          Math.min(
-            isRenderPaused
-              ? FIRE_FX_PAUSED_MIN_SMOKE_RENDER_CAP * 4
-              : emergencyOverload
-                ? FIRE_FX_EMERGENCY_MAX_SMOKE_RENDER_CAP
-                : overloaded
-                  ? FIRE_FX_OVERLOAD_MAX_SMOKE_RENDER_CAP
-                  : SMOKE_MAX_INSTANCES,
-            smokeRenderCapTarget
-          )
-        )
-      : 0;
-    const smokeRenderStride = !showSmoke
-      ? 0
-      : isRenderPaused
-        ? Math.max(4, FIRE_FX_OVERLOAD_SMOKE_RENDER_STRIDE)
-        : emergencyOverload
-          ? FIRE_FX_EMERGENCY_SMOKE_RENDER_STRIDE
-          : overloaded
-            ? FIRE_FX_OVERLOAD_SMOKE_RENDER_STRIDE
-            : effectiveSmokeBudgetScale >= 0.9
-              ? 1
-              : effectiveSmokeBudgetScale >= 0.7
-                ? 2
-                : effectiveSmokeBudgetScale >= 0.5
-                  ? 3
-                  : 4;
+    const effectiveSmokeBudgetScale = showSmoke ? renderBudgetPlan.effectiveSmokeBudgetScale : 0;
+    const smokeSpawnFrameCap = showSmoke ? renderBudgetPlan.smokeSpawnFrameCap : 0;
+    const smokeRenderCap = showSmoke ? renderBudgetPlan.smokeRenderCap : 0;
+    const smokeRenderStride = showSmoke ? renderBudgetPlan.smokeRenderStride : 0;
     if (!showSmoke) {
       smokeParticleActive.fill(0);
     }
     let activeFlameTileCount = 0;
     let visualActiveWeight = 0;
-    for (let y = minY; y <= maxY; y += 1) {
-      const rowBase = y * cols;
-      for (let x = minX; x <= maxX; x += 1) {
-        const idx = rowBase + x;
-        const fire = fireView.getFireByIndex(idx);
-        if (fire > simFireEps) {
-          activeFlameTileCount += 1;
-          visualActiveWeight += clamp(
-            smoothstep(simFireEps * 0.5, 0.45, fire) + fire * 0.2 + fireView.getHeat01ByIndex(idx) * 0.14,
-            0,
-            1.2
-          );
-          continue;
-        }
-        const heat = fireView.getHeat01ByIndex(idx);
-        if (heat <= 0.08) {
-          continue;
-        }
-        const fuel = fireView.getFuelByIndex(idx);
-        const isAshTile = (world.tileTypeId[idx] ?? -1) === TILE_TYPE_IDS.ash;
-        if (fuel <= TREE_BURN_CARRY_FUEL_MIN || isAshTile) {
-          continue;
-        }
-        const flameProfile: FireFxTreeFlameProfile | null = treeBurn?.getTileFlameProfile(idx) ?? null;
-        if (!flameProfile) {
-          continue;
-        }
-        const treeBurnVisual = treeBurn?.getTileBurnVisual(idx) ?? 0;
-        const burnProgress = treeBurn?.getTileBurnProgress(idx) ?? 0;
-        if (treeBurnVisual > TREE_BURN_FLAME_VISUAL_MIN && burnProgress > TREE_BURN_CARRY_PROGRESS_MIN) {
-          activeFlameTileCount += 1;
-          visualActiveWeight += clamp(treeBurnVisual * 0.72 + heat * 0.18, 0, 0.95);
-        }
-      }
-    }
-    const boundsChanged =
-      sampleStep !== lastClusterSampleStep ||
-      minX !== lastClusterMinX ||
-      maxX !== lastClusterMaxX ||
-      minY !== lastClusterMinY ||
-      maxY !== lastClusterMaxY;
-    const activeCountChanged =
-      Math.abs(activeFlameTileCount - lastClusterActiveTileCount) / Math.max(1, lastClusterActiveTileCount) > 0.15;
-    const shouldRebuildClusters =
-      frameTimeMs - lastClusterRebuildMs >= CLUSTER_UPDATE_MS || activeCountChanged || boundsChanged;
-    if (shouldRebuildClusters) {
-      const clusterBuild = buildFireClusters(
-        world,
-        fireView,
-        cols,
-        rows,
-        minX,
-        maxX,
-        minY,
-        maxY,
-        sampleStep,
-        simFireEps,
+    const framePlan = analyzeFireRenderFrame({
+      state: analysisState,
+      audioClusters: audioClusterSnapshots,
+      world,
+      fireView,
+      terrainSize,
+      terrainSurface,
+      treeBurn,
+      timing: {
+        frameTimeMs,
+        frameDeltaSeconds,
+        deltaSeconds,
+        smokeDeltaSeconds,
+        animationTimeMs,
+        smokeAnimationTimeMs,
+        flameTimeSeconds,
+        sparkTimeSeconds,
+        fireShaderTime
+      },
+      wind: {
         windX,
         windZ,
-        treeBurn,
-        terrainSize,
-        resolveGroundAnchor
-      );
-      clusterCount = clusterBuild.clusterCount;
-      clusteredTiles = clusterBuild.clusteredTiles;
-      lastClusterRebuildMs = frameTimeMs;
-      lastClusterActiveTileCount = activeFlameTileCount;
-      lastClusterSampleStep = sampleStep;
-      lastClusterMinX = minX;
-      lastClusterMaxX = maxX;
-      lastClusterMinY = minY;
-      lastClusterMaxY = maxY;
-    } else {
-      clusterCount = fireClusters.length;
-      clusteredTiles = fireClusters.reduce((sum, cluster) => sum + cluster.tileCount, 0);
-    }
-    const windDirLen = Math.hypot(windX, windZ);
-    const windNormX = windDirLen > 0.0001 ? windX / windDirLen : 0;
-    const windNormZ = windDirLen > 0.0001 ? windZ / windDirLen : 0;
-    const getHeat01 = (tileIdx: number): number => fireView.getHeat01ByIndex(tileIdx);
-    const getFrontTileVisualDrive = (tileIdx: number): number => {
-      const fire = fireView.getFireByIndex(tileIdx);
-      const heat = getHeat01(tileIdx);
-      const flameVisual = tileFlameVisual[tileIdx] ?? 0;
-      const ignitionAge = tileIgnitionAgeSeconds[tileIdx] ?? 0;
-      const treeBurnVisual = treeBurn?.getTileBurnVisual(tileIdx) ?? 0;
-      const fuel = fireView.getFuelByIndex(tileIdx);
-      const isAshTile = (world.tileTypeId[tileIdx] ?? -1) === TILE_TYPE_IDS.ash;
-      const flameProfile: FireFxTreeFlameProfile | null = treeBurn?.getTileFlameProfile(tileIdx) ?? null;
-      const burnProgress = treeBurn?.getTileBurnProgress(tileIdx) ?? 0;
-      const hasTreeCarryFlame =
-        !isAshTile &&
-        fuel > TREE_BURN_CARRY_FUEL_MIN &&
-        flameProfile !== null &&
-        treeBurnVisual > TREE_BURN_FLAME_VISUAL_MIN &&
-        burnProgress > TREE_BURN_CARRY_PROGRESS_MIN &&
-        heat > 0.08;
-      if (fire <= simFireEps && !hasTreeCarryFlame) {
-        return 0;
-      }
-      const treeCarryVisual =
-        !isAshTile && fuel > TREE_BURN_CARRY_FUEL_MIN
-          ? treeBurnVisual * (0.54 + smoothstep(0.08, 0.72, heat) * 0.34)
-          : 0;
-      const freshIgnitionVisual =
-        smoothstep(Math.max(simFireEps * 0.25, 0.02), 0.22, fire) *
-        (1 - smoothstep(1.6, 4.6, ignitionAge));
-      return clamp(
-        Math.max(
-          fire * 0.88 + heat * 0.28 + flameVisual * 0.14,
-          flameVisual * 0.96 + heat * 0.22,
-          treeCarryVisual + heat * 0.16,
-          freshIgnitionVisual * 0.28 + heat * 0.12
-        ),
-        0,
-        1.35
-      );
-    };
-    const getFrontTileIgnitionSignal = (tileIdx: number): number => {
-      const fire = fireView.getFireByIndex(tileIdx);
-      const heat = getHeat01(tileIdx);
-      const scheduled = fireView.getScheduledByIndex(tileIdx);
-      const flameVisual = tileFlameVisual[tileIdx] ?? 0;
-      const ignitionAge = tileIgnitionAgeSeconds[tileIdx] ?? 0;
-      const wetness = fireView.getWetnessByIndex(tileIdx);
-      const freshIgnition01 =
-        smoothstep(Math.max(simFireEps * 0.18, 0.02), 0.2, fire) *
-        (1 - smoothstep(1.3, 4.4, ignitionAge));
-      return clamp(
-        scheduled * 0.58 +
-          heat * (0.58 - wetness * 0.18) +
-          flameVisual * 0.34 +
-          freshIgnition01 * 0.62,
-        0,
-        1.2
-      );
-    };
-    tileFrontPerimeter01.fill(0);
-    tileFrontArrival01.fill(0);
-    tileFrontAdvance01.fill(0);
-    tileFrontDirX.fill(0);
-    tileFrontDirZ.fill(0);
-    const activeFrontStates: DirectedFrontEdgeState[] = [];
-    let visualFrontWeight = 0;
-    const frontPassEnabled = showFrontPass && ENABLE_FLAME_FRONT_PASS && !isRenderPaused && !overloaded;
-    const frontFrameId = frontPassEnabled ? (frontUpdateSerial += 1) : frontUpdateSerial;
-    if (frontPassEnabled) {
-      for (let y = minY; y <= maxY; y += 1) {
-        const rowBase = y * cols;
-        for (let x = minX; x <= maxX; x += 1) {
-          const sourceIdx = rowBase + x;
-          const sourceDriveTarget = getFrontTileVisualDrive(sourceIdx);
-          if (sourceDriveTarget <= 0.06) {
-            continue;
-          }
-          for (let dir = 0; dir < FRONT_DIRECTION_DATA.length; dir += 1) {
-            const direction = FRONT_DIRECTION_DATA[dir]!;
-            const destX = x + direction.dx;
-            const destY = y + direction.dy;
-            if (destX < minX || destX > maxX || destY < minY || destY > maxY) {
-              continue;
-            }
-            const destIdx = destY * cols + destX;
-            const destFuel = fireView.getFuelByIndex(destIdx);
-            const destTypeId = world.tileTypeId[destIdx] ?? -1;
-            if (destFuel <= 0.01 || destTypeId === TILE_TYPE_IDS.ash) {
-              continue;
-            }
-            const destFire = fireView.getFireByIndex(destIdx);
-            const destHeat = getHeat01(destIdx);
-            const destFlameVisual = tileFlameVisual[destIdx] ?? 0;
-            const destIgnitionAge = tileIgnitionAgeSeconds[destIdx] ?? 0;
-            const destIgnitionTarget = getFrontTileIgnitionSignal(destIdx);
-            const windPush = windDirLen > 0.0001 ? Math.max(0, direction.normalX * windNormX + direction.normalZ * windNormZ) : 0;
-            const neighbourCarry = clamp(destFire * 0.76 + destHeat * 0.38 + destFlameVisual * 0.72, 0, 1.3);
-            const spreadGradient = sourceDriveTarget - neighbourCarry * 0.72 + windPush * 0.16;
-            const destFreshFire01 =
-              smoothstep(Math.max(simFireEps * 0.16, 0.02), 0.24, destFire) *
-              (1 - smoothstep(1.4, 5.1, destIgnitionAge));
-            const destBurnMature01 = clamp(
-              smoothstep(Math.max(simFireEps * 0.25, 0.04), 0.42, destFire) * 0.64 +
-                smoothstep(0.08, 0.54, destFlameVisual) * 0.42 +
-                smoothstep(0.9, 3.4, destIgnitionAge) * 0.34,
-              0,
-              1.15
-            );
-            const shouldExplainSpread =
-              destIgnitionTarget > 0.05 ||
-              destFreshFire01 > 0.04 ||
-              (destFire <= simFireEps * 0.6 && spreadGradient > 0.04);
-            if (!shouldExplainSpread || (destBurnMature01 > 0.92 && spreadGradient < 0.14)) {
-              continue;
-            }
-            const sourceAnchor = resolveGroundAnchor(sourceIdx);
-            const destAnchor = resolveGroundAnchor(destIdx);
-            const stateKey = getFrontEdgeKey(sourceIdx, dir as FrontDirection);
-            let state = frontEdgeStates.get(stateKey);
-            if (!state) {
-              state = {
-                key: stateKey,
-                sourceTileIdx: sourceIdx,
-                destTileIdx: destIdx,
-                sourceTileX: x,
-                sourceTileY: y,
-                destTileX: destX,
-                destTileY: destY,
-                dir: dir as FrontDirection,
-                normalX: direction.normalX,
-                normalZ: direction.normalZ,
-                tangentX: direction.tangentX,
-                tangentZ: direction.tangentZ,
-                orientation: direction.orientation,
-                fixedCoord: 0,
-                alongCoord: 0,
-                edgeCenterX: 0,
-                edgeCenterY: 0,
-                edgeCenterZ: 0,
-                normalY: 1,
-                dominantSource: "terrainSurface",
-                presence01: 0,
-                advance01: 0,
-                sourceDrive01: 0,
-                destIgnition01: 0,
-                passed01: 0,
-                lastActiveFrame: frontFrameId
-              };
-              frontEdgeStates.set(stateKey, state);
-            }
-            state.sourceTileIdx = sourceIdx;
-            state.destTileIdx = destIdx;
-            state.sourceTileX = x;
-            state.sourceTileY = y;
-            state.destTileX = destX;
-            state.destTileY = destY;
-            state.fixedCoord =
-              direction.orientation === "horizontal"
-                ? direction.normalZ < 0
-                  ? y
-                  : y + 1
-                : direction.normalX < 0
-                  ? x
-                  : x + 1;
-            state.alongCoord = direction.orientation === "horizontal" ? x : y;
-            state.edgeCenterX = (sourceAnchor.position.x + destAnchor.position.x) * 0.5;
-            state.edgeCenterY = (sourceAnchor.position.y + destAnchor.position.y) * 0.5;
-            state.edgeCenterZ = (sourceAnchor.position.z + destAnchor.position.z) * 0.5;
-            state.normalX = direction.normalX;
-            state.normalZ = direction.normalZ;
-            state.normalY = clamp((sourceAnchor.normal.y + destAnchor.normal.y) * 0.5, 0.2, 1);
-            state.tangentX = direction.tangentX;
-            state.tangentZ = direction.tangentZ;
-            {
-              const sourceWeights = [0, 0, 0, 0];
-              accumulateAnchorSourceWeight(sourceWeights, sourceAnchor.source, 1);
-              accumulateAnchorSourceWeight(sourceWeights, destAnchor.source, 1);
-              state.dominantSource = pickDominantAnchorSource(sourceWeights);
-            }
-            const passedTarget = clamp(
-              destBurnMature01 * smoothstep(0.12, 0.62, destIgnitionTarget + destFreshFire01 * 0.38),
-              0,
-              1
-            );
-            const presenceTarget = clamp(
-              sourceDriveTarget * 0.68 +
-                destIgnitionTarget * 0.32 +
-                Math.max(0, spreadGradient) * 0.42 +
-                windPush * 0.18 -
-                passedTarget * 0.7,
-              0,
-              1.25
-            );
-            const advanceTarget = clamp(
-              destIgnitionTarget * 0.16 +
-                destFreshFire01 * 0.8 +
-                smoothstep(0.03, 0.68, Math.max(0, spreadGradient)) * 0.12 +
-                windPush * 0.08 -
-                passedTarget * 0.28,
-              0,
-              1
-            );
-            state.sourceDrive01 = smoothApproach(state.sourceDrive01, sourceDriveTarget, 8.8, 8.4, deltaSeconds);
-            state.destIgnition01 = smoothApproach(state.destIgnition01, destIgnitionTarget, 6.8, 7.6, deltaSeconds);
-            state.passed01 = smoothApproach(state.passed01, passedTarget, 5.6, 8.6, deltaSeconds);
-            state.presence01 = smoothApproach(state.presence01, presenceTarget, 10.6, 7.2, deltaSeconds);
-            state.advance01 = smoothApproach(state.advance01, advanceTarget, 7.2, 8.8, deltaSeconds);
-            state.lastActiveFrame = frontFrameId;
-            if (state.presence01 <= FIRE_FRONT_VISUAL_MIN * 0.35 || state.passed01 >= 0.98) {
-              continue;
-            }
-            activeFrontStates.push(state);
-            const outgoingWeight = clamp(
-              state.presence01 * (0.54 + state.sourceDrive01 * 0.46) * (1 - state.passed01 * 0.3),
-              0,
-              1.35
-            );
-            const incomingWeight = clamp(
-              state.presence01 * (0.3 + state.advance01 * 0.7) * (1 - state.passed01 * 0.48),
-              0,
-              1.35
-            );
-            tileFrontPerimeter01[sourceIdx] = Math.max(tileFrontPerimeter01[sourceIdx] ?? 0, outgoingWeight);
-            tileFrontArrival01[destIdx] = Math.max(tileFrontArrival01[destIdx] ?? 0, incomingWeight);
-            tileFrontAdvance01[destIdx] = Math.max(tileFrontAdvance01[destIdx] ?? 0, state.advance01);
-            tileFrontDirX[destIdx] += direction.normalX * incomingWeight;
-            tileFrontDirZ[destIdx] += direction.normalZ * incomingWeight;
-            visualFrontWeight += smoothstep(FIRE_FRONT_VISUAL_MIN * 0.4, 0.82, state.presence01) * (0.45 + state.advance01 * 0.55);
-          }
-        }
-      }
-      for (const [stateKey, state] of frontEdgeStates) {
-        if (state.lastActiveFrame === frontFrameId) {
-          continue;
-        }
-        state.presence01 = smoothApproach(state.presence01, 0, 0, 9.8, deltaSeconds);
-        state.advance01 = smoothApproach(state.advance01, 0, 0, 10.8, deltaSeconds);
-        state.sourceDrive01 = smoothApproach(state.sourceDrive01, 0, 0, 9.4, deltaSeconds);
-        state.destIgnition01 = smoothApproach(state.destIgnition01, 0, 0, 9.2, deltaSeconds);
-        state.passed01 = smoothApproach(state.passed01, 0, 0, 10.4, deltaSeconds);
-        if (
-          state.presence01 <= 0.02 &&
-          state.advance01 <= 0.02 &&
-          state.sourceDrive01 <= 0.02 &&
-          state.destIgnition01 <= 0.02 &&
-          state.passed01 <= 0.02
-        ) {
-          frontEdgeStates.delete(stateKey);
-        }
-      }
-    }
-    const frontBudgetFloor =
-      visualFrontWeight >= 4
-        ? Math.min(FIRE_FRONT_MIN_INSTANCES, Math.round(visualFrontWeight * 2.2))
-        : 0;
-    const frontPassActive =
-      frontPassEnabled &&
-      activeFrontStates.length >= 2 &&
-      visualFrontWeight >= FIRE_FRONT_PASS_MIN_WEIGHT * 0.55 &&
-      activeFlameTileCount >= 2;
-    const frontSegmentBudgetTarget = frontPassActive
-      ? clamp(
-          Math.round(
-            Math.min(
-              FIRE_FRONT_MAX_INSTANCES,
-              visualFrontWeight * 2.8 + activeFrontStates.length * 0.95 + visualActiveWeight * 0.14
-            ) *
-              clamp(flameDensityScale, 0.28, 1.05)
-          ),
-          frontBudgetFloor,
-          FIRE_FRONT_MAX_INSTANCES
-        )
-      : 0;
-    renderContinuityState.smoothedFrontSegmentBudget = smoothApproach(
-      renderContinuityState.smoothedFrontSegmentBudget,
-      frontSegmentBudgetTarget,
-      FIRE_FRONT_BUDGET_RISE_RATE,
-      FIRE_FRONT_BUDGET_FALL_RATE,
-      deltaSeconds
-    );
-    const frontSegmentBudget = frontPassActive
-      ? clamp(Math.round(renderContinuityState.smoothedFrontSegmentBudget), frontBudgetFloor, FIRE_FRONT_MAX_INSTANCES)
-      : 0;
-    const frontFieldReadScale = frontPassActive ? smoothstep(FIRE_FRONT_PASS_MIN_WEIGHT * 0.55, 14, visualFrontWeight) : 0;
-    const flameTileCapacity = clamp(FIRE_MAX_INSTANCES - frontSegmentBudget, 96, FIRE_MAX_INSTANCES);
-    const clusterBudgetState = computeClusterBudgets(
-      flameBudgetScale,
-      Math.max(activeFlameTileCount, Math.round(Math.max(1, visualActiveWeight))),
-      clusteredTiles,
-      flameTileCapacity
-    );
-    const perTileFlameCap =
-      visualActiveWeight > 0.01
-        ? clamp(
-            Math.floor(clusterBudgetState.reserveTileJets / Math.max(1, visualActiveWeight)),
-            1,
-            FIRE_VISUAL_TUNING.tongueSpawnMax
-          )
-        : FIRE_VISUAL_TUNING.tongueSpawnMax;
-    const perTileCrossCap =
-      visualActiveWeight > 0.01
-        ? clamp(Math.floor(FIRE_CROSS_MAX_INSTANCES / Math.max(1, visualActiveWeight)), 0, 5)
-        : 5;
-    const guaranteedFlameInstances =
-      visualActiveWeight > 0.01
-        ? Math.min(clusterBudgetState.reserveTileJets, Math.round(visualActiveWeight * perTileFlameCap))
-        : 0;
-    const perTileGroundCap =
-      visualActiveWeight > 0.01
-        ? clamp(
-            Math.floor(Math.max(0, clusterBudgetState.reserveTileJets - guaranteedFlameInstances) / Math.max(1, visualActiveWeight)),
-            0,
-            FIRE_VISUAL_TUNING.groundFlameSpawnMax
-          )
-        : FIRE_VISUAL_TUNING.groundFlameSpawnMax;
-    renderContinuityState.smoothedPerTileFlameCap = smoothApproach(
-      renderContinuityState.smoothedPerTileFlameCap,
-      perTileFlameCap,
-      FIRE_TILE_CAP_RISE_RATE,
-      FIRE_TILE_CAP_FALL_RATE,
-      deltaSeconds
-    );
-    renderContinuityState.smoothedPerTileGroundCap = smoothApproach(
-      renderContinuityState.smoothedPerTileGroundCap,
-      perTileGroundCap,
-      FIRE_TILE_CAP_RISE_RATE,
-      FIRE_TILE_CAP_FALL_RATE,
-      deltaSeconds
-    );
+        windStrength,
+        crossWindX,
+        crossWindZ,
+        windNormX,
+        windNormZ,
+        windDirLen,
+        windLeanX,
+        windLeanZ,
+        windResponse
+      },
+      camera: {
+        cameraWorldPos: { x: cameraWorldPos.x, y: cameraWorldPos.y, z: cameraWorldPos.z },
+        cameraForward: { x: cameraForward.x, y: cameraForward.y, z: cameraForward.z },
+        topView01,
+        zoomScale,
+        viewportHeightPx
+      },
+      visual: {
+        isRenderPaused,
+        overloaded,
+        emergencyOverload,
+        wallBlend,
+        flameIntensityBoost,
+        groundGlowBoost,
+        emberBoost,
+        flameHeightBoost,
+        flameWidthBoost,
+        groundGlowSizeBoost,
+        groundGlowCountBoost,
+        emberEjectBoost,
+        sparkDebug,
+        sparkMode,
+        showFrontPass,
+        showClusterFlames,
+        showSmoke,
+        showSparks,
+        showGroundGlow,
+        useTipStreaks,
+        useFreeEmbers,
+        freeEmberModeScale,
+        flameBudgetBaseScale,
+        smokeBudgetScale,
+        flameBudgetScale,
+        flameDensityScale,
+        groundDensityScale,
+        heroCrossDensity,
+        effectiveSmokeBudgetScale,
+        smokeSpawnFrameCap,
+        smokeRenderCap,
+        smokeRenderStride,
+        sparkStreakCap,
+        emberCap,
+        sampleStep
+      },
+      environment: {
+        envOrange,
+        heightScale,
+        simFireEps,
+        flamePresenceEps,
+        tileSpanX,
+        tileSpanZ,
+        tileSpan,
+        sampleFootprint,
+        sparkFootprint,
+        terrainMinX,
+        terrainMaxX,
+        terrainMinZ,
+        terrainMaxZ
+      },
+      minX,
+      maxX,
+      minY,
+      maxY,
+      area,
+      trackedFireTiles,
+      resolveGroundAnchor,
+      resolveObjectAnchor
+    });
+    activeFlameTileCount = framePlan.activeFlameTileCount;
+    visualActiveWeight = framePlan.visualActiveWeight;
+    visibleFlameTiles = framePlan.visibleFlameTiles;
+    clusterCount = framePlan.clusterCount;
+    clusteredTiles = framePlan.clusteredTiles;
+    const frontFrameId = framePlan.frontFrameId;
+    const frontPassActive = framePlan.frontPassActive;
+    const frontSegmentBudget = framePlan.frontSegmentBudget;
+    const frontFieldReadScale = framePlan.frontFieldReadScale;
+    const perTileCrossCap = framePlan.perTileCrossCap;
+    const frontCorridors = framePlan.frontCorridors;
+    const {
+      tileFlameVisual,
+      tileIgnitionAgeSeconds,
+      tileSmokeVisual,
+      tileLocalFlameSlotActivation,
+      tileGroundFlameSlotActivation,
+      tileObjectFlameSlotActivation,
+      tileFrontPerimeter01,
+      tileFrontArrival01,
+      tileFrontAdvance01,
+      tileFrontDirX,
+      tileFrontDirZ,
+      tileClusterId,
+      tileClusterRole,
+      tileSmokeOcclusion01,
+      fireClusters
+    } = analysisState;
     const smoothedPerTileFlameCap = clamp(
       renderContinuityState.smoothedPerTileFlameCap,
       0,
@@ -2592,79 +1547,6 @@ export const createThreeTestFireFx = (
       0,
       FIRE_VISUAL_TUNING.groundFlameSpawnMax
     );
-    for (let i = 0; i < fireClusters.length; i += 1) {
-      const cluster = fireClusters[i]!;
-      let perimeterSum = 0;
-      let arrivalMax = 0;
-      let weightSum = 0;
-      for (let tileIndex = 0; tileIndex < cluster.tiles.length; tileIndex += 1) {
-        const tid = cluster.tiles[tileIndex]!;
-        const roleWeight = tileClusterRole[tid] === 1 ? 1 : tileClusterRole[tid] === 2 ? 0.5 : 0.72;
-        perimeterSum += (tileFrontPerimeter01[tid] ?? 0) * roleWeight;
-        arrivalMax = Math.max(arrivalMax, tileFrontArrival01[tid] ?? 0);
-        weightSum += roleWeight;
-      }
-      cluster.frontPerimeter01 = weightSum > 0 ? perimeterSum / weightSum : 0;
-      cluster.frontArrival01 = arrivalMax;
-    }
-    const stitchFrontCorridors = (): FrontCorridor[] => {
-      const groups = new Map<number, DirectedFrontEdgeState[]>();
-      for (let i = 0; i < activeFrontStates.length; i += 1) {
-        const state = activeFrontStates[i]!;
-        const groupKey = state.fixedCoord * 8 + state.dir;
-        let group = groups.get(groupKey);
-        if (!group) {
-          group = [];
-          groups.set(groupKey, group);
-        }
-        group.push(state);
-      }
-      const corridors: FrontCorridor[] = [];
-      for (const group of groups.values()) {
-        group.sort((a, b) => a.alongCoord - b.alongCoord);
-        let start = 0;
-        while (start < group.length) {
-          let end = start;
-          while (end + 1 < group.length && group[end + 1]!.alongCoord === group[end]!.alongCoord + 1) {
-            end += 1;
-          }
-          const states = group.slice(start, end + 1);
-          const sourceWeights = [0, 0, 0, 0];
-          let presenceSum = 0;
-          let advanceSum = 0;
-          let sourceDriveSum = 0;
-          let destIgnitionSum = 0;
-          let passedSum = 0;
-          for (let i = 0; i < states.length; i += 1) {
-            const state = states[i]!;
-            presenceSum += state.presence01;
-            advanceSum += state.advance01;
-            sourceDriveSum += state.sourceDrive01;
-            destIgnitionSum += state.destIgnition01;
-            passedSum += state.passed01;
-            accumulateAnchorSourceWeight(sourceWeights, state.dominantSource, state.presence01);
-          }
-          const first = states[0]!;
-          const last = states[states.length - 1]!;
-          corridors.push({
-            dir: first.dir,
-            orientation: first.orientation,
-            fixedCoord: first.fixedCoord,
-            startCoord: first.alongCoord,
-            endCoord: last.alongCoord,
-            states,
-            dominantSource: pickDominantAnchorSource(sourceWeights),
-            presence01: presenceSum / Math.max(1, states.length),
-            advance01: advanceSum / Math.max(1, states.length),
-            sourceDrive01: sourceDriveSum / Math.max(1, states.length),
-            destIgnition01: destIgnitionSum / Math.max(1, states.length),
-            passed01: passedSum / Math.max(1, states.length)
-          });
-          start = end + 1;
-        }
-      }
-      return corridors;
-    };
     const emitFrontCorridor = (corridor: FrontCorridor): void => {
       if (!ENABLE_FLAME_FRONT_PASS || frontSegmentBudget <= 0 || frontSegmentCount >= frontSegmentBudget) {
         return;
@@ -2718,6 +1600,7 @@ export const createThreeTestFireFx = (
         const segment = FIRE_FRONT_SLOT_ORDER[orderIndex]!;
         const targetActivation = clamp(targetVisibleCount - (FIRE_FRONT_SLOT_RANK[segment] ?? orderIndex), 0, 1);
         const slotActivation = updateFrontCorridorSlotActivation(
+          analysisState,
           corridorKey,
           segment,
           targetActivation,
@@ -2895,7 +1778,6 @@ export const createThreeTestFireFx = (
         }
       }
     };
-    const frontCorridors = frontPassActive ? stitchFrontCorridors() : [];
     analysisMs = performance.now() - analysisStartedAt;
     const flameWriteStartedAt = performance.now();
 
@@ -3052,7 +1934,7 @@ export const createThreeTestFireFx = (
     for (let i = 0; i < frontCorridors.length; i += 1) {
       emitFrontCorridor(frontCorridors[i]!);
     }
-    decayInactiveFrontCorridorSlots(frontFrameId, deltaSeconds);
+    decayInactiveFrontCorridorSlots(analysisState, frontFrameId, deltaSeconds);
     for (let i = 0; i < fireClusters.length; i += 1) {
       emitClusterFlameBed(fireClusters[i]);
       emitClusterPlumes(fireClusters[i]);
@@ -3080,41 +1962,17 @@ export const createThreeTestFireFx = (
           treeBurnVisual > TREE_BURN_FLAME_VISUAL_MIN &&
           burnProgress > TREE_BURN_CARRY_PROGRESS_MIN &&
           heat > 0.08;
-        const hasSuppressedHoldover = !hasActiveFire && !isAshTile && wetness > 0.08 && heat > 0.04;
         const neighbourFire = getNeighbourFireBias(fireView, cols, rows, x, y);
         const flameVisual = hasActiveFire
           ? Math.max(fire, treeBurnVisual * 0.95)
           : hasTreeCarryFlame
             ? treeBurnVisual * 0.72
             : 0;
-        const holdoverEmber = !hasActiveFire
-          ? clamp(wetness * heat * (hasSuppressedHoldover ? 0.32 : 0.18), 0, hasSuppressedHoldover ? 0.12 : 0.08)
-          : 0;
         const suppressAshResidualFlame = isAshTile && !hasActiveFire;
-        const hasRenderableFlame =
-          !suppressAshResidualFlame && (hasActiveFire || hasTreeCarryFlame);
-        const hasVisualFlame = hasRenderableFlame;
-        if (hasVisualFlame) {
-          visibleFlameTiles += 1;
-        }
-        const targetFlameBase = hasActiveFire
-          ? clamp(flameVisual * 0.6 + heat * 0.28 + treeBurnVisual * 0.16, 0, 1)
-          : hasTreeCarryFlame
-            ? clamp(flameVisual * 0.8 + heat * 0.24, 0, 1)
-            : 0;
-        const previousFlame = tileFlameVisual[idx] ?? 0;
-        let ignitionAgeSeconds = tileIgnitionAgeSeconds[idx] ?? 0;
-        const sustainIgnitionAge =
-          !suppressAshResidualFlame &&
-          (hasActiveFire ||
-            hasTreeCarryFlame ||
-            fire > simFireEps * 0.35 ||
-            previousFlame > 0.04);
-        if (sustainIgnitionAge) {
-          ignitionAgeSeconds = Math.min(8, ignitionAgeSeconds + deltaSeconds);
-        } else {
-          ignitionAgeSeconds = Math.max(0, ignitionAgeSeconds - deltaSeconds * 6);
-        }
+        const hasRenderableFlame = !suppressAshResidualFlame && (hasActiveFire || hasTreeCarryFlame);
+        const ignitionAgeSeconds = tileIgnitionAgeSeconds[idx] ?? 0;
+        const smoothedFlame = tileFlameVisual[idx] ?? 0;
+        const smoothedSmoke = tileSmokeVisual[idx] ?? 0;
         const radiantDrive = clamp(heat * 0.62 + neighbourFire * 0.88, 0, 1.2);
         const rampSecondsEffective = clamp(
           IGNITION_RAMP_SECONDS_BASE * (1 - radiantDrive * IGNITION_RAMP_ACCELERATION),
@@ -3126,44 +1984,6 @@ export const createThreeTestFireFx = (
           : hasTreeCarryFlame
             ? 1
             : 0;
-        const rampFloor = hasActiveFire ? 0.1 : 1;
-        const targetFlame = hasActiveFire
-          ? clamp(targetFlameBase * (rampFloor + (1 - rampFloor) * ignitionRamp01), 0, 1)
-          : clamp(targetFlameBase, 0, 1);
-        let smoothedFlame = suppressAshResidualFlame
-          ? 0
-          : hasVisualFlame
-            ? smoothApproach(
-                previousFlame,
-                targetFlame,
-                9.4,
-                Math.max(7.6, 1 / Math.max(0.001, FLAME_VISUAL_RELEASE_SECONDS)),
-                deltaSeconds
-              )
-            : smoothApproach(
-                previousFlame,
-                0,
-                0,
-                Math.max(8.2, 1 / Math.max(0.001, FLAME_VISUAL_RELEASE_SECONDS)),
-                deltaSeconds
-              );
-        if (suppressAshResidualFlame || !hasRenderableFlame) {
-          ignitionAgeSeconds = 0;
-          clearTileEmitterSlots(tileLocalFlameSlotActivation, idx, FIRE_VISUAL_TUNING.tongueSpawnMax);
-          clearTileEmitterSlots(tileGroundFlameSlotActivation, idx, FIRE_VISUAL_TUNING.groundFlameSpawnMax);
-          clearTileEmitterSlots(tileObjectFlameSlotActivation, idx, 2);
-        }
-        tileIgnitionAgeSeconds[idx] = ignitionAgeSeconds;
-        tileFlameVisual[idx] = smoothedFlame;
-        const targetSmoke = hasActiveFire || hasTreeCarryFlame
-          ? clamp(Math.max(targetFlameBase * 0.85, heat * 0.95, treeBurnVisual * 0.8), 0, 1.2)
-          : hasSuppressedHoldover
-            ? clamp(wetness * 0.42 + heat * 0.28 + holdoverEmber * 0.8, 0, 0.42)
-            : 0;
-        const smoothedSmoke = hasActiveFire || hasTreeCarryFlame || hasSuppressedHoldover
-          ? smoothApproach(tileSmokeVisual[idx] ?? 0, targetSmoke, 10.0, 6.6, smokeDeltaSeconds)
-          : smoothApproach(tileSmokeVisual[idx] ?? 0, 0, 0, 9.4, smokeDeltaSeconds);
-        tileSmokeVisual[idx] = smoothedSmoke;
         const tileCluster = tileClusterId[idx] >= 0 ? fireClusters[tileClusterId[idx]] ?? null : null;
         const tileRole = tileCluster ? (tileClusterRole[idx] as ClusterRole) : 0;
         const clusterBlend = tileCluster
@@ -3183,20 +2003,7 @@ export const createThreeTestFireFx = (
           1.25
         );
         const frontDominance = clamp(frontPerimeter01 * (hasActiveFire ? 0.92 : 0.28) + frontArrival01 * 1.16, 0, 1.35);
-        if (tileCluster) {
-          const tileCenterXOcc = ((x + 0.5) / cols - 0.5) * terrainSize.width;
-          const tileCenterZOcc = ((y + 0.5) / rows - 0.5) * terrainSize.depth;
-          const distNorm = Math.hypot(tileCenterXOcc - tileCluster.centroidX, tileCenterZOcc - tileCluster.centroidZ) /
-            Math.max(tileSpan * 0.75, tileCluster.radius * 1.05);
-          const plumeInfluence = 1 - smoothstep(0.38, 1.08, distNorm);
-          tileSmokeOcclusion01[idx] = clamp(
-            smoothedSmoke * (0.48 + clusterBlend * 0.25) + plumeInfluence * clusterBlend * (0.24 + tileCluster.intensity * 0.26),
-            0,
-            1
-          );
-        } else {
-          tileSmokeOcclusion01[idx] = clamp(smoothedSmoke * 0.16, 0, 1);
-        }
+        const smokeOcclusion01 = tileSmokeOcclusion01[idx] ?? 0;
         const hasFlame = smoothedFlame > flamePresenceEps;
         const hasPlume = hasFlame || smoothedSmoke > 0.02;
         const sparkVisibleThreshold = Math.max(flamePresenceEps * 1.6, SPARK_VISIBLE_FLAME_MIN);
@@ -3272,9 +2079,6 @@ export const createThreeTestFireFx = (
           flameletTargetCount = Math.min(flameletTargetCount, CLUSTER_EDGE_KERNEL_CAP);
         }
         flameletTargetCount = Math.max(0, Math.min(FIRE_VISUAL_TUNING.tongueSpawnMax, flameletTargetCount));
-        if (flameletTargetCount > smoothedPerTileFlameCap + 0.001) {
-          renderContinuityState.budgetClampedDrops += flameletTargetCount - smoothedPerTileFlameCap;
-        }
         flameletTargetCount = Math.min(flameletTargetCount, smoothedPerTileFlameCap);
         flameletTargetCount *= 0.45 + ignitionRamp01 * 0.55;
         const hasObjectAnchorFlame = flameProfile !== null || isStructureTile;
@@ -3331,16 +2135,11 @@ export const createThreeTestFireFx = (
         if (sustainInteriorFlame) {
           flameletTargetCount = Math.max(flameletTargetCount, 0.36);
         }
-        const localSlotStats = updateTileEmitterSlots(
+        const localSlotStats = readTileEmitterSlotStats(
           tileLocalFlameSlotActivation,
           idx,
           FIRE_VISUAL_TUNING.tongueSpawnMax,
-          flameletTargetCount,
-          FIRE_LOCAL_SLOT_RISE_RATE,
-          FIRE_LOCAL_SLOT_FALL_RATE,
-          deltaSeconds,
-          FIRE_EMITTER_SLOT_VISIBLE_CUTOFF,
-          "localSlotChurn"
+          FIRE_EMITTER_SLOT_VISIBLE_CUTOFF
         );
         const flameletCount = localSlotStats.visibleCount;
         const heroCount =
@@ -3816,16 +2615,11 @@ export const createThreeTestFireFx = (
               (flameProfile !== null ? 0.5 + objectFlameDrive * 1.15 : 0.42 + objectFlameDrive * 0.92) * sliceComplexityScale
             );
         }
-        const objectSlotStats = updateTileEmitterSlots(
+        const objectSlotStats = readTileEmitterSlotStats(
           tileObjectFlameSlotActivation,
           idx,
           2,
-          objectFlameTargetCount,
-          FIRE_OBJECT_SLOT_RISE_RATE,
-          FIRE_OBJECT_SLOT_FALL_RATE,
-          deltaSeconds,
-          FIRE_EMITTER_SLOT_VISIBLE_CUTOFF,
-          "objectSlotChurn"
+          FIRE_EMITTER_SLOT_VISIBLE_CUTOFF
         );
         if (hasObjectAnchorFlame && objectSlotStats.visibleCount > 0) {
           const objectRadius = flameProfile !== null
@@ -4116,9 +2910,6 @@ export const createThreeTestFireFx = (
           frontPassActive ? 0.52 : 0.82
         );
         groundFlameTargetCount *= groundDetailScale;
-        if (groundFlameTargetCount > smoothedPerTileGroundCap + 0.001) {
-          renderContinuityState.budgetClampedDrops += groundFlameTargetCount - smoothedPerTileGroundCap;
-        }
         groundFlameTargetCount = Math.min(groundFlameTargetCount, smoothedPerTileGroundCap);
         const sustainGroundFlame =
           hasActiveFire &&
@@ -4128,17 +2919,6 @@ export const createThreeTestFireFx = (
         if (sustainGroundFlame) {
           groundFlameTargetCount = Math.max(groundFlameTargetCount, 0.34);
         }
-        updateTileEmitterSlots(
-          tileGroundFlameSlotActivation,
-          idx,
-          FIRE_VISUAL_TUNING.groundFlameSpawnMax,
-          groundFlameTargetCount,
-          FIRE_GROUND_SLOT_RISE_RATE,
-          FIRE_GROUND_SLOT_FALL_RATE,
-          deltaSeconds,
-          FIRE_EMITTER_SLOT_VISIBLE_CUTOFF,
-          null
-        );
         for (let groundFlame = 0; groundFlame < FIRE_VISUAL_TUNING.groundFlameSpawnMax && fireCount < FIRE_MAX_INSTANCES; groundFlame += 1) {
           const groundActivation = readTileEmitterSlotState(
             tileGroundFlameSlotActivation,
@@ -4392,7 +3172,7 @@ export const createThreeTestFireFx = (
           sampleFootprint * (0.44 + flameIntensity * 0.72 + heat * 0.28 + frontRead01 * 0.14);
         const smokeSourceY = sourceYBase + smokeSourceLift;
         const smokeIntensity01 = clamp(smoothedSmoke, 0, 1);
-        const smokeDrive = Math.max(smokeIntensity01, targetSmoke * 0.85);
+        const smokeDrive = smokeIntensity01;
         if (hasActiveFire && smokeDrive > 0.005 && smokeSpawnsThisFrame < smokeSpawnFrameCap) {
           const roleSmokeScale = tileRole === 2 ? 1.22 : tileRole === 1 ? 1.08 : 1;
           const frontSmokeScale = frontPassActive
@@ -4736,37 +3516,7 @@ export const createThreeTestFireFx = (
     continuity: { ...fireDebugSnapshot.continuity },
     modes: { ...fireDebugSnapshot.modes }
   });
-  const getAudioClusterSnapshot = (): FireAudioClusterSnapshot[] => {
-    audioClusterSnapshots.length = fireClusters.length;
-    for (let i = 0; i < fireClusters.length; i += 1) {
-      const cluster = fireClusters[i]!;
-      const existing = audioClusterSnapshots[i];
-      const nextSnapshot = existing ?? {
-        id: cluster.id,
-        x: cluster.centroidX,
-        y: cluster.baseY,
-        z: cluster.centroidZ,
-        radius: cluster.radius,
-        tileCount: cluster.tileCount,
-        heatMean01: cluster.heatMean01,
-        heatSum01: cluster.heatSum01,
-        fuelMean01: cluster.fuelMean01,
-        intensity01: cluster.intensity01
-      };
-      nextSnapshot.id = cluster.id;
-      nextSnapshot.x = cluster.centroidX;
-      nextSnapshot.y = cluster.baseY;
-      nextSnapshot.z = cluster.centroidZ;
-      nextSnapshot.radius = cluster.radius;
-      nextSnapshot.tileCount = cluster.tileCount;
-      nextSnapshot.heatMean01 = cluster.heatMean01;
-      nextSnapshot.heatSum01 = cluster.heatSum01;
-      nextSnapshot.fuelMean01 = cluster.fuelMean01;
-      nextSnapshot.intensity01 = cluster.intensity01;
-      audioClusterSnapshots[i] = nextSnapshot;
-    }
-    return audioClusterSnapshots;
-  };
+  const getAudioClusterSnapshot = (): FireAudioClusterSnapshot[] => audioClusterSnapshots;
 
   const setDebugControls = (controls: Partial<FireFxDebugControls>): void => {
     if (Object.keys(controls).length === 0) {
@@ -4795,3 +3545,4 @@ export const createThreeTestFireFx = (
     dispose
   };
 };
+

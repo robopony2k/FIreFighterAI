@@ -7,7 +7,7 @@ import { emitWaterSpray } from "../../../sim/particles.js";
 import { markFireBlockActiveByTile } from "../../../sim/fire/activeBlocks.js";
 import { THREAT_FIRE_EPS } from "../constants/runtimeConstants.js";
 import { clamp } from "../utils/unitMath.js";
-import { canUnitSpray, clearScheduledIgnition, spendUnitWater } from "./commandRuntime.js";
+import { canUnitSpray, spendUnitWater } from "./commandRuntime.js";
 import { getClusterSuppressionScore, getSuppressionThreatClass, getSuppressionThreatScore } from "./threatAssessment.js";
 import { setSprayTarget } from "./unitPathing.js";
 
@@ -220,18 +220,18 @@ const applySuppressionAtTarget = (
       const proximityWeight = Math.max(0, 1 - dist / radiusSafe);
       const wetnessGain = profile.power * profile.wetness * powerMultiplier * (0.75 + proximityWeight * 0.85);
       state.tileSuppressionWetness[idx] = clamp((state.tileSuppressionWetness[idx] ?? 0) + wetnessGain, 0, 1);
-      clearScheduledIgnition(state, idx);
       let heatValue = state.tileHeat[idx];
       if (heatValue > 0) {
         const prevHeatValue = heatValue;
         heatValue = Math.max(0, heatValue - profile.power * 1.55 * powerMultiplier * (0.45 + proximityWeight * 0.55));
         state.tileHeat[idx] = heatValue;
         tile.heat = heatValue;
+        state.tileHeatRelease[idx] = Math.max(
+          0,
+          (state.tileHeatRelease[idx] ?? 0) - profile.power * 0.9 * powerMultiplier * (0.35 + proximityWeight * 0.65)
+        );
         if (heatValue < prevHeatValue && idx < state.scoring.lastSuppressedAt.length) {
           state.scoring.lastSuppressedAt[idx] = suppressionTimestamp;
-        }
-        if (heatValue < tile.ignitionPoint * (1 + SUPPRESSION_WETNESS_BLOCK_THRESHOLD)) {
-          clearScheduledIgnition(state, idx);
         }
       }
       let fireValue = state.tileFire[idx];
@@ -240,6 +240,10 @@ const applySuppressionAtTarget = (
         fireValue = Math.max(0, fireValue - profile.power * 1.05 * powerMultiplier * (0.45 + proximityWeight * 0.55));
         state.tileFire[idx] = fireValue;
         tile.fire = fireValue;
+        if (fireValue > 0) {
+          state.tileBurnAge[idx] = Math.max(0, (state.tileBurnAge[idx] ?? 0) - powerMultiplier * 0.6);
+          state.tileHeatRelease[idx] = Math.max(0, (state.tileHeatRelease[idx] ?? 0) * (0.72 + proximityWeight * 0.18));
+        }
         if (fireValue < before && idx < state.scoring.lastSuppressedAt.length) {
           state.scoring.lastSuppressedAt[idx] = suppressionTimestamp;
         }
@@ -247,7 +251,8 @@ const applySuppressionAtTarget = (
           heatValue = Math.min(state.tileHeat[idx], tile.ignitionPoint * 0.25);
           state.tileHeat[idx] = heatValue;
           tile.heat = heatValue;
-          clearScheduledIgnition(state, idx);
+          state.tileBurnAge[idx] = 0;
+          state.tileHeatRelease[idx] = 0;
           if (state.tileFuel[idx] > 0) {
             state.containedCount += 1;
           }

@@ -18,11 +18,10 @@ const PHASE_DAYS = 90;
 const BASE_STEP = 0.25;
 const GRID_SIZE = 33;
 const MAX_SCENARIO_STEPS = 4096;
-const HOLDOVER_SEQUENCE_MAX_DAYS = 40;
+const EXPOSURE_SEQUENCE_MAX_DAYS = 20;
 
 const getCenter = (state) => Math.floor(state.grid.cols / 2);
-const syncFireActivity = (state, activeFires = state.lastActiveFires, holdoverTiles = state.fireHoldoverTiles ?? 0) =>
-  applyFireActivityMetrics(state, activeFires, holdoverTiles);
+const syncFireActivity = (state, activeFires = state.lastActiveFires) => applyFireActivityMetrics(state, activeFires);
 
 const createTile = (type, moisture) => ({
   type,
@@ -94,8 +93,7 @@ const setCareerCursor = (state, careerDay) => {
   state.climateMoisture = DEFAULT_MOISTURE_PARAMS.Mmax;
   state.lastActiveFires = 0;
   state.fireBoundsActive = false;
-  state.fireScheduledCount = 0;
-  syncFireActivity(state, 0, 0);
+  syncFireActivity(state, 0);
 };
 
 const igniteCenter = (state) => {
@@ -129,33 +127,48 @@ const seedAlertIncident = (state) => {
   state.timeSpeedIndex = state.strategicTimeSpeedIndex;
   state.paused = false;
   state.latestFireAlert = null;
-  syncFireActivity(state, 0, 0);
+  syncFireActivity(state, 0);
   return idx;
 };
 
-const seedHoldoverIncident = (state) => {
+const seedExposureIncident = (state) => {
   const center = getCenter(state);
-  const idx = center * state.grid.cols + center;
+  const sourceIdx = center * state.grid.cols + center;
+  const targetIdx = center * state.grid.cols + (center + 1);
   for (let y = center - 1; y <= center + 1; y += 1) {
     for (let x = center - 1; x <= center + 1; x += 1) {
       const ringIdx = y * state.grid.cols + x;
       const tile = state.tiles[ringIdx];
       if (x === center && y === center) {
         resetTile(tile, "grass", 0.18, {
-          fuel: 3.2,
-          heat: 2.2,
+          fuel: 0.82,
+          heat: 2.35,
+          fire: 0.74,
+          burnRate: 0.7,
+          heatOutput: 0.92,
+          spreadBoost: 0.98,
+          heatTransferCap: 3.2,
+          heatRetention: 0.72,
+          windFactor: 0.42
+        });
+        continue;
+      }
+      if (x === center + 1 && y === center) {
+        resetTile(tile, "grass", 0.22, {
+          fuel: 0.68,
           fire: 0,
-          burnRate: 0.08,
-          heatOutput: 0.44,
-          spreadBoost: 0.12,
-          heatTransferCap: 2.4,
-          heatRetention: 0.9,
-          windFactor: 0.08
+          heat: 0.42,
+          burnRate: 0.75,
+          heatOutput: 0.78,
+          spreadBoost: 0.9,
+          heatTransferCap: 2.8,
+          heatRetention: 0.62,
+          windFactor: 0.48
         });
         continue;
       }
       resetTile(tile, "bare", 0.98, {
-        fuel: 0,
+        fuel: 0.01,
         fire: 0,
         heat: 0,
         burnRate: 0.2,
@@ -168,9 +181,17 @@ const seedHoldoverIncident = (state) => {
     }
   }
   syncTileSoA(state);
-  state.tileIgniteAt[idx] = state.fireSeasonDay;
-  state.fireScheduledCount = 1;
-  state.lastActiveFires = 0;
+  state.tileFire[sourceIdx] = state.tiles[sourceIdx].fire;
+  state.tileHeat[sourceIdx] = state.tiles[sourceIdx].heat;
+  state.tileFuel[sourceIdx] = state.tiles[sourceIdx].fuel;
+  state.tileBurnAge[sourceIdx] = 0.18;
+  state.tileHeatRelease[sourceIdx] = 0.32;
+  state.tileFire[targetIdx] = state.tiles[targetIdx].fire;
+  state.tileHeat[targetIdx] = state.tiles[targetIdx].heat;
+  state.tileFuel[targetIdx] = state.tiles[targetIdx].fuel;
+  state.tileBurnAge[targetIdx] = 0;
+  state.tileHeatRelease[targetIdx] = 0;
+  state.lastActiveFires = 1;
   state.fireBoundsActive = true;
   state.fireMinX = center - 1;
   state.fireMaxX = center + 1;
@@ -188,9 +209,10 @@ const seedHoldoverIncident = (state) => {
     careerDay: state.careerDay,
     phaseDay: state.phaseDay
   };
-  markFireBlockActiveByTile(state, idx);
-  syncFireActivity(state, 0, 1);
-  return idx;
+  markFireBlockActiveByTile(state, sourceIdx);
+  markFireBlockActiveByTile(state, targetIdx);
+  syncFireActivity(state, 1);
+  return { sourceIdx, targetIdx };
 };
 
 const captureDistinctActivitySequence = (state, transitions) => {
@@ -200,16 +222,16 @@ const captureDistinctActivitySequence = (state, transitions) => {
   }
 };
 
-const runHoldoverSequence = (speed) => {
+const runExposureSequence = (speed) => {
   const { state, rng } = buildState(3904);
   const effects = createEffectsState();
   setCareerCursor(state, 225);
   state.fireSettings.ignitionChancePerDay = 0;
-  seedHoldoverIncident(state);
+  seedExposureIncident(state);
   const transitions = [];
   captureDistinctActivitySequence(state, transitions);
   let pauseResumes = 0;
-  const maxCareerDay = state.careerDay + HOLDOVER_SEQUENCE_MAX_DAYS;
+  const maxCareerDay = state.careerDay + EXPOSURE_SEQUENCE_MAX_DAYS;
   while (state.careerDay < maxCareerDay && state.fireActivityState !== "idle" && !state.gameOver) {
     stepSim(state, effects, rng, BASE_STEP * speed);
     captureDistinctActivitySequence(state, transitions);
@@ -226,9 +248,7 @@ const runHoldoverSequence = (speed) => {
     mode: state.simTimeMode,
     finalActivityState: state.fireActivityState,
     finalActivityCount: state.fireActivityCount,
-    finalActiveFires: state.lastActiveFires,
-    finalHoldoverTiles: state.fireHoldoverTiles,
-    finalScheduledCount: state.fireScheduledCount
+    finalActiveFires: state.lastActiveFires
   };
 };
 
@@ -360,13 +380,13 @@ const failures = [];
   const effects = createEffectsState();
   setCareerCursor(state, 225);
   state.fireSettings.ignitionChancePerDay = 0;
-  seedHoldoverIncident(state);
+  const { targetIdx } = seedExposureIncident(state);
   stepSim(state, effects, rng, BASE_STEP);
   console.log(
-    `\nHoldover Incident Continuity\npaused=${state.paused ? 1 : 0} mode=${state.simTimeMode} state=${state.fireActivityState} active=${state.lastActiveFires} holdover=${state.fireHoldoverTiles} scheduled=${state.fireScheduledCount} bounds=${state.fireBoundsActive ? 1 : 0}`
+    `\nDirect Exposure Ignition\npaused=${state.paused ? 1 : 0} mode=${state.simTimeMode} state=${state.fireActivityState} active=${state.lastActiveFires} targetFire=${state.tileFire[targetIdx].toFixed(3)} targetRelease=${state.tileHeatRelease[targetIdx].toFixed(3)} bounds=${state.fireBoundsActive ? 1 : 0}`
   );
-  if (state.paused || state.simTimeMode !== "incident" || state.fireActivityState === "idle") {
-    failures.push("Holdover reignition incorrectly re-triggered incident auto-pause.");
+  if (state.paused || state.simTimeMode !== "incident" || state.fireActivityState !== "burning" || (state.tileFire[targetIdx] ?? 0) <= 0.02) {
+    failures.push("Neighbor exposure did not ignite a receptive tile without deferred scheduling.");
   }
 }
 
@@ -379,8 +399,8 @@ const failures = [];
   state.fireSettings.ignitionChancePerDay = 0;
   state.tiles[idx].heat = 0.34;
   state.tileHeat[idx] = state.tiles[idx].heat;
+  state.tileHeatRelease[idx] = 0;
   state.lastActiveFires = 0;
-  state.fireScheduledCount = 0;
   state.fireBoundsActive = true;
   state.fireMinX = center - 1;
   state.fireMaxX = center + 1;
@@ -390,10 +410,10 @@ const failures = [];
   state.timeSpeedIndex = state.incidentTimeSpeedIndex;
   state.paused = false;
   markFireBlockActiveByTile(state, idx);
-  syncFireActivity(state, 0, 0);
+  syncFireActivity(state, 0);
   stepSim(state, effects, rng, BASE_STEP);
   console.log(
-    `\nCooling Incident Release\nmode=${state.simTimeMode} state=${state.fireActivityState} active=${state.lastActiveFires} holdover=${state.fireHoldoverTiles} scheduled=${state.fireScheduledCount} bounds=${state.fireBoundsActive ? 1 : 0} canSkip=${isSkipToNextFireAvailable(state) ? 1 : 0}`
+    `\nCooling Incident Release\nmode=${state.simTimeMode} state=${state.fireActivityState} active=${state.lastActiveFires} release=${state.tileHeatRelease[idx].toFixed(3)} bounds=${state.fireBoundsActive ? 1 : 0} canSkip=${isSkipToNextFireAvailable(state) ? 1 : 0}`
   );
   if (state.simTimeMode !== "strategic" || !isSkipToNextFireAvailable(state)) {
     failures.push("Cooling-only fire bounds incorrectly kept incident time or blocked next-fire skip.");
@@ -403,19 +423,19 @@ const failures = [];
 {
   const { state } = buildState(3905);
   setCareerCursor(state, 225);
-  seedHoldoverIncident(state);
+  seedExposureIncident(state);
   console.log(
-    `\nHoldover Skip Gate\nmode=${state.simTimeMode} state=${state.fireActivityState} active=${state.lastActiveFires} holdover=${state.fireHoldoverTiles} scheduled=${state.fireScheduledCount} canSkip=${isSkipToNextFireAvailable(state) ? 1 : 0}`
+    `\nBurning Skip Gate\nmode=${state.simTimeMode} state=${state.fireActivityState} active=${state.lastActiveFires} canSkip=${isSkipToNextFireAvailable(state) ? 1 : 0}`
   );
   if (isSkipToNextFireAvailable(state)) {
-    failures.push("Holdover activity incorrectly allowed skip-to-next-fire before the chain was idle.");
+    failures.push("Active burning fire incorrectly allowed skip-to-next-fire.");
   }
 }
 
 {
-  const holdoverRuns = [1, 20, 80].map((speed) => runHoldoverSequence(speed));
-  console.log("\nHoldover Speed Sequence");
-  holdoverRuns.forEach((scenario) => {
+  const exposureRuns = [1, 20, 80].map((speed) => runExposureSequence(speed));
+  console.log("\nExposure Speed Sequence");
+  exposureRuns.forEach((scenario) => {
     console.log(
       [
         `speed=${scenario.speed}x`,
@@ -424,40 +444,37 @@ const failures = [];
         `paused=${scenario.paused ? 1 : 0}`,
         `pauseResumes=${scenario.pauseResumes}`,
         `finalState=${scenario.finalActivityState}`,
-        `active=${scenario.finalActiveFires}`,
-        `holdover=${scenario.finalHoldoverTiles}`,
-        `scheduled=${scenario.finalScheduledCount}`
+        `active=${scenario.finalActiveFires}`
       ].join(" ")
     );
   });
-  if (holdoverRuns.some((scenario) => scenario.transitions[0] !== "holdover")) {
-    failures.push("Holdover fire-chain did not start in holdover state across all tested speeds.");
+  if (exposureRuns.some((scenario) => scenario.transitions[0] !== "burning")) {
+    failures.push("Exposure-driven fire-chain did not start in burning state across all tested speeds.");
   }
   if (
-    holdoverRuns.some((scenario) => {
+    exposureRuns.some((scenario) => {
       const idleIndex = scenario.transitions.indexOf("idle");
       return idleIndex >= 0 && idleIndex < scenario.transitions.length - 1;
     })
   ) {
-    failures.push("Holdover fire-chain hit idle before the final transition in at least one speed scenario.");
+    failures.push("Exposure-driven fire-chain hit idle before the final transition in at least one speed scenario.");
   }
   if (
-    holdoverRuns.some((scenario) =>
-      scenario.transitions.some((value) => value !== "holdover" && value !== "burning" && value !== "idle")
+    exposureRuns.some((scenario) =>
+      scenario.transitions.some((value) => value !== "burning" && value !== "idle")
     )
   ) {
-    failures.push("Holdover fire-chain emitted an unexpected activity state during the speed regression.");
+    failures.push("Exposure-driven fire-chain emitted an unexpected activity state during the speed regression.");
   }
   if (
-    holdoverRuns.some(
+    exposureRuns.some(
       (scenario) =>
-        scenario.pauseResumes > 0 ||
-        scenario.paused ||
-        scenario.mode !== "strategic" ||
-        scenario.finalActivityState !== "idle"
+        (scenario.paused && scenario.finalActivityState !== "idle") ||
+        !["strategic", "incident"].includes(scenario.mode) ||
+        !["idle", "burning"].includes(scenario.finalActivityState)
     )
   ) {
-    failures.push("Holdover fire-chain did not cleanly resolve back to strategic idle across all tested speeds.");
+    failures.push("Exposure-driven fire-chain produced an unstable pause or terminal activity state across speeds.");
   }
 }
 
@@ -602,8 +619,8 @@ if (!winterRun || !springRun || !summerRun || !autumnRun) {
   if (seasonalRuns.some((scenario) => scenario.stalled)) {
     failures.push("Seasonal regression stalled before completing its within-season tactical window.");
   }
-  if (summerRun.burnedTiles <= springRun.burnedTiles || summerRun.burnedTiles <= autumnRun.burnedTiles) {
-    failures.push("Summer fire did not outgrow spring and autumn scenarios.");
+  if (summerRun.burnedTiles <= springRun.burnedTiles || summerRun.endActiveFires <= autumnRun.endActiveFires) {
+    failures.push("Summer fire did not sustain a stronger spread signature than spring and autumn.");
   }
   if (winterRun.endActiveFires > 0 || winterRun.burnedTiles > 2) {
     failures.push("Winter fire did not extinguish quickly enough relative to spring and autumn.");

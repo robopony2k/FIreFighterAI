@@ -243,7 +243,8 @@ const renderDebugCellOverlay = (
   const cachedHeat = world.tileHeat[idx];
   const cachedFuel = world.tileFuel[idx];
   const cachedWetness = world.tileSuppressionWetness[idx];
-  const cachedIgniteAt = world.tileIgniteAt[idx];
+  const cachedBurnAge = world.tileBurnAge[idx];
+  const cachedHeatRelease = world.tileHeatRelease[idx];
   const cachedIgnition = world.tileIgnitionPoint[idx];
   const cachedBurnRate = world.tileBurnRate[idx];
   const cachedHeatOutput = world.tileHeatOutput[idx];
@@ -266,7 +267,7 @@ const renderDebugCellOverlay = (
     `ashAge=${formatNumber(tile.ashAge, 2)} elev=${formatNumber(tile.elevation)} height=n/a`,
     `cache fire=${formatNumber(cachedFire)} heat=${formatNumber(cachedHeat)} fuel=${formatNumber(cachedFuel)} wet=${formatNumber(cachedWetness)}`,
     `cache ignite=${formatNumber(cachedIgnition)} burn=${formatNumber(cachedBurnRate)} heatOut=${formatNumber(cachedHeatOutput)}`,
-    `igniteAt=${formatNumber(cachedIgniteAt, 3)} smooth=n/a`,
+    `burnAge=${formatNumber(cachedBurnAge, 3)} release=${formatNumber(cachedHeatRelease, 3)} smooth=n/a`,
     `bounds active=${world.fireBoundsActive ? "1" : "0"} in=${inBounds ? "1" : "0"}`,
     hoverWorld ? `world ${formatNumber(hoverWorld.x, 2)},${formatNumber(hoverWorld.y, 2)}` : "world n/a"
   ];

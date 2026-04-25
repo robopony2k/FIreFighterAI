@@ -617,6 +617,7 @@ export const createThreeTest = (
     heroVolumetricShare: THREE_TEST_FIRE_HERO_VOL,
     budgetScale: THREE_TEST_FIRE_BUDGET_SCALE,
     fallbackMode: THREE_TEST_FX_FALLBACK,
+    showSparks: false,
     flameIntensityBoost: cinematicGradeEnabled ? THREE_TEST_CINEMATIC_GRADE_CONFIG.fireFlameIntensityBoost : 1,
     groundGlowBoost: cinematicGradeEnabled ? THREE_TEST_CINEMATIC_GRADE_CONFIG.fireGlowBoost : 1,
     emberBoost: cinematicGradeEnabled ? THREE_TEST_CINEMATIC_GRADE_CONFIG.emberBoost : 1,
@@ -2299,7 +2300,7 @@ export const createThreeTest = (
       nextFireButton.title = "Advance time until the next fire starts.";
       nextFireButton.setAttribute("aria-label", "Skip to next fire");
     } else {
-      nextFireButton.title = "Available when no active or holdover fires remain.";
+      nextFireButton.title = "Available when fire activity has fully cleared.";
       nextFireButton.setAttribute("aria-label", "Skip to next fire unavailable");
     }
     applyDockCardStates();
@@ -3967,8 +3968,8 @@ export const createThreeTest = (
         const idx = indexFor(world.grid, x, y);
         const fire = world.tileFire[idx] ?? 0;
         const heat = world.tileHeat[idx] ?? 0;
-        const scheduled = (world.tileIgniteAt[idx] ?? Number.POSITIVE_INFINITY) < Number.POSITIVE_INFINITY ? 1 : 0;
-        const score = fire * 2 + heat * 0.15 + scheduled * 0.35;
+        const heatRelease = world.tileHeatRelease[idx] ?? 0;
+        const score = fire * 2 + heat * 0.15 + heatRelease * 0.22;
         if (score <= 0) {
           continue;
         }
@@ -4200,12 +4201,13 @@ export const createThreeTest = (
     }
     const hoveredUnits = getUnitsAtTile(context.tileX, context.tileY);
     const cachedWetness = world.tileSuppressionWetness[context.tileIndex] ?? 0;
-    const cachedIgniteAt = world.tileIgniteAt[context.tileIndex];
+    const cachedBurnAge = world.tileBurnAge[context.tileIndex] ?? 0;
+    const cachedHeatRelease = world.tileHeatRelease[context.tileIndex] ?? 0;
     const lines = [
       `type=${tile.type} id=${world.tileTypeId[context.tileIndex] ?? "n/a"} base=${tile.isBase ? "1" : "0"}`,
       `elev=${formatDebugNumber(world.tileElevation[context.tileIndex] ?? tile.elevation, 3)} y=${formatDebugNumber((world.tileElevation[context.tileIndex] ?? 0) * context.heightScale, 2)} moist=${formatDebugNumber(world.tileMoisture[context.tileIndex] ?? tile.moisture, 2)}`,
       `fire=${formatDebugNumber(world.tileFire[context.tileIndex] ?? tile.fire, 2)} heat=${formatDebugNumber(world.tileHeat[context.tileIndex] ?? tile.heat, 2)} fuel=${formatDebugNumber(world.tileFuel[context.tileIndex] ?? tile.fuel, 2)}`,
-      `wet=${formatDebugNumber(cachedWetness, 2)} igniteAt=${Number.isFinite(cachedIgniteAt) ? formatDebugNumber(cachedIgniteAt, 3) : "n/a"}`
+      `wet=${formatDebugNumber(cachedWetness, 2)} burnAge=${formatDebugNumber(cachedBurnAge, 2)} release=${formatDebugNumber(cachedHeatRelease, 2)}`
     ];
     if (hoveredUnits.length > 0) {
       const summary = hoveredUnits

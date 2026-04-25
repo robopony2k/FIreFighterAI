@@ -1,6 +1,11 @@
 import type { ColorRepresentation } from "three";
 
 import type { WorldState } from "../../../core/state.js";
+import {
+  DEFAULT_FIRE_BUDGET_SCALE,
+  DEFAULT_FIRE_HERO_VOLUMETRIC_SHARE,
+  DEFAULT_FIRE_WALL_BLEND
+} from "../constants/fireRenderConstants.js";
 
 const clamp = (value: number, min: number, max: number): number => Math.min(max, Math.max(min, value));
 
@@ -99,9 +104,9 @@ export type FireFxDebugControls = {
 export type ThreeTestFireFxOptions = Partial<FireFxDebugControls>;
 
 export const DEFAULT_FIRE_FX_DEBUG_CONTROLS: FireFxDebugControls = {
-  wallBlend: 0.62,
-  heroVolumetricShare: 0.55,
-  budgetScale: 1,
+  wallBlend: DEFAULT_FIRE_WALL_BLEND,
+  heroVolumetricShare: DEFAULT_FIRE_HERO_VOLUMETRIC_SHARE,
+  budgetScale: DEFAULT_FIRE_BUDGET_SCALE,
   fallbackMode: "aggressive",
   flameIntensityBoost: 1,
   groundGlowBoost: 1,

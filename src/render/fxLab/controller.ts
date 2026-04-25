@@ -991,11 +991,11 @@ export const createFxLabController = (
   const resetDynamicState = (): void => {
     sceneState.world.tileFire.fill(0);
     sceneState.world.tileHeat.fill(0);
+    sceneState.world.tileBurnAge.fill(0);
+    sceneState.world.tileHeatRelease.fill(0);
     sceneState.world.tileSuppressionWetness.fill(0);
-    sceneState.world.tileIgniteAt.fill(Number.POSITIVE_INFINITY);
     sceneState.world.tileFuel.set(sceneState.baseFuel);
     sceneState.world.lastActiveFires = 0;
-    sceneState.world.fireScheduledCount = 0;
     sceneState.world.fireBoundsActive = false;
     sceneState.world.fireMinX = 0;
     sceneState.world.fireMaxX = 0;
@@ -1063,6 +1063,8 @@ export const createFxLabController = (
         const fire = intensity * falloff;
         sceneState.world.tileFire[idx] = Math.max(sceneState.world.tileFire[idx] ?? 0, fire);
         sceneState.world.tileHeat[idx] = Math.max(sceneState.world.tileHeat[idx] ?? 0, fire * heatScale);
+        sceneState.world.tileHeatRelease[idx] = Math.max(sceneState.world.tileHeatRelease[idx] ?? 0, fire * 0.22);
+        sceneState.world.tileBurnAge[idx] = Math.min(sceneState.world.tileBurnAge[idx] ?? 0, 0.08);
         sceneState.world.tileFuel[idx] = Math.max(0.08, Math.min(sceneState.world.tileFuel[idx], sceneState.baseFuel[idx] * (0.96 - fire * 0.26)));
       }
     }
@@ -1103,6 +1105,8 @@ export const createFxLabController = (
         const fire = intensity * Math.pow(1 - dist / Math.max(0.0001, thickness), 0.82);
         sceneState.world.tileFire[idx] = Math.max(sceneState.world.tileFire[idx] ?? 0, fire);
         sceneState.world.tileHeat[idx] = Math.max(sceneState.world.tileHeat[idx] ?? 0, fire * heatScale);
+        sceneState.world.tileHeatRelease[idx] = Math.max(sceneState.world.tileHeatRelease[idx] ?? 0, fire * 0.24);
+        sceneState.world.tileBurnAge[idx] = Math.min(sceneState.world.tileBurnAge[idx] ?? 0, 0.12);
         sceneState.world.tileFuel[idx] = Math.max(0.08, Math.min(sceneState.world.tileFuel[idx], sceneState.baseFuel[idx] * (0.94 - fire * 0.22)));
       }
     }
@@ -1121,8 +1125,18 @@ export const createFxLabController = (
           continue;
         }
         const idx = y * cols + x;
-        sceneState.world.tileIgniteAt[idx] = 0;
-        sceneState.world.tileHeat[idx] = Math.max(sceneState.world.tileHeat[idx] ?? 0, sceneState.world.fireSettings.heatCap * 0.08);
+        const bandWidth = Math.max(0.0001, outerRadius - innerRadius);
+        const centerDist = innerRadius + bandWidth * 0.5;
+        const distFromCenter = Math.abs(dist - centerDist) / Math.max(0.0001, bandWidth * 0.5);
+        const shoulder = Math.pow(1 - clamp(distFromCenter, 0, 1), 0.8);
+        const fire = 0.14 * shoulder;
+        sceneState.world.tileFire[idx] = Math.max(sceneState.world.tileFire[idx] ?? 0, fire);
+        sceneState.world.tileHeat[idx] = Math.max(
+          sceneState.world.tileHeat[idx] ?? 0,
+          sceneState.world.fireSettings.heatCap * (0.05 + shoulder * 0.12)
+        );
+        sceneState.world.tileHeatRelease[idx] = Math.max(sceneState.world.tileHeatRelease[idx] ?? 0, fire * 0.18);
+        sceneState.world.tileBurnAge[idx] = Math.max(sceneState.world.tileBurnAge[idx] ?? 0, 0.35 + shoulder * 0.25);
       }
     }
   };
@@ -1164,8 +1178,8 @@ export const createFxLabController = (
     for (let idx = 0; idx < totalTiles; idx += 1) {
       const fire = sceneState.world.tileFire[idx] ?? 0;
       const heat = sceneState.world.tileHeat[idx] ?? 0;
-      const scheduled = sceneState.world.tileIgniteAt[idx] < Number.POSITIVE_INFINITY ? 0.08 : 0;
-      const weight = Math.max(fire, heat * 0.12, scheduled);
+      const heatRelease = sceneState.world.tileHeatRelease[idx] ?? 0;
+      const weight = Math.max(fire, heat * 0.12, heatRelease * 0.18);
       if (weight <= 0.01) {
         continue;
       }
@@ -1276,7 +1290,6 @@ export const createFxLabController = (
   const finalizeFireState = (): void => {
     const { cols, rows, totalTiles } = sceneState.world.grid;
     let activeCount = 0;
-    let scheduledCount = 0;
     let hasBounds = false;
     let minX = cols;
     let maxX = -1;
@@ -1285,14 +1298,11 @@ export const createFxLabController = (
     for (let idx = 0; idx < totalTiles; idx += 1) {
       const fire = sceneState.world.tileFire[idx] ?? 0;
       const heat = sceneState.world.tileHeat[idx] ?? 0;
-      const scheduled = sceneState.world.tileIgniteAt[idx] < Number.POSITIVE_INFINITY;
+      const heatRelease = sceneState.world.tileHeatRelease[idx] ?? 0;
       if (fire > 0.02) {
         activeCount += 1;
       }
-      if (scheduled) {
-        scheduledCount += 1;
-      }
-      if (fire <= 0.001 && heat <= 0.04 && !scheduled) {
+      if (fire <= 0.001 && heat <= 0.04 && heatRelease <= 0.01) {
         continue;
       }
       const x = idx % cols;
@@ -1304,7 +1314,6 @@ export const createFxLabController = (
       maxY = Math.max(maxY, y);
     }
     sceneState.world.lastActiveFires = activeCount;
-    sceneState.world.fireScheduledCount = scheduledCount;
     sceneState.world.fireBoundsActive = hasBounds;
     sceneState.world.fireMinX = hasBounds ? minX : 0;
     sceneState.world.fireMaxX = hasBounds ? maxX : 0;

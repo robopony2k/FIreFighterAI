@@ -6,13 +6,11 @@ import {
   FIRE_FOCUS_CLUSTER_RADIUS,
   THREAT_ASSET_RADIUS,
   THREAT_FIRE_EPS,
-  THREAT_HOLDOVER_HEAT_EPS,
-  THREAT_HOLDOVER_WETNESS_EPS,
   THREAT_NEIGHBOR_DIRS
 } from "../constants/runtimeConstants.js";
 import { clamp } from "../utils/unitMath.js";
 
-export type SuppressionThreatClass = "burning" | "pending" | "holdover" | "cold";
+export type SuppressionThreatClass = "burning" | "pending" | "cold";
 
 const isSuppressionIgnitableTypeId = (tid: number): boolean =>
   tid !== TILE_TYPE_IDS.water &&
@@ -26,21 +24,14 @@ const isSuppressionIgnitableTypeId = (tid: number): boolean =>
 export const getSuppressionThreatClass = (state: WorldState, idx: number): SuppressionThreatClass => {
   const fireValue = state.tileFire[idx] ?? 0;
   const heatValue = state.tileHeat[idx] ?? 0;
-  const wetnessValue = state.tileSuppressionWetness[idx] ?? 0;
-  const scheduled = state.tileIgniteAt[idx] < Number.POSITIVE_INFINITY;
+  const heatRelease = state.tileHeatRelease[idx] ?? 0;
   const ignitionPoint = Math.max(0.0001, state.tileIgnitionPoint[idx] ?? 0.0001);
 
   if (fireValue > THREAT_FIRE_EPS) {
     return "burning";
   }
-  if (scheduled || heatValue >= ignitionPoint * 0.78) {
+  if (heatValue >= ignitionPoint * 0.78 && heatRelease > 0.02) {
     return "pending";
-  }
-  if (
-    heatValue >= Math.max(THREAT_HOLDOVER_HEAT_EPS, ignitionPoint * 0.45) ||
-    (wetnessValue > THREAT_HOLDOVER_WETNESS_EPS && heatValue > 0.04)
-  ) {
-    return "holdover";
   }
   return "cold";
 };
@@ -74,8 +65,7 @@ export const getSuppressionThreatScore = (state: WorldState, x: number, y: numbe
 
   const fireValue = state.tileFire[idx] ?? 0;
   const heatValue = state.tileHeat[idx] ?? 0;
-  const wetnessValue = state.tileSuppressionWetness[idx] ?? 0;
-  const scheduled = state.tileIgniteAt[idx] < Number.POSITIVE_INFINITY;
+  const heatRelease = state.tileHeatRelease[idx] ?? 0;
   let burningNeighbors = 0;
   let exposedNeighbors = 0;
   let supportiveNeighbors = 0;
@@ -94,7 +84,7 @@ export const getSuppressionThreatScore = (state: WorldState, x: number, y: numbe
     if (neighborFire > THREAT_FIRE_EPS) {
       burningNeighbors += 1;
       supportiveNeighbors += 1;
-    } else if (neighborThreat === "pending" || neighborThreat === "holdover") {
+    } else if (neighborThreat === "pending") {
       supportiveNeighbors += 1;
     }
     if (neighborFuel > 0 && isSuppressionIgnitableTypeId(neighborTypeId) && neighborFire <= THREAT_FIRE_EPS) {
@@ -105,14 +95,12 @@ export const getSuppressionThreatScore = (state: WorldState, x: number, y: numbe
   const classWeight =
     threatClass === "burning"
       ? 1.3 + fireValue * 1.15
-      : threatClass === "pending"
-        ? 0.95 + heatValue * 0.82 + (scheduled ? 0.18 : 0)
-        : 0.6 + heatValue * 0.45 + wetnessValue * 0.28;
+      : 0.95 + heatValue * 0.82 + heatRelease * 0.42;
   const assetWeight = getNearbyAssetWeight(state, x, y);
   const flankWeight =
     threatClass === "burning" || threatClass === "pending"
       ? clamp(0.75 + exposedNeighbors * 0.2 - Math.max(0, burningNeighbors - 4) * 0.1, 0.55, 1.8)
-      : clamp(0.85 + supportiveNeighbors * 0.08 + exposedNeighbors * 0.06, 0.7, 1.4);
+      : 0;
   const continuityWeight = clamp(0.8 + supportiveNeighbors * 0.08, 0.8, 1.5);
   return classWeight * assetWeight * flankWeight * continuityWeight;
 };

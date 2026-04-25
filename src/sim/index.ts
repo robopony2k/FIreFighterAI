@@ -342,11 +342,11 @@ const findStrongestFireTile = (state: WorldState): { x: number; y: number } | nu
       const idx = indexFor(state.grid, x, y);
       const fire = state.tileFire[idx] ?? 0;
       const heat = state.tileHeat[idx] ?? 0;
-      const scheduled = state.tileIgniteAt[idx] < Number.POSITIVE_INFINITY ? 1 : 0;
-      if (fire <= 0 && heat <= 0 && scheduled === 0) {
+      const heatRelease = state.tileHeatRelease[idx] ?? 0;
+      if (fire <= 0 && heat <= 0 && heatRelease <= 0) {
         continue;
       }
-      const score = fire * 2 + heat * 0.15 + scheduled * 0.35;
+      const score = fire * 2 + heat * 0.15 + heatRelease * 0.22;
       if (score > bestScore || !best) {
         bestScore = score;
         best = { x, y };
@@ -451,12 +451,12 @@ const extinguishSeasonCarryoverFires = (state: WorldState): void => {
   });
   state.tileFire.fill(0);
   state.tileHeat.fill(0);
+  state.tileBurnAge.fill(0);
+  state.tileHeatRelease.fill(0);
   state.tileSuppressionWetness.fill(0);
-  state.tileIgniteAt.fill(Number.POSITIVE_INFINITY);
-  state.fireScheduledCount = 0;
   clearFireBlocks(state);
   state.lastActiveFires = 0;
-  applyFireActivityMetrics(state, 0, 0);
+  applyFireActivityMetrics(state, 0);
   resetFireBounds(state);
   clearLatestFireAlert(state);
 };
@@ -497,7 +497,7 @@ const showSeasonOverlay = (state: WorldState): void => {
   } else if (state.phase === "budget") {
     const forecast = getForecastTemp(state);
     const title = "Autumn Operations";
-    const message = `Climate season: ${seasonLabel}. Holdover fires can still run before winter shuts the year down.`;
+    const message = `Climate season: ${seasonLabel}. Late-season flare-ups can still run before winter shuts the year down.`;
     details.push(`Forecast easing toward ${forecast}C.`);
     details.push("Keep crews on containment and mop-up until the winter ledger closes.");
     details.push("Dismiss or wait to close.");
@@ -515,15 +515,15 @@ export function extinguishAllFires(state: WorldState, effects: EffectsState): vo
   });
   state.tileFire.fill(0);
   state.tileHeat.fill(0);
+  state.tileBurnAge.fill(0);
+  state.tileHeatRelease.fill(0);
   state.tileSuppressionWetness.fill(0);
-  state.tileIgniteAt.fill(Number.POSITIVE_INFINITY);
-  state.fireScheduledCount = 0;
   clearFireBlocks(state);
   effects.smokeParticles = [];
   effects.waterParticles = [];
   effects.waterStreams = [];
   state.lastActiveFires = 0;
-  applyFireActivityMetrics(state, 0, 0);
+  applyFireActivityMetrics(state, 0);
   resetFireBounds(state);
   clearLatestFireAlert(state);
 }
@@ -638,7 +638,7 @@ export function setPhase(state: WorldState, rng: RNG, next: WorldState["phase"],
     showSeasonOverlay(state);
     return;
   }
-  setStatus(state, "Autumn operations: contain holdover fires before winter.");
+  setStatus(state, "Autumn operations: finish containment before winter.");
   showSeasonOverlay(state);
 }
 
@@ -807,7 +807,7 @@ export function stepSim(state: WorldState, effects: EffectsState, rng: RNG, delt
       cancelSkipToNextFire(state);
     }
     state.lastActiveFires = 0;
-    applyFireActivityMetrics(state, 0, 0);
+    applyFireActivityMetrics(state, 0);
     return;
   }
   if (state.gameOver) {
@@ -815,7 +815,7 @@ export function stepSim(state: WorldState, effects: EffectsState, rng: RNG, delt
       cancelSkipToNextFire(state);
     }
     state.lastActiveFires = 0;
-    applyFireActivityMetrics(state, 0, 0);
+    applyFireActivityMetrics(state, 0);
     return;
   }
   const hadFireChainRisk = hasFireActivity(state);
@@ -903,7 +903,7 @@ export function stepSim(state: WorldState, effects: EffectsState, rng: RNG, delt
     state.firePerfSimulatedDays = fireDaysSimulated;
   } else {
     stepWind(state, delta, rng);
-    applyFireActivityMetrics(state, 0, 0);
+    applyFireActivityMetrics(state, 0);
   }
   state.lastActiveFires = activeFires;
   if (!hasFireActivity(state)) {

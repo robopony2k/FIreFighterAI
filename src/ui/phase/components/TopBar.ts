@@ -1284,11 +1284,8 @@ export const createTopBar = (): TopBarView => {
     }
 
     const flowEvents = data.flowEvents;
-    const activeDisplayCount = Math.max(
-      0,
-      Math.floor(data.fireActivityState === "holdover" ? data.fireActivityCount : data.activeFireCount)
-    );
-    const activeRailLabel = data.fireActivityState === "holdover" ? "Holdover Risk" : "Active Fires";
+    const activeDisplayCount = Math.max(0, Math.floor(data.activeFireCount));
+    const activeRailLabel = "Active Fires";
     const activeRefs = ledgerRailMap.get("active") ?? null;
     const overlayRect = ledgerPipeTransfers.getBoundingClientRect();
     const trunkX = activeRefs && overlayRect.width > 0 && overlayRect.height > 0 ? getPipeTrunkX(activeRefs, overlayRect) : 16;

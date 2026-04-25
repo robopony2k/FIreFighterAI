@@ -41,10 +41,8 @@ export const igniteDebugFireAt = (
   target.heat = Math.max(target.heat, target.ignitionPoint * 1.4);
   state.tileFire[idx] = target.fire;
   state.tileHeat[idx] = target.heat;
-  if (state.tileIgniteAt[idx] < Number.POSITIVE_INFINITY) {
-    state.tileIgniteAt[idx] = Number.POSITIVE_INFINITY;
-    state.fireScheduledCount = Math.max(0, state.fireScheduledCount - 1);
-  }
+  state.tileBurnAge[idx] = 0;
+  state.tileHeatRelease[idx] = Math.max(state.tileHeatRelease[idx] ?? 0, target.fire * target.heatOutput);
   markFireBlockActiveByTile(state, idx);
   markFireBounds(state, tileX, tileY);
   state.lastActiveFires = Math.max(state.lastActiveFires, 1);

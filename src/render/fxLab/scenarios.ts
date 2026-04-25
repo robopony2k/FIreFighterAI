@@ -49,12 +49,12 @@ export const FX_LAB_SCENARIOS: ReadonlyArray<FxLabScenarioDefinition> = [
   {
     id: "fire-line",
     label: "Fire Line",
-    description: "A diagonal advancing line with active flame fronts and a scheduled shoulder."
+    description: "A diagonal advancing line with active perimeter flames and a weaker shoulder burn."
   },
   {
     id: "fire-patch",
     label: "Fire Patch",
-    description: "A dense core fire with a ring of pending ignition for smoke and glow tuning."
+    description: "A dense core fire with a weaker surrounding burn ring for smoke and glow tuning."
   },
   {
     id: "ocean-shoreline",

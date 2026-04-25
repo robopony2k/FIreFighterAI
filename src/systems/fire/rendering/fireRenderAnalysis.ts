@@ -1,39 +1,74 @@
 import type { FireFxDebugControls, FireFxFallbackMode } from "./fireFxTypes.js";
+import {
+  CLUSTER_UPDATE_MS,
+  EMBER_MAX_INSTANCES,
+  FIRE_CROSS_MAX_INSTANCES,
+  FIRE_FX_ACTIVE_UPDATE_INTERVAL_MS,
+  FIRE_FX_EMERGENCY_FPS,
+  FIRE_FX_EMERGENCY_FLAME_BUDGET_SCALE,
+  FIRE_FX_EMERGENCY_MAX_SMOKE_RENDER_CAP,
+  FIRE_FX_EMERGENCY_SCENE_MS,
+  FIRE_FX_EMERGENCY_SMOKE_DENSITY_SCALE,
+  FIRE_FX_EMERGENCY_SMOKE_RENDER_STRIDE,
+  FIRE_FX_IDLE_UPDATE_INTERVAL_MS,
+  FIRE_FX_OVERLOAD_FPS,
+  FIRE_FX_OVERLOAD_FLAME_BUDGET_SCALE,
+  FIRE_FX_OVERLOAD_MAX_SMOKE_RENDER_CAP,
+  FIRE_FX_OVERLOAD_SCENE_MS,
+  FIRE_FX_OVERLOAD_SMOKE_DENSITY_SCALE,
+  FIRE_FX_OVERLOAD_SMOKE_RENDER_STRIDE,
+  FIRE_FX_PAUSED_FLAME_BUDGET_SCALE,
+  FIRE_FX_PAUSED_MIN_SMOKE_RENDER_CAP,
+  FIRE_FX_PAUSED_SMOKE_DENSITY_SCALE,
+  FIRE_FX_PAUSED_UPDATE_INTERVAL_MS,
+  FIRE_FRONT_MAX_INSTANCES,
+  FIRE_MAX_INSTANCES,
+  FIRE_TILE_CAP_FALL_RATE,
+  FIRE_TILE_CAP_RISE_RATE,
+  FIRE_VISUAL_TUNING,
+  FLAME_BUDGET_MIN_SCALE,
+  SMOKE_BUDGET_MIN_SCALE,
+  SMOKE_MAX_INSTANCES,
+  SMOKE_QUALITY_FALLBACK_FPS,
+  SMOKE_QUALITY_FALLBACK_SCENE_MS,
+  SMOKE_QUALITY_FALLBACK_SECONDS,
+  SMOKE_QUALITY_RECOVERY_FPS,
+  SMOKE_QUALITY_RECOVERY_SCENE_MS,
+  SMOKE_QUALITY_RECOVERY_SECONDS,
+  SMOKE_VISUAL_RATE_MAX,
+  SMOKE_VISUAL_RATE_SCALE,
+  SPARK_STREAK_MAX_INSTANCES
+} from "../constants/fireRenderConstants.js";
+import {
+  buildOrReuseFireClusters,
+  computeClusterBudgets,
+  syncAudioClusterSnapshots,
+  updateClusterFrontFields
+} from "./fireClusterAnalysis.js";
+import { analyzeFireFronts } from "./fireFrontAnalysis.js";
+import { createInitialFireRenderAnalysisState } from "./fireRenderAnalysisState.js";
+import { smoothApproach } from "./fireRenderMath.js";
+import type {
+  FireRenderCameraContext,
+  FireRenderAnalysisState,
+  FireRenderEnvironmentContext,
+  FireRenderFramePlan,
+  FireRenderTimingContext,
+  FireRenderVisualContext,
+  FireRenderWindContext
+} from "./fireRenderPlanningTypes.js";
+import { measureActiveFireTiles, planFireTileVisuals } from "./fireTileRenderPlanning.js";
+import type {
+  FireAudioClusterSnapshot,
+  FireFxTerrainSize,
+  FireFxTerrainSurface,
+  FireFxTreeBurnController,
+  FireFxWorldState,
+  ResolvedFireAnchor
+} from "./fireFxTypes.js";
+import type { FireFieldView } from "./fireRenderSnapshot.js";
 
 const clamp = (value: number, min: number, max: number): number => Math.min(max, Math.max(min, value));
-
-const SMOKE_QUALITY_FALLBACK_FPS = 56;
-const SMOKE_QUALITY_RECOVERY_FPS = 61;
-const SMOKE_QUALITY_FALLBACK_SCENE_MS = 14;
-const SMOKE_QUALITY_RECOVERY_SCENE_MS = 11;
-const SMOKE_QUALITY_FALLBACK_SECONDS = 1.2;
-const SMOKE_QUALITY_RECOVERY_SECONDS = 5;
-const SMOKE_BUDGET_MIN_SCALE = 0.3;
-const FLAME_BUDGET_MIN_SCALE = 0.35;
-const FIRE_FX_ACTIVE_UPDATE_INTERVAL_MS = 16;
-const FIRE_FX_IDLE_UPDATE_INTERVAL_MS = 120;
-const FIRE_FX_PAUSED_UPDATE_INTERVAL_MS = 90;
-const FIRE_FX_PAUSED_FLAME_BUDGET_SCALE = 0.42;
-const FIRE_FX_PAUSED_SMOKE_DENSITY_SCALE = 0.08;
-const FIRE_FX_PAUSED_MIN_SMOKE_RENDER_CAP = 32;
-const FIRE_FX_OVERLOAD_FPS = 45;
-const FIRE_FX_OVERLOAD_SCENE_MS = 24;
-const FIRE_FX_OVERLOAD_FLAME_BUDGET_SCALE = 0.62;
-const FIRE_FX_OVERLOAD_SMOKE_DENSITY_SCALE = 0.28;
-const FIRE_FX_OVERLOAD_MAX_SMOKE_RENDER_CAP = 480;
-const FIRE_FX_OVERLOAD_SMOKE_RENDER_STRIDE = 6;
-const FIRE_FX_EMERGENCY_FPS = 34;
-const FIRE_FX_EMERGENCY_SCENE_MS = 34;
-const FIRE_FX_EMERGENCY_FLAME_BUDGET_SCALE = 0.4;
-const FIRE_FX_EMERGENCY_SMOKE_DENSITY_SCALE = 0.12;
-const FIRE_FX_EMERGENCY_MAX_SMOKE_RENDER_CAP = 224;
-const FIRE_FX_EMERGENCY_SMOKE_RENDER_STRIDE = 8;
-const SPARK_STREAK_MAX_INSTANCES = 2200;
-const EMBER_MAX_INSTANCES = 1600;
-const SMOKE_MAX_INSTANCES = 2400;
-const FIRE_MAX_INSTANCES = 720;
-const SMOKE_VISUAL_RATE_SCALE = 14;
-const SMOKE_VISUAL_RATE_MAX = 4;
 
 export type FireRenderAdaptiveState = {
   smokeBudgetScale: number;
@@ -318,5 +353,228 @@ export const buildFireRenderBudgetPlan = (
     sampleStep,
     preferSparseFullResolution,
     nextAdaptiveState: nextState
+  };
+};
+
+export { createInitialFireRenderAnalysisState };
+export type { FireRenderAnalysisState };
+
+export type AnalyzeFireRenderFrameInput = {
+  state: FireRenderAnalysisState;
+  audioClusters: FireAudioClusterSnapshot[];
+  world: FireFxWorldState;
+  fireView: FireFieldView;
+  terrainSize: FireFxTerrainSize;
+  terrainSurface: FireFxTerrainSurface | null;
+  treeBurn: FireFxTreeBurnController | null;
+  timing: FireRenderTimingContext;
+  wind: FireRenderWindContext;
+  camera: FireRenderCameraContext;
+  visual: FireRenderVisualContext;
+  environment: FireRenderEnvironmentContext;
+  minX: number;
+  maxX: number;
+  minY: number;
+  maxY: number;
+  area: number;
+  trackedFireTiles: number;
+  resolveGroundAnchor: (tileIdx: number) => ResolvedFireAnchor;
+  resolveObjectAnchor: (tileIdx: number) => ResolvedFireAnchor;
+};
+
+export const analyzeFireRenderFrame = (input: AnalyzeFireRenderFrameInput): FireRenderFramePlan => {
+  const {
+    state,
+    audioClusters,
+    world,
+    fireView,
+    terrainSize,
+    terrainSurface,
+    treeBurn,
+    timing,
+    wind,
+    camera,
+    visual,
+    environment,
+    minX,
+    maxX,
+    minY,
+    maxY,
+    area,
+    trackedFireTiles,
+    resolveGroundAnchor,
+    resolveObjectAnchor
+  } = input;
+
+  const { activeFlameTileCount, visualActiveWeight } = measureActiveFireTiles({
+    world,
+    fireView,
+    treeBurn,
+    cols: world.grid.cols,
+    minX,
+    maxX,
+    minY,
+    maxY,
+    simFireEps: environment.simFireEps
+  });
+
+  const clusterBuild = buildOrReuseFireClusters({
+    state,
+    frameTimeMs: timing.frameTimeMs,
+    world,
+    fireView,
+    cols: world.grid.cols,
+    rows: world.grid.rows,
+    minX,
+    maxX,
+    minY,
+    maxY,
+    sampleStep: visual.sampleStep,
+    simFireEps: environment.simFireEps,
+    windX: wind.windX,
+    windZ: wind.windZ,
+    treeBurn,
+    terrainSize,
+    resolveGroundAnchor,
+    activeFlameTileCount,
+    clusterUpdateMs: CLUSTER_UPDATE_MS
+  });
+
+  const frontPassEnabled = visual.showFrontPass && !visual.overloaded;
+  const frontAnalysis = analyzeFireFronts({
+    state,
+    world,
+    fireView,
+    treeBurn,
+    cols: world.grid.cols,
+    rows: world.grid.rows,
+    minX,
+    maxX,
+    minY,
+    maxY,
+    simFireEps: environment.simFireEps,
+    deltaSeconds: timing.deltaSeconds,
+    windNormX: wind.windNormX,
+    windNormZ: wind.windNormZ,
+    windDirLen: wind.windDirLen,
+    activeFlameTileCount,
+    visualActiveWeight,
+    flameDensityScale: visual.flameDensityScale,
+    frontPassEnabled,
+    resolveGroundAnchor
+  });
+
+  const flameTileCapacity = clamp(FIRE_MAX_INSTANCES - frontAnalysis.frontSegmentBudget, 96, FIRE_MAX_INSTANCES);
+  const clusterBudgetState = computeClusterBudgets(
+    state,
+    visual.flameBudgetScale,
+    Math.max(activeFlameTileCount, Math.round(Math.max(1, visualActiveWeight))),
+    clusterBuild.clusteredTiles,
+    flameTileCapacity
+  );
+  const perTileFlameCap =
+    visualActiveWeight > 0.01
+      ? clamp(Math.floor(clusterBudgetState.reserveTileJets / Math.max(1, visualActiveWeight)), 1, FIRE_VISUAL_TUNING.tongueSpawnMax)
+      : FIRE_VISUAL_TUNING.tongueSpawnMax;
+  const guaranteedFlameInstances =
+    visualActiveWeight > 0.01
+      ? Math.min(clusterBudgetState.reserveTileJets, Math.round(visualActiveWeight * perTileFlameCap))
+      : 0;
+  const perTileGroundCap =
+    visualActiveWeight > 0.01
+      ? clamp(
+          Math.floor(Math.max(0, clusterBudgetState.reserveTileJets - guaranteedFlameInstances) / Math.max(1, visualActiveWeight)),
+          0,
+          FIRE_VISUAL_TUNING.groundFlameSpawnMax
+        )
+      : FIRE_VISUAL_TUNING.groundFlameSpawnMax;
+  state.renderContinuityState.smoothedPerTileFlameCap = smoothApproach(
+    state.renderContinuityState.smoothedPerTileFlameCap,
+    perTileFlameCap,
+    FIRE_TILE_CAP_RISE_RATE,
+    FIRE_TILE_CAP_FALL_RATE,
+    timing.deltaSeconds
+  );
+  state.renderContinuityState.smoothedPerTileGroundCap = smoothApproach(
+    state.renderContinuityState.smoothedPerTileGroundCap,
+    perTileGroundCap,
+    FIRE_TILE_CAP_RISE_RATE,
+    FIRE_TILE_CAP_FALL_RATE,
+    timing.deltaSeconds
+  );
+
+  updateClusterFrontFields(state);
+
+  const visiblePlan = planFireTileVisuals({
+    state,
+    world,
+    fireView,
+    treeBurn,
+    terrainSize,
+    cols: world.grid.cols,
+    rows: world.grid.rows,
+    minX,
+    maxX,
+    minY,
+    maxY,
+    sampleStep: visual.sampleStep,
+    simFireEps: environment.simFireEps,
+    flamePresenceEps: environment.flamePresenceEps,
+    deltaSeconds: timing.deltaSeconds,
+    smokeDeltaSeconds: timing.smokeDeltaSeconds,
+    tileSpan: environment.tileSpan,
+    flameDensityScale: visual.flameDensityScale,
+    groundDensityScale: visual.groundDensityScale,
+    sliceComplexityScale: clamp(1 - clamp((visual.flameBudgetScale - 0.38) / 0.62, 0, 1) * 0.18, 0.72, 1),
+    flameBudgetScale: visual.flameBudgetScale,
+    frontPassActive: frontAnalysis.frontPassActive,
+    frontFieldReadScale: frontAnalysis.frontFieldReadScale
+  });
+
+  syncAudioClusterSnapshots(state, audioClusters);
+
+  const crossSliceBudget01 = clamp((visual.flameBudgetScale - 0.38) / 0.62, 0, 1);
+  const sliceComplexityScale = clamp(1 - crossSliceBudget01 * 0.18, 0.72, 1);
+  const kernelBudgetScale = visual.flameBudgetScale >= 0.8 ? 1 : visual.flameBudgetScale >= 0.58 ? 0.78 : 0.6;
+  const perTileCrossCap = visualActiveWeight > 0.01 ? clamp(Math.floor(FIRE_CROSS_MAX_INSTANCES / Math.max(1, visualActiveWeight)), 0, 5) : 5;
+
+  return {
+    world,
+    fireView,
+    bounds: {
+      minX,
+      maxX,
+      minY,
+      maxY,
+      width: Math.max(1, maxX - minX + 1),
+      height: Math.max(1, maxY - minY + 1),
+      area,
+      trackedFireTiles
+    },
+    terrainSize,
+    terrainSurface,
+    treeBurn,
+    timing,
+    wind,
+    camera,
+    visual,
+    environment,
+    state,
+    resolveGroundAnchor,
+    resolveObjectAnchor,
+    activeFlameTileCount,
+    visualActiveWeight,
+    visibleFlameTiles: visiblePlan.visibleFlameTiles,
+    clusterCount: clusterBuild.clusterCount,
+    clusteredTiles: clusterBuild.clusteredTiles,
+    frontFrameId: frontAnalysis.frontFrameId,
+    frontPassActive: frontAnalysis.frontPassActive,
+    frontSegmentBudget: frontAnalysis.frontSegmentBudget,
+    frontFieldReadScale: frontAnalysis.frontFieldReadScale,
+    perTileCrossCap,
+    sliceComplexityScale,
+    kernelBudgetScale,
+    frontCorridors: frontAnalysis.frontCorridors,
+    audioClusters
   };
 };

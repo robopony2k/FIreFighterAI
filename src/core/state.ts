@@ -114,7 +114,7 @@ export type CoastClassId =
   | typeof COAST_CLASS_CLIFF
   | typeof COAST_CLASS_SHELF_WATER;
 
-export type FireActivityState = "idle" | "holdover" | "burning";
+export type FireActivityState = "idle" | "burning";
 export interface WorldState {
 
   grid: Grid;
@@ -130,8 +130,9 @@ export interface WorldState {
   tileFuel: Float32Array;
 
   tileHeat: Float32Array;
+  tileBurnAge: Float32Array;
+  tileHeatRelease: Float32Array;
   tileSuppressionWetness: Float32Array;
-  tileIgniteAt: Float32Array;
 
   tileIgnitionPoint: Float32Array;
 
@@ -204,7 +205,6 @@ export interface WorldState {
   totalLandTiles: number;
 
   lastActiveFires: number;
-  fireHoldoverTiles: number;
   fireActivityCount: number;
   fireActivityState: FireActivityState;
   latestFireAlert: FireAlertIncident | null;
@@ -330,7 +330,6 @@ export interface WorldState {
   tileBlockIndex: Int32Array;
   heatStamp: Uint32Array;
   heatStampId: number;
-  fireScheduledCount: number;
   firePerfActiveBlocks: number;
   firePerfWorkBlocks: number;
   firePerfFireBoundsArea: number;
@@ -446,8 +445,9 @@ export function createInitialState(seed: number, grid: Grid): WorldState {
     tileFire: new Float32Array(grid.totalTiles),
     tileFuel: new Float32Array(grid.totalTiles),
     tileHeat: new Float32Array(grid.totalTiles),
+    tileBurnAge: new Float32Array(grid.totalTiles),
+    tileHeatRelease: new Float32Array(grid.totalTiles),
     tileSuppressionWetness: new Float32Array(grid.totalTiles),
-    tileIgniteAt: new Float32Array(grid.totalTiles).fill(Number.POSITIVE_INFINITY),
     tileIgnitionPoint: new Float32Array(grid.totalTiles),
     tileBurnRate: new Float32Array(grid.totalTiles),
     tileHeatOutput: new Float32Array(grid.totalTiles),
@@ -550,7 +550,6 @@ export function createInitialState(seed: number, grid: Grid): WorldState {
     totalLandTiles: 1,
 
     lastActiveFires: 0,
-    fireHoldoverTiles: 0,
     fireActivityCount: 0,
     fireActivityState: "idle",
     latestFireAlert: null,
@@ -678,7 +677,6 @@ export function createInitialState(seed: number, grid: Grid): WorldState {
     tileBlockIndex,
     heatStamp: new Uint32Array(grid.totalTiles),
     heatStampId: 0,
-    fireScheduledCount: 0,
     firePerfActiveBlocks: 0,
     firePerfWorkBlocks: 0,
     firePerfFireBoundsArea: 0,
@@ -710,6 +708,10 @@ export function syncTileSoA(state: WorldState): void {
 
   if (
     state.tileFire.length !== total ||
+    !state.tileBurnAge ||
+    state.tileBurnAge.length !== total ||
+    !state.tileHeatRelease ||
+    state.tileHeatRelease.length !== total ||
     !state.tileSuppressionWetness ||
     state.tileSuppressionWetness.length !== total ||
     state.tileVegetationAge.length !== total ||
@@ -737,8 +739,9 @@ export function syncTileSoA(state: WorldState): void {
     state.tileFuel = new Float32Array(total);
 
     state.tileHeat = new Float32Array(total);
+    state.tileBurnAge = new Float32Array(total);
+    state.tileHeatRelease = new Float32Array(total);
     state.tileSuppressionWetness = new Float32Array(total);
-    state.tileIgniteAt = new Float32Array(total).fill(Number.POSITIVE_INFINITY);
 
     state.tileIgnitionPoint = new Float32Array(total);
     state.tileBurnRate = new Float32Array(total);
@@ -818,6 +821,8 @@ export function syncTileSoA(state: WorldState): void {
   const fuel = state.tileFuel;
 
   const heat = state.tileHeat;
+  const burnAge = state.tileBurnAge;
+  const heatRelease = state.tileHeatRelease;
 
   const ignition = state.tileIgnitionPoint;
 
@@ -848,6 +853,10 @@ export function syncTileSoA(state: WorldState): void {
     fuel[i] = tile.fuel;
 
     heat[i] = tile.heat;
+    if (tile.fire <= 0) {
+      burnAge[i] = 0;
+      heatRelease[i] = 0;
+    }
 
     ignition[i] = tile.ignitionPoint;
 
@@ -914,6 +923,10 @@ export function syncTileSoAIndex(state: WorldState, idx: number): void {
   state.tileFire[idx] = tile.fire;
   state.tileFuel[idx] = tile.fuel;
   state.tileHeat[idx] = tile.heat;
+  if (tile.fire <= 0) {
+    state.tileBurnAge[idx] = 0;
+    state.tileHeatRelease[idx] = 0;
+  }
   state.tileIgnitionPoint[idx] = tile.ignitionPoint;
   state.tileBurnRate[idx] = tile.burnRate;
   state.tileHeatOutput[idx] = tile.heatOutput;

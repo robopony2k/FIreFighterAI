@@ -19,10 +19,10 @@ export type FireRenderSnapshot = {
   tileFire: Float32Array;
   tileHeat: Float32Array;
   tileFuel: Float32Array;
+  tileBurnAge: Float32Array;
+  tileHeatRelease: Float32Array;
   tileWetness: Float32Array;
-  scheduled: Uint8Array;
   lastActiveFires: number;
-  fireScheduledCount: number;
   fireBoundsActive: boolean;
 };
 
@@ -34,24 +34,24 @@ export type FireFieldView = {
   maxY: number;
   hasBounds: boolean;
   lastActiveFires: number;
-  fireScheduledCount: number;
   getFireAt: (x: number, y: number) => number;
   getFireByIndex: (tileIdx: number) => number;
   getHeat01At: (x: number, y: number) => number;
   getHeat01ByIndex: (tileIdx: number) => number;
   getFuelAt: (x: number, y: number) => number;
   getFuelByIndex: (tileIdx: number) => number;
+  getBurnAgeAt: (x: number, y: number) => number;
+  getBurnAgeByIndex: (tileIdx: number) => number;
+  getHeatReleaseAt: (x: number, y: number) => number;
+  getHeatReleaseByIndex: (tileIdx: number) => number;
   getWetnessAt: (x: number, y: number) => number;
   getWetnessByIndex: (tileIdx: number) => number;
-  getScheduledAt: (x: number, y: number) => number;
-  getScheduledByIndex: (tileIdx: number) => number;
 };
 
 export const createEmptyFireRenderSnapshot = (
   cols: number,
   rows: number,
   lastActiveFires = 0,
-  fireScheduledCount = 0,
   fireBoundsActive = false
 ): FireRenderSnapshot => ({
   cols,
@@ -65,17 +65,17 @@ export const createEmptyFireRenderSnapshot = (
   tileFire: new Float32Array(0),
   tileHeat: new Float32Array(0),
   tileFuel: new Float32Array(0),
+  tileBurnAge: new Float32Array(0),
+  tileHeatRelease: new Float32Array(0),
   tileWetness: new Float32Array(0),
-  scheduled: new Uint8Array(0),
   lastActiveFires,
-  fireScheduledCount,
   fireBoundsActive
 });
 
 const snapshotHasSourceBounds = (snapshot: FireRenderSnapshot | null): boolean =>
   !!snapshot &&
   snapshot.width > 0 &&
-  (snapshot.fireBoundsActive || snapshot.lastActiveFires > 0 || snapshot.fireScheduledCount > 0);
+  snapshot.lastActiveFires > 0;
 
 const clampSnapshotBounds = (
   cols: number,
@@ -98,13 +98,10 @@ export const captureFireRenderSnapshot = (
   const cols = world.grid.cols;
   const rows = world.grid.rows;
   const lastActiveFires = Math.max(0, world.lastActiveFires ?? 0);
-  const fireScheduledCount = Math.max(0, world.fireScheduledCount ?? 0);
   const fireBoundsActive = world.fireBoundsActive === true;
-  const heatCap = Math.max(0.01, world.fireSettings.heatCap);
   const simFireEps = getSimFireEps(world);
-  const heatEps = Math.max(0.06, (world.simPerf?.diffusionEps || 0.02) * 2.5);
   if (cols <= 0 || rows <= 0) {
-    return createEmptyFireRenderSnapshot(cols, rows, lastActiveFires, fireScheduledCount, fireBoundsActive);
+    return createEmptyFireRenderSnapshot(cols, rows, lastActiveFires, fireBoundsActive);
   }
   let hasBounds = false;
   let minX = cols;
@@ -119,11 +116,8 @@ export const captureFireRenderSnapshot = (
     const rowBase = y * cols;
     for (let x = scanMinX; x <= scanMaxX; x += 1) {
       const idx = rowBase + x;
-      const scheduled = world.tileIgniteAt[idx] < Number.POSITIVE_INFINITY;
       const fire = Math.max(0, world.tileFire[idx] ?? 0);
-      const heat01 = clamp((world.tileHeat[idx] ?? 0) / heatCap, 0, 1);
-      const wetness = Math.max(0, world.tileSuppressionWetness[idx] ?? 0);
-      if (fire <= simFireEps && heat01 <= heatEps && !scheduled && wetness <= 0.01) {
+      if (fire <= simFireEps) {
         continue;
       }
       if (!hasBounds) {
@@ -176,7 +170,7 @@ export const captureFireRenderSnapshot = (
     }
   }
   if (!hasBounds || minX > maxX || minY > maxY) {
-    return createEmptyFireRenderSnapshot(cols, rows, lastActiveFires, fireScheduledCount, fireBoundsActive);
+    return createEmptyFireRenderSnapshot(cols, rows, lastActiveFires, fireBoundsActive);
   }
   const width = maxX - minX + 1;
   const height = maxY - minY + 1;
@@ -184,9 +178,9 @@ export const captureFireRenderSnapshot = (
   const tileFire = new Float32Array(count);
   const tileHeat = new Float32Array(count);
   const tileFuel = new Float32Array(count);
+  const tileBurnAge = new Float32Array(count);
+  const tileHeatRelease = new Float32Array(count);
   const tileWetness = new Float32Array(count);
-  const scheduled = new Uint8Array(count);
-  let scheduledWithinBounds = 0;
   let write = 0;
   for (let y = minY; y <= maxY; y += 1) {
     const rowBase = y * cols;
@@ -195,10 +189,9 @@ export const captureFireRenderSnapshot = (
       tileFire[write] = Math.max(0, world.tileFire[idx] ?? 0);
       tileHeat[write] = Math.max(0, world.tileHeat[idx] ?? 0);
       tileFuel[write] = clamp(world.tileFuel[idx] ?? 0, 0, 1);
+      tileBurnAge[write] = Math.max(0, world.tileBurnAge[idx] ?? 0);
+      tileHeatRelease[write] = Math.max(0, world.tileHeatRelease[idx] ?? 0);
       tileWetness[write] = clamp(world.tileSuppressionWetness[idx] ?? 0, 0, 1);
-      const scheduledNow = world.tileIgniteAt[idx] < Number.POSITIVE_INFINITY ? 1 : 0;
-      scheduled[write] = scheduledNow;
-      scheduledWithinBounds += scheduledNow;
       write += 1;
     }
   }
@@ -214,10 +207,10 @@ export const captureFireRenderSnapshot = (
     tileFire,
     tileHeat,
     tileFuel,
+    tileBurnAge,
+    tileHeatRelease,
     tileWetness,
-    scheduled,
     lastActiveFires,
-    fireScheduledCount: Math.max(fireScheduledCount, scheduledWithinBounds),
     fireBoundsActive
   };
 };
@@ -252,25 +245,6 @@ const snapshotReadFloatByIndex = (
   snapshot: FireRenderSnapshot,
   tileIdx: number,
   source: Float32Array
-): number => {
-  const offset = snapshotOffsetByIndex(snapshot, tileIdx);
-  return offset >= 0 ? source[offset] ?? 0 : 0;
-};
-
-const snapshotReadByteAt = (
-  snapshot: FireRenderSnapshot,
-  x: number,
-  y: number,
-  source: Uint8Array
-): number => {
-  const offset = snapshotOffsetAt(snapshot, x, y);
-  return offset >= 0 ? source[offset] ?? 0 : 0;
-};
-
-const snapshotReadByteByIndex = (
-  snapshot: FireRenderSnapshot,
-  tileIdx: number,
-  source: Uint8Array
 ): number => {
   const offset = snapshotOffsetByIndex(snapshot, tileIdx);
   return offset >= 0 ? source[offset] ?? 0 : 0;
@@ -315,7 +289,6 @@ export const createFireFieldView = (
     maxY,
     hasBounds: previousHasBounds || currentHasBounds,
     lastActiveFires: Math.max(previousSnapshot.lastActiveFires, currentSnapshot.lastActiveFires),
-    fireScheduledCount: Math.max(previousSnapshot.fireScheduledCount, currentSnapshot.fireScheduledCount),
     getFireAt: (x: number, y: number): number =>
       lerpFloat(
         snapshotReadFloatAt(previousSnapshot, x, y, previousSnapshot.tileFire),
@@ -362,6 +335,38 @@ export const createFireFieldView = (
         0,
         1
       ),
+    getBurnAgeAt: (x: number, y: number): number =>
+      Math.max(
+        0,
+        lerpFloat(
+          snapshotReadFloatAt(previousSnapshot, x, y, previousSnapshot.tileBurnAge),
+          snapshotReadFloatAt(currentSnapshot, x, y, currentSnapshot.tileBurnAge)
+        )
+      ),
+    getBurnAgeByIndex: (tileIdx: number): number =>
+      Math.max(
+        0,
+        lerpFloat(
+          snapshotReadFloatByIndex(previousSnapshot, tileIdx, previousSnapshot.tileBurnAge),
+          snapshotReadFloatByIndex(currentSnapshot, tileIdx, currentSnapshot.tileBurnAge)
+        )
+      ),
+    getHeatReleaseAt: (x: number, y: number): number =>
+      Math.max(
+        0,
+        lerpFloat(
+          snapshotReadFloatAt(previousSnapshot, x, y, previousSnapshot.tileHeatRelease),
+          snapshotReadFloatAt(currentSnapshot, x, y, currentSnapshot.tileHeatRelease)
+        )
+      ),
+    getHeatReleaseByIndex: (tileIdx: number): number =>
+      Math.max(
+        0,
+        lerpFloat(
+          snapshotReadFloatByIndex(previousSnapshot, tileIdx, previousSnapshot.tileHeatRelease),
+          snapshotReadFloatByIndex(currentSnapshot, tileIdx, currentSnapshot.tileHeatRelease)
+        )
+      ),
     getWetnessAt: (x: number, y: number): number =>
       clamp(
         lerpFloat(
@@ -376,24 +381,6 @@ export const createFireFieldView = (
         lerpFloat(
           snapshotReadFloatByIndex(previousSnapshot, tileIdx, previousSnapshot.tileWetness),
           snapshotReadFloatByIndex(currentSnapshot, tileIdx, currentSnapshot.tileWetness)
-        ),
-        0,
-        1
-      ),
-    getScheduledAt: (x: number, y: number): number =>
-      clamp(
-        lerpFloat(
-          snapshotReadByteAt(previousSnapshot, x, y, previousSnapshot.scheduled),
-          snapshotReadByteAt(currentSnapshot, x, y, currentSnapshot.scheduled)
-        ),
-        0,
-        1
-      ),
-    getScheduledByIndex: (tileIdx: number): number =>
-      clamp(
-        lerpFloat(
-          snapshotReadByteByIndex(previousSnapshot, tileIdx, previousSnapshot.scheduled),
-          snapshotReadByteByIndex(currentSnapshot, tileIdx, currentSnapshot.scheduled)
         ),
         0,
         1

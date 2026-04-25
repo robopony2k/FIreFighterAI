@@ -16,8 +16,7 @@ const MAX_VISIBLE_TILES = 5200;
  * Updates the smoothed fire intensity values used for rendering.
  */
 export const updateFireSmoothing = (state: WorldState, renderState: RenderState, now: number) => {
-  const useAuthoritativeFire =
-    state.simTimeMode === "incident" || state.lastActiveFires > 0 || state.fireScheduledCount > 0;
+  const useAuthoritativeFire = state.simTimeMode === "incident" || state.lastActiveFires > 0;
   if (useAuthoritativeFire) {
     renderState.renderFireSmooth.set(state.tileFire);
     return;

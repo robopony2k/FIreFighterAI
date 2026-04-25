@@ -157,8 +157,5 @@ export const getAdaptiveFireSubstepMax = (
   if (fireActivityState === "burning") {
     return climateRisk >= 0.4 ? 0.125 : 0.25;
   }
-  if (fireActivityState === "holdover") {
-    return 0.25;
-  }
   return 0.5;
 };

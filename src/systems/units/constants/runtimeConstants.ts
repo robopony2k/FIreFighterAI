@@ -8,8 +8,6 @@ export const TRUCK_SUPPORT_POSITION_TOLERANCE = 1.85;
 export const CREW_REISSUE_DISTANCE = 0.7;
 export const FIRE_FOCUS_CLUSTER_RADIUS = 1.8;
 export const THREAT_FIRE_EPS = 0.03;
-export const THREAT_HOLDOVER_HEAT_EPS = 0.08;
-export const THREAT_HOLDOVER_WETNESS_EPS = 0.06;
 export const THREAT_ASSET_RADIUS = 2;
 export const THREAT_NEIGHBOR_DIRS = [
   { dx: 1, dy: 0 },
