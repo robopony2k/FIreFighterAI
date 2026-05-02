@@ -40,7 +40,7 @@ The resulting moisture value is stored in both:
 ## Key Tunables
 - Elevation scale and octaves.
 - Moisture thresholds for biomes.
-- Fuel profiles (from YAML config).
+- Fuel profiles from `src/config/fuelProfiles.ts`.
 
 ## Performance Characteristics
 - Distance-to-water is computed once during map generation.

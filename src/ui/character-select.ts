@@ -21,6 +21,13 @@ import {
   syncTerrainControlOutputs,
   TERRAIN_RUN_GROUPS
 } from "./terrain-schema.js";
+import {
+  FUEL_PROFILE_FIELD_DEFINITIONS,
+  buildFuelFieldTooltip,
+  buildFuelInputTooltip,
+  buildFuelTypeTooltip,
+  formatFuelTileTypeLabel
+} from "./fuelProfileHelp.js";
 export type CharacterSelectRefs = {
   characterScreen: HTMLDivElement;
   characterGrid: HTMLDivElement;
@@ -61,161 +68,7 @@ const buildStats = (character: CharacterDefinition): string[] => [
   `Approval Retention ${formatMultiplier(character.modifiers.approvalRetentionMultiplier)}`
 ];
 
-const FUEL_PROFILE_FIELDS: { key: keyof FuelProfile; label: string; step: string }[] = [
-  { key: "baseFuel", label: "Base fuel", step: "0.01" },
-  { key: "ignition", label: "Ignition point", step: "0.01" },
-  { key: "burnRate", label: "Burn rate", step: "0.01" },
-  { key: "heatOutput", label: "Heat output", step: "0.01" },
-  { key: "spreadBoost", label: "Spread boost", step: "0.01" },
-  { key: "heatTransferCap", label: "Heat transfer cap", step: "0.01" },
-  { key: "heatRetention", label: "Heat retention", step: "0.01" },
-  { key: "windFactor", label: "Wind factor", step: "0.01" }
-];
-
 const FUEL_PROFILE_TYPES = Object.keys(FUEL_PROFILES) as TileType[];
-
-const formatTileTypeLabel = (type: TileType): string => type.charAt(0).toUpperCase() + type.slice(1);
-
-const getFuelFieldLabel = (key: keyof FuelProfile): string =>
-  FUEL_PROFILE_FIELDS.find((field) => field.key === key)?.label ?? key;
-
-const buildFuelFieldTooltip = (key: keyof FuelProfile, heatCap: number): string => {
-  switch (key) {
-    case "baseFuel":
-      return [
-        "Starting combustible mass before moisture, vegetation-age scaling, and small random variation are applied.",
-        "Final fuel is roughly baseFuel * vegetation multiplier * (1 - moisture * 0.6).",
-        "Tune this for burn duration more than ignition difficulty.",
-        "0 disables sustained burning; ~0.2-0.5 is light fuel; ~0.8+ is heavy fuel."
-      ].join("\n");
-    case "ignition":
-      return [
-        "Heat threshold required to ignite the tile.",
-        "Final ignition is clamp(profile + moisture * 0.35 + forest bonus 0.08, 0.2, 1.4).",
-        "Lower values ignite easily; higher values need stronger pre-heating.",
-        "Values that end up above 1.4 are effectively capped."
-      ].join("\n");
-    case "burnRate":
-      return [
-        "Scales both fire growth and fuel drain once the tile is burning.",
-        "Final burn rate is profile * (0.7 + (1 - moisture) * 0.8), so dry tiles burn a bit over 2x faster than saturated ones.",
-        "Higher values create faster flare-ups; lower values create longer smoldering burns."
-      ].join("\n");
-    case "heatOutput":
-      return [
-        "Controls how much heat a burning tile generates for itself and neighboring tiles.",
-        "Final heat output is profile * (0.85 + fuel * 0.25), so heavier-fuel tiles burn hotter.",
-        "Raise this when you want a tile to push stronger heat into the fire front."
-      ].join("\n");
-    case "spreadBoost":
-      return [
-        "Multiplier on outgoing spread heat while the tile is actively burning.",
-        "1.0 is neutral. 0 means the tile can burn, but contributes almost no active spread.",
-        "Best tuned alongside heat output; high spread boost with low heat output still spreads weakly."
-      ].join("\n");
-    case "heatTransferCap":
-      return [
-        "Maximum stored heat the tile can hold after diffusion.",
-        `The effective cap is limited by the current global fire heat cap (${heatCap.toFixed(2)}).`,
-        "If this is non-zero but below the tile's ignition point, the sim still lifts the effective cap to at least ignitionPoint * 1.05.",
-        "0 makes the tile dump stored heat immediately."
-      ].join("\n");
-    case "heatRetention":
-      return [
-        "Fraction of buffered heat kept each update, and a major driver of how long hotspots linger after flames die.",
-        "~0.4-0.6 cools quickly; ~0.85+ keeps stubborn embers alive.",
-        "Values above 1 can amplify heat and usually create unstable behavior."
-      ].join("\n");
-    case "windFactor":
-      return [
-        "How strongly wind biases the direction of spread heat.",
-        "0 ignores wind. ~0.6-1.0 is a strong but sane directional effect. Values above 1 exaggerate downwind runs.",
-        "Negative values are treated as 0 in the sim."
-      ].join("\n");
-    default:
-      return "";
-  }
-};
-
-const collectFuelProfileRelationshipNotes = (profile: FuelProfile, heatCap: number): string[] => {
-  const notes: string[] = [];
-  if (profile.baseFuel <= 0) {
-    notes.push("Base fuel is 0, so this tile type will not sustain fire regardless of the other values.");
-  } else if (profile.baseFuel < profile.burnRate) {
-    notes.push("Base fuel is lower than burn rate; expect brief flare-ups that consume fuel very quickly.");
-  } else if (profile.baseFuel > 0.8 && profile.burnRate < 0.2) {
-    notes.push("High fuel with low burn rate creates long, stubborn burns that can smolder for a while.");
-  }
-
-  if (profile.heatOutput < profile.ignition) {
-    notes.push("Heat output is below ignition point; same-type spread may need neighbor stacking, dry conditions, or wind support.");
-  } else if (profile.baseFuel > 0 && profile.heatOutput > profile.baseFuel * 2.2 && profile.burnRate >= 0.6) {
-    notes.push("Heat output is high relative to fuel; expect hot but relatively short-lived flare-ups.");
-  }
-
-  if (profile.spreadBoost <= 0 && profile.baseFuel > 0) {
-    notes.push("Spread boost is 0: the tile can burn if ignited, but contributes almost no active spread.");
-  } else if (profile.spreadBoost > 1 && profile.windFactor > 1) {
-    notes.push("High spread boost plus high wind factor creates very aggressive downwind fronts.");
-  }
-
-  if (profile.heatTransferCap > heatCap) {
-    notes.push(
-      `Heat transfer cap is above the current global fire heat cap (${heatCap.toFixed(2)}), so the extra headroom is unused unless you raise the global cap.`
-    );
-  } else if (profile.heatTransferCap > 0 && profile.heatTransferCap < profile.ignition) {
-    notes.push("Heat transfer cap is below ignition point; the sim will still lift the effective cap to at least ignitionPoint * 1.05.");
-  }
-
-  if (profile.heatRetention > 1) {
-    notes.push("Heat retention above 1 can amplify stored heat and usually produces unstable or non-physical behavior.");
-  } else if (profile.heatRetention > 0.85 && profile.heatTransferCap >= heatCap * 0.8 && profile.baseFuel > 0) {
-    notes.push("High heat retention plus high heat transfer cap creates stubborn hotspots and repeat ignitions.");
-  }
-
-  if (profile.windFactor > 1 && profile.spreadBoost <= 0.75) {
-    notes.push("Wind factor is very high, but spread boost is low, so wind will steer the fire more than it accelerates it.");
-  } else if (profile.windFactor > 1) {
-    notes.push("Wind factor above 1 exaggerates downwind bias and can starve upwind spread.");
-  }
-
-  return notes;
-};
-
-const buildFuelInputTooltip = (
-  type: TileType,
-  key: keyof FuelProfile,
-  profile: FuelProfile,
-  heatCap: number
-): string => {
-  const currentValue = profile[key];
-  const defaultValue = FUEL_PROFILES[type][key];
-  const relationshipNotes = collectFuelProfileRelationshipNotes(profile, heatCap);
-  const lines = [
-    `${formatTileTypeLabel(type)} - ${getFuelFieldLabel(key)}`,
-    `Current ${currentValue.toFixed(2)} | Default ${defaultValue.toFixed(2)}`,
-    "",
-    buildFuelFieldTooltip(key, heatCap)
-  ];
-  if (relationshipNotes.length > 0) {
-    lines.push("", "Current profile notes:");
-    relationshipNotes.forEach((note) => lines.push(`- ${note}`));
-  }
-  return lines.join("\n");
-};
-
-const buildFuelTypeTooltip = (type: TileType, profile: FuelProfile, heatCap: number): string => {
-  const notes = collectFuelProfileRelationshipNotes(profile, heatCap);
-  const lines = [
-    `${formatTileTypeLabel(type)} defaults`,
-    "These values are copied into each tile of this type, then moisture and local fuel variance adjust the live sim values."
-  ];
-  if (notes.length > 0) {
-    lines.push("", "Current profile notes:");
-    notes.forEach((note) => lines.push(`- ${note}`));
-  }
-  return lines.join("\n");
-};
 
 const buildFuelProfiles = (overrides: FuelProfileOverrides): Record<TileType, FuelProfile> => {
   const result = {} as Record<TileType, FuelProfile>;
@@ -232,7 +85,7 @@ const buildFuelProfileOverrides = (profiles: Record<TileType, FuelProfile>): Fue
     const base = FUEL_PROFILES[type];
     const profile = profiles[type];
     const delta: Partial<FuelProfile> = {};
-    for (const field of FUEL_PROFILE_FIELDS) {
+    for (const field of FUEL_PROFILE_FIELD_DEFINITIONS) {
       const key = field.key;
       if (Math.abs(profile[key] - base[key]) > 1e-6) {
         delta[key] = profile[key];
@@ -651,7 +504,7 @@ export function initCharacterSelect(
     fuelProfileHeaderCells.clear();
     fuelProfileTypeCells.clear();
     ui.fuelProfileGrid.innerHTML = "";
-    const headerLabels = ["Tile", ...FUEL_PROFILE_FIELDS.map((field) => field.label)];
+    const headerLabels = ["Tile", ...FUEL_PROFILE_FIELD_DEFINITIONS.map((field) => field.label)];
     headerLabels.forEach((label) => {
       const cell = document.createElement("div");
       cell.className = "fuel-grid-cell fuel-grid-head";
@@ -659,7 +512,7 @@ export function initCharacterSelect(
       if (label === "Tile") {
         cell.title = "Tile type these fire-tuning values apply to.";
       } else {
-        const field = FUEL_PROFILE_FIELDS.find((entry) => entry.label === label);
+        const field = FUEL_PROFILE_FIELD_DEFINITIONS.find((entry) => entry.label === label);
         if (field) {
           fuelProfileHeaderCells.set(field.key, cell);
         }
@@ -674,13 +527,13 @@ export function initCharacterSelect(
       swatch.className = "fuel-grid-swatch";
       swatch.dataset.type = type;
       const label = document.createElement("span");
-      label.textContent = formatTileTypeLabel(type);
+      label.textContent = formatFuelTileTypeLabel(type);
       typeCell.appendChild(swatch);
       typeCell.appendChild(label);
       fuelProfileTypeCells.set(type, typeCell);
       ui.fuelProfileGrid.appendChild(typeCell);
 
-      for (const field of FUEL_PROFILE_FIELDS) {
+      for (const field of FUEL_PROFILE_FIELD_DEFINITIONS) {
         const cell = document.createElement("div");
         cell.className = "fuel-grid-cell";
         const input = document.createElement("input");

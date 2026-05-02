@@ -18,8 +18,11 @@ export type RuntimeSettings = {
   autodpr: boolean;
   mindpr: number;
   waterq: "fast" | "balanced" | "high";
+  trees: boolean;
+  detailedstructures: boolean;
   rivercam: "" | "top" | "under" | "oblique";
   rivercamlock: boolean;
+  shadows: boolean;
   firewall: number;
   firevol: number;
   fxbudget: number;
@@ -118,8 +121,11 @@ export const DEFAULT_RUNTIME_SETTINGS: RuntimeSettings = {
   autodpr: true,
   mindpr: 1,
   waterq: "balanced",
+  trees: true,
+  detailedstructures: true,
   rivercam: "",
   rivercamlock: false,
+  shadows: true,
   firewall: 0.62,
   firevol: 0.55,
   fxbudget: 1,
@@ -329,6 +335,24 @@ export const RUNTIME_SETTING_DEFINITIONS: ReadonlyArray<RuntimeSettingDefinition
     ]
   },
   {
+    key: "trees",
+    section: "3D Renderer",
+    kind: "boolean",
+    label: "3D Trees",
+    description: "Render decorative instanced 3D tree and scrub meshes.",
+    defaultValue: DEFAULT_RUNTIME_SETTINGS.trees,
+    queryStyle: "0-false"
+  },
+  {
+    key: "detailedstructures",
+    section: "3D Renderer",
+    kind: "boolean",
+    label: "Detailed Structures",
+    description: "Render detailed procedural house and base meshes instead of simple structure blocks.",
+    defaultValue: DEFAULT_RUNTIME_SETTINGS.detailedstructures,
+    queryStyle: "0-false"
+  },
+  {
     key: "rivercam",
     section: "3D Renderer",
     kind: "enum",
@@ -350,6 +374,15 @@ export const RUNTIME_SETTING_DEFINITIONS: ReadonlyArray<RuntimeSettingDefinition
     description: "Disable camera controls when a river camera preset is active.",
     defaultValue: DEFAULT_RUNTIME_SETTINGS.rivercamlock,
     queryStyle: "1-true"
+  },
+  {
+    key: "shadows",
+    section: "3D Renderer",
+    kind: "boolean",
+    label: "Shadows",
+    description: "Enable directional shadow-map rendering in 3D mode.",
+    defaultValue: DEFAULT_RUNTIME_SETTINGS.shadows,
+    queryStyle: "0-false"
   },
   {
     key: "shadowres",

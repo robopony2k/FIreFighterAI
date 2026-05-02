@@ -390,6 +390,28 @@ const clearLatestFireAlert = (state: WorldState): void => {
   state.latestFireAlert = null;
 };
 
+const pauseForDetectedFireIncident = (
+  state: WorldState,
+  strongest: { x: number; y: number },
+  previousSpeedIndex: number,
+  previousSliderValue: number
+): void => {
+  recordLatestFireAlert(state, strongest.x, strongest.y);
+  const incident = state.latestFireAlert;
+  const nearestTown = incident && incident.townId >= 0
+    ? state.towns.find((town) => town.id === incident.townId) ?? null
+    : null;
+  enterIncidentMode(state, previousSpeedIndex);
+  state.timeSpeedSliderValue = previousSliderValue;
+  state.paused = true;
+  state.skipToNextFire = null;
+  if (nearestTown) {
+    setStatus(state, `Fire incident detected near ${nearestTown.name}. Simulation paused.`);
+  } else {
+    setStatus(state, "Fire incident detected. Simulation paused.");
+  }
+};
+
 const hasFireActivity = (
   state: Pick<WorldState, "fireActivityState">
 ): boolean => state.fireActivityState !== "idle";
@@ -738,6 +760,8 @@ export function pickInitialFires(state: WorldState, rng: RNG): void {
     state.fireMaxX = maxX;
     state.fireMinY = minY;
     state.fireMaxY = maxY;
+    state.lastActiveFires = Math.max(state.lastActiveFires, placed);
+    applyFireActivityMetrics(state, state.lastActiveFires);
   }
 }
 
@@ -797,6 +821,13 @@ export function stepSim(state: WorldState, effects: EffectsState, rng: RNG, delt
   const dayDelta = delta * DAYS_PER_SECOND;
   const calendarDelta = dayDelta;
   const previousCareerDay = state.careerDay;
+  const hadFireChainRisk = hasFireActivity(state);
+  const previousSpeedIndex = state.skipToNextFire
+    ? clamp(state.skipToNextFire.previousTimeSpeedIndex, 0, getMaxTimeSpeedIndex(TIME_SPEED_OPTIONS))
+    : clamp(state.strategicTimeSpeedIndex, 0, getMaxTimeSpeedIndex(TIME_SPEED_OPTIONS));
+  const previousSliderValue = state.skipToNextFire
+    ? clampTimeSpeedSliderValue(state.skipToNextFire.previousTimeSpeedSliderValue)
+    : state.timeSpeedSliderValue;
   advanceCalendar(state, rng, calendarDelta);
   advanceCareerDay(state, calendarDelta, PHASE_YEAR_DAYS, VIRTUAL_YEAR_DAYS, CAREER_TOTAL_DAYS);
   syncClimateToCareerDay(state);
@@ -818,7 +849,14 @@ export function stepSim(state: WorldState, effects: EffectsState, rng: RNG, delt
     applyFireActivityMetrics(state, 0);
     return;
   }
-  const hadFireChainRisk = hasFireActivity(state);
+  if (!hadFireChainRisk && hasFireActivity(state)) {
+    const strongest = findStrongestFireTile(state);
+    if (strongest) {
+      pauseForDetectedFireIncident(state, strongest, previousSpeedIndex, previousSliderValue);
+      stepParticles(state, effects, delta);
+      return;
+    }
+  }
   const climateRisk = getClimateRisk(state);
   stepTownAlertPosture(state, dayDelta);
   stepTownConstructionSchedule(state, createRuntimeSettlementRoadAdapter(state), dayDelta);
@@ -912,26 +950,7 @@ export function stepSim(state: WorldState, effects: EffectsState, rng: RNG, delt
   if (!hadFireChainRisk && hasFireActivity(state)) {
     const strongest = findStrongestFireTile(state);
     if (strongest) {
-      recordLatestFireAlert(state, strongest.x, strongest.y);
-      const previousSpeedIndex = state.skipToNextFire
-        ? clamp(state.skipToNextFire.previousTimeSpeedIndex, 0, getMaxTimeSpeedIndex(TIME_SPEED_OPTIONS))
-        : clamp(state.strategicTimeSpeedIndex, 0, getMaxTimeSpeedIndex(TIME_SPEED_OPTIONS));
-      const previousSliderValue = state.skipToNextFire
-        ? clampTimeSpeedSliderValue(state.skipToNextFire.previousTimeSpeedSliderValue)
-        : state.timeSpeedSliderValue;
-      const incident = state.latestFireAlert;
-      const nearestTown = incident && incident.townId >= 0
-        ? state.towns.find((town) => town.id === incident.townId) ?? null
-        : null;
-      enterIncidentMode(state, previousSpeedIndex);
-      state.timeSpeedSliderValue = previousSliderValue;
-      state.paused = true;
-      state.skipToNextFire = null;
-      if (nearestTown) {
-        setStatus(state, `Fire incident detected near ${nearestTown.name}. Simulation paused.`);
-      } else {
-        setStatus(state, "Fire incident detected. Simulation paused.");
-      }
+      pauseForDetectedFireIncident(state, strongest, previousSpeedIndex, previousSliderValue);
     }
   } else if (state.simTimeMode === "incident" && state.fireActivityState === "idle") {
     exitIncidentMode(state);

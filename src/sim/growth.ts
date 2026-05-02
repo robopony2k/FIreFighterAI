@@ -571,10 +571,7 @@ export function stepGrowth(state: WorldState, dayDelta: number, rng: RNG): void 
           const maturityDrag = 0.2 + 0.8 * (1 - maturity01);
           tile.vegetationAgeYears += dayDelta * ageRate * env * seedBoost * maturityDrag;
           syncDerivedVegetationState(tile, state.seed, x, y);
-          const maxFuel =
-            profile.baseFuel *
-            getVegetationFuelCapMultiplier(tile.type, tile.vegetationAgeYears) *
-            (1.1 + waterFactor * 0.2);
+          const maxFuel = profile.baseFuel * getVegetationFuelCapMultiplier(tile.type, tile.vegetationAgeYears);
           const fuelGrowth = dayDelta * FUEL_GROWTH_RATE * (0.4 + 0.6 * env);
           tile.fuel = clamp(tile.fuel + fuelGrowth, 0, maxFuel);
 

@@ -77,6 +77,12 @@ export type FireRenderAdaptiveState = {
   smokeRecoveryAccum: number;
   flameFallbackAccum: number;
   flameRecoveryAccum: number;
+  overloadActive: boolean;
+  overloadFallbackAccum: number;
+  overloadRecoveryAccum: number;
+  emergencyOverloadActive: boolean;
+  emergencyFallbackAccum: number;
+  emergencyRecoveryAccum: number;
 };
 
 export type FireRenderAdaptiveInput = {
@@ -123,8 +129,53 @@ export const createInitialFireRenderAdaptiveState = (): FireRenderAdaptiveState 
   smokeFallbackAccum: 0,
   smokeRecoveryAccum: 0,
   flameFallbackAccum: 0,
-  flameRecoveryAccum: 0
+  flameRecoveryAccum: 0,
+  overloadActive: false,
+  overloadFallbackAccum: 0,
+  overloadRecoveryAccum: 0,
+  emergencyOverloadActive: false,
+  emergencyFallbackAccum: 0,
+  emergencyRecoveryAccum: 0
 });
+
+const FIRE_FX_OVERLOAD_ENTER_SECONDS = 0.22;
+const FIRE_FX_OVERLOAD_EXIT_SECONDS = 0.85;
+const FIRE_FX_EMERGENCY_ENTER_SECONDS = 0.12;
+const FIRE_FX_EMERGENCY_EXIT_SECONDS = 0.45;
+
+const updateStickyMode = (
+  active: boolean,
+  rawActive: boolean,
+  dtSeconds: number,
+  enterSeconds: number,
+  exitSeconds: number,
+  fallbackAccum: number,
+  recoveryAccum: number
+): { active: boolean; fallbackAccum: number; recoveryAccum: number } => {
+  let nextActive = active;
+  let nextFallbackAccum = fallbackAccum;
+  let nextRecoveryAccum = recoveryAccum;
+  if (rawActive) {
+    nextFallbackAccum += dtSeconds;
+    nextRecoveryAccum = 0;
+    if (nextFallbackAccum >= enterSeconds) {
+      nextActive = true;
+      nextFallbackAccum = enterSeconds;
+    }
+  } else {
+    nextRecoveryAccum += dtSeconds;
+    nextFallbackAccum = 0;
+    if (nextRecoveryAccum >= exitSeconds) {
+      nextActive = false;
+      nextRecoveryAccum = exitSeconds;
+    }
+  }
+  return {
+    active: nextActive,
+    fallbackAccum: nextFallbackAccum,
+    recoveryAccum: nextRecoveryAccum
+  };
+};
 
 const applyFallbackMode = (
   fallbackMode: FireFxFallbackMode,
@@ -194,15 +245,49 @@ export const buildFireRenderBudgetPlan = (
       : input.hasFireWork || input.hasActiveSmoke
         ? FIRE_FX_ACTIVE_UPDATE_INTERVAL_MS
         : FIRE_FX_IDLE_UPDATE_INTERVAL_MS;
-  const emergencyOverload =
+  let nextState: FireRenderAdaptiveState = { ...state };
+  const rawEmergencyOverload =
     (Number.isFinite(input.fpsEstimate) && input.fpsEstimate > 0 && input.fpsEstimate <= FIRE_FX_EMERGENCY_FPS) ||
     (Number.isFinite(input.sceneRenderMs) && input.sceneRenderMs >= FIRE_FX_EMERGENCY_SCENE_MS);
-  const overloaded =
-    emergencyOverload ||
-    ((Number.isFinite(input.fpsEstimate) && input.fpsEstimate > 0 && input.fpsEstimate <= FIRE_FX_OVERLOAD_FPS) ||
-      (Number.isFinite(input.sceneRenderMs) && input.sceneRenderMs >= FIRE_FX_OVERLOAD_SCENE_MS));
-
-  let nextState: FireRenderAdaptiveState = { ...state };
+  const rawOverload =
+    rawEmergencyOverload ||
+    (Number.isFinite(input.fpsEstimate) && input.fpsEstimate > 0 && input.fpsEstimate <= FIRE_FX_OVERLOAD_FPS) ||
+    (Number.isFinite(input.sceneRenderMs) && input.sceneRenderMs >= FIRE_FX_OVERLOAD_SCENE_MS);
+  if (isRenderPaused) {
+    nextState.overloadActive = false;
+    nextState.overloadFallbackAccum = 0;
+    nextState.overloadRecoveryAccum = 0;
+    nextState.emergencyOverloadActive = false;
+    nextState.emergencyFallbackAccum = 0;
+    nextState.emergencyRecoveryAccum = 0;
+  } else {
+    const emergencyMode = updateStickyMode(
+      nextState.emergencyOverloadActive,
+      rawEmergencyOverload,
+      input.frameDeltaSeconds,
+      FIRE_FX_EMERGENCY_ENTER_SECONDS,
+      FIRE_FX_EMERGENCY_EXIT_SECONDS,
+      nextState.emergencyFallbackAccum,
+      nextState.emergencyRecoveryAccum
+    );
+    nextState.emergencyOverloadActive = emergencyMode.active;
+    nextState.emergencyFallbackAccum = emergencyMode.fallbackAccum;
+    nextState.emergencyRecoveryAccum = emergencyMode.recoveryAccum;
+    const overloadMode = updateStickyMode(
+      nextState.overloadActive,
+      rawOverload || emergencyMode.active,
+      input.frameDeltaSeconds,
+      FIRE_FX_OVERLOAD_ENTER_SECONDS,
+      FIRE_FX_OVERLOAD_EXIT_SECONDS,
+      nextState.overloadFallbackAccum,
+      nextState.overloadRecoveryAccum
+    );
+    nextState.overloadActive = overloadMode.active || emergencyMode.active;
+    nextState.overloadFallbackAccum = overloadMode.fallbackAccum;
+    nextState.overloadRecoveryAccum = overloadMode.recoveryAccum;
+  }
+  const emergencyOverload = nextState.emergencyOverloadActive;
+  const overloaded = nextState.overloadActive;
   const pressureFlameBudgetScale = isRenderPaused
     ? FIRE_FX_PAUSED_FLAME_BUDGET_SCALE
     : emergencyOverload
@@ -212,6 +297,7 @@ export const buildFireRenderBudgetPlan = (
         : 1;
 
   if (
+    !isRenderPaused &&
     Number.isFinite(input.fpsEstimate) &&
     input.fpsEstimate > 0 &&
     Number.isFinite(input.sceneRenderMs) &&
@@ -323,14 +409,14 @@ export const buildFireRenderBudgetPlan = (
       ? 1
       : Math.max(1, Math.ceil(Math.sqrt(input.area / Math.max(1, fireMaxInstances))));
   const sparkStreakCap = Math.max(
-    140,
+    48,
     Math.floor(
       SPARK_STREAK_MAX_INSTANCES *
         clamp(flameBudgetBaseScale * (0.66 + nextState.flameBudgetScale * 0.34), 0.35, 1)
     )
   );
   const emberCap = Math.max(
-    120,
+    48,
     Math.floor(EMBER_MAX_INSTANCES * clamp(flameBudgetBaseScale * (0.62 + nextState.flameBudgetScale * 0.38), 0.32, 1))
   );
   return {
@@ -440,7 +526,7 @@ export const analyzeFireRenderFrame = (input: AnalyzeFireRenderFrameInput): Fire
     clusterUpdateMs: CLUSTER_UPDATE_MS
   });
 
-  const frontPassEnabled = visual.showFrontPass && !visual.overloaded;
+  const frontPassEnabled = visual.showFrontPass && !visual.emergencyOverload;
   const frontAnalysis = analyzeFireFronts({
     state,
     world,

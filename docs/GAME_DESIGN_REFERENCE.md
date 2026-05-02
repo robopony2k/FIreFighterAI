@@ -61,7 +61,11 @@ Story: You are the new "Fire Warden" in charge of a region. Your mission is to p
 
 ## Fire Behavior (Gameplay Perspective)
 
-- Fires spread based on local heat, fuel, moisture, wind, and neighboring fires.
+- Fires spread based on local heat, fuel, moisture, wind, elevation, and neighboring fires.
+- Tile type does not add hidden ignition/spread modifiers; differences between forest, house, grass, roads, and other terrain should come from explicit fuel profiles, current fuel load, moisture, heat, wind, elevation, suppression, and non-ignitable fuel values.
+- In the campaign, vegetation age controls current available fuel up to the tile type's `baseFuel` cap; SIM Lab treats vegetated tiles as fully fueled from the active fuel profile for direct tuning comparisons.
+- Elevation biases heat transfer: uphill cells ignite more easily than downhill cells, while flat terrain remains neutral.
+- Terrain can locally shape wind around burning cells with small clamped strength and steering changes, including obstruction, downslope acceleration, and simple corridor funneling; this is not a persistent wind simulation.
 - Spread should be reliable in high-risk conditions; low-risk periods should still allow controlled burns.
 - The player should feel the difference between a mild year and a severe year.
 
@@ -107,6 +111,7 @@ Design intent:
 - Top right of screen - Forecast graph shows rolling 90-day fire risk with current-day marker.
 - Bottom right of screen - "Announcements" at key events ie a speech bubble from a News Station, Weather Presenter, Financial Advisor etc
 - Bottom middle of screen - Debug overlays exist for tuning and dev validation.
+- Dev-facing SIM Lab exists for controlled fire-behavior tuning: selectable scenario templates run on a denser 128x80 grid, with terrain painting, painted firefighter suppression markers, local saved/loaded test scenarios, a cell-state legend/symbol overlay, fuel profile sliders, and wind, temperature, moisture, risk, and incident-speed preset controls with explanatory tooltips. Firefighter markers maintain a hose-reachable defensive wetness field and auto-spray nearby hot or burning cells using default firefighter radius, hose range, and power. SIM Lab speed mirrors the game's incident-time tuning surface on the same fixed 0.25s incident tick, adds `0.5x` and `1x` lab convenience options, and is capped at `1x`. The Plain + Road template uses a one-tile road gap so it matches the in-game road scale while still testing fire jumps across non-flammable cells. Fuel profile slider edits apply immediately, auto-save as local SIM Lab drafts, survive saved-scenario loads, and can be copied as a complete `src/config/fuelProfiles.ts` defaults file when ready to promote into source. The `windFactor` slider is displayed as Windbreak: `0` is open/no blocking, `1` is strong wind obstruction.
 - Top left of screen - Available trucks to select with key info
 - Bottom left of screen - Details on selected unit + available commands
 
@@ -132,7 +137,7 @@ Command Roster
 Terrain
 - Seed and map size presets.
 - Map generation sliders (forest/meadow/water settings).
-- Tile fuel profiles (baseFuel/ignition/burnRate/heatOutput/spreadBoost/heatTransferCap/heatRetention/windFactor per tile type).
+- Tile fuel profiles (baseFuel/ignition/burnRate/heatOutput/spreadBoost/heatTransferCap/heatRetention/windFactor per tile type); windFactor is retained as the config key but means windbreak strength, where 0 is open terrain and 1 is strong wind obstruction.
 - Vegetation regrowth (water influence, ash recovery, canopy growth, forest recruit).
 - Community and road generation (town density, bridge allowance, settlement spacing, road strictness, pre-growth years).
 
@@ -146,14 +151,16 @@ Climate
 Fire
 - Ignition chance per day, sim speed/tick cadence/rows per slice, render smoothing.
 - Fire season taper/min intensity and seasonal fire pacing.
-- Fire jump thresholds/chance/boosts.
-- Heat diffusion constants and heat cap.
+- Deterministic ranged heat diffusion for short firebreak gaps: 10m gaps can cross in bad conditions, 20m gaps require extreme aligned wind/heat, and 30m gaps require explicit extreme tuning. V1 does not model probabilistic long-range ember spotting.
+- Heat diffusion constants, ranged-diffusion thresholds/falloff, windbreak obstruction strength, and heat cap.
 - Conflagration boosts.
 - Fire bounds padding.
+- Elevation spread and local terrain-wind shaping tunables.
 
 Other
 - Career/time pacing (career years, days/sec, phase durations, ash regrow delay, growth speed).
 - Time controls support persisted preset-button mode and an experimental slider mode; the slider spans 0x-80x in 0.25x steps, shares one value across strategic/incident time, and `Skip to Next Fire` temporarily forces max speed before restoring the prior value.
+- High-speed strategic time must still detect the first fire-season incident immediately: when calendar advancement seeds or discovers active fire, the sim enters incident mode and pauses before any large high-speed fire step can burn past the opening response window.
 - Economy baselines (base budget, approval min, hectares per tile, initial approval).
 - Progression toggles (available upgrades list).
 - Debug/perf toggles (simPerf, renderTrees/effects), unlimited money.

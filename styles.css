@@ -777,6 +777,308 @@ canvas {
   }
 }
 
+.three-test-overlay--sim-lab #threeTestCanvas {
+  opacity: 0;
+}
+
+.fire-sim-lab-shell {
+  position: absolute;
+  inset: 0;
+  z-index: 14;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(320px, 380px);
+  gap: 14px;
+  padding: 14px;
+  pointer-events: auto;
+  background:
+    linear-gradient(180deg, rgba(11, 18, 24, 0.94) 0%, rgba(14, 17, 18, 0.96) 100%);
+  color: var(--three-test-text-primary);
+}
+
+.fire-sim-lab-grid-shell {
+  min-width: 0;
+  min-height: 0;
+  border: 1px solid rgba(151, 189, 165, 0.24);
+  border-radius: 8px;
+  background: #10151a;
+  overflow: hidden;
+}
+
+.fire-sim-lab-grid {
+  width: 100%;
+  height: 100%;
+  display: block;
+  cursor: crosshair;
+  touch-action: none;
+}
+
+.fire-sim-lab-panel {
+  min-height: 0;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 14px;
+  border: 1px solid rgba(255, 203, 141, 0.22);
+  border-radius: 8px;
+  background: rgba(18, 21, 22, 0.96);
+  box-shadow: 0 18px 38px rgba(0, 0, 0, 0.28);
+}
+
+.fire-sim-lab-header {
+  display: grid;
+  gap: 6px;
+}
+
+.fire-sim-lab-header h2 {
+  margin: 0;
+  font-size: 22px;
+  letter-spacing: 0;
+}
+
+.fire-sim-lab-badge {
+  width: fit-content;
+  padding: 4px 8px;
+  border-radius: 999px;
+  background: rgba(126, 178, 119, 0.18);
+  color: #d8f6d0;
+  font-size: 11px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.fire-sim-lab-section {
+  display: grid;
+  gap: 9px;
+  padding: 11px;
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.035);
+}
+
+.fire-sim-lab-section h3 {
+  margin: 0;
+  font-size: 13px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.fire-sim-lab-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.fire-sim-lab-actions > button,
+.fire-sim-lab-speed-options > button,
+.fire-sim-lab-subhead > button {
+  border: 1px solid var(--three-test-button-border);
+  border-radius: 8px;
+  background: rgba(43, 36, 29, 0.96);
+  color: var(--three-test-text-primary);
+  padding: 8px 10px;
+  font-size: 12px;
+  text-transform: uppercase;
+}
+
+.fire-sim-lab-actions > button[aria-pressed="true"],
+.fire-sim-lab-speed-options > button[aria-pressed="true"] {
+  border-color: rgba(126, 178, 119, 0.68);
+  background: rgba(62, 86, 57, 0.98);
+  color: #f0ffe9;
+}
+
+.fire-sim-lab-actions > button:disabled,
+.fire-sim-lab-speed-options > button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.fire-sim-lab-select,
+.fire-sim-lab-text-input,
+.fire-sim-lab-range-inputs input[type="number"] {
+  width: 100%;
+  border: 1px solid var(--three-test-button-border);
+  border-radius: 8px;
+  background: rgba(9, 13, 17, 0.94);
+  color: var(--three-test-text-primary);
+  padding: 8px 10px;
+}
+
+.fire-sim-lab-text-input::placeholder {
+  color: rgba(218, 231, 217, 0.48);
+}
+
+.fire-sim-lab-saved-scenarios {
+  display: grid;
+  gap: 8px;
+  padding-top: 4px;
+}
+
+.fire-sim-lab-range-row,
+.fire-sim-lab-speed-row {
+  display: grid;
+  gap: 7px;
+  padding: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  border-radius: 8px;
+  background: rgba(8, 12, 16, 0.48);
+}
+
+.fire-sim-lab-speed-options {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.fire-sim-lab-speed-options > button {
+  min-width: 0;
+  padding: 7px 5px;
+  text-transform: none;
+}
+
+.fire-sim-lab-range-heading,
+.fire-sim-lab-subhead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 13px;
+}
+
+.fire-sim-lab-range-heading strong {
+  color: #ffe6b0;
+}
+
+.fire-sim-lab-range-inputs {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 82px;
+  gap: 8px;
+  align-items: center;
+}
+
+.fire-sim-lab-range-inputs input[type="range"] {
+  width: 100%;
+}
+
+.fire-sim-lab-status {
+  min-height: 18px;
+  color: var(--three-test-text-muted);
+  font-size: 12px;
+  line-height: 1.35;
+  word-break: break-word;
+}
+
+.fire-sim-lab-stats {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.fire-sim-lab-stat {
+  display: grid;
+  gap: 3px;
+  padding: 8px;
+  border-radius: 8px;
+  background: rgba(10, 15, 19, 0.62);
+}
+
+.fire-sim-lab-stat span {
+  color: var(--three-test-text-muted);
+  font-size: 11px;
+  text-transform: uppercase;
+}
+
+.fire-sim-lab-stat strong {
+  font-size: 15px;
+  color: #f6ead4;
+}
+
+.fire-sim-lab-legend {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.fire-sim-lab-legend-item {
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr);
+  align-items: center;
+  gap: 7px;
+  min-height: 32px;
+  padding: 5px 7px;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 8px;
+  background: rgba(8, 12, 16, 0.48);
+}
+
+.fire-sim-lab-legend-symbol {
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.07);
+  font-family: "Segoe UI Emoji", "Apple Color Emoji", "Noto Color Emoji", ui-sans-serif, system-ui, sans-serif;
+  font-size: 15px;
+}
+
+.fire-sim-lab-symbol--fire {
+  color: #fff7ed;
+  background: rgba(153, 27, 27, 0.58);
+}
+
+.fire-sim-lab-symbol--igniting {
+  color: #ffe08a;
+  background: rgba(161, 98, 7, 0.38);
+}
+
+.fire-sim-lab-symbol--hot {
+  color: #fbbf24;
+  background: rgba(124, 45, 18, 0.38);
+}
+
+.fire-sim-lab-symbol--cooling {
+  color: #f8fafc;
+  background: rgba(51, 65, 85, 0.5);
+}
+
+.fire-sim-lab-symbol--spent {
+  color: #d1d5db;
+  background: rgba(55, 65, 81, 0.5);
+}
+
+.fire-sim-lab-symbol--firefighter {
+  color: #f0b33b;
+  background: rgba(92, 64, 20, 0.58);
+}
+
+.fire-sim-lab-legend-label {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--three-test-text-primary);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@media (max-width: 900px) {
+  .fire-sim-lab-shell {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(220px, 1fr) minmax(260px, 46vh);
+    gap: 10px;
+    padding: 10px;
+  }
+
+  .fire-sim-lab-panel {
+    min-height: 0;
+  }
+
+  .fire-sim-lab-legend {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
 .three-test-town-overlay {
   position: absolute;
   inset: 0;

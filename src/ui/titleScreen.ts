@@ -7,7 +7,7 @@ import {
 import { renderTitleFlameField } from "./title-screen/titleFlameField.js";
 import { createTitleFlameProgram, type TitleFlameProgram } from "./title-screen/titleFlameProgram.js";
 
-type TitleMenuAction = "new-game" | "map-editor" | "fx-lab" | "settings" | "high-score" | "credits" | "quit";
+type TitleMenuAction = "new-game" | "map-editor" | "fx-lab" | "sim-lab" | "settings" | "high-score" | "credits" | "quit";
 
 type TitleMenuOption = {
   id: TitleMenuAction;
@@ -91,6 +91,7 @@ export type TitleScreenDeps = {
   onNewGame: () => void;
   onMapEditor: () => void;
   onFxLab: () => void;
+  onSimLab: () => void;
   onQuit: () => void;
   audioControls?: TitleAudioControls;
   runtimeSettings?: TitleRuntimeSettingsControls;
@@ -109,6 +110,7 @@ const TITLE_MENU_OPTIONS: readonly TitleMenuOption[] = [
   { id: "new-game", label: "New Game" },
   { id: "map-editor", label: "Map Editor" },
   { id: "fx-lab", label: "FX Lab" },
+  { id: "sim-lab", label: "SIM Lab" },
   { id: "settings", label: "Settings" },
   { id: "high-score", label: "High Score" },
   { id: "credits", label: "Credits" },
@@ -995,6 +997,10 @@ export const showTitleScreen = (deps: TitleScreenDeps): TitleScreenHandle => {
     }
     if (action === "fx-lab") {
       deps.onFxLab();
+      return;
+    }
+    if (action === "sim-lab") {
+      deps.onSimLab();
       return;
     }
     if (action === "quit") {

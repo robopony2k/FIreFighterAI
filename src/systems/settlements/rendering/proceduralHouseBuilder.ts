@@ -30,6 +30,9 @@ const ENCLOSED_WALL_COVERAGE_STEPS = [1, 2, 3, 4] as const;
 const ENCLOSED_ROOF_FULL_STEP = 2;
 
 const BOX_GEOMETRY = new THREE.BoxGeometry(1, 1, 1);
+const POSITION_ITEM_SIZE = 3;
+const NORMAL_ITEM_SIZE = 3;
+const UV_ITEM_SIZE = 2;
 
 type BuildingSide = "front" | "back" | "left" | "right";
 
@@ -207,6 +210,141 @@ const addChimney = (
   sz: number
 ): void => {
   addBox(meshes, material, x, y, z, sx, sy, sz);
+};
+
+const getMaterialMergeKey = (() => {
+  let nextId = 1;
+  const materialIds = new WeakMap<THREE.Material, number>();
+  return (material: THREE.Material): string => {
+    const existing = materialIds.get(material);
+    if (existing !== undefined) {
+      return existing.toString();
+    }
+    const id = nextId;
+    nextId += 1;
+    materialIds.set(material, id);
+    return id.toString();
+  };
+})();
+
+type MergeBucket = {
+  material: THREE.Material;
+  meshes: BuildingMeshTemplate[];
+};
+
+const mergeMeshBucket = (bucket: MergeBucket): BuildingMeshTemplate | null => {
+  let vertexCount = 0;
+  let indexCount = 0;
+  for (const mesh of bucket.meshes) {
+    const position = mesh.geometry.getAttribute("position");
+    if (!position) {
+      continue;
+    }
+    vertexCount += position.count;
+    indexCount += mesh.geometry.index ? mesh.geometry.index.count : position.count;
+  }
+  if (vertexCount <= 0 || indexCount <= 0) {
+    return null;
+  }
+
+  const positions = new Float32Array(vertexCount * POSITION_ITEM_SIZE);
+  const normals = new Float32Array(vertexCount * NORMAL_ITEM_SIZE);
+  const uvs = new Float32Array(vertexCount * UV_ITEM_SIZE);
+  const indices = vertexCount > 65535 ? new Uint32Array(indexCount) : new Uint16Array(indexCount);
+  const sourcePosition = new THREE.Vector3();
+  const sourceNormal = new THREE.Vector3();
+  const normalMatrix = new THREE.Matrix3();
+  let vertexOffset = 0;
+  let indexOffset = 0;
+
+  for (const mesh of bucket.meshes) {
+    const geometry = mesh.geometry;
+    const position = geometry.getAttribute("position");
+    if (!position) {
+      continue;
+    }
+    const normal = geometry.getAttribute("normal");
+    const uv = geometry.getAttribute("uv");
+    normalMatrix.getNormalMatrix(mesh.baseMatrix);
+    for (let i = 0; i < position.count; i += 1) {
+      sourcePosition.fromBufferAttribute(position, i).applyMatrix4(mesh.baseMatrix);
+      const writePosition = (vertexOffset + i) * POSITION_ITEM_SIZE;
+      positions[writePosition] = sourcePosition.x;
+      positions[writePosition + 1] = sourcePosition.y;
+      positions[writePosition + 2] = sourcePosition.z;
+
+      if (normal) {
+        sourceNormal.fromBufferAttribute(normal, i).applyMatrix3(normalMatrix).normalize();
+      } else {
+        sourceNormal.set(0, 1, 0);
+      }
+      const writeNormal = (vertexOffset + i) * NORMAL_ITEM_SIZE;
+      normals[writeNormal] = sourceNormal.x;
+      normals[writeNormal + 1] = sourceNormal.y;
+      normals[writeNormal + 2] = sourceNormal.z;
+
+      const writeUv = (vertexOffset + i) * UV_ITEM_SIZE;
+      uvs[writeUv] = uv ? uv.getX(i) : 0;
+      uvs[writeUv + 1] = uv ? uv.getY(i) : 0;
+    }
+
+    if (geometry.index) {
+      for (let i = 0; i < geometry.index.count; i += 1) {
+        indices[indexOffset + i] = geometry.index.getX(i) + vertexOffset;
+      }
+      indexOffset += geometry.index.count;
+    } else {
+      for (let i = 0; i < position.count; i += 1) {
+        indices[indexOffset + i] = vertexOffset + i;
+      }
+      indexOffset += position.count;
+    }
+    vertexOffset += position.count;
+  }
+
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute("position", new THREE.BufferAttribute(positions, POSITION_ITEM_SIZE));
+  geometry.setAttribute("normal", new THREE.BufferAttribute(normals, NORMAL_ITEM_SIZE));
+  geometry.setAttribute("uv", new THREE.BufferAttribute(uvs, UV_ITEM_SIZE));
+  geometry.setIndex(new THREE.BufferAttribute(indices, 1));
+  geometry.computeBoundingBox();
+  geometry.computeBoundingSphere();
+  return {
+    geometry,
+    material: bucket.material,
+    baseMatrix: new THREE.Matrix4()
+  };
+};
+
+const mergeMeshTemplatesByMaterial = (meshes: BuildingMeshTemplate[]): BuildingMeshTemplate[] => {
+  const buckets = new Map<string, MergeBucket>();
+  const passthrough: BuildingMeshTemplate[] = [];
+  for (const mesh of meshes) {
+    if (Array.isArray(mesh.material)) {
+      passthrough.push(mesh);
+      continue;
+    }
+    const key = getMaterialMergeKey(mesh.material);
+    const bucket = buckets.get(key);
+    if (bucket) {
+      bucket.meshes.push(mesh);
+    } else {
+      buckets.set(key, { material: mesh.material, meshes: [mesh] });
+    }
+  }
+  const merged: BuildingMeshTemplate[] = [];
+  for (const bucket of buckets.values()) {
+    if (bucket.meshes.length === 1) {
+      merged.push(bucket.meshes[0]);
+      continue;
+    }
+    const template = mergeMeshBucket(bucket);
+    if (template) {
+      merged.push(template);
+    }
+  }
+  merged.push(...passthrough);
+  return merged;
 };
 
 type HipRoofLayout = {
@@ -1852,6 +1990,7 @@ const finalizeVariant = (
     material: mesh.material,
     baseMatrix: mesh.baseMatrix.clone().premultiply(recenter)
   }));
+  const renderMeshes = mergeMeshTemplatesByMaterial(recenteredMeshes);
   const localBounds = worldBounds.clone().applyMatrix4(recenter);
   const localSize = new THREE.Vector3();
   localBounds.getSize(localSize);
@@ -1859,7 +1998,7 @@ const finalizeVariant = (
   const fittedFootprintX = Math.max(foundationWidth, localSize.x);
   const fittedFootprintZ = Math.max(foundationDepth, localSize.z);
   return {
-    meshes: recenteredMeshes,
+    meshes: renderMeshes,
     height: Math.max(0.01, localSize.y),
     baseOffset: -localBounds.min.y,
     size: localSize,

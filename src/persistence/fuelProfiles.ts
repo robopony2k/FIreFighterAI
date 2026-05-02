@@ -25,6 +25,9 @@ const toNumberOrNull = (value: unknown): number | null => {
   return Number.isFinite(parsed) ? parsed : null;
 };
 
+const sanitizeProfileField = (key: keyof FuelProfile, value: number): number =>
+  key === "windFactor" ? Math.max(0, Math.min(1, value)) : value;
+
 export const sanitizeFuelProfileOverrides = (input: unknown): FuelProfileOverrides => {
   if (!isRecord(input)) {
     return {};
@@ -39,7 +42,7 @@ export const sanitizeFuelProfileOverrides = (input: unknown): FuelProfileOverrid
     for (const key of FUEL_PROFILE_FIELDS) {
       const numeric = toNumberOrNull(entry[key]);
       if (numeric !== null) {
-        cleaned[key] = numeric;
+        cleaned[key] = sanitizeProfileField(key, numeric);
       }
     }
     if (Object.keys(cleaned).length > 0) {

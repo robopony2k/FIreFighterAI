@@ -4,12 +4,9 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "generate-fuel-profiles": "node scripts/generate-fuel-profiles.mjs",
     "generate-building-footprints": "node scripts/generate-building-footprints.mjs",
-    "prebuild": "npm run generate-fuel-profiles",
     "check": "tsc --noEmit --pretty false",
     "build": "tsc --project tsconfig.json",
-    "predev": "npm run generate-fuel-profiles",
     "dev": "node scripts/dev-server.cjs",
     "queue:next": "node skills/game-design-maintainer/scripts/work_queue_cli.mjs next",
     "queue:summary": "node skills/game-design-maintainer/scripts/work_queue_cli.mjs summary",
@@ -31,7 +28,6 @@
     "typescript": "^5.5.4"
   },
   "dependencies": {
-    "three": "^0.182.0",
-    "yaml": "^2.8.2"
+    "three": "^0.182.0"
   }
 }

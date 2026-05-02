@@ -248,6 +248,7 @@ const ADAPTIVE_DPR_FALLBACK_SECONDS = 1.1;
 const ADAPTIVE_DPR_RECOVERY_SECONDS = 7.5;
 const ADAPTIVE_DPR_STEP_DOWN = 0.2;
 const ADAPTIVE_DPR_STEP_UP = 0.1;
+const FRAME_CAP_TOLERANCE_MS = 0.75;
 const THREE_TEST_ENV_FOG_ENABLED = true;
 const THREE_TEST_SHADOW_VIEW_PADDING = 1.08;
 const THREE_TEST_SHADOW_HEIGHT_PADDING = 1.28;
@@ -432,6 +433,8 @@ export const createThreeTest = (
   const THREE_TEST_DEFAULT_WATER_QUALITY: WaterQualityProfile = runtimeSettings.waterq;
   const THREE_TEST_RIVER_VIEW = runtimeSettings.rivercam;
   const THREE_TEST_RIVER_VIEW_LOCK = runtimeSettings.rivercamlock;
+  const THREE_TEST_SHADOWS_ENABLED = runtimeSettings.shadows;
+  const THREE_TEST_DETAILED_STRUCTURES_ENABLED = runtimeSettings.detailedstructures;
   const THREE_TEST_FIRE_WALL_BLEND = Math.max(0, Math.min(1, runtimeSettings.firewall));
   const THREE_TEST_FIRE_HERO_VOL = Math.max(0, Math.min(1, runtimeSettings.firevol));
   const THREE_TEST_FIRE_BUDGET_SCALE = Math.max(0.4, Math.min(1.25, runtimeSettings.fxbudget));
@@ -472,7 +475,7 @@ export const createThreeTest = (
   renderer.toneMappingExposure = cinematicGradeEnabled
     ? THREE_TEST_CINEMATIC_GRADE_CONFIG.exposure
     : THREE_TEST_LEGACY_EXPOSURE;
-  renderer.shadowMap.enabled = true;
+  renderer.shadowMap.enabled = THREE_TEST_SHADOWS_ENABLED;
   renderer.shadowMap.type = THREE.PCFSoftShadowMap;
   renderer.shadowMap.autoUpdate = !ENABLE_THREE_TEST_SEASONAL_RECOLOR;
   renderer.autoClear = false;
@@ -511,7 +514,7 @@ export const createThreeTest = (
   scene.add(ambient);
   const keyLight = new THREE.DirectionalLight(0xffe6c2, 0.95);
   keyLight.position.set(4, 5, 2);
-  keyLight.castShadow = true;
+  keyLight.castShadow = THREE_TEST_SHADOWS_ENABLED;
   keyLight.shadow.mapSize.width = THREE_TEST_SHADOW_MAP_SIZE;
   keyLight.shadow.mapSize.height = THREE_TEST_SHADOW_MAP_SIZE;
   keyLight.shadow.bias = -0.00035;
@@ -5814,7 +5817,9 @@ export const createThreeTest = (
     surface: TerrainRenderSurface | null = lastTerrainSurface
   ): void => {
     const structureRevision = sample.structureRevision ?? -1;
-    const structureAssetKey = `${houseAssets?.variants.length ?? 0}:${firestationAsset ? 1 : 0}`;
+    const structureAssetKey = THREE_TEST_DETAILED_STRUCTURES_ENABLED
+      ? `${houseAssets?.variants.length ?? 0}:${firestationAsset ? 1 : 0}:detailed`
+      : "simple";
     const structureOverlayKey = `${sample.cols}x${sample.rows}:${sample.worldSeed ?? -1}:${structureAssetKey}`;
     const shouldRenderDynamic = sample.dynamicStructures === true;
     if (!shouldRenderDynamic) {
@@ -6018,7 +6023,7 @@ export const createThreeTest = (
         scaleZ: number;
         rotation: number;
       };
-      const availableHouseVariants = houseAssets?.variants ?? [];
+      const availableHouseVariants = THREE_TEST_DETAILED_STRUCTURES_ENABLED ? houseAssets?.variants ?? [] : [];
       const houseByKey = new Map<string, OverlayHouseVariant[]>();
       const houseBySource = new Map<string, OverlayHouseVariant[]>();
       const houseByTheme: Record<OverlayHouseVariant["theme"], OverlayHouseVariant[]> = {
@@ -6100,7 +6105,7 @@ export const createThreeTest = (
         }
 
         const variant = pickHouseVariant(spot);
-        if (variant && variant.meshes.length > 0) {
+        if (THREE_TEST_DETAILED_STRUCTURES_ENABLED && variant && variant.meshes.length > 0) {
           const planSizeX = Math.max(0.01, variant.planFootprint?.x ?? variant.size?.x ?? 0);
           const planSizeZ = Math.max(0.01, variant.planFootprint?.y ?? variant.size?.z ?? 0);
           const fitBias = 0.98 * (variant.scaleBias ?? 1);
@@ -6208,7 +6213,7 @@ export const createThreeTest = (
       const supportBottom = grounding.foundationBottom;
       const supportTop = grounding.foundationTop;
 
-      if (firestationAsset && firestationAsset.meshes.length > 0) {
+      if (THREE_TEST_DETAILED_STRUCTURES_ENABLED && firestationAsset && firestationAsset.meshes.length > 0) {
         const footprintTarget = Math.max(baseFootprintX, baseFootprintZ) * 0.85;
         const assetFootprint = Math.max(firestationAsset.size.x, firestationAsset.size.z);
         const scale = footprintTarget / Math.max(0.01, assetFootprint);
@@ -6506,7 +6511,11 @@ export const createThreeTest = (
         threePerf.lastHitchMs = rafGapMs;
       }
     }
-    if (THREE_TEST_FRAME_MIN_MS > 0 && lastPresentedAt > 0 && time - lastPresentedAt < THREE_TEST_FRAME_MIN_MS) {
+    if (
+      THREE_TEST_FRAME_MIN_MS > 0 &&
+      lastPresentedAt > 0 &&
+      time - lastPresentedAt + FRAME_CAP_TOLERANCE_MS < THREE_TEST_FRAME_MIN_MS
+    ) {
       raf = window.requestAnimationFrame(renderFrame);
       return;
     }
@@ -7413,6 +7422,11 @@ export const createThreeTest = (
       threePerf.terrainSetMs = smoothPerf(threePerf.terrainSetMs, terrainSetMs);
       threePerf.terrainSetMaxMs = Math.max(terrainSetMs, threePerf.terrainSetMaxMs * 0.997);
       threePerf.terrainSetCount += 1;
+      threePerf.fps = 0;
+      threePerf.rafGapMs = 0;
+      threePerf.rafGapLastMs = 0;
+      lastFrameTime = 0;
+      lastPresentedAt = 0;
     }
   };
 
@@ -7453,9 +7467,9 @@ export const createThreeTest = (
     roadMaterial.needsUpdate = true;
     terrainRoadOverlayMesh.userData.roadOverlayVersion = nextRoadVersion;
   };
-  const needTreeAssets = !treeAssets;
-  const needHouseAssets = !houseAssets;
-  const needFirestationAsset = !firestationAsset;
+  const needTreeAssets = runtimeSettings.trees && !treeAssets;
+  const needHouseAssets = THREE_TEST_DETAILED_STRUCTURES_ENABLED && !houseAssets;
+  const needFirestationAsset = THREE_TEST_DETAILED_STRUCTURES_ENABLED && !firestationAsset;
   let pendingAssetSettles =
     (needTreeAssets ? 1 : 0) +
     (needHouseAssets ? 1 : 0) +

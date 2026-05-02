@@ -1,6 +1,6 @@
 import type { FuelProfile, RNG, Tile, TileType } from "./types.js";
 import { FUEL_PROFILES } from "./config.js";
-import { getVegetationFuelCapMultiplier, isVegetationType } from "./vegetation.js";
+import { getVegetationFuelCapMultiplier } from "./vegetation.js";
 import { clamp } from "./utils.js";
 
 const FUEL_PROFILE_FIELDS: (keyof FuelProfile)[] = [
@@ -58,16 +58,14 @@ export function getFuelProfiles(): Record<TileType, FuelProfile> {
   return ACTIVE_FUEL_PROFILES;
 }
 
-export function applyFuel(tile: Tile, moisture: number, rng: RNG): void {
+export function applyFuel(tile: Tile, moisture: number, _rng: RNG): void {
   const profile = ACTIVE_FUEL_PROFILES[tile.type];
-  const vegetation = isVegetationType(tile.type);
-  const variance = vegetation ? (rng.next() - 0.5) * 0.35 : 0;
-  const fuelCapMultiplier = getVegetationFuelCapMultiplier(tile.type, tile.vegetationAgeYears ?? 0);
-  const fuel = Math.max(0, profile.baseFuel * fuelCapMultiplier * (1 + variance) * (1 - moisture * 0.6));
+  const fuelCap = profile.baseFuel * getVegetationFuelCapMultiplier(tile.type, tile.vegetationAgeYears ?? 0);
+  const fuel = Math.max(0, fuelCap * (1 - moisture * 0.6));
   tile.fuel = fuel;
   tile.fire = 0;
   tile.heat = 0;
-  tile.ignitionPoint = clamp(profile.ignition + moisture * 0.35 + (tile.type === "forest" ? 0.08 : 0), 0.2, 1.4);
+  tile.ignitionPoint = clamp(profile.ignition + moisture * 0.35, 0.2, 1.4);
   tile.burnRate = profile.burnRate * (0.7 + (1 - moisture) * 0.8);
   tile.heatOutput = profile.heatOutput * (0.85 + fuel * 0.25);
   tile.spreadBoost = profile.spreadBoost;

@@ -31,7 +31,7 @@ For headless testing: Use `npm run headless` to run simulations without UI.
 - `src/ui/`: User interfaces and bindings.
 - `src/persistence/`: Leaderboard saving.
 - `assets/`: 3D models and resources.
-- `config/`: YAML configs for fuel profiles.
+- `src/config/`: Static TypeScript tunables such as fuel profiles.
 
 ## Key Systems
 - **Terrain & Fuel**: Procedural maps with elevations, moisture, and fuel types.

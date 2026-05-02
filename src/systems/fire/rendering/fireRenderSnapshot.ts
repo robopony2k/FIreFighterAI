@@ -103,6 +103,9 @@ export const captureFireRenderSnapshot = (
   if (cols <= 0 || rows <= 0) {
     return createEmptyFireRenderSnapshot(cols, rows, lastActiveFires, fireBoundsActive);
   }
+  if (lastActiveFires <= 0) {
+    return createEmptyFireRenderSnapshot(cols, rows, lastActiveFires, fireBoundsActive);
+  }
   let hasBounds = false;
   let minX = cols;
   let maxX = -1;

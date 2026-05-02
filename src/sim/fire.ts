@@ -26,6 +26,8 @@ import { buildFireWorkBlocks, ensureFireBlocks, finalizeFireBlocks, markFireBloc
 import { markAttributedFireLossTile, queueScoreFlowEvent } from "./scoring.js";
 import { profEnd, profStart } from "./prof.js";
 import { applyFireActivityMetrics } from "../systems/fire/sim/fireActivityState.js";
+import { getElevationHeatTransferMultiplier, resolveTerrainAdjustedWind } from "../systems/fire/sim/fireTerrainInfluence.js";
+import { getRangedHeatTransferScale } from "../systems/fire/sim/fireRangedHeatDiffusion.js";
 const CARDINAL_DIRS = [
     { dx: 1, dy: 0 },
     { dx: -1, dy: 0 },
@@ -64,6 +66,7 @@ const BASELINE_FIRE_EPS = 0.04;
 const BASELINE_HEAT_EPS = 0.08;
 const SUPPRESSION_WETNESS_ACTIVE_EPS = 0.01;
 const ISOLATED_RESIDUAL_COOLING_BOOST = 0.55;
+const WIND_BIAS_COMPONENT_MAX = 0.88;
 let baselineTickCounter = 0;
 
 const getWetnessDecayFactor = (delta) => {
@@ -323,7 +326,8 @@ export function stepFire(state, effects: EffectsState, rng, delta, spreadScale, 
     const moisture = state.tileMoisture;
     const spreadBoost = state.tileSpreadBoost;
     const heatRetention = state.tileHeatRetention;
-    const windFactor = state.tileWindFactor;
+    const windbreakFactor = state.tileWindFactor;
+    const elevation = state.tileElevation;
     const heatTransferCap = state.tileHeatTransferCap;
     const suppressionWetness = state.tileSuppressionWetness;
     const typeId = state.tileTypeId;
@@ -337,6 +341,7 @@ export function stepFire(state, effects: EffectsState, rng, delta, spreadScale, 
     const windDx = state.wind.dx;
     const windDy = state.wind.dy;
     const windStrength = state.wind.strength;
+    const terrainWindScratch = { dx: windDx, dy: windDy, strength: windStrength };
     const wetnessDecayFactor = getWetnessDecayFactor(delta);
     const smokeSampleRate = Math.max(1, Math.floor(perf.smokeSampleRate || 1));
     const smokeSeed = (state.fireSeasonDay * 1000) | 0;
@@ -432,6 +437,102 @@ export function stepFire(state, effects: EffectsState, rng, delta, spreadScale, 
             markFireBlockNextByTile(state, idx);
         }
     };
+    const addTerrainHeat = (sourceIdx, targetIdx, value, distanceTiles) => {
+        if (value <= 0) {
+            return;
+        }
+        const elevationMultiplier = getElevationHeatTransferMultiplier(
+            elevation[sourceIdx],
+            elevation[targetIdx],
+            distanceTiles,
+            state.fireSettings
+        );
+        addHeat(targetIdx, value * elevationMultiplier);
+    };
+    const maxRangedDiffusionTiles = Math.max(1, Math.floor(state.fireSettings.rangedDiffusionMaxTiles || 1));
+    const addRangedTerrainHeat = (
+        sourceIdx,
+        sourceX,
+        sourceY,
+        dx,
+        dy,
+        distanceTiles,
+        localWind,
+        heatReleaseValue,
+        directionalScale,
+        neighborBoost
+    ) => {
+        const targetX = sourceX + dx * distanceTiles;
+        const targetY = sourceY + dy * distanceTiles;
+        if (targetX < 0 || targetY < 0 || targetX >= cols || targetY >= rows) {
+            return;
+        }
+        const targetIdx = targetY * cols + targetX;
+        if (!isIgnitableTypeId(typeId[targetIdx]) || fuel[targetIdx] <= 0.02 || fire[targetIdx] > fireEps) {
+            return;
+        }
+        const rangedScale = getRangedHeatTransferScale({
+            settings: state.fireSettings,
+            sourceX,
+            sourceY,
+            dx,
+            dy,
+            distanceTiles,
+            cols,
+            rows,
+            windDx: localWind.dx,
+            windDy: localWind.dy,
+            windStrength: localWind.strength,
+            heatRelease: heatReleaseValue,
+            weatherSpread,
+            targetMoisture: moisture[targetIdx] || 0,
+            windbreakFactor
+        });
+        if (rangedScale <= 0) {
+            return;
+        }
+        addTerrainHeat(sourceIdx, targetIdx, heatReleaseValue * directionalScale * neighborBoost * diffuseSecondary * rangedScale, distanceTiles);
+    };
+    const hasRangedFireExposureAt = (x, y) => {
+        if (fireQuality <= 1 || diffuseSecondary <= 0 || maxRangedDiffusionTiles < 2) {
+            return false;
+        }
+        for (const dir of CARDINAL_DIRS) {
+            for (let distance = 2; distance <= maxRangedDiffusionTiles; distance += 1) {
+                const sourceX = x - dir.dx * distance;
+                const sourceY = y - dir.dy * distance;
+                if (sourceX < 0 || sourceY < 0 || sourceX >= cols || sourceY >= rows) {
+                    continue;
+                }
+                const sourceIdx = sourceY * cols + sourceX;
+                if (fire[sourceIdx] <= fireEps) {
+                    continue;
+                }
+                const previousRelease = heatRelease[sourceIdx] || fire[sourceIdx] * Math.max(0.1, heatOutput[sourceIdx] || 0);
+                const exposureScale = getRangedHeatTransferScale({
+                    settings: state.fireSettings,
+                    sourceX,
+                    sourceY,
+                    dx: dir.dx,
+                    dy: dir.dy,
+                    distanceTiles: distance,
+                    cols,
+                    rows,
+                    windDx,
+                    windDy,
+                    windStrength,
+                    heatRelease: previousRelease,
+                    weatherSpread,
+                    targetMoisture: moisture[y * cols + x] || 0,
+                    windbreakFactor
+                });
+                if (exposureScale > 0) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    };
     buildFireWorkBlocks(state);
     state.firePerfActiveBlocks = state.fireBlockActiveCount;
     state.firePerfWorkBlocks = state.fireBlockWorkCount;
@@ -520,9 +621,23 @@ export function stepFire(state, effects: EffectsState, rng, delta, spreadScale, 
                     if (heatReleaseValue > 0) {
                         const cardinalScale = diffuseCardinal * (1 + spreadScale * 0.12);
                         const diagonalScale = diffuseDiagonal * (1 + spreadScale * 0.08);
-                        const windPull = fireQuality === 0 ? 0 : Math.max(0, windFactor[idx] || 0);
-                        const wx = windPull * windStrength * windDx;
-                        const wy = windPull * windStrength * windDy;
+                        const localWind = fireQuality > 0
+                            ? resolveTerrainAdjustedWind(
+                                x,
+                                y,
+                                idx,
+                                cols,
+                                rows,
+                                elevation,
+                                windDx,
+                                windDy,
+                                windStrength,
+                                state.fireSettings,
+                                terrainWindScratch
+                            )
+                            : terrainWindScratch;
+                        const wx = fireQuality === 0 ? 0 : clamp(localWind.strength * localWind.dx, -WIND_BIAS_COMPONENT_MAX, WIND_BIAS_COMPONENT_MAX);
+                        const wy = fireQuality === 0 ? 0 : clamp(localWind.strength * localWind.dy, -WIND_BIAS_COMPONENT_MAX, WIND_BIAS_COMPONENT_MAX);
                         const wE = Math.max(0, cardinalScale * (1 + wx));
                         const wW = Math.max(0, cardinalScale * (1 - wx));
                         const wS = Math.max(0, cardinalScale * (1 + wy));
@@ -532,44 +647,37 @@ export function stepFire(state, effects: EffectsState, rng, delta, spreadScale, 
                         const wSE = Math.max(0, diagonalScale * (1 + wx - wy));
                         const wSW = Math.max(0, diagonalScale * (1 - wx - wy));
                         if (x < cols - 1) {
-                            addHeat(idx + 1, heatReleaseValue * wE * neighborBoost);
+                            addTerrainHeat(idx, idx + 1, heatReleaseValue * wE * neighborBoost, 1);
                         }
                         if (x > 0) {
-                            addHeat(idx - 1, heatReleaseValue * wW * neighborBoost);
+                            addTerrainHeat(idx, idx - 1, heatReleaseValue * wW * neighborBoost, 1);
                         }
                         if (y < rows - 1) {
-                            addHeat(idx + cols, heatReleaseValue * wS * neighborBoost);
+                            addTerrainHeat(idx, idx + cols, heatReleaseValue * wS * neighborBoost, 1);
                         }
                         if (y > 0) {
-                            addHeat(idx - cols, heatReleaseValue * wN * neighborBoost);
+                            addTerrainHeat(idx, idx - cols, heatReleaseValue * wN * neighborBoost, 1);
                         }
                         if (fireQuality > 0) {
                             if (x < cols - 1 && y < rows - 1) {
-                                addHeat(idx + cols + 1, heatReleaseValue * wSE * neighborBoost);
+                                addTerrainHeat(idx, idx + cols + 1, heatReleaseValue * wSE * neighborBoost, Math.SQRT2);
                             }
                             if (x > 0 && y < rows - 1) {
-                                addHeat(idx + cols - 1, heatReleaseValue * wSW * neighborBoost);
+                                addTerrainHeat(idx, idx + cols - 1, heatReleaseValue * wSW * neighborBoost, Math.SQRT2);
                             }
                             if (x < cols - 1 && y > 0) {
-                                addHeat(idx - cols + 1, heatReleaseValue * wNE * neighborBoost);
+                                addTerrainHeat(idx, idx - cols + 1, heatReleaseValue * wNE * neighborBoost, Math.SQRT2);
                             }
                             if (x > 0 && y > 0) {
-                                addHeat(idx - cols - 1, heatReleaseValue * wNW * neighborBoost);
+                                addTerrainHeat(idx, idx - cols - 1, heatReleaseValue * wNW * neighborBoost, Math.SQRT2);
                             }
                         }
-                        if (fireQuality > 1 && diffuseSecondary > 0) {
-                            const secondary = diffuseSecondary * 0.6;
-                            if (x + 2 < cols) {
-                                addHeat(idx + 2, heatReleaseValue * wE * neighborBoost * secondary);
-                            }
-                            if (x - 2 >= 0) {
-                                addHeat(idx - 2, heatReleaseValue * wW * neighborBoost * secondary);
-                            }
-                            if (y + 2 < rows) {
-                                addHeat(idx + cols * 2, heatReleaseValue * wS * neighborBoost * secondary);
-                            }
-                            if (y - 2 >= 0) {
-                                addHeat(idx - cols * 2, heatReleaseValue * wN * neighborBoost * secondary);
+                        if (fireQuality > 1 && diffuseSecondary > 0 && maxRangedDiffusionTiles >= 2) {
+                            for (let distance = 2; distance <= maxRangedDiffusionTiles; distance += 1) {
+                                addRangedTerrainHeat(idx, x, y, 1, 0, distance, localWind, heatReleaseValue, wE, neighborBoost);
+                                addRangedTerrainHeat(idx, x, y, -1, 0, distance, localWind, heatReleaseValue, wW, neighborBoost);
+                                addRangedTerrainHeat(idx, x, y, 0, 1, distance, localWind, heatReleaseValue, wS, neighborBoost);
+                                addRangedTerrainHeat(idx, x, y, 0, -1, distance, localWind, heatReleaseValue, wN, neighborBoost);
                             }
                         }
                     }
@@ -752,7 +860,7 @@ export function stepFire(state, effects: EffectsState, rng, delta, spreadScale, 
                             state.tileStemDensity[idx] = 0;
                             spreadBoost[idx] = tile.spreadBoost ?? 1;
                             heatRetention[idx] = tile.heatRetention ?? 0.9;
-                            windFactor[idx] = tile.windFactor ?? 0;
+                            windbreakFactor[idx] = tile.windFactor ?? 0;
                             heatTransferCap[idx] = tile.heatTransferCap ?? 0;
                             fireValue = 0;
                             fuelValue = 0;
@@ -760,50 +868,58 @@ export function stepFire(state, effects: EffectsState, rng, delta, spreadScale, 
                             burnAgeValue = 0;
                             heatReleaseValue = 0;
                             heat[idx] = heatValue;
-                            continue;
+                        } else {
+                            tile.type = "ash";
+                            tile.fuel = 0;
+                            tile.ashAge = 0;
+                            clearVegetationState(tile);
+                            tile.dominantTreeType = null;
+                            tile.treeType = null;
+                            tile.heat = Math.min(tile.heat * 0.1, 0.18);
+                            if (!tile.isBase) {
+                                state.burnedTiles += 1;
+                                state.yearBurnedTiles += 1;
+                            }
+                            state.terrainDirty = true;
+                            state.terrainTypeRevision += 1;
+                            state.vegetationRevision += 1;
+                            tile.spreadBoost = ashProfile.spreadBoost;
+                            tile.ignitionPoint = ashProfile.ignition;
+                            tile.burnRate = ashProfile.burnRate;
+                            tile.heatOutput = ashProfile.heatOutput;
+                            tile.heatTransferCap = ashProfile.heatTransferCap;
+                            tile.heatRetention = ashProfile.heatRetention;
+                            tile.windFactor = ashProfile.windFactor;
+                            typeId[idx] = TILE_TYPE_IDS.ash;
+                            suppressionWetness[idx] = 0;
+                            ignitionPoint[idx] = tile.ignitionPoint;
+                            burnRate[idx] = tile.burnRate;
+                            heatOutput[idx] = tile.heatOutput;
+                            state.tileVegetationAge[idx] = 0;
+                            state.tileCanopyCover[idx] = 0;
+                            state.tileStemDensity[idx] = 0;
+                            spreadBoost[idx] = tile.spreadBoost ?? 1;
+                            heatRetention[idx] = tile.heatRetention ?? 0.9;
+                            windbreakFactor[idx] = tile.windFactor ?? 0;
+                            heatTransferCap[idx] = tile.heatTransferCap ?? 0;
+                            fireValue = 0;
+                            fuelValue = 0;
+                            heatValue = tile.heat;
+                            burnAgeValue = 0;
+                            heatReleaseValue = 0;
+                            heat[idx] = heatValue;
                         }
-                        tile.type = "ash";
-                        tile.fuel = 0;
-                        tile.ashAge = 0;
-                        clearVegetationState(tile);
-                        tile.dominantTreeType = null;
-                        tile.treeType = null;
-                        tile.heat = Math.min(tile.heat * 0.1, 0.18);
-                        if (!tile.isBase) {
-                            state.burnedTiles += 1;
-                            state.yearBurnedTiles += 1;
-                        }
-                        state.terrainDirty = true;
-                        state.terrainTypeRevision += 1;
-                        state.vegetationRevision += 1;
-                        tile.spreadBoost = ashProfile.spreadBoost;
-                        tile.ignitionPoint = ashProfile.ignition;
-                        tile.burnRate = ashProfile.burnRate;
-                        tile.heatOutput = ashProfile.heatOutput;
-                        tile.heatTransferCap = ashProfile.heatTransferCap;
-                        tile.heatRetention = ashProfile.heatRetention;
-                        tile.windFactor = ashProfile.windFactor;
-                        typeId[idx] = TILE_TYPE_IDS.ash;
-                        suppressionWetness[idx] = 0;
-                        ignitionPoint[idx] = tile.ignitionPoint;
-                        burnRate[idx] = tile.burnRate;
-                        heatOutput[idx] = tile.heatOutput;
-                        state.tileVegetationAge[idx] = 0;
-                        state.tileCanopyCover[idx] = 0;
-                        state.tileStemDensity[idx] = 0;
-                        spreadBoost[idx] = tile.spreadBoost ?? 1;
-                        heatRetention[idx] = tile.heatRetention ?? 0.9;
-                        windFactor[idx] = tile.windFactor ?? 0;
-                        heatTransferCap[idx] = tile.heatTransferCap ?? 0;
-                        fireValue = 0;
-                        fuelValue = 0;
-                        heatValue = tile.heat;
-                        burnAgeValue = 0;
-                        heatReleaseValue = 0;
-                        heat[idx] = heatValue;
                     }
                 }
-                if (!burning && !wetnessBlocked && fuelValue > 0 && heatValue >= effectiveIgnitionThreshold && isIgnitableTypeId(tid) && hasNeighborFire && weatherIgnition >= 0.12) {
+                if (
+                    !burning &&
+                    !wetnessBlocked &&
+                    fuelValue > 0 &&
+                    heatValue >= effectiveIgnitionThreshold &&
+                    isIgnitableTypeId(tid) &&
+                    (hasNeighborFire || hasRangedFireExposureAt(x, y)) &&
+                    weatherIgnition >= 0.12
+                ) {
                     igniteBuffer[igniteCount] = idx;
                     igniteCount += 1;
                 }

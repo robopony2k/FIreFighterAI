@@ -77,12 +77,12 @@ import {
   sortSmokeParticlesByDepth
 } from "./fireRenderMath.js";
 
-const FIRE_MAX_INSTANCES = 720;
-const FIRE_CROSS_MAX_INSTANCES = 320;
-const SMOKE_MAX_INSTANCES = 2400;
-const EMBER_MAX_INSTANCES = 1600;
-const SPARK_STREAK_MAX_INSTANCES = 2200;
-const SPARK_POINT_MAX_INSTANCES = 5200;
+const FIRE_MAX_INSTANCES = 560;
+const FIRE_CROSS_MAX_INSTANCES = 180;
+const SMOKE_MAX_INSTANCES = 1400;
+const EMBER_MAX_INSTANCES = 700;
+const SPARK_STREAK_MAX_INSTANCES = 900;
+const SPARK_POINT_MAX_INSTANCES = 1800;
 const GLOW_MAX_INSTANCES = FIRE_MAX_INSTANCES * 2;
 const SMOKE_QUALITY_FALLBACK_FPS = 56;
 const SMOKE_QUALITY_RECOVERY_FPS = 61;
@@ -1038,6 +1038,11 @@ export const createThreeTestFireFx = (
     const previousSource = gridChanged ? null : currentFireSnapshot;
     const nextSnapshot = captureFireRenderSnapshot(world, previousSource);
     if (gridChanged || !currentFireSnapshot) {
+      previousFireSnapshot = nextSnapshot;
+      currentFireSnapshot = nextSnapshot;
+      return;
+    }
+    if (nextSnapshot.width <= 0 || nextSnapshot.lastActiveFires <= 0) {
       previousFireSnapshot = nextSnapshot;
       currentFireSnapshot = nextSnapshot;
       return;
@@ -2121,7 +2126,7 @@ export const createThreeTestFireFx = (
         const sparkActive =
           hasFlame &&
           sparkVisual01 > 0.035 &&
-          (hasActiveFire || hasTreeCarryFlame || treeBurnVisual > TREE_BURN_FLAME_VISUAL_MIN);
+          hasActiveFire;
         flameletTargetCount *= localDetailScale;
         if (frontPassActive && tileRole === 2 && frontDominance < FIRE_FRONT_VISUAL_MIN && flameProfile === null) {
           flameletTargetCount = 0;

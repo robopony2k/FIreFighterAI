@@ -531,11 +531,29 @@ export interface FireSettings {
   diffusionCardinal: number;
   diffusionDiagonal: number;
   diffusionSecondary: number;
+  rangedDiffusionMaxTiles: number;
+  rangedDiffusionWindThreshold: number;
+  rangedDiffusionAlignmentThreshold: number;
+  rangedDiffusionHeatThreshold: number;
+  rangedDiffusionWeatherThreshold: number;
+  rangedDiffusionTwoTileThreshold: number;
+  rangedDiffusionThreeTileThreshold: number;
+  rangedDiffusionDistanceFalloff: number;
+  rangedDiffusionObstructionStrength: number;
   diffusionMoisture: number;
   heatCap: number;
   conflagrationHeatBoost: number;
   conflagrationFuelBoost: number;
   boundsPadding: number;
+  elevationSpreadGain: number;
+  elevationSpreadMaxBoost: number;
+  elevationSpreadMaxPenalty: number;
+  elevationSpreadDeadZone: number;
+  terrainWindSteerStrength: number;
+  terrainWindSpeedMin: number;
+  terrainWindSpeedMax: number;
+  terrainWindObstructionPenalty: number;
+  terrainWindFunnelBonus: number;
 }
 
 export interface LeaderboardEntry {

@@ -54,10 +54,58 @@ export const normalizeFireSettings = (settings?: Partial<FireSettings>): FireSet
     diffusionCardinal: toNumber(source.diffusionCardinal, DEFAULT_FIRE_SETTINGS.diffusionCardinal),
     diffusionDiagonal: toNumber(source.diffusionDiagonal, DEFAULT_FIRE_SETTINGS.diffusionDiagonal),
     diffusionSecondary: toNumber(source.diffusionSecondary, DEFAULT_FIRE_SETTINGS.diffusionSecondary),
+    rangedDiffusionMaxTiles: Math.max(
+      1,
+      Math.round(toNumber(source.rangedDiffusionMaxTiles, DEFAULT_FIRE_SETTINGS.rangedDiffusionMaxTiles))
+    ),
+    rangedDiffusionWindThreshold: toNumber(
+      source.rangedDiffusionWindThreshold,
+      DEFAULT_FIRE_SETTINGS.rangedDiffusionWindThreshold
+    ),
+    rangedDiffusionAlignmentThreshold: toNumber(
+      source.rangedDiffusionAlignmentThreshold,
+      DEFAULT_FIRE_SETTINGS.rangedDiffusionAlignmentThreshold
+    ),
+    rangedDiffusionHeatThreshold: toNumber(
+      source.rangedDiffusionHeatThreshold,
+      DEFAULT_FIRE_SETTINGS.rangedDiffusionHeatThreshold
+    ),
+    rangedDiffusionWeatherThreshold: toNumber(
+      source.rangedDiffusionWeatherThreshold,
+      DEFAULT_FIRE_SETTINGS.rangedDiffusionWeatherThreshold
+    ),
+    rangedDiffusionTwoTileThreshold: toNumber(
+      source.rangedDiffusionTwoTileThreshold,
+      DEFAULT_FIRE_SETTINGS.rangedDiffusionTwoTileThreshold
+    ),
+    rangedDiffusionThreeTileThreshold: toNumber(
+      source.rangedDiffusionThreeTileThreshold,
+      DEFAULT_FIRE_SETTINGS.rangedDiffusionThreeTileThreshold
+    ),
+    rangedDiffusionDistanceFalloff: toNumber(
+      source.rangedDiffusionDistanceFalloff,
+      DEFAULT_FIRE_SETTINGS.rangedDiffusionDistanceFalloff
+    ),
+    rangedDiffusionObstructionStrength: toNumber(
+      source.rangedDiffusionObstructionStrength,
+      DEFAULT_FIRE_SETTINGS.rangedDiffusionObstructionStrength
+    ),
     diffusionMoisture: toNumber(source.diffusionMoisture, DEFAULT_FIRE_SETTINGS.diffusionMoisture),
     heatCap: toNumber(source.heatCap, DEFAULT_FIRE_SETTINGS.heatCap),
     conflagrationHeatBoost: toNumber(source.conflagrationHeatBoost, DEFAULT_FIRE_SETTINGS.conflagrationHeatBoost),
     conflagrationFuelBoost: toNumber(source.conflagrationFuelBoost, DEFAULT_FIRE_SETTINGS.conflagrationFuelBoost),
-    boundsPadding: Math.max(0, Math.round(toNumber(source.boundsPadding, DEFAULT_FIRE_SETTINGS.boundsPadding)))
+    boundsPadding: Math.max(0, Math.round(toNumber(source.boundsPadding, DEFAULT_FIRE_SETTINGS.boundsPadding))),
+    elevationSpreadGain: toNumber(source.elevationSpreadGain, DEFAULT_FIRE_SETTINGS.elevationSpreadGain),
+    elevationSpreadMaxBoost: toNumber(source.elevationSpreadMaxBoost, DEFAULT_FIRE_SETTINGS.elevationSpreadMaxBoost),
+    elevationSpreadMaxPenalty: toNumber(source.elevationSpreadMaxPenalty, DEFAULT_FIRE_SETTINGS.elevationSpreadMaxPenalty),
+    elevationSpreadDeadZone: toNumber(source.elevationSpreadDeadZone, DEFAULT_FIRE_SETTINGS.elevationSpreadDeadZone),
+    terrainWindSteerStrength: toNumber(source.terrainWindSteerStrength, DEFAULT_FIRE_SETTINGS.terrainWindSteerStrength),
+    terrainWindSpeedMin: toNumber(source.terrainWindSpeedMin, DEFAULT_FIRE_SETTINGS.terrainWindSpeedMin),
+    terrainWindSpeedMax: toNumber(source.terrainWindSpeedMax, DEFAULT_FIRE_SETTINGS.terrainWindSpeedMax),
+    terrainWindObstructionPenalty: toNumber(
+      source.terrainWindObstructionPenalty,
+      DEFAULT_FIRE_SETTINGS.terrainWindObstructionPenalty
+    ),
+    terrainWindFunnelBonus: toNumber(source.terrainWindFunnelBonus, DEFAULT_FIRE_SETTINGS.terrainWindFunnelBonus)
   };
 };

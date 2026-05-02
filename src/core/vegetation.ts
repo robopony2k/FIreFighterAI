@@ -65,14 +65,7 @@ export const getVegetationMaturity01 = (type: TileType, ageYears: number): numbe
 };
 
 export const getVegetationFuelCapMultiplier = (type: TileType, ageYears: number): number => {
-  const maturity01 = getVegetationMaturity01(type, ageYears);
-  if (type === "forest") {
-    return 0.55 + 0.6 * maturity01;
-  }
-  if (type === "grass" || type === "scrub" || type === "floodplain") {
-    return 0.7 + 0.3 * maturity01;
-  }
-  return 1;
+  return isVegetationType(type) ? getVegetationMaturity01(type, ageYears) : 1;
 };
 
 export const getForestRenderHeightMultiplier = (ageYears: number): number =>

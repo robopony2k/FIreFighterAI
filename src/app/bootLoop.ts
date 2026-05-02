@@ -65,6 +65,7 @@ export const startAppBootLoop = (deps: AppBootLoopDeps): void => {
   let accumulator = 0;
   let lastMainRafAt = 0;
   let lastMainStepAt = 0;
+  const frameCapToleranceMs = 0.75;
 
   const frame = (now: number): void => {
     const frameStartedAt = performance.now();
@@ -81,7 +82,7 @@ export const startAppBootLoop = (deps: AppBootLoopDeps): void => {
     if (!lastTick) {
       lastTick = now;
     }
-    if (mainFrameMinMs > 0 && lastMainStepAt > 0 && now - lastMainStepAt < mainFrameMinMs) {
+    if (mainFrameMinMs > 0 && lastMainStepAt > 0 && now - lastMainStepAt + frameCapToleranceMs < mainFrameMinMs) {
       requestAnimationFrame(frame);
       return;
     }

@@ -1,6 +1,7 @@
 import { performance } from "node:perf_hooks";
 
 import { DEFAULT_MOISTURE_PARAMS, VIRTUAL_CLIMATE_PARAMS, buildClimateTimeline } from "../dist/core/climate.js";
+import { DEFAULT_FIRE_SETTINGS } from "../dist/core/config.js";
 import { createEffectsState } from "../dist/core/effectsState.js";
 import { RNG } from "../dist/core/rng.js";
 import { TILE_TYPE_IDS, createInitialState, syncTileSoA } from "../dist/core/state.js";
@@ -9,9 +10,19 @@ import { applyFuel } from "../dist/core/tiles.js";
 import { buildSampleTypeMap } from "../dist/render/threeTestTerrain.js";
 import { isSkipToNextFireAvailable, stepSim } from "../dist/sim/index.js";
 import { markFireBlockActiveByTile } from "../dist/sim/fire/activeBlocks.js";
+import { stepFire } from "../dist/sim/fire.js";
 import { findIgnitionCandidate } from "../dist/sim/fire/ignite.js";
 import { createUnit } from "../dist/sim/units.js";
 import { applyFireActivityMetrics } from "../dist/systems/fire/sim/fireActivityState.js";
+import {
+  getElevationHeatTransferMultiplier,
+  resolveTerrainAdjustedWind
+} from "../dist/systems/fire/sim/fireTerrainInfluence.js";
+import {
+  getPathWindbreakMultiplier,
+  getRangedHeatTransferScale
+} from "../dist/systems/fire/sim/fireRangedHeatDiffusion.js";
+import { createLabTile } from "../dist/systems/fire/sim/fireSimLabScenario.js";
 
 const YEAR_DAYS = 360;
 const PHASE_DAYS = 90;
@@ -325,6 +336,290 @@ const runScenario = ({ seed, startDay, speed, durationDays, withTruck = false, s
   };
 };
 
+const runSingleTargetElevationSpread = (targetElevation) => {
+  const { state, rng } = buildState(8850);
+  const effects = createEffectsState();
+  const center = getCenter(state);
+  const sourceIdx = center * state.grid.cols + center;
+  const targetIdx = center * state.grid.cols + center + 1;
+  setCareerCursor(state, 225);
+  state.fireSettings.ignitionChancePerDay = 0;
+  state.wind = { name: "calm", dx: 0, dy: 0, strength: 0 };
+  for (let y = center - 2; y <= center + 2; y += 1) {
+    for (let x = center - 2; x <= center + 3; x += 1) {
+      const idx = y * state.grid.cols + x;
+      resetTile(state.tiles[idx], "bare", 0.98, {
+        elevation: 0.5,
+        fuel: 0,
+        heat: 0,
+        fire: 0,
+        spreadBoost: 0,
+        heatOutput: 0,
+        windFactor: 0
+      });
+    }
+  }
+  resetTile(state.tiles[sourceIdx], "grass", 0.16, {
+    elevation: 0.5,
+    fuel: 0.9,
+    fire: 0.82,
+    heat: 2.4,
+    burnRate: 0.58,
+    heatOutput: 1.05,
+    spreadBoost: 1,
+    heatTransferCap: 4,
+    heatRetention: 0.88,
+    windFactor: 0
+  });
+  resetTile(state.tiles[targetIdx], "grass", 0.16, {
+    elevation: targetElevation,
+    fuel: 0.9,
+    fire: 0,
+    heat: 0,
+    ignitionPoint: 3.8,
+    burnRate: 0.58,
+    heatOutput: 1.05,
+    spreadBoost: 1,
+    heatTransferCap: 4,
+    heatRetention: 0.88,
+    windFactor: 0
+  });
+  syncTileSoA(state);
+  state.tileBurnAge[sourceIdx] = 0.2;
+  state.tileHeatRelease[sourceIdx] = 0.3;
+  state.lastActiveFires = 1;
+  state.fireBoundsActive = true;
+  state.fireMinX = center - 1;
+  state.fireMaxX = center + 2;
+  state.fireMinY = center - 1;
+  state.fireMaxY = center + 1;
+  state.simTimeMode = "incident";
+  state.timeSpeedIndex = state.incidentTimeSpeedIndex;
+  state.paused = false;
+  markFireBlockActiveByTile(state, sourceIdx);
+  syncFireActivity(state, 1);
+  stepFire(state, effects, rng, BASE_STEP, 1, 1);
+  return {
+    targetHeat: state.tileHeat[targetIdx],
+    targetFire: state.tileFire[targetIdx]
+  };
+};
+
+const EXTREME_GAP_WEATHER = {
+  careerDay: 0,
+  climateDayOfYear: 225,
+  climateYearIndex: 12,
+  climateRisk: 0.92,
+  climateTemp: 42,
+  climateMoisture: 0.08,
+  climateIgnitionMultiplier: 1.85,
+  climateSpreadMultiplier: 1.7,
+  seasonIndex: 2,
+  ignition: 1.35,
+  spread: 1.55,
+  sustain: 1.2,
+  cooling: 0.72,
+  suppression: 0.92,
+  effectiveAmbient: 42
+};
+
+const CALM_GAP_WEATHER = {
+  ...EXTREME_GAP_WEATHER,
+  climateRisk: 0.25,
+  climateTemp: 22,
+  climateMoisture: 0.5,
+  climateIgnitionMultiplier: 0.75,
+  climateSpreadMultiplier: 0.75,
+  ignition: 0.72,
+  spread: 0.82,
+  sustain: 0.72,
+  cooling: 1.35,
+  effectiveAmbient: 22
+};
+
+const prepareGapJumpState = (gapTiles, mode = "extreme") => {
+  const { state, rng } = buildState(9100 + gapTiles + (mode === "explicit-30m" ? 100 : 0), 19);
+  const effects = createEffectsState();
+  const centerY = getCenter(state);
+  const sourceX = 5;
+  const targetX = sourceX + gapTiles + 1;
+  const sourceIdx = centerY * state.grid.cols + sourceX;
+  const targetIdx = centerY * state.grid.cols + targetX;
+  setCareerCursor(state, 225);
+  state.fireSettings = {
+    ...DEFAULT_FIRE_SETTINGS,
+    ignitionChancePerDay: 0,
+    diffusionSecondary: mode === "explicit-30m" ? 0.52 : DEFAULT_FIRE_SETTINGS.diffusionSecondary,
+    rangedDiffusionMaxTiles: mode === "explicit-30m" ? 4 : DEFAULT_FIRE_SETTINGS.rangedDiffusionMaxTiles,
+    rangedDiffusionThreeTileThreshold:
+      mode === "explicit-30m" ? 0.62 : DEFAULT_FIRE_SETTINGS.rangedDiffusionThreeTileThreshold,
+    rangedDiffusionDistanceFalloff:
+      mode === "explicit-30m" ? 0.72 : DEFAULT_FIRE_SETTINGS.rangedDiffusionDistanceFalloff
+  };
+  state.wind =
+    mode === "calm"
+      ? { name: "calm", dx: 1, dy: 0, strength: 0.2 }
+      : { name: "extreme-east", dx: 1, dy: 0, strength: mode === "explicit-30m" ? 0.95 : 0.82 };
+
+  for (let y = centerY - 2; y <= centerY + 2; y += 1) {
+    for (let x = sourceX - 2; x <= targetX + 2; x += 1) {
+      const idx = y * state.grid.cols + x;
+      resetTile(state.tiles[idx], "bare", 0.95, {
+        elevation: 0.2,
+        fuel: 0,
+        fire: 0,
+        heat: 0,
+        ignitionPoint: 9,
+        burnRate: 0,
+        heatOutput: 0,
+        spreadBoost: 0,
+        heatTransferCap: 0,
+        heatRetention: 0.35,
+        windFactor: 0
+      });
+    }
+  }
+  for (let x = sourceX + 1; x < targetX; x += 1) {
+    resetTile(state.tiles[centerY * state.grid.cols + x], "road", 0.95, {
+      fuel: 0,
+      fire: 0,
+      heat: 0,
+      ignitionPoint: 9,
+      burnRate: 0,
+      heatOutput: 0,
+      spreadBoost: 0,
+      heatTransferCap: 0,
+      heatRetention: 0.35,
+      windFactor: 0
+    });
+  }
+  resetTile(state.tiles[sourceIdx], "grass", 0.06, {
+    fuel: 2,
+    fire: 0.96,
+    heat: 4.4,
+    ignitionPoint: 0.22,
+    burnRate: 0.2,
+    heatOutput: 2.15,
+    spreadBoost: 1.55,
+    heatTransferCap: 5,
+    heatRetention: 0.94,
+    windFactor: 0
+  });
+  resetTile(state.tiles[targetIdx], "grass", mode === "calm" ? 0.5 : 0.08, {
+    fuel: 1.2,
+    fire: 0,
+    heat: 0,
+    ignitionPoint: mode === "explicit-30m" ? 0.28 : 0.32,
+    burnRate: 0.45,
+    heatOutput: 1,
+    spreadBoost: 1,
+    heatTransferCap: 5,
+    heatRetention: 0.9,
+    windFactor: 0
+  });
+  syncTileSoA(state);
+  state.tileBurnAge[sourceIdx] = 0.35;
+  state.lastActiveFires = 1;
+  state.fireBoundsActive = true;
+  state.fireMinX = sourceX - 1;
+  state.fireMaxX = targetX + 1;
+  state.fireMinY = centerY - 1;
+  state.fireMaxY = centerY + 1;
+  state.simTimeMode = "incident";
+  state.timeSpeedIndex = state.incidentTimeSpeedIndex;
+  state.paused = false;
+  markFireBlockActiveByTile(state, sourceIdx);
+  syncFireActivity(state, 1);
+  return { state, rng, effects, sourceIdx, targetIdx };
+};
+
+const runGapJumpScenario = (gapTiles, mode = "extreme") => {
+  const context = prepareGapJumpState(gapTiles, mode);
+  const weather = mode === "calm" ? CALM_GAP_WEATHER : EXTREME_GAP_WEATHER;
+  for (let step = 0; step < 96; step += 1) {
+    stepFire(context.state, context.effects, context.rng, BASE_STEP, 1.15, 1, 0, weather, weather.climateIgnitionMultiplier);
+    if (context.state.tileFire[context.targetIdx] > 0.02) {
+      break;
+    }
+  }
+  return {
+    gapTiles,
+    mode,
+    targetHeat: context.state.tileHeat[context.targetIdx],
+    targetFire: context.state.tileFire[context.targetIdx],
+    sourceFuel: context.state.tileFuel[context.sourceIdx]
+  };
+};
+
+const runMatchedFuelTypeSpread = (type) => {
+  const { state, rng } = buildState(9400, 17);
+  const effects = createEffectsState();
+  const center = getCenter(state);
+  const sourceIdx = center * state.grid.cols + center;
+  const targetIdx = center * state.grid.cols + center + 1;
+  setCareerCursor(state, 225);
+  state.fireSettings = { ...DEFAULT_FIRE_SETTINGS, ignitionChancePerDay: 0, diffusionSecondary: 0 };
+  state.wind = { name: "east", dx: 1, dy: 0, strength: 0.7 };
+  for (let y = center - 2; y <= center + 2; y += 1) {
+    for (let x = center - 2; x <= center + 3; x += 1) {
+      const idx = y * state.grid.cols + x;
+      resetTile(state.tiles[idx], "bare", 0.95, {
+        fuel: 0,
+        fire: 0,
+        heat: 0,
+        ignitionPoint: 9,
+        burnRate: 0,
+        heatOutput: 0,
+        spreadBoost: 0,
+        heatTransferCap: 0,
+        heatRetention: 0.35,
+        windFactor: 0
+      });
+    }
+  }
+  const sharedProfile = {
+    fuel: 1.1,
+    ignitionPoint: 0.34,
+    burnRate: 0.52,
+    heatOutput: 1.08,
+    spreadBoost: 1.02,
+    heatTransferCap: 4,
+    heatRetention: 0.82,
+    windFactor: 0.35,
+    moisture: 0.12
+  };
+  resetTile(state.tiles[sourceIdx], type, sharedProfile.moisture, {
+    ...sharedProfile,
+    fire: 0.82,
+    heat: 2.9
+  });
+  resetTile(state.tiles[targetIdx], type, sharedProfile.moisture, {
+    ...sharedProfile,
+    fire: 0,
+    heat: 0
+  });
+  syncTileSoA(state);
+  state.tileBurnAge[sourceIdx] = 0.2;
+  state.lastActiveFires = 1;
+  state.fireBoundsActive = true;
+  state.fireMinX = center - 1;
+  state.fireMaxX = center + 2;
+  state.fireMinY = center - 1;
+  state.fireMaxY = center + 1;
+  state.simTimeMode = "incident";
+  state.timeSpeedIndex = state.incidentTimeSpeedIndex;
+  state.paused = false;
+  markFireBlockActiveByTile(state, sourceIdx);
+  syncFireActivity(state, 1);
+  stepFire(state, effects, rng, BASE_STEP, 1, 1, 0, EXTREME_GAP_WEATHER, EXTREME_GAP_WEATHER.climateIgnitionMultiplier);
+  return {
+    targetHeat: state.tileHeat[targetIdx],
+    targetFire: state.tileFire[targetIdx],
+    sourceHeat: state.tileHeat[sourceIdx],
+    sourceFire: state.tileFire[sourceIdx]
+  };
+};
+
 const printScenarioGroup = (label, scenarios) => {
   console.log(`\n${label}`);
   scenarios.forEach((scenario) => {
@@ -362,6 +657,207 @@ const median = (values) => {
 const failures = [];
 
 {
+  const settings = { ...DEFAULT_FIRE_SETTINGS };
+  const flatMultiplier = getElevationHeatTransferMultiplier(0.42, 0.42, 1, settings);
+  const uphillMultiplier = getElevationHeatTransferMultiplier(0.42, 0.62, 1, settings);
+  const downhillMultiplier = getElevationHeatTransferMultiplier(0.42, 0.22, 1, settings);
+  const steepUphillMultiplier = getElevationHeatTransferMultiplier(0.1, 0.95, 1, settings);
+  const steepDownhillMultiplier = getElevationHeatTransferMultiplier(0.95, 0.1, 1, settings);
+  console.log(
+    `\nElevation Spread Multipliers\nflat=${flatMultiplier.toFixed(3)} uphill=${uphillMultiplier.toFixed(3)} downhill=${downhillMultiplier.toFixed(3)} steepUp=${steepUphillMultiplier.toFixed(3)} steepDown=${steepDownhillMultiplier.toFixed(3)}`
+  );
+  if (flatMultiplier !== 1) {
+    failures.push("Flat elevation changed heat transfer.");
+  }
+  if (!(uphillMultiplier > 1 && downhillMultiplier < 1)) {
+    failures.push("Elevation heat transfer did not boost uphill and penalize downhill spread.");
+  }
+  if (
+    steepUphillMultiplier > settings.elevationSpreadMaxBoost ||
+    steepDownhillMultiplier < settings.elevationSpreadMaxPenalty
+  ) {
+    failures.push("Elevation heat-transfer clamp was not enforced.");
+  }
+
+  const uphillSpread = runSingleTargetElevationSpread(0.7);
+  const downhillSpread = runSingleTargetElevationSpread(0.3);
+  console.log(
+    `Elevation Spread Integration\nuphillHeat=${uphillSpread.targetHeat.toFixed(3)} downhillHeat=${downhillSpread.targetHeat.toFixed(3)} uphillFire=${uphillSpread.targetFire.toFixed(3)} downhillFire=${downhillSpread.targetFire.toFixed(3)}`
+  );
+  if (!(uphillSpread.targetHeat > downhillSpread.targetHeat * 1.08)) {
+    failures.push("Integrated fire spread did not deliver more heat uphill than downhill.");
+  }
+}
+
+{
+  const labGrass = createLabTile("grass");
+  const labWater = createLabTile("water");
+  console.log(`\nSIM Lab Elevation\nwater=${labWater.elevation.toFixed(3)} grass=${labGrass.elevation.toFixed(3)}`);
+  if (labWater.elevation !== labGrass.elevation) {
+    failures.push("SIM Lab tiles should remain flat for elevation-aware fire spread.");
+  }
+}
+
+{
+  const settings = { ...DEFAULT_FIRE_SETTINGS };
+  const cols = 5;
+  const rows = 5;
+  const centerX = 2;
+  const centerY = 2;
+  const centerIdx = centerY * cols + centerX;
+  const sample = new Float32Array(cols * rows);
+  sample.fill(0.5);
+  const out = { dx: 0, dy: 0, strength: 0 };
+
+  resolveTerrainAdjustedWind(centerX, centerY, centerIdx, cols, rows, sample, 1, 0, 1, settings, out);
+  const flatStrength = out.strength;
+  const flatDy = out.dy;
+
+  sample[centerIdx + 1] = 0.78;
+  resolveTerrainAdjustedWind(centerX, centerY, centerIdx, cols, rows, sample, 1, 0, 1, settings, out);
+  const obstructedStrength = out.strength;
+
+  sample.fill(0.5);
+  sample[centerIdx + 1] = 0.22;
+  resolveTerrainAdjustedWind(centerX, centerY, centerIdx, cols, rows, sample, 1, 0, 1, settings, out);
+  const descendingStrength = out.strength;
+
+  sample.fill(0.5);
+  sample[centerIdx - cols] = 0.88;
+  sample[centerIdx + cols] = 0.5;
+  resolveTerrainAdjustedWind(centerX, centerY, centerIdx, cols, rows, sample, 1, 0, 1, settings, out);
+  const steeredDy = out.dy;
+
+  sample.fill(0.35);
+  sample[centerIdx - cols] = 0.82;
+  sample[centerIdx + cols] = 0.82;
+  resolveTerrainAdjustedWind(centerX, centerY, centerIdx, cols, rows, sample, 1, 0, 1, settings, out);
+  const corridorStrength = out.strength;
+
+  console.log(
+    `Terrain Wind\nflat=${flatStrength.toFixed(3)} obstructed=${obstructedStrength.toFixed(3)} descending=${descendingStrength.toFixed(3)} steeredDy=${steeredDy.toFixed(3)} corridor=${corridorStrength.toFixed(3)}`
+  );
+  if (Math.abs(flatStrength - 1) > 0.0001 || Math.abs(flatDy) > 0.0001) {
+    failures.push("Flat terrain changed ambient wind.");
+  }
+  if (!(obstructedStrength < flatStrength)) {
+    failures.push("Raised downwind terrain did not reduce effective wind strength.");
+  }
+  if (!(descendingStrength > flatStrength)) {
+    failures.push("Lower downwind terrain did not preserve or increase effective wind strength.");
+  }
+  if (Math.abs(steeredDy) <= 0.01) {
+    failures.push("Side terrain imbalance did not steer local wind direction.");
+  }
+  if (!(corridorStrength > flatStrength)) {
+    failures.push("Low corridor with raised sides did not increase effective wind strength.");
+  }
+  if (obstructedStrength < 0.89 || corridorStrength > 1.07 || Math.abs(steeredDy) > 0.08) {
+    failures.push("Terrain wind adjustment exceeded the conservative anti-striping envelope.");
+  }
+}
+
+{
+  const settings = { ...DEFAULT_FIRE_SETTINGS };
+  const cols = 7;
+  const rows = 3;
+  const windbreaks = new Float32Array(cols * rows);
+  const sourceX = 1;
+  const sourceY = 1;
+  const openScale = getRangedHeatTransferScale({
+    settings,
+    sourceX,
+    sourceY,
+    dx: 1,
+    dy: 0,
+    distanceTiles: 2,
+    cols,
+    rows,
+    windDx: 1,
+    windDy: 0,
+    windStrength: 0.9,
+    heatRelease: 0.8,
+    weatherSpread: 1.4,
+    targetMoisture: 0.08,
+    windbreakFactor: windbreaks
+  });
+  const openMultiplier = getPathWindbreakMultiplier(sourceX, sourceY, 1, 0, 2, cols, rows, windbreaks, settings);
+  windbreaks[sourceY * cols + sourceX + 1] = 0.45;
+  const forestMultiplier = getPathWindbreakMultiplier(sourceX, sourceY, 1, 0, 2, cols, rows, windbreaks, settings);
+  windbreaks[sourceY * cols + sourceX + 1] = 0.85;
+  const houseScale = getRangedHeatTransferScale({
+    settings,
+    sourceX,
+    sourceY,
+    dx: 1,
+    dy: 0,
+    distanceTiles: 2,
+    cols,
+    rows,
+    windDx: 1,
+    windDy: 0,
+    windStrength: 0.9,
+    heatRelease: 0.8,
+    weatherSpread: 1.4,
+    targetMoisture: 0.08,
+    windbreakFactor: windbreaks
+  });
+  const houseMultiplier = getPathWindbreakMultiplier(sourceX, sourceY, 1, 0, 2, cols, rows, windbreaks, settings);
+  console.log(
+    `\nWindbreak Ranged Heat\nopenScale=${openScale.toFixed(3)} openMult=${openMultiplier.toFixed(3)} forestMult=${forestMultiplier.toFixed(3)} houseScale=${houseScale.toFixed(3)} houseMult=${houseMultiplier.toFixed(3)}`
+  );
+  if (!(openScale > 0 && Math.abs(openMultiplier - 1) < 0.0001)) {
+    failures.push("Open terrain should allow deterministic ranged heat transfer under extreme aligned conditions.");
+  }
+  if (!(forestMultiplier < openMultiplier && houseMultiplier < forestMultiplier && houseScale < openScale)) {
+    failures.push("Windbreak factors did not reduce deterministic ranged heat transfer by terrain obstruction.");
+  }
+}
+
+{
+  const calm10m = runGapJumpScenario(1, "calm");
+  const extreme10m = runGapJumpScenario(1, "extreme");
+  const extreme20m = runGapJumpScenario(2, "extreme");
+  const default30m = runGapJumpScenario(3, "extreme");
+  const explicit30m = runGapJumpScenario(3, "explicit-30m");
+  console.log(
+    `\nGap Jump Diffusion\ncalm10m fire=${calm10m.targetFire.toFixed(3)} heat=${calm10m.targetHeat.toFixed(3)} ` +
+      `extreme10m fire=${extreme10m.targetFire.toFixed(3)} heat=${extreme10m.targetHeat.toFixed(3)} ` +
+      `extreme20m fire=${extreme20m.targetFire.toFixed(3)} heat=${extreme20m.targetHeat.toFixed(3)} ` +
+      `default30m fire=${default30m.targetFire.toFixed(3)} heat=${default30m.targetHeat.toFixed(3)} ` +
+      `explicit30m fire=${explicit30m.targetFire.toFixed(3)} heat=${explicit30m.targetHeat.toFixed(3)}`
+  );
+  if (calm10m.targetFire > 0.02) {
+    failures.push("Calm/wet conditions crossed a 10m fuel gap.");
+  }
+  if (extreme10m.targetFire <= 0.02) {
+    failures.push("Extreme aligned conditions did not cross a 10m fuel gap.");
+  }
+  if (extreme20m.targetFire <= 0.02) {
+    failures.push("Extreme aligned conditions did not cross a 20m fuel gap.");
+  }
+  if (default30m.targetFire > 0.02) {
+    failures.push("Default extreme conditions crossed a 30m fuel gap without explicit 30m tuning.");
+  }
+  if (explicit30m.targetFire <= 0.02) {
+    failures.push("Explicit extreme 30m tuning did not cross a 30m fuel gap.");
+  }
+}
+
+{
+  const forestSpread = runMatchedFuelTypeSpread("forest");
+  const houseSpread = runMatchedFuelTypeSpread("house");
+  const heatDelta = Math.abs(forestSpread.targetHeat - houseSpread.targetHeat);
+  const fireDelta = Math.abs(forestSpread.targetFire - houseSpread.targetFire);
+  console.log(
+    `\nMatched Fuel Profiles\nforestHeat=${forestSpread.targetHeat.toFixed(3)} houseHeat=${houseSpread.targetHeat.toFixed(3)} forestFire=${forestSpread.targetFire.toFixed(3)} houseFire=${houseSpread.targetFire.toFixed(3)}`
+  );
+  if (heatDelta > 0.0001 || fireDelta > 0.0001) {
+    failures.push("Matching forest and house fuel profiles produced different spread behavior before damage/scoring side effects.");
+  }
+}
+
+{
   const { state, rng } = buildState(3901);
   const effects = createEffectsState();
   setCareerCursor(state, 225);
@@ -372,6 +868,23 @@ const failures = [];
   );
   if (!state.paused || state.simTimeMode !== "incident" || !state.latestFireAlert) {
     failures.push("New incidents did not auto-pause and switch into incident mode.");
+  }
+}
+
+{
+  const { state, rng } = buildState(3904);
+  const effects = createEffectsState();
+  setCareerCursor(state, 179.75);
+  state.simTimeMode = "strategic";
+  state.timeSpeedIndex = state.strategicTimeSpeedIndex;
+  state.timeSpeedSliderValue = 80;
+  state.paused = false;
+  stepSim(state, effects, rng, BASE_STEP * 80);
+  console.log(
+    `\nHigh-Speed Season Entry Alert\nphase=${state.phase} paused=${state.paused ? 1 : 0} mode=${state.simTimeMode} active=${state.lastActiveFires} alertId=${state.latestFireAlert?.id ?? "none"} burned=${state.burnedTiles}`
+  );
+  if (!state.paused || state.simTimeMode !== "incident" || !state.latestFireAlert || state.burnedTiles !== 0) {
+    failures.push("High-speed season entry did not pause immediately on the seeded fire incident.");
   }
 }
 

@@ -1,5 +1,5 @@
 import type { ApprovalTier, FireSettings, FuelProfile, Point, RiskTier, SimTimeMode, TileType, UnitKind, Wind } from "./types.js";
-import { TILE_FUEL_PROFILES } from "./generated/fuelProfiles.js";
+import { TILE_FUEL_PROFILES } from "../config/fuelProfiles.js";
 
 export const TILE_SIZE = 10;
 export const ZOOM_MIN = 0.6;
@@ -86,11 +86,29 @@ export const DEFAULT_FIRE_SETTINGS: FireSettings = {
   diffusionCardinal: 0.35,
   diffusionDiagonal: 0.25,
   diffusionSecondary: 0.28,
+  rangedDiffusionMaxTiles: 3,
+  rangedDiffusionWindThreshold: 0.55,
+  rangedDiffusionAlignmentThreshold: 0.35,
+  rangedDiffusionHeatThreshold: 0.26,
+  rangedDiffusionWeatherThreshold: 1.08,
+  rangedDiffusionTwoTileThreshold: 0.62,
+  rangedDiffusionThreeTileThreshold: 1.08,
+  rangedDiffusionDistanceFalloff: 0.42,
+  rangedDiffusionObstructionStrength: 0.72,
   diffusionMoisture: 0.35,
   heatCap: 5,
   conflagrationHeatBoost: 0.3,
   conflagrationFuelBoost: 0.5,
-  boundsPadding: 6
+  boundsPadding: 6,
+  elevationSpreadGain: 1.15,
+  elevationSpreadMaxBoost: 1.28,
+  elevationSpreadMaxPenalty: 0.82,
+  elevationSpreadDeadZone: 0.012,
+  terrainWindSteerStrength: 0.12,
+  terrainWindSpeedMin: 0.9,
+  terrainWindSpeedMax: 1.06,
+  terrainWindObstructionPenalty: 0.45,
+  terrainWindFunnelBonus: 0.12
 };
 export const GROWTH_WEATHER_TEMP_MIN = 18;
 export const GROWTH_WEATHER_TEMP_MAX = 30;
