@@ -39,6 +39,7 @@ export const TOWN_EVAC_SPEED = 0.2;
 export const FIRE_IGNITION_CHANCE_PER_DAY = 0.08;
 export const FIRE_SIM_SPEED = 1.35;
 export const FIRE_SIM_TICK_SECONDS = 1;
+export const INCIDENT_FIRE_PACING_SCALE = 0.0625;
 export const FIRE_SIM_ROWS_PER_SLICE = 8;
 export const FIRE_PHASE_TIME_SCALE = 0.125;
 export const FIRE_RENDER_SMOOTH_SECONDS = 0.5;

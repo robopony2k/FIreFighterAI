@@ -26,7 +26,7 @@
   - spread multiplier is raised as moisture drops.
 
 ### Fire-phase gates controlled by risk
-- New random ignitions are only allowed when `climateRisk >= FIRE_WEATHER_RISK_MIN` (0.4).
+- Fire simulation work can wake when `climateRisk >= FIRE_WEATHER_RISK_MIN` (0.4), but new campaign random ignitions require viable incident weather: risk, ignition, spread, sustain, and cooling must all pass the random-ignition viability helper.
 - A burnout/auto-cooling factor is applied when `climateRisk < FIRE_WEATHER_BURNOUT_RISK` (0.25).
 
 ## 2) Fuel + moisture + ignition at tile level
@@ -49,9 +49,9 @@ So moisture is currently static per tile during a season but still moderates hea
 
 ### Random ignition
 Random starts depend on:
-- `ignitionChancePerDay * dayDelta * intensity`, where `intensity = climateRisk * climateIgnitionMultiplier`.
+- viable incident weather first, then `ignitionChancePerDay * dayDelta * intensity`, where `intensity` is based on the sampled fire-weather ignition response.
 
-Result: hot/dry climate can increase starts nonlinearly (risk and ignition multiplier both increase as climate dries).
+Result: hot/dry climate still increases starts, but mid-risk weather that cannot sustain spread should not create false-alarm campaign incidents.
 
 ### Spread-induced ignition
 For non-burning tiles, ignition happens when heat exceeds climate-adjusted threshold:
@@ -103,8 +103,8 @@ This means the same tile can re-enter risk once reheated by neighbors if fuel re
 
 ## 7) Model limitations / potential tuning issues
 
-1. **Potential double-weighting of dryness on random ignitions**
-- `intensity = climateRisk * climateIgnitionMultiplier` may over-amplify starts in very dry periods.
+1. **Random ignition threshold tuning**
+- Random ignitions now require viable weather, but the viability thresholds may need adjustment after more campaign pacing runs.
 
 2. **No dynamic fuel-moisture recovery from suppression**
 - Water attack reduces heat/fire only; no temporary increase to local moisture or ignition point.

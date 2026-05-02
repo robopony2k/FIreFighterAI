@@ -67,6 +67,7 @@ const BASELINE_HEAT_EPS = 0.08;
 const SUPPRESSION_WETNESS_ACTIVE_EPS = 0.01;
 const ISOLATED_RESIDUAL_COOLING_BOOST = 0.55;
 const WIND_BIAS_COMPONENT_MAX = 0.88;
+const FIRE_INTENSITY_REFERENCE_DELTA_SECONDS = 0.05;
 let baselineTickCounter = 0;
 
 const getWetnessDecayFactor = (delta) => {
@@ -575,7 +576,8 @@ export function stepFire(state, effects: EffectsState, rng, delta, spreadScale, 
                     const { exposedFuel01, support01, hasExposure } = getExposureFactorsAt(x, y);
                     const wetnessSpreadFactor = Math.max(0, 1 - SUPPRESSION_WETNESS_SPREAD_REDUCTION * wetnessValue);
                     const moistureFactor = fireQuality === 0 ? 1 : Math.max(0, 1 - moisture[idx] * diffuseMoisture);
-                    const intensity = Math.max(0.25, fireDelta * (0.45 + spreadScale * 0.12));
+                    const intensityFloor = 0.25 * clamp(delta / FIRE_INTENSITY_REFERENCE_DELTA_SECONDS, 0, 1);
+                    const intensity = Math.max(intensityFloor, fireDelta * (0.45 + spreadScale * 0.12));
                     const dayBoost = 0.65 + dayFactor * 0.4;
                     const spreadMultiplier = fireQuality === 0 ? 1 : Math.max(0, spreadBoost[idx] || 1);
                     const ignition = Math.max(ignitionPoint[idx], 0.0001);

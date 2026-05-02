@@ -41,6 +41,11 @@ export interface FireWeatherResponse extends FireClimateSample {
 const SEASON_COUNT = 4;
 const YEAR_DAYS = Math.max(1, Math.floor(VIRTUAL_CLIMATE_PARAMS.seasonLen));
 const EPSILON = 0.0001;
+const RANDOM_IGNITION_MIN_RISK = 0.62;
+const RANDOM_IGNITION_MIN_IGNITION = 0.85;
+const RANDOM_IGNITION_MIN_SPREAD = 0.95;
+const RANDOM_IGNITION_MIN_SUSTAIN = 0.85;
+const RANDOM_IGNITION_MAX_COOLING = 1.2;
 
 const SEASON_BANDS: SeasonBand[] = [
   {
@@ -144,6 +149,13 @@ export const buildFireWeatherResponse = (sample: FireClimateSample): FireWeather
 
 export const sampleFireWeatherResponse = (state: WorldState, careerDay: number): FireWeatherResponse =>
   buildFireWeatherResponse(sampleFireClimate(state, careerDay));
+
+export const isRandomIgnitionWeatherViable = (weather: FireWeatherResponse): boolean =>
+  weather.climateRisk >= RANDOM_IGNITION_MIN_RISK &&
+  weather.ignition >= RANDOM_IGNITION_MIN_IGNITION &&
+  weather.spread >= RANDOM_IGNITION_MIN_SPREAD &&
+  weather.sustain >= RANDOM_IGNITION_MIN_SUSTAIN &&
+  weather.cooling <= RANDOM_IGNITION_MAX_COOLING;
 
 export const getBurnoutFactorForRisk = (climateRisk: number): number =>
   climateRisk < FIRE_WEATHER_BURNOUT_RISK

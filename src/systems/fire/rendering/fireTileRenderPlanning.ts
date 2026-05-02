@@ -23,6 +23,7 @@ import {
 import { clamp, hash1, smoothApproach, smoothstep } from "./fireRenderMath.js";
 import type { FireRenderAnalysisState } from "./fireRenderPlanningTypes.js";
 import type { FireFxTerrainSize, FireFxTreeBurnController, FireFxTreeFlameProfile, FireFxWorldState } from "./fireFxTypes.js";
+import type { FireFxVisibilityContext } from "./fireFxVisibility.js";
 import type { FireFieldView } from "./fireRenderSnapshot.js";
 import { getNeighbourFireBias } from "./fireRenderSnapshot.js";
 
@@ -110,9 +111,10 @@ export type PlanFireTileVisualsInput = {
   flameBudgetScale: number;
   frontPassActive: boolean;
   frontFieldReadScale: number;
+  visibility: FireFxVisibilityContext | null;
 };
 
-export const planFireTileVisuals = (input: PlanFireTileVisualsInput): { visibleFlameTiles: number } => {
+export const planFireTileVisuals = (input: PlanFireTileVisualsInput): { visibleFlameTiles: number; culledTiles: number } => {
   const {
     state,
     world,
@@ -136,13 +138,24 @@ export const planFireTileVisuals = (input: PlanFireTileVisualsInput): { visibleF
     sliceComplexityScale,
     flameBudgetScale,
     frontPassActive,
-    frontFieldReadScale
+    frontFieldReadScale,
+    visibility
   } = input;
   let visibleFlameTiles = 0;
+  let culledTiles = 0;
   for (let y = minY; y <= maxY; y += sampleStep) {
     const rowBase = y * cols;
     for (let x = minX; x <= maxX; x += sampleStep) {
       const idx = rowBase + x;
+      if (visibility) {
+        visibility.stats.candidateTiles += 1;
+        if (!visibility.isTileVisible(x, y, 1.35)) {
+          visibility.stats.culledTiles += 1;
+          culledTiles += 1;
+          continue;
+        }
+        visibility.stats.visibleTiles += 1;
+      }
       const fire = fireView.getFireByIndex(idx);
       const heat = fireView.getHeat01ByIndex(idx);
       const heatRelease = fireView.getHeatReleaseByIndex(idx);
@@ -355,5 +368,5 @@ export const planFireTileVisuals = (input: PlanFireTileVisualsInput): { visibleF
       updateObjectTileEmitterSlots(state, idx, objectFlameTargetCount, deltaSeconds);
     }
   }
-  return { visibleFlameTiles };
+  return { visibleFlameTiles, culledTiles };
 };

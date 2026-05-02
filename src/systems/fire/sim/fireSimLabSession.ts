@@ -1,5 +1,5 @@
 import { createEffectsState, resetEffectsState, type EffectsState } from "../../../core/effectsState.js";
-import { DEFAULT_FIRE_SETTINGS, FUEL_PROFILES } from "../../../core/config.js";
+import { DEFAULT_FIRE_SETTINGS, FUEL_PROFILES, INCIDENT_FIRE_PACING_SCALE } from "../../../core/config.js";
 import { inBounds, indexFor } from "../../../core/grid.js";
 import { RNG } from "../../../core/rng.js";
 import { createInitialState, TILE_TYPE_IDS, type WorldState } from "../../../core/state.js";
@@ -288,7 +288,7 @@ export const createFireSimLabSession = (
         state,
         effects,
         rng,
-        deltaSeconds,
+        deltaSeconds * INCIDENT_FIRE_PACING_SCALE,
         state.fireSettings.simSpeed,
         1,
         burnoutFactor,

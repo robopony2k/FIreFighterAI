@@ -9,6 +9,7 @@ import type {
   ResolvedFireAnchor
 } from "./fireFxTypes.js";
 import type { FireFieldView } from "./fireRenderSnapshot.js";
+import type { FireFxVisibilityContext } from "./fireFxVisibility.js";
 
 export type FrontDirection = 0 | 1 | 2 | 3;
 export type FrontEdgeOrientation = "horizontal" | "vertical";
@@ -169,6 +170,13 @@ export type FireRenderTimingContext = {
   fireShaderTime: number;
 };
 
+export type FireRenderAnalysisTimings = {
+  activeTiles: number;
+  clusters: number;
+  fronts: number;
+  tilePlan: number;
+};
+
 export type FireRenderWindContext = {
   windX: number;
   windZ: number;
@@ -279,7 +287,10 @@ export type FireRenderFramePlan = {
   kernelBudgetScale: number;
   frontCorridors: FrontCorridor[];
   audioClusters: FireAudioClusterSnapshot[];
+  analysisTimingsMs: FireRenderAnalysisTimings;
 };
+
+export type FireRenderVisibilityInput = FireFxVisibilityContext | null;
 
 export type FireTileVisualPlan = {
   tileIndex: number;

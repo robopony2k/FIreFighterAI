@@ -67,6 +67,7 @@ Story: You are the new "Fire Warden" in charge of a region. Your mission is to p
 - Elevation biases heat transfer: uphill cells ignite more easily than downhill cells, while flat terrain remains neutral.
 - Terrain can locally shape wind around burning cells with small clamped strength and steering changes, including obstruction, downslope acceleration, and simple corridor funneling; this is not a persistent wind simulation.
 - Spread should be reliable in high-risk conditions; low-risk periods should still allow controlled burns.
+- Campaign random ignitions require viable incident weather, so low or moderate forecast risk can still be shown without creating false-alarm fires that immediately fizzle. Manual, debug, controlled-burn, and SIM Lab ignitions can still test low-risk fire behavior.
 - The player should feel the difference between a mild year and a severe year.
 
 ## Resource Management
@@ -111,7 +112,7 @@ Design intent:
 - Top right of screen - Forecast graph shows rolling 90-day fire risk with current-day marker.
 - Bottom right of screen - "Announcements" at key events ie a speech bubble from a News Station, Weather Presenter, Financial Advisor etc
 - Bottom middle of screen - Debug overlays exist for tuning and dev validation.
-- Dev-facing SIM Lab exists for controlled fire-behavior tuning: selectable scenario templates run on a denser 128x80 grid, with terrain painting, painted firefighter suppression markers, local saved/loaded test scenarios, a cell-state legend/symbol overlay, fuel profile sliders, and wind, temperature, moisture, risk, and incident-speed preset controls with explanatory tooltips. Firefighter markers maintain a hose-reachable defensive wetness field and auto-spray nearby hot or burning cells using default firefighter radius, hose range, and power. SIM Lab speed mirrors the game's incident-time tuning surface on the same fixed 0.25s incident tick, adds `0.5x` and `1x` lab convenience options, and is capped at `1x`. The Plain + Road template uses a one-tile road gap so it matches the in-game road scale while still testing fire jumps across non-flammable cells. Fuel profile slider edits apply immediately, auto-save as local SIM Lab drafts, survive saved-scenario loads, and can be copied as a complete `src/config/fuelProfiles.ts` defaults file when ready to promote into source. The `windFactor` slider is displayed as Windbreak: `0` is open/no blocking, `1` is strong wind obstruction.
+- Dev-facing SIM Lab exists for controlled fire-behavior tuning: selectable scenario templates run on a denser 128x80 grid, with terrain painting, painted firefighter suppression markers, local saved/loaded test scenarios, a cell-state legend/symbol overlay, fuel profile sliders, and wind, temperature, moisture, risk, and incident-speed preset controls with explanatory tooltips. Firefighter markers maintain a hose-reachable defensive wetness field and auto-spray nearby hot or burning cells using default firefighter radius, hose range, and power. SIM Lab speed mirrors the game's incident-time tuning surface on the same fixed 0.25s incident tick, adds `0.5x` and `1x` lab convenience options, and is capped at `1x`; both SIM Lab and in-game incidents intentionally pace fire-kernel spread below incident clock time so active fires remain tactically readable at the slow presets. The Plain + Road template uses a one-tile road gap so it matches the in-game road scale while still testing fire jumps across non-flammable cells. Fuel profile slider edits apply immediately, auto-save as local SIM Lab drafts, survive saved-scenario loads, and can be copied as a complete `src/config/fuelProfiles.ts` defaults file when ready to promote into source. The `windFactor` slider is displayed as Windbreak: `0` is open/no blocking, `1` is strong wind obstruction.
 - Top left of screen - Available trucks to select with key info
 - Bottom left of screen - Details on selected unit + available commands
 
@@ -150,7 +151,7 @@ Climate
 
 Fire
 - Ignition chance per day, sim speed/tick cadence/rows per slice, render smoothing.
-- Fire season taper/min intensity and seasonal fire pacing.
+- Fire season taper/min intensity, seasonal fire pacing, and the incident fire-kernel pacing scale used to keep slow active incidents readable.
 - Deterministic ranged heat diffusion for short firebreak gaps: 10m gaps can cross in bad conditions, 20m gaps require extreme aligned wind/heat, and 30m gaps require explicit extreme tuning. V1 does not model probabilistic long-range ember spotting.
 - Heat diffusion constants, ranged-diffusion thresholds/falloff, windbreak obstruction strength, and heat cap.
 - Conflagration boosts.
@@ -176,6 +177,7 @@ Other
 
 - Forecast visual should map to clear risk tiers (low, moderate, high, extreme).
 - Color and UI language must match gameplay impact.
+- Risk is a climate severity signal, not a direct guarantee that a random incident will start; campaign random starts are additionally gated by ignition, spread, sustain, and cooling viability.
 - Add tooltip or legend for risk meaning and expected behavior.
 
 ## Failure States + Win Conditions

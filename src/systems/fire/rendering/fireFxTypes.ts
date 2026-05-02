@@ -209,7 +209,14 @@ export type FireAudioClusterSnapshot = {
 export type FireFxDebugTimings = {
   snapshot: number;
   analysis: number;
+  analysisActiveTiles: number;
+  analysisClusters: number;
+  analysisFronts: number;
+  analysisTilePlan: number;
   flameWrite: number;
+  flameFront: number;
+  flameCluster: number;
+  flameTiles: number;
   smoke: number;
   upload: number;
   total: number;
@@ -233,6 +240,14 @@ export type FireFxDebugCounts = {
   smokeRenderCap: number;
   smokeSpawnFrameCap: number;
   rawFallbackAnchorTiles: number;
+  candidateTiles: number;
+  visibleTiles: number;
+  culledTiles: number;
+  frontCorridorsTested: number;
+  frontCorridorsCulled: number;
+  frontCorridorsEmitted: number;
+  instancesCulledByVisibility: number;
+  smokeParticlesCulledByVisibility: number;
 };
 
 export type FireFxDebugBudgets = {
@@ -275,7 +290,14 @@ export const createEmptyFireFxDebugSnapshot = (
   timingsMs: {
     snapshot: 0,
     analysis: 0,
+    analysisActiveTiles: 0,
+    analysisClusters: 0,
+    analysisFronts: 0,
+    analysisTilePlan: 0,
     flameWrite: 0,
+    flameFront: 0,
+    flameCluster: 0,
+    flameTiles: 0,
     smoke: 0,
     upload: 0,
     total: 0
@@ -297,7 +319,15 @@ export const createEmptyFireFxDebugSnapshot = (
     smokeRenderStride: 0,
     smokeRenderCap: 0,
     smokeSpawnFrameCap: 0,
-    rawFallbackAnchorTiles: 0
+    rawFallbackAnchorTiles: 0,
+    candidateTiles: 0,
+    visibleTiles: 0,
+    culledTiles: 0,
+    frontCorridorsTested: 0,
+    frontCorridorsCulled: 0,
+    frontCorridorsEmitted: 0,
+    instancesCulledByVisibility: 0,
+    smokeParticlesCulledByVisibility: 0
   },
   budgets: {
     smokeBudgetScale: 1,

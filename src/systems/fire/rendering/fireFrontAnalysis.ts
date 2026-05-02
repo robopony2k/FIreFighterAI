@@ -23,6 +23,7 @@ import type {
   ResolvedFireAnchor
 } from "./fireFxTypes.js";
 import type { FireFieldView } from "./fireRenderSnapshot.js";
+import type { FireFxVisibilityContext } from "./fireFxVisibility.js";
 
 const FRONT_DIRECTION_DATA: ReadonlyArray<{
   dx: number;
@@ -106,6 +107,7 @@ export type AnalyzeFireFrontsInput = {
   visualActiveWeight: number;
   flameDensityScale: number;
   frontPassEnabled: boolean;
+  visibility: FireFxVisibilityContext | null;
   resolveGroundAnchor: (tileIdx: number) => ResolvedFireAnchor;
 };
 
@@ -139,6 +141,7 @@ export const analyzeFireFronts = (input: AnalyzeFireFrontsInput): FireFrontAnaly
     visualActiveWeight,
     flameDensityScale,
     frontPassEnabled,
+    visibility,
     resolveGroundAnchor
   } = input;
 
@@ -214,6 +217,9 @@ export const analyzeFireFronts = (input: AnalyzeFireFrontsInput): FireFrontAnaly
     for (let y = minY; y <= maxY; y += 1) {
       const rowBase = y * cols;
       for (let x = minX; x <= maxX; x += 1) {
+        if (visibility && !visibility.isTileVisible(x, y, 1.7)) {
+          continue;
+        }
         const sourceIdx = rowBase + x;
         const sourceDriveTarget = getFrontTileVisualDrive(sourceIdx);
         if (sourceDriveTarget <= 0.06) {

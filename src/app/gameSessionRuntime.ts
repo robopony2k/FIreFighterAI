@@ -2,7 +2,7 @@ import { BASE_BUDGET, TILE_SIZE, MAP_SCALE, MAP_SIZE_PRESETS } from "../core/con
 import type { MapSizeId } from "../core/config.js";
 import { getCharacterBaseBudget } from "../core/characters.js";
 import { RNG } from "../core/rng.js";
-import { computeChecksum, createInitialState, resetState, setStatus } from "../core/state.js";
+import { computeChecksum, createInitialState, resetState, setStatus, TILE_TYPE_IDS } from "../core/state.js";
 import { ensureTileSoA, syncTileSoA } from "../core/tileCache.js";
 import { setFuelProfiles } from "../core/tiles.js";
 import { TREE_TYPE_IDS } from "../core/types.js";
@@ -471,6 +471,7 @@ export const createAppRuntime = (): AppRuntime => {
   let lastThreeTestVegetationRevision = -1;
   let lastThreeTestStructureRevision = -1;
   let lastThreeTestDebugTypeColors = false;
+  let lastThreeTestGeometryTypeSnapshot: Uint8Array | null = null;
   let cachedThreeTestTreeTypeMap: Uint8Array | null = null;
   let cachedThreeTestTreeTypeTerrainRevision = -1;
   let cachedThreeTestTreeTypeVegetationRevision = -1;
@@ -700,6 +701,9 @@ export const createAppRuntime = (): AppRuntime => {
     const climate3d = readRecentPerf("3d.climateSync", now);
     const terrain3d = readRecentPerf("3d.terrainSync", now);
     const terrainDeferred3d = readRecentPerf("3d.terrainDeferred", now);
+    const terrainSampleBuild3d = readRecentPerf("3d.terrainSampleBuild", now);
+    const terrainSyncSkipped3d = readRecentPerf("3d.terrainSyncSkipped", now);
+    const terrainVisualBatched3d = readRecentPerf("3d.terrainVisualBatched", now);
     const lines = [
       `Perf (${activeRenderMode.toUpperCase()})  |  Ctrl+Shift+P toggle`,
       `Flags: seasonal=${isThreeTestSeasonalEnabled() ? "1" : "0"} nosim=${isThreeTestNoSimEnabled() ? "1" : "0"} noterrain=${isThreeTestTerrainSyncDisabled() ? "1" : "0"} trees=${isThreeTestTreeRenderingEnabled() ? "1" : "0"} detailStruct=${isThreeTestDetailedStructuresEnabled() ? "1" : "0"} dpr=${getThreeTestDprCap().toFixed(2)} fps=${getFrameCapFps() > 0 ? getFrameCapFps().toFixed(0) : "off"}`,
@@ -726,14 +730,26 @@ export const createAppRuntime = (): AppRuntime => {
             `3D fire: snap ${formatMs(threePerf.fireFxDebug.timingsMs.snapshot)} ana ${formatMs(threePerf.fireFxDebug.timingsMs.analysis)} flame ${formatMs(threePerf.fireFxDebug.timingsMs.flameWrite)} smoke ${formatMs(threePerf.fireFxDebug.timingsMs.smoke)} up ${formatMs(threePerf.fireFxDebug.timingsMs.upload)}`
           );
           lines.push(
+            `3D fire ana: act ${formatMs(threePerf.fireFxDebug.timingsMs.analysisActiveTiles)} cl ${formatMs(threePerf.fireFxDebug.timingsMs.analysisClusters)} front ${formatMs(threePerf.fireFxDebug.timingsMs.analysisFronts)} plan ${formatMs(threePerf.fireFxDebug.timingsMs.analysisTilePlan)}`
+          );
+          lines.push(
+            `3D fire write: front ${formatMs(threePerf.fireFxDebug.timingsMs.flameFront)} cl ${formatMs(threePerf.fireFxDebug.timingsMs.flameCluster)} tile ${formatMs(threePerf.fireFxDebug.timingsMs.flameTiles)}`
+          );
+          lines.push(
             `3D fire dbg: inst ${formatInt(threePerf.fireFxDebug.counts.fireInstances)} smoke ${formatInt(threePerf.fireFxDebug.counts.smokeParticles)} cluster ${formatInt(threePerf.fireFxDebug.counts.clusters)}/${formatInt(threePerf.fireFxDebug.counts.clusteredTiles)} front ${formatInt(threePerf.fireFxDebug.counts.frontSegments)} step ${formatInt(threePerf.fireFxDebug.counts.sampleStep)} stride ${formatInt(threePerf.fireFxDebug.counts.smokeRenderStride)} cap ${formatInt(threePerf.fireFxDebug.counts.smokeRenderCap)}`
+          );
+          lines.push(
+            `3D fire vis: tiles ${formatInt(threePerf.fireFxDebug.counts.visibleTiles)}/${formatInt(threePerf.fireFxDebug.counts.candidateTiles)} culled ${formatInt(threePerf.fireFxDebug.counts.culledTiles)} corr ${formatInt(threePerf.fireFxDebug.counts.frontCorridorsEmitted)}/${formatInt(threePerf.fireFxDebug.counts.frontCorridorsTested)} cull ${formatInt(threePerf.fireFxDebug.counts.frontCorridorsCulled)} inst ${formatInt(threePerf.fireFxDebug.counts.instancesCulledByVisibility)} smoke ${formatInt(threePerf.fireFxDebug.counts.smokeParticlesCulledByVisibility)}`
           );
           lines.push(
             `3D fire mode: ${threePerf.fireFxDebug.modes.emergencyOverload ? "emergency" : threePerf.fireFxDebug.modes.overloaded ? "overload" : "normal"} spark ${threePerf.fireFxDebug.modes.showSparks ? "on" : "off"} smoke ${threePerf.fireFxDebug.modes.showSmoke ? "on" : "off"} front ${threePerf.fireFxDebug.modes.showFrontPass ? "on" : "off"} raw ${formatInt(threePerf.fireFxDebug.counts.rawFallbackAnchorTiles)} churn ${formatInt(threePerf.fireFxDebug.continuity.localSlotChurn)}/${formatInt(threePerf.fireFxDebug.continuity.objectSlotChurn)}/${formatInt(threePerf.fireFxDebug.continuity.frontSlotChurn)}`
           );
         }
         lines.push(
-          `3D terrain set: avg ${formatMs(threePerf.terrainSetMs)} last ${formatMs(threePerf.terrainSetLastMs)} max ${formatMs(threePerf.terrainSetMaxMs)} n ${formatInt(threePerf.terrainSetCount)}`
+          `3D terrain set: avg ${formatMs(threePerf.terrainSetMs)} last ${formatMs(threePerf.terrainSetLastMs)} max ${formatMs(threePerf.terrainSetMaxMs)} n ${formatInt(threePerf.terrainSetCount)} reuse/full ${formatInt(threePerf.terrainSetFastReuseCount)}/${formatInt(threePerf.terrainSetFullRebuildCount)}`
+        );
+        lines.push(
+          `3D terrain sync: sample ${formatMs(terrainSampleBuild3d?.avg)} skip ${formatNum(terrainSyncSkipped3d?.avg)}(${formatInt(threeTestTerrainSyncSkippedCount)}) visualBatch ${formatNum(terrainVisualBatched3d?.avg)}(${formatInt(threeTestTerrainVisualBatchedCount)})`
         );
         lines.push(
           `3D gap: avg ${formatMs(threePerf.rafGapMs)}  last ${formatMs(threePerf.rafGapLastMs)}  max ${formatMs(threePerf.rafGapMaxMs)}  hitches ${formatInt(threePerf.hitchCount)}`
@@ -792,6 +808,9 @@ export const createAppRuntime = (): AppRuntime => {
         const climateAvg = readRecentPerf("3d.climateSync", now)?.avg ?? 0;
         const terrainAvg = readRecentPerf("3d.terrainSync", now)?.avg ?? 0;
         const terrainDeferred = readRecentPerf("3d.terrainDeferred", now)?.avg ?? 0;
+        const terrainSampleBuild = readRecentPerf("3d.terrainSampleBuild", now)?.avg ?? 0;
+        const terrainSkipped = readRecentPerf("3d.terrainSyncSkipped", now)?.avg ?? 0;
+        const terrainVisualBatched = readRecentPerf("3d.terrainVisualBatched", now)?.avg ?? 0;
         const threeFrame = readRecentPerf("3d.frame", now)?.avg ?? 0;
         const threeScene = readRecentPerf("3d.scene", now)?.avg ?? 0;
         const threePost = readRecentPerf("3d.post", now)?.avg ?? 0;
@@ -818,6 +837,7 @@ export const createAppRuntime = (): AppRuntime => {
             `sync(climate=${climateAvg.toFixed(2)} terrain=${terrainAvg.toFixed(2)} defer=${terrainDeferred.toFixed(2)}) ` +
             `3dFrame=${threeFrame.toFixed(2)}ms scene=${threeScene.toFixed(2)} post=${threePost.toFixed(2)} dof=${threeDof.toFixed(2)} sceneLast=${(threePerf?.sceneRenderLastMs ?? 0).toFixed(2)} ` +
             `gap3d=${(threePerf?.rafGapLastMs ?? 0).toFixed(2)} terrainSetLast=${terrainSetLast.toFixed(2)} terrainSetMax=${terrainSetMax.toFixed(2)} terrainSetN=${Math.round(terrainSetCount)} ` +
+            `terrainSample=${terrainSampleBuild.toFixed(2)} terrainSkip=${terrainSkipped.toFixed(2)}(${Math.round(threeTestTerrainSyncSkippedCount)}) terrainBatch=${terrainVisualBatched.toFixed(2)}(${Math.round(threeTestTerrainVisualBatchedCount)}) terrainReuseFull=${Math.round(threePerf?.terrainSetFastReuseCount ?? 0)}/${Math.round(threePerf?.terrainSetFullRebuildCount ?? 0)} ` +
             `fx=${threeFx.toFixed(2)} hud=${threeHud.toFixed(2)} ctxLoss=${Math.round(contextLosses)} ctxRestore=${Math.round(contextRestores)} ` +
             `calls=${Math.round(sceneCalls)} tri=${Math.round(sceneTriangles)}`
         );
@@ -899,25 +919,55 @@ export const createAppRuntime = (): AppRuntime => {
   };
   
   const buildThreeTestSample = (fastUpdate = false) => {
-    const terrainHeightScaleMultiplier = getTerrainHeightScaleMultiplier(activeTerrainSource, activeMapSize);
-    const sample = buildRenderTerrainSample(
-      state,
-      getThreeTestTreeTypeMap(!fastUpdate),
-      inputState.debugTypeColors,
-      isThreeTestTreeRenderingEnabled(),
-      fastUpdate,
-      true,
-      terrainHeightScaleMultiplier
-    );
-    // Climate tinting is shader-driven in 3D; avoid terrain texture rebuild pressure from moisture deltas.
-    sample.tileMoisture = undefined;
-    sample.climateDryness = undefined;
-    return sample;
+    const startedAt = performance.now();
+    try {
+      const terrainHeightScaleMultiplier = getTerrainHeightScaleMultiplier(activeTerrainSource, activeMapSize);
+      const sample = buildRenderTerrainSample(
+        state,
+        getThreeTestTreeTypeMap(!fastUpdate),
+        inputState.debugTypeColors,
+        isThreeTestTreeRenderingEnabled(),
+        fastUpdate,
+        true,
+        terrainHeightScaleMultiplier
+      );
+      // Climate tinting is shader-driven in 3D; avoid terrain texture rebuild pressure from moisture deltas.
+      sample.tileMoisture = undefined;
+      sample.climateDryness = undefined;
+      return sample;
+    } finally {
+      recordPerfSample("3d.terrainSampleBuild", performance.now() - startedAt);
+    }
   };
-  
+
   const THREE_TEST_TERRAIN_COOLDOWN_MS = 600;
-  const THREE_TEST_TERRAIN_COOLDOWN_ACTIVE_FIRE_MS = 90;
+  const THREE_TEST_TERRAIN_FIRE_VISUAL_COOLDOWN_MS = 750;
+  const THREE_TEST_GEOMETRY_TERRAIN_TYPES = new Set<number>([
+    TILE_TYPE_IDS.road,
+    TILE_TYPE_IDS.water,
+    TILE_TYPE_IDS.base,
+    TILE_TYPE_IDS.house
+  ]);
+  const isGeometryRelevantTerrainType = (typeId: number): boolean => THREE_TEST_GEOMETRY_TERRAIN_TYPES.has(typeId);
+  const hasGeometryRelevantTerrainTypeChange = (previous: Uint8Array | null, next: Uint8Array): boolean => {
+    if (!previous || previous.length !== next.length) {
+      return true;
+    }
+    for (let i = 0; i < next.length; i += 1) {
+      const prevType = previous[i] ?? -1;
+      const nextType = next[i] ?? -1;
+      if (prevType === nextType) {
+        continue;
+      }
+      if (isGeometryRelevantTerrainType(prevType) || isGeometryRelevantTerrainType(nextType)) {
+        return true;
+      }
+    }
+    return false;
+  };
   let lastThreeTestTerrainSync = 0;
+  let threeTestTerrainSyncSkippedCount = 0;
+  let threeTestTerrainVisualBatchedCount = 0;
   const hasActiveFireTerrainPressure = (): boolean =>
     state.phase === "fire" || state.lastActiveFires > 0 || state.fireBoundsActive;
   
@@ -951,22 +1001,38 @@ export const createAppRuntime = (): AppRuntime => {
       };
       const debugChanged = lastThreeTestDebugTypeColors !== inputState.debugTypeColors;
       const terrainTypesChanged = nextTypeRevision !== lastThreeTestTerrainTypeRevision;
+      const vegetationChanged = nextVegetationRevision !== lastThreeTestVegetationRevision;
       const structuresChanged = nextStructureRevision !== lastThreeTestStructureRevision;
       if (!shouldSyncThreeTestTerrain(prevRevisionState, nextRevisionState, force)) {
         state.terrainDirty = false;
         return;
       }
       const now = performance.now();
-      const cooldownMs =
-        hasActiveFireTerrainPressure()
-          ? THREE_TEST_TERRAIN_COOLDOWN_ACTIVE_FIRE_MS
-          : THREE_TEST_TERRAIN_COOLDOWN_MS;
-      if (!force && !structuresChanged && !terrainTypesChanged && now - lastThreeTestTerrainSync < cooldownMs) {
+      const activeFireTerrainPressure = hasActiveFireTerrainPressure();
+      const geometryTerrainChanged =
+        terrainTypesChanged && hasGeometryRelevantTerrainTypeChange(lastThreeTestGeometryTypeSnapshot, state.tileTypeId);
+      const visualTerrainChanged = terrainTypesChanged && !geometryTerrainChanged;
+      const vegetationOnlyChanged = vegetationChanged && !terrainTypesChanged;
+      const fireVisualTerrainChanged = activeFireTerrainPressure && (visualTerrainChanged || vegetationOnlyChanged);
+      const immediateTerrainSync = force || debugChanged || structuresChanged || geometryTerrainChanged;
+      const cooldownMs = fireVisualTerrainChanged
+        ? THREE_TEST_TERRAIN_FIRE_VISUAL_COOLDOWN_MS
+        : THREE_TEST_TERRAIN_COOLDOWN_MS;
+      if (!immediateTerrainSync && now - lastThreeTestTerrainSync < cooldownMs) {
+        threeTestTerrainSyncSkippedCount += 1;
+        recordPerfSample("3d.terrainSyncSkipped", 1);
+        if (fireVisualTerrainChanged) {
+          threeTestTerrainVisualBatchedCount += 1;
+          recordPerfSample("3d.terrainVisualBatched", 1);
+        }
         return;
       }
+      recordPerfSample("3d.terrainSyncSkipped", 0);
+      recordPerfSample("3d.terrainVisualBatched", fireVisualTerrainChanged ? 1 : 0);
       lastThreeTestTerrainSync = now;
       ensureTileSoA(state);
       threeTestController.setTerrain(buildThreeTestSample(!force));
+      lastThreeTestGeometryTypeSnapshot = state.tileTypeId.slice();
       lastThreeTestTerrainTypeRevision = nextTypeRevision;
       lastThreeTestVegetationRevision = nextVegetationRevision;
       lastThreeTestStructureRevision = nextStructureRevision;
@@ -1318,6 +1384,9 @@ export const createAppRuntime = (): AppRuntime => {
     lastThreeTestVegetationRevision = -1;
     lastThreeTestStructureRevision = -1;
     lastThreeTestDebugTypeColors = inputState.debugTypeColors;
+    lastThreeTestGeometryTypeSnapshot = null;
+    threeTestTerrainSyncSkippedCount = 0;
+    threeTestTerrainVisualBatchedCount = 0;
     cachedThreeTestTreeTypeMap = null;
     cachedThreeTestTreeTypeTerrainRevision = -1;
     cachedThreeTestTreeTypeVegetationRevision = -1;

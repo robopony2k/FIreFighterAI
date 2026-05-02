@@ -4,14 +4,15 @@ import {
   EMBER_MAX_INSTANCES,
   FIRE_CROSS_MAX_INSTANCES,
   FIRE_FX_ACTIVE_UPDATE_INTERVAL_MS,
-  FIRE_FX_EMERGENCY_FPS,
   FIRE_FX_EMERGENCY_FLAME_BUDGET_SCALE,
   FIRE_FX_EMERGENCY_MAX_SMOKE_RENDER_CAP,
   FIRE_FX_EMERGENCY_SCENE_MS,
   FIRE_FX_EMERGENCY_SMOKE_DENSITY_SCALE,
   FIRE_FX_EMERGENCY_SMOKE_RENDER_STRIDE,
   FIRE_FX_IDLE_UPDATE_INTERVAL_MS,
-  FIRE_FX_OVERLOAD_FPS,
+  FIRE_FX_NORMAL_MAX_SMOKE_RENDER_CAP,
+  FIRE_FX_NORMAL_SMOKE_DENSITY_SCALE,
+  FIRE_FX_NORMAL_SMOKE_SPAWN_FRAME_CAP,
   FIRE_FX_OVERLOAD_FLAME_BUDGET_SCALE,
   FIRE_FX_OVERLOAD_MAX_SMOKE_RENDER_CAP,
   FIRE_FX_OVERLOAD_SCENE_MS,
@@ -29,10 +30,8 @@ import {
   FLAME_BUDGET_MIN_SCALE,
   SMOKE_BUDGET_MIN_SCALE,
   SMOKE_MAX_INSTANCES,
-  SMOKE_QUALITY_FALLBACK_FPS,
   SMOKE_QUALITY_FALLBACK_SCENE_MS,
   SMOKE_QUALITY_FALLBACK_SECONDS,
-  SMOKE_QUALITY_RECOVERY_FPS,
   SMOKE_QUALITY_RECOVERY_SCENE_MS,
   SMOKE_QUALITY_RECOVERY_SECONDS,
   SMOKE_VISUAL_RATE_MAX,
@@ -50,6 +49,7 @@ import { createInitialFireRenderAnalysisState } from "./fireRenderAnalysisState.
 import { smoothApproach } from "./fireRenderMath.js";
 import type {
   FireRenderCameraContext,
+  FireRenderAnalysisTimings,
   FireRenderAnalysisState,
   FireRenderEnvironmentContext,
   FireRenderFramePlan,
@@ -67,6 +67,7 @@ import type {
   ResolvedFireAnchor
 } from "./fireFxTypes.js";
 import type { FireFieldView } from "./fireRenderSnapshot.js";
+import type { FireFxVisibilityContext } from "./fireFxVisibility.js";
 
 const clamp = (value: number, min: number, max: number): number => Math.min(max, Math.max(min, value));
 
@@ -91,6 +92,7 @@ export type FireRenderAdaptiveInput = {
   deltaSeconds: number;
   fpsEstimate: number;
   sceneRenderMs: number;
+  fireFxMs: number;
   animationRate: number;
   hasFireWork: boolean;
   hasActiveSmoke: boolean;
@@ -142,6 +144,8 @@ const FIRE_FX_OVERLOAD_ENTER_SECONDS = 0.22;
 const FIRE_FX_OVERLOAD_EXIT_SECONDS = 0.85;
 const FIRE_FX_EMERGENCY_ENTER_SECONDS = 0.12;
 const FIRE_FX_EMERGENCY_EXIT_SECONDS = 0.45;
+const FIRE_FX_LOCAL_OVERLOAD_MS = 14;
+const FIRE_FX_LOCAL_EMERGENCY_MS = 26;
 
 const updateStickyMode = (
   active: boolean,
@@ -179,8 +183,7 @@ const updateStickyMode = (
 
 const applyFallbackMode = (
   fallbackMode: FireFxFallbackMode,
-  fpsEstimate: number,
-  sceneRenderMs: number,
+  pressureMs: number,
   deltaSeconds: number,
   flameBudgetScale: number,
   flameFallbackAccum: number,
@@ -193,8 +196,6 @@ const applyFallbackMode = (
       flameRecoveryAccum: 0
     };
   }
-  const fallbackFps = fallbackMode === "gentle" ? 54 : 58;
-  const recoveryFps = fallbackMode === "gentle" ? 60 : 62;
   const fallbackSceneMs = fallbackMode === "gentle" ? 15 : 13;
   const recoverySceneMs = fallbackMode === "gentle" ? 11.5 : 10.5;
   const fallbackSeconds = fallbackMode === "gentle" ? 1.7 : 0.85;
@@ -202,13 +203,13 @@ const applyFallbackMode = (
   let nextFlameFallbackAccum = flameFallbackAccum;
   let nextFlameRecoveryAccum = flameRecoveryAccum;
   let nextFlameBudgetScale = flameBudgetScale;
-  const overloadedFlames = fpsEstimate < fallbackFps || sceneRenderMs > fallbackSceneMs;
+  const overloadedFlames = pressureMs > fallbackSceneMs;
   if (overloadedFlames) {
     nextFlameFallbackAccum += deltaSeconds;
   } else {
     nextFlameFallbackAccum = Math.max(0, nextFlameFallbackAccum - deltaSeconds * 0.75);
   }
-  const healthyFlames = fpsEstimate > recoveryFps && sceneRenderMs < recoverySceneMs;
+  const healthyFlames = pressureMs < recoverySceneMs;
   if (healthyFlames) {
     nextFlameRecoveryAccum += deltaSeconds;
   } else {
@@ -246,13 +247,17 @@ export const buildFireRenderBudgetPlan = (
         ? FIRE_FX_ACTIVE_UPDATE_INTERVAL_MS
         : FIRE_FX_IDLE_UPDATE_INTERVAL_MS;
   let nextState: FireRenderAdaptiveState = { ...state };
+  const firePressureMs = Math.max(
+    Number.isFinite(input.sceneRenderMs) ? input.sceneRenderMs : 0,
+    Number.isFinite(input.fireFxMs) ? input.fireFxMs : 0
+  );
   const rawEmergencyOverload =
-    (Number.isFinite(input.fpsEstimate) && input.fpsEstimate > 0 && input.fpsEstimate <= FIRE_FX_EMERGENCY_FPS) ||
-    (Number.isFinite(input.sceneRenderMs) && input.sceneRenderMs >= FIRE_FX_EMERGENCY_SCENE_MS);
+    (Number.isFinite(input.sceneRenderMs) && input.sceneRenderMs >= FIRE_FX_EMERGENCY_SCENE_MS) ||
+    (Number.isFinite(input.fireFxMs) && input.fireFxMs >= FIRE_FX_LOCAL_EMERGENCY_MS);
   const rawOverload =
     rawEmergencyOverload ||
-    (Number.isFinite(input.fpsEstimate) && input.fpsEstimate > 0 && input.fpsEstimate <= FIRE_FX_OVERLOAD_FPS) ||
-    (Number.isFinite(input.sceneRenderMs) && input.sceneRenderMs >= FIRE_FX_OVERLOAD_SCENE_MS);
+    (Number.isFinite(input.sceneRenderMs) && input.sceneRenderMs >= FIRE_FX_OVERLOAD_SCENE_MS) ||
+    (Number.isFinite(input.fireFxMs) && input.fireFxMs >= FIRE_FX_LOCAL_OVERLOAD_MS);
   if (isRenderPaused) {
     nextState.overloadActive = false;
     nextState.overloadFallbackAccum = 0;
@@ -298,20 +303,16 @@ export const buildFireRenderBudgetPlan = (
 
   if (
     !isRenderPaused &&
-    Number.isFinite(input.fpsEstimate) &&
-    input.fpsEstimate > 0 &&
-    Number.isFinite(input.sceneRenderMs) &&
-    input.sceneRenderMs > 0
+    Number.isFinite(firePressureMs) &&
+    firePressureMs > 0
   ) {
-    const overloadedSmoke =
-      input.fpsEstimate < SMOKE_QUALITY_FALLBACK_FPS || input.sceneRenderMs > SMOKE_QUALITY_FALLBACK_SCENE_MS;
+    const overloadedSmoke = firePressureMs > SMOKE_QUALITY_FALLBACK_SCENE_MS;
     if (overloadedSmoke) {
       nextState.smokeFallbackAccum += input.frameDeltaSeconds;
     } else {
       nextState.smokeFallbackAccum = Math.max(0, nextState.smokeFallbackAccum - input.frameDeltaSeconds * 0.7);
     }
-    const healthySmoke =
-      input.fpsEstimate > SMOKE_QUALITY_RECOVERY_FPS && input.sceneRenderMs < SMOKE_QUALITY_RECOVERY_SCENE_MS;
+    const healthySmoke = firePressureMs < SMOKE_QUALITY_RECOVERY_SCENE_MS;
     if (healthySmoke) {
       nextState.smokeRecoveryAccum += input.frameDeltaSeconds;
     } else {
@@ -327,8 +328,7 @@ export const buildFireRenderBudgetPlan = (
     }
     const flameFallbackState = applyFallbackMode(
       input.controls.fallbackMode,
-      input.fpsEstimate,
-      input.sceneRenderMs,
+      firePressureMs,
       input.deltaSeconds,
       nextState.flameBudgetScale,
       nextState.flameFallbackAccum,
@@ -346,7 +346,7 @@ export const buildFireRenderBudgetPlan = (
         ? FIRE_FX_EMERGENCY_SMOKE_DENSITY_SCALE
         : overloaded
           ? FIRE_FX_OVERLOAD_SMOKE_DENSITY_SCALE
-          : 1);
+          : FIRE_FX_NORMAL_SMOKE_DENSITY_SCALE);
 
   const flameFallbackPressure = clamp(1 - nextState.flameBudgetScale, 0, 1);
   const flameDensityScale = clamp(
@@ -366,19 +366,19 @@ export const buildFireRenderBudgetPlan = (
   );
   const effectiveSmokeBudgetScale = clamp(
     nextState.smokeBudgetScale * smokeDensityScale,
-    isRenderPaused ? 0.08 : 0.2,
+    isRenderPaused ? 0.08 : 0.1,
     2.5
   );
   const smokeSpawnFrameCap = Math.max(
     12,
     Math.min(
-      emergencyOverload ? 48 : overloaded ? 96 : smokeMaxInstances,
+      emergencyOverload ? 48 : overloaded ? 96 : FIRE_FX_NORMAL_SMOKE_SPAWN_FRAME_CAP,
       Math.floor(smokeMaxInstances * 0.26 * effectiveSmokeBudgetScale)
     )
   );
   const smokeRenderCapTarget = Math.floor(smokeMaxInstances * effectiveSmokeBudgetScale);
   const smokeRenderCap = Math.max(
-    isRenderPaused ? FIRE_FX_PAUSED_MIN_SMOKE_RENDER_CAP : 180,
+    isRenderPaused ? FIRE_FX_PAUSED_MIN_SMOKE_RENDER_CAP : 96,
     Math.min(
       isRenderPaused
         ? FIRE_FX_PAUSED_MIN_SMOKE_RENDER_CAP * 4
@@ -386,7 +386,7 @@ export const buildFireRenderBudgetPlan = (
           ? FIRE_FX_EMERGENCY_MAX_SMOKE_RENDER_CAP
           : overloaded
             ? FIRE_FX_OVERLOAD_MAX_SMOKE_RENDER_CAP
-            : smokeMaxInstances,
+            : FIRE_FX_NORMAL_MAX_SMOKE_RENDER_CAP,
       smokeRenderCapTarget
     )
   );
@@ -464,6 +464,7 @@ export type AnalyzeFireRenderFrameInput = {
   maxY: number;
   area: number;
   trackedFireTiles: number;
+  visibility: FireFxVisibilityContext | null;
   resolveGroundAnchor: (tileIdx: number) => ResolvedFireAnchor;
   resolveObjectAnchor: (tileIdx: number) => ResolvedFireAnchor;
 };
@@ -488,10 +489,18 @@ export const analyzeFireRenderFrame = (input: AnalyzeFireRenderFrameInput): Fire
     maxY,
     area,
     trackedFireTiles,
+    visibility,
     resolveGroundAnchor,
     resolveObjectAnchor
   } = input;
 
+  const analysisTimingsMs: FireRenderAnalysisTimings = {
+    activeTiles: 0,
+    clusters: 0,
+    fronts: 0,
+    tilePlan: 0
+  };
+  const activeTilesStartedAt = performance.now();
   const { activeFlameTileCount, visualActiveWeight } = measureActiveFireTiles({
     world,
     fireView,
@@ -503,7 +512,9 @@ export const analyzeFireRenderFrame = (input: AnalyzeFireRenderFrameInput): Fire
     maxY,
     simFireEps: environment.simFireEps
   });
+  analysisTimingsMs.activeTiles = performance.now() - activeTilesStartedAt;
 
+  const clustersStartedAt = performance.now();
   const clusterBuild = buildOrReuseFireClusters({
     state,
     frameTimeMs: timing.frameTimeMs,
@@ -525,8 +536,10 @@ export const analyzeFireRenderFrame = (input: AnalyzeFireRenderFrameInput): Fire
     activeFlameTileCount,
     clusterUpdateMs: CLUSTER_UPDATE_MS
   });
+  analysisTimingsMs.clusters = performance.now() - clustersStartedAt;
 
   const frontPassEnabled = visual.showFrontPass && !visual.emergencyOverload;
+  const frontsStartedAt = performance.now();
   const frontAnalysis = analyzeFireFronts({
     state,
     world,
@@ -547,8 +560,10 @@ export const analyzeFireRenderFrame = (input: AnalyzeFireRenderFrameInput): Fire
     visualActiveWeight,
     flameDensityScale: visual.flameDensityScale,
     frontPassEnabled,
+    visibility,
     resolveGroundAnchor
   });
+  analysisTimingsMs.fronts = performance.now() - frontsStartedAt;
 
   const flameTileCapacity = clamp(FIRE_MAX_INSTANCES - frontAnalysis.frontSegmentBudget, 96, FIRE_MAX_INSTANCES);
   const clusterBudgetState = computeClusterBudgets(
@@ -591,6 +606,7 @@ export const analyzeFireRenderFrame = (input: AnalyzeFireRenderFrameInput): Fire
 
   updateClusterFrontFields(state);
 
+  const tilePlanStartedAt = performance.now();
   const visiblePlan = planFireTileVisuals({
     state,
     world,
@@ -614,8 +630,10 @@ export const analyzeFireRenderFrame = (input: AnalyzeFireRenderFrameInput): Fire
     sliceComplexityScale: clamp(1 - clamp((visual.flameBudgetScale - 0.38) / 0.62, 0, 1) * 0.18, 0.72, 1),
     flameBudgetScale: visual.flameBudgetScale,
     frontPassActive: frontAnalysis.frontPassActive,
-    frontFieldReadScale: frontAnalysis.frontFieldReadScale
+    frontFieldReadScale: frontAnalysis.frontFieldReadScale,
+    visibility
   });
+  analysisTimingsMs.tilePlan = performance.now() - tilePlanStartedAt;
 
   syncAudioClusterSnapshots(state, audioClusters);
 
@@ -661,6 +679,7 @@ export const analyzeFireRenderFrame = (input: AnalyzeFireRenderFrameInput): Fire
     sliceComplexityScale,
     kernelBudgetScale,
     frontCorridors: frontAnalysis.frontCorridors,
-    audioClusters
+    audioClusters,
+    analysisTimingsMs
   };
 };

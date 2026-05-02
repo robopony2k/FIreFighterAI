@@ -12,6 +12,7 @@ import {
   GROWTH_WEATHER_MOISTURE_MIN,
   GROWTH_WEATHER_TEMP_MAX,
   GROWTH_WEATHER_TEMP_MIN,
+  INCIDENT_FIRE_PACING_SCALE,
   INCIDENT_TIME_SPEED_OPTIONS,
   NEIGHBOR_DIRS,
   TIME_SPEED_OPTIONS,
@@ -66,7 +67,12 @@ import {
   setUnitTarget,
   stepUnits
 } from "./units.js";
-import { getAdaptiveFireSubstepMax, getBurnoutFactorForRisk, sampleFireWeatherResponse } from "./fire/fireWeather.js";
+import {
+  getAdaptiveFireSubstepMax,
+  getBurnoutFactorForRisk,
+  isRandomIgnitionWeatherViable,
+  sampleFireWeatherResponse
+} from "./fire/fireWeather.js";
 import type { InputState } from "../core/inputState.js";
 import type { EffectsState } from "../core/effectsState.js";
 import { getRuntimeSettings, subscribeRuntimeSettings } from "../persistence/runtimeSettings.js";
@@ -909,7 +915,7 @@ export function stepSim(state: WorldState, effects: EffectsState, rng: RNG, delt
       state.fireSeasonDay += simDayDelta;
       const seasonIntensity = phaseSample.id === "fire" ? getFireSeasonIntensity(phaseSample.phaseDay, state.fireSettings) : 1;
       const spreadScale = state.fireSettings.simSpeed * (0.55 + seasonIntensity * 0.45);
-      if (allowRandomFireIgnition && phaseSample.id === "fire" && weather.climateRisk >= FIRE_WEATHER_RISK_MIN) {
+      if (allowRandomFireIgnition && phaseSample.id === "fire" && isRandomIgnitionWeatherViable(weather)) {
         igniteRandomFire(state, rng, simDayDelta, clamp(weather.ignition, 0, 1.35));
       }
       if (state.units.length > 0) {
@@ -919,7 +925,7 @@ export function stepSim(state: WorldState, effects: EffectsState, rng: RNG, delt
         state,
         effects,
         rng,
-        simDelta,
+        state.simTimeMode === "incident" ? simDelta * INCIDENT_FIRE_PACING_SCALE : simDelta,
         spreadScale,
         1,
         burnoutFactor,

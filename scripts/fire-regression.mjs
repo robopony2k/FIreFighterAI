@@ -1,7 +1,7 @@
 import { performance } from "node:perf_hooks";
 
 import { DEFAULT_MOISTURE_PARAMS, VIRTUAL_CLIMATE_PARAMS, buildClimateTimeline } from "../dist/core/climate.js";
-import { DEFAULT_FIRE_SETTINGS } from "../dist/core/config.js";
+import { DEFAULT_FIRE_SETTINGS, INCIDENT_TIME_SPEED_OPTIONS } from "../dist/core/config.js";
 import { createEffectsState } from "../dist/core/effectsState.js";
 import { RNG } from "../dist/core/rng.js";
 import { TILE_TYPE_IDS, createInitialState, syncTileSoA } from "../dist/core/state.js";
@@ -11,6 +11,7 @@ import { buildSampleTypeMap } from "../dist/render/threeTestTerrain.js";
 import { isSkipToNextFireAvailable, stepSim } from "../dist/sim/index.js";
 import { markFireBlockActiveByTile } from "../dist/sim/fire/activeBlocks.js";
 import { stepFire } from "../dist/sim/fire.js";
+import { isRandomIgnitionWeatherViable } from "../dist/sim/fire/fireWeather.js";
 import { findIgnitionCandidate } from "../dist/sim/fire/ignite.js";
 import { createUnit } from "../dist/sim/units.js";
 import { applyFireActivityMetrics } from "../dist/systems/fire/sim/fireActivityState.js";
@@ -260,6 +261,32 @@ const runExposureSequence = (speed) => {
     finalActivityState: state.fireActivityState,
     finalActivityCount: state.fireActivityCount,
     finalActiveFires: state.lastActiveFires
+  };
+};
+
+const runSlowIncidentCrawlScenario = () => {
+  const { state, rng } = buildState(3906);
+  const effects = createEffectsState();
+  setCareerCursor(state, 225);
+  state.fireSettings.ignitionChancePerDay = 0;
+  const { sourceIdx, targetIdx } = seedExposureIncident(state);
+  state.tiles[targetIdx].fire = 0;
+  state.tiles[targetIdx].heat = 0;
+  state.tileFire[targetIdx] = 0;
+  state.tileHeat[targetIdx] = 0;
+  state.tileBurnAge[targetIdx] = 0;
+  state.tileHeatRelease[targetIdx] = 0;
+  const slowestIncidentSpeed = INCIDENT_TIME_SPEED_OPTIONS[0] ?? 0.015625;
+  for (let step = 0; step < 4; step += 1) {
+    stepSim(state, effects, rng, BASE_STEP * slowestIncidentSpeed);
+  }
+  return {
+    activeFires: state.lastActiveFires,
+    activityState: state.fireActivityState,
+    sourceFire: state.tileFire[sourceIdx],
+    targetFire: state.tileFire[targetIdx],
+    targetHeat: state.tileHeat[targetIdx],
+    burnedTiles: state.burnedTiles
   };
 };
 
@@ -657,6 +684,32 @@ const median = (values) => {
 const failures = [];
 
 {
+  const lowRiskWeather = {
+    climateRisk: 0.59,
+    ignition: 1.05,
+    spread: 1.1,
+    sustain: 1.0,
+    cooling: 1.0
+  };
+  const viableWeather = {
+    climateRisk: 0.65,
+    ignition: 0.9,
+    spread: 1.0,
+    sustain: 0.9,
+    cooling: 1.1
+  };
+  console.log(
+    `\nRandom Ignition Weather Viability\nlow=${isRandomIgnitionWeatherViable(lowRiskWeather) ? 1 : 0} viable=${isRandomIgnitionWeatherViable(viableWeather) ? 1 : 0}`
+  );
+  if (isRandomIgnitionWeatherViable(lowRiskWeather)) {
+    failures.push("Low-risk weather passed random ignition viability.");
+  }
+  if (!isRandomIgnitionWeatherViable(viableWeather)) {
+    failures.push("Viable weather failed random ignition viability.");
+  }
+}
+
+{
   const settings = { ...DEFAULT_FIRE_SETTINGS };
   const flatMultiplier = getElevationHeatTransferMultiplier(0.42, 0.42, 1, settings);
   const uphillMultiplier = getElevationHeatTransferMultiplier(0.42, 0.62, 1, settings);
@@ -900,6 +953,19 @@ const failures = [];
   );
   if (state.paused || state.simTimeMode !== "incident" || state.fireActivityState !== "burning" || (state.tileFire[targetIdx] ?? 0) <= 0.02) {
     failures.push("Neighbor exposure did not ignite a receptive tile without deferred scheduling.");
+  }
+}
+
+{
+  const crawl = runSlowIncidentCrawlScenario();
+  console.log(
+    `\nSlow Incident Crawl\nstate=${crawl.activityState} active=${crawl.activeFires} sourceFire=${crawl.sourceFire.toFixed(3)} targetFire=${crawl.targetFire.toFixed(3)} targetHeat=${crawl.targetHeat.toFixed(3)} burned=${crawl.burnedTiles}`
+  );
+  if (crawl.activityState !== "burning" || crawl.activeFires <= 0 || crawl.sourceFire <= 0.02) {
+    failures.push("Slowest incident pacing did not keep the source fire active.");
+  }
+  if (crawl.targetFire > 0.02 || crawl.burnedTiles > 0) {
+    failures.push("Slowest incident pacing advanced the fire front too far within one real second.");
   }
 }
 

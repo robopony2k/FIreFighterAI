@@ -144,6 +144,8 @@ export type ThreeTestPerfSnapshot = {
   terrainSetLastMs: number;
   terrainSetMaxMs: number;
   terrainSetCount: number;
+  terrainSetFastReuseCount: number;
+  terrainSetFullRebuildCount: number;
   sceneCalls: number;
   sceneTriangles: number;
   sceneLines: number;
@@ -5576,6 +5578,8 @@ export const createThreeTest = (
     terrainSetLastMs: 0,
     terrainSetMaxMs: 0,
     terrainSetCount: 0,
+    terrainSetFastReuseCount: 0,
+    terrainSetFullRebuildCount: 0,
     sceneCalls: 0,
     sceneTriangles: 0,
     sceneLines: 0,
@@ -6940,6 +6944,8 @@ export const createThreeTest = (
       terrainSetLastMs: threePerf.terrainSetLastMs,
       terrainSetMaxMs: threePerf.terrainSetMaxMs,
       terrainSetCount: threePerf.terrainSetCount,
+      terrainSetFastReuseCount: threePerf.terrainSetFastReuseCount,
+      terrainSetFullRebuildCount: threePerf.terrainSetFullRebuildCount,
       sceneCalls: threePerf.sceneCalls,
       sceneTriangles: threePerf.sceneTriangles,
       sceneLines: threePerf.sceneLines,
@@ -7306,6 +7312,7 @@ export const createThreeTest = (
           ? prepareTerrainRenderSurface(nextSample)
           : null;
       if (nextSurface && updateTerrainSurface(nextSample, nextSurface)) {
+        threePerf.terrainSetFastReuseCount += 1;
         lastSample = nextSample;
         lastTerrainSurface = nextSurface;
         lastTerrainSize = nextSurface.size;
@@ -7313,6 +7320,7 @@ export const createThreeTest = (
         requestShadowRefresh();
         return;
       }
+      threePerf.terrainSetFullRebuildCount += 1;
       lastSample = nextSample;
       if (terrainMesh) {
       const activeTerrainMesh = terrainMesh;

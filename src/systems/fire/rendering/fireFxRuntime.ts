@@ -56,6 +56,7 @@ import {
   createInitialFireRenderAdaptiveState,
   type FireRenderAdaptiveState
 } from "./fireRenderAnalysis.js";
+import { createFireFxVisibilityContext } from "./fireFxVisibility.js";
 import { FIRE_FX_PAUSED_VISUAL_SETTLE_DELTA_SECONDS } from "../constants/fireRenderConstants.js";
 import {
   decayInactiveFrontCorridorSlots,
@@ -167,6 +168,7 @@ const FLAME_MOTION_TIME_SCALE = 0.44;
 const SPARK_MOTION_TIME_SCALE = 0.62;
 const SMOKE_VISUAL_RATE_SCALE = 14;
 const SMOKE_VISUAL_RATE_MAX = 4;
+const SMOKE_EMISSION_DENSITY_SCALE = 0.5;
 const FLAME_BILLBOARD_OVERSCAN_X = 1.32;
 const FLAME_BILLBOARD_OVERSCAN_Y = 1.28;
 const FLAME_CORE_BILLBOARD_OVERSCAN_X = 1.16;
@@ -1090,7 +1092,14 @@ export const createThreeTestFireFx = (
     const updateStartedAt = performance.now();
     let snapshotMs = 0;
     let analysisMs = 0;
+    let analysisActiveTilesMs = 0;
+    let analysisClustersMs = 0;
+    let analysisFrontsMs = 0;
+    let analysisTilePlanMs = 0;
     let flameWriteMs = 0;
+    let flameFrontMs = 0;
+    let flameClusterMs = 0;
+    let flameTilesMs = 0;
     let smokeMs = 0;
     let uploadMs = 0;
     const frameDeltaSeconds =
@@ -1199,6 +1208,7 @@ export const createThreeTestFireFx = (
       deltaSeconds: pendingFrameDeltaSeconds,
       fpsEstimate,
       sceneRenderMs,
+      fireFxMs: fireDebugSnapshot.timingsMs.total,
       animationRate,
       hasFireWork,
       hasActiveSmoke,
@@ -1261,6 +1271,7 @@ export const createThreeTestFireFx = (
     const sparkFootprint = tileSpan;
     const viewportHeightPx = typeof window !== "undefined" ? Math.max(1, window.innerHeight) : 1080;
     const heightScale = terrainSurface?.heightScale ?? getTerrainHeightScale(cols, rows, sample.heightScaleMultiplier ?? 1);
+    const visibility = createFireFxVisibilityContext(camera, terrainSize, cols, rows, tileSpan, heightScale);
     const simFireEps = getSimFireEps(world);
     const flamePresenceEps = Math.max(FIRE_FLAME_VISUAL_FLOOR, simFireEps * 0.9);
     const wind = world.wind;
@@ -1511,9 +1522,14 @@ export const createThreeTestFireFx = (
       maxY,
       area,
       trackedFireTiles,
+      visibility,
       resolveGroundAnchor,
       resolveObjectAnchor
     });
+    analysisActiveTilesMs = framePlan.analysisTimingsMs.activeTiles;
+    analysisClustersMs = framePlan.analysisTimingsMs.clusters;
+    analysisFrontsMs = framePlan.analysisTimingsMs.fronts;
+    analysisTilePlanMs = framePlan.analysisTimingsMs.tilePlan;
     activeFlameTileCount = framePlan.activeFlameTileCount;
     visualActiveWeight = framePlan.visualActiveWeight;
     visibleFlameTiles = framePlan.visibleFlameTiles;
@@ -1559,6 +1575,22 @@ export const createThreeTestFireFx = (
       if (corridor.presence01 <= FIRE_FRONT_VISUAL_MIN * 0.45 || corridor.states.length <= 0) {
         return;
       }
+      visibility.stats.frontCorridorsTested += 1;
+      const firstCorridorState = corridor.states[0]!;
+      const lastCorridorState = corridor.states[corridor.states.length - 1]!;
+      const corridorCenterX = (firstCorridorState.edgeCenterX + lastCorridorState.edgeCenterX) * 0.5;
+      const corridorCenterY = (firstCorridorState.edgeCenterY + lastCorridorState.edgeCenterY) * 0.5 + sampleFootprint * 0.7;
+      const corridorCenterZ = (firstCorridorState.edgeCenterZ + lastCorridorState.edgeCenterZ) * 0.5;
+      const corridorRadius =
+        Math.hypot(lastCorridorState.edgeCenterX - firstCorridorState.edgeCenterX, lastCorridorState.edgeCenterZ - firstCorridorState.edgeCenterZ) *
+          0.5 +
+        sampleFootprint * 4.5;
+      if (!visibility.isSphereVisible(corridorCenterX, corridorCenterY, corridorCenterZ, corridorRadius)) {
+        visibility.stats.frontCorridorsCulled += 1;
+        visibility.stats.instancesCulledByVisibility += Math.max(1, Math.min(FIRE_FRONT_CORRIDOR_MAX_SEGMENTS, corridor.states.length));
+        return;
+      }
+      const frontSegmentsBefore = frontSegmentCount;
       const blockSpan = corridor.orientation === "horizontal" ? tileSpanX : tileSpanZ;
       const maxSegments = Math.min(
         FIRE_FRONT_CORRIDOR_MAX_SEGMENTS,
@@ -1782,6 +1814,9 @@ export const createThreeTestFireFx = (
           );
         }
       }
+      if (frontSegmentCount > frontSegmentsBefore) {
+        visibility.stats.frontCorridorsEmitted += 1;
+      }
     };
     analysisMs = performance.now() - analysisStartedAt;
     const flameWriteStartedAt = performance.now();
@@ -1797,6 +1832,10 @@ export const createThreeTestFireFx = (
         Math.min(CLUSTER_BED_MAX_PER_CLUSTER, cluster.bedBudget)
       );
       const radius = Math.max(tileSpan * 0.8, cluster.radius * 1.1);
+      if (!visibility.isSphereVisible(cluster.centroidX, cluster.baseY + tileSpan * 0.6, cluster.centroidZ, radius + tileSpan * 4.2)) {
+        visibility.stats.instancesCulledByVisibility += Math.max(1, cluster.bedBudget);
+        return;
+      }
       const clusterBlend = clamp(
         (cluster.tileCount - CLUSTER_MIN_TILES) / Math.max(1, CLUSTER_FULL_BLEND_TILES - CLUSTER_MIN_TILES),
         0,
@@ -1873,6 +1912,17 @@ export const createThreeTestFireFx = (
       if (!showClusterFlames || !showSmoke || cluster.plumeBudget <= 0 || smokeSpawnsThisFrame >= smokeSpawnFrameCap) {
         return;
       }
+      if (
+        !visibility.isSphereVisible(
+          cluster.centroidX + windX * cluster.radius * 1.2,
+          cluster.baseY + tileSpan * (1.8 + cluster.intensity),
+          cluster.centroidZ + windZ * cluster.radius * 1.2,
+          cluster.radius + tileSpan * 6
+        )
+      ) {
+        visibility.stats.instancesCulledByVisibility += Math.max(1, cluster.plumeBudget);
+        return;
+      }
       const clusterFront01 = clamp(cluster.frontPerimeter01 * 0.78 + cluster.frontArrival01 * 0.86, 0, 1.2);
       const plumeAnchors = clamp(cluster.plumeBudget, 1, CLUSTER_PLUME_MAX_PER_CLUSTER);
       const clusterSmokeSourceY =
@@ -1894,7 +1944,11 @@ export const createThreeTestFireFx = (
           terrainMaxZ
         );
         const spawnCount = clamp(
-          Math.round((1.4 + cluster.intensity * 4.2 + cluster.tileCount * 0.06 + clusterFront01 * 2.2) * effectiveSmokeBudgetScale),
+          Math.round(
+            (1.4 + cluster.intensity * 4.2 + cluster.tileCount * 0.06 + clusterFront01 * 2.2) *
+              effectiveSmokeBudgetScale *
+              SMOKE_EMISSION_DENSITY_SCALE
+          ),
           1,
           8
         );
@@ -1915,7 +1969,7 @@ export const createThreeTestFireFx = (
           }
           smokeParticleActive[slot] = 1;
           smokeParticleAge[slot] = SMOKE_INITIAL_AGE01;
-          smokeParticleLife[slot] = 10.5 + cluster.intensity * 13.5 + r1 * 4.4 + windStrength * 2.8;
+          smokeParticleLife[slot] = 7.0 + cluster.intensity * 8.5 + r1 * 2.8 + windStrength * 1.6;
           smokeParticleX[slot] = anchorX + offsetX + crossWindX * velCross * 0.24 + windX * spawnDownwind;
           smokeParticleY[slot] = clusterSmokeSourceY + tileSpan * (0.06 + r3 * 0.22);
           smokeParticleZ[slot] = anchorZ + offsetZ + crossWindZ * velCross * 0.24 + windZ * spawnDownwind;
@@ -1936,14 +1990,19 @@ export const createThreeTestFireFx = (
       }
     };
 
+    const flameFrontStartedAt = performance.now();
     for (let i = 0; i < frontCorridors.length; i += 1) {
       emitFrontCorridor(frontCorridors[i]!);
     }
     decayInactiveFrontCorridorSlots(analysisState, frontFrameId, deltaSeconds);
+    flameFrontMs = performance.now() - flameFrontStartedAt;
+    const flameClusterStartedAt = performance.now();
     for (let i = 0; i < fireClusters.length; i += 1) {
       emitClusterFlameBed(fireClusters[i]);
       emitClusterPlumes(fireClusters[i]);
     }
+    flameClusterMs = performance.now() - flameClusterStartedAt;
+    const flameTilesStartedAt = performance.now();
     for (let y = minY; y <= maxY; y += sampleStep) {
       const rowBase = y * cols;
       for (let x = minX; x <= maxX; x += sampleStep) {
@@ -2014,6 +2073,9 @@ export const createThreeTestFireFx = (
         const sparkVisibleThreshold = Math.max(flamePresenceEps * 1.6, SPARK_VISIBLE_FLAME_MIN);
         if (!hasPlume) {
           tileSmokeSpawnAccum[idx] = Math.max(0, (tileSmokeSpawnAccum[idx] ?? 0) - smokeDeltaSeconds * 0.6);
+          if (!hasActiveFire) {
+            continue;
+          }
         }
         const intensity = clamp(Math.max(smoothedFlame, heat * 0.5), 0, 1);
         const flameIntensity = clamp(smoothedFlame, 0, 1);
@@ -2028,6 +2090,10 @@ export const createThreeTestFireFx = (
         const maxTileX = tileCenterX + tileHalfX;
         const minTileZ = tileCenterZ - tileHalfZ;
         const maxTileZ = tileCenterZ + tileHalfZ;
+        if (!visibility.isTileVisible(x, y, 1.7)) {
+          visibility.stats.instancesCulledByVisibility += 1;
+          continue;
+        }
         const tileAnchor = resolveObjectAnchor(idx);
         const crownToTrunk = smoothstep(0.32, 0.88, burnProgress);
         const trunkDescent = smoothstep(0.58, 1.0, burnProgress);
@@ -3194,7 +3260,8 @@ export const createThreeTestFireFx = (
             (0.75 + sampleStep * 0.22) *
             roleSmokeScale *
             smokeDensityScale *
-            frontSmokeScale;
+            frontSmokeScale *
+            SMOKE_EMISSION_DENSITY_SCALE;
           let spawnCarry = (tileSmokeSpawnAccum[idx] ?? 0) + emissionRate * smokeDeltaSeconds;
           const spawnCount = Math.min(9, Math.floor(spawnCarry));
           spawnCarry -= spawnCount;
@@ -3220,7 +3287,7 @@ export const createThreeTestFireFx = (
             }
             smokeParticleActive[slot] = 1;
             smokeParticleAge[slot] = SMOKE_INITIAL_AGE01;
-            smokeParticleLife[slot] = 8.5 + smokeDrive * 11.5 + r1 * 3.8 + windStrength * 2.2;
+            smokeParticleLife[slot] = 5.5 + smokeDrive * 7.0 + r1 * 2.4 + windStrength * 1.3;
             smokeParticleX[slot] = jetClusterX + offsetX + crossWindX * velCross * 0.22 + windX * spawnDownwind;
             smokeParticleY[slot] = smokeSourceY + tileSpan * (0.04 + r3 * 0.18);
             smokeParticleZ[slot] = jetClusterZ + offsetZ + crossWindZ * velCross * 0.22 + windZ * spawnDownwind;
@@ -3240,6 +3307,7 @@ export const createThreeTestFireFx = (
         }
     }
     }
+    flameTilesMs = performance.now() - flameTilesStartedAt;
     const freezeSmokeParticles = smokeDeltaSeconds <= 0;
     flameWriteMs = performance.now() - flameWriteStartedAt;
     const smokeStartedAt = performance.now();
@@ -3325,6 +3393,17 @@ export const createThreeTestFireFx = (
       if (smokeRenderStride > 1 && (i % smokeRenderStride) !== 0) {
         continue;
       }
+      if (
+        !visibility.isSphereVisible(
+          smokeParticleX[i],
+          smokeParticleY[i],
+          smokeParticleZ[i],
+          smokeParticleBaseSize[i] * (1.4 + smokeParticleAge[i] * 5.2)
+        )
+      ) {
+        visibility.stats.smokeParticlesCulledByVisibility += 1;
+        continue;
+      }
       smokeRenderDepth[smokeCount] = dx * cameraForward.x + dy * cameraForward.y + dz * cameraForward.z;
       smokeRenderOrder[smokeCount] = i;
       smokeCount += 1;
@@ -3386,7 +3465,14 @@ export const createThreeTestFireFx = (
       timingsMs: {
         snapshot: snapshotMs,
         analysis: analysisMs,
+        analysisActiveTiles: analysisActiveTilesMs,
+        analysisClusters: analysisClustersMs,
+        analysisFronts: analysisFrontsMs,
+        analysisTilePlan: analysisTilePlanMs,
         flameWrite: flameWriteMs,
+        flameFront: flameFrontMs,
+        flameCluster: flameClusterMs,
+        flameTiles: flameTilesMs,
         smoke: smokeMs,
         upload: uploadMs,
         total: 0
@@ -3408,7 +3494,15 @@ export const createThreeTestFireFx = (
         smokeRenderStride,
         smokeRenderCap,
         smokeSpawnFrameCap,
-        rawFallbackAnchorTiles: fireAnchorResolver.getRawFallbackTileIndices().length
+        rawFallbackAnchorTiles: fireAnchorResolver.getRawFallbackTileIndices().length,
+        candidateTiles: visibility.stats.candidateTiles,
+        visibleTiles: visibility.stats.visibleTiles,
+        culledTiles: visibility.stats.culledTiles,
+        frontCorridorsTested: visibility.stats.frontCorridorsTested,
+        frontCorridorsCulled: visibility.stats.frontCorridorsCulled,
+        frontCorridorsEmitted: visibility.stats.frontCorridorsEmitted,
+        instancesCulledByVisibility: visibility.stats.instancesCulledByVisibility,
+        smokeParticlesCulledByVisibility: visibility.stats.smokeParticlesCulledByVisibility
       },
       budgets: {
         smokeBudgetScale,
