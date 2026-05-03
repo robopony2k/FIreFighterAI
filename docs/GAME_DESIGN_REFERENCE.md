@@ -90,6 +90,15 @@ Design intent:
 - Deployments should be fast, readable, and predictable.
 - In 3D, hose streams should read as gravity-affected ballistic arcs; when terrain or structures mask the target, the visual stream should lift its attack angle and impact the first visible obstruction instead of drawing a straight-through cone.
 
+## Tactical Evacuation
+
+- Town evacuation is a tactical commitment, not an abstract warning ladder: the player selects a town, picks a road-reachable evacuation destination, previews the exact initial route, then issues the order.
+- The route preview is not advice. The player judges the route from visible fire, roads, terrain, town layout, traffic, distance, and fire spread direction.
+- The game validates only basic feasibility and must not show route safety scores, recommended points, best routes, alternatives, ETA, survival odds, heat ratings, congestion forecasts, or warning copy that tells the player a route is bad.
+- Civilian evacuation uses representative vehicles rendered as varied civilian cars. Vehicles follow the locked route, occupy road slots, queue behind blockers, accumulate heat exposure, burn under sustained or extreme exposure, kill occupants when destroyed, and leave road obstacles that reduce or block capacity.
+- Completed evacuation vehicles remain staged at the selected destination until the player orders evacuees to return home. Return-home uses the same locked route in reverse and keeps the same queueing, blockage, and heat exposure rules.
+- Evacuation outcomes update town population counts and should feed existing approval/scoring hooks where available.
+
 ## Progression and Unlocks
 
 - Run-style unlocks provide perks or tools that slightly bend strategy.
@@ -213,6 +222,7 @@ This can be achieved by:
 
 - Fire simulation (heat diffusion, ignition scheduling).
 - Units (truck + firefighter logic).
+- Tactical evacuation (town destination selection, locked road routes, representative civilian vehicles, road slot queueing, heat exposure, vehicle destruction, and population/life-loss hooks).
 - Climate model (temperature + moisture).
 - Map generation (terrain, vegetation age/density, forest stand composition).
 - Settlements (terrain-aware town seeding, constrained-ribbon vs compact street archetypes, frontage-based annual growth, block-forming road expansion).

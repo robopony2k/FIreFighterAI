@@ -52,7 +52,7 @@ import { updatePhaseControls } from "./lifecycle.js";
 import { stepGrowth } from "./growth.js";
 import { stepTownAlertPosture } from "./towns.js";
 import { stepParticles } from "./particles.js";
-import { freezeScoringSeason, startScoringSeason, stepScoring } from "./scoring.js";
+import { freezeScoringSeason, queueScoreFlowEvent, startScoringSeason, stepScoring } from "./scoring.js";
 import {
   applyExtinguishStep,
   applyUnitHazards,
@@ -87,6 +87,8 @@ import {
 import type { SettlementRoadAdapter } from "../systems/settlements/types/settlementTypes.js";
 import { stepTownConstructionSchedule } from "../systems/settlements/sim/townConstruction.js";
 import { applyFireActivityMetrics } from "../systems/fire/sim/fireActivityState.js";
+import { stepEvacuations } from "../systems/evacuation/sim/evacuationRuntime.js";
+import type { EvacuationLossEvent } from "../systems/evacuation/types/evacuationTypes.js";
 export { updatePhaseControls };
 
 const FIRE_HEAT_PADDING = 8;
@@ -121,6 +123,21 @@ const emitOverlay = (payload: OverlayPayload): void => {
 
 const emitGameOver = (payload: GameEvents["game:over"]): void => {
   gameEvents?.emit("game:over", payload);
+};
+
+const applyEvacuationLossEvents = (state: WorldState, events: EvacuationLossEvent[]): void => {
+  for (const event of events) {
+    if (event.kind !== "vehicle-destroyed" || event.occupants <= 0) {
+      continue;
+    }
+    state.lostResidents += event.occupants;
+    state.yearLivesLost += event.occupants;
+    const town = state.towns.find((entry) => entry.id === event.townId) ?? null;
+    if (town) {
+      town.nonApprovingHouseCount += Math.max(1, event.occupants / 4);
+    }
+    queueScoreFlowEvent(state, "lives", event.occupants, undefined, event.tileX, event.tileY);
+  }
 };
 
 const ensureClimateTimeline = (state: WorldState): void => {
@@ -865,6 +882,7 @@ export function stepSim(state: WorldState, effects: EffectsState, rng: RNG, delt
   }
   const climateRisk = getClimateRisk(state);
   stepTownAlertPosture(state, dayDelta);
+  applyEvacuationLossEvents(state, stepEvacuations(state, dayDelta));
   stepTownConstructionSchedule(state, createRuntimeSettlementRoadAdapter(state), dayDelta);
   const allowGrowth = state.phase === "growth" && isGrowthWeather(state);
   const allowIgnition = state.phase === "fire" && climateRisk >= FIRE_WEATHER_RISK_MIN;

@@ -19,8 +19,6 @@ import {
   FIRE_FX_OVERLOAD_SMOKE_DENSITY_SCALE,
   FIRE_FX_OVERLOAD_SMOKE_RENDER_STRIDE,
   FIRE_FX_PAUSED_FLAME_BUDGET_SCALE,
-  FIRE_FX_PAUSED_MIN_SMOKE_RENDER_CAP,
-  FIRE_FX_PAUSED_SMOKE_DENSITY_SCALE,
   FIRE_FX_PAUSED_UPDATE_INTERVAL_MS,
   FIRE_FRONT_MAX_INSTANCES,
   FIRE_MAX_INSTANCES,
@@ -341,7 +339,7 @@ export const buildFireRenderBudgetPlan = (
   const smokeDensityScale =
     input.controls.smokeDensityScale *
     (isRenderPaused
-      ? FIRE_FX_PAUSED_SMOKE_DENSITY_SCALE
+      ? FIRE_FX_NORMAL_SMOKE_DENSITY_SCALE
       : emergencyOverload
         ? FIRE_FX_EMERGENCY_SMOKE_DENSITY_SCALE
         : overloaded
@@ -366,11 +364,11 @@ export const buildFireRenderBudgetPlan = (
   );
   const effectiveSmokeBudgetScale = clamp(
     nextState.smokeBudgetScale * smokeDensityScale,
-    isRenderPaused ? 0.08 : 0.1,
+    0.1,
     2.5
   );
   const smokeSpawnFrameCap = Math.max(
-    12,
+    isRenderPaused ? 0 : 12,
     Math.min(
       emergencyOverload ? 48 : overloaded ? 96 : FIRE_FX_NORMAL_SMOKE_SPAWN_FRAME_CAP,
       Math.floor(smokeMaxInstances * 0.26 * effectiveSmokeBudgetScale)
@@ -378,10 +376,10 @@ export const buildFireRenderBudgetPlan = (
   );
   const smokeRenderCapTarget = Math.floor(smokeMaxInstances * effectiveSmokeBudgetScale);
   const smokeRenderCap = Math.max(
-    isRenderPaused ? FIRE_FX_PAUSED_MIN_SMOKE_RENDER_CAP : 96,
+    96,
     Math.min(
       isRenderPaused
-        ? FIRE_FX_PAUSED_MIN_SMOKE_RENDER_CAP * 4
+        ? FIRE_FX_NORMAL_MAX_SMOKE_RENDER_CAP
         : emergencyOverload
           ? FIRE_FX_EMERGENCY_MAX_SMOKE_RENDER_CAP
           : overloaded
@@ -391,7 +389,7 @@ export const buildFireRenderBudgetPlan = (
     )
   );
   const smokeRenderStride = isRenderPaused
-    ? Math.max(4, FIRE_FX_OVERLOAD_SMOKE_RENDER_STRIDE)
+    ? 1
     : emergencyOverload
       ? FIRE_FX_EMERGENCY_SMOKE_RENDER_STRIDE
       : overloaded

@@ -57,7 +57,6 @@ import {
   type FireRenderAdaptiveState
 } from "./fireRenderAnalysis.js";
 import { createFireFxVisibilityContext } from "./fireFxVisibility.js";
-import { FIRE_FX_PAUSED_VISUAL_SETTLE_DELTA_SECONDS } from "../constants/fireRenderConstants.js";
 import {
   decayInactiveFrontCorridorSlots,
   ensureFireRenderAnalysisState,
@@ -1195,12 +1194,8 @@ export const createThreeTestFireFx = (
     const height = Math.max(1, maxY - minY + 1);
     const area = width * height;
     const trackedFireTiles = Math.max(0, fireView.lastActiveFires);
-    const pausedVisualSettleDeltaSeconds =
-      isRenderPaused && hasFireWork
-        ? clamp(Math.max(frameDeltaSeconds, FIRE_FX_PAUSED_VISUAL_SETTLE_DELTA_SECONDS), 1 / 240, 0.08)
-        : 0;
     const pendingFrameDeltaSeconds =
-      pendingDeltaSeconds > 0 ? clamp(pendingDeltaSeconds, 1 / 240, 0.08) : pausedVisualSettleDeltaSeconds;
+      !isRenderPaused && pendingDeltaSeconds > 0 ? clamp(pendingDeltaSeconds, 1 / 240, 0.08) : 0;
     const pendingFrameSmokeDeltaSeconds = pendingSmokeDeltaSeconds > 0 ? clamp(pendingSmokeDeltaSeconds, 0, 0.08) : 0;
     const renderBudgetPlan = buildFireRenderBudgetPlan(adaptiveState, {
       controls: debugControls,
@@ -1909,7 +1904,13 @@ export const createThreeTestFireFx = (
     };
 
     const emitClusterPlumes = (cluster: FireCluster): void => {
-      if (!showClusterFlames || !showSmoke || cluster.plumeBudget <= 0 || smokeSpawnsThisFrame >= smokeSpawnFrameCap) {
+      if (
+        isRenderPaused ||
+        !showClusterFlames ||
+        !showSmoke ||
+        cluster.plumeBudget <= 0 ||
+        smokeSpawnsThisFrame >= smokeSpawnFrameCap
+      ) {
         return;
       }
       if (

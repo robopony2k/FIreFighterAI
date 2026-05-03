@@ -65,6 +65,13 @@ import {
 } from "../../../sim/input/mapTileActions.js";
 import { lowerTownAlertPosture, raiseTownAlertPosture } from "../../../sim/towns.js";
 import {
+  beginTownEvacuationDestinationSelection,
+  cancelTownEvacuationSelection,
+  issueTownEvacuation,
+  returnTownEvacuationHome,
+  selectTownEvacuationDestination
+} from "../../../systems/evacuation/controllers/evacuationController.js";
+import {
   getRuntimeSettings,
   setRuntimeSetting,
   subscribeRuntimeSettings
@@ -1109,6 +1116,51 @@ export const bindPhaseUi = ({
               ? raiseTownAlertPosture(state, command.townId)
               : lowerTownAlertPosture(state, command.townId);
           if (changed) {
+            phaseUi.sync(state, inputState);
+          }
+        });
+        return;
+      case "town-evac-select":
+        noteInteraction();
+        gate("select", () => {
+          if (beginTownEvacuationDestinationSelection(state, command.townId)) {
+            inputState.evacuationDestinationTownId = command.townId;
+            phaseUi.sync(state, inputState);
+          }
+        });
+        return;
+      case "town-evac-cancel":
+        noteInteraction();
+        gate("select", () => {
+          inputState.evacuationDestinationTownId = null;
+          if (cancelTownEvacuationSelection(state, command.townId)) {
+            phaseUi.sync(state, inputState);
+          }
+        });
+        return;
+        case "town-evac-issue":
+          noteInteraction();
+          gate("select", () => {
+            inputState.evacuationDestinationTownId = null;
+            if (issueTownEvacuation(state, command.townId)) {
+            phaseUi.sync(state, inputState);
+          }
+          });
+          return;
+        case "town-evac-return":
+          noteInteraction();
+          gate("select", () => {
+            inputState.evacuationDestinationTownId = null;
+            if (returnTownEvacuationHome(state, command.townId)) {
+              phaseUi.sync(state, inputState);
+            }
+          });
+          return;
+        case "town-evac-destination":
+        noteInteraction();
+        gate("select", () => {
+          if (selectTownEvacuationDestination(state, command.townId, command.tile)) {
+            inputState.evacuationDestinationTownId = null;
             phaseUi.sync(state, inputState);
           }
         });

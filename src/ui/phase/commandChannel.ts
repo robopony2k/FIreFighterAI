@@ -42,6 +42,27 @@ export type PhaseUiCommand =
       type: "town-alert";
       townId: number;
       direction: "raise" | "lower";
+    }
+  | {
+      type: "town-evac-select";
+      townId: number;
+    }
+  | {
+      type: "town-evac-cancel";
+      townId: number;
+    }
+  | {
+      type: "town-evac-issue";
+      townId: number;
+    }
+  | {
+      type: "town-evac-return";
+      townId: number;
+    }
+  | {
+      type: "town-evac-destination";
+      townId: number;
+      tile: PhaseUiTilePoint;
     };
 
 export const dispatchPhaseUiCommand = (command: PhaseUiCommand): void => {

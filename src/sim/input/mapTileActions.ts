@@ -4,6 +4,7 @@ import type { InputState } from "../../core/inputState.js";
 import type { AreaTarget, CommandIntent, CommandType, LineTarget, Point, RNG, Unit } from "../../core/types.js";
 import { handleUnitDeployment } from "../index.js";
 import { igniteDebugFireAt } from "../fire/debugIgnite.js";
+import { selectTownEvacuationDestination } from "../../systems/evacuation/controllers/evacuationController.js";
 import {
   applyCommandIntentToSelection,
   assignFormationTargets,
@@ -167,6 +168,14 @@ export const handleMapPrimaryTileClick = ({
   }
   if (debugIgniteMode) {
     igniteDebugFireAt(state, tile.x, tile.y, { random: () => rng.next() });
+    return true;
+  }
+  if (inputState.evacuationDestinationTownId !== null) {
+    runAction({ gate }, "select", () => {
+      if (selectTownEvacuationDestination(state, inputState.evacuationDestinationTownId!, tile)) {
+        inputState.evacuationDestinationTownId = null;
+      }
+    });
     return true;
   }
   const clickedUnit = getUnitAt(state, tile.x, tile.y);

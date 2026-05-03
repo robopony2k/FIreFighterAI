@@ -14,6 +14,7 @@ export interface InputState {
   debugTypeColors: boolean;
   debugHoverTile: Point | null;
   debugHoverWorld: Point | null;
+  evacuationDestinationTownId: number | null;
   lastInteractionTime: number;
 }
 
@@ -29,6 +30,7 @@ export const createInputState = (): InputState => ({
   debugTypeColors: false,
   debugHoverTile: null,
   debugHoverWorld: null,
+  evacuationDestinationTownId: null,
   lastInteractionTime: 0
 });
 
@@ -44,5 +46,6 @@ export const resetInputState = (state: InputState): void => {
   state.debugTypeColors = false;
   state.debugHoverTile = null;
   state.debugHoverWorld = null;
+  state.evacuationDestinationTownId = null;
   state.lastInteractionTime = 0;
 };

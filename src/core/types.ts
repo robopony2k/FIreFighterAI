@@ -160,6 +160,26 @@ export interface Town extends Point {
   approval: number;
   evacState: "none" | "in_progress" | "complete";
   evacProgress: number;
+  evacuationStatus:
+    | "None"
+    | "PointSelected"
+      | "EvacuationOrdered"
+      | "Evacuating"
+      | "Returning"
+      | "Completed"
+      | "Returned"
+      | "Failed"
+      | "Cancelled";
+  selectedEvacuationPoint?: Point;
+  activeEvacuationId?: string;
+  populationRemaining: number;
+  populationQueued: number;
+  populationEvacuating: number;
+  populationEvacuated: number;
+  populationDead: number;
+  vehiclesQueued: number;
+  vehiclesMoving: number;
+  vehiclesDestroyed: number;
   lastPostureChangeDay?: number;
   desiredHouseDelta?: number;
   lastSeasonHouseDelta?: number;

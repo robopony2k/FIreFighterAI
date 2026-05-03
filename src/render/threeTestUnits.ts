@@ -16,6 +16,7 @@ import type { TerrainRenderSurface } from "./threeTestTerrain.js";
 import { resolveWaterStreamTrajectory } from "../systems/fire/rendering/waterStreamTrajectory.js";
 import { approachAngleExp, resolveDesiredUnitYaw } from "./unitAimVisuals.js";
 import { registerPbrSpecularGlossiness } from "./gltfSpecGloss.js";
+import { createVehicleModelLayer, type VehicleModelInstance } from "./vehicleModelLayer.js";
 
 const TRUCK_BASE_COLOR = new THREE.Color(0xe0311d);
 const TRUCK_SELECTED_COLOR = new THREE.Color(0xff6e57);
@@ -82,19 +83,25 @@ type UnitModelTemplate = {
 };
 
 export const createThreeTestUnitsLayer = (scene: THREE.Scene): ThreeTestUnitsLayer => {
-  const truckGeometry = new THREE.BoxGeometry(0.38, 0.18, 0.64);
-  const truckMaterial = new THREE.MeshStandardMaterial({
+  const truckVehicleLayer = createVehicleModelLayer(scene, {
+    name: "three-test-firetruck",
+    modelPath: TRUCK_MODEL_PATH,
+    maxInstances: MAX_TRUCK_INSTANCES,
+    targetLength: TRUCK_MODEL_TARGET_LENGTH,
+    yawOffset: TRUCK_MODEL_YAW_OFFSET,
+    modelGroundOffset: TRUCK_MODEL_GROUND_OFFSET + UNIT_BASE_Y_OFFSET,
+    fallbackLift: 0.11 + UNIT_BASE_Y_OFFSET,
+    normalSampleTiles: TRUCK_NORMAL_SAMPLE_TILES,
+    fallbackGeometry: new THREE.BoxGeometry(0.38, 0.18, 0.64),
+    fallbackMaterial: new THREE.MeshStandardMaterial({
     color: TRUCK_BASE_COLOR,
     emissive: new THREE.Color(0x3a0904),
     emissiveIntensity: 0.3,
     roughness: 0.64,
     metalness: 0.05,
     vertexColors: true
+    })
   });
-  const truckMesh = new THREE.InstancedMesh(truckGeometry, truckMaterial, MAX_TRUCK_INSTANCES);
-  truckMesh.count = 0;
-  truckMesh.frustumCulled = false;
-  scene.add(truckMesh);
   const truckSelectionRingGeometry = new THREE.RingGeometry(
     TRUCK_SELECTION_RING_INNER_RADIUS,
     TRUCK_SELECTION_RING_OUTER_RADIUS,
@@ -116,10 +123,6 @@ export const createThreeTestUnitsLayer = (scene: THREE.Scene): ThreeTestUnitsLay
   truckSelectionMesh.count = 0;
   truckSelectionMesh.frustumCulled = false;
   scene.add(truckSelectionMesh);
-  const truckModelMeshes: Array<{ mesh: THREE.InstancedMesh; baseMatrix: THREE.Matrix4 }> = [];
-  let useTruckModel = false;
-  let truckModelScale = 1;
-  let truckModelLift = 0.11 + UNIT_BASE_Y_OFFSET;
   const firefighterModelMeshes: Array<{
     mesh: THREE.InstancedMesh;
     baseMatrix: THREE.Matrix4;
@@ -137,16 +140,6 @@ export const createThreeTestUnitsLayer = (scene: THREE.Scene): ThreeTestUnitsLay
       return;
     }
     material.dispose();
-  };
-
-  const clearTruckModelMeshes = (): void => {
-    truckModelMeshes.forEach(({ mesh }) => {
-      scene.remove(mesh);
-      mesh.geometry.dispose();
-      disposeMaterial(mesh.material);
-    });
-    truckModelMeshes.length = 0;
-    useTruckModel = false;
   };
 
   const clearFirefighterModelMeshes = (): void => {
@@ -231,40 +224,6 @@ export const createThreeTestUnitsLayer = (scene: THREE.Scene): ThreeTestUnitsLay
 
   const loader = registerPbrSpecularGlossiness(new GLTFLoader());
   loader.load(
-    TRUCK_MODEL_PATH,
-    (gltf) => {
-      if (disposed) {
-        return;
-      }
-      const extracted = extractModelTemplates(gltf.scene);
-      if (!extracted) {
-        return;
-      }
-      clearTruckModelMeshes();
-      const footprint = Math.max(extracted.size.x, extracted.size.z);
-      truckModelScale = TRUCK_MODEL_TARGET_LENGTH / Math.max(0.01, footprint);
-      truckModelLift = TRUCK_MODEL_GROUND_OFFSET + UNIT_BASE_Y_OFFSET;
-      extracted.templates.forEach((template) => {
-        const mesh = new THREE.InstancedMesh(template.geometry, template.material, MAX_TRUCK_INSTANCES);
-        mesh.count = 0;
-        mesh.castShadow = true;
-        mesh.receiveShadow = true;
-        mesh.frustumCulled = false;
-        scene.add(mesh);
-        truckModelMeshes.push({
-          mesh,
-          baseMatrix: template.baseMatrix
-        });
-      });
-      useTruckModel = truckModelMeshes.length > 0;
-    },
-    undefined,
-    (error) => {
-      console.warn("[threeTestUnits] Failed to load truck model, using placeholder.", error);
-    }
-  );
-
-  loader.load(
     FIREFIGHTER_MODEL_PATH,
     (gltf) => {
       if (disposed) {
@@ -338,29 +297,18 @@ export const createThreeTestUnitsLayer = (scene: THREE.Scene): ThreeTestUnitsLay
   firefighterNozzleMesh.frustumCulled = false;
   scene.add(firefighterNozzleMesh);
 
-  const truckMatrix = new THREE.Matrix4();
   const firefighterMatrix = new THREE.Matrix4();
   const firefighterNozzleMatrix = new THREE.Matrix4();
-  const truckPos = new THREE.Vector3();
   const firefighterPos = new THREE.Vector3();
   const firefighterNozzlePos = new THREE.Vector3();
-  const truckQuat = new THREE.Quaternion();
   const firefighterQuat = new THREE.Quaternion();
   const firefighterNozzleQuat = new THREE.Quaternion();
-  const truckScale = new THREE.Vector3(1, 1, 1);
   const firefighterScale = new THREE.Vector3(1, 1, 1);
   const firefighterNozzleScale = new THREE.Vector3(1, 1, 1);
   const worldUp = new THREE.Vector3(0, 1, 0);
-  const worldForward = new THREE.Vector3(0, 0, 1);
   const worldRight = new THREE.Vector3(1, 0, 0);
-  const truckModelYawOffsetQuat = new THREE.Quaternion().setFromAxisAngle(worldUp, TRUCK_MODEL_YAW_OFFSET);
   const firefighterModelYawOffsetQuat = new THREE.Quaternion().setFromAxisAngle(worldUp, FIREFIGHTER_MODEL_YAW_OFFSET);
   const surfaceNormal = new THREE.Vector3();
-  const surfaceForward = new THREE.Vector3();
-  const surfaceRight = new THREE.Vector3();
-  const projectedForward = new THREE.Vector3();
-  const truckBasis = new THREE.Matrix4();
-  const truckTemplateMatrix = new THREE.Matrix4();
   const firefighterTemplateMatrix = new THREE.Matrix4();
   const firefighterPartPoseMatrix = new THREE.Matrix4();
   const truckSelectionMatrix = new THREE.Matrix4();
@@ -373,7 +321,6 @@ export const createThreeTestUnitsLayer = (scene: THREE.Scene): ThreeTestUnitsLay
   const firefighterDesiredNozzleDirection = new THREE.Vector3();
   const firefighterPose = createFirefighterVisualState();
   const lastYawByUnitId = new Map<number, number>();
-  const lastForwardByUnitId = new Map<number, THREE.Vector3>();
   const lastNozzleDirectionByUnitId = new Map<number, THREE.Vector3>();
   let lastUpdateTimeMs: number | null = null;
 
@@ -479,18 +426,14 @@ export const createThreeTestUnitsLayer = (scene: THREE.Scene): ThreeTestUnitsLay
     interpolationAlpha: number
   ): void => {
     if (!surface || world.units.length === 0) {
-      truckMesh.count = 0;
+      truckVehicleLayer.update(null, []);
       truckSelectionMesh.count = 0;
-      truckModelMeshes.forEach(({ mesh }) => {
-        mesh.count = 0;
-      });
       firefighterMesh.count = 0;
       firefighterNozzleMesh.count = 0;
       firefighterModelMeshes.forEach(({ mesh }) => {
         mesh.count = 0;
       });
       lastYawByUnitId.clear();
-      lastForwardByUnitId.clear();
       lastNozzleDirectionByUnitId.clear();
       lastUpdateTimeMs = null;
       return;
@@ -511,6 +454,7 @@ export const createThreeTestUnitsLayer = (scene: THREE.Scene): ThreeTestUnitsLay
     let selectedTruckCount = 0;
     let firefighterCount = 0;
     let firefighterNozzleCount = 0;
+    const truckInstances: VehicleModelInstance[] = [];
     const activeUnitIds = new Set<number>();
 
     for (let i = 0; i < world.units.length; i += 1) {
@@ -532,6 +476,13 @@ export const createThreeTestUnitsLayer = (scene: THREE.Scene): ThreeTestUnitsLay
         if (truckCount >= MAX_TRUCK_INSTANCES) {
           continue;
         }
+        truckInstances.push({
+          x: interpolated.x,
+          y: interpolated.y,
+          yaw,
+          color: unit.selected ? TRUCK_MODEL_SELECTED_TINT : TRUCK_MODEL_BASE_TINT,
+          fallbackColor: unit.selected ? TRUCK_SELECTED_COLOR : TRUCK_BASE_COLOR
+        });
         sampleSurfaceNormal(
           terrainSize,
           cols,
@@ -543,60 +494,6 @@ export const createThreeTestUnitsLayer = (scene: THREE.Scene): ThreeTestUnitsLay
           sampleHeightAt,
           surfaceNormal
         );
-        surfaceForward.set(Math.sin(yaw), 0, Math.cos(yaw));
-        projectedForward.copy(surfaceForward).addScaledVector(surfaceNormal, -surfaceForward.dot(surfaceNormal));
-        if (projectedForward.lengthSq() <= 1e-8) {
-          const rememberedForward = lastForwardByUnitId.get(unit.id);
-          if (rememberedForward) {
-            projectedForward
-              .copy(rememberedForward)
-              .addScaledVector(surfaceNormal, -rememberedForward.dot(surfaceNormal));
-          }
-        }
-        if (projectedForward.lengthSq() <= 1e-8) {
-          projectedForward.copy(worldForward).addScaledVector(surfaceNormal, -worldForward.dot(surfaceNormal));
-        }
-        if (projectedForward.lengthSq() <= 1e-8) {
-          projectedForward.set(1, 0, 0);
-        } else {
-          projectedForward.normalize();
-        }
-        const rememberedForward = lastForwardByUnitId.get(unit.id);
-        if (rememberedForward) {
-          rememberedForward.copy(projectedForward);
-        } else {
-          lastForwardByUnitId.set(unit.id, projectedForward.clone());
-        }
-        // Build a right-handed tangent frame on the terrain surface.
-        // right = up x forward, then forward = right x up.
-        surfaceRight.crossVectors(surfaceNormal, projectedForward);
-        if (surfaceRight.lengthSq() <= 1e-8) {
-          surfaceRight.set(1, 0, 0);
-        } else {
-          surfaceRight.normalize();
-        }
-        surfaceForward.crossVectors(surfaceRight, surfaceNormal).normalize();
-        truckBasis.makeBasis(surfaceRight, surfaceNormal, surfaceForward);
-        truckQuat.setFromRotationMatrix(truckBasis);
-        if (useTruckModel && truckModelMeshes.length > 0) {
-          // Keep the truck anchored to the sampled world position; only the visual lift should move upward.
-          truckPos.set(wx, wy + truckModelLift, wz);
-          truckQuat.multiply(truckModelYawOffsetQuat);
-          truckScale.setScalar(truckModelScale);
-          truckMatrix.compose(truckPos, truckQuat, truckScale);
-          const tint = unit.selected ? TRUCK_MODEL_SELECTED_TINT : TRUCK_MODEL_BASE_TINT;
-          truckModelMeshes.forEach(({ mesh, baseMatrix }) => {
-            truckTemplateMatrix.copy(truckMatrix).multiply(baseMatrix);
-            mesh.setMatrixAt(truckCount, truckTemplateMatrix);
-            mesh.setColorAt(truckCount, tint);
-          });
-        } else {
-          truckPos.set(wx, wy + 0.11 + UNIT_BASE_Y_OFFSET, wz);
-          truckScale.set(1, 1, 1);
-          truckMatrix.compose(truckPos, truckQuat, truckScale);
-          truckMesh.setMatrixAt(truckCount, truckMatrix);
-          truckMesh.setColorAt(truckCount, unit.selected ? TRUCK_SELECTED_COLOR : TRUCK_BASE_COLOR);
-        }
         if (unit.selected && selectedTruckCount < MAX_TRUCK_INSTANCES) {
           truckSelectionPos.set(wx, wy + TRUCK_SELECTION_RING_Y_OFFSET, wz);
           truckSelectionQuat.setFromUnitVectors(worldUp, surfaceNormal);
@@ -696,33 +593,13 @@ export const createThreeTestUnitsLayer = (scene: THREE.Scene): ThreeTestUnitsLay
         lastYawByUnitId.delete(unitId);
       }
     });
-    Array.from(lastForwardByUnitId.keys()).forEach((unitId) => {
-      if (!activeUnitIds.has(unitId)) {
-        lastForwardByUnitId.delete(unitId);
-      }
-    });
     Array.from(lastNozzleDirectionByUnitId.keys()).forEach((unitId) => {
       if (!activeUnitIds.has(unitId)) {
         lastNozzleDirectionByUnitId.delete(unitId);
       }
     });
 
-    if (useTruckModel && truckModelMeshes.length > 0) {
-      truckMesh.count = 0;
-      truckModelMeshes.forEach(({ mesh }) => {
-        mesh.count = truckCount;
-        mesh.instanceMatrix.needsUpdate = true;
-        if (mesh.instanceColor) {
-          mesh.instanceColor.needsUpdate = true;
-        }
-      });
-    } else {
-      truckMesh.count = truckCount;
-      truckMesh.instanceMatrix.needsUpdate = true;
-      if (truckMesh.instanceColor) {
-        truckMesh.instanceColor.needsUpdate = true;
-      }
-    }
+    truckVehicleLayer.update(surface, truckInstances);
     truckSelectionMesh.count = selectedTruckCount;
     truckSelectionMesh.instanceMatrix.needsUpdate = true;
     if (useFirefighterModel && firefighterModelMeshes.length > 0) {
@@ -747,14 +624,11 @@ export const createThreeTestUnitsLayer = (scene: THREE.Scene): ThreeTestUnitsLay
 
   const dispose = (): void => {
     disposed = true;
-    clearTruckModelMeshes();
+    truckVehicleLayer.dispose();
     clearFirefighterModelMeshes();
-    scene.remove(truckMesh);
     scene.remove(truckSelectionMesh);
     scene.remove(firefighterMesh);
     scene.remove(firefighterNozzleMesh);
-    truckGeometry.dispose();
-    truckMaterial.dispose();
     truckSelectionRingGeometry.dispose();
     truckSelectionRingMaterial.dispose();
     firefighterGeometry.dispose();

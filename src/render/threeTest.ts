@@ -17,6 +17,8 @@ import { findBestRoadReferenceForPlot, pickHouseRotationFromRoadMask } from "../
 import { getBuildingLifecycleStageFromId, getBuildingLifecycleStageId } from "../systems/settlements/sim/buildingLifecycle.js";
 import { getProceduralHouseVariantKey } from "../systems/settlements/rendering/proceduralHouseBuilder.js";
 import type { RenderBuildingLot } from "../systems/settlements/types/buildingTypes.js";
+import { buildEvacuationRenderModel } from "../systems/evacuation/rendering/evacuationRenderModel.js";
+import { createVehicleModelLayer, type VehicleModelInstance } from "./vehicleModelLayer.js";
 import type { InputState } from "../core/inputState.js";
 import { indexFor } from "../core/grid.js";
 import { TILE_ID_TO_TYPE, TILE_TYPE_IDS } from "../core/state.js";
@@ -322,6 +324,20 @@ const UNIT_COMMAND_MARKER_RADIUS = 0.06;
 const SCORE_FLOW_PULSE_POOL_SIZE = 18;
 const SCORE_FLOW_PULSE_DURATION_MS = 1050;
 const SCORE_FLOW_PULSE_LIFT = 0.05;
+const EVACUATION_CAR_MODEL_PATH = "assets/3d/GLTF/Vehicles/CAR_01.glb";
+const EVACUATION_CAR_TARGET_LENGTH = 0.38;
+const EVACUATION_CAR_YAW_OFFSET = 0;
+const EVACUATION_CAR_GROUND_OFFSET = -0.015;
+const EVACUATION_CAR_NORMAL_SAMPLE_TILES = 0.22;
+const EVACUATION_CAR_COLORS = [
+  0xd9ded8,
+  0x7e8d98,
+  0xb84d45,
+  0x3f6f8e,
+  0xd6b35f,
+  0x5e6b5d
+] as const;
+const EVACUATION_CAR_DESTROYED_COLOR = 0x161616;
 const CLIMATE_RISK_LABELS = ["Low", "Moderate", "High", "Extreme"] as const;
 const CLIMATE_TEMP_DOMAIN_MIN = Math.floor(
   VIRTUAL_CLIMATE_PARAMS.tMid - VIRTUAL_CLIMATE_PARAMS.tAmp - VIRTUAL_CLIMATE_PARAMS.noiseAmp
@@ -646,6 +662,27 @@ export const createThreeTest = (
   const unitCommandVisualGroup = new THREE.Group();
   unitCommandVisualGroup.name = "three-test-unit-commands";
   scene.add(unitCommandVisualGroup);
+  const evacuationVisualGroup = new THREE.Group();
+  evacuationVisualGroup.name = "three-test-evacuations";
+  scene.add(evacuationVisualGroup);
+  const evacuationVehicleLayer = createVehicleModelLayer(scene, {
+    name: "three-test-evacuation-car",
+    modelPath: EVACUATION_CAR_MODEL_PATH,
+    maxInstances: 512,
+    targetLength: EVACUATION_CAR_TARGET_LENGTH,
+    yawOffset: EVACUATION_CAR_YAW_OFFSET,
+    modelGroundOffset: EVACUATION_CAR_GROUND_OFFSET,
+    tintMaterialPattern: /basic color/i,
+    fallbackLift: 0.22,
+    normalSampleTiles: EVACUATION_CAR_NORMAL_SAMPLE_TILES,
+    fallbackGeometry: new THREE.BoxGeometry(0.22, 0.11, 0.34),
+    fallbackMaterial: new THREE.MeshStandardMaterial({
+      color: 0x4f9fff,
+      roughness: 0.62,
+      metalness: 0.12,
+      vertexColors: true
+    })
+  });
   const scoreFlowPulseGroup = new THREE.Group();
   scoreFlowPulseGroup.name = "three-test-score-flow-pulses";
   scene.add(scoreFlowPulseGroup);
@@ -874,12 +911,14 @@ export const createThreeTest = (
     summaryText: HTMLSpanElement;
     summaryAlert: HTMLSpanElement;
     evac: HTMLDivElement;
-    raiseButton: HTMLButtonElement;
-    raiseMeta: HTMLSpanElement;
-    lowerButton: HTMLButtonElement;
-    lowerMeta: HTMLSpanElement;
-    clearTreesButton: HTMLButtonElement;
-    clearTreesMeta: HTMLSpanElement;
+    selectEvacDestinationButton: HTMLButtonElement;
+    selectEvacDestinationMeta: HTMLSpanElement;
+    issueEvacuationButton: HTMLButtonElement;
+    issueEvacuationMeta: HTMLSpanElement;
+    returnEvacuationButton: HTMLButtonElement;
+    returnEvacuationMeta: HTMLSpanElement;
+    cancelEvacuationButton: HTMLButtonElement;
+    cancelEvacuationMeta: HTMLSpanElement;
     upgradeButton: HTMLButtonElement;
     upgradeMeta: HTMLSpanElement;
   };
@@ -904,6 +943,15 @@ export const createThreeTest = (
     nonApproving: number;
     evacState: Town["evacState"];
     evacPct: number;
+    evacuationStatus: Town["evacuationStatus"];
+    populationRemaining: number;
+    populationEvacuating: number;
+    populationEvacuated: number;
+    populationDead: number;
+    vehiclesQueued: number;
+    vehiclesMoving: number;
+    vehiclesDestroyed: number;
+    hasSelectedEvacuationPoint: boolean;
     clearTreesCost: number;
     clearTreesDays: number;
     upgradeCost: number;
@@ -1044,11 +1092,18 @@ export const createThreeTest = (
     townCardEvac.className = "three-test-town-card-evac hidden";
     const townCardActions = document.createElement("div");
     townCardActions.className = "three-test-town-card-actions";
-    const raiseAction = createTownCardAction(TOWN_ICON_WARN_UP, "Raise warning level (next posture)");
-    const lowerAction = createTownCardAction(TOWN_ICON_WARN_DOWN, "Lower warning level");
-    const clearTreesAction = createTownCardAction(TOWN_ICON_CLEAR_TREES, "Clear trees around town");
+    const selectEvacAction = createTownCardAction(TOWN_ICON_EVAC, "Select evacuation destination");
+    const issueEvacAction = createTownCardAction(TOWN_ICON_WARN_UP, "Issue evacuation");
+    const returnEvacAction = createTownCardAction("R", "Return evacuees home");
+    const cancelEvacAction = createTownCardAction("x", "Cancel evacuation selection");
     const upgradeAction = createTownCardAction(TOWN_ICON_UPGRADE, "Invest in firefighting equipment");
-    townCardActions.append(raiseAction.button, lowerAction.button, clearTreesAction.button, upgradeAction.button);
+    townCardActions.append(
+      selectEvacAction.button,
+      issueEvacAction.button,
+      returnEvacAction.button,
+      cancelEvacAction.button,
+      upgradeAction.button
+    );
     townCardRoot.append(townCardHeader, townCardSummary, townCardStatus, townCardEvac, townCardActions);
     townOverlayRoot.appendChild(townCardRoot);
     return {
@@ -1066,12 +1121,14 @@ export const createThreeTest = (
       summaryText: townCardSummaryText,
       summaryAlert: townCardSummaryAlert,
       evac: townCardEvac,
-      raiseButton: raiseAction.button,
-      raiseMeta: raiseAction.meta,
-      lowerButton: lowerAction.button,
-      lowerMeta: lowerAction.meta,
-      clearTreesButton: clearTreesAction.button,
-      clearTreesMeta: clearTreesAction.meta,
+      selectEvacDestinationButton: selectEvacAction.button,
+      selectEvacDestinationMeta: selectEvacAction.meta,
+      issueEvacuationButton: issueEvacAction.button,
+      issueEvacuationMeta: issueEvacAction.meta,
+      returnEvacuationButton: returnEvacAction.button,
+      returnEvacuationMeta: returnEvacAction.meta,
+      cancelEvacuationButton: cancelEvacAction.button,
+      cancelEvacuationMeta: cancelEvacAction.meta,
       upgradeButton: upgradeAction.button,
       upgradeMeta: upgradeAction.meta
     };
@@ -2404,6 +2461,25 @@ export const createThreeTest = (
     );
   };
 
+  const dispatchTownEvacuationCommand = (
+    townId: number,
+    type: "town-evac-select" | "town-evac-cancel" | "town-evac-issue" | "town-evac-return"
+  ): boolean => {
+    const town = world.towns.find((entry) => entry.id === townId) ?? null;
+    if (!town) {
+      return false;
+    }
+    const previousStatus = town.evacuationStatus;
+    const previousPoint = town.selectedEvacuationPoint
+      ? `${town.selectedEvacuationPoint.x}:${town.selectedEvacuationPoint.y}`
+      : "";
+    dispatchPhaseUiCommand({ type, townId });
+    const nextPoint = town.selectedEvacuationPoint
+      ? `${town.selectedEvacuationPoint.x}:${town.selectedEvacuationPoint.y}`
+      : "";
+    return town.evacuationStatus !== previousStatus || previousPoint !== nextPoint;
+  };
+
   const selectAndPanToTruck = (
     truck: RenderSim["units"][number],
     options?: { truckScope?: boolean; toggle?: boolean; append?: boolean }
@@ -3267,6 +3343,10 @@ export const createThreeTest = (
     const approvalPct = Math.round(Math.max(0, Math.min(1, town.approval ?? 1)) * 100);
     const evacPct = Math.round(Math.max(0, Math.min(1, town.evacProgress ?? 0)) * 100);
     const maintenance = readTownMaintenanceData(town);
+    const populationRemaining = Math.max(0, Math.floor(town.populationRemaining ?? 0));
+    const populationEvacuating = Math.max(0, Math.floor(town.populationEvacuating ?? 0));
+    const populationEvacuated = Math.max(0, Math.floor(town.populationEvacuated ?? 0));
+    const populationDead = Math.max(0, Math.floor(town.populationDead ?? 0));
     return {
       threatLevel,
       threatLabel,
@@ -3281,6 +3361,15 @@ export const createThreeTest = (
       nonApproving,
       evacState: town.evacState,
       evacPct,
+      evacuationStatus: town.evacuationStatus ?? "None",
+      populationRemaining,
+      populationEvacuating,
+      populationEvacuated,
+      populationDead,
+      vehiclesQueued: Math.max(0, Math.floor(town.vehiclesQueued ?? 0)),
+      vehiclesMoving: Math.max(0, Math.floor(town.vehiclesMoving ?? 0)),
+      vehiclesDestroyed: Math.max(0, Math.floor(town.vehiclesDestroyed ?? 0)),
+      hasSelectedEvacuationPoint: !!town.selectedEvacuationPoint,
       clearTreesCost: maintenance.clearTreesCost,
       clearTreesDays: maintenance.clearTreesDays,
       upgradeCost: maintenance.upgradeCost,
@@ -3290,8 +3379,8 @@ export const createThreeTest = (
 
   const formatTownIconRow = (snapshot: TownUiSnapshot, includeEvac = false): string => {
     let row = `${TOWN_ICON_HOUSES}${snapshot.houses}  ${TOWN_ICON_BURNING}${snapshot.burning}  ${TOWN_ICON_LOST}${snapshot.lost}  ${TOWN_ICON_APPROVAL}${snapshot.approvalPct}%`;
-    if (includeEvac && snapshot.evacState === "in_progress") {
-      row += `  ${TOWN_ICON_EVAC}${snapshot.evacPct}%`;
+    if (includeEvac && snapshot.evacuationStatus !== "None" && snapshot.evacuationStatus !== "Cancelled") {
+      row += `  ${TOWN_ICON_EVAC}${snapshot.populationEvacuated}/${Math.max(1, snapshot.populationRemaining + snapshot.populationEvacuated + snapshot.populationDead)}`;
     }
     return row;
   };
@@ -3374,38 +3463,57 @@ export const createThreeTest = (
     card.summaryAlert.className = `three-test-town-alert-badge alert-${snapshot.posture}`;
     card.summaryAlert.textContent = `[${compactAlertLabel}]`;
     card.summary.title = `Houses ${snapshot.houses}/${Math.max(snapshot.houses, snapshot.houses + snapshot.lost)}, Burning ${snapshot.burning}, Approval ${snapshot.approvalPct}%, Alert ${snapshot.postureLabel}`;
-    if (snapshot.evacState === "in_progress") {
-      card.evac.textContent = `${TOWN_ICON_EVAC}${snapshot.evacPct}%`;
-      card.evac.title = `Evacuation in progress: ${snapshot.evacPct}%`;
+    if (snapshot.evacuationStatus === "PointSelected") {
+      card.evac.textContent = `${TOWN_ICON_EVAC} route selected`;
+      card.evac.title = "Evacuation route selected";
       card.evac.classList.remove("hidden");
-    } else if (snapshot.evacState === "complete") {
-      card.evac.textContent = `${TOWN_ICON_EVAC}100%`;
-      card.evac.title = "Evacuation complete";
+    } else if (snapshot.evacuationStatus === "Evacuating" || snapshot.evacuationStatus === "EvacuationOrdered") {
+      card.evac.textContent = `${TOWN_ICON_EVAC}${snapshot.populationEvacuated} out  ${snapshot.populationEvacuating} moving  ${snapshot.vehiclesQueued} queued`;
+      card.evac.title = `Evacuating: ${snapshot.populationEvacuated} evacuated, ${snapshot.populationDead} dead, ${snapshot.vehiclesDestroyed} vehicles destroyed`;
+      card.evac.classList.remove("hidden");
+    } else if (snapshot.evacuationStatus === "Completed") {
+      card.evac.textContent = `${TOWN_ICON_EVAC}${snapshot.populationEvacuated} evacuated`;
+      card.evac.title = "Evacuation complete; evacuees are waiting at the selected destination";
+      card.evac.classList.remove("hidden");
+    } else if (snapshot.evacuationStatus === "Returning") {
+      card.evac.textContent = `${TOWN_ICON_EVAC}${snapshot.populationEvacuating} returning  ${snapshot.vehiclesQueued} queued`;
+      card.evac.title = "Evacuees returning home along the locked route";
+      card.evac.classList.remove("hidden");
+    } else if (snapshot.evacuationStatus === "Returned") {
+      card.evac.textContent = `${TOWN_ICON_EVAC}returned home`;
+      card.evac.title = "Evacuees returned home";
+      card.evac.classList.remove("hidden");
+    } else if (snapshot.evacuationStatus === "Failed") {
+      card.evac.textContent = `${TOWN_ICON_EVAC}${snapshot.populationDead} dead`;
+      card.evac.title = "Evacuation failed";
       card.evac.classList.remove("hidden");
     } else {
       card.evac.classList.add("hidden");
     }
 
-    const raiseOnCooldown = snapshot.cooldown > 0 && snapshot.posture < TOWN_ALERT_MAX_POSTURE;
-    const lowerOnCooldown = snapshot.cooldown > 0 && snapshot.posture > 0;
-    card.raiseButton.disabled = snapshot.posture >= TOWN_ALERT_MAX_POSTURE || snapshot.cooldown > 0;
-    card.lowerButton.disabled = snapshot.posture <= 0 || snapshot.cooldown > 0;
-    card.raiseMeta.textContent = raiseOnCooldown
-      ? `${TOWN_ICON_COOLDOWN}${snapshot.cooldown.toFixed(1)}d`
-      : "";
-    card.lowerMeta.textContent = lowerOnCooldown
-      ? `${TOWN_ICON_COOLDOWN}${snapshot.cooldown.toFixed(1)}d`
-      : "";
-    card.raiseButton.title = raiseOnCooldown
-      ? `Cooldown ${snapshot.cooldown.toFixed(1)}d`
-      : "Raise warning level (next posture)";
-    card.lowerButton.title = lowerOnCooldown
-      ? `Cooldown ${snapshot.cooldown.toFixed(1)}d`
-      : "Lower warning level";
+    const evacuationLocked =
+      snapshot.evacuationStatus === "EvacuationOrdered" ||
+      snapshot.evacuationStatus === "Evacuating" ||
+      snapshot.evacuationStatus === "Returning" ||
+      snapshot.evacuationStatus === "Completed" ||
+      snapshot.evacuationStatus === "Returned" ||
+      snapshot.evacuationStatus === "Failed";
+    card.selectEvacDestinationButton.disabled = evacuationLocked;
+    card.issueEvacuationButton.disabled = !snapshot.hasSelectedEvacuationPoint || evacuationLocked;
+    card.returnEvacuationButton.disabled =
+      snapshot.evacuationStatus !== "Completed" || snapshot.populationEvacuated <= 0;
+    card.cancelEvacuationButton.disabled = snapshot.evacuationStatus !== "PointSelected";
+    card.selectEvacDestinationMeta.textContent = snapshot.hasSelectedEvacuationPoint ? "selected" : "";
+    card.issueEvacuationMeta.textContent = snapshot.hasSelectedEvacuationPoint && !evacuationLocked ? "order" : "";
+    card.returnEvacuationMeta.textContent =
+      snapshot.evacuationStatus === "Completed" && snapshot.populationEvacuated > 0 ? "home" : "";
+    card.cancelEvacuationMeta.textContent = snapshot.evacuationStatus === "PointSelected" ? "clear" : "";
+    card.selectEvacDestinationButton.title = "Select evacuation destination";
+    card.issueEvacuationButton.title = "Issue evacuation";
+    card.returnEvacuationButton.title = "Return evacuees home";
+    card.cancelEvacuationButton.title = "Cancel evacuation selection";
 
-    card.clearTreesMeta.textContent = `${TOWN_ICON_COST}${snapshot.clearTreesCost}  ${TOWN_ICON_TIME}${snapshot.clearTreesDays}d`;
     card.upgradeMeta.textContent = `${TOWN_ICON_COST}${snapshot.upgradeCost}  ${TOWN_ICON_TIME}${snapshot.upgradeDays}d`;
-    card.clearTreesButton.title = `Clear trees around town (${TOWN_ICON_COST}${snapshot.clearTreesCost} ${TOWN_ICON_TIME}${snapshot.clearTreesDays}d)`;
     card.upgradeButton.title = `Invest in firefighting equipment (${TOWN_ICON_COST}${snapshot.upgradeCost} ${TOWN_ICON_TIME}${snapshot.upgradeDays}d)`;
   };
 
@@ -3447,7 +3555,7 @@ export const createThreeTest = (
     card.root.addEventListener("mouseenter", () => {
       playUiCue("hover");
     });
-    card.raiseButton.addEventListener("click", (event) => {
+    card.selectEvacDestinationButton.addEventListener("click", (event) => {
       event.preventDefault();
       event.stopPropagation();
       playUiCue("confirm");
@@ -3455,12 +3563,12 @@ export const createThreeTest = (
       if (townId === null) {
         return;
       }
-      if (dispatchTownAlertCommand(townId, "raise")) {
+      if (dispatchTownEvacuationCommand(townId, "town-evac-select")) {
         inputState.lastInteractionTime = performance.now();
       }
       updateTownMetrics();
     });
-    card.lowerButton.addEventListener("click", (event) => {
+    card.issueEvacuationButton.addEventListener("click", (event) => {
       event.preventDefault();
       event.stopPropagation();
       playUiCue("confirm");
@@ -3468,16 +3576,36 @@ export const createThreeTest = (
       if (townId === null) {
         return;
       }
-      if (dispatchTownAlertCommand(townId, "lower")) {
+      if (dispatchTownEvacuationCommand(townId, "town-evac-issue")) {
         inputState.lastInteractionTime = performance.now();
       }
       updateTownMetrics();
     });
-    card.clearTreesButton.addEventListener("click", (event) => {
+    card.returnEvacuationButton.addEventListener("click", (event) => {
       event.preventDefault();
       event.stopPropagation();
-      playUiCue("click");
-      inputState.lastInteractionTime = performance.now();
+      playUiCue("confirm");
+      const townId = resolveTownId();
+      if (townId === null) {
+        return;
+      }
+      if (dispatchTownEvacuationCommand(townId, "town-evac-return")) {
+        inputState.lastInteractionTime = performance.now();
+      }
+      updateTownMetrics();
+    });
+    card.cancelEvacuationButton.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      playUiCue("toggle");
+      const townId = resolveTownId();
+      if (townId === null) {
+        return;
+      }
+      if (dispatchTownEvacuationCommand(townId, "town-evac-cancel")) {
+        inputState.lastInteractionTime = performance.now();
+      }
+      updateTownMetrics();
     });
     card.upgradeButton.addEventListener("click", (event) => {
       event.preventDefault();
@@ -5629,6 +5757,92 @@ export const createThreeTest = (
     return new THREE.Vector3(x, worldY, z);
   };
 
+  const evacuationPreviewMaterial = new THREE.LineBasicMaterial({
+    color: 0xf6d36d,
+    transparent: true,
+    opacity: 0.82
+  });
+  const evacuationActiveMaterial = new THREE.LineBasicMaterial({
+    color: 0x66c7ff,
+    transparent: true,
+    opacity: 0.9
+  });
+  const evacuationObstacleMaterial = new THREE.MeshStandardMaterial({
+    color: 0x2f2a24,
+    roughness: 0.9,
+    metalness: 0.03
+  });
+  const evacuationObstacleGeometry = new THREE.BoxGeometry(0.28, 0.1, 0.28);
+
+  const resolveEvacuationVehicleColor = (colorSeed: number, destroyed: boolean): THREE.Color => {
+    if (destroyed) {
+      return new THREE.Color(EVACUATION_CAR_DESTROYED_COLOR);
+    }
+    const index = Math.abs(Math.trunc(colorSeed)) % EVACUATION_CAR_COLORS.length;
+    return new THREE.Color(EVACUATION_CAR_COLORS[index]);
+  };
+
+  const clearEvacuationVisuals = (): void => {
+    while (evacuationVisualGroup.children.length > 0) {
+      const child = evacuationVisualGroup.children[evacuationVisualGroup.children.length - 1];
+      if (!child) {
+        continue;
+      }
+      evacuationVisualGroup.remove(child);
+      if (child instanceof THREE.Line || child instanceof THREE.Mesh) {
+        child.geometry.dispose();
+      }
+    }
+  };
+
+  const updateEvacuationVisuals = (): void => {
+    clearEvacuationVisuals();
+    if (!lastTerrainSurface) {
+      evacuationVehicleLayer.update(null, []);
+      return;
+    }
+    const model = buildEvacuationRenderModel(world);
+    const vehicleInstances: VehicleModelInstance[] = [];
+    for (const route of model.routes) {
+      const points: THREE.Vector3[] = [];
+      for (const tile of route.tiles) {
+        const point = toWorldCommandPoint(tile.x + 0.5, tile.y + 0.5, route.active ? 0.18 : 0.14);
+        if (point) {
+          points.push(point);
+        }
+      }
+      if (points.length >= 2) {
+        const line = new THREE.Line(
+          new THREE.BufferGeometry().setFromPoints(points),
+          route.active ? evacuationActiveMaterial : evacuationPreviewMaterial
+        );
+        line.frustumCulled = false;
+        line.renderOrder = route.active ? 9 : 8;
+        evacuationVisualGroup.add(line);
+      }
+    }
+    for (const vehicle of model.vehicles) {
+      const alpha = clamp01(simulationAlpha);
+      vehicleInstances.push({
+        x: vehicle.prevX + (vehicle.x - vehicle.prevX) * alpha + 0.5,
+        y: vehicle.prevY + (vehicle.y - vehicle.prevY) * alpha + 0.5,
+        yaw: vehicle.yaw,
+        color: resolveEvacuationVehicleColor(vehicle.colorSeed, vehicle.destroyed)
+      });
+    }
+    evacuationVehicleLayer.update(lastTerrainSurface, vehicleInstances);
+    for (const obstacle of model.obstacles) {
+      const point = toWorldCommandPoint(obstacle.x + 0.5, obstacle.y + 0.5, 0.12);
+      if (!point) {
+        continue;
+      }
+      const mesh = new THREE.Mesh(evacuationObstacleGeometry.clone(), evacuationObstacleMaterial);
+      mesh.position.copy(point);
+      mesh.renderOrder = 10;
+      evacuationVisualGroup.add(mesh);
+    }
+  };
+
   const acquireScoreFlowPulse = (): ScoreFlowPulse => {
     let candidate = scoreFlowPulses[0];
     for (let i = 1; i < scoreFlowPulses.length; i += 1) {
@@ -6311,6 +6525,7 @@ export const createThreeTest = (
     lastTerrainSize = null;
     disposeStructureOverlay();
     clearUnitCommandVisuals();
+    clearEvacuationVisuals();
     lastStructureOverlayKey = "";
     lastStructureRevision = -1;
     townLabelElements.clear();
@@ -6347,6 +6562,12 @@ export const createThreeTest = (
     hoverDebugTileHighlightGeometry.dispose();
     hoverDebugTileHighlightMaterial.dispose();
     scene.remove(unitCommandVisualGroup);
+    scene.remove(evacuationVisualGroup);
+    evacuationVehicleLayer.dispose();
+    evacuationPreviewMaterial.dispose();
+    evacuationActiveMaterial.dispose();
+    evacuationObstacleMaterial.dispose();
+    evacuationObstacleGeometry.dispose();
     unitCommandPathMaterial.dispose();
     unitCommandMarkerGeometry.dispose();
     unitCommandMarkerMaterial.dispose();
@@ -6643,6 +6864,7 @@ export const createThreeTest = (
     unitsLayer.update(world, lastTerrainSurface, simulationAlpha);
     unitFxLayer.update(world, effectsState, lastTerrainSurface, simulationAlpha, time);
     updateUnitCommandVisuals();
+    updateEvacuationVisuals();
     updateScoreFlowPulses(time);
     updateTownOverlay(time);
     updateTruckBeaconOverlay();

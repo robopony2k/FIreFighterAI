@@ -1,5 +1,19 @@
 # Deprecations
 
+## Town Alert Progress-Only Evacuation
+
+Status: Deprecated as of May 3, 2026.
+
+- The old player-facing alert posture ladder no longer starts evacuation automatically.
+- Town evacuation is now route-based: select a destination, preview the locked route, and issue the evacuation command.
+- The old abstract `evacProgress` model is compatibility-only and should not drive new player-facing evacuation behavior.
+
+Migration guidance:
+
+1. Put new evacuation behavior under `src/systems/evacuation/`.
+2. Keep simulation outcomes in evacuation sim/controller code, not render code.
+3. Do not reintroduce route recommendation, route scoring, ETA, or survival forecast UI.
+
 ## WindFactor as Spread Bias
 
 Status: Deprecated as of May 2, 2026.

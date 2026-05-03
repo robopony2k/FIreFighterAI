@@ -14,6 +14,7 @@
     "world-audio:regression": "npm run build && node scripts/world-audio-regression.mjs",
     "sun:regression": "node scripts/seasonal-sun-regression.mjs",
     "fire:regression": "npm run build && node scripts/fire-regression.mjs",
+    "evacuation:regression": "npm run build && node scripts/evacuation-regression.mjs",
     "growth:regression": "npm run build && node scripts/growth-regression.mjs",
     "settlement:regression": "npm run build && node scripts/settlement-lifecycle-regression.mjs",
     "terrain:eval": "npm run build && node scripts/terrain-eval.mjs",

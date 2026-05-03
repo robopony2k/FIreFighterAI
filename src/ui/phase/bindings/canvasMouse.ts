@@ -145,6 +145,9 @@ export const bindCanvasMouseHandlers = ({
       });
       return;
     }
+    if (inputState.evacuationDestinationTownId !== null) {
+      return;
+    }
     if (mouseEvent.button !== 0) {
       return;
     }
