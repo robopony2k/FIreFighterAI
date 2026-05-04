@@ -337,7 +337,16 @@ const EVACUATION_CAR_COLORS = [
   0xd6b35f,
   0x5e6b5d
 ] as const;
+const EVACUATION_CAR_ACCENT_COLORS = [
+  0xf2efe6,
+  0x9ec5d6,
+  0xf0a15d,
+  0x89a85b,
+  0xc57b95,
+  0x5c8fd6
+] as const;
 const EVACUATION_CAR_DESTROYED_COLOR = 0x161616;
+const EVACUATION_CAR_DESTROYED_ACCENT_COLOR = 0x2b2b2b;
 const CLIMATE_RISK_LABELS = ["Low", "Moderate", "High", "Extreme"] as const;
 const CLIMATE_TEMP_DOMAIN_MIN = Math.floor(
   VIRTUAL_CLIMATE_PARAMS.tMid - VIRTUAL_CLIMATE_PARAMS.tAmp - VIRTUAL_CLIMATE_PARAMS.noiseAmp
@@ -672,7 +681,7 @@ export const createThreeTest = (
     targetLength: EVACUATION_CAR_TARGET_LENGTH,
     yawOffset: EVACUATION_CAR_YAW_OFFSET,
     modelGroundOffset: EVACUATION_CAR_GROUND_OFFSET,
-    tintMaterialPattern: /basic color/i,
+    tintMaterialPatterns: [/basic color/i, /window/i],
     fallbackLift: 0.22,
     normalSampleTiles: EVACUATION_CAR_NORMAL_SAMPLE_TILES,
     fallbackGeometry: new THREE.BoxGeometry(0.22, 0.11, 0.34),
@@ -5782,6 +5791,14 @@ export const createThreeTest = (
     return new THREE.Color(EVACUATION_CAR_COLORS[index]);
   };
 
+  const resolveEvacuationVehicleAccentColor = (colorSeed: number, destroyed: boolean): THREE.Color => {
+    if (destroyed) {
+      return new THREE.Color(EVACUATION_CAR_DESTROYED_ACCENT_COLOR);
+    }
+    const index = Math.abs((Math.trunc(colorSeed) ^ 0x9e3779b9) | 0) % EVACUATION_CAR_ACCENT_COLORS.length;
+    return new THREE.Color(EVACUATION_CAR_ACCENT_COLORS[index]);
+  };
+
   const clearEvacuationVisuals = (): void => {
     while (evacuationVisualGroup.children.length > 0) {
       const child = evacuationVisualGroup.children[evacuationVisualGroup.children.length - 1];
@@ -5827,7 +5844,8 @@ export const createThreeTest = (
         x: vehicle.prevX + (vehicle.x - vehicle.prevX) * alpha + 0.5,
         y: vehicle.prevY + (vehicle.y - vehicle.prevY) * alpha + 0.5,
         yaw: vehicle.yaw,
-        color: resolveEvacuationVehicleColor(vehicle.colorSeed, vehicle.destroyed)
+        color: resolveEvacuationVehicleColor(vehicle.colorSeed, vehicle.destroyed),
+        modelAccentColor: resolveEvacuationVehicleAccentColor(vehicle.colorSeed, vehicle.destroyed)
       });
     }
     evacuationVehicleLayer.update(lastTerrainSurface, vehicleInstances);

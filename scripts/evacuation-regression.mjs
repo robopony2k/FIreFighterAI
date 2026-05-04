@@ -7,6 +7,7 @@ import {
   selectTownEvacuationDestination
 } from "../dist/systems/evacuation/controllers/evacuationController.js";
 import { stepEvacuations } from "../dist/systems/evacuation/sim/evacuationRuntime.js";
+import { buildEvacuationRenderModel } from "../dist/systems/evacuation/rendering/evacuationRenderModel.js";
 
 const ROAD_EDGE_N = 1 << 0;
 const ROAD_EDGE_E = 1 << 1;
@@ -101,6 +102,36 @@ const createRoadState = () => {
   return state;
 };
 
+const createHostTownRoadState = () => {
+  const state = createInitialState(4321, { cols: 10, rows: 3, totalTiles: 30 });
+  state.tiles = Array.from({ length: state.grid.totalTiles }, () => makeTile());
+  for (let x = 0; x < state.grid.cols; x += 1) {
+    const idx = 1 * state.grid.cols + x;
+    state.tiles[idx] = makeTile("road");
+    state.tileRoadEdges[idx] = (x > 0 ? ROAD_EDGE_W : 0) | (x < state.grid.cols - 1 ? ROAD_EDGE_E : 0);
+  }
+  state.tiles[0] = makeTile("house");
+  state.tiles[0].houseTownId = 0;
+  state.tileTownId[0] = 0;
+  state.tiles[20] = makeTile("house");
+  state.tiles[20].houseTownId = 0;
+  state.tileTownId[20] = 0;
+  const origin = makeTown();
+  const host = {
+    ...makeTown(),
+    id: 1,
+    name: "Hoston",
+    x: 8,
+    y: 1,
+    cx: 8,
+    cy: 1,
+    houseCount: 2
+  };
+  state.towns = [origin, host];
+  state.tileTownId[1 * state.grid.cols + 8] = 1;
+  return state;
+};
+
 const assertRoute = () => {
   const state = createRoadState();
   const route = createEvacuationRoute(state, 0, { x: 5, y: 1 });
@@ -159,6 +190,8 @@ const assertArrivalPersistsAndReturnHome = () => {
   assert.equal(active.phase, "holding");
   assert.equal(active.vehicles.some((vehicle) => vehicle.status === "evacuated"), true);
   assert.equal(active.vehicles.every((vehicle) => vehicle.status === "evacuated"), true);
+  assert.equal(active.vehicles.every((vehicle) => vehicle.holdKind === "parked"), true);
+  assert.equal(buildEvacuationRenderModel(state).vehicles.length, active.vehicles.length);
   assert.equal(returnTownEvacuationHome(state, 0), true);
   assert.equal(state.towns[0].evacuationStatus, "Returning");
   assert.equal(active.phase, "returning");
@@ -172,8 +205,63 @@ const assertArrivalPersistsAndReturnHome = () => {
   assert.equal(state.towns[0].populationRemaining, 16);
 };
 
+const assertTerminalCellsDoNotDeadlock = () => {
+  const state = createRoadState();
+  assert.equal(selectTownEvacuationDestination(state, 0, { x: 5, y: 1 }), true);
+  assert.equal(issueTownEvacuation(state, 0), true);
+  const active = state.activeEvacuations[0];
+  assert.ok(active);
+  for (let i = 0; i < 160; i += 1) {
+    stepEvacuations(state, 0.05);
+  }
+  assert.equal(active.phase, "holding");
+  assert.equal(active.vehicles.length, 2);
+  assert.equal(active.vehicles.every((vehicle) => vehicle.status === "evacuated"), true);
+  assert.equal(active.vehicles.some((vehicle) => vehicle.routeIndex >= active.route.tiles.length - 2), true);
+  assert.equal(active.vehicles.some((vehicle) => vehicle.status === "queued" || vehicle.status === "moving"), false);
+  for (let i = 0; i < 40; i += 1) {
+    stepEvacuations(state, 0.05);
+  }
+  assert.equal(active.phase, "holding");
+  assert.equal(active.vehicles.some((vehicle) => vehicle.status === "queued" || vehicle.status === "moving"), false);
+};
+
+const assertHostTownHoldingAndApprovalPressure = () => {
+  const state = createHostTownRoadState();
+  assert.equal(selectTownEvacuationDestination(state, 0, { x: 8, y: 1 }), true);
+  assert.equal(issueTownEvacuation(state, 0), true);
+  const active = state.activeEvacuations[0];
+  assert.ok(active);
+  for (let i = 0; i < 220; i += 1) {
+    stepEvacuations(state, 0.05);
+  }
+  assert.equal(active.phase, "holding");
+  assert.equal(active.destinationTownId, 1);
+  assert.equal(active.vehicles.every((vehicle) => vehicle.status === "evacuated" && vehicle.holdKind === "hosted"), true);
+  assert.equal(buildEvacuationRenderModel(state).vehicles.length, 0);
+  const originPressureBefore = state.towns[0].nonApprovingHouseCount;
+  const hostPressureBefore = state.towns[1].nonApprovingHouseCount;
+  stepEvacuations(state, 1);
+  assert.equal(state.towns[0].nonApprovingHouseCount > originPressureBefore, true);
+  assert.equal(state.towns[1].nonApprovingHouseCount > hostPressureBefore, true);
+  assert.equal(returnTownEvacuationHome(state, 0), true);
+  assert.equal(buildEvacuationRenderModel(state).vehicles.length, active.vehicles.length);
+  for (let i = 0; i < 220; i += 1) {
+    stepEvacuations(state, 0.05);
+  }
+  assert.equal(active.phase, "returned");
+  assert.equal(active.vehicles.every((vehicle) => vehicle.status === "returned"), true);
+  const originPressureReturned = state.towns[0].nonApprovingHouseCount;
+  const hostPressureReturned = state.towns[1].nonApprovingHouseCount;
+  stepEvacuations(state, 1);
+  assert.equal(state.towns[0].nonApprovingHouseCount, originPressureReturned);
+  assert.equal(state.towns[1].nonApprovingHouseCount, hostPressureReturned);
+};
+
 assertRoute();
 assertSpawnQueueAndLock();
 assertHeatDestruction();
 assertArrivalPersistsAndReturnHome();
+assertTerminalCellsDoNotDeadlock();
+assertHostTownHoldingAndApprovalPressure();
 console.log("Evacuation regression passed.");

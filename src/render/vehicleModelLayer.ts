@@ -11,6 +11,7 @@ export type VehicleModelLayerConfig = {
   yawOffset: number;
   modelGroundOffset: number;
   tintMaterialPattern?: RegExp;
+  tintMaterialPatterns?: RegExp[];
   fallbackGeometry: THREE.BufferGeometry;
   fallbackMaterial: THREE.Material;
   fallbackLift: number;
@@ -23,6 +24,7 @@ export type VehicleModelInstance = {
   yaw: number;
   color: THREE.Color;
   modelColor?: THREE.Color;
+  modelAccentColor?: THREE.Color;
   fallbackColor?: THREE.Color;
 };
 
@@ -30,7 +32,7 @@ type VehicleModelTemplate = {
   geometry: THREE.BufferGeometry;
   material: THREE.Material | THREE.Material[];
   baseMatrix: THREE.Matrix4;
-  receivesInstanceColor: boolean;
+  tintSlot: number | null;
 };
 
 export type VehicleModelLayer = {
@@ -49,32 +51,56 @@ const disposeMaterial = (material: THREE.Material | THREE.Material[]): void => {
   material.dispose();
 };
 
-const cloneVehicleMaterial = (material: THREE.Material, tintable: boolean): THREE.Material => {
-  const clone = material.clone();
-  if (!tintable) {
-    return clone;
-  }
-  const maybeTinted = clone as THREE.MeshStandardMaterial & {
-    map?: THREE.Texture | null;
-    color?: THREE.Color;
-    vertexColors?: boolean;
+const normalizeTintableVehicleMaterial = (material: THREE.Material): THREE.Material => {
+  const source = material as THREE.MeshStandardMaterial & {
+    emissive?: THREE.Color;
+    roughness?: number;
+    metalness?: number;
+    side?: THREE.Side;
   };
-  if ("map" in maybeTinted) {
-    maybeTinted.map = null;
+  const normalized = new THREE.MeshStandardMaterial({
+    color: 0xffffff,
+    emissive: source.emissive ? source.emissive.clone().multiplyScalar(0.08) : 0x000000,
+    roughness: Number.isFinite(source.roughness) ? Math.max(0.42, Math.min(0.9, source.roughness)) : 0.58,
+    metalness: Number.isFinite(source.metalness) ? Math.max(0, Math.min(0.18, source.metalness * 0.2)) : 0.04,
+    transparent: false,
+    opacity: 1,
+    side: source.side ?? THREE.FrontSide,
+    vertexColors: true
+  });
+  normalized.name = material.name;
+  normalized.toneMapped = material.toneMapped;
+  return normalized;
+};
+
+const cloneVehicleMaterial = (material: THREE.Material, tintable: boolean): THREE.Material => {
+  if (tintable) {
+    return normalizeTintableVehicleMaterial(material);
   }
-  if (maybeTinted.color) {
-    maybeTinted.color.set(0xffffff);
-  }
-  if ("vertexColors" in maybeTinted) {
-    maybeTinted.vertexColors = true;
-  }
+  const clone = material.clone();
   clone.needsUpdate = true;
   return clone;
 };
 
+const getMaterialTintSlot = (material: THREE.Material, tintMaterialPatterns: RegExp[]): number | null => {
+  const slot = tintMaterialPatterns.findIndex((pattern) => pattern.test(material.name));
+  return slot >= 0 ? slot : null;
+};
+
+const ensureInstanceColorShader = (material: THREE.Material | THREE.Material[]): void => {
+  const materials = Array.isArray(material) ? material : [material];
+  materials.forEach((entry) => {
+    if (entry.userData.vehicleInstanceColorShaderReady) {
+      return;
+    }
+    entry.userData.vehicleInstanceColorShaderReady = true;
+    entry.needsUpdate = true;
+  });
+};
+
 const extractVehicleModelTemplates = (
   root: THREE.Object3D,
-  tintMaterialPattern?: RegExp
+  tintMaterialPatterns: RegExp[]
 ): { templates: VehicleModelTemplate[]; size: THREE.Vector3 } | null => {
   root.updateMatrixWorld(true);
   const worldBounds = new THREE.Box3().setFromObject(root);
@@ -90,14 +116,14 @@ const extractVehicleModelTemplates = (
       return;
     }
     const geometry = child.geometry.clone();
-    const receivesInstanceColor = Array.isArray(child.material)
-      ? child.material.some((entry) => !!tintMaterialPattern?.test(entry.name))
-      : !!tintMaterialPattern?.test(child.material.name);
+    const tintSlot = Array.isArray(child.material)
+      ? child.material.reduce<number | null>((match, entry) => match ?? getMaterialTintSlot(entry, tintMaterialPatterns), null)
+      : getMaterialTintSlot(child.material, tintMaterialPatterns);
     const material = Array.isArray(child.material)
-      ? child.material.map((entry) => cloneVehicleMaterial(entry, !!tintMaterialPattern?.test(entry.name)))
-      : cloneVehicleMaterial(child.material, receivesInstanceColor);
+      ? child.material.map((entry) => cloneVehicleMaterial(entry, getMaterialTintSlot(entry, tintMaterialPatterns) !== null))
+      : cloneVehicleMaterial(child.material, tintSlot !== null);
     const baseMatrix = child.matrixWorld.clone().premultiply(recenter);
-    templates.push({ geometry, material, baseMatrix, receivesInstanceColor });
+    templates.push({ geometry, material, baseMatrix, tintSlot });
   });
   if (templates.length === 0) {
     return null;
@@ -126,7 +152,7 @@ export const createVehicleModelLayer = (
   const modelMeshes: Array<{
     mesh: THREE.InstancedMesh;
     baseMatrix: THREE.Matrix4;
-    receivesInstanceColor: boolean;
+    tintSlot: number | null;
   }> = [];
   let modelScale = 1;
   let useModel = false;
@@ -143,13 +169,14 @@ export const createVehicleModelLayer = (
   };
 
   const loader = registerPbrSpecularGlossiness(new GLTFLoader());
+  const tintMaterialPatterns = config.tintMaterialPatterns ?? (config.tintMaterialPattern ? [config.tintMaterialPattern] : []);
   loader.load(
     config.modelPath,
     (gltf) => {
       if (disposed) {
         return;
       }
-      const extracted = extractVehicleModelTemplates(gltf.scene, config.tintMaterialPattern);
+      const extracted = extractVehicleModelTemplates(gltf.scene, tintMaterialPatterns);
       if (!extracted) {
         return;
       }
@@ -164,7 +191,7 @@ export const createVehicleModelLayer = (
         mesh.frustumCulled = false;
         mesh.name = `${config.name}-model`;
         scene.add(mesh);
-        modelMeshes.push({ mesh, baseMatrix: template.baseMatrix, receivesInstanceColor: template.receivesInstanceColor });
+        modelMeshes.push({ mesh, baseMatrix: template.baseMatrix, tintSlot: template.tintSlot });
       });
       useModel = modelMeshes.length > 0;
     },
@@ -263,11 +290,17 @@ export const createVehicleModelLayer = (
       fallbackMesh.count = 0;
       for (let i = 0; i < count; i += 1) {
         writeVehicleMatrix(surface, instances[i]!, config.modelGroundOffset, modelScale, matrix);
-        modelMeshes.forEach(({ mesh, baseMatrix, receivesInstanceColor }) => {
+        modelMeshes.forEach(({ mesh, baseMatrix, tintSlot }) => {
           templateMatrix.copy(matrix).multiply(baseMatrix);
           mesh.setMatrixAt(i, templateMatrix);
-          if (receivesInstanceColor) {
-            mesh.setColorAt(i, instances[i]!.modelColor ?? instances[i]!.color);
+          if (tintSlot !== null) {
+            mesh.setColorAt(
+              i,
+              tintSlot === 0
+                ? instances[i]!.modelColor ?? instances[i]!.color
+                : instances[i]!.modelAccentColor ?? instances[i]!.modelColor ?? instances[i]!.color
+            );
+            ensureInstanceColorShader(mesh.material);
           }
         });
       }

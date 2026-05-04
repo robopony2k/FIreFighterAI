@@ -61,6 +61,9 @@ export const buildEvacuationRenderModel = (state: WorldState): EvacuationRenderM
       tiles: evacuation.route.tiles
     });
     for (const vehicle of evacuation.vehicles) {
+      if (evacuation.phase === "holding" && vehicle.status === "evacuated" && vehicle.holdKind === "hosted") {
+        continue;
+      }
       const lastRouteIndex = Math.max(0, evacuation.route.tiles.length - 1);
       const currentIndex = Math.max(0, Math.min(lastRouteIndex, vehicle.routeIndex));
       const nextIndex =
@@ -72,6 +75,10 @@ export const buildEvacuationRenderModel = (state: WorldState): EvacuationRenderM
       const progress = vehicle.status === "moving" ? Math.max(0, Math.min(1, vehicle.progress)) : 0;
       let x = current.x + (next.x - current.x) * progress;
       let y = current.y + (next.y - current.y) * progress;
+      if (vehicle.status === "evacuated" && vehicle.holdKind === "parked") {
+        x = Number.isFinite(vehicle.holdX) ? vehicle.holdX! : vehicle.x;
+        y = Number.isFinite(vehicle.holdY) ? vehicle.holdY! : vehicle.y;
+      }
       const prevX = Number.isFinite(vehicle.prevX) ? vehicle.prevX : vehicle.x;
       const prevY = Number.isFinite(vehicle.prevY) ? vehicle.prevY : vehicle.y;
       const yawFrom =
@@ -89,7 +96,7 @@ export const buildEvacuationRenderModel = (state: WorldState): EvacuationRenderM
       const dx = yawTo.x - yawFrom.x;
       const dy = yawTo.y - yawFrom.y;
       const yaw = Math.abs(dx) + Math.abs(dy) > 0.0001 ? Math.atan2(dx, dy) : 0;
-      if (vehicle.status === "evacuated" || vehicle.status === "returned") {
+      if ((vehicle.status === "evacuated" && vehicle.holdKind !== "parked") || vehicle.status === "returned") {
         const lateral = ((vehicle.id % 5) - 2) * 0.16;
         const depth = (Math.floor(vehicle.id / 5) % 3) * 0.14;
         x += Math.cos(yaw) * lateral - Math.sin(yaw) * depth;

@@ -96,7 +96,7 @@ Design intent:
 - The route preview is not advice. The player judges the route from visible fire, roads, terrain, town layout, traffic, distance, and fire spread direction.
 - The game validates only basic feasibility and must not show route safety scores, recommended points, best routes, alternatives, ETA, survival odds, heat ratings, congestion forecasts, or warning copy that tells the player a route is bad.
 - Civilian evacuation uses representative vehicles rendered as varied civilian cars. Vehicles follow the locked route, occupy road slots, queue behind blockers, accumulate heat exposure, burn under sustained or extreme exposure, kill occupants when destroyed, and leave road obstacles that reduce or block capacity.
-- Completed evacuation vehicles remain staged at the selected destination until the player orders evacuees to return home. Return-home uses the same locked route in reverse and keeps the same queueing, blockage, and heat exposure rules.
+- Completed evacuation vehicles remain staged at the selected destination until the player orders evacuees to return home. Non-town destinations visibly park vehicles off-road near the evacuation point; destination towns host evacuees off-map instead, creating over-capacity approval pressure for both the origin and host towns while evacuees stay there. Return-home uses the same locked route in reverse and keeps the same queueing, blockage, and heat exposure rules.
 - Evacuation outcomes update town population counts and should feed existing approval/scoring hooks where available.
 
 ## Progression and Unlocks

@@ -15,6 +15,8 @@ export type EvacuationVehicleStatus = "queued" | "moving" | "evacuated" | "retur
 
 export type EvacuationPhase = "outbound" | "holding" | "returning" | "returned";
 
+export type EvacuationVehicleHoldKind = "parked" | "hosted";
+
 export type EvacuationVehicle = {
   id: number;
   evacuationId: string;
@@ -29,6 +31,9 @@ export type EvacuationVehicle = {
   prevX: number;
   prevY: number;
   colorSeed: number;
+  holdKind?: EvacuationVehicleHoldKind;
+  holdX?: number;
+  holdY?: number;
 };
 
 export type EvacuationObstacle = {
@@ -53,6 +58,7 @@ export type EvacuationRoute = {
 export type ActiveEvacuation = {
   id: string;
   townId: number;
+  destinationTownId?: number;
   phase: EvacuationPhase;
   route: EvacuationRoute;
   vehicles: EvacuationVehicle[];

@@ -1,6 +1,6 @@
 import type { WorldState } from "../../../core/state.js";
 import type { Point } from "../../../core/types.js";
-import { indexFor } from "../../../core/grid.js";
+import { inBounds, indexFor } from "../../../core/grid.js";
 import {
   EVACUATION_EXTREME_FIRE_THRESHOLD,
   EVACUATION_EXTREME_HEAT_THRESHOLD,
@@ -19,6 +19,16 @@ import type {
   EvacuationVehicle
 } from "../types/evacuationTypes.js";
 
+const EVACUATION_APPROVAL_PEOPLE_PER_HOUSEHOLD = 8;
+const EVACUATION_ORIGIN_DISPLACEMENT_DISAPPROVAL_PER_HOUSEHOLD_DAY = 0.04;
+const EVACUATION_HOST_OVER_CAPACITY_DISAPPROVAL_PER_HOUSEHOLD_DAY = 0.06;
+
+const getTownCenterX = (town: WorldState["towns"][number]): number => (Number.isFinite(town.cx) ? town.cx : town.x);
+const getTownCenterY = (town: WorldState["towns"][number]): number => (Number.isFinite(town.cy) ? town.cy : town.y);
+
+const getTownById = (state: WorldState, townId: number): WorldState["towns"][number] | null =>
+  state.towns.find((entry) => entry.id === townId) ?? null;
+
 const getTownPopulation = (state: WorldState, townId: number): number => {
   let population = 0;
   for (let idx = 0; idx < state.grid.totalTiles; idx += 1) {
@@ -27,6 +37,33 @@ const getTownPopulation = (state: WorldState, townId: number): number => {
     }
   }
   return population;
+};
+
+const findDestinationTownId = (state: WorldState, originTownId: number, destination: Point): number | undefined => {
+  const x = Math.trunc(destination.x);
+  const y = Math.trunc(destination.y);
+  if (inBounds(state.grid, x, y)) {
+    const directTownId = state.tileTownId[indexFor(state.grid, x, y)] ?? -1;
+    if (directTownId >= 0 && directTownId !== originTownId && getTownById(state, directTownId)) {
+      return directTownId;
+    }
+  }
+  let bestTownId: number | undefined;
+  let bestDistSq = Number.POSITIVE_INFINITY;
+  for (const town of state.towns) {
+    if (town.id === originTownId) {
+      continue;
+    }
+    const radius = Math.max(3, Number.isFinite(town.radius) ? town.radius : 3);
+    const dx = destination.x - getTownCenterX(town);
+    const dy = destination.y - getTownCenterY(town);
+    const distSq = dx * dx + dy * dy;
+    if (distSq <= radius * radius && distSq < bestDistSq) {
+      bestDistSq = distSq;
+      bestTownId = town.id;
+    }
+  }
+  return bestTownId;
 };
 
 const syncTownEvacuationCounts = (state: WorldState, evacuation: ActiveEvacuation): void => {
@@ -89,6 +126,7 @@ export const createActiveEvacuation = (
   return {
     id,
     townId: town.id,
+    destinationTownId: findDestinationTownId(state, town.id, route.destination),
     phase: "outbound",
     route,
     vehicles: [],
@@ -122,6 +160,9 @@ export const orderEvacuationReturnHome = (state: WorldState, townId: number): bo
     vehicle.status = "queued";
     vehicle.routeIndex = endIndex;
     vehicle.progress = 0;
+    vehicle.holdKind = undefined;
+    vehicle.holdX = undefined;
+    vehicle.holdY = undefined;
     vehicle.x = destination.x;
     vehicle.y = destination.y;
     vehicle.prevX = destination.x;
@@ -149,9 +190,90 @@ const getNextRouteIndex = (evacuation: ActiveEvacuation, vehicle: EvacuationVehi
   return vehicle.routeIndex < getRouteEndIndex(evacuation) ? vehicle.routeIndex + 1 : null;
 };
 
-const markVehicleArrived = (evacuation: ActiveEvacuation, vehicle: EvacuationVehicle): void => {
+const isParkingTile = (state: WorldState, x: number, y: number): boolean => {
+  if (!inBounds(state.grid, x, y)) {
+    return false;
+  }
+  const tile = state.tiles[indexFor(state.grid, x, y)];
+  if (!tile) {
+    return false;
+  }
+  const idx = indexFor(state.grid, x, y);
+  if ((state.tileFire[idx] ?? tile.fire ?? 0) >= EVACUATION_EXTREME_FIRE_THRESHOLD) {
+    return false;
+  }
+  if ((state.tileHeat[idx] ?? tile.heat ?? 0) >= EVACUATION_EXTREME_HEAT_THRESHOLD) {
+    return false;
+  }
+  return tile.type !== "road" && tile.type !== "base" && tile.type !== "water" && tile.type !== "house";
+};
+
+const findVehicleHoldPosition = (state: WorldState, evacuation: ActiveEvacuation, vehicle: EvacuationVehicle): Point => {
+  const destination = evacuation.route.tiles[getRouteEndIndex(evacuation)] ?? evacuation.route.destination;
+  const candidates: Point[] = [];
+  for (let radius = 1; radius <= 4; radius += 1) {
+    for (let dy = -radius; dy <= radius; dy += 1) {
+      for (let dx = -radius; dx <= radius; dx += 1) {
+        if (Math.max(Math.abs(dx), Math.abs(dy)) !== radius) {
+          continue;
+        }
+        const x = destination.x + dx;
+        const y = destination.y + dy;
+        if (isParkingTile(state, x, y)) {
+          candidates.push({ x, y });
+        }
+      }
+    }
+    if (candidates.length > vehicle.id + 2) {
+      break;
+    }
+  }
+  const chosen = candidates.length > 0 ? candidates[(vehicle.id - 1) % candidates.length]! : destination;
+  const lateral = ((vehicle.id % 3) - 1) * 0.18;
+  const depth = (Math.floor(vehicle.id / 3) % 3 - 1) * 0.18;
+  return { x: chosen.x + lateral, y: chosen.y + depth };
+};
+
+const clearVehicleFromOccupancy = (occupancy: Map<string, number>, vehicle: EvacuationVehicle): void => {
+  const currentKey = getVehicleTileKey(vehicle);
+  const currentCount = (occupancy.get(currentKey) ?? 0) - 1;
+  if (currentCount > 0) {
+    occupancy.set(currentKey, currentCount);
+  } else {
+    occupancy.delete(currentKey);
+  }
+};
+
+const markVehicleArrived = (
+  state: WorldState,
+  evacuation: ActiveEvacuation,
+  vehicle: EvacuationVehicle,
+  occupancy: Map<string, number>
+): void => {
+  clearVehicleFromOccupancy(occupancy, vehicle);
   vehicle.progress = 0;
-  vehicle.status = evacuation.phase === "returning" ? "returned" : "evacuated";
+  if (evacuation.phase === "returning") {
+    vehicle.status = "returned";
+    vehicle.holdKind = undefined;
+    vehicle.holdX = undefined;
+    vehicle.holdY = undefined;
+    return;
+  }
+  vehicle.status = "evacuated";
+  if (evacuation.destinationTownId !== undefined) {
+    vehicle.holdKind = "hosted";
+    vehicle.holdX = undefined;
+    vehicle.holdY = undefined;
+    return;
+  }
+  const hold = findVehicleHoldPosition(state, evacuation, vehicle);
+  vehicle.holdKind = "parked";
+  vehicle.holdX = hold.x;
+  vehicle.holdY = hold.y;
+  vehicle.x = hold.x;
+  vehicle.y = hold.y;
+  vehicle.prevX = hold.x;
+  vehicle.prevY = hold.y;
 };
 
 const buildOccupancy = (evacuation: ActiveEvacuation): Map<string, number> => {
@@ -205,7 +327,10 @@ const spawnVehicle = (evacuation: ActiveEvacuation): void => {
     y: start.y,
     prevX: start.x,
     prevY: start.y,
-    colorSeed: ((evacuation.townId + 1) * 73856093) ^ (vehicleId * 19349663)
+    colorSeed: ((evacuation.townId + 1) * 73856093) ^ (vehicleId * 19349663),
+    holdKind: undefined,
+    holdX: undefined,
+    holdY: undefined
   });
 };
 
@@ -299,7 +424,7 @@ const advanceVehicle = (
   }
   const firstNextIndex = getNextRouteIndex(evacuation, vehicle);
   if (firstNextIndex === null) {
-    markVehicleArrived(evacuation, vehicle);
+    markVehicleArrived(state, evacuation, vehicle, occupancy);
     return;
   }
   const next = evacuation.route.tiles[firstNextIndex]!;
@@ -310,11 +435,10 @@ const advanceVehicle = (
   vehicle.status = "moving";
   vehicle.progress += EVACUATION_VEHICLE_SPEED_TILES_PER_DAY * stepDays;
   while (vehicle.progress >= 1) {
-    const currentKey = getVehicleTileKey(vehicle);
-    occupancy.set(currentKey, Math.max(0, (occupancy.get(currentKey) ?? 0) - 1));
+    clearVehicleFromOccupancy(occupancy, vehicle);
     const nextIndex = getNextRouteIndex(evacuation, vehicle);
     if (nextIndex === null) {
-      markVehicleArrived(evacuation, vehicle);
+      markVehicleArrived(state, evacuation, vehicle, occupancy);
       return;
     }
     vehicle.routeIndex = nextIndex;
@@ -326,7 +450,7 @@ const advanceVehicle = (
     occupancy.set(nextKey, (occupancy.get(nextKey) ?? 0) + 1);
     const upcomingIndex = getNextRouteIndex(evacuation, vehicle);
     if (upcomingIndex === null) {
-      markVehicleArrived(evacuation, vehicle);
+      markVehicleArrived(state, evacuation, vehicle, occupancy);
       return;
     }
     const upcoming = evacuation.route.tiles[upcomingIndex]!;
@@ -336,6 +460,46 @@ const advanceVehicle = (
       return;
     }
   }
+};
+
+const applyEvacuationApprovalPressure = (state: WorldState, evacuation: ActiveEvacuation, stepDays: number): void => {
+  if (stepDays <= 0 || evacuation.phase === "returned") {
+    return;
+  }
+  const originTown = getTownById(state, evacuation.townId);
+  if (!originTown) {
+    return;
+  }
+  let displacedPeople = 0;
+  let hostedPeople = 0;
+  for (const vehicle of evacuation.vehicles) {
+    if (vehicle.status === "destroyed" || vehicle.status === "returned") {
+      continue;
+    }
+    if (vehicle.status === "evacuated" || vehicle.status === "moving" || vehicle.status === "queued") {
+      displacedPeople += vehicle.occupants;
+    }
+    if (evacuation.phase === "holding" && vehicle.status === "evacuated" && vehicle.holdKind === "hosted") {
+      hostedPeople += vehicle.occupants;
+    }
+  }
+  if (displacedPeople > 0) {
+    originTown.nonApprovingHouseCount +=
+      (displacedPeople / EVACUATION_APPROVAL_PEOPLE_PER_HOUSEHOLD) *
+      EVACUATION_ORIGIN_DISPLACEMENT_DISAPPROVAL_PER_HOUSEHOLD_DAY *
+      stepDays;
+  }
+  if (hostedPeople <= 0 || evacuation.destinationTownId === undefined) {
+    return;
+  }
+  const hostTown = getTownById(state, evacuation.destinationTownId);
+  if (!hostTown || hostTown.id === originTown.id) {
+    return;
+  }
+  hostTown.nonApprovingHouseCount +=
+    (hostedPeople / EVACUATION_APPROVAL_PEOPLE_PER_HOUSEHOLD) *
+    EVACUATION_HOST_OVER_CAPACITY_DISAPPROVAL_PER_HOUSEHOLD_DAY *
+    stepDays;
 };
 
 export const stepEvacuations = (state: WorldState, stepDays: number): EvacuationLossEvent[] => {
@@ -349,6 +513,7 @@ export const stepEvacuations = (state: WorldState, stepDays: number): Evacuation
       continue;
     }
     if (evacuation.phase !== "outbound" && evacuation.phase !== "returning") {
+      applyEvacuationApprovalPressure(state, evacuation, stepDays);
       syncTownEvacuationCounts(state, evacuation);
       continue;
     }
@@ -387,6 +552,7 @@ export const stepEvacuations = (state: WorldState, stepDays: number): Evacuation
       }
     }
     syncTownEvacuationCounts(state, evacuation);
+    applyEvacuationApprovalPressure(state, evacuation, stepDays);
     if (activePeople <= 0 && evacuation.populationToSpawn <= 0) {
       if (evacuation.phase === "returning") {
         evacuation.phase = "returned";
