@@ -44,6 +44,7 @@ export type AppBootLoopDeps = {
   mainHitchThresholdMs: number;
   getFrameCapFps: () => number;
   getTimeSpeedValue: () => number;
+  getMaxSimulationStep?: () => number | null;
   isGenerating: () => boolean;
   isTitleScreenVisible?: () => boolean;
   isCharacterScreenVisible: () => boolean;
@@ -112,7 +113,12 @@ export const startAppBootLoop = (deps: AppBootLoopDeps): void => {
       accumulator = Math.min(accumulator, deps.baseStep);
     }
     const timeSpeedValue = deps.getTimeSpeedValue();
-    const simStep = deps.baseStep * timeSpeedValue;
+    const requestedSimStep = deps.baseStep * timeSpeedValue;
+    const maxSimulationStep = deps.getMaxSimulationStep?.() ?? null;
+    const simStep =
+      maxSimulationStep !== null && Number.isFinite(maxSimulationStep) && maxSimulationStep > 0
+        ? Math.min(requestedSimStep, maxSimulationStep)
+        : requestedSimStep;
     const maxStepsPerFrame = incidentMode ? 1 : threeTestVisible ? 1 : 8;
     let simStepsThisFrame = 0;
     let simFrameMs = 0;

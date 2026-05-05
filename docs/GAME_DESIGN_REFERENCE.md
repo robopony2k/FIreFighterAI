@@ -48,6 +48,8 @@ Story: You are the new "Fire Warden" in charge of a region. Your mission is to p
 ## Vegetation and Forest Identity
 
 - Vegetated tiles carry deterministic vegetation state that includes age, canopy cover, and stem density, so forests can look denser without changing the underlying simulation grid.
+- Campaign vegetation maturity is tuned for the 20-year run rather than real-world botany: grass/floodplain mature in about one year, scrub in about two years, and forest reaches full gameplay fuel/canopy maturity in about five years.
+- Forest expansion should be visible over a few quiet growth seasons; open vegetated tiles can recruit into young forest when canopy and nearby seed pressure are high enough.
 - Forest stands are assigned one dominant tree identity from pine, oak, maple, birch, or elm. Large forest areas can also contain 1-2 clustered secondary species so they read as stands instead of noisy per-tile mixes.
 - Broad environmental bias already shapes composition: drier or higher terrain leans pine, wetter or lower terrain leans elm, and other hardwoods fill the middle ground.
 - Tree identity currently drives mapgen readability and rendering variety first. It is not yet a separate fire-fuel model.
@@ -68,6 +70,7 @@ Story: You are the new "Fire Warden" in charge of a region. Your mission is to p
 - Terrain can locally shape wind around burning cells with small clamped strength and steering changes, including obstruction, downslope acceleration, and simple corridor funneling; this is not a persistent wind simulation.
 - Spread should be reliable in high-risk conditions; low-risk periods should still allow controlled burns.
 - Campaign random ignitions require viable incident weather, so low or moderate forecast risk can still be shown without creating false-alarm fires that immediately fizzle. Manual, debug, controlled-burn, and SIM Lab ignitions can still test low-risk fire behavior.
+- The Fire Ignition Events runtime toggle gates new campaign fire starts and heat/spread-scheduled ignition events, allowing no-fire runs that evaluate forest and town growth without burning the region.
 - The player should feel the difference between a mild year and a severe year.
 
 ## Resource Management
@@ -147,6 +150,7 @@ Command Roster
 Terrain
 - Seed and map size presets.
 - Map generation sliders (forest/meadow/water settings).
+- Island archetypes should visibly change the same-seed initial relief and coastline plan. The current tectonic layer is an aesthetic landform proxy for natural islands, ridges, shelves, bays, and uplands, not a literal plate-simulation goal.
 - Tile fuel profiles (baseFuel/ignition/burnRate/heatOutput/spreadBoost/heatTransferCap/heatRetention/windFactor per tile type); windFactor is retained as the config key but means windbreak strength, where 0 is open terrain and 1 is strong wind obstruction.
 - Vegetation regrowth (water influence, ash recovery, canopy growth, forest recruit).
 - Community and road generation (town density, bridge allowance, settlement spacing, road strictness, pre-growth years).
@@ -170,7 +174,7 @@ Fire
 Other
 - Career/time pacing (career years, days/sec, phase durations, ash regrow delay, growth speed).
 - Time controls support persisted preset-button mode and an experimental slider mode; the slider spans 0x-80x in 0.25x steps, shares one value across strategic/incident time, and `Skip to Next Fire` temporarily forces max speed before restoring the prior value.
-- High-speed strategic time must still detect the first fire-season incident immediately: when calendar advancement seeds or discovers active fire, the sim enters incident mode and pauses before any large high-speed fire step can burn past the opening response window.
+- High-speed strategic time must still detect the first fire-season incident immediately: when calendar advancement seeds or discovers active fire, the sim enters incident mode and pauses before any large high-speed fire step can burn past the opening response window. Near fire-eligible weather or active fire work, the runtime internally caps submitted strategic sim steps to the fire kernel's idle adaptive window while leaving the player's selected speed display unchanged; `Skip to Next Fire` uses the same cap once it reaches viable incident weather.
 - Economy baselines (base budget, approval min, hectares per tile, initial approval).
 - Progression toggles (available upgrades list).
 - Debug/perf toggles (simPerf, renderTrees/effects), unlimited money.

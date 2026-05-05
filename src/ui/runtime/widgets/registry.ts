@@ -200,7 +200,7 @@ export const RUNTIME_WIDGET_SPECS: readonly RuntimeWidgetSpec[] = [
     id: "simulationSettings",
     title: "Simulation Settings",
     shortTitle: "Simulation",
-    description: "Runtime testing toggles that can suppress random ignitions or the annual report.",
+    description: "Runtime testing toggles that can suppress fire ignition events or the annual report.",
     surfaceTitles: {
       phaseDom: "Testing",
       threeDock: "TESTING"

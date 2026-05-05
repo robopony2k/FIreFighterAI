@@ -5,6 +5,7 @@ import { createInitialState, syncTileSoA } from "../dist/core/state.js";
 import { applyFuel } from "../dist/core/tiles.js";
 import { TreeType } from "../dist/core/types.js";
 import {
+  FOREST_RECRUIT_AGE_YEARS,
   getVegetationAgeCapYears,
   getVegetationMaturity01,
   syncDerivedVegetationState
@@ -193,7 +194,8 @@ assert.ok(sawForest, "burned tile never recruited back into forest");
 assert.equal(recoveredTile.type, "forest", "recovered center tile should end as forest");
 assert.equal(recoveredTile.treeType, TreeType.Oak, "recovered forest should inherit a neighboring tree type");
 assert.ok(
-  recoveredTile.vegetationAgeYears >= 6 && recoveredTile.vegetationAgeYears <= getVegetationAgeCapYears("forest"),
+  recoveredTile.vegetationAgeYears >= FOREST_RECRUIT_AGE_YEARS
+    && recoveredTile.vegetationAgeYears <= getVegetationAgeCapYears("forest"),
   "recovered forest age should stay within the capped recruit range"
 );
 

@@ -172,8 +172,8 @@ export const RUNTIME_SETTING_DEFINITIONS: ReadonlyArray<RuntimeSettingDefinition
     key: "randomFireIgnition",
     section: "General",
     kind: "boolean",
-    label: "Random Fire Ignition",
-    description: "Allow random fire starts during fire season simulation.",
+    label: "Fire Ignition Events",
+    description: "Allow any new fire ignition events. Disable this for no-fire growth and town simulation runs.",
     defaultValue: DEFAULT_RUNTIME_SETTINGS.randomFireIgnition,
     queryStyle: "0-false"
   },

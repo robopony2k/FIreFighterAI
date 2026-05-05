@@ -37,6 +37,7 @@ import { randomizeWind } from "../sim/wind.js";
 import {
   endGame,
   getActiveTimeSpeedValue,
+  getStrategicFireSimulationStepCap,
   isSimulationEffectivelyPaused,
   setGameEventBus,
   setPhase,
@@ -1968,6 +1969,7 @@ export const createAppRuntime = (): AppRuntime => {
       mainHitchThresholdMs: MAIN_HITCH_THRESHOLD_MS,
       getFrameCapFps,
       getTimeSpeedValue: () => getActiveTimeSpeedValue(state),
+      getMaxSimulationStep: () => getStrategicFireSimulationStepCap(state),
       isGenerating: () => isGenerating,
       isTitleScreenVisible: () => titleScreenVisible,
       isCharacterScreenVisible: () => !characterScreen.classList.contains("hidden"),

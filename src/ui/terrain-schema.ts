@@ -453,6 +453,14 @@ export const applyTerrainRecipeToControls = (
   syncTerrainControlOutputs(elements);
 };
 
+export const applyTerrainArchetypeDefaultsToControls = (
+  archetype: TerrainRecipe["archetype"],
+  mapSize: TerrainRecipe["mapSize"],
+  elements: TerrainControlElements
+): void => {
+  applyTerrainRecipeToControls(createDefaultTerrainRecipe(mapSize, archetype), elements);
+};
+
 export const readTerrainRecipeFromControls = (
   elements: TerrainControlElements,
   fallbackRecipe?: TerrainRecipe

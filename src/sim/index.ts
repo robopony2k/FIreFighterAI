@@ -99,11 +99,11 @@ const PHASE_YEAR_DAYS = PHASES.reduce((sum, phase) => sum + phase.duration, 0);
 const VIRTUAL_YEAR_DAYS = Math.max(1, Math.floor(VIRTUAL_CLIMATE_PARAMS.seasonLen));
 const CAREER_TOTAL_DAYS = VIRTUAL_YEAR_DAYS * CAREER_YEARS;
 const CLIMATE_SEASONS = ["Winter", "Spring", "Summer", "Autumn"];
-let allowRandomFireIgnition = getRuntimeSettings().randomFireIgnition;
+let allowFireIgnitionEvents = getRuntimeSettings().randomFireIgnition;
 let allowAnnualReport = getRuntimeSettings().annualReportEnabled;
 
 subscribeRuntimeSettings((settings) => {
-  allowRandomFireIgnition = settings.randomFireIgnition;
+  allowFireIgnitionEvents = settings.randomFireIgnition;
   allowAnnualReport = settings.annualReportEnabled;
 });
 
@@ -443,6 +443,24 @@ const hasFireSimulationWork = (
   state: Pick<WorldState, "fireActivityState" | "fireBoundsActive">
 ): boolean => hasFireActivity(state) || state.fireBoundsActive;
 
+const STRATEGIC_FIRE_SIM_STEP_CAP_DAYS = 0.5;
+
+export const getStrategicFireSimulationStepCap = (state: WorldState): number | null => {
+  if (state.simTimeMode !== "strategic" || state.gameOver) {
+    return null;
+  }
+  if (hasFireSimulationWork(state)) {
+    return STRATEGIC_FIRE_SIM_STEP_CAP_DAYS / Math.max(DAYS_PER_SECOND, 0.0001);
+  }
+  if (state.phase !== "fire" || !allowFireIgnitionEvents) {
+    return null;
+  }
+  const weather = sampleFireWeatherResponse(state, state.careerDay);
+  const fireEligibleWeather =
+    weather.climateRisk >= FIRE_WEATHER_RISK_MIN || isRandomIgnitionWeatherViable(weather);
+  return fireEligibleWeather ? STRATEGIC_FIRE_SIM_STEP_CAP_DAYS / Math.max(DAYS_PER_SECOND, 0.0001) : null;
+};
+
 const isGrowthWeather = (state: WorldState): boolean =>
   state.climateTemp >= GROWTH_WEATHER_TEMP_MIN &&
   state.climateTemp <= GROWTH_WEATHER_TEMP_MAX &&
@@ -675,11 +693,18 @@ export function setPhase(state: WorldState, rng: RNG, next: WorldState["phase"],
   }
   if (state.phase === "fire") {
     randomizeWind(state, rng);
-    pickInitialFires(state, rng);
+    if (allowFireIgnitionEvents) {
+      pickInitialFires(state, rng);
+    }
     state.incidentTimeSpeedIndex = DEFAULT_INCIDENT_TIME_SPEED_INDEX;
     startScoringSeason(state);
     debugClimateChecks(state.seed, VIRTUAL_CLIMATE_PARAMS, DEFAULT_MOISTURE_PARAMS);
-    setStatus(state, "Fire season begins. Stay ahead of the line.");
+    setStatus(
+      state,
+      allowFireIgnitionEvents
+        ? "Fire season begins. Stay ahead of the line."
+        : "Fire season begins with ignition events disabled."
+    );
     showSeasonOverlay(state);
     return;
   }
@@ -933,8 +958,22 @@ export function stepSim(state: WorldState, effects: EffectsState, rng: RNG, delt
       state.fireSeasonDay += simDayDelta;
       const seasonIntensity = phaseSample.id === "fire" ? getFireSeasonIntensity(phaseSample.phaseDay, state.fireSettings) : 1;
       const spreadScale = state.fireSettings.simSpeed * (0.55 + seasonIntensity * 0.45);
-      if (allowRandomFireIgnition && phaseSample.id === "fire" && isRandomIgnitionWeatherViable(weather)) {
+      if (allowFireIgnitionEvents && phaseSample.id === "fire" && isRandomIgnitionWeatherViable(weather)) {
         igniteRandomFire(state, rng, simDayDelta, clamp(weather.ignition, 0, 1.35));
+        activeFires = Math.max(activeFires, state.lastActiveFires);
+        fireActivityState = state.fireActivityState;
+        if (!hadFireChainRisk && hasFireActivity(state)) {
+          const strongest = findStrongestFireTile(state);
+          if (strongest) {
+            fireSubsteps += 1;
+            fireDaysSimulated += simDayDelta;
+            state.firePerfSubsteps = fireSubsteps;
+            state.firePerfSimulatedDays = fireDaysSimulated;
+            pauseForDetectedFireIncident(state, strongest, previousSpeedIndex, previousSliderValue);
+            stepParticles(state, effects, simDelta);
+            return;
+          }
+        }
       }
       if (state.units.length > 0) {
         applyExtinguishStep(state, simDelta, weather.suppression);
@@ -948,13 +987,28 @@ export function stepSim(state: WorldState, effects: EffectsState, rng: RNG, delt
         1,
         burnoutFactor,
         weather,
-        weather.climateIgnitionMultiplier
+        weather.climateIgnitionMultiplier,
+        allowFireIgnitionEvents
       );
       fireActivityState = state.fireActivityState;
       if (weather.seasonIndex === 0 && weather.ignition < 0.04 && activeFires > 0) {
         extinguishAllFires(state, effects);
         activeFires = 0;
         fireActivityState = state.fireActivityState;
+      } else if (!hadFireChainRisk && hasFireActivity(state)) {
+        const strongest = findStrongestFireTile(state);
+        if (strongest) {
+          remaining -= simDelta;
+          careerCursor += simDayDelta;
+          fireSubsteps += 1;
+          fireDaysSimulated += simDayDelta;
+          state.firePerfSubsteps = fireSubsteps;
+          state.firePerfSimulatedDays = fireDaysSimulated;
+          state.lastActiveFires = activeFires;
+          pauseForDetectedFireIncident(state, strongest, previousSpeedIndex, previousSliderValue);
+          stepParticles(state, effects, simDelta);
+          return;
+        }
       }
       remaining -= simDelta;
       careerCursor += simDayDelta;

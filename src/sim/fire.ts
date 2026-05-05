@@ -12,6 +12,7 @@ import { indexFor } from "../core/grid.js";
 import { ensureTileSoA } from "../core/tileCache.js";
 import { getFuelProfiles } from "../core/tiles.js";
 import { TILE_TYPE_IDS } from "../core/state.js";
+import type { WorldState } from "../core/state.js";
 import { destroyHouse } from "../core/towns.js";
 import { clearVegetationState } from "../core/vegetation.js";
 import { advanceHouseDamage } from "../systems/settlements/sim/buildingLifecycle.js";
@@ -111,7 +112,7 @@ const isIgnitableTile = (tile) =>
         tile.type !== "firebreak" &&
         tile.type !== "road";
 
-function stepFireBaseline(state, rng, delta, spreadScale, dayFactor, burnoutFactor = 0, weatherResponse: FireWeatherResponse | null = null, climateIgnitionMultiplier = state.climateIgnitionMultiplier || 1) {
+function stepFireBaseline(state, rng, delta, spreadScale, dayFactor, burnoutFactor = 0, weatherResponse: FireWeatherResponse | null = null, climateIgnitionMultiplier = state.climateIgnitionMultiplier || 1, allowIgnitionEvents = true) {
     const cols = state.grid.cols;
     const rows = state.grid.rows;
     const boundsActive = state.fireBoundsActive;
@@ -210,7 +211,7 @@ function stepFireBaseline(state, rng, delta, spreadScale, dayFactor, burnoutFact
             tile.heat = currentHeat;
             tile.fuel = fuel[idx];
             igniteMask[idx] = 0;
-            if (fuel[idx] > 0 && currentFire <= BASELINE_FIRE_EPS && currentHeat >= BASELINE_IGNITION_HEAT / ignitionBoost && isIgnitableTile(tile)) {
+            if (allowIgnitionEvents && fuel[idx] > 0 && currentFire <= BASELINE_FIRE_EPS && currentHeat >= BASELINE_IGNITION_HEAT / ignitionBoost && isIgnitableTile(tile)) {
                 const igniteChance = clamp(BASELINE_BASE_IGNITE * ignitionBoost * (currentHeat / heatCap), 0, 1);
                 if (rng.next() < igniteChance) {
                     igniteMask[idx] = 1;
@@ -283,9 +284,9 @@ function stepFireBaseline(state, rng, delta, spreadScale, dayFactor, burnoutFact
     applyFireActivityMetrics(state, activeFires);
     return activeFires;
 }
-export function stepFire(state, effects: EffectsState, rng, delta, spreadScale, dayFactor, burnoutFactor = 0, weatherResponse: FireWeatherResponse | null = null, climateIgnitionMultiplier = state.climateIgnitionMultiplier || 1) {
+export function stepFire(state: WorldState, effects: EffectsState, rng, delta, spreadScale, dayFactor, burnoutFactor = 0, weatherResponse: FireWeatherResponse | null = null, climateIgnitionMultiplier = state.climateIgnitionMultiplier || 1, allowIgnitionEvents = true) {
     if (BASELINE_FIRE) {
-        return stepFireBaseline(state, rng, delta, spreadScale, dayFactor, burnoutFactor, weatherResponse, climateIgnitionMultiplier);
+        return stepFireBaseline(state, rng, delta, spreadScale, dayFactor, burnoutFactor, weatherResponse, climateIgnitionMultiplier, allowIgnitionEvents);
     }
     const tickStart = profStart();
     const fuelProfiles = getFuelProfiles();
@@ -914,6 +915,7 @@ export function stepFire(state, effects: EffectsState, rng, delta, spreadScale, 
                     }
                 }
                 if (
+                    allowIgnitionEvents &&
                     !burning &&
                     !wetnessBlocked &&
                     fuelValue > 0 &&

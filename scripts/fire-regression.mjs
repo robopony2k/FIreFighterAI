@@ -8,7 +8,12 @@ import { TILE_TYPE_IDS, createInitialState, syncTileSoA } from "../dist/core/sta
 import { PHASES } from "../dist/core/time.js";
 import { applyFuel } from "../dist/core/tiles.js";
 import { buildSampleTypeMap } from "../dist/render/threeTestTerrain.js";
-import { isSkipToNextFireAvailable, stepSim } from "../dist/sim/index.js";
+import {
+  getStrategicFireSimulationStepCap,
+  isSkipToNextFireAvailable,
+  requestSkipToNextFire,
+  stepSim
+} from "../dist/sim/index.js";
 import { markFireBlockActiveByTile } from "../dist/sim/fire/activeBlocks.js";
 import { stepFire } from "../dist/sim/fire.js";
 import { isRandomIgnitionWeatherViable } from "../dist/sim/fire/fireWeather.js";
@@ -225,6 +230,15 @@ const seedExposureIncident = (state) => {
   markFireBlockActiveByTile(state, targetIdx);
   syncFireActivity(state, 1);
   return { sourceIdx, targetIdx };
+};
+
+const stepWithRuntimeCap = (state, effects, rng, requestedDelta) => {
+  const cap = getStrategicFireSimulationStepCap(state);
+  const appliedDelta = cap !== null && Number.isFinite(cap) && cap > 0
+    ? Math.min(requestedDelta, cap)
+    : requestedDelta;
+  stepSim(state, effects, rng, appliedDelta);
+  return { cap, appliedDelta };
 };
 
 const captureDistinctActivitySequence = (state, transitions) => {
@@ -938,6 +952,58 @@ const failures = [];
   );
   if (!state.paused || state.simTimeMode !== "incident" || !state.latestFireAlert || state.burnedTiles !== 0) {
     failures.push("High-speed season entry did not pause immediately on the seeded fire incident.");
+  }
+}
+
+{
+  const { state, rng } = buildState(3910);
+  const effects = createEffectsState();
+  setCareerCursor(state, 225);
+  state.simTimeMode = "strategic";
+  state.timeSpeedIndex = state.strategicTimeSpeedIndex;
+  state.timeSpeedSliderValue = 80;
+  state.fireSettings.ignitionChancePerDay = 100;
+  state.paused = false;
+  const { cap, appliedDelta } = stepWithRuntimeCap(state, effects, rng, BASE_STEP * 80);
+  console.log(
+    `\nHigh-Speed Random Ignition Cap\ncap=${cap?.toFixed(3) ?? "none"} applied=${appliedDelta.toFixed(3)} paused=${state.paused ? 1 : 0} mode=${state.simTimeMode} active=${state.lastActiveFires} simulatedDays=${state.firePerfSimulatedDays.toFixed(3)} burned=${state.burnedTiles}`
+  );
+  if (
+    cap === null ||
+    appliedDelta > 0.5 + 0.0001 ||
+    !state.paused ||
+    state.simTimeMode !== "incident" ||
+    !state.latestFireAlert ||
+    state.lastActiveFires > 4 ||
+    state.firePerfSimulatedDays > 0.5 + 0.0001 ||
+    state.burnedTiles !== 0
+  ) {
+    failures.push("High-speed random ignition was not capped before incident pause.");
+  }
+}
+
+{
+  const { state, rng } = buildState(3911);
+  const effects = createEffectsState();
+  setCareerCursor(state, 225);
+  state.fireSettings.ignitionChancePerDay = 100;
+  state.timeSpeedSliderValue = 17;
+  const requested = requestSkipToNextFire(state);
+  const { cap, appliedDelta } = stepWithRuntimeCap(state, effects, rng, BASE_STEP * 80);
+  console.log(
+    `\nSkip-To-Fire Runtime Cap\nrequested=${requested ? 1 : 0} cap=${cap?.toFixed(3) ?? "none"} applied=${appliedDelta.toFixed(3)} paused=${state.paused ? 1 : 0} mode=${state.simTimeMode} active=${state.lastActiveFires} slider=${state.timeSpeedSliderValue.toFixed(2)}`
+  );
+  if (
+    !requested ||
+    cap === null ||
+    appliedDelta > 0.5 + 0.0001 ||
+    !state.paused ||
+    state.simTimeMode !== "incident" ||
+    !state.latestFireAlert ||
+    state.skipToNextFire !== null ||
+    Math.abs(state.timeSpeedSliderValue - 17) > 0.0001
+  ) {
+    failures.push("Skip-to-next-fire did not use the runtime cap and restore incident alert state.");
   }
 }
 

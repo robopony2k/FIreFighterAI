@@ -52,6 +52,7 @@ import {
   encodeTerrainSeedCode
 } from "./terrainSeedCode.js";
 import {
+  applyTerrainArchetypeDefaultsToControls,
   applyTerrainRecipeToControls,
   collectTerrainControlElements,
   MAP_EDITOR_TERRAIN_GROUPS,
@@ -1997,6 +1998,9 @@ export const initMapEditor = (refs: MapEditorRefs, deps: MapEditorDeps): MapEdit
   });
   terrainControlElements.inputs.forEach((input) => {
     const sync = (): void => {
+      if (input instanceof HTMLSelectElement && input.dataset.terrainScope === "recipe" && input.dataset.terrainKey === "archetype") {
+        applyTerrainArchetypeDefaultsToControls(input.value as TerrainRecipe["archetype"], getSelectedMapSize(), terrainControlElements);
+      }
       syncTerrainControlOutputs(terrainControlElements);
       syncSeedField();
       requestPreviewBuild(false);

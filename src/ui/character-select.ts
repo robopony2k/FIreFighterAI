@@ -15,6 +15,7 @@ import {
   encodeTerrainSeedCode
 } from "./terrainSeedCode.js";
 import {
+  applyTerrainArchetypeDefaultsToControls,
   applyTerrainRecipeToControls,
   collectTerrainControlElements,
   readTerrainRecipeFromControls,
@@ -636,6 +637,9 @@ export function initCharacterSelect(
 
   terrainControlElements.inputs.forEach((input) => {
     const sync = (): void => {
+      if (input instanceof HTMLSelectElement && input.dataset.terrainScope === "recipe" && input.dataset.terrainKey === "archetype") {
+        applyTerrainArchetypeDefaultsToControls(input.value as TerrainRecipe["archetype"], getSelectedMapSize(), terrainControlElements);
+      }
       syncTerrainControlOutputs(terrainControlElements);
       syncSeedField();
       syncCurrentScenarioState();

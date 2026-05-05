@@ -2,10 +2,10 @@ import type { Tile, TileType, TreeType } from "./types.js";
 import { TreeType as TreeTypeEnum } from "./types.js";
 import { clamp } from "./utils.js";
 
-export const FOREST_AGE_CAP_YEARS = 40;
-export const SCRUB_AGE_CAP_YEARS = 12;
-export const OPEN_WOODY_AGE_CAP_YEARS = 6;
-export const FOREST_RECRUIT_AGE_YEARS = 6;
+export const FOREST_AGE_CAP_YEARS = 5;
+export const SCRUB_AGE_CAP_YEARS = 2;
+export const OPEN_WOODY_AGE_CAP_YEARS = 1;
+export const FOREST_RECRUIT_AGE_YEARS = 1.25;
 export const CANOPY_FOREST_THRESHOLD = 0.35;
 
 const MAX_FOREST_STEM_DENSITY = 12;
