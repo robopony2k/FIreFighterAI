@@ -3,6 +3,7 @@ import type { MapGenContext } from "./pipeline/MapGenContext.js";
 export type MapGenReporter = (message: string, progress: number) => void | Promise<void>;
 
 export type MapGenDebugPhase =
+  | "terrain:fastPreview"
   | "terrain:relief"
   | "terrain:landmass"
   | "terrain:mountains"

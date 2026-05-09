@@ -138,12 +138,12 @@ export const createTerrainPreviewController = (canvas: HTMLCanvasElement): Terra
   camera.position.set(14, 12, 14);
   camera.lookAt(0, 0, 0);
 
-  const hemisphere = new THREE.HemisphereLight(0x8ca9c7, 0x6b5644, 0.96);
+  const hemisphere = new THREE.HemisphereLight(0x8ca9c7, 0x6b5644, 0.78);
   scene.add(hemisphere);
-  const ambient = new THREE.AmbientLight(0xfff7ec, 0.38);
+  const ambient = new THREE.AmbientLight(0xfff7ec, 0.2);
   scene.add(ambient);
 
-  const keyLight = new THREE.DirectionalLight(0xffe8c8, 1.28);
+  const keyLight = new THREE.DirectionalLight(0xffe8c8, 1.46);
   keyLight.position.set(5.5, 7, 3.5);
   keyLight.castShadow = true;
   keyLight.shadow.mapSize.width = 2048;
@@ -153,12 +153,12 @@ export const createTerrainPreviewController = (canvas: HTMLCanvasElement): Terra
   scene.add(keyLight);
   scene.add(keyLight.target);
 
-  const fillLight = new THREE.DirectionalLight(0x9bbbe0, 0.62);
+  const fillLight = new THREE.DirectionalLight(0x9bbbe0, 0.34);
   fillLight.position.set(-4.5, 3.6, -3.5);
   scene.add(fillLight);
   scene.add(fillLight.target);
 
-  const rimLight = new THREE.DirectionalLight(0xc3d9ef, 0.24);
+  const rimLight = new THREE.DirectionalLight(0xc3d9ef, 0.34);
   rimLight.position.set(-2.5, 6, 5.5);
   scene.add(rimLight);
   scene.add(rimLight.target);

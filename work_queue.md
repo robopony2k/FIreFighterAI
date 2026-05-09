@@ -1,3 +1,23 @@
+TSK-0145: Calibrate island shaping by land-mass target
+
+Type: feature
+
+Why: Island maps should reliably read as islands without asking authors to tune a raw water-level threshold. The terrain editor needs player-friendly land-mass authoring while hydrology resolves the sea level automatically from the dry landmass.
+
+Done when:
+- [x] Dry landmass generation uses a stronger center-up, edge-down island envelope before ocean resolution.
+- [x] Water preview and final hydrology calibrate connected ocean coverage from `landCoverageTarget`.
+- [x] The map editor exposes Land mass as the primary shape control and moves sea-level bias to advanced Water overrides.
+- [x] Regression coverage verifies dry previews stay water-free, land target affects dry previews, sea-level bias affects Water only, and final maps remain island-shaped.
+
+Touchpoints: `src/systems/terrain/sim/noiseLandmass.ts`, `src/mapgen/terrainProfile.ts`, `src/ui/terrain-schema.ts`, `scripts/fast-terrain-preview-regression.mjs`, `scripts/mapgen-regression.mjs`, `docs/GAME_DESIGN_REFERENCE.md`, `docs/mapgen-pipeline.md`, `docs/deprecations.md`
+
+Constraints: preserve saved scenario compatibility, keep terrain sim independent from UI/rendering, keep Water as the first ocean-rendering editor step, and preserve the massive-map fast preview budget.
+
+Notes: Implemented immediately after queueing from the accepted plan. Inspired by Red Blob/SimBlob island shaping: separate dry relief from island shaping, then calibrate ocean after the dry baseline exists.
+
+Status: done
+
 TSK-0131: Extract real mapgen stags
 
 Type: refactor
@@ -12,6 +32,83 @@ Touchpoints: `src/mapgen/runtime.ts`, `src/mapgen/stages/`, `src/mapgen/pipeline
 Constraints: preserve seed order, stage order, and debug snapshot behavior
 
 Notes: Quick and full parity runs passed on April 11, 2026. `generateMapLegacy` remains in place for fallback/reference and can be isolated further in follow-up cleanup.
+
+Status: done
+
+TSK-0144: Make terrain editor dry landmass previews near-instant
+
+Type: bug
+
+Why: Scenario and Shape previews rendered ocean water before the player reached the Water step, making Random and shape-slider edits lag behind the responsive dry Relief preview.
+
+Done when:
+- [x] Scenario, Shape, and Relief render dry fast previews with no visible ocean, water tile types, or river masks.
+- [x] Water remains the first fast preview that resolves sea level and renders ocean, while Rivers remains staged through `hydro:rivers`.
+- [x] Final map generation establishes dry landmass elevation before hydrology resolves sea level, ocean, rivers, towns, roads, and biomes.
+- [x] Fast-preview regression coverage verifies dry modes stay water-free, Water responds to water level, and dry modes ignore water-level edits.
+
+Touchpoints: `src/systems/terrain/sim/`, `src/ui/map-editor.ts`, `scripts/fast-terrain-preview-regression.mjs`, `docs/GAME_DESIGN_REFERENCE.md`, `docs/mapgen-pipeline.md`, `docs/deprecations.md`
+
+Constraints: preserve saved scenario schema, keep early preview budget under 100ms on massive maps, preserve staged Rivers behavior, and keep terrain sim independent from UI/rendering.
+
+Notes: Implemented immediately after queueing because the accepted plan was promoted to implementation in the same session.
+
+Status: done
+
+TSK-0143: Make terrain editor rivers staged-only
+
+Type: bug
+
+Why: The fast Rivers preview classified broad drainage accumulation as water, creating inland coastal blobs that disappeared once the accurate staged river carving ran.
+
+Done when:
+- [x] Scenario, Shape, Relief, and Water remain fast preview modes, while Rivers targets the staged `hydro:rivers` snapshot.
+- [x] Fast landmass previews emit no visible river water mask before the staged river phase.
+- [x] Regression coverage verifies Rivers is not mapped to a fast preview mode.
+
+Touchpoints: `src/ui/map-editor.ts`, `src/systems/terrain/sim/`, `scripts/fast-terrain-preview-regression.mjs`, `docs/GAME_DESIGN_REFERENCE.md`, `docs/deprecations.md`
+
+Constraints: preserve final river carving, saved scenario schema, and downstream settlement/vegetation/final staged generation.
+
+Notes: Rivers can be slower than the early landmass previews because accurate channel carving is preferred over an approximate river preview.
+
+Status: done
+
+TSK-0142: Streamline terrain editor fast landmass workflow
+
+Type: feature
+
+Why: The map editor still showed old carving/flooding-era controls and labels after fast noise landmass generation became the primary early terrain path.
+
+Done when:
+- [x] Early terrain editor steps read as Scenario, Shape, Relief, Water, and Rivers, with Erosion Detail kept as a later final-quality preview.
+- [x] Fast preview modes produce distinct shape, relief, and water outputs and render immediately for active early-step edits.
+- [x] Regression coverage locks hashes per fast-preview mode and verifies editor controls are relevant to their step.
+
+Touchpoints: `src/ui/terrain-schema.ts`, `src/ui/map-editor.ts`, `src/systems/terrain/sim/`, `scripts/fast-terrain-preview-regression.mjs`, `docs/GAME_DESIGN_REFERENCE.md`, `docs/deprecations.md`
+
+Constraints: preserve saved scenario schema, existing internal step ids where practical, and downstream erosion/hydrology/settlement/vegetation generation.
+
+Notes: The editor-facing `skipCarving` control is retired; compatibility fields remain available in terrain recipes for existing scenarios.
+
+Status: done
+
+TSK-0141: Add Mapgen4-inspired fast terrain preview
+
+Type: feature
+
+Why: Map editor terrain tweaks needed visceral shape, coastline, and river feedback without waiting for the full staged terrain, shoreline, settlement, and vegetation pipeline.
+
+Done when:
+- [x] Early map-editor terrain steps can render deterministic fast grid previews for shape, relief, and flooded coastline.
+- [x] The fast preview keeps the existing square tile terrain model and shares its landmass core with campaign `terrain:elevation`.
+- [x] Fixed-seed fast-preview regression coverage validates distinct archetype/mode hashes and the 100ms massive-map budget.
+
+Touchpoints: `src/systems/terrain/sim/`, `src/ui/map-editor.ts`, `scripts/fast-terrain-preview-regression.mjs`, `docs/GAME_DESIGN_REFERENCE.md`
+
+Constraints: preserve the `generateMap()` entrypoint, saved scenario schema, downstream erosion/hydrology/biome/settlement/road stages, and staged editor generation
+
+Notes: Uses Mapgen4 concepts, not its mesh architecture: seeded noise and editable guide-field structure for land, mountains, and valleys, height redistribution, edge falloff, direct ocean masks, and priority-queue drainage on the existing tile grid. The same core now feeds instant editor terrain previews and the campaign `terrain:elevation` surface so later stages reuse the faster landmass instead of rebuilding the old tectonic proxy.
 
 Status: done
 

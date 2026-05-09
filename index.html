@@ -322,20 +322,20 @@
                 <button type="button" class="run-tab map-editor-step is-active" data-step="scenario" aria-selected="true">
                   Scenario
                 </button>
+                <button type="button" class="run-tab map-editor-step" data-step="carving" aria-selected="false">
+                  Shape
+                </button>
                 <button type="button" class="run-tab map-editor-step" data-step="relief" aria-selected="false">
                   Relief
                 </button>
-                <button type="button" class="run-tab map-editor-step" data-step="carving" aria-selected="false">
-                  Carving
-                </button>
-                <button type="button" class="run-tab map-editor-step" data-step="erosion" aria-selected="false">
-                  Erosion
-                </button>
                 <button type="button" class="run-tab map-editor-step" data-step="flooding" aria-selected="false">
-                  Flooding
+                  Water
                 </button>
                 <button type="button" class="run-tab map-editor-step" data-step="rivers" aria-selected="false">
                   Rivers
+                </button>
+                <button type="button" class="run-tab map-editor-step" data-step="erosion" aria-selected="false">
+                  Erosion Detail
                 </button>
                 <button type="button" class="run-tab map-editor-step" data-step="settlements" aria-selected="false">
                   Settlements
@@ -422,28 +422,28 @@
                     <div id="mapEditorScenarioControls" class="run-settings-card run-settings-card--wide"></div>
                   </div>
                 </section>
-                <section class="map-editor-step-panel" data-step-panel="relief">
-                  <div id="mapEditorReliefControls" class="run-settings"></div>
-                </section>
                 <section class="map-editor-step-panel" data-step-panel="carving">
                   <div id="mapEditorCarvingControls" class="run-settings"></div>
                 </section>
-                <section class="map-editor-step-panel" data-step-panel="erosion">
-                  <div class="run-settings">
-                    <div class="run-settings-card">
-                      <div class="run-settings-title">Erosion Preview</div>
-                      <div class="run-settings-note">
-                        This stage shows the directional erosion detail pass between elevation and flooding. Use Compare pre-erosion to flip against the un-eroded baseline.
-                      </div>
-                    </div>
-                    <div id="mapEditorErosionControls" class="run-settings-slot"></div>
-                  </div>
+                <section class="map-editor-step-panel" data-step-panel="relief">
+                  <div id="mapEditorReliefControls" class="run-settings"></div>
                 </section>
                 <section class="map-editor-step-panel" data-step-panel="flooding">
                   <div id="mapEditorFloodingControls" class="run-settings"></div>
                 </section>
                 <section class="map-editor-step-panel" data-step-panel="rivers">
                   <div id="mapEditorRiverControls" class="run-settings"></div>
+                </section>
+                <section class="map-editor-step-panel" data-step-panel="erosion">
+                  <div class="run-settings">
+                    <div class="run-settings-card">
+                      <div class="run-settings-title">Erosion Detail Preview</div>
+                      <div class="run-settings-note">
+                        This stage shows the final-quality directional erosion detail pass after the fast landmass is accepted. Use Compare pre-erosion to flip against the un-eroded baseline.
+                      </div>
+                    </div>
+                    <div id="mapEditorErosionControls" class="run-settings-slot"></div>
+                  </div>
                 </section>
                 <section class="map-editor-step-panel" data-step-panel="settlements">
                   <div id="mapEditorSettlementControls" class="run-settings"></div>

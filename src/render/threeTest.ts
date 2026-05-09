@@ -18,6 +18,7 @@ import { getBuildingLifecycleStageFromId, getBuildingLifecycleStageId } from "..
 import { getProceduralHouseVariantKey } from "../systems/settlements/rendering/proceduralHouseBuilder.js";
 import type { RenderBuildingLot } from "../systems/settlements/types/buildingTypes.js";
 import { buildEvacuationRenderModel } from "../systems/evacuation/rendering/evacuationRenderModel.js";
+import { generateWorldClimateSeed } from "../systems/climate/sim/worldClimateSeed.js";
 import { createVehicleModelLayer, type VehicleModelInstance } from "./vehicleModelLayer.js";
 import type { InputState } from "../core/inputState.js";
 import { indexFor } from "../core/grid.js";
@@ -2203,17 +2204,43 @@ export const createThreeTest = (
       ctx.restore();
     }
     if (minimapOverlays.wind) {
+      const climateSeed = generateWorldClimateSeed(world.seed);
       const centerX = width * 0.14;
       const centerY = height * 0.14;
-      const len = Math.max(8, Math.min(width, height) * 0.08) * Math.max(0.4, world.wind?.strength ?? 0.4);
-      const dx = (world.wind?.dx ?? 0) * len;
-      const dy = (world.wind?.dy ?? 0) * len;
-      ctx.strokeStyle = "rgba(240, 243, 247, 0.95)";
-      ctx.lineWidth = 1.2;
-      ctx.beginPath();
-      ctx.moveTo(centerX, centerY);
-      ctx.lineTo(centerX + dx, centerY + dy);
-      ctx.stroke();
+      const len = Math.max(8, Math.min(width, height) * 0.08);
+      const drawArrow = (dx: number, dy: number, strength: number, color: string, offsetY: number): void => {
+        const mag = Math.hypot(dx, dy);
+        if (mag <= 0.0001) {
+          return;
+        }
+        const ux = dx / mag;
+        const uy = dy / mag;
+        const scaledLen = len * Math.max(0.4, Math.min(1, strength));
+        const startY = centerY + offsetY;
+        const endX = centerX + ux * scaledLen;
+        const endY = startY + uy * scaledLen;
+        ctx.strokeStyle = color;
+        ctx.fillStyle = color;
+        ctx.lineWidth = 1.2;
+        ctx.beginPath();
+        ctx.moveTo(centerX, startY);
+        ctx.lineTo(endX, endY);
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.moveTo(endX, endY);
+        ctx.lineTo(endX - ux * 4 - uy * 2.5, endY - uy * 4 + ux * 2.5);
+        ctx.lineTo(endX - ux * 4 + uy * 2.5, endY - uy * 4 - ux * 2.5);
+        ctx.closePath();
+        ctx.fill();
+      };
+      drawArrow(
+        Math.cos(climateSeed.prevailingWindAngleRad),
+        Math.sin(climateSeed.prevailingWindAngleRad),
+        climateSeed.prevailingWindStrength,
+        "rgba(83, 211, 194, 0.95)",
+        0
+      );
+      drawArrow(world.wind?.dx ?? 0, world.wind?.dy ?? 0, world.wind?.strength ?? 0, "rgba(240, 243, 247, 0.95)", 9);
     }
     if (lastTerrainSize && minimapOverlays.units) {
       const worldWidth = Math.max(1, lastTerrainSize.width);

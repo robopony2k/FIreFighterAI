@@ -6,6 +6,7 @@ import { clamp } from "../core/utils.js";
 import { inBounds, indexFor } from "../core/grid.js";
 import {
   DOMINANT_FOREST_TYPES,
+  FOREST_AGE_CAP_YEARS,
   clearVegetationState,
   computeForestTreeWeights,
   isForestType,
@@ -77,6 +78,9 @@ import { buildForestMask } from "./biome/ForestSpread.js";
 import { runIterativeHydraulicErosion } from "./iterativeHydraulicErosion.js";
 import { buildPreRiverErosionFields } from "./preRiverErosion.js";
 import { buildTectonicProxySeed } from "./tectonicProxySeed.js";
+import { buildNoiseLandmass } from "../systems/terrain/sim/noiseLandmass.js";
+import { generateWorldClimateSeed } from "../systems/climate/sim/worldClimateSeed.js";
+import { buildWindDrivenMoistureMap } from "../systems/terrain/sim/windDrivenMoisture.js";
 
 const nextFrame = () =>
   new Promise<void>((resolve) => {
@@ -163,7 +167,7 @@ const getEdgeFalloff = (x: number, y: number, cols: number, rows: number, width:
 
 const getSeaLevelBounds = (settings: MapGenSettings): { min: number; max: number } => {
   if (Number.isFinite(settings.waterCoverage)) {
-    return { min: 0.04, max: 0.5 };
+    return { min: 0.02, max: 0.72 };
   }
   return { min: 0.08, max: 0.34 };
 };
@@ -173,14 +177,69 @@ export const clampSeaLevel = (value: number, settings: MapGenSettings): number =
   return clamp(value, min, max);
 };
 
+const countConnectedOceanAtBaseLevel = (
+  state: WorldState,
+  settings: MapGenSettings,
+  elevationMap: ArrayLike<number>,
+  edgeBias: Float32Array,
+  seaLevelBase: number
+): number => {
+  const { cols, rows, totalTiles } = state.grid;
+  const ocean = new Uint8Array(totalTiles);
+  const queue = new Int32Array(totalTiles);
+  let head = 0;
+  let tail = 0;
+  const enqueue = (idx: number): void => {
+    if (idx < 0 || idx >= totalTiles || ocean[idx] > 0) {
+      return;
+    }
+    const seaLevel = clampSeaLevel(seaLevelBase + (edgeBias[idx] ?? 0), settings);
+    if ((elevationMap[idx] ?? 0) > seaLevel) {
+      return;
+    }
+    ocean[idx] = 1;
+    queue[tail] = idx;
+    tail += 1;
+  };
+  for (let x = 0; x < cols; x += 1) {
+    enqueue(x);
+    enqueue((rows - 1) * cols + x);
+  }
+  for (let y = 1; y < rows - 1; y += 1) {
+    enqueue(y * cols);
+    enqueue(y * cols + cols - 1);
+  }
+  while (head < tail) {
+    const idx = queue[head] ?? 0;
+    head += 1;
+    const x = idx % cols;
+    const y = Math.floor(idx / cols);
+    if (x > 0) {
+      enqueue(idx - 1);
+    }
+    if (x < cols - 1) {
+      enqueue(idx + 1);
+    }
+    if (y > 0) {
+      enqueue(idx - cols);
+    }
+    if (y < rows - 1) {
+      enqueue(idx + cols);
+    }
+  }
+  return tail;
+};
+
 export const resolveSeaLevelBase = (
   state: WorldState,
   settings: MapGenSettings,
   elevationMap: ArrayLike<number>,
   cellSizeM: number
 ): number => {
-  const target = Number.isFinite(settings.waterCoverage)
-    ? clamp(settings.waterCoverage, 0.05, 0.85)
+  const target = Number.isFinite(settings.landCoverageTarget)
+    ? clamp(1 - settings.landCoverageTarget, 0.18, 0.68)
+    : Number.isFinite(settings.waterCoverage)
+      ? clamp(settings.waterCoverage, 0.05, 0.85)
     : null;
   if (target === null) {
     return settings.baseWaterThreshold;
@@ -198,25 +257,27 @@ export const resolveSeaLevelBase = (
     }
   }
   const { min, max } = getSeaLevelBounds(settings);
+  const biasOffset = (clamp(settings.seaLevelBias, 0, 1) - 0.5) * 0.16;
   let low = min - settings.edgeWaterBias;
   let high = max;
+  let best = settings.baseWaterThreshold;
+  let bestError = Number.POSITIVE_INFINITY;
   for (let i = 0; i < 18; i += 1) {
     const mid = (low + high) / 2;
-    let waterCount = 0;
-    for (let j = 0; j < total; j += 1) {
-      const seaLevel = clampSeaLevel(mid + edgeBias[j], settings);
-      if ((elevationMap[j] ?? 0) <= seaLevel) {
-        waterCount += 1;
-      }
+    const oceanCount = countConnectedOceanAtBaseLevel(state, settings, elevationMap, edgeBias, mid);
+    const ratio = oceanCount / Math.max(1, total);
+    const error = Math.abs(ratio - target);
+    if (error < bestError) {
+      bestError = error;
+      best = mid;
     }
-    const ratio = waterCount / Math.max(1, total);
     if (ratio < target) {
       low = mid;
     } else {
       high = mid;
     }
   }
-  return clamp(high, min - settings.edgeWaterBias, max);
+  return clamp(best + biasOffset, min - settings.edgeWaterBias, max);
 };
 
 const buildDebugTypeIds = (
@@ -1780,7 +1841,17 @@ export async function buildElevationMap(
   yieldIfNeeded?: () => Promise<boolean>,
   debug?: MapGenDebug
 ): Promise<ElevationBuildResult> {
-  return buildElevationMapTectonicProxy(state, rng, settings, report, yieldIfNeeded, debug);
+  void rng;
+  return buildNoiseLandmass({
+    seed: state.seed,
+    cols: state.grid.cols,
+    rows: state.grid.rows,
+    settings,
+    report,
+    yieldIfNeeded,
+    debug,
+    includeRivers: true
+  });
 }
 
 type TectonicGridPlan = {
@@ -3957,34 +4028,17 @@ export async function buildMoistureMap(
   report?: MapGenReporter,
   yieldIfNeeded?: () => Promise<boolean>
 ): Promise<Float32Array> {
-  const total = state.grid.totalTiles;
-  const moisture = new Float32Array(total);
-  const maxDistance = Math.max(1, Math.min(0xffff - 1, Math.floor(maxWaterDistance)));
-  const dryRange = Math.max(0.0001, MOISTURE_ELEV_DRY_RANGE);
-  const gamma = Math.max(0.01, MOISTURE_GAMMA);
-
-  for (let y = 0; y < state.grid.rows; y += 1) {
-    const rowBase = y * state.grid.cols;
-    for (let x = 0; x < state.grid.cols; x += 1) {
-      const idx = rowBase + x;
-      const tile = state.tiles[idx];
-      if (tile.type === "water") {
-        moisture[idx] = 1;
-        continue;
-      }
-      const dNorm = clamp(distToWater[idx] / maxDistance, 0, 1);
-      let m = 1 - dNorm;
-      const eNorm = clamp((tile.elevation - MOISTURE_ELEV_WET_REF) / dryRange, 0, 1);
-      m = clamp(m - eNorm * MOISTURE_ELEV_DRYNESS_WEIGHT, 0, 1);
-      moisture[idx] = clamp(Math.pow(m, gamma), 0, 1);
-    }
-    if (yieldIfNeeded && report) {
-      if (await yieldIfNeeded()) {
-        await report("Mapping moisture...", (y + 1) / state.grid.rows);
-      }
-    }
-  }
-  return moisture;
+  return buildWindDrivenMoistureMap({
+    seed: state.seed,
+    cols: state.grid.cols,
+    rows: state.grid.rows,
+    tiles: state.tiles,
+    distToWater,
+    maxWaterDistance,
+    climate: generateWorldClimateSeed(state.seed),
+    report,
+    yieldIfNeeded
+  });
 }
 
 async function smoothWater(
@@ -4746,9 +4800,9 @@ export function seedInitialVegetationState(
       const edgeDepth01 = clamp(edgeDepth / 3.5, 0, 1);
       const interiorBias = clamp((forestNeighbors - 1) / 3, 0, 1);
       const maturityBias = clamp(edgeDepth01 * 0.68 + interiorBias * 0.12 + suitability * 0.14 + micro * 0.06, 0, 1);
-      const edgeAge = 8 + hash2D(x, y, state.seed + 12031) * 8;
-      const upperAge = 22 + hash2D(x, y, state.seed + 12067) * 12;
-      tile.vegetationAgeYears = clamp(edgeAge * (1 - maturityBias) + upperAge * maturityBias, 8, 34);
+      const edgeAge = FOREST_AGE_CAP_YEARS * (0.18 + hash2D(x, y, state.seed + 12031) * 0.22);
+      const upperAge = FOREST_AGE_CAP_YEARS * (0.48 + hash2D(x, y, state.seed + 12067) * 0.38);
+      tile.vegetationAgeYears = clamp(edgeAge * (1 - maturityBias) + upperAge * maturityBias, 0, FOREST_AGE_CAP_YEARS);
       syncDerivedVegetationState(tile, state.seed, x, y);
     }
   }

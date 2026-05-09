@@ -4,11 +4,12 @@ import { ELEVATION_TINT_HIGH, ELEVATION_TINT_LOW, TILE_COLOR_RGB } from "../../.
 import { buildThermalBackdropField, buildThermalHotspotField, paintThermalField } from "../../../render/minimapRaster.js";
 import { getRuntimeWidgetTitle } from "../../runtime/widgets/registry.js";
 import type { MinimapWidgetModel } from "../../runtime/widgets/models.js";
+import { generateWorldClimateSeed } from "../../../systems/climate/sim/worldClimateSeed.js";
 
 type RGB = { r: number; g: number; b: number };
-type MiniMapMode = "terrain" | "elevation" | "thermal";
+type MiniMapMode = "terrain" | "elevation" | "moisture" | "thermal";
 
-const MODES: readonly MiniMapMode[] = ["terrain", "elevation", "thermal"];
+const MODES: readonly MiniMapMode[] = ["terrain", "elevation", "moisture", "thermal"];
 const THERMAL_LOW: RGB = { r: 20, g: 20, b: 22 };
 const THERMAL_MID: RGB = { r: 192, g: 70, b: 40 };
 const THERMAL_HIGH: RGB = { r: 242, g: 201, b: 76 };
@@ -20,6 +21,14 @@ const mix = (a: RGB, b: RGB, t: number): RGB => ({
   g: a.g + (b.g - a.g) * t,
   b: a.b + (b.b - a.b) * t
 });
+
+const getMoistureColor = (moisture: number): RGB => {
+  const dry = { r: 125, g: 92, b: 58 };
+  const damp = { r: 94, g: 129, b: 84 };
+  const wet = { r: 60, g: 128, b: 179 };
+  const clamped = clamp(moisture, 0, 1);
+  return clamped <= 0.5 ? mix(dry, damp, clamped / 0.5) : mix(damp, wet, (clamped - 0.5) / 0.5);
+};
 
 export type MiniMapPanelData = MinimapWidgetModel;
 
@@ -92,6 +101,7 @@ export const createMiniMapPanel = (): MiniMapPanelView => {
     const rows = world.grid.rows;
     const tileTypes = world.tileTypeId;
     const elevations = world.tileElevation;
+    const moisture = world.tileMoisture;
     if (mode === "thermal") {
       const hotspots = buildThermalHotspotField(world, mapWidth, mapHeight);
       paintThermalField(data, thermalBackdrop, hotspots, {
@@ -110,6 +120,8 @@ export const createMiniMapPanel = (): MiniMapPanelView => {
             const typeId = tileTypes[idx] ?? 0;
             const tileType = TILE_ID_TO_TYPE[typeId] ?? "grass";
             color = TILE_COLOR_RGB[tileType] ?? color;
+          } else if (mode === "moisture") {
+            color = getMoistureColor(moisture[idx] ?? 0);
           } else {
             const elev = clamp(elevations[idx] ?? 0, 0, 1);
             color = mix(ELEVATION_TINT_LOW, ELEVATION_TINT_HIGH, elev);
@@ -123,6 +135,55 @@ export const createMiniMapPanel = (): MiniMapPanelView => {
       }
     }
     rasterCtx.putImageData(image, 0, 0);
+  };
+
+  const drawWindOverlay = (
+    targetCtx: CanvasRenderingContext2D,
+    world: WorldState,
+    x: number,
+    y: number,
+    size: number
+  ): void => {
+    const climateSeed = generateWorldClimateSeed(world.seed);
+    const originX = x + size * 0.16;
+    const originY = y + size * 0.16;
+    const len = Math.max(8, size * 0.12);
+    const drawArrow = (dx: number, dy: number, strength: number, color: string, offsetY: number): void => {
+      const mag = Math.hypot(dx, dy);
+      if (mag <= 0.0001) {
+        return;
+      }
+      const ux = dx / mag;
+      const uy = dy / mag;
+      const scaledLen = len * clamp(strength, 0.35, 1);
+      const sx = originX;
+      const sy = originY + offsetY;
+      const ex = sx + ux * scaledLen;
+      const ey = sy + uy * scaledLen;
+      targetCtx.strokeStyle = color;
+      targetCtx.fillStyle = color;
+      targetCtx.lineWidth = 1.5;
+      targetCtx.beginPath();
+      targetCtx.moveTo(sx, sy);
+      targetCtx.lineTo(ex, ey);
+      targetCtx.stroke();
+      targetCtx.beginPath();
+      targetCtx.moveTo(ex, ey);
+      targetCtx.lineTo(ex - ux * 4 - uy * 2.5, ey - uy * 4 + ux * 2.5);
+      targetCtx.lineTo(ex - ux * 4 + uy * 2.5, ey - uy * 4 - ux * 2.5);
+      targetCtx.closePath();
+      targetCtx.fill();
+    };
+    targetCtx.save();
+    drawArrow(
+      Math.cos(climateSeed.prevailingWindAngleRad),
+      Math.sin(climateSeed.prevailingWindAngleRad),
+      climateSeed.prevailingWindStrength,
+      "rgba(83, 211, 194, 0.95)",
+      0
+    );
+    drawArrow(world.wind?.dx ?? 0, world.wind?.dy ?? 0, world.wind?.strength ?? 0, "rgba(245, 247, 250, 0.95)", 11);
+    targetCtx.restore();
   };
 
   return {
@@ -192,6 +253,7 @@ export const createMiniMapPanel = (): MiniMapPanelView => {
       ctx.imageSmoothingEnabled = false;
       ctx.drawImage(rasterCanvas, drawX, drawY, drawSize, drawSize);
       ctx.imageSmoothingEnabled = smoothing;
+      drawWindOverlay(ctx, world, drawX, drawY, drawSize);
     }
   };
 };

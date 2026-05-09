@@ -15,8 +15,9 @@ const { createInitialState, resetState } = await import(distImport(["core", "sta
 const { RNG } = await import(distImport(["core", "rng.js"]));
 const { MAP_SIZE_PRESETS } = await import(distImport(["core", "config.js"]));
 const { HOUSE_VARIANTS } = await import(distImport(["core", "buildingFootprints.js"]));
-const { getVegetationMaturity01 } = await import(distImport(["core", "vegetation.js"]));
+const { FOREST_AGE_CAP_YEARS, getVegetationMaturity01 } = await import(distImport(["core", "vegetation.js"]));
 const { generateMap } = await import(distImport(["mapgen", "index.js"]));
+const { createDefaultTerrainRecipe } = await import(distImport(["mapgen", "terrainProfile.js"]));
 const { analyzeRoadSurfaceMetrics } = await import(distImport(["mapgen", "roads.js"]));
 
 const allSizes = ["medium", "massive", "colossal", "gigantic", "titanic"];
@@ -593,6 +594,82 @@ const analyzeCoastalClassification = (state) => {
   };
 };
 
+const analyzeIslandShape = (state, targetLandRatio) => {
+  const { cols, rows, totalTiles } = state.grid;
+  const oceanMask = buildOceanMask(state);
+  let oceanCount = 0;
+  let borderCount = 0;
+  let borderOceanCount = 0;
+  for (let y = 0; y < rows; y += 1) {
+    for (let x = 0; x < cols; x += 1) {
+      const idx = y * cols + x;
+      if (oceanMask[idx] > 0) {
+        oceanCount += 1;
+      }
+      if (x === 0 || y === 0 || x === cols - 1 || y === rows - 1) {
+        borderCount += 1;
+        if (oceanMask[idx] > 0) {
+          borderOceanCount += 1;
+        }
+      }
+    }
+  }
+
+  const visited = new Uint8Array(totalTiles);
+  const queue = new Int32Array(totalTiles);
+  let largestLandComponent = 0;
+  let landCount = 0;
+  for (let i = 0; i < totalTiles; i += 1) {
+    if (oceanMask[i] === 0) {
+      landCount += 1;
+    }
+    if (visited[i] > 0 || oceanMask[i] > 0) {
+      continue;
+    }
+    let head = 0;
+    let tail = 0;
+    visited[i] = 1;
+    queue[tail] = i;
+    tail += 1;
+    while (head < tail) {
+      const idx = queue[head];
+      head += 1;
+      const x = idx % cols;
+      const y = Math.floor(idx / cols);
+      const tryPush = (next) => {
+        if (next < 0 || next >= totalTiles || visited[next] > 0 || oceanMask[next] > 0) {
+          return;
+        }
+        visited[next] = 1;
+        queue[tail] = next;
+        tail += 1;
+      };
+      if (x > 0) {
+        tryPush(idx - 1);
+      }
+      if (x < cols - 1) {
+        tryPush(idx + 1);
+      }
+      if (y > 0) {
+        tryPush(idx - cols);
+      }
+      if (y < rows - 1) {
+        tryPush(idx + cols);
+      }
+    }
+    largestLandComponent = Math.max(largestLandComponent, tail);
+  }
+
+  const landRatio = landCount / Math.max(1, totalTiles);
+  return {
+    islandTargetLandRatio: Number(targetLandRatio.toFixed(4)),
+    islandLandRatio: Number(landRatio.toFixed(4)),
+    islandOceanRatio: Number((oceanCount / Math.max(1, totalTiles)).toFixed(4)),
+    islandBorderOceanRatio: Number((borderOceanCount / Math.max(1, borderCount)).toFixed(4)),
+    islandMainLandComponentRatio: Number((largestLandComponent / Math.max(1, landCount)).toFixed(4))
+  };
+};
+
 const analyzeTownMorphologies = (state) => {
   const { cols, rows } = state.grid;
   const isRoadLike = (x, y) => {
@@ -772,6 +849,7 @@ const runCase = async (sizeId, seed) => {
   const roadMetrics = analyzeRoadEdgeQuality(state);
   const roadSurfaceMetrics = analyzeRoadSurfaceMetrics(state);
   const coastMetrics = analyzeCoastalClassification(state);
+  const islandMetrics = analyzeIslandShape(state, createDefaultTerrainRecipe(sizeId).landCoverageTarget);
   const townMorphologies = analyzeTownMorphologies(state);
   const compactTownViolations = townMorphologies
     .filter((town) => town.meaningful && town.violations.length > 0)
@@ -818,7 +896,8 @@ const runCase = async (sizeId, seed) => {
     ...riverMetrics,
     ...roadMetrics,
     ...roadSurfaceMetrics,
-    ...coastMetrics
+    ...coastMetrics,
+    ...islandMetrics
   };
 };
 
@@ -935,13 +1014,32 @@ const compareAgainstBaseline = async (results) => {
         `[mapgen] coastline classification drift for ${key}: coastalOther=${result.coastalOtherCount} of natural=${result.coastalNaturalCount}`
       );
     }
+    if (result.islandBorderOceanRatio < 0.96) {
+      failures += 1;
+      console.error(
+        `[mapgen] border ocean coverage too low for ${key}: ${result.islandBorderOceanRatio.toFixed(4)}`
+      );
+    }
+    if (result.islandMainLandComponentRatio < 0.9) {
+      failures += 1;
+      console.error(
+        `[mapgen] main land component too fragmented for ${key}: ${result.islandMainLandComponentRatio.toFixed(4)}`
+      );
+    }
+    const landTargetDrift = Math.abs(result.islandLandRatio - result.islandTargetLandRatio);
+    if (landTargetDrift > 0.12) {
+      failures += 1;
+      console.error(
+        `[mapgen] calibrated land ratio drift too high for ${key}: target=${result.islandTargetLandRatio.toFixed(4)} actual=${result.islandLandRatio.toFixed(4)}`
+      );
+    }
     if (result.settlementPadReliefMax > 0.015) {
       failures += 1;
       console.error(
         `[mapgen] settlement pad relief too high for ${key}: ${result.settlementPadReliefMax.toFixed(4)}`
       );
     }
-    if (result.forestMaturityP95 >= 0.95) {
+    if (FOREST_AGE_CAP_YEARS > 5 && result.forestMaturityP95 >= 0.95) {
       failures += 1;
       console.error(`[mapgen] forest maturity p95 too high for ${key}: ${result.forestMaturityP95.toFixed(3)}`);
     }

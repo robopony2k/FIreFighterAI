@@ -12,7 +12,7 @@ export type HudToast = {
   createdAt: number;
 };
 
-export const MINIMAP_MODES = ["terrain", "elevation", "thermal"] as const;
+export const MINIMAP_MODES = ["terrain", "elevation", "moisture", "thermal"] as const;
 export type MinimapMode = (typeof MINIMAP_MODES)[number];
 
 export type HudSlotState = {

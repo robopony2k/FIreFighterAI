@@ -1,5 +1,62 @@
 # Deprecations
 
+## Primary Water-Level Terrain Authoring
+
+Status: Deprecated as of May 9, 2026.
+
+- The terrain editor no longer uses Water level as the primary coastline authoring control.
+- Shape now exposes Land mass as the player-facing control for target dry island coverage.
+- Hydrology calibrates sea level automatically from the dry landmass and the Land mass target; Sea-level bias remains available as an advanced Water override.
+- Existing saved scenarios and share codes may still carry `waterLevel` for compatibility, but new authoring should not depend on it.
+
+Migration guidance:
+
+1. Put coastline coverage decisions under `landCoverageTarget`.
+2. Use `seaLevelBias` only for advanced post-calibration nudging.
+3. Do not reintroduce raw Water level as the normal Water-step slider.
+
+## Pre-Water Ocean Rendering in Early Terrain Previews
+
+Status: Deprecated as of May 9, 2026.
+
+- Scenario, Shape, and Relief previews no longer render ocean or water geometry.
+- Dry landmass elevation is now established before Water resolves sea level and ocean classification.
+- Water remains the first fast terrain-editor step that renders ocean; Rivers remains staged through `hydro:rivers`.
+
+Migration guidance:
+
+1. Put dry landmass feedback under Scenario, Shape, and Relief.
+2. Put sea-level and coastline flooding feedback under Water.
+3. Do not reintroduce ocean masks or water tile types into dry fast preview modes.
+
+## Map Editor Skip Terrain Carving Control
+
+Status: Deprecated as of May 6, 2026.
+
+- The map editor no longer exposes `skipCarving` as an authoring control.
+- Early terrain authoring now uses fast Shape, Relief, and Water previews backed by the shared noise landmass core.
+- The saved scenario schema may still preserve `skipCarving` for compatibility, but new editor workflows should not depend on it.
+
+Migration guidance:
+
+1. Put landmass-shape tuning under Shape controls: coast complexity, island compactness, embayment, anisotropy, and asymmetry.
+2. Put ridge and height tuning under Relief controls.
+3. Keep final-quality erosion behavior behind the Erosion Detail preview step instead of reintroducing a skip-carving toggle.
+
+## Fast Rivers Preview
+
+Status: Deprecated as of May 6, 2026.
+
+- The map editor no longer renders Rivers through the fast landmass preview.
+- Fast drainage accumulation remains available as a support field, but it must not be classified directly as visible river water.
+- Rivers now advances to the accurate `hydro:rivers` stage and renders the carved channel snapshot.
+
+Migration guidance:
+
+1. Keep instant feedback focused on Scenario, Shape, Relief, and Water.
+2. Route river authoring controls through staged mapgen previews instead of adding another fast river mask.
+3. Preserve `RiverStage` and `carveRiverValleys()` as the source of visible river channels.
+
 ## Town Alert Progress-Only Evacuation
 
 Status: Deprecated as of May 3, 2026.

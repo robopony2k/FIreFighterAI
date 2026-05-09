@@ -43,6 +43,8 @@ export type MapGenSettings = {
   ruggedness: number;
   coastComplexity: number;
   waterLevel: number;
+  landCoverageTarget: number;
+  seaLevelBias: number;
   riverIntensity: number;
   vegetationDensity: number;
   townDensity: number;
@@ -113,6 +115,8 @@ export const DEFAULT_MAP_GEN_SETTINGS: MapGenSettings = {
   ruggedness: 0.55,
   coastComplexity: 0.42,
   waterLevel: 0.34,
+  landCoverageTarget: 0.64,
+  seaLevelBias: 0.5,
   riverIntensity: 0.45,
   vegetationDensity: 0.56,
   townDensity: 0.48,

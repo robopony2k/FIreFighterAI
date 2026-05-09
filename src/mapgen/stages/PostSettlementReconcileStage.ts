@@ -1,10 +1,3 @@
-import {
-  MOISTURE_ELEV_DRYNESS_WEIGHT,
-  MOISTURE_ELEV_DRY_RANGE,
-  MOISTURE_ELEV_WET_REF,
-  MOISTURE_GAMMA,
-  MOISTURE_WATER_DIST_CAP
-} from "../../core/config.js";
 import { inBounds, indexFor } from "../../core/grid.js";
 import { TILE_TYPE_IDS } from "../../core/state.js";
 import type { TileType } from "../../core/types.js";
@@ -23,17 +16,6 @@ import {
   computeStemDensityForTile,
   seedInitialVegetationState
 } from "../runtime.js";
-
-const computeMoistureValue = (elevation: number, waterDist: number): number => {
-  const maxDistance = Math.max(1, Math.min(0xffff - 1, Math.floor(MOISTURE_WATER_DIST_CAP)));
-  const dryRange = Math.max(0.0001, MOISTURE_ELEV_DRY_RANGE);
-  const gamma = Math.max(0.01, MOISTURE_GAMMA);
-  const dNorm = clamp(waterDist / maxDistance, 0, 1);
-  let moisture = 1 - dNorm;
-  const eNorm = clamp((elevation - MOISTURE_ELEV_WET_REF) / dryRange, 0, 1);
-  moisture = clamp(moisture - eNorm * MOISTURE_ELEV_DRYNESS_WEIGHT, 0, 1);
-  return clamp(Math.pow(moisture, gamma), 0, 1);
-};
 
 export const PostSettlementReconcileStage: PipelineStage = {
   id: "reconcile:postSettlement",
@@ -103,7 +85,10 @@ export const PostSettlementReconcileStage: PipelineStage = {
             return clamp(maxDiff, 0, 1);
           })();
           ctx.slopeMap[idx] = slopeLocal;
-          const moisture = computeMoistureValue(tile.elevation, tile.waterDist);
+          const moisture =
+            ctx.oceanMask[idx] || ctx.riverMask[idx] > 0
+              ? 1
+              : clamp(ctx.moistureMap[idx] ?? tile.moisture, 0, 1);
           ctx.moistureMap[idx] = moisture;
           tile.moisture = moisture;
 

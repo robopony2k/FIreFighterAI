@@ -4,6 +4,7 @@ import { CAREER_YEARS, WIND_DIRS } from "../core/config.js";
 import { DEFAULT_CLIMATE_PARAMS, DEFAULT_MOISTURE_PARAMS, VIRTUAL_CLIMATE_PARAMS, u01 } from "../core/climate.js";
 import { clamp } from "../core/utils.js";
 import { hash2D } from "../mapgen/noise.js";
+import { generateWorldClimateSeed } from "../systems/climate/sim/worldClimateSeed.js";
 
 const getNearestWindDir = (dx: number, dy: number): Wind => {
   let best = WIND_DIRS[0];
@@ -19,15 +20,15 @@ const getNearestWindDir = (dx: number, dy: number): Wind => {
 };
 
 const getClimateWind = (state: WorldState): Wind => {
-  const baseIndex = Math.floor(u01(state.seed, 9011) * WIND_DIRS.length);
-  const baseDir = WIND_DIRS[baseIndex];
-  const baseAngle = Math.atan2(baseDir.dy, baseDir.dx);
+  const climateSeed = generateWorldClimateSeed(state.seed);
+  const baseAngle = climateSeed.prevailingWindAngleRad;
   const yearDays = Math.max(1, Math.floor(VIRTUAL_CLIMATE_PARAMS.seasonLen));
   const dayPhase = (state.climateDay / yearDays) * Math.PI * 2;
   const seasonalOffset = (u01(state.seed, 9029) * Math.PI * 2) - Math.PI;
-  const seasonalDrift = Math.sin(dayPhase + seasonalOffset) * (0.35 + u01(state.seed, 9037) * 0.25);
+  const variability = clamp(climateSeed.prevailingWindVariability, 0, 0.75);
+  const seasonalDrift = Math.sin(dayPhase + seasonalOffset) * variability;
   const driftBucket = Math.floor(state.climateDay / 12);
-  const driftNoise = (hash2D(driftBucket, state.climateYear, state.seed + 731) * 2 - 1) * 0.25;
+  const driftNoise = (hash2D(driftBucket, state.climateYear, state.seed + 731) * 2 - 1) * variability * 0.42;
   const angle = baseAngle + seasonalDrift + driftNoise;
   const dx = Math.cos(angle);
   const dy = Math.sin(angle);
@@ -39,7 +40,8 @@ const getClimateWind = (state: WorldState): Wind => {
   const tempNorm = clamp((state.climateTemp - DEFAULT_CLIMATE_PARAMS.tMid) / tempSpan, -1, 1);
   const yearTrend = clamp(state.climateYear / Math.max(1, CAREER_YEARS - 1), 0, 1);
   const gust = (hash2D(Math.floor(state.climateDay / 4), state.climateYear, state.seed + 977) * 2 - 1) * 0.08;
-  const strengthBase = 0.28 + dryness * 0.32 + Math.max(0, tempNorm) * 0.18;
+  const strengthBase =
+    climateSeed.prevailingWindStrength * 0.58 + dryness * 0.26 + Math.max(0, tempNorm) * 0.14;
   const strengthTrend = yearTrend * 0.22;
   const strength = clamp(strengthBase + strengthTrend + gust, 0.2, 0.95);
   const nearest = getNearestWindDir(dx, dy);

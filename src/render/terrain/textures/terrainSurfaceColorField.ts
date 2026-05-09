@@ -8,6 +8,7 @@ type TerrainSurfaceColorSample = {
   rows: number;
   treeTypes?: Uint8Array;
   riverMask?: Uint8Array;
+  oceanMask?: Uint8Array;
   tileMoisture?: Float32Array;
   climateDryness?: number;
   tileFuel?: Float32Array;
@@ -15,6 +16,7 @@ type TerrainSurfaceColorSample = {
   tileHeat?: Float32Array;
   heatCap?: number;
   worldSeed?: number;
+  fastUpdate?: boolean;
 };
 
 type TerrainSurfaceColorFieldDeps = {
@@ -84,6 +86,18 @@ const mixTriplet = (a: readonly number[], b: readonly number[], t: number): [num
     a[1] * (1 - clampedT) + b[1] * clampedT,
     a[2] * (1 - clampedT) + b[2] * clampedT
   ];
+};
+
+const hasMaskCoverage = (mask?: Uint8Array): boolean => {
+  if (!mask) {
+    return false;
+  }
+  for (let i = 0; i < mask.length; i += 1) {
+    if ((mask[i] ?? 0) > 0) {
+      return true;
+    }
+  }
+  return false;
 };
 
 const srgbChannelToLinear = (value: number): number =>
@@ -191,6 +205,54 @@ const applySlopeTint = (
   return mixTriplet(desaturated, rockyBlendColor, tintMix);
 };
 
+const applyFastPreviewReliefContrast = (
+  color: readonly number[],
+  height: number,
+  minHeight: number,
+  invHeightRange: number,
+  slope: number,
+  curvature: number,
+  lightGradient: number,
+  typeId: number,
+  beachId: number
+): [number, number, number] => {
+  if (
+    typeId === TILE_TYPE_IDS.water ||
+    typeId === TILE_TYPE_IDS.road ||
+    typeId === TILE_TYPE_IDS.base ||
+    typeId === TILE_TYPE_IDS.house ||
+    typeId === TILE_TYPE_IDS.firebreak
+  ) {
+    return [color[0], color[1], color[2]];
+  }
+
+  const height01 = clamp((height - minHeight) * invHeightRange, 0, 1);
+  const lowlandTint: [number, number, number] = [0.32, 0.44, 0.25];
+  const uplandTint: [number, number, number] = [0.43, 0.55, 0.31];
+  const highlandTint: [number, number, number] = [0.61, 0.58, 0.42];
+  const rockyTint: [number, number, number] = [0.53, 0.5, 0.43];
+  const heightTint =
+    height01 < 0.58
+      ? mixTriplet(lowlandTint, uplandTint, height01 / 0.58)
+      : mixTriplet(uplandTint, highlandTint, (height01 - 0.58) / 0.42);
+  const slopeMask = typeId === beachId ? smoothstep(0.035, 0.18, slope) : smoothstep(0.07, 0.3, slope);
+  const ridgeMask = smoothstep(0.004, -0.02, curvature);
+  const valleyMask = smoothstep(0.004, 0.028, curvature);
+  const reliefShade = clamp(
+    0.87 + clamp(lightGradient, -0.28, 0.3) + height01 * 0.1 - valleyMask * 0.08,
+    0.66,
+    1.22
+  );
+  const rockyMix = clamp(slopeMask * 0.24 + ridgeMask * 0.16, 0, 0.36);
+  let reliefColor = mixTriplet(color, heightTint, 0.46);
+  reliefColor = mixTriplet(reliefColor, rockyTint, rockyMix);
+  return [
+    clamp(reliefColor[0] * reliefShade, 0, 1),
+    clamp(reliefColor[1] * reliefShade, 0, 1),
+    clamp(reliefColor[2] * reliefShade, 0, 1)
+  ];
+};
+
 export const buildTerrainSurfaceColorField = (options: BuildTerrainSurfaceColorFieldOptions): Float32Array => {
   const {
     sample,
@@ -225,6 +287,26 @@ export const buildTerrainSurfaceColorField = (options: BuildTerrainSurfaceColorF
   const bareId = TILE_TYPE_IDS.bare;
   const worldSeed = Math.floor(sample.worldSeed ?? 0);
   const output = new Float32Array(sampleCols * sampleRows * 3);
+  const fastDryPreview =
+    sample.fastUpdate === true &&
+    !hasMaskCoverage(sample.oceanMask) &&
+    !hasMaskCoverage(sample.riverMask);
+  let minPreviewHeight = 0;
+  let invPreviewHeightRange = 1;
+  if (fastDryPreview) {
+    minPreviewHeight = Number.POSITIVE_INFINITY;
+    let maxPreviewHeight = Number.NEGATIVE_INFINITY;
+    for (let i = 0; i < sampleHeights.length; i += 1) {
+      const height = sampleHeights[i] ?? 0;
+      minPreviewHeight = Math.min(minPreviewHeight, height);
+      maxPreviewHeight = Math.max(maxPreviewHeight, height);
+    }
+    if (!Number.isFinite(minPreviewHeight) || !Number.isFinite(maxPreviewHeight)) {
+      minPreviewHeight = 0;
+      maxPreviewHeight = 1;
+    }
+    invPreviewHeightRange = 1 / Math.max(0.001, maxPreviewHeight - minPreviewHeight);
+  }
 
   for (let row = 0; row < sampleRows; row += 1) {
     const tileY = Math.min(rows - 1, row * step);
@@ -405,6 +487,8 @@ export const buildTerrainSurfaceColorField = (options: BuildTerrainSurfaceColorF
       const dx = (heightRight - heightLeft) * heightScale;
       const dz = (heightDown - heightUp) * heightScale;
       const slope = Math.sqrt(dx * dx + dz * dz);
+      const previewLightGradient =
+        ((heightLeft - heightRight) * 0.95 + (heightDown - heightUp) * 0.65) * heightScale;
 
       if (
         !debugTypeColors &&
@@ -445,6 +529,19 @@ export const buildTerrainSurfaceColorField = (options: BuildTerrainSurfaceColorF
         const rockyColor = deps.palette[rockyId] ?? color;
         const bareColor = deps.palette[bareId] ?? rockyColor;
         color = applySlopeTint(color, slope, typeId, localMoisture, rockyColor, bareColor, beachId);
+        if (fastDryPreview) {
+          color = applyFastPreviewReliefContrast(
+            color,
+            height,
+            minPreviewHeight,
+            invPreviewHeightRange,
+            slope,
+            curvature,
+            previewLightGradient,
+            typeId,
+            beachId
+          );
+        }
       }
 
       const linearColor = toLinearTriplet(color);

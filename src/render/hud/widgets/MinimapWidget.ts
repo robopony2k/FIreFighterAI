@@ -8,6 +8,7 @@ import { HUD_PLANE_Y } from "../hudLayout.js";
 import type { HudInput, HudWidget } from "./hudWidget.js";
 import { computeViewportCenterOnPlane } from "../minimapViewport.js";
 import { buildThermalBackdropField, buildThermalHotspotField, paintThermalField } from "../../minimapRaster.js";
+import { generateWorldClimateSeed } from "../../../systems/climate/sim/worldClimateSeed.js";
 
 type RGB = { r: number; g: number; b: number };
 
@@ -17,6 +18,14 @@ const mix = (a: RGB, b: RGB, t: number): RGB => ({
   g: a.g + (b.g - a.g) * t,
   b: a.b + (b.b - a.b) * t
 });
+
+const getMoistureColor = (moisture: number): RGB => {
+  const dry = { r: 125, g: 92, b: 58 };
+  const damp = { r: 94, g: 129, b: 84 };
+  const wet = { r: 60, g: 128, b: 179 };
+  const clamped = clamp(moisture, 0, 1);
+  return clamped <= 0.5 ? mix(dry, damp, clamped / 0.5) : mix(damp, wet, (clamped - 0.5) / 0.5);
+};
 
 export class MinimapWidget implements HudWidget {
   public readonly type: WidgetType = "minimap";
@@ -90,6 +99,7 @@ export class MinimapWidget implements HudWidget {
     ctx.strokeRect(mapRect.x + 0.5, mapRect.y + 0.5, mapRect.width - 1, mapRect.height - 1);
 
     this.drawViewportOverlay(ctx, mapRect, world, ui);
+    this.drawWindOverlay(ctx, mapRect, world);
 
     ctx.restore();
   }
@@ -145,6 +155,7 @@ export class MinimapWidget implements HudWidget {
       const data = image.data;
       const tileTypes = world.tileTypeId;
       const elevations = world.tileElevation;
+      const moisture = world.tileMoisture;
       if (mode === "thermal") {
         const pixelCount = mapWidth * mapHeight;
         const thermalBackdropDirty =
@@ -171,6 +182,8 @@ export class MinimapWidget implements HudWidget {
               const typeId = tileTypes[idx] ?? 0;
               const tileType = TILE_ID_TO_TYPE[typeId] ?? "grass";
               color = TILE_COLOR_RGB[tileType] ?? color;
+            } else if (mode === "moisture") {
+              color = getMoistureColor(moisture[idx] ?? 0);
             } else {
               const elev = clamp(elevations[idx] ?? 0, 0, 1);
               color = mix(ELEVATION_TINT_LOW, ELEVATION_TINT_HIGH, elev);
@@ -239,6 +252,48 @@ export class MinimapWidget implements HudWidget {
     ctx.beginPath();
     ctx.arc(mapped.x, mapped.y, Math.max(2, len * 0.15), 0, Math.PI * 2);
     ctx.fill();
+    ctx.restore();
+  }
+
+  private drawWindOverlay(ctx: CanvasRenderingContext2D, rect: Rect, world: WorldState): void {
+    const climateSeed = generateWorldClimateSeed(world.seed);
+    const prevailing = {
+      dx: Math.cos(climateSeed.prevailingWindAngleRad),
+      dy: Math.sin(climateSeed.prevailingWindAngleRad),
+      strength: climateSeed.prevailingWindStrength
+    };
+    const originX = rect.x + rect.width * 0.16;
+    const originY = rect.y + rect.height * 0.16;
+    const len = Math.max(8, Math.min(rect.width, rect.height) * 0.13);
+    const drawArrow = (dx: number, dy: number, strength: number, color: string, offsetY: number): void => {
+      const mag = Math.hypot(dx, dy);
+      if (mag <= 0.0001) {
+        return;
+      }
+      const ux = dx / mag;
+      const uy = dy / mag;
+      const scaledLen = len * clamp(strength, 0.35, 1);
+      const sx = originX;
+      const sy = originY + offsetY;
+      const ex = sx + ux * scaledLen;
+      const ey = sy + uy * scaledLen;
+      ctx.strokeStyle = color;
+      ctx.fillStyle = color;
+      ctx.lineWidth = 1.4;
+      ctx.beginPath();
+      ctx.moveTo(sx, sy);
+      ctx.lineTo(ex, ey);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(ex, ey);
+      ctx.lineTo(ex - ux * 4 - uy * 2.5, ey - uy * 4 + ux * 2.5);
+      ctx.lineTo(ex - ux * 4 + uy * 2.5, ey - uy * 4 - ux * 2.5);
+      ctx.closePath();
+      ctx.fill();
+    };
+    ctx.save();
+    drawArrow(prevailing.dx, prevailing.dy, prevailing.strength, "rgba(83, 211, 194, 0.95)", 0);
+    drawArrow(world.wind?.dx ?? 0, world.wind?.dy ?? 0, world.wind?.strength ?? 0, "rgba(245, 247, 250, 0.95)", 11);
     ctx.restore();
   }
 }

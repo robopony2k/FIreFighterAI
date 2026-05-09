@@ -134,6 +134,9 @@ Design intent:
 - Grass, floodplain, beach, and scorched ground should vary in broad 10-20 tile patches so the land reads as cohesive terrain instead of per-tile checkerboarding.
 - Slopes should subtly desaturate toward rocky/bare tones while keeping terrain type identity readable.
 - Dev-facing terrain tools should retain a legacy faceted comparison mode for validating shading changes without affecting simulation data.
+- Terrain generation uses a shared Mapgen4-inspired grid landmass core for editor previews and `terrain:elevation`, deriving dry shape, coastline intent, mountains, valleys, and drainage support fields from seeded noise, elevation redistribution, and a center-up/edge-down island envelope before sea level, ocean flooding, accurate rivers, biomes, settlements, roads, and fuel stages run.
+- Each world seed also derives a fictional prevailing wind direction, strength, and variability; that seed climate carries ocean moisture inland so windward slopes trend wetter, leeward rain shadows trend drier, and the resulting static moisture shapes biome, fuel, and later fire-season wind bias.
+- The terrain editor early sequence is Scenario, Shape, Relief, and Water for fast landmass previews. Scenario, Shape, and Relief render dry landmass previews with no ocean or river water; Water is the first fast preview that calibrates sea level from the Land mass target and renders connected ocean. Rivers is an accurate click-driven stage that advances the mapgen session through shoreline and river carving before rendering.
 
 ## New Run Configuration (Proposed)
 
@@ -150,7 +153,8 @@ Command Roster
 Terrain
 - Seed and map size presets.
 - Map generation sliders (forest/meadow/water settings).
-- Island archetypes should visibly change the same-seed initial relief and coastline plan. The current tectonic layer is an aesthetic landform proxy for natural islands, ridges, shelves, bays, and uplands, not a literal plate-simulation goal.
+- Island archetypes should visibly change the same-seed initial relief and coastline plan. The fast noise/elevation redistribution layer is the primary landform proxy for natural islands, ridges, shelves, bays, and uplands; literal plate simulation is not a design goal.
+- Terrain editor previews prioritize instant feedback for shape, relief, and water controls using the same fast landmass core as `terrain:elevation`; Rivers and later final-quality stages are not started until their step is selected, then advance the current preview session instead of restarting earlier completed stages. Shape exposes Land mass as the primary coastline coverage control; Water exposes sea-level bias only as an advanced calibration override.
 - Tile fuel profiles (baseFuel/ignition/burnRate/heatOutput/spreadBoost/heatTransferCap/heatRetention/windFactor per tile type); windFactor is retained as the config key but means windbreak strength, where 0 is open terrain and 1 is strong wind obstruction.
 - Vegetation regrowth (water influence, ash recovery, canopy growth, forest recruit).
 - Community and road generation (town density, bridge allowance, settlement spacing, road strictness, pre-growth years).
@@ -160,7 +164,7 @@ Climate
 - Moisture params (Mmin/Mmax, Tdry0/Tdry1, k0/k1).
 - Cooling params (base/alpha/Tref/kMinFactor/kMaxFactor).
 - Climate risk mapping (CLIMATE_IGNITION_MIN/MAX, spread base/range, risk weights), forecast window (90).
-- Wind model tuning (strength base/dryness/temp/year weights, gust).
+- Wind model tuning (seeded prevailing wind, seasonal variability, strength base/dryness/temp/year weights, gust).
 
 Fire
 - Ignition chance per day, sim speed/tick cadence/rows per slice, render smoothing.

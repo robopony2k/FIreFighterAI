@@ -1,6 +1,6 @@
 import type { RNG } from "../core/types.js";
 import type { WorldState } from "../core/state.js";
-import type { MapGenDebug, MapGenDebugSnapshot, MapGenReporter } from "./mapgenTypes.js";
+import type { MapGenDebug, MapGenDebugPhase, MapGenDebugSnapshot, MapGenReporter } from "./mapgenTypes.js";
 import type { MapGenSettings } from "./settings.js";
 import type { ResolvedTerrainProfile, TerrainRecipe } from "./terrainProfile.js";
 import { createYieldController } from "./pipeline/yieldController.js";
@@ -47,3 +47,51 @@ export async function generateMap(
   const context = new MapGenContext(state, rng, report, terrain, debug, yieldIfNeeded);
   await MAPGEN_PIPELINE.run(context);
 }
+
+export type MapGenSession = {
+  readonly state: WorldState;
+  readonly completedPhase: MapGenDebugPhase | null;
+  advanceTo: (
+    targetPhase: MapGenDebugPhase,
+    report?: MapGenReporter,
+    debug?: Omit<MapGenDebug, "stopAfterPhase"> & { stopAfterPhase?: MapGenDebugPhase }
+  ) => Promise<void>;
+};
+
+class TerrainMapGenSession implements MapGenSession {
+  private readonly context: MapGenContext;
+  private lastCompletedPhase: MapGenDebugPhase | null = null;
+
+  constructor(
+    readonly state: WorldState,
+    rng: RNG,
+    terrain?: MapGenSettings | TerrainRecipe | ResolvedTerrainProfile
+  ) {
+    this.context = new MapGenContext(state, rng, undefined, terrain, undefined, createYieldController());
+  }
+
+  get completedPhase(): MapGenDebugPhase | null {
+    return this.lastCompletedPhase;
+  }
+
+  async advanceTo(
+    targetPhase: MapGenDebugPhase,
+    report?: MapGenReporter,
+    debug?: Omit<MapGenDebug, "stopAfterPhase"> & { stopAfterPhase?: MapGenDebugPhase }
+  ): Promise<void> {
+    this.context.setRunOptions(report, {
+      ...(debug ?? { onPhase: () => {} }),
+      stopAfterPhase: debug?.stopAfterPhase ?? targetPhase
+    });
+    const completedPhase = await MAPGEN_PIPELINE.run(this.context, {
+      startAfterPhase: this.lastCompletedPhase
+    });
+    this.lastCompletedPhase = completedPhase ?? this.lastCompletedPhase;
+  }
+}
+
+export const createMapGenSession = (
+  state: WorldState,
+  rng: RNG,
+  terrain?: MapGenSettings | TerrainRecipe | ResolvedTerrainProfile
+): MapGenSession => new TerrainMapGenSession(state, rng, terrain);

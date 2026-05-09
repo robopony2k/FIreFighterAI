@@ -6,7 +6,6 @@ import {
   COAST_CLASS_NONE,
   COAST_CLASS_SHELF_WATER,
   createInitialState,
-  resetState,
   TILE_ID_TO_TYPE,
   TILE_TYPE_IDS,
   type WorldState
@@ -14,9 +13,16 @@ import {
 import { getTerrainHeightScale } from "../core/terrainScale.js";
 import { TREE_TYPE_IDS } from "../core/types.js";
 import { syncTileSoA } from "../core/tileCache.js";
-import { generateMap, type MapGenDebug, type MapGenDebugPhase, type MapGenDebugSnapshot } from "../mapgen/index.js";
+import {
+  createMapGenSession,
+  type MapGenDebug,
+  type MapGenDebugPhase,
+  type MapGenDebugSnapshot,
+  type MapGenSession
+} from "../mapgen/index.js";
 import {
   cloneTerrainRecipe,
+  compileTerrainRecipe,
   createDefaultTerrainRecipe,
   getTerrainHeightScaleMultiplier,
   terrainRecipeEqual,
@@ -31,6 +37,7 @@ import {
   type MapScenario
 } from "../persistence/mapScenarios.js";
 import { buildRenderTerrainSample } from "../render/simView.js";
+import { buildFastTerrainPreview, type FastTerrainPreviewMode } from "../systems/terrain/sim/fastTerrainPreview.js";
 import {
   createTerrainPreviewController,
   type TerrainPreviewHoverTile,
@@ -157,6 +164,7 @@ const formatPreviewUnavailableMessage = (reason: string | null): string =>
     : "3D preview unavailable in this environment.";
 
 const MAP_EDITOR_PHASE_ORDER: MapGenDebugPhase[] = [
+  "terrain:fastPreview",
   "terrain:relief",
   "terrain:carving",
   "terrain:flooding",
@@ -180,7 +188,7 @@ const MAP_EDITOR_PHASE_RANK = new Map<MapGenDebugPhase, number>(
 type StepPreviewConfig = {
   label: string;
   stopAfterPhase: MapGenDebugPhase;
-  sampleSource: "snapshot" | "state";
+  sampleSource: "snapshot" | "state" | "fast";
   treesEnabled: boolean;
 };
 
@@ -202,21 +210,21 @@ const DEFAULT_MAP_EDITOR_RENDER_DEBUG_STATE: MapEditorRenderDebugState = {
 
 const MAP_EDITOR_PREVIEW_BY_STEP: Record<MapEditorStepId, StepPreviewConfig> = {
   scenario: {
-    label: "Relief",
-    stopAfterPhase: "terrain:relief",
-    sampleSource: "snapshot",
+    label: "Scenario",
+    stopAfterPhase: "terrain:fastPreview",
+    sampleSource: "fast",
     treesEnabled: false
   },
   relief: {
     label: "Relief",
-    stopAfterPhase: "terrain:relief",
-    sampleSource: "snapshot",
+    stopAfterPhase: "terrain:fastPreview",
+    sampleSource: "fast",
     treesEnabled: false
   },
   carving: {
-    label: "Terrain Carving",
-    stopAfterPhase: "terrain:carving",
-    sampleSource: "snapshot",
+    label: "Shape",
+    stopAfterPhase: "terrain:fastPreview",
+    sampleSource: "fast",
     treesEnabled: false
   },
   erosion: {
@@ -226,9 +234,9 @@ const MAP_EDITOR_PREVIEW_BY_STEP: Record<MapEditorStepId, StepPreviewConfig> = {
     treesEnabled: false
   },
   flooding: {
-    label: "Flooded Coastline",
-    stopAfterPhase: "hydro:solve",
-    sampleSource: "state",
+    label: "Water",
+    stopAfterPhase: "terrain:fastPreview",
+    sampleSource: "fast",
     treesEnabled: false
   },
   rivers: {
@@ -322,9 +330,61 @@ const buildWorldPreviewSample = (
   );
 };
 
+const getFastPreviewMode = (stepId: MapEditorStepId): FastTerrainPreviewMode | null => {
+  switch (stepId) {
+    case "scenario":
+    case "carving":
+      return "shape";
+    case "relief":
+      return "relief";
+    case "flooding":
+      return "water";
+    default:
+      return null;
+  }
+};
+
+const buildFastPreviewSample = (
+  draft: TerrainDraft,
+  stepId: MapEditorStepId,
+  heightScaleMultiplier: number
+) => {
+  const mode = getFastPreviewMode(stepId);
+  if (!mode) {
+    return null;
+  }
+  const grid = buildGrid(draft.mapSize);
+  const { settings } = compileTerrainRecipe(draft.terrain);
+  const result = buildFastTerrainPreview({
+    seed: draft.seed,
+    cols: grid.cols,
+    rows: grid.rows,
+    settings,
+    mode
+  });
+  return {
+    cols: result.cols,
+    rows: result.rows,
+    elevations: result.elevationMap,
+    heightScaleMultiplier,
+    tileTypes: result.tileTypes,
+    riverMask: result.riverMask,
+    oceanMask: result.oceanMask,
+    seaLevel: result.seaLevelMap,
+    coastDistance: result.coastDistance,
+    coastClass: result.coastClass,
+    fullResolution: false,
+    treesEnabled: false,
+    worldSeed: draft.seed,
+    fastUpdate: true,
+    fastPreviewTimingsMs: result.timingsMs
+  };
+};
+
 type SnapshotPreviewSample = ReturnType<typeof buildSnapshotSample>;
 type WorldPreviewSample = ReturnType<typeof buildWorldPreviewSample>;
-type PreviewRenderableSample = SnapshotPreviewSample | WorldPreviewSample;
+type FastPreviewSample = NonNullable<ReturnType<typeof buildFastPreviewSample>>;
+type PreviewRenderableSample = SnapshotPreviewSample | WorldPreviewSample | FastPreviewSample;
 type DebugPreviewRenderableSample = PreviewRenderableSample & { debugRenderOptions?: TerrainRenderDebugOptions };
 type CoastlineProbe = {
   label: string;
@@ -337,11 +397,11 @@ type CoastlineProbe = {
 
 const MAP_EDITOR_STEP_SEQUENCE: readonly MapEditorStepId[] = [
   "scenario",
-  "relief",
   "carving",
-  "erosion",
+  "relief",
   "flooding",
   "rivers",
+  "erosion",
   "settlements",
   "vegetation",
   "final"
@@ -977,9 +1037,8 @@ export const initMapEditor = (refs: MapEditorRefs, deps: MapEditorDeps): MapEdit
   let activeStep: MapEditorStepId = "scenario";
   let selectedScenarioId: string | null = null;
   let scenarios: MapScenario[] = [];
-  let previewWorld: WorldState | null = null;
-  let previewWorldMapSize: MapSizeId | null = null;
-  const previewRng = new RNG(DEFAULT_RUN_SEED);
+  let previewPipelineSession: MapGenSession | null = null;
+  let previewPipelineSessionCacheKey: string | null = null;
   let previewPending = false;
   let previewRunning = false;
   let previewRecenterPending = false;
@@ -989,9 +1048,6 @@ export const initMapEditor = (refs: MapEditorRefs, deps: MapEditorDeps): MapEdit
   let previewCacheKey: string | null = null;
   let previewCachedSamples: Partial<Record<MapEditorStepId, PreviewRenderableSample>> = {};
   let previewErosionBaselineSample: PreviewRenderableSample | null = null;
-  let previewWarmRunning = false;
-  let previewWarmCacheKey: string | null = null;
-  let previewWarmToken = 0;
   let assetsReadyForSession = false;
   let advancedMode = false;
   let previewHoveredTile: TerrainPreviewHoverTile | null = null;
@@ -1031,15 +1087,16 @@ export const initMapEditor = (refs: MapEditorRefs, deps: MapEditorDeps): MapEdit
     updateCoastlineDebugPanel();
     const draft = collectDraft();
     const cacheKey = syncPreviewCacheDraft(draft);
+    void cacheKey;
+    if (getFastPreviewMode(stepId) !== null && renderFastPreviewForDraft(draft, stepId, previewRecenterPending)) {
+      previewRecenterPending = false;
+      return;
+    }
     if (tryRenderCachedActiveStep()) {
       return;
     }
     if (previewRunning) {
       requestPreviewBuild(false, true);
-      return;
-    }
-    if (previewWarmRunning && previewWarmCacheKey === cacheKey) {
-      showPreviewOverlay(`Refining ${getActivePreviewConfig().label.toLowerCase()} preview...`, 0);
       return;
     }
     requestPreviewBuild(false, true);
@@ -1142,7 +1199,8 @@ export const initMapEditor = (refs: MapEditorRefs, deps: MapEditorDeps): MapEdit
       relief: jitterValue(rng, base.relief, archetype === "SHELF" ? 0.1 : 0.16),
       ruggedness: jitterValue(rng, base.ruggedness, archetype === "SHELF" ? 0.08 : 0.16),
       coastComplexity: jitterValue(rng, base.coastComplexity, archetype === "TWIN_BAY" ? 0.16 : 0.12),
-      waterLevel: jitterValue(rng, base.waterLevel, 0.12),
+      landCoverageTarget: jitterValue(rng, base.landCoverageTarget, 0.1),
+      waterLevel: base.waterLevel,
       riverIntensity: jitterValue(rng, base.riverIntensity, 0.14),
       vegetationDensity: jitterValue(rng, base.vegetationDensity, 0.18),
       townDensity: jitterValue(rng, base.townDensity, 0.16),
@@ -1160,7 +1218,8 @@ export const initMapEditor = (refs: MapEditorRefs, deps: MapEditorDeps): MapEdit
         ridgeFrequency: jitterValue(rng, advanced.ridgeFrequency ?? 0.5, archetype === "LONG_SPINE" ? 0.1 : 0.14),
         basinStrength: jitterValue(rng, advanced.basinStrength ?? 0.5, 0.12),
         coastalShelfWidth: jitterValue(rng, advanced.coastalShelfWidth ?? 0.5, archetype === "SHELF" ? 0.14 : 0.1),
-        skipCarving: rng.next() < 0.18,
+        seaLevelBias: jitterValue(rng, advanced.seaLevelBias ?? 0.5, 0.04),
+        skipCarving: false,
         riverBudget: jitterValue(rng, advanced.riverBudget ?? 0.5, 0.14),
         settlementSpacing: jitterValue(rng, advanced.settlementSpacing ?? 0.5, 0.12),
         settlementPreGrowthYears: Math.max(0, Math.min(40, Math.round((advanced.settlementPreGrowthYears ?? 20) + (rng.next() * 16 - 8)))),
@@ -1198,7 +1257,8 @@ export const initMapEditor = (refs: MapEditorRefs, deps: MapEditorDeps): MapEdit
       previewCacheKey = cacheKey;
       previewCachedSamples = {};
       previewErosionBaselineSample = null;
-      previewWarmToken += 1;
+      previewPipelineSession = null;
+      previewPipelineSessionCacheKey = null;
       updateCoastlineDebugPanel();
     }
     return cacheKey;
@@ -1208,7 +1268,8 @@ export const initMapEditor = (refs: MapEditorRefs, deps: MapEditorDeps): MapEdit
     previewCacheKey = null;
     previewCachedSamples = {};
     previewErosionBaselineSample = null;
-    previewWarmToken += 1;
+    previewPipelineSession = null;
+    previewPipelineSessionCacheKey = null;
     updateCoastlineDebugPanel();
   };
 
@@ -1240,9 +1301,9 @@ export const initMapEditor = (refs: MapEditorRefs, deps: MapEditorDeps): MapEdit
     stepId: MapEditorStepId,
     sample: PreviewRenderableSample
   ): void => {
-    if (stepId === "scenario" || stepId === "relief") {
+    if (stepId === "scenario" || stepId === "carving") {
       cachePreviewSample(cacheKey, "scenario", sample);
-      cachePreviewSample(cacheKey, "relief", sample);
+      cachePreviewSample(cacheKey, "carving", sample);
       return;
     }
     cachePreviewSample(cacheKey, stepId, sample);
@@ -1288,21 +1349,27 @@ export const initMapEditor = (refs: MapEditorRefs, deps: MapEditorDeps): MapEdit
       ? previewErosionBaselineSample
       : previewCachedSamples[activeStep] ?? null;
 
-  const maybeRenderCachedActiveStep = (cacheKey: string, stepId: MapEditorStepId): void => {
-    if (!visible || previewRunning || previewCacheKey !== cacheKey) {
-      return;
+  const renderFastPreviewForDraft = (
+    draft: TerrainDraft,
+    stepId: MapEditorStepId,
+    recenter: boolean
+  ): boolean => {
+    if (!isPreviewAvailable() || !visible || getFastPreviewMode(stepId) === null) {
+      return false;
     }
-    if (
-      activeStep !== stepId
-      && !(activeStep === "scenario" && stepId === "relief")
-    ) {
-      return;
+    const cacheKey = syncPreviewCacheDraft(draft);
+    const terrainHeightScaleMultiplier = getTerrainHeightScaleMultiplier(draft.terrain, draft.mapSize);
+    const sample = buildFastPreviewSample(draft, stepId, terrainHeightScaleMultiplier);
+    if (!sample) {
+      return false;
     }
-    const draft = collectDraft();
-    if (buildPreviewCacheKey(draft) !== cacheKey) {
-      return;
+    cacheEquivalentPreviewSample(cacheKey, stepId, sample);
+    if (activeStep === stepId || (activeStep === "scenario" && stepId === "carving")) {
+      preview.setTerrain(applyTerrainRenderDebugOptions(sample, previewRenderDebugState, false), { recenter });
+      hidePreviewOverlay();
+      syncCurrentScenarioLabel();
     }
-    tryRenderCachedActiveStep();
+    return true;
   };
 
   const findScenarioById = (scenarioId: string | null): MapScenario | null => {
@@ -1465,6 +1532,13 @@ export const initMapEditor = (refs: MapEditorRefs, deps: MapEditorDeps): MapEdit
     }
     const match = findMatchingScenario(draft);
     const sourceLabel = match ? `linked to "${match.name}"` : "custom draft";
+    const activeSample = getActiveCachedPreviewSample() as PreviewRenderableSample & {
+      fastPreviewTimingsMs?: { total: number };
+    } | null;
+    const fastMode = getFastPreviewMode(activeStep);
+    if (fastMode && activeSample?.fastPreviewTimingsMs) {
+      return `Fast preview: ${fastMode} - ${Math.round(activeSample.fastPreviewTimingsMs.total)}ms - ${sourceLabel}`;
+    }
     return `Preview layer: ${getActivePreviewConfig().label} - ${sourceLabel}`;
   };
 
@@ -1525,160 +1599,13 @@ export const initMapEditor = (refs: MapEditorRefs, deps: MapEditorDeps): MapEdit
     updateCoastlineDebugPanel();
   };
 
-  const ensurePreviewWorld = (mapSize: MapSizeId, seed: number): WorldState => {
-    if (!previewWorld || previewWorldMapSize !== mapSize) {
-      previewWorld = createInitialState(seed, buildGrid(mapSize));
-      previewWorldMapSize = mapSize;
-      return previewWorld;
+  const ensurePreviewPipelineSession = (draft: TerrainDraft, cacheKey: string): MapGenSession => {
+    if (!previewPipelineSession || previewPipelineSessionCacheKey !== cacheKey) {
+      const state = createInitialState(draft.seed, buildGrid(draft.mapSize));
+      previewPipelineSession = createMapGenSession(state, new RNG(draft.seed), draft.terrain);
+      previewPipelineSessionCacheKey = cacheKey;
     }
-    resetState(previewWorld, seed);
-    return previewWorld;
-  };
-
-  const warmPreviewCache = async (draft: TerrainDraft): Promise<void> => {
-    if (!isPreviewAvailable()) {
-      return;
-    }
-    if (!visible || !assetsReadyForSession || previewRunning || previewWarmRunning) {
-      return;
-    }
-    const cacheKey = syncPreviewCacheDraft(draft);
-    const terrainHeightScaleMultiplier = getTerrainHeightScaleMultiplier(draft.terrain, draft.mapSize);
-    if (previewCachedSamples.final && previewCacheKey === cacheKey) {
-      return;
-    }
-
-    previewWarmRunning = true;
-    previewWarmCacheKey = cacheKey;
-    const sessionToken = previewSessionToken;
-    const warmToken = previewWarmToken;
-    const warmWorld = createInitialState(draft.seed, buildGrid(draft.mapSize));
-    const warmRng = new RNG(draft.seed);
-
-    try {
-      const debug: MapGenDebug = {
-        onPhase: async (snapshot) => {
-          if (!visible || sessionToken !== previewSessionToken || warmToken !== previewWarmToken || previewCacheKey !== cacheKey) {
-            return;
-          }
-          switch (snapshot.phase) {
-            case "terrain:relief": {
-              const sample = buildSnapshotSample(
-                snapshot,
-                warmWorld.grid,
-                warmWorld.seed,
-                terrainHeightScaleMultiplier,
-                false
-              );
-              cacheEquivalentPreviewSample(cacheKey, "relief", sample);
-              maybeRenderCachedActiveStep(cacheKey, "relief");
-              break;
-            }
-            case "terrain:carving": {
-              cacheEquivalentPreviewSample(
-                cacheKey,
-                "carving",
-                buildSnapshotSample(snapshot, warmWorld.grid, warmWorld.seed, terrainHeightScaleMultiplier, false)
-              );
-              maybeRenderCachedActiveStep(cacheKey, "carving");
-              break;
-            }
-            case "terrain:elevation": {
-              cacheErosionBaselineSample(
-                cacheKey,
-                buildSnapshotSample(snapshot, warmWorld.grid, warmWorld.seed, terrainHeightScaleMultiplier, false)
-              );
-              maybeRenderCachedActiveStep(cacheKey, "erosion");
-              break;
-            }
-            case "terrain:erosion": {
-              cacheEquivalentPreviewSample(
-                cacheKey,
-                "erosion",
-                buildSnapshotSample(snapshot, warmWorld.grid, warmWorld.seed, terrainHeightScaleMultiplier, false)
-              );
-              maybeRenderCachedActiveStep(cacheKey, "erosion");
-              break;
-            }
-            case "hydro:solve": {
-              cacheEquivalentPreviewSample(
-                cacheKey,
-                "flooding",
-                buildWorldPreviewSample(warmWorld, false, terrainHeightScaleMultiplier)
-              );
-              maybeRenderCachedActiveStep(cacheKey, "flooding");
-              break;
-            }
-            case "hydro:rivers": {
-              cacheEquivalentPreviewSample(
-                cacheKey,
-                "rivers",
-                buildSnapshotSample(snapshot, warmWorld.grid, warmWorld.seed, terrainHeightScaleMultiplier, false)
-              );
-              maybeRenderCachedActiveStep(cacheKey, "rivers");
-              break;
-            }
-            case "roads:connect": {
-              cacheEquivalentPreviewSample(
-                cacheKey,
-                "settlements",
-                buildWorldPreviewSample(warmWorld, false, terrainHeightScaleMultiplier)
-              );
-              maybeRenderCachedActiveStep(cacheKey, "settlements");
-              break;
-            }
-            case "reconcile:postSettlement": {
-              cacheEquivalentPreviewSample(
-                cacheKey,
-                "vegetation",
-                buildWorldPreviewSample(warmWorld, true, terrainHeightScaleMultiplier)
-              );
-              maybeRenderCachedActiveStep(cacheKey, "vegetation");
-              break;
-            }
-            case "map:finalize": {
-              cacheEquivalentPreviewSample(
-                cacheKey,
-                "final",
-                buildWorldPreviewSample(warmWorld, true, terrainHeightScaleMultiplier)
-              );
-              maybeRenderCachedActiveStep(cacheKey, "final");
-              break;
-            }
-            default:
-              break;
-          }
-        }
-      };
-
-      await generateMap(warmWorld, warmRng, undefined, draft.terrain, debug);
-
-      if (!visible || sessionToken !== previewSessionToken || warmToken !== previewWarmToken || previewCacheKey !== cacheKey) {
-        return;
-      }
-
-      if (!previewCachedSamples.final) {
-        cacheEquivalentPreviewSample(
-          cacheKey,
-          "final",
-          buildWorldPreviewSample(warmWorld, true, terrainHeightScaleMultiplier)
-        );
-        maybeRenderCachedActiveStep(cacheKey, "final");
-      }
-    } catch {
-      if (
-        visible &&
-        sessionToken === previewSessionToken &&
-        warmToken === previewWarmToken &&
-        previewCacheKey === cacheKey &&
-        !previewCachedSamples[activeStep]
-      ) {
-        requestPreviewBuild(previewRecenterPending, true);
-      }
-    } finally {
-      previewWarmRunning = false;
-      previewWarmCacheKey = null;
-    }
+    return previewPipelineSession;
   };
 
   const runPreviewBuild = async (): Promise<void> => {
@@ -1705,7 +1632,6 @@ export const initMapEditor = (refs: MapEditorRefs, deps: MapEditorDeps): MapEdit
     const cacheKey = syncPreviewCacheDraft(draft);
     const terrainHeightScaleMultiplier = getTerrainHeightScaleMultiplier(draft.terrain, draft.mapSize);
     const previewConfig = getActivePreviewConfig();
-    const targetPhaseRank = getPhaseRank(previewConfig.stopAfterPhase);
     const recenter = previewRecenterPending;
     previewRecenterPending = false;
     let appliedStageCamera = false;
@@ -1714,14 +1640,72 @@ export const initMapEditor = (refs: MapEditorRefs, deps: MapEditorDeps): MapEdit
 
     try {
       showPreviewOverlay(`Generating ${previewConfig.label.toLowerCase()} preview...`, 0);
-      const world = ensurePreviewWorld(draft.mapSize, draft.seed);
+      if (previewConfig.sampleSource === "fast") {
+        if (!renderFastPreviewForDraft(draft, activeStep, recenter)) {
+          throw new Error("Fast preview unavailable.");
+        }
+        return;
+      }
+      const targetPhaseRank = getPhaseRank(previewConfig.stopAfterPhase);
+      const session = ensurePreviewPipelineSession(draft, cacheKey);
+      const world = session.state;
       resetTerrainCaches();
-      previewRng.setState(draft.seed);
       const debug: MapGenDebug = {
         stopAfterPhase: previewConfig.stopAfterPhase,
         onPhase: async (snapshot) => {
           if (!visible || sessionToken !== previewSessionToken || buildToken !== previewBuildToken) {
             return;
+          }
+          switch (snapshot.phase) {
+            case "terrain:carving": {
+              cacheEquivalentPreviewSample(
+                cacheKey,
+                "carving",
+                buildSnapshotSample(snapshot, world.grid, world.seed, terrainHeightScaleMultiplier, false)
+              );
+              break;
+            }
+            case "terrain:elevation": {
+              cacheErosionBaselineSample(
+                cacheKey,
+                buildSnapshotSample(snapshot, world.grid, world.seed, terrainHeightScaleMultiplier, false)
+              );
+              break;
+            }
+            case "terrain:erosion": {
+              cacheEquivalentPreviewSample(
+                cacheKey,
+                "erosion",
+                buildSnapshotSample(snapshot, world.grid, world.seed, terrainHeightScaleMultiplier, false)
+              );
+              break;
+            }
+            case "roads:connect": {
+              cacheEquivalentPreviewSample(
+                cacheKey,
+                "settlements",
+                buildWorldPreviewSample(world, false, terrainHeightScaleMultiplier)
+              );
+              break;
+            }
+            case "reconcile:postSettlement": {
+              cacheEquivalentPreviewSample(
+                cacheKey,
+                "vegetation",
+                buildWorldPreviewSample(world, true, terrainHeightScaleMultiplier)
+              );
+              break;
+            }
+            case "map:finalize": {
+              cacheEquivalentPreviewSample(
+                cacheKey,
+                "final",
+                buildWorldPreviewSample(world, true, terrainHeightScaleMultiplier)
+              );
+              break;
+            }
+            default:
+              break;
           }
           const snapshotRank = getPhaseRank(snapshot.phase);
           if (snapshotRank > targetPhaseRank) {
@@ -1743,16 +1727,14 @@ export const initMapEditor = (refs: MapEditorRefs, deps: MapEditorDeps): MapEdit
           appliedStageCamera = appliedStageCamera || recenter;
         }
       };
-      await generateMap(
-        world,
-        previewRng,
+      await session.advanceTo(
+        previewConfig.stopAfterPhase,
         (message, progress) => {
           if (!visible || sessionToken !== previewSessionToken || buildToken !== previewBuildToken) {
             return;
           }
           showPreviewOverlay(message, progress);
         },
-        draft.terrain,
         debug
       );
       if (!visible || sessionToken !== previewSessionToken || buildToken !== previewBuildToken) {
@@ -1798,7 +1780,8 @@ export const initMapEditor = (refs: MapEditorRefs, deps: MapEditorDeps): MapEdit
   };
 
   const requestPreviewBuild = (recenter = false, immediate = false): void => {
-    syncPreviewCacheDraft(collectDraft());
+    const draft = collectDraft();
+    syncPreviewCacheDraft(draft);
     if (!isPreviewAvailable()) {
       previewPending = false;
       previewRecenterPending = false;
@@ -1809,7 +1792,18 @@ export const initMapEditor = (refs: MapEditorRefs, deps: MapEditorDeps): MapEdit
     }
     previewPending = true;
     previewRecenterPending = previewRecenterPending || recenter;
-    if (!visible || !assetsReadyForSession) {
+    if (!visible) {
+      return;
+    }
+    if (getFastPreviewMode(activeStep) !== null && renderFastPreviewForDraft(draft, activeStep, previewRecenterPending)) {
+      previewPending = false;
+      previewRecenterPending = false;
+      if (previewRunning) {
+        previewBuildToken += 1;
+      }
+      return;
+    }
+    if (!assetsReadyForSession) {
       return;
     }
     if (previewRunning) {
@@ -1890,10 +1884,16 @@ export const initMapEditor = (refs: MapEditorRefs, deps: MapEditorDeps): MapEdit
       showPreviewUnavailableState();
       return;
     }
-    refs.previewMeta.textContent = "Loading preview assets...";
-    showPreviewOverlay("Loading preview assets...", 0);
+    const hasInitialFastPreview = getFastPreviewMode(activeStep) !== null && getActiveCachedPreviewSample() !== null;
+    if (!hasInitialFastPreview) {
+      refs.previewMeta.textContent = "Loading preview assets...";
+      showPreviewOverlay("Loading preview assets...", 0);
+    }
     void preview.prepareAssets((progress) => {
       if (!visible || sessionToken !== previewSessionToken) {
+        return;
+      }
+      if (getFastPreviewMode(activeStep) !== null && getActiveCachedPreviewSample() !== null) {
         return;
       }
       showPreviewOverlay(`Loading preview assets (${progress.label})...`, progress.progress);

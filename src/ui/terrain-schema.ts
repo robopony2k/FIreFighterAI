@@ -11,6 +11,7 @@ export type TerrainSliderKey =
   | "relief"
   | "ruggedness"
   | "coastComplexity"
+  | "landCoverageTarget"
   | "waterLevel"
   | "riverIntensity"
   | "vegetationDensity"
@@ -125,6 +126,7 @@ export const TERRAIN_RUN_GROUPS: readonly TerrainControlGroup[] = [
     fields: [
       selectField("archetype", "archetype", "Archetype", "Primary island layout and relief style.", TERRAIN_ARCHETYPE_OPTIONS),
       sliderField("recipe", "relief", "relief", "Relief", "How much the terrain rises and falls across the island."),
+      sliderField("recipe", "landCoverageTarget", "landCoverageTarget", "Land mass", "How much connected dry island land the coastline solver targets."),
       sliderField(
         "advanced",
         "maxHeight",
@@ -164,7 +166,6 @@ export const TERRAIN_RUN_GROUPS: readonly TerrainControlGroup[] = [
     title: "Coast + Water",
     fields: [
       sliderField("recipe", "coastComplexity", "coastComplexity", "Coast complexity", "How irregular and cut-up the shoreline becomes."),
-      sliderField("recipe", "waterLevel", "waterLevel", "Water level", "How much of the relief ends up flooded into ocean and straits."),
       sliderField("recipe", "riverIntensity", "riverIntensity", "River intensity", "River presence, carve strength, and drainage emphasis."),
       checkboxField("skipCarving", "skipCarving", "Skip terrain carving", "Bypass the coarse pre-river carving pass and keep the relief stage untouched.")
     ]
@@ -188,30 +189,6 @@ export const MAP_EDITOR_TERRAIN_GROUPS = {
       fields: [
         selectField("archetype", "archetype", "Archetype", "Primary island layout and relief style.", TERRAIN_ARCHETYPE_OPTIONS)
       ]
-    },
-    {
-      id: "scenario-shape-advanced",
-      title: "Shape Overrides",
-      advanced: true,
-      fields: [
-        sliderField("advanced", "embayment", "embayment", "Embayment", "How strongly the coastline opens into coves, bays, and inlets."),
-        sliderField("advanced", "anisotropy", "anisotropy", "Anisotropy", "How strongly the island is stretched into a directional landform."),
-        sliderField("advanced", "asymmetry", "asymmetry", "Asymmetry", "How much the island mass shifts away from a balanced center."),
-        sliderField(
-          "advanced",
-          "ridgeAlignment",
-          "ridgeAlignment",
-          "Ridge alignment",
-          "How strongly uplands align into coherent ridge corridors instead of scattered lumps."
-        ),
-        sliderField(
-          "advanced",
-          "uplandDistribution",
-          "uplandDistribution",
-          "Upland distribution",
-          "Whether high ground concentrates into one core or spreads across multiple upland shoulders."
-        )
-      ]
     }
   ],
   relief: [
@@ -220,6 +197,7 @@ export const MAP_EDITOR_TERRAIN_GROUPS = {
       title: "Relief",
       fields: [
         sliderField("recipe", "relief", "relief", "Relief", "How much the terrain rises and falls across the island."),
+        sliderField("recipe", "ruggedness", "ruggedness", "Ruggedness", "How broken, ridged, and difficult the terrain becomes."),
         sliderField(
           "advanced",
           "maxHeight",
@@ -237,10 +215,17 @@ export const MAP_EDITOR_TERRAIN_GROUPS = {
         sliderField("advanced", "interiorRise", "interiorRise", "Interior rise", "How strongly the island rises toward its interior."),
         sliderField(
           "advanced",
-          "islandCompactness",
-          "islandCompactness",
-          "Island compactness",
-          "Whether the landmass stays cohesive or breaks into separated lobes."
+          "ridgeAlignment",
+          "ridgeAlignment",
+          "Ridge alignment",
+          "How strongly uplands align into coherent ridge corridors instead of scattered lumps."
+        ),
+        sliderField(
+          "advanced",
+          "uplandDistribution",
+          "uplandDistribution",
+          "Upland distribution",
+          "Whether high ground concentrates into one core or spreads across multiple upland shoulders."
         ),
         sliderField("advanced", "ridgeFrequency", "ridgeFrequency", "Ridge frequency", "How frequently major ridges repeat across the map.")
       ]
@@ -249,47 +234,55 @@ export const MAP_EDITOR_TERRAIN_GROUPS = {
   carving: [
     {
       id: "carving-simple",
-      title: "Carving",
+      title: "Shape",
       fields: [
-        sliderField("recipe", "ruggedness", "ruggedness", "Ruggedness", "How broken, ridged, and difficult the terrain becomes."),
-        checkboxField("skipCarving", "skipCarving", "Skip terrain carving", "Bypass the coarse pre-river carving pass and keep the relief stage untouched.")
+        sliderField("recipe", "coastComplexity", "coastComplexity", "Coast complexity", "How irregular and cut-up the shoreline becomes."),
+        sliderField("recipe", "landCoverageTarget", "landCoverageTarget", "Land mass", "How much connected dry island land the coastline solver targets."),
+        sliderField(
+          "advanced",
+          "islandCompactness",
+          "islandCompactness",
+          "Island compactness",
+          "Whether the landmass stays cohesive or breaks into separated lobes."
+        )
       ]
     },
     {
       id: "carving-advanced",
-      title: "Carving Overrides",
+      title: "Shape Overrides",
       advanced: true,
       fields: [
-        sliderField("advanced", "basinStrength", "basinStrength", "Basin strength", "How much lowland carving and interior basins are emphasized.")
+        sliderField("advanced", "embayment", "embayment", "Embayment", "How strongly the coastline opens into coves, bays, and inlets."),
+        sliderField("advanced", "anisotropy", "anisotropy", "Anisotropy", "How strongly the island is stretched into a directional landform."),
+        sliderField("advanced", "asymmetry", "asymmetry", "Asymmetry", "How much the island mass shifts away from a balanced center.")
       ]
     }
   ],
   erosion: [
     {
       id: "erosion-simple",
-      title: "Erosion Drivers",
-      fields: [
-        sliderField("recipe", "relief", "relief", "Relief", "How much the terrain rises and falls across the island."),
-        sliderField("recipe", "ruggedness", "ruggedness", "Ruggedness", "How broken, ridged, and difficult the terrain becomes."),
-        sliderField("recipe", "riverIntensity", "riverIntensity", "River intensity", "River presence, carve strength, and drainage emphasis."),
-        sliderField("recipe", "waterLevel", "waterLevel", "Water level", "How much of the relief ends up flooded into ocean and straits.")
-      ]
+      title: "Erosion Detail",
+      fields: []
     }
   ],
   flooding: [
     {
       id: "flooding-simple",
-      title: "Flooding",
-      fields: [
-        sliderField("recipe", "coastComplexity", "coastComplexity", "Coast complexity", "How irregular and cut-up the shoreline becomes."),
-        sliderField("recipe", "waterLevel", "waterLevel", "Water level", "How much of the relief ends up flooded into ocean and straits.")
-      ]
+      title: "Water",
+      fields: []
     },
     {
       id: "flooding-advanced",
-      title: "Flooding Overrides",
+      title: "Water Overrides",
       advanced: true,
       fields: [
+        sliderField(
+          "advanced",
+          "seaLevelBias",
+          "seaLevelBias",
+          "Sea-level bias",
+          "Optional manual bias after automatic coastline calibration; 50% is neutral."
+        ),
         sliderField(
           "advanced",
           "coastalShelfWidth",
@@ -313,7 +306,8 @@ export const MAP_EDITOR_TERRAIN_GROUPS = {
       title: "River Overrides",
       advanced: true,
       fields: [
-        sliderField("advanced", "riverBudget", "riverBudget", "River budget", "How many meaningful river systems the map attempts to sustain.")
+        sliderField("advanced", "riverBudget", "riverBudget", "River budget", "How many meaningful river systems the map attempts to sustain."),
+        sliderField("advanced", "basinStrength", "basinStrength", "Basin strength", "How much lowland carving and interior basins are emphasized.")
       ]
     }
   ],

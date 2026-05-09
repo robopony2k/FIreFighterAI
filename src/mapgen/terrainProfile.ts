@@ -24,6 +24,7 @@ export type TerrainAdvancedOverrides = {
   ridgeFrequency?: number;
   basinStrength?: number;
   coastalShelfWidth?: number;
+  seaLevelBias?: number;
   skipCarving?: boolean;
   riverBudget?: number;
   settlementSpacing?: number;
@@ -38,6 +39,7 @@ export type TerrainRecipe = {
   relief: number;
   ruggedness: number;
   coastComplexity: number;
+  landCoverageTarget: number;
   waterLevel: number;
   riverIntensity: number;
   vegetationDensity: number;
@@ -61,6 +63,8 @@ const clamp = (value: number, min: number, max: number): number => Math.max(min,
 const clampWhole = (value: number, min: number, max: number): number => Math.max(min, Math.min(max, Math.round(value)));
 const mix = (a: number, b: number, t: number): number => a + (b - a) * clamp01(t);
 const MAX_HEIGHT_REFERENCE = 0.62;
+const LEGACY_WATER_COVERAGE_MIN = 0.22;
+const LEGACY_WATER_COVERAGE_MAX = 0.68;
 
 const computeTerrainHeightScaleMultiplier = (maxHeight: number): number =>
   clamp(1 + (clamp01(maxHeight) - MAX_HEIGHT_REFERENCE) * 1.75, 0.65, 1.7);
@@ -74,6 +78,18 @@ const inferMaxHeightFromScaleMultiplier = (multiplier: number | undefined): numb
   }
   return clamp01(MAX_HEIGHT_REFERENCE + ((multiplier as number) - 1) / 1.75);
 };
+
+const landCoverageFromLegacyWaterLevel = (waterLevel: unknown, fallback: number): number => {
+  const parsed = toFiniteNumber(waterLevel);
+  if (parsed === null) {
+    return fallback;
+  }
+  return clamp01(1 - mix(LEGACY_WATER_COVERAGE_MIN, LEGACY_WATER_COVERAGE_MAX, parsed));
+};
+
+const legacyWaterLevelFromLandCoverage = (landCoverageTarget: number): number =>
+  clamp01((1 - clamp01(landCoverageTarget) - LEGACY_WATER_COVERAGE_MIN) /
+    Math.max(0.0001, LEGACY_WATER_COVERAGE_MAX - LEGACY_WATER_COVERAGE_MIN));
 
 const toFiniteNumber = (value: unknown): number | null => {
   if (typeof value === "number" && Number.isFinite(value)) {
@@ -130,6 +146,7 @@ const DEFAULT_ADVANCED_OVERRIDES: Required<TerrainAdvancedOverrides> = {
   ridgeFrequency: 0.48,
   basinStrength: 0.42,
   coastalShelfWidth: 0.48,
+  seaLevelBias: 0.5,
   skipCarving: false,
   riverBudget: 0.42,
   settlementSpacing: 0.58,
@@ -144,6 +161,7 @@ const ARCHETYPE_PRESETS: Record<
     relief: number;
     ruggedness: number;
     coastComplexity: number;
+    landCoverageTarget: number;
     waterLevel: number;
     riverIntensity: number;
     vegetationDensity: number;
@@ -156,6 +174,7 @@ const ARCHETYPE_PRESETS: Record<
     relief: 0.7,
     ruggedness: 0.55,
     coastComplexity: 0.34,
+    landCoverageTarget: 0.64,
     waterLevel: 0.34,
     riverIntensity: 0.45,
     vegetationDensity: 0.56,
@@ -173,6 +192,7 @@ const ARCHETYPE_PRESETS: Record<
       ridgeFrequency: ISLAND_ARCHETYPE_DEFINITIONS.MASSIF.ridgeFrequency,
       basinStrength: ISLAND_ARCHETYPE_DEFINITIONS.MASSIF.basinStrength,
       coastalShelfWidth: ISLAND_ARCHETYPE_DEFINITIONS.MASSIF.coastalShelfWidth,
+      seaLevelBias: 0.5,
       skipCarving: false,
       riverBudget: 0.44,
       settlementSpacing: 0.62,
@@ -185,6 +205,7 @@ const ARCHETYPE_PRESETS: Record<
     relief: 0.72,
     ruggedness: 0.68,
     coastComplexity: 0.42,
+    landCoverageTarget: 0.61,
     waterLevel: 0.36,
     riverIntensity: 0.56,
     vegetationDensity: 0.52,
@@ -202,6 +223,7 @@ const ARCHETYPE_PRESETS: Record<
       ridgeFrequency: ISLAND_ARCHETYPE_DEFINITIONS.LONG_SPINE.ridgeFrequency,
       basinStrength: ISLAND_ARCHETYPE_DEFINITIONS.LONG_SPINE.basinStrength,
       coastalShelfWidth: ISLAND_ARCHETYPE_DEFINITIONS.LONG_SPINE.coastalShelfWidth,
+      seaLevelBias: 0.5,
       skipCarving: false,
       riverBudget: 0.58,
       settlementSpacing: 0.6,
@@ -214,6 +236,7 @@ const ARCHETYPE_PRESETS: Record<
     relief: 0.62,
     ruggedness: 0.5,
     coastComplexity: 0.58,
+    landCoverageTarget: 0.58,
     waterLevel: 0.42,
     riverIntensity: 0.48,
     vegetationDensity: 0.5,
@@ -231,6 +254,7 @@ const ARCHETYPE_PRESETS: Record<
       ridgeFrequency: ISLAND_ARCHETYPE_DEFINITIONS.TWIN_BAY.ridgeFrequency,
       basinStrength: ISLAND_ARCHETYPE_DEFINITIONS.TWIN_BAY.basinStrength,
       coastalShelfWidth: ISLAND_ARCHETYPE_DEFINITIONS.TWIN_BAY.coastalShelfWidth,
+      seaLevelBias: 0.5,
       skipCarving: false,
       riverBudget: 0.52,
       settlementSpacing: 0.58,
@@ -243,6 +267,7 @@ const ARCHETYPE_PRESETS: Record<
     relief: 0.44,
     ruggedness: 0.24,
     coastComplexity: 0.24,
+    landCoverageTarget: 0.68,
     waterLevel: 0.3,
     riverIntensity: 0.3,
     vegetationDensity: 0.48,
@@ -260,6 +285,7 @@ const ARCHETYPE_PRESETS: Record<
       ridgeFrequency: ISLAND_ARCHETYPE_DEFINITIONS.SHELF.ridgeFrequency,
       basinStrength: ISLAND_ARCHETYPE_DEFINITIONS.SHELF.basinStrength,
       coastalShelfWidth: ISLAND_ARCHETYPE_DEFINITIONS.SHELF.coastalShelfWidth,
+      seaLevelBias: 0.5,
       skipCarving: false,
       riverBudget: 0.28,
       settlementSpacing: 0.56,
@@ -281,6 +307,7 @@ export const createDefaultTerrainRecipe = (
     relief: preset.relief,
     ruggedness: preset.ruggedness,
     coastComplexity: preset.coastComplexity,
+    landCoverageTarget: preset.landCoverageTarget,
     waterLevel: preset.waterLevel,
     riverIntensity: preset.riverIntensity,
     vegetationDensity: preset.vegetationDensity,
@@ -299,13 +326,18 @@ export const cloneTerrainRecipe = (recipe?: Partial<TerrainRecipe>): TerrainReci
     archetype
   );
   const sourceAdvanced = isRecord(recipe?.advancedOverrides) ? recipe.advancedOverrides : {};
+  const landCoverageTarget = clampOverride(
+    recipe?.landCoverageTarget,
+    landCoverageFromLegacyWaterLevel(recipe?.waterLevel, defaults.landCoverageTarget)
+  );
   return {
     archetype,
     mapSize: defaults.mapSize,
     relief: clampOverride(recipe?.relief, defaults.relief),
     ruggedness: clampOverride(recipe?.ruggedness, defaults.ruggedness),
     coastComplexity: clampOverride(recipe?.coastComplexity, defaults.coastComplexity),
-    waterLevel: clampOverride(recipe?.waterLevel, defaults.waterLevel),
+    landCoverageTarget,
+    waterLevel: clampOverride(recipe?.waterLevel, legacyWaterLevelFromLandCoverage(landCoverageTarget)),
     riverIntensity: clampOverride(recipe?.riverIntensity, defaults.riverIntensity),
     vegetationDensity: clampOverride(recipe?.vegetationDensity, defaults.vegetationDensity),
     townDensity: clampOverride(recipe?.townDensity, defaults.townDensity),
@@ -339,6 +371,10 @@ export const cloneTerrainRecipe = (recipe?: Partial<TerrainRecipe>): TerrainReci
       coastalShelfWidth: clampOverride(
         sourceAdvanced.coastalShelfWidth,
         defaults.advancedOverrides?.coastalShelfWidth ?? DEFAULT_ADVANCED_OVERRIDES.coastalShelfWidth
+      ),
+      seaLevelBias: clampOverride(
+        sourceAdvanced.seaLevelBias,
+        defaults.advancedOverrides?.seaLevelBias ?? DEFAULT_ADVANCED_OVERRIDES.seaLevelBias
       ),
       skipCarving: parseBooleanOverride(
         sourceAdvanced.skipCarving,
@@ -384,6 +420,7 @@ export const terrainRecipeEqual = (a: TerrainRecipe, b: TerrainRecipe): boolean 
     Math.abs(a.relief - b.relief) > 1e-6 ||
     Math.abs(a.ruggedness - b.ruggedness) > 1e-6 ||
     Math.abs(a.coastComplexity - b.coastComplexity) > 1e-6 ||
+    Math.abs(a.landCoverageTarget - b.landCoverageTarget) > 1e-6 ||
     Math.abs(a.waterLevel - b.waterLevel) > 1e-6 ||
     Math.abs(a.riverIntensity - b.riverIntensity) > 1e-6 ||
     Math.abs(a.vegetationDensity - b.vegetationDensity) > 1e-6 ||
@@ -406,6 +443,7 @@ export const terrainRecipeEqual = (a: TerrainRecipe, b: TerrainRecipe): boolean 
     Math.abs((aAdvanced.ridgeFrequency ?? 0) - (bAdvanced.ridgeFrequency ?? 0)) <= 1e-6 &&
     Math.abs((aAdvanced.basinStrength ?? 0) - (bAdvanced.basinStrength ?? 0)) <= 1e-6 &&
     Math.abs((aAdvanced.coastalShelfWidth ?? 0) - (bAdvanced.coastalShelfWidth ?? 0)) <= 1e-6 &&
+    Math.abs((aAdvanced.seaLevelBias ?? 0) - (bAdvanced.seaLevelBias ?? 0)) <= 1e-6 &&
     Boolean(aAdvanced.skipCarving) === Boolean(bAdvanced.skipCarving) &&
     Math.abs((aAdvanced.riverBudget ?? 0) - (bAdvanced.riverBudget ?? 0)) <= 1e-6 &&
     Math.abs((aAdvanced.settlementSpacing ?? 0) - (bAdvanced.settlementSpacing ?? 0)) <= 1e-6 &&
@@ -435,6 +473,7 @@ const resolveAdvancedOverrides = (recipe: TerrainRecipe): Required<TerrainAdvanc
     ridgeFrequency: clampOverride(advanced.ridgeFrequency, preset.ridgeFrequency),
     basinStrength: clampOverride(advanced.basinStrength, preset.basinStrength),
     coastalShelfWidth: clampOverride(advanced.coastalShelfWidth, preset.coastalShelfWidth),
+    seaLevelBias: clampOverride(advanced.seaLevelBias, preset.seaLevelBias),
     skipCarving: parseBooleanOverride(advanced.skipCarving, preset.skipCarving),
     riverBudget: clampOverride(advanced.riverBudget, preset.riverBudget),
     settlementSpacing: clampOverride(advanced.settlementSpacing, preset.settlementSpacing),
@@ -452,6 +491,7 @@ export const compileTerrainRecipe = (recipeInput: TerrainRecipe): ResolvedTerrai
   const relief = clamp01(recipe.relief);
   const ruggedness = clamp01(recipe.ruggedness);
   const coastComplexity = clamp01(recipe.coastComplexity);
+  const landCoverageTarget = clamp(recipe.landCoverageTarget, 0.32, 0.82);
   const waterLevel = clamp01(recipe.waterLevel);
   const riverIntensity = clamp01(recipe.riverIntensity);
   const vegetationDensity = clamp01(recipe.vegetationDensity);
@@ -464,6 +504,7 @@ export const compileTerrainRecipe = (recipeInput: TerrainRecipe): ResolvedTerrai
   const asymmetry = clamp01(advanced.asymmetry);
   const ridgeAlignment = clamp01(advanced.ridgeAlignment);
   const uplandDistribution = clamp01(advanced.uplandDistribution);
+  const seaLevelBias = clamp01(advanced.seaLevelBias);
   const heightScaleMultiplier = computeTerrainHeightScaleMultiplier(maxHeight);
   const normalizedHeightPressure = computeNormalizedHeightPressure(maxHeight);
   const valleyDepthScale = mix(0.74, 1, reliefCurve);
@@ -525,9 +566,9 @@ export const compileTerrainRecipe = (recipeInput: TerrainRecipe): ResolvedTerrai
     meadowStrength: mix(0.45, 0.88, clamp01(1 - vegetationDensity * 0.65 + forestPatchiness * 0.35)),
     grassCanopyBase: mix(0.03, 0.14, vegetationDensity),
     grassCanopyRange: mix(0.08, 0.34, forestPatchiness),
-    waterCoverage: mix(0.22, 0.68, waterLevel),
+    waterCoverage: clamp(1 - landCoverageTarget, 0.18, 0.68),
     baseWaterThreshold: mix(0.08, 0.2, waterLevel),
-    edgeWaterBias: mix(0.06, 0.28, clamp01(waterLevel * 0.4 + coastComplexity * 0.6)),
+    edgeWaterBias: mix(0.05, 0.24, coastComplexity),
     riverCount,
     riverWaterBias: mix(0.08, 0.32, riverIntensity),
     biomeClassifierMode: "seedSpread",
@@ -543,6 +584,8 @@ export const compileTerrainRecipe = (recipeInput: TerrainRecipe): ResolvedTerrai
     ruggedness,
     coastComplexity,
     waterLevel,
+    landCoverageTarget,
+    seaLevelBias,
     riverIntensity,
     vegetationDensity,
     townDensity,
@@ -569,7 +612,7 @@ export const compileTerrainRecipe = (recipeInput: TerrainRecipe): ResolvedTerrai
     erosionDetailOctaves: 4,
     erosionSlopeStrength: mix(1.1, 2.5, clamp01(ruggedness * 0.75 + relief * 0.25)),
     erosionBranchStrength: mix(0.8, 2.25, clamp01(ruggedness * 0.55 + riverIntensity * 0.45)),
-    erosionCoastFade: mix(0.012, 0.064, clamp01(waterLevel * 0.7 + advanced.coastalShelfWidth * 0.3)),
+    erosionCoastFade: mix(0.012, 0.064, clamp01((1 - landCoverageTarget) * 0.7 + advanced.coastalShelfWidth * 0.3)),
     erosionSlopeMaskMin: mix(0.007, 0.0025, ruggedness),
     erosionSlopeMaskMax: mix(0.026, 0.076, clamp01(ruggedness * 0.65 + relief * 0.35)),
     skipCarving: advanced.skipCarving,
@@ -609,6 +652,7 @@ const inferRecipeFromSettings = (settingsInput: Partial<MapGenSettings>, mapSize
     relief: clamp01((settings.relief ?? ((settings.elevationScale - 0.88) / Math.max(0.0001, 1.58 - 0.88)))),
     ruggedness: clamp01(settings.ruggedness ?? (settings.ridgeStrength / 0.24)),
     coastComplexity: clamp01(settings.coastComplexity ?? ((settings.edgeWaterBias - 0.06) / Math.max(0.0001, 0.28 - 0.06))),
+    landCoverageTarget: clamp01(settings.landCoverageTarget ?? (1 - settings.waterCoverage)),
     waterLevel: clamp01(settings.waterLevel ?? ((settings.waterCoverage - 0.22) / Math.max(0.0001, 0.68 - 0.22))),
     riverIntensity: clamp01(settings.riverIntensity ?? ((settings.riverWaterBias - 0.08) / Math.max(0.0001, 0.32 - 0.08))),
     vegetationDensity: clamp01(
@@ -628,6 +672,7 @@ const inferRecipeFromSettings = (settingsInput: Partial<MapGenSettings>, mapSize
       ridgeFrequency: clamp01(settings.ridgeFrequency ?? DEFAULT_ADVANCED_OVERRIDES.ridgeFrequency),
       basinStrength: clamp01(settings.basinStrength ?? DEFAULT_ADVANCED_OVERRIDES.basinStrength),
       coastalShelfWidth: clamp01(settings.coastalShelfWidth ?? DEFAULT_ADVANCED_OVERRIDES.coastalShelfWidth),
+      seaLevelBias: clamp01(settings.seaLevelBias ?? DEFAULT_ADVANCED_OVERRIDES.seaLevelBias),
       skipCarving: Boolean(settings.skipCarving ?? DEFAULT_ADVANCED_OVERRIDES.skipCarving),
       riverBudget: clamp01(settings.riverBudget ?? DEFAULT_ADVANCED_OVERRIDES.riverBudget),
       settlementSpacing: clamp01(settings.settlementSpacing ?? DEFAULT_ADVANCED_OVERRIDES.settlementSpacing),

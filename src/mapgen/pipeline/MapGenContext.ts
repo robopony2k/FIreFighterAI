@@ -17,8 +17,8 @@ export class MapGenContext {
   readonly rng: RNG;
   readonly profile: ResolvedTerrainProfile;
   readonly settings: MapGenSettings;
-  readonly report?: MapGenReporter;
-  readonly debug?: MapGenDebug;
+  report?: MapGenReporter;
+  debug?: MapGenDebug;
   readonly yieldIfNeeded: () => Promise<boolean>;
   readonly dirtyRegions: DirtyRegionTracker;
 
@@ -94,6 +94,11 @@ export class MapGenContext {
     this.edgeDenomM = minDimM / 2;
     const maxDim = Math.max(state.grid.cols, state.grid.rows);
     this.biomeBlock = maxDim >= 1024 ? 8 : maxDim >= 512 ? 4 : 2;
+  }
+
+  setRunOptions(report: MapGenReporter | undefined, debug: MapGenDebug | undefined): void {
+    this.report = report;
+    this.debug = debug;
   }
 
   setStageReporter(phase: MapGenDebugPhase, fn: (message: string, localProgress: number) => Promise<void>): void {
