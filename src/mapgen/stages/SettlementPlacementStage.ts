@@ -1,10 +1,10 @@
 import { inBounds, indexFor } from "../../core/grid.js";
 import { TILE_TYPE_IDS } from "../../core/state.js";
 import { clearVegetationState } from "../../core/vegetation.js";
+import { selectBaseSite } from "../../systems/settlements/sim/baseSiteSelection.js";
 import type { PipelineStage } from "../pipeline/TerrainPipeline.js";
 import { createSettlementPlacementPlan } from "../communities.js";
 import { emitStageSnapshot } from "../pipeline/stageDebug.js";
-import { findBasePoint } from "../runtime.js";
 
 export const SettlementPlacementStage: PipelineStage = {
   id: "settlement:place",
@@ -19,7 +19,7 @@ export const SettlementPlacementStage: PipelineStage = {
     }
     ctx.settlementSnapshot = { typeBefore: beforeType, elevationBefore: beforeElevation };
 
-    state.basePoint = findBasePoint(state);
+    state.basePoint = selectBaseSite(state);
     if (state.tileRoadBridge.length !== state.grid.totalTiles) {
       state.tileRoadBridge = new Uint8Array(state.grid.totalTiles);
     } else {

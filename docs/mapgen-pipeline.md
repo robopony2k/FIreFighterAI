@@ -34,7 +34,7 @@ Context:
 - Elevation still emits its historical debug subphases (`terrain:relief`, `terrain:carving`, `terrain:flooding`) before the stage-level `terrain:elevation` snapshot, but these remain dry landmass snapshots; `hydro:solve` owns sea-level and ocean classification.
 - Dry elevation is shaped as an island before hydrology runs. Sea level is calibrated from `landCoverageTarget` against connected ocean coverage, then optionally nudged by the advanced `seaLevelBias` override.
 - `terrain:shoreline` performs an ocean-only coastal polish pass (organic shoreline smoothing + near-shore elevation sculpt).
-- `settlement:place` prepares settlement-road plan data only; road carving now happens in `roads:connect`.
+- `settlement:place` selects a central lowland firebase site using terrain-aware scoring, then prepares settlement-road plan data only; road carving now happens in `roads:connect`.
 - `roads:connect` is non-noop and owns road/bridge network carving plus edge-mask stamping (`WorldState.tileRoadEdges`).
 - Post-settlement reconcile only touches dirty regions captured from settlement deltas.
 - `biome:spread` builds deterministic suitability and `forestMask` layers before `biome:classify`.

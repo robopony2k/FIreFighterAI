@@ -21,24 +21,24 @@ const size = MAP_SIZE_PRESETS[sizeId];
 const PERF_BUDGET_MS = 100;
 const EXPECTED_HASHES = {
   MASSIF: {
-    shape: "41081f98",
-    relief: "8e9d6224",
-    water: "610eec74"
+    shape: "5ca8c2ed",
+    relief: "78a18b4c",
+    water: "fdf1777c"
   },
   LONG_SPINE: {
-    shape: "e7238950",
-    relief: "19bc0725",
-    water: "2a7dfa75"
+    shape: "b02fa27f",
+    relief: "49ed9b04",
+    water: "3e829e44"
   },
   TWIN_BAY: {
-    shape: "62229200",
-    relief: "4095bfc2",
-    water: "2d968513"
+    shape: "53130209",
+    relief: "cc08d7fc",
+    water: "f9d86a6c"
   },
   SHELF: {
-    shape: "4cedf0ac",
-    relief: "06754c6b",
-    water: "5ed23f7a"
+    shape: "0231d485",
+    relief: "52bca5f5",
+    water: "ba217bb4"
   }
 };
 
@@ -182,6 +182,24 @@ const assertDryPreviewHasNoWater = (summary) => {
   }
 };
 
+const assertPerimeterElevationZero = (archetype, mode, result) => {
+  const { cols, rows, elevationMap } = result;
+  for (let x = 0; x < cols; x += 1) {
+    const top = elevationMap[x] ?? 0;
+    const bottom = elevationMap[(rows - 1) * cols + x] ?? 0;
+    if (top !== 0 || bottom !== 0) {
+      throw new Error(`${archetype}:${mode} has nonzero north/south perimeter elevation at x=${x}: ${JSON.stringify({ top, bottom })}`);
+    }
+  }
+  for (let y = 0; y < rows; y += 1) {
+    const left = elevationMap[y * cols] ?? 0;
+    const right = elevationMap[y * cols + cols - 1] ?? 0;
+    if (left !== 0 || right !== 0) {
+      throw new Error(`${archetype}:${mode} has nonzero east/west perimeter elevation at y=${y}: ${JSON.stringify({ left, right })}`);
+    }
+  }
+};
+
 const withRecipeChange = (recipe, mutate) => {
   const next = cloneTerrainRecipe(recipe);
   next.advancedOverrides = { ...(next.advancedOverrides ?? {}) };
@@ -307,7 +325,7 @@ assertEditorControlSchema();
 assertEditorRiversAreStaged();
 for (const archetype of archetypes) {
   for (const mode of modes) {
-    buildPreview(createDefaultTerrainRecipe(sizeId, archetype), mode);
+    assertPerimeterElevationZero(archetype, mode, buildPreview(createDefaultTerrainRecipe(sizeId, archetype), mode).result);
   }
 }
 const runs = archetypes.flatMap((archetype) => modes.map((mode) => summarize(archetype, mode)));

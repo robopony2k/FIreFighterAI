@@ -81,6 +81,7 @@ import { buildTectonicProxySeed } from "./tectonicProxySeed.js";
 import { buildNoiseLandmass } from "../systems/terrain/sim/noiseLandmass.js";
 import { generateWorldClimateSeed } from "../systems/climate/sim/worldClimateSeed.js";
 import { buildWindDrivenMoistureMap } from "../systems/terrain/sim/windDrivenMoisture.js";
+import { selectBaseSite } from "../systems/settlements/sim/baseSiteSelection.js";
 
 const nextFrame = () =>
   new Promise<void>((resolve) => {
@@ -4302,53 +4303,8 @@ async function computeWaterDistancesCoarse(
   }
 }
 
-function isBaseCandidate(state: WorldState, x: number, y: number, buffer: number): boolean {
-  if (!inBounds(state.grid, x, y)) {
-    return false;
-  }
-  if (state.tiles[indexFor(state.grid, x, y)].type === "water") {
-    return false;
-  }
-  for (let dy = -buffer; dy <= buffer; dy += 1) {
-    for (let dx = -buffer; dx <= buffer; dx += 1) {
-      if (Math.hypot(dx, dy) > buffer) {
-        continue;
-      }
-      const nx = x + dx;
-      const ny = y + dy;
-      if (!inBounds(state.grid, nx, ny)) {
-        return false;
-      }
-      if (state.tiles[indexFor(state.grid, nx, ny)].type === "water") {
-        return false;
-      }
-    }
-  }
-  return true;
-}
-
 export function findBasePoint(state: WorldState): Point {
-  const center = { x: Math.floor(state.grid.cols / 2), y: Math.floor(state.grid.rows / 2) };
-  const buffer = 4;
-  if (isBaseCandidate(state, center.x, center.y, buffer)) {
-    return center;
-  }
-  const maxRadius = Math.max(state.grid.cols, state.grid.rows);
-  for (let radius = 1; radius < maxRadius; radius += 1) {
-    for (let dy = -radius; dy <= radius; dy += 1) {
-      for (let dx = -radius; dx <= radius; dx += 1) {
-        if (Math.abs(dx) !== radius && Math.abs(dy) !== radius) {
-          continue;
-        }
-        const x = center.x + dx;
-        const y = center.y + dy;
-        if (isBaseCandidate(state, x, y, buffer)) {
-          return { x, y };
-        }
-      }
-    }
-  }
-  return center;
+  return selectBaseSite(state);
 }
 
 export function buildOceanMask(state: WorldState): Uint8Array {

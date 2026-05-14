@@ -670,6 +670,56 @@ const analyzeIslandShape = (state, targetLandRatio) => {
   };
 };
 
+const analyzeBaseSite = (state) => {
+  const { cols, rows } = state.grid;
+  const center = { x: Math.floor(cols / 2), y: Math.floor(rows / 2) };
+  const base = state.basePoint ?? center;
+  const baseIdx = base.y * cols + base.x;
+  const baseTile = state.tiles[baseIdx];
+  const baseElevation = baseTile?.elevation ?? 0;
+  let localRelief = 0;
+  let vegetationTiles = 0;
+  let usableTiles = 0;
+  const reliefRadius = 4;
+  const vegetationRadius = 8;
+  for (let dy = -vegetationRadius; dy <= vegetationRadius; dy += 1) {
+    for (let dx = -vegetationRadius; dx <= vegetationRadius; dx += 1) {
+      const nx = base.x + dx;
+      const ny = base.y + dy;
+      if (nx < 0 || ny < 0 || nx >= cols || ny >= rows) {
+        continue;
+      }
+      const distance = Math.hypot(dx, dy);
+      const tile = state.tiles[ny * cols + nx];
+      if (!tile || tile.type === "water") {
+        continue;
+      }
+      if (distance <= reliefRadius) {
+        localRelief = Math.max(localRelief, Math.abs(baseElevation - tile.elevation));
+      }
+      if (distance <= vegetationRadius && tile.type !== "road" && tile.type !== "base" && tile.type !== "house") {
+        usableTiles += 1;
+        if (tile.type === "forest" || tile.type === "grass" || tile.type === "scrub" || tile.type === "floodplain") {
+          vegetationTiles += 1;
+        }
+      }
+    }
+  }
+  const centerDistance = Math.hypot(base.x - center.x, base.y - center.y);
+  const minDim = Math.max(1, Math.min(cols, rows));
+  return {
+    baseX: base.x,
+    baseY: base.y,
+    baseElevation: Number(baseElevation.toFixed(4)),
+    baseLocalRelief: Number(localRelief.toFixed(4)),
+    baseWaterDistance: Math.floor(baseTile?.waterDist ?? 99),
+    baseCenterDistance: Number(centerDistance.toFixed(2)),
+    baseCenterDistanceRatio: Number((centerDistance / minDim).toFixed(4)),
+    baseExactCenter: base.x === center.x && base.y === center.y,
+    baseNearbyVegetationRatio: Number((vegetationTiles / Math.max(1, usableTiles)).toFixed(4))
+  };
+};
+
 const analyzeTownMorphologies = (state) => {
   const { cols, rows } = state.grid;
   const isRoadLike = (x, y) => {
@@ -850,6 +900,7 @@ const runCase = async (sizeId, seed) => {
   const roadSurfaceMetrics = analyzeRoadSurfaceMetrics(state);
   const coastMetrics = analyzeCoastalClassification(state);
   const islandMetrics = analyzeIslandShape(state, createDefaultTerrainRecipe(sizeId).landCoverageTarget);
+  const baseMetrics = analyzeBaseSite(state);
   const townMorphologies = analyzeTownMorphologies(state);
   const compactTownViolations = townMorphologies
     .filter((town) => town.meaningful && town.violations.length > 0)
@@ -897,7 +948,8 @@ const runCase = async (sizeId, seed) => {
     ...roadMetrics,
     ...roadSurfaceMetrics,
     ...coastMetrics,
-    ...islandMetrics
+    ...islandMetrics,
+    ...baseMetrics
   };
 };
 
@@ -948,7 +1000,7 @@ const runAll = async () => {
       const metrics = await runCase(sizeId, seed);
       results.push(metrics);
       console.log(
-        `[mapgen] size=${metrics.sizeId} seed=${metrics.seed} ms=${metrics.durationMs.toFixed(2)} biome=${metrics.biomeSpreadClassifyMs.toFixed(2)}ms water=${metrics.waterPct.toFixed(2)}% forest=${metrics.forestPct.toFixed(2)}% forestAgeMean=${metrics.forestAgeMean.toFixed(2)} forestMaturityP95=${metrics.forestMaturityP95.toFixed(3)} patches=${metrics.forestPatchCount} meanPatch=${metrics.forestPatchMean} p95Patch=${metrics.forestPatchP95} houses=${metrics.houseCount} placed=${metrics.placedHouseCount}/${metrics.requestedHouseCount} compactEval=${metrics.compactTownEvalCount} compactViolations=${metrics.compactTownViolationCount} compactMaxAspect=${metrics.compactTownMaxAspect.toFixed(2)} padReliefMax=${metrics.settlementPadReliefMax.toFixed(4)} padReliefMean=${metrics.settlementPadReliefMean.toFixed(4)} roads=${metrics.roadCount} rivers=${metrics.riverCount} roadIgnoredDiag=${metrics.ignoredDiagonalCount} roadUnmatched=${metrics.unmatchedPatternCount} roadGrade=${metrics.maxRoadGrade.toFixed(3)} roadCrossfall=${metrics.maxRoadCrossfall.toFixed(3)} roadGradeChange=${metrics.maxRoadGradeChange.toFixed(3)} roadWalls=${metrics.wallEdgeCount} riverDiagOnly=${metrics.riverDiagOnlyLinks} riverIso=${metrics.riverIsolatedCells} riverOrthRatio=${metrics.riverOrthConnectivityRatio.toFixed(4)} riverComps=${metrics.riverComponentCount} riverDetachedComps=${metrics.detachedRiverComponents} riverDetachedCells=${metrics.detachedRiverCells} coastNatural=${metrics.coastalNaturalCount} coastBeach=${metrics.coastalBeachCount} coastRocky=${metrics.coastalRockyCount} coastOther=${metrics.coastalOtherCount}`
+        `[mapgen] size=${metrics.sizeId} seed=${metrics.seed} ms=${metrics.durationMs.toFixed(2)} biome=${metrics.biomeSpreadClassifyMs.toFixed(2)}ms water=${metrics.waterPct.toFixed(2)}% forest=${metrics.forestPct.toFixed(2)}% forestAgeMean=${metrics.forestAgeMean.toFixed(2)} forestMaturityP95=${metrics.forestMaturityP95.toFixed(3)} patches=${metrics.forestPatchCount} meanPatch=${metrics.forestPatchMean} p95Patch=${metrics.forestPatchP95} houses=${metrics.houseCount} placed=${metrics.placedHouseCount}/${metrics.requestedHouseCount} compactEval=${metrics.compactTownEvalCount} compactViolations=${metrics.compactTownViolationCount} compactMaxAspect=${metrics.compactTownMaxAspect.toFixed(2)} base=(${metrics.baseX},${metrics.baseY}) baseElev=${metrics.baseElevation.toFixed(4)} baseRelief=${metrics.baseLocalRelief.toFixed(4)} baseCenter=${metrics.baseCenterDistanceRatio.toFixed(4)} baseVeg=${metrics.baseNearbyVegetationRatio.toFixed(4)} padReliefMax=${metrics.settlementPadReliefMax.toFixed(4)} padReliefMean=${metrics.settlementPadReliefMean.toFixed(4)} roads=${metrics.roadCount} rivers=${metrics.riverCount} roadIgnoredDiag=${metrics.ignoredDiagonalCount} roadUnmatched=${metrics.unmatchedPatternCount} roadGrade=${metrics.maxRoadGrade.toFixed(3)} roadCrossfall=${metrics.maxRoadCrossfall.toFixed(3)} roadGradeChange=${metrics.maxRoadGradeChange.toFixed(3)} roadWalls=${metrics.wallEdgeCount} riverDiagOnly=${metrics.riverDiagOnlyLinks} riverIso=${metrics.riverIsolatedCells} riverOrthRatio=${metrics.riverOrthConnectivityRatio.toFixed(4)} riverComps=${metrics.riverComponentCount} riverDetachedComps=${metrics.detachedRiverComponents} riverDetachedCells=${metrics.detachedRiverCells} coastNatural=${metrics.coastalNaturalCount} coastBeach=${metrics.coastalBeachCount} coastRocky=${metrics.coastalRockyCount} coastOther=${metrics.coastalOtherCount}`
       );
     }
   }
@@ -1038,6 +1090,28 @@ const compareAgainstBaseline = async (results) => {
       console.error(
         `[mapgen] settlement pad relief too high for ${key}: ${result.settlementPadReliefMax.toFixed(4)}`
       );
+    }
+    if (result.baseElevation > 0.74) {
+      failures += 1;
+      console.error(`[mapgen] base placed too high for ${key}: ${result.baseElevation.toFixed(4)}`);
+    }
+    if (result.baseLocalRelief > 0.06) {
+      failures += 1;
+      console.error(`[mapgen] base local relief too high for ${key}: ${result.baseLocalRelief.toFixed(4)}`);
+    }
+    if (result.baseCenterDistanceRatio > 0.34) {
+      failures += 1;
+      console.error(`[mapgen] base too far from center for ${key}: ${result.baseCenterDistanceRatio.toFixed(4)}`);
+    }
+    if (result.baseExactCenter && (result.baseElevation > 0.66 || result.baseLocalRelief > 0.035)) {
+      failures += 1;
+      console.error(
+        `[mapgen] base fell back to unsuitable exact center for ${key}: elevation=${result.baseElevation.toFixed(4)} relief=${result.baseLocalRelief.toFixed(4)}`
+      );
+    }
+    if (result.baseNearbyVegetationRatio < 0.1) {
+      failures += 1;
+      console.error(`[mapgen] base has too little nearby vegetated terrain for ${key}: ${result.baseNearbyVegetationRatio.toFixed(4)}`);
     }
     if (FOREST_AGE_CAP_YEARS > 5 && result.forestMaturityP95 >= 0.95) {
       failures += 1;

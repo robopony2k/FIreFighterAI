@@ -1,3 +1,22 @@
+TSK-0146: Break center-volcano terrain and score firebase lowlands
+
+Type: bug
+
+Why: Default island terrain was reading as a repeated center-peaked volcano, which placed the firebase on barren high terrain and made roads/fire behavior struggle around the starting area.
+
+Done when:
+- [x] Noise landmass relief keeps one main island while distributing uplands, basins, ridges, shelves, and valleys away from a forced center peak.
+- [x] Firebase placement prefers a central lowland candidate with dry buffer, low local relief, moderate elevation, nearby vegetation, and roadability.
+- [x] Regression coverage checks base elevation, base relief, center distance, nearby vegetation, road quality, and existing island/mapgen invariants.
+
+Touchpoints: `src/systems/terrain/sim/noiseLandmass.ts`, `src/systems/settlements/sim/baseSiteSelection.ts`, `src/mapgen/stages/SettlementPlacementStage.ts`, `scripts/fast-terrain-preview-regression.mjs`, `scripts/mapgen-regression.mjs`, `docs/GAME_DESIGN_REFERENCE.md`, `docs/mapgen-pipeline.md`, `docs/deprecations.md`
+
+Constraints: preserve one-main-island generation, saved terrain schema compatibility, fast preview budget, terrain sim independence from settlement/UI/rendering, and existing road quality gates.
+
+Notes: Implemented immediately from the accepted plan on May 14, 2026.
+
+Status: done
+
 TSK-0145: Calibrate island shaping by land-mass target
 
 Type: feature

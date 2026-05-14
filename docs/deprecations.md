@@ -1,5 +1,19 @@
 # Deprecations
 
+## Center-First Firebase Placement
+
+Status: Deprecated as of May 14, 2026.
+
+- Firebase placement no longer accepts the exact map center just because it is dry.
+- Settlement placement now scores central lowland candidates for dry buffer, local relief, moderate elevation, water distance, nearby vegetation, and roadability.
+- The base remains near the center of the main island when viable, but it may move to a better nearby lowland site to avoid barren high terrain.
+
+Migration guidance:
+
+1. Route new firebase placement work through `selectBaseSite()` in the settlements simulation domain.
+2. Keep terrain generation responsible for landform variety, not base-specific flattening.
+3. Do not reintroduce center-first placement as the default campaign behavior.
+
 ## Primary Water-Level Terrain Authoring
 
 Status: Deprecated as of May 9, 2026.

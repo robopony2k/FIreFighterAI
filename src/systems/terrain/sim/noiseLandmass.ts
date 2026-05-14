@@ -158,6 +158,20 @@ const edgeDistance01 = (x: number, y: number, cols: number, rows: number): numbe
   return clamp01(Math.min(dx, dy) * 2);
 };
 
+const zeroPerimeter = (map: Float32Array, cols: number, rows: number): void => {
+  if (cols <= 0 || rows <= 0) {
+    return;
+  }
+  for (let x = 0; x < cols; x += 1) {
+    map[x] = 0;
+    map[(rows - 1) * cols + x] = 0;
+  }
+  for (let y = 0; y < rows; y += 1) {
+    map[y * cols] = 0;
+    map[y * cols + cols - 1] = 0;
+  }
+};
+
 const buildSeaLevelMap = (
   cols: number,
   rows: number,
@@ -563,6 +577,7 @@ export function buildNoiseLandmassCore(input: NoiseLandmassCoreInput): NoiseLand
   const landTargetOffset = (landCoverageTarget - 0.62) / 0.5;
   const interiorRise = clamp01(settings.interiorRise);
   const asymmetry = clamp01(settings.asymmetry);
+  const uplandDistribution = clamp01(settings.uplandDistribution);
   const ridgeFrequency = clamp01(settings.ridgeFrequency);
   const basinStrength = clamp01(settings.basinStrength);
   const longSpine = settings.terrainArchetype === "LONG_SPINE";
@@ -574,6 +589,18 @@ export function buildNoiseLandmassCore(input: NoiseLandmassCoreInput): NoiseLand
   const ridgeAngle = angle + (settings.ridgeAlignment - 0.5) * Math.PI * 0.72;
   const ridgeCos = Math.cos(ridgeAngle);
   const ridgeSin = Math.sin(ridgeAngle);
+  const uplandAngleA = angle + (hash2D(41, 43, archetypeSeed) - 0.5) * Math.PI * 1.1;
+  const uplandAngleB = uplandAngleA + Math.PI * mix(0.42, 0.86, hash2D(47, 53, archetypeSeed));
+  const uplandRadiusA = mix(0.1, 0.48, uplandDistribution) * (longSpine ? 1.18 : 1);
+  const uplandRadiusB = mix(0.08, 0.38, uplandDistribution) * (shelf ? 0.78 : 1);
+  const uplandAAlong = Math.cos(uplandAngleA - angle) * uplandRadiusA;
+  const uplandAAcross = Math.sin(uplandAngleA - angle) * uplandRadiusA * mix(0.75, 1.1, anisotropy);
+  const uplandBAlong = Math.cos(uplandAngleB - angle) * uplandRadiusB;
+  const uplandBAcross = Math.sin(uplandAngleB - angle) * uplandRadiusB * mix(0.75, 1.1, anisotropy);
+  const basinAlong = (hash2D(59, 61, archetypeSeed) - 0.5) * mix(0.04, 0.22, 1 - uplandDistribution);
+  const basinAcross = (hash2D(67, 71, archetypeSeed) - 0.5) * mix(0.04, 0.2, 1 - uplandDistribution);
+  const ridgeAlongOffset = mix(uplandAAlong, uplandBAlong, 0.35) * mix(0.2, 0.72, uplandDistribution);
+  const ridgeAcrossOffset = mix(uplandAAcross, uplandBAcross, 0.35) * mix(0.2, 0.78, uplandDistribution);
 
   for (let y = 0; y < rows; y += 1) {
     const ny = rows <= 1 ? 0 : y / (rows - 1);
@@ -600,7 +627,7 @@ export function buildNoiseLandmassCore(input: NoiseLandmassCoreInput): NoiseLand
       } else if (twinBay) {
         island += gaussian(along, across, -0.46, -0.12, 0.46, 0.42) * 0.34 + gaussian(along, across, 0.44, 0.12, 0.48, 0.4) * 0.36;
       } else if (massif) {
-        island += gaussian(along, across, 0.02, -0.02, 0.62, 0.58) * mix(0.22, 0.46, interiorRise);
+        island += gaussian(along, across, uplandAAlong * 0.25, uplandAAcross * 0.25, 0.68, 0.62) * mix(0.08, 0.24, interiorRise);
       } else if (shelf) {
         island += gaussian(along, across, -0.42, 0.22, 0.5, 0.32) * 0.18;
       }
@@ -626,16 +653,47 @@ export function buildNoiseLandmassCore(input: NoiseLandmassCoreInput): NoiseLand
         - 0.46;
 
       const landWeight = smoothstep(-0.035, 0.16, baseMask);
+      const uplandA = gaussian(
+        along,
+        across,
+        uplandAAlong,
+        uplandAAcross,
+        longSpine ? mix(0.38, 0.18, anisotropy) : mix(0.42, 0.28, uplandDistribution),
+        longSpine ? mix(0.72, 1.08, anisotropy) : mix(0.34, 0.56, uplandDistribution)
+      );
+      const uplandB = gaussian(
+        along,
+        across,
+        uplandBAlong,
+        uplandBAcross,
+        mix(0.26, 0.46, 1 - uplandDistribution),
+        mix(0.24, 0.44, basinStrength)
+      );
+      const uplandMask = clamp01(Math.max(uplandA, uplandB * mix(0.62, 0.92, uplandDistribution)) * landWeight);
+      const lowlandBasin = gaussian(
+        along,
+        across,
+        basinAlong,
+        basinAcross,
+        mix(0.34, 0.58, basinStrength),
+        mix(0.32, 0.54, basinStrength)
+      ) * landWeight;
+      const interiorEnvelope = smoothstep(0.08, 0.92, edge);
+      const broadInteriorRise = interiorEnvelope * mix(0.006, 0.04, interiorRise) * mix(0.88, 0.34, uplandDistribution);
+      const uplandRise = uplandMask * mix(0.018, 0.13, interiorRise * mix(0.55, 1, uplandDistribution));
+      const basinDrop = lowlandBasin * mix(0.012, 0.075, basinStrength * (shelf ? 0.72 : 1));
       let ridge = 0;
       let valley = 0;
       let raw = clamp01(
         0.5
-        + baseMask * mix(0.28, 0.42, relief)
-        + landWeight * mix(0.025, 0.08, interiorRise)
+        + baseMask * mix(0.24, 0.36, relief)
+        + broadInteriorRise
+        + uplandRise
+        - basinDrop
       );
       if (includeDetailRelief) {
-        const ridgeAlong = wx * ridgeCos + wy * ridgeSin;
-        const ridgeAcross = -wx * ridgeSin + wy * ridgeCos;
+        const ridgeAlong = wx * ridgeCos + wy * ridgeSin - ridgeAlongOffset;
+        const ridgeAcross = -wx * ridgeSin + wy * ridgeCos - ridgeAcrossOffset;
         const ridgeCurve = Math.sin(ridgeAlong * TAU * mix(0.34, 0.78, ridgeFrequency) + hash2D(2, 2, archetypeSeed) * TAU) * mix(0.03, 0.16, ruggedness);
         ridge = clamp01(lineRidge(ridgeAlong, ridgeAcross, longSpine ? mix(0.11, 0.065, anisotropy) : mix(0.16, 0.08, ruggedness), longSpine ? 0.95 : 0.72, ridgeCurve));
         valley = clamp01(
@@ -656,12 +714,16 @@ export function buildNoiseLandmassCore(input: NoiseLandmassCoreInput): NoiseLand
       const redistributed = Math.pow(raw, mix(1.35, 0.74, relief));
       const shapeHeight = clamp01(
         0.5
-        + baseMask * mix(0.24, 0.36, relief)
-        + smoothstep(0.08, 0.92, edge) * mix(0.015, 0.08, interiorRise)
+        + baseMask * mix(0.22, 0.34, relief)
+        + broadInteriorRise * 0.75
+        + uplandRise * 0.68
+        - basinDrop * 0.65
       );
       const reliefHeight = clamp01(
         redistributed * mix(0.76, 1.08, edgeLift)
-        + smoothstep(0.08, 0.92, edge) * mix(0.02, 0.12, interiorRise)
+        + broadInteriorRise * 0.85
+        + uplandRise * 0.74
+        - basinDrop * 0.55
       );
       const finalHeight = includeDetailRelief ? reliefHeight : shapeHeight;
       const idx = y * cols + x;
@@ -674,6 +736,8 @@ export function buildNoiseLandmassCore(input: NoiseLandmassCoreInput): NoiseLand
       elevationFloatMap[idx] = finalHeight;
     }
   }
+  zeroPerimeter(redistributedHeightMap, cols, rows);
+  zeroPerimeter(elevationFloatMap, cols, rows);
 
   const { seaLevelBase, seaLevelMap, oceanMask: resolvedOceanMask } =
     resolveCalibratedSeaLevel(elevationFloatMap, cols, rows, settings);
