@@ -9,6 +9,11 @@ export const BiomeSpreadStage: PipelineStage = {
   run: async (ctx) => {
     if (ctx.settings.biomeClassifierMode === "legacy") {
       ctx.biomeSuitabilityMap = null;
+      ctx.elevationStressMap = null;
+      ctx.slopeStressMap = null;
+      ctx.treeSuitabilityMap = null;
+      ctx.treeProbabilityMap = null;
+      ctx.treeDensityMap = null;
       ctx.forestMask = null;
       await ctx.reportStage("Biome spread skipped (legacy mode).", 1);
       await emitStageSnapshot(ctx, "biome:spread");

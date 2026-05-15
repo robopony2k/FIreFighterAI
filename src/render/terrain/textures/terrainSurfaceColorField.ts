@@ -17,6 +17,7 @@ type TerrainSurfaceColorSample = {
   heatCap?: number;
   worldSeed?: number;
   fastUpdate?: boolean;
+  debugScalarField?: Float32Array;
 };
 
 type TerrainSurfaceColorFieldDeps = {
@@ -86,6 +87,16 @@ const mixTriplet = (a: readonly number[], b: readonly number[], t: number): [num
     a[1] * (1 - clampedT) + b[1] * clampedT,
     a[2] * (1 - clampedT) + b[2] * clampedT
   ];
+};
+
+const scalarDebugColor = (value: number): [number, number, number] => {
+  const t = clamp(value, 0, 1);
+  if (t < 0.5) {
+    const k = t / 0.5;
+    return [0.08 + k * 0.12, 0.16 + k * 0.48, 0.42 - k * 0.26];
+  }
+  const k = (t - 0.5) / 0.5;
+  return [0.2 + k * 0.72, 0.64 - k * 0.14, 0.16 - k * 0.08];
 };
 
 const hasMaskCoverage = (mask?: Uint8Array): boolean => {
@@ -281,6 +292,7 @@ export const buildTerrainSurfaceColorField = (options: BuildTerrainSurfaceColorF
   const treeTypes = sample.treeTypes;
   const riverMask = sample.riverMask;
   const tileMoisture = sample.tileMoisture;
+  const debugScalarField = sample.debugScalarField;
   const climateDryness = clamp(sample.climateDryness ?? 0.35, 0, 1);
   const ashId = TILE_TYPE_IDS.ash;
   const rockyId = TILE_TYPE_IDS.rocky;
@@ -315,6 +327,7 @@ export const buildTerrainSurfaceColorField = (options: BuildTerrainSurfaceColorF
       const idx = tileY * cols + tileX;
       const sampleIndex = row * sampleCols + col;
       const typeId = sampleTypes[sampleIndex] ?? grassId;
+      const debugScalar = debugScalarField ? debugScalarField[idx] : undefined;
       let colorType = typeId;
       const localOceanRatio = oceanRatio ? clamp(oceanRatio[sampleIndex] ?? 0, 0, 1) : typeId === waterId ? 1 : 0;
       const localRiverRatio = riverRatio ? clamp(riverRatio[sampleIndex] ?? 0, 0, 1) : 0;
@@ -351,7 +364,7 @@ export const buildTerrainSurfaceColorField = (options: BuildTerrainSurfaceColorF
         localRiverCoverage >= 0.1 ||
         localRiverRatio >= Math.max(0.08, localOceanRatio * 0.7);
 
-      if (!debugTypeColors) {
+      if (!debugTypeColors && !debugScalarField) {
         if (typeId === forestId) {
           colorType = grassId;
         } else if (typeId === beachId) {
@@ -370,7 +383,9 @@ export const buildTerrainSurfaceColorField = (options: BuildTerrainSurfaceColorF
       }
 
       let color = deps.palette[colorType] ?? deps.palette[grassId] ?? [0, 0, 0];
-      if (!debugTypeColors && roadId !== null && typeId === roadId) {
+      if (debugScalarField && Number.isFinite(debugScalar)) {
+        color = scalarDebugColor(debugScalar as number);
+      } else if (!debugTypeColors && !debugScalarField && roadId !== null && typeId === roadId) {
         let sumR = 0;
         let sumG = 0;
         let sumB = 0;
@@ -406,14 +421,14 @@ export const buildTerrainSurfaceColorField = (options: BuildTerrainSurfaceColorF
         }
       }
 
-      if (!debugTypeColors && typeId === forestId) {
+      if (!debugTypeColors && !debugScalarField && typeId === forestId) {
         const dominantId = treeTypes ? treeTypes[idx] : 255;
         const tint = deps.forestTintById[dominantId] ?? deps.forestToneBase;
         const tintColor: [number, number, number] = [tint.r / 255, tint.g / 255, tint.b / 255];
         color = mixTriplet(color, tintColor, 0.55);
       }
 
-      if (!debugTypeColors && typeId === ashId) {
+      if (!debugTypeColors && !debugScalarField && typeId === ashId) {
         const ashNoise = sampleValueNoise(tileX + 0.5, tileY + 0.5, 12, worldSeed + 103);
         const ashCool = sampleValueNoise(tileX + 0.5, tileY + 0.5, 24, worldSeed + 151);
         const ashBase = 0.18 + ashNoise * 0.18;
@@ -424,7 +439,7 @@ export const buildTerrainSurfaceColorField = (options: BuildTerrainSurfaceColorF
         ];
       }
 
-      if (!debugTypeColors && (typeId === grassId || typeId === scrubId || typeId === floodplainId || typeId === forestId)) {
+      if (!debugTypeColors && !debugScalarField && (typeId === grassId || typeId === scrubId || typeId === floodplainId || typeId === forestId)) {
         const localDryness = 1 - localMoisture;
         const effectiveDryness = clamp(climateDryness * 0.72 + localDryness * 0.28, 0, 1);
         const dryTint = DRY_TINT_BY_TILE[typeId] ?? DRY_TINT_BY_TILE[grassId];
@@ -439,7 +454,7 @@ export const buildTerrainSurfaceColorField = (options: BuildTerrainSurfaceColorF
         }
       }
 
-      if (!debugTypeColors && sample.tileFuel && (typeId === grassId || typeId === scrubId || typeId === floodplainId || typeId === forestId)) {
+      if (!debugTypeColors && !debugScalarField && sample.tileFuel && (typeId === grassId || typeId === scrubId || typeId === floodplainId || typeId === forestId)) {
         const baseFuel = BASE_FUEL_BY_TILE_ID[typeId] ?? 0;
         if (baseFuel > 0) {
           const expectedFuel = Math.max(0.01, baseFuel * (1 - localMoisture * 0.6));
@@ -463,7 +478,7 @@ export const buildTerrainSurfaceColorField = (options: BuildTerrainSurfaceColorF
         }
       }
 
-      if (!debugTypeColors && typeId === waterId && localRiverRatio >= deps.riverRatioMin) {
+      if (!debugTypeColors && !debugScalarField && typeId === waterId && localRiverRatio >= deps.riverRatioMin) {
         const rockyColor = deps.palette[rockyId] ?? color;
         const floodColor = deps.palette[floodplainId] ?? deps.palette[grassId] ?? color;
         const wetBankColor: [number, number, number] = [
@@ -492,6 +507,7 @@ export const buildTerrainSurfaceColorField = (options: BuildTerrainSurfaceColorF
 
       if (
         !debugTypeColors &&
+        !debugScalarField &&
         localErosionWear > 0.001 &&
         (
           typeId === grassId ||
@@ -524,7 +540,7 @@ export const buildTerrainSurfaceColorField = (options: BuildTerrainSurfaceColorF
         color = mixTriplet(color, rockyColor, clamp(shoulderMask * 0.34, 0, 0.34));
       }
 
-      if (!debugTypeColors) {
+      if (!debugTypeColors && !debugScalarField) {
         color = applyMacroVariation(color, tileX, tileY, worldSeed, typeId, floodplainId, forestId, beachId);
         const rockyColor = deps.palette[rockyId] ?? color;
         const bareColor = deps.palette[bareId] ?? rockyColor;

@@ -17,6 +17,7 @@ type TileTextureSample = {
   tileFire?: Float32Array;
   tileHeat?: Float32Array;
   heatCap?: number;
+  debugScalarField?: Float32Array;
 };
 
 type TileTextureBuildDeps = {
@@ -60,6 +61,16 @@ const smoothstep = (edge0: number, edge1: number, x: number): number => {
   }
   const t = clamp((x - edge0) / (edge1 - edge0), 0, 1);
   return t * t * (3 - 2 * t);
+};
+
+const scalarDebugColor = (value: number): [number, number, number] => {
+  const t = clamp(value, 0, 1);
+  if (t < 0.5) {
+    const k = t / 0.5;
+    return [0.08 + k * 0.12, 0.16 + k * 0.48, 0.42 - k * 0.26];
+  }
+  const k = (t - 0.5) / 0.5;
+  return [0.2 + k * 0.72, 0.64 - k * 0.14, 0.16 - k * 0.08];
 };
 
 export const sampleTouchesWorldBorder = (
@@ -121,6 +132,7 @@ export const buildTileTexture = (
   const treeTypes = sample.treeTypes;
   const riverMask = sample.riverMask;
   const tileMoisture = sample.tileMoisture;
+  const debugScalarField = sample.debugScalarField;
   const climateDryness = clamp(sample.climateDryness ?? 0.35, 0, 1);
   const ashId = TILE_TYPE_IDS.ash;
   const distanceToLand = (() => {
@@ -185,6 +197,7 @@ export const buildTileTexture = (
       const idx = tileY * cols + tileX;
       const sampleIndex = row * sampleCols + col;
       const typeId = sampleTypes[sampleIndex] ?? grassId;
+      const debugScalar = debugScalarField ? debugScalarField[idx] : undefined;
       const touchesWorldBorder = sampleTouchesWorldBorder(tileX, tileY, endX, endY, cols, rows);
       const localWaterRatio = waterRatio ? clamp(waterRatio[sampleIndex] ?? 0, 0, 1) : typeId === waterId ? 1 : 0;
       const localOceanRatio = oceanRatio ? clamp(oceanRatio[sampleIndex] ?? 0, 0, 1) : localWaterRatio;
@@ -223,7 +236,7 @@ export const buildTileTexture = (
         localRiverCoverage >= 0.1 ||
         localRiverRatio >= Math.max(0.08, localOceanRatio * 0.7);
       let colorType = typeId;
-      if (!debugTypeColors) {
+      if (!debugTypeColors && !debugScalarField) {
         if (typeId === forestId) {
           colorType = grassId;
         } else if (typeId === beachId) {
@@ -245,10 +258,12 @@ export const buildTileTexture = (
         }
       }
       let color = palette[colorType] ?? palette[grassId];
-      if (!debugTypeColors && roadId !== null && typeId === roadId) {
+      if (debugScalarField && Number.isFinite(debugScalar)) {
+        color = scalarDebugColor(debugScalar as number);
+      } else if (!debugTypeColors && !debugScalarField && roadId !== null && typeId === roadId) {
         color = getRoadGroundColor(row, col);
       }
-      if (!debugTypeColors && typeId === forestId) {
+      if (!debugTypeColors && !debugScalarField && typeId === forestId) {
         const dominantId = treeTypes ? treeTypes[idx] : 255;
         const tint = deps.forestTintById[dominantId] ?? deps.forestToneBase;
         const tintColor: [number, number, number] = [tint.r / 255, tint.g / 255, tint.b / 255];
@@ -259,7 +274,7 @@ export const buildTileTexture = (
           color[2] * (1 - mixFactor) + tintColor[2] * mixFactor
         ];
       }
-      if (!debugTypeColors && typeId === ashId) {
+      if (!debugTypeColors && !debugScalarField && typeId === ashId) {
         const ashNoise = deps.noiseAt(idx * 5.131 + 91.7);
         const ashCool = deps.noiseAt(idx * 1.977 + 13.4);
         const ashBase = 0.18 + ashNoise * 0.18;
@@ -269,7 +284,7 @@ export const buildTileTexture = (
           ashBase * (1.0 + ashCool * 0.08)
         ];
       }
-      if (!debugTypeColors && (typeId === grassId || typeId === scrubId || typeId === floodplainId || typeId === forestId)) {
+      if (!debugTypeColors && !debugScalarField && (typeId === grassId || typeId === scrubId || typeId === floodplainId || typeId === forestId)) {
         const localDryness = 1 - localMoisture;
         const effectiveDryness = clamp(climateDryness * 0.72 + localDryness * 0.28, 0, 1);
         const dryTint = DRY_TINT_BY_TILE[typeId] ?? DRY_TINT_BY_TILE[grassId];
@@ -292,7 +307,7 @@ export const buildTileTexture = (
           ];
         }
       }
-      if (!debugTypeColors && sample.tileFuel && (typeId === grassId || typeId === scrubId || typeId === floodplainId || typeId === forestId)) {
+      if (!debugTypeColors && !debugScalarField && sample.tileFuel && (typeId === grassId || typeId === scrubId || typeId === floodplainId || typeId === forestId)) {
         const baseFuel = BASE_FUEL_BY_TILE_ID[typeId] ?? 0;
         if (baseFuel > 0) {
           const expectedFuel = Math.max(0.01, baseFuel * (1 - localMoisture * 0.6));
@@ -327,7 +342,7 @@ export const buildTileTexture = (
           ];
         }
       }
-      if (!debugTypeColors && typeId === waterId && localRiverRatio >= deps.riverRatioMin) {
+      if (!debugTypeColors && !debugScalarField && typeId === waterId && localRiverRatio >= deps.riverRatioMin) {
         const rockyColor = palette[TILE_TYPE_IDS.rocky] ?? color;
         const floodColor = palette[floodplainId] ?? palette[grassId] ?? color;
         const wetBankColor: [number, number, number] = [
@@ -372,6 +387,7 @@ export const buildTileTexture = (
       const occlusion = clamp(1 - slope * 0.06, 0.7, 1);
       if (
         !debugTypeColors &&
+        !debugScalarField &&
         localErosionWear > 0.001 &&
         (
           typeId === grassId ||
@@ -413,9 +429,9 @@ export const buildTileTexture = (
           color[2] * (1 - rockyBlend) + rockyColor[2] * rockyBlend
         ];
       }
-      const ashToneBoost = !debugTypeColors && typeId === ashId ? 1.18 : 1;
+      const ashToneBoost = !debugTypeColors && !debugScalarField && typeId === ashId ? 1.18 : 1;
       const erosionLowlandDarken =
-        !debugTypeColors
+        !debugTypeColors && !debugScalarField
           ? localErosionWear *
             smoothstep(0.0015, 0.012, curvature) *
             (1 - smoothstep(0.18, 0.58, height)) *
@@ -444,6 +460,7 @@ export const buildTileTexture = (
         !riverDominant;
       const shouldCutForOcean =
         !debugTypeColors &&
+        !debugScalarField &&
         !riverDominant &&
         localOceanRatio >= deps.waterAlphaMinRatio &&
         (borderOceanCutout ||

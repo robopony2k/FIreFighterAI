@@ -4,7 +4,7 @@ import type { TileType } from "../../core/types.js";
 import { clamp } from "../../core/utils.js";
 import { clearVegetationState } from "../../core/vegetation.js";
 import type { PipelineStage } from "../pipeline/TerrainPipeline.js";
-import { computeBiomeSuitabilityValue } from "../biome/BiomeSuitability.js";
+import { computeBiomeSuitabilityDetails } from "../biome/BiomeSuitability.js";
 import { emitStageSnapshot } from "../pipeline/stageDebug.js";
 import {
   assignForestComposition,
@@ -123,15 +123,40 @@ export const PostSettlementReconcileStage: PipelineStage = {
           if (coastlineOverride) {
             nextType = coastlineOverride;
           } else if (ctx.settings.biomeClassifierMode === "seedSpread" && ctx.forestMask && ctx.biomeSuitabilityMap) {
-            const suitability = computeBiomeSuitabilityValue({
+            const details = computeBiomeSuitabilityDetails({
               elevation: tile.elevation,
               slope: slopeLocal,
               moisture,
               valley,
               seaLevel,
-              highlandForestElevation: ctx.settings.highlandForestElevation
+              highlandForestElevation: ctx.settings.highlandForestElevation,
+              seed: state.seed,
+              x,
+              y,
+              worldX: ctx.worldOffsetXM + x * ctx.cellSizeM,
+              worldY: ctx.worldOffsetYM + y * ctx.cellSizeM,
+              cellSizeM: ctx.cellSizeM,
+              waterDist: tile.waterDist,
+              vegetationDensity: ctx.settings.vegetationDensity,
+              forestPatchiness: ctx.settings.forestPatchiness
             });
+            const suitability = details.treeSuitability;
             ctx.biomeSuitabilityMap[idx] = suitability;
+            if (ctx.elevationStressMap) {
+              ctx.elevationStressMap[idx] = details.elevationStress;
+            }
+            if (ctx.slopeStressMap) {
+              ctx.slopeStressMap[idx] = details.slopeStress;
+            }
+            if (ctx.treeSuitabilityMap) {
+              ctx.treeSuitabilityMap[idx] = details.treeSuitability;
+            }
+            if (ctx.treeProbabilityMap) {
+              ctx.treeProbabilityMap[idx] = details.treeProbability;
+            }
+            if (ctx.treeDensityMap) {
+              ctx.treeDensityMap[idx] = details.treeDensity;
+            }
             let forestNeighborCount = 0;
             for (let dy = -1; dy <= 1; dy += 1) {
               for (let dx = -1; dx <= 1; dx += 1) {
@@ -152,11 +177,11 @@ export const PostSettlementReconcileStage: PipelineStage = {
             const wasForest = ctx.forestMask[idx] > 0;
             let forestCandidate = false;
             if (wasForest) {
-              forestCandidate = suitability >= 0.42;
-            } else if (suitability >= 0.62 && forestNeighborCount >= 2) {
+              forestCandidate = details.treeProbability >= 0.32;
+            } else if (details.treeProbability >= 0.62 && forestNeighborCount >= 2) {
               forestCandidate = true;
             }
-            if (suitability < 0.3) {
+            if (details.treeProbability < 0.18) {
               forestCandidate = false;
             }
             ctx.forestMask[idx] = forestCandidate ? 1 : 0;
@@ -196,7 +221,10 @@ export const PostSettlementReconcileStage: PipelineStage = {
             const valleyDry = valley > 0.1 && tile.elevation < 0.6;
             if (nextType === "forest" && ctx.settings.biomeClassifierMode === "seedSpread" && ctx.biomeSuitabilityMap) {
               canopy = clamp(
-                0.48 + 0.42 * (ctx.biomeSuitabilityMap[idx] ?? 0) + 0.1 * (ctx.microMap[idx] ?? 0),
+                0.18 +
+                  0.22 * (ctx.biomeSuitabilityMap[idx] ?? 0) +
+                  0.54 * (ctx.treeDensityMap?.[idx] ?? 0) +
+                  0.1 * (ctx.microMap[idx] ?? 0),
                 0,
                 1
               );
@@ -218,7 +246,7 @@ export const PostSettlementReconcileStage: PipelineStage = {
         }
       }
     }
-    seedInitialVegetationState(state, ctx.biomeSuitabilityMap, ctx.microMap, ctx.meadowMaskMap);
+    seedInitialVegetationState(state, ctx.biomeSuitabilityMap, ctx.microMap, ctx.meadowMaskMap, ctx.treeDensityMap);
     assignForestComposition(state);
     await emitStageSnapshot(ctx, "reconcile:postSettlement");
   }

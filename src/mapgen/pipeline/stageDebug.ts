@@ -23,7 +23,12 @@ export const emitStageSnapshot = async (ctx: MapGenContext, phase: MapGenDebugPh
     oceanMask: ctx.oceanMask ? Uint8Array.from(ctx.oceanMask) : undefined,
     seaLevel: ctx.seaLevelMap ? Float32Array.from(ctx.seaLevelMap) : undefined,
     coastDistance: ctx.state.tileCoastDistance.length > 0 ? Uint16Array.from(ctx.state.tileCoastDistance) : undefined,
-    coastClass: ctx.state.tileCoastClass.length > 0 ? Uint8Array.from(ctx.state.tileCoastClass) : undefined
+    coastClass: ctx.state.tileCoastClass.length > 0 ? Uint8Array.from(ctx.state.tileCoastClass) : undefined,
+    rawMoisture: ctx.moistureMap ? Float32Array.from(ctx.moistureMap) : undefined,
+    elevationStress: ctx.elevationStressMap ? Float32Array.from(ctx.elevationStressMap) : undefined,
+    slopeStress: ctx.slopeStressMap ? Float32Array.from(ctx.slopeStressMap) : undefined,
+    treeSuitability: ctx.treeSuitabilityMap ? Float32Array.from(ctx.treeSuitabilityMap) : undefined,
+    treeProbability: ctx.treeProbabilityMap ? Float32Array.from(ctx.treeProbabilityMap) : undefined
   });
   if (ctx.debug.waitForStep) {
     await ctx.debug.waitForStep();

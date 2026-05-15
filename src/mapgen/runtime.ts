@@ -539,7 +539,7 @@ export const classifySeedSpreadTile = (input: SeedSpreadClassificationInput): Ti
   if (elevation > seaLevel + 0.35 && moisture < 0.25 && slope <= 0.45) {
     return "bare";
   }
-  if (forestCandidate && elevation <= highlandForestElevation + 0.05) {
+  if (forestCandidate) {
     return "forest";
   }
   if (moisture > 0.33) {
@@ -792,9 +792,24 @@ export function assignForestComposition(state: WorldState): void {
       tile.dominantTreeType = dominant;
       let chosen = dominant;
       let bestScore = 0;
+      const x = idx % cols;
+      const y = Math.floor(idx / cols);
+      const standScale = areaSize >= 256 ? 34 : areaSize >= 96 ? 26 : 18;
+      const standX = Math.floor(x / standScale);
+      const standY = Math.floor(y / standScale);
+      const localWeights = computeForestTreeWeights(tile.moisture, tile.elevation, standX, standY, state.seed + 12_331);
+      const localDominant = pickWeightedTreeType(hash2D(standX, standY, state.seed + 12_367), DOMINANT_FOREST_TYPES, localWeights);
+      const localPatchNoise = fractalNoise(
+        (x + standX * 17) / Math.max(10, standScale * 0.82),
+        (y - standY * 19) / Math.max(10, standScale * 0.82),
+        state.seed + 12_401
+      );
+      const transitionMix = clamp(1 - (tile.canopyCover ?? tile.canopy ?? 0), 0, 1);
+      if (localDominant !== dominant && localPatchNoise > 0.48 + transitionMix * 0.1) {
+        chosen = localDominant;
+        bestScore = localPatchNoise;
+      }
       if (secondaryConfigs.length > 0) {
-        const x = idx % cols;
-        const y = Math.floor(idx / cols);
         secondaryConfigs.forEach((config) => {
           const noise = fractalNoise(
             (x + config.offset) / config.scale,
@@ -4581,7 +4596,8 @@ export function seedInitialVegetationState(
   state: WorldState,
   biomeSuitabilityMap?: ArrayLike<number> | null,
   microMap?: ArrayLike<number> | null,
-  meadowMaskMap?: ArrayLike<number> | null
+  meadowMaskMap?: ArrayLike<number> | null,
+  treeDensityMap?: ArrayLike<number> | null
 ): void {
   const total = state.grid.totalTiles;
   const visited = new Uint8Array(total);
@@ -4751,11 +4767,12 @@ export function seedInitialVegetationState(
       const suitability =
         biomeSuitabilityMap?.[idx] ??
         clamp(0.28 + tile.moisture * 0.42 + (1 - tile.elevation) * 0.18, 0, 1);
+      const treeDensity = clamp(treeDensityMap?.[idx] ?? suitability, 0, 1);
       const micro = clamp(microMap?.[idx] ?? 0.5, 0, 1);
       const edgeDepth = Math.max(0, edgeDistance[idx]);
       const edgeDepth01 = clamp(edgeDepth / 3.5, 0, 1);
       const interiorBias = clamp((forestNeighbors - 1) / 3, 0, 1);
-      const maturityBias = clamp(edgeDepth01 * 0.68 + interiorBias * 0.12 + suitability * 0.14 + micro * 0.06, 0, 1);
+      const maturityBias = clamp(edgeDepth01 * 0.54 + interiorBias * 0.1 + suitability * 0.12 + treeDensity * 0.18 + micro * 0.06, 0, 1);
       const edgeAge = FOREST_AGE_CAP_YEARS * (0.18 + hash2D(x, y, state.seed + 12031) * 0.22);
       const upperAge = FOREST_AGE_CAP_YEARS * (0.48 + hash2D(x, y, state.seed + 12067) * 0.38);
       tile.vegetationAgeYears = clamp(edgeAge * (1 - maturityBias) + upperAge * maturityBias, 0, FOREST_AGE_CAP_YEARS);
@@ -7526,6 +7543,11 @@ async function runBiomeFieldsStage(ctx: MapGenContext): Promise<void> {
 async function runBiomeSpreadStage(ctx: MapGenContext): Promise<void> {
   if (ctx.settings.biomeClassifierMode === "legacy") {
     ctx.biomeSuitabilityMap = null;
+    ctx.elevationStressMap = null;
+    ctx.slopeStressMap = null;
+    ctx.treeSuitabilityMap = null;
+    ctx.treeProbabilityMap = null;
+    ctx.treeDensityMap = null;
     ctx.forestMask = null;
     await ctx.reportStage("Biome spread skipped (legacy mode).", 1);
     await emitStageSnapshot(ctx, "biome:spread");

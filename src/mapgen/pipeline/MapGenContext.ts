@@ -52,6 +52,11 @@ export class MapGenContext {
   waterDistMap: Uint16Array | null = null;
   moistureMap: Float32Array | null = null;
   biomeSuitabilityMap: Float32Array | null = null;
+  elevationStressMap: Float32Array | null = null;
+  slopeStressMap: Float32Array | null = null;
+  treeSuitabilityMap: Float32Array | null = null;
+  treeProbabilityMap: Float32Array | null = null;
+  treeDensityMap: Float32Array | null = null;
   forestMask: Uint8Array | null = null;
   settlementSnapshot: SettlementStageData | null = null;
   settlementPlan: SettlementPlacementResult | null = null;

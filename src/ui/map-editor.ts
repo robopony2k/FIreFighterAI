@@ -195,6 +195,7 @@ type StepPreviewConfig = {
 type MapEditorRenderDebugState = {
   terrainHeightMode: "final" | "raw";
   terrainSurfaceShadingMode: "refined" | "legacyFaceted";
+  biomeScalarField: "none" | "rawMoisture" | "elevationStress" | "slopeStress" | "treeSuitability" | "treeProbability";
   riverWaterOff: boolean;
   riverCutoutOff: boolean;
   bridgesOff: boolean;
@@ -203,6 +204,7 @@ type MapEditorRenderDebugState = {
 const DEFAULT_MAP_EDITOR_RENDER_DEBUG_STATE: MapEditorRenderDebugState = {
   terrainHeightMode: "final",
   terrainSurfaceShadingMode: "refined",
+  biomeScalarField: "none",
   riverWaterOff: false,
   riverCutoutOff: false,
   bridgesOff: false
@@ -308,6 +310,11 @@ const buildSnapshotSample = (
   seaLevel: snapshot.seaLevel,
   coastDistance: snapshot.coastDistance,
   coastClass: snapshot.coastClass,
+  rawMoisture: snapshot.rawMoisture,
+  elevationStress: snapshot.elevationStress,
+  slopeStress: snapshot.slopeStress,
+  treeSuitability: snapshot.treeSuitability,
+  treeProbability: snapshot.treeProbability,
   fullResolution: true,
   treesEnabled,
   worldSeed
@@ -316,18 +323,26 @@ const buildSnapshotSample = (
 const buildWorldPreviewSample = (
   state: WorldState,
   treesEnabled: boolean,
-  heightScaleMultiplier: number
+  heightScaleMultiplier: number,
+  snapshot?: MapGenDebugSnapshot | null
 ) => {
   syncTileSoA(state);
-  return buildRenderTerrainSample(
-    state,
-    buildTreeTypeMap(state),
-    false,
-    treesEnabled,
-    false,
-    true,
-    heightScaleMultiplier
-  );
+  return {
+    ...buildRenderTerrainSample(
+      state,
+      buildTreeTypeMap(state),
+      false,
+      treesEnabled,
+      false,
+      true,
+      heightScaleMultiplier
+    ),
+    rawMoisture: snapshot?.rawMoisture,
+    elevationStress: snapshot?.elevationStress,
+    slopeStress: snapshot?.slopeStress,
+    treeSuitability: snapshot?.treeSuitability,
+    treeProbability: snapshot?.treeProbability
+  };
 };
 
 const getFastPreviewMode = (stepId: MapEditorStepId): FastTerrainPreviewMode | null => {
@@ -435,12 +450,23 @@ const buildTerrainRenderDebugOptions = (
   disableBridges: state.bridgesOff
 });
 
+const getBiomeDebugScalarField = (
+  sample: PreviewRenderableSample,
+  field: MapEditorRenderDebugState["biomeScalarField"]
+): Float32Array | undefined => {
+  if (field === "none") {
+    return undefined;
+  }
+  return (sample as PreviewRenderableSample & Record<typeof field, Float32Array | undefined>)[field];
+};
+
 const applyTerrainRenderDebugOptions = (
   sample: PreviewRenderableSample,
   state: MapEditorRenderDebugState,
   logHeightAnomalies = true
 ): DebugPreviewRenderableSample => ({
   ...sample,
+  debugScalarField: getBiomeDebugScalarField(sample, state.biomeScalarField),
   debugRenderOptions: buildTerrainRenderDebugOptions(state, logHeightAnomalies)
 });
 
@@ -861,6 +887,11 @@ const clonePreviewSample = (sample: PreviewRenderableSample): PreviewRenderableS
       riverBed: cloneFloat32Array(worldSample.riverBed),
       riverSurface: cloneFloat32Array(worldSample.riverSurface),
       riverStepStrength: cloneFloat32Array(worldSample.riverStepStrength),
+      rawMoisture: cloneFloat32Array(worldSample.rawMoisture),
+      elevationStress: cloneFloat32Array(worldSample.elevationStress),
+      slopeStress: cloneFloat32Array(worldSample.slopeStress),
+      treeSuitability: cloneFloat32Array(worldSample.treeSuitability),
+      treeProbability: cloneFloat32Array(worldSample.treeProbability),
       towns: worldSample.towns?.map((town) => ({ ...town }))
     };
   }
@@ -873,7 +904,12 @@ const clonePreviewSample = (sample: PreviewRenderableSample): PreviewRenderableS
     oceanMask: cloneUint8Array(snapshotSample.oceanMask),
     seaLevel: cloneFloat32Array(snapshotSample.seaLevel),
     coastDistance: snapshotSample.coastDistance ? Uint16Array.from(snapshotSample.coastDistance) : undefined,
-    coastClass: cloneUint8Array(snapshotSample.coastClass)
+    coastClass: cloneUint8Array(snapshotSample.coastClass),
+    rawMoisture: cloneFloat32Array(snapshotSample.rawMoisture),
+    elevationStress: cloneFloat32Array(snapshotSample.elevationStress),
+    slopeStress: cloneFloat32Array(snapshotSample.slopeStress),
+    treeSuitability: cloneFloat32Array(snapshotSample.treeSuitability),
+    treeProbability: cloneFloat32Array(snapshotSample.treeProbability)
   };
 };
 
@@ -1022,12 +1058,39 @@ export const initMapEditor = (refs: MapEditorRefs, deps: MapEditorDeps): MapEdit
     return input;
   };
 
+  const createBiomeScalarSelect = (): HTMLSelectElement => {
+    const label = document.createElement("label");
+    label.style.display = "inline-flex";
+    label.style.alignItems = "center";
+    label.style.gap = "0.35rem";
+    label.style.marginRight = "0.75rem";
+    const select = document.createElement("select");
+    const options: Array<{ value: MapEditorRenderDebugState["biomeScalarField"]; label: string }> = [
+      { value: "none", label: "biome_overlay_off" },
+      { value: "rawMoisture", label: "raw_moisture" },
+      { value: "elevationStress", label: "elevation_stress" },
+      { value: "slopeStress", label: "slope_stress" },
+      { value: "treeSuitability", label: "tree_suitability" },
+      { value: "treeProbability", label: "tree_probability" }
+    ];
+    options.forEach((option) => {
+      const node = document.createElement("option");
+      node.value = option.value;
+      node.textContent = option.label;
+      select.appendChild(node);
+    });
+    label.append(document.createTextNode("biome_debug"), select);
+    renderDebugControlsRoot.appendChild(label);
+    return select;
+  };
+
   const terrainFinalVerticesToggle = createRenderDebugRadio("final", "terrain_final_vertices", true);
   const terrainRawVerticesToggle = createRenderDebugRadio("raw", "terrain_raw_vertices", false);
   const legacyFacetedShadingToggle = createRenderDebugCheckbox("terrain_legacy_faceted");
   const riverWaterOffToggle = createRenderDebugCheckbox("river_water_off");
   const riverCutoutOffToggle = createRenderDebugCheckbox("river_cutout_off");
   const bridgesOffToggle = createRenderDebugCheckbox("bridges_off");
+  const biomeScalarSelect = createBiomeScalarSelect();
   refs.coastDebugOutput.parentElement?.insertBefore(renderDebugControlsRoot, refs.coastDebugOutput);
   const terrainControlElements = collectTerrainControlElements(refs.screen);
   refs.legacyNotice.textContent = "Older saved map scenarios used the legacy slider model and are not loaded in this editor.";
@@ -1502,6 +1565,7 @@ export const initMapEditor = (refs: MapEditorRefs, deps: MapEditorDeps): MapEdit
     previewRenderDebugState = {
       terrainHeightMode: terrainRawVerticesToggle.checked ? "raw" : "final",
       terrainSurfaceShadingMode: legacyFacetedShadingToggle.checked ? "legacyFaceted" : "refined",
+      biomeScalarField: biomeScalarSelect.value as MapEditorRenderDebugState["biomeScalarField"],
       riverWaterOff: riverWaterOffToggle.checked,
       riverCutoutOff: riverCutoutOffToggle.checked,
       bridgesOff: bridgesOffToggle.checked
@@ -1521,7 +1585,8 @@ export const initMapEditor = (refs: MapEditorRefs, deps: MapEditorDeps): MapEdit
     legacyFacetedShadingToggle,
     riverWaterOffToggle,
     riverCutoutOffToggle,
-    bridgesOffToggle
+    bridgesOffToggle,
+    biomeScalarSelect
   ].forEach((input) => {
     input.addEventListener("change", syncPreviewRenderDebugState);
   });
@@ -1684,7 +1749,7 @@ export const initMapEditor = (refs: MapEditorRefs, deps: MapEditorDeps): MapEdit
               cacheEquivalentPreviewSample(
                 cacheKey,
                 "settlements",
-                buildWorldPreviewSample(world, false, terrainHeightScaleMultiplier)
+                buildWorldPreviewSample(world, false, terrainHeightScaleMultiplier, snapshot)
               );
               break;
             }
@@ -1692,7 +1757,7 @@ export const initMapEditor = (refs: MapEditorRefs, deps: MapEditorDeps): MapEdit
               cacheEquivalentPreviewSample(
                 cacheKey,
                 "vegetation",
-                buildWorldPreviewSample(world, true, terrainHeightScaleMultiplier)
+                buildWorldPreviewSample(world, true, terrainHeightScaleMultiplier, snapshot)
               );
               break;
             }
@@ -1700,7 +1765,7 @@ export const initMapEditor = (refs: MapEditorRefs, deps: MapEditorDeps): MapEdit
               cacheEquivalentPreviewSample(
                 cacheKey,
                 "final",
-                buildWorldPreviewSample(world, true, terrainHeightScaleMultiplier)
+                buildWorldPreviewSample(world, true, terrainHeightScaleMultiplier, snapshot)
               );
               break;
             }
@@ -1721,7 +1786,10 @@ export const initMapEditor = (refs: MapEditorRefs, deps: MapEditorDeps): MapEdit
             return;
           }
           preview.setTerrain(
-            buildSnapshotSample(snapshot, world.grid, world.seed, terrainHeightScaleMultiplier, false),
+            applyTerrainRenderDebugOptions(
+              buildSnapshotSample(snapshot, world.grid, world.seed, terrainHeightScaleMultiplier, false),
+              previewRenderDebugState
+            ),
             { recenter: recenter && !appliedStageCamera }
           );
           appliedStageCamera = appliedStageCamera || recenter;
@@ -1756,11 +1824,11 @@ export const initMapEditor = (refs: MapEditorRefs, deps: MapEditorDeps): MapEdit
         } else {
           cacheEquivalentPreviewSample(cacheKey, activeStep, sample);
         }
-        preview.setTerrain(sample, { recenter: recenter && !appliedStageCamera });
+        preview.setTerrain(applyTerrainRenderDebugOptions(sample, previewRenderDebugState), { recenter: recenter && !appliedStageCamera });
       } else {
-        const sample = buildWorldPreviewSample(world, previewConfig.treesEnabled, terrainHeightScaleMultiplier);
+        const sample = buildWorldPreviewSample(world, previewConfig.treesEnabled, terrainHeightScaleMultiplier, latestSnapshot);
         cacheEquivalentPreviewSample(cacheKey, activeStep, sample);
-        preview.setTerrain(sample, { recenter: recenter && !appliedStageCamera });
+        preview.setTerrain(applyTerrainRenderDebugOptions(sample, previewRenderDebugState), { recenter: recenter && !appliedStageCamera });
       }
       hidePreviewOverlay();
       syncCurrentScenarioLabel();

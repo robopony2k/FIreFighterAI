@@ -26,7 +26,7 @@ export const RoadNetworkStage: PipelineStage = {
         tile.isBase = false;
       }
     }
-    seedInitialVegetationState(ctx.state, ctx.biomeSuitabilityMap, ctx.microMap, ctx.meadowMaskMap);
+    seedInitialVegetationState(ctx.state, ctx.biomeSuitabilityMap, ctx.microMap, ctx.meadowMaskMap, ctx.treeDensityMap);
     assignForestComposition(ctx.state);
     if (DEBUG_TERRAIN) {
       const stats = getRoadGenerationStats();

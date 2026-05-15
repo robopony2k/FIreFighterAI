@@ -110,6 +110,12 @@ const assertSnapshotShape = (snapshot, totalTiles, label) => {
   if (snapshot.coastClass && (!(snapshot.coastClass instanceof Uint8Array) || snapshot.coastClass.length !== totalTiles)) {
     throw new Error(`[mapgen] ${label} invalid coastClass payload for ${snapshot.phase}`);
   }
+  for (const field of ["rawMoisture", "elevationStress", "slopeStress", "treeSuitability", "treeProbability"]) {
+    const value = snapshot[field];
+    if (value && (!(value instanceof Float32Array) || value.length !== totalTiles)) {
+      throw new Error(`[mapgen] ${label} invalid ${field} payload for ${snapshot.phase}`);
+    }
+  }
 };
 
 const getExpectedStagePrefix = (stopAfterPhase) => {
@@ -867,6 +873,8 @@ const runCase = async (sizeId, seed) => {
   let river = 0;
   let forestAgeSum = 0;
   const forestMaturities = [];
+  const forestSpecies = new Set();
+  let forestTreeTypeHash = 2166136261;
   let elevationMin = Number.POSITIVE_INFINITY;
   let elevationMax = Number.NEGATIVE_INFINITY;
   let elevationSum = 0;
@@ -884,6 +892,13 @@ const runCase = async (sizeId, seed) => {
       forest += 1;
       forestAgeSum += tile.vegetationAgeYears ?? 0;
       forestMaturities.push(getVegetationMaturity01(tile.type, tile.vegetationAgeYears ?? 0));
+      if (tile.treeType) {
+        forestSpecies.add(tile.treeType);
+        for (let c = 0; c < tile.treeType.length; c += 1) {
+          forestTreeTypeHash ^= tile.treeType.charCodeAt(c);
+          forestTreeTypeHash = Math.imul(forestTreeTypeHash, 16777619) >>> 0;
+        }
+      }
     } else if (tile.type === "house") {
       houses += 1;
     } else if (tile.type === "road") {
@@ -927,6 +942,8 @@ const runCase = async (sizeId, seed) => {
     forestPct: Number(((forest / total) * 100).toFixed(2)),
     forestAgeMean: Number((forestAgeSum / Math.max(1, forest)).toFixed(2)),
     forestMaturityP95: Number(forestMaturityP95.toFixed(3)),
+    forestSpeciesCount: forestSpecies.size,
+    forestTreeTypeHash,
     houseCount: houses,
     requestedHouseCount: state.settlementRequestedHouses ?? houses,
     placedHouseCount: state.settlementPlacedHouses ?? houses,
@@ -1116,6 +1133,10 @@ const compareAgainstBaseline = async (results) => {
     if (FOREST_AGE_CAP_YEARS > 5 && result.forestMaturityP95 >= 0.95) {
       failures += 1;
       console.error(`[mapgen] forest maturity p95 too high for ${key}: ${result.forestMaturityP95.toFixed(3)}`);
+    }
+    if (result.forestPct > 2 && result.forestSpeciesCount < 2) {
+      failures += 1;
+      console.error(`[mapgen] forest tree species diversity too low for ${key}: ${result.forestSpeciesCount}`);
     }
     if (result.compactTownViolationCount > 0) {
       failures += 1;

@@ -31,6 +31,11 @@ export type MapGenDebugSnapshot = {
   seaLevel?: Float32Array;
   coastDistance?: Uint16Array;
   coastClass?: Uint8Array;
+  rawMoisture?: Float32Array;
+  elevationStress?: Float32Array;
+  slopeStress?: Float32Array;
+  treeSuitability?: Float32Array;
+  treeProbability?: Float32Array;
 };
 
 export type MapGenStageTiming = {

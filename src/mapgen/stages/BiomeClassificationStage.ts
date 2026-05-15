@@ -33,6 +33,8 @@ export const BiomeClassificationStage: PipelineStage = {
       microMap,
       meadowMaskMap,
       biomeSuitabilityMap,
+      treeProbabilityMap,
+      treeDensityMap,
       forestMask
     } = ctx;
     if (
@@ -49,7 +51,7 @@ export const BiomeClassificationStage: PipelineStage = {
     }
 
     const useSeedSpread = settings.biomeClassifierMode === "seedSpread";
-    if (useSeedSpread && (!biomeSuitabilityMap || !forestMask)) {
+    if (useSeedSpread && (!biomeSuitabilityMap || !forestMask || !treeProbabilityMap || !treeDensityMap)) {
       throw new Error("Seed-spread biome classification missing spread maps.");
     }
 
@@ -98,7 +100,7 @@ export const BiomeClassificationStage: PipelineStage = {
                 moisture,
                 seaLevel,
                 highlandForestElevation: settings.highlandForestElevation,
-                forestCandidate: (forestMask?.[idx] ?? 0) > 0
+                forestCandidate: (forestMask?.[idx] ?? 0) > 0 || (treeProbabilityMap?.[idx] ?? 0) >= 0.78
               })
             : classifyTile({
                 elevation,
@@ -121,7 +123,14 @@ export const BiomeClassificationStage: PipelineStage = {
             (1 - (meadowMaskMap[idx] ?? 0) * settings.meadowStrength);
           const valleyDry = valley > 0.1 && elevation < 0.6;
           if (nextType === "forest" && useSeedSpread) {
-            canopyCover = clamp(0.48 + 0.42 * (biomeSuitabilityMap?.[idx] ?? 0) + 0.1 * micro, 0, 1);
+            canopyCover = clamp(
+              0.18 +
+                0.22 * (biomeSuitabilityMap?.[idx] ?? 0) +
+                0.54 * (treeDensityMap?.[idx] ?? 0) +
+                0.1 * micro,
+              0,
+              1
+            );
           } else {
             const canopyBase = nextType === "forest" ? 0.55 + micro * 0.55 : grassCanopyBase - (valleyDry ? 0.08 : 0);
             canopyCover = clamp(canopyBase, 0, 1);
@@ -169,7 +178,7 @@ export const BiomeClassificationStage: PipelineStage = {
       }
     }
 
-    seedInitialVegetationState(state, biomeSuitabilityMap, microMap, meadowMaskMap);
+    seedInitialVegetationState(state, biomeSuitabilityMap, microMap, meadowMaskMap, treeDensityMap);
     assignForestComposition(state);
     assertEdgeWater(state);
     await emitStageSnapshot(ctx, "biome:classify");

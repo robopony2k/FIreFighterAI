@@ -46,6 +46,7 @@ export type RenderTerrainSample = {
   riverSurface?: Float32Array;
   riverStepStrength?: Float32Array;
   climateDryness?: number;
+  debugScalarField?: Float32Array;
   debugTypeColors?: boolean;
   treesEnabled?: boolean;
   fastUpdate?: boolean;

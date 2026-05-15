@@ -1,5 +1,19 @@
 # Deprecations
 
+## Binary Seed-Spread Forest Boundaries
+
+Status: Deprecated as of May 14, 2026.
+
+- Forest generation no longer treats the seed-spread `forestMask` as the primary visual vegetation boundary.
+- Terrain vegetation now uses continuous tree suitability, probability, and density derived from moisture, elevation stress, slope stress, water influence, and seeded biome noise.
+- The `forest` tile type remains the fuel category, but visual tree identity is assigned through clustered pine, oak, maple, birch, and elm stand patches.
+
+Migration guidance:
+
+1. Drive new vegetation placement from tree suitability/probability/density fields, not hard moisture/elevation thresholds.
+2. Keep `forestMask` as a compatibility or broad-classification derivative only.
+3. Keep tree species visual-only unless a future design explicitly adds species-specific fuel behavior.
+
 ## Center-First Firebase Placement
 
 Status: Deprecated as of May 14, 2026.
