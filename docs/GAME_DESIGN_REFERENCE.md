@@ -49,7 +49,8 @@ Story: You are the new "Fire Warden" in charge of a region. Your mission is to p
 
 - Vegetated tiles carry deterministic vegetation state that includes age, canopy cover, and stem density, so forests can look denser without changing the underlying simulation grid.
 - Campaign vegetation maturity is tuned for the 20-year run rather than real-world botany: grass/floodplain mature in about one year, scrub in about two years, and forest reaches full gameplay fuel/canopy maturity in about five years.
-- Forest expansion should be visible over a few quiet growth seasons; open vegetated tiles can recruit into young forest when canopy and nearby seed pressure are high enough.
+- Strategic vegetation growth is processed in deterministic seasonal block batches, not literal daily full-map ecology. Low block budgets must still catch every region up over elapsed career time, while visual terrain refreshes are batched until changes are meaningful.
+- Forest expansion should be visible over a few quiet growth seasons; open vegetated tiles and suitable non-rocky bare lowlands can recruit into young forest from runtime tree suitability and seed pressure instead of being locked to initial biome classification.
 - Forest stands are assigned one dominant tree identity from pine, oak, maple, birch, or elm. Large forest areas can also contain 1-2 clustered secondary species so they read as stands instead of noisy per-tile mixes.
 - Broad environmental bias already shapes composition: drier or higher terrain leans pine, wetter or lower terrain leans elm, and other hardwoods fill the middle ground.
 - Tree identity currently drives mapgen readability and rendering variety first. It is not yet a separate fire-fuel model.
@@ -136,6 +137,7 @@ Design intent:
 - Dev-facing terrain tools should retain a legacy faceted comparison mode for validating shading changes without affecting simulation data.
 - Terrain generation uses a shared Mapgen4-inspired grid landmass core for editor previews and `terrain:elevation`, deriving dry shape, coastline intent, off-center uplands, ridges, lowland basins, valleys, and drainage support fields from seeded noise, elevation redistribution, and an edge-down island envelope before sea level, ocean flooding, accurate rivers, biomes, settlements, roads, and fuel stages run.
 - The firebase starts near the center of the main island, but placement scores nearby lowland candidates instead of blindly accepting the exact map center. It should prefer flat, moderate-elevation, roadable ground with nearby vegetated fuel so the base is not stranded on barren high terrain.
+- Initial map generation guarantees the firebase and all seeded towns share one edge-connected road network. Road strictness remains an internal/debug tuning input, not something players must adjust to avoid isolated towns.
 - Each world seed also derives a fictional prevailing wind direction, strength, and variability; that seed climate carries ocean moisture inland so windward slopes trend wetter, leeward rain shadows trend drier, and the resulting static moisture shapes biome, fuel, and later fire-season wind bias. Terrain vegetation derives continuous tree suitability from moisture, elevation stress, slope stress, river/coastal influence, and seeded biome noise, so forests thin probabilistically and patchily instead of ending at a hard contour. Forest remains the fuel category, while pine, oak, maple, birch, and elm are assigned as clustered visual stand patches for 3D assets and canopy color variation.
 - The terrain editor early sequence is Scenario, Shape, Relief, and Water for fast landmass previews. Scenario, Shape, and Relief render dry landmass previews with no ocean or river water; Water is the first fast preview that calibrates sea level from the Land mass target and renders connected ocean. Rivers is an accurate click-driven stage that advances the mapgen session through shoreline and river carving before rendering.
 
@@ -158,8 +160,8 @@ Terrain
 - Default islands should read as varied single-island regions rather than volcano cones: center position should not imply highest elevation, and uplands should be distributed by seeded ridges, basins, shelves, and valleys.
 - Terrain editor previews prioritize instant feedback for shape, relief, and water controls using the same fast landmass core as `terrain:elevation`; Rivers and later final-quality stages are not started until their step is selected, then advance the current preview session instead of restarting earlier completed stages. Shape exposes Land mass as the primary coastline coverage control; Water exposes sea-level bias only as an advanced calibration override.
 - Tile fuel profiles (baseFuel/ignition/burnRate/heatOutput/spreadBoost/heatTransferCap/heatRetention/windFactor per tile type); windFactor is retained as the config key but means windbreak strength, where 0 is open terrain and 1 is strong wind obstruction.
-- Vegetation regrowth (water influence, ash recovery, canopy growth, forest recruit).
-- Community and road generation (town density, bridge allowance, settlement spacing, road strictness, pre-growth years).
+- Vegetation regrowth (water influence, ash recovery, canopy growth, runtime tree suitability, block catch-up, forest recruit).
+- Community and road generation (town density, bridge allowance, settlement spacing, debug/internal road strictness, pre-growth years, guaranteed initial road connectivity).
 
 Climate
 - Climate params (seasonLen, peakDay, tMid, tAmp, warmingPerYear, noiseAmp, heatwavesPerYear).
@@ -235,7 +237,7 @@ This can be achieved by:
 - Tactical evacuation (town destination selection, locked road routes, representative civilian vehicles, road slot queueing, heat exposure, vehicle destruction, and population/life-loss hooks).
 - Climate model (temperature + moisture).
 - Map generation (terrain, vegetation age/density, forest stand composition).
-- Settlements (terrain-aware town seeding, constrained-ribbon vs compact street archetypes, frontage-based annual growth, block-forming road expansion).
+- Settlements (terrain-aware town seeding, constrained-ribbon vs compact street archetypes, frontage-based annual growth, compact infill/densification, event-style construction catch-up, block-forming road expansion).
 - UI system (phase UI, controls, overlays).
 
 ## Open Questions

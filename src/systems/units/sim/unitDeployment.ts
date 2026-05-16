@@ -7,8 +7,8 @@ import { isPassable } from "../../../sim/pathing.js";
 import { buildUnitDerivedStats } from "../utils/unitStats.js";
 import { getRosterUnit, getUnitTile } from "../utils/unitLookup.js";
 import { boardTruck, assignFirefighterToTruck, setTruckCrewMode } from "./crewRuntime.js";
+import { syncCommandUnits } from "./commandUnits.js";
 import { routeUnitToTile } from "./unitPathing.js";
-import { syncCommandUnits } from "../controllers/commandSelectionController.js";
 
 export function setUnitDeployMode(state: WorldState, mode: UnitKind | null, options?: { silent?: boolean }): void {
   state.deployMode = mode;

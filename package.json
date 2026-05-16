@@ -15,6 +15,7 @@
     "world-climate:regression": "npm run build && node scripts/world-climate-regression.mjs",
     "sun:regression": "node scripts/seasonal-sun-regression.mjs",
     "fire:regression": "npm run build && node scripts/fire-regression.mjs",
+    "units:regression": "npm run build && node scripts/units-regression.mjs",
     "evacuation:regression": "npm run build && node scripts/evacuation-regression.mjs",
     "growth:regression": "npm run build && node scripts/growth-regression.mjs",
     "settlement:regression": "npm run build && node scripts/settlement-lifecycle-regression.mjs",

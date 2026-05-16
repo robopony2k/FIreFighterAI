@@ -1,5 +1,33 @@
 # Deprecations
 
+## Player-Facing Road Aggressiveness as Connectivity Fix
+
+Status: Deprecated as of May 16, 2026.
+
+- Initial map generation now treats firebase-to-town road connectivity as an invariant instead of relying on road aggressiveness or strictness tuning to overcome difficult terrain.
+- Road strictness can remain as internal/debug tuning, but default campaign generation should automatically repair disconnected town road components.
+- Switchback-style rescue routing and road terrain grading are the replacement path for hard terrain cases.
+
+Migration guidance:
+
+1. Add new initial road connectivity work through settlement road adapters and road edge masks, not loose tile adjacency.
+2. Keep player-facing terrain controls focused on readable world shape rather than making players solve pathfinding failures.
+3. Preserve road quality gates for edge masks, diagonals, and surface grading when changing connector behavior.
+
+## Literal Daily Strategic Growth Stepping
+
+Status: Deprecated as of May 16, 2026.
+
+- Strategic vegetation growth no longer relies on every map block receiving the same small daily tick.
+- Growth blocks now track elapsed career time and catch up in deterministic seasonal chunks, so large maps can run quickly without starving unprocessed regions.
+- Settlement construction scheduling can skip passive days and jump to relevant cooldown or lifecycle events during high-speed strategic time.
+
+Migration guidance:
+
+1. Put new vegetation succession rules in `src/systems/terrain/sim/vegetationSuccession.ts` and keep `src/sim/growth.ts` focused on orchestration.
+2. Treat `vegetationRevision` and `terrainDirty` as visual sync signals, not proof that every tiny canopy value changed on that exact tick.
+3. Add future town-growth pacing to the settlement simulation modules instead of restoring one-day loops for high-speed catch-up.
+
 ## Binary Seed-Spread Forest Boundaries
 
 Status: Deprecated as of May 14, 2026.

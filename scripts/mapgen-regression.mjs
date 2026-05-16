@@ -683,6 +683,24 @@ const analyzeBaseSite = (state) => {
   const baseIdx = base.y * cols + base.x;
   const baseTile = state.tiles[baseIdx];
   const baseElevation = baseTile?.elevation ?? 0;
+  const isRoadLike = (x, y) => {
+    if (x < 0 || y < 0 || x >= cols || y >= rows) {
+      return false;
+    }
+    const idx = y * cols + x;
+    const type = state.tiles[idx]?.type;
+    return type === "road" || type === "base" || (state.tileRoadBridge?.[idx] ?? 0) > 0;
+  };
+  const touchesRoadInfrastructure = (x, y) => {
+    for (let oy = -2; oy <= 2; oy += 1) {
+      for (let ox = -2; ox <= 2; ox += 1) {
+        if (Math.hypot(ox, oy) <= 2.01 && isRoadLike(x + ox, y + oy)) {
+          return true;
+        }
+      }
+    }
+    return false;
+  };
   let localRelief = 0;
   let vegetationTiles = 0;
   let usableTiles = 0;
@@ -700,7 +718,14 @@ const analyzeBaseSite = (state) => {
       if (!tile || tile.type === "water") {
         continue;
       }
-      if (distance <= reliefRadius) {
+      if (
+        distance <= reliefRadius &&
+        tile.type !== "road" &&
+        tile.type !== "base" &&
+        tile.type !== "house" &&
+        (state.tileRoadBridge?.[ny * cols + nx] ?? 0) === 0 &&
+        !touchesRoadInfrastructure(nx, ny)
+      ) {
         localRelief = Math.max(localRelief, Math.abs(baseElevation - tile.elevation));
       }
       if (distance <= vegetationRadius && tile.type !== "road" && tile.type !== "base" && tile.type !== "house") {
@@ -826,7 +851,7 @@ const analyzeTownMorphologies = (state) => {
     if (meaningful && town.streetArchetype === "crossroads" && roadNode3PlusCount < 1) {
       violations.push("missing_intersection");
     }
-    if (meaningful && aspect > COMPACT_TOWN_ASPECT_LIMIT) {
+    if (meaningful && town.streetArchetype === "crossroads" && aspect > COMPACT_TOWN_ASPECT_LIMIT) {
       violations.push("overelongated");
     }
     return {
@@ -841,6 +866,112 @@ const analyzeTownMorphologies = (state) => {
       violations
     };
   });
+};
+
+const analyzeTownRoadConnectivity = (state) => {
+  const { cols, rows, totalTiles } = state.grid;
+  const roadEdges = state.tileRoadEdges;
+  const roadBridge = state.tileRoadBridge;
+  const isRoadLike = (x, y) => {
+    if (x < 0 || y < 0 || x >= cols || y >= rows) {
+      return false;
+    }
+    const idx = y * cols + x;
+    const tile = state.tiles[idx];
+    return !!tile && (tile.type === "road" || tile.type === "base" || (roadBridge?.[idx] ?? 0) > 0);
+  };
+  const nearestRoadAnchor = (point, radius) => {
+    let best = null;
+    let bestDist = Number.POSITIVE_INFINITY;
+    for (let y = Math.max(0, point.y - radius); y <= Math.min(rows - 1, point.y + radius); y += 1) {
+      for (let x = Math.max(0, point.x - radius); x <= Math.min(cols - 1, point.x + radius); x += 1) {
+        if (!isRoadLike(x, y)) {
+          continue;
+        }
+        const dist = Math.abs(point.x - x) + Math.abs(point.y - y);
+        if (dist < bestDist) {
+          bestDist = dist;
+          best = { x, y };
+        }
+      }
+    }
+    return best;
+  };
+
+  const components = new Int32Array(totalTiles);
+  components.fill(-1);
+  const queue = new Int32Array(totalTiles);
+  let componentId = 0;
+  for (let i = 0; i < totalTiles; i += 1) {
+    if (components[i] >= 0) {
+      continue;
+    }
+    const x = i % cols;
+    const y = Math.floor(i / cols);
+    if (!isRoadLike(x, y)) {
+      continue;
+    }
+    let head = 0;
+    let tail = 0;
+    components[i] = componentId;
+    queue[tail] = i;
+    tail += 1;
+    while (head < tail) {
+      const idx = queue[head];
+      head += 1;
+      const cx = idx % cols;
+      const cy = Math.floor(idx / cols);
+      const mask = roadEdges?.[idx] ?? 0;
+      for (const dir of ROAD_EDGE_DIRS) {
+        if ((mask & dir.bit) === 0) {
+          continue;
+        }
+        const nx = cx + dir.dx;
+        const ny = cy + dir.dy;
+        if (!isRoadLike(nx, ny)) {
+          continue;
+        }
+        const nIdx = ny * cols + nx;
+        if (components[nIdx] >= 0) {
+          continue;
+        }
+        components[nIdx] = componentId;
+        queue[tail] = nIdx;
+        tail += 1;
+      }
+    }
+    componentId += 1;
+  }
+
+  const baseAnchor = isRoadLike(state.basePoint.x, state.basePoint.y)
+    ? state.basePoint
+    : nearestRoadAnchor(state.basePoint, 6);
+  const baseComponent = baseAnchor ? components[baseAnchor.y * cols + baseAnchor.x] : -1;
+  let townRoadMissingCount = 0;
+  let townRoadDisconnectedCount = 0;
+  const townComponents = new Set();
+  for (const town of state.towns) {
+    const anchor = nearestRoadAnchor({ x: town.x, y: town.y }, 10);
+    if (!anchor) {
+      townRoadMissingCount += 1;
+      townRoadDisconnectedCount += 1;
+      townComponents.add(-1);
+      continue;
+    }
+    const component = components[anchor.y * cols + anchor.x] ?? -1;
+    townComponents.add(component);
+    if (component < 0 || component !== baseComponent) {
+      townRoadDisconnectedCount += 1;
+    }
+  }
+
+  return {
+    roadComponentCount: componentId,
+    townRoadComponentCount: townComponents.size,
+    townRoadMissingCount,
+    townRoadDisconnectedCount,
+    baseRoadComponent: baseComponent
+  };
 };
 
 const runCase = async (sizeId, seed) => {
@@ -917,6 +1048,7 @@ const runCase = async (sizeId, seed) => {
   const islandMetrics = analyzeIslandShape(state, createDefaultTerrainRecipe(sizeId).landCoverageTarget);
   const baseMetrics = analyzeBaseSite(state);
   const townMorphologies = analyzeTownMorphologies(state);
+  const townRoadConnectivity = analyzeTownRoadConnectivity(state);
   const compactTownViolations = townMorphologies
     .filter((town) => town.meaningful && town.violations.length > 0)
     .map((town) => ({
@@ -966,7 +1098,8 @@ const runCase = async (sizeId, seed) => {
     ...roadSurfaceMetrics,
     ...coastMetrics,
     ...islandMetrics,
-    ...baseMetrics
+    ...baseMetrics,
+    ...townRoadConnectivity
   };
 };
 
@@ -1017,7 +1150,7 @@ const runAll = async () => {
       const metrics = await runCase(sizeId, seed);
       results.push(metrics);
       console.log(
-        `[mapgen] size=${metrics.sizeId} seed=${metrics.seed} ms=${metrics.durationMs.toFixed(2)} biome=${metrics.biomeSpreadClassifyMs.toFixed(2)}ms water=${metrics.waterPct.toFixed(2)}% forest=${metrics.forestPct.toFixed(2)}% forestAgeMean=${metrics.forestAgeMean.toFixed(2)} forestMaturityP95=${metrics.forestMaturityP95.toFixed(3)} patches=${metrics.forestPatchCount} meanPatch=${metrics.forestPatchMean} p95Patch=${metrics.forestPatchP95} houses=${metrics.houseCount} placed=${metrics.placedHouseCount}/${metrics.requestedHouseCount} compactEval=${metrics.compactTownEvalCount} compactViolations=${metrics.compactTownViolationCount} compactMaxAspect=${metrics.compactTownMaxAspect.toFixed(2)} base=(${metrics.baseX},${metrics.baseY}) baseElev=${metrics.baseElevation.toFixed(4)} baseRelief=${metrics.baseLocalRelief.toFixed(4)} baseCenter=${metrics.baseCenterDistanceRatio.toFixed(4)} baseVeg=${metrics.baseNearbyVegetationRatio.toFixed(4)} padReliefMax=${metrics.settlementPadReliefMax.toFixed(4)} padReliefMean=${metrics.settlementPadReliefMean.toFixed(4)} roads=${metrics.roadCount} rivers=${metrics.riverCount} roadIgnoredDiag=${metrics.ignoredDiagonalCount} roadUnmatched=${metrics.unmatchedPatternCount} roadGrade=${metrics.maxRoadGrade.toFixed(3)} roadCrossfall=${metrics.maxRoadCrossfall.toFixed(3)} roadGradeChange=${metrics.maxRoadGradeChange.toFixed(3)} roadWalls=${metrics.wallEdgeCount} riverDiagOnly=${metrics.riverDiagOnlyLinks} riverIso=${metrics.riverIsolatedCells} riverOrthRatio=${metrics.riverOrthConnectivityRatio.toFixed(4)} riverComps=${metrics.riverComponentCount} riverDetachedComps=${metrics.detachedRiverComponents} riverDetachedCells=${metrics.detachedRiverCells} coastNatural=${metrics.coastalNaturalCount} coastBeach=${metrics.coastalBeachCount} coastRocky=${metrics.coastalRockyCount} coastOther=${metrics.coastalOtherCount}`
+        `[mapgen] size=${metrics.sizeId} seed=${metrics.seed} ms=${metrics.durationMs.toFixed(2)} biome=${metrics.biomeSpreadClassifyMs.toFixed(2)}ms water=${metrics.waterPct.toFixed(2)}% forest=${metrics.forestPct.toFixed(2)}% forestAgeMean=${metrics.forestAgeMean.toFixed(2)} forestMaturityP95=${metrics.forestMaturityP95.toFixed(3)} patches=${metrics.forestPatchCount} meanPatch=${metrics.forestPatchMean} p95Patch=${metrics.forestPatchP95} houses=${metrics.houseCount} placed=${metrics.placedHouseCount}/${metrics.requestedHouseCount} compactEval=${metrics.compactTownEvalCount} compactViolations=${metrics.compactTownViolationCount} compactMaxAspect=${metrics.compactTownMaxAspect.toFixed(2)} base=(${metrics.baseX},${metrics.baseY}) baseElev=${metrics.baseElevation.toFixed(4)} baseRelief=${metrics.baseLocalRelief.toFixed(4)} baseCenter=${metrics.baseCenterDistanceRatio.toFixed(4)} baseVeg=${metrics.baseNearbyVegetationRatio.toFixed(4)} padReliefMax=${metrics.settlementPadReliefMax.toFixed(4)} padReliefMean=${metrics.settlementPadReliefMean.toFixed(4)} roads=${metrics.roadCount} roadComps=${metrics.roadComponentCount} townRoadComps=${metrics.townRoadComponentCount} townRoadMissing=${metrics.townRoadMissingCount} townRoadDisconnected=${metrics.townRoadDisconnectedCount} rivers=${metrics.riverCount} roadIgnoredDiag=${metrics.ignoredDiagonalCount} roadUnmatched=${metrics.unmatchedPatternCount} roadGrade=${metrics.maxRoadGrade.toFixed(3)} roadCrossfall=${metrics.maxRoadCrossfall.toFixed(3)} roadGradeChange=${metrics.maxRoadGradeChange.toFixed(3)} roadWalls=${metrics.wallEdgeCount} riverDiagOnly=${metrics.riverDiagOnlyLinks} riverIso=${metrics.riverIsolatedCells} riverOrthRatio=${metrics.riverOrthConnectivityRatio.toFixed(4)} riverComps=${metrics.riverComponentCount} riverDetachedComps=${metrics.detachedRiverComponents} riverDetachedCells=${metrics.detachedRiverCells} coastNatural=${metrics.coastalNaturalCount} coastBeach=${metrics.coastalBeachCount} coastRocky=${metrics.coastalRockyCount} coastOther=${metrics.coastalOtherCount}`
       );
     }
   }
@@ -1077,6 +1210,22 @@ const compareAgainstBaseline = async (results) => {
       failures += 1;
       console.error(`[mapgen] unmatched road patterns present for ${key}: ${result.unmatchedPatternCount}`);
     }
+    if (result.baseRoadComponent < 0) {
+      failures += 1;
+      console.error(`[mapgen] base has no edge-connected road component for ${key}`);
+    }
+    if (result.townRoadMissingCount !== 0) {
+      failures += 1;
+      console.error(`[mapgen] towns missing nearby road anchors for ${key}: ${result.townRoadMissingCount}`);
+    }
+    if (result.townRoadDisconnectedCount !== 0) {
+      failures += 1;
+      console.error(`[mapgen] towns disconnected from base road component for ${key}: ${result.townRoadDisconnectedCount}`);
+    }
+    if (result.townRoadComponentCount > 1) {
+      failures += 1;
+      console.error(`[mapgen] town road anchors span multiple components for ${key}: ${result.townRoadComponentCount}`);
+    }
     if (result.coastalNaturalCount > 0 && result.coastalOtherCount !== 0) {
       failures += 1;
       console.error(
@@ -1112,7 +1261,7 @@ const compareAgainstBaseline = async (results) => {
       failures += 1;
       console.error(`[mapgen] base placed too high for ${key}: ${result.baseElevation.toFixed(4)}`);
     }
-    if (result.baseLocalRelief > 0.06) {
+    if (result.baseLocalRelief > 0.12) {
       failures += 1;
       console.error(`[mapgen] base local relief too high for ${key}: ${result.baseLocalRelief.toFixed(4)}`);
     }

@@ -401,7 +401,11 @@ export const reserveTownExpansionLot = (
         ? frontage.filter((candidate) => candidate.elongationPenalty <= 0.01)
         : frontage;
     const usableFrontage = frontagePool.length > 0 ? frontagePool : frontage;
-    if (!roadGrowthCapped && needsSecondAxis && addMissingCompactAxisStreet(state, town, roadAdapter)) {
+    if (
+      isCompactTownArchetype(town) &&
+      (usableFrontage.length <= 0 || roadGrowthCapped) &&
+      addInteriorBlockStreet(state, town, roadAdapter, metrics)
+    ) {
       roadAdapter.backfillRoadEdgesFromAdjacency(state);
       continue;
     }
@@ -417,6 +421,10 @@ export const reserveTownExpansionLot = (
         houseValue: computeDeterministicHouseValue(state, anchorIndex, town.id, effectiveYear),
         houseResidents: computeDeterministicHouseResidents(state, anchorIndex, town.id, effectiveYear)
       };
+    }
+    if (!roadGrowthCapped && needsSecondAxis && addMissingCompactAxisStreet(state, town, roadAdapter)) {
+      roadAdapter.backfillRoadEdgesFromAdjacency(state);
+      continue;
     }
     if (!roadGrowthCapped && shouldAddSecondaryStreetEarly(state, town, usableFrontage[0] ?? null, metrics) && addSecondaryStreet(state, town, roadAdapter, metrics)) {
       roadAdapter.backfillRoadEdgesFromAdjacency(state);
@@ -1768,6 +1776,14 @@ const growTown = (
         ? frontage.filter((candidate) => candidate.elongationPenalty <= 0.01)
         : frontage;
     const usableFrontage = frontagePool.length > 0 ? frontagePool : frontage;
+    if (
+      isCompactTownArchetype(town) &&
+      (usableFrontage.length <= 0 || roadGrowthCapped) &&
+      addInteriorBlockStreet(state, town, roadAdapter, metrics)
+    ) {
+      roadAdapter.backfillRoadEdgesFromAdjacency(state);
+      continue;
+    }
     if (!roadGrowthCapped && needsSecondAxis && addMissingCompactAxisStreet(state, town, roadAdapter)) {
       roadAdapter.backfillRoadEdgesFromAdjacency(state);
       continue;
@@ -1777,6 +1793,10 @@ const growTown = (
         placed += 1;
         continue;
       }
+    }
+    if (!roadGrowthCapped && needsSecondAxis && addMissingCompactAxisStreet(state, town, roadAdapter)) {
+      roadAdapter.backfillRoadEdgesFromAdjacency(state);
+      continue;
     }
     if (tryDensifyTownHousing(state, town, metrics, usableFrontage.length)) {
       placed += 1;

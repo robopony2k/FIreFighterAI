@@ -195,6 +195,13 @@ const advanceConstructionDays = (state, days) => {
   }
 };
 
+const advanceConstructionDaysBulk = (state, days) => {
+  const adapter = createRuntimeSettlementRoadAdapter();
+  state.careerDay += days;
+  syncCalendar(state);
+  stepTownConstructionSchedule(state, adapter, days);
+};
+
 const buildTreeTypes = (state) => new Uint8Array(state.grid.totalTiles);
 
 const snapshotConstructionState = (state) => ({
@@ -387,6 +394,57 @@ const runIdleRevisionCase = () => {
   advanceConstructionDays(state, 10);
   assert.equal(state.structureRevision, startRevision, "idle days should not change structure revision");
   return { startRevision, endRevision: state.structureRevision };
+};
+
+const runBulkSchedulerParityCase = () => {
+  const daily = buildExpansionReadyWorld(7272);
+  const bulk = buildExpansionReadyWorld(7272);
+  daily.townGrowthAppliedYear = daily.year;
+  bulk.townGrowthAppliedYear = bulk.year;
+  daily.towns.forEach((town) => {
+    town.growthPressure = 3;
+    town.buildStartCooldownDays = 0;
+  });
+  bulk.towns.forEach((town) => {
+    town.growthPressure = 3;
+    town.buildStartCooldownDays = 0;
+  });
+
+  advanceConstructionDays(daily, 72);
+  advanceConstructionDaysBulk(bulk, 72);
+
+  assert.deepEqual(
+    snapshotConstructionState(bulk),
+    snapshotConstructionState(daily),
+    "bulk construction catch-up should match daily stepping for deterministic quiet growth"
+  );
+
+  return {
+    houses: bulk.totalHouses,
+    lots: bulk.buildingLots.length
+  };
+};
+
+const runNoFireGrowthCompletesHousingCase = () => {
+  const state = buildExpansionReadyWorld(7373);
+  const startingHouses = state.totalHouses;
+  state.towns.forEach((town) => {
+    town.buildStartCooldownDays = 0;
+  });
+  advanceConstructionDaysBulk(state, SIMULATION_YEAR_DAYS);
+  assert.ok(
+    state.totalHouses > startingHouses,
+    `no-fire growth should bring new houses online (${startingHouses} -> ${state.totalHouses})`
+  );
+  assert.ok(
+    state.towns.some((town) => town.lastSeasonHouseDelta > 0 || town.simulatedGrowthYears > 0),
+    "no-fire growth should apply town seasonal growth pressure"
+  );
+
+  return {
+    start: startingHouses,
+    end: state.totalHouses
+  };
 };
 
 const runCompactGrowthBranchingCase = () => {
@@ -648,6 +706,8 @@ const rebuild = runRuinPersistenceAndRebuildCase();
 const alert = runAlertSuppressionCase();
 const recovery = runRecoveryPriorityCase();
 const idle = runIdleRevisionCase();
+const bulkParity = runBulkSchedulerParityCase();
+const noFireGrowth = runNoFireGrowthCompletesHousingCase();
 const compact = runCompactGrowthBranchingCase();
 const diagonal = runDiagonalFrontageCase();
 const densification = runCompactDensificationCase();
@@ -661,6 +721,8 @@ console.log(
     `alertResumeProgress=${alert.resumedProgress.toFixed(2)}`,
     `priority=${recovery.firstLotKind}`,
     `idleRevision=${idle.startRevision}->${idle.endRevision}`,
+    `bulkParity=${bulkParity.houses}/${bulkParity.lots}`,
+    `noFireGrowth=${noFireGrowth.start}->${noFireGrowth.end}`,
     `compactRoads=${compact.offAxisRoads}`,
     `compactJunctions=${compact.junctions}`,
     `compactAspect=${compact.aspect.toFixed(2)}`,

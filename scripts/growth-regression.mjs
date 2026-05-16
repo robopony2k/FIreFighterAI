@@ -66,7 +66,7 @@ const buildGrowthOnlyState = () => {
     const y = Math.floor(index / grid.cols);
     const border = x === 0 || y === 0 || x === grid.cols - 1 || y === grid.rows - 1;
     if (border) {
-      return buildTile("bare", { moisture: 0.9, waterDist: 18, elevation: 0.32 });
+      return buildTile("rocky", { moisture: 0.9, waterDist: 18, elevation: 0.32 });
     }
     const forestTile = buildTile("forest", {
       moisture: 0.68,
@@ -117,6 +117,76 @@ const buildRecoveryState = () => {
   });
   syncAll(state, rng);
   return { state, rng, center };
+};
+
+const buildLowBudgetCatchupState = () => {
+  const seed = 3011;
+  const grid = { cols: 16, rows: 16, totalTiles: 256 };
+  const state = createInitialState(seed, grid);
+  const rng = new RNG(seed ^ 0x9e3779b9);
+  state.tiles = Array.from({ length: grid.totalTiles }, (_, index) => {
+    const x = index % grid.cols;
+    const y = Math.floor(index / grid.cols);
+    return buildTile("forest", {
+      moisture: 0.72,
+      waterDist: 6 + ((x + y) % 5),
+      elevation: 0.22,
+      vegetationAgeYears: 0.35,
+      dominantTreeType: TreeType.Oak,
+      treeType: TreeType.Oak
+    });
+  });
+  syncAll(state, rng);
+  state.simPerf.growthBlocksPerTick = 1;
+  return { state, rng };
+};
+
+const buildOpenRecruitState = () => {
+  const seed = 4421;
+  const grid = { cols: 9, rows: 9, totalTiles: 81 };
+  const state = createInitialState(seed, grid);
+  const rng = new RNG(seed ^ 0x7c15);
+  const center = 4 + 4 * grid.cols;
+  const target = 2 + 2 * grid.cols;
+  state.tiles = Array.from({ length: grid.totalTiles }, (_, index) => {
+    if (index === center) {
+      return buildTile("forest", {
+        moisture: 0.82,
+        waterDist: 4,
+        elevation: 0.18,
+        vegetationAgeYears: 5,
+        dominantTreeType: TreeType.Elm,
+        treeType: TreeType.Elm
+      });
+    }
+    return buildTile(index === target ? "bare" : "grass", {
+      moisture: 0.86,
+      waterDist: 4,
+      elevation: 0.18,
+      vegetationAgeYears: 0.8
+    });
+  });
+  syncAll(state, rng);
+  return { state, rng, target };
+};
+
+const buildRevisionBatchState = () => {
+  const seed = 5521;
+  const grid = { cols: 7, rows: 7, totalTiles: 49 };
+  const state = createInitialState(seed, grid);
+  const rng = new RNG(seed ^ 0xa53a);
+  state.tiles = Array.from({ length: grid.totalTiles }, () =>
+    buildTile("forest", {
+      moisture: 0.72,
+      waterDist: 7,
+      elevation: 0.22,
+      vegetationAgeYears: 0.35,
+      dominantTreeType: TreeType.Oak,
+      treeType: TreeType.Oak
+    })
+  );
+  syncAll(state, rng);
+  return { state, rng };
 };
 
 const assertVegetationCaps = (state) => {
@@ -173,6 +243,49 @@ assert.ok(
   "vegetation age SoA did not update"
 );
 
+const lowBudget = buildLowBudgetCatchupState();
+const lowBudgetStartAge = Math.min(...lowBudget.state.tiles.map((tile) => tile.vegetationAgeYears));
+for (let step = 0; step < lowBudget.state.fireBlockCount * 2; step += 1) {
+  lowBudget.state.careerDay += 30;
+  stepGrowth(lowBudget.state, 30, lowBudget.rng);
+}
+const lowBudgetEndAge = Math.min(...lowBudget.state.tiles.map((tile) => tile.vegetationAgeYears));
+assert.ok(
+  lowBudgetEndAge > lowBudgetStartAge + 0.4,
+  `low block budget catch-up did not advance every block (${lowBudgetStartAge.toFixed(2)} -> ${lowBudgetEndAge.toFixed(2)})`
+);
+
+const openRecruit = buildOpenRecruitState();
+for (let step = 0; step < 12; step += 1) {
+  openRecruit.state.careerDay += 30;
+  stepGrowth(openRecruit.state, 30, openRecruit.rng);
+}
+assert.equal(
+  openRecruit.state.tiles[openRecruit.target].type,
+  "forest",
+  "suitable open/bare land should recruit into visible forest during quiet growth"
+);
+
+const revisionBatch = buildRevisionBatchState();
+const revisionStart = revisionBatch.state.vegetationRevision;
+for (let step = 0; step < 10; step += 1) {
+  revisionBatch.state.careerDay += 1;
+  stepGrowth(revisionBatch.state, 1, revisionBatch.rng);
+}
+assert.equal(
+  revisionBatch.state.vegetationRevision,
+  revisionStart,
+  "small vegetation-only ticks should be batched instead of forcing terrain sync every day"
+);
+for (let step = 0; step < 30; step += 1) {
+  revisionBatch.state.careerDay += 1;
+  stepGrowth(revisionBatch.state, 1, revisionBatch.rng);
+}
+assert.ok(
+  revisionBatch.state.vegetationRevision > revisionStart,
+  "batched vegetation visuals should flush after enough growth days"
+);
+
 const recovery = buildRecoveryState();
 let sawGrass = false;
 let sawForest = false;
@@ -209,6 +322,8 @@ console.log(
     `stem ${growthStemBefore} -> ${growthTileAfter.stemDensity}`,
     `centerType=${recoveredTile.type}`,
     `centerTree=${recoveredTile.treeType}`,
+    `lowBudgetMinAge=${lowBudgetEndAge.toFixed(2)}`,
+    `openRecruit=${openRecruit.state.tiles[openRecruit.target].type}`,
     `vegetationRevision=${growthOnly.state.vegetationRevision}`
   ].join(" ")
 );

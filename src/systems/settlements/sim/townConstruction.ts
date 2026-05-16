@@ -22,16 +22,19 @@ import {
   rebuildGrowthContext,
   reserveTownExpansionLot,
   stepRuntimeTownGrowth,
+  tryDensifyTownHousing,
   updateTownEnvelope
 } from "./townGrowth.js";
 
 const SIMULATION_YEAR_DAYS = Math.max(1, PHASES.reduce((sum, phase) => sum + phase.duration, 0));
+const BULK_CONSTRUCTION_THRESHOLD_DAYS = 4;
 
 type SimulationDayContext = {
   careerDay: number;
   phase: WorldState["phase"];
   year: number;
   simulationYear: number;
+  phaseDay: number;
 };
 
 const isValidTownId = (state: WorldState, townId: number): boolean =>
@@ -67,7 +70,8 @@ const sampleSimulationDay = (careerDay: number): SimulationDayContext => {
     careerDay: clampedCareerDay,
     phase,
     year: Math.max(1, Math.floor(clampedCareerDay / SIMULATION_YEAR_DAYS) + 1),
-    simulationYear: getFractionalSimulationYear(clampedCareerDay)
+    simulationYear: getFractionalSimulationYear(clampedCareerDay),
+    phaseDay: remaining
   };
 };
 
@@ -166,20 +170,27 @@ const advanceBuildingLot = (
   if (progressDays <= 0) {
     return { completed: false, stageChanged: false };
   }
-  const duration = Math.max(1, getBuildingLotStageDurationDays(lot.stage));
-  lot.stageProgressDays = Math.max(0, lot.stageProgressDays + progressDays);
-  if (lot.stageProgressDays + 1e-6 < duration) {
-    return { completed: false, stageChanged: false };
+  let remainingProgress = progressDays;
+  let stageChanged = false;
+  while (remainingProgress > 1e-6) {
+    const duration = Math.max(1, getBuildingLotStageDurationDays(lot.stage));
+    const needed = Math.max(0, duration - Math.max(0, lot.stageProgressDays));
+    if (remainingProgress + 1e-6 < needed) {
+      lot.stageProgressDays = Math.max(0, lot.stageProgressDays + remainingProgress);
+      return { completed: false, stageChanged };
+    }
+    remainingProgress = Math.max(0, remainingProgress - needed);
+    lot.stageProgressDays = 0;
+    const sequence = getBuildingLotStageSequence(lot.kind);
+    const stageIndex = sequence.indexOf(lot.stage);
+    const nextStage = stageIndex >= 0 ? sequence[stageIndex + 1] : null;
+    stageChanged = true;
+    if (!nextStage) {
+      return { completed: true, stageChanged: true };
+    }
+    lot.stage = nextStage;
   }
-  lot.stageProgressDays = Math.max(0, lot.stageProgressDays - duration);
-  const sequence = getBuildingLotStageSequence(lot.kind);
-  const stageIndex = sequence.indexOf(lot.stage);
-  const nextStage = stageIndex >= 0 ? sequence[stageIndex + 1] : null;
-  if (!nextStage) {
-    return { completed: true, stageChanged: true };
-  }
-  lot.stage = nextStage;
-  return { completed: false, stageChanged: true };
+  return { completed: false, stageChanged };
 };
 
 const createBuildingLot = (
@@ -384,6 +395,13 @@ const processConstructionDay = (
     );
     const expansionLot = startTownExpansionLot(state, town, dayContext.careerDay, effectiveYear, roadAdapter, context);
     if (!expansionLot) {
+      if (tryDensifyTownHousing(state, town)) {
+        town.growthPressure = Math.max(0, town.growthPressure - 1);
+        town.buildStartSerial += 1;
+        town.buildStartCooldownDays = getNextTownBuildCooldownDays(state, town);
+        state.structureRevision += 1;
+        updateTownEnvelope(state, town);
+      }
       continue;
     }
     town.buildStartSerial += 1;
@@ -393,6 +411,126 @@ const processConstructionDay = (
     activeLots.push(expansionLot);
     state.structureRevision += 1;
     updateTownEnvelope(state, town);
+  }
+};
+
+const getDaysUntilPhaseBoundary = (dayContext: SimulationDayContext): number => {
+  const phaseDef = PHASES.find((entry) => entry.id === dayContext.phase) ?? PHASES[0]!;
+  return Math.max(1, Math.ceil(Math.max(0.000001, phaseDef.duration - dayContext.phaseDay)));
+};
+
+const getDaysUntilLotStageEvent = (lot: BuildingLot, progressRate: number): number => {
+  if (progressRate <= 0) {
+    return Number.POSITIVE_INFINITY;
+  }
+  const duration = Math.max(1, getBuildingLotStageDurationDays(lot.stage));
+  const remaining = Math.max(0, duration - Math.max(0, lot.stageProgressDays));
+  return Math.max(1, Math.ceil(remaining / progressRate));
+};
+
+const getDaysUntilRuinEligible = (
+  state: WorldState,
+  townId: number,
+  currentDay: number
+): number => {
+  let best = Number.POSITIVE_INFINITY;
+  for (let idx = 0; idx < state.grid.totalTiles; idx += 1) {
+    const tile = state.tiles[idx];
+    if (!tile || tile.type !== "house" || !tile.houseDestroyed || tile.houseTownId !== townId) {
+      continue;
+    }
+    const destroyedAtDay = Number.isFinite(tile.houseDestroyedAtDay) ? (tile.houseDestroyedAtDay ?? currentDay) : currentDay;
+    const eligibleIn = Math.max(0, destroyedAtDay + BUILDING_RUIN_PERSISTENCE_DAYS - currentDay);
+    best = Math.min(best, Math.max(1, Math.ceil(eligibleIn)));
+  }
+  return best;
+};
+
+const computeConstructionSkipWindowDays = (
+  state: WorldState,
+  dayContext: SimulationDayContext
+): number => {
+  normalizeTownConstructionState(state);
+  if (dayContext.phase === "growth" && state.townGrowthAppliedYear !== dayContext.year) {
+    return 1;
+  }
+  const lotsByTown = groupLotsByTown(state);
+  const { eligibleQueues } = buildRebuildQueues(state, dayContext.careerDay);
+  let nextEventDays = getDaysUntilPhaseBoundary(dayContext);
+  for (let townId = 0; townId < state.towns.length; townId += 1) {
+    const town = state.towns[townId]!;
+    town.activeBuildCap = computeTownActiveBuildCap(town);
+    const progressRate = getTownConstructionRate(town.alertPosture);
+    if (progressRate <= 0) {
+      continue;
+    }
+    const activeLots = lotsByTown[townId]!;
+    const hasCapacity = activeLots.length < town.activeBuildCap;
+    const hasGrowthWork = dayContext.phase === "growth" && town.growthPressure > 0;
+    const hasRecoveryWork = eligibleQueues[townId]!.length > 0;
+    if (hasCapacity && town.buildStartCooldownDays <= 1e-6 && (hasGrowthWork || hasRecoveryWork)) {
+      return 1;
+    }
+    if (hasCapacity && (hasGrowthWork || hasRecoveryWork) && town.buildStartCooldownDays > 1e-6) {
+      nextEventDays = Math.min(nextEventDays, Math.max(1, Math.ceil(town.buildStartCooldownDays / progressRate)));
+    }
+    if (hasCapacity && !hasRecoveryWork) {
+      nextEventDays = Math.min(nextEventDays, getDaysUntilRuinEligible(state, townId, dayContext.careerDay));
+    }
+    for (let i = 0; i < activeLots.length; i += 1) {
+      nextEventDays = Math.min(nextEventDays, getDaysUntilLotStageEvent(activeLots[i]!, progressRate));
+    }
+  }
+  return Number.isFinite(nextEventDays) ? Math.max(1, Math.floor(nextEventDays)) : getDaysUntilPhaseBoundary(dayContext);
+};
+
+const advancePassiveConstructionDays = (
+  state: WorldState,
+  days: number
+): void => {
+  if (days <= 0) {
+    return;
+  }
+  normalizeTownConstructionState(state);
+  const lotsByTown = groupLotsByTown(state);
+  for (let townId = 0; townId < state.towns.length; townId += 1) {
+    const town = state.towns[townId]!;
+    town.activeBuildCap = computeTownActiveBuildCap(town);
+    const progressRate = getTownConstructionRate(town.alertPosture);
+    if (progressRate <= 0) {
+      continue;
+    }
+    town.buildStartCooldownDays = Math.max(0, town.buildStartCooldownDays - progressRate * days);
+    const activeLots = lotsByTown[townId]!;
+    for (let i = 0; i < activeLots.length; i += 1) {
+      const lot = activeLots[i]!;
+      const duration = Math.max(1, getBuildingLotStageDurationDays(lot.stage));
+      lot.stageProgressDays = Math.min(duration - 1e-6, Math.max(0, lot.stageProgressDays + progressRate * days));
+    }
+  }
+};
+
+const processConstructionWholeDays = (
+  state: WorldState,
+  roadAdapter: SettlementRoadAdapter,
+  firstCareerDay: number,
+  wholeDays: number
+): void => {
+  let day = firstCareerDay;
+  let remaining = wholeDays;
+  while (remaining > 0) {
+    const dayContext = sampleSimulationDay(day);
+    const skipWindow = computeConstructionSkipWindowDays(state, dayContext);
+    const passiveDays = Math.min(remaining, Math.max(0, skipWindow - 1));
+    if (passiveDays >= BULK_CONSTRUCTION_THRESHOLD_DAYS) {
+      advancePassiveConstructionDays(state, passiveDays);
+      day += passiveDays;
+      remaining -= passiveDays;
+      continue;
+    }
+    processConstructionDay(state, roadAdapter, dayContext);
+    day += 1;
+    remaining -= 1;
   }
 };
 
@@ -406,9 +544,14 @@ export const stepTownConstructionSchedule = (
   }
   normalizeTownConstructionState(state);
   state.settlementBuildDayAccumulator = Math.max(0, state.settlementBuildDayAccumulator + dayDelta);
-  while (state.settlementBuildDayAccumulator >= 1) {
-    state.settlementBuildDayAccumulator -= 1;
-    const processedCareerDay = Math.floor(state.careerDay - state.settlementBuildDayAccumulator);
-    processConstructionDay(state, roadAdapter, sampleSimulationDay(processedCareerDay));
+  const wholeDays = Math.floor(state.settlementBuildDayAccumulator);
+  if (wholeDays <= 0) {
+    return;
+  }
+  const firstCareerDay = Math.floor(state.careerDay - state.settlementBuildDayAccumulator + 1);
+  processConstructionWholeDays(state, roadAdapter, firstCareerDay, wholeDays);
+  state.settlementBuildDayAccumulator = Math.max(0, state.settlementBuildDayAccumulator - wholeDays);
+  if (state.settlementBuildDayAccumulator >= 1) {
+    state.settlementBuildDayAccumulator %= 1;
   }
 };

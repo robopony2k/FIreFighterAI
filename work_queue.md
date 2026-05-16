@@ -1,3 +1,22 @@
+TSK-0147: Guarantee initial road connectivity
+
+Type: bug
+
+Why: Recent terrain and firebase placement changes made the base more accessible, but town and firebase road networks could still end up split across multiple edge-connected components while older road strictness controls masked the failure.
+
+Done when:
+- [x] Initial map generation verifies towns against the firebase's edge-connected road component instead of loose road-tile adjacency.
+- [x] Disconnected town components are repaired with connector and rescue-route passes before final road grading.
+- [x] Mapgen regression coverage fails when a town lacks a nearby road anchor or is disconnected from the firebase road component.
+
+Touchpoints: `src/systems/settlements/controllers/settlementGeneration.ts`, `src/systems/settlements/types/settlementTypes.ts`, `src/mapgen/roads.ts`, `src/mapgen/communities.ts`, `src/sim/index.ts`, `scripts/mapgen-regression.mjs`, `docs/GAME_DESIGN_REFERENCE.md`, `docs/deprecations.md`
+
+Constraints: preserve saved map and terrain schemas, keep settlement-to-road dependency behind adapters, avoid player-facing road aggressiveness controls as a connectivity fix, and preserve existing road quality gates.
+
+Notes: Implemented immediately from the accepted Auto Guarantee plan on May 16, 2026.
+
+Status: done
+
 TSK-0146: Break center-volcano terrain and score firebase lowlands
 
 Type: bug
@@ -138,17 +157,17 @@ Type: refactor
 Why: `src/sim/units.ts` currently mixes roster, deployment, selection, command control, hazards, water, and suppression in one god module.
 
 Done when:
-- [ ] Roster/deployment logic is separated from runtime stepping logic.
-- [ ] Selection/command logic is separated from hazards/suppression logic.
-- [ ] Existing external call sites continue to use a stable public surface.
+- [x] Roster/deployment logic is separated from runtime stepping logic.
+- [x] Selection/command logic is separated from hazards/suppression logic.
+- [x] Existing external call sites continue to use a stable public surface.
 
-Touchpoints: `src/sim/units.ts`, new `src/sim/units/*` modules, dependent UI bindings
+Touchpoints: `src/sim/units.ts`, `src/systems/units/`, `src/systems/firebreaks/`, `scripts/units-regression.mjs`, dependent UI bindings
 
 Constraints: preserve command semantics, selection UX, and current pathing behavior
 
-Notes: Extract lookup helpers first to reduce repeated whole-array scans safely.
+Notes: Implemented on May 16, 2026. `src/sim/units.ts` remains a compatibility facade; units behavior now lives under `src/systems/units/`, and firebreak construction moved to `src/systems/firebreaks/`. Added focused units regression coverage for roster assignment, deployment, command selection, movement, formation targets, suppression water, hazards, and recall cleanup.
 
-Status: queued
+Status: done
 
 TSK-0135: Add experimental time-speed slider mode
 

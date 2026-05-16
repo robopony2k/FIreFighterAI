@@ -40,11 +40,3 @@ export const getUnitTile = (unit: Unit): Point => ({
 });
 
 export const getTruckSortKey = (unit: Unit): number => unit.rosterId ?? unit.id;
-
-export const getCommandUnitTruckIds = (state: WorldState, commandUnitId: number): number[] => {
-  const commandUnit = getCommandUnitById(state, commandUnitId);
-  if (!commandUnit) {
-    return [];
-  }
-  return commandUnit.truckIds.filter((truckId) => getUnitById(state, truckId)?.kind === "truck");
-};

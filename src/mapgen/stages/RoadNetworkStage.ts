@@ -1,7 +1,7 @@
 import { DEBUG_TERRAIN } from "../../core/config.js";
 import { clearVegetationState } from "../../core/vegetation.js";
 import type { PipelineStage } from "../pipeline/TerrainPipeline.js";
-import { connectSettlementsByRoad } from "../communities.js";
+import { connectSettlementsByRoad, repairSettlementRoadConnectivity } from "../communities.js";
 import { emitStageSnapshot } from "../pipeline/stageDebug.js";
 import { getRoadGenerationStats, type RoadSurfaceMetrics } from "../roads.js";
 import { assignForestComposition, flattenSettlementGround, gradeRoadNetworkTerrain, seedInitialVegetationState } from "../runtime.js";
@@ -12,7 +12,12 @@ export const RoadNetworkStage: PipelineStage = {
   run: async (ctx) => {
     connectSettlementsByRoad(ctx.state, ctx.rng, ctx.settlementPlan ?? null);
     flattenSettlementGround(ctx.state);
-    const roadSurfaceMetrics = gradeRoadNetworkTerrain(ctx.state, ctx.settings.heightScaleMultiplier);
+    let roadSurfaceMetrics = gradeRoadNetworkTerrain(ctx.state, ctx.settings.heightScaleMultiplier);
+    if (repairSettlementRoadConnectivity(ctx.state, ctx.rng, ctx.settlementPlan ?? null)) {
+      flattenSettlementGround(ctx.state);
+      roadSurfaceMetrics = gradeRoadNetworkTerrain(ctx.state, ctx.settings.heightScaleMultiplier);
+    }
+    flattenSettlementGround(ctx.state);
     if (ctx.riverMask) {
       for (let i = 0; i < ctx.state.tiles.length; i += 1) {
         if (ctx.riverMask[i] === 0) {

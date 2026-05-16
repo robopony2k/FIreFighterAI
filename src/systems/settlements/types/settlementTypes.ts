@@ -31,6 +31,7 @@ export type SettlementRoadOptions = {
 export type SettlementRoadAdapter = {
   carveRoad: (state: WorldState, start: Point, end: Point, options?: SettlementRoadOptions) => boolean;
   collectRoadTiles: (state: WorldState) => Point[];
+  collectConnectedRoadNeighbors: (state: WorldState, x: number, y: number) => Point[];
   findNearestRoadTile: (state: WorldState, origin: Point) => Point;
   clearRoadEdges: (state: WorldState) => void;
   backfillRoadEdgesFromAdjacency: (state: WorldState) => void;

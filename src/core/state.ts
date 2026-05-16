@@ -341,6 +341,8 @@ export interface WorldState {
   firePerfSubsteps: number;
   firePerfSimulatedDays: number;
   growthBlockCursor: number;
+  growthBlockLastCareerDay: Float32Array;
+  growthVisualDayAccumulator: number;
   pathPrev: Int32Array;
   pathGScore: Float32Array;
   pathVisitStamp: Uint32Array;
@@ -691,6 +693,8 @@ export function createInitialState(seed: number, grid: Grid): WorldState {
     firePerfSubsteps: 0,
     firePerfSimulatedDays: 0,
     growthBlockCursor: 0,
+    growthBlockLastCareerDay: new Float32Array(blockCount),
+    growthVisualDayAccumulator: 0,
     pathPrev: new Int32Array(grid.totalTiles),
     pathGScore: new Float32Array(grid.totalTiles),
     pathVisitStamp: new Uint32Array(grid.totalTiles),
@@ -805,6 +809,8 @@ export function syncTileSoA(state: WorldState): void {
     state.fireBlockActiveCount = 0;
     state.fireBlockWorkCount = 0;
     state.fireBlockNextCount = 0;
+    state.growthBlockLastCareerDay = new Float32Array(state.fireBlockCount).fill(state.careerDay);
+    state.growthBlockCursor = 0;
     state.tileBlockIndex = new Int32Array(total);
     state.heatStamp = new Uint32Array(total);
     state.heatStampId = 0;
@@ -900,7 +906,16 @@ export function syncTileSoA(state: WorldState): void {
     state.fireBlockActiveCount = 0;
     state.fireBlockWorkCount = 0;
     state.fireBlockNextCount = 0;
+    state.growthBlockLastCareerDay = new Float32Array(state.fireBlockCount).fill(state.careerDay);
+    state.growthBlockCursor = 0;
     state.tileBlockIndex = new Int32Array(total);
+  }
+  if (!state.growthBlockLastCareerDay || state.growthBlockLastCareerDay.length !== state.fireBlockCount) {
+    state.growthBlockLastCareerDay = new Float32Array(state.fireBlockCount).fill(state.careerDay);
+    state.growthBlockCursor = 0;
+  }
+  if (!Number.isFinite(state.growthVisualDayAccumulator)) {
+    state.growthVisualDayAccumulator = 0;
   }
   for (let i = 0; i < total; i += 1) {
     const x = i % state.grid.cols;

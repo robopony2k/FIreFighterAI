@@ -7,9 +7,9 @@ import { emitWaterSpray } from "../../../sim/particles.js";
 import { markFireBlockActiveByTile } from "../../../sim/fire/activeBlocks.js";
 import { THREAT_FIRE_EPS } from "../constants/runtimeConstants.js";
 import { clamp } from "../utils/unitMath.js";
-import { canUnitSpray, spendUnitWater } from "./commandRuntime.js";
 import { getClusterSuppressionScore, getSuppressionThreatClass, getSuppressionThreatScore } from "./threatAssessment.js";
 import { setSprayTarget } from "./unitPathing.js";
+import { canUnitSpray, spendUnitWater } from "./unitWater.js";
 
 type SuppressionProfile = {
   radius: number;

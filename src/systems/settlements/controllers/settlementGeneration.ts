@@ -527,12 +527,37 @@ const buildConnectorRoadOptions = (plan: SettlementPlacementResult): SettlementR
   bridgeMaxWaterTilesPerPath: 10
 });
 
+const buildRescueConnectorRoadOptions = (plan: SettlementPlacementResult): SettlementRoadOptions => ({
+  ...buildRoadOptions(plan),
+  diagonalPenalty: Math.min(0.04, Math.max(0, plan.diagonalPenalty ?? 0.18)),
+  gradeLimitStart: 2.5,
+  gradeLimitRelaxStep: 1,
+  gradeLimitMax: 5,
+  slopePenaltyWeight: 0,
+  crossfallLimitStart: 2.5,
+  crossfallLimitRelaxStep: 1,
+  crossfallLimitMax: 5,
+  crossfallPenaltyWeight: 0,
+  gradeChangeLimitStart: 2.5,
+  gradeChangeLimitRelaxStep: 1,
+  gradeChangeLimitMax: 5,
+  gradeChangePenaltyWeight: 0,
+  riverBlockDistance: 0,
+  riverPenaltyDistance: 0,
+  riverPenaltyWeight: 0,
+  turnPenalty: 0,
+  bridgeStepCost: 1,
+  bridgeMaxConsecutiveWater: 8,
+  bridgeMaxWaterTilesPerPath: 20
+});
+
 const carveConnectorWithWaypoints = (
   state: WorldState,
   roadAdapter: SettlementRoadAdapter,
   start: Point,
   end: Point,
-  plan: SettlementPlacementResult
+  plan: SettlementPlacementResult,
+  options: SettlementRoadOptions = buildConnectorRoadOptions(plan)
 ): boolean => {
   const distance = Math.hypot(end.x - start.x, end.y - start.y);
   const segments = Math.max(4, Math.ceil(distance / 8));
@@ -544,7 +569,36 @@ const carveConnectorWithWaypoints = (
       y: Math.round(start.y + (end.y - start.y) * t)
     };
     const target = step === segments ? end : findBuildableNear(state, projected, 6) ?? projected;
-    if (!roadAdapter.carveRoad(state, current, target, buildConnectorRoadOptions(plan))) {
+    if (!roadAdapter.carveRoad(state, current, target, options)) {
+      return false;
+    }
+    current = target;
+  }
+  return true;
+};
+
+const carveRescueConnectorWithWaypoints = (
+  state: WorldState,
+  roadAdapter: SettlementRoadAdapter,
+  start: Point,
+  end: Point,
+  plan: SettlementPlacementResult
+): boolean => {
+  const options = buildRescueConnectorRoadOptions(plan);
+  if (roadAdapter.carveRoad(state, start, end, options)) {
+    return true;
+  }
+  const distance = Math.hypot(end.x - start.x, end.y - start.y);
+  const segments = Math.max(5, Math.ceil(distance / 6));
+  let current = start;
+  for (let step = 1; step <= segments; step += 1) {
+    const t = step / segments;
+    const projected = {
+      x: Math.round(start.x + (end.x - start.x) * t),
+      y: Math.round(start.y + (end.y - start.y) * t)
+    };
+    const target = step === segments ? end : findBuildableNear(state, projected, 10) ?? projected;
+    if (!roadAdapter.carveRoad(state, current, target, options)) {
       return false;
     }
     current = target;
@@ -852,7 +906,7 @@ const selectTownConnectionAnchor = (
   return localStreet ?? roadAdapter.findNearestRoadTile(state, { x: town.x, y: town.y });
 };
 
-const buildRoadComponentMap = (state: WorldState): Int32Array => {
+const buildRoadComponentMap = (state: WorldState, roadAdapter: SettlementRoadAdapter): Int32Array => {
   const components = new Int32Array(state.grid.totalTiles);
   components.fill(-1);
   let componentId = 0;
@@ -872,23 +926,18 @@ const buildRoadComponentMap = (state: WorldState): Int32Array => {
       const current = queue.pop()!;
       const cx = current % state.grid.cols;
       const cy = Math.floor(current / state.grid.cols);
-      for (let dy = -1; dy <= 1; dy += 1) {
-        for (let dx = -1; dx <= 1; dx += 1) {
-          if (dx === 0 && dy === 0) {
-            continue;
-          }
-          const nx = cx + dx;
-          const ny = cy + dy;
-          if (!isRoadLikeTile(state, nx, ny)) {
-            continue;
-          }
-          const neighborIdx = indexFor(state.grid, nx, ny);
-          if (components[neighborIdx] >= 0) {
-            continue;
-          }
-          components[neighborIdx] = componentId;
-          queue.push(neighborIdx);
+      const neighbors = roadAdapter.collectConnectedRoadNeighbors(state, cx, cy);
+      for (let i = 0; i < neighbors.length; i += 1) {
+        const neighbor = neighbors[i]!;
+        if (!isRoadLikeTile(state, neighbor.x, neighbor.y)) {
+          continue;
         }
+        const neighborIdx = indexFor(state.grid, neighbor.x, neighbor.y);
+        if (components[neighborIdx] >= 0) {
+          continue;
+        }
+        components[neighborIdx] = componentId;
+        queue.push(neighborIdx);
       }
     }
     componentId += 1;
@@ -896,51 +945,110 @@ const buildRoadComponentMap = (state: WorldState): Int32Array => {
   return components;
 };
 
+const getRoadComponentAt = (state: WorldState, components: Int32Array, point: Point): number => {
+  if (!inBounds(state.grid, point.x, point.y) || !isRoadLikeTile(state, point.x, point.y)) {
+    return -1;
+  }
+  return components[indexFor(state.grid, point.x, point.y)] ?? -1;
+};
+
+const resolveTownRoadAnchor = (
+  state: WorldState,
+  town: Town,
+  target: Point,
+  roadAdapter: SettlementRoadAdapter
+): Point => {
+  const selected = selectTownConnectionAnchor(state, town, target, roadAdapter);
+  if (isRoadLikeTile(state, selected.x, selected.y)) {
+    return selected;
+  }
+  return findStreetNearTown(state, { x: town.x, y: town.y }, 10) ?? { x: town.x, y: town.y };
+};
+
+const resolveBaseRoadAnchor = (state: WorldState, roadAdapter: SettlementRoadAdapter): Point =>
+  isRoadLikeTile(state, state.basePoint.x, state.basePoint.y)
+    ? state.basePoint
+    : findStreetNearTown(state, state.basePoint, 6) ?? roadAdapter.findNearestRoadTile(state, state.basePoint);
+
+const ensureTownLocalRoadAnchors = (
+  state: WorldState,
+  towns: Town[],
+  roadAdapter: SettlementRoadAdapter,
+  plan: SettlementPlacementResult
+): boolean => {
+  let repaired = false;
+  for (let i = 0; i < towns.length; i += 1) {
+    const town = towns[i]!;
+    if (findStreetNearTown(state, { x: town.x, y: town.y }, 10)) {
+      continue;
+    }
+    const start = roadAdapter.findNearestRoadTile(state, { x: town.x, y: town.y });
+    const target = isBuildable(state, town.x, town.y)
+      ? { x: town.x, y: town.y }
+      : findBuildableNear(state, { x: town.x, y: town.y }, 4) ?? { x: town.x, y: town.y };
+    if (start.x === target.x && start.y === target.y) {
+      continue;
+    }
+    if (carveRescueConnectorWithWaypoints(state, roadAdapter, start, target, plan)) {
+      repaired = true;
+    }
+  }
+  return repaired;
+};
+
 const ensureTownRoadConnectivity = (
   state: WorldState,
   towns: Town[],
   roadAdapter: SettlementRoadAdapter,
   plan: SettlementPlacementResult
-): void => {
-  const maxPasses = Math.max(2, towns.length * 3);
+): boolean => {
+  let repairedAny = false;
+  const maxPasses = Math.max(4, towns.length * 4);
   for (let pass = 0; pass < maxPasses; pass += 1) {
     roadAdapter.backfillRoadEdgesFromAdjacency(state);
-    const components = buildRoadComponentMap(state);
-    const anchorEntries = towns.map((town) => {
-      const anchor = selectTownConnectionAnchor(state, town, { x: town.x, y: town.y }, roadAdapter);
-      const idx = inBounds(state.grid, anchor.x, anchor.y) ? indexFor(state.grid, anchor.x, anchor.y) : -1;
-      return {
-        town,
-        anchor,
-        component: idx >= 0 ? components[idx] : -1
-      };
-    });
-    const uniqueComponents = new Set(anchorEntries.map((entry) => entry.component).filter((component) => component >= 0));
-    if (uniqueComponents.size <= 1) {
-      return;
+    const components = buildRoadComponentMap(state, roadAdapter);
+    const baseAnchor = resolveBaseRoadAnchor(state, roadAdapter);
+    const baseComponent = getRoadComponentAt(state, components, baseAnchor);
+    if (baseComponent < 0) {
+      return repairedAny;
+    }
+    const anchorEntries = towns.map((town) => ({
+      town,
+      anchor: resolveTownRoadAnchor(state, town, baseAnchor, roadAdapter),
+      component: -1
+    }));
+    for (let i = 0; i < anchorEntries.length; i += 1) {
+      const entry = anchorEntries[i]!;
+      entry.component = getRoadComponentAt(state, components, entry.anchor);
+    }
+    const disconnected = anchorEntries.filter((entry) => entry.component !== baseComponent);
+    if (disconnected.length === 0) {
+      return repairedAny;
     }
     const candidates: Array<{
-      left: Town;
-      right: Town;
+      connectedAnchor: Point;
+      disconnectedAnchor: Point;
+      disconnectedTown: Town;
       leftAnchor: Point;
       rightAnchor: Point;
       distance: number;
     }> = [];
-    for (let i = 0; i < anchorEntries.length; i += 1) {
-      for (let j = i + 1; j < anchorEntries.length; j += 1) {
-        const left = anchorEntries[i]!;
-        const right = anchorEntries[j]!;
-        if (left.component < 0 || right.component < 0 || left.component === right.component) {
-          continue;
-        }
-        const leftAnchor = selectTownConnectionAnchor(state, left.town, { x: right.town.x, y: right.town.y }, roadAdapter);
-        const rightAnchor = selectTownConnectionAnchor(state, right.town, { x: left.town.x, y: left.town.y }, roadAdapter);
+    const connected = [
+      { anchor: baseAnchor },
+      ...anchorEntries.filter((entry) => entry.component === baseComponent).map((entry) => ({ anchor: entry.anchor }))
+    ];
+    for (let i = 0; i < connected.length; i += 1) {
+      const left = connected[i]!;
+      for (let j = 0; j < disconnected.length; j += 1) {
+        const right = disconnected[j]!;
+        const rightAnchor = resolveTownRoadAnchor(state, right.town, left.anchor, roadAdapter);
         candidates.push({
-          left: left.town,
-          right: right.town,
-          leftAnchor,
+          connectedAnchor: left.anchor,
+          disconnectedAnchor: rightAnchor,
+          disconnectedTown: right.town,
+          leftAnchor: left.anchor,
           rightAnchor,
-          distance: Math.hypot(leftAnchor.x - rightAnchor.x, leftAnchor.y - rightAnchor.y)
+          distance: Math.hypot(left.anchor.x - rightAnchor.x, left.anchor.y - rightAnchor.y)
         });
       }
     }
@@ -950,9 +1058,11 @@ const ensureTownRoadConnectivity = (
       const candidate = candidates[i]!;
       if (
         roadAdapter.carveRoad(state, candidate.leftAnchor, candidate.rightAnchor, buildConnectorRoadOptions(plan)) ||
-        carveConnectorWithWaypoints(state, roadAdapter, candidate.leftAnchor, candidate.rightAnchor, plan)
+        carveConnectorWithWaypoints(state, roadAdapter, candidate.leftAnchor, candidate.rightAnchor, plan) ||
+        carveRescueConnectorWithWaypoints(state, roadAdapter, candidate.connectedAnchor, candidate.disconnectedAnchor, plan)
       ) {
         connectedAny = true;
+        repairedAny = true;
         break;
       }
     }
@@ -960,6 +1070,7 @@ const ensureTownRoadConnectivity = (
       break;
     }
   }
+  return repairedAny;
 };
 
 const initializeSettlementState = (state: WorldState): void => {
@@ -1121,16 +1232,39 @@ export const executeSettlementPlacementPlan = (
   ensureTownRoadConnectivity(state, towns, roadAdapter, realized);
   roadAdapter.backfillRoadEdgesFromAdjacency(state);
   simulateTownGrowthYears(state, roadAdapter, clampSettlementYears(realized.settlementPreGrowthYears));
+  ensureTownLocalRoadAnchors(state, towns, roadAdapter, realized);
   connectTownRoads(state, towns, roadAdapter, realized);
   ensureTownRoadConnectivity(state, towns, roadAdapter, realized);
   roadAdapter.backfillRoadEdgesFromAdjacency(state);
   if (realized.pruneRedundantDiagonals) {
     roadAdapter.pruneRoadDiagonalStubs(state);
+    roadAdapter.backfillRoadEdgesFromAdjacency(state);
+    ensureTownRoadConnectivity(state, towns, roadAdapter, realized);
+    roadAdapter.backfillRoadEdgesFromAdjacency(state);
   }
   state.settlementRequestedHouses = state.totalHouses;
   state.settlementPlacedHouses = state.totalHouses;
   realized.generatedRoads = true;
   return realized;
+};
+
+export const repairSettlementRoadConnectivity = (
+  state: WorldState,
+  roadAdapter: SettlementRoadAdapter,
+  plan: SettlementPlacementResult | null
+): boolean => {
+  const realized = createSettlementPlacementPlan(plan ?? {});
+  roadAdapter.backfillRoadEdgesFromAdjacency(state);
+  let repaired = ensureTownLocalRoadAnchors(state, state.towns, roadAdapter, realized);
+  repaired = ensureTownRoadConnectivity(state, state.towns, roadAdapter, realized) || repaired;
+  roadAdapter.backfillRoadEdgesFromAdjacency(state);
+  if (realized.pruneRedundantDiagonals) {
+    roadAdapter.pruneRoadDiagonalStubs(state);
+    roadAdapter.backfillRoadEdgesFromAdjacency(state);
+    repaired = ensureTownRoadConnectivity(state, state.towns, roadAdapter, realized) || repaired;
+    roadAdapter.backfillRoadEdgesFromAdjacency(state);
+  }
+  return repaired;
 };
 
 export const populateCommunities = (state: WorldState, roadAdapter: SettlementRoadAdapter): void => {

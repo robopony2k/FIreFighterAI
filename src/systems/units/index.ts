@@ -9,7 +9,6 @@ export {
 } from "./controllers/rosterController.js";
 
 export {
-  syncCommandUnits,
   clearCommandSelection,
   selectCommandUnit,
   selectTruck,
@@ -19,13 +18,13 @@ export {
   clearTruckOverrideIntents,
   clearSelectedTruckOverrides,
   applyCommandIntentToSelection,
-  getEffectiveTruckIntent,
   clearUnitSelection,
   selectUnit,
   toggleUnitSelection,
   getSelectedUnits
 } from "./controllers/commandSelectionController.js";
 
+export { syncCommandUnits, getEffectiveTruckIntent } from "./sim/commandUnits.js";
 export { setUnitDeployMode, createUnit, setUnitTarget, deployUnit, getUnitAt } from "./sim/unitDeployment.js";
 export { setTruckCrewMode, setCrewFormation } from "./sim/crewRuntime.js";
 export { autoAssignTargets } from "./sim/commandRuntime.js";

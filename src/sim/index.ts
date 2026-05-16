@@ -80,6 +80,7 @@ import {
   backfillRoadEdgesFromAdjacency,
   carveRoad,
   clearRoadEdges,
+  collectConnectedRoadNeighbors,
   collectRoadTiles,
   findNearestRoadTile,
   pruneRoadDiagonalStubs
@@ -287,6 +288,7 @@ const createRuntimeSettlementRoadAdapter = (state: WorldState): SettlementRoadAd
       0;
     return carveRoad(nextState, new RuntimeRng(routeSeed), start, end, options);
   },
+  collectConnectedRoadNeighbors,
   collectRoadTiles,
   findNearestRoadTile,
   clearRoadEdges,

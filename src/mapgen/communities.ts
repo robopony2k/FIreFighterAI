@@ -4,6 +4,7 @@ import {
   backfillRoadEdgesFromAdjacency,
   carveRoad,
   clearRoadEdges,
+  collectConnectedRoadNeighbors,
   collectRoadTiles,
   findNearestRoadTile,
   pruneRoadDiagonalStubs
@@ -11,12 +12,14 @@ import {
 import {
   createSettlementPlacementPlan as createSharedSettlementPlacementPlan,
   executeSettlementPlacementPlan,
-  populateCommunities as populateSharedCommunities
+  populateCommunities as populateSharedCommunities,
+  repairSettlementRoadConnectivity as repairSharedSettlementRoadConnectivity
 } from "../systems/settlements/controllers/settlementGeneration.js";
 import type { SettlementPlacementResult, SettlementRoadAdapter } from "../systems/settlements/types/settlementTypes.js";
 
 const createRoadAdapter = (rng: RNG): SettlementRoadAdapter => ({
   carveRoad: (state, start, end, options = {}) => carveRoad(state, rng, start, end, options),
+  collectConnectedRoadNeighbors,
   collectRoadTiles,
   findNearestRoadTile,
   clearRoadEdges,
@@ -51,6 +54,14 @@ export function connectSettlementsByRoad(
   plan.settlementSpacing = realized.settlementSpacing;
   plan.roadStrictness = realized.roadStrictness;
   plan.settlementPreGrowthYears = realized.settlementPreGrowthYears;
+}
+
+export function repairSettlementRoadConnectivity(
+  state: WorldState,
+  rng: RNG,
+  plan: SettlementPlacementResult | null
+): boolean {
+  return repairSharedSettlementRoadConnectivity(state, createRoadAdapter(rng), plan);
 }
 
 export function populateCommunities(state: WorldState, rng: RNG): void {

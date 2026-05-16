@@ -4,7 +4,8 @@ import { UNIT_LOSS_FIRE_THRESHOLD } from "../../../core/config.js";
 import { setStatus } from "../../../core/state.js";
 import { indexFor } from "../../../core/grid.js";
 import { queueScoreFlowEvent } from "../../../sim/scoring.js";
-import { clearCommandSelection, syncCommandUnits } from "../controllers/commandSelectionController.js";
+import { clearCommandSelection } from "../controllers/commandSelectionController.js";
+import { syncCommandUnits } from "./commandUnits.js";
 import { getTrainingMultiplier } from "../utils/unitStats.js";
 import { getRosterFirefighter, getRosterTruck, getRosterUnit, getUnitById } from "../utils/unitLookup.js";
 

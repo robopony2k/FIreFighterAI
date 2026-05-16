@@ -598,6 +598,41 @@ export const pruneRoadDiagonalStubs = (state: WorldState): void => {
 export const backfillRoadEdgesFromAdjacency = (state: WorldState): void => {
   ensureRoadEdgeBuffer(state);
   const { cols, rows } = state.grid;
+  for (let idx = 0; idx < state.grid.totalTiles; idx += 1) {
+    if (!isRoadLikeIndex(state, idx)) {
+      setRoadEdgeMaskAtIndex(state, idx, 0);
+      continue;
+    }
+    const x = idx % cols;
+    const y = Math.floor(idx / cols);
+    let sanitized = 0;
+    for (let i = 0; i < ROAD_EDGE_DIRS.length; i += 1) {
+      const dir = ROAD_EDGE_DIRS[i];
+      if ((state.tileRoadEdges[idx] & dir.bit) === 0) {
+        continue;
+      }
+      const nx = x + dir.dx;
+      const ny = y + dir.dy;
+      if (isRoadLikeTile(state, nx, ny)) {
+        sanitized |= dir.bit;
+      }
+    }
+    setRoadEdgeMaskAtIndex(state, idx, sanitized);
+  }
+  for (let idx = 0; idx < state.grid.totalTiles; idx += 1) {
+    if (!isRoadLikeIndex(state, idx) || state.tileRoadEdges[idx] === 0) {
+      continue;
+    }
+    const x = idx % cols;
+    const y = Math.floor(idx / cols);
+    for (let i = 0; i < ROAD_EDGE_DIRS.length; i += 1) {
+      const dir = ROAD_EDGE_DIRS[i];
+      if ((state.tileRoadEdges[idx] & dir.bit) === 0) {
+        continue;
+      }
+      connectRoadPoints(state, x, y, x + dir.dx, y + dir.dy);
+    }
+  }
   for (let y = 0; y < rows; y += 1) {
     for (let x = 0; x < cols; x += 1) {
       if (!isRoadLikeTile(state, x, y)) {
@@ -617,6 +652,27 @@ export const backfillRoadEdgesFromAdjacency = (state: WorldState): void => {
       }
     }
   }
+};
+
+export const collectConnectedRoadNeighbors = (state: WorldState, x: number, y: number): Point[] => {
+  if (!isRoadLikeTile(state, x, y)) {
+    return [];
+  }
+  ensureRoadEdgeBuffer(state);
+  const mask = state.tileRoadEdges[indexFor(state.grid, x, y)] ?? 0;
+  const neighbors: Point[] = [];
+  for (let i = 0; i < ROAD_EDGE_DIRS.length; i += 1) {
+    const dir = ROAD_EDGE_DIRS[i];
+    if ((mask & dir.bit) === 0) {
+      continue;
+    }
+    const nx = x + dir.dx;
+    const ny = y + dir.dy;
+    if (isRoadLikeTile(state, nx, ny)) {
+      neighbors.push({ x: nx, y: ny });
+    }
+  }
+  return neighbors;
 };
 
 export const analyzeRoadEdgeQuality = (
