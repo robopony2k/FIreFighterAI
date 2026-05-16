@@ -29,6 +29,10 @@ import {
 const SIMULATION_YEAR_DAYS = Math.max(1, PHASES.reduce((sum, phase) => sum + phase.duration, 0));
 const BULK_CONSTRUCTION_THRESHOLD_DAYS = 4;
 
+export type TownConstructionScheduleOptions = {
+  maxEventDays?: number;
+};
+
 type SimulationDayContext = {
   careerDay: number;
   phase: WorldState["phase"];
@@ -401,6 +405,10 @@ const processConstructionDay = (
         town.buildStartCooldownDays = getNextTownBuildCooldownDays(state, town);
         state.structureRevision += 1;
         updateTownEnvelope(state, town);
+      } else {
+        town.growthPressure = Math.max(0, town.growthPressure - 1);
+        town.buildStartSerial += 1;
+        town.buildStartCooldownDays = getNextTownBuildCooldownDays(state, town);
       }
       continue;
     }
@@ -514,11 +522,14 @@ const processConstructionWholeDays = (
   state: WorldState,
   roadAdapter: SettlementRoadAdapter,
   firstCareerDay: number,
-  wholeDays: number
-): void => {
+  wholeDays: number,
+  maxEventDays: number
+): number => {
   let day = firstCareerDay;
   let remaining = wholeDays;
-  while (remaining > 0) {
+  let processedDays = 0;
+  let eventDays = 0;
+  while (remaining > 0 && eventDays < maxEventDays) {
     const dayContext = sampleSimulationDay(day);
     const skipWindow = computeConstructionSkipWindowDays(state, dayContext);
     const passiveDays = Math.min(remaining, Math.max(0, skipWindow - 1));
@@ -526,18 +537,23 @@ const processConstructionWholeDays = (
       advancePassiveConstructionDays(state, passiveDays);
       day += passiveDays;
       remaining -= passiveDays;
+      processedDays += passiveDays;
       continue;
     }
     processConstructionDay(state, roadAdapter, dayContext);
     day += 1;
     remaining -= 1;
+    processedDays += 1;
+    eventDays += 1;
   }
+  return processedDays;
 };
 
 export const stepTownConstructionSchedule = (
   state: WorldState,
   roadAdapter: SettlementRoadAdapter,
-  dayDelta: number
+  dayDelta: number,
+  options: TownConstructionScheduleOptions = {}
 ): void => {
   if (dayDelta <= 0 || state.towns.length <= 0) {
     return;
@@ -549,8 +565,14 @@ export const stepTownConstructionSchedule = (
     return;
   }
   const firstCareerDay = Math.floor(state.careerDay - state.settlementBuildDayAccumulator + 1);
-  processConstructionWholeDays(state, roadAdapter, firstCareerDay, wholeDays);
-  state.settlementBuildDayAccumulator = Math.max(0, state.settlementBuildDayAccumulator - wholeDays);
+  const processedDays = processConstructionWholeDays(
+    state,
+    roadAdapter,
+    firstCareerDay,
+    wholeDays,
+    Math.max(1, Math.floor(options.maxEventDays ?? Number.POSITIVE_INFINITY))
+  );
+  state.settlementBuildDayAccumulator = Math.max(0, state.settlementBuildDayAccumulator - processedDays);
   if (state.settlementBuildDayAccumulator >= 1) {
     state.settlementBuildDayAccumulator %= 1;
   }

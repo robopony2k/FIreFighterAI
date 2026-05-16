@@ -28,7 +28,7 @@ import { formatCurrency } from "../core/utils.js";
 import { getFireSeasonIntensity, getPhaseInfo, PHASES } from "../core/time.js";
 import { RNG as RuntimeRng } from "../core/rng.js";
 import { setStatus, resetStatus } from "../core/state.js";
-import { maybeReport } from "./prof.js";
+import { maybeReport, profEnd, profStart } from "./prof.js";
 import { inBounds, indexFor } from "../core/grid.js";
 import { getCharacterBaseBudget, getCharacterDefinition } from "../core/characters.js";
 import {
@@ -77,13 +77,16 @@ import type { InputState } from "../core/inputState.js";
 import type { EffectsState } from "../core/effectsState.js";
 import { getRuntimeSettings, subscribeRuntimeSettings } from "../persistence/runtimeSettings.js";
 import {
+  backfillRoadEdgesInBounds,
   backfillRoadEdgesFromAdjacency,
-  carveRoad,
+  carveRoadDetailed,
   clearRoadEdges,
   collectConnectedRoadNeighbors,
   collectRoadTiles,
+  mergeRoadTileBounds,
   findNearestRoadTile,
-  pruneRoadDiagonalStubs
+  pruneRoadDiagonalStubs,
+  type RoadTileBounds
 } from "../mapgen/roads.js";
 import type { SettlementRoadAdapter } from "../systems/settlements/types/settlementTypes.js";
 import { stepTownConstructionSchedule } from "../systems/settlements/sim/townConstruction.js";
@@ -100,6 +103,7 @@ const PHASE_YEAR_DAYS = PHASES.reduce((sum, phase) => sum + phase.duration, 0);
 const VIRTUAL_YEAR_DAYS = Math.max(1, Math.floor(VIRTUAL_CLIMATE_PARAMS.seasonLen));
 const CAREER_TOTAL_DAYS = VIRTUAL_YEAR_DAYS * CAREER_YEARS;
 const CLIMATE_SEASONS = ["Winter", "Spring", "Summer", "Autumn"];
+const RUNTIME_CONSTRUCTION_EVENT_DAYS_PER_TICK = 2;
 let allowFireIgnitionEvents = getRuntimeSettings().randomFireIgnition;
 let allowAnnualReport = getRuntimeSettings().annualReportEnabled;
 
@@ -277,24 +281,57 @@ const getTownCenterY = (town: WorldState["towns"][number]): number => (Number.is
 
 const getMaxTimeSpeedIndex = (options: readonly number[]): number => Math.max(0, options.length - 1);
 
-const createRuntimeSettlementRoadAdapter = (state: WorldState): SettlementRoadAdapter => ({
-  carveRoad: (nextState, start, end, options = {}) => {
-    const routeSeed =
-      (nextState.seed ^
-        Math.imul(start.x + 1, 73856093) ^
-        Math.imul(start.y + 1, 19349663) ^
-        Math.imul(end.x + 1, 83492791) ^
-        Math.imul(end.y + 1, 2971215073 >>> 0)) >>>
-      0;
-    return carveRoad(nextState, new RuntimeRng(routeSeed), start, end, options);
-  },
-  collectConnectedRoadNeighbors,
-  collectRoadTiles,
-  findNearestRoadTile,
-  clearRoadEdges,
-  backfillRoadEdgesFromAdjacency,
-  pruneRoadDiagonalStubs
-});
+const getRuntimeRoadSearchBounds = (state: WorldState, start: { x: number; y: number }, end: { x: number; y: number }): RoadTileBounds => {
+  const directDistance = Math.abs(start.x - end.x) + Math.abs(start.y - end.y);
+  const padding = Math.max(12, Math.min(48, directDistance * 3 + 8));
+  return {
+    minX: Math.max(0, Math.min(start.x, end.x) - padding),
+    maxX: Math.min(state.grid.cols - 1, Math.max(start.x, end.x) + padding),
+    minY: Math.max(0, Math.min(start.y, end.y) - padding),
+    maxY: Math.min(state.grid.rows - 1, Math.max(start.y, end.y) + padding)
+  };
+};
+
+const createRuntimeSettlementRoadAdapter = (): SettlementRoadAdapter => {
+  let dirtyRoadBounds: RoadTileBounds | null = null;
+  return {
+    carveRoad: (nextState, start, end, options = {}) => {
+      const profStartAt = profStart();
+      const routeSeed =
+        (nextState.seed ^
+          Math.imul(start.x + 1, 73856093) ^
+          Math.imul(start.y + 1, 19349663) ^
+          Math.imul(end.x + 1, 83492791) ^
+          Math.imul(end.y + 1, 2971215073 >>> 0)) >>>
+        0;
+      const result = carveRoadDetailed(nextState, new RuntimeRng(routeSeed), start, end, {
+        ...options,
+        searchBounds: getRuntimeRoadSearchBounds(nextState, start, end)
+      });
+      dirtyRoadBounds = mergeRoadTileBounds(dirtyRoadBounds, result.bounds);
+      profEnd("runtimeRoad.carve", profStartAt);
+      return result.carved;
+    },
+    collectConnectedRoadNeighbors,
+    collectRoadTiles,
+    findNearestRoadTile,
+    clearRoadEdges: (nextState) => {
+      dirtyRoadBounds = null;
+      clearRoadEdges(nextState);
+    },
+    backfillRoadEdgesFromAdjacency: (nextState) => {
+      const profStartAt = profStart();
+      if (dirtyRoadBounds) {
+        backfillRoadEdgesInBounds(nextState, dirtyRoadBounds, 2);
+        dirtyRoadBounds = null;
+      } else {
+        backfillRoadEdgesFromAdjacency(nextState);
+      }
+      profEnd("runtimeRoad.backfill", profStartAt);
+    },
+    pruneRoadDiagonalStubs
+  };
+};
 
 export const getActiveTimeSpeedOptions = (state: Pick<WorldState, "simTimeMode">): readonly number[] =>
   getTimeSpeedOptions(state.simTimeMode);
@@ -910,13 +947,19 @@ export function stepSim(state: WorldState, effects: EffectsState, rng: RNG, delt
   const climateRisk = getClimateRisk(state);
   stepTownAlertPosture(state, dayDelta);
   applyEvacuationLossEvents(state, stepEvacuations(state, dayDelta));
-  stepTownConstructionSchedule(state, createRuntimeSettlementRoadAdapter(state), dayDelta);
+  const townConstructionProfStart = profStart();
+  stepTownConstructionSchedule(state, createRuntimeSettlementRoadAdapter(), dayDelta, {
+    maxEventDays: RUNTIME_CONSTRUCTION_EVENT_DAYS_PER_TICK
+  });
+  profEnd("townConstruction", townConstructionProfStart);
   const allowGrowth = state.phase === "growth" && isGrowthWeather(state);
   const allowIgnition = state.phase === "fire" && climateRisk >= FIRE_WEATHER_RISK_MIN;
   const allowFireSim = hasFireSimulationWork(state) || allowIgnition;
 
   if (allowGrowth) {
+    const growthProfStart = profStart();
     stepGrowth(state, dayDelta, rng);
+    profEnd("growthStep", growthProfStart);
   }
 
   if (state.units.length > 0) {

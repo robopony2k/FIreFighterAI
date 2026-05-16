@@ -41,9 +41,17 @@ const ROAD_SWITCHBACK_RELIEF_WEIGHT = 3.25;
 
 type RoadBridgePolicy = "never" | "allow";
 
+export type RoadTileBounds = {
+  minX: number;
+  maxX: number;
+  minY: number;
+  maxY: number;
+};
+
 export type RoadPathOptions = {
   allowWater?: boolean;
   bridgePolicy?: RoadBridgePolicy;
+  searchBounds?: RoadTileBounds;
   heightScaleMultiplier?: number;
   gradeLimitStart?: number;
   gradeLimitRelaxStep?: number;
@@ -69,6 +77,7 @@ export type RoadPathOptions = {
 
 type RoadPathOptionsResolved = {
   bridgePolicy: RoadBridgePolicy;
+  searchBounds: RoadTileBounds | null;
   heightScaleMultiplier: number;
   gradeLimitStart: number;
   gradeLimitRelaxStep: number;
@@ -94,6 +103,12 @@ type RoadPathOptionsResolved = {
 
 type RoadCarveOptions = RoadPathOptions & {
   allowBridge?: boolean;
+};
+
+export type RoadCarveResult = {
+  carved: boolean;
+  bounds: RoadTileBounds | null;
+  pathLength: number;
 };
 
 type RoadPathResult = {
@@ -179,6 +194,60 @@ const getRoadEdgeDir = (dx: number, dy: number): RoadEdgeDir | null => {
   return null;
 };
 
+const getPathBounds = (path: readonly Point[]): RoadTileBounds | null => {
+  if (path.length === 0) {
+    return null;
+  }
+  let minX = Number.POSITIVE_INFINITY;
+  let maxX = Number.NEGATIVE_INFINITY;
+  let minY = Number.POSITIVE_INFINITY;
+  let maxY = Number.NEGATIVE_INFINITY;
+  for (let i = 0; i < path.length; i += 1) {
+    const point = path[i]!;
+    minX = Math.min(minX, point.x);
+    maxX = Math.max(maxX, point.x);
+    minY = Math.min(minY, point.y);
+    maxY = Math.max(maxY, point.y);
+  }
+  return { minX, maxX, minY, maxY };
+};
+
+export const expandRoadTileBounds = (
+  state: WorldState,
+  bounds: RoadTileBounds,
+  padding: number
+): RoadTileBounds => {
+  const pad = Math.max(0, Math.floor(padding));
+  return {
+    minX: Math.max(0, bounds.minX - pad),
+    maxX: Math.min(state.grid.cols - 1, bounds.maxX + pad),
+    minY: Math.max(0, bounds.minY - pad),
+    maxY: Math.min(state.grid.rows - 1, bounds.maxY + pad)
+  };
+};
+
+export const mergeRoadTileBounds = (
+  left: RoadTileBounds | null,
+  right: RoadTileBounds | null
+): RoadTileBounds | null => {
+  if (!left) {
+    return right;
+  }
+  if (!right) {
+    return left;
+  }
+  return {
+    minX: Math.min(left.minX, right.minX),
+    maxX: Math.max(left.maxX, right.maxX),
+    minY: Math.min(left.minY, right.minY),
+    maxY: Math.max(left.maxY, right.maxY)
+  };
+};
+
+const isPointInRoadBounds = (point: Point, bounds: RoadTileBounds | null): boolean =>
+  !bounds ||
+  (point.x >= bounds.minX && point.x <= bounds.maxX && point.y >= bounds.minY && point.y <= bounds.maxY);
+
 const riverDistanceCache = new WeakMap<WorldState, RiverDistanceCache>();
 
 const roadGenerationStats: RoadGenerationStats = {
@@ -200,6 +269,7 @@ const resolveRoadPathOptions = (options: RoadPathOptions = {}): RoadPathOptionsR
   const gradeChangeLimitStart = Math.max(0.01, options.gradeChangeLimitStart ?? ROAD_GRADE_CHANGE_LIMIT_START);
   return {
     bridgePolicy,
+    searchBounds: options.searchBounds ?? null,
     heightScaleMultiplier: Math.max(0.1, options.heightScaleMultiplier ?? 1),
     gradeLimitStart,
     gradeLimitRelaxStep,
@@ -654,6 +724,72 @@ export const backfillRoadEdgesFromAdjacency = (state: WorldState): void => {
   }
 };
 
+export const backfillRoadEdgesInBounds = (
+  state: WorldState,
+  bounds: RoadTileBounds,
+  padding = 1
+): void => {
+  ensureRoadEdgeBuffer(state);
+  const clipped = expandRoadTileBounds(state, bounds, padding);
+  const { cols } = state.grid;
+  for (let y = clipped.minY; y <= clipped.maxY; y += 1) {
+    for (let x = clipped.minX; x <= clipped.maxX; x += 1) {
+      const idx = y * cols + x;
+      if (!isRoadLikeIndex(state, idx)) {
+        setRoadEdgeMaskAtIndex(state, idx, 0);
+        continue;
+      }
+      let sanitized = 0;
+      for (let i = 0; i < ROAD_EDGE_DIRS.length; i += 1) {
+        const dir = ROAD_EDGE_DIRS[i]!;
+        if ((state.tileRoadEdges[idx] & dir.bit) === 0) {
+          continue;
+        }
+        const nx = x + dir.dx;
+        const ny = y + dir.dy;
+        if (isRoadLikeTile(state, nx, ny)) {
+          sanitized |= dir.bit;
+        }
+      }
+      setRoadEdgeMaskAtIndex(state, idx, sanitized);
+    }
+  }
+  for (let y = clipped.minY; y <= clipped.maxY; y += 1) {
+    for (let x = clipped.minX; x <= clipped.maxX; x += 1) {
+      const idx = y * cols + x;
+      if (!isRoadLikeIndex(state, idx) || state.tileRoadEdges[idx] === 0) {
+        continue;
+      }
+      for (let i = 0; i < ROAD_EDGE_DIRS.length; i += 1) {
+        const dir = ROAD_EDGE_DIRS[i]!;
+        if ((state.tileRoadEdges[idx] & dir.bit) === 0) {
+          continue;
+        }
+        connectRoadPoints(state, x, y, x + dir.dx, y + dir.dy);
+      }
+    }
+  }
+  for (let y = clipped.minY; y <= clipped.maxY; y += 1) {
+    for (let x = clipped.minX; x <= clipped.maxX; x += 1) {
+      if (!isRoadLikeTile(state, x, y)) {
+        continue;
+      }
+      const idx = indexFor(state.grid, x, y);
+      if (state.tileRoadEdges[idx] !== 0) {
+        continue;
+      }
+      for (let i = 0; i < ROAD_EDGE_DIRS.length; i += 1) {
+        const dir = ROAD_EDGE_DIRS[i]!;
+        const nx = x + dir.dx;
+        const ny = y + dir.dy;
+        if (isRoadLikeTile(state, nx, ny)) {
+          connectRoadPoints(state, x, y, nx, ny);
+        }
+      }
+    }
+  }
+};
+
 export const collectConnectedRoadNeighbors = (state: WorldState, x: number, y: number): Point[] => {
   if (!isRoadLikeTile(state, x, y)) {
     return [];
@@ -1030,6 +1166,10 @@ const runAStar = (
   if (end && !inBounds(state.grid, end.x, end.y)) {
     return null;
   }
+  const searchBounds = options.searchBounds ? expandRoadTileBounds(state, options.searchBounds, 0) : null;
+  if (!isPointInRoadBounds(start, searchBounds) || (end && !isPointInRoadBounds(end, searchBounds))) {
+    return null;
+  }
   const total = state.grid.totalTiles;
   const cols = state.grid.cols;
   const startIdx = indexFor(state.grid, start.x, start.y);
@@ -1110,6 +1250,12 @@ const runAStar = (
       const nx = cx + dir.x;
       const ny = cy + dir.y;
       if (!inBounds(state.grid, nx, ny)) {
+        continue;
+      }
+      if (
+        searchBounds &&
+        (nx < searchBounds.minX || nx > searchBounds.maxX || ny < searchBounds.minY || ny > searchBounds.maxY)
+      ) {
         continue;
       }
       const nIdx = indexFor(state.grid, nx, ny);
@@ -1437,14 +1583,33 @@ export function carveRoadPath(
 }
 
 export function carveRoad(state: WorldState, rng: RNG, start: Point, end: Point, options: RoadCarveOptions = {}): boolean {
+  return carveRoadDetailed(state, rng, start, end, options).carved;
+}
+
+export function carveRoadDetailed(
+  state: WorldState,
+  rng: RNG,
+  start: Point,
+  end: Point,
+  options: RoadCarveOptions = {}
+): RoadCarveResult {
   const bridgePolicy =
     options.bridgePolicy ?? (typeof options.allowBridge === "boolean" ? (options.allowBridge ? "allow" : "never") : "allow");
   const result = findRoadPathDetailed(state, start, end, { ...options, bridgePolicy });
   if (result.path.length === 0) {
-    return false;
+    return {
+      carved: false,
+      bounds: null,
+      pathLength: 0
+    };
   }
   const bridgeSet = new Set<number>(result.bridgeTileIndices);
-  return carveRoadPath(state, rng, result.path, { allowBridgeIndices: bridgeSet });
+  const carved = carveRoadPath(state, rng, result.path, { allowBridgeIndices: bridgeSet });
+  return {
+    carved,
+    bounds: carved ? getPathBounds(result.path) : null,
+    pathLength: carved ? result.path.length : 0
+  };
 }
 
 export function collectRoadTiles(state: WorldState): Point[] {

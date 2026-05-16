@@ -447,6 +447,39 @@ const runNoFireGrowthCompletesHousingCase = () => {
   };
 };
 
+const runBlockedGrowthPressureCase = () => {
+  const state = buildBaseWorld(7474, 1);
+  const town = state.towns[0];
+  town.streetArchetype = "ribbon";
+  town.growthPressure = 3;
+  town.buildStartCooldownDays = 0;
+  town.activeBuildCap = 1;
+  state.townGrowthAppliedYear = state.year;
+  for (let idx = 0; idx < state.tiles.length; idx += 1) {
+    const tile = state.tiles[idx];
+    if (tile.type !== "house" && tile.type !== "road") {
+      state.tiles[idx] = buildTile("rocky", {
+        elevation: tile.elevation,
+        moisture: tile.moisture,
+        waterDist: tile.waterDist
+      });
+    }
+  }
+  syncTileSoA(state);
+  const startingHouses = state.totalHouses;
+  state.careerDay = PHASES[0].duration;
+  syncCalendar(state);
+  advanceConstructionDaysBulk(state, 40);
+
+  assert.equal(state.totalHouses, startingHouses, "blocked growth should not create houses");
+  assert.equal(state.towns[0].growthPressure, 0, "blocked growth pressure should be consumed instead of retried forever");
+
+  return {
+    start: startingHouses,
+    pressure: state.towns[0].growthPressure
+  };
+};
+
 const runCompactGrowthBranchingCase = () => {
   const grid = { cols: 20, rows: 20, totalTiles: 20 * 20 };
   const state = createInitialState(9191, grid);
@@ -708,6 +741,7 @@ const recovery = runRecoveryPriorityCase();
 const idle = runIdleRevisionCase();
 const bulkParity = runBulkSchedulerParityCase();
 const noFireGrowth = runNoFireGrowthCompletesHousingCase();
+const blockedGrowth = runBlockedGrowthPressureCase();
 const compact = runCompactGrowthBranchingCase();
 const diagonal = runDiagonalFrontageCase();
 const densification = runCompactDensificationCase();
@@ -723,6 +757,7 @@ console.log(
     `idleRevision=${idle.startRevision}->${idle.endRevision}`,
     `bulkParity=${bulkParity.houses}/${bulkParity.lots}`,
     `noFireGrowth=${noFireGrowth.start}->${noFireGrowth.end}`,
+    `blockedGrowth=${blockedGrowth.start}/${blockedGrowth.pressure}`,
     `compactRoads=${compact.offAxisRoads}`,
     `compactJunctions=${compact.junctions}`,
     `compactAspect=${compact.aspect.toFixed(2)}`,
