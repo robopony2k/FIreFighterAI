@@ -398,6 +398,10 @@ canvas {
   min-height: 40px;
 }
 
+.three-test-overlay--run .three-test-header {
+  display: none;
+}
+
 .three-test-actions {
   display: flex;
   align-items: center;
@@ -1098,14 +1102,14 @@ canvas {
   left: 0;
   top: 0;
   display: grid;
-  gap: 6px;
-  inline-size: 192px;
-  min-block-size: 58px;
+  gap: 4px;
+  inline-size: 150px;
+  min-block-size: 34px;
   border: 1px solid color-mix(in srgb, var(--three-test-card-border) 78%, rgba(136, 174, 212, 0.42));
-  border-radius: 14px;
+  border-radius: 8px;
   background: color-mix(in srgb, var(--three-test-card-bg) 88%, rgba(12, 20, 28, 0.84));
   color: var(--three-test-text-primary);
-  padding: 6px 10px;
+  padding: 6px 8px;
   font: 600 12px/1.1 ui-sans-serif, system-ui, sans-serif;
   box-shadow: 0 6px 16px rgba(0, 0, 0, 0.32);
   pointer-events: auto;
@@ -2183,7 +2187,7 @@ canvas {
 .three-test-unit-tray {
   position: absolute;
   left: 12px;
-  right: 12px;
+  right: min(328px, 30vw);
   bottom: 12px;
   display: grid;
   gap: 8px;
@@ -2193,14 +2197,24 @@ canvas {
 
 .three-test-command-bar {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(260px, 320px);
-  gap: 8px;
-  align-items: end;
+  grid-template-columns: minmax(0, 1fr) minmax(300px, 380px);
+  gap: 12px;
+  align-items: stretch;
+}
+
+.three-test-command-bar.unit-command-tray {
+  min-height: 166px;
+  border-radius: 8px;
+  border: 1px solid var(--three-test-card-border);
+  background: color-mix(in srgb, var(--three-test-card-bg) 94%, transparent);
+  padding: 10px;
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.24);
 }
 
 .three-test-command-bar-left {
   min-width: 0;
   display: grid;
+  grid-template-rows: auto minmax(92px, 1fr);
   gap: 8px;
 }
 
@@ -2218,7 +2232,7 @@ canvas {
   border: 1px solid var(--three-test-unit-card-border);
   background: var(--three-test-unit-card-bg);
   color: var(--three-test-text-primary);
-  border-radius: 12px;
+  border-radius: 8px;
   padding: 10px;
   display: grid;
   gap: 7px;
@@ -2228,11 +2242,14 @@ canvas {
 }
 
 .three-test-command-unit-card {
-  flex: 0 0 216px;
+  flex: 0 0 232px;
+  min-height: 74px;
 }
 
 .three-test-truck-tile {
-  flex: 0 0 180px;
+  flex: 0 0 210px;
+  height: 84px;
+  align-content: start;
 }
 
 .three-test-command-unit-card:hover,
@@ -2247,7 +2264,8 @@ canvas {
 .three-test-command-unit-card.is-focused,
 .three-test-truck-tile.is-selected {
   border-color: var(--three-test-accent);
-  box-shadow: 0 0 0 2px color-mix(in srgb, var(--three-test-accent) 26%, transparent);
+  background: color-mix(in srgb, var(--three-test-unit-card-bg) 76%, var(--three-test-button-bg-hover));
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--three-test-accent) 34%, transparent);
 }
 
 .three-test-command-unit-header,
@@ -2420,22 +2438,26 @@ canvas {
 }
 
 .three-test-truck-strip {
-  border-radius: 12px;
-  border: 1px solid var(--three-test-card-border);
-  background: var(--three-test-card-bg);
-  padding: 9px 10px;
+  border-radius: 8px;
+  border: 0;
+  background: transparent;
+  padding: 0;
   display: grid;
+  grid-template-rows: auto minmax(84px, 1fr);
   gap: 8px;
+  min-height: 108px;
 }
 
 .three-test-command-panel {
-  border-radius: 12px;
-  border: 1px solid var(--three-test-card-border);
-  background: var(--three-test-card-bg);
+  border-radius: 8px;
+  border: 0;
+  background: transparent;
   color: var(--three-test-text-primary);
-  padding: 10px;
+  padding: 0;
   display: grid;
-  gap: 10px;
+  align-content: start;
+  gap: 8px;
+  min-height: 100%;
 }
 
 .three-test-command-panel-section {
@@ -2456,6 +2478,10 @@ canvas {
   gap: 6px;
 }
 
+.three-test-command-panel-grid--commands {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
 .three-test-command-panel-grid--triple {
   grid-template-columns: repeat(3, minmax(0, 1fr));
 }
@@ -2463,10 +2489,11 @@ canvas {
 .three-test-command-button {
   border: 1px solid var(--three-test-button-border);
   background: var(--three-test-button-bg);
-  border-radius: 9px;
+  border-radius: 8px;
   box-shadow: none;
   padding: 7px 8px;
   font-size: 11px;
+  min-height: 30px;
 }
 
 .three-test-command-button:hover,
@@ -2478,6 +2505,13 @@ canvas {
 .three-test-command-button.is-active {
   border-color: var(--three-test-accent);
   box-shadow: 0 0 0 2px color-mix(in srgb, var(--three-test-accent) 22%, transparent);
+}
+
+.three-test-command-button:disabled {
+  cursor: not-allowed;
+  color: color-mix(in srgb, var(--three-test-text-primary) 44%, transparent);
+  background: var(--three-test-button-disabled-bg);
+  border-color: color-mix(in srgb, var(--three-test-button-border) 50%, transparent);
 }
 
 .three-test-command-button.is-danger {
@@ -4661,6 +4695,16 @@ input[type="text"] {
   text-align: right;
 }
 
+.phase-progression-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.phase-progression-actions.is-empty {
+  display: none;
+}
+
 .phase-progression-level {
   font-size: 12px;
   font-weight: 700;
@@ -4747,6 +4791,23 @@ input[type="text"] {
   font-size: 11px;
   letter-spacing: 0.55px;
   text-transform: uppercase;
+}
+
+.phase-progression-run-action {
+  padding: 7px 11px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 203, 141, 0.26);
+  background: linear-gradient(135deg, rgba(58, 43, 29, 0.98) 0%, rgba(28, 23, 18, 0.98) 100%);
+  color: rgba(248, 236, 216, 0.96);
+  box-shadow: none;
+  font-size: 11px;
+  letter-spacing: 0.55px;
+  text-transform: uppercase;
+}
+
+.phase-progression-run-action:hover {
+  transform: none;
+  background: linear-gradient(135deg, rgba(76, 55, 34, 0.98) 0%, rgba(36, 28, 21, 0.98) 100%);
 }
 
 .phase-progression-draft {
@@ -6809,15 +6870,15 @@ input[type="text"] {
   }
 
   .three-test-command-bar {
-    grid-template-columns: minmax(0, 1fr) minmax(240px, 280px);
+    grid-template-columns: minmax(0, 1fr) minmax(280px, 340px);
   }
 
   .three-test-command-unit-card {
-    flex-basis: 196px;
+    flex-basis: 208px;
   }
 
   .three-test-truck-tile {
-    flex-basis: 168px;
+    flex-basis: 188px;
   }
 
   .three-test-unit-card {
@@ -6900,12 +6961,16 @@ input[type="text"] {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
+  .three-test-command-panel-grid--commands {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
   .three-test-command-unit-card {
-    flex-basis: 180px;
+    flex-basis: 184px;
   }
 
   .three-test-truck-tile {
-    flex-basis: 156px;
+    flex-basis: 172px;
   }
 
   .three-test-unit-card {

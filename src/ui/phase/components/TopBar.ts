@@ -81,6 +81,7 @@ export type TopBarView = {
   update: (data: TopBarData) => void;
   onCta: (handler: (actionId: string) => void) => void;
   attachControls: (controls: HTMLElement) => void;
+  attachProgressionActions: (actions: HTMLElement | null) => void;
 };
 
 const phaseLabels: Record<Phase, string> = {
@@ -1196,7 +1197,9 @@ export const createTopBar = (): TopBarView => {
   progressionReview.className = "phase-progression-review is-hidden";
   progressionReview.dataset.action = "progression-open";
   progressionReview.textContent = "Review Draft";
-  progressionMeta.append(progressionStatus, progressionReview);
+  const progressionActions = document.createElement("div");
+  progressionActions.className = "phase-progression-actions is-empty";
+  progressionMeta.append(progressionStatus, progressionActions, progressionReview);
   progressionHeader.append(progressionCopy, progressionMeta);
   const progressionBar = document.createElement("div");
   progressionBar.className = "phase-progression-bar";
@@ -1469,6 +1472,13 @@ export const createTopBar = (): TopBarView => {
         forecastControls.removeChild(forecastControls.firstChild);
       }
       forecastControls.appendChild(controls);
+    },
+    attachProgressionActions: (actions) => {
+      progressionActions.replaceChildren();
+      if (actions) {
+        progressionActions.appendChild(actions);
+      }
+      progressionActions.classList.toggle("is-empty", !actions);
     },
     update: (data) => {
       const isThreeTest = element.closest(".phase-ui-root--three-test") !== null;

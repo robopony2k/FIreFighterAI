@@ -368,6 +368,10 @@ export const createAppRuntime = (): AppRuntime => {
   const threeTestCanvas = document.getElementById("threeTestCanvas") as HTMLCanvasElement | null;
   const threeTestEndRunButton = document.getElementById("threeTestEndRun") as HTMLButtonElement | null;
   const threeTestMainMenuButton = document.getElementById("threeTestMainMenu") as HTMLButtonElement | null;
+  const threeTestRunMainMenuButton = document.createElement("button");
+  threeTestRunMainMenuButton.type = "button";
+  threeTestRunMainMenuButton.className = "phase-progression-run-action";
+  threeTestRunMainMenuButton.textContent = "Main Menu";
   const isMenuActive = (): boolean =>
     (startMenu ? !startMenu.classList.contains("hidden") : false) ||
     !characterScreen.classList.contains("hidden") ||
@@ -1220,12 +1224,14 @@ export const createAppRuntime = (): AppRuntime => {
 
   const configureThreeOverlayMode = (mode: "run" | "fx-lab" | "sim-lab" | null): void => {
     activeThreeOverlayMode = mode;
+    phaseUi?.controller.attachProgressionActions(mode === "run" ? threeTestRunMainMenuButton : null);
     if (threeTestEndRunButton) {
       threeTestEndRunButton.textContent = mode === "fx-lab" || mode === "sim-lab" ? "Close Lab" : "End Run";
     }
     if (threeTestMainMenuButton) {
       threeTestMainMenuButton.textContent = "Main Menu";
     }
+    threeTestOverlay?.classList.toggle("three-test-overlay--run", mode === "run");
     threeTestOverlay?.classList.toggle("three-test-overlay--fx-lab", mode === "fx-lab");
     threeTestOverlay?.classList.toggle("three-test-overlay--sim-lab", mode === "sim-lab");
   };
@@ -1788,6 +1794,13 @@ export const createAppRuntime = (): AppRuntime => {
       returnToStartMenu();
     });
   }
+  threeTestRunMainMenuButton.addEventListener("click", () => {
+    if (activeThreeOverlayMode !== "run") {
+      return;
+    }
+    endGame(state, false, "Run ended from 3D test.");
+    returnToMainMenu();
+  });
   if (threeTestMainMenuButton) {
     threeTestMainMenuButton.addEventListener("click", () => {
       if (activeThreeOverlayMode === "fx-lab" || activeThreeOverlayMode === "sim-lab") {

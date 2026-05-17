@@ -1,6 +1,6 @@
 import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
-import { CAREER_YEARS, TILE_SIZE, TOWN_ALERT_MAX_POSTURE, TRUCK_CAPACITY, getTimeSpeedOptions } from "../core/config.js";
+import { CAREER_YEARS, TILE_SIZE, TOWN_ALERT_MAX_POSTURE, getTimeSpeedOptions } from "../core/config.js";
 import { VIRTUAL_CLIMATE_PARAMS } from "../core/climate.js";
 import type { EffectsState } from "../core/effectsState.js";
 import {
@@ -23,16 +23,7 @@ import { createVehicleModelLayer, type VehicleModelInstance } from "./vehicleMod
 import type { InputState } from "../core/inputState.js";
 import { indexFor } from "../core/grid.js";
 import { TILE_ID_TO_TYPE, TILE_TYPE_IDS } from "../core/state.js";
-import type {
-  BehaviourMode,
-  ClimateForecast,
-  CommandIntent,
-  CommandType,
-  CommandUnit,
-  CommandUnitAlert,
-  CommandUnitStatus,
-  Town
-} from "../core/types.js";
+import type { ClimateForecast, Town } from "../core/types.js";
 import type { RenderSim } from "./simView.js";
 import { createHudState, setHudViewport, type HudTheme } from "./hud/hudState.js";
 import { handleHudClick, handleHudKey, renderHud } from "./hud/hud.js";
@@ -97,6 +88,7 @@ import type { ThreeTestCinematicGradeConfig } from "./post/cinematicGradePass.js
 import { getRequiredWebGLContext } from "./webglContext.js";
 import { resolveStructureGrounding } from "./terrain/shared/structureGrounding.js";
 import { CardStateModel } from "../ui/cards/cardState.js";
+import { createUnitCommandTray } from "../ui/unit-control/UnitCommandTray.js";
 import { dispatchPhaseUiCommand } from "../ui/phase/commandChannel.js";
 import { RISK_THRESHOLDS, SEASON_LABELS, computeSeasonLayout } from "../ui/phase/forecastLayout.js";
 import {
@@ -902,9 +894,6 @@ export const createThreeTest = (
     connector: HTMLDivElement;
     name: HTMLSpanElement;
     status: HTMLSpanElement;
-    waterStat: HTMLSpanElement;
-    crewStat: HTMLSpanElement;
-    speedStat: HTMLSpanElement;
   };
   type TownCardElements = {
     root: HTMLDivElement;
@@ -2404,30 +2393,6 @@ export const createThreeTest = (
     applyDockCardStates();
   };
 
-  type CommandBarSeverity = "none" | "warning" | "critical";
-  const commandBarRoot = document.createElement("div");
-  commandBarRoot.className = "three-test-command-bar";
-  const commandBarLeft = document.createElement("div");
-  commandBarLeft.className = "three-test-command-bar-left";
-  const commandUnitRow = document.createElement("div");
-  commandUnitRow.className = "three-test-command-unit-row";
-  const truckStrip = document.createElement("div");
-  truckStrip.className = "three-test-truck-strip hidden";
-  const truckStripHeader = document.createElement("div");
-  truckStripHeader.className = "three-test-truck-strip-header";
-  const truckStripTitle = document.createElement("div");
-  truckStripTitle.className = "three-test-truck-strip-title";
-  const truckStripMeta = document.createElement("div");
-  truckStripMeta.className = "three-test-truck-strip-meta";
-  truckStripHeader.append(truckStripTitle, truckStripMeta);
-  const truckStripRow = document.createElement("div");
-  truckStripRow.className = "three-test-truck-strip-row";
-  truckStrip.append(truckStripHeader, truckStripRow);
-  commandBarLeft.append(commandUnitRow, truckStrip);
-  const commandBarRight = document.createElement("div");
-  commandBarRight.className = "three-test-command-panel";
-  commandBarRoot.append(commandBarLeft, commandBarRight);
-  unitTrayRoot.append(commandBarRoot);
   let lastUnitTrayUpdateAt = -Infinity;
 
   const getUnitLabel = (unitId: number): string => {
@@ -2456,6 +2421,12 @@ export const createThreeTest = (
   const dispatchStatusCommand = (message: string): void => {
     dispatchPhaseUiCommand({ type: "status", message });
   };
+
+  const unitCommandTray = createUnitCommandTray({
+    onAction: dispatchSelectionAction,
+    onStatus: dispatchStatusCommand
+  });
+  unitTrayRoot.append(unitCommandTray.element);
 
   const dispatchMapPrimaryCommand = (
     tile: { x: number; y: number },
@@ -2543,223 +2514,6 @@ export const createThreeTest = (
     });
   };
 
-  const getTruckLabel = (truck: RenderSim["units"][number]): string =>
-    truck.rosterId !== null ? getUnitLabel(truck.rosterId) : getUnitLabel(truck.id);
-
-  const getCommandUnitTrucks = (commandUnit: CommandUnit): RenderSim["units"][number][] =>
-    commandUnit.truckIds
-      .map((truckId) => world.units.find((entry) => entry.id === truckId && entry.kind === "truck") ?? null)
-      .filter((entry): entry is RenderSim["units"][number] => !!entry)
-      .sort((left, right) => (left.rosterId ?? left.id) - (right.rosterId ?? right.id));
-
-  const getEffectiveTruckIntent = (
-    truck: RenderSim["units"][number],
-    commandUnitById: Map<number, CommandUnit>
-  ): CommandIntent | null => {
-    if (truck.truckOverrideIntent) {
-      return truck.truckOverrideIntent;
-    }
-    if (truck.commandUnitId === null) {
-      return null;
-    }
-    return commandUnitById.get(truck.commandUnitId)?.currentIntent ?? null;
-  };
-
-  const getCommandTypeLabel = (type: CommandType | null): string => {
-    if (!type) {
-      return "Auto";
-    }
-    return type[0]!.toUpperCase() + type.slice(1);
-  };
-
-  const getBehaviourLabel = (mode: BehaviourMode): string => mode[0]!.toUpperCase() + mode.slice(1);
-
-  const getStatusIcon = (status: CommandUnitStatus): string => {
-    if (status === "suppressing") {
-      return "F";
-    }
-    if (status === "moving") {
-      return ">";
-    }
-    if (status === "retreating") {
-      return "!";
-    }
-    return "O";
-  };
-
-  const getWaterRatio = (current: number, capacity: number): number =>
-    capacity > 0 ? clamp01(current / capacity) : 1;
-
-  const truckBeaconWaterIcon = "\u{1F4A7}";
-  const truckBeaconCrewIcon = "\u{1F465}";
-  const truckBeaconSpeedIcon = "\u{27A4}";
-
-  const getTruckWaterStatValue = (truck: RenderSim["units"][number]): string =>
-    `${Math.round(getWaterRatio(truck.water, truck.waterCapacity) * 100)}%`;
-
-  const getTruckWaterStatLabel = (truck: RenderSim["units"][number]): string =>
-    `Water ${getTruckWaterStatValue(truck)}`;
-
-  const getTruckCrewStatValue = (truck: RenderSim["units"][number]): string => `${truck.crewIds.length}/${TRUCK_CAPACITY}`;
-
-  const getTruckCrewStatLabel = (truck: RenderSim["units"][number]): string => `Crew ${getTruckCrewStatValue(truck)}`;
-
-  const getTruckSpeedKmh = (truck: RenderSim["units"][number]): number => Math.max(1, Math.round(truck.speed * TILE_SIZE));
-
-  const getTruckSpeedStatValue = (truck: RenderSim["units"][number]): string => `${getTruckSpeedKmh(truck)}`;
-
-  const getTruckSpeedStatLabel = (truck: RenderSim["units"][number]): string =>
-    `Speed ${getTruckSpeedKmh(truck)} km/h`;
-
-  const getWaterGlyph = (ratio: number): string => {
-    if (ratio <= 0.2) {
-      return "▁";
-    }
-    if (ratio <= 0.4) {
-      return "▃";
-    }
-    if (ratio <= 0.7) {
-      return "▆";
-    }
-    return "▇";
-  };
-
-  const getWaterGlyphLevel = (ratio: number): "empty" | "low" | "mid" | "high" => {
-    if (ratio <= 0.2) {
-      return "empty";
-    }
-    if (ratio <= 0.4) {
-      return "low";
-    }
-    if (ratio <= 0.7) {
-      return "mid";
-    }
-    return "high";
-  };
-
-  const getAlertPriority = (alert: CommandUnitAlert): number => {
-    switch (alert) {
-      case "danger":
-      case "empty":
-      case "critical":
-        return 3;
-      case "warning":
-      case "crew_low":
-        return 2;
-      case "low":
-        return 1;
-      default:
-        return 0;
-    }
-  };
-
-  const getAlertText = (alert: CommandUnitAlert): string => {
-    switch (alert) {
-      case "danger":
-        return "Danger";
-      case "empty":
-        return "Empty";
-      case "critical":
-        return "Critical";
-      case "warning":
-        return "Warning";
-      case "crew_low":
-        return "Crew";
-      case "low":
-        return "Low";
-      default:
-        return "Alert";
-    }
-  };
-
-  const resolveHighestAlert = (alerts: readonly CommandUnitAlert[]): CommandUnitAlert | null => {
-    let best: CommandUnitAlert | null = null;
-    let bestPriority = -1;
-    alerts.forEach((alert) => {
-      const priority = getAlertPriority(alert);
-      if (priority > bestPriority) {
-        bestPriority = priority;
-        best = alert;
-      }
-    });
-    return best;
-  };
-
-  const getSeverityForAlert = (alert: CommandUnitAlert | null): CommandBarSeverity => {
-    if (!alert) {
-      return "none";
-    }
-    return getAlertPriority(alert) >= 3 ? "critical" : "warning";
-  };
-
-  const getCommandUnitStatusGlyph = (status: CommandUnitStatus): string => {
-    switch (status) {
-      case "suppressing":
-        return "🔥";
-      case "moving":
-        return "➡";
-      case "retreating":
-        return "⚠";
-      default:
-        return "🛡";
-    }
-  };
-
-  const getAlertGlyphs = (alerts: readonly CommandUnitAlert[]): string[] => {
-    const glyphs: string[] = [];
-    if (alerts.some((alert) => alert === "empty" || alert === "critical" || alert === "low")) {
-      glyphs.push("💧");
-    }
-    if (alerts.some((alert) => alert === "warning" || alert === "crew_low" || alert === "danger")) {
-      glyphs.push("⚠");
-    }
-    return glyphs;
-  };
-
-  const resolveMajorityStatus = (trucks: RenderSim["units"][number][]): CommandUnitStatus => {
-    const counts = new Map<CommandUnitStatus, number>();
-    trucks.forEach((truck) => {
-      counts.set(truck.currentStatus, (counts.get(truck.currentStatus) ?? 0) + 1);
-    });
-    const priority: CommandUnitStatus[] = ["retreating", "suppressing", "moving", "holding"];
-    let bestStatus: CommandUnitStatus = "holding";
-    let bestCount = -1;
-    priority.forEach((status) => {
-      const count = counts.get(status) ?? 0;
-      if (count > bestCount) {
-        bestCount = count;
-        bestStatus = status;
-      }
-    });
-    return bestStatus;
-  };
-
-  const getSelectionSummary = (focusedCommandUnit: CommandUnit | null): { title: string; summary: string } => {
-    if (world.selectionScope === "truck" && world.selectedTruckIds.length > 0) {
-      const unitName = focusedCommandUnit?.name ?? "Unit";
-      return {
-        title: "Truck Control",
-        summary: `${world.selectedTruckIds.length} truck(s) selected in ${unitName}.`
-      };
-    }
-    if (world.selectedCommandUnitIds.length === 1 && focusedCommandUnit) {
-      return {
-        title: "Command Unit",
-        summary: `${focusedCommandUnit.name} selected with ${focusedCommandUnit.truckIds.length} truck(s).`
-      };
-    }
-    if (world.selectedCommandUnitIds.length > 1) {
-      return {
-        title: "Command Units",
-        summary: `${world.selectedCommandUnitIds.length} command units selected.`
-      };
-    }
-    return {
-      title: "Command",
-      summary: "Select a command unit or Alt-click a truck for direct control."
-    };
-  };
-
   const removeTruckBeacon = (unitId: number): void => {
     const entry = truckBeaconElements.get(unitId);
     if (!entry) {
@@ -2784,22 +2538,10 @@ export const createThreeTest = (
     name.className = "three-test-truck-beacon-name";
     const status = document.createElement("span");
     status.className = "three-test-truck-beacon-status";
-    const stats = document.createElement("div");
-    stats.className = "three-test-truck-beacon-stats";
-    const waterStat = document.createElement("span");
-    waterStat.className = "three-test-truck-beacon-stat";
-    waterStat.dataset.icon = truckBeaconWaterIcon;
-    const crewStat = document.createElement("span");
-    crewStat.className = "three-test-truck-beacon-stat";
-    crewStat.dataset.icon = truckBeaconCrewIcon;
-    const speedStat = document.createElement("span");
-    speedStat.className = "three-test-truck-beacon-stat";
-    speedStat.dataset.icon = truckBeaconSpeedIcon;
     const connector = document.createElement("div");
     connector.className = "three-test-truck-beacon-connector";
     header.append(name, status);
-    stats.append(waterStat, crewStat, speedStat);
-    root.append(header, stats);
+    root.append(header);
     root.addEventListener("pointerdown", (event) => {
       event.stopPropagation();
     });
@@ -2813,7 +2555,7 @@ export const createThreeTest = (
       selectAndPanToTruck(unit, { truckScope: event.altKey, toggle: event.shiftKey });
     });
     truckBeaconOverlayRoot.append(root, connector);
-    const created: TruckBeaconElements = { root, connector, name, status, waterStat, crewStat, speedStat };
+    const created: TruckBeaconElements = { root, connector, name, status };
     truckBeaconElements.set(unitId, created);
     return created;
   };
@@ -2832,276 +2574,7 @@ export const createThreeTest = (
       return;
     }
     unitTrayRoot.classList.remove("hidden");
-    const commandUnits = [...world.commandUnits].sort((left, right) => left.id - right.id);
-    const commandUnitById = new Map(commandUnits.map((entry) => [entry.id, entry] as const));
-    const focusedCommandUnit =
-      (world.focusedCommandUnitId !== null ? commandUnitById.get(world.focusedCommandUnitId) ?? null : null) ??
-      (world.selectedCommandUnitIds.length === 1 ? commandUnitById.get(world.selectedCommandUnitIds[0]!) ?? null : null);
-    const showTruckStrip =
-      !!focusedCommandUnit && (world.selectionScope === "truck" || world.selectedCommandUnitIds.length === 1);
-
-    commandUnitRow.replaceChildren();
-    commandUnits.forEach((commandUnit) => {
-      const trucks = getCommandUnitTrucks(commandUnit);
-      if (trucks.length <= 0) {
-        return;
-      }
-      const totalCrew = trucks.reduce((sum, truck) => sum + truck.crewIds.length, 0);
-      const totalCrewCapacity = trucks.length * TRUCK_CAPACITY;
-      const totalWater = trucks.reduce((sum, truck) => sum + truck.water, 0);
-      const totalCapacity = trucks.reduce((sum, truck) => sum + truck.waterCapacity, 0);
-      const waterRatio = getWaterRatio(totalWater, totalCapacity);
-      const aggregateAlerts = trucks.flatMap((truck) => truck.currentAlerts);
-      const highestAlert = resolveHighestAlert(aggregateAlerts);
-      const effectiveStatus = resolveMajorityStatus(trucks);
-      const overrideCount = trucks.filter((truck) => truck.truckOverrideIntent !== null).length;
-      const alertGlyphs = getAlertGlyphs(aggregateAlerts);
-
-      const card = document.createElement("button");
-      card.type = "button";
-      card.className = "three-test-command-unit-card";
-      const selected =
-        world.selectedCommandUnitIds.includes(commandUnit.id) ||
-        (world.selectionScope === "truck" && world.focusedCommandUnitId === commandUnit.id);
-      card.classList.toggle("is-selected", selected);
-      card.classList.toggle("is-focused", world.focusedCommandUnitId === commandUnit.id);
-
-      const header = document.createElement("div");
-      header.className = "three-test-command-unit-header";
-      const name = document.createElement("div");
-      name.className = "three-test-command-unit-name";
-      name.textContent = commandUnit.name;
-      header.append(name);
-
-      const metrics = document.createElement("div");
-      metrics.className = "three-test-command-unit-stats";
-      const truckStat = document.createElement("span");
-      truckStat.className = "three-test-command-unit-stat";
-      truckStat.textContent = `🚒×${trucks.length}`;
-      const crewStat = document.createElement("span");
-      crewStat.className = "three-test-command-unit-stat";
-      crewStat.textContent = `👨 ${totalCrew}/${totalCrewCapacity}`;
-      metrics.append(truckStat, crewStat);
-
-      const waterLine = document.createElement("div");
-      waterLine.className = "three-test-command-unit-waterline";
-      const waterIcon = document.createElement("span");
-      waterIcon.className = "three-test-command-unit-watericon";
-      waterIcon.textContent = "💧";
-      const waterBars = document.createElement("div");
-      waterBars.className = "three-test-command-unit-waterbars";
-      trucks.forEach((truck) => {
-        const truckWaterRatio = getWaterRatio(truck.water, truck.waterCapacity);
-        const glyph = document.createElement("span");
-        glyph.className = "three-test-command-unit-waterbar";
-        glyph.dataset.level = getWaterGlyphLevel(truckWaterRatio);
-        glyph.textContent = getWaterGlyph(truckWaterRatio);
-        glyph.title = `${getTruckLabel(truck)} ${Math.round(truckWaterRatio * 100)}% water`;
-        waterBars.appendChild(glyph);
-      });
-      waterLine.append(waterIcon, waterBars);
-
-      const signals = document.createElement("div");
-      signals.className = "three-test-command-unit-signals";
-      const statusSignal = document.createElement("span");
-      statusSignal.className = "three-test-command-unit-signal";
-      statusSignal.dataset.kind = "status";
-      statusSignal.textContent = getCommandUnitStatusGlyph(effectiveStatus);
-      statusSignal.title = effectiveStatus;
-      signals.appendChild(statusSignal);
-      alertGlyphs.forEach((glyphText) => {
-        const signal = document.createElement("span");
-        signal.className = "three-test-command-unit-signal";
-        signal.dataset.kind = "alert";
-        if (highestAlert && getSeverityForAlert(highestAlert) === "critical") {
-          signal.classList.add("three-test-alert-pulse");
-        }
-        signal.textContent = glyphText;
-        signal.title = highestAlert ? getAlertText(highestAlert) : "Alert";
-        signals.appendChild(signal);
-      });
-
-      const intentLabel = commandUnit.currentIntent
-        ? `${getCommandTypeLabel(commandUnit.currentIntent.type)} ${getBehaviourLabel(commandUnit.currentIntent.behaviourMode)}`
-        : "Auto";
-      card.append(header, metrics, waterLine, signals);
-      card.title = `${commandUnit.name}. ${trucks.length} truck(s), ${totalCrew}/${totalCrewCapacity} crew, ${Math.round(
-        waterRatio * 100
-      )}% water. ${overrideCount > 0 ? `${intentLabel} with ${overrideCount} override.` : `${intentLabel}.`}`;
-      card.addEventListener("click", (event) => {
-        event.preventDefault();
-        event.stopPropagation();
-        dispatchSelectionAction("select-command-unit", {
-          commandUnitId: String(commandUnit.id),
-          ...(event.shiftKey ? { toggle: "1" } : {})
-        });
-      });
-      commandUnitRow.appendChild(card);
-    });
-
-    if (showTruckStrip && focusedCommandUnit) {
-      const focusedTrucks = getCommandUnitTrucks(focusedCommandUnit);
-      truckStrip.classList.remove("hidden");
-      truckStripTitle.textContent = `${focusedCommandUnit.name} trucks`;
-      truckStripMeta.textContent =
-        world.selectionScope === "truck"
-          ? `${world.selectedTruckIds.length} selected`
-          : `${focusedTrucks.length} available`;
-      truckStripRow.replaceChildren();
-      focusedTrucks.forEach((truck) => {
-        const waterRatio = getWaterRatio(truck.water, truck.waterCapacity);
-        const effectiveIntent = getEffectiveTruckIntent(truck, commandUnitById);
-        const highestAlert = resolveHighestAlert(truck.currentAlerts);
-        const tile = document.createElement("button");
-        tile.type = "button";
-        tile.className = "three-test-truck-tile";
-        tile.classList.toggle("is-selected", world.selectedTruckIds.includes(truck.id));
-        if (highestAlert && getSeverityForAlert(highestAlert) === "critical") {
-          tile.classList.add("three-test-alert-pulse");
-        }
-
-        const tileHeader = document.createElement("div");
-        tileHeader.className = "three-test-truck-tile-header";
-        const tileName = document.createElement("div");
-        tileName.className = "three-test-truck-tile-name";
-        tileName.textContent = getTruckLabel(truck);
-        const tileStatus = document.createElement("span");
-        tileStatus.className = "three-test-truck-tile-status";
-        tileStatus.dataset.status = truck.currentStatus;
-        tileStatus.textContent = `${getStatusIcon(truck.currentStatus)} ${truck.currentStatus}`;
-        tileHeader.append(tileName, tileStatus);
-
-        const tileWater = document.createElement("div");
-        tileWater.className = "three-test-command-unit-water";
-        const tileWaterFill = document.createElement("div");
-        tileWaterFill.className = "three-test-command-unit-water-fill";
-        tileWaterFill.style.width = `${Math.round(waterRatio * 100)}%`;
-        tileWater.appendChild(tileWaterFill);
-
-        const tileMeta = document.createElement("div");
-        tileMeta.className = "three-test-truck-tile-meta";
-        tileMeta.textContent = `${getWaterGlyph(waterRatio)} ${Math.round(waterRatio * 100)}% | ${
-          effectiveIntent ? getCommandTypeLabel(effectiveIntent.type) : "Auto"
-        }`;
-        tile.append(tileHeader, tileWater, tileMeta);
-
-        if (truck.truckOverrideIntent || highestAlert) {
-          const chips = document.createElement("div");
-          chips.className = "three-test-truck-tile-chips";
-          if (truck.truckOverrideIntent) {
-            const chip = document.createElement("span");
-            chip.className = "three-test-truck-chip";
-            chip.textContent = "Override";
-            chips.appendChild(chip);
-          }
-          if (highestAlert) {
-            const chip = document.createElement("span");
-            chip.className = "three-test-truck-chip";
-            chip.dataset.severity = getSeverityForAlert(highestAlert);
-            chip.textContent = getAlertText(highestAlert);
-            chips.appendChild(chip);
-          }
-          tile.appendChild(chips);
-        }
-
-        tile.addEventListener("click", (event) => {
-          event.preventDefault();
-          event.stopPropagation();
-          dispatchSelectionAction("select-truck", {
-            truckId: String(truck.id),
-            ...(event.shiftKey ? { toggle: "1" } : {})
-          });
-        });
-        truckStripRow.appendChild(tile);
-      });
-    } else {
-      truckStrip.classList.add("hidden");
-      truckStripRow.replaceChildren();
-    }
-
-    commandBarRight.replaceChildren();
-    const selectionSummary = getSelectionSummary(focusedCommandUnit);
-    const title = document.createElement("div");
-    title.className = "three-test-command-panel-title";
-    title.textContent = selectionSummary.title;
-    const summary = document.createElement("div");
-    summary.className = "three-test-command-panel-summary";
-    summary.textContent = selectionSummary.summary;
-    const hint = document.createElement("div");
-    hint.className = "three-test-command-panel-hint";
-    hint.textContent =
-      world.selectionScope === "truck"
-        ? "Truck overrides take priority over the parent unit until rejoined."
-        : "Right-click places a point order. Drag right-click for line or area orders.";
-    commandBarRight.append(title, summary, hint);
-
-    const commandModeSection = document.createElement("div");
-    commandModeSection.className = "three-test-command-panel-section";
-    const commandModeLabel = document.createElement("div");
-    commandModeLabel.className = "three-test-command-panel-label";
-    commandModeLabel.textContent = `Mode ${getCommandTypeLabel(inputState.commandMode)}`;
-    const commandModeGrid = document.createElement("div");
-    commandModeGrid.className = "three-test-command-panel-grid";
-    const addPanelButton = (
-      container: HTMLElement,
-      labelText: string,
-      action: string,
-      active = false,
-      options?: { danger?: boolean; disabled?: boolean }
-    ): void => {
-      const button = document.createElement("button");
-      button.type = "button";
-      button.className = "three-test-command-button";
-      if (active) {
-        button.classList.add("is-active");
-      }
-      if (options?.danger) {
-        button.classList.add("is-danger");
-      }
-      button.disabled = options?.disabled ?? false;
-      button.textContent = labelText;
-      button.addEventListener("click", (event) => {
-        event.preventDefault();
-        event.stopPropagation();
-        dispatchSelectionAction(action);
-      });
-      container.appendChild(button);
-    };
-    addPanelButton(commandModeGrid, "Auto", "command-clear", inputState.commandMode === null);
-    addPanelButton(commandModeGrid, "Move", "command-mode-move", inputState.commandMode === "move");
-    addPanelButton(commandModeGrid, "Suppress", "command-mode-suppress", inputState.commandMode === "suppress");
-    addPanelButton(commandModeGrid, "Contain", "command-mode-contain", inputState.commandMode === "contain");
-    addPanelButton(commandModeGrid, "Backburn", "command-mode-backburn", inputState.commandMode === "backburn", {
-      danger: true
-    });
-    commandModeSection.append(commandModeLabel, commandModeGrid);
-    commandBarRight.appendChild(commandModeSection);
-
-    const behaviourSection = document.createElement("div");
-    behaviourSection.className = "three-test-command-panel-section";
-    const behaviourLabel = document.createElement("div");
-    behaviourLabel.className = "three-test-command-panel-label";
-    behaviourLabel.textContent = `Behavior ${getBehaviourLabel(inputState.behaviourMode)}`;
-    const behaviourGrid = document.createElement("div");
-    behaviourGrid.className = "three-test-command-panel-grid three-test-command-panel-grid--triple";
-    addPanelButton(behaviourGrid, "Aggressive", "behaviour-aggressive", inputState.behaviourMode === "aggressive");
-    addPanelButton(behaviourGrid, "Balanced", "behaviour-balanced", inputState.behaviourMode === "balanced");
-    addPanelButton(behaviourGrid, "Defensive", "behaviour-defensive", inputState.behaviourMode === "defensive");
-    behaviourSection.append(behaviourLabel, behaviourGrid);
-    commandBarRight.appendChild(behaviourSection);
-
-    if (world.selectionScope === "truck" && world.selectedTruckIds.length > 0) {
-      const rejoinSection = document.createElement("div");
-      rejoinSection.className = "three-test-command-panel-section";
-      const rejoinLabel = document.createElement("div");
-      rejoinLabel.className = "three-test-command-panel-label";
-      rejoinLabel.textContent = "Truck Overrides";
-      const rejoinButtonWrap = document.createElement("div");
-      rejoinButtonWrap.className = "three-test-command-panel-grid";
-      addPanelButton(rejoinButtonWrap, "Rejoin Unit", "rejoin-command-unit");
-      rejoinSection.append(rejoinLabel, rejoinButtonWrap);
-      commandBarRight.appendChild(rejoinSection);
-    }
+    unitCommandTray.update(world, inputState);
   };
 
   const updateTruckBeaconOverlay = (): void => {
@@ -3135,12 +2608,6 @@ export const createThreeTest = (
       const entry = ensureTruckBeacon(unit.id);
       const rosterLabel = unit.rosterId !== null ? getUnitLabel(unit.rosterId) : getUnitLabel(unit.id);
       const moveStatus = getUnitMoveStatus(unit);
-      const waterValue = getTruckWaterStatValue(unit);
-      const waterLabel = getTruckWaterStatLabel(unit);
-      const crewValue = getTruckCrewStatValue(unit);
-      const crewLabel = getTruckCrewStatLabel(unit);
-      const speedValue = getTruckSpeedStatValue(unit);
-      const speedLabel = getTruckSpeedStatLabel(unit);
       const selected = world.selectedUnitIds.includes(unit.id);
       const interpolated = resolveInterpolatedUnitPosition(unit);
       const worldX = lastTerrainSurface.toWorldX(interpolated.x);
@@ -3158,18 +2625,9 @@ export const createThreeTest = (
       entry.name.textContent = rosterLabel;
       entry.status.textContent = moveStatus;
       entry.status.dataset.state = moveStatus.toLowerCase();
-      entry.waterStat.textContent = waterValue;
-      entry.waterStat.title = waterLabel;
-      entry.crewStat.textContent = crewValue;
-      entry.crewStat.title = crewLabel;
-      entry.speedStat.textContent = speedValue;
-      entry.speedStat.title = speedLabel;
       entry.root.classList.toggle("is-selected", selected);
-      entry.root.title = `${rosterLabel}. ${moveStatus}. ${waterLabel}. ${crewLabel}. ${speedLabel}. Click to select and center the camera.`;
-      entry.root.setAttribute(
-        "aria-label",
-        `${rosterLabel}. ${moveStatus}. ${waterLabel}. ${crewLabel}. ${speedLabel}. Click to select and center the camera.`
-      );
+      entry.root.title = `${rosterLabel}. ${moveStatus}. Click to select and center the camera.`;
+      entry.root.setAttribute("aria-label", `${rosterLabel}. ${moveStatus}. Click to select and center the camera.`);
       if (!isVisible) {
         entry.root.classList.add("hidden");
         entry.connector.style.display = "none";
@@ -5386,6 +4844,12 @@ export const createThreeTest = (
   let lastShadowElevationDeg = Number.NaN;
   let lastShadowCameraInteracting = false;
   const lastShadowFocusPoint = new THREE.Vector3(Number.NaN, Number.NaN, Number.NaN);
+  const shadowSnapFocusPoint = new THREE.Vector3();
+  const shadowSnapAxisX = new THREE.Vector3();
+  const shadowSnapAxisY = new THREE.Vector3();
+  const shadowSnapAxisZ = new THREE.Vector3();
+  const shadowSnapUp = new THREE.Vector3(0, 1, 0);
+  const shadowSnapFallbackUp = new THREE.Vector3(1, 0, 0);
   let lastShadowExtent = Number.NaN;
   let lastShadowFar = Number.NaN;
   const glareProjection = new THREE.Vector3();
@@ -5531,15 +4995,42 @@ export const createThreeTest = (
       Math.min(Math.max(THREE_TEST_SHADOW_MIN_EXTENT, terrainSpan * THREE_TEST_SHADOW_MAX_TERRAIN_RATIO), focusExtent)
     );
   };
+  const getSnappedShadowFocusPoint = (
+    focusPoint: THREE.Vector3,
+    sunDirection: THREE.Vector3,
+    shadowExtent: number
+  ): THREE.Vector3 => {
+    const texelWorldSize = (shadowExtent * 2) / THREE_TEST_SHADOW_MAP_SIZE;
+    if (!Number.isFinite(texelWorldSize) || texelWorldSize <= 0) {
+      return shadowSnapFocusPoint.copy(focusPoint);
+    }
+    shadowSnapAxisZ.copy(sunDirection).normalize();
+    const up = Math.abs(shadowSnapAxisZ.y) > 0.98 ? shadowSnapFallbackUp : shadowSnapUp;
+    shadowSnapAxisX.crossVectors(up, shadowSnapAxisZ);
+    if (shadowSnapAxisX.lengthSq() <= 1e-8) {
+      shadowSnapAxisX.crossVectors(shadowSnapFallbackUp, shadowSnapAxisZ);
+    }
+    shadowSnapAxisX.normalize();
+    shadowSnapAxisY.crossVectors(shadowSnapAxisZ, shadowSnapAxisX).normalize();
+    const lightSpaceX = focusPoint.dot(shadowSnapAxisX);
+    const lightSpaceY = focusPoint.dot(shadowSnapAxisY);
+    const snappedLightSpaceX = Math.round(lightSpaceX / texelWorldSize) * texelWorldSize;
+    const snappedLightSpaceY = Math.round(lightSpaceY / texelWorldSize) * texelWorldSize;
+    return shadowSnapFocusPoint
+      .copy(focusPoint)
+      .addScaledVector(shadowSnapAxisX, snappedLightSpaceX - lightSpaceX)
+      .addScaledVector(shadowSnapAxisY, snappedLightSpaceY - lightSpaceY);
+  };
   const syncDirectionalLightRig = (lighting: LightingDirectorState): void => {
     const focusPoint = controls.target;
-    const lightDistance = Math.max(getLightDistance(), getShadowExtent() * 1.8);
-    keyLight.position.copy(focusPoint).addScaledVector(lighting.sunDirection, lightDistance);
-    keyLight.target.position.copy(focusPoint);
+    const shadowExtent = getShadowExtent();
+    const lightDistance = Math.max(getLightDistance(), shadowExtent * 1.8);
+    const shadowFocusPoint = getSnappedShadowFocusPoint(focusPoint, lighting.sunDirection, shadowExtent);
+    keyLight.position.copy(shadowFocusPoint).addScaledVector(lighting.sunDirection, lightDistance);
+    keyLight.target.position.copy(shadowFocusPoint);
     fillLight.position.copy(focusPoint).addScaledVector(lighting.fillDirection, lightDistance * 0.72);
     fillLight.target.position.copy(focusPoint);
     const shadowCam = keyLight.shadow.camera as THREE.OrthographicCamera;
-    const shadowExtent = getShadowExtent();
     const shadowFar = Math.max(120, lightDistance * 2.35);
     shadowCam.left = -shadowExtent;
     shadowCam.right = shadowExtent;
@@ -5554,14 +5045,14 @@ export const createThreeTest = (
     fillLight.updateMatrixWorld();
     const focusChanged =
       !Number.isFinite(lastShadowFocusPoint.x) ||
-      focusPoint.distanceTo(lastShadowFocusPoint) >= THREE_TEST_SHADOW_TARGET_EPSILON;
+      shadowFocusPoint.distanceToSquared(lastShadowFocusPoint) > 1e-8;
     const extentChanged =
       !Number.isFinite(lastShadowExtent) || Math.abs(shadowExtent - lastShadowExtent) >= THREE_TEST_SHADOW_EXTENT_EPSILON;
     const farChanged = !Number.isFinite(lastShadowFar) || Math.abs(shadowFar - lastShadowFar) >= THREE_TEST_SHADOW_FAR_EPSILON;
     if (focusChanged || extentChanged || farChanged) {
       shadowRefreshPending = true;
     }
-    lastShadowFocusPoint.copy(focusPoint);
+    lastShadowFocusPoint.copy(shadowFocusPoint);
     lastShadowExtent = shadowExtent;
     lastShadowFar = shadowFar;
     waterSystem.setLightDirectionFromKeyLight();

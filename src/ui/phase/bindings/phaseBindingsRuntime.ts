@@ -1213,27 +1213,46 @@ export const bindPhaseUi = ({
     }
     if (event.key === "Escape") {
       handleEscape(state, inputState);
+      phaseUi.sync(state, inputState);
+      noteInteraction();
+      event.preventDefault();
+      return;
     }
     if (event.key === " ") {
       isSpaceDown = true;
     }
-    if (event.key.length === 1 && /^[0-9]$/.test(event.key)) {
-      const slot = event.key === "0" ? 9 : Number(event.key) - 1;
-      if (slot >= 0) {
-        const trucks = state.units
-          .filter((unit) => unit.kind === "truck")
-          .sort((a, b) => (a.rosterId ?? a.id) - (b.rosterId ?? b.id))
-          .slice(0, 10);
-        const target = trucks[slot] ?? null;
-        if (target) {
-          gate("select", () => {
-            selectUnit(state, target);
-            setDeployMode(state, null);
-          });
-          noteInteraction();
-          return;
-        }
+    if (event.key === "1" || event.key === "2") {
+      const slot = Number(event.key) - 1;
+      const target = [...state.commandUnits].sort((a, b) => a.id - b.id)[slot] ?? null;
+      if (target) {
+        gate("select", () => {
+          selectCommandUnit(state, target.id);
+          setDeployMode(state, null);
+        });
+        phaseUi.sync(state, inputState);
+        noteInteraction();
+        event.preventDefault();
+        return;
       }
+    }
+    if (event.key === "m" || event.key === "M") {
+      noteInteraction();
+      runUiAction("command-mode-move");
+      event.preventDefault();
+      return;
+    }
+    if (event.key === "s" || event.key === "S") {
+      noteInteraction();
+      runUiAction("command-mode-suppress");
+      event.preventDefault();
+      return;
+    }
+    if (event.key === "h" || event.key === "H") {
+      setStatus(state, "Hold command mode is unavailable in Phase 1; no simulation command exists yet.");
+      phaseUi.sync(state, inputState);
+      noteInteraction();
+      event.preventDefault();
+      return;
     }
     if (event.key === "+" || event.key === "=") {
       gate("zoom", () =>

@@ -1107,6 +1107,7 @@ export function handleEscape(state: WorldState, inputState: InputState): void {
     selectUnit(state, null);
   }
   setDeployMode(state, null);
+  inputState.commandMode = null;
   inputState.formationStart = null;
   inputState.formationEnd = null;
   inputState.selectionBox = null;

@@ -1,5 +1,33 @@
 # Deprecations
 
+## Duplicated 3D Run Header Exit Controls
+
+Status: Deprecated as of May 17, 2026.
+
+- Normal 3D runs should expose one Main Menu action inside the command/progression counter.
+- The old run header with separate End Run and Main Menu buttons created unused vertical space above the world and made two run-ending actions look more different than they were.
+- FX Lab and SIM Lab may keep their header controls because they do not use the command/progression counter as the primary HUD surface.
+
+Migration guidance:
+
+1. Put future 3D run-level exit actions in the phase HUD progression action slot.
+2. Keep app/session navigation behavior in the runtime layer; HUD components should only provide neutral attachment points.
+3. Do not reintroduce a normal-run header above the 3D canvas unless it carries persistent, non-duplicated gameplay information.
+
+## Duplicated Right-Panel Unit Command Controls
+
+Status: Deprecated as of May 17, 2026.
+
+- Unit command ownership now belongs to the bottom command tray in the 3D runtime.
+- Alpha/Bravo group selection, selected truck summaries, and command mode buttons should be presented together in that tray.
+- The right-side dock should remain focused on fire risk, minimap, time/settings, and contextual widgets instead of duplicating unit command controls.
+
+Migration guidance:
+
+1. Add future unit command previews, queues, or command-mode affordances through the bottom tray.
+2. Keep simulation authority in unit systems; tray UI may read state and dispatch existing command actions only.
+3. Do not reintroduce command buttons into the right dock unless the design intentionally creates a distinct non-command widget.
+
 ## SVG Placeholder Chief Portrait Roster
 
 Status: Deprecated as of May 16, 2026.

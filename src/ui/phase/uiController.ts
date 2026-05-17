@@ -195,6 +195,10 @@ export class UIController {
     this.bottomControls.setSimulationToggleState(settings);
   }
 
+  attachProgressionActions(actions: HTMLElement | null): void {
+    this.topBar.attachProgressionActions(actions);
+  }
+
   private buildLayout(): void {
     const shell = document.createElement("div");
     shell.className = "phase-shell";
