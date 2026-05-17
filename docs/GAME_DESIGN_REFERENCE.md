@@ -129,6 +129,7 @@ Design intent:
 - Bottom command tray is the primary unit control surface: select Alpha/Bravo command groups, inspect selected trucks, read compact crew/water/status, and arm unit command modes there.
 - Right-side runtime dock stays focused on widgets such as fire risk, minimap, time, and contextual information rather than duplicating unit command ownership.
 - 3D run exit controls should be compact and contextual: use a single Main Menu action inside the command/progression counter instead of a separate top header that reduces world viewport space.
+- Game-over and manual End Run flows stay on the 3D runtime and show a dedicated end-run summary placeholder with final score, reason, seed, year, and New Run/Main Menu actions.
 
 ## 3D Terrain Presentation
 

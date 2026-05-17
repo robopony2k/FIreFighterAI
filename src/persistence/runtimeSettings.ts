@@ -1,5 +1,4 @@
 export type RuntimeSettings = {
-  render: "3d" | "2d";
   timespeedui: "buttons" | "slider";
   randomFireIgnition: boolean;
   annualReportEnabled: boolean;
@@ -102,7 +101,6 @@ const toFiniteNumber = (value: unknown): number | null => {
 };
 
 export const DEFAULT_RUNTIME_SETTINGS: RuntimeSettings = {
-  render: "3d",
   timespeedui: "buttons",
   randomFireIgnition: true,
   annualReportEnabled: true,
@@ -144,18 +142,6 @@ export const DEFAULT_RUNTIME_SETTINGS: RuntimeSettings = {
 };
 
 export const RUNTIME_SETTING_DEFINITIONS: ReadonlyArray<RuntimeSettingDefinition> = [
-  {
-    key: "render",
-    section: "General",
-    kind: "enum",
-    label: "Renderer",
-    description: "Default renderer when launching from the menu.",
-    defaultValue: DEFAULT_RUNTIME_SETTINGS.render,
-    options: [
-      { value: "3d", label: "3D" },
-      { value: "2d", label: "Legacy 2D" }
-    ]
-  },
   {
     key: "timespeedui",
     section: "General",

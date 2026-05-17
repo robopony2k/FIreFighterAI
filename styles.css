@@ -482,6 +482,113 @@ canvas {
   z-index: 8;
 }
 
+.end-run-screen {
+  position: absolute;
+  inset: 0;
+  z-index: 24;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background:
+    linear-gradient(180deg, rgba(7, 9, 12, 0.52), rgba(12, 11, 10, 0.76)),
+    rgba(6, 8, 11, 0.44);
+  pointer-events: auto;
+}
+
+.end-run-panel {
+  width: min(460px, 100%);
+  display: grid;
+  gap: 16px;
+  padding: 24px;
+  border: 1px solid rgba(255, 214, 155, 0.32);
+  border-radius: 8px;
+  background: linear-gradient(180deg, rgba(31, 27, 23, 0.96), rgba(16, 16, 17, 0.97));
+  color: rgba(248, 236, 216, 0.96);
+  box-shadow: 0 26px 70px rgba(0, 0, 0, 0.42);
+}
+
+.end-run-eyebrow {
+  color: rgba(240, 179, 59, 0.92);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 1.4px;
+  text-transform: uppercase;
+}
+
+.end-run-panel h2 {
+  margin: 0;
+  font-size: 30px;
+  line-height: 1.05;
+}
+
+.end-run-message {
+  margin: 0;
+  color: rgba(227, 205, 177, 0.82);
+  font-size: 15px;
+  line-height: 1.45;
+}
+
+.end-run-score {
+  display: grid;
+  gap: 4px;
+  padding: 14px;
+  border: 1px solid rgba(255, 214, 155, 0.2);
+  border-radius: 8px;
+  background: rgba(255, 239, 213, 0.08);
+}
+
+.end-run-score span,
+.end-run-meta dt {
+  color: rgba(227, 205, 177, 0.72);
+  font-size: 11px;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+}
+
+.end-run-score strong {
+  font-size: 34px;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+}
+
+.end-run-meta {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 8px 14px;
+  margin: 0;
+}
+
+.end-run-meta dd {
+  margin: 0;
+  color: rgba(248, 236, 216, 0.92);
+  font-variant-numeric: tabular-nums;
+}
+
+.end-run-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.end-run-actions button {
+  border: 1px solid rgba(255, 203, 141, 0.28);
+  border-radius: 8px;
+  background: linear-gradient(135deg, rgba(44, 35, 27, 0.95) 0%, rgba(34, 27, 22, 0.95) 100%);
+  color: rgba(248, 236, 216, 0.96);
+  box-shadow: none;
+  padding: 10px 14px;
+}
+
+.end-run-actions button:hover {
+  transform: none;
+  background: linear-gradient(135deg, rgba(57, 43, 32, 0.95) 0%, rgba(40, 30, 24, 0.98) 100%);
+}
+
+.end-run-actions .end-run-primary {
+  border-color: rgba(240, 179, 59, 0.58);
+  background: linear-gradient(135deg, rgba(154, 67, 37, 0.96), rgba(214, 116, 52, 0.92));
+}
+
 .fx-lab-shell {
   position: absolute;
   inset: 0;

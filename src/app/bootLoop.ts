@@ -56,7 +56,7 @@ export type AppBootLoopDeps = {
   isSimulationEffectivelyPaused: () => boolean;
   stepSimulation: (simStep: number) => number;
   onThreeTestFrame: (alpha: number) => void;
-  render2dFrame: (alpha: number) => void;
+  renderFrame: (alpha: number) => void;
   recordPerfSample: (name: string, value: number) => void;
   maybeUpdatePerfDiagnostics: (now: number) => void;
 };
@@ -148,7 +148,7 @@ export const startAppBootLoop = (deps: AppBootLoopDeps): void => {
     if (threeTestVisible) {
       deps.onThreeTestFrame(alpha);
     } else {
-      deps.render2dFrame(alpha);
+      deps.renderFrame(alpha);
     }
     deps.recordPerfSample("main.frame", performance.now() - frameStartedAt);
     deps.maybeUpdatePerfDiagnostics(now);

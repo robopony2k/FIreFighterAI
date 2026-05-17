@@ -1,4 +1,4 @@
-import { BASE_BUDGET, TILE_SIZE, MAP_SCALE, MAP_SIZE_PRESETS } from "../core/config.js";
+import { BASE_BUDGET, MAP_SIZE_PRESETS } from "../core/config.js";
 import type { MapSizeId } from "../core/config.js";
 import { DEFAULT_CHIEF_GENDER, getCharacterBaseBudget } from "../core/characters.js";
 import { RNG } from "../core/rng.js";
@@ -9,11 +9,9 @@ import { TREE_TYPE_IDS } from "../core/types.js";
 import { createEffectsState, resetEffectsState } from "../core/effectsState.js";
 import { createInputState, resetInputState } from "../core/inputState.js";
 import { createUiState, resetUiState } from "../core/uiState.js";
-import { createGameEventBus } from "../core/gameEvents.js";
+import { createGameEventBus, type GameOverPayload } from "../core/gameEvents.js";
 import { CLIMATE_IGNITION_MAX, CLIMATE_IGNITION_MIN, VIRTUAL_CLIMATE_PARAMS } from "../core/climate.js";
 import { generateMap, type MapGenDebug, type MapGenDebugSnapshot } from "../mapgen/index.js";
-import { resetTerrainCaches } from "../render/terrainCache.js";
-import { renderLegacy2dFrame } from "../render/legacy2d/index.js";
 import { createThreeTest, type ThreeTestPerfSnapshot } from "../render/threeTest.js";
 import { preloadThreeTestWorldAudioAssets } from "../render/threeTestWorldAudio.js";
 import {
@@ -30,6 +28,7 @@ import { initPhaseUI } from "../ui/phase/index.js";
 import { bindPhaseUi } from "../ui/phase/bindings.js";
 import { getMapEditorRefs, initMapEditor, type MapEditorHandle } from "../ui/map-editor.js";
 import { getOverlayRefs, updateOverlay } from "../ui/overlay.js";
+import { createEndRunScreen, type EndRunScreenHandle } from "../ui/end-run/endRunScreen.js";
 import { saveLeaderboard } from "../persistence/leaderboard.js";
 import { loadFuelProfileOverrides } from "../persistence/fuelProfiles.js";
 import { loadLastRunConfig } from "../persistence/lastRunConfig.js";
@@ -50,7 +49,6 @@ import { DEFAULT_MAP_SIZE, DEFAULT_RUN_OPTIONS, DEFAULT_RUN_SEED, normalizeFireS
 import type { NewRunConfig } from "../ui/run-config.js";
 import { cloneTerrainRecipe, getTerrainHeightScaleMultiplier } from "../mapgen/terrainProfile.js";
 import type { GameUiSnapshot } from "../ui/phase/types.js";
-import { createRenderBackend, type RenderBackend } from "./renderBackend.js";
 import { updatePerfCounter } from "./perfDiagnostics.js";
 import { startAppBootLoop } from "./bootLoop.js";
 import {
@@ -80,9 +78,6 @@ import { normalizeFxLabScenarioId, type FxLabScenarioId } from "../render/fxLab/
 import { createFireSimLabController, type FireSimLabController } from "../ui/fire-sim-lab/controller.js";
 import { normalizeFireSimLabScenarioId, type FireSimLabScenarioId } from "../systems/fire/types/fireSimLabTypes.js";
 import { describeWebGLError } from "../render/webglContext.js";
-
-
-export type { RenderBackend } from "./renderBackend.js";
 
 // Single switch for removing the startup title layer.
 const ENABLE_TITLE_SCREEN = true;
@@ -181,15 +176,6 @@ const resolveRunConfig = (defaults: NewRunConfig, persisted?: NewRunConfig | nul
 
 export const createAppRuntime = (): AppRuntime => {
   const canvas = document.getElementById("gameCanvas") as HTMLCanvasElement;
-  const ctx = canvas.getContext("2d");
-  
-  if (!ctx) {
-    throw new Error("Canvas not supported");
-  }
-  
-  const baseCanvasWidth = canvas.width;
-  const baseCanvasHeight = canvas.height;
-  const gridScale = MAP_SCALE;
   const buildGrid = (mapSize: MapSizeId) => {
     const size = MAP_SIZE_PRESETS[mapSize];
     return {
@@ -209,10 +195,6 @@ export const createAppRuntime = (): AppRuntime => {
   const initialFxLabScene = normalizeFxLabScenarioId(params.get("scene"));
   const initialFireSimLabScene = normalizeFireSimLabScenarioId(params.get("scene"));
   let runtimeSettings = getRuntimeSettings();
-  let forcedRenderBackend: RenderBackend | null = null;
-  const getConfiguredRenderBackend = (): RenderBackend =>
-    forcedRenderBackend ?? (runtimeSettings.render === "2d" ? "legacy2d" : "3d");
-  const isLegacy2dEnabled = (): boolean => getConfiguredRenderBackend() === "legacy2d";
   const isHeadless = (): boolean => runtimeSettings.headless;
   const isThreeTestNoSimEnabled = (): boolean => runtimeSettings.nosim;
   const isThreeTestSeasonalEnabled = (): boolean => runtimeSettings.seasonal;
@@ -224,9 +206,6 @@ export const createAppRuntime = (): AppRuntime => {
   const isPerfConsoleAlways = (): boolean => runtimeSettings.perflog;
   const seedParam = params.get("seed");
   const initialSeed = seedParam && !Number.isNaN(Number(seedParam)) ? Number(seedParam) : Math.floor(Date.now() % 1000000);
-  if (isLegacy2dEnabled()) {
-    console.warn("[render] Legacy 2D renderer is deprecated. Prefer 3D mode.");
-  }
   
   const state = createInitialState(initialSeed, grid);
   const syncTimeSpeedControlMode = (): void => {
@@ -310,6 +289,7 @@ export const createAppRuntime = (): AppRuntime => {
   setGameEventBus(gameEvents);
   
   const persistenceState = { scoreSubmitted: false };
+  let endRunScreen: EndRunScreenHandle | null = null;
   
   gameEvents.on("overlay:show", (payload) => {
     uiState.overlayTitle = payload.title;
@@ -331,6 +311,7 @@ export const createAppRuntime = (): AppRuntime => {
     saveLeaderboard({ name: callsign, score: payload.score, seed: payload.seed, date: Date.now() });
     persistenceState.scoreSubmitted = true;
     musicController.setGameOver(payload.victory ? "victory" : "defeat");
+    showEndRunScreen(payload);
   });
   const buildTreeTypeMap = (): Uint8Array => {
     const result = new Uint8Array(state.grid.totalTiles);
@@ -392,7 +373,6 @@ export const createAppRuntime = (): AppRuntime => {
   const CLIMATE_SEASONS = ["Winter", "Spring", "Summer", "Autumn"] as const;
   const isThreeTestSeasonalRecolorEnabled = (): boolean => runtimeSettings.seasonal;
   type ThreeTestSeasonMode = "auto" | "manual";
-  type ActiveRenderMode = "2d" | "3d";
   const THREE_TEST_VISUAL_EPSILON = 0.0005;
   type PerfStat = { last: number; avg: number; max: number; samples: number; updatedAt: number };
   const PERF_OVERLAY_REFRESH_MS = 220;
@@ -484,7 +464,6 @@ export const createAppRuntime = (): AppRuntime => {
   let cachedThreeTestTreeTypeVegetationRevision = -1;
   let savedThreeTestSmokeRate: number | null = null;
   let activeThreeOverlayMode: "run" | "fx-lab" | "sim-lab" | null = null;
-  let activeRenderMode: ActiveRenderMode = isLegacy2dEnabled() ? "2d" : "3d";
   const perfStats = new Map<string, PerfStat>();
   const perfOverlay = document.createElement("div");
   const perfOverlayText = document.createElement("pre");
@@ -519,14 +498,7 @@ export const createAppRuntime = (): AppRuntime => {
   type LongTaskStats = { count: number; totalMs: number; maxMs: number; lastMs: number; lastAt: number; lastDetail: string };
   const longTaskStats: LongTaskStats = { count: 0, totalMs: 0, maxMs: 0, lastMs: 0, lastAt: 0, lastDetail: "n/a" };
   
-  const setRenderMode = (mode: ActiveRenderMode): void => {
-    if (!isLegacy2dEnabled() && mode === "2d") {
-      return;
-    }
-    activeRenderMode = mode;
-    const show2d = mode === "2d";
-    canvas.classList.toggle("hidden", !show2d);
-    phaseUiRoot?.classList.toggle("hidden", !show2d);
+  const resetPerfDiagnostics = (): void => {
     perfStats.clear();
     lastPerfOverlayUpdate = 0;
     lastPerfConsoleLog = 0;
@@ -538,15 +510,12 @@ export const createAppRuntime = (): AppRuntime => {
     longTaskStats.lastDetail = "n/a";
   };
 
-  const forceLegacy2dFallback = (): void => {
-    forcedRenderBackend = "legacy2d";
-    setRenderMode("2d");
-  };
-
   const formatRendererUnavailableStatus = (featureLabel: string, error: unknown): string =>
-    `${featureLabel} unavailable: ${describeWebGLError(error)} Switched to Legacy 2D for this session.`;
+    `${featureLabel} unavailable: ${describeWebGLError(error)} Return to the main menu and try again after checking WebGL support.`;
 
-  setRenderMode(activeRenderMode);
+  canvas.classList.add("hidden");
+  phaseUiRoot?.classList.add("hidden");
+  resetPerfDiagnostics();
   
   const recordPerfSample = (name: string, value: number): void => {
     const now = performance.now();
@@ -572,7 +541,6 @@ export const createAppRuntime = (): AppRuntime => {
   const formatInt = (value: number | null | undefined): string =>
     typeof value === "number" && Number.isFinite(value) ? Math.round(value).toString() : "n/a";
   const canUsePerfOverlayRunToggles = (): boolean =>
-    activeRenderMode === "3d" &&
     activeThreeOverlayMode === "run" &&
     !!threeTestController &&
     !!threeTestOverlay &&
@@ -679,19 +647,12 @@ export const createAppRuntime = (): AppRuntime => {
   };
   
   const unsubscribeRuntimeSettings = subscribeRuntimeSettings((nextSettings) => {
-    const previousRender = runtimeSettings.render;
     const previousTimeSpeedUi = runtimeSettings.timespeedui;
     runtimeSettings = nextSettings;
     syncTimeSpeedControlMode();
     setPerfOverlayVisible(runtimeSettings.perf);
-    if (previousRender !== runtimeSettings.render && isLegacy2dEnabled()) {
-      console.warn("[render] Legacy 2D renderer is deprecated. Prefer 3D mode.");
-    }
     if (previousTimeSpeedUi !== runtimeSettings.timespeedui) {
       phaseUi?.sync(state, inputState);
-    }
-    if (!threeTestOverlay || threeTestOverlay.classList.contains("hidden")) {
-      setRenderMode(isLegacy2dEnabled() ? "2d" : "3d");
     }
   });
   
@@ -702,9 +663,6 @@ export const createAppRuntime = (): AppRuntime => {
     const simFrame = readRecentPerf("sim.frame", now);
     const simStep = readRecentPerf("sim.step", now);
     const simSteps = readRecentPerf("sim.steps", now);
-    const draw2d = readRecentPerf("2d.draw", now);
-    const ui2d = readRecentPerf("2d.ui", now);
-    const overlay2d = readRecentPerf("2d.overlay", now);
     const climate3d = readRecentPerf("3d.climateSync", now);
     const terrain3d = readRecentPerf("3d.terrainSync", now);
     const terrainDeferred3d = readRecentPerf("3d.terrainDeferred", now);
@@ -712,19 +670,16 @@ export const createAppRuntime = (): AppRuntime => {
     const terrainSyncSkipped3d = readRecentPerf("3d.terrainSyncSkipped", now);
     const terrainVisualBatched3d = readRecentPerf("3d.terrainVisualBatched", now);
     const lines = [
-      `Perf (${activeRenderMode.toUpperCase()})  |  Ctrl+Shift+P toggle`,
+      `Perf (3D)  |  Ctrl+Shift+P toggle`,
       `Flags: seasonal=${isThreeTestSeasonalEnabled() ? "1" : "0"} nosim=${isThreeTestNoSimEnabled() ? "1" : "0"} noterrain=${isThreeTestTerrainSyncDisabled() ? "1" : "0"} trees=${isThreeTestTreeRenderingEnabled() ? "1" : "0"} detailStruct=${isThreeTestDetailedStructuresEnabled() ? "1" : "0"} dpr=${getThreeTestDprCap().toFixed(2)} fps=${getFrameCapFps() > 0 ? getFrameCapFps().toFixed(0) : "off"}`,
       `Main:  ${formatMs(mainFrame?.avg)} avg  ${formatMs(mainFrame?.last)} last  ${formatMs(mainFrame?.max)} max`,
       `Main gap: ${formatMs(mainRafGap?.avg)} avg  ${formatMs(mainRafGap?.last)} last  hitch ${formatMs(mainHitch?.last)}`,
       `Sim:   ${formatMs(simFrame?.avg)} frame  ${formatMs(simStep?.avg)} step  steps/frame ${formatNum(simSteps?.avg)}`
     ];
-    if (activeRenderMode === "2d") {
-      lines.push(`2D:    draw ${formatMs(draw2d?.avg)}  ui ${formatMs(ui2d?.avg)}  overlay ${formatMs(overlay2d?.avg)}`);
-    } else {
-      lines.push(
-        `3D sync: climate ${formatMs(climate3d?.avg)}  terrain ${formatMs(terrain3d?.avg)}  deferred ${formatNum(terrainDeferred3d?.avg)}`
-      );
-      if (threePerf) {
+    lines.push(
+      `3D sync: climate ${formatMs(climate3d?.avg)}  terrain ${formatMs(terrain3d?.avg)}  deferred ${formatNum(terrainDeferred3d?.avg)}`
+    );
+    if (threePerf) {
         lines.push(`3D frame: ${formatMs(threePerf.frameMs)}  fps ${formatNum(threePerf.fps)}`);
         lines.push(
           `3D slices: scene ${formatMs(threePerf.sceneRenderMs)}  post ${formatMs(threePerf.postMs)}  dof ${formatMs(threePerf.dofMs)}`
@@ -779,7 +734,6 @@ export const createAppRuntime = (): AppRuntime => {
         lines.push(
           `3D ctx: loss ${formatInt(threePerf.contextLosses)} restore ${formatInt(threePerf.contextRestores)}`
         );
-      }
     }
     if (longTaskStats.count > 0 && now - longTaskStats.lastAt < 60000) {
       lines.push(
@@ -790,7 +744,7 @@ export const createAppRuntime = (): AppRuntime => {
   };
   
   const maybeUpdatePerfDiagnostics = (now: number): void => {
-    const threePerf = activeRenderMode === "3d" ? threeTestController?.getPerfSnapshot() ?? null : null;
+    const threePerf = threeTestController?.getPerfSnapshot() ?? null;
     if (threePerf) {
       recordPerfSample("3d.frame", threePerf.frameMs);
       recordPerfSample("3d.scene", threePerf.sceneRenderMs);
@@ -809,7 +763,7 @@ export const createAppRuntime = (): AppRuntime => {
     }
     const perfConsoleAlways = isPerfConsoleAlways();
     if ((perfOverlayVisible || perfConsoleAlways) && now - lastPerfConsoleLog >= PERF_CONSOLE_INTERVAL_MS) {
-      if (activeRenderMode === "3d") {
+      if (threePerf) {
         const mainAvg = readRecentPerf("main.frame", now)?.avg ?? 0;
         const simAvg = readRecentPerf("sim.frame", now)?.avg ?? 0;
         const climateAvg = readRecentPerf("3d.climateSync", now)?.avg ?? 0;
@@ -847,24 +801,6 @@ export const createAppRuntime = (): AppRuntime => {
             `terrainSample=${terrainSampleBuild.toFixed(2)} terrainSkip=${terrainSkipped.toFixed(2)}(${Math.round(threeTestTerrainSyncSkippedCount)}) terrainBatch=${terrainVisualBatched.toFixed(2)}(${Math.round(threeTestTerrainVisualBatchedCount)}) terrainReuseFull=${Math.round(threePerf?.terrainSetFastReuseCount ?? 0)}/${Math.round(threePerf?.terrainSetFullRebuildCount ?? 0)} ` +
             `fx=${threeFx.toFixed(2)} hud=${threeHud.toFixed(2)} ctxLoss=${Math.round(contextLosses)} ctxRestore=${Math.round(contextRestores)} ` +
             `calls=${Math.round(sceneCalls)} tri=${Math.round(sceneTriangles)}`
-        );
-      } else {
-        const mainAvg = readRecentPerf("main.frame", now)?.avg ?? 0;
-        const simAvg = readRecentPerf("sim.frame", now)?.avg ?? 0;
-        const drawAvg = readRecentPerf("2d.draw", now)?.avg ?? 0;
-        const uiAvg = readRecentPerf("2d.ui", now)?.avg ?? 0;
-        const overlayAvg = readRecentPerf("2d.overlay", now)?.avg ?? 0;
-        const mainGap = readRecentPerf("main.rafGap", now)?.avg ?? 0;
-        const hitch = readRecentPerf("main.hitch", now)?.last ?? 0;
-        console.log(
-          `[perf] mode=2d main=${mainAvg.toFixed(2)}ms sim=${simAvg.toFixed(2)}ms ` +
-            `seasonal=${isThreeTestSeasonalEnabled() ? 1 : 0} ` +
-            `nosim=${isThreeTestNoSimEnabled() ? 1 : 0} ` +
-            `noterrain=${isThreeTestTerrainSyncDisabled() ? 1 : 0} ` +
-            `trees=${isThreeTestTreeRenderingEnabled() ? 1 : 0} ` +
-            `detailStruct=${isThreeTestDetailedStructuresEnabled() ? 1 : 0} ` +
-            `gap=${mainGap.toFixed(2)}ms hitch=${hitch.toFixed(2)}ms ` +
-            `draw=${drawAvg.toFixed(2)}ms ui=${uiAvg.toFixed(2)}ms overlay=${overlayAvg.toFixed(2)}ms`
         );
       }
       lastPerfConsoleLog = now;
@@ -1138,16 +1074,17 @@ export const createAppRuntime = (): AppRuntime => {
     if (!threeTestOverlay) {
       return;
     }
-    setRenderMode(visible ? "3d" : "2d");
     if (visible && mountPhaseUi) {
       clearThreeOverlayHudMount();
       mountPhaseUiIntoThreeTest();
     } else {
       restorePhaseUiMount();
       clearThreeOverlayHudMount();
+      phaseUiRoot?.classList.add("hidden");
     }
     threeTestOverlay.classList.toggle("hidden", !visible);
     threeTestOverlay.setAttribute("aria-hidden", visible ? "false" : "true");
+    resetPerfDiagnostics();
   };
   
   const prepareTerrainPreview = async (config: NewRunConfig, debug?: MapGenDebug): Promise<void> => {
@@ -1163,7 +1100,6 @@ export const createAppRuntime = (): AppRuntime => {
         syncRenderState(renderState, state.grid);
       }
       activeTerrainSource = cloneTerrainRecipe(config.options.terrain);
-      resetTerrainCaches();
       resetState(state, seed);
       syncTimeSpeedControlMode();
       rng.setState(seed);
@@ -1237,10 +1173,10 @@ export const createAppRuntime = (): AppRuntime => {
   };
 
   const handleThreeRendererUnavailable = (featureLabel: string, error: unknown): void => {
-    forceLegacy2dFallback();
     setThreeOverlayVisible(false);
     configureThreeOverlayMode(null);
     setStatus(state, formatRendererUnavailableStatus(featureLabel, error));
+    state.paused = true;
     syncMusicContext();
   };
 
@@ -1373,6 +1309,11 @@ export const createAppRuntime = (): AppRuntime => {
           savedThreeTestSmokeRate = null;
         }
         handleThreeRendererUnavailable("3D mode", error);
+        if (titleScreenEnabled) {
+          showTitleScreen();
+        } else {
+          showFallbackMenu();
+        }
         return;
       }
     }
@@ -1502,7 +1443,7 @@ export const createAppRuntime = (): AppRuntime => {
       }
       return;
     }
-    if (!isLegacy2dEnabled() && !force && activeThreeOverlayMode !== "run") {
+    if (!force && activeThreeOverlayMode !== "run") {
       return;
     }
     if (!threeTestOverlay) {
@@ -1525,6 +1466,7 @@ export const createAppRuntime = (): AppRuntime => {
 
   const returnToStartMenu = (): void => {
     const closingLab = activeThreeOverlayMode === "fx-lab" || activeThreeOverlayMode === "sim-lab";
+    endRunScreen?.hide();
     closeThreeTest(true);
     uiState.overlayVisible = false;
     uiState.overlayAction = "dismiss";
@@ -1538,6 +1480,7 @@ export const createAppRuntime = (): AppRuntime => {
 
   const returnToMainMenu = (): void => {
     const closingLab = activeThreeOverlayMode === "fx-lab" || activeThreeOverlayMode === "sim-lab";
+    endRunScreen?.hide();
     closeThreeTest(true);
     uiState.overlayVisible = false;
     uiState.overlayAction = "dismiss";
@@ -1554,6 +1497,46 @@ export const createAppRuntime = (): AppRuntime => {
     }
     syncMusicContext();
   };
+
+  const openNewRunFromEndRunScreen = (): void => {
+    endRunScreen?.hide();
+    closeThreeTest(true);
+    uiState.overlayVisible = false;
+    uiState.overlayAction = "dismiss";
+    updateOverlay(overlayRefs, uiState);
+    if (phaseUi && startNewRunButton) {
+      startNewRunButton.click();
+      return;
+    }
+    showFallbackMenu();
+  };
+
+  endRunScreen = threeTestOverlay
+    ? createEndRunScreen({
+        mount: threeTestOverlay,
+        onNewRun: openNewRunFromEndRunScreen,
+        onMainMenu: returnToMainMenu
+      })
+    : null;
+
+  function showEndRunScreen(payload: GameOverPayload): void {
+    uiState.overlayVisible = false;
+    uiState.overlayAction = "dismiss";
+    updateOverlay(overlayRefs, uiState);
+    state.paused = true;
+    if (threeTestOverlay?.classList.contains("hidden") && threeTestController) {
+      setThreeOverlayVisible(true, true);
+    }
+    endRunScreen?.show({
+      victory: payload.victory,
+      reason: payload.reason,
+      score: payload.score,
+      seed: payload.seed,
+      year: state.year,
+      callsign: state.campaign.callsign.trim() || "Chief"
+    });
+    syncMusicContext();
+  }
 
   const destroyTitleScreen = (): void => {
     titleScreen?.destroy();
@@ -1593,6 +1576,7 @@ export const createAppRuntime = (): AppRuntime => {
     if (!titleScreenEnabled || titleScreen) {
       return;
     }
+    endRunScreen?.hide();
     mapEditor?.close();
     const mount = appRoot ?? document.body;
     titleScreenVisible = true;
@@ -1665,6 +1649,7 @@ export const createAppRuntime = (): AppRuntime => {
     if (isGenerating) {
       return;
     }
+    endRunScreen?.hide();
     mapEditor?.close();
     isGenerating = true;
     const { seed, mapSize, characterId, chiefGender, callsign } = config;
@@ -1680,7 +1665,6 @@ export const createAppRuntime = (): AppRuntime => {
         syncRenderState(renderState, state.grid);
       }
       activeTerrainSource = cloneTerrainRecipe(config.options.terrain);
-      resetTerrainCaches();
       resetState(state, seed);
       syncTimeSpeedControlMode();
       state.fireSettings = normalizeFireSettings(config.options.fire);
@@ -1764,26 +1748,6 @@ export const createAppRuntime = (): AppRuntime => {
     syncMusicContext();
   };
 
-  const renderBackend = createRenderBackend(() => getConfiguredRenderBackend(), {
-    renderLegacy2d: (alpha: number) => {
-      const stats = renderLegacy2dFrame({
-        state,
-        inputState,
-        uiState,
-        effectsState,
-        renderState,
-        canvas,
-        ctx,
-        overlayRefs,
-        phaseUi,
-        alpha
-      });
-      recordPerfSample("2d.ui", stats.uiMs);
-      recordPerfSample("2d.overlay", stats.overlayMs);
-      recordPerfSample("2d.draw", stats.drawMs);
-    }
-  });
-  
   if (threeTestEndRunButton) {
     threeTestEndRunButton.addEventListener("click", () => {
       if (activeThreeOverlayMode === "fx-lab" || activeThreeOverlayMode === "sim-lab") {
@@ -1791,7 +1755,6 @@ export const createAppRuntime = (): AppRuntime => {
         return;
       }
       endGame(state, false, "Run ended from 3D test.");
-      returnToStartMenu();
     });
   }
   threeTestRunMainMenuButton.addEventListener("click", () => {
@@ -1822,7 +1785,6 @@ export const createAppRuntime = (): AppRuntime => {
           closeFireSimLab();
           return;
         }
-        closeThreeTest();
       }
     });
   }
@@ -1900,7 +1862,7 @@ export const createAppRuntime = (): AppRuntime => {
           onSimLab: () => openFireSimLab(),
           overlayRefs,
           showStartMenuOnBind: false,
-          startThreeOnConfirm: () => !isLegacy2dEnabled(),
+          startThreeOnConfirm: true,
           onMinimapPan: (tile) => {
             if (threeTestController) {
               threeTestController.panToTile(tile.x, tile.y);
@@ -1940,7 +1902,7 @@ export const createAppRuntime = (): AppRuntime => {
           onSimLab: () => openFireSimLab(),
           overlayRefs,
           showStartMenuOnBind: !initialFxLabEnabled && !initialFireSimLabEnabled,
-          startThreeOnConfirm: () => !isLegacy2dEnabled(),
+          startThreeOnConfirm: true,
           onMinimapPan: (tile) => {
             if (threeTestController) {
               threeTestController.panToTile(tile.x, tile.y);
@@ -1992,7 +1954,8 @@ export const createAppRuntime = (): AppRuntime => {
       isCharacterScreenVisible: () => !characterScreen.classList.contains("hidden"),
       isStartMenuVisible: () => (startMenu ? !startMenu.classList.contains("hidden") : false),
       isDocumentHidden: () => document.hidden,
-      isThreeTestVisible: () => activeRenderMode === "3d" && !!threeTestController,
+      isThreeTestVisible: () =>
+        !!threeTestController && !!threeTestOverlay && !threeTestOverlay.classList.contains("hidden"),
       isIncidentMode: () => state.simTimeMode === "incident",
       isThreeTestNoSim: isThreeTestNoSimEnabled,
       isSimulationEffectivelyPaused: () => isSimulationEffectivelyPaused(state),
@@ -2008,9 +1971,6 @@ export const createAppRuntime = (): AppRuntime => {
         recordPerfSample("3d.phaseUi", performance.now() - uiStartedAt);
         const controller = threeTestController;
         controller?.setSimulationAlpha(alpha);
-        if (state.gameOver) {
-          closeThreeTest();
-        }
         if (isThreeTestSeasonalRecolorEnabled()) {
           syncThreeTestClimateVisuals();
         }
@@ -2027,9 +1987,7 @@ export const createAppRuntime = (): AppRuntime => {
           }
         }
       },
-      render2dFrame: (alpha: number) => {
-        renderBackend.frame(alpha);
-      },
+      renderFrame: () => {},
       recordPerfSample,
       maybeUpdatePerfDiagnostics: (now: number) => {
         syncMusicContext();
@@ -2046,7 +2004,8 @@ export const createAppRuntime = (): AppRuntime => {
     closeThreeTest(true);
     closeFxLab();
     closeFireSimLab();
-    renderBackend.dispose();
+    endRunScreen?.destroy();
+    endRunScreen = null;
     phaseUiDisposer?.();
     phaseUiDisposer = null;
     unsubscribeRuntimeSettings();

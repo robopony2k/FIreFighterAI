@@ -253,16 +253,15 @@ Migration guidance:
 
 ## Legacy 2D Renderer (`legacy2d`)
 
-Status: Deprecated as of February 16, 2026.
+Status: Removed as of May 17, 2026. Previously deprecated as of February 16, 2026.
 
-- Default runtime backend is now `3d`.
-- The legacy 2D renderer is still available only via explicit query flag: `?render=2d`.
-- When `?render=2d` is used, the app logs a one-time warning that 2D is deprecated.
+- 3D is now the only gameplay renderer.
+- `?render=2d`, the runtime renderer setting, and the legacy 2D fallback path have been removed.
+- Game-over and manual End Run flows now stay on the 3D runtime and show the end-run summary placeholder instead of exposing the old 2D canvas/phase UI.
 - New rendering features should target the 3D backend only.
-- Legacy 2D is planned for removal in the next major refactor cycle after compatibility soak.
 
 Migration guidance:
 
 1. Prefer 3D runtime path and `threeTest`-backed rendering flows.
-2. Treat `src/render/legacy2d/` as compatibility-only.
-3. Keep behavior parity fixes in 2D minimal and avoid adding new feature work.
+2. Use `src/ui/end-run/endRunScreen.ts` for terminal run presentation until the final end-run screen design replaces the placeholder.
+3. Do not reintroduce 2D fallback behavior for WebGL failures; route users to menu/status recovery instead.

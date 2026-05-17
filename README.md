@@ -7,8 +7,7 @@ Top-down firefighting strategy game built with TypeScript + Canvas. Procedural l
 2. Open `http://localhost:5173`.
 
 Runtime flags:
-- `?render=2d`: enable legacy 2D compatibility renderer (deprecated).
-- Default is 3D runtime.
+- Default and only gameplay renderer is the 3D runtime.
 
 Alternative:
 - VS Code: use the "Live Server" extension.
@@ -29,4 +28,4 @@ The compiled output is `dist/main.js`.
 ## Notes
 - Leaderboard is stored in localStorage on this browser.
 - Seed is shown in the top bar for repeatable maps.
-- 2D rendering is deprecated and kept only for compatibility behind `?render=2d`.
+- Game-over and End Run flows use the 3D end-run summary screen.

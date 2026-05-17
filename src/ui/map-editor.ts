@@ -50,7 +50,6 @@ import {
   type TerrainHeightProvenance,
   type TerrainRenderDebugOptions
 } from "../render/threeTestTerrain.js";
-import { resetTerrainCaches } from "../render/terrainCache.js";
 import { DEFAULT_MAP_SIZE, DEFAULT_RUN_SEED, type NewRunConfig } from "./run-config.js";
 import { buildTerrainControls } from "./terrain-controls.js";
 import {
@@ -1714,7 +1713,6 @@ export const initMapEditor = (refs: MapEditorRefs, deps: MapEditorDeps): MapEdit
       const targetPhaseRank = getPhaseRank(previewConfig.stopAfterPhase);
       const session = ensurePreviewPipelineSession(draft, cacheKey);
       const world = session.state;
-      resetTerrainCaches();
       const debug: MapGenDebug = {
         stopAfterPhase: previewConfig.stopAfterPhase,
         onPhase: async (snapshot) => {
