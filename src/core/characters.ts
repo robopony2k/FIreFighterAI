@@ -1,4 +1,8 @@
 export type CharacterId = "chief" | "strategist" | "logistics" | "trainer" | "air-ops" | "community";
+export type ChiefGender = "male" | "female";
+
+export const DEFAULT_CHIEF_GENDER: ChiefGender = "male";
+export const CHIEF_GENDERS: ChiefGender[] = ["male", "female"];
 
 export interface CharacterModifiers {
   budgetMultiplier: number;
@@ -15,7 +19,7 @@ export interface CharacterDefinition {
   title: string;
   description: string;
   accent: string;
-  portrait: string;
+  portraits: Record<ChiefGender, string>;
   modifiers: CharacterModifiers;
 }
 
@@ -26,7 +30,10 @@ export const CHARACTERS: CharacterDefinition[] = [
     title: "Unified Command",
     description: "Steady, balanced leadership across budgets and response.",
     accent: "#b43a22",
-    portrait: "assets/chiefs/incident-commander.svg",
+    portraits: {
+      male: "assets/chiefs/chief-incident_commander-male.png",
+      female: "assets/chiefs/chief-incident_commander-female.png"
+    },
     modifiers: {
       budgetMultiplier: 1,
       unitSpeedMultiplier: 1,
@@ -42,7 +49,10 @@ export const CHARACTERS: CharacterDefinition[] = [
     title: "Containment Planning",
     description: "Leans on containment planning and smarter suppression lines.",
     accent: "#2b688c",
-    portrait: "assets/chiefs/strategic-chief.svg",
+    portraits: {
+      male: "assets/chiefs/chief-strategic_chief-male.png",
+      female: "assets/chiefs/chief-strategic_chief-female.png"
+    },
     modifiers: {
       budgetMultiplier: 0.95,
       unitSpeedMultiplier: 1,
@@ -58,7 +68,10 @@ export const CHARACTERS: CharacterDefinition[] = [
     title: "Supply & Mobilization",
     description: "More resources and faster deployments, less raw suppression.",
     accent: "#f0b33b",
-    portrait: "assets/chiefs/logistics-chief.svg",
+    portraits: {
+      male: "assets/chiefs/chief-logistics_chief-male.png",
+      female: "assets/chiefs/chief-logistics_chief-female.png"
+    },
     modifiers: {
       budgetMultiplier: 1.12,
       unitSpeedMultiplier: 1.06,
@@ -74,7 +87,10 @@ export const CHARACTERS: CharacterDefinition[] = [
     title: "Crew Excellence",
     description: "Elite crews hit harder but cost more to field.",
     accent: "#8b5d33",
-    portrait: "assets/chiefs/training-captain.svg",
+    portraits: {
+      male: "assets/chiefs/chief-training_captain-male.png",
+      female: "assets/chiefs/chief-training_captain-female.png"
+    },
     modifiers: {
       budgetMultiplier: 0.92,
       unitSpeedMultiplier: 1,
@@ -90,7 +106,10 @@ export const CHARACTERS: CharacterDefinition[] = [
     title: "Rapid Response",
     description: "Fast aerial coordination sharpens response time.",
     accent: "#2a6f97",
-    portrait: "assets/chiefs/air-operations.svg",
+    portraits: {
+      male: "assets/chiefs/chief-air_operations-male.png",
+      female: "assets/chiefs/chief-air_operations-female.png"
+    },
     modifiers: {
       budgetMultiplier: 0.9,
       unitSpeedMultiplier: 1.1,
@@ -106,7 +125,10 @@ export const CHARACTERS: CharacterDefinition[] = [
     title: "Prevention & Outreach",
     description: "Stronger prevention planning and higher public support.",
     accent: "#5a8f4e",
-    portrait: "assets/chiefs/community-liaison.svg",
+    portraits: {
+      male: "assets/chiefs/chief-community_liaison-male.png",
+      female: "assets/chiefs/chief-community_liaison-female.png"
+    },
     modifiers: {
       budgetMultiplier: 1.05,
       unitSpeedMultiplier: 0.98,

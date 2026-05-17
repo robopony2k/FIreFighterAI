@@ -148,7 +148,9 @@ Purpose: expose tunable run constants before each campaign. Defaults are shown, 
 ### Tabs and Fields
 
 Command Roster
-- Chief selection + modifiers (budget, speed, power, containment, firebreak cost, approval retention).
+- Chief selection uses compact portrait icons and a large selected-chief detail panel with paired male/female PNG portrait art.
+- The roster includes a male/female portrait toggle; random callsigns use first-name pools matching the selected toggle.
+- Chief modifiers are shown for budget, speed, power, containment, firebreak cost, and approval retention.
 - Starting roster composition (2 firefighters + 1 truck).
 - Unit economy + stats (recruit costs, training cost/cap/gains, unit speed/power/radius, truck capacity/board radius, tether distance, formation spacing, movement cost/slope factors, unit loss fire threshold).
 - Firebreak cost per tile.

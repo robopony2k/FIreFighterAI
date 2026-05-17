@@ -1,6 +1,6 @@
 import { BASE_BUDGET, TILE_SIZE, MAP_SCALE, MAP_SIZE_PRESETS } from "../core/config.js";
 import type { MapSizeId } from "../core/config.js";
-import { getCharacterBaseBudget } from "../core/characters.js";
+import { DEFAULT_CHIEF_GENDER, getCharacterBaseBudget } from "../core/characters.js";
 import { RNG } from "../core/rng.js";
 import { computeChecksum, createInitialState, resetState, setStatus, TILE_TYPE_IDS } from "../core/state.js";
 import { ensureTileSoA, syncTileSoA } from "../core/tileCache.js";
@@ -148,6 +148,7 @@ const cloneRunConfig = (config: NewRunConfig): NewRunConfig => ({
   seed: Number.isFinite(config.seed) ? Math.floor(config.seed) : DEFAULT_RUN_SEED,
   mapSize: config.mapSize,
   characterId: config.characterId,
+  chiefGender: config.chiefGender ?? DEFAULT_CHIEF_GENDER,
   callsign: config.callsign,
   options: {
     ...DEFAULT_RUN_OPTIONS,
@@ -166,6 +167,7 @@ const resolveRunConfig = (defaults: NewRunConfig, persisted?: NewRunConfig | nul
     seed: persisted.seed,
     mapSize: persisted.mapSize,
     characterId: persisted.characterId,
+    chiefGender: persisted.chiefGender ?? defaults.chiefGender,
     callsign: persisted.callsign.trim().length > 0 ? persisted.callsign : defaults.callsign,
     options: {
       ...defaults.options,
@@ -1659,7 +1661,7 @@ export const createAppRuntime = (): AppRuntime => {
     }
     mapEditor?.close();
     isGenerating = true;
-    const { seed, mapSize, characterId, callsign } = config;
+    const { seed, mapSize, characterId, chiefGender, callsign } = config;
     try {
       resetInputState(inputState);
       resetEffectsState(effectsState);
@@ -1678,6 +1680,7 @@ export const createAppRuntime = (): AppRuntime => {
       state.fireSettings = normalizeFireSettings(config.options.fire);
       setFuelProfiles(config.options.fuelProfiles);
       state.campaign.characterId = characterId;
+      state.campaign.chiefGender = chiefGender;
       state.campaign.callsign = callsign;
       const baseBudget = getCharacterBaseBudget(state.campaign.characterId, BASE_BUDGET);
       state.budget = baseBudget;
@@ -1717,6 +1720,7 @@ export const createAppRuntime = (): AppRuntime => {
       fuelProfiles: { ...persistedFuelProfiles }
     },
     characterId: state.campaign.characterId,
+    chiefGender: state.campaign.chiefGender,
     callsign: state.campaign.callsign
   };
   const initialRunConfig: NewRunConfig = resolveRunConfig(defaultRunConfig, persistedLastRunConfig);

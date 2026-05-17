@@ -1,4 +1,4 @@
-import type { CharacterId } from "../core/characters.js";
+import type { CharacterId, ChiefGender } from "../core/characters.js";
 import type { MapSizeId } from "../core/config.js";
 import { DEFAULT_FIRE_SETTINGS } from "../core/config.js";
 import type { FireSettings, FuelProfile, TileType } from "../core/types.js";
@@ -18,6 +18,7 @@ export type NewRunConfig = {
   seed: number;
   mapSize: MapSizeId;
   characterId: CharacterId;
+  chiefGender: ChiefGender;
   callsign: string;
   options: RunOptions;
 };

@@ -1,5 +1,19 @@
 # Deprecations
 
+## SVG Placeholder Chief Portrait Roster
+
+Status: Deprecated as of May 16, 2026.
+
+- The new campaign Command Roster now uses 496 x 496 PNG chief portraits instead of compact SVG placeholder portraits.
+- Chief selection should present small selectable portrait icons with a larger selected-chief detail panel.
+- Future chief portrait work should add or replace PNG assets under `assets/chiefs/` and route them through `src/core/characters.ts`.
+
+Migration guidance:
+
+1. Do not add new chief SVG placeholders for the roster.
+2. Keep portrait asset paths in character metadata so UI code remains data-driven.
+3. Preserve the icon-plus-detail selection pattern when adding future chiefs.
+
 ## Player-Facing Road Aggressiveness as Connectivity Fix
 
 Status: Deprecated as of May 16, 2026.

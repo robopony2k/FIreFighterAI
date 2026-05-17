@@ -1,6 +1,6 @@
 import type { WorldState } from "../core/state.js";
-import { CHARACTERS, getCharacterInitials } from "../core/characters.js";
-import type { CharacterId, CharacterDefinition } from "../core/characters.js";
+import { CHARACTERS, CHIEF_GENDERS, DEFAULT_CHIEF_GENDER, getCharacterInitials } from "../core/characters.js";
+import type { CharacterId, CharacterDefinition, ChiefGender } from "../core/characters.js";
 import { FUEL_PROFILES, type MapSizeId } from "../core/config.js";
 import type { FireSettings, FuelProfile, TileType } from "../core/types.js";
 import { DEFAULT_MAP_SIZE, DEFAULT_RUN_OPTIONS, DEFAULT_RUN_SEED, normalizeFireSettings } from "./run-config.js";
@@ -111,28 +111,41 @@ const cloneRunConfig = (config: NewRunConfig): NewRunConfig => ({
   seed: Number.isFinite(config.seed) ? Math.floor(config.seed) : DEFAULT_RUN_SEED,
   mapSize: config.mapSize,
   characterId: config.characterId,
+  chiefGender: config.chiefGender ?? DEFAULT_CHIEF_GENDER,
   callsign: config.callsign,
   options: cloneRunOptions(config.options)
 });
 
-const FIRST_NAMES = [
-  "Alex",
-  "Riley",
-  "Jordan",
-  "Casey",
-  "Morgan",
-  "Avery",
-  "Quinn",
-  "Parker",
-  "Rowan",
-  "Hayden",
-  "Logan",
-  "Emery",
-  "Reese",
-  "Sawyer",
-  "Cameron",
-  "Ellis"
-];
+const FIRST_NAMES: Record<ChiefGender, string[]> = {
+  male: [
+    "Alex",
+    "Riley",
+    "Jordan",
+    "Casey",
+    "Logan",
+    "Hayden",
+    "Cameron",
+    "Ellis",
+    "Wyatt",
+    "Beckett",
+    "Drew",
+    "Miles"
+  ],
+  female: [
+    "Avery",
+    "Morgan",
+    "Quinn",
+    "Parker",
+    "Rowan",
+    "Emery",
+    "Reese",
+    "Sawyer",
+    "Harper",
+    "Maya",
+    "Tessa",
+    "Nora"
+  ]
+};
 
 const LAST_NAMES = [
   "Sparks",
@@ -164,8 +177,8 @@ const NICKNAMES: Record<CharacterId, string[]> = {
 
 const pickRandom = <T,>(options: T[]): T => options[Math.floor(Math.random() * options.length)];
 
-const buildCallsign = (characterId: CharacterId): string => {
-  const first = pickRandom(FIRST_NAMES);
+const buildCallsign = (characterId: CharacterId, chiefGender: ChiefGender): string => {
+  const first = pickRandom(FIRST_NAMES[chiefGender]);
   const last = pickRandom(LAST_NAMES);
   const nick = pickRandom(NICKNAMES[characterId]);
   return `${first} "${nick}" ${last}`;
@@ -188,42 +201,68 @@ export function initCharacterSelect(
         fuelProfiles: { ...loadFuelProfileOverrides() }
       },
       characterId: state.campaign.characterId,
+      chiefGender: state.campaign.chiefGender,
       callsign: state.campaign.callsign
     }
   );
   let selectedId: CharacterId = defaultConfig.characterId;
+  let selectedGender: ChiefGender = defaultConfig.chiefGender;
   let fuelProfileOverrides = { ...defaultConfig.options.fuelProfiles };
   let fuelProfiles = buildFuelProfiles(fuelProfileOverrides);
   const fuelProfileInputs: HTMLInputElement[] = [];
   const fuelProfileHeaderCells = new Map<keyof FuelProfile, HTMLDivElement>();
   const fuelProfileTypeCells = new Map<TileType, HTMLDivElement>();
   const cards = new Map<CharacterId, HTMLButtonElement>();
+  const genderButtons = new Map<ChiefGender, HTMLButtonElement>();
+  const genderControl = document.createElement("div");
+  const previewDetails = document.createElement("div");
   let mapScenarios: MapScenario[] = [];
   let selectedScenarioOptionId = "";
+
+  genderControl.className = "character-gender-toggle";
+  genderControl.setAttribute("role", "group");
+  genderControl.setAttribute("aria-label", "Chief portrait gender");
+  CHIEF_GENDERS.forEach((gender) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "character-gender-option";
+    button.dataset.chiefGender = gender;
+    button.textContent = gender === "male" ? "Male" : "Female";
+    button.addEventListener("click", () => {
+      selectedGender = gender;
+      state.campaign.chiefGender = selectedGender;
+      updateSelection();
+    });
+    genderControl.appendChild(button);
+    genderButtons.set(gender, button);
+  });
+  ui.characterNameInput.closest(".character-preview-fields")?.prepend(genderControl);
+
+  previewDetails.className = "character-preview-details";
+  ui.characterPreviewPortrait.insertAdjacentElement("afterend", previewDetails);
+
+  const getPortrait = (character: CharacterDefinition): string =>
+    character.portraits[selectedGender] ?? character.portraits[DEFAULT_CHIEF_GENDER];
 
   ui.characterGrid.innerHTML = "";
   CHARACTERS.forEach((character) => {
     const initials = getCharacterInitials(character.name);
+    const portrait = getPortrait(character);
     const card = document.createElement("button");
     card.type = "button";
     card.className = "character-card";
     card.dataset.id = character.id;
+    card.setAttribute("aria-label", `Select ${character.name}, ${character.title}`);
     card.innerHTML = `
-      <div class="character-card-top">
+      <div class="character-card-frame">
         <div class="character-portrait has-photo" style="--chief-accent: ${character.accent};">
-          <img src="${character.portrait}" alt="${character.name} portrait" loading="lazy" />
+          <img src="${portrait}" alt="${character.name} portrait" loading="lazy" />
           <span>${initials}</span>
         </div>
-        <div>
-          <div class="character-name">${character.name}</div>
-          <div class="character-title">${character.title}</div>
-        </div>
       </div>
-      <p class="character-desc">${character.description}</p>
-      <div class="character-stats">
-        ${buildStats(character)
-          .map((stat) => `<div>${stat}</div>`)
-          .join("")}
+      <div class="character-card-label">
+        <div class="character-name">${character.name}</div>
+        <div class="character-title">${character.title}</div>
       </div>
     `;
     card.addEventListener("click", () => {
@@ -236,12 +275,24 @@ export function initCharacterSelect(
 
   const updatePreview = (): void => {
     const chosen = CHARACTERS.find((entry) => entry.id === selectedId) ?? CHARACTERS[0];
+    const portrait = getPortrait(chosen);
     ui.characterSummary.textContent = `${chosen.name} - ${chosen.title}. ${chosen.description}`;
     ui.characterPreviewInitials.textContent = getCharacterInitials(chosen.name);
     ui.characterPreviewPortrait.style.setProperty("--chief-accent", chosen.accent);
-    ui.characterPreviewImage.src = chosen.portrait;
+    ui.characterPreviewImage.src = portrait;
     ui.characterPreviewImage.alt = `${chosen.name} portrait`;
     ui.characterPreviewPortrait.classList.add("has-photo");
+    previewDetails.innerHTML = `
+      <div class="character-preview-kicker">Selected Chief</div>
+      <div class="character-preview-name">${chosen.name}</div>
+      <div class="character-preview-title">${chosen.title}</div>
+      <p class="character-preview-desc">${chosen.description}</p>
+      <div class="character-preview-stats">
+        ${buildStats(chosen)
+          .map((stat) => `<div>${stat}</div>`)
+          .join("")}
+      </div>
+    `;
   };
 
   const updateSelection = (): void => {
@@ -249,6 +300,17 @@ export function initCharacterSelect(
       const active = id === selectedId;
       card.classList.toggle("selected", active);
       card.setAttribute("aria-pressed", active ? "true" : "false");
+      const character = CHARACTERS.find((entry) => entry.id === id);
+      const image = card.querySelector<HTMLImageElement>("img");
+      if (character && image) {
+        image.src = getPortrait(character);
+        image.alt = `${character.name} portrait`;
+      }
+    });
+    genderButtons.forEach((button, gender) => {
+      const active = gender === selectedGender;
+      button.classList.toggle("is-active", active);
+      button.setAttribute("aria-pressed", active ? "true" : "false");
     });
     updatePreview();
     updateConfirmState();
@@ -259,7 +321,7 @@ export function initCharacterSelect(
   };
 
   const applyRandomName = (): void => {
-    const name = buildCallsign(selectedId);
+    const name = buildCallsign(selectedId, selectedGender);
     ui.characterNameInput.value = name;
     state.campaign.callsign = name;
     updateConfirmState();
@@ -572,7 +634,9 @@ export function initCharacterSelect(
   const applyConfigToForm = (config: NewRunConfig, fillMissingCallsign: boolean): void => {
     const nextConfig = cloneRunConfig(config);
     selectedId = nextConfig.characterId;
+    selectedGender = nextConfig.chiefGender;
     state.campaign.characterId = selectedId;
+    state.campaign.chiefGender = selectedGender;
     state.campaign.callsign = nextConfig.callsign;
     ui.characterNameInput.value = nextConfig.callsign;
     setSelectedMapSize(nextConfig.mapSize);
@@ -663,8 +727,9 @@ export function initCharacterSelect(
 
   ui.characterConfirm.addEventListener("click", () => {
     state.campaign.characterId = selectedId;
+    state.campaign.chiefGender = selectedGender;
     const trimmed = ui.characterNameInput.value.trim();
-    const callsign = trimmed || buildCallsign(selectedId);
+    const callsign = trimmed || buildCallsign(selectedId, selectedGender);
     state.campaign.callsign = callsign;
     ui.characterNameInput.value = callsign;
     const config: NewRunConfig = {
@@ -672,6 +737,7 @@ export function initCharacterSelect(
       mapSize: getSelectedMapSize(),
       options: getRunOptions(),
       characterId: selectedId,
+      chiefGender: selectedGender,
       callsign
     };
     ui.characterScreen.classList.add("hidden");
@@ -681,12 +747,13 @@ export function initCharacterSelect(
 
   const getCurrentConfig = (): NewRunConfig => {
     const trimmed = ui.characterNameInput.value.trim();
-    const callsign = trimmed || state.campaign.callsign || buildCallsign(selectedId);
+    const callsign = trimmed || state.campaign.callsign || buildCallsign(selectedId, selectedGender);
     return {
       seed: readSeedNumber(),
       mapSize: getSelectedMapSize(),
       options: getRunOptions(),
       characterId: selectedId,
+      chiefGender: selectedGender,
       callsign
     };
   };

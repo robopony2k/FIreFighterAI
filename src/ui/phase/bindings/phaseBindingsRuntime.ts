@@ -5,6 +5,7 @@ import type { UiState } from "../../../core/uiState.js";
 import type { RenderState } from "../../../render/renderState.js";
 import { ZOOM_STEP } from "../../../core/config.js";
 import { inBounds } from "../../../core/grid.js";
+import { DEFAULT_CHIEF_GENDER } from "../../../core/characters.js";
 import { screenToWorld, zoomAtPointer } from "../../../render/inputProjection.js";
 import { setStatus } from "../../../core/state.js";
 import { formatTimeSpeedValue, stepTimeSpeedSliderValue } from "../../../core/timeSpeed.js";
@@ -93,6 +94,7 @@ const cloneRunConfig = (config: NewRunConfig): NewRunConfig => ({
   seed: Number.isFinite(config.seed) ? Math.floor(config.seed) : DEFAULT_RUN_SEED,
   mapSize: config.mapSize,
   characterId: config.characterId,
+  chiefGender: config.chiefGender ?? DEFAULT_CHIEF_GENDER,
   callsign: config.callsign,
   options: {
     ...DEFAULT_RUN_OPTIONS,
@@ -111,6 +113,7 @@ const resolveRunConfig = (defaults: NewRunConfig, persisted?: NewRunConfig | nul
     seed: persisted.seed,
     mapSize: persisted.mapSize,
     characterId: persisted.characterId,
+    chiefGender: persisted.chiefGender ?? defaults.chiefGender,
     callsign: persisted.callsign.trim().length > 0 ? persisted.callsign : defaults.callsign,
     options: {
       ...defaults.options,
@@ -380,6 +383,7 @@ export const bindPhaseUi = ({
       fuelProfiles: { ...loadFuelProfileOverrides() }
     },
     characterId: state.campaign.characterId,
+    chiefGender: state.campaign.chiefGender,
     callsign: state.campaign.callsign
   };
   let lastRunConfig: NewRunConfig = resolveRunConfig(defaultRunConfig, loadLastRunConfig());
