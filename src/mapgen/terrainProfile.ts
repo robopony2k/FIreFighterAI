@@ -520,6 +520,8 @@ export const compileTerrainRecipe = (recipeInput: TerrainRecipe): ResolvedTerrai
   const nominalRiverCount = Math.round(mix(1, 7, riverBudget) * Math.max(0.75, sizeScale));
   const riverCount =
     recipe.archetype === "SHELF" ? Math.max(1, nominalRiverCount - 1) : Math.max(1, nominalRiverCount);
+  const totalTiles = mapSizeTiles * mapSizeTiles;
+  const lakeBias = clamp01(riverIntensity * 0.46 + advanced.basinStrength * 0.42 + vegetationDensity * 0.12);
 
   const forestPatchiness = advanced.forestPatchiness;
   const forestPatchScale = Math.round(mix(32, 16, forestPatchiness));
@@ -620,7 +622,37 @@ export const compileTerrainRecipe = (recipeInput: TerrainRecipe): ResolvedTerrai
     settlementSpacing: advanced.settlementSpacing,
     settlementPreGrowthYears: advanced.settlementPreGrowthYears,
     roadStrictness,
-    forestPatchiness
+    forestPatchiness,
+    lakeChance: mix(0.36, 0.9, lakeBias),
+    maxLakeCount: Math.max(1, Math.round(mix(1, 6, lakeBias) * Math.max(0.75, sizeScale))),
+    minLakeAreaTiles: Math.max(8, Math.round(mix(8, 20, sizeScale))),
+    maxLakeAreaTiles: Math.round(clamp(totalTiles * mix(0.0025, 0.011, lakeBias), 48, 2400)),
+    minLakeDepth: mix(0.006, 0.012, relief),
+    maxLakeDepth: mix(0.026, 0.055, clamp01(ruggedness * 0.55 + relief * 0.45)),
+    minDistanceFromOceanTiles: Math.max(5, Math.round(mix(5, 12, 1 - landCoverageTarget) * Math.max(0.75, sizeScale))),
+    lakeElevationMin: mix(0.1, 0.18, waterLevel),
+    lakeElevationMax: mix(0.62, 0.82, relief),
+    lakeShapeSmoothingPasses: lakeBias >= 0.45 ? 1 : 0,
+    rainfallWindwardBoost: mix(0.14, 0.28, ruggedness),
+    rainfallLeewardPenalty: mix(0.12, 0.24, ruggedness),
+    rainfallInlandDecay: mix(0.24, 0.42, clamp01(1 - landCoverageTarget)),
+    rainfallElevationBoost: mix(0.08, 0.2, relief),
+    rainfallRainShadowStrength: mix(0.14, 0.28, ruggedness),
+    minRainfallForLake: mix(0.18, 0.3, 1 - vegetationDensity),
+    minCatchmentRunoffForLake: mix(0.12, 0.26, 1 - lakeBias),
+    preferLakesOnRiverPaths: mix(0.55, 0.85, riverIntensity),
+    maxRiverRerouteDistanceTiles: Math.max(4, Math.round(mix(4, 10, riverIntensity) * Math.max(0.75, sizeScale))),
+    lakeOutletSearchRadius: Math.max(4, Math.round(mix(5, 10, riverIntensity) * Math.max(0.75, sizeScale))),
+    allowEndorheicLakes: true,
+    minOutletDrop: mix(0.002, 0.006, ruggedness),
+    preserveExistingRiverCount: true,
+    riverLakeConnectionSmoothing: mix(0.28, 0.64, riverIntensity),
+    waterfallMinDrop: mix(0.01, 0.022, ruggedness),
+    waterfallMinFlow: mix(0.28, 0.46, 1 - riverIntensity),
+    waterfallMinSpacingTiles: Math.max(5, Math.round(mix(6, 12, 1 - riverIntensity))),
+    waterfallMaxPerRiver: Math.max(8, Math.round(mix(10, 24, riverIntensity) * Math.max(0.75, sizeScale))),
+    waterfallAllowLakeOutlet: true,
+    waterfallAvoidCoastTiles: Math.max(3, Math.round(mix(3, 7, 1 - landCoverageTarget)))
   };
 
   return {
@@ -633,6 +665,62 @@ export const isResolvedTerrainProfile = (value: unknown): value is ResolvedTerra
   isRecord(value)
   && isRecord(value.settings)
   && isRecord(value.recipe);
+
+const HYDROLOGY_SETTING_KEYS = [
+  "lakeChance",
+  "maxLakeCount",
+  "minLakeAreaTiles",
+  "maxLakeAreaTiles",
+  "minLakeDepth",
+  "maxLakeDepth",
+  "minDistanceFromOceanTiles",
+  "lakeElevationMin",
+  "lakeElevationMax",
+  "lakeShapeSmoothingPasses",
+  "rainfallWindwardBoost",
+  "rainfallLeewardPenalty",
+  "rainfallInlandDecay",
+  "rainfallElevationBoost",
+  "rainfallRainShadowStrength",
+  "minRainfallForLake",
+  "minCatchmentRunoffForLake",
+  "preferLakesOnRiverPaths",
+  "maxRiverRerouteDistanceTiles",
+  "lakeOutletSearchRadius",
+  "minOutletDrop",
+  "riverLakeConnectionSmoothing",
+  "waterfallMinDrop",
+  "waterfallMinFlow",
+  "waterfallMinSpacingTiles",
+  "waterfallMaxPerRiver",
+  "waterfallAvoidCoastTiles"
+] as const satisfies readonly (keyof MapGenSettings)[];
+
+const HYDROLOGY_BOOLEAN_SETTING_KEYS = [
+  "allowEndorheicLakes",
+  "preserveExistingRiverCount",
+  "waterfallAllowLakeOutlet"
+] as const satisfies readonly (keyof MapGenSettings)[];
+
+const overlayHydrologySettings = (
+  profile: ResolvedTerrainProfile,
+  source: Partial<MapGenSettings>
+): ResolvedTerrainProfile => {
+  const settings = { ...profile.settings };
+  for (const key of HYDROLOGY_SETTING_KEYS) {
+    const value = source[key];
+    if (typeof value === "number" && Number.isFinite(value)) {
+      (settings as unknown as Record<keyof MapGenSettings, unknown>)[key] = value;
+    }
+  }
+  for (const key of HYDROLOGY_BOOLEAN_SETTING_KEYS) {
+    const value = source[key];
+    if (typeof value === "boolean") {
+      (settings as unknown as Record<keyof MapGenSettings, unknown>)[key] = value;
+    }
+  }
+  return { recipe: profile.recipe, settings };
+};
 
 const inferRecipeFromSettings = (settingsInput: Partial<MapGenSettings>, mapSize: MapSizeId): TerrainRecipe => {
   const settings = {
@@ -714,7 +802,11 @@ export const resolveTerrainProfile = (
       return compileTerrainRecipe(sanitizeTerrainRecipe(sourceRecord));
     }
   }
-  return compileTerrainRecipe(inferRecipeFromSettings(source as Partial<MapGenSettings>, fallbackMapSize));
+  const settingsSource = source as Partial<MapGenSettings>;
+  return overlayHydrologySettings(
+    compileTerrainRecipe(inferRecipeFromSettings(settingsSource, fallbackMapSize)),
+    settingsSource
+  );
 };
 
 export const getTerrainHeightScaleMultiplier = (

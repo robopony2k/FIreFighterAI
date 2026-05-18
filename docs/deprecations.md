@@ -1,5 +1,19 @@
 # Deprecations
 
+## Accidental Inland Water Suppression
+
+Status: Deprecated as of May 17, 2026.
+
+- Inland water is no longer treated as ocean-solve drift to be removed before final rivers.
+- The replacement path is the static hydrology network in `hydro:rivers`, where accepted inland lakes are generated from rainfall/runoff-weighted basins and integrated with river outlets and waterfall markers.
+- Ocean classification remains owned by `hydro:solve`; lake water must stay distinct from connected ocean water unless future work explicitly adds coastal lagoons.
+
+Migration guidance:
+
+1. Add lake, outlet, or waterfall behavior through the static terrain hydrology modules, not ad hoc water tile cleanup.
+2. Preserve water/fire invariants for every generated lake, river, and waterfall tile.
+3. Keep dynamic water simulation and hydraulic erosion out of this phase unless a future design explicitly replaces the static hydrology model.
+
 ## Duplicated 3D Run Header Exit Controls
 
 Status: Deprecated as of May 17, 2026.

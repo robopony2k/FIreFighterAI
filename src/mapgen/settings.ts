@@ -74,6 +74,36 @@ export type MapGenSettings = {
   settlementPreGrowthYears: number;
   roadStrictness: number;
   forestPatchiness: number;
+  lakeChance: number;
+  maxLakeCount: number;
+  minLakeAreaTiles: number;
+  maxLakeAreaTiles: number;
+  minLakeDepth: number;
+  maxLakeDepth: number;
+  minDistanceFromOceanTiles: number;
+  lakeElevationMin: number;
+  lakeElevationMax: number;
+  lakeShapeSmoothingPasses: number;
+  rainfallWindwardBoost: number;
+  rainfallLeewardPenalty: number;
+  rainfallInlandDecay: number;
+  rainfallElevationBoost: number;
+  rainfallRainShadowStrength: number;
+  minRainfallForLake: number;
+  minCatchmentRunoffForLake: number;
+  preferLakesOnRiverPaths: number;
+  maxRiverRerouteDistanceTiles: number;
+  lakeOutletSearchRadius: number;
+  allowEndorheicLakes: boolean;
+  minOutletDrop: number;
+  preserveExistingRiverCount: boolean;
+  riverLakeConnectionSmoothing: number;
+  waterfallMinDrop: number;
+  waterfallMinFlow: number;
+  waterfallMinSpacingTiles: number;
+  waterfallMaxPerRiver: number;
+  waterfallAllowLakeOutlet: boolean;
+  waterfallAvoidCoastTiles: number;
 };
 
 export const DEFAULT_ROAD_GEN_SETTINGS: RoadGenSettings = {
@@ -145,5 +175,35 @@ export const DEFAULT_MAP_GEN_SETTINGS: MapGenSettings = {
   settlementSpacing: 0.62,
   settlementPreGrowthYears: 20,
   roadStrictness: 0.56,
-  forestPatchiness: 0.42
+  forestPatchiness: 0.42,
+  lakeChance: 0.78,
+  maxLakeCount: 4,
+  minLakeAreaTiles: 10,
+  maxLakeAreaTiles: 900,
+  minLakeDepth: 0.008,
+  maxLakeDepth: 0.04,
+  minDistanceFromOceanTiles: 7,
+  lakeElevationMin: 0.12,
+  lakeElevationMax: 0.78,
+  lakeShapeSmoothingPasses: 1,
+  rainfallWindwardBoost: 0.22,
+  rainfallLeewardPenalty: 0.18,
+  rainfallInlandDecay: 0.34,
+  rainfallElevationBoost: 0.16,
+  rainfallRainShadowStrength: 0.22,
+  minRainfallForLake: 0.24,
+  minCatchmentRunoffForLake: 0.18,
+  preferLakesOnRiverPaths: 0.72,
+  maxRiverRerouteDistanceTiles: 6,
+  lakeOutletSearchRadius: 7,
+  allowEndorheicLakes: true,
+  minOutletDrop: 0.003,
+  preserveExistingRiverCount: true,
+  riverLakeConnectionSmoothing: 0.45,
+  waterfallMinDrop: 0.014,
+  waterfallMinFlow: 0.38,
+  waterfallMinSpacingTiles: 8,
+  waterfallMaxPerRiver: 16,
+  waterfallAllowLakeOutlet: true,
+  waterfallAvoidCoastTiles: 4
 };

@@ -28,7 +28,17 @@ export const emitStageSnapshot = async (ctx: MapGenContext, phase: MapGenDebugPh
     elevationStress: ctx.elevationStressMap ? Float32Array.from(ctx.elevationStressMap) : undefined,
     slopeStress: ctx.slopeStressMap ? Float32Array.from(ctx.slopeStressMap) : undefined,
     treeSuitability: ctx.treeSuitabilityMap ? Float32Array.from(ctx.treeSuitabilityMap) : undefined,
-    treeProbability: ctx.treeProbabilityMap ? Float32Array.from(ctx.treeProbabilityMap) : undefined
+    treeProbability: ctx.treeProbabilityMap ? Float32Array.from(ctx.treeProbabilityMap) : undefined,
+    lakeMask: ctx.lakeMask ? Uint16Array.from(ctx.lakeMask) : undefined,
+    lakeSurface: ctx.lakeSurfaceMap ? Float32Array.from(ctx.lakeSurfaceMap) : undefined,
+    lakeOutletMask: ctx.lakeOutletMask ? Uint8Array.from(ctx.lakeOutletMask) : undefined,
+    rainfall: ctx.rainfallMap ? Float32Array.from(ctx.rainfallMap) : undefined,
+    runoff: ctx.runoffMap ? Float32Array.from(ctx.runoffMap) : undefined,
+    riverLakeEntryMask: ctx.riverLakeEntryMask ? Uint8Array.from(ctx.riverLakeEntryMask) : undefined,
+    riverLakeExitMask: ctx.riverLakeExitMask ? Uint8Array.from(ctx.riverLakeExitMask) : undefined,
+    waterfallSourceMask: ctx.waterfallSourceMask ? Uint8Array.from(ctx.waterfallSourceMask) : undefined,
+    waterfallTarget: ctx.waterfallTargetMap ? Int32Array.from(ctx.waterfallTargetMap) : undefined,
+    waterfallDrop: ctx.waterfallDropMap ? Float32Array.from(ctx.waterfallDropMap) : undefined
   });
   if (ctx.debug.waitForStep) {
     await ctx.debug.waitForStep();

@@ -68,7 +68,7 @@ export const BiomeClassificationStage: PipelineStage = {
         const tile = state.tiles[idx];
         const moisture = moistureMap[idx] ?? 0;
         nextMoisture[idx] = moisture;
-        if (oceanMask[idx] || riverMask[idx] > 0) {
+        if (oceanMask[idx] || riverMask[idx] > 0 || state.tileLakeMask[idx] > 0) {
           nextTypes[idx] = "water";
           nextCanopy[idx] = 0;
           nextStemDensity[idx] = 0;

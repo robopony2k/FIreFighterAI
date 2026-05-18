@@ -7,6 +7,7 @@ type RiverRenderDomainSample = {
   elevations: Float32Array;
   tileTypes?: Uint8Array;
   riverMask?: Uint8Array;
+  lakeMask?: Uint16Array;
   riverSurface?: Float32Array;
 };
 
@@ -71,6 +72,7 @@ const buildRenderRiverSupportMasks = (
 ): { base: Uint8Array; render: Uint8Array } | undefined => {
   const tileTypes = sample.tileTypes;
   const riverMask = sample.riverMask;
+  const lakeMask = sample.lakeMask;
   if (!tileTypes || !riverMask) {
     return undefined;
   }
@@ -85,7 +87,7 @@ const buildRenderRiverSupportMasks = (
   let sourceCount = 0;
   for (let i = 0; i < total; i += 1) {
     const hasSurface = !riverSurface || Number.isFinite(riverSurface[i]);
-    base[i] = tileTypes[i] === waterId && riverMask[i] > 0 && hasSurface ? 1 : 0;
+    base[i] = tileTypes[i] === waterId && riverMask[i] > 0 && (lakeMask?.[i] ?? 0) === 0 && hasSurface ? 1 : 0;
     if (base[i]) {
       sourceCount += 1;
     }

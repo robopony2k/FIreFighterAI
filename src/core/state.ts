@@ -163,6 +163,12 @@ export interface WorldState {
   tileRiverBed: Float32Array;
   tileRiverSurface: Float32Array;
   tileRiverStepStrength: Float32Array;
+  tileLakeMask: Uint16Array;
+  tileLakeSurface: Float32Array;
+  tileLakeOutletMask: Uint8Array;
+  tileWaterfallSourceMask: Uint8Array;
+  tileWaterfallTarget: Int32Array;
+  tileWaterfallDrop: Float32Array;
   structureMask: Uint8Array;
   tileTownId: Int16Array;
   tileStructure: Uint8Array;
@@ -482,6 +488,12 @@ export function createInitialState(seed: number, grid: Grid): WorldState {
     tileRiverBed: new Float32Array(grid.totalTiles).fill(Number.NaN),
     tileRiverSurface: new Float32Array(grid.totalTiles).fill(Number.NaN),
     tileRiverStepStrength: new Float32Array(grid.totalTiles),
+    tileLakeMask: new Uint16Array(grid.totalTiles),
+    tileLakeSurface: new Float32Array(grid.totalTiles).fill(Number.NaN),
+    tileLakeOutletMask: new Uint8Array(grid.totalTiles),
+    tileWaterfallSourceMask: new Uint8Array(grid.totalTiles),
+    tileWaterfallTarget: new Int32Array(grid.totalTiles).fill(-1),
+    tileWaterfallDrop: new Float32Array(grid.totalTiles),
     structureMask: new Uint8Array(grid.totalTiles),
     tileTownId: new Int16Array(grid.totalTiles).fill(-1),
     tileStructure: new Uint8Array(grid.totalTiles),
@@ -741,6 +753,18 @@ export function syncTileSoA(state: WorldState): void {
     state.tileRoadWallEdges.length !== total ||
     !state.tileErosionWear ||
     state.tileErosionWear.length !== total ||
+    !state.tileLakeMask ||
+    state.tileLakeMask.length !== total ||
+    !state.tileLakeSurface ||
+    state.tileLakeSurface.length !== total ||
+    !state.tileLakeOutletMask ||
+    state.tileLakeOutletMask.length !== total ||
+    !state.tileWaterfallSourceMask ||
+    state.tileWaterfallSourceMask.length !== total ||
+    !state.tileWaterfallTarget ||
+    state.tileWaterfallTarget.length !== total ||
+    !state.tileWaterfallDrop ||
+    state.tileWaterfallDrop.length !== total ||
     state.tileTownId.length !== total ||
     state.tileStructure.length !== total
   ) {
@@ -779,6 +803,12 @@ export function syncTileSoA(state: WorldState): void {
     state.tileRiverBed = new Float32Array(total).fill(Number.NaN);
     state.tileRiverSurface = new Float32Array(total).fill(Number.NaN);
     state.tileRiverStepStrength = new Float32Array(total);
+    state.tileLakeMask = new Uint16Array(total);
+    state.tileLakeSurface = new Float32Array(total).fill(Number.NaN);
+    state.tileLakeOutletMask = new Uint8Array(total);
+    state.tileWaterfallSourceMask = new Uint8Array(total);
+    state.tileWaterfallTarget = new Int32Array(total).fill(-1);
+    state.tileWaterfallDrop = new Float32Array(total);
     state.structureMask = new Uint8Array(total);
     state.tileTownId = new Int16Array(total).fill(-1);
     state.tileStructure = new Uint8Array(total);

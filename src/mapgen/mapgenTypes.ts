@@ -36,6 +36,16 @@ export type MapGenDebugSnapshot = {
   slopeStress?: Float32Array;
   treeSuitability?: Float32Array;
   treeProbability?: Float32Array;
+  lakeMask?: Uint16Array;
+  lakeSurface?: Float32Array;
+  lakeOutletMask?: Uint8Array;
+  rainfall?: Float32Array;
+  runoff?: Float32Array;
+  riverLakeEntryMask?: Uint8Array;
+  riverLakeExitMask?: Uint8Array;
+  waterfallSourceMask?: Uint8Array;
+  waterfallTarget?: Int32Array;
+  waterfallDrop?: Float32Array;
 };
 
 export type MapGenStageTiming = {

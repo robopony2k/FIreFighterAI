@@ -3,6 +3,7 @@ import { clamp } from "../../core/utils.js";
 import type { PipelineStage } from "../pipeline/TerrainPipeline.js";
 import { emitStageSnapshot } from "../pipeline/stageDebug.js";
 import { carveRiverValleys, clampRiverMouthDepthsToSeaLevel, suppressIsolatedElevationSpikes } from "../runtime.js";
+import { buildStaticInlandLakeNetwork } from "../../systems/terrain/sim/inlandLakeNetwork.js";
 
 export const RiverStage: PipelineStage = {
   id: "hydro:rivers",
@@ -35,6 +36,36 @@ export const RiverStage: PipelineStage = {
     } else {
       state.tileRiverStepStrength.fill(0);
     }
+    if (state.tileLakeMask.length !== total) {
+      state.tileLakeMask = new Uint16Array(total);
+    } else {
+      state.tileLakeMask.fill(0);
+    }
+    if (state.tileLakeSurface.length !== total) {
+      state.tileLakeSurface = new Float32Array(total).fill(Number.NaN);
+    } else {
+      state.tileLakeSurface.fill(Number.NaN);
+    }
+    if (state.tileLakeOutletMask.length !== total) {
+      state.tileLakeOutletMask = new Uint8Array(total);
+    } else {
+      state.tileLakeOutletMask.fill(0);
+    }
+    if (state.tileWaterfallSourceMask.length !== total) {
+      state.tileWaterfallSourceMask = new Uint8Array(total);
+    } else {
+      state.tileWaterfallSourceMask.fill(0);
+    }
+    if (state.tileWaterfallTarget.length !== total) {
+      state.tileWaterfallTarget = new Int32Array(total).fill(-1);
+    } else {
+      state.tileWaterfallTarget.fill(-1);
+    }
+    if (state.tileWaterfallDrop.length !== total) {
+      state.tileWaterfallDrop = new Float32Array(total);
+    } else {
+      state.tileWaterfallDrop.fill(0);
+    }
 
     await ctx.reportStage("Routing rivers to final coast...", 0.2);
     carveRiverValleys(
@@ -49,9 +80,32 @@ export const RiverStage: PipelineStage = {
       oceanMask
     );
 
+    await ctx.reportStage("Resolving inland lake network...", 0.72);
+    const staticHydrology = buildStaticInlandLakeNetwork({
+      state,
+      elevationMap,
+      riverMask,
+      oceanMask,
+      settings
+    });
+    ctx.lakeMask = staticHydrology.lakeMask;
+    ctx.lakeSurfaceMap = staticHydrology.lakeSurface;
+    ctx.lakeOutletMask = staticHydrology.lakeOutletMask;
+    ctx.rainfallMap = staticHydrology.rainfall;
+    ctx.runoffMap = staticHydrology.runoff;
+    ctx.riverLakeEntryMask = staticHydrology.riverLakeEntryMask;
+    ctx.riverLakeExitMask = staticHydrology.riverLakeExitMask;
+    ctx.waterfallSourceMask = staticHydrology.waterfallSourceMask;
+    ctx.waterfallTargetMap = staticHydrology.waterfallTarget;
+    ctx.waterfallDropMap = staticHydrology.waterfallDrop;
+    ctx.staticHydrologyLakes = staticHydrology.lakes;
+    ctx.staticHydrologyWaterfalls = staticHydrology.waterfalls;
+    ctx.staticHydrologyRejectedLakeCandidates = staticHydrology.rejectedLakeCandidates;
+    ctx.staticHydrologyRejectedWaterfallCandidates = staticHydrology.rejectedWaterfallCandidates;
+
     for (let i = 0; i < total; i += 1) {
       state.tiles[i].elevation = elevationMap[i] ?? state.tiles[i].elevation;
-      if (riverMask[i] > 0) {
+      if (riverMask[i] > 0 || state.tileLakeMask[i] > 0) {
         state.tiles[i].type = "water";
         clearVegetationState(state.tiles[i]);
         state.tiles[i].dominantTreeType = null;
@@ -61,7 +115,7 @@ export const RiverStage: PipelineStage = {
     }
     const protectedRiverWater = new Uint8Array(total);
     for (let i = 0; i < total; i += 1) {
-      protectedRiverWater[i] = oceanMask[i] > 0 || riverMask[i] > 0 ? 1 : 0;
+      protectedRiverWater[i] = oceanMask[i] > 0 || riverMask[i] > 0 || state.tileLakeMask[i] > 0 ? 1 : 0;
     }
     suppressIsolatedElevationSpikes(elevationMap, state.grid.cols, state.grid.rows, protectedRiverWater);
     for (let i = 0; i < total; i += 1) {

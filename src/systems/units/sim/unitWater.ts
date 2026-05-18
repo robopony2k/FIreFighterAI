@@ -18,7 +18,7 @@ const isTruckNearRiverWaterSource = (state: WorldState, truck: Unit): boolean =>
         continue;
       }
       const idx = indexFor(state.grid, nx, ny);
-      if (state.tileRiverMask[idx] > 0) {
+      if (state.tileRiverMask[idx] > 0 || state.tileLakeMask[idx] > 0) {
         return true;
       }
     }

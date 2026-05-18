@@ -85,14 +85,15 @@ export const PostSettlementReconcileStage: PipelineStage = {
             return clamp(maxDiff, 0, 1);
           })();
           ctx.slopeMap[idx] = slopeLocal;
+          const isStaticWater = ctx.oceanMask[idx] || ctx.riverMask[idx] > 0 || state.tileLakeMask[idx] > 0;
           const moisture =
-            ctx.oceanMask[idx] || ctx.riverMask[idx] > 0
+            isStaticWater
               ? 1
               : clamp(ctx.moistureMap[idx] ?? tile.moisture, 0, 1);
           ctx.moistureMap[idx] = moisture;
           tile.moisture = moisture;
 
-          if (ctx.oceanMask[idx] || ctx.riverMask[idx] > 0) {
+          if (isStaticWater) {
             tile.type = "water";
             clearVegetationState(tile);
             tile.dominantTreeType = null;

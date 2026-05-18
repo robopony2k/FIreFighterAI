@@ -62,6 +62,7 @@ import {
   WATERFALL_DEBUG_FLAG_STEP_OK,
   WATERFALL_DEBUG_FLAG_WATER,
   WATERFALL_MIN_DROP_NORM,
+  WATERFALL_TOP_OFFSET,
   WATERFALL_VERTICALITY_MIN,
   buildWaterfallInstances,
   type WaterfallDebugData,
@@ -166,6 +167,12 @@ export type TerrainSample = {
   riverBed?: Float32Array;
   riverSurface?: Float32Array;
   riverStepStrength?: Float32Array;
+  lakeMask?: Uint16Array;
+  lakeSurface?: Float32Array;
+  lakeOutletMask?: Uint8Array;
+  waterfallSourceMask?: Uint8Array;
+  waterfallTarget?: Int32Array;
+  waterfallDrop?: Float32Array;
   climateDryness?: number;
   debugScalarField?: Float32Array;
   debugTypeColors?: boolean;
@@ -945,7 +952,8 @@ const buildSampleWaterRatios = (
   step: number,
   waterId: number,
   oceanMask?: Uint8Array | null,
-  riverMask?: Uint8Array | null
+  riverMask?: Uint8Array | null,
+  lakeMask?: Uint16Array | null
 ): WaterSampleRatios => {
   const { cols, rows, tileTypes } = sample;
   const total = sampleCols * sampleRows;
@@ -975,6 +983,9 @@ const buildSampleWaterRatios = (
             continue;
           }
           waterCount += 1;
+          if (lakeMask && lakeMask[idx] > 0) {
+            continue;
+          }
           if (riverMask && riverMask[idx]) {
             riverCount += 1;
             continue;
@@ -1009,7 +1020,7 @@ const buildSampleOptionalFloatMap = (
   sampleCols: number,
   sampleRows: number,
   step: number,
-  includeMask?: Uint8Array | null,
+  includeMask?: ArrayLike<number> | null,
   reducer: SampleFloatReducer = "mean"
 ): Float32Array | undefined => {
   const { cols, rows } = sample;
@@ -1058,7 +1069,7 @@ const buildSampleOptionalFloatMap = (
 
 const buildSampleMaskCoverage = (
   sample: TerrainSample,
-  sourceMask: Uint8Array | undefined,
+  sourceMask: ArrayLike<number> | undefined,
   sampleCols: number,
   sampleRows: number,
   step: number
@@ -1136,6 +1147,8 @@ export type TerrainRenderSurface = {
   sampledRiverSurface?: Float32Array;
   sampledRiverStepStrength?: Float32Array;
   sampledRiverCoverage?: Float32Array;
+  sampledLakeSurface?: Float32Array;
+  sampledLakeCoverage?: Float32Array;
   riverRenderDomain?: RiverRenderDomain;
   structureTopHeightsWorld?: Float32Array;
   debugHeightAnomalies?: TerrainHeightAnomaly[];
@@ -1251,17 +1264,98 @@ const buildWaterMaskTexture = (
 const buildWaterSupportMask = (
   waterRatios: WaterSampleRatios,
   oceanSupportMask: Uint8Array,
-  sampledRiverCoverage?: Float32Array
+  sampledRiverCoverage?: Float32Array,
+  sampledLakeCoverage?: Float32Array
 ): Uint8Array => {
   const support = new Uint8Array(oceanSupportMask.length);
   for (let i = 0; i < oceanSupportMask.length; i += 1) {
     const riverCoverage = sampledRiverCoverage?.[i] ?? 0;
+    const lakeCoverage = sampledLakeCoverage?.[i] ?? 0;
     const riverRatio = waterRatios.river[i] ?? 0;
     const riverBacked =
       riverCoverage >= RIVER_RENDER_SUPPORT_RATIO_MIN || riverRatio >= RIVER_RATIO_MIN * 0.5;
-    support[i] = oceanSupportMask[i] > 0 || riverBacked ? 1 : 0;
+    support[i] = oceanSupportMask[i] > 0 || riverBacked || lakeCoverage >= WATER_ALPHA_MIN_RATIO ? 1 : 0;
   }
   return support;
+};
+
+const buildStandingWaterRenderData = (
+  oceanRatios: WaterSampleRatios,
+  oceanSupportMask: Uint8Array,
+  sampledLakeCoverage: Float32Array | undefined
+): { ratios: WaterSampleRatios; supportMask: Uint8Array } => {
+  const total = oceanSupportMask.length;
+  const water = new Float32Array(total);
+  const ocean = new Float32Array(total);
+  const river = new Float32Array(total);
+  const supportMask = new Uint8Array(total);
+  for (let i = 0; i < total; i += 1) {
+    const oceanWater = clamp(oceanRatios.water[i] ?? 0, 0, 1);
+    const oceanRatio = clamp(oceanRatios.ocean[i] ?? 0, 0, 1);
+    const lakeRatio = clamp(sampledLakeCoverage?.[i] ?? 0, 0, 1);
+    water[i] = Math.max(oceanWater, lakeRatio);
+    ocean[i] = oceanRatio;
+    supportMask[i] = oceanSupportMask[i] > 0 || lakeRatio >= WATER_ALPHA_MIN_RATIO ? 1 : 0;
+  }
+  return {
+    ratios: { water, ocean, river },
+    supportMask
+  };
+};
+
+const buildStaticWaterfallInstancesFromSample = (
+  sample: TerrainSample,
+  surface: TerrainRenderSurface,
+  waterLevelWorld: number,
+  minDropWorld: number
+): Float32Array | undefined => {
+  const sourceMask = sample.waterfallSourceMask;
+  const targetMap = sample.waterfallTarget;
+  const dropMap = sample.waterfallDrop;
+  if (!sourceMask || !targetMap || !dropMap) {
+    return undefined;
+  }
+  const instances: number[] = [];
+  const cols = sample.cols;
+  const rows = sample.rows;
+  const worldTileX = surface.width / Math.max(1, cols);
+  const worldTileZ = surface.depth / Math.max(1, rows);
+  const halfWidth = Math.max(0.22, Math.min(worldTileX, worldTileZ) * 0.46);
+  for (let idx = 0; idx < sourceMask.length; idx += 1) {
+    if (sourceMask[idx] === 0) {
+      continue;
+    }
+    const target = targetMap[idx] ?? -1;
+    if (target < 0 || target >= sourceMask.length) {
+      continue;
+    }
+    const dropWorld = (dropMap[idx] ?? 0) * surface.heightScale;
+    if (!Number.isFinite(dropWorld) || dropWorld < minDropWorld) {
+      continue;
+    }
+    const sx = idx % cols;
+    const sy = Math.floor(idx / cols);
+    const tx = target % cols;
+    const ty = Math.floor(target / cols);
+    let dirX = tx - sx;
+    let dirZ = ty - sy;
+    const dirLen = Math.hypot(dirX, dirZ);
+    if (dirLen <= 1e-5) {
+      continue;
+    }
+    dirX /= dirLen;
+    dirZ /= dirLen;
+    const wx = surface.toWorldX(sx + 0.5);
+    const wz = surface.toWorldZ(sy + 0.5);
+    const sampleX = clamp((sx + 0.5) / surface.step, 0, surface.sampleCols - 1);
+    const sampleY = clamp((sy + 0.5) / surface.step, 0, surface.sampleRows - 1);
+    const sampleCol = Math.round(sampleX);
+    const sampleRow = Math.round(sampleY);
+    const sampleIdx = sampleRow * surface.sampleCols + sampleCol;
+    const top = (surface.waterSurfaceHeights[sampleIdx] ?? 0) + WATERFALL_TOP_OFFSET;
+    instances.push(wx, wz, top, dropWorld, dirX, dirZ, halfWidth);
+  }
+  return instances.length > 0 ? new Float32Array(instances) : undefined;
 };
 
 const buildWaterDomainMapTexture = (
@@ -2208,6 +2302,7 @@ export const prepareTerrainRenderSurface = (
   const coastData = buildSampleCoastData(sample, sampleCols, sampleRows, step);
   const oceanMask = sample.oceanMask ?? (sample.tileTypes ? buildOceanMask(cols, rows, sample.tileTypes, waterId) : null);
   const riverMask = sample.riverMask ?? null;
+  const lakeMask = sample.lakeMask ?? null;
   const waterLevel = computeWaterLevel(sample, waterId, oceanMask, riverMask);
   const hasAuthoritativeCoastProfile =
     !!sample.seaLevel &&
@@ -2308,7 +2403,7 @@ export const prepareTerrainRenderSurface = (
       }
     }
   }
-  const waterRatios = buildSampleWaterRatios(sample, sampleCols, sampleRows, step, waterId, oceanMask, riverMask);
+  const waterRatios = buildSampleWaterRatios(sample, sampleCols, sampleRows, step, waterId, oceanMask, riverMask, lakeMask);
   if (waterLevel !== null && !hasAuthoritativeCoastProfile) {
     const total = sampleCols * sampleRows;
     const sampleOceanSupport = new Uint8Array(total);
@@ -2385,6 +2480,22 @@ export const prepareTerrainRenderSurface = (
     riverMask,
     "max"
   );
+  const sampledLakeSurface = buildSampleOptionalFloatMap(
+    sample,
+    sample.lakeSurface,
+    sampleCols,
+    sampleRows,
+    step,
+    lakeMask,
+    "mean"
+  );
+  const sampledLakeCoverage = buildSampleMaskCoverage(
+    sample,
+    lakeMask ?? undefined,
+    sampleCols,
+    sampleRows,
+    step
+  );
   const sampledErosionWear = buildSampleOptionalFloatMap(
     sample,
     sample.erosionWear,
@@ -2417,7 +2528,7 @@ export const prepareTerrainRenderSurface = (
       sampleCoastDistance,
       coastData
     );
-  const waterSupportMask = buildWaterSupportMask(waterRatios, oceanSupportMask, sampledRiverCoverage);
+  const waterSupportMask = buildWaterSupportMask(waterRatios, oceanSupportMask, sampledRiverCoverage, sampledLakeCoverage);
   if (step === 1) {
     suppressIsolatedHeightSamples(finalSampleHeights, sampleCols, sampleRows, sampleTypes, waterId);
   }
@@ -2435,6 +2546,8 @@ export const prepareTerrainRenderSurface = (
     waterLevel,
     sampledRiverSurface,
     sampledRiverStepStrength,
+    sampledLakeSurface,
+    sampledLakeCoverage,
     {
       oceanRatioMin: OCEAN_RATIO_MIN,
       riverRatioMin: RIVER_RATIO_MIN
@@ -2532,6 +2645,8 @@ export const prepareTerrainRenderSurface = (
     sampledRiverSurface,
     sampledRiverStepStrength,
     sampledRiverCoverage,
+    sampledLakeSurface,
+    sampledLakeCoverage,
     riverRenderDomain,
     structureTopHeightsWorld: structureTopHeights,
     debugHeightAnomalies: undefined,
@@ -3763,9 +3878,14 @@ export const buildTerrainMesh = (
       surface.oceanSurfAttenuation = resolvedSurfAttenuation;
     }
     const zeroRiver = new Float32Array(sampleCols * sampleRows);
-    const oceanMaskTexture = buildWaterMaskTexture(sampleCols, sampleRows, resolvedOceanRatios);
-    const oceanSupportMap = buildWaterSupportMapTexture(sampleCols, sampleRows, resolvedOceanSupportMask);
-    const shoreSdf = buildShoreSdfTextureFromSupportMask(resolvedOceanSupportMask, sampleCols, sampleRows);
+    const standingWater = buildStandingWaterRenderData(
+      resolvedOceanRatios,
+      resolvedOceanSupportMask,
+      surface.sampledLakeCoverage
+    );
+    const standingWaterMaskTexture = buildWaterMaskTexture(sampleCols, sampleRows, standingWater.ratios);
+    const standingWaterSupportMap = buildWaterSupportMapTexture(sampleCols, sampleRows, standingWater.supportMask);
+    const standingWaterShoreSdf = buildShoreSdfTextureFromSupportMask(standingWater.supportMask, sampleCols, sampleRows);
     const normalizedOceanHeights = buildWaterSurfaceHeights(
       sampleHeights,
       resolvedOceanSupportMask,
@@ -3774,6 +3894,8 @@ export const buildTerrainMesh = (
       sampleCols,
       sampleRows,
       oceanLevel,
+      undefined,
+      undefined,
       undefined,
       undefined,
       {
@@ -3836,12 +3958,18 @@ export const buildTerrainMesh = (
       const terrainWorld = (sampleHeights[i] ?? 0) * heightScale;
       shoreTerrainHeightAboveWater[i] = Math.max(0, terrainWorld - waterLevelWorld);
     }
-    const oceanDomainMap = buildWaterDomainMapTexture(
+    const standingWaterTerrainHeightAboveWater = new Float32Array(sampleCols * sampleRows);
+    for (let i = 0; i < sampleCols * sampleRows; i += 1) {
+      const terrainWorld = (sampleHeights[i] ?? 0) * heightScale;
+      const surfaceWorld = clamp(normalizedWaterHeights[i] ?? 0, 0, 1) * heightScale;
+      standingWaterTerrainHeightAboveWater[i] = Math.max(0, terrainWorld - surfaceWorld);
+    }
+    const standingWaterDomainMap = buildWaterDomainMapTexture(
       sampleCols,
       sampleRows,
-      resolvedOceanRatios,
-      resolvedSurfAttenuation,
-      shoreTerrainHeightAboveWater
+      standingWater.ratios,
+      undefined,
+      standingWaterTerrainHeightAboveWater
     );
     const resolvedShoreTransition =
       shoreTransition ??
@@ -3857,11 +3985,6 @@ export const buildTerrainMesh = (
     surface.shoreTransition = resolvedShoreTransition;
     const shoreTransitionMap = buildShoreTransitionMapTexture(sampleCols, sampleRows, resolvedShoreTransition);
     applyShoreTransitionTerrainMaterial(material, { shoreTransitionMap });
-    const oceanHeights = new Float32Array(normalizedOceanHeights.length);
-    for (let i = 0; i < normalizedOceanHeights.length; i += 1) {
-      const surfaceWorld = clamp(normalizedOceanHeights[i] ?? 0, 0, 1) * heightScale;
-      oceanHeights[i] = surfaceWorld - waterLevelWorld + WATER_SURFACE_LIFT_OCEAN;
-    }
     const waterHeights = new Float32Array(normalizedWaterHeights.length);
     let validationCount = 0;
     let terrainWaterMean = 0;
@@ -3951,7 +4074,18 @@ export const buildTerrainMesh = (
       depth,
       waterfallRiverDomain
     );
-    const waterfallInstances = waterfall.instances;
+    const staticWaterfallInstances = buildStaticWaterfallInstancesFromSample(
+      sample,
+      surface,
+      waterLevelWorld,
+      waterfallMinDrop
+    );
+    const waterfallInstances = staticWaterfallInstances ?? waterfall.instances;
+    if (staticWaterfallInstances) {
+      waterfall.debug.emittedCount = Math.floor(staticWaterfallInstances.length / 7);
+      waterfall.debug.candidateCount = Math.max(waterfall.debug.candidateCount, waterfall.debug.emittedCount);
+      waterfall.debug.clusterCount = Math.max(waterfall.debug.clusterCount, waterfall.debug.emittedCount);
+    }
     const river = buildRiverMeshData(
       sample,
       waterId,
@@ -3964,10 +4098,10 @@ export const buildTerrainMesh = (
     );
     water = {
       ocean: {
-        mask: oceanMaskTexture,
-        supportMap: oceanSupportMap,
-        domainMap: oceanDomainMap,
-        shoreSdf,
+        mask: standingWaterMaskTexture,
+        supportMap: standingWaterSupportMap,
+        domainMap: standingWaterDomainMap,
+        shoreSdf: standingWaterShoreSdf,
         shoreTransitionMap,
         flowMap: oceanFlowMap,
         rapidMap: oceanRapidMap,
@@ -3976,7 +4110,7 @@ export const buildTerrainMesh = (
         sampleRows,
         width,
         depth,
-        heights: oceanHeights
+        heights: waterHeights
       },
       river,
       waterfallInstances,

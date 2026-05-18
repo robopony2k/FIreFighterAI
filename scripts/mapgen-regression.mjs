@@ -98,6 +98,18 @@ const assertSnapshotShape = (snapshot, totalTiles, label) => {
   if (snapshot.oceanMask && (!(snapshot.oceanMask instanceof Uint8Array) || snapshot.oceanMask.length !== totalTiles)) {
     throw new Error(`[mapgen] ${label} invalid oceanMask payload for ${snapshot.phase}`);
   }
+  if (snapshot.lakeMask && (!(snapshot.lakeMask instanceof Uint16Array) || snapshot.lakeMask.length !== totalTiles)) {
+    throw new Error(`[mapgen] ${label} invalid lakeMask payload for ${snapshot.phase}`);
+  }
+  if (snapshot.lakeSurface && (!(snapshot.lakeSurface instanceof Float32Array) || snapshot.lakeSurface.length !== totalTiles)) {
+    throw new Error(`[mapgen] ${label} invalid lakeSurface payload for ${snapshot.phase}`);
+  }
+  if (
+    snapshot.waterfallTarget &&
+    (!(snapshot.waterfallTarget instanceof Int32Array) || snapshot.waterfallTarget.length !== totalTiles)
+  ) {
+    throw new Error(`[mapgen] ${label} invalid waterfallTarget payload for ${snapshot.phase}`);
+  }
   if (snapshot.seaLevel && (!(snapshot.seaLevel instanceof Float32Array) || snapshot.seaLevel.length !== totalTiles)) {
     throw new Error(`[mapgen] ${label} invalid seaLevel payload for ${snapshot.phase}`);
   }
@@ -110,9 +122,15 @@ const assertSnapshotShape = (snapshot, totalTiles, label) => {
   if (snapshot.coastClass && (!(snapshot.coastClass instanceof Uint8Array) || snapshot.coastClass.length !== totalTiles)) {
     throw new Error(`[mapgen] ${label} invalid coastClass payload for ${snapshot.phase}`);
   }
-  for (const field of ["rawMoisture", "elevationStress", "slopeStress", "treeSuitability", "treeProbability"]) {
+  for (const field of ["rawMoisture", "elevationStress", "slopeStress", "treeSuitability", "treeProbability", "rainfall", "runoff", "waterfallDrop"]) {
     const value = snapshot[field];
     if (value && (!(value instanceof Float32Array) || value.length !== totalTiles)) {
+      throw new Error(`[mapgen] ${label} invalid ${field} payload for ${snapshot.phase}`);
+    }
+  }
+  for (const field of ["lakeOutletMask", "riverLakeEntryMask", "riverLakeExitMask", "waterfallSourceMask"]) {
+    const value = snapshot[field];
+    if (value && (!(value instanceof Uint8Array) || value.length !== totalTiles)) {
       throw new Error(`[mapgen] ${label} invalid ${field} payload for ${snapshot.phase}`);
     }
   }
@@ -273,6 +291,7 @@ const buildOceanMask = (state) => {
 const analyzeRiverConnectivity = (state) => {
   const { cols, rows, totalTiles } = state.grid;
   const riverMask = state.tileRiverMask;
+  const lakeMask = state.tileLakeMask ?? new Uint16Array(totalTiles);
   const oceanMask = buildOceanMask(state);
   let riverCells = 0;
   let diagOnlyLinks = 0;
@@ -282,6 +301,8 @@ const analyzeRiverConnectivity = (state) => {
   let detachedRiverComponents = 0;
   let detachedRiverCells = 0;
   const hasRiver = (x, y) => x >= 0 && y >= 0 && x < cols && y < rows && riverMask[y * cols + x] > 0;
+  const hasHydrologyPath = (x, y) =>
+    x >= 0 && y >= 0 && x < cols && y < rows && (riverMask[y * cols + x] > 0 || lakeMask[y * cols + x] > 0);
   for (let i = 0; i < totalTiles; i += 1) {
     if (!(riverMask[i] > 0)) {
       continue;
@@ -290,10 +311,10 @@ const analyzeRiverConnectivity = (state) => {
     const x = i % cols;
     const y = Math.floor(i / cols);
     const orthCount =
-      (hasRiver(x - 1, y) ? 1 : 0) +
-      (hasRiver(x + 1, y) ? 1 : 0) +
-      (hasRiver(x, y - 1) ? 1 : 0) +
-      (hasRiver(x, y + 1) ? 1 : 0);
+      (hasHydrologyPath(x - 1, y) ? 1 : 0) +
+      (hasHydrologyPath(x + 1, y) ? 1 : 0) +
+      (hasHydrologyPath(x, y - 1) ? 1 : 0) +
+      (hasHydrologyPath(x, y + 1) ? 1 : 0);
     const diagCount =
       (hasRiver(x - 1, y - 1) ? 1 : 0) +
       (hasRiver(x + 1, y - 1) ? 1 : 0) +
@@ -310,7 +331,7 @@ const analyzeRiverConnectivity = (state) => {
   const visited = new Uint8Array(totalTiles);
   const queue = new Int32Array(totalTiles);
   for (let i = 0; i < totalTiles; i += 1) {
-    if (visited[i] > 0 || riverMask[i] === 0) {
+    if (visited[i] > 0 || (riverMask[i] === 0 && lakeMask[i] === 0)) {
       continue;
     }
     riverComponentCount += 1;
@@ -322,10 +343,18 @@ const analyzeRiverConnectivity = (state) => {
     let size = 0;
     let touchesEdge = false;
     let touchesOcean = false;
+    let hasRiverCell = false;
+    let hasLakeCell = false;
     while (head < tail) {
       const idx = queue[head];
       head += 1;
       size += 1;
+      if (riverMask[idx] > 0) {
+        hasRiverCell = true;
+      }
+      if (lakeMask[idx] > 0) {
+        hasLakeCell = true;
+      }
       const x = idx % cols;
       const y = Math.floor(idx / cols);
       if (x === 0 || y === 0 || x === cols - 1 || y === rows - 1) {
@@ -343,7 +372,7 @@ const analyzeRiverConnectivity = (state) => {
           continue;
         }
         const nIdx = ny * cols + nx;
-        if (riverMask[nIdx] > 0) {
+        if (riverMask[nIdx] > 0 || lakeMask[nIdx] > 0) {
           if (visited[nIdx] === 0) {
             visited[nIdx] = 1;
             queue[tail] = nIdx;
@@ -356,7 +385,7 @@ const analyzeRiverConnectivity = (state) => {
         }
       }
     }
-    if (!touchesEdge && !touchesOcean) {
+    if (hasRiverCell && !hasLakeCell && !touchesEdge && !touchesOcean) {
       detachedRiverComponents += 1;
       detachedRiverCells += size;
     }
@@ -368,6 +397,120 @@ const analyzeRiverConnectivity = (state) => {
     riverComponentCount,
     detachedRiverComponents,
     detachedRiverCells
+  };
+};
+
+const analyzeStaticHydrology = (state) => {
+  const { cols, rows, totalTiles } = state.grid;
+  const lakeMask = state.tileLakeMask ?? new Uint16Array(totalTiles);
+  const oceanMask = state.tileOceanMask ?? new Uint8Array(totalTiles);
+  const riverMask = state.tileRiverMask ?? new Uint8Array(totalTiles);
+  let lakeTiles = 0;
+  let lakeOutletCount = 0;
+  let lakeInvariantFailures = 0;
+  let lakeBedFailures = 0;
+  let lakeOceanAdjacent = 0;
+  let waterfallCount = 0;
+  let invalidWaterfalls = 0;
+  const lakeIds = new Set();
+  const visited = new Uint8Array(totalTiles);
+  const queue = new Int32Array(totalTiles);
+  let lakeComponentCount = 0;
+  const lakeHashParts = [];
+  const waterfallHashParts = [];
+  const idxAt = (x, y) => y * cols + x;
+  for (let idx = 0; idx < totalTiles; idx += 1) {
+    const lakeId = lakeMask[idx] ?? 0;
+    if (lakeId > 0) {
+      lakeTiles += 1;
+      lakeIds.add(lakeId);
+      lakeHashParts.push((idx * 131 + lakeId * 17) >>> 0);
+      const tile = state.tiles[idx];
+      if (!tile || tile.type !== "water" || tile.fuel !== 0 || tile.moisture !== 1 || tile.waterDist !== 0) {
+        lakeInvariantFailures += 1;
+      }
+      const lakeSurface = state.tileLakeSurface?.[idx] ?? Number.NaN;
+      if (tile && Number.isFinite(lakeSurface) && tile.elevation > lakeSurface - 0.001) {
+        lakeBedFailures += 1;
+      }
+      const x = idx % cols;
+      const y = Math.floor(idx / cols);
+      for (const [nx, ny] of [[x - 1, y], [x + 1, y], [x, y - 1], [x, y + 1]]) {
+        if (nx < 0 || ny < 0 || nx >= cols || ny >= rows) {
+          continue;
+        }
+        if (oceanMask[idxAt(nx, ny)] > 0) {
+          lakeOceanAdjacent += 1;
+          break;
+        }
+      }
+    }
+    if (state.tileLakeOutletMask?.[idx] > 0) {
+      lakeOutletCount += 1;
+    }
+    if (state.tileWaterfallSourceMask?.[idx] > 0) {
+      waterfallCount += 1;
+      const target = state.tileWaterfallTarget?.[idx] ?? -1;
+      const drop = state.tileWaterfallDrop?.[idx] ?? 0;
+      waterfallHashParts.push((idx * 131 + target * 17 + Math.round(drop * 10_000)) >>> 0);
+      if (
+        target < 0 ||
+        target >= totalTiles ||
+        drop <= 0 ||
+        oceanMask[idx] > 0 ||
+        lakeMask[target] > 0 ||
+        (riverMask[idx] === 0 && lakeMask[idx] === 0)
+      ) {
+        invalidWaterfalls += 1;
+      }
+    }
+  }
+  for (let i = 0; i < totalTiles; i += 1) {
+    if (visited[i] > 0 || lakeMask[i] === 0) {
+      continue;
+    }
+    lakeComponentCount += 1;
+    let head = 0;
+    let tail = 0;
+    queue[tail] = i;
+    tail += 1;
+    visited[i] = 1;
+    const lakeId = lakeMask[i];
+    while (head < tail) {
+      const idx = queue[head];
+      head += 1;
+      const x = idx % cols;
+      const y = Math.floor(idx / cols);
+      for (const [nx, ny] of [[x - 1, y], [x + 1, y], [x, y - 1], [x, y + 1]]) {
+        if (nx < 0 || ny < 0 || nx >= cols || ny >= rows) {
+          continue;
+        }
+        const nIdx = idxAt(nx, ny);
+        if (visited[nIdx] === 0 && lakeMask[nIdx] === lakeId) {
+          visited[nIdx] = 1;
+          queue[tail] = nIdx;
+          tail += 1;
+        }
+      }
+    }
+  }
+  const lakeHash = lakeHashParts.reduce((hash, value) => Math.imul(hash ^ value, 16777619) >>> 0, 2166136261);
+  const waterfallHash = waterfallHashParts.reduce(
+    (hash, value) => Math.imul(hash ^ value, 16777619) >>> 0,
+    2166136261
+  );
+  return {
+    lakeTiles,
+    lakeCount: lakeIds.size,
+    lakeComponentCount,
+    lakeOutletCount,
+    lakeInvariantFailures,
+    lakeBedFailures,
+    lakeOceanAdjacent,
+    waterfallCount,
+    invalidWaterfalls,
+    lakeHash,
+    waterfallHash
   };
 };
 
@@ -1042,6 +1185,7 @@ const runCase = async (sizeId, seed) => {
   const total = Math.max(1, state.tiles.length);
   const patchMetrics = analyzeForestPatches(state);
   const riverMetrics = analyzeRiverConnectivity(state);
+  const staticHydrologyMetrics = analyzeStaticHydrology(state);
   const roadMetrics = analyzeRoadEdgeQuality(state);
   const roadSurfaceMetrics = analyzeRoadSurfaceMetrics(state);
   const coastMetrics = analyzeCoastalClassification(state);
@@ -1094,6 +1238,7 @@ const runCase = async (sizeId, seed) => {
     compactTownViolations,
     ...patchMetrics,
     ...riverMetrics,
+    ...staticHydrologyMetrics,
     ...roadMetrics,
     ...roadSurfaceMetrics,
     ...coastMetrics,
@@ -1150,7 +1295,7 @@ const runAll = async () => {
       const metrics = await runCase(sizeId, seed);
       results.push(metrics);
       console.log(
-        `[mapgen] size=${metrics.sizeId} seed=${metrics.seed} ms=${metrics.durationMs.toFixed(2)} biome=${metrics.biomeSpreadClassifyMs.toFixed(2)}ms water=${metrics.waterPct.toFixed(2)}% forest=${metrics.forestPct.toFixed(2)}% forestAgeMean=${metrics.forestAgeMean.toFixed(2)} forestMaturityP95=${metrics.forestMaturityP95.toFixed(3)} patches=${metrics.forestPatchCount} meanPatch=${metrics.forestPatchMean} p95Patch=${metrics.forestPatchP95} houses=${metrics.houseCount} placed=${metrics.placedHouseCount}/${metrics.requestedHouseCount} compactEval=${metrics.compactTownEvalCount} compactViolations=${metrics.compactTownViolationCount} compactMaxAspect=${metrics.compactTownMaxAspect.toFixed(2)} base=(${metrics.baseX},${metrics.baseY}) baseElev=${metrics.baseElevation.toFixed(4)} baseRelief=${metrics.baseLocalRelief.toFixed(4)} baseCenter=${metrics.baseCenterDistanceRatio.toFixed(4)} baseVeg=${metrics.baseNearbyVegetationRatio.toFixed(4)} padReliefMax=${metrics.settlementPadReliefMax.toFixed(4)} padReliefMean=${metrics.settlementPadReliefMean.toFixed(4)} roads=${metrics.roadCount} roadComps=${metrics.roadComponentCount} townRoadComps=${metrics.townRoadComponentCount} townRoadMissing=${metrics.townRoadMissingCount} townRoadDisconnected=${metrics.townRoadDisconnectedCount} rivers=${metrics.riverCount} roadIgnoredDiag=${metrics.ignoredDiagonalCount} roadUnmatched=${metrics.unmatchedPatternCount} roadGrade=${metrics.maxRoadGrade.toFixed(3)} roadCrossfall=${metrics.maxRoadCrossfall.toFixed(3)} roadGradeChange=${metrics.maxRoadGradeChange.toFixed(3)} roadWalls=${metrics.wallEdgeCount} riverDiagOnly=${metrics.riverDiagOnlyLinks} riverIso=${metrics.riverIsolatedCells} riverOrthRatio=${metrics.riverOrthConnectivityRatio.toFixed(4)} riverComps=${metrics.riverComponentCount} riverDetachedComps=${metrics.detachedRiverComponents} riverDetachedCells=${metrics.detachedRiverCells} coastNatural=${metrics.coastalNaturalCount} coastBeach=${metrics.coastalBeachCount} coastRocky=${metrics.coastalRockyCount} coastOther=${metrics.coastalOtherCount}`
+        `[mapgen] size=${metrics.sizeId} seed=${metrics.seed} ms=${metrics.durationMs.toFixed(2)} biome=${metrics.biomeSpreadClassifyMs.toFixed(2)}ms water=${metrics.waterPct.toFixed(2)}% forest=${metrics.forestPct.toFixed(2)}% forestAgeMean=${metrics.forestAgeMean.toFixed(2)} forestMaturityP95=${metrics.forestMaturityP95.toFixed(3)} patches=${metrics.forestPatchCount} meanPatch=${metrics.forestPatchMean} p95Patch=${metrics.forestPatchP95} houses=${metrics.houseCount} placed=${metrics.placedHouseCount}/${metrics.requestedHouseCount} compactEval=${metrics.compactTownEvalCount} compactViolations=${metrics.compactTownViolationCount} compactMaxAspect=${metrics.compactTownMaxAspect.toFixed(2)} base=(${metrics.baseX},${metrics.baseY}) baseElev=${metrics.baseElevation.toFixed(4)} baseRelief=${metrics.baseLocalRelief.toFixed(4)} baseCenter=${metrics.baseCenterDistanceRatio.toFixed(4)} baseVeg=${metrics.baseNearbyVegetationRatio.toFixed(4)} padReliefMax=${metrics.settlementPadReliefMax.toFixed(4)} padReliefMean=${metrics.settlementPadReliefMean.toFixed(4)} roads=${metrics.roadCount} roadComps=${metrics.roadComponentCount} townRoadComps=${metrics.townRoadComponentCount} townRoadMissing=${metrics.townRoadMissingCount} townRoadDisconnected=${metrics.townRoadDisconnectedCount} rivers=${metrics.riverCount} lakes=${metrics.lakeCount}/${metrics.lakeTiles} lakeOut=${metrics.lakeOutletCount} falls=${metrics.waterfallCount} roadIgnoredDiag=${metrics.ignoredDiagonalCount} roadUnmatched=${metrics.unmatchedPatternCount} roadGrade=${metrics.maxRoadGrade.toFixed(3)} roadCrossfall=${metrics.maxRoadCrossfall.toFixed(3)} roadGradeChange=${metrics.maxRoadGradeChange.toFixed(3)} roadWalls=${metrics.wallEdgeCount} riverDiagOnly=${metrics.riverDiagOnlyLinks} riverIso=${metrics.riverIsolatedCells} riverOrthRatio=${metrics.riverOrthConnectivityRatio.toFixed(4)} riverComps=${metrics.riverComponentCount} riverDetachedComps=${metrics.detachedRiverComponents} riverDetachedCells=${metrics.detachedRiverCells} coastNatural=${metrics.coastalNaturalCount} coastBeach=${metrics.coastalBeachCount} coastRocky=${metrics.coastalRockyCount} coastOther=${metrics.coastalOtherCount}`
       );
     }
   }
@@ -1164,6 +1309,53 @@ const runDebugSmokes = async () => {
       `[mapgen] debug-smoke size=${smokeCase.sizeId} seed=${smokeCase.seed} stop=${smokeCase.stopAfterPhase}`
     );
   }
+};
+
+const runNoLakeSmoke = async () => {
+  const sizeId = "medium";
+  const seed = 1337;
+  const grid = createGrid(sizeId);
+  const state = createInitialState(seed, grid);
+  const rng = new RNG(seed);
+  resetState(state, seed);
+  rng.setState(seed);
+  await generateMap(state, rng, undefined, { lakeChance: 0, maxLakeCount: 0 });
+  const metrics = analyzeStaticHydrology(state);
+  let riverCount = 0;
+  for (let i = 0; i < state.grid.totalTiles; i += 1) {
+    if (state.tileRiverMask[i] > 0) {
+      riverCount += 1;
+    }
+  }
+  if (metrics.lakeTiles !== 0 || riverCount <= 0) {
+    throw new Error(`[mapgen] no-lake smoke failed: lakes=${metrics.lakeTiles} rivers=${riverCount}`);
+  }
+  console.log(`[mapgen] no-lake smoke seed=${seed} rivers=${riverCount}`);
+};
+
+const runDeterministicHydrologySmoke = async () => {
+  const sizeId = "medium";
+  const seed = 1337;
+  const runOnce = async () => {
+    const grid = createGrid(sizeId);
+    const state = createInitialState(seed, grid);
+    const rng = new RNG(seed);
+    resetState(state, seed);
+    rng.setState(seed);
+    await generateMap(state, rng);
+    return analyzeStaticHydrology(state);
+  };
+  const first = await runOnce();
+  const second = await runOnce();
+  const fields = ["lakeTiles", "lakeCount", "lakeOutletCount", "waterfallCount", "lakeHash", "waterfallHash"];
+  for (const field of fields) {
+    if (first[field] !== second[field]) {
+      throw new Error(`[mapgen] hydrology determinism failed for ${field}: ${first[field]} !== ${second[field]}`);
+    }
+  }
+  console.log(
+    `[mapgen] deterministic hydrology smoke seed=${seed} lakeHash=${first.lakeHash} waterfallHash=${first.waterfallHash}`
+  );
 };
 
 const compareAgainstBaseline = async (results) => {
@@ -1198,6 +1390,36 @@ const compareAgainstBaseline = async (results) => {
     if (result.detachedRiverComponents !== 0) {
       failures += 1;
       console.error(`[mapgen] detached river components present for ${key}: ${result.detachedRiverComponents}`);
+    }
+    if (result.lakeInvariantFailures !== 0) {
+      failures += 1;
+      console.error(`[mapgen] lake water invariants failed for ${key}: ${result.lakeInvariantFailures}`);
+    }
+    if (result.lakeBedFailures !== 0) {
+      failures += 1;
+      console.error(`[mapgen] lake beds not below surface for ${key}: ${result.lakeBedFailures}`);
+    }
+    if (result.lakeOceanAdjacent !== 0) {
+      failures += 1;
+      console.error(`[mapgen] inland lake touches ocean for ${key}: ${result.lakeOceanAdjacent}`);
+    }
+    if (result.invalidWaterfalls !== 0) {
+      failures += 1;
+      console.error(`[mapgen] invalid static waterfalls for ${key}: ${result.invalidWaterfalls}`);
+    }
+    if (result.lakeComponentCount !== result.lakeCount) {
+      failures += 1;
+      console.error(
+        `[mapgen] lake components do not match lake ids for ${key}: components=${result.lakeComponentCount} ids=${result.lakeCount}`
+      );
+    }
+    if (result.lakeCount > 0 && result.lakeOutletCount === 0) {
+      failures += 1;
+      console.error(`[mapgen] lakes generated without outlets for ${key}`);
+    }
+    if (result.sizeId === "medium" && result.seed === 1337 && result.lakeTiles < 24) {
+      failures += 1;
+      console.error(`[mapgen] target hydrology seed produced too few inland lake tiles for ${key}: ${result.lakeTiles}`);
     }
     const ignoredDiagonalRatio = result.roadCount > 0 ? result.ignoredDiagonalCount / result.roadCount : 0;
     if (ignoredDiagonalRatio > 0.05) {
@@ -1311,6 +1533,8 @@ const compareAgainstBaseline = async (results) => {
 
 validateHouseParcels();
 await runDebugSmokes();
+await runNoLakeSmoke();
+await runDeterministicHydrologySmoke();
 const results = await runAll();
 if (writeBaseline) {
   const payload = {

@@ -22,6 +22,8 @@ export const buildWaterSurfaceHeights = (
   oceanLevel: number | null,
   sampledRiverSurface: Float32Array | undefined,
   sampledRiverStepStrength: Float32Array | undefined,
+  sampledLakeSurface: Float32Array | undefined,
+  lakeRatio: Float32Array | undefined,
   deps: WaterSurfaceHeightsDeps
 ): Float32Array => {
   const total = sampleCols * sampleRows;
@@ -43,8 +45,14 @@ export const buildWaterSurfaceHeights = (
     hasWater(idx) && (oceanRatio[idx] ?? 0) >= deps.oceanRatioMin;
   const isRiverCell = (idx: number): boolean =>
     hasWater(idx) && (riverRatio[idx] ?? 0) >= deps.riverRatioMin;
+  const isLakeCell = (idx: number): boolean =>
+    hasWater(idx) && (lakeRatio?.[idx] ?? 0) >= 0.1 && Number.isFinite(sampledLakeSurface?.[idx]);
 
   for (let i = 0; i < total; i += 1) {
+    if (isLakeCell(i) && sampledLakeSurface) {
+      heights[i] = clamp(sampledLakeSurface[i] ?? 0, 0, 1);
+      continue;
+    }
     if (!hasWater(i) || !isRiverCell(i) || !sampledRiverSurface) {
       continue;
     }
@@ -150,6 +158,10 @@ export const buildWaterSurfaceHeights = (
         smoothed[idx] = heights[idx];
         continue;
       }
+      if (isLakeCell(idx)) {
+        smoothed[idx] = heights[idx];
+        continue;
+      }
       const center = heights[idx];
       let sum = center;
       let count = 1;
@@ -202,6 +214,14 @@ export const buildWaterSurfaceHeights = (
         continue;
       }
       heights[i] = clamp(heights[i] * (1 - preserve) + riverSurface * preserve, 0, 1);
+    }
+  }
+
+  if (sampledLakeSurface) {
+    for (let i = 0; i < total; i += 1) {
+      if (isLakeCell(i)) {
+        heights[i] = clamp(sampledLakeSurface[i] ?? heights[i], 0, 1);
+      }
     }
   }
 

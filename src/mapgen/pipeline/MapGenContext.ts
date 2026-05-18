@@ -6,6 +6,7 @@ import { DEFAULT_MAP_GEN_SETTINGS, DEFAULT_ROAD_GEN_SETTINGS } from "../settings
 import { mapSizeIdFromDimensions, resolveTerrainProfile, type ResolvedTerrainProfile, type TerrainRecipe } from "../terrainProfile.js";
 import { DirtyRegionTracker } from "./DirtyRegionTracker.js";
 import type { SettlementPlacementResult } from "../communities.js";
+import type { StaticHydrologyLake, StaticHydrologyRejectSummary, StaticHydrologyWaterfall } from "../../systems/terrain/types/staticHydrologyTypes.js";
 
 export type SettlementStageData = {
   typeBefore: Uint8Array;
@@ -58,6 +59,20 @@ export class MapGenContext {
   treeProbabilityMap: Float32Array | null = null;
   treeDensityMap: Float32Array | null = null;
   forestMask: Uint8Array | null = null;
+  lakeMask: Uint16Array | null = null;
+  lakeSurfaceMap: Float32Array | null = null;
+  lakeOutletMask: Uint8Array | null = null;
+  rainfallMap: Float32Array | null = null;
+  runoffMap: Float32Array | null = null;
+  riverLakeEntryMask: Uint8Array | null = null;
+  riverLakeExitMask: Uint8Array | null = null;
+  waterfallSourceMask: Uint8Array | null = null;
+  waterfallTargetMap: Int32Array | null = null;
+  waterfallDropMap: Float32Array | null = null;
+  staticHydrologyLakes: StaticHydrologyLake[] = [];
+  staticHydrologyWaterfalls: StaticHydrologyWaterfall[] = [];
+  staticHydrologyRejectedLakeCandidates: StaticHydrologyRejectSummary = {};
+  staticHydrologyRejectedWaterfallCandidates = 0;
   settlementSnapshot: SettlementStageData | null = null;
   settlementPlan: SettlementPlacementResult | null = null;
 

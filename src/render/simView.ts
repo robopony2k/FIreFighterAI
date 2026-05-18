@@ -45,6 +45,12 @@ export type RenderTerrainSample = {
   riverBed?: Float32Array;
   riverSurface?: Float32Array;
   riverStepStrength?: Float32Array;
+  lakeMask?: Uint16Array;
+  lakeSurface?: Float32Array;
+  lakeOutletMask?: Uint8Array;
+  waterfallSourceMask?: Uint8Array;
+  waterfallTarget?: Int32Array;
+  waterfallDrop?: Float32Array;
   climateDryness?: number;
   debugScalarField?: Float32Array;
   debugTypeColors?: boolean;
@@ -130,6 +136,12 @@ export const buildRenderTerrainSample = (
     riverBed: state.tileRiverBed,
     riverSurface: state.tileRiverSurface,
     riverStepStrength: state.tileRiverStepStrength,
+    lakeMask: state.tileLakeMask,
+    lakeSurface: state.tileLakeSurface,
+    lakeOutletMask: state.tileLakeOutletMask,
+    waterfallSourceMask: state.tileWaterfallSourceMask,
+    waterfallTarget: state.tileWaterfallTarget,
+    waterfallDrop: state.tileWaterfallDrop,
     climateDryness: getClimateDryness(state),
     debugTypeColors,
     treesEnabled,
