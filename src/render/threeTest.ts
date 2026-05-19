@@ -3821,6 +3821,50 @@ export const createThreeTest = (
     return pickHouseRotationFromRoadMask(reference?.roadMask ?? 0, seed);
   };
 
+  const computeHoverBiomeShape = (
+    tileX: number,
+    tileY: number,
+    tileIndex: number,
+    heightScale: number
+  ): { slope: number; relief: number; renderGrade: number; renderAngleDeg: number } => {
+    const center = world.tileElevation[tileIndex] ?? world.tiles[tileIndex]?.elevation ?? 0;
+    let maxCardinalDiff = 0;
+    let minElevation = center;
+    let maxElevation = center;
+    for (let dy = -1; dy <= 1; dy += 1) {
+      const ny = tileY + dy;
+      if (ny < 0 || ny >= world.grid.rows) {
+        continue;
+      }
+      for (let dx = -1; dx <= 1; dx += 1) {
+        const nx = tileX + dx;
+        if (nx < 0 || nx >= world.grid.cols || (dx === 0 && dy === 0)) {
+          continue;
+        }
+        const nIdx = ny * world.grid.cols + nx;
+        const neighbor = world.tileElevation[nIdx] ?? world.tiles[nIdx]?.elevation ?? center;
+        minElevation = Math.min(minElevation, neighbor);
+        maxElevation = Math.max(maxElevation, neighbor);
+        if (Math.abs(dx) + Math.abs(dy) === 1) {
+          maxCardinalDiff = Math.max(maxCardinalDiff, Math.abs(center - neighbor));
+        }
+      }
+    }
+    const tileSpan = lastTerrainSurface
+      ? Math.min(
+          lastTerrainSurface.width / Math.max(1, lastTerrainSurface.cols),
+          lastTerrainSurface.depth / Math.max(1, lastTerrainSurface.rows)
+        )
+      : 1;
+    const renderGrade = (maxCardinalDiff * heightScale) / Math.max(1e-4, tileSpan);
+    return {
+      slope: maxCardinalDiff,
+      relief: maxElevation - minElevation,
+      renderGrade,
+      renderAngleDeg: (Math.atan(renderGrade) * 180) / Math.PI
+    };
+  };
+
   const buildHoverCellSection: HoverDebugSectionBuilder = (context) => {
     const tile = world.tiles[context.tileIndex];
     if (!tile) {
@@ -3830,9 +3874,11 @@ export const createThreeTest = (
     const cachedWetness = world.tileSuppressionWetness[context.tileIndex] ?? 0;
     const cachedBurnAge = world.tileBurnAge[context.tileIndex] ?? 0;
     const cachedHeatRelease = world.tileHeatRelease[context.tileIndex] ?? 0;
+    const biomeShape = computeHoverBiomeShape(context.tileX, context.tileY, context.tileIndex, context.heightScale);
     const lines = [
       `type=${tile.type} id=${world.tileTypeId[context.tileIndex] ?? "n/a"} base=${tile.isBase ? "1" : "0"}`,
       `elev=${formatDebugNumber(world.tileElevation[context.tileIndex] ?? tile.elevation, 3)} y=${formatDebugNumber((world.tileElevation[context.tileIndex] ?? 0) * context.heightScale, 2)} moist=${formatDebugNumber(world.tileMoisture[context.tileIndex] ?? tile.moisture, 2)}`,
+      `biome slope=${formatDebugNumber(biomeShape.slope, 3)} relief=${formatDebugNumber(biomeShape.relief, 3)} grade=${formatDebugNumber(biomeShape.renderGrade, 2)} angle=${formatDebugNumber(biomeShape.renderAngleDeg, 0)}deg`,
       `fire=${formatDebugNumber(world.tileFire[context.tileIndex] ?? tile.fire, 2)} heat=${formatDebugNumber(world.tileHeat[context.tileIndex] ?? tile.heat, 2)} fuel=${formatDebugNumber(world.tileFuel[context.tileIndex] ?? tile.fuel, 2)}`,
       `wet=${formatDebugNumber(cachedWetness, 2)} burnAge=${formatDebugNumber(cachedBurnAge, 2)} release=${formatDebugNumber(cachedHeatRelease, 2)}`
     ];
@@ -6949,7 +6995,9 @@ export const createThreeTest = (
       !typedArrayEqual(lastTerrainSurface.waterRatios.river, surface.waterRatios.river) ||
       !typedArrayEqual(lastTerrainSurface.sampledRiverSurface, surface.sampledRiverSurface) ||
       !typedArrayEqual(lastTerrainSurface.sampledRiverStepStrength, surface.sampledRiverStepStrength) ||
-      !typedArrayEqual(lastTerrainSurface.sampledRiverCoverage, surface.sampledRiverCoverage)
+      !typedArrayEqual(lastTerrainSurface.sampledRiverCoverage, surface.sampledRiverCoverage) ||
+      !typedArrayEqual(lastTerrainSurface.sampledLakeSurface, surface.sampledLakeSurface) ||
+      !typedArrayEqual(lastTerrainSurface.sampledLakeCoverage, surface.sampledLakeCoverage)
     ) {
       return false;
     }

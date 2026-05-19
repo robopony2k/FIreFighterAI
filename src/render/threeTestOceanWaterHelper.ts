@@ -40,6 +40,8 @@ type OceanWaterPalette = {
   skyHorizonColor: THREE.ColorRepresentation;
   shallowColor: THREE.ColorRepresentation;
   deepColor: THREE.ColorRepresentation;
+  inlandShallowColor: THREE.ColorRepresentation;
+  inlandDeepColor: THREE.ColorRepresentation;
   sunColor: THREE.ColorRepresentation;
 };
 
@@ -79,6 +81,8 @@ export class ThreeTestOceanWaterHelper {
     skyHorizonColor: THREE.Color;
     shallowColor: THREE.Color;
     deepColor: THREE.Color;
+    inlandShallowColor: THREE.Color;
+    inlandDeepColor: THREE.Color;
     sunColor: THREE.Color;
   };
   private fogState: {
@@ -92,6 +96,7 @@ export class ThreeTestOceanWaterHelper {
   private mask: THREE.Texture | null = null;
   private supportMap: THREE.Texture | null = null;
   private domainMap: THREE.Texture | null = null;
+  private inlandWaterMap: THREE.Texture | null = null;
   private shoreSdf: THREE.Texture | null = null;
   private shoreTransitionMap: THREE.Texture | null = null;
   private flowMap: THREE.Texture | null = null;
@@ -101,6 +106,7 @@ export class ThreeTestOceanWaterHelper {
   private readonly backdropMask: THREE.DataTexture;
   private readonly backdropSupportMap: THREE.DataTexture;
   private readonly backdropDomainMap: THREE.DataTexture;
+  private readonly backdropInlandWaterMap: THREE.DataTexture;
   private readonly backdropShoreSdf: THREE.DataTexture;
   private readonly backdropShoreTransitionMap: THREE.DataTexture;
   private debugControls: OceanWaterDebugControls = { ...DEFAULT_OCEAN_WATER_DEBUG_CONTROLS };
@@ -113,6 +119,8 @@ export class ThreeTestOceanWaterHelper {
       skyHorizonColor: new THREE.Color(options.skyHorizonColor),
       shallowColor: new THREE.Color(0x2f87c8),
       deepColor: new THREE.Color(0x1b5078),
+      inlandShallowColor: new THREE.Color(0x3f86bf),
+      inlandDeepColor: new THREE.Color(0x1a4d79),
       sunColor: new THREE.Color(0xfff0cf)
     };
     this.fogState = {
@@ -123,6 +131,7 @@ export class ThreeTestOceanWaterHelper {
     this.backdropMask = createSolidTexture(255, 255, 255, 255);
     this.backdropSupportMap = createSolidTexture(255, 255, 255, 255);
     this.backdropDomainMap = createSolidTexture(255, 0, 255, 255);
+    this.backdropInlandWaterMap = createSolidTexture(0, 0, 0, 255);
     this.backdropShoreSdf = createSolidTexture(255, 255, 255, 255);
     this.backdropShoreTransitionMap = createSolidTexture(0, 0, 0, 128);
   }
@@ -182,6 +191,7 @@ export class ThreeTestOceanWaterHelper {
     mask: THREE.Texture,
     supportMap: THREE.Texture,
     domainMap: THREE.Texture,
+    inlandWaterMap: THREE.Texture,
     shoreSdf: THREE.Texture,
     shoreTransitionMap: THREE.Texture,
     width: number,
@@ -205,10 +215,13 @@ export class ThreeTestOceanWaterHelper {
       u_mask: { value: mask },
       u_supportMap: { value: supportMap },
       u_domainMap: { value: domainMap },
+      u_inlandWaterMap: { value: inlandWaterMap },
       u_shoreSdf: { value: shoreSdf },
       u_shoreTransitionMap: { value: shoreTransitionMap },
       u_color: { value: this.currentPalette.shallowColor.clone() },
       u_deepColor: { value: this.currentPalette.deepColor.clone() },
+      u_inlandColor: { value: this.currentPalette.inlandShallowColor.clone() },
+      u_inlandDeepColor: { value: this.currentPalette.inlandDeepColor.clone() },
       u_opacity: { value: 1.0 },
       u_waveScale: { value: 0.145 },
       u_normalMap1: { value: this.normal1 as THREE.Texture },
@@ -361,12 +374,16 @@ export class ThreeTestOceanWaterHelper {
     this.currentPalette.skyHorizonColor.set(palette.skyHorizonColor);
     this.currentPalette.shallowColor.set(palette.shallowColor);
     this.currentPalette.deepColor.set(palette.deepColor);
+    this.currentPalette.inlandShallowColor.set(palette.inlandShallowColor);
+    this.currentPalette.inlandDeepColor.set(palette.inlandDeepColor);
     this.currentPalette.sunColor.set(palette.sunColor);
     this.forEachUniformSet((uniforms) => {
       uniforms.u_skyTopColor.value.copy(this.currentPalette.skyTopColor);
       uniforms.u_skyHorizonColor.value.copy(this.currentPalette.skyHorizonColor);
       uniforms.u_color.value.copy(this.currentPalette.shallowColor);
       uniforms.u_deepColor.value.copy(this.currentPalette.deepColor);
+      uniforms.u_inlandColor.value.copy(this.currentPalette.inlandShallowColor);
+      uniforms.u_inlandDeepColor.value.copy(this.currentPalette.inlandDeepColor);
       uniforms.u_sunColor.value.copy(this.currentPalette.sunColor);
     });
   }
@@ -461,6 +478,7 @@ export class ThreeTestOceanWaterHelper {
         this.backdropMask,
         this.backdropSupportMap,
         this.backdropDomainMap,
+        this.backdropInlandWaterMap,
         this.backdropShoreSdf,
         this.backdropShoreTransitionMap,
         width,
@@ -543,6 +561,9 @@ export class ThreeTestOceanWaterHelper {
     disposeTexture(this.mask);
     disposeTexture(this.supportMap);
     disposeTexture(this.domainMap);
+    if (this.inlandWaterMap !== this.backdropInlandWaterMap) {
+      disposeTexture(this.inlandWaterMap);
+    }
     disposeTexture(this.shoreSdf);
     disposeTexture(this.shoreTransitionMap);
     disposeTexture(this.flowMap);
@@ -550,6 +571,7 @@ export class ThreeTestOceanWaterHelper {
     this.mask = null;
     this.supportMap = null;
     this.domainMap = null;
+    this.inlandWaterMap = null;
     this.shoreSdf = null;
     this.shoreTransitionMap = null;
     this.flowMap = null;
@@ -561,6 +583,7 @@ export class ThreeTestOceanWaterHelper {
     this.backdropMask.dispose();
     this.backdropSupportMap.dispose();
     this.backdropDomainMap.dispose();
+    this.backdropInlandWaterMap.dispose();
     this.backdropShoreSdf.dispose();
     this.backdropShoreTransitionMap.dispose();
   }
@@ -570,6 +593,7 @@ export class ThreeTestOceanWaterHelper {
     this.mask = ocean.mask;
     this.supportMap = ocean.supportMap;
     this.domainMap = ocean.domainMap;
+    this.inlandWaterMap = ocean.inlandWaterMap ?? this.backdropInlandWaterMap;
     this.shoreSdf = ocean.shoreSdf;
     this.shoreTransitionMap = ocean.shoreTransitionMap;
     this.flowMap = ocean.flowMap;
@@ -595,6 +619,7 @@ export class ThreeTestOceanWaterHelper {
       this.mask,
       this.supportMap,
       this.domainMap,
+      this.inlandWaterMap,
       this.shoreSdf,
       this.shoreTransitionMap,
       ocean.width,

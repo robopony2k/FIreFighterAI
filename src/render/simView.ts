@@ -33,6 +33,8 @@ export type RenderTerrainSample = {
   tileVegetationAge?: Float32Array;
   tileCanopyCover?: Float32Array;
   tileStemDensity?: Uint8Array;
+  structureMask?: Uint8Array;
+  tileTownId?: Int16Array;
   riverMask?: Uint8Array;
   oceanMask?: Uint8Array;
   seaLevel?: Float32Array;
@@ -124,6 +126,8 @@ export const buildRenderTerrainSample = (
     tileVegetationAge: state.tileVegetationAge,
     tileCanopyCover: state.tileCanopyCover,
     tileStemDensity: state.tileStemDensity,
+    structureMask: state.structureMask,
+    tileTownId: state.tileTownId,
     riverMask: state.tileRiverMask,
     oceanMask: state.tileOceanMask,
     seaLevel: state.tileSeaLevel,

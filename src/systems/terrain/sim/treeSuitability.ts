@@ -1,4 +1,5 @@
 import { clamp } from "../../../core/utils.js";
+import { getTerrainHeightScale } from "../../../core/terrainScale.js";
 import { fbmNoise, hash2D } from "../../../mapgen/noise.js";
 
 export type TreeSuitabilityInput = {
@@ -17,6 +18,7 @@ export type TreeSuitabilityInput = {
   highlandForestElevation: number;
   vegetationDensity: number;
   forestPatchiness: number;
+  slopeAngleDeg?: number;
   isWater?: boolean;
 };
 
@@ -41,6 +43,43 @@ const smoothstep = (edge0: number, edge1: number, value: number): number => {
 
 const transitionWeight = (value: number): number => 1 - Math.abs(clamp(value, 0, 1) * 2 - 1);
 
+export const computeRenderedSlopeAngleDeg = (
+  slope: number,
+  cols: number,
+  rows: number,
+  heightScaleMultiplier = 1
+): number => {
+  const tileSpan = Math.max(1e-4, (Math.max(1, Math.min(cols, rows) - 1) / Math.max(1, Math.min(cols, rows))));
+  const grade = (Math.max(0, slope) * getTerrainHeightScale(cols, rows, heightScaleMultiplier)) / tileSpan;
+  return (Math.atan(grade) * 180) / Math.PI;
+};
+
+export const computeTreeSlopeSuitability = (slopeAngleDeg: number): number => {
+  if (slopeAngleDeg <= 20) {
+    return 1;
+  }
+  if (slopeAngleDeg <= 35) {
+    return 1 - smoothstep(20, 35, slopeAngleDeg) * 0.58;
+  }
+  if (slopeAngleDeg <= 45) {
+    return 0.42 - smoothstep(35, 45, slopeAngleDeg) * 0.3;
+  }
+  return Math.max(0, 0.12 * (1 - smoothstep(45, 58, slopeAngleDeg)));
+};
+
+export const computeShrubSlopeSuitability = (slopeAngleDeg: number): number => {
+  if (slopeAngleDeg <= 30) {
+    return 1;
+  }
+  if (slopeAngleDeg <= 45) {
+    return 1 - smoothstep(30, 45, slopeAngleDeg) * 0.58;
+  }
+  if (slopeAngleDeg <= 55) {
+    return 0.42 - smoothstep(45, 55, slopeAngleDeg) * 0.3;
+  }
+  return Math.max(0, 0.12 * (1 - smoothstep(55, 68, slopeAngleDeg)));
+};
+
 export const computeTreeSuitability = (input: TreeSuitabilityInput): TreeSuitabilityResult => {
   if (input.isWater) {
     return {
@@ -60,6 +99,8 @@ export const computeTreeSuitability = (input: TreeSuitabilityInput): TreeSuitabi
   const patchiness = clamp(input.forestPatchiness, 0, 1);
   const elevation = clamp(input.elevation, 0, 1);
   const slope = clamp(input.slope, 0, 1);
+  const slopeAngleDeg = Math.max(0, input.slopeAngleDeg ?? (Math.atan(slope) * 180) / Math.PI);
+  const treeSlopeSuitability = computeTreeSlopeSuitability(slopeAngleDeg);
   const moisture = clamp(input.moisture, 0, 1);
   const waterDistM = Math.max(0, input.waterDist) * cellSizeM;
   const headroom = Math.max(0, elevation - input.seaLevel);
@@ -79,14 +120,14 @@ export const computeTreeSuitability = (input: TreeSuitabilityInput): TreeSuitabi
     0,
     1
   );
-  const slopeStress = smoothstep(0.16, 0.5, slope);
+  const slopeStress = 1 - treeSlopeSuitability;
 
   const macroScaleM = 620 + patchiness * 460;
   const patchScaleM = 210 + patchiness * 220;
   const macroNoise = fbmNoise(input.worldX / macroScaleM, input.worldY / macroScaleM, input.seed + 19_031, 3);
   const patchNoise = fbmNoise(input.worldX / patchScaleM, input.worldY / patchScaleM, input.seed + 19_607, 2);
 
-  const stressFactor = clamp((1 - elevationStress * 0.82) * (1 - slopeStress * 0.76), 0, 1);
+  const stressFactor = clamp((1 - elevationStress * 0.82) * treeSlopeSuitability, 0, 1);
   const wetBase = clamp(
     moistureFactor * 0.72 +
       waterInfluence * 0.18 +

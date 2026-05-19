@@ -3,11 +3,13 @@ import { TILE_TYPE_IDS } from "../../core/state.js";
 import type { TileType } from "../../core/types.js";
 import { clamp } from "../../core/utils.js";
 import { clearVegetationState } from "../../core/vegetation.js";
+import { computeRenderedSlopeAngleDeg } from "../../systems/terrain/sim/treeSuitability.js";
 import type { PipelineStage } from "../pipeline/TerrainPipeline.js";
 import { computeBiomeSuitabilityDetails } from "../biome/BiomeSuitability.js";
 import { emitStageSnapshot } from "../pipeline/stageDebug.js";
 import {
   assignForestComposition,
+  buildLocalBiomeContext,
   classifyOceanCoastTile,
   classifySeedSpreadTile,
   classifyTile,
@@ -85,6 +87,12 @@ export const PostSettlementReconcileStage: PipelineStage = {
             return clamp(maxDiff, 0, 1);
           })();
           ctx.slopeMap[idx] = slopeLocal;
+          const slopeAngleDeg = computeRenderedSlopeAngleDeg(
+            slopeLocal,
+            state.grid.cols,
+            state.grid.rows,
+            ctx.settings.heightScaleMultiplier
+          );
           const isStaticWater = ctx.oceanMask[idx] || ctx.riverMask[idx] > 0 || state.tileLakeMask[idx] > 0;
           const moisture =
             isStaticWater
@@ -111,6 +119,19 @@ export const PostSettlementReconcileStage: PipelineStage = {
 
           const valley = state.valleyMap[idx] ?? 0;
           const seaLevel = ctx.seaLevelMap[idx] ?? 0;
+          const localContext = buildLocalBiomeContext({
+            elevationMap: ctx.elevationMap,
+            cols: state.grid.cols,
+            rows: state.grid.rows,
+            x,
+            y,
+            oceanMask: ctx.oceanMask,
+            riverMask: ctx.riverMask,
+            lakeMask: state.tileLakeMask,
+            waterfallDropMap: ctx.waterfallDropMap,
+            waterfallTargetMap: ctx.waterfallTargetMap
+          });
+          const seededNoiseOffset = (ctx.microMap[idx] ?? 0.5) - 0.5;
           let nextType: TileType;
           const coastlineOverride = classifyOceanCoastTile(
             state,
@@ -139,7 +160,8 @@ export const PostSettlementReconcileStage: PipelineStage = {
               cellSizeM: ctx.cellSizeM,
               waterDist: tile.waterDist,
               vegetationDensity: ctx.settings.vegetationDensity,
-              forestPatchiness: ctx.settings.forestPatchiness
+              forestPatchiness: ctx.settings.forestPatchiness,
+              slopeAngleDeg
             });
             const suitability = details.treeSuitability;
             ctx.biomeSuitabilityMap[idx] = suitability;
@@ -194,7 +216,10 @@ export const PostSettlementReconcileStage: PipelineStage = {
               moisture,
               seaLevel,
               highlandForestElevation: ctx.settings.highlandForestElevation,
-              forestCandidate
+              forestCandidate,
+              localContext,
+              seededNoiseOffset,
+              slopeAngleDeg
             });
           } else {
             nextType = classifyTile({
@@ -206,7 +231,10 @@ export const PostSettlementReconcileStage: PipelineStage = {
               forestNoise: ctx.forestNoiseMap[idx] ?? 0.5,
               seaLevel,
               forestThreshold: ctx.settings.forestThreshold,
-              highlandForestElevation: ctx.settings.highlandForestElevation
+              highlandForestElevation: ctx.settings.highlandForestElevation,
+              localContext,
+              seededNoiseOffset,
+              slopeAngleDeg
             });
           }
           tile.type = nextType;

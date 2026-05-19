@@ -7,6 +7,7 @@ import {
   buildOceanDistanceField,
   buildStaticHydrologyFields
 } from "./staticHydrologyFields.js";
+import { buildLakeRiverConnectionPaths } from "./lakeRiverConnections.js";
 import type {
   StaticHydrologyLake,
   StaticHydrologyRejectReason,
@@ -596,6 +597,7 @@ const stampLakeWater = (
   state: WorldState,
   elevationMap: number[],
   riverMask: Uint8Array,
+  oceanMask: Uint8Array,
   riverSurface: Float32Array,
   riverBed: Float32Array,
   riverStepStrength: Float32Array,
@@ -609,6 +611,55 @@ const stampLakeWater = (
 ): void => {
   const cols = state.grid.cols;
   const rows = state.grid.rows;
+  const setRiverConnectionTile = (
+    idx: number,
+    surfaceLevel: number,
+    stepStrength: number,
+    markerMask: Uint8Array
+  ): void => {
+    if (idx < 0 || idx >= state.grid.totalTiles || oceanMask[idx] > 0 || lakeMask[idx] > 0) {
+      return;
+    }
+    const existingRiverSurface = riverMask[idx] > 0 && Number.isFinite(riverSurface[idx])
+      ? riverSurface[idx] as number
+      : Number.NaN;
+    const terrainCap = Number.isFinite(existingRiverSurface)
+      ? Math.max(existingRiverSurface, surfaceLevel)
+      : (elevationMap[idx] ?? surfaceLevel) - 0.001;
+    const surface = clamp(Math.min(surfaceLevel, terrainCap), 0, 1);
+    const bedDepth = Math.max(0.006, settings.minLakeDepth * 0.55);
+    const bed = clamp(surface - bedDepth, 0, 1);
+    riverMask[idx] = 1;
+    state.tileRiverMask[idx] = 1;
+    markerMask[idx] = 1;
+    riverSurface[idx] = Number.isFinite(riverSurface[idx])
+      ? Math.min(riverSurface[idx] as number, surface)
+      : surface;
+    riverBed[idx] = Number.isFinite(riverBed[idx])
+      ? Math.min(riverBed[idx] as number, bed)
+      : bed;
+    riverStepStrength[idx] = Math.max(riverStepStrength[idx] ?? 0, stepStrength);
+    elevationMap[idx] = Math.min(elevationMap[idx] ?? bed, bed);
+    state.tileElevation[idx] = elevationMap[idx] ?? bed;
+    state.tileMoisture[idx] = 1;
+    state.tileFuel[idx] = 0;
+    state.tileFire[idx] = 0;
+    const tile = state.tiles[idx];
+    if (!tile) {
+      return;
+    }
+    tile.type = "water";
+    tile.elevation = elevationMap[idx] ?? bed;
+    tile.moisture = 1;
+    tile.waterDist = 0;
+    tile.fuel = 0;
+    tile.fire = 0;
+    tile.heat = 0;
+    tile.isBase = false;
+    clearVegetationState(tile);
+    tile.dominantTreeType = null;
+    tile.treeType = null;
+  };
   const shoreDistances = buildLakeShoreDistances(lake.tiles, cols, rows);
   for (const idx of lake.tiles) {
     lakeMask[idx] = lake.id;
@@ -642,33 +693,46 @@ const stampLakeWater = (
   for (const idx of lake.inflowRiverTiles) {
     riverLakeEntryMask[idx] = 1;
   }
+  const connectionPaths = buildLakeRiverConnectionPaths({
+    cols,
+    rows,
+    elevationMap,
+    riverMask,
+    oceanMask,
+    lakeMask,
+    lakeId: lake.id,
+    lakeTiles: lake.tiles,
+    surfaceLevel: lake.surfaceLevel,
+    settings,
+    seed: state.seed,
+    outletTargetIndex: lake.outletTargetIndex
+  });
+  connectionPaths.inletTiles.forEach((idx, pathIndex) => {
+    const progress = (pathIndex + 1) / Math.max(1, connectionPaths.inletTiles.length);
+    const existingSurface = riverSurface[idx];
+    const targetSurface = lake.surfaceLevel - 0.001;
+    const blendedSurface = Number.isFinite(existingSurface)
+      ? (existingSurface as number) * (1 - progress) + targetSurface * progress
+      : targetSurface;
+    setRiverConnectionTile(idx, blendedSurface, 0.08, riverLakeEntryMask);
+  });
   if (lake.outletIndex >= 0) {
     lakeOutletMask[lake.outletIndex] = 1;
     riverLakeExitMask[lake.outletIndex] = 1;
     state.tileLakeOutletMask[lake.outletIndex] = 1;
   }
   if (lake.outletTargetIndex >= 0) {
-    const target = lake.outletTargetIndex;
-    riverMask[target] = 1;
-    riverLakeExitMask[target] = 1;
-    const targetElevation = elevationMap[target] ?? lake.surfaceLevel;
-    const outletSurface = Math.max(targetElevation - 0.001, lake.surfaceLevel - settings.minOutletDrop);
-    riverSurface[target] = Number.isFinite(riverSurface[target])
-      ? Math.min(riverSurface[target], outletSurface)
-      : outletSurface;
-    riverBed[target] = Number.isFinite(riverBed[target])
-      ? Math.min(riverBed[target], outletSurface - 0.006)
-      : outletSurface - 0.006;
-    riverStepStrength[target] = Math.max(riverStepStrength[target] ?? 0, 0.22);
-    const tile = state.tiles[target];
-    if (tile) {
-      tile.type = "water";
-      tile.moisture = 1;
-      tile.waterDist = 0;
-      tile.fuel = 0;
-      tile.fire = 0;
-      clearVegetationState(tile);
-    }
+    const outletTiles =
+      connectionPaths.outletTiles.length > 0
+        ? connectionPaths.outletTiles
+        : [lake.outletTargetIndex];
+    outletTiles.forEach((idx, pathIndex) => {
+      const targetElevation = elevationMap[idx] ?? lake.surfaceLevel;
+      const dropSurface = lake.surfaceLevel - settings.minOutletDrop * (1 + pathIndex * 0.35);
+      const bankSurface = targetElevation - 0.001;
+      const outletSurface = Math.min(dropSurface, bankSurface);
+      setRiverConnectionTile(idx, outletSurface, pathIndex === 0 ? 0.32 : 0.18, riverLakeExitMask);
+    });
   }
 };
 
@@ -913,6 +977,7 @@ export const buildStaticInlandLakeNetwork = (input: {
       state,
       elevationMap,
       riverMask,
+      oceanMask,
       riverSurface,
       riverBed,
       riverStepStrength,

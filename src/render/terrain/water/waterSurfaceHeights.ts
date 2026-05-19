@@ -9,6 +9,8 @@ type WaterSurfaceHeightsDeps = {
 };
 
 const RIVER_STEP_BLEND_BLOCK_THRESHOLD = 0.26;
+const LAKE_SURFACE_EDGE_RATIO = 0.1;
+const LAKE_SURFACE_FULL_RATIO = 0.55;
 
 const clamp = (value: number, min: number, max: number): number => Math.min(max, Math.max(min, value));
 
@@ -45,12 +47,33 @@ export const buildWaterSurfaceHeights = (
     hasWater(idx) && (oceanRatio[idx] ?? 0) >= deps.oceanRatioMin;
   const isRiverCell = (idx: number): boolean =>
     hasWater(idx) && (riverRatio[idx] ?? 0) >= deps.riverRatioMin;
+  const getLakeRatio = (idx: number): number => clamp(lakeRatio?.[idx] ?? 0, 0, 1);
   const isLakeCell = (idx: number): boolean =>
-    hasWater(idx) && (lakeRatio?.[idx] ?? 0) >= 0.1 && Number.isFinite(sampledLakeSurface?.[idx]);
+    hasWater(idx) &&
+    getLakeRatio(idx) >= LAKE_SURFACE_EDGE_RATIO &&
+    Number.isFinite(sampledLakeSurface?.[idx]);
+  const isLakeInterior = (idx: number): boolean => isLakeCell(idx) && getLakeRatio(idx) >= LAKE_SURFACE_FULL_RATIO;
+  const resolveLakeHeight = (idx: number): number => {
+    if (!sampledLakeSurface || !Number.isFinite(sampledLakeSurface[idx])) {
+      return heights[idx] ?? sampleHeights[idx] ?? 0;
+    }
+    const lakeSurface = clamp(sampledLakeSurface[idx] ?? 0, 0, 1);
+    const ratio = getLakeRatio(idx);
+    if (ratio >= LAKE_SURFACE_FULL_RATIO) {
+      return lakeSurface;
+    }
+    const edgeBlend = clamp(
+      (ratio - LAKE_SURFACE_EDGE_RATIO) / (LAKE_SURFACE_FULL_RATIO - LAKE_SURFACE_EDGE_RATIO),
+      0,
+      1
+    );
+    const terrainHeight = clamp(sampleHeights[idx] ?? lakeSurface, 0, 1);
+    return clamp(terrainHeight * (1 - edgeBlend) + lakeSurface * edgeBlend, 0, 1);
+  };
 
   for (let i = 0; i < total; i += 1) {
     if (isLakeCell(i) && sampledLakeSurface) {
-      heights[i] = clamp(sampledLakeSurface[i] ?? 0, 0, 1);
+      heights[i] = resolveLakeHeight(i);
       continue;
     }
     if (!hasWater(i) || !isRiverCell(i) || !sampledRiverSurface) {
@@ -158,7 +181,7 @@ export const buildWaterSurfaceHeights = (
         smoothed[idx] = heights[idx];
         continue;
       }
-      if (isLakeCell(idx)) {
+      if (isLakeInterior(idx)) {
         smoothed[idx] = heights[idx];
         continue;
       }
@@ -220,7 +243,7 @@ export const buildWaterSurfaceHeights = (
   if (sampledLakeSurface) {
     for (let i = 0; i < total; i += 1) {
       if (isLakeCell(i)) {
-        heights[i] = clamp(sampledLakeSurface[i] ?? heights[i], 0, 1);
+        heights[i] = resolveLakeHeight(i);
       }
     }
   }

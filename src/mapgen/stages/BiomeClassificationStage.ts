@@ -1,11 +1,13 @@
 import { COAST_CLASS_NONE, COAST_CLASS_SHELF_WATER } from "../../core/state.js";
 import type { TileType } from "../../core/types.js";
 import { clamp } from "../../core/utils.js";
+import { computeRenderedSlopeAngleDeg } from "../../systems/terrain/sim/treeSuitability.js";
 import type { PipelineStage } from "../pipeline/TerrainPipeline.js";
 import { emitStageSnapshot } from "../pipeline/stageDebug.js";
 import {
   assignForestComposition,
   assertEdgeWater,
+  buildLocalBiomeContext,
   classifyOceanCoastTile,
   classifySeedSpreadTile,
   classifyTile,
@@ -26,6 +28,7 @@ export const BiomeClassificationStage: PipelineStage = {
       settings,
       oceanMask,
       riverMask,
+      elevationMap,
       seaLevelMap,
       slopeMap,
       moistureMap,
@@ -35,11 +38,14 @@ export const BiomeClassificationStage: PipelineStage = {
       biomeSuitabilityMap,
       treeProbabilityMap,
       treeDensityMap,
-      forestMask
+      forestMask,
+      waterfallDropMap,
+      waterfallTargetMap
     } = ctx;
     if (
       !oceanMask ||
       !riverMask ||
+      !elevationMap ||
       !seaLevelMap ||
       !slopeMap ||
       !moistureMap ||
@@ -61,6 +67,9 @@ export const BiomeClassificationStage: PipelineStage = {
     const nextStemDensity = new Uint8Array(state.grid.totalTiles);
     const yieldEveryRows = getYieldEveryRows(state.grid.cols);
 
+    // Final biome class combines elevation headroom, static wind-driven moisture,
+    // slope, water distance, valley/local ridge-gully context, forest spread, and
+    // seeded biome noise. Fuel behavior still comes from the existing tile type.
     for (let y = 0; y < state.grid.rows; y += 1) {
       const rowBase = y * state.grid.cols;
       for (let x = 0; x < state.grid.cols; x += 1) {
@@ -78,8 +87,27 @@ export const BiomeClassificationStage: PipelineStage = {
         const elevation = tile.elevation;
         const valley = state.valleyMap[idx] ?? 0;
         const slope = slopeMap[idx] ?? 0;
+        const slopeAngleDeg = computeRenderedSlopeAngleDeg(
+          slope,
+          state.grid.cols,
+          state.grid.rows,
+          settings.heightScaleMultiplier
+        );
         const seaLevel = seaLevelMap[idx] ?? 0;
         const waterDistM = tile.waterDist * ctx.cellSizeM;
+        const localContext = buildLocalBiomeContext({
+          elevationMap,
+          cols: state.grid.cols,
+          rows: state.grid.rows,
+          x,
+          y,
+          oceanMask,
+          riverMask,
+          lakeMask: state.tileLakeMask,
+          waterfallDropMap,
+          waterfallTargetMap
+        });
+        const seededNoiseOffset = (microMap[idx] ?? 0.5) - 0.5;
         const coastlineOverride = classifyOceanCoastTile(
           state,
           idx,
@@ -100,7 +128,10 @@ export const BiomeClassificationStage: PipelineStage = {
                 moisture,
                 seaLevel,
                 highlandForestElevation: settings.highlandForestElevation,
-                forestCandidate: (forestMask?.[idx] ?? 0) > 0 || (treeProbabilityMap?.[idx] ?? 0) >= 0.78
+                forestCandidate: (forestMask?.[idx] ?? 0) > 0 || (treeProbabilityMap?.[idx] ?? 0) >= 0.78,
+                localContext,
+                seededNoiseOffset,
+                slopeAngleDeg
               })
             : classifyTile({
                 elevation,
@@ -111,7 +142,10 @@ export const BiomeClassificationStage: PipelineStage = {
                 forestNoise: forestNoiseMap[idx] ?? 0.5,
                 seaLevel,
                 forestThreshold: settings.forestThreshold,
-                highlandForestElevation: settings.highlandForestElevation
+                highlandForestElevation: settings.highlandForestElevation,
+                localContext,
+                seededNoiseOffset,
+                slopeAngleDeg
               }));
         nextTypes[idx] = nextType;
 

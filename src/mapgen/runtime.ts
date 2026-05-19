@@ -71,14 +71,19 @@ import type { MapGenDebug, MapGenDebugPhase, MapGenReporter } from "./mapgenType
 import type { MapGenContext } from "./pipeline/MapGenContext.js";
 import {
   buildBiomeSuitability,
-  computeBiomeSuitabilityValue,
-  isFloodplainCandidate
+  computeBiomeSuitabilityValue
 } from "./biome/BiomeSuitability.js";
+import {
+  buildLocalBiomeContext,
+  classifySeedSpreadTile,
+  classifyTile
+} from "./biome/BiomeClassification.js";
 import { buildForestMask } from "./biome/ForestSpread.js";
 import { runIterativeHydraulicErosion } from "./iterativeHydraulicErosion.js";
 import { buildPreRiverErosionFields } from "./preRiverErosion.js";
 import { buildTectonicProxySeed } from "./tectonicProxySeed.js";
 import { buildNoiseLandmass } from "../systems/terrain/sim/noiseLandmass.js";
+import { computeRenderedSlopeAngleDeg } from "../systems/terrain/sim/treeSuitability.js";
 import { generateWorldClimateSeed } from "../systems/climate/sim/worldClimateSeed.js";
 import { buildWindDrivenMoistureMap } from "../systems/terrain/sim/windDrivenMoisture.js";
 import { selectBaseSite } from "../systems/settlements/sim/baseSiteSelection.js";
@@ -414,60 +419,7 @@ export const getWorldY = (settings: MapGenSettings, y: number): number => settin
 const FOREST_MACRO_WEIGHT = 0.85;
 const FOREST_DETAIL_WEIGHT = 0.15;
 
-type TileClassificationInput = {
-  elevation: number;
-  slope: number;
-  waterDistM: number;
-  valley: number;
-  moisture: number;
-  forestNoise: number;
-  seaLevel: number;
-  forestThreshold: number;
-  highlandForestElevation: number;
-};
-
-export function classifyTile(input: TileClassificationInput): TileType {
-  const {
-    elevation,
-    slope,
-    waterDistM,
-    valley,
-    moisture,
-    forestNoise,
-    seaLevel,
-    forestThreshold,
-    highlandForestElevation
-  } = input;
-  if (elevation < seaLevel) {
-    return "water";
-  }
-  if (waterDistM <= 15 && slope < 0.15) {
-    return "beach";
-  }
-  const isFloodplain = valley > 0.08 && slope < 0.12 && elevation < seaLevel + 0.15;
-  if (isFloodplain) {
-    return "floodplain";
-  }
-  if (slope > 0.45 && elevation > seaLevel + 0.25) {
-    return "rocky";
-  }
-  if (elevation > seaLevel + 0.35 && moisture < 0.25 && slope <= 0.45) {
-    return "bare";
-  }
-  if (
-    elevation <= highlandForestElevation &&
-    moisture > 0.45 &&
-    slope < 0.35 &&
-    forestNoise > forestThreshold &&
-    !isFloodplain
-  ) {
-    return "forest";
-  }
-  if (moisture > 0.3) {
-    return "scrub";
-  }
-  return "grass";
-}
+export { buildLocalBiomeContext, classifySeedSpreadTile, classifyTile };
 
 export const getYieldEveryRows = (cols: number): number => Math.max(4, Math.floor(2048 / Math.max(1, cols)));
 
@@ -509,43 +461,6 @@ export const classifyCoastDryTileType = (slope: number, elevationAboveSea: numbe
     return "bare";
   }
   return "rocky";
-};
-
-type SeedSpreadClassificationInput = {
-  elevation: number;
-  slope: number;
-  waterDistM: number;
-  valley: number;
-  moisture: number;
-  seaLevel: number;
-  highlandForestElevation: number;
-  forestCandidate: boolean;
-};
-
-export const classifySeedSpreadTile = (input: SeedSpreadClassificationInput): TileType => {
-  const { elevation, slope, waterDistM, valley, moisture, seaLevel, highlandForestElevation, forestCandidate } = input;
-  if (elevation < seaLevel) {
-    return "water";
-  }
-  if (waterDistM <= 15 && slope < 0.15) {
-    return "beach";
-  }
-  if (isFloodplainCandidate(elevation, slope, valley, seaLevel)) {
-    return "floodplain";
-  }
-  if (slope > 0.45 && elevation > seaLevel + 0.25) {
-    return "rocky";
-  }
-  if (elevation > seaLevel + 0.35 && moisture < 0.25 && slope <= 0.45) {
-    return "bare";
-  }
-  if (forestCandidate) {
-    return "forest";
-  }
-  if (moisture > 0.33) {
-    return "scrub";
-  }
-  return "grass";
 };
 
 export const persistSeaLevelMapToState = (state: WorldState, seaLevelMap: ArrayLike<number>): void => {
@@ -6452,6 +6367,12 @@ async function generateMapLegacy(
     const elevation = tile.elevation;
     const valley = state.valleyMap[i];
     const slope = slopeMap[i];
+    const slopeAngleDeg = computeRenderedSlopeAngleDeg(
+      slope,
+      state.grid.cols,
+      state.grid.rows,
+      mapSettings.heightScaleMultiplier
+    );
     const seaLevel = seaLevelMap[i];
     const moisture = moistureMap[i];
     const forestNoise = forestNoiseMap[i];
@@ -6465,7 +6386,8 @@ async function generateMapLegacy(
       forestNoise,
       seaLevel,
       forestThreshold: mapSettings.forestThreshold,
-      highlandForestElevation: mapSettings.highlandForestElevation
+      highlandForestElevation: mapSettings.highlandForestElevation,
+      slopeAngleDeg
     });
     tile.type = nextType;
     tile.moisture = moisture;
@@ -7620,6 +7542,12 @@ async function runBiomeClassificationStage(ctx: MapGenContext): Promise<void> {
       const elevation = tile.elevation;
       const valley = state.valleyMap[idx] ?? 0;
       const slope = slopeMap[idx] ?? 0;
+      const slopeAngleDeg = computeRenderedSlopeAngleDeg(
+        slope,
+        state.grid.cols,
+        state.grid.rows,
+        settings.heightScaleMultiplier
+      );
       const seaLevel = seaLevelMap[idx] ?? 0;
       const waterDistM = tile.waterDist * ctx.cellSizeM;
       const coastlineOverride = classifyOceanCoastTile(
@@ -7642,7 +7570,8 @@ async function runBiomeClassificationStage(ctx: MapGenContext): Promise<void> {
               moisture,
               seaLevel,
               highlandForestElevation: settings.highlandForestElevation,
-              forestCandidate: (forestMask?.[idx] ?? 0) > 0
+              forestCandidate: (forestMask?.[idx] ?? 0) > 0,
+              slopeAngleDeg
             })
           : classifyTile({
               elevation,
@@ -7653,7 +7582,8 @@ async function runBiomeClassificationStage(ctx: MapGenContext): Promise<void> {
               forestNoise: forestNoiseMap[idx] ?? 0.5,
               seaLevel,
               forestThreshold: settings.forestThreshold,
-              highlandForestElevation: settings.highlandForestElevation
+              highlandForestElevation: settings.highlandForestElevation,
+              slopeAngleDeg
             }));
       nextTypes[idx] = nextType;
 
@@ -7873,6 +7803,12 @@ async function runPostSettlementReconcileStage(ctx: MapGenContext): Promise<void
           return clamp(maxDiff, 0, 1);
         })();
         ctx.slopeMap[idx] = slopeLocal;
+        const slopeAngleDeg = computeRenderedSlopeAngleDeg(
+          slopeLocal,
+          state.grid.cols,
+          state.grid.rows,
+          ctx.settings.heightScaleMultiplier
+        );
         const moisture = computeMoistureValue(tile.elevation, tile.waterDist);
         ctx.moistureMap[idx] = moisture;
         tile.moisture = moisture;
@@ -7914,7 +7850,8 @@ async function runPostSettlementReconcileStage(ctx: MapGenContext): Promise<void
             moisture,
             valley,
             seaLevel,
-            highlandForestElevation: ctx.settings.highlandForestElevation
+            highlandForestElevation: ctx.settings.highlandForestElevation,
+            slopeAngleDeg
           });
           ctx.biomeSuitabilityMap[idx] = suitability;
           let forestNeighborCount = 0;
@@ -7953,7 +7890,8 @@ async function runPostSettlementReconcileStage(ctx: MapGenContext): Promise<void
             moisture,
             seaLevel,
             highlandForestElevation: ctx.settings.highlandForestElevation,
-            forestCandidate
+            forestCandidate,
+            slopeAngleDeg
           });
         } else {
           nextType = classifyTile({
@@ -7965,7 +7903,8 @@ async function runPostSettlementReconcileStage(ctx: MapGenContext): Promise<void
             forestNoise: ctx.forestNoiseMap[idx] ?? 0.5,
             seaLevel,
             forestThreshold: ctx.settings.forestThreshold,
-            highlandForestElevation: ctx.settings.highlandForestElevation
+            highlandForestElevation: ctx.settings.highlandForestElevation,
+            slopeAngleDeg
           });
         }
         tile.type = nextType;

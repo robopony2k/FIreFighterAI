@@ -5,10 +5,13 @@ export type OceanUniforms = {
   u_mask: { value: THREE.Texture };
   u_supportMap: { value: THREE.Texture };
   u_domainMap: { value: THREE.Texture };
+  u_inlandWaterMap: { value: THREE.Texture };
   u_shoreSdf: { value: THREE.Texture };
   u_shoreTransitionMap: { value: THREE.Texture };
   u_color: { value: THREE.Color };
   u_deepColor: { value: THREE.Color };
+  u_inlandColor: { value: THREE.Color };
+  u_inlandDeepColor: { value: THREE.Color };
   u_opacity: { value: number };
   u_waveScale: { value: number };
   u_normalMap1: { value: THREE.Texture };
@@ -307,9 +310,11 @@ export const createOceanSurfaceMaterial = (uniforms: OceanUniforms): THREE.Shade
       varying float vCoverage;
       varying float vSurfAtten;
       varying float vShorelineSdf;
+      varying float vInlandWater;
 
       uniform float u_time;
       uniform sampler2D u_domainMap;
+      uniform sampler2D u_inlandWaterMap;
       uniform sampler2D u_shoreSdf;
       uniform float u_waveAmp;
       uniform vec2 u_waveFreq;
@@ -337,17 +342,20 @@ export const createOceanSurfaceMaterial = (uniforms: OceanUniforms): THREE.Shade
         out float coverage,
         out float sdf,
         out float surfAtten,
-        out float shorelineSdf
+        out float shorelineSdf,
+        out float inlandWater
       ) {
         vec2 worldXZ = (modelMatrix * vec4(p, 1.0)).xz;
         vec4 domain = texture2D(u_domainMap, uvCoord);
         ocean = domain.r;
         coverage = domain.b;
         surfAtten = domain.a;
+        inlandWater = texture2D(u_inlandWaterMap, uvCoord).r;
         sdf = texture2D(u_shoreSdf, uvCoord).r * 2.0 - 1.0;
         float positiveSdf = max(0.0, sdf);
         shorelineSdf = max(0.0, positiveSdf - computeOrganicShoreInset(worldXZ, positiveSdf));
         vec3 animated = computeAnimatedWave(worldXZ, uvCoord, ocean, coverage, surfAtten, shorelineSdf);
+        animated *= mix(1.0, 0.16, clamp(inlandWater, 0.0, 1.0));
         return p + animated;
       }
 
@@ -359,13 +367,15 @@ export const createOceanSurfaceMaterial = (uniforms: OceanUniforms): THREE.Shade
         float sdf;
         float surfAtten;
         float shorelineSdf;
-        vec3 displaced = computeSurfacePosition(position, vUv, ocean, coverage, sdf, surfAtten, shorelineSdf);
+        float inlandWater;
+        vec3 displaced = computeSurfacePosition(position, vUv, ocean, coverage, sdf, surfAtten, shorelineSdf, inlandWater);
 
         float oceanX;
         float coverageX;
         float sdfX;
         float surfAttenX;
         float shorelineSdfX;
+        float inlandWaterX;
         vec3 displacedX = computeSurfacePosition(
           position + vec3(u_worldStep.x, 0.0, 0.0),
           vUv + vec2(u_uvStep.x, 0.0),
@@ -373,7 +383,8 @@ export const createOceanSurfaceMaterial = (uniforms: OceanUniforms): THREE.Shade
           coverageX,
           sdfX,
           surfAttenX,
-          shorelineSdfX
+          shorelineSdfX,
+          inlandWaterX
         );
 
         float oceanZ;
@@ -381,6 +392,7 @@ export const createOceanSurfaceMaterial = (uniforms: OceanUniforms): THREE.Shade
         float sdfZ;
         float surfAttenZ;
         float shorelineSdfZ;
+        float inlandWaterZ;
         vec3 displacedZ = computeSurfacePosition(
           position + vec3(0.0, 0.0, u_worldStep.y),
           vUv + vec2(0.0, u_uvStep.y),
@@ -388,7 +400,8 @@ export const createOceanSurfaceMaterial = (uniforms: OceanUniforms): THREE.Shade
           coverageZ,
           sdfZ,
           surfAttenZ,
-          shorelineSdfZ
+          shorelineSdfZ,
+          inlandWaterZ
         );
 
         vec3 tangentX = displacedX - displaced;
@@ -408,6 +421,7 @@ export const createOceanSurfaceMaterial = (uniforms: OceanUniforms): THREE.Shade
         vCoverage = coverage;
         vSurfAtten = surfAtten;
         vShorelineSdf = shorelineSdf;
+        vInlandWater = inlandWater;
         gl_Position = projectionMatrix * viewMatrix * worldPos;
       }
     `,
@@ -423,14 +437,18 @@ export const createOceanSurfaceMaterial = (uniforms: OceanUniforms): THREE.Shade
       varying float vCoverage;
       varying float vSurfAtten;
       varying float vShorelineSdf;
+      varying float vInlandWater;
 
       uniform sampler2D u_mask;
       uniform sampler2D u_supportMap;
       uniform sampler2D u_domainMap;
+      uniform sampler2D u_inlandWaterMap;
       uniform sampler2D u_shoreSdf;
       uniform sampler2D u_shoreTransitionMap;
       uniform vec3 u_color;
       uniform vec3 u_deepColor;
+      uniform vec3 u_inlandColor;
+      uniform vec3 u_inlandDeepColor;
       uniform float u_opacity;
       uniform float u_time;
       uniform float u_waveScale;
@@ -468,6 +486,8 @@ export const createOceanSurfaceMaterial = (uniforms: OceanUniforms): THREE.Shade
         float mask = texture2D(u_mask, vUv).a;
         float shorelineSdf = max(0.0, vShorelineSdf);
         vec4 domain = texture2D(u_domainMap, vUv);
+        float inlandWater = clamp(max(vInlandWater, texture2D(u_inlandWaterMap, vUv).r), 0.0, 1.0);
+        float oceanMotion = 1.0 - inlandWater;
         vec4 shoreTransition = texture2D(u_shoreTransitionMap, vUv);
         float domainWater = max(vCoverage, domain.b);
         float shoreTerrainHeight = domain.g * 10.0;
@@ -504,14 +524,14 @@ export const createOceanSurfaceMaterial = (uniforms: OceanUniforms): THREE.Shade
           swashCoverage,
           clamp(swashWeight * 0.92 + shoreWaveSuppression * 0.24, 0.0, 1.0)
         );
-        float shoreImpact = shoalWeight * 0.76 + swashWeight;
+        float shoreImpact = (shoalWeight * 0.76 + swashWeight) * oceanMotion;
         float shoreLappingA = sin(u_time * 1.55 + dot(vWorldPos.xz, vec2(0.48, 0.29)));
         float shoreLappingB = sin(u_time * 2.2 - dot(vWorldPos.xz, vec2(0.31, -0.57)));
         float shoreLapping = smoothstep(0.14, 0.96, shoreLappingA * 0.28 + shoreLappingB * 0.22 + 0.5);
         float breakerCrest =
           smoothstep(0.008, 0.05, max(0.0, vDisp)) *
           mix(0.45, 1.0, clamp(shoreImpact + shorePresence * 0.22, 0.0, 1.0));
-        float shorePulse = max(breakerCrest, shoreLapping * (0.12 + swashWeight * 0.1)) * staticCoastMask;
+        float shorePulse = max(breakerCrest, shoreLapping * (0.12 + swashWeight * 0.1)) * staticCoastMask * oceanMotion;
         float swashBand = 1.0 - smoothstep(0.0, u_shoreParamsA.y + u_shoreParamsB.y, shorelineSdf);
         float shoreMotionMask = max(
           seawardCoastMask * mix(0.4, 1.0, surfWeight),
@@ -527,7 +547,8 @@ export const createOceanSurfaceMaterial = (uniforms: OceanUniforms): THREE.Shade
             1.0
           ) *
           shoreMotionMask *
-          u_shoreFeatureMix.w;
+          u_shoreFeatureMix.w *
+          oceanMotion;
         float shorelineAdvance = swashAdvance;
         float shoreRenderSdf = shorelineSdf - shorelineAdvance;
         float renderShoreClip = smoothstep(-u_shoreParamsB.y, u_shoreParamsA.y, shoreRenderSdf);
@@ -543,8 +564,8 @@ export const createOceanSurfaceMaterial = (uniforms: OceanUniforms): THREE.Shade
           swashWeight + shoalWeight * 0.28,
           max(seawardCoastMask * 0.42, landwardCoastMask * 0.74)
         );
-        float swashSheet = landwardCoastMask * (0.04 + 0.12 * shoreLapping + 0.08 * breakerCrest) * u_shoreTuning.x;
-        float shorelineCover = clamp((0.12 + shorelineAdvance * 1.8) * shoreMotionMask, 0.0, 1.0);
+        float swashSheet = landwardCoastMask * (0.04 + 0.12 * shoreLapping + 0.08 * breakerCrest) * u_shoreTuning.x * oceanMotion;
+        float shorelineCover = clamp((0.12 + shorelineAdvance * 1.8) * shoreMotionMask * oceanMotion, 0.0, 1.0);
         float coverage = max(max(effectiveCoverage, swashSheet * 1.02), shorelineCover);
         if (
           (support < 0.5 && landwardCoastMask < 0.02 && swashSheet < 0.02 && vSdf <= 0.0) ||
@@ -596,7 +617,8 @@ export const createOceanSurfaceMaterial = (uniforms: OceanUniforms): THREE.Shade
         float normalScale =
           u_normalScale *
           (0.95 + 0.22 * grazing) *
-          (1.0 + 0.18 * max(vOcean, coverage));
+          (1.0 + 0.18 * max(vOcean, coverage)) *
+          mix(1.0, 0.46, inlandWater);
         vec3 normalMapN = normalize(vec3(
           nXY.x * normalScale * u_normalStrength,
           1.0,
@@ -621,6 +643,8 @@ export const createOceanSurfaceMaterial = (uniforms: OceanUniforms): THREE.Shade
         vec3 shoreWaterTint = mix(u_color * vec3(1.1, 1.08, 0.98), vec3(0.46, 0.62, 0.60), 0.18);
         vec3 waterColor = mix(u_color, u_deepColor, depthMix);
         waterColor = mix(waterColor, shoreWaterTint, shoreTransitionTint * 0.72);
+        vec3 inlandColor = mix(u_inlandColor, u_inlandDeepColor, clamp(0.28 + depthMix * 0.38, 0.0, 1.0));
+        waterColor = mix(waterColor, inlandColor, inlandWater * 0.88);
         float subsurface = max(dot(-lightDir, n) * 0.5 + 0.5, 0.0);
         vec3 scattering =
           waterColor * (0.16 + 0.22 * subsurface) +
@@ -634,15 +658,16 @@ export const createOceanSurfaceMaterial = (uniforms: OceanUniforms): THREE.Shade
           (0.025 + shoreLapping * 0.04 + breakerCrest * 0.08) *
           (0.84 + shoreImpact * 0.1) *
           max(seawardCoastMask * 0.72, landwardCoastMask * 0.52);
-        float foam = (shoreFoam + crestFoam * mix(0.04, 0.12, shoreImpact)) * u_shoreTuning.w;
+        float foam = (shoreFoam + crestFoam * mix(0.04, 0.12, shoreImpact)) * u_shoreTuning.w * oceanMotion;
         vec3 foamColor = mix(vec3(0.96, 0.98, 1.0), u_sunColor, 0.08);
         vec3 litWater = mix(scattering, foamColor, clamp(foam, 0.0, 1.0) * mix(0.12, 0.28, shoreImpact));
 
         float skyFill = 0.08 + 0.08 * grazing;
         float glitter =
           pow(max(dot(reflectDir, lightDir), 0.0), mix(240.0, 120.0, grazing)) *
-          (0.08 + 0.42 * vOcean);
-        float specular = specBase * u_specular * (0.18 + 0.82 * fresnel);
+          (0.08 + 0.42 * vOcean) *
+          mix(1.0, 0.42, inlandWater);
+        float specular = specBase * u_specular * (0.18 + 0.82 * fresnel) * mix(1.0, 0.64, inlandWater);
         vec3 color =
           litWater * (0.82 + diffuse * 0.18) +
           getAtmosphere(vec3(0.0, max(viewDir.y, 0.0) + 0.001, 1.0)) * skyFill +

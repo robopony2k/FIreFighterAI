@@ -18,7 +18,7 @@ import { clamp } from "../../../core/utils.js";
 import { applyFuel, getFuelProfiles } from "../../../core/tiles.js";
 import { indexFor, inBounds } from "../../../core/grid.js";
 import { hash2D } from "../../../mapgen/noise.js";
-import { computeTreeSuitability } from "./treeSuitability.js";
+import { computeRenderedSlopeAngleDeg, computeTreeSuitability } from "./treeSuitability.js";
 
 export type VegetationBlockResult = {
   terrainTypeChanged: boolean;
@@ -162,6 +162,7 @@ const computeRuntimeTreeSuitability = (state: WorldState, x: number, y: number):
   const idx = indexFor(state.grid, x, y);
   const tile = state.tiles[idx];
   const seaLevel = state.tileSeaLevel?.[idx] ?? 0.08;
+  const slope = computeLocalSlope(state, x, y);
   const details = computeTreeSuitability({
     seed: state.seed,
     x,
@@ -170,7 +171,7 @@ const computeRuntimeTreeSuitability = (state: WorldState, x: number, y: number):
     worldY: y * 10,
     cellSizeM: 10,
     elevation: tile?.elevation ?? 0,
-    slope: computeLocalSlope(state, x, y),
+    slope,
     moisture: tile?.moisture ?? 0,
     valley: state.valleyMap?.[idx] ?? 0,
     seaLevel,
@@ -178,6 +179,7 @@ const computeRuntimeTreeSuitability = (state: WorldState, x: number, y: number):
     highlandForestElevation: 0.72,
     vegetationDensity: 0.62,
     forestPatchiness: 0.48,
+    slopeAngleDeg: computeRenderedSlopeAngleDeg(slope, state.grid.cols, state.grid.rows),
     isWater: tile?.type === "water"
   });
   return details.treeSuitability;

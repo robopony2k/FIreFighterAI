@@ -1,4 +1,5 @@
 import {
+  computeRenderedSlopeAngleDeg,
   computeTreeSuitability,
   type TreeSuitabilityResult
 } from "../../systems/terrain/sim/treeSuitability.js";
@@ -27,6 +28,7 @@ export const computeBiomeSuitabilityValue = (input: {
   waterDist?: number;
   vegetationDensity?: number;
   forestPatchiness?: number;
+  slopeAngleDeg?: number;
   isWater?: boolean;
 }): number => computeBiomeSuitabilityDetails(input).treeSuitability;
 
@@ -46,6 +48,7 @@ export const computeBiomeSuitabilityDetails = (input: {
   waterDist?: number;
   vegetationDensity?: number;
   forestPatchiness?: number;
+  slopeAngleDeg?: number;
   isWater?: boolean;
 }): TreeSuitabilityResult =>
   computeTreeSuitability({
@@ -64,6 +67,7 @@ export const computeBiomeSuitabilityDetails = (input: {
     highlandForestElevation: input.highlandForestElevation,
     vegetationDensity: input.vegetationDensity ?? 0.56,
     forestPatchiness: input.forestPatchiness ?? 0.42,
+    slopeAngleDeg: input.slopeAngleDeg,
     isWater: input.isWater
   });
 
@@ -101,6 +105,12 @@ export const buildBiomeSuitability = (ctx: MapGenContext): Float32Array => {
     const y = Math.floor(i / state.grid.cols);
     const elevation = tile?.elevation ?? 0;
     const slope = slopeMap[i] ?? 0;
+    const slopeAngleDeg = computeRenderedSlopeAngleDeg(
+      slope,
+      state.grid.cols,
+      state.grid.rows,
+      settings.heightScaleMultiplier
+    );
     const moisture = moistureMap[i] ?? 0;
     const valley = state.valleyMap[i] ?? 0;
     const seaLevel = seaLevelMap[i] ?? 0;
@@ -119,7 +129,8 @@ export const buildBiomeSuitability = (ctx: MapGenContext): Float32Array => {
       cellSizeM: ctx.cellSizeM,
       waterDist: tile?.waterDist ?? ctx.waterDistMap?.[i] ?? 24,
       vegetationDensity: settings.vegetationDensity,
-      forestPatchiness: settings.forestPatchiness
+      forestPatchiness: settings.forestPatchiness,
+      slopeAngleDeg
     });
     suitability[i] = details.treeSuitability;
     elevationStress[i] = details.elevationStress;

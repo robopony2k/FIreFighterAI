@@ -312,6 +312,8 @@ export class ThreeTestWaterSystem {
       skyHorizonColor: rgbToHex(this.palette.skyHorizon),
       shallowColor: rgbToHex(this.palette.oceanShallow),
       deepColor: rgbToHex(this.palette.oceanDeep),
+      inlandShallowColor: rgbToHex(this.palette.riverShallow),
+      inlandDeepColor: rgbToHex(this.palette.riverDeep),
       sunColor: rgbToHex(this.palette.sun)
     });
     this.riverHelper.setPalette({

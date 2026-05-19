@@ -105,6 +105,9 @@ import {
   buildTerrainSurfaceColorField,
   type BuildTerrainSurfaceColorFieldOptions
 } from "./terrain/textures/terrainSurfaceColorField.js";
+import { applyMountainRockMaterial } from "./terrain/textures/mountainRockMaterial.js";
+import { buildMountainTerrainMaskTexture } from "./terrain/textures/mountainTerrainVisuals.js";
+import { getRockTextureAsset } from "./terrain/textures/rockTextureAsset.js";
 import {
   buildTileTexture as buildTileTextureInternal,
   sampleTouchesWorldBorder
@@ -155,6 +158,8 @@ export type TerrainSample = {
   tileVegetationAge?: Float32Array;
   tileCanopyCover?: Float32Array;
   tileStemDensity?: Uint8Array;
+  structureMask?: Uint8Array;
+  tileTownId?: Int16Array;
   riverMask?: Uint8Array;
   oceanMask?: Uint8Array;
   seaLevel?: Float32Array;
@@ -400,6 +405,7 @@ export type OceanWaterData = {
   mask: THREE.DataTexture;
   supportMap: THREE.DataTexture;
   domainMap: THREE.DataTexture;
+  inlandWaterMap?: THREE.DataTexture;
   shoreSdf: THREE.DataTexture;
   shoreTransitionMap: THREE.DataTexture;
   flowMap: THREE.DataTexture;
@@ -1257,6 +1263,23 @@ const buildWaterMaskTexture = (
     data[base + 1] = 255;
     data[base + 2] = 255;
     data[base + 3] = alpha;
+  }
+  return createDataTexture(data, sampleCols, sampleRows, THREE.LinearFilter, THREE.LinearFilter);
+};
+
+const buildInlandWaterMapTexture = (
+  sampleCols: number,
+  sampleRows: number,
+  sampledLakeCoverage?: Float32Array
+): THREE.DataTexture => {
+  const data = new Uint8Array(sampleCols * sampleRows * 4);
+  for (let i = 0; i < sampleCols * sampleRows; i += 1) {
+    const lake = clamp(sampledLakeCoverage?.[i] ?? 0, 0, 1);
+    const base = i * 4;
+    data[base] = Math.round(lake * 255);
+    data[base + 1] = 0;
+    data[base + 2] = 0;
+    data[base + 3] = 255;
   }
   return createDataTexture(data, sampleCols, sampleRows, THREE.LinearFilter, THREE.LinearFilter);
 };
@@ -3130,6 +3153,25 @@ export const buildTerrainMesh = (
     sample.debugTypeColors ?? false,
     useLegacyFacetedTerrain ? "legacy" : "mask"
   );
+  const mountainRockMaskTexture =
+    !sample.debugTypeColors && !sample.debugScalarField
+      ? buildMountainTerrainMaskTexture({
+          sample,
+          sampleCols,
+          sampleRows,
+          step,
+          heightScale,
+          sampleHeights,
+          sampleTypes,
+          riverRatio: waterRatios.river,
+          oceanRatio: waterRatios.ocean,
+          sampledRiverCoverage: sampledRiverCoverage ?? null,
+          sampledLakeCoverage: surface.sampledLakeCoverage
+        })
+      : null;
+  const mountainRockDetailTexture = mountainRockMaskTexture
+    ? getRockTextureAsset()
+    : null;
   const material = new THREE.MeshStandardMaterial({
     map: tileTexture,
     roughness: 0.88,
@@ -3884,6 +3926,7 @@ export const buildTerrainMesh = (
       surface.sampledLakeCoverage
     );
     const standingWaterMaskTexture = buildWaterMaskTexture(sampleCols, sampleRows, standingWater.ratios);
+    const standingWaterInlandMap = buildInlandWaterMapTexture(sampleCols, sampleRows, surface.sampledLakeCoverage);
     const standingWaterSupportMap = buildWaterSupportMapTexture(sampleCols, sampleRows, standingWater.supportMask);
     const standingWaterShoreSdf = buildShoreSdfTextureFromSupportMask(standingWater.supportMask, sampleCols, sampleRows);
     const normalizedOceanHeights = buildWaterSurfaceHeights(
@@ -3992,13 +4035,16 @@ export const buildTerrainMesh = (
     for (let i = 0; i < normalizedWaterHeights.length; i += 1) {
       const ratio = ratios.water[i] ?? 0;
       const riverRatio = clamp(ratios.river[i] ?? 0, 0, 1);
-      const riverWeight = clamp((riverRatio - 0.08) / 0.42, 0, 1);
-      const lift = WATER_SURFACE_LIFT_OCEAN * (1 - riverWeight) + WATER_SURFACE_LIFT_RIVER * riverWeight;
+      const lakeRatio = clamp(surface.sampledLakeCoverage?.[i] ?? 0, 0, 1);
+      const inlandRatio = Math.max(riverRatio, lakeRatio);
+      const inlandWeight = clamp((inlandRatio - 0.08) / 0.42, 0, 1);
+      const lift = WATER_SURFACE_LIFT_OCEAN * (1 - inlandWeight) + WATER_SURFACE_LIFT_RIVER * inlandWeight;
       let surfaceWorld = clamp(normalizedWaterHeights[i] ?? 0, 0, 1) * heightScale;
-      if (riverRatio >= RIVER_RATIO_MIN) {
+      if (inlandRatio >= RIVER_RATIO_MIN) {
         const x = i % sampleCols;
         const y = Math.floor(i / sampleCols);
         let minBankWorld = Number.POSITIVE_INFINITY;
+        let minLakeBankWorld = Number.POSITIVE_INFINITY;
         const neighbors = [
           { x: x - 1, y },
           { x: x + 1, y },
@@ -4019,19 +4065,28 @@ export const buildTerrainMesh = (
             continue;
           }
           const nIdx = neighbor.y * sampleCols + neighbor.x;
+          const neighborTerrainWorld = (sampleHeights[nIdx] ?? 0) * heightScale;
+          const neighborLakeRatio = clamp(surface.sampledLakeCoverage?.[nIdx] ?? 0, 0, 1);
+          if (lakeRatio >= WATER_ALPHA_MIN_RATIO && neighborLakeRatio < WATER_ALPHA_MIN_RATIO) {
+            minLakeBankWorld = Math.min(minLakeBankWorld, neighborTerrainWorld);
+          }
           if (supportMask[nIdx] > 0) {
             continue;
           }
-          minBankWorld = Math.min(minBankWorld, (sampleHeights[nIdx] ?? 0) * heightScale);
+          minBankWorld = Math.min(minBankWorld, neighborTerrainWorld);
         }
         if (Number.isFinite(minBankWorld)) {
           const maxSurfaceWorld = minBankWorld - RIVER_SURFACE_BANK_CLEARANCE;
           surfaceWorld = Math.min(surfaceWorld, maxSurfaceWorld);
         }
+        if (lakeRatio >= WATER_ALPHA_MIN_RATIO && Number.isFinite(minLakeBankWorld)) {
+          const maxLakeSurfaceWorld = minLakeBankWorld - RIVER_SURFACE_BANK_CLEARANCE;
+          surfaceWorld = Math.min(surfaceWorld, maxLakeSurfaceWorld);
+        }
       }
       const offsetY = surfaceWorld - waterLevelWorld + lift;
       waterHeights[i] = offsetY;
-      if (ratio < WATER_ALPHA_MIN_RATIO || riverRatio >= RIVER_RATIO_MIN) {
+      if (ratio < WATER_ALPHA_MIN_RATIO || inlandRatio >= RIVER_RATIO_MIN) {
         continue;
       }
       if (DEBUG_TERRAIN_RENDER) {
@@ -4101,6 +4156,7 @@ export const buildTerrainMesh = (
         mask: standingWaterMaskTexture,
         supportMap: standingWaterSupportMap,
         domainMap: standingWaterDomainMap,
+        inlandWaterMap: standingWaterInlandMap,
         shoreSdf: standingWaterShoreSdf,
         shoreTransitionMap,
         flowMap: oceanFlowMap,
@@ -4117,6 +4173,12 @@ export const buildTerrainMesh = (
       waterfallDebug: waterfall.debug
     };
   }
+
+  applyMountainRockMaterial(material, {
+    maskTexture: mountainRockMaskTexture,
+    detailTexture: mountainRockDetailTexture,
+    seed: sample.worldSeed ?? 0
+  });
 
   const treeTileProfiles = new Map<number, TreeFlameProfile>();
   treeTileProfilesRaw.forEach((profile, tileIndex) => {
