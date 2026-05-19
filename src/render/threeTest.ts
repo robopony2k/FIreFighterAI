@@ -88,6 +88,7 @@ import type { ThreeTestCinematicGradeConfig } from "./post/cinematicGradePass.js
 import { getRequiredWebGLContext } from "./webglContext.js";
 import { resolveStructureGrounding } from "./terrain/shared/structureGrounding.js";
 import { CardStateModel } from "../ui/cards/cardState.js";
+import { resolveTownLabelDepthAwareLayout } from "../ui/town-labels/townLabelOcclusion.js";
 import { createUnitCommandTray } from "../ui/unit-control/UnitCommandTray.js";
 import { dispatchPhaseUiCommand } from "../ui/phase/commandChannel.js";
 import { RISK_THRESHOLDS, SEASON_LABELS, computeSeasonLayout } from "../ui/phase/forecastLayout.js";
@@ -290,6 +291,11 @@ const TOWN_LABEL_UPDATE_INTERVAL_MS = 120;
 const TOWN_LABEL_SCREEN_OFFSET_Y = -24;
 const TOWN_LABEL_CONNECTOR_ORIGIN_X = 12;
 const TOWN_LABEL_MAX_Z_INDEX = 20000;
+const TOWN_LABEL_OCCLUSION_MAX_LIFT_METERS = 420;
+const TOWN_LABEL_OCCLUSION_VERTICAL_CLEARANCE = 2.5;
+const TOWN_LABEL_OCCLUSION_LABEL_CLEARANCE = 3.5;
+const TOWN_LABEL_CONNECTOR_CLEARANCE = 0.8;
+const TOWN_LABEL_OCCLUSION_SAMPLE_COUNT = 36;
 const TRUCK_BEACON_LIFT_METERS = 122;
 const TRUCK_BEACON_SCREEN_OFFSET_Y = -18;
 const TRUCK_BEACON_STACK_OFFSET_PX = 20;
@@ -4328,13 +4334,13 @@ export const createThreeTest = (
   };
 
   const townLabelWorld = new THREE.Vector3();
-  const townGroundWorld = new THREE.Vector3();
+  const townConnectorWorld = new THREE.Vector3();
   const townLabelProjected = new THREE.Vector3();
-  const townGroundProjected = new THREE.Vector3();
+  const townConnectorProjected = new THREE.Vector3();
   const baseLabelWorld = new THREE.Vector3();
-  const baseGroundWorld = new THREE.Vector3();
+  const baseConnectorWorld = new THREE.Vector3();
   const baseLabelProjected = new THREE.Vector3();
-  const baseGroundProjected = new THREE.Vector3();
+  const baseConnectorProjected = new THREE.Vector3();
   const hoverDebugLabelWorld = new THREE.Vector3();
   const hoverDebugGroundWorld = new THREE.Vector3();
   const hoverDebugLabelProjected = new THREE.Vector3();
@@ -4378,6 +4384,12 @@ export const createThreeTest = (
     const heightScale = lastTerrainSurface.heightScale;
     const labelLift = TOWN_LABEL_LIFT_METERS / Math.max(0.001, TILE_SIZE);
     const baseLabelLift = BASE_LABEL_LIFT_METERS / Math.max(0.001, TILE_SIZE);
+    const occlusionMaxLift = Math.max(
+      labelLift,
+      baseLabelLift,
+      heightScale * 1.45,
+      TOWN_LABEL_OCCLUSION_MAX_LIFT_METERS / Math.max(0.001, TILE_SIZE)
+    );
     const viewportWidth = Math.max(1, hudState.viewport.width);
     const viewportHeight = Math.max(1, hudState.viewport.height);
     const availableTrucks = world.roster.filter((unit) => unit.kind === "truck" && unit.status === "available").length;
@@ -4416,10 +4428,23 @@ export const createThreeTest = (
       const worldX = lastTerrainSurface.toWorldX(tileX + 0.5);
       const worldZ = lastTerrainSurface.toWorldZ(tileY + 0.5);
       const groundY = lastTerrainSurface.heightAtTile(tileX, tileY) * heightScale;
-      townGroundWorld.set(worldX, groundY, worldZ);
-      townLabelWorld.set(worldX, groundY + labelLift, worldZ);
+      const labelLayout = resolveTownLabelDepthAwareLayout({
+        camera,
+        surface: lastTerrainSurface,
+        worldX,
+        groundY,
+        worldZ,
+        baseLift: labelLift,
+        maxLift: occlusionMaxLift,
+        verticalClearance: TOWN_LABEL_OCCLUSION_VERTICAL_CLEARANCE,
+        labelClearance: TOWN_LABEL_OCCLUSION_LABEL_CLEARANCE,
+        connectorClearance: TOWN_LABEL_CONNECTOR_CLEARANCE,
+        sampleCount: TOWN_LABEL_OCCLUSION_SAMPLE_COUNT
+      });
+      townConnectorWorld.set(worldX, labelLayout.connectorY, worldZ);
+      townLabelWorld.set(worldX, labelLayout.labelY, worldZ);
       townLabelProjected.copy(townLabelWorld).project(camera);
-      townGroundProjected.copy(townGroundWorld).project(camera);
+      townConnectorProjected.copy(townConnectorWorld).project(camera);
       const isVisible =
         townLabelProjected.z > -1 &&
         townLabelProjected.z < 1 &&
@@ -4435,19 +4460,19 @@ export const createThreeTest = (
       }
       const screenX = (townLabelProjected.x * 0.5 + 0.5) * viewportWidth;
       const screenY = (-townLabelProjected.y * 0.5 + 0.5) * viewportHeight;
-      const groundScreenX = (townGroundProjected.x * 0.5 + 0.5) * viewportWidth;
-      const groundScreenY = (-townGroundProjected.y * 0.5 + 0.5) * viewportHeight;
+      const connectorScreenX = (townConnectorProjected.x * 0.5 + 0.5) * viewportWidth;
+      const connectorScreenY = (-townConnectorProjected.y * 0.5 + 0.5) * viewportHeight;
       const rootX = screenX - TOWN_LABEL_CONNECTOR_ORIGIN_X;
       const rootY = screenY + TOWN_LABEL_SCREEN_OFFSET_Y;
       const depth01 = Math.max(0, Math.min(1, (townLabelProjected.z + 1) * 0.5));
       const zIndex = Math.max(1, Math.min(TOWN_LABEL_MAX_Z_INDEX, Math.round((1 - depth01) * TOWN_LABEL_MAX_Z_INDEX)));
-      const isGroundProjectedVisible =
-        townGroundProjected.z > -1 &&
-        townGroundProjected.z < 1 &&
-        townGroundProjected.x >= -1.5 &&
-        townGroundProjected.x <= 1.5 &&
-        townGroundProjected.y >= -1.5 &&
-        townGroundProjected.y <= 1.5;
+      const isConnectorProjectedVisible =
+        townConnectorProjected.z > -1 &&
+        townConnectorProjected.z < 1 &&
+        townConnectorProjected.x >= -1.5 &&
+        townConnectorProjected.x <= 1.5 &&
+        townConnectorProjected.y >= -1.5 &&
+        townConnectorProjected.y <= 1.5;
       const rootHeight = Math.max(0, entry.root.offsetHeight);
       const rootWidth = Math.max(0, entry.root.offsetWidth);
       entry.root.classList.remove("hidden");
@@ -4456,10 +4481,10 @@ export const createThreeTest = (
       townAnchors.set(town.id, { rootX, rootY, rootWidth, rootHeight, zIndex });
       entry.root.style.clipPath = "none";
       const connectorStartScreenY = Math.max(rootY + 1, rootY + rootHeight - 1);
-      const connectorEndScreenY = groundScreenY;
+      const connectorEndScreenY = connectorScreenY;
       const connectorLength = connectorEndScreenY - connectorStartScreenY;
-      const connectorXError = Math.abs(groundScreenX - screenX);
-      if (isGroundProjectedVisible && connectorLength >= 4 && connectorXError <= viewportWidth * 0.25) {
+      const connectorXError = Math.abs(connectorScreenX - screenX);
+      if (isConnectorProjectedVisible && connectorLength >= 4 && connectorXError <= viewportWidth * 0.25) {
         entry.connector.style.display = "block";
         entry.connector.style.width = `${connectorLength.toFixed(1)}px`;
         entry.connector.style.zIndex = `${Math.max(1, zIndex - 1)}`;
@@ -4474,10 +4499,23 @@ export const createThreeTest = (
     const baseWorldX = lastTerrainSurface.toWorldX(baseTileX + 0.5);
     const baseWorldZ = lastTerrainSurface.toWorldZ(baseTileY + 0.5);
     const baseGroundY = lastTerrainSurface.heightAtTile(baseTileX, baseTileY) * heightScale;
-    baseGroundWorld.set(baseWorldX, baseGroundY, baseWorldZ);
-    baseLabelWorld.set(baseWorldX, baseGroundY + baseLabelLift, baseWorldZ);
+    const baseLabelLayout = resolveTownLabelDepthAwareLayout({
+      camera,
+      surface: lastTerrainSurface,
+      worldX: baseWorldX,
+      groundY: baseGroundY,
+      worldZ: baseWorldZ,
+      baseLift: baseLabelLift,
+      maxLift: occlusionMaxLift,
+      verticalClearance: TOWN_LABEL_OCCLUSION_VERTICAL_CLEARANCE,
+      labelClearance: TOWN_LABEL_OCCLUSION_LABEL_CLEARANCE,
+      connectorClearance: TOWN_LABEL_CONNECTOR_CLEARANCE,
+      sampleCount: TOWN_LABEL_OCCLUSION_SAMPLE_COUNT
+    });
+    baseConnectorWorld.set(baseWorldX, baseLabelLayout.connectorY, baseWorldZ);
+    baseLabelWorld.set(baseWorldX, baseLabelLayout.labelY, baseWorldZ);
     baseLabelProjected.copy(baseLabelWorld).project(camera);
-    baseGroundProjected.copy(baseGroundWorld).project(camera);
+    baseConnectorProjected.copy(baseConnectorWorld).project(camera);
     const baseVisible =
       baseLabelProjected.z > -1 &&
       baseLabelProjected.z < 1 &&
@@ -4488,8 +4526,8 @@ export const createThreeTest = (
     if (baseVisible) {
       const screenX = (baseLabelProjected.x * 0.5 + 0.5) * viewportWidth;
       const screenY = (-baseLabelProjected.y * 0.5 + 0.5) * viewportHeight;
-      const groundScreenX = (baseGroundProjected.x * 0.5 + 0.5) * viewportWidth;
-      const groundScreenY = (-baseGroundProjected.y * 0.5 + 0.5) * viewportHeight;
+      const connectorScreenX = (baseConnectorProjected.x * 0.5 + 0.5) * viewportWidth;
+      const connectorScreenY = (-baseConnectorProjected.y * 0.5 + 0.5) * viewportHeight;
       const rootX = screenX - BASE_LABEL_CONNECTOR_ORIGIN_X;
       const rootY = screenY + BASE_LABEL_SCREEN_OFFSET_Y;
       const depth01 = Math.max(0, Math.min(1, (baseLabelProjected.z + 1) * 0.5));
@@ -4501,9 +4539,16 @@ export const createThreeTest = (
       baseCardElements.root.style.zIndex = `${zIndex}`;
       baseCardElements.root.style.transform = `translate3d(${rootX.toFixed(1)}px, ${rootY.toFixed(1)}px, 0)`;
       const connectorStartScreenY = Math.max(rootY + 1, rootY + rootHeight - 1);
-      const connectorLength = groundScreenY - connectorStartScreenY;
-      const connectorXError = Math.abs(groundScreenX - screenX);
-      if (connectorLength >= 4 && connectorXError <= viewportWidth * 0.25) {
+      const connectorLength = connectorScreenY - connectorStartScreenY;
+      const connectorXError = Math.abs(connectorScreenX - screenX);
+      const isConnectorProjectedVisible =
+        baseConnectorProjected.z > -1 &&
+        baseConnectorProjected.z < 1 &&
+        baseConnectorProjected.x >= -1.5 &&
+        baseConnectorProjected.x <= 1.5 &&
+        baseConnectorProjected.y >= -1.5 &&
+        baseConnectorProjected.y <= 1.5;
+      if (isConnectorProjectedVisible && connectorLength >= 4 && connectorXError <= viewportWidth * 0.25) {
         baseCardElements.connector.style.display = "block";
         baseCardElements.connector.style.width = `${connectorLength.toFixed(1)}px`;
         baseCardElements.connector.style.zIndex = `${Math.max(1, zIndex - 1)}`;

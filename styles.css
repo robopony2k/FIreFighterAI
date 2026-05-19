@@ -479,7 +479,7 @@ canvas {
   position: absolute;
   inset: 0;
   pointer-events: none;
-  z-index: 8;
+  z-index: 11;
 }
 
 .end-run-screen {
@@ -2256,7 +2256,7 @@ canvas {
   left: 50%;
   top: var(--three-test-top-clearance);
   transform: translateX(-50%);
-  z-index: 18;
+  z-index: 21000;
   min-width: 320px;
   max-width: 420px;
   border-color: var(--three-test-accent);
