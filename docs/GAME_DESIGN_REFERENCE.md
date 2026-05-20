@@ -129,6 +129,7 @@ Design intent:
 - Bottom command tray is the primary unit control surface: select Alpha/Bravo command groups, inspect selected trucks, read compact crew/water/status, and arm unit command modes there.
 - Right-side runtime dock stays focused on widgets such as fire risk, minimap, time, and contextual information rather than duplicating unit command ownership.
 - 3D run exit controls should be compact and contextual: use a single Main Menu action inside the command/progression counter instead of a separate top header that reduces world viewport space.
+- The 3D run camera should stay above the terrain and keep pan targets inside the playable map so normal orbit and pan controls never expose the underside of the world.
 - Game-over and manual End Run flows stay on the 3D runtime and show a dedicated end-run summary placeholder with final score, reason, seed, year, and New Run/Main Menu actions.
 
 ## 3D Terrain Presentation
@@ -144,6 +145,8 @@ Design intent:
 - The firebase starts near the center of the main island, but placement scores nearby lowland candidates instead of blindly accepting the exact map center. It should prefer flat, moderate-elevation, roadable ground with nearby vegetated fuel so the base is not stranded on barren high terrain.
 - Settlement placement uses rendered slope angle as a first-class terrain fit signal: towns should prefer sites around 12 degrees or lower, tolerate only moderate angle fallback, and reject steep house plots unless local terrain can be flattened to an accessible pad.
 - Initial map generation guarantees the firebase and all seeded towns share one edge-connected road network. Road strictness remains an internal/debug tuning input, not something players must adjust to avoid isolated towns.
+- Intertown roads use rendered slope angle when routing. Normal connectors prefer low-angle terrain, detour along contours when possible, use generated non-town junction candidates to avoid repeated full-map pairwise cuts, and reserve bounded mountain-pass fallback for connectivity cases that cannot otherwise be solved.
+- Compound road connectors are applied atomically: failed junction or waypoint attempts must not leave visible dead-end fragments. Final road grading and rendered house-footprint reconciliation keep road surfaces and building pads accessible after settlement flattening.
 - 3D town and firebase nameplates should remain readable without drawing through hills or mountains: labels lift along their world anchor until the terrain depth line is clear, lengthening the connector instead of pretending obstructed settlements are in front.
 - Each world seed also derives a fictional prevailing wind direction, strength, and variability; that seed climate carries ocean moisture inland so windward slopes trend wetter, leeward rain shadows trend drier, and the resulting static moisture shapes biome, fuel, and later fire-season wind bias. Terrain vegetation derives continuous tree suitability from moisture, elevation stress, slope stress, river/coastal influence, and seeded biome noise, so forests thin probabilistically and patchily instead of ending at a hard contour. Forest remains the fuel category, while pine, oak, maple, birch, and elm are assigned as clustered visual stand patches for 3D assets and canopy color variation.
 - The terrain editor early sequence is Scenario, Shape, Relief, and Water for fast landmass previews. Scenario, Shape, and Relief render dry landmass previews with no ocean or river water; Water is the first fast preview that calibrates sea level from the Land mass target and renders connected ocean. Rivers is an accurate click-driven stage that advances the mapgen session through shoreline and river carving before rendering.
@@ -170,7 +173,7 @@ Terrain
 - Terrain editor previews prioritize instant feedback for shape, relief, and water controls using the same fast landmass core as `terrain:elevation`; Rivers and later final-quality stages are not started until their step is selected, then advance the current preview session instead of restarting earlier completed stages. Shape exposes Land mass as the primary coastline coverage control; Water exposes sea-level bias only as an advanced calibration override.
 - Tile fuel profiles (baseFuel/ignition/burnRate/heatOutput/spreadBoost/heatTransferCap/heatRetention/windFactor per tile type); windFactor is retained as the config key but means windbreak strength, where 0 is open terrain and 1 is strong wind obstruction.
 - Vegetation regrowth (water influence, ash recovery, canopy growth, runtime tree suitability, block catch-up, forest recruit).
-- Community and road generation (town density, bridge allowance, settlement spacing, debug/internal road strictness, pre-growth years, guaranteed initial road connectivity).
+- Community and road generation (town density, bridge allowance, settlement spacing, debug/internal road strictness, pre-growth years, guaranteed initial road connectivity, angle-aware intertown routing).
 
 Climate
 - Climate params (seasonLen, peakDay, tMid, tAmp, warmingPerYear, noiseAmp, heatwavesPerYear).

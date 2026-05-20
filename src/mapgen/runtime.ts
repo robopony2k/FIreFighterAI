@@ -15,6 +15,8 @@ import {
   syncDerivedVegetationState
 } from "../core/vegetation.js";
 import { applyFuel } from "../core/tiles.js";
+import { getHouseFootprintBounds, pickHouseFootprint } from "../core/houseFootprints.js";
+import { findBestRoadReferenceForPlot, pickHouseRotationFromRoadMask } from "../core/roadAlignment.js";
 import {
   COAST_CLASS_BEACH,
   COAST_CLASS_CLIFF,
@@ -5081,8 +5083,11 @@ type ShortBridgeApproachComponent = {
   connectorRoads: number[];
 };
 
-const ROAD_GRADE_TARGET_LIMIT = 0.085;
-const ROAD_GRADE_CHANGE_TARGET_LIMIT = 0.055;
+const ROAD_GRADE_TARGET_LIMIT = 0.095;
+const ROAD_GRADE_CHANGE_TARGET_LIMIT = 0.065;
+const ROAD_FINAL_MAX_ANGLE_DEG = 27.5;
+const ROAD_FINAL_STRUCTURE_MAX_ANGLE_DEG = 18;
+const ROAD_FINAL_ANGLE_RELAX_PASSES = 10;
 const ROAD_SHOULDER_BLEND_RADIUS = 2;
 const ROAD_WALL_DROP_THRESHOLD = 0.09;
 const ROAD_WALL_OUTER_DROP_THRESHOLD = 0.11;
@@ -5444,6 +5449,68 @@ const buildRoadSegmentProfile = (
   return target;
 };
 
+const reconcileHighAngleRoadEdges = (state: WorldState, heightScaleMultiplier = 1): void => {
+  const elevationScale = getTerrainHeightScale(state.grid.cols, state.grid.rows, heightScaleMultiplier);
+  for (let pass = 0; pass < ROAD_FINAL_ANGLE_RELAX_PASSES; pass += 1) {
+    let adjusted = false;
+    for (let idx = 0; idx < state.grid.totalTiles; idx += 1) {
+      if (!isLandRoadLikeIndex(state, idx)) {
+        continue;
+      }
+      const x = idx % state.grid.cols;
+      const y = Math.floor(idx / state.grid.cols);
+      const mask = getRoadMaskAtIndex(state, idx, true);
+      for (let i = 0; i < ROAD_EDGE_DIRS.length; i += 1) {
+        const dir = ROAD_EDGE_DIRS[i]!;
+        if ((mask & dir.bit) === 0) {
+          continue;
+        }
+        const nx = x + dir.dx;
+        const ny = y + dir.dy;
+        if (!inBounds(state.grid, nx, ny)) {
+          continue;
+        }
+        const neighborIdx = indexFor(state.grid, nx, ny);
+        if (neighborIdx <= idx || !isLandRoadLikeIndex(state, neighborIdx)) {
+          continue;
+        }
+        const tile = state.tiles[idx];
+        const neighbor = state.tiles[neighborIdx];
+        if (!tile || !neighbor) {
+          continue;
+        }
+        const maxAngleDeg =
+          touchesStructurePad(state, idx) || touchesStructurePad(state, neighborIdx)
+            ? ROAD_FINAL_STRUCTURE_MAX_ANGLE_DEG
+            : ROAD_FINAL_MAX_ANGLE_DEG;
+        const slopeLimit = Math.tan((maxAngleDeg * Math.PI) / 180) / Math.max(1e-6, elevationScale);
+        const run = Math.hypot(dir.dx, dir.dy);
+        const maxDelta = slopeLimit * Math.max(1, run);
+        const delta = neighbor.elevation - tile.elevation;
+        const absDelta = Math.abs(delta);
+        if (absDelta <= maxDelta + 1e-6) {
+          continue;
+        }
+        const sign = Math.sign(delta) || 1;
+        const targetDelta = sign * maxDelta;
+        const excess = delta - targetDelta;
+        if (tile.type === "base" && neighbor.type !== "base") {
+          neighbor.elevation = clamp(tile.elevation + targetDelta, 0, 1);
+        } else if (neighbor.type === "base" && tile.type !== "base") {
+          tile.elevation = clamp(neighbor.elevation - targetDelta, 0, 1);
+        } else {
+          tile.elevation = clamp(tile.elevation + excess * 0.5, 0, 1);
+          neighbor.elevation = clamp(neighbor.elevation - excess * 0.5, 0, 1);
+        }
+        adjusted = true;
+      }
+    }
+    if (!adjusted) {
+      break;
+    }
+  }
+};
+
 export function gradeRoadNetworkTerrain(state: WorldState, heightScaleMultiplier = 1): RoadSurfaceMetrics {
   const total = state.grid.totalTiles;
   prepareShortBridgeApproaches(state);
@@ -5557,6 +5624,7 @@ export function gradeRoadNetworkTerrain(state: WorldState, heightScaleMultiplier
       tile.elevation = clamp(profile[j] ?? tile.elevation, 0, 1);
     }
   }
+  reconcileHighAngleRoadEdges(state, heightScaleMultiplier);
 
   const shoulderSum = new Float32Array(total);
   const shoulderWeight = new Float32Array(total);
@@ -5614,6 +5682,9 @@ export function gradeRoadNetworkTerrain(state: WorldState, heightScaleMultiplier
     const clampedTarget = clamp(target, originalElevation - maxCut, originalElevation + maxFill);
     tile.elevation = clamp(tile.elevation * (1 - blend) + clampedTarget * blend, 0, 1);
   }
+  flattenRenderedHouseFootprints(state);
+  reconcileHighAngleRoadEdges(state, heightScaleMultiplier);
+  flattenRenderedHouseFootprints(state);
 
   for (let idx = 0; idx < total; idx += 1) {
     if (!isLandRoadLikeIndex(state, idx)) {
@@ -5659,6 +5730,57 @@ export function gradeRoadNetworkTerrain(state: WorldState, heightScaleMultiplier
 const SETTLEMENT_PAD_BLEND_RADIUS = 4;
 const SETTLEMENT_PAD_RING_WEIGHTS = [0.88, 0.64, 0.38, 0.18] as const;
 const SETTLEMENT_PAD_ROAD_ADJUST_LIMIT = 0.03;
+
+const flattenRenderedHouseFootprints = (state: WorldState): void => {
+  const cols = state.grid.cols;
+  const rows = state.grid.rows;
+  const total = state.grid.totalTiles;
+  const isRoadLikeAt = (x: number, y: number): boolean => {
+    if (!inBounds(state.grid, x, y)) {
+      return false;
+    }
+    return isRoadLikeIndex(state, indexFor(state.grid, x, y));
+  };
+  const getRoadMaskAt = (x: number, y: number): number => {
+    if (!inBounds(state.grid, x, y)) {
+      return 0;
+    }
+    return getRoadMaskAtIndex(state, indexFor(state.grid, x, y), false);
+  };
+  const setElevation = (idx: number, elevation: number): void => {
+    const value = clamp(elevation, 0, 1);
+    state.tiles[idx].elevation = value;
+    if (state.tileElevation.length === total) {
+      state.tileElevation[idx] = value;
+    }
+  };
+  for (let idx = 0; idx < total; idx += 1) {
+    const tile = state.tiles[idx];
+    if (!tile || tile.type !== "house") {
+      continue;
+    }
+    const x = idx % cols;
+    const y = Math.floor(idx / cols);
+    const seed = Number.isFinite(tile.houseStyleSeed) ? Math.trunc(tile.houseStyleSeed as number) : idx;
+    const reference = findBestRoadReferenceForPlot(x, y, isRoadLikeAt, getRoadMaskAt);
+    const rotation = pickHouseRotationFromRoadMask(reference?.roadMask ?? 0, seed);
+    const footprint = pickHouseFootprint(seed);
+    const bounds = getHouseFootprintBounds(x, y, rotation, footprint, "asset");
+    const target = tile.elevation;
+    for (let fy = bounds.minY; fy <= bounds.maxY; fy += 1) {
+      for (let fx = bounds.minX; fx <= bounds.maxX; fx += 1) {
+        if (fx < 0 || fy < 0 || fx >= cols || fy >= rows) {
+          continue;
+        }
+        const footprintIdx = indexFor(state.grid, fx, fy);
+        if (state.tiles[footprintIdx]?.type === "water") {
+          continue;
+        }
+        setElevation(footprintIdx, target);
+      }
+    }
+  }
+};
 
 export function flattenSettlementGround(state: WorldState): void {
   const tiles = state.tiles;
@@ -5774,11 +5896,16 @@ export function flattenSettlementGround(state: WorldState): void {
     if (componentMaxX < componentMinX || componentMaxY < componentMinY) {
       continue;
     }
+    const padExpansion = componentHasHouse ? 1 : 0;
+    const padMinX = Math.max(0, componentMinX - padExpansion);
+    const padMaxX = Math.min(cols - 1, componentMaxX + padExpansion);
+    const padMinY = Math.max(0, componentMinY - padExpansion);
+    const padMaxY = Math.min(rows - 1, componentMaxY + padExpansion);
     const padTiles: number[] = [];
     const padSamples: number[] = [];
-    for (let y = componentMinY; y <= componentMaxY; y += 1) {
+    for (let y = padMinY; y <= padMaxY; y += 1) {
       const rowBase = y * cols;
-      for (let x = componentMinX; x <= componentMaxX; x += 1) {
+      for (let x = padMinX; x <= padMaxX; x += 1) {
         const idx = rowBase + x;
         const tile = tiles[idx];
         if (!tile || tile.type === "water") {
@@ -5832,18 +5959,18 @@ export function flattenSettlementGround(state: WorldState): void {
       }
     });
 
-    for (let y = componentMinY - SETTLEMENT_PAD_BLEND_RADIUS; y <= componentMaxY + SETTLEMENT_PAD_BLEND_RADIUS; y += 1) {
+    for (let y = padMinY - SETTLEMENT_PAD_BLEND_RADIUS; y <= padMaxY + SETTLEMENT_PAD_BLEND_RADIUS; y += 1) {
       if (y < 0 || y >= rows) {
         continue;
       }
-      for (let x = componentMinX - SETTLEMENT_PAD_BLEND_RADIUS; x <= componentMaxX + SETTLEMENT_PAD_BLEND_RADIUS; x += 1) {
+      for (let x = padMinX - SETTLEMENT_PAD_BLEND_RADIUS; x <= padMaxX + SETTLEMENT_PAD_BLEND_RADIUS; x += 1) {
         if (x < 0 || x >= cols) {
           continue;
         }
         const dx =
-          x < componentMinX ? componentMinX - x : x > componentMaxX ? x - componentMaxX : 0;
+          x < padMinX ? padMinX - x : x > padMaxX ? x - padMaxX : 0;
         const dy =
-          y < componentMinY ? componentMinY - y : y > componentMaxY ? y - componentMaxY : 0;
+          y < padMinY ? padMinY - y : y > padMaxY ? y - padMaxY : 0;
         const chebyshev = Math.max(dx, dy);
         if (chebyshev <= 0 || chebyshev > SETTLEMENT_PAD_BLEND_RADIUS) {
           continue;
@@ -5893,6 +6020,7 @@ export function flattenSettlementGround(state: WorldState): void {
     );
     setElevation(i, tiles[i].elevation + delta);
   }
+  flattenRenderedHouseFootprints(state);
   state.tileSoaDirty = true;
   state.terrainDirty = true;
   state.settlementPadReliefMax = Number(housePadReliefMax.toFixed(4));
@@ -7717,7 +7845,9 @@ async function runSettlementPlacementStage(ctx: MapGenContext): Promise<void> {
 async function runRoadNetworkStage(ctx: MapGenContext): Promise<void> {
   connectSettlementsByRoad(ctx.state, ctx.rng, ctx.settlementPlan ?? null);
   flattenSettlementGround(ctx.state);
-  const roadSurfaceMetrics = gradeRoadNetworkTerrain(ctx.state, ctx.settings.heightScaleMultiplier);
+  let roadSurfaceMetrics = gradeRoadNetworkTerrain(ctx.state, ctx.settings.heightScaleMultiplier);
+  flattenSettlementGround(ctx.state);
+  roadSurfaceMetrics = gradeRoadNetworkTerrain(ctx.state, ctx.settings.heightScaleMultiplier);
   if (ctx.riverMask) {
     for (let i = 0; i < ctx.state.tiles.length; i += 1) {
       if (ctx.riverMask[i] === 0) {
@@ -7737,7 +7867,7 @@ async function runRoadNetworkStage(ctx: MapGenContext): Promise<void> {
     const stats = getRoadGenerationStats();
     const finalMetrics: RoadSurfaceMetrics = roadSurfaceMetrics;
     console.log(
-      `[roadsurface] maxGrade=${finalMetrics.maxRoadGrade.toFixed(3)} maxCrossfall=${finalMetrics.maxRoadCrossfall.toFixed(3)} maxGradeChange=${finalMetrics.maxRoadGradeChange.toFixed(3)} wallEdges=${finalMetrics.wallEdgeCount} routedMaxGrade=${stats.maxRealizedGrade.toFixed(3)} routedMaxCrossfall=${stats.maxRealizedCrossfall.toFixed(3)} routedMaxGradeChange=${stats.maxRealizedGradeChange.toFixed(3)}`
+      `[roadsurface] maxGrade=${finalMetrics.maxRoadGrade.toFixed(3)} maxCrossfall=${finalMetrics.maxRoadCrossfall.toFixed(3)} maxGradeChange=${finalMetrics.maxRoadGradeChange.toFixed(3)} maxAngle=${finalMetrics.maxRoadAngleDeg.toFixed(2)} highAngle=${finalMetrics.highAngleRoadStepCount} wallEdges=${finalMetrics.wallEdgeCount} routedMaxGrade=${stats.maxRealizedGrade.toFixed(3)} routedMaxCrossfall=${stats.maxRealizedCrossfall.toFixed(3)} routedMaxGradeChange=${stats.maxRealizedGradeChange.toFixed(3)} routedAngle=${stats.maxRealizedAngleDeg.toFixed(2)}/${stats.meanRealizedAngleDeg.toFixed(2)} pass=${stats.mountainPassFallbackCount} junctions=${stats.generatedJunctionCount}`
     );
   }
   await ctx.reportStage("Connecting roads...", 1);

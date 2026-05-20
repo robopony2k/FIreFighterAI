@@ -1,5 +1,19 @@
 # Deprecations
 
+## Unbounded Rescue Road Routing Through Steep Terrain
+
+Status: Deprecated as of May 20, 2026.
+
+- Intertown road routing no longer uses near-unbounded rescue connectors that can cut straight through steep mountains or leave repeated failed connector fragments on the map.
+- Road planning now scores rendered slope angle, prefers contour-following routes, can use a bounded set of non-town junction candidates, and applies compound junction/waypoint connectors atomically.
+- Connectivity remains mandatory, but rare fallback routes are bounded, counted in regression metrics, and followed by final road-surface and rendered-footprint terrain reconciliation.
+
+Migration guidance:
+
+1. Add new intertown routing work through `src/mapgen/roads.ts` and the settlement road adapter boundary.
+2. Keep settlement controllers free of direct road mutation details; use adapter operations for single and compound road carving.
+3. Do not reintroduce rescue options with effectively unlimited grade, crossfall, or angle limits as the default connector path.
+
 ## Relief-Only Settlement Siting
 
 Status: Deprecated as of May 20, 2026.

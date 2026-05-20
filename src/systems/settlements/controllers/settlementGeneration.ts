@@ -529,55 +529,141 @@ const findBuildableNear = (state: WorldState, origin: Point, radius: number, hei
 const buildRoadOptions = (plan: SettlementPlacementResult): SettlementRoadOptions => ({
   bridgePolicy: plan.bridgeTransitions ? "allow" : "never",
   heightScaleMultiplier: Math.max(0.1, plan.heightScaleMultiplier ?? 1),
-  diagonalPenalty: Math.max(0, plan.diagonalPenalty ?? 0.18)
+  diagonalPenalty: Math.max(0, plan.diagonalPenalty ?? 0.18),
+  preferredAngleDeg: 13,
+  softAngleDeg: 20,
+  avoidAngleDeg: 30,
+  fallbackAngleDeg: 42,
+  anglePenaltyWeight: 0.36,
+  straightClimbPenaltyWeight: 0.44,
+  contourTurnReliefWeight: 0.8
 });
 
 const buildConnectorRoadOptions = (plan: SettlementPlacementResult): SettlementRoadOptions => ({
   ...buildRoadOptions(plan),
   gradeLimitStart: 0.12,
-  gradeLimitRelaxStep: 0.02,
-  gradeLimitMax: 0.24,
-  slopePenaltyWeight: 14,
+  gradeLimitRelaxStep: 0.015,
+  gradeLimitMax: 0.2,
+  slopePenaltyWeight: 19,
   crossfallLimitStart: 0.08,
-  crossfallLimitRelaxStep: 0.018,
-  crossfallLimitMax: 0.18,
-  crossfallPenaltyWeight: 12,
+  crossfallLimitRelaxStep: 0.014,
+  crossfallLimitMax: 0.16,
+  crossfallPenaltyWeight: 17,
   gradeChangeLimitStart: 0.08,
-  gradeChangeLimitRelaxStep: 0.018,
-  gradeChangeLimitMax: 0.18,
-  gradeChangePenaltyWeight: 10,
+  gradeChangeLimitRelaxStep: 0.014,
+  gradeChangeLimitMax: 0.16,
+  gradeChangePenaltyWeight: 15,
   riverBlockDistance: 0,
   riverPenaltyDistance: 2,
   riverPenaltyWeight: 4,
-  turnPenalty: 0.06,
+  turnPenalty: 0.04,
   bridgeStepCost: 18,
   bridgeMaxConsecutiveWater: 4,
-  bridgeMaxWaterTilesPerPath: 10
+  bridgeMaxWaterTilesPerPath: 10,
+  anglePenaltyWeight: 0.5,
+  straightClimbPenaltyWeight: 0.66,
+  contourTurnReliefWeight: 1.05
 });
 
 const buildRescueConnectorRoadOptions = (plan: SettlementPlacementResult): SettlementRoadOptions => ({
   ...buildRoadOptions(plan),
-  diagonalPenalty: Math.min(0.04, Math.max(0, plan.diagonalPenalty ?? 0.18)),
-  gradeLimitStart: 2.5,
-  gradeLimitRelaxStep: 1,
-  gradeLimitMax: 5,
-  slopePenaltyWeight: 0,
-  crossfallLimitStart: 2.5,
-  crossfallLimitRelaxStep: 1,
-  crossfallLimitMax: 5,
-  crossfallPenaltyWeight: 0,
-  gradeChangeLimitStart: 2.5,
-  gradeChangeLimitRelaxStep: 1,
-  gradeChangeLimitMax: 5,
-  gradeChangePenaltyWeight: 0,
+  diagonalPenalty: Math.min(0.08, Math.max(0, plan.diagonalPenalty ?? 0.18)),
+  gradeLimitStart: 0.14,
+  gradeLimitRelaxStep: 0.025,
+  gradeLimitMax: 0.38,
+  slopePenaltyWeight: 30,
+  crossfallLimitStart: 0.1,
+  crossfallLimitRelaxStep: 0.025,
+  crossfallLimitMax: 0.32,
+  crossfallPenaltyWeight: 26,
+  gradeChangeLimitStart: 0.1,
+  gradeChangeLimitRelaxStep: 0.025,
+  gradeChangeLimitMax: 0.32,
+  gradeChangePenaltyWeight: 22,
   riverBlockDistance: 0,
-  riverPenaltyDistance: 0,
-  riverPenaltyWeight: 0,
-  turnPenalty: 0,
-  bridgeStepCost: 1,
+  riverPenaltyDistance: 2,
+  riverPenaltyWeight: 3,
+  turnPenalty: 0.025,
+  bridgeStepCost: 16,
   bridgeMaxConsecutiveWater: 8,
-  bridgeMaxWaterTilesPerPath: 20
+  bridgeMaxWaterTilesPerPath: 20,
+  avoidAngleDeg: 30,
+  fallbackAngleDeg: 64,
+  anglePenaltyWeight: 1.18,
+  straightClimbPenaltyWeight: 1.28,
+  contourTurnReliefWeight: 1.2,
+  allowMountainPassFallback: true
 });
+
+const buildConnectivityFallbackRoadOptions = (plan: SettlementPlacementResult): SettlementRoadOptions => ({
+  ...buildRescueConnectorRoadOptions(plan),
+  gradeLimitStart: 0.34,
+  gradeLimitRelaxStep: 0.08,
+  gradeLimitMax: 1.5,
+  slopePenaltyWeight: 60,
+  crossfallLimitStart: 0.28,
+  crossfallLimitRelaxStep: 0.08,
+  crossfallLimitMax: 1.2,
+  crossfallPenaltyWeight: 56,
+  gradeChangeLimitStart: 0.28,
+  gradeChangeLimitRelaxStep: 0.08,
+  gradeChangeLimitMax: 1.2,
+  gradeChangePenaltyWeight: 48,
+  avoidAngleDeg: 30,
+  fallbackAngleDeg: 88,
+  anglePenaltyWeight: 2.4,
+  straightClimbPenaltyWeight: 3.2,
+  contourTurnReliefWeight: 1.8,
+  allowMountainPassFallback: true
+});
+
+const withConnectorSearchBounds = (
+  state: WorldState,
+  start: Point,
+  end: Point,
+  options: SettlementRoadOptions,
+  padding: number
+): SettlementRoadOptions => ({
+  ...options,
+  searchBounds: {
+    minX: Math.max(0, Math.min(start.x, end.x) - padding),
+    maxX: Math.min(state.grid.cols - 1, Math.max(start.x, end.x) + padding),
+    minY: Math.max(0, Math.min(start.y, end.y) - padding),
+    maxY: Math.min(state.grid.rows - 1, Math.max(start.y, end.y) + padding)
+  }
+});
+
+const buildBoundedConnectorOptions = (
+  state: WorldState,
+  start: Point,
+  end: Point,
+  plan: SettlementPlacementResult,
+  options: SettlementRoadOptions = buildConnectorRoadOptions(plan)
+): SettlementRoadOptions => {
+  const distance = Math.hypot(end.x - start.x, end.y - start.y);
+  const padding = Math.max(14, Math.ceil(distance * 0.8));
+  return withConnectorSearchBounds(state, start, end, options, padding);
+};
+
+const carveRoadSegments = (
+  state: WorldState,
+  roadAdapter: SettlementRoadAdapter,
+  segments: Array<{ start: Point; end: Point; options?: SettlementRoadOptions }>
+): boolean => {
+  if (segments.length === 0) {
+    return false;
+  }
+  if (roadAdapter.carveRoadSequence) {
+    return roadAdapter.carveRoadSequence(state, segments);
+  }
+  for (let i = 0; i < segments.length; i += 1) {
+    const segment = segments[i]!;
+    if (!roadAdapter.carveRoad(state, segment.start, segment.end, segment.options)) {
+      return false;
+    }
+  }
+  return true;
+};
 
 const carveConnectorWithWaypoints = (
   state: WorldState,
@@ -590,6 +676,7 @@ const carveConnectorWithWaypoints = (
   const distance = Math.hypot(end.x - start.x, end.y - start.y);
   const segments = Math.max(4, Math.ceil(distance / 8));
   let current = start;
+  const roadSegments: Array<{ start: Point; end: Point; options?: SettlementRoadOptions }> = [];
   for (let step = 1; step <= segments; step += 1) {
     const t = step / segments;
     const projected = {
@@ -597,12 +684,10 @@ const carveConnectorWithWaypoints = (
       y: Math.round(start.y + (end.y - start.y) * t)
     };
     const target = step === segments ? end : findBuildableNear(state, projected, 6, plan.heightScaleMultiplier ?? 1) ?? projected;
-    if (!roadAdapter.carveRoad(state, current, target, options)) {
-      return false;
-    }
+    roadSegments.push({ start: current, end: target, options: buildBoundedConnectorOptions(state, current, target, plan, options) });
     current = target;
   }
-  return true;
+  return carveRoadSegments(state, roadAdapter, roadSegments);
 };
 
 const carveRescueConnectorWithWaypoints = (
@@ -613,12 +698,16 @@ const carveRescueConnectorWithWaypoints = (
   plan: SettlementPlacementResult
 ): boolean => {
   const options = buildRescueConnectorRoadOptions(plan);
+  if (roadAdapter.carveRoad(state, start, end, buildBoundedConnectorOptions(state, start, end, plan, options))) {
+    return true;
+  }
   if (roadAdapter.carveRoad(state, start, end, options)) {
     return true;
   }
   const distance = Math.hypot(end.x - start.x, end.y - start.y);
   const segments = Math.max(5, Math.ceil(distance / 6));
   let current = start;
+  const roadSegments: Array<{ start: Point; end: Point; options?: SettlementRoadOptions }> = [];
   for (let step = 1; step <= segments; step += 1) {
     const t = step / segments;
     const projected = {
@@ -626,12 +715,13 @@ const carveRescueConnectorWithWaypoints = (
       y: Math.round(start.y + (end.y - start.y) * t)
     };
     const target = step === segments ? end : findBuildableNear(state, projected, 10, plan.heightScaleMultiplier ?? 1) ?? projected;
-    if (!roadAdapter.carveRoad(state, current, target, options)) {
-      return false;
-    }
+    roadSegments.push({ start: current, end: target, options: buildBoundedConnectorOptions(state, current, target, plan, options) });
     current = target;
   }
-  return true;
+  if (carveRoadSegments(state, roadAdapter, roadSegments)) {
+    return true;
+  }
+  return roadAdapter.carveRoad(state, start, end, buildConnectivityFallbackRoadOptions(plan));
 };
 
 const carveStreetArm = (
@@ -998,6 +1088,162 @@ const resolveBaseRoadAnchor = (state: WorldState, roadAdapter: SettlementRoadAda
     ? state.basePoint
     : findStreetNearTown(state, state.basePoint, 6) ?? roadAdapter.findNearestRoadTile(state, state.basePoint);
 
+const findNearestStreetExcludingBase = (state: WorldState, origin: Point): Point | null => {
+  let best: Point | null = null;
+  let bestDist = Number.POSITIVE_INFINITY;
+  for (let y = 0; y < state.grid.rows; y += 1) {
+    for (let x = 0; x < state.grid.cols; x += 1) {
+      const idx = indexFor(state.grid, x, y);
+      const tile = state.tiles[idx];
+      if (!tile || tile.type !== "road") {
+        continue;
+      }
+      const dist = Math.abs(origin.x - x) + Math.abs(origin.y - y);
+      if (dist < bestDist) {
+        bestDist = dist;
+        best = { x, y };
+      }
+    }
+  }
+  return best;
+};
+
+const ensureBaseRoadConnectivity = (
+  state: WorldState,
+  roadAdapter: SettlementRoadAdapter,
+  plan: SettlementPlacementResult
+): boolean => {
+  if (!isRoadLikeTile(state, state.basePoint.x, state.basePoint.y)) {
+    return false;
+  }
+  const target = findStreetNearTown(state, state.basePoint, 12) ?? findNearestStreetExcludingBase(state, state.basePoint);
+  if (!target || (target.x === state.basePoint.x && target.y === state.basePoint.y)) {
+    return false;
+  }
+  return (
+    roadAdapter.carveRoad(
+      state,
+      state.basePoint,
+      target,
+      buildBoundedConnectorOptions(state, state.basePoint, target, plan, buildConnectorRoadOptions(plan))
+    ) || roadAdapter.carveRoad(state, state.basePoint, target, buildRescueConnectorRoadOptions(plan))
+  );
+};
+
+type RoadJunctionCandidate = Point & {
+  score: number;
+};
+
+const distanceToSegment = (point: Point, start: Point, end: Point): number => {
+  const dx = end.x - start.x;
+  const dy = end.y - start.y;
+  const lenSq = dx * dx + dy * dy;
+  if (lenSq <= 1e-6) {
+    return Math.hypot(point.x - start.x, point.y - start.y);
+  }
+  const t = Math.max(0, Math.min(1, ((point.x - start.x) * dx + (point.y - start.y) * dy) / lenSq));
+  const px = start.x + dx * t;
+  const py = start.y + dy * t;
+  return Math.hypot(point.x - px, point.y - py);
+};
+
+const collectRoadJunctionCandidates = (
+  state: WorldState,
+  anchors: Point[],
+  plan: SettlementPlacementResult
+): RoadJunctionCandidate[] => {
+  const total = state.grid.totalTiles;
+  const limit = Math.max(16, Math.min(total >= 16000 ? 96 : 32, Math.ceil(Math.sqrt(total) * 0.7)));
+  const step = Math.max(3, Math.floor(Math.sqrt(total / Math.max(1, limit * 2))));
+  const heightScaleMultiplier = plan.heightScaleMultiplier ?? 1;
+  const candidates: RoadJunctionCandidate[] = [];
+  for (let y = step; y < state.grid.rows - step; y += step) {
+    for (let x = step; x < state.grid.cols - step; x += step) {
+      if (!isBuildable(state, x, y, heightScaleMultiplier)) {
+        continue;
+      }
+      const idx = indexFor(state.grid, x, y);
+      const tile = state.tiles[idx];
+      if (!tile || tile.type === "water" || tile.type === "house" || tile.type === "base" || state.structureMask[idx] > 0) {
+        continue;
+      }
+      const point = { x, y };
+      let nearestLine = Number.POSITIVE_INFINITY;
+      for (let i = 0; i < anchors.length; i += 1) {
+        for (let j = i + 1; j < anchors.length; j += 1) {
+          nearestLine = Math.min(nearestLine, distanceToSegment(point, anchors[i]!, anchors[j]!));
+        }
+      }
+      const lineWindow = Math.max(8, step * 2.5);
+      if (nearestLine > lineWindow) {
+        continue;
+      }
+      const angleDeg = computeSettlementTileAngleDeg(state, x, y, { heightScaleMultiplier });
+      const relief = computeLocalRelief(state, x, y);
+      const existingRoadBonus = isRoadLikeTile(state, x, y) ? -8 : 0;
+      candidates.push({
+        x,
+        y,
+        score: angleDeg * 1.2 + relief * 220 + nearestLine * 0.7 + existingRoadBonus
+      });
+    }
+  }
+  candidates.sort((left, right) => left.score - right.score);
+  const selected: RoadJunctionCandidate[] = [];
+  const minSpacing = Math.max(5, step * 1.6);
+  for (let i = 0; i < candidates.length && selected.length < limit; i += 1) {
+    const candidate = candidates[i]!;
+    if (selected.some((existing) => Math.hypot(existing.x - candidate.x, existing.y - candidate.y) < minSpacing)) {
+      continue;
+    }
+    selected.push(candidate);
+  }
+  return selected;
+};
+
+const selectJunctionForConnection = (
+  junctions: RoadJunctionCandidate[],
+  start: Point,
+  end: Point
+): RoadJunctionCandidate | null => {
+  let best: RoadJunctionCandidate | null = null;
+  let bestScore = Number.POSITIVE_INFINITY;
+  const direct = Math.max(1, Math.hypot(end.x - start.x, end.y - start.y));
+  for (let i = 0; i < junctions.length; i += 1) {
+    const junction = junctions[i]!;
+    const detour = Math.hypot(junction.x - start.x, junction.y - start.y) + Math.hypot(end.x - junction.x, end.y - junction.y);
+    if (detour > direct * 1.7) {
+      continue;
+    }
+    const segmentDist = distanceToSegment(junction, start, end);
+    const score = junction.score + segmentDist * 2 + Math.max(0, detour - direct) * 1.4;
+    if (score < bestScore) {
+      bestScore = score;
+      best = junction;
+    }
+  }
+  return best;
+};
+
+const carveConnectorViaJunction = (
+  state: WorldState,
+  roadAdapter: SettlementRoadAdapter,
+  start: Point,
+  end: Point,
+  plan: SettlementPlacementResult,
+  junctions: RoadJunctionCandidate[],
+  options: SettlementRoadOptions = buildConnectorRoadOptions(plan)
+): boolean => {
+  const junction = selectJunctionForConnection(junctions, start, end);
+  if (!junction) {
+    return false;
+  }
+  return carveRoadSegments(state, roadAdapter, [
+    { start, end: junction, options: buildBoundedConnectorOptions(state, start, junction, plan, options) },
+    { start: junction, end, options: buildBoundedConnectorOptions(state, junction, end, plan, options) }
+  ]);
+};
+
 const ensureTownLocalRoadAnchors = (
   state: WorldState,
   towns: Town[],
@@ -1024,6 +1270,46 @@ const ensureTownLocalRoadAnchors = (
   return repaired;
 };
 
+const ensureTownLocalStreetLinks = (
+  state: WorldState,
+  towns: Town[],
+  roadAdapter: SettlementRoadAdapter,
+  plan: SettlementPlacementResult
+): boolean => {
+  let repaired = false;
+  const baseAnchor = resolveBaseRoadAnchor(state, roadAdapter);
+  for (let i = 0; i < towns.length; i += 1) {
+    const town = towns[i]!;
+    const localStreet = findStreetNearTown(state, { x: town.x, y: town.y }, 10);
+    if (!localStreet) {
+      continue;
+    }
+    if (
+      roadAdapter.carveRoad(state, baseAnchor, localStreet, buildRescueConnectorRoadOptions(plan)) ||
+      roadAdapter.carveRoad(state, baseAnchor, localStreet, buildConnectivityFallbackRoadOptions(plan))
+    ) {
+      repaired = true;
+    }
+    const selectedAnchor = resolveTownRoadAnchor(state, town, baseAnchor, roadAdapter);
+    if (localStreet.x === selectedAnchor.x && localStreet.y === selectedAnchor.y) {
+      continue;
+    }
+    const localOptions = buildRoadOptions(plan);
+    if (
+      roadAdapter.carveRoad(
+        state,
+        localStreet,
+        selectedAnchor,
+        buildBoundedConnectorOptions(state, localStreet, selectedAnchor, plan, localOptions)
+      ) ||
+      roadAdapter.carveRoad(state, localStreet, selectedAnchor, buildRescueConnectorRoadOptions(plan))
+    ) {
+      repaired = true;
+    }
+  }
+  return repaired;
+};
+
 const ensureTownRoadConnectivity = (
   state: WorldState,
   towns: Town[],
@@ -1033,6 +1319,9 @@ const ensureTownRoadConnectivity = (
   let repairedAny = false;
   const maxPasses = Math.max(4, towns.length * 4);
   for (let pass = 0; pass < maxPasses; pass += 1) {
+    roadAdapter.backfillRoadEdgesFromAdjacency(state);
+    repairedAny = ensureBaseRoadConnectivity(state, roadAdapter, plan) || repairedAny;
+    repairedAny = ensureTownLocalStreetLinks(state, towns, roadAdapter, plan) || repairedAny;
     roadAdapter.backfillRoadEdgesFromAdjacency(state);
     const components = buildRoadComponentMap(state, roadAdapter);
     const baseAnchor = resolveBaseRoadAnchor(state, roadAdapter);
@@ -1065,6 +1354,12 @@ const ensureTownRoadConnectivity = (
       { anchor: baseAnchor },
       ...anchorEntries.filter((entry) => entry.component === baseComponent).map((entry) => ({ anchor: entry.anchor }))
     ];
+    const junctions = collectRoadJunctionCandidates(
+      state,
+      [baseAnchor, ...anchorEntries.map((entry) => entry.anchor)],
+      plan
+    );
+    roadAdapter.recordGeneratedJunctions?.(junctions.length);
     for (let i = 0; i < connected.length; i += 1) {
       const left = connected[i]!;
       for (let j = 0; j < disconnected.length; j += 1) {
@@ -1084,8 +1379,15 @@ const ensureTownRoadConnectivity = (
     let connectedAny = false;
     for (let i = 0; i < candidates.length; i += 1) {
       const candidate = candidates[i]!;
+      const connectorOptions = buildConnectorRoadOptions(plan);
       if (
-        roadAdapter.carveRoad(state, candidate.leftAnchor, candidate.rightAnchor, buildConnectorRoadOptions(plan)) ||
+        carveConnectorViaJunction(state, roadAdapter, candidate.leftAnchor, candidate.rightAnchor, plan, junctions, connectorOptions) ||
+        roadAdapter.carveRoad(
+          state,
+          candidate.leftAnchor,
+          candidate.rightAnchor,
+          buildBoundedConnectorOptions(state, candidate.leftAnchor, candidate.rightAnchor, plan, connectorOptions)
+        ) ||
         carveConnectorWithWaypoints(state, roadAdapter, candidate.leftAnchor, candidate.rightAnchor, plan) ||
         carveRescueConnectorWithWaypoints(state, roadAdapter, candidate.connectedAnchor, candidate.disconnectedAnchor, plan)
       ) {
@@ -1183,16 +1485,26 @@ const seedTowns = (state: WorldState, plan: SettlementPlacementResult): Town[] =
 
 const connectTownRoads = (state: WorldState, towns: Town[], roadAdapter: SettlementRoadAdapter, plan: SettlementPlacementResult): void => {
   const connections = buildTownConnectionPlan(towns);
+  const anchors = [resolveBaseRoadAnchor(state, roadAdapter), ...towns.map((town) => resolveTownRoadAnchor(state, town, state.basePoint, roadAdapter))];
+  const junctions = collectRoadJunctionCandidates(state, anchors, plan);
+  roadAdapter.recordGeneratedJunctions?.(junctions.length);
   for (let i = 0; i < connections.length; i += 1) {
     const [left, right] = connections[i]!;
     const leftRoad = selectTownConnectionAnchor(state, left, { x: right.x, y: right.y }, roadAdapter);
     const rightRoad = selectTownConnectionAnchor(state, right, { x: left.x, y: left.y }, roadAdapter);
-    if (roadAdapter.carveRoad(state, leftRoad, rightRoad, buildConnectorRoadOptions(plan))) {
+    const connectorOptions = buildConnectorRoadOptions(plan);
+    if (carveConnectorViaJunction(state, roadAdapter, leftRoad, rightRoad, plan, junctions, connectorOptions)) {
+      continue;
+    }
+    if (roadAdapter.carveRoad(state, leftRoad, rightRoad, buildBoundedConnectorOptions(state, leftRoad, rightRoad, plan, connectorOptions))) {
       continue;
     }
     const fallbackLeft = roadAdapter.findNearestRoadTile(state, { x: left.x, y: left.y });
     const fallbackRight = roadAdapter.findNearestRoadTile(state, { x: right.x, y: right.y });
-    if (roadAdapter.carveRoad(state, fallbackLeft, fallbackRight, buildConnectorRoadOptions(plan))) {
+    if (carveConnectorViaJunction(state, roadAdapter, fallbackLeft, fallbackRight, plan, junctions, connectorOptions)) {
+      continue;
+    }
+    if (roadAdapter.carveRoad(state, fallbackLeft, fallbackRight, buildBoundedConnectorOptions(state, fallbackLeft, fallbackRight, plan, connectorOptions))) {
       continue;
     }
     carveConnectorWithWaypoints(state, roadAdapter, fallbackLeft, fallbackRight, plan);

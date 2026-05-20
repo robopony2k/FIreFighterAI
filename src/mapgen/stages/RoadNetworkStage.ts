@@ -18,6 +18,7 @@ export const RoadNetworkStage: PipelineStage = {
       roadSurfaceMetrics = gradeRoadNetworkTerrain(ctx.state, ctx.settings.heightScaleMultiplier);
     }
     flattenSettlementGround(ctx.state);
+    roadSurfaceMetrics = gradeRoadNetworkTerrain(ctx.state, ctx.settings.heightScaleMultiplier);
     if (ctx.riverMask) {
       for (let i = 0; i < ctx.state.tiles.length; i += 1) {
         if (ctx.riverMask[i] === 0) {
@@ -37,7 +38,7 @@ export const RoadNetworkStage: PipelineStage = {
       const stats = getRoadGenerationStats();
       const finalMetrics: RoadSurfaceMetrics = roadSurfaceMetrics;
       console.log(
-        `[roadsurface] maxGrade=${finalMetrics.maxRoadGrade.toFixed(3)} maxCrossfall=${finalMetrics.maxRoadCrossfall.toFixed(3)} maxGradeChange=${finalMetrics.maxRoadGradeChange.toFixed(3)} wallEdges=${finalMetrics.wallEdgeCount} routedMaxGrade=${stats.maxRealizedGrade.toFixed(3)} routedMaxCrossfall=${stats.maxRealizedCrossfall.toFixed(3)} routedMaxGradeChange=${stats.maxRealizedGradeChange.toFixed(3)}`
+        `[roadsurface] maxGrade=${finalMetrics.maxRoadGrade.toFixed(3)} maxCrossfall=${finalMetrics.maxRoadCrossfall.toFixed(3)} maxGradeChange=${finalMetrics.maxRoadGradeChange.toFixed(3)} maxAngle=${finalMetrics.maxRoadAngleDeg.toFixed(2)} highAngle=${finalMetrics.highAngleRoadStepCount} wallEdges=${finalMetrics.wallEdgeCount} routedMaxGrade=${stats.maxRealizedGrade.toFixed(3)} routedMaxCrossfall=${stats.maxRealizedCrossfall.toFixed(3)} routedMaxGradeChange=${stats.maxRealizedGradeChange.toFixed(3)} routedAngle=${stats.maxRealizedAngleDeg.toFixed(2)}/${stats.meanRealizedAngleDeg.toFixed(2)} pass=${stats.mountainPassFallbackCount} junctions=${stats.generatedJunctionCount}`
       );
     }
     await ctx.reportStage("Connecting roads...", 1);

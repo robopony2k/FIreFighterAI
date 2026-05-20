@@ -20,7 +20,9 @@ const { findBestRoadReferenceForPlot, pickHouseRotationFromRoadMask } = await im
 const { FOREST_AGE_CAP_YEARS, getVegetationMaturity01 } = await import(distImport(["core", "vegetation.js"]));
 const { generateMap } = await import(distImport(["mapgen", "index.js"]));
 const { createDefaultTerrainRecipe } = await import(distImport(["mapgen", "terrainProfile.js"]));
-const { analyzeRoadSurfaceMetrics } = await import(distImport(["mapgen", "roads.js"]));
+const { analyzeRoadSurfaceMetrics, carveRoad, getRoadGenerationStats, resetRoadGenerationStats } = await import(
+  distImport(["mapgen", "roads.js"])
+);
 const { computeRenderedSlopeAngleDeg } = await import(distImport(["shared", "terrainSlope.js"]));
 
 const allSizes = ["medium", "massive", "colossal", "gigantic", "titanic"];
@@ -28,6 +30,36 @@ const quickSizes = ["medium", "massive"];
 const fullMode = process.argv.includes("--full");
 const sizes = fullMode ? allSizes : quickSizes;
 const seeds = fullMode ? [1337] : [1337, 2, 4, 9001];
+
+const buildRegressionTile = (type = "grass", overrides = {}) => ({
+  type,
+  fuel: type === "road" ? 0 : 0.55,
+  fire: 0,
+  isBase: false,
+  elevation: 0.22,
+  heat: 0,
+  ignitionPoint: 0.8,
+  burnRate: 0.7,
+  heatOutput: 1,
+  spreadBoost: 1,
+  heatTransferCap: 5,
+  heatRetention: type === "road" ? 0.55 : 0.95,
+  windFactor: type === "road" ? 0 : 0.35,
+  moisture: 0.58,
+  waterDist: 10,
+  vegetationAgeYears: 1,
+  canopy: 0,
+  canopyCover: 0,
+  stemDensity: 0,
+  dominantTreeType: null,
+  treeType: null,
+  houseValue: 0,
+  houseResidents: 0,
+  houseDestroyed: false,
+  ashAge: 0,
+  ...overrides
+});
+
 const EXPECTED_STAGE_PHASE_ORDER = [
   "terrain:elevation",
   "terrain:erosion",
@@ -1249,6 +1281,7 @@ const runCase = async (sizeId, seed) => {
   const state = createInitialState(seed, grid);
   const rng = new RNG(seed);
   resetState(state, seed);
+  resetRoadGenerationStats();
   rng.setState(seed);
 
   const phaseTimingsMs = {};
@@ -1315,6 +1348,7 @@ const runCase = async (sizeId, seed) => {
   const staticHydrologyMetrics = analyzeStaticHydrology(state);
   const roadMetrics = analyzeRoadEdgeQuality(state);
   const roadSurfaceMetrics = analyzeRoadSurfaceMetrics(state);
+  const roadGenerationStats = getRoadGenerationStats();
   const coastMetrics = analyzeCoastalClassification(state);
   const islandMetrics = analyzeIslandShape(state, createDefaultTerrainRecipe(sizeId).landCoverageTarget);
   const baseMetrics = analyzeBaseSite(state);
@@ -1369,6 +1403,12 @@ const runCase = async (sizeId, seed) => {
     ...staticHydrologyMetrics,
     ...roadMetrics,
     ...roadSurfaceMetrics,
+    routedRoadMaxAngle: Number(roadGenerationStats.maxRealizedAngleDeg.toFixed(2)),
+    routedRoadMeanAngle: Number(roadGenerationStats.meanRealizedAngleDeg.toFixed(2)),
+    routedHighAngleStepCount: roadGenerationStats.highAngleStepCount,
+    mountainPassFallbackCount: roadGenerationStats.mountainPassFallbackCount,
+    switchbackTurnCount: roadGenerationStats.switchbackTurnCount,
+    generatedJunctionCount: roadGenerationStats.generatedJunctionCount,
     ...coastMetrics,
     ...islandMetrics,
     ...baseMetrics,
@@ -1417,14 +1457,77 @@ const runDebugSmokeCase = async ({ sizeId, seed, stopAfterPhase }) => {
   }
 };
 
+const runSyntheticRoadAngleCases = () => {
+  const grid = { cols: 44, rows: 28, totalTiles: 44 * 28 };
+  const state = createInitialState(424242, grid);
+  resetState(state, 424242);
+  state.tiles = Array.from({ length: grid.totalTiles }, (_, idx) => {
+    const x = idx % grid.cols;
+    const y = Math.floor(idx / grid.cols);
+    let elevation = 0.22 + Math.abs(y - 14) * 0.0008;
+    if (x >= 19 && x <= 22) {
+      elevation = y >= 4 && y <= 6 ? 0.235 : 0.52;
+    }
+    if (state.tileElevation.length === grid.totalTiles) {
+      state.tileElevation[idx] = elevation;
+    }
+    return buildRegressionTile("grass", { elevation });
+  });
+  resetRoadGenerationStats();
+  const carved = carveRoad(
+    state,
+    new RNG(424242),
+    { x: 5, y: 14 },
+    { x: 38, y: 14 },
+    {
+      bridgePolicy: "never",
+      preferredAngleDeg: 12,
+      softAngleDeg: 18,
+      avoidAngleDeg: 28,
+      fallbackAngleDeg: 40,
+      anglePenaltyWeight: 0.8,
+      straightClimbPenaltyWeight: 1,
+      contourTurnReliefWeight: 1.1,
+      gradeLimitStart: 0.1,
+      gradeLimitRelaxStep: 0.015,
+      gradeLimitMax: 0.2,
+      crossfallLimitStart: 0.08,
+      crossfallLimitRelaxStep: 0.015,
+      crossfallLimitMax: 0.18,
+      gradeChangeLimitStart: 0.08,
+      gradeChangeLimitRelaxStep: 0.015,
+      gradeChangeLimitMax: 0.18
+    }
+  );
+  const metrics = analyzeRoadSurfaceMetrics(state);
+  const usedSteepWall = state.tiles.some((tile, idx) => {
+    const x = idx % grid.cols;
+    const y = Math.floor(idx / grid.cols);
+    return tile.type === "road" && x >= 19 && x <= 22 && !(y >= 4 && y <= 6);
+  });
+  return {
+    carved,
+    usedSteepWall,
+    maxRoadAngleDeg: metrics.maxRoadAngleDeg,
+    highAngleRoadStepCount: metrics.highAngleRoadStepCount,
+    stats: getRoadGenerationStats()
+  };
+};
+
 const runAll = async () => {
   const results = [];
+  const syntheticRoads = runSyntheticRoadAngleCases();
+  if (!syntheticRoads.carved || syntheticRoads.usedSteepWall) {
+    throw new Error(
+      `[mapgen] synthetic road angle case failed: carved=${syntheticRoads.carved} steepWall=${syntheticRoads.usedSteepWall} maxAngle=${syntheticRoads.maxRoadAngleDeg.toFixed(2)}`
+    );
+  }
   for (const sizeId of sizes) {
     for (const seed of seeds) {
       const metrics = await runCase(sizeId, seed);
       results.push(metrics);
       console.log(
-        `[mapgen] size=${metrics.sizeId} seed=${metrics.seed} ms=${metrics.durationMs.toFixed(2)} biome=${metrics.biomeSpreadClassifyMs.toFixed(2)}ms water=${metrics.waterPct.toFixed(2)}% forest=${metrics.forestPct.toFixed(2)}% forestAgeMean=${metrics.forestAgeMean.toFixed(2)} forestMaturityP95=${metrics.forestMaturityP95.toFixed(3)} patches=${metrics.forestPatchCount} meanPatch=${metrics.forestPatchMean} p95Patch=${metrics.forestPatchP95} houses=${metrics.houseCount} placed=${metrics.placedHouseCount}/${metrics.requestedHouseCount} compactEval=${metrics.compactTownEvalCount} compactViolations=${metrics.compactTownViolationCount} compactMaxAspect=${metrics.compactTownMaxAspect.toFixed(2)} base=(${metrics.baseX},${metrics.baseY}) baseElev=${metrics.baseElevation.toFixed(4)} baseRelief=${metrics.baseLocalRelief.toFixed(4)} baseCenter=${metrics.baseCenterDistanceRatio.toFixed(4)} baseVeg=${metrics.baseNearbyVegetationRatio.toFixed(4)} townAngle=${metrics.settlementTownSeedMaxAngle.toFixed(2)}/${metrics.settlementTownSeedMeanAngle.toFixed(2)} houseAngle=${metrics.houseFootprintMaxAngle.toFixed(2)}/${metrics.houseFootprintMeanAngle.toFixed(2)} highHouseAngle=${metrics.highAngleHouseFootprintCount} padReliefMax=${metrics.settlementPadReliefMax.toFixed(4)} padReliefMean=${metrics.settlementPadReliefMean.toFixed(4)} roads=${metrics.roadCount} roadComps=${metrics.roadComponentCount} townRoadComps=${metrics.townRoadComponentCount} townRoadMissing=${metrics.townRoadMissingCount} townRoadDisconnected=${metrics.townRoadDisconnectedCount} rivers=${metrics.riverCount} lakes=${metrics.lakeCount}/${metrics.lakeTiles} lakeOut=${metrics.lakeOutletCount} lakeOutMiss=${metrics.lakeOutletConnectionFailures} falls=${metrics.waterfallCount} roadIgnoredDiag=${metrics.ignoredDiagonalCount} roadUnmatched=${metrics.unmatchedPatternCount} roadGrade=${metrics.maxRoadGrade.toFixed(3)} roadCrossfall=${metrics.maxRoadCrossfall.toFixed(3)} roadGradeChange=${metrics.maxRoadGradeChange.toFixed(3)} roadWalls=${metrics.wallEdgeCount} riverDiagOnly=${metrics.riverDiagOnlyLinks} riverIso=${metrics.riverIsolatedCells} riverOrthRatio=${metrics.riverOrthConnectivityRatio.toFixed(4)} riverComps=${metrics.riverComponentCount} riverDetachedComps=${metrics.detachedRiverComponents} riverDetachedCells=${metrics.detachedRiverCells} coastNatural=${metrics.coastalNaturalCount} coastBeach=${metrics.coastalBeachCount} coastRocky=${metrics.coastalRockyCount} coastOther=${metrics.coastalOtherCount}`
+        `[mapgen] size=${metrics.sizeId} seed=${metrics.seed} ms=${metrics.durationMs.toFixed(2)} biome=${metrics.biomeSpreadClassifyMs.toFixed(2)}ms water=${metrics.waterPct.toFixed(2)}% forest=${metrics.forestPct.toFixed(2)}% forestAgeMean=${metrics.forestAgeMean.toFixed(2)} forestMaturityP95=${metrics.forestMaturityP95.toFixed(3)} patches=${metrics.forestPatchCount} meanPatch=${metrics.forestPatchMean} p95Patch=${metrics.forestPatchP95} houses=${metrics.houseCount} placed=${metrics.placedHouseCount}/${metrics.requestedHouseCount} compactEval=${metrics.compactTownEvalCount} compactViolations=${metrics.compactTownViolationCount} compactMaxAspect=${metrics.compactTownMaxAspect.toFixed(2)} base=(${metrics.baseX},${metrics.baseY}) baseElev=${metrics.baseElevation.toFixed(4)} baseRelief=${metrics.baseLocalRelief.toFixed(4)} baseCenter=${metrics.baseCenterDistanceRatio.toFixed(4)} baseVeg=${metrics.baseNearbyVegetationRatio.toFixed(4)} townAngle=${metrics.settlementTownSeedMaxAngle.toFixed(2)}/${metrics.settlementTownSeedMeanAngle.toFixed(2)} houseAngle=${metrics.houseFootprintMaxAngle.toFixed(2)}/${metrics.houseFootprintMeanAngle.toFixed(2)} highHouseAngle=${metrics.highAngleHouseFootprintCount} padReliefMax=${metrics.settlementPadReliefMax.toFixed(4)} padReliefMean=${metrics.settlementPadReliefMean.toFixed(4)} roads=${metrics.roadCount} roadComps=${metrics.roadComponentCount} townRoadComps=${metrics.townRoadComponentCount} townRoadMissing=${metrics.townRoadMissingCount} townRoadDisconnected=${metrics.townRoadDisconnectedCount} rivers=${metrics.riverCount} lakes=${metrics.lakeCount}/${metrics.lakeTiles} lakeOut=${metrics.lakeOutletCount} lakeOutMiss=${metrics.lakeOutletConnectionFailures} falls=${metrics.waterfallCount} roadIgnoredDiag=${metrics.ignoredDiagonalCount} roadUnmatched=${metrics.unmatchedPatternCount} roadGrade=${metrics.maxRoadGrade.toFixed(3)} roadCrossfall=${metrics.maxRoadCrossfall.toFixed(3)} roadGradeChange=${metrics.maxRoadGradeChange.toFixed(3)} roadAngle=${metrics.maxRoadAngleDeg.toFixed(2)}/${metrics.meanRoadAngleDeg.toFixed(2)} highRoadAngle=${metrics.highAngleRoadStepCount} routedAngle=${metrics.routedRoadMaxAngle.toFixed(2)}/${metrics.routedRoadMeanAngle.toFixed(2)} routedHighAngle=${metrics.routedHighAngleStepCount} passes=${metrics.mountainPassFallbackCount} junctions=${metrics.generatedJunctionCount} switchbacks=${metrics.switchbackTurnCount} roadWalls=${metrics.wallEdgeCount} riverDiagOnly=${metrics.riverDiagOnlyLinks} riverIso=${metrics.riverIsolatedCells} riverOrthRatio=${metrics.riverOrthConnectivityRatio.toFixed(4)} riverComps=${metrics.riverComponentCount} riverDetachedComps=${metrics.detachedRiverComponents} riverDetachedCells=${metrics.detachedRiverCells} coastNatural=${metrics.coastalNaturalCount} coastBeach=${metrics.coastalBeachCount} coastRocky=${metrics.coastalRockyCount} coastOther=${metrics.coastalOtherCount}`
       );
     }
   }
@@ -1564,6 +1667,19 @@ const compareAgainstBaseline = async (results) => {
     if (result.unmatchedPatternCount !== 0) {
       failures += 1;
       console.error(`[mapgen] unmatched road patterns present for ${key}: ${result.unmatchedPatternCount}`);
+    }
+    const allowedHighAngleRoadSteps = Math.max(4, result.mountainPassFallbackCount * 10);
+    if (result.highAngleRoadStepCount > allowedHighAngleRoadSteps || result.maxRoadAngleDeg > 62) {
+      failures += 1;
+      console.error(
+        `[mapgen] road angle too high for ${key}: max=${result.maxRoadAngleDeg.toFixed(2)} high=${result.highAngleRoadStepCount} passes=${result.mountainPassFallbackCount}`
+      );
+    }
+    if (result.routedHighAngleStepCount > Math.max(6, result.mountainPassFallbackCount * 12)) {
+      failures += 1;
+      console.error(
+        `[mapgen] routed road angle fallback too frequent for ${key}: routedHigh=${result.routedHighAngleStepCount} passes=${result.mountainPassFallbackCount}`
+      );
     }
     if (result.baseRoadComponent < 0) {
       failures += 1;

@@ -4,6 +4,7 @@ import { inBounds, indexFor } from "../core/grid.js";
 import { getTerrainHeightScale } from "../core/terrainScale.js";
 import { applyFuel } from "../core/tiles.js";
 import { clearVegetationState } from "../core/vegetation.js";
+import { computeLocalRenderedSlopeAngleDeg, computeRenderedSlopeAngleDeg } from "../shared/terrainSlope.js";
 
 export const ROAD_GRADE_LIMIT_START = 0.09;
 export const ROAD_GRADE_LIMIT_RELAX_STEP = 0.015;
@@ -38,6 +39,13 @@ export const ROAD_BRIDGE_STEP_COST = 24;
 export const ROAD_BRIDGE_MAX_CONSEC_WATER = 3;
 export const ROAD_BRIDGE_MAX_WATER_TILES_PER_PATH = 6;
 const ROAD_SWITCHBACK_RELIEF_WEIGHT = 3.25;
+export const ROAD_PREFERRED_ANGLE_DEG = 12;
+export const ROAD_SOFT_ANGLE_DEG = 18;
+export const ROAD_AVOID_ANGLE_DEG = 28;
+export const ROAD_FALLBACK_ANGLE_DEG = 38;
+export const ROAD_ANGLE_PENALTY_WEIGHT = 0.34;
+export const ROAD_STRAIGHT_CLIMB_PENALTY_WEIGHT = 0.42;
+export const ROAD_CONTOUR_TURN_RELIEF_WEIGHT = 0.72;
 
 type RoadBridgePolicy = "never" | "allow";
 
@@ -73,6 +81,14 @@ export type RoadPathOptions = {
   bridgeStepCost?: number;
   bridgeMaxConsecutiveWater?: number;
   bridgeMaxWaterTilesPerPath?: number;
+  preferredAngleDeg?: number;
+  softAngleDeg?: number;
+  avoidAngleDeg?: number;
+  fallbackAngleDeg?: number;
+  anglePenaltyWeight?: number;
+  straightClimbPenaltyWeight?: number;
+  contourTurnReliefWeight?: number;
+  allowMountainPassFallback?: boolean;
 };
 
 type RoadPathOptionsResolved = {
@@ -99,10 +115,24 @@ type RoadPathOptionsResolved = {
   bridgeStepCost: number;
   bridgeMaxConsecutiveWater: number;
   bridgeMaxWaterTilesPerPath: number;
+  preferredAngleDeg: number;
+  softAngleDeg: number;
+  avoidAngleDeg: number;
+  fallbackAngleDeg: number;
+  anglePenaltyWeight: number;
+  straightClimbPenaltyWeight: number;
+  contourTurnReliefWeight: number;
+  allowMountainPassFallback: boolean;
 };
 
 type RoadCarveOptions = RoadPathOptions & {
   allowBridge?: boolean;
+};
+
+export type RoadCarveSegment = {
+  start: Point;
+  end: Point;
+  options?: RoadCarveOptions;
 };
 
 export type RoadCarveResult = {
@@ -117,8 +147,13 @@ type RoadPathResult = {
   maxGrade: number;
   maxCrossfall: number;
   maxGradeChange: number;
+  maxAngleDeg: number;
+  meanAngleDeg: number;
+  highAngleStepCount: number;
   minRiverClearance: number;
   bridgeSegments: number;
+  mountainPassFallback: boolean;
+  switchbackTurnCount: number;
 };
 
 type RiverDistanceCache = {
@@ -132,14 +167,23 @@ export type RoadGenerationStats = {
   maxRealizedGrade: number;
   maxRealizedCrossfall: number;
   maxRealizedGradeChange: number;
+  maxRealizedAngleDeg: number;
+  meanRealizedAngleDeg: number;
+  highAngleStepCount: number;
   minRiverClearance: number;
   bridgeSegments: number;
+  mountainPassFallbackCount: number;
+  switchbackTurnCount: number;
+  generatedJunctionCount: number;
 };
 
 export type RoadSurfaceMetrics = {
   maxRoadGrade: number;
   maxRoadCrossfall: number;
   maxRoadGradeChange: number;
+  maxRoadAngleDeg: number;
+  meanRoadAngleDeg: number;
+  highAngleRoadStepCount: number;
   wallEdgeCount: number;
 };
 
@@ -256,8 +300,14 @@ const roadGenerationStats: RoadGenerationStats = {
   maxRealizedGrade: 0,
   maxRealizedCrossfall: 0,
   maxRealizedGradeChange: 0,
+  maxRealizedAngleDeg: 0,
+  meanRealizedAngleDeg: 0,
+  highAngleStepCount: 0,
   minRiverClearance: Number.POSITIVE_INFINITY,
-  bridgeSegments: 0
+  bridgeSegments: 0,
+  mountainPassFallbackCount: 0,
+  switchbackTurnCount: 0,
+  generatedJunctionCount: 0
 };
 
 const resolveRoadPathOptions = (options: RoadPathOptions = {}): RoadPathOptionsResolved => {
@@ -267,6 +317,10 @@ const resolveRoadPathOptions = (options: RoadPathOptions = {}): RoadPathOptionsR
   const gradeLimitMax = Math.max(gradeLimitStart, options.gradeLimitMax ?? ROAD_GRADE_LIMIT_MAX);
   const crossfallLimitStart = Math.max(0.01, options.crossfallLimitStart ?? ROAD_CROSSFALL_LIMIT_START);
   const gradeChangeLimitStart = Math.max(0.01, options.gradeChangeLimitStart ?? ROAD_GRADE_CHANGE_LIMIT_START);
+  const preferredAngleDeg = Math.max(0, options.preferredAngleDeg ?? ROAD_PREFERRED_ANGLE_DEG);
+  const softAngleDeg = Math.max(preferredAngleDeg, options.softAngleDeg ?? ROAD_SOFT_ANGLE_DEG);
+  const avoidAngleDeg = Math.max(softAngleDeg, options.avoidAngleDeg ?? ROAD_AVOID_ANGLE_DEG);
+  const fallbackAngleDeg = Math.max(avoidAngleDeg, options.fallbackAngleDeg ?? ROAD_FALLBACK_ANGLE_DEG);
   return {
     bridgePolicy,
     searchBounds: options.searchBounds ?? null,
@@ -296,7 +350,15 @@ const resolveRoadPathOptions = (options: RoadPathOptions = {}): RoadPathOptionsR
     diagonalPenalty: Math.max(0, options.diagonalPenalty ?? ROAD_DIAGONAL_PENALTY),
     bridgeStepCost: Math.max(0, options.bridgeStepCost ?? ROAD_BRIDGE_STEP_COST),
     bridgeMaxConsecutiveWater: Math.max(1, Math.round(options.bridgeMaxConsecutiveWater ?? ROAD_BRIDGE_MAX_CONSEC_WATER)),
-    bridgeMaxWaterTilesPerPath: Math.max(1, Math.round(options.bridgeMaxWaterTilesPerPath ?? ROAD_BRIDGE_MAX_WATER_TILES_PER_PATH))
+    bridgeMaxWaterTilesPerPath: Math.max(1, Math.round(options.bridgeMaxWaterTilesPerPath ?? ROAD_BRIDGE_MAX_WATER_TILES_PER_PATH)),
+    preferredAngleDeg,
+    softAngleDeg,
+    avoidAngleDeg,
+    fallbackAngleDeg,
+    anglePenaltyWeight: Math.max(0, options.anglePenaltyWeight ?? ROAD_ANGLE_PENALTY_WEIGHT),
+    straightClimbPenaltyWeight: Math.max(0, options.straightClimbPenaltyWeight ?? ROAD_STRAIGHT_CLIMB_PENALTY_WEIGHT),
+    contourTurnReliefWeight: Math.max(0, options.contourTurnReliefWeight ?? ROAD_CONTOUR_TURN_RELIEF_WEIGHT),
+    allowMountainPassFallback: options.allowMountainPassFallback ?? true
   };
 };
 
@@ -312,7 +374,23 @@ const buildSwitchbackFallbackOptions = (options: RoadPathOptionsResolved): RoadP
   gradeChangeLimitRelaxStep: Math.max(options.gradeChangeLimitRelaxStep, ROAD_SWITCHBACK_GRADE_CHANGE_LIMIT_RELAX_STEP),
   gradeChangeLimitMax: Math.max(options.gradeChangeLimitMax, ROAD_SWITCHBACK_GRADE_CHANGE_LIMIT_MAX),
   turnPenalty: Math.min(options.turnPenalty, ROAD_SWITCHBACK_TURN_PENALTY),
-  diagonalPenalty: Math.min(options.diagonalPenalty, ROAD_SWITCHBACK_DIAGONAL_PENALTY)
+  diagonalPenalty: Math.min(options.diagonalPenalty, ROAD_SWITCHBACK_DIAGONAL_PENALTY),
+  anglePenaltyWeight: Math.max(options.anglePenaltyWeight, ROAD_ANGLE_PENALTY_WEIGHT * 1.4),
+  straightClimbPenaltyWeight: Math.max(options.straightClimbPenaltyWeight, ROAD_STRAIGHT_CLIMB_PENALTY_WEIGHT * 1.35),
+  contourTurnReliefWeight: Math.max(options.contourTurnReliefWeight, ROAD_CONTOUR_TURN_RELIEF_WEIGHT * 1.2)
+});
+
+const buildMountainPassFallbackOptions = (options: RoadPathOptionsResolved): RoadPathOptionsResolved => ({
+  ...buildSwitchbackFallbackOptions(options),
+  gradeLimitStart: Math.max(options.gradeLimitStart, Math.min(options.gradeLimitMax, ROAD_SWITCHBACK_GRADE_LIMIT_START)),
+  gradeLimitRelaxStep: Math.max(options.gradeLimitRelaxStep, 0.015),
+  gradeLimitMax: Math.max(options.gradeLimitMax, ROAD_SWITCHBACK_GRADE_LIMIT_MAX),
+  crossfallLimitMax: Math.max(options.crossfallLimitMax, ROAD_SWITCHBACK_CROSSFALL_LIMIT_MAX),
+  gradeChangeLimitMax: Math.max(options.gradeChangeLimitMax, ROAD_SWITCHBACK_GRADE_CHANGE_LIMIT_MAX),
+  avoidAngleDeg: options.fallbackAngleDeg,
+  anglePenaltyWeight: Math.max(options.anglePenaltyWeight, ROAD_ANGLE_PENALTY_WEIGHT * 2.8),
+  straightClimbPenaltyWeight: Math.max(options.straightClimbPenaltyWeight, ROAD_STRAIGHT_CLIMB_PENALTY_WEIGHT * 2.2),
+  contourTurnReliefWeight: Math.max(options.contourTurnReliefWeight, ROAD_CONTOUR_TURN_RELIEF_WEIGHT * 1.5)
 });
 
 const toPoint = (idx: number, cols: number): Point => ({ x: idx % cols, y: Math.floor(idx / cols) });
@@ -360,6 +438,78 @@ const computeCrossfallAtStep = (
   const rightElevation = (rightA + rightB) * 0.5;
   return Math.abs(leftElevation - rightElevation) * 0.5 * elevationToGradeScale;
 };
+
+const computeRoadStepAngleDeg = (
+  state: WorldState,
+  fromElevation: number,
+  toElevation: number,
+  runCost: number,
+  heightScaleMultiplier: number
+): number =>
+  computeRenderedSlopeAngleDeg(
+    Math.abs(toElevation - fromElevation) / Math.max(1, runCost),
+    state.grid.cols,
+    state.grid.rows,
+    heightScaleMultiplier
+  );
+
+const computeRoadTileAngleDeg = (
+  state: WorldState,
+  idx: number,
+  heightScaleMultiplier: number,
+  cache: Float32Array
+): number => {
+  const cached = cache[idx];
+  if (cached >= 0) {
+    return cached;
+  }
+  const x = idx % state.grid.cols;
+  const y = Math.floor(idx / state.grid.cols);
+  const angle = computeLocalRenderedSlopeAngleDeg(
+    {
+      cols: state.grid.cols,
+      rows: state.grid.rows,
+      elevations: state.tileElevation.length === state.grid.totalTiles ? state.tileElevation : state.tiles.map((tile) => tile.elevation)
+    },
+    x,
+    y,
+    heightScaleMultiplier
+  );
+  cache[idx] = angle;
+  return angle;
+};
+
+const scoreRoadAnglePenalty = (angleDeg: number, options: RoadPathOptionsResolved): number => {
+  if (angleDeg <= options.preferredAngleDeg) {
+    return 0;
+  }
+  if (angleDeg <= options.softAngleDeg) {
+    const t = (angleDeg - options.preferredAngleDeg) / Math.max(1e-6, options.softAngleDeg - options.preferredAngleDeg);
+    return t * options.anglePenaltyWeight;
+  }
+  if (angleDeg <= options.avoidAngleDeg) {
+    const t = (angleDeg - options.softAngleDeg) / Math.max(1e-6, options.avoidAngleDeg - options.softAngleDeg);
+    return options.anglePenaltyWeight + t * options.anglePenaltyWeight * 3;
+  }
+  const t = (angleDeg - options.avoidAngleDeg) / Math.max(1e-6, options.fallbackAngleDeg - options.avoidAngleDeg);
+  return options.anglePenaltyWeight * (4 + Math.max(0, t) * 8);
+};
+
+const isStraightClimb = (
+  previousDx: number,
+  previousDy: number,
+  nextDx: number,
+  nextDy: number,
+  previousSignedGrade: number,
+  nextSignedGrade: number,
+  angleDeg: number,
+  options: RoadPathOptionsResolved
+): boolean =>
+  previousDx === nextDx &&
+  previousDy === nextDy &&
+  angleDeg > options.softAngleDeg &&
+  Math.sign(previousSignedGrade) === Math.sign(nextSignedGrade) &&
+  Math.abs(nextSignedGrade) > Math.abs(previousSignedGrade) * 0.75;
 
 const getRoadEdgeMaskAtIndex = (state: WorldState, idx: number): number => {
   const cols = state.grid.cols;
@@ -918,7 +1068,7 @@ const canTraverseTileIndex = (
   options: RoadPathOptionsResolved,
   riverDistance: Int16Array
 ): boolean => {
-  if (state.structureMask[idx]) {
+  if (state.structureMask[idx] && !isEndpoint) {
     return false;
   }
   const tile = state.tiles[idx];
@@ -1067,10 +1217,17 @@ const buildPathResult = (
   let maxGrade = 0;
   let maxCrossfall = 0;
   let maxGradeChange = 0;
+  let maxAngleDeg = 0;
+  let angleSum = 0;
+  let angleCount = 0;
+  let highAngleStepCount = 0;
   let minRiverClearance = Number.POSITIVE_INFINITY;
   let bridgeSegments = 0;
   let inBridge = false;
   let prevSignedGrade: number | null = null;
+  let prevDx = 0;
+  let prevDy = 0;
+  let switchbackTurnCount = 0;
 
   for (let i = 0; i < pathIndices.length; i += 1) {
     const idx = pathIndices[i];
@@ -1101,6 +1258,13 @@ const buildPathResult = (
     const runCost = Math.hypot(point.x - prevPoint.x, point.y - prevPoint.y);
     const signedGrade = computeStepSignedGrade(prevTile.elevation, tile.elevation, runCost, elevationToGradeScale);
     const grade = Math.abs(signedGrade);
+    const angleDeg = computeRoadStepAngleDeg(state, prevTile.elevation, tile.elevation, runCost, options.heightScaleMultiplier);
+    maxAngleDeg = Math.max(maxAngleDeg, angleDeg);
+    angleSum += angleDeg;
+    angleCount += 1;
+    if (angleDeg > options.avoidAngleDeg) {
+      highAngleStepCount += 1;
+    }
     if (grade > maxGrade) {
       maxGrade = grade;
     }
@@ -1122,8 +1286,15 @@ const buildPathResult = (
       if (gradeChange > maxGradeChange) {
         maxGradeChange = gradeChange;
       }
+      const dx = Math.sign(point.x - prevPoint.x);
+      const dy = Math.sign(point.y - prevPoint.y);
+      if ((dx !== prevDx || dy !== prevDy) && angleDeg > options.softAngleDeg) {
+        switchbackTurnCount += 1;
+      }
     }
     prevSignedGrade = signedGrade;
+    prevDx = Math.sign(point.x - prevPoint.x);
+    prevDy = Math.sign(point.y - prevPoint.y);
   }
 
   return {
@@ -1132,8 +1303,13 @@ const buildPathResult = (
     maxGrade,
     maxCrossfall,
     maxGradeChange,
+    maxAngleDeg,
+    meanAngleDeg: angleCount > 0 ? angleSum / angleCount : 0,
+    highAngleStepCount,
     minRiverClearance,
-    bridgeSegments
+    bridgeSegments,
+    mountainPassFallback: false,
+    switchbackTurnCount
   };
 };
 
@@ -1145,8 +1321,16 @@ const recordPathStats = (result: RoadPathResult): void => {
     roadGenerationStats.maxRealizedGradeChange,
     result.maxGradeChange
   );
+  const previousCount = Math.max(0, roadGenerationStats.pathsFound - 1);
+  roadGenerationStats.meanRealizedAngleDeg =
+    (roadGenerationStats.meanRealizedAngleDeg * previousCount + result.meanAngleDeg) /
+    Math.max(1, roadGenerationStats.pathsFound);
+  roadGenerationStats.maxRealizedAngleDeg = Math.max(roadGenerationStats.maxRealizedAngleDeg, result.maxAngleDeg);
+  roadGenerationStats.highAngleStepCount += result.highAngleStepCount;
   roadGenerationStats.minRiverClearance = Math.min(roadGenerationStats.minRiverClearance, result.minRiverClearance);
   roadGenerationStats.bridgeSegments += result.bridgeSegments;
+  roadGenerationStats.mountainPassFallbackCount += result.mountainPassFallback ? 1 : 0;
+  roadGenerationStats.switchbackTurnCount += result.switchbackTurnCount;
 };
 
 const runAStar = (
@@ -1176,6 +1360,8 @@ const runAStar = (
   const endIdx = end ? indexFor(state.grid, end.x, end.y) : -1;
   const riverDistance = getRiverDistanceField(state);
   const elevationToGradeScale = getRoadGradeScale(state, options.heightScaleMultiplier);
+  const roadAngleCache = new Float32Array(total);
+  roadAngleCache.fill(-1);
 
   if (
     !canTraverseTileIndex(state, startIdx, true, allowBridge, options, riverDistance) ||
@@ -1190,8 +1376,13 @@ const runAStar = (
       maxGrade: 0,
       maxCrossfall: 0,
       maxGradeChange: 0,
+      maxAngleDeg: 0,
+      meanAngleDeg: 0,
+      highAngleStepCount: 0,
       minRiverClearance: riverDistance[startIdx],
-      bridgeSegments: 0
+      bridgeSegments: 0,
+      mountainPassFallback: false,
+      switchbackTurnCount: 0
     };
   }
 
@@ -1299,6 +1490,11 @@ const runAStar = (
       let grade = 0;
       let crossfall = 0;
       let gradeChange = 0;
+      let stepAngleDeg = 0;
+      const tileAngleDeg = computeRoadTileAngleDeg(state, nIdx, options.heightScaleMultiplier, roadAngleCache);
+      if (tileAngleDeg > options.avoidAngleDeg && !isRoadLikeIndex(state, nIdx) && !neighborIsGoal) {
+        continue;
+      }
       const hasPreviousLandStep =
         prev[currentIdx] !== currentIdx &&
         currentIsWater === false &&
@@ -1307,6 +1503,10 @@ const runAStar = (
         signedGrade = computeStepSignedGrade(currentTile.elevation, nextTile.elevation, dir.cost, elevationToGradeScale);
         grade = Math.abs(signedGrade);
         if (grade > gradeLimit) {
+          continue;
+        }
+        stepAngleDeg = computeRoadStepAngleDeg(state, currentTile.elevation, nextTile.elevation, dir.cost, options.heightScaleMultiplier);
+        if (stepAngleDeg > options.avoidAngleDeg && !isRoadLikeIndex(state, nIdx) && !neighborIsGoal) {
           continue;
         }
         crossfall = computeCrossfallAtStep(
@@ -1338,6 +1538,24 @@ const runAStar = (
         stepCost += grade * options.slopePenaltyWeight;
         stepCost += crossfall * options.crossfallPenaltyWeight;
         stepCost += gradeChange * options.gradeChangePenaltyWeight;
+        stepCost += scoreRoadAnglePenalty(Math.max(stepAngleDeg, tileAngleDeg), options);
+        if (
+          hasPreviousLandStep &&
+          isStraightClimb(
+            stepDx[currentIdx],
+            stepDy[currentIdx],
+            dir.x,
+            dir.y,
+            signedGradeAt[currentIdx],
+            signedGrade,
+            stepAngleDeg,
+            options
+          )
+        ) {
+          stepCost +=
+            ((stepAngleDeg - options.softAngleDeg) / Math.max(1e-6, options.avoidAngleDeg - options.softAngleDeg)) *
+            options.straightClimbPenaltyWeight;
+        }
       }
       if (nextIsWater) {
         stepCost += options.bridgeStepCost;
@@ -1357,7 +1575,11 @@ const runAStar = (
           const previousSeverity = Math.max(Math.abs(signedGradeAt[currentIdx]), crossfallAt[currentIdx]);
           const nextSeverity = Math.max(grade, crossfall);
           if (nextSeverity < previousSeverity) {
-            const relief = Math.min(0.85, (previousSeverity - nextSeverity) * ROAD_SWITCHBACK_RELIEF_WEIGHT);
+            const relief = Math.min(
+              0.9,
+              (previousSeverity - nextSeverity) * ROAD_SWITCHBACK_RELIEF_WEIGHT +
+                Math.max(0, stepAngleDeg - options.softAngleDeg) * 0.02 * options.contourTurnReliefWeight
+            );
             turnPenalty *= 1 - relief;
           }
         }
@@ -1457,7 +1679,18 @@ const findPathWithGradeRelaxation = (
   if (standard) {
     return standard;
   }
-  return tryOptions(buildSwitchbackFallbackOptions(options));
+  const switchback = tryOptions(buildSwitchbackFallbackOptions(options));
+  if (switchback) {
+    return switchback;
+  }
+  if (!options.allowMountainPassFallback) {
+    return null;
+  }
+  const mountainPass = tryOptions(buildMountainPassFallbackOptions(options));
+  if (mountainPass) {
+    mountainPass.mountainPassFallback = true;
+  }
+  return mountainPass;
 };
 
 const findRoadPathDetailed = (
@@ -1484,8 +1717,13 @@ const findRoadPathDetailed = (
       maxGrade: 0,
       maxCrossfall: 0,
       maxGradeChange: 0,
+      maxAngleDeg: 0,
+      meanAngleDeg: 0,
+      highAngleStepCount: 0,
       minRiverClearance: Number.POSITIVE_INFINITY,
-      bridgeSegments: 0
+      bridgeSegments: 0,
+      mountainPassFallback: false,
+      switchbackTurnCount: 0
     };
   }
   recordPathStats(result);
@@ -1516,8 +1754,13 @@ const findRoadPathToTargetDetailed = (
       maxGrade: 0,
       maxCrossfall: 0,
       maxGradeChange: 0,
+      maxAngleDeg: 0,
+      meanAngleDeg: 0,
+      highAngleStepCount: 0,
       minRiverClearance: Number.POSITIVE_INFINITY,
-      bridgeSegments: 0
+      bridgeSegments: 0,
+      mountainPassFallback: false,
+      switchbackTurnCount: 0
     };
   }
   recordPathStats(result);
@@ -1584,6 +1827,30 @@ export function carveRoadPath(
 
 export function carveRoad(state: WorldState, rng: RNG, start: Point, end: Point, options: RoadCarveOptions = {}): boolean {
   return carveRoadDetailed(state, rng, start, end, options).carved;
+}
+
+export function carveRoadSequence(state: WorldState, rng: RNG, segments: RoadCarveSegment[]): boolean {
+  if (segments.length === 0) {
+    return false;
+  }
+  const planned: Array<{ path: Point[]; bridgeTileIndices: number[] }> = [];
+  for (let i = 0; i < segments.length; i += 1) {
+    const segment = segments[i]!;
+    const options = segment.options ?? {};
+    const bridgePolicy =
+      options.bridgePolicy ??
+      (typeof options.allowBridge === "boolean" ? (options.allowBridge ? "allow" : "never") : "allow");
+    const result = findRoadPathDetailed(state, segment.start, segment.end, { ...options, bridgePolicy });
+    if (result.path.length === 0) {
+      return false;
+    }
+    planned.push({ path: result.path, bridgeTileIndices: result.bridgeTileIndices });
+  }
+  for (let i = 0; i < planned.length; i += 1) {
+    const result = planned[i]!;
+    carveRoadPath(state, rng, result.path, { allowBridgeIndices: new Set<number>(result.bridgeTileIndices) });
+  }
+  return true;
 }
 
 export function carveRoadDetailed(
@@ -1673,6 +1940,10 @@ export const analyzeRoadSurfaceMetrics = (state: WorldState, heightScaleMultipli
   let maxRoadGrade = 0;
   let maxRoadCrossfall = 0;
   let maxRoadGradeChange = 0;
+  let maxRoadAngleDeg = 0;
+  let roadAngleSum = 0;
+  let roadAngleCount = 0;
+  let highAngleRoadStepCount = 0;
   let wallEdgeCount = 0;
 
   for (let idx = 0; idx < total; idx += 1) {
@@ -1711,6 +1982,19 @@ export const analyzeRoadSurfaceMetrics = (state: WorldState, heightScaleMultipli
       );
       connectedSignedGrades.push(signedGrade);
       if (neighborIdx > idx) {
+        const angleDeg = computeRoadStepAngleDeg(
+          state,
+          state.tiles[idx].elevation,
+          state.tiles[neighborIdx].elevation,
+          Math.hypot(dir.dx, dir.dy),
+          heightScaleMultiplier
+        );
+        maxRoadAngleDeg = Math.max(maxRoadAngleDeg, angleDeg);
+        roadAngleSum += angleDeg;
+        roadAngleCount += 1;
+        if (angleDeg > ROAD_AVOID_ANGLE_DEG) {
+          highAngleRoadStepCount += 1;
+        }
         maxRoadGrade = Math.max(maxRoadGrade, Math.abs(signedGrade));
         maxRoadCrossfall = Math.max(
           maxRoadCrossfall,
@@ -1743,6 +2027,9 @@ export const analyzeRoadSurfaceMetrics = (state: WorldState, heightScaleMultipli
     maxRoadGrade,
     maxRoadCrossfall,
     maxRoadGradeChange,
+    maxRoadAngleDeg,
+    meanRoadAngleDeg: roadAngleCount > 0 ? roadAngleSum / roadAngleCount : 0,
+    highAngleRoadStepCount,
     wallEdgeCount
   };
 };
@@ -1753,8 +2040,14 @@ export const resetRoadGenerationStats = (): void => {
   roadGenerationStats.maxRealizedGrade = 0;
   roadGenerationStats.maxRealizedCrossfall = 0;
   roadGenerationStats.maxRealizedGradeChange = 0;
+  roadGenerationStats.maxRealizedAngleDeg = 0;
+  roadGenerationStats.meanRealizedAngleDeg = 0;
+  roadGenerationStats.highAngleStepCount = 0;
   roadGenerationStats.minRiverClearance = Number.POSITIVE_INFINITY;
   roadGenerationStats.bridgeSegments = 0;
+  roadGenerationStats.mountainPassFallbackCount = 0;
+  roadGenerationStats.switchbackTurnCount = 0;
+  roadGenerationStats.generatedJunctionCount = 0;
 };
 
 export const getRoadGenerationStats = (): RoadGenerationStats => ({
@@ -1763,6 +2056,16 @@ export const getRoadGenerationStats = (): RoadGenerationStats => ({
   maxRealizedGrade: roadGenerationStats.maxRealizedGrade,
   maxRealizedCrossfall: roadGenerationStats.maxRealizedCrossfall,
   maxRealizedGradeChange: roadGenerationStats.maxRealizedGradeChange,
+  maxRealizedAngleDeg: roadGenerationStats.maxRealizedAngleDeg,
+  meanRealizedAngleDeg: roadGenerationStats.meanRealizedAngleDeg,
+  highAngleStepCount: roadGenerationStats.highAngleStepCount,
   minRiverClearance: roadGenerationStats.minRiverClearance,
-  bridgeSegments: roadGenerationStats.bridgeSegments
+  bridgeSegments: roadGenerationStats.bridgeSegments,
+  mountainPassFallbackCount: roadGenerationStats.mountainPassFallbackCount,
+  switchbackTurnCount: roadGenerationStats.switchbackTurnCount,
+  generatedJunctionCount: roadGenerationStats.generatedJunctionCount
 });
+
+export const recordGeneratedRoadJunctions = (count: number): void => {
+  roadGenerationStats.generatedJunctionCount += Math.max(0, Math.floor(count));
+};

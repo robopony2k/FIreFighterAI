@@ -26,16 +26,35 @@ export type SettlementRoadOptions = {
   bridgeStepCost?: number;
   bridgeMaxConsecutiveWater?: number;
   bridgeMaxWaterTilesPerPath?: number;
+  preferredAngleDeg?: number;
+  softAngleDeg?: number;
+  avoidAngleDeg?: number;
+  fallbackAngleDeg?: number;
+  anglePenaltyWeight?: number;
+  straightClimbPenaltyWeight?: number;
+  contourTurnReliefWeight?: number;
+  allowMountainPassFallback?: boolean;
+  searchBounds?: {
+    minX: number;
+    maxX: number;
+    minY: number;
+    maxY: number;
+  };
 };
 
 export type SettlementRoadAdapter = {
   carveRoad: (state: WorldState, start: Point, end: Point, options?: SettlementRoadOptions) => boolean;
+  carveRoadSequence?: (
+    state: WorldState,
+    segments: Array<{ start: Point; end: Point; options?: SettlementRoadOptions }>
+  ) => boolean;
   collectRoadTiles: (state: WorldState) => Point[];
   collectConnectedRoadNeighbors: (state: WorldState, x: number, y: number) => Point[];
   findNearestRoadTile: (state: WorldState, origin: Point) => Point;
   clearRoadEdges: (state: WorldState) => void;
   backfillRoadEdgesFromAdjacency: (state: WorldState) => void;
   pruneRoadDiagonalStubs: (state: WorldState) => void;
+  recordGeneratedJunctions?: (count: number) => void;
 };
 
 export type SettlementPlacementResult = {

@@ -3,11 +3,13 @@ import type { WorldState } from "../core/state.js";
 import {
   backfillRoadEdgesFromAdjacency,
   carveRoad,
+  carveRoadSequence,
   clearRoadEdges,
   collectConnectedRoadNeighbors,
   collectRoadTiles,
   findNearestRoadTile,
-  pruneRoadDiagonalStubs
+  pruneRoadDiagonalStubs,
+  recordGeneratedRoadJunctions
 } from "./roads.js";
 import {
   createSettlementPlacementPlan as createSharedSettlementPlacementPlan,
@@ -19,12 +21,14 @@ import type { SettlementPlacementResult, SettlementRoadAdapter } from "../system
 
 const createRoadAdapter = (rng: RNG): SettlementRoadAdapter => ({
   carveRoad: (state, start, end, options = {}) => carveRoad(state, rng, start, end, options),
+  carveRoadSequence: (state, segments) => carveRoadSequence(state, rng, segments),
   collectConnectedRoadNeighbors,
   collectRoadTiles,
   findNearestRoadTile,
   clearRoadEdges,
   backfillRoadEdgesFromAdjacency,
-  pruneRoadDiagonalStubs
+  pruneRoadDiagonalStubs,
+  recordGeneratedJunctions: recordGeneratedRoadJunctions
 });
 
 export type { SettlementPlacementResult } from "../systems/settlements/types/settlementTypes.js";

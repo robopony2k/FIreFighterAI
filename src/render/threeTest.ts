@@ -103,6 +103,7 @@ import { getThreeDockCardSpec } from "../ui/runtime/widgets/threeDock.js";
 import type { AudioChannelId, RuntimeWidgetId } from "../ui/runtime/widgets/types.js";
 import type { UiAudioController } from "../audio/uiAudio.js";
 import { getRuntimeSettings, setRuntimeSetting, subscribeRuntimeSettings } from "../persistence/runtimeSettings.js";
+import { constrainCameraToTerrain } from "../systems/terrain/rendering/terrainCameraConstraints.js";
 
 export type SeasonVisualState = {
   seasonT01: number;
@@ -336,6 +337,10 @@ const EVACUATION_CAR_COLORS = [
   0xd6b35f,
   0x5e6b5d
 ] as const;
+const TERRAIN_CAMERA_MIN_POLAR_ANGLE = THREE.MathUtils.degToRad(8);
+const TERRAIN_CAMERA_MAX_POLAR_ANGLE = THREE.MathUtils.degToRad(78);
+const TERRAIN_CAMERA_TARGET_GROUND_CLEARANCE = 0.04;
+const TERRAIN_CAMERA_BODY_GROUND_CLEARANCE = 0.35;
 const EVACUATION_CAR_ACCENT_COLORS = [
   0xf2efe6,
   0x9ec5d6,
@@ -558,6 +563,9 @@ export const createThreeTest = (
   controls.dampingFactor = 0.08;
   controls.enablePan = true;
   controls.enableZoom = true;
+  controls.screenSpacePanning = false;
+  controls.minPolarAngle = TERRAIN_CAMERA_MIN_POLAR_ANGLE;
+  controls.maxPolarAngle = TERRAIN_CAMERA_MAX_POLAR_ANGLE;
   controls.minDistance = 3;
   controls.maxDistance = 120;
   controls.target.set(0, 0, 0);
@@ -4908,6 +4916,19 @@ export const createThreeTest = (
   let lastStructureOverlayKey = "";
   let treeBurnController: TreeBurnController | null = null;
   let cameraLockedToTerrain = false;
+  const applyTerrainCameraConstraints = (): boolean => {
+    if (!lastTerrainSurface) {
+      return false;
+    }
+    const changed = constrainCameraToTerrain(camera, controls.target, lastTerrainSurface, {
+      targetGroundClearance: TERRAIN_CAMERA_TARGET_GROUND_CLEARANCE,
+      cameraGroundClearance: TERRAIN_CAMERA_BODY_GROUND_CLEARANCE
+    });
+    if (changed) {
+      markCameraMotion();
+    }
+    return changed;
+  };
   const yearDays = Math.max(1, Math.floor((world.climateTimeline?.daysPerYear ?? 360) || 360));
   const initialSeasonT01 = wrap01((world.careerDay ?? 0) / yearDays);
   const terrainClimateUniforms: TerrainClimateUniforms = {
@@ -6421,6 +6442,7 @@ export const createThreeTest = (
     const controlsStart = performance.now();
     updateCameraFlight(time);
     controls.update();
+    applyTerrainCameraConstraints();
     syncCameraClipPlanes();
     threePerf.controlsMs = smoothPerf(threePerf.controlsMs, performance.now() - controlsStart);
     seasonalSky.syncToCamera(camera);
@@ -6733,6 +6755,7 @@ export const createThreeTest = (
     controls.target.set(worldX, worldY, worldZ);
     camera.position.copy(controls.target.clone().add(cameraOffset));
     controls.update();
+    applyTerrainCameraConstraints();
     markCameraMotion();
   };
 
@@ -6855,8 +6878,9 @@ export const createThreeTest = (
       controls.enablePan = false;
       controls.enableZoom = false;
     }
-    syncCameraClipPlanes();
     controls.update();
+    applyTerrainCameraConstraints();
+    syncCameraClipPlanes();
     seasonalSky.syncToCamera(camera);
     if (lastLightingApplied) {
       syncDirectionalLightRig(lastLightingApplied);
@@ -7167,6 +7191,7 @@ export const createThreeTest = (
         lastSample = nextSample;
         lastTerrainSurface = nextSurface;
         lastTerrainSize = nextSurface.size;
+        applyTerrainCameraConstraints();
         rebuildStructureOverlay(nextSample, nextSurface);
         requestShadowRefresh();
         return;
@@ -7251,13 +7276,17 @@ export const createThreeTest = (
     ground.visible = false;
 
     const maxSize = Math.max(size.width, size.depth);
+    const previousTerrainSize = lastTerrainSize;
+    lastTerrainSurface = nextSurface;
     const sizeChanged =
-      !lastTerrainSize ||
-      Math.abs(lastTerrainSize.width - size.width) > 0.01 ||
-      Math.abs(lastTerrainSize.depth - size.depth) > 0.01;
+      !previousTerrainSize ||
+      Math.abs(previousTerrainSize.width - size.width) > 0.01 ||
+      Math.abs(previousTerrainSize.depth - size.depth) > 0.01;
     if (!cameraLockedToTerrain || sizeChanged) {
       updateCameraForSize(maxSize);
       cameraLockedToTerrain = true;
+    } else {
+      applyTerrainCameraConstraints();
     }
     lastTerrainSize = size;
     if (lastLightingApplied) {
@@ -7272,7 +7301,6 @@ export const createThreeTest = (
       applyLightingState(lastLightingApplied);
       syncWaterEnvironment(lastLightingApplied);
     }
-    lastTerrainSurface = nextSurface;
     rebuildStructureOverlay(nextSample, nextSurface);
     requestShadowRefresh();
     } finally {
