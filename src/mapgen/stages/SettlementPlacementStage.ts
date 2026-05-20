@@ -19,7 +19,7 @@ export const SettlementPlacementStage: PipelineStage = {
     }
     ctx.settlementSnapshot = { typeBefore: beforeType, elevationBefore: beforeElevation };
 
-    state.basePoint = selectBaseSite(state);
+    state.basePoint = selectBaseSite(state, ctx.settings.heightScaleMultiplier);
     if (state.tileRoadBridge.length !== state.grid.totalTiles) {
       state.tileRoadBridge = new Uint8Array(state.grid.totalTiles);
     } else {

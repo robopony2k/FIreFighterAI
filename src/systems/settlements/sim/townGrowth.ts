@@ -26,6 +26,14 @@ import type { Point, Town, TownGrowthFrontier } from "../../../core/types.js";
 import { clamp } from "../../../core/utils.js";
 import { getCompletedConstructionYear, getFractionalSimulationYear } from "./buildingLifecycle.js";
 import {
+  SETTLEMENT_PLOT_MAX_ANGLE_DEG,
+  SETTLEMENT_TOWN_FALLBACK_ANGLE_DEG,
+  computeSettlementTileAngleDeg,
+  evaluateSettlementFootprintFit,
+  flattenSettlementFootprintForPlot,
+  type SettlementTerrainFit
+} from "./settlementTerrainFit.js";
+import {
   BUILDABLE_SLOPE_LIMIT,
   COMPACT_TOWN_ASPECT_HARD_LIMIT,
   COMPACT_TOWN_ASPECT_SOFT_LIMIT,
@@ -63,6 +71,9 @@ type FrontageCandidate = {
   bounds: HouseFootprintBounds;
   clearanceRect: HouseClearanceRect;
   styleSeed: number;
+  roadX: number;
+  roadY: number;
+  terrainFit: SettlementTerrainFit;
   score: number;
   distCenter: number;
   elongationPenalty: number;
@@ -171,6 +182,9 @@ const isBuildable = (state: WorldState, x: number, y: number): boolean => {
   const idx = indexFor(state.grid, x, y);
   const tile = state.tiles[idx];
   if (!isBuildableType(tile.type) || state.tileStructure[idx] !== STRUCTURE_NONE) {
+    return false;
+  }
+  if (computeSettlementTileAngleDeg(state, x, y) > SETTLEMENT_TOWN_FALLBACK_ANGLE_DEG) {
     return false;
   }
   const center = tile.elevation;
@@ -351,6 +365,9 @@ const placeFrontageHouse = (
   if (!canPlaceHouseFootprint(state, candidate.bounds)) {
     return false;
   }
+  flattenSettlementFootprintForPlot(state, candidate.bounds, {
+    roadPoint: { x: candidate.roadX, y: candidate.roadY }
+  });
   const idx = indexFor(state.grid, candidate.x, candidate.y);
   const tile = state.tiles[idx];
   tile.houseValue = computeDeterministicHouseValue(state, idx, town.id, effectiveYear);
@@ -410,8 +427,11 @@ export const reserveTownExpansionLot = (
       continue;
     }
     const selected = selectDeterministicFrontageCandidate(state, town, usableFrontage);
-    if (selected && canPlaceHouseFootprint(state, selected.bounds)) {
+    if (selected && selected.terrainFit.viable && canPlaceHouseFootprint(state, selected.bounds)) {
       const anchorIndex = indexFor(state.grid, selected.x, selected.y);
+      flattenSettlementFootprintForPlot(state, selected.bounds, {
+        roadPoint: { x: selected.roadX, y: selected.roadY }
+      });
       markHouseFootprint(state, selected.bounds, context);
       context.footprints.set(anchorIndex, selected.bounds);
       context.clearanceRects.set(anchorIndex, selected.clearanceRect);
@@ -915,7 +935,8 @@ const computeFrontageScore = (
   roadY: number,
   setback: number,
   distFrontier: number,
-  ownedAdjacency: number
+  ownedAdjacency: number,
+  terrainFit: SettlementTerrainFit
 ): number => {
   const distCenter = Math.hypot(point.x - getTownCenterX(town), point.y - getTownCenterY(town));
   const coreRadius = Math.max(TOWN_CORE_RADIUS + 1, Math.min(Math.max(MIN_TOWN_RADIUS, town.radius) * 0.45, TOWN_CORE_RADIUS + 4));
@@ -924,6 +945,9 @@ const computeFrontageScore = (
   const intersectionBias = roadDegree >= 3 ? -1.25 : roadDegree === 2 ? -0.35 : 0.45;
   const earlyCoreBias = town.houseCount < COMPACT_TOWN_MIN_CORE_HOUSES ? distCenter * 0.7 + coreOverflow * 1.3 : 0;
   const elongationPenalty = computeLongAxisPenalty(town, metrics, point);
+  const anglePenalty =
+    Math.max(0, terrainFit.maxAngleDeg - SETTLEMENT_PLOT_MAX_ANGLE_DEG) * 0.5 +
+    Math.max(0, SETTLEMENT_PLOT_MAX_ANGLE_DEG - terrainFit.score * SETTLEMENT_PLOT_MAX_ANGLE_DEG) * 0.12;
   return (
     distCenter * 0.95 +
     coreOverflow * 1.9 +
@@ -932,7 +956,9 @@ const computeFrontageScore = (
     ownedAdjacency * 1.5 +
     intersectionBias +
     earlyCoreBias +
-    elongationPenalty
+    elongationPenalty +
+    anglePenalty +
+    terrainFit.relief * 36
   );
 };
 
@@ -979,10 +1005,12 @@ const collectFrontageCandidates = (state: WorldState, town: Town, context: Growt
           const footprint = pickHouseFootprint(seed);
           const boundsAtPoint = getHouseFootprintBounds(point.x, point.y, rotation, footprint, "asset");
           const clearanceRect = createHouseClearanceRect(point.x, point.y, rotation, footprint);
+          const terrainFit = evaluateSettlementFootprintFit(state, boundsAtPoint);
           if (
             !canPlaceHouseClearance(context, clearanceRect) ||
             !canPlaceHouseFootprint(state, boundsAtPoint) ||
-            !footprintTouchesStreet(state, boundsAtPoint)
+            !footprintTouchesStreet(state, boundsAtPoint) ||
+            !terrainFit.viable
           ) {
             continue;
           }
@@ -996,7 +1024,7 @@ const collectFrontageCandidates = (state: WorldState, town: Town, context: Growt
           }
           const ownedAdjacency = countAdjacentOwnedHouses(state, town.id, point.x, point.y);
           const elongationPenalty = computeLongAxisPenalty(town, metrics, point);
-          const score = computeFrontageScore(state, town, metrics, point, x, y, setback, distFrontier, ownedAdjacency);
+          const score = computeFrontageScore(state, town, metrics, point, x, y, setback, distFrontier, ownedAdjacency, terrainFit);
           const existing = candidates.get(key);
           if (existing && existing.score <= score) {
             continue;
@@ -1007,6 +1035,9 @@ const collectFrontageCandidates = (state: WorldState, town: Town, context: Growt
             bounds: boundsAtPoint,
             clearanceRect,
             styleSeed: seed,
+            roadX: x,
+            roadY: y,
+            terrainFit,
             score,
             distCenter,
             elongationPenalty
@@ -1054,10 +1085,12 @@ const findBuildableTargetNear = (state: WorldState, origin: Point, radius: numbe
       if (!isBuildable(state, x, y)) {
         continue;
       }
+      const angleDeg = computeSettlementTileAngleDeg(state, x, y);
       const score =
         Math.abs(origin.x - x) +
         Math.abs(origin.y - y) +
         evaluateTargetRelief(state, x, y) * 64 +
+        Math.max(0, angleDeg - SETTLEMENT_PLOT_MAX_ANGLE_DEG) * 0.45 +
         (isStreetTile(state, x, y) ? 10 : 0);
       if (score < bestScore) {
         bestScore = score;

@@ -20,12 +20,21 @@ import {
   TOWN_INITIAL_BUILD_COOLDOWN_MAX_DAYS
 } from "../constants/settlementConstants.js";
 import { simulateTownGrowthYears } from "../sim/townGrowth.js";
+import {
+  SETTLEMENT_PLOT_MAX_ANGLE_DEG,
+  SETTLEMENT_TOWN_FALLBACK_ANGLE_DEG,
+  computeSettlementTileAngleDeg,
+  evaluateSettlementSiteFit,
+  scoreSettlementAngle
+} from "../sim/settlementTerrainFit.js";
 import type { SettlementPlacementResult, SettlementRoadAdapter, SettlementRoadOptions } from "../types/settlementTypes.js";
 import { hash2D } from "../../../mapgen/noise.js";
 
 type TownSeedCandidate = Point & {
   score: number;
   localRelief: number;
+  maxAngleDeg: number;
+  meanAngleDeg: number;
   waterDistance: number;
   elevation: number;
   profile: TownIndustryProfile;
@@ -140,13 +149,16 @@ const isRoadLikeTile = (state: WorldState, x: number, y: number): boolean => {
 const isBuildableType = (type: WorldState["tiles"][number]["type"]): boolean =>
   type === "grass" || type === "scrub" || type === "floodplain" || type === "forest" || type === "bare";
 
-const isBuildable = (state: WorldState, x: number, y: number): boolean => {
+const isBuildable = (state: WorldState, x: number, y: number, heightScaleMultiplier = 1): boolean => {
   if (!inBounds(state.grid, x, y)) {
     return false;
   }
   const idx = indexFor(state.grid, x, y);
   const tile = state.tiles[idx];
   if (!isBuildableType(tile.type) || state.structureMask[idx] > 0) {
+    return false;
+  }
+  if (computeSettlementTileAngleDeg(state, x, y, { heightScaleMultiplier }) > SETTLEMENT_TOWN_FALLBACK_ANGLE_DEG) {
     return false;
   }
   const elevation = tile.elevation;
@@ -266,13 +278,13 @@ const classifyTownProfile = (candidate: {
   return "general";
 };
 
-const collectSettlementCandidates = (state: WorldState, townDensity: number): TownSeedCandidate[] => {
+const collectSettlementCandidates = (state: WorldState, townDensity: number, heightScaleMultiplier: number): TownSeedCandidate[] => {
   const candidates: TownSeedCandidate[] = [];
   const step = Math.max(1, Math.floor(Math.max(state.grid.cols, state.grid.rows) / 192));
   const minDim = Math.min(state.grid.cols, state.grid.rows);
   for (let y = 4; y < state.grid.rows - 4; y += step) {
     for (let x = 4; x < state.grid.cols - 4; x += step) {
-      if (!isBuildable(state, x, y)) {
+      if (!isBuildable(state, x, y, heightScaleMultiplier)) {
         continue;
       }
       const idx = indexFor(state.grid, x, y);
@@ -287,6 +299,11 @@ const collectSettlementCandidates = (state: WorldState, townDensity: number): To
       const baseBand = 1 - Math.min(1, Math.abs(distFromBase / Math.max(1, minDim * 0.36) - 1));
       const localRelief = computeLocalRelief(state, x, y);
       const flatness = 1 - clamp01(localRelief * 12.5);
+      const terrainFit = evaluateSettlementSiteFit(state, { x, y }, 3, { heightScaleMultiplier });
+      if (terrainFit.maxAngleDeg > SETTLEMENT_TOWN_FALLBACK_ANGLE_DEG) {
+        continue;
+      }
+      const angleScore = scoreSettlementAngle(Math.max(terrainFit.maxAngleDeg, terrainFit.meanAngleDeg));
       const waterAffinity = 1 - clamp01(Math.abs(waterDistance - 6) / 10);
       const profile = classifyTownProfile({
         waterDistance,
@@ -294,12 +311,14 @@ const collectSettlementCandidates = (state: WorldState, townDensity: number): To
         elevation: tile.elevation
       });
       let score = 0.12;
-      score += flatness * 0.92;
+      score += flatness * 0.52;
+      score += angleScore * 0.76;
       score += edgeNorm * 0.24;
       score += baseBand * 0.18;
       score += waterAffinity * (profile === "coastal" ? 0.22 : profile === "farming" ? 0.16 : 0.12);
       score += profile === "farming" ? 0.08 : profile === "general" ? 0.05 : profile === "coastal" ? 0.02 : 0;
       score += flatness >= 0.82 ? 0.04 : 0;
+      score += terrainFit.maxAngleDeg <= SETTLEMENT_PLOT_MAX_ANGLE_DEG ? 0.08 : 0;
       score += (townDensity - 0.5) * 0.05;
       if (score <= 0.42) {
         continue;
@@ -309,6 +328,8 @@ const collectSettlementCandidates = (state: WorldState, townDensity: number): To
         y,
         score,
         localRelief,
+        maxAngleDeg: terrainFit.maxAngleDeg,
+        meanAngleDeg: terrainFit.meanAngleDeg,
         waterDistance,
         elevation: tile.elevation,
         profile
@@ -369,9 +390,10 @@ const selectVillageSeeds = (
   state: WorldState,
   townDensity: number,
   spacing01: number,
-  requestedCount: number
+  requestedCount: number,
+  heightScaleMultiplier: number
 ): TownSeedCandidate[] => {
-  const candidates = collectSettlementCandidates(state, townDensity);
+  const candidates = collectSettlementCandidates(state, townDensity, heightScaleMultiplier);
   const reachable = markReachableLand(state, state.basePoint);
   const chosen: TownSeedCandidate[] = [];
   const minDim = Math.min(state.grid.cols, state.grid.rows);
@@ -480,15 +502,21 @@ const choosePrimaryDirection = (state: WorldState, candidate: TownSeedCandidate)
   return ewRelief <= nsRelief ? { dx: 1, dy: 0 } : { dx: 0, dy: 1 };
 };
 
-const findBuildableNear = (state: WorldState, origin: Point, radius: number): Point | null => {
+const findBuildableNear = (state: WorldState, origin: Point, radius: number, heightScaleMultiplier = 1): Point | null => {
   let best: Point | null = null;
   let bestScore = Number.POSITIVE_INFINITY;
   for (let y = origin.y - radius; y <= origin.y + radius; y += 1) {
     for (let x = origin.x - radius; x <= origin.x + radius; x += 1) {
-      if (!isBuildable(state, x, y)) {
+      if (!isBuildable(state, x, y, heightScaleMultiplier)) {
         continue;
       }
-      const score = Math.abs(origin.x - x) + Math.abs(origin.y - y) + computeLocalRelief(state, x, y) * 64;
+      const angleDeg = computeSettlementTileAngleDeg(state, x, y, { heightScaleMultiplier });
+      const score =
+        Math.abs(origin.x - x) +
+        Math.abs(origin.y - y) +
+        computeLocalRelief(state, x, y) * 64 +
+        Math.max(0, angleDeg - SETTLEMENT_PLOT_MAX_ANGLE_DEG) * 0.4 +
+        (SETTLEMENT_PLOT_MAX_ANGLE_DEG - Math.min(SETTLEMENT_PLOT_MAX_ANGLE_DEG, angleDeg)) * -0.02;
       if (score < bestScore) {
         bestScore = score;
         best = { x, y };
@@ -568,7 +596,7 @@ const carveConnectorWithWaypoints = (
       x: Math.round(start.x + (end.x - start.x) * t),
       y: Math.round(start.y + (end.y - start.y) * t)
     };
-    const target = step === segments ? end : findBuildableNear(state, projected, 6) ?? projected;
+    const target = step === segments ? end : findBuildableNear(state, projected, 6, plan.heightScaleMultiplier ?? 1) ?? projected;
     if (!roadAdapter.carveRoad(state, current, target, options)) {
       return false;
     }
@@ -597,7 +625,7 @@ const carveRescueConnectorWithWaypoints = (
       x: Math.round(start.x + (end.x - start.x) * t),
       y: Math.round(start.y + (end.y - start.y) * t)
     };
-    const target = step === segments ? end : findBuildableNear(state, projected, 10) ?? projected;
+    const target = step === segments ? end : findBuildableNear(state, projected, 10, plan.heightScaleMultiplier ?? 1) ?? projected;
     if (!roadAdapter.carveRoad(state, current, target, options)) {
       return false;
     }
@@ -616,7 +644,7 @@ const carveStreetArm = (
   plan: SettlementPlacementResult
 ): Point => {
   const projected = { x: start.x + dx * length, y: start.y + dy * length };
-  const target = findBuildableNear(state, projected, 3) ?? projected;
+  const target = findBuildableNear(state, projected, 3, plan.heightScaleMultiplier ?? 1) ?? projected;
   if (roadAdapter.carveRoad(state, start, target, buildRoadOptions(plan))) {
     return target;
   }
@@ -983,9 +1011,9 @@ const ensureTownLocalRoadAnchors = (
       continue;
     }
     const start = roadAdapter.findNearestRoadTile(state, { x: town.x, y: town.y });
-    const target = isBuildable(state, town.x, town.y)
+    const target = isBuildable(state, town.x, town.y, plan.heightScaleMultiplier ?? 1)
       ? { x: town.x, y: town.y }
-      : findBuildableNear(state, { x: town.x, y: town.y }, 4) ?? { x: town.x, y: town.y };
+      : findBuildableNear(state, { x: town.x, y: town.y }, 4, plan.heightScaleMultiplier ?? 1) ?? { x: town.x, y: town.y };
     if (start.x === target.x && start.y === target.y) {
       continue;
     }
@@ -1106,11 +1134,16 @@ const initializeSettlementState = (state: WorldState): void => {
 };
 
 const seedTowns = (state: WorldState, plan: SettlementPlacementResult): Town[] => {
+  const baseTerrainFit = evaluateSettlementSiteFit(state, state.basePoint, 3, {
+    heightScaleMultiplier: plan.heightScaleMultiplier ?? 1
+  });
   const centralCandidate: TownSeedCandidate = {
     x: state.basePoint.x,
     y: state.basePoint.y,
     score: 1,
     localRelief: computeLocalRelief(state, state.basePoint.x, state.basePoint.y),
+    maxAngleDeg: baseTerrainFit.maxAngleDeg,
+    meanAngleDeg: baseTerrainFit.meanAngleDeg,
     waterDistance: Math.floor(state.tiles[indexFor(state.grid, state.basePoint.x, state.basePoint.y)]?.waterDist ?? 99),
     elevation: state.tiles[indexFor(state.grid, state.basePoint.x, state.basePoint.y)]?.elevation ?? 0,
     profile: classifyTownProfile({
@@ -1124,7 +1157,8 @@ const seedTowns = (state: WorldState, plan: SettlementPlacementResult): Town[] =
     state,
     clamp01(plan.townDensity ?? 0.5),
     clamp01(plan.settlementSpacing ?? 0.55),
-    requestedVillageCount
+    requestedVillageCount,
+    plan.heightScaleMultiplier ?? 1
   );
   const ranked = [centralCandidate, ...villageSeeds];
   const shuffledNames = shuffleTownNames(state.seed ^ state.grid.cols * 73856093 ^ state.grid.rows * 19349663);
@@ -1173,11 +1207,16 @@ const buildInitialRoadSkeletons = (
 ): void => {
   for (let i = 0; i < towns.length; i += 1) {
     const town = towns[i]!;
+    const terrainFit = evaluateSettlementSiteFit(state, { x: town.x, y: town.y }, 3, {
+      heightScaleMultiplier: plan.heightScaleMultiplier ?? 1
+    });
     const candidate: TownSeedCandidate = {
       x: town.x,
       y: town.y,
       score: 1,
       localRelief: computeLocalRelief(state, town.x, town.y),
+      maxAngleDeg: terrainFit.maxAngleDeg,
+      meanAngleDeg: terrainFit.meanAngleDeg,
       waterDistance: Math.floor(state.tiles[indexFor(state.grid, town.x, town.y)]?.waterDist ?? 99),
       elevation: state.tiles[indexFor(state.grid, town.x, town.y)]?.elevation ?? 0,
       profile: town.industryProfile

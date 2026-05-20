@@ -3,7 +3,7 @@ import { TILE_TYPE_IDS } from "../../core/state.js";
 import type { TileType } from "../../core/types.js";
 import { clamp } from "../../core/utils.js";
 import { clearVegetationState } from "../../core/vegetation.js";
-import { computeRenderedSlopeAngleDeg } from "../../systems/terrain/sim/treeSuitability.js";
+import { computeRenderedSlopeAngleDeg } from "../../shared/terrainSlope.js";
 import type { PipelineStage } from "../pipeline/TerrainPipeline.js";
 import { computeBiomeSuitabilityDetails } from "../biome/BiomeSuitability.js";
 import { emitStageSnapshot } from "../pipeline/stageDebug.js";

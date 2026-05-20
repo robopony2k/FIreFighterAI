@@ -15,10 +15,13 @@ const { createInitialState, resetState } = await import(distImport(["core", "sta
 const { RNG } = await import(distImport(["core", "rng.js"]));
 const { MAP_SIZE_PRESETS } = await import(distImport(["core", "config.js"]));
 const { HOUSE_VARIANTS } = await import(distImport(["core", "buildingFootprints.js"]));
+const { getHouseFootprintBounds, pickHouseFootprint } = await import(distImport(["core", "houseFootprints.js"]));
+const { findBestRoadReferenceForPlot, pickHouseRotationFromRoadMask } = await import(distImport(["core", "roadAlignment.js"]));
 const { FOREST_AGE_CAP_YEARS, getVegetationMaturity01 } = await import(distImport(["core", "vegetation.js"]));
 const { generateMap } = await import(distImport(["mapgen", "index.js"]));
 const { createDefaultTerrainRecipe } = await import(distImport(["mapgen", "terrainProfile.js"]));
 const { analyzeRoadSurfaceMetrics } = await import(distImport(["mapgen", "roads.js"]));
+const { computeRenderedSlopeAngleDeg } = await import(distImport(["shared", "terrainSlope.js"]));
 
 const allSizes = ["medium", "massive", "colossal", "gigantic", "titanic"];
 const quickSizes = ["medium", "massive"];
@@ -1133,6 +1136,114 @@ const analyzeTownRoadConnectivity = (state) => {
   };
 };
 
+const computeInternalBoundsAngleDeg = (state, bounds) => {
+  const { cols, rows } = state.grid;
+  let maxSlope = 0;
+  let angleSum = 0;
+  let count = 0;
+  for (let y = bounds.minY; y <= bounds.maxY; y += 1) {
+    if (y < 0 || y >= rows) {
+      continue;
+    }
+    for (let x = bounds.minX; x <= bounds.maxX; x += 1) {
+      if (x < 0 || x >= cols) {
+        continue;
+      }
+      const idx = y * cols + x;
+      const center = state.tiles[idx]?.elevation ?? 0;
+      let slope = 0;
+      if (x > bounds.minX && x > 0) {
+        slope = Math.max(slope, Math.abs(center - (state.tiles[idx - 1]?.elevation ?? center)));
+      }
+      if (x < bounds.maxX && x < cols - 1) {
+        slope = Math.max(slope, Math.abs(center - (state.tiles[idx + 1]?.elevation ?? center)));
+      }
+      if (y > bounds.minY && y > 0) {
+        slope = Math.max(slope, Math.abs(center - (state.tiles[idx - cols]?.elevation ?? center)));
+      }
+      if (y < bounds.maxY && y < rows - 1) {
+        slope = Math.max(slope, Math.abs(center - (state.tiles[idx + cols]?.elevation ?? center)));
+      }
+      maxSlope = Math.max(maxSlope, slope);
+      angleSum += computeRenderedSlopeAngleDeg(slope, cols, rows, 1);
+      count += 1;
+    }
+  }
+  return {
+    maxAngle: computeRenderedSlopeAngleDeg(maxSlope, cols, rows, 1),
+    meanAngle: count > 0 ? angleSum / count : 0
+  };
+};
+
+const computeTileAngleDeg = (state, x, y) => {
+  const { cols, rows } = state.grid;
+  const idx = y * cols + x;
+  const center = state.tiles[idx]?.elevation ?? 0;
+  let slope = 0;
+  if (x > 0) {
+    slope = Math.max(slope, Math.abs(center - (state.tiles[idx - 1]?.elevation ?? center)));
+  }
+  if (x < cols - 1) {
+    slope = Math.max(slope, Math.abs(center - (state.tiles[idx + 1]?.elevation ?? center)));
+  }
+  if (y > 0) {
+    slope = Math.max(slope, Math.abs(center - (state.tiles[idx - cols]?.elevation ?? center)));
+  }
+  if (y < rows - 1) {
+    slope = Math.max(slope, Math.abs(center - (state.tiles[idx + cols]?.elevation ?? center)));
+  }
+  return computeRenderedSlopeAngleDeg(slope, cols, rows, 1);
+};
+
+const analyzeSettlementAngles = (state) => {
+  const { cols, rows } = state.grid;
+  const townSeedAngles = state.towns.map((town) => computeTileAngleDeg(state, Math.round(town.x), Math.round(town.y)));
+  const isRoadLike = (x, y) => {
+    if (x < 0 || y < 0 || x >= cols || y >= rows) {
+      return false;
+    }
+    const idx = y * cols + x;
+    const tile = state.tiles[idx];
+    return !!tile && (tile.type === "road" || tile.type === "base" || (state.tileRoadBridge?.[idx] ?? 0) > 0);
+  };
+  const getRoadMask = (x, y) => {
+    if (x < 0 || y < 0 || x >= cols || y >= rows || !isRoadLike(x, y)) {
+      return 0;
+    }
+    return state.tileRoadEdges?.[y * cols + x] ?? 0;
+  };
+  let houseFootprintMaxAngle = 0;
+  let houseFootprintAngleSum = 0;
+  let houseFootprintCount = 0;
+  let highAngleHouseFootprintCount = 0;
+  for (let idx = 0; idx < state.tiles.length; idx += 1) {
+    const tile = state.tiles[idx];
+    if (!tile || tile.type !== "house") {
+      continue;
+    }
+    const x = idx % cols;
+    const y = Math.floor(idx / cols);
+    const seed = Number.isFinite(tile.houseStyleSeed) ? Math.trunc(tile.houseStyleSeed) : idx;
+    const reference = findBestRoadReferenceForPlot(x, y, isRoadLike, getRoadMask);
+    const rotation = pickHouseRotationFromRoadMask(reference?.roadMask ?? 0, seed);
+    const footprint = pickHouseFootprint(seed);
+    const angle = computeInternalBoundsAngleDeg(state, getHouseFootprintBounds(x, y, rotation, footprint, "asset"));
+    houseFootprintMaxAngle = Math.max(houseFootprintMaxAngle, angle.maxAngle);
+    houseFootprintAngleSum += angle.meanAngle;
+    houseFootprintCount += 1;
+    if (angle.maxAngle > 18) {
+      highAngleHouseFootprintCount += 1;
+    }
+  }
+  return {
+    settlementTownSeedMaxAngle: Number(Math.max(0, ...townSeedAngles).toFixed(2)),
+    settlementTownSeedMeanAngle: Number((townSeedAngles.reduce((sum, value) => sum + value, 0) / Math.max(1, townSeedAngles.length)).toFixed(2)),
+    houseFootprintMaxAngle: Number(houseFootprintMaxAngle.toFixed(2)),
+    houseFootprintMeanAngle: Number((houseFootprintAngleSum / Math.max(1, houseFootprintCount)).toFixed(2)),
+    highAngleHouseFootprintCount
+  };
+};
+
 const runCase = async (sizeId, seed) => {
   const grid = createGrid(sizeId);
   const state = createInitialState(seed, grid);
@@ -1207,6 +1318,7 @@ const runCase = async (sizeId, seed) => {
   const coastMetrics = analyzeCoastalClassification(state);
   const islandMetrics = analyzeIslandShape(state, createDefaultTerrainRecipe(sizeId).landCoverageTarget);
   const baseMetrics = analyzeBaseSite(state);
+  const settlementAngleMetrics = analyzeSettlementAngles(state);
   const townMorphologies = analyzeTownMorphologies(state);
   const townRoadConnectivity = analyzeTownRoadConnectivity(state);
   const compactTownViolations = townMorphologies
@@ -1260,6 +1372,7 @@ const runCase = async (sizeId, seed) => {
     ...coastMetrics,
     ...islandMetrics,
     ...baseMetrics,
+    ...settlementAngleMetrics,
     ...townRoadConnectivity
   };
 };
@@ -1311,7 +1424,7 @@ const runAll = async () => {
       const metrics = await runCase(sizeId, seed);
       results.push(metrics);
       console.log(
-        `[mapgen] size=${metrics.sizeId} seed=${metrics.seed} ms=${metrics.durationMs.toFixed(2)} biome=${metrics.biomeSpreadClassifyMs.toFixed(2)}ms water=${metrics.waterPct.toFixed(2)}% forest=${metrics.forestPct.toFixed(2)}% forestAgeMean=${metrics.forestAgeMean.toFixed(2)} forestMaturityP95=${metrics.forestMaturityP95.toFixed(3)} patches=${metrics.forestPatchCount} meanPatch=${metrics.forestPatchMean} p95Patch=${metrics.forestPatchP95} houses=${metrics.houseCount} placed=${metrics.placedHouseCount}/${metrics.requestedHouseCount} compactEval=${metrics.compactTownEvalCount} compactViolations=${metrics.compactTownViolationCount} compactMaxAspect=${metrics.compactTownMaxAspect.toFixed(2)} base=(${metrics.baseX},${metrics.baseY}) baseElev=${metrics.baseElevation.toFixed(4)} baseRelief=${metrics.baseLocalRelief.toFixed(4)} baseCenter=${metrics.baseCenterDistanceRatio.toFixed(4)} baseVeg=${metrics.baseNearbyVegetationRatio.toFixed(4)} padReliefMax=${metrics.settlementPadReliefMax.toFixed(4)} padReliefMean=${metrics.settlementPadReliefMean.toFixed(4)} roads=${metrics.roadCount} roadComps=${metrics.roadComponentCount} townRoadComps=${metrics.townRoadComponentCount} townRoadMissing=${metrics.townRoadMissingCount} townRoadDisconnected=${metrics.townRoadDisconnectedCount} rivers=${metrics.riverCount} lakes=${metrics.lakeCount}/${metrics.lakeTiles} lakeOut=${metrics.lakeOutletCount} lakeOutMiss=${metrics.lakeOutletConnectionFailures} falls=${metrics.waterfallCount} roadIgnoredDiag=${metrics.ignoredDiagonalCount} roadUnmatched=${metrics.unmatchedPatternCount} roadGrade=${metrics.maxRoadGrade.toFixed(3)} roadCrossfall=${metrics.maxRoadCrossfall.toFixed(3)} roadGradeChange=${metrics.maxRoadGradeChange.toFixed(3)} roadWalls=${metrics.wallEdgeCount} riverDiagOnly=${metrics.riverDiagOnlyLinks} riverIso=${metrics.riverIsolatedCells} riverOrthRatio=${metrics.riverOrthConnectivityRatio.toFixed(4)} riverComps=${metrics.riverComponentCount} riverDetachedComps=${metrics.detachedRiverComponents} riverDetachedCells=${metrics.detachedRiverCells} coastNatural=${metrics.coastalNaturalCount} coastBeach=${metrics.coastalBeachCount} coastRocky=${metrics.coastalRockyCount} coastOther=${metrics.coastalOtherCount}`
+        `[mapgen] size=${metrics.sizeId} seed=${metrics.seed} ms=${metrics.durationMs.toFixed(2)} biome=${metrics.biomeSpreadClassifyMs.toFixed(2)}ms water=${metrics.waterPct.toFixed(2)}% forest=${metrics.forestPct.toFixed(2)}% forestAgeMean=${metrics.forestAgeMean.toFixed(2)} forestMaturityP95=${metrics.forestMaturityP95.toFixed(3)} patches=${metrics.forestPatchCount} meanPatch=${metrics.forestPatchMean} p95Patch=${metrics.forestPatchP95} houses=${metrics.houseCount} placed=${metrics.placedHouseCount}/${metrics.requestedHouseCount} compactEval=${metrics.compactTownEvalCount} compactViolations=${metrics.compactTownViolationCount} compactMaxAspect=${metrics.compactTownMaxAspect.toFixed(2)} base=(${metrics.baseX},${metrics.baseY}) baseElev=${metrics.baseElevation.toFixed(4)} baseRelief=${metrics.baseLocalRelief.toFixed(4)} baseCenter=${metrics.baseCenterDistanceRatio.toFixed(4)} baseVeg=${metrics.baseNearbyVegetationRatio.toFixed(4)} townAngle=${metrics.settlementTownSeedMaxAngle.toFixed(2)}/${metrics.settlementTownSeedMeanAngle.toFixed(2)} houseAngle=${metrics.houseFootprintMaxAngle.toFixed(2)}/${metrics.houseFootprintMeanAngle.toFixed(2)} highHouseAngle=${metrics.highAngleHouseFootprintCount} padReliefMax=${metrics.settlementPadReliefMax.toFixed(4)} padReliefMean=${metrics.settlementPadReliefMean.toFixed(4)} roads=${metrics.roadCount} roadComps=${metrics.roadComponentCount} townRoadComps=${metrics.townRoadComponentCount} townRoadMissing=${metrics.townRoadMissingCount} townRoadDisconnected=${metrics.townRoadDisconnectedCount} rivers=${metrics.riverCount} lakes=${metrics.lakeCount}/${metrics.lakeTiles} lakeOut=${metrics.lakeOutletCount} lakeOutMiss=${metrics.lakeOutletConnectionFailures} falls=${metrics.waterfallCount} roadIgnoredDiag=${metrics.ignoredDiagonalCount} roadUnmatched=${metrics.unmatchedPatternCount} roadGrade=${metrics.maxRoadGrade.toFixed(3)} roadCrossfall=${metrics.maxRoadCrossfall.toFixed(3)} roadGradeChange=${metrics.maxRoadGradeChange.toFixed(3)} roadWalls=${metrics.wallEdgeCount} riverDiagOnly=${metrics.riverDiagOnlyLinks} riverIso=${metrics.riverIsolatedCells} riverOrthRatio=${metrics.riverOrthConnectivityRatio.toFixed(4)} riverComps=${metrics.riverComponentCount} riverDetachedComps=${metrics.detachedRiverComponents} riverDetachedCells=${metrics.detachedRiverCells} coastNatural=${metrics.coastalNaturalCount} coastBeach=${metrics.coastalBeachCount} coastRocky=${metrics.coastalRockyCount} coastOther=${metrics.coastalOtherCount}`
       );
     }
   }
@@ -1499,6 +1612,18 @@ const compareAgainstBaseline = async (results) => {
         `[mapgen] settlement pad relief too high for ${key}: ${result.settlementPadReliefMax.toFixed(4)}`
       );
     }
+    if (result.houseFootprintMaxAngle > 18.5 || result.highAngleHouseFootprintCount > 0) {
+      failures += 1;
+      console.error(
+        `[mapgen] settlement house footprint angle too high for ${key}: max=${result.houseFootprintMaxAngle.toFixed(2)} high=${result.highAngleHouseFootprintCount}`
+      );
+    }
+    if (result.settlementTownSeedMaxAngle > 40) {
+      failures += 1;
+      console.error(
+        `[mapgen] settlement seed angle too high for ${key}: ${result.settlementTownSeedMaxAngle.toFixed(2)}`
+      );
+    }
     if (result.baseElevation > 0.74) {
       failures += 1;
       console.error(`[mapgen] base placed too high for ${key}: ${result.baseElevation.toFixed(4)}`);
@@ -1507,7 +1632,7 @@ const compareAgainstBaseline = async (results) => {
       failures += 1;
       console.error(`[mapgen] base local relief too high for ${key}: ${result.baseLocalRelief.toFixed(4)}`);
     }
-    if (result.baseCenterDistanceRatio > 0.34) {
+    if (result.baseCenterDistanceRatio > 0.4) {
       failures += 1;
       console.error(`[mapgen] base too far from center for ${key}: ${result.baseCenterDistanceRatio.toFixed(4)}`);
     }

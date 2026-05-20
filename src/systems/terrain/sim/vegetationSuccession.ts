@@ -18,7 +18,8 @@ import { clamp } from "../../../core/utils.js";
 import { applyFuel, getFuelProfiles } from "../../../core/tiles.js";
 import { indexFor, inBounds } from "../../../core/grid.js";
 import { hash2D } from "../../../mapgen/noise.js";
-import { computeRenderedSlopeAngleDeg, computeTreeSuitability } from "./treeSuitability.js";
+import { computeRenderedSlopeAngleDeg } from "../../../shared/terrainSlope.js";
+import { computeTreeSuitability } from "./treeSuitability.js";
 
 export type VegetationBlockResult = {
   terrainTypeChanged: boolean;

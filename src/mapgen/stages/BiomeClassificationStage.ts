@@ -1,7 +1,7 @@
 import { COAST_CLASS_NONE, COAST_CLASS_SHELF_WATER } from "../../core/state.js";
 import type { TileType } from "../../core/types.js";
 import { clamp } from "../../core/utils.js";
-import { computeRenderedSlopeAngleDeg } from "../../systems/terrain/sim/treeSuitability.js";
+import { computeRenderedSlopeAngleDeg } from "../../shared/terrainSlope.js";
 import type { PipelineStage } from "../pipeline/TerrainPipeline.js";
 import { emitStageSnapshot } from "../pipeline/stageDebug.js";
 import {

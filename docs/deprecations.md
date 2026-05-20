@@ -1,5 +1,19 @@
 # Deprecations
 
+## Relief-Only Settlement Siting
+
+Status: Deprecated as of May 20, 2026.
+
+- Town and firebase placement no longer treat local elevation relief as sufficient proof that a location is buildable.
+- Settlement placement now also scores rendered slope angle, prefers lower-angle town sites, and rejects steep individual house plots unless they can be flattened to an accessible pad.
+- Foundations should remain trim visual supports over accepted pads, not large black terrain-repair blocks compensating for steep placement.
+
+Migration guidance:
+
+1. Add new settlement terrain-fit rules through `src/systems/settlements/sim/settlementTerrainFit.ts`.
+2. Keep rendered slope-angle math in `src/shared/terrainSlope.ts` so terrain, biome, settlement, and regression code use the same conversion.
+3. Do not reintroduce broad relief-only placement checks for towns, plots, or firebase siting.
+
 ## Accidental Inland Water Suppression
 
 Status: Deprecated as of May 17, 2026.

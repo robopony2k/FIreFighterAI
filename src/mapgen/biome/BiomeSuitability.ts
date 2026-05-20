@@ -1,8 +1,8 @@
 import {
-  computeRenderedSlopeAngleDeg,
   computeTreeSuitability,
   type TreeSuitabilityResult
 } from "../../systems/terrain/sim/treeSuitability.js";
+import { computeRenderedSlopeAngleDeg } from "../../shared/terrainSlope.js";
 import type { MapGenContext } from "../pipeline/MapGenContext.js";
 
 export const isFloodplainCandidate = (

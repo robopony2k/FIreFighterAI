@@ -1,11 +1,17 @@
 import { inBounds, indexFor } from "../../../core/grid.js";
 import type { WorldState } from "../../../core/state.js";
 import type { Point, TileType } from "../../../core/types.js";
+import {
+  SETTLEMENT_PLOT_MAX_ANGLE_DEG,
+  evaluateSettlementSiteFit
+} from "./settlementTerrainFit.js";
 
 type BaseSiteCandidate = Point & {
   distanceFromCenter: number;
   elevation: number;
   localRelief: number;
+  maxAngleDeg: number;
+  meanAngleDeg: number;
   waterDistance: number;
   vegetationScore: number;
   score: number;
@@ -101,7 +107,8 @@ const scoreCandidate = (
   x: number,
   y: number,
   center: Point,
-  maxPreferredRadius: number
+  maxPreferredRadius: number,
+  heightScaleMultiplier: number
 ): BaseSiteCandidate | null => {
   if (!isBaseFootprintDry(state, x, y, BASE_DRY_BUFFER)) {
     return null;
@@ -115,23 +122,27 @@ const scoreCandidate = (
   const distanceFromCenter = Math.hypot(x - center.x, y - center.y);
   const elevation = tile.elevation;
   const localRelief = computeLocalRelief(state, x, y, LOCAL_RELIEF_RADIUS);
+  const terrainFit = evaluateSettlementSiteFit(state, { x, y }, 2, { heightScaleMultiplier });
   const waterDistance = Math.floor(tile.waterDist ?? 99);
   const vegetationScore = computeVegetationScore(state, x, y);
   const centerScore = 1 - clamp01(distanceFromCenter / Math.max(1, maxPreferredRadius));
   const reliefScore = 1 - clamp01(localRelief / 0.055);
+  const angleScore = terrainFit.score;
   const elevationScore = 1 - clamp01(Math.abs(elevation - 0.46) / 0.24);
   const highlandPenalty = clamp01((elevation - 0.58) / 0.16);
+  const steepPenalty = clamp01((terrainFit.maxAngleDeg - SETTLEMENT_PLOT_MAX_ANGLE_DEG) / 12);
   const barrenPenalty = 1 - vegetationScore;
   const shorelinePenalty = 1 - clamp01((waterDistance - 3) / 8);
-  const roadableScore = reliefScore * (1 - highlandPenalty * 0.8);
+  const roadableScore = (reliefScore * 0.62 + angleScore * 0.38) * (1 - highlandPenalty * 0.8);
 
   const score =
-    centerScore * 1.15
-    + roadableScore * 1.75
+    centerScore * 2.35
+    + roadableScore * 1.65
     + elevationScore * 1.1
     + vegetationScore * 1.15
     - shorelinePenalty * 0.35
-    - highlandPenalty * 1.25
+    - highlandPenalty * 2.85
+    - steepPenalty * 0.85
     - barrenPenalty * 0.65;
 
   return {
@@ -140,6 +151,8 @@ const scoreCandidate = (
     distanceFromCenter,
     elevation,
     localRelief,
+    maxAngleDeg: terrainFit.maxAngleDeg,
+    meanAngleDeg: terrainFit.meanAngleDeg,
     waterDistance,
     vegetationScore,
     score
@@ -148,7 +161,7 @@ const scoreCandidate = (
 
 const findFallbackDrySite = (state: WorldState, center: Point): Point => {
   let best: Point = center;
-  let bestDistance = Number.POSITIVE_INFINITY;
+  let bestScore = Number.POSITIVE_INFINITY;
   for (let y = 0; y < state.grid.rows; y += 1) {
     for (let x = 0; x < state.grid.cols; x += 1) {
       const tile = state.tiles[indexFor(state.grid, x, y)];
@@ -156,8 +169,11 @@ const findFallbackDrySite = (state: WorldState, center: Point): Point => {
         continue;
       }
       const distance = Math.hypot(x - center.x, y - center.y);
-      if (distance < bestDistance) {
-        bestDistance = distance;
+      const elevationPenalty = Math.max(0, tile.elevation - 0.7) * 128 + Math.abs(tile.elevation - 0.46) * 18;
+      const reliefPenalty = computeLocalRelief(state, x, y, 2) * 90;
+      const score = distance + elevationPenalty + reliefPenalty;
+      if (score < bestScore) {
+        bestScore = score;
         best = { x, y };
       }
     }
@@ -167,18 +183,18 @@ const findFallbackDrySite = (state: WorldState, center: Point): Point => {
 
 const isAcceptableForPass = (candidate: BaseSiteCandidate, pass: number): boolean => {
   if (pass === 0) {
-    return candidate.localRelief <= 0.045 && candidate.elevation <= 0.62 && candidate.vegetationScore >= 0.28;
+    return candidate.localRelief <= 0.045 && candidate.maxAngleDeg <= 22 && candidate.elevation <= 0.62 && candidate.vegetationScore >= 0.28;
   }
   if (pass === 1) {
-    return candidate.localRelief <= 0.05 && candidate.elevation <= 0.66 && candidate.vegetationScore >= 0.12;
+    return candidate.localRelief <= 0.05 && candidate.maxAngleDeg <= 26 && candidate.elevation <= 0.66 && candidate.vegetationScore >= 0.12;
   }
   if (pass === 2) {
-    return candidate.localRelief <= 0.055 && candidate.elevation <= 0.68 && candidate.vegetationScore >= 0.1;
+    return candidate.localRelief <= 0.055 && candidate.maxAngleDeg <= 30 && candidate.elevation <= 0.68 && candidate.vegetationScore >= 0.1;
   }
-  return true;
+  return candidate.elevation <= 0.74 && candidate.maxAngleDeg <= 34;
 };
 
-export const selectBaseSite = (state: WorldState): Point => {
+export const selectBaseSite = (state: WorldState, heightScaleMultiplier = 1): Point => {
   const center = { x: Math.floor(state.grid.cols / 2), y: Math.floor(state.grid.rows / 2) };
   const minDim = Math.max(1, Math.min(state.grid.cols, state.grid.rows));
   const passRadii = [0.18, 0.28, 0.34, 0.48].map((ratio) => Math.max(BASE_DRY_BUFFER + 1, minDim * ratio));
@@ -196,7 +212,7 @@ export const selectBaseSite = (state: WorldState): Point => {
         if (Math.hypot(x - center.x, y - center.y) > radius) {
           continue;
         }
-        const candidate = scoreCandidate(state, x, y, center, radius);
+        const candidate = scoreCandidate(state, x, y, center, radius, heightScaleMultiplier);
         if (!candidate) {
           continue;
         }

@@ -84,10 +84,10 @@ export const resolveStructureGrounding = (input: StructureGroundingInput): Struc
     terrainMax = padMax;
   }
 
-  const padHeight = padMax;
   const liftCap = input.maxPadLift ?? defaultMaxPadLift(heightScale);
-  const foundationBottom = Math.min(terrainMin, padHeight);
-  const foundationTop = padHeight + Math.min(Math.max(0, terrainMax - padHeight), liftCap) + (input.foundationClearance ?? 0.01);
+  const padHeight = padMax;
+  const foundationBottom = Math.max(padMin, padHeight - liftCap);
+  const foundationTop = padHeight + (input.foundationClearance ?? 0.01);
 
   return {
     padMin,

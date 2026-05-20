@@ -83,7 +83,7 @@ import { runIterativeHydraulicErosion } from "./iterativeHydraulicErosion.js";
 import { buildPreRiverErosionFields } from "./preRiverErosion.js";
 import { buildTectonicProxySeed } from "./tectonicProxySeed.js";
 import { buildNoiseLandmass } from "../systems/terrain/sim/noiseLandmass.js";
-import { computeRenderedSlopeAngleDeg } from "../systems/terrain/sim/treeSuitability.js";
+import { computeRenderedSlopeAngleDeg } from "../shared/terrainSlope.js";
 import { generateWorldClimateSeed } from "../systems/climate/sim/worldClimateSeed.js";
 import { buildWindDrivenMoistureMap } from "../systems/terrain/sim/windDrivenMoisture.js";
 import { selectBaseSite } from "../systems/settlements/sim/baseSiteSelection.js";
@@ -5671,6 +5671,13 @@ export function flattenSettlementGround(state: WorldState): void {
   const ringTarget = new Float32Array(total);
   const roadAdjustSum = new Float32Array(total);
   const roadAdjustCount = new Uint8Array(total);
+  const setElevation = (idx: number, elevation: number): void => {
+    const value = clamp(elevation, 0, 1);
+    tiles[idx].elevation = value;
+    if (state.tileElevation.length === total) {
+      state.tileElevation[idx] = value;
+    }
+  };
   const isStructureTile = (idx: number): boolean => {
     const type = tiles[idx].type;
     return type === "house" || type === "base" || state.structureMask[idx] === 1;
@@ -5786,13 +5793,10 @@ export function flattenSettlementGround(state: WorldState): void {
       continue;
     }
     padSamples.sort((a, b) => a - b);
-    const middle = Math.floor(padSamples.length / 2);
-    const target =
-      padSamples.length % 2 === 0
-        ? clamp((padSamples[middle - 1] + padSamples[middle]) * 0.5, 0, 1)
-        : clamp(padSamples[middle] ?? 0, 0, 1);
+    const targetIndex = Math.max(0, Math.min(padSamples.length - 1, Math.floor((padSamples.length - 1) * 0.35)));
+    const target = clamp(padSamples[targetIndex] ?? 0, 0, 1);
     padTiles.forEach((idx) => {
-      tiles[idx].elevation = target;
+      setElevation(idx, target);
     });
 
     padTiles.forEach((idx) => {
@@ -5874,7 +5878,7 @@ export function flattenSettlementGround(state: WorldState): void {
     }
     const target = ringTarget[i];
     const t = ringInfluence[i];
-    tiles[i].elevation = clamp(tiles[i].elevation * (1 - t) + target * t, 0, 1);
+    setElevation(i, tiles[i].elevation * (1 - t) + target * t);
   }
 
   for (let i = 0; i < total; i += 1) {
@@ -5887,8 +5891,10 @@ export function flattenSettlementGround(state: WorldState): void {
       -SETTLEMENT_PAD_ROAD_ADJUST_LIMIT,
       SETTLEMENT_PAD_ROAD_ADJUST_LIMIT
     );
-    tiles[i].elevation = clamp(tiles[i].elevation + delta, 0, 1);
+    setElevation(i, tiles[i].elevation + delta);
   }
+  state.tileSoaDirty = true;
+  state.terrainDirty = true;
   state.settlementPadReliefMax = Number(housePadReliefMax.toFixed(4));
   state.settlementPadReliefMean = Number((housePadCount > 0 ? housePadReliefSum / housePadCount : 0).toFixed(4));
 }

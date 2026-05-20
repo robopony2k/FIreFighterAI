@@ -42,6 +42,11 @@ const {
   getBuildingLifecycleStageId
 } = await import(distImport(["systems", "settlements", "sim", "buildingLifecycle.js"]));
 const { pickHouseFootprint } = await import(distImport(["core", "houseFootprints.js"]));
+const {
+  evaluateSettlementFootprintFit,
+  flattenSettlementFootprintForPlot
+} = await import(distImport(["systems", "settlements", "sim", "settlementTerrainFit.js"]));
+const { resolveStructureGrounding } = await import(distImport(["render", "terrain", "shared", "structureGrounding.js"]));
 
 const SIMULATION_YEAR_DAYS = PHASES.reduce((sum, phase) => sum + phase.duration, 0);
 
@@ -665,6 +670,106 @@ const runCompactDensificationCase = () => {
   };
 };
 
+const runSteepFrontageRejectionCase = () => {
+  const grid = { cols: 20, rows: 20, totalTiles: 20 * 20 };
+  const state = createInitialState(8181, grid);
+  state.tiles = Array.from({ length: grid.totalTiles }, (_, idx) => {
+    const x = idx % grid.cols;
+    const y = Math.floor(idx / grid.cols);
+    return buildTile("grass", { elevation: (x + y) % 2 === 0 ? 0.22 : 0.25 });
+  });
+  for (let x = 4; x <= 16; x += 1) {
+    state.tiles[10 * grid.cols + x] = buildTile("road", { fuel: 0, elevation: 0.22 });
+  }
+  const town = buildTown(8181, 0, "Steephold", 10, 10, 10);
+  town.streetArchetype = "main_street";
+  town.growthFrontiers = [
+    { x: 16, y: 10, dx: 1, dy: 0, active: true, branchType: "primary" },
+    { x: 4, y: 10, dx: -1, dy: 0, active: true, branchType: "primary" }
+  ];
+  state.towns = [town];
+  backfillRoadEdgesFromAdjacency(state);
+  syncTileSoA(state);
+
+  const context = rebuildGrowthContext(state);
+  const lot = reserveTownExpansionLot(state, town, context, createRuntimeSettlementRoadAdapter(), 1);
+  assert.equal(lot, null, "frontage above the settlement angle band should not reserve a construction lot");
+  assert.equal(state.totalHouses, 0, "steep frontage rejection should not place a house");
+
+  return { rejected: true };
+};
+
+const runPlotFlatteningAndFoundationCase = () => {
+  const grid = { cols: 8, rows: 8, totalTiles: 8 * 8 };
+  const state = createInitialState(8282, grid);
+  state.tiles = Array.from({ length: grid.totalTiles }, () => buildTile("grass", { elevation: 0.22 }));
+  state.tiles[4 * grid.cols + 3] = buildTile("road", { fuel: 0, elevation: 0.22 });
+  state.tiles[3 * grid.cols + 3] = buildTile("grass", { elevation: 0.232 });
+  state.tiles[3 * grid.cols + 4] = buildTile("grass", { elevation: 0.248 });
+  const bounds = { minX: 3, maxX: 4, minY: 3, maxY: 3, width: 2, depth: 1 };
+  const before = evaluateSettlementFootprintFit(state, bounds);
+  const flattened = flattenSettlementFootprintForPlot(state, bounds, { roadPoint: { x: 3, y: 4 } });
+  assert.ok(before.relief > flattened.after.relief, "accepted plot flattening should reduce footprint relief");
+  assert.ok(flattened.after.relief <= 0.0001, "accepted plot pad should be level after flattening");
+
+  const grounding = resolveStructureGrounding({
+    surface: {
+      cols: grid.cols,
+      rows: grid.rows,
+      elevations: state.tiles.map((tile) => tile.elevation)
+    },
+    minTileX: bounds.minX,
+    maxTileX: bounds.maxX,
+    minTileY: bounds.minY,
+    maxTileY: bounds.maxY,
+    heightScale: 1,
+    heightAtTileCoord: (x, y) => {
+      const tileX = Math.max(0, Math.min(grid.cols - 1, Math.floor(x)));
+      const tileY = Math.max(0, Math.min(grid.rows - 1, Math.floor(y)));
+      return state.tiles[tileY * grid.cols + tileX].elevation;
+    }
+  });
+  assert.ok(
+    grounding.foundationTop - grounding.foundationBottom <= 0.04,
+    "grounding should keep foundations as trim skirts on flattened settlement pads"
+  );
+
+  const unevenSurfaceElevations = Array.from({ length: grid.totalTiles }, () => 0.22);
+  unevenSurfaceElevations[3 * grid.cols + 4] = 0.5;
+  const unevenGrounding = resolveStructureGrounding({
+    surface: {
+      cols: grid.cols,
+      rows: grid.rows,
+      elevations: unevenSurfaceElevations
+    },
+    minTileX: bounds.minX,
+    maxTileX: bounds.maxX,
+    minTileY: bounds.minY,
+    maxTileY: bounds.maxY,
+    heightScale: 1,
+    heightAtTileCoord: (x, y) => {
+      const tileX = Math.max(0, Math.min(grid.cols - 1, Math.floor(x)));
+      const tileY = Math.max(0, Math.min(grid.rows - 1, Math.floor(y)));
+      return unevenSurfaceElevations[tileY * grid.cols + tileX];
+    }
+  });
+  assert.ok(
+    unevenGrounding.foundationTop >= 0.51,
+    "grounding should keep the structure base above the highest footprint tile"
+  );
+  assert.ok(
+    unevenGrounding.foundationTop - unevenGrounding.foundationBottom <= 0.14,
+    "grounding should cap visual foundation height on unreconciled steep footprints"
+  );
+
+  return {
+    beforeRelief: before.relief,
+    afterRelief: flattened.after.relief,
+    foundationHeight: grounding.foundationTop - grounding.foundationBottom,
+    unevenFoundationTop: unevenGrounding.foundationTop
+  };
+};
+
 const runStyleContinuityCase = () => {
   const state = buildBaseWorld(8182, 1);
   const anchorIndex = 2 * state.grid.cols + 7;
@@ -745,6 +850,8 @@ const blockedGrowth = runBlockedGrowthPressureCase();
 const compact = runCompactGrowthBranchingCase();
 const diagonal = runDiagonalFrontageCase();
 const densification = runCompactDensificationCase();
+const steepFrontage = runSteepFrontageRejectionCase();
+const flattening = runPlotFlatteningAndFoundationCase();
 const startup = runMapgenStartupCompletesStockCase();
 const style = runStyleContinuityCase();
 
@@ -764,6 +871,9 @@ console.log(
     `diagonalAnchor=${diagonal.anchor}`,
     `diagonalRoad=${diagonal.road}`,
     `compactDenseGain=${densification.populationGain}`,
+    `steepRejected=${steepFrontage.rejected ? 1 : 0}`,
+    `flatRelief=${flattening.beforeRelief.toFixed(3)}->${flattening.afterRelief.toFixed(3)}`,
+    `foundation=${flattening.foundationHeight.toFixed(3)}`,
     `startupHouses=${startup.houseCount}`,
     `styleSeed=${style.styleSeed}`
   ].join(" ")

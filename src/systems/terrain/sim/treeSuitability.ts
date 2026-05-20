@@ -1,6 +1,6 @@
 import { clamp } from "../../../core/utils.js";
-import { getTerrainHeightScale } from "../../../core/terrainScale.js";
 import { fbmNoise, hash2D } from "../../../mapgen/noise.js";
+export { computeRenderedSlopeAngleDeg } from "../../../shared/terrainSlope.js";
 
 export type TreeSuitabilityInput = {
   seed: number;
@@ -42,17 +42,6 @@ const smoothstep = (edge0: number, edge1: number, value: number): number => {
 };
 
 const transitionWeight = (value: number): number => 1 - Math.abs(clamp(value, 0, 1) * 2 - 1);
-
-export const computeRenderedSlopeAngleDeg = (
-  slope: number,
-  cols: number,
-  rows: number,
-  heightScaleMultiplier = 1
-): number => {
-  const tileSpan = Math.max(1e-4, (Math.max(1, Math.min(cols, rows) - 1) / Math.max(1, Math.min(cols, rows))));
-  const grade = (Math.max(0, slope) * getTerrainHeightScale(cols, rows, heightScaleMultiplier)) / tileSpan;
-  return (Math.atan(grade) * 180) / Math.PI;
-};
 
 export const computeTreeSlopeSuitability = (slopeAngleDeg: number): number => {
   if (slopeAngleDeg <= 20) {
