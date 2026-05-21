@@ -8,6 +8,7 @@ import {
   RISK_THRESHOLDS,
   buildRiskPaths,
   computeForecastMarkerX,
+  computeForecastPeriodLayout,
   computeSeasonLayout,
   computeYearLayout
 } from "../../../ui/phase/forecastLayout.js";
@@ -190,6 +191,20 @@ export class ClimateChartWidget implements HudWidget {
       ctx.lineTo(chartX + first.x, axisY);
       ctx.closePath();
       ctx.fill();
+
+      const rainLayout = computeForecastPeriodLayout(forecast.rainPeriods ?? [], forecastStartDay, forecast.days, {
+        width: chartWidth,
+        height: chartHeight,
+        padding: chartPadding
+      });
+      rainLayout.bands.forEach((band) => {
+        const x = chartX + band.x;
+        ctx.fillStyle = "rgba(89, 168, 222, 0.24)";
+        ctx.fillRect(x, innerTop, band.width, innerHeight);
+        ctx.strokeStyle = "rgba(130, 210, 255, 0.62)";
+        ctx.lineWidth = 1;
+        ctx.strokeRect(x + 0.5, innerTop + 0.5, Math.max(0, band.width - 1), Math.max(0, innerHeight - 1));
+      });
 
       const lineGradient = ctx.createLinearGradient(chartX, 0, chartX + chartWidth, 0);
       lineGradient.addColorStop(0, lineCool);

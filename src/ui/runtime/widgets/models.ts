@@ -13,8 +13,8 @@ export type TimeControlsWidgetModel = {
   timeSpeedControlMode: TimeSpeedControlMode;
   timeSpeedIndex: number;
   timeSpeedValue: number;
-  skipToNextFireActive: boolean;
-  canSkipToNextFire: boolean;
+  advanceToNextEventActive: boolean;
+  canAdvanceToNextEvent: boolean;
   status?: string;
 };
 
@@ -24,7 +24,14 @@ export type AudioControlsWidgetModel = {
   music: AudioChannelState;
 };
 
-export type SimulationSettingsWidgetModel = Pick<RuntimeSettings, "randomFireIgnition" | "annualReportEnabled">;
+export type SimulationSettingsWidgetModel = Pick<
+  RuntimeSettings,
+  | "randomFireIgnition"
+  | "annualReportEnabled"
+  | "pauseOnFireEvent"
+  | "pauseOnAnnualReportEvent"
+  | "pauseOnRainEvent"
+>;
 
 export type ClimateWidgetModel = {
   forecast: ClimateForecast | null;

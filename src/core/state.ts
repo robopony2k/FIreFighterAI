@@ -11,7 +11,7 @@ import type {
   ScoringState,
   SelectionScope,
   SimTimeMode,
-  SkipToNextFireState,
+  AdvanceToNextEventState,
   Town,
   SeasonPhase,
   Tile,
@@ -20,6 +20,7 @@ import type {
   Wind,
   TileType,
   RosterUnit,
+  SeasonalRainState,
   TimeSpeedControlMode
 } from "./types.js";
 import type { CampaignState } from "./campaign.js";
@@ -219,7 +220,7 @@ export interface WorldState {
   fireActivityState: FireActivityState;
   latestFireAlert: FireAlertIncident | null;
   nextFireAlertId: number;
-  skipToNextFire: SkipToNextFireState | null;
+  advanceToNextEvent: AdvanceToNextEventState | null;
 
   paused: boolean;
 
@@ -324,6 +325,7 @@ export interface WorldState {
   climateForecast: ClimateForecast | null;
   climateForecastStart: number;
   climateForecastDay: number;
+  seasonalRain: SeasonalRainState;
   careerDay: number;
 
   fireBlockSize: number;
@@ -575,7 +577,7 @@ export function createInitialState(seed: number, grid: Grid): WorldState {
     fireActivityState: "idle",
     latestFireAlert: null,
     nextFireAlertId: 1,
-    skipToNextFire: null,
+    advanceToNextEvent: null,
 
     paused: false,
 
@@ -675,6 +677,16 @@ export function createInitialState(seed: number, grid: Grid): WorldState {
     climateForecast: null,
     climateForecastStart: -1,
     climateForecastDay: 0,
+    seasonalRain: {
+      event: null,
+      yearIndex: 0,
+      dayOfYear: 1,
+      intensity01: 0,
+      visualIntensity01: 0,
+      active: false,
+      hasExtinguished: false,
+      hasStartPauseHandled: false
+    },
     careerDay: 0,
     fireSnapshot: new Float32Array(grid.totalTiles),
     roster: [],

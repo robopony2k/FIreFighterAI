@@ -25,7 +25,9 @@ export type FxLabPanelHandle = {
 type FxLabToolTab = "scene" | "fire" | "hose" | "water" | "export";
 
 const getRecommendedToolTab = (scenarioId: FxLabScenarioId): FxLabToolTab =>
-  scenarioId === "river-waterfall" || scenarioId === "ocean-shoreline"
+  scenarioId === "rain-overlay"
+    ? "scene"
+    : scenarioId === "river-waterfall" || scenarioId === "ocean-shoreline"
     ? "water"
     : scenarioId.startsWith("water-")
       ? "hose"

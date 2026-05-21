@@ -10,16 +10,19 @@ import { applyFuel } from "../dist/core/tiles.js";
 import { buildSampleTypeMap } from "../dist/render/threeTestTerrain.js";
 import {
   getStrategicFireSimulationStepCap,
-  isSkipToNextFireAvailable,
-  requestSkipToNextFire,
+  isAdvanceToNextEventAvailable,
+  requestAdvanceToNextEvent,
+  setPhase,
   stepSim
 } from "../dist/sim/index.js";
+import { getRuntimeSettings, setRuntimeSetting } from "../dist/persistence/runtimeSettings.js";
 import { markFireBlockActiveByTile } from "../dist/sim/fire/activeBlocks.js";
 import { stepFire } from "../dist/sim/fire.js";
 import { isRandomIgnitionWeatherViable } from "../dist/sim/fire/fireWeather.js";
 import { findIgnitionCandidate } from "../dist/sim/fire/ignite.js";
 import { createUnit } from "../dist/sim/units.js";
 import { applyFireActivityMetrics } from "../dist/systems/fire/sim/fireActivityState.js";
+import { buildSeasonalRainEvent } from "../dist/systems/climate/sim/seasonalRain.js";
 import {
   getElevationHeatTransferMultiplier,
   resolveTerrainAdjustedWind
@@ -39,6 +42,16 @@ const EXPOSURE_SEQUENCE_MAX_DAYS = 20;
 
 const getCenter = (state) => Math.floor(state.grid.cols / 2);
 const syncFireActivity = (state, activeFires = state.lastActiveFires) => applyFireActivityMetrics(state, activeFires);
+
+const withRuntimeSetting = (key, value, run) => {
+  const previous = getRuntimeSettings()[key];
+  setRuntimeSetting(key, value);
+  try {
+    return run();
+  } finally {
+    setRuntimeSetting(key, previous);
+  }
+};
 
 const createTile = (type, moisture) => ({
   type,
@@ -377,6 +390,38 @@ const runScenario = ({ seed, startDay, speed, durationDays, withTruck = false, s
   };
 };
 
+const runSeasonalRainClearScenario = () => {
+  const seed = 8821;
+  const { state, rng } = buildState(seed);
+  const effects = createEffectsState();
+  const rain = buildSeasonalRainEvent(seed, 0);
+  setCareerCursor(state, rain.extinguishDayOfYear - 2);
+  state.fireSettings.ignitionChancePerDay = 0;
+  const idx = igniteCenter(state);
+  state.fireSnapshot[idx] = state.tileFire[idx];
+  state.scoring.prevFireBoundsActive = true;
+  state.scoring.prevFireMinX = state.fireMinX;
+  state.scoring.prevFireMaxX = state.fireMaxX;
+  state.scoring.prevFireMinY = state.fireMinY;
+  state.scoring.prevFireMaxY = state.fireMaxY;
+  stepSim(state, effects, rng, 1);
+  const creditedEvents = state.scoring.events.filter((event) => event.lane === "extinguished");
+  const fireFlowEvents = state.scoring.flowEvents.filter(
+    (event) => event.kind === "extinguished" || event.kind === "decay"
+  );
+  return {
+    rain,
+    activeFires: state.lastActiveFires,
+    centerFire: state.tileFire[idx],
+    centerHeat: state.tileHeat[idx],
+    hasExtinguished: state.seasonalRain.hasExtinguished,
+    creditedEvents: creditedEvents.length,
+    fireFlowEvents: fireFlowEvents.length,
+    seasonExtinguishedCount: state.scoring.seasonExtinguishedCount,
+    seasonExtinguishPoints: state.scoring.seasonExtinguishPoints
+  };
+};
+
 const runSingleTargetElevationSpread = (targetElevation) => {
   const { state, rng } = buildState(8850);
   const effects = createEffectsState();
@@ -698,6 +743,16 @@ const median = (values) => {
 const failures = [];
 
 {
+  const settings = getRuntimeSettings();
+  console.log(
+    `\nRuntime Event Pause Defaults\nfire=${settings.pauseOnFireEvent ? 1 : 0} annual=${settings.pauseOnAnnualReportEvent ? 1 : 0} rain=${settings.pauseOnRainEvent ? 1 : 0}`
+  );
+  if (!settings.pauseOnFireEvent || !settings.pauseOnAnnualReportEvent || !settings.pauseOnRainEvent) {
+    failures.push("Runtime event pause toggles should default to enabled.");
+  }
+}
+
+{
   const lowRiskWeather = {
     climateRisk: 0.59,
     ignition: 1.05,
@@ -988,10 +1043,10 @@ const failures = [];
   setCareerCursor(state, 225);
   state.fireSettings.ignitionChancePerDay = 100;
   state.timeSpeedSliderValue = 17;
-  const requested = requestSkipToNextFire(state);
+  const requested = requestAdvanceToNextEvent(state);
   const { cap, appliedDelta } = stepWithRuntimeCap(state, effects, rng, BASE_STEP * 80);
   console.log(
-    `\nSkip-To-Fire Runtime Cap\nrequested=${requested ? 1 : 0} cap=${cap?.toFixed(3) ?? "none"} applied=${appliedDelta.toFixed(3)} paused=${state.paused ? 1 : 0} mode=${state.simTimeMode} active=${state.lastActiveFires} slider=${state.timeSpeedSliderValue.toFixed(2)}`
+    `\nAdvance-To-Event Fire Runtime Cap\nrequested=${requested ? 1 : 0} cap=${cap?.toFixed(3) ?? "none"} applied=${appliedDelta.toFixed(3)} paused=${state.paused ? 1 : 0} mode=${state.simTimeMode} active=${state.lastActiveFires} slider=${state.timeSpeedSliderValue.toFixed(2)}`
   );
   if (
     !requested ||
@@ -1000,12 +1055,119 @@ const failures = [];
     !state.paused ||
     state.simTimeMode !== "incident" ||
     !state.latestFireAlert ||
-    state.skipToNextFire !== null ||
+    state.advanceToNextEvent !== null ||
     Math.abs(state.timeSpeedSliderValue - 17) > 0.0001
   ) {
-    failures.push("Skip-to-next-fire did not use the runtime cap and restore incident alert state.");
+    failures.push("Advance to next event did not use the runtime cap and restore incident alert state.");
   }
 }
+
+withRuntimeSetting("pauseOnFireEvent", false, () => {
+  const { state, rng } = buildState(3912);
+  const effects = createEffectsState();
+  setCareerCursor(state, 225);
+  state.fireSettings.ignitionChancePerDay = 100;
+  state.timeSpeedSliderValue = 19;
+  const requested = requestAdvanceToNextEvent(state);
+  const { cap, appliedDelta } = stepWithRuntimeCap(state, effects, rng, BASE_STEP * 80);
+  console.log(
+    `\nAdvance-To-Event Fire Pause Disabled\nrequested=${requested ? 1 : 0} cap=${cap?.toFixed(3) ?? "none"} applied=${appliedDelta.toFixed(3)} paused=${state.paused ? 1 : 0} advance=${state.advanceToNextEvent ? 1 : 0} alertId=${state.latestFireAlert?.id ?? "none"} active=${state.lastActiveFires}`
+  );
+  if (
+    !requested ||
+    cap === null ||
+    !state.latestFireAlert ||
+    state.paused ||
+    state.advanceToNextEvent === null ||
+    state.lastActiveFires <= 0
+  ) {
+    failures.push("Disabled fire pause did not let a fire event occur while advance-to-event continued.");
+  }
+});
+
+{
+  const { state, rng } = buildState(3913);
+  setCareerCursor(state, 269);
+  state.timeSpeedSliderValue = 13;
+  const requested = requestAdvanceToNextEvent(state);
+  setPhase(state, rng, "maintenance", { openAnnualReport: true });
+  console.log(
+    `\nAdvance-To-Event Annual Report Pause\nrequested=${requested ? 1 : 0} paused=${state.paused ? 1 : 0} report=${state.annualReportOpen ? 1 : 0} advance=${state.advanceToNextEvent ? 1 : 0} slider=${state.timeSpeedSliderValue.toFixed(2)}`
+  );
+  if (
+    !requested ||
+    !state.paused ||
+    !state.annualReportOpen ||
+    state.advanceToNextEvent !== null ||
+    Math.abs(state.timeSpeedSliderValue - 13) > 0.0001
+  ) {
+    failures.push("Annual report did not pause and restore advance-to-event controls by default.");
+  }
+}
+
+withRuntimeSetting("pauseOnAnnualReportEvent", false, () => {
+  const { state, rng } = buildState(3914);
+  setCareerCursor(state, 269);
+  state.timeSpeedSliderValue = 11;
+  const requested = requestAdvanceToNextEvent(state);
+  setPhase(state, rng, "maintenance", { openAnnualReport: true });
+  console.log(
+    `\nAdvance-To-Event Annual Report Pause Disabled\nrequested=${requested ? 1 : 0} paused=${state.paused ? 1 : 0} report=${state.annualReportOpen ? 1 : 0} advance=${state.advanceToNextEvent ? 1 : 0} budget=${state.budget}`
+  );
+  if (!requested || state.paused || state.annualReportOpen || state.advanceToNextEvent === null) {
+    failures.push("Disabled annual report pause opened a blocking report or stopped advance-to-event.");
+  }
+});
+
+{
+  const seed = 3915;
+  const { state, rng } = buildState(seed);
+  const effects = createEffectsState();
+  const rain = buildSeasonalRainEvent(seed, 0);
+  setCareerCursor(state, rain.startDayOfYear);
+  state.fireSettings.ignitionChancePerDay = 0;
+  state.paused = false;
+  state.timeSpeedSliderValue = 15;
+  const requested = requestAdvanceToNextEvent(state);
+  stepSim(state, effects, rng, BASE_STEP);
+  const pausedAtStart = state.paused;
+  const handledAtStart = state.seasonalRain.hasStartPauseHandled;
+  state.paused = false;
+  stepSim(state, effects, rng, BASE_STEP);
+  console.log(
+    `\nAdvance-To-Event Rain Start Pause\nrequested=${requested ? 1 : 0} pausedStart=${pausedAtStart ? 1 : 0} pausedAgain=${state.paused ? 1 : 0} active=${state.seasonalRain.active ? 1 : 0} handled=${state.seasonalRain.hasStartPauseHandled ? 1 : 0} advance=${state.advanceToNextEvent ? 1 : 0}`
+  );
+  if (!requested || !pausedAtStart || !handledAtStart || state.advanceToNextEvent !== null) {
+    failures.push("Rain start did not pause advance-to-event once by default.");
+  }
+  if (state.paused) {
+    failures.push("Rain start pause fired more than once for the same seasonal rain event.");
+  }
+}
+
+withRuntimeSetting("pauseOnRainEvent", false, () => {
+  const seed = 3916;
+  const { state, rng } = buildState(seed);
+  const effects = createEffectsState();
+  const rain = buildSeasonalRainEvent(seed, 0);
+  setCareerCursor(state, rain.startDayOfYear);
+  state.fireSettings.ignitionChancePerDay = 0;
+  state.paused = false;
+  const requested = requestAdvanceToNextEvent(state);
+  stepSim(state, effects, rng, BASE_STEP);
+  console.log(
+    `\nAdvance-To-Event Rain Pause Disabled\nrequested=${requested ? 1 : 0} paused=${state.paused ? 1 : 0} active=${state.seasonalRain.active ? 1 : 0} handled=${state.seasonalRain.hasStartPauseHandled ? 1 : 0} advance=${state.advanceToNextEvent ? 1 : 0}`
+  );
+  if (
+    !requested ||
+    state.paused ||
+    !state.seasonalRain.active ||
+    !state.seasonalRain.hasStartPauseHandled ||
+    state.advanceToNextEvent === null
+  ) {
+    failures.push("Disabled rain pause did not let the rain event pass while advance-to-event continued.");
+  }
+});
 
 {
   const { state, rng } = buildState(3902);
@@ -1058,10 +1220,10 @@ const failures = [];
   syncFireActivity(state, 0);
   stepSim(state, effects, rng, BASE_STEP);
   console.log(
-    `\nCooling Incident Release\nmode=${state.simTimeMode} state=${state.fireActivityState} active=${state.lastActiveFires} release=${state.tileHeatRelease[idx].toFixed(3)} bounds=${state.fireBoundsActive ? 1 : 0} canSkip=${isSkipToNextFireAvailable(state) ? 1 : 0}`
+    `\nCooling Incident Release\nmode=${state.simTimeMode} state=${state.fireActivityState} active=${state.lastActiveFires} release=${state.tileHeatRelease[idx].toFixed(3)} bounds=${state.fireBoundsActive ? 1 : 0} canAdvance=${isAdvanceToNextEventAvailable(state) ? 1 : 0}`
   );
-  if (state.simTimeMode !== "strategic" || !isSkipToNextFireAvailable(state)) {
-    failures.push("Cooling-only fire bounds incorrectly kept incident time or blocked next-fire skip.");
+  if (state.simTimeMode !== "strategic" || !isAdvanceToNextEventAvailable(state)) {
+    failures.push("Cooling-only fire bounds incorrectly kept incident time or blocked advance-to-event.");
   }
 }
 
@@ -1070,10 +1232,10 @@ const failures = [];
   setCareerCursor(state, 225);
   seedExposureIncident(state);
   console.log(
-    `\nBurning Skip Gate\nmode=${state.simTimeMode} state=${state.fireActivityState} active=${state.lastActiveFires} canSkip=${isSkipToNextFireAvailable(state) ? 1 : 0}`
+    `\nBurning Advance Gate\nmode=${state.simTimeMode} state=${state.fireActivityState} active=${state.lastActiveFires} canAdvance=${isAdvanceToNextEventAvailable(state) ? 1 : 0}`
   );
-  if (isSkipToNextFireAvailable(state)) {
-    failures.push("Active burning fire incorrectly allowed skip-to-next-fire.");
+  if (isAdvanceToNextEventAvailable(state)) {
+    failures.push("Active burning fire incorrectly allowed advance-to-event.");
   }
 }
 
@@ -1308,6 +1470,27 @@ if (!winterSuppression || !summerSuppression) {
   if (!(winterExtinguishedAt < summerExtinguishedAt || (winterSuppression.endActiveFires === 0 && summerSuppression.endActiveFires > 0))) {
     failures.push("Winter suppression did not outperform summer suppression.");
   }
+}
+
+const rainClear = withRuntimeSetting("pauseOnRainEvent", false, runSeasonalRainClearScenario);
+console.log(
+  `\nSeasonal Rain Clear\npeak=${rainClear.rain.peakDayOfYear} active=${rainClear.activeFires} ` +
+    `fire=${rainClear.centerFire.toFixed(3)} heat=${rainClear.centerHeat.toFixed(3)} credited=${rainClear.creditedEvents} ` +
+    `fireFlow=${rainClear.fireFlowEvents}`
+);
+if (rainClear.activeFires !== 0 || rainClear.centerFire > 0 || rainClear.centerHeat > 0) {
+  failures.push("Seasonal autumn rain did not clear the active fire.");
+}
+if (!rainClear.hasExtinguished) {
+  failures.push("Seasonal autumn rain did not mark its yearly clear as consumed.");
+}
+if (
+  rainClear.creditedEvents > 0 ||
+  rainClear.fireFlowEvents > 0 ||
+  rainClear.seasonExtinguishedCount > 0 ||
+  rainClear.seasonExtinguishPoints > 0
+) {
+  failures.push("Seasonal autumn rain clearing awarded fire suppression or decay credit.");
 }
 
 const perfScenario = runScenario({

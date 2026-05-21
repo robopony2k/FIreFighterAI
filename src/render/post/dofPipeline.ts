@@ -4,6 +4,10 @@ import { createThreeTestCinematicGradePass, type ThreeTestCinematicGradeConfig }
 import { dofBlurFragmentShader } from "./shaders/dofBlur.js";
 import { dofCocFragmentShader } from "./shaders/dofCoc.js";
 import { dofCompositeFragmentShader } from "./shaders/dofComposite.js";
+import {
+  createSeasonalRainOverlayPass,
+  type SeasonalRainOverlayState
+} from "../../systems/climate/rendering/seasonalRainOverlayPass.js";
 
 export type DepthOfFieldFocusMode = "target" | "manual";
 
@@ -33,6 +37,7 @@ export type ThreeTestPostPipeline = {
   setFogColor: (color: THREE.ColorRepresentation) => void;
   setHeightHazeStrength: (value: number) => void;
   setSunGlare: (x: number, y: number, intensity: number, color?: THREE.ColorRepresentation) => void;
+  setSeasonalRainState: (state: SeasonalRainOverlayState) => void;
   getStats: () => ThreeTestPostPipelineStats;
   dispose: () => void;
 };
@@ -107,6 +112,7 @@ export const createThreeTestPostPipeline = (
 
   const gradePass = createThreeTestCinematicGradePass(gradeConfig);
   gradePass.setEnabled(gradeEnabled);
+  const rainPass = createSeasonalRainOverlayPass();
 
   const cocUniforms = {
     uDepthTex: { value: null as THREE.DepthTexture | null },
@@ -179,6 +185,7 @@ export const createThreeTestPostPipeline = (
   let nearBlurTargetA: THREE.WebGLRenderTarget | null = null;
   let nearBlurTargetB: THREE.WebGLRenderTarget | null = null;
   let compositeTarget: THREE.WebGLRenderTarget | null = null;
+  let rainInputTarget: THREE.WebGLRenderTarget | null = null;
   let sceneTargetsDirty = true;
   let dofTargetsDirty = true;
   let postFailed = false;
@@ -201,6 +208,10 @@ export const createThreeTestPostPipeline = (
     dofTargetsDirty = true;
   };
 
+  const disposeRainTargets = (): void => {
+    rainInputTarget = disposeRenderTarget(rainInputTarget);
+  };
+
   const failPost = (error: unknown): void => {
     if (!postWarnIssued) {
       console.warn("[threeTest] Post pipeline disabled; falling back to direct scene render.", error);
@@ -212,6 +223,7 @@ export const createThreeTestPostPipeline = (
     gradePass.setEnabled(false);
     disposeSceneTargets();
     disposeDofTargets();
+    disposeRainTargets();
   };
 
   const failDof = (error: unknown): void => {
@@ -293,6 +305,23 @@ export const createThreeTestPostPipeline = (
     }
   };
 
+  const ensureRainInputTarget = (): boolean => {
+    if (!rainPass.isActive()) {
+      return false;
+    }
+    if (rainInputTarget) {
+      return true;
+    }
+    try {
+      const size = resolveFullResolution();
+      rainInputTarget = createColorTarget(size.width, size.height, "three-test-rain-input");
+      return true;
+    } catch (error) {
+      failPost(error);
+      return false;
+    }
+  };
+
   const updateCameraUniforms = (): void => {
     cocUniforms.uCameraNear.value = camera.near;
     cocUniforms.uCameraFar.value = camera.far;
@@ -340,7 +369,8 @@ export const createThreeTestPostPipeline = (
   };
 
   const render = (renderSceneFn: () => void): boolean => {
-    if ((!gradeEnabled && !dofSettings.enabled) || postFailed) {
+    const rainActive = rainPass.isActive();
+    if ((!gradeEnabled && !dofSettings.enabled && !rainActive) || postFailed) {
       stats.postMs = 0;
       stats.dofMs = 0;
       renderSceneFn();
@@ -391,7 +421,14 @@ export const createThreeTestPostPipeline = (
         stats.dofMs = 0;
       }
 
-      gradePass.render(renderer, finalTexture, previousTarget);
+      const gradeTarget = rainActive && ensureRainInputTarget() ? rainInputTarget : previousTarget;
+      gradePass.render(renderer, finalTexture, gradeTarget);
+      if (rainActive && rainInputTarget) {
+        finalTexture = rainInputTarget.texture;
+      }
+      if (rainActive) {
+        rainPass.render(renderer, finalTexture, previousTarget);
+      }
       stats.postMs = performance.now() - postStart;
       return true;
     } catch (error) {
@@ -417,8 +454,10 @@ export const createThreeTestPostPipeline = (
       viewportHeight = Math.max(1, Math.floor(height));
       viewportDpr = Math.max(0.5, dpr);
       gradePass.resize(viewportWidth, viewportHeight);
+      rainPass.resize(viewportWidth, viewportHeight);
       sceneTargetsDirty = true;
       dofTargetsDirty = true;
+      disposeRainTargets();
     },
     render,
     setDofSettings: (settings) => {
@@ -453,6 +492,12 @@ export const createThreeTestPostPipeline = (
     setSunGlare: (x, y, intensity, color) => {
       gradePass.setSunGlare(x, y, intensity, color);
     },
+    setSeasonalRainState: (state) => {
+      rainPass.setState(state);
+      if (!rainPass.isActive()) {
+        disposeRainTargets();
+      }
+    },
     getStats: () => ({
       postMs: stats.postMs,
       dofMs: stats.dofMs,
@@ -461,7 +506,9 @@ export const createThreeTestPostPipeline = (
     dispose: () => {
       disposeSceneTargets();
       disposeDofTargets();
+      disposeRainTargets();
       gradePass.dispose();
+      rainPass.dispose();
       cocPass.dispose();
       blurPass.dispose();
       compositePass.dispose();

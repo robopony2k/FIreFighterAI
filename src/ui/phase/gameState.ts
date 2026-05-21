@@ -21,8 +21,8 @@ export class GameState {
     timeSpeedControlMode: "buttons",
     timeSpeedIndex: 1,
     timeSpeedValue: 1,
-    skipToNextFireActive: false,
-    canSkipToNextFire: false,
+    advanceToNextEventActive: false,
+    canAdvanceToNextEvent: false,
     forecast: null,
     forecastDay: 0,
     forecastStartDay: 0,
@@ -137,12 +137,12 @@ export class GameState {
     this.emitChange();
   }
 
-  setSkipToNextFireState(active: boolean, available: boolean): void {
-    if (this.snapshot.skipToNextFireActive === active && this.snapshot.canSkipToNextFire === available) {
+  setAdvanceToNextEventState(active: boolean, available: boolean): void {
+    if (this.snapshot.advanceToNextEventActive === active && this.snapshot.canAdvanceToNextEvent === available) {
       return;
     }
-    this.snapshot.skipToNextFireActive = active;
-    this.snapshot.canSkipToNextFire = available;
+    this.snapshot.advanceToNextEventActive = active;
+    this.snapshot.canAdvanceToNextEvent = available;
     this.emitChange();
   }
 

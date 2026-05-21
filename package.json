@@ -13,6 +13,7 @@
     "queue:validate": "node skills/game-design-maintainer/scripts/work_queue_cli.mjs validate",
     "world-audio:regression": "npm run build && node scripts/world-audio-regression.mjs",
     "world-climate:regression": "npm run build && node scripts/world-climate-regression.mjs",
+    "runtime-settings:regression": "npm run build && node scripts/runtime-settings-regression.mjs",
     "sun:regression": "node scripts/seasonal-sun-regression.mjs",
     "fire:regression": "npm run build && node scripts/fire-regression.mjs",
     "units:regression": "npm run build && node scripts/units-regression.mjs",

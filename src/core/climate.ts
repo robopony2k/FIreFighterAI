@@ -1,3 +1,5 @@
+import type { ClimateForecast } from "./types.js";
+
 export type ClimateParams = {
   seasonLen: number;
   peakDay: number;
@@ -130,7 +132,7 @@ export function buildClimateForecast(
   year: number,
   params: ClimateParams,
   moisture: MoistureParams
-): { days: number; temps: number[]; risk: number[] } {
+): ClimateForecast {
   const days = params.seasonLen;
   const temps = new Array<number>(days);
   const risk = new Array<number>(days);
@@ -152,7 +154,7 @@ export function buildClimateForecast(
     risk[day - 1] = clamp(0.55 * ignitionNorm + 0.45 * spreadNorm, 0, 1);
     temps[day - 1] = T;
   }
-  return { days, temps, risk };
+  return { days, temps, risk, rainPeriods: [] };
 }
 
 export function buildClimateTimeline(

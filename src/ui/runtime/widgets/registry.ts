@@ -24,7 +24,7 @@ export const CANVAS_HUD_SLOT_CONTAINER = "canvasHud:widgetSlots";
 
 export const TIME_CONTROL_ACTIONS = {
   pause: { kind: "phaseAction", action: "pause" } as const,
-  skipToNextFire: { kind: "phaseAction", action: "time-skip-next-fire" } as const,
+  advanceToNextEvent: { kind: "phaseAction", action: "time-advance-next-event" } as const,
   sliderSet: { kind: "phaseAction", action: "time-speed-slider-set" } as const,
   sliderStep: { kind: "phaseAction", action: "time-speed-step" } as const
 };
@@ -103,6 +103,9 @@ const getRuntimeSettingCopy = (setting: SimulationToggleSettingKey): { title: st
 
 const randomFireCopy = getRuntimeSettingCopy("randomFireIgnition");
 const annualReportCopy = getRuntimeSettingCopy("annualReportEnabled");
+const pauseOnFireCopy = getRuntimeSettingCopy("pauseOnFireEvent");
+const pauseOnAnnualReportCopy = getRuntimeSettingCopy("pauseOnAnnualReportEvent");
+const pauseOnRainCopy = getRuntimeSettingCopy("pauseOnRainEvent");
 
 export const SIMULATION_TOGGLE_SPECS: readonly SimulationToggleSpec[] = [
   {
@@ -116,6 +119,24 @@ export const SIMULATION_TOGGLE_SPECS: readonly SimulationToggleSpec[] = [
     title: annualReportCopy.title,
     description: annualReportCopy.description,
     action: { kind: "runtimeSetting", setting: "annualReportEnabled" }
+  },
+  {
+    setting: "pauseOnFireEvent",
+    title: pauseOnFireCopy.title,
+    description: pauseOnFireCopy.description,
+    action: { kind: "runtimeSetting", setting: "pauseOnFireEvent" }
+  },
+  {
+    setting: "pauseOnAnnualReportEvent",
+    title: pauseOnAnnualReportCopy.title,
+    description: pauseOnAnnualReportCopy.description,
+    action: { kind: "runtimeSetting", setting: "pauseOnAnnualReportEvent" }
+  },
+  {
+    setting: "pauseOnRainEvent",
+    title: pauseOnRainCopy.title,
+    description: pauseOnRainCopy.description,
+    action: { kind: "runtimeSetting", setting: "pauseOnRainEvent" }
   }
 ] as const;
 
@@ -164,7 +185,7 @@ export const RUNTIME_WIDGET_SPECS: readonly RuntimeWidgetSpec[] = [
     ]),
     actions: [
       TIME_CONTROL_ACTIONS.pause,
-      TIME_CONTROL_ACTIONS.skipToNextFire,
+      TIME_CONTROL_ACTIONS.advanceToNextEvent,
       TIME_CONTROL_ACTIONS.sliderSet,
       TIME_CONTROL_ACTIONS.sliderStep
     ]
@@ -198,12 +219,12 @@ export const RUNTIME_WIDGET_SPECS: readonly RuntimeWidgetSpec[] = [
   },
   {
     id: "simulationSettings",
-    title: "Simulation Settings",
-    shortTitle: "Simulation",
-    description: "Runtime testing toggles that can suppress fire ignition events or the annual report.",
+    title: "Event Settings",
+    shortTitle: "Events",
+    description: "Runtime event source and pause toggles for fire, annual report, and rain events.",
     surfaceTitles: {
-      phaseDom: "Testing",
-      threeDock: "TESTING"
+      phaseDom: "Events",
+      threeDock: "EVENTS"
     },
     placements: runtimeWidgetPlacements([
       {

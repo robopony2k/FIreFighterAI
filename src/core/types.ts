@@ -200,7 +200,7 @@ export interface FireAlertIncident {
   phaseDay: number;
 }
 
-export interface SkipToNextFireState {
+export interface AdvanceToNextEventState {
   active: boolean;
   previousPaused: boolean;
   previousTimeSpeedIndex: number;
@@ -604,12 +604,43 @@ export type ClimateForecast = {
   days: number;
   temps: number[];
   risk: number[];
+  rainPeriods: ClimateForecastRainPeriod[];
+};
+
+export type ClimateForecastRainPeriod = {
+  eventId: string;
+  yearIndex: number;
+  startDay: number;
+  peakDay: number;
+  endDay: number;
 };
 
 export type ClimateTimeline = {
   daysPerYear: number;
   totalDays: number;
   risk: Float32Array;
+};
+
+export type SeasonalRainEvent = {
+  id: string;
+  yearIndex: number;
+  seed: number;
+  startDayOfYear: number;
+  peakDayOfYear: number;
+  extinguishDayOfYear: number;
+  endDayOfYear: number;
+  durationDays: number;
+};
+
+export type SeasonalRainState = {
+  event: SeasonalRainEvent | null;
+  yearIndex: number;
+  dayOfYear: number;
+  intensity01: number;
+  visualIntensity01: number;
+  active: boolean;
+  hasExtinguished: boolean;
+  hasStartPauseHandled: boolean;
 };
 
 export type ApprovalTier = "S" | "A" | "B" | "C" | "D";

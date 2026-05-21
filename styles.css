@@ -2110,6 +2110,34 @@ canvas {
   color: color-mix(in srgb, var(--three-test-text-primary) 70%, transparent);
 }
 
+.three-test-settings-tabs,
+.three-test-settings-tab-panel {
+  display: grid;
+  gap: 8px;
+}
+
+.three-test-settings-tabbar {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 4px;
+}
+
+.three-test-settings-tab {
+  border: 1px solid var(--three-test-button-border);
+  background: var(--three-test-button-bg);
+  border-radius: 8px;
+  padding: 5px 8px;
+  font-size: 10px;
+  letter-spacing: 0.6px;
+  text-transform: uppercase;
+  color: var(--three-test-text-primary);
+}
+
+.three-test-settings-tab.is-active {
+  background: color-mix(in srgb, var(--three-test-accent) 32%, var(--three-test-button-bg));
+  border-color: color-mix(in srgb, var(--three-test-accent) 70%, var(--three-test-button-border));
+}
+
 .three-test-time-slider {
   grid-column: span 4;
   display: grid;
@@ -5148,6 +5176,12 @@ input[type="text"] {
   fill: rgba(209, 74, 44, 0.12);
 }
 
+.phase-forecast-rain-band {
+  fill: rgba(89, 168, 222, 0.24);
+  stroke: rgba(130, 210, 255, 0.68);
+  stroke-width: 1;
+}
+
 .phase-forecast-season-line {
   stroke: rgba(27, 27, 27, 0.25);
   stroke-width: 1;
@@ -6737,6 +6771,33 @@ input[type="text"] {
   text-transform: uppercase;
   letter-spacing: 0.8px;
   color: var(--muted);
+}
+
+.phase-control-tabs {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+  margin-bottom: 10px;
+}
+
+.phase-control-tab {
+  padding: 5px 8px;
+  font-size: 11px;
+  letter-spacing: 0.7px;
+  text-transform: uppercase;
+  border: 1px solid rgba(129, 113, 92, 0.26);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.62);
+  color: var(--ink);
+}
+
+.phase-control-tab.is-active {
+  background: rgba(209, 74, 44, 0.14);
+  border-color: rgba(209, 74, 44, 0.42);
+}
+
+.phase-control-tab-panel {
+  display: block;
 }
 
 .phase-control-row {

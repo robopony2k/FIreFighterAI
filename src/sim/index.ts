@@ -93,6 +93,11 @@ import { stepTownConstructionSchedule } from "../systems/settlements/sim/townCon
 import { applyFireActivityMetrics } from "../systems/fire/sim/fireActivityState.js";
 import { stepEvacuations } from "../systems/evacuation/sim/evacuationRuntime.js";
 import type { EvacuationLossEvent } from "../systems/evacuation/types/evacuationTypes.js";
+import {
+  buildSeasonalRainForecastPeriods,
+  SEASONAL_RAIN_EXTINGUISH_THRESHOLD,
+  sampleSeasonalRainState
+} from "../systems/climate/sim/seasonalRain.js";
 export { updatePhaseControls };
 
 const FIRE_HEAT_PADDING = 8;
@@ -106,10 +111,16 @@ const CLIMATE_SEASONS = ["Winter", "Spring", "Summer", "Autumn"];
 const RUNTIME_CONSTRUCTION_EVENT_DAYS_PER_TICK = 2;
 let allowFireIgnitionEvents = getRuntimeSettings().randomFireIgnition;
 let allowAnnualReport = getRuntimeSettings().annualReportEnabled;
+let pauseOnFireEvent = getRuntimeSettings().pauseOnFireEvent;
+let pauseOnAnnualReportEvent = getRuntimeSettings().pauseOnAnnualReportEvent;
+let pauseOnRainEvent = getRuntimeSettings().pauseOnRainEvent;
 
 subscribeRuntimeSettings((settings) => {
   allowFireIgnitionEvents = settings.randomFireIgnition;
   allowAnnualReport = settings.annualReportEnabled;
+  pauseOnFireEvent = settings.pauseOnFireEvent;
+  pauseOnAnnualReportEvent = settings.pauseOnAnnualReportEvent;
+  pauseOnRainEvent = settings.pauseOnRainEvent;
 });
 
 type PhaseTransitionOptions = {
@@ -159,7 +170,8 @@ const ensureClimateTimeline = (state: WorldState): void => {
   state.climateForecast = {
     days: FORECAST_WINDOW_DAYS,
     temps: [],
-    risk: Array.from({ length: FORECAST_WINDOW_DAYS }, () => 0)
+    risk: Array.from({ length: FORECAST_WINDOW_DAYS }, () => 0),
+    rainPeriods: []
   };
   state.climateForecastStart = -1;
   state.climateForecastDay = 0;
@@ -215,7 +227,12 @@ const updateClimateForecastWindow = (state: WorldState): void => {
     }
     state.climateForecastStart = windowStart;
   }
+  forecast.rainPeriods = buildSeasonalRainForecastPeriods(state.seed, windowStart, FORECAST_WINDOW_DAYS, VIRTUAL_YEAR_DAYS);
   state.climateForecastDay = clamp(currentDay - windowStart, 0, FORECAST_WINDOW_DAYS - 1);
+};
+
+const syncSeasonalRainToCareerDay = (state: WorldState): void => {
+  state.seasonalRain = sampleSeasonalRainState(state.seed, state.careerDay, state.seasonalRain, VIRTUAL_YEAR_DAYS);
 };
 
 const ensureFireSnapshot = (state: WorldState): Float32Array => {
@@ -452,6 +469,30 @@ const clearLatestFireAlert = (state: WorldState): void => {
   state.latestFireAlert = null;
 };
 
+const restoreAdvanceToNextEventTimeControls = (
+  state: WorldState,
+  previousSpeedIndex?: number,
+  previousSliderValue?: number
+): void => {
+  const advance = state.advanceToNextEvent;
+  if (!advance) {
+    return;
+  }
+  const restoredIndex = clamp(
+    previousSpeedIndex ?? advance.previousTimeSpeedIndex,
+    0,
+    getMaxTimeSpeedIndex(TIME_SPEED_OPTIONS)
+  );
+  state.strategicTimeSpeedIndex = restoredIndex;
+  if (state.simTimeMode === "strategic") {
+    state.timeSpeedIndex = restoredIndex;
+  }
+  state.timeSpeedSliderValue = clampTimeSpeedSliderValue(
+    previousSliderValue ?? advance.previousTimeSpeedSliderValue
+  );
+  state.advanceToNextEvent = null;
+};
+
 const pauseForDetectedFireIncident = (
   state: WorldState,
   strongest: { x: number; y: number },
@@ -463,15 +504,29 @@ const pauseForDetectedFireIncident = (
   const nearestTown = incident && incident.townId >= 0
     ? state.towns.find((town) => town.id === incident.townId) ?? null
     : null;
+  restoreAdvanceToNextEventTimeControls(state, previousSpeedIndex, previousSliderValue);
   enterIncidentMode(state, previousSpeedIndex);
   state.timeSpeedSliderValue = previousSliderValue;
   state.paused = true;
-  state.skipToNextFire = null;
   if (nearestTown) {
     setStatus(state, `Fire incident detected near ${nearestTown.name}. Simulation paused.`);
   } else {
     setStatus(state, "Fire incident detected. Simulation paused.");
   }
+};
+
+const maybePauseForDetectedFireIncident = (
+  state: WorldState,
+  strongest: { x: number; y: number },
+  previousSpeedIndex: number,
+  previousSliderValue: number
+): boolean => {
+  if (!pauseOnFireEvent) {
+    recordLatestFireAlert(state, strongest.x, strongest.y);
+    return false;
+  }
+  pauseForDetectedFireIncident(state, strongest, previousSpeedIndex, previousSliderValue);
+  return true;
 };
 
 const hasFireActivity = (
@@ -505,14 +560,14 @@ const isGrowthWeather = (state: WorldState): boolean =>
   state.climateTemp <= GROWTH_WEATHER_TEMP_MAX &&
   state.climateMoisture >= GROWTH_WEATHER_MOISTURE_MIN;
 
-export const isSkipToNextFireAvailable = (state: WorldState): boolean =>
-  !state.gameOver && state.simTimeMode === "strategic" && state.fireActivityState === "idle" && !state.skipToNextFire;
+export const isAdvanceToNextEventAvailable = (state: WorldState): boolean =>
+  !state.gameOver && state.simTimeMode === "strategic" && state.fireActivityState === "idle" && !state.advanceToNextEvent;
 
-export const requestSkipToNextFire = (state: WorldState): boolean => {
-  if (!isSkipToNextFireAvailable(state)) {
+export const requestAdvanceToNextEvent = (state: WorldState): boolean => {
+  if (!isAdvanceToNextEventAvailable(state)) {
     return false;
   }
-  state.skipToNextFire = {
+  state.advanceToNextEvent = {
     active: true,
     previousPaused: state.paused,
     previousTimeSpeedIndex: clamp(state.strategicTimeSpeedIndex, 0, getMaxTimeSpeedIndex(TIME_SPEED_OPTIONS)),
@@ -522,23 +577,23 @@ export const requestSkipToNextFire = (state: WorldState): boolean => {
   state.paused = false;
   state.timeSpeedIndex = getMaxTimeSpeedIndex(TIME_SPEED_OPTIONS);
   state.timeSpeedSliderValue = TIME_SPEED_SLIDER_MAX;
-  setStatus(state, "Seeking next fire incident...");
+  setStatus(state, "Advancing to next event...");
   return true;
 };
 
-export const cancelSkipToNextFire = (state: WorldState, reason?: string): void => {
-  const skip = state.skipToNextFire;
-  if (!skip) {
+export const cancelAdvanceToNextEvent = (state: WorldState, reason?: string): void => {
+  const advance = state.advanceToNextEvent;
+  if (!advance) {
     return;
   }
-  const restoredIndex = clamp(skip.previousTimeSpeedIndex, 0, getMaxTimeSpeedIndex(TIME_SPEED_OPTIONS));
-  state.paused = skip.previousPaused;
+  const restoredIndex = clamp(advance.previousTimeSpeedIndex, 0, getMaxTimeSpeedIndex(TIME_SPEED_OPTIONS));
+  state.paused = advance.previousPaused;
   state.strategicTimeSpeedIndex = restoredIndex;
-  state.timeSpeedSliderValue = clampTimeSpeedSliderValue(skip.previousTimeSpeedSliderValue);
+  state.timeSpeedSliderValue = clampTimeSpeedSliderValue(advance.previousTimeSpeedSliderValue);
   if (state.simTimeMode === "strategic") {
     state.timeSpeedIndex = restoredIndex;
   }
-  state.skipToNextFire = null;
+  state.advanceToNextEvent = null;
   if (reason) {
     setStatus(state, reason);
   }
@@ -630,6 +685,55 @@ export function extinguishAllFires(state: WorldState, effects: EffectsState): vo
   clearLatestFireAlert(state);
 }
 
+const syncWeatherClearedFireScoringSnapshot = (state: WorldState): void => {
+  captureFireSnapshot(state);
+  state.scoring.prevFireBoundsActive = false;
+  state.scoring.prevFireMinX = 0;
+  state.scoring.prevFireMaxX = 0;
+  state.scoring.prevFireMinY = 0;
+  state.scoring.prevFireMaxY = 0;
+  state.scoring.attributedFireLossTiles.clear();
+};
+
+const applySeasonalRainExtinguish = (state: WorldState, effects: EffectsState): void => {
+  const rain = state.seasonalRain;
+  if (!rain.active || rain.hasExtinguished || rain.intensity01 < SEASONAL_RAIN_EXTINGUISH_THRESHOLD) {
+    return;
+  }
+  if (!hasFireActivity(state)) {
+    return;
+  }
+  extinguishAllFires(state, effects);
+  syncWeatherClearedFireScoringSnapshot(state);
+  state.seasonalRain = {
+    ...rain,
+    hasExtinguished: true
+  };
+  setStatus(state, "Heavy autumn rain extinguished remaining fires.");
+};
+
+const maybePauseForSeasonalRainStart = (
+  state: WorldState,
+  previousSpeedIndex: number,
+  previousSliderValue: number
+): boolean => {
+  const rain = state.seasonalRain;
+  if (!rain.active || !rain.event || rain.hasStartPauseHandled) {
+    return false;
+  }
+  state.seasonalRain = {
+    ...rain,
+    hasStartPauseHandled: true
+  };
+  if (!pauseOnRainEvent) {
+    return false;
+  }
+  restoreAdvanceToNextEventTimeControls(state, previousSpeedIndex, previousSliderValue);
+  state.paused = true;
+  setStatus(state, "Autumn rain is moving in. Simulation paused.");
+  return true;
+};
+
 export function calculateBudgetOutcome(state: WorldState): void {
   const propertyLossRatio = state.totalPropertyValue > 0 ? state.yearPropertyLost / state.totalPropertyValue : 0;
   const lifeLossRatio = state.totalPopulation > 0 ? state.yearLivesLost / state.totalPopulation : 0;
@@ -669,6 +773,7 @@ const openAnnualReportForWinter = (state: WorldState): void => {
   if (state.gameOver) {
     return;
   }
+  restoreAdvanceToNextEventTimeControls(state);
   state.annualReportOpen = true;
   state.paused = true;
   setStatus(
@@ -718,7 +823,7 @@ export function setPhase(state: WorldState, rng: RNG, next: WorldState["phase"],
   }
   if (state.phase === "maintenance") {
     if (options.openAnnualReport) {
-      if (!allowAnnualReport) {
+      if (!allowAnnualReport || !pauseOnAnnualReportEvent) {
         resolveWinterRolloverWithoutReport(state);
         showSeasonOverlay(state);
         return;
@@ -898,8 +1003,8 @@ export function endGame(state: WorldState, victory: boolean, reason?: string): v
 }
 
 export function stepSim(state: WorldState, effects: EffectsState, rng: RNG, delta: number): void {
-  if (state.skipToNextFire && state.gameOver) {
-    cancelSkipToNextFire(state);
+  if (state.advanceToNextEvent && state.gameOver) {
+    cancelAdvanceToNextEvent(state);
   }
   if (isSimulationEffectivelyPaused(state)) {
     return;
@@ -909,28 +1014,33 @@ export function stepSim(state: WorldState, effects: EffectsState, rng: RNG, delt
   const calendarDelta = dayDelta;
   const previousCareerDay = state.careerDay;
   const hadFireChainRisk = hasFireActivity(state);
-  const previousSpeedIndex = state.skipToNextFire
-    ? clamp(state.skipToNextFire.previousTimeSpeedIndex, 0, getMaxTimeSpeedIndex(TIME_SPEED_OPTIONS))
+  const previousSpeedIndex = state.advanceToNextEvent
+    ? clamp(state.advanceToNextEvent.previousTimeSpeedIndex, 0, getMaxTimeSpeedIndex(TIME_SPEED_OPTIONS))
     : clamp(state.strategicTimeSpeedIndex, 0, getMaxTimeSpeedIndex(TIME_SPEED_OPTIONS));
-  const previousSliderValue = state.skipToNextFire
-    ? clampTimeSpeedSliderValue(state.skipToNextFire.previousTimeSpeedSliderValue)
+  const previousSliderValue = state.advanceToNextEvent
+    ? clampTimeSpeedSliderValue(state.advanceToNextEvent.previousTimeSpeedSliderValue)
     : state.timeSpeedSliderValue;
   advanceCalendar(state, rng, calendarDelta);
   advanceCareerDay(state, calendarDelta, PHASE_YEAR_DAYS, VIRTUAL_YEAR_DAYS, CAREER_TOTAL_DAYS);
   syncClimateToCareerDay(state);
   updateClimateForecastWindow(state);
+  syncSeasonalRainToCareerDay(state);
+  if (maybePauseForSeasonalRainStart(state, previousSpeedIndex, previousSliderValue)) {
+    return;
+  }
+  applySeasonalRainExtinguish(state, effects);
   if (state.careerDay >= CAREER_TOTAL_DAYS && !state.gameOver) {
     endGame(state, true, "Career complete. The region passes into new hands.");
-    if (state.skipToNextFire) {
-      cancelSkipToNextFire(state);
+    if (state.advanceToNextEvent) {
+      cancelAdvanceToNextEvent(state);
     }
     state.lastActiveFires = 0;
     applyFireActivityMetrics(state, 0);
     return;
   }
   if (state.gameOver) {
-    if (state.skipToNextFire) {
-      cancelSkipToNextFire(state);
+    if (state.advanceToNextEvent) {
+      cancelAdvanceToNextEvent(state);
     }
     state.lastActiveFires = 0;
     applyFireActivityMetrics(state, 0);
@@ -939,9 +1049,10 @@ export function stepSim(state: WorldState, effects: EffectsState, rng: RNG, delt
   if (!hadFireChainRisk && hasFireActivity(state)) {
     const strongest = findStrongestFireTile(state);
     if (strongest) {
-      pauseForDetectedFireIncident(state, strongest, previousSpeedIndex, previousSliderValue);
-      stepParticles(state, effects, delta);
-      return;
+      if (maybePauseForDetectedFireIncident(state, strongest, previousSpeedIndex, previousSliderValue)) {
+        stepParticles(state, effects, delta);
+        return;
+      }
     }
   }
   const climateRisk = getClimateRisk(state);
@@ -1014,9 +1125,10 @@ export function stepSim(state: WorldState, effects: EffectsState, rng: RNG, delt
             fireDaysSimulated += simDayDelta;
             state.firePerfSubsteps = fireSubsteps;
             state.firePerfSimulatedDays = fireDaysSimulated;
-            pauseForDetectedFireIncident(state, strongest, previousSpeedIndex, previousSliderValue);
-            stepParticles(state, effects, simDelta);
-            return;
+            if (maybePauseForDetectedFireIncident(state, strongest, previousSpeedIndex, previousSliderValue)) {
+              stepParticles(state, effects, simDelta);
+              return;
+            }
           }
         }
       }
@@ -1050,9 +1162,10 @@ export function stepSim(state: WorldState, effects: EffectsState, rng: RNG, delt
           state.firePerfSubsteps = fireSubsteps;
           state.firePerfSimulatedDays = fireDaysSimulated;
           state.lastActiveFires = activeFires;
-          pauseForDetectedFireIncident(state, strongest, previousSpeedIndex, previousSliderValue);
-          stepParticles(state, effects, simDelta);
-          return;
+          if (maybePauseForDetectedFireIncident(state, strongest, previousSpeedIndex, previousSliderValue)) {
+            stepParticles(state, effects, simDelta);
+            return;
+          }
         }
       }
       remaining -= simDelta;
@@ -1073,7 +1186,7 @@ export function stepSim(state: WorldState, effects: EffectsState, rng: RNG, delt
   if (!hadFireChainRisk && hasFireActivity(state)) {
     const strongest = findStrongestFireTile(state);
     if (strongest) {
-      pauseForDetectedFireIncident(state, strongest, previousSpeedIndex, previousSliderValue);
+      maybePauseForDetectedFireIncident(state, strongest, previousSpeedIndex, previousSliderValue);
     }
   } else if (state.simTimeMode === "incident" && state.fireActivityState === "idle") {
     exitIncidentMode(state);
@@ -1082,15 +1195,15 @@ export function stepSim(state: WorldState, effects: EffectsState, rng: RNG, delt
   stepScoring(state, dayDelta, climateRisk);
   stepParticles(state, effects, delta);
   checkFailureConditions(state);
-  if (state.skipToNextFire && state.gameOver) {
-    cancelSkipToNextFire(state);
+  if (state.advanceToNextEvent && state.gameOver) {
+    cancelAdvanceToNextEvent(state);
   }
   maybeReport(state);
 }
 
 export function togglePause(state: WorldState): void {
-  if (state.skipToNextFire) {
-    cancelSkipToNextFire(state);
+  if (state.advanceToNextEvent) {
+    cancelAdvanceToNextEvent(state);
   }
   state.paused = !state.paused;
   if (state.paused) {

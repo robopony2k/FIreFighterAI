@@ -19,6 +19,8 @@ import { getProceduralHouseVariantKey } from "../systems/settlements/rendering/p
 import type { RenderBuildingLot } from "../systems/settlements/types/buildingTypes.js";
 import { buildEvacuationRenderModel } from "../systems/evacuation/rendering/evacuationRenderModel.js";
 import { generateWorldClimateSeed } from "../systems/climate/sim/worldClimateSeed.js";
+import type { SeasonalRainState } from "../systems/climate/types/seasonalRain.js";
+import { resolveSeasonalRainScreenWind } from "../systems/climate/rendering/seasonalRainOverlayPass.js";
 import { createVehicleModelLayer, type VehicleModelInstance } from "./vehicleModelLayer.js";
 import type { InputState } from "../core/inputState.js";
 import { indexFor } from "../core/grid.js";
@@ -48,7 +50,7 @@ import {
   getTownThreatLabel,
   getTownThreatLevel
 } from "../sim/towns.js";
-import { isSkipToNextFireAvailable } from "../sim/index.js";
+import { isAdvanceToNextEventAvailable } from "../sim/index.js";
 import {
   applyTerrainSurfaceColors,
   buildPalette,
@@ -91,7 +93,12 @@ import { CardStateModel } from "../ui/cards/cardState.js";
 import { resolveTownLabelDepthAwareLayout } from "../ui/town-labels/townLabelOcclusion.js";
 import { createUnitCommandTray } from "../ui/unit-control/UnitCommandTray.js";
 import { dispatchPhaseUiCommand } from "../ui/phase/commandChannel.js";
-import { RISK_THRESHOLDS, SEASON_LABELS, computeSeasonLayout } from "../ui/phase/forecastLayout.js";
+import {
+  RISK_THRESHOLDS,
+  SEASON_LABELS,
+  computeForecastPeriodLayout,
+  computeSeasonLayout
+} from "../ui/phase/forecastLayout.js";
 import {
   AUDIO_CONTROL_CHANNELS,
   SIMULATION_TOGGLE_SPECS,
@@ -181,6 +188,7 @@ export type ThreeTestController = {
   setSeasonVisualState: (state: SeasonVisualState) => void;
   setSeason: (index: number) => void;
   setClimateDryness: (value: number) => void;
+  setSeasonalRainState: (state: SeasonalRainState | null) => void;
   setPhaseLabel: (text: string) => void;
   setSeasonLabel: (text: string) => void;
   setClimateForecast: (
@@ -1594,16 +1602,16 @@ export const createThreeTest = (
   speedSliderValue.textContent = "1x";
   speedSliderWrap.append(speedSliderCaption, speedSlider, speedSliderValue);
   timeControls.appendChild(speedSliderWrap);
-  const nextFireButton = document.createElement("button");
-  nextFireButton.type = "button";
-  nextFireButton.className = "three-test-time-button";
-  nextFireButton.textContent = ">>>";
-  nextFireButton.addEventListener("click", (event) => {
+  const advanceToNextEventButton = document.createElement("button");
+  advanceToNextEventButton.type = "button";
+  advanceToNextEventButton.className = "three-test-time-button";
+  advanceToNextEventButton.textContent = ">>>";
+  advanceToNextEventButton.addEventListener("click", (event) => {
     event.preventDefault();
     event.stopPropagation();
-    dispatchPhaseUiCommand({ type: "action", action: TIME_CONTROL_ACTIONS.skipToNextFire.action });
+    dispatchPhaseUiCommand({ type: "action", action: TIME_CONTROL_ACTIONS.advanceToNextEvent.action });
   });
-  timeControls.appendChild(nextFireButton);
+  timeControls.appendChild(advanceToNextEventButton);
   const createDockSection = (titleText: string, content: HTMLElement): HTMLElement => {
     const section = document.createElement("section");
     section.className = "three-test-time-section";
@@ -1691,6 +1699,43 @@ export const createThreeTest = (
     getRuntimeWidgetTitle("simulationSettings", "threeDock"),
     timeTestingControls
   );
+  const settingsTabs = document.createElement("div");
+  settingsTabs.className = "three-test-settings-tabs";
+  const settingsTabBar = document.createElement("div");
+  settingsTabBar.className = "three-test-settings-tabbar";
+  const settingsMainTab = document.createElement("button");
+  settingsMainTab.type = "button";
+  settingsMainTab.className = "three-test-settings-tab is-active";
+  settingsMainTab.textContent = "Main";
+  const settingsEventsTab = document.createElement("button");
+  settingsEventsTab.type = "button";
+  settingsEventsTab.className = "three-test-settings-tab";
+  settingsEventsTab.textContent = "Events";
+  const settingsMainPanel = document.createElement("div");
+  settingsMainPanel.className = "three-test-settings-tab-panel";
+  const settingsEventsPanel = document.createElement("div");
+  settingsEventsPanel.className = "three-test-settings-tab-panel hidden";
+  const setActiveSettingsTab = (tab: "main" | "events"): void => {
+    const mainActive = tab === "main";
+    settingsMainTab.classList.toggle("is-active", mainActive);
+    settingsEventsTab.classList.toggle("is-active", !mainActive);
+    settingsMainPanel.classList.toggle("hidden", !mainActive);
+    settingsEventsPanel.classList.toggle("hidden", mainActive);
+  };
+  settingsMainTab.addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    setActiveSettingsTab("main");
+  });
+  settingsEventsTab.addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    setActiveSettingsTab("events");
+  });
+  settingsTabBar.append(settingsMainTab, settingsEventsTab);
+  settingsMainPanel.append(timeControls, timeAudioSection);
+  settingsEventsPanel.appendChild(timeTestingSection);
+  settingsTabs.append(settingsTabBar, settingsMainPanel, settingsEventsPanel);
   const mutedAudioIcon = "\u{1F507}";
   const unmutedAudioIcon = "\u{1F50A}";
   const applyRuntimeToggleState = (): void => {
@@ -1830,9 +1875,7 @@ export const createThreeTest = (
   ]);
   const detailContentByWidget = new Map<RuntimeWidgetId, HTMLElement>([
     ["minimap", minimapLayersWrap],
-    ["timeControls", timeControls],
-    ["audioControls", timeAudioSection],
-    ["simulationSettings", timeTestingSection]
+    ["timeControls", settingsTabs]
   ]);
   climateCardSpec.summaryWidgets.forEach((widgetId) => {
     const content = summaryContentByWidget.get(widgetId);
@@ -1918,6 +1961,7 @@ export const createThreeTest = (
       forecastStartDay: number;
       forecastYearDays: number;
       forecastWindowDays: number;
+      rainPeriods?: ClimateForecast["rainPeriods"];
     }
   ): void => {
     const rect = canvasElement.getBoundingClientRect();
@@ -2091,6 +2135,21 @@ export const createThreeTest = (
     ctx.lineTo(firstX, plotY + plotHeight);
     ctx.closePath();
     ctx.fill();
+
+    const rainLayout = computeForecastPeriodLayout(
+      chartContext.rainPeriods ?? [],
+      Math.max(0, Math.floor(chartContext.forecastStartDay)),
+      Math.max(1, Math.floor(chartContext.forecastWindowDays)),
+      { width: plotWidth, height: plotHeight, padding: 0 }
+    );
+    rainLayout.bands.forEach((band) => {
+      const x = plotX + band.x;
+      ctx.fillStyle = "rgba(89, 168, 222, 0.22)";
+      ctx.fillRect(x, plotY, band.width, plotHeight);
+      ctx.strokeStyle = "rgba(130, 210, 255, 0.68)";
+      ctx.lineWidth = 1;
+      ctx.strokeRect(x + 0.5, plotY + 0.5, Math.max(0, band.width - 1), Math.max(0, plotHeight - 1));
+    });
 
     const lineGradient = ctx.createLinearGradient(plotX, 0, plotX + plotWidth, 0);
     if (mode === "risk") {
@@ -2325,7 +2384,8 @@ export const createThreeTest = (
     const climateChartContext = {
       forecastStartDay: Math.max(0, world.climateForecastStart ?? 0),
       forecastYearDays: Math.max(1, Math.floor(world.climateTimeline?.daysPerYear ?? 360)),
-      forecastWindowDays: forecastDays
+      forecastWindowDays: forecastDays,
+      rainPeriods: world.climateForecast?.rainPeriods ?? []
     };
     const climateState = dockCardState.get(climateCardId).visual;
     if (climateState === "peek" || climateState === "expanded") {
@@ -2346,8 +2406,8 @@ export const createThreeTest = (
     const speedValue = getResolvedTimeSpeedValue(world);
     const speedLabel = formatTimeSpeedValue(speedValue);
     const timeModeLabel = world.simTimeMode === "incident" ? "Incident" : "Strategic";
-    const skipToNextFireActive = !!world.skipToNextFire;
-    const canSkipToNextFire = isSkipToNextFireAvailable(world);
+    const advanceToNextEventActive = !!world.advanceToNextEvent;
+    const canAdvanceToNextEvent = isAdvanceToNextEventAvailable(world);
     const usingSlider = world.timeSpeedControlMode === "slider";
     const effectivelyPaused = isSimulationEffectivelyPaused(world);
     timeSummary.innerHTML = "";
@@ -2357,13 +2417,13 @@ export const createThreeTest = (
     speedLine.textContent = `${timeModeLabel} ${speedLabel}`;
     const phaseLine = document.createElement("div");
     phaseLine.textContent = `Phase ${world.phase}`;
-    const skipLine = document.createElement("div");
-    skipLine.textContent = skipToNextFireActive
-      ? "Seeking next fire..."
-      : canSkipToNextFire
-        ? "Next fire skip ready"
-        : "Next fire skip unavailable";
-    timeSummary.append(timeLine, speedLine, phaseLine, skipLine);
+    const advanceLine = document.createElement("div");
+    advanceLine.textContent = advanceToNextEventActive
+      ? "Advancing to next event..."
+      : canAdvanceToNextEvent
+        ? "Next event advance ready"
+        : "Next event advance unavailable";
+    timeSummary.append(timeLine, speedLine, phaseLine, advanceLine);
     pauseButton.textContent = world.paused ? ">" : "||";
     pauseButton.title = world.paused ? "Resume simulation" : "Pause simulation";
     pauseButton.setAttribute("aria-label", world.paused ? "Resume simulation" : "Pause simulation");
@@ -2392,17 +2452,17 @@ export const createThreeTest = (
     speedSlider.title = `Set ${timeModeLabel.toLowerCase()} speed to ${speedLabel}`;
     speedSlider.setAttribute("aria-label", `Set ${timeModeLabel.toLowerCase()} speed`);
     speedSliderValue.textContent = speedLabel;
-    nextFireButton.disabled = !canSkipToNextFire || skipToNextFireActive;
-    nextFireButton.textContent = skipToNextFireActive ? "..." : ">>>";
-    if (skipToNextFireActive) {
-      nextFireButton.title = "Advancing time to next fire incident.";
-      nextFireButton.setAttribute("aria-label", "Seeking next fire");
-    } else if (canSkipToNextFire) {
-      nextFireButton.title = "Advance time until the next fire starts.";
-      nextFireButton.setAttribute("aria-label", "Skip to next fire");
+    advanceToNextEventButton.disabled = !canAdvanceToNextEvent || advanceToNextEventActive;
+    advanceToNextEventButton.textContent = advanceToNextEventActive ? "..." : ">>>";
+    if (advanceToNextEventActive) {
+      advanceToNextEventButton.title = "Advancing time to next enabled event.";
+      advanceToNextEventButton.setAttribute("aria-label", "Seeking next event");
+    } else if (canAdvanceToNextEvent) {
+      advanceToNextEventButton.title = "Advance time until the next enabled event.";
+      advanceToNextEventButton.setAttribute("aria-label", "Advance to next event");
     } else {
-      nextFireButton.title = "Available when fire activity has fully cleared.";
-      nextFireButton.setAttribute("aria-label", "Skip to next fire unavailable");
+      advanceToNextEventButton.title = "Available when fire activity has fully cleared.";
+      advanceToNextEventButton.setAttribute("aria-label", "Advance to next event unavailable");
     }
     applyDockCardStates();
   };
@@ -4941,6 +5001,7 @@ export const createThreeTest = (
     risk01: 0.35,
     mode: "auto"
   };
+  let seasonalRainState: SeasonalRainState | null = null;
   let environmentTarget: EnvironmentSignalState = {
     seasonT01: initialSeasonT01,
     risk01: 0.35,
@@ -6358,8 +6419,26 @@ export const createThreeTest = (
     renderer.render(scene, camera);
   };
 
+  const isSeasonalRainVisualActive = (): boolean =>
+    !THREE_TEST_DISABLE_FX && (seasonalRainState?.visualIntensity01 ?? 0) > 0.001;
+
+  const syncSeasonalRainPostState = (time: number): void => {
+    const rain = seasonalRainState;
+    const screenWind = resolveSeasonalRainScreenWind(camera, world.wind);
+    postPipeline?.setSeasonalRainState({
+      enabled: !THREE_TEST_DISABLE_FX && Boolean(rain?.active),
+      intensity01: rain?.intensity01 ?? 0,
+      visualIntensity01: rain?.visualIntensity01 ?? 0,
+      seed: rain?.event?.seed ?? world.seed,
+      timeSeconds: time * 0.001,
+      windScreenX: screenWind.x,
+      windScreenY: screenWind.y,
+      windStrength01: screenWind.strength01
+    });
+  };
+
   const renderWorldPass = (): void => {
-    if ((cinematicGradeEnabled || dofEnabled) && postPipeline) {
+    if ((cinematicGradeEnabled || dofEnabled || isSeasonalRainVisualActive()) && postPipeline) {
       const renderedWithPost = postPipeline.render(renderWorldScene);
       if (!renderedWithPost) {
         disablePostProcessing();
@@ -6453,6 +6532,7 @@ export const createThreeTest = (
       syncDirectionalLightRig(lastLightingApplied);
     }
     syncSunGlare(lastLightingApplied);
+    syncSeasonalRainPostState(time);
     maybeRefreshShadowMap(time, lastLightingApplied, isCameraInteracting());
     syncDofSettings();
     const treeBurnStart = performance.now();
@@ -6704,6 +6784,22 @@ export const createThreeTest = (
 
   const setPhaseLabel = (text: string): void => {
     hudState.phaseLabelOverride = text;
+  };
+
+  const setSeasonalRainState = (next: SeasonalRainState | null): void => {
+    seasonalRainState = next;
+    if (!next || next.visualIntensity01 <= 0.001) {
+      postPipeline?.setSeasonalRainState({
+        enabled: false,
+        intensity01: 0,
+        visualIntensity01: 0,
+        seed: world.seed,
+        timeSeconds: lastFrameTime > 0 ? lastFrameTime * 0.001 : 0,
+        windScreenX: 0,
+        windScreenY: 0,
+        windStrength01: 0
+      });
+    }
   };
 
   const setSeasonLabel = (text: string): void => {
@@ -7428,6 +7524,7 @@ export const createThreeTest = (
     setSeasonVisualState,
     setSeason,
     setClimateDryness,
+    setSeasonalRainState,
     setPhaseLabel,
     setSeasonLabel,
     setClimateForecast,

@@ -11,6 +11,10 @@ import {
   type WorldState
 } from "../../core/state.js";
 import { TREE_TYPE_IDS, TreeType, type Formation, type Grid, type Unit, type WaterSprayMode } from "../../core/types.js";
+import {
+  createSeasonalRainOverlayPass,
+  resolveSeasonalRainScreenWind
+} from "../../systems/climate/rendering/seasonalRainOverlayPass.js";
 import { buildRenderTerrainSample } from "../simView.js";
 import { buildTerrainMesh, prepareTerrainRenderSurface, type TerrainRenderSurface, type TerrainSample } from "../threeTestTerrain.js";
 import { ThreeTestWaterSystem } from "../threeTestWater.js";
@@ -67,6 +71,9 @@ const FX_LAB_COAST_BEACH_LAND_BAND = 2;
 const FX_LAB_COAST_BEACH_SHELF_BAND = 6;
 const FX_LAB_COAST_BEACH_DRY_HEIGHTS = [0.01, 0.024] as const;
 const FX_LAB_COAST_BEACH_WET_DEPTHS = [0.003, 0.006, 0.01, 0.015, 0.021, 0.028] as const;
+const FX_LAB_RAIN_SCENARIO_ID: FxLabScenarioId = "rain-overlay";
+const FX_LAB_RAIN_SEED = 26092026;
+const FX_LAB_RAIN_INTENSITY = 1;
 
 const clamp = (value: number, min: number, max: number): number => Math.max(min, Math.min(max, value));
 const fract = (value: number): number => value - Math.floor(value);
@@ -739,6 +746,14 @@ const disposeTerrainMesh = (mesh: THREE.Mesh | null): void => {
   });
 };
 
+const configureFxLabRainTarget = (target: THREE.WebGLRenderTarget): THREE.WebGLRenderTarget => {
+  target.texture.minFilter = THREE.LinearFilter;
+  target.texture.magFilter = THREE.LinearFilter;
+  target.texture.generateMipmaps = false;
+  target.texture.name = "fx-lab-rain-scene";
+  return target;
+};
+
 export const createFxLabController = (
   canvas: HTMLCanvasElement,
   initialScenarioId: FxLabScenarioId = "fire-line"
@@ -756,6 +771,7 @@ export const createFxLabController = (
   renderer.setClearColor(0x0d1117, 1);
   renderer.shadowMap.enabled = true;
   renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+  const rainOverlayPass = createSeasonalRainOverlayPass();
 
   const scene = new THREE.Scene();
   scene.fog = new THREE.Fog(0x1e2430, 22, 86);
@@ -802,6 +818,9 @@ export const createFxLabController = (
   let lastTerrainStructureRevision = -1;
   let houseAssets: HouseAssets | null = getHouseAssetsCache();
   let treeAssets: TreeAssets | null = getTreeAssetsCache();
+  let rainSceneTarget: THREE.WebGLRenderTarget | null = null;
+  let rainSceneTargetFailed = false;
+  const rainTargetSize = new THREE.Vector2(1, 1);
   let disposed = false;
   let running = false;
   let rafId = 0;
@@ -841,6 +860,71 @@ export const createFxLabController = (
   unitFxLayer.setDebugControls(waterDebugControls);
   waterSystem.setOceanDebugControls(oceanWaterDebugControls);
   waterSystem.setDebugControls(terrainWaterDebugControls);
+
+  const disposeRainSceneTarget = (): void => {
+    if (!rainSceneTarget) {
+      return;
+    }
+    rainSceneTarget.dispose();
+    rainSceneTarget = null;
+  };
+
+  const ensureRainSceneTarget = (): THREE.WebGLRenderTarget | null => {
+    if (rainSceneTargetFailed) {
+      return null;
+    }
+    renderer.getDrawingBufferSize(rainTargetSize);
+    const targetWidth = Math.max(1, Math.floor(rainTargetSize.x));
+    const targetHeight = Math.max(1, Math.floor(rainTargetSize.y));
+    if (rainSceneTarget && rainSceneTarget.width === targetWidth && rainSceneTarget.height === targetHeight) {
+      return rainSceneTarget;
+    }
+    disposeRainSceneTarget();
+    try {
+      rainSceneTarget = configureFxLabRainTarget(
+        new THREE.WebGLRenderTarget(targetWidth, targetHeight, {
+          depthBuffer: true,
+          stencilBuffer: false
+        })
+      );
+      return rainSceneTarget;
+    } catch (error) {
+      rainSceneTargetFailed = true;
+      console.warn("[fxLab] Rain overlay target allocation failed; rendering scene without rain overlay.", error);
+      return null;
+    }
+  };
+
+  const renderSceneWithOptionalRain = (): void => {
+    if (currentScenarioId !== FX_LAB_RAIN_SCENARIO_ID) {
+      renderer.render(scene, camera);
+      return;
+    }
+    const screenWind = resolveSeasonalRainScreenWind(camera, sceneState.world.wind);
+    rainOverlayPass.setState({
+      enabled: true,
+      intensity01: FX_LAB_RAIN_INTENSITY,
+      visualIntensity01: FX_LAB_RAIN_INTENSITY,
+      seed: FX_LAB_RAIN_SEED,
+      timeSeconds: labTimeMs * 0.001,
+      windScreenX: screenWind.x,
+      windScreenY: screenWind.y,
+      windStrength01: screenWind.strength01
+    });
+    const target = ensureRainSceneTarget();
+    if (!target || !rainOverlayPass.isActive()) {
+      renderer.render(scene, camera);
+      return;
+    }
+    const previousTarget = renderer.getRenderTarget();
+    try {
+      renderer.setRenderTarget(target);
+      renderer.render(scene, camera);
+      rainOverlayPass.render(renderer, target.texture, previousTarget);
+    } finally {
+      renderer.setRenderTarget(previousTarget);
+    }
+  };
 
   const fitCameraToTerrain = (): void => {
     if (!terrainSize) {
@@ -1484,7 +1568,7 @@ export const createFxLabController = (
     unitFxLayer.update(sceneState.world, sceneState.effects, terrainSurface, 1, now);
     updateSprayTargetMarker(now);
     const renderStartedAt = performance.now();
-    renderer.render(scene, camera);
+    renderSceneWithOptionalRain();
     lastSceneRenderMs = performance.now() - renderStartedAt;
   };
 
@@ -1504,6 +1588,8 @@ export const createFxLabController = (
     renderer.setSize(width, height, false);
     camera.aspect = width / height;
     camera.updateProjectionMatrix();
+    rainOverlayPass.resize(width, height);
+    disposeRainSceneTarget();
   };
 
   rebuildTerrain();
@@ -1545,6 +1631,8 @@ export const createFxLabController = (
       unitFxLayer.dispose();
       unitsLayer.dispose();
       waterSystem.dispose();
+      rainOverlayPass.dispose();
+      disposeRainSceneTarget();
       scene.remove(sprayTargetMarker);
       sprayTargetMarker.geometry.dispose();
       (sprayTargetMarker.material as THREE.Material).dispose();
@@ -1558,6 +1646,9 @@ export const createFxLabController = (
     },
     setScenario: (scenarioId: FxLabScenarioId) => {
       currentScenarioId = normalizeFxLabScenarioId(scenarioId);
+      if (currentScenarioId !== FX_LAB_RAIN_SCENARIO_ID) {
+        disposeRainSceneTarget();
+      }
       setPlacementMode("none");
       manualTruckPlacement = null;
       manualFirefighterPlacement = null;

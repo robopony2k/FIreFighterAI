@@ -66,8 +66,8 @@ export type GameUiSnapshot = {
   timeSpeedControlMode: TimeSpeedControlMode;
   timeSpeedIndex: number;
   timeSpeedValue: number;
-  skipToNextFireActive: boolean;
-  canSkipToNextFire: boolean;
+  advanceToNextEventActive: boolean;
+  canAdvanceToNextEvent: boolean;
   forecast: ClimateForecast | null;
   forecastDay: number;
   forecastStartDay: number;

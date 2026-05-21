@@ -2,6 +2,9 @@ export type RuntimeSettings = {
   timespeedui: "buttons" | "slider";
   randomFireIgnition: boolean;
   annualReportEnabled: boolean;
+  pauseOnFireEvent: boolean;
+  pauseOnAnnualReportEvent: boolean;
+  pauseOnRainEvent: boolean;
   headless: boolean;
   nosim: boolean;
   seasonal: boolean;
@@ -104,6 +107,9 @@ export const DEFAULT_RUNTIME_SETTINGS: RuntimeSettings = {
   timespeedui: "buttons",
   randomFireIgnition: true,
   annualReportEnabled: true,
+  pauseOnFireEvent: true,
+  pauseOnAnnualReportEvent: true,
+  pauseOnRainEvent: true,
   headless: false,
   nosim: false,
   seasonal: true,
@@ -170,6 +176,33 @@ export const RUNTIME_SETTING_DEFINITIONS: ReadonlyArray<RuntimeSettingDefinition
     label: "Annual Report",
     description: "Pause for the annual ledger at the winter rollover.",
     defaultValue: DEFAULT_RUNTIME_SETTINGS.annualReportEnabled,
+    queryStyle: "0-false"
+  },
+  {
+    key: "pauseOnFireEvent",
+    section: "General",
+    kind: "boolean",
+    label: "Pause on Fire",
+    description: "Pause when a fire incident starts, including during Advance to Next Event.",
+    defaultValue: DEFAULT_RUNTIME_SETTINGS.pauseOnFireEvent,
+    queryStyle: "0-false"
+  },
+  {
+    key: "pauseOnAnnualReportEvent",
+    section: "General",
+    kind: "boolean",
+    label: "Pause on Annual Report",
+    description: "Open and pause for the annual ledger at winter rollover.",
+    defaultValue: DEFAULT_RUNTIME_SETTINGS.pauseOnAnnualReportEvent,
+    queryStyle: "0-false"
+  },
+  {
+    key: "pauseOnRainEvent",
+    section: "General",
+    kind: "boolean",
+    label: "Pause on Rain",
+    description: "Pause when the seeded autumn rain event first becomes visible.",
+    defaultValue: DEFAULT_RUNTIME_SETTINGS.pauseOnRainEvent,
     queryStyle: "0-false"
   },
   {

@@ -191,7 +191,28 @@ export class UIController {
     this.bottomControls.onAnnualReportToggle(handler);
   }
 
-  setSimulationToggleState(settings: Pick<RuntimeSettings, "randomFireIgnition" | "annualReportEnabled">): void {
+  onPauseFireEventToggle(handler: (enabled: boolean) => void): void {
+    this.bottomControls.onPauseFireEventToggle(handler);
+  }
+
+  onPauseAnnualReportEventToggle(handler: (enabled: boolean) => void): void {
+    this.bottomControls.onPauseAnnualReportEventToggle(handler);
+  }
+
+  onPauseRainEventToggle(handler: (enabled: boolean) => void): void {
+    this.bottomControls.onPauseRainEventToggle(handler);
+  }
+
+  setSimulationToggleState(
+    settings: Pick<
+      RuntimeSettings,
+      | "randomFireIgnition"
+      | "annualReportEnabled"
+      | "pauseOnFireEvent"
+      | "pauseOnAnnualReportEvent"
+      | "pauseOnRainEvent"
+    >
+  ): void {
     this.bottomControls.setSimulationToggleState(settings);
   }
 
@@ -283,8 +304,8 @@ export class UIController {
       timeSpeedControlMode: snapshot.timeSpeedControlMode,
       timeSpeedIndex: snapshot.timeSpeedIndex,
       timeSpeedValue: snapshot.timeSpeedValue,
-      skipToNextFireActive: snapshot.skipToNextFireActive,
-      canSkipToNextFire: snapshot.canSkipToNextFire,
+      advanceToNextEventActive: snapshot.advanceToNextEventActive,
+      canAdvanceToNextEvent: snapshot.canAdvanceToNextEvent,
       status: bottomStatus
     };
     this.bottomControls.update(bottomData);

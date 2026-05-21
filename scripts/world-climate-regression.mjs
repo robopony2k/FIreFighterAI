@@ -10,6 +10,14 @@ const distImport = (segments) => pathToFileURL(path.join(repoRoot, "dist", ...se
 const { generateWorldClimateSeed } = await import(
   distImport(["systems", "climate", "sim", "worldClimateSeed.js"])
 );
+const {
+  buildSeasonalRainEvent,
+  buildSeasonalRainForecastPeriods,
+  sampleSeasonalRainState,
+  SEASONAL_RAIN_EXTINGUISH_THRESHOLD
+} = await import(
+  distImport(["systems", "climate", "sim", "seasonalRain.js"])
+);
 const { buildWindDrivenMoistureMap } = await import(
   distImport(["systems", "terrain", "sim", "windDrivenMoisture.js"])
 );
@@ -95,6 +103,24 @@ const angles = [1337, 1338, 9001, 42].map((seed) =>
 );
 assert.ok(new Set(angles).size > 1, "different seeds should vary prevailing wind direction");
 
+const rainA = buildSeasonalRainEvent(1337, 0);
+const rainB = buildSeasonalRainEvent(1337, 0);
+assert.deepEqual(rainA, rainB, "same seed/year should produce identical seasonal rain event");
+const rainVariants = [1337, 1338, 9001, 42].map((seed) => buildSeasonalRainEvent(seed, 0).peakDayOfYear);
+assert.ok(new Set(rainVariants).size > 1, "different seeds should jitter seasonal rain timing");
+assert.ok(rainA.startDayOfYear >= 271 && rainA.endDayOfYear <= 360, "seasonal rain should stay inside autumn");
+assert.ok(rainA.durationDays >= 8 && rainA.durationDays <= 12, "seasonal rain should remain brief");
+const rainPeakState = sampleSeasonalRainState(1337, rainA.extinguishDayOfYear - 1);
+assert.equal(rainPeakState.event?.id, rainA.id, "seasonal rain sample should reference the yearly event");
+assert.ok(rainPeakState.intensity01 >= SEASONAL_RAIN_EXTINGUISH_THRESHOLD, "seasonal rain should peak strongly enough to clear fires");
+const rainForecastPeriods = buildSeasonalRainForecastPeriods(1337, 250, 90, 360);
+assert.deepEqual(rainForecastPeriods, buildSeasonalRainForecastPeriods(1337, 250, 90, 360), "rain forecast bands should be deterministic");
+assert.ok(rainForecastPeriods.some((period) => period.eventId === rainA.id), "rain forecast should include overlapping autumn rain period");
+assert.ok(
+  rainForecastPeriods.every((period) => period.startDay >= 270 && period.endDay <= 360),
+  "first-year rain forecast bands should use absolute autumn day ranges"
+);
+
 const ridgeCase = buildRidgeCase();
 const climate = {
   prevailingWindAngleRad: 0,
@@ -139,6 +165,7 @@ console.log(
     {
       seed: 1337,
       climateSeed: seedA,
+      seasonalRain: rainA,
       moistureHash: hashFloatArray(moistureA),
       windwardMean: Number(meanBand(moistureA, ridgeCase.cols, ridgeCase.rows, 8).toFixed(4)),
       leewardMean: Number(meanBand(moistureA, ridgeCase.cols, ridgeCase.rows, 13).toFixed(4))

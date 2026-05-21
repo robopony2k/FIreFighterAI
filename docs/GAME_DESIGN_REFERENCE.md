@@ -41,9 +41,10 @@ Story: You are the new "Fire Warden" in charge of a region. Your mission is to p
 ## Climate and Weather
 
 - Daily temperature and moisture drive ignition and spread.
-- Weather forecast provides a rolling 90-day outlook of fire risk.
+- Weather forecast provides a rolling 90-day outlook of fire risk and overlays deterministic seeded autumn rain periods as blue bands so players can see the upcoming weather-clear window.
 - A year is 360 days with four distinct seasons: (Winter = cold + moist, Spring = warm + moist, Summer = warm + dry, Autumn is Cool + dry)
 - Climate change is represented by a warming trend and drying bias.
+- Each year has one deterministic, seed-jittered mid-autumn rain event. It is brief, reads mainly as a 3D screen-space rain visual aligned to wind direction relative to the camera, uses a moving storm-cell mask with local wet dimming/mist/sheen, and clears any remaining active fires as weather without awarding firefighter suppression credit or restoring burned fuel.
 
 ## Vegetation and Forest Identity
 
@@ -126,6 +127,7 @@ Design intent:
 - Bottom right of screen - "Announcements" at key events ie a speech bubble from a News Station, Weather Presenter, Financial Advisor etc
 - Bottom middle of screen - Debug overlays exist for tuning and dev validation.
 - Dev-facing SIM Lab exists for controlled fire-behavior tuning: selectable scenario templates run on a denser 128x80 grid, with terrain painting, painted firefighter suppression markers, local saved/loaded test scenarios, a cell-state legend/symbol overlay, fuel profile sliders, and wind, temperature, moisture, risk, and incident-speed preset controls with explanatory tooltips. Firefighter markers maintain a hose-reachable defensive wetness field and auto-spray nearby hot or burning cells using default firefighter radius, hose range, and power. SIM Lab speed mirrors the game's incident-time tuning surface on the same fixed 0.25s incident tick, adds `0.5x` and `1x` lab convenience options, and is capped at `1x`; both SIM Lab and in-game incidents intentionally pace fire-kernel spread below incident clock time so active fires remain tactically readable at the slow presets. The Plain + Road template uses a one-tile road gap so it matches the in-game road scale while still testing fire jumps across non-flammable cells. Fuel profile slider edits apply immediately, auto-save as local SIM Lab drafts, survive saved-scenario loads, and can be copied as a complete `src/config/fuelProfiles.ts` defaults file when ready to promote into source. The `windFactor` slider is displayed as Windbreak: `0` is open/no blocking, `1` is strong wind obstruction.
+- Dev-facing FX Lab includes scripted fire, hose, shoreline, river/waterfall, house lifecycle, and rain-overlay scenes so rendering-only effects can be verified without waiting on campaign timing.
 - Bottom command tray is the primary unit control surface: select Alpha/Bravo command groups, inspect selected trucks, read compact crew/water/status, and arm unit command modes there.
 - Right-side runtime dock stays focused on widgets such as fire risk, minimap, time, and contextual information rather than duplicating unit command ownership.
 - 3D run exit controls should be compact and contextual: use a single Main Menu action inside the command/progression counter instead of a separate top header that reduces world viewport space.
@@ -193,8 +195,8 @@ Fire
 
 Other
 - Career/time pacing (career years, days/sec, phase durations, ash regrow delay, growth speed).
-- Time controls support persisted preset-button mode and an experimental slider mode; the slider spans 0x-80x in 0.25x steps, shares one value across strategic/incident time, and `Skip to Next Fire` temporarily forces max speed before restoring the prior value.
-- High-speed strategic time must still detect the first fire-season incident immediately: when calendar advancement seeds or discovers active fire, the sim enters incident mode and pauses before any large high-speed fire step can burn past the opening response window. Near fire-eligible weather or active fire work, the runtime internally caps submitted strategic sim steps to the fire kernel's idle adaptive window while leaving the player's selected speed display unchanged; `Skip to Next Fire` uses the same cap once it reaches viable incident weather.
+- Time controls support persisted preset-button mode and an experimental slider mode; the slider spans 0x-80x in 0.25x steps, shares one value across strategic/incident time, and `Advance to Next Event` temporarily forces max speed before restoring the prior value.
+- High-speed strategic time must still detect enabled pause events immediately: when calendar advancement seeds or discovers a pause-enabled fire, the sim enters incident mode and pauses before any large high-speed fire step can burn past the opening response window. Near fire-eligible weather or active fire work, the runtime internally caps submitted strategic sim steps to the fire kernel's idle adaptive window while leaving the player's selected speed display unchanged; `Advance to Next Event` uses the same cap once it reaches viable incident weather. Fire, annual report, and rain pause behavior can be toggled independently from event source toggles.
 - Economy baselines (base budget, approval min, hectares per tile, initial approval).
 - Progression toggles (available upgrades list).
 - Debug/perf toggles (simPerf, renderTrees/effects), unlimited money.

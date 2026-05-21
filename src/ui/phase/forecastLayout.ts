@@ -108,6 +108,43 @@ export type YearLayout = {
   labels: { leftPercent: number; text: string }[];
 };
 
+export type ForecastPeriod = {
+  startDay: number;
+  endDay: number;
+};
+
+export type ForecastPeriodLayout = {
+  bands: { x: number; width: number }[];
+};
+
+export const computeForecastPeriodLayout = (
+  periods: ReadonlyArray<ForecastPeriod>,
+  startDay: number,
+  windowDays: number,
+  dims: ChartDims = FORECAST_CHART
+): ForecastPeriodLayout => {
+  const result: ForecastPeriodLayout = { bands: [] };
+  if (windowDays <= 0 || periods.length === 0) {
+    return result;
+  }
+  const width = dims.width - dims.padding * 2;
+  const windowEnd = startDay + windowDays;
+  periods.forEach((period) => {
+    const segStart = Math.max(period.startDay, startDay);
+    const segEnd = Math.min(period.endDay, windowEnd);
+    if (segStart >= segEnd) {
+      return;
+    }
+    const t0 = (segStart - startDay) / windowDays;
+    const t1 = (segEnd - startDay) / windowDays;
+    result.bands.push({
+      x: dims.padding + t0 * width,
+      width: Math.max(0, (t1 - t0) * width)
+    });
+  });
+  return result;
+};
+
 export const computeYearLayout = (
   startDay: number,
   yearDays: number,

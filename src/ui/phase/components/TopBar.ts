@@ -6,6 +6,7 @@ import {
   RISK_BANDS,
   RISK_THRESHOLDS,
   SEASON_CLASSES,
+  computeForecastPeriodLayout,
   buildRiskPaths,
   computeForecastMarkerX,
   computeSeasonLayout,
@@ -1012,6 +1013,8 @@ export const createTopBar = (): TopBarView => {
   riskBands.classList.add("phase-forecast-bands");
   const seasonBands = document.createElementNS(SVG_NS, "g");
   seasonBands.classList.add("phase-forecast-seasons");
+  const rainBands = document.createElementNS(SVG_NS, "g");
+  rainBands.classList.add("phase-forecast-rain");
   const bandHeight = (CHART_HEIGHT - CHART_PADDING * 2) / RISK_BANDS.length;
   for (let i = 0; i < RISK_BANDS.length; i += 1) {
     const rect = document.createElementNS(SVG_NS, "rect");
@@ -1052,7 +1055,19 @@ export const createTopBar = (): TopBarView => {
   markerLine.setAttribute("y1", CHART_PADDING.toString());
   markerLine.setAttribute("y2", (CHART_HEIGHT - CHART_PADDING + 4).toString());
 
-  forecastSvg.append(defs, seasonBands, riskBands, axisLine, areaPath, seasonMarkers, yearMarkers, linePath, riskAxis, markerLine);
+  forecastSvg.append(
+    defs,
+    seasonBands,
+    riskBands,
+    axisLine,
+    areaPath,
+    rainBands,
+    seasonMarkers,
+    yearMarkers,
+    linePath,
+    riskAxis,
+    markerLine
+  );
   forecastChart.appendChild(forecastSvg);
   forecast.append(forecastChart, forecastSeasonScale, forecastScale, forecastMeta, forecastControls);
 
@@ -1434,6 +1449,30 @@ export const createTopBar = (): TopBarView => {
     });
   };
 
+  const updateRainBands = (forecastData: ClimateForecast | null, startDay: number, windowDays: number): void => {
+    while (rainBands.firstChild) {
+      rainBands.removeChild(rainBands.firstChild);
+    }
+    const periods = forecastData?.rainPeriods ?? [];
+    if (periods.length === 0 || windowDays <= 0) {
+      return;
+    }
+    const layout = computeForecastPeriodLayout(periods, startDay, windowDays, FORECAST_CHART);
+    const height = CHART_HEIGHT - CHART_PADDING * 2;
+    layout.bands.forEach((band) => {
+      const rect = document.createElementNS(SVG_NS, "rect");
+      rect.classList.add("phase-forecast-rain-band");
+      rect.setAttribute("x", band.x.toFixed(2));
+      rect.setAttribute("y", CHART_PADDING.toString());
+      rect.setAttribute("width", band.width.toFixed(2));
+      rect.setAttribute("height", height.toFixed(2));
+      const title = document.createElementNS(SVG_NS, "title");
+      title.textContent = "Seeded autumn rain period";
+      rect.appendChild(title);
+      rainBands.appendChild(rect);
+    });
+  };
+
   const updateRiskAxis = (): void => {
     while (riskAxis.firstChild) {
       riskAxis.removeChild(riskAxis.firstChild);
@@ -1493,6 +1532,7 @@ export const createTopBar = (): TopBarView => {
         markerLine.setAttribute("x1", markerXValue);
         markerLine.setAttribute("x2", markerXValue);
         updateSeasonMarkers(data.forecastStartDay, data.forecastYearDays, data.forecast.days);
+        updateRainBands(data.forecast, data.forecastStartDay, data.forecast.days);
         updateYearMarkers(data.forecastStartDay, data.forecastYearDays, data.forecast.days);
         forecastMeta.textContent = data.forecastMeta ?? "";
       } else {
@@ -1501,6 +1541,7 @@ export const createTopBar = (): TopBarView => {
         areaPath.setAttribute("d", "");
         forecastMeta.textContent = "";
         updateSeasonMarkers(0, 0, 0);
+        updateRainBands(null, 0, 0);
         updateYearMarkers(0, 0, 0);
       }
       if (data.alert) {

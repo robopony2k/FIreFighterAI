@@ -38,6 +38,9 @@ export type BottomControlsView = {
   setMusicState: (settings: AudioChannelState) => void;
   onRandomFireIgnitionToggle: (handler: (enabled: boolean) => void) => void;
   onAnnualReportToggle: (handler: (enabled: boolean) => void) => void;
+  onPauseFireEventToggle: (handler: (enabled: boolean) => void) => void;
+  onPauseAnnualReportEventToggle: (handler: (enabled: boolean) => void) => void;
+  onPauseRainEventToggle: (handler: (enabled: boolean) => void) => void;
   setSimulationToggleState: (settings: SimulationSettingsWidgetModel) => void;
 };
 
@@ -65,6 +68,29 @@ export const createBottomLeftControls = (): BottomControlsView => {
   element.dataset.panel = "bottomControls";
   element.dataset.runtimeWidgetContainer = PHASE_DOM_SETTINGS_WIDGET_CONTAINER;
 
+  const tabBar = document.createElement("div");
+  tabBar.className = "phase-control-tabs";
+  const mainTabButton = document.createElement("button");
+  mainTabButton.type = "button";
+  mainTabButton.className = "phase-control-tab is-active";
+  mainTabButton.textContent = "Main";
+  const eventsTabButton = document.createElement("button");
+  eventsTabButton.type = "button";
+  eventsTabButton.className = "phase-control-tab";
+  eventsTabButton.textContent = "Events";
+  tabBar.append(mainTabButton, eventsTabButton);
+  const mainTabPanel = document.createElement("div");
+  mainTabPanel.className = "phase-control-tab-panel";
+  const eventsTabPanel = document.createElement("div");
+  eventsTabPanel.className = "phase-control-tab-panel is-hidden";
+  const setActiveSettingsTab = (tab: "main" | "events"): void => {
+    const mainActive = tab === "main";
+    mainTabButton.classList.toggle("is-active", mainActive);
+    eventsTabButton.classList.toggle("is-active", !mainActive);
+    mainTabPanel.classList.toggle("is-hidden", !mainActive);
+    eventsTabPanel.classList.toggle("is-hidden", mainActive);
+  };
+
   const timeGroup = document.createElement("div");
   timeGroup.className = "phase-control-group phase-time-group";
   timeGroup.dataset.runtimeWidget = "timeControls";
@@ -80,7 +106,7 @@ export const createBottomLeftControls = (): BottomControlsView => {
     <button data-role="time-speed"></button>
     <button data-role="time-speed"></button>
     <button data-role="time-speed"></button>
-    <button data-action="${TIME_CONTROL_ACTIONS.skipToNextFire.action}" aria-label="Skip to Next Fire" title="Skip to Next Fire">Next Fire</button>
+    <button data-action="${TIME_CONTROL_ACTIONS.advanceToNextEvent.action}" aria-label="Advance to Next Event" title="Advance to Next Event">Next Event</button>
   `;
 
   const sliderSpeedRow = document.createElement("div");
@@ -101,7 +127,7 @@ export const createBottomLeftControls = (): BottomControlsView => {
       />
     </label>
     <span class="phase-time-slider-value">1x</span>
-    <button data-action="${TIME_CONTROL_ACTIONS.skipToNextFire.action}" aria-label="Skip to Next Fire" title="Skip to Next Fire">Next Fire</button>
+    <button data-action="${TIME_CONTROL_ACTIONS.advanceToNextEvent.action}" aria-label="Advance to Next Event" title="Advance to Next Event">Next Event</button>
   `;
   timeGroup.append(titleRow, buttonSpeedRow, sliderSpeedRow);
 
@@ -188,18 +214,23 @@ export const createBottomLeftControls = (): BottomControlsView => {
   getRuntimeWidgetsForContainer("phaseDom", PHASE_DOM_SETTINGS_WIDGET_CONTAINER).forEach((spec) => {
     const group = widgetGroups.get(spec.id as "timeControls" | "audioControls" | "simulationSettings");
     if (group) {
-      element.appendChild(group);
+      if (spec.id === "simulationSettings") {
+        eventsTabPanel.appendChild(group);
+      } else {
+        mainTabPanel.appendChild(group);
+      }
     }
   });
+  element.append(tabBar, mainTabPanel, eventsTabPanel);
   element.appendChild(status);
 
   const buttonPauseButton = buttonSpeedRow.querySelector(`[data-action="${TIME_CONTROL_ACTIONS.pause.action}"]`) as HTMLButtonElement;
   const sliderPauseButton = sliderSpeedRow.querySelector(`[data-action="${TIME_CONTROL_ACTIONS.pause.action}"]`) as HTMLButtonElement;
   const buttonNextFireButton = buttonSpeedRow.querySelector(
-    `[data-action="${TIME_CONTROL_ACTIONS.skipToNextFire.action}"]`
+    `[data-action="${TIME_CONTROL_ACTIONS.advanceToNextEvent.action}"]`
   ) as HTMLButtonElement;
   const sliderNextFireButton = sliderSpeedRow.querySelector(
-    `[data-action="${TIME_CONTROL_ACTIONS.skipToNextFire.action}"]`
+    `[data-action="${TIME_CONTROL_ACTIONS.advanceToNextEvent.action}"]`
   ) as HTMLButtonElement;
   const speedButtons = Array.from(buttonSpeedRow.querySelectorAll<HTMLButtonElement>('[data-role="time-speed"]'));
   const speedSlider = sliderSpeedRow.querySelector('[data-role="time-speed-slider"]') as HTMLInputElement;
@@ -227,10 +258,16 @@ export const createBottomLeftControls = (): BottomControlsView => {
   let onMusicVolumeChangeHandler: ((value: number) => void) | null = null;
   let simulationToggleState: SimulationSettingsWidgetModel = {
     randomFireIgnition: true,
-    annualReportEnabled: true
+    annualReportEnabled: true,
+    pauseOnFireEvent: true,
+    pauseOnAnnualReportEvent: true,
+    pauseOnRainEvent: true
   };
   let onRandomFireIgnitionToggleHandler: ((enabled: boolean) => void) | null = null;
   let onAnnualReportToggleHandler: ((enabled: boolean) => void) | null = null;
+  let onPauseFireEventToggleHandler: ((enabled: boolean) => void) | null = null;
+  let onPauseAnnualReportEventToggleHandler: ((enabled: boolean) => void) | null = null;
+  let onPauseRainEventToggleHandler: ((enabled: boolean) => void) | null = null;
 
   const getAudioControlState = (channelId: AudioChannelId): AudioChannelState => {
     if (channelId === "world") {
@@ -291,12 +328,22 @@ export const createBottomLeftControls = (): BottomControlsView => {
       }
       const enabled = simulationToggleState[toggle.setting];
       controls.input.checked = enabled;
-      controls.input.disabled =
+      const handlerMissing =
         toggle.setting === "randomFireIgnition"
           ? onRandomFireIgnitionToggleHandler === null
-          : onAnnualReportToggleHandler === null;
+          : toggle.setting === "annualReportEnabled"
+            ? onAnnualReportToggleHandler === null
+            : toggle.setting === "pauseOnFireEvent"
+              ? onPauseFireEventToggleHandler === null
+              : toggle.setting === "pauseOnAnnualReportEvent"
+                ? onPauseAnnualReportEventToggleHandler === null
+                : onPauseRainEventToggleHandler === null;
+      controls.input.disabled = handlerMissing;
     });
   };
+
+  mainTabButton.addEventListener("click", () => setActiveSettingsTab("main"));
+  eventsTabButton.addEventListener("click", () => setActiveSettingsTab("events"));
 
   audioRows.get("sfx")?.muteButton.addEventListener("click", (event) => {
     event.preventDefault();
@@ -340,6 +387,15 @@ export const createBottomLeftControls = (): BottomControlsView => {
   toggleRows.get("annualReportEnabled")?.input.addEventListener("change", () => {
     onAnnualReportToggleHandler?.(Boolean(toggleRows.get("annualReportEnabled")?.input.checked));
   });
+  toggleRows.get("pauseOnFireEvent")?.input.addEventListener("change", () => {
+    onPauseFireEventToggleHandler?.(Boolean(toggleRows.get("pauseOnFireEvent")?.input.checked));
+  });
+  toggleRows.get("pauseOnAnnualReportEvent")?.input.addEventListener("change", () => {
+    onPauseAnnualReportEventToggleHandler?.(Boolean(toggleRows.get("pauseOnAnnualReportEvent")?.input.checked));
+  });
+  toggleRows.get("pauseOnRainEvent")?.input.addEventListener("change", () => {
+    onPauseRainEventToggleHandler?.(Boolean(toggleRows.get("pauseOnRainEvent")?.input.checked));
+  });
 
   refreshAudioControls();
   refreshSimulationToggles();
@@ -380,19 +436,19 @@ export const createBottomLeftControls = (): BottomControlsView => {
       );
       speedSliderValue.textContent = formatTimeSpeedValue(data.timeSpeedValue);
 
-      const nextFireDisabled = data.skipToNextFireActive || !data.canSkipToNextFire;
-      [buttonNextFireButton, sliderNextFireButton].forEach((nextFireButton) => {
-        nextFireButton.disabled = nextFireDisabled;
-        nextFireButton.textContent = data.skipToNextFireActive ? "Seeking..." : "Next Fire";
-        if (data.skipToNextFireActive) {
-          nextFireButton.setAttribute("title", "Advancing time to next fire incident.");
-          nextFireButton.setAttribute("aria-label", "Seeking next fire");
-        } else if (data.canSkipToNextFire) {
-          nextFireButton.setAttribute("title", "Advance time until the next fire starts.");
-          nextFireButton.setAttribute("aria-label", "Skip to next fire");
+      const advanceToNextEventDisabled = data.advanceToNextEventActive || !data.canAdvanceToNextEvent;
+      [buttonNextFireButton, sliderNextFireButton].forEach((advanceToNextEventButton) => {
+        advanceToNextEventButton.disabled = advanceToNextEventDisabled;
+        advanceToNextEventButton.textContent = data.advanceToNextEventActive ? "Seeking..." : "Next Event";
+        if (data.advanceToNextEventActive) {
+          advanceToNextEventButton.setAttribute("title", "Advancing time to next enabled event.");
+          advanceToNextEventButton.setAttribute("aria-label", "Seeking next event");
+        } else if (data.canAdvanceToNextEvent) {
+          advanceToNextEventButton.setAttribute("title", "Advance time until the next enabled event.");
+          advanceToNextEventButton.setAttribute("aria-label", "Advance to next event");
         } else {
-          nextFireButton.setAttribute("title", "Available when fire activity has fully cleared.");
-          nextFireButton.setAttribute("aria-label", "Skip to next fire unavailable");
+          advanceToNextEventButton.setAttribute("title", "Available when fire activity has fully cleared.");
+          advanceToNextEventButton.setAttribute("aria-label", "Advance to next event unavailable");
         }
       });
 
@@ -459,10 +515,25 @@ export const createBottomLeftControls = (): BottomControlsView => {
       onAnnualReportToggleHandler = handler;
       refreshSimulationToggles();
     },
+    onPauseFireEventToggle: (handler) => {
+      onPauseFireEventToggleHandler = handler;
+      refreshSimulationToggles();
+    },
+    onPauseAnnualReportEventToggle: (handler) => {
+      onPauseAnnualReportEventToggleHandler = handler;
+      refreshSimulationToggles();
+    },
+    onPauseRainEventToggle: (handler) => {
+      onPauseRainEventToggleHandler = handler;
+      refreshSimulationToggles();
+    },
     setSimulationToggleState: (settings) => {
       simulationToggleState = {
         randomFireIgnition: Boolean(settings.randomFireIgnition),
-        annualReportEnabled: Boolean(settings.annualReportEnabled)
+        annualReportEnabled: Boolean(settings.annualReportEnabled),
+        pauseOnFireEvent: Boolean(settings.pauseOnFireEvent),
+        pauseOnAnnualReportEvent: Boolean(settings.pauseOnAnnualReportEvent),
+        pauseOnRainEvent: Boolean(settings.pauseOnRainEvent)
       };
       refreshSimulationToggles();
     }

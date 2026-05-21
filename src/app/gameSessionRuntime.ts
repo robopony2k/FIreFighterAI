@@ -1025,6 +1025,10 @@ export const createAppRuntime = (): AppRuntime => {
       recordPerfSample("3d.climateSync", performance.now() - startedAt);
     }
   };
+
+  const syncThreeTestSeasonalRainVisuals = (): void => {
+    threeTestController?.setSeasonalRainState(state.seasonalRain ?? null);
+  };
   
   const handleThreeResize = (): void => {
     threeTestController?.resize();
@@ -1423,6 +1427,7 @@ export const createAppRuntime = (): AppRuntime => {
     } else {
       updateThreeTestSeasonUi(threeTestManualSeasonT01, threeTestSeasonMode);
     }
+    syncThreeTestSeasonalRainVisuals();
     threeTestController.captureFireSnapshot(asRenderSim(state));
     threeTestController.prime();
     if (!previewDuringMapgen) {
@@ -1974,6 +1979,7 @@ export const createAppRuntime = (): AppRuntime => {
         if (isThreeTestSeasonalRecolorEnabled()) {
           syncThreeTestClimateVisuals();
         }
+        syncThreeTestSeasonalRainVisuals();
         if (controller && state.terrainDirty) {
           const activeFireTerrainPressure = hasActiveFireTerrainPressure();
           if (isThreeTestTerrainSyncDisabled()) {

@@ -19,7 +19,7 @@ import type { ProgressionDraftPanelData } from "./components/ProgressionDraftPan
 import { GameState } from "./gameState.js";
 import { UIController } from "./uiController.js";
 import { getProgressionLevelFloor, getProgressionNextLevelThreshold, getProgressionProgress01 } from "../../systems/progression/index.js";
-import { getActiveTimeSpeedValue, isSkipToNextFireAvailable } from "../../sim/index.js";
+import { getActiveTimeSpeedValue, isAdvanceToNextEventAvailable } from "../../sim/index.js";
 import { getFirebreakCostForState, getTrainingCostForState } from "../../sim/units.js";
 
 export type PhaseUiApi = {
@@ -326,9 +326,9 @@ export const initPhaseUI = (container: HTMLElement): PhaseUiApi => {
     state.setTimeSpeedControlMode(world.timeSpeedControlMode);
     state.setTimeSpeedIndex(world.timeSpeedIndex);
     state.setTimeSpeedValue(getActiveTimeSpeedValue(world));
-    state.setSkipToNextFireState(
-      !!world.skipToNextFire,
-      isSkipToNextFireAvailable(world)
+    state.setAdvanceToNextEventState(
+      !!world.advanceToNextEvent,
+      isAdvanceToNextEventAvailable(world)
     );
     state.setAlert(world.statusMessage && world.statusMessage !== "Ready." ? world.statusMessage : null);
     const windStrength = Math.round(world.wind.strength * 10);

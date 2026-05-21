@@ -67,6 +67,11 @@ export const FX_LAB_SCENARIOS: ReadonlyArray<FxLabScenarioDefinition> = [
     description: "A narrow stepped river corridor with engine-like 2-3 tile widths, a clear drop, and a plunge pool for waterfall tuning."
   },
   {
+    id: "rain-overlay",
+    label: "Rain Overlay",
+    description: "A quiet terrain view with the autumn rain screen-space overlay enabled for streak, dimming, and wet-lens tuning."
+  },
+  {
     id: "house-lifecycle",
     label: "House Lifecycle",
     description: "Procedural house previews showing frame, roofed, and charred-remains states from the same generator."
@@ -308,6 +313,12 @@ export const applyFxLabScenarioFrame = (scenarioId: FxLabScenarioId, ctx: FxLabS
     ctx.placeTruck(38.8, 44.6, "medium");
     ctx.placeFirefighter(41.2, 42.7);
     ctx.addFireDisk(49.6, 28.8, 2.4, 0.28 * pulse(timeSeconds, 0.2, 0.92, 1.08), 2.6);
+    return;
+  }
+  if (scenarioId === "rain-overlay") {
+    ctx.setWind(0.48, -0.88, 0.42, "Rain");
+    ctx.placeTruck(26.5, 45.5, "medium");
+    ctx.placeFirefighter(28.2, 44.4);
     return;
   }
   if (scenarioId === "water-precision") {

@@ -12,14 +12,14 @@ import { formatTimeSpeedValue, stepTimeSpeedSliderValue } from "../../../core/ti
 import {
   advancePhase,
   beginFireSeason,
-  cancelSkipToNextFire,
+  cancelAdvanceToNextEvent,
   closeAnnualReport,
   getActiveTimeSpeedOptions,
   getActiveTimeSpeedValue,
   handleDeployAction,
   handleEscape,
-  isSkipToNextFireAvailable,
-  requestSkipToNextFire,
+  isAdvanceToNextEventAvailable,
+  requestAdvanceToNextEvent,
   syncActiveTimeSpeedIndex,
   syncTimeSpeedSliderValue,
   togglePause
@@ -516,7 +516,7 @@ export const bindPhaseUi = ({
       return "confirm";
     }
     if (
-      action === "time-skip-next-fire" ||
+      action === "time-advance-next-event" ||
       action === "time-speed-step" ||
       /^time-speed-\d+$/.test(action) ||
       /^formation-(narrow|medium|wide)$/.test(action)
@@ -667,6 +667,21 @@ export const bindPhaseUi = ({
     uiAudio?.play("toggle");
     setRuntimeSetting("annualReportEnabled", enabled);
   });
+  phaseUi.controller.onPauseFireEventToggle((enabled) => {
+    noteInteraction();
+    uiAudio?.play("toggle");
+    setRuntimeSetting("pauseOnFireEvent", enabled);
+  });
+  phaseUi.controller.onPauseAnnualReportEventToggle((enabled) => {
+    noteInteraction();
+    uiAudio?.play("toggle");
+    setRuntimeSetting("pauseOnAnnualReportEvent", enabled);
+  });
+  phaseUi.controller.onPauseRainEventToggle((enabled) => {
+    noteInteraction();
+    uiAudio?.play("toggle");
+    setRuntimeSetting("pauseOnRainEvent", enabled);
+  });
   disposers.push(
     subscribeRuntimeSettings((settings) => {
       phaseUi.controller.setSimulationToggleState(settings);
@@ -717,8 +732,8 @@ export const bindPhaseUi = ({
       const activeOptions = getActiveTimeSpeedOptions(state);
       if (!Number.isNaN(nextIndex) && nextIndex >= 0 && nextIndex < activeOptions.length) {
         gate("timeControl", () => {
-          if (state.skipToNextFire) {
-            cancelSkipToNextFire(state, "Skip to next fire cancelled.");
+          if (state.advanceToNextEvent) {
+            cancelAdvanceToNextEvent(state, "Advance to next event cancelled.");
           }
           syncActiveTimeSpeedIndex(state, nextIndex);
           setStatus(
@@ -739,8 +754,8 @@ export const bindPhaseUi = ({
         return;
       }
       gate("timeControl", () => {
-        if (state.skipToNextFire) {
-          cancelSkipToNextFire(state, "Skip to next fire cancelled.");
+        if (state.advanceToNextEvent) {
+          cancelAdvanceToNextEvent(state, "Advance to next event cancelled.");
         }
         syncTimeSpeedSliderValue(state, stepTimeSpeedSliderValue(state.timeSpeedSliderValue, delta));
         setStatus(
@@ -761,8 +776,8 @@ export const bindPhaseUi = ({
         return;
       }
       gate("timeControl", () => {
-        if (state.skipToNextFire) {
-          cancelSkipToNextFire(state, "Skip to next fire cancelled.");
+        if (state.advanceToNextEvent) {
+          cancelAdvanceToNextEvent(state, "Advance to next event cancelled.");
         }
         syncTimeSpeedSliderValue(state, nextValue);
         setStatus(
@@ -795,8 +810,8 @@ export const bindPhaseUi = ({
     }
     if (resolvedAction === "pause") {
       gate("timeControl", () => {
-        if (state.skipToNextFire) {
-          cancelSkipToNextFire(state, "Skip to next fire cancelled.");
+        if (state.advanceToNextEvent) {
+          cancelAdvanceToNextEvent(state, "Advance to next event cancelled.");
           if (!state.paused) {
             state.paused = true;
           }
@@ -808,20 +823,20 @@ export const bindPhaseUi = ({
       });
       return;
     }
-    if (resolvedAction === "time-skip-next-fire") {
+    if (resolvedAction === "time-advance-next-event") {
       gate("timeControl", () => {
-        if (!isSkipToNextFireAvailable(state)) {
-          if (state.skipToNextFire) {
-            setStatus(state, "Already seeking next fire incident.");
+        if (!isAdvanceToNextEventAvailable(state)) {
+          if (state.advanceToNextEvent) {
+            setStatus(state, "Already advancing to the next event.");
           } else if (state.fireActivityState === "burning") {
-            setStatus(state, "Cannot skip: active fires already on the map.");
+            setStatus(state, "Cannot advance: active fires already on the map.");
           } else if (state.gameOver) {
-            setStatus(state, "Cannot skip after game over.");
+            setStatus(state, "Cannot advance after game over.");
           }
           phaseUi.sync(state, inputState);
           return;
         }
-        if (requestSkipToNextFire(state)) {
+        if (requestAdvanceToNextEvent(state)) {
           phaseUi.sync(state, inputState);
         }
       });
