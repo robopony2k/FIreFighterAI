@@ -57,6 +57,41 @@ export type SettlementRoadAdapter = {
   recordGeneratedJunctions?: (count: number) => void;
 };
 
+export type SettlementGrowthPlanEntryStatus = "pending" | "consumed" | "skipped";
+
+export type SettlementGrowthRoadSegment = {
+  start: Point;
+  end: Point;
+  options?: SettlementRoadOptions;
+};
+
+export type SettlementGrowthTerrainEdit = {
+  index: number;
+  elevation: number;
+};
+
+export type SettlementGrowthPlanEntry = {
+  townId: number;
+  anchorIndex: number;
+  styleSeed: number;
+  houseValue: number;
+  houseResidents: number;
+  roadSegments: SettlementGrowthRoadSegment[];
+  terrainEdits: SettlementGrowthTerrainEdit[];
+  plannedYear: number;
+  sequence: number;
+  status: SettlementGrowthPlanEntryStatus;
+};
+
+export type SettlementGrowthPlan = {
+  entries: SettlementGrowthPlanEntry[];
+  nextExpansionIndexByTown: number[];
+  plannedYears: number;
+  consumedEntries: number;
+  skippedEntries: number;
+  runtimeFallbackReservations: number;
+};
+
 export type SettlementPlacementResult = {
   generatedRoads: boolean;
   diagonalPenalty?: number;

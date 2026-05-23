@@ -25,6 +25,12 @@ export type SettlementFlattenResult = {
   before: SettlementTerrainFit;
   after: SettlementTerrainFit;
   targetElevation: number;
+  elevationEdits: SettlementTerrainElevationEdit[];
+};
+
+export type SettlementTerrainElevationEdit = {
+  index: number;
+  elevation: number;
 };
 
 const DEFAULT_HEIGHT_SCALE_MULTIPLIER = 1;
@@ -219,6 +225,16 @@ export const flattenSettlementFootprintForPlot = (
 ): SettlementFlattenResult => {
   const before = evaluateSettlementFootprintFit(state, bounds, options);
   const targetElevation = resolvePlotPadTarget(state, bounds, options.roadPoint);
+  const elevationEdits: SettlementTerrainElevationEdit[] = [];
+  const applyElevation = (idx: number, elevation: number): void => {
+    const nextElevation = clamp(elevation, 0, 1);
+    const tile = state.tiles[idx];
+    if (!tile || Math.abs(tile.elevation - nextElevation) <= 1e-6) {
+      return;
+    }
+    setTileElevation(state, idx, nextElevation);
+    elevationEdits.push({ index: idx, elevation: nextElevation });
+  };
   for (let y = bounds.minY; y <= bounds.maxY; y += 1) {
     for (let x = bounds.minX; x <= bounds.maxX; x += 1) {
       if (!inBounds(state.grid, x, y)) {
@@ -226,7 +242,7 @@ export const flattenSettlementFootprintForPlot = (
       }
       const idx = indexFor(state.grid, x, y);
       if (state.tiles[idx].type !== "water") {
-        setTileElevation(state, idx, targetElevation);
+        applyElevation(idx, targetElevation);
       }
     }
   }
@@ -242,13 +258,14 @@ export const flattenSettlementFootprintForPlot = (
         continue;
       }
       const blend = tile.type === "road" ? 0.35 : 0.22;
-      setTileElevation(state, idx, tile.elevation * (1 - blend) + targetElevation * blend);
+      applyElevation(idx, tile.elevation * (1 - blend) + targetElevation * blend);
     }
   }
 
   return {
     before,
     after: evaluateSettlementFootprintFit(state, bounds, options),
-    targetElevation
+    targetElevation,
+    elevationEdits
   };
 };

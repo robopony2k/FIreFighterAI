@@ -19,7 +19,7 @@ import {
   TOWN_CORE_RADIUS,
   TOWN_INITIAL_BUILD_COOLDOWN_MAX_DAYS
 } from "../constants/settlementConstants.js";
-import { simulateTownGrowthYears } from "../sim/townGrowth.js";
+import { createPrecomputedSettlementGrowthPlan, simulateTownGrowthYears } from "../sim/townGrowth.js";
 import {
   SETTLEMENT_PLOT_MAX_ANGLE_DEG,
   SETTLEMENT_TOWN_FALLBACK_ANGLE_DEG,
@@ -1593,6 +1593,7 @@ export const executeSettlementPlacementPlan = (
     ensureTownRoadConnectivity(state, towns, roadAdapter, realized);
     roadAdapter.backfillRoadEdgesFromAdjacency(state);
   }
+  state.plannedTownGrowth = createPrecomputedSettlementGrowthPlan(state, roadAdapter);
   state.settlementRequestedHouses = state.totalHouses;
   state.settlementPlacedHouses = state.totalHouses;
   realized.generatedRoads = true;

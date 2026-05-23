@@ -32,3 +32,22 @@ export const shouldSyncThreeTestTerrain = (
   previous.vegetationRevision !== next.vegetationRevision ||
   previous.structureRevision !== next.structureRevision ||
   previous.debugTypeColors !== next.debugTypeColors;
+
+const FAST_TIME_TERRAIN_SYNC_SPEED_THRESHOLD = 10;
+
+export type ThreeTestFastTimeTerrainSyncState = {
+  simTimeMode: string;
+  timeSpeedValue: number;
+  simulationPaused: boolean;
+  activeFireTerrainPressure: boolean;
+  immediateTerrainSyncChange?: boolean;
+};
+
+export const shouldDeferThreeTestTerrainSyncForFastTime = (
+  state: ThreeTestFastTimeTerrainSyncState
+): boolean =>
+  state.simTimeMode === "strategic" &&
+  !state.simulationPaused &&
+  !state.activeFireTerrainPressure &&
+  !state.immediateTerrainSyncChange &&
+  state.timeSpeedValue > FAST_TIME_TERRAIN_SYNC_SPEED_THRESHOLD;

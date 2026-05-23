@@ -11,7 +11,7 @@ import {
   TOWN_CONSTRUCTION_SLOWDOWN_FACTOR
 } from "../constants/settlementConstants.js";
 import type { BuildingLot } from "../types/buildingTypes.js";
-import type { SettlementRoadAdapter } from "../types/settlementTypes.js";
+import type { SettlementGrowthPlan, SettlementGrowthPlanEntry, SettlementRoadAdapter } from "../types/settlementTypes.js";
 import {
   getBuildingLotStageDurationDays,
   getBuildingLotStageSequence,
@@ -19,6 +19,8 @@ import {
   getFractionalSimulationYear
 } from "./buildingLifecycle.js";
 import {
+  applySettlementGrowthTerrainEdits,
+  createEmptySettlementGrowthPlan,
   rebuildGrowthContext,
   reserveTownExpansionLot,
   stepRuntimeTownGrowth,
@@ -248,6 +250,133 @@ const startTownRebuildLot = (
   );
 };
 
+const ensureSettlementGrowthPlanState = (state: WorldState): SettlementGrowthPlan => {
+  if (!state.plannedTownGrowth) {
+    state.plannedTownGrowth = createEmptySettlementGrowthPlan(state.towns.length);
+  }
+  const plan = state.plannedTownGrowth;
+  while (plan.nextExpansionIndexByTown.length < state.towns.length) {
+    plan.nextExpansionIndexByTown.push(0);
+  }
+  plan.consumedEntries = Math.max(0, Math.trunc(plan.consumedEntries ?? 0));
+  plan.skippedEntries = Math.max(0, Math.trunc(plan.skippedEntries ?? 0));
+  plan.runtimeFallbackReservations = Math.max(0, Math.trunc(plan.runtimeFallbackReservations ?? 0));
+  return plan;
+};
+
+const findNextPlannedExpansionEntry = (
+  plan: SettlementGrowthPlan,
+  townId: number
+): { entry: SettlementGrowthPlanEntry; index: number } | null => {
+  let index = Math.max(0, Math.trunc(plan.nextExpansionIndexByTown[townId] ?? 0));
+  while (index < plan.entries.length) {
+    const entry = plan.entries[index]!;
+    if (entry.townId === townId && entry.status === "pending") {
+      return { entry, index };
+    }
+    index += 1;
+  }
+  return null;
+};
+
+const markPlannedExpansionSkipped = (plan: SettlementGrowthPlan, townId: number, index: number): void => {
+  const entry = plan.entries[index];
+  if (entry && entry.status === "pending") {
+    entry.status = "skipped";
+    plan.skippedEntries += 1;
+  }
+  plan.nextExpansionIndexByTown[townId] = Math.max(plan.nextExpansionIndexByTown[townId] ?? 0, index + 1);
+};
+
+const markPlannedExpansionConsumed = (plan: SettlementGrowthPlan, townId: number, index: number): void => {
+  const entry = plan.entries[index];
+  if (entry && entry.status === "pending") {
+    entry.status = "consumed";
+    plan.consumedEntries += 1;
+  }
+  plan.nextExpansionIndexByTown[townId] = Math.max(plan.nextExpansionIndexByTown[townId] ?? 0, index + 1);
+};
+
+const isPlannedExpansionAnchorAvailable = (state: WorldState, anchorIndex: number): boolean => {
+  if (anchorIndex < 0 || anchorIndex >= state.grid.totalTiles) {
+    return false;
+  }
+  if (state.tileStructure[anchorIndex] !== 0) {
+    return false;
+  }
+  if (state.buildingLots.some((lot) => lot.anchorIndex === anchorIndex)) {
+    return false;
+  }
+  const tile = state.tiles[anchorIndex];
+  return !!tile && tile.type !== "water" && tile.type !== "base" && tile.type !== "house" && tile.type !== "road";
+};
+
+const applyPlannedExpansionRoads = (
+  state: WorldState,
+  roadAdapter: SettlementRoadAdapter,
+  entry: SettlementGrowthPlanEntry
+): boolean => {
+  let carvedAny = false;
+  for (let i = 0; i < entry.roadSegments.length; i += 1) {
+    const segment = entry.roadSegments[i]!;
+    if (!roadAdapter.carveRoad(state, segment.start, segment.end, segment.options)) {
+      if (carvedAny) {
+        roadAdapter.backfillRoadEdgesFromAdjacency(state);
+        state.terrainTypeRevision += 1;
+        state.terrainDirty = true;
+        state.tileSoaDirty = true;
+      }
+      return false;
+    }
+    carvedAny = true;
+  }
+  if (carvedAny) {
+    roadAdapter.backfillRoadEdgesFromAdjacency(state);
+    state.terrainTypeRevision += 1;
+    state.terrainDirty = true;
+    state.tileSoaDirty = true;
+  }
+  return true;
+};
+
+const consumePlannedExpansionLot = (
+  state: WorldState,
+  town: WorldState["towns"][number],
+  currentDay: number,
+  roadAdapter: SettlementRoadAdapter
+): BuildingLot | null => {
+  const plan = ensureSettlementGrowthPlanState(state);
+  for (let attempts = 0; attempts < 8; attempts += 1) {
+    const next = findNextPlannedExpansionEntry(plan, town.id);
+    if (!next) {
+      return null;
+    }
+    const { entry, index } = next;
+    if (!isPlannedExpansionAnchorAvailable(state, entry.anchorIndex)) {
+      markPlannedExpansionSkipped(plan, town.id, index);
+      continue;
+    }
+    applySettlementGrowthTerrainEdits(state, entry.terrainEdits);
+    if (!applyPlannedExpansionRoads(state, roadAdapter, entry)) {
+      markPlannedExpansionSkipped(plan, town.id, index);
+      continue;
+    }
+    markPlannedExpansionConsumed(plan, town.id, index);
+    return createBuildingLot(
+      state,
+      town.id,
+      "expansion",
+      entry.anchorIndex,
+      entry.styleSeed,
+      "empty_lot",
+      currentDay,
+      entry.houseValue,
+      entry.houseResidents
+    );
+  }
+  return null;
+};
+
 const startTownExpansionLot = (
   state: WorldState,
   town: WorldState["towns"][number],
@@ -256,6 +385,15 @@ const startTownExpansionLot = (
   roadAdapter: SettlementRoadAdapter,
   context: ReturnType<typeof rebuildGrowthContext>
 ): BuildingLot | null => {
+  const plannedLot = consumePlannedExpansionLot(state, town, currentDay, roadAdapter);
+  if (plannedLot) {
+    return plannedLot;
+  }
+  const plan = ensureSettlementGrowthPlanState(state);
+  if (plan.entries.length > 0) {
+    return null;
+  }
+  plan.runtimeFallbackReservations += 1;
   const reservation = reserveTownExpansionLot(state, town, context, roadAdapter, effectiveYear);
   if (!reservation) {
     return null;

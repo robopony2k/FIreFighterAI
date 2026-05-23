@@ -31,6 +31,7 @@ import {
   computeSettlementTileAngleDeg,
   evaluateSettlementFootprintFit,
   flattenSettlementFootprintForPlot,
+  type SettlementTerrainElevationEdit,
   type SettlementTerrainFit
 } from "./settlementTerrainFit.js";
 import {
@@ -52,11 +53,19 @@ import {
   MIN_TOWN_RADIUS,
   SECONDARY_BRANCH_MAX,
   SECONDARY_BRANCH_MIN,
+  SETTLEMENT_GROWTH_PLAN_YEARS,
   TOWN_CORE_RADIUS,
   TOWN_FRONTIER_BOOTSTRAP_LENGTH,
   TOWN_FRONTIER_RECOVERY_RADIUS_BONUS
 } from "../constants/settlementConstants.js";
-import type { SettlementRoadAdapter, SettlementRoadOptions } from "../types/settlementTypes.js";
+import type {
+  SettlementGrowthPlan,
+  SettlementGrowthPlanEntry,
+  SettlementGrowthRoadSegment,
+  SettlementGrowthTerrainEdit,
+  SettlementRoadAdapter,
+  SettlementRoadOptions
+} from "../types/settlementTypes.js";
 
 type GrowthMode = "mapgen" | "runtime";
 
@@ -84,6 +93,7 @@ export type ReservedBuildingLotCandidate = {
   styleSeed: number;
   houseValue: number;
   houseResidents: number;
+  terrainEdits: SettlementTerrainElevationEdit[];
 };
 
 type TownEnvelopeMetrics = {
@@ -429,7 +439,7 @@ export const reserveTownExpansionLot = (
     const selected = selectDeterministicFrontageCandidate(state, town, usableFrontage);
     if (selected && selected.terrainFit.viable && canPlaceHouseFootprint(state, selected.bounds)) {
       const anchorIndex = indexFor(state.grid, selected.x, selected.y);
-      flattenSettlementFootprintForPlot(state, selected.bounds, {
+      const flattenResult = flattenSettlementFootprintForPlot(state, selected.bounds, {
         roadPoint: { x: selected.roadX, y: selected.roadY }
       });
       markHouseFootprint(state, selected.bounds, context);
@@ -439,7 +449,8 @@ export const reserveTownExpansionLot = (
         anchorIndex,
         styleSeed: selected.styleSeed,
         houseValue: computeDeterministicHouseValue(state, anchorIndex, town.id, effectiveYear),
-        houseResidents: computeDeterministicHouseResidents(state, anchorIndex, town.id, effectiveYear)
+        houseResidents: computeDeterministicHouseResidents(state, anchorIndex, town.id, effectiveYear),
+        terrainEdits: flattenResult.elevationEdits
       };
     }
     if (!roadGrowthCapped && needsSecondAxis && addMissingCompactAxisStreet(state, town, roadAdapter)) {
@@ -1920,6 +1931,214 @@ const applyTownGrowthStep = (state: WorldState, roadAdapter: SettlementRoadAdapt
   if (!invariant.ok) {
     console.warn(`[towns] growth invariant failure: ${invariant.errors.slice(0, 8).join(" | ")}`);
   }
+};
+
+export const createEmptySettlementGrowthPlan = (townCount = 0, plannedYears = 0): SettlementGrowthPlan => ({
+  entries: [],
+  nextExpansionIndexByTown: new Array(Math.max(0, townCount)).fill(0),
+  plannedYears,
+  consumedEntries: 0,
+  skippedEntries: 0,
+  runtimeFallbackReservations: 0
+});
+
+const clonePoint = <T extends Point>(point: T): T => ({ ...point });
+
+const cloneRoadOptions = (options?: SettlementRoadOptions): SettlementRoadOptions | undefined => {
+  if (!options) {
+    return undefined;
+  }
+  return {
+    ...options,
+    searchBounds: options.searchBounds ? { ...options.searchBounds } : undefined
+  };
+};
+
+const cloneGrowthRoadSegment = (segment: SettlementGrowthRoadSegment): SettlementGrowthRoadSegment => ({
+  start: clonePoint(segment.start),
+  end: clonePoint(segment.end),
+  options: cloneRoadOptions(segment.options)
+});
+
+const cloneGrowthTerrainEdit = (edit: SettlementGrowthTerrainEdit): SettlementGrowthTerrainEdit => ({
+  index: Math.max(0, Math.trunc(edit.index)),
+  elevation: clamp(edit.elevation, 0, 1)
+});
+
+export const applySettlementGrowthTerrainEdits = (
+  state: WorldState,
+  edits: readonly SettlementGrowthTerrainEdit[] | undefined
+): boolean => {
+  if (!edits || edits.length <= 0) {
+    return false;
+  }
+  let changed = false;
+  for (let i = 0; i < edits.length; i += 1) {
+    const edit = edits[i];
+    if (!edit) {
+      continue;
+    }
+    const idx = Math.trunc(edit.index);
+    if (idx < 0 || idx >= state.grid.totalTiles) {
+      continue;
+    }
+    const tile = state.tiles[idx];
+    if (!tile) {
+      continue;
+    }
+    const nextElevation = clamp(edit.elevation, 0, 1);
+    if (Math.abs(tile.elevation - nextElevation) <= 1e-6) {
+      continue;
+    }
+    tile.elevation = nextElevation;
+    if (state.tileElevation.length === state.grid.totalTiles) {
+      state.tileElevation[idx] = nextElevation;
+    }
+    changed = true;
+  }
+  if (changed) {
+    state.terrainDirty = true;
+    state.tileSoaDirty = true;
+  }
+  return changed;
+};
+
+const clonePlanningState = (state: WorldState): WorldState =>
+  ({
+    ...state,
+    tiles: state.tiles.map((tile) => ({ ...tile })),
+    towns: state.towns.map((town) => ({
+      ...town,
+      growthFrontiers: town.growthFrontiers.map((frontier) => ({ ...frontier })),
+      selectedEvacuationPoint: town.selectedEvacuationPoint ? { ...town.selectedEvacuationPoint } : undefined
+    })),
+    buildingLots: state.buildingLots.map((lot) => ({ ...lot })),
+    tileFire: new Float32Array(state.tileFire),
+    tileFuel: new Float32Array(state.tileFuel),
+    tileHeat: new Float32Array(state.tileHeat),
+    tileBurnAge: new Float32Array(state.tileBurnAge),
+    tileHeatRelease: new Float32Array(state.tileHeatRelease),
+    tileIgnitionPoint: new Float32Array(state.tileIgnitionPoint),
+    tileBurnRate: new Float32Array(state.tileBurnRate),
+    tileHeatOutput: new Float32Array(state.tileHeatOutput),
+    tileElevation: new Float32Array(state.tileElevation),
+    tileMoisture: new Float32Array(state.tileMoisture),
+    tileVegetationAge: new Float32Array(state.tileVegetationAge),
+    tileCanopyCover: new Float32Array(state.tileCanopyCover),
+    tileStemDensity: new Uint8Array(state.tileStemDensity),
+    tileSpreadBoost: new Float32Array(state.tileSpreadBoost),
+    tileHeatRetention: new Float32Array(state.tileHeatRetention),
+    tileWindFactor: new Float32Array(state.tileWindFactor),
+    tileHeatTransferCap: new Float32Array(state.tileHeatTransferCap),
+    tileRoadBridge: new Uint8Array(state.tileRoadBridge),
+    tileRoadEdges: new Uint8Array(state.tileRoadEdges),
+    tileRoadWallEdges: new Uint8Array(state.tileRoadWallEdges),
+    structureMask: new Uint8Array(state.structureMask),
+    tileTownId: new Int16Array(state.tileTownId),
+    tileStructure: new Uint8Array(state.tileStructure),
+    tileTypeId: new Uint8Array(state.tileTypeId),
+    plannedTownGrowth: createEmptySettlementGrowthPlan(state.towns.length)
+  }) as WorldState;
+
+const createRecordingRoadAdapter = (
+  roadAdapter: SettlementRoadAdapter,
+  segments: SettlementGrowthRoadSegment[]
+): SettlementRoadAdapter => ({
+  ...roadAdapter,
+  carveRoad: (nextState, start, end, options = {}) => {
+    const carved = roadAdapter.carveRoad(nextState, start, end, options);
+    if (carved) {
+      segments.push({
+        start: clonePoint(start),
+        end: clonePoint(end),
+        options: cloneRoadOptions(options)
+      });
+    }
+    return carved;
+  },
+  carveRoadSequence: roadAdapter.carveRoadSequence
+    ? (nextState, roadSegments) => {
+        const carved = roadAdapter.carveRoadSequence!(nextState, roadSegments);
+        if (carved) {
+          for (let i = 0; i < roadSegments.length; i += 1) {
+            const segment = roadSegments[i]!;
+            segments.push({
+              start: clonePoint(segment.start),
+              end: clonePoint(segment.end),
+              options: cloneRoadOptions(segment.options)
+            });
+          }
+        }
+        return carved;
+      }
+    : undefined
+});
+
+export const createPrecomputedSettlementGrowthPlan = (
+  state: WorldState,
+  roadAdapter: SettlementRoadAdapter,
+  plannedYears = SETTLEMENT_GROWTH_PLAN_YEARS
+): SettlementGrowthPlan => {
+  const safeYears = Math.max(0, Math.floor(plannedYears));
+  const plan = createEmptySettlementGrowthPlan(state.towns.length, safeYears);
+  if (state.towns.length <= 0 || safeYears <= 0) {
+    return plan;
+  }
+
+  let planningState = clonePlanningState(state);
+  let sequence = 0;
+  const baseEffectiveYear = Math.max(
+    0,
+    ...planningState.towns.map((town) => Math.max(0, Math.floor(town.simulatedGrowthYears ?? 0)))
+  );
+
+  for (let yearOffset = 0; yearOffset < safeYears; yearOffset += 1) {
+    const effectiveYear = baseEffectiveYear + yearOffset;
+    assignDesiredGrowthDeltas(planningState, effectiveYear, "mapgen");
+    for (let townIndex = 0; townIndex < planningState.towns.length; townIndex += 1) {
+      const desiredDelta = Math.max(0, Math.trunc(planningState.towns[townIndex]?.desiredHouseDelta ?? 0));
+      for (let item = 0; item < desiredDelta; item += 1) {
+        const town = planningState.towns[townIndex];
+        if (!town) {
+          continue;
+        }
+        const roadSegments: SettlementGrowthRoadSegment[] = [];
+        const recordingAdapter = createRecordingRoadAdapter(roadAdapter, roadSegments);
+        const context = rebuildGrowthContext(planningState);
+        const reservation = reserveTownExpansionLot(planningState, town, context, recordingAdapter, effectiveYear);
+        if (!reservation) {
+          continue;
+        }
+        const tile = planningState.tiles[reservation.anchorIndex];
+        if (!tile) {
+          continue;
+        }
+        planningState.structureMask[reservation.anchorIndex] = 0;
+        tile.houseValue = reservation.houseValue;
+        tile.houseResidents = reservation.houseResidents;
+        if (!placeHouse(planningState, reservation.anchorIndex, town.id, effectiveYear, reservation.styleSeed)) {
+          continue;
+        }
+        updateTownEnvelope(planningState, town);
+        applySettlementGrowthTerrainEdits(state, reservation.terrainEdits);
+        plan.entries.push({
+          townId: town.id,
+          anchorIndex: reservation.anchorIndex,
+          styleSeed: reservation.styleSeed,
+          houseValue: reservation.houseValue,
+          houseResidents: reservation.houseResidents,
+          roadSegments: roadSegments.map(cloneGrowthRoadSegment),
+          terrainEdits: reservation.terrainEdits.map(cloneGrowthTerrainEdit),
+          plannedYear: effectiveYear,
+          sequence,
+          status: "pending"
+        });
+        sequence += 1;
+      }
+    }
+  }
+
+  return plan;
 };
 
 export const simulateTownGrowthYears = (

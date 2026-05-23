@@ -8,7 +8,7 @@ Story: You are the new "Fire Warden" in charge of a region. Your mission is to p
 - A strategic fire-response simulation with long-term planning and tactical firefighting.
 - Climate drives the world instead of fixed seasons; "seasons" are emergent from temperature and moisture.
 - The player manages a 20-year campaign where risk gradually increases due to climate change.
-- Towns are terrain-aware settlements that start from seeded street skeletons, form compact blocks when terrain allows, and keep growing over the campaign, increasing building exposure and fire risk over time.
+- Towns are terrain-aware settlements that start from seeded street skeletons, form compact blocks when terrain allows, and keep growing over the campaign, increasing building exposure and fire risk over time. Map generation precomputes each town's ideal 20-year expansion queue and bakes the required future house-pad terrain into the day-1 landform, while runtime approval and recovery pressure decide how quickly queued expansion lots and their prerequisite roads become active.
 - Balance the competing demands of managing a budget, the firefighters under your command, and the community's preparedness.
 - The game should feel readable and decisive: clear cause and effect, no hidden "gotchas."
 
@@ -251,7 +251,7 @@ This can be achieved by:
 - Tactical evacuation (town destination selection, locked road routes, representative civilian vehicles, road slot queueing, heat exposure, vehicle destruction, and population/life-loss hooks).
 - Climate model (temperature + moisture).
 - Map generation (terrain, vegetation age/density, forest stand composition).
-- Settlements (angle-aware terrain-fit town seeding, constrained-ribbon vs compact street archetypes, frontage-based annual growth, compact infill/densification, event-style construction catch-up, block-forming road expansion).
+- Settlements (angle-aware terrain-fit town seeding, constrained-ribbon vs compact street archetypes, precomputed deterministic 20-year ideal growth queues with day-1 future pad terrain, approval-gated queue consumption, compact infill/densification, event-style construction catch-up, block-forming road expansion).
 - UI system (phase UI, controls, overlays).
 
 ## Open Questions

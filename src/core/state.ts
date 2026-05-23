@@ -26,6 +26,7 @@ import type {
 import type { CampaignState } from "./campaign.js";
 import type { ProgressionState } from "../systems/progression/types.js";
 import type { BuildingLot } from "../systems/settlements/types/buildingTypes.js";
+import type { SettlementGrowthPlan } from "../systems/settlements/types/settlementTypes.js";
 import type { ActiveEvacuation } from "../systems/evacuation/types/evacuationTypes.js";
 
 import { BASE_BUDGET, DEFAULT_FIRE_SETTINGS, DEFAULT_INCIDENT_TIME_SPEED_INDEX } from "./config.js";
@@ -204,6 +205,7 @@ export interface WorldState {
   settlementBuildDayAccumulator: number;
   buildingLots: BuildingLot[];
   nextBuildingLotId: number;
+  plannedTownGrowth: SettlementGrowthPlan;
 
   seed: number;
   fireSettings: FireSettings;
@@ -561,6 +563,14 @@ export function createInitialState(seed: number, grid: Grid): WorldState {
     settlementBuildDayAccumulator: 0,
     buildingLots: [],
     nextBuildingLotId: 1,
+    plannedTownGrowth: {
+      entries: [],
+      nextExpansionIndexByTown: [],
+      plannedYears: 0,
+      consumedEntries: 0,
+      skippedEntries: 0,
+      runtimeFallbackReservations: 0
+    },
 
     seed,
     fireSettings: { ...DEFAULT_FIRE_SETTINGS },

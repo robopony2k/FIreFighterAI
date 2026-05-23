@@ -1,5 +1,32 @@
 # Deprecations
 
+## Unbaked Planned Settlement Pads
+
+Status: Deprecated as of May 21, 2026.
+
+- Precomputed settlement growth entries now record the elevation edits made while flattening future house pads.
+- Map generation applies those elevation edits to the real world immediately, so day-1 terrain already contains the landform needed for the 20-year settlement plan even though future houses and roads remain queued.
+
+Migration guidance:
+
+1. Keep future house and road visibility gated by the settlement growth queue.
+2. Treat planned house-pad terrain as part of generated terrain, not as a runtime construction effect.
+3. When changing plot flattening rules, update both queue recording and the day-1 terrain bake regression.
+
+## Runtime Settlement Expansion Search
+
+Status: Deprecated as of May 21, 2026.
+
+- Growth-season town expansion no longer runs the full frontage, road-extension, and lot-reservation search as the default runtime path.
+- Map generation now precomputes deterministic 20-year ideal settlement growth queues. Runtime construction consumes queued expansion lots and queued prerequisite road segments when approval-gated growth pressure allows it.
+- Compatibility fallback may still reserve a lot at runtime for synthetic/debug worlds with no precomputed plan, but generated campaign maps should use the queue.
+
+Migration guidance:
+
+1. Add future settlement expansion behavior through `src/systems/settlements/sim/townGrowth.ts` plan generation and `src/systems/settlements/sim/townConstruction.ts` queue consumption.
+2. Keep road mutation behind `SettlementRoadAdapter`; do not reintroduce direct runtime road search in construction scheduling.
+3. Regression coverage should assert generated maps consume precomputed entries without reservation fallback during spring fast-time growth.
+
 ## Unbounded Rescue Road Routing Through Steep Terrain
 
 Status: Deprecated as of May 20, 2026.

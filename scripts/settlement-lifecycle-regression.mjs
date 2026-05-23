@@ -30,7 +30,13 @@ const {
 const { stepTownConstructionSchedule } = await import(
   distImport(["systems", "settlements", "sim", "townConstruction.js"])
 );
-const { reserveTownExpansionLot, rebuildGrowthContext, simulateTownGrowthYears, tryDensifyTownHousing } = await import(
+const {
+  createPrecomputedSettlementGrowthPlan,
+  reserveTownExpansionLot,
+  rebuildGrowthContext,
+  simulateTownGrowthYears,
+  tryDensifyTownHousing
+} = await import(
   distImport(["systems", "settlements", "sim", "townGrowth.js"])
 );
 const { buildRenderTerrainSample } = await import(distImport(["render", "simView.js"]));
@@ -430,6 +436,169 @@ const runBulkSchedulerParityCase = () => {
   };
 };
 
+const runPrecomputedGrowthPlanDeterminismCase = () => {
+  const left = buildExpansionReadyWorld(7575);
+  const right = buildExpansionReadyWorld(7575);
+  const leftPlan = createPrecomputedSettlementGrowthPlan(left, createRuntimeSettlementRoadAdapter(), 4);
+  const rightPlan = createPrecomputedSettlementGrowthPlan(right, createRuntimeSettlementRoadAdapter(), 4);
+  assert.ok(leftPlan.entries.length > 0, "precomputed growth plan should contain future expansion entries");
+  assert.deepEqual(leftPlan, rightPlan, "precomputed growth plan should be deterministic for identical inputs");
+  return {
+    entries: leftPlan.entries.length
+  };
+};
+
+const runPrecomputedGrowthTerrainBakeCase = () => {
+  const state = buildExpansionReadyWorld(7626);
+  for (let idx = 0; idx < state.tiles.length; idx += 1) {
+    const x = idx % state.grid.cols;
+    const y = Math.floor(idx / state.grid.cols);
+    if (state.tiles[idx].type !== "road") {
+      state.tiles[idx].elevation = 0.215 + x * 0.0015 + y * 0.001;
+    }
+  }
+  syncTileSoA(state);
+  const plan = createPrecomputedSettlementGrowthPlan(state, createRuntimeSettlementRoadAdapter(), 5);
+  const terrainEntry = plan.entries.find((entry) => entry.terrainEdits.length > 0);
+  assert.ok(terrainEntry, "precomputed growth plan should record future plot terrain edits");
+  const finalEditsByIndex = new Map();
+  for (const entry of plan.entries) {
+    for (const edit of entry.terrainEdits) {
+      finalEditsByIndex.set(edit.index, edit.elevation);
+    }
+  }
+  for (const [index, elevation] of finalEditsByIndex) {
+    assert.ok(
+      Math.abs(state.tiles[index].elevation - elevation) <= 1e-6,
+      "final future plot terrain edits should be baked into day-1 terrain"
+    );
+  }
+  assert.notEqual(
+    state.tiles[terrainEntry.anchorIndex].type,
+    "house",
+    "future queued house should not be placed during terrain pre-bake"
+  );
+  assert.equal(state.tileStructure[terrainEntry.anchorIndex], 0, "future queued house should not reserve a structure anchor");
+
+  return {
+    edits: finalEditsByIndex.size
+  };
+};
+
+const runPrecomputedGrowthConsumptionCase = () => {
+  const state = buildExpansionReadyWorld(7676);
+  state.plannedTownGrowth = createPrecomputedSettlementGrowthPlan(state, createRuntimeSettlementRoadAdapter(), 5);
+  assert.ok(state.plannedTownGrowth.entries.length > 0, "expected precomputed expansion entries");
+  const firstTownEntry = state.plannedTownGrowth.entries.find((entry) => entry.townId === 0);
+  assert.ok(firstTownEntry, "expected a planned entry for town 0");
+  state.townGrowthAppliedYear = state.year;
+  state.careerDay = PHASES[0].duration;
+  syncCalendar(state);
+  state.towns[0].growthPressure = 1;
+  state.towns[0].buildStartCooldownDays = 0;
+
+  advanceConstructionDaysBulk(state, 1);
+
+  assert.equal(state.buildingLots.length, 1, "planned expansion should start one construction lot");
+  assert.equal(state.buildingLots[0].anchorIndex, firstTownEntry.anchorIndex, "runtime expansion should consume the queued anchor");
+  assert.equal(state.plannedTownGrowth.consumedEntries, 1, "planned entry should be marked consumed");
+  assert.equal(state.plannedTownGrowth.runtimeFallbackReservations, 0, "planned runtime growth should not use reservation fallback");
+
+  return {
+    anchor: state.buildingLots[0].anchorIndex,
+    consumed: state.plannedTownGrowth.consumedEntries
+  };
+};
+
+const runLowApprovalGateCase = () => {
+  const state = buildExpansionReadyWorld(7777);
+  state.plannedTownGrowth = createPrecomputedSettlementGrowthPlan(state, createRuntimeSettlementRoadAdapter(), 5);
+  const entriesBefore = JSON.stringify(state.plannedTownGrowth.entries);
+  state.careerDay = PHASES[0].duration;
+  syncCalendar(state);
+  state.towns.forEach((town) => {
+    town.approval = 0;
+    town.buildStartCooldownDays = 0;
+  });
+
+  advanceConstructionDaysBulk(state, 1);
+
+  assert.equal(state.plannedTownGrowth.consumedEntries, 0, "low approval should not consume planned expansion entries");
+  assert.equal(JSON.stringify(state.plannedTownGrowth.entries), entriesBefore, "low approval should not rewrite planned locations");
+  return {
+    consumed: state.plannedTownGrowth.consumedEntries
+  };
+};
+
+const runInvalidPlannedEntrySkipCase = () => {
+  const state = buildExpansionReadyWorld(7878);
+  state.plannedTownGrowth = createPrecomputedSettlementGrowthPlan(state, createRuntimeSettlementRoadAdapter(), 8);
+  const townEntries = state.plannedTownGrowth.entries.filter((entry) => entry.townId === 0);
+  assert.ok(townEntries.length >= 2, "invalid-entry case needs at least two planned entries for town 0");
+  const blocked = townEntries[0];
+  const fallback = townEntries[1];
+  state.tileStructure[blocked.anchorIndex] = 1;
+  state.townGrowthAppliedYear = state.year;
+  state.careerDay = PHASES[0].duration;
+  syncCalendar(state);
+  state.towns[0].growthPressure = 1;
+  state.towns[0].buildStartCooldownDays = 0;
+
+  advanceConstructionDaysBulk(state, 1);
+
+  assert.equal(state.plannedTownGrowth.skippedEntries, 1, "blocked planned entry should be skipped");
+  assert.equal(state.plannedTownGrowth.consumedEntries, 1, "runtime should continue to the next planned entry");
+  assert.equal(state.buildingLots[0].anchorIndex, fallback.anchorIndex, "runtime should build the next valid planned entry");
+  return {
+    skipped: state.plannedTownGrowth.skippedEntries,
+    anchor: state.buildingLots[0].anchorIndex
+  };
+};
+
+const runQueuedRoadApplicationCase = () => {
+  const grid = { cols: 20, rows: 20, totalTiles: 20 * 20 };
+  const state = createInitialState(7979, grid);
+  state.tiles = Array.from({ length: grid.totalTiles }, () => buildTile("grass"));
+  for (let x = 4; x <= 15; x += 1) {
+    state.tiles[10 * grid.cols + x] = buildTile("road", { fuel: 0 });
+  }
+  const town = buildTown(7979, 0, "Queue Roads", 10, 10, 10);
+  town.streetArchetype = "crossroads";
+  town.growthFrontiers = [
+    { x: 14, y: 10, dx: 1, dy: 0, active: true, branchType: "primary" },
+    { x: 6, y: 10, dx: -1, dy: 0, active: true, branchType: "primary" }
+  ];
+  state.towns = [town];
+  placeHouse(state, 9 * grid.cols + 10, 0, 0.5);
+  backfillRoadEdgesFromAdjacency(state);
+  syncTileSoA(state);
+
+  state.plannedTownGrowth = createPrecomputedSettlementGrowthPlan(state, createRuntimeSettlementRoadAdapter(), 10);
+  const roadEntryIndex = state.plannedTownGrowth.entries.findIndex((entry) => entry.townId === 0 && entry.roadSegments.length > 0);
+  assert.ok(roadEntryIndex >= 0, "expected at least one queued expansion entry with road segments");
+  state.plannedTownGrowth.nextExpansionIndexByTown[0] = roadEntryIndex;
+  const roadEntry = state.plannedTownGrowth.entries[roadEntryIndex];
+  const roadsBefore = collectRoadTiles(state).length;
+  const revisionBefore = state.terrainTypeRevision;
+  state.townGrowthAppliedYear = state.year;
+  state.careerDay = PHASES[0].duration;
+  syncCalendar(state);
+  state.towns[0].growthPressure = 1;
+  state.towns[0].buildStartCooldownDays = 0;
+
+  advanceConstructionDaysBulk(state, 1);
+
+  assert.equal(state.buildingLots[0].anchorIndex, roadEntry.anchorIndex, "queued road entry should reserve its planned lot");
+  assert.ok(collectRoadTiles(state).length > roadsBefore, "queued road segments should add road tiles at runtime");
+  assert.ok(state.terrainTypeRevision > revisionBefore, "queued road application should bump terrain type revision");
+  assert.equal(state.tileSoaDirty, true, "queued road application should mark tile SoA dirty");
+
+  return {
+    roads: collectRoadTiles(state).length - roadsBefore,
+    anchor: state.buildingLots[0].anchorIndex
+  };
+};
+
 const runNoFireGrowthCompletesHousingCase = () => {
   const state = buildExpansionReadyWorld(7373);
   const startingHouses = state.totalHouses;
@@ -711,6 +880,7 @@ const runPlotFlatteningAndFoundationCase = () => {
   const flattened = flattenSettlementFootprintForPlot(state, bounds, { roadPoint: { x: 3, y: 4 } });
   assert.ok(before.relief > flattened.after.relief, "accepted plot flattening should reduce footprint relief");
   assert.ok(flattened.after.relief <= 0.0001, "accepted plot pad should be level after flattening");
+  assert.ok(flattened.elevationEdits.length > 0, "accepted plot flattening should report concrete elevation edits");
 
   const grounding = resolveStructureGrounding({
     surface: {
@@ -845,6 +1015,12 @@ const alert = runAlertSuppressionCase();
 const recovery = runRecoveryPriorityCase();
 const idle = runIdleRevisionCase();
 const bulkParity = runBulkSchedulerParityCase();
+const precomputedPlan = runPrecomputedGrowthPlanDeterminismCase();
+const precomputedTerrain = runPrecomputedGrowthTerrainBakeCase();
+const precomputedConsumption = runPrecomputedGrowthConsumptionCase();
+const lowApprovalGate = runLowApprovalGateCase();
+const invalidPlanSkip = runInvalidPlannedEntrySkipCase();
+const queuedRoads = runQueuedRoadApplicationCase();
 const noFireGrowth = runNoFireGrowthCompletesHousingCase();
 const blockedGrowth = runBlockedGrowthPressureCase();
 const compact = runCompactGrowthBranchingCase();
@@ -863,6 +1039,12 @@ console.log(
     `priority=${recovery.firstLotKind}`,
     `idleRevision=${idle.startRevision}->${idle.endRevision}`,
     `bulkParity=${bulkParity.houses}/${bulkParity.lots}`,
+    `planEntries=${precomputedPlan.entries}`,
+    `planTerrainEdits=${precomputedTerrain.edits}`,
+    `planConsumed=${precomputedConsumption.consumed}`,
+    `approvalGate=${lowApprovalGate.consumed}`,
+    `planSkip=${invalidPlanSkip.skipped}`,
+    `queuedRoads=${queuedRoads.roads}`,
     `noFireGrowth=${noFireGrowth.start}->${noFireGrowth.end}`,
     `blockedGrowth=${blockedGrowth.start}/${blockedGrowth.pressure}`,
     `compactRoads=${compact.offAxisRoads}`,

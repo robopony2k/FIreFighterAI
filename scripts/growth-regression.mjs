@@ -11,7 +11,10 @@ import {
   syncDerivedVegetationState
 } from "../dist/core/vegetation.js";
 import { stepGrowth } from "../dist/sim/growth.js";
-import { shouldSyncThreeTestTerrain } from "../dist/app/threeTestTerrainSync.js";
+import {
+  shouldDeferThreeTestTerrainSyncForFastTime,
+  shouldSyncThreeTestTerrain
+} from "../dist/app/threeTestTerrainSync.js";
 
 const buildTile = (type, overrides = {}) => ({
   type,
@@ -237,6 +240,47 @@ assert.ok(
     debugTypeColors: false
   }),
   "vegetation-only revision change should trigger 3D terrain sync"
+);
+assert.equal(
+  shouldDeferThreeTestTerrainSyncForFastTime({
+    simTimeMode: "strategic",
+    timeSpeedValue: 20,
+    simulationPaused: false,
+    activeFireTerrainPressure: false
+  }),
+  true,
+  "fast strategic time should defer terrain sync when no active fire needs visuals"
+);
+assert.equal(
+  shouldDeferThreeTestTerrainSyncForFastTime({
+    simTimeMode: "strategic",
+    timeSpeedValue: 80,
+    simulationPaused: false,
+    activeFireTerrainPressure: true
+  }),
+  false,
+  "active fire terrain pressure should override fast-time terrain sync deferral"
+);
+assert.equal(
+  shouldDeferThreeTestTerrainSyncForFastTime({
+    simTimeMode: "strategic",
+    timeSpeedValue: 80,
+    simulationPaused: false,
+    activeFireTerrainPressure: false,
+    immediateTerrainSyncChange: true
+  }),
+  false,
+  "fast strategic time should sync immediate structure changes instead of waiting for speed to drop"
+);
+assert.equal(
+  shouldDeferThreeTestTerrainSyncForFastTime({
+    simTimeMode: "strategic",
+    timeSpeedValue: 10,
+    simulationPaused: false,
+    activeFireTerrainPressure: false
+  }),
+  false,
+  "low and medium strategic speeds should keep terrain sync immediate"
 );
 assert.ok(
   growthOnly.state.tileVegetationAge[growthOnly.targetIdx] >= growthTileAfter.vegetationAgeYears - 1e-6,

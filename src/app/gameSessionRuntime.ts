@@ -52,6 +52,7 @@ import type { GameUiSnapshot } from "../ui/phase/types.js";
 import { updatePerfCounter } from "./perfDiagnostics.js";
 import { startAppBootLoop } from "./bootLoop.js";
 import {
+  shouldDeferThreeTestTerrainSyncForFastTime,
   shouldRebuildThreeTestTreeTypeMap,
   shouldSyncThreeTestTerrain,
   type ThreeTestTerrainRevisionState
@@ -1982,9 +1983,18 @@ export const createAppRuntime = (): AppRuntime => {
         syncThreeTestSeasonalRainVisuals();
         if (controller && state.terrainDirty) {
           const activeFireTerrainPressure = hasActiveFireTerrainPressure();
+          const deferFastTimeTerrainSync = shouldDeferThreeTestTerrainSyncForFastTime({
+            simTimeMode: state.simTimeMode,
+            timeSpeedValue: getActiveTimeSpeedValue(state),
+            simulationPaused: isSimulationEffectivelyPaused(state),
+            activeFireTerrainPressure: state.lastActiveFires > 0 || state.fireBoundsActive,
+            immediateTerrainSyncChange: state.structureRevision !== lastThreeTestStructureRevision
+          });
           if (isThreeTestTerrainSyncDisabled()) {
             state.terrainDirty = false;
             recordPerfSample("3d.terrainDeferred", 0);
+          } else if (deferFastTimeTerrainSync) {
+            recordPerfSample("3d.terrainDeferred", 2);
           } else if (controller.isCameraInteracting() && !activeFireTerrainPressure) {
             recordPerfSample("3d.terrainDeferred", 1);
           } else {
