@@ -158,6 +158,7 @@ type RoadPathResult = {
   mountainPassFallback: boolean;
   switchbackTurnCount: number;
   switchbackRoute: boolean;
+  hairpinGradeDiscountCount: number;
   longStraightSteepSegmentCount: number;
 };
 
@@ -181,6 +182,7 @@ export type RoadGenerationStats = {
   switchbackTurnCount: number;
   switchbackRouteAttempts: number;
   switchbackRouteCount: number;
+  hairpinGradeDiscountCount: number;
   longStraightSteepSegmentCount: number;
   generatedJunctionCount: number;
 };
@@ -319,6 +321,7 @@ const roadGenerationStats: RoadGenerationStats = {
   switchbackTurnCount: 0,
   switchbackRouteAttempts: 0,
   switchbackRouteCount: 0,
+  hairpinGradeDiscountCount: 0,
   longStraightSteepSegmentCount: 0,
   generatedJunctionCount: 0
 };
@@ -1341,6 +1344,7 @@ const buildPathResult = (
     mountainPassFallback: options.pathMode === "mountainPass",
     switchbackTurnCount,
     switchbackRoute: options.pathMode === "switchback",
+    hairpinGradeDiscountCount: 0,
     longStraightSteepSegmentCount
   };
 };
@@ -1364,6 +1368,7 @@ const recordPathStats = (result: RoadPathResult): void => {
   roadGenerationStats.mountainPassFallbackCount += result.mountainPassFallback ? 1 : 0;
   roadGenerationStats.switchbackTurnCount += result.switchbackTurnCount;
   roadGenerationStats.switchbackRouteCount += result.switchbackRoute ? 1 : 0;
+  roadGenerationStats.hairpinGradeDiscountCount += result.hairpinGradeDiscountCount;
   roadGenerationStats.longStraightSteepSegmentCount += result.longStraightSteepSegmentCount;
 };
 
@@ -1418,6 +1423,7 @@ const runAStar = (
       mountainPassFallback: false,
       switchbackTurnCount: 0,
       switchbackRoute: false,
+      hairpinGradeDiscountCount: 0,
       longStraightSteepSegmentCount: 0
     };
   }
@@ -1436,9 +1442,13 @@ const runAStar = (
   const crossfallAt = new Float32Array(total);
   const steepRunAt = new Int16Array(total);
   const stepsSinceTurnAt = new Int16Array(total);
+  const lateralLegLengthAt = new Int16Array(total);
+  const stepsSinceHairpinDiscountAt = new Int16Array(total);
+  const hairpinSteepStepRunAt = new Int16Array(total);
   const cumulativeClimbAt = new Float32Array(total);
   const cumulativeDescentAt = new Float32Array(total);
   const switchbackTurnsAt = new Int16Array(total);
+  const hairpinGradeDiscountsAt = new Int16Array(total);
   const longStraightSteepAt = new Int16Array(total);
   const openIdx: number[] = [];
   const openF: number[] = [];
@@ -1460,6 +1470,8 @@ const runAStar = (
   waterTilesUsed[startIdx] = startWater;
   consecutiveWater[startIdx] = startWater;
   stepsSinceTurnAt[startIdx] = 32767;
+  lateralLegLengthAt[startIdx] = 0;
+  stepsSinceHairpinDiscountAt[startIdx] = 32767;
   heapPush(openIdx, openF, startIdx, estimate(start.x, start.y));
 
   let goalIdx = -1;
@@ -1579,10 +1591,6 @@ const runAStar = (
       }
       let plannerStepScore: ReturnType<typeof scoreRoadPlannerStep> | null = null;
       if (!currentIsWater && !nextIsWater) {
-        stepCost += grade * options.slopePenaltyWeight;
-        stepCost += crossfall * options.crossfallPenaltyWeight;
-        stepCost += gradeChange * options.gradeChangePenaltyWeight;
-        stepCost += scoreRoadAnglePenalty(Math.max(stepAngleDeg, tileAngleDeg), options);
         plannerStepScore = scoreRoadPlannerStep({
           mode: options.pathMode,
           hasPreviousLandStep,
@@ -1602,9 +1610,20 @@ const runAStar = (
           contourTurnReliefWeight: options.contourTurnReliefWeight,
           previousSteepRun: steepRunAt[currentIdx],
           previousStepsSinceTurn: stepsSinceTurnAt[currentIdx],
+          previousLateralLegLength: lateralLegLengthAt[currentIdx],
+          previousStepsSinceHairpinDiscount: stepsSinceHairpinDiscountAt[currentIdx],
+          previousHairpinSteepStepRun: hairpinSteepStepRunAt[currentIdx],
           previousCumulativeClimb: cumulativeClimbAt[currentIdx],
-          previousCumulativeDescent: cumulativeDescentAt[currentIdx]
+          previousCumulativeDescent: cumulativeDescentAt[currentIdx],
+          localPlatformCrossfall: crossfall,
+          localPlatformAngleDeg: tileAngleDeg,
+          riverDistance: riverDistance[nIdx],
+          riverBlockDistance: options.riverBlockDistance
         });
+        stepCost += grade * options.slopePenaltyWeight * plannerStepScore.gradePenaltyMultiplier;
+        stepCost += crossfall * options.crossfallPenaltyWeight;
+        stepCost += gradeChange * options.gradeChangePenaltyWeight;
+        stepCost += scoreRoadAnglePenalty(Math.max(stepAngleDeg, tileAngleDeg), options);
         stepCost += plannerStepScore.costAdjustment;
       }
       if (nextIsWater) {
@@ -1662,16 +1681,25 @@ const runAStar = (
       if (plannerStepScore) {
         steepRunAt[nIdx] = plannerStepScore.nextSteepRun;
         stepsSinceTurnAt[nIdx] = plannerStepScore.nextStepsSinceTurn;
+        lateralLegLengthAt[nIdx] = plannerStepScore.nextLateralLegLength;
+        stepsSinceHairpinDiscountAt[nIdx] = plannerStepScore.nextStepsSinceHairpinDiscount;
+        hairpinSteepStepRunAt[nIdx] = plannerStepScore.nextHairpinSteepStepRun;
         cumulativeClimbAt[nIdx] = plannerStepScore.nextCumulativeClimb;
         cumulativeDescentAt[nIdx] = plannerStepScore.nextCumulativeDescent;
         switchbackTurnsAt[nIdx] = switchbackTurnsAt[currentIdx] + (plannerStepScore.switchbackTurn ? 1 : 0);
+        hairpinGradeDiscountsAt[nIdx] =
+          hairpinGradeDiscountsAt[currentIdx] + (plannerStepScore.hairpinGradeDiscount ? 1 : 0);
         longStraightSteepAt[nIdx] = longStraightSteepAt[currentIdx] + (plannerStepScore.longStraightSteep ? 1 : 0);
       } else {
         steepRunAt[nIdx] = 0;
         stepsSinceTurnAt[nIdx] = Math.min(32767, stepsSinceTurnAt[currentIdx] + 1);
+        lateralLegLengthAt[nIdx] = Math.min(32767, lateralLegLengthAt[currentIdx] + 1);
+        stepsSinceHairpinDiscountAt[nIdx] = Math.min(32767, stepsSinceHairpinDiscountAt[currentIdx] + 1);
+        hairpinSteepStepRunAt[nIdx] = 0;
         cumulativeClimbAt[nIdx] = cumulativeClimbAt[currentIdx];
         cumulativeDescentAt[nIdx] = cumulativeDescentAt[currentIdx];
         switchbackTurnsAt[nIdx] = switchbackTurnsAt[currentIdx];
+        hairpinGradeDiscountsAt[nIdx] = hairpinGradeDiscountsAt[currentIdx];
         longStraightSteepAt[nIdx] = longStraightSteepAt[currentIdx];
       }
       heapPush(openIdx, openF, nIdx, nextG + estimate(nx, ny));
@@ -1700,6 +1728,7 @@ const runAStar = (
   pathIndices.reverse();
   const result = buildPathResult(state, pathIndices, riverDistance, options);
   result.switchbackTurnCount = Math.max(result.switchbackTurnCount, switchbackTurnsAt[goalIdx]);
+  result.hairpinGradeDiscountCount = Math.max(result.hairpinGradeDiscountCount, hairpinGradeDiscountsAt[goalIdx]);
   result.longStraightSteepSegmentCount = Math.max(result.longStraightSteepSegmentCount, longStraightSteepAt[goalIdx]);
   result.switchbackRoute = options.pathMode === "switchback" && result.switchbackTurnCount > 0;
   return result;
@@ -1806,6 +1835,7 @@ const findRoadPathDetailed = (
       mountainPassFallback: false,
       switchbackTurnCount: 0,
       switchbackRoute: false,
+      hairpinGradeDiscountCount: 0,
       longStraightSteepSegmentCount: 0
     };
   }
@@ -1845,6 +1875,7 @@ const findRoadPathToTargetDetailed = (
       mountainPassFallback: false,
       switchbackTurnCount: 0,
       switchbackRoute: false,
+      hairpinGradeDiscountCount: 0,
       longStraightSteepSegmentCount: 0
     };
   }
@@ -2157,6 +2188,7 @@ export const resetRoadGenerationStats = (): void => {
   roadGenerationStats.switchbackTurnCount = 0;
   roadGenerationStats.switchbackRouteAttempts = 0;
   roadGenerationStats.switchbackRouteCount = 0;
+  roadGenerationStats.hairpinGradeDiscountCount = 0;
   roadGenerationStats.longStraightSteepSegmentCount = 0;
   roadGenerationStats.generatedJunctionCount = 0;
 };
@@ -2176,6 +2208,7 @@ export const getRoadGenerationStats = (): RoadGenerationStats => ({
   switchbackTurnCount: roadGenerationStats.switchbackTurnCount,
   switchbackRouteAttempts: roadGenerationStats.switchbackRouteAttempts,
   switchbackRouteCount: roadGenerationStats.switchbackRouteCount,
+  hairpinGradeDiscountCount: roadGenerationStats.hairpinGradeDiscountCount,
   longStraightSteepSegmentCount: roadGenerationStats.longStraightSteepSegmentCount,
   generatedJunctionCount: roadGenerationStats.generatedJunctionCount
 });

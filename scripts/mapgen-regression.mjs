@@ -1414,6 +1414,7 @@ const runCase = async (sizeId, seed) => {
     switchbackTurnCount: roadGenerationStats.switchbackTurnCount,
     switchbackRouteAttempts: roadGenerationStats.switchbackRouteAttempts,
     switchbackRouteCount: roadGenerationStats.switchbackRouteCount,
+    hairpinGradeDiscountCount: roadGenerationStats.hairpinGradeDiscountCount,
     routedLongStraightSteepSegmentCount: roadGenerationStats.longStraightSteepSegmentCount,
     roadGradingDelta: Number(roadSurfaceMetrics.maxRoadGradingDelta.toFixed(4)),
     roadLongStraightSteepSegmentCount: roadSurfaceMetrics.longStraightSteepSegmentCount,
@@ -1586,6 +1587,55 @@ const runSyntheticSwitchbackCase = () => {
   };
 };
 
+const runSyntheticStraightSteepNoDiscountCase = () => {
+  const grid = { cols: 36, rows: 11, totalTiles: 36 * 11 };
+  const state = createInitialState(525252, grid);
+  resetState(state, 525252);
+  state.tiles = Array.from({ length: grid.totalTiles }, (_, idx) => {
+    const x = idx % grid.cols;
+    const elevation = 0.12 + x * 0.012;
+    if (state.tileElevation.length === grid.totalTiles) {
+      state.tileElevation[idx] = elevation;
+    }
+    return buildRegressionTile("grass", { elevation });
+  });
+  resetRoadGenerationStats();
+  const carved = carveRoad(
+    state,
+    new RNG(525252),
+    { x: 3, y: 5 },
+    { x: 31, y: 5 },
+    {
+      bridgePolicy: "never",
+      pathMode: "switchback",
+      allowMountainPassFallback: false,
+      searchBounds: { minX: 0, maxX: grid.cols - 1, minY: 5, maxY: 5 },
+      preferredAngleDeg: 8,
+      softAngleDeg: 10,
+      avoidAngleDeg: 36,
+      fallbackAngleDeg: 52,
+      anglePenaltyWeight: 0.95,
+      straightClimbPenaltyWeight: 2.8,
+      contourTurnReliefWeight: 2.4,
+      turnPenalty: 0.01,
+      diagonalPenalty: 0.02,
+      gradeLimitStart: 0.1,
+      gradeLimitRelaxStep: 0.015,
+      gradeLimitMax: 0.24,
+      crossfallLimitStart: 0.08,
+      crossfallLimitRelaxStep: 0.016,
+      crossfallLimitMax: 0.22,
+      gradeChangeLimitStart: 0.08,
+      gradeChangeLimitRelaxStep: 0.016,
+      gradeChangeLimitMax: 0.22
+    }
+  );
+  return {
+    carved,
+    stats: getRoadGenerationStats()
+  };
+};
+
 const runSyntheticMountainPassCase = () => {
   const grid = { cols: 36, rows: 24, totalTiles: 36 * 24 };
   const state = createInitialState(616161, grid);
@@ -1645,10 +1695,17 @@ const runAll = async () => {
     !syntheticSwitchbacks.carved ||
     syntheticSwitchbacks.lateralSpan < 4 ||
     syntheticSwitchbacks.stats.switchbackRouteCount < 1 ||
-    syntheticSwitchbacks.stats.switchbackTurnCount < 2
+    syntheticSwitchbacks.stats.switchbackTurnCount < 2 ||
+    syntheticSwitchbacks.stats.hairpinGradeDiscountCount < 1
   ) {
     throw new Error(
-      `[mapgen] synthetic switchback case failed: carved=${syntheticSwitchbacks.carved} lateral=${syntheticSwitchbacks.lateralSpan} routes=${syntheticSwitchbacks.stats.switchbackRouteCount} turns=${syntheticSwitchbacks.stats.switchbackTurnCount}`
+      `[mapgen] synthetic switchback case failed: carved=${syntheticSwitchbacks.carved} lateral=${syntheticSwitchbacks.lateralSpan} routes=${syntheticSwitchbacks.stats.switchbackRouteCount} turns=${syntheticSwitchbacks.stats.switchbackTurnCount} hairpins=${syntheticSwitchbacks.stats.hairpinGradeDiscountCount} straightSteep=${syntheticSwitchbacks.stats.longStraightSteepSegmentCount}`
+    );
+  }
+  const syntheticStraightSteep = runSyntheticStraightSteepNoDiscountCase();
+  if (!syntheticStraightSteep.carved || syntheticStraightSteep.stats.hairpinGradeDiscountCount !== 0) {
+    throw new Error(
+      `[mapgen] synthetic straight-steep case failed: carved=${syntheticStraightSteep.carved} hairpins=${syntheticStraightSteep.stats.hairpinGradeDiscountCount}`
     );
   }
   const syntheticMountainPass = runSyntheticMountainPassCase();
@@ -1662,7 +1719,7 @@ const runAll = async () => {
       const metrics = await runCase(sizeId, seed);
       results.push(metrics);
       console.log(
-        `[mapgen] size=${metrics.sizeId} seed=${metrics.seed} ms=${metrics.durationMs.toFixed(2)} biome=${metrics.biomeSpreadClassifyMs.toFixed(2)}ms water=${metrics.waterPct.toFixed(2)}% forest=${metrics.forestPct.toFixed(2)}% forestAgeMean=${metrics.forestAgeMean.toFixed(2)} forestMaturityP95=${metrics.forestMaturityP95.toFixed(3)} patches=${metrics.forestPatchCount} meanPatch=${metrics.forestPatchMean} p95Patch=${metrics.forestPatchP95} houses=${metrics.houseCount} placed=${metrics.placedHouseCount}/${metrics.requestedHouseCount} compactEval=${metrics.compactTownEvalCount} compactViolations=${metrics.compactTownViolationCount} compactMaxAspect=${metrics.compactTownMaxAspect.toFixed(2)} base=(${metrics.baseX},${metrics.baseY}) baseElev=${metrics.baseElevation.toFixed(4)} baseRelief=${metrics.baseLocalRelief.toFixed(4)} baseCenter=${metrics.baseCenterDistanceRatio.toFixed(4)} baseVeg=${metrics.baseNearbyVegetationRatio.toFixed(4)} townAngle=${metrics.settlementTownSeedMaxAngle.toFixed(2)}/${metrics.settlementTownSeedMeanAngle.toFixed(2)} houseAngle=${metrics.houseFootprintMaxAngle.toFixed(2)}/${metrics.houseFootprintMeanAngle.toFixed(2)} highHouseAngle=${metrics.highAngleHouseFootprintCount} padReliefMax=${metrics.settlementPadReliefMax.toFixed(4)} padReliefMean=${metrics.settlementPadReliefMean.toFixed(4)} roads=${metrics.roadCount} roadComps=${metrics.roadComponentCount} townRoadComps=${metrics.townRoadComponentCount} townRoadMissing=${metrics.townRoadMissingCount} townRoadDisconnected=${metrics.townRoadDisconnectedCount} rivers=${metrics.riverCount} lakes=${metrics.lakeCount}/${metrics.lakeTiles} lakeOut=${metrics.lakeOutletCount} lakeOutMiss=${metrics.lakeOutletConnectionFailures} falls=${metrics.waterfallCount} roadIgnoredDiag=${metrics.ignoredDiagonalCount} roadUnmatched=${metrics.unmatchedPatternCount} roadGrade=${metrics.maxRoadGrade.toFixed(3)} roadCrossfall=${metrics.maxRoadCrossfall.toFixed(3)} roadGradeChange=${metrics.maxRoadGradeChange.toFixed(3)} roadAngle=${metrics.maxRoadAngleDeg.toFixed(2)}/${metrics.meanRoadAngleDeg.toFixed(2)} highRoadAngle=${metrics.highAngleRoadStepCount} straightSteep=${metrics.roadLongStraightSteepSegmentCount} gradingDelta=${metrics.roadGradingDelta.toFixed(3)} routedAngle=${metrics.routedRoadMaxAngle.toFixed(2)}/${metrics.routedRoadMeanAngle.toFixed(2)} routedHighAngle=${metrics.routedHighAngleStepCount} routedStraightSteep=${metrics.routedLongStraightSteepSegmentCount} passes=${metrics.mountainPassFallbackCount} junctions=${metrics.generatedJunctionCount} switchbacks=${metrics.switchbackTurnCount} switchbackRoutes=${metrics.switchbackRouteCount}/${metrics.switchbackRouteAttempts} roadWalls=${metrics.wallEdgeCount} riverDiagOnly=${metrics.riverDiagOnlyLinks} riverIso=${metrics.riverIsolatedCells} riverOrthRatio=${metrics.riverOrthConnectivityRatio.toFixed(4)} riverComps=${metrics.riverComponentCount} riverDetachedComps=${metrics.detachedRiverComponents} riverDetachedCells=${metrics.detachedRiverCells} coastNatural=${metrics.coastalNaturalCount} coastBeach=${metrics.coastalBeachCount} coastRocky=${metrics.coastalRockyCount} coastOther=${metrics.coastalOtherCount}`
+        `[mapgen] size=${metrics.sizeId} seed=${metrics.seed} ms=${metrics.durationMs.toFixed(2)} biome=${metrics.biomeSpreadClassifyMs.toFixed(2)}ms water=${metrics.waterPct.toFixed(2)}% forest=${metrics.forestPct.toFixed(2)}% forestAgeMean=${metrics.forestAgeMean.toFixed(2)} forestMaturityP95=${metrics.forestMaturityP95.toFixed(3)} patches=${metrics.forestPatchCount} meanPatch=${metrics.forestPatchMean} p95Patch=${metrics.forestPatchP95} houses=${metrics.houseCount} placed=${metrics.placedHouseCount}/${metrics.requestedHouseCount} compactEval=${metrics.compactTownEvalCount} compactViolations=${metrics.compactTownViolationCount} compactMaxAspect=${metrics.compactTownMaxAspect.toFixed(2)} base=(${metrics.baseX},${metrics.baseY}) baseElev=${metrics.baseElevation.toFixed(4)} baseRelief=${metrics.baseLocalRelief.toFixed(4)} baseCenter=${metrics.baseCenterDistanceRatio.toFixed(4)} baseVeg=${metrics.baseNearbyVegetationRatio.toFixed(4)} townAngle=${metrics.settlementTownSeedMaxAngle.toFixed(2)}/${metrics.settlementTownSeedMeanAngle.toFixed(2)} houseAngle=${metrics.houseFootprintMaxAngle.toFixed(2)}/${metrics.houseFootprintMeanAngle.toFixed(2)} highHouseAngle=${metrics.highAngleHouseFootprintCount} padReliefMax=${metrics.settlementPadReliefMax.toFixed(4)} padReliefMean=${metrics.settlementPadReliefMean.toFixed(4)} roads=${metrics.roadCount} roadComps=${metrics.roadComponentCount} townRoadComps=${metrics.townRoadComponentCount} townRoadMissing=${metrics.townRoadMissingCount} townRoadDisconnected=${metrics.townRoadDisconnectedCount} rivers=${metrics.riverCount} lakes=${metrics.lakeCount}/${metrics.lakeTiles} lakeOut=${metrics.lakeOutletCount} lakeOutMiss=${metrics.lakeOutletConnectionFailures} falls=${metrics.waterfallCount} roadIgnoredDiag=${metrics.ignoredDiagonalCount} roadUnmatched=${metrics.unmatchedPatternCount} roadGrade=${metrics.maxRoadGrade.toFixed(3)} roadCrossfall=${metrics.maxRoadCrossfall.toFixed(3)} roadGradeChange=${metrics.maxRoadGradeChange.toFixed(3)} roadAngle=${metrics.maxRoadAngleDeg.toFixed(2)}/${metrics.meanRoadAngleDeg.toFixed(2)} highRoadAngle=${metrics.highAngleRoadStepCount} straightSteep=${metrics.roadLongStraightSteepSegmentCount} gradingDelta=${metrics.roadGradingDelta.toFixed(3)} routedAngle=${metrics.routedRoadMaxAngle.toFixed(2)}/${metrics.routedRoadMeanAngle.toFixed(2)} routedHighAngle=${metrics.routedHighAngleStepCount} routedStraightSteep=${metrics.routedLongStraightSteepSegmentCount} passes=${metrics.mountainPassFallbackCount} junctions=${metrics.generatedJunctionCount} switchbacks=${metrics.switchbackTurnCount} hairpins=${metrics.hairpinGradeDiscountCount} switchbackRoutes=${metrics.switchbackRouteCount}/${metrics.switchbackRouteAttempts} roadWalls=${metrics.wallEdgeCount} riverDiagOnly=${metrics.riverDiagOnlyLinks} riverIso=${metrics.riverIsolatedCells} riverOrthRatio=${metrics.riverOrthConnectivityRatio.toFixed(4)} riverComps=${metrics.riverComponentCount} riverDetachedComps=${metrics.detachedRiverComponents} riverDetachedCells=${metrics.detachedRiverCells} coastNatural=${metrics.coastalNaturalCount} coastBeach=${metrics.coastalBeachCount} coastRocky=${metrics.coastalRockyCount} coastOther=${metrics.coastalOtherCount}`
       );
     }
   }
@@ -1958,10 +2015,17 @@ if (syntheticRoadsOnly) {
     !syntheticSwitchbacks.carved ||
     syntheticSwitchbacks.lateralSpan < 4 ||
     syntheticSwitchbacks.stats.switchbackRouteCount < 1 ||
-    syntheticSwitchbacks.stats.switchbackTurnCount < 2
+    syntheticSwitchbacks.stats.switchbackTurnCount < 2 ||
+    syntheticSwitchbacks.stats.hairpinGradeDiscountCount < 1
   ) {
     throw new Error(
-      `[mapgen] synthetic switchback case failed: carved=${syntheticSwitchbacks.carved} lateral=${syntheticSwitchbacks.lateralSpan} routes=${syntheticSwitchbacks.stats.switchbackRouteCount} turns=${syntheticSwitchbacks.stats.switchbackTurnCount}`
+      `[mapgen] synthetic switchback case failed: carved=${syntheticSwitchbacks.carved} lateral=${syntheticSwitchbacks.lateralSpan} routes=${syntheticSwitchbacks.stats.switchbackRouteCount} turns=${syntheticSwitchbacks.stats.switchbackTurnCount} hairpins=${syntheticSwitchbacks.stats.hairpinGradeDiscountCount} straightSteep=${syntheticSwitchbacks.stats.longStraightSteepSegmentCount}`
+    );
+  }
+  const syntheticStraightSteep = runSyntheticStraightSteepNoDiscountCase();
+  if (!syntheticStraightSteep.carved || syntheticStraightSteep.stats.hairpinGradeDiscountCount !== 0) {
+    throw new Error(
+      `[mapgen] synthetic straight-steep case failed: carved=${syntheticStraightSteep.carved} hairpins=${syntheticStraightSteep.stats.hairpinGradeDiscountCount}`
     );
   }
   const syntheticMountainPass = runSyntheticMountainPassCase();
@@ -1971,7 +2035,7 @@ if (syntheticRoadsOnly) {
     );
   }
   console.log(
-    `[mapgen] synthetic roads ok switchbacks=${syntheticSwitchbacks.stats.switchbackTurnCount} lateral=${syntheticSwitchbacks.lateralSpan} passes=${syntheticMountainPass.stats.mountainPassFallbackCount}`
+    `[mapgen] synthetic roads ok switchbacks=${syntheticSwitchbacks.stats.switchbackTurnCount} hairpins=${syntheticSwitchbacks.stats.hairpinGradeDiscountCount} lateral=${syntheticSwitchbacks.lateralSpan} passes=${syntheticMountainPass.stats.mountainPassFallbackCount}`
   );
   process.exit(0);
 }
