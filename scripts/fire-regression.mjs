@@ -28,6 +28,10 @@ import {
   resolveTerrainAdjustedWind
 } from "../dist/systems/fire/sim/fireTerrainInfluence.js";
 import {
+  getTerrainWindField,
+  sampleTerrainWindAt
+} from "../dist/systems/fire/sim/terrainWindField.js";
+import {
   getPathWindbreakMultiplier,
   getRangedHeatTransferScale
 } from "../dist/systems/fire/sim/fireRangedHeatDiffusion.js";
@@ -822,48 +826,69 @@ const failures = [];
 
 {
   const settings = { ...DEFAULT_FIRE_SETTINGS };
-  const cols = 5;
-  const rows = 5;
-  const centerX = 2;
-  const centerY = 2;
+  const cols = 17;
+  const rows = 17;
+  const centerX = 8;
+  const centerY = 8;
   const centerIdx = centerY * cols + centerX;
   const sample = new Float32Array(cols * rows);
   sample.fill(0.5);
   const out = { dx: 0, dy: 0, strength: 0 };
+  const setElev = (x, y, value) => {
+    sample[y * cols + x] = value;
+  };
 
   resolveTerrainAdjustedWind(centerX, centerY, centerIdx, cols, rows, sample, 1, 0, 1, settings, out);
   const flatStrength = out.strength;
   const flatDy = out.dy;
 
-  sample[centerIdx + 1] = 0.78;
+  sample.fill(0.5);
+  [1, 2, 4, 7].forEach((r) => setElev(centerX + r, centerY, 0.82));
+  [1, 2, 4, 7].forEach((r) => setElev(centerX + r, centerY + Math.max(1, Math.round(r * 0.75)), 0.88));
   resolveTerrainAdjustedWind(centerX, centerY, centerIdx, cols, rows, sample, 1, 0, 1, settings, out);
-  const obstructedStrength = out.strength;
+  const ridgeStrength = out.strength;
+  const ridgeDy = out.dy;
 
   sample.fill(0.5);
-  sample[centerIdx + 1] = 0.22;
+  [1, 2, 4, 7].forEach((r) => setElev(centerX + r, centerY, 0.28));
   resolveTerrainAdjustedWind(centerX, centerY, centerIdx, cols, rows, sample, 1, 0, 1, settings, out);
   const descendingStrength = out.strength;
 
   sample.fill(0.5);
-  sample[centerIdx - cols] = 0.88;
-  sample[centerIdx + cols] = 0.5;
+  [1, 2, 4, 7].forEach((r) => setElev(centerX, centerY + r, 0.9));
   resolveTerrainAdjustedWind(centerX, centerY, centerIdx, cols, rows, sample, 1, 0, 1, settings, out);
   const steeredDy = out.dy;
 
-  sample.fill(0.35);
-  sample[centerIdx - cols] = 0.82;
-  sample[centerIdx + cols] = 0.82;
+  sample.fill(0.5);
+  [1, 2, 4, 7].forEach((r) => setElev(centerX + r, centerY, 0.24));
+  [1, 2, 4, 7].forEach((r) => {
+    setElev(centerX, centerY - r, 0.82);
+    setElev(centerX, centerY + r, 0.82);
+    setElev(centerX + r, centerY - Math.max(1, Math.round(r * 0.75)), 0.82);
+    setElev(centerX + r, centerY + Math.max(1, Math.round(r * 0.75)), 0.82);
+  });
   resolveTerrainAdjustedWind(centerX, centerY, centerIdx, cols, rows, sample, 1, 0, 1, settings, out);
   const corridorStrength = out.strength;
+  const corridorDy = out.dy;
+
+  sample.fill(0.5);
+  [1, 2, 4, 7].forEach((r) => {
+    setElev(centerX + r, centerY, 1.4);
+    setElev(centerX, centerY + r, 1.4);
+    setElev(centerX + r, centerY + Math.max(1, Math.round(r * 0.75)), 1.4);
+  });
+  resolveTerrainAdjustedWind(centerX, centerY, centerIdx, cols, rows, sample, 1, 0, 1, settings, out);
+  const clampedStrength = out.strength;
+  const clampedDot = out.dx / Math.max(0.0001, Math.hypot(out.dx, out.dy));
 
   console.log(
-    `Terrain Wind\nflat=${flatStrength.toFixed(3)} obstructed=${obstructedStrength.toFixed(3)} descending=${descendingStrength.toFixed(3)} steeredDy=${steeredDy.toFixed(3)} corridor=${corridorStrength.toFixed(3)}`
+    `Terrain Wind\nflat=${flatStrength.toFixed(3)} ridge=${ridgeStrength.toFixed(3)} ridgeDy=${ridgeDy.toFixed(3)} descending=${descendingStrength.toFixed(3)} steeredDy=${steeredDy.toFixed(3)} corridor=${corridorStrength.toFixed(3)} corridorDy=${corridorDy.toFixed(3)} clamp=${clampedStrength.toFixed(3)}`
   );
   if (Math.abs(flatStrength - 1) > 0.0001 || Math.abs(flatDy) > 0.0001) {
     failures.push("Flat terrain changed ambient wind.");
   }
-  if (!(obstructedStrength < flatStrength)) {
-    failures.push("Raised downwind terrain did not reduce effective wind strength.");
+  if (!(ridgeStrength < flatStrength && Math.abs(ridgeDy) > 0.015)) {
+    failures.push("Broad downwind ridge did not slow and deflect local wind.");
   }
   if (!(descendingStrength > flatStrength)) {
     failures.push("Lower downwind terrain did not preserve or increase effective wind strength.");
@@ -874,8 +899,98 @@ const failures = [];
   if (!(corridorStrength > flatStrength)) {
     failures.push("Low corridor with raised sides did not increase effective wind strength.");
   }
-  if (obstructedStrength < 0.89 || corridorStrength > 1.07 || Math.abs(steeredDy) > 0.08) {
-    failures.push("Terrain wind adjustment exceeded the conservative anti-striping envelope.");
+  if (Math.abs(corridorDy) > 0.015) {
+    failures.push("Symmetric valley corridor should channel wind without lateral drift.");
+  }
+  if (
+    clampedStrength < settings.terrainWindSpeedMin ||
+    clampedStrength > settings.terrainWindSpeedMax ||
+    clampedDot < 0.7
+  ) {
+    failures.push("Terrain wind adjustment did not respect speed and direction clamps.");
+  }
+}
+
+{
+  const buildWindWorld = (wind, paint) => {
+    const cols = 17;
+    const rows = 17;
+    const elevation = new Float32Array(cols * rows);
+    elevation.fill(0.45);
+    const world = {
+      grid: { cols, rows, totalTiles: cols * rows },
+      tileElevation: elevation,
+      wind,
+      fireSettings: { ...DEFAULT_FIRE_SETTINGS },
+      terrainTypeRevision: 1,
+      seed: 9901
+    };
+    paint?.(world, (x, y, value) => {
+      elevation[y * cols + x] = value;
+    });
+    return world;
+  };
+  const sampleField = (world, x, y) => {
+    const field = getTerrainWindField(world);
+    return sampleTerrainWindAt(field, y * world.grid.cols + x, world.wind);
+  };
+
+  const flatWorld = buildWindWorld({ name: "E", dx: 1, dy: 0, strength: 1 });
+  const flat = sampleField(flatWorld, 8, 8);
+
+  const ridgeWorld = buildWindWorld({ name: "E", dx: 1, dy: 0, strength: 1 }, (_world, setElev) => {
+    for (let y = 4; y <= 12; y += 1) {
+      setElev(8, y, 0.95);
+      setElev(9, y, 0.88);
+    }
+  });
+  const northShoulder = sampleField(ridgeWorld, 7, 4);
+  const southShoulder = sampleField(ridgeWorld, 7, 12);
+  const lee = sampleField(ridgeWorld, 10, 8);
+
+  const valleyWorld = buildWindWorld({ name: "E", dx: 1, dy: 0, strength: 1 }, (_world, setElev) => {
+    for (let x = 1; x <= 15; x += 1) {
+      setElev(x, 6, 0.86);
+      setElev(x, 10, 0.86);
+      setElev(x, 8, 0.28);
+    }
+  });
+  const valley = sampleField(valleyWorld, 9, 8);
+
+  const clampWorld = buildWindWorld({ name: "E", dx: 1, dy: 0, strength: 1 }, (_world, setElev) => {
+    for (let x = 7; x <= 10; x += 1) {
+      for (let y = 5; y <= 12; y += 1) {
+        setElev(x, y, 1.35);
+      }
+    }
+  });
+  const clamped = sampleField(clampWorld, 9, 8);
+  const clampedDot = clamped.dx / Math.max(0.0001, Math.hypot(clamped.dx, clamped.dy));
+
+  console.log(
+    `Terrain Wind Field\nflat=(${flat.dx.toFixed(3)},${flat.dy.toFixed(3)},${flat.strength.toFixed(3)}) ` +
+      `northDy=${northShoulder.dy.toFixed(3)} southDy=${southShoulder.dy.toFixed(3)} ` +
+      `lee=${lee.strength.toFixed(3)} valley=${valley.strength.toFixed(3)} clampDot=${clampedDot.toFixed(3)}`
+  );
+
+  if (Math.abs(flat.dx - 1) > 0.001 || Math.abs(flat.dy) > 0.001 || Math.abs(flat.strength - 1) > 0.001) {
+    failures.push("Propagated terrain wind field changed flat terrain wind.");
+  }
+  if (!(northShoulder.dy < -0.02 && southShoulder.dy > 0.02)) {
+    failures.push("Propagated terrain wind did not split around a central ridge.");
+  }
+  if (!(lee.strength < flat.strength * 0.92)) {
+    failures.push("Propagated terrain wind did not create a sheltered lee behind a ridge.");
+  }
+  if (!(valley.strength > flat.strength)) {
+    failures.push("Propagated terrain wind did not accelerate through an aligned valley.");
+  }
+  if (
+    clamped.strength < clampWorld.fireSettings.terrainWindSpeedMin ||
+    clamped.strength > clampWorld.fireSettings.terrainWindSpeedMax ||
+    clampedDot < 0.55
+  ) {
+    failures.push("Propagated terrain wind field exceeded direction or speed clamps.");
   }
 }
 

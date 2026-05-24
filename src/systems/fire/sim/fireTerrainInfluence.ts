@@ -29,6 +29,74 @@ const sampleElevation = (
   return Number.isFinite(value) ? value : fallback;
 };
 
+const WIND_TERRAIN_PROBES: readonly { radius: number; weight: number }[] = [
+  { radius: 1, weight: 0.4 },
+  { radius: 2, weight: 0.28 },
+  { radius: 4, weight: 0.2 },
+  { radius: 7, weight: 0.12 }
+];
+
+const sampleWeightedRise = (
+  elevation: Float32Array,
+  x: number,
+  y: number,
+  dx: number,
+  dy: number,
+  cols: number,
+  rows: number,
+  sourceElevation: number
+): number => {
+  let weightedRise = 0;
+  let weightSum = 0;
+  for (const probe of WIND_TERRAIN_PROBES) {
+    const sampled = sampleElevation(
+      elevation,
+      x,
+      y,
+      dx * probe.radius,
+      dy * probe.radius,
+      cols,
+      rows,
+      sourceElevation
+    );
+    weightedRise += (sampled - sourceElevation) * probe.weight;
+    weightSum += probe.weight;
+  }
+  return weightSum > 0 ? weightedRise / weightSum : 0;
+};
+
+const sampleForwardWallRise = (
+  elevation: Float32Array,
+  x: number,
+  y: number,
+  forwardX: number,
+  forwardY: number,
+  sideX: number,
+  sideY: number,
+  cols: number,
+  rows: number,
+  sourceElevation: number
+): number => {
+  let weightedRise = 0;
+  let weightSum = 0;
+  for (const probe of WIND_TERRAIN_PROBES) {
+    const sideOffset = Math.max(1, Math.round(probe.radius * 0.75));
+    const sampled = sampleElevation(
+      elevation,
+      x,
+      y,
+      forwardX * probe.radius + sideX * sideOffset,
+      forwardY * probe.radius + sideY * sideOffset,
+      cols,
+      rows,
+      sourceElevation
+    );
+    weightedRise += (sampled - sourceElevation) * probe.weight;
+    weightSum += probe.weight;
+  }
+  return weightSum > 0 ? weightedRise / weightSum : 0;
+};
+
 export const getElevationHeatTransferMultiplier = (
   sourceElevation: number,
   targetElevation: number,
@@ -104,25 +172,51 @@ export const resolveTerrainAdjustedWind = (
   const leftY = stepX;
   const rightX = stepY;
   const rightY = -stepX;
-  const downwindElevation = sampleElevation(elevation, x, y, stepX, stepY, cols, rows, sourceElevation);
-  const leftElevation = sampleElevation(elevation, x, y, leftX, leftY, cols, rows, sourceElevation);
-  const rightElevation = sampleElevation(elevation, x, y, rightX, rightY, cols, rows, sourceElevation);
+  const downwindRise = sampleWeightedRise(elevation, x, y, stepX, stepY, cols, rows, sourceElevation);
+  const upwindRise = sampleWeightedRise(elevation, x, y, -stepX, -stepY, cols, rows, sourceElevation);
+  const leftRise = sampleWeightedRise(elevation, x, y, leftX, leftY, cols, rows, sourceElevation);
+  const rightRise = sampleWeightedRise(elevation, x, y, rightX, rightY, cols, rows, sourceElevation);
+  const forwardLeftRise = sampleForwardWallRise(
+    elevation,
+    x,
+    y,
+    stepX,
+    stepY,
+    leftX,
+    leftY,
+    cols,
+    rows,
+    sourceElevation
+  );
+  const forwardRightRise = sampleForwardWallRise(
+    elevation,
+    x,
+    y,
+    stepX,
+    stepY,
+    rightX,
+    rightY,
+    cols,
+    rows,
+    sourceElevation
+  );
 
-  const downwindRise = downwindElevation - sourceElevation;
-  const sideCorridorRise = Math.min(leftElevation - sourceElevation, rightElevation - sourceElevation);
+  const sideWallRise = Math.min(Math.max(leftRise, forwardLeftRise), Math.max(rightRise, forwardRightRise));
+  const channelFloorDrop = Math.max(0, -downwindRise, upwindRise);
   let speedMultiplier = 1;
   if (downwindRise > 0) {
     speedMultiplier -= downwindRise * obstructionPenalty;
   } else if (downwindRise < 0) {
-    speedMultiplier += -downwindRise * funnelBonus * 0.5;
+    speedMultiplier += -downwindRise * funnelBonus * 0.65;
   }
-  if (sideCorridorRise > 0) {
-    speedMultiplier += sideCorridorRise * funnelBonus;
+  if (sideWallRise > 0) {
+    speedMultiplier += sideWallRise * funnelBonus * (1 + clamp(channelFloorDrop * 2.5, 0, 0.65));
   }
   speedMultiplier = clamp(speedMultiplier, minSpeed, maxSpeed);
 
-  const sideImbalance = leftElevation - rightElevation;
-  const steerAmount = clamp(sideImbalance * steerStrength, -0.45, 0.45);
+  const sideImbalance = (leftRise - rightRise) * 0.45 + (forwardLeftRise - forwardRightRise) * 0.55;
+  const ridgeAhead = Math.max(0, downwindRise) * 0.7;
+  const steerAmount = clamp(sideImbalance * steerStrength * (1 + ridgeAhead), -0.45, 0.45);
   let adjustedDirX = dirX - leftX * steerAmount;
   let adjustedDirY = dirY - leftY * steerAmount;
   const adjustedMagnitude = Math.hypot(adjustedDirX, adjustedDirY);

@@ -5,6 +5,7 @@ import { buildThermalBackdropField, buildThermalHotspotField, paintThermalField 
 import { getRuntimeWidgetTitle } from "../../runtime/widgets/registry.js";
 import type { MinimapWidgetModel } from "../../runtime/widgets/models.js";
 import { generateWorldClimateSeed } from "../../../systems/climate/sim/worldClimateSeed.js";
+import { buildTerrainWindOverlaySamples } from "../../../systems/fire/rendering/terrainWindOverlay.js";
 
 type RGB = { r: number; g: number; b: number };
 type MiniMapMode = "terrain" | "elevation" | "moisture" | "thermal";
@@ -148,6 +149,40 @@ export const createMiniMapPanel = (): MiniMapPanelView => {
     const originX = x + size * 0.16;
     const originY = y + size * 0.16;
     const len = Math.max(8, size * 0.12);
+    const barbLen = Math.max(9, size * 0.072);
+    const drawBarb = (sx: number, sy: number, dx: number, dy: number, strength: number): void => {
+      const mag = Math.hypot(dx, dy);
+      const scaledLen = barbLen * clamp(strength, 0, 1.2);
+      if (strength <= 0.04 || mag <= 0.0001 || scaledLen < 2.25) {
+        targetCtx.fillStyle = "rgba(8, 10, 14, 0.78)";
+        targetCtx.beginPath();
+        targetCtx.arc(sx, sy, 2.3, 0, Math.PI * 2);
+        targetCtx.fill();
+        targetCtx.fillStyle = "rgba(255, 255, 255, 0.96)";
+        targetCtx.beginPath();
+        targetCtx.arc(sx, sy, 1.35, 0, Math.PI * 2);
+        targetCtx.fill();
+        return;
+      }
+      const ux = dx / mag;
+      const uy = dy / mag;
+      const ex = sx + ux * scaledLen;
+      const ey = sy + uy * scaledLen;
+      const side = scaledLen * 0.28;
+      targetCtx.strokeStyle = "rgba(8, 10, 14, 0.78)";
+      targetCtx.lineWidth = 3.1;
+      targetCtx.beginPath();
+      targetCtx.moveTo(sx, sy);
+      targetCtx.lineTo(ex, ey);
+      targetCtx.moveTo(ex, ey);
+      targetCtx.lineTo(ex - ux * side - uy * side * 0.7, ey - uy * side + ux * side * 0.7);
+      targetCtx.moveTo(ex - ux * side * 0.45, ey - uy * side * 0.45);
+      targetCtx.lineTo(ex - ux * side * 1.15 + uy * side * 0.55, ey - uy * side * 1.15 - ux * side * 0.55);
+      targetCtx.stroke();
+      targetCtx.strokeStyle = "rgba(255, 255, 255, 0.96)";
+      targetCtx.lineWidth = 1.65;
+      targetCtx.stroke();
+    };
     const drawArrow = (dx: number, dy: number, strength: number, color: string, offsetY: number): void => {
       const mag = Math.hypot(dx, dy);
       if (mag <= 0.0001) {
@@ -175,6 +210,9 @@ export const createMiniMapPanel = (): MiniMapPanelView => {
       targetCtx.fill();
     };
     targetCtx.save();
+    buildTerrainWindOverlaySamples(world).forEach((sample) => {
+      drawBarb(x + sample.x01 * size, y + sample.y01 * size, sample.dx, sample.dy, sample.strength);
+    });
     drawArrow(
       Math.cos(climateSeed.prevailingWindAngleRad),
       Math.sin(climateSeed.prevailingWindAngleRad),

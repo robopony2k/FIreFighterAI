@@ -1158,6 +1158,57 @@ const getRoadComponentAt = (state: WorldState, components: Int32Array, point: Po
   return components[indexFor(state.grid, point.x, point.y)] ?? -1;
 };
 
+const areRoadAnchorsAlreadyLocallyConnected = (
+  state: WorldState,
+  roadAdapter: SettlementRoadAdapter,
+  left: Point,
+  right: Point
+): boolean => {
+  if (left.x === right.x && left.y === right.y) {
+    return true;
+  }
+  if (!isRoadLikeTile(state, left.x, left.y) || !isRoadLikeTile(state, right.x, right.y)) {
+    return false;
+  }
+  const direct = Math.max(1, Math.hypot(right.x - left.x, right.y - left.y));
+  const maxSteps = Math.max(8, Math.ceil(direct * 1.45 + 6));
+  const startIdx = indexFor(state.grid, left.x, left.y);
+  const targetIdx = indexFor(state.grid, right.x, right.y);
+  const visited = new Uint8Array(state.grid.totalTiles);
+  const depth = new Int16Array(state.grid.totalTiles);
+  const queue = new Int32Array(state.grid.totalTiles);
+  let head = 0;
+  let tail = 0;
+  queue[tail] = startIdx;
+  tail += 1;
+  visited[startIdx] = 1;
+  while (head < tail) {
+    const current = queue[head];
+    head += 1;
+    if (depth[current] >= maxSteps) {
+      continue;
+    }
+    const cx = current % state.grid.cols;
+    const cy = Math.floor(current / state.grid.cols);
+    const neighbors = roadAdapter.collectConnectedRoadNeighbors(state, cx, cy);
+    for (let i = 0; i < neighbors.length; i += 1) {
+      const neighbor = neighbors[i]!;
+      const nIdx = indexFor(state.grid, neighbor.x, neighbor.y);
+      if (visited[nIdx] > 0) {
+        continue;
+      }
+      if (nIdx === targetIdx) {
+        return true;
+      }
+      visited[nIdx] = 1;
+      depth[nIdx] = depth[current] + 1;
+      queue[tail] = nIdx;
+      tail += 1;
+    }
+  }
+  return false;
+};
+
 const resolveTownRoadAnchor = (
   state: WorldState,
   town: Town,
@@ -1391,7 +1442,7 @@ const ensureTownLocalStreetLinks = (
     if (!localStreet) {
       continue;
     }
-    if (
+    if (!areRoadAnchorsAlreadyLocallyConnected(state, roadAdapter, baseAnchor, localStreet) && (
       roadAdapter.carveRoad(
         state,
         baseAnchor,
@@ -1400,7 +1451,7 @@ const ensureTownLocalStreetLinks = (
       ) ||
       roadAdapter.carveRoad(state, baseAnchor, localStreet, buildRescueConnectorRoadOptions(plan)) ||
       roadAdapter.carveRoad(state, baseAnchor, localStreet, buildConnectivityFallbackRoadOptions(plan))
-    ) {
+    )) {
       repaired = true;
     }
     const selectedAnchor = resolveTownRoadAnchor(state, town, baseAnchor, roadAdapter);
@@ -1408,7 +1459,7 @@ const ensureTownLocalStreetLinks = (
       continue;
     }
     const localOptions = buildRoadOptions(plan);
-    if (
+    if (!areRoadAnchorsAlreadyLocallyConnected(state, roadAdapter, localStreet, selectedAnchor) && (
       roadAdapter.carveRoad(
         state,
         localStreet,
@@ -1422,7 +1473,7 @@ const ensureTownLocalStreetLinks = (
         buildBoundedConnectorOptions(state, localStreet, selectedAnchor, plan, buildSwitchbackConnectorRoadOptions(plan))
       ) ||
       roadAdapter.carveRoad(state, localStreet, selectedAnchor, buildRescueConnectorRoadOptions(plan))
-    ) {
+    )) {
       repaired = true;
     }
   }
@@ -1608,20 +1659,31 @@ const connectTownRoads = (state: WorldState, towns: Town[], roadAdapter: Settlem
   const anchors = [resolveBaseRoadAnchor(state, roadAdapter), ...towns.map((town) => resolveTownRoadAnchor(state, town, state.basePoint, roadAdapter))];
   const junctions = collectRoadJunctionCandidates(state, anchors, plan);
   roadAdapter.recordGeneratedJunctions?.(junctions.length);
+  roadAdapter.backfillRoadEdgesFromAdjacency(state);
   for (let i = 0; i < connections.length; i += 1) {
     const [left, right] = connections[i]!;
     const leftRoad = selectTownConnectionAnchor(state, left, { x: right.x, y: right.y }, roadAdapter);
     const rightRoad = selectTownConnectionAnchor(state, right, { x: left.x, y: left.y }, roadAdapter);
+    if (areRoadAnchorsAlreadyLocallyConnected(state, roadAdapter, leftRoad, rightRoad)) {
+      continue;
+    }
     const connectorOptions = buildConnectorRoadOptions(plan);
     if (carveConnectorSwitchbackFirst(state, roadAdapter, leftRoad, rightRoad, plan, junctions, connectorOptions)) {
+      roadAdapter.backfillRoadEdgesFromAdjacency(state);
       continue;
     }
     const fallbackLeft = roadAdapter.findNearestRoadTile(state, { x: left.x, y: left.y });
     const fallbackRight = roadAdapter.findNearestRoadTile(state, { x: right.x, y: right.y });
-    if (carveConnectorSwitchbackFirst(state, roadAdapter, fallbackLeft, fallbackRight, plan, junctions, connectorOptions)) {
+    if (areRoadAnchorsAlreadyLocallyConnected(state, roadAdapter, fallbackLeft, fallbackRight)) {
       continue;
     }
-    carveRescueConnectorWithWaypoints(state, roadAdapter, fallbackLeft, fallbackRight, plan);
+    if (carveConnectorSwitchbackFirst(state, roadAdapter, fallbackLeft, fallbackRight, plan, junctions, connectorOptions)) {
+      roadAdapter.backfillRoadEdgesFromAdjacency(state);
+      continue;
+    }
+    if (carveRescueConnectorWithWaypoints(state, roadAdapter, fallbackLeft, fallbackRight, plan)) {
+      roadAdapter.backfillRoadEdgesFromAdjacency(state);
+    }
   }
 };
 

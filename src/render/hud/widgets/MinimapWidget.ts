@@ -9,6 +9,7 @@ import type { HudInput, HudWidget } from "./hudWidget.js";
 import { computeViewportCenterOnPlane } from "../minimapViewport.js";
 import { buildThermalBackdropField, buildThermalHotspotField, paintThermalField } from "../../minimapRaster.js";
 import { generateWorldClimateSeed } from "../../../systems/climate/sim/worldClimateSeed.js";
+import { buildTerrainWindOverlaySamples } from "../../../systems/fire/rendering/terrainWindOverlay.js";
 
 type RGB = { r: number; g: number; b: number };
 
@@ -99,7 +100,7 @@ export class MinimapWidget implements HudWidget {
     ctx.strokeRect(mapRect.x + 0.5, mapRect.y + 0.5, mapRect.width - 1, mapRect.height - 1);
 
     this.drawViewportOverlay(ctx, mapRect, world, ui);
-    this.drawWindOverlay(ctx, mapRect, world);
+    this.drawWindOverlay(ctx, mapRect, world, mode);
 
     ctx.restore();
   }
@@ -255,7 +256,7 @@ export class MinimapWidget implements HudWidget {
     ctx.restore();
   }
 
-  private drawWindOverlay(ctx: CanvasRenderingContext2D, rect: Rect, world: WorldState): void {
+  private drawWindOverlay(ctx: CanvasRenderingContext2D, rect: Rect, world: WorldState, mode: string): void {
     const climateSeed = generateWorldClimateSeed(world.seed);
     const prevailing = {
       dx: Math.cos(climateSeed.prevailingWindAngleRad),
@@ -265,6 +266,48 @@ export class MinimapWidget implements HudWidget {
     const originX = rect.x + rect.width * 0.16;
     const originY = rect.y + rect.height * 0.16;
     const len = Math.max(8, Math.min(rect.width, rect.height) * 0.13);
+    const barbLen = Math.max(9, Math.min(rect.width, rect.height) * 0.072);
+    const barbColor =
+      mode === "thermal"
+        ? "rgba(115, 235, 255, 0.95)"
+        : mode === "elevation"
+          ? "rgba(255, 238, 128, 0.96)"
+          : mode === "moisture"
+            ? "rgba(255, 247, 214, 0.96)"
+            : "rgba(255, 255, 255, 0.96)";
+    const drawBarb = (x: number, y: number, dx: number, dy: number, strength: number): void => {
+      const mag = Math.hypot(dx, dy);
+      const scaledLen = barbLen * clamp(strength, 0, 1.2);
+      if (strength <= 0.04 || mag <= 0.0001 || scaledLen < 2.25) {
+        ctx.fillStyle = "rgba(8, 10, 14, 0.78)";
+        ctx.beginPath();
+        ctx.arc(x, y, 2.3, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = barbColor;
+        ctx.beginPath();
+        ctx.arc(x, y, 1.35, 0, Math.PI * 2);
+        ctx.fill();
+        return;
+      }
+      const ux = dx / mag;
+      const uy = dy / mag;
+      const ex = x + ux * scaledLen;
+      const ey = y + uy * scaledLen;
+      const side = scaledLen * 0.28;
+      ctx.strokeStyle = "rgba(8, 10, 14, 0.78)";
+      ctx.lineWidth = 3.2;
+      ctx.beginPath();
+      ctx.moveTo(x, y);
+      ctx.lineTo(ex, ey);
+      ctx.moveTo(ex, ey);
+      ctx.lineTo(ex - ux * side - uy * side * 0.7, ey - uy * side + ux * side * 0.7);
+      ctx.moveTo(ex - ux * side * 0.45, ey - uy * side * 0.45);
+      ctx.lineTo(ex - ux * side * 1.15 + uy * side * 0.55, ey - uy * side * 1.15 - ux * side * 0.55);
+      ctx.stroke();
+      ctx.strokeStyle = barbColor;
+      ctx.lineWidth = 1.7;
+      ctx.stroke();
+    };
     const drawArrow = (dx: number, dy: number, strength: number, color: string, offsetY: number): void => {
       const mag = Math.hypot(dx, dy);
       if (mag <= 0.0001) {
@@ -292,6 +335,11 @@ export class MinimapWidget implements HudWidget {
       ctx.fill();
     };
     ctx.save();
+    buildTerrainWindOverlaySamples(world).forEach((sample) => {
+      const x = rect.x + sample.x01 * rect.width;
+      const y = rect.y + sample.y01 * rect.height;
+      drawBarb(x, y, sample.dx, sample.dy, sample.strength);
+    });
     drawArrow(prevailing.dx, prevailing.dy, prevailing.strength, "rgba(83, 211, 194, 0.95)", 0);
     drawArrow(world.wind?.dx ?? 0, world.wind?.dy ?? 0, world.wind?.strength ?? 0, "rgba(245, 247, 250, 0.95)", 11);
     ctx.restore();

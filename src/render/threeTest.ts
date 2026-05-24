@@ -21,6 +21,7 @@ import { buildEvacuationRenderModel } from "../systems/evacuation/rendering/evac
 import { generateWorldClimateSeed } from "../systems/climate/sim/worldClimateSeed.js";
 import type { SeasonalRainState } from "../systems/climate/types/seasonalRain.js";
 import { resolveSeasonalRainScreenWind } from "../systems/climate/rendering/seasonalRainOverlayPass.js";
+import { buildTerrainWindOverlaySamples } from "../systems/fire/rendering/terrainWindOverlay.js";
 import { createVehicleModelLayer, type VehicleModelInstance } from "./vehicleModelLayer.js";
 import type { InputState } from "../core/inputState.js";
 import { indexFor } from "../core/grid.js";
@@ -2270,6 +2271,46 @@ export const createThreeTest = (
       const centerX = width * 0.14;
       const centerY = height * 0.14;
       const len = Math.max(8, Math.min(width, height) * 0.08);
+      const barbLen = Math.max(9, Math.min(width, height) * 0.07);
+      const barbColor =
+        minimapMode === "fire"
+          ? "rgba(115, 235, 255, 0.95)"
+          : minimapMode === "moisture"
+            ? "rgba(255, 247, 214, 0.96)"
+            : "rgba(255, 255, 255, 0.96)";
+      const drawBarb = (x: number, y: number, dx: number, dy: number, strength: number): void => {
+        const mag = Math.hypot(dx, dy);
+        const scaledLen = barbLen * Math.max(0, Math.min(1.2, strength));
+        if (strength <= 0.04 || mag <= 0.0001 || scaledLen < 2.25) {
+          ctx.fillStyle = "rgba(8, 10, 14, 0.78)";
+          ctx.beginPath();
+          ctx.arc(x, y, 2.3, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.fillStyle = barbColor;
+          ctx.beginPath();
+          ctx.arc(x, y, 1.35, 0, Math.PI * 2);
+          ctx.fill();
+          return;
+        }
+        const ux = dx / mag;
+        const uy = dy / mag;
+        const endX = x + ux * scaledLen;
+        const endY = y + uy * scaledLen;
+        const side = scaledLen * 0.28;
+        ctx.strokeStyle = "rgba(8, 10, 14, 0.78)";
+        ctx.lineWidth = 3.1;
+        ctx.beginPath();
+        ctx.moveTo(x, y);
+        ctx.lineTo(endX, endY);
+        ctx.moveTo(endX, endY);
+        ctx.lineTo(endX - ux * side - uy * side * 0.7, endY - uy * side + ux * side * 0.7);
+        ctx.moveTo(endX - ux * side * 0.45, endY - uy * side * 0.45);
+        ctx.lineTo(endX - ux * side * 1.15 + uy * side * 0.55, endY - uy * side * 1.15 - ux * side * 0.55);
+        ctx.stroke();
+        ctx.strokeStyle = barbColor;
+        ctx.lineWidth = 1.65;
+        ctx.stroke();
+      };
       const drawArrow = (dx: number, dy: number, strength: number, color: string, offsetY: number): void => {
         const mag = Math.hypot(dx, dy);
         if (mag <= 0.0001) {
@@ -2295,6 +2336,9 @@ export const createThreeTest = (
         ctx.closePath();
         ctx.fill();
       };
+      buildTerrainWindOverlaySamples(world).forEach((sample) => {
+        drawBarb(sample.x01 * width, sample.y01 * height, sample.dx, sample.dy, sample.strength);
+      });
       drawArrow(
         Math.cos(climateSeed.prevailingWindAngleRad),
         Math.sin(climateSeed.prevailingWindAngleRad),

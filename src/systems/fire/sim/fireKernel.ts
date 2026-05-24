@@ -16,10 +16,10 @@ import { sampleIgnitionFireSeed, sampleIgnitionHeatMultiplier } from "./fireIgni
 import { getRangedHeatTransferScale } from "./fireRangedHeatDiffusion.js";
 import {
     getElevationHeatTransferMultiplier,
-    resolveTerrainAdjustedWind,
     type TerrainAdjustedWind
 } from "./fireTerrainInfluence.js";
 import type { FireKernelHooks, FireKernelResult, FireKernelStepOptions } from "./fireKernelTypes.js";
+import { getTerrainWindField, sampleTerrainWindAt } from "./terrainWindField.js";
 
 const CARDINAL_DIRS = [
     { dx: 1, dy: 0 },
@@ -139,7 +139,10 @@ export function runFireKernel(
     const windDx = state.wind.dx;
     const windDy = state.wind.dy;
     const windStrength = state.wind.strength;
+    const terrainWindField = fireQuality > 0 ? getTerrainWindField(state) : null;
+    const globalWind = { dx: windDx, dy: windDy, strength: windStrength };
     const terrainWindScratch = { dx: windDx, dy: windDy, strength: windStrength };
+    const exposureWindScratch = { dx: windDx, dy: windDy, strength: windStrength };
     const wetnessDecayFactor = getWetnessDecayFactor(delta);
     const smokeSampleRate = Math.max(1, Math.floor(perf.smokeSampleRate || 1));
     const smokeSeed = (state.fireSeasonDay * 1000) | 0;
@@ -310,6 +313,9 @@ export function runFireKernel(
                     continue;
                 }
                 const previousRelease = heatRelease[sourceIdx] || fire[sourceIdx] * Math.max(0.1, heatOutput[sourceIdx] || 0);
+                const sourceWind = fireQuality > 0
+                    ? sampleTerrainWindAt(terrainWindField, sourceIdx, globalWind, exposureWindScratch)
+                    : globalWind;
                 const exposureScale = getRangedHeatTransferScale({
                     settings: state.fireSettings,
                     sourceX,
@@ -319,9 +325,9 @@ export function runFireKernel(
                     distanceTiles: distance,
                     cols,
                     rows,
-                    windDx,
-                    windDy,
-                    windStrength,
+                    windDx: sourceWind.dx,
+                    windDy: sourceWind.dy,
+                    windStrength: sourceWind.strength,
                     heatRelease: previousRelease,
                     weatherSpread,
                     targetMoisture: moisture[y * cols + x] || 0,
@@ -424,20 +430,8 @@ export function runFireKernel(
                         const cardinalScale = diffuseCardinal * (1 + spreadScale * 0.12);
                         const diagonalScale = diffuseDiagonal * (1 + spreadScale * 0.08);
                         const localWind = fireQuality > 0
-                            ? resolveTerrainAdjustedWind(
-                                x,
-                                y,
-                                idx,
-                                cols,
-                                rows,
-                                elevation,
-                                windDx,
-                                windDy,
-                                windStrength,
-                                state.fireSettings,
-                                terrainWindScratch
-                            )
-                            : terrainWindScratch;
+                            ? sampleTerrainWindAt(terrainWindField, idx, globalWind, terrainWindScratch)
+                            : globalWind;
                         const wx = fireQuality === 0 ? 0 : clamp(localWind.strength * localWind.dx, -WIND_BIAS_COMPONENT_MAX, WIND_BIAS_COMPONENT_MAX);
                         const wy = fireQuality === 0 ? 0 : clamp(localWind.strength * localWind.dy, -WIND_BIAS_COMPONENT_MAX, WIND_BIAS_COMPONENT_MAX);
                         const wE = Math.max(0, cardinalScale * (1 + wx));
