@@ -1,4 +1,4 @@
-import type { RNG } from "../../core/types.js";
+import type { RNG } from "../../../core/types.js";
 
 export type IgnitionSource = "spread" | "random";
 

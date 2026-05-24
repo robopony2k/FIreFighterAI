@@ -2,9 +2,9 @@
 import type { RNG } from "../../core/types.js";
 import type { WorldState } from "../../core/state.js";
 import { indexFor } from "../../core/grid.js";
+import { sampleIgnitionFireSeed, sampleIgnitionHeatMultiplier } from "../../systems/fire/sim/fireIgnitionTuning.js";
 import { markFireBlockActiveByTile } from "./activeBlocks.js";
 import { markFireBounds } from "./bounds.js";
-import { sampleIgnitionFireSeed, sampleIgnitionHeatMultiplier } from "./ignitionTuning.js";
 
 const BASE_IGNITION_EXCLUSION_RADIUS = 8;
 const EARLY_CAREER_PREFERRED_RADIUS = 24;

@@ -174,15 +174,10 @@ export interface WorldState {
   structureMask: Uint8Array;
   tileTownId: Int16Array;
   tileStructure: Uint8Array;
-  igniteMask: Uint8Array;
   tileSoaDirty: boolean;
   neighborOffsets4: Int32Array;
   neighborOffsets8: Int32Array;
   igniteBuffer: Int32Array;
-  baselineFireScratch: Float32Array;
-  baselineHeatScratch: Float32Array;
-  baselineNextHeat: Float32Array;
-  igniteCount: number;
 
   simPerf: SimPerfConfig;
 
@@ -467,9 +462,6 @@ export function createInitialState(seed: number, grid: Grid): WorldState {
     tileIgnitionPoint: new Float32Array(grid.totalTiles),
     tileBurnRate: new Float32Array(grid.totalTiles),
     tileHeatOutput: new Float32Array(grid.totalTiles),
-    baselineFireScratch: new Float32Array(grid.totalTiles),
-    baselineHeatScratch: new Float32Array(grid.totalTiles),
-    baselineNextHeat: new Float32Array(grid.totalTiles),
     tileElevation: new Float32Array(grid.totalTiles),
     tileMoisture: new Float32Array(grid.totalTiles),
     tileVegetationAge: new Float32Array(grid.totalTiles),
@@ -509,10 +501,6 @@ export function createInitialState(seed: number, grid: Grid): WorldState {
     neighborOffsets8: buildNeighborOffsets(grid.cols, 8),
 
     igniteBuffer: new Int32Array(grid.totalTiles),
-
-    igniteMask: new Uint8Array(grid.totalTiles),
-
-    igniteCount: 0,
 
     simPerf: {
 
@@ -837,10 +825,6 @@ export function syncTileSoA(state: WorldState): void {
     state.heatBuffer = new Float32Array(total);
     state.fireSnapshot = new Float32Array(total);
     state.igniteBuffer = new Int32Array(total);
-    state.igniteMask = new Uint8Array(total);
-    state.baselineFireScratch = new Float32Array(total);
-    state.baselineHeatScratch = new Float32Array(total);
-    state.baselineNextHeat = new Float32Array(total);
     state.scoring.burnStartFuel = new Float32Array(total).fill(-1);
     state.scoring.lastSuppressedAt = new Float32Array(total).fill(Number.NEGATIVE_INFINITY);
     state.neighborOffsets4 = buildNeighborOffsets(state.grid.cols, 4);

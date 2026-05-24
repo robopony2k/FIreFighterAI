@@ -1,6 +1,6 @@
 import { clamp } from "../../../core/utils.js";
 import type { Wind } from "../../../core/types.js";
-import type { FireWeatherResponse } from "../../../sim/fire/fireWeather.js";
+import type { FireWeatherResponse } from "./fireWeather.js";
 import type { FireSimLabEnvironment } from "../types/fireSimLabTypes.js";
 
 export const getWindFromFireSimLabEnvironment = (environment: FireSimLabEnvironment): Wind => {
