@@ -183,6 +183,7 @@ export type RoadGenerationStats = {
   switchbackRouteAttempts: number;
   switchbackRouteCount: number;
   hairpinGradeDiscountCount: number;
+  connectorArtifactPrunedEdgeCount: number;
   longStraightSteepSegmentCount: number;
   generatedJunctionCount: number;
 };
@@ -322,6 +323,7 @@ const roadGenerationStats: RoadGenerationStats = {
   switchbackRouteAttempts: 0,
   switchbackRouteCount: 0,
   hairpinGradeDiscountCount: 0,
+  connectorArtifactPrunedEdgeCount: 0,
   longStraightSteepSegmentCount: 0,
   generatedJunctionCount: 0
 };
@@ -832,6 +834,168 @@ export const pruneRoadDiagonalStubs = (state: WorldState): void => {
     const edge = removals[i];
     disconnectRoadPoints(state, edge.ax, edge.ay, edge.bx, edge.by);
   }
+};
+
+const ROAD_ARTIFACT_ALT_PATH_MAX_STEPS = 8;
+const ROAD_ARTIFACT_PROTECTED_RADIUS = 2;
+
+const isRoadArtifactProtectedTile = (state: WorldState, x: number, y: number): boolean => {
+  if (!inBounds(state.grid, x, y)) {
+    return true;
+  }
+  const idx = indexFor(state.grid, x, y);
+  const tile = state.tiles[idx];
+  if (tile.type === "base" || tile.type === "house" || state.structureMask[idx] > 0 || state.tileTownId[idx] >= 0) {
+    return true;
+  }
+  for (let oy = -ROAD_ARTIFACT_PROTECTED_RADIUS; oy <= ROAD_ARTIFACT_PROTECTED_RADIUS; oy += 1) {
+    for (let ox = -ROAD_ARTIFACT_PROTECTED_RADIUS; ox <= ROAD_ARTIFACT_PROTECTED_RADIUS; ox += 1) {
+      const nx = x + ox;
+      const ny = y + oy;
+      if (!inBounds(state.grid, nx, ny)) {
+        continue;
+      }
+      const nIdx = indexFor(state.grid, nx, ny);
+      const neighbor = state.tiles[nIdx];
+      if (
+        neighbor.type === "base" ||
+        neighbor.type === "house" ||
+        state.structureMask[nIdx] > 0 ||
+        state.tileTownId[nIdx] >= 0
+      ) {
+        return true;
+      }
+    }
+  }
+  return false;
+};
+
+const roadDegreeAtIndex = (state: WorldState, idx: number): number => {
+  let degree = 0;
+  const mask = state.tileRoadEdges[idx] ?? 0;
+  for (let i = 0; i < ROAD_EDGE_DIRS.length; i += 1) {
+    if ((mask & ROAD_EDGE_DIRS[i].bit) > 0) {
+      degree += 1;
+    }
+  }
+  return degree;
+};
+
+const hasShortAlternateRoadPath = (
+  state: WorldState,
+  startIdx: number,
+  goalIdx: number,
+  blockedA: number,
+  blockedB: number,
+  maxSteps: number
+): boolean => {
+  const total = state.grid.totalTiles;
+  const cols = state.grid.cols;
+  const visited = new Uint8Array(total);
+  const queue = new Int32Array(total);
+  const depth = new Int16Array(total);
+  let head = 0;
+  let tail = 0;
+  queue[tail] = startIdx;
+  tail += 1;
+  visited[startIdx] = 1;
+
+  while (head < tail) {
+    const idx = queue[head];
+    head += 1;
+    const nextDepth = depth[idx] + 1;
+    if (nextDepth > maxSteps) {
+      continue;
+    }
+    const x = idx % cols;
+    const y = Math.floor(idx / cols);
+    const mask = state.tileRoadEdges[idx] ?? 0;
+    for (let i = 0; i < ROAD_EDGE_DIRS.length; i += 1) {
+      const dir = ROAD_EDGE_DIRS[i];
+      if ((mask & dir.bit) === 0) {
+        continue;
+      }
+      const nx = x + dir.dx;
+      const ny = y + dir.dy;
+      if (!inBounds(state.grid, nx, ny)) {
+        continue;
+      }
+      const nIdx = indexFor(state.grid, nx, ny);
+      if ((idx === blockedA && nIdx === blockedB) || (idx === blockedB && nIdx === blockedA)) {
+        continue;
+      }
+      if (!isRoadLikeIndex(state, nIdx) || visited[nIdx] > 0) {
+        continue;
+      }
+      if (nIdx === goalIdx) {
+        return true;
+      }
+      visited[nIdx] = 1;
+      depth[nIdx] = nextDepth;
+      queue[tail] = nIdx;
+      tail += 1;
+    }
+  }
+  return false;
+};
+
+export const pruneRoadConnectorArtifacts = (state: WorldState): number => {
+  ensureRoadEdgeBuffer(state);
+  const removals: Array<{ ax: number; ay: number; bx: number; by: number }> = [];
+  const { cols } = state.grid;
+
+  for (let idx = 0; idx < state.grid.totalTiles; idx += 1) {
+    if (!isRoadLikeIndex(state, idx) || state.tiles[idx]?.type === "water" || state.tileRoadBridge[idx] > 0) {
+      continue;
+    }
+    const x = idx % cols;
+    const y = Math.floor(idx / cols);
+    if (isRoadArtifactProtectedTile(state, x, y)) {
+      continue;
+    }
+    const degree = roadDegreeAtIndex(state, idx);
+    const mask = state.tileRoadEdges[idx] ?? 0;
+    for (let i = 0; i < ROAD_EDGE_DIRS.length; i += 1) {
+      const dir = ROAD_EDGE_DIRS[i];
+      if ((mask & dir.bit) === 0) {
+        continue;
+      }
+      const nx = x + dir.dx;
+      const ny = y + dir.dy;
+      if (!inBounds(state.grid, nx, ny)) {
+        continue;
+      }
+      const nIdx = indexFor(state.grid, nx, ny);
+      if (nIdx <= idx || !isRoadLikeIndex(state, nIdx) || state.tiles[nIdx]?.type === "water" || state.tileRoadBridge[nIdx] > 0) {
+        continue;
+      }
+      if (isRoadArtifactProtectedTile(state, nx, ny)) {
+        continue;
+      }
+      const neighborDegree = roadDegreeAtIndex(state, nIdx);
+      const redundantConnectorCandidate = dir.diagonal || degree >= 3 || neighborDegree >= 3;
+      if (!redundantConnectorCandidate || degree <= 1 || neighborDegree <= 1) {
+        continue;
+      }
+      if (hasShortAlternateRoadPath(state, idx, nIdx, idx, nIdx, ROAD_ARTIFACT_ALT_PATH_MAX_STEPS)) {
+        removals.push({ ax: x, ay: y, bx: nx, by: ny });
+      }
+    }
+  }
+
+  let pruned = 0;
+  for (let i = 0; i < removals.length; i += 1) {
+    const edge = removals[i];
+    const aIdx = indexFor(state.grid, edge.ax, edge.ay);
+    const bIdx = indexFor(state.grid, edge.bx, edge.by);
+    if (!hasShortAlternateRoadPath(state, aIdx, bIdx, aIdx, bIdx, ROAD_ARTIFACT_ALT_PATH_MAX_STEPS)) {
+      continue;
+    }
+    disconnectRoadPoints(state, edge.ax, edge.ay, edge.bx, edge.by);
+    pruned += 1;
+  }
+  roadGenerationStats.connectorArtifactPrunedEdgeCount += pruned;
+  return pruned;
 };
 
 export const backfillRoadEdgesFromAdjacency = (state: WorldState): void => {
@@ -2189,6 +2353,7 @@ export const resetRoadGenerationStats = (): void => {
   roadGenerationStats.switchbackRouteAttempts = 0;
   roadGenerationStats.switchbackRouteCount = 0;
   roadGenerationStats.hairpinGradeDiscountCount = 0;
+  roadGenerationStats.connectorArtifactPrunedEdgeCount = 0;
   roadGenerationStats.longStraightSteepSegmentCount = 0;
   roadGenerationStats.generatedJunctionCount = 0;
 };
@@ -2209,6 +2374,7 @@ export const getRoadGenerationStats = (): RoadGenerationStats => ({
   switchbackRouteAttempts: roadGenerationStats.switchbackRouteAttempts,
   switchbackRouteCount: roadGenerationStats.switchbackRouteCount,
   hairpinGradeDiscountCount: roadGenerationStats.hairpinGradeDiscountCount,
+  connectorArtifactPrunedEdgeCount: roadGenerationStats.connectorArtifactPrunedEdgeCount,
   longStraightSteepSegmentCount: roadGenerationStats.longStraightSteepSegmentCount,
   generatedJunctionCount: roadGenerationStats.generatedJunctionCount
 });
