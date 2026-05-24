@@ -29,6 +29,7 @@ import { bindPhaseUi } from "../ui/phase/bindings.js";
 import { getMapEditorRefs, initMapEditor, type MapEditorHandle } from "../ui/map-editor.js";
 import { getOverlayRefs, updateOverlay } from "../ui/overlay.js";
 import { createEndRunScreen, type EndRunScreenHandle } from "../ui/end-run/endRunScreen.js";
+import { getMapPrepLoadingScene, getMapPrepStateLine } from "../ui/loadingTips.js";
 import { saveLeaderboard } from "../persistence/leaderboard.js";
 import { loadFuelProfileOverrides } from "../persistence/fuelProfiles.js";
 import { loadLastRunConfig } from "../persistence/lastRunConfig.js";
@@ -342,9 +343,11 @@ export const createAppRuntime = (): AppRuntime => {
   const startNewRunButton = document.getElementById("startNewRun") as HTMLButtonElement | null;
   const canvasWrap = canvas.parentElement as HTMLElement | null;
   const mapgenOverlay = document.getElementById("mapgenOverlay") as HTMLDivElement | null;
-  const mapgenMessage = document.getElementById("mapgenMessage") as HTMLDivElement | null;
+  const mapgenStateLine = document.getElementById("mapgenStateLine") as HTMLDivElement | null;
+  const mapgenGraphic = document.getElementById("mapgenGraphic") as HTMLDivElement | null;
   const mapgenProgressBar = document.getElementById("mapgenProgressBar") as HTMLDivElement | null;
   const mapgenPercent = document.getElementById("mapgenPercent") as HTMLDivElement | null;
+  const mapgenTip = document.getElementById("mapgenTip") as HTMLDivElement | null;
   const threeTestOverlay = document.getElementById("threeTestOverlay") as HTMLDivElement | null;
   const threeTestPhaseHudMount = document.getElementById("threeTestPhaseHudMount") as HTMLDivElement | null;
   const threeTestCanvas = document.getElementById("threeTestCanvas") as HTMLCanvasElement | null;
@@ -411,29 +414,59 @@ export const createAppRuntime = (): AppRuntime => {
   };
   
   let isGenerating = false;
+  let mapgenOverlayShownAt = 0;
+  let mapgenTipTimer: number | null = null;
   const titleScreenEnabled = ENABLE_TITLE_SCREEN && !isHeadless() && !initialFxLabEnabled && !initialFireSimLabEnabled;
   let titleScreenVisible = false;
   let titleScreen: TitleScreenHandle | null = null;
+  const readMapgenOverlayElapsedMs = (): number => {
+    if (mapgenOverlayShownAt <= 0) {
+      return 0;
+    }
+    return (typeof performance !== "undefined" ? performance.now() : Date.now()) - mapgenOverlayShownAt;
+  };
+  const updateMapgenTipScene = (): void => {
+    if (!mapgenTip) {
+      return;
+    }
+    const scene = getMapPrepLoadingScene(readMapgenOverlayElapsedMs());
+    mapgenTip.textContent = scene.tip;
+    if (mapgenGraphic) {
+      mapgenGraphic.dataset.scene = scene.graphicKey;
+    }
+  };
   const showMapgenOverlay = (): void => {
     if (!mapgenOverlay) {
       return;
     }
+    mapgenOverlayShownAt = typeof performance !== "undefined" ? performance.now() : Date.now();
+    updateMapgenTipScene();
+    if (mapgenTipTimer !== null) {
+      window.clearInterval(mapgenTipTimer);
+    }
+    mapgenTipTimer = window.setInterval(updateMapgenTipScene, 1000);
     mapgenOverlay.classList.remove("hidden");
   };
   const hideMapgenOverlay = (): void => {
     if (!mapgenOverlay) {
       return;
     }
+    if (mapgenTipTimer !== null) {
+      window.clearInterval(mapgenTipTimer);
+      mapgenTipTimer = null;
+    }
+    mapgenOverlayShownAt = 0;
     mapgenOverlay.classList.add("hidden");
   };
   const updateMapgenOverlay = (message: string, progress: number): void => {
-    if (!mapgenOverlay || !mapgenMessage || !mapgenProgressBar || !mapgenPercent) {
+    if (!mapgenOverlay || !mapgenStateLine || !mapgenProgressBar || !mapgenPercent) {
       return;
     }
     const clamped = Math.min(1, Math.max(0, progress));
-    mapgenMessage.textContent = message;
+    mapgenStateLine.textContent = getMapPrepStateLine(message, clamped, readMapgenOverlayElapsedMs());
     mapgenProgressBar.style.width = `${Math.round(clamped * 100)}%`;
     mapgenPercent.textContent = `${Math.round(clamped * 100)}%`;
+    updateMapgenTipScene();
   };
   
   let threeTestController: ReturnType<typeof createThreeTest> | null = null;

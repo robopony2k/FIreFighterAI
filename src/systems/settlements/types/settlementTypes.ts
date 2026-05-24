@@ -2,6 +2,7 @@ import type { Point } from "../../../core/types.js";
 import type { WorldState } from "../../../core/state.js";
 
 export type SettlementRoadBridgePolicy = "allow" | "never";
+export type SettlementRoadPathMode = "normal" | "switchback" | "mountainPass";
 
 export type SettlementRoadOptions = {
   bridgePolicy?: SettlementRoadBridgePolicy;
@@ -34,6 +35,7 @@ export type SettlementRoadOptions = {
   straightClimbPenaltyWeight?: number;
   contourTurnReliefWeight?: number;
   allowMountainPassFallback?: boolean;
+  pathMode?: SettlementRoadPathMode;
   searchBounds?: {
     minX: number;
     maxX: number;

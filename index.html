@@ -511,11 +511,17 @@
           </div>
           <div id="mapgenOverlay" class="mapgen-overlay hidden">
             <div class="mapgen-card">
-              <div id="mapgenMessage" class="mapgen-message">Reticulating splines...</div>
-              <div class="mapgen-progress">
-                <div id="mapgenProgressBar" class="mapgen-progress-bar"></div>
+              <div class="mapgen-tip-stage">
+                <div id="mapgenGraphic" class="mapgen-tip-graphic" data-scene="wind" aria-hidden="true"></div>
+                <div id="mapgenTip" class="mapgen-tip">Watch the wind before committing crews; a flank can become the head of the fire quickly.</div>
               </div>
-              <div id="mapgenPercent" class="mapgen-percent">0%</div>
+              <div class="mapgen-bottom">
+                <div id="mapgenStateLine" class="mapgen-state-line">mapgen 0% | 0s | Reticulating splines...</div>
+                <div class="mapgen-progress">
+                  <div id="mapgenProgressBar" class="mapgen-progress-bar"></div>
+                </div>
+                <div id="mapgenPercent" class="mapgen-percent">0%</div>
+              </div>
             </div>
           </div>
         </div>

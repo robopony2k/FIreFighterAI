@@ -61,6 +61,7 @@ import {
   ROAD_EDGE_DIRS,
   analyzeRoadSurfaceMetrics,
   getRoadGenerationStats,
+  resetRoadGenerationStats,
   type RoadSurfaceMetrics
 } from "./roads.js";
 import {
@@ -5083,20 +5084,22 @@ type ShortBridgeApproachComponent = {
   connectorRoads: number[];
 };
 
-const ROAD_GRADE_TARGET_LIMIT = 0.095;
-const ROAD_GRADE_CHANGE_TARGET_LIMIT = 0.065;
-const ROAD_FINAL_MAX_ANGLE_DEG = 27.5;
-const ROAD_FINAL_STRUCTURE_MAX_ANGLE_DEG = 18;
-const ROAD_FINAL_ANGLE_RELAX_PASSES = 10;
-const ROAD_SHOULDER_BLEND_RADIUS = 2;
+const ROAD_GRADE_TARGET_LIMIT = 0.18;
+const ROAD_GRADE_CHANGE_TARGET_LIMIT = 0.12;
+const ROAD_FINAL_MAX_ANGLE_DEG = 40;
+const ROAD_FINAL_STRUCTURE_MAX_ANGLE_DEG = 24;
+const ROAD_FINAL_ANGLE_RELAX_PASSES = 5;
+const ROAD_SHOULDER_BLEND_RADIUS = 1;
 const ROAD_WALL_DROP_THRESHOLD = 0.09;
 const ROAD_WALL_OUTER_DROP_THRESHOLD = 0.11;
-const ROAD_PROFILE_MAX_FILL = 0.022;
-const ROAD_PROFILE_MAX_CUT = 0.14;
-const ROAD_SHOULDER_MAX_FILL_NEAR = 0.028;
-const ROAD_SHOULDER_MAX_FILL_FAR = 0.014;
-const ROAD_SHOULDER_MAX_CUT_NEAR = 0.1;
-const ROAD_SHOULDER_MAX_CUT_FAR = 0.05;
+const ROAD_PROFILE_MAX_FILL = 0.014;
+const ROAD_PROFILE_MAX_CUT = 0.07;
+const ROAD_PROFILE_STRAIGHT_MAX_FILL = 0.01;
+const ROAD_PROFILE_STRAIGHT_MAX_CUT = 0.04;
+const ROAD_SHOULDER_MAX_FILL_NEAR = 0.012;
+const ROAD_SHOULDER_MAX_FILL_FAR = 0.006;
+const ROAD_SHOULDER_MAX_CUT_NEAR = 0.035;
+const ROAD_SHOULDER_MAX_CUT_FAR = 0.018;
 const SHORT_BRIDGE_APPROACH_MAX_COMPONENT_TILES = 2;
 const SHORT_BRIDGE_APPROACH_MAX_CONNECTOR_DISTANCE = 3.1;
 
@@ -5344,6 +5347,9 @@ const buildRoadSegmentProfile = (
   const runs = new Array<number>(indices.length - 1);
   const cumulative = new Array<number>(indices.length).fill(0);
   let totalRun = 0;
+  let directionChanges = 0;
+  let previousDx = 0;
+  let previousDy = 0;
   for (let i = 1; i < indices.length; i += 1) {
     const prevIdx = indices[i - 1];
     const idx = indices[i];
@@ -5351,11 +5357,19 @@ const buildRoadSegmentProfile = (
     const prevY = Math.floor(prevIdx / state.grid.cols);
     const x = idx % state.grid.cols;
     const y = Math.floor(idx / state.grid.cols);
+    const stepDx = Math.sign(x - prevX);
+    const stepDy = Math.sign(y - prevY);
+    if (i > 1 && (stepDx !== previousDx || stepDy !== previousDy)) {
+      directionChanges += 1;
+    }
+    previousDx = stepDx;
+    previousDy = stepDy;
     const run = Math.hypot(x - prevX, y - prevY);
     runs[i - 1] = Math.max(1, run);
     totalRun += runs[i - 1];
     cumulative[i] = totalRun;
   }
+  const isLongStraightSegment = !loop && indices.length >= 7 && directionChanges <= 1;
 
   let target = original.slice();
   if (!loop) {
@@ -5441,8 +5455,10 @@ const buildRoadSegmentProfile = (
   for (let i = 0; i < target.length; i += 1) {
     const idx = indices[i];
     const originalElevation = originalElevations[idx] ?? original[i];
-    const minElevation = Math.max(0, originalElevation - ROAD_PROFILE_MAX_CUT);
-    const maxElevation = Math.min(1, originalElevation + ROAD_PROFILE_MAX_FILL);
+    const maxCut = isLongStraightSegment ? ROAD_PROFILE_STRAIGHT_MAX_CUT : ROAD_PROFILE_MAX_CUT;
+    const maxFill = isLongStraightSegment ? ROAD_PROFILE_STRAIGHT_MAX_FILL : ROAD_PROFILE_MAX_FILL;
+    const minElevation = Math.max(0, originalElevation - maxCut);
+    const maxElevation = Math.min(1, originalElevation + maxFill);
     target[i] = clamp(target[i], minElevation, maxElevation);
   }
 
@@ -5657,7 +5673,7 @@ export function gradeRoadNetworkTerrain(state: WorldState, heightScaleMultiplier
         if (dist > ROAD_SHOULDER_BLEND_RADIUS + 0.01) {
           continue;
         }
-        const weight = dist <= 1.05 ? 0.34 : 0.16;
+        const weight = dist <= 1.05 ? 0.18 : 0.08;
         shoulderSum[nIdx] += roadElevation * weight;
         shoulderWeight[nIdx] += weight;
       }
@@ -5724,7 +5740,19 @@ export function gradeRoadNetworkTerrain(state: WorldState, heightScaleMultiplier
     }
   }
 
-  return analyzeRoadSurfaceMetrics(state, heightScaleMultiplier);
+  const metrics = analyzeRoadSurfaceMetrics(state, heightScaleMultiplier);
+  let maxRoadGradingDelta = 0;
+  for (let idx = 0; idx < total; idx += 1) {
+    if (!isLandRoadLikeIndex(state, idx)) {
+      continue;
+    }
+    maxRoadGradingDelta = Math.max(
+      maxRoadGradingDelta,
+      Math.abs((state.tiles[idx]?.elevation ?? 0) - (originalElevations[idx] ?? 0))
+    );
+  }
+  metrics.maxRoadGradingDelta = maxRoadGradingDelta;
+  return metrics;
 }
 
 const SETTLEMENT_PAD_BLEND_RADIUS = 4;
@@ -6607,6 +6635,7 @@ async function generateMapLegacy(
     roadStrictness: mapSettings.roadStrictness,
     settlementPreGrowthYears: mapSettings.settlementPreGrowthYears
   });
+  resetRoadGenerationStats();
   connectSettlementsByRoad(state, rng, legacySettlementPlan);
   flattenSettlementGround(state);
 
@@ -7843,6 +7872,7 @@ async function runSettlementPlacementStage(ctx: MapGenContext): Promise<void> {
 }
 
 async function runRoadNetworkStage(ctx: MapGenContext): Promise<void> {
+  resetRoadGenerationStats();
   connectSettlementsByRoad(ctx.state, ctx.rng, ctx.settlementPlan ?? null);
   flattenSettlementGround(ctx.state);
   let roadSurfaceMetrics = gradeRoadNetworkTerrain(ctx.state, ctx.settings.heightScaleMultiplier);
@@ -7867,7 +7897,7 @@ async function runRoadNetworkStage(ctx: MapGenContext): Promise<void> {
     const stats = getRoadGenerationStats();
     const finalMetrics: RoadSurfaceMetrics = roadSurfaceMetrics;
     console.log(
-      `[roadsurface] maxGrade=${finalMetrics.maxRoadGrade.toFixed(3)} maxCrossfall=${finalMetrics.maxRoadCrossfall.toFixed(3)} maxGradeChange=${finalMetrics.maxRoadGradeChange.toFixed(3)} maxAngle=${finalMetrics.maxRoadAngleDeg.toFixed(2)} highAngle=${finalMetrics.highAngleRoadStepCount} wallEdges=${finalMetrics.wallEdgeCount} routedMaxGrade=${stats.maxRealizedGrade.toFixed(3)} routedMaxCrossfall=${stats.maxRealizedCrossfall.toFixed(3)} routedMaxGradeChange=${stats.maxRealizedGradeChange.toFixed(3)} routedAngle=${stats.maxRealizedAngleDeg.toFixed(2)}/${stats.meanRealizedAngleDeg.toFixed(2)} pass=${stats.mountainPassFallbackCount} junctions=${stats.generatedJunctionCount}`
+      `[roadsurface] maxGrade=${finalMetrics.maxRoadGrade.toFixed(3)} maxCrossfall=${finalMetrics.maxRoadCrossfall.toFixed(3)} maxGradeChange=${finalMetrics.maxRoadGradeChange.toFixed(3)} maxAngle=${finalMetrics.maxRoadAngleDeg.toFixed(2)} highAngle=${finalMetrics.highAngleRoadStepCount} straightSteep=${finalMetrics.longStraightSteepSegmentCount} gradingDelta=${finalMetrics.maxRoadGradingDelta.toFixed(3)} wallEdges=${finalMetrics.wallEdgeCount} routedMaxGrade=${stats.maxRealizedGrade.toFixed(3)} routedMaxCrossfall=${stats.maxRealizedCrossfall.toFixed(3)} routedMaxGradeChange=${stats.maxRealizedGradeChange.toFixed(3)} routedAngle=${stats.maxRealizedAngleDeg.toFixed(2)}/${stats.meanRealizedAngleDeg.toFixed(2)} pass=${stats.mountainPassFallbackCount} switchbackRoutes=${stats.switchbackRouteCount}/${stats.switchbackRouteAttempts} junctions=${stats.generatedJunctionCount}`
     );
   }
   await ctx.reportStage("Connecting roads...", 1);

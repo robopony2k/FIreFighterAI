@@ -1,4 +1,4 @@
-const nextFrame = () =>
+export const yieldToNextFrame = () =>
   new Promise<void>((resolve) => {
     if (typeof requestAnimationFrame === "function") {
       requestAnimationFrame(() => resolve());
@@ -18,7 +18,7 @@ const createYield = (maxIterations = 32) => {
     }
     iterations = 0;
     lastYield = now;
-    await nextFrame();
+    await yieldToNextFrame();
     return true;
   };
 };
