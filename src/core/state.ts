@@ -202,6 +202,7 @@ export interface WorldState {
   nextBuildingLotId: number;
   plannedTownGrowth: SettlementGrowthPlan;
   settlementRuntimeRoadPathSearches: number;
+  settlementRuntimeTerrainEditAttempts: number;
 
   seed: number;
   fireSettings: FireSettings;
@@ -564,6 +565,7 @@ export function createInitialState(seed: number, grid: Grid): WorldState {
     buildingLots: [],
     nextBuildingLotId: 1,
     settlementRuntimeRoadPathSearches: 0,
+    settlementRuntimeTerrainEditAttempts: 0,
     plannedTownGrowth: {
       entries: [],
       nextExpansionIndexByTown: [],

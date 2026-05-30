@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 
 import { RNG } from "../dist/core/rng.js";
-import { createInitialState, syncTileSoA } from "../dist/core/state.js";
+import { createInitialState, syncTileSoA, TILE_TYPE_IDS } from "../dist/core/state.js";
 import { applyFuel } from "../dist/core/tiles.js";
 import { TreeType } from "../dist/core/types.js";
 import {
@@ -12,6 +12,7 @@ import {
 } from "../dist/core/vegetation.js";
 import { stepGrowth } from "../dist/sim/growth.js";
 import { stepTownConstructionSchedule } from "../dist/systems/settlements/sim/townConstruction.js";
+import { prepareTerrainRenderSurface, prepareTerrainRenderVisualSurface } from "../dist/render/threeTestTerrain.js";
 import {
   classifyTerrainVisualInvalidation,
   decideTerrainVisualSync,
@@ -268,7 +269,7 @@ const buildSettlementConstructionState = (withReplayPath) => {
             bridgeTileIndices: withReplayPath ? [] : undefined
           }
         ],
-        terrainEdits: [],
+        terrainEdits: [{ index: 3 + 3 * grid.cols, elevation: 0.95 }],
         plannedYear: 0,
         sequence: 0,
         status: "pending"
@@ -472,20 +473,82 @@ assert.ok(
   "batched vegetation visuals should flush after enough growth days"
 );
 
+const terrainSignatureSample = (() => {
+  const cols = 5;
+  const rows = 5;
+  const total = cols * rows;
+  const elevations = new Float32Array(total).fill(0.25);
+  elevations[0] = 0.12;
+  const tileTypes = new Uint8Array(total).fill(TILE_TYPE_IDS.grass);
+  tileTypes[0] = TILE_TYPE_IDS.water;
+  const oceanMask = new Uint8Array(total);
+  oceanMask[0] = 1;
+  const baseSurface = prepareTerrainRenderSurface({ cols, rows, elevations, tileTypes, oceanMask, fastUpdate: true });
+  const roadTypes = tileTypes.slice();
+  roadTypes[12] = TILE_TYPE_IDS.road;
+  const roadSurface = prepareTerrainRenderSurface({ cols, rows, elevations, tileTypes: roadTypes, oceanMask, fastUpdate: true });
+  const houseTypes = tileTypes.slice();
+  houseTypes[13] = TILE_TYPE_IDS.house;
+  const structureSurface = prepareTerrainRenderSurface({ cols, rows, elevations, tileTypes: houseTypes, oceanMask, fastUpdate: true });
+  const forestTypes = tileTypes.slice();
+  forestTypes[14] = TILE_TYPE_IDS.forest;
+  const vegetationSurface = prepareTerrainRenderSurface({ cols, rows, elevations, tileTypes: forestTypes, oceanMask, fastUpdate: true });
+  const visualSurface = prepareTerrainRenderVisualSurface(
+    { cols, rows, elevations, tileTypes: forestTypes, oceanMask, fastUpdate: true },
+    baseSurface
+  );
+  assert.equal(roadSurface.geometrySignature, baseSurface.geometrySignature, "road-only visuals should not change terrain geometry signature");
+  assert.equal(
+    structureSurface.geometrySignature,
+    baseSurface.geometrySignature,
+    "structure-only visuals should not change terrain geometry signature"
+  );
+  assert.equal(
+    vegetationSurface.geometrySignature,
+    baseSurface.geometrySignature,
+    "vegetation-only visuals should not change terrain geometry signature"
+  );
+  assert.ok(visualSurface, "vegetation-only visual terrain prep should reuse cached static terrain geometry");
+  assert.equal(
+    visualSurface.geometrySignature,
+    baseSurface.geometrySignature,
+    "visual-only terrain prep should preserve cached terrain geometry signature"
+  );
+  assert.equal(
+    visualSurface.sampleHeights,
+    baseSurface.sampleHeights,
+    "visual-only terrain prep should reuse cached static height samples"
+  );
+  assert.notEqual(
+    visualSurface.sampleTypes,
+    baseSurface.sampleTypes,
+    "visual-only terrain prep should refresh mutable visual tile classes"
+  );
+  return baseSurface.geometrySignature;
+})();
+
 const replayConstruction = buildSettlementConstructionState(true);
+const replayElevationBefore = new Float32Array(replayConstruction.tileElevation);
 const replayRoads = createCountingRoadAdapter();
 stepTownConstructionSchedule(replayConstruction, replayRoads.adapter, 1, { maxEventDays: 4 });
 assert.equal(replayRoads.counts.replay, 1, "planned expansion should replay recorded road paths");
 assert.equal(replayRoads.counts.search, 0, "planned expansion with replay data should not run runtime road search");
 assert.equal(replayConstruction.plannedTownGrowth.consumedEntries, 1, "planned expansion entry should be consumed");
 assert.equal(replayConstruction.buildingLots.length, 1, "planned expansion should create a building lot");
+assert.deepEqual(replayConstruction.tileElevation, replayElevationBefore, "runtime planned expansion must not mutate terrain elevation");
+assert.ok(
+  replayConstruction.settlementRuntimeTerrainEditAttempts > 0,
+  "deprecated runtime terrain edits should be counted as no-op attempts"
+);
 
 const fallbackConstruction = buildSettlementConstructionState(false);
+const fallbackElevationBefore = new Float32Array(fallbackConstruction.tileElevation);
 const fallbackRoads = createCountingRoadAdapter();
 stepTownConstructionSchedule(fallbackConstruction, fallbackRoads.adapter, 1, { maxEventDays: 4 });
 assert.equal(fallbackRoads.counts.replay, 0, "legacy planned expansion without path should not call replay");
 assert.equal(fallbackRoads.counts.search, 1, "legacy planned expansion without path should use runtime road search fallback");
 assert.equal(fallbackConstruction.buildingLots.length, 1, "runtime road-search fallback should still create a building lot");
+assert.deepEqual(fallbackConstruction.tileElevation, fallbackElevationBefore, "legacy runtime expansion must not mutate terrain elevation");
 
 const recovery = buildRecoveryState();
 let sawGrass = false;
@@ -527,6 +590,8 @@ console.log(
     `openRecruit=${openRecruit.state.tiles[openRecruit.target].type}`,
     `roadReplay=${replayRoads.counts.replay}`,
     `roadFallback=${fallbackRoads.counts.search}`,
+    `terrainGeom=${terrainSignatureSample}`,
+    `terrainEditNoop=${replayConstruction.settlementRuntimeTerrainEditAttempts + fallbackConstruction.settlementRuntimeTerrainEditAttempts}`,
     `vegetationRevision=${growthOnly.state.vegetationRevision}`
   ].join(" ")
 );

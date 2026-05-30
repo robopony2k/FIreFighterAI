@@ -69,6 +69,10 @@ import type {
 
 type GrowthMode = "mapgen" | "runtime";
 
+type SettlementGrowthTerrainMutationOptions = {
+  mutateTerrain?: boolean;
+};
+
 export type GrowthContext = {
   footprints: Map<number, HouseFootprintBounds>;
   clearanceRects: Map<number, HouseClearanceRect>;
@@ -370,13 +374,15 @@ const placeFrontageHouse = (
   candidate: FrontageCandidate,
   context: GrowthContext,
   effectiveYear: number,
-  constructionYear: number
+  constructionYear: number,
+  options: SettlementGrowthTerrainMutationOptions = {}
 ): boolean => {
   if (!canPlaceHouseFootprint(state, candidate.bounds)) {
     return false;
   }
   flattenSettlementFootprintForPlot(state, candidate.bounds, {
-    roadPoint: { x: candidate.roadX, y: candidate.roadY }
+    roadPoint: { x: candidate.roadX, y: candidate.roadY },
+    mutateTerrain: options.mutateTerrain === true
   });
   const idx = indexFor(state.grid, candidate.x, candidate.y);
   const tile = state.tiles[idx];
@@ -413,7 +419,8 @@ export const reserveTownExpansionLot = (
   town: Town,
   context: GrowthContext,
   roadAdapter: SettlementRoadAdapter,
-  effectiveYear: number
+  effectiveYear: number,
+  options: SettlementGrowthTerrainMutationOptions = {}
 ): ReservedBuildingLotCandidate | null => {
   let safety = 0;
   while (safety < 12) {
@@ -440,7 +447,8 @@ export const reserveTownExpansionLot = (
     if (selected && selected.terrainFit.viable && canPlaceHouseFootprint(state, selected.bounds)) {
       const anchorIndex = indexFor(state.grid, selected.x, selected.y);
       const flattenResult = flattenSettlementFootprintForPlot(state, selected.bounds, {
-        roadPoint: { x: selected.roadX, y: selected.roadY }
+        roadPoint: { x: selected.roadX, y: selected.roadY },
+        mutateTerrain: options.mutateTerrain === true
       });
       markHouseFootprint(state, selected.bounds, context);
       context.footprints.set(anchorIndex, selected.bounds);
@@ -1804,7 +1812,8 @@ const growTown = (
   context: GrowthContext,
   roadAdapter: SettlementRoadAdapter,
   effectiveYear: number,
-  constructionYear: number
+  constructionYear: number,
+  options: SettlementGrowthTerrainMutationOptions = {}
 ): number => {
   let placed = 0;
   let safety = 0;
@@ -1833,7 +1842,11 @@ const growTown = (
       continue;
     }
     if (usableFrontage.length > 0) {
-      if (placeFrontageHouse(state, town, usableFrontage[0]!, context, effectiveYear, constructionYear)) {
+      if (
+        placeFrontageHouse(state, town, usableFrontage[0]!, context, effectiveYear, constructionYear, {
+          mutateTerrain: options.mutateTerrain === true
+        })
+      ) {
         placed += 1;
         continue;
       }
@@ -1913,7 +1926,9 @@ const applyTownGrowthStep = (state: WorldState, roadAdapter: SettlementRoadAdapt
     const town = state.towns[i]!;
     const desiredDelta = Math.trunc(town.desiredHouseDelta ?? 0);
     if (desiredDelta > 0) {
-      const placed = growTown(state, town, desiredDelta, context, roadAdapter, effectiveYear, constructionYear);
+      const placed = growTown(state, town, desiredDelta, context, roadAdapter, effectiveYear, constructionYear, {
+        mutateTerrain: mode === "mapgen"
+      });
       town.lastSeasonHouseDelta = placed;
     } else if (desiredDelta < 0) {
       const removed = shrinkTown(state, town, Math.abs(desiredDelta), roadAdapter);
@@ -1969,9 +1984,14 @@ const cloneGrowthTerrainEdit = (edit: SettlementGrowthTerrainEdit): SettlementGr
 
 export const applySettlementGrowthTerrainEdits = (
   state: WorldState,
-  edits: readonly SettlementGrowthTerrainEdit[] | undefined
+  edits: readonly SettlementGrowthTerrainEdit[] | undefined,
+  options: SettlementGrowthTerrainMutationOptions = {}
 ): boolean => {
   if (!edits || edits.length <= 0) {
+    return false;
+  }
+  if (options.mutateTerrain !== true) {
+    state.settlementRuntimeTerrainEditAttempts += edits.length;
     return false;
   }
   let changed = false;
@@ -2127,7 +2147,9 @@ export const createPrecomputedSettlementGrowthPlan = (
         const roadSegments: SettlementGrowthRoadSegment[] = [];
         const recordingAdapter = createRecordingRoadAdapter(roadAdapter, roadSegments);
         const context = rebuildGrowthContext(planningState);
-        const reservation = reserveTownExpansionLot(planningState, town, context, recordingAdapter, effectiveYear);
+        const reservation = reserveTownExpansionLot(planningState, town, context, recordingAdapter, effectiveYear, {
+          mutateTerrain: true
+        });
         if (!reservation) {
           continue;
         }
@@ -2142,7 +2164,7 @@ export const createPrecomputedSettlementGrowthPlan = (
           continue;
         }
         updateTownEnvelope(planningState, town);
-        applySettlementGrowthTerrainEdits(state, reservation.terrainEdits);
+        applySettlementGrowthTerrainEdits(state, reservation.terrainEdits, { mutateTerrain: true });
         plan.entries.push({
           townId: town.id,
           anchorIndex: reservation.anchorIndex,

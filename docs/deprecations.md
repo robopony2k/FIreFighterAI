@@ -1,5 +1,19 @@
 # Deprecations
 
+## Runtime Settlement Terrain Elevation Edits
+
+Status: Deprecated as of May 30, 2026.
+
+- Runtime settlement growth no longer applies queued `terrainEdits` or plot-flattening elevation writes.
+- Terrain shape, water masks, and hydrology are treated as static mapgen-authored runtime data; construction visuals adapt through structure grounding and foundations.
+- Existing planned growth entries may still contain `terrainEdits` for compatibility, but runtime consumption treats them as no-op data and counts attempted use for diagnostics.
+
+Migration guidance:
+
+1. Keep terrain-height authoring in map generation, terrain tools, and debug labs.
+2. Do not add runtime simulation code that writes `state.tileElevation` or `tile.elevation` for settlement construction.
+3. Use structure grounding/foundation rendering for uneven runtime building sites instead of terrain flattening.
+
 ## Exposed 40x/80x Strategic Fast-Time Controls
 
 Status: Deprecated as of May 30, 2026.

@@ -60,8 +60,10 @@ import {
   buildTileTexture,
   getRoadAtlasVersion,
   getTerrainRoadVisualSignature,
+  getTerrainHeightScale,
   getTerrainStep,
   prepareTerrainRenderSurface,
+  prepareTerrainRenderVisualSurface,
   refreshTerrainRoadVisuals,
   ROAD_SURFACE_WIDTH,
   ROAD_TEX_SCALE,
@@ -154,6 +156,41 @@ export type ThreeTestPerfSnapshot = {
   terrainSetFastReuseCount: number;
   terrainSetFullRebuildCount: number;
   terrainSetFullRebuildReason: string;
+  terrainSetIntent: string;
+  terrainSetPath: string;
+  terrainSetDominantStep: string;
+  terrainSetMaxDominantStep: string;
+  terrainSetMaxIntent: string;
+  terrainSetMaxPath: string;
+  terrainGeometrySignature: string;
+  terrainGeometrySignatureChanged: boolean;
+  terrainSetPrepareMs: number;
+  terrainSetPrepareLastMs: number;
+  terrainSetStaticPrepareMs: number;
+  terrainSetStaticPrepareLastMs: number;
+  terrainSetStaticPrepareCount: number;
+  terrainSetVisualPrepareMs: number;
+  terrainSetVisualPrepareLastMs: number;
+  terrainSetVisualPrepareCount: number;
+  terrainSetPrepareSkippedCount: number;
+  terrainSetReuseCheckMs: number;
+  terrainSetReuseCheckLastMs: number;
+  terrainSetColorMs: number;
+  terrainSetColorLastMs: number;
+  terrainSetTextureMs: number;
+  terrainSetTextureLastMs: number;
+  terrainSetTextureSwapMs: number;
+  terrainSetTextureSwapLastMs: number;
+  terrainSetRoadSignatureMs: number;
+  terrainSetRoadSignatureLastMs: number;
+  terrainSetStructureMs: number;
+  terrainSetStructureLastMs: number;
+  terrainSetFullDisposeMs: number;
+  terrainSetFullDisposeLastMs: number;
+  terrainSetFullBuildMs: number;
+  terrainSetFullBuildLastMs: number;
+  terrainSetWaterMs: number;
+  terrainSetWaterLastMs: number;
   terrainRoadRefreshMs: number;
   terrainRoadRefreshLastMs: number;
   terrainRoadRefreshCount: number;
@@ -183,6 +220,17 @@ export type ThreeTestPerfSnapshot = {
   waterfallWallTopGapMax: number;
 };
 
+export type ThreeTestTerrainUpdateIntent = {
+  label: string;
+  geometry?: boolean;
+  surfaceColor?: boolean;
+  vegetation?: boolean;
+  roads?: boolean;
+  structure?: boolean;
+  debug?: boolean;
+  fireVisual?: boolean;
+};
+
 export type ThreeTestController = {
   start: () => void;
   stop: () => void;
@@ -191,7 +239,7 @@ export type ThreeTestController = {
   captureFireSnapshot: (world: RenderSim) => void;
   setSimulationAlpha: (alpha: number) => void;
   isCameraInteracting: () => boolean;
-  setTerrain: (sample: TerrainSample) => void;
+  setTerrain: (sample: TerrainSample, intent?: ThreeTestTerrainUpdateIntent) => void;
   setSeasonVisualState: (state: SeasonVisualState) => void;
   setSeason: (index: number) => void;
   setClimateDryness: (value: number) => void;
@@ -5459,6 +5507,41 @@ export const createThreeTest = (
     terrainSetFastReuseCount: 0,
     terrainSetFullRebuildCount: 0,
     terrainSetFullRebuildReason: "none",
+    terrainSetIntent: "initial",
+    terrainSetPath: "none",
+    terrainSetDominantStep: "none",
+    terrainSetMaxDominantStep: "none",
+    terrainSetMaxIntent: "none",
+    terrainSetMaxPath: "none",
+    terrainGeometrySignature: "none",
+    terrainGeometrySignatureChanged: false,
+    terrainSetPrepareMs: 0,
+    terrainSetPrepareLastMs: 0,
+    terrainSetStaticPrepareMs: 0,
+    terrainSetStaticPrepareLastMs: 0,
+    terrainSetStaticPrepareCount: 0,
+    terrainSetVisualPrepareMs: 0,
+    terrainSetVisualPrepareLastMs: 0,
+    terrainSetVisualPrepareCount: 0,
+    terrainSetPrepareSkippedCount: 0,
+    terrainSetReuseCheckMs: 0,
+    terrainSetReuseCheckLastMs: 0,
+    terrainSetColorMs: 0,
+    terrainSetColorLastMs: 0,
+    terrainSetTextureMs: 0,
+    terrainSetTextureLastMs: 0,
+    terrainSetTextureSwapMs: 0,
+    terrainSetTextureSwapLastMs: 0,
+    terrainSetRoadSignatureMs: 0,
+    terrainSetRoadSignatureLastMs: 0,
+    terrainSetStructureMs: 0,
+    terrainSetStructureLastMs: 0,
+    terrainSetFullDisposeMs: 0,
+    terrainSetFullDisposeLastMs: 0,
+    terrainSetFullBuildMs: 0,
+    terrainSetFullBuildLastMs: 0,
+    terrainSetWaterMs: 0,
+    terrainSetWaterLastMs: 0,
     terrainRoadRefreshMs: 0,
     terrainRoadRefreshLastMs: 0,
     terrainRoadRefreshCount: 0,
@@ -5488,6 +5571,82 @@ export const createThreeTest = (
     waterfallWallTopGapMax: Number.NaN
   };
   const smoothPerf = (current: number, next: number): number => (current > 0 ? current * 0.86 + next * 0.14 : next);
+  type TerrainSetTimingKey =
+    | "prepare"
+    | "staticPrepare"
+    | "visualPrepare"
+    | "reuseCheck"
+    | "color"
+    | "texture"
+    | "textureSwap"
+    | "roadSignature"
+    | "structure"
+    | "fullDispose"
+    | "fullBuild"
+    | "water";
+  const terrainSetTimingFields: Record<TerrainSetTimingKey, { avg: keyof ThreeTestPerfSnapshot; last: keyof ThreeTestPerfSnapshot }> = {
+    prepare: { avg: "terrainSetPrepareMs", last: "terrainSetPrepareLastMs" },
+    staticPrepare: { avg: "terrainSetStaticPrepareMs", last: "terrainSetStaticPrepareLastMs" },
+    visualPrepare: { avg: "terrainSetVisualPrepareMs", last: "terrainSetVisualPrepareLastMs" },
+    reuseCheck: { avg: "terrainSetReuseCheckMs", last: "terrainSetReuseCheckLastMs" },
+    color: { avg: "terrainSetColorMs", last: "terrainSetColorLastMs" },
+    texture: { avg: "terrainSetTextureMs", last: "terrainSetTextureLastMs" },
+    textureSwap: { avg: "terrainSetTextureSwapMs", last: "terrainSetTextureSwapLastMs" },
+    roadSignature: { avg: "terrainSetRoadSignatureMs", last: "terrainSetRoadSignatureLastMs" },
+    structure: { avg: "terrainSetStructureMs", last: "terrainSetStructureLastMs" },
+    fullDispose: { avg: "terrainSetFullDisposeMs", last: "terrainSetFullDisposeLastMs" },
+    fullBuild: { avg: "terrainSetFullBuildMs", last: "terrainSetFullBuildLastMs" },
+    water: { avg: "terrainSetWaterMs", last: "terrainSetWaterLastMs" }
+  };
+  const resetTerrainSetLastTimings = (): void => {
+    for (const field of Object.values(terrainSetTimingFields)) {
+      (threePerf[field.last] as number) = 0;
+    }
+    threePerf.terrainRoadRefreshLastMs = 0;
+    threePerf.terrainSetDominantStep = "none";
+  };
+  const recordTerrainSetTiming = (key: TerrainSetTimingKey, ms: number): void => {
+    const field = terrainSetTimingFields[key];
+    (threePerf[field.last] as number) = ms;
+    (threePerf[field.avg] as number) = smoothPerf(threePerf[field.avg] as number, ms);
+  };
+  const getDominantTerrainSetStep = (): string => {
+    let dominant = "none";
+    let dominantMs = 0;
+    for (const [key, field] of Object.entries(terrainSetTimingFields) as Array<
+      [TerrainSetTimingKey, { avg: keyof ThreeTestPerfSnapshot; last: keyof ThreeTestPerfSnapshot }]
+    >) {
+      const ms = threePerf[field.last] as number;
+      if (ms > dominantMs) {
+        dominant = key;
+        dominantMs = ms;
+      }
+    }
+    return dominant;
+  };
+  const normalizeTerrainUpdateIntent = (
+    intent: ThreeTestTerrainUpdateIntent | undefined,
+    fastUpdate: boolean
+  ): Required<ThreeTestTerrainUpdateIntent> => ({
+    label: intent?.label ?? (fastUpdate ? "fast-unspecified" : "full"),
+    geometry: intent?.geometry ?? !fastUpdate,
+    surfaceColor: intent?.surfaceColor ?? true,
+    vegetation: intent?.vegetation ?? false,
+    roads: intent?.roads ?? true,
+    structure: intent?.structure ?? true,
+    debug: intent?.debug ?? false,
+    fireVisual: intent?.fireVisual ?? false
+  });
+  const isOnlyTerrainUpdateIntent = (
+    intent: Required<ThreeTestTerrainUpdateIntent>,
+    key: "roads" | "structure"
+  ): boolean => {
+    const hasTarget = intent[key];
+    if (!hasTarget) {
+      return false;
+    }
+    return !intent.geometry && !intent.surfaceColor && !intent.vegetation && !intent.debug && !intent.fireVisual && (key === "roads" ? !intent.structure : !intent.roads);
+  };
   let lastRafAt = 0;
   let lastPresentedAt = 0;
 
@@ -5772,6 +5931,36 @@ export const createThreeTest = (
         removeUnitCommandVisual(unitId);
       }
     });
+  };
+
+  const ensureTerrainVertexColorsWhite = (geometry: THREE.BufferGeometry): void => {
+    if (geometry.userData?.terrainVertexColorsWhite === true) {
+      return;
+    }
+    const positionAttr = geometry.getAttribute("position");
+    if (!positionAttr) {
+      return;
+    }
+    const colorAttr = geometry.getAttribute("color");
+    const expectedLength = positionAttr.count * 3;
+    if (!colorAttr || colorAttr.count !== positionAttr.count || !("array" in colorAttr)) {
+      const colors = new Float32Array(expectedLength);
+      colors.fill(1);
+      geometry.setAttribute("color", new THREE.Float32BufferAttribute(colors, 3));
+      geometry.userData.terrainVertexColorsWhite = true;
+      return;
+    }
+    const colorArray = colorAttr.array;
+    if (colorArray.length !== expectedLength) {
+      const colors = new Float32Array(expectedLength);
+      colors.fill(1);
+      geometry.setAttribute("color", new THREE.Float32BufferAttribute(colors, 3));
+      geometry.userData.terrainVertexColorsWhite = true;
+      return;
+    }
+    colorArray.fill(1);
+    colorAttr.needsUpdate = true;
+    geometry.userData.terrainVertexColorsWhite = true;
   };
 
   const disposeStructureOverlay = (): void => {
@@ -6969,6 +7158,41 @@ export const createThreeTest = (
       terrainSetFastReuseCount: threePerf.terrainSetFastReuseCount,
       terrainSetFullRebuildCount: threePerf.terrainSetFullRebuildCount,
       terrainSetFullRebuildReason: threePerf.terrainSetFullRebuildReason,
+      terrainSetIntent: threePerf.terrainSetIntent,
+      terrainSetPath: threePerf.terrainSetPath,
+      terrainSetDominantStep: threePerf.terrainSetDominantStep,
+      terrainSetMaxDominantStep: threePerf.terrainSetMaxDominantStep,
+      terrainSetMaxIntent: threePerf.terrainSetMaxIntent,
+      terrainSetMaxPath: threePerf.terrainSetMaxPath,
+      terrainGeometrySignature: threePerf.terrainGeometrySignature,
+      terrainGeometrySignatureChanged: threePerf.terrainGeometrySignatureChanged,
+      terrainSetPrepareMs: threePerf.terrainSetPrepareMs,
+      terrainSetPrepareLastMs: threePerf.terrainSetPrepareLastMs,
+      terrainSetStaticPrepareMs: threePerf.terrainSetStaticPrepareMs,
+      terrainSetStaticPrepareLastMs: threePerf.terrainSetStaticPrepareLastMs,
+      terrainSetStaticPrepareCount: threePerf.terrainSetStaticPrepareCount,
+      terrainSetVisualPrepareMs: threePerf.terrainSetVisualPrepareMs,
+      terrainSetVisualPrepareLastMs: threePerf.terrainSetVisualPrepareLastMs,
+      terrainSetVisualPrepareCount: threePerf.terrainSetVisualPrepareCount,
+      terrainSetPrepareSkippedCount: threePerf.terrainSetPrepareSkippedCount,
+      terrainSetReuseCheckMs: threePerf.terrainSetReuseCheckMs,
+      terrainSetReuseCheckLastMs: threePerf.terrainSetReuseCheckLastMs,
+      terrainSetColorMs: threePerf.terrainSetColorMs,
+      terrainSetColorLastMs: threePerf.terrainSetColorLastMs,
+      terrainSetTextureMs: threePerf.terrainSetTextureMs,
+      terrainSetTextureLastMs: threePerf.terrainSetTextureLastMs,
+      terrainSetTextureSwapMs: threePerf.terrainSetTextureSwapMs,
+      terrainSetTextureSwapLastMs: threePerf.terrainSetTextureSwapLastMs,
+      terrainSetRoadSignatureMs: threePerf.terrainSetRoadSignatureMs,
+      terrainSetRoadSignatureLastMs: threePerf.terrainSetRoadSignatureLastMs,
+      terrainSetStructureMs: threePerf.terrainSetStructureMs,
+      terrainSetStructureLastMs: threePerf.terrainSetStructureLastMs,
+      terrainSetFullDisposeMs: threePerf.terrainSetFullDisposeMs,
+      terrainSetFullDisposeLastMs: threePerf.terrainSetFullDisposeLastMs,
+      terrainSetFullBuildMs: threePerf.terrainSetFullBuildMs,
+      terrainSetFullBuildLastMs: threePerf.terrainSetFullBuildLastMs,
+      terrainSetWaterMs: threePerf.terrainSetWaterMs,
+      terrainSetWaterLastMs: threePerf.terrainSetWaterLastMs,
       terrainRoadRefreshMs: threePerf.terrainRoadRefreshMs,
       terrainRoadRefreshLastMs: threePerf.terrainRoadRefreshLastMs,
       terrainRoadRefreshCount: threePerf.terrainRoadRefreshCount,
@@ -7153,6 +7377,11 @@ export const createThreeTest = (
   };
 
   const geometryRelevantTileTypesEqual = (previous: TerrainSample, next: TerrainSample): boolean => {
+    const previousHasStaticWater = !!previous.oceanMask || !!previous.riverMask || !!previous.lakeMask;
+    const nextHasStaticWater = !!next.oceanMask || !!next.riverMask || !!next.lakeMask;
+    if (previousHasStaticWater && nextHasStaticWater && previous.dynamicStructures && next.dynamicStructures) {
+      return true;
+    }
     const previousTypes = previous.tileTypes;
     const nextTypes = next.tileTypes;
     if (!previousTypes || !nextTypes) {
@@ -7181,6 +7410,57 @@ export const createThreeTest = (
     return true;
   };
 
+  const staticTerrainSourceMatchesCache = (sample: TerrainSample): boolean => {
+    if (!terrainMesh || !lastSample || !lastTerrainSurface || !lastTerrainSize) {
+      return false;
+    }
+    if (!sample.fastUpdate) {
+      return false;
+    }
+    if (sample.cols !== lastSample.cols || sample.rows !== lastSample.rows) {
+      return false;
+    }
+    if (sample.elevations !== lastSample.elevations) {
+      return false;
+    }
+    if (sample.heightScaleMultiplier !== lastSample.heightScaleMultiplier || sample.fullResolution !== lastSample.fullResolution) {
+      return false;
+    }
+    if (
+      sample.oceanMask !== lastSample.oceanMask ||
+      sample.riverMask !== lastSample.riverMask ||
+      sample.lakeMask !== lastSample.lakeMask ||
+      sample.seaLevel !== lastSample.seaLevel ||
+      sample.coastDistance !== lastSample.coastDistance ||
+      sample.coastClass !== lastSample.coastClass ||
+      sample.erosionWear !== lastSample.erosionWear ||
+      sample.riverSurface !== lastSample.riverSurface ||
+      sample.riverStepStrength !== lastSample.riverStepStrength ||
+      sample.lakeSurface !== lastSample.lakeSurface
+    ) {
+      return false;
+    }
+    if (sample.dynamicStructures !== lastSample.dynamicStructures) {
+      return false;
+    }
+    if (!sample.dynamicStructures && (sample.structureRevision ?? -1) !== (lastSample.structureRevision ?? -1)) {
+      return false;
+    }
+    if (!geometryRelevantTileTypesEqual(lastSample, sample)) {
+      return false;
+    }
+    const step = getTerrainStep(Math.max(sample.cols, sample.rows), sample.fullResolution ?? false);
+    const sampleCols = Math.floor((sample.cols - 1) / step) + 1;
+    const sampleRows = Math.floor((sample.rows - 1) / step) + 1;
+    const heightScale = getTerrainHeightScale(sample.cols, sample.rows, sample.heightScaleMultiplier ?? 1);
+    return (
+      step === lastTerrainSurface.step &&
+      sampleCols === lastTerrainSurface.sampleCols &&
+      sampleRows === lastTerrainSurface.sampleRows &&
+      Math.abs(heightScale - lastTerrainSurface.heightScale) <= 1e-6
+    );
+  };
+
   const canReuseTerrainSurface = (sample: TerrainSample, surface: TerrainRenderSurface): boolean => {
     if (!lastSample || !lastTerrainSurface || !lastTerrainSize) {
       return false;
@@ -7207,7 +7487,7 @@ export const createThreeTest = (
       lastTerrainSurface.step !== surface.step ||
       lastTerrainSurface.sampleCols !== surface.sampleCols ||
       lastTerrainSurface.sampleRows !== surface.sampleRows ||
-      !typedArrayEqual(lastTerrainSurface.sampleHeights, surface.sampleHeights) ||
+      lastTerrainSurface.geometrySignature !== surface.geometrySignature ||
       !typedArrayEqual(lastTerrainSurface.oceanMask, surface.oceanMask, 0) ||
       !typedArrayEqual(lastTerrainSurface.riverMask, surface.riverMask, 0) ||
       !typedArrayEqual(lastTerrainSurface.waterRatios.water, surface.waterRatios.water) ||
@@ -7267,8 +7547,8 @@ export const createThreeTest = (
     ) {
       return "surface-layout";
     }
-    if (!typedArrayEqual(lastTerrainSurface.sampleHeights, surface.sampleHeights)) {
-      return "height-geometry";
+    if (lastTerrainSurface.geometrySignature !== surface.geometrySignature) {
+      return "geometry-signature";
     }
     if (
       !typedArrayEqual(lastTerrainSurface.oceanMask, surface.oceanMask, 0) ||
@@ -7296,82 +7576,112 @@ export const createThreeTest = (
     return Math.abs(previousWaterLevel - nextWaterLevel) <= 1e-6 ? "unknown" : "water-level";
   };
 
-  const updateTerrainSurface = (sample: TerrainSample, surface: TerrainRenderSurface): boolean => {
-    if (!terrainMesh || !sample.fastUpdate || !canReuseTerrainSurface(sample, surface)) {
+  const updateTerrainSurface = (
+    sample: TerrainSample,
+    surface: TerrainRenderSurface,
+    intent: Required<ThreeTestTerrainUpdateIntent>
+  ): boolean => {
+    const reuseCheckStartedAt = performance.now();
+    const canReuse = Boolean(terrainMesh && sample.fastUpdate && canReuseTerrainSurface(sample, surface));
+    recordTerrainSetTiming("reuseCheck", performance.now() - reuseCheckStartedAt);
+    if (!terrainMesh || !sample.fastUpdate || !canReuse) {
       return false;
     }
+    const roadOnly = isOnlyTerrainUpdateIntent(intent, "roads");
+    const structureOnly = isOnlyTerrainUpdateIntent(intent, "structure");
+    const shouldUpdateBaseSurface = !roadOnly && !structureOnly;
+    const shouldCheckRoadVisuals = !structureOnly && (intent.roads || intent.geometry || intent.debug || intent.label === "fast-unspecified");
+    threePerf.terrainSetPath = roadOnly ? "road-only" : structureOnly ? "structure-only" : "fast";
     const terrainSurfaceShadingMode = sample.debugRenderOptions?.terrainSurfaceShadingMode ?? "refined";
     const useLegacyFacetedTerrain = terrainSurfaceShadingMode === "legacyFaceted";
+    const useTextureColorFastPath = !useLegacyFacetedTerrain && sample.fastUpdate === true;
     const palette = buildPalette();
     const grassId = TILE_TYPE_IDS.grass;
     const forestId = TILE_TYPE_IDS.forest;
     const waterId = TILE_TYPE_IDS.water;
     const roadId = TILE_TYPE_IDS.road;
-    if (terrainMesh.geometry instanceof THREE.BufferGeometry) {
-      if (useLegacyFacetedTerrain) {
-        terrainMesh.geometry.deleteAttribute("color");
+    if (shouldUpdateBaseSurface && terrainMesh.geometry instanceof THREE.BufferGeometry) {
+      const colorStartedAt = performance.now();
+      try {
+        if (useLegacyFacetedTerrain) {
+          terrainMesh.geometry.deleteAttribute("color");
+        } else if (useTextureColorFastPath) {
+          ensureTerrainVertexColorsWhite(terrainMesh.geometry);
+        } else {
+          applyTerrainSurfaceColors(terrainMesh.geometry, sample, surface);
+        }
+      } finally {
+        recordTerrainSetTiming("color", performance.now() - colorStartedAt);
+      }
+    }
+    if (shouldUpdateBaseSurface) {
+      const textureStartedAt = performance.now();
+      const tileTexture = buildTileTexture(
+        sample,
+        surface.sampleCols,
+        surface.sampleRows,
+        surface.step,
+        palette,
+        grassId,
+        TILE_TYPE_IDS.scrub,
+        TILE_TYPE_IDS.floodplain,
+        TILE_TYPE_IDS.beach,
+        forestId,
+        waterId,
+        roadId,
+        surface.heightScale,
+        surface.sampleHeights,
+        surface.sampleTypes,
+        surface.waterRatios.water,
+        surface.waterRatios.ocean,
+        surface.waterRatios.river,
+        surface.sampledErosionWear ?? null,
+        surface.sampledRiverCoverage ?? null,
+        surface.sampledRiverStepStrength,
+        sample.debugTypeColors ?? false,
+        useLegacyFacetedTerrain || useTextureColorFastPath ? "legacy" : "mask"
+      );
+      recordTerrainSetTiming("texture", performance.now() - textureStartedAt);
+      const textureSwapStartedAt = performance.now();
+      const material = terrainMesh.material;
+      let previousMap: THREE.Texture | null = null;
+      const applyMap = (mat: THREE.Material) => {
+        const textured = mat as THREE.Material & { map?: THREE.Texture | null };
+        if (!previousMap && textured.map) {
+          previousMap = textured.map;
+        }
+        textured.map = tileTexture;
+        mat.needsUpdate = true;
+      };
+      if (Array.isArray(material)) {
+        material.forEach((mat) => applyMap(mat));
       } else {
-        applyTerrainSurfaceColors(terrainMesh.geometry, sample, surface);
+        applyMap(material);
       }
-    }
-    const tileTexture = buildTileTexture(
-      sample,
-      surface.sampleCols,
-      surface.sampleRows,
-      surface.step,
-      palette,
-      grassId,
-      TILE_TYPE_IDS.scrub,
-      TILE_TYPE_IDS.floodplain,
-      TILE_TYPE_IDS.beach,
-      forestId,
-      waterId,
-      roadId,
-      surface.heightScale,
-      surface.sampleHeights,
-      surface.sampleTypes,
-      surface.waterRatios.water,
-      surface.waterRatios.ocean,
-      surface.waterRatios.river,
-      surface.sampledErosionWear ?? null,
-      surface.sampledRiverCoverage ?? null,
-      surface.sampledRiverStepStrength,
-      sample.debugTypeColors ?? false,
-      useLegacyFacetedTerrain ? "legacy" : "mask"
-    );
-    const material = terrainMesh.material;
-    let previousMap: THREE.Texture | null = null;
-    const applyMap = (mat: THREE.Material) => {
-      const textured = mat as THREE.Material & { map?: THREE.Texture | null };
-      if (!previousMap && textured.map) {
-        previousMap = textured.map;
+      const mapToDispose = previousMap as THREE.Texture | null;
+      if (mapToDispose) {
+        mapToDispose.dispose();
       }
-      textured.map = tileTexture;
-      mat.needsUpdate = true;
-    };
-    if (Array.isArray(material)) {
-      material.forEach((mat) => applyMap(mat));
-    } else {
-      applyMap(material);
-    }
-    const mapToDispose = previousMap as THREE.Texture | null;
-    if (mapToDispose) {
-      mapToDispose.dispose();
+      recordTerrainSetTiming("textureSwap", performance.now() - textureSwapStartedAt);
     }
 
-    const nextRoadSignature = getTerrainRoadVisualSignature(sample);
-    const previousRoadSignature = terrainMesh.userData?.roadVisualSignature;
-    const roadMesh = terrainRoadOverlayMesh ?? findRoadOverlayMesh(terrainMesh);
-    const roadOverlayVersion = roadMesh?.userData?.roadOverlayVersion ?? -1;
-    if (nextRoadSignature !== previousRoadSignature || getRoadAtlasVersion() !== roadOverlayVersion) {
-      const roadStartedAt = performance.now();
-      terrainRoadOverlayMesh = refreshTerrainRoadVisuals(terrainMesh, sample, surface);
-      const roadRefreshMs = performance.now() - roadStartedAt;
-      threePerf.terrainRoadRefreshLastMs = roadRefreshMs;
-      threePerf.terrainRoadRefreshMs = smoothPerf(threePerf.terrainRoadRefreshMs, roadRefreshMs);
-      threePerf.terrainRoadRefreshCount += 1;
-    } else if (roadMesh) {
-      terrainRoadOverlayMesh = roadMesh;
+    if (shouldCheckRoadVisuals) {
+      const roadSignatureStartedAt = performance.now();
+      const nextRoadSignature = getTerrainRoadVisualSignature(sample);
+      const previousRoadSignature = terrainMesh.userData?.roadVisualSignature;
+      const roadMesh = terrainRoadOverlayMesh ?? findRoadOverlayMesh(terrainMesh);
+      const roadOverlayVersion = roadMesh?.userData?.roadOverlayVersion ?? -1;
+      recordTerrainSetTiming("roadSignature", performance.now() - roadSignatureStartedAt);
+      if (nextRoadSignature !== previousRoadSignature || getRoadAtlasVersion() !== roadOverlayVersion) {
+        const roadStartedAt = performance.now();
+        terrainRoadOverlayMesh = refreshTerrainRoadVisuals(terrainMesh, sample, surface);
+        const roadRefreshMs = performance.now() - roadStartedAt;
+        threePerf.terrainRoadRefreshLastMs = roadRefreshMs;
+        threePerf.terrainRoadRefreshMs = smoothPerf(threePerf.terrainRoadRefreshMs, roadRefreshMs);
+        threePerf.terrainRoadRefreshCount += 1;
+      } else if (roadMesh) {
+        terrainRoadOverlayMesh = roadMesh;
+      }
     }
     lastTerrainSurface = surface;
     lastTerrainSize = surface.size;
@@ -7379,8 +7689,9 @@ export const createThreeTest = (
   };
 
 
-  const setTerrain = (sample: TerrainSample): void => {
+  const setTerrain = (sample: TerrainSample, updateIntent?: ThreeTestTerrainUpdateIntent): void => {
     const setTerrainStartedAt = performance.now();
+    resetTerrainSetLastTimings();
     try {
       let nextSample = sample;
       if (assetRebuildPending && nextSample.fastUpdate) {
@@ -7396,79 +7707,127 @@ export const createThreeTest = (
       if (!nextSample.fastUpdate) {
         assetRebuildPending = false;
       }
-      const nextSurface =
-        nextSample.cols > 1 && nextSample.rows > 1 && nextSample.elevations.length > 0
-          ? prepareTerrainRenderSurface(nextSample)
-          : null;
-      const fullRebuildReason = getTerrainSurfaceReuseBlocker(nextSample, nextSurface);
-      if (nextSurface && updateTerrainSurface(nextSample, nextSurface)) {
+      const intent = normalizeTerrainUpdateIntent(updateIntent, Boolean(nextSample.fastUpdate));
+      threePerf.terrainSetIntent = intent.label;
+      threePerf.terrainSetPath = "pending";
+      const roadOnly = isOnlyTerrainUpdateIntent(intent, "roads");
+      const structureOnly = isOnlyTerrainUpdateIntent(intent, "structure");
+      const shouldPrepareVisualSurface = !roadOnly && !structureOnly;
+      const canUseStaticCache = staticTerrainSourceMatchesCache(nextSample);
+      let nextSurface: TerrainRenderSurface | null = null;
+      let preparedStaticSurface = false;
+      if (nextSample.cols > 1 && nextSample.rows > 1 && nextSample.elevations.length > 0) {
+        if (canUseStaticCache && lastTerrainSurface) {
+          if (shouldPrepareVisualSurface) {
+            const visualPrepareStartedAt = performance.now();
+            nextSurface = prepareTerrainRenderVisualSurface(nextSample, lastTerrainSurface);
+            const visualPrepareMs = performance.now() - visualPrepareStartedAt;
+            recordTerrainSetTiming("prepare", visualPrepareMs);
+            recordTerrainSetTiming("visualPrepare", visualPrepareMs);
+            threePerf.terrainSetVisualPrepareCount += 1;
+          } else {
+            nextSurface = {
+              ...lastTerrainSurface,
+              sample: nextSample
+            };
+            threePerf.terrainSetPrepareSkippedCount += 1;
+          }
+        }
+        if (!nextSurface) {
+          const prepareStartedAt = performance.now();
+          nextSurface = prepareTerrainRenderSurface(nextSample);
+          const staticPrepareMs = performance.now() - prepareStartedAt;
+          recordTerrainSetTiming("prepare", staticPrepareMs);
+          recordTerrainSetTiming("staticPrepare", staticPrepareMs);
+          threePerf.terrainSetStaticPrepareCount += 1;
+          preparedStaticSurface = true;
+        }
+      }
+      threePerf.terrainGeometrySignature = nextSurface?.geometrySignature ?? "none";
+      threePerf.terrainGeometrySignatureChanged =
+        !!nextSurface && !!lastTerrainSurface && lastTerrainSurface.geometrySignature !== nextSurface.geometrySignature;
+      const blockerStartedAt = performance.now();
+      const fullRebuildReason =
+        canUseStaticCache && nextSurface && !preparedStaticSurface ? "none" : getTerrainSurfaceReuseBlocker(nextSample, nextSurface);
+      recordTerrainSetTiming("reuseCheck", performance.now() - blockerStartedAt);
+      if (nextSurface && updateTerrainSurface(nextSample, nextSurface, intent)) {
         threePerf.terrainSetFastReuseCount += 1;
         threePerf.terrainSetFullRebuildReason = "none";
         lastSample = nextSample;
         lastTerrainSurface = nextSurface;
         lastTerrainSize = nextSurface.size;
         applyTerrainCameraConstraints();
+        const structureStartedAt = performance.now();
         rebuildStructureOverlay(nextSample, nextSurface);
+        recordTerrainSetTiming("structure", performance.now() - structureStartedAt);
         requestShadowRefresh();
         return;
       }
       threePerf.terrainSetFullRebuildCount += 1;
       threePerf.terrainSetFullRebuildReason = fullRebuildReason;
+      threePerf.terrainSetPath = "full";
       lastSample = nextSample;
       if (terrainMesh) {
-      const activeTerrainMesh = terrainMesh;
-      scene.remove(activeTerrainMesh);
-      activeTerrainMesh.traverse((child) => {
-        if (!(child instanceof THREE.Mesh)) {
-          return;
-        }
-        if (child === activeTerrainMesh) {
-          return;
-        }
-        const meshChild = child as THREE.Mesh;
-        if (meshChild.geometry && meshChild.geometry !== activeTerrainMesh.geometry) {
-          meshChild.geometry.dispose();
-        }
-        const material = meshChild.material;
-        const disposeMaterial = (mat: THREE.Material) => {
-          const textured = mat as THREE.Material & { map?: THREE.Texture | null };
-          if (textured.map) {
-            textured.map.dispose();
+        const fullDisposeStartedAt = performance.now();
+        const activeTerrainMesh = terrainMesh;
+        scene.remove(activeTerrainMesh);
+        activeTerrainMesh.traverse((child) => {
+          if (!(child instanceof THREE.Mesh)) {
+            return;
           }
-          mat.dispose();
-        };
-        if (Array.isArray(material)) {
-          material.forEach((mat) => disposeMaterial(mat));
-        } else {
-          disposeMaterial(material);
-        }
-      });
-      activeTerrainMesh.geometry.dispose();
-      if (Array.isArray(activeTerrainMesh.material)) {
-        activeTerrainMesh.material.forEach((material) => {
-          const textured = material as THREE.Material & { map?: THREE.Texture | null };
-          if (textured.map) {
-            textured.map.dispose();
+          if (child === activeTerrainMesh) {
+            return;
           }
-          material.dispose();
+          const meshChild = child as THREE.Mesh;
+          if (meshChild.geometry && meshChild.geometry !== activeTerrainMesh.geometry) {
+            meshChild.geometry.dispose();
+          }
+          const material = meshChild.material;
+          const disposeMaterial = (mat: THREE.Material) => {
+            const textured = mat as THREE.Material & { map?: THREE.Texture | null };
+            if (textured.map) {
+              textured.map.dispose();
+            }
+            mat.dispose();
+          };
+          if (Array.isArray(material)) {
+            material.forEach((mat) => disposeMaterial(mat));
+          } else {
+            disposeMaterial(material);
+          }
         });
-      } else {
-        const textured = activeTerrainMesh.material as THREE.Material & { map?: THREE.Texture | null };
-        if (textured.map) {
-          textured.map.dispose();
+        activeTerrainMesh.geometry.dispose();
+        if (Array.isArray(activeTerrainMesh.material)) {
+          activeTerrainMesh.material.forEach((material) => {
+            const textured = material as THREE.Material & { map?: THREE.Texture | null };
+            if (textured.map) {
+              textured.map.dispose();
+            }
+            material.dispose();
+          });
+        } else {
+          const textured = activeTerrainMesh.material as THREE.Material & { map?: THREE.Texture | null };
+          if (textured.map) {
+            textured.map.dispose();
+          }
+          activeTerrainMesh.material.dispose();
         }
-        activeTerrainMesh.material.dispose();
+        terrainMesh = null;
+        terrainRoadOverlayMesh = null;
+        treeBurnController = null;
+        recordTerrainSetTiming("fullDispose", performance.now() - fullDisposeStartedAt);
       }
-      terrainMesh = null;
-      terrainRoadOverlayMesh = null;
-      treeBurnController = null;
-    }
-    waterSystem.clear();
+      const waterClearStartedAt = performance.now();
+      waterSystem.clear();
+      recordTerrainSetTiming("water", performance.now() - waterClearStartedAt);
       lastTerrainWater = null;
       if (nextSample.cols <= 1 || nextSample.rows <= 1 || nextSample.elevations.length === 0) {
+        threePerf.terrainSetPath = "empty";
         lastTerrainSurface = null;
         lastTerrainSize = null;
+        const structureStartedAt = performance.now();
         disposeStructureOverlay();
+        recordTerrainSetTiming("structure", performance.now() - structureStartedAt);
         lastStructureRevision = nextSample.structureRevision ?? -1;
         lastStructureOverlayKey = `${nextSample.cols}x${nextSample.rows}:${nextSample.worldSeed ?? -1}`;
         ground.visible = true;
@@ -7478,53 +7837,67 @@ export const createThreeTest = (
         ground.visible = true;
         return;
       }
+      const fullBuildStartedAt = performance.now();
       const { mesh, size, water, treeBurn } = buildTerrainMesh(
-      nextSurface,
-      treeAssets,
-      houseAssets,
-      firestationAsset,
-      treeSeasonVisualConfig
+        nextSurface,
+        treeAssets,
+        houseAssets,
+        firestationAsset,
+        treeSeasonVisualConfig
       );
-    terrainMesh = mesh;
-    terrainRoadOverlayMesh = findRoadOverlayMesh(terrainMesh);
-    patchTerrainClimateMaterials(terrainMesh.material);
-    treeBurnController = treeBurn ?? null;
-    scene.add(terrainMesh);
-    ground.visible = false;
+      recordTerrainSetTiming("fullBuild", performance.now() - fullBuildStartedAt);
+      terrainMesh = mesh;
+      terrainRoadOverlayMesh = findRoadOverlayMesh(terrainMesh);
+      patchTerrainClimateMaterials(terrainMesh.material);
+      treeBurnController = treeBurn ?? null;
+      scene.add(terrainMesh);
+      ground.visible = false;
 
-    const maxSize = Math.max(size.width, size.depth);
-    const previousTerrainSize = lastTerrainSize;
-    lastTerrainSurface = nextSurface;
-    const sizeChanged =
-      !previousTerrainSize ||
-      Math.abs(previousTerrainSize.width - size.width) > 0.01 ||
-      Math.abs(previousTerrainSize.depth - size.depth) > 0.01;
-    if (!cameraLockedToTerrain || sizeChanged) {
-      updateCameraForSize(maxSize);
-      cameraLockedToTerrain = true;
-    } else {
-      applyTerrainCameraConstraints();
-    }
-    lastTerrainSize = size;
-    if (lastLightingApplied) {
-      applyLightingState(lastLightingApplied);
-    }
+      const maxSize = Math.max(size.width, size.depth);
+      const previousTerrainSize = lastTerrainSize;
+      lastTerrainSurface = nextSurface;
+      const sizeChanged =
+        !previousTerrainSize ||
+        Math.abs(previousTerrainSize.width - size.width) > 0.01 ||
+        Math.abs(previousTerrainSize.depth - size.depth) > 0.01;
+      if (!cameraLockedToTerrain || sizeChanged) {
+        updateCameraForSize(maxSize);
+        cameraLockedToTerrain = true;
+      } else {
+        applyTerrainCameraConstraints();
+      }
+      lastTerrainSize = size;
+      if (lastLightingApplied) {
+        applyLightingState(lastLightingApplied);
+      }
 
-    if (water) {
-      lastTerrainWater = water;
-      waterSystem.rebuild(mesh, water);
-    }
-    if (lastLightingApplied) {
-      applyLightingState(lastLightingApplied);
-      syncWaterEnvironment(lastLightingApplied);
-    }
-    rebuildStructureOverlay(nextSample, nextSurface);
-    requestShadowRefresh();
+      if (water) {
+        const waterStartedAt = performance.now();
+        lastTerrainWater = water;
+        waterSystem.rebuild(mesh, water);
+        recordTerrainSetTiming("water", performance.now() - waterStartedAt);
+      }
+      if (lastLightingApplied) {
+        applyLightingState(lastLightingApplied);
+        syncWaterEnvironment(lastLightingApplied);
+      }
+      const structureStartedAt = performance.now();
+      rebuildStructureOverlay(nextSample, nextSurface);
+      recordTerrainSetTiming("structure", performance.now() - structureStartedAt);
+      requestShadowRefresh();
     } finally {
       const terrainSetMs = performance.now() - setTerrainStartedAt;
+      const terrainSetMaxBeforeDecay = threePerf.terrainSetMaxMs * 0.997;
+      const dominantStep = getDominantTerrainSetStep();
+      threePerf.terrainSetDominantStep = dominantStep;
+      if (terrainSetMs >= terrainSetMaxBeforeDecay) {
+        threePerf.terrainSetMaxDominantStep = dominantStep;
+        threePerf.terrainSetMaxIntent = threePerf.terrainSetIntent;
+        threePerf.terrainSetMaxPath = threePerf.terrainSetPath;
+      }
       threePerf.terrainSetLastMs = terrainSetMs;
       threePerf.terrainSetMs = smoothPerf(threePerf.terrainSetMs, terrainSetMs);
-      threePerf.terrainSetMaxMs = Math.max(terrainSetMs, threePerf.terrainSetMaxMs * 0.997);
+      threePerf.terrainSetMaxMs = Math.max(terrainSetMs, terrainSetMaxBeforeDecay);
       threePerf.terrainSetCount += 1;
       threePerf.fps = 0;
       threePerf.rafGapMs = 0;

@@ -1,3 +1,39 @@
+TSK-0151: Make runtime terrain height static
+
+Type: bug
+
+Why: Spring runtime construction could consume precomputed settlement terrain edits, mutate `state.tileElevation`, and force a full 3D terrain/water rebuild even though terrain shape and hydrology should be static during a live run.
+
+Done when:
+- [x] Runtime town construction treats legacy planned `terrainEdits` as no-op compatibility data and counts attempted use for diagnostics.
+- [x] Mapgen/precomputed settlement planning can still opt into terrain elevation edits before the run starts.
+- [x] Terrain geometry signatures are exposed in 3D perf diagnostics and remain stable across road-only, structure-only, and vegetation-only visual changes.
+- [x] Growth regression coverage asserts runtime expansion does not mutate tile elevations.
+
+Touchpoints: `src/systems/settlements/sim/`, `src/render/threeTestTerrain.ts`, `src/render/threeTest.ts`, `src/app/gameSessionRuntime.ts`, `scripts/growth-regression.mjs`
+
+Constraints: keep runtime terrain/hydrology immutable, preserve old planned growth entry readability, and leave debug/mapgen elevation authoring supported.
+
+Status: done
+
+TSK-0150: Identify spring terrain-set bottleneck
+
+Type: refactor
+
+Why: Spring growth can still produce high `3D terrain set` max values even when terrain geometry is reused, because the renderer did not expose which `setTerrain()` substep was responsible and road-only or structure-only invalidations still paid base terrain color/texture costs.
+
+Done when:
+- [x] `setTerrain()` telemetry reports prepare, reuse check, surface color, tile texture, texture swap, road signature, road refresh, structure overlay, full rebuild, and water substep timings.
+- [x] The perf overlay and console output show current terrain invalidation intent, update path, current hot substep, and max hot substep.
+- [x] App terrain sync passes vegetation, road, structure, geometry, debug, and fire-visual invalidation intent into the 3D renderer.
+- [x] Road-only and structure-only fast updates skip base terrain color/texture rebuild work while preserving road refresh and structure overlay updates.
+
+Touchpoints: `src/render/threeTest.ts`, `src/app/gameSessionRuntime.ts`
+
+Constraints: keep terrain sync classification in `systems/terrain/controllers/`, keep app runtime as the bridge between sync intent and renderer calls, and avoid new production modules.
+
+Status: done
+
 TSK-0149: Cap strategic fast time and keep 3D visual sync current
 
 Type: bug

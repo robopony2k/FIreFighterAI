@@ -510,6 +510,17 @@ export const buildSampleHeightMap = (
 ): Float32Array => {
   const { cols, rows, elevations, tileTypes } = sample;
   const heights = new Float32Array(sampleCols * sampleRows);
+  const hasStaticWaterMask = !!sample.oceanMask || !!sample.riverMask || !!sample.lakeMask;
+  const isWaterGeometryTile = (idx: number): boolean => {
+    if (hasStaticWaterMask) {
+      return (
+        (sample.oceanMask?.[idx] ?? 0) > 0 ||
+        (sample.riverMask?.[idx] ?? 0) > 0 ||
+        (sample.lakeMask?.[idx] ?? 0) > 0
+      );
+    }
+    return tileTypes?.[idx] === waterId;
+  };
   if (step <= 1) {
     let offset = 0;
     for (let row = 0; row < sampleRows; row += 1) {
@@ -547,12 +558,10 @@ export const buildSampleHeightMap = (
             const coastClass = sample.coastClass?.[idx] ?? COAST_CLASS_NONE;
             const seaLevel = sample.seaLevel?.[idx];
             const waterLike =
-              tileTypes?.[idx] === waterId ||
-              (sample.riverMask?.[idx] ?? 0) > 0 ||
-              (sample.oceanMask?.[idx] ?? 0) > 0 ||
+              isWaterGeometryTile(idx) ||
               coastClass === COAST_CLASS_SHELF_WATER ||
               (seaLevel !== undefined && Number.isFinite(seaLevel) && height <= seaLevel + 0.0015);
-            if (tileTypes?.[idx] === waterId) {
+            if (isWaterGeometryTile(idx)) {
               waterSum += height;
               waterCount += 1;
             }
@@ -626,7 +635,7 @@ export const buildSampleHeightMap = (
           const height = elevations[tileIdx] ?? 0;
           sum += height;
           count += 1;
-          if (tileTypes && tileTypes[tileIdx] === waterId) {
+          if (isWaterGeometryTile(tileIdx)) {
             waterCount += 1;
             waterSum += height;
           }
@@ -652,7 +661,7 @@ export const buildSampleHeightMap = (
       const waterRatio = count > 0 ? waterCount / count : 0;
       const waterThreshold = touchesWorldBorder ? EDGE_WATER_SAMPLE_RATIO : INTERIOR_WATER_SAMPLE_RATIO;
       const keepShoreAsLand = coastalLandCount > 0 && coastalLandCount >= shelfCount;
-      if (tileTypes && waterRatio >= waterThreshold && !keepShoreAsLand) {
+      if ((hasStaticWaterMask || tileTypes) && waterRatio >= waterThreshold && !keepShoreAsLand) {
         heights[offset] = waterCount > 0 ? waterSum / waterCount : 0;
         offset += 1;
         continue;
@@ -804,7 +813,7 @@ export const computeWaterLevel = (
   riverMask?: Uint8Array | null
 ): number | null => {
   const tileTypes = sample.tileTypes;
-  if (!tileTypes) {
+  if (!tileTypes && !oceanMask) {
     return null;
   }
   const { elevations } = sample;
@@ -813,7 +822,10 @@ export const computeWaterLevel = (
   const sums = new Float32Array(bins);
   let total = 0;
   for (let i = 0; i < elevations.length; i += 1) {
-    if (tileTypes[i] !== waterId || (oceanMask && !oceanMask[i]) || (riverMask && riverMask[i])) {
+    const isWaterLevelTile = oceanMask
+      ? oceanMask[i] > 0 && !(riverMask && riverMask[i])
+      : tileTypes?.[i] === waterId;
+    if (!isWaterLevelTile) {
       continue;
     }
     const height = clamp(elevations[i] ?? 0, 0, 1);
@@ -848,6 +860,72 @@ export const computeWaterLevel = (
     }
   }
   return count > 0 ? sum / count : null;
+};
+
+const hashNumber = (hash: number, value: number): number => {
+  const quantized = Number.isFinite(value) ? Math.trunc(value * 1000000) : 0;
+  let next = (hash ^ (quantized & 0xff)) * 16777619;
+  next = (next ^ ((quantized >>> 8) & 0xff)) * 16777619;
+  next = (next ^ ((quantized >>> 16) & 0xff)) * 16777619;
+  next = (next ^ ((quantized >>> 24) & 0xff)) * 16777619;
+  return next >>> 0;
+};
+
+const hashNumericArray = (
+  hash: number,
+  values: ArrayLike<number> | null | undefined,
+  stride = 1
+): number => {
+  if (!values) {
+    return hashNumber(hash, -1);
+  }
+  let next = hashNumber(hash, values.length);
+  const step = Math.max(1, Math.trunc(stride));
+  for (let i = 0; i < values.length; i += step) {
+    next = hashNumber(next, values[i] ?? 0);
+  }
+  if (step > 1 && values.length > 0) {
+    next = hashNumber(next, values[values.length - 1] ?? 0);
+  }
+  return next >>> 0;
+};
+
+const buildTerrainGeometrySignature = (surface: {
+  cols: number;
+  rows: number;
+  step: number;
+  sampleCols: number;
+  sampleRows: number;
+  heightScale: number;
+  sampleHeights: Float32Array;
+  oceanMask: Uint8Array | null;
+  riverMask: Uint8Array | null;
+  waterRatios: WaterSampleRatios;
+  sampledRiverSurface?: Float32Array;
+  sampledRiverStepStrength?: Float32Array;
+  sampledRiverCoverage?: Float32Array;
+  sampledLakeSurface?: Float32Array;
+  sampledLakeCoverage?: Float32Array;
+}): string => {
+  let hash = 2166136261;
+  hash = hashNumber(hash, surface.cols);
+  hash = hashNumber(hash, surface.rows);
+  hash = hashNumber(hash, surface.step);
+  hash = hashNumber(hash, surface.sampleCols);
+  hash = hashNumber(hash, surface.sampleRows);
+  hash = hashNumber(hash, surface.heightScale);
+  hash = hashNumericArray(hash, surface.sampleHeights);
+  hash = hashNumericArray(hash, surface.oceanMask);
+  hash = hashNumericArray(hash, surface.riverMask);
+  hash = hashNumericArray(hash, surface.waterRatios.water);
+  hash = hashNumericArray(hash, surface.waterRatios.ocean);
+  hash = hashNumericArray(hash, surface.waterRatios.river);
+  hash = hashNumericArray(hash, surface.sampledRiverSurface);
+  hash = hashNumericArray(hash, surface.sampledRiverStepStrength);
+  hash = hashNumericArray(hash, surface.sampledRiverCoverage);
+  hash = hashNumericArray(hash, surface.sampledLakeSurface);
+  hash = hashNumericArray(hash, surface.sampledLakeCoverage);
+  return hash.toString(16).padStart(8, "0");
 };
 
 export const buildSampleTypeMap = (
@@ -1131,6 +1209,7 @@ export type TerrainRenderSurface = {
   depth: number;
   size: { width: number; depth: number };
   heightScale: number;
+  geometrySignature: string;
   sampleHeights: Float32Array;
   rawSampleHeights?: Float32Array;
   finalSampleHeights?: Float32Array;
@@ -2472,7 +2551,6 @@ export const prepareTerrainRenderSurface = (
   const houseId = TILE_TYPE_IDS.house;
   const roadId = TILE_TYPE_IDS.road;
   const firebreakId = TILE_TYPE_IDS.firebreak;
-  const ashId = TILE_TYPE_IDS.ash;
   const step = getTerrainStep(Math.max(cols, rows), sample.fullResolution ?? false);
   const sampleCols = Math.floor((cols - 1) / step) + 1;
   const sampleRows = Math.floor((rows - 1) / step) + 1;
@@ -2601,12 +2679,6 @@ export const prepareTerrainRenderSurface = (
     for (let i = 0; i < total; i += 1) {
       const typeId = sampleTypes[i] ?? grassId;
       if (typeId === waterId) {
-        continue;
-      }
-      if (typeId === baseId || typeId === houseId || typeId === firebreakId || typeId === ashId) {
-        continue;
-      }
-      if (roadId !== null && typeId === roadId) {
         continue;
       }
       if ((waterRatios.river[i] ?? 0) >= RIVER_RATIO_MIN * 0.5) {
@@ -2794,6 +2866,23 @@ export const prepareTerrainRenderSurface = (
     const iy = clamp(Math.floor(tileY), 0, rows - 1);
     return structureTopHeights[iy * cols + ix] ?? Number.NEGATIVE_INFINITY;
   };
+  const geometrySignature = buildTerrainGeometrySignature({
+    cols,
+    rows,
+    step,
+    sampleCols,
+    sampleRows,
+    heightScale,
+    sampleHeights,
+    oceanMask,
+    riverMask,
+    waterRatios,
+    sampledRiverSurface,
+    sampledRiverStepStrength,
+    sampledRiverCoverage,
+    sampledLakeSurface,
+    sampledLakeCoverage
+  });
   const surface: TerrainRenderSurface = {
     sample,
     cols,
@@ -2805,6 +2894,7 @@ export const prepareTerrainRenderSurface = (
     depth,
     size: { width, depth },
     heightScale,
+    geometrySignature,
     sampleHeights,
     rawSampleHeights,
     finalSampleHeights,
@@ -2857,6 +2947,75 @@ export const prepareTerrainRenderSurface = (
     }
   }
   return surface;
+};
+
+export const prepareTerrainRenderVisualSurface = (
+  sample: TerrainSample,
+  staticSurface: TerrainRenderSurface
+): TerrainRenderSurface | null => {
+  const { cols, rows } = sample;
+  if (
+    cols !== staticSurface.cols ||
+    rows !== staticSurface.rows ||
+    sample.elevations.length !== staticSurface.sample.elevations.length
+  ) {
+    return null;
+  }
+  const step = getTerrainStep(Math.max(cols, rows), sample.fullResolution ?? false);
+  const sampleCols = Math.floor((cols - 1) / step) + 1;
+  const sampleRows = Math.floor((rows - 1) / step) + 1;
+  const heightScale = getTerrainHeightScale(cols, rows, sample.heightScaleMultiplier ?? 1);
+  if (
+    step !== staticSurface.step ||
+    sampleCols !== staticSurface.sampleCols ||
+    sampleRows !== staticSurface.sampleRows ||
+    Math.abs(heightScale - staticSurface.heightScale) > 1e-6
+  ) {
+    return null;
+  }
+  const grassId = TILE_TYPE_IDS.grass;
+  const beachId = TILE_TYPE_IDS.beach;
+  const rockyId = TILE_TYPE_IDS.rocky;
+  const waterId = TILE_TYPE_IDS.water;
+  const baseId = TILE_TYPE_IDS.base;
+  const houseId = TILE_TYPE_IDS.house;
+  const roadId = TILE_TYPE_IDS.road;
+  const firebreakId = TILE_TYPE_IDS.firebreak;
+  const sampleTypes = buildSampleTypeMap(
+    sample,
+    sampleCols,
+    sampleRows,
+    step,
+    grassId,
+    waterId,
+    TILE_ID_TO_TYPE.length,
+    [baseId, houseId, roadId, firebreakId]
+  );
+  const sampleCoastClass = staticSurface.sampleCoastClass;
+  for (let i = 0; i < sampleTypes.length; i += 1) {
+    const typeId = sampleTypes[i] ?? grassId;
+    if (typeId === baseId || typeId === houseId || typeId === firebreakId || (roadId !== null && typeId === roadId)) {
+      continue;
+    }
+    const coastClass = sampleCoastClass?.[i] ?? COAST_CLASS_NONE;
+    if (coastClass === COAST_CLASS_SHELF_WATER) {
+      sampleTypes[i] = waterId;
+    } else if (coastClass === COAST_CLASS_BEACH) {
+      sampleTypes[i] = beachId;
+    } else if (coastClass === COAST_CLASS_CLIFF && typeId === waterId) {
+      sampleTypes[i] = rockyId;
+    }
+  }
+  const sampledErosionWear =
+    sample.erosionWear && sample.erosionWear !== staticSurface.sample.erosionWear
+      ? buildSampleOptionalFloatMap(sample, sample.erosionWear, sampleCols, sampleRows, step, undefined, "mean")
+      : staticSurface.sampledErosionWear;
+  return {
+    ...staticSurface,
+    sample,
+    sampleTypes,
+    sampledErosionWear
+  };
 };
 
 export const buildTerrainMesh = (

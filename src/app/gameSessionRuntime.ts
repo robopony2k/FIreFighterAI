@@ -12,7 +12,7 @@ import { createUiState, resetUiState } from "../core/uiState.js";
 import { createGameEventBus, type GameOverPayload } from "../core/gameEvents.js";
 import { CLIMATE_IGNITION_MAX, CLIMATE_IGNITION_MIN, VIRTUAL_CLIMATE_PARAMS } from "../core/climate.js";
 import { generateMap, type MapGenDebug, type MapGenDebugSnapshot } from "../mapgen/index.js";
-import { createThreeTest, type ThreeTestPerfSnapshot } from "../render/threeTest.js";
+import { createThreeTest, type ThreeTestPerfSnapshot, type ThreeTestTerrainUpdateIntent } from "../render/threeTest.js";
 import { preloadThreeTestWorldAudioAssets } from "../render/threeTestWorldAudio.js";
 import {
   getFirestationAssetCache,
@@ -56,6 +56,7 @@ import {
   decideTerrainVisualSync,
   shouldRebuildThreeTestTreeTypeMap,
   shouldSyncThreeTestTerrain,
+  type TerrainVisualInvalidation,
   type ThreeTestTerrainRevisionState
 } from "../systems/terrain/controllers/terrainVisualSyncController.js";
 import { createUiAudioController } from "../audio/uiAudio.js";
@@ -730,7 +731,7 @@ export const createAppRuntime = (): AppRuntime => {
       `Sim slices: cal ${formatMs(simCalendar?.avg)} town ${formatMs(simTownConstruction?.avg)} growth ${formatMs(simGrowth?.avg)} units ${formatMs(simUnits?.avg)} fire ${formatMs(simFire?.avg)} score ${formatMs(simScoring?.avg)} part ${formatMs(simParticles?.avg)} snap ${formatMs(simFireSnapshot?.avg)}`
     );
     lines.push(
-      `Fire budget: substeps ${formatNum(fireSubsteps?.avg)} deferredDays ${formatNum(fireDeferredDays?.avg)} terrainMut ${formatNum(fireTerrainMutations?.avg)} ranged ${formatNum(fireRangedSamples?.avg)} ignite ${formatNum(fireIgniteCandidates?.avg)} roadSearch ${formatInt(state.settlementRuntimeRoadPathSearches)}`
+      `Fire budget: substeps ${formatNum(fireSubsteps?.avg)} deferredDays ${formatNum(fireDeferredDays?.avg)} terrainMut ${formatNum(fireTerrainMutations?.avg)} ranged ${formatNum(fireRangedSamples?.avg)} ignite ${formatNum(fireIgniteCandidates?.avg)} roadSearch ${formatInt(state.settlementRuntimeRoadPathSearches)} terrainEditNoop ${formatInt(state.settlementRuntimeTerrainEditAttempts)}`
     );
     lines.push(
       `3D sync: climate ${formatMs(climate3d?.avg)}  terrain ${formatMs(terrain3d?.avg)}  deferred ${formatNum(terrainDeferred3d?.avg)}`
@@ -764,10 +765,19 @@ export const createAppRuntime = (): AppRuntime => {
           );
         }
         lines.push(
-          `3D terrain set: avg ${formatMs(threePerf.terrainSetMs)} last ${formatMs(threePerf.terrainSetLastMs)} max ${formatMs(threePerf.terrainSetMaxMs)} n ${formatInt(threePerf.terrainSetCount)} reuse/full ${formatInt(threePerf.terrainSetFastReuseCount)}/${formatInt(threePerf.terrainSetFullRebuildCount)} reason ${threePerf.terrainSetFullRebuildReason}`
+          `3D terrain set: avg ${formatMs(threePerf.terrainSetMs)} last ${formatMs(threePerf.terrainSetLastMs)} max ${formatMs(threePerf.terrainSetMaxMs)} n ${formatInt(threePerf.terrainSetCount)} reuse/full ${formatInt(threePerf.terrainSetFastReuseCount)}/${formatInt(threePerf.terrainSetFullRebuildCount)} intent ${threePerf.terrainSetIntent} path ${threePerf.terrainSetPath}`
         );
         lines.push(
-          `3D terrain road: avg ${formatMs(threePerf.terrainRoadRefreshMs)} last ${formatMs(threePerf.terrainRoadRefreshLastMs)} n ${formatInt(threePerf.terrainRoadRefreshCount)}`
+          `3D terrain hot: now ${threePerf.terrainSetDominantStep} max ${threePerf.terrainSetMaxDominantStep}(${threePerf.terrainSetMaxIntent}/${threePerf.terrainSetMaxPath}) reason ${threePerf.terrainSetFullRebuildReason} geom ${threePerf.terrainGeometrySignature}${threePerf.terrainGeometrySignatureChanged ? "*" : ""}`
+        );
+        lines.push(
+          `3D terrain sub: prep ${formatMs(threePerf.terrainSetPrepareLastMs)}/${formatMs(threePerf.terrainSetPrepareMs)} static ${formatMs(threePerf.terrainSetStaticPrepareLastMs)}/${formatMs(threePerf.terrainSetStaticPrepareMs)} visual ${formatMs(threePerf.terrainSetVisualPrepareLastMs)}/${formatMs(threePerf.terrainSetVisualPrepareMs)} skip ${formatInt(threePerf.terrainSetPrepareSkippedCount)} reuse ${formatMs(threePerf.terrainSetReuseCheckLastMs)}/${formatMs(threePerf.terrainSetReuseCheckMs)}`
+        );
+        lines.push(
+          `3D terrain tex: color ${formatMs(threePerf.terrainSetColorLastMs)}/${formatMs(threePerf.terrainSetColorMs)} tex ${formatMs(threePerf.terrainSetTextureLastMs)}/${formatMs(threePerf.terrainSetTextureMs)} swap ${formatMs(threePerf.terrainSetTextureSwapLastMs)}/${formatMs(threePerf.terrainSetTextureSwapMs)}`
+        );
+        lines.push(
+          `3D terrain aux: roadSig ${formatMs(threePerf.terrainSetRoadSignatureLastMs)}/${formatMs(threePerf.terrainSetRoadSignatureMs)} road ${formatMs(threePerf.terrainRoadRefreshLastMs)}/${formatMs(threePerf.terrainRoadRefreshMs)} n ${formatInt(threePerf.terrainRoadRefreshCount)} struct ${formatMs(threePerf.terrainSetStructureLastMs)}/${formatMs(threePerf.terrainSetStructureMs)} full ${formatMs(threePerf.terrainSetFullDisposeLastMs)}/${formatMs(threePerf.terrainSetFullBuildLastMs)} water ${formatMs(threePerf.terrainSetWaterLastMs)}`
         );
         lines.push(
           `3D terrain sync: sample ${formatMs(terrainSampleBuild3d?.avg)} skip ${formatNum(terrainSyncSkipped3d?.avg)}(${formatInt(threeTestTerrainSyncSkippedCount)}) visualBatch ${formatNum(terrainVisualBatched3d?.avg)}(${formatInt(threeTestTerrainVisualBatchedCount)})`
@@ -861,7 +871,7 @@ export const createAppRuntime = (): AppRuntime => {
             `sync(climate=${climateAvg.toFixed(2)} terrain=${terrainAvg.toFixed(2)} defer=${terrainDeferred.toFixed(2)}) ` +
             `3dFrame=${threeFrame.toFixed(2)}ms scene=${threeScene.toFixed(2)} post=${threePost.toFixed(2)} dof=${threeDof.toFixed(2)} sceneLast=${(threePerf?.sceneRenderLastMs ?? 0).toFixed(2)} ` +
             `gap3d=${(threePerf?.rafGapLastMs ?? 0).toFixed(2)} terrainSetLast=${terrainSetLast.toFixed(2)} terrainSetMax=${terrainSetMax.toFixed(2)} terrainSetN=${Math.round(terrainSetCount)} ` +
-            `terrainSample=${terrainSampleBuild.toFixed(2)} terrainSkip=${terrainSkipped.toFixed(2)}(${Math.round(threeTestTerrainSyncSkippedCount)}) terrainBatch=${terrainVisualBatched.toFixed(2)}(${Math.round(threeTestTerrainVisualBatchedCount)}) terrainReuseFull=${Math.round(threePerf?.terrainSetFastReuseCount ?? 0)}/${Math.round(threePerf?.terrainSetFullRebuildCount ?? 0)} terrainReason=${threePerf?.terrainSetFullRebuildReason ?? "none"} terrainRoad=${(threePerf?.terrainRoadRefreshLastMs ?? 0).toFixed(2)} ` +
+            `terrainSample=${terrainSampleBuild.toFixed(2)} terrainSkip=${terrainSkipped.toFixed(2)}(${Math.round(threeTestTerrainSyncSkippedCount)}) terrainBatch=${terrainVisualBatched.toFixed(2)}(${Math.round(threeTestTerrainVisualBatchedCount)}) terrainReuseFull=${Math.round(threePerf?.terrainSetFastReuseCount ?? 0)}/${Math.round(threePerf?.terrainSetFullRebuildCount ?? 0)} terrainReason=${threePerf?.terrainSetFullRebuildReason ?? "none"} terrainIntent=${threePerf?.terrainSetIntent ?? "none"} terrainPath=${threePerf?.terrainSetPath ?? "none"} terrainHot=${threePerf?.terrainSetDominantStep ?? "none"} terrainMaxHot=${threePerf?.terrainSetMaxDominantStep ?? "none"} terrainGeom=${threePerf?.terrainGeometrySignature ?? "none"}${threePerf?.terrainGeometrySignatureChanged ? "*" : ""} terrainPrep=${(threePerf?.terrainSetPrepareLastMs ?? 0).toFixed(2)} terrainStaticPrep=${(threePerf?.terrainSetStaticPrepareLastMs ?? 0).toFixed(2)} terrainVisualPrep=${(threePerf?.terrainSetVisualPrepareLastMs ?? 0).toFixed(2)} terrainPrepSkip=${Math.round(threePerf?.terrainSetPrepareSkippedCount ?? 0)} terrainReuse=${(threePerf?.terrainSetReuseCheckLastMs ?? 0).toFixed(2)} terrainColor=${(threePerf?.terrainSetColorLastMs ?? 0).toFixed(2)} terrainTex=${(threePerf?.terrainSetTextureLastMs ?? 0).toFixed(2)} terrainSwap=${(threePerf?.terrainSetTextureSwapLastMs ?? 0).toFixed(2)} terrainRoadSig=${(threePerf?.terrainSetRoadSignatureLastMs ?? 0).toFixed(2)} terrainRoad=${(threePerf?.terrainRoadRefreshLastMs ?? 0).toFixed(2)} terrainStruct=${(threePerf?.terrainSetStructureLastMs ?? 0).toFixed(2)} terrainEditNoop=${Math.round(state.settlementRuntimeTerrainEditAttempts)} ` +
             `fx=${threeFx.toFixed(2)} hud=${threeHud.toFixed(2)} ctxLoss=${Math.round(contextLosses)} ctxRestore=${Math.round(contextRestores)} ` +
             `calls=${Math.round(sceneCalls)} tri=${Math.round(sceneTriangles)}`
         );
@@ -991,6 +1001,40 @@ export const createAppRuntime = (): AppRuntime => {
     }
     return false;
   };
+  const buildThreeTestTerrainUpdateIntent = (
+    invalidation: TerrainVisualInvalidation,
+    force: boolean,
+    reason: "terrain" | "debug" | "initial" | "climate"
+  ): ThreeTestTerrainUpdateIntent => {
+    const activeLabels = [
+      invalidation.geometry ? "geometry" : "",
+      invalidation.surfaceColor ? "surfaceColor" : "",
+      invalidation.vegetation ? "vegetation" : "",
+      invalidation.roads ? "roads" : "",
+      invalidation.structure ? "structure" : "",
+      invalidation.debug ? "debug" : "",
+      invalidation.fireVisual ? "fireVisual" : ""
+    ].filter(Boolean);
+    const label = force
+      ? reason === "initial"
+        ? "initial"
+        : "force"
+      : activeLabels.length === 0
+        ? "none"
+        : activeLabels.length === 1
+          ? activeLabels[0]
+          : `mixed:${activeLabels.join("+")}`;
+    return {
+      label,
+      geometry: force || invalidation.geometry,
+      surfaceColor: invalidation.surfaceColor,
+      vegetation: invalidation.vegetation,
+      roads: invalidation.roads,
+      structure: invalidation.structure,
+      debug: invalidation.debug || reason === "debug",
+      fireVisual: invalidation.fireVisual
+    };
+  };
   let lastThreeTestTerrainSync = 0;
   let threeTestTerrainSyncSkippedCount = 0;
   let threeTestTerrainVisualBatchedCount = 0;
@@ -1068,7 +1112,10 @@ export const createAppRuntime = (): AppRuntime => {
       recordPerfSample("3d.terrainVisualBatched", decision.visualBatched ? 1 : 0);
       lastThreeTestTerrainSync = now;
       ensureTileSoA(state);
-      threeTestController.setTerrain(buildThreeTestSample(!force));
+      threeTestController.setTerrain(
+        buildThreeTestSample(!force),
+        buildThreeTestTerrainUpdateIntent(decision.invalidation, force, reason)
+      );
       lastThreeTestGeometryTypeSnapshot = state.tileTypeId.slice();
       lastThreeTestTerrainTypeRevision = nextTypeRevision;
       lastThreeTestVegetationRevision = nextVegetationRevision;

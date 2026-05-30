@@ -13,6 +13,11 @@ export type SettlementTerrainFitOptions = {
   heightScaleMultiplier?: number;
 };
 
+export type SettlementTerrainFlattenOptions = SettlementTerrainFitOptions & {
+  roadPoint?: Point | null;
+  mutateTerrain?: boolean;
+};
+
 export type SettlementTerrainFit = {
   maxAngleDeg: number;
   meanAngleDeg: number;
@@ -221,7 +226,7 @@ const resolvePlotPadTarget = (state: WorldState, bounds: HouseFootprintBounds, r
 export const flattenSettlementFootprintForPlot = (
   state: WorldState,
   bounds: HouseFootprintBounds,
-  options: SettlementTerrainFitOptions & { roadPoint?: Point | null } = {}
+  options: SettlementTerrainFlattenOptions = {}
 ): SettlementFlattenResult => {
   const before = evaluateSettlementFootprintFit(state, bounds, options);
   const targetElevation = resolvePlotPadTarget(state, bounds, options.roadPoint);
@@ -232,7 +237,9 @@ export const flattenSettlementFootprintForPlot = (
     if (!tile || Math.abs(tile.elevation - nextElevation) <= 1e-6) {
       return;
     }
-    setTileElevation(state, idx, nextElevation);
+    if (options.mutateTerrain === true) {
+      setTileElevation(state, idx, nextElevation);
+    }
     elevationEdits.push({ index: idx, elevation: nextElevation });
   };
   for (let y = bounds.minY; y <= bounds.maxY; y += 1) {

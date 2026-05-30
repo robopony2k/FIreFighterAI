@@ -877,7 +877,10 @@ const runPlotFlatteningAndFoundationCase = () => {
   state.tiles[3 * grid.cols + 4] = buildTile("grass", { elevation: 0.248 });
   const bounds = { minX: 3, maxX: 4, minY: 3, maxY: 3, width: 2, depth: 1 };
   const before = evaluateSettlementFootprintFit(state, bounds);
-  const flattened = flattenSettlementFootprintForPlot(state, bounds, { roadPoint: { x: 3, y: 4 } });
+  const flattened = flattenSettlementFootprintForPlot(state, bounds, {
+    roadPoint: { x: 3, y: 4 },
+    mutateTerrain: true
+  });
   assert.ok(before.relief > flattened.after.relief, "accepted plot flattening should reduce footprint relief");
   assert.ok(flattened.after.relief <= 0.0001, "accepted plot pad should be level after flattening");
   assert.ok(flattened.elevationEdits.length > 0, "accepted plot flattening should report concrete elevation edits");
