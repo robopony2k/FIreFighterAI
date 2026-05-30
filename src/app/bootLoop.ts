@@ -1,3 +1,5 @@
+import { STRATEGIC_TIME_SPEED_MAX } from "../core/config.js";
+
 export type BootLoopDeps = {
   isBlocked: () => boolean;
   tick: (deltaSeconds: number) => void;
@@ -54,6 +56,7 @@ export type AppBootLoopDeps = {
   isIncidentMode: () => boolean;
   isThreeTestNoSim: () => boolean;
   isSimulationEffectivelyPaused: () => boolean;
+  shouldHoldSimulationForVisualSync?: () => boolean;
   stepSimulation: (simStep: number) => number;
   onThreeTestFrame: (alpha: number) => void;
   renderFrame: (alpha: number) => void;
@@ -62,24 +65,33 @@ export type AppBootLoopDeps = {
 };
 
 export type RuntimeFrameWorkBudget = {
+  requestedTimeSpeedValue: number;
+  effectiveTimeSpeedValue: number;
   requestedSimulationStep: number;
   appliedSimulationStep: number;
   maxSimulationStepsPerFrame: number;
 };
 
-const resolveRuntimeFrameWorkBudget = (params: {
+export const resolveRuntimeFrameWorkBudget = (params: {
   baseStep: number;
   timeSpeedValue: number;
   maxSimulationStep: number | null;
   incidentMode: boolean;
   threeTestVisible: boolean;
 }): RuntimeFrameWorkBudget => {
-  const requestedSimulationStep = params.baseStep * params.timeSpeedValue;
+  const requestedTimeSpeedValue = Math.max(0, Number.isFinite(params.timeSpeedValue) ? params.timeSpeedValue : 1);
+  const effectiveTimeSpeedValue = params.incidentMode
+    ? requestedTimeSpeedValue
+    : Math.min(requestedTimeSpeedValue, STRATEGIC_TIME_SPEED_MAX);
+  const requestedSimulationStep = params.baseStep * requestedTimeSpeedValue;
+  const effectiveSimulationStep = params.baseStep * effectiveTimeSpeedValue;
   const appliedSimulationStep =
     params.maxSimulationStep !== null && Number.isFinite(params.maxSimulationStep) && params.maxSimulationStep > 0
-      ? Math.min(requestedSimulationStep, params.maxSimulationStep)
-      : requestedSimulationStep;
+      ? Math.min(effectiveSimulationStep, params.maxSimulationStep)
+      : effectiveSimulationStep;
   return {
+    requestedTimeSpeedValue,
+    effectiveTimeSpeedValue,
     requestedSimulationStep,
     appliedSimulationStep,
     maxSimulationStepsPerFrame: params.incidentMode || params.threeTestVisible ? 1 : 8
@@ -152,8 +164,12 @@ export const startAppBootLoop = (deps: AppBootLoopDeps): void => {
     let simFrameMs = 0;
     const skipSimThisFrame = threeTestVisible && deps.isThreeTestNoSim();
     const simPaused = deps.isSimulationEffectivelyPaused();
+    const holdForVisualSync =
+      threeTestVisible && !skipSimThisFrame && !simPaused && Boolean(deps.shouldHoldSimulationForVisualSync?.());
     if (skipSimThisFrame || simPaused) {
       accumulator = 0;
+    } else if (holdForVisualSync) {
+      accumulator = Math.min(accumulator, deps.baseStep);
     } else {
       while (accumulator >= deps.baseStep && simStepsThisFrame < maxStepsPerFrame) {
         simFrameMs += deps.stepSimulation(simStep);
@@ -163,9 +179,12 @@ export const startAppBootLoop = (deps: AppBootLoopDeps): void => {
     }
     deps.recordPerfSample("sim.frame", simFrameMs);
     deps.recordPerfSample("sim.steps", simStepsThisFrame);
+    deps.recordPerfSample("sim.requestedSpeed", frameBudget.requestedTimeSpeedValue);
+    deps.recordPerfSample("sim.effectiveSpeed", frameBudget.effectiveTimeSpeedValue);
     deps.recordPerfSample("sim.requestedStep", frameBudget.requestedSimulationStep);
     deps.recordPerfSample("sim.appliedStep", frameBudget.appliedSimulationStep);
     deps.recordPerfSample("sim.stepBudget", frameBudget.maxSimulationStepsPerFrame);
+    deps.recordPerfSample("sim.visualSyncHold", holdForVisualSync ? 1 : 0);
     if (simStepsThisFrame > 0) {
       deps.recordPerfSample("sim.step", simFrameMs / simStepsThisFrame);
     }

@@ -14,7 +14,7 @@ import { stepGrowth } from "../dist/sim/growth.js";
 import { stepTownConstructionSchedule } from "../dist/systems/settlements/sim/townConstruction.js";
 import {
   classifyTerrainVisualInvalidation,
-  shouldDeferThreeTestTerrainSyncForFastTime,
+  decideTerrainVisualSync,
   shouldSyncThreeTestTerrain
 } from "../dist/app/threeTestTerrainSync.js";
 
@@ -357,47 +357,45 @@ assert.ok(
   }),
   "vegetation-only revision change should trigger 3D terrain sync"
 );
+const fastTimeVegetationDecision = decideTerrainVisualSync({
+  previous: growthPrevRevision,
+  next: {
+    terrainTypeRevision: growthOnly.state.terrainTypeRevision,
+    vegetationRevision: growthOnly.state.vegetationRevision,
+    structureRevision: growthOnly.state.structureRevision,
+    debugTypeColors: false
+  },
+  geometryTerrainChanged: false,
+  activeFireTerrainPressure: false,
+  nowMs: 1000,
+  lastSyncMs: 0,
+  cooldownMs: 0,
+  fireVisualCooldownMs: 0,
+  cameraInteracting: false
+});
 assert.equal(
-  shouldDeferThreeTestTerrainSyncForFastTime({
-    simTimeMode: "strategic",
-    timeSpeedValue: 20,
-    simulationPaused: false,
-    activeFireTerrainPressure: false
-  }),
+  fastTimeVegetationDecision.shouldSync,
   true,
-  "fast strategic time should defer terrain sync when no active fire needs visuals"
+  "fast strategic time should no longer defer terrain sync solely because speed is high"
 );
-assert.equal(
-  shouldDeferThreeTestTerrainSyncForFastTime({
-    simTimeMode: "strategic",
-    timeSpeedValue: 80,
-    simulationPaused: false,
-    activeFireTerrainPressure: true
-  }),
-  false,
-  "active fire terrain pressure should override fast-time terrain sync deferral"
-);
-assert.equal(
-  shouldDeferThreeTestTerrainSyncForFastTime({
-    simTimeMode: "strategic",
-    timeSpeedValue: 80,
-    simulationPaused: false,
-    activeFireTerrainPressure: false,
-    immediateTerrainSyncChange: true
-  }),
-  false,
-  "fast strategic time should sync immediate structure changes instead of waiting for speed to drop"
-);
-assert.equal(
-  shouldDeferThreeTestTerrainSyncForFastTime({
-    simTimeMode: "strategic",
-    timeSpeedValue: 10,
-    simulationPaused: false,
-    activeFireTerrainPressure: false
-  }),
-  false,
-  "low and medium strategic speeds should keep terrain sync immediate"
-);
+const cameraInteractionDecision = decideTerrainVisualSync({
+  previous: growthPrevRevision,
+  next: {
+    terrainTypeRevision: growthOnly.state.terrainTypeRevision,
+    vegetationRevision: growthOnly.state.vegetationRevision,
+    structureRevision: growthOnly.state.structureRevision,
+    debugTypeColors: false
+  },
+  geometryTerrainChanged: false,
+  activeFireTerrainPressure: false,
+  nowMs: 1000,
+  lastSyncMs: 0,
+  cooldownMs: 0,
+  fireVisualCooldownMs: 0,
+  cameraInteracting: true
+});
+assert.equal(cameraInteractionDecision.shouldSync, false, "camera interaction should still defer non-immediate terrain sync");
+assert.equal(cameraInteractionDecision.deferredReason, 1, "camera interaction should keep its deferred reason");
 const ashOnlyInvalidation = classifyTerrainVisualInvalidation({
   previous: { terrainTypeRevision: 4, vegetationRevision: 7, structureRevision: 2, debugTypeColors: false },
   next: { terrainTypeRevision: 5, vegetationRevision: 8, structureRevision: 2, debugTypeColors: false },

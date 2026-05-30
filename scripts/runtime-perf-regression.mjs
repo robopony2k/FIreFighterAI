@@ -12,7 +12,7 @@ import { applyFireActivityMetrics } from "../dist/systems/fire/sim/fireActivityS
 
 const BASE_STEP = 0.25;
 const SIZE = 65;
-const SPEEDS = [1, 20, 80];
+const SPEEDS = [1, 10, 20];
 const FRAMES = 18;
 const MAX_FRAME_MS = 1200;
 const MAX_FIRE_SUBSTEPS = 40;

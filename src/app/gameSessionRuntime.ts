@@ -54,7 +54,6 @@ import { updatePerfCounter } from "./perfDiagnostics.js";
 import { startAppBootLoop } from "./bootLoop.js";
 import {
   decideTerrainVisualSync,
-  shouldDeferThreeTestTerrainSyncForFastTime,
   shouldRebuildThreeTestTreeTypeMap,
   shouldSyncThreeTestTerrain,
   type ThreeTestTerrainRevisionState
@@ -698,6 +697,9 @@ export const createAppRuntime = (): AppRuntime => {
     const simFrame = readRecentPerf("sim.frame", now);
     const simStep = readRecentPerf("sim.step", now);
     const simSteps = readRecentPerf("sim.steps", now);
+    const simRequestedSpeed = readRecentPerf("sim.requestedSpeed", now);
+    const simEffectiveSpeed = readRecentPerf("sim.effectiveSpeed", now);
+    const simVisualSyncHold = readRecentPerf("sim.visualSyncHold", now);
     const simCalendar = readRecentPerf("sim.calendar", now);
     const simTownConstruction = readRecentPerf("sim.townConstruction", now);
     const simGrowth = readRecentPerf("sim.growth", now);
@@ -722,7 +724,7 @@ export const createAppRuntime = (): AppRuntime => {
       `Flags: seasonal=${isThreeTestSeasonalEnabled() ? "1" : "0"} nosim=${isThreeTestNoSimEnabled() ? "1" : "0"} noterrain=${isThreeTestTerrainSyncDisabled() ? "1" : "0"} trees=${isThreeTestTreeRenderingEnabled() ? "1" : "0"} detailStruct=${isThreeTestDetailedStructuresEnabled() ? "1" : "0"} dpr=${getThreeTestDprCap().toFixed(2)} fps=${getFrameCapFps() > 0 ? getFrameCapFps().toFixed(0) : "off"}`,
       `Main:  ${formatMs(mainFrame?.avg)} avg  ${formatMs(mainFrame?.last)} last  ${formatMs(mainFrame?.max)} max`,
       `Main gap: ${formatMs(mainRafGap?.avg)} avg  ${formatMs(mainRafGap?.last)} last  hitch ${formatMs(mainHitch?.last)}`,
-      `Sim:   ${formatMs(simFrame?.avg)} frame  ${formatMs(simStep?.avg)} step  steps/frame ${formatNum(simSteps?.avg)}`
+      `Sim:   ${formatMs(simFrame?.avg)} frame  ${formatMs(simStep?.avg)} step  steps/frame ${formatNum(simSteps?.avg)} speed ${formatNum(simEffectiveSpeed?.avg)}/${formatNum(simRequestedSpeed?.avg)} hold ${formatNum(simVisualSyncHold?.avg)}`
     ];
     lines.push(
       `Sim slices: cal ${formatMs(simCalendar?.avg)} town ${formatMs(simTownConstruction?.avg)} growth ${formatMs(simGrowth?.avg)} units ${formatMs(simUnits?.avg)} fire ${formatMs(simFire?.avg)} score ${formatMs(simScoring?.avg)} part ${formatMs(simParticles?.avg)} snap ${formatMs(simFireSnapshot?.avg)}`
@@ -823,6 +825,9 @@ export const createAppRuntime = (): AppRuntime => {
       if (threePerf) {
         const mainAvg = readRecentPerf("main.frame", now)?.avg ?? 0;
         const simAvg = readRecentPerf("sim.frame", now)?.avg ?? 0;
+        const requestedSpeed = readRecentPerf("sim.requestedSpeed", now)?.avg ?? 0;
+        const effectiveSpeed = readRecentPerf("sim.effectiveSpeed", now)?.avg ?? 0;
+        const visualSyncHold = readRecentPerf("sim.visualSyncHold", now)?.avg ?? 0;
         const climateAvg = readRecentPerf("3d.climateSync", now)?.avg ?? 0;
         const terrainAvg = readRecentPerf("3d.terrainSync", now)?.avg ?? 0;
         const terrainDeferred = readRecentPerf("3d.terrainDeferred", now)?.avg ?? 0;
@@ -846,6 +851,7 @@ export const createAppRuntime = (): AppRuntime => {
         const terrainSetCount = threePerf?.terrainSetCount ?? 0;
         console.log(
           `[perf] mode=3d main=${mainAvg.toFixed(2)}ms sim=${simAvg.toFixed(2)}ms ` +
+            `speed=${effectiveSpeed.toFixed(2)}/${requestedSpeed.toFixed(2)} hold=${visualSyncHold.toFixed(2)} ` +
             `seasonal=${isThreeTestSeasonalEnabled() ? 1 : 0} ` +
             `nosim=${isThreeTestNoSimEnabled() ? 1 : 0} ` +
             `noterrain=${isThreeTestTerrainSyncDisabled() ? 1 : 0} ` +
@@ -991,6 +997,8 @@ export const createAppRuntime = (): AppRuntime => {
   const hasActiveFireTerrainPressure = (): boolean =>
     state.phase === "fire" || state.lastActiveFires > 0 || state.fireBoundsActive;
   const hasActiveFireVisualPressure = (): boolean => state.lastActiveFires > 0 || state.fireBoundsActive;
+  const shouldHoldThreeTestSimulationForVisualSync = (): boolean =>
+    activeThreeOverlayMode === "run" && !isThreeTestTerrainSyncDisabled() && state.terrainDirty;
   
   const syncThreeTestTerrain = (
     force = false,
@@ -1044,7 +1052,6 @@ export const createAppRuntime = (): AppRuntime => {
         lastSyncMs: lastThreeTestTerrainSync,
         cooldownMs: THREE_TEST_TERRAIN_COOLDOWN_MS,
         fireVisualCooldownMs: THREE_TEST_TERRAIN_FIRE_VISUAL_COOLDOWN_MS,
-        deferFastTime: false,
         cameraInteracting: false,
         activeFireVisualRefresh
       });
@@ -2051,6 +2058,7 @@ export const createAppRuntime = (): AppRuntime => {
       isIncidentMode: () => state.simTimeMode === "incident",
       isThreeTestNoSim: isThreeTestNoSimEnabled,
       isSimulationEffectivelyPaused: () => isSimulationEffectivelyPaused(state),
+      shouldHoldSimulationForVisualSync: shouldHoldThreeTestSimulationForVisualSync,
       stepSimulation: (simStep: number) => {
         const simStartedAt = performance.now();
         stepSim(state, effectsState, rng, simStep);
@@ -2084,18 +2092,9 @@ export const createAppRuntime = (): AppRuntime => {
         const activeFireVisualPressure = hasActiveFireVisualPressure();
         if (controller && (state.terrainDirty || activeFireVisualPressure)) {
           const activeFireTerrainPressure = hasActiveFireTerrainPressure();
-          const deferFastTimeTerrainSync = shouldDeferThreeTestTerrainSyncForFastTime({
-            simTimeMode: state.simTimeMode,
-            timeSpeedValue: getActiveTimeSpeedValue(state),
-            simulationPaused: isSimulationEffectivelyPaused(state),
-            activeFireTerrainPressure: state.lastActiveFires > 0 || state.fireBoundsActive,
-            immediateTerrainSyncChange: state.structureRevision !== lastThreeTestStructureRevision
-          });
           if (isThreeTestTerrainSyncDisabled()) {
             state.terrainDirty = false;
             recordPerfSample("3d.terrainDeferred", 0);
-          } else if (deferFastTimeTerrainSync) {
-            recordPerfSample("3d.terrainDeferred", 2);
           } else if (controller.isCameraInteracting() && !activeFireTerrainPressure) {
             recordPerfSample("3d.terrainDeferred", 1);
           } else {

@@ -30,8 +30,6 @@ export type TerrainVisualSyncDecision = {
   invalidation: TerrainVisualInvalidation;
 };
 
-const FAST_TIME_TERRAIN_SYNC_SPEED_THRESHOLD = 10;
-
 export const shouldRebuildThreeTestTreeTypeMap = (
   cache: ThreeTestTreeTypeMapState,
   next: Pick<ThreeTestTerrainRevisionState, "terrainTypeRevision" | "vegetationRevision">,
@@ -52,23 +50,6 @@ export const shouldSyncThreeTestTerrain = (
   previous.vegetationRevision !== next.vegetationRevision ||
   previous.structureRevision !== next.structureRevision ||
   previous.debugTypeColors !== next.debugTypeColors;
-
-export type ThreeTestFastTimeTerrainSyncState = {
-  simTimeMode: string;
-  timeSpeedValue: number;
-  simulationPaused: boolean;
-  activeFireTerrainPressure: boolean;
-  immediateTerrainSyncChange?: boolean;
-};
-
-export const shouldDeferThreeTestTerrainSyncForFastTime = (
-  state: ThreeTestFastTimeTerrainSyncState
-): boolean =>
-  state.simTimeMode === "strategic" &&
-  !state.simulationPaused &&
-  !state.activeFireTerrainPressure &&
-  !state.immediateTerrainSyncChange &&
-  state.timeSpeedValue > FAST_TIME_TERRAIN_SYNC_SPEED_THRESHOLD;
 
 export const classifyTerrainVisualInvalidation = (params: {
   previous: ThreeTestTerrainRevisionState;
@@ -113,7 +94,6 @@ export const decideTerrainVisualSync = (params: {
   lastSyncMs: number;
   cooldownMs: number;
   fireVisualCooldownMs: number;
-  deferFastTime: boolean;
   cameraInteracting: boolean;
   activeFireVisualRefresh?: boolean;
 }): TerrainVisualSyncDecision => {
@@ -124,9 +104,6 @@ export const decideTerrainVisualSync = (params: {
     return { shouldSync: false, skipped: false, visualBatched: false, deferredReason: 0, invalidation };
   }
   const immediate = Boolean(params.force) || invalidation.debug || invalidation.structure || invalidation.geometry;
-  if (!immediate && params.deferFastTime) {
-    return { shouldSync: false, skipped: true, visualBatched: invalidation.fireVisual, deferredReason: 2, invalidation };
-  }
   if (!immediate && params.cameraInteracting && !params.activeFireTerrainPressure) {
     return { shouldSync: false, skipped: true, visualBatched: false, deferredReason: 1, invalidation };
   }

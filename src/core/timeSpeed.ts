@@ -1,8 +1,8 @@
-import { getTimeSpeedOptions } from "./config.js";
+import { STRATEGIC_TIME_SPEED_MAX, getTimeSpeedOptions } from "./config.js";
 import type { SimTimeMode, TimeSpeedControlMode } from "./types.js";
 
 export const TIME_SPEED_SLIDER_MIN = 0;
-export const TIME_SPEED_SLIDER_MAX = 80;
+export const TIME_SPEED_SLIDER_MAX = STRATEGIC_TIME_SPEED_MAX;
 export const TIME_SPEED_SLIDER_STEP = 0.25;
 export const TIME_SPEED_FAST_PATH_VALUE = TIME_SPEED_SLIDER_MAX;
 export const DEFAULT_TIME_SPEED_SLIDER_VALUE = 1;

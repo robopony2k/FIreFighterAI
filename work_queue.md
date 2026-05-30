@@ -1,3 +1,21 @@
+TSK-0149: Cap strategic fast time and keep 3D visual sync current
+
+Type: bug
+
+Why: Strategic fast-time controls exposed 40x/80x debug speeds that could let simulation advance through seasonal work faster than 3D terrain and structure visuals could stay current, making bottlenecks look like later catch-up pauses.
+
+Done when:
+- [x] Strategic preset buttons, slider sanitization, and Advance to Next Event cap at 20x.
+- [x] Runtime frame budgeting preserves requested speed telemetry but clamps effective strategic simulation speed to 20x before lower simulation caps.
+- [x] Fast time no longer defers terrain sync purely because speed is high, and simulation yields while 3D terrain visual sync is pending.
+- [x] Regression coverage asserts the 20x cap and updates runtime perf coverage to supported high-speed values.
+
+Touchpoints: `src/core/timeSpeed.ts`, `src/core/config.ts`, `src/app/bootLoop.ts`, `src/app/gameSessionRuntime.ts`, `src/systems/terrain/controllers/`, `scripts/time-speed-regression.mjs`, `scripts/runtime-perf-regression.mjs`
+
+Constraints: keep incident-time pacing unchanged, preserve runtime perf telemetry, and keep terrain sync policy owned by the terrain controller boundary.
+
+Status: done
+
 TSK-0148: Spring growth terrain rebuild and settlement road replay fix
 
 Type: bug

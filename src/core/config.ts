@@ -241,7 +241,8 @@ export const CONTOUR_STEP = 0.08;
 export const CONTOUR_BAND = 0.012;
 export const LIGHT_DIR = { x: 0.6, y: -0.8 };
 
-export const TIME_SPEED_OPTIONS = [0.5, 1, 2, 3, 5, 10, 20, 40, 80];
+export const STRATEGIC_TIME_SPEED_MAX = 20;
+export const TIME_SPEED_OPTIONS = [0.5, 1, 2, 3, 5, 10, STRATEGIC_TIME_SPEED_MAX];
 export const INCIDENT_TIME_SPEED_OPTIONS = [0.015625, 0.03125, 0.0625, 0.125, 0.25] as const;
 export const DEFAULT_INCIDENT_TIME_SPEED_INDEX = 1;
 

@@ -1,5 +1,19 @@
 # Deprecations
 
+## Exposed 40x/80x Strategic Fast-Time Controls
+
+Status: Deprecated as of May 30, 2026.
+
+- Strategic fast time no longer exposes 40x or 80x presets, and the experimental slider no longer accepts values above 20x.
+- Runtime frame budgeting still preserves requested-speed telemetry for stale/debug values, but effective strategic simulation speed is capped at 20x before any lower fire or runtime work cap is applied.
+- 3D runtime simulation should yield while terrain or structure visual sync is pending, so future optimization work can distinguish actual simulation cost from render catch-up debt.
+
+Migration guidance:
+
+1. Use 20x as the maximum strategic fast-time target for player-facing controls, debug controls, and `Advance to Next Event`.
+2. Add future high-speed pacing work through the app boot-loop budget and terrain visual-sync controller instead of restoring 40x/80x controls.
+3. Treat any persisted or debug value above 20x as stale input that must sanitize or clamp to an effective 20x.
+
 ## Unbaked Planned Settlement Pads
 
 Status: Deprecated as of May 21, 2026.

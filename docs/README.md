@@ -17,7 +17,7 @@ The active queue in `../work_queue.md` only tracks pending work. Completed queue
 | --- | --- | --- |
 | TSK-0131 | Map generation pipeline | Extracted real mapgen stages outside `src/mapgen/runtime.ts`; `generateMap()` stayed the public entrypoint, parity runs passed on April 11, 2026, and `generateMapLegacy` remains for fallback/reference. |
 | TSK-0132 | Units | Split roster, deployment, selection, command, movement, suppression, hazards, water, and recall behavior into `src/systems/units/` and `src/systems/firebreaks/`, with `src/sim/units.ts` retained as a compatibility facade. |
-| TSK-0135 | Time controls | Added persisted preset-vs-slider time control mode; slider mode spans `0x` to `80x` in `0.25x` steps and preserves pause and advance-to-next-event semantics. |
+| TSK-0135 | Time controls | Added persisted preset-vs-slider time control mode; slider mode now spans `0x` to `20x` in `0.25x` steps and preserves pause and advance-to-next-event semantics. |
 | TSK-0136 | Terrain rendering | Refined 3D terrain shading to use render-only vertex colors and shared-vertex normal smoothing, while keeping legacy faceted comparison available through terrain debug controls. |
 | TSK-0138 | Tactical evacuation | Added route-based town evacuation with locked road routes, representative civilian vehicles, road slot queueing, heat exposure, vehicle destruction, occupant death, and life-loss hooks. |
 | TSK-0139 | Evacuation rendering | Replaced placeholder evacuation vehicle boxes with deterministic civilian car GLB rendering through the shared vehicle-instancing path. |
