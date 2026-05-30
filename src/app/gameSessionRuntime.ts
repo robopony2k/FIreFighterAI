@@ -53,11 +53,12 @@ import type { GameUiSnapshot } from "../ui/phase/types.js";
 import { updatePerfCounter } from "./perfDiagnostics.js";
 import { startAppBootLoop } from "./bootLoop.js";
 import {
+  decideTerrainVisualSync,
   shouldDeferThreeTestTerrainSyncForFastTime,
   shouldRebuildThreeTestTreeTypeMap,
   shouldSyncThreeTestTerrain,
   type ThreeTestTerrainRevisionState
-} from "./threeTestTerrainSync.js";
+} from "../systems/terrain/controllers/terrainVisualSyncController.js";
 import { createUiAudioController } from "../audio/uiAudio.js";
 import { createMusicController } from "../audio/musicController.js";
 import { showTitleScreen as mountTitleScreen, type TitleScreenHandle } from "../ui/titleScreen.js";
@@ -697,6 +698,19 @@ export const createAppRuntime = (): AppRuntime => {
     const simFrame = readRecentPerf("sim.frame", now);
     const simStep = readRecentPerf("sim.step", now);
     const simSteps = readRecentPerf("sim.steps", now);
+    const simCalendar = readRecentPerf("sim.calendar", now);
+    const simTownConstruction = readRecentPerf("sim.townConstruction", now);
+    const simGrowth = readRecentPerf("sim.growth", now);
+    const simUnits = readRecentPerf("sim.units", now);
+    const simFire = readRecentPerf("sim.fire", now);
+    const simScoring = readRecentPerf("sim.scoring", now);
+    const simParticles = readRecentPerf("sim.particles", now);
+    const simFireSnapshot = readRecentPerf("sim.fireSnapshot", now);
+    const fireSubsteps = readRecentPerf("fire.substeps", now);
+    const fireDeferredDays = readRecentPerf("fire.deferredDays", now);
+    const fireTerrainMutations = readRecentPerf("fire.terrainMutations", now);
+    const fireRangedSamples = readRecentPerf("fire.rangedSamples", now);
+    const fireIgniteCandidates = readRecentPerf("fire.igniteCandidates", now);
     const climate3d = readRecentPerf("3d.climateSync", now);
     const terrain3d = readRecentPerf("3d.terrainSync", now);
     const terrainDeferred3d = readRecentPerf("3d.terrainDeferred", now);
@@ -710,6 +724,12 @@ export const createAppRuntime = (): AppRuntime => {
       `Main gap: ${formatMs(mainRafGap?.avg)} avg  ${formatMs(mainRafGap?.last)} last  hitch ${formatMs(mainHitch?.last)}`,
       `Sim:   ${formatMs(simFrame?.avg)} frame  ${formatMs(simStep?.avg)} step  steps/frame ${formatNum(simSteps?.avg)}`
     ];
+    lines.push(
+      `Sim slices: cal ${formatMs(simCalendar?.avg)} town ${formatMs(simTownConstruction?.avg)} growth ${formatMs(simGrowth?.avg)} units ${formatMs(simUnits?.avg)} fire ${formatMs(simFire?.avg)} score ${formatMs(simScoring?.avg)} part ${formatMs(simParticles?.avg)} snap ${formatMs(simFireSnapshot?.avg)}`
+    );
+    lines.push(
+      `Fire budget: substeps ${formatNum(fireSubsteps?.avg)} deferredDays ${formatNum(fireDeferredDays?.avg)} terrainMut ${formatNum(fireTerrainMutations?.avg)} ranged ${formatNum(fireRangedSamples?.avg)} ignite ${formatNum(fireIgniteCandidates?.avg)} roadSearch ${formatInt(state.settlementRuntimeRoadPathSearches)}`
+    );
     lines.push(
       `3D sync: climate ${formatMs(climate3d?.avg)}  terrain ${formatMs(terrain3d?.avg)}  deferred ${formatNum(terrainDeferred3d?.avg)}`
     );
@@ -742,7 +762,10 @@ export const createAppRuntime = (): AppRuntime => {
           );
         }
         lines.push(
-          `3D terrain set: avg ${formatMs(threePerf.terrainSetMs)} last ${formatMs(threePerf.terrainSetLastMs)} max ${formatMs(threePerf.terrainSetMaxMs)} n ${formatInt(threePerf.terrainSetCount)} reuse/full ${formatInt(threePerf.terrainSetFastReuseCount)}/${formatInt(threePerf.terrainSetFullRebuildCount)}`
+          `3D terrain set: avg ${formatMs(threePerf.terrainSetMs)} last ${formatMs(threePerf.terrainSetLastMs)} max ${formatMs(threePerf.terrainSetMaxMs)} n ${formatInt(threePerf.terrainSetCount)} reuse/full ${formatInt(threePerf.terrainSetFastReuseCount)}/${formatInt(threePerf.terrainSetFullRebuildCount)} reason ${threePerf.terrainSetFullRebuildReason}`
+        );
+        lines.push(
+          `3D terrain road: avg ${formatMs(threePerf.terrainRoadRefreshMs)} last ${formatMs(threePerf.terrainRoadRefreshLastMs)} n ${formatInt(threePerf.terrainRoadRefreshCount)}`
         );
         lines.push(
           `3D terrain sync: sample ${formatMs(terrainSampleBuild3d?.avg)} skip ${formatNum(terrainSyncSkipped3d?.avg)}(${formatInt(threeTestTerrainSyncSkippedCount)}) visualBatch ${formatNum(terrainVisualBatched3d?.avg)}(${formatInt(threeTestTerrainVisualBatchedCount)})`
@@ -832,7 +855,7 @@ export const createAppRuntime = (): AppRuntime => {
             `sync(climate=${climateAvg.toFixed(2)} terrain=${terrainAvg.toFixed(2)} defer=${terrainDeferred.toFixed(2)}) ` +
             `3dFrame=${threeFrame.toFixed(2)}ms scene=${threeScene.toFixed(2)} post=${threePost.toFixed(2)} dof=${threeDof.toFixed(2)} sceneLast=${(threePerf?.sceneRenderLastMs ?? 0).toFixed(2)} ` +
             `gap3d=${(threePerf?.rafGapLastMs ?? 0).toFixed(2)} terrainSetLast=${terrainSetLast.toFixed(2)} terrainSetMax=${terrainSetMax.toFixed(2)} terrainSetN=${Math.round(terrainSetCount)} ` +
-            `terrainSample=${terrainSampleBuild.toFixed(2)} terrainSkip=${terrainSkipped.toFixed(2)}(${Math.round(threeTestTerrainSyncSkippedCount)}) terrainBatch=${terrainVisualBatched.toFixed(2)}(${Math.round(threeTestTerrainVisualBatchedCount)}) terrainReuseFull=${Math.round(threePerf?.terrainSetFastReuseCount ?? 0)}/${Math.round(threePerf?.terrainSetFullRebuildCount ?? 0)} ` +
+            `terrainSample=${terrainSampleBuild.toFixed(2)} terrainSkip=${terrainSkipped.toFixed(2)}(${Math.round(threeTestTerrainSyncSkippedCount)}) terrainBatch=${terrainVisualBatched.toFixed(2)}(${Math.round(threeTestTerrainVisualBatchedCount)}) terrainReuseFull=${Math.round(threePerf?.terrainSetFastReuseCount ?? 0)}/${Math.round(threePerf?.terrainSetFullRebuildCount ?? 0)} terrainReason=${threePerf?.terrainSetFullRebuildReason ?? "none"} terrainRoad=${(threePerf?.terrainRoadRefreshLastMs ?? 0).toFixed(2)} ` +
             `fx=${threeFx.toFixed(2)} hud=${threeHud.toFixed(2)} ctxLoss=${Math.round(contextLosses)} ctxRestore=${Math.round(contextRestores)} ` +
             `calls=${Math.round(sceneCalls)} tri=${Math.round(sceneTriangles)}`
         );
@@ -918,14 +941,18 @@ export const createAppRuntime = (): AppRuntime => {
   };
 
   const THREE_TEST_TERRAIN_COOLDOWN_MS = 600;
-  const THREE_TEST_TERRAIN_FIRE_VISUAL_COOLDOWN_MS = 750;
+  const THREE_TEST_TERRAIN_FIRE_VISUAL_COOLDOWN_MS = 2000;
   const THREE_TEST_GEOMETRY_TERRAIN_TYPES = new Set<number>([
-    TILE_TYPE_IDS.road,
     TILE_TYPE_IDS.water,
     TILE_TYPE_IDS.base,
     TILE_TYPE_IDS.house
   ]);
+  const THREE_TEST_ROAD_TERRAIN_TYPES = new Set<number>([
+    TILE_TYPE_IDS.road,
+    TILE_TYPE_IDS.base
+  ]);
   const isGeometryRelevantTerrainType = (typeId: number): boolean => THREE_TEST_GEOMETRY_TERRAIN_TYPES.has(typeId);
+  const isRoadRelevantTerrainType = (typeId: number): boolean => THREE_TEST_ROAD_TERRAIN_TYPES.has(typeId);
   const hasGeometryRelevantTerrainTypeChange = (previous: Uint8Array | null, next: Uint8Array): boolean => {
     if (!previous || previous.length !== next.length) {
       return true;
@@ -942,11 +969,28 @@ export const createAppRuntime = (): AppRuntime => {
     }
     return false;
   };
+  const hasRoadRelevantTerrainTypeChange = (previous: Uint8Array | null, next: Uint8Array): boolean => {
+    if (!previous || previous.length !== next.length) {
+      return true;
+    }
+    for (let i = 0; i < next.length; i += 1) {
+      const prevType = previous[i] ?? -1;
+      const nextType = next[i] ?? -1;
+      if (prevType === nextType) {
+        continue;
+      }
+      if (isRoadRelevantTerrainType(prevType) || isRoadRelevantTerrainType(nextType)) {
+        return true;
+      }
+    }
+    return false;
+  };
   let lastThreeTestTerrainSync = 0;
   let threeTestTerrainSyncSkippedCount = 0;
   let threeTestTerrainVisualBatchedCount = 0;
   const hasActiveFireTerrainPressure = (): boolean =>
     state.phase === "fire" || state.lastActiveFires > 0 || state.fireBoundsActive;
+  const hasActiveFireVisualPressure = (): boolean => state.lastActiveFires > 0 || state.fireBoundsActive;
   
   const syncThreeTestTerrain = (
     force = false,
@@ -976,36 +1020,45 @@ export const createAppRuntime = (): AppRuntime => {
         structureRevision: lastThreeTestStructureRevision,
         debugTypeColors: lastThreeTestDebugTypeColors
       };
-      const debugChanged = lastThreeTestDebugTypeColors !== inputState.debugTypeColors;
       const terrainTypesChanged = nextTypeRevision !== lastThreeTestTerrainTypeRevision;
-      const vegetationChanged = nextVegetationRevision !== lastThreeTestVegetationRevision;
-      const structuresChanged = nextStructureRevision !== lastThreeTestStructureRevision;
-      if (!shouldSyncThreeTestTerrain(prevRevisionState, nextRevisionState, force)) {
+      const activeFireTerrainPressure = hasActiveFireTerrainPressure();
+      const activeFireVisualRefresh = !force && hasActiveFireVisualPressure();
+      const hasRevisionWork = shouldSyncThreeTestTerrain(prevRevisionState, nextRevisionState, force);
+      if (!hasRevisionWork && !activeFireVisualRefresh) {
         state.terrainDirty = false;
         return;
       }
       const now = performance.now();
-      const activeFireTerrainPressure = hasActiveFireTerrainPressure();
       const geometryTerrainChanged =
         terrainTypesChanged && hasGeometryRelevantTerrainTypeChange(lastThreeTestGeometryTypeSnapshot, state.tileTypeId);
-      const visualTerrainChanged = terrainTypesChanged && !geometryTerrainChanged;
-      const vegetationOnlyChanged = vegetationChanged && !terrainTypesChanged;
-      const fireVisualTerrainChanged = activeFireTerrainPressure && (visualTerrainChanged || vegetationOnlyChanged);
-      const immediateTerrainSync = force || debugChanged || structuresChanged || geometryTerrainChanged;
-      const cooldownMs = fireVisualTerrainChanged
-        ? THREE_TEST_TERRAIN_FIRE_VISUAL_COOLDOWN_MS
-        : THREE_TEST_TERRAIN_COOLDOWN_MS;
-      if (!immediateTerrainSync && now - lastThreeTestTerrainSync < cooldownMs) {
+      const roadTerrainChanged =
+        terrainTypesChanged && hasRoadRelevantTerrainTypeChange(lastThreeTestGeometryTypeSnapshot, state.tileTypeId);
+      const decision = decideTerrainVisualSync({
+        previous: prevRevisionState,
+        next: nextRevisionState,
+        force,
+        geometryTerrainChanged,
+        roadTerrainChanged,
+        activeFireTerrainPressure,
+        nowMs: now,
+        lastSyncMs: lastThreeTestTerrainSync,
+        cooldownMs: THREE_TEST_TERRAIN_COOLDOWN_MS,
+        fireVisualCooldownMs: THREE_TEST_TERRAIN_FIRE_VISUAL_COOLDOWN_MS,
+        deferFastTime: false,
+        cameraInteracting: false,
+        activeFireVisualRefresh
+      });
+      if (!decision.shouldSync) {
         threeTestTerrainSyncSkippedCount += 1;
         recordPerfSample("3d.terrainSyncSkipped", 1);
-        if (fireVisualTerrainChanged) {
+        if (decision.visualBatched) {
           threeTestTerrainVisualBatchedCount += 1;
           recordPerfSample("3d.terrainVisualBatched", 1);
         }
         return;
       }
       recordPerfSample("3d.terrainSyncSkipped", 0);
-      recordPerfSample("3d.terrainVisualBatched", fireVisualTerrainChanged ? 1 : 0);
+      recordPerfSample("3d.terrainVisualBatched", decision.visualBatched ? 1 : 0);
       lastThreeTestTerrainSync = now;
       ensureTileSoA(state);
       threeTestController.setTerrain(buildThreeTestSample(!force));
@@ -2001,7 +2054,21 @@ export const createAppRuntime = (): AppRuntime => {
       stepSimulation: (simStep: number) => {
         const simStartedAt = performance.now();
         stepSim(state, effectsState, rng, simStep);
+        recordPerfSample("sim.calendar", state.simPerfCalendarMs);
+        recordPerfSample("sim.townConstruction", state.simPerfTownConstructionMs);
+        recordPerfSample("sim.growth", state.simPerfGrowthMs);
+        recordPerfSample("sim.units", state.simPerfUnitsMs);
+        recordPerfSample("sim.fire", state.simPerfFireMs);
+        recordPerfSample("sim.scoring", state.simPerfScoringMs);
+        recordPerfSample("sim.particles", state.simPerfParticlesMs);
+        recordPerfSample("fire.substeps", state.firePerfSubsteps);
+        recordPerfSample("fire.deferredDays", state.firePerfDeferredDays);
+        recordPerfSample("fire.terrainMutations", state.firePerfTerrainMutations);
+        recordPerfSample("fire.rangedSamples", state.firePerfRangedDiffusionSamples);
+        recordPerfSample("fire.igniteCandidates", state.firePerfIgniteCandidates);
+        const snapshotStartedAt = performance.now();
         threeTestController?.captureFireSnapshot(asRenderSim(state));
+        recordPerfSample("sim.fireSnapshot", performance.now() - snapshotStartedAt);
         return performance.now() - simStartedAt;
       },
       onThreeTestFrame: (alpha: number) => {
@@ -2014,7 +2081,8 @@ export const createAppRuntime = (): AppRuntime => {
           syncThreeTestClimateVisuals();
         }
         syncThreeTestSeasonalRainVisuals();
-        if (controller && state.terrainDirty) {
+        const activeFireVisualPressure = hasActiveFireVisualPressure();
+        if (controller && (state.terrainDirty || activeFireVisualPressure)) {
           const activeFireTerrainPressure = hasActiveFireTerrainPressure();
           const deferFastTimeTerrainSync = shouldDeferThreeTestTerrainSyncForFastTime({
             simTimeMode: state.simTimeMode,

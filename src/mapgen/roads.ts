@@ -142,6 +142,8 @@ export type RoadCarveResult = {
   carved: boolean;
   bounds: RoadTileBounds | null;
   pathLength: number;
+  path: Point[];
+  bridgeTileIndices: number[];
 };
 
 type RoadPathResult = {
@@ -2147,7 +2149,9 @@ export function carveRoadDetailed(
     return {
       carved: false,
       bounds: null,
-      pathLength: 0
+      pathLength: 0,
+      path: [],
+      bridgeTileIndices: []
     };
   }
   const bridgeSet = new Set<number>(result.bridgeTileIndices);
@@ -2155,7 +2159,9 @@ export function carveRoadDetailed(
   return {
     carved,
     bounds: carved ? getPathBounds(result.path) : null,
-    pathLength: carved ? result.path.length : 0
+    pathLength: carved ? result.path.length : 0,
+    path: carved ? result.path.map((point) => ({ ...point })) : [],
+    bridgeTileIndices: carved ? [...result.bridgeTileIndices] : []
   };
 }
 

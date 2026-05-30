@@ -18,6 +18,8 @@ type TerrainWindFieldCacheEntry = {
 
 const fieldCache = new WeakMap<WorldState, TerrainWindFieldCacheEntry>();
 const MIN_WIND_MAGNITUDE = 0.0001;
+const WIND_ANGLE_BUCKET_DEGREES = 5;
+const WIND_STRENGTH_BUCKETS_PER_UNIT = 20;
 
 const finiteOr = (value: number | undefined, fallback: number): number =>
   Number.isFinite(value) ? Number(value) : fallback;
@@ -60,8 +62,8 @@ const buildElevationSignature = (state: WorldState): number => {
 const buildCacheKey = (state: WorldState): string => {
   const wind = state.wind;
   const settings = state.fireSettings;
-  const angleBucket = Math.round(Math.atan2(wind.dy, wind.dx) * 180 / Math.PI);
-  const strengthBucket = Math.round((wind.strength ?? 0) * 100);
+  const angleBucket = Math.round((Math.atan2(wind.dy, wind.dx) * 180 / Math.PI) / WIND_ANGLE_BUCKET_DEGREES);
+  const strengthBucket = Math.round((wind.strength ?? 0) * WIND_STRENGTH_BUCKETS_PER_UNIT);
   return [
     state.grid.cols,
     state.grid.rows,

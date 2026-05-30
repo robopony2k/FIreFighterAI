@@ -201,6 +201,7 @@ export interface WorldState {
   buildingLots: BuildingLot[];
   nextBuildingLotId: number;
   plannedTownGrowth: SettlementGrowthPlan;
+  settlementRuntimeRoadPathSearches: number;
 
   seed: number;
   fireSettings: FireSettings;
@@ -345,6 +346,17 @@ export interface WorldState {
   firePerfHeatBoundsArea: number;
   firePerfSubsteps: number;
   firePerfSimulatedDays: number;
+  firePerfDeferredDays: number;
+  firePerfTerrainMutations: number;
+  firePerfRangedDiffusionSamples: number;
+  firePerfIgniteCandidates: number;
+  simPerfCalendarMs: number;
+  simPerfTownConstructionMs: number;
+  simPerfGrowthMs: number;
+  simPerfUnitsMs: number;
+  simPerfFireMs: number;
+  simPerfScoringMs: number;
+  simPerfParticlesMs: number;
   growthBlockCursor: number;
   growthBlockLastCareerDay: Float32Array;
   growthVisualDayAccumulator: number;
@@ -551,6 +563,7 @@ export function createInitialState(seed: number, grid: Grid): WorldState {
     settlementBuildDayAccumulator: 0,
     buildingLots: [],
     nextBuildingLotId: 1,
+    settlementRuntimeRoadPathSearches: 0,
     plannedTownGrowth: {
       entries: [],
       nextExpansionIndexByTown: [],
@@ -714,6 +727,17 @@ export function createInitialState(seed: number, grid: Grid): WorldState {
     firePerfHeatBoundsArea: 0,
     firePerfSubsteps: 0,
     firePerfSimulatedDays: 0,
+    firePerfDeferredDays: 0,
+    firePerfTerrainMutations: 0,
+    firePerfRangedDiffusionSamples: 0,
+    firePerfIgniteCandidates: 0,
+    simPerfCalendarMs: 0,
+    simPerfTownConstructionMs: 0,
+    simPerfGrowthMs: 0,
+    simPerfUnitsMs: 0,
+    simPerfFireMs: 0,
+    simPerfScoringMs: 0,
+    simPerfParticlesMs: 0,
     growthBlockCursor: 0,
     growthBlockLastCareerDay: new Float32Array(blockCount),
     growthVisualDayAccumulator: 0,

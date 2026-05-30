@@ -2092,6 +2092,165 @@ export const buildRoadOverlayTexture = (
 ): THREE.Texture | null =>
   buildRoadOverlayTextureInternal(sample, roadId, baseId, roadWidth, scale);
 
+const TERRAIN_ROAD_VISUAL_USER_DATA = "terrainRoadVisual";
+
+const markTerrainRoadVisual = (object: THREE.Object3D, kind: string): void => {
+  object.userData[TERRAIN_ROAD_VISUAL_USER_DATA] = kind;
+};
+
+const disposeTerrainRoadVisual = (object: THREE.Object3D, sharedGeometry: THREE.BufferGeometry): void => {
+  const textures = new Set<THREE.Texture>();
+  object.traverse((child) => {
+    if (child instanceof THREE.Mesh) {
+      if (child.geometry && child.geometry !== sharedGeometry) {
+        child.geometry.dispose();
+      }
+      const disposeMaterial = (material: THREE.Material) => {
+        const textured = material as THREE.Material & { map?: THREE.Texture | null };
+        if (textured.map) {
+          textures.add(textured.map);
+        }
+        material.dispose();
+      };
+      if (Array.isArray(child.material)) {
+        child.material.forEach(disposeMaterial);
+      } else {
+        disposeMaterial(child.material);
+      }
+    }
+  });
+  textures.forEach((texture) => texture.dispose());
+};
+
+const clearTerrainRoadVisuals = (mesh: THREE.Mesh): void => {
+  const roadChildren = mesh.children.filter((child) => child.userData?.[TERRAIN_ROAD_VISUAL_USER_DATA]);
+  for (let i = 0; i < roadChildren.length; i += 1) {
+    const child = roadChildren[i]!;
+    mesh.remove(child);
+    disposeTerrainRoadVisual(child, mesh.geometry);
+  }
+};
+
+export const getTerrainRoadVisualSignature = (sample: TerrainSample): string => {
+  const tileTypes = sample.tileTypes;
+  const roadEdges = sample.roadEdges;
+  const roadBridgeMask = sample.roadBridgeMask;
+  const roadWallEdges = sample.roadWallEdges;
+  const roadId = TILE_TYPE_IDS.road;
+  const baseId = TILE_TYPE_IDS.base;
+  const total = Math.max(tileTypes?.length ?? 0, roadEdges?.length ?? 0, roadBridgeMask?.length ?? 0, roadWallEdges?.length ?? 0);
+  let hash = 2166136261 >>> 0;
+  let active = 0;
+  for (let i = 0; i < total; i += 1) {
+    const type = tileTypes?.[i] ?? 0;
+    const edges = roadEdges?.[i] ?? 0;
+    const bridge = roadBridgeMask?.[i] ?? 0;
+    const wall = roadWallEdges?.[i] ?? 0;
+    if (type !== roadId && type !== baseId && edges === 0 && bridge === 0 && wall === 0) {
+      continue;
+    }
+    active += 1;
+    hash ^= (i + 1) >>> 0;
+    hash = Math.imul(hash, 16777619) >>> 0;
+    hash ^= ((type & 0xff) | ((edges & 0xff) << 8) | ((bridge & 0xff) << 16) | ((wall & 0xff) << 24)) >>> 0;
+    hash = Math.imul(hash, 16777619) >>> 0;
+  }
+  return `${total}:${active}:${hash}`;
+};
+
+export const refreshTerrainRoadVisuals = (
+  mesh: THREE.Mesh,
+  sample: TerrainSample,
+  surface: TerrainRenderSurface
+): THREE.Mesh | null => {
+  clearTerrainRoadVisuals(mesh);
+  const roadId = TILE_TYPE_IDS.road;
+  const baseId = TILE_TYPE_IDS.base;
+  const roadOverlay = buildRoadOverlayTexture(sample, roadId, baseId, ROAD_SURFACE_WIDTH, ROAD_TEX_SCALE);
+  let roadOverlayMesh: THREE.Mesh | null = null;
+  if (roadOverlay) {
+    const roadMaterial = new THREE.MeshStandardMaterial({
+      map: roadOverlay,
+      color: new THREE.Color(0xffffff),
+      transparent: true,
+      depthWrite: false,
+      roughness: 0.9,
+      metalness: 0.05,
+      side: THREE.DoubleSide,
+      polygonOffset: true,
+      polygonOffsetFactor: -2,
+      polygonOffsetUnits: -2
+    });
+    roadMaterial.alphaTest = 0.02;
+    roadOverlayMesh = new THREE.Mesh(mesh.geometry, roadMaterial);
+    roadOverlayMesh.castShadow = false;
+    roadOverlayMesh.receiveShadow = true;
+    roadOverlayMesh.renderOrder = 1;
+    roadOverlayMesh.userData.roadOverlay = true;
+    roadOverlayMesh.userData.roadOverlayVersion = getRoadAtlasVersion();
+    markTerrainRoadVisual(roadOverlayMesh, "overlay");
+    mesh.add(roadOverlayMesh);
+  }
+
+  const roadDeckMesh = buildRoadDeckMesh(
+    sample,
+    surface.width,
+    surface.depth,
+    surface.heightScale,
+    roadOverlay,
+    roadId,
+    baseId,
+    surface.heightAtTileCoord
+  );
+  if (roadDeckMesh) {
+    markTerrainRoadVisual(roadDeckMesh, "deck");
+    mesh.add(roadDeckMesh);
+  }
+
+  const bridgeDeckSurface: BridgeDeckSurfaceInput = {
+    sample,
+    cols: surface.cols,
+    rows: surface.rows,
+    width: surface.width,
+    depth: surface.depth,
+    step: surface.step,
+    sampleCols: surface.sampleCols,
+    sampleRows: surface.sampleRows,
+    heightScale: surface.heightScale,
+    heightAtTileCoord: surface.heightAtTileCoord,
+    toWorldX: surface.toWorldX,
+    toWorldZ: surface.toWorldZ,
+    waterRatio: surface.waterRatios.water,
+    waterSurfaceHeights: surface.waterSurfaceHeights
+  };
+  if (!sample.debugRenderOptions?.disableBridges) {
+    const bridgeDeck = buildBridgeDeckMesh(bridgeDeckSurface, roadOverlay, roadId, baseId);
+    mesh.userData.bridgeDebug = bridgeDeck.debug;
+    if (bridgeDeck.group) {
+      markTerrainRoadVisual(bridgeDeck.group, "bridge");
+      mesh.add(bridgeDeck.group);
+    }
+  } else {
+    mesh.userData.bridgeDebug = null;
+  }
+
+  const roadWallMesh = buildRoadRetainingWallMesh(
+    sample,
+    surface.width,
+    surface.depth,
+    surface.heightScale,
+    roadId,
+    baseId,
+    surface.heightAtTileCoord
+  );
+  if (roadWallMesh) {
+    markTerrainRoadVisual(roadWallMesh, "wall");
+    mesh.add(roadWallMesh);
+  }
+  mesh.userData.roadVisualSignature = getTerrainRoadVisualSignature(sample);
+  return roadOverlayMesh;
+};
+
 export const buildTileTexture = (
   sample: TerrainSample,
   sampleCols: number,
@@ -3195,62 +3354,7 @@ export const buildTerrainMesh = (
   }
   const mesh = new THREE.Mesh(geometry, material);
   mesh.receiveShadow = true;
-  const roadOverlay = buildRoadOverlayTexture(sample, roadId, baseId, ROAD_SURFACE_WIDTH, ROAD_TEX_SCALE);
-  if (roadOverlay) {
-    const roadMaterial = new THREE.MeshStandardMaterial({
-      map: roadOverlay,
-      color: new THREE.Color(0xffffff),
-      transparent: true,
-      depthWrite: false,
-      roughness: 0.9,
-      metalness: 0.05,
-      side: THREE.DoubleSide,
-      polygonOffset: true,
-      polygonOffsetFactor: -2,
-      polygonOffsetUnits: -2
-    });
-    roadMaterial.alphaTest = 0.02;
-    const roadMesh = new THREE.Mesh(geometry, roadMaterial);
-    roadMesh.castShadow = false;
-    roadMesh.receiveShadow = true;
-    roadMesh.renderOrder = 1;
-    roadMesh.userData.roadOverlay = true;
-    roadMesh.userData.roadOverlayVersion = getRoadAtlasVersion();
-    mesh.add(roadMesh);
-  }
-  const roadDeckMesh = buildRoadDeckMesh(sample, width, depth, heightScale, roadOverlay, roadId, baseId, heightAtTileCoord);
-  if (roadDeckMesh) {
-    mesh.add(roadDeckMesh);
-  }
-  const bridgeDeckSurface: BridgeDeckSurfaceInput = {
-    sample,
-    cols,
-    rows,
-    width,
-    depth,
-    step,
-    sampleCols,
-    sampleRows,
-    heightScale,
-    heightAtTileCoord,
-    toWorldX,
-    toWorldZ,
-    waterRatio: waterRatios.water,
-    waterSurfaceHeights
-  };
-  if (!debugRenderOptions?.disableBridges) {
-    const bridgeDeck = buildBridgeDeckMesh(bridgeDeckSurface, roadOverlay, roadId, baseId);
-    mesh.userData.bridgeDebug = bridgeDeck.debug;
-    if (bridgeDeck.group) {
-      mesh.add(bridgeDeck.group);
-    }
-  } else {
-    mesh.userData.bridgeDebug = null;
-  }
-  const roadWallMesh = buildRoadRetainingWallMesh(sample, width, depth, heightScale, roadId, baseId, heightAtTileCoord);
-  if (roadWallMesh) {
-    mesh.add(roadWallMesh);
-  }
+  refreshTerrainRoadVisuals(mesh, sample, surface);
   const treeBurnMeshStates: TreeBurnMeshState[] = [];
   if (hasTreeAssets && treeInstances.length > 0) {
     const treeGroup = new THREE.Group();

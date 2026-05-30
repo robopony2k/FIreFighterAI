@@ -59,8 +59,10 @@ import {
   buildTerrainMesh,
   buildTileTexture,
   getRoadAtlasVersion,
+  getTerrainRoadVisualSignature,
   getTerrainStep,
   prepareTerrainRenderSurface,
+  refreshTerrainRoadVisuals,
   ROAD_SURFACE_WIDTH,
   ROAD_TEX_SCALE,
   setRoadOverlayMaxSize,
@@ -151,6 +153,10 @@ export type ThreeTestPerfSnapshot = {
   terrainSetCount: number;
   terrainSetFastReuseCount: number;
   terrainSetFullRebuildCount: number;
+  terrainSetFullRebuildReason: string;
+  terrainRoadRefreshMs: number;
+  terrainRoadRefreshLastMs: number;
+  terrainRoadRefreshCount: number;
   sceneCalls: number;
   sceneTriangles: number;
   sceneLines: number;
@@ -5452,6 +5458,10 @@ export const createThreeTest = (
     terrainSetCount: 0,
     terrainSetFastReuseCount: 0,
     terrainSetFullRebuildCount: 0,
+    terrainSetFullRebuildReason: "none",
+    terrainRoadRefreshMs: 0,
+    terrainRoadRefreshLastMs: 0,
+    terrainRoadRefreshCount: 0,
     sceneCalls: 0,
     sceneTriangles: 0,
     sceneLines: 0,
@@ -6958,6 +6968,10 @@ export const createThreeTest = (
       terrainSetCount: threePerf.terrainSetCount,
       terrainSetFastReuseCount: threePerf.terrainSetFastReuseCount,
       terrainSetFullRebuildCount: threePerf.terrainSetFullRebuildCount,
+      terrainSetFullRebuildReason: threePerf.terrainSetFullRebuildReason,
+      terrainRoadRefreshMs: threePerf.terrainRoadRefreshMs,
+      terrainRoadRefreshLastMs: threePerf.terrainRoadRefreshLastMs,
+      terrainRoadRefreshCount: threePerf.terrainRoadRefreshCount,
       sceneCalls: threePerf.sceneCalls,
       sceneTriangles: threePerf.sceneTriangles,
       sceneLines: threePerf.sceneLines,
@@ -7147,7 +7161,6 @@ export const createThreeTest = (
     if (previousTypes.length !== nextTypes.length) {
       return false;
     }
-    const roadId = TILE_TYPE_IDS.road;
     const baseId = TILE_TYPE_IDS.base;
     const houseId = TILE_TYPE_IDS.house;
     const waterId = TILE_TYPE_IDS.water;
@@ -7156,11 +7169,9 @@ export const createThreeTest = (
       const previousType = previousTypes[i];
       const nextType = nextTypes[i];
       const previousRelevant =
-        previousType === roadId ||
         previousType === waterId ||
         (trackStructureTiles && (previousType === baseId || previousType === houseId));
       const nextRelevant =
-        nextType === roadId ||
         nextType === waterId ||
         (trackStructureTiles && (nextType === baseId || nextType === houseId));
       if ((previousRelevant || nextRelevant) && previousType !== nextType) {
@@ -7216,6 +7227,73 @@ export const createThreeTest = (
       return previousWaterLevel === nextWaterLevel;
     }
     return Math.abs(previousWaterLevel - nextWaterLevel) <= 1e-6;
+  };
+
+  const getTerrainSurfaceReuseBlocker = (sample: TerrainSample, surface: TerrainRenderSurface | null): string => {
+    if (!terrainMesh) {
+      return "no-mesh";
+    }
+    if (!sample.fastUpdate) {
+      return assetRebuildPending ? "asset-rebuild" : "full-sample";
+    }
+    if (!surface) {
+      return "no-surface";
+    }
+    if (!lastSample || !lastTerrainSurface || !lastTerrainSize) {
+      return "no-cache";
+    }
+    if (sample.cols !== lastSample.cols || sample.rows !== lastSample.rows) {
+      return "size";
+    }
+    if (sample.elevations.length !== lastSample.elevations.length) {
+      return "height-length";
+    }
+    if (sample.dynamicStructures !== lastSample.dynamicStructures) {
+      return "structure-mode";
+    }
+    if (!sample.dynamicStructures && (sample.structureRevision ?? -1) !== (lastSample.structureRevision ?? -1)) {
+      return "structure-geometry";
+    }
+    if (!geometryRelevantTileTypesEqual(lastSample, sample)) {
+      return "water-or-structure-type";
+    }
+    if (
+      Math.abs(lastTerrainSurface.size.width - surface.size.width) > 1e-6 ||
+      Math.abs(lastTerrainSurface.size.depth - surface.size.depth) > 1e-6 ||
+      Math.abs(lastTerrainSurface.heightScale - surface.heightScale) > 1e-6 ||
+      lastTerrainSurface.step !== surface.step ||
+      lastTerrainSurface.sampleCols !== surface.sampleCols ||
+      lastTerrainSurface.sampleRows !== surface.sampleRows
+    ) {
+      return "surface-layout";
+    }
+    if (!typedArrayEqual(lastTerrainSurface.sampleHeights, surface.sampleHeights)) {
+      return "height-geometry";
+    }
+    if (
+      !typedArrayEqual(lastTerrainSurface.oceanMask, surface.oceanMask, 0) ||
+      !typedArrayEqual(lastTerrainSurface.riverMask, surface.riverMask, 0) ||
+      !typedArrayEqual(lastTerrainSurface.waterRatios.water, surface.waterRatios.water) ||
+      !typedArrayEqual(lastTerrainSurface.waterRatios.ocean, surface.waterRatios.ocean) ||
+      !typedArrayEqual(lastTerrainSurface.waterRatios.river, surface.waterRatios.river)
+    ) {
+      return "water-geometry";
+    }
+    if (
+      !typedArrayEqual(lastTerrainSurface.sampledRiverSurface, surface.sampledRiverSurface) ||
+      !typedArrayEqual(lastTerrainSurface.sampledRiverStepStrength, surface.sampledRiverStepStrength) ||
+      !typedArrayEqual(lastTerrainSurface.sampledRiverCoverage, surface.sampledRiverCoverage) ||
+      !typedArrayEqual(lastTerrainSurface.sampledLakeSurface, surface.sampledLakeSurface) ||
+      !typedArrayEqual(lastTerrainSurface.sampledLakeCoverage, surface.sampledLakeCoverage)
+    ) {
+      return "water-detail";
+    }
+    const previousWaterLevel = lastTerrainSurface.waterLevel;
+    const nextWaterLevel = surface.waterLevel;
+    if (previousWaterLevel === null || nextWaterLevel === null) {
+      return previousWaterLevel === nextWaterLevel ? "unknown" : "water-level";
+    }
+    return Math.abs(previousWaterLevel - nextWaterLevel) <= 1e-6 ? "unknown" : "water-level";
   };
 
   const updateTerrainSurface = (sample: TerrainSample, surface: TerrainRenderSurface): boolean => {
@@ -7281,23 +7359,19 @@ export const createThreeTest = (
       mapToDispose.dispose();
     }
 
+    const nextRoadSignature = getTerrainRoadVisualSignature(sample);
+    const previousRoadSignature = terrainMesh.userData?.roadVisualSignature;
     const roadMesh = terrainRoadOverlayMesh ?? findRoadOverlayMesh(terrainMesh);
-    if (roadMesh) {
+    const roadOverlayVersion = roadMesh?.userData?.roadOverlayVersion ?? -1;
+    if (nextRoadSignature !== previousRoadSignature || getRoadAtlasVersion() !== roadOverlayVersion) {
+      const roadStartedAt = performance.now();
+      terrainRoadOverlayMesh = refreshTerrainRoadVisuals(terrainMesh, sample, surface);
+      const roadRefreshMs = performance.now() - roadStartedAt;
+      threePerf.terrainRoadRefreshLastMs = roadRefreshMs;
+      threePerf.terrainRoadRefreshMs = smoothPerf(threePerf.terrainRoadRefreshMs, roadRefreshMs);
+      threePerf.terrainRoadRefreshCount += 1;
+    } else if (roadMesh) {
       terrainRoadOverlayMesh = roadMesh;
-      const nextRoadVersion = getRoadAtlasVersion();
-      const roadOverlayVersion = roadMesh.userData?.roadOverlayVersion ?? -1;
-      if (nextRoadVersion !== roadOverlayVersion) {
-        const roadOverlay = buildRoadOverlayTexture(sample, roadId, TILE_TYPE_IDS.base, ROAD_SURFACE_WIDTH, ROAD_TEX_SCALE);
-        if (roadOverlay) {
-          const roadMaterial = roadMesh.material as THREE.Material & { map?: THREE.Texture | null };
-          if (roadMaterial.map) {
-            roadMaterial.map.dispose();
-          }
-          roadMaterial.map = roadOverlay;
-          roadMaterial.needsUpdate = true;
-          roadMesh.userData.roadOverlayVersion = nextRoadVersion;
-        }
-      }
     }
     lastTerrainSurface = surface;
     lastTerrainSize = surface.size;
@@ -7326,8 +7400,10 @@ export const createThreeTest = (
         nextSample.cols > 1 && nextSample.rows > 1 && nextSample.elevations.length > 0
           ? prepareTerrainRenderSurface(nextSample)
           : null;
+      const fullRebuildReason = getTerrainSurfaceReuseBlocker(nextSample, nextSurface);
       if (nextSurface && updateTerrainSurface(nextSample, nextSurface)) {
         threePerf.terrainSetFastReuseCount += 1;
+        threePerf.terrainSetFullRebuildReason = "none";
         lastSample = nextSample;
         lastTerrainSurface = nextSurface;
         lastTerrainSize = nextSurface.size;
@@ -7337,6 +7413,7 @@ export const createThreeTest = (
         return;
       }
       threePerf.terrainSetFullRebuildCount += 1;
+      threePerf.terrainSetFullRebuildReason = fullRebuildReason;
       lastSample = nextSample;
       if (terrainMesh) {
       const activeTerrainMesh = terrainMesh;

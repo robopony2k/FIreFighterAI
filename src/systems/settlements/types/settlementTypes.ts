@@ -46,6 +46,17 @@ export type SettlementRoadOptions = {
 
 export type SettlementRoadAdapter = {
   carveRoad: (state: WorldState, start: Point, end: Point, options?: SettlementRoadOptions) => boolean;
+  carveRoadDetailed?: (
+    state: WorldState,
+    start: Point,
+    end: Point,
+    options?: SettlementRoadOptions
+  ) => {
+    carved: boolean;
+    path: Point[];
+    bridgeTileIndices: number[];
+  };
+  carveRoadPath?: (state: WorldState, path: Point[], bridgeTileIndices?: number[]) => boolean;
   carveRoadSequence?: (
     state: WorldState,
     segments: Array<{ start: Point; end: Point; options?: SettlementRoadOptions }>
@@ -65,6 +76,8 @@ export type SettlementGrowthRoadSegment = {
   start: Point;
   end: Point;
   options?: SettlementRoadOptions;
+  path?: Point[];
+  bridgeTileIndices?: number[];
 };
 
 export type SettlementGrowthTerrainEdit = {

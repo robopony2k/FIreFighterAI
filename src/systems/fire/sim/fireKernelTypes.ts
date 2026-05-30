@@ -1,4 +1,5 @@
 import type { WorldState } from "../../../core/state.js";
+import type { FireStepTelemetry } from "../types/fireRuntimeTypes.js";
 import type { FireWeatherResponse } from "./fireWeather.js";
 
 export type FireKernelStepOptions = {
@@ -54,4 +55,5 @@ export type FireKernelResult = {
   houseDamageEvents: number;
   houseLossEvents: number;
   vegetationBurnoutEvents: number;
+  telemetry: FireStepTelemetry;
 };

@@ -3,6 +3,8 @@ import type { WorldState } from "../core/state.js";
 import {
   backfillRoadEdgesFromAdjacency,
   carveRoad,
+  carveRoadDetailed,
+  carveRoadPath,
   carveRoadSequence,
   clearRoadEdges,
   collectConnectedRoadNeighbors,
@@ -21,6 +23,9 @@ import type { SettlementPlacementResult, SettlementRoadAdapter } from "../system
 
 const createRoadAdapter = (rng: RNG): SettlementRoadAdapter => ({
   carveRoad: (state, start, end, options = {}) => carveRoad(state, rng, start, end, options),
+  carveRoadDetailed: (state, start, end, options = {}) => carveRoadDetailed(state, rng, start, end, options),
+  carveRoadPath: (state, path, bridgeTileIndices = []) =>
+    carveRoadPath(state, rng, path, { allowBridgeIndices: new Set(bridgeTileIndices) }),
   carveRoadSequence: (state, segments) => carveRoadSequence(state, rng, segments),
   collectConnectedRoadNeighbors,
   collectRoadTiles,

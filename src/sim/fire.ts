@@ -100,7 +100,11 @@ export function stepFire(
     climateIgnitionMultiplier,
     allowIgnitionEvents
   };
-  return runFireKernel(state, rng, options, createFireKernelHooks(state, effects)).activeFires;
+  const result = runFireKernel(state, rng, options, createFireKernelHooks(state, effects));
+  state.firePerfTerrainMutations += result.telemetry.terrainMutations;
+  state.firePerfRangedDiffusionSamples += result.telemetry.rangedDiffusionSamples;
+  state.firePerfIgniteCandidates += result.telemetry.igniteCandidates;
+  return result.activeFires;
 }
 
 export { igniteRandomFire };

@@ -80,6 +80,7 @@ import {
   backfillRoadEdgesInBounds,
   backfillRoadEdgesFromAdjacency,
   carveRoadDetailed,
+  carveRoadPath,
   clearRoadEdges,
   collectConnectedRoadNeighbors,
   collectRoadTiles,
@@ -98,6 +99,10 @@ import {
   SEASONAL_RAIN_EXTINGUISH_THRESHOLD,
   sampleSeasonalRainState
 } from "../systems/climate/sim/seasonalRain.js";
+import {
+  hasDeferredFireRuntimeWork,
+  resolveRuntimeWorkBudget
+} from "../systems/fire/controllers/fireRuntimeController.js";
 export { updatePhaseControls };
 
 const FIRE_HEAT_PADDING = 8;
@@ -114,6 +119,18 @@ let allowAnnualReport = getRuntimeSettings().annualReportEnabled;
 let pauseOnFireEvent = getRuntimeSettings().pauseOnFireEvent;
 let pauseOnAnnualReportEvent = getRuntimeSettings().pauseOnAnnualReportEvent;
 let pauseOnRainEvent = getRuntimeSettings().pauseOnRainEvent;
+
+const nowMs = (): number => (typeof performance !== "undefined" ? performance.now() : Date.now());
+
+const resetStepPerfTelemetry = (state: WorldState): void => {
+  state.simPerfCalendarMs = 0;
+  state.simPerfTownConstructionMs = 0;
+  state.simPerfGrowthMs = 0;
+  state.simPerfUnitsMs = 0;
+  state.simPerfFireMs = 0;
+  state.simPerfScoringMs = 0;
+  state.simPerfParticlesMs = 0;
+};
 
 subscribeRuntimeSettings((settings) => {
   allowFireIgnitionEvents = settings.randomFireIgnition;
@@ -309,11 +326,33 @@ const getRuntimeRoadSearchBounds = (state: WorldState, start: { x: number; y: nu
   };
 };
 
+const getRuntimeRoadPathBounds = (path: readonly { x: number; y: number }[]): RoadTileBounds | null => {
+  if (path.length <= 0) {
+    return null;
+  }
+  let minX = Number.POSITIVE_INFINITY;
+  let maxX = Number.NEGATIVE_INFINITY;
+  let minY = Number.POSITIVE_INFINITY;
+  let maxY = Number.NEGATIVE_INFINITY;
+  for (let i = 0; i < path.length; i += 1) {
+    const point = path[i]!;
+    minX = Math.min(minX, point.x);
+    maxX = Math.max(maxX, point.x);
+    minY = Math.min(minY, point.y);
+    maxY = Math.max(maxY, point.y);
+  }
+  if (!Number.isFinite(minX) || !Number.isFinite(maxX) || !Number.isFinite(minY) || !Number.isFinite(maxY)) {
+    return null;
+  }
+  return { minX, maxX, minY, maxY };
+};
+
 const createRuntimeSettlementRoadAdapter = (): SettlementRoadAdapter => {
   let dirtyRoadBounds: RoadTileBounds | null = null;
   return {
     carveRoad: (nextState, start, end, options = {}) => {
       const profStartAt = profStart();
+      nextState.settlementRuntimeRoadPathSearches += 1;
       const routeSeed =
         (nextState.seed ^
           Math.imul(start.x + 1, 73856093) ^
@@ -328,6 +367,48 @@ const createRuntimeSettlementRoadAdapter = (): SettlementRoadAdapter => {
       dirtyRoadBounds = mergeRoadTileBounds(dirtyRoadBounds, result.bounds);
       profEnd("runtimeRoad.carve", profStartAt);
       return result.carved;
+    },
+    carveRoadDetailed: (nextState, start, end, options = {}) => {
+      const profStartAt = profStart();
+      nextState.settlementRuntimeRoadPathSearches += 1;
+      const routeSeed =
+        (nextState.seed ^
+          Math.imul(start.x + 1, 73856093) ^
+          Math.imul(start.y + 1, 19349663) ^
+          Math.imul(end.x + 1, 83492791) ^
+          Math.imul(end.y + 1, 2971215073 >>> 0)) >>>
+        0;
+      const result = carveRoadDetailed(nextState, new RuntimeRng(routeSeed), start, end, {
+        ...options,
+        searchBounds: getRuntimeRoadSearchBounds(nextState, start, end)
+      });
+      dirtyRoadBounds = mergeRoadTileBounds(dirtyRoadBounds, result.bounds);
+      profEnd("runtimeRoad.carveDetailed", profStartAt);
+      return result;
+    },
+    carveRoadPath: (nextState, path, bridgeTileIndices = []) => {
+      const profStartAt = profStart();
+      if (path.length <= 0) {
+        profEnd("runtimeRoad.replay", profStartAt);
+        return false;
+      }
+      const first = path[0]!;
+      const last = path[path.length - 1]!;
+      const replaySeed =
+        (nextState.seed ^
+          Math.imul(first.x + 1, 2654435761 >>> 0) ^
+          Math.imul(first.y + 1, 1597334677) ^
+          Math.imul(last.x + 1, 2246822519 >>> 0) ^
+          Math.imul(last.y + 1, 3266489917 >>> 0)) >>>
+        0;
+      const carved = carveRoadPath(nextState, new RuntimeRng(replaySeed), path, {
+        allowBridgeIndices: new Set(bridgeTileIndices)
+      });
+      if (carved) {
+        dirtyRoadBounds = mergeRoadTileBounds(dirtyRoadBounds, getRuntimeRoadPathBounds(path));
+      }
+      profEnd("runtimeRoad.replay", profStartAt);
+      return carved;
     },
     collectConnectedRoadNeighbors,
     collectRoadTiles,
@@ -534,8 +615,8 @@ const hasFireActivity = (
 ): boolean => state.fireActivityState !== "idle";
 
 const hasFireSimulationWork = (
-  state: Pick<WorldState, "fireActivityState" | "fireBoundsActive">
-): boolean => hasFireActivity(state) || state.fireBoundsActive;
+  state: Pick<WorldState, "fireActivityState" | "fireBoundsActive" | "fireSimAccumulator">
+): boolean => hasFireActivity(state) || state.fireBoundsActive || hasDeferredFireRuntimeWork(state);
 
 const STRATEGIC_FIRE_SIM_STEP_CAP_DAYS = 0.5;
 
@@ -1009,6 +1090,7 @@ export function stepSim(state: WorldState, effects: EffectsState, rng: RNG, delt
   if (isSimulationEffectivelyPaused(state)) {
     return;
   }
+  resetStepPerfTelemetry(state);
 
   const dayDelta = delta * DAYS_PER_SECOND;
   const calendarDelta = dayDelta;
@@ -1020,11 +1102,13 @@ export function stepSim(state: WorldState, effects: EffectsState, rng: RNG, delt
   const previousSliderValue = state.advanceToNextEvent
     ? clampTimeSpeedSliderValue(state.advanceToNextEvent.previousTimeSpeedSliderValue)
     : state.timeSpeedSliderValue;
+  const calendarPerfStart = nowMs();
   advanceCalendar(state, rng, calendarDelta);
   advanceCareerDay(state, calendarDelta, PHASE_YEAR_DAYS, VIRTUAL_YEAR_DAYS, CAREER_TOTAL_DAYS);
   syncClimateToCareerDay(state);
   updateClimateForecastWindow(state);
   syncSeasonalRainToCareerDay(state);
+  state.simPerfCalendarMs = nowMs() - calendarPerfStart;
   if (maybePauseForSeasonalRainStart(state, previousSpeedIndex, previousSliderValue)) {
     return;
   }
@@ -1058,40 +1142,53 @@ export function stepSim(state: WorldState, effects: EffectsState, rng: RNG, delt
   const climateRisk = getClimateRisk(state);
   stepTownAlertPosture(state, dayDelta);
   applyEvacuationLossEvents(state, stepEvacuations(state, dayDelta));
+  const townConstructionPerfStart = nowMs();
   const townConstructionProfStart = profStart();
   stepTownConstructionSchedule(state, createRuntimeSettlementRoadAdapter(), dayDelta, {
     maxEventDays: RUNTIME_CONSTRUCTION_EVENT_DAYS_PER_TICK
   });
   profEnd("townConstruction", townConstructionProfStart);
+  state.simPerfTownConstructionMs = nowMs() - townConstructionPerfStart;
   const allowGrowth = state.phase === "growth" && isGrowthWeather(state);
   const allowIgnition = state.phase === "fire" && climateRisk >= FIRE_WEATHER_RISK_MIN;
   const allowFireSim = hasFireSimulationWork(state) || allowIgnition;
 
   if (allowGrowth) {
+    const growthPerfStart = nowMs();
     const growthProfStart = profStart();
     stepGrowth(state, dayDelta, rng);
     profEnd("growthStep", growthProfStart);
+    state.simPerfGrowthMs = nowMs() - growthPerfStart;
   }
 
   if (state.units.length > 0) {
+    const unitsPerfStart = nowMs();
     autoAssignTargets(state);
     stepUnits(state, delta);
     prepareExtinguish(state, effects, rng);
     applyUnitHazards(state, rng, delta);
+    state.simPerfUnitsMs = nowMs() - unitsPerfStart;
   }
 
   let activeFires = state.lastActiveFires;
   let fireActivityState = state.fireActivityState;
-  state.fireSimAccumulator = 0;
   state.firePerfSubsteps = 0;
   state.firePerfSimulatedDays = 0;
+  state.firePerfDeferredDays = 0;
+  state.firePerfTerrainMutations = 0;
+  state.firePerfRangedDiffusionSamples = 0;
+  state.firePerfIgniteCandidates = 0;
   if (allowFireSim) {
+    const firePerfStart = nowMs();
     const maxConfiguredSubstep = Math.max(0.05, state.fireSettings.simTickSeconds || 0.05);
-    let remaining = delta;
-    let careerCursor = previousCareerDay;
+    state.fireSimAccumulator = Math.max(0, state.fireSimAccumulator + delta);
+    const budget = resolveRuntimeWorkBudget(state, delta);
+    let remaining = Math.min(state.fireSimAccumulator, budget.maxFireDeltaSeconds);
+    const pendingBeforeStep = state.fireSimAccumulator;
+    let careerCursor = Math.max(0, state.careerDay - pendingBeforeStep * DAYS_PER_SECOND);
     let fireSubsteps = 0;
     let fireDaysSimulated = 0;
-    while (remaining > 0.0001) {
+    while (remaining > 0.0001 && fireSubsteps < budget.maxFireSubsteps) {
       const previewWeather = sampleFireWeatherResponse(state, careerCursor);
       const adaptiveSubstepDays = getAdaptiveFireSubstepMax(
         fireActivityState,
@@ -1126,7 +1223,10 @@ export function stepSim(state: WorldState, effects: EffectsState, rng: RNG, delt
             state.firePerfSubsteps = fireSubsteps;
             state.firePerfSimulatedDays = fireDaysSimulated;
             if (maybePauseForDetectedFireIncident(state, strongest, previousSpeedIndex, previousSliderValue)) {
+              state.fireSimAccumulator = Math.max(0, state.fireSimAccumulator - simDelta);
+              state.firePerfDeferredDays = state.fireSimAccumulator * DAYS_PER_SECOND;
               stepParticles(state, effects, simDelta);
+              state.simPerfFireMs = nowMs() - firePerfStart;
               return;
             }
           }
@@ -1155,15 +1255,18 @@ export function stepSim(state: WorldState, effects: EffectsState, rng: RNG, delt
       } else if (!hadFireChainRisk && hasFireActivity(state)) {
         const strongest = findStrongestFireTile(state);
         if (strongest) {
-          remaining -= simDelta;
-          careerCursor += simDayDelta;
-          fireSubsteps += 1;
-          fireDaysSimulated += simDayDelta;
-          state.firePerfSubsteps = fireSubsteps;
-          state.firePerfSimulatedDays = fireDaysSimulated;
           state.lastActiveFires = activeFires;
           if (maybePauseForDetectedFireIncident(state, strongest, previousSpeedIndex, previousSliderValue)) {
+            remaining -= simDelta;
+            careerCursor += simDayDelta;
+            fireSubsteps += 1;
+            fireDaysSimulated += simDayDelta;
+            state.firePerfSubsteps = fireSubsteps;
+            state.firePerfSimulatedDays = fireDaysSimulated;
+            state.fireSimAccumulator = Math.max(0, state.fireSimAccumulator - simDelta);
+            state.firePerfDeferredDays = state.fireSimAccumulator * DAYS_PER_SECOND;
             stepParticles(state, effects, simDelta);
+            state.simPerfFireMs = nowMs() - firePerfStart;
             return;
           }
         }
@@ -1172,10 +1275,14 @@ export function stepSim(state: WorldState, effects: EffectsState, rng: RNG, delt
       careerCursor += simDayDelta;
       fireSubsteps += 1;
       fireDaysSimulated += simDayDelta;
+      state.fireSimAccumulator = Math.max(0, state.fireSimAccumulator - simDelta);
     }
     state.firePerfSubsteps = fireSubsteps;
     state.firePerfSimulatedDays = fireDaysSimulated;
+    state.firePerfDeferredDays = state.fireSimAccumulator * DAYS_PER_SECOND;
+    state.simPerfFireMs = nowMs() - firePerfStart;
   } else {
+    state.fireSimAccumulator = 0;
     stepWind(state, delta, rng);
     applyFireActivityMetrics(state, 0);
   }
@@ -1192,8 +1299,12 @@ export function stepSim(state: WorldState, effects: EffectsState, rng: RNG, delt
     exitIncidentMode(state);
   }
 
+  const scoringPerfStart = nowMs();
   stepScoring(state, dayDelta, climateRisk);
+  state.simPerfScoringMs = nowMs() - scoringPerfStart;
+  const particlesPerfStart = nowMs();
   stepParticles(state, effects, delta);
+  state.simPerfParticlesMs = nowMs() - particlesPerfStart;
   checkFailureConditions(state);
   if (state.advanceToNextEvent && state.gameOver) {
     cancelAdvanceToNextEvent(state);

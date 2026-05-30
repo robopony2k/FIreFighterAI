@@ -14,6 +14,7 @@ import { clamp } from "../../../core/utils.js";
 import { applyFireActivityMetrics } from "./fireActivityState.js";
 import { sampleIgnitionFireSeed, sampleIgnitionHeatMultiplier } from "./fireIgnitionTuning.js";
 import { getRangedHeatTransferScale } from "./fireRangedHeatDiffusion.js";
+import { createEmptyFireStepTelemetry } from "../types/fireRuntimeTypes.js";
 import {
     getElevationHeatTransferMultiplier,
     type TerrainAdjustedWind
@@ -83,7 +84,14 @@ export function runFireKernel(
         climateIgnitionMultiplier = state.climateIgnitionMultiplier || 1,
         allowIgnitionEvents = true
     } = options;
-    const result: FireKernelResult = { activeFires: 0, smokeEvents: 0, houseDamageEvents: 0, houseLossEvents: 0, vegetationBurnoutEvents: 0 };
+    const result: FireKernelResult = {
+        activeFires: 0,
+        smokeEvents: 0,
+        houseDamageEvents: 0,
+        houseLossEvents: 0,
+        vegetationBurnoutEvents: 0,
+        telemetry: createEmptyFireStepTelemetry()
+    };
     const tickStart = hooks.profStart();
     const fuelProfiles = getFuelProfiles();
     const ashProfile = fuelProfiles.ash;
@@ -272,6 +280,7 @@ export function runFireKernel(
             return;
         }
         const targetIdx = targetY * cols + targetX;
+        result.telemetry.rangedDiffusionSamples += 1;
         if (!isIgnitableTypeId(typeId[targetIdx]) || fuel[targetIdx] <= 0.02 || fire[targetIdx] > fireEps) {
             return;
         }
@@ -309,6 +318,7 @@ export function runFireKernel(
                     continue;
                 }
                 const sourceIdx = sourceY * cols + sourceX;
+                result.telemetry.rangedDiffusionSamples += 1;
                 if (fire[sourceIdx] <= fireEps) {
                     continue;
                 }
@@ -624,6 +634,7 @@ export function runFireKernel(
                             state.terrainDirty = true;
                             state.terrainTypeRevision += 1;
                             state.vegetationRevision += 1;
+                            result.telemetry.terrainMutations += 1;
                             tile.spreadBoost = ashProfile.spreadBoost;
                             tile.ignitionPoint = ashProfile.ignition;
                             tile.burnRate = ashProfile.burnRate;
@@ -665,6 +676,7 @@ export function runFireKernel(
                             state.terrainDirty = true;
                             state.terrainTypeRevision += 1;
                             state.vegetationRevision += 1;
+                            result.telemetry.terrainMutations += 1;
                             tile.spreadBoost = ashProfile.spreadBoost;
                             tile.ignitionPoint = ashProfile.ignition;
                             tile.burnRate = ashProfile.burnRate;
@@ -746,6 +758,7 @@ export function runFireKernel(
         }
     }
     hooks.profEnd("fireLoop", loopStart);
+    result.telemetry.igniteCandidates = igniteCount;
     const igniteStart = hooks.profStart();
     for (let i = 0; i < igniteCount; i += 1) {
         const idx = igniteBuffer[i];
@@ -821,6 +834,10 @@ export function runFireKernel(
     state.firePerfHeatBoundsArea = heatBoundsArea;
     state.firePerfFireBoundsArea =
         fireMaxX >= fireMinX && fireMaxY >= fireMinY ? (fireMaxX - fireMinX + 1) * (fireMaxY - fireMinY + 1) : 0;
+    result.telemetry.activeBlocks = state.firePerfActiveBlocks;
+    result.telemetry.workBlocks = state.firePerfWorkBlocks;
+    result.telemetry.fireBoundsArea = state.firePerfFireBoundsArea;
+    result.telemetry.heatBoundsArea = state.firePerfHeatBoundsArea;
     if (fireMaxX >= fireMinX && fireMaxY >= fireMinY) {
         state.fireBoundsActive = true;
         state.fireMinX = fireMinX;

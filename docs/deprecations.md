@@ -334,3 +334,31 @@ Migration guidance:
 1. Prefer 3D runtime path and `threeTest`-backed rendering flows.
 2. Use `src/ui/end-run/endRunScreen.ts` for terminal run presentation until the final end-run screen design replaces the placeholder.
 3. Do not reintroduce 2D fallback behavior for WebGL failures; route users to menu/status recovery instead.
+
+## Single-Frame High-Speed Fire Catch-Up
+
+Status: Deprecated as of May 26, 2026.
+
+- High-speed strategic fire work no longer attempts to process every accumulated fire substep in one frame.
+- Fire runtime work now uses a bounded per-frame substep budget and carries deferred fire days as telemetry-visible backlog.
+- Terrain visual sync distinguishes geometry, surface color, vegetation, structure, and fire-visual invalidation so ash/vegetation churn can be batched without hiding immediate structure changes.
+
+Migration guidance:
+
+1. Add future fire pacing changes through the fire runtime controller rather than expanding `stepSim` catch-up loops.
+2. Use the perf overlay and runtime perf regression before tuning fire substep caps.
+3. Keep terrain visual sync policy in the terrain controller and renderer modules focused on applying prepared samples.
+
+## Runtime Path Search for Precomputed Settlement Expansion Roads
+
+Status: Deprecated as of May 28, 2026.
+
+- Generated settlement growth plans now record replayable road paths and bridge tile indices for queued expansion roads.
+- Runtime planned expansion should replay recorded paths through the settlement road adapter instead of running A* or `carveRoadDetailed` during spring growth.
+- Runtime path search remains a compatibility fallback for legacy or synthetic worlds with no recorded road path data, and fallback use is exposed through telemetry.
+
+Migration guidance:
+
+1. Regenerate campaign maps or growth plans so `SettlementGrowthRoadSegment` entries include `path` and `bridgeTileIndices`.
+2. Consume generated settlement expansion roads through `carveRoadPath` or an equivalent replay adapter method.
+3. Treat runtime settlement expansion path search as debug/legacy fallback only; investigate any fallback telemetry in generated campaign maps.

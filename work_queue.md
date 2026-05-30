@@ -1,3 +1,43 @@
+TSK-0148: Spring growth terrain rebuild and settlement road replay fix
+
+Type: bug
+
+Why: High-speed winter-to-spring growth could replay town expansion work in the same frame as terrain visual refresh, causing road-only or structure-only settlement growth to force multi-second base terrain rebuilds.
+
+Done when:
+- [x] Generated settlement growth road segments record replayable paths and bridge tile indices.
+- [x] Runtime planned expansion prefers recorded path replay and exposes runtime road-search fallback telemetry.
+- [x] Terrain visual sync separates road-layer refreshes from base terrain geometry rebuilds, with perf telemetry for rebuild reason and road refresh timing.
+- [x] Growth regression coverage asserts recorded road paths avoid runtime path search and legacy plans still fall back safely.
+
+Touchpoints: `src/systems/settlements/`, `src/mapgen/roads.ts`, `src/sim/index.ts`, `src/render/threeTest.ts`, `src/render/threeTestTerrain.ts`, `src/systems/terrain/controllers/`, `scripts/growth-regression.mjs`
+
+Constraints: keep road replay behind the settlement road adapter, preserve legacy synthetic/no-plan world fallback, and avoid broad terrain renderer decomposition beyond the road-layer refresh path.
+
+Notes: Follow-up renderer decomposition remains tracked by `TSK-0134`.
+
+Status: done
+
+TSK-0138: Runtime spike budget and fire-season terrain sync refactor
+
+Type: refactor
+
+Why: High-speed strategic fire seasons could put fire catch-up, terrain visual sync, and 3D snapshot work into the same frame, producing significant lag spikes and making optimization hard to attribute.
+
+Done when:
+- [x] Fire runtime work exposes substep, deferred-day, terrain-mutation, ranged-diffusion, and ignition-candidate telemetry.
+- [x] High-speed fire work is bounded per frame and carries deferred fire simulation work instead of processing every catch-up substep immediately.
+- [x] Terrain visual sync policy is owned by a terrain controller and separates geometry, surface-color, vegetation, structure, and fire-visual invalidation.
+- [x] Runtime perf regression coverage exists for high-speed fire scenarios.
+
+Touchpoints: `src/app/bootLoop.ts`, `src/app/gameSessionRuntime.ts`, `src/sim/index.ts`, `src/systems/fire/`, `src/systems/terrain/controllers/`, `scripts/runtime-perf-regression.mjs`
+
+Constraints: preserve incident readability, keep fire simulation independent from rendering/UI, and allow only small behavior shifts from bounded high-speed catch-up.
+
+Notes: This precedes `TSK-0134`; terrain renderer decomposition should build on the new terrain visual sync boundary.
+
+Status: done
+
 TSK-0137: Add dust construction effect for house build phases
 
 Type: polish
@@ -52,5 +92,7 @@ Touchpoints: `src/render/threeTestTerrain.ts`, `src/render/terrain/debug/`, `src
 Constraints: preserve visual output and large-map performance characteristics
 
 Notes: Keep `prepareTerrainRenderSurface` and `buildTerrainMesh` as stable facade exports during the split.
+
+Related: `TSK-0138` moved terrain visual sync policy out of app runtime; continue using that boundary when splitting renderer modules.
 
 Status: queued

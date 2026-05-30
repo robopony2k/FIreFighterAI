@@ -11,7 +11,9 @@ import {
   syncDerivedVegetationState
 } from "../dist/core/vegetation.js";
 import { stepGrowth } from "../dist/sim/growth.js";
+import { stepTownConstructionSchedule } from "../dist/systems/settlements/sim/townConstruction.js";
 import {
+  classifyTerrainVisualInvalidation,
   shouldDeferThreeTestTerrainSyncForFastTime,
   shouldSyncThreeTestTerrain
 } from "../dist/app/threeTestTerrainSync.js";
@@ -192,6 +194,120 @@ const buildRevisionBatchState = () => {
   return { state, rng };
 };
 
+const buildSettlementConstructionState = (withReplayPath) => {
+  const seed = withReplayPath ? 7103 : 7109;
+  const grid = { cols: 7, rows: 7, totalTiles: 49 };
+  const state = createInitialState(seed, grid);
+  const rng = new RNG(seed ^ 0x91);
+  state.tiles = Array.from({ length: grid.totalTiles }, () => buildTile("grass", { moisture: 0.66, waterDist: 7 }));
+  syncAll(state, rng);
+  state.careerDay = 91;
+  state.phase = "growth";
+  state.phaseIndex = 1;
+  state.phaseDay = 1;
+  state.year = 1;
+  state.townGrowthAppliedYear = 1;
+  state.towns = [
+    {
+      id: 0,
+      name: "Replay",
+      x: 3,
+      y: 3,
+      cx: 3,
+      cy: 3,
+      radius: 2,
+      industryProfile: "general",
+      streetArchetype: "main_street",
+      growthFrontiers: [],
+      growthSeedYear: 0,
+      simulatedGrowthYears: 0,
+      houseCount: 0,
+      housesLost: 0,
+      alertPosture: 0,
+      alertCooldownDays: 0,
+      nonApprovingHouseCount: 0,
+      approval: 0.8,
+      evacState: "none",
+      evacProgress: 0,
+      evacuationStatus: "None",
+      populationRemaining: 0,
+      populationQueued: 0,
+      populationEvacuating: 0,
+      populationEvacuated: 0,
+      populationDead: 0,
+      vehiclesQueued: 0,
+      vehiclesMoving: 0,
+      vehiclesDestroyed: 0,
+      desiredHouseDelta: 1,
+      lastSeasonHouseDelta: 0,
+      growthPressure: 1,
+      recoveryPressure: 0,
+      buildStartCooldownDays: 0,
+      activeBuildCap: 1,
+      buildStartSerial: 0
+    }
+  ];
+  const path = [
+    { x: 1, y: 3 },
+    { x: 2, y: 3 },
+    { x: 3, y: 3 }
+  ];
+  state.plannedTownGrowth = {
+    entries: [
+      {
+        townId: 0,
+        anchorIndex: 3 + 3 * grid.cols,
+        styleSeed: 123,
+        houseValue: 180,
+        houseResidents: 2,
+        roadSegments: [
+          {
+            start: path[0],
+            end: path[path.length - 1],
+            path: withReplayPath ? path : undefined,
+            bridgeTileIndices: withReplayPath ? [] : undefined
+          }
+        ],
+        terrainEdits: [],
+        plannedYear: 0,
+        sequence: 0,
+        status: "pending"
+      }
+    ],
+    nextExpansionIndexByTown: [0],
+    plannedYears: 1,
+    consumedEntries: 0,
+    skippedEntries: 0,
+    runtimeFallbackReservations: 0
+  };
+  return state;
+};
+
+const createCountingRoadAdapter = () => {
+  const counts = { replay: 0, search: 0, backfill: 0 };
+  return {
+    counts,
+    adapter: {
+      carveRoad: () => {
+        counts.search += 1;
+        return true;
+      },
+      carveRoadPath: () => {
+        counts.replay += 1;
+        return true;
+      },
+      collectRoadTiles: () => [],
+      collectConnectedRoadNeighbors: () => [],
+      findNearestRoadTile: () => ({ x: 0, y: 0 }),
+      clearRoadEdges: () => {},
+      backfillRoadEdgesFromAdjacency: () => {
+        counts.backfill += 1;
+      },
+      pruneRoadDiagonalStubs: () => {}
+    }
+  };
+};
+
 const assertVegetationCaps = (state) => {
   for (const tile of state.tiles) {
     if (!(tile.type === "grass" || tile.type === "scrub" || tile.type === "floodplain" || tile.type === "forest")) {
@@ -282,6 +398,34 @@ assert.equal(
   false,
   "low and medium strategic speeds should keep terrain sync immediate"
 );
+const ashOnlyInvalidation = classifyTerrainVisualInvalidation({
+  previous: { terrainTypeRevision: 4, vegetationRevision: 7, structureRevision: 2, debugTypeColors: false },
+  next: { terrainTypeRevision: 5, vegetationRevision: 8, structureRevision: 2, debugTypeColors: false },
+  geometryTerrainChanged: false,
+  activeFireTerrainPressure: true
+});
+assert.equal(ashOnlyInvalidation.geometry, false, "ash-only terrain changes should not force geometry rebuild");
+assert.equal(ashOnlyInvalidation.surfaceColor, true, "ash-only terrain changes should invalidate surface color");
+assert.equal(ashOnlyInvalidation.vegetation, true, "ash-only vegetation cleanup should invalidate vegetation visuals");
+assert.equal(ashOnlyInvalidation.fireVisual, true, "active fire visual terrain changes should be batchable");
+const structureInvalidation = classifyTerrainVisualInvalidation({
+  previous: { terrainTypeRevision: 4, vegetationRevision: 7, structureRevision: 2, debugTypeColors: false },
+  next: { terrainTypeRevision: 4, vegetationRevision: 7, structureRevision: 3, debugTypeColors: false },
+  geometryTerrainChanged: false,
+  activeFireTerrainPressure: true
+});
+assert.equal(structureInvalidation.structure, true, "structure changes should remain immediate terrain sync work");
+assert.equal(structureInvalidation.fireVisual, false, "structure changes should not be treated as batchable fire visuals");
+const roadInvalidation = classifyTerrainVisualInvalidation({
+  previous: { terrainTypeRevision: 4, vegetationRevision: 7, structureRevision: 2, debugTypeColors: false },
+  next: { terrainTypeRevision: 5, vegetationRevision: 7, structureRevision: 2, debugTypeColors: false },
+  geometryTerrainChanged: false,
+  roadTerrainChanged: true,
+  activeFireTerrainPressure: false
+});
+assert.equal(roadInvalidation.geometry, false, "road-only terrain changes should not force geometry rebuild");
+assert.equal(roadInvalidation.roads, true, "road-only terrain changes should invalidate road visuals");
+assert.equal(roadInvalidation.surfaceColor, true, "road-only terrain changes should still refresh surface color");
 assert.ok(
   growthOnly.state.tileVegetationAge[growthOnly.targetIdx] >= growthTileAfter.vegetationAgeYears - 1e-6,
   "vegetation age SoA did not update"
@@ -330,6 +474,21 @@ assert.ok(
   "batched vegetation visuals should flush after enough growth days"
 );
 
+const replayConstruction = buildSettlementConstructionState(true);
+const replayRoads = createCountingRoadAdapter();
+stepTownConstructionSchedule(replayConstruction, replayRoads.adapter, 1, { maxEventDays: 4 });
+assert.equal(replayRoads.counts.replay, 1, "planned expansion should replay recorded road paths");
+assert.equal(replayRoads.counts.search, 0, "planned expansion with replay data should not run runtime road search");
+assert.equal(replayConstruction.plannedTownGrowth.consumedEntries, 1, "planned expansion entry should be consumed");
+assert.equal(replayConstruction.buildingLots.length, 1, "planned expansion should create a building lot");
+
+const fallbackConstruction = buildSettlementConstructionState(false);
+const fallbackRoads = createCountingRoadAdapter();
+stepTownConstructionSchedule(fallbackConstruction, fallbackRoads.adapter, 1, { maxEventDays: 4 });
+assert.equal(fallbackRoads.counts.replay, 0, "legacy planned expansion without path should not call replay");
+assert.equal(fallbackRoads.counts.search, 1, "legacy planned expansion without path should use runtime road search fallback");
+assert.equal(fallbackConstruction.buildingLots.length, 1, "runtime road-search fallback should still create a building lot");
+
 const recovery = buildRecoveryState();
 let sawGrass = false;
 let sawForest = false;
@@ -368,6 +527,8 @@ console.log(
     `centerTree=${recoveredTile.treeType}`,
     `lowBudgetMinAge=${lowBudgetEndAge.toFixed(2)}`,
     `openRecruit=${openRecruit.state.tiles[openRecruit.target].type}`,
+    `roadReplay=${replayRoads.counts.replay}`,
+    `roadFallback=${fallbackRoads.counts.search}`,
     `vegetationRevision=${growthOnly.state.vegetationRevision}`
   ].join(" ")
 );

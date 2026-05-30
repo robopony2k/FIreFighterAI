@@ -402,10 +402,14 @@ export const buildFireRenderBudgetPlan = (
               ? 3
               : 4;
   const preferSparseFullResolution = input.trackedFireTiles > 0 && input.area / input.trackedFireTiles >= 32;
+  const pressureSampleStep = emergencyOverload ? 3 : overloaded ? 2 : 1;
+  const fullResolutionSparse = preferSparseFullResolution && !overloaded;
+  const fullResolutionSmallArea = input.area <= 8192 && !overloaded;
+  const areaBudgetSampleStep = Math.max(1, Math.ceil(Math.sqrt(input.area / Math.max(1, fireMaxInstances))));
   const sampleStep =
-    preferSparseFullResolution || input.area <= 8192
+    fullResolutionSparse || fullResolutionSmallArea
       ? 1
-      : Math.max(1, Math.ceil(Math.sqrt(input.area / Math.max(1, fireMaxInstances))));
+      : Math.max(pressureSampleStep, areaBudgetSampleStep);
   const sparkStreakCap = Math.max(
     48,
     Math.floor(

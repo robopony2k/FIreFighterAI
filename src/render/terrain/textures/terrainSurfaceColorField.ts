@@ -1,5 +1,6 @@
 import { FUEL_PROFILES } from "../../../core/config.js";
 import { TILE_ID_TO_TYPE, TILE_TYPE_IDS } from "../../../core/state.js";
+import { applyFuelScorchColor } from "./fuelScorchColor.js";
 
 type Rgb = { r: number; g: number; b: number };
 
@@ -66,8 +67,6 @@ const WET_TINT_BY_TILE: Record<number, [number, number, number]> = {
   [TILE_TYPE_IDS.forest]: [0.33, 0.46, 0.31]
 };
 
-const SCORCH_WARM_TINT: [number, number, number] = [0.34, 0.25, 0.16];
-const SCORCH_CHAR_TINT: [number, number, number] = [0.19, 0.18, 0.17];
 const BASE_FUEL_BY_TILE_ID = TILE_ID_TO_TYPE.map((tileType) => Math.max(0, FUEL_PROFILES[tileType]?.baseFuel ?? 0));
 
 const clamp = (value: number, min: number, max: number): number => Math.min(max, Math.max(min, value));
@@ -428,15 +427,22 @@ export const buildTerrainSurfaceColorField = (options: BuildTerrainSurfaceColorF
         color = mixTriplet(color, tintColor, 0.55);
       }
 
+      let ashColor: [number, number, number] | null = null;
+      const getAshColor = (): [number, number, number] => {
+        if (!ashColor) {
+          const ashNoise = sampleValueNoise(tileX + 0.5, tileY + 0.5, 12, worldSeed + 103);
+          const ashCool = sampleValueNoise(tileX + 0.5, tileY + 0.5, 24, worldSeed + 151);
+          const ashBase = 0.18 + ashNoise * 0.18;
+          ashColor = [
+            ashBase * 0.95,
+            ashBase * 0.93,
+            ashBase * (1.0 + ashCool * 0.08)
+          ];
+        }
+        return ashColor;
+      };
       if (!debugTypeColors && !debugScalarField && typeId === ashId) {
-        const ashNoise = sampleValueNoise(tileX + 0.5, tileY + 0.5, 12, worldSeed + 103);
-        const ashCool = sampleValueNoise(tileX + 0.5, tileY + 0.5, 24, worldSeed + 151);
-        const ashBase = 0.18 + ashNoise * 0.18;
-        color = [
-          ashBase * 0.95,
-          ashBase * 0.93,
-          ashBase * (1.0 + ashCool * 0.08)
-        ];
+        color = getAshColor();
       }
 
       if (!debugTypeColors && !debugScalarField && (typeId === grassId || typeId === scrubId || typeId === floodplainId || typeId === forestId)) {
@@ -457,24 +463,17 @@ export const buildTerrainSurfaceColorField = (options: BuildTerrainSurfaceColorF
       if (!debugTypeColors && !debugScalarField && sample.tileFuel && (typeId === grassId || typeId === scrubId || typeId === floodplainId || typeId === forestId)) {
         const baseFuel = BASE_FUEL_BY_TILE_ID[typeId] ?? 0;
         if (baseFuel > 0) {
-          const expectedFuel = Math.max(0.01, baseFuel * (1 - localMoisture * 0.6));
-          const fuelNow = clamp(sample.tileFuel[idx] ?? expectedFuel, 0, expectedFuel);
-          const fuelDepletion = clamp(1 - fuelNow / expectedFuel, 0, 1);
           const liveFire = clamp(sample.tileFire?.[idx] ?? 0, 0, 1);
           const liveHeat = clamp((sample.tileHeat?.[idx] ?? 0) / Math.max(0.01, sample.heatCap ?? 5), 0, 1);
-          const activeBurnHold = clamp(
-            smoothstep(0.02, 0.12, liveFire) * 0.92 + smoothstep(0.08, 0.32, liveHeat) * 0.42,
-            0,
-            1
-          );
-          const warmScorch = smoothstep(0.3, 0.85, fuelDepletion);
-          const charScorch = smoothstep(0.62, 0.98, fuelDepletion);
-          const warmMixBase = (typeId === forestId ? 0.46 : 0.34) * warmScorch;
-          const charMixBase = (typeId === forestId ? 0.54 : 0.4) * charScorch;
-          const warmMix = clamp(warmMixBase * (1 - activeBurnHold * 0.48) + activeBurnHold * 0.1, 0, 1);
-          const charMix = clamp(charMixBase * (1 - activeBurnHold * 0.96), 0, 1);
-          color = mixTriplet(color, SCORCH_WARM_TINT, warmMix);
-          color = mixTriplet(color, SCORCH_CHAR_TINT, charMix);
+          color = applyFuelScorchColor(color, {
+            baseFuel,
+            localMoisture,
+            fuelNow: sample.tileFuel[idx] ?? baseFuel,
+            liveFire,
+            liveHeat,
+            isForest: typeId === forestId,
+            ashColor: getAshColor()
+          });
         }
       }
 

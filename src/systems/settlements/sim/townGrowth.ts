@@ -1957,7 +1957,9 @@ const cloneRoadOptions = (options?: SettlementRoadOptions): SettlementRoadOption
 const cloneGrowthRoadSegment = (segment: SettlementGrowthRoadSegment): SettlementGrowthRoadSegment => ({
   start: clonePoint(segment.start),
   end: clonePoint(segment.end),
-  options: cloneRoadOptions(segment.options)
+  options: cloneRoadOptions(segment.options),
+  path: segment.path?.map(clonePoint),
+  bridgeTileIndices: segment.bridgeTileIndices ? [...segment.bridgeTileIndices] : undefined
 });
 
 const cloneGrowthTerrainEdit = (edit: SettlementGrowthTerrainEdit): SettlementGrowthTerrainEdit => ({
@@ -2046,18 +2048,38 @@ const createRecordingRoadAdapter = (
 ): SettlementRoadAdapter => ({
   ...roadAdapter,
   carveRoad: (nextState, start, end, options = {}) => {
-    const carved = roadAdapter.carveRoad(nextState, start, end, options);
+    const detailed = roadAdapter.carveRoadDetailed?.(nextState, start, end, options);
+    const carved = detailed ? detailed.carved : roadAdapter.carveRoad(nextState, start, end, options);
     if (carved) {
       segments.push({
         start: clonePoint(start),
         end: clonePoint(end),
-        options: cloneRoadOptions(options)
+        options: cloneRoadOptions(options),
+        path: detailed?.path.map(clonePoint),
+        bridgeTileIndices: detailed ? [...detailed.bridgeTileIndices] : undefined
       });
     }
     return carved;
   },
   carveRoadSequence: roadAdapter.carveRoadSequence
     ? (nextState, roadSegments) => {
+        if (roadAdapter.carveRoadDetailed) {
+          for (let i = 0; i < roadSegments.length; i += 1) {
+            const segment = roadSegments[i]!;
+            const detailed = roadAdapter.carveRoadDetailed(nextState, segment.start, segment.end, segment.options);
+            if (!detailed.carved) {
+              return false;
+            }
+            segments.push({
+              start: clonePoint(segment.start),
+              end: clonePoint(segment.end),
+              options: cloneRoadOptions(segment.options),
+              path: detailed.path.map(clonePoint),
+              bridgeTileIndices: [...detailed.bridgeTileIndices]
+            });
+          }
+          return true;
+        }
         const carved = roadAdapter.carveRoadSequence!(nextState, roadSegments);
         if (carved) {
           for (let i = 0; i < roadSegments.length; i += 1) {

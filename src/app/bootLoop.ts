@@ -61,6 +61,31 @@ export type AppBootLoopDeps = {
   maybeUpdatePerfDiagnostics: (now: number) => void;
 };
 
+export type RuntimeFrameWorkBudget = {
+  requestedSimulationStep: number;
+  appliedSimulationStep: number;
+  maxSimulationStepsPerFrame: number;
+};
+
+const resolveRuntimeFrameWorkBudget = (params: {
+  baseStep: number;
+  timeSpeedValue: number;
+  maxSimulationStep: number | null;
+  incidentMode: boolean;
+  threeTestVisible: boolean;
+}): RuntimeFrameWorkBudget => {
+  const requestedSimulationStep = params.baseStep * params.timeSpeedValue;
+  const appliedSimulationStep =
+    params.maxSimulationStep !== null && Number.isFinite(params.maxSimulationStep) && params.maxSimulationStep > 0
+      ? Math.min(requestedSimulationStep, params.maxSimulationStep)
+      : requestedSimulationStep;
+  return {
+    requestedSimulationStep,
+    appliedSimulationStep,
+    maxSimulationStepsPerFrame: params.incidentMode || params.threeTestVisible ? 1 : 8
+  };
+};
+
 export const startAppBootLoop = (deps: AppBootLoopDeps): void => {
   let lastTick = 0;
   let accumulator = 0;
@@ -113,13 +138,16 @@ export const startAppBootLoop = (deps: AppBootLoopDeps): void => {
       accumulator = Math.min(accumulator, deps.baseStep);
     }
     const timeSpeedValue = deps.getTimeSpeedValue();
-    const requestedSimStep = deps.baseStep * timeSpeedValue;
     const maxSimulationStep = deps.getMaxSimulationStep?.() ?? null;
-    const simStep =
-      maxSimulationStep !== null && Number.isFinite(maxSimulationStep) && maxSimulationStep > 0
-        ? Math.min(requestedSimStep, maxSimulationStep)
-        : requestedSimStep;
-    const maxStepsPerFrame = incidentMode ? 1 : threeTestVisible ? 1 : 8;
+    const frameBudget = resolveRuntimeFrameWorkBudget({
+      baseStep: deps.baseStep,
+      timeSpeedValue,
+      maxSimulationStep,
+      incidentMode,
+      threeTestVisible
+    });
+    const simStep = frameBudget.appliedSimulationStep;
+    const maxStepsPerFrame = frameBudget.maxSimulationStepsPerFrame;
     let simStepsThisFrame = 0;
     let simFrameMs = 0;
     const skipSimThisFrame = threeTestVisible && deps.isThreeTestNoSim();
@@ -135,6 +163,9 @@ export const startAppBootLoop = (deps: AppBootLoopDeps): void => {
     }
     deps.recordPerfSample("sim.frame", simFrameMs);
     deps.recordPerfSample("sim.steps", simStepsThisFrame);
+    deps.recordPerfSample("sim.requestedStep", frameBudget.requestedSimulationStep);
+    deps.recordPerfSample("sim.appliedStep", frameBudget.appliedSimulationStep);
+    deps.recordPerfSample("sim.stepBudget", frameBudget.maxSimulationStepsPerFrame);
     if (simStepsThisFrame > 0) {
       deps.recordPerfSample("sim.step", simFrameMs / simStepsThisFrame);
     }

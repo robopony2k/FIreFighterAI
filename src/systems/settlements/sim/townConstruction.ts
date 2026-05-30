@@ -319,7 +319,12 @@ const applyPlannedExpansionRoads = (
   let carvedAny = false;
   for (let i = 0; i < entry.roadSegments.length; i += 1) {
     const segment = entry.roadSegments[i]!;
-    if (!roadAdapter.carveRoad(state, segment.start, segment.end, segment.options)) {
+    const hasReplayPath = !!segment.path && segment.path.length > 0;
+    const replayed = hasReplayPath && !!roadAdapter.carveRoadPath;
+    const carved = replayed
+      ? roadAdapter.carveRoadPath!(state, segment.path!, segment.bridgeTileIndices)
+      : roadAdapter.carveRoad(state, segment.start, segment.end, segment.options);
+    if (!carved) {
       if (carvedAny) {
         roadAdapter.backfillRoadEdgesFromAdjacency(state);
         state.terrainTypeRevision += 1;
@@ -327,6 +332,9 @@ const applyPlannedExpansionRoads = (
         state.tileSoaDirty = true;
       }
       return false;
+    }
+    if (!replayed) {
+      console.warn("[towns] planned expansion road segment fell back to runtime path search; regenerate the growth plan to record replay paths.");
     }
     carvedAny = true;
   }
