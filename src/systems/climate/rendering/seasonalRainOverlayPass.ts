@@ -99,33 +99,31 @@ const rainFragmentShader = `
     return n;
   }
 
-  float rainLayer(
+  float rainSheet(
     vec2 uv,
     float scale,
     float speed,
-    float width,
     float salt,
     float slant,
     float speedScale,
-    float density,
-    float lengthMin,
-    float lengthMax
+    float density
   ) {
-    vec2 p = uv;
-    p.x += p.y * slant;
-    p.y += uTime * speed * speedScale;
-    p *= scale;
-    vec2 cell = floor(p);
-    vec2 local = fract(p);
+    vec2 st = uv * vec2(0.55 + uv.y * 0.62, 0.035);
+    st.x += uv.y * slant + uTime * speed * speedScale + salt * 0.013;
+    st.y += uTime * speed * speedScale * 0.38 + salt * 0.021;
+    float coarse = valueNoise(st * scale + vec2(uSeed * 0.00017, salt));
+    float fine = valueNoise(st * scale * 0.773 + vec2(salt, uSeed * 0.00011));
+    float sheet = pow(abs(coarse * fine * 1.65), 13.0);
+    vec2 laneUv = uv;
+    laneUv.x += laneUv.y * slant;
+    laneUv.y += uTime * speed * speedScale;
+    laneUv *= vec2(scale * 0.18, scale * 1.4);
+    vec2 cell = floor(laneUv);
+    vec2 local = fract(laneUv);
     float rnd = hash12(cell + salt);
-    float densityGate = smoothstep(1.0 - density, 1.0, rnd);
-    float lane = abs(local.x - rnd);
-    float streak = 1.0 - smoothstep(0.0, width, lane);
-    float streakLength = mix(lengthMin, lengthMax, hash12(cell + salt * 1.71));
-    float tail = smoothstep(0.02, 0.11, local.y);
-    float head = 1.0 - smoothstep(streakLength, min(0.98, streakLength + 0.16), local.y);
-    float shimmer = 0.62 + 0.38 * sin((local.y + rnd) * 18.0 - uTime * (5.0 + speed));
-    return streak * tail * head * shimmer * densityGate * (0.35 + rnd * 0.9);
+    float lane = 1.0 - smoothstep(0.0, 0.04, abs(local.x - rnd));
+    float tail = smoothstep(0.03, 0.18, local.y) * (1.0 - smoothstep(0.62, 0.95, local.y));
+    return clamp((sheet * 3.4 + lane * tail * 0.58) * density * (0.35 + rnd), 0.0, 1.0);
   }
 
   float lensRipple(vec2 uv) {
@@ -154,14 +152,14 @@ const rainFragmentShader = `
     vec2 stormUv = vUv * vec2(aspect, 1.0) * 2.15;
     stormUv += windDir * uTime * (0.028 + windStrength * 0.032);
     stormUv += vec2(uSeed * 0.00009, uSeed * 0.00013);
-    float stormMask = smoothstep(0.35, 0.85, stormNoise(stormUv));
+    float stormMask = smoothstep(0.28, 0.82, stormNoise(stormUv));
     float localIntensity = intensity * stormMask;
     rainUv.y += vUv.x * verticalWind * 0.08;
     float rain =
-      rainLayer(rainUv, 34.0, 1.85, 0.013, 11.0, slant * 0.78, speedScale, 0.46 * stormMask, 0.28, 0.48) * 0.26 +
-      rainLayer(rainUv + vec2(0.17, 0.0), 64.0, 3.55, 0.016, 37.0, slant, speedScale, 0.31 * stormMask, 0.22, 0.38) * 0.6 +
-      rainLayer(rainUv + vec2(0.41, 0.0), 112.0, 6.45, 0.024, 71.0, slant * 1.18, speedScale, 0.1 * stormMask, 0.16, 0.3) * 0.96;
-    rain = clamp(rain * localIntensity, 0.0, 1.0);
+      rainSheet(rainUv, 52.0, 0.58, 11.0, slant * 0.72, speedScale, 0.54 * stormMask) * 0.32 +
+      rainSheet(rainUv + vec2(0.19, 0.0), 96.0, 0.91, 37.0, slant, speedScale, 0.36 * stormMask) * 0.64 +
+      rainSheet(rainUv + vec2(0.43, 0.0), 156.0, 1.38, 71.0, slant * 1.16, speedScale, 0.18 * stormMask) * 0.92;
+    rain = clamp(pow(rain, 1.15) * localIntensity * 1.45, 0.0, 1.0);
 
     float luminance = dot(color, vec3(0.299, 0.587, 0.114));
     float wetness = localIntensity;

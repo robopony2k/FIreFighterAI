@@ -29,6 +29,8 @@ export type LightingDirectorState = SeasonalSkyState & {
   hazeStrength: number;
   smokeTint: RGB;
   waterSunColor: RGB;
+  oceanShallowColor: RGB;
+  oceanDeepColor: RGB;
   shadowRefreshMinMs: number;
 };
 
@@ -49,6 +51,8 @@ export const buildLightingDirectorState = (input: LightingDirectorInput): Lighti
   const fogDensity = clamp(0.0028 + sky.overcastStrength * 0.0035 + sky.winter01 * 0.0011 + (1 - risk01) * 0.0002, 0.0026, 0.0094);
   const smokeTint = mixRgb(rgb(118, 122, 128), rgb(168, 150, 130), sky.overcastStrength * 0.2 + risk01 * 0.18);
   const waterSunColor = mixRgb(sky.sunColor, rgb(255, 250, 232), 0.24);
+  const oceanShallowColor = mixRgb(sky.oceanShallowColor, rgb(82, 88, 92), risk01 * 0.05);
+  const oceanDeepColor = mixRgb(sky.oceanDeepColor, rgb(34, 40, 46), risk01 * 0.06);
   const shadowRefreshMinMs =
     input.timeSpeedValue >= TIME_SPEED_FAST_PATH_VALUE ? SHADOW_FAST_REFRESH_MS : SHADOW_NORMAL_REFRESH_MS;
 
@@ -63,6 +67,8 @@ export const buildLightingDirectorState = (input: LightingDirectorInput): Lighti
     hazeStrength: sky.hazeStrength,
     smokeTint,
     waterSunColor,
+    oceanShallowColor,
+    oceanDeepColor,
     shadowRefreshMinMs
   };
 };

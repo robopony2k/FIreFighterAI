@@ -1,9 +1,17 @@
 import * as THREE from "three";
-import { mixRgb, scaleRgb, type RGB } from "./color.js";
+import { mixRgb, type RGB } from "./color.js";
 import {
   EQUINOX_AZIMUTH_DEG,
   sampleSeasonalSunTrajectory
 } from "../systems/climate/rendering/seasonalSunTrajectory.js";
+import {
+  sampleSeasonalAtmosphereVisualState,
+  type SeasonalAtmosphereVisualState
+} from "../systems/climate/rendering/seasonalAtmosphereVisualState.js";
+import {
+  sampleSeasonalWeatherVisualState,
+  type SeasonalWeatherVisualState
+} from "../systems/climate/rendering/seasonalWeatherVisualState.js";
 
 const TAU = Math.PI * 2;
 const PI = Math.PI;
@@ -23,16 +31,7 @@ const smoothstep = (edge0: number, edge1: number, x: number): number => {
 const degToRad = (degrees: number): number => degrees * (Math.PI / 180);
 const rgb = (r: number, g: number, b: number): RGB => ({ r, g, b });
 
-type SeasonWeights = {
-  winter: number;
-  spring: number;
-  summer: number;
-  autumn: number;
-};
-
 export type SeasonalSkyConfig = {
-  summerCloudCoverage: number;
-  winterCloudCoverage: number;
   cloudLayerScaleNear: number;
   cloudLayerScaleFar: number;
   cloudLayerDriftNear: number;
@@ -54,8 +53,6 @@ export type SeasonalSkyConfig = {
 };
 
 export const SEASONAL_SKY_CONFIG: SeasonalSkyConfig = {
-  summerCloudCoverage: 0.28,
-  winterCloudCoverage: 0.72,
   cloudLayerScaleNear: 1.75,
   cloudLayerScaleFar: 0.96,
   cloudLayerDriftNear: 0.0105,
@@ -64,7 +61,7 @@ export const SEASONAL_SKY_CONFIG: SeasonalSkyConfig = {
   sunIntensityWinter: 0.76,
   glareIntensitySummer: 0.16,
   glareIntensityWinter: 0.07,
-  hazeStrengthSummer: 0.05,
+  hazeStrengthSummer: 0.035,
   hazeStrengthWinter: 0.11,
   ambientSoftnessSummer: 0.16,
   ambientSoftnessWinter: 0.4,
@@ -83,7 +80,9 @@ export type SeasonalSkyInput = {
   windDx: number;
   windDy: number;
   windStrength: number;
-  timeSpeedValue: number;
+  rainIntensity01?: number;
+  rainSeed?: number;
+  worldSeed?: number;
 };
 
 export type SeasonalSkyState = {
@@ -96,6 +95,8 @@ export type SeasonalSkyState = {
   cloudNearColor: RGB;
   cloudFarColor: RGB;
   cloudCoverage: number;
+  cloudSoftness01: number;
+  cloudDensity01: number;
   cloudNearScale: number;
   cloudFarScale: number;
   cloudNearOffset: THREE.Vector2;
@@ -110,6 +111,14 @@ export type SeasonalSkyState = {
   winter01: number;
   sunAzimuthDeg: number;
   sunElevationDeg: number;
+  cloudTimeDays: number;
+  stormIntensity01: number;
+  clearSky01: number;
+  wetSky01: number;
+  stormMood01: number;
+  oceanShallowColor: RGB;
+  oceanDeepColor: RGB;
+  weatherSeed: number;
 };
 
 export type SeasonalSkyDome = {
@@ -127,36 +136,14 @@ type SkyNoiseResources = {
 
 type CloudFieldSample = Pick<
   SeasonalSkyState,
-  "cloudCoverage" | "cloudNearScale" | "cloudFarScale" | "cloudNearOffset" | "cloudFarOffset"
+  | "cloudCoverage"
+  | "cloudSoftness01"
+  | "cloudDensity01"
+  | "cloudNearScale"
+  | "cloudFarScale"
+  | "cloudNearOffset"
+  | "cloudFarOffset"
 >;
-
-const blendSeason = (winter: RGB, spring: RGB, summer: RGB, autumn: RGB, weights: SeasonWeights): RGB => {
-  const total = Math.max(0.0001, weights.winter + weights.spring + weights.summer + weights.autumn);
-  const wn = weights.winter / total;
-  const sp = weights.spring / total;
-  const su = weights.summer / total;
-  const au = weights.autumn / total;
-  return {
-    r: winter.r * wn + spring.r * sp + summer.r * su + autumn.r * au,
-    g: winter.g * wn + spring.g * sp + summer.g * su + autumn.g * au,
-    b: winter.b * wn + spring.b * sp + summer.b * su + autumn.b * au
-  };
-};
-
-const getSeasonWeights = (seasonT01: number): SeasonWeights => {
-  const t = wrap01(seasonT01);
-  const spring = smoothstep(0.18, 0.28, t) * (1 - smoothstep(0.42, 0.52, t));
-  const summer = smoothstep(0.42, 0.52, t) * (1 - smoothstep(0.66, 0.76, t));
-  const autumn = smoothstep(0.62, 0.7, t) * (1 - smoothstep(0.9, 0.98, t));
-  const winterA = 1 - smoothstep(0.08, 0.18, t);
-  const winterB = smoothstep(0.88, 0.96, t);
-  return {
-    winter: clamp(winterA + winterB, 0, 1),
-    spring,
-    summer,
-    autumn
-  };
-};
 
 const toThreeColor = (color: RGB): THREE.Color =>
   new THREE.Color().setRGB(color.r / 255, color.g / 255, color.b / 255, THREE.SRGBColorSpace);
@@ -304,21 +291,22 @@ const sampleCloudLayer = (
 };
 
 const sampleCombinedCloudDensity = (direction: THREE.Vector3, cloudState: CloudFieldSample): number => {
+  const softnessScale = lerp(0.72, 1.28, cloudState.cloudSoftness01);
   const farDensity = sampleCloudLayer(
     direction,
     cloudState.cloudFarScale,
     cloudState.cloudFarOffset,
-    clamp01(cloudState.cloudCoverage * 0.82),
-    0.11
+    clamp01(cloudState.cloudCoverage * 0.7),
+    0.09 * softnessScale
   );
   const nearDensity = sampleCloudLayer(
     direction,
     cloudState.cloudNearScale,
     cloudState.cloudNearOffset,
-    clamp01(cloudState.cloudCoverage * 1.08),
-    0.085
+    clamp01(cloudState.cloudCoverage * 0.86),
+    0.075 * softnessScale
   );
-  return clamp01(farDensity * 0.44 + nearDensity * 0.64);
+  return clamp01((farDensity * 0.36 + nearDensity * 0.54) * cloudState.cloudDensity01);
 };
 
 const computeSunOcclusion = (
@@ -358,9 +346,25 @@ export const buildSeasonalSkyState = (
   config: SeasonalSkyConfig = SEASONAL_SKY_CONFIG
 ): SeasonalSkyState => {
   const seasonT01 = wrap01(input.seasonT01);
-  const season = getSeasonWeights(seasonT01);
   const { sunAzimuthDeg, sunElevationDeg, summer01, winter01 } = sampleSeasonalSunTrajectory(seasonT01);
   const risk01 = clamp01(input.risk01);
+  const weather: SeasonalWeatherVisualState = sampleSeasonalWeatherVisualState({
+    careerDay: input.careerDay,
+    seasonT01,
+    rainIntensity01: input.rainIntensity01,
+    rainSeed: input.rainSeed,
+    worldSeed: input.worldSeed,
+    windDx: input.windDx,
+    windDy: input.windDy,
+    windStrength: input.windStrength
+  });
+  const atmosphere: SeasonalAtmosphereVisualState = sampleSeasonalAtmosphereVisualState({
+    seasonT01,
+    risk01,
+    rainIntensity01: input.rainIntensity01,
+    wetSeason01: weather.wetSeason01,
+    stormIntensity01: weather.stormIntensity01
+  });
 
   // The sun follows a continuous stylized analemma driven only by wrapped year
   // position, so the sky dome and scene lighting stay continuous across seasons.
@@ -373,61 +377,24 @@ export const buildSeasonalSkyState = (
     horizontal * Math.sin(azimuthRad)
   ).normalize();
 
-  const baseSkyTop = blendSeason(
-    rgb(144, 154, 174),
-    rgb(132, 170, 214),
-    rgb(124, 180, 232),
-    rgb(150, 142, 162),
-    season
-  );
-  const baseSkyHorizon = blendSeason(
-    rgb(202, 206, 216),
-    rgb(220, 208, 178),
-    rgb(228, 200, 154),
-    rgb(220, 188, 150),
-    season
-  );
-  const baseSun = blendSeason(
-    rgb(244, 242, 236),
-    rgb(255, 237, 210),
-    rgb(255, 229, 184),
-    rgb(248, 219, 182),
-    season
-  );
-  const baseCloud = blendSeason(
-    rgb(220, 224, 230),
-    rgb(236, 234, 230),
-    rgb(248, 244, 234),
-    rgb(230, 220, 208),
-    season
-  );
+  const cloudCoverage = atmosphere.cloudCoverage01;
+  const driftDays = weather.cloudTimeDays;
 
-  // Seasonal blending stays continuous by mixing coverage and palette inputs from the
-  // wrapped season weights instead of hard-switching between summer and winter presets.
-  const cloudCoverage = clamp(
-    lerp(config.winterCloudCoverage, config.summerCloudCoverage, summer01) + (0.5 - risk01) * 0.08 + winter01 * 0.03,
-    0.12,
-    0.9
-  );
-  const speed01 = clamp01(Math.log2(Math.max(1, input.timeSpeedValue) + 1) / Math.log2(81));
-  const windLen = Math.hypot(input.windDx, input.windDy);
-  const windDirX = windLen > 1e-5 ? input.windDx / windLen : 0;
-  const windDirY = windLen > 1e-5 ? input.windDy / windLen : 0;
-  const driftDays = input.careerDay * (0.78 + speed01 * 0.22);
-
-  // Cloud drift is keyed from authoritative wind and career day, so pauses stop motion
-  // and faster sim speeds advance the same field more quickly without extra sim logic.
+  // Cloud drift is keyed from authoritative wind and career day, so pauses stop motion.
+  // Time-speed changes alone do not jump the cloud field.
   const cloudNearOffset = new THREE.Vector2(
-    windDirX * input.windStrength * driftDays * config.cloudLayerDriftNear,
-    windDirY * input.windStrength * driftDays * config.cloudLayerDriftNear
+    weather.windDirX * weather.windStrength01 * driftDays * config.cloudLayerDriftNear,
+    weather.windDirY * weather.windStrength01 * driftDays * config.cloudLayerDriftNear
   );
   const cloudFarOffset = new THREE.Vector2(
-    windDirX * input.windStrength * driftDays * config.cloudLayerDriftFar + 0.19,
-    windDirY * input.windStrength * driftDays * config.cloudLayerDriftFar - 0.11
+    weather.windDirX * weather.windStrength01 * driftDays * config.cloudLayerDriftFar + 0.19,
+    weather.windDirY * weather.windStrength01 * driftDays * config.cloudLayerDriftFar - 0.11
   );
 
   const cloudField: CloudFieldSample = {
     cloudCoverage,
+    cloudSoftness01: atmosphere.cloudSoftness01,
+    cloudDensity01: atmosphere.cloudDensity01,
     cloudNearScale: config.cloudLayerScaleNear,
     cloudFarScale: config.cloudLayerScaleFar,
     cloudNearOffset,
@@ -436,12 +403,16 @@ export const buildSeasonalSkyState = (
   // Cloud occlusion samples the same layered field around the sun direction so direct
   // light and glare soften when a cloud bank crosses the visible solar disc.
   const sunOcclusion01 = computeSunOcclusion(sunDirection, cloudField, config);
-  const overcastStrength = clamp01(cloudCoverage * 0.64 + winter01 * 0.18);
-  const skyTopColor = mixRgb(baseSkyTop, rgb(156, 166, 178), overcastStrength * 0.28);
-  const skyHorizonColor = mixRgb(baseSkyHorizon, rgb(196, 200, 204), overcastStrength * 0.32);
-  const sunColor = mixRgb(baseSun, rgb(242, 244, 246), overcastStrength * 0.22 + winter01 * 0.08);
-  const cloudFarColor = mixRgb(baseCloud, skyTopColor, 0.06 + overcastStrength * 0.12);
-  const cloudNearColor = mixRgb(scaleRgb(baseCloud, 1.06), skyHorizonColor, 0.08 + overcastStrength * 0.18);
+  const overcastStrength = clamp01(cloudCoverage * 0.38 + atmosphere.wetSky01 * 0.22 + atmosphere.stormMood01 * 0.22);
+  const sunColor = mixRgb(
+    mixRgb(rgb(244, 242, 236), rgb(255, 229, 184), summer01),
+    rgb(232, 238, 244),
+    overcastStrength * 0.24 + winter01 * 0.08
+  );
+  const skyTopColor = atmosphere.skyTopColor;
+  const skyHorizonColor = atmosphere.skyHorizonColor;
+  const cloudFarColor = atmosphere.cloudShadowColor;
+  const cloudNearColor = atmosphere.cloudBrightColor;
   const sunVisibility = clamp(1 - sunOcclusion01 * config.sunOcclusionLightReduction, 0.14, 1);
   const sunIntensityBase = lerp(config.sunIntensityWinter, config.sunIntensitySummer, summer01);
   const sunIntensity = clamp(sunIntensityBase * sunVisibility, 0.45, 1.3);
@@ -478,6 +449,8 @@ export const buildSeasonalSkyState = (
     cloudNearColor,
     cloudFarColor,
     cloudCoverage,
+    cloudSoftness01: atmosphere.cloudSoftness01,
+    cloudDensity01: atmosphere.cloudDensity01,
     cloudNearScale: config.cloudLayerScaleNear,
     cloudFarScale: config.cloudLayerScaleFar,
     cloudNearOffset,
@@ -491,7 +464,15 @@ export const buildSeasonalSkyState = (
     summer01,
     winter01,
     sunAzimuthDeg,
-    sunElevationDeg
+    sunElevationDeg,
+    cloudTimeDays: weather.cloudTimeDays,
+    stormIntensity01: weather.stormIntensity01,
+    clearSky01: atmosphere.clearSky01,
+    wetSky01: atmosphere.wetSky01,
+    stormMood01: atmosphere.stormMood01,
+    oceanShallowColor: atmosphere.oceanShallowColor,
+    oceanDeepColor: atmosphere.oceanDeepColor,
+    weatherSeed: weather.weatherSeed
   };
 };
 
@@ -520,6 +501,10 @@ const skyFragmentShader = `
   uniform float uOvercastStrength;
   uniform float uSunVisibility;
   uniform float uHazeStrength;
+  uniform float uCloudTimeDays;
+  uniform float uStormIntensity;
+  uniform float uCloudSoftness;
+  uniform float uCloudDensity;
 
   varying vec3 vSkyDir;
 
@@ -552,9 +537,72 @@ const skyFragmentShader = `
     float detail = sampleDirectionalNoise(dir, scale * 1.87, warpedOffset * 1.31 + vec2(-0.17, 0.29));
     float billow = sampleDirectionalNoise(dir, scale * 0.58, offset * 0.57 + vec2(0.51, -0.37));
     float shape = clamp(pow(base * 0.58 + detail * 0.24 + billow * 0.18, 1.18), 0.0, 1.0);
-    float threshold = mix(0.71, 0.47, clamp(coverage, 0.0, 1.0));
+    float threshold = mix(0.63, 0.38, clamp(coverage, 0.0, 1.0));
     float density = smoothstep(threshold - softness, threshold + softness, shape);
     return clamp(density * (0.72 + base * 0.36), 0.0, 1.0);
+  }
+
+  float samplePlanarNoise(vec2 uv, float scale, vec2 offset) {
+    vec2 p = uv * scale + offset;
+    float octave0 = sampleNoise(p);
+    float octave1 = sampleNoise(p * 1.93 + vec2(0.17, -0.29) - offset.yx * 0.17);
+    float octave2 = sampleNoise(p * 3.71 + vec2(-0.43, 0.31) + offset * 0.09);
+    float billow = 1.0 - abs(octave0 * 2.0 - 1.0);
+    return clamp(octave0 * 0.52 + billow * 0.3 + octave1 * 0.14 + octave2 * 0.04, 0.0, 1.0);
+  }
+
+  float samplePlanarCloudLayer(vec3 dir, float layerLift, float scale, vec2 offset, float coverage, float softness) {
+    float rayY = max(0.055, dir.y + layerLift);
+    vec2 planeUv = dir.xz / rayY;
+    planeUv *= 0.32;
+    float warp = samplePlanarNoise(planeUv, scale * 0.28, offset * 0.32 + vec2(0.19, -0.23));
+    float warpDetail = samplePlanarNoise(planeUv, scale * 0.48, vec2(-offset.y * 0.21 + 0.73, offset.x * 0.21 + 0.41));
+    vec2 warpedUv = planeUv + vec2((warp - 0.5) * 0.22, (warpDetail - 0.5) * 0.16);
+    float base = samplePlanarNoise(warpedUv, scale, offset);
+    float detail = samplePlanarNoise(warpedUv, scale * 1.38, offset * 1.31 + vec2(-0.17, 0.29));
+    float billow = samplePlanarNoise(warpedUv, scale * 0.46, offset * 0.57 + vec2(0.51, -0.37));
+    float core = smoothstep(0.42, 0.76, base * 0.72 + billow * 0.28);
+    float shape = clamp(pow(base * 0.64 + billow * 0.28 + detail * 0.08, 1.34), 0.0, 1.0);
+    float threshold = mix(0.82, 0.45, clamp(coverage, 0.0, 1.0));
+    float density = smoothstep(threshold, threshold + softness * mix(0.68, 1.26, uCloudSoftness), shape) * core;
+    float skyMask = smoothstep(-0.04, 0.08, dir.y);
+    return clamp(density * (0.74 + base * 0.34) * skyMask, 0.0, 1.0);
+  }
+
+  vec2 raymarchCloudLayer(vec3 dir, float horizonMask) {
+    float coverage = clamp(uCloudCoverage + uStormIntensity * 0.16, 0.0, 1.0);
+    float alpha = 0.0;
+    float body = 0.0;
+    float light = 0.0;
+    float stepCount = 9.0;
+    for (int i = 0; i < 9; i++) {
+      float t = (float(i) + 0.5) / stepCount;
+      vec2 shear = vec2(t * 0.19 + uCloudTimeDays * 0.0009, -t * 0.13 + uCloudTimeDays * 0.0006);
+      float farDensity = samplePlanarCloudLayer(
+        dir,
+        0.18 + t * 0.12,
+        uCloudFarScale * mix(0.92, 1.16, t),
+        uCloudFarOffset + shear,
+        coverage * mix(0.72, 0.96, t),
+        mix(0.14, 0.09, t)
+      );
+      float nearDensity = samplePlanarCloudLayer(
+        dir,
+        0.08 + t * 0.1,
+        uCloudNearScale * mix(0.88, 1.28, t),
+        uCloudNearOffset - shear.yx * 0.72,
+        min(1.0, coverage * mix(0.82, 1.22, t)),
+        mix(0.12, 0.07, t)
+      );
+      float density = clamp(farDensity * 0.34 + nearDensity * 0.54, 0.0, 1.0) * uCloudDensity;
+      density *= smoothstep(0.02, 0.2, dir.y + 0.14) * mix(0.82, 1.18, horizonMask);
+      density = clamp(density * mix(0.86, 1.32, uStormIntensity), 0.0, 1.0);
+      float sliceAlpha = density * mix(0.22, 0.36, uStormIntensity);
+      alpha += (1.0 - alpha) * sliceAlpha;
+      body += (1.0 - body) * density * 0.18;
+      light += (1.0 - light) * density * mix(t, 1.0 - t * 0.35, uStormIntensity) * 0.24;
+    }
+    return vec2(clamp(alpha, 0.0, 0.98), clamp(body * 0.74 + light * 0.46, 0.0, 1.0));
   }
 
   void main() {
@@ -562,22 +610,45 @@ const skyFragmentShader = `
     float skyT = clamp(dir.y * 0.5 + 0.5, 0.0, 1.0);
     vec3 baseSky = mix(uSkyHorizonColor, uSkyTopColor, pow(skyT, 0.6));
     float horizonMask = smoothstep(0.2, 1.0, 1.0 - clamp(dir.y, -0.3, 1.0));
-    float farDensity = sampleLayer(dir, uCloudFarScale, uCloudFarOffset, uCloudCoverage * 0.82, 0.11);
-    float nearDensity = sampleLayer(dir, uCloudNearScale, uCloudNearOffset, min(1.0, uCloudCoverage * 1.08), 0.085);
-    farDensity *= mix(0.86, 1.12, horizonMask);
-    nearDensity *= mix(0.84, 1.2, horizonMask);
-    float cloudAlpha = clamp(farDensity * 0.54 + nearDensity * 0.74, 0.0, 0.96);
+    float farDensity = samplePlanarCloudLayer(
+      dir,
+      0.24,
+      uCloudFarScale * 0.92,
+      uCloudFarOffset + vec2(uCloudTimeDays * 0.0007, -uCloudTimeDays * 0.0004),
+      uCloudCoverage * 0.56 + uStormIntensity * 0.13,
+      0.13
+    ) * mix(0.94, 1.2, horizonMask);
+    float nearDensity = samplePlanarCloudLayer(
+      dir,
+      0.12,
+      uCloudNearScale,
+      uCloudNearOffset + vec2(-uCloudTimeDays * 0.0003, uCloudTimeDays * 0.0005),
+      min(1.0, uCloudCoverage * 0.74 + uStormIntensity * 0.18),
+      0.1
+    ) * mix(0.9, 1.24, horizonMask);
+    float cloudPresence = mix(0.06, 1.0, smoothstep(0.24, 0.88, uCloudCoverage + uStormIntensity * 0.34));
+    float planarCloudAlpha = clamp(farDensity * 0.36 + nearDensity * 0.58, 0.0, 0.92) * cloudPresence * uCloudDensity;
+    vec2 cloudVolume = raymarchCloudLayer(dir, horizonMask);
+    cloudVolume.x *= mix(0.18, 1.0, cloudPresence);
+    cloudVolume.y *= mix(0.36, 1.0, cloudPresence);
+    float cloudAlpha = clamp(max(cloudVolume.x, planarCloudAlpha * 0.82) + planarCloudAlpha * 0.16, 0.0, 0.96);
     float sunDot = max(dot(dir, normalize(uSunDirection)), 0.0);
     float glow = pow(sunDot, mix(12.0, 6.0, uOvercastStrength));
     float disc = smoothstep(0.9945, 0.9989, sunDot);
     vec3 sunColor = uSunColor * uSunVisibility;
     vec3 skyWithSun = baseSky + sunColor * (glow * 0.48 + disc * 1.35);
-    float nearMix = clamp(nearDensity / max(0.001, nearDensity + farDensity), 0.0, 1.0);
+    float nearMix = clamp(cloudVolume.y + nearDensity * 0.42 + horizonMask * 0.18, 0.0, 1.0);
     vec3 cloudBase = mix(uCloudFarColor, uCloudNearColor, nearMix);
-    float cloudBody = clamp(farDensity * 0.48 + nearDensity * 0.72, 0.0, 1.0);
-    float cloudHighlight = pow(clamp(1.0 - cloudBody, 0.0, 1.0), 1.6);
-    vec3 cloudShadowColor = mix(uSkyTopColor, uCloudFarColor, 0.42);
-    vec3 cloudColor = mix(cloudShadowColor, cloudBase, 0.5 + cloudHighlight * 0.5);
+    float cloudBody = clamp(max(cloudVolume.y, planarCloudAlpha * 0.62), 0.0, 1.0);
+    float cloudHighlight = pow(clamp(1.0 - cloudBody, 0.0, 1.0), 1.35);
+    float stormMood = clamp(uStormIntensity * 0.72 + smoothstep(0.42, 0.88, uCloudCoverage) * 0.48, 0.0, 1.0);
+    float contrast = clamp(0.12 + uCloudCoverage * 0.26 + stormMood * 0.38 + horizonMask * 0.1, 0.0, 0.82);
+    vec3 cloudShadowColor = mix(vec3(0.78, 0.81, 0.84), vec3(0.34, 0.36, 0.4), stormMood);
+    vec3 cloudBrightColor = mix(cloudBase, vec3(1.0, 0.99, 0.95), 0.44 - stormMood * 0.22);
+    vec3 cloudMidColor = mix(cloudShadowColor, cloudBrightColor, 0.5 + cloudHighlight * 0.46);
+    vec3 cloudColor = mix(cloudMidColor, mix(cloudMidColor, cloudBrightColor, 0.28), smoothstep(0.72, 0.98, sunDot));
+    cloudColor = mix(cloudColor, cloudColor - vec3(0.1, 0.11, 0.12) * cloudBody, contrast * cloudBody);
+    cloudColor = mix(cloudColor, cloudBrightColor, (1.0 - cloudBody) * 0.18);
     vec3 color = mix(skyWithSun, cloudColor, cloudAlpha);
     color += sunColor * glow * (1.0 - cloudAlpha * 0.78) * (0.14 + (1.0 - uOvercastStrength) * 0.2);
     float haze = smoothstep(-0.14, 0.12, dir.y) * uHazeStrength;
@@ -601,10 +672,14 @@ export const createSeasonalSkyDome = (): SeasonalSkyDome => {
     uCloudFarOffset: { value: new THREE.Vector2(0.19, -0.11) },
     uCloudNearScale: { value: SEASONAL_SKY_CONFIG.cloudLayerScaleNear },
     uCloudFarScale: { value: SEASONAL_SKY_CONFIG.cloudLayerScaleFar },
-    uCloudCoverage: { value: SEASONAL_SKY_CONFIG.summerCloudCoverage },
+    uCloudCoverage: { value: 0.06 },
     uOvercastStrength: { value: 0.2 },
     uSunVisibility: { value: 1 },
-    uHazeStrength: { value: SEASONAL_SKY_CONFIG.hazeStrengthSummer }
+    uHazeStrength: { value: SEASONAL_SKY_CONFIG.hazeStrengthSummer },
+    uCloudTimeDays: { value: 0 },
+    uStormIntensity: { value: 0 },
+    uCloudSoftness: { value: 0.8 },
+    uCloudDensity: { value: 0.4 }
   };
   const material = new THREE.ShaderMaterial({
     uniforms,
@@ -636,6 +711,10 @@ export const createSeasonalSkyDome = (): SeasonalSkyDome => {
     uniforms.uOvercastStrength.value = state.overcastStrength;
     uniforms.uSunVisibility.value = state.sunVisibility;
     uniforms.uHazeStrength.value = state.hazeStrength;
+    uniforms.uCloudTimeDays.value = state.cloudTimeDays;
+    uniforms.uStormIntensity.value = state.stormIntensity01;
+    uniforms.uCloudSoftness.value = state.cloudSoftness01;
+    uniforms.uCloudDensity.value = state.cloudDensity01;
   };
 
   const syncToCamera = (camera: THREE.Camera): void => {

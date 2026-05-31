@@ -5,7 +5,7 @@ import {
   FX_LAB_WATER_CONTROLS
 } from "./controls.js";
 import { FX_LAB_SCENARIOS } from "./scenarios.js";
-import type { FxLabController } from "./controller.js";
+import type { FxLabController, FxLabWeatherMode } from "./controller.js";
 import type { WaterSprayMode } from "../../core/types.js";
 import type { FireFxDebugControls, FireFxDebugSnapshot } from "../threeTestFireFx.js";
 import type { OceanWaterDebugControls } from "../oceanWaterDebug.js";
@@ -174,7 +174,27 @@ export const createFxLabPanel = (mount: HTMLElement, controller: FxLabController
     timeScaleSelect.appendChild(option);
   });
   timeScaleLabel.append(timeScaleText, timeScaleSelect);
-  playbackSection.append(playbackTitle, playbackRow, timeScaleLabel);
+  const weatherModeLabel = document.createElement("label");
+  weatherModeLabel.className = "fx-lab-inline-field";
+  const weatherModeText = document.createElement("span");
+  weatherModeText.textContent = "Weather";
+  const weatherModeSelect = document.createElement("select");
+  weatherModeSelect.className = "fx-lab-select";
+  ([
+    { value: "rainEvent", label: "Rain Event" },
+    { value: "yearCycle", label: "Year Cycle" },
+    { value: "winter", label: "Winter Clouds" },
+    { value: "spring", label: "Spring Clouds" },
+    { value: "summer", label: "Summer Clouds" },
+    { value: "autumn", label: "Autumn Clouds" }
+  ] as const).forEach((option) => {
+    const entry = document.createElement("option");
+    entry.value = option.value;
+    entry.textContent = option.label;
+    weatherModeSelect.appendChild(entry);
+  });
+  weatherModeLabel.append(weatherModeText, weatherModeSelect);
+  playbackSection.append(playbackTitle, playbackRow, timeScaleLabel, weatherModeLabel);
   registerTabSection("scene", playbackSection);
 
   const placementSection = document.createElement("section");
@@ -721,6 +741,7 @@ export const createFxLabPanel = (mount: HTMLElement, controller: FxLabController
       timeScaleSelect.appendChild(option);
     }
     timeScaleSelect.value = `${timeScale}`;
+    weatherModeSelect.value = controller.getWeatherMode();
     placeFirefighterButton.setAttribute("aria-pressed", `${placementMode === "firefighter"}`);
     placeTruckButton.setAttribute("aria-pressed", `${placementMode === "truck"}`);
     clearPlacementButton.setAttribute("aria-pressed", "false");
@@ -788,6 +809,10 @@ export const createFxLabPanel = (mount: HTMLElement, controller: FxLabController
   });
   timeScaleSelect.addEventListener("change", () => {
     controller.setTimeScale(Number(timeScaleSelect.value));
+    sync();
+  });
+  weatherModeSelect.addEventListener("change", () => {
+    controller.setWeatherMode(weatherModeSelect.value as FxLabWeatherMode);
     sync();
   });
   const togglePlacementMode = (mode: FxLabPlacementMode): void => {

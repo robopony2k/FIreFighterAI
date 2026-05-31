@@ -33,6 +33,7 @@ import { handleHudClick, handleHudKey, renderHud } from "./hud/hud.js";
 import { buildEnvironmentPalette, computeFireLoad01 } from "./environmentPalette.js";
 import { buildLightingDirectorState, type LightingDirectorInput, type LightingDirectorState } from "./lightingDirector.js";
 import { createSeasonalSkyDome } from "./seasonalSky.js";
+import { sampleSeasonalWeatherVisualState } from "../systems/climate/rendering/seasonalWeatherVisualState.js";
 import { buildThermalBackdropField, buildThermalHotspotField, paintThermalField } from "./minimapRaster.js";
 import {
   getFirestationAssetCache,
@@ -5133,6 +5134,9 @@ export const createThreeTest = (
       windDx: world.wind?.dx ?? 0,
       windDy: world.wind?.dy ?? 0,
       windStrength: world.wind?.strength ?? 0,
+      rainIntensity01: seasonalRainState?.visualIntensity01 ?? 0,
+      rainSeed: seasonalRainState?.event?.seed,
+      worldSeed: world.seed,
       timeSpeedValue: getResolvedTimeSpeedValue(world)
     };
   };
@@ -5349,6 +5353,8 @@ export const createThreeTest = (
       ...currentEnvironmentPalette.water,
       skyTop: lighting.skyTopColor,
       skyHorizon: waterSkyHorizon,
+      oceanShallow: lighting.oceanShallowColor,
+      oceanDeep: lighting.oceanDeepColor,
       sun: lighting.waterSunColor
     });
   };
@@ -6665,15 +6671,25 @@ export const createThreeTest = (
   const isSeasonalRainVisualActive = (): boolean =>
     !THREE_TEST_DISABLE_FX && (seasonalRainState?.visualIntensity01 ?? 0) > 0.001;
 
-  const syncSeasonalRainPostState = (time: number): void => {
+  const syncSeasonalRainPostState = (): void => {
     const rain = seasonalRainState;
     const screenWind = resolveSeasonalRainScreenWind(camera, world.wind);
+    const weatherVisual = sampleSeasonalWeatherVisualState({
+      careerDay: world.careerDay ?? 0,
+      seasonT01: seasonVisualState.seasonT01,
+      rainIntensity01: rain?.visualIntensity01 ?? 0,
+      rainSeed: rain?.event?.seed,
+      worldSeed: world.seed,
+      windDx: world.wind?.dx ?? 0,
+      windDy: world.wind?.dy ?? 0,
+      windStrength: world.wind?.strength ?? 0
+    });
     postPipeline?.setSeasonalRainState({
       enabled: !THREE_TEST_DISABLE_FX && Boolean(rain?.active),
       intensity01: rain?.intensity01 ?? 0,
       visualIntensity01: rain?.visualIntensity01 ?? 0,
       seed: rain?.event?.seed ?? world.seed,
-      timeSeconds: time * 0.001,
+      timeSeconds: weatherVisual.rainTimeSeconds,
       windScreenX: screenWind.x,
       windScreenY: screenWind.y,
       windStrength01: screenWind.strength01
@@ -6775,7 +6791,7 @@ export const createThreeTest = (
       syncDirectionalLightRig(lastLightingApplied);
     }
     syncSunGlare(lastLightingApplied);
-    syncSeasonalRainPostState(time);
+    syncSeasonalRainPostState();
     maybeRefreshShadowMap(time, lastLightingApplied, isCameraInteracting());
     syncDofSettings();
     const treeBurnStart = performance.now();
@@ -7032,12 +7048,22 @@ export const createThreeTest = (
   const setSeasonalRainState = (next: SeasonalRainState | null): void => {
     seasonalRainState = next;
     if (!next || next.visualIntensity01 <= 0.001) {
+      const weatherVisual = sampleSeasonalWeatherVisualState({
+        careerDay: world.careerDay ?? 0,
+        seasonT01: seasonVisualState.seasonT01,
+        rainIntensity01: 0,
+        rainSeed: next?.event?.seed,
+        worldSeed: world.seed,
+        windDx: world.wind?.dx ?? 0,
+        windDy: world.wind?.dy ?? 0,
+        windStrength: world.wind?.strength ?? 0
+      });
       postPipeline?.setSeasonalRainState({
         enabled: false,
         intensity01: 0,
         visualIntensity01: 0,
         seed: world.seed,
-        timeSeconds: lastFrameTime > 0 ? lastFrameTime * 0.001 : 0,
+        timeSeconds: weatherVisual.rainTimeSeconds,
         windScreenX: 0,
         windScreenY: 0,
         windStrength01: 0

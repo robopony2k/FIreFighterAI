@@ -1,5 +1,19 @@
 # Deprecations
 
+## Wall-Clock Weather FX Animation
+
+Status: Deprecated as of May 30, 2026.
+
+- 3D cloud drift and seasonal rain streak motion no longer advance from render-frame wall-clock time.
+- Weather visuals now derive cloud and rain phase from simulation career time, seasonal rain seed, and wind, so pausing the game freezes weather like other gameplay-aligned visual effects.
+- The replacement weather presentation is a ShaderToy-inspired local rewrite, not a direct source port.
+
+Migration guidance:
+
+1. Route future weather visual motion through climate rendering state derived from simulation time.
+2. Do not add rain, cloud, or storm animation paths that depend only on `requestAnimationFrame` timestamps.
+3. Keep new weather rendering helpers under `src/systems/climate/rendering/` unless they are truly generic render infrastructure.
+
 ## Runtime Settlement Terrain Elevation Edits
 
 Status: Deprecated as of May 30, 2026.

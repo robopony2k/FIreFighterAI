@@ -15,6 +15,9 @@ import {
   createSeasonalRainOverlayPass,
   resolveSeasonalRainScreenWind
 } from "../../systems/climate/rendering/seasonalRainOverlayPass.js";
+import { sampleSeasonalWeatherVisualState } from "../../systems/climate/rendering/seasonalWeatherVisualState.js";
+import { buildLightingDirectorState } from "../lightingDirector.js";
+import { createSeasonalSkyDome } from "../seasonalSky.js";
 import { buildRenderTerrainSample } from "../simView.js";
 import { buildTerrainMesh, prepareTerrainRenderSurface, type TerrainRenderSurface, type TerrainSample } from "../threeTestTerrain.js";
 import { ThreeTestWaterSystem } from "../threeTestWater.js";
@@ -74,6 +77,20 @@ const FX_LAB_COAST_BEACH_WET_DEPTHS = [0.003, 0.006, 0.01, 0.015, 0.021, 0.028] 
 const FX_LAB_RAIN_SCENARIO_ID: FxLabScenarioId = "rain-overlay";
 const FX_LAB_RAIN_SEED = 26092026;
 const FX_LAB_RAIN_INTENSITY = 1;
+const FX_LAB_RAIN_CAREER_DAY = 286;
+const FX_LAB_RIVER_SHALLOW = { r: 63, g: 134, b: 191 };
+const FX_LAB_RIVER_DEEP = { r: 26, g: 77, b: 121 };
+const FX_LAB_WEATHER_CYCLE_DAYS_PER_SECOND = 18;
+const FX_LAB_WEATHER_MODE_CAREER_DAY: Record<FxLabWeatherMode, number> = {
+  rainEvent: FX_LAB_RAIN_CAREER_DAY,
+  yearCycle: FX_LAB_RAIN_CAREER_DAY,
+  winter: 24,
+  spring: 116,
+  summer: 190,
+  autumn: 286
+};
+
+export type FxLabWeatherMode = "rainEvent" | "yearCycle" | "winter" | "spring" | "summer" | "autumn";
 
 const clamp = (value: number, min: number, max: number): number => Math.max(min, Math.min(max, value));
 const fract = (value: number): number => value - Math.floor(value);
@@ -332,6 +349,8 @@ export type FxLabController = {
   isPaused: () => boolean;
   setTimeScale: (value: number) => void;
   getTimeScale: () => number;
+  setWeatherMode: (mode: FxLabWeatherMode) => void;
+  getWeatherMode: () => FxLabWeatherMode;
   setPlacementMode: (mode: FxLabPlacementMode) => void;
   getPlacementMode: () => FxLabPlacementMode;
   clearPlacementOverrides: () => void;
@@ -774,7 +793,10 @@ export const createFxLabController = (
   const rainOverlayPass = createSeasonalRainOverlayPass();
 
   const scene = new THREE.Scene();
+  scene.background = null;
   scene.fog = new THREE.Fog(0x1e2430, 22, 86);
+  const seasonalSky = createSeasonalSkyDome();
+  scene.add(seasonalSky.mesh);
   const camera = new THREE.PerspectiveCamera(46, 1, 0.1, 240);
   const raycaster = new THREE.Raycaster();
   const pointerNdc = new THREE.Vector2();
@@ -826,6 +848,7 @@ export const createFxLabController = (
   let rafId = 0;
   let paused = false;
   let timeScale = 1;
+  let weatherMode: FxLabWeatherMode = "rainEvent";
   let labTimeMs = 0;
   let lastFrameMs: number | null = null;
   let lastSceneRenderMs = 9;
@@ -895,18 +918,101 @@ export const createFxLabController = (
     }
   };
 
+  const normalizeWeatherMode = (mode: FxLabWeatherMode): FxLabWeatherMode =>
+    mode === "yearCycle" || mode === "winter" || mode === "spring" || mode === "summer" || mode === "autumn"
+      ? mode
+      : "rainEvent";
+
+  const getFxLabWeatherCareerDay = (): number => {
+    if (weatherMode === "yearCycle") {
+      return FX_LAB_RAIN_CAREER_DAY + labTimeMs * 0.001 * FX_LAB_WEATHER_CYCLE_DAYS_PER_SECOND;
+    }
+    return FX_LAB_WEATHER_MODE_CAREER_DAY[weatherMode] ?? FX_LAB_RAIN_CAREER_DAY;
+  };
+
+  const getFxLabWeatherSeasonT01 = (): number => {
+    const dayOfYear = ((getFxLabWeatherCareerDay() % 360) + 360) % 360;
+    return dayOfYear / 360;
+  };
+
+  const getFxLabWeatherRainIntensity = (): number =>
+    weatherMode === "rainEvent" ? FX_LAB_RAIN_INTENSITY : 0;
+
+  const syncWeatherRenderer = (): void => {
+    const rainIntensity = getFxLabWeatherRainIntensity();
+    const rainActive = currentScenarioId === FX_LAB_RAIN_SCENARIO_ID && rainIntensity > 0.001;
+    const careerDay = getFxLabWeatherCareerDay();
+    const seasonT01 = getFxLabWeatherSeasonT01();
+    const lighting = buildLightingDirectorState({
+      seasonT01,
+      risk01: rainActive ? 0.22 : 0.44,
+      careerDay,
+      windDx: sceneState.world.wind.dx,
+      windDy: sceneState.world.wind.dy,
+      windStrength: sceneState.world.wind.strength,
+      rainIntensity01: rainActive ? rainIntensity : 0,
+      rainSeed: FX_LAB_RAIN_SEED,
+      worldSeed: FX_LAB_SEED,
+      timeSpeedValue: paused ? 0 : timeScale
+    });
+    seasonalSky.setState(lighting);
+    seasonalSky.syncToCamera(camera);
+    hemisphere.color.setRGB(
+      lighting.skyTopColor.r / 255,
+      lighting.skyTopColor.g / 255,
+      lighting.skyTopColor.b / 255,
+      THREE.SRGBColorSpace
+    );
+    hemisphere.intensity = lighting.ambientIntensity + 0.28;
+    keyLight.color.setRGB(
+      lighting.sunColor.r / 255,
+      lighting.sunColor.g / 255,
+      lighting.sunColor.b / 255,
+      THREE.SRGBColorSpace
+    );
+    keyLight.intensity = lighting.sunIntensity;
+    keyLight.position.copy(controls.target).addScaledVector(lighting.sunDirection, 42);
+    keyLight.target.position.copy(controls.target);
+    keyLight.target.updateMatrixWorld();
+    waterSystem.setPalette({
+      skyTop: lighting.skyTopColor,
+      skyHorizon: {
+        r: lighting.skyHorizonColor.r + (lighting.skyTopColor.r - lighting.skyHorizonColor.r) * 0.32,
+        g: lighting.skyHorizonColor.g + (lighting.skyTopColor.g - lighting.skyHorizonColor.g) * 0.32,
+        b: lighting.skyHorizonColor.b + (lighting.skyTopColor.b - lighting.skyHorizonColor.b) * 0.32
+      },
+      sun: lighting.waterSunColor,
+      oceanShallow: lighting.oceanShallowColor,
+      oceanDeep: lighting.oceanDeepColor,
+      riverShallow: FX_LAB_RIVER_SHALLOW,
+      riverDeep: FX_LAB_RIVER_DEEP
+    });
+  };
+
   const renderSceneWithOptionalRain = (): void => {
+    syncWeatherRenderer();
     if (currentScenarioId !== FX_LAB_RAIN_SCENARIO_ID) {
       renderer.render(scene, camera);
       return;
     }
+    const rainIntensity = getFxLabWeatherRainIntensity();
     const screenWind = resolveSeasonalRainScreenWind(camera, sceneState.world.wind);
+    const weatherVisual = sampleSeasonalWeatherVisualState({
+      careerDay: getFxLabWeatherCareerDay(),
+      seasonT01: getFxLabWeatherSeasonT01(),
+      rainIntensity01: rainIntensity,
+      rainSeed: FX_LAB_RAIN_SEED,
+      worldSeed: FX_LAB_SEED,
+      windDx: sceneState.world.wind.dx,
+      windDy: sceneState.world.wind.dy,
+      windStrength: sceneState.world.wind.strength
+    });
     rainOverlayPass.setState({
-      enabled: true,
-      intensity01: FX_LAB_RAIN_INTENSITY,
-      visualIntensity01: FX_LAB_RAIN_INTENSITY,
+      enabled: rainIntensity > 0.001,
+      intensity01: rainIntensity,
+      visualIntensity01: rainIntensity,
       seed: FX_LAB_RAIN_SEED,
-      timeSeconds: labTimeMs * 0.001,
+      timeSeconds: weatherVisual.rainTimeSeconds,
       windScreenX: screenWind.x,
       windScreenY: screenWind.y,
       windStrength01: screenWind.strength01
@@ -1632,6 +1738,8 @@ export const createFxLabController = (
       unitsLayer.dispose();
       waterSystem.dispose();
       rainOverlayPass.dispose();
+      scene.remove(seasonalSky.mesh);
+      seasonalSky.dispose();
       disposeRainSceneTarget();
       scene.remove(sprayTargetMarker);
       sprayTargetMarker.geometry.dispose();
@@ -1676,6 +1784,11 @@ export const createFxLabController = (
       timeScale = clamp(value, 0.1, 4);
     },
     getTimeScale: () => timeScale,
+    setWeatherMode: (mode: FxLabWeatherMode) => {
+      weatherMode = normalizeWeatherMode(mode);
+      renderOnce();
+    },
+    getWeatherMode: () => weatherMode,
     setPlacementMode,
     getPlacementMode: () => placementMode,
     clearPlacementOverrides,
