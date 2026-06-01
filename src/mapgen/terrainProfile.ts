@@ -20,6 +20,7 @@ export type TerrainAdvancedOverrides = {
   asymmetry?: number;
   ridgeAlignment?: number;
   uplandDistribution?: number;
+  noiseFrequency?: number;
   islandCompactness?: number;
   ridgeFrequency?: number;
   basinStrength?: number;
@@ -142,6 +143,7 @@ const DEFAULT_ADVANCED_OVERRIDES: Required<TerrainAdvancedOverrides> = {
   asymmetry: 0.46,
   ridgeAlignment: 0.42,
   uplandDistribution: 0.42,
+  noiseFrequency: 0.5,
   islandCompactness: 0.6,
   ridgeFrequency: 0.48,
   basinStrength: 0.42,
@@ -173,11 +175,11 @@ const ARCHETYPE_PRESETS: Record<
   MASSIF: {
     relief: 0.7,
     ruggedness: 0.55,
-    coastComplexity: 0.34,
+    coastComplexity: 0.5,
     landCoverageTarget: 0.64,
     waterLevel: 0.34,
     riverIntensity: 0.45,
-    vegetationDensity: 0.56,
+    vegetationDensity: 0.62,
     townDensity: 0.48,
     bridgeAllowance: 0.18,
     advanced: {
@@ -188,9 +190,10 @@ const ARCHETYPE_PRESETS: Record<
       asymmetry: ISLAND_ARCHETYPE_DEFINITIONS.MASSIF.asymmetry,
       ridgeAlignment: ISLAND_ARCHETYPE_DEFINITIONS.MASSIF.ridgeAlignment,
       uplandDistribution: ISLAND_ARCHETYPE_DEFINITIONS.MASSIF.uplandDistribution,
-      islandCompactness: 0.72,
+      noiseFrequency: 0.48,
+      islandCompactness: 0.56,
       ridgeFrequency: ISLAND_ARCHETYPE_DEFINITIONS.MASSIF.ridgeFrequency,
-      basinStrength: ISLAND_ARCHETYPE_DEFINITIONS.MASSIF.basinStrength,
+      basinStrength: 0.58,
       coastalShelfWidth: ISLAND_ARCHETYPE_DEFINITIONS.MASSIF.coastalShelfWidth,
       seaLevelBias: 0.5,
       skipCarving: false,
@@ -219,6 +222,7 @@ const ARCHETYPE_PRESETS: Record<
       asymmetry: ISLAND_ARCHETYPE_DEFINITIONS.LONG_SPINE.asymmetry,
       ridgeAlignment: ISLAND_ARCHETYPE_DEFINITIONS.LONG_SPINE.ridgeAlignment,
       uplandDistribution: ISLAND_ARCHETYPE_DEFINITIONS.LONG_SPINE.uplandDistribution,
+      noiseFrequency: 0.56,
       islandCompactness: 0.6,
       ridgeFrequency: ISLAND_ARCHETYPE_DEFINITIONS.LONG_SPINE.ridgeFrequency,
       basinStrength: ISLAND_ARCHETYPE_DEFINITIONS.LONG_SPINE.basinStrength,
@@ -250,6 +254,7 @@ const ARCHETYPE_PRESETS: Record<
       asymmetry: ISLAND_ARCHETYPE_DEFINITIONS.TWIN_BAY.asymmetry,
       ridgeAlignment: ISLAND_ARCHETYPE_DEFINITIONS.TWIN_BAY.ridgeAlignment,
       uplandDistribution: ISLAND_ARCHETYPE_DEFINITIONS.TWIN_BAY.uplandDistribution,
+      noiseFrequency: 0.5,
       islandCompactness: 0.62,
       ridgeFrequency: ISLAND_ARCHETYPE_DEFINITIONS.TWIN_BAY.ridgeFrequency,
       basinStrength: ISLAND_ARCHETYPE_DEFINITIONS.TWIN_BAY.basinStrength,
@@ -281,6 +286,7 @@ const ARCHETYPE_PRESETS: Record<
       asymmetry: ISLAND_ARCHETYPE_DEFINITIONS.SHELF.asymmetry,
       ridgeAlignment: ISLAND_ARCHETYPE_DEFINITIONS.SHELF.ridgeAlignment,
       uplandDistribution: ISLAND_ARCHETYPE_DEFINITIONS.SHELF.uplandDistribution,
+      noiseFrequency: 0.38,
       islandCompactness: 0.78,
       ridgeFrequency: ISLAND_ARCHETYPE_DEFINITIONS.SHELF.ridgeFrequency,
       basinStrength: ISLAND_ARCHETYPE_DEFINITIONS.SHELF.basinStrength,
@@ -355,6 +361,10 @@ export const cloneTerrainRecipe = (recipe?: Partial<TerrainRecipe>): TerrainReci
       uplandDistribution: clampOverride(
         sourceAdvanced.uplandDistribution,
         defaults.advancedOverrides?.uplandDistribution ?? DEFAULT_ADVANCED_OVERRIDES.uplandDistribution
+      ),
+      noiseFrequency: clampOverride(
+        sourceAdvanced.noiseFrequency,
+        defaults.advancedOverrides?.noiseFrequency ?? DEFAULT_ADVANCED_OVERRIDES.noiseFrequency
       ),
       islandCompactness: clampOverride(
         sourceAdvanced.islandCompactness,
@@ -439,6 +449,7 @@ export const terrainRecipeEqual = (a: TerrainRecipe, b: TerrainRecipe): boolean 
     Math.abs((aAdvanced.asymmetry ?? 0) - (bAdvanced.asymmetry ?? 0)) <= 1e-6 &&
     Math.abs((aAdvanced.ridgeAlignment ?? 0) - (bAdvanced.ridgeAlignment ?? 0)) <= 1e-6 &&
     Math.abs((aAdvanced.uplandDistribution ?? 0) - (bAdvanced.uplandDistribution ?? 0)) <= 1e-6 &&
+    Math.abs((aAdvanced.noiseFrequency ?? 0) - (bAdvanced.noiseFrequency ?? 0)) <= 1e-6 &&
     Math.abs((aAdvanced.islandCompactness ?? 0) - (bAdvanced.islandCompactness ?? 0)) <= 1e-6 &&
     Math.abs((aAdvanced.ridgeFrequency ?? 0) - (bAdvanced.ridgeFrequency ?? 0)) <= 1e-6 &&
     Math.abs((aAdvanced.basinStrength ?? 0) - (bAdvanced.basinStrength ?? 0)) <= 1e-6 &&
@@ -469,6 +480,7 @@ const resolveAdvancedOverrides = (recipe: TerrainRecipe): Required<TerrainAdvanc
     asymmetry: clampOverride(advanced.asymmetry, preset.asymmetry),
     ridgeAlignment: clampOverride(advanced.ridgeAlignment, preset.ridgeAlignment),
     uplandDistribution: clampOverride(advanced.uplandDistribution, preset.uplandDistribution),
+    noiseFrequency: clampOverride(advanced.noiseFrequency, preset.noiseFrequency),
     islandCompactness: clampOverride(advanced.islandCompactness, preset.islandCompactness),
     ridgeFrequency: clampOverride(advanced.ridgeFrequency, preset.ridgeFrequency),
     basinStrength: clampOverride(advanced.basinStrength, preset.basinStrength),
@@ -504,6 +516,7 @@ export const compileTerrainRecipe = (recipeInput: TerrainRecipe): ResolvedTerrai
   const asymmetry = clamp01(advanced.asymmetry);
   const ridgeAlignment = clamp01(advanced.ridgeAlignment);
   const uplandDistribution = clamp01(advanced.uplandDistribution);
+  const noiseFrequency = clamp01(advanced.noiseFrequency);
   const seaLevelBias = clamp01(advanced.seaLevelBias);
   const heightScaleMultiplier = computeTerrainHeightScaleMultiplier(maxHeight);
   const normalizedHeightPressure = computeNormalizedHeightPressure(maxHeight);
@@ -599,6 +612,7 @@ export const compileTerrainRecipe = (recipeInput: TerrainRecipe): ResolvedTerrai
     asymmetry,
     ridgeAlignment,
     uplandDistribution,
+    noiseFrequency,
     islandCompactness: advanced.islandCompactness,
     ridgeFrequency: advanced.ridgeFrequency,
     basinStrength: advanced.basinStrength,
@@ -756,6 +770,7 @@ const inferRecipeFromSettings = (settingsInput: Partial<MapGenSettings>, mapSize
       asymmetry: clamp01(settings.asymmetry ?? DEFAULT_ADVANCED_OVERRIDES.asymmetry),
       ridgeAlignment: clamp01(settings.ridgeAlignment ?? DEFAULT_ADVANCED_OVERRIDES.ridgeAlignment),
       uplandDistribution: clamp01(settings.uplandDistribution ?? DEFAULT_ADVANCED_OVERRIDES.uplandDistribution),
+      noiseFrequency: clamp01(settings.noiseFrequency ?? DEFAULT_ADVANCED_OVERRIDES.noiseFrequency),
       islandCompactness: clamp01(settings.islandCompactness ?? DEFAULT_ADVANCED_OVERRIDES.islandCompactness),
       ridgeFrequency: clamp01(settings.ridgeFrequency ?? DEFAULT_ADVANCED_OVERRIDES.ridgeFrequency),
       basinStrength: clamp01(settings.basinStrength ?? DEFAULT_ADVANCED_OVERRIDES.basinStrength),

@@ -56,6 +56,7 @@ export type MapGenSettings = {
   asymmetry: number;
   ridgeAlignment: number;
   uplandDistribution: number;
+  noiseFrequency: number;
   islandCompactness: number;
   ridgeFrequency: number;
   basinStrength: number;
@@ -158,6 +159,7 @@ export const DEFAULT_MAP_GEN_SETTINGS: MapGenSettings = {
   asymmetry: 0.46,
   ridgeAlignment: 0.34,
   uplandDistribution: 0.42,
+  noiseFrequency: 0.5,
   islandCompactness: 0.72,
   ridgeFrequency: 0.34,
   basinStrength: 0.3,

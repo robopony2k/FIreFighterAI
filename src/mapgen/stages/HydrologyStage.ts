@@ -2,7 +2,6 @@ import { DISABLE_INLAND_LAKES } from "../../core/config.js";
 import { indexFor } from "../../core/grid.js";
 import { COAST_CLASS_NONE } from "../../core/state.js";
 import type { Tile } from "../../core/types.js";
-import { clamp } from "../../core/utils.js";
 import type { PipelineStage } from "../pipeline/TerrainPipeline.js";
 import { emitStageSnapshot } from "../pipeline/stageDebug.js";
 import {
@@ -49,7 +48,7 @@ export const HydrologyStage: PipelineStage = {
   id: "hydro:solve",
   weight: 16,
   run: async (ctx) => {
-    const { state, settings, cellSizeM, edgeDenomM } = ctx;
+    const { state, settings } = ctx;
     const elevationMap = ctx.elevationMap;
     const riverMask = ctx.riverMask;
     if (!elevationMap || !riverMask) {
@@ -59,13 +58,11 @@ export const HydrologyStage: PipelineStage = {
     const totalTiles = state.grid.totalTiles;
     const seaLevelMap = new Float32Array(totalTiles);
     ctx.seaLevelMap = seaLevelMap;
+    const seaLevel = clampSeaLevel(ctx.seaLevelBase, settings);
 
     for (let y = 0; y < state.grid.rows; y += 1) {
       for (let x = 0; x < state.grid.cols; x += 1) {
         const idx = indexFor(state.grid, x, y);
-        const edgeDistM = Math.min(x, y, state.grid.cols - 1 - x, state.grid.rows - 1 - y) * cellSizeM;
-        const edgeFactor = clamp(edgeDistM / edgeDenomM, 0, 1);
-        const seaLevel = clampSeaLevel(ctx.seaLevelBase + (1 - edgeFactor) * settings.edgeWaterBias, settings);
         seaLevelMap[idx] = seaLevel;
         const elevation = elevationMap[idx] ?? 0;
         const tile = createBlankTile(elevation);

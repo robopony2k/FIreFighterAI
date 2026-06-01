@@ -126,7 +126,7 @@ export const TERRAIN_RUN_GROUPS: readonly TerrainControlGroup[] = [
     fields: [
       selectField("archetype", "archetype", "Archetype", "Primary island layout and relief style.", TERRAIN_ARCHETYPE_OPTIONS),
       sliderField("recipe", "relief", "relief", "Relief", "How much the terrain rises and falls across the island."),
-      sliderField("recipe", "landCoverageTarget", "landCoverageTarget", "Land mass", "How much connected dry island land the coastline solver targets."),
+      sliderField("recipe", "landCoverageTarget", "landCoverageTarget", "Land mass", "Target amount of dry island land after sea level is applied."),
       sliderField(
         "advanced",
         "maxHeight",
@@ -165,7 +165,7 @@ export const TERRAIN_RUN_GROUPS: readonly TerrainControlGroup[] = [
     id: "terrain-water",
     title: "Coast + Water",
     fields: [
-      sliderField("recipe", "coastComplexity", "coastComplexity", "Coast complexity", "How irregular and cut-up the shoreline becomes."),
+      sliderField("recipe", "coastComplexity", "coastComplexity", "Coast complexity", "How much low-frequency shoreline and coastal elevation variation is added before sea level."),
       sliderField("recipe", "riverIntensity", "riverIntensity", "River intensity", "River presence, carve strength, and drainage emphasis."),
       checkboxField("skipCarving", "skipCarving", "Skip terrain carving", "Bypass the coarse pre-river carving pass and keep the relief stage untouched.")
     ]
@@ -187,17 +187,22 @@ export const MAP_EDITOR_TERRAIN_GROUPS = {
       id: "scenario-shape",
       title: "World Plan",
       fields: [
-        selectField("archetype", "archetype", "Archetype", "Primary island layout and relief style.", TERRAIN_ARCHETYPE_OPTIONS)
+        selectField("archetype", "archetype", "Archetype", "Primary island layout and relief style.", TERRAIN_ARCHETYPE_OPTIONS),
+        sliderField(
+          "advanced",
+          "noiseFrequency",
+          "noiseFrequency",
+          "Noise frequency",
+          "Scale of the raw 2D octave noise shown in the first preview. Lower values make broader blobs; higher values make tighter features."
+        )
       ]
     }
   ],
   relief: [
     {
       id: "relief-simple",
-      title: "Relief",
+      title: "Surface Detail",
       fields: [
-        sliderField("recipe", "relief", "relief", "Relief", "How much the terrain rises and falls across the island."),
-        sliderField("recipe", "ruggedness", "ruggedness", "Ruggedness", "How broken, ridged, and difficult the terrain becomes."),
         sliderField(
           "advanced",
           "maxHeight",
@@ -209,10 +214,9 @@ export const MAP_EDITOR_TERRAIN_GROUPS = {
     },
     {
       id: "relief-advanced",
-      title: "Relief Overrides",
+      title: "Ridge + Upland Detail",
       advanced: true,
       fields: [
-        sliderField("advanced", "interiorRise", "interiorRise", "Interior rise", "How strongly the island rises toward its interior."),
         sliderField(
           "advanced",
           "ridgeAlignment",
@@ -234,25 +238,26 @@ export const MAP_EDITOR_TERRAIN_GROUPS = {
   carving: [
     {
       id: "carving-simple",
-      title: "Shape",
+      title: "Elevation Field",
       fields: [
-        sliderField("recipe", "coastComplexity", "coastComplexity", "Coast complexity", "How irregular and cut-up the shoreline becomes."),
-        sliderField("recipe", "landCoverageTarget", "landCoverageTarget", "Land mass", "How much connected dry island land the coastline solver targets."),
-        sliderField(
-          "advanced",
-          "islandCompactness",
-          "islandCompactness",
-          "Island compactness",
-          "Whether the landmass stays cohesive or breaks into separated lobes."
-        )
+        sliderField("recipe", "relief", "relief", "Relief", "How much the noise elevation rises and falls before sea level."),
+        sliderField("recipe", "ruggedness", "ruggedness", "Ruggedness", "How much octave detail, ridge breakup, and local terrain variation remains visible."),
+        sliderField("recipe", "landCoverageTarget", "landCoverageTarget", "Land mass", "Target amount of dry island land after sea level is applied.")
       ]
     },
     {
       id: "carving-advanced",
-      title: "Shape Overrides",
+      title: "Distance Shaping",
       advanced: true,
       fields: [
-        sliderField("advanced", "embayment", "embayment", "Embayment", "How strongly the coastline opens into coves, bays, and inlets."),
+        sliderField("advanced", "interiorRise", "interiorRise", "Interior land floor", "How strongly the distance shaper protects central land without replacing the noise field."),
+        sliderField(
+          "advanced",
+          "islandCompactness",
+          "islandCompactness",
+          "Border water falloff",
+          "How firmly the distance shaper forces edge water while leaving the middle to the elevation noise."
+        ),
         sliderField("advanced", "anisotropy", "anisotropy", "Anisotropy", "How strongly the island is stretched into a directional landform."),
         sliderField("advanced", "asymmetry", "asymmetry", "Asymmetry", "How much the island mass shifts away from a balanced center.")
       ]
@@ -261,28 +266,31 @@ export const MAP_EDITOR_TERRAIN_GROUPS = {
   erosion: [
     {
       id: "erosion-simple",
-      title: "Erosion Detail",
+      title: "Erosion",
       fields: []
     }
   ],
   flooding: [
     {
       id: "flooding-simple",
-      title: "Water",
-      fields: []
-    },
-    {
-      id: "flooding-advanced",
-      title: "Water Overrides",
-      advanced: true,
+      title: "Sea Level + Coastline",
       fields: [
+        sliderField("recipe", "coastComplexity", "coastComplexity", "Coast complexity", "How much low-frequency shoreline and coastal elevation variation is added before sea level."),
         sliderField(
           "advanced",
           "seaLevelBias",
           "seaLevelBias",
           "Sea-level bias",
-          "Optional manual bias after automatic coastline calibration; 50% is neutral."
-        ),
+          "Manual bias after automatic coastline calibration; 50% is neutral."
+        )
+      ]
+    },
+    {
+      id: "flooding-advanced",
+      title: "Coast Overrides",
+      advanced: true,
+      fields: [
+        sliderField("advanced", "embayment", "embayment", "Embayment", "How strongly the coastline opens into coves, bays, and inlets."),
         sliderField(
           "advanced",
           "coastalShelfWidth",

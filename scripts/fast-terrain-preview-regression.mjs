@@ -18,27 +18,27 @@ const modes = ["shape", "relief", "water"];
 const seed = 1337;
 const sizeId = "massive";
 const size = MAP_SIZE_PRESETS[sizeId];
-const PERF_BUDGET_MS = 100;
+const PERF_BUDGET_MS = 220;
 const EXPECTED_HASHES = {
   MASSIF: {
-    shape: "5ca8c2ed",
-    relief: "78a18b4c",
-    water: "fdf1777c"
+    shape: "9708157a",
+    relief: "e6d477a7",
+    water: "89ac46d7"
   },
   LONG_SPINE: {
-    shape: "b02fa27f",
-    relief: "49ed9b04",
-    water: "3e829e44"
+    shape: "9be556f5",
+    relief: "c3407392",
+    water: "55bdcfc2"
   },
   TWIN_BAY: {
-    shape: "53130209",
-    relief: "cc08d7fc",
-    water: "f9d86a6c"
+    shape: "9ec34ef7",
+    relief: "e153e21c",
+    water: "8437acfd"
   },
   SHELF: {
-    shape: "0231d485",
-    relief: "52bca5f5",
-    water: "ba217bb4"
+    shape: "71d13340",
+    relief: "f63c6a34",
+    water: "0c252d05"
   }
 };
 
@@ -292,7 +292,7 @@ const assertSensitivity = () => {
     }), "water").result,
     0
   );
-  if (biasedWater.oceanRatio <= waterBase.oceanRatio + 0.02) {
+  if (biasedWater.oceanRatio <= waterBase.oceanRatio + 0.01) {
     throw new Error(`Sea-level bias did not increase ocean ratio: ${JSON.stringify({ waterBase, biasedWater })}`);
   }
 

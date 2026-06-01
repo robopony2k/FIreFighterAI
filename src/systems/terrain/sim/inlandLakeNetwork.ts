@@ -148,21 +148,33 @@ const localDepressionScore = (
   const x = idx % cols;
   const y = Math.floor(idx / cols);
   const center = elevationMap[idx] ?? 0;
-  let sum = 0;
-  let count = 0;
-  for (const dir of NEIGHBORS_8) {
-    const nx = x + dir.dx;
-    const ny = y + dir.dy;
-    if (nx < 0 || ny < 0 || nx >= cols || ny >= rows) {
-      continue;
+  const ringScore = (radius: number, scale: number): number => {
+    let sum = 0;
+    let count = 0;
+    for (let dy = -radius; dy <= radius; dy += 1) {
+      for (let dx = -radius; dx <= radius; dx += 1) {
+        if (dx === 0 && dy === 0) {
+          continue;
+        }
+        const distance = Math.hypot(dx, dy);
+        if (distance > radius || distance <= Math.max(0.5, radius - 1.35)) {
+          continue;
+        }
+        const nx = x + dx;
+        const ny = y + dy;
+        if (nx < 0 || ny < 0 || nx >= cols || ny >= rows) {
+          continue;
+        }
+        sum += elevationMap[ny * cols + nx] ?? center;
+        count += 1;
+      }
     }
-    sum += elevationMap[ny * cols + nx] ?? center;
-    count += 1;
-  }
-  if (count === 0) {
-    return 0;
-  }
-  return clamp((sum / count - center) / 0.035, 0, 1);
+    if (count === 0) {
+      return 0;
+    }
+    return clamp((sum / count - center) / scale, 0, 1);
+  };
+  return Math.max(ringScore(1, 0.035), ringScore(3, 0.045), ringScore(5, 0.06));
 };
 
 const collectLakeCandidates = (
@@ -203,27 +215,83 @@ const collectLakeCandidates = (
     }
     const rDist = riverDistance[idx] ?? maxRiverDistance + 1;
     const onRiverPath = riverMask[idx] > 0 || rDist <= maxRiverDistance;
-    if (!onRiverPath && !isLocalRunoffPeak(idx, cols, rows, flow)) {
+    const basin = localDepressionScore(idx, cols, rows, elevationMap);
+    const highlandBasin =
+      basin >= 0.42 &&
+      elevation >= settings.lakeElevationMin + 0.05 &&
+      (rainfall[idx] ?? 0) >= settings.minRainfallForLake * 0.9 &&
+      (flow[idx] ?? 0) >= settings.minCatchmentRunoffForLake * 0.82;
+    if (!onRiverPath && !isLocalRunoffPeak(idx, cols, rows, flow) && !highlandBasin) {
       continue;
     }
     const x = idx % cols;
     const y = Math.floor(idx / cols);
     const chanceRoll = hash2D(x, y, state.seed + 45_211);
     const riverAffinity = clamp(1 - rDist / Math.max(1, maxRiverDistance), 0, 1);
-    if (chanceRoll > chance && riverAffinity < 0.5) {
+    if (chanceRoll > chance && riverAffinity < 0.5 && !highlandBasin) {
       continue;
     }
-    const basin = localDepressionScore(idx, cols, rows, elevationMap);
     const score =
       (flow[idx] ?? 0) * 0.42 +
       (rainfall[idx] ?? 0) * 0.22 +
       riverAffinity * settings.preferLakesOnRiverPaths * 0.24 +
-      basin * 0.18 -
+      basin * (highlandBasin ? 0.32 : 0.18) +
+      (highlandBasin ? 0.08 : 0) -
       chanceRoll * 0.04;
     candidates.push({ index: idx, score, riverDistance: rDist });
   }
   candidates.sort((a, b) => b.score - a.score || a.riverDistance - b.riverDistance || a.index - b.index);
   return candidates.slice(0, Math.max(settings.maxLakeCount * 48, 64));
+};
+
+const collectFallbackBasinLakeCandidates = (
+  state: WorldState,
+  elevationMap: ArrayLike<number>,
+  oceanMask: Uint8Array,
+  oceanDistance: Uint16Array,
+  riverDistance: Uint16Array,
+  settings: MapGenSettings,
+  rainfall: Float32Array,
+  flow: Float32Array
+): LakeCandidate[] => {
+  const cols = state.grid.cols;
+  const rows = state.grid.rows;
+  const candidates: LakeCandidate[] = [];
+  const minOceanDistance = Math.max(1, settings.minDistanceFromOceanTiles);
+  for (let idx = 0; idx < state.grid.totalTiles; idx += 1) {
+    if (oceanMask[idx] > 0 || (oceanDistance[idx] ?? 0) < minOceanDistance) {
+      continue;
+    }
+    const elevation = elevationMap[idx] ?? 0;
+    if (elevation < settings.lakeElevationMin || elevation > settings.lakeElevationMax + 0.08) {
+      continue;
+    }
+    const basin = localDepressionScore(idx, cols, rows, elevationMap);
+    if (basin < 0.28) {
+      continue;
+    }
+    const rainfallScore = rainfall[idx] ?? 0;
+    const runoffScore = flow[idx] ?? 0;
+    if (
+      rainfallScore < settings.minRainfallForLake * 0.48 ||
+      runoffScore < settings.minCatchmentRunoffForLake * 0.36
+    ) {
+      continue;
+    }
+    const x = idx % cols;
+    const y = Math.floor(idx / cols);
+    const rDist = riverDistance[idx] ?? settings.maxRiverRerouteDistanceTiles + 1;
+    const centerPull = 1 - Math.hypot(x - cols * 0.5, y - rows * 0.5) / Math.max(cols, rows);
+    const score =
+      basin * 0.54 +
+      rainfallScore * 0.18 +
+      runoffScore * 0.18 +
+      centerPull * 0.08 -
+      hash2D(x, y, state.seed + 61_337) * 0.04;
+    candidates.push({ index: idx, score, riverDistance: rDist });
+  }
+  candidates.sort((a, b) => b.score - a.score || a.riverDistance - b.riverDistance || a.index - b.index);
+  return candidates.slice(0, Math.max(settings.maxLakeCount * 32, 48));
 };
 
 const smoothLakeTiles = (
@@ -923,6 +991,25 @@ export const buildStaticInlandLakeNetwork = (input: {
     fields.flow,
     rejectedLakeCandidates
   );
+  const fallbackCandidates = collectFallbackBasinLakeCandidates(
+    state,
+    elevationMap,
+    oceanMask,
+    oceanDistance,
+    riverDistance,
+    settings,
+    fields.rainfall,
+    fields.flow
+  );
+  const candidateIndexes = new Set<number>();
+  const lakeCandidates: LakeCandidate[] = [];
+  for (const candidate of [...candidates, ...fallbackCandidates]) {
+    if (candidateIndexes.has(candidate.index)) {
+      continue;
+    }
+    candidateIndexes.add(candidate.index);
+    lakeCandidates.push(candidate);
+  }
   state.tileLakeMask.fill(0);
   state.tileLakeSurface.fill(Number.NaN);
   state.tileLakeOutletMask.fill(0);
@@ -930,7 +1017,7 @@ export const buildStaticInlandLakeNetwork = (input: {
   const riverBed = state.tileRiverBed;
   const riverStepStrength = state.tileRiverStepStrength;
   const lakes: StaticHydrologyLake[] = [];
-  for (const candidate of candidates) {
+  for (const candidate of lakeCandidates) {
     if (lakes.length >= settings.maxLakeCount) {
       break;
     }
@@ -953,7 +1040,13 @@ export const buildStaticInlandLakeNetwork = (input: {
       flooded.tiles.reduce((sum, idx) => sum + (fields.flow[idx] ?? 0), 0) / Math.max(1, flooded.tiles.length);
     const rainfallScore =
       flooded.tiles.reduce((sum, idx) => sum + (fields.rainfall[idx] ?? 0), 0) / Math.max(1, flooded.tiles.length);
-    if (rainfallScore < settings.minRainfallForLake || runoffScore < settings.minCatchmentRunoffForLake) {
+    const deepHillBasin =
+      flooded.maxDepth >= settings.minLakeDepth * 1.35 &&
+      flooded.tiles.length >= settings.minLakeAreaTiles &&
+      candidate.riverDistance <= Math.max(settings.maxRiverRerouteDistanceTiles * 2, settings.maxRiverRerouteDistanceTiles + 4) &&
+      rainfallScore >= settings.minRainfallForLake * 0.68 &&
+      runoffScore >= settings.minCatchmentRunoffForLake * 0.58;
+    if (!deepHillBasin && (rainfallScore < settings.minRainfallForLake || runoffScore < settings.minCatchmentRunoffForLake)) {
       incrementReject(
         rejectedLakeCandidates,
         rainfallScore < settings.minRainfallForLake ? "weak-rainfall" : "weak-runoff"

@@ -9,7 +9,7 @@ export const ErosionStage: PipelineStage = {
   id: "terrain:erosion",
   weight: 8,
   run: async (ctx) => {
-    const { state, settings, cellSizeM, edgeDenomM } = ctx;
+    const { state, settings, cellSizeM } = ctx;
     if (!ctx.elevationMap) {
       throw new Error("Erosion stage missing elevation map.");
     }
@@ -31,6 +31,7 @@ export const ErosionStage: PipelineStage = {
     const previousHeights = Float32Array.from(input);
     const refinedHeights = Float32Array.from(input);
     const nextWear = Float32Array.from(wearMap);
+    const seaLevel = clampSeaLevel(ctx.seaLevelBase, settings);
     let coverage = 0;
     let absOffsetSum = 0;
     const absOffsets: number[] = [];
@@ -48,9 +49,6 @@ export const ErosionStage: PipelineStage = {
         const gradY = (down - up) * 0.5;
         const slope = Math.hypot(gradX, gradY);
         const slopeMask = smoothstep(slopeMin, slopeMax, slope);
-        const edgeDistM = Math.min(x, y, state.grid.cols - 1 - x, state.grid.rows - 1 - y) * cellSizeM;
-        const edgeFactor = clamp(edgeDistM / edgeDenomM, 0, 1);
-        const seaLevel = clampSeaLevel(ctx.seaLevelBase + (1 - edgeFactor) * settings.edgeWaterBias, settings);
         const headroom = center - seaLevel;
         const coastMask = smoothstep(coastFadeStart, coastFadeEnd, headroom);
         const baseWear = clamp(wearMap[idx] ?? 0, 0, 1);
@@ -114,9 +112,6 @@ export const ErosionStage: PipelineStage = {
         const gradY = (down - up) * 0.5;
         const slope = Math.hypot(gradX, gradY);
         const slopeMask = smoothstep(slopeMin, slopeMax, slope);
-        const edgeDistM = Math.min(x, y, state.grid.cols - 1 - x, state.grid.rows - 1 - y) * cellSizeM;
-        const edgeFactor = clamp(edgeDistM / edgeDenomM, 0, 1);
-        const seaLevel = clampSeaLevel(ctx.seaLevelBase + (1 - edgeFactor) * settings.edgeWaterBias, settings);
         const headroom = center - seaLevel;
         const coastMask = smoothstep(coastFadeStart, coastFadeEnd, headroom);
         const wearMask = smoothstep(0.06, 0.46, wearMap[idx] ?? 0);

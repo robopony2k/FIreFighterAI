@@ -36,8 +36,12 @@ import {
   upsertMapScenario,
   type MapScenario
 } from "../persistence/mapScenarios.js";
-import { buildRenderTerrainSample } from "../render/simView.js";
-import { buildFastTerrainPreview, type FastTerrainPreviewMode } from "../systems/terrain/sim/fastTerrainPreview.js";
+import { buildRenderTerrainSample, type RenderTerrainSample } from "../render/simView.js";
+import {
+  buildFastTerrainPreview,
+  type FastTerrainPreviewMode,
+  type FastTerrainPreviewResult
+} from "../systems/terrain/sim/fastTerrainPreview.js";
 import {
   createTerrainPreviewController,
   type TerrainPreviewHoverTile,
@@ -211,37 +215,37 @@ const DEFAULT_MAP_EDITOR_RENDER_DEBUG_STATE: MapEditorRenderDebugState = {
 
 const MAP_EDITOR_PREVIEW_BY_STEP: Record<MapEditorStepId, StepPreviewConfig> = {
   scenario: {
-    label: "Scenario",
+    label: "Noise Field",
     stopAfterPhase: "terrain:fastPreview",
     sampleSource: "fast",
     treesEnabled: false
   },
   relief: {
-    label: "Relief",
+    label: "Surface Detail",
     stopAfterPhase: "terrain:fastPreview",
     sampleSource: "fast",
     treesEnabled: false
   },
   carving: {
-    label: "Shape",
+    label: "Landform",
     stopAfterPhase: "terrain:fastPreview",
     sampleSource: "fast",
     treesEnabled: false
   },
   erosion: {
-    label: "Erosion Detail",
+    label: "Erosion",
     stopAfterPhase: "terrain:erosion",
     sampleSource: "snapshot",
     treesEnabled: false
   },
   flooding: {
-    label: "Water",
+    label: "Sea Level",
     stopAfterPhase: "terrain:fastPreview",
     sampleSource: "fast",
     treesEnabled: false
   },
   rivers: {
-    label: "River Channels",
+    label: "Rivers + Lakes",
     stopAfterPhase: "hydro:rivers",
     sampleSource: "snapshot",
     treesEnabled: false
@@ -320,6 +324,8 @@ const buildSnapshotSample = (
   slopeStress: snapshot.slopeStress,
   treeSuitability: snapshot.treeSuitability,
   treeProbability: snapshot.treeProbability,
+  debugScalarField: undefined as Float32Array | undefined,
+  debugScalarMode: undefined as "color" | "grayscale" | undefined,
   fullResolution: true,
   treesEnabled,
   worldSeed
@@ -353,8 +359,8 @@ const buildWorldPreviewSample = (
 const getFastPreviewMode = (stepId: MapEditorStepId): FastTerrainPreviewMode | null => {
   switch (stepId) {
     case "scenario":
+      return "noise";
     case "carving":
-      return "shape";
     case "relief":
       return "relief";
     case "flooding":
@@ -368,7 +374,7 @@ const buildFastPreviewSample = (
   draft: TerrainDraft,
   stepId: MapEditorStepId,
   heightScaleMultiplier: number
-) => {
+): FastPreviewSample | null => {
   const mode = getFastPreviewMode(stepId);
   if (!mode) {
     return null;
@@ -382,6 +388,7 @@ const buildFastPreviewSample = (
     settings,
     mode
   });
+  const debugScalarMode: "color" | "grayscale" | undefined = mode === "noise" ? "grayscale" : undefined;
   return {
     cols: result.cols,
     rows: result.rows,
@@ -393,6 +400,8 @@ const buildFastPreviewSample = (
     seaLevel: result.seaLevelMap,
     coastDistance: result.coastDistance,
     coastClass: result.coastClass,
+    debugScalarField: result.debugScalarField,
+    debugScalarMode,
     fullResolution: false,
     treesEnabled: false,
     worldSeed: draft.seed,
@@ -403,7 +412,7 @@ const buildFastPreviewSample = (
 
 type SnapshotPreviewSample = ReturnType<typeof buildSnapshotSample>;
 type WorldPreviewSample = ReturnType<typeof buildWorldPreviewSample>;
-type FastPreviewSample = NonNullable<ReturnType<typeof buildFastPreviewSample>>;
+type FastPreviewSample = RenderTerrainSample & { fastPreviewTimingsMs: FastTerrainPreviewResult["timingsMs"] };
 type PreviewRenderableSample = SnapshotPreviewSample | WorldPreviewSample | FastPreviewSample;
 type DebugPreviewRenderableSample = PreviewRenderableSample & { debugRenderOptions?: TerrainRenderDebugOptions };
 type CoastlineProbe = {
@@ -426,6 +435,8 @@ const MAP_EDITOR_STEP_SEQUENCE: readonly MapEditorStepId[] = [
   "vegetation",
   "final"
 ] as const;
+
+const MAP_EDITOR_LANDFORM_FAST_STEPS = new Set<MapEditorStepId>(["carving", "relief"]);
 const MAP_EDITOR_EROSION_COMPARE_PREVIEW: StepPreviewConfig = {
   label: "Pre-Erosion Baseline",
   stopAfterPhase: "terrain:elevation",
@@ -469,11 +480,15 @@ const applyTerrainRenderDebugOptions = (
   sample: PreviewRenderableSample,
   state: MapEditorRenderDebugState,
   logHeightAnomalies = true
-): DebugPreviewRenderableSample => ({
-  ...sample,
-  debugScalarField: getBiomeDebugScalarField(sample, state.biomeScalarField),
-  debugRenderOptions: buildTerrainRenderDebugOptions(state, logHeightAnomalies)
-});
+): DebugPreviewRenderableSample => {
+  const biomeScalarField = getBiomeDebugScalarField(sample, state.biomeScalarField);
+  return {
+    ...sample,
+    debugScalarField: biomeScalarField ?? sample.debugScalarField,
+    debugScalarMode: biomeScalarField ? undefined : sample.debugScalarMode,
+    debugRenderOptions: buildTerrainRenderDebugOptions(state, logHeightAnomalies)
+  };
+};
 
 const inSampleBounds = (sample: PreviewRenderableSample, x: number, y: number): boolean =>
   x >= 0 && y >= 0 && x < sample.cols && y < sample.rows;
@@ -903,10 +918,12 @@ const clonePreviewSample = (sample: PreviewRenderableSample): PreviewRenderableS
       slopeStress: cloneFloat32Array(worldSample.slopeStress),
       treeSuitability: cloneFloat32Array(worldSample.treeSuitability),
       treeProbability: cloneFloat32Array(worldSample.treeProbability),
+      debugScalarField: cloneFloat32Array(worldSample.debugScalarField),
       towns: worldSample.towns?.map((town) => ({ ...town }))
     };
   }
   const snapshotSample = sample as SnapshotPreviewSample;
+  const debugScalarField = (sample as { debugScalarField?: Float32Array }).debugScalarField;
   return {
     ...snapshotSample,
     elevations: Float32Array.from(snapshotSample.elevations),
@@ -926,7 +943,8 @@ const clonePreviewSample = (sample: PreviewRenderableSample): PreviewRenderableS
     elevationStress: cloneFloat32Array(snapshotSample.elevationStress),
     slopeStress: cloneFloat32Array(snapshotSample.slopeStress),
     treeSuitability: cloneFloat32Array(snapshotSample.treeSuitability),
-    treeProbability: cloneFloat32Array(snapshotSample.treeProbability)
+    treeProbability: cloneFloat32Array(snapshotSample.treeProbability),
+    debugScalarField: cloneFloat32Array(debugScalarField)
   };
 };
 
@@ -1381,9 +1399,10 @@ export const initMapEditor = (refs: MapEditorRefs, deps: MapEditorDeps): MapEdit
     stepId: MapEditorStepId,
     sample: PreviewRenderableSample
   ): void => {
-    if (stepId === "scenario" || stepId === "carving") {
-      cachePreviewSample(cacheKey, "scenario", sample);
-      cachePreviewSample(cacheKey, "carving", sample);
+    if (MAP_EDITOR_LANDFORM_FAST_STEPS.has(stepId)) {
+      MAP_EDITOR_LANDFORM_FAST_STEPS.forEach((landformStep) => {
+        cachePreviewSample(cacheKey, landformStep, sample);
+      });
       return;
     }
     cachePreviewSample(cacheKey, stepId, sample);
@@ -1444,7 +1463,7 @@ export const initMapEditor = (refs: MapEditorRefs, deps: MapEditorDeps): MapEdit
       return false;
     }
     cacheEquivalentPreviewSample(cacheKey, stepId, sample);
-    if (activeStep === stepId || (activeStep === "scenario" && stepId === "carving")) {
+    if (activeStep === stepId || (MAP_EDITOR_LANDFORM_FAST_STEPS.has(activeStep) && MAP_EDITOR_LANDFORM_FAST_STEPS.has(stepId))) {
       preview.setTerrain(applyTerrainRenderDebugOptions(sample, previewRenderDebugState, false), { recenter });
       hidePreviewOverlay();
       syncCurrentScenarioLabel();

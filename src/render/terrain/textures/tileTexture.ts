@@ -19,6 +19,7 @@ type TileTextureSample = {
   tileHeat?: Float32Array;
   heatCap?: number;
   debugScalarField?: Float32Array;
+  debugScalarMode?: "color" | "grayscale";
 };
 
 type TileTextureBuildDeps = {
@@ -62,8 +63,11 @@ const smoothstep = (edge0: number, edge1: number, x: number): number => {
   return t * t * (3 - 2 * t);
 };
 
-const scalarDebugColor = (value: number): [number, number, number] => {
+const scalarDebugColor = (value: number, mode: "color" | "grayscale" = "color"): [number, number, number] => {
   const t = clamp(value, 0, 1);
+  if (mode === "grayscale") {
+    return [t, t, t];
+  }
   if (t < 0.5) {
     const k = t / 0.5;
     return [0.08 + k * 0.12, 0.16 + k * 0.48, 0.42 - k * 0.26];
@@ -258,7 +262,7 @@ export const buildTileTexture = (
       }
       let color = palette[colorType] ?? palette[grassId];
       if (debugScalarField && Number.isFinite(debugScalar)) {
-        color = scalarDebugColor(debugScalar as number);
+        color = scalarDebugColor(debugScalar as number, sample.debugScalarMode);
       } else if (!debugTypeColors && !debugScalarField && roadId !== null && typeId === roadId) {
         color = getRoadGroundColor(row, col);
       }

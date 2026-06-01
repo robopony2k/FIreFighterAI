@@ -1,5 +1,5 @@
 import { COAST_CLASS_BEACH, COAST_CLASS_CLIFF, COAST_CLASS_NONE, COAST_CLASS_SHELF_WATER, TILE_TYPE_IDS } from "../../../core/state.js";
-import { fbmNoise, hash2D, ridgedFbmNoise } from "../../../mapgen/noise.js";
+import { fbmNoise, gradientNoise, hash2D, ridgedFbmNoise } from "../../../mapgen/noise.js";
 import type { MapGenDebug, MapGenDebugPhase, MapGenReporter } from "../../../mapgen/mapgenTypes.js";
 import type { MapGenSettings } from "../../../mapgen/settings.js";
 
@@ -9,7 +9,7 @@ export type NoiseLandmassCoreInput = {
   rows: number;
   settings: MapGenSettings;
   includeRivers?: boolean;
-  previewMode?: "shape" | "relief" | "water";
+  previewMode?: "noise" | "shape" | "relief" | "water";
 };
 
 export type NoiseLandmassInput = NoiseLandmassCoreInput & {
@@ -150,26 +150,38 @@ const gaussian = (x: number, y: number, cx: number, cy: number, rx: number, ry: 
   return Math.exp(-(dx * dx + dy * dy));
 };
 
-const edgeDistance01 = (x: number, y: number, cols: number, rows: number): number => {
-  const nx = cols <= 1 ? 0 : x / (cols - 1);
-  const ny = rows <= 1 ? 0 : y / (rows - 1);
-  const dx = Math.min(nx, 1 - nx);
-  const dy = Math.min(ny, 1 - ny);
-  return clamp01(Math.min(dx, dy) * 2);
+const squareBumpDistance01 = (x: number, y: number, cols: number, rows: number): number => {
+  if (cols <= 1 || rows <= 1) {
+    return 1;
+  }
+  const nx = 2 * x / (cols - 1) - 1;
+  const ny = 2 * y / (rows - 1) - 1;
+  return clamp01(1 - (1 - nx * nx) * (1 - ny * ny));
 };
 
-const zeroPerimeter = (map: Float32Array, cols: number, rows: number): void => {
-  if (cols <= 0 || rows <= 0) {
-    return;
+const octaveGradientNoise01 = (x: number, y: number, seed: number, octaves: number): number => {
+  let amplitude = 1;
+  let frequency = 1;
+  let sum = 0;
+  let weight = 0;
+  for (let octave = 0; octave < octaves; octave += 1) {
+    sum += gradientNoise(x * frequency, y * frequency, seed + octave * 197) * amplitude;
+    weight += amplitude;
+    amplitude *= 0.5;
+    frequency *= 2;
   }
-  for (let x = 0; x < cols; x += 1) {
-    map[x] = 0;
-    map[(rows - 1) * cols + x] = 0;
-  }
-  for (let y = 0; y < rows; y += 1) {
-    map[y * cols] = 0;
-    map[y * cols + cols - 1] = 0;
-  }
+  return weight > 0 ? sum / weight : 0.5;
+};
+
+const applyDistanceShaping = (elevation: number, distance01: number, compactness: number): number => {
+  const midMix = mix(0.08, 0.18, compactness) * smoothstep(0.18, 0.78, distance01) * (1 - smoothstep(0.78, 0.96, distance01));
+  const blended = mix(elevation, 1 - distance01, midMix);
+  const forceLand = 1 - smoothstep(0.02, 0.28, distance01);
+  const forceWater = smoothstep(0.78, 1, distance01);
+  const landFloor = SEA_LEVEL + mix(0.035, 0.075, compactness);
+  const waterCeiling = SEA_LEVEL - mix(0.045, 0.09, compactness);
+  const centerShaped = mix(blended, Math.max(blended, landFloor), forceLand);
+  return clamp01(mix(centerShaped, Math.min(centerShaped, waterCeiling), forceWater));
 };
 
 const buildSeaLevelMap = (
@@ -180,12 +192,11 @@ const buildSeaLevelMap = (
 ): { seaLevelBase: number; seaLevelMap: Float32Array } => {
   const total = cols * rows;
   const seaLevelMap = new Float32Array(total);
-  for (let y = 0; y < rows; y += 1) {
-    for (let x = 0; x < cols; x += 1) {
-      const edge = edgeDistance01(x, y, cols, rows);
-      seaLevelMap[y * cols + x] = clamp(seaLevelBase + (1 - edge) * settings.edgeWaterBias, SEA_LEVEL_MIN, SEA_LEVEL_MAX);
-    }
+  const seaLevel = clamp(seaLevelBase, SEA_LEVEL_MIN, SEA_LEVEL_MAX);
+  for (let i = 0; i < total; i += 1) {
+    seaLevelMap[i] = seaLevel;
   }
+  void settings;
   return { seaLevelBase, seaLevelMap };
 };
 
@@ -208,7 +219,7 @@ const resolveCalibratedSeaLevel = (
   const total = Math.max(1, cols * rows);
   const targetOceanRatio = clamp(1 - settings.landCoverageTarget, 0.18, 0.68);
   const biasOffset = (clamp01(settings.seaLevelBias) - 0.5) * 0.16;
-  let low = SEA_LEVEL_MIN - Math.max(0, settings.edgeWaterBias);
+  let low = SEA_LEVEL_MIN;
   let high = SEA_LEVEL_MAX;
   let bestBase = settings.baseWaterThreshold;
   let bestError = Number.POSITIVE_INFINITY;
@@ -230,7 +241,7 @@ const resolveCalibratedSeaLevel = (
     }
   }
 
-  const biasedBase = clamp(bestBase + biasOffset, SEA_LEVEL_MIN - Math.max(0, settings.edgeWaterBias), SEA_LEVEL_MAX);
+  const biasedBase = clamp(bestBase + biasOffset, SEA_LEVEL_MIN, SEA_LEVEL_MAX);
   const biasedMap = buildSeaLevelMap(cols, rows, settings, biasedBase).seaLevelMap;
   const biasedOcean = buildOceanMask(elevations, biasedMap, cols, rows);
   return {
@@ -580,6 +591,7 @@ export function buildNoiseLandmassCore(input: NoiseLandmassCoreInput): NoiseLand
   const uplandDistribution = clamp01(settings.uplandDistribution);
   const ridgeFrequency = clamp01(settings.ridgeFrequency);
   const basinStrength = clamp01(settings.basinStrength);
+  const noiseFrequency = clamp01(settings.noiseFrequency);
   const longSpine = settings.terrainArchetype === "LONG_SPINE";
   const twinBay = settings.terrainArchetype === "TWIN_BAY";
   const shelf = settings.terrainArchetype === "SHELF";
@@ -627,7 +639,7 @@ export function buildNoiseLandmassCore(input: NoiseLandmassCoreInput): NoiseLand
       } else if (twinBay) {
         island += gaussian(along, across, -0.46, -0.12, 0.46, 0.42) * 0.34 + gaussian(along, across, 0.44, 0.12, 0.48, 0.4) * 0.36;
       } else if (massif) {
-        island += gaussian(along, across, uplandAAlong * 0.25, uplandAAcross * 0.25, 0.68, 0.62) * mix(0.08, 0.24, interiorRise);
+        island += gaussian(along, across, uplandAAlong * 0.46, uplandAAcross * 0.46, 0.72, 0.66) * mix(0.05, 0.15, interiorRise);
       } else if (shelf) {
         island += gaussian(along, across, -0.42, 0.22, 0.5, 0.32) * 0.18;
       }
@@ -636,23 +648,24 @@ export function buildNoiseLandmassCore(input: NoiseLandmassCoreInput): NoiseLand
       const strait = twinBay ? lineRidge(along, across, mix(0.16, 0.28, embayment), 0.88, Math.sin(along * 3.2 + hash2D(8, 8, archetypeSeed) * TAU) * 0.08) : 0;
       const coastBand = smoothstep(0.18, 0.72, island) * (1 - smoothstep(0.72, 1.12, island));
       const headlandNoise = fbmNoise(nx * 3.4 + 11, ny * 3.4 - 17, archetypeSeed + 1409, 3) * 2 - 1;
-      const edge = edgeDistance01(x, y, cols, rows);
-      const radialEnvelope = clamp01(1 - Math.hypot(px, py) / mix(1.02, 1.36, landCoverageTarget));
-      const edgeEnvelope = smoothstep(0.02, mix(0.54, 0.82, landCoverageTarget), edge);
-      const islandEnvelope = Math.pow(
-        mix(edgeEnvelope, radialEnvelope, mix(0.25, 0.48, compactness)),
-        mix(0.82, 1.42, compactness)
-      );
+      const distance01 = squareBumpDistance01(x, y, cols, rows);
+      const islandShape = 1 - distance01;
+      const terrainScale = mix(0.42, 1.72, noiseFrequency) * mix(0.92, 1.12, ruggedness);
+      const terrainOctaves = includeDetailRelief ? 4 : 3;
+      const octaveTerrain =
+        octaveGradientNoise01(nx * terrainScale + 13.7, ny * terrainScale - 9.2, archetypeSeed + 1601, terrainOctaves) * 2 - 1;
+      const fineScale = terrainScale * mix(3.2, 4.8, ruggedness);
+      const octaveFine = includeDetailRelief
+        ? octaveGradientNoise01(nx * fineScale - 21.4, ny * fineScale + 6.8, archetypeSeed + 1801, 3) * 2 - 1
+        : 0;
       const baseMask =
-        island * mix(1.22, 1.56, relief)
-        + (islandEnvelope - 0.5) * mix(0.28, 0.46, compactness)
-        + landTargetOffset * 0.2
-        + headlandNoise * mix(0.08, 0.26, settings.coastComplexity) * coastBand
-        - (bayA + bayB) * mix(0.18, 0.52, embayment)
-        - strait * mix(0.2, 0.58, embayment)
-        - 0.46;
+        (island - 0.5) * mix(0.08, 0.16, relief)
+        + landTargetOffset * 0.06
+        + headlandNoise * mix(0.04, 0.12, settings.coastComplexity) * (0.35 + coastBand * 0.65)
+        - (bayA + bayB) * mix(0.025, 0.07, embayment)
+        - strait * mix(0.03, 0.08, embayment);
 
-      const landWeight = smoothstep(-0.035, 0.16, baseMask);
+      const landWeight = 1;
       const uplandA = gaussian(
         along,
         across,
@@ -678,14 +691,16 @@ export function buildNoiseLandmassCore(input: NoiseLandmassCoreInput): NoiseLand
         mix(0.34, 0.58, basinStrength),
         mix(0.32, 0.54, basinStrength)
       ) * landWeight;
-      const interiorEnvelope = smoothstep(0.08, 0.92, edge);
-      const broadInteriorRise = interiorEnvelope * mix(0.006, 0.04, interiorRise) * mix(0.88, 0.34, uplandDistribution);
+      const interiorEnvelope = 1 - smoothstep(0.82, 1, distance01);
+      const broadInteriorRise = interiorEnvelope * mix(0.002, 0.018, interiorRise) * mix(0.88, 0.34, uplandDistribution);
       const uplandRise = uplandMask * mix(0.018, 0.13, interiorRise * mix(0.55, 1, uplandDistribution));
-      const basinDrop = lowlandBasin * mix(0.012, 0.075, basinStrength * (shelf ? 0.72 : 1));
+      const basinDrop = lowlandBasin * mix(0.018, 0.13, basinStrength * (shelf ? 0.72 : 1));
       let ridge = 0;
       let valley = 0;
       let raw = clamp01(
         0.5
+        + octaveTerrain * mix(0.32, 0.54, relief)
+        + octaveFine * mix(0.015, 0.055, ruggedness)
         + baseMask * mix(0.24, 0.36, relief)
         + broadInteriorRise
         + uplandRise
@@ -710,34 +725,34 @@ export function buildNoiseLandmassCore(input: NoiseLandmassCoreInput): NoiseLand
           - valley * mix(0.025, 0.17, settings.riverIntensity * 0.6 + basinStrength * 0.4)
         );
       }
-      const edgeLift = Math.pow(edge, mix(0.78, 1.45, settings.coastalShelfWidth));
       const redistributed = Math.pow(raw, mix(1.35, 0.74, relief));
       const shapeHeight = clamp01(
         0.5
+        + octaveTerrain * mix(0.3, 0.5, relief)
+        + octaveFine * mix(0.01, 0.035, ruggedness)
         + baseMask * mix(0.22, 0.34, relief)
         + broadInteriorRise * 0.75
         + uplandRise * 0.68
         - basinDrop * 0.65
       );
       const reliefHeight = clamp01(
-        redistributed * mix(0.76, 1.08, edgeLift)
+        redistributed
         + broadInteriorRise * 0.85
         + uplandRise * 0.74
         - basinDrop * 0.55
       );
-      const finalHeight = includeDetailRelief ? reliefHeight : shapeHeight;
+      const coreHeight = includeDetailRelief ? reliefHeight : shapeHeight;
+      const finalHeight = applyDistanceShaping(coreHeight, distance01, compactness);
       const idx = y * cols + x;
-      rawNoiseMap[idx] = raw;
+      rawNoiseMap[idx] = clamp01(0.5 + (octaveTerrain * 0.82 + octaveFine * 0.18) * 0.5);
       redistributedHeightMap[idx] = redistributed;
-      edgeDistanceMap[idx] = edge;
-      islandMask[idx] = clamp01(baseMask * 0.5 + 0.5);
+      edgeDistanceMap[idx] = islandShape;
+      islandMask[idx] = islandShape;
       ridgeMask[idx] = ridge;
       valleyMask[idx] = valley * landWeight;
       elevationFloatMap[idx] = finalHeight;
     }
   }
-  zeroPerimeter(redistributedHeightMap, cols, rows);
-  zeroPerimeter(elevationFloatMap, cols, rows);
 
   const { seaLevelBase, seaLevelMap, oceanMask: resolvedOceanMask } =
     resolveCalibratedSeaLevel(elevationFloatMap, cols, rows, settings);

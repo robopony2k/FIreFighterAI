@@ -190,7 +190,6 @@ const countConnectedOceanAtBaseLevel = (
   state: WorldState,
   settings: MapGenSettings,
   elevationMap: ArrayLike<number>,
-  edgeBias: Float32Array,
   seaLevelBase: number
 ): number => {
   const { cols, rows, totalTiles } = state.grid;
@@ -202,7 +201,7 @@ const countConnectedOceanAtBaseLevel = (
     if (idx < 0 || idx >= totalTiles || ocean[idx] > 0) {
       return;
     }
-    const seaLevel = clampSeaLevel(seaLevelBase + (edgeBias[idx] ?? 0), settings);
+    const seaLevel = clampSeaLevel(seaLevelBase, settings);
     if ((elevationMap[idx] ?? 0) > seaLevel) {
       return;
     }
@@ -245,6 +244,7 @@ export const resolveSeaLevelBase = (
   elevationMap: ArrayLike<number>,
   cellSizeM: number
 ): number => {
+  void cellSizeM;
   const target = Number.isFinite(settings.landCoverageTarget)
     ? clamp(1 - settings.landCoverageTarget, 0.18, 0.68)
     : Number.isFinite(settings.waterCoverage)
@@ -254,26 +254,15 @@ export const resolveSeaLevelBase = (
     return settings.baseWaterThreshold;
   }
   const total = state.grid.totalTiles;
-  const edgeDenomM = (Math.min(state.grid.cols, state.grid.rows) * cellSizeM) / 2;
-  const edgeBias = new Float32Array(total);
-  for (let y = 0; y < state.grid.rows; y += 1) {
-    const rowBase = y * state.grid.cols;
-    for (let x = 0; x < state.grid.cols; x += 1) {
-      const idx = rowBase + x;
-      const edgeDistM = Math.min(x, y, state.grid.cols - 1 - x, state.grid.rows - 1 - y) * cellSizeM;
-      const edgeFactor = clamp(edgeDistM / edgeDenomM, 0, 1);
-      edgeBias[idx] = (1 - edgeFactor) * settings.edgeWaterBias;
-    }
-  }
   const { min, max } = getSeaLevelBounds(settings);
   const biasOffset = (clamp(settings.seaLevelBias, 0, 1) - 0.5) * 0.16;
-  let low = min - settings.edgeWaterBias;
+  let low = min;
   let high = max;
   let best = settings.baseWaterThreshold;
   let bestError = Number.POSITIVE_INFINITY;
   for (let i = 0; i < 18; i += 1) {
     const mid = (low + high) / 2;
-    const oceanCount = countConnectedOceanAtBaseLevel(state, settings, elevationMap, edgeBias, mid);
+    const oceanCount = countConnectedOceanAtBaseLevel(state, settings, elevationMap, mid);
     const ratio = oceanCount / Math.max(1, total);
     const error = Math.abs(ratio - target);
     if (error < bestError) {
@@ -286,7 +275,7 @@ export const resolveSeaLevelBase = (
       high = mid;
     }
   }
-  return clamp(best + biasOffset, min - settings.edgeWaterBias, max);
+  return clamp(best + biasOffset, min, max);
 };
 
 const buildDebugTypeIds = (
@@ -299,15 +288,10 @@ const buildDebugTypeIds = (
   const total = state.grid.totalTiles;
   const typeIds = new Uint8Array(total);
   const base = seaLevelBase ?? settings.baseWaterThreshold;
-  const cellSizeM = Math.max(0.1, settings.cellSizeM);
-  const edgeDenomM = (Math.min(state.grid.cols, state.grid.rows) * cellSizeM) / 2;
+  const seaLevel = clampSeaLevel(base, settings);
   for (let y = 0; y < state.grid.rows; y += 1) {
     for (let x = 0; x < state.grid.cols; x += 1) {
       const idx = indexFor(state.grid, x, y);
-      const edgeDistM =
-        Math.min(x, y, state.grid.cols - 1 - x, state.grid.rows - 1 - y) * cellSizeM;
-      const edgeFactor = clamp(edgeDistM / edgeDenomM, 0, 1);
-      const seaLevel = clampSeaLevel(base + (1 - edgeFactor) * settings.edgeWaterBias, settings);
       const elev = elevationMap[idx] ?? 0;
       const isRiver = riverMask ? riverMask[idx] > 0 : false;
       typeIds[idx] = elev < seaLevel || isRiver ? TILE_TYPE_IDS.water : TILE_TYPE_IDS.grass;
@@ -542,7 +526,14 @@ export const persistCoastMetadataToState = (
       relief <= COAST_BEACH_MAX_RELIEF &&
       elevation - seaLevel <= COAST_BEACH_SCULPT_MAX_HEIGHT_ABOVE_SEA &&
       moisture >= 0.14;
-    state.tileCoastClass[i] = isBeach ? COAST_CLASS_BEACH : COAST_CLASS_CLIFF;
+    const isCliff =
+      !isBeach &&
+      (
+        slope >= 0.4 ||
+        relief >= 0.22 ||
+        elevation - seaLevel >= 0.19
+      );
+    state.tileCoastClass[i] = isBeach || !isCliff ? COAST_CLASS_BEACH : COAST_CLASS_CLIFF;
   }
 };
 
@@ -564,14 +555,35 @@ export const classifyOceanCoastTile = (
   }
   const coastClass = state.tileCoastClass[idx] ?? COAST_CLASS_NONE;
   const seaLevel = seaLevelMap[idx] ?? 0;
-  if (elevation <= seaLevel + COAST_LOCAL_SEA_MARGIN) {
-    return null;
-  }
   if (coastClass === COAST_CLASS_BEACH) {
     return "beach";
   }
   if (coastClass === COAST_CLASS_CLIFF) {
     return classifyCoastDryTileType(slope, elevation - seaLevel);
+  }
+  const cols = state.grid.cols;
+  const rows = state.grid.rows;
+  const x = idx % cols;
+  const y = Math.floor(idx / cols);
+  for (const dir of NEIGHBOR_DIRS) {
+    if (Math.abs(dir.x) + Math.abs(dir.y) !== 1) {
+      continue;
+    }
+    const nx = x + dir.x;
+    const ny = y + dir.y;
+    if (nx < 0 || ny < 0 || nx >= cols || ny >= rows) {
+      continue;
+    }
+    const nIdx = ny * cols + nx;
+    if (oceanMask[nIdx] > 0 && riverMask[nIdx] === 0) {
+      const heightAboveSea = elevation - seaLevel;
+      return heightAboveSea <= 0.075 || slope <= 0.035
+        ? "beach"
+        : classifyCoastDryTileType(slope, heightAboveSea);
+    }
+  }
+  if (elevation <= seaLevel + COAST_LOCAL_SEA_MARGIN) {
+    return null;
   }
   return null;
 };
@@ -4883,15 +4895,14 @@ function buildSeaLevelMap(
   cellSizeM: number,
   seaLevelBase: number
 ): Float32Array {
+  void cellSizeM;
   const seaLevelMap = new Float32Array(state.grid.totalTiles);
-  const edgeDenomM = (Math.min(state.grid.cols, state.grid.rows) * cellSizeM) / 2;
+  const seaLevel = clampSeaLevel(seaLevelBase, settings);
   for (let y = 0; y < state.grid.rows; y += 1) {
     const rowBase = y * state.grid.cols;
     for (let x = 0; x < state.grid.cols; x += 1) {
       const idx = rowBase + x;
-      const edgeDistM = Math.min(x, y, state.grid.cols - 1 - x, state.grid.rows - 1 - y) * cellSizeM;
-      const edgeFactor = clamp(edgeDistM / edgeDenomM, 0, 1);
-      seaLevelMap[idx] = clampSeaLevel(seaLevelBase + (1 - edgeFactor) * settings.edgeWaterBias, settings);
+      seaLevelMap[idx] = seaLevel;
     }
   }
   return seaLevelMap;
@@ -6071,8 +6082,6 @@ async function generateMapLegacy(
   const forestMacroScaleM = Math.max(1, mapSettings.forestMacroScale * cellSizeM);
   const forestDetailScaleM = Math.max(1, mapSettings.forestDetailScale * cellSizeM);
   const meadowScaleM = Math.max(1, mapSettings.meadowScale * cellSizeM);
-  const minDimM = Math.min(state.grid.cols, state.grid.rows) * cellSizeM;
-  const edgeDenomM = minDimM / 2;
   const maxDim = Math.max(state.grid.cols, state.grid.rows);
   const biomeBlock = maxDim >= 1024 ? 8 : maxDim >= 512 ? 4 : 2;
   state.tiles = new Array(state.grid.totalTiles);
@@ -6183,9 +6192,6 @@ async function generateMapLegacy(
 
   for (let y = 0; y < state.grid.rows; y += 1) {
     for (let x = 0; x < state.grid.cols; x += 1) {
-      const edgeDistM =
-        Math.min(x, y, state.grid.cols - 1 - x, state.grid.rows - 1 - y) * cellSizeM;
-      const edgeFactor = clamp(edgeDistM / edgeDenomM, 0, 1);
       const idx = indexFor(state.grid, x, y);
       const elevation = elevationMap[idx];
       const valley = state.valleyMap[idx];
@@ -6225,11 +6231,7 @@ async function generateMapLegacy(
       forestNoiseMap[idx] = forestNoise;
       meadowMaskMap[idx] = meadowMask;
 
-      const riverBias = 0;
-      const seaLevel = clampSeaLevel(
-        seaLevelBase + (1 - edgeFactor) * mapSettings.edgeWaterBias + riverBias,
-        mapSettings
-      );
+      const seaLevel = clampSeaLevel(seaLevelBase, mapSettings);
       seaLevelMap[idx] = seaLevel;
       if (trackTerrainStats) {
         elevMin = Math.min(elevMin, elevation);
@@ -6836,7 +6838,7 @@ async function runElevationStage(ctx: MapGenContext): Promise<void> {
 }
 
 async function runErosionStage(ctx: MapGenContext): Promise<void> {
-  const { state, settings, cellSizeM, edgeDenomM } = ctx;
+  const { state, settings, cellSizeM } = ctx;
   if (!ctx.elevationMap) {
     throw new Error("Erosion stage missing elevation map.");
   }
@@ -6858,6 +6860,7 @@ async function runErosionStage(ctx: MapGenContext): Promise<void> {
   const previousHeights = Float32Array.from(input);
   const refinedHeights = Float32Array.from(input);
   const nextWear = Float32Array.from(wearMap);
+  const seaLevel = clampSeaLevel(ctx.seaLevelBase, settings);
   let coverage = 0;
   let absOffsetSum = 0;
   const absOffsets: number[] = [];
@@ -6875,9 +6878,6 @@ async function runErosionStage(ctx: MapGenContext): Promise<void> {
       const gradY = (down - up) * 0.5;
       const slope = Math.hypot(gradX, gradY);
       const slopeMask = smoothstep(slopeMin, slopeMax, slope);
-      const edgeDistM = Math.min(x, y, state.grid.cols - 1 - x, state.grid.rows - 1 - y) * cellSizeM;
-      const edgeFactor = clamp(edgeDistM / edgeDenomM, 0, 1);
-      const seaLevel = clampSeaLevel(ctx.seaLevelBase + (1 - edgeFactor) * settings.edgeWaterBias, settings);
       const headroom = center - seaLevel;
       const coastMask = smoothstep(coastFadeStart, coastFadeEnd, headroom);
       const baseWear = clamp(wearMap[idx] ?? 0, 0, 1);
@@ -6941,9 +6941,6 @@ async function runErosionStage(ctx: MapGenContext): Promise<void> {
       const gradY = (down - up) * 0.5;
       const slope = Math.hypot(gradX, gradY);
       const slopeMask = smoothstep(slopeMin, slopeMax, slope);
-      const edgeDistM = Math.min(x, y, state.grid.cols - 1 - x, state.grid.rows - 1 - y) * cellSizeM;
-      const edgeFactor = clamp(edgeDistM / edgeDenomM, 0, 1);
-      const seaLevel = clampSeaLevel(ctx.seaLevelBase + (1 - edgeFactor) * settings.edgeWaterBias, settings);
       const headroom = center - seaLevel;
       const coastMask = smoothstep(coastFadeStart, coastFadeEnd, headroom);
       const wearMask = smoothstep(0.06, 0.46, wearMap[idx] ?? 0);
@@ -7082,7 +7079,7 @@ const buildBiomeSamples = async (ctx: MapGenContext): Promise<BiomeSample[] | nu
 };
 
 async function runHydrologyStage(ctx: MapGenContext): Promise<void> {
-  const { state, settings, cellSizeM, edgeDenomM } = ctx;
+  const { state, settings } = ctx;
   const elevationMap = ctx.elevationMap;
   const riverMask = ctx.riverMask;
   if (!elevationMap || !riverMask) {
@@ -7092,13 +7089,11 @@ async function runHydrologyStage(ctx: MapGenContext): Promise<void> {
   const totalTiles = state.grid.totalTiles;
   const seaLevelMap = new Float32Array(totalTiles);
   ctx.seaLevelMap = seaLevelMap;
+  const seaLevel = clampSeaLevel(ctx.seaLevelBase, settings);
 
   for (let y = 0; y < state.grid.rows; y += 1) {
     for (let x = 0; x < state.grid.cols; x += 1) {
       const idx = indexFor(state.grid, x, y);
-      const edgeDistM = Math.min(x, y, state.grid.cols - 1 - x, state.grid.rows - 1 - y) * cellSizeM;
-      const edgeFactor = clamp(edgeDistM / edgeDenomM, 0, 1);
-      const seaLevel = clampSeaLevel(ctx.seaLevelBase + (1 - edgeFactor) * settings.edgeWaterBias, settings);
       seaLevelMap[idx] = seaLevel;
       const elevation = elevationMap[idx] ?? 0;
       const tile = createBlankTile(elevation);
@@ -7391,8 +7386,7 @@ async function runShorelinePolishStage(ctx: MapGenContext): Promise<void> {
         const target = seaLevel + getCoastBandValue(COAST_BEACH_DRY_HEIGHTS, dist);
         nextElevation = clamp(Math.min(current, Math.max(target, seaLevel + COAST_MIN_LAND_ABOVE_SEA)), 0, 1);
       } else {
-        const minTarget = seaLevel + getCoastBandValue(COAST_CLIFF_MIN_HEIGHTS, dist);
-        nextElevation = clamp(Math.max(current, minTarget), 0, 1);
+        nextElevation = clamp(Math.max(current, seaLevel + COAST_MIN_LAND_ABOVE_SEA), 0, 1);
       }
       if (dist <= COAST_LAND_EASE_BAND) {
         const easedMax = seaLevel + getCoastBandValue(COAST_LAND_EASE_MAX_HEIGHTS, dist);
@@ -7426,6 +7420,26 @@ async function runShorelinePolishStage(ctx: MapGenContext): Promise<void> {
       elevationMap[i] = lifted;
       state.tiles[i].elevation = lifted;
     }
+  }
+
+  const expandedDistToOcean = buildDistanceFromMask(polishedOceanMask, cols, rows);
+  for (let i = 0; i < totalTiles; i += 1) {
+    if (riverMask[i] > 0 || polishedOceanMask[i] > 0) {
+      continue;
+    }
+    const dist = expandedDistToOcean[i] ?? 0;
+    if (dist < 1 || dist > COAST_LAND_EASE_BAND) {
+      continue;
+    }
+    const sea = shorelineSeaLevelMap[i] ?? 0;
+    const easedMax = sea + getCoastBandValue(COAST_LAND_EASE_MAX_HEIGHTS, dist);
+    const nextElevation = clamp(
+      Math.min(elevationMap[i] ?? state.tiles[i].elevation, Math.max(easedMax, sea + COAST_MIN_LAND_ABOVE_SEA)),
+      0,
+      1
+    );
+    elevationMap[i] = nextElevation;
+    state.tiles[i].elevation = nextElevation;
   }
 
   const finalLandMask = new Uint8Array(totalTiles);

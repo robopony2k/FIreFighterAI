@@ -180,6 +180,7 @@ export type TerrainSample = {
   waterfallDrop?: Float32Array;
   climateDryness?: number;
   debugScalarField?: Float32Array;
+  debugScalarMode?: "color" | "grayscale";
   debugTypeColors?: boolean;
   treesEnabled?: boolean;
   fastUpdate?: boolean;
@@ -1236,6 +1237,12 @@ export type TerrainRenderSurface = {
   sampledLakeCoverage?: Float32Array;
   riverRenderDomain?: RiverRenderDomain;
   structureTopHeightsWorld?: Float32Array;
+  coastHeightDeltaStats?: {
+    sampleCount: number;
+    meanAbsDelta: number;
+    maxAbsDelta: number;
+    highDeltaRatio: number;
+  };
   debugHeightAnomalies?: TerrainHeightAnomaly[];
   getHeightProvenance?: (tileX: number, tileY: number) => TerrainHeightProvenance | null;
   heightAtSample: (x: number, y: number) => number;
@@ -2609,7 +2616,7 @@ export const prepareTerrainRenderSurface = (
     }
     return buildDistanceField(mapped, sampleCols, sampleRows, 0);
   })();
-  if (waterLevel !== null) {
+  if (waterLevel !== null && !hasAuthoritativeCoastProfile) {
     for (let row = 0; row < sampleRows; row += 1) {
       const tileY = Math.min(rows - 1, row * step);
       const endY = Math.min(rows, tileY + step);
@@ -2813,6 +2820,32 @@ export const prepareTerrainRenderSurface = (
     const terrainWorld = (sampleHeights[i] ?? 0) * heightScale;
     shoreTerrainHeightAboveWater[i] = Math.max(0, terrainWorld - waterLevelWorld);
   }
+  let coastDeltaCount = 0;
+  let coastDeltaSum = 0;
+  let coastDeltaMax = 0;
+  let coastHighDeltaCount = 0;
+  for (let i = 0; i < sampleCols * sampleRows; i += 1) {
+    const coastDistance = sampleCoastDistance?.[i] ?? 0;
+    const coastClass = sampleCoastClass?.[i] ?? COAST_CLASS_NONE;
+    if (coastDistance <= 0 || coastDistance > 6 || coastClass === COAST_CLASS_NONE) {
+      continue;
+    }
+    const delta = Math.abs((finalSampleHeights[i] ?? 0) - (rawSampleHeights[i] ?? 0));
+    coastDeltaCount += 1;
+    coastDeltaSum += delta;
+    coastDeltaMax = Math.max(coastDeltaMax, delta);
+    if (delta >= 0.03) {
+      coastHighDeltaCount += 1;
+    }
+  }
+  const coastHeightDeltaStats = coastDeltaCount > 0
+    ? {
+      sampleCount: coastDeltaCount,
+      meanAbsDelta: coastDeltaSum / coastDeltaCount,
+      maxAbsDelta: coastDeltaMax,
+      highDeltaRatio: coastHighDeltaCount / coastDeltaCount
+    }
+    : undefined;
   const shoreTransition = buildShoreTransitionData({
     sampleCols,
     sampleRows,
@@ -2921,6 +2954,7 @@ export const prepareTerrainRenderSurface = (
     sampledLakeCoverage,
     riverRenderDomain,
     structureTopHeightsWorld: structureTopHeights,
+    coastHeightDeltaStats,
     debugHeightAnomalies: undefined,
     getHeightProvenance: undefined,
     heightAtSample,

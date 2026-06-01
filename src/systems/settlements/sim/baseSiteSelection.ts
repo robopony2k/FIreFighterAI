@@ -168,10 +168,14 @@ const findFallbackDrySite = (state: WorldState, center: Point): Point => {
       if (!tile || tile.type === "water") {
         continue;
       }
+      if (!isBaseFootprintDry(state, x, y, BASE_DRY_BUFFER)) {
+        continue;
+      }
       const distance = Math.hypot(x - center.x, y - center.y);
+      const vegetationPenalty = (1 - computeVegetationScore(state, x, y)) * 12;
       const elevationPenalty = Math.max(0, tile.elevation - 0.7) * 128 + Math.abs(tile.elevation - 0.46) * 18;
       const reliefPenalty = computeLocalRelief(state, x, y, 2) * 90;
-      const score = distance + elevationPenalty + reliefPenalty;
+      const score = distance + elevationPenalty + reliefPenalty + vegetationPenalty;
       if (score < bestScore) {
         bestScore = score;
         best = { x, y };
@@ -235,7 +239,7 @@ export const selectBaseSite = (state: WorldState, heightScaleMultiplier = 1): Po
         }
       }
     }
-    const selected = bestAcceptable ?? (pass > 2 ? best : null);
+    const selected = bestAcceptable ?? (pass > 2 && best && best.elevation <= 0.68 ? best : null);
     if (selected) {
       return { x: selected.x, y: selected.y };
     }

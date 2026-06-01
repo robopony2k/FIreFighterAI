@@ -1,7 +1,8 @@
+import { COAST_CLASS_NONE, TILE_TYPE_IDS } from "../../../core/state.js";
 import type { MapGenSettings } from "../../../mapgen/settings.js";
 import { buildNoiseLandmassCore } from "./noiseLandmass.js";
 
-export type FastTerrainPreviewMode = "shape" | "relief" | "water";
+export type FastTerrainPreviewMode = "noise" | "shape" | "relief" | "water";
 
 export type FastTerrainPreviewInput = {
   seed: number;
@@ -25,6 +26,7 @@ export type FastTerrainPreviewResult = {
   coastClass: Uint8Array;
   riverMask: Uint8Array;
   flowMap: Float32Array;
+  debugScalarField?: Float32Array;
   timingsMs: {
     constraints: number;
     elevation: number;
@@ -49,21 +51,34 @@ export function buildFastTerrainPreview(input: FastTerrainPreviewInput): FastTer
   });
   const finishedAt = now();
   const total = finishedAt - startedAt;
+  const totalTiles = input.cols * input.rows;
+  const isNoisePreview = mode === "noise";
+  const flatElevationMap = new Float32Array(totalTiles);
+  const flatTileTypes = new Uint8Array(totalTiles);
+  const emptyMask = new Uint8Array(totalTiles);
+  const emptyDistance = new Uint16Array(totalTiles);
+  const emptyCoastClass = new Uint8Array(totalTiles);
+  const flatSeaLevelMap = new Float32Array(totalTiles);
+  if (isNoisePreview) {
+    flatTileTypes.fill(TILE_TYPE_IDS.grass);
+    emptyCoastClass.fill(COAST_CLASS_NONE);
+  }
 
   return {
     cols: input.cols,
     rows: input.rows,
     constraintCols: input.cols,
     constraintRows: input.rows,
-    constraintMap: landmass.islandMask,
-    elevationMap: landmass.elevationFloatMap,
-    tileTypes: landmass.tileTypes,
-    oceanMask: landmass.oceanMask,
-    seaLevelMap: landmass.seaLevelMap,
-    coastDistance: landmass.coastDistance,
-    coastClass: landmass.coastClass,
-    riverMask: landmass.riverMask,
+    constraintMap: isNoisePreview ? landmass.rawNoiseMap : landmass.islandMask,
+    elevationMap: isNoisePreview ? flatElevationMap : landmass.elevationFloatMap,
+    tileTypes: isNoisePreview ? flatTileTypes : landmass.tileTypes,
+    oceanMask: isNoisePreview ? emptyMask : landmass.oceanMask,
+    seaLevelMap: isNoisePreview ? flatSeaLevelMap : landmass.seaLevelMap,
+    coastDistance: isNoisePreview ? emptyDistance : landmass.coastDistance,
+    coastClass: isNoisePreview ? emptyCoastClass : landmass.coastClass,
+    riverMask: isNoisePreview ? emptyMask : landmass.riverMask,
     flowMap: landmass.flowMap,
+    debugScalarField: isNoisePreview ? landmass.rawNoiseMap : undefined,
     timingsMs: {
       constraints: total * 0.18,
       elevation: mode === "water" ? total * 0.52 : total * 0.82,

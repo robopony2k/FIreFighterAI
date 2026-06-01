@@ -55,6 +55,7 @@ export type RenderTerrainSample = {
   waterfallDrop?: Float32Array;
   climateDryness?: number;
   debugScalarField?: Float32Array;
+  debugScalarMode?: "color" | "grayscale";
   debugTypeColors?: boolean;
   treesEnabled?: boolean;
   fastUpdate?: boolean;

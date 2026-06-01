@@ -13,15 +13,9 @@ export type TerrainSeedPayload = {
   name?: string;
 };
 
-const SHARE_CODE_PREFIX_V1 = "MAP1";
-const SHARE_CODE_PREFIX_V2 = "MAP2";
-const SHARE_CODE_PREFIX_V3 = "MAP3";
-const SHARE_CODE_PREFIX_V4 = "MAP4";
-const SHARE_CODE_PREFIX_V5 = "MAP5";
-const SHARE_CODE_PREFIX = SHARE_CODE_PREFIX_V5;
+const SHARE_CODE_PREFIX = "MAP6";
 const MAP_SIZE_ORDER: readonly MapSizeId[] = ["medium", "massive", "colossal", "gigantic", "titanic"];
 const ARCHETYPE_ORDER: readonly TerrainArchetypeId[] = ["MASSIF", "LONG_SPINE", "TWIN_BAY", "SHELF"];
-const LEGACY_TOWN_LAYOUT_ORDER = ["auto", "coastal_ring", "bridge_chain", "inland_valley", "hub_spokes"] as const;
 
 const clamp01 = (value: number): number => Math.max(0, Math.min(1, value));
 
@@ -157,7 +151,8 @@ export const encodeTerrainSeedCode = (payload: TerrainSeedPayload): string => {
     encodePercent(advanced.settlementSpacing ?? 0),
     encodeSmallInt(advanced.settlementPreGrowthYears ?? 20),
     encodePercent(advanced.roadStrictness ?? 0),
-    encodePercent(advanced.forestPatchiness ?? 0)
+    encodePercent(advanced.forestPatchiness ?? 0),
+    encodePercent(advanced.noiseFrequency ?? 0.5)
   ].join("");
   const nameToken = encodeNameToken(payload.name ?? "", seed);
   return nameToken.length > 0
@@ -169,13 +164,7 @@ export const decodeTerrainSeedCode = (value: string): TerrainSeedPayload | null 
   const trimmed = value.trim();
   const parts = trimmed.split("-");
   const prefix = (parts[0] ?? "").toUpperCase();
-  if (
-    prefix !== SHARE_CODE_PREFIX_V1 &&
-    prefix !== SHARE_CODE_PREFIX_V2 &&
-    prefix !== SHARE_CODE_PREFIX_V3 &&
-    prefix !== SHARE_CODE_PREFIX_V4 &&
-    prefix !== SHARE_CODE_PREFIX_V5
-  ) {
+  if (prefix !== SHARE_CODE_PREFIX) {
     return null;
   }
   if (parts.length < 3 || parts.length > 4) {
@@ -184,163 +173,67 @@ export const decodeTerrainSeedCode = (value: string): TerrainSeedPayload | null 
   const seed = Number.parseInt(parts[1] ?? "", 36);
   const body = parts[2] ?? "";
   const nameToken = parts[3] ?? "";
-  const hasNameToken =
-    prefix === SHARE_CODE_PREFIX_V2 ||
-    prefix === SHARE_CODE_PREFIX_V3 ||
-    prefix === SHARE_CODE_PREFIX_V4 ||
-    prefix === SHARE_CODE_PREFIX_V5;
-  const name = hasNameToken ? decodeNameToken(nameToken, coerceNonNegativeSeed(seed)) : undefined;
-  const expectedBodyLength =
-    prefix === SHARE_CODE_PREFIX_V5 ? 54 : prefix === SHARE_CODE_PREFIX_V4 ? 52 : prefix === SHARE_CODE_PREFIX_V3 ? 50 : 40;
-  if (!Number.isFinite(seed) || seed < 0 || body.length !== expectedBodyLength) {
+  const name = decodeNameToken(nameToken, coerceNonNegativeSeed(seed));
+  if (!Number.isFinite(seed) || seed < 0 || body.length !== 56) {
     return null;
   }
-  if (hasNameToken && nameToken.length > 0 && name === undefined) {
+  if (nameToken.length > 0 && name === undefined) {
     return null;
   }
   const mapSize = readDiscreteValue(MAP_SIZE_ORDER, body.slice(0, 1));
   const archetype = readDiscreteValue(ARCHETYPE_ORDER, body.slice(1, 2));
-  const townLayout = readDiscreteValue(LEGACY_TOWN_LAYOUT_ORDER, body.slice(2, 3));
+  const versionSlot = body.slice(2, 3);
   const skipCarving = body.slice(3, 4) === "1";
-  if (!mapSize || !archetype || !townLayout) {
+  if (!mapSize || !archetype || versionSlot !== "0") {
     return null;
   }
   const values: number[] = [];
-  const bodyValueLimit = prefix === SHARE_CODE_PREFIX_V5 ? 48 : prefix === SHARE_CODE_PREFIX_V4 ? 46 : body.length;
-  for (let index = 4; index < bodyValueLimit; index += 2) {
+  for (let index = 4; index < 48; index += 2) {
     const decoded = decodePercent(body.slice(index, index + 2));
     if (decoded === null) {
       return null;
     }
     values.push(decoded);
   }
-  const decodedPreGrowthYears =
-    prefix === SHARE_CODE_PREFIX_V5
-      ? decodeSmallInt(body.slice(48, 50))
-      : prefix === SHARE_CODE_PREFIX_V4
-        ? decodeSmallInt(body.slice(46, 48))
-        : 20;
-  if ((prefix === SHARE_CODE_PREFIX_V5 || prefix === SHARE_CODE_PREFIX_V4) && decodedPreGrowthYears === null) {
+  const decodedPreGrowthYears = decodeSmallInt(body.slice(48, 50));
+  if (decodedPreGrowthYears === null || values.length !== 22) {
     return null;
   }
-  const preGrowthYears = decodedPreGrowthYears ?? 20;
-  if (
-    (prefix === SHARE_CODE_PREFIX_V5 && values.length !== 22) ||
-    (prefix === SHARE_CODE_PREFIX_V4 && values.length !== 21) ||
-    (prefix === SHARE_CODE_PREFIX_V3 && values.length !== 23) ||
-    (
-      prefix !== SHARE_CODE_PREFIX_V3 &&
-      prefix !== SHARE_CODE_PREFIX_V4 &&
-      prefix !== SHARE_CODE_PREFIX_V5 &&
-      values.length !== 18
-    )
-  ) {
+  const roadStrictness = decodePercent(body.slice(50, 52));
+  const forestPatchiness = decodePercent(body.slice(52, 54));
+  const noiseFrequency = decodePercent(body.slice(54, 56));
+  if (roadStrictness === null || forestPatchiness === null || noiseFrequency === null) {
     return null;
   }
-  const advancedOverrides =
-    prefix === SHARE_CODE_PREFIX_V5
-      ? (() => {
-          const roadStrictness = decodePercent(body.slice(50, 52));
-          const forestPatchiness = decodePercent(body.slice(52, 54));
-          if (roadStrictness === null || forestPatchiness === null) {
-            return null;
-          }
-          return {
-          interiorRise: values[8],
-          maxHeight: values[9],
-          embayment: values[10],
-          anisotropy: values[11],
-          asymmetry: values[12],
-          ridgeAlignment: values[13],
-          uplandDistribution: values[14],
-          islandCompactness: values[15],
-          ridgeFrequency: values[16],
-          basinStrength: values[17],
-          coastalShelfWidth: values[18],
-          seaLevelBias: values[19],
-          skipCarving,
-          riverBudget: values[20],
-          settlementSpacing: values[21],
-          settlementPreGrowthYears: preGrowthYears,
-          roadStrictness,
-          forestPatchiness
-        };
-        })()
-    : prefix === SHARE_CODE_PREFIX_V4
-      ? (() => {
-          const roadStrictness = decodePercent(body.slice(48, 50));
-          const forestPatchiness = decodePercent(body.slice(50, 52));
-          if (roadStrictness === null || forestPatchiness === null) {
-            return null;
-          }
-          return {
-          interiorRise: values[8],
-          maxHeight: values[9],
-          embayment: values[10],
-          anisotropy: values[11],
-          asymmetry: values[12],
-          ridgeAlignment: values[13],
-          uplandDistribution: values[14],
-          islandCompactness: values[15],
-          ridgeFrequency: values[16],
-          basinStrength: values[17],
-          coastalShelfWidth: values[18],
-          seaLevelBias: 0.5,
-          skipCarving,
-          riverBudget: values[19],
-          settlementSpacing: values[20],
-          settlementPreGrowthYears: preGrowthYears,
-          roadStrictness,
-          forestPatchiness
-        };
-        })()
-      : prefix === SHARE_CODE_PREFIX_V3
-      ? {
-          interiorRise: values[8],
-          maxHeight: values[9],
-          embayment: values[10],
-          anisotropy: values[11],
-          asymmetry: values[12],
-          ridgeAlignment: values[13],
-          uplandDistribution: values[14],
-          islandCompactness: values[15],
-          ridgeFrequency: values[16],
-          basinStrength: values[17],
-          coastalShelfWidth: values[18],
-          seaLevelBias: 0.5,
-          skipCarving,
-          riverBudget: values[19],
-          settlementSpacing: values[20],
-          settlementPreGrowthYears: 20,
-          roadStrictness: values[21],
-          forestPatchiness: values[22]
-        }
-      : {
-          interiorRise: values[8],
-          maxHeight: values[9],
-          islandCompactness: values[10],
-          ridgeFrequency: values[11],
-          basinStrength: values[12],
-          coastalShelfWidth: values[13],
-          seaLevelBias: 0.5,
-          skipCarving,
-          riverBudget: values[14],
-          settlementSpacing: values[15],
-          settlementPreGrowthYears: 20,
-          roadStrictness: values[16],
-          forestPatchiness: values[17]
-        };
-  if (!advancedOverrides) {
-    return null;
-  }
+  const advancedOverrides = {
+    interiorRise: values[8],
+    maxHeight: values[9],
+    embayment: values[10],
+    anisotropy: values[11],
+    asymmetry: values[12],
+    ridgeAlignment: values[13],
+    uplandDistribution: values[14],
+    islandCompactness: values[15],
+    ridgeFrequency: values[16],
+    basinStrength: values[17],
+    coastalShelfWidth: values[18],
+    seaLevelBias: values[19],
+    skipCarving,
+    riverBudget: values[20],
+    settlementSpacing: values[21],
+    settlementPreGrowthYears: decodedPreGrowthYears,
+    roadStrictness,
+    forestPatchiness,
+    noiseFrequency
+  };
   const terrain = cloneTerrainRecipe({
     archetype,
     mapSize,
     relief: values[0],
     ruggedness: values[1],
     coastComplexity: values[2],
-    landCoverageTarget: prefix === SHARE_CODE_PREFIX_V5 ? values[3] : undefined,
-    waterLevel: prefix === SHARE_CODE_PREFIX_V5 ? undefined : values[3],
+    landCoverageTarget: values[3],
+    waterLevel: undefined,
     riverIntensity: values[4],
     vegetationDensity: values[5],
     townDensity: values[6],

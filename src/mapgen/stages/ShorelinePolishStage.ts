@@ -16,7 +16,6 @@ import {
   COAST_BEACH_SCULPT_MAX_HEIGHT_ABOVE_SEA,
   COAST_BEACH_SHELF_BAND,
   COAST_BEACH_WET_DEPTHS,
-  COAST_CLIFF_MIN_HEIGHTS,
   COAST_LAND_EASE_BAND,
   COAST_LAND_EASE_MAX_HEIGHTS,
   COAST_LOCAL_SEA_MARGIN,
@@ -260,8 +259,7 @@ export const ShorelinePolishStage: PipelineStage = {
           const target = seaLevel + getCoastBandValue(COAST_BEACH_DRY_HEIGHTS, dist);
           nextElevation = clamp(Math.min(current, Math.max(target, seaLevel + COAST_MIN_LAND_ABOVE_SEA)), 0, 1);
         } else {
-          const minTarget = seaLevel + getCoastBandValue(COAST_CLIFF_MIN_HEIGHTS, dist);
-          nextElevation = clamp(Math.max(current, minTarget), 0, 1);
+          nextElevation = clamp(Math.max(current, seaLevel + COAST_MIN_LAND_ABOVE_SEA), 0, 1);
         }
         if (dist <= COAST_LAND_EASE_BAND) {
           const easedMax = seaLevel + getCoastBandValue(COAST_LAND_EASE_MAX_HEIGHTS, dist);
@@ -295,6 +293,26 @@ export const ShorelinePolishStage: PipelineStage = {
         elevationMap[i] = lifted;
         state.tiles[i].elevation = lifted;
       }
+    }
+
+    const expandedDistToOcean = buildDistanceFromMask(polishedOceanMask, cols, rows);
+    for (let i = 0; i < totalTiles; i += 1) {
+      if (riverMask[i] > 0 || polishedOceanMask[i] > 0) {
+        continue;
+      }
+      const dist = expandedDistToOcean[i] ?? 0;
+      if (dist < 1 || dist > COAST_LAND_EASE_BAND) {
+        continue;
+      }
+      const sea = shorelineSeaLevelMap[i] ?? 0;
+      const easedMax = sea + getCoastBandValue(COAST_LAND_EASE_MAX_HEIGHTS, dist);
+      const nextElevation = clamp(
+        Math.min(elevationMap[i] ?? state.tiles[i].elevation, Math.max(easedMax, sea + COAST_MIN_LAND_ABOVE_SEA)),
+        0,
+        1
+      );
+      elevationMap[i] = nextElevation;
+      state.tiles[i].elevation = nextElevation;
     }
 
     const finalLandMask = new Uint8Array(totalTiles);
