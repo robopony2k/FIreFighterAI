@@ -21,6 +21,9 @@ const NEIGHBORS_4 = [
   { dx: 0, dy: 1 }
 ] as const;
 
+const MIN_VISIBLE_LAKE_OUTLET_TILES = 4;
+const MAX_LAKE_LAND_COVERAGE = 0.12;
+
 type AcceptedBasinLake = StaticHydrologyLake & {
   basin: DepressionBasin;
 };
@@ -128,12 +131,17 @@ const candidateRejectReason = (
   state: WorldState,
   lakeMask: Uint16Array,
   oceanDistance: Uint16Array,
+  landTileCount: number,
   settings: MapGenSettings
 ): StaticHydrologyRejectReason | null => {
   if (basin.area < settings.minLakeAreaTiles || footprintTiles.length < settings.minLakeAreaTiles) {
     return "area-small";
   }
   if (footprintTiles.length > settings.maxLakeAreaTiles) {
+    return "area-large";
+  }
+  const relativeAreaLimit = Math.max(settings.minLakeAreaTiles, Math.floor(landTileCount * MAX_LAKE_LAND_COVERAGE));
+  if (footprintTiles.length > relativeAreaLimit) {
     return "area-large";
   }
   if (basin.maxDepth < settings.minLakeDepth) {
@@ -304,20 +312,22 @@ const stampLakeOverflowRivers = (
 ): void => {
   const { cols, rows } = state.grid;
   const lakeById = new Map<number, AcceptedBasinLake>(lakes.map((lake) => [lake.id, lake]));
-  const routes = buildLakeOverflowRiverPaths({
-    cols,
-    rows,
-    elevationMap,
-    oceanMask,
-    lakeMask,
-    flowTarget,
-    lakes,
-    maxSteps: cols + rows
-  });
+  const minVisibleLength = Math.max(MIN_VISIBLE_LAKE_OUTLET_TILES, Math.min(10, settings.lakeOutletSearchRadius));
 
-  for (const route of routes) {
-    const lake = lakeById.get(route.lakeId);
-    if (!lake || route.tiles.length === 0) {
+  for (const lake of lakes) {
+    const route = buildLakeOverflowRiverPaths({
+      cols,
+      rows,
+      elevationMap,
+      riverMask,
+      oceanMask,
+      lakeMask,
+      flowTarget,
+      lakes: [lake],
+      maxSteps: Math.max(cols + rows, minVisibleLength),
+      minVisibleLength
+    })[0];
+    if (!route || route.tiles.length === 0) {
       continue;
     }
     const pathDenom = Math.max(1, route.tiles.length);
@@ -518,6 +528,12 @@ export const buildBasinLakeHydrology = (input: {
   const rejectedLakeCandidates: StaticHydrologyRejectSummary = {};
   const oceanDistance = buildOceanDistanceField(cols, rows, oceanMask, Math.max(cols, rows));
   const lakes: AcceptedBasinLake[] = [];
+  let landTileCount = 0;
+  for (let idx = 0; idx < totalTiles; idx += 1) {
+    if (oceanMask[idx] === 0) {
+      landTileCount += 1;
+    }
+  }
 
   resetStaticHydrologyState(state);
 
@@ -542,7 +558,7 @@ export const buildBasinLakeHydrology = (input: {
         spillTolerance: Math.max(0.0025, settings.minLakeDepth * 0.3),
         surfaceMargin: 0.0001
       });
-      const reason = candidateRejectReason(basin, contourTiles, state, lakeMask, oceanDistance, settings);
+      const reason = candidateRejectReason(basin, contourTiles, state, lakeMask, oceanDistance, landTileCount, settings);
       if (reason) {
         incrementReject(rejectedLakeCandidates, reason);
         continue;

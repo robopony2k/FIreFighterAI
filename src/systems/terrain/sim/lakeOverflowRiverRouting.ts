@@ -13,17 +13,20 @@ export type LakeOverflowRiverPath = {
   tiles: number[];
   reachedLakeId: number;
   reachedOcean: boolean;
+  reachedExistingRiver: boolean;
 };
 
 export type LakeOverflowRiverRoutingInput = {
   cols: number;
   rows: number;
   elevationMap: ArrayLike<number>;
+  riverMask: Uint8Array;
   oceanMask: Uint8Array;
   lakeMask: Uint16Array;
   flowTarget: Int32Array;
   lakes: readonly StaticHydrologyLake[];
   maxSteps: number;
+  minVisibleLength: number;
 };
 
 const idxAt = (x: number, y: number, cols: number): number => y * cols + x;
@@ -34,6 +37,7 @@ const inBounds = (x: number, y: number, cols: number, rows: number): boolean =>
 const findFallbackDownstreamNeighbor = (
   current: number,
   sourceLakeId: number,
+  allowTerminal: boolean,
   visited: Uint8Array,
   input: LakeOverflowRiverRoutingInput
 ): number => {
@@ -55,6 +59,9 @@ const findFallbackDownstreamNeighbor = (
     if (visited[nIdx] > 0 || nLakeId === sourceLakeId) {
       continue;
     }
+    if (!allowTerminal && (oceanMask[nIdx] > 0 || nLakeId > 0)) {
+      continue;
+    }
     const nElevation = elevationMap[nIdx] ?? currentElevation;
     const downhill = Math.max(0, currentElevation - nElevation);
     const uphill = Math.max(0, nElevation - currentElevation);
@@ -70,17 +77,40 @@ const findFallbackDownstreamNeighbor = (
   return bestIdx;
 };
 
+const isValidFlowTarget = (
+  target: number,
+  current: number,
+  sourceLakeId: number,
+  minVisibleLength: number,
+  visibleLength: number,
+  visited: Uint8Array,
+  input: LakeOverflowRiverRoutingInput
+): boolean => {
+  const { cols, rows, oceanMask, lakeMask } = input;
+  const total = cols * rows;
+  if (target < 0 || target >= total || target === current || visited[target] > 0) {
+    return false;
+  }
+  const targetLakeId = lakeMask[target] ?? 0;
+  if (targetLakeId === sourceLakeId) {
+    return false;
+  }
+  const terminal = oceanMask[target] > 0 || targetLakeId > 0;
+  return !terminal || visibleLength >= minVisibleLength;
+};
+
 const buildLakeOverflowPath = (
   lake: StaticHydrologyLake,
   input: LakeOverflowRiverRoutingInput
 ): LakeOverflowRiverPath => {
-  const { cols, rows, oceanMask, lakeMask, flowTarget, maxSteps } = input;
+  const { cols, rows, riverMask, oceanMask, lakeMask, flowTarget, maxSteps, minVisibleLength } = input;
   const total = cols * rows;
   const tiles: number[] = [];
   const visited = new Uint8Array(total);
   let current = lake.outletTargetIndex;
   let reachedLakeId = 0;
   let reachedOcean = false;
+  let reachedExistingRiver = false;
 
   for (let step = 0; step < maxSteps; step += 1) {
     if (current < 0 || current >= total || visited[current] > 0) {
@@ -98,16 +128,25 @@ const buildLakeOverflowPath = (
       }
       break;
     }
+    if (riverMask[current] > 0 && tiles.length > 0) {
+      reachedExistingRiver = true;
+      break;
+    }
 
     tiles.push(current);
     const target = flowTarget[current] ?? -1;
-    if (target >= 0 && target < total && target !== current && visited[target] === 0) {
+    if (isValidFlowTarget(target, current, lake.id, minVisibleLength, tiles.length, visited, input)) {
       current = target;
       continue;
     }
 
-    const fallback = findFallbackDownstreamNeighbor(current, lake.id, visited, input);
+    const fallback = findFallbackDownstreamNeighbor(current, lake.id, tiles.length >= minVisibleLength, visited, input);
     if (fallback < 0) {
+      const terminalFallback = findFallbackDownstreamNeighbor(current, lake.id, true, visited, input);
+      if (terminalFallback >= 0) {
+        current = terminalFallback;
+        continue;
+      }
       break;
     }
     current = fallback;
@@ -118,7 +157,8 @@ const buildLakeOverflowPath = (
     outletTargetIndex: lake.outletTargetIndex,
     tiles,
     reachedLakeId,
-    reachedOcean
+    reachedOcean,
+    reachedExistingRiver
   };
 };
 
@@ -126,7 +166,8 @@ export const buildLakeOverflowRiverPaths = (
   input: LakeOverflowRiverRoutingInput
 ): LakeOverflowRiverPath[] => {
   const maxSteps = Math.max(1, input.maxSteps);
+  const minVisibleLength = Math.max(1, input.minVisibleLength);
   return input.lakes
     .filter((lake) => lake.outletIndex >= 0 && lake.outletTargetIndex >= 0)
-    .map((lake) => buildLakeOverflowPath(lake, { ...input, maxSteps }));
+    .map((lake) => buildLakeOverflowPath(lake, { ...input, maxSteps, minVisibleLength }));
 };

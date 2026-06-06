@@ -309,6 +309,7 @@ const LAKE_TRACE_SEED_MIN_RATIO = 0.001;
 const LAKE_TRACE_WATER_SUPPORT_MIN_RATIO = 0.02;
 const LAKE_TRACE_TERRAIN_MARGIN = 0.0006;
 const LAKE_TRACE_FULL_DEPTH = 0.006;
+const LAKE_TRACE_MAX_SAMPLE_DISTANCE = 3;
 const OCEAN_SAMPLE_SUPPORT_FLOOR = 0.12;
 const EDGE_WATER_SAMPLE_RATIO = 0.2;
 const INTERIOR_WATER_SAMPLE_RATIO = 0.5;
@@ -1210,9 +1211,11 @@ const traceSampledLakeSurfaceCoverage = (
   const coverage = new Float32Array(sampledLakeCoverage);
   const surface = new Float32Array(total).fill(Number.NaN);
   const visited = new Uint8Array(total);
+  const traceDistance = new Int16Array(total);
   const queue = new Int32Array(total);
   let head = 0;
   let tail = 0;
+  traceDistance.fill(-1);
 
   for (let i = 0; i < total; i += 1) {
     const level = sampledLakeSurface[i];
@@ -1221,6 +1224,7 @@ const traceSampledLakeSurfaceCoverage = (
     }
     surface[i] = clamp(level as number, 0, 1);
     visited[i] = 1;
+    traceDistance[i] = 0;
     queue[tail] = i;
     tail += 1;
   }
@@ -1254,6 +1258,10 @@ const traceSampledLakeSurfaceCoverage = (
       continue;
     }
     const lakeLevel = level as number;
+    const currentDistance = traceDistance[idx] ?? 0;
+    if (currentDistance >= LAKE_TRACE_MAX_SAMPLE_DISTANCE) {
+      continue;
+    }
     const x = idx % sampleCols;
     const y = Math.floor(idx / sampleCols);
     const neighbors = [
@@ -1279,6 +1287,7 @@ const traceSampledLakeSurfaceCoverage = (
       coverage[nIdx] = Math.max(coverage[nIdx] ?? 0, tracedCoverage);
       surface[nIdx] = lakeLevel;
       visited[nIdx] = 1;
+      traceDistance[nIdx] = currentDistance + 1;
       queue[tail] = nIdx;
       tail += 1;
     }
