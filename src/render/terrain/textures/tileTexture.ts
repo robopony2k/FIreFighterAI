@@ -126,6 +126,7 @@ export const buildTileTexture = (
   riverRatio: Float32Array | null,
   sampledErosionWear: Float32Array | null,
   sampledRiverCoverage: Float32Array | null,
+  sampledLakeCoverage: Float32Array | null | undefined,
   riverStepStrength: Float32Array | null | undefined,
   debugTypeColors: boolean,
   colorMode: TileTextureColorMode,
@@ -208,6 +209,7 @@ export const buildTileTexture = (
       const rawErosionWear = sampledErosionWear ? sampledErosionWear[sampleIndex] : 0;
       const localErosionWear = Number.isFinite(rawErosionWear) ? clamp(rawErosionWear as number, 0, 1) : 0;
       const localRiverCoverage = sampledRiverCoverage ? clamp(sampledRiverCoverage[sampleIndex] ?? 0, 0, 1) : localRiverRatio;
+      const localLakeCoverage = sampledLakeCoverage ? clamp(sampledLakeCoverage[sampleIndex] ?? 0, 0, 1) : 0;
       const coastalDistanceToLand = distanceToLand[sampleIndex] >= 0 ? distanceToLand[sampleIndex] : sampleCols + sampleRows;
       const localMoisture = tileMoisture ? clamp(tileMoisture[idx] ?? 0.5, 0, 1) : 0.5;
       const riverMaskAtTile = riverMask ? riverMask[idx] > 0 : false;
@@ -356,6 +358,27 @@ export const buildTileTexture = (
           riverbedColor[0] * (1 - rockyStepBlend) + rockyColor[0] * rockyStepBlend,
           riverbedColor[1] * (1 - rockyStepBlend) + rockyColor[1] * rockyStepBlend,
           riverbedColor[2] * (1 - rockyStepBlend) + rockyColor[2] * rockyStepBlend
+        ];
+      }
+      if (
+        !debugTypeColors &&
+        !debugScalarField &&
+        typeId === waterId &&
+        localLakeCoverage >= deps.waterAlphaMinRatio &&
+        localRiverRatio < deps.riverRatioMin
+      ) {
+        const rockyColor = palette[TILE_TYPE_IDS.rocky] ?? color;
+        const floodColor = palette[floodplainId] ?? palette[grassId] ?? color;
+        const wetLakebedColor: [number, number, number] = [
+          floodColor[0] * 0.62 + rockyColor[0] * 0.24 + color[0] * 0.14,
+          floodColor[1] * 0.68 + rockyColor[1] * 0.2 + color[1] * 0.12,
+          floodColor[2] * 0.72 + rockyColor[2] * 0.16 + color[2] * 0.12
+        ];
+        const blend = clamp(0.38 + localLakeCoverage * 0.42, 0, 0.82);
+        color = [
+          color[0] * (1 - blend) + wetLakebedColor[0] * blend,
+          color[1] * (1 - blend) + wetLakebedColor[1] * blend,
+          color[2] * (1 - blend) + wetLakebedColor[2] * blend
         ];
       }
       const height = heightAtSample(col, row);

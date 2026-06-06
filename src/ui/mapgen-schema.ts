@@ -173,7 +173,7 @@ export const MAPGEN_GROUPS: readonly MapGenGroup[] = [
   },
   {
     id: "water",
-    title: "Water & Rivers",
+    title: "Water + Hydrology",
     sliders: [
       {
         key: "waterCoverage",
@@ -195,20 +195,10 @@ export const MAPGEN_GROUPS: readonly MapGenGroup[] = [
         step: 0.01
       },
       {
-        key: "riverCount",
-        slug: "riverCount",
-        label: "River count (0 = auto)",
-        tooltip: "Number of rivers to carve. Set to 0 to keep automatic river counts by map size.",
-        min: 0,
-        max: 12,
-        step: 1,
-        format: "int"
-      },
-      {
         key: "riverWaterBias",
         slug: "riverWaterBias",
-        label: "River carve strength",
-        tooltip: "Controls river channel width/depth and lake size. Higher values make rivers wider and lakes larger.",
+        label: "Hydrology carve strength",
+        tooltip: "Controls outlet channel depth and lake-water integration. Higher values make generated channels more pronounced.",
         min: 0,
         max: 0.6,
         step: 0.01
@@ -286,4 +276,3 @@ export const mapGenSettingsEqual = (a: MapGenSettings, b: MapGenSettings): boole
   }
   return true;
 };
-

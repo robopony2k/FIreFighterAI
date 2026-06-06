@@ -64,20 +64,23 @@ const clamp = (value: number, min: number, max: number): number => Math.max(min,
 const clampWhole = (value: number, min: number, max: number): number => Math.max(min, Math.min(max, Math.round(value)));
 const mix = (a: number, b: number, t: number): number => a + (b - a) * clamp01(t);
 const MAX_HEIGHT_REFERENCE = 0.62;
+const MAX_HEIGHT_LIMIT = 1.5;
 const LEGACY_WATER_COVERAGE_MIN = 0.22;
 const LEGACY_WATER_COVERAGE_MAX = 0.68;
 
+const clampMaxHeight = (value: number): number => clamp(value, 0, MAX_HEIGHT_LIMIT);
+
 const computeTerrainHeightScaleMultiplier = (maxHeight: number): number =>
-  clamp(1 + (clamp01(maxHeight) - MAX_HEIGHT_REFERENCE) * 1.75, 0.65, 1.7);
+  clamp(1 + (clampMaxHeight(maxHeight) - MAX_HEIGHT_REFERENCE) * 1.65, 0.65, 2.45);
 
 const computeNormalizedHeightPressure = (maxHeight: number): number =>
-  clamp(1 - (clamp01(maxHeight) - MAX_HEIGHT_REFERENCE) * 0.45, 0.82, 1.16);
+  clamp(1 - (clampMaxHeight(maxHeight) - MAX_HEIGHT_REFERENCE) * 0.34, 0.7, 1.16);
 
 const inferMaxHeightFromScaleMultiplier = (multiplier: number | undefined): number => {
   if (!Number.isFinite(multiplier)) {
     return MAX_HEIGHT_REFERENCE;
   }
-  return clamp01(MAX_HEIGHT_REFERENCE + ((multiplier as number) - 1) / 1.75);
+  return clampMaxHeight(MAX_HEIGHT_REFERENCE + ((multiplier as number) - 1) / 1.65);
 };
 
 const landCoverageFromLegacyWaterLevel = (waterLevel: unknown, fallback: number): number => {
@@ -109,6 +112,11 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
 const clampOverride = (value: unknown, fallback: number): number => {
   const parsed = toFiniteNumber(value);
   return parsed === null ? fallback : clamp01(parsed);
+};
+
+const clampMaxHeightOverride = (value: unknown, fallback: number): number => {
+  const parsed = toFiniteNumber(value);
+  return parsed === null ? clampMaxHeight(fallback) : clampMaxHeight(parsed);
 };
 
 const parseBooleanOverride = (value: unknown, fallback: boolean): boolean => {
@@ -299,6 +307,38 @@ const ARCHETYPE_PRESETS: Record<
       roadStrictness: 0.54,
       forestPatchiness: 0.54
     }
+  },
+  NONE: {
+    relief: 0.62,
+    ruggedness: 0.5,
+    coastComplexity: 0.42,
+    landCoverageTarget: 0.64,
+    waterLevel: 0.34,
+    riverIntensity: 0.45,
+    vegetationDensity: 0.56,
+    townDensity: 0.48,
+    bridgeAllowance: 0.18,
+    advanced: {
+      interiorRise: ISLAND_ARCHETYPE_DEFINITIONS.NONE.interiorRise,
+      maxHeight: ISLAND_ARCHETYPE_DEFINITIONS.NONE.maxHeight,
+      embayment: ISLAND_ARCHETYPE_DEFINITIONS.NONE.embayment,
+      anisotropy: ISLAND_ARCHETYPE_DEFINITIONS.NONE.anisotropy,
+      asymmetry: ISLAND_ARCHETYPE_DEFINITIONS.NONE.asymmetry,
+      ridgeAlignment: ISLAND_ARCHETYPE_DEFINITIONS.NONE.ridgeAlignment,
+      uplandDistribution: ISLAND_ARCHETYPE_DEFINITIONS.NONE.uplandDistribution,
+      noiseFrequency: 0.5,
+      islandCompactness: 0.6,
+      ridgeFrequency: ISLAND_ARCHETYPE_DEFINITIONS.NONE.ridgeFrequency,
+      basinStrength: ISLAND_ARCHETYPE_DEFINITIONS.NONE.basinStrength,
+      coastalShelfWidth: ISLAND_ARCHETYPE_DEFINITIONS.NONE.coastalShelfWidth,
+      seaLevelBias: 0.5,
+      skipCarving: false,
+      riverBudget: 0.42,
+      settlementSpacing: 0.58,
+      settlementPreGrowthYears: 20,
+      roadStrictness: 0.5,
+      forestPatchiness: 0.46
+    }
   }
 };
 
@@ -350,7 +390,7 @@ export const cloneTerrainRecipe = (recipe?: Partial<TerrainRecipe>): TerrainReci
     bridgeAllowance: clampOverride(recipe?.bridgeAllowance, defaults.bridgeAllowance),
     advancedOverrides: {
       interiorRise: clampOverride(sourceAdvanced.interiorRise, defaults.advancedOverrides?.interiorRise ?? DEFAULT_ADVANCED_OVERRIDES.interiorRise),
-      maxHeight: clampOverride(sourceAdvanced.maxHeight, defaults.advancedOverrides?.maxHeight ?? DEFAULT_ADVANCED_OVERRIDES.maxHeight),
+      maxHeight: clampMaxHeightOverride(sourceAdvanced.maxHeight, defaults.advancedOverrides?.maxHeight ?? DEFAULT_ADVANCED_OVERRIDES.maxHeight),
       embayment: clampOverride(sourceAdvanced.embayment, defaults.advancedOverrides?.embayment ?? DEFAULT_ADVANCED_OVERRIDES.embayment),
       anisotropy: clampOverride(sourceAdvanced.anisotropy, defaults.advancedOverrides?.anisotropy ?? DEFAULT_ADVANCED_OVERRIDES.anisotropy),
       asymmetry: clampOverride(sourceAdvanced.asymmetry, defaults.advancedOverrides?.asymmetry ?? DEFAULT_ADVANCED_OVERRIDES.asymmetry),
@@ -474,7 +514,7 @@ const resolveAdvancedOverrides = (recipe: TerrainRecipe): Required<TerrainAdvanc
   const advanced = recipe.advancedOverrides ?? {};
   return {
     interiorRise: clampOverride(advanced.interiorRise, preset.interiorRise),
-    maxHeight: clampOverride(advanced.maxHeight, preset.maxHeight),
+    maxHeight: clampMaxHeightOverride(advanced.maxHeight, preset.maxHeight),
     embayment: clampOverride(advanced.embayment, preset.embayment),
     anisotropy: clampOverride(advanced.anisotropy, preset.anisotropy),
     asymmetry: clampOverride(advanced.asymmetry, preset.asymmetry),
@@ -510,7 +550,7 @@ export const compileTerrainRecipe = (recipeInput: TerrainRecipe): ResolvedTerrai
   const townDensity = clamp01(recipe.townDensity);
   const bridgeAllowance = clamp01(recipe.bridgeAllowance);
   const reliefCurve = Math.pow(relief, 1.35);
-  const maxHeight = clamp01(advanced.maxHeight);
+  const maxHeight = clampMaxHeight(advanced.maxHeight);
   const embayment = clamp01(advanced.embayment);
   const anisotropy = clamp01(advanced.anisotropy);
   const asymmetry = clamp01(advanced.asymmetry);
@@ -529,10 +569,8 @@ export const compileTerrainRecipe = (recipeInput: TerrainRecipe): ResolvedTerrai
         ? mix(0.92, 1.12, mix(1 - advanced.islandCompactness, anisotropy, 0.55))
         : mix(0.84, 1.18, mix(1 - advanced.islandCompactness, uplandDistribution, 0.35));
 
-  const riverBudget = clamp01(mix(advanced.riverBudget, riverIntensity, 0.35));
-  const nominalRiverCount = Math.round(mix(1, 7, riverBudget) * Math.max(0.75, sizeScale));
-  const riverCount =
-    recipe.archetype === "SHELF" ? Math.max(1, nominalRiverCount - 1) : Math.max(1, nominalRiverCount);
+  const riverBudget = clamp01(advanced.riverBudget);
+  const riverCount = 0;
   const totalTiles = mapSizeTiles * mapSizeTiles;
   const lakeBias = clamp01(riverIntensity * 0.46 + advanced.basinStrength * 0.42 + vegetationDensity * 0.12);
 
@@ -764,7 +802,7 @@ const inferRecipeFromSettings = (settingsInput: Partial<MapGenSettings>, mapSize
     bridgeAllowance: clamp01(settings.bridgeAllowance ?? (settings.road.bridgeTransitions ? 0.7 : 0.2)),
     advancedOverrides: {
       interiorRise: clamp01(settings.interiorRise ?? DEFAULT_ADVANCED_OVERRIDES.interiorRise),
-      maxHeight: clamp01(settings.maxHeight ?? inferMaxHeightFromScaleMultiplier(settings.heightScaleMultiplier)),
+      maxHeight: clampMaxHeight(settings.maxHeight ?? inferMaxHeightFromScaleMultiplier(settings.heightScaleMultiplier)),
       embayment: clamp01(settings.embayment ?? DEFAULT_ADVANCED_OVERRIDES.embayment),
       anisotropy: clamp01(settings.anisotropy ?? DEFAULT_ADVANCED_OVERRIDES.anisotropy),
       asymmetry: clamp01(settings.asymmetry ?? DEFAULT_ADVANCED_OVERRIDES.asymmetry),

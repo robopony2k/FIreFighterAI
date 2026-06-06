@@ -11,6 +11,7 @@ import {
   collectRoadTiles,
   findNearestRoadTile,
   pruneRoadDiagonalStubs,
+  recordRoadConnectorCacheSkip,
   recordGeneratedRoadJunctions
 } from "./roads.js";
 import {
@@ -33,7 +34,8 @@ const createRoadAdapter = (rng: RNG): SettlementRoadAdapter => ({
   clearRoadEdges,
   backfillRoadEdgesFromAdjacency,
   pruneRoadDiagonalStubs,
-  recordGeneratedJunctions: recordGeneratedRoadJunctions
+  recordGeneratedJunctions: recordGeneratedRoadJunctions,
+  recordConnectorCacheSkip: recordRoadConnectorCacheSkip
 });
 
 export type { SettlementPlacementResult } from "../systems/settlements/types/settlementTypes.js";

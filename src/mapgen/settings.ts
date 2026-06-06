@@ -2,7 +2,7 @@ export type BiomeClassifierMode = "legacy" | "seedSpread";
 
 export type RoadTopologyMode = "eight_dir";
 
-export type TerrainArchetypeMode = "MASSIF" | "LONG_SPINE" | "TWIN_BAY" | "SHELF";
+export type TerrainArchetypeMode = "MASSIF" | "LONG_SPINE" | "TWIN_BAY" | "SHELF" | "NONE";
 
 export type RoadGenSettings = {
   topology: RoadTopologyMode;

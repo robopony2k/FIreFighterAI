@@ -320,31 +320,40 @@
               </div>
               <div class="run-tabs map-editor-steps" role="tablist">
                 <button type="button" class="run-tab map-editor-step is-active" data-step="scenario" aria-selected="true">
-                  Scenario
+                  <span class="map-editor-step-index">1</span>
+                  <span class="map-editor-step-label">Scenario</span>
                 </button>
                 <button type="button" class="run-tab map-editor-step" data-step="carving" aria-selected="false">
-                  Landform
+                  <span class="map-editor-step-index">2</span>
+                  <span class="map-editor-step-label">Landform</span>
                 </button>
                 <button type="button" class="run-tab map-editor-step" data-step="relief" aria-selected="false">
-                  Surface
+                  <span class="map-editor-step-index">3</span>
+                  <span class="map-editor-step-label">Surface</span>
                 </button>
                 <button type="button" class="run-tab map-editor-step" data-step="flooding" aria-selected="false">
-                  Sea Level
-                </button>
-                <button type="button" class="run-tab map-editor-step" data-step="rivers" aria-selected="false">
-                  Rivers/Lakes
+                  <span class="map-editor-step-index">4</span>
+                  <span class="map-editor-step-label">Sea Level</span>
                 </button>
                 <button type="button" class="run-tab map-editor-step" data-step="erosion" aria-selected="false">
-                  Erosion
+                  <span class="map-editor-step-index">5</span>
+                  <span class="map-editor-step-label">Erosion</span>
+                </button>
+                <button type="button" class="run-tab map-editor-step" data-step="rivers" aria-selected="false">
+                  <span class="map-editor-step-index">6</span>
+                  <span class="map-editor-step-label">Rivers/Lakes</span>
                 </button>
                 <button type="button" class="run-tab map-editor-step" data-step="settlements" aria-selected="false">
-                  Settlements
+                  <span class="map-editor-step-index">7</span>
+                  <span class="map-editor-step-label">Settlements</span>
                 </button>
                 <button type="button" class="run-tab map-editor-step" data-step="vegetation" aria-selected="false">
-                  Vegetation
+                  <span class="map-editor-step-index">8</span>
+                  <span class="map-editor-step-label">Vegetation</span>
                 </button>
                 <button type="button" class="run-tab map-editor-step" data-step="final" aria-selected="false">
-                  Final
+                  <span class="map-editor-step-index">9</span>
+                  <span class="map-editor-step-label">Final</span>
                 </button>
               </div>
               <div class="map-editor-step-panels">
@@ -431,9 +440,6 @@
                 <section class="map-editor-step-panel" data-step-panel="flooding">
                   <div id="mapEditorFloodingControls" class="run-settings"></div>
                 </section>
-                <section class="map-editor-step-panel" data-step-panel="rivers">
-                  <div id="mapEditorRiverControls" class="run-settings"></div>
-                </section>
                 <section class="map-editor-step-panel" data-step-panel="erosion">
                   <div class="run-settings">
                     <div class="run-settings-card">
@@ -444,6 +450,9 @@
                     </div>
                     <div id="mapEditorErosionControls" class="run-settings-slot"></div>
                   </div>
+                </section>
+                <section class="map-editor-step-panel" data-step-panel="rivers">
+                  <div id="mapEditorRiverControls" class="run-settings"></div>
                 </section>
                 <section class="map-editor-step-panel" data-step-panel="settlements">
                   <div id="mapEditorSettlementControls" class="run-settings"></div>

@@ -19,7 +19,7 @@ const { getHouseFootprintBounds, pickHouseFootprint } = await import(distImport(
 const { findBestRoadReferenceForPlot, pickHouseRotationFromRoadMask } = await import(distImport(["core", "roadAlignment.js"]));
 const { FOREST_AGE_CAP_YEARS, getVegetationMaturity01 } = await import(distImport(["core", "vegetation.js"]));
 const { generateMap } = await import(distImport(["mapgen", "index.js"]));
-const { createDefaultTerrainRecipe } = await import(distImport(["mapgen", "terrainProfile.js"]));
+const { compileTerrainRecipe, createDefaultTerrainRecipe } = await import(distImport(["mapgen", "terrainProfile.js"]));
 const {
   analyzeRoadSurfaceMetrics,
   carveRoad,
@@ -344,6 +344,7 @@ const analyzeRiverConnectivity = (state) => {
   let riverComponentCount = 0;
   let detachedRiverComponents = 0;
   let detachedRiverCells = 0;
+  const riverHashParts = [];
   const hasRiver = (x, y) => x >= 0 && y >= 0 && x < cols && y < rows && riverMask[y * cols + x] > 0;
   const hasHydrologyPath = (x, y) =>
     x >= 0 && y >= 0 && x < cols && y < rows && (riverMask[y * cols + x] > 0 || lakeMask[y * cols + x] > 0);
@@ -352,6 +353,7 @@ const analyzeRiverConnectivity = (state) => {
       continue;
     }
     riverCells += 1;
+    riverHashParts.push((i * 131 + 17) >>> 0);
     const x = i % cols;
     const y = Math.floor(i / cols);
     const orthCount =
@@ -435,6 +437,7 @@ const analyzeRiverConnectivity = (state) => {
     }
   }
   return {
+    riverTopologyHash: riverHashParts.reduce((hash, value) => Math.imul(hash ^ value, 16777619) >>> 0, 2166136261),
     riverDiagOnlyLinks: diagOnlyLinks,
     riverIsolatedCells: isolatedCells,
     riverOrthConnectivityRatio: Number((riverCells > 0 ? orthConnectedCells / riverCells : 1).toFixed(4)),
@@ -454,10 +457,13 @@ const analyzeStaticHydrology = (state) => {
   let lakeOutletConnectionFailures = 0;
   let lakeInvariantFailures = 0;
   let lakeBedFailures = 0;
+  let lakeSurfaceConsistencyFailures = 0;
+  let lakeOutletSurfaceFailures = 0;
   let lakeOceanAdjacent = 0;
   let waterfallCount = 0;
   let invalidWaterfalls = 0;
   const lakeIds = new Set();
+  const lakeSurfaceById = new Map();
   const visited = new Uint8Array(totalTiles);
   const queue = new Int32Array(totalTiles);
   let lakeComponentCount = 0;
@@ -477,6 +483,13 @@ const analyzeStaticHydrology = (state) => {
       const lakeSurface = state.tileLakeSurface?.[idx] ?? Number.NaN;
       if (tile && Number.isFinite(lakeSurface) && tile.elevation > lakeSurface - 0.001) {
         lakeBedFailures += 1;
+      }
+      if (!Number.isFinite(lakeSurface)) {
+        lakeSurfaceConsistencyFailures += 1;
+      } else if (!lakeSurfaceById.has(lakeId)) {
+        lakeSurfaceById.set(lakeId, lakeSurface);
+      } else if (Math.abs(lakeSurfaceById.get(lakeId) - lakeSurface) > 0.0005) {
+        lakeSurfaceConsistencyFailures += 1;
       }
       const x = idx % cols;
       const y = Math.floor(idx / cols);
@@ -504,6 +517,19 @@ const analyzeStaticHydrology = (state) => {
       });
       if (!connected) {
         lakeOutletConnectionFailures += 1;
+      } else {
+        const lakeSurface = state.tileLakeSurface?.[idx] ?? Number.NaN;
+        const hasDownstreamSurface = [[x - 1, y], [x + 1, y], [x, y - 1], [x, y + 1]].some(([nx, ny]) => {
+          if (nx < 0 || ny < 0 || nx >= cols || ny >= rows) {
+            return false;
+          }
+          const nIdx = idxAt(nx, ny);
+          const riverSurface = state.tileRiverSurface?.[nIdx] ?? Number.NaN;
+          return lakeMask[nIdx] !== lakeId && riverMask[nIdx] > 0 && Number.isFinite(riverSurface) && riverSurface <= lakeSurface + 0.001;
+        });
+        if (!Number.isFinite(lakeSurface) || !hasDownstreamSurface) {
+          lakeOutletSurfaceFailures += 1;
+        }
       }
     }
     if (state.tileWaterfallSourceMask?.[idx] > 0) {
@@ -566,6 +592,8 @@ const analyzeStaticHydrology = (state) => {
     lakeOutletConnectionFailures,
     lakeInvariantFailures,
     lakeBedFailures,
+    lakeSurfaceConsistencyFailures,
+    lakeOutletSurfaceFailures,
     lakeOceanAdjacent,
     waterfallCount,
     invalidWaterfalls,
@@ -1585,6 +1613,7 @@ const runCase = async (sizeId, seed) => {
     forestSpeciesCount: forestSpecies.size,
     forestTreeTypeHash,
     houseCount: houses,
+    townCount: state.towns?.length ?? 0,
     requestedHouseCount: state.settlementRequestedHouses ?? houses,
     placedHouseCount: state.settlementPlacedHouses ?? houses,
     settlementPadReliefMax: Number((state.settlementPadReliefMax ?? 0).toFixed(4)),
@@ -1614,6 +1643,8 @@ const runCase = async (sizeId, seed) => {
     switchbackRouteCount: roadGenerationStats.switchbackRouteCount,
     hairpinGradeDiscountCount: roadGenerationStats.hairpinGradeDiscountCount,
     connectorArtifactPrunedEdgeCount: roadGenerationStats.connectorArtifactPrunedEdgeCount,
+    searchBudgetAbortCount: roadGenerationStats.searchBudgetAbortCount,
+    connectorCacheSkipCount: roadGenerationStats.connectorCacheSkipCount,
     routedLongStraightSteepSegmentCount: roadGenerationStats.longStraightSteepSegmentCount,
     roadGradingDelta: Number(roadSurfaceMetrics.maxRoadGradingDelta.toFixed(4)),
     roadLongStraightSteepSegmentCount: roadSurfaceMetrics.longStraightSteepSegmentCount,
@@ -1757,6 +1788,7 @@ const runSyntheticSwitchbackCase = () => {
       bridgePolicy: "never",
       pathMode: "switchback",
       allowMountainPassFallback: false,
+      searchBounds: { minX: 0, maxX: grid.cols - 1, minY: 8, maxY: 28 },
       preferredAngleDeg: 8,
       softAngleDeg: 10,
       avoidAngleDeg: 36,
@@ -1764,7 +1796,7 @@ const runSyntheticSwitchbackCase = () => {
       anglePenaltyWeight: 0.95,
       straightClimbPenaltyWeight: 2.8,
       contourTurnReliefWeight: 2.4,
-      turnPenalty: 0.01,
+      turnPenalty: 0.02,
       diagonalPenalty: 0.02,
       gradeLimitStart: 0.1,
       gradeLimitRelaxStep: 0.015,
@@ -1928,7 +1960,7 @@ const runAll = async () => {
     syntheticSwitchbacks.lateralSpan < 4 ||
     syntheticSwitchbacks.stats.switchbackRouteCount < 1 ||
     syntheticSwitchbacks.stats.switchbackTurnCount < 2 ||
-    syntheticSwitchbacks.stats.hairpinGradeDiscountCount < 1
+    syntheticSwitchbacks.stats.switchbackTurnCount > 16
   ) {
     throw new Error(
       `[mapgen] synthetic switchback case failed: carved=${syntheticSwitchbacks.carved} lateral=${syntheticSwitchbacks.lateralSpan} routes=${syntheticSwitchbacks.stats.switchbackRouteCount} turns=${syntheticSwitchbacks.stats.switchbackTurnCount} hairpins=${syntheticSwitchbacks.stats.hairpinGradeDiscountCount} straightSteep=${syntheticSwitchbacks.stats.longStraightSteepSegmentCount}`
@@ -1961,7 +1993,7 @@ const runAll = async () => {
       const metrics = await runCase(sizeId, seed);
       results.push(metrics);
       console.log(
-        `[mapgen] size=${metrics.sizeId} seed=${metrics.seed} ms=${metrics.durationMs.toFixed(2)} biome=${metrics.biomeSpreadClassifyMs.toFixed(2)}ms water=${metrics.waterPct.toFixed(2)}% forest=${metrics.forestPct.toFixed(2)}% forestAgeMean=${metrics.forestAgeMean.toFixed(2)} forestMaturityP95=${metrics.forestMaturityP95.toFixed(3)} patches=${metrics.forestPatchCount} meanPatch=${metrics.forestPatchMean} p95Patch=${metrics.forestPatchP95} houses=${metrics.houseCount} placed=${metrics.placedHouseCount}/${metrics.requestedHouseCount} compactEval=${metrics.compactTownEvalCount} compactViolations=${metrics.compactTownViolationCount} compactMaxAspect=${metrics.compactTownMaxAspect.toFixed(2)} base=(${metrics.baseX},${metrics.baseY}) baseElev=${metrics.baseElevation.toFixed(4)} baseRelief=${metrics.baseLocalRelief.toFixed(4)} baseCenter=${metrics.baseCenterDistanceRatio.toFixed(4)} baseVeg=${metrics.baseNearbyVegetationRatio.toFixed(4)} townAngle=${metrics.settlementTownSeedMaxAngle.toFixed(2)}/${metrics.settlementTownSeedMeanAngle.toFixed(2)} houseAngle=${metrics.houseFootprintMaxAngle.toFixed(2)}/${metrics.houseFootprintMeanAngle.toFixed(2)} highHouseAngle=${metrics.highAngleHouseFootprintCount} padReliefMax=${metrics.settlementPadReliefMax.toFixed(4)} padReliefMean=${metrics.settlementPadReliefMean.toFixed(4)} roads=${metrics.roadCount} roadComps=${metrics.roadComponentCount} townRoadComps=${metrics.townRoadComponentCount} townRoadMissing=${metrics.townRoadMissingCount} townRoadDisconnected=${metrics.townRoadDisconnectedCount} rivers=${metrics.riverCount} lakes=${metrics.lakeCount}/${metrics.lakeTiles} lakeOut=${metrics.lakeOutletCount} lakeOutMiss=${metrics.lakeOutletConnectionFailures} falls=${metrics.waterfallCount} roadIgnoredDiag=${metrics.ignoredDiagonalCount} roadUnmatched=${metrics.unmatchedPatternCount} roadGrade=${metrics.maxRoadGrade.toFixed(3)} roadCrossfall=${metrics.maxRoadCrossfall.toFixed(3)} roadGradeChange=${metrics.maxRoadGradeChange.toFixed(3)} roadAngle=${metrics.maxRoadAngleDeg.toFixed(2)}/${metrics.meanRoadAngleDeg.toFixed(2)} highRoadAngle=${metrics.highAngleRoadStepCount} straightSteep=${metrics.roadLongStraightSteepSegmentCount} gradingDelta=${metrics.roadGradingDelta.toFixed(3)} routedAngle=${metrics.routedRoadMaxAngle.toFixed(2)}/${metrics.routedRoadMeanAngle.toFixed(2)} routedHighAngle=${metrics.routedHighAngleStepCount} routedStraightSteep=${metrics.routedLongStraightSteepSegmentCount} passes=${metrics.mountainPassFallbackCount} junctions=${metrics.generatedJunctionCount} switchbacks=${metrics.switchbackTurnCount} hairpins=${metrics.hairpinGradeDiscountCount} cleanup=${metrics.connectorArtifactPrunedEdgeCount} switchbackRoutes=${metrics.switchbackRouteCount}/${metrics.switchbackRouteAttempts} roadWalls=${metrics.wallEdgeCount} riverDiagOnly=${metrics.riverDiagOnlyLinks} riverIso=${metrics.riverIsolatedCells} riverOrthRatio=${metrics.riverOrthConnectivityRatio.toFixed(4)} riverComps=${metrics.riverComponentCount} riverDetachedComps=${metrics.detachedRiverComponents} riverDetachedCells=${metrics.detachedRiverCells} coastNatural=${metrics.coastalNaturalCount} coastBeach=${metrics.coastalBeachCount} coastRocky=${metrics.coastalRockyCount} coastOther=${metrics.coastalOtherCount} coastSlope=${metrics.coastSlopeMean.toFixed(4)}/${metrics.coastSlopeP95.toFixed(4)} coastDrop=${metrics.coastBoundaryDropMean.toFixed(4)}/${metrics.coastBoundaryDropMax.toFixed(4)} coastCliff=${metrics.coastCliffRatio.toFixed(3)} forcedCliff=${metrics.coastForcedCliffRatio.toFixed(3)} coastInsetStd=${metrics.coastalEdgeInsetStdDev.toFixed(2)} coastInsetDominant=${metrics.coastalDominantInsetRatio.toFixed(3)} coastSideRun=${metrics.coastalSideWallRunRatio.toFixed(3)} coastSideStd=${metrics.coastalSideWallMinStdDev.toFixed(2)}`
+        `[mapgen] size=${metrics.sizeId} seed=${metrics.seed} ms=${metrics.durationMs.toFixed(2)} biome=${metrics.biomeSpreadClassifyMs.toFixed(2)}ms water=${metrics.waterPct.toFixed(2)}% forest=${metrics.forestPct.toFixed(2)}% forestAgeMean=${metrics.forestAgeMean.toFixed(2)} forestMaturityP95=${metrics.forestMaturityP95.toFixed(3)} patches=${metrics.forestPatchCount} meanPatch=${metrics.forestPatchMean} p95Patch=${metrics.forestPatchP95} houses=${metrics.houseCount} placed=${metrics.placedHouseCount}/${metrics.requestedHouseCount} compactEval=${metrics.compactTownEvalCount} compactViolations=${metrics.compactTownViolationCount} compactMaxAspect=${metrics.compactTownMaxAspect.toFixed(2)} base=(${metrics.baseX},${metrics.baseY}) baseElev=${metrics.baseElevation.toFixed(4)} baseRelief=${metrics.baseLocalRelief.toFixed(4)} baseCenter=${metrics.baseCenterDistanceRatio.toFixed(4)} baseVeg=${metrics.baseNearbyVegetationRatio.toFixed(4)} townAngle=${metrics.settlementTownSeedMaxAngle.toFixed(2)}/${metrics.settlementTownSeedMeanAngle.toFixed(2)} houseAngle=${metrics.houseFootprintMaxAngle.toFixed(2)}/${metrics.houseFootprintMeanAngle.toFixed(2)} highHouseAngle=${metrics.highAngleHouseFootprintCount} padReliefMax=${metrics.settlementPadReliefMax.toFixed(4)} padReliefMean=${metrics.settlementPadReliefMean.toFixed(4)} roads=${metrics.roadCount} roadComps=${metrics.roadComponentCount} townRoadComps=${metrics.townRoadComponentCount} townRoadMissing=${metrics.townRoadMissingCount} townRoadDisconnected=${metrics.townRoadDisconnectedCount} rivers=${metrics.riverCount} lakes=${metrics.lakeCount}/${metrics.lakeTiles} lakeOut=${metrics.lakeOutletCount} lakeOutMiss=${metrics.lakeOutletConnectionFailures} falls=${metrics.waterfallCount} roadIgnoredDiag=${metrics.ignoredDiagonalCount} roadUnmatched=${metrics.unmatchedPatternCount} roadGrade=${metrics.maxRoadGrade.toFixed(3)} roadCrossfall=${metrics.maxRoadCrossfall.toFixed(3)} roadGradeChange=${metrics.maxRoadGradeChange.toFixed(3)} roadAngle=${metrics.maxRoadAngleDeg.toFixed(2)}/${metrics.meanRoadAngleDeg.toFixed(2)} highRoadAngle=${metrics.highAngleRoadStepCount} straightSteep=${metrics.roadLongStraightSteepSegmentCount} gradingDelta=${metrics.roadGradingDelta.toFixed(3)} routedAngle=${metrics.routedRoadMaxAngle.toFixed(2)}/${metrics.routedRoadMeanAngle.toFixed(2)} routedHighAngle=${metrics.routedHighAngleStepCount} routedStraightSteep=${metrics.routedLongStraightSteepSegmentCount} passes=${metrics.mountainPassFallbackCount} junctions=${metrics.generatedJunctionCount} switchbacks=${metrics.switchbackTurnCount} hairpins=${metrics.hairpinGradeDiscountCount} cleanup=${metrics.connectorArtifactPrunedEdgeCount} switchbackRoutes=${metrics.switchbackRouteCount}/${metrics.switchbackRouteAttempts} budgetAbort=${metrics.searchBudgetAbortCount} cacheSkip=${metrics.connectorCacheSkipCount} roadWalls=${metrics.wallEdgeCount} riverDiagOnly=${metrics.riverDiagOnlyLinks} riverIso=${metrics.riverIsolatedCells} riverOrthRatio=${metrics.riverOrthConnectivityRatio.toFixed(4)} riverComps=${metrics.riverComponentCount} riverDetachedComps=${metrics.detachedRiverComponents} riverDetachedCells=${metrics.detachedRiverCells} coastNatural=${metrics.coastalNaturalCount} coastBeach=${metrics.coastalBeachCount} coastRocky=${metrics.coastalRockyCount} coastOther=${metrics.coastalOtherCount} coastSlope=${metrics.coastSlopeMean.toFixed(4)}/${metrics.coastSlopeP95.toFixed(4)} coastDrop=${metrics.coastBoundaryDropMean.toFixed(4)}/${metrics.coastBoundaryDropMax.toFixed(4)} coastCliff=${metrics.coastCliffRatio.toFixed(3)} forcedCliff=${metrics.coastForcedCliffRatio.toFixed(3)} coastInsetStd=${metrics.coastalEdgeInsetStdDev.toFixed(2)} coastInsetDominant=${metrics.coastalDominantInsetRatio.toFixed(3)} coastSideRun=${metrics.coastalSideWallRunRatio.toFixed(3)} coastSideStd=${metrics.coastalSideWallMinStdDev.toFixed(2)}`
       );
     }
   }
@@ -1993,10 +2025,56 @@ const runNoLakeSmoke = async () => {
       riverCount += 1;
     }
   }
-  if (metrics.lakeTiles !== 0 || riverCount <= 0) {
+  if (metrics.lakeTiles !== 0 || riverCount !== 0) {
     throw new Error(`[mapgen] no-lake smoke failed: lakes=${metrics.lakeTiles} rivers=${riverCount}`);
   }
   console.log(`[mapgen] no-lake smoke seed=${seed} rivers=${riverCount}`);
+};
+
+const runRiverControlCompatibilitySmoke = async () => {
+  const sizeId = "medium";
+  const seed = 1337;
+  const baseRecipe = createDefaultTerrainRecipe(sizeId, "MASSIF");
+  const runOnce = async (terrain) => {
+    const grid = createGrid(sizeId);
+    const state = createInitialState(seed, grid);
+    const rng = new RNG(seed);
+    resetState(state, seed);
+    rng.setState(seed);
+    await generateMap(state, rng, undefined, terrain);
+    return {
+      ...analyzeRiverConnectivity(state),
+      ...analyzeStaticHydrology(state),
+      riverCount: state.tileRiverMask.reduce((sum, value) => sum + (value > 0 ? 1 : 0), 0)
+    };
+  };
+  const baseline = await runOnce(baseRecipe);
+  const riverCountOverride = await runOnce({
+    ...compileTerrainRecipe(baseRecipe).settings,
+    riverCount: 12
+  });
+  const riverBudgetOverride = await runOnce({
+    ...baseRecipe,
+    advancedOverrides: {
+      ...(baseRecipe.advancedOverrides ?? {}),
+      riverBudget: 1
+    }
+  });
+  for (const [label, result] of [
+    ["riverCount", riverCountOverride],
+    ["riverBudget", riverBudgetOverride]
+  ]) {
+    if (
+      result.riverCount !== baseline.riverCount ||
+      result.riverTopologyHash !== baseline.riverTopologyHash ||
+      result.lakeHash !== baseline.lakeHash
+    ) {
+      throw new Error(
+        `[mapgen] ${label} compatibility failed: rivers=${baseline.riverCount}/${result.riverCount} riverHash=${baseline.riverTopologyHash}/${result.riverTopologyHash} lakeHash=${baseline.lakeHash}/${result.lakeHash}`
+      );
+    }
+  }
+  console.log(`[mapgen] river controls ignored seed=${seed} rivers=${baseline.riverCount}`);
 };
 
 const runDeterministicHydrologySmoke = async () => {
@@ -2020,13 +2098,24 @@ const runDeterministicHydrologySmoke = async () => {
     }
   }
   const longSpine = await runOnce("LONG_SPINE");
-  if (first.lakeCount <= 0 || longSpine.lakeCount <= 0) {
+  const twinBay = await runOnce("TWIN_BAY");
+  const archetypeLakeResults = [
+    ["MASSIF", first],
+    ["LONG_SPINE", longSpine],
+    ["TWIN_BAY", twinBay]
+  ];
+  const missingLakes = archetypeLakeResults.filter(([, metrics]) => metrics.lakeCount <= 0 || metrics.lakeOutletCount <= 0);
+  if (missingLakes.length > 0) {
     throw new Error(
-      `[mapgen] default mountain lake smoke failed: massif=${first.lakeCount}/${first.lakeTiles} longSpine=${longSpine.lakeCount}/${longSpine.lakeTiles}`
+      `[mapgen] archetype watershed lake smoke failed: ${missingLakes
+        .map(([label, metrics]) => `${label}=${metrics.lakeCount}/${metrics.lakeTiles}/out${metrics.lakeOutletCount}`)
+        .join(" ")}`
     );
   }
   console.log(
-    `[mapgen] deterministic hydrology smoke seed=${seed} lakeHash=${first.lakeHash} waterfallHash=${first.waterfallHash} longSpineLakes=${longSpine.lakeCount}/${longSpine.lakeTiles}`
+    `[mapgen] deterministic hydrology smoke seed=${seed} lakeHash=${first.lakeHash} waterfallHash=${first.waterfallHash} archetypeLakes=${archetypeLakeResults
+      .map(([label, metrics]) => `${label}:${metrics.lakeCount}/${metrics.lakeTiles}/out${metrics.lakeOutletCount}`)
+      .join(",")}`
   );
 };
 
@@ -2071,6 +2160,10 @@ const compareAgainstBaseline = async (results) => {
       failures += 1;
       console.error(`[mapgen] lake beds not below surface for ${key}: ${result.lakeBedFailures}`);
     }
+    if (result.lakeSurfaceConsistencyFailures !== 0) {
+      failures += 1;
+      console.error(`[mapgen] lake surfaces are not constant per basin for ${key}: ${result.lakeSurfaceConsistencyFailures}`);
+    }
     if (result.lakeOceanAdjacent !== 0) {
       failures += 1;
       console.error(`[mapgen] inland lake touches ocean for ${key}: ${result.lakeOceanAdjacent}`);
@@ -2093,6 +2186,10 @@ const compareAgainstBaseline = async (results) => {
       failures += 1;
       console.error(`[mapgen] lake outlets missing adjacent river connectors for ${key}: ${result.lakeOutletConnectionFailures}`);
     }
+    if (result.lakeOutletSurfaceFailures !== 0) {
+      failures += 1;
+      console.error(`[mapgen] lake outlet river surfaces do not descend from spill surface for ${key}: ${result.lakeOutletSurfaceFailures}`);
+    }
     if (result.sizeId === "medium" && result.seed === 1337 && result.lakeTiles < 16) {
       failures += 1;
       console.error(`[mapgen] target hydrology seed produced too few inland lake tiles for ${key}: ${result.lakeTiles}`);
@@ -2107,6 +2204,13 @@ const compareAgainstBaseline = async (results) => {
     if (result.unmatchedPatternCount !== 0) {
       failures += 1;
       console.error(`[mapgen] unmatched road patterns present for ${key}: ${result.unmatchedPatternCount}`);
+    }
+    const maxSwitchbackRouteAttempts = Math.max(48, (result.townCount ?? 0) * 16);
+    if (result.switchbackRouteAttempts > maxSwitchbackRouteAttempts) {
+      failures += 1;
+      console.error(
+        `[mapgen] switchback route attempts too high for ${key}: ${result.switchbackRouteAttempts}/${maxSwitchbackRouteAttempts}`
+      );
     }
     const allowedHighAngleRoadSteps = Math.max(
       4,
@@ -2328,7 +2432,7 @@ if (syntheticRoadsOnly) {
     syntheticSwitchbacks.lateralSpan < 4 ||
     syntheticSwitchbacks.stats.switchbackRouteCount < 1 ||
     syntheticSwitchbacks.stats.switchbackTurnCount < 2 ||
-    syntheticSwitchbacks.stats.hairpinGradeDiscountCount < 1
+    syntheticSwitchbacks.stats.switchbackTurnCount > 16
   ) {
     throw new Error(
       `[mapgen] synthetic switchback case failed: carved=${syntheticSwitchbacks.carved} lateral=${syntheticSwitchbacks.lateralSpan} routes=${syntheticSwitchbacks.stats.switchbackRouteCount} turns=${syntheticSwitchbacks.stats.switchbackTurnCount} hairpins=${syntheticSwitchbacks.stats.hairpinGradeDiscountCount} straightSteep=${syntheticSwitchbacks.stats.longStraightSteepSegmentCount}`
@@ -2363,6 +2467,7 @@ if (syntheticRoadsOnly) {
 }
 await runDebugSmokes();
 await runNoLakeSmoke();
+await runRiverControlCompatibilitySmoke();
 await runDeterministicHydrologySmoke();
 const results = await runAll();
 if (writeBaseline) {

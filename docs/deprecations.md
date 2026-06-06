@@ -1,5 +1,33 @@
 # Deprecations
 
+## Direct River Count Generation Controls
+
+Status: Deprecated as of June 1, 2026.
+
+- Static river generation no longer starts from a requested river count or river budget.
+- Visible rivers are now downstream overflow channels from accepted priority-flood lake basins.
+- Legacy `riverCount` and `riverBudget` values remain readable for saved terrain data and share-code compatibility, but they do not choose river source count or topology.
+
+Migration guidance:
+
+1. Use rainfall, runoff, basin, and lake-outlet hydrology when adding future river behavior.
+2. Do not reintroduce player-facing controls that directly request a number of rivers.
+3. Keep compatibility parsing for stale `riverCount` and `riverBudget` values while treating them as ignored hydrology-generation inputs.
+
+## Heuristic Fixed-Depth Inland Lake Selection
+
+Status: Deprecated as of June 1, 2026.
+
+- Static inland lake generation no longer starts from local depression scores and a fixed seed-depth flood guess.
+- The replacement hydrology pass uses deterministic priority-flood basin detection, fills accepted enclosed basins to their lowest spill elevation, and routes overflow into generated river channels.
+- Existing lake, outlet, river, and waterfall state fields remain supported; future hydrology work should preserve those baked terrain-generation outputs rather than adding runtime water simulation.
+
+Migration guidance:
+
+1. Add future inland lake behavior through `src/systems/terrain/sim/depressionBasinSolver.ts` and `src/systems/terrain/sim/basinLakeHydrology.ts`.
+2. Keep lake surfaces tied to basin spill elevation instead of arbitrary seed depth.
+3. Keep runtime terrain and hydrology immutable during live campaign play.
+
 ## Wall-Clock Weather FX Animation
 
 Status: Deprecated as of May 30, 2026.
@@ -214,7 +242,7 @@ Migration guidance:
 Status: Deprecated as of May 9, 2026.
 
 - The terrain editor no longer uses Water level as the primary coastline authoring control.
-- Shape now exposes Land mass as the player-facing control for target dry island coverage.
+- Water now exposes Land mass as the player-facing control for target dry island coverage.
 - Hydrology calibrates sea level automatically from the dry landmass and the Land mass target; Sea-level bias remains available as an advanced Water override.
 - Existing saved scenarios and share codes may still carry `waterLevel` for compatibility, but new authoring should not depend on it.
 
@@ -228,28 +256,42 @@ Migration guidance:
 
 Status: Deprecated as of May 9, 2026.
 
-- Scenario, Shape, and Relief previews no longer render ocean or water geometry.
+- Scenario, Landform, and Surface previews no longer render ocean or water geometry.
 - Dry landmass elevation is now established before Water resolves sea level and ocean classification.
 - Water remains the first fast terrain-editor step that renders ocean; Rivers remains staged through `hydro:rivers`.
 
 Migration guidance:
 
-1. Put dry landmass feedback under Scenario, Shape, and Relief.
+1. Put dry landmass feedback under Scenario, Landform, and Surface.
 2. Put sea-level and coastline flooding feedback under Water.
 3. Do not reintroduce ocean masks or water tile types into dry fast preview modes.
+
+## Land Mass Control in Landform Preview
+
+Status: Deprecated as of June 1, 2026.
+
+- The map editor no longer exposes the Land mass slider under the Landform step.
+- Landform is a dry height preview focused on elevation amplitude and local variation, not sea-level coverage calibration.
+- Water owns the Land mass target because it is applied when sea level is calibrated and connected ocean is rendered.
+
+Migration guidance:
+
+1. Put height controls such as Relief, Ruggedness, Max height, and dry elevation shaping under Landform.
+2. Put dry-land coverage, sea-level bias, coastline complexity, and border-water falloff under Water.
+3. Do not reintroduce island-coverage target controls into the Landform step.
 
 ## Map Editor Skip Terrain Carving Control
 
 Status: Deprecated as of May 6, 2026.
 
 - The map editor no longer exposes `skipCarving` as an authoring control.
-- Early terrain authoring now uses fast Shape, Relief, and Water previews backed by the shared noise landmass core.
+- Early terrain authoring now uses fast Landform, Surface, and Water previews backed by the shared noise landmass core.
 - The saved scenario schema may still preserve `skipCarving` for compatibility, but new editor workflows should not depend on it.
 
 Migration guidance:
 
-1. Put landmass-shape tuning under Shape controls: coast complexity, island compactness, embayment, anisotropy, and asymmetry.
-2. Put ridge and height tuning under Relief controls.
+1. Put landmass-shape tuning under Water controls: Land mass, coast complexity, island compactness, embayment, anisotropy, and asymmetry.
+2. Put height tuning under Landform and ridge/surface tuning under Surface.
 3. Keep final-quality erosion behavior behind the Erosion Detail preview step instead of reintroducing a skip-carving toggle.
 
 ## Fast Rivers Preview
@@ -262,9 +304,9 @@ Status: Deprecated as of May 6, 2026.
 
 Migration guidance:
 
-1. Keep instant feedback focused on Scenario, Shape, Relief, and Water.
+1. Keep instant feedback focused on Scenario, Landform, Surface, and Water.
 2. Route river authoring controls through staged mapgen previews instead of adding another fast river mask.
-3. Preserve `RiverStage` and `carveRiverValleys()` as the source of visible river channels.
+3. Preserve `RiverStage` as the source of visible river snapshots; current visible river channels come from lake overflow routing rather than fast drainage masks or direct river-count carving.
 
 ## Town Alert Progress-Only Evacuation
 

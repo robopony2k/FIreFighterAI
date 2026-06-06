@@ -2,7 +2,7 @@ import { COAST_CLASS_NONE, TILE_TYPE_IDS } from "../../../core/state.js";
 import type { MapGenSettings } from "../../../mapgen/settings.js";
 import { buildNoiseLandmassCore } from "./noiseLandmass.js";
 
-export type FastTerrainPreviewMode = "noise" | "shape" | "relief" | "water";
+export type FastTerrainPreviewMode = "noise" | "height" | "shape" | "relief" | "water";
 
 export type FastTerrainPreviewInput = {
   seed: number;

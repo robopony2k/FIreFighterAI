@@ -19,11 +19,11 @@ export const RoadNetworkStage: PipelineStage = {
     resetRoadGenerationStats();
     await ctx.reportStage("Road solver: preparing recursive A* route attempts...", 0.02);
     await yieldToNextFrame();
+    flattenSettlementGround(ctx.state);
     connectSettlementsByRoad(ctx.state, ctx.rng, ctx.settlementPlan ?? null);
     pruneRoadConnectorArtifacts(ctx.state);
     await ctx.reportStage(formatRoadSolveStatus("Road solver: settlement routes planned"), 0.42);
     await yieldToNextFrame();
-    flattenSettlementGround(ctx.state);
     let roadSurfaceMetrics = gradeRoadNetworkTerrain(ctx.state, ctx.settings.heightScaleMultiplier);
     await ctx.reportStage("Road solver: checking isolated town components...", 0.58);
     await yieldToNextFrame();
@@ -34,9 +34,6 @@ export const RoadNetworkStage: PipelineStage = {
       pruneRoadConnectorArtifacts(ctx.state);
       roadSurfaceMetrics = gradeRoadNetworkTerrain(ctx.state, ctx.settings.heightScaleMultiplier);
     }
-    flattenSettlementGround(ctx.state);
-    pruneRoadConnectorArtifacts(ctx.state);
-    roadSurfaceMetrics = gradeRoadNetworkTerrain(ctx.state, ctx.settings.heightScaleMultiplier);
     await ctx.reportStage(formatRoadSolveStatus("Road solver: final grading pass"), 0.86);
     await yieldToNextFrame();
     if (ctx.riverMask) {
@@ -60,7 +57,7 @@ export const RoadNetworkStage: PipelineStage = {
       const stats = getRoadGenerationStats();
       const finalMetrics: RoadSurfaceMetrics = roadSurfaceMetrics;
       console.log(
-        `[roadsurface] maxGrade=${finalMetrics.maxRoadGrade.toFixed(3)} maxCrossfall=${finalMetrics.maxRoadCrossfall.toFixed(3)} maxGradeChange=${finalMetrics.maxRoadGradeChange.toFixed(3)} maxAngle=${finalMetrics.maxRoadAngleDeg.toFixed(2)} highAngle=${finalMetrics.highAngleRoadStepCount} straightSteep=${finalMetrics.longStraightSteepSegmentCount} gradingDelta=${finalMetrics.maxRoadGradingDelta.toFixed(3)} wallEdges=${finalMetrics.wallEdgeCount} routedMaxGrade=${stats.maxRealizedGrade.toFixed(3)} routedMaxCrossfall=${stats.maxRealizedCrossfall.toFixed(3)} routedMaxGradeChange=${stats.maxRealizedGradeChange.toFixed(3)} routedAngle=${stats.maxRealizedAngleDeg.toFixed(2)}/${stats.meanRealizedAngleDeg.toFixed(2)} pass=${stats.mountainPassFallbackCount} switchbackRoutes=${stats.switchbackRouteCount}/${stats.switchbackRouteAttempts} cleanup=${stats.connectorArtifactPrunedEdgeCount} junctions=${stats.generatedJunctionCount}`
+        `[roadsurface] maxGrade=${finalMetrics.maxRoadGrade.toFixed(3)} maxCrossfall=${finalMetrics.maxRoadCrossfall.toFixed(3)} maxGradeChange=${finalMetrics.maxRoadGradeChange.toFixed(3)} maxAngle=${finalMetrics.maxRoadAngleDeg.toFixed(2)} highAngle=${finalMetrics.highAngleRoadStepCount} straightSteep=${finalMetrics.longStraightSteepSegmentCount} gradingDelta=${finalMetrics.maxRoadGradingDelta.toFixed(3)} wallEdges=${finalMetrics.wallEdgeCount} routedMaxGrade=${stats.maxRealizedGrade.toFixed(3)} routedMaxCrossfall=${stats.maxRealizedCrossfall.toFixed(3)} routedMaxGradeChange=${stats.maxRealizedGradeChange.toFixed(3)} routedAngle=${stats.maxRealizedAngleDeg.toFixed(2)}/${stats.meanRealizedAngleDeg.toFixed(2)} pass=${stats.mountainPassFallbackCount} switchbackRoutes=${stats.switchbackRouteCount}/${stats.switchbackRouteAttempts} budgetAbort=${stats.searchBudgetAbortCount} cacheSkip=${stats.connectorCacheSkipCount} cleanup=${stats.connectorArtifactPrunedEdgeCount} junctions=${stats.generatedJunctionCount}`
       );
     }
     await ctx.reportStage("Road network connected.", 1);

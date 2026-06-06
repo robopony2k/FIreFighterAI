@@ -5095,22 +5095,22 @@ type ShortBridgeApproachComponent = {
   connectorRoads: number[];
 };
 
-const ROAD_GRADE_TARGET_LIMIT = 0.18;
-const ROAD_GRADE_CHANGE_TARGET_LIMIT = 0.12;
+const ROAD_GRADE_TARGET_LIMIT = 0.16;
+const ROAD_GRADE_CHANGE_TARGET_LIMIT = 0.09;
 const ROAD_FINAL_MAX_ANGLE_DEG = 40;
 const ROAD_FINAL_STRUCTURE_MAX_ANGLE_DEG = 24;
 const ROAD_FINAL_ANGLE_RELAX_PASSES = 5;
 const ROAD_SHOULDER_BLEND_RADIUS = 1;
 const ROAD_WALL_DROP_THRESHOLD = 0.09;
 const ROAD_WALL_OUTER_DROP_THRESHOLD = 0.11;
-const ROAD_PROFILE_MAX_FILL = 0.014;
-const ROAD_PROFILE_MAX_CUT = 0.07;
+const ROAD_PROFILE_MAX_FILL = 0.01;
+const ROAD_PROFILE_MAX_CUT = 0.032;
 const ROAD_PROFILE_STRAIGHT_MAX_FILL = 0.01;
-const ROAD_PROFILE_STRAIGHT_MAX_CUT = 0.04;
-const ROAD_SHOULDER_MAX_FILL_NEAR = 0.012;
-const ROAD_SHOULDER_MAX_FILL_FAR = 0.006;
-const ROAD_SHOULDER_MAX_CUT_NEAR = 0.035;
-const ROAD_SHOULDER_MAX_CUT_FAR = 0.018;
+const ROAD_PROFILE_STRAIGHT_MAX_CUT = 0.024;
+const ROAD_SHOULDER_MAX_FILL_NEAR = 0.008;
+const ROAD_SHOULDER_MAX_FILL_FAR = 0.004;
+const ROAD_SHOULDER_MAX_CUT_NEAR = 0.018;
+const ROAD_SHOULDER_MAX_CUT_FAR = 0.01;
 const SHORT_BRIDGE_APPROACH_MAX_COMPONENT_TILES = 2;
 const SHORT_BRIDGE_APPROACH_MAX_CONNECTOR_DISTANCE = 3.1;
 
@@ -5386,19 +5386,20 @@ const buildRoadSegmentProfile = (
   if (!loop) {
     const start = original[0];
     const end = original[original.length - 1];
+    const linearWeight = totalRun > 18 ? 0.18 : totalRun > 10 ? 0.28 : 0.42;
     for (let i = 1; i < target.length - 1; i += 1) {
       const t = totalRun > 1e-6 ? cumulative[i] / totalRun : i / Math.max(1, target.length - 1);
       const linear = start * (1 - t) + end * t;
-      target[i] = clamp(original[i] * 0.35 + linear * 0.65, 0, 1);
+      target[i] = clamp(original[i] * (1 - linearWeight) + linear * linearWeight, 0, 1);
     }
   } else {
     const mean = original.reduce((sum, value) => sum + value, 0) / Math.max(1, original.length);
     for (let i = 0; i < target.length; i += 1) {
-      target[i] = clamp(original[i] * 0.45 + mean * 0.55, 0, 1);
+      target[i] = clamp(original[i] * 0.74 + mean * 0.26, 0, 1);
     }
   }
 
-  const smoothPasses = loop ? 4 : 3;
+  const smoothPasses = loop ? 2 : totalRun > 18 ? 1 : 2;
   for (let pass = 0; pass < smoothPasses; pass += 1) {
     const next = target.slice();
     const startIndex = loop ? 0 : 1;
@@ -5408,7 +5409,7 @@ const buildRoadSegmentProfile = (
       const nextIndex = loop ? (i + 1) % target.length : i + 1;
       const prevValue = target[prevIndex] ?? target[i];
       const nextValue = target[nextIndex] ?? target[i];
-      next[i] = clamp(target[i] * 0.48 + (prevValue + nextValue) * 0.26, 0, 1);
+      next[i] = clamp(target[i] * 0.64 + (prevValue + nextValue) * 0.18, 0, 1);
     }
     target = next;
   }

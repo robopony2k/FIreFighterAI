@@ -116,7 +116,8 @@ export const TERRAIN_ARCHETYPE_OPTIONS: Array<{ value: TerrainArchetypeId; label
   { value: "MASSIF", label: "Massif" },
   { value: "LONG_SPINE", label: "Long Spine" },
   { value: "TWIN_BAY", label: "Twin Bay" },
-  { value: "SHELF", label: "Shelf" }
+  { value: "SHELF", label: "Shelf" },
+  { value: "NONE", label: "None" }
 ];
 
 export const TERRAIN_RUN_GROUPS: readonly TerrainControlGroup[] = [
@@ -132,7 +133,8 @@ export const TERRAIN_RUN_GROUPS: readonly TerrainControlGroup[] = [
         "maxHeight",
         "maxHeight",
         "Max height",
-        "How high the tallest mountains are allowed to climb before peak compression kicks in."
+        "How high the tallest mountains are allowed to climb before peak compression kicks in.",
+        { max: 1.5 }
       ),
       sliderField("recipe", "ruggedness", "ruggedness", "Ruggedness", "How broken, ridged, and difficult the terrain becomes.")
     ]
@@ -166,7 +168,7 @@ export const TERRAIN_RUN_GROUPS: readonly TerrainControlGroup[] = [
     title: "Coast + Water",
     fields: [
       sliderField("recipe", "coastComplexity", "coastComplexity", "Coast complexity", "How much low-frequency shoreline and coastal elevation variation is added before sea level."),
-      sliderField("recipe", "riverIntensity", "riverIntensity", "River intensity", "River presence, carve strength, and drainage emphasis."),
+      sliderField("recipe", "riverIntensity", "riverIntensity", "Hydrology intensity", "Runoff, channel carve strength, and lake outlet emphasis."),
       checkboxField("skipCarving", "skipCarving", "Skip terrain carving", "Bypass the coarse pre-river carving pass and keep the relief stage untouched.")
     ]
   },
@@ -201,37 +203,29 @@ export const MAP_EDITOR_TERRAIN_GROUPS = {
   relief: [
     {
       id: "relief-simple",
-      title: "Surface Detail",
+      title: "Surface Pattern",
       fields: [
         sliderField(
           "advanced",
-          "maxHeight",
-          "maxHeight",
-          "Max height",
-          "How high the tallest mountains are allowed to climb before peak compression kicks in."
+          "ridgeFrequency",
+          "ridgeFrequency",
+          "Surface frequency",
+          "How frequently secondary ridge texture and surface bands repeat across the map."
         )
       ]
     },
     {
       id: "relief-advanced",
-      title: "Ridge + Upland Detail",
+      title: "Surface Direction",
       advanced: true,
       fields: [
         sliderField(
           "advanced",
           "ridgeAlignment",
           "ridgeAlignment",
-          "Ridge alignment",
-          "How strongly uplands align into coherent ridge corridors instead of scattered lumps."
-        ),
-        sliderField(
-          "advanced",
-          "uplandDistribution",
-          "uplandDistribution",
-          "Upland distribution",
-          "Whether high ground concentrates into one core or spreads across multiple upland shoulders."
-        ),
-        sliderField("advanced", "ridgeFrequency", "ridgeFrequency", "Ridge frequency", "How frequently major ridges repeat across the map.")
+          "Surface alignment",
+          "How strongly secondary ridge texture leans into a shared direction instead of staying scattered."
+        )
       ]
     }
   ],
@@ -242,24 +236,22 @@ export const MAP_EDITOR_TERRAIN_GROUPS = {
       fields: [
         sliderField("recipe", "relief", "relief", "Relief", "How much the noise elevation rises and falls before sea level."),
         sliderField("recipe", "ruggedness", "ruggedness", "Ruggedness", "How much octave detail, ridge breakup, and local terrain variation remains visible."),
-        sliderField("recipe", "landCoverageTarget", "landCoverageTarget", "Land mass", "Target amount of dry island land after sea level is applied.")
+        sliderField(
+          "advanced",
+          "maxHeight",
+          "maxHeight",
+          "Max height",
+          "How high the tallest mountains are allowed to climb before peak compression kicks in.",
+          { max: 1.5 }
+        )
       ]
     },
     {
       id: "carving-advanced",
-      title: "Distance Shaping",
+      title: "Height Overrides",
       advanced: true,
       fields: [
-        sliderField("advanced", "interiorRise", "interiorRise", "Interior land floor", "How strongly the distance shaper protects central land without replacing the noise field."),
-        sliderField(
-          "advanced",
-          "islandCompactness",
-          "islandCompactness",
-          "Border water falloff",
-          "How firmly the distance shaper forces edge water while leaving the middle to the elevation noise."
-        ),
-        sliderField("advanced", "anisotropy", "anisotropy", "Anisotropy", "How strongly the island is stretched into a directional landform."),
-        sliderField("advanced", "asymmetry", "asymmetry", "Asymmetry", "How much the island mass shifts away from a balanced center.")
+        sliderField("advanced", "uplandDistribution", "uplandDistribution", "Upland distribution", "Whether high ground concentrates into one core or spreads across multiple upland shoulders.")
       ]
     }
   ],
@@ -275,6 +267,7 @@ export const MAP_EDITOR_TERRAIN_GROUPS = {
       id: "flooding-simple",
       title: "Sea Level + Coastline",
       fields: [
+        sliderField("recipe", "landCoverageTarget", "landCoverageTarget", "Land mass", "Target amount of dry island land after sea level is applied."),
         sliderField("recipe", "coastComplexity", "coastComplexity", "Coast complexity", "How much low-frequency shoreline and coastal elevation variation is added before sea level."),
         sliderField(
           "advanced",
@@ -293,6 +286,16 @@ export const MAP_EDITOR_TERRAIN_GROUPS = {
         sliderField("advanced", "embayment", "embayment", "Embayment", "How strongly the coastline opens into coves, bays, and inlets."),
         sliderField(
           "advanced",
+          "islandCompactness",
+          "islandCompactness",
+          "Border water falloff",
+          "How firmly the distance shaper forces edge water while leaving the middle to the elevation noise."
+        ),
+        sliderField("advanced", "interiorRise", "interiorRise", "Interior land floor", "How strongly the distance shaper protects central land without replacing the noise field."),
+        sliderField("advanced", "anisotropy", "anisotropy", "Anisotropy", "How strongly the island is stretched into a directional landform."),
+        sliderField("advanced", "asymmetry", "asymmetry", "Asymmetry", "How much the island mass shifts away from a balanced center."),
+        sliderField(
+          "advanced",
           "coastalShelfWidth",
           "coastalShelfWidth",
           "Coastal shelf width",
@@ -306,15 +309,14 @@ export const MAP_EDITOR_TERRAIN_GROUPS = {
       id: "river-simple",
       title: "Rivers",
       fields: [
-        sliderField("recipe", "riverIntensity", "riverIntensity", "River intensity", "River presence, carve strength, and drainage emphasis.")
+        sliderField("recipe", "riverIntensity", "riverIntensity", "Hydrology intensity", "Runoff, channel carve strength, and lake outlet emphasis.")
       ]
     },
     {
       id: "river-advanced",
-      title: "River Overrides",
+      title: "Hydrology Overrides",
       advanced: true,
       fields: [
-        sliderField("advanced", "riverBudget", "riverBudget", "River budget", "How many meaningful river systems the map attempts to sustain."),
         sliderField("advanced", "basinStrength", "basinStrength", "Basin strength", "How much lowland carving and interior basins are emphasized.")
       ]
     }

@@ -13,7 +13,7 @@ const { generateMap } = await import(distImport(["mapgen", "index.js"]));
 const { createDefaultTerrainRecipe, compileTerrainRecipe } = await import(distImport(["mapgen", "terrainProfile.js"]));
 const { analyzeRoadSurfaceMetrics } = await import(distImport(["mapgen", "roads.js"]));
 
-const archetypes = ["MASSIF", "LONG_SPINE", "TWIN_BAY", "SHELF"];
+const archetypes = ["MASSIF", "LONG_SPINE", "TWIN_BAY", "SHELF", "NONE"];
 const arg = (name, fallback) => {
   const match = process.argv.find((value) => value.startsWith(`--${name}=`));
   if (!match) {
@@ -122,6 +122,32 @@ const analyzeRivers = (state) => {
   };
 };
 
+const analyzeStaticHydrology = (state) => {
+  const lakeIds = new Set();
+  let lakeTiles = 0;
+  let lakeOutletCount = 0;
+  let waterfallCount = 0;
+  for (let i = 0; i < state.grid.totalTiles; i += 1) {
+    const lakeId = state.tileLakeMask?.[i] ?? 0;
+    if (lakeId > 0) {
+      lakeIds.add(lakeId);
+      lakeTiles += 1;
+    }
+    if ((state.tileLakeOutletMask?.[i] ?? 0) > 0) {
+      lakeOutletCount += 1;
+    }
+    if ((state.tileWaterfallSourceMask?.[i] ?? 0) > 0) {
+      waterfallCount += 1;
+    }
+  }
+  return {
+    lakeCount: lakeIds.size,
+    lakeTiles,
+    lakeOutletCount,
+    waterfallCount
+  };
+};
+
 const analyzeSettlements = (state) => {
   let bridgeTiles = 0;
   for (let i = 0; i < state.tileRoadBridge.length; i += 1) {
@@ -206,6 +232,7 @@ for (const archetype of archetypes) {
       ...analyzeRelief(world),
       ...analyzeErosionDelta(elevationBeforeErosion, elevationAfterErosion),
       ...analyzeRivers(world),
+      ...analyzeStaticHydrology(world),
       ...analyzeSettlements(world),
       stageTimings: roundStageTimings(stageTimings),
       roadMetrics: {
@@ -218,9 +245,23 @@ for (const archetype of archetypes) {
   }
 }
 
+const lakeSummaryByArchetype = Object.fromEntries(archetypes.map((archetype) => {
+  const archetypeRuns = runs.filter((run) => run.archetype === archetype);
+  const lakeRuns = archetypeRuns.filter((run) => run.lakeCount > 0);
+  const outletRuns = archetypeRuns.filter((run) => run.lakeOutletCount > 0);
+  return [archetype, {
+    sampleCount: archetypeRuns.length,
+    lakeHitRate: Number((lakeRuns.length / Math.max(1, archetypeRuns.length)).toFixed(4)),
+    outletHitRate: Number((outletRuns.length / Math.max(1, archetypeRuns.length)).toFixed(4)),
+    meanLakeCount: Number((lakeRuns.reduce((sum, run) => sum + run.lakeCount, 0) / Math.max(1, archetypeRuns.length)).toFixed(3)),
+    meanLakeTiles: Number((lakeRuns.reduce((sum, run) => sum + run.lakeTiles, 0) / Math.max(1, archetypeRuns.length)).toFixed(2))
+  }];
+}));
+
 console.log(JSON.stringify({
   generatedAt: new Date().toISOString(),
   sizeId,
   sampleCount,
+  lakeSummaryByArchetype,
   runs
 }, null, 2));

@@ -328,6 +328,7 @@ const SHORE_SDF_MAX_DISTANCE = 7;
 const RIVER_BANK_MAX_DISTANCE = 5;
 const WATER_SURFACE_LIFT_OCEAN = 0.08;
 const WATER_SURFACE_LIFT_RIVER = 0.012;
+const WATER_SURFACE_LIFT_LAKE = 0.004;
 const RIVER_SURFACE_BANK_CLEARANCE = 0.02;
 const RIVER_CUTOUT_FIELD_DILATE = 0;
 const STEP_ROCKY_TINT_MAX = 0.28;
@@ -1370,6 +1371,11 @@ const buildInlandWaterMapTexture = (
   return createDataTexture(data, sampleCols, sampleRows, THREE.LinearFilter, THREE.LinearFilter);
 };
 
+const strengthenLakeRenderCoverage = (coverage: number): number => {
+  const lake = clamp(coverage, 0, 1);
+  return lake >= WATER_ALPHA_MIN_RATIO ? clamp(0.58 + lake * 0.42, 0, 1) : lake;
+};
+
 const buildWaterSupportMask = (
   waterRatios: WaterSampleRatios,
   oceanSupportMask: Uint8Array,
@@ -1392,23 +1398,26 @@ const buildStandingWaterRenderData = (
   oceanRatios: WaterSampleRatios,
   oceanSupportMask: Uint8Array,
   sampledLakeCoverage: Float32Array | undefined
-): { ratios: WaterSampleRatios; supportMask: Uint8Array } => {
+): { ratios: WaterSampleRatios; supportMask: Uint8Array; lakeCoverage: Float32Array } => {
   const total = oceanSupportMask.length;
   const water = new Float32Array(total);
   const ocean = new Float32Array(total);
   const river = new Float32Array(total);
+  const lakeCoverage = new Float32Array(total);
   const supportMask = new Uint8Array(total);
   for (let i = 0; i < total; i += 1) {
     const oceanWater = clamp(oceanRatios.water[i] ?? 0, 0, 1);
     const oceanRatio = clamp(oceanRatios.ocean[i] ?? 0, 0, 1);
-    const lakeRatio = clamp(sampledLakeCoverage?.[i] ?? 0, 0, 1);
+    const lakeRatio = strengthenLakeRenderCoverage(sampledLakeCoverage?.[i] ?? 0);
+    lakeCoverage[i] = lakeRatio;
     water[i] = Math.max(oceanWater, lakeRatio);
     ocean[i] = oceanRatio;
     supportMask[i] = oceanSupportMask[i] > 0 || lakeRatio >= WATER_ALPHA_MIN_RATIO ? 1 : 0;
   }
   return {
     ratios: { water, ocean, river },
-    supportMask
+    supportMask,
+    lakeCoverage
   };
 };
 
@@ -2358,6 +2367,7 @@ export const buildTileTexture = (
   riverRatio: Float32Array | null,
   sampledErosionWear: Float32Array | null,
   sampledRiverCoverage: Float32Array | null,
+  sampledLakeCoverage: Float32Array | null | undefined,
   riverStepStrength: Float32Array | null | undefined,
   debugTypeColors: boolean,
   colorMode: "legacy" | "mask"
@@ -2383,6 +2393,7 @@ export const buildTileTexture = (
     riverRatio,
     sampledErosionWear,
     sampledRiverCoverage,
+    sampledLakeCoverage,
     riverStepStrength,
     debugTypeColors,
     colorMode,
@@ -2461,12 +2472,14 @@ const buildTerrainSurfaceColorFieldOptions = (
   oceanRatio: surface.waterRatios.ocean,
   sampledErosionWear: surface.sampledErosionWear ?? null,
   sampledRiverCoverage: surface.sampledRiverCoverage ?? null,
+  sampledLakeCoverage: surface.sampledLakeCoverage ?? null,
   riverStepStrength: surface.sampledRiverStepStrength,
   debugTypeColors: sample.debugTypeColors ?? false,
   deps: {
     palette,
     forestToneBase: FOREST_TONE_BASE,
     forestTintById: FOREST_TINT_BY_ID,
+    waterAlphaMinRatio: WATER_ALPHA_MIN_RATIO,
     riverRatioMin: RIVER_RATIO_MIN,
     stepRockyTintMax: STEP_ROCKY_TINT_MAX
   }
@@ -3501,6 +3514,7 @@ export const buildTerrainMesh = (
     waterRatios.river,
     sampledErosionWear ?? null,
     sampledRiverCoverage ?? null,
+    surface.sampledLakeCoverage ?? null,
     sampledRiverStepStrength,
     sample.debugTypeColors ?? false,
     useLegacyFacetedTerrain ? "legacy" : "mask"
@@ -4223,7 +4237,7 @@ export const buildTerrainMesh = (
       surface.sampledLakeCoverage
     );
     const standingWaterMaskTexture = buildWaterMaskTexture(sampleCols, sampleRows, standingWater.ratios);
-    const standingWaterInlandMap = buildInlandWaterMapTexture(sampleCols, sampleRows, surface.sampledLakeCoverage);
+    const standingWaterInlandMap = buildInlandWaterMapTexture(sampleCols, sampleRows, standingWater.lakeCoverage);
     const standingWaterSupportMap = buildWaterSupportMapTexture(sampleCols, sampleRows, standingWater.supportMask);
     const standingWaterShoreSdf = buildShoreSdfTextureFromSupportMask(standingWater.supportMask, sampleCols, sampleRows);
     const normalizedOceanHeights = buildWaterSurfaceHeights(
@@ -4333,15 +4347,22 @@ export const buildTerrainMesh = (
       const ratio = ratios.water[i] ?? 0;
       const riverRatio = clamp(ratios.river[i] ?? 0, 0, 1);
       const lakeRatio = clamp(surface.sampledLakeCoverage?.[i] ?? 0, 0, 1);
-      const inlandRatio = Math.max(riverRatio, lakeRatio);
-      const inlandWeight = clamp((inlandRatio - 0.08) / 0.42, 0, 1);
-      const lift = WATER_SURFACE_LIFT_OCEAN * (1 - inlandWeight) + WATER_SURFACE_LIFT_RIVER * inlandWeight;
+      const lakeRenderRatio = clamp(standingWater.lakeCoverage[i] ?? 0, 0, 1);
+      const hasLakeSurface = lakeRatio >= WATER_ALPHA_MIN_RATIO && Number.isFinite(surface.sampledLakeSurface?.[i]);
+      const riverOnlyRatio = hasLakeSurface ? 0 : riverRatio;
+      const inlandRenderRatio = Math.max(riverRatio, lakeRenderRatio);
+      const riverWeight = clamp((riverOnlyRatio - 0.08) / 0.42, 0, 1);
+      const lakeWeight = clamp((lakeRenderRatio - 0.08) / 0.42, 0, 1);
+      const inlandWeight = clamp(Math.max(riverWeight, lakeWeight), 0, 1);
+      const inlandLift = hasLakeSurface
+        ? WATER_SURFACE_LIFT_LAKE
+        : WATER_SURFACE_LIFT_RIVER * riverWeight;
+      const lift = WATER_SURFACE_LIFT_OCEAN * (1 - inlandWeight) + inlandLift * inlandWeight;
       let surfaceWorld = clamp(normalizedWaterHeights[i] ?? 0, 0, 1) * heightScale;
-      if (inlandRatio >= RIVER_RATIO_MIN) {
+      if (riverOnlyRatio >= RIVER_RATIO_MIN) {
         const x = i % sampleCols;
         const y = Math.floor(i / sampleCols);
         let minBankWorld = Number.POSITIVE_INFINITY;
-        let minLakeBankWorld = Number.POSITIVE_INFINITY;
         const neighbors = [
           { x: x - 1, y },
           { x: x + 1, y },
@@ -4363,10 +4384,6 @@ export const buildTerrainMesh = (
           }
           const nIdx = neighbor.y * sampleCols + neighbor.x;
           const neighborTerrainWorld = (sampleHeights[nIdx] ?? 0) * heightScale;
-          const neighborLakeRatio = clamp(surface.sampledLakeCoverage?.[nIdx] ?? 0, 0, 1);
-          if (lakeRatio >= WATER_ALPHA_MIN_RATIO && neighborLakeRatio < WATER_ALPHA_MIN_RATIO) {
-            minLakeBankWorld = Math.min(minLakeBankWorld, neighborTerrainWorld);
-          }
           if (supportMask[nIdx] > 0) {
             continue;
           }
@@ -4376,14 +4393,10 @@ export const buildTerrainMesh = (
           const maxSurfaceWorld = minBankWorld - RIVER_SURFACE_BANK_CLEARANCE;
           surfaceWorld = Math.min(surfaceWorld, maxSurfaceWorld);
         }
-        if (lakeRatio >= WATER_ALPHA_MIN_RATIO && Number.isFinite(minLakeBankWorld)) {
-          const maxLakeSurfaceWorld = minLakeBankWorld - RIVER_SURFACE_BANK_CLEARANCE;
-          surfaceWorld = Math.min(surfaceWorld, maxLakeSurfaceWorld);
-        }
       }
       const offsetY = surfaceWorld - waterLevelWorld + lift;
       waterHeights[i] = offsetY;
-      if (ratio < WATER_ALPHA_MIN_RATIO || inlandRatio >= RIVER_RATIO_MIN) {
+      if (ratio < WATER_ALPHA_MIN_RATIO || inlandRenderRatio >= RIVER_RATIO_MIN) {
         continue;
       }
       if (DEBUG_TERRAIN_RENDER) {

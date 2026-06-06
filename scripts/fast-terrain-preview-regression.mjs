@@ -13,56 +13,64 @@ const { createDefaultTerrainRecipe, compileTerrainRecipe, cloneTerrainRecipe } =
 const { buildFastTerrainPreview } = await import(distImport(["systems", "terrain", "sim", "fastTerrainPreview.js"]));
 const { MAP_EDITOR_TERRAIN_GROUPS } = await import(distImport(["ui", "terrain-schema.js"]));
 
-const archetypes = ["MASSIF", "LONG_SPINE", "TWIN_BAY", "SHELF"];
-const modes = ["shape", "relief", "water"];
+const archetypes = ["MASSIF", "LONG_SPINE", "TWIN_BAY", "SHELF", "NONE"];
+const modes = ["height", "relief", "water"];
 const seed = 1337;
 const sizeId = "massive";
 const size = MAP_SIZE_PRESETS[sizeId];
 const PERF_BUDGET_MS = 220;
 const EXPECTED_HASHES = {
   MASSIF: {
-    shape: "9708157a",
-    relief: "e6d477a7",
-    water: "89ac46d7"
+    height: "07dceed5",
+    relief: "c2eec41e",
+    water: "00dfb5ae"
   },
   LONG_SPINE: {
-    shape: "9be556f5",
-    relief: "c3407392",
-    water: "55bdcfc2"
+    height: "d75d040d",
+    relief: "3e4bc9a6",
+    water: "459104b6"
   },
   TWIN_BAY: {
-    shape: "9ec34ef7",
-    relief: "e153e21c",
-    water: "8437acfd"
+    height: "be61a997",
+    relief: "7245c2c7",
+    water: "70962b66"
   },
   SHELF: {
-    shape: "71d13340",
-    relief: "f63c6a34",
-    water: "0c252d05"
+    height: "7ae300bb",
+    relief: "2de2d2f0",
+    water: "01959ff1"
+  },
+  NONE: {
+    height: "0b21f3a4",
+    relief: "b5f05691",
+    water: "757150d1"
   }
 };
 
 const EXPECTED_EDITOR_KEYS = {
-  scenario: ["recipe.archetype"],
+  scenario: ["recipe.archetype", "advanced.noiseFrequency"],
   carving: [
-    "recipe.coastComplexity",
-    "recipe.landCoverageTarget",
-    "advanced.islandCompactness",
-    "advanced.embayment",
-    "advanced.anisotropy",
-    "advanced.asymmetry"
-  ],
-  relief: [
     "recipe.relief",
     "recipe.ruggedness",
     "advanced.maxHeight",
-    "advanced.interiorRise",
+    "advanced.uplandDistribution"
+  ],
+  relief: [
     "advanced.ridgeAlignment",
-    "advanced.uplandDistribution",
     "advanced.ridgeFrequency"
   ],
-  flooding: ["advanced.seaLevelBias", "advanced.coastalShelfWidth"],
-  rivers: ["recipe.riverIntensity", "advanced.riverBudget", "advanced.basinStrength"],
+  flooding: [
+    "recipe.landCoverageTarget",
+    "recipe.coastComplexity",
+    "advanced.seaLevelBias",
+    "advanced.embayment",
+    "advanced.islandCompactness",
+    "advanced.interiorRise",
+    "advanced.anisotropy",
+    "advanced.asymmetry",
+    "advanced.coastalShelfWidth"
+  ],
+  rivers: ["recipe.riverIntensity", "advanced.basinStrength"],
   erosion: []
 };
 
@@ -182,21 +190,106 @@ const assertDryPreviewHasNoWater = (summary) => {
   }
 };
 
-const assertPerimeterElevationZero = (archetype, mode, result) => {
-  const { cols, rows, elevationMap } = result;
-  for (let x = 0; x < cols; x += 1) {
-    const top = elevationMap[x] ?? 0;
-    const bottom = elevationMap[(rows - 1) * cols + x] ?? 0;
-    if (top !== 0 || bottom !== 0) {
-      throw new Error(`${archetype}:${mode} has nonzero north/south perimeter elevation at x=${x}: ${JSON.stringify({ top, bottom })}`);
+const assertWaterPreviewDistanceShaping = (archetype, result) => {
+  const { cols, rows, oceanMask } = result;
+  let border = 0;
+  let borderLand = 0;
+  let center = 0;
+  let centerWater = 0;
+  const borderWidth = Math.max(4, Math.round(Math.min(cols, rows) * 0.08));
+  for (let y = 0; y < rows; y += 1) {
+    for (let x = 0; x < cols; x += 1) {
+      const idx = y * cols + x;
+      const edgeBand = x < borderWidth || y < borderWidth || x >= cols - borderWidth || y >= rows - borderWidth;
+      const nx = cols <= 1 ? 0 : x / (cols - 1) * 2 - 1;
+      const ny = rows <= 1 ? 0 : y / (rows - 1) * 2 - 1;
+      const centerCore = Math.hypot(nx, ny) < 0.45;
+      if (edgeBand) {
+        border += 1;
+        if (oceanMask[idx] === 0) {
+          borderLand += 1;
+        }
+      }
+      if (centerCore) {
+        center += 1;
+        if (oceanMask[idx] > 0) {
+          centerWater += 1;
+        }
+      }
     }
   }
-  for (let y = 0; y < rows; y += 1) {
-    const left = elevationMap[y * cols] ?? 0;
-    const right = elevationMap[y * cols + cols - 1] ?? 0;
-    if (left !== 0 || right !== 0) {
-      throw new Error(`${archetype}:${mode} has nonzero east/west perimeter elevation at y=${y}: ${JSON.stringify({ left, right })}`);
+  const borderLandRatio = borderLand / Math.max(1, border);
+  const centerWaterRatio = centerWater / Math.max(1, center);
+  if (borderLandRatio > 0.12 || centerWaterRatio > 0.02) {
+    throw new Error(
+      `${archetype}:water distance shaping failed: ${JSON.stringify({ borderLandRatio, centerWaterRatio, borderLand, border, centerWater, center })}`
+    );
+  }
+};
+
+const assertWaterPreviewHasNoisyContour = (archetype, result) => {
+  const { cols, rows, oceanMask } = result;
+  const centerX = (cols - 1) / 2;
+  const centerY = (rows - 1) / 2;
+  const maxRadius = Math.hypot(centerX, centerY);
+  const radii = [];
+  for (let sample = 0; sample < 48; sample += 1) {
+    const angle = sample / 48 * Math.PI * 2;
+    let boundaryRadius = 1;
+    for (let step = 2; step <= 128; step += 1) {
+      const radius = step / 128 * maxRadius;
+      const x = Math.round(centerX + Math.cos(angle) * radius);
+      const y = Math.round(centerY + Math.sin(angle) * radius);
+      if (x < 0 || y < 0 || x >= cols || y >= rows) {
+        break;
+      }
+      if (oceanMask[y * cols + x] > 0) {
+        boundaryRadius = radius / maxRadius;
+        break;
+      }
     }
+    radii.push(boundaryRadius);
+  }
+  const mean = radii.reduce((sum, radius) => sum + radius, 0) / Math.max(1, radii.length);
+  const variance = radii.reduce((sum, radius) => sum + (radius - mean) ** 2, 0) / Math.max(1, radii.length);
+  const stdev = Math.sqrt(variance);
+  if (stdev < 0.025) {
+    throw new Error(`Water preview contour is too uniform for ${archetype}: ${JSON.stringify({ stdev, min: Math.min(...radii), max: Math.max(...radii) })}`);
+  }
+};
+
+const assertNeutralSurfaceDoesNotCreateCentralSpine = () => {
+  const recipe = createDefaultTerrainRecipe(sizeId, "NONE");
+  const height = buildPreview(recipe, "height").result.elevationMap;
+  const relief = buildPreview(recipe, "relief").result.elevationMap;
+  const stripeRadius = Math.max(3, Math.round(size * 0.04));
+  let totalLift = 0;
+  let totalCount = 0;
+  let verticalLift = 0;
+  let verticalCount = 0;
+  let horizontalLift = 0;
+  let horizontalCount = 0;
+  for (let y = 0; y < size; y += 1) {
+    for (let x = 0; x < size; x += 1) {
+      const idx = y * size + x;
+      const lift = Math.max(0, (relief[idx] ?? 0) - (height[idx] ?? 0));
+      totalLift += lift;
+      totalCount += 1;
+      if (Math.abs(x - (size - 1) / 2) <= stripeRadius) {
+        verticalLift += lift;
+        verticalCount += 1;
+      }
+      if (Math.abs(y - (size - 1) / 2) <= stripeRadius) {
+        horizontalLift += lift;
+        horizontalCount += 1;
+      }
+    }
+  }
+  const averageLift = totalLift / Math.max(1, totalCount);
+  const verticalRatio = verticalLift / Math.max(1, verticalCount) / Math.max(0.0001, averageLift);
+  const horizontalRatio = horizontalLift / Math.max(1, horizontalCount) / Math.max(0.0001, averageLift);
+  if (verticalRatio > 2.2 || horizontalRatio > 2.2) {
+    throw new Error(`Neutral surface preview created a dominant central spine: ${JSON.stringify({ verticalRatio, horizontalRatio, averageLift })}`);
   }
 };
 
@@ -210,38 +303,39 @@ const withRecipeChange = (recipe, mutate) => {
 const assertSensitivity = () => {
   const base = createDefaultTerrainRecipe(sizeId, "MASSIF");
   const longSpine = createDefaultTerrainRecipe(sizeId, "LONG_SPINE");
-  const shapeBase = summarizeResult("MASSIF", "shape", buildPreview(base, "shape").result, 0);
-  const shapeLong = summarizeResult("LONG_SPINE", "shape", buildPreview(longSpine, "shape").result, 0);
-  if (shapeBase.hash === shapeLong.hash || Math.abs(shapeBase.elevationVariance - shapeLong.elevationVariance) < 0.0003) {
-    throw new Error(`Archetype did not visibly change shape metrics: ${JSON.stringify({ shapeBase, shapeLong })}`);
+  const heightBase = summarizeResult("MASSIF", "height", buildPreview(base, "height").result, 0);
+  const heightLong = summarizeResult("LONG_SPINE", "height", buildPreview(longSpine, "height").result, 0);
+  if (heightBase.hash === heightLong.hash || Math.abs(heightBase.elevationVariance - heightLong.elevationVariance) < 0.0003) {
+    throw new Error(`Archetype did not visibly change height metrics: ${JSON.stringify({ heightBase, heightLong })}`);
   }
 
-  const compactShape = summarizeResult(
+  const compactWater = summarizeResult(
     "MASSIF",
-    "shape",
+    "water",
     buildPreview(withRecipeChange(base, (recipe) => {
       recipe.coastComplexity = 0.95;
       recipe.landCoverageTarget = 0.78;
       recipe.advancedOverrides.islandCompactness = 0.28;
       recipe.advancedOverrides.embayment = 0.9;
-    }), "shape").result,
+    }), "water").result,
     0
   );
-  if (shapeBase.hash === compactShape.hash) {
-    throw new Error(`Shape controls did not move coastline metrics: ${JSON.stringify({ shapeBase, compactShape })}`);
+  const waterBase = summarizeResult("MASSIF", "water", buildPreview(base, "water").result, 0);
+  if (waterBase.hash === compactWater.hash) {
+    throw new Error(`Water shaping controls did not move coastline metrics: ${JSON.stringify({ waterBase, compactWater })}`);
   }
-  const highLandDryRelief = summarizeResult(
+  const highLandDryHeight = summarizeResult(
     "MASSIF",
-    "relief",
+    "height",
     buildPreview(withRecipeChange(base, (recipe) => {
       recipe.landCoverageTarget = 0.78;
-    }), "relief").result,
+    }), "height").result,
     0
   );
-  const reliefBase = summarizeResult("MASSIF", "relief", buildPreview(base, "relief").result, 0);
-  if (highLandDryRelief.hash === reliefBase.hash) {
-    throw new Error(`Land coverage target did not change dry relief preview: ${JSON.stringify({ reliefBase, highLandDryRelief })}`);
+  if (highLandDryHeight.hash !== heightBase.hash) {
+    throw new Error(`Land coverage target changed dry height preview: ${JSON.stringify({ heightBase, highLandDryHeight })}`);
   }
+  const reliefBase = summarizeResult("MASSIF", "relief", buildPreview(base, "relief").result, 0);
 
   const lowRelief = summarizeResult(
     "MASSIF",
@@ -259,7 +353,7 @@ const assertSensitivity = () => {
     buildPreview(withRecipeChange(base, (recipe) => {
       recipe.relief = 0.95;
       recipe.ruggedness = 0.95;
-      recipe.advancedOverrides.maxHeight = 0.95;
+      recipe.advancedOverrides.maxHeight = 1.5;
     }), "relief").result,
     0
   );
@@ -267,7 +361,6 @@ const assertSensitivity = () => {
     throw new Error(`Relief controls did not increase elevation variance: ${JSON.stringify({ lowRelief, highRelief })}`);
   }
 
-  const waterBase = summarizeResult("MASSIF", "water", buildPreview(base, "water").result, 0);
   const highLandWater = summarizeResult(
     "MASSIF",
     "water",
@@ -296,16 +389,16 @@ const assertSensitivity = () => {
     throw new Error(`Sea-level bias did not increase ocean ratio: ${JSON.stringify({ waterBase, biasedWater })}`);
   }
 
-  const highWaterDryShape = summarizeResult(
+  const highWaterDryHeight = summarizeResult(
     "MASSIF",
-    "shape",
+    "height",
     buildPreview(withRecipeChange(base, (recipe) => {
       recipe.advancedOverrides.seaLevelBias = 0.86;
-    }), "shape").result,
+    }), "height").result,
     0
   );
-  if (highWaterDryShape.hash !== shapeBase.hash) {
-    throw new Error(`Water level changed dry shape preview: ${JSON.stringify({ shapeBase, highWaterDryShape })}`);
+  if (highWaterDryHeight.hash !== heightBase.hash) {
+    throw new Error(`Water level changed dry height preview: ${JSON.stringify({ heightBase, highWaterDryHeight })}`);
   }
 
   const highWaterDryRelief = summarizeResult(
@@ -323,10 +416,11 @@ const assertSensitivity = () => {
 
 assertEditorControlSchema();
 assertEditorRiversAreStaged();
+assertNeutralSurfaceDoesNotCreateCentralSpine();
 for (const archetype of archetypes) {
-  for (const mode of modes) {
-    assertPerimeterElevationZero(archetype, mode, buildPreview(createDefaultTerrainRecipe(sizeId, archetype), mode).result);
-  }
+  const waterPreview = buildPreview(createDefaultTerrainRecipe(sizeId, archetype), "water").result;
+  assertWaterPreviewDistanceShaping(archetype, waterPreview);
+  assertWaterPreviewHasNoisyContour(archetype, waterPreview);
 }
 const runs = archetypes.flatMap((archetype) => modes.map((mode) => summarize(archetype, mode)));
 const slowest = Math.max(...runs.map((run) => run.elapsedMs));
@@ -350,7 +444,7 @@ if (runs.some((run) => run.riverRatio > 0)) {
 }
 
 for (const run of runs) {
-  if (run.mode === "shape" || run.mode === "relief") {
+  if (run.mode === "height" || run.mode === "relief") {
     assertDryPreviewHasNoWater(run);
   } else if (run.mode === "water" && (run.oceanRatio <= 0 || run.waterTileRatio <= 0)) {
     throw new Error(`Water preview produced no visible ocean coverage: ${JSON.stringify(run)}`);

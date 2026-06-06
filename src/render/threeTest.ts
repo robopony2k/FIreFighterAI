@@ -7663,6 +7663,7 @@ export const createThreeTest = (
         surface.waterRatios.river,
         surface.sampledErosionWear ?? null,
         surface.sampledRiverCoverage ?? null,
+        surface.sampledLakeCoverage ?? null,
         surface.sampledRiverStepStrength,
         sample.debugTypeColors ?? false,
         useLegacyFacetedTerrain || useTextureColorFastPath ? "legacy" : "mask"

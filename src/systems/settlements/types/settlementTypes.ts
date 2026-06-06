@@ -36,6 +36,7 @@ export type SettlementRoadOptions = {
   contourTurnReliefWeight?: number;
   allowMountainPassFallback?: boolean;
   pathMode?: SettlementRoadPathMode;
+  maxSearchNodeVisits?: number;
   searchBounds?: {
     minX: number;
     maxX: number;
@@ -68,6 +69,7 @@ export type SettlementRoadAdapter = {
   backfillRoadEdgesFromAdjacency: (state: WorldState) => void;
   pruneRoadDiagonalStubs: (state: WorldState) => void;
   recordGeneratedJunctions?: (count: number) => void;
+  recordConnectorCacheSkip?: (count?: number) => void;
 };
 
 export type SettlementGrowthPlanEntryStatus = "pending" | "consumed" | "skipped";

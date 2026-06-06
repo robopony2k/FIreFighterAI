@@ -91,6 +91,7 @@ export type RoadPathOptions = {
   contourTurnReliefWeight?: number;
   allowMountainPassFallback?: boolean;
   pathMode?: RoadPathMode;
+  maxSearchNodeVisits?: number;
 };
 
 type RoadPathOptionsResolved = {
@@ -126,6 +127,7 @@ type RoadPathOptionsResolved = {
   contourTurnReliefWeight: number;
   allowMountainPassFallback: boolean;
   pathMode: RoadPathMode;
+  maxSearchNodeVisits: number;
 };
 
 type RoadCarveOptions = RoadPathOptions & {
@@ -188,6 +190,8 @@ export type RoadGenerationStats = {
   connectorArtifactPrunedEdgeCount: number;
   longStraightSteepSegmentCount: number;
   generatedJunctionCount: number;
+  searchBudgetAbortCount: number;
+  connectorCacheSkipCount: number;
 };
 
 export type RoadSurfaceMetrics = {
@@ -327,7 +331,9 @@ const roadGenerationStats: RoadGenerationStats = {
   hairpinGradeDiscountCount: 0,
   connectorArtifactPrunedEdgeCount: 0,
   longStraightSteepSegmentCount: 0,
-  generatedJunctionCount: 0
+  generatedJunctionCount: 0,
+  searchBudgetAbortCount: 0,
+  connectorCacheSkipCount: 0
 };
 
 const resolveRoadPathOptions = (options: RoadPathOptions = {}): RoadPathOptionsResolved => {
@@ -379,7 +385,8 @@ const resolveRoadPathOptions = (options: RoadPathOptions = {}): RoadPathOptionsR
     straightClimbPenaltyWeight: Math.max(0, options.straightClimbPenaltyWeight ?? ROAD_STRAIGHT_CLIMB_PENALTY_WEIGHT),
     contourTurnReliefWeight: Math.max(0, options.contourTurnReliefWeight ?? ROAD_CONTOUR_TURN_RELIEF_WEIGHT),
     allowMountainPassFallback: options.allowMountainPassFallback ?? true,
-    pathMode: options.pathMode ?? "normal"
+    pathMode: options.pathMode ?? "normal",
+    maxSearchNodeVisits: Math.max(0, Math.floor(options.maxSearchNodeVisits ?? 0))
   };
 };
 
@@ -1608,6 +1615,8 @@ const runAStar = (
   const crossfallAt = new Float32Array(total);
   const steepRunAt = new Int16Array(total);
   const stepsSinceTurnAt = new Int16Array(total);
+  const turnDirectionAt = new Int8Array(total);
+  const stepsSinceTurnDirectionChangeAt = new Int16Array(total);
   const lateralLegLengthAt = new Int16Array(total);
   const stepsSinceHairpinDiscountAt = new Int16Array(total);
   const hairpinSteepStepRunAt = new Int16Array(total);
@@ -1636,17 +1645,24 @@ const runAStar = (
   waterTilesUsed[startIdx] = startWater;
   consecutiveWater[startIdx] = startWater;
   stepsSinceTurnAt[startIdx] = 32767;
+  stepsSinceTurnDirectionChangeAt[startIdx] = 32767;
   lateralLegLengthAt[startIdx] = 0;
   stepsSinceHairpinDiscountAt[startIdx] = 32767;
   heapPush(openIdx, openF, startIdx, estimate(start.x, start.y));
 
   let goalIdx = -1;
+  let visitedNodes = 0;
   while (openIdx.length > 0) {
     const currentIdx = heapPop(openIdx, openF);
     if (currentIdx < 0 || closed[currentIdx]) {
       continue;
     }
     closed[currentIdx] = 1;
+    visitedNodes += 1;
+    if (options.maxSearchNodeVisits > 0 && visitedNodes > options.maxSearchNodeVisits) {
+      roadGenerationStats.searchBudgetAbortCount += 1;
+      return null;
+    }
     const cx = currentIdx % cols;
     const cy = Math.floor(currentIdx / cols);
     const isGoal = end ? currentIdx === endIdx : !!isTarget?.(cx, cy);
@@ -1776,6 +1792,8 @@ const runAStar = (
           contourTurnReliefWeight: options.contourTurnReliefWeight,
           previousSteepRun: steepRunAt[currentIdx],
           previousStepsSinceTurn: stepsSinceTurnAt[currentIdx],
+          previousTurnDirection: turnDirectionAt[currentIdx],
+          previousStepsSinceTurnDirectionChange: stepsSinceTurnDirectionChangeAt[currentIdx],
           previousLateralLegLength: lateralLegLengthAt[currentIdx],
           previousStepsSinceHairpinDiscount: stepsSinceHairpinDiscountAt[currentIdx],
           previousHairpinSteepStepRun: hairpinSteepStepRunAt[currentIdx],
@@ -1847,6 +1865,8 @@ const runAStar = (
       if (plannerStepScore) {
         steepRunAt[nIdx] = plannerStepScore.nextSteepRun;
         stepsSinceTurnAt[nIdx] = plannerStepScore.nextStepsSinceTurn;
+        turnDirectionAt[nIdx] = plannerStepScore.nextTurnDirection;
+        stepsSinceTurnDirectionChangeAt[nIdx] = plannerStepScore.nextStepsSinceTurnDirectionChange;
         lateralLegLengthAt[nIdx] = plannerStepScore.nextLateralLegLength;
         stepsSinceHairpinDiscountAt[nIdx] = plannerStepScore.nextStepsSinceHairpinDiscount;
         hairpinSteepStepRunAt[nIdx] = plannerStepScore.nextHairpinSteepStepRun;
@@ -1859,6 +1879,8 @@ const runAStar = (
       } else {
         steepRunAt[nIdx] = 0;
         stepsSinceTurnAt[nIdx] = Math.min(32767, stepsSinceTurnAt[currentIdx] + 1);
+        turnDirectionAt[nIdx] = turnDirectionAt[currentIdx];
+        stepsSinceTurnDirectionChangeAt[nIdx] = Math.min(32767, stepsSinceTurnDirectionChangeAt[currentIdx] + 1);
         lateralLegLengthAt[nIdx] = Math.min(32767, lateralLegLengthAt[currentIdx] + 1);
         stepsSinceHairpinDiscountAt[nIdx] = Math.min(32767, stepsSinceHairpinDiscountAt[currentIdx] + 1);
         hairpinSteepStepRunAt[nIdx] = 0;
@@ -2362,6 +2384,8 @@ export const resetRoadGenerationStats = (): void => {
   roadGenerationStats.connectorArtifactPrunedEdgeCount = 0;
   roadGenerationStats.longStraightSteepSegmentCount = 0;
   roadGenerationStats.generatedJunctionCount = 0;
+  roadGenerationStats.searchBudgetAbortCount = 0;
+  roadGenerationStats.connectorCacheSkipCount = 0;
 };
 
 export const getRoadGenerationStats = (): RoadGenerationStats => ({
@@ -2382,9 +2406,15 @@ export const getRoadGenerationStats = (): RoadGenerationStats => ({
   hairpinGradeDiscountCount: roadGenerationStats.hairpinGradeDiscountCount,
   connectorArtifactPrunedEdgeCount: roadGenerationStats.connectorArtifactPrunedEdgeCount,
   longStraightSteepSegmentCount: roadGenerationStats.longStraightSteepSegmentCount,
-  generatedJunctionCount: roadGenerationStats.generatedJunctionCount
+  generatedJunctionCount: roadGenerationStats.generatedJunctionCount,
+  searchBudgetAbortCount: roadGenerationStats.searchBudgetAbortCount,
+  connectorCacheSkipCount: roadGenerationStats.connectorCacheSkipCount
 });
 
 export const recordGeneratedRoadJunctions = (count: number): void => {
   roadGenerationStats.generatedJunctionCount += Math.max(0, Math.floor(count));
+};
+
+export const recordRoadConnectorCacheSkip = (count = 1): void => {
+  roadGenerationStats.connectorCacheSkipCount += Math.max(0, Math.floor(count));
 };

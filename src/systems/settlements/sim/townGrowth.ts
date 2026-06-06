@@ -1350,7 +1350,9 @@ const buildRoadOptions = (state: WorldState): SettlementRoadOptions => ({
   turnPenalty: 0.03,
   bridgeStepCost: 16,
   bridgeMaxConsecutiveWater: 3,
-  bridgeMaxWaterTilesPerPath: 6
+  bridgeMaxWaterTilesPerPath: 6,
+  pathMode: "normal",
+  allowMountainPassFallback: false
 });
 
 const determineExtensionLength = (town: Town, metrics?: TownEnvelopeMetrics): number => {

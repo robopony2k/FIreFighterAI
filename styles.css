@@ -3480,14 +3480,35 @@ canvas {
 .run-tab.map-editor-step {
   width: 100%;
   min-height: 46px;
-  display: inline-flex;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
   align-items: center;
-  justify-content: center;
-  padding: 10px 12px;
-  text-align: center;
+  justify-content: stretch;
+  gap: 8px;
+  padding: 9px 12px;
+  text-align: left;
   border-radius: 10px;
   border-color: rgba(255, 204, 146, 0.14);
   background: rgba(255, 255, 255, 0.03);
+}
+
+.map-editor-step-index {
+  display: inline-grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 204, 146, 0.28);
+  background: rgba(8, 12, 14, 0.46);
+  color: #ffe5bc;
+  font-size: 12px;
+  line-height: 1;
+}
+
+.map-editor-step-label {
+  min-width: 0;
+  align-self: center;
+  overflow-wrap: anywhere;
 }
 
 .run-tab.map-editor-step:hover {
@@ -3498,6 +3519,12 @@ canvas {
 .run-tab.map-editor-step.is-active {
   border-color: rgba(255, 204, 146, 0.38);
   background: rgba(255, 136, 36, 0.12);
+}
+
+.run-tab.map-editor-step.is-active .map-editor-step-index {
+  border-color: rgba(255, 204, 146, 0.5);
+  background: rgba(255, 136, 36, 0.2);
+  color: #fff6e8;
 }
 
 .map-editor-step-panels {

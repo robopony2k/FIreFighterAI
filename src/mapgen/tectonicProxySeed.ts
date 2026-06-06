@@ -34,6 +34,7 @@ type Plate = {
 };
 
 const ARCHETYPE_SEED_OFFSETS: Record<MapGenSettings["terrainArchetype"], number> = {
+  NONE: 0,
   MASSIF: 0,
   LONG_SPINE: 7919,
   TWIN_BAY: 15443,

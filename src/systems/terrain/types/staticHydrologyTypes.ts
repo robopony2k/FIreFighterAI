@@ -10,6 +10,10 @@ export type StaticHydrologyLake = {
   rainfallScore: number;
   runoffScore: number;
   maxDepth: number;
+  spillElevation?: number;
+  basinAreaTiles?: number;
+  catchmentRunoff?: number;
+  overflowTargetIndex?: number;
 };
 
 export type StaticHydrologyWaterfall = {

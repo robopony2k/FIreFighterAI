@@ -1,8 +1,7 @@
 import { clearVegetationState } from "../../core/vegetation.js";
-import { clamp } from "../../core/utils.js";
 import type { PipelineStage } from "../pipeline/TerrainPipeline.js";
 import { emitStageSnapshot } from "../pipeline/stageDebug.js";
-import { carveRiverValleys, clampRiverMouthDepthsToSeaLevel, suppressIsolatedElevationSpikes } from "../runtime.js";
+import { clampRiverMouthDepthsToSeaLevel, suppressIsolatedElevationSpikes } from "../runtime.js";
 import { buildStaticInlandLakeNetwork } from "../../systems/terrain/sim/inlandLakeNetwork.js";
 
 export const RiverStage: PipelineStage = {
@@ -67,20 +66,9 @@ export const RiverStage: PipelineStage = {
       state.tileWaterfallDrop.fill(0);
     }
 
-    await ctx.reportStage("Routing rivers to final coast...", 0.2);
-    carveRiverValleys(
-      state,
-      ctx.rng,
-      elevationMap,
-      riverMask,
-      clamp(settings.valleyDepth, 0.4, 3),
-      settings.riverWaterBias,
-      settings,
-      seaLevelMap,
-      oceanMask
-    );
+    state.valleyMap = Array.from({ length: total }, () => 0);
 
-    await ctx.reportStage("Resolving inland lake network...", 0.72);
+    await ctx.reportStage("Resolving inland lake overflow network...", 0.72);
     const staticHydrology = buildStaticInlandLakeNetwork({
       state,
       elevationMap,

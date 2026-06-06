@@ -19,6 +19,8 @@ export type RoadPlannerStepContext = {
   contourTurnReliefWeight: number;
   previousSteepRun: number;
   previousStepsSinceTurn: number;
+  previousTurnDirection: number;
+  previousStepsSinceTurnDirectionChange: number;
   previousLateralLegLength: number;
   previousStepsSinceHairpinDiscount: number;
   previousHairpinSteepStepRun: number;
@@ -36,6 +38,8 @@ export type RoadPlannerStepScore = {
   turnPenaltyMultiplier: number;
   nextSteepRun: number;
   nextStepsSinceTurn: number;
+  nextTurnDirection: number;
+  nextStepsSinceTurnDirectionChange: number;
   nextLateralLegLength: number;
   nextStepsSinceHairpinDiscount: number;
   nextHairpinSteepStepRun: number;
@@ -46,14 +50,14 @@ export type RoadPlannerStepScore = {
   longStraightSteep: boolean;
 };
 
-const SWITCHBACK_MIN_TURN_SPACING = 4;
+const SWITCHBACK_MIN_TURN_SPACING = 6;
 const SWITCHBACK_STEEP_GRADE = 0.04;
 const LONG_STRAIGHT_STEEP_RUN = 4;
 const HAIRPIN_GRADE_MULTIPLIER = 0.5;
-const HAIRPIN_MIN_LATERAL_LEG_LENGTH = 4;
-const HAIRPIN_MIN_DISCOUNT_SPACING = 6;
+const HAIRPIN_MIN_LATERAL_LEG_LENGTH = 6;
+const HAIRPIN_MIN_DISCOUNT_SPACING = 8;
 const HAIRPIN_MAX_STEEP_STEP_RUN = 2;
-const HAIRPIN_MIN_TURN_DEG = 45;
+const HAIRPIN_MIN_TURN_DEG = 70;
 const HAIRPIN_PREFERRED_TURN_DEG = 90;
 const HAIRPIN_ACTIVATION_ANGLE_DEG = 16;
 const HAIRPIN_MAX_PLATFORM_CROSSFALL = 0.22;
@@ -87,6 +91,14 @@ const directionTurnDeg = (ctx: RoadPlannerStepContext): number => {
   }
   const dot = ctx.previousDx * ctx.nextDx + ctx.previousDy * ctx.nextDy;
   return (Math.acos(clamp(dot / (previousLength * nextLength), -1, 1)) * 180) / Math.PI;
+};
+
+const directionTurnSign = (ctx: RoadPlannerStepContext): number => {
+  if (!isTurn(ctx)) {
+    return 0;
+  }
+  const cross = ctx.previousDx * ctx.nextDy - ctx.previousDy * ctx.nextDx;
+  return cross < 0 ? -1 : cross > 0 ? 1 : 0;
 };
 
 const hasGradeTrendRelief = (ctx: RoadPlannerStepContext): boolean => {
@@ -169,6 +181,13 @@ export const scoreRoadPlannerStep = (ctx: RoadPlannerStepContext): RoadPlannerSt
   const nextCumulativeClimb = ctx.previousCumulativeClimb + cumulativeDelta;
   const nextCumulativeDescent = ctx.previousCumulativeDescent + descentDelta;
   const nextStepsSinceTurn = turn ? 0 : Math.min(32767, ctx.previousStepsSinceTurn + 1);
+  const turnSign = directionTurnSign(ctx);
+  const turnDirectionChanged =
+    turn && turnSign !== 0 && ctx.previousTurnDirection !== 0 && turnSign !== ctx.previousTurnDirection;
+  const nextTurnDirection = turn && turnSign !== 0 ? turnSign : ctx.previousTurnDirection;
+  const nextStepsSinceTurnDirectionChange = turnDirectionChanged
+    ? 0
+    : Math.min(32767, ctx.previousStepsSinceTurnDirectionChange + 1);
   const hairpinGradeDiscount = isHairpinGradeDiscountEligible(ctx, steep, turn);
   const nextLateralLegLength = hairpinGradeDiscount
     ? 0
@@ -217,12 +236,15 @@ export const scoreRoadPlannerStep = (ctx: RoadPlannerStepContext): RoadPlannerSt
         const stairStepRatio = (HAIRPIN_PREFERRED_TURN_DEG - turnDeg) / HAIRPIN_PREFERRED_TURN_DEG;
         costAdjustment += stairStepRatio * (ctx.mode === "switchback" ? 3.5 : 1.6);
       }
+      if (turnDirectionChanged && ctx.previousStepsSinceTurnDirectionChange < 5) {
+        costAdjustment += (5 - ctx.previousStepsSinceTurnDirectionChange) * (ctx.mode === "switchback" ? 1.45 : 0.75);
+      }
       if (enoughSpacing && relief > 0.04) {
         switchbackTurn = true;
-        turnPenaltyMultiplier = 1 - clamp(0.48 + relief, 0, 0.94);
-        costAdjustment -= relief * ctx.contourTurnReliefWeight * 0.82;
+        turnPenaltyMultiplier = 1 - clamp(0.34 + relief * 0.78, 0, 0.86);
+        costAdjustment -= relief * ctx.contourTurnReliefWeight * 0.62;
       } else if (!enoughSpacing) {
-        costAdjustment += (SWITCHBACK_MIN_TURN_SPACING - spacing) * 1.2;
+        costAdjustment += (SWITCHBACK_MIN_TURN_SPACING - spacing) * 1.55;
       } else {
         turnPenaltyMultiplier = 1 - relief * 0.45;
       }
@@ -237,6 +259,8 @@ export const scoreRoadPlannerStep = (ctx: RoadPlannerStepContext): RoadPlannerSt
     turnPenaltyMultiplier: clamp(turnPenaltyMultiplier, 0.08, 1.35),
     nextSteepRun,
     nextStepsSinceTurn,
+    nextTurnDirection,
+    nextStepsSinceTurnDirectionChange,
     nextLateralLegLength,
     nextStepsSinceHairpinDiscount,
     nextHairpinSteepStepRun,

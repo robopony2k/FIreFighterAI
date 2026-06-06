@@ -26,6 +26,7 @@ type TerrainSurfaceColorFieldDeps = {
   palette: number[][];
   forestToneBase: Rgb;
   forestTintById: ArrayLike<Rgb | undefined>;
+  waterAlphaMinRatio: number;
   riverRatioMin: number;
   stepRockyTintMax: number;
 };
@@ -49,6 +50,7 @@ export type BuildTerrainSurfaceColorFieldOptions = {
   oceanRatio: Float32Array | null;
   sampledErosionWear: Float32Array | null;
   sampledRiverCoverage: Float32Array | null;
+  sampledLakeCoverage: Float32Array | null | undefined;
   riverStepStrength: Float32Array | null | undefined;
   debugTypeColors: boolean;
   deps: TerrainSurfaceColorFieldDeps;
@@ -287,6 +289,7 @@ export const buildTerrainSurfaceColorField = (options: BuildTerrainSurfaceColorF
     oceanRatio,
     sampledErosionWear,
     sampledRiverCoverage,
+    sampledLakeCoverage,
     riverStepStrength,
     debugTypeColors,
     deps
@@ -337,6 +340,7 @@ export const buildTerrainSurfaceColorField = (options: BuildTerrainSurfaceColorF
       const rawErosionWear = sampledErosionWear ? sampledErosionWear[sampleIndex] : 0;
       const localErosionWear = Number.isFinite(rawErosionWear) ? clamp(rawErosionWear as number, 0, 1) : 0;
       const localRiverCoverage = sampledRiverCoverage ? clamp(sampledRiverCoverage[sampleIndex] ?? 0, 0, 1) : localRiverRatio;
+      const localLakeCoverage = sampledLakeCoverage ? clamp(sampledLakeCoverage[sampleIndex] ?? 0, 0, 1) : 0;
       const localMoisture = tileMoisture ? clamp(tileMoisture[idx] ?? 0.5, 0, 1) : 0.5;
       const riverMaskAtTile = riverMask ? riverMask[idx] > 0 : false;
       const riverMaskNearby = (() => {
@@ -493,6 +497,22 @@ export const buildTerrainSurfaceColorField = (options: BuildTerrainSurfaceColorF
         const riverbedColor = mixTriplet(color, wetBankColor, blend);
         const rockyStepBlend = clamp(localStepStrength * deps.stepRockyTintMax, 0, deps.stepRockyTintMax);
         color = mixTriplet(riverbedColor, rockyColor, rockyStepBlend);
+      }
+      if (
+        !debugTypeColors &&
+        !debugScalarField &&
+        typeId === waterId &&
+        localLakeCoverage >= deps.waterAlphaMinRatio &&
+        localRiverRatio < deps.riverRatioMin
+      ) {
+        const rockyColor = deps.palette[rockyId] ?? color;
+        const floodColor = deps.palette[floodplainId] ?? deps.palette[grassId] ?? color;
+        const wetLakebedColor: [number, number, number] = [
+          floodColor[0] * 0.62 + rockyColor[0] * 0.24 + color[0] * 0.14,
+          floodColor[1] * 0.68 + rockyColor[1] * 0.2 + color[1] * 0.12,
+          floodColor[2] * 0.72 + rockyColor[2] * 0.16 + color[2] * 0.12
+        ];
+        color = mixTriplet(color, wetLakebedColor, clamp(0.38 + localLakeCoverage * 0.42, 0, 0.82));
       }
 
       const height = heightAtSample(sampleHeights, sampleCols, sampleRows, col, row);

@@ -15,19 +15,19 @@ export type TerrainSeedPayload = {
 
 const SHARE_CODE_PREFIX = "MAP6";
 const MAP_SIZE_ORDER: readonly MapSizeId[] = ["medium", "massive", "colossal", "gigantic", "titanic"];
-const ARCHETYPE_ORDER: readonly TerrainArchetypeId[] = ["MASSIF", "LONG_SPINE", "TWIN_BAY", "SHELF"];
+const ARCHETYPE_ORDER: readonly TerrainArchetypeId[] = ["MASSIF", "LONG_SPINE", "TWIN_BAY", "SHELF", "NONE"];
 
 const clamp01 = (value: number): number => Math.max(0, Math.min(1, value));
 
-const encodePercent = (value: number): string =>
-  Math.round(clamp01(value) * 100).toString(36).toUpperCase().padStart(2, "0");
+const encodePercent = (value: number, max = 1): string =>
+  Math.round(Math.max(0, Math.min(max, value)) * 100).toString(36).toUpperCase().padStart(2, "0");
 
-const decodePercent = (token: string): number | null => {
+const decodePercent = (token: string, max = 1): number | null => {
   if (token.length !== 2) {
     return null;
   }
   const parsed = Number.parseInt(token, 36);
-  if (!Number.isFinite(parsed) || parsed < 0 || parsed > 100) {
+  if (!Number.isFinite(parsed) || parsed < 0 || parsed > Math.round(max * 100)) {
     return null;
   }
   return parsed / 100;
@@ -136,7 +136,7 @@ export const encodeTerrainSeedCode = (payload: TerrainSeedPayload): string => {
     encodePercent(terrain.townDensity),
     encodePercent(terrain.bridgeAllowance),
     encodePercent(advanced.interiorRise ?? 0),
-    encodePercent(advanced.maxHeight ?? 0),
+    encodePercent(advanced.maxHeight ?? 0, 1.5),
     encodePercent(advanced.embayment ?? 0),
     encodePercent(advanced.anisotropy ?? 0),
     encodePercent(advanced.asymmetry ?? 0),
@@ -189,7 +189,8 @@ export const decodeTerrainSeedCode = (value: string): TerrainSeedPayload | null 
   }
   const values: number[] = [];
   for (let index = 4; index < 48; index += 2) {
-    const decoded = decodePercent(body.slice(index, index + 2));
+    const valueIndex = (index - 4) / 2;
+    const decoded = decodePercent(body.slice(index, index + 2), valueIndex === 9 ? 1.5 : 1);
     if (decoded === null) {
       return null;
     }

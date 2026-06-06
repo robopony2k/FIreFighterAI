@@ -361,6 +361,7 @@ const getFastPreviewMode = (stepId: MapEditorStepId): FastTerrainPreviewMode | n
     case "scenario":
       return "noise";
     case "carving":
+      return "height";
     case "relief":
       return "relief";
     case "flooding":
@@ -429,14 +430,13 @@ const MAP_EDITOR_STEP_SEQUENCE: readonly MapEditorStepId[] = [
   "carving",
   "relief",
   "flooding",
-  "rivers",
   "erosion",
+  "rivers",
   "settlements",
   "vegetation",
   "final"
 ] as const;
 
-const MAP_EDITOR_LANDFORM_FAST_STEPS = new Set<MapEditorStepId>(["carving", "relief"]);
 const MAP_EDITOR_EROSION_COMPARE_PREVIEW: StepPreviewConfig = {
   label: "Pre-Erosion Baseline",
   stopAfterPhase: "terrain:elevation",
@@ -1289,7 +1289,7 @@ export const initMapEditor = (refs: MapEditorRefs, deps: MapEditorDeps): MapEdit
 
   const buildRandomTerrainRecipe = (mapSize: MapSizeId, seed: number): TerrainRecipe => {
     const rng = new RNG(seed ^ 0x7f4a7c15);
-    const archetype = pickRandom(rng, ["MASSIF", "LONG_SPINE", "TWIN_BAY", "SHELF"] as const);
+    const archetype = pickRandom(rng, ["MASSIF", "LONG_SPINE", "TWIN_BAY", "SHELF", "NONE"] as const);
     const base = createDefaultTerrainRecipe(mapSize, archetype);
     const advanced = base.advancedOverrides ?? {};
     return cloneTerrainRecipe({
@@ -1399,12 +1399,6 @@ export const initMapEditor = (refs: MapEditorRefs, deps: MapEditorDeps): MapEdit
     stepId: MapEditorStepId,
     sample: PreviewRenderableSample
   ): void => {
-    if (MAP_EDITOR_LANDFORM_FAST_STEPS.has(stepId)) {
-      MAP_EDITOR_LANDFORM_FAST_STEPS.forEach((landformStep) => {
-        cachePreviewSample(cacheKey, landformStep, sample);
-      });
-      return;
-    }
     cachePreviewSample(cacheKey, stepId, sample);
   };
 
@@ -1463,7 +1457,7 @@ export const initMapEditor = (refs: MapEditorRefs, deps: MapEditorDeps): MapEdit
       return false;
     }
     cacheEquivalentPreviewSample(cacheKey, stepId, sample);
-    if (activeStep === stepId || (MAP_EDITOR_LANDFORM_FAST_STEPS.has(activeStep) && MAP_EDITOR_LANDFORM_FAST_STEPS.has(stepId))) {
+    if (activeStep === stepId) {
       preview.setTerrain(applyTerrainRenderDebugOptions(sample, previewRenderDebugState, false), { recenter });
       hidePreviewOverlay();
       syncCurrentScenarioLabel();
