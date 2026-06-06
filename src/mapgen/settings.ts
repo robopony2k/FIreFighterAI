@@ -70,6 +70,7 @@ export type MapGenSettings = {
   erosionSlopeMaskMin: number;
   erosionSlopeMaskMax: number;
   skipCarving: boolean;
+  skipRoadNetworkRouting: boolean;
   riverBudget: number;
   settlementSpacing: number;
   settlementPreGrowthYears: number;
@@ -173,6 +174,7 @@ export const DEFAULT_MAP_GEN_SETTINGS: MapGenSettings = {
   erosionSlopeMaskMin: 0.005,
   erosionSlopeMaskMax: 0.05,
   skipCarving: false,
+  skipRoadNetworkRouting: false,
   riverBudget: 0.44,
   settlementSpacing: 0.62,
   settlementPreGrowthYears: 20,

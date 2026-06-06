@@ -177,7 +177,7 @@ Terrain
 - Terrain editor previews prioritize instant feedback for landform height, surface detail, and water controls using the same fast landmass core as `terrain:elevation`; Rivers and later final-quality stages are not started until their step is selected, then advance the current preview session instead of restarting earlier completed stages. Landform owns height controls such as Relief, Ruggedness, and Max height; Water exposes Land mass as the primary coastline coverage control and sea-level bias as an advanced calibration override.
 - Tile fuel profiles (baseFuel/ignition/burnRate/heatOutput/spreadBoost/heatTransferCap/heatRetention/windFactor per tile type); windFactor is retained as the config key but means windbreak strength, where 0 is open terrain and 1 is strong wind obstruction.
 - Vegetation regrowth (water influence, ash recovery, canopy growth, runtime tree suitability, block catch-up, forest recruit).
-- Community and road generation (town density, bridge allowance, settlement spacing, debug/internal road strictness, pre-growth years, guaranteed initial road connectivity, angle-aware intertown routing).
+- Community and road generation (town density, bridge allowance, settlement spacing, debug/internal road strictness, pre-growth years, guaranteed initial road connectivity, angle-aware intertown routing). The map editor may expose a temporary dev-only skip for expensive road routing so other terrain, hydrology, vegetation, or settlement features can be validated without waiting on intertown road A* attempts.
 
 Climate
 - Climate params (seasonLen, peakDay, tMid, tAmp, warmingPerYear, noiseAmp, heatwavesPerYear).

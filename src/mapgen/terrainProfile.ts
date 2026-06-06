@@ -27,6 +27,7 @@ export type TerrainAdvancedOverrides = {
   coastalShelfWidth?: number;
   seaLevelBias?: number;
   skipCarving?: boolean;
+  skipRoadNetworkRouting?: boolean;
   riverBudget?: number;
   settlementSpacing?: number;
   settlementPreGrowthYears?: number;
@@ -158,6 +159,7 @@ const DEFAULT_ADVANCED_OVERRIDES: Required<TerrainAdvancedOverrides> = {
   coastalShelfWidth: 0.48,
   seaLevelBias: 0.5,
   skipCarving: false,
+  skipRoadNetworkRouting: false,
   riverBudget: 0.42,
   settlementSpacing: 0.58,
   settlementPreGrowthYears: 20,
@@ -205,6 +207,7 @@ const ARCHETYPE_PRESETS: Record<
       coastalShelfWidth: ISLAND_ARCHETYPE_DEFINITIONS.MASSIF.coastalShelfWidth,
       seaLevelBias: 0.5,
       skipCarving: false,
+      skipRoadNetworkRouting: false,
       riverBudget: 0.44,
       settlementSpacing: 0.62,
       settlementPreGrowthYears: 20,
@@ -237,6 +240,7 @@ const ARCHETYPE_PRESETS: Record<
       coastalShelfWidth: ISLAND_ARCHETYPE_DEFINITIONS.LONG_SPINE.coastalShelfWidth,
       seaLevelBias: 0.5,
       skipCarving: false,
+      skipRoadNetworkRouting: false,
       riverBudget: 0.58,
       settlementSpacing: 0.6,
       settlementPreGrowthYears: 20,
@@ -269,6 +273,7 @@ const ARCHETYPE_PRESETS: Record<
       coastalShelfWidth: ISLAND_ARCHETYPE_DEFINITIONS.TWIN_BAY.coastalShelfWidth,
       seaLevelBias: 0.5,
       skipCarving: false,
+      skipRoadNetworkRouting: false,
       riverBudget: 0.52,
       settlementSpacing: 0.58,
       settlementPreGrowthYears: 20,
@@ -301,6 +306,7 @@ const ARCHETYPE_PRESETS: Record<
       coastalShelfWidth: ISLAND_ARCHETYPE_DEFINITIONS.SHELF.coastalShelfWidth,
       seaLevelBias: 0.5,
       skipCarving: false,
+      skipRoadNetworkRouting: false,
       riverBudget: 0.28,
       settlementSpacing: 0.56,
       settlementPreGrowthYears: 20,
@@ -333,6 +339,7 @@ const ARCHETYPE_PRESETS: Record<
       coastalShelfWidth: ISLAND_ARCHETYPE_DEFINITIONS.NONE.coastalShelfWidth,
       seaLevelBias: 0.5,
       skipCarving: false,
+      skipRoadNetworkRouting: false,
       riverBudget: 0.42,
       settlementSpacing: 0.58,
       settlementPreGrowthYears: 20,
@@ -430,6 +437,10 @@ export const cloneTerrainRecipe = (recipe?: Partial<TerrainRecipe>): TerrainReci
         sourceAdvanced.skipCarving,
         defaults.advancedOverrides?.skipCarving ?? DEFAULT_ADVANCED_OVERRIDES.skipCarving
       ),
+      skipRoadNetworkRouting: parseBooleanOverride(
+        sourceAdvanced.skipRoadNetworkRouting,
+        defaults.advancedOverrides?.skipRoadNetworkRouting ?? DEFAULT_ADVANCED_OVERRIDES.skipRoadNetworkRouting
+      ),
       riverBudget: clampOverride(
         sourceAdvanced.riverBudget,
         defaults.advancedOverrides?.riverBudget ?? DEFAULT_ADVANCED_OVERRIDES.riverBudget
@@ -496,6 +507,7 @@ export const terrainRecipeEqual = (a: TerrainRecipe, b: TerrainRecipe): boolean 
     Math.abs((aAdvanced.coastalShelfWidth ?? 0) - (bAdvanced.coastalShelfWidth ?? 0)) <= 1e-6 &&
     Math.abs((aAdvanced.seaLevelBias ?? 0) - (bAdvanced.seaLevelBias ?? 0)) <= 1e-6 &&
     Boolean(aAdvanced.skipCarving) === Boolean(bAdvanced.skipCarving) &&
+    Boolean(aAdvanced.skipRoadNetworkRouting) === Boolean(bAdvanced.skipRoadNetworkRouting) &&
     Math.abs((aAdvanced.riverBudget ?? 0) - (bAdvanced.riverBudget ?? 0)) <= 1e-6 &&
     Math.abs((aAdvanced.settlementSpacing ?? 0) - (bAdvanced.settlementSpacing ?? 0)) <= 1e-6 &&
     Math.abs((aAdvanced.settlementPreGrowthYears ?? 0) - (bAdvanced.settlementPreGrowthYears ?? 0)) <= 1e-6 &&
@@ -527,6 +539,7 @@ const resolveAdvancedOverrides = (recipe: TerrainRecipe): Required<TerrainAdvanc
     coastalShelfWidth: clampOverride(advanced.coastalShelfWidth, preset.coastalShelfWidth),
     seaLevelBias: clampOverride(advanced.seaLevelBias, preset.seaLevelBias),
     skipCarving: parseBooleanOverride(advanced.skipCarving, preset.skipCarving),
+    skipRoadNetworkRouting: parseBooleanOverride(advanced.skipRoadNetworkRouting, preset.skipRoadNetworkRouting),
     riverBudget: clampOverride(advanced.riverBudget, preset.riverBudget),
     settlementSpacing: clampOverride(advanced.settlementSpacing, preset.settlementSpacing),
     settlementPreGrowthYears: clampIntegerOverride(advanced.settlementPreGrowthYears, preset.settlementPreGrowthYears, 0, 40),
@@ -670,6 +683,7 @@ export const compileTerrainRecipe = (recipeInput: TerrainRecipe): ResolvedTerrai
     erosionSlopeMaskMin: mix(0.007, 0.0025, ruggedness),
     erosionSlopeMaskMax: mix(0.026, 0.076, clamp01(ruggedness * 0.65 + relief * 0.35)),
     skipCarving: advanced.skipCarving,
+    skipRoadNetworkRouting: advanced.skipRoadNetworkRouting,
     riverBudget,
     settlementSpacing: advanced.settlementSpacing,
     settlementPreGrowthYears: advanced.settlementPreGrowthYears,
@@ -815,6 +829,7 @@ const inferRecipeFromSettings = (settingsInput: Partial<MapGenSettings>, mapSize
       coastalShelfWidth: clamp01(settings.coastalShelfWidth ?? DEFAULT_ADVANCED_OVERRIDES.coastalShelfWidth),
       seaLevelBias: clamp01(settings.seaLevelBias ?? DEFAULT_ADVANCED_OVERRIDES.seaLevelBias),
       skipCarving: Boolean(settings.skipCarving ?? DEFAULT_ADVANCED_OVERRIDES.skipCarving),
+      skipRoadNetworkRouting: Boolean(settings.skipRoadNetworkRouting ?? DEFAULT_ADVANCED_OVERRIDES.skipRoadNetworkRouting),
       riverBudget: clamp01(settings.riverBudget ?? DEFAULT_ADVANCED_OVERRIDES.riverBudget),
       settlementSpacing: clamp01(settings.settlementSpacing ?? DEFAULT_ADVANCED_OVERRIDES.settlementSpacing),
       settlementPreGrowthYears: clampIntegerOverride(

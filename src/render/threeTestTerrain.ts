@@ -305,6 +305,10 @@ const WATER_ALPHA_MIN_RATIO = 0.1;
 const OCEAN_RATIO_MIN = 0.1;
 const RIVER_RATIO_MIN = 0.2;
 const RIVER_RENDER_SUPPORT_RATIO_MIN = 0.04;
+const LAKE_TRACE_SEED_MIN_RATIO = 0.001;
+const LAKE_TRACE_WATER_SUPPORT_MIN_RATIO = 0.02;
+const LAKE_TRACE_TERRAIN_MARGIN = 0.0006;
+const LAKE_TRACE_FULL_DEPTH = 0.006;
 const OCEAN_SAMPLE_SUPPORT_FLOOR = 0.12;
 const EDGE_WATER_SAMPLE_RATIO = 0.2;
 const INTERIOR_WATER_SAMPLE_RATIO = 0.5;
@@ -1190,6 +1194,99 @@ const buildSampleMaskCoverage = (
   return sampled;
 };
 
+const traceSampledLakeSurfaceCoverage = (
+  sampleHeights: Float32Array,
+  waterRatios: WaterSampleRatios,
+  sampledLakeCoverage: Float32Array | undefined,
+  sampledLakeSurface: Float32Array | undefined,
+  sampleCoastClass: Uint8Array | undefined,
+  sampleCols: number,
+  sampleRows: number
+): { coverage: Float32Array | undefined; surface: Float32Array | undefined } => {
+  const total = sampleCols * sampleRows;
+  if (!sampledLakeCoverage || !sampledLakeSurface || sampledLakeCoverage.length !== total || sampledLakeSurface.length !== total) {
+    return { coverage: sampledLakeCoverage, surface: sampledLakeSurface };
+  }
+  const coverage = new Float32Array(sampledLakeCoverage);
+  const surface = new Float32Array(total).fill(Number.NaN);
+  const visited = new Uint8Array(total);
+  const queue = new Int32Array(total);
+  let head = 0;
+  let tail = 0;
+
+  for (let i = 0; i < total; i += 1) {
+    const level = sampledLakeSurface[i];
+    if ((sampledLakeCoverage[i] ?? 0) < LAKE_TRACE_SEED_MIN_RATIO || !Number.isFinite(level)) {
+      continue;
+    }
+    surface[i] = clamp(level as number, 0, 1);
+    visited[i] = 1;
+    queue[tail] = i;
+    tail += 1;
+  }
+
+  const canTraceInto = (idx: number, level: number): boolean => {
+    if (idx < 0 || idx >= total || (sampleCoastClass?.[idx] ?? COAST_CLASS_NONE) === COAST_CLASS_SHELF_WATER) {
+      return false;
+    }
+    const ocean = clamp(waterRatios.ocean[idx] ?? 0, 0, 1);
+    if (ocean >= OCEAN_RATIO_MIN) {
+      return false;
+    }
+    const river = clamp(waterRatios.river[idx] ?? 0, 0, 1);
+    if (river >= RIVER_RATIO_MIN * 0.5) {
+      return false;
+    }
+    const terrain = sampleHeights[idx] ?? level;
+    const depth = level - terrain;
+    if (depth <= LAKE_TRACE_TERRAIN_MARGIN) {
+      return false;
+    }
+    const water = clamp(waterRatios.water[idx] ?? 0, 0, 1);
+    return water >= LAKE_TRACE_WATER_SUPPORT_MIN_RATIO || depth >= LAKE_TRACE_FULL_DEPTH;
+  };
+
+  while (head < tail) {
+    const idx = queue[head];
+    head += 1;
+    const level = surface[idx];
+    if (!Number.isFinite(level)) {
+      continue;
+    }
+    const lakeLevel = level as number;
+    const x = idx % sampleCols;
+    const y = Math.floor(idx / sampleCols);
+    const neighbors = [
+      { x: x - 1, y },
+      { x: x + 1, y },
+      { x, y: y - 1 },
+      { x, y: y + 1 }
+    ];
+    for (const neighbor of neighbors) {
+      if (neighbor.x < 0 || neighbor.y < 0 || neighbor.x >= sampleCols || neighbor.y >= sampleRows) {
+        continue;
+      }
+      const nIdx = neighbor.y * sampleCols + neighbor.x;
+      if (visited[nIdx] > 0 || !canTraceInto(nIdx, lakeLevel)) {
+        continue;
+      }
+      const terrain = sampleHeights[nIdx] ?? lakeLevel;
+      const depth = lakeLevel - terrain;
+      const water = clamp(waterRatios.water[nIdx] ?? 0, 0, 1);
+      const tracedCoverage = water >= LAKE_TRACE_WATER_SUPPORT_MIN_RATIO
+        ? 1
+        : clamp((depth - LAKE_TRACE_TERRAIN_MARGIN) / Math.max(0.0001, LAKE_TRACE_FULL_DEPTH), 0, 1);
+      coverage[nIdx] = Math.max(coverage[nIdx] ?? 0, tracedCoverage);
+      surface[nIdx] = lakeLevel;
+      visited[nIdx] = 1;
+      queue[tail] = nIdx;
+      tail += 1;
+    }
+  }
+
+  return { coverage, surface };
+};
+
 export type SampledCoastData = {
   oceanCoverage?: Float32Array;
   seaLevel?: Float32Array;
@@ -1371,11 +1468,6 @@ const buildInlandWaterMapTexture = (
   return createDataTexture(data, sampleCols, sampleRows, THREE.LinearFilter, THREE.LinearFilter);
 };
 
-const strengthenLakeRenderCoverage = (coverage: number): number => {
-  const lake = clamp(coverage, 0, 1);
-  return lake >= WATER_ALPHA_MIN_RATIO ? clamp(0.58 + lake * 0.42, 0, 1) : lake;
-};
-
 const buildWaterSupportMask = (
   waterRatios: WaterSampleRatios,
   oceanSupportMask: Uint8Array,
@@ -1408,7 +1500,7 @@ const buildStandingWaterRenderData = (
   for (let i = 0; i < total; i += 1) {
     const oceanWater = clamp(oceanRatios.water[i] ?? 0, 0, 1);
     const oceanRatio = clamp(oceanRatios.ocean[i] ?? 0, 0, 1);
-    const lakeRatio = strengthenLakeRenderCoverage(sampledLakeCoverage?.[i] ?? 0);
+    const lakeRatio = clamp(sampledLakeCoverage?.[i] ?? 0, 0, 1);
     lakeCoverage[i] = lakeRatio;
     water[i] = Math.max(oceanWater, lakeRatio);
     ocean[i] = oceanRatio;
@@ -2754,7 +2846,7 @@ export const prepareTerrainRenderSurface = (
     riverMask,
     "max"
   );
-  const sampledLakeSurface = buildSampleOptionalFloatMap(
+  const rawSampledLakeSurface = buildSampleOptionalFloatMap(
     sample,
     sample.lakeSurface,
     sampleCols,
@@ -2763,13 +2855,24 @@ export const prepareTerrainRenderSurface = (
     lakeMask,
     "mean"
   );
-  const sampledLakeCoverage = buildSampleMaskCoverage(
+  const rawSampledLakeCoverage = buildSampleMaskCoverage(
     sample,
     lakeMask ?? undefined,
     sampleCols,
     sampleRows,
     step
   );
+  const tracedLake = traceSampledLakeSurfaceCoverage(
+    finalSampleHeights,
+    waterRatios,
+    rawSampledLakeCoverage,
+    rawSampledLakeSurface,
+    sampleCoastClass,
+    sampleCols,
+    sampleRows
+  );
+  const sampledLakeSurface = tracedLake.surface;
+  const sampledLakeCoverage = tracedLake.coverage;
   const sampledErosionWear = buildSampleOptionalFloatMap(
     sample,
     sample.erosionWear,

@@ -20,9 +20,9 @@ export type TerrainSliderKey =
 
 export type TerrainSelectKey = "archetype";
 
-export type TerrainAdvancedNumericKey = Exclude<keyof TerrainAdvancedOverrides, "skipCarving">;
+export type TerrainAdvancedNumericKey = Exclude<keyof TerrainAdvancedOverrides, "skipCarving" | "skipRoadNetworkRouting">;
 
-export type TerrainToggleKey = Extract<keyof TerrainAdvancedOverrides, "skipCarving">;
+export type TerrainToggleKey = Extract<keyof TerrainAdvancedOverrides, "skipCarving" | "skipRoadNetworkRouting">;
 
 export type TerrainControlField =
   | {
@@ -349,6 +349,12 @@ export const MAP_EDITOR_TERRAIN_GROUPS = {
           "Pre-growth years",
           "How many yearly settlement-growth steps map generation simulates before the campaign begins.",
           { min: 0, max: 40, step: 1, format: "int" }
+        ),
+        checkboxField(
+          "skipRoadNetworkRouting",
+          "skipRoadNetworkRouting",
+          "Skip road routing",
+          "Bypass expensive settlement road route attempts for temporary mapgen debugging."
         ),
         sliderField("advanced", "roadStrictness", "roadStrictness", "Road strictness", "How slope-limited and conservative road routing remains.")
       ]

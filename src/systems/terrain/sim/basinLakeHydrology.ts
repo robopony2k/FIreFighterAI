@@ -4,6 +4,7 @@ import { clamp } from "../../../core/utils.js";
 import type { MapGenSettings } from "../../../mapgen/settings.js";
 import { buildOceanDistanceField, buildStaticHydrologyFields } from "./staticHydrologyFields.js";
 import { buildLakeOverflowRiverPaths } from "./lakeOverflowRiverRouting.js";
+import { buildLakeSpillContour } from "./lakeSpillContour.js";
 import { solveDepressionBasins, type DepressionBasin } from "./depressionBasinSolver.js";
 import type {
   StaticHydrologyLake,
@@ -93,14 +94,14 @@ const buildLakeShoreDistances = (tiles: readonly number[], cols: number, rows: n
 };
 
 const collectInflowRiverTiles = (
-  basin: DepressionBasin,
+  tiles: readonly number[],
   cols: number,
   rows: number,
   riverMask: Uint8Array
 ): number[] => {
   const inflow = new Set<number>();
-  const tileSet = new Set<number>(basin.tiles);
-  for (const idx of basin.tiles) {
+  const tileSet = new Set<number>(tiles);
+  for (const idx of tiles) {
     if (riverMask[idx] > 0) {
       inflow.add(idx);
     }
@@ -123,15 +124,16 @@ const collectInflowRiverTiles = (
 
 const candidateRejectReason = (
   basin: DepressionBasin,
+  footprintTiles: readonly number[],
   state: WorldState,
   lakeMask: Uint16Array,
   oceanDistance: Uint16Array,
   settings: MapGenSettings
 ): StaticHydrologyRejectReason | null => {
-  if (basin.area < settings.minLakeAreaTiles) {
+  if (basin.area < settings.minLakeAreaTiles || footprintTiles.length < settings.minLakeAreaTiles) {
     return "area-small";
   }
-  if (basin.area > settings.maxLakeAreaTiles) {
+  if (footprintTiles.length > settings.maxLakeAreaTiles) {
     return "area-large";
   }
   if (basin.maxDepth < settings.minLakeDepth) {
@@ -140,7 +142,7 @@ const candidateRejectReason = (
   if (basin.spillElevation < settings.lakeElevationMin || basin.spillElevation > settings.lakeElevationMax) {
     return "elevation-range";
   }
-  for (const idx of basin.tiles) {
+  for (const idx of footprintTiles) {
     if (lakeMask[idx] > 0) {
       return "overlap";
     }
@@ -255,15 +257,23 @@ const stampAcceptedLake = (
 ): void => {
   const { cols, rows } = state.grid;
   const shoreDistances = buildLakeShoreDistances(lake.tiles, cols, rows);
+  const coreTiles = new Set<number>(lake.basin.tiles);
   for (const idx of lake.tiles) {
     lakeMask[idx] = lake.id;
     lakeSurface[idx] = lake.surfaceLevel;
     state.tileLakeMask[idx] = lake.id;
     state.tileLakeSurface[idx] = lake.surfaceLevel;
     const shoreDistance = shoreDistances.get(idx) ?? 0;
+    const currentElevation = elevationMap[idx] ?? lake.surfaceLevel;
+    const isCoreTile = coreTiles.has(idx);
     const depthT = clamp(shoreDistance / 4, 0, 1);
-    const bedDepth = settings.minLakeDepth * 0.75 + (lake.maxDepth - settings.minLakeDepth * 0.35) * depthT;
-    const bedElevation = clamp(Math.min(elevationMap[idx] ?? lake.surfaceLevel, lake.surfaceLevel - bedDepth), 0, 1);
+    const coreBedDepth = settings.minLakeDepth * 0.75 + (lake.maxDepth - settings.minLakeDepth * 0.35) * depthT;
+    const shallowDepth = Math.max(
+      0.0015,
+      Math.min(settings.minLakeDepth * 0.45, Math.max(0, lake.surfaceLevel - currentElevation) + settings.minLakeDepth * 0.15)
+    );
+    const bedDepth = isCoreTile ? coreBedDepth : shallowDepth;
+    const bedElevation = clamp(Math.min(currentElevation, lake.surfaceLevel - bedDepth), 0, 1);
     elevationMap[idx] = bedElevation;
     setWaterTile(state, idx, bedElevation);
   }
@@ -520,7 +530,19 @@ export const buildBasinLakeHydrology = (input: {
       if (lakes.length >= settings.maxLakeCount) {
         break;
       }
-      const reason = candidateRejectReason(candidate.basin, state, lakeMask, oceanDistance, settings);
+      const basin = candidate.basin;
+      const contourTiles = buildLakeSpillContour({
+        cols,
+        rows,
+        basin,
+        elevationMap,
+        filledElevation: solve.filledElevation,
+        oceanMask,
+        exclude: basin.outletTargetIndex >= 0 ? [basin.outletTargetIndex] : undefined,
+        spillTolerance: Math.max(0.0025, settings.minLakeDepth * 0.3),
+        surfaceMargin: 0.0001
+      });
+      const reason = candidateRejectReason(basin, contourTiles, state, lakeMask, oceanDistance, settings);
       if (reason) {
         incrementReject(rejectedLakeCandidates, reason);
         continue;
@@ -529,12 +551,11 @@ export const buildBasinLakeHydrology = (input: {
         incrementReject(rejectedLakeCandidates, "weak-basin");
         continue;
       }
-      const basin = candidate.basin;
       const lakeId = lakes.length + 1;
-      const inflowRiverTiles = collectInflowRiverTiles(basin, cols, rows, riverMask);
+      const inflowRiverTiles = collectInflowRiverTiles(contourTiles, cols, rows, riverMask);
       const lake: AcceptedBasinLake = {
         id: lakeId,
-        tiles: basin.tiles.slice().sort((a, b) => a - b),
+        tiles: contourTiles,
         surfaceLevel: basin.spillElevation,
         outletIndex: basin.outletIndex,
         outletTargetIndex: basin.outletTargetIndex,
@@ -545,7 +566,7 @@ export const buildBasinLakeHydrology = (input: {
         runoffScore: basin.runoffScore,
         maxDepth: basin.maxDepth,
         spillElevation: basin.spillElevation,
-        basinAreaTiles: basin.area,
+        basinAreaTiles: contourTiles.length,
         catchmentRunoff: basin.catchmentRunoff,
         overflowTargetIndex: basin.outletTargetIndex,
         basin

@@ -490,6 +490,8 @@ export const createOceanSurfaceMaterial = (uniforms: OceanUniforms): THREE.Shade
         float oceanMotion = 1.0 - inlandWater;
         vec4 shoreTransition = texture2D(u_shoreTransitionMap, vUv);
         float domainWater = max(vCoverage, domain.b);
+        float lakeFill = smoothstep(0.08, 0.32, inlandWater);
+        float lakeCoverage = lakeFill * max(mask, inlandWater);
         float shoreTerrainHeight = domain.g * 10.0;
         float transitionWaterSide = shoreTransition.r;
         float transitionLandSide = shoreTransition.g;
@@ -556,6 +558,7 @@ export const createOceanSurfaceMaterial = (uniforms: OceanUniforms): THREE.Shade
           coastalMask,
           smoothstep(u_shoreParamsA.x, u_shoreParamsA.z, shorelineSdf)
         );
+        renderShoreClip = mix(renderShoreClip, 1.0, lakeFill);
         float effectiveCoverage = max(
           max(domainWater, seawardCoastMask * 0.24),
           domainWater * swashCoverage
@@ -566,17 +569,19 @@ export const createOceanSurfaceMaterial = (uniforms: OceanUniforms): THREE.Shade
         );
         float swashSheet = landwardCoastMask * (0.04 + 0.12 * shoreLapping + 0.08 * breakerCrest) * u_shoreTuning.x * oceanMotion;
         float shorelineCover = clamp((0.12 + shorelineAdvance * 1.8) * shoreMotionMask * oceanMotion, 0.0, 1.0);
-        float coverage = max(max(effectiveCoverage, swashSheet * 1.02), shorelineCover);
+        float coverage = max(max(max(effectiveCoverage, swashSheet * 1.02), shorelineCover), lakeCoverage);
         if (
-          (support < 0.5 && landwardCoastMask < 0.02 && swashSheet < 0.02 && vSdf <= 0.0) ||
-          renderShoreClip < 0.004 ||
-          ((swashWeight > 1e-3 || landwardCoastMask > 1e-3) && coverage < max(0.012, u_shoreParamsB.z * 0.08)) ||
+          (support < 0.5 && lakeFill < 0.02 && landwardCoastMask < 0.02 && swashSheet < 0.02 && vSdf <= 0.0) ||
+          (renderShoreClip < 0.004 && lakeFill < 0.02) ||
+          ((swashWeight > 1e-3 || landwardCoastMask > 1e-3) && lakeFill < 0.02 && coverage < max(0.012, u_shoreParamsB.z * 0.08)) ||
           coverage < 0.01
         ) {
           discard;
         }
 
         float shoreFade = smoothstep(-u_shoreParamsB.y * 0.4, u_shoreParamsA.z, shoreRenderSdf);
+        shoreFade = mix(shoreFade, 1.0, lakeFill);
+        float lakeAlpha = u_opacity * lakeCoverage;
         float shorelineFilm = shorelineCover * mix(0.08, 0.18, min(1.0, shoreImpact + breakerCrest * 0.22));
         float alpha =
           u_opacity *
@@ -593,6 +598,7 @@ export const createOceanSurfaceMaterial = (uniforms: OceanUniforms): THREE.Shade
           );
         alpha *= max(max(coverageStrength, swashSheet * 1.12), shorelineCover);
         alpha *= 1.0 - seawardCoastMask * 0.08;
+        alpha = max(alpha, lakeAlpha);
         if (alpha < 0.01) {
           discard;
         }
