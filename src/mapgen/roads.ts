@@ -5,7 +5,25 @@ import { getTerrainHeightScale } from "../core/terrainScale.js";
 import { applyFuel } from "../core/tiles.js";
 import { clearVegetationState } from "../core/vegetation.js";
 import { computeLocalRenderedSlopeAngleDeg, computeRenderedSlopeAngleDeg } from "../shared/terrainSlope.js";
+import { planRoadPathBidirectionalStreamer } from "../systems/roads/sim/roadBidirectionalStreamer.js";
+import { planRoadPathDijkstra } from "../systems/roads/sim/roadDijkstraPlanner.js";
+import {
+  cloneRoadPathPlannerNodeState,
+  createInitialRoadPathPlannerNodeState,
+  getRoadStreamerJoinRadiusForMode
+} from "../systems/roads/sim/roadTerrainCost.js";
 import { scoreRoadPlannerStep, type RoadPathMode } from "../systems/roads/sim/roadPathPlanner.js";
+import type {
+  RoadPathPlannerDirection,
+  RoadPathPlannerFront,
+  RoadPathPlannerFailureReason,
+  RoadPathPlannerJoinResult,
+  RoadPathPlannerNodeState,
+  RoadPathPlannerStepResult,
+  RoadStreamerDestinationSeed
+} from "../systems/roads/types/roadPathPlannerTypes.js";
+import type { RoadPathDebugHooks } from "../systems/roads/types/roadPathDebugTypes.js";
+import { yieldToNextFrame } from "./pipeline/yieldController.js";
 
 export const ROAD_GRADE_LIMIT_START = 0.09;
 export const ROAD_GRADE_LIMIT_RELAX_STEP = 0.015;
@@ -47,6 +65,15 @@ export const ROAD_FALLBACK_ANGLE_DEG = 38;
 export const ROAD_ANGLE_PENALTY_WEIGHT = 0.34;
 export const ROAD_STRAIGHT_CLIMB_PENALTY_WEIGHT = 0.42;
 export const ROAD_CONTOUR_TURN_RELIEF_WEIGHT = 0.72;
+const ROAD_DEBUG_PROGRESS_NODE_STRIDE = 2048;
+const ROAD_DEBUG_PROGRESS_MIN_MS = 250;
+
+let roadPathDebugHooks: RoadPathDebugHooks | null = null;
+let nextRoadPathDebugAttemptId = 1;
+
+export const setRoadPathDebugHooks = (hooks: RoadPathDebugHooks | null): void => {
+  roadPathDebugHooks = hooks;
+};
 
 type RoadBridgePolicy = "never" | "allow";
 
@@ -92,6 +119,7 @@ export type RoadPathOptions = {
   allowMountainPassFallback?: boolean;
   pathMode?: RoadPathMode;
   maxSearchNodeVisits?: number;
+  useBidirectionalStreamer?: boolean;
 };
 
 type RoadPathOptionsResolved = {
@@ -128,6 +156,7 @@ type RoadPathOptionsResolved = {
   allowMountainPassFallback: boolean;
   pathMode: RoadPathMode;
   maxSearchNodeVisits: number;
+  useBidirectionalStreamer: boolean;
 };
 
 type RoadCarveOptions = RoadPathOptions & {
@@ -169,6 +198,11 @@ type RoadPathResult = {
 type RiverDistanceCache = {
   maskRef: Uint8Array;
   distances: Int16Array;
+};
+
+type RoadPathFailureCache = {
+  revision: number;
+  failures: Set<string>;
 };
 
 export type RoadGenerationStats = {
@@ -312,6 +346,8 @@ const isPointInRoadBounds = (point: Point, bounds: RoadTileBounds | null): boole
   (point.x >= bounds.minX && point.x <= bounds.maxX && point.y >= bounds.minY && point.y <= bounds.maxY);
 
 const riverDistanceCache = new WeakMap<WorldState, RiverDistanceCache>();
+const roadNetworkRevisionByState = new WeakMap<WorldState, number>();
+const roadPathFailureCacheByState = new WeakMap<WorldState, RoadPathFailureCache>();
 
 const roadGenerationStats: RoadGenerationStats = {
   pathsAttempted: 0,
@@ -386,9 +422,75 @@ const resolveRoadPathOptions = (options: RoadPathOptions = {}): RoadPathOptionsR
     contourTurnReliefWeight: Math.max(0, options.contourTurnReliefWeight ?? ROAD_CONTOUR_TURN_RELIEF_WEIGHT),
     allowMountainPassFallback: options.allowMountainPassFallback ?? true,
     pathMode: options.pathMode ?? "normal",
-    maxSearchNodeVisits: Math.max(0, Math.floor(options.maxSearchNodeVisits ?? 0))
+    maxSearchNodeVisits: Math.max(0, Math.floor(options.maxSearchNodeVisits ?? 0)),
+    useBidirectionalStreamer: options.useBidirectionalStreamer ?? false
   };
 };
+
+const getRoadNetworkRevision = (state: WorldState): number => roadNetworkRevisionByState.get(state) ?? 0;
+
+const bumpRoadNetworkRevision = (state: WorldState): void => {
+  const nextRevision = getRoadNetworkRevision(state) + 1;
+  roadNetworkRevisionByState.set(state, nextRevision);
+  const cache = roadPathFailureCacheByState.get(state);
+  if (cache) {
+    cache.revision = nextRevision;
+    cache.failures.clear();
+  }
+};
+
+const getRoadPathFailureCache = (state: WorldState): RoadPathFailureCache => {
+  const revision = getRoadNetworkRevision(state);
+  const existing = roadPathFailureCacheByState.get(state);
+  if (existing && existing.revision === revision) {
+    return existing;
+  }
+  const cache = { revision, failures: new Set<string>() };
+  roadPathFailureCacheByState.set(state, cache);
+  return cache;
+};
+
+const roadBoundsKey = (bounds: RoadTileBounds | null): string =>
+  bounds ? `${bounds.minX},${bounds.maxX},${bounds.minY},${bounds.maxY}` : "-";
+
+const buildRoadPathFailureKey = (start: Point, end: Point, options: RoadPathOptionsResolved): string =>
+  [
+    start.x,
+    start.y,
+    end.x,
+    end.y,
+    options.bridgePolicy,
+    options.pathMode,
+    Number(options.allowMountainPassFallback),
+    roadBoundsKey(options.searchBounds),
+    options.maxSearchNodeVisits,
+    options.gradeLimitStart,
+    options.gradeLimitMax,
+    options.crossfallLimitStart,
+    options.crossfallLimitMax,
+    options.gradeChangeLimitStart,
+    options.gradeChangeLimitMax,
+    options.avoidAngleDeg,
+    options.fallbackAngleDeg
+  ].join(":");
+
+const buildEmptyRoadPathResult = (): RoadPathResult => ({
+  path: [],
+  bridgeTileIndices: [],
+  maxGrade: 0,
+  maxCrossfall: 0,
+  maxGradeChange: 0,
+  maxAngleDeg: 0,
+  meanAngleDeg: 0,
+  highAngleStepCount: 0,
+  minRiverClearance: Number.POSITIVE_INFINITY,
+  bridgeSegments: 0,
+  mountainPassFallback: false,
+  switchbackTurnCount: 0,
+  switchbackRoute: false,
+  hairpinGradeDiscountCount: 0,
+  longStraightSteepSegmentCount: 0
+});
 
 const buildSwitchbackFallbackOptions = (options: RoadPathOptionsResolved): RoadPathOptionsResolved => ({
   ...options,
@@ -1522,6 +1624,735 @@ const buildPathResult = (
   };
 };
 
+const getRoadStreamerDirection = (
+  fromIdx: number,
+  toIdx: number,
+  cols: number
+): RoadPathPlannerDirection | null => {
+  const fromX = fromIdx % cols;
+  const fromY = Math.floor(fromIdx / cols);
+  const toX = toIdx % cols;
+  const toY = Math.floor(toIdx / cols);
+  const dx = Math.sign(toX - fromX);
+  const dy = Math.sign(toY - fromY);
+  if (dx === 0 && dy === 0) {
+    return null;
+  }
+  return { x: dx, y: dy, cost: Math.hypot(dx, dy) };
+};
+
+const buildRoadStreamerJoinPath = (fromIdx: number, toIdx: number, cols: number): number[] => {
+  const path = [fromIdx];
+  let x = fromIdx % cols;
+  let y = Math.floor(fromIdx / cols);
+  const toX = toIdx % cols;
+  const toY = Math.floor(toIdx / cols);
+  let guard = Math.abs(toX - x) + Math.abs(toY - y) + 4;
+  while ((x !== toX || y !== toY) && guard > 0) {
+    x += Math.sign(toX - x);
+    y += Math.sign(toY - y);
+    path.push(y * cols + x);
+    guard -= 1;
+  }
+  return x === toX && y === toY ? path : [];
+};
+
+const collectPointRoadStreamerDestinationSeeds = (
+  state: WorldState,
+  end: Point,
+  endIdx: number,
+  options: RoadPathOptionsResolved,
+  allowBridge: boolean,
+  riverDistance: Int16Array,
+  searchBounds: RoadTileBounds | null
+): RoadStreamerDestinationSeed[] => {
+  const seeds: RoadStreamerDestinationSeed[] = [];
+  const seen = new Set<number>();
+  const pushSeed = (idx: number, priority: number): void => {
+    if (idx < 0 || idx >= state.grid.totalTiles || seen.has(idx)) {
+      return;
+    }
+    const point = toPoint(idx, state.grid.cols);
+    if (!isPointInRoadBounds(point, searchBounds)) {
+      return;
+    }
+    if (!canTraverseTileIndex(state, idx, true, allowBridge, options, riverDistance)) {
+      return;
+    }
+    seen.add(idx);
+    seeds.push({ index: idx, point, priority });
+  };
+  pushSeed(endIdx, 0);
+  if (!isRoadLikeIndex(state, endIdx)) {
+    return seeds;
+  }
+  const mask = state.tileRoadEdges[endIdx] ?? 0;
+  for (let i = 0; i < ROAD_EDGE_DIRS.length; i += 1) {
+    const dir = ROAD_EDGE_DIRS[i]!;
+    if ((mask & dir.bit) === 0) {
+      continue;
+    }
+    const nx = end.x + dir.dx;
+    const ny = end.y + dir.dy;
+    if (!inBounds(state.grid, nx, ny)) {
+      continue;
+    }
+    const nIdx = indexFor(state.grid, nx, ny);
+    if (isRoadLikeIndex(state, nIdx)) {
+      pushSeed(nIdx, 0.15);
+    }
+  }
+  const networkSeedRadius = options.pathMode === "mountainPass" ? 10 : options.pathMode === "switchback" ? 7 : 4;
+  for (let oy = -networkSeedRadius; oy <= networkSeedRadius; oy += 1) {
+    for (let ox = -networkSeedRadius; ox <= networkSeedRadius; ox += 1) {
+      const distance = Math.hypot(ox, oy);
+      if (distance <= 1 || distance > networkSeedRadius) {
+        continue;
+      }
+      const nx = end.x + ox;
+      const ny = end.y + oy;
+      if (!inBounds(state.grid, nx, ny)) {
+        continue;
+      }
+      const nIdx = indexFor(state.grid, nx, ny);
+      if (isRoadLikeIndex(state, nIdx)) {
+        pushSeed(nIdx, 0.2 + distance * 0.02);
+      }
+    }
+  }
+  return seeds;
+};
+
+const collectTargetRoadStreamerDestinationSeeds = (
+  state: WorldState,
+  start: Point,
+  isTarget: (x: number, y: number) => boolean,
+  options: RoadPathOptionsResolved,
+  allowBridge: boolean,
+  riverDistance: Int16Array,
+  searchBounds: RoadTileBounds | null
+): RoadStreamerDestinationSeed[] => {
+  const candidates: RoadStreamerDestinationSeed[] = [];
+  const minX = searchBounds?.minX ?? 0;
+  const maxX = searchBounds?.maxX ?? state.grid.cols - 1;
+  const minY = searchBounds?.minY ?? 0;
+  const maxY = searchBounds?.maxY ?? state.grid.rows - 1;
+  for (let y = minY; y <= maxY; y += 1) {
+    for (let x = minX; x <= maxX; x += 1) {
+      if (!isTarget(x, y)) {
+        continue;
+      }
+      const idx = indexFor(state.grid, x, y);
+      if (!canTraverseTileIndex(state, idx, true, allowBridge, options, riverDistance)) {
+        continue;
+      }
+      candidates.push({
+        index: idx,
+        point: { x, y },
+        priority: Math.hypot(start.x - x, start.y - y) * 0.001
+      });
+    }
+  }
+  candidates.sort((left, right) => {
+    const distLeft = Math.hypot(start.x - left.point.x, start.y - left.point.y);
+    const distRight = Math.hypot(start.x - right.point.x, start.y - right.point.y);
+    return distLeft - distRight || left.point.y - right.point.y || left.point.x - right.point.x;
+  });
+  return candidates.slice(0, 96);
+};
+
+const evaluateRoadStreamerStep = (
+  state: WorldState,
+  startIdx: number,
+  endpointIndices: Set<number>,
+  searchBounds: RoadTileBounds | null,
+  options: RoadPathOptionsResolved,
+  allowBridge: boolean,
+  gradeLimit: number,
+  crossfallLimit: number,
+  gradeChangeLimit: number,
+  riverDistance: Int16Array,
+  roadAngleCache: Float32Array,
+  front: RoadPathPlannerFront,
+  currentIdx: number,
+  nIdx: number,
+  dir: RoadPathPlannerDirection,
+  currentState: RoadPathPlannerNodeState
+): RoadPathPlannerStepResult | null => {
+  const cols = state.grid.cols;
+  const nx = nIdx % cols;
+  const ny = Math.floor(nIdx / cols);
+  if (
+    searchBounds &&
+    (nx < searchBounds.minX || nx > searchBounds.maxX || ny < searchBounds.minY || ny > searchBounds.maxY)
+  ) {
+    return null;
+  }
+  const cx = currentIdx % cols;
+  const cy = Math.floor(currentIdx / cols);
+  const isEndpoint = front === "origin" ? endpointIndices.has(nIdx) : nIdx === startIdx;
+  if (!canTraverseTileIndex(state, nIdx, isEndpoint, allowBridge, options, riverDistance)) {
+    return null;
+  }
+  if (dir.x !== 0 && dir.y !== 0) {
+    const idxA = indexFor(state.grid, cx + dir.x, cy);
+    const idxB = indexFor(state.grid, cx, cy + dir.y);
+    if (
+      !canTraverseTileIndex(state, idxA, false, allowBridge, options, riverDistance) &&
+      !canTraverseTileIndex(state, idxB, false, allowBridge, options, riverDistance)
+    ) {
+      return null;
+    }
+  }
+
+  const currentTile = state.tiles[currentIdx];
+  const nextTile = state.tiles[nIdx];
+  const currentIsWater = currentTile.type === "water" && state.tileRoadBridge[currentIdx] === 0;
+  const nextIsWater = nextTile.type === "water" && state.tileRoadBridge[nIdx] === 0;
+  let nextWaterUsed = currentState.waterTilesUsed;
+  let nextConsecutiveWater = 0;
+  if (nextIsWater) {
+    if (!allowBridge || state.tileRiverMask[nIdx] === 0) {
+      return null;
+    }
+    nextWaterUsed += 1;
+    if (nextWaterUsed > options.bridgeMaxWaterTilesPerPath) {
+      return null;
+    }
+    nextConsecutiveWater = currentState.consecutiveWater + 1;
+    if (nextConsecutiveWater > options.bridgeMaxConsecutiveWater) {
+      return null;
+    }
+  }
+
+  const elevationToGradeScale = getRoadGradeScale(state, options.heightScaleMultiplier);
+  let signedGrade = 0;
+  let grade = 0;
+  let crossfall = 0;
+  let gradeChange = 0;
+  let stepAngleDeg = 0;
+  const tileAngleDeg = computeRoadTileAngleDeg(state, nIdx, options.heightScaleMultiplier, roadAngleCache);
+  if (tileAngleDeg > options.avoidAngleDeg && !isRoadLikeIndex(state, nIdx) && !isEndpoint) {
+    return null;
+  }
+  const hasPreviousLandStep = currentState.stepDx !== 0 || currentState.stepDy !== 0;
+  if (!currentIsWater && !nextIsWater) {
+    signedGrade = computeStepSignedGrade(currentTile.elevation, nextTile.elevation, dir.cost, elevationToGradeScale);
+    grade = Math.abs(signedGrade);
+    if (grade > gradeLimit) {
+      return null;
+    }
+    stepAngleDeg = computeRoadStepAngleDeg(state, currentTile.elevation, nextTile.elevation, dir.cost, options.heightScaleMultiplier);
+    if (stepAngleDeg > options.avoidAngleDeg && !isRoadLikeIndex(state, nIdx) && !isEndpoint) {
+      return null;
+    }
+    crossfall = computeCrossfallAtStep(
+      state,
+      cx,
+      cy,
+      nx,
+      ny,
+      currentTile.elevation,
+      nextTile.elevation,
+      elevationToGradeScale
+    );
+    if (crossfall > crossfallLimit) {
+      return null;
+    }
+    if (hasPreviousLandStep) {
+      gradeChange = Math.abs(signedGrade - currentState.signedGrade);
+      if (gradeChange > gradeChangeLimit) {
+        return null;
+      }
+    }
+  }
+
+  let stepCost = dir.cost;
+  if (dir.x !== 0 && dir.y !== 0) {
+    stepCost += options.diagonalPenalty;
+  }
+  const nextState = cloneRoadPathPlannerNodeState(currentState);
+  nextState.waterTilesUsed = nextWaterUsed;
+  nextState.consecutiveWater = nextConsecutiveWater;
+  if (!currentIsWater && !nextIsWater) {
+    const plannerStepScore = scoreRoadPlannerStep({
+      mode: options.pathMode,
+      hasPreviousLandStep,
+      previousDx: currentState.stepDx,
+      previousDy: currentState.stepDy,
+      nextDx: dir.x,
+      nextDy: dir.y,
+      previousSignedGrade: currentState.signedGrade,
+      nextSignedGrade: signedGrade,
+      previousCrossfall: currentState.crossfall,
+      nextCrossfall: crossfall,
+      stepAngleDeg,
+      tileAngleDeg,
+      softAngleDeg: options.softAngleDeg,
+      avoidAngleDeg: options.avoidAngleDeg,
+      straightClimbPenaltyWeight: options.straightClimbPenaltyWeight,
+      contourTurnReliefWeight: options.contourTurnReliefWeight,
+      previousSteepRun: currentState.steepRun,
+      previousStepsSinceTurn: currentState.stepsSinceTurn,
+      previousTurnDirection: currentState.turnDirection,
+      previousStepsSinceTurnDirectionChange: currentState.stepsSinceTurnDirectionChange,
+      previousLateralLegLength: currentState.lateralLegLength,
+      previousStepsSinceHairpinDiscount: currentState.stepsSinceHairpinDiscount,
+      previousHairpinSteepStepRun: currentState.hairpinSteepStepRun,
+      previousCumulativeClimb: currentState.cumulativeClimb,
+      previousCumulativeDescent: currentState.cumulativeDescent,
+      localPlatformCrossfall: crossfall,
+      localPlatformAngleDeg: tileAngleDeg,
+      riverDistance: riverDistance[nIdx],
+      riverBlockDistance: options.riverBlockDistance
+    });
+    stepCost += grade * options.slopePenaltyWeight * plannerStepScore.gradePenaltyMultiplier;
+    stepCost += crossfall * options.crossfallPenaltyWeight;
+    stepCost += gradeChange * options.gradeChangePenaltyWeight;
+    stepCost += scoreRoadAnglePenalty(Math.max(stepAngleDeg, tileAngleDeg), options);
+    stepCost += plannerStepScore.costAdjustment;
+    if (hasPreviousLandStep && (currentState.stepDx !== dir.x || currentState.stepDy !== dir.y)) {
+      let turnPenalty = options.turnPenalty;
+      const previousSeverity = Math.max(Math.abs(currentState.signedGrade), currentState.crossfall);
+      const nextSeverity = Math.max(grade, crossfall);
+      if (nextSeverity < previousSeverity) {
+        const relief = Math.min(
+          0.9,
+          (previousSeverity - nextSeverity) * ROAD_SWITCHBACK_RELIEF_WEIGHT +
+            Math.max(0, stepAngleDeg - options.softAngleDeg) * 0.02 * options.contourTurnReliefWeight
+        );
+        turnPenalty *= 1 - relief;
+      }
+      stepCost += turnPenalty * plannerStepScore.turnPenaltyMultiplier;
+    }
+    nextState.stepDx = dir.x;
+    nextState.stepDy = dir.y;
+    nextState.signedGrade = signedGrade;
+    nextState.crossfall = crossfall;
+    nextState.steepRun = plannerStepScore.nextSteepRun;
+    nextState.stepsSinceTurn = plannerStepScore.nextStepsSinceTurn;
+    nextState.turnDirection = plannerStepScore.nextTurnDirection;
+    nextState.stepsSinceTurnDirectionChange = plannerStepScore.nextStepsSinceTurnDirectionChange;
+    nextState.lateralLegLength = plannerStepScore.nextLateralLegLength;
+    nextState.stepsSinceHairpinDiscount = plannerStepScore.nextStepsSinceHairpinDiscount;
+    nextState.hairpinSteepStepRun = plannerStepScore.nextHairpinSteepStepRun;
+    nextState.cumulativeClimb = plannerStepScore.nextCumulativeClimb;
+    nextState.cumulativeDescent = plannerStepScore.nextCumulativeDescent;
+    nextState.switchbackTurns += plannerStepScore.switchbackTurn ? 1 : 0;
+    nextState.hairpinGradeDiscounts += plannerStepScore.hairpinGradeDiscount ? 1 : 0;
+    nextState.longStraightSteepSegments += plannerStepScore.longStraightSteep ? 1 : 0;
+  } else {
+    nextState.stepDx = 0;
+    nextState.stepDy = 0;
+    nextState.signedGrade = 0;
+    nextState.crossfall = 0;
+    if (nextIsWater) {
+      stepCost += options.bridgeStepCost;
+    }
+  }
+  if (!nextIsWater && !isRoadLikeIndex(state, nIdx) && options.riverPenaltyDistance > 0) {
+    const riverDist = riverDistance[nIdx];
+    if (riverDist <= options.riverPenaltyDistance) {
+      const riverPenaltyRatio = (options.riverPenaltyDistance - riverDist + 1) / (options.riverPenaltyDistance + 1);
+      stepCost += riverPenaltyRatio * options.riverPenaltyWeight;
+    }
+  }
+  if (isRoadLikeIndex(state, nIdx)) {
+    stepCost *= ROAD_EXISTING_SEGMENT_COST_MULTIPLIER;
+  }
+  return { cost: Math.max(0.0001, stepCost), state: nextState };
+};
+
+const runBidirectionalStreamer = (
+  state: WorldState,
+  start: Point,
+  end: Point | null,
+  isTarget: ((x: number, y: number) => boolean) | null,
+  options: RoadPathOptionsResolved,
+  allowBridge: boolean,
+  gradeLimit: number,
+  crossfallLimit: number,
+  gradeChangeLimit: number,
+  asyncMode = false
+): RoadPathResult | null => {
+  const debug = roadPathDebugHooks;
+  debug?.checkCancelled?.();
+  const attemptId = nextRoadPathDebugAttemptId++;
+  const startedAt = typeof performance !== "undefined" ? performance.now() : Date.now();
+  const finish = (result: RoadPathResult | null, budgetAborted: boolean, visitedNodes: number): RoadPathResult | null => {
+    const endedAt = typeof performance !== "undefined" ? performance.now() : Date.now();
+    if (budgetAborted) {
+      roadGenerationStats.searchBudgetAbortCount += 1;
+    }
+    debug?.emit?.({
+      kind: "road:result",
+      attemptId,
+      found: !!result,
+      budgetAborted,
+      visitedNodes,
+      pathLength: result?.path.length ?? 0,
+      bridgeTileIndices: result?.bridgeTileIndices ? [...result.bridgeTileIndices] : undefined,
+      path: result?.path ? result.path.map((point) => ({ ...point })) : undefined,
+      elapsedMs: Math.max(0, endedAt - startedAt),
+      mode: options.pathMode,
+      allowBridge,
+      planner: "streamer",
+      joined: !!result
+    });
+    return result;
+  };
+  if (!inBounds(state.grid, start.x, start.y)) {
+    return finish(null, false, 0);
+  }
+  if (end && !inBounds(state.grid, end.x, end.y)) {
+    return finish(null, false, 0);
+  }
+  const searchBounds = options.searchBounds ? expandRoadTileBounds(state, options.searchBounds, 0) : null;
+  if (!isPointInRoadBounds(start, searchBounds) || (end && !isPointInRoadBounds(end, searchBounds))) {
+    return finish(null, false, 0);
+  }
+  const total = state.grid.totalTiles;
+  const startIdx = indexFor(state.grid, start.x, start.y);
+  const endIdx = end ? indexFor(state.grid, end.x, end.y) : -1;
+  const riverDistance = getRiverDistanceField(state);
+  const roadAngleCache = new Float32Array(total);
+  roadAngleCache.fill(-1);
+  if (!canTraverseTileIndex(state, startIdx, true, allowBridge, options, riverDistance)) {
+    return finish(null, false, 0);
+  }
+  const destinationSeeds = end
+    ? collectPointRoadStreamerDestinationSeeds(state, end, endIdx, options, allowBridge, riverDistance, searchBounds)
+    : collectTargetRoadStreamerDestinationSeeds(state, start, isTarget ?? (() => false), options, allowBridge, riverDistance, searchBounds);
+  if (destinationSeeds.length === 0) {
+    return finish(null, false, 0);
+  }
+  const endpointIndices = new Set(destinationSeeds.map((seed) => seed.index));
+  const joinRadius = getRoadStreamerJoinRadiusForMode(options.pathMode);
+  debug?.emit?.({
+    kind: "road:attempt",
+    attemptId,
+    attemptKind: end ? "point" : "target",
+    planner: "streamer",
+    start: { ...start },
+    end: end ? { ...end } : undefined,
+    destinationSeedCount: destinationSeeds.length,
+    joinRadius,
+    mode: options.pathMode,
+    allowBridge,
+    gradeLimit,
+    crossfallLimit,
+    gradeChangeLimit,
+    maxSearchNodeVisits: options.maxSearchNodeVisits
+  });
+  if (endIdx >= 0 && startIdx === endIdx) {
+    return finish(buildPathResult(state, [startIdx], riverDistance, options), false, 0);
+  }
+
+  let lastDebugProgressMs = startedAt;
+  void asyncMode;
+  const plannerResult = planRoadPathBidirectionalStreamer({
+    cols: state.grid.cols,
+    rows: state.grid.rows,
+    totalTiles: total,
+    startIndex: startIdx,
+    destinationSeeds,
+    directions: ROAD_DIRS,
+    joinRadius,
+    maxSearchNodeVisits: options.maxSearchNodeVisits,
+    initialState: createInitialRoadPathPlannerNodeState(),
+    checkCancelled: () => debug?.checkCancelled?.(),
+    onProgress: (progress) => {
+      if (!debug || progress.visitedNodes % ROAD_DEBUG_PROGRESS_NODE_STRIDE !== 0) {
+        return;
+      }
+      const now = typeof performance !== "undefined" ? performance.now() : Date.now();
+      if (now - lastDebugProgressMs < ROAD_DEBUG_PROGRESS_MIN_MS) {
+        return;
+      }
+      lastDebugProgressMs = now;
+      const current = toPoint(progress.currentIndex, state.grid.cols);
+      debug.emit?.({
+        kind: "road:progress",
+        attemptId,
+        visitedNodes: progress.visitedNodes,
+        openNodes: progress.openNodes,
+        current,
+        elapsedMs: Math.max(0, now - startedAt),
+        planner: "streamer"
+      });
+    },
+    evaluateStep: (front, currentIdx, nextIdx, direction, currentState) =>
+      evaluateRoadStreamerStep(
+        state,
+        startIdx,
+        endpointIndices,
+        searchBounds,
+        options,
+        allowBridge,
+        gradeLimit,
+        crossfallLimit,
+        gradeChangeLimit,
+        riverDistance,
+        roadAngleCache,
+        front,
+        currentIdx,
+        nextIdx,
+        direction,
+        currentState
+      ),
+    validateJoin: (originIdx, destinationIdx, originState, _destinationState): RoadPathPlannerJoinResult | null => {
+      if (originIdx === destinationIdx) {
+        return { pathIndices: [originIdx], cost: 0 };
+      }
+      const joinPath = buildRoadStreamerJoinPath(originIdx, destinationIdx, state.grid.cols);
+      if (joinPath.length <= 1 || joinPath.length > joinRadius + 1) {
+        return null;
+      }
+      let totalCost = 0;
+      let currentState = cloneRoadPathPlannerNodeState(originState);
+      for (let i = 1; i < joinPath.length; i += 1) {
+        const currentIdx = joinPath[i - 1]!;
+        const nextIdx = joinPath[i]!;
+        const direction = getRoadStreamerDirection(currentIdx, nextIdx, state.grid.cols);
+        if (!direction) {
+          return null;
+        }
+        const step = evaluateRoadStreamerStep(
+          state,
+          startIdx,
+          new Set<number>([destinationIdx]),
+          searchBounds,
+          options,
+          allowBridge,
+          gradeLimit,
+          crossfallLimit,
+          gradeChangeLimit,
+          riverDistance,
+          roadAngleCache,
+          "origin",
+          currentIdx,
+          nextIdx,
+          direction,
+          currentState
+        );
+        if (!step) {
+          return null;
+        }
+        totalCost += step.cost;
+        currentState = step.state;
+      }
+      return { pathIndices: joinPath, cost: totalCost };
+    }
+  });
+
+  if (!plannerResult.found || plannerResult.pathIndices.length === 0) {
+    return finish(null, plannerResult.budgetAborted, plannerResult.visitedNodes);
+  }
+  const result = buildPathResult(state, plannerResult.pathIndices, riverDistance, options);
+  if (options.pathMode === "mountainPass") {
+    result.mountainPassFallback = true;
+  }
+  result.switchbackRoute = options.pathMode === "switchback" && result.switchbackTurnCount > 0;
+  return finish(result, plannerResult.budgetAborted, plannerResult.visitedNodes);
+};
+
+const runDijkstraRoadPlanner = (
+  state: WorldState,
+  start: Point,
+  end: Point | null,
+  isTarget: ((x: number, y: number) => boolean) | null,
+  options: RoadPathOptionsResolved,
+  allowBridge: boolean,
+  gradeLimit: number,
+  crossfallLimit: number,
+  gradeChangeLimit: number
+): RoadPathResult | null => {
+  const debug = roadPathDebugHooks;
+  debug?.checkCancelled?.();
+  const attemptId = nextRoadPathDebugAttemptId++;
+  const startedAt = typeof performance !== "undefined" ? performance.now() : Date.now();
+  const finish = (
+    result: RoadPathResult | null,
+    budgetAborted: boolean,
+    visitedNodes: number,
+    totalRouteCost?: number,
+    selectedSeed?: RoadStreamerDestinationSeed | null,
+    failureReason?: RoadPathPlannerFailureReason | null
+  ): RoadPathResult | null => {
+    const endedAt = typeof performance !== "undefined" ? performance.now() : Date.now();
+    if (budgetAborted) {
+      roadGenerationStats.searchBudgetAbortCount += 1;
+    }
+    debug?.emit?.({
+      kind: "road:result",
+      attemptId,
+      found: !!result,
+      budgetAborted,
+      visitedNodes,
+      pathLength: result?.path.length ?? 0,
+      bridgeTileIndices: result?.bridgeTileIndices ? [...result.bridgeTileIndices] : undefined,
+      path: result?.path ? result.path.map((point) => ({ ...point })) : undefined,
+      selectedDestinationSeed: selectedSeed ? { ...selectedSeed.point } : undefined,
+      selectedDestinationSeedKind: selectedSeed?.kind,
+      selectedDestinationSeedLabel: selectedSeed?.label,
+      totalRouteCost,
+      failureReason: failureReason ?? undefined,
+      elapsedMs: Math.max(0, endedAt - startedAt),
+      mode: options.pathMode,
+      allowBridge,
+      planner: "dijkstra"
+    });
+    return result;
+  };
+  if (!inBounds(state.grid, start.x, start.y)) {
+    return finish(null, false, 0, undefined, null, "invalid-start");
+  }
+  if (end && !inBounds(state.grid, end.x, end.y)) {
+    return finish(null, false, 0, undefined, null, "invalid-destination");
+  }
+  const searchBounds = options.searchBounds ? expandRoadTileBounds(state, options.searchBounds, 0) : null;
+  if (!isPointInRoadBounds(start, searchBounds)) {
+    return finish(null, false, 0, undefined, null, "invalid-start");
+  }
+  if (end && !isPointInRoadBounds(end, searchBounds)) {
+    return finish(null, false, 0, undefined, null, "invalid-destination");
+  }
+
+  const total = state.grid.totalTiles;
+  const startIdx = indexFor(state.grid, start.x, start.y);
+  const endIdx = end ? indexFor(state.grid, end.x, end.y) : -1;
+  const riverDistance = getRiverDistanceField(state);
+  const roadAngleCache = new Float32Array(total);
+  roadAngleCache.fill(-1);
+
+  if (!canTraverseTileIndex(state, startIdx, true, allowBridge, options, riverDistance)) {
+    return finish(null, false, 0, undefined, null, "invalid-start");
+  }
+
+  const destinationSeeds = end
+    ? collectPointRoadStreamerDestinationSeeds(state, end, endIdx, options, allowBridge, riverDistance, searchBounds)
+    : collectTargetRoadStreamerDestinationSeeds(
+        state,
+        start,
+        isTarget ?? (() => false),
+        options,
+        allowBridge,
+        riverDistance,
+        searchBounds
+      );
+  for (let i = 0; i < destinationSeeds.length; i += 1) {
+    const seed = destinationSeeds[i]!;
+    if (!seed.kind) {
+      seed.kind = end ? (isRoadLikeIndex(state, seed.index) ? "network" : "point") : "network";
+    }
+    if (!seed.label) {
+      seed.label = end ? "point destination" : "target destination";
+    }
+  }
+  if (destinationSeeds.length === 0) {
+    return finish(null, false, 0, undefined, null, "no-destination-seeds");
+  }
+
+  debug?.emit?.({
+    kind: "road:attempt",
+    attemptId,
+    attemptKind: end ? "point" : "target",
+    planner: "dijkstra",
+    start: { ...start },
+    end: end ? { ...end } : undefined,
+    destinationSeedCount: destinationSeeds.length,
+    mode: options.pathMode,
+    allowBridge,
+    gradeLimit,
+    crossfallLimit,
+    gradeChangeLimit,
+    maxSearchNodeVisits: options.maxSearchNodeVisits
+  });
+
+  if (endIdx >= 0 && startIdx === endIdx) {
+    return finish(buildPathResult(state, [startIdx], riverDistance, options), false, 0, 0, destinationSeeds[0] ?? null, null);
+  }
+
+  const endpointIndices = new Set(destinationSeeds.map((seed) => seed.index));
+  let lastDebugProgressMs = startedAt;
+  const plannerResult = planRoadPathDijkstra({
+    cols: state.grid.cols,
+    rows: state.grid.rows,
+    totalTiles: total,
+    startIndex: startIdx,
+    destinationSeeds,
+    directions: ROAD_DIRS,
+    joinRadius: 0,
+    maxSearchNodeVisits:
+      options.maxSearchNodeVisits > 0 ? Math.min(total, Math.max(options.maxSearchNodeVisits, options.maxSearchNodeVisits * 4)) : 0,
+    initialState: createInitialRoadPathPlannerNodeState(),
+    checkCancelled: () => debug?.checkCancelled?.(),
+    onProgress: (progress) => {
+      if (!debug || progress.visitedNodes % ROAD_DEBUG_PROGRESS_NODE_STRIDE !== 0) {
+        return;
+      }
+      const now = typeof performance !== "undefined" ? performance.now() : Date.now();
+      if (now - lastDebugProgressMs < ROAD_DEBUG_PROGRESS_MIN_MS) {
+        return;
+      }
+      lastDebugProgressMs = now;
+      debug.emit?.({
+        kind: "road:progress",
+        attemptId,
+        visitedNodes: progress.visitedNodes,
+        openNodes: progress.openNodes,
+        current: toPoint(progress.currentIndex, state.grid.cols),
+        elapsedMs: Math.max(0, now - startedAt),
+        planner: "dijkstra"
+      });
+    },
+    evaluateStep: (front, currentIdx, nextIdx, direction, currentState) =>
+      evaluateRoadStreamerStep(
+        state,
+        startIdx,
+        endpointIndices,
+        searchBounds,
+        options,
+        allowBridge,
+        gradeLimit,
+        crossfallLimit,
+        gradeChangeLimit,
+        riverDistance,
+        roadAngleCache,
+        front,
+        currentIdx,
+        nextIdx,
+        direction,
+        currentState
+      ),
+    validateJoin: () => null
+  });
+
+  if (!plannerResult.found || plannerResult.pathIndices.length === 0) {
+    return finish(
+      null,
+      plannerResult.budgetAborted,
+      plannerResult.visitedNodes,
+      undefined,
+      plannerResult.selectedDestinationSeed,
+      plannerResult.failureReason
+    );
+  }
+  const result = buildPathResult(state, plannerResult.pathIndices, riverDistance, options);
+  if (options.pathMode === "mountainPass") {
+    result.mountainPassFallback = true;
+  }
+  result.switchbackRoute = options.pathMode === "switchback" && result.switchbackTurnCount > 0;
+  return finish(
+    result,
+    plannerResult.budgetAborted,
+    plannerResult.visitedNodes,
+    plannerResult.totalCost,
+    plannerResult.selectedDestinationSeed,
+    null
+  );
+};
+
 const recordPathStats = (result: RoadPathResult): void => {
   roadGenerationStats.pathsFound += 1;
   roadGenerationStats.maxRealizedGrade = Math.max(roadGenerationStats.maxRealizedGrade, result.maxGrade);
@@ -1556,15 +2387,51 @@ const runAStar = (
   crossfallLimit: number,
   gradeChangeLimit: number
 ): RoadPathResult | null => {
+  const debug = roadPathDebugHooks;
+  debug?.checkCancelled?.();
+  const attemptId = nextRoadPathDebugAttemptId++;
+  const startedAt = typeof performance !== "undefined" ? performance.now() : Date.now();
+  const finish = (result: RoadPathResult | null, budgetAborted: boolean, visitedNodes: number): RoadPathResult | null => {
+    const endedAt = typeof performance !== "undefined" ? performance.now() : Date.now();
+    debug?.emit?.({
+      kind: "road:result",
+      attemptId,
+      found: !!result,
+      budgetAborted,
+      visitedNodes,
+      pathLength: result?.path.length ?? 0,
+      bridgeTileIndices: result?.bridgeTileIndices ? [...result.bridgeTileIndices] : undefined,
+      path: result?.path ? result.path.map((point) => ({ ...point })) : undefined,
+      elapsedMs: Math.max(0, endedAt - startedAt),
+      mode: options.pathMode,
+      allowBridge,
+      planner: "astar"
+    });
+    return result;
+  };
+  debug?.emit?.({
+    kind: "road:attempt",
+    attemptId,
+    attemptKind: end ? "point" : "target",
+    planner: "astar",
+    start: { ...start },
+    end: end ? { ...end } : undefined,
+    mode: options.pathMode,
+    allowBridge,
+    gradeLimit,
+    crossfallLimit,
+    gradeChangeLimit,
+    maxSearchNodeVisits: options.maxSearchNodeVisits
+  });
   if (!inBounds(state.grid, start.x, start.y)) {
-    return null;
+    return finish(null, false, 0);
   }
   if (end && !inBounds(state.grid, end.x, end.y)) {
-    return null;
+    return finish(null, false, 0);
   }
   const searchBounds = options.searchBounds ? expandRoadTileBounds(state, options.searchBounds, 0) : null;
   if (!isPointInRoadBounds(start, searchBounds) || (end && !isPointInRoadBounds(end, searchBounds))) {
-    return null;
+    return finish(null, false, 0);
   }
   const total = state.grid.totalTiles;
   const cols = state.grid.cols;
@@ -1579,10 +2446,10 @@ const runAStar = (
     !canTraverseTileIndex(state, startIdx, true, allowBridge, options, riverDistance) ||
     (endIdx >= 0 && !canTraverseTileIndex(state, endIdx, true, allowBridge, options, riverDistance))
   ) {
-    return null;
+    return finish(null, false, 0);
   }
   if (endIdx >= 0 && startIdx === endIdx) {
-    return {
+    return finish({
       path: [start],
       bridgeTileIndices: [],
       maxGrade: 0,
@@ -1598,7 +2465,7 @@ const runAStar = (
       switchbackRoute: false,
       hairpinGradeDiscountCount: 0,
       longStraightSteepSegmentCount: 0
-    };
+    }, false, 0);
   }
 
   const gScore = new Float64Array(total);
@@ -1652,7 +2519,9 @@ const runAStar = (
 
   let goalIdx = -1;
   let visitedNodes = 0;
+  let lastDebugProgressMs = startedAt;
   while (openIdx.length > 0) {
+    debug?.checkCancelled?.();
     const currentIdx = heapPop(openIdx, openF);
     if (currentIdx < 0 || closed[currentIdx]) {
       continue;
@@ -1661,10 +2530,25 @@ const runAStar = (
     visitedNodes += 1;
     if (options.maxSearchNodeVisits > 0 && visitedNodes > options.maxSearchNodeVisits) {
       roadGenerationStats.searchBudgetAbortCount += 1;
-      return null;
+      return finish(null, true, visitedNodes);
     }
     const cx = currentIdx % cols;
     const cy = Math.floor(currentIdx / cols);
+    if (debug && visitedNodes % ROAD_DEBUG_PROGRESS_NODE_STRIDE === 0) {
+      const now = typeof performance !== "undefined" ? performance.now() : Date.now();
+      if (now - lastDebugProgressMs >= ROAD_DEBUG_PROGRESS_MIN_MS) {
+        lastDebugProgressMs = now;
+        debug.emit?.({
+          kind: "road:progress",
+          attemptId,
+          visitedNodes,
+          openNodes: openIdx.length,
+          current: { x: cx, y: cy },
+          elapsedMs: Math.max(0, now - startedAt),
+          planner: "astar"
+        });
+      }
+    }
     const isGoal = end ? currentIdx === endIdx : !!isTarget?.(cx, cy);
     if (isGoal) {
       goalIdx = currentIdx;
@@ -1895,7 +2779,7 @@ const runAStar = (
   }
 
   if (goalIdx < 0) {
-    return null;
+    return finish(null, false, visitedNodes);
   }
 
   const pathIndices: number[] = [];
@@ -1903,13 +2787,13 @@ const runAStar = (
   const pathGuard = new Uint8Array(total);
   while (current !== startIdx) {
     if (pathGuard[current] > 0) {
-      return null;
+      return finish(null, false, visitedNodes);
     }
     pathGuard[current] = 1;
     pathIndices.push(current);
     current = prev[current];
     if (current < 0) {
-      return null;
+      return finish(null, false, visitedNodes);
     }
   }
   pathIndices.push(startIdx);
@@ -1919,7 +2803,439 @@ const runAStar = (
   result.hairpinGradeDiscountCount = Math.max(result.hairpinGradeDiscountCount, hairpinGradeDiscountsAt[goalIdx]);
   result.longStraightSteepSegmentCount = Math.max(result.longStraightSteepSegmentCount, longStraightSteepAt[goalIdx]);
   result.switchbackRoute = options.pathMode === "switchback" && result.switchbackTurnCount > 0;
-  return result;
+  return finish(result, false, visitedNodes);
+};
+
+const runAStarAsync = async (
+  state: WorldState,
+  start: Point,
+  end: Point | null,
+  isTarget: ((x: number, y: number) => boolean) | null,
+  options: RoadPathOptionsResolved,
+  allowBridge: boolean,
+  gradeLimit: number,
+  crossfallLimit: number,
+  gradeChangeLimit: number
+): Promise<RoadPathResult | null> => {
+  const debug = roadPathDebugHooks;
+  debug?.checkCancelled?.();
+  const attemptId = nextRoadPathDebugAttemptId++;
+  const startedAt = typeof performance !== "undefined" ? performance.now() : Date.now();
+  const finish = (result: RoadPathResult | null, budgetAborted: boolean, visitedNodes: number): RoadPathResult | null => {
+    const endedAt = typeof performance !== "undefined" ? performance.now() : Date.now();
+    debug?.emit?.({
+      kind: "road:result",
+      attemptId,
+      found: !!result,
+      budgetAborted,
+      visitedNodes,
+      pathLength: result?.path.length ?? 0,
+      bridgeTileIndices: result?.bridgeTileIndices ? [...result.bridgeTileIndices] : undefined,
+      path: result?.path ? result.path.map((point) => ({ ...point })) : undefined,
+      elapsedMs: Math.max(0, endedAt - startedAt),
+      mode: options.pathMode,
+      allowBridge,
+      planner: "astar"
+    });
+    return result;
+  };
+  debug?.emit?.({
+    kind: "road:attempt",
+    attemptId,
+    attemptKind: end ? "point" : "target",
+    planner: "astar",
+    start: { ...start },
+    end: end ? { ...end } : undefined,
+    mode: options.pathMode,
+    allowBridge,
+    gradeLimit,
+    crossfallLimit,
+    gradeChangeLimit,
+    maxSearchNodeVisits: options.maxSearchNodeVisits
+  });
+  if (!inBounds(state.grid, start.x, start.y)) {
+    return finish(null, false, 0);
+  }
+  if (end && !inBounds(state.grid, end.x, end.y)) {
+    return finish(null, false, 0);
+  }
+  const searchBounds = options.searchBounds ? expandRoadTileBounds(state, options.searchBounds, 0) : null;
+  if (!isPointInRoadBounds(start, searchBounds) || (end && !isPointInRoadBounds(end, searchBounds))) {
+    return finish(null, false, 0);
+  }
+  const total = state.grid.totalTiles;
+  const cols = state.grid.cols;
+  const startIdx = indexFor(state.grid, start.x, start.y);
+  const endIdx = end ? indexFor(state.grid, end.x, end.y) : -1;
+  const riverDistance = getRiverDistanceField(state);
+  const elevationToGradeScale = getRoadGradeScale(state, options.heightScaleMultiplier);
+  const roadAngleCache = new Float32Array(total);
+  roadAngleCache.fill(-1);
+
+  if (
+    !canTraverseTileIndex(state, startIdx, true, allowBridge, options, riverDistance) ||
+    (endIdx >= 0 && !canTraverseTileIndex(state, endIdx, true, allowBridge, options, riverDistance))
+  ) {
+    return finish(null, false, 0);
+  }
+  if (endIdx >= 0 && startIdx === endIdx) {
+    return finish({
+      path: [start],
+      bridgeTileIndices: [],
+      maxGrade: 0,
+      maxCrossfall: 0,
+      maxGradeChange: 0,
+      maxAngleDeg: 0,
+      meanAngleDeg: 0,
+      highAngleStepCount: 0,
+      minRiverClearance: riverDistance[startIdx],
+      bridgeSegments: 0,
+      mountainPassFallback: false,
+      switchbackTurnCount: 0,
+      switchbackRoute: false,
+      hairpinGradeDiscountCount: 0,
+      longStraightSteepSegmentCount: 0
+    }, false, 0);
+  }
+
+  const gScore = new Float64Array(total);
+  gScore.fill(Number.POSITIVE_INFINITY);
+  const prev = new Int32Array(total);
+  prev.fill(-1);
+  const closed = new Uint8Array(total);
+  const waterTilesUsed = new Int16Array(total);
+  waterTilesUsed.fill(32767);
+  const consecutiveWater = new Int8Array(total);
+  const stepDx = new Int8Array(total);
+  const stepDy = new Int8Array(total);
+  const signedGradeAt = new Float32Array(total);
+  const crossfallAt = new Float32Array(total);
+  const steepRunAt = new Int16Array(total);
+  const stepsSinceTurnAt = new Int16Array(total);
+  const turnDirectionAt = new Int8Array(total);
+  const stepsSinceTurnDirectionChangeAt = new Int16Array(total);
+  const lateralLegLengthAt = new Int16Array(total);
+  const stepsSinceHairpinDiscountAt = new Int16Array(total);
+  const hairpinSteepStepRunAt = new Int16Array(total);
+  const cumulativeClimbAt = new Float32Array(total);
+  const cumulativeDescentAt = new Float32Array(total);
+  const switchbackTurnsAt = new Int16Array(total);
+  const hairpinGradeDiscountsAt = new Int16Array(total);
+  const longStraightSteepAt = new Int16Array(total);
+  const openIdx: number[] = [];
+  const openF: number[] = [];
+
+  const estimate = (x: number, y: number): number => {
+    if (!end) {
+      return 0;
+    }
+    const dx = Math.abs(x - end.x);
+    const dy = Math.abs(y - end.y);
+    const diagonal = Math.min(dx, dy);
+    const octile = dx + dy + (Math.SQRT2 - 2) * diagonal;
+    return octile * Math.min(1, ROAD_EXISTING_SEGMENT_COST_MULTIPLIER);
+  };
+
+  const startWater = state.tiles[startIdx].type === "water" && state.tileRoadBridge[startIdx] === 0 ? 1 : 0;
+  gScore[startIdx] = 0;
+  prev[startIdx] = startIdx;
+  waterTilesUsed[startIdx] = startWater;
+  consecutiveWater[startIdx] = startWater;
+  stepsSinceTurnAt[startIdx] = 32767;
+  stepsSinceTurnDirectionChangeAt[startIdx] = 32767;
+  lateralLegLengthAt[startIdx] = 0;
+  stepsSinceHairpinDiscountAt[startIdx] = 32767;
+  heapPush(openIdx, openF, startIdx, estimate(start.x, start.y));
+
+  let goalIdx = -1;
+  let visitedNodes = 0;
+  let lastDebugProgressMs = startedAt;
+  while (openIdx.length > 0) {
+    debug?.checkCancelled?.();
+    const currentIdx = heapPop(openIdx, openF);
+    if (currentIdx < 0 || closed[currentIdx]) {
+      continue;
+    }
+    closed[currentIdx] = 1;
+    visitedNodes += 1;
+    if (options.maxSearchNodeVisits > 0 && visitedNodes > options.maxSearchNodeVisits) {
+      roadGenerationStats.searchBudgetAbortCount += 1;
+      return finish(null, true, visitedNodes);
+    }
+    const cx = currentIdx % cols;
+    const cy = Math.floor(currentIdx / cols);
+    if (debug && visitedNodes % ROAD_DEBUG_PROGRESS_NODE_STRIDE === 0) {
+      const now = typeof performance !== "undefined" ? performance.now() : Date.now();
+      if (now - lastDebugProgressMs >= ROAD_DEBUG_PROGRESS_MIN_MS) {
+        lastDebugProgressMs = now;
+        debug.emit?.({
+          kind: "road:progress",
+          attemptId,
+          visitedNodes,
+          openNodes: openIdx.length,
+          current: { x: cx, y: cy },
+          elapsedMs: Math.max(0, now - startedAt),
+          planner: "astar"
+        });
+        await (debug.yield?.() ?? yieldToNextFrame());
+        debug.checkCancelled?.();
+      }
+    }
+    const isGoal = end ? currentIdx === endIdx : !!isTarget?.(cx, cy);
+    if (isGoal) {
+      goalIdx = currentIdx;
+      break;
+    }
+    const currentG = gScore[currentIdx];
+    const currentTile = state.tiles[currentIdx];
+    const currentIsWater = currentTile.type === "water" && state.tileRoadBridge[currentIdx] === 0;
+
+    for (const dir of ROAD_DIRS) {
+      const nx = cx + dir.x;
+      const ny = cy + dir.y;
+      if (!inBounds(state.grid, nx, ny)) {
+        continue;
+      }
+      if (
+        searchBounds &&
+        (nx < searchBounds.minX || nx > searchBounds.maxX || ny < searchBounds.minY || ny > searchBounds.maxY)
+      ) {
+        continue;
+      }
+      const nIdx = indexFor(state.grid, nx, ny);
+      if (closed[nIdx]) {
+        continue;
+      }
+      const neighborIsGoal = end ? nIdx === endIdx : false;
+      if (!canTraverseTileIndex(state, nIdx, neighborIsGoal, allowBridge, options, riverDistance)) {
+        continue;
+      }
+      if (dir.x !== 0 && dir.y !== 0) {
+        const idxA = indexFor(state.grid, cx + dir.x, cy);
+        const idxB = indexFor(state.grid, cx, cy + dir.y);
+        if (
+          !canTraverseTileIndex(state, idxA, false, allowBridge, options, riverDistance) &&
+          !canTraverseTileIndex(state, idxB, false, allowBridge, options, riverDistance)
+        ) {
+          continue;
+        }
+      }
+
+      const nextTile = state.tiles[nIdx];
+      const nextIsWater = nextTile.type === "water" && state.tileRoadBridge[nIdx] === 0;
+      let nextWaterUsed = waterTilesUsed[currentIdx];
+      let nextConsecutiveWater = 0;
+      if (nextIsWater) {
+        if (!allowBridge || state.tileRiverMask[nIdx] === 0) {
+          continue;
+        }
+        nextWaterUsed += 1;
+        if (nextWaterUsed > options.bridgeMaxWaterTilesPerPath) {
+          continue;
+        }
+        nextConsecutiveWater = consecutiveWater[currentIdx] + 1;
+        if (nextConsecutiveWater > options.bridgeMaxConsecutiveWater) {
+          continue;
+        }
+      }
+
+      let signedGrade = 0;
+      let grade = 0;
+      let crossfall = 0;
+      let gradeChange = 0;
+      let stepAngleDeg = 0;
+      const tileAngleDeg = computeRoadTileAngleDeg(state, nIdx, options.heightScaleMultiplier, roadAngleCache);
+      if (tileAngleDeg > options.avoidAngleDeg && !isRoadLikeIndex(state, nIdx) && !neighborIsGoal) {
+        continue;
+      }
+      const hasPreviousLandStep =
+        prev[currentIdx] !== currentIdx &&
+        currentIsWater === false &&
+        state.tiles[prev[currentIdx]]?.type !== "water";
+      if (!currentIsWater && !nextIsWater) {
+        signedGrade = computeStepSignedGrade(currentTile.elevation, nextTile.elevation, dir.cost, elevationToGradeScale);
+        grade = Math.abs(signedGrade);
+        if (grade > gradeLimit) {
+          continue;
+        }
+        stepAngleDeg = computeRoadStepAngleDeg(state, currentTile.elevation, nextTile.elevation, dir.cost, options.heightScaleMultiplier);
+        if (stepAngleDeg > options.avoidAngleDeg && !isRoadLikeIndex(state, nIdx) && !neighborIsGoal) {
+          continue;
+        }
+        crossfall = computeCrossfallAtStep(
+          state,
+          cx,
+          cy,
+          nx,
+          ny,
+          currentTile.elevation,
+          nextTile.elevation,
+          elevationToGradeScale
+        );
+        if (crossfall > crossfallLimit) {
+          continue;
+        }
+        if (hasPreviousLandStep) {
+          gradeChange = Math.abs(signedGrade - signedGradeAt[currentIdx]);
+          if (gradeChange > gradeChangeLimit) {
+            continue;
+          }
+        }
+      }
+
+      let stepCost = dir.cost;
+      if (dir.x !== 0 && dir.y !== 0) {
+        stepCost += options.diagonalPenalty;
+      }
+      let plannerStepScore: ReturnType<typeof scoreRoadPlannerStep> | null = null;
+      if (!currentIsWater && !nextIsWater) {
+        plannerStepScore = scoreRoadPlannerStep({
+          mode: options.pathMode,
+          hasPreviousLandStep,
+          previousDx: stepDx[currentIdx],
+          previousDy: stepDy[currentIdx],
+          nextDx: dir.x,
+          nextDy: dir.y,
+          previousSignedGrade: signedGradeAt[currentIdx],
+          nextSignedGrade: signedGrade,
+          previousCrossfall: crossfallAt[currentIdx],
+          nextCrossfall: crossfall,
+          stepAngleDeg,
+          tileAngleDeg,
+          softAngleDeg: options.softAngleDeg,
+          avoidAngleDeg: options.avoidAngleDeg,
+          straightClimbPenaltyWeight: options.straightClimbPenaltyWeight,
+          contourTurnReliefWeight: options.contourTurnReliefWeight,
+          previousSteepRun: steepRunAt[currentIdx],
+          previousStepsSinceTurn: stepsSinceTurnAt[currentIdx],
+          previousTurnDirection: turnDirectionAt[currentIdx],
+          previousStepsSinceTurnDirectionChange: stepsSinceTurnDirectionChangeAt[currentIdx],
+          previousLateralLegLength: lateralLegLengthAt[currentIdx],
+          previousStepsSinceHairpinDiscount: stepsSinceHairpinDiscountAt[currentIdx],
+          previousHairpinSteepStepRun: hairpinSteepStepRunAt[currentIdx],
+          previousCumulativeClimb: cumulativeClimbAt[currentIdx],
+          previousCumulativeDescent: cumulativeDescentAt[currentIdx],
+          localPlatformCrossfall: crossfall,
+          localPlatformAngleDeg: tileAngleDeg,
+          riverDistance: riverDistance[nIdx],
+          riverBlockDistance: options.riverBlockDistance
+        });
+        stepCost += grade * options.slopePenaltyWeight * plannerStepScore.gradePenaltyMultiplier;
+        stepCost += crossfall * options.crossfallPenaltyWeight;
+        stepCost += gradeChange * options.gradeChangePenaltyWeight;
+        stepCost += scoreRoadAnglePenalty(Math.max(stepAngleDeg, tileAngleDeg), options);
+        stepCost += plannerStepScore.costAdjustment;
+      }
+      if (nextIsWater) {
+        stepCost += options.bridgeStepCost;
+      } else if (!isRoadLikeIndex(state, nIdx) && options.riverPenaltyDistance > 0) {
+        const riverDist = riverDistance[nIdx];
+        if (riverDist <= options.riverPenaltyDistance) {
+          const riverPenaltyRatio = (options.riverPenaltyDistance - riverDist + 1) / (options.riverPenaltyDistance + 1);
+          stepCost += riverPenaltyRatio * options.riverPenaltyWeight;
+        }
+      }
+      if (isRoadLikeIndex(state, nIdx)) {
+        stepCost *= ROAD_EXISTING_SEGMENT_COST_MULTIPLIER;
+      }
+      if (prev[currentIdx] !== currentIdx && (stepDx[currentIdx] !== dir.x || stepDy[currentIdx] !== dir.y)) {
+        let turnPenalty = options.turnPenalty;
+        if (!currentIsWater && !nextIsWater && hasPreviousLandStep) {
+          const previousSeverity = Math.max(Math.abs(signedGradeAt[currentIdx]), crossfallAt[currentIdx]);
+          const nextSeverity = Math.max(grade, crossfall);
+          if (nextSeverity < previousSeverity) {
+            const relief = Math.min(
+              0.9,
+              (previousSeverity - nextSeverity) * ROAD_SWITCHBACK_RELIEF_WEIGHT +
+                Math.max(0, stepAngleDeg - options.softAngleDeg) * 0.02 * options.contourTurnReliefWeight
+            );
+            turnPenalty *= 1 - relief;
+          }
+        }
+        if (plannerStepScore) {
+          turnPenalty *= plannerStepScore.turnPenaltyMultiplier;
+        }
+        stepCost += turnPenalty;
+      }
+
+      const nextG = currentG + stepCost;
+      const equalCost = Math.abs(nextG - gScore[nIdx]) <= 1e-7;
+      const betterWaterUsage = nextWaterUsed < waterTilesUsed[nIdx];
+      const nextSlopeState = grade + crossfall + gradeChange;
+      const currentSlopeState = Math.abs(signedGradeAt[nIdx]) + crossfallAt[nIdx];
+      if (nextG > gScore[nIdx] + 1e-7 && !betterWaterUsage) {
+        continue;
+      }
+      if (equalCost && !betterWaterUsage && nextSlopeState >= currentSlopeState - 1e-6) {
+        continue;
+      }
+
+      gScore[nIdx] = nextG;
+      prev[nIdx] = currentIdx;
+      waterTilesUsed[nIdx] = nextWaterUsed;
+      consecutiveWater[nIdx] = nextConsecutiveWater;
+      stepDx[nIdx] = dir.x;
+      stepDy[nIdx] = dir.y;
+      signedGradeAt[nIdx] = signedGrade;
+      crossfallAt[nIdx] = crossfall;
+      if (plannerStepScore) {
+        steepRunAt[nIdx] = plannerStepScore.nextSteepRun;
+        stepsSinceTurnAt[nIdx] = plannerStepScore.nextStepsSinceTurn;
+        turnDirectionAt[nIdx] = plannerStepScore.nextTurnDirection;
+        stepsSinceTurnDirectionChangeAt[nIdx] = plannerStepScore.nextStepsSinceTurnDirectionChange;
+        lateralLegLengthAt[nIdx] = plannerStepScore.nextLateralLegLength;
+        stepsSinceHairpinDiscountAt[nIdx] = plannerStepScore.nextStepsSinceHairpinDiscount;
+        hairpinSteepStepRunAt[nIdx] = plannerStepScore.nextHairpinSteepStepRun;
+        cumulativeClimbAt[nIdx] = plannerStepScore.nextCumulativeClimb;
+        cumulativeDescentAt[nIdx] = plannerStepScore.nextCumulativeDescent;
+        switchbackTurnsAt[nIdx] = switchbackTurnsAt[currentIdx] + (plannerStepScore.switchbackTurn ? 1 : 0);
+        hairpinGradeDiscountsAt[nIdx] =
+          hairpinGradeDiscountsAt[currentIdx] + (plannerStepScore.hairpinGradeDiscount ? 1 : 0);
+        longStraightSteepAt[nIdx] = longStraightSteepAt[currentIdx] + (plannerStepScore.longStraightSteep ? 1 : 0);
+      } else {
+        steepRunAt[nIdx] = 0;
+        stepsSinceTurnAt[nIdx] = Math.min(32767, stepsSinceTurnAt[currentIdx] + 1);
+        turnDirectionAt[nIdx] = turnDirectionAt[currentIdx];
+        stepsSinceTurnDirectionChangeAt[nIdx] = Math.min(32767, stepsSinceTurnDirectionChangeAt[currentIdx] + 1);
+        lateralLegLengthAt[nIdx] = Math.min(32767, lateralLegLengthAt[currentIdx] + 1);
+        stepsSinceHairpinDiscountAt[nIdx] = Math.min(32767, stepsSinceHairpinDiscountAt[currentIdx] + 1);
+        hairpinSteepStepRunAt[nIdx] = 0;
+        cumulativeClimbAt[nIdx] = cumulativeClimbAt[currentIdx];
+        cumulativeDescentAt[nIdx] = cumulativeDescentAt[currentIdx];
+        switchbackTurnsAt[nIdx] = switchbackTurnsAt[currentIdx];
+        hairpinGradeDiscountsAt[nIdx] = hairpinGradeDiscountsAt[currentIdx];
+        longStraightSteepAt[nIdx] = longStraightSteepAt[currentIdx];
+      }
+      heapPush(openIdx, openF, nIdx, nextG + estimate(nx, ny));
+    }
+  }
+
+  if (goalIdx < 0) {
+    return finish(null, false, visitedNodes);
+  }
+
+  const pathIndices: number[] = [];
+  let current = goalIdx;
+  const pathGuard = new Uint8Array(total);
+  while (current !== startIdx) {
+    if (pathGuard[current] > 0) {
+      return finish(null, false, visitedNodes);
+    }
+    pathGuard[current] = 1;
+    pathIndices.push(current);
+    current = prev[current];
+    if (current < 0) {
+      return finish(null, false, visitedNodes);
+    }
+  }
+  pathIndices.push(startIdx);
+  pathIndices.reverse();
+  const result = buildPathResult(state, pathIndices, riverDistance, options);
+  result.switchbackTurnCount = Math.max(result.switchbackTurnCount, switchbackTurnsAt[goalIdx]);
+  result.hairpinGradeDiscountCount = Math.max(result.hairpinGradeDiscountCount, hairpinGradeDiscountsAt[goalIdx]);
+  result.longStraightSteepSegmentCount = Math.max(result.longStraightSteepSegmentCount, longStraightSteepAt[goalIdx]);
+  result.switchbackRoute = options.pathMode === "switchback" && result.switchbackTurnCount > 0;
+  return finish(result, false, visitedNodes);
 };
 
 const findPathWithGradeRelaxation = (
@@ -1935,17 +3251,40 @@ const findPathWithGradeRelaxation = (
     let crossfallLimit = candidate.crossfallLimitStart;
     let gradeChangeLimit = candidate.gradeChangeLimitStart;
     while (true) {
-      const result = runAStar(
-        state,
-        start,
-        end,
-        isTarget,
-        candidate,
-        allowBridge,
-        gradeLimit,
-        crossfallLimit,
-        gradeChangeLimit
-      );
+      const result = candidate.useBidirectionalStreamer
+        ? runBidirectionalStreamer(
+            state,
+            start,
+            end,
+            isTarget,
+            candidate,
+            allowBridge,
+            gradeLimit,
+            crossfallLimit,
+            gradeChangeLimit
+          ) ??
+          runDijkstraRoadPlanner(
+            state,
+            start,
+            end,
+            isTarget,
+            candidate,
+            allowBridge,
+            gradeLimit,
+            crossfallLimit,
+            gradeChangeLimit
+          )
+        : runDijkstraRoadPlanner(
+          state,
+          start,
+          end,
+          isTarget,
+          candidate,
+          allowBridge,
+          gradeLimit,
+          crossfallLimit,
+          gradeChangeLimit
+          );
       if (result) {
         return result;
       }
@@ -1991,6 +3330,99 @@ const findPathWithGradeRelaxation = (
   return mountainPass;
 };
 
+const findPathWithGradeRelaxationAsync = async (
+  state: WorldState,
+  start: Point,
+  end: Point | null,
+  isTarget: ((x: number, y: number) => boolean) | null,
+  options: RoadPathOptionsResolved,
+  allowBridge: boolean
+): Promise<RoadPathResult | null> => {
+  const tryOptions = async (candidate: RoadPathOptionsResolved): Promise<RoadPathResult | null> => {
+    let gradeLimit = candidate.gradeLimitStart;
+    let crossfallLimit = candidate.crossfallLimitStart;
+    let gradeChangeLimit = candidate.gradeChangeLimitStart;
+    while (true) {
+      const result = candidate.useBidirectionalStreamer
+        ? runBidirectionalStreamer(
+            state,
+            start,
+            end,
+            isTarget,
+            candidate,
+            allowBridge,
+            gradeLimit,
+            crossfallLimit,
+            gradeChangeLimit,
+            true
+          ) ??
+          runDijkstraRoadPlanner(
+            state,
+            start,
+            end,
+            isTarget,
+            candidate,
+            allowBridge,
+            gradeLimit,
+            crossfallLimit,
+            gradeChangeLimit
+          )
+        : runDijkstraRoadPlanner(
+          state,
+          start,
+          end,
+          isTarget,
+          candidate,
+          allowBridge,
+          gradeLimit,
+          crossfallLimit,
+          gradeChangeLimit
+          );
+      if (result) {
+        return result;
+      }
+      const atMaxGrade = gradeLimit >= candidate.gradeLimitMax - 1e-9;
+      const atMaxCrossfall = crossfallLimit >= candidate.crossfallLimitMax - 1e-9;
+      const atMaxGradeChange = gradeChangeLimit >= candidate.gradeChangeLimitMax - 1e-9;
+      if (atMaxGrade && atMaxCrossfall && atMaxGradeChange) {
+        return null;
+      }
+      gradeLimit += candidate.gradeLimitRelaxStep;
+      crossfallLimit += candidate.crossfallLimitRelaxStep;
+      gradeChangeLimit += candidate.gradeChangeLimitRelaxStep;
+      gradeLimit = Math.min(candidate.gradeLimitMax, gradeLimit);
+      crossfallLimit = Math.min(candidate.crossfallLimitMax, crossfallLimit);
+      gradeChangeLimit = Math.min(candidate.gradeChangeLimitMax, gradeChangeLimit);
+    }
+  };
+
+  if (options.pathMode === "switchback") {
+    roadGenerationStats.switchbackRouteAttempts += 1;
+  }
+  const standard = await tryOptions(options);
+  if (standard) {
+    return standard;
+  }
+  if (options.pathMode === "normal" && !options.allowMountainPassFallback) {
+    return null;
+  }
+  if (options.pathMode !== "switchback") {
+    roadGenerationStats.switchbackRouteAttempts += 1;
+  }
+  const switchback = await tryOptions(buildSwitchbackFallbackOptions(options));
+  if (switchback) {
+    return switchback;
+  }
+  if (!options.allowMountainPassFallback) {
+    return null;
+  }
+  const mountainPass = await tryOptions(buildMountainPassFallbackOptions(options));
+  if (mountainPass) {
+    mountainPass.mountainPassFallback = true;
+  }
+  return mountainPass;
+};
+
 const findRoadPathDetailed = (
   state: WorldState,
   start: Point,
@@ -1998,6 +3430,12 @@ const findRoadPathDetailed = (
   options: RoadPathOptions = {}
 ): RoadPathResult => {
   const resolved = resolveRoadPathOptions(options);
+  const failureCache = getRoadPathFailureCache(state);
+  const failureKey = buildRoadPathFailureKey(start, end, resolved);
+  if (failureCache.failures.has(failureKey)) {
+    roadGenerationStats.connectorCacheSkipCount += 1;
+    return buildEmptyRoadPathResult();
+  }
   roadGenerationStats.pathsAttempted += 1;
   let result: RoadPathResult | null = null;
   if (resolved.bridgePolicy === "allow") {
@@ -2009,23 +3447,39 @@ const findRoadPathDetailed = (
     result = findPathWithGradeRelaxation(state, start, end, null, resolved, false);
   }
   if (!result) {
-    return {
-      path: [],
-      bridgeTileIndices: [],
-      maxGrade: 0,
-      maxCrossfall: 0,
-      maxGradeChange: 0,
-      maxAngleDeg: 0,
-      meanAngleDeg: 0,
-      highAngleStepCount: 0,
-      minRiverClearance: Number.POSITIVE_INFINITY,
-      bridgeSegments: 0,
-      mountainPassFallback: false,
-      switchbackTurnCount: 0,
-      switchbackRoute: false,
-      hairpinGradeDiscountCount: 0,
-      longStraightSteepSegmentCount: 0
-    };
+    failureCache.failures.add(failureKey);
+    return buildEmptyRoadPathResult();
+  }
+  recordPathStats(result);
+  return result;
+};
+
+const findRoadPathDetailedAsync = async (
+  state: WorldState,
+  start: Point,
+  end: Point,
+  options: RoadPathOptions = {}
+): Promise<RoadPathResult> => {
+  const resolved = resolveRoadPathOptions(options);
+  const failureCache = getRoadPathFailureCache(state);
+  const failureKey = buildRoadPathFailureKey(start, end, resolved);
+  if (failureCache.failures.has(failureKey)) {
+    roadGenerationStats.connectorCacheSkipCount += 1;
+    return buildEmptyRoadPathResult();
+  }
+  roadGenerationStats.pathsAttempted += 1;
+  let result: RoadPathResult | null = null;
+  if (resolved.bridgePolicy === "allow") {
+    result = await findPathWithGradeRelaxationAsync(state, start, end, null, resolved, true);
+    if (!result) {
+      result = await findPathWithGradeRelaxationAsync(state, start, end, null, resolved, false);
+    }
+  } else {
+    result = await findPathWithGradeRelaxationAsync(state, start, end, null, resolved, false);
+  }
+  if (!result) {
+    failureCache.failures.add(failureKey);
+    return buildEmptyRoadPathResult();
   }
   recordPathStats(result);
   return result;
@@ -2049,23 +3503,7 @@ const findRoadPathToTargetDetailed = (
     result = findPathWithGradeRelaxation(state, start, null, isTarget, resolved, false);
   }
   if (!result) {
-    return {
-      path: [],
-      bridgeTileIndices: [],
-      maxGrade: 0,
-      maxCrossfall: 0,
-      maxGradeChange: 0,
-      maxAngleDeg: 0,
-      meanAngleDeg: 0,
-      highAngleStepCount: 0,
-      minRiverClearance: Number.POSITIVE_INFINITY,
-      bridgeSegments: 0,
-      mountainPassFallback: false,
-      switchbackTurnCount: 0,
-      switchbackRoute: false,
-      hairpinGradeDiscountCount: 0,
-      longStraightSteepSegmentCount: 0
-    };
+    return buildEmptyRoadPathResult();
   }
   recordPathStats(result);
   return result;
@@ -2114,11 +3552,15 @@ export function carveRoadPath(
   if (path.length === 0) {
     return false;
   }
+  const bridgeTileIndices: number[] = [];
   for (let i = 0; i < path.length; i += 1) {
     const point = path[i];
     const idx = indexFor(state.grid, point.x, point.y);
     const allowBridge =
       options.allowBridgeIndices?.has(idx) ?? options.allowBridgeByPoint?.(point) ?? false;
+    if (allowBridge) {
+      bridgeTileIndices.push(idx);
+    }
     setRoadAt(state, rng, point.x, point.y, { allowBridge });
   }
   for (let i = 1; i < path.length; i += 1) {
@@ -2126,11 +3568,38 @@ export function carveRoadPath(
     const next = path[i];
     connectRoadPoints(state, prev.x, prev.y, next.x, next.y);
   }
+  bumpRoadNetworkRevision(state);
+  roadPathDebugHooks?.emit?.({
+    kind: "road:carve",
+    pathLength: path.length,
+    bridgeTileIndices: bridgeTileIndices.length > 0 ? bridgeTileIndices : undefined,
+    bounds: getPathBounds(path) ?? undefined
+  });
   return true;
 }
 
 export function carveRoad(state: WorldState, rng: RNG, start: Point, end: Point, options: RoadCarveOptions = {}): boolean {
   return carveRoadDetailed(state, rng, start, end, options).carved;
+}
+
+export async function carveRoadAsync(
+  state: WorldState,
+  rng: RNG,
+  start: Point,
+  end: Point,
+  options: RoadCarveOptions = {}
+): Promise<boolean> {
+  roadPathDebugHooks?.checkCancelled?.();
+  await yieldToNextFrame();
+  roadPathDebugHooks?.checkCancelled?.();
+  const bridgePolicy =
+    options.bridgePolicy ?? (typeof options.allowBridge === "boolean" ? (options.allowBridge ? "allow" : "never") : "allow");
+  const result = await findRoadPathDetailedAsync(state, start, end, { ...options, bridgePolicy });
+  if (result.path.length === 0) {
+    return false;
+  }
+  const bridgeSet = new Set<number>(result.bridgeTileIndices);
+  return carveRoadPath(state, rng, result.path, { allowBridgeIndices: bridgeSet });
 }
 
 export function carveRoadSequence(state: WorldState, rng: RNG, segments: RoadCarveSegment[]): boolean {
@@ -2157,6 +3626,33 @@ export function carveRoadSequence(state: WorldState, rng: RNG, segments: RoadCar
   return true;
 }
 
+export async function carveRoadSequenceAsync(state: WorldState, rng: RNG, segments: RoadCarveSegment[]): Promise<boolean> {
+  if (segments.length === 0) {
+    return false;
+  }
+  const planned: Array<{ path: Point[]; bridgeTileIndices: number[] }> = [];
+  for (let i = 0; i < segments.length; i += 1) {
+    roadPathDebugHooks?.checkCancelled?.();
+    await yieldToNextFrame();
+    roadPathDebugHooks?.checkCancelled?.();
+    const segment = segments[i]!;
+    const options = segment.options ?? {};
+    const bridgePolicy =
+      options.bridgePolicy ??
+      (typeof options.allowBridge === "boolean" ? (options.allowBridge ? "allow" : "never") : "allow");
+    const result = await findRoadPathDetailedAsync(state, segment.start, segment.end, { ...options, bridgePolicy });
+    if (result.path.length === 0) {
+      return false;
+    }
+    planned.push({ path: result.path, bridgeTileIndices: result.bridgeTileIndices });
+  }
+  for (let i = 0; i < planned.length; i += 1) {
+    const result = planned[i]!;
+    carveRoadPath(state, rng, result.path, { allowBridgeIndices: new Set<number>(result.bridgeTileIndices) });
+  }
+  return true;
+}
+
 export function carveRoadDetailed(
   state: WorldState,
   rng: RNG,
@@ -2167,6 +3663,39 @@ export function carveRoadDetailed(
   const bridgePolicy =
     options.bridgePolicy ?? (typeof options.allowBridge === "boolean" ? (options.allowBridge ? "allow" : "never") : "allow");
   const result = findRoadPathDetailed(state, start, end, { ...options, bridgePolicy });
+  if (result.path.length === 0) {
+    return {
+      carved: false,
+      bounds: null,
+      pathLength: 0,
+      path: [],
+      bridgeTileIndices: []
+    };
+  }
+  const bridgeSet = new Set<number>(result.bridgeTileIndices);
+  const carved = carveRoadPath(state, rng, result.path, { allowBridgeIndices: bridgeSet });
+  return {
+    carved,
+    bounds: carved ? getPathBounds(result.path) : null,
+    pathLength: carved ? result.path.length : 0,
+    path: carved ? result.path.map((point) => ({ ...point })) : [],
+    bridgeTileIndices: carved ? [...result.bridgeTileIndices] : []
+  };
+}
+
+export async function carveRoadDetailedAsync(
+  state: WorldState,
+  rng: RNG,
+  start: Point,
+  end: Point,
+  options: RoadCarveOptions = {}
+): Promise<RoadCarveResult> {
+  roadPathDebugHooks?.checkCancelled?.();
+  await yieldToNextFrame();
+  roadPathDebugHooks?.checkCancelled?.();
+  const bridgePolicy =
+    options.bridgePolicy ?? (typeof options.allowBridge === "boolean" ? (options.allowBridge ? "allow" : "never") : "allow");
+  const result = await findRoadPathDetailedAsync(state, start, end, { ...options, bridgePolicy });
   if (result.path.length === 0) {
     return {
       carved: false,

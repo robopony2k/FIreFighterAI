@@ -15,9 +15,11 @@ import { TREE_TYPE_IDS } from "../core/types.js";
 import { syncTileSoA } from "../core/tileCache.js";
 import {
   createMapGenSession,
+  isMapGenCancelledError,
   type MapGenDebug,
   type MapGenDebugPhase,
   type MapGenDebugSnapshot,
+  type MapGenDiagnosticEvent,
   type MapGenSession
 } from "../mapgen/index.js";
 import {
@@ -77,6 +79,7 @@ type MapEditorStepId =
   | "erosion"
   | "flooding"
   | "rivers"
+  | "biomes"
   | "settlements"
   | "vegetation"
   | "final";
@@ -97,6 +100,14 @@ type MapEditorRefs = {
   coastDebugMeta: HTMLDivElement;
   coastDebugOutput: HTMLPreElement;
   coastDebugCopy: HTMLButtonElement;
+  diagnosticsToggle: HTMLInputElement;
+  diagnosticsCancel: HTMLButtonElement;
+  diagnosticsPanel: HTMLDivElement;
+  diagnosticsHydrologyTab: HTMLButtonElement;
+  diagnosticsRoadTab: HTMLButtonElement;
+  diagnosticsTimelineTab: HTMLButtonElement;
+  diagnosticsSummary: HTMLDivElement;
+  diagnosticsOutput: HTMLPreElement;
   scenarioList: HTMLSelectElement;
   scenarioLoad: HTMLButtonElement;
   scenarioEntryStatus: HTMLDivElement;
@@ -114,6 +125,8 @@ type MapEditorRefs = {
   shareCodeStatus: HTMLDivElement;
   advancedToggle: HTMLInputElement;
   erosionCompareToggle: HTMLInputElement;
+  previewGenerateButton: HTMLButtonElement;
+  previewGenerateStatus: HTMLDivElement;
   legacyNotice: HTMLDivElement;
   backToMenu: HTMLButtonElement;
   mapSizeInputs: HTMLInputElement[];
@@ -125,6 +138,7 @@ type MapEditorRefs = {
   erosionControls: HTMLDivElement;
   floodingControls: HTMLDivElement;
   riverControls: HTMLDivElement;
+  biomeControls: HTMLDivElement;
   settlementControls: HTMLDivElement;
   vegetationControls: HTMLDivElement;
 };
@@ -247,6 +261,12 @@ const MAP_EDITOR_PREVIEW_BY_STEP: Record<MapEditorStepId, StepPreviewConfig> = {
   rivers: {
     label: "Rivers + Lakes",
     stopAfterPhase: "hydro:rivers",
+    sampleSource: "snapshot",
+    treesEnabled: false
+  },
+  biomes: {
+    label: "Biomes",
+    stopAfterPhase: "biome:classify",
     sampleSource: "snapshot",
     treesEnabled: false
   },
@@ -416,6 +436,70 @@ type WorldPreviewSample = ReturnType<typeof buildWorldPreviewSample>;
 type FastPreviewSample = RenderTerrainSample & { fastPreviewTimingsMs: FastTerrainPreviewResult["timingsMs"] };
 type PreviewRenderableSample = SnapshotPreviewSample | WorldPreviewSample | FastPreviewSample;
 type DebugPreviewRenderableSample = PreviewRenderableSample & { debugRenderOptions?: TerrainRenderDebugOptions };
+type MapEditorDiagnosticsTab = "hydrology" | "road" | "timeline";
+type HydrologyDiagnosticRecord = Extract<MapGenDiagnosticEvent, { kind: `hydrology:${string}` }>;
+type RoadDiagnosticRecord = Extract<MapGenDiagnosticEvent, { kind: `road:${string}` }>;
+type MapEditorDiagnosticsState = {
+  enabled: boolean;
+  cancelRequested: boolean;
+  activeTab: MapEditorDiagnosticsTab;
+  startedAtMs: number;
+  latestEvent: MapGenDiagnosticEvent | null;
+  hydrologyRecords: HydrologyDiagnosticRecord[];
+  roadRecords: RoadDiagnosticRecord[];
+  timelineRecords: MapGenDiagnosticEvent[];
+  hydrologyOverflowCount: number;
+  roadOverflowCount: number;
+  timelineOverflowCount: number;
+  hydrologyCandidates: number;
+  hydrologyRejected: number;
+  hydrologyAccepted: number;
+  hydrologyOverflowRoutes: number;
+  hydrologyWaterfallsAccepted: number;
+  roadAttempts: number;
+  roadFound: number;
+  roadFailed: number;
+  roadBudgetAborted: number;
+  roadCarves: number;
+  roadProgressEvents: number;
+  roadActiveAttemptId: number | null;
+  roadActiveLabel: string;
+  roadActiveVisitedNodes: number;
+  roadActiveElapsedMs: number;
+};
+
+const DIAGNOSTIC_DETAIL_CAP = 500;
+const DIAGNOSTIC_TIMELINE_CAP = 800;
+
+const createDiagnosticsState = (): MapEditorDiagnosticsState => ({
+  enabled: false,
+  cancelRequested: false,
+  activeTab: "hydrology",
+  startedAtMs: 0,
+  latestEvent: null,
+  hydrologyRecords: [],
+  roadRecords: [],
+  timelineRecords: [],
+  hydrologyOverflowCount: 0,
+  roadOverflowCount: 0,
+  timelineOverflowCount: 0,
+  hydrologyCandidates: 0,
+  hydrologyRejected: 0,
+  hydrologyAccepted: 0,
+  hydrologyOverflowRoutes: 0,
+  hydrologyWaterfallsAccepted: 0,
+  roadAttempts: 0,
+  roadFound: 0,
+  roadFailed: 0,
+  roadBudgetAborted: 0,
+  roadCarves: 0,
+  roadProgressEvents: 0,
+  roadActiveAttemptId: null,
+  roadActiveLabel: "",
+  roadActiveVisitedNodes: 0,
+  roadActiveElapsedMs: 0
+});
+
 type CoastlineProbe = {
   label: string;
   x: number;
@@ -432,6 +516,7 @@ const MAP_EDITOR_STEP_SEQUENCE: readonly MapEditorStepId[] = [
   "flooding",
   "erosion",
   "rivers",
+  "biomes",
   "settlements",
   "vegetation",
   "final"
@@ -527,7 +612,7 @@ const formatTileTypeLabel = (typeId: number | undefined): string =>
 const findCoastlineProbeReferenceSample = (
   samples: Partial<Record<MapEditorStepId, PreviewRenderableSample>>
 ): { stepId: MapEditorStepId; sample: PreviewRenderableSample } | null => {
-  const preferredSteps: readonly MapEditorStepId[] = ["flooding", "rivers", "settlements", "vegetation", "final"];
+  const preferredSteps: readonly MapEditorStepId[] = ["flooding", "rivers", "biomes", "settlements", "vegetation", "final"];
   for (let i = 0; i < preferredSteps.length; i += 1) {
     const stepId = preferredSteps[i]!;
     const sample = samples[stepId];
@@ -973,6 +1058,14 @@ export const getMapEditorRefs = (): MapEditorRefs => ({
   coastDebugMeta: document.getElementById("mapEditorCoastDebugMeta") as HTMLDivElement,
   coastDebugOutput: document.getElementById("mapEditorCoastDebugOutput") as HTMLPreElement,
   coastDebugCopy: document.getElementById("mapEditorCoastDebugCopy") as HTMLButtonElement,
+  diagnosticsToggle: document.getElementById("mapEditorDiagnosticsToggle") as HTMLInputElement,
+  diagnosticsCancel: document.getElementById("mapEditorDiagnosticsCancel") as HTMLButtonElement,
+  diagnosticsPanel: document.getElementById("mapEditorDiagnosticsPanel") as HTMLDivElement,
+  diagnosticsHydrologyTab: document.getElementById("mapEditorDiagnosticsHydrologyTab") as HTMLButtonElement,
+  diagnosticsRoadTab: document.getElementById("mapEditorDiagnosticsRoadTab") as HTMLButtonElement,
+  diagnosticsTimelineTab: document.getElementById("mapEditorDiagnosticsTimelineTab") as HTMLButtonElement,
+  diagnosticsSummary: document.getElementById("mapEditorDiagnosticsSummary") as HTMLDivElement,
+  diagnosticsOutput: document.getElementById("mapEditorDiagnosticsOutput") as HTMLPreElement,
   scenarioList: document.getElementById("mapEditorScenarioList") as HTMLSelectElement,
   scenarioLoad: document.getElementById("mapEditorScenarioLoad") as HTMLButtonElement,
   scenarioEntryStatus: document.getElementById("mapEditorScenarioEntryStatus") as HTMLDivElement,
@@ -990,6 +1083,8 @@ export const getMapEditorRefs = (): MapEditorRefs => ({
   shareCodeStatus: document.getElementById("mapEditorShareCodeStatus") as HTMLDivElement,
   advancedToggle: document.getElementById("mapEditorAdvancedToggle") as HTMLInputElement,
   erosionCompareToggle: document.getElementById("mapEditorErosionCompareToggle") as HTMLInputElement,
+  previewGenerateButton: document.getElementById("mapEditorGeneratePreview") as HTMLButtonElement,
+  previewGenerateStatus: document.getElementById("mapEditorGenerateStatus") as HTMLDivElement,
   legacyNotice: document.getElementById("mapEditorLegacyNotice") as HTMLDivElement,
   backToMenu: document.getElementById("mapEditorBackToMenu") as HTMLButtonElement,
   mapSizeInputs: Array.from(document.querySelectorAll<HTMLInputElement>('#mapEditorScreen input[name="mapEditorMapSize"]')),
@@ -1001,6 +1096,7 @@ export const getMapEditorRefs = (): MapEditorRefs => ({
   erosionControls: document.getElementById("mapEditorErosionControls") as HTMLDivElement,
   floodingControls: document.getElementById("mapEditorFloodingControls") as HTMLDivElement,
   riverControls: document.getElementById("mapEditorRiverControls") as HTMLDivElement,
+  biomeControls: document.getElementById("mapEditorBiomeControls") as HTMLDivElement,
   settlementControls: document.getElementById("mapEditorSettlementControls") as HTMLDivElement,
   vegetationControls: document.getElementById("mapEditorVegetationControls") as HTMLDivElement,
 });
@@ -1037,14 +1133,14 @@ export const initMapEditor = (refs: MapEditorRefs, deps: MapEditorDeps): MapEdit
     groups: MAP_EDITOR_TERRAIN_GROUPS.rivers
   });
   buildTerrainControls({
+    container: refs.biomeControls,
+    idPrefix: "mapEditorBiomes",
+    groups: MAP_EDITOR_TERRAIN_GROUPS.vegetation
+  });
+  buildTerrainControls({
     container: refs.settlementControls,
     idPrefix: "mapEditorSettlements",
     groups: MAP_EDITOR_TERRAIN_GROUPS.settlements
-  });
-  buildTerrainControls({
-    container: refs.vegetationControls,
-    idPrefix: "mapEditorVegetation",
-    groups: MAP_EDITOR_TERRAIN_GROUPS.vegetation
   });
   let previewUnavailableReason: string | null = null;
   let preview: TerrainPreviewController;
@@ -1146,6 +1242,8 @@ export const initMapEditor = (refs: MapEditorRefs, deps: MapEditorDeps): MapEdit
   let previewCacheKey: string | null = null;
   let previewCachedSamples: Partial<Record<MapEditorStepId, PreviewRenderableSample>> = {};
   let previewErosionBaselineSample: PreviewRenderableSample | null = null;
+  let previewNeedsGenerate = true;
+  let diagnosticsState: MapEditorDiagnosticsState = createDiagnosticsState();
   let assetsReadyForSession = false;
   let advancedMode = false;
   let previewHoveredTile: TerrainPreviewHoverTile | null = null;
@@ -1159,6 +1257,31 @@ export const initMapEditor = (refs: MapEditorRefs, deps: MapEditorDeps): MapEdit
   const getActivePreviewConfig = (): StepPreviewConfig =>
     isErosionCompareEnabled() ? MAP_EDITOR_EROSION_COMPARE_PREVIEW : MAP_EDITOR_PREVIEW_BY_STEP[activeStep];
 
+  const updatePreviewGenerateAction = (): void => {
+    const label = getActivePreviewConfig().label;
+    refs.previewGenerateButton.textContent = previewRunning ? "Generating..." : `Generate ${label}`;
+    refs.previewGenerateButton.disabled = !visible || !isPreviewAvailable() || !assetsReadyForSession || previewRunning;
+    if (!isPreviewAvailable()) {
+      refs.previewGenerateStatus.textContent = "3D preview unavailable.";
+      return;
+    }
+    if (!assetsReadyForSession) {
+      refs.previewGenerateStatus.textContent = "Preview assets loading.";
+      return;
+    }
+    if (previewRunning) {
+      refs.previewGenerateStatus.textContent = `${label} generation in progress.`;
+      return;
+    }
+    if (getActiveCachedPreviewSample()) {
+      refs.previewGenerateStatus.textContent = previewNeedsGenerate
+        ? `${label} has changed settings. Generate to refresh.`
+        : `${label} preview is current.`;
+      return;
+    }
+    refs.previewGenerateStatus.textContent = `Generate ${label} to render this stage.`;
+  };
+
   const syncAdvancedVisibility = (): void => {
     advancedMode = refs.advancedToggle.checked;
     refs.screen.querySelectorAll<HTMLElement>("[data-terrain-advanced='true']").forEach((element) => {
@@ -1168,6 +1291,138 @@ export const initMapEditor = (refs: MapEditorRefs, deps: MapEditorDeps): MapEdit
 
   const syncErosionCompareToggleAvailability = (): void => {
     refs.erosionCompareToggle.disabled = activeStep !== "erosion";
+  };
+
+  const pushDiagnosticRecord = <T>(records: T[], record: T, cap: number, onOverflow: () => void): void => {
+    if (records.length >= cap) {
+      records.shift();
+      onOverflow();
+    }
+    records.push(record);
+  };
+
+  const resetDiagnosticsRun = (): void => {
+    const enabled = refs.diagnosticsToggle.checked;
+    const activeTab = diagnosticsState.activeTab;
+    diagnosticsState = createDiagnosticsState();
+    diagnosticsState.enabled = enabled;
+    diagnosticsState.activeTab = activeTab;
+    diagnosticsState.startedAtMs = typeof performance !== "undefined" ? performance.now() : Date.now();
+  };
+
+  const formatDiagnosticEvent = (event: MapGenDiagnosticEvent): string => {
+    switch (event.kind) {
+      case "hydrology:candidate":
+        return `candidate seed=${event.basinSeedIndex} score=${event.score.toFixed(3)} area=${event.area}/${event.footprintTiles} depth=${event.maxDepth.toFixed(3)} outlet=${event.outletIndex}->${event.outletTargetIndex}`;
+      case "hydrology:reject":
+        return `reject seed=${event.basinSeedIndex} reason=${event.reason} score=${event.score.toFixed(3)} tiles=${event.footprintTiles}`;
+      case "hydrology:lake":
+        return `lake #${event.lake.id} tiles=${event.lake.tiles.length} depth=${event.lake.maxDepth.toFixed(3)} outlet=${event.lake.outletIndex}->${event.lake.outletTargetIndex}`;
+      case "hydrology:overflow":
+        return `overflow lake=${event.lakeId} len=${event.tiles.length} target=${event.outletTargetIndex} ocean=${event.reachedOcean} river=${event.reachedExistingRiver} lake=${event.reachedLakeId}`;
+      case "hydrology:waterfall":
+        return `waterfall ${event.accepted ? "accepted" : "rejected"} source=${event.waterfall.sourceIndex} target=${event.waterfall.targetIndex} drop=${event.waterfall.drop.toFixed(3)} lake=${event.waterfall.lakeId}`;
+      case "road:attempt":
+        return `${event.planner === "streamer" ? "streamer" : "A*"} search #${event.attemptId} ${event.mode} bridge=${event.allowBridge} ${event.start.x},${event.start.y}${event.end ? ` -> ${event.end.x},${event.end.y}` : " -> target"}${event.destinationSeedCount ? ` seeds=${event.destinationSeedCount}` : ""}${event.joinRadius ? ` join<=${event.joinRadius}` : ""} limits=${event.gradeLimit.toFixed(3)}/${event.crossfallLimit.toFixed(3)}/${event.gradeChangeLimit.toFixed(3)}`;
+      case "road:progress":
+        return `${event.planner === "streamer" ? "streamer" : "A*"} progress #${event.attemptId} visited=${event.visitedNodes} open=${event.openNodes} at=${event.current ? `${event.current.x},${event.current.y}` : "-"} ${Math.round(event.elapsedMs)}ms`;
+      case "road:result":
+        return `${event.planner === "streamer" ? "streamer" : "A*"} result #${event.attemptId} ${event.found ? "path found" : event.budgetAborted ? "budget aborted" : "exhausted"} visited=${event.visitedNodes} pathLen=${event.pathLength} ${Math.round(event.elapsedMs)}ms`;
+      case "road:carve":
+        return `committed road path len=${event.pathLength}${event.bounds ? ` bounds=${event.bounds.minX},${event.bounds.minY}-${event.bounds.maxX},${event.bounds.maxY}` : ""}${event.bridgeTileIndices ? ` bridges=${event.bridgeTileIndices.length}` : ""}`;
+      case "mapgen:cancelled":
+        return `cancelled ${event.phase ?? "-"} ${event.message}`;
+      default:
+        return JSON.stringify(event);
+    }
+  };
+
+  const renderDiagnosticsPanel = (): void => {
+    setElementHidden(refs.diagnosticsPanel, !diagnosticsState.enabled);
+    setElementHidden(refs.diagnosticsCancel, !diagnosticsState.enabled);
+    refs.diagnosticsCancel.disabled = !previewRunning || diagnosticsState.cancelRequested;
+    refs.diagnosticsHydrologyTab.classList.toggle("is-active", diagnosticsState.activeTab === "hydrology");
+    refs.diagnosticsRoadTab.classList.toggle("is-active", diagnosticsState.activeTab === "road");
+    refs.diagnosticsTimelineTab.classList.toggle("is-active", diagnosticsState.activeTab === "timeline");
+    if (!diagnosticsState.enabled) {
+      return;
+    }
+    const now = typeof performance !== "undefined" ? performance.now() : Date.now();
+    const elapsedMs = diagnosticsState.startedAtMs > 0 ? Math.max(0, now - diagnosticsState.startedAtMs) : 0;
+    const activeRoad =
+      previewRunning && diagnosticsState.roadActiveAttemptId !== null
+        ? ` | active road search #${diagnosticsState.roadActiveAttemptId} ${diagnosticsState.roadActiveLabel} visited ${diagnosticsState.roadActiveVisitedNodes} ${Math.round(diagnosticsState.roadActiveElapsedMs)}ms`
+        : "";
+    refs.diagnosticsSummary.textContent =
+      `elapsed ${Math.round(elapsedMs)}ms | hydro candidates ${diagnosticsState.hydrologyCandidates}, rejected ${diagnosticsState.hydrologyRejected}, lakes ${diagnosticsState.hydrologyAccepted}, overflow ${diagnosticsState.hydrologyOverflowRoutes} | road searches ${diagnosticsState.roadAttempts}, path found ${diagnosticsState.roadFound}, exhausted ${diagnosticsState.roadFailed}, budget ${diagnosticsState.roadBudgetAborted}, committed ${diagnosticsState.roadCarves}${activeRoad}`;
+    const records =
+      diagnosticsState.activeTab === "hydrology"
+        ? diagnosticsState.hydrologyRecords.map(formatDiagnosticEvent)
+        : diagnosticsState.activeTab === "road"
+          ? diagnosticsState.roadRecords.map(formatDiagnosticEvent)
+          : diagnosticsState.timelineRecords.map(formatDiagnosticEvent);
+    const overflow =
+      diagnosticsState.activeTab === "hydrology"
+        ? diagnosticsState.hydrologyOverflowCount
+        : diagnosticsState.activeTab === "road"
+          ? diagnosticsState.roadOverflowCount
+          : diagnosticsState.timelineOverflowCount;
+    refs.diagnosticsOutput.textContent =
+      records.length > 0
+        ? `${overflow > 0 ? `...${overflow} older records discarded\n` : ""}${records.slice(-80).join("\n")}`
+        : "No diagnostic records yet.";
+  };
+
+  const recordDiagnosticEvent = (event: MapGenDiagnosticEvent): void => {
+    if (!diagnosticsState.enabled) {
+      return;
+    }
+    diagnosticsState.latestEvent = event;
+    pushDiagnosticRecord(diagnosticsState.timelineRecords, event, DIAGNOSTIC_TIMELINE_CAP, () => {
+      diagnosticsState.timelineOverflowCount += 1;
+    });
+    if (event.kind.startsWith("hydrology:")) {
+      const hydroEvent = event as HydrologyDiagnosticRecord;
+      pushDiagnosticRecord(diagnosticsState.hydrologyRecords, hydroEvent, DIAGNOSTIC_DETAIL_CAP, () => {
+        diagnosticsState.hydrologyOverflowCount += 1;
+      });
+      if (event.kind === "hydrology:candidate") diagnosticsState.hydrologyCandidates += 1;
+      if (event.kind === "hydrology:reject") diagnosticsState.hydrologyRejected += 1;
+      if (event.kind === "hydrology:lake") diagnosticsState.hydrologyAccepted += 1;
+      if (event.kind === "hydrology:overflow") diagnosticsState.hydrologyOverflowRoutes += 1;
+      if (event.kind === "hydrology:waterfall" && event.accepted) diagnosticsState.hydrologyWaterfallsAccepted += 1;
+    } else if (event.kind.startsWith("road:")) {
+      const roadEvent = event as RoadDiagnosticRecord;
+      pushDiagnosticRecord(diagnosticsState.roadRecords, roadEvent, DIAGNOSTIC_DETAIL_CAP, () => {
+        diagnosticsState.roadOverflowCount += 1;
+      });
+      if (event.kind === "road:attempt") diagnosticsState.roadAttempts += 1;
+      if (event.kind === "road:attempt") {
+        diagnosticsState.roadActiveAttemptId = event.attemptId;
+        diagnosticsState.roadActiveLabel = `${event.mode} ${event.start.x},${event.start.y}${event.end ? ` -> ${event.end.x},${event.end.y}` : " -> target"}`;
+        diagnosticsState.roadActiveVisitedNodes = 0;
+        diagnosticsState.roadActiveElapsedMs = 0;
+      }
+      if (event.kind === "road:progress") {
+        diagnosticsState.roadProgressEvents += 1;
+        diagnosticsState.roadActiveAttemptId = event.attemptId;
+        diagnosticsState.roadActiveVisitedNodes = event.visitedNodes;
+        diagnosticsState.roadActiveElapsedMs = event.elapsedMs;
+      }
+      if (event.kind === "road:result") {
+        if (event.found) diagnosticsState.roadFound += 1;
+        else diagnosticsState.roadFailed += 1;
+        if (event.budgetAborted) diagnosticsState.roadBudgetAborted += 1;
+        if (diagnosticsState.roadActiveAttemptId === event.attemptId) {
+          diagnosticsState.roadActiveVisitedNodes = event.visitedNodes;
+          diagnosticsState.roadActiveElapsedMs = event.elapsedMs;
+        }
+      }
+      if (event.kind === "road:carve") {
+        diagnosticsState.roadCarves += 1;
+      }
+    }
+    renderDiagnosticsPanel();
   };
 
   const setActiveStep = (stepId: MapEditorStepId): void => {
@@ -1184,20 +1439,13 @@ export const initMapEditor = (refs: MapEditorRefs, deps: MapEditorDeps): MapEdit
     syncCurrentScenarioLabel();
     updateCoastlineDebugPanel();
     const draft = collectDraft();
-    const cacheKey = syncPreviewCacheDraft(draft);
-    void cacheKey;
-    if (getFastPreviewMode(stepId) !== null && renderFastPreviewForDraft(draft, stepId, previewRecenterPending)) {
-      previewRecenterPending = false;
-      return;
-    }
+    syncPreviewCacheDraft(draft);
     if (tryRenderCachedActiveStep()) {
+      previewNeedsGenerate = false;
+      updatePreviewGenerateAction();
       return;
     }
-    if (previewRunning) {
-      requestPreviewBuild(false, true);
-      return;
-    }
-    requestPreviewBuild(false, true);
+    markActivePreviewNeedsGenerate();
   };
 
   const getSelectedMapSize = (): MapSizeId => {
@@ -1332,7 +1580,7 @@ export const initMapEditor = (refs: MapEditorRefs, deps: MapEditorDeps): MapEdit
     setScenarioEntryStatus(entryMessage);
     setScenarioStatus(saveMessage);
     setShareCodeStatus("Copy the share code or save this terrain as a named scenario.");
-    requestPreviewBuild(true, true);
+    markActivePreviewNeedsGenerate();
   };
 
   const collectDraft = (): TerrainDraft => ({
@@ -1357,6 +1605,7 @@ export const initMapEditor = (refs: MapEditorRefs, deps: MapEditorDeps): MapEdit
       previewErosionBaselineSample = null;
       previewPipelineSession = null;
       previewPipelineSessionCacheKey = null;
+      previewNeedsGenerate = true;
       updateCoastlineDebugPanel();
     }
     return cacheKey;
@@ -1368,6 +1617,7 @@ export const initMapEditor = (refs: MapEditorRefs, deps: MapEditorDeps): MapEdit
     previewErosionBaselineSample = null;
     previewPipelineSession = null;
     previewPipelineSessionCacheKey = null;
+    previewNeedsGenerate = true;
     updateCoastlineDebugPanel();
   };
 
@@ -1422,6 +1672,7 @@ export const initMapEditor = (refs: MapEditorRefs, deps: MapEditorDeps): MapEdit
       return false;
     }
     preview.setTerrain(applyTerrainRenderDebugOptions(sample, previewRenderDebugState), { recenter });
+    previewNeedsGenerate = false;
     hidePreviewOverlay();
     syncCurrentScenarioLabel();
     return true;
@@ -1458,6 +1709,7 @@ export const initMapEditor = (refs: MapEditorRefs, deps: MapEditorDeps): MapEdit
     }
     cacheEquivalentPreviewSample(cacheKey, stepId, sample);
     if (activeStep === stepId) {
+      previewNeedsGenerate = false;
       preview.setTerrain(applyTerrainRenderDebugOptions(sample, previewRenderDebugState, false), { recenter });
       hidePreviewOverlay();
       syncCurrentScenarioLabel();
@@ -1607,7 +1859,7 @@ export const initMapEditor = (refs: MapEditorRefs, deps: MapEditorDeps): MapEdit
     if (tryRenderCachedActiveStep()) {
       return;
     }
-    requestPreviewBuild(false, false);
+    markActivePreviewNeedsGenerate();
   };
   [
     terrainFinalVerticesToggle,
@@ -1632,9 +1884,16 @@ export const initMapEditor = (refs: MapEditorRefs, deps: MapEditorDeps): MapEdit
     } | null;
     const fastMode = getFastPreviewMode(activeStep);
     if (fastMode && activeSample?.fastPreviewTimingsMs) {
-      return `Fast preview: ${fastMode} - ${Math.round(activeSample.fastPreviewTimingsMs.total)}ms - ${sourceLabel}`;
+      return previewNeedsGenerate
+        ? `Fast preview stale: ${fastMode} - ${sourceLabel}`
+        : `Fast preview: ${fastMode} - ${Math.round(activeSample.fastPreviewTimingsMs.total)}ms - ${sourceLabel}`;
     }
-    return `Preview layer: ${getActivePreviewConfig().label} - ${sourceLabel}`;
+    if (activeSample) {
+      return previewNeedsGenerate
+        ? `Preview stale: ${getActivePreviewConfig().label} - ${sourceLabel}`
+        : `Preview layer: ${getActivePreviewConfig().label} - ${sourceLabel}`;
+    }
+    return `Preview not generated: ${getActivePreviewConfig().label} - ${sourceLabel}`;
   };
 
   const refreshScenarioList = (): void => {
@@ -1674,6 +1933,7 @@ export const initMapEditor = (refs: MapEditorRefs, deps: MapEditorDeps): MapEdit
   const syncCurrentScenarioLabel = (): void => {
     const draft = collectDraft();
     refs.previewMeta.textContent = describePreviewState(draft);
+    updatePreviewGenerateAction();
   };
 
   const showPreviewOverlay = (message: string, progress: number, mode: "loading" | "error" = "loading"): void => {
@@ -1692,6 +1952,19 @@ export const initMapEditor = (refs: MapEditorRefs, deps: MapEditorDeps): MapEdit
     refs.previewMeta.textContent = "3D preview unavailable";
     updateBridgeDebugPanel({ selectedSpan: null, bridgeDebug: null });
     updateCoastlineDebugPanel();
+    updatePreviewGenerateAction();
+  };
+
+  const markActivePreviewNeedsGenerate = (): void => {
+    previewNeedsGenerate = true;
+    if (previewRunning) {
+      previewBuildToken += 1;
+      previewPending = false;
+    }
+    if (visible && isPreviewAvailable()) {
+      showPreviewOverlay(`Generate ${getActivePreviewConfig().label} to render this stage.`, 0);
+    }
+    syncCurrentScenarioLabel();
   };
 
   const ensurePreviewPipelineSession = (draft: TerrainDraft, cacheKey: string): MapGenSession => {
@@ -1726,6 +1999,7 @@ export const initMapEditor = (refs: MapEditorRefs, deps: MapEditorDeps): MapEdit
     const draft = collectDraft();
     const cacheKey = syncPreviewCacheDraft(draft);
     const terrainHeightScaleMultiplier = getTerrainHeightScaleMultiplier(draft.terrain, draft.mapSize);
+    const requestedStep = activeStep;
     const previewConfig = getActivePreviewConfig();
     const recenter = previewRecenterPending;
     previewRecenterPending = false;
@@ -1734,9 +2008,17 @@ export const initMapEditor = (refs: MapEditorRefs, deps: MapEditorDeps): MapEdit
     let latestSnapshotRank = -1;
 
     try {
+      updatePreviewGenerateAction();
       showPreviewOverlay(`Generating ${previewConfig.label.toLowerCase()} preview...`, 0);
+      if (refs.diagnosticsToggle.checked) {
+        resetDiagnosticsRun();
+      } else {
+        diagnosticsState.enabled = false;
+        diagnosticsState.cancelRequested = false;
+      }
+      renderDiagnosticsPanel();
       if (previewConfig.sampleSource === "fast") {
-        if (!renderFastPreviewForDraft(draft, activeStep, recenter)) {
+        if (!renderFastPreviewForDraft(draft, requestedStep, recenter)) {
           throw new Error("Fast preview unavailable.");
         }
         return;
@@ -1744,12 +2026,39 @@ export const initMapEditor = (refs: MapEditorRefs, deps: MapEditorDeps): MapEdit
       const targetPhaseRank = getPhaseRank(previewConfig.stopAfterPhase);
       const session = ensurePreviewPipelineSession(draft, cacheKey);
       const world = session.state;
+      const diagnosticsEnabledForBuild = diagnosticsState.enabled;
+      let diagnosticRoadCarvesSinceRender = 0;
+      let lastDiagnosticRoadRenderMs = 0;
+      const renderDiagnosticRoadProgress = (event: MapGenDiagnosticEvent): void => {
+        if (event.kind !== "road:carve" || targetPhaseRank < getPhaseRank("roads:connect")) {
+          return;
+        }
+        if (!visible || sessionToken !== previewSessionToken || buildToken !== previewBuildToken) {
+          return;
+        }
+        const now = typeof performance !== "undefined" ? performance.now() : Date.now();
+        diagnosticRoadCarvesSinceRender += 1;
+        if (lastDiagnosticRoadRenderMs > 0 && diagnosticRoadCarvesSinceRender < 12 && now - lastDiagnosticRoadRenderMs < 180) {
+          return;
+        }
+        diagnosticRoadCarvesSinceRender = 0;
+        lastDiagnosticRoadRenderMs = now;
+        preview.setTerrain(
+          applyTerrainRenderDebugOptions(
+            buildWorldPreviewSample(world, false, terrainHeightScaleMultiplier, latestSnapshot),
+            previewRenderDebugState
+          ),
+          { recenter: recenter && !appliedStageCamera }
+        );
+        appliedStageCamera = appliedStageCamera || recenter;
+      };
       const debug: MapGenDebug = {
         stopAfterPhase: previewConfig.stopAfterPhase,
         onPhase: async (snapshot) => {
           if (!visible || sessionToken !== previewSessionToken || buildToken !== previewBuildToken) {
             return;
           }
+          const isRequestedStepActive = activeStep === requestedStep;
           switch (snapshot.phase) {
             case "terrain:carving": {
               cacheEquivalentPreviewSample(
@@ -1770,6 +2079,14 @@ export const initMapEditor = (refs: MapEditorRefs, deps: MapEditorDeps): MapEdit
               cacheEquivalentPreviewSample(
                 cacheKey,
                 "erosion",
+                buildSnapshotSample(snapshot, world.grid, world.seed, terrainHeightScaleMultiplier, false)
+              );
+              break;
+            }
+            case "biome:classify": {
+              cacheEquivalentPreviewSample(
+                cacheKey,
+                "biomes",
                 buildSnapshotSample(snapshot, world.grid, world.seed, terrainHeightScaleMultiplier, false)
               );
               break;
@@ -1811,7 +2128,7 @@ export const initMapEditor = (refs: MapEditorRefs, deps: MapEditorDeps): MapEdit
           } else {
             return;
           }
-          if (previewConfig.sampleSource !== "snapshot" || snapshot.phase !== previewConfig.stopAfterPhase) {
+          if (!isRequestedStepActive || previewConfig.sampleSource !== "snapshot" || snapshot.phase !== previewConfig.stopAfterPhase) {
             return;
           }
           preview.setTerrain(
@@ -1822,7 +2139,12 @@ export const initMapEditor = (refs: MapEditorRefs, deps: MapEditorDeps): MapEdit
             { recenter: recenter && !appliedStageCamera }
           );
           appliedStageCamera = appliedStageCamera || recenter;
-        }
+        },
+        onDiagnosticEvent: diagnosticsEnabledForBuild ? (event) => {
+          recordDiagnosticEvent(event);
+          renderDiagnosticRoadProgress(event);
+        } : undefined,
+        shouldCancel: diagnosticsEnabledForBuild ? () => diagnosticsState.enabled && diagnosticsState.cancelRequested : undefined
       };
       await session.advanceTo(
         previewConfig.stopAfterPhase,
@@ -1848,21 +2170,39 @@ export const initMapEditor = (refs: MapEditorRefs, deps: MapEditorDeps): MapEdit
           terrainHeightScaleMultiplier,
           previewConfig.treesEnabled
         );
-        if (activeStep === "erosion" && refs.erosionCompareToggle.checked) {
+        if (requestedStep === "erosion" && refs.erosionCompareToggle.checked) {
           cacheErosionBaselineSample(cacheKey, sample);
         } else {
-          cacheEquivalentPreviewSample(cacheKey, activeStep, sample);
+          cacheEquivalentPreviewSample(cacheKey, requestedStep, sample);
         }
-        preview.setTerrain(applyTerrainRenderDebugOptions(sample, previewRenderDebugState), { recenter: recenter && !appliedStageCamera });
+        if (activeStep === requestedStep) {
+          previewNeedsGenerate = false;
+          preview.setTerrain(applyTerrainRenderDebugOptions(sample, previewRenderDebugState), { recenter: recenter && !appliedStageCamera });
+        }
       } else {
         const sample = buildWorldPreviewSample(world, previewConfig.treesEnabled, terrainHeightScaleMultiplier, latestSnapshot);
-        cacheEquivalentPreviewSample(cacheKey, activeStep, sample);
-        preview.setTerrain(applyTerrainRenderDebugOptions(sample, previewRenderDebugState), { recenter: recenter && !appliedStageCamera });
+        cacheEquivalentPreviewSample(cacheKey, requestedStep, sample);
+        if (activeStep === requestedStep) {
+          previewNeedsGenerate = false;
+          preview.setTerrain(applyTerrainRenderDebugOptions(sample, previewRenderDebugState), { recenter: recenter && !appliedStageCamera });
+        }
       }
-      hidePreviewOverlay();
-      syncCurrentScenarioLabel();
+      if (activeStep === requestedStep) {
+        hidePreviewOverlay();
+        syncCurrentScenarioLabel();
+      }
     } catch (error) {
       if (!visible || sessionToken !== previewSessionToken || buildToken !== previewBuildToken) {
+        return;
+      }
+      if (isMapGenCancelledError(error)) {
+        recordDiagnosticEvent({
+          kind: "mapgen:cancelled",
+          phase: previewConfig.stopAfterPhase,
+          message: error.message
+        });
+        hidePreviewOverlay();
+        refs.previewMeta.textContent = "Diagnostic preview cancelled; partial results retained.";
         return;
       }
       const message = error instanceof Error ? error.message : "Preview generation failed.";
@@ -1870,6 +2210,10 @@ export const initMapEditor = (refs: MapEditorRefs, deps: MapEditorDeps): MapEdit
       refs.previewMeta.textContent = "Preview failed";
     } finally {
       previewRunning = false;
+      refs.diagnosticsCancel.disabled = false;
+      diagnosticsState.cancelRequested = false;
+      renderDiagnosticsPanel();
+      updatePreviewGenerateAction();
       if (visible && assetsReadyForSession && previewPending) {
         void runPreviewBuild();
       }
@@ -1889,6 +2233,7 @@ export const initMapEditor = (refs: MapEditorRefs, deps: MapEditorDeps): MapEdit
     }
     previewPending = true;
     previewRecenterPending = previewRecenterPending || recenter;
+    updatePreviewGenerateAction();
     if (!visible) {
       return;
     }
@@ -1901,10 +2246,12 @@ export const initMapEditor = (refs: MapEditorRefs, deps: MapEditorDeps): MapEdit
       return;
     }
     if (!assetsReadyForSession) {
+      updatePreviewGenerateAction();
       return;
     }
     if (previewRunning) {
       previewBuildToken += 1;
+      updatePreviewGenerateAction();
       return;
     }
     if (previewDebounceHandle) {
@@ -1946,7 +2293,7 @@ export const initMapEditor = (refs: MapEditorRefs, deps: MapEditorDeps): MapEdit
     setScenarioEntryStatus(`Loaded "${scenario.name}".`);
     setScenarioStatus(`Loaded "${scenario.name}".`);
     setShareCodeStatus("Copy the share code or save this terrain as a named scenario.");
-    requestPreviewBuild(true, true);
+    markActivePreviewNeedsGenerate();
   };
 
   const open = (config: NewRunConfig): void => {
@@ -1999,7 +2346,7 @@ export const initMapEditor = (refs: MapEditorRefs, deps: MapEditorDeps): MapEdit
         return;
       }
       assetsReadyForSession = true;
-      requestPreviewBuild(true, true);
+      markActivePreviewNeedsGenerate();
     });
   };
 
@@ -2042,9 +2389,14 @@ export const initMapEditor = (refs: MapEditorRefs, deps: MapEditorDeps): MapEdit
     preview.resetView();
   });
 
+  refs.previewGenerateButton.addEventListener("click", () => {
+    const recenter = getActiveCachedPreviewSample() === null;
+    requestPreviewBuild(recenter, true);
+  });
+
   refs.scenarioSeedInput.addEventListener("input", () => {
     applySeedFieldIfEncoded();
-    requestPreviewBuild(false);
+    markActivePreviewNeedsGenerate();
     syncCurrentScenarioLabel();
     setShareCodeStatus("Copy the share code or save this terrain as a named scenario.");
   });
@@ -2089,7 +2441,7 @@ export const initMapEditor = (refs: MapEditorRefs, deps: MapEditorDeps): MapEdit
   refs.mapSizeInputs.forEach((input) => {
     input.addEventListener("change", () => {
       syncSeedField();
-      requestPreviewBuild(true, true);
+      markActivePreviewNeedsGenerate();
       syncCurrentScenarioLabel();
     });
   });
@@ -2100,12 +2452,35 @@ export const initMapEditor = (refs: MapEditorRefs, deps: MapEditorDeps): MapEdit
       }
       syncTerrainControlOutputs(terrainControlElements);
       syncSeedField();
-      requestPreviewBuild(false);
+      markActivePreviewNeedsGenerate();
       syncCurrentScenarioLabel();
     };
     input.addEventListener(input instanceof HTMLSelectElement ? "change" : "input", sync);
   });
   refs.advancedToggle.addEventListener("change", syncAdvancedVisibility);
+  refs.diagnosticsToggle.addEventListener("change", () => {
+    diagnosticsState.enabled = refs.diagnosticsToggle.checked;
+    diagnosticsState.cancelRequested = false;
+    renderDiagnosticsPanel();
+  });
+  refs.diagnosticsCancel.addEventListener("click", () => {
+    diagnosticsState.cancelRequested = true;
+    refs.diagnosticsCancel.disabled = true;
+    refs.previewMeta.textContent = "Cancelling diagnostic preview...";
+    renderDiagnosticsPanel();
+  });
+  refs.diagnosticsHydrologyTab.addEventListener("click", () => {
+    diagnosticsState.activeTab = "hydrology";
+    renderDiagnosticsPanel();
+  });
+  refs.diagnosticsRoadTab.addEventListener("click", () => {
+    diagnosticsState.activeTab = "road";
+    renderDiagnosticsPanel();
+  });
+  refs.diagnosticsTimelineTab.addEventListener("click", () => {
+    diagnosticsState.activeTab = "timeline";
+    renderDiagnosticsPanel();
+  });
   refs.erosionCompareToggle.addEventListener("change", () => {
     syncCurrentScenarioLabel();
     updateCoastlineDebugPanel();
@@ -2115,11 +2490,12 @@ export const initMapEditor = (refs: MapEditorRefs, deps: MapEditorDeps): MapEdit
     if (tryRenderCachedActiveStep()) {
       return;
     }
-    requestPreviewBuild(false, true);
+    markActivePreviewNeedsGenerate();
   });
   syncTerrainControlOutputs(terrainControlElements);
   syncAdvancedVisibility();
   syncErosionCompareToggleAvailability();
+  renderDiagnosticsPanel();
   refs.scenarioNameInput.addEventListener("input", () => {
     syncSeedField();
     updateScenarioButtons();

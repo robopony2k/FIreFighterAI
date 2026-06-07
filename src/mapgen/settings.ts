@@ -75,6 +75,7 @@ export type MapGenSettings = {
   settlementSpacing: number;
   settlementPreGrowthYears: number;
   roadStrictness: number;
+  roadMaxGrade: number;
   forestPatchiness: number;
   lakeChance: number;
   maxLakeCount: number;
@@ -179,6 +180,7 @@ export const DEFAULT_MAP_GEN_SETTINGS: MapGenSettings = {
   settlementSpacing: 0.62,
   settlementPreGrowthYears: 20,
   roadStrictness: 0.56,
+  roadMaxGrade: 0.38,
   forestPatchiness: 0.42,
   lakeChance: 0.78,
   maxLakeCount: 4,

@@ -7,6 +7,16 @@ export const yieldToNextFrame = () =>
     }
   });
 
+export class MapGenCancelledError extends Error {
+  constructor(message = "Map generation cancelled.") {
+    super(message);
+    this.name = "MapGenCancelledError";
+  }
+}
+
+export const isMapGenCancelledError = (error: unknown): error is MapGenCancelledError =>
+  error instanceof MapGenCancelledError;
+
 const createYield = (maxIterations = 32) => {
   let lastYield = typeof performance !== "undefined" ? performance.now() : Date.now();
   let iterations = 0;

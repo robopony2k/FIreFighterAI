@@ -69,12 +69,17 @@ export const RiverStage: PipelineStage = {
     state.valleyMap = Array.from({ length: total }, () => 0);
 
     await ctx.reportStage("Resolving inland lake overflow network...", 0.72);
-    const staticHydrology = buildStaticInlandLakeNetwork({
+    const staticHydrology = await buildStaticInlandLakeNetwork({
       state,
       elevationMap,
       riverMask,
       oceanMask,
-      settings
+      settings,
+      debug: {
+        emit: (event) => ctx.emitDiagnosticEvent(event),
+        yieldIfNeeded: () => ctx.yieldAndCheck(),
+        checkCancelled: () => ctx.checkCancelled()
+      }
     });
     ctx.lakeMask = staticHydrology.lakeMask;
     ctx.lakeSurfaceMap = staticHydrology.lakeSurface;

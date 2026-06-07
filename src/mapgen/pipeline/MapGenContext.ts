@@ -1,10 +1,11 @@
 import type { RNG } from "../../core/types.js";
 import type { WorldState } from "../../core/state.js";
-import type { MapGenDebug, MapGenDebugPhase, MapGenReporter } from "../mapgenTypes.js";
+import type { MapGenDebug, MapGenDebugPhase, MapGenDiagnosticEvent, MapGenReporter } from "../mapgenTypes.js";
 import type { MapGenSettings } from "../settings.js";
 import { DEFAULT_MAP_GEN_SETTINGS, DEFAULT_ROAD_GEN_SETTINGS } from "../settings.js";
 import { mapSizeIdFromDimensions, resolveTerrainProfile, type ResolvedTerrainProfile, type TerrainRecipe } from "../terrainProfile.js";
 import { DirtyRegionTracker } from "./DirtyRegionTracker.js";
+import { MapGenCancelledError } from "./yieldController.js";
 import type { SettlementPlacementResult } from "../communities.js";
 import type { StaticHydrologyLake, StaticHydrologyRejectSummary, StaticHydrologyWaterfall } from "../../systems/terrain/types/staticHydrologyTypes.js";
 
@@ -127,10 +128,31 @@ export class MapGenContext {
   }
 
   async reportStage(message: string, localProgress: number): Promise<void> {
+    this.checkCancelled();
     if (!this.stageReport) {
       return;
     }
     await this.stageReport(message, localProgress);
+  }
+
+  checkCancelled(): void {
+    if (this.debug?.shouldCancel?.()) {
+      throw new MapGenCancelledError(`Map generation cancelled during ${this.stage}.`);
+    }
+  }
+
+  async yieldAndCheck(): Promise<boolean> {
+    this.checkCancelled();
+    const yielded = await this.yieldIfNeeded();
+    this.checkCancelled();
+    return yielded;
+  }
+
+  async emitDiagnosticEvent(event: MapGenDiagnosticEvent): Promise<void> {
+    if (!this.debug?.onDiagnosticEvent) {
+      return;
+    }
+    await this.debug.onDiagnosticEvent(event);
   }
 
   get currentPhase(): MapGenDebugPhase {

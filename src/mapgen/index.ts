@@ -1,9 +1,10 @@
 import type { RNG } from "../core/types.js";
 import type { WorldState } from "../core/state.js";
-import type { MapGenDebug, MapGenDebugPhase, MapGenDebugSnapshot, MapGenReporter } from "./mapgenTypes.js";
+import type { MapGenDebug, MapGenDebugPhase, MapGenDebugSnapshot, MapGenDiagnosticEvent, MapGenReporter } from "./mapgenTypes.js";
 import type { MapGenSettings } from "./settings.js";
 import type { ResolvedTerrainProfile, TerrainRecipe } from "./terrainProfile.js";
 import { createYieldController } from "./pipeline/yieldController.js";
+export { isMapGenCancelledError } from "./pipeline/yieldController.js";
 import { MapGenContext } from "./pipeline/MapGenContext.js";
 import { TerrainPipeline } from "./pipeline/TerrainPipeline.js";
 import { ElevationStage } from "./stages/ElevationStage.js";
@@ -19,7 +20,7 @@ import { RoadNetworkStage } from "./stages/RoadNetworkStage.js";
 import { PostSettlementReconcileStage } from "./stages/PostSettlementReconcileStage.js";
 import { FinalizeStage } from "./stages/FinalizeStage.js";
 
-export type { MapGenDebug, MapGenDebugPhase, MapGenDebugSnapshot, MapGenReporter } from "./mapgenTypes.js";
+export type { MapGenDebug, MapGenDebugPhase, MapGenDebugSnapshot, MapGenDiagnosticEvent, MapGenReporter } from "./mapgenTypes.js";
 
 const MAPGEN_PIPELINE = new TerrainPipeline([
   ElevationStage,

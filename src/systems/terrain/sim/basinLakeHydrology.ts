@@ -8,6 +8,7 @@ import { buildLakeSpillContour } from "./lakeSpillContour.js";
 import { solveDepressionBasins, type DepressionBasin } from "./depressionBasinSolver.js";
 import type {
   StaticHydrologyLake,
+  StaticHydrologyDebugHooks,
   StaticHydrologyRejectReason,
   StaticHydrologyRejectSummary,
   StaticHydrologyResult,
@@ -308,14 +309,17 @@ const stampLakeOverflowRivers = (
   riverLakeEntryMask: Uint8Array,
   riverLakeExitMask: Uint8Array,
   flowTarget: Int32Array,
-  settings: MapGenSettings
-): void => {
+  settings: MapGenSettings,
+  debug?: StaticHydrologyDebugHooks
+): Promise<void> => {
+  const run = async (): Promise<void> => {
   const { cols, rows } = state.grid;
   const lakeById = new Map<number, AcceptedBasinLake>(lakes.map((lake) => [lake.id, lake]));
   const minVisibleLength = Math.max(MIN_VISIBLE_LAKE_OUTLET_TILES, Math.min(10, settings.lakeOutletSearchRadius));
 
   for (const lake of lakes) {
-    const route = buildLakeOverflowRiverPaths({
+    debug?.checkCancelled?.();
+    const route = (await buildLakeOverflowRiverPaths({
       cols,
       rows,
       elevationMap,
@@ -325,17 +329,28 @@ const stampLakeOverflowRivers = (
       flowTarget,
       lakes: [lake],
       maxSteps: Math.max(cols + rows, minVisibleLength),
-      minVisibleLength
-    })[0];
+      minVisibleLength,
+      debug
+    }))[0];
     if (!route || route.tiles.length === 0) {
       continue;
     }
     const pathDenom = Math.max(1, route.tiles.length);
+    const routeElevations = route.tiles.map((idx) => elevationMap[idx] ?? lake.surfaceLevel);
+    let previousSurface = lake.surfaceLevel;
     route.tiles.forEach((idx, pathIndex) => {
       const progress = (pathIndex + 1) / pathDenom;
-      const targetElevation = elevationMap[idx] ?? lake.surfaceLevel;
-      const dropSurface = lake.surfaceLevel - settings.minOutletDrop * (0.75 + progress * 2.5);
+      const targetElevation = routeElevations[pathIndex] ?? lake.surfaceLevel;
+      const upstreamElevation = pathIndex === 0
+        ? lake.surfaceLevel
+        : routeElevations[pathIndex - 1] ?? lake.surfaceLevel;
+      const localDrop = Math.max(0, upstreamElevation - targetElevation);
+      const minimumSegmentDrop = Math.max(settings.minOutletDrop * 0.35, localDrop * 0.55);
+      const progressSurface = lake.surfaceLevel - settings.minOutletDrop * (0.75 + progress * 2.5);
+      const localSurface = previousSurface - minimumSegmentDrop;
       const bankSurface = targetElevation - 0.001;
+      const surface = Math.min(progressSurface, localSurface, bankSurface);
+      const strongDrop = localDrop >= settings.waterfallMinDrop * 0.65;
       stampRiverConnectionTile(
         state,
         elevationMap,
@@ -344,10 +359,13 @@ const stampLakeOverflowRivers = (
         lakeMask,
         riverLakeExitMask,
         idx,
-        Math.min(dropSurface, bankSurface),
-        pathIndex === 0 ? 0.36 : 0.2,
+        surface,
+        Math.max(pathIndex === 0 ? 0.36 : 0.2, strongDrop ? 0.72 : 0),
         settings
       );
+      previousSurface = Number.isFinite(state.tileRiverSurface[idx])
+        ? state.tileRiverSurface[idx] as number
+        : surface;
     });
 
     const finalTile = route.tiles[route.tiles.length - 1];
@@ -359,7 +377,10 @@ const stampLakeOverflowRivers = (
         targetLake.inflowRiverTiles.sort((a, b) => a - b);
       }
     }
+    await debug?.yieldIfNeeded?.();
   }
+  };
+  return run();
 };
 
 const farEnoughFromWaterfalls = (
@@ -407,8 +428,10 @@ const buildWaterfalls = (
   lakeMask: Uint16Array,
   lakes: StaticHydrologyLake[],
   flow: Float32Array,
-  settings: MapGenSettings
-): { waterfalls: StaticHydrologyWaterfall[]; rejected: number } => {
+  settings: MapGenSettings,
+  debug?: StaticHydrologyDebugHooks
+): Promise<{ waterfalls: StaticHydrologyWaterfall[]; rejected: number }> => {
+  const run = async (): Promise<{ waterfalls: StaticHydrologyWaterfall[]; rejected: number }> => {
   const { cols, rows } = state.grid;
   const waterfalls: StaticHydrologyWaterfall[] = [];
   let rejected = 0;
@@ -418,24 +441,22 @@ const buildWaterfalls = (
       if (lake.outletIndex < 0 || lake.outletTargetIndex < 0) {
         continue;
       }
+      debug?.checkCancelled?.();
+      const waterfall: StaticHydrologyWaterfall = {
+        sourceIndex: lake.outletIndex,
+        targetIndex: lake.outletTargetIndex,
+        drop: lake.surfaceLevel - (state.tiles[lake.outletTargetIndex]?.elevation ?? lake.surfaceLevel),
+        flowScore: Math.max(lake.runoffScore, flow[lake.outletTargetIndex] ?? 0),
+        lakeId: lake.id
+      };
       if (oceanMask[lake.outletTargetIndex] > 0 || (oceanDistance[lake.outletTargetIndex] ?? 0) < settings.waterfallAvoidCoastTiles) {
         rejected += 1;
+        await debug?.emit?.({ kind: "hydrology:waterfall", accepted: false, waterfall });
         continue;
       }
-      const targetElevation = state.tiles[lake.outletTargetIndex]?.elevation ?? lake.surfaceLevel;
-      const drop = lake.surfaceLevel - targetElevation;
-      if (!addWaterfall(
-        {
-          sourceIndex: lake.outletIndex,
-          targetIndex: lake.outletTargetIndex,
-          drop,
-          flowScore: Math.max(lake.runoffScore, flow[lake.outletTargetIndex] ?? 0),
-          lakeId: lake.id
-        },
-        cols,
-        settings,
-        waterfalls
-      )) {
+      const accepted = addWaterfall(waterfall, cols, settings, waterfalls);
+      await debug?.emit?.({ kind: "hydrology:waterfall", accepted, waterfall });
+      if (!accepted) {
         rejected += 1;
       }
     }
@@ -480,33 +501,38 @@ const buildWaterfalls = (
     if (bestTarget < 0) {
       continue;
     }
-    if (!addWaterfall(
-      {
-        sourceIndex: idx,
-        targetIndex: bestTarget,
-        drop: bestDrop,
-        flowScore: flow[idx] ?? 0,
-        lakeId: 0
-      },
-      cols,
-      settings,
-      waterfalls
-    )) {
+    const waterfall: StaticHydrologyWaterfall = {
+      sourceIndex: idx,
+      targetIndex: bestTarget,
+      drop: bestDrop,
+      flowScore: flow[idx] ?? 0,
+      lakeId: 0
+    };
+    const accepted = addWaterfall(waterfall, cols, settings, waterfalls);
+    await debug?.emit?.({ kind: "hydrology:waterfall", accepted, waterfall });
+    if (!accepted) {
       rejected += 1;
+    }
+    if (idx % Math.max(1, state.grid.cols * 8) === 0) {
+      await debug?.yieldIfNeeded?.();
+      debug?.checkCancelled?.();
     }
   }
 
   return { waterfalls, rejected };
+  };
+  return run();
 };
 
-export const buildBasinLakeHydrology = (input: {
+export const buildBasinLakeHydrology = async (input: {
   state: WorldState;
   elevationMap: number[];
   riverMask: Uint8Array;
   oceanMask: Uint8Array;
   settings: MapGenSettings;
-}): StaticHydrologyResult => {
-  const { state, elevationMap, riverMask, oceanMask, settings } = input;
+  debug?: StaticHydrologyDebugHooks;
+}): Promise<StaticHydrologyResult> => {
+  const { state, elevationMap, riverMask, oceanMask, settings, debug } = input;
   const { cols, rows, totalTiles } = state.grid;
   const baseFields = buildStaticHydrologyFields(state, elevationMap, oceanMask, settings);
   const solve = solveDepressionBasins({
@@ -538,11 +564,13 @@ export const buildBasinLakeHydrology = (input: {
   resetStaticHydrologyState(state);
 
   if (settings.lakeChance > 0 && settings.maxLakeCount > 0) {
+    debug?.checkCancelled?.();
     const scored = solve.basins
       .map((basin) => ({ basin, score: scoreBasin(basin, settings) }))
       .sort((a, b) => b.score - a.score || b.basin.catchmentRunoff - a.basin.catchmentRunoff || a.basin.floorIndex - b.basin.floorIndex);
     const scoreThreshold = 0.16 + (1 - clamp(settings.lakeChance, 0, 1)) * 0.34;
     for (const candidate of scored) {
+      debug?.checkCancelled?.();
       if (lakes.length >= settings.maxLakeCount) {
         break;
       }
@@ -558,13 +586,40 @@ export const buildBasinLakeHydrology = (input: {
         spillTolerance: Math.max(0.0025, settings.minLakeDepth * 0.3),
         surfaceMargin: 0.0001
       });
+      await debug?.emit?.({
+        kind: "hydrology:candidate",
+        basinSeedIndex: basin.floorIndex,
+        area: basin.area,
+        footprintTiles: contourTiles.length,
+        maxDepth: basin.maxDepth,
+        spillElevation: basin.spillElevation,
+        rainfallScore: basin.rainfallScore,
+        runoffScore: basin.runoffScore,
+        score: candidate.score,
+        outletIndex: basin.outletIndex,
+        outletTargetIndex: basin.outletTargetIndex
+      });
       const reason = candidateRejectReason(basin, contourTiles, state, lakeMask, oceanDistance, landTileCount, settings);
       if (reason) {
         incrementReject(rejectedLakeCandidates, reason);
+        await debug?.emit?.({
+          kind: "hydrology:reject",
+          basinSeedIndex: basin.floorIndex,
+          reason,
+          score: candidate.score,
+          footprintTiles: contourTiles.length
+        });
         continue;
       }
       if (candidate.score < scoreThreshold) {
         incrementReject(rejectedLakeCandidates, "weak-basin");
+        await debug?.emit?.({
+          kind: "hydrology:reject",
+          basinSeedIndex: basin.floorIndex,
+          reason: "weak-basin",
+          score: candidate.score,
+          footprintTiles: contourTiles.length
+        });
         continue;
       }
       const lakeId = lakes.length + 1;
@@ -601,10 +656,19 @@ export const buildBasinLakeHydrology = (input: {
         settings
       );
       lakes.push(lake);
+      await debug?.emit?.({
+        kind: "hydrology:lake",
+        lake: {
+          ...lake,
+          tiles: [...lake.tiles],
+          inflowRiverTiles: [...lake.inflowRiverTiles]
+        }
+      });
+      await debug?.yieldIfNeeded?.();
     }
   }
 
-  stampLakeOverflowRivers(
+  await stampLakeOverflowRivers(
     lakes,
     state,
     elevationMap,
@@ -614,10 +678,11 @@ export const buildBasinLakeHydrology = (input: {
     riverLakeEntryMask,
     riverLakeExitMask,
     solve.flowTarget,
-    settings
+    settings,
+    debug
   );
 
-  const waterfallBuild = buildWaterfalls(
+  const waterfallBuild = await buildWaterfalls(
     state,
     riverMask,
     oceanMask,
@@ -625,7 +690,8 @@ export const buildBasinLakeHydrology = (input: {
     lakeMask,
     lakes,
     solve.flow,
-    settings
+    settings,
+    debug
   );
   for (const waterfall of waterfallBuild.waterfalls) {
     waterfallSourceMask[waterfall.sourceIndex] = 1;

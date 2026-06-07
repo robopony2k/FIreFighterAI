@@ -71,6 +71,15 @@ const EXPECTED_EDITOR_KEYS = {
     "advanced.coastalShelfWidth"
   ],
   rivers: ["recipe.riverIntensity", "advanced.basinStrength"],
+  settlements: [
+    "recipe.townDensity",
+    "recipe.bridgeAllowance",
+    "advanced.settlementSpacing",
+    "advanced.settlementPreGrowthYears",
+    "advanced.skipRoadNetworkRouting",
+    "advanced.roadMaxGrade",
+    "advanced.roadStrictness"
+  ],
   erosion: []
 };
 
@@ -181,6 +190,19 @@ const assertEditorRiversAreStaged = () => {
   }
   if (/case\s+"rivers":\s*[\r\n\s]*return\s+"rivers"/.test(source)) {
     throw new Error("Map editor Rivers step is still mapped to a fast preview mode.");
+  }
+};
+
+const assertEditorBiomesBeforeSettlements = () => {
+  const source = readFileSync(path.join(repoRoot, "src", "ui", "map-editor.ts"), "utf8");
+  if (!/biomes:\s*{[\s\S]*?stopAfterPhase:\s*"biome:classify"[\s\S]*?sampleSource:\s*"snapshot"/.test(source)) {
+    throw new Error("Map editor Biomes step must target the staged biome:classify snapshot.");
+  }
+  if (!/MAP_EDITOR_STEP_SEQUENCE[\s\S]*?"rivers"[\s\S]*?"biomes"[\s\S]*?"settlements"/.test(source)) {
+    throw new Error("Map editor Biomes step must sit between Rivers/Lakes and Settlements.");
+  }
+  if (!/"settlements"[\s\S]*?stopAfterPhase:\s*"roads:connect"/.test(source)) {
+    throw new Error("Map editor Settlements step must remain the road network step after Biomes.");
   }
 };
 
@@ -416,6 +438,7 @@ const assertSensitivity = () => {
 
 assertEditorControlSchema();
 assertEditorRiversAreStaged();
+assertEditorBiomesBeforeSettlements();
 assertNeutralSurfaceDoesNotCreateCentralSpine();
 for (const archetype of archetypes) {
   const waterPreview = buildPreview(createDefaultTerrainRecipe(sizeId, archetype), "water").result;

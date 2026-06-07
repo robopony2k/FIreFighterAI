@@ -1,5 +1,33 @@
 # Deprecations
 
+## Default Road A* Exact-Target Routing
+
+Status: Deprecated as of June 8, 2026.
+
+- Default mapgen road routing no longer uses exact-target A* as the production connector planner.
+- Road generation now uses a bounded, road-domain Dijkstra planner that can select the cheapest valid destination seed from existing road/network/access candidates.
+- Runtime unit pathfinding is unchanged; this deprecation only covers mapgen-authored road generation.
+
+Migration guidance:
+
+1. Add future generated-road routing behavior through `src/systems/roads/sim/` planner boundaries and the `src/mapgen/roads.ts` adapter.
+2. Keep runtime firefighter unit movement separate from road-generation route search.
+3. Preserve deterministic seed output, bounded search budgets, diagnostics, and existing terrain-cost rules when tuning road connectors.
+
+## Default Bidirectional Road Streamer Prototype
+
+Status: Deprecated as of June 7, 2026.
+
+- Default mapgen road routing no longer runs the bidirectional streamer prototype before every bounded A* attempt.
+- Diagnostics showed the prototype doubled failed route searches on difficult terrain without fixing repeated bad connector selection.
+- The streamer remains available as opt-in road-domain experiment coverage, but production routing should first reduce repeated connector attempts and improve route-candidate policy.
+
+Migration guidance:
+
+1. Do not enable streamer routing globally without proving generation time and road quality improve on diagnostics and mapgen regression cases.
+2. Prefer changes that reduce bad connector candidates, repeated retries, and over-dense road skeletons before adding another solver layer.
+3. Keep road planning deterministic and mapgen-authored; runtime settlement growth should consume replayed generated road paths where available.
+
 ## Direct River Count Generation Controls
 
 Status: Deprecated as of June 1, 2026.

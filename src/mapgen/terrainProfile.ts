@@ -32,6 +32,7 @@ export type TerrainAdvancedOverrides = {
   settlementSpacing?: number;
   settlementPreGrowthYears?: number;
   roadStrictness?: number;
+  roadMaxGrade?: number;
   forestPatchiness?: number;
 };
 
@@ -66,6 +67,8 @@ const clampWhole = (value: number, min: number, max: number): number => Math.max
 const mix = (a: number, b: number, t: number): number => a + (b - a) * clamp01(t);
 const MAX_HEIGHT_REFERENCE = 0.62;
 const MAX_HEIGHT_LIMIT = 1.5;
+const ROAD_MAX_GRADE_MIN = 0.12;
+const ROAD_MAX_GRADE_MAX = 0.42;
 const LEGACY_WATER_COVERAGE_MIN = 0.22;
 const LEGACY_WATER_COVERAGE_MAX = 0.68;
 
@@ -120,6 +123,13 @@ const clampMaxHeightOverride = (value: unknown, fallback: number): number => {
   return parsed === null ? clampMaxHeight(fallback) : clampMaxHeight(parsed);
 };
 
+const clampRoadMaxGrade = (value: number): number => clamp(value, ROAD_MAX_GRADE_MIN, ROAD_MAX_GRADE_MAX);
+
+const clampRoadMaxGradeOverride = (value: unknown, fallback: number): number => {
+  const parsed = toFiniteNumber(value);
+  return parsed === null ? clampRoadMaxGrade(fallback) : clampRoadMaxGrade(parsed);
+};
+
 const parseBooleanOverride = (value: unknown, fallback: boolean): boolean => {
   if (typeof value === "boolean") {
     return value;
@@ -164,6 +174,7 @@ const DEFAULT_ADVANCED_OVERRIDES: Required<TerrainAdvancedOverrides> = {
   settlementSpacing: 0.58,
   settlementPreGrowthYears: 20,
   roadStrictness: 0.5,
+  roadMaxGrade: 0.38,
   forestPatchiness: 0.46
 };
 
@@ -212,6 +223,7 @@ const ARCHETYPE_PRESETS: Record<
       settlementSpacing: 0.62,
       settlementPreGrowthYears: 20,
       roadStrictness: 0.56,
+      roadMaxGrade: 0.38,
       forestPatchiness: 0.42
     }
   },
@@ -245,6 +257,7 @@ const ARCHETYPE_PRESETS: Record<
       settlementSpacing: 0.6,
       settlementPreGrowthYears: 20,
       roadStrictness: 0.56,
+      roadMaxGrade: 0.38,
       forestPatchiness: 0.5
     }
   },
@@ -278,6 +291,7 @@ const ARCHETYPE_PRESETS: Record<
       settlementSpacing: 0.58,
       settlementPreGrowthYears: 20,
       roadStrictness: 0.52,
+      roadMaxGrade: 0.38,
       forestPatchiness: 0.48
     }
   },
@@ -311,6 +325,7 @@ const ARCHETYPE_PRESETS: Record<
       settlementSpacing: 0.56,
       settlementPreGrowthYears: 20,
       roadStrictness: 0.54,
+      roadMaxGrade: 0.38,
       forestPatchiness: 0.54
     }
   },
@@ -344,6 +359,7 @@ const ARCHETYPE_PRESETS: Record<
       settlementSpacing: 0.58,
       settlementPreGrowthYears: 20,
       roadStrictness: 0.5,
+      roadMaxGrade: 0.38,
       forestPatchiness: 0.46
     }
   }
@@ -459,6 +475,10 @@ export const cloneTerrainRecipe = (recipe?: Partial<TerrainRecipe>): TerrainReci
         sourceAdvanced.roadStrictness,
         defaults.advancedOverrides?.roadStrictness ?? DEFAULT_ADVANCED_OVERRIDES.roadStrictness
       ),
+      roadMaxGrade: clampRoadMaxGradeOverride(
+        sourceAdvanced.roadMaxGrade,
+        defaults.advancedOverrides?.roadMaxGrade ?? DEFAULT_ADVANCED_OVERRIDES.roadMaxGrade
+      ),
       forestPatchiness: clampOverride(
         sourceAdvanced.forestPatchiness,
         defaults.advancedOverrides?.forestPatchiness ?? DEFAULT_ADVANCED_OVERRIDES.forestPatchiness
@@ -512,6 +532,7 @@ export const terrainRecipeEqual = (a: TerrainRecipe, b: TerrainRecipe): boolean 
     Math.abs((aAdvanced.settlementSpacing ?? 0) - (bAdvanced.settlementSpacing ?? 0)) <= 1e-6 &&
     Math.abs((aAdvanced.settlementPreGrowthYears ?? 0) - (bAdvanced.settlementPreGrowthYears ?? 0)) <= 1e-6 &&
     Math.abs((aAdvanced.roadStrictness ?? 0) - (bAdvanced.roadStrictness ?? 0)) <= 1e-6 &&
+    Math.abs((aAdvanced.roadMaxGrade ?? 0) - (bAdvanced.roadMaxGrade ?? 0)) <= 1e-6 &&
     Math.abs((aAdvanced.forestPatchiness ?? 0) - (bAdvanced.forestPatchiness ?? 0)) <= 1e-6
   );
 };
@@ -544,6 +565,7 @@ const resolveAdvancedOverrides = (recipe: TerrainRecipe): Required<TerrainAdvanc
     settlementSpacing: clampOverride(advanced.settlementSpacing, preset.settlementSpacing),
     settlementPreGrowthYears: clampIntegerOverride(advanced.settlementPreGrowthYears, preset.settlementPreGrowthYears, 0, 40),
     roadStrictness: clampOverride(advanced.roadStrictness, preset.roadStrictness),
+    roadMaxGrade: clampRoadMaxGradeOverride(advanced.roadMaxGrade, preset.roadMaxGrade),
     forestPatchiness: clampOverride(advanced.forestPatchiness, preset.forestPatchiness)
   };
 };
@@ -591,6 +613,7 @@ export const compileTerrainRecipe = (recipeInput: TerrainRecipe): ResolvedTerrai
   const forestPatchScale = Math.round(mix(32, 16, forestPatchiness));
   const meadowPatchScale = Math.round(mix(28, 12, forestPatchiness));
   const roadStrictness = advanced.roadStrictness;
+  const roadMaxGrade = clampRoadMaxGrade(advanced.roadMaxGrade);
   const erosionTightness = clamp01(ruggedness * 0.65 + riverIntensity * 0.35);
   const erosionArchetypeScale =
     recipe.archetype === "SHELF"
@@ -688,6 +711,7 @@ export const compileTerrainRecipe = (recipeInput: TerrainRecipe): ResolvedTerrai
     settlementSpacing: advanced.settlementSpacing,
     settlementPreGrowthYears: advanced.settlementPreGrowthYears,
     roadStrictness,
+    roadMaxGrade,
     forestPatchiness,
     lakeChance: mix(0.36, 0.9, lakeBias),
     maxLakeCount: Math.max(1, Math.round(mix(1, 6, lakeBias) * Math.max(0.75, sizeScale))),
@@ -839,6 +863,7 @@ const inferRecipeFromSettings = (settingsInput: Partial<MapGenSettings>, mapSize
         40
       ),
       roadStrictness: clamp01(settings.roadStrictness ?? DEFAULT_ADVANCED_OVERRIDES.roadStrictness),
+      roadMaxGrade: clampRoadMaxGrade(settings.roadMaxGrade ?? DEFAULT_ADVANCED_OVERRIDES.roadMaxGrade),
       forestPatchiness: clamp01(settings.forestPatchiness ?? DEFAULT_ADVANCED_OVERRIDES.forestPatchiness)
     }
   });

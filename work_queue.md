@@ -1,3 +1,37 @@
+TSK-0157: Prototype bidirectional streamer road routing
+
+Type: feature
+
+Why: Strict point-to-point road A* could overfocus exact destination tiles, causing slow searches, brittle failures, or visually poor connectors on difficult generated terrain.
+
+Done when:
+- [x] A road-domain bidirectional streamer prototype can grow origin and destination-side fronts and join nearby validated fronts when explicitly enabled.
+- [x] Production mapgen road carving does not run the streamer by default after diagnostics showed worse generation time and route quality.
+- [x] Regression coverage exercises opt-in streamer route success, destination seed joining, budget abort accounting, and existing switchback/mountain-pass cases.
+
+Touchpoints: `src/systems/roads/`, `src/mapgen/roads.ts`, `src/mapgen/stages/RoadNetworkStage.ts`, `src/ui/map-editor.ts`, `scripts/mapgen-regression.mjs`
+
+Constraints: keep road planning simulation-first, deterministic, mapgen-authored, and independent of render behavior; do not add more production solver layers without first reducing repeated bad connector attempts.
+
+Status: done
+
+TSK-0156: Add map editor mapgen diagnostics
+
+Type: feature
+
+Why: Hydrology lake/overflow failures and road A* routing stalls were hard to diagnose from final terrain snapshots, and slow mapgen could leave the browser feeling frozen without a debug interrupt path.
+
+Done when:
+- [x] Map editor diagnostics record hydrology candidates, rejection reasons, accepted lakes, overflow routes, waterfalls, and road A* attempts/results without changing normal mapgen output.
+- [x] Diagnostic preview cancellation exits through a typed mapgen cancellation path and keeps partial editor results visible.
+- [x] Regression coverage verifies diagnostics do not change deterministic map output and emit hydrology/road events.
+
+Touchpoints: `src/mapgen/`, `src/systems/terrain/sim/`, `src/mapgen/roads.ts`, `src/ui/map-editor.ts`, `scripts/mapgen-diagnostics-regression.mjs`
+
+Constraints: keep diagnostics editor-only/off by default, preserve deterministic seeds and saved scenario compatibility, and keep terrain/road systems free of UI dependencies.
+
+Status: done
+
 TSK-0155: Shape archetype watershed basins for reliable lakes
 
 Type: feature

@@ -6636,6 +6636,7 @@ async function generateMapLegacy(
     bridgeAllowance: mapSettings.bridgeAllowance,
     settlementSpacing: mapSettings.settlementSpacing,
     roadStrictness: mapSettings.roadStrictness,
+    roadMaxGrade: mapSettings.roadMaxGrade,
     settlementPreGrowthYears: mapSettings.settlementPreGrowthYears
   });
   resetRoadGenerationStats();
@@ -7879,6 +7880,7 @@ async function runSettlementPlacementStage(ctx: MapGenContext): Promise<void> {
     bridgeAllowance: ctx.settings.bridgeAllowance,
     settlementSpacing: ctx.settings.settlementSpacing,
     roadStrictness: ctx.settings.roadStrictness,
+    roadMaxGrade: ctx.settings.roadMaxGrade,
     settlementPreGrowthYears: ctx.settings.settlementPreGrowthYears
   });
 

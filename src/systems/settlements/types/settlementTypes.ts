@@ -47,6 +47,7 @@ export type SettlementRoadOptions = {
 
 export type SettlementRoadAdapter = {
   carveRoad: (state: WorldState, start: Point, end: Point, options?: SettlementRoadOptions) => boolean;
+  carveRoadAsync?: (state: WorldState, start: Point, end: Point, options?: SettlementRoadOptions) => Promise<boolean>;
   carveRoadDetailed?: (
     state: WorldState,
     start: Point,
@@ -57,11 +58,25 @@ export type SettlementRoadAdapter = {
     path: Point[];
     bridgeTileIndices: number[];
   };
+  carveRoadDetailedAsync?: (
+    state: WorldState,
+    start: Point,
+    end: Point,
+    options?: SettlementRoadOptions
+  ) => Promise<{
+    carved: boolean;
+    path: Point[];
+    bridgeTileIndices: number[];
+  }>;
   carveRoadPath?: (state: WorldState, path: Point[], bridgeTileIndices?: number[]) => boolean;
   carveRoadSequence?: (
     state: WorldState,
     segments: Array<{ start: Point; end: Point; options?: SettlementRoadOptions }>
   ) => boolean;
+  carveRoadSequenceAsync?: (
+    state: WorldState,
+    segments: Array<{ start: Point; end: Point; options?: SettlementRoadOptions }>
+  ) => Promise<boolean>;
   collectRoadTiles: (state: WorldState) => Point[];
   collectConnectedRoadNeighbors: (state: WorldState, x: number, y: number) => Point[];
   findNearestRoadTile: (state: WorldState, origin: Point) => Point;
@@ -119,5 +134,6 @@ export type SettlementPlacementResult = {
   bridgeAllowance?: number;
   settlementSpacing?: number;
   roadStrictness?: number;
+  roadMaxGrade?: number;
   settlementPreGrowthYears?: number;
 };

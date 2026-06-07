@@ -47,7 +47,9 @@ export class TerrainPipeline {
         await tracker.reportStage(i - startIndex, message, localProgress);
       });
       const startedAt = typeof performance !== "undefined" ? performance.now() : Date.now();
+      ctx.checkCancelled();
       await stage.run(ctx);
+      ctx.checkCancelled();
       const endedAt = typeof performance !== "undefined" ? performance.now() : Date.now();
       const durationMs = Math.max(0, endedAt - startedAt);
       if (ctx.debug?.onStageTiming) {

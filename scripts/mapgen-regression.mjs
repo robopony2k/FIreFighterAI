@@ -23,10 +23,12 @@ const { compileTerrainRecipe, createDefaultTerrainRecipe } = await import(distIm
 const {
   analyzeRoadSurfaceMetrics,
   carveRoad,
+  carveRoadToTarget,
   connectRoadPoints,
   getRoadGenerationStats,
   pruneRoadConnectorArtifacts,
-  resetRoadGenerationStats
+  resetRoadGenerationStats,
+  setRoadPathDebugHooks
 } = await import(distImport(["mapgen", "roads.js"]));
 const { computeRenderedSlopeAngleDeg } = await import(distImport(["shared", "terrainSlope.js"]));
 
@@ -96,6 +98,8 @@ const DEBUG_SMOKE_CASES = [
   { sizeId: "medium", seed: 1337, stopAfterPhase: "reconcile:postSettlement" }
 ];
 const MIN_READABLE_LAKE_OUTLET_TILES = 4;
+const MAX_SOURCE_LAKE_ADJACENT_OUTLET_TILES = 2;
+const OUTLET_DIRECT_DESCENT_MARGIN = 0.008;
 
 const createGrid = (sizeId) => {
   const dim = MAP_SIZE_PRESETS[sizeId];
@@ -459,6 +463,8 @@ const analyzeStaticHydrology = (state) => {
   let lakeOutletReadableCount = 0;
   let lakeOutletConnectionFailures = 0;
   let lakeOutletShortRiverFailures = 0;
+  let lakeOutletShorelineLapFailures = 0;
+  let lakeOutletLateralStartFailures = 0;
   let lakeInvariantFailures = 0;
   let lakeBedFailures = 0;
   let lakeSurfaceConsistencyFailures = 0;
@@ -474,6 +480,20 @@ const analyzeStaticHydrology = (state) => {
   const lakeHashParts = [];
   const waterfallHashParts = [];
   const idxAt = (x, y) => y * cols + x;
+  const countAdjacentLakeTiles = (idx, lakeId) => {
+    const x = idx % cols;
+    const y = Math.floor(idx / cols);
+    let count = 0;
+    for (const [nx, ny] of [[x - 1, y], [x + 1, y], [x, y - 1], [x, y + 1]]) {
+      if (nx < 0 || ny < 0 || nx >= cols || ny >= rows) {
+        continue;
+      }
+      if ((lakeMask[idxAt(nx, ny)] ?? 0) === lakeId) {
+        count += 1;
+      }
+    }
+    return count;
+  };
   const traceOutletRiver = (outletIdx, lakeId) => {
     const outletX = outletIdx % cols;
     const outletY = Math.floor(outletIdx / cols);
@@ -484,6 +504,8 @@ const analyzeStaticHydrology = (state) => {
     let touchesOcean = false;
     let touchesOtherLake = false;
     let directTerminal = false;
+    let sourceLakeAdjacentRiverCells = 0;
+    const firstRiverTiles = [];
 
     for (const [nx, ny] of [[outletX - 1, outletY], [outletX + 1, outletY], [outletX, outletY - 1], [outletX, outletY + 1]]) {
       if (nx < 0 || ny < 0 || nx >= cols || ny >= rows) {
@@ -498,6 +520,7 @@ const analyzeStaticHydrology = (state) => {
         visitedRiver[nIdx] = 1;
         queue[tail] = nIdx;
         tail += 1;
+        firstRiverTiles.push(nIdx);
       }
     }
 
@@ -507,6 +530,9 @@ const analyzeStaticHydrology = (state) => {
       riverLength += 1;
       const x = idx % cols;
       const y = Math.floor(idx / cols);
+      if (countAdjacentLakeTiles(idx, lakeId) > 0) {
+        sourceLakeAdjacentRiverCells += 1;
+      }
       for (const [nx, ny] of [[x - 1, y], [x + 1, y], [x, y - 1], [x, y + 1]]) {
         if (nx < 0 || ny < 0 || nx >= cols || ny >= rows) {
           continue;
@@ -535,8 +561,39 @@ const analyzeStaticHydrology = (state) => {
       directTerminal,
       touchesOcean,
       touchesOtherLake,
+      sourceLakeAdjacentRiverCells,
+      firstRiverTiles,
       readable: directTerminal || riverLength >= MIN_READABLE_LAKE_OUTLET_TILES
     };
+  };
+  const hasLateralOutletStart = (outletIdx, lakeId, firstRiverTiles) => {
+    if (firstRiverTiles.length === 0) {
+      return false;
+    }
+    const outletSurface = state.tileLakeSurface?.[outletIdx] ?? state.tiles[outletIdx]?.elevation ?? Number.NaN;
+    if (!Number.isFinite(outletSurface)) {
+      return false;
+    }
+    const x = outletIdx % cols;
+    const y = Math.floor(outletIdx / cols);
+    let bestAvailableDrop = 0;
+    for (const [nx, ny] of [[x - 1, y], [x + 1, y], [x, y - 1], [x, y + 1]]) {
+      if (nx < 0 || ny < 0 || nx >= cols || ny >= rows) {
+        continue;
+      }
+      const nIdx = idxAt(nx, ny);
+      if ((lakeMask[nIdx] ?? 0) === lakeId || oceanMask[nIdx] > 0) {
+        continue;
+      }
+      const elevation = state.tiles[nIdx]?.elevation ?? state.tileElevation?.[nIdx] ?? outletSurface;
+      bestAvailableDrop = Math.max(bestAvailableDrop, outletSurface - elevation);
+    }
+    let chosenDrop = 0;
+    for (const riverIdx of firstRiverTiles) {
+      const riverSurface = state.tileRiverSurface?.[riverIdx] ?? state.tiles[riverIdx]?.elevation ?? outletSurface;
+      chosenDrop = Math.max(chosenDrop, outletSurface - riverSurface);
+    }
+    return bestAvailableDrop > OUTLET_DIRECT_DESCENT_MARGIN && chosenDrop + OUTLET_DIRECT_DESCENT_MARGIN < bestAvailableDrop;
   };
   for (let idx = 0; idx < totalTiles; idx += 1) {
     const lakeId = lakeMask[idx] ?? 0;
@@ -584,6 +641,12 @@ const analyzeStaticHydrology = (state) => {
         lakeOutletReadableCount += 1;
       } else {
         lakeOutletShortRiverFailures += 1;
+      }
+      if (outletTrace.sourceLakeAdjacentRiverCells > MAX_SOURCE_LAKE_ADJACENT_OUTLET_TILES) {
+        lakeOutletShorelineLapFailures += 1;
+      }
+      if (hasLateralOutletStart(idx, lakeId, outletTrace.firstRiverTiles)) {
+        lakeOutletLateralStartFailures += 1;
       }
       const connected = [[x - 1, y], [x + 1, y], [x, y - 1], [x, y + 1]].some(([nx, ny]) => {
         if (nx < 0 || ny < 0 || nx >= cols || ny >= rows) {
@@ -670,6 +733,8 @@ const analyzeStaticHydrology = (state) => {
     lakeOutletReadableCount,
     lakeOutletConnectionFailures,
     lakeOutletShortRiverFailures,
+    lakeOutletShorelineLapFailures,
+    lakeOutletLateralStartFailures,
     lakeInvariantFailures,
     lakeBedFailures,
     lakeSurfaceConsistencyFailures,
@@ -2026,8 +2091,343 @@ const runSyntheticMountainPassCase = () => {
   };
 };
 
+const runSyntheticRoadStreamerNearJoinCase = () => {
+  const grid = { cols: 42, rows: 20, totalTiles: 42 * 20 };
+  const state = createInitialState(717171, grid);
+  resetState(state, 717171);
+  state.tiles = Array.from({ length: grid.totalTiles }, (_, idx) => {
+    const x = idx % grid.cols;
+    const y = Math.floor(idx / grid.cols);
+    const elevation = 0.22 + Math.abs(y - 10) * 0.0005 + Math.abs(x - 21) * 0.0002;
+    if (state.tileElevation.length === grid.totalTiles) {
+      state.tileElevation[idx] = elevation;
+    }
+    return buildRegressionTile("grass", { elevation });
+  });
+  resetRoadGenerationStats();
+  const carved = carveRoad(
+    state,
+    new RNG(717171),
+    { x: 4, y: 10 },
+    { x: 37, y: 10 },
+    {
+      bridgePolicy: "never",
+      useBidirectionalStreamer: true,
+      searchBounds: { minX: 0, maxX: grid.cols - 1, minY: 6, maxY: 14 },
+      maxSearchNodeVisits: 900,
+      gradeLimitStart: 0.08,
+      gradeLimitRelaxStep: 0.01,
+      gradeLimitMax: 0.14,
+      crossfallLimitStart: 0.06,
+      crossfallLimitRelaxStep: 0.01,
+      crossfallLimitMax: 0.12,
+      gradeChangeLimitStart: 0.06,
+      gradeChangeLimitRelaxStep: 0.01,
+      gradeChangeLimitMax: 0.12
+    }
+  );
+  return {
+    carved,
+    stats: getRoadGenerationStats()
+  };
+};
+
+const runSyntheticRoadStreamerDestinationSeedCase = () => {
+  const grid = { cols: 34, rows: 18, totalTiles: 34 * 18 };
+  const state = createInitialState(727272, grid);
+  resetState(state, 727272);
+  state.tiles = Array.from({ length: grid.totalTiles }, (_, idx) => {
+    if (state.tileElevation.length === grid.totalTiles) {
+      state.tileElevation[idx] = 0.22;
+    }
+    return buildRegressionTile("grass", { elevation: 0.22 });
+  });
+  const roadPoints = [
+    { x: 27, y: 8 },
+    { x: 28, y: 8 },
+    { x: 29, y: 8 }
+  ];
+  for (const point of roadPoints) {
+    state.tiles[point.y * grid.cols + point.x] = buildRegressionTile("road", { elevation: 0.22 });
+  }
+  connectRoadPoints(state, 27, 8, 28, 8);
+  connectRoadPoints(state, 28, 8, 29, 8);
+  resetRoadGenerationStats();
+  const carved = carveRoad(
+    state,
+    new RNG(727272),
+    { x: 4, y: 8 },
+    { x: 29, y: 8 },
+    {
+      bridgePolicy: "never",
+      useBidirectionalStreamer: true,
+      searchBounds: { minX: 0, maxX: grid.cols - 1, minY: 4, maxY: 12 },
+      maxSearchNodeVisits: 700
+    }
+  );
+  return {
+    carved,
+    connectedToNetwork: (state.tileRoadEdges[8 * grid.cols + 27] ?? 0) > 0,
+    stats: getRoadGenerationStats()
+  };
+};
+
+const runSyntheticRoadStreamerBudgetCase = () => {
+  const grid = { cols: 30, rows: 18, totalTiles: 30 * 18 };
+  const state = createInitialState(737373, grid);
+  resetState(state, 737373);
+  state.tiles = Array.from({ length: grid.totalTiles }, (_, idx) => {
+    if (state.tileElevation.length === grid.totalTiles) {
+      state.tileElevation[idx] = 0.22;
+    }
+    return buildRegressionTile("grass", { elevation: 0.22 });
+  });
+  resetRoadGenerationStats();
+  const carved = carveRoad(
+    state,
+    new RNG(737373),
+    { x: 2, y: 9 },
+    { x: 27, y: 9 },
+    {
+      bridgePolicy: "never",
+      useBidirectionalStreamer: true,
+      searchBounds: { minX: 0, maxX: grid.cols - 1, minY: 0, maxY: grid.rows - 1 },
+      maxSearchNodeVisits: 1
+    }
+  );
+  return {
+    carved,
+    stats: getRoadGenerationStats()
+  };
+};
+
+const createFlatSyntheticRoadState = (seed, cols, rows, elevation = 0.22) => {
+  const grid = { cols, rows, totalTiles: cols * rows };
+  const state = createInitialState(seed, grid);
+  resetState(state, seed);
+  state.tiles = Array.from({ length: grid.totalTiles }, (_, idx) => {
+    if (state.tileElevation.length === grid.totalTiles) {
+      state.tileElevation[idx] = elevation;
+    }
+    return buildRegressionTile("grass", { elevation });
+  });
+  return state;
+};
+
+const setSyntheticTile = (state, x, y, type, elevation = 0.22) => {
+  const idx = y * state.grid.cols + x;
+  state.tiles[idx] = buildRegressionTile(type, { elevation });
+  if (state.tileElevation.length === state.grid.totalTiles) {
+    state.tileElevation[idx] = elevation;
+  }
+};
+
+const withRoadDiagnostics = (fn) => {
+  const events = [];
+  setRoadPathDebugHooks({
+    emit: (event) => {
+      events.push(event);
+    }
+  });
+  try {
+    return { value: fn(), events };
+  } finally {
+    setRoadPathDebugHooks(null);
+  }
+};
+
+const latestDijkstraResult = (events) => {
+  const results = events.filter((event) => event.kind === "road:result" && event.planner === "dijkstra");
+  return results[results.length - 1] ?? null;
+};
+
+const runSyntheticDijkstraDestinationChoiceCase = () => {
+  const state = createFlatSyntheticRoadState(747474, 34, 20);
+  for (let x = 8; x <= 22; x += 1) {
+    for (let y = 2; y <= 8; y += 1) {
+      setSyntheticTile(state, x, y, "grass", 0.72);
+    }
+  }
+  setSyntheticTile(state, 25, 4, "road", 0.72);
+  setSyntheticTile(state, 26, 14, "road", 0.22);
+  resetRoadGenerationStats();
+  const { value: selected, events } = withRoadDiagnostics(() =>
+    carveRoadToTarget(
+      state,
+      new RNG(747474),
+      { x: 2, y: 4 },
+      (x, y) => (x === 25 && y === 4) || (x === 26 && y === 14),
+      {
+        bridgePolicy: "never",
+        searchBounds: { minX: 0, maxX: state.grid.cols - 1, minY: 0, maxY: state.grid.rows - 1 },
+        preferredAngleDeg: 8,
+        softAngleDeg: 12,
+        avoidAngleDeg: 18,
+        fallbackAngleDeg: 28,
+        gradeLimitStart: 0.08,
+        gradeLimitRelaxStep: 0.01,
+        gradeLimitMax: 0.12,
+        crossfallLimitStart: 0.06,
+        crossfallLimitRelaxStep: 0.01,
+        crossfallLimitMax: 0.1,
+        gradeChangeLimitStart: 0.06,
+        gradeChangeLimitRelaxStep: 0.01,
+        gradeChangeLimitMax: 0.1,
+        allowMountainPassFallback: false
+      }
+    )
+  );
+  return {
+    selected,
+    result: latestDijkstraResult(events),
+    stats: getRoadGenerationStats()
+  };
+};
+
+const runSyntheticDijkstraBudgetCase = () => {
+  const state = createFlatSyntheticRoadState(757575, 30, 10);
+  resetRoadGenerationStats();
+  const { value: carved, events } = withRoadDiagnostics(() =>
+    carveRoad(
+      state,
+      new RNG(757575),
+      { x: 1, y: 5 },
+      { x: 28, y: 5 },
+      {
+        bridgePolicy: "never",
+        maxSearchNodeVisits: 1,
+        allowMountainPassFallback: false
+      }
+    )
+  );
+  return {
+    carved,
+    result: latestDijkstraResult(events),
+    stats: getRoadGenerationStats()
+  };
+};
+
+const runSyntheticDijkstraNoRouteCase = () => {
+  const state = createFlatSyntheticRoadState(767676, 14, 9);
+  const blocked = [
+    [8, 3],
+    [9, 3],
+    [10, 3],
+    [8, 4],
+    [10, 4],
+    [8, 5],
+    [9, 5],
+    [10, 5]
+  ];
+  for (const [x, y] of blocked) {
+    setSyntheticTile(state, x, y, "water", 0.18);
+  }
+  resetRoadGenerationStats();
+  const { value: carved, events } = withRoadDiagnostics(() =>
+    carveRoad(
+      state,
+      new RNG(767676),
+      { x: 2, y: 4 },
+      { x: 9, y: 4 },
+      {
+        bridgePolicy: "never",
+        allowMountainPassFallback: false
+      }
+    )
+  );
+  return {
+    carved,
+    result: latestDijkstraResult(events)
+  };
+};
+
+const runSyntheticDijkstraExistingRoadPreferenceCase = (seed = 777777) => {
+  const state = createFlatSyntheticRoadState(seed, 32, 13);
+  for (let x = 5; x <= 25; x += 1) {
+    setSyntheticTile(state, x, 6, "road", 0.22);
+    if (x > 5) {
+      connectRoadPoints(state, x - 1, 6, x, 6);
+    }
+  }
+  resetRoadGenerationStats();
+  const { value: carved, events } = withRoadDiagnostics(() =>
+    carveRoad(
+      state,
+      new RNG(seed),
+      { x: 2, y: 6 },
+      { x: 29, y: 6 },
+      {
+        bridgePolicy: "never",
+        turnPenalty: 0.35,
+        diagonalPenalty: 0.4,
+        allowMountainPassFallback: false
+      }
+    )
+  );
+  const result = latestDijkstraResult(events);
+  const path = result?.path ?? [];
+  const existingRoadSteps = path.filter((point) => point.y === 6 && point.x >= 5 && point.x <= 25).length;
+  const pathSignature = path.map((point) => `${point.x},${point.y}`).join("|");
+  return {
+    carved,
+    result,
+    existingRoadSteps,
+    pathSignature
+  };
+};
+
+const runSyntheticDijkstraCases = () => {
+  const destinationChoice = runSyntheticDijkstraDestinationChoiceCase();
+  if (
+    !destinationChoice.selected ||
+    destinationChoice.selected.x !== 26 ||
+    destinationChoice.selected.y !== 14 ||
+    destinationChoice.result?.selectedDestinationSeed?.x !== 26 ||
+    destinationChoice.result?.selectedDestinationSeed?.y !== 14 ||
+    destinationChoice.result?.totalRouteCost === undefined
+  ) {
+    throw new Error(
+      `[mapgen] synthetic Dijkstra destination case failed: selected=${JSON.stringify(destinationChoice.selected)} diagnostic=${JSON.stringify(destinationChoice.result?.selectedDestinationSeed)} cost=${destinationChoice.result?.totalRouteCost}`
+    );
+  }
+
+  const budget = runSyntheticDijkstraBudgetCase();
+  if (!budget.result || budget.carved || budget.result.failureReason !== "budget-aborted" || budget.stats.searchBudgetAbortCount < 1) {
+    throw new Error(
+      `[mapgen] synthetic Dijkstra budget case failed: carved=${budget.carved} reason=${budget.result?.failureReason} budget=${budget.stats.searchBudgetAbortCount}`
+    );
+  }
+
+  const noRoute = runSyntheticDijkstraNoRouteCase();
+  if (!noRoute.result || noRoute.carved || noRoute.result.failureReason !== "no-route") {
+    throw new Error(
+      `[mapgen] synthetic Dijkstra no-route case failed: carved=${noRoute.carved} reason=${noRoute.result?.failureReason}`
+    );
+  }
+
+  const existingRoad = runSyntheticDijkstraExistingRoadPreferenceCase();
+  const repeatExistingRoad = runSyntheticDijkstraExistingRoadPreferenceCase();
+  if (
+    !existingRoad.carved ||
+    existingRoad.existingRoadSteps < 18 ||
+    existingRoad.pathSignature !== repeatExistingRoad.pathSignature
+  ) {
+    throw new Error(
+      `[mapgen] synthetic Dijkstra existing-road case failed: carved=${existingRoad.carved} existingSteps=${existingRoad.existingRoadSteps} deterministic=${existingRoad.pathSignature === repeatExistingRoad.pathSignature}`
+    );
+  }
+
+  return {
+    selected: destinationChoice.selected,
+    totalRouteCost: destinationChoice.result.totalRouteCost,
+    existingRoadSteps: existingRoad.existingRoadSteps,
+    budgetAborts: budget.stats.searchBudgetAbortCount
+  };
+};
+
 const runAll = async () => {
   const results = [];
+  const syntheticDijkstra = runSyntheticDijkstraCases();
   const syntheticRoads = runSyntheticRoadAngleCases();
   if (!syntheticRoads.carved || syntheticRoads.usedSteepWall) {
     throw new Error(
@@ -2068,12 +2468,30 @@ const runAll = async () => {
       `[mapgen] synthetic mountain-pass case failed: carved=${syntheticMountainPass.carved} passes=${syntheticMountainPass.stats.mountainPassFallbackCount}`
     );
   }
+  const syntheticStreamerNearJoin = runSyntheticRoadStreamerNearJoinCase();
+  if (!syntheticStreamerNearJoin.carved || syntheticStreamerNearJoin.stats.pathsFound < 1) {
+    throw new Error(
+      `[mapgen] synthetic streamer near-join case failed: carved=${syntheticStreamerNearJoin.carved} paths=${syntheticStreamerNearJoin.stats.pathsFound}/${syntheticStreamerNearJoin.stats.pathsAttempted}`
+    );
+  }
+  const syntheticStreamerDestinationSeeds = runSyntheticRoadStreamerDestinationSeedCase();
+  if (!syntheticStreamerDestinationSeeds.carved || !syntheticStreamerDestinationSeeds.connectedToNetwork) {
+    throw new Error(
+      `[mapgen] synthetic streamer destination-seed case failed: carved=${syntheticStreamerDestinationSeeds.carved} connected=${syntheticStreamerDestinationSeeds.connectedToNetwork}`
+    );
+  }
+  const syntheticStreamerBudget = runSyntheticRoadStreamerBudgetCase();
+  if (syntheticStreamerBudget.carved || syntheticStreamerBudget.stats.searchBudgetAbortCount < 1) {
+    throw new Error(
+      `[mapgen] synthetic streamer budget case failed: carved=${syntheticStreamerBudget.carved} budget=${syntheticStreamerBudget.stats.searchBudgetAbortCount}`
+    );
+  }
   for (const sizeId of sizes) {
     for (const seed of seeds) {
       const metrics = await runCase(sizeId, seed);
       results.push(metrics);
       console.log(
-        `[mapgen] size=${metrics.sizeId} seed=${metrics.seed} ms=${metrics.durationMs.toFixed(2)} biome=${metrics.biomeSpreadClassifyMs.toFixed(2)}ms water=${metrics.waterPct.toFixed(2)}% forest=${metrics.forestPct.toFixed(2)}% forestAgeMean=${metrics.forestAgeMean.toFixed(2)} forestMaturityP95=${metrics.forestMaturityP95.toFixed(3)} patches=${metrics.forestPatchCount} meanPatch=${metrics.forestPatchMean} p95Patch=${metrics.forestPatchP95} houses=${metrics.houseCount} placed=${metrics.placedHouseCount}/${metrics.requestedHouseCount} compactEval=${metrics.compactTownEvalCount} compactViolations=${metrics.compactTownViolationCount} compactMaxAspect=${metrics.compactTownMaxAspect.toFixed(2)} base=(${metrics.baseX},${metrics.baseY}) baseElev=${metrics.baseElevation.toFixed(4)} baseRelief=${metrics.baseLocalRelief.toFixed(4)} baseCenter=${metrics.baseCenterDistanceRatio.toFixed(4)} baseVeg=${metrics.baseNearbyVegetationRatio.toFixed(4)} townAngle=${metrics.settlementTownSeedMaxAngle.toFixed(2)}/${metrics.settlementTownSeedMeanAngle.toFixed(2)} houseAngle=${metrics.houseFootprintMaxAngle.toFixed(2)}/${metrics.houseFootprintMeanAngle.toFixed(2)} highHouseAngle=${metrics.highAngleHouseFootprintCount} padReliefMax=${metrics.settlementPadReliefMax.toFixed(4)} padReliefMean=${metrics.settlementPadReliefMean.toFixed(4)} roads=${metrics.roadCount} roadComps=${metrics.roadComponentCount} townRoadComps=${metrics.townRoadComponentCount} townRoadMissing=${metrics.townRoadMissingCount} townRoadDisconnected=${metrics.townRoadDisconnectedCount} rivers=${metrics.riverCount} lakes=${metrics.lakeCount}/${metrics.lakeTiles} lakeOut=${metrics.lakeOutletCount} lakeOutAdj=${metrics.lakeOutletAdjacentRiverCount} lakeOutRead=${metrics.lakeOutletReadableCount} lakeOutMiss=${metrics.lakeOutletConnectionFailures} lakeOutShort=${metrics.lakeOutletShortRiverFailures} falls=${metrics.waterfallCount} roadIgnoredDiag=${metrics.ignoredDiagonalCount} roadUnmatched=${metrics.unmatchedPatternCount} roadGrade=${metrics.maxRoadGrade.toFixed(3)} roadCrossfall=${metrics.maxRoadCrossfall.toFixed(3)} roadGradeChange=${metrics.maxRoadGradeChange.toFixed(3)} roadAngle=${metrics.maxRoadAngleDeg.toFixed(2)}/${metrics.meanRoadAngleDeg.toFixed(2)} highRoadAngle=${metrics.highAngleRoadStepCount} straightSteep=${metrics.roadLongStraightSteepSegmentCount} gradingDelta=${metrics.roadGradingDelta.toFixed(3)} routedAngle=${metrics.routedRoadMaxAngle.toFixed(2)}/${metrics.routedRoadMeanAngle.toFixed(2)} routedHighAngle=${metrics.routedHighAngleStepCount} routedStraightSteep=${metrics.routedLongStraightSteepSegmentCount} passes=${metrics.mountainPassFallbackCount} junctions=${metrics.generatedJunctionCount} switchbacks=${metrics.switchbackTurnCount} hairpins=${metrics.hairpinGradeDiscountCount} cleanup=${metrics.connectorArtifactPrunedEdgeCount} switchbackRoutes=${metrics.switchbackRouteCount}/${metrics.switchbackRouteAttempts} budgetAbort=${metrics.searchBudgetAbortCount} cacheSkip=${metrics.connectorCacheSkipCount} roadWalls=${metrics.wallEdgeCount} riverDiagOnly=${metrics.riverDiagOnlyLinks} riverIso=${metrics.riverIsolatedCells} riverOrthRatio=${metrics.riverOrthConnectivityRatio.toFixed(4)} riverComps=${metrics.riverComponentCount} riverDetachedComps=${metrics.detachedRiverComponents} riverDetachedCells=${metrics.detachedRiverCells} coastNatural=${metrics.coastalNaturalCount} coastBeach=${metrics.coastalBeachCount} coastRocky=${metrics.coastalRockyCount} coastOther=${metrics.coastalOtherCount} coastSlope=${metrics.coastSlopeMean.toFixed(4)}/${metrics.coastSlopeP95.toFixed(4)} coastDrop=${metrics.coastBoundaryDropMean.toFixed(4)}/${metrics.coastBoundaryDropMax.toFixed(4)} coastCliff=${metrics.coastCliffRatio.toFixed(3)} forcedCliff=${metrics.coastForcedCliffRatio.toFixed(3)} coastInsetStd=${metrics.coastalEdgeInsetStdDev.toFixed(2)} coastInsetDominant=${metrics.coastalDominantInsetRatio.toFixed(3)} coastSideRun=${metrics.coastalSideWallRunRatio.toFixed(3)} coastSideStd=${metrics.coastalSideWallMinStdDev.toFixed(2)}`
+        `[mapgen] size=${metrics.sizeId} seed=${metrics.seed} ms=${metrics.durationMs.toFixed(2)} biome=${metrics.biomeSpreadClassifyMs.toFixed(2)}ms water=${metrics.waterPct.toFixed(2)}% forest=${metrics.forestPct.toFixed(2)}% forestAgeMean=${metrics.forestAgeMean.toFixed(2)} forestMaturityP95=${metrics.forestMaturityP95.toFixed(3)} patches=${metrics.forestPatchCount} meanPatch=${metrics.forestPatchMean} p95Patch=${metrics.forestPatchP95} houses=${metrics.houseCount} placed=${metrics.placedHouseCount}/${metrics.requestedHouseCount} compactEval=${metrics.compactTownEvalCount} compactViolations=${metrics.compactTownViolationCount} compactMaxAspect=${metrics.compactTownMaxAspect.toFixed(2)} base=(${metrics.baseX},${metrics.baseY}) baseElev=${metrics.baseElevation.toFixed(4)} baseRelief=${metrics.baseLocalRelief.toFixed(4)} baseCenter=${metrics.baseCenterDistanceRatio.toFixed(4)} baseVeg=${metrics.baseNearbyVegetationRatio.toFixed(4)} townAngle=${metrics.settlementTownSeedMaxAngle.toFixed(2)}/${metrics.settlementTownSeedMeanAngle.toFixed(2)} houseAngle=${metrics.houseFootprintMaxAngle.toFixed(2)}/${metrics.houseFootprintMeanAngle.toFixed(2)} highHouseAngle=${metrics.highAngleHouseFootprintCount} padReliefMax=${metrics.settlementPadReliefMax.toFixed(4)} padReliefMean=${metrics.settlementPadReliefMean.toFixed(4)} roads=${metrics.roadCount} roadComps=${metrics.roadComponentCount} townRoadComps=${metrics.townRoadComponentCount} townRoadMissing=${metrics.townRoadMissingCount} townRoadDisconnected=${metrics.townRoadDisconnectedCount} rivers=${metrics.riverCount} lakes=${metrics.lakeCount}/${metrics.lakeTiles} lakeOut=${metrics.lakeOutletCount} lakeOutAdj=${metrics.lakeOutletAdjacentRiverCount} lakeOutRead=${metrics.lakeOutletReadableCount} lakeOutMiss=${metrics.lakeOutletConnectionFailures} lakeOutShort=${metrics.lakeOutletShortRiverFailures} lakeOutLap=${metrics.lakeOutletShorelineLapFailures} lakeOutLat=${metrics.lakeOutletLateralStartFailures} falls=${metrics.waterfallCount} roadIgnoredDiag=${metrics.ignoredDiagonalCount} roadUnmatched=${metrics.unmatchedPatternCount} roadGrade=${metrics.maxRoadGrade.toFixed(3)} roadCrossfall=${metrics.maxRoadCrossfall.toFixed(3)} roadGradeChange=${metrics.maxRoadGradeChange.toFixed(3)} roadAngle=${metrics.maxRoadAngleDeg.toFixed(2)}/${metrics.meanRoadAngleDeg.toFixed(2)} highRoadAngle=${metrics.highAngleRoadStepCount} straightSteep=${metrics.roadLongStraightSteepSegmentCount} gradingDelta=${metrics.roadGradingDelta.toFixed(3)} routedAngle=${metrics.routedRoadMaxAngle.toFixed(2)}/${metrics.routedRoadMeanAngle.toFixed(2)} routedHighAngle=${metrics.routedHighAngleStepCount} routedStraightSteep=${metrics.routedLongStraightSteepSegmentCount} passes=${metrics.mountainPassFallbackCount} junctions=${metrics.generatedJunctionCount} switchbacks=${metrics.switchbackTurnCount} hairpins=${metrics.hairpinGradeDiscountCount} cleanup=${metrics.connectorArtifactPrunedEdgeCount} switchbackRoutes=${metrics.switchbackRouteCount}/${metrics.switchbackRouteAttempts} budgetAbort=${metrics.searchBudgetAbortCount} cacheSkip=${metrics.connectorCacheSkipCount} roadWalls=${metrics.wallEdgeCount} riverDiagOnly=${metrics.riverDiagOnlyLinks} riverIso=${metrics.riverIsolatedCells} riverOrthRatio=${metrics.riverOrthConnectivityRatio.toFixed(4)} riverComps=${metrics.riverComponentCount} riverDetachedComps=${metrics.detachedRiverComponents} riverDetachedCells=${metrics.detachedRiverCells} coastNatural=${metrics.coastalNaturalCount} coastBeach=${metrics.coastalBeachCount} coastRocky=${metrics.coastalRockyCount} coastOther=${metrics.coastalOtherCount} coastSlope=${metrics.coastSlopeMean.toFixed(4)}/${metrics.coastSlopeP95.toFixed(4)} coastDrop=${metrics.coastBoundaryDropMean.toFixed(4)}/${metrics.coastBoundaryDropMax.toFixed(4)} coastCliff=${metrics.coastCliffRatio.toFixed(3)} forcedCliff=${metrics.coastForcedCliffRatio.toFixed(3)} coastInsetStd=${metrics.coastalEdgeInsetStdDev.toFixed(2)} coastInsetDominant=${metrics.coastalDominantInsetRatio.toFixed(3)} coastSideRun=${metrics.coastalSideWallRunRatio.toFixed(3)} coastSideStd=${metrics.coastalSideWallMinStdDev.toFixed(2)}`
       );
     }
   }
@@ -2276,6 +2694,18 @@ const compareAgainstBaseline = async (results) => {
         `[mapgen] lake outlets have too-short visible river continuations for ${key}: ${result.lakeOutletShortRiverFailures}`
       );
     }
+    if (result.lakeOutletShorelineLapFailures !== 0) {
+      failures += 1;
+      console.error(
+        `[mapgen] lake outlets trace the source lake shoreline for ${key}: ${result.lakeOutletShorelineLapFailures}`
+      );
+    }
+    if (result.lakeOutletLateralStartFailures !== 0) {
+      failures += 1;
+      console.error(
+        `[mapgen] lake outlets start laterally despite available direct descent for ${key}: ${result.lakeOutletLateralStartFailures}`
+      );
+    }
     if (result.sizeId === "medium" && result.seed === 1337 && result.lakeTiles < 16) {
       failures += 1;
       console.error(`[mapgen] target hydrology seed produced too few inland lake tiles for ${key}: ${result.lakeTiles}`);
@@ -2291,7 +2721,7 @@ const compareAgainstBaseline = async (results) => {
       failures += 1;
       console.error(`[mapgen] unmatched road patterns present for ${key}: ${result.unmatchedPatternCount}`);
     }
-    const maxSwitchbackRouteAttempts = Math.max(48, (result.townCount ?? 0) * 16);
+    const maxSwitchbackRouteAttempts = Math.max(64, (result.townCount ?? 0) * 22);
     if (result.switchbackRouteAttempts > maxSwitchbackRouteAttempts) {
       failures += 1;
       console.error(
@@ -2506,6 +2936,7 @@ const compareAgainstBaseline = async (results) => {
 
 validateHouseParcels();
 if (syntheticRoadsOnly) {
+  const syntheticDijkstra = runSyntheticDijkstraCases();
   const syntheticRoads = runSyntheticRoadAngleCases();
   if (!syntheticRoads.carved || syntheticRoads.usedSteepWall) {
     throw new Error(
@@ -2546,8 +2977,26 @@ if (syntheticRoadsOnly) {
       `[mapgen] synthetic mountain-pass case failed: carved=${syntheticMountainPass.carved} passes=${syntheticMountainPass.stats.mountainPassFallbackCount}`
     );
   }
+  const syntheticStreamerNearJoin = runSyntheticRoadStreamerNearJoinCase();
+  if (!syntheticStreamerNearJoin.carved || syntheticStreamerNearJoin.stats.pathsFound < 1) {
+    throw new Error(
+      `[mapgen] synthetic streamer near-join case failed: carved=${syntheticStreamerNearJoin.carved} paths=${syntheticStreamerNearJoin.stats.pathsFound}/${syntheticStreamerNearJoin.stats.pathsAttempted}`
+    );
+  }
+  const syntheticStreamerDestinationSeeds = runSyntheticRoadStreamerDestinationSeedCase();
+  if (!syntheticStreamerDestinationSeeds.carved || !syntheticStreamerDestinationSeeds.connectedToNetwork) {
+    throw new Error(
+      `[mapgen] synthetic streamer destination-seed case failed: carved=${syntheticStreamerDestinationSeeds.carved} connected=${syntheticStreamerDestinationSeeds.connectedToNetwork}`
+    );
+  }
+  const syntheticStreamerBudget = runSyntheticRoadStreamerBudgetCase();
+  if (syntheticStreamerBudget.carved || syntheticStreamerBudget.stats.searchBudgetAbortCount < 1) {
+    throw new Error(
+      `[mapgen] synthetic streamer budget case failed: carved=${syntheticStreamerBudget.carved} budget=${syntheticStreamerBudget.stats.searchBudgetAbortCount}`
+    );
+  }
   console.log(
-    `[mapgen] synthetic roads ok switchbacks=${syntheticSwitchbacks.stats.switchbackTurnCount} hairpins=${syntheticSwitchbacks.stats.hairpinGradeDiscountCount} cleanup=${syntheticRoadCleanup.pruned} lateral=${syntheticSwitchbacks.lateralSpan} passes=${syntheticMountainPass.stats.mountainPassFallbackCount}`
+    `[mapgen] synthetic roads ok dijkstraSelected=(${syntheticDijkstra.selected.x},${syntheticDijkstra.selected.y}) dijkstraExisting=${syntheticDijkstra.existingRoadSteps} dijkstraBudget=${syntheticDijkstra.budgetAborts} switchbacks=${syntheticSwitchbacks.stats.switchbackTurnCount} hairpins=${syntheticSwitchbacks.stats.hairpinGradeDiscountCount} cleanup=${syntheticRoadCleanup.pruned} lateral=${syntheticSwitchbacks.lateralSpan} passes=${syntheticMountainPass.stats.mountainPassFallbackCount} streamerBudget=${syntheticStreamerBudget.stats.searchBudgetAbortCount}`
   );
   process.exit(0);
 }

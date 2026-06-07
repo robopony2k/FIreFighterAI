@@ -12,6 +12,7 @@ const buildTypeIdsFromState = (state: WorldState): Uint8Array => {
 };
 
 export const emitStageSnapshot = async (ctx: MapGenContext, phase: MapGenDebugPhase): Promise<void> => {
+  ctx.checkCancelled();
   if (!ctx.debug || !ctx.elevationMap) {
     return;
   }
@@ -43,6 +44,7 @@ export const emitStageSnapshot = async (ctx: MapGenContext, phase: MapGenDebugPh
   if (ctx.debug.waitForStep) {
     await ctx.debug.waitForStep();
   }
+  ctx.checkCancelled();
 };
 
 export const resolveStageLimit = (phase: MapGenDebugPhase | undefined): MapGenDebugPhase | null => {

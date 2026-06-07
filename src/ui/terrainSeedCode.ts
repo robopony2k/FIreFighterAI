@@ -151,6 +151,7 @@ export const encodeTerrainSeedCode = (payload: TerrainSeedPayload): string => {
     encodePercent(advanced.settlementSpacing ?? 0),
     encodeSmallInt(advanced.settlementPreGrowthYears ?? 20),
     encodePercent(advanced.roadStrictness ?? 0),
+    encodePercent(advanced.roadMaxGrade ?? 0.38),
     encodePercent(advanced.forestPatchiness ?? 0),
     encodePercent(advanced.noiseFrequency ?? 0.5)
   ].join("");
@@ -174,7 +175,7 @@ export const decodeTerrainSeedCode = (value: string): TerrainSeedPayload | null 
   const body = parts[2] ?? "";
   const nameToken = parts[3] ?? "";
   const name = decodeNameToken(nameToken, coerceNonNegativeSeed(seed));
-  if (!Number.isFinite(seed) || seed < 0 || body.length !== 56) {
+  if (!Number.isFinite(seed) || seed < 0 || (body.length !== 56 && body.length !== 58)) {
     return null;
   }
   if (nameToken.length > 0 && name === undefined) {
@@ -200,10 +201,12 @@ export const decodeTerrainSeedCode = (value: string): TerrainSeedPayload | null 
   if (decodedPreGrowthYears === null || values.length !== 22) {
     return null;
   }
+  const hasRoadMaxGrade = body.length >= 58;
   const roadStrictness = decodePercent(body.slice(50, 52));
-  const forestPatchiness = decodePercent(body.slice(52, 54));
-  const noiseFrequency = decodePercent(body.slice(54, 56));
-  if (roadStrictness === null || forestPatchiness === null || noiseFrequency === null) {
+  const roadMaxGrade = hasRoadMaxGrade ? decodePercent(body.slice(52, 54)) : 0.38;
+  const forestPatchiness = decodePercent(body.slice(hasRoadMaxGrade ? 54 : 52, hasRoadMaxGrade ? 56 : 54));
+  const noiseFrequency = decodePercent(body.slice(hasRoadMaxGrade ? 56 : 54, hasRoadMaxGrade ? 58 : 56));
+  if (roadStrictness === null || roadMaxGrade === null || forestPatchiness === null || noiseFrequency === null) {
     return null;
   }
   const advancedOverrides = {
@@ -224,6 +227,7 @@ export const decodeTerrainSeedCode = (value: string): TerrainSeedPayload | null 
     settlementSpacing: values[21],
     settlementPreGrowthYears: decodedPreGrowthYears,
     roadStrictness,
+    roadMaxGrade,
     forestPatchiness,
     noiseFrequency
   };

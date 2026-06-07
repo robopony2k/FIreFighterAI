@@ -356,6 +356,14 @@ export const MAP_EDITOR_TERRAIN_GROUPS = {
           "Skip road routing",
           "Bypass expensive settlement road route attempts for temporary mapgen debugging."
         ),
+        sliderField(
+          "advanced",
+          "roadMaxGrade",
+          "roadMaxGrade",
+          "Max road grade",
+          "Maximum climb grade the settlement road search may accept after route relaxation. Lower values test whether steep roads are causing routing failures.",
+          { min: 0.12, max: 0.42, step: 0.01, format: "percent" }
+        ),
         sliderField("advanced", "roadStrictness", "roadStrictness", "Road strictness", "How slope-limited and conservative road routing remains.")
       ]
     }

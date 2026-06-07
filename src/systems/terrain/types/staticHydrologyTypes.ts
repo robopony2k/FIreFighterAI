@@ -39,6 +39,62 @@ export type StaticHydrologyRejectReason =
 
 export type StaticHydrologyRejectSummary = Partial<Record<StaticHydrologyRejectReason, number>>;
 
+export type StaticHydrologyDebugCandidateEvent = {
+  kind: "hydrology:candidate";
+  basinSeedIndex: number;
+  area: number;
+  footprintTiles: number;
+  maxDepth: number;
+  spillElevation: number;
+  rainfallScore: number;
+  runoffScore: number;
+  score: number;
+  outletIndex: number;
+  outletTargetIndex: number;
+};
+
+export type StaticHydrologyDebugRejectEvent = {
+  kind: "hydrology:reject";
+  basinSeedIndex: number;
+  reason: StaticHydrologyRejectReason;
+  score: number;
+  footprintTiles: number;
+};
+
+export type StaticHydrologyDebugLakeEvent = {
+  kind: "hydrology:lake";
+  lake: StaticHydrologyLake;
+};
+
+export type StaticHydrologyDebugOverflowEvent = {
+  kind: "hydrology:overflow";
+  lakeId: number;
+  outletTargetIndex: number;
+  tiles: number[];
+  reachedLakeId: number;
+  reachedOcean: boolean;
+  reachedExistingRiver: boolean;
+};
+
+export type StaticHydrologyDebugWaterfallEvent = {
+  kind: "hydrology:waterfall";
+  accepted: boolean;
+  waterfall: StaticHydrologyWaterfall;
+};
+
+export type StaticHydrologyDebugEvent =
+  | StaticHydrologyDebugCandidateEvent
+  | StaticHydrologyDebugRejectEvent
+  | StaticHydrologyDebugLakeEvent
+  | StaticHydrologyDebugOverflowEvent
+  | StaticHydrologyDebugWaterfallEvent;
+
+export type StaticHydrologyDebugHooks = {
+  emit?: (event: StaticHydrologyDebugEvent) => void | Promise<void>;
+  yieldIfNeeded?: () => Promise<boolean>;
+  checkCancelled?: () => void;
+};
+
 export type StaticHydrologyFields = {
   rainfall: Float32Array;
   runoff: Float32Array;

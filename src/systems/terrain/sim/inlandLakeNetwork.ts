@@ -1,6 +1,6 @@
 import type { WorldState } from "../../../core/state.js";
 import type { MapGenSettings } from "../../../mapgen/settings.js";
-import type { StaticHydrologyResult } from "../types/staticHydrologyTypes.js";
+import type { StaticHydrologyDebugHooks, StaticHydrologyResult } from "../types/staticHydrologyTypes.js";
 import { buildBasinLakeHydrology } from "./basinLakeHydrology.js";
 
 export const buildStaticInlandLakeNetwork = (input: {
@@ -9,4 +9,5 @@ export const buildStaticInlandLakeNetwork = (input: {
   riverMask: Uint8Array;
   oceanMask: Uint8Array;
   settings: MapGenSettings;
-}): StaticHydrologyResult => buildBasinLakeHydrology(input);
+  debug?: StaticHydrologyDebugHooks;
+}): Promise<StaticHydrologyResult> => buildBasinLakeHydrology(input);
