@@ -550,6 +550,103 @@
                   </div>
                 </div>
                 <pre id="mapEditorDiagnosticsOutput" class="map-editor-bridge-debug-output" tabindex="0">Enable Diagnostics, then run Rivers/Lakes or Settlements.</pre>
+                <div class="map-editor-road-tuning">
+                  <div class="map-editor-road-tuning-header">
+                    <div>
+                      <div class="run-settings-title">Road Tuning</div>
+                      <div class="map-editor-bridge-debug-meta">Editor diagnostics only. Defaults match normal generation.</div>
+                    </div>
+                    <button id="mapEditorRoadTuningReset" type="button">Reset</button>
+                  </div>
+                  <div class="map-editor-road-tuning-grid">
+                    <label class="run-checkbox">
+                      <input id="mapEditorRoadTuningSwitchbacks" type="checkbox" checked />
+                      Switchbacks
+                    </label>
+                    <label class="run-checkbox">
+                      <input id="mapEditorRoadTuningMountainPass" type="checkbox" checked />
+                      Mountain pass
+                    </label>
+                    <label class="run-checkbox">
+                      <input id="mapEditorRoadTuningWaypoints" type="checkbox" checked />
+                      Waypoints
+                    </label>
+                    <label class="run-checkbox">
+                      <input id="mapEditorRoadTuningBridgeFirst" type="checkbox" checked />
+                      Bridge-first
+                    </label>
+                    <label class="run-checkbox">
+                      <input id="mapEditorRoadTuningIntertown" type="checkbox" checked />
+                      Intertown
+                    </label>
+                    <label class="run-checkbox">
+                      <input id="mapEditorRoadTuningRepair" type="checkbox" checked />
+                      Repair pass
+                    </label>
+                    <label class="run-checkbox">
+                      <input id="mapEditorRoadTuningCleanup" type="checkbox" checked />
+                      Cleanup
+                    </label>
+                  </div>
+                  <div class="map-editor-road-tuning-sliders">
+                    <label class="run-slider">
+                      Search budget
+                      <div class="run-slider-row">
+                        <input id="mapEditorRoadTuningBudgetMultiplier" type="range" min="0.1" max="2" step="0.05" value="1" />
+                        <output id="mapEditorRoadTuningBudgetMultiplierValue" class="run-slider-value" for="mapEditorRoadTuningBudgetMultiplier">x1.00</output>
+                      </div>
+                    </label>
+                    <label class="run-slider">
+                      Grade tolerance
+                      <div class="run-slider-row">
+                        <input id="mapEditorRoadTuningGradeTolerance" type="range" min="0.25" max="3" step="0.05" value="1" />
+                        <output id="mapEditorRoadTuningGradeToleranceValue" class="run-slider-value" for="mapEditorRoadTuningGradeTolerance">x1.00</output>
+                      </div>
+                    </label>
+                    <label class="run-slider">
+                      Relax passes cap
+                      <div class="run-slider-row">
+                        <input id="mapEditorRoadTuningRelaxPasses" type="range" min="0" max="12" step="1" value="0" />
+                        <output id="mapEditorRoadTuningRelaxPassesValue" class="run-slider-value" for="mapEditorRoadTuningRelaxPasses">Default</output>
+                      </div>
+                    </label>
+                    <label class="run-slider">
+                      Intertown passes
+                      <div class="run-slider-row">
+                        <input id="mapEditorRoadTuningIntertownPasses" type="range" min="-1" max="2" step="1" value="-1" />
+                        <output id="mapEditorRoadTuningIntertownPassesValue" class="run-slider-value" for="mapEditorRoadTuningIntertownPasses">Default</output>
+                      </div>
+                    </label>
+                    <label class="run-slider">
+                      Intertown edges
+                      <div class="run-slider-row">
+                        <input id="mapEditorRoadTuningIntertownEdges" type="range" min="0" max="12" step="1" value="0" />
+                        <output id="mapEditorRoadTuningIntertownEdgesValue" class="run-slider-value" for="mapEditorRoadTuningIntertownEdges">Default</output>
+                      </div>
+                    </label>
+                    <label class="run-slider">
+                      Intertown detour
+                      <div class="run-slider-row">
+                        <input id="mapEditorRoadTuningIntertownDetour" type="range" min="0" max="8" step="0.25" value="0" />
+                        <output id="mapEditorRoadTuningIntertownDetourValue" class="run-slider-value" for="mapEditorRoadTuningIntertownDetour">Default</output>
+                      </div>
+                    </label>
+                    <label class="run-slider">
+                      Pre-growth years
+                      <div class="run-slider-row">
+                        <input id="mapEditorRoadTuningPreGrowthYears" type="range" min="-1" max="40" step="1" value="-1" />
+                        <output id="mapEditorRoadTuningPreGrowthYearsValue" class="run-slider-value" for="mapEditorRoadTuningPreGrowthYears">Default</output>
+                      </div>
+                    </label>
+                    <label class="run-slider">
+                      Future growth years
+                      <div class="run-slider-row">
+                        <input id="mapEditorRoadTuningFutureGrowthYears" type="range" min="-1" max="20" step="1" value="-1" />
+                        <output id="mapEditorRoadTuningFutureGrowthYearsValue" class="run-slider-value" for="mapEditorRoadTuningFutureGrowthYears">Default</output>
+                      </div>
+                    </label>
+                  </div>
+                </div>
               </div>
             </section>
           </div>

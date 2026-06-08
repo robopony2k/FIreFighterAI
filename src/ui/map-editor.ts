@@ -23,6 +23,13 @@ import {
   type MapGenSession
 } from "../mapgen/index.js";
 import {
+  DEFAULT_ROAD_DIAGNOSTIC_TUNING,
+  describeRoadDiagnosticTuning,
+  resolveRoadDiagnosticTuning,
+  roadDiagnosticTuningToCacheKey,
+  type RoadDiagnosticTuning
+} from "../systems/roads/types/roadDiagnosticTuning.js";
+import {
   cloneTerrainRecipe,
   compileTerrainRecipe,
   createDefaultTerrainRecipe,
@@ -108,6 +115,30 @@ type MapEditorRefs = {
   diagnosticsTimelineTab: HTMLButtonElement;
   diagnosticsSummary: HTMLDivElement;
   diagnosticsOutput: HTMLPreElement;
+  roadTuningSwitchbacks: HTMLInputElement;
+  roadTuningMountainPass: HTMLInputElement;
+  roadTuningWaypoints: HTMLInputElement;
+  roadTuningBridgeFirst: HTMLInputElement;
+  roadTuningIntertown: HTMLInputElement;
+  roadTuningRepair: HTMLInputElement;
+  roadTuningCleanup: HTMLInputElement;
+  roadTuningBudgetMultiplier: HTMLInputElement;
+  roadTuningBudgetMultiplierValue: HTMLOutputElement;
+  roadTuningGradeTolerance: HTMLInputElement;
+  roadTuningGradeToleranceValue: HTMLOutputElement;
+  roadTuningRelaxPasses: HTMLInputElement;
+  roadTuningRelaxPassesValue: HTMLOutputElement;
+  roadTuningIntertownPasses: HTMLInputElement;
+  roadTuningIntertownPassesValue: HTMLOutputElement;
+  roadTuningIntertownEdges: HTMLInputElement;
+  roadTuningIntertownEdgesValue: HTMLOutputElement;
+  roadTuningIntertownDetour: HTMLInputElement;
+  roadTuningIntertownDetourValue: HTMLOutputElement;
+  roadTuningPreGrowthYears: HTMLInputElement;
+  roadTuningPreGrowthYearsValue: HTMLOutputElement;
+  roadTuningFutureGrowthYears: HTMLInputElement;
+  roadTuningFutureGrowthYearsValue: HTMLOutputElement;
+  roadTuningReset: HTMLButtonElement;
   scenarioList: HTMLSelectElement;
   scenarioLoad: HTMLButtonElement;
   scenarioEntryStatus: HTMLDivElement;
@@ -439,11 +470,28 @@ type DebugPreviewRenderableSample = PreviewRenderableSample & { debugRenderOptio
 type MapEditorDiagnosticsTab = "hydrology" | "road" | "timeline";
 type HydrologyDiagnosticRecord = Extract<MapGenDiagnosticEvent, { kind: `hydrology:${string}` }>;
 type RoadDiagnosticRecord = Extract<MapGenDiagnosticEvent, { kind: `road:${string}` }>;
+type RoadDiagnosticAggregate = {
+  attempts: number;
+  found: number;
+  failed: number;
+  budgetAborted: number;
+  totalElapsedMs: number;
+  maxVisitedNodes: number;
+};
+type RoadDiagnosticSlowAttempt = {
+  attemptId: number;
+  label: string;
+  elapsedMs: number;
+  visitedNodes: number;
+  found: boolean;
+  budgetAborted: boolean;
+};
 type MapEditorDiagnosticsState = {
   enabled: boolean;
   cancelRequested: boolean;
   activeTab: MapEditorDiagnosticsTab;
   startedAtMs: number;
+  endedAtMs: number;
   latestEvent: MapGenDiagnosticEvent | null;
   hydrologyRecords: HydrologyDiagnosticRecord[];
   roadRecords: RoadDiagnosticRecord[];
@@ -461,11 +509,16 @@ type MapEditorDiagnosticsState = {
   roadFailed: number;
   roadBudgetAborted: number;
   roadCarves: number;
+  roadHiddenCarves: number;
+  roadUnknownRouteResults: number;
   roadProgressEvents: number;
   roadActiveAttemptId: number | null;
   roadActiveLabel: string;
   roadActiveVisitedNodes: number;
   roadActiveElapsedMs: number;
+  roadAttemptLabels: Map<number, string>;
+  roadAggregateByModePlanner: Map<string, RoadDiagnosticAggregate>;
+  roadSlowAttempts: RoadDiagnosticSlowAttempt[];
 };
 
 const DIAGNOSTIC_DETAIL_CAP = 500;
@@ -476,6 +529,7 @@ const createDiagnosticsState = (): MapEditorDiagnosticsState => ({
   cancelRequested: false,
   activeTab: "hydrology",
   startedAtMs: 0,
+  endedAtMs: 0,
   latestEvent: null,
   hydrologyRecords: [],
   roadRecords: [],
@@ -493,11 +547,16 @@ const createDiagnosticsState = (): MapEditorDiagnosticsState => ({
   roadFailed: 0,
   roadBudgetAborted: 0,
   roadCarves: 0,
+  roadHiddenCarves: 0,
+  roadUnknownRouteResults: 0,
   roadProgressEvents: 0,
   roadActiveAttemptId: null,
   roadActiveLabel: "",
   roadActiveVisitedNodes: 0,
-  roadActiveElapsedMs: 0
+  roadActiveElapsedMs: 0,
+  roadAttemptLabels: new Map(),
+  roadAggregateByModePlanner: new Map(),
+  roadSlowAttempts: []
 });
 
 type CoastlineProbe = {
@@ -1066,6 +1125,30 @@ export const getMapEditorRefs = (): MapEditorRefs => ({
   diagnosticsTimelineTab: document.getElementById("mapEditorDiagnosticsTimelineTab") as HTMLButtonElement,
   diagnosticsSummary: document.getElementById("mapEditorDiagnosticsSummary") as HTMLDivElement,
   diagnosticsOutput: document.getElementById("mapEditorDiagnosticsOutput") as HTMLPreElement,
+  roadTuningSwitchbacks: document.getElementById("mapEditorRoadTuningSwitchbacks") as HTMLInputElement,
+  roadTuningMountainPass: document.getElementById("mapEditorRoadTuningMountainPass") as HTMLInputElement,
+  roadTuningWaypoints: document.getElementById("mapEditorRoadTuningWaypoints") as HTMLInputElement,
+  roadTuningBridgeFirst: document.getElementById("mapEditorRoadTuningBridgeFirst") as HTMLInputElement,
+  roadTuningIntertown: document.getElementById("mapEditorRoadTuningIntertown") as HTMLInputElement,
+  roadTuningRepair: document.getElementById("mapEditorRoadTuningRepair") as HTMLInputElement,
+  roadTuningCleanup: document.getElementById("mapEditorRoadTuningCleanup") as HTMLInputElement,
+  roadTuningBudgetMultiplier: document.getElementById("mapEditorRoadTuningBudgetMultiplier") as HTMLInputElement,
+  roadTuningBudgetMultiplierValue: document.getElementById("mapEditorRoadTuningBudgetMultiplierValue") as HTMLOutputElement,
+  roadTuningGradeTolerance: document.getElementById("mapEditorRoadTuningGradeTolerance") as HTMLInputElement,
+  roadTuningGradeToleranceValue: document.getElementById("mapEditorRoadTuningGradeToleranceValue") as HTMLOutputElement,
+  roadTuningRelaxPasses: document.getElementById("mapEditorRoadTuningRelaxPasses") as HTMLInputElement,
+  roadTuningRelaxPassesValue: document.getElementById("mapEditorRoadTuningRelaxPassesValue") as HTMLOutputElement,
+  roadTuningIntertownPasses: document.getElementById("mapEditorRoadTuningIntertownPasses") as HTMLInputElement,
+  roadTuningIntertownPassesValue: document.getElementById("mapEditorRoadTuningIntertownPassesValue") as HTMLOutputElement,
+  roadTuningIntertownEdges: document.getElementById("mapEditorRoadTuningIntertownEdges") as HTMLInputElement,
+  roadTuningIntertownEdgesValue: document.getElementById("mapEditorRoadTuningIntertownEdgesValue") as HTMLOutputElement,
+  roadTuningIntertownDetour: document.getElementById("mapEditorRoadTuningIntertownDetour") as HTMLInputElement,
+  roadTuningIntertownDetourValue: document.getElementById("mapEditorRoadTuningIntertownDetourValue") as HTMLOutputElement,
+  roadTuningPreGrowthYears: document.getElementById("mapEditorRoadTuningPreGrowthYears") as HTMLInputElement,
+  roadTuningPreGrowthYearsValue: document.getElementById("mapEditorRoadTuningPreGrowthYearsValue") as HTMLOutputElement,
+  roadTuningFutureGrowthYears: document.getElementById("mapEditorRoadTuningFutureGrowthYears") as HTMLInputElement,
+  roadTuningFutureGrowthYearsValue: document.getElementById("mapEditorRoadTuningFutureGrowthYearsValue") as HTMLOutputElement,
+  roadTuningReset: document.getElementById("mapEditorRoadTuningReset") as HTMLButtonElement,
   scenarioList: document.getElementById("mapEditorScenarioList") as HTMLSelectElement,
   scenarioLoad: document.getElementById("mapEditorScenarioLoad") as HTMLButtonElement,
   scenarioEntryStatus: document.getElementById("mapEditorScenarioEntryStatus") as HTMLDivElement,
@@ -1244,6 +1327,8 @@ export const initMapEditor = (refs: MapEditorRefs, deps: MapEditorDeps): MapEdit
   let previewErosionBaselineSample: PreviewRenderableSample | null = null;
   let previewNeedsGenerate = true;
   let diagnosticsState: MapEditorDiagnosticsState = createDiagnosticsState();
+  let diagnosticsRenderHandle = 0;
+  let diagnosticsLastRenderMs = 0;
   let assetsReadyForSession = false;
   let advancedMode = false;
   let previewHoveredTile: TerrainPreviewHoverTile | null = null;
@@ -1301,6 +1386,102 @@ export const initMapEditor = (refs: MapEditorRefs, deps: MapEditorDeps): MapEdit
     records.push(record);
   };
 
+  const readRoadTuningSlider = (input: HTMLInputElement, fallback: number): number => {
+    const parsed = Number(input.value);
+    return Number.isFinite(parsed) ? parsed : fallback;
+  };
+
+  const syncRoadTuningOutputs = (): void => {
+    const budgetMultiplier = readRoadTuningSlider(
+      refs.roadTuningBudgetMultiplier,
+      DEFAULT_ROAD_DIAGNOSTIC_TUNING.searchBudgetMultiplier
+    );
+    refs.roadTuningBudgetMultiplierValue.textContent = `x${budgetMultiplier.toFixed(2)}`;
+    const gradeTolerance = readRoadTuningSlider(
+      refs.roadTuningGradeTolerance,
+      DEFAULT_ROAD_DIAGNOSTIC_TUNING.gradeToleranceMultiplier
+    );
+    refs.roadTuningGradeToleranceValue.textContent = `x${gradeTolerance.toFixed(2)}`;
+    const relaxationPasses = Math.round(readRoadTuningSlider(refs.roadTuningRelaxPasses, 0));
+    refs.roadTuningRelaxPassesValue.textContent = relaxationPasses <= 0 ? "Default" : `${relaxationPasses}`;
+    const intertownPasses = Math.round(readRoadTuningSlider(refs.roadTuningIntertownPasses, -1));
+    refs.roadTuningIntertownPassesValue.textContent = intertownPasses < 0 ? "Default" : `${intertownPasses}`;
+    const intertownEdges = Math.round(readRoadTuningSlider(refs.roadTuningIntertownEdges, 0));
+    refs.roadTuningIntertownEdgesValue.textContent = intertownEdges <= 0 ? "Default" : `${intertownEdges}`;
+    const intertownDetour = readRoadTuningSlider(refs.roadTuningIntertownDetour, 0);
+    refs.roadTuningIntertownDetourValue.textContent =
+      intertownDetour <= 0 ? "Default" : `x${intertownDetour.toFixed(2)}`;
+    const preGrowthYears = Math.round(readRoadTuningSlider(refs.roadTuningPreGrowthYears, -1));
+    refs.roadTuningPreGrowthYearsValue.textContent = preGrowthYears < 0 ? "Default" : `${preGrowthYears}y`;
+    const futureGrowthYears = Math.round(readRoadTuningSlider(refs.roadTuningFutureGrowthYears, -1));
+    refs.roadTuningFutureGrowthYearsValue.textContent = futureGrowthYears < 0 ? "Default" : `${futureGrowthYears}y`;
+  };
+
+  const collectRoadDiagnosticTuning = (): RoadDiagnosticTuning =>
+    resolveRoadDiagnosticTuning({
+      enableSwitchbackConnectors: refs.roadTuningSwitchbacks.checked,
+      enableMountainPassFallbacks: refs.roadTuningMountainPass.checked,
+      enableWaypointConnectors: refs.roadTuningWaypoints.checked,
+      enableBridgeFirstRetries: refs.roadTuningBridgeFirst.checked,
+      enableIntertownConnections: refs.roadTuningIntertown.checked,
+      enableConnectivityRepairPass: refs.roadTuningRepair.checked,
+      enableConnectorCleanup: refs.roadTuningCleanup.checked,
+      searchBudgetMultiplier: readRoadTuningSlider(
+        refs.roadTuningBudgetMultiplier,
+        DEFAULT_ROAD_DIAGNOSTIC_TUNING.searchBudgetMultiplier
+      ),
+      gradeToleranceMultiplier: readRoadTuningSlider(
+        refs.roadTuningGradeTolerance,
+        DEFAULT_ROAD_DIAGNOSTIC_TUNING.gradeToleranceMultiplier
+      ),
+      maxGradeRelaxationPasses: Math.round(readRoadTuningSlider(refs.roadTuningRelaxPasses, 0)) > 0
+        ? Math.round(readRoadTuningSlider(refs.roadTuningRelaxPasses, 0))
+        : null,
+      intertownConnectionPasses: Math.round(readRoadTuningSlider(refs.roadTuningIntertownPasses, -1)) >= 0
+        ? Math.round(readRoadTuningSlider(refs.roadTuningIntertownPasses, -1))
+        : null,
+      intertownEdgeLimit: Math.round(readRoadTuningSlider(refs.roadTuningIntertownEdges, 0)) > 0
+        ? Math.round(readRoadTuningSlider(refs.roadTuningIntertownEdges, 0))
+        : null,
+      intertownDetourMultiplier: readRoadTuningSlider(refs.roadTuningIntertownDetour, 0) > 0
+        ? readRoadTuningSlider(refs.roadTuningIntertownDetour, 0)
+        : null,
+      settlementPreGrowthYearsOverride: Math.round(readRoadTuningSlider(refs.roadTuningPreGrowthYears, -1)) >= 0
+        ? Math.round(readRoadTuningSlider(refs.roadTuningPreGrowthYears, -1))
+        : null,
+      futureGrowthPlanYearsOverride: Math.round(readRoadTuningSlider(refs.roadTuningFutureGrowthYears, -1)) >= 0
+        ? Math.round(readRoadTuningSlider(refs.roadTuningFutureGrowthYears, -1))
+        : null
+    });
+
+  const resetRoadDiagnosticTuningControls = (): void => {
+    refs.roadTuningSwitchbacks.checked = DEFAULT_ROAD_DIAGNOSTIC_TUNING.enableSwitchbackConnectors;
+    refs.roadTuningMountainPass.checked = DEFAULT_ROAD_DIAGNOSTIC_TUNING.enableMountainPassFallbacks;
+    refs.roadTuningWaypoints.checked = DEFAULT_ROAD_DIAGNOSTIC_TUNING.enableWaypointConnectors;
+    refs.roadTuningBridgeFirst.checked = DEFAULT_ROAD_DIAGNOSTIC_TUNING.enableBridgeFirstRetries;
+    refs.roadTuningIntertown.checked = DEFAULT_ROAD_DIAGNOSTIC_TUNING.enableIntertownConnections;
+    refs.roadTuningRepair.checked = DEFAULT_ROAD_DIAGNOSTIC_TUNING.enableConnectivityRepairPass;
+    refs.roadTuningCleanup.checked = DEFAULT_ROAD_DIAGNOSTIC_TUNING.enableConnectorCleanup;
+    refs.roadTuningBudgetMultiplier.value = DEFAULT_ROAD_DIAGNOSTIC_TUNING.searchBudgetMultiplier.toString();
+    refs.roadTuningGradeTolerance.value = DEFAULT_ROAD_DIAGNOSTIC_TUNING.gradeToleranceMultiplier.toString();
+    refs.roadTuningRelaxPasses.value = "0";
+    refs.roadTuningIntertownPasses.value = "-1";
+    refs.roadTuningIntertownEdges.value = "0";
+    refs.roadTuningIntertownDetour.value = "0";
+    refs.roadTuningPreGrowthYears.value = "-1";
+    refs.roadTuningFutureGrowthYears.value = "-1";
+    syncRoadTuningOutputs();
+  };
+
+  const markDiagnosticRoadTuningChanged = (): void => {
+    syncRoadTuningOutputs();
+    if (refs.diagnosticsToggle.checked) {
+      resetPreviewCache();
+      markActivePreviewNeedsGenerate();
+      renderDiagnosticsPanel();
+    }
+  };
+
   const resetDiagnosticsRun = (): void => {
     const enabled = refs.diagnosticsToggle.checked;
     const activeTab = diagnosticsState.activeTab;
@@ -1323,13 +1504,13 @@ export const initMapEditor = (refs: MapEditorRefs, deps: MapEditorDeps): MapEdit
       case "hydrology:waterfall":
         return `waterfall ${event.accepted ? "accepted" : "rejected"} source=${event.waterfall.sourceIndex} target=${event.waterfall.targetIndex} drop=${event.waterfall.drop.toFixed(3)} lake=${event.waterfall.lakeId}`;
       case "road:attempt":
-        return `${event.planner === "streamer" ? "streamer" : "A*"} search #${event.attemptId} ${event.mode} bridge=${event.allowBridge} ${event.start.x},${event.start.y}${event.end ? ` -> ${event.end.x},${event.end.y}` : " -> target"}${event.destinationSeedCount ? ` seeds=${event.destinationSeedCount}` : ""}${event.joinRadius ? ` join<=${event.joinRadius}` : ""} limits=${event.gradeLimit.toFixed(3)}/${event.crossfallLimit.toFixed(3)}/${event.gradeChangeLimit.toFixed(3)}`;
+        return `${event.routeGroup} ${event.planner === "streamer" ? "streamer" : "A*"} search #${event.attemptId} ${event.mode} bridge=${event.allowBridge} ${event.start.x},${event.start.y}${event.end ? ` -> ${event.end.x},${event.end.y}` : " -> target"}${event.destinationSeedCount ? ` seeds=${event.destinationSeedCount}` : ""}${event.joinRadius ? ` join<=${event.joinRadius}` : ""} limits=${event.gradeLimit.toFixed(3)}/${event.crossfallLimit.toFixed(3)}/${event.gradeChangeLimit.toFixed(3)}`;
       case "road:progress":
         return `${event.planner === "streamer" ? "streamer" : "A*"} progress #${event.attemptId} visited=${event.visitedNodes} open=${event.openNodes} at=${event.current ? `${event.current.x},${event.current.y}` : "-"} ${Math.round(event.elapsedMs)}ms`;
       case "road:result":
-        return `${event.planner === "streamer" ? "streamer" : "A*"} result #${event.attemptId} ${event.found ? "path found" : event.budgetAborted ? "budget aborted" : "exhausted"} visited=${event.visitedNodes} pathLen=${event.pathLength} ${Math.round(event.elapsedMs)}ms`;
+        return `${event.routeGroup} ${event.planner === "streamer" ? "streamer" : "A*"} result #${event.attemptId} ${event.found ? "path found" : event.budgetAborted ? "budget aborted" : "exhausted"} visited=${event.visitedNodes} pathLen=${event.pathLength} ${Math.round(event.elapsedMs)}ms`;
       case "road:carve":
-        return `committed road path len=${event.pathLength}${event.bounds ? ` bounds=${event.bounds.minX},${event.bounds.minY}-${event.bounds.maxX},${event.bounds.maxY}` : ""}${event.bridgeTileIndices ? ` bridges=${event.bridgeTileIndices.length}` : ""}`;
+        return `${event.routeGroup} committed road path len=${event.pathLength}${event.bounds ? ` bounds=${event.bounds.minX},${event.bounds.minY}-${event.bounds.maxX},${event.bounds.maxY}` : ""}${event.bridgeTileIndices ? ` bridges=${event.bridgeTileIndices.length}` : ""}`;
       case "mapgen:cancelled":
         return `cancelled ${event.phase ?? "-"} ${event.message}`;
       default:
@@ -1337,7 +1518,52 @@ export const initMapEditor = (refs: MapEditorRefs, deps: MapEditorDeps): MapEdit
     }
   };
 
+  const roadAggregateKey = (event: Pick<Extract<RoadDiagnosticRecord, { kind: "road:result" }>, "mode" | "planner" | "routeGroup">): string =>
+    `${event.routeGroup}/${event.planner ?? "dijkstra"}:${event.mode}`;
+
+  const formatRoadAggregate = (): string[] => {
+    const rows = [...diagnosticsState.roadAggregateByModePlanner.entries()]
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, value]) => {
+        const meanMs = value.attempts > 0 ? value.totalElapsedMs / value.attempts : 0;
+        return `${key} attempts=${value.attempts} found=${value.found} failed=${value.failed} budget=${value.budgetAborted} total=${Math.round(value.totalElapsedMs)}ms mean=${Math.round(meanMs)}ms maxVisited=${value.maxVisitedNodes}`;
+      });
+    return rows.length > 0 ? rows : ["No road planner results yet."];
+  };
+
+  const formatRoadSlowAttempts = (): string[] => {
+    if (diagnosticsState.roadSlowAttempts.length === 0) {
+      return ["No completed road searches yet."];
+    }
+    return diagnosticsState.roadSlowAttempts
+      .slice()
+      .sort((left, right) => right.elapsedMs - left.elapsedMs)
+      .slice(0, 8)
+      .map((attempt) =>
+        `#${attempt.attemptId} ${attempt.label} ${attempt.found ? "found" : attempt.budgetAborted ? "budget" : "failed"} ${Math.round(attempt.elapsedMs)}ms visited=${attempt.visitedNodes}`
+      );
+  };
+
+  const buildRoadDiagnosticsOutput = (): string => {
+    const records = diagnosticsState.roadRecords.map(formatDiagnosticEvent);
+    const lines = [
+      `profile: ${describeRoadDiagnosticTuning(collectRoadDiagnosticTuning())}`,
+      "",
+      "by route/planner/mode:",
+      ...formatRoadAggregate(),
+      "",
+      "slowest attempts:",
+      ...formatRoadSlowAttempts(),
+      "",
+      "recent events:",
+      ...(records.length > 0 ? records.slice(-80) : ["No diagnostic records yet."])
+    ];
+    return `${diagnosticsState.roadOverflowCount > 0 ? `...${diagnosticsState.roadOverflowCount} older road records discarded\n` : ""}${lines.join("\n")}`;
+  };
+
   const renderDiagnosticsPanel = (): void => {
+    diagnosticsRenderHandle = 0;
+    diagnosticsLastRenderMs = typeof performance !== "undefined" ? performance.now() : Date.now();
     setElementHidden(refs.diagnosticsPanel, !diagnosticsState.enabled);
     setElementHidden(refs.diagnosticsCancel, !diagnosticsState.enabled);
     refs.diagnosticsCancel.disabled = !previewRunning || diagnosticsState.cancelRequested;
@@ -1347,30 +1573,44 @@ export const initMapEditor = (refs: MapEditorRefs, deps: MapEditorDeps): MapEdit
     if (!diagnosticsState.enabled) {
       return;
     }
-    const now = typeof performance !== "undefined" ? performance.now() : Date.now();
+    const now = diagnosticsState.endedAtMs > 0
+      ? diagnosticsState.endedAtMs
+      : typeof performance !== "undefined" ? performance.now() : Date.now();
     const elapsedMs = diagnosticsState.startedAtMs > 0 ? Math.max(0, now - diagnosticsState.startedAtMs) : 0;
     const activeRoad =
       previewRunning && diagnosticsState.roadActiveAttemptId !== null
         ? ` | active road search #${diagnosticsState.roadActiveAttemptId} ${diagnosticsState.roadActiveLabel} visited ${diagnosticsState.roadActiveVisitedNodes} ${Math.round(diagnosticsState.roadActiveElapsedMs)}ms`
         : "";
     refs.diagnosticsSummary.textContent =
-      `elapsed ${Math.round(elapsedMs)}ms | hydro candidates ${diagnosticsState.hydrologyCandidates}, rejected ${diagnosticsState.hydrologyRejected}, lakes ${diagnosticsState.hydrologyAccepted}, overflow ${diagnosticsState.hydrologyOverflowRoutes} | road searches ${diagnosticsState.roadAttempts}, path found ${diagnosticsState.roadFound}, exhausted ${diagnosticsState.roadFailed}, budget ${diagnosticsState.roadBudgetAborted}, committed ${diagnosticsState.roadCarves}${activeRoad}`;
+      `elapsed ${Math.round(elapsedMs)}ms | hydro candidates ${diagnosticsState.hydrologyCandidates}, rejected ${diagnosticsState.hydrologyRejected}, lakes ${diagnosticsState.hydrologyAccepted}, overflow ${diagnosticsState.hydrologyOverflowRoutes} | road searches ${diagnosticsState.roadAttempts}, path found ${diagnosticsState.roadFound}, exhausted ${diagnosticsState.roadFailed}, budget ${diagnosticsState.roadBudgetAborted}, committed ${diagnosticsState.roadCarves}${diagnosticsState.roadHiddenCarves > 0 ? `, hidden ${diagnosticsState.roadHiddenCarves}` : ""}${diagnosticsState.roadUnknownRouteResults > 0 ? `, unknown ${diagnosticsState.roadUnknownRouteResults}` : ""}${activeRoad}`;
+    if (diagnosticsState.activeTab === "road") {
+      refs.diagnosticsOutput.textContent = buildRoadDiagnosticsOutput();
+      return;
+    }
     const records =
       diagnosticsState.activeTab === "hydrology"
         ? diagnosticsState.hydrologyRecords.map(formatDiagnosticEvent)
-        : diagnosticsState.activeTab === "road"
-          ? diagnosticsState.roadRecords.map(formatDiagnosticEvent)
-          : diagnosticsState.timelineRecords.map(formatDiagnosticEvent);
+        : diagnosticsState.timelineRecords.map(formatDiagnosticEvent);
     const overflow =
       diagnosticsState.activeTab === "hydrology"
         ? diagnosticsState.hydrologyOverflowCount
-        : diagnosticsState.activeTab === "road"
-          ? diagnosticsState.roadOverflowCount
-          : diagnosticsState.timelineOverflowCount;
+        : diagnosticsState.timelineOverflowCount;
     refs.diagnosticsOutput.textContent =
       records.length > 0
         ? `${overflow > 0 ? `...${overflow} older records discarded\n` : ""}${records.slice(-80).join("\n")}`
         : "No diagnostic records yet.";
+  };
+
+  const scheduleDiagnosticsRender = (): void => {
+    const now = typeof performance !== "undefined" ? performance.now() : Date.now();
+    if (diagnosticsRenderHandle === 0 && now - diagnosticsLastRenderMs >= 100) {
+      renderDiagnosticsPanel();
+      return;
+    }
+    if (diagnosticsRenderHandle !== 0) {
+      return;
+    }
+    diagnosticsRenderHandle = window.setTimeout(renderDiagnosticsPanel, Math.max(16, 100 - (now - diagnosticsLastRenderMs)));
   };
 
   const recordDiagnosticEvent = (event: MapGenDiagnosticEvent): void => {
@@ -1399,7 +1639,11 @@ export const initMapEditor = (refs: MapEditorRefs, deps: MapEditorDeps): MapEdit
       if (event.kind === "road:attempt") diagnosticsState.roadAttempts += 1;
       if (event.kind === "road:attempt") {
         diagnosticsState.roadActiveAttemptId = event.attemptId;
-        diagnosticsState.roadActiveLabel = `${event.mode} ${event.start.x},${event.start.y}${event.end ? ` -> ${event.end.x},${event.end.y}` : " -> target"}`;
+        diagnosticsState.roadActiveLabel = `${event.routeGroup}/${event.mode} ${event.start.x},${event.start.y}${event.end ? ` -> ${event.end.x},${event.end.y}` : " -> target"}`;
+        diagnosticsState.roadAttemptLabels.set(
+          event.attemptId,
+          `${event.routeGroup}/${event.planner ?? "dijkstra"}:${event.mode} ${event.start.x},${event.start.y}${event.end ? ` -> ${event.end.x},${event.end.y}` : " -> target"}`
+        );
         diagnosticsState.roadActiveVisitedNodes = 0;
         diagnosticsState.roadActiveElapsedMs = 0;
       }
@@ -1410,19 +1654,54 @@ export const initMapEditor = (refs: MapEditorRefs, deps: MapEditorDeps): MapEdit
         diagnosticsState.roadActiveElapsedMs = event.elapsedMs;
       }
       if (event.kind === "road:result") {
+        if (event.routeGroup === "unknown") {
+          diagnosticsState.roadUnknownRouteResults += 1;
+        }
         if (event.found) diagnosticsState.roadFound += 1;
         else diagnosticsState.roadFailed += 1;
         if (event.budgetAborted) diagnosticsState.roadBudgetAborted += 1;
+        const aggregateKey = roadAggregateKey(event);
+        const aggregate = diagnosticsState.roadAggregateByModePlanner.get(aggregateKey) ?? {
+          attempts: 0,
+          found: 0,
+          failed: 0,
+          budgetAborted: 0,
+          totalElapsedMs: 0,
+          maxVisitedNodes: 0
+        };
+        aggregate.attempts += 1;
+        aggregate.found += event.found ? 1 : 0;
+        aggregate.failed += event.found ? 0 : 1;
+        aggregate.budgetAborted += event.budgetAborted ? 1 : 0;
+        aggregate.totalElapsedMs += event.elapsedMs;
+        aggregate.maxVisitedNodes = Math.max(aggregate.maxVisitedNodes, event.visitedNodes);
+        diagnosticsState.roadAggregateByModePlanner.set(aggregateKey, aggregate);
+        diagnosticsState.roadSlowAttempts.push({
+          attemptId: event.attemptId,
+          label: diagnosticsState.roadAttemptLabels.get(event.attemptId) ?? aggregateKey,
+          elapsedMs: event.elapsedMs,
+          visitedNodes: event.visitedNodes,
+          found: event.found,
+          budgetAborted: event.budgetAborted
+        });
+        diagnosticsState.roadSlowAttempts.sort((left, right) => right.elapsedMs - left.elapsedMs);
+        if (diagnosticsState.roadSlowAttempts.length > 12) {
+          diagnosticsState.roadSlowAttempts.length = 12;
+        }
         if (diagnosticsState.roadActiveAttemptId === event.attemptId) {
           diagnosticsState.roadActiveVisitedNodes = event.visitedNodes;
           diagnosticsState.roadActiveElapsedMs = event.elapsedMs;
         }
       }
       if (event.kind === "road:carve") {
-        diagnosticsState.roadCarves += 1;
+        if (event.routeGroup === "futureGrowthPrecompute") {
+          diagnosticsState.roadHiddenCarves += 1;
+        } else {
+          diagnosticsState.roadCarves += 1;
+        }
       }
     }
-    renderDiagnosticsPanel();
+    scheduleDiagnosticsRender();
   };
 
   const setActiveStep = (stepId: MapEditorStepId): void => {
@@ -1594,7 +1873,10 @@ export const initMapEditor = (refs: MapEditorRefs, deps: MapEditorDeps): MapEdit
     JSON.stringify({
       seed: draft.seed,
       mapSize: draft.mapSize,
-      terrain: draft.terrain
+      terrain: draft.terrain,
+      roadDiagnostics: refs.diagnosticsToggle.checked
+        ? roadDiagnosticTuningToCacheKey(collectRoadDiagnosticTuning())
+        : "off"
     });
 
   const syncPreviewCacheDraft = (draft: TerrainDraft): string => {
@@ -2030,7 +2312,11 @@ export const initMapEditor = (refs: MapEditorRefs, deps: MapEditorDeps): MapEdit
       let diagnosticRoadCarvesSinceRender = 0;
       let lastDiagnosticRoadRenderMs = 0;
       const renderDiagnosticRoadProgress = (event: MapGenDiagnosticEvent): void => {
-        if (event.kind !== "road:carve" || targetPhaseRank < getPhaseRank("roads:connect")) {
+        if (
+          event.kind !== "road:carve" ||
+          event.routeGroup === "futureGrowthPrecompute" ||
+          targetPhaseRank < getPhaseRank("roads:connect")
+        ) {
           return;
         }
         if (!visible || sessionToken !== previewSessionToken || buildToken !== previewBuildToken) {
@@ -2054,6 +2340,7 @@ export const initMapEditor = (refs: MapEditorRefs, deps: MapEditorDeps): MapEdit
       };
       const debug: MapGenDebug = {
         stopAfterPhase: previewConfig.stopAfterPhase,
+        roadTuning: diagnosticsEnabledForBuild ? collectRoadDiagnosticTuning() : undefined,
         onPhase: async (snapshot) => {
           if (!visible || sessionToken !== previewSessionToken || buildToken !== previewBuildToken) {
             return;
@@ -2212,6 +2499,9 @@ export const initMapEditor = (refs: MapEditorRefs, deps: MapEditorDeps): MapEdit
       previewRunning = false;
       refs.diagnosticsCancel.disabled = false;
       diagnosticsState.cancelRequested = false;
+      if (diagnosticsState.enabled && diagnosticsState.startedAtMs > 0 && diagnosticsState.endedAtMs === 0) {
+        diagnosticsState.endedAtMs = typeof performance !== "undefined" ? performance.now() : Date.now();
+      }
       renderDiagnosticsPanel();
       updatePreviewGenerateAction();
       if (visible && assetsReadyForSession && previewPending) {
@@ -2461,7 +2751,36 @@ export const initMapEditor = (refs: MapEditorRefs, deps: MapEditorDeps): MapEdit
   refs.diagnosticsToggle.addEventListener("change", () => {
     diagnosticsState.enabled = refs.diagnosticsToggle.checked;
     diagnosticsState.cancelRequested = false;
+    resetPreviewCache();
+    markActivePreviewNeedsGenerate();
     renderDiagnosticsPanel();
+  });
+  [
+    refs.roadTuningSwitchbacks,
+    refs.roadTuningMountainPass,
+    refs.roadTuningWaypoints,
+    refs.roadTuningBridgeFirst,
+    refs.roadTuningIntertown,
+    refs.roadTuningRepair,
+    refs.roadTuningCleanup
+  ].forEach((input) => {
+    input.addEventListener("change", markDiagnosticRoadTuningChanged);
+  });
+  [
+    refs.roadTuningBudgetMultiplier,
+    refs.roadTuningGradeTolerance,
+    refs.roadTuningRelaxPasses,
+    refs.roadTuningIntertownPasses,
+    refs.roadTuningIntertownEdges,
+    refs.roadTuningIntertownDetour,
+    refs.roadTuningPreGrowthYears,
+    refs.roadTuningFutureGrowthYears
+  ].forEach((input) => {
+    input.addEventListener("input", markDiagnosticRoadTuningChanged);
+  });
+  refs.roadTuningReset.addEventListener("click", () => {
+    resetRoadDiagnosticTuningControls();
+    markDiagnosticRoadTuningChanged();
   });
   refs.diagnosticsCancel.addEventListener("click", () => {
     diagnosticsState.cancelRequested = true;
@@ -2493,6 +2812,7 @@ export const initMapEditor = (refs: MapEditorRefs, deps: MapEditorDeps): MapEdit
     markActivePreviewNeedsGenerate();
   });
   syncTerrainControlOutputs(terrainControlElements);
+  resetRoadDiagnosticTuningControls();
   syncAdvancedVisibility();
   syncErosionCompareToggleAvailability();
   renderDiagnosticsPanel();

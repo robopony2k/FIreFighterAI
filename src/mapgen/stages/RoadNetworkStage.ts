@@ -11,6 +11,7 @@ import {
 import { emitStageSnapshot } from "../pipeline/stageDebug.js";
 import { getRoadGenerationStats, pruneRoadConnectorArtifacts, resetRoadGenerationStats, setRoadPathDebugHooks, type RoadSurfaceMetrics } from "../roads.js";
 import { assignForestComposition, flattenSettlementGround, gradeRoadNetworkTerrain, seedInitialVegetationState } from "../runtime.js";
+import { resolveRoadDiagnosticTuning } from "../../systems/roads/types/roadDiagnosticTuning.js";
 
 const formatRoadSolveStatus = (prefix: string): string => {
   const stats = getRoadGenerationStats();
@@ -23,6 +24,16 @@ export const RoadNetworkStage: PipelineStage = {
   run: async (ctx) => {
     resetRoadGenerationStats();
     const diagnosticsEnabled = Boolean(ctx.debug?.onDiagnosticEvent);
+    const roadTuning = diagnosticsEnabled ? resolveRoadDiagnosticTuning(ctx.debug?.roadTuning) : null;
+    if (roadTuning && ctx.settlementPlan) {
+      ctx.settlementPlan.roadDiagnosticTuning = roadTuning;
+      if (roadTuning.settlementPreGrowthYearsOverride !== null) {
+        ctx.settlementPlan.settlementPreGrowthYears = roadTuning.settlementPreGrowthYearsOverride;
+      }
+      if (roadTuning.futureGrowthPlanYearsOverride !== null) {
+        ctx.settlementPlan.futureGrowthPlanYears = roadTuning.futureGrowthPlanYearsOverride;
+      }
+    }
     if (diagnosticsEnabled) {
       setRoadPathDebugHooks({
         emit: (event) => {
@@ -43,28 +54,35 @@ export const RoadNetworkStage: PipelineStage = {
         await yieldToNextFrame();
       } else {
         if (diagnosticsEnabled) {
-          await connectSettlementsByRoadAsync(ctx.state, ctx.rng, ctx.settlementPlan ?? null);
+          await connectSettlementsByRoadAsync(ctx.state, ctx.rng, ctx.settlementPlan ?? null, roadTuning);
         } else {
           connectSettlementsByRoad(ctx.state, ctx.rng, ctx.settlementPlan ?? null);
         }
-        pruneRoadConnectorArtifacts(ctx.state);
+        if (!roadTuning || roadTuning.enableConnectorCleanup) {
+          pruneRoadConnectorArtifacts(ctx.state);
+        }
         await ctx.reportStage(formatRoadSolveStatus("Road solver: settlement routes planned"), 0.42);
         await yieldToNextFrame();
       }
       let roadSurfaceMetrics = gradeRoadNetworkTerrain(ctx.state, ctx.settings.heightScaleMultiplier);
-      if (!ctx.settings.skipRoadNetworkRouting) {
+      if (!ctx.settings.skipRoadNetworkRouting && (!roadTuning || roadTuning.enableConnectivityRepairPass)) {
         await ctx.reportStage("Road solver: checking isolated town components...", 0.58);
         await yieldToNextFrame();
         const repaired = diagnosticsEnabled
-          ? await repairSettlementRoadConnectivityAsync(ctx.state, ctx.rng, ctx.settlementPlan ?? null)
+          ? await repairSettlementRoadConnectivityAsync(ctx.state, ctx.rng, ctx.settlementPlan ?? null, roadTuning)
           : repairSettlementRoadConnectivity(ctx.state, ctx.rng, ctx.settlementPlan ?? null);
         if (repaired) {
           await ctx.reportStage(formatRoadSolveStatus("Road solver: repairing disconnected components"), 0.72);
           await yieldToNextFrame();
           flattenSettlementGround(ctx.state);
-          pruneRoadConnectorArtifacts(ctx.state);
+          if (!roadTuning || roadTuning.enableConnectorCleanup) {
+            pruneRoadConnectorArtifacts(ctx.state);
+          }
           roadSurfaceMetrics = gradeRoadNetworkTerrain(ctx.state, ctx.settings.heightScaleMultiplier);
         }
+      } else if (!ctx.settings.skipRoadNetworkRouting && roadTuning && !roadTuning.enableConnectivityRepairPass) {
+        await ctx.reportStage("Road solver: connectivity repair skipped by diagnostics tuning.", 0.72);
+        await yieldToNextFrame();
       }
       await ctx.reportStage(
         ctx.settings.skipRoadNetworkRouting

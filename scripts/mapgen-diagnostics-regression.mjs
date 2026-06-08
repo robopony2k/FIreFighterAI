@@ -10,6 +10,7 @@ const { RNG } = await import(distImport(["core", "rng.js"]));
 const { createInitialState } = await import(distImport(["core", "state.js"]));
 const { generateMap, isMapGenCancelledError } = await import(distImport(["mapgen", "index.js"]));
 const { createDefaultTerrainRecipe } = await import(distImport(["mapgen", "terrainProfile.js"]));
+const { DEFAULT_ROAD_DIAGNOSTIC_TUNING } = await import(distImport(["systems", "roads", "types", "roadDiagnosticTuning.js"]));
 
 const seed = 424242;
 const grid = { cols: 64, rows: 64, totalTiles: 64 * 64 };
@@ -58,9 +59,49 @@ const diagnostic = await runMap({
     events.push(event);
   }
 });
+const defaultTunedEvents = [];
+const defaultTunedDiagnostic = await runMap({
+  onPhase: () => {},
+  roadTuning: DEFAULT_ROAD_DIAGNOSTIC_TUNING,
+  onDiagnosticEvent: (event) => {
+    defaultTunedEvents.push(event);
+  }
+});
+const constrainedRoadEvents = [];
+await runMap({
+  onPhase: () => {},
+  roadTuning: {
+    ...DEFAULT_ROAD_DIAGNOSTIC_TUNING,
+    enableSwitchbackConnectors: false,
+    enableMountainPassFallbacks: false,
+    enableBridgeFirstRetries: false,
+    maxGradeRelaxationPasses: 1
+  },
+  onDiagnosticEvent: (event) => {
+    constrainedRoadEvents.push(event);
+  }
+});
+const isolatedIntertownEvents = [];
+await runMap({
+  onPhase: () => {},
+  roadTuning: {
+    ...DEFAULT_ROAD_DIAGNOSTIC_TUNING,
+    settlementPreGrowthYearsOverride: 0,
+    futureGrowthPlanYearsOverride: 0,
+    enableConnectivityRepairPass: false,
+    intertownConnectionPasses: 1,
+    intertownEdgeLimit: 1
+  },
+  onDiagnosticEvent: (event) => {
+    isolatedIntertownEvents.push(event);
+  }
+});
 
 if (baseline.hash !== diagnostic.hash) {
   throw new Error(`Diagnostics changed generated map hash: ${baseline.hash} !== ${diagnostic.hash}`);
+}
+if (baseline.hash !== defaultTunedDiagnostic.hash) {
+  throw new Error(`Default road tuning changed generated map hash: ${baseline.hash} !== ${defaultTunedDiagnostic.hash}`);
 }
 
 const hydrologyCandidates = events.filter((event) => event.kind === "hydrology:candidate").length;
@@ -77,6 +118,50 @@ if (roadAttempts <= 0 || roadResults <= 0) {
 }
 if (roadCarves <= 0) {
   throw new Error(`Expected committed road diagnostics, got carves=${roadCarves}`);
+}
+if (defaultTunedEvents.filter((event) => event.kind === "road:attempt").length <= 0) {
+  throw new Error("Expected default tuned diagnostics to emit road attempts.");
+}
+const constrainedRoadAttempts = constrainedRoadEvents.filter((event) => event.kind === "road:attempt");
+if (constrainedRoadAttempts.length <= 0) {
+  throw new Error("Expected constrained road tuning diagnostics to emit road attempts.");
+}
+const constrainedBridgeAttempts = constrainedRoadAttempts.filter((event) => event.allowBridge);
+const constrainedFallbackModes = constrainedRoadAttempts.filter((event) => event.mode === "switchback" || event.mode === "mountainPass");
+if (constrainedBridgeAttempts.length > 0 || constrainedFallbackModes.length > 0) {
+  throw new Error(
+    `Expected constrained road tuning to suppress bridge/switchback/mountain attempts, got bridge=${constrainedBridgeAttempts.length} fallback=${constrainedFallbackModes.length}`
+  );
+}
+const defaultUnknownRoadResults = defaultTunedEvents.filter((event) => event.kind === "road:result" && event.routeGroup === "unknown");
+if (defaultUnknownRoadResults.length > 0) {
+  throw new Error(`Expected no unknown road result route groups under default diagnostics, got ${defaultUnknownRoadResults.length}.`);
+}
+const isolatedRoadAttempts = isolatedIntertownEvents.filter((event) => event.kind === "road:attempt");
+const isolatedRoadResults = isolatedIntertownEvents.filter((event) => event.kind === "road:result");
+const isolatedFutureGrowthAttempts = isolatedRoadAttempts.filter((event) => event.routeGroup === "futureGrowthPrecompute");
+const isolatedRepairAttempts = isolatedRoadAttempts.filter((event) => event.routeGroup === "connectivityRepair");
+const isolatedUnknownResults = isolatedRoadResults.filter((event) => event.routeGroup === "unknown");
+if (isolatedRoadAttempts.length <= 0) {
+  throw new Error("Expected isolated intertown diagnostics to emit road attempts.");
+}
+if (isolatedFutureGrowthAttempts.length > 0) {
+  throw new Error(`Expected future growth years override 0 to suppress future growth road attempts, got ${isolatedFutureGrowthAttempts.length}.`);
+}
+if (isolatedRepairAttempts.length > 0) {
+  throw new Error(`Expected repair-pass-off diagnostics to suppress connectivity repair attempts, got ${isolatedRepairAttempts.length}.`);
+}
+if (isolatedUnknownResults.length > 0) {
+  throw new Error(`Expected no unknown road result route groups in isolated diagnostics, got ${isolatedUnknownResults.length}.`);
+}
+const visibleRoadCarves = isolatedIntertownEvents.filter(
+  (event) => event.kind === "road:carve" && event.routeGroup !== "futureGrowthPrecompute"
+);
+const hiddenFutureGrowthCarves = isolatedIntertownEvents.filter(
+  (event) => event.kind === "road:carve" && event.routeGroup === "futureGrowthPrecompute"
+);
+if (hiddenFutureGrowthCarves.length > 0) {
+  throw new Error(`Expected headline-visible committed road count to exclude future growth precompute carves, got hidden=${hiddenFutureGrowthCarves.length} visible=${visibleRoadCarves.length}.`);
 }
 
 let cancelSeen = false;

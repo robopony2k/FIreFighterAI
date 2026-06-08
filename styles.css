@@ -3671,6 +3671,7 @@ canvas {
   padding: 14px 16px;
   min-height: 0;
   max-height: min(420px, 38vh);
+  overflow: auto;
   border-radius: 8px;
   border: 1px solid rgba(118, 181, 201, 0.22);
   background: rgba(10, 16, 18, 0.82);
@@ -3727,6 +3728,48 @@ canvas {
   white-space: pre;
   font-size: 12px;
   line-height: 1.45;
+}
+
+.map-editor-road-tuning {
+  display: grid;
+  gap: 10px;
+  padding-top: 10px;
+  border-top: 1px solid rgba(118, 181, 201, 0.16);
+}
+
+.map-editor-road-tuning-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.map-editor-road-tuning-header > div {
+  min-width: 0;
+}
+
+.map-editor-road-tuning-header button {
+  padding: 7px 10px;
+}
+
+.map-editor-road-tuning-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px 10px;
+}
+
+.map-editor-road-tuning-grid .run-checkbox {
+  min-width: 0;
+}
+
+.map-editor-road-tuning-sliders {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.map-editor-road-tuning-sliders .run-slider {
+  min-width: 0;
 }
 
 #mapEditorDiagnosticsCancel {
@@ -3791,6 +3834,11 @@ canvas {
   .map-editor-diagnostics-header {
     flex-direction: column;
     align-items: stretch;
+  }
+
+  .map-editor-road-tuning-grid,
+  .map-editor-road-tuning-sliders {
+    grid-template-columns: 1fr;
   }
 
   #mapEditorGeneratePreview {

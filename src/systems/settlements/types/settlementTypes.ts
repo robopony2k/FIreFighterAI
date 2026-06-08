@@ -1,5 +1,9 @@
 import type { Point } from "../../../core/types.js";
 import type { WorldState } from "../../../core/state.js";
+import type {
+  RoadDiagnosticRouteGroup,
+  RoadDiagnosticTuning
+} from "../../roads/types/roadDiagnosticTuning.js";
 
 export type SettlementRoadBridgePolicy = "allow" | "never";
 export type SettlementRoadPathMode = "normal" | "switchback" | "mountainPass";
@@ -37,6 +41,10 @@ export type SettlementRoadOptions = {
   allowMountainPassFallback?: boolean;
   pathMode?: SettlementRoadPathMode;
   maxSearchNodeVisits?: number;
+  maxGradeRelaxationPasses?: number | null;
+  allowBridgeFirstRetry?: boolean;
+  maxPathLengthMultiplier?: number | null;
+  diagnosticRouteGroup?: RoadDiagnosticRouteGroup;
   searchBounds?: {
     minX: number;
     maxX: number;
@@ -136,4 +144,6 @@ export type SettlementPlacementResult = {
   roadStrictness?: number;
   roadMaxGrade?: number;
   settlementPreGrowthYears?: number;
+  futureGrowthPlanYears?: number;
+  roadDiagnosticTuning?: RoadDiagnosticTuning;
 };

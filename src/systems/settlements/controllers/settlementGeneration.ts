@@ -19,7 +19,7 @@ import {
   TOWN_CORE_RADIUS,
   TOWN_INITIAL_BUILD_COOLDOWN_MAX_DAYS
 } from "../constants/settlementConstants.js";
-import { createPrecomputedSettlementGrowthPlan, simulateTownGrowthYears } from "../sim/townGrowth.js";
+import { createEmptySettlementGrowthPlan, createPrecomputedSettlementGrowthPlan, simulateTownGrowthYears } from "../sim/townGrowth.js";
 import {
   SETTLEMENT_PLOT_MAX_ANGLE_DEG,
   SETTLEMENT_TOWN_FALLBACK_ANGLE_DEG,
@@ -54,6 +54,75 @@ const clampSettlementYears = (value: number | undefined): number => {
     return BASE_PRE_GROWTH_YEARS;
   }
   return Math.max(0, Math.min(MAX_SETTLEMENT_PRE_GROWTH_YEARS, Math.round(value as number)));
+};
+
+const getRoadDiagnosticTuning = (plan: SettlementPlacementResult) => plan.roadDiagnosticTuning ?? null;
+
+const isSwitchbackConnectorEnabled = (plan: SettlementPlacementResult): boolean =>
+  getRoadDiagnosticTuning(plan)?.enableSwitchbackConnectors ?? true;
+
+const isMountainPassFallbackEnabled = (plan: SettlementPlacementResult): boolean =>
+  getRoadDiagnosticTuning(plan)?.enableMountainPassFallbacks ?? true;
+
+const isWaypointConnectorEnabled = (plan: SettlementPlacementResult): boolean =>
+  getRoadDiagnosticTuning(plan)?.enableWaypointConnectors ?? true;
+
+const isIntertownConnectionEnabled = (plan: SettlementPlacementResult): boolean =>
+  getRoadDiagnosticTuning(plan)?.enableIntertownConnections ?? true;
+
+const getIntertownConnectionPassLimit = (plan: SettlementPlacementResult): number =>
+  getRoadDiagnosticTuning(plan)?.intertownConnectionPasses ?? 2;
+
+const getIntertownEdgeLimit = (plan: SettlementPlacementResult): number | null =>
+  getRoadDiagnosticTuning(plan)?.intertownEdgeLimit ?? null;
+
+const isConnectivityRepairEnabled = (plan: SettlementPlacementResult): boolean =>
+  getRoadDiagnosticTuning(plan)?.enableConnectivityRepairPass ?? true;
+
+const getFutureGrowthPlanYears = (plan: SettlementPlacementResult): number | null =>
+  getRoadDiagnosticTuning(plan)?.futureGrowthPlanYearsOverride ?? null;
+
+const withDiagnosticRouteGroup = (
+  options: SettlementRoadOptions,
+  diagnosticRouteGroup: NonNullable<SettlementRoadOptions["diagnosticRouteGroup"]>
+): SettlementRoadOptions => ({
+  ...options,
+  diagnosticRouteGroup
+});
+
+const createRouteGroupRoadAdapter = (
+  roadAdapter: SettlementRoadAdapter,
+  diagnosticRouteGroup: NonNullable<SettlementRoadOptions["diagnosticRouteGroup"]>
+): SettlementRoadAdapter => {
+  const tagOptions = (options: SettlementRoadOptions = {}): SettlementRoadOptions =>
+    withDiagnosticRouteGroup(options, options.diagnosticRouteGroup ?? diagnosticRouteGroup);
+  return {
+    ...roadAdapter,
+    carveRoad: (state, start, end, options = {}) => roadAdapter.carveRoad(state, start, end, tagOptions(options)),
+    carveRoadAsync: roadAdapter.carveRoadAsync
+      ? (state, start, end, options = {}) => roadAdapter.carveRoadAsync!(state, start, end, tagOptions(options))
+      : undefined,
+    carveRoadDetailed: roadAdapter.carveRoadDetailed
+      ? (state, start, end, options = {}) => roadAdapter.carveRoadDetailed!(state, start, end, tagOptions(options))
+      : undefined,
+    carveRoadDetailedAsync: roadAdapter.carveRoadDetailedAsync
+      ? (state, start, end, options = {}) => roadAdapter.carveRoadDetailedAsync!(state, start, end, tagOptions(options))
+      : undefined,
+    carveRoadSequence: roadAdapter.carveRoadSequence
+      ? (state, segments) =>
+          roadAdapter.carveRoadSequence!(
+            state,
+            segments.map((segment) => ({ ...segment, options: tagOptions(segment.options ?? {}) }))
+          )
+      : undefined,
+    carveRoadSequenceAsync: roadAdapter.carveRoadSequenceAsync
+      ? (state, segments) =>
+          roadAdapter.carveRoadSequenceAsync!(
+            state,
+            segments.map((segment) => ({ ...segment, options: tagOptions(segment.options ?? {}) }))
+          )
+      : undefined
+  };
 };
 
 const TOWN_NAME_POOL: readonly string[] = [
@@ -979,13 +1048,32 @@ const carveRescueConnectorWithWaypoints = (
   end: Point,
   plan: SettlementPlacementResult,
   failedCache: ConnectorAttemptCache | null = null,
-  allowMountainPass = true
+  allowMountainPass = true,
+  diagnosticRouteGroup: NonNullable<SettlementRoadOptions["diagnosticRouteGroup"]> = "connectivityRepair"
 ): boolean => {
-  const options = buildRescueConnectorRoadOptions(plan);
+  if (!isSwitchbackConnectorEnabled(plan)) {
+    return false;
+  }
+  const options = withDiagnosticRouteGroup(buildRescueConnectorRoadOptions(plan), diagnosticRouteGroup);
   if (tryCarveCachedRoad(state, roadAdapter, start, end, buildBoundedConnectorOptions(state, start, end, plan, options), failedCache)) {
     return true;
   }
+  const canUseMountainPass = allowMountainPass && isMountainPassFallbackEnabled(plan);
   const distance = Math.hypot(end.x - start.x, end.y - start.y);
+  if (!isWaypointConnectorEnabled(plan)) {
+    if (!canUseMountainPass || distance > 24) {
+      return false;
+    }
+    const mountainOptions = withDiagnosticRouteGroup(buildConnectivityFallbackRoadOptions(plan), diagnosticRouteGroup);
+    return tryCarveCachedRoad(
+      state,
+      roadAdapter,
+      start,
+      end,
+      buildBoundedConnectorOptions(state, start, end, plan, mountainOptions),
+      failedCache
+    );
+  }
   const segments = Math.max(5, Math.ceil(distance / 6));
   let current = start;
   const roadSegments: Array<{ start: Point; end: Point; options?: SettlementRoadOptions }> = [];
@@ -1007,10 +1095,10 @@ const carveRescueConnectorWithWaypoints = (
   if (carveRoadSegments(state, roadAdapter, roadSegments, failedCache)) {
     return true;
   }
-  if (!allowMountainPass) {
+  if (!canUseMountainPass) {
     return false;
   }
-  const mountainOptions = buildConnectivityFallbackRoadOptions(plan);
+  const mountainOptions = withDiagnosticRouteGroup(buildConnectivityFallbackRoadOptions(plan), diagnosticRouteGroup);
   const mountainSegments = roadSegments.map((segment) => ({
     start: segment.start,
     end: segment.end,
@@ -1039,13 +1127,32 @@ const carveRescueConnectorWithWaypointsAsync = async (
   end: Point,
   plan: SettlementPlacementResult,
   failedCache: ConnectorAttemptCache | null = null,
-  allowMountainPass = true
+  allowMountainPass = true,
+  diagnosticRouteGroup: NonNullable<SettlementRoadOptions["diagnosticRouteGroup"]> = "connectivityRepair"
 ): Promise<boolean> => {
-  const options = buildRescueConnectorRoadOptions(plan);
+  if (!isSwitchbackConnectorEnabled(plan)) {
+    return false;
+  }
+  const options = withDiagnosticRouteGroup(buildRescueConnectorRoadOptions(plan), diagnosticRouteGroup);
   if (await tryCarveCachedRoadAsync(state, roadAdapter, start, end, buildBoundedConnectorOptions(state, start, end, plan, options), failedCache)) {
     return true;
   }
+  const canUseMountainPass = allowMountainPass && isMountainPassFallbackEnabled(plan);
   const distance = Math.hypot(end.x - start.x, end.y - start.y);
+  if (!isWaypointConnectorEnabled(plan)) {
+    if (!canUseMountainPass || distance > 24) {
+      return false;
+    }
+    const mountainOptions = withDiagnosticRouteGroup(buildConnectivityFallbackRoadOptions(plan), diagnosticRouteGroup);
+    return tryCarveCachedRoadAsync(
+      state,
+      roadAdapter,
+      start,
+      end,
+      buildBoundedConnectorOptions(state, start, end, plan, mountainOptions),
+      failedCache
+    );
+  }
   const segments = Math.max(5, Math.ceil(distance / 6));
   let current = start;
   const roadSegments: Array<{ start: Point; end: Point; options?: SettlementRoadOptions }> = [];
@@ -1067,10 +1174,10 @@ const carveRescueConnectorWithWaypointsAsync = async (
   if (await carveRoadSegmentsAsync(state, roadAdapter, roadSegments, failedCache)) {
     return true;
   }
-  if (!allowMountainPass) {
+  if (!canUseMountainPass) {
     return false;
   }
-  const mountainOptions = buildConnectivityFallbackRoadOptions(plan);
+  const mountainOptions = withDiagnosticRouteGroup(buildConnectivityFallbackRoadOptions(plan), diagnosticRouteGroup);
   const mountainSegments = roadSegments.map((segment) => ({
     start: segment.start,
     end: segment.end,
@@ -1103,7 +1210,7 @@ const carveStreetArm = (
 ): Point => {
   const projected = { x: start.x + dx * length, y: start.y + dy * length };
   const target = findBuildableNear(state, projected, 3, plan.heightScaleMultiplier ?? 1) ?? projected;
-  if (roadAdapter.carveRoad(state, start, target, buildRoadOptions(plan))) {
+  if (roadAdapter.carveRoad(state, start, target, withDiagnosticRouteGroup(buildRoadOptions(plan), "localSettlement"))) {
     return target;
   }
   return start;
@@ -1120,7 +1227,7 @@ const carveStreetArmAsync = async (
 ): Promise<Point> => {
   const projected = { x: start.x + dx * length, y: start.y + dy * length };
   const target = findBuildableNear(state, projected, 3, plan.heightScaleMultiplier ?? 1) ?? projected;
-  if (await tryCarveCachedRoadAsync(state, roadAdapter, start, target, buildRoadOptions(plan), null)) {
+  if (await tryCarveCachedRoadAsync(state, roadAdapter, start, target, withDiagnosticRouteGroup(buildRoadOptions(plan), "localSettlement"), null)) {
     return target;
   }
   return start;
@@ -1328,6 +1435,11 @@ const compareTownConnectionEdges = (left: TownConnectionEdge, right: TownConnect
 };
 
 const createTownConnectionEdgeKey = (a: number, b: number): string => (a < b ? `${a}:${b}` : `${b}:${a}`);
+
+const samePoint = (left: Point, right: Point): boolean => left.x === right.x && left.y === right.y;
+
+const sameUndirectedEndpointPair = (leftA: Point, leftB: Point, rightA: Point, rightB: Point): boolean =>
+  (samePoint(leftA, rightA) && samePoint(leftB, rightB)) || (samePoint(leftA, rightB) && samePoint(leftB, rightA));
 
 const buildTownConnectionPlan = (towns: Town[]): Array<[Town, Town]> => {
   if (towns.length <= 1) {
@@ -1643,7 +1755,13 @@ const ensureBaseRoadConnectivity = (
       roadAdapter,
       state.basePoint,
       target,
-      buildBoundedConnectorOptions(state, state.basePoint, target, plan, buildConnectorRoadOptions(plan)),
+      buildBoundedConnectorOptions(
+        state,
+        state.basePoint,
+        target,
+        plan,
+        withDiagnosticRouteGroup(buildConnectorRoadOptions(plan), "connectivityRepair")
+      ),
       failedCache
     ) ||
     tryCarveCachedRoad(
@@ -1651,7 +1769,13 @@ const ensureBaseRoadConnectivity = (
       roadAdapter,
       state.basePoint,
       target,
-      buildBoundedConnectorOptions(state, state.basePoint, target, plan, buildRescueConnectorRoadOptions(plan)),
+      buildBoundedConnectorOptions(
+        state,
+        state.basePoint,
+        target,
+        plan,
+        withDiagnosticRouteGroup(buildRescueConnectorRoadOptions(plan), "connectivityRepair")
+      ),
       failedCache
     )
   );
@@ -1676,7 +1800,13 @@ const ensureBaseRoadConnectivityAsync = async (
       roadAdapter,
       state.basePoint,
       target,
-      buildBoundedConnectorOptions(state, state.basePoint, target, plan, buildConnectorRoadOptions(plan)),
+      buildBoundedConnectorOptions(
+        state,
+        state.basePoint,
+        target,
+        plan,
+        withDiagnosticRouteGroup(buildConnectorRoadOptions(plan), "connectivityRepair")
+      ),
       failedCache
     ) ||
     await tryCarveCachedRoadAsync(
@@ -1684,7 +1814,13 @@ const ensureBaseRoadConnectivityAsync = async (
       roadAdapter,
       state.basePoint,
       target,
-      buildBoundedConnectorOptions(state, state.basePoint, target, plan, buildRescueConnectorRoadOptions(plan)),
+      buildBoundedConnectorOptions(
+        state,
+        state.basePoint,
+        target,
+        plan,
+        withDiagnosticRouteGroup(buildRescueConnectorRoadOptions(plan), "connectivityRepair")
+      ),
       failedCache
     )
   );
@@ -1835,7 +1971,12 @@ const carveConnectorSwitchbackFirst = (
   normalOptions: SettlementRoadOptions = buildConnectorRoadOptions(plan),
   failedCache: ConnectorAttemptCache | null = null
 ): boolean => {
-  const switchbackOptions = buildSwitchbackConnectorRoadOptions(plan);
+  const switchbackOptions = {
+    ...buildSwitchbackConnectorRoadOptions(plan),
+    diagnosticRouteGroup: normalOptions.diagnosticRouteGroup
+  };
+  const allowWaypoints = isWaypointConnectorEnabled(plan);
+  const allowSwitchbacks = isSwitchbackConnectorEnabled(plan);
   return (
     carveConnectorViaJunction(state, roadAdapter, start, end, plan, junctions, normalOptions, failedCache) ||
     tryCarveCachedRoad(
@@ -1846,17 +1987,20 @@ const carveConnectorSwitchbackFirst = (
       buildBoundedConnectorOptions(state, start, end, plan, normalOptions),
       failedCache
     ) ||
-    carveConnectorWithWaypoints(state, roadAdapter, start, end, plan, normalOptions, failedCache) ||
-    carveConnectorViaJunction(state, roadAdapter, start, end, plan, junctions, switchbackOptions, failedCache) ||
-    tryCarveCachedRoad(
+    (allowWaypoints && carveConnectorWithWaypoints(state, roadAdapter, start, end, plan, normalOptions, failedCache)) ||
+    (allowSwitchbacks &&
+      carveConnectorViaJunction(state, roadAdapter, start, end, plan, junctions, switchbackOptions, failedCache)) ||
+    (allowSwitchbacks && tryCarveCachedRoad(
       state,
       roadAdapter,
       start,
       end,
       buildBoundedConnectorOptions(state, start, end, plan, switchbackOptions),
       failedCache
-    ) ||
-    carveConnectorWithWaypoints(state, roadAdapter, start, end, plan, switchbackOptions, failedCache)
+    )) ||
+    (allowSwitchbacks &&
+      allowWaypoints &&
+      carveConnectorWithWaypoints(state, roadAdapter, start, end, plan, switchbackOptions, failedCache))
   );
 };
 
@@ -1870,7 +2014,12 @@ const carveConnectorSwitchbackFirstAsync = async (
   normalOptions: SettlementRoadOptions = buildConnectorRoadOptions(plan),
   failedCache: ConnectorAttemptCache | null = null
 ): Promise<boolean> => {
-  const switchbackOptions = buildSwitchbackConnectorRoadOptions(plan);
+  const switchbackOptions = {
+    ...buildSwitchbackConnectorRoadOptions(plan),
+    diagnosticRouteGroup: normalOptions.diagnosticRouteGroup
+  };
+  const allowWaypoints = isWaypointConnectorEnabled(plan);
+  const allowSwitchbacks = isSwitchbackConnectorEnabled(plan);
   return (
     await carveConnectorViaJunctionAsync(state, roadAdapter, start, end, plan, junctions, normalOptions, failedCache) ||
     await tryCarveCachedRoadAsync(
@@ -1881,17 +2030,20 @@ const carveConnectorSwitchbackFirstAsync = async (
       buildBoundedConnectorOptions(state, start, end, plan, normalOptions),
       failedCache
     ) ||
-    await carveConnectorWithWaypointsAsync(state, roadAdapter, start, end, plan, normalOptions, failedCache) ||
-    await carveConnectorViaJunctionAsync(state, roadAdapter, start, end, plan, junctions, switchbackOptions, failedCache) ||
-    await tryCarveCachedRoadAsync(
+    (allowWaypoints && await carveConnectorWithWaypointsAsync(state, roadAdapter, start, end, plan, normalOptions, failedCache)) ||
+    (allowSwitchbacks &&
+      await carveConnectorViaJunctionAsync(state, roadAdapter, start, end, plan, junctions, switchbackOptions, failedCache)) ||
+    (allowSwitchbacks && await tryCarveCachedRoadAsync(
       state,
       roadAdapter,
       start,
       end,
       buildBoundedConnectorOptions(state, start, end, plan, switchbackOptions),
       failedCache
-    ) ||
-    await carveConnectorWithWaypointsAsync(state, roadAdapter, start, end, plan, switchbackOptions, failedCache)
+    )) ||
+    (allowSwitchbacks &&
+      allowWaypoints &&
+      await carveConnectorWithWaypointsAsync(state, roadAdapter, start, end, plan, switchbackOptions, failedCache))
   );
 };
 
@@ -1915,7 +2067,7 @@ const ensureTownLocalRoadAnchors = (
     if (start.x === target.x && start.y === target.y) {
       continue;
     }
-    if (carveRescueConnectorWithWaypoints(state, roadAdapter, start, target, plan, failedCache)) {
+    if (carveRescueConnectorWithWaypoints(state, roadAdapter, start, target, plan, failedCache, true, "localSettlement")) {
       repaired = true;
     }
   }
@@ -1942,7 +2094,7 @@ const ensureTownLocalRoadAnchorsAsync = async (
     if (start.x === target.x && start.y === target.y) {
       continue;
     }
-    if (await carveRescueConnectorWithWaypointsAsync(state, roadAdapter, start, target, plan, failedCache)) {
+    if (await carveRescueConnectorWithWaypointsAsync(state, roadAdapter, start, target, plan, failedCache, true, "localSettlement")) {
       repaired = true;
     }
   }
@@ -1970,7 +2122,13 @@ const ensureTownLocalStreetLinks = (
         roadAdapter,
         baseAnchor,
         localStreet,
-        buildBoundedConnectorOptions(state, baseAnchor, localStreet, plan, buildConnectorRoadOptions(plan)),
+        buildBoundedConnectorOptions(
+          state,
+          baseAnchor,
+          localStreet,
+          plan,
+          withDiagnosticRouteGroup(buildConnectorRoadOptions(plan), "localSettlement")
+        ),
         failedCache
       ) ||
       tryCarveCachedRoad(
@@ -1978,10 +2136,16 @@ const ensureTownLocalStreetLinks = (
         roadAdapter,
         baseAnchor,
         localStreet,
-        buildBoundedConnectorOptions(state, baseAnchor, localStreet, plan, buildSwitchbackConnectorRoadOptions(plan)),
+        buildBoundedConnectorOptions(
+          state,
+          baseAnchor,
+          localStreet,
+          plan,
+          withDiagnosticRouteGroup(buildSwitchbackConnectorRoadOptions(plan), "localSettlement")
+        ),
         failedCache
       ) ||
-      carveRescueConnectorWithWaypoints(state, roadAdapter, baseAnchor, localStreet, plan, failedCache)
+      carveRescueConnectorWithWaypoints(state, roadAdapter, baseAnchor, localStreet, plan, failedCache, true, "localSettlement")
     )) {
       repaired = true;
     }
@@ -1996,7 +2160,13 @@ const ensureTownLocalStreetLinks = (
         roadAdapter,
         localStreet,
         selectedAnchor,
-        buildBoundedConnectorOptions(state, localStreet, selectedAnchor, plan, localOptions),
+        buildBoundedConnectorOptions(
+          state,
+          localStreet,
+          selectedAnchor,
+          plan,
+          withDiagnosticRouteGroup(localOptions, "localSettlement")
+        ),
         failedCache
       ) ||
       tryCarveCachedRoad(
@@ -2004,10 +2174,16 @@ const ensureTownLocalStreetLinks = (
         roadAdapter,
         localStreet,
         selectedAnchor,
-        buildBoundedConnectorOptions(state, localStreet, selectedAnchor, plan, buildSwitchbackConnectorRoadOptions(plan)),
+        buildBoundedConnectorOptions(
+          state,
+          localStreet,
+          selectedAnchor,
+          plan,
+          withDiagnosticRouteGroup(buildSwitchbackConnectorRoadOptions(plan), "localSettlement")
+        ),
         failedCache
       ) ||
-      carveRescueConnectorWithWaypoints(state, roadAdapter, localStreet, selectedAnchor, plan, failedCache)
+      carveRescueConnectorWithWaypoints(state, roadAdapter, localStreet, selectedAnchor, plan, failedCache, true, "localSettlement")
     )) {
       repaired = true;
     }
@@ -2036,7 +2212,13 @@ const ensureTownLocalStreetLinksAsync = async (
         roadAdapter,
         baseAnchor,
         localStreet,
-        buildBoundedConnectorOptions(state, baseAnchor, localStreet, plan, buildConnectorRoadOptions(plan)),
+        buildBoundedConnectorOptions(
+          state,
+          baseAnchor,
+          localStreet,
+          plan,
+          withDiagnosticRouteGroup(buildConnectorRoadOptions(plan), "localSettlement")
+        ),
         failedCache
       ) ||
       await tryCarveCachedRoadAsync(
@@ -2044,10 +2226,16 @@ const ensureTownLocalStreetLinksAsync = async (
         roadAdapter,
         baseAnchor,
         localStreet,
-        buildBoundedConnectorOptions(state, baseAnchor, localStreet, plan, buildSwitchbackConnectorRoadOptions(plan)),
+        buildBoundedConnectorOptions(
+          state,
+          baseAnchor,
+          localStreet,
+          plan,
+          withDiagnosticRouteGroup(buildSwitchbackConnectorRoadOptions(plan), "localSettlement")
+        ),
         failedCache
       ) ||
-      await carveRescueConnectorWithWaypointsAsync(state, roadAdapter, baseAnchor, localStreet, plan, failedCache)
+      await carveRescueConnectorWithWaypointsAsync(state, roadAdapter, baseAnchor, localStreet, plan, failedCache, true, "localSettlement")
     )) {
       repaired = true;
     }
@@ -2062,7 +2250,13 @@ const ensureTownLocalStreetLinksAsync = async (
         roadAdapter,
         localStreet,
         selectedAnchor,
-        buildBoundedConnectorOptions(state, localStreet, selectedAnchor, plan, localOptions),
+        buildBoundedConnectorOptions(
+          state,
+          localStreet,
+          selectedAnchor,
+          plan,
+          withDiagnosticRouteGroup(localOptions, "localSettlement")
+        ),
         failedCache
       ) ||
       await tryCarveCachedRoadAsync(
@@ -2070,10 +2264,16 @@ const ensureTownLocalStreetLinksAsync = async (
         roadAdapter,
         localStreet,
         selectedAnchor,
-        buildBoundedConnectorOptions(state, localStreet, selectedAnchor, plan, buildSwitchbackConnectorRoadOptions(plan)),
+        buildBoundedConnectorOptions(
+          state,
+          localStreet,
+          selectedAnchor,
+          plan,
+          withDiagnosticRouteGroup(buildSwitchbackConnectorRoadOptions(plan), "localSettlement")
+        ),
         failedCache
       ) ||
-      await carveRescueConnectorWithWaypointsAsync(state, roadAdapter, localStreet, selectedAnchor, plan, failedCache)
+      await carveRescueConnectorWithWaypointsAsync(state, roadAdapter, localStreet, selectedAnchor, plan, failedCache, true, "localSettlement")
     )) {
       repaired = true;
     }
@@ -2172,7 +2372,7 @@ const ensureTownRoadConnectivity = (
     let connectedAny = false;
     for (let i = 0; i < candidates.length; i += 1) {
       const candidate = candidates[i]!;
-      const connectorOptions = buildConnectorRoadOptions(plan);
+      const connectorOptions = withDiagnosticRouteGroup(buildConnectorRoadOptions(plan), "connectivityRepair");
       if (
         carveConnectorSwitchbackFirst(
           state,
@@ -2191,7 +2391,8 @@ const ensureTownRoadConnectivity = (
           candidate.disconnectedAnchor,
           plan,
           failedCache,
-          !mountainPassTriedComponents.has(candidate.disconnectedComponent)
+          !mountainPassTriedComponents.has(candidate.disconnectedComponent),
+          "connectivityRepair"
         )
       ) {
         connectedAny = true;
@@ -2298,7 +2499,7 @@ const ensureTownRoadConnectivityAsync = async (
     let connectedAny = false;
     for (let i = 0; i < candidates.length; i += 1) {
       const candidate = candidates[i]!;
-      const connectorOptions = buildConnectorRoadOptions(plan);
+      const connectorOptions = withDiagnosticRouteGroup(buildConnectorRoadOptions(plan), "connectivityRepair");
       if (
         await carveConnectorSwitchbackFirstAsync(
           state,
@@ -2317,7 +2518,8 @@ const ensureTownRoadConnectivityAsync = async (
           candidate.disconnectedAnchor,
           plan,
           failedCache,
-          !mountainPassTriedComponents.has(candidate.disconnectedComponent)
+          !mountainPassTriedComponents.has(candidate.disconnectedComponent),
+          "connectivityRepair"
         )
       ) {
         connectedAny = true;
@@ -2413,11 +2615,20 @@ const seedTowns = (state: WorldState, plan: SettlementPlacementResult): Town[] =
   return towns;
 };
 
-const connectTownRoads = (state: WorldState, towns: Town[], roadAdapter: SettlementRoadAdapter, plan: SettlementPlacementResult): void => {
-  const connections = buildTownConnectionPlan(towns);
+const connectTownRoads = (
+  state: WorldState,
+  towns: Town[],
+  roadAdapter: SettlementRoadAdapter,
+  plan: SettlementPlacementResult,
+  failedCache: ConnectorAttemptCache = new Set()
+): void => {
+  if (!isIntertownConnectionEnabled(plan)) {
+    return;
+  }
+  const edgeLimit = getIntertownEdgeLimit(plan);
+  const connections = buildTownConnectionPlan(towns).slice(0, edgeLimit ?? undefined);
   const anchors = [resolveBaseRoadAnchor(state, roadAdapter), ...towns.map((town) => resolveTownRoadAnchor(state, town, state.basePoint, roadAdapter))];
   const junctions = collectRoadJunctionCandidates(state, anchors, plan);
-  const failedCache: ConnectorAttemptCache = new Set();
   roadAdapter.recordGeneratedJunctions?.(junctions.length);
   roadAdapter.backfillRoadEdgesFromAdjacency(state);
   for (let i = 0; i < connections.length; i += 1) {
@@ -2427,21 +2638,27 @@ const connectTownRoads = (state: WorldState, towns: Town[], roadAdapter: Settlem
     if (areRoadAnchorsAlreadyLocallyConnected(state, roadAdapter, leftRoad, rightRoad)) {
       continue;
     }
-    const connectorOptions = buildConnectorRoadOptions(plan);
+    const connectorOptions = withDiagnosticRouteGroup(buildConnectorRoadOptions(plan), "intertown");
     if (carveConnectorSwitchbackFirst(state, roadAdapter, leftRoad, rightRoad, plan, junctions, connectorOptions, failedCache)) {
+      failedCache.clear();
       roadAdapter.backfillRoadEdgesFromAdjacency(state);
       continue;
     }
     const fallbackLeft = roadAdapter.findNearestRoadTile(state, { x: left.x, y: left.y });
     const fallbackRight = roadAdapter.findNearestRoadTile(state, { x: right.x, y: right.y });
+    if (sameUndirectedEndpointPair(leftRoad, rightRoad, fallbackLeft, fallbackRight)) {
+      continue;
+    }
     if (areRoadAnchorsAlreadyLocallyConnected(state, roadAdapter, fallbackLeft, fallbackRight)) {
       continue;
     }
     if (carveConnectorSwitchbackFirst(state, roadAdapter, fallbackLeft, fallbackRight, plan, junctions, connectorOptions, failedCache)) {
+      failedCache.clear();
       roadAdapter.backfillRoadEdgesFromAdjacency(state);
       continue;
     }
-    if (carveRescueConnectorWithWaypoints(state, roadAdapter, fallbackLeft, fallbackRight, plan, failedCache)) {
+    if (carveRescueConnectorWithWaypoints(state, roadAdapter, fallbackLeft, fallbackRight, plan, failedCache, true, "intertown")) {
+      failedCache.clear();
       roadAdapter.backfillRoadEdgesFromAdjacency(state);
     }
   }
@@ -2451,12 +2668,16 @@ const connectTownRoadsAsync = async (
   state: WorldState,
   towns: Town[],
   roadAdapter: SettlementRoadAdapter,
-  plan: SettlementPlacementResult
+  plan: SettlementPlacementResult,
+  failedCache: ConnectorAttemptCache = new Set()
 ): Promise<void> => {
-  const connections = buildTownConnectionPlan(towns);
+  if (!isIntertownConnectionEnabled(plan)) {
+    return;
+  }
+  const edgeLimit = getIntertownEdgeLimit(plan);
+  const connections = buildTownConnectionPlan(towns).slice(0, edgeLimit ?? undefined);
   const anchors = [resolveBaseRoadAnchor(state, roadAdapter), ...towns.map((town) => resolveTownRoadAnchor(state, town, state.basePoint, roadAdapter))];
   const junctions = collectRoadJunctionCandidates(state, anchors, plan);
-  const failedCache: ConnectorAttemptCache = new Set();
   roadAdapter.recordGeneratedJunctions?.(junctions.length);
   roadAdapter.backfillRoadEdgesFromAdjacency(state);
   for (let i = 0; i < connections.length; i += 1) {
@@ -2466,21 +2687,27 @@ const connectTownRoadsAsync = async (
     if (areRoadAnchorsAlreadyLocallyConnected(state, roadAdapter, leftRoad, rightRoad)) {
       continue;
     }
-    const connectorOptions = buildConnectorRoadOptions(plan);
+    const connectorOptions = withDiagnosticRouteGroup(buildConnectorRoadOptions(plan), "intertown");
     if (await carveConnectorSwitchbackFirstAsync(state, roadAdapter, leftRoad, rightRoad, plan, junctions, connectorOptions, failedCache)) {
+      failedCache.clear();
       roadAdapter.backfillRoadEdgesFromAdjacency(state);
       continue;
     }
     const fallbackLeft = roadAdapter.findNearestRoadTile(state, { x: left.x, y: left.y });
     const fallbackRight = roadAdapter.findNearestRoadTile(state, { x: right.x, y: right.y });
+    if (sameUndirectedEndpointPair(leftRoad, rightRoad, fallbackLeft, fallbackRight)) {
+      continue;
+    }
     if (areRoadAnchorsAlreadyLocallyConnected(state, roadAdapter, fallbackLeft, fallbackRight)) {
       continue;
     }
     if (await carveConnectorSwitchbackFirstAsync(state, roadAdapter, fallbackLeft, fallbackRight, plan, junctions, connectorOptions, failedCache)) {
+      failedCache.clear();
       roadAdapter.backfillRoadEdgesFromAdjacency(state);
       continue;
     }
-    if (await carveRescueConnectorWithWaypointsAsync(state, roadAdapter, fallbackLeft, fallbackRight, plan, failedCache)) {
+    if (await carveRescueConnectorWithWaypointsAsync(state, roadAdapter, fallbackLeft, fallbackRight, plan, failedCache, true, "intertown")) {
+      failedCache.clear();
       roadAdapter.backfillRoadEdgesFromAdjacency(state);
     }
   }
@@ -2560,6 +2787,8 @@ export const createSettlementPlacementPlan = (
     roadStrictness?: number;
     roadMaxGrade?: number;
     settlementPreGrowthYears?: number;
+    futureGrowthPlanYears?: number;
+    roadDiagnosticTuning?: SettlementPlacementResult["roadDiagnosticTuning"];
   } = {}
 ): SettlementPlacementResult => ({
   generatedRoads: false,
@@ -2572,7 +2801,11 @@ export const createSettlementPlacementPlan = (
   settlementSpacing: clamp01(options.settlementSpacing ?? 0.55),
   roadStrictness: clamp01(options.roadStrictness ?? 0.5),
   roadMaxGrade: Math.max(0.08, Math.min(0.5, options.roadMaxGrade ?? 0.38)),
-  settlementPreGrowthYears: clampSettlementYears(options.settlementPreGrowthYears)
+  settlementPreGrowthYears: clampSettlementYears(
+    options.roadDiagnosticTuning?.settlementPreGrowthYearsOverride ?? options.settlementPreGrowthYears
+  ),
+  futureGrowthPlanYears: options.roadDiagnosticTuning?.futureGrowthPlanYearsOverride ?? options.futureGrowthPlanYears,
+  roadDiagnosticTuning: options.roadDiagnosticTuning
 });
 
 export const executeSettlementPlacementPlan = (
@@ -2586,22 +2819,46 @@ export const executeSettlementPlacementPlan = (
   }
   initializeSettlementState(state);
   const towns = seedTowns(state, realized);
+  const intertownPasses = getIntertownConnectionPassLimit(realized);
+  const intertownFailedCache: ConnectorAttemptCache = new Set();
+  const repairEnabled = isConnectivityRepairEnabled(realized);
+  const preGrowthRoadAdapter = createRouteGroupRoadAdapter(roadAdapter, "settlementPreGrowth");
+  const futureGrowthRoadAdapter = createRouteGroupRoadAdapter(roadAdapter, "futureGrowthPrecompute");
   buildInitialRoadSkeletons(state, towns, roadAdapter, realized);
-  connectTownRoads(state, towns, roadAdapter, realized);
-  ensureTownRoadConnectivity(state, towns, roadAdapter, realized);
+  if (intertownPasses >= 1) {
+    connectTownRoads(state, towns, roadAdapter, realized, intertownFailedCache);
+  }
+  if (repairEnabled) {
+    ensureTownRoadConnectivity(state, towns, roadAdapter, realized);
+  }
   roadAdapter.backfillRoadEdgesFromAdjacency(state);
-  simulateTownGrowthYears(state, roadAdapter, clampSettlementYears(realized.settlementPreGrowthYears));
-  ensureTownLocalRoadAnchors(state, towns, roadAdapter, realized);
-  connectTownRoads(state, towns, roadAdapter, realized);
-  ensureTownRoadConnectivity(state, towns, roadAdapter, realized);
+  simulateTownGrowthYears(state, preGrowthRoadAdapter, clampSettlementYears(realized.settlementPreGrowthYears));
+  if (repairEnabled) {
+    ensureTownLocalRoadAnchors(state, towns, roadAdapter, realized);
+  }
+  if (intertownPasses >= 2) {
+    connectTownRoads(state, towns, roadAdapter, realized, intertownFailedCache);
+  }
+  if (repairEnabled) {
+    ensureTownRoadConnectivity(state, towns, roadAdapter, realized);
+  }
   roadAdapter.backfillRoadEdgesFromAdjacency(state);
   if (realized.pruneRedundantDiagonals) {
     roadAdapter.pruneRoadDiagonalStubs(state);
     roadAdapter.backfillRoadEdgesFromAdjacency(state);
-    ensureTownRoadConnectivity(state, towns, roadAdapter, realized);
+    if (repairEnabled) {
+      ensureTownRoadConnectivity(state, towns, roadAdapter, realized);
+    }
     roadAdapter.backfillRoadEdgesFromAdjacency(state);
   }
-  state.plannedTownGrowth = createPrecomputedSettlementGrowthPlan(state, roadAdapter);
+  const futureGrowthYears = getFutureGrowthPlanYears(realized);
+  state.plannedTownGrowth = futureGrowthYears === 0
+    ? createEmptySettlementGrowthPlan(state.towns.length, 0)
+    : createPrecomputedSettlementGrowthPlan(
+        state,
+        futureGrowthRoadAdapter,
+        futureGrowthYears ?? undefined
+      );
   state.settlementRequestedHouses = state.totalHouses;
   state.settlementPlacedHouses = state.totalHouses;
   realized.generatedRoads = true;
@@ -2619,22 +2876,46 @@ export const executeSettlementPlacementPlanAsync = async (
   }
   initializeSettlementState(state);
   const towns = seedTowns(state, realized);
+  const intertownPasses = getIntertownConnectionPassLimit(realized);
+  const intertownFailedCache: ConnectorAttemptCache = new Set();
+  const repairEnabled = isConnectivityRepairEnabled(realized);
+  const preGrowthRoadAdapter = createRouteGroupRoadAdapter(roadAdapter, "settlementPreGrowth");
+  const futureGrowthRoadAdapter = createRouteGroupRoadAdapter(roadAdapter, "futureGrowthPrecompute");
   await buildInitialRoadSkeletonsAsync(state, towns, roadAdapter, realized);
-  await connectTownRoadsAsync(state, towns, roadAdapter, realized);
-  await ensureTownRoadConnectivityAsync(state, towns, roadAdapter, realized);
+  if (intertownPasses >= 1) {
+    await connectTownRoadsAsync(state, towns, roadAdapter, realized, intertownFailedCache);
+  }
+  if (repairEnabled) {
+    await ensureTownRoadConnectivityAsync(state, towns, roadAdapter, realized);
+  }
   roadAdapter.backfillRoadEdgesFromAdjacency(state);
-  simulateTownGrowthYears(state, roadAdapter, clampSettlementYears(realized.settlementPreGrowthYears));
-  await ensureTownLocalRoadAnchorsAsync(state, towns, roadAdapter, realized);
-  await connectTownRoadsAsync(state, towns, roadAdapter, realized);
-  await ensureTownRoadConnectivityAsync(state, towns, roadAdapter, realized);
+  simulateTownGrowthYears(state, preGrowthRoadAdapter, clampSettlementYears(realized.settlementPreGrowthYears));
+  if (repairEnabled) {
+    await ensureTownLocalRoadAnchorsAsync(state, towns, roadAdapter, realized);
+  }
+  if (intertownPasses >= 2) {
+    await connectTownRoadsAsync(state, towns, roadAdapter, realized, intertownFailedCache);
+  }
+  if (repairEnabled) {
+    await ensureTownRoadConnectivityAsync(state, towns, roadAdapter, realized);
+  }
   roadAdapter.backfillRoadEdgesFromAdjacency(state);
   if (realized.pruneRedundantDiagonals) {
     roadAdapter.pruneRoadDiagonalStubs(state);
     roadAdapter.backfillRoadEdgesFromAdjacency(state);
-    await ensureTownRoadConnectivityAsync(state, towns, roadAdapter, realized);
+    if (repairEnabled) {
+      await ensureTownRoadConnectivityAsync(state, towns, roadAdapter, realized);
+    }
     roadAdapter.backfillRoadEdgesFromAdjacency(state);
   }
-  state.plannedTownGrowth = createPrecomputedSettlementGrowthPlan(state, roadAdapter);
+  const futureGrowthYears = getFutureGrowthPlanYears(realized);
+  state.plannedTownGrowth = futureGrowthYears === 0
+    ? createEmptySettlementGrowthPlan(state.towns.length, 0)
+    : createPrecomputedSettlementGrowthPlan(
+        state,
+        futureGrowthRoadAdapter,
+        futureGrowthYears ?? undefined
+      );
   state.settlementRequestedHouses = state.totalHouses;
   state.settlementPlacedHouses = state.totalHouses;
   realized.generatedRoads = true;

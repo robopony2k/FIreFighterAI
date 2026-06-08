@@ -23,6 +23,7 @@ import type {
   RoadStreamerDestinationSeed
 } from "../systems/roads/types/roadPathPlannerTypes.js";
 import type { RoadPathDebugHooks } from "../systems/roads/types/roadPathDebugTypes.js";
+import type { RoadDiagnosticRouteGroup } from "../systems/roads/types/roadDiagnosticTuning.js";
 import { yieldToNextFrame } from "./pipeline/yieldController.js";
 
 export const ROAD_GRADE_LIMIT_START = 0.09;
@@ -119,7 +120,11 @@ export type RoadPathOptions = {
   allowMountainPassFallback?: boolean;
   pathMode?: RoadPathMode;
   maxSearchNodeVisits?: number;
+  maxGradeRelaxationPasses?: number | null;
+  allowBridgeFirstRetry?: boolean;
+  maxPathLengthMultiplier?: number | null;
   useBidirectionalStreamer?: boolean;
+  diagnosticRouteGroup?: RoadDiagnosticRouteGroup;
 };
 
 type RoadPathOptionsResolved = {
@@ -156,7 +161,11 @@ type RoadPathOptionsResolved = {
   allowMountainPassFallback: boolean;
   pathMode: RoadPathMode;
   maxSearchNodeVisits: number;
+  maxGradeRelaxationPasses: number | null;
+  allowBridgeFirstRetry: boolean;
+  maxPathLengthMultiplier: number | null;
   useBidirectionalStreamer: boolean;
+  diagnosticRouteGroup: RoadDiagnosticRouteGroup;
 };
 
 type RoadCarveOptions = RoadPathOptions & {
@@ -423,7 +432,17 @@ const resolveRoadPathOptions = (options: RoadPathOptions = {}): RoadPathOptionsR
     allowMountainPassFallback: options.allowMountainPassFallback ?? true,
     pathMode: options.pathMode ?? "normal",
     maxSearchNodeVisits: Math.max(0, Math.floor(options.maxSearchNodeVisits ?? 0)),
-    useBidirectionalStreamer: options.useBidirectionalStreamer ?? false
+    maxGradeRelaxationPasses:
+      typeof options.maxGradeRelaxationPasses === "number" && Number.isFinite(options.maxGradeRelaxationPasses)
+        ? Math.max(1, Math.floor(options.maxGradeRelaxationPasses))
+        : null,
+    allowBridgeFirstRetry: options.allowBridgeFirstRetry ?? true,
+    maxPathLengthMultiplier:
+      typeof options.maxPathLengthMultiplier === "number" && Number.isFinite(options.maxPathLengthMultiplier)
+        ? Math.max(1, options.maxPathLengthMultiplier)
+        : null,
+    useBidirectionalStreamer: options.useBidirectionalStreamer ?? false,
+    diagnosticRouteGroup: options.diagnosticRouteGroup ?? "unknown"
   };
 };
 
@@ -471,7 +490,10 @@ const buildRoadPathFailureKey = (start: Point, end: Point, options: RoadPathOpti
     options.gradeChangeLimitStart,
     options.gradeChangeLimitMax,
     options.avoidAngleDeg,
-    options.fallbackAngleDeg
+    options.fallbackAngleDeg,
+    options.maxGradeRelaxationPasses ?? "default",
+    options.maxPathLengthMultiplier?.toFixed(2) ?? "default",
+    Number(options.allowBridgeFirstRetry)
   ].join(":");
 
 const buildEmptyRoadPathResult = (): RoadPathResult => ({
@@ -491,6 +513,20 @@ const buildEmptyRoadPathResult = (): RoadPathResult => ({
   hairpinGradeDiscountCount: 0,
   longStraightSteepSegmentCount: 0
 });
+
+const rejectRoadPathForDetour = (
+  result: RoadPathResult | null,
+  start: Point,
+  end: Point | null,
+  options: RoadPathOptionsResolved
+): RoadPathResult | null => {
+  if (!result || !end || options.maxPathLengthMultiplier === null) {
+    return result;
+  }
+  const straightDistance = Math.hypot(end.x - start.x, end.y - start.y);
+  const maxPathLength = Math.max(8, Math.ceil(straightDistance * options.maxPathLengthMultiplier));
+  return result.path.length > maxPathLength ? null : result;
+};
 
 const buildSwitchbackFallbackOptions = (options: RoadPathOptionsResolved): RoadPathOptionsResolved => ({
   ...options,
@@ -1980,6 +2016,7 @@ const runBidirectionalStreamer = (
   const attemptId = nextRoadPathDebugAttemptId++;
   const startedAt = typeof performance !== "undefined" ? performance.now() : Date.now();
   const finish = (result: RoadPathResult | null, budgetAborted: boolean, visitedNodes: number): RoadPathResult | null => {
+    const acceptedResult = rejectRoadPathForDetour(result, start, end, options);
     const endedAt = typeof performance !== "undefined" ? performance.now() : Date.now();
     if (budgetAborted) {
       roadGenerationStats.searchBudgetAbortCount += 1;
@@ -1987,19 +2024,19 @@ const runBidirectionalStreamer = (
     debug?.emit?.({
       kind: "road:result",
       attemptId,
-      found: !!result,
+      found: !!acceptedResult,
       budgetAborted,
       visitedNodes,
-      pathLength: result?.path.length ?? 0,
-      bridgeTileIndices: result?.bridgeTileIndices ? [...result.bridgeTileIndices] : undefined,
-      path: result?.path ? result.path.map((point) => ({ ...point })) : undefined,
+      pathLength: acceptedResult?.path.length ?? 0,
+      bridgeTileIndices: acceptedResult?.bridgeTileIndices ? [...acceptedResult.bridgeTileIndices] : undefined,
       elapsedMs: Math.max(0, endedAt - startedAt),
       mode: options.pathMode,
+      routeGroup: options.diagnosticRouteGroup,
       allowBridge,
       planner: "streamer",
-      joined: !!result
+      joined: !!acceptedResult
     });
-    return result;
+    return acceptedResult;
   };
   if (!inBounds(state.grid, start.x, start.y)) {
     return finish(null, false, 0);
@@ -2038,6 +2075,7 @@ const runBidirectionalStreamer = (
     destinationSeedCount: destinationSeeds.length,
     joinRadius,
     mode: options.pathMode,
+    routeGroup: options.diagnosticRouteGroup,
     allowBridge,
     gradeLimit,
     crossfallLimit,
@@ -2179,6 +2217,7 @@ const runDijkstraRoadPlanner = (
     selectedSeed?: RoadStreamerDestinationSeed | null,
     failureReason?: RoadPathPlannerFailureReason | null
   ): RoadPathResult | null => {
+    const acceptedResult = rejectRoadPathForDetour(result, start, end, options);
     const endedAt = typeof performance !== "undefined" ? performance.now() : Date.now();
     if (budgetAborted) {
       roadGenerationStats.searchBudgetAbortCount += 1;
@@ -2186,12 +2225,11 @@ const runDijkstraRoadPlanner = (
     debug?.emit?.({
       kind: "road:result",
       attemptId,
-      found: !!result,
+      found: !!acceptedResult,
       budgetAborted,
       visitedNodes,
-      pathLength: result?.path.length ?? 0,
-      bridgeTileIndices: result?.bridgeTileIndices ? [...result.bridgeTileIndices] : undefined,
-      path: result?.path ? result.path.map((point) => ({ ...point })) : undefined,
+      pathLength: acceptedResult?.path.length ?? 0,
+      bridgeTileIndices: acceptedResult?.bridgeTileIndices ? [...acceptedResult.bridgeTileIndices] : undefined,
       selectedDestinationSeed: selectedSeed ? { ...selectedSeed.point } : undefined,
       selectedDestinationSeedKind: selectedSeed?.kind,
       selectedDestinationSeedLabel: selectedSeed?.label,
@@ -2199,10 +2237,11 @@ const runDijkstraRoadPlanner = (
       failureReason: failureReason ?? undefined,
       elapsedMs: Math.max(0, endedAt - startedAt),
       mode: options.pathMode,
+      routeGroup: options.diagnosticRouteGroup,
       allowBridge,
       planner: "dijkstra"
     });
-    return result;
+    return acceptedResult;
   };
   if (!inBounds(state.grid, start.x, start.y)) {
     return finish(null, false, 0, undefined, null, "invalid-start");
@@ -2262,6 +2301,7 @@ const runDijkstraRoadPlanner = (
     end: end ? { ...end } : undefined,
     destinationSeedCount: destinationSeeds.length,
     mode: options.pathMode,
+    routeGroup: options.diagnosticRouteGroup,
     allowBridge,
     gradeLimit,
     crossfallLimit,
@@ -2392,22 +2432,23 @@ const runAStar = (
   const attemptId = nextRoadPathDebugAttemptId++;
   const startedAt = typeof performance !== "undefined" ? performance.now() : Date.now();
   const finish = (result: RoadPathResult | null, budgetAborted: boolean, visitedNodes: number): RoadPathResult | null => {
+    const acceptedResult = rejectRoadPathForDetour(result, start, end, options);
     const endedAt = typeof performance !== "undefined" ? performance.now() : Date.now();
     debug?.emit?.({
       kind: "road:result",
       attemptId,
-      found: !!result,
+      found: !!acceptedResult,
       budgetAborted,
       visitedNodes,
-      pathLength: result?.path.length ?? 0,
-      bridgeTileIndices: result?.bridgeTileIndices ? [...result.bridgeTileIndices] : undefined,
-      path: result?.path ? result.path.map((point) => ({ ...point })) : undefined,
+      pathLength: acceptedResult?.path.length ?? 0,
+      bridgeTileIndices: acceptedResult?.bridgeTileIndices ? [...acceptedResult.bridgeTileIndices] : undefined,
       elapsedMs: Math.max(0, endedAt - startedAt),
       mode: options.pathMode,
+      routeGroup: options.diagnosticRouteGroup,
       allowBridge,
       planner: "astar"
     });
-    return result;
+    return acceptedResult;
   };
   debug?.emit?.({
     kind: "road:attempt",
@@ -2417,6 +2458,7 @@ const runAStar = (
     start: { ...start },
     end: end ? { ...end } : undefined,
     mode: options.pathMode,
+    routeGroup: options.diagnosticRouteGroup,
     allowBridge,
     gradeLimit,
     crossfallLimit,
@@ -2822,22 +2864,23 @@ const runAStarAsync = async (
   const attemptId = nextRoadPathDebugAttemptId++;
   const startedAt = typeof performance !== "undefined" ? performance.now() : Date.now();
   const finish = (result: RoadPathResult | null, budgetAborted: boolean, visitedNodes: number): RoadPathResult | null => {
+    const acceptedResult = rejectRoadPathForDetour(result, start, end, options);
     const endedAt = typeof performance !== "undefined" ? performance.now() : Date.now();
     debug?.emit?.({
       kind: "road:result",
       attemptId,
-      found: !!result,
+      found: !!acceptedResult,
       budgetAborted,
       visitedNodes,
-      pathLength: result?.path.length ?? 0,
-      bridgeTileIndices: result?.bridgeTileIndices ? [...result.bridgeTileIndices] : undefined,
-      path: result?.path ? result.path.map((point) => ({ ...point })) : undefined,
+      pathLength: acceptedResult?.path.length ?? 0,
+      bridgeTileIndices: acceptedResult?.bridgeTileIndices ? [...acceptedResult.bridgeTileIndices] : undefined,
       elapsedMs: Math.max(0, endedAt - startedAt),
       mode: options.pathMode,
+      routeGroup: options.diagnosticRouteGroup,
       allowBridge,
       planner: "astar"
     });
-    return result;
+    return acceptedResult;
   };
   debug?.emit?.({
     kind: "road:attempt",
@@ -2847,6 +2890,7 @@ const runAStarAsync = async (
     start: { ...start },
     end: end ? { ...end } : undefined,
     mode: options.pathMode,
+    routeGroup: options.diagnosticRouteGroup,
     allowBridge,
     gradeLimit,
     crossfallLimit,
@@ -3250,6 +3294,7 @@ const findPathWithGradeRelaxation = (
     let gradeLimit = candidate.gradeLimitStart;
     let crossfallLimit = candidate.crossfallLimitStart;
     let gradeChangeLimit = candidate.gradeChangeLimitStart;
+    let relaxationPasses = 0;
     while (true) {
       const result = candidate.useBidirectionalStreamer
         ? runBidirectionalStreamer(
@@ -3287,6 +3332,10 @@ const findPathWithGradeRelaxation = (
           );
       if (result) {
         return result;
+      }
+      relaxationPasses += 1;
+      if (candidate.maxGradeRelaxationPasses !== null && relaxationPasses >= candidate.maxGradeRelaxationPasses) {
+        return null;
       }
       const atMaxGrade = gradeLimit >= candidate.gradeLimitMax - 1e-9;
       const atMaxCrossfall = crossfallLimit >= candidate.crossfallLimitMax - 1e-9;
@@ -3342,6 +3391,7 @@ const findPathWithGradeRelaxationAsync = async (
     let gradeLimit = candidate.gradeLimitStart;
     let crossfallLimit = candidate.crossfallLimitStart;
     let gradeChangeLimit = candidate.gradeChangeLimitStart;
+    let relaxationPasses = 0;
     while (true) {
       const result = candidate.useBidirectionalStreamer
         ? runBidirectionalStreamer(
@@ -3380,6 +3430,10 @@ const findPathWithGradeRelaxationAsync = async (
           );
       if (result) {
         return result;
+      }
+      relaxationPasses += 1;
+      if (candidate.maxGradeRelaxationPasses !== null && relaxationPasses >= candidate.maxGradeRelaxationPasses) {
+        return null;
       }
       const atMaxGrade = gradeLimit >= candidate.gradeLimitMax - 1e-9;
       const atMaxCrossfall = crossfallLimit >= candidate.crossfallLimitMax - 1e-9;
@@ -3438,7 +3492,7 @@ const findRoadPathDetailed = (
   }
   roadGenerationStats.pathsAttempted += 1;
   let result: RoadPathResult | null = null;
-  if (resolved.bridgePolicy === "allow") {
+  if (resolved.bridgePolicy === "allow" && resolved.allowBridgeFirstRetry) {
     result = findPathWithGradeRelaxation(state, start, end, null, resolved, true);
     if (!result) {
       result = findPathWithGradeRelaxation(state, start, end, null, resolved, false);
@@ -3469,7 +3523,7 @@ const findRoadPathDetailedAsync = async (
   }
   roadGenerationStats.pathsAttempted += 1;
   let result: RoadPathResult | null = null;
-  if (resolved.bridgePolicy === "allow") {
+  if (resolved.bridgePolicy === "allow" && resolved.allowBridgeFirstRetry) {
     result = await findPathWithGradeRelaxationAsync(state, start, end, null, resolved, true);
     if (!result) {
       result = await findPathWithGradeRelaxationAsync(state, start, end, null, resolved, false);
@@ -3494,7 +3548,7 @@ const findRoadPathToTargetDetailed = (
   const resolved = resolveRoadPathOptions(options);
   roadGenerationStats.pathsAttempted += 1;
   let result: RoadPathResult | null = null;
-  if (resolved.bridgePolicy === "allow") {
+  if (resolved.bridgePolicy === "allow" && resolved.allowBridgeFirstRetry) {
     result = findPathWithGradeRelaxation(state, start, null, isTarget, resolved, true);
     if (!result) {
       result = findPathWithGradeRelaxation(state, start, null, isTarget, resolved, false);
@@ -3536,7 +3590,10 @@ export function carveRoadToTarget(
     return null;
   }
   const bridgeSet = new Set<number>(result.bridgeTileIndices);
-  carveRoadPath(state, rng, result.path, { allowBridgeIndices: bridgeSet });
+  carveRoadPath(state, rng, result.path, {
+    allowBridgeIndices: bridgeSet,
+    diagnosticRouteGroup: options.diagnosticRouteGroup
+  });
   return result.path[result.path.length - 1] ?? null;
 }
 
@@ -3547,6 +3604,7 @@ export function carveRoadPath(
   options: {
     allowBridgeIndices?: Set<number>;
     allowBridgeByPoint?: (point: Point) => boolean;
+    diagnosticRouteGroup?: RoadDiagnosticRouteGroup;
   } = {}
 ): boolean {
   if (path.length === 0) {
@@ -3571,6 +3629,7 @@ export function carveRoadPath(
   bumpRoadNetworkRevision(state);
   roadPathDebugHooks?.emit?.({
     kind: "road:carve",
+    routeGroup: options.diagnosticRouteGroup ?? "unknown",
     pathLength: path.length,
     bridgeTileIndices: bridgeTileIndices.length > 0 ? bridgeTileIndices : undefined,
     bounds: getPathBounds(path) ?? undefined
@@ -3599,14 +3658,21 @@ export async function carveRoadAsync(
     return false;
   }
   const bridgeSet = new Set<number>(result.bridgeTileIndices);
-  return carveRoadPath(state, rng, result.path, { allowBridgeIndices: bridgeSet });
+  return carveRoadPath(state, rng, result.path, {
+    allowBridgeIndices: bridgeSet,
+    diagnosticRouteGroup: options.diagnosticRouteGroup
+  });
 }
 
 export function carveRoadSequence(state: WorldState, rng: RNG, segments: RoadCarveSegment[]): boolean {
   if (segments.length === 0) {
     return false;
   }
-  const planned: Array<{ path: Point[]; bridgeTileIndices: number[] }> = [];
+  const planned: Array<{
+    path: Point[];
+    bridgeTileIndices: number[];
+    diagnosticRouteGroup?: RoadDiagnosticRouteGroup;
+  }> = [];
   for (let i = 0; i < segments.length; i += 1) {
     const segment = segments[i]!;
     const options = segment.options ?? {};
@@ -3617,11 +3683,18 @@ export function carveRoadSequence(state: WorldState, rng: RNG, segments: RoadCar
     if (result.path.length === 0) {
       return false;
     }
-    planned.push({ path: result.path, bridgeTileIndices: result.bridgeTileIndices });
+    planned.push({
+      path: result.path,
+      bridgeTileIndices: result.bridgeTileIndices,
+      diagnosticRouteGroup: options.diagnosticRouteGroup
+    });
   }
   for (let i = 0; i < planned.length; i += 1) {
     const result = planned[i]!;
-    carveRoadPath(state, rng, result.path, { allowBridgeIndices: new Set<number>(result.bridgeTileIndices) });
+    carveRoadPath(state, rng, result.path, {
+      allowBridgeIndices: new Set<number>(result.bridgeTileIndices),
+      diagnosticRouteGroup: result.diagnosticRouteGroup
+    });
   }
   return true;
 }
@@ -3630,7 +3703,11 @@ export async function carveRoadSequenceAsync(state: WorldState, rng: RNG, segmen
   if (segments.length === 0) {
     return false;
   }
-  const planned: Array<{ path: Point[]; bridgeTileIndices: number[] }> = [];
+  const planned: Array<{
+    path: Point[];
+    bridgeTileIndices: number[];
+    diagnosticRouteGroup?: RoadDiagnosticRouteGroup;
+  }> = [];
   for (let i = 0; i < segments.length; i += 1) {
     roadPathDebugHooks?.checkCancelled?.();
     await yieldToNextFrame();
@@ -3644,11 +3721,18 @@ export async function carveRoadSequenceAsync(state: WorldState, rng: RNG, segmen
     if (result.path.length === 0) {
       return false;
     }
-    planned.push({ path: result.path, bridgeTileIndices: result.bridgeTileIndices });
+    planned.push({
+      path: result.path,
+      bridgeTileIndices: result.bridgeTileIndices,
+      diagnosticRouteGroup: options.diagnosticRouteGroup
+    });
   }
   for (let i = 0; i < planned.length; i += 1) {
     const result = planned[i]!;
-    carveRoadPath(state, rng, result.path, { allowBridgeIndices: new Set<number>(result.bridgeTileIndices) });
+    carveRoadPath(state, rng, result.path, {
+      allowBridgeIndices: new Set<number>(result.bridgeTileIndices),
+      diagnosticRouteGroup: result.diagnosticRouteGroup
+    });
   }
   return true;
 }
@@ -3673,7 +3757,10 @@ export function carveRoadDetailed(
     };
   }
   const bridgeSet = new Set<number>(result.bridgeTileIndices);
-  const carved = carveRoadPath(state, rng, result.path, { allowBridgeIndices: bridgeSet });
+  const carved = carveRoadPath(state, rng, result.path, {
+    allowBridgeIndices: bridgeSet,
+    diagnosticRouteGroup: options.diagnosticRouteGroup
+  });
   return {
     carved,
     bounds: carved ? getPathBounds(result.path) : null,
@@ -3706,7 +3793,10 @@ export async function carveRoadDetailedAsync(
     };
   }
   const bridgeSet = new Set<number>(result.bridgeTileIndices);
-  const carved = carveRoadPath(state, rng, result.path, { allowBridgeIndices: bridgeSet });
+  const carved = carveRoadPath(state, rng, result.path, {
+    allowBridgeIndices: bridgeSet,
+    diagnosticRouteGroup: options.diagnosticRouteGroup
+  });
   return {
     carved,
     bounds: carved ? getPathBounds(result.path) : null,

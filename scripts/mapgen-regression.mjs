@@ -1910,6 +1910,53 @@ const collectRoadPoints = (state) => {
   return points;
 };
 
+const collectRoadPathFromEdges = (state, start, end) => {
+  const cols = state.grid.cols;
+  const startIdx = start.y * cols + start.x;
+  const endIdx = end.y * cols + end.x;
+  const previous = new Int32Array(state.grid.totalTiles);
+  previous.fill(-1);
+  const queue = [startIdx];
+  previous[startIdx] = startIdx;
+  for (let head = 0; head < queue.length; head += 1) {
+    const idx = queue[head];
+    if (idx === endIdx) {
+      break;
+    }
+    const mask = state.tileRoadEdges[idx] ?? 0;
+    const x = idx % cols;
+    const y = Math.floor(idx / cols);
+    for (const dir of ROAD_EDGE_DIRS) {
+      if ((mask & dir.bit) === 0) {
+        continue;
+      }
+      const nx = x + dir.dx;
+      const ny = y + dir.dy;
+      if (nx < 0 || nx >= cols || ny < 0 || ny >= state.grid.rows) {
+        continue;
+      }
+      const nextIdx = ny * cols + nx;
+      if (previous[nextIdx] >= 0) {
+        continue;
+      }
+      previous[nextIdx] = idx;
+      queue.push(nextIdx);
+    }
+  }
+  if (previous[endIdx] < 0) {
+    return [];
+  }
+  const path = [];
+  let current = endIdx;
+  while (current !== startIdx) {
+    path.push({ x: current % cols, y: Math.floor(current / cols) });
+    current = previous[current];
+  }
+  path.push(start);
+  path.reverse();
+  return path;
+};
+
 const runSyntheticSwitchbackCase = () => {
   const grid = { cols: 54, rows: 36, totalTiles: 54 * 36 };
   const state = createInitialState(515151, grid);
@@ -2365,7 +2412,7 @@ const runSyntheticDijkstraExistingRoadPreferenceCase = (seed = 777777) => {
     )
   );
   const result = latestDijkstraResult(events);
-  const path = result?.path ?? [];
+  const path = collectRoadPathFromEdges(state, { x: 2, y: 6 }, { x: 29, y: 6 });
   const existingRoadSteps = path.filter((point) => point.y === 6 && point.x >= 5 && point.x <= 25).length;
   const pathSignature = path.map((point) => `${point.x},${point.y}`).join("|");
   return {

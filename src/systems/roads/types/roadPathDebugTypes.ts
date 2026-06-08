@@ -1,5 +1,6 @@
 import type { Point } from "../../../core/types.js";
 import type { SettlementRoadPathMode } from "../../settlements/types/settlementTypes.js";
+import type { RoadDiagnosticRouteGroup } from "./roadDiagnosticTuning.js";
 import type { RoadPathPlannerFailureReason } from "./roadPathPlannerTypes.js";
 
 export type RoadPathDebugAttemptKind = "point" | "target" | "sequence";
@@ -15,6 +16,7 @@ export type RoadPathDebugAttemptEvent = {
   destinationSeedCount?: number;
   joinRadius?: number;
   mode: SettlementRoadPathMode;
+  routeGroup: RoadDiagnosticRouteGroup;
   allowBridge: boolean;
   gradeLimit: number;
   crossfallLimit: number;
@@ -40,7 +42,6 @@ export type RoadPathDebugResultEvent = {
   visitedNodes: number;
   pathLength: number;
   bridgeTileIndices?: number[];
-  path?: Point[];
   selectedDestinationSeed?: Point;
   selectedDestinationSeedKind?: string;
   selectedDestinationSeedLabel?: string;
@@ -48,6 +49,7 @@ export type RoadPathDebugResultEvent = {
   failureReason?: RoadPathPlannerFailureReason;
   elapsedMs: number;
   mode: SettlementRoadPathMode;
+  routeGroup: RoadDiagnosticRouteGroup;
   allowBridge: boolean;
   planner?: RoadPathDebugPlannerKind;
   joined?: boolean;
@@ -55,6 +57,7 @@ export type RoadPathDebugResultEvent = {
 
 export type RoadPathDebugCarveEvent = {
   kind: "road:carve";
+  routeGroup: RoadDiagnosticRouteGroup;
   pathLength: number;
   bridgeTileIndices?: number[];
   bounds?: {

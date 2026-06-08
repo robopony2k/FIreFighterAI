@@ -1,5 +1,6 @@
 import type { MapGenContext } from "./pipeline/MapGenContext.js";
 import type { RoadPathDebugEvent } from "../systems/roads/types/roadPathDebugTypes.js";
+import type { RoadDiagnosticTuning } from "../systems/roads/types/roadDiagnosticTuning.js";
 import type { StaticHydrologyDebugEvent } from "../systems/terrain/types/staticHydrologyTypes.js";
 
 export type MapGenReporter = (message: string, progress: number) => void | Promise<void>;
@@ -70,6 +71,7 @@ export type MapGenDebug = {
   onPhase: (snapshot: MapGenDebugSnapshot) => void | Promise<void>;
   onStageTiming?: (timing: MapGenStageTiming) => void | Promise<void>;
   onDiagnosticEvent?: (event: MapGenDiagnosticEvent) => void | Promise<void>;
+  roadTuning?: RoadDiagnosticTuning;
   waitForStep?: () => Promise<void>;
   shouldCancel?: () => boolean;
   stopAfterPhase?: MapGenDebugPhase;
