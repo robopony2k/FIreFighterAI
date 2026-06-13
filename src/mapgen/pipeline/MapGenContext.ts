@@ -7,7 +7,12 @@ import { mapSizeIdFromDimensions, resolveTerrainProfile, type ResolvedTerrainPro
 import { DirtyRegionTracker } from "./DirtyRegionTracker.js";
 import { MapGenCancelledError } from "./yieldController.js";
 import type { SettlementPlacementResult } from "../communities.js";
-import type { StaticHydrologyLake, StaticHydrologyRejectSummary, StaticHydrologyWaterfall } from "../../systems/terrain/types/staticHydrologyTypes.js";
+import type {
+  StaticHydrologyFeatureCounts,
+  StaticHydrologyLake,
+  StaticHydrologyRejectSummary,
+  StaticHydrologyWaterfall
+} from "../../systems/terrain/types/staticHydrologyTypes.js";
 
 export type SettlementStageData = {
   typeBefore: Uint8Array;
@@ -70,6 +75,8 @@ export class MapGenContext {
   waterfallSourceMask: Uint8Array | null = null;
   waterfallTargetMap: Int32Array | null = null;
   waterfallDropMap: Float32Array | null = null;
+  hydrologyFeatureClass: Uint8Array | null = null;
+  hydrologyFeatureCounts: StaticHydrologyFeatureCounts | null = null;
   staticHydrologyLakes: StaticHydrologyLake[] = [];
   staticHydrologyWaterfalls: StaticHydrologyWaterfall[] = [];
   staticHydrologyRejectedLakeCandidates: StaticHydrologyRejectSummary = {};

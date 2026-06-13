@@ -24,6 +24,34 @@ export type StaticHydrologyWaterfall = {
   lakeId: number;
 };
 
+export type StaticHydrologyOverflowFailureReason =
+  | "invalid-start"
+  | "cycle"
+  | "dead-end"
+  | "max-steps"
+  | "source-lake-lap";
+
+export type StaticHydrologyWaterfallRejectReason =
+  | "coast-proximity"
+  | "drop-small"
+  | "flow-small"
+  | "spacing"
+  | "max-count";
+
+export type StaticHydrologyFeatureClass =
+  | "none"
+  | "sheet-flow"
+  | "channel"
+  | "river"
+  | "lake"
+  | "lake-outlet"
+  | "waterfall-lip"
+  | "waterfall-runout"
+  | "river-mouth"
+  | "failed-overflow";
+
+export type StaticHydrologyFeatureCounts = Record<StaticHydrologyFeatureClass, number>;
+
 export type StaticHydrologyRejectReason =
   | "ocean-proximity"
   | "elevation-range"
@@ -74,12 +102,23 @@ export type StaticHydrologyDebugOverflowEvent = {
   reachedLakeId: number;
   reachedOcean: boolean;
   reachedExistingRiver: boolean;
+  terminalReached: boolean;
+  failureReason?: StaticHydrologyOverflowFailureReason;
 };
 
 export type StaticHydrologyDebugWaterfallEvent = {
   kind: "hydrology:waterfall";
   accepted: boolean;
   waterfall: StaticHydrologyWaterfall;
+  reason?: StaticHydrologyWaterfallRejectReason;
+};
+
+export type StaticHydrologyDebugClassificationEvent = {
+  kind: "hydrology:classification";
+  counts: StaticHydrologyFeatureCounts;
+  terminalRoutes: number;
+  failedRoutes: number;
+  waterfallCandidates: number;
 };
 
 export type StaticHydrologyDebugEvent =
@@ -87,7 +126,8 @@ export type StaticHydrologyDebugEvent =
   | StaticHydrologyDebugRejectEvent
   | StaticHydrologyDebugLakeEvent
   | StaticHydrologyDebugOverflowEvent
-  | StaticHydrologyDebugWaterfallEvent;
+  | StaticHydrologyDebugWaterfallEvent
+  | StaticHydrologyDebugClassificationEvent;
 
 export type StaticHydrologyDebugHooks = {
   emit?: (event: StaticHydrologyDebugEvent) => void | Promise<void>;
@@ -110,6 +150,8 @@ export type StaticHydrologyResult = StaticHydrologyFields & {
   waterfallSourceMask: Uint8Array;
   waterfallTarget: Int32Array;
   waterfallDrop: Float32Array;
+  hydrologyFeatureClass: Uint8Array;
+  hydrologyFeatureCounts: StaticHydrologyFeatureCounts;
   lakes: StaticHydrologyLake[];
   waterfalls: StaticHydrologyWaterfall[];
   rejectedLakeCandidates: StaticHydrologyRejectSummary;

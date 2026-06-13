@@ -39,7 +39,8 @@ export const emitStageSnapshot = async (ctx: MapGenContext, phase: MapGenDebugPh
     riverLakeExitMask: ctx.riverLakeExitMask ? Uint8Array.from(ctx.riverLakeExitMask) : undefined,
     waterfallSourceMask: ctx.waterfallSourceMask ? Uint8Array.from(ctx.waterfallSourceMask) : undefined,
     waterfallTarget: ctx.waterfallTargetMap ? Int32Array.from(ctx.waterfallTargetMap) : undefined,
-    waterfallDrop: ctx.waterfallDropMap ? Float32Array.from(ctx.waterfallDropMap) : undefined
+    waterfallDrop: ctx.waterfallDropMap ? Float32Array.from(ctx.waterfallDropMap) : undefined,
+    hydrologyFeatureClass: ctx.hydrologyFeatureClass ? Uint8Array.from(ctx.hydrologyFeatureClass) : undefined
   });
   if (ctx.debug.waitForStep) {
     await ctx.debug.waitForStep();

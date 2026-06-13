@@ -195,6 +195,8 @@ export const createTerrainPreviewController = (canvas: HTMLCanvasElement): Terra
   let lastHoverTileKey = "";
   let running = false;
   let rafId = 0;
+  let resizeObserver: ResizeObserver | null = null;
+  let resizeRafId = 0;
   let lastFrameTime = performance.now();
   const raycaster = new THREE.Raycaster();
   const pointerNdc = new THREE.Vector2();
@@ -360,6 +362,23 @@ export const createTerrainPreviewController = (canvas: HTMLCanvasElement): Terra
     seasonalSky.syncToCamera(camera);
   };
 
+  const scheduleResize = (): void => {
+    if (resizeRafId !== 0) {
+      return;
+    }
+    resizeRafId = window.requestAnimationFrame(() => {
+      resizeRafId = 0;
+      resize();
+    });
+  };
+
+  if (typeof ResizeObserver !== "undefined") {
+    resizeObserver = new ResizeObserver(() => scheduleResize());
+    resizeObserver.observe(canvas);
+  } else {
+    window.addEventListener("resize", scheduleResize);
+  }
+
   const prepareAssets = async (
     onProgress?: (progress: TerrainPreviewAssetProgress) => void
   ): Promise<void> => {
@@ -505,6 +524,16 @@ export const createTerrainPreviewController = (canvas: HTMLCanvasElement): Terra
 
   const dispose = (): void => {
     stop();
+    if (resizeObserver) {
+      resizeObserver.disconnect();
+      resizeObserver = null;
+    } else {
+      window.removeEventListener("resize", scheduleResize);
+    }
+    if (resizeRafId !== 0) {
+      window.cancelAnimationFrame(resizeRafId);
+      resizeRafId = 0;
+    }
     canvas.removeEventListener("click", handleCanvasClick);
     canvas.removeEventListener("mousemove", handleCanvasPointerMove);
     canvas.removeEventListener("mouseleave", handleCanvasPointerLeave);

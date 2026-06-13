@@ -1500,9 +1500,11 @@ export const initMapEditor = (refs: MapEditorRefs, deps: MapEditorDeps): MapEdit
       case "hydrology:lake":
         return `lake #${event.lake.id} tiles=${event.lake.tiles.length} depth=${event.lake.maxDepth.toFixed(3)} outlet=${event.lake.outletIndex}->${event.lake.outletTargetIndex}`;
       case "hydrology:overflow":
-        return `overflow lake=${event.lakeId} len=${event.tiles.length} target=${event.outletTargetIndex} ocean=${event.reachedOcean} river=${event.reachedExistingRiver} lake=${event.reachedLakeId}`;
+        return `overflow lake=${event.lakeId} len=${event.tiles.length} target=${event.outletTargetIndex} terminal=${event.terminalReached} reason=${event.failureReason ?? "-"} ocean=${event.reachedOcean} river=${event.reachedExistingRiver} lake=${event.reachedLakeId}`;
       case "hydrology:waterfall":
-        return `waterfall ${event.accepted ? "accepted" : "rejected"} source=${event.waterfall.sourceIndex} target=${event.waterfall.targetIndex} drop=${event.waterfall.drop.toFixed(3)} lake=${event.waterfall.lakeId}`;
+        return `waterfall ${event.accepted ? "accepted" : `rejected:${event.reason ?? "unknown"}`} source=${event.waterfall.sourceIndex} target=${event.waterfall.targetIndex} drop=${event.waterfall.drop.toFixed(3)} flow=${event.waterfall.flowScore.toFixed(3)} lake=${event.waterfall.lakeId}`;
+      case "hydrology:classification":
+        return `classification routes=${event.terminalRoutes}/${event.terminalRoutes + event.failedRoutes} failed=${event.failedRoutes} falls=${event.waterfallCandidates} river=${event.counts.river} channel=${event.counts.channel} lip=${event.counts["waterfall-lip"]} runout=${event.counts["waterfall-runout"]} failedTiles=${event.counts["failed-overflow"]}`;
       case "road:attempt":
         return `${event.routeGroup} ${event.planner === "streamer" ? "streamer" : "A*"} search #${event.attemptId} ${event.mode} bridge=${event.allowBridge} ${event.start.x},${event.start.y}${event.end ? ` -> ${event.end.x},${event.end.y}` : " -> target"}${event.destinationSeedCount ? ` seeds=${event.destinationSeedCount}` : ""}${event.joinRadius ? ` join<=${event.joinRadius}` : ""} limits=${event.gradeLimit.toFixed(3)}/${event.crossfallLimit.toFixed(3)}/${event.gradeChangeLimit.toFixed(3)}`;
       case "road:progress":

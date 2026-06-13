@@ -49,6 +49,7 @@ export type MapGenDebugSnapshot = {
   waterfallSourceMask?: Uint8Array;
   waterfallTarget?: Int32Array;
   waterfallDrop?: Float32Array;
+  hydrologyFeatureClass?: Uint8Array;
 };
 
 export type MapGenStageTiming = {

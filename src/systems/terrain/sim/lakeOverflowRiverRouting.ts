@@ -1,4 +1,8 @@
-import type { StaticHydrologyDebugHooks, StaticHydrologyLake } from "../types/staticHydrologyTypes.js";
+import type {
+  StaticHydrologyDebugHooks,
+  StaticHydrologyLake,
+  StaticHydrologyOverflowFailureReason
+} from "../types/staticHydrologyTypes.js";
 
 const NEIGHBORS_4 = [
   { dx: -1, dy: 0 },
@@ -10,6 +14,7 @@ const NEIGHBORS_4 = [
 const DIRECT_DROP_MIN = 0.01;
 const FLAT_STEP_EPSILON = 0.0015;
 const SOURCE_LAKE_ESCAPE_GRACE_TILES = 1;
+const MAX_SOURCE_LAKE_ADJACENT_ROUTE_TILES = 2;
 
 export type LakeOverflowRiverPath = {
   lakeId: number;
@@ -18,6 +23,8 @@ export type LakeOverflowRiverPath = {
   reachedLakeId: number;
   reachedOcean: boolean;
   reachedExistingRiver: boolean;
+  terminalReached: boolean;
+  failureReason?: StaticHydrologyOverflowFailureReason;
 };
 
 export type LakeOverflowRiverRoutingInput = {
@@ -203,6 +210,8 @@ const buildLakeOverflowPath = async (
   let reachedLakeId = 0;
   let reachedOcean = false;
   let reachedExistingRiver = false;
+  let failureReason: StaticHydrologyOverflowFailureReason | undefined;
+  let sourceLakeAdjacentTiles = 0;
 
   for (let step = 0; step < maxSteps; step += 1) {
     input.debug?.checkCancelled?.();
@@ -210,7 +219,12 @@ const buildLakeOverflowPath = async (
       await input.debug?.yieldIfNeeded?.();
       input.debug?.checkCancelled?.();
     }
-    if (current < 0 || current >= total || visited[current] > 0) {
+    if (current < 0 || current >= total) {
+      failureReason = "invalid-start";
+      break;
+    }
+    if (visited[current] > 0) {
+      failureReason = "cycle";
       break;
     }
     visited[current] = 1;
@@ -231,20 +245,34 @@ const buildLakeOverflowPath = async (
     }
 
     tiles.push(current);
+    if (isAdjacentToLake(current, lake.id, input)) {
+      sourceLakeAdjacentTiles += 1;
+      if (sourceLakeAdjacentTiles > MAX_SOURCE_LAKE_ADJACENT_ROUTE_TILES) {
+        failureReason = "source-lake-lap";
+        break;
+      }
+    }
     const next = chooseNextRouteCandidate(current, lake, tiles.length, visited, input);
     if (next < 0) {
+      failureReason = "dead-end";
       break;
     }
     current = next;
   }
 
+  const terminalReached = reachedOcean || reachedLakeId > 0 || reachedExistingRiver;
+  if (!terminalReached && !failureReason) {
+    failureReason = "max-steps";
+  }
   const result = {
     lakeId: lake.id,
     outletTargetIndex: lake.outletTargetIndex,
     tiles,
     reachedLakeId,
     reachedOcean,
-    reachedExistingRiver
+    reachedExistingRiver,
+    terminalReached,
+    failureReason
   };
   await input.debug?.emit?.({
     kind: "hydrology:overflow",
@@ -253,7 +281,9 @@ const buildLakeOverflowPath = async (
     tiles: [...result.tiles],
     reachedLakeId: result.reachedLakeId,
     reachedOcean: result.reachedOcean,
-    reachedExistingRiver: result.reachedExistingRiver
+    reachedExistingRiver: result.reachedExistingRiver,
+    terminalReached: result.terminalReached,
+    failureReason: result.failureReason
   });
   return result;
 };
