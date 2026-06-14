@@ -448,7 +448,7 @@ const runPrecomputedGrowthPlanDeterminismCase = () => {
   };
 };
 
-const runPrecomputedGrowthTerrainBakeCase = () => {
+const runPrecomputedGrowthIsolationCase = () => {
   const state = buildExpansionReadyWorld(7626);
   for (let idx = 0; idx < state.tiles.length; idx += 1) {
     const x = idx % state.grid.cols;
@@ -458,25 +458,43 @@ const runPrecomputedGrowthTerrainBakeCase = () => {
     }
   }
   syncTileSoA(state);
+  const roadSignatureBefore = collectRoadTiles(state)
+    .map((point) => `${point.x},${point.y}`)
+    .sort()
+    .join("|");
+  const elevationBefore = Array.from(state.tileElevation);
   const plan = createPrecomputedSettlementGrowthPlan(state, createRuntimeSettlementRoadAdapter(), 5);
   const terrainEntry = plan.entries.find((entry) => entry.terrainEdits.length > 0);
   assert.ok(terrainEntry, "precomputed growth plan should record future plot terrain edits");
+  assert.equal(
+    collectRoadTiles(state)
+      .map((point) => `${point.x},${point.y}`)
+      .sort()
+      .join("|"),
+    roadSignatureBefore,
+    "precomputed growth plan should not expose future roads on the live map"
+  );
   const finalEditsByIndex = new Map();
   for (const entry of plan.entries) {
     for (const edit of entry.terrainEdits) {
       finalEditsByIndex.set(edit.index, edit.elevation);
     }
   }
-  for (const [index, elevation] of finalEditsByIndex) {
+  for (const [index] of finalEditsByIndex) {
     assert.ok(
-      Math.abs(state.tiles[index].elevation - elevation) <= 1e-6,
-      "final future plot terrain edits should be baked into day-1 terrain"
+      Math.abs(state.tiles[index].elevation - elevationBefore[index]) <= 1e-6,
+      "precomputed growth plan should not expose future plot terrain on the live map"
+    );
+    assert.equal(
+      state.tileElevation[index],
+      elevationBefore[index],
+      "precomputed growth plan should not expose future plot elevation in tile SoA"
     );
   }
   assert.notEqual(
     state.tiles[terrainEntry.anchorIndex].type,
     "house",
-    "future queued house should not be placed during terrain pre-bake"
+    "future queued house should not be placed during precompute"
   );
   assert.equal(state.tileStructure[terrainEntry.anchorIndex], 0, "future queued house should not reserve a structure anchor");
 
@@ -1019,7 +1037,7 @@ const recovery = runRecoveryPriorityCase();
 const idle = runIdleRevisionCase();
 const bulkParity = runBulkSchedulerParityCase();
 const precomputedPlan = runPrecomputedGrowthPlanDeterminismCase();
-const precomputedTerrain = runPrecomputedGrowthTerrainBakeCase();
+const precomputedIsolation = runPrecomputedGrowthIsolationCase();
 const precomputedConsumption = runPrecomputedGrowthConsumptionCase();
 const lowApprovalGate = runLowApprovalGateCase();
 const invalidPlanSkip = runInvalidPlannedEntrySkipCase();
@@ -1043,7 +1061,7 @@ console.log(
     `idleRevision=${idle.startRevision}->${idle.endRevision}`,
     `bulkParity=${bulkParity.houses}/${bulkParity.lots}`,
     `planEntries=${precomputedPlan.entries}`,
-    `planTerrainEdits=${precomputedTerrain.edits}`,
+    `planHiddenEdits=${precomputedIsolation.edits}`,
     `planConsumed=${precomputedConsumption.consumed}`,
     `approvalGate=${lowApprovalGate.consumed}`,
     `planSkip=${invalidPlanSkip.skipped}`,

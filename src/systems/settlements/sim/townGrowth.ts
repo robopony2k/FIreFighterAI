@@ -2166,7 +2166,6 @@ export const createPrecomputedSettlementGrowthPlan = (
           continue;
         }
         updateTownEnvelope(planningState, town);
-        applySettlementGrowthTerrainEdits(state, reservation.terrainEdits, { mutateTerrain: true });
         plan.entries.push({
           townId: town.id,
           anchorIndex: reservation.anchorIndex,
