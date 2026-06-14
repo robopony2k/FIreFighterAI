@@ -42,25 +42,33 @@ export const createFireFxVisibilityContext = (
   const frustum = new THREE.Frustum().setFromProjectionMatrix(viewProjection);
   const sphere = new THREE.Sphere();
   const center = new THREE.Vector3();
+  const cameraPosition = new THREE.Vector3();
+  camera.getWorldPosition(cameraPosition);
   const stats = createFireFxVisibilityStats();
-  const tileRadius = Math.max(tileSpan * 3.2, heightScale * 0.08);
-  const tileCenterY = Math.max(tileSpan * 0.7, heightScale * 0.16);
+  const tileRadius = Math.max(tileSpan * 6.5, heightScale * 0.32);
+  const tileCenterY = Math.max(tileSpan * 1.3, heightScale * 0.38);
+  const nearCameraCullBypassDistance = Math.max(tileSpan * 18, heightScale * 0.75);
+
+  const intersectsExpandedSphere = (x: number, y: number, z: number, radius: number): boolean => {
+    center.set(x, y, z);
+    const safeRadius = Math.max(tileSpan * 2.5, radius);
+    if (center.distanceTo(cameraPosition) <= safeRadius + nearCameraCullBypassDistance) {
+      return true;
+    }
+    sphere.center.copy(center);
+    sphere.radius = safeRadius;
+    return frustum.intersectsSphere(sphere);
+  };
 
   return {
     stats,
     isSphereVisible: (x: number, y: number, z: number, radius: number): boolean => {
-      center.set(x, y, z);
-      sphere.center.copy(center);
-      sphere.radius = Math.max(tileSpan * 1.5, radius);
-      return frustum.intersectsSphere(sphere);
+      return intersectsExpandedSphere(x, y, z, radius + tileSpan * 4);
     },
     isTileVisible: (tileX: number, tileY: number, radiusScale = 1): boolean => {
       const x = ((tileX + 0.5) / Math.max(1, cols) - 0.5) * terrainSize.width;
       const z = ((tileY + 0.5) / Math.max(1, rows) - 0.5) * terrainSize.depth;
-      center.set(x, tileCenterY, z);
-      sphere.center.copy(center);
-      sphere.radius = tileRadius * Math.max(1, radiusScale);
-      return frustum.intersectsSphere(sphere);
+      return intersectsExpandedSphere(x, tileCenterY, z, tileRadius * Math.max(1, radiusScale));
     }
   };
 };
