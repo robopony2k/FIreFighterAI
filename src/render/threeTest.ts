@@ -22,6 +22,10 @@ import { generateWorldClimateSeed } from "../systems/climate/sim/worldClimateSee
 import type { SeasonalRainState } from "../systems/climate/types/seasonalRain.js";
 import { resolveSeasonalRainScreenWind } from "../systems/climate/rendering/seasonalRainOverlayPass.js";
 import { buildTerrainWindOverlaySamples } from "../systems/fire/rendering/terrainWindOverlay.js";
+import {
+  TerrainShadowBlendController,
+  type TerrainShadowLightSlot
+} from "../systems/terrain/rendering/terrainShadowBlendController.js";
 import { createVehicleModelLayer, type VehicleModelInstance } from "./vehicleModelLayer.js";
 import type { InputState } from "../core/inputState.js";
 import { indexFor } from "../core/grid.js";
@@ -317,11 +321,11 @@ const THREE_TEST_SHADOW_VIEW_PADDING = 1.08;
 const THREE_TEST_SHADOW_HEIGHT_PADDING = 1.28;
 const THREE_TEST_SHADOW_MIN_EXTENT = 12;
 const THREE_TEST_SHADOW_MAX_TERRAIN_RATIO = 0.45;
-const THREE_TEST_SHADOW_TARGET_EPSILON = 0.2;
 const THREE_TEST_SHADOW_EXTENT_EPSILON = 0.35;
 const THREE_TEST_SHADOW_FAR_EPSILON = 1;
-const THREE_TEST_SHADOW_AZIMUTH_EPSILON_DEG = 0.25;
-const THREE_TEST_SHADOW_ELEVATION_EPSILON_DEG = 0.5;
+const THREE_TEST_SHADOW_DIRECTION_STEP_DEG = 0.65;
+const THREE_TEST_SHADOW_BLEND_DURATION_MS = 760;
+const THREE_TEST_SHADOW_LIGHT_SHARE = 0.72;
 const THREE_TEST_LEGACY_EXPOSURE = 1.05;
 const THREE_TEST_CINEMATIC_GRADE_CONFIG: ThreeTestCinematicLookConfig = {
   exposure: 0.94,
@@ -463,15 +467,6 @@ const wrap01 = (value: number): number => {
   const wrapped = value % 1;
   return wrapped < 0 ? wrapped + 1 : wrapped;
 };
-const shortestAngleDeltaDeg = (fromDeg: number, toDeg: number): number => {
-  let delta = (toDeg - fromDeg) % 360;
-  if (delta > 180) {
-    delta -= 360;
-  } else if (delta < -180) {
-    delta += 360;
-  }
-  return delta;
-};
 const formatDebugNumber = (value: number, digits = 2): string =>
   Number.isFinite(value) ? value.toFixed(digits) : "n/a";
 const lerpWrapped01 = (current: number, target: number, alpha: number): number => {
@@ -609,17 +604,29 @@ export const createThreeTest = (
   scene.add(ambient);
   const keyLight = new THREE.DirectionalLight(0xffe6c2, 0.95);
   keyLight.position.set(4, 5, 2);
-  keyLight.castShadow = THREE_TEST_SHADOWS_ENABLED;
-  keyLight.shadow.mapSize.width = THREE_TEST_SHADOW_MAP_SIZE;
-  keyLight.shadow.mapSize.height = THREE_TEST_SHADOW_MAP_SIZE;
-  keyLight.shadow.bias = -0.00035;
-  keyLight.shadow.normalBias = 0.02;
-  keyLight.shadow.intensity = 1;
+  keyLight.castShadow = false;
   scene.add(keyLight);
+  const createShadowBlendLight = (): THREE.DirectionalLight => {
+    const light = new THREE.DirectionalLight(0xffe6c2, 0);
+    light.castShadow = THREE_TEST_SHADOWS_ENABLED;
+    light.shadow.mapSize.width = THREE_TEST_SHADOW_MAP_SIZE;
+    light.shadow.mapSize.height = THREE_TEST_SHADOW_MAP_SIZE;
+    light.shadow.bias = -0.00035;
+    light.shadow.normalBias = 0.02;
+    light.shadow.intensity = 1;
+    light.shadow.autoUpdate = false;
+    return light;
+  };
+  const previousShadowLight = createShadowBlendLight();
+  const nextShadowLight = createShadowBlendLight();
+  scene.add(previousShadowLight);
+  scene.add(nextShadowLight);
   const fillLight = new THREE.DirectionalLight(0x88a9c9, 0.35);
   fillLight.position.set(-4, 2.5, -2);
   scene.add(fillLight);
   scene.add(keyLight.target);
+  scene.add(previousShadowLight.target);
+  scene.add(nextShadowLight.target);
   scene.add(fillLight.target);
 
   const controls = new OrbitControls(camera, renderer.domElement);
@@ -5110,20 +5117,17 @@ export const createThreeTest = (
   let lastEnvironmentApplied: EnvironmentSignalState | null = null;
   let currentEnvironmentPalette = buildEnvironmentPalette(environmentCurrent);
   let lastLightingApplied: LightingDirectorState | null = null;
-  let shadowRefreshPending = true;
-  let lastShadowRefreshAt = -Infinity;
-  let lastShadowAzimuthDeg = Number.NaN;
-  let lastShadowElevationDeg = Number.NaN;
-  let lastShadowCameraInteracting = false;
-  const lastShadowFocusPoint = new THREE.Vector3(Number.NaN, Number.NaN, Number.NaN);
-  const shadowSnapFocusPoint = new THREE.Vector3();
-  const shadowSnapAxisX = new THREE.Vector3();
-  const shadowSnapAxisY = new THREE.Vector3();
-  const shadowSnapAxisZ = new THREE.Vector3();
-  const shadowSnapUp = new THREE.Vector3(0, 1, 0);
-  const shadowSnapFallbackUp = new THREE.Vector3(1, 0, 0);
-  let lastShadowExtent = Number.NaN;
-  let lastShadowFar = Number.NaN;
+  const shadowBlendController = new TerrainShadowBlendController({
+    mapSize: THREE_TEST_SHADOW_MAP_SIZE,
+    viewPadding: THREE_TEST_SHADOW_VIEW_PADDING,
+    heightPadding: THREE_TEST_SHADOW_HEIGHT_PADDING,
+    minExtent: THREE_TEST_SHADOW_MIN_EXTENT,
+    maxTerrainRatio: THREE_TEST_SHADOW_MAX_TERRAIN_RATIO,
+    extentEpsilon: THREE_TEST_SHADOW_EXTENT_EPSILON,
+    farEpsilon: THREE_TEST_SHADOW_FAR_EPSILON,
+    directionStepDeg: THREE_TEST_SHADOW_DIRECTION_STEP_DEG,
+    blendDurationMs: THREE_TEST_SHADOW_BLEND_DURATION_MS
+  });
   const glareProjection = new THREE.Vector3();
   const glareForward = new THREE.Vector3();
   const getCurrentLightingInput = (): LightingDirectorInput => {
@@ -5246,67 +5250,19 @@ export const createThreeTest = (
     syncFogState(lastLightingApplied);
   };
   const getEnvironmentFogEnabled = (): boolean => environmentFogEnabled;
+  let resolveCameraInteracting = (): boolean => false;
   const requestShadowRefresh = (): void => {
-    shadowRefreshPending = true;
+    shadowBlendController.requestRefresh();
   };
-  const getLightDistance = (): number => {
-    const terrainSpan = lastTerrainSize ? Math.max(lastTerrainSize.width, lastTerrainSize.depth) : 12;
-    const cameraDistance = camera.position.distanceTo(controls.target);
-    return Math.max(18, Math.min(terrainSpan * 0.85, Math.max(terrainSpan * 0.4, cameraDistance * 1.9)));
-  };
-  const getShadowExtent = (): number => {
-    const terrainSpan = lastTerrainSize ? Math.max(lastTerrainSize.width, lastTerrainSize.depth) : 12;
-    const cameraDistance = Math.max(1, camera.position.distanceTo(controls.target));
-    const halfFovRadians = THREE.MathUtils.degToRad(camera.fov * 0.5);
-    const visibleHalfHeight = Math.tan(halfFovRadians) * cameraDistance;
-    const visibleHalfWidth = visibleHalfHeight * Math.max(1, camera.aspect);
-    const focusExtent = Math.max(
-      terrainSpan * 0.1,
-      visibleHalfWidth * THREE_TEST_SHADOW_VIEW_PADDING,
-      visibleHalfHeight * THREE_TEST_SHADOW_HEIGHT_PADDING
-    );
-    return Math.max(
-      THREE_TEST_SHADOW_MIN_EXTENT,
-      Math.min(Math.max(THREE_TEST_SHADOW_MIN_EXTENT, terrainSpan * THREE_TEST_SHADOW_MAX_TERRAIN_RATIO), focusExtent)
-    );
-  };
-  const getSnappedShadowFocusPoint = (
-    focusPoint: THREE.Vector3,
-    sunDirection: THREE.Vector3,
-    shadowExtent: number
-  ): THREE.Vector3 => {
-    const texelWorldSize = (shadowExtent * 2) / THREE_TEST_SHADOW_MAP_SIZE;
-    if (!Number.isFinite(texelWorldSize) || texelWorldSize <= 0) {
-      return shadowSnapFocusPoint.copy(focusPoint);
-    }
-    shadowSnapAxisZ.copy(sunDirection).normalize();
-    const up = Math.abs(shadowSnapAxisZ.y) > 0.98 ? shadowSnapFallbackUp : shadowSnapUp;
-    shadowSnapAxisX.crossVectors(up, shadowSnapAxisZ);
-    if (shadowSnapAxisX.lengthSq() <= 1e-8) {
-      shadowSnapAxisX.crossVectors(shadowSnapFallbackUp, shadowSnapAxisZ);
-    }
-    shadowSnapAxisX.normalize();
-    shadowSnapAxisY.crossVectors(shadowSnapAxisZ, shadowSnapAxisX).normalize();
-    const lightSpaceX = focusPoint.dot(shadowSnapAxisX);
-    const lightSpaceY = focusPoint.dot(shadowSnapAxisY);
-    const snappedLightSpaceX = Math.round(lightSpaceX / texelWorldSize) * texelWorldSize;
-    const snappedLightSpaceY = Math.round(lightSpaceY / texelWorldSize) * texelWorldSize;
-    return shadowSnapFocusPoint
-      .copy(focusPoint)
-      .addScaledVector(shadowSnapAxisX, snappedLightSpaceX - lightSpaceX)
-      .addScaledVector(shadowSnapAxisY, snappedLightSpaceY - lightSpaceY);
-  };
-  const syncDirectionalLightRig = (lighting: LightingDirectorState): void => {
-    const focusPoint = controls.target;
-    const shadowExtent = getShadowExtent();
-    const lightDistance = Math.max(getLightDistance(), shadowExtent * 1.8);
-    const shadowFocusPoint = getSnappedShadowFocusPoint(focusPoint, lighting.sunDirection, shadowExtent);
-    keyLight.position.copy(shadowFocusPoint).addScaledVector(lighting.sunDirection, lightDistance);
-    keyLight.target.position.copy(shadowFocusPoint);
-    fillLight.position.copy(focusPoint).addScaledVector(lighting.fillDirection, lightDistance * 0.72);
-    fillLight.target.position.copy(focusPoint);
-    const shadowCam = keyLight.shadow.camera as THREE.OrthographicCamera;
-    const shadowFar = Math.max(120, lightDistance * 2.35);
+  const configureShadowBlendLight = (
+    light: THREE.DirectionalLight,
+    slot: TerrainShadowLightSlot,
+    shadowExtent: number,
+    shadowFar: number
+  ): void => {
+    light.position.copy(slot.position);
+    light.target.position.copy(slot.target);
+    const shadowCam = light.shadow.camera as THREE.OrthographicCamera;
     shadowCam.left = -shadowExtent;
     shadowCam.right = shadowExtent;
     shadowCam.top = shadowExtent;
@@ -5314,28 +5270,55 @@ export const createThreeTest = (
     shadowCam.near = 0.1;
     shadowCam.far = shadowFar;
     shadowCam.updateProjectionMatrix();
+    light.target.updateMatrixWorld();
+    light.updateMatrixWorld();
+    if (slot.needsShadowUpdate && light.castShadow) {
+      light.shadow.needsUpdate = true;
+      renderer.shadowMap.needsUpdate = true;
+      slot.needsShadowUpdate = false;
+    }
+  };
+  const syncDirectionalLightRig = (lighting: LightingDirectorState): void => {
+    const focusPoint = controls.target;
+    const cameraDistance = camera.position.distanceTo(focusPoint);
+    const shadowState = shadowBlendController.update({
+      timeMs: performance.now(),
+      sunDirection: lighting.sunDirection,
+      focusPoint,
+      cameraDistance,
+      cameraFovDeg: camera.fov,
+      cameraAspect: camera.aspect,
+      terrainSize: lastTerrainSize,
+      cameraInteracting: resolveCameraInteracting()
+    });
+    const visualLightDistance = Math.max(shadowState.lightDistance, 18);
+    keyLight.position.copy(focusPoint).addScaledVector(lighting.sunDirection, visualLightDistance);
+    keyLight.target.position.copy(focusPoint);
+    fillLight.position.copy(focusPoint).addScaledVector(lighting.fillDirection, visualLightDistance * 0.72);
+    fillLight.target.position.copy(focusPoint);
     keyLight.target.updateMatrixWorld();
     fillLight.target.updateMatrixWorld();
     keyLight.updateMatrixWorld();
     fillLight.updateMatrixWorld();
-    const focusChanged =
-      !Number.isFinite(lastShadowFocusPoint.x) ||
-      shadowFocusPoint.distanceToSquared(lastShadowFocusPoint) > 1e-8;
-    const extentChanged =
-      !Number.isFinite(lastShadowExtent) || Math.abs(shadowExtent - lastShadowExtent) >= THREE_TEST_SHADOW_EXTENT_EPSILON;
-    const farChanged = !Number.isFinite(lastShadowFar) || Math.abs(shadowFar - lastShadowFar) >= THREE_TEST_SHADOW_FAR_EPSILON;
-    if (focusChanged || extentChanged || farChanged) {
-      shadowRefreshPending = true;
-    }
-    lastShadowFocusPoint.copy(shadowFocusPoint);
-    lastShadowExtent = shadowExtent;
-    lastShadowFar = shadowFar;
+    keyLight.intensity = THREE_TEST_SHADOWS_ENABLED
+      ? lighting.sunIntensity * (1 - THREE_TEST_SHADOW_LIGHT_SHARE)
+      : lighting.sunIntensity;
+    previousShadowLight.intensity = THREE_TEST_SHADOWS_ENABLED
+      ? lighting.sunIntensity * THREE_TEST_SHADOW_LIGHT_SHARE * shadowState.slots[0].weight
+      : 0;
+    nextShadowLight.intensity = THREE_TEST_SHADOWS_ENABLED
+      ? lighting.sunIntensity * THREE_TEST_SHADOW_LIGHT_SHARE * shadowState.slots[1].weight
+      : 0;
+    configureShadowBlendLight(previousShadowLight, shadowState.slots[0], shadowState.shadowExtent, shadowState.shadowFar);
+    configureShadowBlendLight(nextShadowLight, shadowState.slots[1], shadowState.shadowExtent, shadowState.shadowFar);
     waterSystem.setLightDirectionFromKeyLight();
   };
   const applyLightingState = (lighting: LightingDirectorState): void => {
     keyLight.color.set(rgbToHex(lighting.sunColor));
-    keyLight.intensity = lighting.sunIntensity;
-    keyLight.shadow.intensity = lighting.shadowContrast;
+    previousShadowLight.color.set(rgbToHex(lighting.sunColor));
+    nextShadowLight.color.set(rgbToHex(lighting.sunColor));
+    previousShadowLight.shadow.intensity = lighting.shadowContrast;
+    nextShadowLight.shadow.intensity = lighting.shadowContrast;
     fillLight.color.set(rgbToHex(lighting.fillColor));
     fillLight.intensity = lighting.fillIntensity;
     ambient.color.set(rgbToHex(lighting.fogColor));
@@ -5384,32 +5367,6 @@ export const createThreeTest = (
     const forwardFade = Math.pow(THREE.MathUtils.smoothstep(alignment, 0.55, 0.98), 1.7);
     const glare = Math.max(0, Math.min(0.18, lighting.glareIntensity * forwardFade * screenFade));
     postPipeline.setSunGlare(screenX, screenY, glare, rgbToHex(lighting.sunColor));
-  };
-  const maybeRefreshShadowMap = (time: number, lighting: LightingDirectorState | null, cameraInteracting: boolean): void => {
-    if (!renderer.shadowMap.enabled || !keyLight.castShadow || !lighting) {
-      return;
-    }
-    if (lastShadowCameraInteracting && !cameraInteracting) {
-      shadowRefreshPending = true;
-    }
-    lastShadowCameraInteracting = cameraInteracting;
-    const azimuthChanged =
-      !Number.isFinite(lastShadowAzimuthDeg) ||
-      Math.abs(shortestAngleDeltaDeg(lastShadowAzimuthDeg, lighting.sunAzimuthDeg)) >= THREE_TEST_SHADOW_AZIMUTH_EPSILON_DEG;
-    const elevationChanged =
-      !Number.isFinite(lastShadowElevationDeg) ||
-      Math.abs(lighting.sunElevationDeg - lastShadowElevationDeg) >= THREE_TEST_SHADOW_ELEVATION_EPSILON_DEG;
-    if (azimuthChanged || elevationChanged) {
-      shadowRefreshPending = true;
-    }
-    if (!shadowRefreshPending || time - lastShadowRefreshAt < lighting.shadowRefreshMinMs) {
-      return;
-    }
-    renderer.shadowMap.needsUpdate = true;
-    lastShadowRefreshAt = time;
-    lastShadowAzimuthDeg = lighting.sunAzimuthDeg;
-    lastShadowElevationDeg = lighting.sunElevationDeg;
-    shadowRefreshPending = false;
   };
   const applyDynamicEnvironmentState = (force = false): void => {
     const lighting = buildLightingDirectorState(getCurrentLightingInput());
@@ -6792,7 +6749,6 @@ export const createThreeTest = (
     }
     syncSunGlare(lastLightingApplied);
     syncSeasonalRainPostState();
-    maybeRefreshShadowMap(time, lastLightingApplied, isCameraInteracting());
     syncDofSettings();
     const treeBurnStart = performance.now();
     if (
@@ -6960,7 +6916,6 @@ export const createThreeTest = (
       syncDirectionalLightRig(lastLightingApplied);
       syncSunGlare(lastLightingApplied);
     }
-    maybeRefreshShadowMap(performance.now(), lastLightingApplied, false);
     renderWorldPass();
     if (!THREE_TEST_DISABLE_HUD) {
       renderer.clearDepth();
@@ -6974,6 +6929,7 @@ export const createThreeTest = (
     }
     return performance.now() - lastCameraMotionAt <= CAMERA_INTERACTION_HOLD_MS;
   };
+  resolveCameraInteracting = isCameraInteracting;
 
   const stop = (): void => {
     cancelCameraFlight();
