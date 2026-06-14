@@ -16,6 +16,7 @@ import {
   setCrewFormation,
   setTruckCrewMode,
   setUnitTarget,
+  syncProgressionUnitStats,
   stepUnits
 } from "../dist/sim/units.js";
 
@@ -107,6 +108,31 @@ const testCommandSelectionAndMovement = () => {
   assert.equal(getCrew(state, truck).every((unit) => unit.carrierId === truck.id), true, "boarded crew should follow carrier");
 };
 
+const testUpgradedHighSpeedMovementConsumesFullRouteBudget = () => {
+  const { state, truck } = buildDeployedTruckState(2010);
+  const rosterTruck = state.roster.find((unit) => unit.id === truck.rosterId);
+  assert.ok(rosterTruck, "deployed truck should have a roster source");
+  state.progression.resolved.unitSpeedMultiplier = 4;
+  syncProgressionUnitStats(state);
+  truck.x = 1.5;
+  truck.y = 1.5;
+  truck.prevX = truck.x;
+  truck.prevY = truck.y;
+  truck.path = [
+    { x: 2, y: 1 },
+    { x: 3, y: 1 },
+    { x: 4, y: 1 },
+    { x: 5, y: 1 }
+  ];
+  truck.pathIndex = 0;
+  stepUnits(state, 0.25);
+  assert.equal(truck.prevX, 1.5, "render interpolation should start from the step-start truck position");
+  assert.equal(truck.prevY, 1.5, "render interpolation should preserve the step-start truck row");
+  assert.equal(truck.pathIndex, truck.path.length, "upgraded trucks should consume multiple route waypoints per step");
+  assert.equal(truck.x, 5.5, "upgraded trucks should finish the reachable route instead of stalling one tile at a time");
+  assert.equal(getCrew(state, truck).every((unit) => unit.carrierId === truck.id && unit.x === truck.x), true, "boarded crew should stay synced to upgraded truck motion");
+};
+
 const testFormationAndCommandTargets = () => {
   const { state, truck } = buildDeployedTruckState(2003);
   setCrewFormation(state, truck.id, "wide");
@@ -195,6 +221,7 @@ const testRosterAssignment = () => {
 
 testStartingRosterAndDeployment();
 testCommandSelectionAndMovement();
+testUpgradedHighSpeedMovementConsumesFullRouteBudget();
 testFormationAndCommandTargets();
 testSuppressionWaterSpendAndRefill();
 testHazardsAndRecallCleanup();

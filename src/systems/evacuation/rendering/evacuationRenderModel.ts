@@ -72,9 +72,8 @@ export const buildEvacuationRenderModel = (state: WorldState): EvacuationRenderM
           : Math.min(lastRouteIndex, currentIndex + 1);
       const current = evacuation.route.tiles[currentIndex] ?? { x: vehicle.x, y: vehicle.y };
       const next = evacuation.route.tiles[nextIndex] ?? current;
-      const progress = vehicle.status === "moving" ? Math.max(0, Math.min(1, vehicle.progress)) : 0;
-      let x = current.x + (next.x - current.x) * progress;
-      let y = current.y + (next.y - current.y) * progress;
+      let x = Number.isFinite(vehicle.x) ? vehicle.x : current.x;
+      let y = Number.isFinite(vehicle.y) ? vehicle.y : current.y;
       if (vehicle.status === "evacuated" && vehicle.holdKind === "parked") {
         x = Number.isFinite(vehicle.holdX) ? vehicle.holdX! : vehicle.x;
         y = Number.isFinite(vehicle.holdY) ? vehicle.holdY! : vehicle.y;

@@ -236,6 +236,10 @@ export type ThreeTestTerrainUpdateIntent = {
   fireVisual?: boolean;
 };
 
+export type ThreeTestPanToTileOptions = {
+  transition?: "snap" | "contextual";
+};
+
 export type ThreeTestController = {
   start: () => void;
   stop: () => void;
@@ -259,7 +263,7 @@ export type ThreeTestController = {
     meta: string | null
   ) => void;
   setBaseCardOpen: (open: boolean) => void;
-  panToTile: (tileX: number, tileY: number) => void;
+  panToTile: (tileX: number, tileY: number, options?: ThreeTestPanToTileOptions) => void;
   setEnvironmentFogEnabled: (enabled: boolean) => void;
   getEnvironmentFogEnabled: () => boolean;
   setTerrainWaterDebugControls: (controls: Partial<TerrainWaterDebugControls>) => void;
@@ -482,6 +486,7 @@ const lerpWrapped01 = (current: number, target: number, alpha: number): number =
 };
 const easeInOutCubic = (t: number): number =>
   t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+const easeOutCubic = (t: number): number => 1 - Math.pow(1 - t, 3);
 const rgbToHex = (color: { r: number; g: number; b: number }): number =>
   (Math.round(color.r) << 16) | (Math.round(color.g) << 8) | Math.round(color.b);
 const cloneHudTheme = (theme: HudTheme): HudTheme => ({
@@ -687,6 +692,7 @@ export const createThreeTest = (
     startPosition: THREE.Vector3;
     endTarget: THREE.Vector3;
     endPosition: THREE.Vector3;
+    arcLift: number;
   };
   let cameraFlight: CameraFlightState | null = null;
   let lastCameraMotionAt = 0;
@@ -2964,7 +2970,8 @@ export const createThreeTest = (
       startTarget,
       startPosition,
       endTarget: target,
-      endPosition
+      endPosition,
+      arcLift: 0
     };
     markCameraMotion();
   };
@@ -6569,6 +6576,9 @@ export const createThreeTest = (
     const eased = easeInOutCubic(progress);
     controls.target.lerpVectors(cameraFlight.startTarget, cameraFlight.endTarget, eased);
     camera.position.lerpVectors(cameraFlight.startPosition, cameraFlight.endPosition, eased);
+    if (cameraFlight.arcLift > 0) {
+      camera.position.y += Math.sin(Math.PI * eased) * cameraFlight.arcLift;
+    }
     if (progress >= 1) {
       controls.target.copy(cameraFlight.endTarget);
       camera.position.copy(cameraFlight.endPosition);
@@ -7060,11 +7070,10 @@ export const createThreeTest = (
     fireFx.captureSnapshot(nextWorld);
   };
 
-  const panToTile = (tileX: number, tileY: number): void => {
+  const panToTile = (tileX: number, tileY: number, options: ThreeTestPanToTileOptions = {}): void => {
     if (!lastTerrainSurface) {
       return;
     }
-    cancelCameraFlight();
     const cols = Math.max(1, world.grid.cols);
     const rows = Math.max(1, world.grid.rows);
     const clampedX = Math.max(0, Math.min(cols - 1, Math.floor(tileX)));
@@ -7072,9 +7081,35 @@ export const createThreeTest = (
     const worldX = lastTerrainSurface.toWorldX(clampedX + 0.5);
     const worldZ = lastTerrainSurface.toWorldZ(clampedY + 0.5);
     const worldY = lastTerrainSurface.heightAtTile(clampedX, clampedY) * lastTerrainSurface.heightScale;
+    const endTarget = new THREE.Vector3(worldX, worldY, worldZ);
     const cameraOffset = camera.position.clone().sub(controls.target);
-    controls.target.set(worldX, worldY, worldZ);
-    camera.position.copy(controls.target.clone().add(cameraOffset));
+    const endPosition = endTarget.clone().add(cameraOffset);
+    if (options.transition === "contextual") {
+      const startTarget = controls.target.clone();
+      const startPosition = camera.position.clone();
+      const targetTravel = startTarget.distanceTo(endTarget);
+      const tileSpan = Math.max(lastTerrainSurface.size.width / cols, lastTerrainSurface.size.depth / rows);
+      const closeTravel = tileSpan * 5;
+      const farTravel = tileSpan * 34;
+      const travel01 = clamp01((targetTravel - closeTravel) / Math.max(tileSpan, farTravel - closeTravel));
+      const currentDistance = Math.max(controls.minDistance, startPosition.distanceTo(startTarget));
+      const arcLift = easeOutCubic(travel01) * Math.min(controls.maxDistance * 0.22, Math.max(tileSpan * 2, currentDistance * 0.42));
+      const durationMs = Math.round(180 + easeOutCubic(Math.min(1, targetTravel / Math.max(tileSpan, farTravel))) * 720);
+      cameraFlight = {
+        startedAt: performance.now(),
+        durationMs,
+        startTarget,
+        startPosition,
+        endTarget,
+        endPosition,
+        arcLift
+      };
+      markCameraMotion();
+      return;
+    }
+    cancelCameraFlight();
+    controls.target.copy(endTarget);
+    camera.position.copy(endPosition);
     controls.update();
     applyTerrainCameraConstraints();
     markCameraMotion();

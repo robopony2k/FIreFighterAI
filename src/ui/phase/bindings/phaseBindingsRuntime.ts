@@ -77,6 +77,7 @@ import {
   setRuntimeSetting,
   subscribeRuntimeSettings
 } from "../../../persistence/runtimeSettings.js";
+import { resolveActiveFireFrontTargets } from "../../../systems/fire/sim/activeFireFrontTargets.js";
 
 type HudAudioChannelSettings = {
   muted: boolean;
@@ -174,7 +175,7 @@ export type PhaseUiBindingDeps = {
   overlayRefs: OverlayRefs;
   showStartMenuOnBind?: boolean;
   startThreeOnConfirm?: boolean | (() => boolean);
-  onMinimapPan?: (tile: { x: number; y: number }) => void;
+  onMinimapPan?: (tile: { x: number; y: number }, options?: { transition?: "contextual" }) => void;
   uiAudio?: UiAudioController;
   musicControls?: HudAudioChannelControls;
   worldAudioControls?: HudAudioChannelControls;
@@ -216,6 +217,8 @@ export const bindPhaseUi = ({
   worldAudioControls
 }: PhaseUiBindingDeps): (() => void) => {
   let isSpaceDown = false;
+  let activeFireFocusIndex = -1;
+  let activeFireFocusSignature = "";
   const disposers: Array<() => void> = [];
 
   const listen = <K extends keyof DocumentEventMap>(
@@ -1058,6 +1061,49 @@ export const bindPhaseUi = ({
     runUiAction(action, actionTarget, event);
   });
 
+  const panToTile = (tile: { x: number; y: number }, options?: { transition?: "contextual" }): void => {
+    if (onMinimapPan) {
+      onMinimapPan(tile, options);
+      return;
+    }
+    renderState.cameraCenter = { x: tile.x + 0.5, y: tile.y + 0.5 };
+  };
+
+  const focusActiveFireFront = (direction: "previous" | "next"): void => {
+    const targets = resolveActiveFireFrontTargets(state);
+    if (targets.length === 0) {
+      activeFireFocusIndex = -1;
+      activeFireFocusSignature = "";
+      setStatus(state, "No active firefronts to focus.");
+      return;
+    }
+
+    const signature = targets.map((target) => `${target.x},${target.y}:${target.tileCount}`).join("|");
+    if (signature !== activeFireFocusSignature) {
+      activeFireFocusSignature = signature;
+      activeFireFocusIndex = -1;
+    }
+
+    if (activeFireFocusIndex < 0 || activeFireFocusIndex >= targets.length) {
+      activeFireFocusIndex = direction === "previous" ? targets.length - 1 : 0;
+    } else {
+      const step = direction === "previous" ? -1 : 1;
+      activeFireFocusIndex = (activeFireFocusIndex + step + targets.length) % targets.length;
+    }
+
+    const target = targets[activeFireFocusIndex];
+    if (!target) {
+      return;
+    }
+    panToTile({ x: target.x, y: target.y }, { transition: "contextual" });
+    setStatus(
+      state,
+      targets.length === 1
+        ? "Focused active firefront."
+        : `Focused firefront ${activeFireFocusIndex + 1}/${targets.length}.`
+    );
+  };
+
   const onCommand = (command: PhaseUiCommand): void => {
     if (isOverlayLocked()) {
       return;
@@ -1080,11 +1126,11 @@ export const bindPhaseUi = ({
         return;
       case "minimap-pan":
         noteInteraction();
-        if (onMinimapPan) {
-          onMinimapPan(command.tile);
-        } else {
-          renderState.cameraCenter = { x: command.tile.x + 0.5, y: command.tile.y + 0.5 };
-        }
+        panToTile(command.tile);
+        return;
+      case "focus-active-fire":
+        noteInteraction();
+        focusActiveFireFront(command.direction);
         return;
       case "map-primary":
         noteInteraction();

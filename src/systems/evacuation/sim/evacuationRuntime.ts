@@ -1,6 +1,7 @@
 import type { WorldState } from "../../../core/state.js";
 import type { Point } from "../../../core/types.js";
 import { inBounds, indexFor } from "../../../core/grid.js";
+import { advanceRouteMotion, measureSegmentProgress, type RouteMotionTarget } from "../../../shared/movement/routeMotion.js";
 import {
   EVACUATION_EXTREME_FIRE_THRESHOLD,
   EVACUATION_EXTREME_HEAT_THRESHOLD,
@@ -178,7 +179,6 @@ export const orderEvacuationReturnHome = (state: WorldState, townId: number): bo
   return true;
 };
 
-const getVehicleTileKey = (vehicle: EvacuationVehicle): string => `${Math.floor(vehicle.x)}:${Math.floor(vehicle.y)}`;
 const getRouteKey = (point: Point): string => `${point.x}:${point.y}`;
 
 const getRouteEndIndex = (evacuation: ActiveEvacuation): number => Math.max(0, evacuation.route.tiles.length - 1);
@@ -188,6 +188,48 @@ const getNextRouteIndex = (evacuation: ActiveEvacuation, vehicle: EvacuationVehi
     return vehicle.routeIndex > 0 ? vehicle.routeIndex - 1 : null;
   }
   return vehicle.routeIndex < getRouteEndIndex(evacuation) ? vehicle.routeIndex + 1 : null;
+};
+
+const getVehicleTileKey = (evacuation: ActiveEvacuation, vehicle: EvacuationVehicle): string => {
+  const routeTile = evacuation.route.tiles[Math.max(0, Math.min(getRouteEndIndex(evacuation), vehicle.routeIndex))];
+  return routeTile ? getRouteKey(routeTile) : `${Math.floor(vehicle.x)}:${Math.floor(vehicle.y)}`;
+};
+
+const getVehicleContinuousPosition = (evacuation: ActiveEvacuation, vehicle: EvacuationVehicle): Point => {
+  if (vehicle.status !== "moving" || vehicle.progress <= 0) {
+    return { x: vehicle.x, y: vehicle.y };
+  }
+  const current = evacuation.route.tiles[Math.max(0, Math.min(getRouteEndIndex(evacuation), vehicle.routeIndex))];
+  const nextIndex = getNextRouteIndex(evacuation, vehicle);
+  const next = nextIndex === null ? null : evacuation.route.tiles[nextIndex];
+  if (!current || !next) {
+    return { x: vehicle.x, y: vehicle.y };
+  }
+  const progress = Math.max(0, Math.min(1, vehicle.progress));
+  return {
+    x: current.x + (next.x - current.x) * progress,
+    y: current.y + (next.y - current.y) * progress
+  };
+};
+
+const getVehicleMotionTarget = (evacuation: ActiveEvacuation, vehicle: EvacuationVehicle): RouteMotionTarget | null => {
+  const nextIndex = getNextRouteIndex(evacuation, vehicle);
+  if (nextIndex === null) {
+    return null;
+  }
+  const next = evacuation.route.tiles[nextIndex];
+  return next ? { index: nextIndex, x: next.x, y: next.y } : null;
+};
+
+const syncVehicleRouteProgress = (evacuation: ActiveEvacuation, vehicle: EvacuationVehicle): void => {
+  const current = evacuation.route.tiles[Math.max(0, Math.min(getRouteEndIndex(evacuation), vehicle.routeIndex))];
+  const nextIndex = getNextRouteIndex(evacuation, vehicle);
+  const next = nextIndex === null ? null : evacuation.route.tiles[nextIndex];
+  if (!current || !next || vehicle.status !== "moving") {
+    vehicle.progress = 0;
+    return;
+  }
+  vehicle.progress = measureSegmentProgress(current, next, { x: vehicle.x, y: vehicle.y });
 };
 
 const isParkingTile = (state: WorldState, x: number, y: number): boolean => {
@@ -234,8 +276,8 @@ const findVehicleHoldPosition = (state: WorldState, evacuation: ActiveEvacuation
   return { x: chosen.x + lateral, y: chosen.y + depth };
 };
 
-const clearVehicleFromOccupancy = (occupancy: Map<string, number>, vehicle: EvacuationVehicle): void => {
-  const currentKey = getVehicleTileKey(vehicle);
+const clearVehicleFromOccupancy = (occupancy: Map<string, number>, evacuation: ActiveEvacuation, vehicle: EvacuationVehicle): void => {
+  const currentKey = getVehicleTileKey(evacuation, vehicle);
   const currentCount = (occupancy.get(currentKey) ?? 0) - 1;
   if (currentCount > 0) {
     occupancy.set(currentKey, currentCount);
@@ -250,7 +292,7 @@ const markVehicleArrived = (
   vehicle: EvacuationVehicle,
   occupancy: Map<string, number>
 ): void => {
-  clearVehicleFromOccupancy(occupancy, vehicle);
+  clearVehicleFromOccupancy(occupancy, evacuation, vehicle);
   vehicle.progress = 0;
   if (evacuation.phase === "returning") {
     vehicle.status = "returned";
@@ -282,7 +324,7 @@ const buildOccupancy = (evacuation: ActiveEvacuation): Map<string, number> => {
     if (vehicle.status !== "moving" && vehicle.status !== "queued") {
       continue;
     }
-    const key = getVehicleTileKey(vehicle);
+    const key = getVehicleTileKey(evacuation, vehicle);
     occupancy.set(key, (occupancy.get(key) ?? 0) + 1);
   }
   return occupancy;
@@ -341,7 +383,7 @@ const canSpawnAtDeparture = (evacuation: ActiveEvacuation): boolean => {
   }
   const startKey = getRouteKey(start);
   const occupied = evacuation.vehicles.reduce((count, vehicle) => {
-    if ((vehicle.status === "queued" || vehicle.status === "moving") && getVehicleTileKey(vehicle) === startKey) {
+    if ((vehicle.status === "queued" || vehicle.status === "moving") && getVehicleTileKey(evacuation, vehicle) === startKey) {
       return count + 1;
     }
     return count;
@@ -417,49 +459,43 @@ const advanceVehicle = (
   if (vehicle.status === "destroyed" || vehicle.status === "evacuated" || vehicle.status === "returned") {
     return;
   }
-  vehicle.prevX = vehicle.x;
-  vehicle.prevY = vehicle.y;
+  const startPosition = getVehicleContinuousPosition(evacuation, vehicle);
+  vehicle.x = startPosition.x;
+  vehicle.y = startPosition.y;
+  vehicle.prevX = startPosition.x;
+  vehicle.prevY = startPosition.y;
   if (applyHeatExposure(state, evacuation, vehicle, stepDays, events)) {
     return;
   }
-  const firstNextIndex = getNextRouteIndex(evacuation, vehicle);
-  if (firstNextIndex === null) {
+  if (getNextRouteIndex(evacuation, vehicle) === null) {
     markVehicleArrived(state, evacuation, vehicle, occupancy);
     return;
   }
-  const next = evacuation.route.tiles[firstNextIndex]!;
-  if (!canEnterTile(occupancy, blocked, next)) {
-    vehicle.status = "queued";
+  vehicle.status = "moving";
+  const result = advanceRouteMotion({
+    x: vehicle.x,
+    y: vehicle.y,
+    movementBudget: EVACUATION_VEHICLE_SPEED_TILES_PER_DAY * stepDays,
+    getTarget: () => getVehicleMotionTarget(evacuation, vehicle),
+    canEnterTarget: (target) => canEnterTile(occupancy, blocked, target),
+    onReachTarget: (target) => {
+      clearVehicleFromOccupancy(occupancy, evacuation, vehicle);
+      vehicle.routeIndex = target.index;
+      const nextKey = getRouteKey(target);
+      occupancy.set(nextKey, (occupancy.get(nextKey) ?? 0) + 1);
+    },
+    maxTargetsVisited: evacuation.route.tiles.length + 1
+  });
+  vehicle.x = result.x;
+  vehicle.y = result.y;
+  if (result.arrived) {
+    markVehicleArrived(state, evacuation, vehicle, occupancy);
     return;
   }
-  vehicle.status = "moving";
-  vehicle.progress += EVACUATION_VEHICLE_SPEED_TILES_PER_DAY * stepDays;
-  while (vehicle.progress >= 1) {
-    clearVehicleFromOccupancy(occupancy, vehicle);
-    const nextIndex = getNextRouteIndex(evacuation, vehicle);
-    if (nextIndex === null) {
-      markVehicleArrived(state, evacuation, vehicle, occupancy);
-      return;
-    }
-    vehicle.routeIndex = nextIndex;
-    vehicle.progress -= 1;
-    const current = evacuation.route.tiles[vehicle.routeIndex]!;
-    vehicle.x = current.x;
-    vehicle.y = current.y;
-    const nextKey = getRouteKey(current);
-    occupancy.set(nextKey, (occupancy.get(nextKey) ?? 0) + 1);
-    const upcomingIndex = getNextRouteIndex(evacuation, vehicle);
-    if (upcomingIndex === null) {
-      markVehicleArrived(state, evacuation, vehicle, occupancy);
-      return;
-    }
-    const upcoming = evacuation.route.tiles[upcomingIndex]!;
-    if (!canEnterTile(occupancy, blocked, upcoming)) {
-      vehicle.status = "queued";
-      vehicle.progress = 0;
-      return;
-    }
+  if (result.blocked) {
+    vehicle.status = "queued";
   }
+  syncVehicleRouteProgress(evacuation, vehicle);
 };
 
 const applyEvacuationApprovalPressure = (state: WorldState, evacuation: ActiveEvacuation, stepDays: number): void => {

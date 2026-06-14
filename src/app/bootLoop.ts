@@ -67,6 +67,7 @@ export type AppBootLoopDeps = {
 export type RuntimeFrameWorkBudget = {
   requestedTimeSpeedValue: number;
   effectiveTimeSpeedValue: number;
+  appliedTimeSpeedValue: number;
   requestedSimulationStep: number;
   appliedSimulationStep: number;
   maxSimulationStepsPerFrame: number;
@@ -92,6 +93,7 @@ export const resolveRuntimeFrameWorkBudget = (params: {
   return {
     requestedTimeSpeedValue,
     effectiveTimeSpeedValue,
+    appliedTimeSpeedValue: params.baseStep > 0 ? appliedSimulationStep / params.baseStep : 0,
     requestedSimulationStep,
     appliedSimulationStep,
     maxSimulationStepsPerFrame: params.incidentMode || params.threeTestVisible ? 1 : 8
@@ -181,6 +183,7 @@ export const startAppBootLoop = (deps: AppBootLoopDeps): void => {
     deps.recordPerfSample("sim.steps", simStepsThisFrame);
     deps.recordPerfSample("sim.requestedSpeed", frameBudget.requestedTimeSpeedValue);
     deps.recordPerfSample("sim.effectiveSpeed", frameBudget.effectiveTimeSpeedValue);
+    deps.recordPerfSample("sim.appliedSpeed", frameBudget.appliedTimeSpeedValue);
     deps.recordPerfSample("sim.requestedStep", frameBudget.requestedSimulationStep);
     deps.recordPerfSample("sim.appliedStep", frameBudget.appliedSimulationStep);
     deps.recordPerfSample("sim.stepBudget", frameBudget.maxSimulationStepsPerFrame);

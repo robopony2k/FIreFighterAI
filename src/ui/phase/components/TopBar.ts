@@ -12,6 +12,7 @@ import {
   computeSeasonLayout,
   computeYearLayout
 } from "../forecastLayout.js";
+import { dispatchPhaseUiCommand } from "../commandChannel.js";
 
 export type TopBarData = {
   phase: Phase;
@@ -164,6 +165,21 @@ const restartTransientClass = (element: HTMLElement, className: string): void =>
   element.classList.remove(className);
   void element.offsetWidth;
   element.classList.add(className);
+};
+
+const createActiveFireFocusButton = (direction: "previous" | "next"): HTMLButtonElement => {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "phase-firefront-jump-button";
+  button.textContent = direction === "previous" ? "\u2039" : "\u203a";
+  button.setAttribute("aria-label", direction === "previous" ? "Previous active firefront" : "Next active firefront");
+  button.title = direction === "previous" ? "Previous active firefront" : "Next active firefront";
+  button.addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    dispatchPhaseUiCommand({ type: "focus-active-fire", direction });
+  });
+  return button;
 };
 
 const createRailIcon = (lane: LedgerRailId): SVGSVGElement => {
@@ -1154,6 +1170,9 @@ export const createTopBar = (): TopBarView => {
   ledgerPipeTransfers.className = "phase-score-ledger-transfer-layer";
   ledgerTransfers.append(ledgerPipeTransfers);
   const ledgerRailMap = new Map<LedgerRailId, LedgerRailRefs>();
+  let activeFireFocusControls: HTMLElement | null = null;
+  let activeFirePreviousButton: HTMLButtonElement | null = null;
+  let activeFireNextButton: HTMLButtonElement | null = null;
   for (const config of LEDGER_RAILS) {
     const rail = document.createElement("div");
     rail.className = `phase-score-rail is-${config.lane}`;
@@ -1164,6 +1183,14 @@ export const createTopBar = (): TopBarView => {
     label.className = "phase-score-rail-label";
     label.textContent = config.label;
     meta.appendChild(label);
+    if (config.lane === "active") {
+      activeFireFocusControls = document.createElement("span");
+      activeFireFocusControls.className = "phase-firefront-jump-controls is-hidden";
+      activeFirePreviousButton = createActiveFireFocusButton("previous");
+      activeFireNextButton = createActiveFireFocusButton("next");
+      activeFireFocusControls.append(activeFirePreviousButton, activeFireNextButton);
+      meta.appendChild(activeFireFocusControls);
+    }
 
     const track = document.createElement("div");
     track.className = `phase-score-track is-${config.lane}`;
@@ -1278,6 +1305,16 @@ export const createTopBar = (): TopBarView => {
     }
     previousApprovalSignature = approvalSignature;
     previousRiskSignature = riskSignature;
+  };
+
+  const syncActiveFireFocusControls = (visible: boolean, activeFireCount: number): void => {
+    if (!activeFireFocusControls || !activeFirePreviousButton || !activeFireNextButton) {
+      return;
+    }
+    const enabled = visible && activeFireCount > 0;
+    activeFireFocusControls.classList.toggle("is-hidden", !visible);
+    activeFirePreviousButton.disabled = !enabled;
+    activeFireNextButton.disabled = !enabled;
   };
 
   const renderLedgerBoard = (data: NonNullable<TopBarData["scoring"]>, now: number): void => {
@@ -1628,6 +1665,7 @@ export const createTopBar = (): TopBarView => {
         scoreStrip.classList.remove("is-hidden");
         applyMultiplierLabels(animatedScoring, isThreeTest);
         if (isThreeTest) {
+          syncActiveFireFocusControls(true, animatedScoring.activeFireCount);
           scoreCounter.classList.add("is-hidden");
           scoreCounter.textContent = "";
           legacyScoreContent.classList.add("is-hidden");
@@ -1636,6 +1674,7 @@ export const createTopBar = (): TopBarView => {
           scoreEvents.innerHTML = "";
           renderLedgerBoard(animatedScoring, now);
         } else {
+          syncActiveFireFocusControls(false, 0);
           activeQueueTokens = [];
           pipeTransferTokens = [];
           lastProcessedVisualFlowId = 0;
@@ -1693,6 +1732,7 @@ export const createTopBar = (): TopBarView => {
           }
         }
       } else {
+        syncActiveFireFocusControls(false, 0);
         scoreEventClock.clear();
         flowEventClock.clear();
         activeQueueTokens = [];

@@ -6192,6 +6192,44 @@ input[type="text"] {
   color: rgba(244, 232, 214, 0.9);
 }
 
+.phase-firefront-jump-controls {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 2px;
+}
+
+.phase-firefront-jump-controls.is-hidden {
+  display: none;
+}
+
+.phase-firefront-jump-button {
+  width: 18px;
+  height: 20px;
+  border: 1px solid rgba(255, 214, 155, 0.18);
+  border-radius: 6px;
+  background: rgba(255, 214, 155, 0.08);
+  color: rgba(255, 221, 173, 0.92);
+  font-size: 16px;
+  line-height: 1;
+  padding: 0;
+  display: inline-grid;
+  place-items: center;
+  cursor: pointer;
+}
+
+.phase-firefront-jump-button:hover,
+.phase-firefront-jump-button:focus-visible {
+  background: rgba(255, 177, 104, 0.16);
+  border-color: rgba(255, 177, 104, 0.42);
+  transform: none;
+}
+
+.phase-firefront-jump-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.42;
+}
+
 .phase-score-track {
   position: relative;
   z-index: 1;

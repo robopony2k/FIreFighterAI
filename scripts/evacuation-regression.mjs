@@ -158,6 +158,28 @@ const assertSpawnQueueAndLock = () => {
   assert.equal(active.route.tiles.map((tile) => `${tile.x},${tile.y}`).join("|"), lockedRoute);
 };
 
+const assertContinuousVehicleMotionAcrossSteps = () => {
+  const state = createRoadState();
+  assert.equal(selectTownEvacuationDestination(state, 0, { x: 5, y: 1 }), true);
+  assert.equal(issueTownEvacuation(state, 0), true);
+  const active = state.activeEvacuations[0];
+  assert.ok(active);
+  stepEvacuations(state, 0.35);
+  const vehicle = active.vehicles[0];
+  assert.ok(vehicle);
+  const firstX = vehicle.x;
+  assert.equal(vehicle.prevX, 0, "first movement step should interpolate from the departure tile");
+  assert.equal(vehicle.routeIndex >= 2, true, "evacuation vehicles should consume multiple route segments when budget allows");
+  assert.equal(firstX > 2 && firstX < 3, true, "vehicle state should retain continuous position between route tiles");
+  assert.equal(vehicle.progress > 0 && vehicle.progress < 1, true, "vehicle progress should describe the current segment");
+  const firstRender = buildEvacuationRenderModel(state).vehicles[0];
+  assert.ok(firstRender);
+  assert.equal(firstRender.x, firstX, "render model should use the continuous vehicle position");
+  stepEvacuations(state, 0.05);
+  assert.equal(vehicle.prevX, firstX, "next step should interpolate from the previous continuous position");
+  assert.equal(vehicle.x > firstX, true, "vehicle should continue smoothly along the route on the next step");
+};
+
 const assertHeatDestruction = () => {
   const state = createRoadState();
   assert.equal(selectTownEvacuationDestination(state, 0, { x: 5, y: 1 }), true);
@@ -260,6 +282,7 @@ const assertHostTownHoldingAndApprovalPressure = () => {
 
 assertRoute();
 assertSpawnQueueAndLock();
+assertContinuousVehicleMotionAcrossSteps();
 assertHeatDestruction();
 assertArrivalPersistsAndReturnHome();
 assertTerminalCellsDoNotDeadlock();

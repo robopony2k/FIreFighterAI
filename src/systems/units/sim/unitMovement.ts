@@ -1,12 +1,47 @@
 import type { Point, Unit } from "../../../core/types.js";
 import type { WorldState } from "../../../core/state.js";
 import { findPath, getMoveSpeedMultiplier } from "../../../sim/pathing.js";
+import { advanceRouteMotion, type RouteMotionPoint, type RouteMotionTarget } from "../../../shared/movement/routeMotion.js";
 import { MOVING_SPRAY_SPEED_FACTOR } from "../constants/runtimeConstants.js";
 import { getUnitTile } from "../utils/unitLookup.js";
 import { updateTruckCrewOrders, detachFromCarrier } from "./crewRuntime.js";
 import { applyCommandIntentControl } from "./commandRuntime.js";
 import { findNearestPassable } from "./unitPathing.js";
 import { setUnitTarget } from "./unitDeployment.js";
+
+const getUnitMotionTarget = (unit: Unit): RouteMotionTarget | null => {
+  if (unit.pathIndex >= unit.path.length) {
+    return null;
+  }
+  const next = unit.path[unit.pathIndex];
+  return {
+    index: unit.pathIndex,
+    x: next.x + 0.5,
+    y: next.y + 0.5
+  };
+};
+
+const getUnitSegmentSpeedScale = (
+  state: WorldState,
+  unit: Unit,
+  target: RouteMotionTarget,
+  position: RouteMotionPoint
+): number => {
+  const next = unit.path[target.index];
+  if (!next) {
+    return 1;
+  }
+  const tileX = Math.floor(position.x);
+  const tileY = Math.floor(position.y);
+  let scale = getMoveSpeedMultiplier(state, tileX, tileY, next.x, next.y);
+  if (unit.kind === "firefighter" && unit.sprayTarget) {
+    const distToSpray = Math.hypot(unit.sprayTarget.x - position.x, unit.sprayTarget.y - position.y);
+    if (distToSpray <= unit.hoseRange + Math.max(0.35, unit.radius * 0.35)) {
+      scale *= MOVING_SPRAY_SPEED_FACTOR;
+    }
+  }
+  return scale;
+};
 
 export function stepUnits(state: WorldState, delta: number): void {
   applyCommandIntentControl(state, delta);
@@ -21,31 +56,22 @@ export function stepUnits(state: WorldState, delta: number): void {
   });
 
   const advanceUnit = (unit: Unit) => {
-    if (unit.pathIndex < unit.path.length) {
-      const next = unit.path[unit.pathIndex];
-      const targetX = next.x + 0.5;
-      const targetY = next.y + 0.5;
-      const dx = targetX - unit.x;
-      const dy = targetY - unit.y;
-      const dist = Math.hypot(dx, dy);
-      const tile = getUnitTile(unit);
-      const speedMultiplier = getMoveSpeedMultiplier(state, tile.x, tile.y, next.x, next.y);
-      let step = unit.speed * speedMultiplier * delta;
-      if (unit.kind === "firefighter" && unit.sprayTarget) {
-        const distToSpray = Math.hypot(unit.sprayTarget.x - unit.x, unit.sprayTarget.y - unit.y);
-        if (distToSpray <= unit.hoseRange + Math.max(0.35, unit.radius * 0.35)) {
-          step *= MOVING_SPRAY_SPEED_FACTOR;
-        }
-      }
-      if (dist <= step || dist < 0.01) {
-        unit.x = targetX;
-        unit.y = targetY;
-        unit.pathIndex += 1;
-      } else {
-        unit.x += (dx / dist) * step;
-        unit.y += (dy / dist) * step;
-      }
+    if (unit.pathIndex >= unit.path.length) {
+      return;
     }
+    const result = advanceRouteMotion({
+      x: unit.x,
+      y: unit.y,
+      movementBudget: unit.speed * Math.max(0, delta),
+      getTarget: () => getUnitMotionTarget(unit),
+      getSegmentSpeedScale: (target, position) => getUnitSegmentSpeedScale(state, unit, target, position),
+      onReachTarget: () => {
+        unit.pathIndex += 1;
+      },
+      maxTargetsVisited: unit.path.length + 1
+    });
+    unit.x = result.x;
+    unit.y = result.y;
   };
 
   state.units.forEach((unit) => {

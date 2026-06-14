@@ -57,6 +57,7 @@ expect(clampTimeSpeedSliderValue(80) === 20, "Stale 80x slider values should san
   );
   expect(budget.requestedTimeSpeedValue === 80, "Budget telemetry should preserve the requested stale/debug speed.");
   expect(budget.effectiveTimeSpeedValue === 20, "Budget should cap stale/debug strategic speed to 20x.");
+  expect(budget.appliedTimeSpeedValue === 20, "Applied speed should match effective speed when no lower cap is present.");
   expect(budget.requestedSimulationStep === 20, "Requested step should reflect the raw 80x request.");
   expect(budget.appliedSimulationStep === 5, "Applied step should reflect the 20x cap.");
 }
@@ -69,7 +70,8 @@ expect(clampTimeSpeedSliderValue(80) === 20, "Stale 80x slider values should san
     incidentMode: false,
     threeTestVisible: true
   });
-  console.log(`Budget fire cap appliedStep=${budget.appliedSimulationStep}`);
+  console.log(`Budget fire cap appliedSpeed=${budget.appliedTimeSpeedValue} appliedStep=${budget.appliedSimulationStep}`);
+  expect(budget.appliedTimeSpeedValue === 8, "Applied speed should expose lower fire/runtime step caps.");
   expect(budget.appliedSimulationStep === 2, "Fire/runtime step caps should still apply below the 20x cap.");
 }
 

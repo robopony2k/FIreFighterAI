@@ -700,6 +700,7 @@ export const createAppRuntime = (): AppRuntime => {
     const simSteps = readRecentPerf("sim.steps", now);
     const simRequestedSpeed = readRecentPerf("sim.requestedSpeed", now);
     const simEffectiveSpeed = readRecentPerf("sim.effectiveSpeed", now);
+    const simAppliedSpeed = readRecentPerf("sim.appliedSpeed", now);
     const simVisualSyncHold = readRecentPerf("sim.visualSyncHold", now);
     const simCalendar = readRecentPerf("sim.calendar", now);
     const simTownConstruction = readRecentPerf("sim.townConstruction", now);
@@ -725,7 +726,7 @@ export const createAppRuntime = (): AppRuntime => {
       `Flags: seasonal=${isThreeTestSeasonalEnabled() ? "1" : "0"} nosim=${isThreeTestNoSimEnabled() ? "1" : "0"} noterrain=${isThreeTestTerrainSyncDisabled() ? "1" : "0"} trees=${isThreeTestTreeRenderingEnabled() ? "1" : "0"} detailStruct=${isThreeTestDetailedStructuresEnabled() ? "1" : "0"} dpr=${getThreeTestDprCap().toFixed(2)} fps=${getFrameCapFps() > 0 ? getFrameCapFps().toFixed(0) : "off"}`,
       `Main:  ${formatMs(mainFrame?.avg)} avg  ${formatMs(mainFrame?.last)} last  ${formatMs(mainFrame?.max)} max`,
       `Main gap: ${formatMs(mainRafGap?.avg)} avg  ${formatMs(mainRafGap?.last)} last  hitch ${formatMs(mainHitch?.last)}`,
-      `Sim:   ${formatMs(simFrame?.avg)} frame  ${formatMs(simStep?.avg)} step  steps/frame ${formatNum(simSteps?.avg)} speed ${formatNum(simEffectiveSpeed?.avg)}/${formatNum(simRequestedSpeed?.avg)} hold ${formatNum(simVisualSyncHold?.avg)}`
+      `Sim:   ${formatMs(simFrame?.avg)} frame  ${formatMs(simStep?.avg)} step  steps/frame ${formatNum(simSteps?.avg)} speed applied/effective/requested ${formatNum(simAppliedSpeed?.avg)}/${formatNum(simEffectiveSpeed?.avg)}/${formatNum(simRequestedSpeed?.avg)} hold ${formatNum(simVisualSyncHold?.avg)}`
     ];
     lines.push(
       `Sim slices: cal ${formatMs(simCalendar?.avg)} town ${formatMs(simTownConstruction?.avg)} growth ${formatMs(simGrowth?.avg)} units ${formatMs(simUnits?.avg)} fire ${formatMs(simFire?.avg)} score ${formatMs(simScoring?.avg)} part ${formatMs(simParticles?.avg)} snap ${formatMs(simFireSnapshot?.avg)}`
@@ -837,6 +838,7 @@ export const createAppRuntime = (): AppRuntime => {
         const simAvg = readRecentPerf("sim.frame", now)?.avg ?? 0;
         const requestedSpeed = readRecentPerf("sim.requestedSpeed", now)?.avg ?? 0;
         const effectiveSpeed = readRecentPerf("sim.effectiveSpeed", now)?.avg ?? 0;
+        const appliedSpeed = readRecentPerf("sim.appliedSpeed", now)?.avg ?? 0;
         const visualSyncHold = readRecentPerf("sim.visualSyncHold", now)?.avg ?? 0;
         const climateAvg = readRecentPerf("3d.climateSync", now)?.avg ?? 0;
         const terrainAvg = readRecentPerf("3d.terrainSync", now)?.avg ?? 0;
@@ -861,7 +863,7 @@ export const createAppRuntime = (): AppRuntime => {
         const terrainSetCount = threePerf?.terrainSetCount ?? 0;
         console.log(
           `[perf] mode=3d main=${mainAvg.toFixed(2)}ms sim=${simAvg.toFixed(2)}ms ` +
-            `speed=${effectiveSpeed.toFixed(2)}/${requestedSpeed.toFixed(2)} hold=${visualSyncHold.toFixed(2)} ` +
+            `speed=${appliedSpeed.toFixed(2)}/${effectiveSpeed.toFixed(2)}/${requestedSpeed.toFixed(2)} hold=${visualSyncHold.toFixed(2)} ` +
             `seasonal=${isThreeTestSeasonalEnabled() ? 1 : 0} ` +
             `nosim=${isThreeTestNoSimEnabled() ? 1 : 0} ` +
             `noterrain=${isThreeTestTerrainSyncDisabled() ? 1 : 0} ` +
@@ -2009,9 +2011,9 @@ export const createAppRuntime = (): AppRuntime => {
           overlayRefs,
           showStartMenuOnBind: false,
           startThreeOnConfirm: true,
-          onMinimapPan: (tile) => {
+          onMinimapPan: (tile, options) => {
             if (threeTestController) {
-              threeTestController.panToTile(tile.x, tile.y);
+              threeTestController.panToTile(tile.x, tile.y, options);
               return;
             }
             renderState.cameraCenter = { x: tile.x + 0.5, y: tile.y + 0.5 };
@@ -2049,9 +2051,9 @@ export const createAppRuntime = (): AppRuntime => {
           overlayRefs,
           showStartMenuOnBind: !initialFxLabEnabled && !initialFireSimLabEnabled,
           startThreeOnConfirm: true,
-          onMinimapPan: (tile) => {
+          onMinimapPan: (tile, options) => {
             if (threeTestController) {
-              threeTestController.panToTile(tile.x, tile.y);
+              threeTestController.panToTile(tile.x, tile.y, options);
               return;
             }
             renderState.cameraCenter = { x: tile.x + 0.5, y: tile.y + 0.5 };

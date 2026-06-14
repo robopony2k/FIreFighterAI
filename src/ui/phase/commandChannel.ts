@@ -20,6 +20,10 @@ export type PhaseUiCommand =
       tile: PhaseUiTilePoint;
     }
   | {
+      type: "focus-active-fire";
+      direction: "previous" | "next";
+    }
+  | {
       type: "map-primary";
       tile: PhaseUiTilePoint;
       shiftKey?: boolean;
