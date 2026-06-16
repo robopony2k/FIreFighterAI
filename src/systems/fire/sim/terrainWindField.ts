@@ -169,9 +169,9 @@ const buildTerrainWindField = (state: WorldState): TerrainWindField => {
   const elevation = state.tileElevation;
   const shelter = new Float32Array(total);
   const local = { dx: baseDx, dy: baseDy, strength: baseStrength };
-  const minSpeed = clamp(finiteOr(state.fireSettings.terrainWindSpeedMin, 0.84), 0.05, 1);
-  const maxSpeed = Math.max(1, finiteOr(state.fireSettings.terrainWindSpeedMax, 1.14));
-  const obstructionPenalty = Math.max(0, finiteOr(state.fireSettings.terrainWindObstructionPenalty, 0.72));
+  const minSpeed = clamp(finiteOr(state.fireSettings.terrainWindSpeedMin, 0.55), 0.05, 1);
+  const maxSpeed = Math.max(1, finiteOr(state.fireSettings.terrainWindSpeedMax, 1.55));
+  const obstructionPenalty = Math.max(0, finiteOr(state.fireSettings.terrainWindObstructionPenalty, 1.45));
 
   for (let x = xStart; x !== xEnd; x += xStep) {
     for (let y = yStart; y !== yEnd; y += yStep) {
@@ -212,9 +212,21 @@ const buildTerrainWindField = (state: WorldState): TerrainWindField => {
         y - stepY,
         currentElevation
       );
-      const leeDrop = Math.max(0, upwindElevation - currentElevation - 0.018);
-      const nextShelter = clamp(inherited.shelter * 0.78 + leeDrop * obstructionPenalty * 1.35, 0, 0.55);
-      const turbulence = hashSigned(Math.floor(x / 4), Math.floor(y / 4), state.seed) * nextShelter * 0.22;
+      const downwindElevation = readElevation(
+        elevation,
+        cols,
+        rows,
+        x + stepX,
+        y + stepY,
+        currentElevation
+      );
+      const leeDrop = Math.max(0, upwindElevation - currentElevation - 0.012);
+      const windwardClimb = Math.max(0, currentElevation - upwindElevation - 0.01);
+      const downwindDrop = Math.max(0, currentElevation - downwindElevation - 0.01);
+      const crestLift = Math.min(windwardClimb, downwindDrop);
+      const nextShelter = clamp(inherited.shelter * 0.82 + leeDrop * obstructionPenalty * 1.55, 0, 0.68);
+      const wakeNoise = hashSigned(Math.floor(x / 3), Math.floor(y / 3), state.seed ^ 0x5bd1e995);
+      const turbulence = wakeNoise * nextShelter * 0.42;
       const localMagnitude = Math.hypot(local.dx, local.dy);
       const localDx = localMagnitude > MIN_WIND_MAGNITUDE ? local.dx / localMagnitude : baseDx;
       const localDy = localMagnitude > MIN_WIND_MAGNITUDE ? local.dy / localMagnitude : baseDy;
@@ -229,6 +241,7 @@ const buildTerrainWindField = (state: WorldState): TerrainWindField => {
         adjustedDy = baseDy;
       }
       const forwardDot = adjustedDx * baseDx + adjustedDy * baseDy;
+      const diversionBoost = clamp((1 - forwardDot) * 0.28, 0, 0.18);
       if (forwardDot < 0.55) {
         adjustedDx = adjustedDx * 0.45 + baseDx * 0.55;
         adjustedDy = adjustedDy * 0.45 + baseDy * 0.55;
@@ -240,7 +253,10 @@ const buildTerrainWindField = (state: WorldState): TerrainWindField => {
       shelter[idx] = nextShelter;
       field.dx[idx] = adjustedDx;
       field.dy[idx] = adjustedDy;
-      field.strength[idx] = clamp(local.strength * (1 - nextShelter), baseStrength * minSpeed, baseStrength * maxSpeed);
+      const windwardBoost = windwardClimb * 0.72 + crestLift * 1.55;
+      const wakeGust = Math.max(0, wakeNoise) * nextShelter * 0.46;
+      const speedMultiplier = 1 - nextShelter + windwardBoost + diversionBoost + wakeGust;
+      field.strength[idx] = clamp(local.strength * speedMultiplier, baseStrength * minSpeed, baseStrength * maxSpeed);
     }
   }
 

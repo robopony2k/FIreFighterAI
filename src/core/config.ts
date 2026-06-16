@@ -105,11 +105,11 @@ export const DEFAULT_FIRE_SETTINGS: FireSettings = {
   elevationSpreadMaxBoost: 1.28,
   elevationSpreadMaxPenalty: 0.82,
   elevationSpreadDeadZone: 0.012,
-  terrainWindSteerStrength: 0.2,
-  terrainWindSpeedMin: 0.84,
-  terrainWindSpeedMax: 1.14,
-  terrainWindObstructionPenalty: 0.72,
-  terrainWindFunnelBonus: 0.24
+  terrainWindSteerStrength: 0.55,
+  terrainWindSpeedMin: 0.55,
+  terrainWindSpeedMax: 1.55,
+  terrainWindObstructionPenalty: 1.45,
+  terrainWindFunnelBonus: 0.8
 };
 export const GROWTH_WEATHER_TEMP_MIN = 18;
 export const GROWTH_WEATHER_TEMP_MAX = 30;

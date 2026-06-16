@@ -1,32 +1,22 @@
 import type { WorldState } from "../../../core/state.js";
-import { TILE_ID_TO_TYPE } from "../../../core/state.js";
-import { ELEVATION_TINT_HIGH, ELEVATION_TINT_LOW, TILE_COLOR_RGB } from "../../../core/config.js";
 import type { HudState } from "../hudState.js";
 import { cycleMinimapMode } from "../hudState.js";
 import type { Rect, WidgetSlot, WidgetType } from "../hudLayout.js";
 import { HUD_PLANE_Y } from "../hudLayout.js";
 import type { HudInput, HudWidget } from "./hudWidget.js";
 import { computeViewportCenterOnPlane } from "../minimapViewport.js";
-import { buildThermalBackdropField, buildThermalHotspotField, paintThermalField } from "../../minimapRaster.js";
+import { getMinimapModeLabel, type MinimapMode } from "../../../ui/runtime/minimap/minimapModes.js";
+import {
+  buildThermalBackdropField,
+  isDynamicMinimapMode,
+  isTerrainRevisionMinimapMode,
+  MINIMAP_DYNAMIC_REFRESH_MS,
+  paintMinimapRaster
+} from "../../../ui/runtime/minimap/minimapRaster.js";
 import { generateWorldClimateSeed } from "../../../systems/climate/sim/worldClimateSeed.js";
 import { buildTerrainWindOverlaySamples } from "../../../systems/fire/rendering/terrainWindOverlay.js";
 
-type RGB = { r: number; g: number; b: number };
-
 const clamp = (value: number, min: number, max: number): number => Math.min(max, Math.max(min, value));
-const mix = (a: RGB, b: RGB, t: number): RGB => ({
-  r: a.r + (b.r - a.r) * t,
-  g: a.g + (b.g - a.g) * t,
-  b: a.b + (b.b - a.b) * t
-});
-
-const getMoistureColor = (moisture: number): RGB => {
-  const dry = { r: 125, g: 92, b: 58 };
-  const damp = { r: 94, g: 129, b: 84 };
-  const wet = { r: 60, g: 128, b: 179 };
-  const clamped = clamp(moisture, 0, 1);
-  return clamped <= 0.5 ? mix(dry, damp, clamped / 0.5) : mix(damp, wet, (clamped - 0.5) / 0.5);
-};
 
 export class MinimapWidget implements HudWidget {
   public readonly type: WidgetType = "minimap";
@@ -76,7 +66,7 @@ export class MinimapWidget implements HudWidget {
     ctx.font = "600 10px ui-sans-serif, system-ui, sans-serif";
     ctx.textAlign = "left";
     ctx.textBaseline = "middle";
-    ctx.fillText(`MODE: ${mode.toUpperCase()}`, this.modeRect.x + 6, this.modeRect.y + this.modeRect.height / 2);
+    ctx.fillText(`MODE: ${getMinimapModeLabel(mode).toUpperCase()}`, this.modeRect.x + 6, this.modeRect.y + this.modeRect.height / 2);
 
     const rawMapRect: Rect = {
       x: rect.x + padding,
@@ -120,7 +110,7 @@ export class MinimapWidget implements HudWidget {
     }
   }
 
-  private drawMinimap(ctx: CanvasRenderingContext2D, rect: Rect, world: WorldState, ui: HudState, mode: string): void {
+  private drawMinimap(ctx: CanvasRenderingContext2D, rect: Rect, world: WorldState, ui: HudState, mode: MinimapMode): void {
     if (!this.mapCtx || rect.width <= 2 || rect.height <= 2) {
       return;
     }
@@ -142,23 +132,18 @@ export class MinimapWidget implements HudWidget {
 
     const now = performance.now();
     const terrainRevision = world.terrainTypeRevision ?? 0;
-    const thermalIntervalMs = 180;
-    const thermalDue = mode === "thermal" && now - this.lastRasterMs >= thermalIntervalMs;
+    const dynamicDue = isDynamicMinimapMode(mode) && now - this.lastRasterMs >= MINIMAP_DYNAMIC_REFRESH_MS;
     const needsRaster =
       sizeChanged ||
       mode !== this.lastMode ||
-      (mode === "terrain" && terrainRevision !== this.lastTerrainRevision) ||
-      (mode === "thermal" && terrainRevision !== this.lastTerrainRevision) ||
-      thermalDue;
+      (isTerrainRevisionMinimapMode(mode) && terrainRevision !== this.lastTerrainRevision) ||
+      dynamicDue;
 
     if (needsRaster) {
       const image = this.mapCtx.createImageData(mapWidth, mapHeight);
       const data = image.data;
-      const tileTypes = world.tileTypeId;
-      const elevations = world.tileElevation;
-      const moisture = world.tileMoisture;
+      const pixelCount = mapWidth * mapHeight;
       if (mode === "thermal") {
-        const pixelCount = mapWidth * mapHeight;
         const thermalBackdropDirty =
           this.thermalBackdrop.length !== pixelCount ||
           sizeChanged ||
@@ -166,37 +151,15 @@ export class MinimapWidget implements HudWidget {
         if (thermalBackdropDirty) {
           this.thermalBackdrop = buildThermalBackdropField(world, mapWidth, mapHeight);
         }
-        const hotspots = buildThermalHotspotField(world, mapWidth, mapHeight);
-        paintThermalField(data, this.thermalBackdrop, hotspots, {
+      }
+      paintMinimapRaster(data, world, mode, mapWidth, mapHeight, {
+        thermalBackdrop: this.thermalBackdrop,
+        thermalPalette: {
           low: ui.theme.thermalLow,
           mid: ui.theme.thermalMid,
           high: ui.theme.thermalHigh
-        });
-      } else {
-        for (let y = 0; y < mapHeight; y += 1) {
-          const ty = Math.min(rows - 1, Math.floor((y / mapHeight) * rows));
-          for (let x = 0; x < mapWidth; x += 1) {
-            const tx = Math.min(cols - 1, Math.floor((x / mapWidth) * cols));
-            const idx = ty * cols + tx;
-            let color: RGB = { r: 40, g: 40, b: 42 };
-            if (mode === "terrain") {
-              const typeId = tileTypes[idx] ?? 0;
-              const tileType = TILE_ID_TO_TYPE[typeId] ?? "grass";
-              color = TILE_COLOR_RGB[tileType] ?? color;
-            } else if (mode === "moisture") {
-              color = getMoistureColor(moisture[idx] ?? 0);
-            } else {
-              const elev = clamp(elevations[idx] ?? 0, 0, 1);
-              color = mix(ELEVATION_TINT_LOW, ELEVATION_TINT_HIGH, elev);
-            }
-            const base = (y * mapWidth + x) * 4;
-            data[base] = color.r;
-            data[base + 1] = color.g;
-            data[base + 2] = color.b;
-            data[base + 3] = 255;
-          }
         }
-      }
+      });
       this.mapCtx.putImageData(image, 0, 0);
       this.lastMode = mode;
       this.lastMapWidth = mapWidth;
@@ -256,7 +219,7 @@ export class MinimapWidget implements HudWidget {
     ctx.restore();
   }
 
-  private drawWindOverlay(ctx: CanvasRenderingContext2D, rect: Rect, world: WorldState, mode: string): void {
+  private drawWindOverlay(ctx: CanvasRenderingContext2D, rect: Rect, world: WorldState, mode: MinimapMode): void {
     const climateSeed = generateWorldClimateSeed(world.seed);
     const prevailing = {
       dx: Math.cos(climateSeed.prevailingWindAngleRad),
@@ -270,14 +233,14 @@ export class MinimapWidget implements HudWidget {
     const barbColor =
       mode === "thermal"
         ? "rgba(115, 235, 255, 0.95)"
-        : mode === "elevation"
+        : mode === "topographic"
           ? "rgba(255, 238, 128, 0.96)"
           : mode === "moisture"
             ? "rgba(255, 247, 214, 0.96)"
             : "rgba(255, 255, 255, 0.96)";
     const drawBarb = (x: number, y: number, dx: number, dy: number, strength: number): void => {
       const mag = Math.hypot(dx, dy);
-      const scaledLen = barbLen * clamp(strength, 0, 1.2);
+      const scaledLen = barbLen * clamp(strength, 0, 1.6);
       if (strength <= 0.04 || mag <= 0.0001 || scaledLen < 2.25) {
         ctx.fillStyle = "rgba(8, 10, 14, 0.78)";
         ctx.beginPath();

@@ -14,6 +14,7 @@ export type TerrainWindOverlayOptions = {
   maxRows?: number;
   minSampleSpacingTiles?: number;
   calmThreshold?: number;
+  maxVisualSpeedMultiplier?: number;
   visualDeflectionScale?: number;
   maxVisualDeflectionAngleDeg?: number;
 };
@@ -67,6 +68,7 @@ export const buildTerrainWindOverlaySamples = (
   const samples: TerrainWindOverlaySample[] = [];
   const field = getTerrainWindField(world);
   const adjusted = { dx: wind.dx, dy: wind.dy, strength: wind.strength ?? 0 };
+  const maxVisualSpeed = Math.max(1, options.maxVisualSpeedMultiplier ?? 1.6);
   const deflectionScale = Math.max(1, options.visualDeflectionScale ?? 4);
   const maxDeflectionAngleRad = (Math.max(0, options.maxVisualDeflectionAngleDeg ?? 42) * Math.PI) / 180;
 
@@ -90,7 +92,7 @@ export const buildTerrainWindOverlaySamples = (
         y01: (y + 0.5) / rows,
         dx: displayDirection.dx,
         dy: displayDirection.dy,
-        strength: adjusted.strength
+        strength: clamp(adjusted.strength, 0, maxVisualSpeed)
       });
     }
   }

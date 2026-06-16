@@ -1,6 +1,8 @@
-import type { WorldState } from "../core/state.js";
-import { TILE_TYPE_IDS } from "../core/state.js";
-import { clamp } from "../core/utils.js";
+import { CONTOUR_BAND, CONTOUR_STEP, ELEVATION_TINT_HIGH, ELEVATION_TINT_LOW, LIGHT_DIR, TILE_COLOR_RGB } from "../../../core/config.js";
+import type { WorldState } from "../../../core/state.js";
+import { TILE_ID_TO_TYPE, TILE_TYPE_IDS } from "../../../core/state.js";
+import { clamp } from "../../../core/utils.js";
+import type { MinimapMode } from "./minimapModes.js";
 
 export type RGB = { r: number; g: number; b: number };
 
@@ -9,6 +11,14 @@ export type ThermalPalette = {
   mid: RGB;
   high: RGB;
 };
+
+export const DEFAULT_THERMAL_PALETTE: ThermalPalette = {
+  low: { r: 20, g: 20, b: 22 },
+  mid: { r: 192, g: 70, b: 40 },
+  high: { r: 242, g: 201, b: 76 }
+};
+
+export const MINIMAP_DYNAMIC_REFRESH_MS = 180;
 
 const TYPE_WATER = TILE_TYPE_IDS.water;
 const TYPE_FOREST = TILE_TYPE_IDS.forest;
@@ -23,11 +33,35 @@ const TYPE_SCRUB = TILE_TYPE_IDS.scrub;
 const TYPE_ROCKY = TILE_TYPE_IDS.rocky;
 const TYPE_BARE = TILE_TYPE_IDS.bare;
 
+export const isDynamicMinimapMode = (mode: MinimapMode): boolean => mode === "thermal";
+
+export const isTerrainRevisionMinimapMode = (mode: MinimapMode): boolean =>
+  mode === "terrain" || mode === "topographic" || mode === "thermal";
+
 const mix = (a: RGB, b: RGB, t: number): RGB => ({
   r: a.r + (b.r - a.r) * t,
   g: a.g + (b.g - a.g) * t,
   b: a.b + (b.b - a.b) * t
 });
+
+const scaleColor = (color: RGB, scale: number): RGB => ({
+  r: clamp(Math.round(color.r * scale), 0, 255),
+  g: clamp(Math.round(color.g * scale), 0, 255),
+  b: clamp(Math.round(color.b * scale), 0, 255)
+});
+
+const setPixel = (data: Uint8ClampedArray, pixelIndex: number, color: RGB): void => {
+  const base = pixelIndex * 4;
+  data[base] = Math.round(color.r);
+  data[base + 1] = Math.round(color.g);
+  data[base + 2] = Math.round(color.b);
+  data[base + 3] = 255;
+};
+
+const getTileRgb = (typeId: number, fallback: RGB = { r: 40, g: 40, b: 42 }): RGB => {
+  const tileType = TILE_ID_TO_TYPE[typeId] ?? "grass";
+  return TILE_COLOR_RGB[tileType] ?? fallback;
+};
 
 const buildRanges = (sourceSize: number, destSize: number): { start: Int32Array; end: Int32Array } => {
   const start = new Int32Array(destSize);
@@ -39,6 +73,83 @@ const buildRanges = (sourceSize: number, destSize: number): { start: Int32Array;
     end[i] = Math.min(sourceSize, max);
   }
   return { start, end };
+};
+
+const sampleElevation = (world: WorldState, x: number, y: number): number => {
+  const cols = world.grid.cols;
+  const rows = world.grid.rows;
+  const sx = clamp(x, 0, cols - 1);
+  const sy = clamp(y, 0, rows - 1);
+  const idx = sy * cols + sx;
+  return clamp(world.tileElevation[idx] ?? world.tiles[idx]?.elevation ?? 0, 0, 1);
+};
+
+const computeHillshade = (world: WorldState, x: number, y: number, strength: number): number => {
+  const left = sampleElevation(world, x - 1, y);
+  const right = sampleElevation(world, x + 1, y);
+  const up = sampleElevation(world, x, y - 1);
+  const down = sampleElevation(world, x, y + 1);
+  const slopeX = left - right;
+  const slopeY = up - down;
+  const light = (slopeX * LIGHT_DIR.x + slopeY * LIGHT_DIR.y) * strength;
+  return clamp(0.88 + light, 0.58, 1.22);
+};
+
+const getMoistureColor = (moisture: number): RGB => {
+  const dry = { r: 125, g: 92, b: 58 };
+  const damp = { r: 94, g: 129, b: 84 };
+  const wet = { r: 60, g: 128, b: 179 };
+  const clamped = clamp(moisture, 0, 1);
+  return clamped <= 0.5 ? mix(dry, damp, clamped / 0.5) : mix(damp, wet, (clamped - 0.5) / 0.5);
+};
+
+const isWaterSample = (world: WorldState, idx: number, typeId: number): boolean =>
+  typeId === TYPE_WATER || (world.tileRiverMask?.[idx] ?? 0) > 0;
+
+const getWaterColor = (world: WorldState, idx: number, typeId: number): RGB => {
+  const river = (world.tileRiverMask?.[idx] ?? 0) > 0 && typeId !== TYPE_WATER;
+  return river ? { r: 48, g: 112, b: 148 } : getTileRgb(TYPE_WATER, { r: 42, g: 86, b: 125 });
+};
+
+const isContourPixel = (world: WorldState, idx: number, x: number, y: number, elevation: number): boolean => {
+  const scaled = elevation / CONTOUR_STEP;
+  const band = Math.max(CONTOUR_BAND, 0.008);
+  const distance = Math.abs(elevation - Math.round(scaled) * CONTOUR_STEP);
+  if (distance <= band) {
+    return true;
+  }
+
+  const centerBand = Math.floor(elevation / CONTOUR_STEP);
+  return (
+    Math.floor(sampleElevation(world, x - 1, y) / CONTOUR_STEP) !== centerBand ||
+    Math.floor(sampleElevation(world, x + 1, y) / CONTOUR_STEP) !== centerBand ||
+    Math.floor(sampleElevation(world, x, y - 1) / CONTOUR_STEP) !== centerBand ||
+    Math.floor(sampleElevation(world, x, y + 1) / CONTOUR_STEP) !== centerBand
+  );
+};
+
+const getTopographicColor = (world: WorldState, idx: number, x: number, y: number, typeId: number): RGB => {
+  if (isWaterSample(world, idx, typeId)) {
+    return scaleColor(getWaterColor(world, idx, typeId), 0.92);
+  }
+
+  const elevation = clamp(world.tileElevation[idx] ?? world.tiles[idx]?.elevation ?? 0, 0, 1);
+  const bandedElevation = Math.floor(elevation / CONTOUR_STEP) * CONTOUR_STEP + CONTOUR_STEP * 0.35;
+  const highland = clamp(bandedElevation, 0, 1);
+  const shade = computeHillshade(world, x, y, 1.45);
+  let color = mix(ELEVATION_TINT_LOW, ELEVATION_TINT_HIGH, highland);
+
+  if (typeId === TYPE_BEACH || typeId === TYPE_FLOODPLAIN) {
+    color = mix(color, getTileRgb(typeId), 0.28);
+  }
+  color = scaleColor(color, shade);
+
+  if (isContourPixel(world, idx, x, y, elevation)) {
+    const major = Math.round(elevation / CONTOUR_STEP) % 4 === 0;
+    color = mix(color, major ? { r: 69, g: 58, b: 46 } : { r: 91, g: 80, b: 63 }, major ? 0.58 : 0.38);
+  }
+
+  return color;
 };
 
 const getAmbientTileHeat01 = (
@@ -261,10 +372,53 @@ export const paintThermalField = (
       heat01 <= 0.5
         ? mix(palette.low, palette.mid, heat01 / 0.5)
         : mix(palette.mid, palette.high, (heat01 - 0.5) / 0.5);
-    const base = i * 4;
-    data[base] = Math.round(color.r);
-    data[base + 1] = Math.round(color.g);
-    data[base + 2] = Math.round(color.b);
-    data[base + 3] = 255;
+    setPixel(data, i, color);
+  }
+};
+
+export type PaintMinimapRasterOptions = {
+  thermalBackdrop?: Float32Array;
+  thermalPalette?: ThermalPalette;
+};
+
+export const paintMinimapRaster = (
+  data: Uint8ClampedArray,
+  world: WorldState,
+  mode: MinimapMode,
+  mapWidth: number,
+  mapHeight: number,
+  options: PaintMinimapRasterOptions = {}
+): void => {
+  const cols = world.grid.cols;
+  const rows = world.grid.rows;
+  if (cols <= 0 || rows <= 0) {
+    return;
+  }
+
+  if (mode === "thermal") {
+    const backdrop = options.thermalBackdrop ?? buildThermalBackdropField(world, mapWidth, mapHeight);
+    const hotspots = buildThermalHotspotField(world, mapWidth, mapHeight);
+    paintThermalField(data, backdrop, hotspots, options.thermalPalette ?? DEFAULT_THERMAL_PALETTE);
+    return;
+  }
+
+  const tileTypes = world.tileTypeId;
+  const moisture = world.tileMoisture;
+  for (let y = 0; y < mapHeight; y += 1) {
+    const ty = Math.min(rows - 1, Math.floor((y / mapHeight) * rows));
+    for (let x = 0; x < mapWidth; x += 1) {
+      const tx = Math.min(cols - 1, Math.floor((x / mapWidth) * cols));
+      const idx = ty * cols + tx;
+      const typeId = tileTypes[idx] ?? 0;
+      let color: RGB;
+      if (mode === "terrain") {
+        color = getTileRgb(typeId);
+      } else if (mode === "topographic") {
+        color = getTopographicColor(world, idx, tx, ty, typeId);
+      } else {
+        color = getMoistureColor(moisture[idx] ?? world.tiles[idx]?.moisture ?? 0);
+      }
+      setPixel(data, y * mapWidth + x, color);
+    }
   }
 };

@@ -38,7 +38,12 @@ import { buildEnvironmentPalette, computeFireLoad01 } from "./environmentPalette
 import { buildLightingDirectorState, type LightingDirectorInput, type LightingDirectorState } from "./lightingDirector.js";
 import { createSeasonalSkyDome } from "./seasonalSky.js";
 import { sampleSeasonalWeatherVisualState } from "../systems/climate/rendering/seasonalWeatherVisualState.js";
-import { buildThermalBackdropField, buildThermalHotspotField, paintThermalField } from "./minimapRaster.js";
+import { getMinimapModeLabel, type MinimapMode } from "../ui/runtime/minimap/minimapModes.js";
+import {
+  DEFAULT_THERMAL_PALETTE,
+  buildThermalBackdropField,
+  paintMinimapRaster
+} from "../ui/runtime/minimap/minimapRaster.js";
 import {
   getFirestationAssetCache,
   getHouseAssetsCache,
@@ -389,6 +394,18 @@ const HOVER_DEBUG_TILE_WATCH_COLOR = 0xffd447;
 const HOVER_DEBUG_TILE_HIGH_COLOR = 0xff9738;
 const HOVER_DEBUG_TILE_CRITICAL_COLOR = 0xd13232;
 const MINIMAP_REDRAW_INTERVAL_MS = 140;
+const SATELLITE_MINIMAP_MAX_SIZE = 256;
+const SATELLITE_MINIMAP_REFRESH_DAYS = 3;
+type ThreeTestMinimapMode = MinimapMode | "satellite";
+const THREE_TEST_MINIMAP_MODES: readonly ThreeTestMinimapMode[] = [
+  "terrain",
+  "satellite",
+  "topographic",
+  "moisture",
+  "thermal"
+];
+const getThreeTestMinimapModeLabel = (mode: ThreeTestMinimapMode): string =>
+  mode === "satellite" ? "Satellite" : getMinimapModeLabel(mode);
 const UNIT_TRAY_UPDATE_INTERVAL_MS = 90;
 const UNIT_COMMAND_PATH_LIFT = 0.07;
 const UNIT_COMMAND_MARKER_LIFT = 0.1;
@@ -435,8 +452,6 @@ const CLIMATE_TEMP_DOMAIN_MAX = Math.ceil(
     VIRTUAL_CLIMATE_PARAMS.warmingPerYear * Math.max(0, CAREER_YEARS - 1)
 );
 
-type MinimapMode = "terrain" | "fire" | "moisture";
-
 const clamp01 = (value: number): number => Math.max(0, Math.min(1, value));
 const mixChannel = (a: number, b: number, t: number): number => a + (b - a) * t;
 const mixRgb = (
@@ -448,21 +463,6 @@ const mixRgb = (
   g: Math.round(mixChannel(a.g, b.g, t)),
   b: Math.round(mixChannel(a.b, b.b, t))
 });
-const getMinimapMoistureColor = (moisture: number): { r: number; g: number; b: number } => {
-  const dry = { r: 125, g: 92, b: 58 };
-  const damp = { r: 94, g: 129, b: 84 };
-  const wet = { r: 60, g: 128, b: 179 };
-  const clamped = clamp01(moisture);
-  if (clamped <= 0.5) {
-    return mixRgb(dry, damp, clamped / 0.5);
-  }
-  return mixRgb(damp, wet, (clamped - 0.5) / 0.5);
-};
-const MINIMAP_FIRE_PALETTE = {
-  low: { r: 20, g: 20, b: 22 },
-  mid: { r: 192, g: 70, b: 40 },
-  high: { r: 242, g: 201, b: 76 }
-};
 const getDisplayedTimeSpeedIndices = (options: readonly number[]): number[] => {
   const last = Math.max(0, options.length - 1);
   return [...new Set([0, Math.min(1, last), Math.min(2, last), last])];
@@ -1540,12 +1540,12 @@ export const createThreeTest = (
   const minimapLayersWrap = document.createElement("div");
   minimapLayersWrap.className = "three-test-minimap-layers";
   const minimapModeGroupName = `three-test-minimap-mode-${threeTestInitCount}`;
-  let minimapMode: MinimapMode = "terrain";
+  let minimapMode: ThreeTestMinimapMode = "terrain";
   const minimapOverlays = {
     wind: true,
     units: true
   };
-  const addModeToggle = (mode: MinimapMode, label: string): void => {
+  const addModeToggle = (mode: ThreeTestMinimapMode, label: string): void => {
     const wrap = document.createElement("label");
     wrap.className = "three-test-minimap-layer";
     const input = document.createElement("input");
@@ -1558,6 +1558,9 @@ export const createThreeTest = (
       }
       playUiCue("toggle");
       minimapMode = mode;
+      if (mode === "satellite") {
+        markSatelliteMinimapDirty();
+      }
       lastMinimapRasterAt = -Infinity;
     });
     const text = document.createElement("span");
@@ -1581,9 +1584,7 @@ export const createThreeTest = (
     wrap.append(input, text);
     minimapLayersWrap.appendChild(wrap);
   };
-  addModeToggle("terrain", "Terrain");
-  addModeToggle("fire", "Heat");
-  addModeToggle("moisture", "Moisture");
+  THREE_TEST_MINIMAP_MODES.forEach((mode) => addModeToggle(mode, getThreeTestMinimapModeLabel(mode)));
   addOverlayToggle("wind", "Wind");
   addOverlayToggle("units", "Units");
   minimapSummaryContent.append(minimapCanvas);
@@ -2266,6 +2267,203 @@ export const createThreeTest = (
   let lastMinimapThermalBackdropWidth = 0;
   let lastMinimapThermalBackdropHeight = 0;
   let lastMinimapThermalBackdropRevision = -1;
+  let satelliteMinimapTarget: THREE.WebGLRenderTarget | null = null;
+  let satelliteMinimapPixels = new Uint8Array(0);
+  let satelliteMinimapDirty = true;
+  let satelliteMinimapCacheKey = "";
+  let satelliteMinimapVisualRevision = 0;
+  let satelliteMinimapCapturedDay = -Infinity;
+  let satelliteMinimapRetryAfterMs = -Infinity;
+  const satelliteMinimapCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.1, 1000);
+  const satelliteMinimapCanvas = document.createElement("canvas");
+  const satelliteMinimapCtx = satelliteMinimapCanvas.getContext("2d");
+
+  const markSatelliteMinimapDirty = (): void => {
+    satelliteMinimapDirty = true;
+  };
+
+  const markSatelliteMinimapVisualsDirty = (): void => {
+    satelliteMinimapVisualRevision += 1;
+    markSatelliteMinimapDirty();
+  };
+
+  const disposeSatelliteMinimapTarget = (): void => {
+    if (!satelliteMinimapTarget) {
+      return;
+    }
+    satelliteMinimapTarget.dispose();
+    satelliteMinimapTarget = null;
+  };
+
+  const ensureSatelliteMinimapTarget = (width: number, height: number): THREE.WebGLRenderTarget | null => {
+    if (satelliteMinimapTarget && satelliteMinimapTarget.width === width && satelliteMinimapTarget.height === height) {
+      return satelliteMinimapTarget;
+    }
+    disposeSatelliteMinimapTarget();
+    try {
+      satelliteMinimapTarget = new THREE.WebGLRenderTarget(width, height, {
+        depthBuffer: true,
+        stencilBuffer: false
+      });
+      satelliteMinimapTarget.texture.generateMipmaps = false;
+      satelliteMinimapTarget.texture.minFilter = THREE.LinearFilter;
+      satelliteMinimapTarget.texture.magFilter = THREE.LinearFilter;
+      satelliteMinimapTarget.texture.colorSpace = THREE.SRGBColorSpace;
+      return satelliteMinimapTarget;
+    } catch (error) {
+      satelliteMinimapRetryAfterMs = performance.now() + 1000;
+      console.warn("[threeTest] Satellite minimap render target allocation failed.", error);
+      return null;
+    }
+  };
+
+  const getSatelliteMinimapCaptureSize = (width: number, height: number): { width: number; height: number } => {
+    const maxDim = Math.max(width, height, 1);
+    const scale = Math.min(1, SATELLITE_MINIMAP_MAX_SIZE / maxDim);
+    return {
+      width: Math.max(1, Math.floor(width * scale)),
+      height: Math.max(1, Math.floor(height * scale))
+    };
+  };
+
+  const fitSatelliteMinimapCamera = (width: number, height: number): void => {
+    const terrainSize = lastTerrainSize;
+    if (!terrainSize) {
+      return;
+    }
+    const terrainWidth = Math.max(1, terrainSize.width);
+    const terrainDepth = Math.max(1, terrainSize.depth);
+    const aspect = Math.max(0.01, width / Math.max(1, height));
+    let viewWidth = terrainWidth;
+    let viewDepth = viewWidth / aspect;
+    if (viewDepth < terrainDepth) {
+      viewDepth = terrainDepth;
+      viewWidth = viewDepth * aspect;
+    }
+    const span = Math.max(viewWidth, viewDepth);
+    satelliteMinimapCamera.left = -viewWidth * 0.5;
+    satelliteMinimapCamera.right = viewWidth * 0.5;
+    satelliteMinimapCamera.top = viewDepth * 0.5;
+    satelliteMinimapCamera.bottom = -viewDepth * 0.5;
+    satelliteMinimapCamera.near = 0.1;
+    satelliteMinimapCamera.far = Math.max(500, span * 6);
+    satelliteMinimapCamera.position.set(0, Math.max(80, span * 2), 0.001);
+    satelliteMinimapCamera.up.set(0, 0, -1);
+    satelliteMinimapCamera.lookAt(0, 0, 0);
+    satelliteMinimapCamera.updateProjectionMatrix();
+  };
+
+  const getSatelliteMinimapCacheKey = (width: number, height: number): string => {
+    const size = lastTerrainSize;
+    const sizeKey = size ? `${size.width.toFixed(2)}x${size.depth.toFixed(2)}` : "no-terrain";
+    return [
+      width,
+      height,
+      world.grid.cols,
+      world.grid.rows,
+      sizeKey,
+      satelliteMinimapVisualRevision
+    ].join(":");
+  };
+
+  const captureSatelliteMinimap = (width: number, height: number, cacheKey: string): boolean => {
+    if (!lastTerrainSize || !satelliteMinimapCtx) {
+      return false;
+    }
+    const target = ensureSatelliteMinimapTarget(width, height);
+    if (!target) {
+      return false;
+    }
+
+    fitSatelliteMinimapCamera(width, height);
+    const requiredPixels = width * height * 4;
+    if (satelliteMinimapPixels.length !== requiredPixels) {
+      satelliteMinimapPixels = new Uint8Array(requiredPixels);
+    }
+    if (satelliteMinimapCanvas.width !== width || satelliteMinimapCanvas.height !== height) {
+      satelliteMinimapCanvas.width = width;
+      satelliteMinimapCanvas.height = height;
+    }
+
+    const previousTarget = renderer.getRenderTarget();
+    const previousViewport = new THREE.Vector4();
+    const previousScissor = new THREE.Vector4();
+    const previousClearColor = new THREE.Color();
+    renderer.getViewport(previousViewport);
+    renderer.getScissor(previousScissor);
+    const previousScissorTest = renderer.getScissorTest();
+    renderer.getClearColor(previousClearColor);
+    const previousClearAlpha = renderer.getClearAlpha();
+    const previousXrEnabled = renderer.xr.enabled;
+
+    try {
+      renderer.xr.enabled = false;
+      renderer.setRenderTarget(target);
+      renderer.setViewport(0, 0, width, height);
+      renderer.setScissorTest(false);
+      renderer.setClearColor(0x21485f, 1);
+      renderer.clear(true, true, true);
+      renderer.render(scene, satelliteMinimapCamera);
+      renderer.readRenderTargetPixels(target, 0, 0, width, height, satelliteMinimapPixels);
+
+      const image = satelliteMinimapCtx.createImageData(width, height);
+      const stride = width * 4;
+      for (let y = 0; y < height; y += 1) {
+        const sourceStart = (height - 1 - y) * stride;
+        const targetStart = y * stride;
+        image.data.set(satelliteMinimapPixels.subarray(sourceStart, sourceStart + stride), targetStart);
+      }
+      satelliteMinimapCtx.putImageData(image, 0, 0);
+      satelliteMinimapCacheKey = cacheKey;
+      satelliteMinimapCapturedDay = world.careerDay ?? 0;
+      satelliteMinimapDirty = false;
+      satelliteMinimapRetryAfterMs = -Infinity;
+      return true;
+    } catch (error) {
+      satelliteMinimapDirty = true;
+      satelliteMinimapRetryAfterMs = performance.now() + 1000;
+      console.warn("[threeTest] Satellite minimap capture failed; keeping the previous cached image.", error);
+      return false;
+    } finally {
+      renderer.setRenderTarget(previousTarget);
+      renderer.setViewport(previousViewport);
+      renderer.setScissor(previousScissor);
+      renderer.setScissorTest(previousScissorTest);
+      renderer.setClearColor(previousClearColor, previousClearAlpha);
+      renderer.xr.enabled = previousXrEnabled;
+    }
+  };
+
+  const drawSatelliteMinimapCanvas = (ctx: CanvasRenderingContext2D, width: number, height: number): void => {
+    const captureSize = getSatelliteMinimapCaptureSize(width, height);
+    const cacheKey = getSatelliteMinimapCacheKey(captureSize.width, captureSize.height);
+    const currentDay = world.careerDay ?? 0;
+    const staleByDays =
+      Number.isFinite(satelliteMinimapCapturedDay) &&
+      currentDay - satelliteMinimapCapturedDay >= SATELLITE_MINIMAP_REFRESH_DAYS;
+    const needsCapture =
+      satelliteMinimapDirty ||
+      satelliteMinimapCanvas.width <= 0 ||
+      satelliteMinimapCanvas.height <= 0 ||
+      satelliteMinimapCacheKey !== cacheKey ||
+      staleByDays;
+
+    if (needsCapture && performance.now() >= satelliteMinimapRetryAfterMs) {
+      captureSatelliteMinimap(captureSize.width, captureSize.height, cacheKey);
+    }
+
+    ctx.clearRect(0, 0, width, height);
+    if (satelliteMinimapCanvas.width > 0 && satelliteMinimapCanvas.height > 0) {
+      const smoothing = ctx.imageSmoothingEnabled;
+      ctx.imageSmoothingEnabled = true;
+      ctx.drawImage(satelliteMinimapCanvas, 0, 0, width, height);
+      ctx.imageSmoothingEnabled = smoothing;
+      return;
+    }
+    ctx.fillStyle = "#21485f";
+    ctx.fillRect(0, 0, width, height);
+  };
+
   const drawMinimapCanvas = (canvasElement: HTMLCanvasElement): void => {
     const rect = canvasElement.getBoundingClientRect();
     if (rect.width <= 2 || rect.height <= 2 || world.grid.cols <= 0 || world.grid.rows <= 0) {
@@ -2281,11 +2479,15 @@ export const createThreeTest = (
     if (!ctx) {
       return;
     }
+    if (minimapMode === "satellite") {
+      drawSatelliteMinimapCanvas(ctx, width, height);
+      return;
+    }
     const image = ctx.createImageData(width, height);
     const data = image.data;
     const cols = world.grid.cols;
     const rows = world.grid.rows;
-    if (minimapMode === "fire") {
+    if (minimapMode === "thermal") {
       const terrainRevision = world.terrainTypeRevision ?? 0;
       if (
         lastMinimapThermalBackdrop.length !== width * height ||
@@ -2298,26 +2500,11 @@ export const createThreeTest = (
         lastMinimapThermalBackdropHeight = height;
         lastMinimapThermalBackdropRevision = terrainRevision;
       }
-      const hotspots = buildThermalHotspotField(world, width, height);
-      paintThermalField(data, lastMinimapThermalBackdrop, hotspots, MINIMAP_FIRE_PALETTE);
-    } else {
-      for (let py = 0; py < height; py += 1) {
-        const ty = Math.max(0, Math.min(rows - 1, Math.floor((py / height) * rows)));
-        for (let px = 0; px < width; px += 1) {
-          const tx = Math.max(0, Math.min(cols - 1, Math.floor((px / width) * cols)));
-          const idx = ty * cols + tx;
-          const color =
-            minimapMode === "terrain"
-              ? getTileColor(world.tileTypeId[idx] ?? 0)
-              : getMinimapMoistureColor(world.tileMoisture[idx] ?? 0);
-          const base = (py * width + px) * 4;
-          data[base] = color.r;
-          data[base + 1] = color.g;
-          data[base + 2] = color.b;
-          data[base + 3] = 255;
-        }
-      }
     }
+    paintMinimapRaster(data, world, minimapMode, width, height, {
+      thermalBackdrop: lastMinimapThermalBackdrop,
+      thermalPalette: DEFAULT_THERMAL_PALETTE
+    });
     ctx.putImageData(image, 0, 0);
     if (minimapOverlays.units && world.units.length > 0) {
       ctx.save();
@@ -2341,14 +2528,16 @@ export const createThreeTest = (
       const len = Math.max(8, Math.min(width, height) * 0.08);
       const barbLen = Math.max(9, Math.min(width, height) * 0.07);
       const barbColor =
-        minimapMode === "fire"
+        minimapMode === "thermal"
           ? "rgba(115, 235, 255, 0.95)"
-          : minimapMode === "moisture"
-            ? "rgba(255, 247, 214, 0.96)"
-            : "rgba(255, 255, 255, 0.96)";
+          : minimapMode === "topographic"
+            ? "rgba(255, 238, 128, 0.96)"
+            : minimapMode === "moisture"
+              ? "rgba(255, 247, 214, 0.96)"
+              : "rgba(255, 255, 255, 0.96)";
       const drawBarb = (x: number, y: number, dx: number, dy: number, strength: number): void => {
         const mag = Math.hypot(dx, dy);
-        const scaledLen = barbLen * Math.max(0, Math.min(1.2, strength));
+        const scaledLen = barbLen * Math.max(0, Math.min(1.6, strength));
         if (strength <= 0.04 || mag <= 0.0001 || scaledLen < 2.25) {
           ctx.fillStyle = "rgba(8, 10, 14, 0.78)";
           ctx.beginPath();
@@ -6445,6 +6634,7 @@ export const createThreeTest = (
     lastTerrainWater = null;
     lastTerrainSurface = null;
     lastTerrainSize = null;
+    disposeSatelliteMinimapTarget();
     disposeStructureOverlay();
     clearUnitCommandVisuals();
     clearEvacuationVisuals();
@@ -7726,6 +7916,8 @@ export const createThreeTest = (
         assetRebuildPending = false;
       }
       const intent = normalizeTerrainUpdateIntent(updateIntent, Boolean(nextSample.fastUpdate));
+      const satelliteRelevantTerrainUpdate =
+        intent.geometry || intent.vegetation || intent.roads || intent.structure || intent.debug;
       threePerf.terrainSetIntent = intent.label;
       threePerf.terrainSetPath = "pending";
       const roadOnly = isOnlyTerrainUpdateIntent(intent, "roads");
@@ -7778,6 +7970,9 @@ export const createThreeTest = (
         const structureStartedAt = performance.now();
         rebuildStructureOverlay(nextSample, nextSurface);
         recordTerrainSetTiming("structure", performance.now() - structureStartedAt);
+        if (satelliteRelevantTerrainUpdate) {
+          markSatelliteMinimapVisualsDirty();
+        }
         requestShadowRefresh();
         return;
       }
@@ -7849,6 +8044,9 @@ export const createThreeTest = (
         lastStructureRevision = nextSample.structureRevision ?? -1;
         lastStructureOverlayKey = `${nextSample.cols}x${nextSample.rows}:${nextSample.worldSeed ?? -1}`;
         ground.visible = true;
+        if (satelliteRelevantTerrainUpdate) {
+          markSatelliteMinimapVisualsDirty();
+        }
         return;
       }
       if (!nextSurface) {
@@ -7902,6 +8100,9 @@ export const createThreeTest = (
       const structureStartedAt = performance.now();
       rebuildStructureOverlay(nextSample, nextSurface);
       recordTerrainSetTiming("structure", performance.now() - structureStartedAt);
+      if (satelliteRelevantTerrainUpdate) {
+        markSatelliteMinimapVisualsDirty();
+      }
       requestShadowRefresh();
     } finally {
       const terrainSetMs = performance.now() - setTerrainStartedAt;
@@ -7961,6 +8162,7 @@ export const createThreeTest = (
     roadMaterial.map = roadOverlay;
     roadMaterial.needsUpdate = true;
     terrainRoadOverlayMesh.userData.roadOverlayVersion = nextRoadVersion;
+    markSatelliteMinimapVisualsDirty();
   };
   const needTreeAssets = runtimeSettings.trees && !treeAssets;
   const needHouseAssets = THREE_TEST_DETAILED_STRUCTURES_ENABLED && !houseAssets;

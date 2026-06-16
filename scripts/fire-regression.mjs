@@ -887,16 +887,16 @@ const failures = [];
   if (Math.abs(flatStrength - 1) > 0.0001 || Math.abs(flatDy) > 0.0001) {
     failures.push("Flat terrain changed ambient wind.");
   }
-  if (!(ridgeStrength < flatStrength && Math.abs(ridgeDy) > 0.015)) {
+  if (!(ridgeStrength < flatStrength * 0.7 && Math.abs(ridgeDy) > 0.12)) {
     failures.push("Broad downwind ridge did not slow and deflect local wind.");
   }
-  if (!(descendingStrength > flatStrength)) {
+  if (!(descendingStrength > flatStrength * 1.1)) {
     failures.push("Lower downwind terrain did not preserve or increase effective wind strength.");
   }
-  if (Math.abs(steeredDy) <= 0.01) {
+  if (Math.abs(steeredDy) <= 0.07) {
     failures.push("Side terrain imbalance did not steer local wind direction.");
   }
-  if (!(corridorStrength > flatStrength)) {
+  if (!(corridorStrength > flatStrength * 1.35)) {
     failures.push("Low corridor with raised sides did not increase effective wind strength.");
   }
   if (Math.abs(corridorDy) > 0.015) {
@@ -976,13 +976,13 @@ const failures = [];
   if (Math.abs(flat.dx - 1) > 0.001 || Math.abs(flat.dy) > 0.001 || Math.abs(flat.strength - 1) > 0.001) {
     failures.push("Propagated terrain wind field changed flat terrain wind.");
   }
-  if (!(northShoulder.dy < -0.02 && southShoulder.dy > 0.02)) {
+  if (!(northShoulder.dy < -0.14 && southShoulder.dy > 0.14)) {
     failures.push("Propagated terrain wind did not split around a central ridge.");
   }
-  if (!(lee.strength < flat.strength * 0.92)) {
+  if (!(lee.strength < flat.strength * 0.82)) {
     failures.push("Propagated terrain wind did not create a sheltered lee behind a ridge.");
   }
-  if (!(valley.strength > flat.strength)) {
+  if (!(valley.strength > flat.strength * 1.3)) {
     failures.push("Propagated terrain wind did not accelerate through an aligned valley.");
   }
   if (
@@ -991,6 +991,75 @@ const failures = [];
     clampedDot < 0.55
   ) {
     failures.push("Propagated terrain wind field exceeded direction or speed clamps.");
+  }
+}
+
+{
+  const cols = 25;
+  const rows = 19;
+  const elevation = new Float32Array(cols * rows);
+  elevation.fill(0.42);
+  const world = {
+    grid: { cols, rows, totalTiles: cols * rows },
+    tileElevation: elevation,
+    wind: { name: "W", dx: -1, dy: 0, strength: 1 },
+    fireSettings: { ...DEFAULT_FIRE_SETTINGS },
+    terrainTypeRevision: 1,
+    seed: 7733
+  };
+  const setElev = (x, y, value) => {
+    elevation[y * cols + x] = value;
+  };
+  for (let x = 14; x <= 19; x += 1) {
+    for (let y = 5; y <= 13; y += 1) {
+      const normalizedDistance = Math.hypot((x - 16.5) / 3.2, (y - 9) / 4.2);
+      if (normalizedDistance < 1.25) {
+        setElev(x, y, 0.9 - Math.max(0, normalizedDistance) * 0.12);
+      }
+    }
+  }
+  for (let x = 7; x <= 15; x += 1) {
+    setElev(x, 12, 0.28);
+    setElev(x, 13, 0.25);
+    setElev(x, 14, 0.32);
+  }
+  for (let y = 10; y <= 16; y += 1) {
+    setElev(12, y, 0.26);
+    setElev(13, y, 0.3);
+  }
+  for (let x = 5; x <= 11; x += 1) {
+    for (let y = 7; y <= 11; y += 1) {
+      setElev(x, y, 0.36);
+    }
+  }
+  const field = getTerrainWindField(world);
+  const sample = (x, y) => sampleTerrainWindAt(field, y * cols + x, world.wind);
+  const windwardSlope = sample(18, 9);
+  const crest = sample(16, 9);
+  const northSplit = sample(15, 4);
+  const southSplit = sample(15, 14);
+  const lee = sample(12, 9);
+  const baseOps = sample(11, 10);
+  const lakeCorridor = sample(12, 13);
+  const westRecovery = sample(6, 9);
+
+  console.log(
+    `East Massif Wind\nwindward=${windwardSlope.strength.toFixed(3)} crest=${crest.strength.toFixed(3)} ` +
+      `northDy=${northSplit.dy.toFixed(3)} southDy=${southSplit.dy.toFixed(3)} ` +
+      `lee=${lee.strength.toFixed(3)} base=${baseOps.strength.toFixed(3)}/${baseOps.dy.toFixed(3)} ` +
+      `corridor=${lakeCorridor.strength.toFixed(3)}/${lakeCorridor.dy.toFixed(3)} west=${westRecovery.strength.toFixed(3)}`
+  );
+  if (!(windwardSlope.strength > 1.15 && crest.strength > 1.45)) {
+    failures.push("Eastern massif did not accelerate windward slope and crest flow.");
+  }
+  if (!(northSplit.dy < -0.18 && southSplit.dy > 0.07 && northSplit.strength > 1 && southSplit.strength > 1)) {
+    failures.push("Eastern massif did not split incoming flow around its north and south edges.");
+  }
+  if (!(lee.strength < 0.7 && baseOps.strength >= 0.55 && baseOps.strength < 0.85 && Math.abs(baseOps.dy) > 0.1)) {
+    failures.push("Eastern massif lee did not create sheltered variable wind near the central basin.");
+  }
+  if (!(lakeCorridor.strength > lee.strength && lakeCorridor.dy > 0.04 && westRecovery.strength > lakeCorridor.strength)) {
+    failures.push("Lake corridor and downstream terrain did not redirect and recover lee flow.");
   }
 }
 

@@ -1,4 +1,5 @@
 import type { ClimateForecast } from "../../core/types.js";
+import { MINIMAP_MODES, type MinimapMode } from "../../ui/runtime/minimap/minimapModes.js";
 import type { HudCameraSnapshot } from "./minimapViewport.js";
 import { DEFAULT_WIDGET_ASSIGNMENTS, WidgetSlot, WidgetType, WIDGET_TYPES } from "./hudLayout.js";
 
@@ -11,9 +12,6 @@ export type HudToast = {
   remainingMs: number;
   createdAt: number;
 };
-
-export const MINIMAP_MODES = ["terrain", "elevation", "moisture", "thermal"] as const;
-export type MinimapMode = (typeof MINIMAP_MODES)[number];
 
 export type HudSlotState = {
   widget: WidgetType;

@@ -1,35 +1,19 @@
 import type { WorldState } from "../../../core/state.js";
-import { TILE_ID_TO_TYPE } from "../../../core/state.js";
-import { ELEVATION_TINT_HIGH, ELEVATION_TINT_LOW, TILE_COLOR_RGB } from "../../../core/config.js";
-import { buildThermalBackdropField, buildThermalHotspotField, paintThermalField } from "../../../render/minimapRaster.js";
+import { getMinimapModeLabel, MINIMAP_MODES, type MinimapMode } from "../../runtime/minimap/minimapModes.js";
+import {
+  buildThermalBackdropField,
+  DEFAULT_THERMAL_PALETTE,
+  isDynamicMinimapMode,
+  isTerrainRevisionMinimapMode,
+  MINIMAP_DYNAMIC_REFRESH_MS,
+  paintMinimapRaster
+} from "../../runtime/minimap/minimapRaster.js";
 import { getRuntimeWidgetTitle } from "../../runtime/widgets/registry.js";
 import type { MinimapWidgetModel } from "../../runtime/widgets/models.js";
 import { generateWorldClimateSeed } from "../../../systems/climate/sim/worldClimateSeed.js";
 import { buildTerrainWindOverlaySamples } from "../../../systems/fire/rendering/terrainWindOverlay.js";
 
-type RGB = { r: number; g: number; b: number };
-type MiniMapMode = "terrain" | "elevation" | "moisture" | "thermal";
-
-const MODES: readonly MiniMapMode[] = ["terrain", "elevation", "moisture", "thermal"];
-const THERMAL_LOW: RGB = { r: 20, g: 20, b: 22 };
-const THERMAL_MID: RGB = { r: 192, g: 70, b: 40 };
-const THERMAL_HIGH: RGB = { r: 242, g: 201, b: 76 };
-const THERMAL_REFRESH_MS = 180;
-
 const clamp = (value: number, min: number, max: number): number => Math.min(max, Math.max(min, value));
-const mix = (a: RGB, b: RGB, t: number): RGB => ({
-  r: a.r + (b.r - a.r) * t,
-  g: a.g + (b.g - a.g) * t,
-  b: a.b + (b.b - a.b) * t
-});
-
-const getMoistureColor = (moisture: number): RGB => {
-  const dry = { r: 125, g: 92, b: 58 };
-  const damp = { r: 94, g: 129, b: 84 };
-  const wet = { r: 60, g: 128, b: 179 };
-  const clamped = clamp(moisture, 0, 1);
-  return clamped <= 0.5 ? mix(dry, damp, clamped / 0.5) : mix(damp, wet, (clamped - 0.5) / 0.5);
-};
 
 export type MiniMapPanelData = MinimapWidgetModel;
 
@@ -70,7 +54,7 @@ export const createMiniMapPanel = (): MiniMapPanelView => {
   const rasterCtx = rasterCanvas.getContext("2d");
 
   let modeIndex = 0;
-  let lastMode: MiniMapMode = "terrain";
+  let lastMode: MinimapMode = "terrain";
   let lastTerrainRevision = -1;
   let lastRasterWidth = 0;
   let lastRasterHeight = 0;
@@ -78,17 +62,17 @@ export const createMiniMapPanel = (): MiniMapPanelView => {
   let thermalBackdrop: Float32Array = new Float32Array(0);
 
   const updateModeLabel = (): void => {
-    modeButton.textContent = MODES[modeIndex].charAt(0).toUpperCase() + MODES[modeIndex].slice(1);
+    modeButton.textContent = getMinimapModeLabel(MINIMAP_MODES[modeIndex] ?? "terrain");
   };
 
   modeButton.addEventListener("click", () => {
-    modeIndex = (modeIndex + 1) % MODES.length;
+    modeIndex = (modeIndex + 1) % MINIMAP_MODES.length;
     updateModeLabel();
     lastMode = "terrain";
   });
   updateModeLabel();
 
-  const drawRaster = (world: WorldState, mode: MiniMapMode, mapWidth: number, mapHeight: number): void => {
+  const drawRaster = (world: WorldState, mode: MinimapMode, mapWidth: number, mapHeight: number): void => {
     if (!rasterCtx) {
       return;
     }
@@ -97,44 +81,10 @@ export const createMiniMapPanel = (): MiniMapPanelView => {
       rasterCanvas.height = mapHeight;
     }
     const image = rasterCtx.createImageData(mapWidth, mapHeight);
-    const data = image.data;
-    const cols = world.grid.cols;
-    const rows = world.grid.rows;
-    const tileTypes = world.tileTypeId;
-    const elevations = world.tileElevation;
-    const moisture = world.tileMoisture;
-    if (mode === "thermal") {
-      const hotspots = buildThermalHotspotField(world, mapWidth, mapHeight);
-      paintThermalField(data, thermalBackdrop, hotspots, {
-        low: THERMAL_LOW,
-        mid: THERMAL_MID,
-        high: THERMAL_HIGH
-      });
-    } else {
-      for (let y = 0; y < mapHeight; y += 1) {
-        const ty = Math.min(rows - 1, Math.floor((y / mapHeight) * rows));
-        for (let x = 0; x < mapWidth; x += 1) {
-          const tx = Math.min(cols - 1, Math.floor((x / mapWidth) * cols));
-          const idx = ty * cols + tx;
-          let color: RGB = { r: 40, g: 40, b: 42 };
-          if (mode === "terrain") {
-            const typeId = tileTypes[idx] ?? 0;
-            const tileType = TILE_ID_TO_TYPE[typeId] ?? "grass";
-            color = TILE_COLOR_RGB[tileType] ?? color;
-          } else if (mode === "moisture") {
-            color = getMoistureColor(moisture[idx] ?? 0);
-          } else {
-            const elev = clamp(elevations[idx] ?? 0, 0, 1);
-            color = mix(ELEVATION_TINT_LOW, ELEVATION_TINT_HIGH, elev);
-          }
-          const base = (y * mapWidth + x) * 4;
-          data[base] = color.r;
-          data[base + 1] = color.g;
-          data[base + 2] = color.b;
-          data[base + 3] = 255;
-        }
-      }
-    }
+    paintMinimapRaster(image.data, world, mode, mapWidth, mapHeight, {
+      thermalBackdrop,
+      thermalPalette: DEFAULT_THERMAL_PALETTE
+    });
     rasterCtx.putImageData(image, 0, 0);
   };
 
@@ -152,7 +102,7 @@ export const createMiniMapPanel = (): MiniMapPanelView => {
     const barbLen = Math.max(9, size * 0.072);
     const drawBarb = (sx: number, sy: number, dx: number, dy: number, strength: number): void => {
       const mag = Math.hypot(dx, dy);
-      const scaledLen = barbLen * clamp(strength, 0, 1.2);
+      const scaledLen = barbLen * clamp(strength, 0, 1.6);
       if (strength <= 0.04 || mag <= 0.0001 || scaledLen < 2.25) {
         targetCtx.fillStyle = "rgba(8, 10, 14, 0.78)";
         targetCtx.beginPath();
@@ -243,7 +193,7 @@ export const createMiniMapPanel = (): MiniMapPanelView => {
         canvas.height = targetHeight;
       }
 
-      const mode = MODES[modeIndex];
+      const mode = MINIMAP_MODES[modeIndex] ?? "terrain";
       const cols = world.grid.cols;
       const rows = world.grid.rows;
       if (cols <= 0 || rows <= 0) {
@@ -257,14 +207,13 @@ export const createMiniMapPanel = (): MiniMapPanelView => {
 
       const now = performance.now();
       const terrainRevision = world.terrainTypeRevision ?? 0;
-      const thermalDue = mode === "thermal" && now - lastRasterMs >= THERMAL_REFRESH_MS;
+      const dynamicDue = isDynamicMinimapMode(mode) && now - lastRasterMs >= MINIMAP_DYNAMIC_REFRESH_MS;
       const needsRaster =
         mapWidth !== lastRasterWidth ||
         mapHeight !== lastRasterHeight ||
         mode !== lastMode ||
-        (mode === "terrain" && terrainRevision !== lastTerrainRevision) ||
-        (mode === "thermal" && terrainRevision !== lastTerrainRevision) ||
-        thermalDue;
+        (isTerrainRevisionMinimapMode(mode) && terrainRevision !== lastTerrainRevision) ||
+        dynamicDue;
       if (needsRaster) {
         if (
           mode === "thermal" &&

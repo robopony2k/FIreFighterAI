@@ -123,7 +123,7 @@ Design intent:
 
 ## UI/UX Goals
 
-- Clear, minimal HUD for time, risk, and wind. Minimap wind overlays show the global prevailing/current wind plus sparse propagated local wind barbs so players can read ridge deflection, valley channeling, and sheltered downwind wakes; barb length reflects local speed, with calm samples drawn as dots.
+- Clear, minimal HUD for time, risk, and wind. Runtime minimaps use mutually exclusive terrain, satellite, topographic, moisture, and heat base modes. Terrain, topographic, moisture, and heat are analytical raster modes; Satellite is a cached top-down 3D world capture refreshed on first selection, visual rebuilds, and sparse multi-day cadence rather than every fire or unit tick. Wind and unit indicators remain tactical overlays for the analytical modes, while Satellite stays an aesthetic world-recognition view without HUD, label, wind, or unit overlay markers. Minimap wind overlays show the global prevailing/current wind plus sparse propagated local wind barbs so players can read ridge deflection, valley channeling, and sheltered downwind wakes; barb length reflects local speed, with calm samples drawn as dots.
 - Banner / border shows "season" by color and decals (TBC) along with key metrics (budget, year etc)
 - Top right of screen - Forecast graph shows rolling 90-day fire risk with current-day marker.
 - Bottom right of screen - "Announcements" at key events ie a speech bubble from a News Station, Weather Presenter, Financial Advisor etc

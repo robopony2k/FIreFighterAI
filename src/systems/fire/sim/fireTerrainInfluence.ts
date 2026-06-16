@@ -150,11 +150,11 @@ export const resolveTerrainAdjustedWind = (
     return out;
   }
 
-  const steerStrength = Math.max(0, finiteOr(settings.terrainWindSteerStrength, 0.34));
-  const minSpeed = clamp(finiteOr(settings.terrainWindSpeedMin, 0.78), 0.05, 1);
-  const maxSpeed = Math.max(1, finiteOr(settings.terrainWindSpeedMax, 1.22));
-  const obstructionPenalty = Math.max(0, finiteOr(settings.terrainWindObstructionPenalty, 1.15));
-  const funnelBonus = Math.max(0, finiteOr(settings.terrainWindFunnelBonus, 0.42));
+  const steerStrength = Math.max(0, finiteOr(settings.terrainWindSteerStrength, 0.55));
+  const minSpeed = clamp(finiteOr(settings.terrainWindSpeedMin, 0.55), 0.05, 1);
+  const maxSpeed = Math.max(1, finiteOr(settings.terrainWindSpeedMax, 1.55));
+  const obstructionPenalty = Math.max(0, finiteOr(settings.terrainWindObstructionPenalty, 1.45));
+  const funnelBonus = Math.max(0, finiteOr(settings.terrainWindFunnelBonus, 0.8));
   if (steerStrength <= 0 && obstructionPenalty <= 0 && funnelBonus <= 0) {
     return out;
   }
@@ -203,20 +203,25 @@ export const resolveTerrainAdjustedWind = (
 
   const sideWallRise = Math.min(Math.max(leftRise, forwardLeftRise), Math.max(rightRise, forwardRightRise));
   const channelFloorDrop = Math.max(0, -downwindRise, upwindRise);
+  const windwardClimb = Math.max(0, -upwindRise);
+  const crestDrop = Math.max(0, -downwindRise);
+  const crestLift = Math.min(windwardClimb, crestDrop);
   let speedMultiplier = 1;
   if (downwindRise > 0) {
-    speedMultiplier -= downwindRise * obstructionPenalty;
+    speedMultiplier -= downwindRise * obstructionPenalty * 0.82;
   } else if (downwindRise < 0) {
-    speedMultiplier += -downwindRise * funnelBonus * 0.65;
+    speedMultiplier += -downwindRise * funnelBonus * 0.85;
   }
+  speedMultiplier += windwardClimb * funnelBonus * 0.42;
+  speedMultiplier += crestLift * funnelBonus * 1.3;
   if (sideWallRise > 0) {
-    speedMultiplier += sideWallRise * funnelBonus * (1 + clamp(channelFloorDrop * 2.5, 0, 0.65));
+    speedMultiplier += sideWallRise * funnelBonus * (1 + clamp(channelFloorDrop * 3.25, 0, 0.85));
   }
   speedMultiplier = clamp(speedMultiplier, minSpeed, maxSpeed);
 
   const sideImbalance = (leftRise - rightRise) * 0.45 + (forwardLeftRise - forwardRightRise) * 0.55;
-  const ridgeAhead = Math.max(0, downwindRise) * 0.7;
-  const steerAmount = clamp(sideImbalance * steerStrength * (1 + ridgeAhead), -0.45, 0.45);
+  const ridgeAhead = Math.max(0, downwindRise) * 1.15;
+  const steerAmount = clamp(sideImbalance * steerStrength * (1 + ridgeAhead), -0.62, 0.62);
   let adjustedDirX = dirX - leftX * steerAmount;
   let adjustedDirY = dirY - leftY * steerAmount;
   const adjustedMagnitude = Math.hypot(adjustedDirX, adjustedDirY);
