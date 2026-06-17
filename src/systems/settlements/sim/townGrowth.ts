@@ -66,11 +66,27 @@ import type {
   SettlementRoadAdapter,
   SettlementRoadOptions
 } from "../types/settlementTypes.js";
+import {
+  buildIntratownDiagnosticRouteId,
+  buildIntratownDiagnosticRouteLabel,
+  buildIntratownHouseDiagnosticId,
+  createDiagnosticTownRef,
+  emitSettlementRoadDiagnostic,
+  getDiagnosticRouteStats,
+  getRoadDiagnosticNowMs,
+  withDiagnosticRoute
+} from "../utils/settlementRoadDiagnostics.js";
+import type { RoadDiagnosticRouteGroup } from "../../roads/types/roadDiagnosticTuning.js";
+import type { RoadPathDiagnosticRouteReason } from "../../roads/types/roadPathDebugTypes.js";
 
 type GrowthMode = "mapgen" | "runtime";
 
 type SettlementGrowthTerrainMutationOptions = {
   mutateTerrain?: boolean;
+  diagnosticRouteGroup?: RoadDiagnosticRouteGroup;
+  diagnosticRouteId?: string;
+  diagnosticRouteLabel?: string;
+  diagnosticRouteReason?: RoadPathDiagnosticRouteReason;
 };
 
 export type GrowthContext = {
@@ -820,7 +836,7 @@ const bootstrapTownCoreRoads = (state: WorldState, town: Town, roadAdapter: Sett
       if (!target) {
         continue;
       }
-      if (!roadAdapter.carveRoad(state, localAnchor, target, buildRoadOptions(state))) {
+      if (!roadAdapter.carveRoad(state, localAnchor, target, buildGrowthRoadOptions(state, localAnchor, target))) {
         continue;
       }
       pushGrowthFrontier(town, target, dir.dx, dir.dy, pairIndex === 0 ? "primary" : "secondary");
@@ -1203,7 +1219,8 @@ const addInteriorBlockStreet = (
     if (hasStreetTargetBuffer(state, target, COMPACT_TOWN_BRANCH_TARGET_ROAD_BUFFER)) {
       continue;
     }
-    if (!roadAdapter.carveRoad(state, { x: anchor.x, y: anchor.y }, target, buildRoadOptions(state))) {
+    const start = { x: anchor.x, y: anchor.y };
+    if (!roadAdapter.carveRoad(state, start, target, buildGrowthRoadOptions(state, start, target))) {
       continue;
     }
     if (
@@ -1262,7 +1279,8 @@ const addMissingCompactAxisStreet = (
       if (!target || hasStreetTargetBuffer(state, target, COMPACT_TOWN_BRANCH_TARGET_ROAD_BUFFER)) {
         continue;
       }
-      if (!roadAdapter.carveRoad(state, { x: anchor.x, y: anchor.y }, target, buildRoadOptions(state))) {
+      const start = { x: anchor.x, y: anchor.y };
+      if (!roadAdapter.carveRoad(state, start, target, buildGrowthRoadOptions(state, start, target))) {
         continue;
       }
       town.growthFrontiers.push({
@@ -1312,7 +1330,7 @@ const addMissingCompactAxisStreet = (
     if (!target || hasStreetTargetBuffer(state, target, COMPACT_TOWN_BRANCH_TARGET_ROAD_BUFFER)) {
       continue;
     }
-    if (!roadAdapter.carveRoad(state, localAnchor, target, buildRoadOptions(state))) {
+    if (!roadAdapter.carveRoad(state, localAnchor, target, buildGrowthRoadOptions(state, localAnchor, target))) {
       continue;
     }
     town.growthFrontiers.push({
@@ -1354,6 +1372,74 @@ const buildRoadOptions = (state: WorldState): SettlementRoadOptions => ({
   pathMode: "normal",
   allowMountainPassFallback: false
 });
+
+const buildGrowthRoadOptions = (state: WorldState, start: Point, end: Point): SettlementRoadOptions => {
+  const distance = Math.hypot(end.x - start.x, end.y - start.y);
+  const padding = Math.max(16, Math.ceil(distance * 4));
+  const minX = Math.max(0, Math.min(start.x, end.x) - padding);
+  const maxX = Math.min(state.grid.cols - 1, Math.max(start.x, end.x) + padding);
+  const minY = Math.max(0, Math.min(start.y, end.y) - padding);
+  const maxY = Math.min(state.grid.rows - 1, Math.max(start.y, end.y) + padding);
+  const corridorArea = Math.max(1, (maxX - minX + 1) * (maxY - minY + 1));
+  return {
+    ...buildRoadOptions(state),
+    maxSearchNodeVisits: Math.min(corridorArea, Math.max(4096, Math.ceil(distance * 192))),
+    searchBounds: { minX, maxX, minY, maxY }
+  };
+};
+
+const tagGrowthRoadOptions = (
+  options: SettlementRoadOptions,
+  diagnostics?: SettlementGrowthTerrainMutationOptions
+): SettlementRoadOptions => {
+  const routeId = diagnostics?.diagnosticRouteId;
+  const routeLabel = diagnostics?.diagnosticRouteLabel;
+  const reason = diagnostics?.diagnosticRouteReason;
+  const tagged = diagnostics?.diagnosticRouteGroup
+    ? { ...options, diagnosticRouteGroup: diagnostics.diagnosticRouteGroup }
+    : options;
+  return routeId && routeLabel && reason
+    ? withDiagnosticRoute(tagged, routeId, routeLabel, "intratown", reason)
+    : tagged;
+};
+
+const createGrowthDiagnosticRoadAdapter = (
+  roadAdapter: SettlementRoadAdapter,
+  diagnostics?: SettlementGrowthTerrainMutationOptions
+): SettlementRoadAdapter => {
+  if (!diagnostics?.diagnosticRouteId || !diagnostics.diagnosticRouteLabel || !diagnostics.diagnosticRouteReason) {
+    return roadAdapter;
+  }
+  const tagOptions = (options: SettlementRoadOptions = {}): SettlementRoadOptions =>
+    tagGrowthRoadOptions(options, diagnostics);
+  return {
+    ...roadAdapter,
+    carveRoad: (state, start, end, options = {}) => roadAdapter.carveRoad(state, start, end, tagOptions(options)),
+    carveRoadAsync: roadAdapter.carveRoadAsync
+      ? (state, start, end, options = {}) => roadAdapter.carveRoadAsync!(state, start, end, tagOptions(options))
+      : undefined,
+    carveRoadDetailed: roadAdapter.carveRoadDetailed
+      ? (state, start, end, options = {}) => roadAdapter.carveRoadDetailed!(state, start, end, tagOptions(options))
+      : undefined,
+    carveRoadDetailedAsync: roadAdapter.carveRoadDetailedAsync
+      ? (state, start, end, options = {}) => roadAdapter.carveRoadDetailedAsync!(state, start, end, tagOptions(options))
+      : undefined,
+    carveRoadSequence: roadAdapter.carveRoadSequence
+      ? (state, segments) =>
+          roadAdapter.carveRoadSequence!(
+            state,
+            segments.map((segment) => ({ ...segment, options: tagOptions(segment.options ?? {}) }))
+          )
+      : undefined,
+    carveRoadSequenceAsync: roadAdapter.carveRoadSequenceAsync
+      ? (state, segments) =>
+          roadAdapter.carveRoadSequenceAsync!(
+            state,
+            segments.map((segment) => ({ ...segment, options: tagOptions(segment.options ?? {}) }))
+          )
+      : undefined
+  };
+};
 
 const determineExtensionLength = (town: Town, metrics?: TownEnvelopeMetrics): number => {
   if (town.streetArchetype === "ribbon") {
@@ -1457,7 +1543,8 @@ const extendTownFrontier = (
     if (!target) {
       continue;
     }
-    if (roadAdapter.carveRoad(state, { x: frontier.x, y: frontier.y }, target, buildRoadOptions(state))) {
+    const start = { x: frontier.x, y: frontier.y };
+    if (roadAdapter.carveRoad(state, start, target, buildGrowthRoadOptions(state, start, target))) {
       frontier.x = target.x;
       frontier.y = target.y;
       frontier.active = true;
@@ -1515,7 +1602,8 @@ const addSecondaryStreet = (
     if (!target) {
       continue;
     }
-    if (!roadAdapter.carveRoad(state, { x: source.x, y: source.y }, target, buildRoadOptions(state))) {
+    const start = { x: source.x, y: source.y };
+    if (!roadAdapter.carveRoad(state, start, target, buildGrowthRoadOptions(state, start, target))) {
       continue;
     }
     town.growthFrontiers.push({
@@ -1913,7 +2001,62 @@ const shrinkTown = (state: WorldState, town: Town, delta: number, roadAdapter: S
   return removed;
 };
 
-const applyTownGrowthStep = (state: WorldState, roadAdapter: SettlementRoadAdapter, effectiveYear: number, mode: GrowthMode): void => {
+const emitIntratownGrowthDiagnostics = (
+  roadAdapter: SettlementRoadAdapter,
+  town: Town,
+  routeId: string,
+  routeLabel: string,
+  routeGroup: RoadDiagnosticRouteGroup,
+  housesNeedingAccess: number,
+  housesConnected: number,
+  startedAtMs: number,
+  effectiveYear: number
+): void => {
+  if (housesNeedingAccess <= 0) {
+    return;
+  }
+  const stats = getDiagnosticRouteStats(roadAdapter, routeId);
+  const housesFailed = Math.max(0, housesNeedingAccess - housesConnected);
+  const elapsedMs = Math.max(0, getRoadDiagnosticNowMs() - startedAtMs);
+  const townRef = createDiagnosticTownRef(town);
+  emitSettlementRoadDiagnostic(roadAdapter, {
+    kind: "road:intratown-summary",
+    diagnosticRouteId: routeId,
+    diagnosticRouteLabel: routeLabel,
+    routeGroup,
+    town: townRef,
+    housesNeedingAccess,
+    townRoutingBudget: stats.maxSearchNodeVisits,
+    attempts: stats.attempts,
+    housesConnected,
+    housesFailed,
+    elapsedMs
+  });
+  for (let failedIndex = 0; failedIndex < housesFailed; failedIndex += 1) {
+    const sequence = effectiveYear * 1000 + housesConnected + failedIndex;
+    const houseId = buildIntratownHouseDiagnosticId(town.id, -1, sequence);
+    emitSettlementRoadDiagnostic(roadAdapter, {
+      kind: "road:failed-house",
+      diagnosticRouteId: routeId,
+      diagnosticRouteLabel: routeLabel,
+      routeGroup,
+      town: townRef,
+      houseId,
+      anchorIndex: -1,
+      failureReason: stats.lastFailureReason ? "route-failed" : "no-frontage-candidate",
+      attempts: stats.attempts,
+      elapsedMs
+    });
+  }
+};
+
+const applyTownGrowthStep = (
+  state: WorldState,
+  roadAdapter: SettlementRoadAdapter,
+  effectiveYear: number,
+  mode: GrowthMode,
+  diagnosticRouteGroup: RoadDiagnosticRouteGroup = "settlementPreGrowth"
+): void => {
   if (state.towns.length === 0) {
     return;
   }
@@ -1928,10 +2071,35 @@ const applyTownGrowthStep = (state: WorldState, roadAdapter: SettlementRoadAdapt
     const town = state.towns[i]!;
     const desiredDelta = Math.trunc(town.desiredHouseDelta ?? 0);
     if (desiredDelta > 0) {
-      const placed = growTown(state, town, desiredDelta, context, roadAdapter, effectiveYear, constructionYear, {
+      const routeReason: RoadPathDiagnosticRouteReason = "pre-growth-house-access";
+      const routeId = buildIntratownDiagnosticRouteId(town.id, effectiveYear, routeReason);
+      const routeLabel = `${buildIntratownDiagnosticRouteLabel(town, effectiveYear)} pre-growth`;
+      const startedAtMs = getRoadDiagnosticNowMs();
+      const diagnosticAdapter = createGrowthDiagnosticRoadAdapter(roadAdapter, {
+        diagnosticRouteGroup,
+        diagnosticRouteId: routeId,
+        diagnosticRouteLabel: routeLabel,
+        diagnosticRouteReason: routeReason
+      });
+      const placed = growTown(state, town, desiredDelta, context, diagnosticAdapter, effectiveYear, constructionYear, {
+        diagnosticRouteGroup,
+        diagnosticRouteId: routeId,
+        diagnosticRouteLabel: routeLabel,
+        diagnosticRouteReason: routeReason,
         mutateTerrain: mode === "mapgen"
       });
       town.lastSeasonHouseDelta = placed;
+      emitIntratownGrowthDiagnostics(
+        roadAdapter,
+        town,
+        routeId,
+        routeLabel,
+        diagnosticRouteGroup,
+        desiredDelta,
+        placed,
+        startedAtMs,
+        effectiveYear
+      );
     } else if (desiredDelta < 0) {
       const removed = shrinkTown(state, town, Math.abs(desiredDelta), roadAdapter);
       town.lastSeasonHouseDelta = -removed;
@@ -2141,15 +2309,32 @@ export const createPrecomputedSettlementGrowthPlan = (
     assignDesiredGrowthDeltas(planningState, effectiveYear, "mapgen");
     for (let townIndex = 0; townIndex < planningState.towns.length; townIndex += 1) {
       const desiredDelta = Math.max(0, Math.trunc(planningState.towns[townIndex]?.desiredHouseDelta ?? 0));
+      const town = planningState.towns[townIndex];
+      if (!town) {
+        continue;
+      }
+      const routeReason: RoadPathDiagnosticRouteReason = "future-growth-house-access";
+      const routeId = buildIntratownDiagnosticRouteId(town.id, effectiveYear, routeReason);
+      const routeLabel = `${buildIntratownDiagnosticRouteLabel(town, effectiveYear)} future-growth`;
+      const routeStartedAt = getRoadDiagnosticNowMs();
+      let connectedForTown = 0;
       for (let item = 0; item < desiredDelta; item += 1) {
-        const town = planningState.towns[townIndex];
-        if (!town) {
-          continue;
-        }
         const roadSegments: SettlementGrowthRoadSegment[] = [];
-        const recordingAdapter = createRecordingRoadAdapter(roadAdapter, roadSegments);
+        const recordingAdapter = createGrowthDiagnosticRoadAdapter(
+          createRecordingRoadAdapter(roadAdapter, roadSegments),
+          {
+            diagnosticRouteGroup: "futureGrowthPrecompute",
+            diagnosticRouteId: routeId,
+            diagnosticRouteLabel: routeLabel,
+            diagnosticRouteReason: routeReason
+          }
+        );
         const context = rebuildGrowthContext(planningState);
         const reservation = reserveTownExpansionLot(planningState, town, context, recordingAdapter, effectiveYear, {
+          diagnosticRouteGroup: "futureGrowthPrecompute",
+          diagnosticRouteId: routeId,
+          diagnosticRouteLabel: routeLabel,
+          diagnosticRouteReason: routeReason,
           mutateTerrain: true
         });
         if (!reservation) {
@@ -2178,8 +2363,20 @@ export const createPrecomputedSettlementGrowthPlan = (
           sequence,
           status: "pending"
         });
+        connectedForTown += 1;
         sequence += 1;
       }
+      emitIntratownGrowthDiagnostics(
+        roadAdapter,
+        town,
+        routeId,
+        routeLabel,
+        "futureGrowthPrecompute",
+        desiredDelta,
+        connectedForTown,
+        routeStartedAt,
+        effectiveYear
+      );
     }
   }
 
@@ -2189,10 +2386,11 @@ export const createPrecomputedSettlementGrowthPlan = (
 export const simulateTownGrowthYears = (
   state: WorldState,
   roadAdapter: SettlementRoadAdapter,
-  years: number
+  years: number,
+  diagnosticRouteGroup: RoadDiagnosticRouteGroup = "settlementPreGrowth"
 ): void => {
   for (let year = 0; year < years; year += 1) {
-    applyTownGrowthStep(state, roadAdapter, year, "mapgen");
+    applyTownGrowthStep(state, roadAdapter, year, "mapgen", diagnosticRouteGroup);
   }
 };
 

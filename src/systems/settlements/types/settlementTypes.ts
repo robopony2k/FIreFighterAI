@@ -4,6 +4,11 @@ import type {
   RoadDiagnosticRouteGroup,
   RoadDiagnosticTuning
 } from "../../roads/types/roadDiagnosticTuning.js";
+import type { RoadPathDebugEvent } from "../../roads/types/roadPathDebugTypes.js";
+import type {
+  RoadPathDiagnosticRouteReason,
+  RoadPathDiagnosticRouteType
+} from "../../roads/types/roadPathDebugTypes.js";
 
 export type SettlementRoadBridgePolicy = "allow" | "never";
 export type SettlementRoadPathMode = "normal" | "switchback" | "mountainPass";
@@ -45,12 +50,29 @@ export type SettlementRoadOptions = {
   allowBridgeFirstRetry?: boolean;
   maxPathLengthMultiplier?: number | null;
   diagnosticRouteGroup?: RoadDiagnosticRouteGroup;
+  diagnosticRouteId?: string;
+  diagnosticRouteLabel?: string;
+  diagnosticRouteType?: RoadPathDiagnosticRouteType;
+  diagnosticRouteReason?: RoadPathDiagnosticRouteReason;
   searchBounds?: {
     minX: number;
     maxX: number;
     minY: number;
     maxY: number;
   };
+};
+
+export type SettlementRoadDiagnosticRouteStats = {
+  attempts: number;
+  results: number;
+  found: number;
+  failed: number;
+  budgetAborted: number;
+  totalElapsedMs: number;
+  maxVisitedNodes: number;
+  maxSearchNodeVisits: number;
+  lastPathLength: number;
+  lastFailureReason: string | null;
 };
 
 export type SettlementRoadAdapter = {
@@ -76,7 +98,12 @@ export type SettlementRoadAdapter = {
     path: Point[];
     bridgeTileIndices: number[];
   }>;
-  carveRoadPath?: (state: WorldState, path: Point[], bridgeTileIndices?: number[]) => boolean;
+  carveRoadPath?: (
+    state: WorldState,
+    path: Point[],
+    bridgeTileIndices?: number[],
+    options?: Pick<SettlementRoadOptions, "diagnosticRouteGroup" | "diagnosticRouteId" | "diagnosticRouteLabel">
+  ) => boolean;
   carveRoadSequence?: (
     state: WorldState,
     segments: Array<{ start: Point; end: Point; options?: SettlementRoadOptions }>
@@ -93,6 +120,8 @@ export type SettlementRoadAdapter = {
   pruneRoadDiagonalStubs: (state: WorldState) => void;
   recordGeneratedJunctions?: (count: number) => void;
   recordConnectorCacheSkip?: (count?: number) => void;
+  emitDiagnosticEvent?: (event: RoadPathDebugEvent) => void;
+  getDiagnosticRouteStats?: (routeId: string) => SettlementRoadDiagnosticRouteStats;
 };
 
 export type SettlementGrowthPlanEntryStatus = "pending" | "consumed" | "skipped";

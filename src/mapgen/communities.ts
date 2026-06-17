@@ -14,6 +14,8 @@ import {
   collectConnectedRoadNeighbors,
   collectRoadTiles,
   findNearestRoadTile,
+  emitRoadPathDebugEvent,
+  getRoadDiagnosticRouteStats,
   pruneRoadDiagonalStubs,
   recordRoadConnectorCacheSkip,
   recordGeneratedRoadJunctions
@@ -97,8 +99,13 @@ const createRoadAdapter = (rng: RNG, tuning: RoadDiagnosticTuning | null = null)
       ? carveRoadDetailedAsync(state, rng, start, end, tuned)
       : Promise.resolve({ carved: false, path: [], bridgeTileIndices: [] });
   },
-  carveRoadPath: (state, path, bridgeTileIndices = []) =>
-    carveRoadPath(state, rng, path, { allowBridgeIndices: new Set(bridgeTileIndices) }),
+  carveRoadPath: (state, path, bridgeTileIndices = [], options = {}) =>
+    carveRoadPath(state, rng, path, {
+      allowBridgeIndices: new Set(bridgeTileIndices),
+      diagnosticRouteGroup: options.diagnosticRouteGroup,
+      diagnosticRouteId: options.diagnosticRouteId,
+      diagnosticRouteLabel: options.diagnosticRouteLabel
+    }),
   carveRoadSequence: (state, segments) => {
     const tunedSegments = segments.map((segment) => ({
       ...segment,
@@ -123,7 +130,9 @@ const createRoadAdapter = (rng: RNG, tuning: RoadDiagnosticTuning | null = null)
   backfillRoadEdgesFromAdjacency,
   pruneRoadDiagonalStubs,
   recordGeneratedJunctions: recordGeneratedRoadJunctions,
-  recordConnectorCacheSkip: recordRoadConnectorCacheSkip
+  recordConnectorCacheSkip: recordRoadConnectorCacheSkip,
+  emitDiagnosticEvent: emitRoadPathDebugEvent,
+  getDiagnosticRouteStats: getRoadDiagnosticRouteStats
 });
 
 export type { SettlementPlacementResult } from "../systems/settlements/types/settlementTypes.js";

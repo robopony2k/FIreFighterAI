@@ -22,7 +22,7 @@ import type {
   RoadPathPlannerStepResult,
   RoadStreamerDestinationSeed
 } from "../systems/roads/types/roadPathPlannerTypes.js";
-import type { RoadPathDebugHooks } from "../systems/roads/types/roadPathDebugTypes.js";
+import type { RoadPathDebugEvent, RoadPathDebugHooks } from "../systems/roads/types/roadPathDebugTypes.js";
 import type { RoadDiagnosticRouteGroup } from "../systems/roads/types/roadDiagnosticTuning.js";
 import { yieldToNextFrame } from "./pipeline/yieldController.js";
 
@@ -76,6 +76,75 @@ export const setRoadPathDebugHooks = (hooks: RoadPathDebugHooks | null): void =>
   roadPathDebugHooks = hooks;
 };
 
+export type RoadDiagnosticRouteStats = {
+  attempts: number;
+  results: number;
+  found: number;
+  failed: number;
+  budgetAborted: number;
+  totalElapsedMs: number;
+  maxVisitedNodes: number;
+  maxSearchNodeVisits: number;
+  lastPathLength: number;
+  lastFailureReason: string | null;
+};
+
+const createEmptyRoadDiagnosticRouteStats = (): RoadDiagnosticRouteStats => ({
+  attempts: 0,
+  results: 0,
+  found: 0,
+  failed: 0,
+  budgetAborted: 0,
+  totalElapsedMs: 0,
+  maxVisitedNodes: 0,
+  maxSearchNodeVisits: 0,
+  lastPathLength: 0,
+  lastFailureReason: null
+});
+
+const roadDiagnosticRouteStats = new Map<string, RoadDiagnosticRouteStats>();
+
+const getMutableRoadDiagnosticRouteStats = (routeId: string): RoadDiagnosticRouteStats => {
+  const existing = roadDiagnosticRouteStats.get(routeId);
+  if (existing) {
+    return existing;
+  }
+  const created = createEmptyRoadDiagnosticRouteStats();
+  roadDiagnosticRouteStats.set(routeId, created);
+  return created;
+};
+
+export const getRoadDiagnosticRouteStats = (routeId: string): RoadDiagnosticRouteStats => ({
+  ...(
+    roadDiagnosticRouteStats.get(routeId) ??
+    createEmptyRoadDiagnosticRouteStats()
+  )
+});
+
+export const emitRoadPathDebugEvent = (event: RoadPathDebugEvent): void => {
+  if (event.kind === "road:attempt" && event.diagnosticRouteId) {
+    const stats = getMutableRoadDiagnosticRouteStats(event.diagnosticRouteId);
+    stats.attempts += 1;
+    stats.maxSearchNodeVisits = Math.max(stats.maxSearchNodeVisits, event.maxSearchNodeVisits);
+  } else if (event.kind === "road:result" && event.diagnosticRouteId) {
+    const stats = getMutableRoadDiagnosticRouteStats(event.diagnosticRouteId);
+    stats.results += 1;
+    if (event.found) {
+      stats.found += 1;
+    } else {
+      stats.failed += 1;
+    }
+    if (event.budgetAborted) {
+      stats.budgetAborted += 1;
+    }
+    stats.totalElapsedMs += event.elapsedMs;
+    stats.maxVisitedNodes = Math.max(stats.maxVisitedNodes, event.visitedNodes);
+    stats.lastPathLength = event.pathLength;
+    stats.lastFailureReason = event.failureReason ?? (event.found ? null : "no-route");
+  }
+  roadPathDebugHooks?.emit?.(event);
+};
+
 type RoadBridgePolicy = "never" | "allow";
 
 export type RoadTileBounds = {
@@ -125,6 +194,8 @@ export type RoadPathOptions = {
   maxPathLengthMultiplier?: number | null;
   useBidirectionalStreamer?: boolean;
   diagnosticRouteGroup?: RoadDiagnosticRouteGroup;
+  diagnosticRouteId?: string;
+  diagnosticRouteLabel?: string;
 };
 
 type RoadPathOptionsResolved = {
@@ -166,6 +237,8 @@ type RoadPathOptionsResolved = {
   maxPathLengthMultiplier: number | null;
   useBidirectionalStreamer: boolean;
   diagnosticRouteGroup: RoadDiagnosticRouteGroup;
+  diagnosticRouteId?: string;
+  diagnosticRouteLabel?: string;
 };
 
 type RoadCarveOptions = RoadPathOptions & {
@@ -442,7 +515,9 @@ const resolveRoadPathOptions = (options: RoadPathOptions = {}): RoadPathOptionsR
         ? Math.max(1, options.maxPathLengthMultiplier)
         : null,
     useBidirectionalStreamer: options.useBidirectionalStreamer ?? false,
-    diagnosticRouteGroup: options.diagnosticRouteGroup ?? "unknown"
+    diagnosticRouteGroup: options.diagnosticRouteGroup ?? "unknown",
+    diagnosticRouteId: options.diagnosticRouteId,
+    diagnosticRouteLabel: options.diagnosticRouteLabel
   };
 };
 
@@ -2021,9 +2096,11 @@ const runBidirectionalStreamer = (
     if (budgetAborted) {
       roadGenerationStats.searchBudgetAbortCount += 1;
     }
-    debug?.emit?.({
+    emitRoadPathDebugEvent({
       kind: "road:result",
       attemptId,
+      diagnosticRouteId: options.diagnosticRouteId,
+      diagnosticRouteLabel: options.diagnosticRouteLabel,
       found: !!acceptedResult,
       budgetAborted,
       visitedNodes,
@@ -2065,9 +2142,11 @@ const runBidirectionalStreamer = (
   }
   const endpointIndices = new Set(destinationSeeds.map((seed) => seed.index));
   const joinRadius = getRoadStreamerJoinRadiusForMode(options.pathMode);
-  debug?.emit?.({
+  emitRoadPathDebugEvent({
     kind: "road:attempt",
     attemptId,
+    diagnosticRouteId: options.diagnosticRouteId,
+    diagnosticRouteLabel: options.diagnosticRouteLabel,
     attemptKind: end ? "point" : "target",
     planner: "streamer",
     start: { ...start },
@@ -2109,7 +2188,7 @@ const runBidirectionalStreamer = (
       }
       lastDebugProgressMs = now;
       const current = toPoint(progress.currentIndex, state.grid.cols);
-      debug.emit?.({
+      emitRoadPathDebugEvent({
         kind: "road:progress",
         attemptId,
         visitedNodes: progress.visitedNodes,
@@ -2222,9 +2301,11 @@ const runDijkstraRoadPlanner = (
     if (budgetAborted) {
       roadGenerationStats.searchBudgetAbortCount += 1;
     }
-    debug?.emit?.({
+    emitRoadPathDebugEvent({
       kind: "road:result",
       attemptId,
+      diagnosticRouteId: options.diagnosticRouteId,
+      diagnosticRouteLabel: options.diagnosticRouteLabel,
       found: !!acceptedResult,
       budgetAborted,
       visitedNodes,
@@ -2292,9 +2373,11 @@ const runDijkstraRoadPlanner = (
     return finish(null, false, 0, undefined, null, "no-destination-seeds");
   }
 
-  debug?.emit?.({
+  emitRoadPathDebugEvent({
     kind: "road:attempt",
     attemptId,
+    diagnosticRouteId: options.diagnosticRouteId,
+    diagnosticRouteLabel: options.diagnosticRouteLabel,
     attemptKind: end ? "point" : "target",
     planner: "dijkstra",
     start: { ...start },
@@ -2336,7 +2419,7 @@ const runDijkstraRoadPlanner = (
         return;
       }
       lastDebugProgressMs = now;
-      debug.emit?.({
+      emitRoadPathDebugEvent({
         kind: "road:progress",
         attemptId,
         visitedNodes: progress.visitedNodes,
@@ -2434,9 +2517,11 @@ const runAStar = (
   const finish = (result: RoadPathResult | null, budgetAborted: boolean, visitedNodes: number): RoadPathResult | null => {
     const acceptedResult = rejectRoadPathForDetour(result, start, end, options);
     const endedAt = typeof performance !== "undefined" ? performance.now() : Date.now();
-    debug?.emit?.({
+    emitRoadPathDebugEvent({
       kind: "road:result",
       attemptId,
+      diagnosticRouteId: options.diagnosticRouteId,
+      diagnosticRouteLabel: options.diagnosticRouteLabel,
       found: !!acceptedResult,
       budgetAborted,
       visitedNodes,
@@ -2450,9 +2535,11 @@ const runAStar = (
     });
     return acceptedResult;
   };
-  debug?.emit?.({
+  emitRoadPathDebugEvent({
     kind: "road:attempt",
     attemptId,
+    diagnosticRouteId: options.diagnosticRouteId,
+    diagnosticRouteLabel: options.diagnosticRouteLabel,
     attemptKind: end ? "point" : "target",
     planner: "astar",
     start: { ...start },
@@ -2580,7 +2667,7 @@ const runAStar = (
       const now = typeof performance !== "undefined" ? performance.now() : Date.now();
       if (now - lastDebugProgressMs >= ROAD_DEBUG_PROGRESS_MIN_MS) {
         lastDebugProgressMs = now;
-        debug.emit?.({
+        emitRoadPathDebugEvent({
           kind: "road:progress",
           attemptId,
           visitedNodes,
@@ -2866,9 +2953,11 @@ const runAStarAsync = async (
   const finish = (result: RoadPathResult | null, budgetAborted: boolean, visitedNodes: number): RoadPathResult | null => {
     const acceptedResult = rejectRoadPathForDetour(result, start, end, options);
     const endedAt = typeof performance !== "undefined" ? performance.now() : Date.now();
-    debug?.emit?.({
+    emitRoadPathDebugEvent({
       kind: "road:result",
       attemptId,
+      diagnosticRouteId: options.diagnosticRouteId,
+      diagnosticRouteLabel: options.diagnosticRouteLabel,
       found: !!acceptedResult,
       budgetAborted,
       visitedNodes,
@@ -2882,9 +2971,11 @@ const runAStarAsync = async (
     });
     return acceptedResult;
   };
-  debug?.emit?.({
+  emitRoadPathDebugEvent({
     kind: "road:attempt",
     attemptId,
+    diagnosticRouteId: options.diagnosticRouteId,
+    diagnosticRouteLabel: options.diagnosticRouteLabel,
     attemptKind: end ? "point" : "target",
     planner: "astar",
     start: { ...start },
@@ -3012,7 +3103,7 @@ const runAStarAsync = async (
       const now = typeof performance !== "undefined" ? performance.now() : Date.now();
       if (now - lastDebugProgressMs >= ROAD_DEBUG_PROGRESS_MIN_MS) {
         lastDebugProgressMs = now;
-        debug.emit?.({
+        emitRoadPathDebugEvent({
           kind: "road:progress",
           attemptId,
           visitedNodes,
@@ -3592,7 +3683,9 @@ export function carveRoadToTarget(
   const bridgeSet = new Set<number>(result.bridgeTileIndices);
   carveRoadPath(state, rng, result.path, {
     allowBridgeIndices: bridgeSet,
-    diagnosticRouteGroup: options.diagnosticRouteGroup
+    diagnosticRouteGroup: options.diagnosticRouteGroup,
+    diagnosticRouteId: options.diagnosticRouteId,
+    diagnosticRouteLabel: options.diagnosticRouteLabel
   });
   return result.path[result.path.length - 1] ?? null;
 }
@@ -3605,6 +3698,8 @@ export function carveRoadPath(
     allowBridgeIndices?: Set<number>;
     allowBridgeByPoint?: (point: Point) => boolean;
     diagnosticRouteGroup?: RoadDiagnosticRouteGroup;
+    diagnosticRouteId?: string;
+    diagnosticRouteLabel?: string;
   } = {}
 ): boolean {
   if (path.length === 0) {
@@ -3627,8 +3722,10 @@ export function carveRoadPath(
     connectRoadPoints(state, prev.x, prev.y, next.x, next.y);
   }
   bumpRoadNetworkRevision(state);
-  roadPathDebugHooks?.emit?.({
+  emitRoadPathDebugEvent({
     kind: "road:carve",
+    diagnosticRouteId: options.diagnosticRouteId,
+    diagnosticRouteLabel: options.diagnosticRouteLabel,
     routeGroup: options.diagnosticRouteGroup ?? "unknown",
     pathLength: path.length,
     bridgeTileIndices: bridgeTileIndices.length > 0 ? bridgeTileIndices : undefined,
@@ -3660,7 +3757,9 @@ export async function carveRoadAsync(
   const bridgeSet = new Set<number>(result.bridgeTileIndices);
   return carveRoadPath(state, rng, result.path, {
     allowBridgeIndices: bridgeSet,
-    diagnosticRouteGroup: options.diagnosticRouteGroup
+    diagnosticRouteGroup: options.diagnosticRouteGroup,
+    diagnosticRouteId: options.diagnosticRouteId,
+    diagnosticRouteLabel: options.diagnosticRouteLabel
   });
 }
 
@@ -3672,6 +3771,8 @@ export function carveRoadSequence(state: WorldState, rng: RNG, segments: RoadCar
     path: Point[];
     bridgeTileIndices: number[];
     diagnosticRouteGroup?: RoadDiagnosticRouteGroup;
+    diagnosticRouteId?: string;
+    diagnosticRouteLabel?: string;
   }> = [];
   for (let i = 0; i < segments.length; i += 1) {
     const segment = segments[i]!;
@@ -3686,14 +3787,18 @@ export function carveRoadSequence(state: WorldState, rng: RNG, segments: RoadCar
     planned.push({
       path: result.path,
       bridgeTileIndices: result.bridgeTileIndices,
-      diagnosticRouteGroup: options.diagnosticRouteGroup
+      diagnosticRouteGroup: options.diagnosticRouteGroup,
+      diagnosticRouteId: options.diagnosticRouteId,
+      diagnosticRouteLabel: options.diagnosticRouteLabel
     });
   }
   for (let i = 0; i < planned.length; i += 1) {
     const result = planned[i]!;
     carveRoadPath(state, rng, result.path, {
       allowBridgeIndices: new Set<number>(result.bridgeTileIndices),
-      diagnosticRouteGroup: result.diagnosticRouteGroup
+      diagnosticRouteGroup: result.diagnosticRouteGroup,
+      diagnosticRouteId: result.diagnosticRouteId,
+      diagnosticRouteLabel: result.diagnosticRouteLabel
     });
   }
   return true;
@@ -3707,6 +3812,8 @@ export async function carveRoadSequenceAsync(state: WorldState, rng: RNG, segmen
     path: Point[];
     bridgeTileIndices: number[];
     diagnosticRouteGroup?: RoadDiagnosticRouteGroup;
+    diagnosticRouteId?: string;
+    diagnosticRouteLabel?: string;
   }> = [];
   for (let i = 0; i < segments.length; i += 1) {
     roadPathDebugHooks?.checkCancelled?.();
@@ -3724,14 +3831,18 @@ export async function carveRoadSequenceAsync(state: WorldState, rng: RNG, segmen
     planned.push({
       path: result.path,
       bridgeTileIndices: result.bridgeTileIndices,
-      diagnosticRouteGroup: options.diagnosticRouteGroup
+      diagnosticRouteGroup: options.diagnosticRouteGroup,
+      diagnosticRouteId: options.diagnosticRouteId,
+      diagnosticRouteLabel: options.diagnosticRouteLabel
     });
   }
   for (let i = 0; i < planned.length; i += 1) {
     const result = planned[i]!;
     carveRoadPath(state, rng, result.path, {
       allowBridgeIndices: new Set<number>(result.bridgeTileIndices),
-      diagnosticRouteGroup: result.diagnosticRouteGroup
+      diagnosticRouteGroup: result.diagnosticRouteGroup,
+      diagnosticRouteId: result.diagnosticRouteId,
+      diagnosticRouteLabel: result.diagnosticRouteLabel
     });
   }
   return true;
@@ -3759,7 +3870,9 @@ export function carveRoadDetailed(
   const bridgeSet = new Set<number>(result.bridgeTileIndices);
   const carved = carveRoadPath(state, rng, result.path, {
     allowBridgeIndices: bridgeSet,
-    diagnosticRouteGroup: options.diagnosticRouteGroup
+    diagnosticRouteGroup: options.diagnosticRouteGroup,
+    diagnosticRouteId: options.diagnosticRouteId,
+    diagnosticRouteLabel: options.diagnosticRouteLabel
   });
   return {
     carved,
@@ -3795,7 +3908,9 @@ export async function carveRoadDetailedAsync(
   const bridgeSet = new Set<number>(result.bridgeTileIndices);
   const carved = carveRoadPath(state, rng, result.path, {
     allowBridgeIndices: bridgeSet,
-    diagnosticRouteGroup: options.diagnosticRouteGroup
+    diagnosticRouteGroup: options.diagnosticRouteGroup,
+    diagnosticRouteId: options.diagnosticRouteId,
+    diagnosticRouteLabel: options.diagnosticRouteLabel
   });
   return {
     carved,
@@ -4005,6 +4120,7 @@ export const resetRoadGenerationStats = (): void => {
   roadGenerationStats.generatedJunctionCount = 0;
   roadGenerationStats.searchBudgetAbortCount = 0;
   roadGenerationStats.connectorCacheSkipCount = 0;
+  roadDiagnosticRouteStats.clear();
 };
 
 export const getRoadGenerationStats = (): RoadGenerationStats => ({

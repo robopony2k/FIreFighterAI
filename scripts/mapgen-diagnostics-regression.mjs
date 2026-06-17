@@ -109,6 +109,9 @@ const hydrologyResolved = events.filter((event) => event.kind === "hydrology:lak
 const roadAttempts = events.filter((event) => event.kind === "road:attempt").length;
 const roadResults = events.filter((event) => event.kind === "road:result").length;
 const roadCarves = events.filter((event) => event.kind === "road:carve").length;
+const roadPlanned = events.filter((event) => event.kind === "road:planned").length;
+const roadCompleted = events.filter((event) => event.kind === "road:completed").length;
+const intratownSummaries = events.filter((event) => event.kind === "road:intratown-summary").length;
 
 if (hydrologyCandidates <= 0 || hydrologyResolved <= 0) {
   throw new Error(`Expected hydrology diagnostics, got candidates=${hydrologyCandidates} resolved=${hydrologyResolved}`);
@@ -118,6 +121,12 @@ if (roadAttempts <= 0 || roadResults <= 0) {
 }
 if (roadCarves <= 0) {
   throw new Error(`Expected committed road diagnostics, got carves=${roadCarves}`);
+}
+if (roadPlanned <= 0 || roadCompleted <= 0) {
+  throw new Error(`Expected grouped road diagnostics, got planned=${roadPlanned} completed=${roadCompleted}`);
+}
+if (intratownSummaries <= 0) {
+  throw new Error(`Expected intratown road summaries, got ${intratownSummaries}.`);
 }
 if (defaultTunedEvents.filter((event) => event.kind === "road:attempt").length <= 0) {
   throw new Error("Expected default tuned diagnostics to emit road attempts.");
@@ -179,5 +188,5 @@ if (!cancelSeen) {
 }
 
 console.log(
-  `[mapgen-diagnostics] hash=${baseline.hash} hydrology=${hydrologyCandidates}/${hydrologyResolved} roads=${roadResults}/${roadAttempts} carves=${roadCarves} cancel=ok`
+  `[mapgen-diagnostics] hash=${baseline.hash} hydrology=${hydrologyCandidates}/${hydrologyResolved} roads=${roadResults}/${roadAttempts} planned=${roadPlanned} completed=${roadCompleted} intratown=${intratownSummaries} carves=${roadCarves} cancel=ok`
 );

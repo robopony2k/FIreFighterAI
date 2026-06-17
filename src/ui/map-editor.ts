@@ -1513,6 +1513,18 @@ export const initMapEditor = (refs: MapEditorRefs, deps: MapEditorDeps): MapEdit
         return `${event.routeGroup} ${event.planner === "streamer" ? "streamer" : "A*"} result #${event.attemptId} ${event.found ? "path found" : event.budgetAborted ? "budget aborted" : "exhausted"} visited=${event.visitedNodes} pathLen=${event.pathLength} ${Math.round(event.elapsedMs)}ms`;
       case "road:carve":
         return `${event.routeGroup} committed road path len=${event.pathLength}${event.bounds ? ` bounds=${event.bounds.minX},${event.bounds.minY}-${event.bounds.maxX},${event.bounds.maxY}` : ""}${event.bridgeTileIndices ? ` bridges=${event.bridgeTileIndices.length}` : ""}`;
+      case "road:planned":
+        return `${event.routeType} planned ${event.diagnosticRouteLabel} reason=${event.reason} budget=${event.searchBudget}${event.start && event.end ? ` ${event.start.x},${event.start.y}->${event.end.x},${event.end.y}` : ""}`;
+      case "road:duplicate-retry":
+        return `${event.routeType} duplicate retry ${event.diagnosticRouteLabel} reason=${event.reason} attempts=${event.attempts} ${Math.round(event.elapsedMs)}ms`;
+      case "road:completed":
+        return `${event.routeType} completed ${event.diagnosticRouteLabel} reason=${event.reason} attempts=${event.attempts} budget=${event.searchBudget} pathLen=${event.pathLength} ${Math.round(event.elapsedMs)}ms`;
+      case "road:failed":
+        return `${event.routeType} failed ${event.diagnosticRouteLabel} reason=${event.reason} failure=${event.failureReason} attempts=${event.attempts} budget=${event.searchBudget} ${Math.round(event.elapsedMs)}ms`;
+      case "road:intratown-summary":
+        return `intratown ${event.town.name} houses=${event.housesConnected}/${event.housesNeedingAccess} failed=${event.housesFailed} attempts=${event.attempts} budget=${event.townRoutingBudget} ${Math.round(event.elapsedMs)}ms`;
+      case "road:failed-house":
+        return `failed house ${event.houseId} town=${event.town.name} reason=${event.failureReason} attempts=${event.attempts} ${Math.round(event.elapsedMs)}ms`;
       case "mapgen:cancelled":
         return `cancelled ${event.phase ?? "-"} ${event.message}`;
       default:
@@ -1546,6 +1558,57 @@ export const initMapEditor = (refs: MapEditorRefs, deps: MapEditorDeps): MapEdit
       );
   };
 
+  const formatGroupedRoadEvents = (title: string, rows: string[]): string[] => [
+    title,
+    ...(rows.length > 0 ? rows.slice(-24) : ["None."])
+  ];
+
+  const formatRoadGroupedDiagnostics = (): string[] => {
+    const planned = diagnosticsState.roadRecords
+      .filter((event): event is Extract<RoadDiagnosticRecord, { kind: "road:planned" }> => event.kind === "road:planned")
+      .map((event) =>
+        `${event.routeType} ${event.diagnosticRouteLabel} reason=${event.reason} budget=${event.searchBudget}`
+      );
+    const duplicateRetries = diagnosticsState.roadRecords
+      .filter((event): event is Extract<RoadDiagnosticRecord, { kind: "road:duplicate-retry" }> => event.kind === "road:duplicate-retry")
+      .map((event) =>
+        `${event.routeType} ${event.diagnosticRouteLabel} reason=${event.reason} attempts=${event.attempts}`
+      );
+    const completed = diagnosticsState.roadRecords
+      .filter((event): event is Extract<RoadDiagnosticRecord, { kind: "road:completed" }> => event.kind === "road:completed")
+      .map((event) =>
+        `${event.routeType} ${event.diagnosticRouteLabel} reason=${event.reason} attempts=${event.attempts} pathLen=${event.pathLength} ${Math.round(event.elapsedMs)}ms`
+      );
+    const failed = diagnosticsState.roadRecords
+      .filter((event): event is Extract<RoadDiagnosticRecord, { kind: "road:failed" }> => event.kind === "road:failed")
+      .map((event) =>
+        `${event.routeType} ${event.diagnosticRouteLabel} reason=${event.reason} failure=${event.failureReason} attempts=${event.attempts} ${Math.round(event.elapsedMs)}ms`
+      );
+    const intratown = diagnosticsState.roadRecords
+      .filter((event): event is Extract<RoadDiagnosticRecord, { kind: "road:intratown-summary" }> => event.kind === "road:intratown-summary")
+      .map((event) =>
+        `${event.town.name} houses=${event.housesConnected}/${event.housesNeedingAccess} failed=${event.housesFailed} attempts=${event.attempts} ${Math.round(event.elapsedMs)}ms`
+      );
+    const failedHouses = diagnosticsState.roadRecords
+      .filter((event): event is Extract<RoadDiagnosticRecord, { kind: "road:failed-house" }> => event.kind === "road:failed-house")
+      .map((event) =>
+        `${event.houseId} town=${event.town.name} reason=${event.failureReason} attempts=${event.attempts}`
+      );
+    return [
+      ...formatGroupedRoadEvents("planned roads:", planned),
+      "",
+      ...formatGroupedRoadEvents("internal duplicate retries:", duplicateRetries),
+      "",
+      ...formatGroupedRoadEvents("completed roads:", completed),
+      "",
+      ...formatGroupedRoadEvents("failed roads:", failed),
+      "",
+      ...formatGroupedRoadEvents("intratown summaries:", intratown),
+      "",
+      ...formatGroupedRoadEvents("failed houses:", failedHouses)
+    ];
+  };
+
   const buildRoadDiagnosticsOutput = (): string => {
     const records = diagnosticsState.roadRecords.map(formatDiagnosticEvent);
     const lines = [
@@ -1553,6 +1616,8 @@ export const initMapEditor = (refs: MapEditorRefs, deps: MapEditorDeps): MapEdit
       "",
       "by route/planner/mode:",
       ...formatRoadAggregate(),
+      "",
+      ...formatRoadGroupedDiagnostics(),
       "",
       "slowest attempts:",
       ...formatRoadSlowAttempts(),
