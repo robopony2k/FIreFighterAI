@@ -131,6 +131,7 @@ export const emitCompletedRoadDiagnostic = (
     houseId?: string;
     startedAtMs: number;
     searchBudget: number;
+    pathLength?: number;
   }
 ): void => {
   const stats = getDiagnosticRouteStats(roadAdapter, input.diagnosticRouteId);
@@ -147,7 +148,7 @@ export const emitCompletedRoadDiagnostic = (
     houseId: input.houseId,
     attempts: stats.attempts,
     elapsedMs: Math.max(0, getRoadDiagnosticNowMs() - input.startedAtMs),
-    pathLength: stats.lastPathLength,
+    pathLength: input.pathLength ?? stats.lastPathLength,
     searchBudget: input.searchBudget
   });
 };

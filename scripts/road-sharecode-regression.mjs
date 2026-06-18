@@ -23,6 +23,7 @@ for (const arg of process.argv.slice(2)) {
 const shareCode = args.get("share-code") ?? "";
 const baselinePath = path.resolve(repoRoot, args.get("baseline") ?? "docs/road-sharecode-regression-baseline.json");
 const writeBaseline = args.get("write-baseline") === "true";
+const strugglingRoadShareCode = "MAP6-115-22002R2S1W1M152B0R1G1W2R2C1X1N1J141K0Y1M1A1E181Q0K1K12161C";
 
 if (shareCode.length === 0) {
   throw new Error("Missing --share-code=<code>.");
@@ -258,6 +259,27 @@ const summarizeGroupedRoads = (events) => ({
     }))
 });
 
+const summarizeGuaranteedConnectorStyles = (groupedRoads) => {
+  const counts = {
+    "shoreline-contour": 0,
+    "sidehill-contour": 0,
+    "direct-guaranteed": 0,
+    unknown: 0
+  };
+  for (const event of groupedRoads.completed) {
+    if (event.reason !== "guaranteed-town-connectivity") {
+      continue;
+    }
+    const match = event.label.match(/\[(shoreline-contour|sidehill-contour|direct-guaranteed)\]$/);
+    if (match) {
+      counts[match[1]] += 1;
+    } else {
+      counts.unknown += 1;
+    }
+  }
+  return counts;
+};
+
 const diffById = (baselineItems, currentItems, key = "id") => {
   const before = new Map(baselineItems.map((item) => [item[key], item]));
   const after = new Map(currentItems.map((item) => [item[key], item]));
@@ -290,6 +312,7 @@ await generateMap(state, new RNG(decoded.seed), undefined, decoded.terrain, {
 });
 const durationMs = Math.max(0, performance.now() - startedAt);
 const groupedRoads = summarizeGroupedRoads(events);
+const guaranteedConnectorStyles = summarizeGuaranteedConnectorStyles(groupedRoads);
 const lowLevelResults = events.filter((event) => event.kind === "road:result");
 const houses = collectHouses(state);
 const unconnectedHouses = collectUnconnectedHouses(state, houses);
@@ -331,6 +354,7 @@ const report = {
   houses,
   unconnectedHouses,
   namedTownConnectivity,
+  guaranteedConnectorStyles,
   townsWithUnconnectedHouses,
   lowLevel: {
     attempts: events.filter((event) => event.kind === "road:attempt").length,
@@ -345,6 +369,18 @@ const report = {
 
 if (!namedTownConnectivity.allNamedTownsConnected) {
   throw new Error(`Named towns are not connected: ${namedTownConnectivity.disconnectedTowns.join(", ")}`);
+}
+if (
+  shareCode === strugglingRoadShareCode &&
+  guaranteedConnectorStyles["direct-guaranteed"] > 0
+) {
+  throw new Error("Struggling road share code used direct guaranteed connectivity.");
+}
+if (
+  shareCode === strugglingRoadShareCode &&
+  guaranteedConnectorStyles["shoreline-contour"] + guaranteedConnectorStyles["sidehill-contour"] === 0
+) {
+  throw new Error("Struggling road share code did not complete a contour guaranteed connector.");
 }
 
 if (writeBaseline) {
@@ -368,6 +404,7 @@ if (!baseline) {
     intertownFailed: groupedRoads.failed.filter((event) => event.type === "intertown").length,
     allNamedTownsConnected: namedTownConnectivity.allNamedTownsConnected,
     disconnectedTowns: namedTownConnectivity.disconnectedTowns,
+    guaranteedConnectorStyles,
     townsWithUnconnectedHouses: townsWithUnconnectedHouses.length,
     attempts: report.lowLevel.attempts,
     routingMs: report.roadStageMs
@@ -400,6 +437,7 @@ console.log(JSON.stringify({
     allNamedTownsConnected: namedTownConnectivity.allNamedTownsConnected,
     disconnectedTowns: namedTownConnectivity.disconnectedTowns
   },
+  guaranteedConnectorStyles,
   townsWithUnconnectedHouses: townsWithUnconnectedHouses.map((entry) => `${entry.town}:${entry.houses.length}`),
   diffs
 }, null, 2));

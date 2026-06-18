@@ -5103,6 +5103,10 @@ const ROAD_FINAL_ANGLE_RELAX_PASSES = 5;
 const ROAD_SHOULDER_BLEND_RADIUS = 1;
 const ROAD_WALL_DROP_THRESHOLD = 0.09;
 const ROAD_WALL_OUTER_DROP_THRESHOLD = 0.11;
+const ROAD_LAKE_LIP_CLEARANCE = 0.012;
+const ROAD_LAKE_LIP_SEARCH_RADIUS = 3;
+const ROAD_LAKE_LIP_SHELF_RADIUS = 3;
+const ROAD_LAKE_LIP_WATER_SHELF_RISE = 0.006;
 const ROAD_PROFILE_MAX_FILL = 0.01;
 const ROAD_PROFILE_MAX_CUT = 0.032;
 const ROAD_PROFILE_STRAIGHT_MAX_FILL = 0.01;
@@ -5121,6 +5125,136 @@ const isRoadLikeIndex = (state: WorldState, idx: number): boolean => {
 
 const isLandRoadLikeIndex = (state: WorldState, idx: number): boolean =>
   isRoadLikeIndex(state, idx) && state.tiles[idx]?.type !== "water";
+
+const getNearbyRoadLakeSurface = (state: WorldState, idx: number): number | null => {
+  const x = idx % state.grid.cols;
+  const y = Math.floor(idx / state.grid.cols);
+  let bestSurface = Number.NaN;
+  let bestDistance = Number.POSITIVE_INFINITY;
+  for (let dy = -ROAD_LAKE_LIP_SEARCH_RADIUS; dy <= ROAD_LAKE_LIP_SEARCH_RADIUS; dy += 1) {
+    for (let dx = -ROAD_LAKE_LIP_SEARCH_RADIUS; dx <= ROAD_LAKE_LIP_SEARCH_RADIUS; dx += 1) {
+      const nx = x + dx;
+      const ny = y + dy;
+      if (!inBounds(state.grid, nx, ny)) {
+        continue;
+      }
+      const neighborIdx = indexFor(state.grid, nx, ny);
+      const neighbor = state.tiles[neighborIdx];
+      if ((state.tileLakeMask[neighborIdx] ?? 0) === 0 && neighbor?.type !== "water") {
+        continue;
+      }
+      const surface = state.tileLakeSurface[neighborIdx] ?? neighbor?.elevation ?? Number.NaN;
+      if (!Number.isFinite(surface)) {
+        continue;
+      }
+      const distance = Math.hypot(dx, dy);
+      if (distance < bestDistance || (distance === bestDistance && surface > bestSurface)) {
+        bestSurface = surface;
+        bestDistance = distance;
+      }
+    }
+  }
+  return Number.isFinite(bestSurface) ? bestSurface : null;
+};
+
+const getRoadLakeLipMinElevation = (state: WorldState, idx: number): number => {
+  if (!isLandRoadLikeIndex(state, idx) || state.tileRoadBridge[idx] > 0 || state.tiles[idx]?.type !== "road") {
+    return 0;
+  }
+  const surface = getNearbyRoadLakeSurface(state, idx);
+  return surface === null ? 0 : Math.min(1, surface + ROAD_LAKE_LIP_CLEARANCE);
+};
+
+const enforceRoadLakeLipClearance = (state: WorldState): void => {
+  for (let idx = 0; idx < state.grid.totalTiles; idx += 1) {
+    const minElevation = getRoadLakeLipMinElevation(state, idx);
+    if (minElevation <= 0) {
+      continue;
+    }
+    const tile = state.tiles[idx];
+    if (!tile || tile.elevation >= minElevation) {
+      continue;
+    }
+    tile.elevation = minElevation;
+    state.tileElevation[idx] = minElevation;
+  }
+};
+
+const terraceRoadLakeLipShoulders = (state: WorldState): void => {
+  const targetByIdx = new Float32Array(state.grid.totalTiles);
+  const weightByIdx = new Float32Array(state.grid.totalTiles);
+  for (let idx = 0; idx < state.grid.totalTiles; idx += 1) {
+    if (!isLandRoadLikeIndex(state, idx) || state.tileRoadBridge[idx] > 0 || state.tiles[idx]?.type !== "road") {
+      continue;
+    }
+    const surface = getNearbyRoadLakeSurface(state, idx);
+    if (surface === null) {
+      continue;
+    }
+    const roadElevation = state.tiles[idx]?.elevation ?? surface + ROAD_LAKE_LIP_CLEARANCE;
+    const x = idx % state.grid.cols;
+    const y = Math.floor(idx / state.grid.cols);
+    for (let dy = -ROAD_LAKE_LIP_SHELF_RADIUS; dy <= ROAD_LAKE_LIP_SHELF_RADIUS; dy += 1) {
+      for (let dx = -ROAD_LAKE_LIP_SHELF_RADIUS; dx <= ROAD_LAKE_LIP_SHELF_RADIUS; dx += 1) {
+        if (dx === 0 && dy === 0) {
+          continue;
+        }
+        const nx = x + dx;
+        const ny = y + dy;
+        if (!inBounds(state.grid, nx, ny)) {
+          continue;
+        }
+        const neighborIdx = indexFor(state.grid, nx, ny);
+        if (isRoadLikeIndex(state, neighborIdx)) {
+          continue;
+        }
+        const neighbor = state.tiles[neighborIdx];
+        if (!neighbor || neighbor.type === "house" || neighbor.type === "base" || state.structureMask[neighborIdx] > 0) {
+          continue;
+        }
+        const neighborSurface = getNearbyRoadLakeSurface(state, neighborIdx);
+        const nearLake = neighborSurface !== null;
+        if (!nearLake) {
+          continue;
+        }
+        const distance = Math.max(Math.abs(dx), Math.abs(dy));
+        if (distance > ROAD_LAKE_LIP_SHELF_RADIUS) {
+          continue;
+        }
+        const innerShelf = distance <= 1;
+        const target =
+          neighbor.type === "water"
+            ? Math.max(
+                neighbor.elevation,
+                innerShelf
+                  ? Math.min(roadElevation - 0.002, neighborSurface + ROAD_LAKE_LIP_WATER_SHELF_RISE)
+                  : neighborSurface - 0.002
+              )
+            : innerShelf
+              ? roadElevation
+              : neighbor.elevation * 0.5 + roadElevation * 0.5;
+        const weight = innerShelf ? 1 : 0.38;
+        targetByIdx[neighborIdx] += target * weight;
+        weightByIdx[neighborIdx] += weight;
+      }
+    }
+  }
+  for (let idx = 0; idx < state.grid.totalTiles; idx += 1) {
+    const weight = weightByIdx[idx] ?? 0;
+    if (weight <= 0) {
+      continue;
+    }
+    const tile = state.tiles[idx];
+    if (!tile || tile.type === "house" || tile.type === "base" || isRoadLikeIndex(state, idx)) {
+      continue;
+    }
+    const target = targetByIdx[idx] / Math.max(1e-6, weight);
+    const blend = 1;
+    const elevation = clamp(tile.elevation * (1 - blend) + target * blend, 0, 1);
+    tile.elevation = elevation;
+    state.tileElevation[idx] = elevation;
+  }
+};
 
 const countEdgeBits = (mask: number): number => {
   let count = 0;
@@ -5522,14 +5656,28 @@ const reconcileHighAngleRoadEdges = (state: WorldState, heightScaleMultiplier = 
         const sign = Math.sign(delta) || 1;
         const targetDelta = sign * maxDelta;
         const excess = delta - targetDelta;
+        const minTileElevation = getRoadLakeLipMinElevation(state, idx);
+        const minNeighborElevation = getRoadLakeLipMinElevation(state, neighborIdx);
         if (tile.type === "base" && neighbor.type !== "base") {
-          neighbor.elevation = clamp(tile.elevation + targetDelta, 0, 1);
+          neighbor.elevation = clamp(Math.max(minNeighborElevation, tile.elevation + targetDelta), 0, 1);
         } else if (neighbor.type === "base" && tile.type !== "base") {
-          tile.elevation = clamp(neighbor.elevation - targetDelta, 0, 1);
+          tile.elevation = clamp(Math.max(minTileElevation, neighbor.elevation - targetDelta), 0, 1);
         } else {
-          tile.elevation = clamp(tile.elevation + excess * 0.5, 0, 1);
-          neighbor.elevation = clamp(neighbor.elevation - excess * 0.5, 0, 1);
+          let nextTileElevation = tile.elevation + excess * 0.5;
+          let nextNeighborElevation = neighbor.elevation - excess * 0.5;
+          if (nextTileElevation < minTileElevation) {
+            nextNeighborElevation += minTileElevation - nextTileElevation;
+            nextTileElevation = minTileElevation;
+          }
+          if (nextNeighborElevation < minNeighborElevation) {
+            nextTileElevation += minNeighborElevation - nextNeighborElevation;
+            nextNeighborElevation = minNeighborElevation;
+          }
+          tile.elevation = clamp(nextTileElevation, 0, 1);
+          neighbor.elevation = clamp(nextNeighborElevation, 0, 1);
         }
+        state.tileElevation[idx] = tile.elevation;
+        state.tileElevation[neighborIdx] = neighbor.elevation;
         adjusted = true;
       }
     }
@@ -5652,6 +5800,8 @@ export function gradeRoadNetworkTerrain(state: WorldState, heightScaleMultiplier
       tile.elevation = clamp(profile[j] ?? tile.elevation, 0, 1);
     }
   }
+  enforceRoadLakeLipClearance(state);
+  terraceRoadLakeLipShoulders(state);
   reconcileHighAngleRoadEdges(state, heightScaleMultiplier);
 
   const shoulderSum = new Float32Array(total);
@@ -5711,6 +5861,8 @@ export function gradeRoadNetworkTerrain(state: WorldState, heightScaleMultiplier
     tile.elevation = clamp(tile.elevation * (1 - blend) + clampedTarget * blend, 0, 1);
   }
   flattenRenderedHouseFootprints(state);
+  enforceRoadLakeLipClearance(state);
+  terraceRoadLakeLipShoulders(state);
   reconcileHighAngleRoadEdges(state, heightScaleMultiplier);
   flattenRenderedHouseFootprints(state);
 

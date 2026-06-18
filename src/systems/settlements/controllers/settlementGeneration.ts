@@ -20,7 +20,7 @@ import {
   TOWN_INITIAL_BUILD_COOLDOWN_MAX_DAYS
 } from "../constants/settlementConstants.js";
 import { createEmptySettlementGrowthPlan, createPrecomputedSettlementGrowthPlan, simulateTownGrowthYears } from "../sim/townGrowth.js";
-import { buildGuaranteedTownConnectorPath } from "../sim/guaranteedTownConnector.js";
+import { applyGuaranteedTownConnectorLakeLipBench, buildGuaranteedTownConnectorPath } from "../sim/guaranteedTownConnector.js";
 import {
   SETTLEMENT_PLOT_MAX_ANGLE_DEG,
   SETTLEMENT_TOWN_FALLBACK_ANGLE_DEG,
@@ -1800,6 +1800,9 @@ const resolveTownRoadAnchor = (
   return findStreetNearTown(state, { x: town.x, y: town.y }, 10) ?? { x: town.x, y: town.y };
 };
 
+const resolveTownCoreRoadAnchor = (state: WorldState, town: Town, roadAdapter: SettlementRoadAdapter): Point =>
+  findStreetNearTown(state, { x: town.x, y: town.y }, 10) ?? roadAdapter.findNearestRoadTile(state, { x: town.x, y: town.y });
+
 const resolveBaseRoadAnchor = (state: WorldState, roadAdapter: SettlementRoadAdapter): Point =>
   isRoadLikeTile(state, state.basePoint.x, state.basePoint.y)
     ? state.basePoint
@@ -2654,7 +2657,7 @@ const collectGuaranteedConnectivityCandidates = (
     return [];
   }
   const anchorEntries = towns.map((town) => {
-    const anchor = resolveTownRoadAnchor(state, town, baseAnchor, roadAdapter);
+    const anchor = resolveTownCoreRoadAnchor(state, town, roadAdapter);
     return {
       town,
       anchor,
@@ -2674,7 +2677,7 @@ const collectGuaranteedConnectivityCandidates = (
     const left = connected[i]!;
     for (let j = 0; j < disconnected.length; j += 1) {
       const right = disconnected[j]!;
-      const rightAnchor = resolveTownRoadAnchor(state, right.town, left.anchor, roadAdapter);
+      const rightAnchor = right.anchor;
       if (samePoint(left.anchor, rightAnchor)) {
         continue;
       }
@@ -2727,39 +2730,63 @@ const ensureGuaranteedTownConnectivity = (
         continue;
       }
       tried.add(key);
-      const diagnosticRouteId = buildGuaranteedConnectivityRouteId(pass + 1, candidate, i + 1);
-      const diagnosticRouteLabel = buildGuaranteedConnectivityRouteLabel(candidate);
+      const baseDiagnosticRouteId = buildGuaranteedConnectivityRouteId(pass + 1, candidate, i + 1);
+      const baseDiagnosticRouteLabel = buildGuaranteedConnectivityRouteLabel(candidate);
       const startedAtMs = getRoadDiagnosticNowMs();
-      const estimatedBudget = estimateGuaranteedConnectivityBudget(candidate.connectedAnchor, candidate.disconnectedAnchor);
-      emitPlannedRoadDiagnostic(roadAdapter, {
-        diagnosticRouteId,
-        diagnosticRouteLabel,
-        routeType: "intertown",
-        routeGroup: "connectivityRepair",
-        reason: "guaranteed-town-connectivity",
-        townA: candidate.connectedTown ? createDiagnosticTownRef(candidate.connectedTown) : undefined,
-        townB: createDiagnosticTownRef(candidate.disconnectedTown),
-        start: candidate.connectedAnchor,
-        end: candidate.disconnectedAnchor,
-        searchBudget: estimatedBudget
-      });
       const result = buildGuaranteedTownConnectorPath(state, candidate.connectedAnchor, candidate.disconnectedAnchor, {
         heightScaleMultiplier: plan.heightScaleMultiplier ?? 1,
         maxPathLengthMultiplier: 3.2
       });
-      if (result.path.length === 0) {
+      if (result.styleAttempts.length === 0) {
         emitFailedRoadDiagnostic(roadAdapter, {
-          diagnosticRouteId,
-          diagnosticRouteLabel,
+          diagnosticRouteId: baseDiagnosticRouteId,
+          diagnosticRouteLabel: baseDiagnosticRouteLabel,
           routeType: "intertown",
           routeGroup: "connectivityRepair",
           reason: "guaranteed-town-connectivity",
           townA: candidate.connectedTown ? createDiagnosticTownRef(candidate.connectedTown) : undefined,
           townB: createDiagnosticTownRef(candidate.disconnectedTown),
           startedAtMs,
-          searchBudget: result.maxPathLength,
-          failureReason: result.failureReason ?? "no-path"
+          searchBudget: estimateGuaranteedConnectivityBudget(candidate.connectedAnchor, candidate.disconnectedAnchor),
+          failureReason: result.failureReason ?? "blocked-endpoint"
         });
+        continue;
+      }
+      for (let styleIndex = 0; styleIndex < result.styleAttempts.length; styleIndex += 1) {
+        const styleAttempt = result.styleAttempts[styleIndex]!;
+        const styleRouteId = `${baseDiagnosticRouteId}:${styleAttempt.style}`;
+        const styleRouteLabel = `${baseDiagnosticRouteLabel} [${styleAttempt.style}]`;
+        emitPlannedRoadDiagnostic(roadAdapter, {
+          diagnosticRouteId: styleRouteId,
+          diagnosticRouteLabel: styleRouteLabel,
+          routeType: "intertown",
+          routeGroup: "connectivityRepair",
+          reason: "guaranteed-town-connectivity",
+          townA: candidate.connectedTown ? createDiagnosticTownRef(candidate.connectedTown) : undefined,
+          townB: createDiagnosticTownRef(candidate.disconnectedTown),
+          start: candidate.connectedAnchor,
+          end: candidate.disconnectedAnchor,
+          searchBudget: result.maxPathLength
+        });
+        if (styleAttempt.failureReason) {
+          emitFailedRoadDiagnostic(roadAdapter, {
+            diagnosticRouteId: styleRouteId,
+            diagnosticRouteLabel: styleRouteLabel,
+            routeType: "intertown",
+            routeGroup: "connectivityRepair",
+            reason: "guaranteed-town-connectivity",
+            townA: candidate.connectedTown ? createDiagnosticTownRef(candidate.connectedTown) : undefined,
+            townB: createDiagnosticTownRef(candidate.disconnectedTown),
+            startedAtMs,
+            searchBudget: result.maxPathLength,
+            failureReason: styleAttempt.failureReason
+          });
+        }
+      }
+      const selectedStyle = result.style ?? "direct-guaranteed";
+      const diagnosticRouteId = `${baseDiagnosticRouteId}:${selectedStyle}`;
+      const diagnosticRouteLabel = `${baseDiagnosticRouteLabel} [${selectedStyle}]`;
+      if (result.path.length === 0) {
         continue;
       }
       const carved = roadAdapter.carveRoadPath(state, result.path, result.bridgeTileIndices, {
@@ -2782,7 +2809,24 @@ const ensureGuaranteedTownConnectivity = (
         });
         continue;
       }
+      applyGuaranteedTownConnectorLakeLipBench(state, result.path, result.bridgeTileIndices);
       roadAdapter.backfillRoadEdgesFromAdjacency(state);
+      const verifiedCandidates = collectGuaranteedConnectivityCandidates(state, towns, roadAdapter);
+      if (verifiedCandidates.some((entry) => entry.disconnectedTown.id === candidate.disconnectedTown.id)) {
+        emitFailedRoadDiagnostic(roadAdapter, {
+          diagnosticRouteId,
+          diagnosticRouteLabel,
+          routeType: "intertown",
+          routeGroup: "connectivityRepair",
+          reason: "guaranteed-town-connectivity",
+          townA: candidate.connectedTown ? createDiagnosticTownRef(candidate.connectedTown) : undefined,
+          townB: createDiagnosticTownRef(candidate.disconnectedTown),
+          startedAtMs,
+          searchBudget: result.maxPathLength,
+          failureReason: "route-failed"
+        });
+        continue;
+      }
       emitCompletedRoadDiagnostic(roadAdapter, {
         diagnosticRouteId,
         diagnosticRouteLabel,
@@ -2792,7 +2836,8 @@ const ensureGuaranteedTownConnectivity = (
         townA: candidate.connectedTown ? createDiagnosticTownRef(candidate.connectedTown) : undefined,
         townB: createDiagnosticTownRef(candidate.disconnectedTown),
         startedAtMs,
-        searchBudget: result.maxPathLength
+        searchBudget: result.maxPathLength,
+        pathLength: result.path.length
       });
       repaired = true;
       connectedAny = true;

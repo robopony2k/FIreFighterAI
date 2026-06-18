@@ -36,6 +36,8 @@ export type RoadPathDiagnosticFailureReason =
   | "no-path"
   | "path-too-long"
   | "blocked-endpoint"
+  | "insufficient-shoreline"
+  | "excessive-earthwork"
   | "unknown";
 
 export type RoadPathDebugAttemptEvent = {
