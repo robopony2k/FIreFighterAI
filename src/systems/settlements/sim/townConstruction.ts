@@ -311,6 +311,15 @@ const isPlannedExpansionAnchorAvailable = (state: WorldState, anchorIndex: numbe
   return !!tile && tile.type !== "water" && tile.type !== "base" && tile.type !== "house" && tile.type !== "road";
 };
 
+const isRecordedRoadPathPresent = (state: WorldState, path: readonly { x: number; y: number }[]): boolean =>
+  path.length > 0 && path.every((point) => {
+    if (point.x < 0 || point.y < 0 || point.x >= state.grid.cols || point.y >= state.grid.rows) {
+      return false;
+    }
+    const idx = point.y * state.grid.cols + point.x;
+    return state.tiles[idx]?.type === "road" || state.tileRoadEdges[idx] > 0 || state.tileRoadBridge[idx] > 0;
+  });
+
 const applyPlannedExpansionRoads = (
   state: WorldState,
   roadAdapter: SettlementRoadAdapter,
@@ -320,6 +329,9 @@ const applyPlannedExpansionRoads = (
   for (let i = 0; i < entry.roadSegments.length; i += 1) {
     const segment = entry.roadSegments[i]!;
     const hasReplayPath = !!segment.path && segment.path.length > 0;
+    if (hasReplayPath && isRecordedRoadPathPresent(state, segment.path!)) {
+      continue;
+    }
     const replayed = hasReplayPath && !!roadAdapter.carveRoadPath;
     const carved = replayed
       ? roadAdapter.carveRoadPath!(state, segment.path!, segment.bridgeTileIndices)

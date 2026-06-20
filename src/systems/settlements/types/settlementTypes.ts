@@ -172,7 +172,6 @@ export type SettlementPlacementResult = {
   settlementSpacing?: number;
   roadStrictness?: number;
   roadMaxGrade?: number;
-  settlementPreGrowthYears?: number;
   futureGrowthPlanYears?: number;
   roadDiagnosticTuning?: RoadDiagnosticTuning;
 };

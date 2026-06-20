@@ -27,9 +27,6 @@ export const RoadNetworkStage: PipelineStage = {
     const roadTuning = diagnosticsEnabled ? resolveRoadDiagnosticTuning(ctx.debug?.roadTuning) : null;
     if (roadTuning && ctx.settlementPlan) {
       ctx.settlementPlan.roadDiagnosticTuning = roadTuning;
-      if (roadTuning.settlementPreGrowthYearsOverride !== null) {
-        ctx.settlementPlan.settlementPreGrowthYears = roadTuning.settlementPreGrowthYearsOverride;
-      }
       if (roadTuning.futureGrowthPlanYearsOverride !== null) {
         ctx.settlementPlan.futureGrowthPlanYears = roadTuning.futureGrowthPlanYearsOverride;
       }

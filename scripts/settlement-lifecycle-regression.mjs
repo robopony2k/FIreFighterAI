@@ -31,13 +31,15 @@ const { stepTownConstructionSchedule } = await import(
   distImport(["systems", "settlements", "sim", "townConstruction.js"])
 );
 const {
-  createPrecomputedSettlementGrowthPlan,
   reserveTownExpansionLot,
   rebuildGrowthContext,
   simulateTownGrowthYears,
   tryDensifyTownHousing
 } = await import(
   distImport(["systems", "settlements", "sim", "townGrowth.js"])
+);
+const { createPrecomputedSettlementGrowthPlan } = await import(
+  distImport(["systems", "settlements", "sim", "futureSettlementGrowthPlan.js"])
 );
 const { buildRenderTerrainSample } = await import(distImport(["render", "simView.js"]));
 const {
@@ -443,6 +445,19 @@ const runPrecomputedGrowthPlanDeterminismCase = () => {
   const rightPlan = createPrecomputedSettlementGrowthPlan(right, createRuntimeSettlementRoadAdapter(), 4);
   assert.ok(leftPlan.entries.length > 0, "precomputed growth plan should contain future expansion entries");
   assert.deepEqual(leftPlan, rightPlan, "precomputed growth plan should be deterministic for identical inputs");
+  for (const townId of new Set(leftPlan.entries.map((entry) => entry.townId))) {
+    let prerequisiteKeys = new Set();
+    for (const entry of leftPlan.entries.filter((candidate) => candidate.townId === townId)) {
+      const entryKeys = new Set(entry.roadSegments.map((segment) =>
+        segment.path?.map((point) => `${point.x},${point.y}`).join(";") ??
+        `${segment.start.x},${segment.start.y}>${segment.end.x},${segment.end.y}`
+      ));
+      for (const key of prerequisiteKeys) {
+        assert.ok(entryKeys.has(key), "later future-growth entries must retain prior road prerequisites");
+      }
+      prerequisiteKeys = entryKeys;
+    }
+  }
   return {
     entries: leftPlan.entries.length
   };
@@ -555,6 +570,15 @@ const runInvalidPlannedEntrySkipCase = () => {
   assert.ok(townEntries.length >= 2, "invalid-entry case needs at least two planned entries for town 0");
   const blocked = townEntries[0];
   const fallback = townEntries[1];
+  const prerequisiteSegment = {
+    start: { x: 2, y: 2 },
+    end: { x: 4, y: 2 },
+    path: [{ x: 2, y: 2 }, { x: 3, y: 2 }, { x: 4, y: 2 }],
+    bridgeTileIndices: []
+  };
+  blocked.roadSegments = [prerequisiteSegment];
+  fallback.roadSegments = [prerequisiteSegment];
+  state.plannedTownGrowth.nextExpansionIndexByTown[0] = state.plannedTownGrowth.entries.indexOf(blocked);
   state.tileStructure[blocked.anchorIndex] = 1;
   state.townGrowthAppliedYear = state.year;
   state.careerDay = PHASES[0].duration;
@@ -567,6 +591,14 @@ const runInvalidPlannedEntrySkipCase = () => {
   assert.equal(state.plannedTownGrowth.skippedEntries, 1, "blocked planned entry should be skipped");
   assert.equal(state.plannedTownGrowth.consumedEntries, 1, "runtime should continue to the next planned entry");
   assert.equal(state.buildingLots[0].anchorIndex, fallback.anchorIndex, "runtime should build the next valid planned entry");
+  for (const segment of blocked.roadSegments) {
+    for (const point of segment.path ?? []) {
+      assert.ok(
+        state.tiles[point.y * state.grid.cols + point.x]?.type === "road",
+        "the next valid entry should replay road prerequisites from a skipped entry"
+      );
+    }
+  }
   return {
     skipped: state.plannedTownGrowth.skippedEntries,
     anchor: state.buildingLots[0].anchorIndex

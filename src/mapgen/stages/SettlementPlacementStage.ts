@@ -61,8 +61,7 @@ export const SettlementPlacementStage: PipelineStage = {
       bridgeAllowance: ctx.settings.bridgeAllowance,
       settlementSpacing: ctx.settings.settlementSpacing,
       roadStrictness: ctx.settings.roadStrictness,
-      roadMaxGrade: ctx.settings.roadMaxGrade,
-      settlementPreGrowthYears: ctx.settings.settlementPreGrowthYears
+      roadMaxGrade: ctx.settings.roadMaxGrade
     });
 
     await ctx.reportStage("Settlement plan ready.", 1);

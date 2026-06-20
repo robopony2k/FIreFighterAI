@@ -5115,6 +5115,12 @@ const ROAD_SHOULDER_MAX_FILL_NEAR = 0.008;
 const ROAD_SHOULDER_MAX_FILL_FAR = 0.004;
 const ROAD_SHOULDER_MAX_CUT_NEAR = 0.018;
 const ROAD_SHOULDER_MAX_CUT_FAR = 0.01;
+const ROAD_HIGH_RELIEF_SHOULDER_TRIGGER = 0.024;
+const ROAD_HIGH_RELIEF_SHOULDER_RADIUS = 2;
+const ROAD_HIGH_RELIEF_SHOULDER_INNER_CUT = 0.095;
+const ROAD_HIGH_RELIEF_SHOULDER_INNER_FILL = 0.055;
+const ROAD_HIGH_RELIEF_SHOULDER_OUTER_CUT = 0.065;
+const ROAD_HIGH_RELIEF_SHOULDER_OUTER_FILL = 0.03;
 const SHORT_BRIDGE_APPROACH_MAX_COMPONENT_TILES = 2;
 const SHORT_BRIDGE_APPROACH_MAX_CONNECTOR_DISTANCE = 3.1;
 
@@ -5251,6 +5257,121 @@ const terraceRoadLakeLipShoulders = (state: WorldState): void => {
     const target = targetByIdx[idx] / Math.max(1e-6, weight);
     const blend = 1;
     const elevation = clamp(tile.elevation * (1 - blend) + target * blend, 0, 1);
+    tile.elevation = elevation;
+    state.tileElevation[idx] = elevation;
+  }
+};
+
+const measureRoadShoulderRelief = (state: WorldState, idx: number): number => {
+  if (!isLandRoadLikeIndex(state, idx)) {
+    return 0;
+  }
+  const roadElevation = state.tiles[idx]?.elevation ?? 0;
+  const x = idx % state.grid.cols;
+  const y = Math.floor(idx / state.grid.cols);
+  let relief = 0;
+  for (let dy = -1; dy <= 1; dy += 1) {
+    for (let dx = -1; dx <= 1; dx += 1) {
+      if (dx === 0 && dy === 0) {
+        continue;
+      }
+      const nx = x + dx;
+      const ny = y + dy;
+      if (!inBounds(state.grid, nx, ny)) {
+        continue;
+      }
+      const neighborIdx = indexFor(state.grid, nx, ny);
+      if (isRoadLikeIndex(state, neighborIdx)) {
+        continue;
+      }
+      const neighbor = state.tiles[neighborIdx];
+      if (!neighbor || neighbor.type === "water" || neighbor.type === "house" || neighbor.type === "base") {
+        continue;
+      }
+      relief = Math.max(relief, Math.abs((neighbor.elevation ?? roadElevation) - roadElevation));
+    }
+  }
+  return relief;
+};
+
+const relaxHighReliefRoadShoulders = (state: WorldState): void => {
+  const total = state.grid.totalTiles;
+  const targetSum = new Float32Array(total);
+  const targetWeight = new Float32Array(total);
+  const maxCutByIdx = new Float32Array(total);
+  const maxFillByIdx = new Float32Array(total);
+
+  for (let idx = 0; idx < total; idx += 1) {
+    if (!isLandRoadLikeIndex(state, idx) || state.tileRoadBridge[idx] > 0) {
+      continue;
+    }
+    const shoulderRelief = measureRoadShoulderRelief(state, idx);
+    const nearLake = getNearbyRoadLakeSurface(state, idx) !== null;
+    if (shoulderRelief < ROAD_HIGH_RELIEF_SHOULDER_TRIGGER && !nearLake) {
+      continue;
+    }
+    const roadElevation = state.tiles[idx]?.elevation ?? 0;
+    const x = idx % state.grid.cols;
+    const y = Math.floor(idx / state.grid.cols);
+    for (let dy = -ROAD_HIGH_RELIEF_SHOULDER_RADIUS; dy <= ROAD_HIGH_RELIEF_SHOULDER_RADIUS; dy += 1) {
+      for (let dx = -ROAD_HIGH_RELIEF_SHOULDER_RADIUS; dx <= ROAD_HIGH_RELIEF_SHOULDER_RADIUS; dx += 1) {
+        if (dx === 0 && dy === 0) {
+          continue;
+        }
+        const distance = Math.hypot(dx, dy);
+        if (distance > ROAD_HIGH_RELIEF_SHOULDER_RADIUS + 0.01) {
+          continue;
+        }
+        const nx = x + dx;
+        const ny = y + dy;
+        if (!inBounds(state.grid, nx, ny)) {
+          continue;
+        }
+        const neighborIdx = indexFor(state.grid, nx, ny);
+        if (isRoadLikeIndex(state, neighborIdx)) {
+          continue;
+        }
+        const neighbor = state.tiles[neighborIdx];
+        if (
+          !neighbor ||
+          neighbor.type === "water" ||
+          neighbor.type === "house" ||
+          neighbor.type === "base" ||
+          state.structureMask[neighborIdx] > 0
+        ) {
+          continue;
+        }
+        const inner = distance <= 1.05;
+        const weight = inner ? 1 : 0.72;
+        targetSum[neighborIdx] += roadElevation * weight;
+        targetWeight[neighborIdx] += weight;
+        maxCutByIdx[neighborIdx] = Math.max(
+          maxCutByIdx[neighborIdx] ?? 0,
+          inner ? ROAD_HIGH_RELIEF_SHOULDER_INNER_CUT : ROAD_HIGH_RELIEF_SHOULDER_OUTER_CUT
+        );
+        maxFillByIdx[neighborIdx] = Math.max(
+          maxFillByIdx[neighborIdx] ?? 0,
+          inner ? ROAD_HIGH_RELIEF_SHOULDER_INNER_FILL : ROAD_HIGH_RELIEF_SHOULDER_OUTER_FILL
+        );
+      }
+    }
+  }
+
+  for (let idx = 0; idx < total; idx += 1) {
+    const weight = targetWeight[idx] ?? 0;
+    if (weight <= 0) {
+      continue;
+    }
+    const tile = state.tiles[idx];
+    if (!tile || tile.type === "water" || tile.type === "house" || tile.type === "base" || isRoadLikeIndex(state, idx)) {
+      continue;
+    }
+    const target = targetSum[idx] / Math.max(1e-6, weight);
+    const maxCut = maxCutByIdx[idx] ?? ROAD_HIGH_RELIEF_SHOULDER_OUTER_CUT;
+    const maxFill = maxFillByIdx[idx] ?? ROAD_HIGH_RELIEF_SHOULDER_OUTER_FILL;
+    const clampedTarget = clamp(target, tile.elevation - maxCut, tile.elevation + maxFill);
+    const blend = Math.min(1, weight * 0.88);
+    const elevation = clamp(tile.elevation * (1 - blend) + clampedTarget * blend, 0, 1);
     tile.elevation = elevation;
     state.tileElevation[idx] = elevation;
   }
@@ -5864,6 +5985,7 @@ export function gradeRoadNetworkTerrain(state: WorldState, heightScaleMultiplier
   enforceRoadLakeLipClearance(state);
   terraceRoadLakeLipShoulders(state);
   reconcileHighAngleRoadEdges(state, heightScaleMultiplier);
+  relaxHighReliefRoadShoulders(state);
   flattenRenderedHouseFootprints(state);
 
   for (let idx = 0; idx < total; idx += 1) {
@@ -6788,8 +6910,7 @@ async function generateMapLegacy(
     bridgeAllowance: mapSettings.bridgeAllowance,
     settlementSpacing: mapSettings.settlementSpacing,
     roadStrictness: mapSettings.roadStrictness,
-    roadMaxGrade: mapSettings.roadMaxGrade,
-    settlementPreGrowthYears: mapSettings.settlementPreGrowthYears
+    roadMaxGrade: mapSettings.roadMaxGrade
   });
   resetRoadGenerationStats();
   connectSettlementsByRoad(state, rng, legacySettlementPlan);
@@ -8032,8 +8153,7 @@ async function runSettlementPlacementStage(ctx: MapGenContext): Promise<void> {
     bridgeAllowance: ctx.settings.bridgeAllowance,
     settlementSpacing: ctx.settings.settlementSpacing,
     roadStrictness: ctx.settings.roadStrictness,
-    roadMaxGrade: ctx.settings.roadMaxGrade,
-    settlementPreGrowthYears: ctx.settings.settlementPreGrowthYears
+    roadMaxGrade: ctx.settings.roadMaxGrade
   });
 
   await ctx.reportStage("Settlement plan ready.", 1);

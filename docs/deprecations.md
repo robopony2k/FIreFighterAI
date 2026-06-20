@@ -1,5 +1,21 @@
 # Deprecations
 
+## Committed Settlement Pre-Growth Years
+
+Status: Deprecated as of June 20, 2026.
+
+- Map generation no longer simulates 20 years of settlement expansion directly into the day-one world.
+- The map-editor pre-growth control now advances deterministic vegetation succession and maturity only.
+- Starting towns use a compact density-derived housing bootstrap, while the separate 20-year future-growth plan remains clone-only until construction consumes its recorded house and road entries.
+
+Migration guidance:
+
+1. Use `vegetationPreGrowthYears` for forest spread and maturity; do not route it into settlement generation.
+2. Change starting-town population through the compact bootstrap policy and `townDensity`, not simulated historical growth years.
+3. Keep future settlement road work in the precomputed growth plan and replay recorded paths when houses are constructed.
+4. Future entries must retain their town's earlier road prerequisites so skipping an unavailable lot cannot leave later houses dependent on clone-only roads.
+5. Failed future-lot searches must discard their trial roads completely; never attach speculative fragments to a later successful house.
+
 ## Default Road A* Exact-Target Routing
 
 Status: Deprecated as of June 8, 2026.

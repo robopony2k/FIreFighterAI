@@ -73,7 +73,7 @@ export type MapGenSettings = {
   skipRoadNetworkRouting: boolean;
   riverBudget: number;
   settlementSpacing: number;
-  settlementPreGrowthYears: number;
+  vegetationPreGrowthYears: number;
   roadStrictness: number;
   roadMaxGrade: number;
   forestPatchiness: number;
@@ -178,7 +178,7 @@ export const DEFAULT_MAP_GEN_SETTINGS: MapGenSettings = {
   skipRoadNetworkRouting: false,
   riverBudget: 0.44,
   settlementSpacing: 0.62,
-  settlementPreGrowthYears: 20,
+  vegetationPreGrowthYears: 20,
   roadStrictness: 0.56,
   roadMaxGrade: 0.38,
   forestPatchiness: 0.42,

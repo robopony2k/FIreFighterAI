@@ -134,8 +134,6 @@ type MapEditorRefs = {
   roadTuningIntertownEdgesValue: HTMLOutputElement;
   roadTuningIntertownDetour: HTMLInputElement;
   roadTuningIntertownDetourValue: HTMLOutputElement;
-  roadTuningPreGrowthYears: HTMLInputElement;
-  roadTuningPreGrowthYearsValue: HTMLOutputElement;
   roadTuningFutureGrowthYears: HTMLInputElement;
   roadTuningFutureGrowthYearsValue: HTMLOutputElement;
   roadTuningReset: HTMLButtonElement;
@@ -1144,8 +1142,6 @@ export const getMapEditorRefs = (): MapEditorRefs => ({
   roadTuningIntertownEdgesValue: document.getElementById("mapEditorRoadTuningIntertownEdgesValue") as HTMLOutputElement,
   roadTuningIntertownDetour: document.getElementById("mapEditorRoadTuningIntertownDetour") as HTMLInputElement,
   roadTuningIntertownDetourValue: document.getElementById("mapEditorRoadTuningIntertownDetourValue") as HTMLOutputElement,
-  roadTuningPreGrowthYears: document.getElementById("mapEditorRoadTuningPreGrowthYears") as HTMLInputElement,
-  roadTuningPreGrowthYearsValue: document.getElementById("mapEditorRoadTuningPreGrowthYearsValue") as HTMLOutputElement,
   roadTuningFutureGrowthYears: document.getElementById("mapEditorRoadTuningFutureGrowthYears") as HTMLInputElement,
   roadTuningFutureGrowthYearsValue: document.getElementById("mapEditorRoadTuningFutureGrowthYearsValue") as HTMLOutputElement,
   roadTuningReset: document.getElementById("mapEditorRoadTuningReset") as HTMLButtonElement,
@@ -1411,8 +1407,6 @@ export const initMapEditor = (refs: MapEditorRefs, deps: MapEditorDeps): MapEdit
     const intertownDetour = readRoadTuningSlider(refs.roadTuningIntertownDetour, 0);
     refs.roadTuningIntertownDetourValue.textContent =
       intertownDetour <= 0 ? "Default" : `x${intertownDetour.toFixed(2)}`;
-    const preGrowthYears = Math.round(readRoadTuningSlider(refs.roadTuningPreGrowthYears, -1));
-    refs.roadTuningPreGrowthYearsValue.textContent = preGrowthYears < 0 ? "Default" : `${preGrowthYears}y`;
     const futureGrowthYears = Math.round(readRoadTuningSlider(refs.roadTuningFutureGrowthYears, -1));
     refs.roadTuningFutureGrowthYearsValue.textContent = futureGrowthYears < 0 ? "Default" : `${futureGrowthYears}y`;
   };
@@ -1446,9 +1440,6 @@ export const initMapEditor = (refs: MapEditorRefs, deps: MapEditorDeps): MapEdit
       intertownDetourMultiplier: readRoadTuningSlider(refs.roadTuningIntertownDetour, 0) > 0
         ? readRoadTuningSlider(refs.roadTuningIntertownDetour, 0)
         : null,
-      settlementPreGrowthYearsOverride: Math.round(readRoadTuningSlider(refs.roadTuningPreGrowthYears, -1)) >= 0
-        ? Math.round(readRoadTuningSlider(refs.roadTuningPreGrowthYears, -1))
-        : null,
       futureGrowthPlanYearsOverride: Math.round(readRoadTuningSlider(refs.roadTuningFutureGrowthYears, -1)) >= 0
         ? Math.round(readRoadTuningSlider(refs.roadTuningFutureGrowthYears, -1))
         : null
@@ -1468,7 +1459,6 @@ export const initMapEditor = (refs: MapEditorRefs, deps: MapEditorDeps): MapEdit
     refs.roadTuningIntertownPasses.value = "-1";
     refs.roadTuningIntertownEdges.value = "0";
     refs.roadTuningIntertownDetour.value = "0";
-    refs.roadTuningPreGrowthYears.value = "-1";
     refs.roadTuningFutureGrowthYears.value = "-1";
     syncRoadTuningOutputs();
   };
@@ -1914,7 +1904,7 @@ export const initMapEditor = (refs: MapEditorRefs, deps: MapEditorDeps): MapEdit
         skipCarving: false,
         riverBudget: jitterValue(rng, advanced.riverBudget ?? 0.5, 0.14),
         settlementSpacing: jitterValue(rng, advanced.settlementSpacing ?? 0.5, 0.12),
-        settlementPreGrowthYears: Math.max(0, Math.min(40, Math.round((advanced.settlementPreGrowthYears ?? 20) + (rng.next() * 16 - 8)))),
+        vegetationPreGrowthYears: Math.max(0, Math.min(40, Math.round((advanced.vegetationPreGrowthYears ?? 20) + (rng.next() * 16 - 8)))),
         roadStrictness: jitterValue(rng, advanced.roadStrictness ?? 0.5, 0.12),
         forestPatchiness: jitterValue(rng, advanced.forestPatchiness ?? 0.5, 0.16)
       }
@@ -2840,7 +2830,6 @@ export const initMapEditor = (refs: MapEditorRefs, deps: MapEditorDeps): MapEdit
     refs.roadTuningIntertownPasses,
     refs.roadTuningIntertownEdges,
     refs.roadTuningIntertownDetour,
-    refs.roadTuningPreGrowthYears,
     refs.roadTuningFutureGrowthYears
   ].forEach((input) => {
     input.addEventListener("input", markDiagnosticRoadTuningChanged);

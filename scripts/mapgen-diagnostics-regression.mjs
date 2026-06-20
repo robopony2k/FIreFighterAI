@@ -11,6 +11,9 @@ const { createInitialState } = await import(distImport(["core", "state.js"]));
 const { generateMap, isMapGenCancelledError } = await import(distImport(["mapgen", "index.js"]));
 const { createDefaultTerrainRecipe } = await import(distImport(["mapgen", "terrainProfile.js"]));
 const { DEFAULT_ROAD_DIAGNOSTIC_TUNING } = await import(distImport(["systems", "roads", "types", "roadDiagnosticTuning.js"]));
+const { getInitialTownHouseTarget } = await import(
+  distImport(["systems", "settlements", "sim", "initialTownBootstrap.js"])
+);
 
 const seed = 424242;
 const grid = { cols: 64, rows: 64, totalTiles: 64 * 64 };
@@ -35,9 +38,9 @@ const hashArrays = (...arrays) => {
   return hash.toString(16).padStart(8, "0");
 };
 
-const runMap = async (debug) => {
+const runMap = async (debug, terrainRecipe = terrain) => {
   const state = createInitialState(seed, grid);
-  await generateMap(state, new RNG(seed), undefined, terrain, debug);
+  await generateMap(state, new RNG(seed), undefined, terrainRecipe, debug);
   return {
     state,
     hash: hashArrays(
@@ -52,6 +55,15 @@ const runMap = async (debug) => {
 };
 
 const baseline = await runMap(undefined);
+const zeroPreGrowthTerrain = {
+  ...terrain,
+  advancedOverrides: {
+    ...terrain.advancedOverrides,
+    vegetationPreGrowthYears: 0
+  }
+};
+const zeroPreGrowth = await runMap(undefined, zeroPreGrowthTerrain);
+const zeroPreGrowthRepeat = await runMap(undefined, zeroPreGrowthTerrain);
 const events = [];
 const diagnostic = await runMap({
   onPhase: () => {},
@@ -86,7 +98,6 @@ await runMap({
   onPhase: () => {},
   roadTuning: {
     ...DEFAULT_ROAD_DIAGNOSTIC_TUNING,
-    settlementPreGrowthYearsOverride: 0,
     futureGrowthPlanYearsOverride: 0,
     enableConnectivityRepairPass: false,
     intertownConnectionPasses: 1,
@@ -102,6 +113,46 @@ if (baseline.hash !== diagnostic.hash) {
 }
 if (baseline.hash !== defaultTunedDiagnostic.hash) {
   throw new Error(`Default road tuning changed generated map hash: ${baseline.hash} !== ${defaultTunedDiagnostic.hash}`);
+}
+if (zeroPreGrowth.hash !== zeroPreGrowthRepeat.hash) {
+  throw new Error(`Zero vegetation pre-growth was not deterministic: ${zeroPreGrowth.hash} !== ${zeroPreGrowthRepeat.hash}`);
+}
+const baselineInfrastructureHash = hashArrays(
+  baseline.state.tileElevation,
+  baseline.state.tileRiverMask,
+  baseline.state.tileLakeMask,
+  baseline.state.tileRoadEdges,
+  baseline.state.tileRoadBridge
+);
+const zeroPreGrowthInfrastructureHash = hashArrays(
+  zeroPreGrowth.state.tileElevation,
+  zeroPreGrowth.state.tileRiverMask,
+  zeroPreGrowth.state.tileLakeMask,
+  zeroPreGrowth.state.tileRoadEdges,
+  zeroPreGrowth.state.tileRoadBridge
+);
+if (baselineInfrastructureHash !== zeroPreGrowthInfrastructureHash) {
+  throw new Error(`Vegetation pre-growth changed infrastructure: ${JSON.stringify({
+    elevation: [hashArrays(baseline.state.tileElevation), hashArrays(zeroPreGrowth.state.tileElevation)],
+    rivers: [hashArrays(baseline.state.tileRiverMask), hashArrays(zeroPreGrowth.state.tileRiverMask)],
+    lakes: [hashArrays(baseline.state.tileLakeMask), hashArrays(zeroPreGrowth.state.tileLakeMask)],
+    roadEdges: [hashArrays(baseline.state.tileRoadEdges), hashArrays(zeroPreGrowth.state.tileRoadEdges)],
+    bridges: [hashArrays(baseline.state.tileRoadBridge), hashArrays(zeroPreGrowth.state.tileRoadBridge)]
+  })}`);
+}
+const meanVegetationAge = (state) =>
+  state.tiles.reduce((sum, tile) => sum + (tile.vegetationAgeYears ?? 0), 0) / Math.max(1, state.grid.totalTiles);
+if (meanVegetationAge(baseline.state) <= meanVegetationAge(zeroPreGrowth.state)) {
+  throw new Error("Expected configured vegetation pre-growth to increase mean vegetation maturity.");
+}
+for (const town of baseline.state.towns) {
+  const target = getInitialTownHouseTarget(seed, town.id, terrain.townDensity);
+  if (town.houseCount < Math.min(4, target) || town.houseCount > target) {
+    throw new Error(`Initial town bootstrap missed compact target for ${town.name}: houses=${town.houseCount} target=${target}.`);
+  }
+}
+if (baseline.state.plannedTownGrowth.plannedYears !== 20 || baseline.state.plannedTownGrowth.entries.length === 0) {
+  throw new Error("Expected a non-empty 20-year cloned settlement growth plan.");
 }
 
 const hydrologyCandidates = events.filter((event) => event.kind === "hydrology:candidate").length;
@@ -188,5 +239,5 @@ if (!cancelSeen) {
 }
 
 console.log(
-  `[mapgen-diagnostics] hash=${baseline.hash} hydrology=${hydrologyCandidates}/${hydrologyResolved} roads=${roadResults}/${roadAttempts} planned=${roadPlanned} completed=${roadCompleted} intratown=${intratownSummaries} carves=${roadCarves} cancel=ok`
+  `[mapgen-diagnostics] hash=${baseline.hash} zeroGrowth=${zeroPreGrowth.hash} houses=${baseline.state.totalHouses} future=${baseline.state.plannedTownGrowth.entries.length} hydrology=${hydrologyCandidates}/${hydrologyResolved} roads=${roadResults}/${roadAttempts} planned=${roadPlanned} completed=${roadCompleted} intratown=${intratownSummaries} carves=${roadCarves} cancel=ok`
 );

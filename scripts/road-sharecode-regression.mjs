@@ -382,6 +382,50 @@ if (
 ) {
   throw new Error("Struggling road share code did not complete a contour guaranteed connector.");
 }
+if (shareCode === strugglingRoadShareCode) {
+  const outOfRangeTown = state.towns.find((town) => town.houseCount < 8 || town.houseCount > 11);
+  if (outOfRangeTown) {
+    throw new Error(`Compact bootstrap house count out of range for ${outOfRangeTown.name}: ${outOfRangeTown.houseCount}.`);
+  }
+  if (report.lowLevel.attempts >= 8_000) {
+    throw new Error(`Expected compact bootstrap to keep road attempts below 8000, got ${report.lowLevel.attempts}.`);
+  }
+  if (state.plannedTownGrowth.plannedYears !== 20 || state.plannedTownGrowth.entries.length === 0) {
+    throw new Error("Expected the supplied share code to retain a non-empty 20-year future growth cache.");
+  }
+  let entriesWithRoadPrerequisites = 0;
+  let maxIntroducedRoadSegments = 0;
+  for (const townId of new Set(state.plannedTownGrowth.entries.map((entry) => entry.townId))) {
+    let prerequisiteKeys = new Set();
+    for (const entry of state.plannedTownGrowth.entries.filter((candidate) => candidate.townId === townId)) {
+      const entryKeys = new Set(entry.roadSegments.map((segment) =>
+        segment.path?.map((point) => `${point.x},${point.y}`).join(";") ??
+        `${segment.start.x},${segment.start.y}>${segment.end.x},${segment.end.y}`
+      ));
+      for (const key of prerequisiteKeys) {
+        if (!entryKeys.has(key)) {
+          throw new Error(`Future growth entry ${entry.sequence} dropped a prior road prerequisite for town ${townId}.`);
+        }
+      }
+      maxIntroducedRoadSegments = Math.max(
+        maxIntroducedRoadSegments,
+        [...entryKeys].filter((key) => !prerequisiteKeys.has(key)).length
+      );
+      if (entryKeys.size > 0) entriesWithRoadPrerequisites += 1;
+      prerequisiteKeys = entryKeys;
+    }
+  }
+  if (entriesWithRoadPrerequisites === 0) {
+    throw new Error("Expected future growth entries with cached road prerequisites.");
+  }
+  if (maxIntroducedRoadSegments > 8) {
+    throw new Error(`Expected bounded per-house road growth, got ${maxIntroducedRoadSegments} new segments in one entry.`);
+  }
+  const initialBootstrapEvents = events.filter((event) => event.routeGroup === "initialSettlementBootstrap");
+  if (initialBootstrapEvents.length === 0) {
+    throw new Error("Expected initial settlement bootstrap diagnostics for the supplied share code.");
+  }
+}
 
 if (writeBaseline) {
   fs.mkdirSync(path.dirname(baselinePath), { recursive: true });
@@ -406,6 +450,7 @@ if (!baseline) {
     disconnectedTowns: namedTownConnectivity.disconnectedTowns,
     guaranteedConnectorStyles,
     townsWithUnconnectedHouses: townsWithUnconnectedHouses.length,
+    futureGrowthEntries: state.plannedTownGrowth.entries.length,
     attempts: report.lowLevel.attempts,
     routingMs: report.roadStageMs
   }, null, 2));

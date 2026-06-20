@@ -166,7 +166,6 @@ export function connectSettlementsByRoad(
   plan.settlementSpacing = realized.settlementSpacing;
   plan.roadStrictness = realized.roadStrictness;
   plan.roadMaxGrade = realized.roadMaxGrade;
-  plan.settlementPreGrowthYears = realized.settlementPreGrowthYears;
   plan.futureGrowthPlanYears = realized.futureGrowthPlanYears;
 }
 
@@ -193,7 +192,6 @@ export async function connectSettlementsByRoadAsync(
   plan.settlementSpacing = realized.settlementSpacing;
   plan.roadStrictness = realized.roadStrictness;
   plan.roadMaxGrade = realized.roadMaxGrade;
-  plan.settlementPreGrowthYears = realized.settlementPreGrowthYears;
   plan.futureGrowthPlanYears = realized.futureGrowthPlanYears;
 }
 

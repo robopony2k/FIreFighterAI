@@ -75,10 +75,14 @@ const EXPECTED_EDITOR_KEYS = {
     "recipe.townDensity",
     "recipe.bridgeAllowance",
     "advanced.settlementSpacing",
-    "advanced.settlementPreGrowthYears",
     "advanced.skipRoadNetworkRouting",
     "advanced.roadMaxGrade",
     "advanced.roadStrictness"
+  ],
+  vegetation: [
+    "recipe.vegetationDensity",
+    "advanced.forestPatchiness",
+    "advanced.vegetationPreGrowthYears"
   ],
   erosion: []
 };

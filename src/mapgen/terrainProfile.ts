@@ -30,7 +30,7 @@ export type TerrainAdvancedOverrides = {
   skipRoadNetworkRouting?: boolean;
   riverBudget?: number;
   settlementSpacing?: number;
-  settlementPreGrowthYears?: number;
+  vegetationPreGrowthYears?: number;
   roadStrictness?: number;
   roadMaxGrade?: number;
   forestPatchiness?: number;
@@ -172,7 +172,7 @@ const DEFAULT_ADVANCED_OVERRIDES: Required<TerrainAdvancedOverrides> = {
   skipRoadNetworkRouting: false,
   riverBudget: 0.42,
   settlementSpacing: 0.58,
-  settlementPreGrowthYears: 20,
+  vegetationPreGrowthYears: 20,
   roadStrictness: 0.5,
   roadMaxGrade: 0.38,
   forestPatchiness: 0.46
@@ -221,7 +221,7 @@ const ARCHETYPE_PRESETS: Record<
       skipRoadNetworkRouting: false,
       riverBudget: 0.44,
       settlementSpacing: 0.62,
-      settlementPreGrowthYears: 20,
+      vegetationPreGrowthYears: 20,
       roadStrictness: 0.56,
       roadMaxGrade: 0.38,
       forestPatchiness: 0.42
@@ -255,7 +255,7 @@ const ARCHETYPE_PRESETS: Record<
       skipRoadNetworkRouting: false,
       riverBudget: 0.58,
       settlementSpacing: 0.6,
-      settlementPreGrowthYears: 20,
+      vegetationPreGrowthYears: 20,
       roadStrictness: 0.56,
       roadMaxGrade: 0.38,
       forestPatchiness: 0.5
@@ -289,7 +289,7 @@ const ARCHETYPE_PRESETS: Record<
       skipRoadNetworkRouting: false,
       riverBudget: 0.52,
       settlementSpacing: 0.58,
-      settlementPreGrowthYears: 20,
+      vegetationPreGrowthYears: 20,
       roadStrictness: 0.52,
       roadMaxGrade: 0.38,
       forestPatchiness: 0.48
@@ -323,7 +323,7 @@ const ARCHETYPE_PRESETS: Record<
       skipRoadNetworkRouting: false,
       riverBudget: 0.28,
       settlementSpacing: 0.56,
-      settlementPreGrowthYears: 20,
+      vegetationPreGrowthYears: 20,
       roadStrictness: 0.54,
       roadMaxGrade: 0.38,
       forestPatchiness: 0.54
@@ -357,7 +357,7 @@ const ARCHETYPE_PRESETS: Record<
       skipRoadNetworkRouting: false,
       riverBudget: 0.42,
       settlementSpacing: 0.58,
-      settlementPreGrowthYears: 20,
+      vegetationPreGrowthYears: 20,
       roadStrictness: 0.5,
       roadMaxGrade: 0.38,
       forestPatchiness: 0.46
@@ -465,9 +465,9 @@ export const cloneTerrainRecipe = (recipe?: Partial<TerrainRecipe>): TerrainReci
         sourceAdvanced.settlementSpacing,
         defaults.advancedOverrides?.settlementSpacing ?? DEFAULT_ADVANCED_OVERRIDES.settlementSpacing
       ),
-      settlementPreGrowthYears: clampIntegerOverride(
-        sourceAdvanced.settlementPreGrowthYears,
-        defaults.advancedOverrides?.settlementPreGrowthYears ?? DEFAULT_ADVANCED_OVERRIDES.settlementPreGrowthYears,
+      vegetationPreGrowthYears: clampIntegerOverride(
+        sourceAdvanced.vegetationPreGrowthYears,
+        defaults.advancedOverrides?.vegetationPreGrowthYears ?? DEFAULT_ADVANCED_OVERRIDES.vegetationPreGrowthYears,
         0,
         40
       ),
@@ -530,7 +530,7 @@ export const terrainRecipeEqual = (a: TerrainRecipe, b: TerrainRecipe): boolean 
     Boolean(aAdvanced.skipRoadNetworkRouting) === Boolean(bAdvanced.skipRoadNetworkRouting) &&
     Math.abs((aAdvanced.riverBudget ?? 0) - (bAdvanced.riverBudget ?? 0)) <= 1e-6 &&
     Math.abs((aAdvanced.settlementSpacing ?? 0) - (bAdvanced.settlementSpacing ?? 0)) <= 1e-6 &&
-    Math.abs((aAdvanced.settlementPreGrowthYears ?? 0) - (bAdvanced.settlementPreGrowthYears ?? 0)) <= 1e-6 &&
+    Math.abs((aAdvanced.vegetationPreGrowthYears ?? 0) - (bAdvanced.vegetationPreGrowthYears ?? 0)) <= 1e-6 &&
     Math.abs((aAdvanced.roadStrictness ?? 0) - (bAdvanced.roadStrictness ?? 0)) <= 1e-6 &&
     Math.abs((aAdvanced.roadMaxGrade ?? 0) - (bAdvanced.roadMaxGrade ?? 0)) <= 1e-6 &&
     Math.abs((aAdvanced.forestPatchiness ?? 0) - (bAdvanced.forestPatchiness ?? 0)) <= 1e-6
@@ -563,7 +563,7 @@ const resolveAdvancedOverrides = (recipe: TerrainRecipe): Required<TerrainAdvanc
     skipRoadNetworkRouting: parseBooleanOverride(advanced.skipRoadNetworkRouting, preset.skipRoadNetworkRouting),
     riverBudget: clampOverride(advanced.riverBudget, preset.riverBudget),
     settlementSpacing: clampOverride(advanced.settlementSpacing, preset.settlementSpacing),
-    settlementPreGrowthYears: clampIntegerOverride(advanced.settlementPreGrowthYears, preset.settlementPreGrowthYears, 0, 40),
+    vegetationPreGrowthYears: clampIntegerOverride(advanced.vegetationPreGrowthYears, preset.vegetationPreGrowthYears, 0, 40),
     roadStrictness: clampOverride(advanced.roadStrictness, preset.roadStrictness),
     roadMaxGrade: clampRoadMaxGradeOverride(advanced.roadMaxGrade, preset.roadMaxGrade),
     forestPatchiness: clampOverride(advanced.forestPatchiness, preset.forestPatchiness)
@@ -709,7 +709,7 @@ export const compileTerrainRecipe = (recipeInput: TerrainRecipe): ResolvedTerrai
     skipRoadNetworkRouting: advanced.skipRoadNetworkRouting,
     riverBudget,
     settlementSpacing: advanced.settlementSpacing,
-    settlementPreGrowthYears: advanced.settlementPreGrowthYears,
+    vegetationPreGrowthYears: advanced.vegetationPreGrowthYears,
     roadStrictness,
     roadMaxGrade,
     forestPatchiness,
@@ -856,9 +856,9 @@ const inferRecipeFromSettings = (settingsInput: Partial<MapGenSettings>, mapSize
       skipRoadNetworkRouting: Boolean(settings.skipRoadNetworkRouting ?? DEFAULT_ADVANCED_OVERRIDES.skipRoadNetworkRouting),
       riverBudget: clamp01(settings.riverBudget ?? DEFAULT_ADVANCED_OVERRIDES.riverBudget),
       settlementSpacing: clamp01(settings.settlementSpacing ?? DEFAULT_ADVANCED_OVERRIDES.settlementSpacing),
-      settlementPreGrowthYears: clampIntegerOverride(
-        settings.settlementPreGrowthYears,
-        DEFAULT_ADVANCED_OVERRIDES.settlementPreGrowthYears,
+      vegetationPreGrowthYears: clampIntegerOverride(
+        settings.vegetationPreGrowthYears,
+        DEFAULT_ADVANCED_OVERRIDES.vegetationPreGrowthYears,
         0,
         40
       ),

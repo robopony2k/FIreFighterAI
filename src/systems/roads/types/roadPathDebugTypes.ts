@@ -13,7 +13,7 @@ export type RoadPathDiagnosticRouteReason =
   | "waypoint-rescue"
   | "guaranteed-town-connectivity"
   | "initial-street-skeleton"
-  | "pre-growth-house-access"
+  | "initial-house-access"
   | "future-growth-house-access"
   | "local-connectivity-repair";
 

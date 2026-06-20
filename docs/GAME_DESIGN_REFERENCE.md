@@ -180,7 +180,7 @@ Terrain
 - Terrain editor previews prioritize instant feedback for landform height, surface detail, and water controls using the same fast landmass core as `terrain:elevation`; Rivers, Biomes, and later final-quality stages are not started until their step is selected, then advance the current preview session instead of restarting earlier completed stages. Landform owns height controls such as Relief, Ruggedness, and Max height; Water exposes Land mass as the primary coastline coverage control and sea-level bias as an advanced calibration override.
 - Tile fuel profiles (baseFuel/ignition/burnRate/heatOutput/spreadBoost/heatTransferCap/heatRetention/windFactor per tile type); windFactor is retained as the config key but means windbreak strength, where 0 is open terrain and 1 is strong wind obstruction.
 - Vegetation regrowth (water influence, ash recovery, canopy growth, runtime tree suitability, block catch-up, forest recruit).
-- Community and road generation (town density, bridge allowance, settlement spacing, maximum accepted road grade, debug/internal road strictness, pre-growth years, guaranteed initial road connectivity, angle-aware intertown routing). The map editor may expose a temporary dev-only skip for expensive road routing so other terrain, hydrology, vegetation, or settlement features can be validated without waiting on intertown road search attempts.
+- Community and road generation (town density, compact density-derived starting populations, bridge allowance, settlement spacing, maximum accepted road grade, debug/internal road strictness, guaranteed initial road connectivity, angle-aware intertown routing). Starting towns fill existing road frontage before adding a bounded demand-backed extension, rather than simulating decades of visible road growth before the campaign. The map editor may expose a temporary dev-only skip for expensive road routing so other terrain, hydrology, vegetation, or settlement features can be validated without waiting on intertown road search attempts.
 
 Climate
 - Climate params (seasonLen, peakDay, tMid, tAmp, warmingPerYear, noiseAmp, heatwavesPerYear).
@@ -255,8 +255,8 @@ This can be achieved by:
 - Units (truck + firefighter logic).
 - Tactical evacuation (town destination selection, locked road routes, representative civilian vehicles, road slot queueing, heat exposure, vehicle destruction, and population/life-loss hooks).
 - Climate model (temperature + moisture).
-- Map generation (terrain, vegetation age/density, forest stand composition).
-- Settlements (angle-aware terrain-fit town seeding, constrained-ribbon vs compact street archetypes, precomputed deterministic 20-year ideal growth queues with day-1 future pad terrain, approval-gated queue consumption, compact infill/densification, event-style construction catch-up, block-forming road expansion).
+- Map generation (terrain, vegetation age/density, forest stand composition, and deterministic 0-40 year vegetation pre-growth that advances spread and maturity after settlements and roads are reconciled without changing infrastructure).
+- Settlements (angle-aware terrain-fit town seeding, constrained-ribbon vs compact street archetypes, compact day-one housing bootstrap, precomputed deterministic 20-year ideal growth queues with future roads hidden until their houses are built, self-contained cumulative prerequisites from successful house plans only, atomic single-extension road trials that are discarded when no valid lot results, approval-gated queue consumption, compact infill/densification, event-style construction catch-up, block-forming road expansion).
 - UI system (phase UI, controls, overlays).
 
 ## Open Questions

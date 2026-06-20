@@ -8,10 +8,8 @@ import type {
   TownStreetArchetype
 } from "../../../core/types.js";
 import {
-  BASE_PRE_GROWTH_YEARS,
   COASTAL_PROFILE_WATER_DISTANCE_MAX,
   COMPACT_TOWN_BLOCK_OFFSET,
-  MAX_SETTLEMENT_PRE_GROWTH_YEARS,
   MIN_TOWN_RADIUS,
   RIBBON_TOWN_MIN_BUILD_SPAN,
   RIBBON_TOWN_RELIEF_MIN,
@@ -19,8 +17,10 @@ import {
   TOWN_CORE_RADIUS,
   TOWN_INITIAL_BUILD_COOLDOWN_MAX_DAYS
 } from "../constants/settlementConstants.js";
-import { createEmptySettlementGrowthPlan, createPrecomputedSettlementGrowthPlan, simulateTownGrowthYears } from "../sim/townGrowth.js";
-import { applyGuaranteedTownConnectorLakeLipBench, buildGuaranteedTownConnectorPath } from "../sim/guaranteedTownConnector.js";
+import { createEmptySettlementGrowthPlan } from "../sim/townGrowth.js";
+import { createPrecomputedSettlementGrowthPlan } from "../sim/futureSettlementGrowthPlan.js";
+import { bootstrapInitialTowns } from "../sim/initialTownBootstrap.js";
+import { applyGuaranteedTownConnectorRoadbedCleanup, buildGuaranteedTownConnectorPath } from "../sim/guaranteedTownConnector.js";
 import {
   SETTLEMENT_PLOT_MAX_ANGLE_DEG,
   SETTLEMENT_TOWN_FALLBACK_ANGLE_DEG,
@@ -67,13 +67,6 @@ type DiagnosticRouteMetadata = {
 };
 
 const clamp01 = (value: number): number => Math.max(0, Math.min(1, value));
-
-const clampSettlementYears = (value: number | undefined): number => {
-  if (!Number.isFinite(value)) {
-    return BASE_PRE_GROWTH_YEARS;
-  }
-  return Math.max(0, Math.min(MAX_SETTLEMENT_PRE_GROWTH_YEARS, Math.round(value as number)));
-};
 
 const getRoadDiagnosticTuning = (plan: SettlementPlacementResult) => plan.roadDiagnosticTuning ?? null;
 
@@ -2809,7 +2802,7 @@ const ensureGuaranteedTownConnectivity = (
         });
         continue;
       }
-      applyGuaranteedTownConnectorLakeLipBench(state, result.path, result.bridgeTileIndices);
+      applyGuaranteedTownConnectorRoadbedCleanup(state, result.path, result.bridgeTileIndices);
       roadAdapter.backfillRoadEdgesFromAdjacency(state);
       const verifiedCandidates = collectGuaranteedConnectivityCandidates(state, towns, roadAdapter);
       if (verifiedCandidates.some((entry) => entry.disconnectedTown.id === candidate.disconnectedTown.id)) {
@@ -3397,7 +3390,6 @@ export const createSettlementPlacementPlan = (
     settlementSpacing?: number;
     roadStrictness?: number;
     roadMaxGrade?: number;
-    settlementPreGrowthYears?: number;
     futureGrowthPlanYears?: number;
     roadDiagnosticTuning?: SettlementPlacementResult["roadDiagnosticTuning"];
   } = {}
@@ -3412,9 +3404,6 @@ export const createSettlementPlacementPlan = (
   settlementSpacing: clamp01(options.settlementSpacing ?? 0.55),
   roadStrictness: clamp01(options.roadStrictness ?? 0.5),
   roadMaxGrade: Math.max(0.08, Math.min(0.5, options.roadMaxGrade ?? 0.38)),
-  settlementPreGrowthYears: clampSettlementYears(
-    options.roadDiagnosticTuning?.settlementPreGrowthYearsOverride ?? options.settlementPreGrowthYears
-  ),
   futureGrowthPlanYears: options.roadDiagnosticTuning?.futureGrowthPlanYearsOverride ?? options.futureGrowthPlanYears,
   roadDiagnosticTuning: options.roadDiagnosticTuning
 });
@@ -3433,7 +3422,7 @@ export const executeSettlementPlacementPlan = (
   const intertownPasses = getIntertownConnectionPassLimit(realized);
   const intertownFailedCache: ConnectorAttemptCache = new Set();
   const repairEnabled = isConnectivityRepairEnabled(realized);
-  const preGrowthRoadAdapter = createRouteGroupRoadAdapter(roadAdapter, "settlementPreGrowth");
+  const bootstrapRoadAdapter = createRouteGroupRoadAdapter(roadAdapter, "initialSettlementBootstrap");
   const futureGrowthRoadAdapter = createRouteGroupRoadAdapter(roadAdapter, "futureGrowthPrecompute");
   buildInitialRoadSkeletons(state, towns, roadAdapter, realized);
   if (intertownPasses >= 1) {
@@ -3443,7 +3432,7 @@ export const executeSettlementPlacementPlan = (
     ensureTownRoadConnectivity(state, towns, roadAdapter, realized);
   }
   roadAdapter.backfillRoadEdgesFromAdjacency(state);
-  simulateTownGrowthYears(state, preGrowthRoadAdapter, clampSettlementYears(realized.settlementPreGrowthYears));
+  bootstrapInitialTowns(state, bootstrapRoadAdapter, realized.townDensity ?? 0.5);
   if (repairEnabled) {
     ensureTownLocalRoadAnchors(state, towns, roadAdapter, realized);
   }
@@ -3474,7 +3463,6 @@ export const executeSettlementPlacementPlan = (
         futureGrowthRoadAdapter,
         futureGrowthYears ?? undefined
       );
-  state.settlementRequestedHouses = state.totalHouses;
   state.settlementPlacedHouses = state.totalHouses;
   realized.generatedRoads = true;
   return realized;
@@ -3494,7 +3482,7 @@ export const executeSettlementPlacementPlanAsync = async (
   const intertownPasses = getIntertownConnectionPassLimit(realized);
   const intertownFailedCache: ConnectorAttemptCache = new Set();
   const repairEnabled = isConnectivityRepairEnabled(realized);
-  const preGrowthRoadAdapter = createRouteGroupRoadAdapter(roadAdapter, "settlementPreGrowth");
+  const bootstrapRoadAdapter = createRouteGroupRoadAdapter(roadAdapter, "initialSettlementBootstrap");
   const futureGrowthRoadAdapter = createRouteGroupRoadAdapter(roadAdapter, "futureGrowthPrecompute");
   await buildInitialRoadSkeletonsAsync(state, towns, roadAdapter, realized);
   if (intertownPasses >= 1) {
@@ -3504,7 +3492,7 @@ export const executeSettlementPlacementPlanAsync = async (
     await ensureTownRoadConnectivityAsync(state, towns, roadAdapter, realized);
   }
   roadAdapter.backfillRoadEdgesFromAdjacency(state);
-  simulateTownGrowthYears(state, preGrowthRoadAdapter, clampSettlementYears(realized.settlementPreGrowthYears));
+  bootstrapInitialTowns(state, bootstrapRoadAdapter, realized.townDensity ?? 0.5);
   if (repairEnabled) {
     await ensureTownLocalRoadAnchorsAsync(state, towns, roadAdapter, realized);
   }
@@ -3535,7 +3523,6 @@ export const executeSettlementPlacementPlanAsync = async (
         futureGrowthRoadAdapter,
         futureGrowthYears ?? undefined
       );
-  state.settlementRequestedHouses = state.totalHouses;
   state.settlementPlacedHouses = state.totalHouses;
   realized.generatedRoads = true;
   return realized;

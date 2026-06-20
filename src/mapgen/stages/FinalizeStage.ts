@@ -2,6 +2,7 @@ import { indexFor } from "../../core/grid.js";
 import { markTileSoADirty } from "../../core/tileCache.js";
 import { applyFuel } from "../../core/tiles.js";
 import { clamp } from "../../core/utils.js";
+import { applyVegetationPreGrowth } from "../../systems/terrain/sim/vegetationPreGrowth.js";
 import type { PipelineStage } from "../pipeline/TerrainPipeline.js";
 import { fractalNoise } from "../noise.js";
 import { emitStageSnapshot } from "../pipeline/stageDebug.js";
@@ -49,6 +50,7 @@ export const FinalizeStage: PipelineStage = {
     }
     seedInitialVegetationState(state, ctx.biomeSuitabilityMap, ctx.microMap, ctx.meadowMaskMap, ctx.treeDensityMap);
     assignForestComposition(state);
+    applyVegetationPreGrowth(state, settings.vegetationPreGrowthYears, rng);
     state.vegetationRevision += 1;
     state.totalLandTiles = 0;
     state.tiles.forEach((tile) => {

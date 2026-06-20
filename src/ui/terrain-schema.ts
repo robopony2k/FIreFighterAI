@@ -342,14 +342,6 @@ export const MAP_EDITOR_TERRAIN_GROUPS = {
           "Settlement spacing",
           "How much space the planner tries to preserve between towns."
         ),
-        sliderField(
-          "advanced",
-          "settlementPreGrowthYears",
-          "settlementPreGrowthYears",
-          "Pre-growth years",
-          "How many yearly settlement-growth steps map generation simulates before the campaign begins.",
-          { min: 0, max: 40, step: 1, format: "int" }
-        ),
         checkboxField(
           "skipRoadNetworkRouting",
           "skipRoadNetworkRouting",
@@ -387,6 +379,14 @@ export const MAP_EDITOR_TERRAIN_GROUPS = {
           "forestPatchiness",
           "Forest patchiness",
           "How broken up the forest canopy is instead of forming broad continuous blocks."
+        ),
+        sliderField(
+          "advanced",
+          "vegetationPreGrowthYears",
+          "vegetationPreGrowthYears",
+          "Vegetation pre-growth years",
+          "How many deterministic vegetation-succession years run before the campaign begins.",
+          { min: 0, max: 40, step: 1, format: "int" }
         )
       ]
     }

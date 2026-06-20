@@ -254,3 +254,22 @@ Notes: Keep `prepareTerrainRenderSurface` and `buildTerrainMesh` as stable facad
 Related: `TSK-0138` moved terrain visual sync policy out of app runtime; continue using that boundary when splitting renderer modules.
 
 Status: queued
+TSK-0158: Separate vegetation pre-growth from settlement road planning
+
+Type: bug
+
+Why: The map-editor pre-growth setting was incorrectly committing 20 years of settlement expansion and excessive intratown roads into the day-one world instead of controlling vegetation maturity and spread.
+
+Done when:
+- [x] Pre-growth settings and MAP6 share-code payloads control deterministic vegetation succession only.
+- [x] Starting towns use compact density-derived housing targets with bounded demand-backed road extension.
+- [x] The 20-year future settlement cache remains clone-only and replays recorded roads during construction.
+- [x] Every future house entry retains cumulative prerequisites from earlier successful house plans so skipped entries cannot strand later houses.
+- [x] Failed future-lot trials discard all road mutations, successful road growth is limited to one bounded extension per house, and exhausted towns stop adding cached entries.
+- [x] The supplied share code produces connected populated towns with materially fewer road attempts, and focused growth/mapgen regressions pass.
+
+Touchpoints: `src/systems/terrain/sim/`, `src/systems/settlements/sim/`, `src/systems/settlements/controllers/settlementGeneration.ts`, `src/ui/terrain-schema.ts`, `scripts/mapgen-diagnostics-regression.mjs`
+
+Constraints: preserve deterministic generation, keep future roads invisible until construction, preserve existing dirty roadbed work, and do not reintroduce runtime road searches for generated campaign maps.
+
+Status: done

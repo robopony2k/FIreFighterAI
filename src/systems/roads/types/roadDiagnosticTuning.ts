@@ -3,7 +3,7 @@ export type RoadDiagnosticRouteGroup =
   | "intertown"
   | "connectivityRepair"
   | "localSettlement"
-  | "settlementPreGrowth"
+  | "initialSettlementBootstrap"
   | "futureGrowthPrecompute";
 
 export type RoadDiagnosticTuning = {
@@ -20,7 +20,6 @@ export type RoadDiagnosticTuning = {
   intertownConnectionPasses: number | null;
   intertownEdgeLimit: number | null;
   intertownDetourMultiplier: number | null;
-  settlementPreGrowthYearsOverride: number | null;
   futureGrowthPlanYearsOverride: number | null;
 };
 
@@ -38,7 +37,6 @@ export const DEFAULT_ROAD_DIAGNOSTIC_TUNING: RoadDiagnosticTuning = {
   intertownConnectionPasses: null,
   intertownEdgeLimit: null,
   intertownDetourMultiplier: null,
-  settlementPreGrowthYearsOverride: null,
   futureGrowthPlanYearsOverride: null
 };
 
@@ -106,7 +104,6 @@ export const resolveRoadDiagnosticTuning = (
     (finiteNumberOrNull(value?.intertownDetourMultiplier) ?? 0) > 0
       ? clamp(finiteNumberOrNull(value?.intertownDetourMultiplier) ?? 0, 1, 8)
       : null,
-  settlementPreGrowthYearsOverride: wholeNumberOrNull(value?.settlementPreGrowthYearsOverride, 0, 40),
   futureGrowthPlanYearsOverride: wholeNumberOrNull(value?.futureGrowthPlanYearsOverride, 0, 20)
 });
 
@@ -125,7 +122,6 @@ export const roadDiagnosticTuningToCacheKey = (tuning: RoadDiagnosticTuning): st
     tuning.intertownConnectionPasses ?? "default",
     tuning.intertownEdgeLimit ?? "default",
     tuning.intertownDetourMultiplier?.toFixed(2) ?? "default",
-    tuning.settlementPreGrowthYearsOverride ?? "default",
     tuning.futureGrowthPlanYearsOverride ?? "default"
   ].join(":");
 
@@ -156,9 +152,6 @@ export const describeRoadDiagnosticTuning = (tuning: RoadDiagnosticTuning): stri
   }
   if (tuning.intertownDetourMultiplier !== null) {
     tuned.push(`intertown detour x${tuning.intertownDetourMultiplier.toFixed(2)}`);
-  }
-  if (tuning.settlementPreGrowthYearsOverride !== null) {
-    tuned.push(`pre-growth ${tuning.settlementPreGrowthYearsOverride}y`);
   }
   if (tuning.futureGrowthPlanYearsOverride !== null) {
     tuned.push(`future-growth ${tuning.futureGrowthPlanYearsOverride}y`);
