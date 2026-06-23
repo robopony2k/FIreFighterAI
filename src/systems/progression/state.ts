@@ -16,8 +16,7 @@ export const createProgressionState = (): ProgressionState => ({
   nextDraftOrdinal: 1,
   activeDraft: null,
   queuedDraftOrdinals: [],
-  rewardStacks: {},
+  nodeRanks: {},
   resolved: createResolvedProgressionModifiers(),
   revision: 0
 });
-

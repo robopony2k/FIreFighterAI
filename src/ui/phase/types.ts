@@ -81,11 +81,11 @@ export type GameUiSnapshot = {
     progress01: number;
     queuedDraftCount: number;
     hasActiveDraft: boolean;
-    ownedRewards: Array<{
+    ownedNodes: Array<{
       id: string;
       label: string;
       name: string;
-      stacks: number;
+      rank: number;
     }>;
   } | null;
   scoring: {

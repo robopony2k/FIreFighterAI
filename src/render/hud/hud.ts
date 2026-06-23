@@ -7,7 +7,8 @@ import { formatTimeSpeedValue, getResolvedTimeSpeedValue, stepTimeSpeedSliderVal
 import { TIME_CONTROL_ACTIONS, getRuntimeWidgetTitle, getTimeSpeedAction } from "../../ui/runtime/widgets/registry.js";
 import { buildHudLayout, WidgetSlot, WidgetType, type Rect } from "./hudLayout.js";
 import type { HudState } from "./hudState.js";
-import { addToast, cycleWidget, stepToasts, toggleCompact } from "./hudState.js";
+import { addToast, cycleWidget, resolveAvailableWidget, stepToasts, toggleCompact } from "./hudState.js";
+import { hasProgressionCapability } from "../../systems/progression/sim/techTree.js";
 import type { HudInput, HudWidget } from "./widgets/hudWidget.js";
 import { ClimateChartWidget } from "./widgets/ClimateChartWidget.js";
 import { MinimapWidget } from "./widgets/MinimapWidget.js";
@@ -116,9 +117,10 @@ const renderTopBar = (ctx: CanvasRenderingContext2D, world: WorldState, ui: HudS
   const moistureDenom = Math.max(0.0001, DEFAULT_MOISTURE_PARAMS.Mmax - DEFAULT_MOISTURE_PARAMS.Mmin);
   const moistureNorm = clamp((world.climateMoisture - DEFAULT_MOISTURE_PARAMS.Mmin) / moistureDenom, 0, 1);
   const dryness = Math.round((1 - moistureNorm) * 100);
+  const windUnlocked = hasProgressionCapability(world.progression, "climate.wind");
   const windStrength = Math.round((world.wind?.strength ?? 0) * 10);
   const windLabel = windStrength > 0 ? `${world.wind?.name ?? "?"} ${windStrength}` : "Calm";
-  const leftText = `TEMP ${tempValue} | WIND ${windLabel} | DRY ${dryness}%`;
+  const leftText = windUnlocked ? `TEMP ${tempValue} | WIND ${windLabel} | DRY ${dryness}%` : `TEMP ${tempValue} | DRY ${dryness}%`;
 
   const day = Math.max(1, Math.ceil(world.phaseDay + 0.0001));
   const year = world.year;
@@ -212,7 +214,7 @@ const autoToasts = (world: WorldState, ui: HudState): void => {
   }
   ui.lastPhase = phase;
   const windName = world.wind?.name ?? "";
-  if (ui.lastWindName && ui.lastWindName !== windName) {
+  if (hasProgressionCapability(world.progression, "climate.wind") && ui.lastWindName && ui.lastWindName !== windName) {
     addToast(ui, `Wind shift: ${ui.lastWindName} -> ${windName}`, "warning", 3200);
   }
   ui.lastWindName = windName;
@@ -331,6 +333,7 @@ export const renderHud = (
     const slotRect = layout.widgetSlots[slot];
     const { headerRect, contentRect } = layoutSlotRects(slotRect, layout.slotHeaderHeight, layout.slotPadding);
     const slotState = ui.slots[slot];
+    slotState.widget = resolveAvailableWidget(world.progression, slotState.widget);
     const label = widgetLabel(slotState.widget, slotState.compact);
 
     ctx.fillStyle = ui.theme.slotCardBackground;
@@ -364,7 +367,7 @@ export const renderHud = (
   renderToasts(ctx, ui, layout.toastArea);
 };
 
-export const handleHudKey = (event: KeyboardEvent, ui: HudState): boolean => {
+export const handleHudKey = (event: KeyboardEvent, world: WorldState, ui: HudState): boolean => {
   const key = event.key;
   if (key !== "F7" && key !== "F8") {
     return false;
@@ -374,7 +377,7 @@ export const handleHudKey = (event: KeyboardEvent, ui: HudState): boolean => {
   if (event.shiftKey) {
     toggleCompact(ui, slot);
   } else {
-    cycleWidget(ui, slot);
+    cycleWidget(ui, slot, world.progression);
   }
   return true;
 };

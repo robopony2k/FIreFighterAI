@@ -5,7 +5,7 @@ import type { Rect, WidgetSlot, WidgetType } from "../hudLayout.js";
 import { HUD_PLANE_Y } from "../hudLayout.js";
 import type { HudInput, HudWidget } from "./hudWidget.js";
 import { computeViewportCenterOnPlane } from "../minimapViewport.js";
-import { getMinimapModeLabel, type MinimapMode } from "../../../ui/runtime/minimap/minimapModes.js";
+import { getMinimapModeLabel, resolveAvailableMinimapMode, type MinimapMode } from "../../../ui/runtime/minimap/minimapModes.js";
 import {
   buildThermalBackdropField,
   isDynamicMinimapMode,
@@ -15,6 +15,7 @@ import {
 } from "../../../ui/runtime/minimap/minimapRaster.js";
 import { generateWorldClimateSeed } from "../../../systems/climate/sim/worldClimateSeed.js";
 import { buildTerrainWindOverlaySamples } from "../../../systems/fire/rendering/terrainWindOverlay.js";
+import { hasProgressionCapability } from "../../../systems/progression/sim/techTree.js";
 
 const clamp = (value: number, min: number, max: number): number => Math.min(max, Math.max(min, value));
 
@@ -40,7 +41,8 @@ export class MinimapWidget implements HudWidget {
   render(ctx: CanvasRenderingContext2D, rect: Rect, world: WorldState, ui: HudState): void {
     const padding = 6;
     const labelHeight = 18;
-    const mode = ui.slots[this.slot].minimapMode;
+    const mode = resolveAvailableMinimapMode(world.progression, ui.slots[this.slot].minimapMode);
+    ui.slots[this.slot].minimapMode = mode;
     const labelWidth = Math.min(150, Math.max(80, rect.width * 0.6));
     this.modeRect = {
       x: rect.x + padding,
@@ -90,7 +92,9 @@ export class MinimapWidget implements HudWidget {
     ctx.strokeRect(mapRect.x + 0.5, mapRect.y + 0.5, mapRect.width - 1, mapRect.height - 1);
 
     this.drawViewportOverlay(ctx, mapRect, world, ui);
-    this.drawWindOverlay(ctx, mapRect, world, mode);
+    if (hasProgressionCapability(world.progression, "minimap.overlay.wind")) {
+      this.drawWindOverlay(ctx, mapRect, world, mode);
+    }
 
     ctx.restore();
   }
@@ -106,7 +110,7 @@ export class MinimapWidget implements HudWidget {
       y >= this.modeRect.y &&
       y <= this.modeRect.y + this.modeRect.height
     ) {
-      cycleMinimapMode(ui, this.slot);
+      cycleMinimapMode(ui, this.slot, _world.progression);
     }
   }
 

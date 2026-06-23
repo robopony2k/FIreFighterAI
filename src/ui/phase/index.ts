@@ -8,7 +8,7 @@ import {
   SCORE_LIFE_LOSS_PENALTY,
   TRUCK_CAPACITY
 } from "../../core/config.js";
-import { getCommandRewardDefinition, getCommandRewardDefinitions } from "../../config/progression/rewardCatalog.js";
+import { getTechNodeDefinition, getTechNodeDefinitions } from "../../config/progression/techTreeCatalog.js";
 import { formatCurrency } from "../../core/utils.js";
 import { getPhaseInfo } from "../../core/time.js";
 import type { SelectedEntity } from "./types.js";
@@ -18,7 +18,13 @@ import type { BudgetReportData } from "./components/BudgetReportView.js";
 import type { ProgressionDraftPanelData } from "./components/ProgressionDraftPanel.js";
 import { GameState } from "./gameState.js";
 import { UIController } from "./uiController.js";
-import { getProgressionLevelFloor, getProgressionNextLevelThreshold, getProgressionProgress01 } from "../../systems/progression/index.js";
+import {
+  getProgressionLevelFloor,
+  getProgressionNextLevelThreshold,
+  getProgressionProgress01,
+  hasProgressionCapability,
+  isTechTreeComplete
+} from "../../systems/progression/index.js";
 import { getActiveTimeSpeedValue, isAdvanceToNextEventAvailable } from "../../sim/index.js";
 import { getFirebreakCostForState, getTrainingCostForState } from "../../sim/units.js";
 
@@ -264,41 +270,69 @@ const getInteractionMode = (world: WorldState, inputState: InputState) => {
 };
 
 const toRewardChipLabel = (icon: string): string => icon.slice(0, 3).toUpperCase();
-const formatRewardCategory = (category: string): string => `${category.slice(0, 1).toUpperCase()}${category.slice(1)}`;
+const formatTechBranch = (branch: string): string => `${branch.slice(0, 1).toUpperCase()}${branch.slice(1)}`;
+const CAPABILITY_LABELS: Record<string, string> = {
+  "runtime.minimap": "Minimap",
+  "minimap.mode.terrain": "Terrain map",
+  "minimap.mode.topographic": "Topographic map",
+  "minimap.mode.moisture": "Moisture map",
+  "minimap.mode.thermal": "Heat map",
+  "minimap.mode.satellite": "Satellite map",
+  "minimap.overlay.wind": "Wind map detail",
+  "minimap.overlay.units": "Unit tracking",
+  "climate.wind": "Wind intelligence"
+};
 
 const buildProgressionPanelData = (world: WorldState): ProgressionDraftPanelData => {
   const level = world.progression.level;
   const nextThreshold = getProgressionNextLevelThreshold(level);
   const progress01 = getProgressionProgress01(level, world.progression.totalAssistedExtinguishes);
   const activeDraft = world.progression.activeDraft;
+  const treeComplete = isTechTreeComplete(world.progression.nodeRanks);
   const draftLevel = activeDraft?.level ?? level;
   return {
     active: activeDraft !== null,
-    title: activeDraft ? `Command Upgrade L${draftLevel}` : `Command Upgrade L${level}`,
+    title: activeDraft ? `Tech Draft L${draftLevel}` : `Tech Tree L${level}`,
     summary: activeDraft
-      ? `Level ${draftLevel} reward ready. Pick while the run continues.`
-      : nextThreshold !== null
-        ? `Next command upgrade unlocks at ${nextThreshold} assisted extinguishes.`
-        : "All authored command upgrades unlocked.",
+      ? `Level ${draftLevel} tech node ready. Pick while the run continues.`
+      : treeComplete
+        ? "All tech tree nodes are at maximum rank."
+        : nextThreshold !== null
+        ? `Next tech draft unlocks at ${nextThreshold} assisted extinguishes.`
+        : "All authored tech nodes unlocked.",
     progressText:
-      nextThreshold !== null
+      treeComplete
+        ? `${world.progression.totalAssistedExtinguishes} assisted extinguishes | Tech tree complete`
+        : nextThreshold !== null
         ? `${world.progression.totalAssistedExtinguishes}/${nextThreshold} assisted extinguishes`
         : `${world.progression.totalAssistedExtinguishes} assisted extinguishes total`,
-    progress01,
+    progress01: treeComplete ? 1 : progress01,
     queuedCount: world.progression.queuedDraftOrdinals.length,
     options: activeDraft
-      ? activeDraft.options.map((rewardId) => {
-          const definition = getCommandRewardDefinition(rewardId);
+      ? activeDraft.options.map((nodeId) => {
+          const definition = getTechNodeDefinition(nodeId);
+          const prerequisiteLabel =
+            definition.prerequisites.length === 0
+              ? "Root node"
+              : definition.prerequisites
+                  .map((prerequisite) => `${getTechNodeDefinition(prerequisite.nodeId).name} R${prerequisite.minRank}`)
+                  .join(", ");
+          const resultLabel =
+            definition.capabilities.length > 0
+              ? definition.capabilities.map((capability) => CAPABILITY_LABELS[capability] ?? capability).join(", ")
+              : "Ranked operational modifier";
           return {
-            id: rewardId,
+            id: nodeId,
             name: definition.name,
             description: definition.description,
             icon: definition.icon,
-            category: definition.category,
-            categoryLabel: formatRewardCategory(definition.category),
+            branch: definition.branch,
+            branchLabel: formatTechBranch(definition.branch),
             rarity: definition.rarity,
-            stacks: Math.max(0, Math.floor(world.progression.rewardStacks[rewardId] ?? 0)),
-            maxStacks: definition.maxStacks
+            rank: Math.max(0, Math.floor(world.progression.nodeRanks[nodeId] ?? 0)),
+            maxRanks: definition.maxRanks,
+            prerequisiteLabel,
+            resultLabel
           };
         })
       : []
@@ -331,14 +365,17 @@ export const initPhaseUI = (container: HTMLElement): PhaseUiApi => {
       isAdvanceToNextEventAvailable(world)
     );
     state.setAlert(world.statusMessage && world.statusMessage !== "Ready." ? world.statusMessage : null);
+    const windUnlocked = hasProgressionCapability(world.progression, "climate.wind");
     const windStrength = Math.round(world.wind.strength * 10);
-    const windLabel = windStrength > 0 ? `Wind ${world.wind.name} ${windStrength}` : "Wind Calm";
+    const windLabel = windUnlocked ? (windStrength > 0 ? `Wind ${world.wind.name} ${windStrength}` : "Wind Calm") : null;
     const tempLabel = Number.isFinite(world.climateTemp) ? `${Math.round(world.climateTemp)}C` : "n/a";
     const approvalPct = Math.round(Math.max(0, Math.min(1, world.approval)) * 100);
     const totalHouses = Number.isFinite(world.totalHouses) ? Math.max(0, Math.floor(world.totalHouses)) : 0;
     const destroyedHouses = Number.isFinite(world.destroyedHouses) ? Math.max(0, Math.floor(world.destroyedHouses)) : 0;
     const houseCount = Math.max(0, totalHouses - destroyedHouses);
-    const forecastMeta = `Year ${world.year} | ${tempLabel} | ${windLabel} | Approval ${approvalPct}% | Houses ${houseCount}`;
+    const forecastMeta = [`Year ${world.year}`, tempLabel, windLabel, `Approval ${approvalPct}%`, `Houses ${houseCount}`]
+      .filter((part): part is string => part !== null)
+      .join(" | ");
     state.setForecast(
       world.climateForecast ?? null,
       world.climateForecastDay ?? 0,
@@ -348,22 +385,23 @@ export const initPhaseUI = (container: HTMLElement): PhaseUiApi => {
     );
     const progressionLevel = world.progression.level;
     const nextProgressionThreshold = getProgressionNextLevelThreshold(progressionLevel);
+    const techTreeComplete = isTechTreeComplete(world.progression.nodeRanks);
     state.setProgression({
       level: progressionLevel,
       totalAssistedExtinguishes: world.progression.totalAssistedExtinguishes,
       currentThreshold: getProgressionLevelFloor(progressionLevel),
-      nextThreshold: nextProgressionThreshold,
-      progress01: getProgressionProgress01(progressionLevel, world.progression.totalAssistedExtinguishes),
+      nextThreshold: techTreeComplete ? null : nextProgressionThreshold,
+      progress01: techTreeComplete ? 1 : getProgressionProgress01(progressionLevel, world.progression.totalAssistedExtinguishes),
       queuedDraftCount: world.progression.queuedDraftOrdinals.length,
       hasActiveDraft: world.progression.activeDraft !== null,
-      ownedRewards: getCommandRewardDefinitions()
+      ownedNodes: getTechNodeDefinitions()
         .map((definition) => ({
           id: definition.id,
           label: toRewardChipLabel(definition.icon),
           name: definition.name,
-          stacks: Math.max(0, Math.floor(world.progression.rewardStacks[definition.id] ?? 0))
+          rank: Math.max(0, Math.floor(world.progression.nodeRanks[definition.id] ?? 0))
         }))
-        .filter((entry) => entry.stacks > 0)
+        .filter((entry) => entry.rank > 0)
     });
     state.setScoring({
       score: world.scoring.score,

@@ -490,3 +490,17 @@ Migration guidance:
 1. Regenerate campaign maps or growth plans so `SettlementGrowthRoadSegment` entries include `path` and `bridgeTileIndices`.
 2. Consume generated settlement expansion roads through `carveRoadPath` or an equivalent replay adapter method.
 3. Treat runtime settlement expansion path search as debug/legacy fallback only; investigate any fallback telemetry in generated campaign maps.
+
+## Flat Command Reward Catalog
+
+Status: Deprecated as of June 22, 2026.
+
+- The prerequisite-free `rewardCatalog.ts` and `rewardStacks` campaign state have been replaced by a graph-backed tech tree and ranked `nodeRanks` state.
+- Command upgrades still arrive through deterministic drafts, but draft candidates must now satisfy authored prerequisite ranks and capability unlocks are enforced by their consuming UI surfaces.
+- Existing numeric upgrade effects and diminishing-return caps remain supported as ranked tech nodes.
+
+Migration guidance:
+
+1. Add future perks and unlocks to `src/config/progression/techTreeCatalog.ts` with stable graph and layout metadata.
+2. Gate player-facing features through progression capability IDs rather than checking node IDs in UI or rendering code.
+3. Use the progression graph helpers for eligibility, snapshots, and validation; do not recreate a separate flat reward pool.

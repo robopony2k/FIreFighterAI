@@ -1,6 +1,7 @@
-import { getCommandRewardDefinition, getCommandRewardDefinitions } from "../../config/progression/rewardCatalog.js";
+import { getEligibleTechNodeDefinitions } from "./sim/techTree.js";
+import { getTechNodeDefinition } from "../../config/progression/techTreeCatalog.js";
 import { RNG } from "../../core/rng.js";
-import type { RewardCategory } from "./types.js";
+import type { TechTreeBranch } from "./types/techTree.js";
 
 const mixDraftSeed = (worldSeed: number, draftOrdinal: number): number => {
   let hash = (worldSeed ^ Math.imul((draftOrdinal + 1) | 0, 0x9e3779b9)) >>> 0;
@@ -12,15 +13,15 @@ const mixDraftSeed = (worldSeed: number, draftOrdinal: number): number => {
   return hash >>> 0;
 };
 
-const sumCategoryStacks = (rewardStacks: Record<string, number>): Map<RewardCategory, number> => {
-  const counts = new Map<RewardCategory, number>();
-  Object.entries(rewardStacks).forEach(([rewardId, stackCount]) => {
-    const resolvedStackCount = Math.max(0, Math.floor(stackCount));
-    if (resolvedStackCount <= 0) {
+const sumBranchRanks = (nodeRanks: Record<string, number>): Map<TechTreeBranch, number> => {
+  const counts = new Map<TechTreeBranch, number>();
+  Object.entries(nodeRanks).forEach(([nodeId, rank]) => {
+    const resolvedRank = Math.max(0, Math.floor(rank));
+    if (resolvedRank <= 0) {
       return;
     }
-    const category = getCommandRewardDefinition(rewardId).category;
-    counts.set(category, (counts.get(category) ?? 0) + resolvedStackCount);
+    const definition = getTechNodeDefinition(nodeId);
+    counts.set(definition.branch, (counts.get(definition.branch) ?? 0) + resolvedRank);
   });
   return counts;
 };
@@ -43,27 +44,24 @@ const pickWeightedRewardIndex = (weights: number[], rng: RNG): number => {
 export const buildProgressionDraftOptions = (
   worldSeed: number,
   draftOrdinal: number,
-  rewardStacks: Record<string, number>,
+  nodeRanks: Record<string, number>,
   count = 3
 ): string[] => {
   const rng = new RNG(mixDraftSeed(worldSeed, draftOrdinal));
-  const ownedCategoryStacks = sumCategoryStacks(rewardStacks);
-  const selectedCategoryCounts = new Map<RewardCategory, number>();
-  const pool = getCommandRewardDefinitions().filter((definition) => {
-    const stackCount = Math.max(0, Math.floor(rewardStacks[definition.id] ?? 0));
-    return stackCount < definition.maxStacks;
-  });
+  const ownedBranchRanks = sumBranchRanks(nodeRanks);
+  const selectedBranchCounts = new Map<TechTreeBranch, number>();
+  const pool = getEligibleTechNodeDefinitions(nodeRanks);
   const options: string[] = [];
 
   while (pool.length > 0 && options.length < count) {
     const weights = pool.map((definition) => {
-      const stackCount = Math.max(0, Math.floor(rewardStacks[definition.id] ?? 0));
-      const ownedCategoryCount = ownedCategoryStacks.get(definition.category) ?? 0;
-      const selectedCategoryCount = selectedCategoryCounts.get(definition.category) ?? 0;
-      const stackPenalty = 1 / (1 + stackCount * 0.45);
-      const ownedCategoryPenalty = 1 / (1 + ownedCategoryCount * 0.18);
-      const selectedCategoryPenalty = 1 / (1 + selectedCategoryCount * 1.75);
-      return Math.max(0.0001, definition.draftWeight * stackPenalty * ownedCategoryPenalty * selectedCategoryPenalty);
+      const rank = Math.max(0, Math.floor(nodeRanks[definition.id] ?? 0));
+      const ownedBranchRank = ownedBranchRanks.get(definition.branch) ?? 0;
+      const selectedBranchCount = selectedBranchCounts.get(definition.branch) ?? 0;
+      const rankPenalty = 1 / (1 + rank * 0.45);
+      const ownedBranchPenalty = 1 / (1 + ownedBranchRank * 0.18);
+      const selectedBranchPenalty = 1 / (1 + selectedBranchCount * 1.75);
+      return Math.max(0.0001, definition.draftWeight * rankPenalty * ownedBranchPenalty * selectedBranchPenalty);
     });
     const pickedIndex = pickWeightedRewardIndex(weights, rng);
     const [picked] = pool.splice(pickedIndex, 1);
@@ -71,9 +69,8 @@ export const buildProgressionDraftOptions = (
       break;
     }
     options.push(picked.id);
-    selectedCategoryCounts.set(picked.category, (selectedCategoryCounts.get(picked.category) ?? 0) + 1);
+    selectedBranchCounts.set(picked.branch, (selectedBranchCounts.get(picked.branch) ?? 0) + 1);
   }
 
   return options;
 };
-

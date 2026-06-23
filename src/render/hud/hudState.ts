@@ -1,7 +1,9 @@
 import type { ClimateForecast } from "../../core/types.js";
-import { MINIMAP_MODES, type MinimapMode } from "../../ui/runtime/minimap/minimapModes.js";
+import { getAvailableMinimapModes, type MinimapMode } from "../../ui/runtime/minimap/minimapModes.js";
 import type { HudCameraSnapshot } from "./minimapViewport.js";
 import { DEFAULT_WIDGET_ASSIGNMENTS, WidgetSlot, WidgetType, WIDGET_TYPES } from "./hudLayout.js";
+import type { ProgressionState } from "../../systems/progression/types.js";
+import { hasProgressionCapability } from "../../systems/progression/sim/techTree.js";
 
 export type ToastSeverity = "info" | "warning" | "error";
 
@@ -183,10 +185,19 @@ export const setHudViewport = (state: HudState, width: number, height: number, s
   state.viewport.scale = Math.max(1, scale);
 };
 
-export const cycleWidget = (state: HudState, slot: WidgetSlot): void => {
+const getAvailableWidgetTypes = (progression: ProgressionState): WidgetType[] =>
+  WIDGET_TYPES.filter((widget) => widget !== "minimap" || hasProgressionCapability(progression, "runtime.minimap"));
+
+export const resolveAvailableWidget = (progression: ProgressionState, preferred: WidgetType): WidgetType => {
+  const available = getAvailableWidgetTypes(progression);
+  return available.includes(preferred) ? preferred : (available[0] ?? "climate");
+};
+
+export const cycleWidget = (state: HudState, slot: WidgetSlot, progression: ProgressionState): void => {
   const current = state.slots[slot].widget;
-  const index = WIDGET_TYPES.indexOf(current);
-  const next = WIDGET_TYPES[(index + 1) % WIDGET_TYPES.length] ?? WIDGET_TYPES[0];
+  const available = getAvailableWidgetTypes(progression);
+  const index = available.indexOf(current);
+  const next = available[(index + 1) % available.length] ?? available[0] ?? "climate";
   state.slots[slot].widget = next;
 };
 
@@ -194,10 +205,11 @@ export const toggleCompact = (state: HudState, slot: WidgetSlot): void => {
   state.slots[slot].compact = !state.slots[slot].compact;
 };
 
-export const cycleMinimapMode = (state: HudState, slot: WidgetSlot): void => {
+export const cycleMinimapMode = (state: HudState, slot: WidgetSlot, progression: ProgressionState): void => {
   const current = state.slots[slot].minimapMode;
-  const index = MINIMAP_MODES.indexOf(current);
-  const next = MINIMAP_MODES[(index + 1) % MINIMAP_MODES.length] ?? MINIMAP_MODES[0];
+  const available = getAvailableMinimapModes(progression);
+  const index = available.indexOf(current);
+  const next = available[(index + 1) % available.length] ?? available[0] ?? "terrain";
   state.slots[slot].minimapMode = next;
 };
 

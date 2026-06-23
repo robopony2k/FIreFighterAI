@@ -19,6 +19,7 @@
     "fire:regression": "npm run build && node scripts/fire-regression.mjs",
     "runtime:perf": "npm run build && node scripts/runtime-perf-regression.mjs",
     "units:regression": "npm run build && node scripts/units-regression.mjs",
+    "progression:regression": "npm run build && node scripts/progression-regression.mjs",
     "evacuation:regression": "npm run build && node scripts/evacuation-regression.mjs",
     "growth:regression": "npm run build && node scripts/growth-regression.mjs",
     "settlement:regression": "npm run build && node scripts/settlement-lifecycle-regression.mjs",

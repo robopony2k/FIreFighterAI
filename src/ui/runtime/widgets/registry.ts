@@ -10,6 +10,8 @@ import type {
   RuntimeWidgetPlacement,
   RuntimeWidgetSpec
 } from "./types.js";
+import type { ProgressionState } from "../../../systems/progression/types.js";
+import { hasProgressionCapability } from "../../../systems/progression/sim/techTree.js";
 
 export const PHASE_DOM_SETTINGS_WIDGET_CONTAINER = "phaseDom:settingsWidget";
 export const PHASE_DOM_TOPBAR_CLIMATE_CONTAINER = "phaseDom:topBarClimate";
@@ -284,6 +286,7 @@ export const RUNTIME_WIDGET_SPECS: readonly RuntimeWidgetSpec[] = [
     title: "Map",
     shortTitle: "Minimap",
     description: "Runtime minimap surface for panning and map-state inspection.",
+    requiredCapabilities: ["runtime.minimap"],
     surfaceTitles: {
       phaseDom: "Map",
       threeDock: "MINIMAP",
@@ -333,6 +336,11 @@ export const getRuntimeWidgetSpec = (widgetId: RuntimeWidgetId): RuntimeWidgetSp
     throw new Error(`Unknown runtime widget: ${widgetId}`);
   }
   return spec;
+};
+
+export const isRuntimeWidgetAvailable = (widgetId: RuntimeWidgetId, progression: ProgressionState): boolean => {
+  const requiredCapabilities = getRuntimeWidgetSpec(widgetId).requiredCapabilities ?? [];
+  return requiredCapabilities.every((capability) => hasProgressionCapability(progression, capability));
 };
 
 export const getRuntimeWidgetTitle = (widgetId: RuntimeWidgetId, surface?: RuntimeSurfaceId): string => {

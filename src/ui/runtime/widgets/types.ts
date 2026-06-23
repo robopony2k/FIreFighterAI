@@ -1,4 +1,5 @@
 import type { RuntimeSettingKey } from "../../../persistence/runtimeSettings.js";
+import type { ProgressionCapabilityId } from "../../../systems/progression/types/techTree.js";
 
 export type RuntimeSurfaceId = "phaseDom" | "threeDock" | "canvasHud";
 
@@ -40,6 +41,7 @@ export type RuntimeWidgetSpec = {
   title: string;
   shortTitle: string;
   description: string;
+  requiredCapabilities?: readonly ProgressionCapabilityId[];
   surfaceTitles?: Partial<Record<RuntimeSurfaceId, string>>;
   placements: readonly RuntimeWidgetPlacement[];
   actions: readonly RuntimeWidgetActionSpec[];

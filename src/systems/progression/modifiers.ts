@@ -1,4 +1,4 @@
-import { getCommandRewardDefinitions } from "../../config/progression/rewardCatalog.js";
+import { getTechNodeDefinitions } from "../../config/progression/techTreeCatalog.js";
 import { clamp } from "../../core/utils.js";
 import { createResolvedProgressionModifiers } from "./state.js";
 import type { ResolvedProgressionModifiers, RewardEffectSpec, RewardEffectTargetId } from "./types.js";
@@ -29,15 +29,15 @@ const applyEffectStack = (accumulator: RewardDeltaAccumulator, effect: RewardEff
     effect.baseValue >= 0 ? clamp(nextValue, 0, effect.cap) : clamp(nextValue, -effect.cap, 0);
 };
 
-export const resolveProgressionModifiers = (rewardStacks: Record<string, number>): ResolvedProgressionModifiers => {
+export const resolveProgressionModifiers = (nodeRanks: Record<string, number>): ResolvedProgressionModifiers => {
   const deltas = createRewardDeltaAccumulator();
-  for (const definition of getCommandRewardDefinitions()) {
-    const stackCount = Math.max(0, Math.floor(rewardStacks[definition.id] ?? 0));
-    if (stackCount <= 0) {
+  for (const definition of getTechNodeDefinitions()) {
+    const rank = Math.max(0, Math.floor(nodeRanks[definition.id] ?? 0));
+    if (rank <= 0) {
       continue;
     }
-    for (let stackIndex = 0; stackIndex < stackCount; stackIndex += 1) {
-      definition.effects.forEach((effect) => applyEffectStack(deltas, effect, stackIndex));
+    for (let rankIndex = 0; rankIndex < rank; rankIndex += 1) {
+      definition.effects.forEach((effect) => applyEffectStack(deltas, effect, rankIndex));
     }
   }
 

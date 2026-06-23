@@ -1,13 +1,22 @@
-import { COMMAND_LEVEL_THRESHOLDS, getCommandLevelThreshold } from "../../config/progression/levelThresholds.js";
+import { getCommandLevelThreshold } from "../../config/progression/levelThresholds.js";
 import { resolveProgressionModifiers } from "./modifiers.js";
 import { buildProgressionDraftOptions } from "./draft.js";
 import type { WorldState } from "../../core/state.js";
 import type { ProgressionDraft } from "./types.js";
+import { getEligibleTechNodeDefinitions, isTechTreeComplete } from "./sim/techTree.js";
+export {
+  buildTechTreeSnapshot,
+  getTechNodeRank,
+  hasProgressionCapability,
+  isTechTreeComplete,
+  validateTechTreeDefinitions
+} from "./sim/techTree.js";
+export { getEligibleTechNodeDefinitions } from "./sim/techTree.js";
 
 export const getProgressionLevelForExtinguishTotal = (totalAssistedExtinguishes: number): number => {
   const total = Math.max(0, Math.floor(totalAssistedExtinguishes));
   let level = 0;
-  while (level < COMMAND_LEVEL_THRESHOLDS.length && total >= COMMAND_LEVEL_THRESHOLDS[level]!) {
+  while (total >= (getCommandLevelThreshold(level + 1) ?? Number.POSITIVE_INFINITY)) {
     level += 1;
   }
   return level;
@@ -17,7 +26,7 @@ export const getProgressionLevelFloor = (level: number): number => {
   if (!Number.isFinite(level) || level <= 0) {
     return 0;
   }
-  return COMMAND_LEVEL_THRESHOLDS[Math.max(0, Math.floor(level) - 1)] ?? COMMAND_LEVEL_THRESHOLDS[COMMAND_LEVEL_THRESHOLDS.length - 1] ?? 0;
+  return getCommandLevelThreshold(Math.floor(level)) ?? 0;
 };
 
 export const getProgressionNextLevelThreshold = (level: number): number | null => getCommandLevelThreshold(level + 1);
@@ -33,7 +42,7 @@ export const getProgressionProgress01 = (level: number, totalAssistedExtinguishe
 };
 
 const createProgressionDraft = (state: WorldState, ordinal: number, level: number): ProgressionDraft | null => {
-  const options = buildProgressionDraftOptions(state.seed, ordinal, state.progression.rewardStacks);
+  const options = buildProgressionDraftOptions(state.seed, ordinal, state.progression.nodeRanks);
   if (options.length === 0) {
     return null;
   }
@@ -87,15 +96,21 @@ export const registerAssistedExtinguishProgress = (state: WorldState, assistedEx
   progression.revision += 1;
 };
 
-export const selectProgressionReward = (state: WorldState, rewardId: string): boolean => {
+export const selectProgressionNode = (state: WorldState, nodeId: string): boolean => {
   const activeDraft = state.progression.activeDraft;
-  if (!activeDraft || !activeDraft.options.includes(rewardId)) {
+  if (!activeDraft || !activeDraft.options.includes(nodeId)) {
+    return false;
+  }
+  if (!getEligibleTechNodeDefinitions(state.progression.nodeRanks).some((definition) => definition.id === nodeId)) {
     return false;
   }
 
-  state.progression.rewardStacks[rewardId] = Math.max(0, Math.floor(state.progression.rewardStacks[rewardId] ?? 0)) + 1;
-  state.progression.resolved = resolveProgressionModifiers(state.progression.rewardStacks);
+  state.progression.nodeRanks[nodeId] = Math.max(0, Math.floor(state.progression.nodeRanks[nodeId] ?? 0)) + 1;
+  state.progression.resolved = resolveProgressionModifiers(state.progression.nodeRanks);
   state.progression.activeDraft = null;
+  if (isTechTreeComplete(state.progression.nodeRanks)) {
+    state.progression.queuedDraftOrdinals = [];
+  }
   state.progression.revision += 1;
   return true;
 };

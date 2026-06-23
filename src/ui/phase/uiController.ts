@@ -26,6 +26,7 @@ import type { ProgressionDraftPanelData } from "./components/ProgressionDraftPan
 import type { TopBarData } from "./components/TopBar.js";
 import type { UiAudioSettings } from "../../audio/uiAudio.js";
 import type { RuntimeSettings } from "../../persistence/runtimeSettings.js";
+import { hasProgressionCapability } from "../../systems/progression/sim/techTree.js";
 
 type PanelDataMap = {
   miniMap: MiniMapPanelData;
@@ -45,8 +46,8 @@ const defaultPanelData: PanelDataMap = {
   },
   progressionDraft: {
     active: false,
-    title: "Command Upgrade",
-    summary: "Next command upgrade will unlock from assisted extinguishes.",
+    title: "Tech Tree",
+    summary: "The next tech draft will unlock from assisted extinguishes.",
     progressText: "0/25 assisted extinguishes",
     progress01: 0,
     queuedCount: 0,
@@ -325,6 +326,10 @@ export class UIController {
     this.budgetReport.update(this.panelData.budgetReport ?? defaultPanelData.budgetReport);
 
     let visiblePanels = isThreeTest ? rules.visiblePanels.filter((panelId) => !THREE_TEST_LEGACY_PANELS.has(panelId)) : rules.visiblePanels;
+    const minimapWorld = this.panelData.miniMap?.world ?? null;
+    if (minimapWorld && !hasProgressionCapability(minimapWorld.progression, "runtime.minimap")) {
+      visiblePanels = visiblePanels.filter((panelId) => panelId !== "miniMap");
+    }
     if (snapshot.annualReportOpen) {
       visiblePanels = ["topbar", "budgetReport"];
     }

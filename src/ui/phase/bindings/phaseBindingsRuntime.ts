@@ -38,8 +38,8 @@ import {
   trainSelectedUnit,
   unassignRosterCrew
 } from "../../../sim/units.js";
-import { getCommandRewardDefinition } from "../../../config/progression/rewardCatalog.js";
-import { openNextProgressionDraft, selectProgressionReward } from "../../../systems/progression/index.js";
+import { getTechNodeDefinition } from "../../../config/progression/techTreeCatalog.js";
+import { openNextProgressionDraft, selectProgressionNode } from "../../../systems/progression/index.js";
 import { initCharacterSelect } from "../../character-select.js";
 import { updateOverlay } from "../../overlay.js";
 import type { OverlayRefs } from "../../overlay.js";
@@ -573,7 +573,7 @@ export const bindPhaseUi = ({
     const action = element.dataset.action;
     if (action) {
       const detail =
-        element.dataset.rewardId ??
+        element.dataset.nodeId ??
         element.dataset.commandUnitId ??
         element.dataset.truckId ??
         element.dataset.unitId ??
@@ -964,21 +964,21 @@ export const bindPhaseUi = ({
       return;
     }
     if (resolvedAction === "progression-pick") {
-      const rewardId = actionTarget?.dataset.rewardId ?? "";
-      if (!rewardId) {
+      const nodeId = actionTarget?.dataset.nodeId ?? "";
+      if (!nodeId) {
         return;
       }
       gate("select", () => {
-        if (!selectProgressionReward(state, rewardId)) {
+        if (!selectProgressionNode(state, nodeId)) {
           return;
         }
         syncProgressionUnitStats(state);
-        const reward = getCommandRewardDefinition(rewardId);
+        const node = getTechNodeDefinition(nodeId);
         setStatus(
           state,
           state.progression.queuedDraftOrdinals.length > 0
-            ? `${reward.name} selected. Review the next command upgrade from the top bar.`
-            : `${reward.name} selected.`
+            ? `${node.name} selected. Review the next tech draft from the top bar.`
+            : `${node.name} selected.`
         );
         phaseUi.sync(state, inputState);
       });
@@ -989,7 +989,7 @@ export const bindPhaseUi = ({
         if (!openNextProgressionDraft(state)) {
           return;
         }
-        setStatus(state, "Queued command upgrade ready.");
+        setStatus(state, "Queued tech draft ready.");
         phaseUi.sync(state, inputState);
       });
       return;

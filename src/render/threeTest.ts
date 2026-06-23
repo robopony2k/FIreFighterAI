@@ -38,7 +38,12 @@ import { buildEnvironmentPalette, computeFireLoad01 } from "./environmentPalette
 import { buildLightingDirectorState, type LightingDirectorInput, type LightingDirectorState } from "./lightingDirector.js";
 import { createSeasonalSkyDome } from "./seasonalSky.js";
 import { sampleSeasonalWeatherVisualState } from "../systems/climate/rendering/seasonalWeatherVisualState.js";
-import { getMinimapModeLabel, type MinimapMode } from "../ui/runtime/minimap/minimapModes.js";
+import {
+  getMinimapModeLabel,
+  MINIMAP_MODE_CAPABILITIES,
+  type MinimapMode
+} from "../ui/runtime/minimap/minimapModes.js";
+import { hasProgressionCapability } from "../systems/progression/sim/techTree.js";
 import {
   DEFAULT_THERMAL_PALETTE,
   buildThermalBackdropField,
@@ -1545,6 +1550,12 @@ export const createThreeTest = (
     wind: true,
     units: true
   };
+  const minimapModeControls = new Map<ThreeTestMinimapMode, HTMLLabelElement>();
+  const minimapOverlayControls = new Map<keyof typeof minimapOverlays, HTMLLabelElement>();
+  const isMinimapModeUnlocked = (mode: ThreeTestMinimapMode): boolean =>
+    mode === "satellite"
+      ? hasProgressionCapability(world.progression, "minimap.mode.satellite")
+      : hasProgressionCapability(world.progression, MINIMAP_MODE_CAPABILITIES[mode]);
   const addModeToggle = (mode: ThreeTestMinimapMode, label: string): void => {
     const wrap = document.createElement("label");
     wrap.className = "three-test-minimap-layer";
@@ -1567,6 +1578,7 @@ export const createThreeTest = (
     text.textContent = label;
     wrap.append(input, text);
     minimapLayersWrap.appendChild(wrap);
+    minimapModeControls.set(mode, wrap);
   };
   const addOverlayToggle = (key: keyof typeof minimapOverlays, label: string): void => {
     const wrap = document.createElement("label");
@@ -1583,6 +1595,7 @@ export const createThreeTest = (
     text.textContent = label;
     wrap.append(input, text);
     minimapLayersWrap.appendChild(wrap);
+    minimapOverlayControls.set(key, wrap);
   };
   THREE_TEST_MINIMAP_MODES.forEach((mode) => addModeToggle(mode, getThreeTestMinimapModeLabel(mode)));
   addOverlayToggle("wind", "Wind");
@@ -2506,7 +2519,11 @@ export const createThreeTest = (
       thermalPalette: DEFAULT_THERMAL_PALETTE
     });
     ctx.putImageData(image, 0, 0);
-    if (minimapOverlays.units && world.units.length > 0) {
+    if (
+      minimapOverlays.units &&
+      hasProgressionCapability(world.progression, "minimap.overlay.units") &&
+      world.units.length > 0
+    ) {
       ctx.save();
       world.units.forEach((unit) => {
         if (unit.kind === "firefighter" && unit.carrierId !== null) {
@@ -2521,7 +2538,7 @@ export const createThreeTest = (
       });
       ctx.restore();
     }
-    if (minimapOverlays.wind) {
+    if (minimapOverlays.wind && hasProgressionCapability(world.progression, "minimap.overlay.wind")) {
       const climateSeed = generateWorldClimateSeed(world.seed);
       const centerX = width * 0.14;
       const centerY = height * 0.14;
@@ -2605,7 +2622,11 @@ export const createThreeTest = (
       );
       drawArrow(world.wind?.dx ?? 0, world.wind?.dy ?? 0, world.wind?.strength ?? 0, "rgba(240, 243, 247, 0.95)", 9);
     }
-    if (lastTerrainSize && minimapOverlays.units) {
+    if (
+      lastTerrainSize &&
+      minimapOverlays.units &&
+      hasProgressionCapability(world.progression, "minimap.overlay.units")
+    ) {
       const worldWidth = Math.max(1, lastTerrainSize.width);
       const worldDepth = Math.max(1, lastTerrainSize.depth);
       const tx = clamp01(camera.position.x / worldWidth + 0.5);
@@ -2660,14 +2681,36 @@ export const createThreeTest = (
     const riskNow = riskSeries[Math.min(markerIndex, riskSeries.length - 1)] ?? 0;
     const riskPct = Math.round(clamp01(riskNow) * 100);
     const seasonLabel = getCurrentSeasonLabel();
+    const minimapUnlocked = hasProgressionCapability(world.progression, "runtime.minimap");
+    const windUnlocked = hasProgressionCapability(world.progression, "climate.wind");
+    const unitsUnlocked = hasProgressionCapability(world.progression, "minimap.overlay.units");
+    minimapDock.root.hidden = !minimapUnlocked;
+    minimapModeControls.forEach((control, mode) => {
+      control.hidden = !isMinimapModeUnlocked(mode);
+    });
+    minimapOverlayControls.get("wind")!.hidden = !hasProgressionCapability(world.progression, "minimap.overlay.wind");
+    minimapOverlayControls.get("units")!.hidden = !unitsUnlocked;
+    if (!isMinimapModeUnlocked(minimapMode)) {
+      minimapMode = THREE_TEST_MINIMAP_MODES.find(isMinimapModeUnlocked) ?? "terrain";
+      minimapModeControls.forEach((control, mode) => {
+        const input = control.querySelector("input");
+        if (input instanceof HTMLInputElement) {
+          input.checked = mode === minimapMode;
+        }
+      });
+      lastMinimapRasterAt = -Infinity;
+    }
     const windSpeed = Math.round(Math.max(0, world.wind.strength) * 10);
     const windDir = (world.wind.name ?? "Calm").toUpperCase();
     climateKpis.innerHTML = "";
     const kpiRisk = document.createElement("div");
     kpiRisk.textContent = `Risk ${riskPct}%`;
-    const kpiWind = document.createElement("div");
-    kpiWind.textContent = `Wind ${world.wind.name} ${windSpeed}`;
-    climateKpis.append(kpiRisk, kpiWind);
+    climateKpis.append(kpiRisk);
+    if (windUnlocked) {
+      const kpiWind = document.createElement("div");
+      kpiWind.textContent = `Wind ${world.wind.name} ${windSpeed}`;
+      climateKpis.append(kpiWind);
+    }
     climateDock.indicatorChip.textContent = `${riskPct}%`;
     climateDock.indicatorChip.classList.remove("is-low", "is-moderate", "is-high", "is-extreme");
     if (riskNow < 0.25) {
@@ -2680,7 +2723,7 @@ export const createThreeTest = (
       climateDock.indicatorChip.classList.add("is-extreme");
     }
     timeDock.indicatorChip.textContent = `Y${Math.max(1, world.year)} ${seasonLabel.toUpperCase()}`;
-    minimapDock.indicatorChip.textContent = `${windDir} ${windSpeed}`;
+    minimapDock.indicatorChip.textContent = windUnlocked ? `${windDir} ${windSpeed}` : "MAP";
     const climateSeries = riskSeries;
     const climateChartContext = {
       forecastStartDay: Math.max(0, world.climateForecastStart ?? 0),
@@ -5064,7 +5107,7 @@ export const createThreeTest = (
       applyDockCardStates();
     }
     if (!THREE_TEST_DISABLE_HUD) {
-      handleHudKey(event, hudState);
+      handleHudKey(event, world, hudState);
     }
   };
 

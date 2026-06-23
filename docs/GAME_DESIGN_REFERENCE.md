@@ -108,12 +108,16 @@ Design intent:
 
 ## Progression and Unlocks
 
-- Run-style unlocks provide perks or tools that slightly bend strategy.
-- Unlocks should be meaningful but not invalidate core systems.
-- Examples:
-  - Specialized rigs (faster response, higher tank capacity).
-  - Policy perks (reduced firebreak cost, faster training).
-  - Tactical modules (temporary wind prediction, heat-sink drops).
+- Tech-tree progression is campaign-scoped and resets for every 20-year run.
+- Assisted extinguishes award command experience. Each command level opens a deterministic draft of up to three currently reachable tech nodes; the player selects one node or one additional rank. The existing level curve continues beyond level 10 and drafts stop only when every authored node is at maximum rank.
+- Every node has stable graph metadata: branch, tier/order, prerequisites with minimum ranks, maximum rank, rarity, draft weight, effects, and granted capabilities. The eventual visual tree is a roadmap for the full graph and current draft state; it does not bypass draft acquisition.
+- The initial graph has four branches:
+  - Awareness gates Field Mapping, Weather Instruments, Topographic Survey, Moisture Analysis, Thermal Imaging, Dispatch Tracking, and Aerial Reconnaissance.
+  - Operations contains Rapid Response, Fireline Training, Extended Lines, and Air Support.
+  - Logistics contains Quick Connects and Tender Upfit.
+  - Policy contains Academy Subsidy and Fuel Break Grants.
+- Runtime information is genuinely capability-gated: the minimap is hidden until Field Mapping; each analytical map mode is separately unlocked; all player-facing wind data is hidden until Weather Instruments; unit markers require Dispatch Tracking; and Satellite requires Aerial Reconnaissance. These gates affect information access only and never disable the underlying simulation.
+- Unlocks should be meaningful but not invalidate core systems. Ranked numeric perks retain diminishing returns and authored caps.
 
 ## Backburning (Planned)
 
@@ -123,7 +127,7 @@ Design intent:
 
 ## UI/UX Goals
 
-- Clear, minimal HUD for time, risk, and wind. Runtime minimaps use mutually exclusive terrain, satellite, topographic, moisture, and heat base modes. Terrain, topographic, moisture, and heat are analytical raster modes; Satellite is a cached top-down 3D world capture refreshed on first selection, visual rebuilds, and sparse multi-day cadence rather than every fire or unit tick. Wind and unit indicators remain tactical overlays for the analytical modes, while Satellite stays an aesthetic world-recognition view without HUD, label, wind, or unit overlay markers. Minimap wind overlays show the global prevailing/current wind plus sparse propagated local wind barbs so players can read ridge deflection, valley channeling, and sheltered downwind wakes; barb length reflects local speed, with calm samples drawn as dots.
+- Clear, minimal HUD for time, risk, and unlocked field intelligence. Runtime minimaps use mutually exclusive terrain, satellite, topographic, moisture, and heat base modes, with the widget and each mode exposed only after its corresponding tech node is owned. Terrain, topographic, moisture, and heat are analytical raster modes; Satellite is a cached top-down 3D world capture refreshed on first selection, visual rebuilds, and sparse multi-day cadence rather than every fire or unit tick. Unlocked wind and unit indicators remain tactical overlays for the analytical modes, while Satellite stays an aesthetic world-recognition view without HUD, label, wind, or unit overlay markers. Minimap wind overlays show the global prevailing/current wind plus sparse propagated local wind barbs so players can read ridge deflection, valley channeling, and sheltered downwind wakes; barb length reflects local speed, with calm samples drawn as dots.
 - Banner / border shows "season" by color and decals (TBC) along with key metrics (budget, year etc)
 - Top right of screen - Forecast graph shows rolling 90-day fire risk with current-day marker.
 - Bottom right of screen - "Announcements" at key events ie a speech bubble from a News Station, Weather Presenter, Financial Advisor etc
@@ -264,12 +268,9 @@ This can be achieved by:
 - How should backburning interact with reputation and budget?
 - Should there be mid-year policy decisions (e.g., burn bans)?
 - How to reward prevention versus reactive suppression?
-- How should unlocks be earned: milestones, random events, or shop-like choices?
 - Should run events be opt-in choices (risk/reward) or surprise drops?
 - How strong can an unlock be before it undermines the climate-driven challenge?
-- Do unlocks persist across runs, or reset each 20-year campaign?
 - Should "loot box" events be framed as grants, equipment drops, or political favors?
-- Should the player choose between 2-3 rewards, or receive a single random drop?
 
 ## Decision Log (fill in)
 

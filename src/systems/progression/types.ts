@@ -1,36 +1,17 @@
-export type RewardCategory = "mobility" | "suppression" | "range" | "logistics" | "economy";
-export type RewardRarity = "standard" | "rare" | "elite";
-
-export type RewardEffectTargetId =
-  | "unit.speedMultiplier"
-  | "unit.powerMultiplier"
-  | "unit.hoseRangeMultiplier"
-  | "truck.waterCapacityMultiplier"
-  | "truck.waterRefillRateMultiplier"
-  | "economy.firebreakCostMultiplier"
-  | "economy.trainingCostMultiplier";
-
-export type RewardEffectOperation = "add";
-
-export interface RewardEffectSpec {
-  targetId: RewardEffectTargetId;
-  operation: RewardEffectOperation;
-  baseValue: number;
-  diminishingFactor: number;
-  cap: number;
-}
-
-export interface RewardDefinition {
-  id: string;
-  name: string;
-  description: string;
-  category: RewardCategory;
-  rarity: RewardRarity;
-  icon: string;
-  draftWeight: number;
-  maxStacks: number;
-  effects: RewardEffectSpec[];
-}
+export type {
+  ProgressionCapabilityId,
+  RewardEffectOperation,
+  RewardEffectSpec,
+  RewardEffectTargetId,
+  TechNodeDefinition,
+  TechNodeLayout,
+  TechNodePrerequisite,
+  TechNodeRarity,
+  TechTreeBranch,
+  TechTreeNodeSnapshot,
+  TechTreeNodeStatus,
+  TechTreeSnapshot
+} from "./types/techTree.js";
 
 export interface ProgressionDraft {
   ordinal: number;
@@ -55,7 +36,7 @@ export interface ProgressionState {
   nextDraftOrdinal: number;
   activeDraft: ProgressionDraft | null;
   queuedDraftOrdinals: number[];
-  rewardStacks: Record<string, number>;
+  nodeRanks: Record<string, number>;
   resolved: ResolvedProgressionModifiers;
   revision: number;
 }

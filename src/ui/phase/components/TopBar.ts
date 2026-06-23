@@ -31,11 +31,11 @@ export type TopBarData = {
     progress01: number;
     queuedDraftCount: number;
     hasActiveDraft: boolean;
-    ownedRewards: Array<{
+    ownedNodes: Array<{
       id: string;
       label: string;
       name: string;
-      stacks: number;
+      rank: number;
     }>;
   } | null;
   scoring: {
@@ -1613,7 +1613,7 @@ export const createTopBar = (): TopBarView => {
         }
         progressionStatus.textContent =
           statusParts.join(" | ") ||
-          (data.progression.nextThreshold !== null ? "Next command upgrade in progress" : "All authored levels unlocked");
+          (data.progression.nextThreshold !== null ? "Next tech draft in progress" : "Tech tree complete");
         progressionStatus.classList.toggle("is-alert", data.progression.hasActiveDraft || data.progression.queuedDraftCount > 0);
         progressionReview.classList.toggle(
           "is-hidden",
@@ -1621,19 +1621,19 @@ export const createTopBar = (): TopBarView => {
         );
         progressionBarFill.style.width = `${Math.round(Math.max(0, Math.min(1, data.progression.progress01)) * 100)}%`;
         progressionRewards.replaceChildren();
-        if (data.progression.ownedRewards.length === 0) {
+        if (data.progression.ownedNodes.length === 0) {
           const placeholder = document.createElement("span");
           placeholder.className = "phase-progression-empty";
-          placeholder.textContent = "No command upgrades selected yet.";
+          placeholder.textContent = "No tech nodes selected yet.";
           progressionRewards.appendChild(placeholder);
         } else {
-          data.progression.ownedRewards.forEach((reward) => {
+          data.progression.ownedNodes.forEach((node) => {
             const chip = document.createElement("span");
             chip.className = "phase-progression-chip";
-            chip.title = reward.name;
+            chip.title = node.name;
             chip.innerHTML = `
-              <span class="phase-progression-chip-label">${reward.label}</span>
-              <span class="phase-progression-chip-stack">x${reward.stacks}</span>
+              <span class="phase-progression-chip-label">${node.label}</span>
+              <span class="phase-progression-chip-stack">R${node.rank}</span>
             `;
             progressionRewards.appendChild(chip);
           });

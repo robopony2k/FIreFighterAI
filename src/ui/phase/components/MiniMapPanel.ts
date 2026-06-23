@@ -1,5 +1,5 @@
 import type { WorldState } from "../../../core/state.js";
-import { getMinimapModeLabel, MINIMAP_MODES, type MinimapMode } from "../../runtime/minimap/minimapModes.js";
+import { getAvailableMinimapModes, getMinimapModeLabel, type MinimapMode } from "../../runtime/minimap/minimapModes.js";
 import {
   buildThermalBackdropField,
   DEFAULT_THERMAL_PALETTE,
@@ -12,6 +12,7 @@ import { getRuntimeWidgetTitle } from "../../runtime/widgets/registry.js";
 import type { MinimapWidgetModel } from "../../runtime/widgets/models.js";
 import { generateWorldClimateSeed } from "../../../systems/climate/sim/worldClimateSeed.js";
 import { buildTerrainWindOverlaySamples } from "../../../systems/fire/rendering/terrainWindOverlay.js";
+import { hasProgressionCapability } from "../../../systems/progression/sim/techTree.js";
 
 const clamp = (value: number, min: number, max: number): number => Math.min(max, Math.max(min, value));
 
@@ -53,7 +54,8 @@ export const createMiniMapPanel = (): MiniMapPanelView => {
   const rasterCanvas = document.createElement("canvas");
   const rasterCtx = rasterCanvas.getContext("2d");
 
-  let modeIndex = 0;
+  let availableModes: MinimapMode[] = ["terrain"];
+  let selectedMode: MinimapMode = "terrain";
   let lastMode: MinimapMode = "terrain";
   let lastTerrainRevision = -1;
   let lastRasterWidth = 0;
@@ -62,11 +64,12 @@ export const createMiniMapPanel = (): MiniMapPanelView => {
   let thermalBackdrop: Float32Array = new Float32Array(0);
 
   const updateModeLabel = (): void => {
-    modeButton.textContent = getMinimapModeLabel(MINIMAP_MODES[modeIndex] ?? "terrain");
+    modeButton.textContent = getMinimapModeLabel(selectedMode);
   };
 
   modeButton.addEventListener("click", () => {
-    modeIndex = (modeIndex + 1) % MINIMAP_MODES.length;
+    const currentIndex = availableModes.indexOf(selectedMode);
+    selectedMode = availableModes[(currentIndex + 1) % availableModes.length] ?? "terrain";
     updateModeLabel();
     lastMode = "terrain";
   });
@@ -193,7 +196,12 @@ export const createMiniMapPanel = (): MiniMapPanelView => {
         canvas.height = targetHeight;
       }
 
-      const mode = MINIMAP_MODES[modeIndex] ?? "terrain";
+      availableModes = getAvailableMinimapModes(world.progression);
+      if (!availableModes.includes(selectedMode)) {
+        selectedMode = availableModes[0] ?? "terrain";
+        updateModeLabel();
+      }
+      const mode = selectedMode;
       const cols = world.grid.cols;
       const rows = world.grid.rows;
       if (cols <= 0 || rows <= 0) {
@@ -240,7 +248,9 @@ export const createMiniMapPanel = (): MiniMapPanelView => {
       ctx.imageSmoothingEnabled = false;
       ctx.drawImage(rasterCanvas, drawX, drawY, drawSize, drawSize);
       ctx.imageSmoothingEnabled = smoothing;
-      drawWindOverlay(ctx, world, drawX, drawY, drawSize);
+      if (hasProgressionCapability(world.progression, "minimap.overlay.wind")) {
+        drawWindOverlay(ctx, world, drawX, drawY, drawSize);
+      }
     }
   };
 };
