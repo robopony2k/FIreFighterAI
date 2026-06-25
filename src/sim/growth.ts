@@ -91,6 +91,8 @@ export function stepGrowth(state: WorldState, dayDelta: number, rng: RNG): void 
   let terrainTypeChanged = false;
   let vegetationChanged = false;
   let visualChanged = false;
+  let tilesVisited = 0;
+  let tilesChanged = 0;
   const blockCount = Math.max(1, state.fireBlockCount);
   const blocksPerTick = Math.max(1, Math.floor(state.simPerf.growthBlocksPerTick || 1));
   const blockSize = Math.max(4, state.fireBlockSize || 16);
@@ -119,9 +121,14 @@ export function stepGrowth(state: WorldState, dayDelta: number, rng: RNG): void 
     terrainTypeChanged ||= result.terrainTypeChanged;
     vegetationChanged ||= result.vegetationChanged;
     visualChanged ||= result.visualChanged;
+    tilesVisited += result.tilesVisited;
+    tilesChanged += result.tilesChanged;
     markGrowthBlockProcessed(state, blockIndex, elapsedDays);
   }
   state.growthBlockCursor = cursor;
+  state.simPerfGrowthBlocksProcessed = processed;
+  state.simPerfGrowthTilesVisited = tilesVisited;
+  state.simPerfGrowthTilesChanged = tilesChanged;
 
   if (terrainTypeChanged) {
     state.terrainTypeRevision += 1;

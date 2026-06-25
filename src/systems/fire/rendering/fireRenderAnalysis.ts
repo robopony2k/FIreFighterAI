@@ -138,12 +138,12 @@ export const createInitialFireRenderAdaptiveState = (): FireRenderAdaptiveState 
   emergencyRecoveryAccum: 0
 });
 
-const FIRE_FX_OVERLOAD_ENTER_SECONDS = 0.22;
+const FIRE_FX_OVERLOAD_ENTER_SECONDS = 0.16;
 const FIRE_FX_OVERLOAD_EXIT_SECONDS = 0.85;
 const FIRE_FX_EMERGENCY_ENTER_SECONDS = 0.12;
 const FIRE_FX_EMERGENCY_EXIT_SECONDS = 0.45;
-const FIRE_FX_LOCAL_OVERLOAD_MS = 14;
-const FIRE_FX_LOCAL_EMERGENCY_MS = 26;
+const FIRE_FX_LOCAL_OVERLOAD_MS = 12;
+const FIRE_FX_LOCAL_EMERGENCY_MS = 22;
 
 const updateStickyMode = (
   active: boolean,

@@ -354,6 +354,9 @@ export interface WorldState {
   simPerfCalendarMs: number;
   simPerfTownConstructionMs: number;
   simPerfGrowthMs: number;
+  simPerfGrowthBlocksProcessed: number;
+  simPerfGrowthTilesVisited: number;
+  simPerfGrowthTilesChanged: number;
   simPerfUnitsMs: number;
   simPerfFireMs: number;
   simPerfScoringMs: number;
@@ -736,6 +739,9 @@ export function createInitialState(seed: number, grid: Grid): WorldState {
     simPerfCalendarMs: 0,
     simPerfTownConstructionMs: 0,
     simPerfGrowthMs: 0,
+    simPerfGrowthBlocksProcessed: 0,
+    simPerfGrowthTilesVisited: 0,
+    simPerfGrowthTilesChanged: 0,
     simPerfUnitsMs: 0,
     simPerfFireMs: 0,
     simPerfScoringMs: 0,

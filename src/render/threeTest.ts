@@ -244,6 +244,16 @@ export type ThreeTestTerrainUpdateIntent = {
   structure?: boolean;
   debug?: boolean;
   fireVisual?: boolean;
+  dirtyTileBounds?: {
+    minX: number;
+    minY: number;
+    maxX: number;
+    maxY: number;
+  };
+};
+
+type NormalizedThreeTestTerrainUpdateIntent = Omit<Required<ThreeTestTerrainUpdateIntent>, "dirtyTileBounds"> & {
+  dirtyTileBounds?: ThreeTestTerrainUpdateIntent["dirtyTileBounds"];
 };
 
 export type ThreeTestPanToTileOptions = {
@@ -5829,7 +5839,7 @@ export const createThreeTest = (
   const normalizeTerrainUpdateIntent = (
     intent: ThreeTestTerrainUpdateIntent | undefined,
     fastUpdate: boolean
-  ): Required<ThreeTestTerrainUpdateIntent> => ({
+  ): NormalizedThreeTestTerrainUpdateIntent => ({
     label: intent?.label ?? (fastUpdate ? "fast-unspecified" : "full"),
     geometry: intent?.geometry ?? !fastUpdate,
     surfaceColor: intent?.surfaceColor ?? true,
@@ -5837,18 +5847,37 @@ export const createThreeTest = (
     roads: intent?.roads ?? true,
     structure: intent?.structure ?? true,
     debug: intent?.debug ?? false,
-    fireVisual: intent?.fireVisual ?? false
+    fireVisual: intent?.fireVisual ?? false,
+    dirtyTileBounds: intent?.dirtyTileBounds
   });
   const isOnlyTerrainUpdateIntent = (
-    intent: Required<ThreeTestTerrainUpdateIntent>,
-    key: "roads" | "structure"
+    intent: NormalizedThreeTestTerrainUpdateIntent,
+    key: "roads" | "structure" | "vegetation"
   ): boolean => {
     const hasTarget = intent[key];
     if (!hasTarget) {
       return false;
     }
-    return !intent.geometry && !intent.surfaceColor && !intent.vegetation && !intent.debug && !intent.fireVisual && (key === "roads" ? !intent.structure : !intent.roads);
+    return (
+      !intent.geometry &&
+      !intent.surfaceColor &&
+      !intent.debug &&
+      !intent.fireVisual &&
+      (key === "roads" || !intent.roads) &&
+      (key === "structure" || !intent.structure) &&
+      (key === "vegetation" || !intent.vegetation)
+    );
   };
+  const isFireVisualOnlyTerrainUpdateIntent = (
+    intent: NormalizedThreeTestTerrainUpdateIntent
+  ): boolean =>
+    intent.fireVisual &&
+    !intent.geometry &&
+    !intent.surfaceColor &&
+    !intent.vegetation &&
+    !intent.roads &&
+    !intent.structure &&
+    !intent.debug;
   let lastRafAt = 0;
   let lastPresentedAt = 0;
 
@@ -7829,7 +7858,7 @@ export const createThreeTest = (
   const updateTerrainSurface = (
     sample: TerrainSample,
     surface: TerrainRenderSurface,
-    intent: Required<ThreeTestTerrainUpdateIntent>
+    intent: NormalizedThreeTestTerrainUpdateIntent
   ): boolean => {
     const reuseCheckStartedAt = performance.now();
     const canReuse = Boolean(terrainMesh && sample.fastUpdate && canReuseTerrainSurface(sample, surface));
@@ -7839,9 +7868,10 @@ export const createThreeTest = (
     }
     const roadOnly = isOnlyTerrainUpdateIntent(intent, "roads");
     const structureOnly = isOnlyTerrainUpdateIntent(intent, "structure");
-    const shouldUpdateBaseSurface = !roadOnly && !structureOnly;
-    const shouldCheckRoadVisuals = !structureOnly && (intent.roads || intent.geometry || intent.debug || intent.label === "fast-unspecified");
-    threePerf.terrainSetPath = roadOnly ? "road-only" : structureOnly ? "structure-only" : "fast";
+    const vegetationOnly = isOnlyTerrainUpdateIntent(intent, "vegetation");
+    const shouldUpdateBaseSurface = !roadOnly && !structureOnly && !vegetationOnly;
+    const shouldCheckRoadVisuals = !structureOnly && !vegetationOnly && (intent.roads || intent.geometry || intent.debug || intent.label === "fast-unspecified");
+    threePerf.terrainSetPath = roadOnly ? "road-only" : structureOnly ? "structure-only" : vegetationOnly ? "vegetation-only" : "fast";
     const terrainSurfaceShadingMode = sample.debugRenderOptions?.terrainSurfaceShadingMode ?? "refined";
     const useLegacyFacetedTerrain = terrainSurfaceShadingMode === "legacyFaceted";
     const useTextureColorFastPath = !useLegacyFacetedTerrain && sample.fastUpdate === true;
@@ -7866,6 +7896,15 @@ export const createThreeTest = (
     }
     if (shouldUpdateBaseSurface) {
       const textureStartedAt = performance.now();
+      const currentTexture = (() => {
+        if (!intent.dirtyTileBounds || sample.debugTypeColors || sample.debugScalarField) {
+          return null;
+        }
+        const material = terrainMesh.material;
+        const firstMaterial = Array.isArray(material) ? material[0] : material;
+        const map = (firstMaterial as THREE.Material & { map?: THREE.Texture | null }).map;
+        return map instanceof THREE.DataTexture ? map : null;
+      })();
       const tileTexture = buildTileTexture(
         sample,
         surface.sampleCols,
@@ -7890,28 +7929,40 @@ export const createThreeTest = (
         surface.sampledLakeCoverage ?? null,
         surface.sampledRiverStepStrength,
         sample.debugTypeColors ?? false,
-        useLegacyFacetedTerrain || useTextureColorFastPath ? "legacy" : "mask"
+        useLegacyFacetedTerrain || useTextureColorFastPath ? "legacy" : "mask",
+        {
+          includeDynamicFireScorch: false,
+          updateTarget:
+            currentTexture && intent.dirtyTileBounds
+              ? {
+                  texture: currentTexture,
+                  dirtyTileBounds: intent.dirtyTileBounds
+                }
+              : undefined
+        }
       );
       recordTerrainSetTiming("texture", performance.now() - textureStartedAt);
       const textureSwapStartedAt = performance.now();
-      const material = terrainMesh.material;
-      let previousMap: THREE.Texture | null = null;
-      const applyMap = (mat: THREE.Material) => {
-        const textured = mat as THREE.Material & { map?: THREE.Texture | null };
-        if (!previousMap && textured.map) {
-          previousMap = textured.map;
+      if (tileTexture !== currentTexture) {
+        const material = terrainMesh.material;
+        let previousMap: THREE.Texture | null = null;
+        const applyMap = (mat: THREE.Material) => {
+          const textured = mat as THREE.Material & { map?: THREE.Texture | null };
+          if (!previousMap && textured.map) {
+            previousMap = textured.map;
+          }
+          textured.map = tileTexture;
+          mat.needsUpdate = true;
+        };
+        if (Array.isArray(material)) {
+          material.forEach((mat) => applyMap(mat));
+        } else {
+          applyMap(material);
         }
-        textured.map = tileTexture;
-        mat.needsUpdate = true;
-      };
-      if (Array.isArray(material)) {
-        material.forEach((mat) => applyMap(mat));
-      } else {
-        applyMap(material);
-      }
-      const mapToDispose = previousMap as THREE.Texture | null;
-      if (mapToDispose) {
-        mapToDispose.dispose();
+        const mapToDispose = previousMap as THREE.Texture | null;
+        if (mapToDispose) {
+          mapToDispose.dispose();
+        }
       }
       recordTerrainSetTiming("textureSwap", performance.now() - textureSwapStartedAt);
     }
@@ -7963,9 +8014,14 @@ export const createThreeTest = (
         intent.geometry || intent.vegetation || intent.roads || intent.structure || intent.debug;
       threePerf.terrainSetIntent = intent.label;
       threePerf.terrainSetPath = "pending";
+      if (nextSample.fastUpdate && isFireVisualOnlyTerrainUpdateIntent(intent)) {
+        threePerf.terrainSetPath = "fire-visual-skip";
+        return;
+      }
       const roadOnly = isOnlyTerrainUpdateIntent(intent, "roads");
       const structureOnly = isOnlyTerrainUpdateIntent(intent, "structure");
-      const shouldPrepareVisualSurface = !roadOnly && !structureOnly;
+      const vegetationOnly = isOnlyTerrainUpdateIntent(intent, "vegetation");
+      const shouldPrepareVisualSurface = !roadOnly && !structureOnly && !vegetationOnly;
       const canUseStaticCache = staticTerrainSourceMatchesCache(nextSample);
       let nextSurface: TerrainRenderSurface | null = null;
       let preparedStaticSurface = false;
@@ -8010,9 +8066,11 @@ export const createThreeTest = (
         lastTerrainSurface = nextSurface;
         lastTerrainSize = nextSurface.size;
         applyTerrainCameraConstraints();
-        const structureStartedAt = performance.now();
-        rebuildStructureOverlay(nextSample, nextSurface);
-        recordTerrainSetTiming("structure", performance.now() - structureStartedAt);
+        if (!vegetationOnly) {
+          const structureStartedAt = performance.now();
+          rebuildStructureOverlay(nextSample, nextSurface);
+          recordTerrainSetTiming("structure", performance.now() - structureStartedAt);
+        }
         if (satelliteRelevantTerrainUpdate) {
           markSatelliteMinimapVisualsDirty();
         }

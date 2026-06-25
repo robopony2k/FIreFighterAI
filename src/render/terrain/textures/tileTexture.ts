@@ -35,6 +35,23 @@ type TileTextureBuildDeps = {
   sunDir: { x: number; y: number; z: number };
 };
 
+export type TileTextureDirtyBounds = {
+  minX: number;
+  minY: number;
+  maxX: number;
+  maxY: number;
+};
+
+export type TileTextureUpdateTarget = {
+  texture: THREE.DataTexture;
+  dirtyTileBounds: TileTextureDirtyBounds;
+};
+
+export type TileTextureBuildOptions = {
+  updateTarget?: TileTextureUpdateTarget;
+  includeDynamicFireScorch?: boolean;
+};
+
 export type TileTextureColorMode = "legacy" | "mask";
 
 const DRY_TINT_BY_TILE: Record<number, [number, number, number]> = {
@@ -105,6 +122,21 @@ const createTexture = (data: Uint8Array, sampleCols: number, sampleRows: number)
   return texture;
 };
 
+const normalizeBuildOptions = (
+  options?: TileTextureUpdateTarget | TileTextureBuildOptions
+): Required<Pick<TileTextureBuildOptions, "includeDynamicFireScorch">> & Pick<TileTextureBuildOptions, "updateTarget"> => {
+  if (!options) {
+    return { updateTarget: undefined, includeDynamicFireScorch: true };
+  }
+  if ("texture" in options) {
+    return { updateTarget: options, includeDynamicFireScorch: true };
+  }
+  return {
+    updateTarget: options.updateTarget,
+    includeDynamicFireScorch: options.includeDynamicFireScorch ?? true
+  };
+};
+
 export const buildTileTexture = (
   sample: TileTextureSample,
   sampleCols: number,
@@ -130,8 +162,12 @@ export const buildTileTexture = (
   riverStepStrength: Float32Array | null | undefined,
   debugTypeColors: boolean,
   colorMode: TileTextureColorMode,
-  deps: TileTextureBuildDeps
+  deps: TileTextureBuildDeps,
+  options?: TileTextureUpdateTarget | TileTextureBuildOptions
 ): THREE.DataTexture => {
+  const buildOptions = normalizeBuildOptions(options);
+  const updateTarget = buildOptions.updateTarget;
+  const includeDynamicFireScorch = buildOptions.includeDynamicFireScorch;
   const { cols, rows } = sample;
   const treeTypes = sample.treeTypes;
   const riverMask = sample.riverMask;
@@ -139,7 +175,18 @@ export const buildTileTexture = (
   const debugScalarField = sample.debugScalarField;
   const climateDryness = clamp(sample.climateDryness ?? 0.35, 0, 1);
   const ashId = TILE_TYPE_IDS.ash;
-  const distanceToLand = (() => {
+  const reusableData =
+    updateTarget?.texture.image?.width === sampleCols &&
+    updateTarget.texture.image?.height === sampleRows &&
+    updateTarget.texture.image?.data instanceof Uint8Array
+      ? updateTarget.texture.image.data
+      : null;
+  const dirtyBounds = reusableData ? updateTarget?.dirtyTileBounds : undefined;
+  const minDirtyCol = dirtyBounds ? clamp(Math.floor(dirtyBounds.minX / step) - 1, 0, sampleCols - 1) : 0;
+  const maxDirtyCol = dirtyBounds ? clamp(Math.ceil(dirtyBounds.maxX / step) + 1, 0, sampleCols - 1) : sampleCols - 1;
+  const minDirtyRow = dirtyBounds ? clamp(Math.floor(dirtyBounds.minY / step) - 1, 0, sampleRows - 1) : 0;
+  const maxDirtyRow = dirtyBounds ? clamp(Math.ceil(dirtyBounds.maxY / step) + 1, 0, sampleRows - 1) : sampleRows - 1;
+  const distanceToLand = reusableData ? null : (() => {
     const total = sampleCols * sampleRows;
     const mapped = new Uint8Array(total);
     for (let i = 0; i < total; i += 1) {
@@ -147,7 +194,7 @@ export const buildTileTexture = (
     }
     return buildDistanceField(mapped, sampleCols, sampleRows, 0);
   })();
-  const data = new Uint8Array(sampleCols * sampleRows * 4);
+  const data = reusableData ?? new Uint8Array(sampleCols * sampleRows * 4);
   const getRoadGroundColor = (row: number, col: number): number[] => {
     if (roadId === null) {
       return palette[grassId] ?? [0, 0, 0];
@@ -193,8 +240,14 @@ export const buildTileTexture = (
   };
   let offset = 0;
   for (let row = 0; row < sampleRows; row += 1) {
+    if (reusableData && (row < minDirtyRow || row > maxDirtyRow)) {
+      continue;
+    }
     const tileY = Math.min(rows - 1, row * step);
     for (let col = 0; col < sampleCols; col += 1) {
+      if (reusableData && (col < minDirtyCol || col > maxDirtyCol)) {
+        continue;
+      }
       const tileX = Math.min(cols - 1, col * step);
       const endX = Math.min(cols, tileX + step);
       const endY = Math.min(rows, tileY + step);
@@ -210,7 +263,14 @@ export const buildTileTexture = (
       const localErosionWear = Number.isFinite(rawErosionWear) ? clamp(rawErosionWear as number, 0, 1) : 0;
       const localRiverCoverage = sampledRiverCoverage ? clamp(sampledRiverCoverage[sampleIndex] ?? 0, 0, 1) : localRiverRatio;
       const localLakeCoverage = sampledLakeCoverage ? clamp(sampledLakeCoverage[sampleIndex] ?? 0, 0, 1) : 0;
-      const coastalDistanceToLand = distanceToLand[sampleIndex] >= 0 ? distanceToLand[sampleIndex] : sampleCols + sampleRows;
+      const pixelOffset = reusableData ? ((sampleRows - 1 - row) * sampleCols + col) * 4 : offset;
+      if (reusableData && typeId === waterId) {
+        continue;
+      }
+      const coastalDistanceToLand =
+        distanceToLand && distanceToLand[sampleIndex] >= 0
+          ? distanceToLand[sampleIndex]
+          : sampleCols + sampleRows;
       const localMoisture = tileMoisture ? clamp(tileMoisture[idx] ?? 0.5, 0, 1) : 0.5;
       const riverMaskAtTile = riverMask ? riverMask[idx] > 0 : false;
       const riverMaskNearby = (() => {
@@ -319,7 +379,7 @@ export const buildTileTexture = (
           ];
         }
       }
-      if (!debugTypeColors && !debugScalarField && sample.tileFuel && (typeId === grassId || typeId === scrubId || typeId === floodplainId || typeId === forestId)) {
+      if (includeDynamicFireScorch && !debugTypeColors && !debugScalarField && sample.tileFuel && (typeId === grassId || typeId === scrubId || typeId === floodplainId || typeId === forestId)) {
         const baseFuel = BASE_FUEL_BY_TILE_ID[typeId] ?? 0;
         if (baseFuel > 0) {
           const liveFire = clamp(sample.tileFire?.[idx] ?? 0, 0, 1);
@@ -486,12 +546,25 @@ export const buildTileTexture = (
           (typeId === waterId &&
             coastalDistanceToLand > deps.oceanSurfaceShoreClipBand &&
             !touchesWorldBorder));
-      data[offset] = Math.round(r);
-      data[offset + 1] = Math.round(g);
-      data[offset + 2] = Math.round(b);
-      data[offset + 3] = shouldCutForOcean ? 0 : 255;
-      offset += 4;
+      data[pixelOffset] = Math.round(r);
+      data[pixelOffset + 1] = Math.round(g);
+      data[pixelOffset + 2] = Math.round(b);
+      data[pixelOffset + 3] = reusableData ? data[pixelOffset + 3] : shouldCutForOcean ? 0 : 255;
+      if (!reusableData) {
+        offset += 4;
+      }
     }
+  }
+  if (reusableData && updateTarget) {
+    updateTarget.texture.clearUpdateRanges();
+    for (let row = minDirtyRow; row <= maxDirtyRow; row += 1) {
+      const flippedRow = sampleRows - 1 - row;
+      const start = (flippedRow * sampleCols + minDirtyCol) * 4;
+      const count = (maxDirtyCol - minDirtyCol + 1) * 4;
+      updateTarget.texture.addUpdateRange(start, count);
+    }
+    updateTarget.texture.needsUpdate = true;
+    return updateTarget.texture;
   }
   return createTexture(data, sampleCols, sampleRows);
 };

@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
 
 import { RNG } from "../dist/core/rng.js";
+import { createEffectsState } from "../dist/core/effectsState.js";
 import { createInitialState, syncTileSoA } from "../dist/core/state.js";
 import { applyFuel } from "../dist/core/tiles.js";
+import { stepSim } from "../dist/sim/index.js";
 import {
   applyCommandIntentToSelection,
   applyExtinguishStep,
@@ -133,6 +135,36 @@ const testUpgradedHighSpeedMovementConsumesFullRouteBudget = () => {
   assert.equal(getCrew(state, truck).every((unit) => unit.carrierId === truck.id && unit.x === truck.x), true, "boarded crew should stay synced to upgraded truck motion");
 };
 
+const testActiveFireMovementUsesEffectiveMovementDelta = () => {
+  const { state, rng, truck } = buildDeployedTruckState(2011);
+  state.paused = false;
+  state.fireActivityState = "burning";
+  state.fireBoundsActive = true;
+  state.lastActiveFires = 1;
+  truck.x = 1.5;
+  truck.y = 1.5;
+  truck.prevX = truck.x;
+  truck.prevY = truck.y;
+  truck.path = [
+    { x: 2, y: 1 },
+    { x: 3, y: 1 },
+    { x: 4, y: 1 },
+    { x: 5, y: 1 },
+    { x: 6, y: 1 }
+  ];
+  truck.pathIndex = 0;
+  stepSim(state, createEffectsState(), rng, 0.5, { unitDelta: 1.5 });
+  assert.equal(truck.prevX, 1.5, "active-fire movement should preserve the step-start interpolation anchor");
+  assert.equal(truck.prevY, 1.5, "active-fire movement should preserve the step-start interpolation row");
+  assert.equal(truck.pathIndex, truck.path.length, "active-fire caps should not limit truck movement to the lower fire step");
+  assert.equal(truck.x, 6.5, "truck movement should use the effective movement delta during active fire work");
+  assert.equal(
+    getCrew(state, truck).every((unit) => unit.carrierId === truck.id && unit.x === truck.x),
+    true,
+    "boarded crew should stay synced to active-fire truck motion"
+  );
+};
+
 const testFormationAndCommandTargets = () => {
   const { state, truck } = buildDeployedTruckState(2003);
   setCrewFormation(state, truck.id, "wide");
@@ -222,6 +254,7 @@ const testRosterAssignment = () => {
 testStartingRosterAndDeployment();
 testCommandSelectionAndMovement();
 testUpgradedHighSpeedMovementConsumesFullRouteBudget();
+testActiveFireMovementUsesEffectiveMovementDelta();
 testFormationAndCommandTargets();
 testSuppressionWaterSpendAndRefill();
 testHazardsAndRecallCleanup();

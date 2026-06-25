@@ -110,7 +110,9 @@ import { buildMountainTerrainMaskTexture } from "./terrain/textures/mountainTerr
 import { getRockTextureAsset } from "./terrain/textures/rockTextureAsset.js";
 import {
   buildTileTexture as buildTileTextureInternal,
-  sampleTouchesWorldBorder
+  sampleTouchesWorldBorder,
+  type TileTextureBuildOptions,
+  type TileTextureUpdateTarget
 } from "./terrain/textures/tileTexture.js";
 
 export { getTerrainHeightScale };
@@ -2471,7 +2473,8 @@ export const buildTileTexture = (
   sampledLakeCoverage: Float32Array | null | undefined,
   riverStepStrength: Float32Array | null | undefined,
   debugTypeColors: boolean,
-  colorMode: "legacy" | "mask"
+  colorMode: "legacy" | "mask",
+  options?: TileTextureUpdateTarget | TileTextureBuildOptions
 ): THREE.DataTexture =>
   buildTileTextureInternal(
     sample,
@@ -2509,7 +2512,8 @@ export const buildTileTexture = (
       riverRatioMin: RIVER_RATIO_MIN,
       stepRockyTintMax: STEP_ROCKY_TINT_MAX,
       sunDir: SUN_DIR
-    }
+    },
+    options
   );
 
 const applyTerrainSurfaceColorAttribute = (
@@ -4621,5 +4625,3 @@ export const buildTerrainMesh = (
       : undefined;
   return { mesh, size: { width, depth }, water, treeBurn };
 };
-
-

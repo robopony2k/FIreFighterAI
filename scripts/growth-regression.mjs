@@ -12,10 +12,18 @@ import {
 } from "../dist/core/vegetation.js";
 import { stepGrowth } from "../dist/sim/growth.js";
 import { stepTownConstructionSchedule } from "../dist/systems/settlements/sim/townConstruction.js";
-import { prepareTerrainRenderSurface, prepareTerrainRenderVisualSurface } from "../dist/render/threeTestTerrain.js";
 import {
+  buildTileTexture,
+  prepareTerrainRenderSurface,
+  prepareTerrainRenderVisualSurface
+} from "../dist/render/threeTestTerrain.js";
+import {
+  analyzeTerrainTypeDiff,
   classifyTerrainVisualInvalidation,
   decideTerrainVisualSync,
+  getTerrainVisualSyncUrgency,
+  shouldRebuildThreeTestTreeTypeMap,
+  shouldHoldSimulationForTerrainInvalidation,
   shouldSyncThreeTestTerrain
 } from "../dist/app/threeTestTerrainSync.js";
 
@@ -320,6 +328,54 @@ const assertVegetationCaps = (state) => {
   }
 };
 
+const makeTileTexturePalette = () => {
+  const maxTileId = Math.max(...Object.values(TILE_TYPE_IDS));
+  const palette = Array.from({ length: maxTileId + 1 }, () => [0.42, 0.48, 0.36]);
+  palette[TILE_TYPE_IDS.water] = [0.1, 0.28, 0.44];
+  palette[TILE_TYPE_IDS.grass] = [0.36, 0.52, 0.24];
+  palette[TILE_TYPE_IDS.forest] = [0.18, 0.38, 0.18];
+  palette[TILE_TYPE_IDS.ash] = [0.22, 0.22, 0.22];
+  palette[TILE_TYPE_IDS.road] = [0.45, 0.39, 0.31];
+  palette[TILE_TYPE_IDS.base] = [0.5, 0.48, 0.42];
+  palette[TILE_TYPE_IDS.house] = [0.55, 0.42, 0.34];
+  palette[TILE_TYPE_IDS.firebreak] = [0.58, 0.54, 0.42];
+  palette[TILE_TYPE_IDS.beach] = [0.72, 0.66, 0.47];
+  palette[TILE_TYPE_IDS.floodplain] = [0.33, 0.5, 0.31];
+  palette[TILE_TYPE_IDS.scrub] = [0.43, 0.48, 0.26];
+  palette[TILE_TYPE_IDS.rocky] = [0.42, 0.42, 0.4];
+  palette[TILE_TYPE_IDS.bare] = [0.48, 0.43, 0.34];
+  return palette;
+};
+
+const buildRegressionTileTexture = (sample, surface, palette, options) =>
+  buildTileTexture(
+    sample,
+    surface.sampleCols,
+    surface.sampleRows,
+    surface.step,
+    palette,
+    TILE_TYPE_IDS.grass,
+    TILE_TYPE_IDS.scrub,
+    TILE_TYPE_IDS.floodplain,
+    TILE_TYPE_IDS.beach,
+    TILE_TYPE_IDS.forest,
+    TILE_TYPE_IDS.water,
+    TILE_TYPE_IDS.road,
+    surface.heightScale,
+    surface.sampleHeights,
+    surface.sampleTypes,
+    surface.waterRatios.water,
+    surface.waterRatios.ocean,
+    surface.waterRatios.river,
+    surface.sampledErosionWear ?? null,
+    surface.sampledRiverCoverage ?? null,
+    surface.sampledLakeCoverage ?? null,
+    surface.sampledRiverStepStrength ?? null,
+    false,
+    "legacy",
+    options
+  );
+
 const growthOnly = buildGrowthOnlyState();
 const growthPrevRevision = {
   terrainTypeRevision: growthOnly.state.terrainTypeRevision,
@@ -331,9 +387,15 @@ const growthTileBefore = growthOnly.state.tiles[growthOnly.targetIdx];
 const growthAgeBefore = growthTileBefore.vegetationAgeYears;
 const growthCanopyBefore = growthTileBefore.canopyCover;
 const growthStemBefore = growthTileBefore.stemDensity;
+let growthTelemetryBlocks = 0;
+let growthTelemetryTilesVisited = 0;
+let growthTelemetryTilesChanged = 0;
 
 for (let step = 0; step < 12; step += 1) {
   stepGrowth(growthOnly.state, 30, growthOnly.rng);
+  growthTelemetryBlocks += growthOnly.state.simPerfGrowthBlocksProcessed;
+  growthTelemetryTilesVisited += growthOnly.state.simPerfGrowthTilesVisited;
+  growthTelemetryTilesChanged += growthOnly.state.simPerfGrowthTilesChanged;
 }
 
 const growthTileAfter = growthOnly.state.tiles[growthOnly.targetIdx];
@@ -349,6 +411,9 @@ assert.ok(
   growthOnly.state.vegetationRevision > growthPrevRevision.vegetationRevision,
   "pure forest growth should bump vegetation revision"
 );
+assert.ok(growthTelemetryBlocks > 0, "growth telemetry should count processed blocks");
+assert.ok(growthTelemetryTilesVisited > 0, "growth telemetry should count visited vegetation tiles");
+assert.ok(growthTelemetryTilesChanged > 0, "growth telemetry should count changed vegetation tiles");
 assert.ok(
   shouldSyncThreeTestTerrain(growthPrevRevision, {
     terrainTypeRevision: growthOnly.state.terrainTypeRevision,
@@ -397,6 +462,29 @@ const cameraInteractionDecision = decideTerrainVisualSync({
 });
 assert.equal(cameraInteractionDecision.shouldSync, false, "camera interaction should still defer non-immediate terrain sync");
 assert.equal(cameraInteractionDecision.deferredReason, 1, "camera interaction should keep its deferred reason");
+const vegetationOnlyInvalidation = classifyTerrainVisualInvalidation({
+  previous: { terrainTypeRevision: 4, vegetationRevision: 7, structureRevision: 2, debugTypeColors: false },
+  next: { terrainTypeRevision: 4, vegetationRevision: 8, structureRevision: 2, debugTypeColors: false },
+  geometryTerrainChanged: false,
+  activeFireTerrainPressure: false
+});
+assert.equal(vegetationOnlyInvalidation.geometry, false, "vegetation-only growth should not force geometry rebuild");
+assert.equal(vegetationOnlyInvalidation.surfaceColor, false, "vegetation-only growth should not require terrain surface-color work");
+assert.equal(vegetationOnlyInvalidation.vegetation, true, "vegetation-only growth should still invalidate vegetation visuals");
+assert.equal(vegetationOnlyInvalidation.dirtyTileBounds, undefined, "vegetation-only growth should not request tile texture updates");
+assert.equal(
+  shouldRebuildThreeTestTreeTypeMap(
+    {
+      cachedLength: growthOnly.state.grid.totalTiles,
+      totalTiles: growthOnly.state.grid.totalTiles,
+      cachedTerrainTypeRevision: 4,
+      cachedVegetationRevision: 7
+    },
+    { terrainTypeRevision: 4, vegetationRevision: 8 }
+  ),
+  false,
+  "vegetation-only maturity changes should not rebuild the tree type map"
+);
 const ashOnlyInvalidation = classifyTerrainVisualInvalidation({
   previous: { terrainTypeRevision: 4, vegetationRevision: 7, structureRevision: 2, debugTypeColors: false },
   next: { terrainTypeRevision: 5, vegetationRevision: 8, structureRevision: 2, debugTypeColors: false },
@@ -407,6 +495,26 @@ assert.equal(ashOnlyInvalidation.geometry, false, "ash-only terrain changes shou
 assert.equal(ashOnlyInvalidation.surfaceColor, true, "ash-only terrain changes should invalidate surface color");
 assert.equal(ashOnlyInvalidation.vegetation, true, "ash-only vegetation cleanup should invalidate vegetation visuals");
 assert.equal(ashOnlyInvalidation.fireVisual, true, "active fire visual terrain changes should be batchable");
+assert.equal(getTerrainVisualSyncUrgency(ashOnlyInvalidation), "deferred", "active fire ash visuals should not hold simulation");
+assert.equal(
+  shouldHoldSimulationForTerrainInvalidation(ashOnlyInvalidation),
+  false,
+  "active fire ash visuals should not freeze simulation while texture work is batched"
+);
+const fireVisualOnlyDecision = decideTerrainVisualSync({
+  previous: { terrainTypeRevision: 4, vegetationRevision: 7, structureRevision: 2, debugTypeColors: false },
+  next: { terrainTypeRevision: 4, vegetationRevision: 7, structureRevision: 2, debugTypeColors: false },
+  geometryTerrainChanged: false,
+  activeFireTerrainPressure: true,
+  activeFireVisualRefresh: true,
+  nowMs: 1000,
+  lastSyncMs: 0,
+  cooldownMs: 0,
+  fireVisualCooldownMs: 0,
+  cameraInteracting: false
+});
+assert.equal(fireVisualOnlyDecision.shouldSync, false, "active fire visual pressure alone should not sync terrain");
+assert.equal(fireVisualOnlyDecision.invalidation.fireVisual, false, "fire visual pressure alone should not invalidate terrain");
 const structureInvalidation = classifyTerrainVisualInvalidation({
   previous: { terrainTypeRevision: 4, vegetationRevision: 7, structureRevision: 2, debugTypeColors: false },
   next: { terrainTypeRevision: 4, vegetationRevision: 7, structureRevision: 3, debugTypeColors: false },
@@ -415,6 +523,11 @@ const structureInvalidation = classifyTerrainVisualInvalidation({
 });
 assert.equal(structureInvalidation.structure, true, "structure changes should remain immediate terrain sync work");
 assert.equal(structureInvalidation.fireVisual, false, "structure changes should not be treated as batchable fire visuals");
+assert.equal(
+  shouldHoldSimulationForTerrainInvalidation(structureInvalidation),
+  true,
+  "structure terrain sync work should still hold simulation until visual sync catches up"
+);
 const roadInvalidation = classifyTerrainVisualInvalidation({
   previous: { terrainTypeRevision: 4, vegetationRevision: 7, structureRevision: 2, debugTypeColors: false },
   next: { terrainTypeRevision: 5, vegetationRevision: 7, structureRevision: 2, debugTypeColors: false },
@@ -425,6 +538,32 @@ const roadInvalidation = classifyTerrainVisualInvalidation({
 assert.equal(roadInvalidation.geometry, false, "road-only terrain changes should not force geometry rebuild");
 assert.equal(roadInvalidation.roads, true, "road-only terrain changes should invalidate road visuals");
 assert.equal(roadInvalidation.surfaceColor, true, "road-only terrain changes should still refresh surface color");
+const roadDiffPrevious = new Uint8Array(25).fill(TILE_TYPE_IDS.grass);
+const roadDiffNext = roadDiffPrevious.slice();
+roadDiffNext[12] = TILE_TYPE_IDS.road;
+const roadTypeDiff = analyzeTerrainTypeDiff(roadDiffPrevious, roadDiffNext, 5);
+assert.equal(roadTypeDiff.terrainTypesChanged, true, "terrain type diff should detect road insertion");
+assert.equal(roadTypeDiff.geometryTerrainChanged, false, "road insertion should not be geometry terrain work");
+assert.equal(roadTypeDiff.roadTerrainChanged, true, "road insertion should be road visual work");
+assert.deepEqual(
+  roadTypeDiff.dirtyTileBounds,
+  { minX: 2, minY: 2, maxX: 2, maxY: 2 },
+  "road insertion should report tight dirty tile bounds"
+);
+const roadDirtyInvalidation = classifyTerrainVisualInvalidation({
+  previous: { terrainTypeRevision: 4, vegetationRevision: 7, structureRevision: 2, debugTypeColors: false },
+  next: { terrainTypeRevision: 5, vegetationRevision: 7, structureRevision: 2, debugTypeColors: false },
+  geometryTerrainChanged: roadTypeDiff.geometryTerrainChanged,
+  roadTerrainChanged: roadTypeDiff.roadTerrainChanged,
+  waterOrCoastChanged: roadTypeDiff.waterOrCoastChanged,
+  dirtyTileBounds: roadTypeDiff.dirtyTileBounds,
+  activeFireTerrainPressure: false
+});
+assert.deepEqual(
+  roadDirtyInvalidation.dirtyTileBounds,
+  { minX: 2, minY: 2, maxX: 2, maxY: 2 },
+  "road-only surface updates should preserve tight dirty tile bounds"
+);
 assert.ok(
   growthOnly.state.tileVegetationAge[growthOnly.targetIdx] >= growthTileAfter.vegetationAgeYears - 1e-6,
   "vegetation age SoA did not update"
@@ -524,6 +663,65 @@ const terrainSignatureSample = (() => {
     baseSurface.sampleTypes,
     "visual-only terrain prep should refresh mutable visual tile classes"
   );
+  const texturePalette = makeTileTexturePalette();
+  const textureElevations = new Float32Array(total).fill(0.28);
+  const textureTypes = new Uint8Array(total).fill(TILE_TYPE_IDS.grass);
+  const textureBaseSample = { cols, rows, elevations: textureElevations, tileTypes: textureTypes, fastUpdate: true };
+  const textureBaseSurface = prepareTerrainRenderSurface(textureBaseSample);
+  const initialTexture = buildRegressionTileTexture(textureBaseSample, textureBaseSurface, texturePalette);
+  const textureRoadTypes = textureTypes.slice();
+  textureRoadTypes[12] = TILE_TYPE_IDS.road;
+  const textureRoadSample = { cols, rows, elevations: textureElevations, tileTypes: textureRoadTypes, fastUpdate: true };
+  const textureRoadSurface =
+    prepareTerrainRenderVisualSurface(textureRoadSample, textureBaseSurface) ??
+    prepareTerrainRenderSurface(textureRoadSample);
+  const fullRoadTexture = buildRegressionTileTexture(textureRoadSample, textureRoadSurface, texturePalette);
+  const partialRoadTexture = buildRegressionTileTexture(textureRoadSample, textureRoadSurface, texturePalette, {
+    texture: initialTexture,
+    dirtyTileBounds: { minX: 2, minY: 2, maxX: 2, maxY: 2 }
+  });
+  assert.equal(partialRoadTexture, initialTexture, "dirty tile texture update should reuse the existing DataTexture");
+  assert.ok(initialTexture.updateRanges.length > 0, "dirty tile texture update should record row update ranges");
+  assert.deepEqual(
+    Array.from(initialTexture.image.data),
+    Array.from(fullRoadTexture.image.data),
+    "dirty tile texture update should match a full texture rebuild"
+  );
+  fullRoadTexture.dispose();
+  initialTexture.dispose();
+
+  const baselineTexture = buildRegressionTileTexture(textureBaseSample, textureBaseSurface, texturePalette);
+  const tileFuel = new Float32Array(total).fill(0);
+  const tileFire = new Float32Array(total);
+  const tileHeat = new Float32Array(total);
+  tileFire[12] = 1;
+  tileHeat[12] = 5;
+  const textureFireSample = {
+    ...textureBaseSample,
+    tileFuel,
+    tileFire,
+    tileHeat,
+    heatCap: 5
+  };
+  const skippedFireTexture = buildRegressionTileTexture(textureFireSample, textureBaseSurface, texturePalette, {
+    includeDynamicFireScorch: false
+  });
+  assert.deepEqual(
+    Array.from(skippedFireTexture.image.data),
+    Array.from(baselineTexture.image.data),
+    "dynamic fire scorch disabled should keep base terrain texture stable"
+  );
+  const scorchedFireTexture = buildRegressionTileTexture(textureFireSample, textureBaseSurface, texturePalette, {
+    includeDynamicFireScorch: true
+  });
+  assert.notDeepEqual(
+    Array.from(scorchedFireTexture.image.data),
+    Array.from(baselineTexture.image.data),
+    "dynamic fire scorch enabled should still support explicit ground scorch rendering"
+  );
+  baselineTexture.dispose();
+  skippedFireTexture.dispose();
+  scorchedFireTexture.dispose();
   return baseSurface.geometrySignature;
 })();
 

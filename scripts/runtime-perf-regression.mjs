@@ -9,6 +9,7 @@ import { createEffectsState } from "../dist/core/effectsState.js";
 import { markFireBlockActiveByTile } from "../dist/sim/fire/activeBlocks.js";
 import { stepSim } from "../dist/sim/index.js";
 import { applyFireActivityMetrics } from "../dist/systems/fire/sim/fireActivityState.js";
+import { decideTerrainVisualSync } from "../dist/app/threeTestTerrainSync.js";
 
 const BASE_STEP = 0.25;
 const SIZE = 65;
@@ -16,6 +17,11 @@ const SPEEDS = [1, 10, 20];
 const FRAMES = 18;
 const MAX_FRAME_MS = 1200;
 const MAX_FIRE_SUBSTEPS = 40;
+const SPRING_SPEED = 20;
+const SPRING_FRAMES = 12;
+const MAX_SPRING_FRAME_MS = 300;
+const MAX_SPRING_GROWTH_MS = 90;
+const MAX_SPRING_TOWN_MS = 90;
 
 const buildTile = (x, y) => {
   const ridge = Math.abs(x - y) < 5;
@@ -100,6 +106,47 @@ const buildScenario = (speed) => {
   return { state, effects: createEffectsState(), rng };
 };
 
+const pinGrowthWeather = (state) => {
+  state.climateTemp = 22;
+  state.climateMoisture = 0.55;
+  state.climateDay = 365;
+  state.climateYear = 0;
+  state.seasonalRain = {
+    ...state.seasonalRain,
+    active: false,
+    event: null,
+    hasStartPauseHandled: true
+  };
+};
+
+const buildSpringGrowthScenario = () => {
+  const seed = 8801;
+  const grid = { cols: SIZE, rows: SIZE, totalTiles: SIZE * SIZE };
+  const state = createInitialState(seed, grid);
+  const rng = new RNG(seed ^ 0x7f4a7c15);
+  state.tiles = Array.from({ length: grid.totalTiles }, (_, idx) => {
+    const x = idx % SIZE;
+    const y = Math.floor(idx / SIZE);
+    const tile = buildTile(x, y);
+    tile.fire = 0;
+    tile.heat = 0;
+    applyFuel(tile, tile.moisture, rng);
+    return tile;
+  });
+  syncTileSoA(state);
+  syncFireSeasonCursor(state, 100);
+  pinGrowthWeather(state);
+  state.paused = false;
+  state.simTimeMode = "strategic";
+  state.timeSpeedIndex = 8;
+  state.timeSpeedSliderValue = SPRING_SPEED;
+  state.fireSettings.ignitionChancePerDay = 0;
+  state.lastActiveFires = 0;
+  applyFireActivityMetrics(state, 0);
+  state.growthBlockLastCareerDay.fill(state.careerDay);
+  return { state, effects: createEffectsState(), rng };
+};
+
 const runScenario = (speed) => {
   const { state, effects, rng } = buildScenario(speed);
   let maxFrameMs = 0;
@@ -128,6 +175,68 @@ const runScenario = (speed) => {
   };
 };
 
+const runSpringGrowthScenario = () => {
+  const { state, effects, rng } = buildSpringGrowthScenario();
+  stepSim(state, effects, rng, BASE_STEP * SPRING_SPEED);
+  if (state.paused) {
+    state.paused = false;
+  }
+  pinGrowthWeather(state);
+
+  let maxFrameMs = 0;
+  let maxGrowthMs = 0;
+  let maxTownConstructionMs = 0;
+  let maxGrowthBlocks = 0;
+  let totalGrowthTilesVisited = 0;
+  let totalGrowthTilesChanged = 0;
+  for (let frame = 0; frame < SPRING_FRAMES && !state.gameOver; frame += 1) {
+    const startedAt = performance.now();
+    stepSim(state, effects, rng, BASE_STEP * SPRING_SPEED);
+    maxFrameMs = Math.max(maxFrameMs, performance.now() - startedAt);
+    maxGrowthMs = Math.max(maxGrowthMs, state.simPerfGrowthMs);
+    maxTownConstructionMs = Math.max(maxTownConstructionMs, state.simPerfTownConstructionMs);
+    maxGrowthBlocks = Math.max(maxGrowthBlocks, state.simPerfGrowthBlocksProcessed);
+    totalGrowthTilesVisited += state.simPerfGrowthTilesVisited;
+    totalGrowthTilesChanged += state.simPerfGrowthTilesChanged;
+    if (state.paused) {
+      state.paused = false;
+    }
+    pinGrowthWeather(state);
+  }
+  return {
+    speed: SPRING_SPEED,
+    maxFrameMs,
+    maxGrowthMs,
+    maxTownConstructionMs,
+    maxGrowthBlocks,
+    totalGrowthTilesVisited,
+    totalGrowthTilesChanged,
+    phase: state.phase,
+    careerDay: state.careerDay
+  };
+};
+
+const runActiveFireVisualSyncScenario = () => {
+  const previous = {
+    terrainTypeRevision: 10,
+    vegetationRevision: 20,
+    structureRevision: 3,
+    debugTypeColors: false
+  };
+  return decideTerrainVisualSync({
+    previous,
+    next: { ...previous },
+    geometryTerrainChanged: false,
+    activeFireTerrainPressure: true,
+    activeFireVisualRefresh: true,
+    nowMs: 5000,
+    lastSyncMs: 0,
+    cooldownMs: 0,
+    fireVisualCooldownMs: 0,
+    cameraInteracting: false
+  });
+};
+
 const results = SPEEDS.map(runScenario);
 for (const result of results) {
   console.log(
@@ -144,5 +253,51 @@ for (const result of results) {
   assert.ok(result.maxFrameMs < MAX_FRAME_MS, `runtime frame exceeded ${MAX_FRAME_MS}ms at ${result.speed}x`);
   assert.ok(result.maxSubsteps <= MAX_FIRE_SUBSTEPS, `fire substep budget exceeded at ${result.speed}x`);
 }
+
+const springResult = runSpringGrowthScenario();
+console.log(
+  [
+    `springSpeed=${springResult.speed}x`,
+    `phase=${springResult.phase}`,
+    `careerDay=${springResult.careerDay.toFixed(1)}`,
+    `maxFrameMs=${springResult.maxFrameMs.toFixed(1)}`,
+    `maxGrowthMs=${springResult.maxGrowthMs.toFixed(1)}`,
+    `maxTownMs=${springResult.maxTownConstructionMs.toFixed(1)}`,
+    `maxGrowthBlocks=${springResult.maxGrowthBlocks}`,
+    `growthTiles=${springResult.totalGrowthTilesVisited}`,
+    `growthChanged=${springResult.totalGrowthTilesChanged}`
+  ].join(" ")
+);
+assert.ok(springResult.totalGrowthTilesVisited > 0, "spring runtime scenario did not execute vegetation growth");
+assert.ok(
+  springResult.maxFrameMs < MAX_SPRING_FRAME_MS,
+  `spring runtime frame exceeded ${MAX_SPRING_FRAME_MS}ms at ${SPRING_SPEED}x`
+);
+assert.ok(
+  springResult.maxGrowthMs < MAX_SPRING_GROWTH_MS,
+  `spring growth step exceeded ${MAX_SPRING_GROWTH_MS}ms at ${SPRING_SPEED}x`
+);
+assert.ok(
+  springResult.maxTownConstructionMs < MAX_SPRING_TOWN_MS,
+  `spring town construction step exceeded ${MAX_SPRING_TOWN_MS}ms at ${SPRING_SPEED}x`
+);
+
+const activeFireVisualDecision = runActiveFireVisualSyncScenario();
+console.log(
+  [
+    `activeFireVisualSync=${activeFireVisualDecision.shouldSync ? "sync" : "skip"}`,
+    `fireVisual=${activeFireVisualDecision.invalidation.fireVisual ? "yes" : "no"}`
+  ].join(" ")
+);
+assert.equal(
+  activeFireVisualDecision.shouldSync,
+  false,
+  "active fire visual pressure without terrain revisions must not request terrain sync"
+);
+assert.equal(
+  activeFireVisualDecision.invalidation.fireVisual,
+  false,
+  "active fire visual pressure alone must not create fireVisual terrain invalidation"
+);
 
 console.log("Runtime perf regression passed.");

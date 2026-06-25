@@ -19,7 +19,9 @@ export const applyVegetationPreGrowth = (
     yearsApplied,
     terrainTypeChanged: false,
     vegetationChanged: false,
-    visualChanged: false
+    visualChanged: false,
+    tilesVisited: 0,
+    tilesChanged: 0
   };
   if (yearsApplied === 0 || state.grid.totalTiles === 0) {
     return result;
@@ -36,6 +38,8 @@ export const applyVegetationPreGrowth = (
     result.terrainTypeChanged ||= annual.terrainTypeChanged;
     result.vegetationChanged ||= annual.vegetationChanged;
     result.visualChanged ||= annual.visualChanged;
+    result.tilesVisited += annual.tilesVisited;
+    result.tilesChanged += annual.tilesChanged;
   }
   return result;
 };

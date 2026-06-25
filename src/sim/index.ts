@@ -126,6 +126,9 @@ const resetStepPerfTelemetry = (state: WorldState): void => {
   state.simPerfCalendarMs = 0;
   state.simPerfTownConstructionMs = 0;
   state.simPerfGrowthMs = 0;
+  state.simPerfGrowthBlocksProcessed = 0;
+  state.simPerfGrowthTilesVisited = 0;
+  state.simPerfGrowthTilesChanged = 0;
   state.simPerfUnitsMs = 0;
   state.simPerfFireMs = 0;
   state.simPerfScoringMs = 0;
@@ -1083,7 +1086,20 @@ export function endGame(state: WorldState, victory: boolean, reason?: string): v
   emitGameOver({ victory, reason: baseMessage, score, seed: state.seed });
 }
 
-export function stepSim(state: WorldState, effects: EffectsState, rng: RNG, delta: number): void {
+export type StepSimOptions = {
+  unitDelta?: number;
+};
+
+const sanitizeStepDelta = (value: number, fallback: number): number =>
+  Number.isFinite(value) && value >= 0 ? value : fallback;
+
+export function stepSim(
+  state: WorldState,
+  effects: EffectsState,
+  rng: RNG,
+  delta: number,
+  options: StepSimOptions = {}
+): void {
   if (state.advanceToNextEvent && state.gameOver) {
     cancelAdvanceToNextEvent(state);
   }
@@ -1093,6 +1109,7 @@ export function stepSim(state: WorldState, effects: EffectsState, rng: RNG, delt
   resetStepPerfTelemetry(state);
 
   const dayDelta = delta * DAYS_PER_SECOND;
+  const unitDelta = sanitizeStepDelta(options.unitDelta ?? delta, delta);
   const calendarDelta = dayDelta;
   const previousCareerDay = state.careerDay;
   const hadFireChainRisk = hasFireActivity(state);
@@ -1164,9 +1181,9 @@ export function stepSim(state: WorldState, effects: EffectsState, rng: RNG, delt
   if (state.units.length > 0) {
     const unitsPerfStart = nowMs();
     autoAssignTargets(state);
-    stepUnits(state, delta);
+    stepUnits(state, unitDelta);
     prepareExtinguish(state, effects, rng);
-    applyUnitHazards(state, rng, delta);
+    applyUnitHazards(state, rng, unitDelta);
     state.simPerfUnitsMs = nowMs() - unitsPerfStart;
   }
 

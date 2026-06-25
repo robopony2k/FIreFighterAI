@@ -18,13 +18,14 @@ import { clamp } from "../../../core/utils.js";
 import { applyFuel, getFuelProfiles } from "../../../core/tiles.js";
 import { indexFor, inBounds } from "../../../core/grid.js";
 import { hash2D } from "../../../mapgen/noise.js";
-import { computeRenderedSlopeAngleDeg } from "../../../shared/terrainSlope.js";
-import { computeTreeSuitability } from "./treeSuitability.js";
+import { getRuntimeVegetationSuitabilityAt } from "./runtimeVegetationSuitabilityCache.js";
 
 export type VegetationBlockResult = {
   terrainTypeChanged: boolean;
   vegetationChanged: boolean;
   visualChanged: boolean;
+  tilesVisited: number;
+  tilesChanged: number;
 };
 
 export type VegetationBlockBounds = {
@@ -48,7 +49,6 @@ const LONG_DISTANCE_RECRUIT_FACTOR = 0.38;
 const SEED_NORMALIZE = 2.6;
 const CANOPY_VISUAL_DIRTY_THRESHOLD = 0.06;
 const AGE_VISUAL_DIRTY_THRESHOLD = 0.5;
-const MAX_SUITABILITY_SLOPE = 0.5;
 
 const SEED_NEIGHBORS = [
   { x: 1, y: 0, weight: 1 },
@@ -139,53 +139,6 @@ const sampleGrowthEvent = (state: WorldState, x: number, y: number, elapsedDays:
   return hash2D(x + seasonBucket * 17, y + salt * 31, state.seed + salt * 9973);
 };
 
-const computeLocalSlope = (state: WorldState, x: number, y: number): number => {
-  const idx = indexFor(state.grid, x, y);
-  const center = state.tiles[idx]?.elevation ?? 0;
-  let maxDiff = 0;
-  for (let dy = -1; dy <= 1; dy += 1) {
-    for (let dx = -1; dx <= 1; dx += 1) {
-      if (dx === 0 && dy === 0) {
-        continue;
-      }
-      const nx = x + dx;
-      const ny = y + dy;
-      if (!inBounds(state.grid, nx, ny)) {
-        continue;
-      }
-      maxDiff = Math.max(maxDiff, Math.abs(center - (state.tiles[indexFor(state.grid, nx, ny)]?.elevation ?? center)));
-    }
-  }
-  return clamp(maxDiff / MAX_SUITABILITY_SLOPE, 0, 1);
-};
-
-const computeRuntimeTreeSuitability = (state: WorldState, x: number, y: number): number => {
-  const idx = indexFor(state.grid, x, y);
-  const tile = state.tiles[idx];
-  const seaLevel = state.tileSeaLevel?.[idx] ?? 0.08;
-  const slope = computeLocalSlope(state, x, y);
-  const details = computeTreeSuitability({
-    seed: state.seed,
-    x,
-    y,
-    worldX: x * 10,
-    worldY: y * 10,
-    cellSizeM: 10,
-    elevation: tile?.elevation ?? 0,
-    slope,
-    moisture: tile?.moisture ?? 0,
-    valley: state.valleyMap?.[idx] ?? 0,
-    seaLevel,
-    waterDist: tile?.waterDist ?? 24,
-    highlandForestElevation: 0.72,
-    vegetationDensity: 0.62,
-    forestPatchiness: 0.48,
-    slopeAngleDeg: computeRenderedSlopeAngleDeg(slope, state.grid.cols, state.grid.rows),
-    isWater: tile?.type === "water"
-  });
-  return details.treeSuitability;
-};
-
 const pickOpenColonizedType = (
   moisture: number,
   elevation: number,
@@ -267,7 +220,9 @@ export const processVegetationSuccessionBlock = (
   const result: VegetationBlockResult = {
     terrainTypeChanged: false,
     vegetationChanged: false,
-    visualChanged: false
+    visualChanged: false,
+    tilesVisited: 0,
+    tilesChanged: 0
   };
 
   for (let y = bounds.minY; y <= bounds.maxY; y += 1) {
@@ -277,6 +232,7 @@ export const processVegetationSuccessionBlock = (
       if (!tile || tile.fire > 0 || isProtectedSuccessionType(tile.type)) {
         continue;
       }
+      result.tilesVisited += 1;
 
       const prevType = tile.type;
       const prevCanopy = tile.canopy;
@@ -287,7 +243,7 @@ export const processVegetationSuccessionBlock = (
 
       const waterFactor = getWaterFactor(tile.waterDist);
       const elevFactor = getElevationFactor(tile.elevation);
-      const suitability = computeRuntimeTreeSuitability(state, x, y);
+      const suitability = getRuntimeVegetationSuitabilityAt(state, x, y);
       const env = (0.35 + 0.65 * tile.moisture) * (0.6 + 0.8 * waterFactor) * (0.4 + 0.6 * elevFactor);
       const successionEnv = clamp(env * (0.42 + suitability * 0.9), 0, 1.4);
 
@@ -384,6 +340,7 @@ export const processVegetationSuccessionBlock = (
         tile.type !== prevType;
       if (changed) {
         result.vegetationChanged = true;
+        result.tilesChanged += 1;
         syncVegetationTileState(state, idx, typeChanged || tile.type !== prevType);
       }
       if (typeChanged || tile.type !== prevType) {

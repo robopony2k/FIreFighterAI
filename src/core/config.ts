@@ -30,6 +30,7 @@ export const ENABLE_GRASS_DETAIL_FX = false;
 export const DISABLE_INLAND_LAKES = true;
 export const FIREBREAK_COST_PER_TILE = 45;
 export const BASE_BUDGET = 320;
+export const DEBUG_UNLIMITED_MONEY_BUDGET = 50000;
 export const APPROVAL_MIN = 0.2;
 export const TOWN_ALERT_MAX_POSTURE = 3;
 export const TOWN_ALERT_CHANGE_COOLDOWN_DAYS = 0.75;

@@ -57,7 +57,7 @@ export type AppBootLoopDeps = {
   isThreeTestNoSim: () => boolean;
   isSimulationEffectivelyPaused: () => boolean;
   shouldHoldSimulationForVisualSync?: () => boolean;
-  stepSimulation: (simStep: number) => number;
+  stepSimulation: (simStep: number, movementStep: number) => number;
   onThreeTestFrame: (alpha: number) => void;
   renderFrame: (alpha: number) => void;
   recordPerfSample: (name: string, value: number) => void;
@@ -68,8 +68,10 @@ export type RuntimeFrameWorkBudget = {
   requestedTimeSpeedValue: number;
   effectiveTimeSpeedValue: number;
   appliedTimeSpeedValue: number;
+  movementTimeSpeedValue: number;
   requestedSimulationStep: number;
   appliedSimulationStep: number;
+  movementSimulationStep: number;
   maxSimulationStepsPerFrame: number;
 };
 
@@ -94,8 +96,10 @@ export const resolveRuntimeFrameWorkBudget = (params: {
     requestedTimeSpeedValue,
     effectiveTimeSpeedValue,
     appliedTimeSpeedValue: params.baseStep > 0 ? appliedSimulationStep / params.baseStep : 0,
+    movementTimeSpeedValue: effectiveTimeSpeedValue,
     requestedSimulationStep,
     appliedSimulationStep,
+    movementSimulationStep: effectiveSimulationStep,
     maxSimulationStepsPerFrame: params.incidentMode || params.threeTestVisible ? 1 : 8
   };
 };
@@ -161,6 +165,7 @@ export const startAppBootLoop = (deps: AppBootLoopDeps): void => {
       threeTestVisible
     });
     const simStep = frameBudget.appliedSimulationStep;
+    const movementStep = frameBudget.movementSimulationStep;
     const maxStepsPerFrame = frameBudget.maxSimulationStepsPerFrame;
     let simStepsThisFrame = 0;
     let simFrameMs = 0;
@@ -174,7 +179,7 @@ export const startAppBootLoop = (deps: AppBootLoopDeps): void => {
       accumulator = Math.min(accumulator, deps.baseStep);
     } else {
       while (accumulator >= deps.baseStep && simStepsThisFrame < maxStepsPerFrame) {
-        simFrameMs += deps.stepSimulation(simStep);
+        simFrameMs += deps.stepSimulation(simStep, movementStep);
         accumulator -= deps.baseStep;
         simStepsThisFrame += 1;
       }
@@ -184,8 +189,10 @@ export const startAppBootLoop = (deps: AppBootLoopDeps): void => {
     deps.recordPerfSample("sim.requestedSpeed", frameBudget.requestedTimeSpeedValue);
     deps.recordPerfSample("sim.effectiveSpeed", frameBudget.effectiveTimeSpeedValue);
     deps.recordPerfSample("sim.appliedSpeed", frameBudget.appliedTimeSpeedValue);
+    deps.recordPerfSample("sim.movementSpeed", frameBudget.movementTimeSpeedValue);
     deps.recordPerfSample("sim.requestedStep", frameBudget.requestedSimulationStep);
     deps.recordPerfSample("sim.appliedStep", frameBudget.appliedSimulationStep);
+    deps.recordPerfSample("sim.movementStep", frameBudget.movementSimulationStep);
     deps.recordPerfSample("sim.stepBudget", frameBudget.maxSimulationStepsPerFrame);
     deps.recordPerfSample("sim.visualSyncHold", holdForVisualSync ? 1 : 0);
     if (simStepsThisFrame > 0) {
