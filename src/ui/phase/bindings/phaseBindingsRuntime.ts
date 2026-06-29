@@ -1282,7 +1282,7 @@ export const bindPhaseUi = ({
     if (event.key === " ") {
       isSpaceDown = true;
     }
-    if (event.key === "1" || event.key === "2") {
+    if (/^[1-5]$/.test(event.key)) {
       const slot = Number(event.key) - 1;
       const target = [...state.commandUnits].sort((a, b) => a.id - b.id)[slot] ?? null;
       if (target) {

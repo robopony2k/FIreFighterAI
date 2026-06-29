@@ -15,6 +15,29 @@ Constraints: keep road planning simulation-first, deterministic, mapgen-authored
 
 Status: done
 
+TSK-0159: Add town water towers
+
+Type: feature
+
+Why: Towns need progression-gated local water infrastructure so firetrucks can refuel away from the firebase and settlements can get limited passive fire protection that depends on stored water.
+
+Done when:
+- [ ] The firebase starts each world with a default water tower at or near the base, while towns can build at most one local tower only after unlocking a Logistics tech node such as `municipal-water-towers`.
+- [ ] Water towers are settlement-owned runtime assets with deterministic placement, capacity, current water, service radius, suppression radius, and built/default state; tower structures do not count as houses or drift town house totals.
+- [ ] Truck refill logic uses an explicit water-source boundary that supports existing base/river/lake behavior plus tower reservoirs, with tower water decreasing when used.
+- [ ] Passive town defense spends tower water to reduce nearby town fire/heat risk without acting as an automated firefighter unit or awarding suppression credit.
+- [ ] Rain strongly replenishes towers and dry periods provide only a slow baseline trickle so long incidents can exhaust local reserves without leaving them permanently empty.
+- [ ] Maintenance/procurement UI exposes tower construction for unlocked towns and runtime town context shows compact tower water status.
+- [ ] Regression coverage verifies base creation, one-per-town enforcement, unlock gating, deterministic placement, house-count integrity, tower refill consumption, passive suppression scope, and rain/trickle recovery.
+
+Touchpoints: `src/systems/settlements/`, `src/systems/units/`, `src/systems/progression/`, `src/config/progression/`, `src/core/towns.ts`, `src/core/state.ts`, `src/render/simView.ts`, `src/render/threeTestTerrain.ts`, `src/ui/phase/`, `scripts/`
+
+Constraints: preserve deterministic settlement placement, keep terrain and hydrology static at runtime, keep suppression/reservoir rules out of rendering, and ship V1 without upgrades, destruction, construction stages, or manual tower targeting.
+
+Notes: Defaults are Passive Defense, One Per Town, and Rain Plus Trickle. No deprecation entry is needed for this net-new feature.
+
+Status: queued
+
 TSK-0156: Add map editor mapgen diagnostics
 
 Type: feature
@@ -203,9 +226,9 @@ Type: polish
 Why: House lifecycle stages already change geometry, but `site_prep`, `frame`, and `enclosed` builds still read as visually static during town growth. A lightweight dust effect would make active construction easier to spot and sell settlement growth better.
 
 Done when:
-- [ ] `site_prep`, `frame`, and `enclosed` house lifecycle stages can drive a lightweight construction-dust effect in the 3D runtime, while `roofed` and `charred_remains` stay unaffected.
-- [ ] Dust timing/intensity is derived from lifecycle stage or visual-step progress so early construction reads differently from late construction instead of acting like constant ambient smoke.
-- [ ] The house lifecycle FX Lab preview or an equivalent debugable surface can show the dust effect so it can be tuned without waiting on a live town-growth repro.
+- [x] `site_prep`, `frame`, and `enclosed` house lifecycle stages can drive a lightweight construction-dust effect in the 3D runtime, while `roofed` and `charred_remains` stay unaffected.
+- [x] Dust timing/intensity is derived from lifecycle stage or visual-step progress so early construction reads differently from late construction instead of acting like constant ambient smoke.
+- [x] The house lifecycle FX Lab preview or an equivalent debugable surface can show the dust effect so it can be tuned without waiting on a live town-growth repro.
 
 Touchpoints: `src/systems/settlements/sim/buildingLifecycle.ts`, `src/systems/settlements/rendering/`, `src/render/simView.ts`, `src/render/threeTest.ts`, `src/render/fxLab/`
 
@@ -213,7 +236,7 @@ Constraints: preserve current house lifecycle silhouettes and determinism, keep 
 
 Notes: Prefer settlement-owned construction FX descriptors/data over burying lifecycle-specific rules directly inside generic fire-FX code.
 
-Status: queued
+Status: done
 
 TSK-0133: Type and isolate the fire simulation kernel
 

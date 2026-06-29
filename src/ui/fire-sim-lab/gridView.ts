@@ -7,6 +7,7 @@ import {
   FIRE_SIM_LAB_FIREFIGHTER_SYMBOL,
   type FireSimLabTool
 } from "../../systems/fire/types/fireSimLabTypes.js";
+import { canvasEmojiFont, canvasUiFont } from "../typography.js";
 import { getFireSimLabCellSymbol, type FireSimLabCellSymbolState } from "./cellSymbols.js";
 
 export type FireSimLabGridPointer = {
@@ -162,7 +163,7 @@ export const createFireSimLabGridView = ({
     ctx.fillStyle = "rgba(12, 18, 24, 0.72)";
     ctx.fillRect(12, 54, Math.min(96, width - 24), 22);
     ctx.fillStyle = "rgba(231, 244, 255, 0.9)";
-    ctx.font = "12px ui-sans-serif, system-ui, sans-serif";
+    ctx.font = canvasUiFont(400, 12);
     ctx.fillText(`Wind ${Math.round(strength * 100)}%`, 20, 69);
     ctx.restore();
   };
@@ -219,7 +220,7 @@ export const createFireSimLabGridView = ({
     ctx.save();
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
-    ctx.font = `${iconSize}px "Segoe UI Emoji", "Apple Color Emoji", "Noto Color Emoji", ui-sans-serif, system-ui, sans-serif`;
+    ctx.font = canvasEmojiFont(iconSize);
     firefighters.forEach((firefighter) => {
       const x = layout.offsetX + (firefighter.x + 0.5) * layout.cellSize;
       const y = layout.offsetY + (firefighter.y + 0.5) * layout.cellSize;
@@ -253,7 +254,7 @@ export const createFireSimLabGridView = ({
     ctx.save();
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
-    ctx.font = `${fontSize}px "Segoe UI Emoji", "Apple Color Emoji", "Noto Color Emoji", ui-sans-serif, system-ui, sans-serif`;
+    ctx.font = canvasEmojiFont(fontSize);
     symbols.forEach((entry) => {
       if (entry.state === "fire") {
         ctx.shadowColor = "rgba(255, 203, 91, 0.72)";

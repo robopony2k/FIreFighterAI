@@ -1,7 +1,7 @@
 export const FIRST_NAMES = ["Alex", "Casey", "Drew", "Jordan", "Parker", "Quinn", "Riley", "Sawyer", "Taylor", "Wyatt"];
 export const LAST_NAMES = ["Cedar", "Hawk", "Keel", "Marsh", "Reed", "Stone", "Sutter", "Vale", "Wells", "Yates"];
 export const TRUCK_PREFIX = ["Engine", "Tanker", "Brush", "Rescue"];
-export const COMMAND_UNIT_NAMES = ["Alpha", "Bravo", "Charlie", "Delta"];
+export const COMMAND_UNIT_NAMES = ["Alpha", "Bravo", "Charlie", "Delta", "Echo"];
 
 export const MOVING_SPRAY_SPEED_FACTOR = 0.6;
 export const TRUCK_SUPPORT_POSITION_TOLERANCE = 1.85;

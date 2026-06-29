@@ -11,6 +11,7 @@ import {
   applyUnitHazards,
   assignFormationTargets,
   assignRosterCrew,
+  createUnit,
   deployUnit,
   recallUnits,
   seedStartingRoster,
@@ -18,6 +19,7 @@ import {
   setCrewFormation,
   setTruckCrewMode,
   setUnitTarget,
+  syncCommandUnits,
   syncProgressionUnitStats,
   stepUnits
 } from "../dist/sim/units.js";
@@ -108,6 +110,31 @@ const testCommandSelectionAndMovement = () => {
   stepUnits(state, 0.25);
   assert.equal(truck.crewMode, "boarded", "manual truck move should keep crew boarded");
   assert.equal(getCrew(state, truck).every((unit) => unit.carrierId === truck.id), true, "boarded crew should follow carrier");
+};
+
+const testFiveCommandUnitSlotsAndSelection = () => {
+  const { state, rng } = buildState(2012);
+  for (let index = 0; index < 25; index += 1) {
+    const truck = createUnit(state, "truck", rng, null);
+    truck.x = 1.5 + (index % 10);
+    truck.y = 1.5 + Math.floor(index / 10);
+    truck.prevX = truck.x;
+    truck.prevY = truck.y;
+    state.units.push(truck);
+  }
+  syncCommandUnits(state);
+  assert.equal(state.commandUnits.length, 5, "twenty-five deployed trucks should create five command-unit squads");
+  assert.deepEqual(
+    state.commandUnits.map((commandUnit) => commandUnit.name),
+    ["Alpha", "Bravo", "Charlie", "Delta", "Echo"],
+    "five command-unit slots should use stable squad callsigns"
+  );
+  const fifthSquad = state.commandUnits[4];
+  assert.ok(fifthSquad, "fifth squad should exist");
+  selectCommandUnit(state, fifthSquad.id);
+  assert.deepEqual(state.selectedCommandUnitIds, [fifthSquad.id], "fifth squad should be directly selectable");
+  assert.deepEqual(state.selectedUnitIds, fifthSquad.truckIds, "fifth squad selection should mirror its truck ids");
+  assert.equal(state.commandUnits[5], undefined, "command-unit grouping should not create a sixth squad slot");
 };
 
 const testUpgradedHighSpeedMovementConsumesFullRouteBudget = () => {
@@ -253,6 +280,7 @@ const testRosterAssignment = () => {
 
 testStartingRosterAndDeployment();
 testCommandSelectionAndMovement();
+testFiveCommandUnitSlotsAndSelection();
 testUpgradedHighSpeedMovementConsumesFullRouteBudget();
 testActiveFireMovementUsesEffectiveMovementDelta();
 testFormationAndCommandTargets();

@@ -98,7 +98,7 @@ const pulse = (timeSeconds: number, hz: number, min = 0.84, max = 1.16): number 
   return min + (max - min) * t;
 };
 
-type HousePreviewStage = "frame" | "roofed" | "charred_remains";
+type HousePreviewStage = "site_prep" | "frame" | "enclosed" | "roofed" | "charred_remains";
 
 type HousePreviewSpec = {
   tileX: number;
@@ -115,19 +115,27 @@ type HousePreviewSnapshotEntry = {
 };
 
 const HOUSE_PREVIEW_TARGETS: readonly HousePreviewSpec[] = [
-  { tileX: 12, tileY: 30, stage: "frame", constructionYearOffset: 0.06 },
-  { tileX: 18, tileY: 30, stage: "roofed", constructionYearOffset: 0.24 },
-  { tileX: 24, tileY: 30, stage: "charred_remains", constructionYearOffset: 0.24 }
+  { tileX: 10, tileY: 30, stage: "site_prep", constructionYearOffset: 0.025 },
+  { tileX: 16, tileY: 30, stage: "frame", constructionYearOffset: 0.06 },
+  { tileX: 22, tileY: 30, stage: "enclosed", constructionYearOffset: 0.13 },
+  { tileX: 28, tileY: 30, stage: "roofed", constructionYearOffset: 0.24 },
+  { tileX: 34, tileY: 30, stage: "charred_remains", constructionYearOffset: 0.24 }
 ] as const;
 const HOUSE_PREVIEW_PAD = {
   minTileX: 7,
-  maxTileX: 29,
+  maxTileX: 39,
   minTileY: 24,
   maxTileY: 36,
   elevation: 0.24
 } as const;
 
 let houseLifecyclePreviewSnapshot: HousePreviewSnapshotEntry[] | null = null;
+let houseLifecyclePreviewBuildingLots: WorldState["buildingLots"] | null = null;
+
+const isConstructionPreviewStage = (
+  stage: HousePreviewStage
+): stage is "site_prep" | "frame" | "enclosed" =>
+  stage === "site_prep" || stage === "frame" || stage === "enclosed";
 
 const isHousePreviewableTile = (tileType: string): boolean =>
   tileType === "grass";
@@ -239,20 +247,36 @@ const applyHouseLifecyclePreview = (world: WorldState): void => {
   }
   const reserved = new Set<number>();
   houseLifecyclePreviewSnapshot = [];
+  houseLifecyclePreviewBuildingLots = world.buildingLots.map((lot) => ({ ...lot }));
+  world.buildingLots = [];
   stampHousePreviewPad(world);
-  for (const target of HOUSE_PREVIEW_TARGETS) {
+  HOUSE_PREVIEW_TARGETS.forEach((target, index) => {
     const x = Math.max(0, Math.min(world.grid.cols - 1, target.tileX));
     const y = Math.max(0, Math.min(world.grid.rows - 1, target.tileY));
     const idx = findHousePreviewTile(world, x, y, reserved);
     if (idx === null) {
-      continue;
+      return;
     }
     const snapshot = snapshotHousePreviewTile(world, idx);
     if (snapshot) {
       snapshot.stage = target.stage;
     }
     stampHousePreview(world, idx, target.stage, target.constructionYearOffset);
-  }
+    if (isConstructionPreviewStage(target.stage)) {
+      world.buildingLots.push({
+        id: -1000 - index,
+        townId: 0,
+        kind: "expansion",
+        anchorIndex: idx,
+        styleSeed: idx * 97 + index * 31,
+        stage: target.stage,
+        stageProgressDays: target.stage === "site_prep" ? 1 : target.stage === "frame" ? 3 : 2,
+        startedDay: 0,
+        houseValue: 160,
+        houseResidents: 2
+      });
+    }
+  });
   world.structureRevision += 1;
   world.terrainTypeRevision += 1;
   world.terrainDirty = true;
@@ -267,7 +291,11 @@ const restoreHouseLifecyclePreview = (world: WorldState): void => {
     Object.assign(world.tiles[entry.idx], entry.tile);
     world.tileTypeId[entry.idx] = entry.tileTypeId;
   });
+  if (houseLifecyclePreviewBuildingLots) {
+    world.buildingLots = houseLifecyclePreviewBuildingLots.map((lot) => ({ ...lot }));
+  }
   houseLifecyclePreviewSnapshot = null;
+  houseLifecyclePreviewBuildingLots = null;
   world.structureRevision += 1;
   world.terrainTypeRevision += 1;
   world.terrainDirty = true;

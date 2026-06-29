@@ -63,7 +63,7 @@ export const syncCommandUnits = (state: WorldState): void => {
   const nextGroupCount =
     deployedTrucks.length <= 1
       ? 1
-      : Math.min(deployedTrucks.length, Math.max(2, Math.min(4, Math.ceil(deployedTrucks.length / 5))));
+      : Math.min(deployedTrucks.length, Math.max(2, Math.min(5, Math.ceil(deployedTrucks.length / 5))));
   const nextCommandUnits: CommandUnit[] = [];
   let cursor = 0;
   for (let groupIndex = 0; groupIndex < nextGroupCount; groupIndex += 1) {

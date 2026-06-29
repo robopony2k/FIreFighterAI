@@ -15,6 +15,7 @@ import {
 import { getHouseFootprintBounds, pickHouseFootprint } from "../core/houseFootprints.js";
 import { findBestRoadReferenceForPlot, pickHouseRotationFromRoadMask } from "../core/roadAlignment.js";
 import { getBuildingLifecycleStageFromId, getBuildingLifecycleStageId } from "../systems/settlements/sim/buildingLifecycle.js";
+import { createConstructionFxRuntime } from "../systems/settlements/rendering/constructionFxRuntime.js";
 import { getProceduralHouseVariantKey } from "../systems/settlements/rendering/proceduralHouseBuilder.js";
 import type { RenderBuildingLot } from "../systems/settlements/types/buildingTypes.js";
 import { buildEvacuationRenderModel } from "../systems/evacuation/rendering/evacuationRenderModel.js";
@@ -30,7 +31,7 @@ import { createVehicleModelLayer, type VehicleModelInstance } from "./vehicleMod
 import type { InputState } from "../core/inputState.js";
 import { indexFor } from "../core/grid.js";
 import { TILE_ID_TO_TYPE, TILE_TYPE_IDS } from "../core/state.js";
-import type { ClimateForecast, Town } from "../core/types.js";
+import type { ClimateForecast, CommandType, CommandUnitAlert, CommandUnitStatus, Town } from "../core/types.js";
 import type { RenderSim } from "./simView.js";
 import { createHudState, setHudViewport, type HudTheme } from "./hud/hudState.js";
 import { handleHudClick, handleHudKey, renderHud } from "./hud/hud.js";
@@ -49,6 +50,7 @@ import {
   buildThermalBackdropField,
   paintMinimapRaster
 } from "../ui/runtime/minimap/minimapRaster.js";
+import { canvasUiFont } from "../ui/typography.js";
 import {
   getFirestationAssetCache,
   getHouseAssetsCache,
@@ -389,11 +391,13 @@ const TOWN_LABEL_OCCLUSION_VERTICAL_CLEARANCE = 2.5;
 const TOWN_LABEL_OCCLUSION_LABEL_CLEARANCE = 3.5;
 const TOWN_LABEL_CONNECTOR_CLEARANCE = 0.8;
 const TOWN_LABEL_OCCLUSION_SAMPLE_COUNT = 36;
-const TRUCK_BEACON_LIFT_METERS = 122;
-const TRUCK_BEACON_SCREEN_OFFSET_Y = -18;
-const TRUCK_BEACON_STACK_OFFSET_PX = 20;
-const TRUCK_BEACON_CLUSTER_X_PX = 132;
-const TRUCK_BEACON_CLUSTER_Y_PX = 44;
+const SQUAD_MARKER_LIFT_METERS = 122;
+const SQUAD_MARKER_SCREEN_OFFSET_Y = -20;
+const SQUAD_MARKER_STACK_OFFSET_PX = 24;
+const SQUAD_MARKER_CLUSTER_X_PX = 150;
+const SQUAD_MARKER_CLUSTER_Y_PX = 54;
+const SQUAD_MARKER_DISPERSED_RADIUS_TILES = 7;
+const SQUAD_MARKER_SMOOTHING_ALPHA = 0.22;
 const BASE_LABEL_LIFT_METERS = 115;
 const BASE_LABEL_SCREEN_OFFSET_Y = -22;
 const BASE_LABEL_CONNECTOR_ORIGIN_X = 12;
@@ -753,6 +757,7 @@ export const createThreeTest = (
     sparkDebug: THREE_TEST_SPARK_DEBUG
   });
   const worldAudio = worldAudioControls ? createThreeTestWorldAudio(camera, worldAudioControls) : null;
+  const constructionFx = createConstructionFxRuntime(scene, camera, worldAudioControls);
   fireFx.captureSnapshot(world);
   const unitsLayer = createThreeTestUnitsLayer(scene);
   const unitFxLayer = createThreeTestUnitFxLayer(scene);
@@ -897,9 +902,9 @@ export const createThreeTest = (
   const townOverlayRoot = document.createElement("div");
   townOverlayRoot.className = "three-test-town-overlay hidden";
   canvas.parentElement?.appendChild(townOverlayRoot);
-  const truckBeaconOverlayRoot = document.createElement("div");
-  truckBeaconOverlayRoot.className = "three-test-truck-beacon-overlay hidden";
-  canvas.parentElement?.appendChild(truckBeaconOverlayRoot);
+  const squadMarkerOverlayRoot = document.createElement("div");
+  squadMarkerOverlayRoot.className = "three-test-squad-marker-overlay hidden";
+  canvas.parentElement?.appendChild(squadMarkerOverlayRoot);
 
   const cardState = new CardStateModel();
   const worldCardState = new CardStateModel();
@@ -995,10 +1000,12 @@ export const createThreeTest = (
     metaText: HTMLSpanElement;
     metaAlert: HTMLSpanElement;
   };
-  type TruckBeaconElements = {
+  type SquadMarkerElements = {
     root: HTMLButtonElement;
     connector: HTMLDivElement;
+    icon: HTMLSpanElement;
     name: HTMLSpanElement;
+    meta: HTMLSpanElement;
     status: HTMLSpanElement;
   };
   type TownCardElements = {
@@ -1092,8 +1099,8 @@ export const createThreeTest = (
     deployCrewButton: HTMLButtonElement;
     dismissButton: HTMLButtonElement;
   };
-  type TruckBeaconLayoutEntry = {
-    unitId: number;
+  type SquadMarkerLayoutEntry = {
+    commandUnitId: number;
     anchorScreenX: number;
     anchorScreenY: number;
     baseRootY: number;
@@ -1103,9 +1110,14 @@ export const createThreeTest = (
     selected: boolean;
     distanceSq: number;
   };
+  type SquadMarkerAnchor = {
+    x: number;
+    y: number;
+  };
 
   const townLabelElements = new Map<number, TownLabelElements>();
-  const truckBeaconElements = new Map<number, TruckBeaconElements>();
+  const squadMarkerElements = new Map<number, SquadMarkerElements>();
+  const squadMarkerAnchors = new Map<number, SquadMarkerAnchor>();
   const townAnchors = new Map<number, TownScreenAnchor>();
   let baseAnchor: TownScreenAnchor | null = null;
   const pinnedTownCards = new Map<number, TownCardElements>();
@@ -2125,7 +2137,7 @@ export const createThreeTest = (
         ctx.fillStyle = riskBandColors[i] ?? riskBandColors[0];
         ctx.fillRect(plotX, y, plotWidth, riskBandHeight);
       }
-      ctx.font = "500 10px ui-sans-serif, system-ui, sans-serif";
+      ctx.font = canvasUiFont(500, 10);
       ctx.textBaseline = "middle";
       ctx.textAlign = "left";
       CLIMATE_RISK_LABELS.forEach((label, index) => {
@@ -2147,7 +2159,7 @@ export const createThreeTest = (
       ctx.setLineDash([]);
     } else {
       const tickCount = 5;
-      ctx.font = "500 10px ui-sans-serif, system-ui, sans-serif";
+      ctx.font = canvasUiFont(500, 10);
       ctx.textBaseline = "middle";
       ctx.textAlign = "left";
       for (let i = 0; i < tickCount; i += 1) {
@@ -2190,7 +2202,7 @@ export const createThreeTest = (
     const seasonLabelY = plotY + plotHeight + 13;
     const maxSeasonLabels = Math.max(1, Math.floor(plotWidth / 68));
     const seasonStep = Math.ceil(seasonLayout.labels.length / maxSeasonLabels);
-    ctx.font = "600 9px ui-sans-serif, system-ui, sans-serif";
+    ctx.font = canvasUiFont(600, 9);
     ctx.fillStyle = "rgba(255, 228, 186, 0.86)";
     ctx.textBaseline = "middle";
     ctx.textAlign = "center";
@@ -2822,17 +2834,100 @@ export const createThreeTest = (
   };
 
   let lastUnitTrayUpdateAt = -Infinity;
+  let hoveredSquadSlotId: number | null = null;
+  let hoveredSquadMarkerId: number | null = null;
 
-  const getUnitLabel = (unitId: number): string => {
-    const rosterUnit = world.roster.find((entry) => entry.id === unitId) ?? null;
-    if (rosterUnit) {
-      return rosterUnit.name;
+  const getSquadTrucks = (commandUnit: RenderSim["commandUnits"][number]): RenderSim["units"] =>
+    commandUnit.truckIds
+      .map((truckId) => world.units.find((entry) => entry.id === truckId && entry.kind === "truck") ?? null)
+      .filter((entry): entry is RenderSim["units"][number] => !!entry)
+      .sort((left, right) => (left.rosterId ?? left.id) - (right.rosterId ?? right.id));
+
+  const getCommandTypeLabel = (type: CommandType | null): string => {
+    if (!type) {
+      return "Auto";
     }
-    return `Unit ${unitId}`;
+    return `${type[0]!.toUpperCase()}${type.slice(1)}`;
   };
 
-  const getUnitMoveStatus = (unit: RenderSim["units"][number]): string =>
-    unit.target && unit.pathIndex < unit.path.length ? "Moving" : "Holding";
+  const getSquadStatusLabel = (status: CommandUnitStatus): string => `${status[0]!.toUpperCase()}${status.slice(1)}`;
+
+  const getSquadStatusIcon = (status: CommandUnitStatus): string => {
+    if (status === "suppressing") {
+      return "SUP";
+    }
+    if (status === "moving") {
+      return "MOV";
+    }
+    if (status === "retreating") {
+      return "RT";
+    }
+    return "HLD";
+  };
+
+  const getSquadAlertPriority = (alert: CommandUnitAlert): number => {
+    switch (alert) {
+      case "danger":
+      case "empty":
+      case "critical":
+        return 3;
+      case "warning":
+      case "crew_low":
+        return 2;
+      case "low":
+        return 1;
+      default:
+        return 0;
+    }
+  };
+
+  const getSquadAlertText = (alert: CommandUnitAlert): string => {
+    switch (alert) {
+      case "danger":
+        return "Danger";
+      case "empty":
+        return "Empty";
+      case "critical":
+        return "Critical";
+      case "warning":
+        return "Warning";
+      case "crew_low":
+        return "Crew";
+      case "low":
+        return "Low";
+      default:
+        return "Alert";
+    }
+  };
+
+  const resolveHighestSquadAlert = (alerts: readonly CommandUnitAlert[]): CommandUnitAlert | null => {
+    let best: CommandUnitAlert | null = null;
+    let bestPriority = -1;
+    alerts.forEach((alert) => {
+      const priority = getSquadAlertPriority(alert);
+      if (priority > bestPriority) {
+        bestPriority = priority;
+        best = alert;
+      }
+    });
+    return best;
+  };
+
+  const resolveMajoritySquadStatus = (trucks: RenderSim["units"]): CommandUnitStatus => {
+    const counts = new Map<CommandUnitStatus, number>();
+    trucks.forEach((truck) => counts.set(truck.currentStatus, (counts.get(truck.currentStatus) ?? 0) + 1));
+    const priority: CommandUnitStatus[] = ["retreating", "suppressing", "moving", "holding"];
+    let bestStatus: CommandUnitStatus = "holding";
+    let bestCount = -1;
+    priority.forEach((status) => {
+      const count = counts.get(status) ?? 0;
+      if (count > bestCount) {
+        bestStatus = status;
+        bestCount = count;
+      }
+    });
+    return bestStatus;
+  };
 
   const resolveInterpolatedUnitPosition = (unit: RenderSim["units"][number]): { x: number; y: number } => {
     const alpha = clamp01(simulationAlpha);
@@ -2852,7 +2947,10 @@ export const createThreeTest = (
 
   const unitCommandTray = createUnitCommandTray({
     onAction: dispatchSelectionAction,
-    onStatus: dispatchStatusCommand
+    onStatus: dispatchStatusCommand,
+    onSquadHover: (commandUnitId) => {
+      hoveredSquadSlotId = commandUnitId;
+    }
   });
   unitTrayRoot.append(unitCommandTray.element);
 
@@ -2915,9 +3013,10 @@ export const createThreeTest = (
     return town.evacuationStatus !== previousStatus || previousPoint !== nextPoint;
   };
 
-  const selectAndPanToTruck = (
-    truck: RenderSim["units"][number],
-    options?: { truckScope?: boolean; toggle?: boolean; append?: boolean }
+  const selectAndPanToSquad = (
+    commandUnit: RenderSim["commandUnits"][number],
+    anchor: SquadMarkerAnchor,
+    options?: { toggle?: boolean; append?: boolean }
   ): void => {
     const payload: Record<string, string> = {};
     if (options?.toggle) {
@@ -2926,65 +3025,75 @@ export const createThreeTest = (
     if (options?.append) {
       payload.append = "1";
     }
-    if (options?.truckScope || truck.commandUnitId === null) {
-      payload.truckId = String(truck.id);
-      dispatchSelectionAction("select-truck", payload);
-    } else {
-      payload.commandUnitId = String(truck.commandUnitId);
-      dispatchSelectionAction("select-command-unit", payload);
-    }
+    payload.commandUnitId = String(commandUnit.id);
+    dispatchSelectionAction("select-command-unit", payload);
     dispatchPhaseUiCommand({
       type: "minimap-pan",
       tile: {
-        x: Math.floor(truck.x),
-        y: Math.floor(truck.y)
+        x: Math.floor(anchor.x),
+        y: Math.floor(anchor.y)
       }
     });
   };
 
-  const removeTruckBeacon = (unitId: number): void => {
-    const entry = truckBeaconElements.get(unitId);
+  const removeSquadMarker = (commandUnitId: number): void => {
+    const entry = squadMarkerElements.get(commandUnitId);
     if (!entry) {
       return;
     }
     entry.connector.remove();
     entry.root.remove();
-    truckBeaconElements.delete(unitId);
+    squadMarkerElements.delete(commandUnitId);
+    squadMarkerAnchors.delete(commandUnitId);
   };
 
-  const ensureTruckBeacon = (unitId: number): TruckBeaconElements => {
-    const existing = truckBeaconElements.get(unitId);
+  const ensureSquadMarker = (commandUnitId: number): SquadMarkerElements => {
+    const existing = squadMarkerElements.get(commandUnitId);
     if (existing) {
       return existing;
     }
     const root = document.createElement("button");
     root.type = "button";
-    root.className = "three-test-truck-beacon hidden";
+    root.className = "three-test-squad-marker hidden";
     const header = document.createElement("div");
-    header.className = "three-test-truck-beacon-header";
+    header.className = "three-test-squad-marker-header";
+    const icon = document.createElement("span");
+    icon.className = "three-test-squad-marker-icon";
+    icon.textContent = "SQ";
     const name = document.createElement("span");
-    name.className = "three-test-truck-beacon-name";
+    name.className = "three-test-squad-marker-name";
     const status = document.createElement("span");
-    status.className = "three-test-truck-beacon-status";
+    status.className = "three-test-squad-marker-status";
+    const meta = document.createElement("span");
+    meta.className = "three-test-squad-marker-meta";
     const connector = document.createElement("div");
-    connector.className = "three-test-truck-beacon-connector";
-    header.append(name, status);
-    root.append(header);
+    connector.className = "three-test-squad-marker-connector";
+    header.append(icon, name, status);
+    root.append(header, meta);
     root.addEventListener("pointerdown", (event) => {
       event.stopPropagation();
+    });
+    root.addEventListener("mouseenter", () => {
+      hoveredSquadMarkerId = commandUnitId;
+      unitCommandTray.update(world, inputState, hoveredSquadMarkerId);
+    });
+    root.addEventListener("mouseleave", () => {
+      hoveredSquadMarkerId = null;
+      unitCommandTray.update(world, inputState, hoveredSquadMarkerId);
     });
     root.addEventListener("click", (event) => {
       event.preventDefault();
       event.stopPropagation();
-      const unit = world.units.find((entry) => entry.id === unitId && entry.kind === "truck") ?? null;
-      if (!unit) {
+      const commandUnit = world.commandUnits.find((entry) => entry.id === commandUnitId) ?? null;
+      const anchor = squadMarkerAnchors.get(commandUnitId) ?? null;
+      if (!commandUnit || !anchor) {
         return;
       }
-      selectAndPanToTruck(unit, { truckScope: event.altKey, toggle: event.shiftKey });
+      selectAndPanToSquad(commandUnit, anchor, { toggle: event.shiftKey });
     });
-    truckBeaconOverlayRoot.append(root, connector);
-    const created: TruckBeaconElements = { root, connector, name, status };
-    truckBeaconElements.set(unitId, created);
+    squadMarkerOverlayRoot.append(root, connector);
+    const created: SquadMarkerElements = { root, connector, icon, name, meta, status };
+    squadMarkerElements.set(commandUnitId, created);
     return created;
   };
 
@@ -2997,99 +3106,176 @@ export const createThreeTest = (
       return;
     }
     lastUnitTrayUpdateAt = time;
-    if (world.commandUnits.length <= 0) {
-      unitTrayRoot.classList.add("hidden");
-      return;
-    }
     unitTrayRoot.classList.remove("hidden");
-    unitCommandTray.update(world, inputState);
+    unitCommandTray.update(world, inputState, hoveredSquadMarkerId);
   };
 
-  const updateTruckBeaconOverlay = (): void => {
+  const resolveSquadMarkerAnchor = (
+    commandUnitId: number,
+    trucks: RenderSim["units"]
+  ): SquadMarkerAnchor | null => {
+    if (trucks.length <= 0) {
+      return null;
+    }
+    const positions = trucks.map((truck) => resolveInterpolatedUnitPosition(truck));
+    const average = positions.reduce(
+      (sum, position) => ({ x: sum.x + position.x / positions.length, y: sum.y + position.y / positions.length }),
+      { x: 0, y: 0 }
+    );
+    const maxDistance = positions.reduce(
+      (max, position) => Math.max(max, Math.hypot(position.x - average.x, position.y - average.y)),
+      0
+    );
+    const target =
+      maxDistance > SQUAD_MARKER_DISPERSED_RADIUS_TILES
+        ? positions[0]!
+        : average;
+    const previous = squadMarkerAnchors.get(commandUnitId) ?? null;
+    if (!previous) {
+      return { ...target };
+    }
+    return {
+      x: previous.x + (target.x - previous.x) * SQUAD_MARKER_SMOOTHING_ALPHA,
+      y: previous.y + (target.y - previous.y) * SQUAD_MARKER_SMOOTHING_ALPHA
+    };
+  };
+
+  const updateSquadMarkerOverlay = (): void => {
     if (!lastTerrainSurface || !lastTerrainSize) {
-      truckBeaconOverlayRoot.classList.add("hidden");
-      truckBeaconElements.forEach((entry) => {
+      squadMarkerOverlayRoot.classList.add("hidden");
+      squadMarkerElements.forEach((entry) => {
         entry.root.classList.add("hidden");
         entry.connector.style.display = "none";
       });
       return;
     }
 
-    const trucks = world.units.filter((unit) => unit.kind === "truck");
-    if (trucks.length <= 0) {
-      truckBeaconOverlayRoot.classList.add("hidden");
-      Array.from(truckBeaconElements.keys()).forEach((unitId) => removeTruckBeacon(unitId));
+    const commandUnits = [...world.commandUnits].sort((left, right) => left.id - right.id);
+    if (commandUnits.length <= 0) {
+      squadMarkerOverlayRoot.classList.add("hidden");
+      Array.from(squadMarkerElements.keys()).forEach((commandUnitId) => removeSquadMarker(commandUnitId));
       return;
     }
 
-    truckBeaconOverlayRoot.classList.remove("hidden");
-    const labelLift = TRUCK_BEACON_LIFT_METERS / Math.max(0.001, TILE_SIZE);
+    squadMarkerOverlayRoot.classList.remove("hidden");
+    const labelLift = SQUAD_MARKER_LIFT_METERS / Math.max(0.001, TILE_SIZE);
+    const occlusionMaxLift = Math.max(
+      labelLift,
+      lastTerrainSurface.heightScale * 1.45,
+      TOWN_LABEL_OCCLUSION_MAX_LIFT_METERS / Math.max(0.001, TILE_SIZE)
+    );
     const viewportWidth = Math.max(1, hudState.viewport.width);
     const viewportHeight = Math.max(1, hudState.viewport.height);
-    const beaconWorld = new THREE.Vector3();
-    const beaconProjected = new THREE.Vector3();
+    const markerWorld = new THREE.Vector3();
+    const connectorWorld = new THREE.Vector3();
+    const markerProjected = new THREE.Vector3();
+    const connectorProjected = new THREE.Vector3();
     const liveIds = new Set<number>();
-    const layoutEntries: TruckBeaconLayoutEntry[] = [];
+    const layoutEntries: SquadMarkerLayoutEntry[] = [];
 
-    for (const unit of trucks) {
-      liveIds.add(unit.id);
-      const entry = ensureTruckBeacon(unit.id);
-      const rosterLabel = unit.rosterId !== null ? getUnitLabel(unit.rosterId) : getUnitLabel(unit.id);
-      const moveStatus = getUnitMoveStatus(unit);
-      const selected = world.selectedUnitIds.includes(unit.id);
-      const interpolated = resolveInterpolatedUnitPosition(unit);
-      const worldX = lastTerrainSurface.toWorldX(interpolated.x);
-      const worldZ = lastTerrainSurface.toWorldZ(interpolated.y);
-      const worldY = lastTerrainSurface.heightAtTileCoord(interpolated.x, interpolated.y) * lastTerrainSurface.heightScale;
-      beaconWorld.set(worldX, worldY + labelLift, worldZ);
-      beaconProjected.copy(beaconWorld).project(camera);
+    for (const commandUnit of commandUnits) {
+      const trucks = getSquadTrucks(commandUnit);
+      if (trucks.length <= 0) {
+        continue;
+      }
+      liveIds.add(commandUnit.id);
+      const anchor = resolveSquadMarkerAnchor(commandUnit.id, trucks);
+      if (!anchor) {
+        continue;
+      }
+      squadMarkerAnchors.set(commandUnit.id, anchor);
+      const entry = ensureSquadMarker(commandUnit.id);
+      const selected =
+        world.selectedCommandUnitIds.includes(commandUnit.id) ||
+        (world.selectionScope === "truck" && world.focusedCommandUnitId === commandUnit.id);
+      const highlighted = selected || hoveredSquadSlotId === commandUnit.id || hoveredSquadMarkerId === commandUnit.id;
+      const aggregateAlerts = trucks.flatMap((truck) => truck.currentAlerts);
+      const highestAlert = resolveHighestSquadAlert(aggregateAlerts);
+      const effectiveStatus = resolveMajoritySquadStatus(trucks);
+      const intentLabel = commandUnit.currentIntent ? getCommandTypeLabel(commandUnit.currentIntent.type) : "Auto";
+      const worldX = lastTerrainSurface.toWorldX(anchor.x);
+      const worldZ = lastTerrainSurface.toWorldZ(anchor.y);
+      const groundY = lastTerrainSurface.heightAtTileCoord(anchor.x, anchor.y) * lastTerrainSurface.heightScale;
+      const labelLayout = resolveTownLabelDepthAwareLayout({
+        camera,
+        surface: lastTerrainSurface,
+        worldX,
+        groundY,
+        worldZ,
+        baseLift: labelLift,
+        maxLift: occlusionMaxLift,
+        verticalClearance: TOWN_LABEL_OCCLUSION_VERTICAL_CLEARANCE,
+        labelClearance: TOWN_LABEL_OCCLUSION_LABEL_CLEARANCE,
+        connectorClearance: TOWN_LABEL_CONNECTOR_CLEARANCE,
+        sampleCount: TOWN_LABEL_OCCLUSION_SAMPLE_COUNT
+      });
+      connectorWorld.set(worldX, labelLayout.connectorY, worldZ);
+      markerWorld.set(worldX, labelLayout.labelY, worldZ);
+      markerProjected.copy(markerWorld).project(camera);
+      connectorProjected.copy(connectorWorld).project(camera);
       const isVisible =
-        beaconProjected.z > -1 &&
-        beaconProjected.z < 1 &&
-        beaconProjected.x >= -1.1 &&
-        beaconProjected.x <= 1.1 &&
-        beaconProjected.y >= -1.2 &&
-        beaconProjected.y <= 1.2;
-      entry.name.textContent = rosterLabel;
-      entry.status.textContent = moveStatus;
-      entry.status.dataset.state = moveStatus.toLowerCase();
+        markerProjected.z > -1 &&
+        markerProjected.z < 1 &&
+        markerProjected.x >= -1.1 &&
+        markerProjected.x <= 1.1 &&
+        markerProjected.y >= -1.2 &&
+        markerProjected.y <= 1.2;
+      entry.name.textContent = commandUnit.name;
+      entry.status.textContent = getSquadStatusIcon(effectiveStatus);
+      entry.status.dataset.status = effectiveStatus;
+      entry.status.title = getSquadStatusLabel(effectiveStatus);
+      entry.meta.textContent = `${trucks.length} unit${trucks.length === 1 ? "" : "s"} | ${intentLabel}`;
       entry.root.classList.toggle("is-selected", selected);
-      entry.root.title = `${rosterLabel}. ${moveStatus}. Click to select and center the camera.`;
-      entry.root.setAttribute("aria-label", `${rosterLabel}. ${moveStatus}. Click to select and center the camera.`);
+      entry.root.classList.toggle("is-hovered", highlighted && !selected);
+      entry.root.classList.toggle("has-alert", !!highestAlert);
+      entry.root.dataset.alert = highestAlert ? (getSquadAlertPriority(highestAlert) >= 3 ? "critical" : "warning") : "none";
+      entry.root.title = `${commandUnit.name} squad. ${trucks.length} unit(s). ${getSquadStatusLabel(effectiveStatus)}. ${intentLabel}${
+        highestAlert ? `. ${getSquadAlertText(highestAlert)} warning` : ""
+      }. Click to select and center the camera.`;
+      entry.root.setAttribute("aria-label", entry.root.title);
       if (!isVisible) {
         entry.root.classList.add("hidden");
         entry.connector.style.display = "none";
         continue;
       }
 
-      const screenX = (beaconProjected.x * 0.5 + 0.5) * viewportWidth;
-      const screenY = (-beaconProjected.y * 0.5 + 0.5) * viewportHeight;
-      const depth01 = clamp01((beaconProjected.z + 1) * 0.5);
+      const screenX = (markerProjected.x * 0.5 + 0.5) * viewportWidth;
+      const screenY = (-markerProjected.y * 0.5 + 0.5) * viewportHeight;
+      const depth01 = clamp01((markerProjected.z + 1) * 0.5);
       const zIndex = Math.max(1, Math.min(TOWN_LABEL_MAX_Z_INDEX, Math.round((1 - depth01) * TOWN_LABEL_MAX_Z_INDEX)));
       entry.root.classList.remove("hidden");
-      const rootWidth = Math.max(120, entry.root.offsetWidth);
-      const rootHeight = Math.max(30, entry.root.offsetHeight);
+      const rootWidth = Math.max(136, entry.root.offsetWidth);
+      const rootHeight = Math.max(42, entry.root.offsetHeight);
+      const connectorScreenX = (connectorProjected.x * 0.5 + 0.5) * viewportWidth;
+      const connectorScreenY = (-connectorProjected.y * 0.5 + 0.5) * viewportHeight;
+      const isConnectorProjectedVisible =
+        connectorProjected.z > -1 &&
+        connectorProjected.z < 1 &&
+        connectorProjected.x >= -1.5 &&
+        connectorProjected.x <= 1.5 &&
+        connectorProjected.y >= -1.5 &&
+        connectorProjected.y <= 1.5;
       layoutEntries.push({
-        unitId: unit.id,
+        commandUnitId: commandUnit.id,
         anchorScreenX: screenX,
-        anchorScreenY: screenY,
-        baseRootY: screenY + TRUCK_BEACON_SCREEN_OFFSET_Y,
+        anchorScreenY: isConnectorProjectedVisible ? connectorScreenY : screenY,
+        baseRootY: screenY + SQUAD_MARKER_SCREEN_OFFSET_Y,
         rootWidth,
         rootHeight,
         zIndex,
-        selected,
-        distanceSq: camera.position.distanceToSquared(beaconWorld)
+        selected: highlighted,
+        distanceSq: camera.position.distanceToSquared(markerWorld)
       });
     }
 
-    Array.from(truckBeaconElements.keys()).forEach((unitId) => {
-      if (!liveIds.has(unitId)) {
-        removeTruckBeacon(unitId);
+    Array.from(squadMarkerElements.keys()).forEach((commandUnitId) => {
+      if (!liveIds.has(commandUnitId)) {
+        removeSquadMarker(commandUnitId);
       }
     });
 
     if (layoutEntries.length <= 0) {
-      truckBeaconOverlayRoot.classList.add("hidden");
+      squadMarkerOverlayRoot.classList.add("hidden");
       return;
     }
 
@@ -3100,26 +3286,26 @@ export const createThreeTest = (
       if (a.distanceSq !== b.distanceSq) {
         return a.distanceSq - b.distanceSq;
       }
-      return a.unitId - b.unitId;
+      return a.commandUnitId - b.commandUnitId;
     });
 
     const placedEntries: Array<{ anchorScreenX: number; baseRootY: number; stackDepth: number }> = [];
     for (const layout of layoutEntries) {
-      const entry = truckBeaconElements.get(layout.unitId);
+      const entry = squadMarkerElements.get(layout.commandUnitId);
       if (!entry) {
         continue;
       }
       let stackDepth = 0;
       for (const placed of placedEntries) {
         const sameCluster =
-          Math.abs(layout.anchorScreenX - placed.anchorScreenX) <= TRUCK_BEACON_CLUSTER_X_PX &&
-          Math.abs(layout.baseRootY - placed.baseRootY) <= TRUCK_BEACON_CLUSTER_Y_PX;
+          Math.abs(layout.anchorScreenX - placed.anchorScreenX) <= SQUAD_MARKER_CLUSTER_X_PX &&
+          Math.abs(layout.baseRootY - placed.baseRootY) <= SQUAD_MARKER_CLUSTER_Y_PX;
         if (sameCluster) {
           stackDepth = Math.max(stackDepth, placed.stackDepth + 1);
         }
       }
       const rootX = layout.anchorScreenX - layout.rootWidth * 0.5;
-      const rootY = layout.baseRootY - stackDepth * TRUCK_BEACON_STACK_OFFSET_PX;
+      const rootY = layout.baseRootY - stackDepth * SQUAD_MARKER_STACK_OFFSET_PX;
       entry.root.style.zIndex = `${layout.selected ? layout.zIndex + 2 : layout.zIndex}`;
       entry.root.style.transform = `translate3d(${rootX.toFixed(1)}px, ${rootY.toFixed(1)}px, 0)`;
       const connectorStartY = Math.max(rootY + layout.rootHeight - 3, rootY + 10);
@@ -4706,7 +4892,7 @@ export const createThreeTest = (
     if (!(target instanceof Node)) {
       return;
     }
-    if (dockOverlayRoot.contains(target) || unitTrayRoot.contains(target) || truckBeaconOverlayRoot.contains(target)) {
+    if (dockOverlayRoot.contains(target) || unitTrayRoot.contains(target) || squadMarkerOverlayRoot.contains(target)) {
       return;
     }
     if (fireAlertCardElements.root.contains(target)) {
@@ -5275,7 +5461,7 @@ export const createThreeTest = (
       cardRoot,
       canvas.parentElement,
       townOverlayRoot,
-      truckBeaconOverlayRoot,
+      squadMarkerOverlayRoot,
       dockOverlayRoot,
       unitTrayRoot
     ];
@@ -6713,14 +6899,15 @@ export const createThreeTest = (
     lastStructureOverlayKey = "";
     lastStructureRevision = -1;
     townLabelElements.clear();
-    truckBeaconElements.clear();
+    squadMarkerElements.clear();
+    squadMarkerAnchors.clear();
     pinnedTownCards.clear();
     dockCards.clear();
     selectedTownId = null;
     focusedTownId = null;
     baseFocused = false;
     townOverlayRoot.remove();
-    truckBeaconOverlayRoot.remove();
+    squadMarkerOverlayRoot.remove();
     dockOverlayRoot.remove();
     unitTrayRoot.remove();
     sparkDebugOverlay.remove();
@@ -6736,6 +6923,7 @@ export const createThreeTest = (
     hudTexture.dispose();
     hudMaterial.dispose();
     fireFx.dispose();
+    constructionFx.dispose();
     worldAudio?.dispose();
     unitsLayer.dispose();
     unitFxLayer.dispose();
@@ -7076,6 +7264,7 @@ export const createThreeTest = (
       fireFx.getAudioClusterSnapshot(),
       simulationAlpha
     );
+    constructionFx.update(time, dt, lastSample, lastTerrainSurface, simulationAnimationRate);
     threePerf.fireFxMs = smoothPerf(threePerf.fireFxMs, performance.now() - fireFxStart);
     unitsLayer.update(world, lastTerrainSurface, simulationAlpha);
     unitFxLayer.update(world, effectsState, lastTerrainSurface, simulationAlpha, time);
@@ -7083,7 +7272,7 @@ export const createThreeTest = (
     updateEvacuationVisuals();
     updateScoreFlowPulses(time);
     updateTownOverlay(time);
-    updateTruckBeaconOverlay();
+    updateSquadMarkerOverlay();
     updateDockOverlay(time);
     updateUnitTrayOverlay(time);
     refreshRoadOverlayIfNeeded();
@@ -7171,6 +7360,7 @@ export const createThreeTest = (
     }
     running = true;
     worldAudio?.setRunning(true);
+    constructionFx.setRunning(true);
     controls.enabled = true;
     lastPresentedAt = 0;
     resize();
@@ -7207,6 +7397,7 @@ export const createThreeTest = (
     cancelCameraFlight();
     running = false;
     worldAudio?.setRunning(false);
+    constructionFx.setRunning(false);
     controls.enabled = false;
     clearDebugHover();
     lastRafAt = 0;

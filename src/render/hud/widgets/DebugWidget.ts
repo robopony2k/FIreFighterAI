@@ -2,6 +2,7 @@ import type { WorldState } from "../../../core/state.js";
 import type { HudState } from "../hudState.js";
 import type { Rect, WidgetSlot, WidgetType } from "../hudLayout.js";
 import type { HudWidget } from "./hudWidget.js";
+import { canvasMonoFont } from "../../../ui/typography.js";
 
 export class DebugWidget implements HudWidget {
   public readonly type: WidgetType = "debug";
@@ -23,7 +24,7 @@ export class DebugWidget implements HudWidget {
     ctx.strokeStyle = theme.debugPanelBorder;
     ctx.strokeRect(rect.x + 0.5, rect.y + 0.5, rect.width - 1, rect.height - 1);
     ctx.fillStyle = theme.debugPanelText;
-    ctx.font = "600 11px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace";
+    ctx.font = canvasMonoFont(600, 11);
     ctx.textBaseline = "top";
     ctx.textAlign = "left";
     const lines = [

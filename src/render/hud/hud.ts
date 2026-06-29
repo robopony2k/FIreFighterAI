@@ -5,6 +5,7 @@ import { DEFAULT_MOISTURE_PARAMS } from "../../core/climate.js";
 import { getTimeSpeedOptions } from "../../core/config.js";
 import { formatTimeSpeedValue, getResolvedTimeSpeedValue, stepTimeSpeedSliderValue } from "../../core/timeSpeed.js";
 import { TIME_CONTROL_ACTIONS, getRuntimeWidgetTitle, getTimeSpeedAction } from "../../ui/runtime/widgets/registry.js";
+import { canvasMonoFont, canvasUiFont } from "../../ui/typography.js";
 import { buildHudLayout, WidgetSlot, WidgetType, type Rect } from "./hudLayout.js";
 import type { HudState } from "./hudState.js";
 import { addToast, cycleWidget, resolveAvailableWidget, stepToasts, toggleCompact } from "./hudState.js";
@@ -137,7 +138,7 @@ const renderTopBar = (ctx: CanvasRenderingContext2D, world: WorldState, ui: HudS
   const rightText = `APPROVAL ${approval} | HOUSES ${liveHouses}`;
 
   ctx.fillStyle = theme.textPrimary;
-  ctx.font = "600 12px ui-sans-serif, system-ui, sans-serif";
+  ctx.font = canvasUiFont(600, 12);
   ctx.textBaseline = "middle";
 
   ctx.textAlign = "left";
@@ -152,17 +153,17 @@ const renderTopBar = (ctx: CanvasRenderingContext2D, world: WorldState, ui: HudS
   ctx.stroke();
   ctx.fillStyle = theme.textPrimary;
   ctx.textAlign = "center";
-  ctx.font = "700 11px ui-sans-serif, system-ui, sans-serif";
+  ctx.font = canvasUiFont(700, 11);
   ctx.fillText("-", speedRect.x + SPEED_BUTTON_SIDE * 0.5, speedRect.y + speedRect.height / 2);
   ctx.fillText("+", speedRect.x + speedRect.width - SPEED_BUTTON_SIDE * 0.5, speedRect.y + speedRect.height / 2);
-  ctx.font = "600 11px ui-sans-serif, system-ui, sans-serif";
+  ctx.font = canvasUiFont(600, 11);
   ctx.fillText(
     `${world.simTimeMode === "incident" ? "INC" : "STR"} ${formatTimeSpeedValue(speed)}`,
     speedRect.x + speedRect.width / 2,
     speedRect.y + speedRect.height / 2
   );
   ctx.textAlign = "right";
-  ctx.font = "600 12px ui-sans-serif, system-ui, sans-serif";
+  ctx.font = canvasUiFont(600, 12);
   ctx.fillText(rightText, speedRect.x - 12, rect.y + rect.height / 2);
 };
 
@@ -176,7 +177,7 @@ const renderToasts = (ctx: CanvasRenderingContext2D, ui: HudState, area: Rect): 
   const padding = 10;
   const lineHeight = 14;
   let y = area.y;
-  ctx.font = "600 12px ui-sans-serif, system-ui, sans-serif";
+  ctx.font = canvasUiFont(600, 12);
   ui.toasts.forEach((toast) => {
     const lines = wrapText(ctx, toast.message, toastWidth - padding * 2);
     const height = Math.max(24, lines.length * lineHeight + padding * 2);
@@ -276,7 +277,7 @@ const renderDebugCellOverlay = (
   const padding = 8;
   const lineHeight = 14;
   ctx.save();
-  ctx.font = "12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace";
+  ctx.font = canvasMonoFont(400, 12);
   ctx.textBaseline = "top";
   ctx.textAlign = "left";
   let maxWidth = 0;
@@ -348,13 +349,13 @@ export const renderHud = (
     ctx.strokeRect(headerRect.x + 0.5, headerRect.y + 0.5, headerRect.width - 1, headerRect.height - 1);
 
     ctx.fillStyle = ui.theme.slotHeaderText;
-    ctx.font = "700 11px ui-sans-serif, system-ui, sans-serif";
+    ctx.font = canvasUiFont(700, 11);
     ctx.textBaseline = "middle";
     ctx.textAlign = "left";
     ctx.fillText(`WIDGET SLOT ${slot}`, headerRect.x + 10, headerRect.y + headerRect.height / 2);
 
     ctx.textAlign = "right";
-    ctx.font = "600 11px ui-sans-serif, system-ui, sans-serif";
+    ctx.font = canvasUiFont(600, 11);
     ctx.fillText(label.toUpperCase(), headerRect.x + headerRect.width - 10, headerRect.y + headerRect.height / 2);
 
     if (contentRect.width > 0 && contentRect.height > 0) {

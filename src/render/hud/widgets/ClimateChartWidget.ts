@@ -2,6 +2,7 @@ import type { WorldState } from "../../../core/state.js";
 import type { HudState } from "../hudState.js";
 import type { Rect, WidgetType, WidgetSlot } from "../hudLayout.js";
 import type { HudWidget } from "./hudWidget.js";
+import { canvasUiFont } from "../../../ui/typography.js";
 import { getRuntimeWidgetTitle } from "../../../ui/runtime/widgets/registry.js";
 import {
   RISK_BANDS,
@@ -90,14 +91,14 @@ export class ClimateChartWidget implements HudWidget {
     ctx.stroke();
 
     ctx.fillStyle = theme.slotHeaderText;
-    ctx.font = `600 ${titleFont}px ui-sans-serif, system-ui, sans-serif`;
+    ctx.font = canvasUiFont(600, titleFont);
     ctx.textBaseline = "top";
     ctx.textAlign = "left";
     ctx.fillText(getRuntimeWidgetTitle("climate"), rect.x + padding, rect.y + padding - 1);
 
     if (!forecast || forecast.risk.length === 0) {
       ctx.fillStyle = theme.chartLabel;
-      ctx.font = `500 ${labelFont}px ui-sans-serif, system-ui, sans-serif`;
+      ctx.font = canvasUiFont(500, labelFont);
       ctx.textAlign = "center";
       ctx.textBaseline = "middle";
       ctx.fillText("No forecast data", rect.x + rect.width / 2, rect.y + rect.height / 2);
@@ -244,7 +245,7 @@ export class ClimateChartWidget implements HudWidget {
       const maxLabels = compact ? 2 : labels.length;
       const step = Math.ceil(labels.length / maxLabels);
       ctx.fillStyle = theme.chartLabel;
-      ctx.font = `${tinyFont}px ui-sans-serif, system-ui, sans-serif`;
+      ctx.font = canvasUiFont(400, tinyFont);
       ctx.textBaseline = "middle";
       ctx.textAlign = "left";
       labels.forEach((label, index) => {
@@ -261,7 +262,7 @@ export class ClimateChartWidget implements HudWidget {
     if (showSeasonLabels) {
       const maxLabels = Math.max(1, Math.floor(chartWidth / 70));
       const step = Math.ceil(seasonLayout.labels.length / maxLabels);
-      ctx.font = `${labelFont}px ui-sans-serif, system-ui, sans-serif`;
+      ctx.font = canvasUiFont(400, labelFont);
       ctx.fillStyle = theme.chartLabel;
       ctx.textBaseline = "top";
       ctx.textAlign = "center";
@@ -279,7 +280,7 @@ export class ClimateChartWidget implements HudWidget {
     if (showYearLabels) {
       const maxLabels = Math.max(1, Math.floor(chartWidth / 90));
       const step = Math.ceil(yearLayout.labels.length / maxLabels);
-      ctx.font = `${tinyFont}px ui-sans-serif, system-ui, sans-serif`;
+      ctx.font = canvasUiFont(400, tinyFont);
       ctx.fillStyle = theme.chartLabel;
       ctx.textBaseline = "top";
       ctx.textAlign = "center";

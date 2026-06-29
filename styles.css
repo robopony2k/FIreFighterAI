@@ -1,5 +1,38 @@
+@font-face {
+  font-family: "Barlow";
+  src: url("assets/fonts/barlow/Barlow-Regular.ttf") format("truetype");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Barlow";
+  src: url("assets/fonts/barlow/Barlow-Medium.ttf") format("truetype");
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Barlow";
+  src: url("assets/fonts/barlow/Barlow-SemiBold.ttf") format("truetype");
+  font-weight: 600;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Barlow";
+  src: url("assets/fonts/barlow/Barlow-Bold.ttf") format("truetype");
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+
 :root {
   color-scheme: light;
+  --font-ui: "Barlow", system-ui, sans-serif;
   --ink: #1b1b1b;
   --muted: #6b6254;
   --paper: #f6f1e6;
@@ -34,7 +67,7 @@ body {
 
 body {
   margin: 0;
-  font-family: "Palatino Linotype", "Book Antiqua", "Georgia", serif;
+  font-family: var(--font-ui);
   color: var(--ink);
   background:
     radial-gradient(circle at 15% 10%, #fffdf7 0%, var(--paper) 35%, #e1e7ed 100%),
@@ -114,7 +147,6 @@ body::after {
 .title {
   font-size: 20px;
   font-weight: 700;
-  font-family: "Copperplate Gothic Bold", "Copperplate", "Palatino Linotype", serif;
   letter-spacing: 1px;
 }
 
@@ -297,7 +329,7 @@ canvas {
   border-radius: 0;
   box-shadow: none;
   border: 0;
-  font-family: "Inter", "Segoe UI", sans-serif;
+  font-family: var(--font-ui);
   letter-spacing: 0;
 }
 
@@ -1197,7 +1229,7 @@ canvas {
   height: 24px;
   border-radius: 6px;
   background: rgba(255, 255, 255, 0.07);
-  font-family: "Segoe UI Emoji", "Apple Color Emoji", "Noto Color Emoji", ui-sans-serif, system-ui, sans-serif;
+  font-family: "Segoe UI Emoji", "Apple Color Emoji", "Noto Color Emoji", var(--font-ui);
   font-size: 15px;
 }
 
@@ -1264,27 +1296,27 @@ canvas {
   z-index: 10;
 }
 
-.three-test-truck-beacon-overlay {
+.three-test-squad-marker-overlay {
   position: absolute;
   inset: 0;
   pointer-events: none;
   z-index: 12;
 }
 
-.three-test-truck-beacon {
+.three-test-squad-marker {
   position: absolute;
   left: 0;
   top: 0;
   display: grid;
-  gap: 4px;
-  inline-size: 150px;
-  min-block-size: 34px;
-  border: 1px solid color-mix(in srgb, var(--three-test-card-border) 78%, rgba(136, 174, 212, 0.42));
-  border-radius: 8px;
-  background: color-mix(in srgb, var(--three-test-card-bg) 88%, rgba(12, 20, 28, 0.84));
+  gap: 5px;
+  inline-size: 164px;
+  min-block-size: 44px;
+  border: 2px solid color-mix(in srgb, var(--three-test-card-border) 70%, #87d8d2);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--three-test-card-bg) 84%, rgba(8, 26, 27, 0.88));
   color: var(--three-test-text-primary);
-  padding: 6px 8px;
-  font: 600 12px/1.1 ui-sans-serif, system-ui, sans-serif;
+  padding: 7px 9px 8px;
+  font: 600 12px/1.1 var(--font-ui);
   box-shadow: 0 6px 16px rgba(0, 0, 0, 0.32);
   pointer-events: auto;
   text-align: left;
@@ -1292,28 +1324,53 @@ canvas {
   will-change: transform;
   transform-origin: center bottom;
   isolation: isolate;
+  clip-path: polygon(0 0, calc(100% - 12px) 0, 100% 12px, 100% 100%, 0 100%);
 }
 
-.three-test-truck-beacon:hover,
-.three-test-truck-beacon:focus-visible {
-  background: color-mix(in srgb, var(--three-test-card-bg) 74%, var(--three-test-button-bg));
-  border-color: color-mix(in srgb, var(--three-test-card-border) 64%, var(--three-test-accent));
+.three-test-squad-marker:hover,
+.three-test-squad-marker:focus-visible,
+.three-test-squad-marker.is-hovered {
+  background: color-mix(in srgb, var(--three-test-card-bg) 68%, rgba(29, 82, 85, 0.76));
+  border-color: color-mix(in srgb, var(--three-test-card-border) 44%, #98f0e5);
 }
 
-.three-test-truck-beacon.is-selected {
-  border-color: var(--three-test-accent);
-  box-shadow: 0 0 0 2px color-mix(in srgb, var(--three-test-accent) 28%, transparent), 0 6px 16px rgba(0, 0, 0, 0.32);
+.three-test-squad-marker.is-selected {
+  border-color: #98f0e5;
+  box-shadow: 0 0 0 2px rgba(152, 240, 229, 0.34), 0 6px 16px rgba(0, 0, 0, 0.32);
 }
 
-.three-test-truck-beacon-header {
+.three-test-squad-marker[data-alert="warning"] {
+  border-style: dashed;
+}
+
+.three-test-squad-marker[data-alert="critical"] {
+  border-color: rgba(233, 112, 93, 0.88);
+  border-style: dashed;
+}
+
+.three-test-squad-marker-header {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-start;
   gap: 8px;
   min-width: 0;
 }
 
-.three-test-truck-beacon-name {
+.three-test-squad-marker-icon {
+  display: inline-grid;
+  place-items: center;
+  flex: 0 0 26px;
+  width: 26px;
+  height: 20px;
+  border: 1px solid rgba(152, 240, 229, 0.48);
+  border-radius: 3px;
+  background: rgba(31, 99, 104, 0.58);
+  color: #cff8f1;
+  font-size: 10px;
+  letter-spacing: 0.04em;
+}
+
+.three-test-squad-marker-name {
   font-weight: 700;
   letter-spacing: 0.01em;
   min-width: 0;
@@ -1322,37 +1379,8 @@ canvas {
   white-space: nowrap;
 }
 
-.three-test-truck-beacon-stats {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 6px;
-}
-
-.three-test-truck-beacon-stat {
-  display: inline-grid;
-  grid-template-columns: auto minmax(0, 1fr);
-  align-items: center;
-  gap: 4px;
-  min-width: 0;
-  border-radius: 999px;
-  padding: 3px 6px;
-  font-size: 10px;
-  line-height: 1;
-  letter-spacing: 0.04em;
-  white-space: nowrap;
-  color: color-mix(in srgb, var(--three-test-text-primary) 86%, transparent);
-  background: color-mix(in srgb, var(--three-test-button-bg) 80%, transparent);
-  border: 1px solid color-mix(in srgb, var(--three-test-card-border) 72%, transparent);
-  overflow: hidden;
-}
-
-.three-test-truck-beacon-stat::before {
-  content: attr(data-icon);
-  font-size: 11px;
-  line-height: 1;
-}
-
-.three-test-truck-beacon-status {
+.three-test-squad-marker-status {
+  margin-left: auto;
   border-radius: 999px;
   padding: 3px 7px;
   font-size: 10px;
@@ -1362,34 +1390,58 @@ canvas {
   color: color-mix(in srgb, var(--three-test-text-primary) 88%, transparent);
 }
 
-.three-test-truck-beacon-status[data-state="moving"] {
+.three-test-squad-marker-status[data-status="moving"] {
   background: var(--three-test-info-bg);
   color: var(--three-test-info-text);
   border: 1px solid color-mix(in srgb, var(--three-test-info-border) 78%, transparent);
 }
 
-.three-test-truck-beacon-status[data-state="holding"] {
+.three-test-squad-marker-status[data-status="holding"] {
   background: color-mix(in srgb, var(--three-test-button-bg) 84%, transparent);
   color: color-mix(in srgb, var(--three-test-text-primary) 82%, transparent);
 }
 
-.three-test-truck-beacon-connector {
+.three-test-squad-marker-status[data-status="suppressing"] {
+  background: rgba(209, 109, 54, 0.18);
+  border: 1px solid rgba(233, 148, 90, 0.32);
+}
+
+.three-test-squad-marker-status[data-status="retreating"] {
+  background: rgba(184, 68, 53, 0.22);
+  border: 1px solid rgba(230, 115, 96, 0.36);
+}
+
+.three-test-squad-marker-meta {
+  min-width: 0;
+  overflow: hidden;
+  color: color-mix(in srgb, var(--three-test-text-primary) 76%, transparent);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.three-test-squad-marker-connector {
   position: absolute;
   left: 0;
   top: 0;
   display: none;
-  width: 2px;
+  width: 3px;
   height: 0;
-  background: color-mix(in srgb, var(--three-test-accent) 64%, var(--three-test-card-border));
+  background: repeating-linear-gradient(
+    to bottom,
+    color-mix(in srgb, #98f0e5 70%, var(--three-test-card-border)) 0 7px,
+    transparent 7px 11px
+  );
   border-radius: 999px;
   box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.18);
   pointer-events: none;
 }
 
-.three-test-truck-beacon:hover + .three-test-truck-beacon-connector,
-.three-test-truck-beacon:focus-visible + .three-test-truck-beacon-connector,
-.three-test-truck-beacon.is-selected + .three-test-truck-beacon-connector {
-  background: color-mix(in srgb, var(--three-test-accent) 82%, #fff4db);
+.three-test-squad-marker:hover + .three-test-squad-marker-connector,
+.three-test-squad-marker:focus-visible + .three-test-squad-marker-connector,
+.three-test-squad-marker.is-hovered + .three-test-squad-marker-connector,
+.three-test-squad-marker.is-selected + .three-test-squad-marker-connector {
+  background: repeating-linear-gradient(to bottom, #cff8f1 0 8px, transparent 8px 12px);
 }
 
 .three-test-town-nameplate {
@@ -2387,48 +2439,58 @@ canvas {
 }
 
 .three-test-unit-tray {
+  --squad-slot-width: 164px;
+  --squad-slot-height: 44px;
+  --squad-slot-gap: 6px;
   position: absolute;
   left: 12px;
   right: min(328px, 30vw);
   bottom: 12px;
   display: grid;
   gap: 8px;
-  pointer-events: auto;
+  pointer-events: none;
   z-index: 13;
 }
 
 .three-test-command-bar {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(300px, 380px);
+  grid-template-columns: var(--squad-slot-width) minmax(0, 1fr);
   gap: 12px;
   align-items: stretch;
 }
 
 .three-test-command-bar.unit-command-tray {
-  min-height: 166px;
+  justify-self: start;
+  width: min(100%, 980px);
+  box-sizing: border-box;
+  height: calc(var(--squad-slot-height) * 5 + var(--squad-slot-gap) * 4 + 18px);
+  min-height: 0;
   border-radius: 8px;
   border: 1px solid var(--three-test-card-border);
   background: color-mix(in srgb, var(--three-test-card-bg) 94%, transparent);
-  padding: 10px;
+  padding: 8px;
   box-shadow: 0 12px 28px rgba(0, 0, 0, 0.24);
+  pointer-events: auto;
 }
 
-.three-test-command-bar-left {
-  min-width: 0;
+.three-test-command-bar.unit-command-tray.is-collapsed {
+  grid-template-columns: var(--squad-slot-width);
+  width: calc(var(--squad-slot-width) + 18px);
+}
+
+.three-test-command-bar.unit-command-tray.is-collapsed .three-test-squad-detail-panel {
+  display: none;
+}
+
+.three-test-squad-slot-column {
   display: grid;
-  grid-template-rows: auto minmax(92px, 1fr);
-  gap: 8px;
+  grid-template-rows: repeat(5, var(--squad-slot-height));
+  gap: var(--squad-slot-gap);
+  min-width: 0;
+  height: calc(var(--squad-slot-height) * 5 + var(--squad-slot-gap) * 4);
 }
 
-.three-test-command-unit-row,
-.three-test-truck-strip-row {
-  display: flex;
-  gap: 8px;
-  overflow-x: auto;
-  padding-bottom: 4px;
-}
-
-.three-test-command-unit-card,
+.three-test-squad-slot,
 .three-test-truck-tile {
   appearance: none;
   border: 1px solid var(--three-test-unit-card-border);
@@ -2443,70 +2505,105 @@ canvas {
   box-shadow: none;
 }
 
-.three-test-command-unit-card {
-  flex: 0 0 232px;
-  min-height: 74px;
+.three-test-squad-slot {
+  min-height: 0;
+  height: var(--squad-slot-height);
+  padding: 5px 7px;
+  align-content: center;
+  gap: 4px;
+}
+
+.three-test-squad-slot.is-empty {
+  cursor: not-allowed;
+  opacity: 0.48;
+  background: color-mix(in srgb, var(--three-test-unit-card-bg) 54%, transparent);
 }
 
 .three-test-truck-tile {
-  flex: 0 0 210px;
-  height: 84px;
+  min-height: 58px;
+  padding: 7px;
   align-content: start;
+  gap: 5px;
 }
 
-.three-test-command-unit-card:hover,
-.three-test-command-unit-card:focus-visible,
+.three-test-squad-slot:not(:disabled):hover,
+.three-test-squad-slot:focus-visible,
 .three-test-truck-tile:hover,
 .three-test-truck-tile:focus-visible {
   border-color: color-mix(in srgb, var(--three-test-unit-card-border) 54%, var(--three-test-accent));
   transform: none;
 }
 
-.three-test-command-unit-card.is-selected,
-.three-test-command-unit-card.is-focused,
+.three-test-squad-slot.is-selected,
+.three-test-squad-slot.is-focused,
 .three-test-truck-tile.is-selected {
   border-color: var(--three-test-accent);
   background: color-mix(in srgb, var(--three-test-unit-card-bg) 76%, var(--three-test-button-bg-hover));
   box-shadow: 0 0 0 2px color-mix(in srgb, var(--three-test-accent) 34%, transparent);
 }
 
-.three-test-command-unit-header,
-.three-test-truck-tile-header,
-.three-test-truck-strip-header {
+.three-test-squad-slot.is-world-hovered {
+  border-color: #98f0e5;
+  box-shadow: 0 0 0 2px rgba(152, 240, 229, 0.24);
+}
+
+.three-test-squad-slot-header,
+.three-test-truck-tile-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
 }
 
-.three-test-command-unit-name,
+.three-test-squad-slot-name,
 .three-test-truck-tile-name,
-.three-test-command-panel-title,
-.three-test-truck-strip-title {
+.three-test-command-panel-title {
   font-size: 12px;
   font-weight: 700;
   letter-spacing: 0.02em;
 }
 
-.three-test-command-unit-header {
+.three-test-squad-slot-header {
   justify-content: flex-start;
 }
 
-.three-test-command-unit-stats,
-.three-test-command-unit-waterline,
-.three-test-command-unit-signals {
+.three-test-squad-slot-key {
+  display: inline-grid;
+  place-items: center;
+  flex: 0 0 20px;
+  width: 20px;
+  height: 20px;
+  border-radius: 4px;
+  border: 1px solid color-mix(in srgb, var(--three-test-card-border) 60%, #98f0e5);
+  background: rgba(255, 255, 255, 0.06);
+  color: color-mix(in srgb, var(--three-test-text-primary) 88%, transparent);
+  font-size: 11px;
+}
+
+.three-test-squad-slot-signals,
+.three-test-squad-detail-metrics {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
   min-width: 0;
+  flex-wrap: wrap;
+}
+
+.three-test-squad-slot-signals {
+  gap: 5px;
   white-space: nowrap;
 }
 
 .three-test-command-unit-stat,
 .three-test-command-unit-watericon,
-.three-test-command-unit-signal {
-  font-size: 12px;
+.three-test-command-unit-signal,
+.three-test-squad-slot-signal {
+  font-size: 11px;
   line-height: 1;
+}
+
+.three-test-squad-slot-signal {
+  color: color-mix(in srgb, var(--three-test-text-primary) 78%, transparent);
 }
 
 .three-test-command-unit-waterbars {
@@ -2547,6 +2644,7 @@ canvas {
 }
 
 .three-test-command-unit-status,
+.three-test-squad-slot-status,
 .three-test-truck-tile-status {
   font-size: 10px;
   line-height: 1;
@@ -2559,24 +2657,28 @@ canvas {
 }
 
 .three-test-command-unit-status[data-status="suppressing"],
+.three-test-squad-slot-status[data-status="suppressing"],
 .three-test-truck-tile-status[data-status="suppressing"] {
   background: rgba(209, 109, 54, 0.18);
   border-color: rgba(233, 148, 90, 0.32);
 }
 
 .three-test-command-unit-status[data-status="moving"],
+.three-test-squad-slot-status[data-status="moving"],
 .three-test-truck-tile-status[data-status="moving"] {
   background: rgba(82, 128, 198, 0.18);
   border-color: rgba(134, 168, 222, 0.32);
 }
 
 .three-test-command-unit-status[data-status="retreating"],
+.three-test-squad-slot-status[data-status="retreating"],
 .three-test-truck-tile-status[data-status="retreating"] {
   background: rgba(184, 68, 53, 0.22);
   border-color: rgba(230, 115, 96, 0.36);
 }
 
 .three-test-command-unit-alert,
+.three-test-squad-slot-alert,
 .three-test-truck-chip {
   font-size: 10px;
   line-height: 1;
@@ -2588,12 +2690,14 @@ canvas {
 }
 
 .three-test-command-unit-alert[data-severity="warning"],
+.three-test-squad-slot-alert[data-severity="warning"],
 .three-test-truck-chip[data-severity="warning"] {
   background: rgba(165, 126, 38, 0.22);
   border-color: rgba(236, 192, 77, 0.34);
 }
 
 .three-test-command-unit-alert[data-severity="critical"],
+.three-test-squad-slot-alert[data-severity="critical"],
 .three-test-truck-chip[data-severity="critical"] {
   background: rgba(184, 68, 53, 0.24);
   border-color: rgba(233, 112, 93, 0.38);
@@ -2601,7 +2705,7 @@ canvas {
 
 .three-test-command-unit-water {
   position: relative;
-  height: 8px;
+  height: 6px;
   border-radius: 999px;
   overflow: hidden;
   background: rgba(255, 255, 255, 0.08);
@@ -2618,8 +2722,7 @@ canvas {
 .three-test-command-unit-meta,
 .three-test-truck-tile-meta,
 .three-test-command-panel-summary,
-.three-test-command-panel-hint,
-.three-test-truck-strip-meta {
+.three-test-command-panel-hint {
   font-size: 11px;
   color: color-mix(in srgb, var(--three-test-text-primary) 82%, transparent);
   min-width: 0;
@@ -2639,15 +2742,12 @@ canvas {
   flex-wrap: wrap;
 }
 
-.three-test-truck-strip {
-  border-radius: 8px;
-  border: 0;
-  background: transparent;
-  padding: 0;
+.three-test-squad-unit-list {
   display: grid;
-  grid-template-rows: auto minmax(84px, 1fr);
-  gap: 8px;
-  min-height: 108px;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 6px;
+  max-height: 76px;
+  overflow: auto;
 }
 
 .three-test-command-panel {
@@ -2657,14 +2757,41 @@ canvas {
   color: var(--three-test-text-primary);
   padding: 0;
   display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(258px, 320px);
   align-content: start;
-  gap: 8px;
-  min-height: 100%;
+  gap: 6px 10px;
+  min-height: 0;
+  overflow: auto;
 }
 
 .three-test-command-panel-section {
   display: grid;
-  gap: 6px;
+  gap: 5px;
+}
+
+.three-test-squad-detail-header {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.three-test-squad-detail-panel > .three-test-command-unit-water,
+.three-test-squad-unit-list,
+.three-test-command-panel-hint {
+  grid-column: 1;
+}
+
+.three-test-command-panel-section--commands {
+  grid-column: 2;
+  grid-row: 1 / span 3;
+}
+
+.three-test-command-panel-section--stance {
+  grid-column: 2;
+}
+
+.three-test-command-panel-section--overrides {
+  grid-column: 2;
 }
 
 .three-test-command-panel-label {
@@ -2677,7 +2804,7 @@ canvas {
 .three-test-command-panel-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 6px;
+  gap: 5px;
 }
 
 .three-test-command-panel-grid--commands {
@@ -2693,9 +2820,9 @@ canvas {
   background: var(--three-test-button-bg);
   border-radius: 8px;
   box-shadow: none;
-  padding: 7px 8px;
+  padding: 5px 7px;
   font-size: 11px;
-  min-height: 30px;
+  min-height: 26px;
 }
 
 .three-test-command-button:hover,
@@ -2925,7 +3052,7 @@ canvas {
   text-transform: uppercase;
   letter-spacing: 0.15em;
   font-size: 16px;
-  font-family: "Copperplate Gothic Bold", "Copperplate", "Palatino Linotype", serif;
+  font-family: var(--font-ui);
   transition: border-color 0.2s ease, color 0.2s ease, text-shadow 0.2s ease, background-color 0.2s ease;
 }
 
@@ -2968,7 +3095,7 @@ canvas {
 .title-screen-panel-title {
   margin: 0;
   color: rgba(255, 235, 206, 0.96);
-  font-family: "Copperplate Gothic Bold", "Copperplate", "Palatino Linotype", serif;
+  font-family: var(--font-ui);
   letter-spacing: 0.08em;
   text-transform: uppercase;
   font-size: 18px;
@@ -3232,7 +3359,6 @@ canvas {
   margin: 4px 0 0;
   font-size: 28px;
   letter-spacing: 1px;
-  font-family: "Copperplate Gothic Bold", "Copperplate", "Palatino Linotype", serif;
 }
 
 .start-menu-card p {
@@ -3392,7 +3518,7 @@ canvas {
   padding: 10px 14px;
   cursor: pointer;
   color: var(--run-text-strong);
-  font-family: "Copperplate Gothic Bold", "Copperplate", "Palatino Linotype", serif;
+  font-family: var(--font-ui);
   font-size: 13px;
   letter-spacing: 0.08em;
   text-transform: uppercase;
@@ -3423,7 +3549,7 @@ canvas {
 .map-editor-debug-drawer-meta {
   min-width: 0;
   color: var(--run-text-muted);
-  font-family: "Palatino Linotype", "Book Antiqua", serif;
+  font-family: var(--font-ui);
   font-size: 12px;
   font-weight: 400;
   letter-spacing: 0;
@@ -3891,7 +4017,7 @@ canvas {
   color: var(--run-text-muted);
   box-shadow: none;
   border: 1px solid transparent;
-  font-family: "Copperplate Gothic Bold", "Copperplate", "Palatino Linotype", serif;
+  font-family: var(--font-ui);
 }
 
 .run-tab:hover {
@@ -7422,15 +7548,8 @@ input[type="text"] {
   }
 
   .three-test-command-bar {
-    grid-template-columns: minmax(0, 1fr) minmax(280px, 340px);
-  }
-
-  .three-test-command-unit-card {
-    flex-basis: 208px;
-  }
-
-  .three-test-truck-tile {
-    flex-basis: 188px;
+    --squad-slot-width: 154px;
+    grid-template-columns: var(--squad-slot-width) minmax(0, 1fr);
   }
 
   .three-test-unit-card {
@@ -7506,7 +7625,29 @@ input[type="text"] {
   }
 
   .three-test-command-bar {
+    --squad-slot-width: 136px;
+    --squad-slot-height: 42px;
+    grid-template-columns: var(--squad-slot-width) minmax(0, 1fr);
+    gap: 8px;
+  }
+
+  .three-test-command-bar.unit-command-tray {
+    padding: 8px;
+  }
+
+  .three-test-squad-slot {
+    padding: 6px;
+  }
+
+  .three-test-command-panel {
     grid-template-columns: minmax(0, 1fr);
+  }
+
+  .three-test-command-panel-section--commands,
+  .three-test-command-panel-section--stance,
+  .three-test-command-panel-section--overrides {
+    grid-column: 1;
+    grid-row: auto;
   }
 
   .three-test-command-panel-grid--triple {
@@ -7517,12 +7658,8 @@ input[type="text"] {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
-  .three-test-command-unit-card {
-    flex-basis: 184px;
-  }
-
-  .three-test-truck-tile {
-    flex-basis: 172px;
+  .three-test-squad-unit-list {
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .three-test-unit-card {

@@ -13,6 +13,7 @@ import {
   MINIMAP_DYNAMIC_REFRESH_MS,
   paintMinimapRaster
 } from "../../../ui/runtime/minimap/minimapRaster.js";
+import { canvasUiFont } from "../../../ui/typography.js";
 import { generateWorldClimateSeed } from "../../../systems/climate/sim/worldClimateSeed.js";
 import { buildTerrainWindOverlaySamples } from "../../../systems/fire/rendering/terrainWindOverlay.js";
 import { hasProgressionCapability } from "../../../systems/progression/sim/techTree.js";
@@ -65,7 +66,7 @@ export class MinimapWidget implements HudWidget {
     ctx.fillRect(this.modeRect.x, this.modeRect.y, this.modeRect.width, this.modeRect.height);
     ctx.strokeRect(this.modeRect.x + 0.5, this.modeRect.y + 0.5, this.modeRect.width - 1, this.modeRect.height - 1);
     ctx.fillStyle = ui.theme.minimapModeText;
-    ctx.font = "600 10px ui-sans-serif, system-ui, sans-serif";
+    ctx.font = canvasUiFont(600, 10);
     ctx.textAlign = "left";
     ctx.textBaseline = "middle";
     ctx.fillText(`MODE: ${getMinimapModeLabel(mode).toUpperCase()}`, this.modeRect.x + 6, this.modeRect.y + this.modeRect.height / 2);

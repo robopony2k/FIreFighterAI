@@ -16,6 +16,7 @@ import {
   resolveSeasonalRainScreenWind
 } from "../../systems/climate/rendering/seasonalRainOverlayPass.js";
 import { sampleSeasonalWeatherVisualState } from "../../systems/climate/rendering/seasonalWeatherVisualState.js";
+import { createConstructionFxRuntime } from "../../systems/settlements/rendering/constructionFxRuntime.js";
 import { buildLightingDirectorState } from "../lightingDirector.js";
 import { createSeasonalSkyDome } from "../seasonalSky.js";
 import { buildRenderTerrainSample } from "../simView.js";
@@ -861,6 +862,8 @@ export const createFxLabController = (
   let manualSprayTarget: ManualSprayTarget | null = null;
 
   const fireFx: ThreeTestFireFx = createThreeTestFireFx(scene, camera, fireDebugControls);
+  const constructionFx = createConstructionFxRuntime(scene, camera, null);
+  constructionFx.setRunning(true);
   const unitsLayer: ThreeTestUnitsLayer = createThreeTestUnitsLayer(scene);
   const unitFxLayer: ThreeTestUnitFxLayer = createThreeTestUnitFxLayer(scene);
   const sprayTargetMarker = new THREE.Mesh(
@@ -1670,6 +1673,7 @@ export const createFxLabController = (
       lastSceneRenderMs,
       fireAnimationRate
     );
+    constructionFx.update(now, frameDeltaMs * 0.001, sceneState.sample, terrainSurface, fireAnimationRate);
     unitsLayer.update(sceneState.world, terrainSurface, 1);
     unitFxLayer.update(sceneState.world, sceneState.effects, terrainSurface, 1, now);
     updateSprayTargetMarker(now);
@@ -1734,6 +1738,7 @@ export const createFxLabController = (
       setPlacementMode("none");
       controls.dispose();
       fireFx.dispose();
+      constructionFx.dispose();
       unitFxLayer.dispose();
       unitsLayer.dispose();
       waterSystem.dispose();

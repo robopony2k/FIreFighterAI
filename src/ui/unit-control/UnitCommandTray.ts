@@ -18,12 +18,13 @@ type UnitCommandTrayStatus = (message: string) => void;
 
 export type UnitCommandTray = {
   element: HTMLElement;
-  update: (state: WorldState, inputState: InputState) => void;
+  update: (state: WorldState, inputState: InputState, hoveredCommandUnitId?: number | null) => void;
 };
 
 export type UnitCommandTrayOptions = {
   onAction: UnitCommandTrayAction;
   onStatus: UnitCommandTrayStatus;
+  onSquadHover?: (commandUnitId: number | null) => void;
 };
 
 type CommandGroupCard = {
@@ -46,6 +47,8 @@ type CommandButtonSpec = {
 };
 
 type CommandBarSeverity = "none" | "warning" | "critical";
+
+const SQUAD_SLOT_COUNT = 5;
 
 const COMMAND_BUTTONS: readonly CommandButtonSpec[] = [
   { label: "Move", mode: "move", action: "command-mode-move" },
@@ -229,77 +232,57 @@ const createWaterMeter = (ratio: number, label: string): HTMLDivElement => {
   return meter;
 };
 
-const createCommandGroupCard = (
-  state: WorldState,
+const createSquadSlot = (
   cardModel: CommandGroupCard,
   selected: boolean,
   focused: boolean,
+  hovered: boolean,
+  slotIndex: number,
   onAction: UnitCommandTrayAction
 ): HTMLButtonElement => {
   const { commandUnit, trucks } = cardModel;
-  const totalCrew = trucks.reduce((sum, truck) => sum + truck.crewIds.length, 0);
-  const totalCrewCapacity = trucks.length * TRUCK_CAPACITY;
-  const totalWater = trucks.reduce((sum, truck) => sum + truck.water, 0);
-  const totalCapacity = trucks.reduce((sum, truck) => sum + truck.waterCapacity, 0);
-  const waterRatio = getWaterRatio(totalWater, totalCapacity);
   const aggregateAlerts = trucks.flatMap((truck) => truck.currentAlerts);
   const highestAlert = resolveHighestAlert(aggregateAlerts);
   const effectiveStatus = resolveMajorityStatus(trucks);
-  const overrideCount = trucks.filter((truck) => truck.truckOverrideIntent !== null).length;
   const intentLabel = commandUnit.currentIntent
-    ? `${getCommandTypeLabel(commandUnit.currentIntent.type)} ${getBehaviourLabel(commandUnit.currentIntent.behaviourMode)}`
+    ? getCommandTypeLabel(commandUnit.currentIntent.type)
     : "Auto";
 
   const card = document.createElement("button");
   card.type = "button";
-  card.className = "three-test-command-unit-card";
+  card.className = "three-test-squad-slot";
   card.classList.toggle("is-selected", selected);
   card.classList.toggle("is-focused", focused);
+  card.classList.toggle("is-world-hovered", hovered);
 
   const header = document.createElement("div");
-  header.className = "three-test-command-unit-header";
+  header.className = "three-test-squad-slot-header";
+  const shortcut = document.createElement("span");
+  shortcut.className = "three-test-squad-slot-key";
+  shortcut.textContent = String(slotIndex + 1);
   const name = document.createElement("div");
-  name.className = "three-test-command-unit-name";
+  name.className = "three-test-squad-slot-name";
   name.textContent = commandUnit.name;
   const status = document.createElement("span");
-  status.className = "three-test-command-unit-status";
+  status.className = "three-test-squad-slot-status";
   status.dataset.status = effectiveStatus;
   status.textContent = getStatusIcon(effectiveStatus);
   status.title = getStatusLabel(effectiveStatus);
-  header.append(name, status);
-
-  const metrics = document.createElement("div");
-  metrics.className = "three-test-command-unit-stats";
-  metrics.append(createStat("T", `${trucks.length}`), createStat("C", `${totalCrew}/${totalCrewCapacity}`));
-
-  const waterLine = document.createElement("div");
-  waterLine.className = "three-test-command-unit-waterline";
-  const waterLabel = document.createElement("span");
-  waterLabel.className = "three-test-command-unit-watericon";
-  waterLabel.textContent = `W ${Math.round(waterRatio * 100)}%`;
-  const waterBars = document.createElement("div");
-  waterBars.className = "three-test-command-unit-waterbars";
-  trucks.forEach((truck) => {
-    const truckWaterRatio = getWaterRatio(truck.water, truck.waterCapacity);
-    const pip = document.createElement("span");
-    pip.className = "three-test-command-unit-waterbar";
-    pip.dataset.level = getWaterLevel(truckWaterRatio);
-    pip.textContent = "|";
-    pip.title = `${getTruckLabel(state, truck)} ${Math.round(truckWaterRatio * 100)}% water`;
-    waterBars.appendChild(pip);
-  });
-  waterLine.append(waterLabel, waterBars);
+  header.append(shortcut, name, status);
 
   const signals = document.createElement("div");
-  signals.className = "three-test-command-unit-signals";
+  signals.className = "three-test-squad-slot-signals";
+  const unitSignal = document.createElement("span");
+  unitSignal.className = "three-test-squad-slot-signal";
+  unitSignal.textContent = `${trucks.length} unit${trucks.length === 1 ? "" : "s"}`;
   const orderSignal = document.createElement("span");
-  orderSignal.className = "three-test-command-unit-signal";
+  orderSignal.className = "three-test-squad-slot-signal";
   orderSignal.dataset.kind = "status";
   orderSignal.textContent = intentLabel;
-  signals.appendChild(orderSignal);
+  signals.append(unitSignal, orderSignal);
   if (highestAlert) {
     const alertSignal = document.createElement("span");
-    alertSignal.className = "three-test-command-unit-alert";
+    alertSignal.className = "three-test-squad-slot-alert";
     alertSignal.dataset.severity = getSeverityForAlert(highestAlert);
     alertSignal.textContent = getAlertText(highestAlert);
     if (getSeverityForAlert(highestAlert) === "critical") {
@@ -308,10 +291,8 @@ const createCommandGroupCard = (
     signals.appendChild(alertSignal);
   }
 
-  card.append(header, metrics, waterLine, signals);
-  card.title = `${commandUnit.name}. ${trucks.length} truck(s), ${totalCrew}/${totalCrewCapacity} crew, ${Math.round(
-    waterRatio * 100
-  )}% water. ${overrideCount > 0 ? `${intentLabel} with ${overrideCount} override.` : `${intentLabel}.`}`;
+  card.append(header, signals);
+  card.title = `${commandUnit.name}. Slot ${slotIndex + 1}. ${trucks.length} unit(s). ${intentLabel}.`;
   card.addEventListener("click", (event) => {
     event.preventDefault();
     event.stopPropagation();
@@ -320,6 +301,33 @@ const createCommandGroupCard = (
       ...(event.shiftKey ? { toggle: "1" } : {})
     });
   });
+  return card;
+};
+
+const createEmptySquadSlot = (slotIndex: number): HTMLButtonElement => {
+  const card = document.createElement("button");
+  card.type = "button";
+  card.className = "three-test-squad-slot is-empty";
+  card.disabled = true;
+  card.title = `Squad slot ${slotIndex + 1} is empty.`;
+
+  const header = document.createElement("div");
+  header.className = "three-test-squad-slot-header";
+  const shortcut = document.createElement("span");
+  shortcut.className = "three-test-squad-slot-key";
+  shortcut.textContent = String(slotIndex + 1);
+  const name = document.createElement("div");
+  name.className = "three-test-squad-slot-name";
+  name.textContent = "Empty";
+  header.append(shortcut, name);
+
+  const signals = document.createElement("div");
+  signals.className = "three-test-squad-slot-signals";
+  const status = document.createElement("span");
+  status.className = "three-test-squad-slot-signal";
+  status.textContent = "No squad";
+  signals.appendChild(status);
+  card.append(header, signals);
   return card;
 };
 
@@ -427,113 +435,134 @@ const createCommandButton = (
   return button;
 };
 
-export const createUnitCommandTray = ({ onAction, onStatus }: UnitCommandTrayOptions): UnitCommandTray => {
+export const createUnitCommandTray = ({ onAction, onStatus, onSquadHover }: UnitCommandTrayOptions): UnitCommandTray => {
   const element = document.createElement("div");
   element.className = "three-test-command-bar unit-command-tray";
 
-  const left = document.createElement("div");
-  left.className = "three-test-command-bar-left";
-  const commandUnitRow = document.createElement("div");
-  commandUnitRow.className = "three-test-command-unit-row";
-  const truckStrip = document.createElement("div");
-  truckStrip.className = "three-test-truck-strip hidden";
-  const truckStripHeader = document.createElement("div");
-  truckStripHeader.className = "three-test-truck-strip-header";
-  const truckStripTitle = document.createElement("div");
-  truckStripTitle.className = "three-test-truck-strip-title";
-  const truckStripMeta = document.createElement("div");
-  truckStripMeta.className = "three-test-truck-strip-meta";
-  truckStripHeader.append(truckStripTitle, truckStripMeta);
-  const truckStripRow = document.createElement("div");
-  truckStripRow.className = "three-test-truck-strip-row";
-  truckStrip.append(truckStripHeader, truckStripRow);
-  left.append(commandUnitRow, truckStrip);
+  const slotColumn = document.createElement("div");
+  slotColumn.className = "three-test-squad-slot-column";
 
   const commandPanel = document.createElement("div");
-  commandPanel.className = "three-test-command-panel";
-  element.append(left, commandPanel);
+  commandPanel.className = "three-test-command-panel three-test-squad-detail-panel";
+  element.append(slotColumn, commandPanel);
 
-  const update = (state: WorldState, inputState: InputState): void => {
+  const update = (state: WorldState, inputState: InputState, hoveredCommandUnitId: number | null = null): void => {
     const commandUnits = [...state.commandUnits].sort((leftUnit, rightUnit) => leftUnit.id - rightUnit.id);
     const commandUnitById = new Map(commandUnits.map((entry) => [entry.id, entry] as const));
     const focusedCommandUnit =
       (state.focusedCommandUnitId !== null ? commandUnitById.get(state.focusedCommandUnitId) ?? null : null) ??
       (state.selectedCommandUnitIds.length === 1 ? commandUnitById.get(state.selectedCommandUnitIds[0]!) ?? null : null);
-    const showTruckStrip =
-      !!focusedCommandUnit && (state.selectionScope === "truck" || state.selectedCommandUnitIds.length === 1);
     const activeCommandMode = inputState.commandMode;
+    element.classList.toggle("is-collapsed", !focusedCommandUnit);
+    element.classList.toggle("is-expanded", !!focusedCommandUnit);
+    const occupiedSlots = commandUnits
+      .map((commandUnit) => ({ commandUnit, trucks: getCommandUnitTrucks(state, commandUnit) }))
+      .filter((entry) => entry.trucks.length > 0)
+      .slice(0, SQUAD_SLOT_COUNT);
 
-    commandUnitRow.replaceChildren();
-    commandUnits.forEach((commandUnit) => {
-      const trucks = getCommandUnitTrucks(state, commandUnit);
-      if (trucks.length <= 0) {
-        return;
+    slotColumn.replaceChildren();
+    for (let slotIndex = 0; slotIndex < SQUAD_SLOT_COUNT; slotIndex += 1) {
+      const slot = occupiedSlots[slotIndex] ?? null;
+      if (!slot) {
+        slotColumn.appendChild(createEmptySquadSlot(slotIndex));
+        continue;
       }
+      const { commandUnit, trucks } = slot;
       const selected =
         state.selectedCommandUnitIds.includes(commandUnit.id) ||
         (state.selectionScope === "truck" && state.focusedCommandUnitId === commandUnit.id);
-      commandUnitRow.appendChild(
-        createCommandGroupCard(
-          state,
-          { commandUnit, trucks },
-          selected,
-          state.focusedCommandUnitId === commandUnit.id,
-          onAction
-        )
+      const slotButton = createSquadSlot(
+        { commandUnit, trucks },
+        selected,
+        state.focusedCommandUnitId === commandUnit.id,
+        hoveredCommandUnitId === commandUnit.id,
+        slotIndex,
+        onAction
       );
-    });
-
-    if (showTruckStrip && focusedCommandUnit) {
-      const focusedTrucks = getCommandUnitTrucks(state, focusedCommandUnit);
-      truckStrip.classList.remove("hidden");
-      truckStripTitle.textContent = `${focusedCommandUnit.name} Units`;
-      truckStripMeta.textContent =
-        state.selectionScope === "truck" ? `${state.selectedTruckIds.length} selected` : `${focusedTrucks.length} available`;
-      truckStripRow.replaceChildren();
-      focusedTrucks.forEach((truck) => {
-        truckStripRow.appendChild(
-          createSelectedUnitCard(
-            state,
-            {
-              truck,
-              effectiveIntent: getEffectiveTruckIntent(truck, commandUnitById)
-            },
-            state.selectedTruckIds.includes(truck.id),
-            onAction
-          )
-        );
-      });
-    } else {
-      truckStrip.classList.add("hidden");
-      truckStripRow.replaceChildren();
+      slotButton.addEventListener("mouseenter", () => onSquadHover?.(commandUnit.id));
+      slotButton.addEventListener("mouseleave", () => onSquadHover?.(null));
+      slotColumn.appendChild(slotButton);
     }
 
     commandPanel.replaceChildren();
+    if (!focusedCommandUnit) {
+      return;
+    }
+
+    const focusedTrucks = getCommandUnitTrucks(state, focusedCommandUnit);
+    const totalWater = focusedTrucks.reduce((sum, truck) => sum + truck.water, 0);
+    const totalCapacity = focusedTrucks.reduce((sum, truck) => sum + truck.waterCapacity, 0);
+    const waterRatio = getWaterRatio(totalWater, totalCapacity);
+    const totalCrew = focusedTrucks.reduce((sum, truck) => sum + truck.crewIds.length, 0);
+    const totalCrewCapacity = focusedTrucks.length * TRUCK_CAPACITY;
+    const aggregateAlerts = focusedTrucks.flatMap((truck) => truck.currentAlerts);
+    const highestAlert = resolveHighestAlert(aggregateAlerts);
+    const effectiveStatus = resolveMajorityStatus(focusedTrucks);
+    const intentLabel = focusedCommandUnit.currentIntent
+      ? `${getCommandTypeLabel(focusedCommandUnit.currentIntent.type)} ${getBehaviourLabel(focusedCommandUnit.currentIntent.behaviourMode)}`
+      : "Auto";
+    const stanceLabel = getBehaviourLabel(focusedCommandUnit.currentIntent?.behaviourMode ?? inputState.behaviourMode);
+
     const title = document.createElement("div");
     title.className = "three-test-command-panel-title";
-    title.textContent =
-      state.selectionScope === "truck" && state.selectedTruckIds.length > 0
-        ? "Truck Control"
-        : focusedCommandUnit?.name ?? "Unit Command";
+    title.textContent = `${focusedCommandUnit.name} Squad`;
+
     const summary = document.createElement("div");
     summary.className = "three-test-command-panel-summary";
-    if (state.selectionScope === "truck" && state.selectedTruckIds.length > 0) {
-      summary.textContent = `${state.selectedTruckIds.length} truck(s) selected in ${focusedCommandUnit?.name ?? "command group"}.`;
-    } else if (focusedCommandUnit) {
-      summary.textContent = `${focusedCommandUnit.name} selected with ${focusedCommandUnit.truckIds.length} truck(s).`;
-    } else {
-      summary.textContent = "Select Alpha or Bravo to command a group.";
+    summary.textContent = `${getStatusLabel(effectiveStatus)} | ${intentLabel}`;
+
+    const metrics = document.createElement("div");
+    metrics.className = "three-test-squad-detail-metrics";
+    metrics.append(
+      createStat("Units", `${focusedTrucks.length}`),
+      createStat("Water", `${Math.round(waterRatio * 100)}%`),
+      createStat("Crew", `${totalCrew}/${totalCrewCapacity}`),
+      createStat("Stance", stanceLabel)
+    );
+    if (highestAlert) {
+      const alert = document.createElement("span");
+      alert.className = "three-test-command-unit-alert";
+      alert.dataset.severity = getSeverityForAlert(highestAlert);
+      alert.textContent = getAlertText(highestAlert);
+      metrics.appendChild(alert);
     }
+
+    const water = createWaterMeter(
+      waterRatio,
+      `${focusedCommandUnit.name} squad ${Math.round(totalWater)}/${Math.round(totalCapacity)} aggregate water`
+    );
+
     const hint = document.createElement("div");
     hint.className = "three-test-command-panel-hint";
     hint.textContent =
       state.selectionScope === "truck"
         ? "Truck overrides take priority until rejoined."
         : "Right-click issues the active command mode.";
-    commandPanel.append(title, summary, hint);
+
+    const header = document.createElement("div");
+    header.className = "three-test-squad-detail-header";
+    header.append(title, summary, metrics);
+
+    const unitRows = document.createElement("div");
+    unitRows.className = "three-test-squad-unit-list";
+    focusedTrucks.forEach((truck) => {
+      unitRows.appendChild(
+        createSelectedUnitCard(
+          state,
+          {
+            truck,
+            effectiveIntent: getEffectiveTruckIntent(truck, commandUnitById)
+          },
+          state.selectedTruckIds.includes(truck.id),
+          onAction
+        )
+      );
+    });
+
+    commandPanel.append(header, water, unitRows, hint);
 
     const modeSection = document.createElement("div");
-    modeSection.className = "three-test-command-panel-section";
+    modeSection.className = "three-test-command-panel-section three-test-command-panel-section--commands";
     const modeLabel = document.createElement("div");
     modeLabel.className = "three-test-command-panel-label";
     modeLabel.textContent = `Active ${getCommandTypeLabel(activeCommandMode)}`;
@@ -546,7 +575,7 @@ export const createUnitCommandTray = ({ onAction, onStatus }: UnitCommandTrayOpt
     commandPanel.appendChild(modeSection);
 
     const behaviourSection = document.createElement("div");
-    behaviourSection.className = "three-test-command-panel-section";
+    behaviourSection.className = "three-test-command-panel-section three-test-command-panel-section--stance";
     const behaviourLabel = document.createElement("div");
     behaviourLabel.className = "three-test-command-panel-label";
     behaviourLabel.textContent = `Stance ${getBehaviourLabel(inputState.behaviourMode)}`;
@@ -570,7 +599,7 @@ export const createUnitCommandTray = ({ onAction, onStatus }: UnitCommandTrayOpt
 
     if (state.selectionScope === "truck" && state.selectedTruckIds.length > 0) {
       const overrideSection = document.createElement("div");
-      overrideSection.className = "three-test-command-panel-section";
+      overrideSection.className = "three-test-command-panel-section three-test-command-panel-section--overrides";
       const overrideLabel = document.createElement("div");
       overrideLabel.className = "three-test-command-panel-label";
       overrideLabel.textContent = "Truck Overrides";

@@ -1,6 +1,7 @@
 import * as THREE from "three";
 import { TILE_SIZE } from "../../../core/config.js";
 import type { Town } from "../../../core/types.js";
+import { canvasUiFont } from "../../../ui/typography.js";
 
 const TOWN_LABEL_SCREEN_HEIGHT = 0.025;
 const TOWN_LABEL_LIFT_METERS = 100;
@@ -67,7 +68,7 @@ const getTownLabelMaterial = (name: string): { material: THREE.SpriteMaterial; a
   const paddingY = 24;
   const strokeWidth = 4;
   const pixelRatio = 2;
-  const font = `700 ${fontPx}px "Trebuchet MS", "Segoe UI", sans-serif`;
+  const font = canvasUiFont(700, fontPx);
   context.font = font;
   const measuredWidth = Math.ceil(context.measureText(normalizedName).width);
   const layoutWidth = Math.max(280, measuredWidth + paddingX * 2);
