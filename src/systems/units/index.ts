@@ -9,6 +9,20 @@ export {
 } from "./controllers/rosterController.js";
 
 export {
+  assignRosterTruckToSelectedSquad,
+  createSquad,
+  dispatchSquadToTile,
+  ensureDefaultSquads,
+  getSquadById,
+  isHeadquartersTown,
+  issueSquadReturnOrders,
+  removeRosterTruckFromSquad,
+  renameSelectedSquad,
+  resolveHeadquartersTownId,
+  selectSquad
+} from "./controllers/squadController.js";
+
+export {
   clearCommandSelection,
   selectCommandUnit,
   selectTruck,

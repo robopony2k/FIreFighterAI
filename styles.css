@@ -1583,6 +1583,21 @@ canvas {
   letter-spacing: 0.2px;
 }
 
+.three-test-town-hq-badge {
+  display: inline-grid;
+  place-items: center;
+  min-width: 26px;
+  height: 20px;
+  padding: 0 6px;
+  border-radius: 5px;
+  border: 1px solid rgba(153, 214, 255, 0.46);
+  background: rgba(76, 137, 176, 0.22);
+  color: rgba(220, 240, 255, 0.96);
+  font-size: 11px;
+  font-weight: 800;
+  line-height: 1;
+}
+
 .three-test-town-nameplate-meta {
   display: none;
   margin-top: 4px;
@@ -1961,6 +1976,63 @@ canvas {
 .three-test-base-hint {
   font-size: 11px;
   color: rgba(255, 240, 212, 0.72);
+}
+
+.three-test-hq-section {
+  display: grid;
+  gap: 8px;
+  padding-top: 2px;
+}
+
+.three-test-hq-summary {
+  font-family: Consolas, "Courier New", monospace;
+  font-size: 12px;
+  color: color-mix(in srgb, var(--three-test-text-primary) 84%, transparent);
+  font-variant-numeric: tabular-nums;
+}
+
+.three-test-hq-list {
+  display: grid;
+  gap: 5px;
+  max-height: 92px;
+  overflow: auto;
+}
+
+.three-test-hq-list-button {
+  border: 1px solid color-mix(in srgb, var(--three-test-button-border) 82%, transparent);
+  background: color-mix(in srgb, var(--three-test-button-bg) 86%, transparent);
+  color: var(--three-test-text-primary);
+  border-radius: 7px;
+  padding: 6px 8px;
+  font-size: 12px;
+  text-align: left;
+  box-shadow: none;
+  transform: none;
+}
+
+.three-test-hq-list-button:hover,
+.three-test-hq-list-button:focus-visible {
+  background: var(--three-test-button-bg-hover);
+  transform: none;
+}
+
+.three-test-hq-list-button.is-selected {
+  border-color: var(--three-test-accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--three-test-accent) 22%, transparent);
+}
+
+.three-test-hq-action-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.three-test-hq-action {
+  min-height: 34px;
+  font-size: 12px;
+}
+
+.three-test-hq-empty {
+  font-size: 12px;
+  color: color-mix(in srgb, var(--three-test-text-primary) 70%, transparent);
 }
 
 .three-test-dock-overlay {
@@ -2787,6 +2859,10 @@ canvas {
 }
 
 .three-test-command-panel-section--stance {
+  grid-column: 2;
+}
+
+.three-test-command-panel-section--formation {
   grid-column: 2;
 }
 
@@ -7645,6 +7721,7 @@ input[type="text"] {
 
   .three-test-command-panel-section--commands,
   .three-test-command-panel-section--stance,
+  .three-test-command-panel-section--formation,
   .three-test-command-panel-section--overrides {
     grid-column: 1;
     grid-row: auto;

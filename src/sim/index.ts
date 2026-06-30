@@ -59,6 +59,7 @@ import {
   autoAssignTargets,
   clearFuelLine,
   deployUnit,
+  issueSquadReturnOrders,
   prepareExtinguish,
   returnToFocusedCommandUnitSelection,
   seedStartingRoster,
@@ -686,6 +687,7 @@ export const cancelAdvanceToNextEvent = (state: WorldState, reason?: string): vo
 const getYearEventMessages = (year: number): string[] => YEAR_EVENTS[year] ?? [];
 
 const extinguishSeasonCarryoverFires = (state: WorldState): void => {
+  issueSquadReturnOrders(state);
   state.tiles.forEach((tile) => {
     tile.fire = 0;
     tile.heat = 0;
@@ -789,6 +791,7 @@ const applySeasonalRainExtinguish = (state: WorldState, effects: EffectsState): 
   }
   extinguishAllFires(state, effects);
   syncWeatherClearedFireScoringSnapshot(state);
+  issueSquadReturnOrders(state);
   state.seasonalRain = {
     ...rain,
     hasExtinguished: true

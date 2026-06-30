@@ -3,11 +3,12 @@ import type { WorldState } from "../../../core/state.js";
 import { findPath, getMoveSpeedMultiplier } from "../../../sim/pathing.js";
 import { advanceRouteMotion, type RouteMotionPoint, type RouteMotionTarget } from "../../../shared/movement/routeMotion.js";
 import { MOVING_SPRAY_SPEED_FACTOR } from "../constants/runtimeConstants.js";
-import { getUnitTile } from "../utils/unitLookup.js";
+import { getRosterUnit, getUnitTile } from "../utils/unitLookup.js";
 import { updateTruckCrewOrders, detachFromCarrier } from "./crewRuntime.js";
 import { applyCommandIntentControl } from "./commandRuntime.js";
 import { findNearestPassable } from "./unitPathing.js";
 import { setUnitTarget } from "./unitDeployment.js";
+import { syncCommandUnits } from "./commandUnits.js";
 
 const getUnitMotionTarget = (unit: Unit): RouteMotionTarget | null => {
   if (unit.pathIndex >= unit.path.length) {
@@ -111,6 +112,39 @@ export function stepUnits(state: WorldState, delta: number): void {
     }
     advanceUnit(unit);
   });
+
+  if (state.phase !== "fire") {
+    const returnedTruckIds = new Set<number>();
+    state.units.forEach((unit) => {
+      if (unit.kind !== "truck" || unit.pathIndex < unit.path.length) {
+        return;
+      }
+      if (Math.hypot(unit.x - (state.basePoint.x + 0.5), unit.y - (state.basePoint.y + 0.5)) > 1.25) {
+        return;
+      }
+      returnedTruckIds.add(unit.id);
+      const rosterTruck = getRosterUnit(state, unit.rosterId);
+      if (rosterTruck) {
+        rosterTruck.status = "available";
+      }
+      unit.crewIds.forEach((crewId) => {
+        const crew = state.units.find((entry) => entry.id === crewId) ?? null;
+        const rosterCrew = getRosterUnit(state, crew?.rosterId ?? null);
+        if (rosterCrew) {
+          rosterCrew.status = "available";
+        }
+      });
+    });
+    if (returnedTruckIds.size > 0) {
+      state.units = state.units.filter((unit) => {
+        if (returnedTruckIds.has(unit.id)) {
+          return false;
+        }
+        return unit.assignedTruckId === null || !returnedTruckIds.has(unit.assignedTruckId);
+      });
+      syncCommandUnits(state);
+    }
+  }
 }
 
 export function assignFormationTargets(state: WorldState, units: Unit[], start: Point, end: Point): void {

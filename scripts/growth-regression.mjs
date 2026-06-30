@@ -18,6 +18,11 @@ import {
   prepareTerrainRenderVisualSurface
 } from "../dist/render/threeTestTerrain.js";
 import {
+  assignTerrainTextureMap,
+  flushTerrainTextureDisposals,
+  queueTerrainTextureDisposals
+} from "../dist/systems/terrain/rendering/terrainTextureSwap.js";
+import {
   analyzeTerrainTypeDiff,
   classifyTerrainVisualInvalidation,
   decideTerrainVisualSync,
@@ -689,6 +694,36 @@ const terrainSignatureSample = (() => {
   );
   fullRoadTexture.dispose();
   initialTexture.dispose();
+
+  const makeDisposableTexture = (label) => ({
+    label,
+    disposed: 0,
+    dispose() {
+      this.disposed += 1;
+    }
+  });
+  const oldMap = makeDisposableTexture("old");
+  const nextMap = makeDisposableTexture("next");
+  const materialA = { map: oldMap, needsUpdate: false };
+  const materialB = { map: oldMap, needsUpdate: false };
+  const queuedDisposals = [];
+  const previousMaps = assignTerrainTextureMap([materialA, materialB], nextMap);
+  assert.equal(materialA.map, nextMap, "terrain texture swap should assign the new map to material A");
+  assert.equal(materialB.map, nextMap, "terrain texture swap should assign the new map to material B");
+  assert.equal(materialA.needsUpdate, true, "terrain texture swap should mark material A dirty");
+  assert.equal(materialB.needsUpdate, true, "terrain texture swap should mark material B dirty");
+  assert.equal(previousMaps.length, 1, "terrain texture swap should dedupe shared previous maps");
+  assert.equal(previousMaps[0], oldMap, "terrain texture swap should return the previous map for deferred disposal");
+  queueTerrainTextureDisposals(queuedDisposals, previousMaps, 2);
+  queueTerrainTextureDisposals(queuedDisposals, previousMaps, 1);
+  assert.equal(queuedDisposals.length, 1, "deferred terrain texture disposal should queue a map once");
+  assert.equal(queuedDisposals[0].framesRemaining, 2, "deferred terrain texture disposal should keep the longest delay");
+  flushTerrainTextureDisposals(queuedDisposals);
+  assert.equal(oldMap.disposed, 0, "deferred terrain texture disposal should keep the old map through the first flush");
+  assert.equal(queuedDisposals.length, 1, "deferred terrain texture disposal should remain queued before the delay elapses");
+  flushTerrainTextureDisposals(queuedDisposals);
+  assert.equal(oldMap.disposed, 1, "deferred terrain texture disposal should dispose after the configured delay");
+  assert.equal(queuedDisposals.length, 0, "deferred terrain texture disposal should clear disposed maps");
 
   const baselineTexture = buildRegressionTileTexture(textureBaseSample, textureBaseSurface, texturePalette);
   const tileFuel = new Float32Array(total).fill(0);

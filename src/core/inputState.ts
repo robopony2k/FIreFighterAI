@@ -1,4 +1,4 @@
-import type { BehaviourMode, CommandType, Point } from "./types.js";
+import type { BehaviourMode, CommandFormation, CommandType, Point } from "./types.js";
 
 export type SelectionBox = { x1: number; y1: number; x2: number; y2: number };
 
@@ -9,6 +9,8 @@ export interface InputState {
   selectionBox: SelectionBox | null;
   commandMode: CommandType | null;
   behaviourMode: BehaviourMode;
+  dispatchFormation: Extract<CommandFormation, "line" | "wedge" | "arc">;
+  pendingSquadDispatchId: number | null;
   debugIgniteMode: boolean;
   debugCellEnabled: boolean;
   debugTypeColors: boolean;
@@ -25,6 +27,8 @@ export const createInputState = (): InputState => ({
   selectionBox: null,
   commandMode: null,
   behaviourMode: "balanced",
+  dispatchFormation: "line",
+  pendingSquadDispatchId: null,
   debugIgniteMode: false,
   debugCellEnabled: false,
   debugTypeColors: false,
@@ -41,6 +45,8 @@ export const resetInputState = (state: InputState): void => {
   state.selectionBox = null;
   state.commandMode = null;
   state.behaviourMode = "balanced";
+  state.dispatchFormation = "line";
+  state.pendingSquadDispatchId = null;
   state.debugIgniteMode = false;
   state.debugCellEnabled = false;
   state.debugTypeColors = false;

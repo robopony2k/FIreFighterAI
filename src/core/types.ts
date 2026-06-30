@@ -65,7 +65,7 @@ export type Formation = "narrow" | "medium" | "wide";
 export type WaterSprayMode = "precision" | "balanced" | "suppression";
 export type CommandType = "move" | "suppress" | "contain" | "backburn";
 export type BehaviourMode = "aggressive" | "balanced" | "defensive";
-export type CommandFormation = "loose" | "line" | "area";
+export type CommandFormation = "loose" | "line" | "area" | "wedge" | "arc";
 export type SelectionScope = "commandUnit" | "truck";
 
 export type FireSimPhase = "snapshot" | "heat-clear" | "heat-pass1" | "heat-pass2" | "fire" | "ignite";
@@ -121,8 +121,20 @@ export type CommandUnitAlert =
 
 export interface CommandUnit {
   id: number;
+  squadId: number | null;
+  homeTownId: number | null;
   name: string;
   truckIds: number[];
+  currentIntent: CommandIntent | null;
+  status: CommandUnitStatus;
+  revision: number;
+}
+
+export interface Squad {
+  id: number;
+  homeTownId: number | null;
+  name: string;
+  truckRosterIds: number[];
   currentIntent: CommandIntent | null;
   status: CommandUnitStatus;
   revision: number;
@@ -386,6 +398,8 @@ export interface Unit {
   training: UnitTraining;
 
     status: RosterStatus;
+
+    squadId: number | null;
 
     assignedTruckId: number | null;
 

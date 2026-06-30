@@ -20,6 +20,7 @@ import type {
   Wind,
   TileType,
   RosterUnit,
+  Squad,
   SeasonalRainState,
   TimeSpeedControlMode
 } from "./types.js";
@@ -239,6 +240,10 @@ export interface WorldState {
   commandUnits: CommandUnit[];
   nextCommandUnitId: number;
   commandUnitsRevision: number;
+  squads: Squad[];
+  selectedSquadId: number | null;
+  nextSquadId: number;
+  headquartersTownId: number | null;
 
   simTimeMode: SimTimeMode;
   timeSpeedControlMode: TimeSpeedControlMode;
@@ -613,6 +618,10 @@ export function createInitialState(seed: number, grid: Grid): WorldState {
     commandUnits: [],
     nextCommandUnitId: 1,
     commandUnitsRevision: 0,
+    squads: [],
+    selectedSquadId: null,
+    nextSquadId: 1,
+    headquartersTownId: null,
 
     simTimeMode: "strategic",
     timeSpeedControlMode: "buttons",

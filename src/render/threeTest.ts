@@ -31,7 +31,7 @@ import { createVehicleModelLayer, type VehicleModelInstance } from "./vehicleMod
 import type { InputState } from "../core/inputState.js";
 import { indexFor } from "../core/grid.js";
 import { TILE_ID_TO_TYPE, TILE_TYPE_IDS } from "../core/state.js";
-import type { ClimateForecast, CommandType, CommandUnitAlert, CommandUnitStatus, Town } from "../core/types.js";
+import type { ClimateForecast, CommandType, CommandUnitAlert, CommandUnitStatus, RosterUnit, Town } from "../core/types.js";
 import type { RenderSim } from "./simView.js";
 import { createHudState, setHudViewport, type HudTheme } from "./hud/hudState.js";
 import { handleHudClick, handleHudKey, renderHud } from "./hud/hud.js";
@@ -69,6 +69,7 @@ import {
   getTownThreatLevel
 } from "../sim/towns.js";
 import { isAdvanceToNextEventAvailable } from "../sim/index.js";
+import { ensureDefaultSquads, isHeadquartersTown, resolveHeadquartersTownId } from "../systems/units/index.js";
 import {
   applyTerrainSurfaceColors,
   buildPalette,
@@ -111,6 +112,13 @@ import { createThreeTestPostPipeline, type DepthOfFieldSettings } from "./post/d
 import type { ThreeTestCinematicGradeConfig } from "./post/cinematicGradePass.js";
 import { getRequiredWebGLContext } from "./webglContext.js";
 import { resolveStructureGrounding } from "./terrain/shared/structureGrounding.js";
+import {
+  assignTerrainTextureMap,
+  disposeQueuedTerrainTextures,
+  flushTerrainTextureDisposals,
+  queueTerrainTextureDisposals,
+  type PendingTerrainTextureDisposal
+} from "../systems/terrain/rendering/terrainTextureSwap.js";
 import { CardStateModel } from "../ui/cards/cardState.js";
 import { resolveTownLabelDepthAwareLayout } from "../ui/town-labels/townLabelOcclusion.js";
 import { createUnitCommandTray } from "../ui/unit-control/UnitCommandTray.js";
@@ -996,6 +1004,7 @@ export const createThreeTest = (
     mainButton: HTMLButtonElement;
     dot: HTMLSpanElement;
     name: HTMLSpanElement;
+    hqBadge: HTMLSpanElement;
     meta: HTMLDivElement;
     metaText: HTMLSpanElement;
     metaAlert: HTMLSpanElement;
@@ -1016,6 +1025,7 @@ export const createThreeTest = (
     topLine: HTMLDivElement;
     dot: HTMLSpanElement;
     name: HTMLSpanElement;
+    hqBadge: HTMLSpanElement;
     postureChip: HTMLSpanElement;
     approvalChip: HTMLSpanElement;
     cooldownChip: HTMLSpanElement;
@@ -1033,6 +1043,22 @@ export const createThreeTest = (
     cancelEvacuationMeta: HTMLSpanElement;
     upgradeButton: HTMLButtonElement;
     upgradeMeta: HTMLSpanElement;
+    hqSection: HTMLDivElement;
+    hqSummary: HTMLDivElement;
+    hqSquadList: HTMLDivElement;
+    hqTruckList: HTMLDivElement;
+    hqCreateSquadButton: HTMLButtonElement;
+    hqRenameSquadButton: HTMLButtonElement;
+    hqAssignTruckButton: HTMLButtonElement;
+    hqRemoveTruckButton: HTMLButtonElement;
+    hqDispatchSquadButton: HTMLButtonElement;
+    hqRecallSquadButton: HTMLButtonElement;
+    hqRecruitFirefighterButton: HTMLButtonElement;
+    hqRecruitTruckButton: HTMLButtonElement;
+    hqTrainSpeedButton: HTMLButtonElement;
+    hqTrainPowerButton: HTMLButtonElement;
+    hqTrainRangeButton: HTMLButtonElement;
+    hqTrainResilienceButton: HTMLButtonElement;
   };
   type TownScreenAnchor = {
     rootX: number;
@@ -1170,7 +1196,11 @@ export const createThreeTest = (
     townCardNameDot.title = "Fire threat";
     const townCardName = document.createElement("span");
     townCardName.className = "three-test-town-name";
-    townCardTopLine.append(townCardNameDot, townCardName);
+    const townCardHqBadge = document.createElement("span");
+    townCardHqBadge.className = "three-test-town-hq-badge hidden";
+    townCardHqBadge.textContent = "HQ";
+    townCardHqBadge.title = "Headquarters";
+    townCardTopLine.append(townCardNameDot, townCardName, townCardHqBadge);
     const townCardHeaderActions = document.createElement("div");
     townCardHeaderActions.className = "three-test-town-card-header-actions";
     const townCardPinButton = document.createElement("button");
@@ -1221,7 +1251,48 @@ export const createThreeTest = (
       cancelEvacAction.button,
       upgradeAction.button
     );
-    townCardRoot.append(townCardHeader, townCardSummary, townCardStatus, townCardEvac, townCardActions);
+    const hqSection = document.createElement("div");
+    hqSection.className = "three-test-hq-section hidden";
+    const hqSummary = document.createElement("div");
+    hqSummary.className = "three-test-hq-summary";
+    const hqSquadList = document.createElement("div");
+    hqSquadList.className = "three-test-hq-list";
+    const hqTruckList = document.createElement("div");
+    hqTruckList.className = "three-test-hq-list";
+    const createHqButton = (label: string, action: string): HTMLButtonElement => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "three-test-town-card-action three-test-hq-action";
+      button.dataset.action = action;
+      button.textContent = label;
+      return button;
+    };
+    const hqSquadActions = document.createElement("div");
+    hqSquadActions.className = "three-test-town-card-actions three-test-hq-action-grid";
+    const hqCreateSquadButton = createHqButton("New Squad", "squad-create");
+    const hqRenameSquadButton = createHqButton("Rename", "squad-rename");
+    const hqAssignTruckButton = createHqButton("Assign Truck", "squad-assign-truck");
+    const hqRemoveTruckButton = createHqButton("Remove Truck", "squad-remove-truck");
+    hqSquadActions.append(hqCreateSquadButton, hqRenameSquadButton, hqAssignTruckButton, hqRemoveTruckButton);
+    const hqDeployActions = document.createElement("div");
+    hqDeployActions.className = "three-test-town-card-actions three-test-hq-action-grid";
+    const hqDispatchSquadButton = createHqButton("Dispatch", "squad-dispatch");
+    const hqRecallSquadButton = createHqButton("Recall", "squad-recall");
+    hqDeployActions.append(hqDispatchSquadButton, hqRecallSquadButton);
+    const hqRecruitActions = document.createElement("div");
+    hqRecruitActions.className = "three-test-town-card-actions three-test-hq-action-grid";
+    const hqRecruitTruckButton = createHqButton("Recruit Truck", "recruit-truck");
+    const hqRecruitFirefighterButton = createHqButton("Recruit Crew", "recruit-firefighter");
+    hqRecruitActions.append(hqRecruitTruckButton, hqRecruitFirefighterButton);
+    const hqTrainActions = document.createElement("div");
+    hqTrainActions.className = "three-test-town-card-actions three-test-hq-action-grid";
+    const hqTrainSpeedButton = createHqButton("Speed", "train-speed");
+    const hqTrainPowerButton = createHqButton("Power", "train-power");
+    const hqTrainRangeButton = createHqButton("Range", "train-range");
+    const hqTrainResilienceButton = createHqButton("Resilience", "train-resilience");
+    hqTrainActions.append(hqTrainSpeedButton, hqTrainPowerButton, hqTrainRangeButton, hqTrainResilienceButton);
+    hqSection.append(hqSummary, hqSquadList, hqTruckList, hqSquadActions, hqDeployActions, hqRecruitActions, hqTrainActions);
+    townCardRoot.append(townCardHeader, townCardSummary, townCardStatus, townCardEvac, townCardActions, hqSection);
     townOverlayRoot.appendChild(townCardRoot);
     return {
       root: townCardRoot,
@@ -1231,6 +1302,7 @@ export const createThreeTest = (
       topLine: townCardTopLine,
       dot: townCardNameDot,
       name: townCardName,
+      hqBadge: townCardHqBadge,
       postureChip: townCardPosture,
       approvalChip: townCardApproval,
       cooldownChip: townCardCooldown,
@@ -1247,7 +1319,23 @@ export const createThreeTest = (
       cancelEvacuationButton: cancelEvacAction.button,
       cancelEvacuationMeta: cancelEvacAction.meta,
       upgradeButton: upgradeAction.button,
-      upgradeMeta: upgradeAction.meta
+      upgradeMeta: upgradeAction.meta,
+      hqSection,
+      hqSummary,
+      hqSquadList,
+      hqTruckList,
+      hqCreateSquadButton,
+      hqRenameSquadButton,
+      hqAssignTruckButton,
+      hqRemoveTruckButton,
+      hqDispatchSquadButton,
+      hqRecallSquadButton,
+      hqRecruitFirefighterButton,
+      hqRecruitTruckButton,
+      hqTrainSpeedButton,
+      hqTrainPowerButton,
+      hqTrainRangeButton,
+      hqTrainResilienceButton
     };
   };
 
@@ -1275,8 +1363,8 @@ export const createThreeTest = (
   };
   const fireAlertZoomButton = createFireAlertAction("Zoom to Fire");
   const fireAlertOpenTownButton = createFireAlertAction("Open Town");
-  const fireAlertDeployTruckButton = createFireAlertAction("Deploy Truck");
-  const fireAlertDeployCrewButton = createFireAlertAction("Deploy Crew");
+  const fireAlertDeployTruckButton = createFireAlertAction("Dispatch Squad");
+  const fireAlertDeployCrewButton = createFireAlertAction("Open HQ");
   const fireAlertDismissButton = createFireAlertAction("Dismiss");
   fireAlertActions.append(
     fireAlertZoomButton,
@@ -3413,6 +3501,11 @@ export const createThreeTest = (
   };
 
   const focusCameraOnBase = (): void => {
+    const hqTownId = resolveHeadquartersTownId(world);
+    if (hqTownId !== null) {
+      focusCameraOnTown(hqTownId);
+      return;
+    }
     focusCameraOnTile(Math.floor(world.basePoint.x), Math.floor(world.basePoint.y));
   };
 
@@ -3546,6 +3639,106 @@ export const createThreeTest = (
     }
   };
 
+  const createHqListButton = (
+    label: string,
+    action: string,
+    payload: Record<string, string>,
+    selected = false
+  ): HTMLButtonElement => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "three-test-hq-list-button";
+    button.classList.toggle("is-selected", selected);
+    button.textContent = label;
+    button.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      playUiCue("click");
+      dispatchSelectionAction(action, payload);
+    });
+    return button;
+  };
+
+  const getSelectedRosterTruck = (): RosterUnit | null => {
+    const selected = world.selectedRosterId !== null
+      ? world.roster.find((entry) => entry.id === world.selectedRosterId) ?? null
+      : null;
+    return selected?.kind === "truck" ? selected : null;
+  };
+
+  const renderHeadquartersControls = (townId: number, card: TownCardElements): void => {
+    const isHq = isHeadquartersTown(world, townId);
+    card.hqSection.classList.toggle("hidden", !isHq);
+    card.hqBadge.classList.toggle("hidden", !isHq);
+    if (!isHq) {
+      return;
+    }
+    ensureDefaultSquads(world);
+    const availableTrucks = world.roster.filter((entry) => entry.kind === "truck" && entry.status === "available");
+    const deployedTrucks = world.roster.filter((entry) => entry.kind === "truck" && entry.status === "deployed");
+    const selectedSquad = world.squads.find((squad) => squad.id === world.selectedSquadId) ?? world.squads[0] ?? null;
+    const selectedTruck = getSelectedRosterTruck();
+    card.hqSummary.textContent = `HQ | ${world.squads.length} squads | ${availableTrucks.length} ready | ${deployedTrucks.length} field`;
+    card.hqSquadList.replaceChildren();
+    world.squads.forEach((squad) => {
+      const active = world.commandUnits.find((commandUnit) => commandUnit.squadId === squad.id) ?? null;
+      const readyCount = squad.truckRosterIds.filter((id) => {
+        const truck = world.roster.find((entry) => entry.id === id) ?? null;
+        return truck?.status === "available";
+      }).length;
+      const fieldCount = active?.truckIds.length ?? 0;
+      card.hqSquadList.appendChild(
+        createHqListButton(
+          `${squad.name} ${readyCount} ready ${fieldCount} field`,
+          "select-squad",
+          { squadId: String(squad.id) },
+          selectedSquad?.id === squad.id
+        )
+      );
+    });
+    card.hqTruckList.replaceChildren();
+    const truckRows = world.roster
+      .filter((entry) => entry.kind === "truck" && entry.status !== "lost")
+      .sort((left, right) => left.id - right.id);
+    if (truckRows.length === 0) {
+      const empty = document.createElement("div");
+      empty.className = "three-test-hq-empty";
+      empty.textContent = "No trucks recruited.";
+      card.hqTruckList.appendChild(empty);
+    } else {
+      truckRows.forEach((truck) => {
+        const squad = world.squads.find((entry) => entry.id === truck.squadId) ?? null;
+        card.hqTruckList.appendChild(
+          createHqListButton(
+            `${truck.name} | ${truck.status} | ${squad?.name ?? "Unassigned"}`,
+            "select-roster-id",
+            { rosterId: String(truck.id) },
+            selectedTruck?.id === truck.id
+          )
+        );
+      });
+    }
+    const maintenanceOpen = world.phase === "maintenance";
+    card.hqAssignTruckButton.dataset.rosterId = selectedTruck ? String(selectedTruck.id) : "";
+    card.hqRemoveTruckButton.dataset.rosterId = selectedTruck ? String(selectedTruck.id) : "";
+    card.hqDispatchSquadButton.dataset.squadId = selectedSquad ? String(selectedSquad.id) : "";
+    card.hqRecallSquadButton.dataset.squadId = selectedSquad ? String(selectedSquad.id) : "";
+    card.hqAssignTruckButton.disabled = !selectedTruck || selectedTruck.status !== "available";
+    card.hqRemoveTruckButton.disabled = !selectedTruck || selectedTruck.status !== "available" || selectedTruck.squadId === null;
+    card.hqDispatchSquadButton.disabled = !selectedSquad || selectedSquad.truckRosterIds.length === 0;
+    card.hqRecallSquadButton.disabled = !selectedSquad || !world.commandUnits.some((entry) => entry.squadId === selectedSquad.id);
+    const recruitButtons = [card.hqRecruitTruckButton, card.hqRecruitFirefighterButton];
+    const trainButtons = [card.hqTrainSpeedButton, card.hqTrainPowerButton, card.hqTrainRangeButton, card.hqTrainResilienceButton];
+    recruitButtons.forEach((button) => {
+      button.disabled = !maintenanceOpen;
+      button.title = maintenanceOpen ? "" : "Only available during maintenance.";
+    });
+    trainButtons.forEach((button) => {
+      button.disabled = !maintenanceOpen;
+      button.title = maintenanceOpen ? "" : "Only available during maintenance.";
+    });
+  };
+
   const updateTownCardLayout = (townId: number, snapshot: TownUiSnapshot, card: TownCardElements): void => {
     const town = getTownById(townId);
     if (!town) {
@@ -3553,6 +3746,7 @@ export const createThreeTest = (
       return;
     }
     card.name.textContent = town.name;
+    renderHeadquartersControls(town.id, card);
     card.dot.className = `three-test-town-dot ${snapshot.threatClass}`;
     card.dot.title = `Fire threat: ${snapshot.threatLabel}`;
     card.postureChip.className = `three-test-town-card-chip posture-${snapshot.posture}`;
@@ -3722,6 +3916,43 @@ export const createThreeTest = (
       playUiCue("click");
       inputState.lastInteractionTime = performance.now();
     });
+    [
+      card.hqCreateSquadButton,
+      card.hqRenameSquadButton,
+      card.hqAssignTruckButton,
+      card.hqRemoveTruckButton,
+      card.hqDispatchSquadButton,
+      card.hqRecallSquadButton,
+      card.hqRecruitFirefighterButton,
+      card.hqRecruitTruckButton,
+      card.hqTrainSpeedButton,
+      card.hqTrainPowerButton,
+      card.hqTrainRangeButton,
+      card.hqTrainResilienceButton
+    ].forEach((button) => {
+      button.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        if (button.disabled) {
+          return;
+        }
+        playUiCue("confirm");
+        inputState.lastInteractionTime = performance.now();
+        const action = button.dataset.action;
+        if (!action) {
+          return;
+        }
+        const payload: Record<string, string> = {};
+        if (button.dataset.squadId) {
+          payload.squadId = button.dataset.squadId;
+        }
+        if (button.dataset.rosterId) {
+          payload.rosterId = button.dataset.rosterId;
+        }
+        dispatchSelectionAction(action, payload);
+        updateTownMetrics();
+      });
+    });
     card.pinButton.addEventListener("click", (event) => {
       event.preventDefault();
       event.stopPropagation();
@@ -3816,13 +4047,16 @@ export const createThreeTest = (
     event.preventDefault();
     event.stopPropagation();
     playUiCue("confirm");
-    dispatchBaseAction("deploy-truck");
+    dispatchBaseAction("squad-dispatch");
   });
   fireAlertCardElements.deployCrewButton.addEventListener("click", (event) => {
     event.preventDefault();
     event.stopPropagation();
     playUiCue("confirm");
-    dispatchBaseAction("deploy-firefighter");
+    const hqTownId = resolveHeadquartersTownId(world);
+    if (hqTownId !== null) {
+      openTownCard(hqTownId);
+    }
   });
   fireAlertCardElements.dismissButton.addEventListener("click", (event) => {
     event.preventDefault();
@@ -3837,6 +4071,12 @@ export const createThreeTest = (
   });
 
   const updateBaseCardState = (): void => {
+    if (!baseAnchor) {
+      baseCardElements.root.classList.add("hidden");
+      baseCardElements.connector.style.display = "none";
+      baseCardElements.cardRoot.classList.add("hidden");
+      return;
+    }
     const snapshot = worldCardState.get(baseCardId);
     baseCardElements.cardRoot.classList.toggle("hidden", snapshot.visual !== "expanded");
     baseCardElements.root.classList.toggle("is-selected", snapshot.visual === "expanded");
@@ -4091,6 +4331,10 @@ export const createThreeTest = (
       dot.className = "three-test-town-dot is-low";
       const name = document.createElement("span");
       name.className = "three-test-town-name";
+      const hqBadge = document.createElement("span");
+      hqBadge.className = "three-test-town-hq-badge hidden";
+      hqBadge.textContent = "HQ";
+      hqBadge.title = "Headquarters";
       const meta = document.createElement("div");
       meta.className = "three-test-town-nameplate-meta";
       const metaText = document.createElement("span");
@@ -4098,7 +4342,7 @@ export const createThreeTest = (
       const metaAlert = document.createElement("span");
       metaAlert.className = "three-test-town-alert-badge alert-0";
       meta.append(metaText, metaAlert);
-      compact.append(dot, name);
+      compact.append(dot, name, hqBadge);
       mainButton.append(compact);
       root.append(mainButton, meta);
       const clearTownLabelFocus = (): void => {
@@ -4133,6 +4377,7 @@ export const createThreeTest = (
         mainButton,
         dot,
         name,
+        hqBadge,
         meta,
         metaText,
         metaAlert
@@ -4166,6 +4411,8 @@ export const createThreeTest = (
       const compactAlertLabel = getCompactAlertLabel(snapshot.posture);
       entry.dot.className = `three-test-town-dot ${snapshot.threatClass}`;
       entry.name.textContent = town.name;
+      const isHq = isHeadquartersTown(world, town.id);
+      entry.hqBadge.classList.toggle("hidden", !isHq);
       entry.metaText.textContent = formatTownHoverPeekRow(snapshot);
       entry.metaAlert.className = `three-test-town-alert-badge alert-${snapshot.posture}`;
       entry.metaAlert.textContent = `[${compactAlertLabel}]`;
@@ -5125,7 +5372,7 @@ export const createThreeTest = (
     baseLabelWorld.set(baseWorldX, baseLabelLayout.labelY, baseWorldZ);
     baseLabelProjected.copy(baseLabelWorld).project(camera);
     baseConnectorProjected.copy(baseConnectorWorld).project(camera);
-    const baseVisible =
+    const baseVisible = false &&
       baseLabelProjected.z > -1 &&
       baseLabelProjected.z < 1 &&
       baseLabelProjected.x >= -1.1 &&
@@ -5441,6 +5688,7 @@ export const createThreeTest = (
 
   let terrainMesh: THREE.Mesh | null = null;
   let terrainRoadOverlayMesh: THREE.Mesh | null = null;
+  const pendingTerrainTextureDisposals: PendingTerrainTextureDisposal[] = [];
   const waterSystem = new ThreeTestWaterSystem({
     scene,
     renderer,
@@ -6948,6 +7196,7 @@ export const createThreeTest = (
     scene.remove(seasonalSky.mesh);
     seasonalSky.dispose();
     waterSystem.dispose();
+    disposeQueuedTerrainTextures(pendingTerrainTextureDisposals);
     renderer.dispose();
   };
 
@@ -7342,6 +7591,7 @@ export const createThreeTest = (
     if (!THREE_TEST_DISABLE_HUD) {
       renderer.render(uiScene, uiCamera);
     }
+    flushTerrainTextureDisposals(pendingTerrainTextureDisposals);
     threePerf.uiRenderMs = smoothPerf(threePerf.uiRenderMs, performance.now() - uiRenderStart);
     threePerf.totalCalls = smoothPerf(threePerf.totalCalls, renderer.info.render.calls);
     threePerf.memoryGeometries = smoothPerf(threePerf.memoryGeometries, renderer.info.memory.geometries);
@@ -7569,7 +7819,12 @@ export const createThreeTest = (
   };
 
   const setBaseCardOpen = (open: boolean): void => {
-    setBaseCardOpenInternal(open);
+    const hqTownId = resolveHeadquartersTownId(world);
+    if (open && hqTownId !== null) {
+      openTownCard(hqTownId);
+      return;
+    }
+    setBaseCardOpenInternal(false);
   };
 
   const setTerrainWaterDebugControls = (controls: Partial<TerrainWaterDebugControls>): void => {
@@ -8135,25 +8390,8 @@ export const createThreeTest = (
       recordTerrainSetTiming("texture", performance.now() - textureStartedAt);
       const textureSwapStartedAt = performance.now();
       if (tileTexture !== currentTexture) {
-        const material = terrainMesh.material;
-        let previousMap: THREE.Texture | null = null;
-        const applyMap = (mat: THREE.Material) => {
-          const textured = mat as THREE.Material & { map?: THREE.Texture | null };
-          if (!previousMap && textured.map) {
-            previousMap = textured.map;
-          }
-          textured.map = tileTexture;
-          mat.needsUpdate = true;
-        };
-        if (Array.isArray(material)) {
-          material.forEach((mat) => applyMap(mat));
-        } else {
-          applyMap(material);
-        }
-        const mapToDispose = previousMap as THREE.Texture | null;
-        if (mapToDispose) {
-          mapToDispose.dispose();
-        }
+        const previousMaps = assignTerrainTextureMap(terrainMesh.material, tileTexture);
+        queueTerrainTextureDisposals(pendingTerrainTextureDisposals, previousMaps);
       }
       recordTerrainSetTiming("textureSwap", performance.now() - textureSwapStartedAt);
     }

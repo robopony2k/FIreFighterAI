@@ -504,3 +504,17 @@ Migration guidance:
 1. Add future perks and unlocks to `src/config/progression/techTreeCatalog.ts` with stable graph and layout metadata.
 2. Gate player-facing features through progression capability IDs rather than checking node IDs in UI or rendering code.
 3. Use the progression graph helpers for eligibility, snapshots, and validation; do not recreate a separate flat reward pool.
+
+## Separate Base Ops Selection and Per-Unit Deployment
+
+Status: Deprecated as of June 30, 2026.
+
+- Base Ops no longer has its own competing world banner or separate card.
+- The physical base remains visible, but headquarters ownership is represented on the owning town with an `HQ` badge.
+- Fire response deployment should flow through persistent HQ squads and the bottom command tray rather than deploying individual trucks or crews one by one from a Base Ops card.
+
+Migration guidance:
+
+1. Add future recruitment, training, squad, and dispatch controls to the unified HQ town panel or the bottom command tray.
+2. Keep non-HQ town panels focused on town commands such as evacuation.
+3. Do not restore separate Base Ops click priority, duplicate Base Ops labels, or one-by-one truck deployment as the primary response workflow.

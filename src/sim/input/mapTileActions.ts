@@ -1,7 +1,7 @@
 import { setStatus } from "../../core/state.js";
 import type { WorldState } from "../../core/state.js";
 import type { InputState } from "../../core/inputState.js";
-import type { AreaTarget, CommandIntent, CommandType, LineTarget, Point, RNG, Unit } from "../../core/types.js";
+import type { AreaTarget, CommandFormation, CommandIntent, CommandType, LineTarget, Point, RNG, Unit } from "../../core/types.js";
 import { handleUnitDeployment } from "../index.js";
 import { igniteDebugFireAt } from "../fire/debugIgnite.js";
 import { selectTownEvacuationDestination } from "../../systems/evacuation/controllers/evacuationController.js";
@@ -17,6 +17,7 @@ import {
   setDeployMode,
   toggleUnitSelection
 } from "../units.js";
+import { dispatchSquadToTile } from "../../systems/units/controllers/squadController.js";
 
 export type MapTile = { x: number; y: number };
 export type MapInputAction = "select" | "deploy" | "retask" | "formation" | "clearFuelBreak";
@@ -107,7 +108,7 @@ const makePointIntent = (
       kind: "point",
       point: { x: tile.x, y: tile.y }
     },
-    formation: "loose",
+    formation: inputState.dispatchFormation ?? "line",
     behaviourMode:
       inputState.commandMode === null && resolvedType === "suppress" && (state.tileFire[tile.y * state.grid.cols + tile.x] ?? 0) > 0.45
         ? "aggressive"
@@ -119,7 +120,8 @@ const makeLineIntent = (
   state: WorldState,
   inputState: InputState,
   start: MapTile,
-  end: MapTile
+  end: MapTile,
+  formation: CommandFormation = inputState.dispatchFormation ?? "line"
 ): CommandIntent => {
   const target: LineTarget = {
     kind: "line",
@@ -129,7 +131,7 @@ const makeLineIntent = (
   return {
     type: inputState.commandMode ?? "contain",
     target,
-    formation: "line",
+    formation,
     behaviourMode: inputState.behaviourMode
   };
 };
@@ -174,6 +176,14 @@ export const handleMapPrimaryTileClick = ({
     runAction({ gate }, "select", () => {
       if (selectTownEvacuationDestination(state, inputState.evacuationDestinationTownId!, tile)) {
         inputState.evacuationDestinationTownId = null;
+      }
+    });
+    return true;
+  }
+  if (inputState.pendingSquadDispatchId !== null) {
+    runAction({ gate }, "deploy", () => {
+      if (dispatchSquadToTile(state, rng, inputState.pendingSquadDispatchId!, tile, inputState.dispatchFormation)) {
+        inputState.pendingSquadDispatchId = null;
       }
     });
     return true;
@@ -240,6 +250,7 @@ export const handleMapRetaskTileCommand = ({ state, inputState, tile, gate }: Ha
 
 export type HandleMapFormationDragCommandParams = {
   state: WorldState;
+  rng?: RNG;
   start: MapTile;
   end: MapTile;
   gate?: MapActionGate;
@@ -247,11 +258,24 @@ export type HandleMapFormationDragCommandParams = {
 
 export const handleMapFormationDragCommand = ({
   state,
+  rng,
   inputState,
   start,
   end,
   gate
 }: HandleMapFormationDragCommandParams & { inputState: InputState }): boolean => {
+  if (inputState.pendingSquadDispatchId !== null) {
+    if (!rng) {
+      setStatus(state, "Squad dispatch is unavailable from this view.");
+      return false;
+    }
+    runAction({ gate }, "formation", () => {
+      if (dispatchSquadToTile(state, rng, inputState.pendingSquadDispatchId!, start, inputState.dispatchFormation, end)) {
+        inputState.pendingSquadDispatchId = null;
+      }
+    });
+    return true;
+  }
   if (state.selectedUnitIds.length === 0) {
     return false;
   }
@@ -262,7 +286,7 @@ export const handleMapFormationDragCommand = ({
   runAction({ gate }, "formation", () => {
     const dx = Math.abs(end.x - start.x);
     const dy = Math.abs(end.y - start.y);
-    if (dx >= 2 && dy >= 2) {
+    if (inputState.commandMode === "backburn" && dx >= 2 && dy >= 2) {
       applyCommandIntentToSelection(state, makeAreaIntent(state, inputState, start, end));
       return;
     }

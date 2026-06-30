@@ -153,6 +153,12 @@ export const applyCommandIntentToSelection = (state: WorldState, intent: Command
   selectedCommandUnits.forEach((commandUnit) => {
     commandUnit.currentIntent = cloneCommandIntent(intent);
     commandUnit.revision += 1;
+    const squad =
+      commandUnit.squadId !== null ? state.squads.find((entry) => entry.id === commandUnit.squadId) ?? null : null;
+    if (squad) {
+      squad.currentIntent = cloneCommandIntent(intent);
+      squad.revision += 1;
+    }
   });
   clearTruckOverrideIntents(
     state,

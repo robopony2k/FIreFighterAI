@@ -2,6 +2,9 @@ import type { CommandIntent, CommandUnit, CommandUnitStatus, Unit } from "../../
 import type { WorldState } from "../../../core/state.js";
 import { COMMAND_UNIT_NAMES } from "../constants/runtimeConstants.js";
 import { getCommandUnitById, getTruckSortKey, getUnitById } from "../utils/unitLookup.js";
+import { ensureDefaultSquads, getSquadById } from "../controllers/squadController.js";
+
+const FALLBACK_TRUCKS_PER_COMMAND_UNIT = 5;
 
 const getCommandUnitName = (index: number): string => {
   if (index < COMMAND_UNIT_NAMES.length) {
@@ -9,6 +12,8 @@ const getCommandUnitName = (index: number): string => {
   }
   return `Unit ${index + 1}`;
 };
+
+const getFallbackCommandUnitName = (index: number): string => getCommandUnitName(index);
 
 const normalizeCommandUnitSelection = (state: WorldState): void => {
   const validCommandUnitIds = new Set(state.commandUnits.map((entry) => entry.id));
@@ -46,10 +51,16 @@ export const syncMirroredTruckSelection = (state: WorldState): void => {
 };
 
 export const syncCommandUnits = (state: WorldState): void => {
+  ensureDefaultSquads(state);
   const deployedTrucks = state.units
     .filter((unit) => unit.kind === "truck")
     .sort((left, right) => getTruckSortKey(left) - getTruckSortKey(right));
-  const previousByName = new Map(state.commandUnits.map((entry, index) => [entry.name, { entry, index }] as const));
+  const previousBySquadId = new Map(
+    state.commandUnits
+      .filter((entry) => entry.squadId !== null)
+      .map((entry) => [entry.squadId as number, entry] as const)
+  );
+  const previousFallback = state.commandUnits.filter((entry) => entry.squadId === null);
   if (deployedTrucks.length === 0) {
     state.commandUnits = [];
     state.selectedCommandUnitIds = [];
@@ -60,24 +71,53 @@ export const syncCommandUnits = (state: WorldState): void => {
     return;
   }
 
-  const nextGroupCount =
-    deployedTrucks.length <= 1
-      ? 1
-      : Math.min(deployedTrucks.length, Math.max(2, Math.min(5, Math.ceil(deployedTrucks.length / 5))));
   const nextCommandUnits: CommandUnit[] = [];
-  let cursor = 0;
-  for (let groupIndex = 0; groupIndex < nextGroupCount; groupIndex += 1) {
-    const remainingGroups = nextGroupCount - groupIndex;
-    const remainingTrucks = deployedTrucks.length - cursor;
-    const chunkSize = Math.max(1, Math.ceil(remainingTrucks / remainingGroups));
-    const chunk = deployedTrucks.slice(cursor, cursor + chunkSize);
-    cursor += chunkSize;
-    const name = getCommandUnitName(groupIndex);
-    const previous = previousByName.get(name)?.entry ?? null;
+  const trucksBySquadId = new Map<number, Unit[]>();
+  const fallbackTrucks: Unit[] = [];
+  deployedTrucks.forEach((truck) => {
+    const rosterTruck = truck.rosterId !== null ? state.roster.find((entry) => entry.id === truck.rosterId) ?? null : null;
+    const squad = getSquadById(state, rosterTruck?.squadId ?? null);
+    if (!squad) {
+      fallbackTrucks.push(truck);
+      return;
+    }
+    const bucket = trucksBySquadId.get(squad.id) ?? [];
+    bucket.push(truck);
+    trucksBySquadId.set(squad.id, bucket);
+  });
+
+  state.squads.forEach((squad) => {
+    const chunk = trucksBySquadId.get(squad.id) ?? [];
+    if (chunk.length === 0) {
+      return;
+    }
+    const previous = previousBySquadId.get(squad.id) ?? null;
     nextCommandUnits.push({
       id: previous?.id ?? state.nextCommandUnitId++,
-      name,
+      squadId: squad.id,
+      homeTownId: squad.homeTownId,
+      name: squad.name,
       truckIds: chunk.map((unit) => unit.id),
+      currentIntent: previous?.currentIntent ?? squad.currentIntent ?? null,
+      status: previous?.status ?? squad.status ?? "holding",
+      revision: (previous?.revision ?? 0) + 1
+    });
+  });
+
+  for (let index = 0; index < fallbackTrucks.length; index += FALLBACK_TRUCKS_PER_COMMAND_UNIT) {
+    const chunk = fallbackTrucks.slice(index, index + FALLBACK_TRUCKS_PER_COMMAND_UNIT);
+    const fallbackIndex = Math.floor(index / FALLBACK_TRUCKS_PER_COMMAND_UNIT);
+    const previous = previousFallback[fallbackIndex] ?? null;
+    const commandUnitIndex = nextCommandUnits.length;
+    if (chunk.length === 0) {
+      continue;
+    }
+    nextCommandUnits.push({
+      id: previous?.id ?? state.nextCommandUnitId++,
+      squadId: null,
+      homeTownId: state.headquartersTownId,
+      name: previous?.name ?? getFallbackCommandUnitName(commandUnitIndex),
+      truckIds: chunk.map((truck) => truck.id),
       currentIntent: previous?.currentIntent ?? null,
       status: previous?.status ?? "holding",
       revision: (previous?.revision ?? 0) + 1
@@ -103,6 +143,13 @@ export const syncCommandUnits = (state: WorldState): void => {
     });
   });
   state.commandUnits = nextCommandUnits;
+  state.squads.forEach((squad) => {
+    const active = nextCommandUnits.find((entry) => entry.squadId === squad.id) ?? null;
+    if (active) {
+      squad.currentIntent = active.currentIntent;
+      squad.status = active.status;
+    }
+  });
   state.commandUnitsRevision += 1;
   normalizeCommandUnitSelection(state);
   syncMirroredTruckSelection(state);

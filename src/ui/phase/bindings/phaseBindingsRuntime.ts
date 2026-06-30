@@ -1,4 +1,4 @@
-import type { RNG, Formation, Point } from "../../../core/types.js";
+import type { CommandIntent, RNG, Formation, Point } from "../../../core/types.js";
 import type { WorldState } from "../../../core/state.js";
 import type { InputState } from "../../../core/inputState.js";
 import type { UiState } from "../../../core/uiState.js";
@@ -26,6 +26,7 @@ import {
 } from "../../../sim/index.js";
 import {
   assignRosterCrew,
+  applyCommandIntentToSelection,
   clearSelectedTruckOverrides,
   recruitUnit,
   selectCommandUnit,
@@ -72,6 +73,14 @@ import {
   returnTownEvacuationHome,
   selectTownEvacuationDestination
 } from "../../../systems/evacuation/controllers/evacuationController.js";
+import {
+  assignRosterTruckToSelectedSquad,
+  createSquad,
+  ensureDefaultSquads,
+  removeRosterTruckFromSquad,
+  renameSelectedSquad,
+  selectSquad
+} from "../../../systems/units/controllers/squadController.js";
 import {
   getRuntimeSettings,
   setRuntimeSetting,
@@ -131,6 +140,9 @@ const getInteractionMode = (state: WorldState, inputState: InputState): Interact
     return "fuelBreak";
   }
   if (state.deployMode === "firefighter" || state.deployMode === "truck") {
+    return "deploy";
+  }
+  if (inputState.pendingSquadDispatchId !== null) {
     return "deploy";
   }
   if (inputState.formationStart) {
@@ -522,7 +534,8 @@ export const bindPhaseUi = ({
       action === "time-advance-next-event" ||
       action === "time-speed-step" ||
       /^time-speed-\d+$/.test(action) ||
-      /^formation-(narrow|medium|wide)$/.test(action)
+      /^formation-(narrow|medium|wide)$/.test(action) ||
+      /^dispatch-formation-(line|wedge|arc)$/.test(action)
     ) {
       return "toggle";
     }
@@ -539,6 +552,11 @@ export const bindPhaseUi = ({
     if (
       /^deploy-(firefighter|truck)$/.test(action) ||
       /^recruit-(firefighter|truck)$/.test(action) ||
+      action === "squad-create" ||
+      action === "squad-assign-truck" ||
+      action === "squad-remove-truck" ||
+      action === "squad-dispatch" ||
+      action === "squad-recall" ||
       /^train-(speed|power|range|resilience)$/.test(action) ||
       action === "progression-open" ||
       action === "progression-pick" ||
@@ -879,6 +897,27 @@ export const bindPhaseUi = ({
       }
       return;
     }
+    if (resolvedAction === "select-squad") {
+      const id = Number(actionTarget?.dataset.squadId ?? "");
+      if (Number.isFinite(id)) {
+        gate("select", () => {
+          selectSquad(state, id);
+          inputState.pendingSquadDispatchId = null;
+          phaseUi.sync(state, inputState);
+        });
+      }
+      return;
+    }
+    if (resolvedAction === "select-roster-id") {
+      const id = Number(actionTarget?.dataset.rosterId ?? "");
+      if (Number.isFinite(id)) {
+        state.selectedRosterId = id;
+        const roster = state.roster.find((entry) => entry.id === id) ?? null;
+        setStatus(state, roster ? `${roster.name} selected.` : "Roster unit selected.");
+        phaseUi.sync(state, inputState);
+      }
+      return;
+    }
     if (resolvedAction === "select-truck") {
       const id = Number(actionTarget?.dataset.truckId ?? "");
       if (Number.isFinite(id)) {
@@ -915,6 +954,13 @@ export const bindPhaseUi = ({
       phaseUi.sync(state, inputState);
       return;
     }
+    const dispatchFormationMatch = resolvedAction.match(/^dispatch-formation-(line|wedge|arc)$/);
+    if (dispatchFormationMatch) {
+      inputState.dispatchFormation = dispatchFormationMatch[1] as InputState["dispatchFormation"];
+      setStatus(state, `${dispatchFormationMatch[1][0]!.toUpperCase()}${dispatchFormationMatch[1].slice(1)} dispatch formation selected.`);
+      phaseUi.sync(state, inputState);
+      return;
+    }
     const commandModeMatch = resolvedAction.match(/^command-mode-(move|suppress|contain|backburn)$/);
     if (commandModeMatch) {
       inputState.commandMode = commandModeMatch[1] as InputState["commandMode"];
@@ -937,6 +983,74 @@ export const bindPhaseUi = ({
         clearSelectedTruckOverrides(state);
       });
       phaseUi.sync(state, inputState);
+      return;
+    }
+    if (resolvedAction === "squad-create") {
+      gate("select", () => {
+        createSquad(state);
+        phaseUi.sync(state, inputState);
+      });
+      return;
+    }
+    if (resolvedAction === "squad-rename") {
+      gate("select", () => {
+        renameSelectedSquad(state);
+        phaseUi.sync(state, inputState);
+      });
+      return;
+    }
+    if (resolvedAction === "squad-assign-truck") {
+      const rosterId = Number(actionTarget?.dataset.rosterId ?? state.selectedRosterId ?? "");
+      if (Number.isFinite(rosterId)) {
+        gate("select", () => {
+          assignRosterTruckToSelectedSquad(state, rosterId);
+          phaseUi.sync(state, inputState);
+        });
+      }
+      return;
+    }
+    if (resolvedAction === "squad-remove-truck") {
+      const rosterId = Number(actionTarget?.dataset.rosterId ?? state.selectedRosterId ?? "");
+      if (Number.isFinite(rosterId)) {
+        gate("select", () => {
+          removeRosterTruckFromSquad(state, rosterId);
+          phaseUi.sync(state, inputState);
+        });
+      }
+      return;
+    }
+    if (resolvedAction === "squad-dispatch") {
+      ensureDefaultSquads(state);
+      const squadId = Number(actionTarget?.dataset.squadId ?? state.selectedSquadId ?? "");
+      if (Number.isFinite(squadId)) {
+        inputState.pendingSquadDispatchId = squadId;
+        selectSquad(state, squadId);
+        setDeployMode(state, null);
+        setStatus(state, "Click a world location to dispatch the selected squad.");
+        phaseUi.sync(state, inputState);
+      }
+      return;
+    }
+    if (resolvedAction === "squad-recall") {
+      ensureDefaultSquads(state);
+      const squadId = Number(actionTarget?.dataset.squadId ?? state.selectedSquadId ?? "");
+      const squad = state.squads.find((entry) => entry.id === squadId) ?? null;
+      const commandUnit = state.commandUnits.find((entry) => entry.squadId === squadId) ?? null;
+      if (squad && commandUnit) {
+        gate("retask", () => {
+          selectCommandUnit(state, commandUnit.id);
+          inputState.pendingSquadDispatchId = null;
+          const intent: CommandIntent = {
+            type: "move",
+            target: { kind: "point", point: { x: state.basePoint.x, y: state.basePoint.y } },
+            formation: inputState.dispatchFormation,
+            behaviourMode: "balanced"
+          };
+          applyCommandIntentToSelection(state, intent);
+          setStatus(state, `${squad.name} returning to HQ.`);
+          phaseUi.sync(state, inputState);
+        });
+      }
       return;
     }
     if (resolvedAction === "recruit-firefighter") {
@@ -1167,6 +1281,7 @@ export const bindPhaseUi = ({
         noteInteraction();
         handleMapFormationDragCommand({
           state,
+          rng,
           inputState,
           start: command.start,
           end: command.end,

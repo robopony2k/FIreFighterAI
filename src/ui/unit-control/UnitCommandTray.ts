@@ -4,6 +4,7 @@ import type { WorldState } from "../../core/state.js";
 import type {
   BehaviourMode,
   CommandIntent,
+  CommandFormation,
   CommandType,
   CommandUnit,
   CommandUnitAlert,
@@ -73,6 +74,16 @@ const BEHAVIOUR_BUTTONS: ReadonlyArray<{ label: string; action: string; mode: Be
   { label: "Aggressive", action: "behaviour-aggressive", mode: "aggressive" },
   { label: "Balanced", action: "behaviour-balanced", mode: "balanced" },
   { label: "Defensive", action: "behaviour-defensive", mode: "defensive" }
+];
+
+const DISPATCH_FORMATION_BUTTONS: ReadonlyArray<{
+  label: string;
+  action: string;
+  formation: Extract<CommandFormation, "line" | "wedge" | "arc">;
+}> = [
+  { label: "Line", action: "dispatch-formation-line", formation: "line" },
+  { label: "Wedge", action: "dispatch-formation-wedge", formation: "wedge" },
+  { label: "Arc", action: "dispatch-formation-arc", formation: "arc" }
 ];
 
 const getUnitLabel = (state: WorldState, unitId: number): string => {
@@ -534,10 +545,13 @@ export const createUnitCommandTray = ({ onAction, onStatus, onSquadHover }: Unit
 
     const hint = document.createElement("div");
     hint.className = "three-test-command-panel-hint";
-    hint.textContent =
-      state.selectionScope === "truck"
-        ? "Truck overrides take priority until rejoined."
-        : "Right-click issues the active command mode.";
+    if (inputState.pendingSquadDispatchId === focusedCommandUnit.squadId) {
+      hint.textContent = "Click the world to place this squad.";
+    } else if (state.selectionScope === "truck") {
+      hint.textContent = "Truck overrides take priority until rejoined.";
+    } else {
+      hint.textContent = "Right-click issues the active command mode.";
+    }
 
     const header = document.createElement("div");
     header.className = "three-test-squad-detail-header";
@@ -596,6 +610,29 @@ export const createUnitCommandTray = ({ onAction, onStatus, onSquadHover }: Unit
     });
     behaviourSection.append(behaviourLabel, behaviourGrid);
     commandPanel.appendChild(behaviourSection);
+
+    const formationSection = document.createElement("div");
+    formationSection.className = "three-test-command-panel-section three-test-command-panel-section--formation";
+    const formationLabel = document.createElement("div");
+    formationLabel.className = "three-test-command-panel-label";
+    formationLabel.textContent = `Formation ${inputState.dispatchFormation}`;
+    const formationGrid = document.createElement("div");
+    formationGrid.className = "three-test-command-panel-grid three-test-command-panel-grid--triple";
+    DISPATCH_FORMATION_BUTTONS.forEach((spec) => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "three-test-command-button three-test-command-button--secondary";
+      button.classList.toggle("is-active", inputState.dispatchFormation === spec.formation);
+      button.textContent = spec.label;
+      button.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        onAction(spec.action);
+      });
+      formationGrid.appendChild(button);
+    });
+    formationSection.append(formationLabel, formationGrid);
+    commandPanel.appendChild(formationSection);
 
     if (state.selectionScope === "truck" && state.selectedTruckIds.length > 0) {
       const overrideSection = document.createElement("div");

@@ -12,6 +12,7 @@ import { FIRST_NAMES, LAST_NAMES, TRUCK_PREFIX } from "../constants/runtimeConst
 import { clamp } from "../utils/unitMath.js";
 import { getRosterFirefighter, getRosterTruck, getRosterUnit } from "../utils/unitLookup.js";
 import { buildUnitDerivedStats, createTraining } from "../utils/unitStats.js";
+import { ensureDefaultSquads } from "./squadController.js";
 
 const unassignRosterFirefighter = (state: WorldState, firefighter: RosterUnit): void => {
   if (firefighter.assignedTruckId === null) {
@@ -96,6 +97,7 @@ export function seedStartingRoster(state: WorldState, rng: RNG): void {
     firefighter.assignedTruckId = truck.id;
     truck.crewIds.push(firefighter.id);
   });
+  ensureDefaultSquads(state);
 }
 
 export function recruitUnit(state: WorldState, rng: RNG, kind: UnitKind, free = false): boolean {
@@ -114,6 +116,7 @@ export function recruitUnit(state: WorldState, rng: RNG, kind: UnitKind, free = 
     name: kind === "truck" ? nextTruckName(state) : nextFirefighterName(rng),
     training: createTraining(),
     status: "available",
+    squadId: null,
     assignedTruckId: null,
     crewIds: [],
     formation: "medium"
@@ -121,6 +124,9 @@ export function recruitUnit(state: WorldState, rng: RNG, kind: UnitKind, free = 
   state.nextRosterId += 1;
   state.roster.push(entry);
   state.selectedRosterId = entry.id;
+  if (entry.kind === "truck") {
+    ensureDefaultSquads(state);
+  }
   if (!free) {
     state.budget -= cost;
   }

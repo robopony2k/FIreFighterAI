@@ -88,6 +88,53 @@ const resolveLineSlotTarget = (state: WorldState, target: LineTarget, count: num
   return findNearestPassable(state, rawX, rawY, 2) ?? getCommandTargetCenter(target);
 };
 
+const getOrientation = (target: CommandTarget): { center: Point; forwardX: number; forwardY: number } => {
+  if (target.kind === "line") {
+    const dx = target.end.x - target.start.x;
+    const dy = target.end.y - target.start.y;
+    const length = Math.max(1, Math.hypot(dx, dy));
+    return {
+      center: target.end,
+      forwardX: dx / length,
+      forwardY: dy / length
+    };
+  }
+  const center = getCommandTargetCenter(target);
+  return { center, forwardX: 0, forwardY: -1 };
+};
+
+const resolveWedgeSlotTarget = (state: WorldState, target: CommandTarget, count: number, index: number): Point => {
+  const { center, forwardX, forwardY } = getOrientation(target);
+  if (count <= 1) {
+    return findNearestPassable(state, center.x, center.y, 2) ?? center;
+  }
+  const side = index % 2 === 0 ? -1 : 1;
+  const rank = Math.floor((index + 1) / 2);
+  const perpendicularX = -forwardY;
+  const perpendicularY = forwardX;
+  const spread = Math.max(1, rank) * 2;
+  const back = Math.max(1, rank) * 2;
+  const rawX = Math.round(center.x + perpendicularX * side * spread - forwardX * back);
+  const rawY = Math.round(center.y + perpendicularY * side * spread - forwardY * back);
+  return findNearestPassable(state, rawX, rawY, 3) ?? center;
+};
+
+const resolveArcSlotTarget = (state: WorldState, target: CommandTarget, count: number, index: number): Point => {
+  const { center, forwardX, forwardY } = getOrientation(target);
+  if (count <= 1) {
+    return findNearestPassable(state, center.x, center.y, 2) ?? center;
+  }
+  const radius = Math.max(2, Math.min(6, count + 1));
+  const arcWidth = Math.PI * 0.9;
+  const t = count <= 1 ? 0.5 : index / Math.max(1, count - 1);
+  const angleOffset = (t - 0.5) * arcWidth;
+  const baseAngle = Math.atan2(forwardY, forwardX) + Math.PI;
+  const angle = baseAngle + angleOffset;
+  const rawX = Math.round(center.x + Math.cos(angle) * radius);
+  const rawY = Math.round(center.y + Math.sin(angle) * radius);
+  return findNearestPassable(state, rawX, rawY, 3) ?? center;
+};
+
 export const resolveIntentSlotTarget = (
   state: WorldState,
   intent: CommandIntent,
@@ -99,6 +146,12 @@ export const resolveIntentSlotTarget = (
   }
   if (intent.formation === "line" && intent.target.kind === "line") {
     return resolveLineSlotTarget(state, intent.target, count, index);
+  }
+  if (intent.formation === "wedge") {
+    return resolveWedgeSlotTarget(state, intent.target, count, index);
+  }
+  if (intent.formation === "arc") {
+    return resolveArcSlotTarget(state, intent.target, count, index);
   }
   return resolveLooseSlotTarget(state, getCommandTargetCenter(intent.target), count, index);
 };
