@@ -31,7 +31,7 @@ import { createVehicleModelLayer, type VehicleModelInstance } from "./vehicleMod
 import type { InputState } from "../core/inputState.js";
 import { indexFor } from "../core/grid.js";
 import { TILE_ID_TO_TYPE, TILE_TYPE_IDS } from "../core/state.js";
-import type { ClimateForecast, CommandType, CommandUnitAlert, CommandUnitStatus, RosterUnit, Town } from "../core/types.js";
+import type { ClimateForecast, CommandType, CommandUnitAlert, CommandUnitStatus, Town } from "../core/types.js";
 import type { RenderSim } from "./simView.js";
 import { createHudState, setHudViewport, type HudTheme } from "./hud/hudState.js";
 import { handleHudClick, handleHudKey, renderHud } from "./hud/hud.js";
@@ -44,6 +44,14 @@ import {
   MINIMAP_MODE_CAPABILITIES,
   type MinimapMode
 } from "../ui/runtime/minimap/minimapModes.js";
+import { createFacilityPanel, renderFacilityPanel, type FacilityPanelElements } from "../ui/runtime/town-panel/facilityPanel.js";
+import { collectTownFacilities } from "../ui/runtime/town-panel/facilityRegistry.js";
+import {
+  createTownFacilitiesSection,
+  renderTownFacilitiesSection,
+  type TownFacilitiesSectionElements
+} from "../ui/runtime/town-panel/townFacilitiesSection.js";
+import type { SelectedTownFacility, TownFacilityDescriptor, TownFacilityTabId } from "../ui/runtime/town-panel/types.js";
 import { hasProgressionCapability } from "../systems/progression/sim/techTree.js";
 import {
   DEFAULT_THERMAL_PALETTE,
@@ -69,7 +77,7 @@ import {
   getTownThreatLevel
 } from "../sim/towns.js";
 import { isAdvanceToNextEventAvailable } from "../sim/index.js";
-import { ensureDefaultSquads, isHeadquartersTown, resolveHeadquartersTownId } from "../systems/units/index.js";
+import { isHeadquartersTown, resolveHeadquartersTownId } from "../systems/units/index.js";
 import {
   applyTerrainSurfaceColors,
   buildPalette,
@@ -1043,22 +1051,7 @@ export const createThreeTest = (
     cancelEvacuationMeta: HTMLSpanElement;
     upgradeButton: HTMLButtonElement;
     upgradeMeta: HTMLSpanElement;
-    hqSection: HTMLDivElement;
-    hqSummary: HTMLDivElement;
-    hqSquadList: HTMLDivElement;
-    hqTruckList: HTMLDivElement;
-    hqCreateSquadButton: HTMLButtonElement;
-    hqRenameSquadButton: HTMLButtonElement;
-    hqAssignTruckButton: HTMLButtonElement;
-    hqRemoveTruckButton: HTMLButtonElement;
-    hqDispatchSquadButton: HTMLButtonElement;
-    hqRecallSquadButton: HTMLButtonElement;
-    hqRecruitFirefighterButton: HTMLButtonElement;
-    hqRecruitTruckButton: HTMLButtonElement;
-    hqTrainSpeedButton: HTMLButtonElement;
-    hqTrainPowerButton: HTMLButtonElement;
-    hqTrainRangeButton: HTMLButtonElement;
-    hqTrainResilienceButton: HTMLButtonElement;
+    facilitiesSection: TownFacilitiesSectionElements;
   };
   type TownScreenAnchor = {
     rootX: number;
@@ -1148,6 +1141,8 @@ export const createThreeTest = (
   let baseAnchor: TownScreenAnchor | null = null;
   const pinnedTownCards = new Map<number, TownCardElements>();
   let selectedTownId: number | null = null;
+  let selectedFacility: SelectedTownFacility | null = null;
+  const activeFacilityTabs = new Map<string, TownFacilityTabId>();
   let focusedTownId: number | null = null;
   let baseFocused = false;
   let hoverTownId: number | null = null;
@@ -1251,48 +1246,8 @@ export const createThreeTest = (
       cancelEvacAction.button,
       upgradeAction.button
     );
-    const hqSection = document.createElement("div");
-    hqSection.className = "three-test-hq-section hidden";
-    const hqSummary = document.createElement("div");
-    hqSummary.className = "three-test-hq-summary";
-    const hqSquadList = document.createElement("div");
-    hqSquadList.className = "three-test-hq-list";
-    const hqTruckList = document.createElement("div");
-    hqTruckList.className = "three-test-hq-list";
-    const createHqButton = (label: string, action: string): HTMLButtonElement => {
-      const button = document.createElement("button");
-      button.type = "button";
-      button.className = "three-test-town-card-action three-test-hq-action";
-      button.dataset.action = action;
-      button.textContent = label;
-      return button;
-    };
-    const hqSquadActions = document.createElement("div");
-    hqSquadActions.className = "three-test-town-card-actions three-test-hq-action-grid";
-    const hqCreateSquadButton = createHqButton("New Squad", "squad-create");
-    const hqRenameSquadButton = createHqButton("Rename", "squad-rename");
-    const hqAssignTruckButton = createHqButton("Assign Truck", "squad-assign-truck");
-    const hqRemoveTruckButton = createHqButton("Remove Truck", "squad-remove-truck");
-    hqSquadActions.append(hqCreateSquadButton, hqRenameSquadButton, hqAssignTruckButton, hqRemoveTruckButton);
-    const hqDeployActions = document.createElement("div");
-    hqDeployActions.className = "three-test-town-card-actions three-test-hq-action-grid";
-    const hqDispatchSquadButton = createHqButton("Dispatch", "squad-dispatch");
-    const hqRecallSquadButton = createHqButton("Recall", "squad-recall");
-    hqDeployActions.append(hqDispatchSquadButton, hqRecallSquadButton);
-    const hqRecruitActions = document.createElement("div");
-    hqRecruitActions.className = "three-test-town-card-actions three-test-hq-action-grid";
-    const hqRecruitTruckButton = createHqButton("Recruit Truck", "recruit-truck");
-    const hqRecruitFirefighterButton = createHqButton("Recruit Crew", "recruit-firefighter");
-    hqRecruitActions.append(hqRecruitTruckButton, hqRecruitFirefighterButton);
-    const hqTrainActions = document.createElement("div");
-    hqTrainActions.className = "three-test-town-card-actions three-test-hq-action-grid";
-    const hqTrainSpeedButton = createHqButton("Speed", "train-speed");
-    const hqTrainPowerButton = createHqButton("Power", "train-power");
-    const hqTrainRangeButton = createHqButton("Range", "train-range");
-    const hqTrainResilienceButton = createHqButton("Resilience", "train-resilience");
-    hqTrainActions.append(hqTrainSpeedButton, hqTrainPowerButton, hqTrainRangeButton, hqTrainResilienceButton);
-    hqSection.append(hqSummary, hqSquadList, hqTruckList, hqSquadActions, hqDeployActions, hqRecruitActions, hqTrainActions);
-    townCardRoot.append(townCardHeader, townCardSummary, townCardStatus, townCardEvac, townCardActions, hqSection);
+    const facilitiesSection = createTownFacilitiesSection();
+    townCardRoot.append(townCardHeader, townCardSummary, townCardStatus, townCardEvac, townCardActions, facilitiesSection.root);
     townOverlayRoot.appendChild(townCardRoot);
     return {
       root: townCardRoot,
@@ -1320,26 +1275,13 @@ export const createThreeTest = (
       cancelEvacuationMeta: cancelEvacAction.meta,
       upgradeButton: upgradeAction.button,
       upgradeMeta: upgradeAction.meta,
-      hqSection,
-      hqSummary,
-      hqSquadList,
-      hqTruckList,
-      hqCreateSquadButton,
-      hqRenameSquadButton,
-      hqAssignTruckButton,
-      hqRemoveTruckButton,
-      hqDispatchSquadButton,
-      hqRecallSquadButton,
-      hqRecruitFirefighterButton,
-      hqRecruitTruckButton,
-      hqTrainSpeedButton,
-      hqTrainPowerButton,
-      hqTrainRangeButton,
-      hqTrainResilienceButton
+      facilitiesSection
     };
   };
 
   const townCardElements = createTownCardElements(false);
+  const facilityPanelElements: FacilityPanelElements = createFacilityPanel();
+  townOverlayRoot.appendChild(facilityPanelElements.root);
   const fireAlertCardRoot = document.createElement("div");
   fireAlertCardRoot.className = "three-test-town-card three-test-fire-alert-card hidden";
   const fireAlertHeader = document.createElement("div");
@@ -3639,104 +3581,79 @@ export const createThreeTest = (
     }
   };
 
-  const createHqListButton = (
-    label: string,
-    action: string,
-    payload: Record<string, string>,
-    selected = false
-  ): HTMLButtonElement => {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = "three-test-hq-list-button";
-    button.classList.toggle("is-selected", selected);
-    button.textContent = label;
-    button.addEventListener("click", (event) => {
-      event.preventDefault();
-      event.stopPropagation();
-      playUiCue("click");
-      dispatchSelectionAction(action, payload);
-    });
-    return button;
+  const closeTownFacility = (): void => {
+    selectedFacility = null;
+    facilityPanelElements.root.classList.add("hidden");
+    facilityPanelElements.content.replaceChildren();
   };
 
-  const getSelectedRosterTruck = (): RosterUnit | null => {
-    const selected = world.selectedRosterId !== null
-      ? world.roster.find((entry) => entry.id === world.selectedRosterId) ?? null
-      : null;
-    return selected?.kind === "truck" ? selected : null;
+  const closeTownFacilityForTown = (townId: number): void => {
+    if (selectedFacility?.townId === townId) {
+      closeTownFacility();
+    }
   };
 
-  const renderHeadquartersControls = (townId: number, card: TownCardElements): void => {
-    const isHq = isHeadquartersTown(world, townId);
-    card.hqSection.classList.toggle("hidden", !isHq);
-    card.hqBadge.classList.toggle("hidden", !isHq);
-    if (!isHq) {
+  const openTownFacility = (townId: number, facilityId: string): void => {
+    const town = getTownById(townId);
+    if (!town) {
+      closeTownFacility();
       return;
     }
-    ensureDefaultSquads(world);
-    const availableTrucks = world.roster.filter((entry) => entry.kind === "truck" && entry.status === "available");
-    const deployedTrucks = world.roster.filter((entry) => entry.kind === "truck" && entry.status === "deployed");
-    const selectedSquad = world.squads.find((squad) => squad.id === world.selectedSquadId) ?? world.squads[0] ?? null;
-    const selectedTruck = getSelectedRosterTruck();
-    card.hqSummary.textContent = `HQ | ${world.squads.length} squads | ${availableTrucks.length} ready | ${deployedTrucks.length} field`;
-    card.hqSquadList.replaceChildren();
-    world.squads.forEach((squad) => {
-      const active = world.commandUnits.find((commandUnit) => commandUnit.squadId === squad.id) ?? null;
-      const readyCount = squad.truckRosterIds.filter((id) => {
-        const truck = world.roster.find((entry) => entry.id === id) ?? null;
-        return truck?.status === "available";
-      }).length;
-      const fieldCount = active?.truckIds.length ?? 0;
-      card.hqSquadList.appendChild(
-        createHqListButton(
-          `${squad.name} ${readyCount} ready ${fieldCount} field`,
-          "select-squad",
-          { squadId: String(squad.id) },
-          selectedSquad?.id === squad.id
-        )
-      );
-    });
-    card.hqTruckList.replaceChildren();
-    const truckRows = world.roster
-      .filter((entry) => entry.kind === "truck" && entry.status !== "lost")
-      .sort((left, right) => left.id - right.id);
-    if (truckRows.length === 0) {
-      const empty = document.createElement("div");
-      empty.className = "three-test-hq-empty";
-      empty.textContent = "No trucks recruited.";
-      card.hqTruckList.appendChild(empty);
-    } else {
-      truckRows.forEach((truck) => {
-        const squad = world.squads.find((entry) => entry.id === truck.squadId) ?? null;
-        card.hqTruckList.appendChild(
-          createHqListButton(
-            `${truck.name} | ${truck.status} | ${squad?.name ?? "Unassigned"}`,
-            "select-roster-id",
-            { rosterId: String(truck.id) },
-            selectedTruck?.id === truck.id
-          )
-        );
-      });
+    openTownCard(townId);
+    selectedFacility = { townId, facilityId };
+    activeFacilityTabs.set(facilityId, activeFacilityTabs.get(facilityId) ?? "squads");
+    updateTownMetrics();
+  };
+
+  const renderSelectedFacilityPanel = (): void => {
+    if (!selectedFacility) {
+      facilityPanelElements.root.classList.add("hidden");
+      return;
     }
-    const maintenanceOpen = world.phase === "maintenance";
-    card.hqAssignTruckButton.dataset.rosterId = selectedTruck ? String(selectedTruck.id) : "";
-    card.hqRemoveTruckButton.dataset.rosterId = selectedTruck ? String(selectedTruck.id) : "";
-    card.hqDispatchSquadButton.dataset.squadId = selectedSquad ? String(selectedSquad.id) : "";
-    card.hqRecallSquadButton.dataset.squadId = selectedSquad ? String(selectedSquad.id) : "";
-    card.hqAssignTruckButton.disabled = !selectedTruck || selectedTruck.status !== "available";
-    card.hqRemoveTruckButton.disabled = !selectedTruck || selectedTruck.status !== "available" || selectedTruck.squadId === null;
-    card.hqDispatchSquadButton.disabled = !selectedSquad || selectedSquad.truckRosterIds.length === 0;
-    card.hqRecallSquadButton.disabled = !selectedSquad || !world.commandUnits.some((entry) => entry.squadId === selectedSquad.id);
-    const recruitButtons = [card.hqRecruitTruckButton, card.hqRecruitFirefighterButton];
-    const trainButtons = [card.hqTrainSpeedButton, card.hqTrainPowerButton, card.hqTrainRangeButton, card.hqTrainResilienceButton];
-    recruitButtons.forEach((button) => {
-      button.disabled = !maintenanceOpen;
-      button.title = maintenanceOpen ? "" : "Only available during maintenance.";
-    });
-    trainButtons.forEach((button) => {
-      button.disabled = !maintenanceOpen;
-      button.title = maintenanceOpen ? "" : "Only available during maintenance.";
-    });
+    const town = getTownById(selectedFacility.townId);
+    if (!town) {
+      closeTownFacility();
+      return;
+    }
+    const facility = collectTownFacilities(world, town).find((entry) => entry.id === selectedFacility?.facilityId) ?? null;
+    if (!facility) {
+      closeTownFacility();
+      return;
+    }
+    renderFacilityPanel(
+      facilityPanelElements,
+      world,
+      town,
+      facility,
+      activeFacilityTabs.get(facility.id) ?? "squads",
+      (action, payload) => {
+        playUiCue("confirm");
+        inputState.lastInteractionTime = performance.now();
+        dispatchSelectionAction(action, payload);
+        updateTownMetrics();
+      },
+      (tabId) => {
+        activeFacilityTabs.set(facility.id, tabId);
+        updateTownMetrics();
+      }
+    );
+  };
+
+  const openHeadquartersFacility = (): boolean => {
+    const hqTownId = resolveHeadquartersTownId(world);
+    if (hqTownId === null) {
+      return false;
+    }
+    const town = getTownById(hqTownId);
+    if (!town) {
+      return false;
+    }
+    const facility = collectTownFacilities(world, town).find((entry) => entry.type === "hq") ?? null;
+    if (!facility) {
+      return false;
+    }
+    openTownFacility(hqTownId, facility.id);
+    return true;
   };
 
   const updateTownCardLayout = (townId: number, snapshot: TownUiSnapshot, card: TownCardElements): void => {
@@ -3746,7 +3663,14 @@ export const createThreeTest = (
       return;
     }
     card.name.textContent = town.name;
-    renderHeadquartersControls(town.id, card);
+    const facilities = collectTownFacilities(world, town);
+    const selectedFacilityId = selectedFacility?.townId === town.id ? selectedFacility.facilityId : null;
+    card.hqBadge.classList.toggle("hidden", !isHeadquartersTown(world, town.id));
+    renderTownFacilitiesSection(card.facilitiesSection, facilities, selectedFacilityId, (facility: TownFacilityDescriptor) => {
+      playUiCue("click");
+      inputState.lastInteractionTime = performance.now();
+      openTownFacility(town.id, facility.id);
+    });
     card.dot.className = `three-test-town-dot ${snapshot.threatClass}`;
     card.dot.title = `Fire threat: ${snapshot.threatLabel}`;
     card.postureChip.className = `three-test-town-card-chip posture-${snapshot.posture}`;
@@ -3842,6 +3766,7 @@ export const createThreeTest = (
     if (!card) {
       return;
     }
+    closeTownFacilityForTown(townId);
     card.root.remove();
     pinnedTownCards.delete(townId);
     if (focusedTownId === townId) {
@@ -3916,43 +3841,6 @@ export const createThreeTest = (
       playUiCue("click");
       inputState.lastInteractionTime = performance.now();
     });
-    [
-      card.hqCreateSquadButton,
-      card.hqRenameSquadButton,
-      card.hqAssignTruckButton,
-      card.hqRemoveTruckButton,
-      card.hqDispatchSquadButton,
-      card.hqRecallSquadButton,
-      card.hqRecruitFirefighterButton,
-      card.hqRecruitTruckButton,
-      card.hqTrainSpeedButton,
-      card.hqTrainPowerButton,
-      card.hqTrainRangeButton,
-      card.hqTrainResilienceButton
-    ].forEach((button) => {
-      button.addEventListener("click", (event) => {
-        event.preventDefault();
-        event.stopPropagation();
-        if (button.disabled) {
-          return;
-        }
-        playUiCue("confirm");
-        inputState.lastInteractionTime = performance.now();
-        const action = button.dataset.action;
-        if (!action) {
-          return;
-        }
-        const payload: Record<string, string> = {};
-        if (button.dataset.squadId) {
-          payload.squadId = button.dataset.squadId;
-        }
-        if (button.dataset.rosterId) {
-          payload.rosterId = button.dataset.rosterId;
-        }
-        dispatchSelectionAction(action, payload);
-        updateTownMetrics();
-      });
-    });
     card.pinButton.addEventListener("click", (event) => {
       event.preventDefault();
       event.stopPropagation();
@@ -3998,6 +3886,7 @@ export const createThreeTest = (
       if (isPinnedCard) {
         removePinnedTownCard(townId);
       } else if (selectedTownId === townId) {
+        closeTownFacilityForTown(townId);
         selectedTownId = null;
       }
       syncFocusedTown();
@@ -4016,6 +3905,16 @@ export const createThreeTest = (
   };
 
   bindTownCardHandlers(townCardElements, () => selectedTownId, false);
+  facilityPanelElements.root.addEventListener("pointerdown", (event) => {
+    event.stopPropagation();
+  });
+  facilityPanelElements.closeButton.addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    playUiCue("click");
+    closeTownFacility();
+    updateTownMetrics();
+  });
 
   const dispatchBaseAction = (action: string): void => {
     dispatchPhaseUiCommand({ type: "action", action });
@@ -4053,10 +3952,7 @@ export const createThreeTest = (
     event.preventDefault();
     event.stopPropagation();
     playUiCue("confirm");
-    const hqTownId = resolveHeadquartersTownId(world);
-    if (hqTownId !== null) {
-      openTownCard(hqTownId);
-    }
+    openHeadquartersFacility();
   });
   fireAlertCardElements.dismissButton.addEventListener("click", (event) => {
     event.preventDefault();
@@ -4090,6 +3986,7 @@ export const createThreeTest = (
     if (open) {
       worldCardState.clickExpand(baseCardId);
       baseFocused = true;
+      closeTownFacility();
       selectedTownId = null;
       focusedTownId = null;
     } else {
@@ -4108,9 +4005,7 @@ export const createThreeTest = (
     event.preventDefault();
     event.stopPropagation();
     playUiCue("click");
-    const snapshot = worldCardState.get(baseCardId);
-    const nextOpen = snapshot.visual !== "expanded";
-    setBaseCardOpenInternal(nextOpen);
+    openHeadquartersFacility();
   });
   baseCardElements.root.addEventListener("mouseenter", () => {
     playUiCue("hover");
@@ -4124,6 +4019,7 @@ export const createThreeTest = (
   baseCardElements.cardRoot.addEventListener("pointerdown", (event) => {
     event.stopPropagation();
     baseFocused = true;
+    closeTownFacility();
     selectedTownId = null;
     focusedTownId = null;
     updateTownMetrics();
@@ -4135,6 +4031,7 @@ export const createThreeTest = (
     playUiCue("toggle");
     const pinned = worldCardState.togglePin(baseCardId);
     baseFocused = true;
+    closeTownFacility();
     selectedTownId = null;
     focusedTownId = null;
     if (!pinned) {
@@ -4259,17 +4156,49 @@ export const createThreeTest = (
     pinnedTownCards.forEach((card, townId) => {
       placeCard(townId, card);
     });
+
+    if (selectedFacility !== null) {
+      const anchor = townAnchors.get(selectedFacility.townId);
+      if (!anchor) {
+        facilityPanelElements.root.classList.add("hidden");
+        return;
+      }
+      const townCard = pinnedTownCards.get(selectedFacility.townId) ?? townCardElements;
+      const townCardWidth = Math.max(292, townCard.root.offsetWidth > 0 ? townCard.root.offsetWidth : 336);
+      const townCardHeight = Math.max(180, townCard.root.offsetHeight > 0 ? townCard.root.offsetHeight : 238);
+      const townCardPosition = getAnchoredCardPosition(anchor, townCardWidth, townCardHeight, viewportWidth, viewportHeight);
+      const panelWidth = Math.max(292, facilityPanelElements.root.offsetWidth > 0 ? facilityPanelElements.root.offsetWidth : 340);
+      const panelHeight = Math.max(220, facilityPanelElements.root.offsetHeight > 0 ? facilityPanelElements.root.offsetHeight : 360);
+      const gap = 10;
+      let x = townCardPosition.x + townCardWidth + gap;
+      if (x + panelWidth > viewportWidth - 8) {
+        x = townCardPosition.x - panelWidth - gap;
+      }
+      if (x < 8) {
+        x = Math.max(8, viewportWidth - panelWidth - 8);
+      }
+      const y = Math.max(8, Math.min(viewportHeight - panelHeight - 8, townCardPosition.y));
+      facilityPanelElements.root.classList.remove("hidden");
+      facilityPanelElements.root.style.transform = `translate3d(${x.toFixed(1)}px, ${y.toFixed(1)}px, 0)`;
+      facilityPanelElements.root.style.zIndex = `${Math.max(4, anchor.zIndex + 5)}`;
+    } else {
+      facilityPanelElements.root.classList.add("hidden");
+    }
   };
 
   const toggleTownCard = (townId: number): void => {
     hoverPeekTownId = null;
     clearTownHoverDelay();
+    const previousTownId = selectedTownId ?? selectedFacility?.townId ?? null;
     if (pinnedTownCards.has(townId)) {
       selectedTownId = null;
       focusedTownId = townId;
     } else {
       selectedTownId = selectedTownId === townId ? null : townId;
       focusedTownId = selectedTownId;
+    }
+    if (selectedTownId !== townId || (previousTownId !== null && previousTownId !== townId)) {
+      closeTownFacility();
     }
     syncFocusedTown();
     updateTownMetrics();
@@ -4283,6 +4212,9 @@ export const createThreeTest = (
     baseFocused = false;
     hoverPeekTownId = null;
     clearTownHoverDelay();
+    if (selectedFacility && selectedFacility.townId !== town.id) {
+      closeTownFacility();
+    }
     if (pinnedTownCards.has(town.id)) {
       selectedTownId = null;
       focusedTownId = town.id;
@@ -4305,6 +4237,7 @@ export const createThreeTest = (
     entry.connector.remove();
     entry.root.remove();
     townLabelElements.delete(townId);
+    closeTownFacilityForTown(townId);
     if (focusedTownId === townId) {
       focusedTownId = null;
     }
@@ -4390,9 +4323,13 @@ export const createThreeTest = (
       }
     }
     if (selectedTownId !== null && !liveIds.has(selectedTownId)) {
+      closeTownFacilityForTown(selectedTownId);
       selectedTownId = null;
       syncFocusedTown();
       updateTownMetrics();
+    }
+    if (selectedFacility !== null && !liveIds.has(selectedFacility.townId)) {
+      closeTownFacility();
     }
   };
 
@@ -4438,6 +4375,7 @@ export const createThreeTest = (
     if (selectedTownId === null || pinnedTownCards.has(selectedTownId)) {
       townCardElements.root.classList.add("hidden");
     }
+    renderSelectedFacilityPanel();
   };
 
   const findCurrentStrongestFireTile = (): { x: number; y: number } | null => {
@@ -5145,8 +5083,12 @@ export const createThreeTest = (
     if (fireAlertCardElements.root.contains(target)) {
       return;
     }
+    if (facilityPanelElements.root.contains(target)) {
+      return;
+    }
     if (baseCardElements.cardRoot.contains(target) || baseCardElements.root.contains(target)) {
       baseFocused = true;
+      closeTownFacility();
       selectedTownId = null;
       focusedTownId = null;
       updateBaseCardState();
@@ -5174,8 +5116,11 @@ export const createThreeTest = (
       return;
     }
     if (selectedTownId !== null) {
+      closeTownFacilityForTown(selectedTownId);
       selectedTownId = null;
       hoverPeekTownId = null;
+    } else if (selectedFacility !== null) {
+      closeTownFacility();
     }
     const baseSnapshot = worldCardState.get(baseCardId);
     baseFocused = false;
@@ -5218,6 +5163,7 @@ export const createThreeTest = (
       baseCardElements.root.classList.add("hidden");
       baseCardElements.connector.style.display = "none";
       baseCardElements.cardRoot.classList.add("hidden");
+      closeTownFacility();
       if (selectedTownId !== null) {
         selectedTownId = null;
       }
@@ -5537,6 +5483,7 @@ export const createThreeTest = (
     }
     if (event.key === "Escape") {
       selectedTownId = null;
+      closeTownFacility();
       hoverPeekTownId = null;
       const baseSnapshot = worldCardState.get(baseCardId);
       baseFocused = false;
@@ -7151,6 +7098,7 @@ export const createThreeTest = (
     squadMarkerAnchors.clear();
     pinnedTownCards.clear();
     dockCards.clear();
+    closeTownFacility();
     selectedTownId = null;
     focusedTownId = null;
     baseFocused = false;
@@ -7819,9 +7767,7 @@ export const createThreeTest = (
   };
 
   const setBaseCardOpen = (open: boolean): void => {
-    const hqTownId = resolveHeadquartersTownId(world);
-    if (open && hqTownId !== null) {
-      openTownCard(hqTownId);
+    if (open && openHeadquartersFacility()) {
       return;
     }
     setBaseCardOpenInternal(false);

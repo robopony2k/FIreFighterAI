@@ -262,6 +262,7 @@ const createSquadSlot = (
   const card = document.createElement("button");
   card.type = "button";
   card.className = "three-test-squad-slot";
+  card.dataset.commandUnitId = String(commandUnit.id);
   card.classList.toggle("is-selected", selected);
   card.classList.toggle("is-focused", focused);
   card.classList.toggle("is-world-hovered", hovered);
@@ -456,6 +457,14 @@ export const createUnitCommandTray = ({ onAction, onStatus, onSquadHover }: Unit
   const commandPanel = document.createElement("div");
   commandPanel.className = "three-test-command-panel three-test-squad-detail-panel";
   element.append(slotColumn, commandPanel);
+  let lastSlotRenderKey = "";
+  let lastCommandPanelRenderKey = "";
+
+  const applyHoveredSlotState = (hoveredCommandUnitId: number | null): void => {
+    slotColumn.querySelectorAll<HTMLButtonElement>(".three-test-squad-slot[data-command-unit-id]").forEach((slot) => {
+      slot.classList.toggle("is-world-hovered", slot.dataset.commandUnitId === String(hoveredCommandUnitId));
+    });
+  };
 
   const update = (state: WorldState, inputState: InputState, hoveredCommandUnitId: number | null = null): void => {
     const commandUnits = [...state.commandUnits].sort((leftUnit, rightUnit) => leftUnit.id - rightUnit.id);
@@ -471,36 +480,89 @@ export const createUnitCommandTray = ({ onAction, onStatus, onSquadHover }: Unit
       .filter((entry) => entry.trucks.length > 0)
       .slice(0, SQUAD_SLOT_COUNT);
 
-    slotColumn.replaceChildren();
-    for (let slotIndex = 0; slotIndex < SQUAD_SLOT_COUNT; slotIndex += 1) {
-      const slot = occupiedSlots[slotIndex] ?? null;
-      if (!slot) {
-        slotColumn.appendChild(createEmptySquadSlot(slotIndex));
-        continue;
+    const slotRenderKey = JSON.stringify({
+      focusedCommandUnitId: state.focusedCommandUnitId,
+      selectedCommandUnitIds: state.selectedCommandUnitIds,
+      selectedTruckIds: state.selectedTruckIds,
+      selectionScope: state.selectionScope,
+      slots: occupiedSlots.map(({ commandUnit, trucks }) => ({
+        id: commandUnit.id,
+        name: commandUnit.name,
+        currentIntent: commandUnit.currentIntent,
+        revision: commandUnit.revision,
+        trucks: trucks.map((truck) => ({
+          id: truck.id,
+          status: truck.currentStatus,
+          alerts: truck.currentAlerts
+        }))
+      }))
+    });
+    if (lastSlotRenderKey !== slotRenderKey) {
+      lastSlotRenderKey = slotRenderKey;
+      slotColumn.replaceChildren();
+      for (let slotIndex = 0; slotIndex < SQUAD_SLOT_COUNT; slotIndex += 1) {
+        const slot = occupiedSlots[slotIndex] ?? null;
+        if (!slot) {
+          slotColumn.appendChild(createEmptySquadSlot(slotIndex));
+          continue;
+        }
+        const { commandUnit, trucks } = slot;
+        const selected =
+          state.selectedCommandUnitIds.includes(commandUnit.id) ||
+          (state.selectionScope === "truck" && state.focusedCommandUnitId === commandUnit.id);
+        const slotButton = createSquadSlot(
+          { commandUnit, trucks },
+          selected,
+          state.focusedCommandUnitId === commandUnit.id,
+          false,
+          slotIndex,
+          onAction
+        );
+        slotButton.addEventListener("mouseenter", () => onSquadHover?.(commandUnit.id));
+        slotButton.addEventListener("mouseleave", () => onSquadHover?.(null));
+        slotColumn.appendChild(slotButton);
       }
-      const { commandUnit, trucks } = slot;
-      const selected =
-        state.selectedCommandUnitIds.includes(commandUnit.id) ||
-        (state.selectionScope === "truck" && state.focusedCommandUnitId === commandUnit.id);
-      const slotButton = createSquadSlot(
-        { commandUnit, trucks },
-        selected,
-        state.focusedCommandUnitId === commandUnit.id,
-        hoveredCommandUnitId === commandUnit.id,
-        slotIndex,
-        onAction
-      );
-      slotButton.addEventListener("mouseenter", () => onSquadHover?.(commandUnit.id));
-      slotButton.addEventListener("mouseleave", () => onSquadHover?.(null));
-      slotColumn.appendChild(slotButton);
     }
+    applyHoveredSlotState(hoveredCommandUnitId);
 
-    commandPanel.replaceChildren();
     if (!focusedCommandUnit) {
+      if (lastCommandPanelRenderKey !== "none") {
+        lastCommandPanelRenderKey = "none";
+        commandPanel.replaceChildren();
+      }
       return;
     }
 
     const focusedTrucks = getCommandUnitTrucks(state, focusedCommandUnit);
+    const commandPanelRenderKey = JSON.stringify({
+      focusedCommandUnitId: focusedCommandUnit.id,
+      focusedCommandUnitName: focusedCommandUnit.name,
+      focusedCommandUnitIntent: focusedCommandUnit.currentIntent,
+      focusedCommandUnitRevision: focusedCommandUnit.revision,
+      activeCommandMode,
+      behaviourMode: inputState.behaviourMode,
+      dispatchFormation: inputState.dispatchFormation,
+      pendingSquadDispatchId: inputState.pendingSquadDispatchId,
+      selectionScope: state.selectionScope,
+      selectedTruckIds: state.selectedTruckIds,
+      trucks: focusedTrucks.map((truck) => ({
+        id: truck.id,
+        rosterId: truck.rosterId,
+        name: getTruckLabel(state, truck),
+        waterBucket: Math.round(getWaterRatio(truck.water, truck.waterCapacity) * 20),
+        crewCount: truck.crewIds.length,
+        currentStatus: truck.currentStatus,
+        currentAlerts: truck.currentAlerts,
+        truckOverrideIntent: truck.truckOverrideIntent,
+        commandUnitId: truck.commandUnitId
+      }))
+    });
+    if (lastCommandPanelRenderKey === commandPanelRenderKey) {
+      return;
+    }
+    lastCommandPanelRenderKey = commandPanelRenderKey;
+    commandPanel.replaceChildren();
+
     const totalWater = focusedTrucks.reduce((sum, truck) => sum + truck.water, 0);
     const totalCapacity = focusedTrucks.reduce((sum, truck) => sum + truck.waterCapacity, 0);
     const waterRatio = getWaterRatio(totalWater, totalCapacity);

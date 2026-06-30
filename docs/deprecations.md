@@ -515,6 +515,20 @@ Status: Deprecated as of June 30, 2026.
 
 Migration guidance:
 
-1. Add future recruitment, training, squad, and dispatch controls to the unified HQ town panel or the bottom command tray.
+1. Add future recruitment, training, squad, and dispatch controls to the HQ facility sidecar or the bottom command tray.
 2. Keep non-HQ town panels focused on town commands such as evacuation.
 3. Do not restore separate Base Ops click priority, duplicate Base Ops labels, or one-by-one truck deployment as the primary response workflow.
+
+## Embedded HQ Controls in the Town Panel
+
+Status: Deprecated as of June 30, 2026.
+
+- The Town panel no longer embeds HQ squad, recruitment, or training controls below town information.
+- Towns use one shared panel layout with town-level facts, actions, and a generic Facilities section.
+- HQ is the first town facility type and opens in the reusable Facility sidecar; future functional buildings should register with the same facility UI mapping.
+
+Migration guidance:
+
+1. Keep town-level status and actions in the shared Town panel.
+2. Add facility-specific operational controls to facility detail content, not directly to the Town panel.
+3. Derive facility presentation from authoritative state and keep sidecar open/selected/tab state as UI-only state.
