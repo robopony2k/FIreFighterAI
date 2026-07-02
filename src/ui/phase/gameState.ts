@@ -16,6 +16,7 @@ export class GameState {
     selection: { kind: "none" },
     interactionMode: "default",
     paused: false,
+    budget: 0,
     alert: null,
     simTimeMode: "strategic",
     timeSpeedControlMode: "buttons",
@@ -94,6 +95,15 @@ export class GameState {
       return;
     }
     this.snapshot.paused = paused;
+    this.emitChange();
+  }
+
+  setBudget(budget: number): void {
+    const normalized = Math.max(0, Math.floor(budget));
+    if (this.snapshot.budget === normalized) {
+      return;
+    }
+    this.snapshot.budget = normalized;
     this.emitChange();
   }
 

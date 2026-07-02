@@ -279,6 +279,7 @@ export class UIController {
 
     const topBarData: TopBarData = {
       phase: rules.phase,
+      budget: snapshot.budget,
       alert: snapshot.alert,
       primaryCta: rules.primaryCta,
       forecast: snapshot.forecast,

@@ -1,6 +1,7 @@
 import type { FireActivityState } from "../../../core/state.js";
 import type { Phase, PrimaryCta } from "../types.js";
 import type { ClimateForecast, ScoreFlowKind } from "../../../core/types.js";
+import { formatCurrency } from "../../../core/utils.js";
 import {
   FORECAST_CHART,
   RISK_BANDS,
@@ -16,6 +17,7 @@ import { dispatchPhaseUiCommand } from "../commandChannel.js";
 
 export type TopBarData = {
   phase: Phase;
+  budget: number;
   alert?: string | null;
   primaryCta?: PrimaryCta;
   forecast: ClimateForecast | null;
@@ -971,6 +973,9 @@ export const createTopBar = (): TopBarView => {
   const badge = document.createElement("div");
   badge.className = "phase-badge";
 
+  const budgetChip = document.createElement("div");
+  budgetChip.className = "phase-budget-chip";
+
   const forecast = document.createElement("div");
   forecast.className = "phase-forecast";
   const forecastChart = document.createElement("div");
@@ -1217,7 +1222,7 @@ export const createTopBar = (): TopBarView => {
 
   const content = document.createElement("div");
   content.className = "phase-topbar-content";
-  content.append(badge, scoreCounter, alert, cta);
+  content.append(badge, budgetChip, scoreCounter, alert, cta);
 
   const progressionStrip = document.createElement("div");
   progressionStrip.className = "phase-progression-strip is-hidden";
@@ -1559,6 +1564,8 @@ export const createTopBar = (): TopBarView => {
     update: (data) => {
       const isThreeTest = element.closest(".phase-ui-root--three-test") !== null;
       badge.textContent = phaseLabels[data.phase];
+      budgetChip.textContent = `Budget ${formatCurrency(data.budget)}`;
+      budgetChip.title = `Available budget: ${formatCurrency(data.budget)}`;
       if (data.forecast && data.forecast.risk.length > 0) {
         forecast.classList.remove("is-hidden");
         const { line, area } = buildRiskPaths(data.forecast.risk, FORECAST_CHART);

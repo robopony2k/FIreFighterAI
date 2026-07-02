@@ -61,6 +61,7 @@ export type GameUiSnapshot = {
   selection: SelectedEntity;
   interactionMode: InteractionMode;
   paused: boolean;
+  budget: number;
   alert: string | null;
   simTimeMode: SimTimeMode;
   timeSpeedControlMode: TimeSpeedControlMode;

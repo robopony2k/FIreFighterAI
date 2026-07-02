@@ -9,6 +9,8 @@ import { deployUnit, setUnitTarget } from "../sim/unitDeployment.js";
 import { getRosterTruck, getUnitById } from "../utils/unitLookup.js";
 
 const DEFAULT_SQUAD_NAME = "Squad";
+const FIXED_SQUAD_COUNT = COMMAND_UNIT_NAMES.length;
+const SQUAD_TRUCK_SLOT_COUNT = 5;
 
 export const resolveHeadquartersTownId = (state: WorldState): number | null => {
   if (state.headquartersTownId !== null && state.towns.some((town) => town.id === state.headquartersTownId)) {
@@ -48,28 +50,19 @@ export const getSquadById = (state: WorldState, squadId: number | null): Squad |
 export const ensureDefaultSquads = (state: WorldState): void => {
   const homeTownId = resolveHeadquartersTownId(state);
   state.squads.forEach((squad) => normalizeSquad(squad, state));
-  if (state.squads.length === 0) {
+  while (state.squads.length < FIXED_SQUAD_COUNT) {
+    const index = state.squads.length;
     const squad: Squad = {
       id: state.nextSquadId++,
       homeTownId,
-      name: COMMAND_UNIT_NAMES[0] ?? DEFAULT_SQUAD_NAME,
+      name: COMMAND_UNIT_NAMES[index] ?? `${DEFAULT_SQUAD_NAME} ${index + 1}`,
       truckRosterIds: [],
       currentIntent: null,
       status: "holding",
       revision: 0
     };
     state.squads.push(squad);
-    state.selectedSquadId = squad.id;
   }
-  const assignedTruckIds = new Set(state.squads.flatMap((squad) => squad.truckRosterIds));
-  const unassignedTrucks = state.roster.filter(
-    (entry) => entry.kind === "truck" && entry.status !== "lost" && !assignedTruckIds.has(entry.id)
-  );
-  const primarySquad = state.squads[0] ?? null;
-  unassignedTrucks.forEach((truck) => {
-    truck.squadId = primarySquad?.id ?? null;
-    primarySquad?.truckRosterIds.push(truck.id);
-  });
   state.roster.forEach((entry) => {
     if (entry.kind !== "truck") {
       return;
@@ -86,6 +79,13 @@ export const ensureDefaultSquads = (state: WorldState): void => {
 };
 
 export const createSquad = (state: WorldState, name = getNextSquadName(state)): Squad => {
+  ensureDefaultSquads(state);
+  if (state.squads.length >= FIXED_SQUAD_COUNT) {
+    const squad = getSquadById(state, state.selectedSquadId) ?? state.squads[0]!;
+    state.selectedSquadId = squad.id;
+    setStatus(state, "All five HQ squads already exist.");
+    return squad;
+  }
   const squad: Squad = {
     id: state.nextSquadId++,
     homeTownId: resolveHeadquartersTownId(state),
@@ -99,6 +99,14 @@ export const createSquad = (state: WorldState, name = getNextSquadName(state)): 
   state.selectedSquadId = squad.id;
   setStatus(state, `${squad.name} created at HQ.`);
   return squad;
+};
+
+const getMostEmptySquad = (state: WorldState): Squad | null => {
+  ensureDefaultSquads(state);
+  return state.squads
+    .slice(0, FIXED_SQUAD_COUNT)
+    .filter((squad) => squad.truckRosterIds.length < SQUAD_TRUCK_SLOT_COUNT)
+    .sort((left, right) => left.truckRosterIds.length - right.truckRosterIds.length || left.id - right.id)[0] ?? null;
 };
 
 export const selectSquad = (state: WorldState, squadId: number | null): void => {
@@ -141,9 +149,9 @@ const removeTruckFromCurrentSquad = (state: WorldState, truck: RosterUnit): void
   truck.squadId = null;
 };
 
-export const assignRosterTruckToSelectedSquad = (state: WorldState, rosterTruckId: number): boolean => {
+export const assignRosterTruckToSquad = (state: WorldState, rosterTruckId: number, squadId: number): boolean => {
   ensureDefaultSquads(state);
-  const squad = getSquadById(state, state.selectedSquadId);
+  const squad = getSquadById(state, squadId);
   const truck = getRosterTruck(state, rosterTruckId);
   if (!squad || !truck || truck.status === "lost") {
     return false;
@@ -152,14 +160,41 @@ export const assignRosterTruckToSelectedSquad = (state: WorldState, rosterTruckI
     setStatus(state, "Truck squad assignment can only change while it is parked at HQ.");
     return false;
   }
+  if (truck.squadId !== squad.id && squad.truckRosterIds.length >= SQUAD_TRUCK_SLOT_COUNT) {
+    setStatus(state, `${squad.name} has no open vehicle slots.`);
+    return false;
+  }
+  if (truck.squadId === squad.id && squad.truckRosterIds.includes(truck.id)) {
+    state.selectedSquadId = squad.id;
+    state.selectedRosterId = truck.id;
+    setStatus(state, `${truck.name} is already assigned to ${squad.name}.`);
+    return true;
+  }
   removeTruckFromCurrentSquad(state, truck);
   truck.squadId = squad.id;
   squad.truckRosterIds.push(truck.id);
   normalizeSquad(squad, state);
   squad.revision += 1;
+  state.selectedSquadId = squad.id;
+  state.selectedRosterId = truck.id;
   syncCommandUnits(state);
   setStatus(state, `${truck.name} assigned to ${squad.name}.`);
   return true;
+};
+
+export const assignRosterTruckToMostEmptySquad = (state: WorldState, rosterTruckId: number): Squad | null => {
+  const squad = getMostEmptySquad(state);
+  if (!squad) {
+    setStatus(state, "All HQ squad vehicle slots are full.");
+    return null;
+  }
+  return assignRosterTruckToSquad(state, rosterTruckId, squad.id) ? squad : null;
+};
+
+export const assignRosterTruckToSelectedSquad = (state: WorldState, rosterTruckId: number): boolean => {
+  ensureDefaultSquads(state);
+  const squad = getSquadById(state, state.selectedSquadId);
+  return squad ? assignRosterTruckToSquad(state, rosterTruckId, squad.id) : false;
 };
 
 export const removeRosterTruckFromSquad = (state: WorldState, rosterTruckId: number): boolean => {
@@ -170,6 +205,7 @@ export const removeRosterTruckFromSquad = (state: WorldState, rosterTruckId: num
   }
   const previous = getSquadById(state, truck.squadId);
   removeTruckFromCurrentSquad(state, truck);
+  state.selectedRosterId = truck.id;
   syncCommandUnits(state);
   setStatus(state, `${truck.name} removed from ${previous?.name ?? "squad"}.`);
   return true;

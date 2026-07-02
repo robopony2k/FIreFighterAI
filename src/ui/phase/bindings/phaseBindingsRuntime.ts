@@ -74,6 +74,7 @@ import {
   selectTownEvacuationDestination
 } from "../../../systems/evacuation/controllers/evacuationController.js";
 import {
+  assignRosterTruckToSquad,
   assignRosterTruckToSelectedSquad,
   createSquad,
   ensureDefaultSquads,
@@ -554,13 +555,16 @@ export const bindPhaseUi = ({
       /^recruit-(firefighter|truck)$/.test(action) ||
       action === "squad-create" ||
       action === "squad-assign-truck" ||
+      action === "squad-move-truck" ||
       action === "squad-remove-truck" ||
+      action === "squad-unassign-truck" ||
       action === "squad-dispatch" ||
       action === "squad-recall" ||
       /^train-(speed|power|range|resilience)$/.test(action) ||
       action === "progression-open" ||
       action === "progression-pick" ||
       action === "crew-assign" ||
+      action === "crew-assign-to-truck" ||
       action === "crew-unassign"
     ) {
       return "confirm";
@@ -1009,8 +1013,29 @@ export const bindPhaseUi = ({
       }
       return;
     }
+    if (resolvedAction === "squad-move-truck") {
+      const rosterId = Number(actionTarget?.dataset.rosterId ?? "");
+      const squadId = Number(actionTarget?.dataset.squadId ?? "");
+      if (Number.isFinite(rosterId) && Number.isFinite(squadId)) {
+        gate("select", () => {
+          assignRosterTruckToSquad(state, rosterId, squadId);
+          phaseUi.sync(state, inputState);
+        });
+      }
+      return;
+    }
     if (resolvedAction === "squad-remove-truck") {
       const rosterId = Number(actionTarget?.dataset.rosterId ?? state.selectedRosterId ?? "");
+      if (Number.isFinite(rosterId)) {
+        gate("select", () => {
+          removeRosterTruckFromSquad(state, rosterId);
+          phaseUi.sync(state, inputState);
+        });
+      }
+      return;
+    }
+    if (resolvedAction === "squad-unassign-truck") {
+      const rosterId = Number(actionTarget?.dataset.rosterId ?? "");
       if (Number.isFinite(rosterId)) {
         gate("select", () => {
           removeRosterTruckFromSquad(state, rosterId);
@@ -1118,14 +1143,26 @@ export const bindPhaseUi = ({
         return;
       }
       assignRosterCrew(state, selected.id, Number(select.value));
+      phaseUi.sync(state, inputState);
+      return;
+    }
+    if (resolvedAction === "crew-assign-to-truck") {
+      const firefighterId = Number(actionTarget?.dataset.firefighterId ?? state.selectedRosterId ?? "");
+      const truckId = Number(actionTarget?.dataset.truckId ?? "");
+      if (Number.isFinite(firefighterId) && Number.isFinite(truckId)) {
+        assignRosterCrew(state, firefighterId, truckId);
+        phaseUi.sync(state, inputState);
+      }
       return;
     }
     if (resolvedAction === "crew-unassign") {
-      const selected = state.roster.find((unit) => unit.id === state.selectedRosterId) ?? null;
+      const firefighterId = Number(actionTarget?.dataset.firefighterId ?? state.selectedRosterId ?? "");
+      const selected = state.roster.find((unit) => unit.id === firefighterId) ?? null;
       if (!selected || selected.kind !== "firefighter") {
         return;
       }
       unassignRosterCrew(state, selected.id);
+      phaseUi.sync(state, inputState);
       return;
     }
     if (resolvedAction === "crew-board") {

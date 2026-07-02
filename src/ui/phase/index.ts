@@ -356,6 +356,7 @@ export const initPhaseUI = (container: HTMLElement): PhaseUiApi => {
     state.setSelection(getSelection(world));
     state.setInteractionMode(getInteractionMode(world, inputState));
     state.setPaused(world.paused);
+    state.setBudget(world.budget);
     state.setSimTimeMode(world.simTimeMode);
     state.setTimeSpeedControlMode(world.timeSpeedControlMode);
     state.setTimeSpeedIndex(world.timeSpeedIndex);

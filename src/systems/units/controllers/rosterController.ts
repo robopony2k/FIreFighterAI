@@ -12,7 +12,7 @@ import { FIRST_NAMES, LAST_NAMES, TRUCK_PREFIX } from "../constants/runtimeConst
 import { clamp } from "../utils/unitMath.js";
 import { getRosterFirefighter, getRosterTruck, getRosterUnit } from "../utils/unitLookup.js";
 import { buildUnitDerivedStats, createTraining } from "../utils/unitStats.js";
-import { ensureDefaultSquads } from "./squadController.js";
+import { assignRosterTruckToMostEmptySquad, ensureDefaultSquads } from "./squadController.js";
 
 const unassignRosterFirefighter = (state: WorldState, firefighter: RosterUnit): void => {
   if (firefighter.assignedTruckId === null) {
@@ -35,6 +35,22 @@ const nextFirefighterName = (rng: RNG): string => {
   const first = FIRST_NAMES[Math.floor(rng.next() * FIRST_NAMES.length)];
   const last = LAST_NAMES[Math.floor(rng.next() * LAST_NAMES.length)];
   return `${first} ${last}`;
+};
+
+const getMostEmptyAvailableTruck = (state: WorldState): RosterUnit | null =>
+  state.roster
+    .filter((entry) => entry.kind === "truck" && entry.status === "available" && entry.crewIds.length < TRUCK_CAPACITY)
+    .sort((left, right) => left.crewIds.length - right.crewIds.length || left.id - right.id)[0] ?? null;
+
+const assignRosterFirefighterToMostEmptyTruck = (state: WorldState, firefighter: RosterUnit): RosterUnit | null => {
+  const truck = getMostEmptyAvailableTruck(state);
+  if (!truck) {
+    return null;
+  }
+  unassignRosterFirefighter(state, firefighter);
+  truck.crewIds.push(firefighter.id);
+  firefighter.assignedTruckId = truck.id;
+  return truck;
 };
 
 export function assignRosterCrew(state: WorldState, firefighterId: number, truckId: number): boolean {
@@ -124,13 +140,19 @@ export function recruitUnit(state: WorldState, rng: RNG, kind: UnitKind, free = 
   state.nextRosterId += 1;
   state.roster.push(entry);
   state.selectedRosterId = entry.id;
+  let assignmentLabel = "";
   if (entry.kind === "truck") {
     ensureDefaultSquads(state);
+    const squad = assignRosterTruckToMostEmptySquad(state, entry.id);
+    assignmentLabel = squad ? ` Assigned to ${squad.name}.` : " No squad vehicle slots are open.";
+  } else {
+    const truck = assignRosterFirefighterToMostEmptyTruck(state, entry);
+    assignmentLabel = truck ? ` Assigned to ${truck.name}.` : " No open truck crew slots.";
   }
   if (!free) {
     state.budget -= cost;
   }
-  setStatus(state, `${entry.name} recruited and ready for training.`);
+  setStatus(state, `${entry.name} recruited and ready for training.${assignmentLabel}`);
   return true;
 }
 

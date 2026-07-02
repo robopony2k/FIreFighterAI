@@ -1,5 +1,8 @@
+import { RECRUIT_FIREFIGHTER_COST, RECRUIT_TRUCK_COST } from "../../../core/config.js";
 import type { WorldState } from "../../../core/state.js";
 import type { RosterUnit, Squad } from "../../../core/types.js";
+import { formatCurrency } from "../../../core/utils.js";
+import { renderHqSquadAssignmentBoard } from "./hqSquadAssignmentBoard.js";
 import type { TownFacilityDescriptor, TownFacilityRenderContext, TownFacilityTabId } from "./types.js";
 
 type HqFacilityStats = {
@@ -8,6 +11,9 @@ type HqFacilityStats = {
   fieldedSquadCount: number;
   readyTruckCount: number;
   fieldedTruckCount: number;
+  totalTruckCount: number;
+  readyCrewCount: number;
+  totalCrewCount: number;
   warning: string | null;
 };
 
@@ -32,6 +38,9 @@ export const readHqFacilityStats = (world: WorldState): HqFacilityStats => {
   ).length;
   const readyTruckCount = world.roster.filter((entry) => entry.kind === "truck" && entry.status === "available").length;
   const fieldedTruckCount = world.roster.filter((entry) => entry.kind === "truck" && entry.status === "deployed").length;
+  const totalTruckCount = world.roster.filter((entry) => entry.kind === "truck" && entry.status !== "lost").length;
+  const readyCrewCount = world.roster.filter((entry) => entry.kind === "firefighter" && entry.status === "available").length;
+  const totalCrewCount = world.roster.filter((entry) => entry.kind === "firefighter" && entry.status !== "lost").length;
   let warning: string | null = null;
   if (world.squads.length === 0) {
     warning = "No squads configured";
@@ -44,6 +53,9 @@ export const readHqFacilityStats = (world: WorldState): HqFacilityStats => {
     fieldedSquadCount,
     readyTruckCount,
     fieldedTruckCount,
+    totalTruckCount,
+    readyCrewCount,
+    totalCrewCount,
     warning
   };
 };
@@ -66,8 +78,17 @@ const getHqContentRenderKey = (context: TownFacilityRenderContext): string =>
   JSON.stringify({
     tab: context.activeTabId,
     phase: context.world.phase,
+    budget: Math.floor(context.world.budget),
     selectedRosterId: context.world.selectedRosterId,
     selectedSquadId: context.world.selectedSquadId,
+    crew: context.world.roster
+      .filter((entry) => entry.kind === "firefighter")
+      .map((crew) => ({
+        id: crew.id,
+        status: crew.status,
+        assignedTruckId: crew.assignedTruckId,
+        training: crew.training
+      })),
     squads: context.world.squads.map((squad) => ({
       id: squad.id,
       name: squad.name,
@@ -80,7 +101,9 @@ const getHqContentRenderKey = (context: TownFacilityRenderContext): string =>
         id: truck.id,
         name: truck.name,
         status: truck.status,
-        squadId: truck.squadId
+        squadId: truck.squadId,
+        crewIds: truck.crewIds,
+        training: truck.training
       })),
     commandUnits: context.world.commandUnits.map((commandUnit) => ({
       id: commandUnit.id,
@@ -99,31 +122,23 @@ const createActionButton = (label: string, action: string): HTMLButtonElement =>
   return button;
 };
 
-const createListButton = (
-  label: string,
-  action: string,
-  payload: Record<string, string>,
-  selected: boolean,
-  dispatchAction: TownFacilityRenderContext["dispatchAction"]
-): HTMLButtonElement => {
-  const button = document.createElement("button");
-  button.type = "button";
-  button.className = "three-test-hq-list-button";
-  button.classList.toggle("is-selected", selected);
-  button.textContent = label;
-  button.addEventListener("click", (event) => {
-    event.preventDefault();
-    event.stopPropagation();
-    dispatchAction(action, payload);
-  });
+const createPricedActionButton = (label: string, action: string, cost: number): HTMLButtonElement => {
+  const button = createActionButton(label, action);
+  const labelSpan = document.createElement("span");
+  labelSpan.className = "three-test-hq-action-label";
+  labelSpan.textContent = label;
+  const costSpan = document.createElement("span");
+  costSpan.className = "three-test-hq-action-meta";
+  costSpan.textContent = formatCurrency(cost);
+  button.replaceChildren(labelSpan, costSpan);
   return button;
 };
 
-const getSelectedRosterTruck = (world: WorldState): RosterUnit | null => {
+const getSelectedRosterUnit = (world: WorldState): RosterUnit | null => {
   const selected = world.selectedRosterId !== null
     ? world.roster.find((entry) => entry.id === world.selectedRosterId) ?? null
     : null;
-  return selected?.kind === "truck" ? selected : null;
+  return selected;
 };
 
 const bindActionButton = (
@@ -171,97 +186,54 @@ const renderTabButtons = (root: HTMLElement, context: TownFacilityRenderContext)
 };
 
 const renderSquadsTab = (root: HTMLElement, context: TownFacilityRenderContext): void => {
-  const { world, dispatchAction } = context;
-  const stats = readHqFacilityStats(world);
-  const selectedSquad = world.squads.find((squad) => squad.id === world.selectedSquadId) ?? world.squads[0] ?? null;
-  const selectedTruck = getSelectedRosterTruck(world);
-  const summary = document.createElement("div");
-  summary.className = "three-test-hq-summary";
-  summary.textContent = `HQ · ${stats.squadCount} squads · ${stats.readyTruckCount} ready · ${stats.fieldedTruckCount} field`;
-  const squadList = document.createElement("div");
-  squadList.className = "three-test-hq-list";
-  world.squads.forEach((squad) => {
-    const active = world.commandUnits.find((commandUnit) => commandUnit.squadId === squad.id) ?? null;
-    squadList.appendChild(
-      createListButton(
-        `${squad.name} ${getSquadReadyTruckCount(world, squad)} ready ${active?.truckIds.length ?? 0} field`,
-        "select-squad",
-        { squadId: String(squad.id) },
-        selectedSquad?.id === squad.id,
-        dispatchAction
-      )
-    );
-  });
-  const truckList = document.createElement("div");
-  truckList.className = "three-test-hq-list";
-  const truckRows = world.roster
-    .filter((entry) => entry.kind === "truck" && entry.status !== "lost")
-    .sort((left, right) => left.id - right.id);
-  if (truckRows.length === 0) {
-    const empty = document.createElement("div");
-    empty.className = "three-test-hq-empty";
-    empty.textContent = "No trucks recruited.";
-    truckList.appendChild(empty);
-  } else {
-    truckRows.forEach((truck) => {
-      const squad = world.squads.find((entry) => entry.id === truck.squadId) ?? null;
-      truckList.appendChild(
-        createListButton(
-          `${truck.name} | ${truck.status} | ${squad?.name ?? "Unassigned"}`,
-          "select-roster-id",
-          { rosterId: String(truck.id) },
-          selectedTruck?.id === truck.id,
-          dispatchAction
-        )
-      );
-    });
-  }
-  const squadActions = document.createElement("div");
-  squadActions.className = "three-test-town-card-actions three-test-hq-action-grid";
-  const createSquadButton = createActionButton("New Squad", "squad-create");
-  const renameSquadButton = createActionButton("Rename", "squad-rename");
-  const assignTruckButton = createActionButton("Assign Truck", "squad-assign-truck");
-  const removeTruckButton = createActionButton("Remove Truck", "squad-remove-truck");
-  assignTruckButton.dataset.rosterId = selectedTruck ? String(selectedTruck.id) : "";
-  removeTruckButton.dataset.rosterId = selectedTruck ? String(selectedTruck.id) : "";
-  assignTruckButton.disabled = !selectedTruck || selectedTruck.status !== "available";
-  removeTruckButton.disabled = !selectedTruck || selectedTruck.status !== "available" || selectedTruck.squadId === null;
-  [createSquadButton, renameSquadButton, assignTruckButton, removeTruckButton].forEach((button) =>
-    bindActionButton(button, dispatchAction)
-  );
-  squadActions.append(createSquadButton, renameSquadButton, assignTruckButton, removeTruckButton);
-  const deployActions = document.createElement("div");
-  deployActions.className = "three-test-town-card-actions three-test-hq-action-grid";
-  const dispatchSquadButton = createActionButton("Dispatch", "squad-dispatch");
-  const recallSquadButton = createActionButton("Recall", "squad-recall");
-  dispatchSquadButton.dataset.squadId = selectedSquad ? String(selectedSquad.id) : "";
-  recallSquadButton.dataset.squadId = selectedSquad ? String(selectedSquad.id) : "";
-  dispatchSquadButton.disabled = !selectedSquad || selectedSquad.truckRosterIds.length === 0;
-  recallSquadButton.disabled = !selectedSquad || !world.commandUnits.some((entry) => entry.squadId === selectedSquad.id);
-  [dispatchSquadButton, recallSquadButton].forEach((button) => bindActionButton(button, dispatchAction));
-  deployActions.append(dispatchSquadButton, recallSquadButton);
-  root.append(summary, squadList, truckList, squadActions, deployActions);
+  renderHqSquadAssignmentBoard(root, context, readHqFacilityStats(context.world));
 };
 
 const renderRecruitTab = (root: HTMLElement, context: TownFacilityRenderContext): void => {
+  const stats = readHqFacilityStats(context.world);
+  const budget = Math.max(0, Math.floor(context.world.budget));
+  const maintenanceOpen = context.world.phase === "maintenance";
+  const summary = document.createElement("div");
+  summary.className = "three-test-hq-recruit-summary";
+  const budgetItem = document.createElement("span");
+  budgetItem.textContent = `Budget ${formatCurrency(budget)}`;
+  const truckItem = document.createElement("span");
+  truckItem.textContent = `Trucks ${stats.readyTruckCount}/${stats.totalTruckCount}`;
+  const crewItem = document.createElement("span");
+  crewItem.textContent = `Crew ${stats.readyCrewCount}/${stats.totalCrewCount}`;
+  summary.append(budgetItem, truckItem, crewItem);
+
   const grid = document.createElement("div");
   grid.className = "three-test-town-card-actions three-test-hq-action-grid";
-  const recruitTruckButton = createActionButton("Recruit Truck", "recruit-truck");
-  const recruitFirefighterButton = createActionButton("Recruit Crew", "recruit-firefighter");
-  const maintenanceOpen = context.world.phase === "maintenance";
-  [recruitTruckButton, recruitFirefighterButton].forEach((button) => {
-    button.disabled = !maintenanceOpen;
-    button.title = maintenanceOpen ? "" : "Only available during maintenance.";
+  const recruitTruckButton = createPricedActionButton("Recruit Truck", "recruit-truck", RECRUIT_TRUCK_COST);
+  const recruitFirefighterButton = createPricedActionButton("Recruit Crew", "recruit-firefighter", RECRUIT_FIREFIGHTER_COST);
+  [
+    { button: recruitTruckButton, cost: RECRUIT_TRUCK_COST, label: "truck" },
+    { button: recruitFirefighterButton, cost: RECRUIT_FIREFIGHTER_COST, label: "crew" }
+  ].forEach(({ button, cost, label }) => {
+    const affordable = budget >= cost;
+    button.disabled = !maintenanceOpen || !affordable;
+    button.title = !maintenanceOpen
+      ? "Only available during maintenance."
+      : affordable
+        ? `Recruit ${label} for ${formatCurrency(cost)}.`
+        : `Need ${formatCurrency(cost)} to recruit ${label}.`;
     bindActionButton(button, context.dispatchAction);
   });
   grid.append(recruitTruckButton, recruitFirefighterButton);
   const hint = document.createElement("div");
   hint.className = "three-test-hq-empty";
   hint.textContent = maintenanceOpen ? "Recruitment is available now." : "Recruitment is locked outside maintenance.";
-  root.append(grid, hint);
+  root.append(summary, grid, hint);
 };
 
 const renderTrainingTab = (root: HTMLElement, context: TownFacilityRenderContext): void => {
+  const selected = getSelectedRosterUnit(context.world);
+  const summary = document.createElement("div");
+  summary.className = "three-test-hq-training-summary";
+  summary.textContent = selected
+    ? `Selected unit training - ${selected.name} (${selected.kind === "truck" ? "truck" : "crew"})`
+    : "Selected unit training - select a truck or firefighter chip first.";
   const grid = document.createElement("div");
   grid.className = "three-test-town-card-actions three-test-hq-action-grid";
   const trainButtons = [
@@ -272,15 +244,21 @@ const renderTrainingTab = (root: HTMLElement, context: TownFacilityRenderContext
   ];
   const maintenanceOpen = context.world.phase === "maintenance";
   trainButtons.forEach((button) => {
-    button.disabled = !maintenanceOpen;
-    button.title = maintenanceOpen ? "" : "Only available during maintenance.";
+    button.disabled = !maintenanceOpen || !selected || selected.status === "lost";
+    button.title = !maintenanceOpen
+      ? "Only available during maintenance."
+      : selected && selected.status !== "lost"
+        ? `Train selected unit: ${selected.name}.`
+        : "Select an available roster unit first.";
     bindActionButton(button, context.dispatchAction);
     grid.appendChild(button);
   });
   const hint = document.createElement("div");
   hint.className = "three-test-hq-empty";
-  hint.textContent = maintenanceOpen ? "Training is available now." : "Training is locked outside maintenance.";
-  root.append(grid, hint);
+  hint.textContent = maintenanceOpen
+    ? "Training applies to the selected roster unit until a broader training model is chosen."
+    : "Training is locked outside maintenance.";
+  root.append(summary, grid, hint);
 };
 
 export const renderHqFacilityContent = (root: HTMLElement, context: TownFacilityRenderContext): void => {

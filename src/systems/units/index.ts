@@ -9,6 +9,8 @@ export {
 } from "./controllers/rosterController.js";
 
 export {
+  assignRosterTruckToSquad,
+  assignRosterTruckToMostEmptySquad,
   assignRosterTruckToSelectedSquad,
   createSquad,
   dispatchSquadToTile,
