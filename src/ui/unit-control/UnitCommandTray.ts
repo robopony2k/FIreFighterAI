@@ -9,6 +9,8 @@ import type {
   CommandUnit,
   CommandUnitAlert,
   CommandUnitStatus,
+  RosterUnit,
+  Squad,
   Unit
 } from "../../core/types.js";
 
@@ -29,7 +31,9 @@ export type UnitCommandTrayOptions = {
 };
 
 type CommandGroupCard = {
-  commandUnit: CommandUnit;
+  commandUnit: CommandUnit | null;
+  squad: Squad | null;
+  rosterTrucks: RosterUnit[];
   trucks: Unit[];
 };
 
@@ -100,6 +104,13 @@ const getCommandUnitTrucks = (state: WorldState, commandUnit: CommandUnit): Unit
     .filter((entry): entry is Unit => !!entry)
     .sort((left, right) => (left.rosterId ?? left.id) - (right.rosterId ?? right.id));
 
+const getSquadRosterTrucks = (state: WorldState, squad: Squad): RosterUnit[] => {
+  const rosterTruckById = new Map(
+    state.roster.filter((entry) => entry.kind === "truck" && entry.status !== "lost").map((entry) => [entry.id, entry] as const)
+  );
+  return squad.truckRosterIds.map((id) => rosterTruckById.get(id) ?? null).filter((entry): entry is RosterUnit => !!entry);
+};
+
 const getEffectiveTruckIntent = (
   truck: Unit,
   commandUnitById: ReadonlyMap<number, CommandUnit>
@@ -123,6 +134,25 @@ const getCommandTypeLabel = (type: CommandType | null): string => {
 const getBehaviourLabel = (mode: BehaviourMode): string => `${mode[0]!.toUpperCase()}${mode.slice(1)}`;
 
 const getStatusLabel = (status: CommandUnitStatus): string => `${status[0]!.toUpperCase()}${status.slice(1)}`;
+
+const getSquadTrayStatusLabel = (status: CommandUnitStatus, fielded: boolean, truckCount: number): string => {
+  if (truckCount <= 0) {
+    return "No trucks";
+  }
+  if (!fielded) {
+    return "At HQ";
+  }
+  if (status === "suppressing") {
+    return "On fireline";
+  }
+  if (status === "moving") {
+    return "En route";
+  }
+  if (status === "retreating") {
+    return "Withdrawing";
+  }
+  return "Holding";
+};
 
 const getStatusIcon = (status: CommandUnitStatus): string => {
   if (status === "suppressing") {
@@ -243,6 +273,66 @@ const createWaterMeter = (ratio: number, label: string): HTMLDivElement => {
   return meter;
 };
 
+const createTrayCrewDots = (crewCount: number): HTMLSpanElement => {
+  const meter = document.createElement("span");
+  meter.className = "three-test-squad-slot-crew-dots";
+  meter.setAttribute("aria-label", `${crewCount}/${TRUCK_CAPACITY} crew`);
+  for (let index = 0; index < TRUCK_CAPACITY; index += 1) {
+    const dot = document.createElement("span");
+    dot.className = "three-test-squad-slot-crew-dot";
+    dot.classList.toggle("is-filled", index < crewCount);
+    meter.appendChild(dot);
+  }
+  return meter;
+};
+
+const appendTrayTruckSlot = (
+  root: HTMLElement,
+  crewCount: number,
+  waterRatio: number | null,
+  empty: boolean
+): void => {
+  const slot = document.createElement("span");
+  slot.className = "three-test-squad-slot-truck";
+  slot.classList.toggle("is-empty", empty);
+  if (!empty && waterRatio !== null) {
+    slot.classList.add("has-water");
+    slot.style.setProperty("--truck-water", `${Math.round(waterRatio * 100)}%`);
+  }
+  if (!empty) {
+    slot.appendChild(createTrayCrewDots(crewCount));
+  }
+  root.appendChild(slot);
+};
+
+const createTrayTruckRack = (cardModel: CommandGroupCard): HTMLDivElement => {
+  const rack = document.createElement("div");
+  rack.className = "three-test-squad-slot-truck-rack";
+  const fieldedByRosterId = new Map(
+    cardModel.trucks
+      .filter((truck) => truck.rosterId !== null)
+      .map((truck) => [truck.rosterId as number, truck] as const)
+  );
+  for (let index = 0; index < SQUAD_SLOT_COUNT; index += 1) {
+    const rosterTruck = cardModel.rosterTrucks[index] ?? null;
+    const fieldedTruck =
+      cardModel.trucks[index] ??
+      (rosterTruck ? fieldedByRosterId.get(rosterTruck.id) ?? null : null);
+    if (!rosterTruck && !fieldedTruck) {
+      appendTrayTruckSlot(rack, 0, null, true);
+      continue;
+    }
+    const crewCount = fieldedTruck?.crewIds.length ?? rosterTruck?.crewIds.length ?? 0;
+    const waterRatio = fieldedTruck
+      ? getWaterRatio(fieldedTruck.water, fieldedTruck.waterCapacity)
+      : rosterTruck?.status === "available"
+        ? 1
+        : null;
+    appendTrayTruckSlot(rack, crewCount, waterRatio, false);
+  }
+  return rack;
+};
+
 const createSquadSlot = (
   cardModel: CommandGroupCard,
   selected: boolean,
@@ -251,21 +341,34 @@ const createSquadSlot = (
   slotIndex: number,
   onAction: UnitCommandTrayAction
 ): HTMLButtonElement => {
-  const { commandUnit, trucks } = cardModel;
+  const { commandUnit, squad, rosterTrucks, trucks } = cardModel;
   const aggregateAlerts = trucks.flatMap((truck) => truck.currentAlerts);
   const highestAlert = resolveHighestAlert(aggregateAlerts);
-  const effectiveStatus = resolveMajorityStatus(trucks);
-  const intentLabel = commandUnit.currentIntent
+  const effectiveStatus = trucks.length > 0 ? resolveMajorityStatus(trucks) : squad?.status ?? "holding";
+  const fielded = !!commandUnit && trucks.length > 0;
+  const truckCount = Math.max(trucks.length, rosterTrucks.length);
+  const statusLabel = getSquadTrayStatusLabel(effectiveStatus, fielded, truckCount);
+  const intentLabel = commandUnit?.currentIntent
     ? getCommandTypeLabel(commandUnit.currentIntent.type)
+    : squad?.currentIntent
+      ? getCommandTypeLabel(squad.currentIntent.type)
     : "Auto";
+  const slotName = commandUnit?.name ?? squad?.name ?? "Empty";
 
   const card = document.createElement("button");
   card.type = "button";
   card.className = "three-test-squad-slot";
-  card.dataset.commandUnitId = String(commandUnit.id);
+  if (commandUnit) {
+    card.dataset.commandUnitId = String(commandUnit.id);
+  }
+  if (squad) {
+    card.dataset.squadId = String(squad.id);
+  }
   card.classList.toggle("is-selected", selected);
   card.classList.toggle("is-focused", focused);
   card.classList.toggle("is-world-hovered", hovered);
+  card.classList.toggle("is-at-hq", !fielded && truckCount > 0);
+  card.classList.toggle("is-unstaffed", truckCount <= 0);
 
   const header = document.createElement("div");
   header.className = "three-test-squad-slot-header";
@@ -274,24 +377,22 @@ const createSquadSlot = (
   shortcut.textContent = String(slotIndex + 1);
   const name = document.createElement("div");
   name.className = "three-test-squad-slot-name";
-  name.textContent = commandUnit.name;
+  name.textContent = slotName;
   const status = document.createElement("span");
   status.className = "three-test-squad-slot-status";
-  status.dataset.status = effectiveStatus;
-  status.textContent = getStatusIcon(effectiveStatus);
-  status.title = getStatusLabel(effectiveStatus);
+  status.dataset.status = fielded ? effectiveStatus : truckCount > 0 ? "at-hq" : "empty";
+  status.textContent = statusLabel;
+  status.title = fielded ? getStatusLabel(effectiveStatus) : statusLabel;
   header.append(shortcut, name, status);
 
+  const truckRack = createTrayTruckRack(cardModel);
   const signals = document.createElement("div");
   signals.className = "three-test-squad-slot-signals";
-  const unitSignal = document.createElement("span");
-  unitSignal.className = "three-test-squad-slot-signal";
-  unitSignal.textContent = `${trucks.length} unit${trucks.length === 1 ? "" : "s"}`;
   const orderSignal = document.createElement("span");
   orderSignal.className = "three-test-squad-slot-signal";
   orderSignal.dataset.kind = "status";
   orderSignal.textContent = intentLabel;
-  signals.append(unitSignal, orderSignal);
+  signals.append(orderSignal);
   if (highestAlert) {
     const alertSignal = document.createElement("span");
     alertSignal.className = "three-test-squad-slot-alert";
@@ -303,15 +404,21 @@ const createSquadSlot = (
     signals.appendChild(alertSignal);
   }
 
-  card.append(header, signals);
-  card.title = `${commandUnit.name}. Slot ${slotIndex + 1}. ${trucks.length} unit(s). ${intentLabel}.`;
+  card.append(header, truckRack, signals);
+  card.title = `${slotName}. Slot ${slotIndex + 1}. ${truckCount} truck${truckCount === 1 ? "" : "s"}. ${statusLabel}. ${intentLabel}.`;
   card.addEventListener("click", (event) => {
     event.preventDefault();
     event.stopPropagation();
-    onAction("select-command-unit", {
-      commandUnitId: String(commandUnit.id),
-      ...(event.shiftKey ? { toggle: "1" } : {})
-    });
+    if (commandUnit) {
+      onAction("select-command-unit", {
+        commandUnitId: String(commandUnit.id),
+        ...(event.shiftKey ? { toggle: "1" } : {})
+      });
+      return;
+    }
+    if (squad) {
+      onAction("select-squad", { squadId: String(squad.id) });
+    }
   });
   return card;
 };
@@ -475,25 +582,53 @@ export const createUnitCommandTray = ({ onAction, onStatus, onSquadHover }: Unit
     const activeCommandMode = inputState.commandMode;
     element.classList.toggle("is-collapsed", !focusedCommandUnit);
     element.classList.toggle("is-expanded", !!focusedCommandUnit);
-    const occupiedSlots = commandUnits
-      .map((commandUnit) => ({ commandUnit, trucks: getCommandUnitTrucks(state, commandUnit) }))
-      .filter((entry) => entry.trucks.length > 0)
-      .slice(0, SQUAD_SLOT_COUNT);
+    const commandUnitBySquadId = new Map(
+      commandUnits
+        .filter((commandUnit) => commandUnit.squadId !== null)
+        .map((commandUnit) => [commandUnit.squadId as number, commandUnit] as const)
+    );
+    const squadSlots: CommandGroupCard[] = state.squads.slice(0, SQUAD_SLOT_COUNT).map((squad) => {
+      const commandUnit = commandUnitBySquadId.get(squad.id) ?? null;
+      return {
+        commandUnit,
+        squad,
+        rosterTrucks: getSquadRosterTrucks(state, squad),
+        trucks: commandUnit ? getCommandUnitTrucks(state, commandUnit) : []
+      };
+    });
+    const fallbackSlots: CommandGroupCard[] = commandUnits
+      .filter((commandUnit) => commandUnit.squadId === null)
+      .map((commandUnit) => ({
+        commandUnit,
+        squad: null,
+        rosterTrucks: [],
+        trucks: getCommandUnitTrucks(state, commandUnit)
+      }));
+    const occupiedSlots = (squadSlots.length > 0 ? squadSlots : fallbackSlots).slice(0, SQUAD_SLOT_COUNT);
 
     const slotRenderKey = JSON.stringify({
       focusedCommandUnitId: state.focusedCommandUnitId,
       selectedCommandUnitIds: state.selectedCommandUnitIds,
+      selectedSquadId: state.selectedSquadId,
       selectedTruckIds: state.selectedTruckIds,
       selectionScope: state.selectionScope,
-      slots: occupiedSlots.map(({ commandUnit, trucks }) => ({
-        id: commandUnit.id,
-        name: commandUnit.name,
-        currentIntent: commandUnit.currentIntent,
-        revision: commandUnit.revision,
+      slots: occupiedSlots.map(({ commandUnit, squad, rosterTrucks, trucks }) => ({
+        commandUnitId: commandUnit?.id ?? null,
+        squadId: squad?.id ?? null,
+        name: commandUnit?.name ?? squad?.name ?? "Empty",
+        currentIntent: commandUnit?.currentIntent ?? squad?.currentIntent ?? null,
+        revision: (commandUnit?.revision ?? 0) + (squad?.revision ?? 0),
+        rosterTrucks: rosterTrucks.map((truck) => ({
+          id: truck.id,
+          status: truck.status,
+          crewCount: truck.crewIds.length
+        })),
         trucks: trucks.map((truck) => ({
           id: truck.id,
           status: truck.currentStatus,
-          alerts: truck.currentAlerts
+          alerts: truck.currentAlerts,
+          waterBucket: Math.round(getWaterRatio(truck.water, truck.waterCapacity) * 20),
+          crewCount: truck.crewIds.length
         }))
       }))
     });
@@ -506,19 +641,21 @@ export const createUnitCommandTray = ({ onAction, onStatus, onSquadHover }: Unit
           slotColumn.appendChild(createEmptySquadSlot(slotIndex));
           continue;
         }
-        const { commandUnit, trucks } = slot;
+        const { commandUnit, squad } = slot;
         const selected =
-          state.selectedCommandUnitIds.includes(commandUnit.id) ||
-          (state.selectionScope === "truck" && state.focusedCommandUnitId === commandUnit.id);
+          (commandUnit !== null &&
+            (state.selectedCommandUnitIds.includes(commandUnit.id) ||
+              (state.selectionScope === "truck" && state.focusedCommandUnitId === commandUnit.id))) ||
+          (commandUnit === null && squad !== null && state.selectedSquadId === squad.id);
         const slotButton = createSquadSlot(
-          { commandUnit, trucks },
+          slot,
           selected,
-          state.focusedCommandUnitId === commandUnit.id,
+          commandUnit !== null && state.focusedCommandUnitId === commandUnit.id,
           false,
           slotIndex,
           onAction
         );
-        slotButton.addEventListener("mouseenter", () => onSquadHover?.(commandUnit.id));
+        slotButton.addEventListener("mouseenter", () => onSquadHover?.(commandUnit?.id ?? null));
         slotButton.addEventListener("mouseleave", () => onSquadHover?.(null));
         slotColumn.appendChild(slotButton);
       }

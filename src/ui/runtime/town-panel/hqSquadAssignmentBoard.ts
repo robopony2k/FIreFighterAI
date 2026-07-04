@@ -53,6 +53,17 @@ const getSquadTrucks = (squad: Squad, roster: readonly RosterUnit[]): RosterUnit
   return squad.truckRosterIds.map((id) => truckById.get(id) ?? null).filter((entry): entry is RosterUnit => !!entry);
 };
 
+const getTruckWaterRatio = (truck: RosterUnit, context: TownFacilityRenderContext): number | null => {
+  if (truck.status === "available") {
+    return 1;
+  }
+  const deployedTruck = context.world.units.find((unit) => unit.kind === "truck" && unit.rosterId === truck.id) ?? null;
+  if (!deployedTruck || deployedTruck.waterCapacity <= 0) {
+    return null;
+  }
+  return Math.max(0, Math.min(1, deployedTruck.water / deployedTruck.waterCapacity));
+};
+
 const makePayload = (payload: DragPayload): string => JSON.stringify(payload);
 
 const readPayload = (event: DragEvent, currentDrag: DragPayload | null): DragPayload | null => {
@@ -191,6 +202,19 @@ const appendEmptyCrewSlots = (root: HTMLElement, count: number): void => {
   }
 };
 
+const createCrewDotMeter = (crewCount: number): HTMLElement => {
+  const meter = document.createElement("span");
+  meter.className = "three-test-hq-vehicle-crew-dots";
+  meter.setAttribute("aria-label", `${crewCount}/${TRUCK_CAPACITY} crew`);
+  for (let index = 0; index < TRUCK_CAPACITY; index += 1) {
+    const dot = document.createElement("span");
+    dot.className = "three-test-hq-vehicle-crew-dot";
+    dot.classList.toggle("is-filled", index < crewCount);
+    meter.appendChild(dot);
+  }
+  return meter;
+};
+
 const createTruckSlot = (
   truck: RosterUnit | null,
   context: TownFacilityRenderContext,
@@ -212,10 +236,13 @@ const createTruckSlot = (
   slot.tabIndex = 0;
   slot.textContent = TRUCK_ICON;
   slot.title = `${truck.name}. ${statusLabel(truck)}. ${crew.length}/${TRUCK_CAPACITY} crew.`;
-  const crewCount = document.createElement("span");
-  crewCount.className = "three-test-hq-vehicle-slot-count";
-  crewCount.textContent = String(crew.length);
-  slot.appendChild(crewCount);
+  const waterRatio = getTruckWaterRatio(truck, context);
+  if (waterRatio !== null) {
+    slot.classList.add("has-water");
+    slot.style.setProperty("--truck-water", `${Math.round(waterRatio * 100)}%`);
+    slot.title = `${slot.title} Water ${Math.round(waterRatio * 100)}%.`;
+  }
+  slot.appendChild(createCrewDotMeter(crew.length));
   bindActivation(slot, context.dispatchAction, "select-roster-id", { rosterId: String(truck.id) });
   if (canDragTruck(truck)) {
     bindDraggable(slot, { kind: "truck", rosterId: truck.id }, setCurrentDrag);
@@ -256,7 +283,7 @@ const renderSubtabs = (
 ): void => {
   const summary = document.createElement("div");
   summary.className = "three-test-hq-board-summary";
-  summary.textContent = `${stats.squadCount} squads - ${stats.readyTruckCount} ready trucks - ${stats.fieldedTruckCount} fielded - ${stats.readyCrewCount}/${stats.totalCrewCount} crew ready`;
+  summary.textContent = `Squads ${stats.squadCount} | Trucks ${stats.readyTruckCount} ready, ${stats.fieldedTruckCount} fielded | Crew ${stats.readyCrewCount}/${stats.totalCrewCount} ready`;
 
   const tabs = document.createElement("div");
   tabs.className = "three-test-hq-assignment-subtabs";
@@ -302,7 +329,7 @@ const renderSquadTruckBoard = (
     column.className = "three-test-hq-squad-column";
     column.classList.toggle("is-selected", selectedSquad?.id === squad.id);
     column.dataset.squadId = String(squad.id);
-    column.appendChild(createColumnHeader(squad.name, `${ready}/${trucks.length} ready`));
+    column.appendChild(createColumnHeader(squad.name, `${ready} ready | ${trucks.length} assigned`));
     bindActivation(column, dispatchAction, "select-squad", { squadId: String(squad.id) });
     bindDropZone(column, "truck", readCurrentDrag, (payload) => {
       dispatchAction("squad-move-truck", { rosterId: String(payload.rosterId), squadId: String(squad.id) });
@@ -352,9 +379,8 @@ const renderTruckCrewBoard = (
   setCurrentDrag: (payload: DragPayload | null) => void
 ): void => {
   const { world, dispatchAction } = context;
-  const trucks = world.roster
-    .filter((entry) => entry.kind === "truck" && entry.status !== "lost")
-    .sort((left, right) => left.id - right.id);
+  const selectedSquad = world.squads.find((squad) => squad.id === world.selectedSquadId) ?? world.squads[0] ?? null;
+  const trucks = selectedSquad ? getSquadTrucks(selectedSquad, world.roster) : [];
   const unassignedCrew = world.roster
     .filter((entry) => entry.kind === "firefighter" && entry.status !== "lost" && entry.assignedTruckId === null)
     .sort((left, right) => left.id - right.id);
@@ -364,6 +390,16 @@ const renderTruckCrewBoard = (
 
   const layout = document.createElement("div");
   layout.className = "three-test-hq-crew-loadout-board";
+  const squadHeader = document.createElement("section");
+  squadHeader.className = "three-test-hq-crew-squad-panel";
+  squadHeader.appendChild(
+    createColumnHeader(
+      selectedSquad ? `${selectedSquad.name} Crew` : "Squad Crew",
+      selectedSquad ? `${trucks.length} squad truck${trucks.length === 1 ? "" : "s"}` : "No squad selected"
+    )
+  );
+  layout.appendChild(squadHeader);
+
   const crewPool = document.createElement("section");
   crewPool.className = "three-test-hq-available-crew-panel";
   crewPool.appendChild(createColumnHeader("Available Crew", `${unassignedCrew.length} unassigned`));
@@ -387,6 +423,12 @@ const renderTruckCrewBoard = (
 
   const truckList = document.createElement("div");
   truckList.className = "three-test-hq-crew-truck-list";
+  if (trucks.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "three-test-hq-board-empty three-test-hq-crew-squad-empty";
+    empty.textContent = selectedSquad ? "No trucks assigned to this squad." : "Select a squad to manage truck crew.";
+    truckList.appendChild(empty);
+  }
   trucks.forEach((truck) => {
     const crew = getTruckCrew(truck, world.roster);
     const card = document.createElement("section");
