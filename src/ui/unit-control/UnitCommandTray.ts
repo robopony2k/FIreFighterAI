@@ -13,6 +13,7 @@ import type {
   Squad,
   Unit
 } from "../../core/types.js";
+import { createSquadLoadoutTruckSlot } from "../squad-loadout/squadLoadoutIcons.js";
 
 export type CommandMode = CommandType | "refill" | "hold";
 
@@ -135,9 +136,19 @@ const getBehaviourLabel = (mode: BehaviourMode): string => `${mode[0]!.toUpperCa
 
 const getStatusLabel = (status: CommandUnitStatus): string => `${status[0]!.toUpperCase()}${status.slice(1)}`;
 
+const getProjectionLabel = (inputState: InputState): string | null => {
+  const projection = inputState.formationProjection;
+  if (!projection) {
+    return null;
+  }
+  const degrees = Math.round((Math.atan2(projection.facing.y, projection.facing.x) * 180) / Math.PI);
+  const normalizedDegrees = (degrees + 360) % 360;
+  return `Projecting ${inputState.dispatchFormation} | width ${projection.widthTiles.toFixed(1)} | facing ${normalizedDegrees}deg`;
+};
+
 const getSquadTrayStatusLabel = (status: CommandUnitStatus, fielded: boolean, truckCount: number): string => {
   if (truckCount <= 0) {
-    return "No trucks";
+    return "No Trucks";
   }
   if (!fielded) {
     return "At HQ";
@@ -273,35 +284,21 @@ const createWaterMeter = (ratio: number, label: string): HTMLDivElement => {
   return meter;
 };
 
-const createTrayCrewDots = (crewCount: number): HTMLSpanElement => {
-  const meter = document.createElement("span");
-  meter.className = "three-test-squad-slot-crew-dots";
-  meter.setAttribute("aria-label", `${crewCount}/${TRUCK_CAPACITY} crew`);
-  for (let index = 0; index < TRUCK_CAPACITY; index += 1) {
-    const dot = document.createElement("span");
-    dot.className = "three-test-squad-slot-crew-dot";
-    dot.classList.toggle("is-filled", index < crewCount);
-    meter.appendChild(dot);
-  }
-  return meter;
-};
-
 const appendTrayTruckSlot = (
   root: HTMLElement,
   crewCount: number,
   waterRatio: number | null,
   empty: boolean
 ): void => {
-  const slot = document.createElement("span");
-  slot.className = "three-test-squad-slot-truck";
-  slot.classList.toggle("is-empty", empty);
-  if (!empty && waterRatio !== null) {
-    slot.classList.add("has-water");
-    slot.style.setProperty("--truck-water", `${Math.round(waterRatio * 100)}%`);
-  }
-  if (!empty) {
-    slot.appendChild(createTrayCrewDots(crewCount));
-  }
+  const slot = createSquadLoadoutTruckSlot({
+    slotClassName: "three-test-squad-slot-truck",
+    crewCount,
+    className: "three-test-squad-slot-crew-dots",
+    dotClassName: "three-test-squad-slot-crew-dot",
+    waterRatio,
+    empty,
+    includeCrewDots: !empty
+  });
   root.appendChild(slot);
 };
 
@@ -375,6 +372,7 @@ const createSquadSlot = (
   const shortcut = document.createElement("span");
   shortcut.className = "three-test-squad-slot-key";
   shortcut.textContent = String(slotIndex + 1);
+  shortcut.setAttribute("aria-hidden", "true");
   const name = document.createElement("div");
   name.className = "three-test-squad-slot-name";
   name.textContent = slotName;
@@ -383,16 +381,11 @@ const createSquadSlot = (
   status.dataset.status = fielded ? effectiveStatus : truckCount > 0 ? "at-hq" : "empty";
   status.textContent = statusLabel;
   status.title = fielded ? getStatusLabel(effectiveStatus) : statusLabel;
-  header.append(shortcut, name, status);
+  header.append(name, status);
 
   const truckRack = createTrayTruckRack(cardModel);
   const signals = document.createElement("div");
   signals.className = "three-test-squad-slot-signals";
-  const orderSignal = document.createElement("span");
-  orderSignal.className = "three-test-squad-slot-signal";
-  orderSignal.dataset.kind = "status";
-  orderSignal.textContent = intentLabel;
-  signals.append(orderSignal);
   if (highestAlert) {
     const alertSignal = document.createElement("span");
     alertSignal.className = "three-test-squad-slot-alert";
@@ -404,7 +397,16 @@ const createSquadSlot = (
     signals.appendChild(alertSignal);
   }
 
-  card.append(header, truckRack, signals);
+  const meta = document.createElement("div");
+  meta.className = "three-test-squad-slot-meta";
+  meta.appendChild(header);
+  if (signals.childElementCount > 0) {
+    meta.appendChild(signals);
+  }
+  const body = document.createElement("div");
+  body.className = "three-test-squad-slot-body";
+  body.append(truckRack, meta);
+  card.append(shortcut, body);
   card.title = `${slotName}. Slot ${slotIndex + 1}. ${truckCount} truck${truckCount === 1 ? "" : "s"}. ${statusLabel}. ${intentLabel}.`;
   card.addEventListener("click", (event) => {
     event.preventDefault();
@@ -435,18 +437,27 @@ const createEmptySquadSlot = (slotIndex: number): HTMLButtonElement => {
   const shortcut = document.createElement("span");
   shortcut.className = "three-test-squad-slot-key";
   shortcut.textContent = String(slotIndex + 1);
+  shortcut.setAttribute("aria-hidden", "true");
   const name = document.createElement("div");
   name.className = "three-test-squad-slot-name";
   name.textContent = "Empty";
-  header.append(shortcut, name);
-
-  const signals = document.createElement("div");
-  signals.className = "three-test-squad-slot-signals";
   const status = document.createElement("span");
-  status.className = "three-test-squad-slot-signal";
+  status.className = "three-test-squad-slot-status";
+  status.dataset.status = "empty";
   status.textContent = "No squad";
-  signals.appendChild(status);
-  card.append(header, signals);
+  header.append(name, status);
+  const truckRack = document.createElement("div");
+  truckRack.className = "three-test-squad-slot-truck-rack";
+  for (let index = 0; index < SQUAD_SLOT_COUNT; index += 1) {
+    appendTrayTruckSlot(truckRack, 0, null, true);
+  }
+  const meta = document.createElement("div");
+  meta.className = "three-test-squad-slot-meta";
+  meta.appendChild(header);
+  const body = document.createElement("div");
+  body.className = "three-test-squad-slot-body";
+  body.append(truckRack, meta);
+  card.append(shortcut, body);
   return card;
 };
 
@@ -679,6 +690,13 @@ export const createUnitCommandTray = ({ onAction, onStatus, onSquadHover }: Unit
       activeCommandMode,
       behaviourMode: inputState.behaviourMode,
       dispatchFormation: inputState.dispatchFormation,
+      formationProjection: inputState.formationProjection
+        ? {
+            width: Math.round(inputState.formationProjection.widthTiles * 10),
+            facingX: Math.round(inputState.formationProjection.facing.x * 100),
+            facingY: Math.round(inputState.formationProjection.facing.y * 100)
+          }
+        : null,
       pendingSquadDispatchId: inputState.pendingSquadDispatchId,
       selectionScope: state.selectionScope,
       selectedTruckIds: state.selectedTruckIds,
@@ -744,8 +762,11 @@ export const createUnitCommandTray = ({ onAction, onStatus, onSquadHover }: Unit
 
     const hint = document.createElement("div");
     hint.className = "three-test-command-panel-hint";
-    if (inputState.pendingSquadDispatchId === focusedCommandUnit.squadId) {
-      hint.textContent = "Click the world to place this squad.";
+    const projectionLabel = getProjectionLabel(inputState);
+    if (projectionLabel) {
+      hint.textContent = projectionLabel;
+    } else if (inputState.pendingSquadDispatchId === focusedCommandUnit.squadId) {
+      hint.textContent = "Right-click the world to place this squad.";
     } else if (state.selectionScope === "truck") {
       hint.textContent = "Truck overrides take priority until rejoined.";
     } else {

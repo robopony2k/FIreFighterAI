@@ -1,10 +1,11 @@
-import type { CommandFormation, CommandIntent, Point, RNG, RosterUnit, Squad } from "../../../core/types.js";
+import type { CommandFormation, CommandIntent, FormationTarget, Point, RNG, RosterUnit, Squad } from "../../../core/types.js";
 import type { WorldState } from "../../../core/state.js";
 import { setStatus } from "../../../core/state.js";
 import { resolveNearestTownId } from "../../../core/towns.js";
 import { COMMAND_UNIT_NAMES } from "../constants/runtimeConstants.js";
 import { applyCommandIntentToSelection, selectCommandUnit } from "./commandSelectionController.js";
 import { syncCommandUnits } from "../sim/commandUnits.js";
+import { createFormationTarget } from "../sim/formationProjection.js";
 import { deployUnit, setUnitTarget } from "../sim/unitDeployment.js";
 import { getRosterTruck, getUnitById } from "../utils/unitLookup.js";
 
@@ -214,16 +215,21 @@ export const removeRosterTruckFromSquad = (state: WorldState, rosterTruckId: num
 const makeDispatchIntent = (
   tile: Point,
   formation: CommandFormation,
-  orientationEnd?: Point | null
+  orientationEnd?: Point | null,
+  truckCount = 1,
+  projection?: FormationTarget | null
 ): CommandIntent => {
-  if (orientationEnd && (formation === "line" || formation === "wedge" || formation === "arc")) {
+  if ((projection || orientationEnd) && (formation === "line" || formation === "wedge" || formation === "arc")) {
     return {
       type: "move",
-      target: {
-        kind: "line",
-        start: { x: tile.x, y: tile.y },
-        end: { x: orientationEnd.x, y: orientationEnd.y }
-      },
+      target:
+        projection ??
+        createFormationTarget({
+          anchor: tile,
+          cursor: orientationEnd,
+          formation,
+          count: truckCount
+        }),
       formation,
       behaviourMode: "balanced"
     };
@@ -245,7 +251,8 @@ export const dispatchSquadToTile = (
   squadId: number,
   tile: Point,
   formation: CommandFormation,
-  orientationEnd?: Point | null
+  orientationEnd?: Point | null,
+  projection?: FormationTarget | null
 ): boolean => {
   ensureDefaultSquads(state);
   const squad = getSquadById(state, squadId);
@@ -272,7 +279,7 @@ export const dispatchSquadToTile = (
   }
   const previousSelection = [...state.selectedCommandUnitIds];
   selectCommandUnit(state, commandUnit.id);
-  const intent = makeDispatchIntent(tile, formation, orientationEnd);
+  const intent = makeDispatchIntent(tile, formation, orientationEnd, commandUnit.truckIds.length, projection);
   applyCommandIntentToSelection(state, intent);
   state.selectedCommandUnitIds = previousSelection.length > 0 ? previousSelection : [commandUnit.id];
   state.focusedCommandUnitId = commandUnit.id;

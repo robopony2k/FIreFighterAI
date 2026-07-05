@@ -94,12 +94,20 @@ export type AreaTarget = {
   end: Point;
 };
 
+export type FormationTarget = {
+  kind: "formation";
+  anchor: Point;
+  facing: Point;
+  widthTiles: number;
+};
+
 export type CommandTarget =
   | {
       kind: "point";
       point: Point;
     }
   | LineTarget
+  | FormationTarget
   | AreaTarget;
 
 export interface CommandIntent {

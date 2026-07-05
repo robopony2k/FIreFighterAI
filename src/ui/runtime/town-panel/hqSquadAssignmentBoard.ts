@@ -1,5 +1,11 @@
 import { TRUCK_CAPACITY } from "../../../core/config.js";
 import type { RosterUnit, Squad } from "../../../core/types.js";
+import {
+  createSquadLoadoutCrewDots,
+  createSquadLoadoutTruckSlot,
+  SQUAD_LOADOUT_FIREFIGHTER_ICON,
+  SQUAD_LOADOUT_TRUCK_ICON
+} from "../../squad-loadout/squadLoadoutIcons.js";
 import type { TownFacilityRenderContext } from "./types.js";
 
 type DispatchAction = TownFacilityRenderContext["dispatchAction"];
@@ -19,8 +25,6 @@ type HqSquadAssignmentStats = {
 
 const DRAG_MIME = "application/x-firefighterai-hq-roster";
 const activeSubtabByFacility = new Map<string, AssignmentSubtab>();
-const TRUCK_ICON = "🚒";
-const FIREFIGHTER_ICON = "🧑🏻‍🚒";
 const FIXED_SQUAD_COUNT = 5;
 const SQUAD_TRUCK_SLOT_COUNT = 5;
 
@@ -197,22 +201,9 @@ const appendEmptyCrewSlots = (root: HTMLElement, count: number): void => {
   for (let index = 0; index < count; index += 1) {
     const dot = document.createElement("span");
     dot.className = "three-test-hq-crew-dot";
-    dot.textContent = FIREFIGHTER_ICON;
+    dot.textContent = SQUAD_LOADOUT_FIREFIGHTER_ICON;
     root.appendChild(dot);
   }
-};
-
-const createCrewDotMeter = (crewCount: number): HTMLElement => {
-  const meter = document.createElement("span");
-  meter.className = "three-test-hq-vehicle-crew-dots";
-  meter.setAttribute("aria-label", `${crewCount}/${TRUCK_CAPACITY} crew`);
-  for (let index = 0; index < TRUCK_CAPACITY; index += 1) {
-    const dot = document.createElement("span");
-    dot.className = "three-test-hq-vehicle-crew-dot";
-    dot.classList.toggle("is-filled", index < crewCount);
-    meter.appendChild(dot);
-  }
-  return meter;
 };
 
 const createTruckSlot = (
@@ -220,29 +211,38 @@ const createTruckSlot = (
   context: TownFacilityRenderContext,
   setCurrentDrag: (payload: DragPayload | null) => void
 ): HTMLElement => {
-  const slot = document.createElement("div");
-  slot.className = "three-test-hq-vehicle-slot";
   if (!truck) {
-    slot.classList.add("is-empty");
-    slot.textContent = TRUCK_ICON;
+    const slot = createSquadLoadoutTruckSlot({
+      tagName: "div",
+      slotClassName: "three-test-hq-vehicle-slot",
+      crewCount: 0,
+      className: "three-test-hq-vehicle-crew-dots",
+      dotClassName: "three-test-hq-vehicle-crew-dot",
+      empty: true,
+      includeCrewDots: false
+    });
     slot.title = "Open vehicle slot.";
     return slot;
   }
   const crew = getTruckCrew(truck, context.world.roster);
+  const waterRatio = getTruckWaterRatio(truck, context);
+  const slot = createSquadLoadoutTruckSlot({
+    tagName: "div",
+    slotClassName: "three-test-hq-vehicle-slot",
+    crewCount: crew.length,
+    className: "three-test-hq-vehicle-crew-dots",
+    dotClassName: "three-test-hq-vehicle-crew-dot",
+    waterRatio
+  });
   slot.classList.toggle("is-selected", context.world.selectedRosterId === truck.id);
   slot.classList.toggle("is-disabled", truck.status !== "available");
   slot.dataset.rosterId = String(truck.id);
   slot.setAttribute("role", "button");
   slot.tabIndex = 0;
-  slot.textContent = TRUCK_ICON;
   slot.title = `${truck.name}. ${statusLabel(truck)}. ${crew.length}/${TRUCK_CAPACITY} crew.`;
-  const waterRatio = getTruckWaterRatio(truck, context);
   if (waterRatio !== null) {
-    slot.classList.add("has-water");
-    slot.style.setProperty("--truck-water", `${Math.round(waterRatio * 100)}%`);
     slot.title = `${slot.title} Water ${Math.round(waterRatio * 100)}%.`;
   }
-  slot.appendChild(createCrewDotMeter(crew.length));
   bindActivation(slot, context.dispatchAction, "select-roster-id", { rosterId: String(truck.id) });
   if (canDragTruck(truck)) {
     bindDraggable(slot, { kind: "truck", rosterId: truck.id }, setCurrentDrag);
@@ -264,7 +264,7 @@ const createCrewIcon = (
   icon.dataset.rosterId = String(crew.id);
   icon.setAttribute("role", "button");
   icon.tabIndex = 0;
-  icon.textContent = FIREFIGHTER_ICON;
+  icon.textContent = SQUAD_LOADOUT_FIREFIGHTER_ICON;
   icon.title = `${crew.name}. ${statusLabel(crew)} crew.`;
   bindActivation(icon, context.dispatchAction, "select-roster-id", { rosterId: String(crew.id) });
   if (canEditCrew(crew, context)) {
@@ -326,7 +326,7 @@ const renderSquadTruckBoard = (
     const trucks = getSquadTrucks(squad, world.roster);
     const ready = trucks.filter((truck) => truck.status === "available").length;
     const column = document.createElement("section");
-    column.className = "three-test-hq-squad-column";
+    column.className = "three-test-hq-squad-column three-test-hq-squad-column--squad";
     column.classList.toggle("is-selected", selectedSquad?.id === squad.id);
     column.dataset.squadId = String(squad.id);
     column.appendChild(createColumnHeader(squad.name, `${ready} ready | ${trucks.length} assigned`));
@@ -457,7 +457,7 @@ const renderTruckCrewBoard = (
     header.append(title, meta);
     const cardIcon = document.createElement("span");
     cardIcon.className = "three-test-hq-chip-icon three-test-hq-chip-icon--truck";
-    cardIcon.textContent = TRUCK_ICON;
+    cardIcon.textContent = SQUAD_LOADOUT_TRUCK_ICON;
     header.prepend(cardIcon);
     const crewSlots = document.createElement("div");
     crewSlots.className = "three-test-hq-crew-slots";

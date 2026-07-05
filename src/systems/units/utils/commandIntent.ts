@@ -14,6 +14,14 @@ export const cloneCommandTarget = (target: CommandTarget): CommandTarget => {
       end: { x: target.end.x, y: target.end.y }
     };
   }
+  if (target.kind === "formation") {
+    return {
+      kind: "formation",
+      anchor: { x: target.anchor.x, y: target.anchor.y },
+      facing: { x: target.facing.x, y: target.facing.y },
+      widthTiles: target.widthTiles
+    };
+  }
   return {
     kind: "area",
     start: { x: target.start.x, y: target.start.y },
@@ -46,6 +54,15 @@ export const commandTargetsEqual = (left: CommandTarget | null, right: CommandTa
         left.start.y === right.start.y &&
         left.end.x === right.end.x &&
         left.end.y === right.end.y
+      );
+    case "formation":
+      return (
+        right.kind === "formation" &&
+        left.anchor.x === right.anchor.x &&
+        left.anchor.y === right.anchor.y &&
+        left.facing.x === right.facing.x &&
+        left.facing.y === right.facing.y &&
+        left.widthTiles === right.widthTiles
       );
   }
 };

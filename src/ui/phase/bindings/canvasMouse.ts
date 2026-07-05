@@ -7,6 +7,7 @@ import { inBounds } from "../../../core/grid.js";
 import { panCameraByPixels, screenToWorld, zoomAtPointer } from "../../../render/inputProjection.js";
 import { resetStatus, setStatus } from "../../../core/state.js";
 import { clearUnitSelection, selectCommandUnit } from "../../../sim/units.js";
+import { createFormationTarget } from "../../../systems/units/sim/formationProjection.js";
 import {
   beginClearFuelBreakLine,
   completeClearFuelBreakLine,
@@ -15,6 +16,9 @@ import {
   handleMapRetaskTileCommand
 } from "../../../sim/input/mapTileActions.js";
 import { wheelDeltaToZoomFactor } from "./canvasWheel.js";
+
+const FORMATION_HOLD_THRESHOLD_MS = 180;
+const FORMATION_DRAG_THRESHOLD_PX = 6;
 
 type ListenCanvas = <K extends keyof HTMLElementEventMap>(
   type: K,
@@ -64,6 +68,7 @@ export const bindCanvasMouseHandlers = ({
   let selectStart: { x: number; y: number } | null = null;
   let selectEnd: { x: number; y: number } | null = null;
   let rightDragStart: { x: number; y: number } | null = null;
+  let rightDragStartedAt = 0;
 
   const getCanvasPos = (event: MouseEvent): { x: number; y: number } => {
     const rect = canvas.getBoundingClientRect();
@@ -73,6 +78,36 @@ export const bindCanvasMouseHandlers = ({
       x: (event.clientX - rect.left) * scaleX,
       y: (event.clientY - rect.top) * scaleY
     };
+  };
+
+  const getFormationUnitCount = (): number => {
+    if (inputState.pendingSquadDispatchId !== null) {
+      const squad = state.squads.find((entry) => entry.id === inputState.pendingSquadDispatchId) ?? null;
+      return Math.max(1, squad?.truckRosterIds.length ?? 1);
+    }
+    return Math.max(1, state.selectedUnitIds.length);
+  };
+
+  const updateFormationProjection = (cursor: { x: number; y: number } | null): void => {
+    if (!inputState.formationStart || !cursor) {
+      inputState.formationProjection = null;
+      return;
+    }
+    inputState.formationProjection = createFormationTarget({
+      anchor: inputState.formationStart,
+      cursor,
+      formation: inputState.dispatchFormation,
+      count: getFormationUnitCount()
+    });
+  };
+
+  const clearFormationDragState = (): void => {
+    isFormationDrag = false;
+    rightDragStart = null;
+    rightDragStartedAt = 0;
+    inputState.formationStart = null;
+    inputState.formationEnd = null;
+    inputState.formationProjection = null;
   };
 
   listenCanvas("click", (event) => {
@@ -122,14 +157,16 @@ export const bindCanvasMouseHandlers = ({
       return;
     }
     if (mouseEvent.button === 2) {
-      if (state.selectedUnitIds.length > 0) {
+      if (state.selectedUnitIds.length > 0 || inputState.pendingSquadDispatchId !== null) {
         gate("formation", () => {
           const tile = getTileFromPointer(mouseEvent);
           if (tile) {
             isFormationDrag = true;
             rightDragStart = canvasPos;
+            rightDragStartedAt = performance.now();
             inputState.formationStart = tile;
             inputState.formationEnd = tile;
+            inputState.formationProjection = null;
           }
         });
       }
@@ -169,23 +206,34 @@ export const bindCanvasMouseHandlers = ({
     if (mouseEvent.button === 2) {
       if (isFormationDrag) {
         const tile = getTileFromPointer(mouseEvent);
+        const heldMs = rightDragStartedAt > 0 ? performance.now() - rightDragStartedAt : 0;
         const dragDistance =
           rightDragStart && mouseEvent
             ? Math.hypot(canvasPos.x - rightDragStart.x, canvasPos.y - rightDragStart.y)
             : 0;
-        if (tile && dragDistance < 6) {
-          handleMapRetaskTileCommand({ state, inputState, tile, gate });
+        if (tile && dragDistance < FORMATION_DRAG_THRESHOLD_PX && heldMs < FORMATION_HOLD_THRESHOLD_MS) {
+          if (inputState.pendingSquadDispatchId !== null) {
+            handleMapPrimaryTileClick({ state, inputState, rng, tile, gate });
+          } else {
+            handleMapRetaskTileCommand({ state, inputState, tile, gate });
+          }
         } else {
           const start = inputState.formationStart;
           const end = inputState.formationEnd;
           if (start && end) {
-            handleMapFormationDragCommand({ state, inputState, start, end, gate });
+            updateFormationProjection(end);
+            handleMapFormationDragCommand({
+              state,
+              rng,
+              inputState,
+              start,
+              end,
+              projection: inputState.formationProjection,
+              gate
+            });
           }
         }
-        isFormationDrag = false;
-        rightDragStart = null;
-        inputState.formationStart = null;
-        inputState.formationEnd = null;
+        clearFormationDragState();
       } else if (state.selectedUnitIds.length > 0) {
         const tile = getTileFromPointer(mouseEvent);
         if (tile) {
@@ -268,10 +316,7 @@ export const bindCanvasMouseHandlers = ({
     isPanning = false;
     panAnchor = null;
     panCamera = null;
-    isFormationDrag = false;
-    rightDragStart = null;
-    inputState.formationStart = null;
-    inputState.formationEnd = null;
+    clearFormationDragState();
     isSelecting = false;
     selectStart = null;
     selectEnd = null;
@@ -302,6 +347,12 @@ export const bindCanvasMouseHandlers = ({
       const tile = getTileFromPointer(mouseEvent);
       if (tile) {
         inputState.formationEnd = tile;
+        const canvasPos = getCanvasPos(mouseEvent);
+        const dragDistance = rightDragStart ? Math.hypot(canvasPos.x - rightDragStart.x, canvasPos.y - rightDragStart.y) : 0;
+        const heldMs = rightDragStartedAt > 0 ? performance.now() - rightDragStartedAt : 0;
+        if (dragDistance >= FORMATION_DRAG_THRESHOLD_PX || heldMs >= FORMATION_HOLD_THRESHOLD_MS) {
+          updateFormationProjection(tile);
+        }
       }
       return;
     }

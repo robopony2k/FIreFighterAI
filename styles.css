@@ -2085,7 +2085,8 @@ canvas {
   grid-template-columns: minmax(66px, 0.28fr) minmax(0, 1fr);
   gap: 4px;
   align-items: center;
-  min-height: 0;
+  box-sizing: border-box;
+  min-height: 56px;
   padding: 5px 6px;
   border: 1px solid color-mix(in srgb, var(--three-test-button-border) 64%, transparent);
   border-radius: 7px;
@@ -2096,6 +2097,10 @@ canvas {
 .three-test-hq-squad-column.is-drop-ready {
   border-color: var(--three-test-accent);
   box-shadow: 0 0 0 2px color-mix(in srgb, var(--three-test-accent) 18%, transparent);
+}
+
+.three-test-hq-squad-column--squad {
+  height: 56px;
 }
 
 .three-test-hq-pool-column {
@@ -3168,8 +3173,8 @@ canvas {
 }
 
 .three-test-unit-tray {
-  --squad-slot-width: 164px;
-  --squad-slot-height: 52px;
+  --squad-slot-width: 300px;
+  --squad-slot-height: 56px;
   --squad-slot-gap: 6px;
   position: absolute;
   left: 12px;
@@ -3239,19 +3244,24 @@ canvas {
   height: var(--squad-slot-height);
   padding: 5px 7px;
   align-content: center;
-  gap: 3px;
+  grid-template-columns: 32px minmax(0, 1fr);
+  align-items: stretch;
+  gap: 8px;
 }
 
 .three-test-squad-slot.is-empty {
   cursor: not-allowed;
   opacity: 1;
-  color: color-mix(in srgb, var(--three-test-text-primary) 46%, transparent);
-  background: color-mix(in srgb, var(--three-test-unit-card-bg) 34%, transparent);
-  border-color: color-mix(in srgb, var(--three-test-unit-card-border) 42%, transparent);
+  color: color-mix(in srgb, var(--three-test-text-primary) 34%, transparent);
+  background: color-mix(in srgb, var(--three-test-unit-card-bg) 18%, transparent);
+  border-color: color-mix(in srgb, var(--three-test-unit-card-border) 36%, transparent);
+  box-shadow: none;
 }
 
 .three-test-squad-slot.is-unstaffed {
-  background: color-mix(in srgb, var(--three-test-unit-card-bg) 48%, transparent);
+  color: color-mix(in srgb, var(--three-test-text-primary) 58%, transparent);
+  background: color-mix(in srgb, var(--three-test-unit-card-bg) 34%, transparent);
+  border-color: color-mix(in srgb, var(--three-test-unit-card-border) 38%, transparent);
 }
 
 .three-test-squad-slot.is-at-hq {
@@ -3286,6 +3296,33 @@ canvas {
   box-shadow: 0 0 0 2px rgba(152, 240, 229, 0.24);
 }
 
+.three-test-squad-slot.is-selected .three-test-squad-slot-key,
+.three-test-squad-slot.is-focused .three-test-squad-slot-key {
+  border-color: color-mix(in srgb, var(--three-test-accent) 74%, #98f0e5);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.16), transparent 44%),
+    linear-gradient(180deg, rgba(84, 99, 99, 0.98), rgba(37, 45, 45, 0.98));
+  color: var(--three-test-text-primary);
+}
+
+.three-test-squad-slot.is-empty .three-test-squad-slot-key {
+  border-color: color-mix(in srgb, var(--three-test-card-border) 34%, transparent);
+  background: linear-gradient(180deg, rgba(84, 91, 91, 0.16), rgba(20, 24, 24, 0.24));
+  color: color-mix(in srgb, var(--three-test-text-primary) 42%, transparent);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.06),
+    inset 0 -2px 0 rgba(0, 0, 0, 0.22);
+}
+
+.three-test-squad-slot.is-unstaffed .three-test-squad-slot-key {
+  border-color: color-mix(in srgb, var(--three-test-card-border) 38%, #98f0e5);
+  background: linear-gradient(180deg, rgba(90, 104, 105, 0.2), rgba(25, 31, 32, 0.34));
+  color: color-mix(in srgb, var(--three-test-text-primary) 56%, transparent);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.07),
+    inset 0 -2px 0 rgba(0, 0, 0, 0.24);
+}
+
 .three-test-squad-slot-header,
 .three-test-truck-tile-header {
   display: flex;
@@ -3302,24 +3339,56 @@ canvas {
   letter-spacing: 0.02em;
 }
 
+.three-test-squad-slot-name {
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .three-test-squad-slot-header {
   display: grid;
-  grid-template-columns: 20px minmax(0, 1fr) auto;
-  justify-content: stretch;
-  gap: 5px;
+  gap: 3px;
+  align-content: center;
+  justify-content: start;
 }
 
 .three-test-squad-slot-key {
   display: inline-grid;
   place-items: center;
-  flex: 0 0 20px;
-  width: 20px;
-  height: 20px;
-  border-radius: 4px;
-  border: 1px solid color-mix(in srgb, var(--three-test-card-border) 60%, #98f0e5);
-  background: rgba(255, 255, 255, 0.06);
-  color: color-mix(in srgb, var(--three-test-text-primary) 88%, transparent);
-  font-size: 11px;
+  width: 32px;
+  height: 32px;
+  align-self: center;
+  border-radius: 6px;
+  border: 1px solid color-mix(in srgb, var(--three-test-card-border) 56%, #98f0e5);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.11), transparent 42%),
+    linear-gradient(180deg, rgba(67, 82, 84, 0.92), rgba(29, 36, 38, 0.94));
+  color: color-mix(in srgb, var(--three-test-text-primary) 96%, transparent);
+  font-size: 18px;
+  font-weight: 800;
+  line-height: 1;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.16),
+    inset 0 -2px 0 rgba(0, 0, 0, 0.32),
+    0 1px 3px rgba(0, 0, 0, 0.16);
+}
+
+.three-test-squad-slot-body {
+  display: grid;
+  grid-template-columns: 184px minmax(0, 1fr);
+  align-items: center;
+  align-content: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.three-test-squad-slot-meta {
+  display: grid;
+  align-content: center;
+  gap: 3px;
+  min-width: 0;
 }
 
 .three-test-squad-slot-signals,
@@ -3332,8 +3401,14 @@ canvas {
 }
 
 .three-test-squad-slot-signals {
-  gap: 5px;
+  gap: 3px;
   white-space: nowrap;
+}
+
+.three-test-squad-slot-meta .three-test-squad-slot-signals {
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
 }
 
 .three-test-command-unit-stat,
@@ -3346,56 +3421,77 @@ canvas {
 
 .three-test-squad-slot-signal {
   color: color-mix(in srgb, var(--three-test-text-primary) 78%, transparent);
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .three-test-squad-slot-truck-rack {
   display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
-  gap: 3px;
+  grid-template-columns: repeat(5, 32px);
+  gap: 6px;
+  justify-content: start;
   min-width: 0;
 }
 
 .three-test-squad-slot-truck {
   position: relative;
-  display: block;
-  height: 10px;
+  display: inline-grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
   border: 1px solid color-mix(in srgb, var(--three-test-unit-card-border) 72%, transparent);
-  border-radius: 3px;
+  border-radius: 7px;
   background: color-mix(in srgb, var(--three-test-button-bg) 74%, transparent);
+  color: var(--three-test-text-primary);
+  font-size: 18px;
+  line-height: 1;
   overflow: hidden;
 }
 
 .three-test-squad-slot-truck.is-empty {
   border-style: dashed;
-  border-color: color-mix(in srgb, var(--three-test-unit-card-border) 34%, transparent);
-  background: color-mix(in srgb, var(--three-test-unit-card-bg) 30%, transparent);
+  border-color: color-mix(in srgb, var(--three-test-unit-card-border) 54%, transparent);
+  background: color-mix(in srgb, var(--three-test-unit-card-bg) 24%, transparent);
+  color: transparent;
+  opacity: 0.7;
+}
+
+.three-test-squad-slot.is-empty .three-test-squad-slot-truck.is-empty {
+  opacity: 0.5;
+}
+
+.three-test-squad-slot.is-unstaffed .three-test-squad-slot-truck.is-empty {
+  opacity: 0.62;
 }
 
 .three-test-squad-slot-truck.has-water::after {
   content: "";
   position: absolute;
-  left: 1px;
-  bottom: 1px;
-  width: max(0px, calc(var(--truck-water, 100%) - 2px));
-  height: 2px;
+  left: 3px;
+  bottom: 3px;
+  width: max(0px, calc(var(--truck-water, 100%) - 6px));
+  height: 3px;
   border-radius: 999px;
   background: linear-gradient(90deg, rgba(66, 156, 221, 0.92), rgba(122, 211, 236, 0.96));
+  pointer-events: none;
 }
 
 .three-test-squad-slot-crew-dots {
   position: absolute;
-  top: 1px;
+  top: 3px;
   left: 50%;
   display: flex;
-  gap: 1px;
+  gap: 2px;
   transform: translateX(-50%);
+  pointer-events: none;
 }
 
 .three-test-squad-slot-crew-dot {
-  width: 2px;
-  height: 2px;
+  width: 4px;
+  height: 4px;
   border-radius: 999px;
-  border: 1px solid color-mix(in srgb, var(--three-test-text-primary) 44%, transparent);
+  border: 1px solid color-mix(in srgb, var(--three-test-text-primary) 52%, transparent);
 }
 
 .three-test-squad-slot-crew-dot.is-filled {
@@ -8392,7 +8488,7 @@ input[type="text"] {
   }
 
   .three-test-command-bar {
-    --squad-slot-width: 154px;
+    --squad-slot-width: 300px;
     grid-template-columns: var(--squad-slot-width) minmax(0, 1fr);
   }
 
@@ -8469,8 +8565,8 @@ input[type="text"] {
   }
 
   .three-test-command-bar {
-    --squad-slot-width: 136px;
-    --squad-slot-height: 50px;
+    --squad-slot-width: min(300px, calc(100vw - 34px));
+    --squad-slot-height: 56px;
     grid-template-columns: var(--squad-slot-width) minmax(0, 1fr);
     gap: 8px;
   }

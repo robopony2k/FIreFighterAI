@@ -1322,6 +1322,7 @@ export const bindPhaseUi = ({
           inputState,
           start: command.start,
           end: command.end,
+          projection: command.projection,
           gate
         });
         return;

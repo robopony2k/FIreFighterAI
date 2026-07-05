@@ -1,13 +1,12 @@
 import { setStatus } from "../../core/state.js";
 import type { WorldState } from "../../core/state.js";
 import type { InputState } from "../../core/inputState.js";
-import type { AreaTarget, CommandFormation, CommandIntent, CommandType, LineTarget, Point, RNG, Unit } from "../../core/types.js";
+import type { AreaTarget, CommandFormation, CommandIntent, CommandType, FormationTarget, Point, RNG, Unit } from "../../core/types.js";
 import { handleUnitDeployment } from "../index.js";
 import { igniteDebugFireAt } from "../fire/debugIgnite.js";
 import { selectTownEvacuationDestination } from "../../systems/evacuation/controllers/evacuationController.js";
 import {
   applyCommandIntentToSelection,
-  assignFormationTargets,
   clearFuelLine,
   clearUnitSelection,
   getSelectedUnits,
@@ -18,6 +17,7 @@ import {
   toggleUnitSelection
 } from "../units.js";
 import { dispatchSquadToTile } from "../../systems/units/controllers/squadController.js";
+import { createFormationTarget } from "../../systems/units/sim/formationProjection.js";
 
 export type MapTile = { x: number; y: number };
 export type MapInputAction = "select" | "deploy" | "retask" | "formation" | "clearFuelBreak";
@@ -116,20 +116,21 @@ const makePointIntent = (
   };
 };
 
-const makeLineIntent = (
-  state: WorldState,
+const makeProjectedFormationIntent = (
   inputState: InputState,
   start: MapTile,
   end: MapTile,
+  count: number,
   formation: CommandFormation = inputState.dispatchFormation ?? "line"
 ): CommandIntent => {
-  const target: LineTarget = {
-    kind: "line",
-    start: { x: start.x, y: start.y },
-    end: { x: end.x, y: end.y }
-  };
+  const target: FormationTarget = createFormationTarget({
+    anchor: start,
+    cursor: end,
+    formation,
+    count
+  });
   return {
-    type: inputState.commandMode ?? "contain",
+    type: inputState.commandMode ?? "move",
     target,
     formation,
     behaviourMode: inputState.behaviourMode
@@ -253,6 +254,7 @@ export type HandleMapFormationDragCommandParams = {
   rng?: RNG;
   start: MapTile;
   end: MapTile;
+  projection?: FormationTarget | null;
   gate?: MapActionGate;
 };
 
@@ -262,6 +264,7 @@ export const handleMapFormationDragCommand = ({
   inputState,
   start,
   end,
+  projection = null,
   gate
 }: HandleMapFormationDragCommandParams & { inputState: InputState }): boolean => {
   if (inputState.pendingSquadDispatchId !== null) {
@@ -270,8 +273,9 @@ export const handleMapFormationDragCommand = ({
       return false;
     }
     runAction({ gate }, "formation", () => {
-      if (dispatchSquadToTile(state, rng, inputState.pendingSquadDispatchId!, start, inputState.dispatchFormation, end)) {
+      if (dispatchSquadToTile(state, rng, inputState.pendingSquadDispatchId!, start, inputState.dispatchFormation, end, projection)) {
         inputState.pendingSquadDispatchId = null;
+        inputState.formationProjection = null;
       }
     });
     return true;
@@ -290,11 +294,16 @@ export const handleMapFormationDragCommand = ({
       applyCommandIntentToSelection(state, makeAreaIntent(state, inputState, start, end));
       return;
     }
-    if (inputState.commandMode === "move" && state.selectionScope === "truck") {
-      assignFormationTargets(state, selectedUnits, start, end);
+    if (projection) {
+      applyCommandIntentToSelection(state, {
+        type: inputState.commandMode ?? "move",
+        target: projection,
+        formation: inputState.dispatchFormation,
+        behaviourMode: inputState.behaviourMode
+      });
       return;
     }
-    applyCommandIntentToSelection(state, makeLineIntent(state, inputState, start, end));
+    applyCommandIntentToSelection(state, makeProjectedFormationIntent(inputState, start, end, selectedUnits.length));
   });
   return true;
 };

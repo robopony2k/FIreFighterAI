@@ -41,6 +41,12 @@ export {
 } from "./controllers/commandSelectionController.js";
 
 export { syncCommandUnits, getEffectiveTruckIntent } from "./sim/commandUnits.js";
+export {
+  createFormationTarget,
+  getAutoFormationWidthTiles,
+  resolveFormationProjection,
+  resolveFormationSlot
+} from "./sim/formationProjection.js";
 export { setUnitDeployMode, createUnit, setUnitTarget, deployUnit, getUnitAt } from "./sim/unitDeployment.js";
 export { setTruckCrewMode, setCrewFormation } from "./sim/crewRuntime.js";
 export { autoAssignTargets } from "./sim/commandRuntime.js";

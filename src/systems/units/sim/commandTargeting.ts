@@ -1,7 +1,8 @@
-import type { AreaTarget, CommandIntent, CommandTarget, LineTarget, Point } from "../../../core/types.js";
+import type { AreaTarget, CommandIntent, CommandTarget, FormationTarget, LineTarget, Point } from "../../../core/types.js";
 import type { WorldState } from "../../../core/state.js";
 import { indexFor } from "../../../core/grid.js";
 import { THREAT_FIRE_EPS } from "../constants/runtimeConstants.js";
+import { resolveFormationSlot } from "./formationProjection.js";
 import { findNearestPassable } from "./unitPathing.js";
 
 export const getCommandTargetBounds = (
@@ -15,6 +16,15 @@ export const getCommandTargetBounds = (
       maxY: target.point.y
     };
   }
+  if (target.kind === "formation") {
+    const radius = Math.max(1, Math.ceil(target.widthTiles));
+    return {
+      minX: Math.floor(target.anchor.x - radius),
+      maxX: Math.ceil(target.anchor.x + radius),
+      minY: Math.floor(target.anchor.y - radius),
+      maxY: Math.ceil(target.anchor.y + radius)
+    };
+  }
   return {
     minX: Math.min(target.start.x, target.end.x),
     maxX: Math.max(target.start.x, target.end.x),
@@ -26,6 +36,9 @@ export const getCommandTargetBounds = (
 export const getCommandTargetCenter = (target: CommandTarget): Point => {
   if (target.kind === "point") {
     return target.point;
+  }
+  if (target.kind === "formation") {
+    return target.anchor;
   }
   return {
     x: Math.round((target.start.x + target.end.x) * 0.5),
@@ -52,6 +65,9 @@ const pointInCommandTarget = (point: Point, target: CommandTarget): boolean => {
   }
   if (target.kind === "line") {
     return pointToSegmentDistance(point, target.start, target.end) <= 3.5;
+  }
+  if (target.kind === "formation") {
+    return Math.hypot(point.x - target.anchor.x, point.y - target.anchor.y) <= Math.max(3.5, target.widthTiles * 0.55);
   }
   const bounds = getCommandTargetBounds(target);
   return point.x >= bounds.minX && point.x <= bounds.maxX && point.y >= bounds.minY && point.y <= bounds.maxY;
@@ -88,7 +104,25 @@ const resolveLineSlotTarget = (state: WorldState, target: LineTarget, count: num
   return findNearestPassable(state, rawX, rawY, 2) ?? getCommandTargetCenter(target);
 };
 
+const resolveProjectedFormationSlotTarget = (
+  state: WorldState,
+  target: FormationTarget,
+  formation: CommandIntent["formation"],
+  count: number,
+  index: number
+): Point => {
+  const raw = resolveFormationSlot(target, formation, count, index);
+  return findNearestPassable(state, raw.x, raw.y, 3) ?? getCommandTargetCenter(target);
+};
+
 const getOrientation = (target: CommandTarget): { center: Point; forwardX: number; forwardY: number } => {
+  if (target.kind === "formation") {
+    return {
+      center: target.anchor,
+      forwardX: target.facing.x,
+      forwardY: target.facing.y
+    };
+  }
   if (target.kind === "line") {
     const dx = target.end.x - target.start.x;
     const dy = target.end.y - target.start.y;
@@ -143,6 +177,9 @@ export const resolveIntentSlotTarget = (
 ): Point => {
   if (intent.formation === "area" && intent.target.kind === "area") {
     return resolveAreaSlotTarget(state, intent.target, count, index);
+  }
+  if (intent.target.kind === "formation") {
+    return resolveProjectedFormationSlotTarget(state, intent.target, intent.formation, count, index);
   }
   if (intent.formation === "line" && intent.target.kind === "line") {
     return resolveLineSlotTarget(state, intent.target, count, index);

@@ -1,3 +1,5 @@
+import type { FormationTarget } from "../../core/types.js";
+
 export const PHASE_UI_COMMAND_EVENT = "phase-ui-command";
 
 export type PhaseUiTilePoint = {
@@ -41,6 +43,7 @@ export type PhaseUiCommand =
       type: "map-formation";
       start: PhaseUiTilePoint;
       end: PhaseUiTilePoint;
+      projection?: FormationTarget;
     }
   | {
       type: "town-alert";

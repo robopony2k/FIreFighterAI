@@ -18,6 +18,8 @@ import { getBuildingLifecycleStageFromId, getBuildingLifecycleStageId } from "..
 import { createConstructionFxRuntime } from "../systems/settlements/rendering/constructionFxRuntime.js";
 import { getProceduralHouseVariantKey } from "../systems/settlements/rendering/proceduralHouseBuilder.js";
 import type { RenderBuildingLot } from "../systems/settlements/types/buildingTypes.js";
+import { createFormationProjectionLayer } from "../systems/units/rendering/formationProjectionLayer.js";
+import { createFormationTarget } from "../systems/units/sim/formationProjection.js";
 import { buildEvacuationRenderModel } from "../systems/evacuation/rendering/evacuationRenderModel.js";
 import { generateWorldClimateSeed } from "../systems/climate/sim/worldClimateSeed.js";
 import type { SeasonalRainState } from "../systems/climate/types/seasonalRain.js";
@@ -398,6 +400,7 @@ const PERF_HITCH_THRESHOLD_MS = 45;
 const CAMERA_INTERACTION_HOLD_MS = 450;
 const HOVER_PICK_INTERVAL_MS = 90;
 const FORMATION_DRAG_THRESHOLD_PX = 6;
+const FORMATION_HOLD_THRESHOLD_MS = 180;
 const TOWN_LABEL_LIFT_METERS = 100;
 const TOWN_LABEL_UPDATE_INTERVAL_MS = 120;
 const TOWN_LABEL_SCREEN_OFFSET_Y = -24;
@@ -778,6 +781,8 @@ export const createThreeTest = (
   fireFx.captureSnapshot(world);
   const unitsLayer = createThreeTestUnitsLayer(scene);
   const unitFxLayer = createThreeTestUnitFxLayer(scene);
+  const formationProjectionLayer = createFormationProjectionLayer();
+  scene.add(formationProjectionLayer.group);
   type UnitCommandVisual = {
     line: THREE.Line;
     destination: THREE.Mesh;
@@ -3005,8 +3010,12 @@ export const createThreeTest = (
     dispatchPhaseUiCommand({ type: "map-retask", tile });
   };
 
-  const dispatchFormationCommand = (start: { x: number; y: number }, end: { x: number; y: number }): void => {
-    dispatchPhaseUiCommand({ type: "map-formation", start, end });
+  const dispatchFormationCommand = (
+    start: { x: number; y: number },
+    end: { x: number; y: number },
+    projection = inputState.formationProjection
+  ): void => {
+    dispatchPhaseUiCommand({ type: "map-formation", start, end, projection: projection ?? undefined });
   };
 
   const dispatchTownAlertCommand = (townId: number, direction: "raise" | "lower"): boolean => {
@@ -5426,13 +5435,94 @@ export const createThreeTest = (
     inputState.debugHoverTile = null;
     inputState.debugHoverWorld = null;
   };
+  type FormationCameraControlState = {
+    enabled: boolean;
+    enablePan: boolean;
+    enableRotate: boolean;
+    enableZoom: boolean;
+  };
   let isFormationDrag = false;
   let formationDragStartPx: { x: number; y: number } | null = null;
+  let formationDragStartedAt = 0;
+  let formationHoldTimer = 0;
+  let formationCameraControlState: FormationCameraControlState | null = null;
+  const canStartFormationGesture = (): boolean =>
+    world.selectedUnitIds.length > 0 || inputState.pendingSquadDispatchId !== null;
+  const suspendFormationCameraControls = (): void => {
+    if (formationCameraControlState) {
+      return;
+    }
+    formationCameraControlState = {
+      enabled: controls.enabled,
+      enablePan: controls.enablePan,
+      enableRotate: controls.enableRotate,
+      enableZoom: controls.enableZoom
+    };
+    controls.enabled = false;
+    controls.enablePan = false;
+    controls.enableRotate = false;
+    controls.enableZoom = false;
+  };
+  const resumeFormationCameraControls = (): void => {
+    if (!formationCameraControlState) {
+      return;
+    }
+    const previous = formationCameraControlState;
+    formationCameraControlState = null;
+    controls.enablePan = previous.enablePan;
+    controls.enableRotate = previous.enableRotate;
+    controls.enableZoom = previous.enableZoom;
+    controls.enabled = running ? previous.enabled : false;
+  };
+  const getFormationProjectionUnitCount = (): number => {
+    if (inputState.pendingSquadDispatchId !== null) {
+      const activeCommandUnit = world.commandUnits.find((entry) => entry.squadId === inputState.pendingSquadDispatchId) ?? null;
+      if (activeCommandUnit) {
+        return Math.max(1, activeCommandUnit.truckIds.length);
+      }
+      const squad = world.squads.find((entry) => entry.id === inputState.pendingSquadDispatchId) ?? null;
+      return Math.max(1, squad?.truckRosterIds.length ?? 1);
+    }
+    return Math.max(1, world.selectedUnitIds.length);
+  };
+  const getFormationFallbackFacing = (anchor: { x: number; y: number }): { x: number; y: number } | null => {
+    const selectedTrucks = world.units.filter((unit) => unit.kind === "truck" && world.selectedUnitIds.includes(unit.id));
+    if (selectedTrucks.length > 0) {
+      const center = selectedTrucks.reduce(
+        (sum, unit) => ({ x: sum.x + unit.x, y: sum.y + unit.y }),
+        { x: 0, y: 0 }
+      );
+      center.x /= selectedTrucks.length;
+      center.y /= selectedTrucks.length;
+      return { x: anchor.x + 0.5 - center.x, y: anchor.y + 0.5 - center.y };
+    }
+    return { x: anchor.x - world.basePoint.x, y: anchor.y - world.basePoint.y };
+  };
+  const updateFormationProjection = (cursor: { x: number; y: number } | null): void => {
+    if (!inputState.formationStart || !cursor) {
+      inputState.formationProjection = null;
+      return;
+    }
+    inputState.formationProjection = createFormationTarget({
+      anchor: inputState.formationStart,
+      cursor,
+      formation: inputState.dispatchFormation,
+      count: getFormationProjectionUnitCount(),
+      fallbackFacing: getFormationFallbackFacing(inputState.formationStart)
+    });
+  };
   const cancelFormationDrag = (): void => {
     isFormationDrag = false;
     formationDragStartPx = null;
+    formationDragStartedAt = 0;
+    if (formationHoldTimer) {
+      window.clearTimeout(formationHoldTimer);
+      formationHoldTimer = 0;
+    }
+    resumeFormationCameraControls();
     inputState.formationStart = null;
     inputState.formationEnd = null;
+    inputState.formationProjection = null;
   };
 
   const handleCanvasMouseMove = (event: MouseEvent): void => {
@@ -5443,6 +5533,13 @@ export const createThreeTest = (
       const hit = pickTerrainTile(event);
       if (hit) {
         inputState.formationEnd = { x: hit.tileX, y: hit.tileY };
+        const dragDistance = formationDragStartPx
+          ? Math.hypot(event.clientX - formationDragStartPx.x, event.clientY - formationDragStartPx.y)
+          : 0;
+        const heldMs = formationDragStartedAt > 0 ? performance.now() - formationDragStartedAt : 0;
+        if (dragDistance >= FORMATION_DRAG_THRESHOLD_PX || heldMs >= FORMATION_HOLD_THRESHOLD_MS) {
+          updateFormationProjection(inputState.formationEnd);
+        }
       }
       return;
     }
@@ -5545,19 +5642,32 @@ export const createThreeTest = (
     if (!running || event.button !== 2) {
       return;
     }
-    if (world.selectedUnitIds.length === 0) {
+    if (!canStartFormationGesture()) {
       return;
     }
     const tile = pickTerrainTile(event);
     if (!tile) {
+      resumeFormationCameraControls();
       return;
     }
     event.preventDefault();
     event.stopPropagation();
+    suspendFormationCameraControls();
     isFormationDrag = true;
     formationDragStartPx = { x: event.clientX, y: event.clientY };
+    formationDragStartedAt = performance.now();
     inputState.formationStart = { x: tile.tileX, y: tile.tileY };
     inputState.formationEnd = { x: tile.tileX, y: tile.tileY };
+    inputState.formationProjection = null;
+    if (formationHoldTimer) {
+      window.clearTimeout(formationHoldTimer);
+    }
+    formationHoldTimer = window.setTimeout(() => {
+      if (isFormationDrag && inputState.formationEnd) {
+        updateFormationProjection(inputState.formationEnd);
+      }
+      formationHoldTimer = 0;
+    }, FORMATION_HOLD_THRESHOLD_MS);
     inputState.lastInteractionTime = performance.now();
   };
 
@@ -5573,37 +5683,53 @@ export const createThreeTest = (
     const dragDistance = formationDragStartPx
       ? Math.hypot(event.clientX - formationDragStartPx.x, event.clientY - formationDragStartPx.y)
       : 0;
-    cancelFormationDrag();
+    const heldMs = formationDragStartedAt > 0 ? performance.now() - formationDragStartedAt : 0;
     if (!start || !end) {
+      cancelFormationDrag();
       return;
     }
-    if (dragDistance < FORMATION_DRAG_THRESHOLD_PX) {
-      const handledRetask = world.selectedUnitIds.length > 0;
-      if (handledRetask) {
+    if (dragDistance < FORMATION_DRAG_THRESHOLD_PX && heldMs < FORMATION_HOLD_THRESHOLD_MS) {
+      if (inputState.pendingSquadDispatchId !== null) {
+        dispatchMapPrimaryCommand(end, { shiftKey: event.shiftKey, altKey: event.altKey });
+        inputState.lastInteractionTime = performance.now();
+      } else if (world.selectedUnitIds.length > 0) {
         dispatchRetaskCommand(end);
-      }
-      if (handledRetask) {
         inputState.lastInteractionTime = performance.now();
       }
+      cancelFormationDrag();
       return;
     }
-    const handledFormation = world.selectedUnitIds.length > 0;
+    updateFormationProjection(end);
+    const projection = inputState.formationProjection;
+    const handledFormation = world.selectedUnitIds.length > 0 || inputState.pendingSquadDispatchId !== null;
     if (handledFormation) {
-      dispatchFormationCommand(start, end);
+      dispatchFormationCommand(start, end, projection);
     }
     if (handledFormation) {
       inputState.lastInteractionTime = performance.now();
     }
+    cancelFormationDrag();
   };
 
   const handleWindowMouseUp = (event: MouseEvent): void => {
     if (isFormationDrag) {
       handleCanvasMouseUp(event);
+    } else {
+      resumeFormationCameraControls();
     }
   };
 
   const handleWindowBlur = (): void => {
     cancelFormationDrag();
+  };
+
+  const handleCanvasPointerDown = (event: PointerEvent): void => {
+    if (!running || event.button !== 2 || !canStartFormationGesture()) {
+      return;
+    }
+    if (pickTerrainTile(event)) {
+      suspendFormationCameraControls();
+    }
   };
 
   const handleCanvasContextMenu = (event: MouseEvent): void => {
@@ -5615,6 +5741,7 @@ export const createThreeTest = (
 
   document.addEventListener("keydown", handleKeyDown);
   canvas.addEventListener("click", handleCanvasClick);
+  canvas.addEventListener("pointerdown", handleCanvasPointerDown, true);
   canvas.addEventListener("mousedown", handleCanvasMouseDown, true);
   window.addEventListener("mouseup", handleWindowMouseUp, true);
   window.addEventListener("pointerdown", handleTownOverlayPointerDown, true);
@@ -7070,6 +7197,7 @@ export const createThreeTest = (
     }
     document.removeEventListener("keydown", handleKeyDown);
     canvas.removeEventListener("click", handleCanvasClick);
+    canvas.removeEventListener("pointerdown", handleCanvasPointerDown, true);
     canvas.removeEventListener("mousedown", handleCanvasMouseDown, true);
     window.removeEventListener("mouseup", handleWindowMouseUp, true);
     window.removeEventListener("pointerdown", handleTownOverlayPointerDown, true);
@@ -7124,6 +7252,8 @@ export const createThreeTest = (
     worldAudio?.dispose();
     unitsLayer.dispose();
     unitFxLayer.dispose();
+    formationProjectionLayer.dispose();
+    scene.remove(formationProjectionLayer.group);
     scene.remove(scoreFlowPulseGroup);
     scoreFlowPulses.forEach((pulse) => pulse.material.dispose());
     scoreFlowPulseGeometry.dispose();
@@ -7466,6 +7596,12 @@ export const createThreeTest = (
     threePerf.fireFxMs = smoothPerf(threePerf.fireFxMs, performance.now() - fireFxStart);
     unitsLayer.update(world, lastTerrainSurface, simulationAlpha);
     unitFxLayer.update(world, effectsState, lastTerrainSurface, simulationAlpha, time);
+    formationProjectionLayer.update(
+      lastTerrainSurface,
+      inputState.formationProjection,
+      inputState.dispatchFormation,
+      getFormationProjectionUnitCount()
+    );
     updateUnitCommandVisuals();
     updateEvacuationVisuals();
     updateScoreFlowPulses(time);

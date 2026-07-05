@@ -2,8 +2,10 @@ import assert from "node:assert/strict";
 
 import { RNG } from "../dist/core/rng.js";
 import { createEffectsState } from "../dist/core/effectsState.js";
+import { createInputState } from "../dist/core/inputState.js";
 import { createInitialState, syncTileSoA } from "../dist/core/state.js";
 import { applyFuel } from "../dist/core/tiles.js";
+import { handleMapFormationDragCommand, handleMapRetaskTileCommand } from "../dist/sim/input/mapTileActions.js";
 import { stepSim } from "../dist/sim/index.js";
 import {
   applyCommandIntentToSelection,
@@ -11,9 +13,12 @@ import {
   applyUnitHazards,
   assignFormationTargets,
   assignRosterCrew,
+  createFormationTarget,
   createUnit,
   deployUnit,
+  ensureDefaultSquads,
   recallUnits,
+  resolveFormationProjection,
   seedStartingRoster,
   selectCommandUnit,
   setCrewFormation,
@@ -216,6 +221,112 @@ const testFormationAndCommandTargets = () => {
   assert.equal(truck.currentStatus === "moving" || truck.currentStatus === "holding", true, "command should update truck status");
 };
 
+const testProjectedFormationTargets = () => {
+  const eastLine = createFormationTarget({
+    anchor: { x: 6, y: 6 },
+    cursor: { x: 10, y: 6 },
+    formation: "line",
+    count: 3
+  });
+  assert.equal(eastLine.kind, "formation", "dragged formation should create a formation command target");
+  assert.equal(eastLine.widthTiles, 8, "drag distance should control projected formation width");
+  const eastLineProjection = resolveFormationProjection(eastLine, "line", 3);
+  assert.deepEqual(
+    eastLineProjection.slots.map((slot) => Math.round(slot.x)),
+    [6, 6, 6],
+    "east-facing line should keep slots centered on the anchor x"
+  );
+  assert.deepEqual(
+    eastLineProjection.slots.map((slot) => Math.round(slot.y)),
+    [2, 6, 10],
+    "east-facing line should spread across the perpendicular axis"
+  );
+
+  const eastWedge = resolveFormationProjection(eastLine, "wedge", 3);
+  const southTarget = createFormationTarget({
+    anchor: { x: 6, y: 6 },
+    cursor: { x: 6, y: 10 },
+    formation: "wedge",
+    count: 3
+  });
+  const southWedge = resolveFormationProjection(southTarget, "wedge", 3);
+  assert.notDeepEqual(
+    eastWedge.slots.map((slot) => `${Math.round(slot.x)},${Math.round(slot.y)}`),
+    southWedge.slots.map((slot) => `${Math.round(slot.x)},${Math.round(slot.y)}`),
+    "wedge slot projection should rotate with facing"
+  );
+
+  const eastArc = resolveFormationProjection(eastLine, "arc", 4);
+  const southArc = resolveFormationProjection(southTarget, "arc", 4);
+  assert.notDeepEqual(
+    eastArc.slots.map((slot) => `${Math.round(slot.x)},${Math.round(slot.y)}`),
+    southArc.slots.map((slot) => `${Math.round(slot.x)},${Math.round(slot.y)}`),
+    "arc slot projection should rotate with facing"
+  );
+};
+
+const testMapActionsCommitProjectedTargets = () => {
+  const { state, rng, truck } = buildDeployedTruckState(2013);
+  selectCommandUnit(state, state.commandUnits[0].id);
+  const inputState = createInputState();
+  handleMapRetaskTileCommand({ state, inputState, tile: { x: 6, y: 6 } });
+  assert.equal(
+    state.commandUnits[0].currentIntent?.target.kind,
+    "point",
+    "short right-click retask should keep point target behavior"
+  );
+
+  const projection = createFormationTarget({
+    anchor: { x: 5, y: 5 },
+    cursor: { x: 9, y: 5 },
+    formation: "line",
+    count: 1
+  });
+  handleMapFormationDragCommand({
+    state,
+    rng,
+    inputState,
+    start: { x: 5, y: 5 },
+    end: { x: 9, y: 5 },
+    projection
+  });
+  assert.equal(
+    state.commandUnits[0].currentIntent?.target.kind,
+    "formation",
+    "held right-click drag should commit a projected formation target"
+  );
+  assert.equal(truck.truckOverrideIntent, null, "command-unit formation order should not create truck overrides");
+};
+
+const testPendingSquadDispatchProjection = () => {
+  const { state, rng } = buildState(2014);
+  seedStartingRoster(state, rng);
+  ensureDefaultSquads(state);
+  const squad = state.squads[0];
+  assert.ok(squad, "default HQ squad should exist");
+  const inputState = createInputState();
+  inputState.pendingSquadDispatchId = squad.id;
+  inputState.dispatchFormation = "line";
+  const projection = createFormationTarget({
+    anchor: { x: 5, y: 5 },
+    cursor: { x: 9, y: 5 },
+    formation: "line",
+    count: Math.max(1, squad.truckRosterIds.length)
+  });
+  handleMapFormationDragCommand({
+    state,
+    rng,
+    inputState,
+    start: { x: 5, y: 5 },
+    end: { x: 9, y: 5 },
+    projection
+  });
+  const commandUnit = state.commandUnits.find((entry) => entry.squadId === squad.id);
+  assert.ok(commandUnit, "projected dispatch should field the pending squad");
+  assert.equal(inputState.pendingSquadDispatchId, null, "successful projected dispatch should clear pending squad state");
+  assert.equal(commandUnit.currentIntent?.target.kind, "formation", "projected dispatch should commit a formation target");
+};
+
 const testSuppressionWaterSpendAndRefill = () => {
   const { state, truck } = buildDeployedTruckState(2004);
   setTruckCrewMode(state, truck.id, "deployed", { silent: true });
@@ -284,6 +395,9 @@ testFiveCommandUnitSlotsAndSelection();
 testUpgradedHighSpeedMovementConsumesFullRouteBudget();
 testActiveFireMovementUsesEffectiveMovementDelta();
 testFormationAndCommandTargets();
+testProjectedFormationTargets();
+testMapActionsCommitProjectedTargets();
+testPendingSquadDispatchProjection();
 testSuppressionWaterSpendAndRefill();
 testHazardsAndRecallCleanup();
 testRosterAssignment();

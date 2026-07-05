@@ -1,4 +1,4 @@
-import type { BehaviourMode, CommandFormation, CommandType, Point } from "./types.js";
+import type { BehaviourMode, CommandFormation, CommandType, FormationTarget, Point } from "./types.js";
 
 export type SelectionBox = { x1: number; y1: number; x2: number; y2: number };
 
@@ -6,6 +6,7 @@ export interface InputState {
   clearLineStart: Point | null;
   formationStart: Point | null;
   formationEnd: Point | null;
+  formationProjection: FormationTarget | null;
   selectionBox: SelectionBox | null;
   commandMode: CommandType | null;
   behaviourMode: BehaviourMode;
@@ -24,6 +25,7 @@ export const createInputState = (): InputState => ({
   clearLineStart: null,
   formationStart: null,
   formationEnd: null,
+  formationProjection: null,
   selectionBox: null,
   commandMode: null,
   behaviourMode: "balanced",
@@ -42,6 +44,7 @@ export const resetInputState = (state: InputState): void => {
   state.clearLineStart = null;
   state.formationStart = null;
   state.formationEnd = null;
+  state.formationProjection = null;
   state.selectionBox = null;
   state.commandMode = null;
   state.behaviourMode = "balanced";
