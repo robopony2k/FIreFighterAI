@@ -87,6 +87,11 @@ import {
 } from "./terrain/water/shoreTransition.js";
 import { applyShoreTransitionTerrainMaterial } from "./terrain/water/shoreTransitionTerrainMaterial.js";
 import {
+  applyScorchedGroundMaterial,
+  buildScorchedGroundMaskTexture
+} from "../systems/terrain/rendering/scorchedGroundMaterial.js";
+import { createTerrainRenderCoordinateMapper } from "../systems/terrain/rendering/terrainRenderCoordinates.js";
+import {
   applyTreeSeasonShader,
   applyTrunkTopCropShader,
   createTreeBurnController,
@@ -472,6 +477,14 @@ export const buildPalette = (): number[][] =>
     const rgb = TILE_COLOR_RGB[tileType];
     return [rgb.r / 255, rgb.g / 255, rgb.b / 255];
   });
+
+const SCORCHED_GROUND_PROTECTED_TYPE_IDS = [
+  TILE_TYPE_IDS.water,
+  TILE_TYPE_IDS.road,
+  TILE_TYPE_IDS.base,
+  TILE_TYPE_IDS.house,
+  TILE_TYPE_IDS.firebreak
+] as const;
 
 const noiseAt = (value: number): number => {
   const s = Math.sin(value * 12.9898 + 78.233) * 43758.5453;
@@ -1357,9 +1370,14 @@ export type TerrainRenderSurface = {
   heightAtSample: (x: number, y: number) => number;
   heightAtTileCoord: (tileX: number, tileY: number) => number;
   heightAtTile: (tileX: number, tileY: number) => number;
+  heightAtRenderedWorldPosition: (worldX: number, worldZ: number) => number;
   obstructionHeightAtTileCoordWorld?: (tileX: number, tileY: number) => number;
   toWorldX: (tileX: number) => number;
   toWorldZ: (tileY: number) => number;
+  toRenderedWorldX: (tileX: number) => number;
+  toRenderedWorldZ: (tileY: number) => number;
+  renderedWorldToTileX: (worldX: number) => number;
+  renderedWorldToTileY: (worldZ: number) => number;
 };
 
 const buildSampleCoastData = (
@@ -2601,6 +2619,46 @@ export const applyTerrainSurfaceColors = (
   applyTerrainSurfaceColorAttribute(geometry, colorField, surface.sampleCols, surface.sampleRows);
 };
 
+const buildTerrainScorchedGroundMaskTexture = (
+  sample: TerrainSample,
+  surface: TerrainRenderSurface
+): THREE.DataTexture | null => {
+  if (sample.debugTypeColors || sample.debugScalarField) {
+    return null;
+  }
+  return buildScorchedGroundMaskTexture({
+    sampleTypes: surface.sampleTypes,
+    sampleCols: surface.sampleCols,
+    sampleRows: surface.sampleRows,
+    cols: sample.cols,
+    rows: sample.rows,
+    step: surface.step,
+    tileFire: sample.tileFire,
+    ashTypeId: TILE_TYPE_IDS.ash,
+    protectedTypeIds: SCORCHED_GROUND_PROTECTED_TYPE_IDS
+  });
+};
+
+export const refreshTerrainScorchedGroundMaterial = (
+  material: THREE.Material | THREE.Material[],
+  sample: TerrainSample,
+  surface: TerrainRenderSurface,
+  enabled: boolean
+): void => {
+  const effectEnabled = enabled && !sample.debugTypeColors && !sample.debugScalarField;
+  const maskTexture = effectEnabled ? buildTerrainScorchedGroundMaskTexture(sample, surface) : null;
+  applyScorchedGroundMaterial(material, {
+    maskTexture,
+    enabled: effectEnabled && !!maskTexture,
+    seed: sample.worldSeed ?? 0,
+    tileWorldSize: surface.step,
+    originX: -surface.width * 0.5,
+    originZ: -surface.depth * 0.5,
+    sampleCols: surface.sampleCols,
+    sampleRows: surface.sampleRows
+  });
+};
+
 const smoothTerrainSharedVertexNormals = (geometry: THREE.BufferGeometry): void => {
   const positionAttr = geometry.getAttribute("position");
   const normalAttr = geometry.getAttribute("normal");
@@ -3021,6 +3079,12 @@ export const prepareTerrainRenderSurface = (
     return hx0 * (1 - ty) + hx1 * ty;
   };
   const heightAtTile = (tileX: number, tileY: number): number => heightAtTileCoord(tileX + 0.5, tileY + 0.5);
+  const coordinateMapper = createTerrainRenderCoordinateMapper({ cols, rows, width, depth });
+  const heightAtRenderedWorldPosition = (worldX: number, worldZ: number): number =>
+    heightAtTileCoord(
+      coordinateMapper.renderedWorldToTileX(worldX),
+      coordinateMapper.renderedWorldToTileY(worldZ)
+    ) * heightScale;
   const structureTopHeights = new Float32Array(cols * rows);
   structureTopHeights.fill(Number.NEGATIVE_INFINITY);
   const sampleStructureTopHeightAtTileCoord = (tileX: number, tileY: number): number => {
@@ -3089,10 +3153,15 @@ export const prepareTerrainRenderSurface = (
     heightAtSample,
     heightAtTileCoord,
     heightAtTile,
+    heightAtRenderedWorldPosition,
     obstructionHeightAtTileCoordWorld: (tileX: number, tileY: number): number =>
       Math.max(heightAtTileCoord(tileX, tileY) * heightScale, sampleStructureTopHeightAtTileCoord(tileX, tileY)),
     toWorldX: (tileX: number): number => (tileX / Math.max(1, cols) - 0.5) * width,
-    toWorldZ: (tileY: number): number => (tileY / Math.max(1, rows) - 0.5) * depth
+    toWorldZ: (tileY: number): number => (tileY / Math.max(1, rows) - 0.5) * depth,
+    toRenderedWorldX: coordinateMapper.toRenderedWorldX,
+    toRenderedWorldZ: coordinateMapper.toRenderedWorldZ,
+    renderedWorldToTileX: coordinateMapper.renderedWorldToTileX,
+    renderedWorldToTileY: coordinateMapper.renderedWorldToTileY
   };
   if (debugRenderOptions?.enableHeightProvenance) {
     surface.getHeightProvenance = (tileX: number, tileY: number): TerrainHeightProvenance | null =>
@@ -3675,6 +3744,7 @@ export const buildTerrainMesh = (
       originZ: -depth * 0.5
     });
   }
+  refreshTerrainScorchedGroundMaterial(material, sample, surface, !useLegacyFacetedTerrain);
   const mesh = new THREE.Mesh(geometry, material);
   mesh.receiveShadow = true;
   refreshTerrainRoadVisuals(mesh, sample, surface);

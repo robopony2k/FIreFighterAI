@@ -66,10 +66,10 @@ export const createFireAnchorResolver = ({
   const rawFallbackTileIndices: number[] = [];
   const rawFallbackFlags = new Uint8Array(tileCount);
   const toWorldX = terrainSurface
-    ? terrainSurface.toWorldX
+    ? terrainSurface.toRenderedWorldX
     : (tileX: number): number => (tileX / Math.max(1, cols) - 0.5) * terrainSize.width;
   const toWorldZ = terrainSurface
-    ? terrainSurface.toWorldZ
+    ? terrainSurface.toRenderedWorldZ
     : (tileY: number): number => (tileY / Math.max(1, rows) - 0.5) * terrainSize.depth;
 
   const noteRawFallback = (tileIndex: number): void => {
@@ -130,9 +130,9 @@ export const createFireAnchorResolver = ({
         tileX: tileXIndex,
         tileY: tileYIndex,
         position: {
-          x: terrainSurface.toWorldX(tileCoordX),
+          x: terrainSurface.toRenderedWorldX(tileCoordX),
           y: terrainSurface.heightAtTileCoord(tileCoordX, tileCoordY) * terrainSurface.heightScale,
-          z: terrainSurface.toWorldZ(tileCoordY)
+          z: terrainSurface.toRenderedWorldZ(tileCoordY)
         },
         normal: sampleSurfaceNormal(tileCoordX, tileCoordY, sampleHeightAtCoord),
         source: "terrainSurface"

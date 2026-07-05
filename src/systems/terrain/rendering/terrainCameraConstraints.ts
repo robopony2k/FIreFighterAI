@@ -5,8 +5,10 @@ export type TerrainCameraConstraintSurface = {
   rows: number;
   heightScale: number;
   heightAtTileCoord: (tileX: number, tileY: number) => number;
-  toWorldX: (tileX: number) => number;
-  toWorldZ: (tileY: number) => number;
+  toRenderedWorldX: (tileX: number) => number;
+  toRenderedWorldZ: (tileY: number) => number;
+  renderedWorldToTileX: (worldX: number) => number;
+  renderedWorldToTileY: (worldZ: number) => number;
 };
 
 export type TerrainCameraConstraintOptions = {
@@ -25,22 +27,13 @@ const getAxisBounds = (start: number, end: number): { min: number; max: number }
   max: Math.max(start, end)
 });
 
-const worldToTile = (worldValue: number, start: number, end: number, tileCount: number): number => {
-  const span = end - start;
-  if (Math.abs(span) <= 0.0001) {
-    return 0;
-  }
-  const normalized = clamp((worldValue - start) / span, 0, 1);
-  return normalized * Math.max(1, tileCount);
-};
-
 const sampleTerrainHeightWorld = (
   surface: TerrainCameraConstraintSurface,
   worldX: number,
   worldZ: number
 ): number => {
-  const tileX = worldToTile(worldX, surface.toWorldX(0), surface.toWorldX(surface.cols), surface.cols);
-  const tileY = worldToTile(worldZ, surface.toWorldZ(0), surface.toWorldZ(surface.rows), surface.rows);
+  const tileX = surface.renderedWorldToTileX(worldX);
+  const tileY = surface.renderedWorldToTileY(worldZ);
   return surface.heightAtTileCoord(tileX, tileY) * surface.heightScale;
 };
 
@@ -52,8 +45,8 @@ export const constrainCameraToTerrain = (
 ): boolean => {
   const targetGroundClearance = options.targetGroundClearance ?? DEFAULT_TARGET_GROUND_CLEARANCE;
   const cameraGroundClearance = options.cameraGroundClearance ?? DEFAULT_CAMERA_GROUND_CLEARANCE;
-  const xBounds = getAxisBounds(surface.toWorldX(0), surface.toWorldX(surface.cols));
-  const zBounds = getAxisBounds(surface.toWorldZ(0), surface.toWorldZ(surface.rows));
+  const xBounds = getAxisBounds(surface.toRenderedWorldX(0), surface.toRenderedWorldX(surface.cols - 1));
+  const zBounds = getAxisBounds(surface.toRenderedWorldZ(0), surface.toRenderedWorldZ(surface.rows - 1));
   const nextTargetX = clamp(target.x, xBounds.min, xBounds.max);
   const nextTargetZ = clamp(target.z, zBounds.min, zBounds.max);
   const nextTargetY = sampleTerrainHeightWorld(surface, nextTargetX, nextTargetZ) + targetGroundClearance;

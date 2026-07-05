@@ -34,7 +34,12 @@ export type FireFxTerrainSurface = {
   step: number;
   toWorldX: (tileX: number) => number;
   toWorldZ: (tileY: number) => number;
+  toRenderedWorldX: (tileX: number) => number;
+  toRenderedWorldZ: (tileY: number) => number;
+  renderedWorldToTileX: (worldX: number) => number;
+  renderedWorldToTileY: (worldZ: number) => number;
   heightAtTileCoord: (tileX: number, tileY: number) => number;
+  heightAtRenderedWorldPosition: (worldX: number, worldZ: number) => number;
 };
 
 export type FireFxTreeFlameProfile = {

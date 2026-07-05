@@ -224,8 +224,8 @@ export const createVehicleModelLayer = (
     const rightHeight = surface.heightAtTileCoord(x + offset, y) * surface.heightScale;
     const downHeight = surface.heightAtTileCoord(x, y - offset) * surface.heightScale;
     const upHeight = surface.heightAtTileCoord(x, y + offset) * surface.heightScale;
-    const worldDx = ((offset * 2) / Math.max(1, surface.cols)) * surface.size.width;
-    const worldDz = ((offset * 2) / Math.max(1, surface.rows)) * surface.size.depth;
+    const worldDx = Math.abs(surface.toRenderedWorldX(x + offset) - surface.toRenderedWorldX(x - offset));
+    const worldDz = Math.abs(surface.toRenderedWorldZ(y + offset) - surface.toRenderedWorldZ(y - offset));
     target.set(
       -(rightHeight - leftHeight) / Math.max(1e-5, worldDx),
       1,
@@ -249,8 +249,8 @@ export const createVehicleModelLayer = (
     instanceScale: number,
     output: THREE.Matrix4
   ): void => {
-    const wx = surface.toWorldX(instance.x);
-    const wz = surface.toWorldZ(instance.y);
+    const wx = surface.toRenderedWorldX(instance.x);
+    const wz = surface.toRenderedWorldZ(instance.y);
     const wy = surface.heightAtTileCoord(instance.x, instance.y) * surface.heightScale;
     sampleSurfaceNormal(surface, instance.x, instance.y, surfaceNormal);
     surfaceForward.set(Math.sin(instance.yaw), 0, Math.cos(instance.yaw));

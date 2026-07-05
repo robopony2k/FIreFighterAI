@@ -1299,6 +1299,10 @@ export const createThreeTestFireFx = (
       treeBurn,
       structureAnchorProvider
     });
+    const heightAtFireWorldPosition = terrainSurface
+      ? (worldX: number, worldZ: number, _fallbackY: number): number =>
+          terrainSurface.heightAtRenderedWorldPosition(worldX, worldZ)
+      : (_worldX: number, _worldZ: number, fallbackY: number): number => fallbackY;
     const resolveGroundAnchor = (tileIdx: number): ResolvedFireAnchor => fireAnchorResolver.resolveTile(tileIdx, "ground");
     const resolveObjectAnchor = (tileIdx: number): ResolvedFireAnchor => fireAnchorResolver.resolveTile(tileIdx, "object");
     fireMaterial.uniforms.uTime.value = fireShaderTime;
@@ -1703,7 +1707,7 @@ export const createThreeTestFireFx = (
           Math.min(heightRaw, sampleFootprint * 1.85 * flameHeightBoost * FLAME_RENDER_SIZE_SCALE) *
           slotScale01;
         const width = Math.min(widthRaw, sampleFootprint * 1.42) * slotScale01;
-        const baseY = edgeCenterY - sampleFootprint * 0.02;
+        const baseY = heightAtFireWorldPosition(centerX, centerZ, edgeCenterY) - sampleFootprint * 0.02;
         const cameraYaw = Math.atan2(cameraWorldPos.x - centerX, cameraWorldPos.z - centerZ);
         const yaw = cameraYaw * 0.84 + tangentYaw * 0.16 + Math.sin(flameTimeSeconds * 0.96 + s3 * TAU) * 0.08;
         const mainPitch = topView01 * (0.14 + travelled01 * 0.07);
@@ -1773,10 +1777,12 @@ export const createThreeTestFireFx = (
         if (showGroundGlow && glowCount < GLOW_MAX_INSTANCES) {
           const glowLength = Math.max(blockSpan * 0.92, width * (0.78 + travelled01 * 0.18));
           const glowDepth = sampleFootprint * (0.3 + presence01 * 0.36 + travelled01 * 0.16) * groundGlowSizeBoost;
+          const glowWorldX = centerX + normalX * sampleFootprint * 0.03;
+          const glowWorldZ = centerZ + normalZ * sampleFootprint * 0.03;
           groundGlowBillboard.position.set(
-            centerX + normalX * sampleFootprint * 0.03,
-            baseY + 0.03,
-            centerZ + normalZ * sampleFootprint * 0.03
+            glowWorldX,
+            heightAtFireWorldPosition(glowWorldX, glowWorldZ, edgeCenterY) + 0.01,
+            glowWorldZ
           );
           groundGlowBillboard.rotation.set(0, tangentYaw, 0);
           groundGlowBillboard.scale.set(glowLength, glowDepth, 1);
@@ -1878,7 +1884,8 @@ export const createThreeTestFireFx = (
         const w = Math.max(tileSpan * 0.12, h * (2.35 + b2 * 1.2)) * FLAME_RENDER_SIZE_SCALE;
         const yaw = Math.atan2(cameraWorldPos.x - wX, cameraWorldPos.z - wZ) + Math.sin(flameTimeSeconds * 0.45 + b1 * TAU) * 0.08;
         const intensity = clamp((0.28 + cluster.intensity * 0.56 + clusterFront01 * 0.22) * pulse, 0, 1);
-        fireBillboard.position.set(wX, cluster.baseY + h * 0.4, wZ);
+        const bedBaseY = heightAtFireWorldPosition(wX, wZ, cluster.baseY);
+        fireBillboard.position.set(wX, bedBaseY + h * 0.4, wZ);
         fireBillboard.rotation.set(0, yaw, 0);
         fireBillboard.scale.set(w * FLAME_BILLBOARD_OVERSCAN_X, h * FLAME_BILLBOARD_OVERSCAN_Y, w * FLAME_BILLBOARD_OVERSCAN_X);
         fireBillboard.updateMatrix();
@@ -1926,8 +1933,7 @@ export const createThreeTestFireFx = (
       }
       const clusterFront01 = clamp(cluster.frontPerimeter01 * 0.78 + cluster.frontArrival01 * 0.86, 0, 1.2);
       const plumeAnchors = clamp(cluster.plumeBudget, 1, CLUSTER_PLUME_MAX_PER_CLUSTER);
-      const clusterSmokeSourceY =
-        cluster.baseY + tileSpan * (0.44 + cluster.intensity * 0.92 + clusterFront01 * 0.28);
+      const clusterSmokeLift = tileSpan * (0.44 + cluster.intensity * 0.92 + clusterFront01 * 0.28);
       for (let anchor = 0; anchor < plumeAnchors && smokeSpawnsThisFrame < smokeSpawnFrameCap; anchor += 1) {
         const a1 = hash1(cluster.id * 0.377 + anchor * 3.17 + 9.1);
         const a2 = hash1(cluster.id * 0.823 + anchor * 5.27 + 4.3);
@@ -1944,6 +1950,7 @@ export const createThreeTestFireFx = (
           terrainMinZ,
           terrainMaxZ
         );
+        const clusterSmokeSourceY = heightAtFireWorldPosition(anchorX, anchorZ, cluster.baseY) + clusterSmokeLift;
         const spawnCount = clamp(
           Math.round(
             (1.4 + cluster.intensity * 4.2 + cluster.tileCount * 0.06 + clusterFront01 * 2.2) *
@@ -2314,6 +2321,9 @@ export const createThreeTestFireFx = (
             terrainMaxZ
           );
         }
+        const terrainAdjustedSourceYBase = hasObjectAnchorFlame
+          ? sourceYBase
+          : sourceYBase + (heightAtFireWorldPosition(jetClusterX, jetClusterZ, baseY) - baseY);
         let tileTipSparkEmitted = 0;
         let tileCrossSlices = 0;
         if (hasFlame || localSlotStats.visibleCount > 0) {
@@ -2421,7 +2431,6 @@ export const createThreeTestFireFx = (
               tileSpan * (isHero ? LOCAL_FLAME_MIN_WIDTH_TILES * 1.1 : LOCAL_FLAME_MIN_WIDTH_TILES),
               flameWidthBase * FLAME_RENDER_SIZE_SCALE
             ) * Math.max(flameSize01, flameletScale01 * 0.86);
-          const flameY = sourceYBase + flameRise;
           let lateralX = spawnX + heroLaneX + helixX + bendX + curlX + lashX + windOffsetX;
           let lateralZ = spawnZ + heroLaneZ + helixZ + bendZ + curlZ + lashZ + windOffsetZ;
           const softLimit = lateralLimit * (isHero ? 0.7 : 0.92) * (0.88 + s3 * 0.22);
@@ -2436,6 +2445,10 @@ export const createThreeTestFireFx = (
           lateralZ = clamp(lateralZ, -localLimit, localLimit);
           const flameWorldX = clamp(flameSourceX + lateralX, terrainMinX, terrainMaxX);
           const flameWorldZ = clamp(flameSourceZ + lateralZ, terrainMinZ, terrainMaxZ);
+          const flameGroundY = hasObjectAnchorFlame
+            ? baseY
+            : heightAtFireWorldPosition(flameWorldX, flameWorldZ, baseY);
+          const flameY = sourceYBase + (flameGroundY - baseY) + flameRise;
           const jetTangentX =
             helixX * 1.1 + curlX * 0.8 + lashX * 0.7 + windOffsetX * 0.6 + windX * sampleFootprint * (0.05 + riseT * 0.08);
           const jetTangentZ =
@@ -2827,7 +2840,8 @@ export const createThreeTestFireFx = (
                 smoothstep(0.02, 0.18, fallbackAge) *
                 (1 - smoothstep(0.58, 1.0, fallbackAge)) *
                 (0.72 + sparkVisual01 * 0.45);
-              const fallbackYBase = sourceYBase + sampleFootprint * (0.62 + flameIntensity * 0.85 + fallbackAge * 0.75);
+              const fallbackYBase =
+                terrainAdjustedSourceYBase + sampleFootprint * (0.62 + flameIntensity * 0.85 + fallbackAge * 0.75);
               const fallbackLaneSpin = sparkTimeSeconds * (0.38 + fallbackSeed * 0.28) + fallbackAge * 1.2;
               const fallbackLaneAngle = fallbackSeed * TAU + hash1(idx * 0.183 + 11.2) * TAU * 0.35 + fallbackLaneSpin;
               const fallbackLaneRadius =
@@ -3030,8 +3044,9 @@ export const createThreeTestFireFx = (
           const gWindLean = tileSpan * windResponse.flame * (0.015 + groundFlameDrive * 0.05 + windStrength * 0.03);
           const groundWorldX = clamp(jetClusterX + gX + windX * gWindLean, terrainMinX, terrainMaxX);
           const groundWorldZ = clamp(jetClusterZ + gZ + windZ * gWindLean, terrainMinZ, terrainMaxZ);
+          const groundBaseY = heightAtFireWorldPosition(groundWorldX, groundWorldZ, baseY);
           const groundYaw = Math.atan2(cameraWorldPos.x - groundWorldX, cameraWorldPos.z - groundWorldZ);
-          fireBillboard.position.set(groundWorldX, baseY + gHeight * 0.42, groundWorldZ);
+          fireBillboard.position.set(groundWorldX, groundBaseY + gHeight * 0.42, groundWorldZ);
           fireBillboard.rotation.set(0, groundYaw, 0);
           fireBillboard.scale.set(
             gWidth * FLAME_BILLBOARD_OVERSCAN_X,
@@ -3094,7 +3109,11 @@ export const createThreeTestFireFx = (
               (1 + envOrange * 0.42);
             const glowWorldX = clamp(jetClusterX + jitterX, minTileX, maxTileX);
             const glowWorldZ = clamp(jetClusterZ + jitterZ, minTileZ, maxTileZ);
-            groundGlowBillboard.position.set(glowWorldX, baseY + 0.05, glowWorldZ);
+            groundGlowBillboard.position.set(
+              glowWorldX,
+              heightAtFireWorldPosition(glowWorldX, glowWorldZ, baseY) + 0.03,
+              glowWorldZ
+            );
             groundGlowBillboard.quaternion.identity();
             groundGlowBillboard.scale.set(glowSize, glowSize, glowSize);
             groundGlowBillboard.updateMatrix();
@@ -3189,7 +3208,7 @@ export const createThreeTestFireFx = (
               sampleFootprint * (0.06 + windStrength * 0.24 + sparkVisual01 * 0.08 + frontRead01 * 0.06);
             emberBillboard.position.set(
               jetClusterX + lateralX + windX * (launchDownwind + downwind) + crossWindX * crosswind,
-              sourceYBase + sourceLift + riseHeight,
+              terrainAdjustedSourceYBase + sourceLift + riseHeight,
               jetClusterZ + lateralZ + windZ * (launchDownwind + downwind) + crossWindZ * crosswind
             );
             const emberSize =
@@ -3242,7 +3261,7 @@ export const createThreeTestFireFx = (
         }
         const smokeSourceLift =
           sampleFootprint * (0.44 + flameIntensity * 0.72 + heat * 0.28 + frontRead01 * 0.14);
-        const smokeSourceY = sourceYBase + smokeSourceLift;
+        const smokeSourceY = terrainAdjustedSourceYBase + smokeSourceLift;
         const smokeIntensity01 = clamp(smoothedSmoke, 0, 1);
         const smokeDrive = smokeIntensity01;
         if (hasActiveFire && smokeDrive > 0.005 && smokeSpawnsThisFrame < smokeSpawnFrameCap) {

@@ -90,6 +90,7 @@ import {
   getTerrainStep,
   prepareTerrainRenderSurface,
   prepareTerrainRenderVisualSurface,
+  refreshTerrainScorchedGroundMaterial,
   refreshTerrainRoadVisuals,
   ROAD_SURFACE_WIDTH,
   ROAD_TEX_SCALE,
@@ -6276,8 +6277,8 @@ export const createThreeTest = (
     if (y === null) {
       return null;
     }
-    const x = lastTerrainSurface.toWorldX(tileX);
-    const z = lastTerrainSurface.toWorldZ(tileY);
+    const x = lastTerrainSurface.toRenderedWorldX(tileX);
+    const z = lastTerrainSurface.toRenderedWorldZ(tileY);
     const worldY = y + lift;
     return new THREE.Vector3(x, worldY, z);
   };
@@ -8339,6 +8340,7 @@ export const createThreeTest = (
         const previousMaps = assignTerrainTextureMap(terrainMesh.material, tileTexture);
         queueTerrainTextureDisposals(pendingTerrainTextureDisposals, previousMaps);
       }
+      refreshTerrainScorchedGroundMaterial(terrainMesh.material, sample, surface, !useLegacyFacetedTerrain);
       recordTerrainSetTiming("textureSwap", performance.now() - textureSwapStartedAt);
     }
 

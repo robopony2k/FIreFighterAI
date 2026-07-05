@@ -1152,18 +1152,18 @@ export const createThreeTestUnitFxLayer = (scene: THREE.Scene): ThreeTestUnitFxL
     const rows = Math.max(1, surface.rows);
     const terrainSize = surface.size;
     const heightScale = surface.heightScale;
-    const worldPerTileX = terrainSize.width / cols;
-    const worldPerTileZ = terrainSize.depth / rows;
+    const worldPerTileX = terrainSize.width / Math.max(1, cols - 1);
+    const worldPerTileZ = terrainSize.depth / Math.max(1, rows - 1);
     const worldPerTile = (worldPerTileX + worldPerTileZ) * 0.5;
     const sampleHeightAt = (tileX: number, tileY: number): number => surface.heightAtTileCoord(tileX, tileY) * heightScale;
     const sampleWorldHeightAt = (worldX: number, worldZ: number): number => {
-      const tileX = (worldX / Math.max(0.0001, terrainSize.width) + 0.5) * cols;
-      const tileY = (worldZ / Math.max(0.0001, terrainSize.depth) + 0.5) * rows;
+      const tileX = surface.renderedWorldToTileX(worldX);
+      const tileY = surface.renderedWorldToTileY(worldZ);
       return sampleHeightAt(tileX, tileY);
     };
     const sampleWorldObstructionAt = (worldX: number, worldZ: number): number => {
-      const tileX = (worldX / Math.max(0.0001, terrainSize.width) + 0.5) * cols;
-      const tileY = (worldZ / Math.max(0.0001, terrainSize.depth) + 0.5) * rows;
+      const tileX = surface.renderedWorldToTileX(worldX);
+      const tileY = surface.renderedWorldToTileY(worldZ);
       return surface.obstructionHeightAtTileCoordWorld
         ? surface.obstructionHeightAtTileCoordWorld(tileX, tileY)
         : sampleHeightAt(tileX, tileY);
@@ -1215,9 +1215,9 @@ export const createThreeTestUnitFxLayer = (scene: THREE.Scene): ThreeTestUnitFxL
         activeFirefighterIds.add(unit.id);
         const yaw = resolveFirefighterYaw(unit, unitTile.x, unitTile.y);
         firefighterRoot.set(
-          surface.toWorldX(unitTile.x),
+          surface.toRenderedWorldX(unitTile.x),
           sampleHeightAt(unitTile.x, unitTile.y) + FIREFIGHTER_MODEL_ROOT_Y_OFFSET,
-          surface.toWorldZ(unitTile.y)
+          surface.toRenderedWorldZ(unitTile.y)
         );
         updateFirefighterVisualState(unit, timeSec, firefighterPose);
         writeFirefighterGripWorldPosition(firefighterRoot, yaw, firefighterPose, firefighterNozzle);
@@ -1227,8 +1227,8 @@ export const createThreeTestUnitFxLayer = (scene: THREE.Scene): ThreeTestUnitFxL
           z: firefighterNozzle.z
         });
       } else {
-        const nozzleX = surface.toWorldX(unitTile.x);
-        const nozzleZ = surface.toWorldZ(unitTile.y);
+        const nozzleX = surface.toRenderedWorldX(unitTile.x);
+        const nozzleZ = surface.toRenderedWorldZ(unitTile.y);
         const nozzleY =
           sampleHeightAt(unitTile.x, unitTile.y) +
           (unit.kind === "truck" ? HOSE_BASE_Y + 0.13 : HOSE_BASE_Y + 0.2);
@@ -1254,8 +1254,8 @@ export const createThreeTestUnitFxLayer = (scene: THREE.Scene): ThreeTestUnitFxL
       if (hoseSegments >= MAX_HOSE_SEGMENTS) {
         break;
       }
-      const truckX = surface.toWorldX(truckRef.x);
-      const truckZ = surface.toWorldZ(truckRef.y);
+      const truckX = surface.toRenderedWorldX(truckRef.x);
+      const truckZ = surface.toRenderedWorldZ(truckRef.y);
       const truckY = sampleHeightAt(truckRef.x, truckRef.y) + HOSE_BASE_Y + 0.11;
       const crewSource = nozzleByUnitId.get(unit.id) ?? null;
       if (!crewSource) {
@@ -1295,19 +1295,19 @@ export const createThreeTestUnitFxLayer = (scene: THREE.Scene): ThreeTestUnitFxL
       const precisionMode = modeValue <= 0.5;
       const suppressionMode = modeValue >= 1.5;
       const modeVolumeScale = getModeVolumeScale(modeValue);
-      const targetX = surface.toWorldX(stream.targetX);
-      const targetZ = surface.toWorldZ(stream.targetY);
+      const targetX = surface.toRenderedWorldX(stream.targetX);
+      const targetZ = surface.toRenderedWorldZ(stream.targetY);
       const targetY =
         sampleHeightAt(stream.targetX, stream.targetY) +
         (precisionMode ? 0.05 : suppressionMode ? 0.02 : 0.035);
       streamBySource.set(sourceId, {
-        sourceX: source?.x ?? surface.toWorldX(stream.sourceX),
+        sourceX: source?.x ?? surface.toRenderedWorldX(stream.sourceX),
         sourceY:
           source?.y ??
           sampleHeightAt(stream.sourceX, stream.sourceY) +
             HOSE_BASE_Y +
             0.18,
-        sourceZ: source?.z ?? surface.toWorldZ(stream.sourceY),
+        sourceZ: source?.z ?? surface.toRenderedWorldZ(stream.sourceY),
         targetX,
         targetY,
         targetZ,
@@ -1793,8 +1793,8 @@ export const createThreeTestUnitFxLayer = (scene: THREE.Scene): ThreeTestUnitFxL
       }
       const modeValue = sprayModeToValue(particle.sprayMode);
       const volume = clamp(particle.sprayVolume ?? defaultVolumeForMode(modeValue), 0, 1);
-      const wx = surface.toWorldX(particle.x);
-      const wz = surface.toWorldZ(particle.y);
+      const wx = surface.toRenderedWorldX(particle.x);
+      const wz = surface.toRenderedWorldZ(particle.y);
       const particleAlpha = clamp(particle.alpha, 0, 1);
       const particleLife01 =
         particle.maxLife > 0

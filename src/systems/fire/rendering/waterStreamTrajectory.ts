@@ -86,8 +86,8 @@ const sampleObstructionHeightAtWorld = (
   worldX: number,
   worldZ: number
 ): number => {
-  const tileX = ((worldX / Math.max(0.0001, surface.size.width)) + 0.5) * surface.cols;
-  const tileY = ((worldZ / Math.max(0.0001, surface.size.depth)) + 0.5) * surface.rows;
+  const tileX = surface.renderedWorldToTileX(worldX);
+  const tileY = surface.renderedWorldToTileY(worldZ);
   if (surface.obstructionHeightAtTileCoordWorld) {
     return surface.obstructionHeightAtTileCoordWorld(tileX, tileY);
   }
