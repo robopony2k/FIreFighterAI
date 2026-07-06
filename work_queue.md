@@ -15,26 +15,45 @@ Constraints: keep road planning simulation-first, deterministic, mapgen-authored
 
 Status: done
 
-TSK-0159: Add town water towers
+TSK-0159: Add town water towers V1 refill utility
 
 Type: feature
 
-Why: Towns need progression-gated local water infrastructure so firetrucks can refuel away from the firebase and settlements can get limited passive fire protection that depends on stored water.
+Why: Towns need local water infrastructure so firetrucks can refuel away from the firebase using visible, settlement-owned reservoirs.
 
 Done when:
-- [ ] The firebase starts each world with a default water tower at or near the base, while towns can build at most one local tower only after unlocking a Logistics tech node such as `municipal-water-towers`.
-- [ ] Water towers are settlement-owned runtime assets with deterministic placement, capacity, current water, service radius, suppression radius, and built/default state; tower structures do not count as houses or drift town house totals.
-- [ ] Truck refill logic uses an explicit water-source boundary that supports existing base/river/lake behavior plus tower reservoirs, with tower water decreasing when used.
+- [x] Every generated town starts with one default water tower using deterministic placement.
+- [x] Water towers are settlement-owned runtime assets with capacity, current water, service radius, and active/default state; tower structures reserve space without counting as houses or changing town house totals.
+- [x] Truck refill logic uses an explicit water-source boundary that supports existing base/river/lake behavior plus tower reservoirs, with tower water decreasing when used.
+- [x] Rain strongly replenishes towers and dry periods provide only a slow baseline trickle so long incidents can exhaust local reserves without leaving them permanently empty.
+- [x] Runtime town context shows compact tower water status through the shared Facilities sidecar.
+- [x] Regression coverage verifies V1 creation, one-per-town enforcement, deterministic placement, house-count integrity, tower refill consumption, stopped/non-spraying refill constraints, and rain/trickle recovery.
+
+Touchpoints: `src/systems/settlements/`, `src/systems/units/`, `src/core/state.ts`, `src/render/simView.ts`, `src/render/threeTestTerrain.ts`, `src/render/threeTest.ts`, `src/ui/runtime/town-panel/`, `scripts/`
+
+Constraints: preserve deterministic settlement placement, keep terrain and hydrology static at runtime, keep reservoir rules out of rendering, and ship V1 without upgrades, destruction, construction stages, passive suppression, progression gating, procurement, or manual tower targeting.
+
+Notes: Implemented V1 defaults are One Per Town and Rain Plus Trickle. Passive defense, progression gating, and procurement moved to TSK-0160. No deprecation entry is needed for this net-new feature.
+
+Status: done
+
+TSK-0160: Add advanced water tower procurement and passive defense
+
+Type: feature
+
+Why: Water towers should eventually become a strategic preparedness investment and provide limited settlement protection that depends on stored water.
+
+Done when:
+- [ ] Towns can build or improve at most one local tower only after an appropriate Logistics unlock such as `municipal-water-towers`.
 - [ ] Passive town defense spends tower water to reduce nearby town fire/heat risk without acting as an automated firefighter unit or awarding suppression credit.
-- [ ] Rain strongly replenishes towers and dry periods provide only a slow baseline trickle so long incidents can exhaust local reserves without leaving them permanently empty.
-- [ ] Maintenance/procurement UI exposes tower construction for unlocked towns and runtime town context shows compact tower water status.
-- [ ] Regression coverage verifies base creation, one-per-town enforcement, unlock gating, deterministic placement, house-count integrity, tower refill consumption, passive suppression scope, and rain/trickle recovery.
+- [ ] Maintenance/procurement UI exposes tower construction or upgrades for unlocked towns.
+- [ ] Regression coverage verifies unlock gating, one-per-town enforcement through procurement, passive suppression scope, no suppression credit, and reservoir exhaustion/recovery.
 
-Touchpoints: `src/systems/settlements/`, `src/systems/units/`, `src/systems/progression/`, `src/config/progression/`, `src/core/towns.ts`, `src/core/state.ts`, `src/render/simView.ts`, `src/render/threeTestTerrain.ts`, `src/ui/phase/`, `scripts/`
+Touchpoints: `src/systems/settlements/`, `src/systems/progression/`, `src/config/progression/`, `src/ui/phase/`, `src/ui/runtime/town-panel/`, `scripts/`
 
-Constraints: preserve deterministic settlement placement, keep terrain and hydrology static at runtime, keep suppression/reservoir rules out of rendering, and ship V1 without upgrades, destruction, construction stages, or manual tower targeting.
+Constraints: keep passive protection deterministic, keep suppression credit tied to firefighter action, and keep terrain/hydrology static.
 
-Notes: Defaults are Passive Defense, One Per Town, and Rain Plus Trickle. No deprecation entry is needed for this net-new feature.
+Notes: Builds on the completed V1 default water tower reservoir/refill system.
 
 Status: queued
 

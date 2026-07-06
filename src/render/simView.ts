@@ -1,9 +1,10 @@
 import type { WorldState } from "../core/state.js";
 import { ensureTileSoA } from "../core/tileCache.js";
-import type { Town } from "../core/types.js";
+import type { Town, WatchTower } from "../core/types.js";
 import { DEFAULT_MOISTURE_PARAMS } from "../core/climate.js";
 import { clamp } from "../core/utils.js";
 import type { RenderBuildingLot } from "../systems/settlements/types/buildingTypes.js";
+import type { WaterTower } from "../systems/settlements/types/waterTowerTypes.js";
 import type { TerrainRenderDebugOptions } from "./terrain/debug/terrainHeightProvenance.js";
 import {
   getBuildingLifecycleStageId,
@@ -62,6 +63,8 @@ export type RenderTerrainSample = {
   fullResolution?: boolean;
   worldSeed?: number;
   towns?: Town[];
+  watchTowers?: WatchTower[];
+  waterTowers?: WaterTower[];
   vegetationRevision?: number;
   structureRevision?: number;
   dynamicStructures?: boolean;
@@ -154,6 +157,8 @@ export const buildRenderTerrainSample = (
     fullResolution,
     worldSeed: state.seed,
     towns: state.towns,
+    watchTowers: state.watchTowers,
+    waterTowers: state.waterTowers,
     vegetationRevision: state.vegetationRevision,
     structureRevision: state.structureRevision,
     dynamicStructures: true,

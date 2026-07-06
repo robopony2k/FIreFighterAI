@@ -1,10 +1,12 @@
+import type { TruckCrewMode } from "../../../core/types.js";
+
 export type FireDeployPanelData = {
   trucks: Array<{
     id: number;
     name: string;
     crewCount: number;
     crewCapacity: number;
-    crewMode: "boarded" | "deployed";
+    crewMode: TruckCrewMode;
     hotkey: string;
     selected: boolean;
   }>;

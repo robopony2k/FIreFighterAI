@@ -1,8 +1,8 @@
 import type { WorldState } from "../../../core/state.js";
 import type { Town } from "../../../core/types.js";
 
-export type TownFacilityType = "hq";
-export type TownFacilityTabId = "squads" | "recruit" | "training";
+export type TownFacilityType = "hq" | "watchTower" | "waterTower";
+export type TownFacilityTabId = "squads" | "recruit" | "training" | "overview";
 
 export type TownFacilityDescriptor = {
   id: string;

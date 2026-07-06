@@ -410,6 +410,7 @@ const createLabUnit = (
   commandUnitId: kind === "truck" ? 1 : assignedTruckId ? 1 : null,
   crewIds: kind === "truck" ? [2] : [],
   crewMode: kind === "truck" ? "deployed" : "deployed",
+  crewAction: null,
   formation,
   behaviourMode: "balanced",
   attackTarget: null,

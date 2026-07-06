@@ -6,7 +6,12 @@ import {
   TRUCK_RIVER_REFILL_RADIUS,
   TRUCK_WATER_USE_RATE
 } from "../constants/runtimeConstants.js";
+import {
+  drainWaterTower,
+  findWaterTowerSourceForPoint
+} from "../../settlements/sim/waterTowerInfrastructure.js";
 import { getUnitById, getUnitTile } from "../utils/unitLookup.js";
+import { canFirefighterOperateHose } from "./crewReadiness.js";
 
 const isTruckNearRiverWaterSource = (state: WorldState, truck: Unit): boolean => {
   const tile = getUnitTile(truck);
@@ -30,9 +35,6 @@ const isTruckGroupActivelySpraying = (state: WorldState, truck: Unit): boolean =
   if (truck.water <= 0.01) {
     return false;
   }
-  if (truck.sprayTarget) {
-    return true;
-  }
   return state.units.some(
     (unit) =>
       unit.kind === "firefighter" &&
@@ -41,6 +43,9 @@ const isTruckGroupActivelySpraying = (state: WorldState, truck: Unit): boolean =
       unit.sprayTarget !== null
   );
 };
+
+const isTruckParkedForRefill = (truck: Unit): boolean =>
+  truck.path.length === 0 || truck.pathIndex >= truck.path.length;
 
 export const updateTruckWater = (state: WorldState, truck: Unit, delta: number): void => {
   if (truck.kind !== "truck" || truck.waterCapacity <= 0) {
@@ -51,6 +56,14 @@ export const updateTruckWater = (state: WorldState, truck: Unit, delta: number):
   if (state.tiles[idx]?.type === "base") {
     truck.water = Math.max(0, Math.min(truck.waterCapacity, truck.water + truck.waterRefillRate * delta));
     return;
+  }
+  if (isTruckParkedForRefill(truck) && !isTruckGroupActivelySpraying(state, truck)) {
+    const source = findWaterTowerSourceForPoint(state, { x: truck.x, y: truck.y });
+    if (source) {
+      const refill = Math.max(0, Math.min(truck.waterCapacity - truck.water, truck.waterRefillRate * delta));
+      truck.water = Math.max(0, Math.min(truck.waterCapacity, truck.water + drainWaterTower(source.tower, refill)));
+      return;
+    }
   }
   if (isTruckNearRiverWaterSource(state, truck) && !isTruckGroupActivelySpraying(state, truck)) {
     truck.water = Math.max(0, Math.min(truck.waterCapacity, truck.water + TRUCK_WATER_USE_RATE * delta));
@@ -69,6 +82,9 @@ const getUnitWaterSourceTruck = (state: WorldState, unit: Unit): Unit | null => 
 };
 
 export const canUnitSpray = (state: WorldState, unit: Unit): boolean => {
+  if (!canFirefighterOperateHose(state, unit)) {
+    return false;
+  }
   const truck = getUnitWaterSourceTruck(state, unit);
   if (!truck || truck.waterCapacity <= 0) {
     return true;

@@ -50,6 +50,7 @@ export function createUnit(state: WorldState, kind: UnitKind, _rng: RNG, rosterE
     commandUnitId: null,
     crewIds: [],
     crewMode: "deployed",
+    crewAction: null,
     formation: rosterUnit ? rosterUnit.formation : "medium",
     behaviourMode: "balanced",
     attackTarget: null,

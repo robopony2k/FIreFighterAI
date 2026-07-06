@@ -10,6 +10,7 @@ import { getTerrainHeightScale } from "../core/terrainScale.js";
 import { getVegetationRenderHeightMultiplier } from "../core/vegetation.js";
 import { getBuildingLifecycleStageFromId, getBuildingLifecycleStageId } from "../systems/settlements/sim/buildingLifecycle.js";
 import type { RenderBuildingLot } from "../systems/settlements/types/buildingTypes.js";
+import type { WaterTower } from "../systems/settlements/types/waterTowerTypes.js";
 import { getProceduralHouseVariantKey } from "../systems/settlements/rendering/proceduralHouseBuilder.js";
 import {
   COAST_CLASS_BEACH,
@@ -19,7 +20,7 @@ import {
   TILE_ID_TO_TYPE,
   TILE_TYPE_IDS
 } from "../core/state.js";
-import { TreeType, TREE_TYPE_IDS, type Town } from "../core/types.js";
+import { TreeType, TREE_TYPE_IDS, type Town, type WatchTower } from "../core/types.js";
 import type { FirestationAsset, HouseAssets, HouseVariant, TreeAssets, TreeMeshTemplate, TreeVariant } from "./threeTestAssets.js";
 import { TREE_MODEL_PATHS } from "./threeTestAssets.js";
 import { applyGrassDetailFx } from "./grassDetailFx.js";
@@ -194,6 +195,8 @@ export type TerrainSample = {
   fullResolution?: boolean;
   worldSeed?: number;
   towns?: Town[];
+  watchTowers?: WatchTower[];
+  waterTowers?: WaterTower[];
   vegetationRevision?: number;
   structureRevision?: number;
   dynamicStructures?: boolean;

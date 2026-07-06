@@ -178,7 +178,7 @@ export const updateCommandUnitStatuses = (state: WorldState): void => {
     const trucks = commandUnit.truckIds
       .map((truckId) => getUnitById(state, truckId))
       .filter((truck): truck is Unit => !!truck && truck.kind === "truck");
-    const priority: CommandUnitStatus[] = ["retreating", "suppressing", "moving", "holding"];
+    const priority: CommandUnitStatus[] = ["retreating", "suppressing", "deploying", "boarding", "moving", "holding"];
     commandUnit.status = priority.find((status) => trucks.some((truck) => truck.currentStatus === status)) ?? "holding";
   });
 };

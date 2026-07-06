@@ -20,6 +20,7 @@ import {
 import { createEmptySettlementGrowthPlan } from "../sim/townGrowth.js";
 import { createPrecomputedSettlementGrowthPlan } from "../sim/futureSettlementGrowthPlan.js";
 import { bootstrapInitialTowns } from "../sim/initialTownBootstrap.js";
+import { ensureDefaultWaterTowers } from "../sim/waterTowerInfrastructure.js";
 import { applyGuaranteedTownConnectorRoadbedCleanup, buildGuaranteedTownConnectorPath } from "../sim/guaranteedTownConnector.js";
 import {
   SETTLEMENT_PLOT_MAX_ANGLE_DEG,
@@ -2873,6 +2874,8 @@ const initializeSettlementState = (state: WorldState): void => {
   state.settlementBuildDayAccumulator = 0;
   state.buildingLots = [];
   state.nextBuildingLotId = 1;
+  state.waterTowers = [];
+  state.nextWaterTowerId = 1;
 };
 
 const seedTowns = (state: WorldState, plan: SettlementPlacementResult): Town[] => {
@@ -3433,6 +3436,7 @@ export const executeSettlementPlacementPlan = (
   }
   roadAdapter.backfillRoadEdgesFromAdjacency(state);
   bootstrapInitialTowns(state, bootstrapRoadAdapter, realized.townDensity ?? 0.5);
+  ensureDefaultWaterTowers(state);
   if (repairEnabled) {
     ensureTownLocalRoadAnchors(state, towns, roadAdapter, realized);
   }
@@ -3493,6 +3497,7 @@ export const executeSettlementPlacementPlanAsync = async (
   }
   roadAdapter.backfillRoadEdgesFromAdjacency(state);
   bootstrapInitialTowns(state, bootstrapRoadAdapter, realized.townDensity ?? 0.5);
+  ensureDefaultWaterTowers(state);
   if (repairEnabled) {
     await ensureTownLocalRoadAnchorsAsync(state, towns, roadAdapter, realized);
   }

@@ -17,6 +17,7 @@
     "runtime-settings:regression": "npm run build && node scripts/runtime-settings-regression.mjs",
     "sun:regression": "node scripts/seasonal-sun-regression.mjs",
     "fire:regression": "npm run build && node scripts/fire-regression.mjs",
+    "fire-detection:regression": "npm run build && node scripts/fire-detection-regression.mjs",
     "runtime:perf": "npm run build && node scripts/runtime-perf-regression.mjs",
     "units:regression": "npm run build && node scripts/units-regression.mjs",
     "progression:regression": "npm run build && node scripts/progression-regression.mjs",

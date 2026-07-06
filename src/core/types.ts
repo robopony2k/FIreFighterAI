@@ -63,7 +63,9 @@ export type DeployMode = UnitKind | "clear";
 
 export type Formation = "narrow" | "medium" | "wide";
 export type WaterSprayMode = "precision" | "balanced" | "suppression";
-export type CommandType = "move" | "suppress" | "contain" | "backburn";
+export type CommandPlacementMode = "move" | "deploy" | "relocate" | "recall";
+export type CommandFireTask = "suppress" | "contain" | "backburn" | "hold_fire";
+export type CommandType = CommandPlacementMode | CommandFireTask;
 export type BehaviourMode = "aggressive" | "balanced" | "defensive";
 export type CommandFormation = "loose" | "line" | "area" | "wedge" | "arc";
 export type SelectionScope = "commandUnit" | "truck";
@@ -112,12 +114,14 @@ export type CommandTarget =
 
 export interface CommandIntent {
   type: CommandType;
+  placementMode: CommandPlacementMode;
+  fireTask: CommandFireTask;
   target: CommandTarget;
   formation: CommandFormation;
   behaviourMode: BehaviourMode;
 }
 
-export type CommandUnitStatus = "suppressing" | "moving" | "holding" | "retreating";
+export type CommandUnitStatus = "suppressing" | "moving" | "holding" | "retreating" | "boarding" | "deploying";
 
 export type CommandUnitAlert =
   | "empty"
@@ -125,7 +129,21 @@ export type CommandUnitAlert =
   | "low"
   | "warning"
   | "crew_low"
+  | "driver_missing"
+  | "hose_unstaffed"
+  | "crew_transition"
+  | "deploy_required"
+  | "out_of_range"
+  | "holding_fire"
   | "danger";
+
+export type TruckCrewMode = "boarded" | "boarding" | "disembarking" | "deployed";
+
+export interface TruckCrewAction {
+  kind: "boarding" | "disembarking";
+  remaining: number;
+  total: number;
+}
 
 export interface CommandUnit {
   id: number;
@@ -210,6 +228,58 @@ export interface Town extends Point {
   buildStartSerial: number;
 }
 
+export type WatchTowerTypeId = "town-watch-tower";
+export type WatchTowerLevel = 1 | 2 | 3;
+
+export interface WatchTower {
+  id: number;
+  typeId: WatchTowerTypeId;
+  townId: number;
+  x: number;
+  y: number;
+  level: WatchTowerLevel;
+  detectionRadius: number;
+  detectionDelayDays: number;
+  accuracyRadius: number;
+  active: boolean;
+  builtCareerDay: number;
+}
+
+export type FireKnowledgeTileState = 0 | 1 | 2;
+export type FireDetectionConfidenceLabel = "Low" | "Medium" | "High";
+export type FireDetectionReportState = "suspected" | "confirmed";
+export type FireDetectionSource = "watchTower" | "town" | "unit" | "roadAsset" | "smoke";
+
+export interface FireDetectionReport {
+  id: number;
+  tileX: number;
+  tileY: number;
+  actualTileX: number;
+  actualTileY: number;
+  townId: number;
+  confidence: number;
+  confidenceLabel: FireDetectionConfidenceLabel;
+  state: FireDetectionReportState;
+  source: FireDetectionSource;
+  firstReportedDay: number;
+  lastUpdatedDay: number;
+  active: boolean;
+  alerted: boolean;
+  towerIds: number[];
+  tileCount: number;
+  message: string;
+}
+
+export interface FireKnowledgeState {
+  tileState: Uint8Array;
+  tileConfidence: Float32Array;
+  tileDetectionProgress: Float32Array;
+  tileFirstKnownDay: Float32Array;
+  tileLastSeenDay: Float32Array;
+  reports: FireDetectionReport[];
+  latestReportId: number | null;
+}
+
 export interface FireAlertIncident {
   id: number;
   tileX: number;
@@ -218,6 +288,11 @@ export interface FireAlertIncident {
   year: number;
   careerDay: number;
   phaseDay: number;
+  confidence?: number;
+  confidenceLabel?: FireDetectionConfidenceLabel;
+  reportState?: FireDetectionReportState;
+  source?: FireDetectionSource;
+  message?: string;
 }
 
 export interface AdvanceToNextEventState {
@@ -337,7 +412,9 @@ export interface Unit {
 
     crewIds: number[];
 
-    crewMode: "boarded" | "deployed";
+    crewMode: TruckCrewMode;
+
+    crewAction: TruckCrewAction | null;
 
   formation: Formation;
 

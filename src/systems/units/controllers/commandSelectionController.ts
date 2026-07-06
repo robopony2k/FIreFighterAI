@@ -145,7 +145,7 @@ export const applyCommandIntentToSelection = (state: WorldState, intent: Command
       truck.truckOverrideIntent = cloneCommandIntent(intent);
     });
     if (selectedTrucks.length > 0) {
-      setStatus(state, `${selectedTrucks.length} truck(s) assigned ${intent.type} orders.`);
+      setStatus(state, `${selectedTrucks.length} truck(s) assigned ${intent.placementMode} / ${intent.fireTask.replace("_", " ")} orders.`);
     }
     return;
   }
@@ -166,7 +166,7 @@ export const applyCommandIntentToSelection = (state: WorldState, intent: Command
   );
   if (selectedCommandUnits.length > 0) {
     const label = selectedCommandUnits.length === 1 ? selectedCommandUnits[0]!.name : `${selectedCommandUnits.length} command units`;
-    setStatus(state, `${label} assigned ${intent.type} orders.`);
+    setStatus(state, `${label} assigned ${intent.placementMode} / ${intent.fireTask.replace("_", " ")} orders.`);
   }
 };
 

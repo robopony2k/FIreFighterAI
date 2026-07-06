@@ -92,7 +92,10 @@ import {
 } from "../mapgen/roads.js";
 import type { SettlementRoadAdapter } from "../systems/settlements/types/settlementTypes.js";
 import { stepTownConstructionSchedule } from "../systems/settlements/sim/townConstruction.js";
+import { stepWaterTowers } from "../systems/settlements/sim/waterTowerInfrastructure.js";
 import { applyFireActivityMetrics } from "../systems/fire/sim/fireActivityState.js";
+import { stepFireDetection, type FireDetectionStepResult } from "../systems/fire/sim/fireDetection.js";
+import type { FireDetectionReport } from "../core/types.js";
 import { stepEvacuations } from "../systems/evacuation/sim/evacuationRuntime.js";
 import type { EvacuationLossEvent } from "../systems/evacuation/types/evacuationTypes.js";
 import {
@@ -489,64 +492,20 @@ const exitIncidentMode = (state: WorldState): void => {
   state.timeSpeedIndex = state.strategicTimeSpeedIndex;
 };
 
-const findStrongestFireTile = (state: WorldState): { x: number; y: number } | null => {
-  if (state.fireActivityState === "idle" && !state.fireBoundsActive) {
-    return null;
-  }
-  const cols = state.grid.cols;
-  const rows = state.grid.rows;
-  const minX = state.fireBoundsActive ? Math.max(0, state.fireMinX) : 0;
-  const maxX = state.fireBoundsActive ? Math.min(cols - 1, state.fireMaxX) : cols - 1;
-  const minY = state.fireBoundsActive ? Math.max(0, state.fireMinY) : 0;
-  const maxY = state.fireBoundsActive ? Math.min(rows - 1, state.fireMaxY) : rows - 1;
-  let bestScore = 0;
-  let best: { x: number; y: number } | null = null;
-  for (let y = minY; y <= maxY; y += 1) {
-    for (let x = minX; x <= maxX; x += 1) {
-      const idx = indexFor(state.grid, x, y);
-      const fire = state.tileFire[idx] ?? 0;
-      const heat = state.tileHeat[idx] ?? 0;
-      const heatRelease = state.tileHeatRelease[idx] ?? 0;
-      if (fire <= 0 && heat <= 0 && heatRelease <= 0) {
-        continue;
-      }
-      const score = fire * 2 + heat * 0.15 + heatRelease * 0.22;
-      if (score > bestScore || !best) {
-        bestScore = score;
-        best = { x, y };
-      }
-    }
-  }
-  return best;
-};
-
-const resolveNearestTownIdForTile = (state: WorldState, x: number, y: number): number => {
-  if (state.towns.length === 0) {
-    return -1;
-  }
-  let bestTownId = -1;
-  let bestDistSq = Number.POSITIVE_INFINITY;
-  for (const town of state.towns) {
-    const dx = x - getTownCenterX(town);
-    const dy = y - getTownCenterY(town);
-    const distSq = dx * dx + dy * dy;
-    if (distSq < bestDistSq || (distSq === bestDistSq && (bestTownId < 0 || town.id < bestTownId))) {
-      bestDistSq = distSq;
-      bestTownId = town.id;
-    }
-  }
-  return bestTownId;
-};
-
-const recordLatestFireAlert = (state: WorldState, tileX: number, tileY: number): void => {
+const recordLatestFireAlertFromReport = (state: WorldState, report: FireDetectionReport): void => {
   state.latestFireAlert = {
-    id: state.nextFireAlertId++,
-    tileX,
-    tileY,
-    townId: resolveNearestTownIdForTile(state, tileX, tileY),
+    id: report.id,
+    tileX: report.tileX,
+    tileY: report.tileY,
+    townId: report.townId,
     year: state.year,
     careerDay: state.careerDay,
-    phaseDay: state.phaseDay
+    phaseDay: state.phaseDay,
+    confidence: report.confidence,
+    confidenceLabel: report.confidenceLabel,
+    reportState: report.state,
+    source: report.source,
+    message: report.message
   };
 };
 
@@ -580,11 +539,11 @@ const restoreAdvanceToNextEventTimeControls = (
 
 const pauseForDetectedFireIncident = (
   state: WorldState,
-  strongest: { x: number; y: number },
+  report: FireDetectionReport,
   previousSpeedIndex: number,
   previousSliderValue: number
 ): void => {
-  recordLatestFireAlert(state, strongest.x, strongest.y);
+  recordLatestFireAlertFromReport(state, report);
   const incident = state.latestFireAlert;
   const nearestTown = incident && incident.townId >= 0
     ? state.towns.find((town) => town.id === incident.townId) ?? null
@@ -594,23 +553,23 @@ const pauseForDetectedFireIncident = (
   state.timeSpeedSliderValue = previousSliderValue;
   state.paused = true;
   if (nearestTown) {
-    setStatus(state, `Fire incident detected near ${nearestTown.name}. Simulation paused.`);
+    setStatus(state, `${incident?.message ?? `Fire incident detected near ${nearestTown.name}.`} Simulation paused.`);
   } else {
-    setStatus(state, "Fire incident detected. Simulation paused.");
+    setStatus(state, `${incident?.message ?? "Fire incident detected."} Simulation paused.`);
   }
 };
 
 const maybePauseForDetectedFireIncident = (
   state: WorldState,
-  strongest: { x: number; y: number },
+  report: FireDetectionReport,
   previousSpeedIndex: number,
   previousSliderValue: number
 ): boolean => {
   if (!pauseOnFireEvent) {
-    recordLatestFireAlert(state, strongest.x, strongest.y);
+    recordLatestFireAlertFromReport(state, report);
     return false;
   }
-  pauseForDetectedFireIncident(state, strongest, previousSpeedIndex, previousSliderValue);
+  pauseForDetectedFireIncident(state, report, previousSpeedIndex, previousSliderValue);
   return true;
 };
 
@@ -1115,7 +1074,6 @@ export function stepSim(
   const unitDelta = sanitizeStepDelta(options.unitDelta ?? delta, delta);
   const calendarDelta = dayDelta;
   const previousCareerDay = state.careerDay;
-  const hadFireChainRisk = hasFireActivity(state);
   const previousSpeedIndex = state.advanceToNextEvent
     ? clamp(state.advanceToNextEvent.previousTimeSpeedIndex, 0, getMaxTimeSpeedIndex(TIME_SPEED_OPTIONS))
     : clamp(state.strategicTimeSpeedIndex, 0, getMaxTimeSpeedIndex(TIME_SPEED_OPTIONS));
@@ -1128,6 +1086,7 @@ export function stepSim(
   syncClimateToCareerDay(state);
   updateClimateForecastWindow(state);
   syncSeasonalRainToCareerDay(state);
+  stepWaterTowers(state, dayDelta);
   state.simPerfCalendarMs = nowMs() - calendarPerfStart;
   if (maybePauseForSeasonalRainStart(state, previousSpeedIndex, previousSliderValue)) {
     return;
@@ -1149,15 +1108,6 @@ export function stepSim(
     state.lastActiveFires = 0;
     applyFireActivityMetrics(state, 0);
     return;
-  }
-  if (!hadFireChainRisk && hasFireActivity(state)) {
-    const strongest = findStrongestFireTile(state);
-    if (strongest) {
-      if (maybePauseForDetectedFireIncident(state, strongest, previousSpeedIndex, previousSliderValue)) {
-        stepParticles(state, effects, delta);
-        return;
-      }
-    }
   }
   const climateRisk = getClimateRisk(state);
   stepTownAlertPosture(state, dayDelta);
@@ -1235,22 +1185,6 @@ export function stepSim(
         igniteRandomFire(state, rng, simDayDelta, clamp(weather.ignition, 0, 1.35));
         activeFires = Math.max(activeFires, state.lastActiveFires);
         fireActivityState = state.fireActivityState;
-        if (!hadFireChainRisk && hasFireActivity(state)) {
-          const strongest = findStrongestFireTile(state);
-          if (strongest) {
-            fireSubsteps += 1;
-            fireDaysSimulated += simDayDelta;
-            state.firePerfSubsteps = fireSubsteps;
-            state.firePerfSimulatedDays = fireDaysSimulated;
-            if (maybePauseForDetectedFireIncident(state, strongest, previousSpeedIndex, previousSliderValue)) {
-              state.fireSimAccumulator = Math.max(0, state.fireSimAccumulator - simDelta);
-              state.firePerfDeferredDays = state.fireSimAccumulator * DAYS_PER_SECOND;
-              stepParticles(state, effects, simDelta);
-              state.simPerfFireMs = nowMs() - firePerfStart;
-              return;
-            }
-          }
-        }
       }
       if (state.units.length > 0) {
         applyExtinguishStep(state, simDelta, weather.suppression);
@@ -1272,24 +1206,6 @@ export function stepSim(
         extinguishAllFires(state, effects);
         activeFires = 0;
         fireActivityState = state.fireActivityState;
-      } else if (!hadFireChainRisk && hasFireActivity(state)) {
-        const strongest = findStrongestFireTile(state);
-        if (strongest) {
-          state.lastActiveFires = activeFires;
-          if (maybePauseForDetectedFireIncident(state, strongest, previousSpeedIndex, previousSliderValue)) {
-            remaining -= simDelta;
-            careerCursor += simDayDelta;
-            fireSubsteps += 1;
-            fireDaysSimulated += simDayDelta;
-            state.firePerfSubsteps = fireSubsteps;
-            state.firePerfSimulatedDays = fireDaysSimulated;
-            state.fireSimAccumulator = Math.max(0, state.fireSimAccumulator - simDelta);
-            state.firePerfDeferredDays = state.fireSimAccumulator * DAYS_PER_SECOND;
-            stepParticles(state, effects, simDelta);
-            state.simPerfFireMs = nowMs() - firePerfStart;
-            return;
-          }
-        }
       }
       remaining -= simDelta;
       careerCursor += simDayDelta;
@@ -1307,13 +1223,17 @@ export function stepSim(
     applyFireActivityMetrics(state, 0);
   }
   state.lastActiveFires = activeFires;
-  if (!hasFireActivity(state)) {
+  let fireDetection: FireDetectionStepResult = { alertReport: null, activeReportCount: 0 };
+  if (hasFireActivity(state)) {
+    fireDetection = stepFireDetection(state, dayDelta);
+  }
+  if (!hasFireActivity(state) || fireDetection.activeReportCount <= 0) {
     clearLatestFireAlert(state);
   }
-  if (!hadFireChainRisk && hasFireActivity(state)) {
-    const strongest = findStrongestFireTile(state);
-    if (strongest) {
-      maybePauseForDetectedFireIncident(state, strongest, previousSpeedIndex, previousSliderValue);
+  if (fireDetection.alertReport) {
+    if (maybePauseForDetectedFireIncident(state, fireDetection.alertReport, previousSpeedIndex, previousSliderValue)) {
+      stepParticles(state, effects, delta);
+      return;
     }
   } else if (state.simTimeMode === "incident" && state.fireActivityState === "idle") {
     exitIncidentMode(state);
@@ -1351,7 +1271,8 @@ export function handleEscape(state: WorldState, inputState: InputState): void {
     selectUnit(state, null);
   }
   setDeployMode(state, null);
-  inputState.commandMode = null;
+  inputState.placementMode = "move";
+  inputState.fireTask = "suppress";
   inputState.formationStart = null;
   inputState.formationEnd = null;
   inputState.selectionBox = null;

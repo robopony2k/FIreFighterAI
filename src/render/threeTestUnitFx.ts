@@ -8,6 +8,7 @@ import {
   sampleWaterStreamTrajectoryTangent,
   type WaterStreamTrajectory
 } from "../systems/fire/rendering/waterStreamTrajectory.js";
+import { getTruckHoseOperators } from "../systems/units/sim/crewReadiness.js";
 import {
   FIREFIGHTER_MODEL_ROOT_Y_OFFSET,
   createFirefighterVisualState,
@@ -18,6 +19,7 @@ import { approachAngleExp, resolveDesiredUnitYaw } from "./unitAimVisuals.js";
 import type { TerrainRenderSurface } from "./threeTestTerrain.js";
 
 const MAX_HOSE_SEGMENTS = 1024;
+const HOSE_CURVE_SEGMENTS = 6;
 const MAX_WATER_PARTICLES = 4096;
 const MAX_WATER_STREAMS = 768;
 const MAX_WATER_TUBE_SEGMENTS = MAX_WATER_STREAMS * 10;
@@ -855,6 +857,10 @@ export const createThreeTestUnitFxLayer = (scene: THREE.Scene): ThreeTestUnitFxL
   const hoseQuaternion = new THREE.Quaternion();
   const hoseScale = new THREE.Vector3(1, 1, 1);
   const hoseUpAxis = new THREE.Vector3(0, 1, 0);
+  const hoseSegmentStart = new THREE.Vector3();
+  const hoseSegmentEnd = new THREE.Vector3();
+  const hoseCurvePrevious = new THREE.Vector3();
+  const hoseCurveNext = new THREE.Vector3();
 
   const waterPositions = new Float32Array(MAX_WATER_PARTICLES * 3);
   const waterAlpha = new Float32Array(MAX_WATER_PARTICLES);
@@ -1241,14 +1247,66 @@ export const createThreeTestUnitFxLayer = (scene: THREE.Scene): ThreeTestUnitFxL
       }
     });
 
+    const activeHoseOperatorIds = new Set<number>();
+    trucks.forEach((truckRef) => {
+      getTruckHoseOperators(world, truckRef.unit).forEach((operator) => activeHoseOperatorIds.add(operator.id));
+    });
+
     let hoseSegments = 0;
+    const appendHoseCylinder = (start: THREE.Vector3, end: THREE.Vector3): boolean => {
+      if (hoseSegments >= MAX_HOSE_SEGMENTS) {
+        return false;
+      }
+      hoseDirection.set(end.x - start.x, end.y - start.y, end.z - start.z);
+      const hoseLength = hoseDirection.length();
+      if (hoseLength <= 0.0001) {
+        return true;
+      }
+      hoseDirection.multiplyScalar(1 / hoseLength);
+      hoseMidpoint.set((start.x + end.x) * 0.5, (start.y + end.y) * 0.5, (start.z + end.z) * 0.5);
+      hoseQuaternion.setFromUnitVectors(hoseUpAxis, hoseDirection);
+      hoseScale.set(1, hoseLength, 1);
+      hoseMatrix.compose(hoseMidpoint, hoseQuaternion, hoseScale);
+      hoses.setMatrixAt(hoseSegments, hoseMatrix);
+      hoseSegments += 1;
+      return true;
+    };
+    const sampleHoseCurvePoint = (
+      truckX: number,
+      truckY: number,
+      truckZ: number,
+      crewX: number,
+      crewY: number,
+      crewZ: number,
+      unitId: number,
+      t: number,
+      target: THREE.Vector3
+    ): void => {
+      const clampedT = clamp(t, 0, 1);
+      const dx = crewX - truckX;
+      const dz = crewZ - truckZ;
+      const planarLength = Math.hypot(dx, dz);
+      const invPlanarLength = planarLength > 0.0001 ? 1 / planarLength : 0;
+      const perpX = -dz * invPlanarLength;
+      const perpZ = dx * invPlanarLength;
+      const side = unitId % 2 === 0 ? 1 : -1;
+      const slack = clamp(planarLength * 0.13, worldPerTile * 0.07, worldPerTile * 0.5);
+      const mainBend = Math.sin(Math.PI * clampedT) * slack * side;
+      const coil = Math.sin(clampedT * TAU * 2.25 + unitId * 0.37) * slack * 0.18 * Math.sin(Math.PI * clampedT);
+      const sag = Math.sin(Math.PI * clampedT) * worldPerTile * 0.025;
+      target.set(
+        truckX + dx * clampedT + perpX * (mainBend + coil),
+        truckY + (crewY - truckY) * clampedT - sag,
+        truckZ + dz * clampedT + perpZ * (mainBend + coil)
+      );
+    };
     for (let i = 0; i < world.units.length; i += 1) {
       const unit = world.units[i];
       if (!unit || unit.kind !== "firefighter" || unit.assignedTruckId === null) {
         continue;
       }
       const truckRef = trucks.get(unit.assignedTruckId) ?? null;
-      if (!truckRef || truckRef.unit.crewMode === "boarded" || unit.carrierId === truckRef.unit.id) {
+      if (!truckRef || !activeHoseOperatorIds.has(unit.id)) {
         continue;
       }
       if (hoseSegments >= MAX_HOSE_SEGMENTS) {
@@ -1262,22 +1320,26 @@ export const createThreeTestUnitFxLayer = (scene: THREE.Scene): ThreeTestUnitFxL
         continue;
       }
 
-      hoseDirection.set(crewSource.x - truckX, crewSource.y - truckY, crewSource.z - truckZ);
-      const hoseLength = hoseDirection.length();
-      if (hoseLength <= 0.0001) {
-        continue;
+      sampleHoseCurvePoint(truckX, truckY, truckZ, crewSource.x, crewSource.y, crewSource.z, unit.id, 0, hoseCurvePrevious);
+      for (let segment = 1; segment <= HOSE_CURVE_SEGMENTS; segment += 1) {
+        sampleHoseCurvePoint(
+          truckX,
+          truckY,
+          truckZ,
+          crewSource.x,
+          crewSource.y,
+          crewSource.z,
+          unit.id,
+          segment / HOSE_CURVE_SEGMENTS,
+          hoseCurveNext
+        );
+        hoseSegmentStart.copy(hoseCurvePrevious);
+        hoseSegmentEnd.copy(hoseCurveNext);
+        if (!appendHoseCylinder(hoseSegmentStart, hoseSegmentEnd)) {
+          break;
+        }
+        hoseCurvePrevious.copy(hoseCurveNext);
       }
-      hoseDirection.multiplyScalar(1 / hoseLength);
-      hoseMidpoint.set(
-        (truckX + crewSource.x) * 0.5,
-        (truckY + crewSource.y) * 0.5,
-        (truckZ + crewSource.z) * 0.5
-      );
-      hoseQuaternion.setFromUnitVectors(hoseUpAxis, hoseDirection);
-      hoseScale.set(1, hoseLength, 1);
-      hoseMatrix.compose(hoseMidpoint, hoseQuaternion, hoseScale);
-      hoses.setMatrixAt(hoseSegments, hoseMatrix);
-      hoseSegments += 1;
     }
     hoses.count = hoseSegments;
     hoses.instanceMatrix.needsUpdate = true;

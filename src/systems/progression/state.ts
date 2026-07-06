@@ -6,6 +6,7 @@ export const createResolvedProgressionModifiers = (): ResolvedProgressionModifie
   unitHoseRangeMultiplier: 1,
   truckWaterCapacityMultiplier: 1,
   truckWaterRefillRateMultiplier: 1,
+  truckHoseSlotBonus: 0,
   firebreakCostMultiplier: 1,
   trainingCostMultiplier: 1
 });

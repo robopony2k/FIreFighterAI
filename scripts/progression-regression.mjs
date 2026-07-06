@@ -18,7 +18,7 @@ import { isRuntimeWidgetAvailable } from "../dist/ui/runtime/widgets/registry.js
 
 const definitions = getTechNodeDefinitions();
 validateTechTreeDefinitions(definitions);
-assert.equal(definitions.length, 15, "The initial authored graph should contain 15 nodes.");
+assert.equal(definitions.length, 16, "The authored graph should contain 16 nodes including Dual Line Operations.");
 
 const expectedFirstThresholds = [25, 60, 110, 175, 255, 350, 460, 585, 725, 880];
 assert.deepEqual(
@@ -54,6 +54,10 @@ assert(
   "Air Support should unlock after Fireline Training R2 and Extended Lines R1."
 );
 
+const logisticsRanks = { "quick-connects": 1 };
+const logisticsEligible = getEligibleTechNodeDefinitions(logisticsRanks).map((node) => node.id);
+assert(logisticsEligible.includes("dual-line-operations"), "Dual Line Operations should unlock after Quick Connects R1.");
+
 const progression = createProgressionState();
 assert(!hasProgressionCapability(progression, "runtime.minimap"), "The minimap must begin locked.");
 assert(!isRuntimeWidgetAvailable("minimap", progression), "The minimap widget metadata must enforce its capability.");
@@ -84,7 +88,29 @@ assert(
 assert.equal(selectionProgression.nodeRanks["rapid-response"], 1, "Selecting a node should increment its rank.");
 assert(selectionProgression.resolved.unitSpeedMultiplier > 1, "Existing numeric perk effects should still resolve.");
 selectionProgression.activeDraft = {
-  ordinal: 2,
+  ordinal: 3,
+  level: 3,
+  options: ["dual-line-operations"],
+  openedAtExtinguishTotal: 110
+};
+assert(
+  !selectProgressionNode({ seed: 1, progression: selectionProgression }, "dual-line-operations"),
+  "Dual Line Operations should reject selection before Quick Connects is owned."
+);
+selectionProgression.nodeRanks["quick-connects"] = 1;
+selectionProgression.activeDraft = {
+  ordinal: 4,
+  level: 4,
+  options: ["dual-line-operations"],
+  openedAtExtinguishTotal: 175
+};
+assert(
+  selectProgressionNode({ seed: 1, progression: selectionProgression }, "dual-line-operations"),
+  "Dual Line Operations should be selectable after Quick Connects."
+);
+assert.equal(selectionProgression.resolved.truckHoseSlotBonus, 1, "Dual Line Operations should add one truck hose slot.");
+selectionProgression.activeDraft = {
+  ordinal: 5,
   level: 2,
   options: ["topographic-survey"],
   openedAtExtinguishTotal: 60

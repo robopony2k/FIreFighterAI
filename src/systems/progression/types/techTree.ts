@@ -18,6 +18,7 @@ export type RewardEffectTargetId =
   | "unit.hoseRangeMultiplier"
   | "truck.waterCapacityMultiplier"
   | "truck.waterRefillRateMultiplier"
+  | "truck.hoseSlotBonus"
   | "economy.firebreakCostMultiplier"
   | "economy.trainingCostMultiplier";
 

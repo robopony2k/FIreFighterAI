@@ -1,7 +1,7 @@
 import { setStatus } from "../../core/state.js";
 import type { WorldState } from "../../core/state.js";
 import type { InputState } from "../../core/inputState.js";
-import type { AreaTarget, CommandFormation, CommandIntent, CommandType, FormationTarget, Point, RNG, Unit } from "../../core/types.js";
+import type { AreaTarget, CommandFireTask, CommandFormation, CommandIntent, FormationTarget, Point, RNG, Unit } from "../../core/types.js";
 import { handleUnitDeployment } from "../index.js";
 import { igniteDebugFireAt } from "../fire/debugIgnite.js";
 import { selectTownEvacuationDestination } from "../../systems/evacuation/controllers/evacuationController.js";
@@ -78,7 +78,7 @@ const isNearFire = (state: WorldState, tile: MapTile, radius: number): boolean =
   return false;
 };
 
-const resolveContextCommandType = (state: WorldState, tile: MapTile): CommandType => {
+const resolveContextFireTask = (state: WorldState, tile: MapTile): CommandFireTask => {
   const idx = tile.y * state.grid.cols + tile.x;
   const fire = state.tileFire[idx] ?? 0;
   const heat = state.tileHeat[idx] ?? 0;
@@ -92,28 +92,44 @@ const resolveContextCommandType = (state: WorldState, tile: MapTile): CommandTyp
   if (fuel > 0.2 && isNearFire(state, tile, 3)) {
     return "contain";
   }
-  return "move";
+  return "suppress";
 };
+
+const makeIntent = (
+  inputState: InputState,
+  target: CommandIntent["target"],
+  formation: CommandFormation,
+  fireTask?: CommandFireTask
+): CommandIntent => ({
+  type: inputState.placementMode,
+  placementMode: inputState.placementMode,
+  fireTask: fireTask ?? inputState.fireTask,
+  target,
+  formation,
+  behaviourMode: inputState.behaviourMode
+});
 
 const makePointIntent = (
   state: WorldState,
   inputState: InputState,
   tile: MapTile,
-  commandType?: CommandType
+  fireTask?: CommandFireTask
 ): CommandIntent => {
-  const resolvedType = commandType ?? inputState.commandMode ?? resolveContextCommandType(state, tile);
-  return {
-    type: resolvedType,
-    target: {
+  const resolvedTask = fireTask ?? inputState.fireTask ?? resolveContextFireTask(state, tile);
+  const intent = makeIntent(
+    inputState,
+    {
       kind: "point",
       point: { x: tile.x, y: tile.y }
     },
-    formation: inputState.dispatchFormation ?? "line",
-    behaviourMode:
-      inputState.commandMode === null && resolvedType === "suppress" && (state.tileFire[tile.y * state.grid.cols + tile.x] ?? 0) > 0.45
+    inputState.dispatchFormation ?? "line",
+    resolvedTask
+  );
+  intent.behaviourMode =
+    inputState.fireTask === "suppress" && resolvedTask === "suppress" && (state.tileFire[tile.y * state.grid.cols + tile.x] ?? 0) > 0.45
         ? "aggressive"
-        : inputState.behaviourMode
-  };
+        : inputState.behaviourMode;
+  return intent;
 };
 
 const makeProjectedFormationIntent = (
@@ -129,12 +145,7 @@ const makeProjectedFormationIntent = (
     formation,
     count
   });
-  return {
-    type: inputState.commandMode ?? "move",
-    target,
-    formation,
-    behaviourMode: inputState.behaviourMode
-  };
+  return makeIntent(inputState, target, formation);
 };
 
 const makeAreaIntent = (
@@ -148,12 +159,7 @@ const makeAreaIntent = (
     start: { x: start.x, y: start.y },
     end: { x: end.x, y: end.y }
   };
-  return {
-    type: inputState.commandMode ?? "backburn",
-    target,
-    formation: "area",
-    behaviourMode: inputState.behaviourMode
-  };
+  return makeIntent(inputState, target, "area", "backburn");
 };
 
 export const handleMapPrimaryTileClick = ({
@@ -290,17 +296,12 @@ export const handleMapFormationDragCommand = ({
   runAction({ gate }, "formation", () => {
     const dx = Math.abs(end.x - start.x);
     const dy = Math.abs(end.y - start.y);
-    if (inputState.commandMode === "backburn" && dx >= 2 && dy >= 2) {
+    if (inputState.fireTask === "backburn" && dx >= 2 && dy >= 2) {
       applyCommandIntentToSelection(state, makeAreaIntent(state, inputState, start, end));
       return;
     }
     if (projection) {
-      applyCommandIntentToSelection(state, {
-        type: inputState.commandMode ?? "move",
-        target: projection,
-        formation: inputState.dispatchFormation,
-        behaviourMode: inputState.behaviourMode
-      });
+      applyCommandIntentToSelection(state, makeIntent(inputState, projection, inputState.dispatchFormation));
       return;
     }
     applyCommandIntentToSelection(state, makeProjectedFormationIntent(inputState, start, end, selectedUnits.length));

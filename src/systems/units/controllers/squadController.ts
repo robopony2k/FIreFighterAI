@@ -222,6 +222,8 @@ const makeDispatchIntent = (
   if ((projection || orientationEnd) && (formation === "line" || formation === "wedge" || formation === "arc")) {
     return {
       type: "move",
+      placementMode: "move",
+      fireTask: "hold_fire",
       target:
         projection ??
         createFormationTarget({
@@ -236,6 +238,8 @@ const makeDispatchIntent = (
   }
   return {
     type: "move",
+    placementMode: "move",
+    fireTask: "hold_fire",
     target: {
       kind: "point",
       point: { x: tile.x, y: tile.y }

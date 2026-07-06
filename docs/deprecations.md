@@ -1,5 +1,19 @@
 # Deprecations
 
+## External Water And Watch Tower GLB Render Path
+
+Status: Deprecated as of July 6, 2026.
+
+- Runtime water towers and watch towers no longer load external GLB models for their 3D structure overlay.
+- Water towers now render from a procedural settlement-owned model, and watch towers render from a procedural fire-detection model that scales height from tower level.
+- The old GLB files may remain in assets for reference, but future tower visual work should extend the procedural builders rather than adding tower-specific model loaders.
+
+Migration guidance:
+
+1. Add new water tower visual details through `src/systems/settlements/rendering/proceduralWaterTowerModel.ts`.
+2. Add new watch tower visual details through `src/systems/fire/rendering/proceduralWatchTowerModel.ts`.
+3. Keep tower visuals render-only; do not route reservoir or detection gameplay through rendering modules.
+
 ## Committed Settlement Pre-Growth Years
 
 Status: Deprecated as of June 20, 2026.
@@ -196,6 +210,48 @@ Migration guidance:
 1. Put future 3D run-level exit actions in the phase HUD progression action slot.
 2. Keep app/session navigation behavior in the runtime layer; HUD components should only provide neutral attachment points.
 3. Do not reintroduce a normal-run header above the 3D canvas unless it carries persistent, non-duplicated gameplay information.
+
+## Truck-Mounted Autonomous Hose Suppression
+
+Status: Deprecated as of July 5, 2026.
+
+- Fire trucks no longer directly create hose streams or apply suppression from the vehicle body.
+- The replacement path is crew-operated hose suppression: trucks carry water and firefighters, while deployed firefighters create the actual spray sources after boarding/disembark timing and hose-slot checks.
+- Dual Line Operations unlocks a second crew-operated hose for sufficiently staffed trucks; under-crewed trucks now degrade through explicit driver and hose-readiness thresholds.
+
+Migration guidance:
+
+1. Add future suppression behavior through `src/systems/units/sim/` crew readiness, water, and firefighter suppression paths rather than truck spray targets.
+2. Keep truck water/refill logic as reservoir support and keep hose visuals sourced from firefighter units.
+3. Do not restore truck-body suppression as a tuning shortcut when firetrucks feel too strong; tune crew thresholds, hose slots, transition timing, and firefighter output instead.
+
+## Fire-Task-Driven Autonomous Truck Repositioning
+
+Status: Deprecated as of July 5, 2026.
+
+- Suppress, Contain, Backburn, and stance changes no longer solve new truck positions or reboard crews just because the internal fire-task standoff changed.
+- The replacement path is player-owned placement: Move, Deploy, Relocate, and Recall own truck movement and crew transition state, while fire tasks operate only from the placed truck envelope.
+- Defensive behavior may still retreat a truck when its current tile is directly unsafe.
+
+Migration guidance:
+
+1. Add future truck movement behavior through placement commands and formation slot resolution, not through fire-task target selection.
+2. Keep firefighter target and stance logic constrained to deployed crew positions within hose/tether range.
+3. Surface `Deploy required` and `Out of range` feedback instead of silently moving trucks toward a fire-task solution.
+
+## Redundant Per-Firefighter Hose Tethers
+
+Status: Deprecated as of July 5, 2026.
+
+- Deployed firefighters no longer each receive a truck-to-firefighter supply hose just because they are visible outside the truck.
+- The replacement path is role-based deployment: drivers remain hidden in the truck, support crew take pump or assistant positions, and supply hose visuals are drawn only for active nozzle operators.
+- Supply hoses should render with modest deterministic slack/curve so they read as unfurled hose, not high-tension wire.
+
+Migration guidance:
+
+1. Add future hose eligibility through unit crew-role and hose-slot helpers, not ad hoc render-side checks for every firefighter.
+2. Keep pump/support firefighters visible for readability, but do not let them emit streams or consume water.
+3. Tune hose visual shape in the rendering layer without changing suppression authority.
 
 ## Duplicated Right-Panel Unit Command Controls
 

@@ -26,6 +26,7 @@ export interface ResolvedProgressionModifiers {
   unitHoseRangeMultiplier: number;
   truckWaterCapacityMultiplier: number;
   truckWaterRefillRateMultiplier: number;
+  truckHoseSlotBonus: number;
   firebreakCostMultiplier: number;
   trainingCostMultiplier: number;
 }

@@ -41,6 +41,19 @@ const {
 const { createPrecomputedSettlementGrowthPlan } = await import(
   distImport(["systems", "settlements", "sim", "futureSettlementGrowthPlan.js"])
 );
+const {
+  ensureDefaultWaterTowers,
+  getWaterTowerForTown,
+  stepWaterTowers
+} = await import(
+  distImport(["systems", "settlements", "sim", "waterTowerInfrastructure.js"])
+);
+const {
+  WATER_TOWER_DRY_REFILL_RATE,
+  WATER_TOWER_RAIN_REFILL_RATE
+} = await import(
+  distImport(["systems", "settlements", "constants", "waterTowerConstants.js"])
+);
 const { buildRenderTerrainSample } = await import(distImport(["render", "simView.js"]));
 const {
   BUILDING_RUIN_PERSISTENCE_DAYS
@@ -407,6 +420,71 @@ const runIdleRevisionCase = () => {
   advanceConstructionDays(state, 10);
   assert.equal(state.structureRevision, startRevision, "idle days should not change structure revision");
   return { startRevision, endRevision: state.structureRevision };
+};
+
+const runWaterTowerInfrastructureCase = () => {
+  const left = buildBaseWorld(7373, 2);
+  const right = buildBaseWorld(7373, 2);
+  const initialHouses = left.totalHouses;
+  ensureDefaultWaterTowers(left);
+  ensureDefaultWaterTowers(right);
+
+  const snapshotTowers = (state) =>
+    state.waterTowers.map((tower) => ({
+      townId: tower.townId,
+      x: tower.x,
+      y: tower.y,
+      water: tower.water,
+      capacity: tower.capacity,
+      serviceRadius: tower.serviceRadius
+    }));
+
+  assert.equal(left.waterTowers.length, left.towns.length, "each town should receive one default water tower");
+  assert.deepEqual(snapshotTowers(left), snapshotTowers(right), "water tower placement should be deterministic");
+  ensureDefaultWaterTowers(left);
+  assert.equal(left.waterTowers.length, left.towns.length, "water tower creation should enforce one per town");
+  assert.equal(left.totalHouses, initialHouses, "water towers should not change house totals");
+
+  for (const town of left.towns) {
+    const tower = getWaterTowerForTown(left, town.id);
+    assert.ok(tower, `town ${town.id} should have a water tower`);
+    const idx = tower.y * left.grid.cols + tower.x;
+    assert.equal(left.structureMask[idx], 1, "water tower should reserve structure space");
+    assert.equal(left.tileStructure[idx], 0, "water tower should not be recorded as a house structure");
+    assert.equal(left.tileTownId[idx], town.id, "water tower should retain town ownership");
+  }
+
+  const sample = buildRenderTerrainSample(left, buildTreeTypes(left), false, false);
+  assert.equal(sample.waterTowers.length, left.towns.length, "render sample should expose water towers");
+
+  const tower = left.waterTowers[0];
+  tower.water = 100;
+  left.seasonalRain.active = false;
+  left.seasonalRain.intensity01 = 0;
+  stepWaterTowers(left, 2);
+  assert.equal(Number(tower.water.toFixed(3)), Number((100 + WATER_TOWER_DRY_REFILL_RATE * 2).toFixed(3)), "dry trickle should refill towers");
+
+  tower.water = 100;
+  left.seasonalRain.active = true;
+  left.seasonalRain.intensity01 = 0.5;
+  stepWaterTowers(left, 1);
+  assert.equal(
+    Number(tower.water.toFixed(3)),
+    Number((100 + WATER_TOWER_DRY_REFILL_RATE + WATER_TOWER_RAIN_REFILL_RATE * 0.5).toFixed(3)),
+    "seasonal rain should accelerate tower refill"
+  );
+
+  const migrated = buildBaseWorld(7374, 1);
+  delete migrated.waterTowers;
+  delete migrated.nextWaterTowerId;
+  ensureDefaultWaterTowers(migrated);
+  assert.equal(migrated.waterTowers.length, 1, "missing water tower state should migrate on demand");
+  assert.equal(migrated.nextWaterTowerId, 2, "migrated water tower id counter should advance");
+
+  return {
+    towers: left.waterTowers.length,
+    refill: Number(tower.water.toFixed(1))
+  };
 };
 
 const runBulkSchedulerParityCase = () => {
@@ -1067,6 +1145,7 @@ const rebuild = runRuinPersistenceAndRebuildCase();
 const alert = runAlertSuppressionCase();
 const recovery = runRecoveryPriorityCase();
 const idle = runIdleRevisionCase();
+const waterTowers = runWaterTowerInfrastructureCase();
 const bulkParity = runBulkSchedulerParityCase();
 const precomputedPlan = runPrecomputedGrowthPlanDeterminismCase();
 const precomputedIsolation = runPrecomputedGrowthIsolationCase();
@@ -1091,6 +1170,7 @@ console.log(
     `alertResumeProgress=${alert.resumedProgress.toFixed(2)}`,
     `priority=${recovery.firstLotKind}`,
     `idleRevision=${idle.startRevision}->${idle.endRevision}`,
+    `waterTowers=${waterTowers.towers}/${waterTowers.refill.toFixed(1)}`,
     `bulkParity=${bulkParity.houses}/${bulkParity.lots}`,
     `planEntries=${precomputedPlan.entries}`,
     `planHiddenEdits=${precomputedIsolation.edits}`,

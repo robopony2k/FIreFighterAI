@@ -11,6 +11,7 @@ const createRewardDeltaAccumulator = (): RewardDeltaAccumulator => ({
   "unit.hoseRangeMultiplier": 0,
   "truck.waterCapacityMultiplier": 0,
   "truck.waterRefillRateMultiplier": 0,
+  "truck.hoseSlotBonus": 0,
   "economy.firebreakCostMultiplier": 0,
   "economy.trainingCostMultiplier": 0
 });
@@ -47,6 +48,7 @@ export const resolveProgressionModifiers = (nodeRanks: Record<string, number>): 
   resolved.unitHoseRangeMultiplier = clamp(1 + deltas["unit.hoseRangeMultiplier"], 0.1, 10);
   resolved.truckWaterCapacityMultiplier = clamp(1 + deltas["truck.waterCapacityMultiplier"], 0.1, 10);
   resolved.truckWaterRefillRateMultiplier = clamp(1 + deltas["truck.waterRefillRateMultiplier"], 0.1, 10);
+  resolved.truckHoseSlotBonus = Math.max(0, Math.floor(deltas["truck.hoseSlotBonus"]));
   resolved.firebreakCostMultiplier = clamp(1 + deltas["economy.firebreakCostMultiplier"], 0.1, 10);
   resolved.trainingCostMultiplier = clamp(1 + deltas["economy.trainingCostMultiplier"], 0.1, 10);
   return resolved;

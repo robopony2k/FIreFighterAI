@@ -3693,21 +3693,29 @@ canvas {
   grid-column: 1;
 }
 
-.three-test-command-panel-section--commands {
+.three-test-command-panel-section--placement {
   grid-column: 2;
-  grid-row: 1 / span 3;
+  grid-row: 1;
+}
+
+.three-test-command-panel-section--tasks {
+  grid-column: 2;
+  grid-row: 2;
 }
 
 .three-test-command-panel-section--stance {
   grid-column: 2;
+  grid-row: 3;
 }
 
 .three-test-command-panel-section--formation {
   grid-column: 2;
+  grid-row: 4;
 }
 
 .three-test-command-panel-section--overrides {
   grid-column: 2;
+  grid-row: 5;
 }
 
 .three-test-command-panel-label {
@@ -3725,6 +3733,11 @@ canvas {
 
 .three-test-command-panel-grid--commands {
   grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.three-test-command-panel-grid--placement,
+.three-test-command-panel-grid--tasks {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
 }
 
 .three-test-command-panel-grid--triple {
@@ -8587,7 +8600,8 @@ input[type="text"] {
     grid-template-columns: minmax(0, 1fr);
   }
 
-  .three-test-command-panel-section--commands,
+  .three-test-command-panel-section--placement,
+  .three-test-command-panel-section--tasks,
   .three-test-command-panel-section--stance,
   .three-test-command-panel-section--formation,
   .three-test-command-panel-section--overrides {

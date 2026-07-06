@@ -7,6 +7,8 @@ import { createInitialState, syncTileSoA } from "../dist/core/state.js";
 import { applyFuel } from "../dist/core/tiles.js";
 import { handleMapFormationDragCommand, handleMapRetaskTileCommand } from "../dist/sim/input/mapTileActions.js";
 import { stepSim } from "../dist/sim/index.js";
+import { getTruckCrewDeploymentRoles } from "../dist/systems/units/sim/crewReadiness.js";
+import { updateTruckWater } from "../dist/systems/units/sim/unitWater.js";
 import {
   applyCommandIntentToSelection,
   applyExtinguishStep,
@@ -17,6 +19,7 @@ import {
   createUnit,
   deployUnit,
   ensureDefaultSquads,
+  prepareExtinguish,
   recallUnits,
   resolveFormationProjection,
   seedStartingRoster,
@@ -87,6 +90,70 @@ const buildDeployedTruckState = (seed = 132) => {
 };
 
 const getCrew = (state, truck) => truck.crewIds.map((id) => state.units.find((unit) => unit.id === id)).filter(Boolean);
+const getNozzleUnits = (state, truck) =>
+  getTruckCrewDeploymentRoles(state, truck).hoseOperators.map((assignment) => assignment.unit);
+
+const addRuntimeCrew = (state, rng, truck, x = truck.x, y = truck.y) => {
+  const crew = createUnit(state, "firefighter", rng, null);
+  crew.x = x;
+  crew.y = y;
+  crew.prevX = x;
+  crew.prevY = y;
+  crew.assignedTruckId = truck.id;
+  crew.commandUnitId = truck.commandUnitId;
+  crew.carrierId = null;
+  crew.path = [];
+  crew.pathIndex = 0;
+  state.units.push(crew);
+  truck.crewIds.push(crew.id);
+  return crew;
+};
+
+const stationCrewAtTruck = (state, truck, carried = false) => {
+  getCrew(state, truck).forEach((member) => {
+    member.x = truck.x;
+    member.y = truck.y;
+    member.prevX = truck.x;
+    member.prevY = truck.y;
+    member.carrierId = carried ? truck.id : null;
+    member.path = [];
+    member.pathIndex = 0;
+    member.attackTarget = null;
+    member.sprayTarget = null;
+  });
+  truck.passengerIds = carried ? getCrew(state, truck).map((member) => member.id) : [];
+};
+
+const stopCrewAtCurrentPositions = (state, truck) => {
+  getCrew(state, truck).forEach((member) => {
+    member.path = [];
+    member.pathIndex = 0;
+  });
+};
+
+const seedSuppressionTarget = (state, x = 6, y = 5) => {
+  const targetIndex = y * state.grid.cols + x;
+  state.tiles[targetIndex].fire = 0.8;
+  state.tiles[targetIndex].heat = 1.4;
+  state.tileFire[targetIndex] = 0.8;
+  state.tileHeat[targetIndex] = 1.4;
+  return targetIndex;
+};
+
+const makeCommandIntent = ({
+  placementMode = "move",
+  fireTask = "suppress",
+  target = { kind: "point", point: { x: 5, y: 5 } },
+  formation = "line",
+  behaviourMode = "balanced"
+} = {}) => ({
+  type: placementMode,
+  placementMode,
+  fireTask,
+  target,
+  formation,
+  behaviourMode
+});
 
 const testStartingRosterAndDeployment = () => {
   const { state, truck } = buildDeployedTruckState(2001);
@@ -210,14 +277,17 @@ const testFormationAndCommandTargets = () => {
   assignFormationTargets(state, [truck], { x: 3, y: 3 }, { x: 5, y: 3 });
   assert.deepEqual(truck.target, { x: 4, y: 3 }, "formation drag with one truck should assign midpoint target");
   selectCommandUnit(state, state.commandUnits[0].id);
-  applyCommandIntentToSelection(state, {
-    type: "move",
+  applyCommandIntentToSelection(state, makeCommandIntent({
+    placementMode: "move",
+    fireTask: "hold_fire",
     formation: "line",
     behaviourMode: "balanced",
     target: { kind: "line", start: { x: 4, y: 5 }, end: { x: 8, y: 5 } }
-  });
+  }));
   stepUnits(state, 0.1);
   assert.equal(state.commandUnits[0].currentIntent?.formation, "line", "command intent should keep requested formation");
+  assert.equal(state.commandUnits[0].currentIntent?.placementMode, "move", "command intent should keep placement mode");
+  assert.equal(state.commandUnits[0].currentIntent?.fireTask, "hold_fire", "command intent should keep fire task");
   assert.equal(truck.currentStatus === "moving" || truck.currentStatus === "holding", true, "command should update truck status");
 };
 
@@ -329,19 +399,15 @@ const testPendingSquadDispatchProjection = () => {
 
 const testSuppressionWaterSpendAndRefill = () => {
   const { state, truck } = buildDeployedTruckState(2004);
-  setTruckCrewMode(state, truck.id, "deployed", { silent: true });
-  const crew = getCrew(state, truck)[0];
-  assert.ok(crew, "deployed truck should have a crew member");
-  crew.x = 5.5;
-  crew.y = 5.5;
+  setTruckCrewMode(state, truck.id, "deployed", { silent: true, immediate: true });
+  const nozzle = getNozzleUnits(state, truck)[0];
+  assert.ok(nozzle, "deployed truck should have a nozzle operator");
+  nozzle.x = 5.5;
+  nozzle.y = 5.5;
   truck.x = 5.5;
   truck.y = 5.5;
-  const targetIndex = 5 * state.grid.cols + 6;
-  state.tiles[targetIndex].fire = 0.8;
-  state.tiles[targetIndex].heat = 1.4;
-  state.tileFire[targetIndex] = 0.8;
-  state.tileHeat[targetIndex] = 1.4;
-  crew.sprayTarget = { x: 6.5, y: 5.5 };
+  const targetIndex = seedSuppressionTarget(state);
+  nozzle.sprayTarget = { x: 6.5, y: 5.5 };
   const waterBefore = truck.water;
   applyExtinguishStep(state, 1);
   assert.equal(truck.water < waterBefore, true, "crew suppression should spend truck water");
@@ -352,9 +418,437 @@ const testSuppressionWaterSpendAndRefill = () => {
   truck.y = state.basePoint.y + 0.5;
   truck.path = [];
   truck.pathIndex = 0;
-  crew.sprayTarget = null;
+  nozzle.sprayTarget = null;
   stepUnits(state, 1);
   assert.equal(truck.water > 0, true, "truck should refill while stopped on base");
+};
+
+const testTownWaterTowerRefillSource = () => {
+  const { state, rng, truck } = buildDeployedTruckState(2024);
+  const tower = {
+    id: 1,
+    typeId: "town-water-tower",
+    townId: 0,
+    x: 5,
+    y: 5,
+    capacity: 100,
+    water: 12,
+    serviceRadius: 3.25,
+    active: true,
+    builtCareerDay: 0
+  };
+  state.waterTowers = [tower];
+  state.nextWaterTowerId = 2;
+  truck.x = 5.5;
+  truck.y = 5.5;
+  truck.prevX = truck.x;
+  truck.prevY = truck.y;
+  truck.path = [];
+  truck.pathIndex = 0;
+  truck.water = 0;
+
+  updateTruckWater(state, truck, 1);
+  const firstRefill = Math.min(truck.waterRefillRate, 12);
+  assert.equal(truck.water, firstRefill, "stopped trucks should refill from nearby water towers");
+  assert.equal(tower.water, 12 - firstRefill, "tower reservoirs should drain by the transferred amount");
+
+  tower.water = 100;
+  truck.water = truck.waterCapacity - 2;
+  updateTruckWater(state, truck, 1);
+  assert.equal(truck.water, truck.waterCapacity, "tower refill should clamp to truck capacity");
+  assert.equal(tower.water, 98, "tower drain should clamp to the truck deficit");
+
+  truck.x = 10.5;
+  truck.y = 10.5;
+  truck.water = 0;
+  updateTruckWater(state, truck, 1);
+  assert.equal(truck.water, 0, "trucks outside tower service radius should not refill from towers");
+
+  truck.x = 5.5;
+  truck.y = 5.5;
+  truck.path = [{ x: 6, y: 5 }];
+  truck.pathIndex = 0;
+  tower.water = 100;
+  updateTruckWater(state, truck, 1);
+  assert.equal(truck.water, 0, "moving trucks should not draw from tower reservoirs");
+
+  truck.path = [];
+  truck.pathIndex = 0;
+  truck.water = 5;
+  const crew = addRuntimeCrew(state, rng, truck, 5.5, 5.5);
+  crew.sprayTarget = { x: 6.5, y: 5.5 };
+  tower.water = 100;
+  updateTruckWater(state, truck, 1);
+  assert.equal(truck.water, 5, "actively spraying truck groups should not refill from towers");
+  assert.equal(tower.water, 100, "active spraying should not drain a tower reservoir");
+};
+
+const testTruckDoesNotSprayDirectly = () => {
+  const { state, rng, truck } = buildDeployedTruckState(2015);
+  truck.x = 2.5;
+  truck.y = 5.5;
+  truck.sprayTarget = { x: 6.5, y: 5.5 };
+  seedSuppressionTarget(state);
+  const effects = createEffectsState();
+  prepareExtinguish(state, effects, rng);
+  assert.equal(truck.sprayTarget, null, "prepareExtinguish should clear truck spray targets");
+  assert.equal(
+    effects.waterStreams.some((stream) => stream.sourceUnitId === truck.id),
+    false,
+    "trucks should never emit water streams directly"
+  );
+};
+
+const testCrewThresholdsAndHoseSlots = () => {
+  const { state, rng, truck } = buildDeployedTruckState(2016);
+  truck.x = 2.5;
+  truck.y = 5.5;
+  truck.prevX = truck.x;
+  truck.prevY = truck.y;
+  const crew = getCrew(state, truck);
+  const stationCrew = () => {
+    getCrew(state, truck).forEach((member) => {
+      member.x = 2.5;
+      member.y = 5.5;
+      member.prevX = member.x;
+      member.prevY = member.y;
+      member.carrierId = null;
+      member.path = [];
+      member.pathIndex = 0;
+    });
+  };
+  stationCrew();
+  setTruckCrewMode(state, truck.id, "deployed", { silent: true, immediate: true });
+  stopCrewAtCurrentPositions(state, truck);
+  seedSuppressionTarget(state, 6, 5);
+  seedSuppressionTarget(state, 6, 6);
+
+  let effects = createEffectsState();
+  prepareExtinguish(state, effects, rng);
+  assert.equal(effects.waterStreams.length, 1, "two crew should operate one hose by default");
+  let roles = getTruckCrewDeploymentRoles(state, truck);
+  assert.equal(roles.driver?.unit.carrierId, truck.id, "two-crew deployment should keep the driver hidden in the truck");
+  assert.equal(roles.pumpOperator, null, "two-crew deployment should not invent a pump-side support firefighter");
+  assert.equal(roles.hoseOperators.length, 1, "two-crew deployment should assign one nozzle operator");
+  assert.equal(roles.hoseOperators[0].unit.carrierId, null, "two-crew nozzle operator should be visible");
+  assert.equal(roles.driver?.unit.sprayTarget, null, "hidden driver should not receive a spray target");
+
+  const extraA = addRuntimeCrew(state, rng, truck, 2.5, 6.5);
+  stationCrew();
+  setTruckCrewMode(state, truck.id, "deployed", { silent: true, immediate: true });
+  stopCrewAtCurrentPositions(state, truck);
+  effects = createEffectsState();
+  prepareExtinguish(state, effects, rng);
+  assert.equal(effects.waterStreams.length, 1, "three crew should still operate one hose by default");
+  roles = getTruckCrewDeploymentRoles(state, truck);
+  assert.equal(roles.pumpOperator?.unit.carrierId, null, "third crew should deploy as pump-side support");
+  assert.equal(roles.pumpOperator?.unit.sprayTarget, null, "pump-side support should not spray");
+
+  const extraB = addRuntimeCrew(state, rng, truck, 2.5, 4.5);
+  stationCrew();
+  setTruckCrewMode(state, truck.id, "deployed", { silent: true, immediate: true });
+  stopCrewAtCurrentPositions(state, truck);
+  effects = createEffectsState();
+  prepareExtinguish(state, effects, rng);
+  assert.equal(effects.waterStreams.length, 1, "four crew should still operate one hose before the second-hose unlock");
+  roles = getTruckCrewDeploymentRoles(state, truck);
+  assert.equal(roles.assistants.length, 1, "fourth crew should be support before the second-hose unlock");
+  assert.equal(roles.assistants.every((assignment) => assignment.unit.sprayTarget === null), true, "support crew should not spray");
+  getCrew(state, truck).forEach((member) => {
+    member.sprayTarget = null;
+  });
+  const supportMember = roles.pumpOperator?.unit;
+  assert.ok(supportMember, "four-crew deployment should include pump-side support");
+  supportMember.sprayTarget = { x: 6.5, y: 5.5 };
+  const waterBeforeSupportCheck = truck.water;
+  applyExtinguishStep(state, 1);
+  assert.equal(truck.water, waterBeforeSupportCheck, "support crew should not spend truck water");
+  assert.equal(supportMember.sprayTarget, null, "support crew should have invalid spray targets cleared");
+
+  state.progression.resolved.truckHoseSlotBonus = 1;
+  effects = createEffectsState();
+  prepareExtinguish(state, effects, rng);
+  assert.equal(effects.waterStreams.length, 2, "four crew plus Dual Line Operations should operate two hoses");
+  roles = getTruckCrewDeploymentRoles(state, truck);
+  assert.equal(roles.hoseOperators.length, 2, "four crew plus Dual Line Operations should assign two nozzle operators");
+
+  const rangeBefore = crew[0].hoseRange;
+  const extraC = addRuntimeCrew(state, rng, truck, 3.5, 5.5);
+  stationCrew();
+  setTruckCrewMode(state, truck.id, "deployed", { silent: true, immediate: true });
+  stopCrewAtCurrentPositions(state, truck);
+  effects = createEffectsState();
+  prepareExtinguish(state, effects, rng);
+  assert.equal(effects.waterStreams.length, 2, "five crew should keep the unlocked two-hose cap");
+  roles = getTruckCrewDeploymentRoles(state, truck);
+  assert.equal(roles.assistants.length, 1, "fifth crew should support existing hose work rather than add a third stream");
+  assert.equal(
+    [extraA, extraB, extraC].every((member) => member.assignedTruckId === truck.id),
+    true,
+    "extra runtime crew should remain assigned to the truck"
+  );
+  assert.equal(crew[0].hoseRange, rangeBefore, "crew-size range boosts should be runtime-derived, not mutate base stats");
+};
+
+const testUnderCrewedMovementAndSuppression = () => {
+  const { state, rng, truck } = buildDeployedTruckState(2017);
+  const crew = getCrew(state, truck);
+  crew.forEach((member) => {
+    member.carrierId = null;
+    member.assignedTruckId = null;
+  });
+  truck.crewIds = [];
+  truck.passengerIds = [];
+  truck.x = 1.5;
+  truck.y = 1.5;
+  setUnitTarget(state, truck, 4, 1, true, { silent: true });
+  stepUnits(state, 1);
+  assert.equal(truck.x, 1.5, "zero-crew trucks should not move");
+  assert(truck.currentAlerts.includes("driver_missing"), "zero-crew trucks should report missing driver");
+
+  const driver = crew[0];
+  assert.ok(driver, "test truck should have a reusable crew unit");
+  driver.assignedTruckId = truck.id;
+  driver.carrierId = truck.id;
+  driver.x = truck.x;
+  driver.y = truck.y;
+  truck.crewIds = [driver.id];
+  truck.passengerIds = [driver.id];
+  stepUnits(state, 1);
+  assert.equal(truck.x > 1.5, true, "one-crew trucks should be able to drive");
+
+  setTruckCrewMode(state, truck.id, "deployed", { silent: true, immediate: true });
+  driver.x = 5.5;
+  driver.y = 5.5;
+  driver.path = [];
+  driver.pathIndex = 0;
+  truck.x = 5.5;
+  truck.y = 5.5;
+  seedSuppressionTarget(state);
+  const effects = createEffectsState();
+  prepareExtinguish(state, effects, rng);
+  assert.equal(effects.waterStreams.length, 0, "one-crew trucks should not operate a hose");
+};
+
+const testBoardingAndDisembarkDelays = () => {
+  const { state, rng, truck } = buildDeployedTruckState(2018);
+  const crew = getCrew(state, truck);
+  setTruckCrewMode(state, truck.id, "deployed", { silent: true, immediate: true });
+  truck.x = 1.5;
+  truck.y = 1.5;
+  crew.forEach((member, index) => {
+    member.carrierId = null;
+    member.x = 3.5 + index;
+    member.y = 1.5;
+    member.path = [];
+    member.pathIndex = 0;
+  });
+  setUnitTarget(state, truck, 8, 1, true, { silent: true });
+  stepUnits(state, 0.25);
+  assert.equal(truck.x, 1.5, "movement orders should wait while crew boards");
+  assert.equal(truck.crewMode, "boarding", "movement orders should start a boarding transition");
+  for (let i = 0; i < 20 && truck.x <= 1.5; i += 1) {
+    stepUnits(state, 0.5);
+  }
+  assert.equal(truck.x > 1.5, true, "truck should move after crew finishes boarding");
+
+  truck.x = 2.5;
+  truck.y = 5.5;
+  truck.prevX = truck.x;
+  truck.prevY = truck.y;
+  truck.path = [];
+  truck.pathIndex = 0;
+  crew.forEach((member) => {
+    member.carrierId = truck.id;
+    member.x = truck.x;
+    member.y = truck.y;
+    member.path = [];
+    member.pathIndex = 0;
+  });
+  truck.passengerIds = crew.map((member) => member.id);
+  seedSuppressionTarget(state);
+  setTruckCrewMode(state, truck.id, "deployed", { silent: true });
+  let effects = createEffectsState();
+  prepareExtinguish(state, effects, rng);
+  assert.equal(effects.waterStreams.length, 0, "crew should not spray while disembarking");
+  for (let i = 0; i < 20; i += 1) {
+    stepUnits(state, 0.25);
+  }
+  effects = createEffectsState();
+  prepareExtinguish(state, effects, rng);
+  assert.equal(effects.waterStreams.length > 0, true, "crew should spray after disembarking and reaching hose positions");
+};
+
+const testFireTasksDoNotMoveTrucks = () => {
+  const { state, truck } = buildDeployedTruckState(2019);
+  selectCommandUnit(state, state.commandUnits[0].id);
+  truck.x = 5.5;
+  truck.y = 5.5;
+  truck.prevX = truck.x;
+  truck.prevY = truck.y;
+  truck.path = [];
+  truck.pathIndex = 0;
+  truck.target = null;
+  setTruckCrewMode(state, truck.id, "deployed", { silent: true, immediate: true });
+  stationCrewAtTruck(state, truck);
+  seedSuppressionTarget(state, 6, 5);
+
+  for (const fireTask of ["suppress", "contain", "backburn"]) {
+    truck.target = null;
+    truck.path = [];
+    truck.pathIndex = 0;
+    applyCommandIntentToSelection(
+      state,
+      makeCommandIntent({
+        placementMode: "deploy",
+        fireTask,
+        target:
+          fireTask === "backburn"
+            ? { kind: "area", start: { x: 4, y: 4 }, end: { x: 5, y: 5 } }
+            : { kind: "point", point: { x: 5, y: 5 } },
+        formation: fireTask === "backburn" ? "area" : "line"
+      })
+    );
+    stepUnits(state, 0.1);
+    assert.equal(truck.target, null, `${fireTask} task should not assign truck movement when already placed`);
+    assert.equal(truck.path.length, 0, `${fireTask} task should not create a truck path when already placed`);
+  }
+};
+
+const testCommandMoveAndDeployOwnership = () => {
+  const { state, truck } = buildDeployedTruckState(2020);
+  selectCommandUnit(state, state.commandUnits[0].id);
+  setTruckCrewMode(state, truck.id, "deployed", { silent: true, immediate: true });
+  truck.x = 1.5;
+  truck.y = 1.5;
+  truck.prevX = truck.x;
+  truck.prevY = truck.y;
+  stationCrewAtTruck(state, truck);
+  applyCommandIntentToSelection(
+    state,
+    makeCommandIntent({
+      placementMode: "move",
+      fireTask: "hold_fire",
+      target: { kind: "point", point: { x: 8, y: 1 } }
+    })
+  );
+  stepUnits(state, 0.25);
+  assert.equal(truck.x, 1.5, "move command should wait for deployed crew to board");
+  assert.equal(truck.crewMode, "boarding", "move command should start boarding before truck movement");
+  for (let i = 0; i < 30 && truck.x < 8.5; i += 1) {
+    stepUnits(state, 0.5);
+  }
+  assert.equal(truck.crewMode, "boarded", "move command should leave crew boarded after arrival");
+  assert.equal(getCrew(state, truck).every((member) => member.carrierId === truck.id), true, "move command should keep crew on the truck");
+
+  seedSuppressionTarget(state, 9, 1);
+  applyCommandIntentToSelection(
+    state,
+    makeCommandIntent({
+      placementMode: "deploy",
+      fireTask: "suppress",
+      target: { kind: "point", point: { x: 8, y: 1 } }
+    })
+  );
+  for (let i = 0; i < 30 && truck.crewMode !== "deployed"; i += 1) {
+    stepUnits(state, 0.25);
+  }
+  assert.equal(truck.crewMode, "deployed", "deploy command should disembark crew after the truck reaches its player placement");
+};
+
+const testDeployAtCurrentPositionDisembarksCrew = () => {
+  const { state, truck } = buildDeployedTruckState(2023);
+  selectCommandUnit(state, state.commandUnits[0].id);
+  truck.x = 5.5;
+  truck.y = 5.5;
+  truck.prevX = truck.x;
+  truck.prevY = truck.y;
+  truck.path = [];
+  truck.pathIndex = 0;
+  stationCrewAtTruck(state, truck, true);
+  truck.crewMode = "boarded";
+  truck.crewAction = null;
+  seedSuppressionTarget(state, 6, 5);
+  applyCommandIntentToSelection(
+    state,
+    makeCommandIntent({
+      placementMode: "deploy",
+      fireTask: "suppress",
+      target: { kind: "point", point: { x: 5, y: 5 } }
+    })
+  );
+  stepUnits(state, 0.1);
+  assert.equal(truck.crewMode, "disembarking", "deploy at the current position should start disembarking immediately");
+  for (let i = 0; i < 20 && truck.crewMode !== "deployed"; i += 1) {
+    stepUnits(state, 0.25);
+  }
+  assert.equal(truck.crewMode, "deployed", "deploy at the current position should finish with deployed crew");
+  const roles = getTruckCrewDeploymentRoles(state, truck);
+  assert.equal(roles.driver?.unit.carrierId, truck.id, "deployed driver should remain hidden in the truck");
+  assert.equal(roles.visibleCrew.every((assignment) => assignment.unit.carrierId === null), true, "visible deployed roles should leave the truck");
+};
+
+const testStanceDoesNotRepositionPlacedTruck = () => {
+  const { state, truck } = buildDeployedTruckState(2021);
+  selectCommandUnit(state, state.commandUnits[0].id);
+  truck.x = 5.5;
+  truck.y = 5.5;
+  truck.prevX = truck.x;
+  truck.prevY = truck.y;
+  truck.path = [];
+  truck.pathIndex = 0;
+  truck.target = null;
+  setTruckCrewMode(state, truck.id, "deployed", { silent: true, immediate: true });
+  stationCrewAtTruck(state, truck);
+  seedSuppressionTarget(state, 6, 5);
+  applyCommandIntentToSelection(
+    state,
+    makeCommandIntent({
+      placementMode: "deploy",
+      fireTask: "suppress",
+      behaviourMode: "defensive",
+      target: { kind: "point", point: { x: 5, y: 5 } }
+    })
+  );
+  stepUnits(state, 0.1);
+  assert.equal(truck.target, null, "defensive stance should not reposition a safe placed truck");
+  assert.equal(truck.crewMode, "deployed", "defensive stance should not reboard a safe placed truck");
+
+  const truckIndex = Math.floor(truck.y) * state.grid.cols + Math.floor(truck.x);
+  state.tileFire[truckIndex] = 0.4;
+  state.tileHeat[truckIndex] = 0.6;
+  stepUnits(state, 0.1);
+  assert.equal(truck.currentStatus, "retreating", "defensive stance may retreat only when the truck tile is unsafe");
+  assert.notEqual(truck.target, null, "unsafe defensive retreat should assign a truck movement target");
+};
+
+const testOutOfRangeSuppressionRequiresPlayerPlacement = () => {
+  const { state, rng, truck } = buildDeployedTruckState(2022);
+  selectCommandUnit(state, state.commandUnits[0].id);
+  truck.x = 1.5;
+  truck.y = 1.5;
+  truck.prevX = truck.x;
+  truck.prevY = truck.y;
+  truck.path = [];
+  truck.pathIndex = 0;
+  truck.target = null;
+  setTruckCrewMode(state, truck.id, "deployed", { silent: true, immediate: true });
+  stationCrewAtTruck(state, truck);
+  seedSuppressionTarget(state, 11, 11);
+  applyCommandIntentToSelection(
+    state,
+    makeCommandIntent({
+      placementMode: "deploy",
+      fireTask: "suppress",
+      target: { kind: "point", point: { x: 1, y: 1 } }
+    })
+  );
+  stepUnits(state, 0.1);
+  const effects = createEffectsState();
+  prepareExtinguish(state, effects, rng);
+  assert.equal(truck.target, null, "out-of-range suppression should not move the truck automatically");
+  assert.equal(effects.waterStreams.length, 0, "out-of-range suppression should not create hose streams");
+  assert(truck.currentAlerts.includes("out_of_range"), "out-of-range suppression should report an out-of-range alert");
 };
 
 const testHazardsAndRecallCleanup = () => {
@@ -399,6 +893,16 @@ testProjectedFormationTargets();
 testMapActionsCommitProjectedTargets();
 testPendingSquadDispatchProjection();
 testSuppressionWaterSpendAndRefill();
+testTownWaterTowerRefillSource();
+testTruckDoesNotSprayDirectly();
+testCrewThresholdsAndHoseSlots();
+testUnderCrewedMovementAndSuppression();
+testBoardingAndDisembarkDelays();
+testFireTasksDoNotMoveTrucks();
+testCommandMoveAndDeployOwnership();
+testDeployAtCurrentPositionDisembarksCrew();
+testStanceDoesNotRepositionPlacedTruck();
+testOutOfRangeSuppressionRequiresPlayerPlacement();
 testHazardsAndRecallCleanup();
 testRosterAssignment();
 

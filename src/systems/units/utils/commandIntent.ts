@@ -31,6 +31,8 @@ export const cloneCommandTarget = (target: CommandTarget): CommandTarget => {
 
 export const cloneCommandIntent = (intent: CommandIntent): CommandIntent => ({
   type: intent.type,
+  placementMode: intent.placementMode,
+  fireTask: intent.fireTask,
   target: cloneCommandTarget(intent.target),
   formation: intent.formation,
   behaviourMode: intent.behaviourMode
@@ -76,6 +78,8 @@ export const commandIntentsEqual = (left: CommandIntent | null, right: CommandIn
   }
   return (
     left.type === right.type &&
+    left.placementMode === right.placementMode &&
+    left.fireTask === right.fireTask &&
     left.formation === right.formation &&
     left.behaviourMode === right.behaviourMode &&
     commandTargetsEqual(left.target, right.target)

@@ -3,8 +3,10 @@ import type { InputState } from "../../core/inputState.js";
 import type { WorldState } from "../../core/state.js";
 import type {
   BehaviourMode,
+  CommandFireTask,
   CommandIntent,
   CommandFormation,
+  CommandPlacementMode,
   CommandType,
   CommandUnit,
   CommandUnitAlert,
@@ -15,7 +17,7 @@ import type {
 } from "../../core/types.js";
 import { createSquadLoadoutTruckSlot } from "../squad-loadout/squadLoadoutIcons.js";
 
-export type CommandMode = CommandType | "refill" | "hold";
+export type CommandMode = CommandPlacementMode | CommandFireTask;
 
 type UnitCommandTrayAction = (action: string, payload?: Record<string, string>) => void;
 type UnitCommandTrayStatus = (message: string) => void;
@@ -56,23 +58,18 @@ type CommandBarSeverity = "none" | "warning" | "critical";
 
 const SQUAD_SLOT_COUNT = 5;
 
-const COMMAND_BUTTONS: readonly CommandButtonSpec[] = [
-  { label: "Move", mode: "move", action: "command-mode-move" },
-  { label: "Suppress", mode: "suppress", action: "command-mode-suppress" },
-  { label: "Contain", mode: "contain", action: "command-mode-contain" },
-  { label: "Backburn", mode: "backburn", action: "command-mode-backburn", danger: true },
-  {
-    label: "Refill",
-    mode: "refill",
-    disabled: true,
-    title: "Refill is unavailable in Phase 1 because no simulation command exists yet."
-  },
-  {
-    label: "Hold",
-    mode: "hold",
-    disabled: true,
-    title: "Hold is unavailable in Phase 1 because no simulation command exists yet."
-  }
+const PLACEMENT_BUTTONS: readonly CommandButtonSpec[] = [
+  { label: "Move", mode: "move", action: "command-placement-move" },
+  { label: "Deploy", mode: "deploy", action: "command-placement-deploy" },
+  { label: "Relocate", mode: "relocate", action: "command-placement-relocate" },
+  { label: "Recall", mode: "recall", action: "command-placement-recall" }
+];
+
+const FIRE_TASK_BUTTONS: readonly CommandButtonSpec[] = [
+  { label: "Suppress", mode: "suppress", action: "command-task-suppress" },
+  { label: "Contain", mode: "contain", action: "command-task-contain" },
+  { label: "Backburn", mode: "backburn", action: "command-task-backburn", danger: true },
+  { label: "Hold Fire", mode: "hold_fire", action: "command-task-hold-fire" }
 ];
 
 const BEHAVIOUR_BUTTONS: ReadonlyArray<{ label: string; action: string; mode: BehaviourMode }> = [
@@ -129,12 +126,27 @@ const getCommandTypeLabel = (type: CommandType | null): string => {
   if (!type) {
     return "Auto";
   }
-  return `${type[0]!.toUpperCase()}${type.slice(1)}`;
+  const label = type === "hold_fire" ? "Hold Fire" : type;
+  return `${label[0]!.toUpperCase()}${label.slice(1)}`;
 };
+
+const getPlacementLabel = (mode: CommandPlacementMode | null): string => (mode ? getCommandTypeLabel(mode) : "Auto");
+
+const getFireTaskLabel = (task: CommandFireTask | null): string => (task ? getCommandTypeLabel(task) : "Auto");
 
 const getBehaviourLabel = (mode: BehaviourMode): string => `${mode[0]!.toUpperCase()}${mode.slice(1)}`;
 
 const getStatusLabel = (status: CommandUnitStatus): string => `${status[0]!.toUpperCase()}${status.slice(1)}`;
+
+const getCrewModeLabel = (truck: Unit): string => {
+  if (truck.crewAction?.kind === "boarding" || truck.crewMode === "boarding") {
+    return "Boarding";
+  }
+  if (truck.crewAction?.kind === "disembarking" || truck.crewMode === "disembarking") {
+    return "Deploying";
+  }
+  return truck.crewMode === "boarded" ? "Boarded" : "Deployed";
+};
 
 const getProjectionLabel = (inputState: InputState): string | null => {
   const projection = inputState.formationProjection;
@@ -159,6 +171,12 @@ const getSquadTrayStatusLabel = (status: CommandUnitStatus, fielded: boolean, tr
   if (status === "moving") {
     return "En route";
   }
+  if (status === "boarding") {
+    return "Boarding";
+  }
+  if (status === "deploying") {
+    return "Deploying";
+  }
   if (status === "retreating") {
     return "Withdrawing";
   }
@@ -171,6 +189,12 @@ const getStatusIcon = (status: CommandUnitStatus): string => {
   }
   if (status === "moving") {
     return "MOV";
+  }
+  if (status === "boarding") {
+    return "BRD";
+  }
+  if (status === "deploying") {
+    return "DEP";
   }
   if (status === "retreating") {
     return "RT";
@@ -202,7 +226,14 @@ const getAlertPriority = (alert: CommandUnitAlert): number => {
       return 3;
     case "warning":
     case "crew_low":
+    case "hose_unstaffed":
+    case "crew_transition":
+    case "deploy_required":
+    case "out_of_range":
+    case "holding_fire":
       return 2;
+    case "driver_missing":
+      return 3;
     case "low":
       return 1;
     default:
@@ -222,6 +253,18 @@ const getAlertText = (alert: CommandUnitAlert): string => {
       return "Warning";
     case "crew_low":
       return "Crew";
+    case "driver_missing":
+      return "No Driver";
+    case "hose_unstaffed":
+      return "No Hose";
+    case "crew_transition":
+      return "Crew Moving";
+    case "deploy_required":
+      return "Deploy";
+    case "out_of_range":
+      return "Out of Range";
+    case "holding_fire":
+      return "Hold Fire";
     case "low":
       return "Low";
     default:
@@ -252,7 +295,7 @@ const getSeverityForAlert = (alert: CommandUnitAlert | null): CommandBarSeverity
 const resolveMajorityStatus = (trucks: Unit[]): CommandUnitStatus => {
   const counts = new Map<CommandUnitStatus, number>();
   trucks.forEach((truck) => counts.set(truck.currentStatus, (counts.get(truck.currentStatus) ?? 0) + 1));
-  const priority: CommandUnitStatus[] = ["retreating", "suppressing", "moving", "holding"];
+  const priority: CommandUnitStatus[] = ["retreating", "suppressing", "deploying", "boarding", "moving", "holding"];
   let bestStatus: CommandUnitStatus = "holding";
   let bestCount = -1;
   priority.forEach((status) => {
@@ -346,9 +389,9 @@ const createSquadSlot = (
   const truckCount = Math.max(trucks.length, rosterTrucks.length);
   const statusLabel = getSquadTrayStatusLabel(effectiveStatus, fielded, truckCount);
   const intentLabel = commandUnit?.currentIntent
-    ? getCommandTypeLabel(commandUnit.currentIntent.type)
+    ? `${getPlacementLabel(commandUnit.currentIntent.placementMode)} | ${getFireTaskLabel(commandUnit.currentIntent.fireTask)}`
     : squad?.currentIntent
-      ? getCommandTypeLabel(squad.currentIntent.type)
+      ? `${getPlacementLabel(squad.currentIntent.placementMode)} | ${getFireTaskLabel(squad.currentIntent.fireTask)}`
     : "Auto";
   const slotName = commandUnit?.name ?? squad?.name ?? "Empty";
 
@@ -470,7 +513,9 @@ const createSelectedUnitCard = (
   const { truck, effectiveIntent } = cardModel;
   const waterRatio = getWaterRatio(truck.water, truck.waterCapacity);
   const highestAlert = resolveHighestAlert(truck.currentAlerts);
-  const orderLabel = effectiveIntent ? getCommandTypeLabel(effectiveIntent.type) : "Auto";
+  const orderLabel = effectiveIntent
+    ? `${getPlacementLabel(effectiveIntent.placementMode)} | ${getFireTaskLabel(effectiveIntent.fireTask)}`
+    : "Auto";
   const name = getTruckLabel(state, truck);
 
   const card = document.createElement("button");
@@ -495,7 +540,7 @@ const createSelectedUnitCard = (
   const meter = createWaterMeter(waterRatio, `${name} ${Math.round(waterRatio * 100)}% water`);
   const meta = document.createElement("div");
   meta.className = "three-test-truck-tile-meta";
-  meta.textContent = `Water ${Math.round(waterRatio * 100)}% | Crew ${truck.crewIds.length}/${TRUCK_CAPACITY} | ${orderLabel}`;
+  meta.textContent = `Water ${Math.round(waterRatio * 100)}% | Crew ${truck.crewIds.length}/${TRUCK_CAPACITY} ${getCrewModeLabel(truck)} | ${orderLabel}`;
   card.append(header, meter, meta);
 
   if (truck.truckOverrideIntent || highestAlert) {
@@ -519,7 +564,7 @@ const createSelectedUnitCard = (
 
   card.title = `${name}. ${getStatusLabel(truck.currentStatus)}. Water ${Math.round(waterRatio * 100)}%. Crew ${
     truck.crewIds.length
-  }/${TRUCK_CAPACITY}. ${orderLabel}.`;
+  }/${TRUCK_CAPACITY} ${getCrewModeLabel(truck)}. ${orderLabel}.`;
   card.addEventListener("click", (event) => {
     event.preventDefault();
     event.stopPropagation();
@@ -533,7 +578,7 @@ const createSelectedUnitCard = (
 
 const createCommandButton = (
   spec: CommandButtonSpec,
-  activeCommandMode: CommandType | null,
+  activeCommandMode: CommandMode,
   onAction: UnitCommandTrayAction,
   onStatus: UnitCommandTrayStatus
 ): HTMLButtonElement => {
@@ -590,7 +635,8 @@ export const createUnitCommandTray = ({ onAction, onStatus, onSquadHover }: Unit
     const focusedCommandUnit =
       (state.focusedCommandUnitId !== null ? commandUnitById.get(state.focusedCommandUnitId) ?? null : null) ??
       (state.selectedCommandUnitIds.length === 1 ? commandUnitById.get(state.selectedCommandUnitIds[0]!) ?? null : null);
-    const activeCommandMode = inputState.commandMode;
+    const activePlacementMode = inputState.placementMode;
+    const activeFireTask = inputState.fireTask;
     element.classList.toggle("is-collapsed", !focusedCommandUnit);
     element.classList.toggle("is-expanded", !!focusedCommandUnit);
     const commandUnitBySquadId = new Map(
@@ -639,7 +685,9 @@ export const createUnitCommandTray = ({ onAction, onStatus, onSquadHover }: Unit
           status: truck.currentStatus,
           alerts: truck.currentAlerts,
           waterBucket: Math.round(getWaterRatio(truck.water, truck.waterCapacity) * 20),
-          crewCount: truck.crewIds.length
+          crewCount: truck.crewIds.length,
+          crewMode: truck.crewMode,
+          crewAction: truck.crewAction
         }))
       }))
     });
@@ -687,7 +735,8 @@ export const createUnitCommandTray = ({ onAction, onStatus, onSquadHover }: Unit
       focusedCommandUnitName: focusedCommandUnit.name,
       focusedCommandUnitIntent: focusedCommandUnit.currentIntent,
       focusedCommandUnitRevision: focusedCommandUnit.revision,
-      activeCommandMode,
+      activePlacementMode,
+      activeFireTask,
       behaviourMode: inputState.behaviourMode,
       dispatchFormation: inputState.dispatchFormation,
       formationProjection: inputState.formationProjection
@@ -706,6 +755,8 @@ export const createUnitCommandTray = ({ onAction, onStatus, onSquadHover }: Unit
         name: getTruckLabel(state, truck),
         waterBucket: Math.round(getWaterRatio(truck.water, truck.waterCapacity) * 20),
         crewCount: truck.crewIds.length,
+        crewMode: truck.crewMode,
+        crewAction: truck.crewAction,
         currentStatus: truck.currentStatus,
         currentAlerts: truck.currentAlerts,
         truckOverrideIntent: truck.truckOverrideIntent,
@@ -727,7 +778,7 @@ export const createUnitCommandTray = ({ onAction, onStatus, onSquadHover }: Unit
     const highestAlert = resolveHighestAlert(aggregateAlerts);
     const effectiveStatus = resolveMajorityStatus(focusedTrucks);
     const intentLabel = focusedCommandUnit.currentIntent
-      ? `${getCommandTypeLabel(focusedCommandUnit.currentIntent.type)} ${getBehaviourLabel(focusedCommandUnit.currentIntent.behaviourMode)}`
+      ? `${getPlacementLabel(focusedCommandUnit.currentIntent.placementMode)} | ${getFireTaskLabel(focusedCommandUnit.currentIntent.fireTask)} ${getBehaviourLabel(focusedCommandUnit.currentIntent.behaviourMode)}`
       : "Auto";
     const stanceLabel = getBehaviourLabel(focusedCommandUnit.currentIntent?.behaviourMode ?? inputState.behaviourMode);
 
@@ -770,7 +821,7 @@ export const createUnitCommandTray = ({ onAction, onStatus, onSquadHover }: Unit
     } else if (state.selectionScope === "truck") {
       hint.textContent = "Truck overrides take priority until rejoined.";
     } else {
-      hint.textContent = "Right-click issues the active command mode.";
+      hint.textContent = "Right-click issues the active placement and task.";
     }
 
     const header = document.createElement("div");
@@ -795,18 +846,31 @@ export const createUnitCommandTray = ({ onAction, onStatus, onSquadHover }: Unit
 
     commandPanel.append(header, water, unitRows, hint);
 
-    const modeSection = document.createElement("div");
-    modeSection.className = "three-test-command-panel-section three-test-command-panel-section--commands";
-    const modeLabel = document.createElement("div");
-    modeLabel.className = "three-test-command-panel-label";
-    modeLabel.textContent = `Active ${getCommandTypeLabel(activeCommandMode)}`;
-    const modeGrid = document.createElement("div");
-    modeGrid.className = "three-test-command-panel-grid three-test-command-panel-grid--commands";
-    COMMAND_BUTTONS.forEach((spec) => {
-      modeGrid.appendChild(createCommandButton(spec, activeCommandMode, onAction, onStatus));
+    const placementSection = document.createElement("div");
+    placementSection.className = "three-test-command-panel-section three-test-command-panel-section--placement";
+    const placementLabel = document.createElement("div");
+    placementLabel.className = "three-test-command-panel-label";
+    placementLabel.textContent = `Placement ${getPlacementLabel(activePlacementMode)}`;
+    const placementGrid = document.createElement("div");
+    placementGrid.className = "three-test-command-panel-grid three-test-command-panel-grid--commands three-test-command-panel-grid--placement";
+    PLACEMENT_BUTTONS.forEach((spec) => {
+      placementGrid.appendChild(createCommandButton(spec, activePlacementMode, onAction, onStatus));
     });
-    modeSection.append(modeLabel, modeGrid);
-    commandPanel.appendChild(modeSection);
+    placementSection.append(placementLabel, placementGrid);
+    commandPanel.appendChild(placementSection);
+
+    const taskSection = document.createElement("div");
+    taskSection.className = "three-test-command-panel-section three-test-command-panel-section--tasks";
+    const taskLabel = document.createElement("div");
+    taskLabel.className = "three-test-command-panel-label";
+    taskLabel.textContent = `Task ${getFireTaskLabel(activeFireTask)}`;
+    const taskGrid = document.createElement("div");
+    taskGrid.className = "three-test-command-panel-grid three-test-command-panel-grid--commands three-test-command-panel-grid--tasks";
+    FIRE_TASK_BUTTONS.forEach((spec) => {
+      taskGrid.appendChild(createCommandButton(spec, activeFireTask, onAction, onStatus));
+    });
+    taskSection.append(taskLabel, taskGrid);
+    commandPanel.appendChild(taskSection);
 
     const behaviourSection = document.createElement("div");
     behaviourSection.className = "three-test-command-panel-section three-test-command-panel-section--stance";

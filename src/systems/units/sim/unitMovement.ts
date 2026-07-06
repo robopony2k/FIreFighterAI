@@ -4,7 +4,8 @@ import { findPath, getMoveSpeedMultiplier } from "../../../sim/pathing.js";
 import { advanceRouteMotion, type RouteMotionPoint, type RouteMotionTarget } from "../../../shared/movement/routeMotion.js";
 import { MOVING_SPRAY_SPEED_FACTOR } from "../constants/runtimeConstants.js";
 import { getRosterUnit, getUnitTile } from "../utils/unitLookup.js";
-import { updateTruckCrewOrders, detachFromCarrier } from "./crewRuntime.js";
+import { updateTruckCrewOrders, detachFromCarrier, stepTruckCrewAction } from "./crewRuntime.js";
+import { getTruckCrewReadiness } from "./crewReadiness.js";
 import { applyCommandIntentControl } from "./commandRuntime.js";
 import { findNearestPassable } from "./unitPathing.js";
 import { setUnitTarget } from "./unitDeployment.js";
@@ -77,12 +78,21 @@ export function stepUnits(state: WorldState, delta: number): void {
 
   state.units.forEach((unit) => {
     if (unit.kind === "truck") {
-      const isWaitingForCrew = unit.crewMode === "boarded" && unit.passengerIds.length < unit.crewIds.length;
+      updateTruckCrewOrders(state, unit);
+      stepTruckCrewAction(state, unit, delta, "boarding");
+      const readiness = getTruckCrewReadiness(state, unit);
+      const isWaitingForCrew =
+        !readiness.canDrive ||
+        unit.crewMode === "boarding" ||
+        unit.crewAction?.kind === "boarding" ||
+        (unit.crewMode === "boarded" && unit.passengerIds.length < unit.crewIds.length);
       if (!isWaitingForCrew) {
         advanceUnit(unit);
       }
       const hasArrived = unit.pathIndex >= unit.path.length;
-      if (hasArrived && unit.crewMode === "boarded") {
+      if (hasArrived) {
+        updateTruckCrewOrders(state, unit);
+        stepTruckCrewAction(state, unit, delta, "disembarking");
         updateTruckCrewOrders(state, unit);
       }
     }

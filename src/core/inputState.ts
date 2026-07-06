@@ -1,4 +1,4 @@
-import type { BehaviourMode, CommandFormation, CommandType, FormationTarget, Point } from "./types.js";
+import type { BehaviourMode, CommandFireTask, CommandFormation, CommandPlacementMode, FormationTarget, Point } from "./types.js";
 
 export type SelectionBox = { x1: number; y1: number; x2: number; y2: number };
 
@@ -8,7 +8,8 @@ export interface InputState {
   formationEnd: Point | null;
   formationProjection: FormationTarget | null;
   selectionBox: SelectionBox | null;
-  commandMode: CommandType | null;
+  placementMode: CommandPlacementMode;
+  fireTask: CommandFireTask;
   behaviourMode: BehaviourMode;
   dispatchFormation: Extract<CommandFormation, "line" | "wedge" | "arc">;
   pendingSquadDispatchId: number | null;
@@ -27,7 +28,8 @@ export const createInputState = (): InputState => ({
   formationEnd: null,
   formationProjection: null,
   selectionBox: null,
-  commandMode: null,
+  placementMode: "move",
+  fireTask: "suppress",
   behaviourMode: "balanced",
   dispatchFormation: "line",
   pendingSquadDispatchId: null,
@@ -46,7 +48,8 @@ export const resetInputState = (state: InputState): void => {
   state.formationEnd = null;
   state.formationProjection = null;
   state.selectionBox = null;
-  state.commandMode = null;
+  state.placementMode = "move";
+  state.fireTask = "suppress";
   state.behaviourMode = "balanced";
   state.dispatchFormation = "line";
   state.pendingSquadDispatchId = null;

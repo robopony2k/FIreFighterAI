@@ -88,6 +88,7 @@ import {
   subscribeRuntimeSettings
 } from "../../../persistence/runtimeSettings.js";
 import { resolveActiveFireFrontTargets } from "../../../systems/fire/sim/activeFireFrontTargets.js";
+import { buildWatchTowerForTown, upgradeWatchTowerForTown } from "../../../systems/fire/sim/fireDetection.js";
 
 type HudAudioChannelSettings = {
   muted: boolean;
@@ -523,6 +524,8 @@ export const bindPhaseUi = ({
       action === "toggle-fuel-break" ||
       action === "backburn" ||
       action === "command-clear" ||
+      action.startsWith("command-placement-") ||
+      action.startsWith("command-task-") ||
       action.startsWith("command-mode-") ||
       action.startsWith("behaviour-")
     ) {
@@ -563,6 +566,8 @@ export const bindPhaseUi = ({
       /^train-(speed|power|range|resilience)$/.test(action) ||
       action === "progression-open" ||
       action === "progression-pick" ||
+      action === "watch-tower-build" ||
+      action === "watch-tower-upgrade" ||
       action === "crew-assign" ||
       action === "crew-assign-to-truck" ||
       action === "crew-unassign"
@@ -744,7 +749,7 @@ export const bindPhaseUi = ({
       const value = actionTarget?.dataset[key];
       return value === "1" || value === "true";
     };
-    const resolvedAction = action === "backburn" ? "command-mode-backburn" : action;
+    const resolvedAction = action === "backburn" ? "command-task-backburn" : action;
     if (action === "continue") {
       if (state.annualReportOpen) {
         closeAnnualReport(state);
@@ -953,8 +958,9 @@ export const bindPhaseUi = ({
       return;
     }
     if (resolvedAction === "command-clear") {
-      inputState.commandMode = null;
-      setStatus(state, "Auto command mode enabled. Right-click chooses the order from context.");
+      inputState.placementMode = "move";
+      inputState.fireTask = "suppress";
+      setStatus(state, "Default command armed. Right-click moves squads; deploy explicitly to use firefighters.");
       phaseUi.sync(state, inputState);
       return;
     }
@@ -965,10 +971,29 @@ export const bindPhaseUi = ({
       phaseUi.sync(state, inputState);
       return;
     }
+    const placementMatch = resolvedAction.match(/^command-placement-(move|deploy|relocate|recall)$/);
+    if (placementMatch) {
+      inputState.placementMode = placementMatch[1] as InputState["placementMode"];
+      setStatus(state, `${placementMatch[1][0]!.toUpperCase()}${placementMatch[1].slice(1)} placement armed. Right-click to issue orders.`);
+      phaseUi.sync(state, inputState);
+      return;
+    }
+    const taskMatch = resolvedAction.match(/^command-task-(suppress|contain|backburn|hold-fire)$/);
+    if (taskMatch) {
+      inputState.fireTask = (taskMatch[1] === "hold-fire" ? "hold_fire" : taskMatch[1]) as InputState["fireTask"];
+      setStatus(state, `${taskMatch[1][0]!.toUpperCase()}${taskMatch[1].slice(1).replace("-", " ")} task armed for deployed crews.`);
+      phaseUi.sync(state, inputState);
+      return;
+    }
     const commandModeMatch = resolvedAction.match(/^command-mode-(move|suppress|contain|backburn)$/);
     if (commandModeMatch) {
-      inputState.commandMode = commandModeMatch[1] as InputState["commandMode"];
-      setStatus(state, `${commandModeMatch[1][0]!.toUpperCase()}${commandModeMatch[1].slice(1)} mode armed. Right-click to issue orders.`);
+      const mode = commandModeMatch[1];
+      if (mode === "move") {
+        inputState.placementMode = "move";
+      } else {
+        inputState.fireTask = mode as InputState["fireTask"];
+      }
+      setStatus(state, `${mode[0]!.toUpperCase()}${mode.slice(1)} armed. Right-click to issue orders.`);
       phaseUi.sync(state, inputState);
       return;
     }
@@ -1067,6 +1092,8 @@ export const bindPhaseUi = ({
           inputState.pendingSquadDispatchId = null;
           const intent: CommandIntent = {
             type: "move",
+            placementMode: "recall",
+            fireTask: "hold_fire",
             target: { kind: "point", point: { x: state.basePoint.x, y: state.basePoint.y } },
             formation: inputState.dispatchFormation,
             behaviourMode: "balanced"
@@ -1100,6 +1127,26 @@ export const bindPhaseUi = ({
     }
     if (resolvedAction === "train-resilience") {
       trainSelectedUnit(state, "resilience");
+      return;
+    }
+    if (resolvedAction === "watch-tower-build") {
+      const townId = Number(actionTarget?.dataset.townId ?? "");
+      if (!Number.isFinite(townId)) {
+        return;
+      }
+      const result = buildWatchTowerForTown(state, townId);
+      setStatus(state, result.message);
+      phaseUi.sync(state, inputState);
+      return;
+    }
+    if (resolvedAction === "watch-tower-upgrade") {
+      const townId = Number(actionTarget?.dataset.townId ?? "");
+      if (!Number.isFinite(townId)) {
+        return;
+      }
+      const result = upgradeWatchTowerForTown(state, townId);
+      setStatus(state, result.message);
+      phaseUi.sync(state, inputState);
       return;
     }
     if (resolvedAction === "progression-pick") {
@@ -1451,20 +1498,19 @@ export const bindPhaseUi = ({
     }
     if (event.key === "m" || event.key === "M") {
       noteInteraction();
-      runUiAction("command-mode-move");
+      runUiAction("command-placement-move");
       event.preventDefault();
       return;
     }
     if (event.key === "s" || event.key === "S") {
       noteInteraction();
-      runUiAction("command-mode-suppress");
+      runUiAction("command-task-suppress");
       event.preventDefault();
       return;
     }
     if (event.key === "h" || event.key === "H") {
-      setStatus(state, "Hold command mode is unavailable in Phase 1; no simulation command exists yet.");
-      phaseUi.sync(state, inputState);
       noteInteraction();
+      runUiAction("command-task-hold-fire");
       event.preventDefault();
       return;
     }

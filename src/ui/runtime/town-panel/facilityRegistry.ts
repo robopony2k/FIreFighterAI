@@ -2,6 +2,8 @@ import type { WorldState } from "../../../core/state.js";
 import type { Town } from "../../../core/types.js";
 import { ensureDefaultSquads, isHeadquartersTown } from "../../../systems/units/index.js";
 import { buildHqFacilityDescriptor, renderHqFacilityContent } from "./hqFacilityContent.js";
+import { buildWatchTowerFacilityDescriptor, renderWatchTowerFacilityContent } from "./watchTowerFacilityContent.js";
+import { buildWaterTowerFacilityDescriptor, renderWaterTowerFacilityContent } from "./waterTowerFacilityContent.js";
 import type { TownFacilityDefinition, TownFacilityDescriptor } from "./types.js";
 
 export const TOWN_FACILITY_DEFINITIONS: readonly TownFacilityDefinition[] = [
@@ -15,6 +17,18 @@ export const TOWN_FACILITY_DEFINITIONS: readonly TownFacilityDefinition[] = [
       return buildHqFacilityDescriptor(world, town.id);
     },
     renderContent: renderHqFacilityContent
+  },
+  {
+    type: "watchTower",
+    collect: (world: WorldState, town: Town): TownFacilityDescriptor | null =>
+      buildWatchTowerFacilityDescriptor(world, town.id),
+    renderContent: renderWatchTowerFacilityContent
+  },
+  {
+    type: "waterTower",
+    collect: (world: WorldState, town: Town): TownFacilityDescriptor | null =>
+      buildWaterTowerFacilityDescriptor(world, town.id),
+    renderContent: renderWaterTowerFacilityContent
   }
 ];
 

@@ -206,6 +206,22 @@ export const TECH_TREE_NODE_DEFINITIONS: readonly TechNodeDefinition[] = [
     layout: { branch: "logistics", tier: 1, order: 0 }
   },
   {
+    id: "dual-line-operations",
+    name: "Dual Line Operations",
+    description: "Four-person truck crews can connect and operate a second hose line.",
+    icon: "hoses",
+    branch: "logistics",
+    rarity: "rare",
+    draftWeight: 0.9,
+    maxRanks: 1,
+    prerequisites: [{ nodeId: "quick-connects", minRank: 1 }],
+    capabilities: [],
+    effects: [
+      { targetId: "truck.hoseSlotBonus", operation: "add", baseValue: 1, diminishingFactor: 1, cap: 1 }
+    ],
+    layout: { branch: "logistics", tier: 1, order: 1 }
+  },
+  {
     id: "academy-subsidy",
     name: "Academy Subsidy",
     description: "Training contracts lower the cost of improving crews.",

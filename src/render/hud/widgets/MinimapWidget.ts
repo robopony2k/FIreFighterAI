@@ -181,6 +181,36 @@ export class MinimapWidget implements HudWidget {
     ctx.imageSmoothingEnabled = false;
     ctx.drawImage(this.mapCanvas, destX, destY, destW, destH);
     ctx.imageSmoothingEnabled = smoothing;
+    if (mode !== "thermal") {
+      this.drawFireReportOverlay(ctx, rect, world);
+    }
+  }
+
+  private drawFireReportOverlay(ctx: CanvasRenderingContext2D, rect: Rect, world: WorldState): void {
+    const reports = world.fireKnowledge?.reports ?? [];
+    if (reports.length === 0) {
+      return;
+    }
+    const cols = Math.max(1, world.grid.cols);
+    const rows = Math.max(1, world.grid.rows);
+    ctx.save();
+    reports.forEach((report) => {
+      if (!report.active) {
+        return;
+      }
+      const x = rect.x + ((report.tileX + 0.5) / cols) * rect.width;
+      const y = rect.y + ((report.tileY + 0.5) / rows) * rect.height;
+      ctx.strokeStyle = report.state === "confirmed" ? "rgba(255, 93, 55, 0.98)" : "rgba(255, 202, 92, 0.92)";
+      ctx.fillStyle = report.state === "confirmed" ? "rgba(255, 93, 55, 0.28)" : "rgba(255, 202, 92, 0.2)";
+      ctx.lineWidth = report.state === "confirmed" ? 1.8 : 1.2;
+      ctx.setLineDash(report.state === "confirmed" ? [] : [3, 2]);
+      ctx.beginPath();
+      ctx.arc(x, y, report.state === "confirmed" ? 4.2 : 5.2, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+    });
+    ctx.setLineDash([]);
+    ctx.restore();
   }
 
   private drawViewportOverlay(ctx: CanvasRenderingContext2D, rect: Rect, world: WorldState, ui: HudState): void {

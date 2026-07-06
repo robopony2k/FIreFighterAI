@@ -10,6 +10,7 @@ import { clamp } from "../utils/unitMath.js";
 import { getClusterSuppressionScore, getSuppressionThreatClass, getSuppressionThreatScore } from "./threatAssessment.js";
 import { setSprayTarget } from "./unitPathing.js";
 import { canUnitSpray, spendUnitWater } from "./unitWater.js";
+import { getFirefighterHoseRangeMultiplier } from "./crewReadiness.js";
 
 type SuppressionProfile = {
   radius: number;
@@ -19,10 +20,10 @@ type SuppressionProfile = {
   wetness: number;
 };
 
-const getSuppressionProfile = (unit: Unit): SuppressionProfile => {
+const getSuppressionProfile = (state: WorldState, unit: Unit): SuppressionProfile => {
   let radius = unit.radius;
   let power = unit.power;
-  let hoseRange = unit.hoseRange;
+  let hoseRange = unit.hoseRange * getFirefighterHoseRangeMultiplier(state, unit);
   let wetness = 1;
 
   if (unit.kind === "firefighter") {
@@ -268,7 +269,11 @@ const applySuppressionAtTarget = (
 export function prepareExtinguish(state: WorldState, effects: EffectsState, rng: RNG): void {
   effects.waterStreams = [];
   state.units.forEach((unit) => {
-    if (unit.kind === "firefighter" && unit.carrierId !== null) {
+    if (unit.kind !== "firefighter") {
+      setSprayTarget(unit, null);
+      return;
+    }
+    if (unit.carrierId !== null) {
       setSprayTarget(unit, null);
       return;
     }
@@ -276,7 +281,7 @@ export function prepareExtinguish(state: WorldState, effects: EffectsState, rng:
       setSprayTarget(unit, null);
       return;
     }
-    const profile = getSuppressionProfile(unit);
+    const profile = getSuppressionProfile(state, unit);
     const impactTarget = resolveSuppressionImpactTarget(state, unit, profile);
     if (!impactTarget) {
       setSprayTarget(unit, null);
@@ -294,7 +299,7 @@ export function applyExtinguishStep(state: WorldState, delta: number, suppressio
   }
   const suppressionTimestamp = state.careerDay;
   state.units.forEach((unit) => {
-    if (unit.kind === "firefighter" && unit.carrierId !== null) {
+    if (unit.kind !== "firefighter" || unit.carrierId !== null) {
       return;
     }
     if (!unit.sprayTarget) {
@@ -304,7 +309,7 @@ export function applyExtinguishStep(state: WorldState, delta: number, suppressio
       setSprayTarget(unit, null);
       return;
     }
-    const profile = getSuppressionProfile(unit);
+    const profile = getSuppressionProfile(state, unit);
     applySuppressionAtTarget(state, unit, unit.sprayTarget, profile, powerMultiplier, suppressionTimestamp);
     spendUnitWater(state, unit, delta);
   });

@@ -4,6 +4,7 @@ import type {
   ClimateTimeline,
   DeployMode,
   FireAlertIncident,
+  FireKnowledgeState,
   FireSimWork,
   FireSettings,
   Grid,
@@ -22,12 +23,14 @@ import type {
   RosterUnit,
   Squad,
   SeasonalRainState,
-  TimeSpeedControlMode
+  TimeSpeedControlMode,
+  WatchTower
 } from "./types.js";
 import type { CampaignState } from "./campaign.js";
 import type { ProgressionState } from "../systems/progression/types.js";
 import type { BuildingLot } from "../systems/settlements/types/buildingTypes.js";
 import type { SettlementGrowthPlan } from "../systems/settlements/types/settlementTypes.js";
+import type { WaterTower } from "../systems/settlements/types/waterTowerTypes.js";
 import type { ActiveEvacuation } from "../systems/evacuation/types/evacuationTypes.js";
 
 import { BASE_BUDGET, DEFAULT_FIRE_SETTINGS, DEFAULT_INCIDENT_TIME_SPEED_INDEX } from "./config.js";
@@ -220,6 +223,12 @@ export interface WorldState {
   fireActivityState: FireActivityState;
   latestFireAlert: FireAlertIncident | null;
   nextFireAlertId: number;
+  watchTowers: WatchTower[];
+  nextWatchTowerId: number;
+  waterTowers: WaterTower[];
+  nextWaterTowerId: number;
+  fireKnowledge: FireKnowledgeState;
+  nextFireDetectionReportId: number;
   advanceToNextEvent: AdvanceToNextEventState | null;
 
   paused: boolean;
@@ -388,6 +397,16 @@ const DEFAULT_WIND: Wind = { name: "N", dx: 0, dy: -1, strength: 0.5 };
 
 
 const createNumberArray = (size: number, fill = 0): number[] => Array.from({ length: size }, () => fill);
+
+const createInitialFireKnowledgeState = (totalTiles: number): FireKnowledgeState => ({
+  tileState: new Uint8Array(totalTiles),
+  tileConfidence: new Float32Array(totalTiles),
+  tileDetectionProgress: new Float32Array(totalTiles),
+  tileFirstKnownDay: new Float32Array(totalTiles).fill(-1),
+  tileLastSeenDay: new Float32Array(totalTiles).fill(-1),
+  reports: [],
+  latestReportId: null
+});
 
 const createInitialScoringState = (grid: Grid): ScoringState => ({
   grossPoints: 0,
@@ -598,6 +617,12 @@ export function createInitialState(seed: number, grid: Grid): WorldState {
     fireActivityState: "idle",
     latestFireAlert: null,
     nextFireAlertId: 1,
+    watchTowers: [],
+    nextWatchTowerId: 1,
+    waterTowers: [],
+    nextWaterTowerId: 1,
+    fireKnowledge: createInitialFireKnowledgeState(grid.totalTiles),
+    nextFireDetectionReportId: 1,
     advanceToNextEvent: null,
 
     paused: false,
@@ -866,6 +891,7 @@ export function syncTileSoA(state: WorldState): void {
     state.heatBuffer = new Float32Array(total);
     state.fireSnapshot = new Float32Array(total);
     state.igniteBuffer = new Int32Array(total);
+    state.fireKnowledge = createInitialFireKnowledgeState(total);
     state.scoring.burnStartFuel = new Float32Array(total).fill(-1);
     state.scoring.lastSuppressedAt = new Float32Array(total).fill(Number.NEGATIVE_INFINITY);
     state.neighborOffsets4 = buildNeighborOffsets(state.grid.cols, 4);
@@ -1007,6 +1033,31 @@ export function syncTileSoA(state: WorldState): void {
   }
   if (state.scoring.lastSuppressedAt.length !== total) {
     state.scoring.lastSuppressedAt = new Float32Array(total).fill(Number.NEGATIVE_INFINITY);
+  }
+  if (
+    !state.fireKnowledge ||
+    state.fireKnowledge.tileState.length !== total ||
+    state.fireKnowledge.tileConfidence.length !== total ||
+    state.fireKnowledge.tileDetectionProgress.length !== total ||
+    state.fireKnowledge.tileFirstKnownDay.length !== total ||
+    state.fireKnowledge.tileLastSeenDay.length !== total
+  ) {
+    state.fireKnowledge = createInitialFireKnowledgeState(total);
+  }
+  if (!state.watchTowers) {
+    state.watchTowers = [];
+  }
+  if (!Number.isFinite(state.nextWatchTowerId)) {
+    state.nextWatchTowerId = 1;
+  }
+  if (!state.waterTowers) {
+    state.waterTowers = [];
+  }
+  if (!Number.isFinite(state.nextWaterTowerId)) {
+    state.nextWaterTowerId = 1;
+  }
+  if (!Number.isFinite(state.nextFireDetectionReportId)) {
+    state.nextFireDetectionReportId = 1;
   }
 
 

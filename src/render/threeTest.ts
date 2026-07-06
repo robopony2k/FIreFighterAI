@@ -17,7 +17,9 @@ import { findBestRoadReferenceForPlot, pickHouseRotationFromRoadMask } from "../
 import { getBuildingLifecycleStageFromId, getBuildingLifecycleStageId } from "../systems/settlements/sim/buildingLifecycle.js";
 import { createConstructionFxRuntime } from "../systems/settlements/rendering/constructionFxRuntime.js";
 import { getProceduralHouseVariantKey } from "../systems/settlements/rendering/proceduralHouseBuilder.js";
+import { createProceduralWaterTowerModel } from "../systems/settlements/rendering/proceduralWaterTowerModel.js";
 import type { RenderBuildingLot } from "../systems/settlements/types/buildingTypes.js";
+import { createProceduralWatchTowerModel } from "../systems/fire/rendering/proceduralWatchTowerModel.js";
 import { createFormationProjectionLayer } from "../systems/units/rendering/formationProjectionLayer.js";
 import { createFormationTarget } from "../systems/units/sim/formationProjection.js";
 import { buildEvacuationRenderModel } from "../systems/evacuation/rendering/evacuationRenderModel.js";
@@ -33,7 +35,7 @@ import { createVehicleModelLayer, type VehicleModelInstance } from "./vehicleMod
 import type { InputState } from "../core/inputState.js";
 import { indexFor } from "../core/grid.js";
 import { TILE_ID_TO_TYPE, TILE_TYPE_IDS } from "../core/state.js";
-import type { ClimateForecast, CommandType, CommandUnitAlert, CommandUnitStatus, Town } from "../core/types.js";
+import type { ClimateForecast, CommandFireTask, CommandPlacementMode, CommandUnitAlert, CommandUnitStatus, Town } from "../core/types.js";
 import type { RenderSim } from "./simView.js";
 import { createHudState, setHudViewport, type HudTheme } from "./hud/hudState.js";
 import { handleHudClick, handleHudKey, renderHud } from "./hud/hud.js";
@@ -2577,6 +2579,27 @@ export const createThreeTest = (
       thermalPalette: DEFAULT_THERMAL_PALETTE
     });
     ctx.putImageData(image, 0, 0);
+    if (minimapMode !== "thermal") {
+      const reports = world.fireKnowledge?.reports ?? [];
+      reports.forEach((report) => {
+        if (!report.active) {
+          return;
+        }
+        const px = ((report.tileX + 0.5) / Math.max(1, cols)) * width;
+        const py = ((report.tileY + 0.5) / Math.max(1, rows)) * height;
+        ctx.save();
+        ctx.strokeStyle = report.state === "confirmed" ? "rgba(255, 93, 55, 0.98)" : "rgba(255, 202, 92, 0.92)";
+        ctx.fillStyle = report.state === "confirmed" ? "rgba(255, 93, 55, 0.28)" : "rgba(255, 202, 92, 0.2)";
+        ctx.lineWidth = report.state === "confirmed" ? 1.8 : 1.2;
+        ctx.setLineDash(report.state === "confirmed" ? [] : [3, 2]);
+        ctx.beginPath();
+        ctx.arc(px, py, report.state === "confirmed" ? 4.2 : 5.2, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.restore();
+      });
+    }
     if (
       minimapOverlays.units &&
       hasProgressionCapability(world.progression, "minimap.overlay.units") &&
@@ -2879,11 +2902,12 @@ export const createThreeTest = (
       .filter((entry): entry is RenderSim["units"][number] => !!entry)
       .sort((left, right) => (left.rosterId ?? left.id) - (right.rosterId ?? right.id));
 
-  const getCommandTypeLabel = (type: CommandType | null): string => {
-    if (!type) {
+  const getCommandLabel = (value: CommandPlacementMode | CommandFireTask | null): string => {
+    if (!value) {
       return "Auto";
     }
-    return `${type[0]!.toUpperCase()}${type.slice(1)}`;
+    const label = value === "hold_fire" ? "Hold Fire" : value;
+    return `${label[0]!.toUpperCase()}${label.slice(1)}`;
   };
 
   const getSquadStatusLabel = (status: CommandUnitStatus): string => `${status[0]!.toUpperCase()}${status.slice(1)}`;
@@ -2894,6 +2918,12 @@ export const createThreeTest = (
     }
     if (status === "moving") {
       return "MOV";
+    }
+    if (status === "boarding") {
+      return "BRD";
+    }
+    if (status === "deploying") {
+      return "DEP";
     }
     if (status === "retreating") {
       return "RT";
@@ -2909,7 +2939,14 @@ export const createThreeTest = (
         return 3;
       case "warning":
       case "crew_low":
+      case "hose_unstaffed":
+      case "crew_transition":
+      case "deploy_required":
+      case "out_of_range":
+      case "holding_fire":
         return 2;
+      case "driver_missing":
+        return 3;
       case "low":
         return 1;
       default:
@@ -2929,6 +2966,18 @@ export const createThreeTest = (
         return "Warning";
       case "crew_low":
         return "Crew";
+      case "driver_missing":
+        return "No Driver";
+      case "hose_unstaffed":
+        return "No Hose";
+      case "crew_transition":
+        return "Crew Moving";
+      case "deploy_required":
+        return "Deploy";
+      case "out_of_range":
+        return "Out of Range";
+      case "holding_fire":
+        return "Hold Fire";
       case "low":
         return "Low";
       default:
@@ -2952,7 +3001,7 @@ export const createThreeTest = (
   const resolveMajoritySquadStatus = (trucks: RenderSim["units"]): CommandUnitStatus => {
     const counts = new Map<CommandUnitStatus, number>();
     trucks.forEach((truck) => counts.set(truck.currentStatus, (counts.get(truck.currentStatus) ?? 0) + 1));
-    const priority: CommandUnitStatus[] = ["retreating", "suppressing", "moving", "holding"];
+    const priority: CommandUnitStatus[] = ["retreating", "suppressing", "deploying", "boarding", "moving", "holding"];
     let bestStatus: CommandUnitStatus = "holding";
     let bestCount = -1;
     priority.forEach((status) => {
@@ -3232,7 +3281,9 @@ export const createThreeTest = (
       const aggregateAlerts = trucks.flatMap((truck) => truck.currentAlerts);
       const highestAlert = resolveHighestSquadAlert(aggregateAlerts);
       const effectiveStatus = resolveMajoritySquadStatus(trucks);
-      const intentLabel = commandUnit.currentIntent ? getCommandTypeLabel(commandUnit.currentIntent.type) : "Auto";
+      const intentLabel = commandUnit.currentIntent
+        ? `${getCommandLabel(commandUnit.currentIntent.placementMode)} | ${getCommandLabel(commandUnit.currentIntent.fireTask)}`
+        : "Auto";
       const worldX = lastTerrainSurface.toWorldX(anchor.x);
       const worldZ = lastTerrainSurface.toWorldZ(anchor.y);
       const groundY = lastTerrainSurface.heightAtTileCoord(anchor.x, anchor.y) * lastTerrainSurface.heightScale;
@@ -3611,7 +3662,11 @@ export const createThreeTest = (
     }
     openTownCard(townId);
     selectedFacility = { townId, facilityId };
-    activeFacilityTabs.set(facilityId, activeFacilityTabs.get(facilityId) ?? "squads");
+    const facility = collectTownFacilities(world, town).find((entry) => entry.id === facilityId) ?? null;
+    activeFacilityTabs.set(
+      facilityId,
+      activeFacilityTabs.get(facilityId) ?? (facility?.type === "hq" ? "squads" : "overview")
+    );
     updateTownMetrics();
   };
 
@@ -3635,7 +3690,7 @@ export const createThreeTest = (
       world,
       town,
       facility,
-      activeFacilityTabs.get(facility.id) ?? "squads",
+      activeFacilityTabs.get(facility.id) ?? (facility.type === "hq" ? "squads" : "overview"),
       (action, payload) => {
         playUiCue("confirm");
         inputState.lastInteractionTime = performance.now();
@@ -4421,8 +4476,7 @@ export const createThreeTest = (
 
   const updateFireAlertCard = (): void => {
     const alert = world.latestFireAlert;
-    const strongestTile = findCurrentStrongestFireTile();
-    if (!alert || !strongestTile) {
+    if (!alert) {
       visibleFireAlertId = null;
       activeFireAlertTownId = null;
       activeFireAlertTile = null;
@@ -4436,18 +4490,21 @@ export const createThreeTest = (
       return;
     }
     visibleFireAlertId = alert.id;
-    activeFireAlertTile = strongestTile;
+    activeFireAlertTile = { x: alert.tileX, y: alert.tileY };
     activeFireAlertTownId = alert.townId >= 0 ? alert.townId : null;
     const town = activeFireAlertTownId !== null ? getTownById(activeFireAlertTownId) : null;
     if (town) {
       const snapshot = readTownUiSnapshot(town);
-      fireAlertCardElements.summary.textContent = `${town.name} | Tile ${strongestTile.x},${strongestTile.y}`;
-      fireAlertCardElements.details.textContent = `Burning ${snapshot.burning} | Houses ${snapshot.houses} | Alert ${snapshot.postureLabel}`;
+      fireAlertCardElements.summary.textContent =
+        alert.message ?? `${town.name} | Tile ${alert.tileX},${alert.tileY}`;
+      fireAlertCardElements.details.textContent =
+        `${alert.reportState === "confirmed" ? "Confirmed" : "Suspected"} fire | Confidence ${alert.confidenceLabel ?? "Medium"} | Houses ${snapshot.houses} | Alert ${snapshot.postureLabel}`;
       fireAlertCardElements.openTownButton.disabled = false;
       fireAlertCardElements.openTownButton.title = `Open ${town.name} card`;
     } else {
-      fireAlertCardElements.summary.textContent = `Incident Tile ${strongestTile.x},${strongestTile.y}`;
-      fireAlertCardElements.details.textContent = "No nearby town linked to this ignition.";
+      fireAlertCardElements.summary.textContent = alert.message ?? `Incident Tile ${alert.tileX},${alert.tileY}`;
+      fireAlertCardElements.details.textContent =
+        `${alert.reportState === "confirmed" ? "Confirmed" : "Suspected"} fire | Confidence ${alert.confidenceLabel ?? "Medium"}`;
       fireAlertCardElements.openTownButton.disabled = true;
       fireAlertCardElements.openTownButton.title = "No nearby town for this incident.";
     }
@@ -6727,9 +6784,17 @@ export const createThreeTest = (
     surface: TerrainRenderSurface | null = lastTerrainSurface
   ): void => {
     const structureRevision = sample.structureRevision ?? -1;
+    const watchTowerVisualKey = (sample.watchTowers ?? [])
+      .filter((tower) => tower.active)
+      .map((tower) => `${tower.id}:${tower.level}:${tower.x.toFixed(2)},${tower.y.toFixed(2)}`)
+      .join("|");
+    const waterTowerVisualKey = (sample.waterTowers ?? [])
+      .filter((tower) => tower.active)
+      .map((tower) => `${tower.id}:${tower.x.toFixed(2)},${tower.y.toFixed(2)}`)
+      .join("|");
     const structureAssetKey = THREE_TEST_DETAILED_STRUCTURES_ENABLED
-      ? `${houseAssets?.variants.length ?? 0}:${firestationAsset ? 1 : 0}:detailed`
-      : "simple";
+      ? `${houseAssets?.variants.length ?? 0}:${firestationAsset ? 1 : 0}:detailed:procedural-towers-v1:${watchTowerVisualKey}:${waterTowerVisualKey}`
+      : `simple:procedural-towers-v1:${watchTowerVisualKey}:${waterTowerVisualKey}`;
     const structureOverlayKey = `${sample.cols}x${sample.rows}:${sample.worldSeed ?? -1}:${structureAssetKey}`;
     const shouldRenderDynamic = sample.dynamicStructures === true;
     if (!shouldRenderDynamic) {
@@ -7174,6 +7239,78 @@ export const createThreeTest = (
           group.add(foundation);
         }
       }
+    }
+
+    const activeWatchTowers = (sample.watchTowers ?? []).filter((tower) => tower.active);
+    if (activeWatchTowers.length > 0) {
+      activeWatchTowers.forEach((tower) => {
+        const tileX = clampToRange(Math.round(tower.x), 0, cols - 1);
+        const tileY = clampToRange(Math.round(tower.y), 0, rows - 1);
+        const centerX = surface.toWorldX(tileX + 0.5);
+        const centerZ = surface.toWorldZ(tileY + 0.5);
+        const grounding = resolveStructureGrounding({
+          surface: sample,
+          minTileX: Math.max(0, tileX - 1),
+          maxTileX: Math.min(cols - 1, tileX + 1),
+          minTileY: Math.max(0, tileY - 1),
+          maxTileY: Math.min(rows - 1, tileY + 1),
+          heightScale: surface.heightScale,
+          heightAtTileCoord: surface.heightAtTileCoord
+        });
+        const supportTop = grounding.foundationTop;
+        const supportBottom = grounding.foundationBottom;
+        const rotation = noiseAt(tower.id + (sample.worldSeed ?? 0)) * Math.PI * 2;
+        const towerModel = createProceduralWatchTowerModel(tower.level);
+        towerModel.position.set(centerX, supportTop, centerZ);
+        towerModel.rotation.set(0, rotation, 0);
+        group.add(towerModel);
+        if (supportBottom < supportTop - 0.01) {
+          const foundationHeight = Math.max(0.08, supportTop - supportBottom);
+          const foundation = new THREE.Mesh(buildingGeometry, foundationMaterial.clone());
+          foundation.scale.set(1.8, foundationHeight, 1.8);
+          foundation.position.set(centerX, supportBottom + foundationHeight / 2, centerZ);
+          foundation.rotation.set(0, rotation, 0);
+          foundation.castShadow = true;
+          foundation.receiveShadow = true;
+          group.add(foundation);
+        }
+      });
+    }
+
+    const activeWaterTowers = (sample.waterTowers ?? []).filter((tower) => tower.active);
+    if (activeWaterTowers.length > 0) {
+      activeWaterTowers.forEach((tower) => {
+        const tileX = clampToRange(Math.round(tower.x), 0, cols - 1);
+        const tileY = clampToRange(Math.round(tower.y), 0, rows - 1);
+        const centerX = surface.toWorldX(tileX + 0.5);
+        const centerZ = surface.toWorldZ(tileY + 0.5);
+        const grounding = resolveStructureGrounding({
+          surface: sample,
+          minTileX: Math.max(0, tileX - 1),
+          maxTileX: Math.min(cols - 1, tileX + 1),
+          minTileY: Math.max(0, tileY - 1),
+          maxTileY: Math.min(rows - 1, tileY + 1),
+          heightScale: surface.heightScale,
+          heightAtTileCoord: surface.heightAtTileCoord
+        });
+        const supportTop = grounding.foundationTop;
+        const supportBottom = grounding.foundationBottom;
+        const rotation = noiseAt(tower.id * 3.17 + (sample.worldSeed ?? 0)) * Math.PI * 2;
+        const towerModel = createProceduralWaterTowerModel();
+        towerModel.position.set(centerX, supportTop, centerZ);
+        towerModel.rotation.set(0, rotation, 0);
+        group.add(towerModel);
+        if (supportBottom < supportTop - 0.01) {
+          const foundationHeight = Math.max(0.08, supportTop - supportBottom);
+          const foundation = new THREE.Mesh(buildingGeometry, foundationMaterial.clone());
+          foundation.scale.set(2.1, foundationHeight, 2.1);
+          foundation.position.set(centerX, supportBottom + foundationHeight / 2, centerZ);
+          foundation.rotation.set(0, rotation, 0);
+          foundation.castShadow = true;
+          foundation.receiveShadow = true;
+          group.add(foundation);
+        }
+      });
     }
 
     if (group.children.length > 0) {
