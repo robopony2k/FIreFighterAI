@@ -1047,6 +1047,13 @@ export function syncTileSoA(state: WorldState): void {
   if (!state.watchTowers) {
     state.watchTowers = [];
   }
+  for (const tower of state.watchTowers) {
+    tower.siteElevationMultiplier = Number.isFinite(tower.siteElevationMultiplier) ? Math.max(1, tower.siteElevationMultiplier) : 1;
+    tower.roadAccessDistance = Number.isFinite(tower.roadAccessDistance) ? Math.max(0, tower.roadAccessDistance) : 0;
+    tower.constructionKind ??= null;
+    tower.constructionTargetLevel ??= null;
+    tower.constructionDaysRemaining = Number.isFinite(tower.constructionDaysRemaining) ? Math.max(0, tower.constructionDaysRemaining) : 0;
+  }
   if (!Number.isFinite(state.nextWatchTowerId)) {
     state.nextWatchTowerId = 1;
   }

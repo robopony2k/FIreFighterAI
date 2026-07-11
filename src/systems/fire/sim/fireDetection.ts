@@ -12,9 +12,11 @@ import { TILE_TYPE_IDS } from "../../../core/state.js";
 import {
   FIRE_DETECTION_CONFIG,
   WATCH_TOWER_MAX_LEVEL,
+  WATCH_TOWER_PLACEMENT_CONFIG,
   WATCH_TOWER_TYPE_ID,
   getWatchTowerLevelTuning
 } from "../constants/fireDetectionConfig.js";
+import { getWatchTowerFootprintSampleOffsets } from "../types/watchTowerFootprint.js";
 
 const clamp = (value: number, min: number, max: number): number => Math.min(max, Math.max(min, value));
 
@@ -69,7 +71,7 @@ export const getWatchTowerForTown = (state: WorldState, townId: number): WatchTo
 
 const applyTowerTuning = (tower: WatchTower): void => {
   const tuning = getWatchTowerLevelTuning(tower.level);
-  tower.detectionRadius = tuning.detectionRadius;
+  tower.detectionRadius = tuning.detectionRadius * tower.siteElevationMultiplier;
   tower.detectionDelayDays = tuning.detectionDelayDays;
   tower.accuracyRadius = tuning.accuracyRadius;
 };
@@ -82,12 +84,115 @@ const isBuildableWatchTowerTile = (state: WorldState, x: number, y: number): boo
   const typeId = state.tileTypeId[idx] ?? -1;
   return (
     typeId !== TILE_TYPE_IDS.water &&
+    typeId !== TILE_TYPE_IDS.road &&
     typeId !== TILE_TYPE_IDS.house &&
     typeId !== TILE_TYPE_IDS.base &&
     (state.tileOceanMask[idx] ?? 0) <= 0 &&
     (state.tileLakeMask[idx] ?? 0) <= 0 &&
     (state.structureMask[idx] ?? 0) <= 0
   );
+};
+
+export type WatchTowerPlacementQuote = {
+  valid: boolean;
+  reason: string;
+  invalidReasonCode: "town-not-found" | "maintenance-only" | "tower-exists" | "blocked" | "out-of-range" | "cliff" | null;
+  x: number;
+  y: number;
+  roadAccessDistance: number;
+  accessMultiplier: number;
+  accessSurcharge: number;
+  elevationMultiplier: number;
+  maxFootprintElevationDelta: number;
+  maxFootprintGrade: number;
+  effectiveRadius: number;
+  totalCost: number;
+  constructionDays: number;
+};
+
+export const getWatchTowerUpgradeQuote = (tower: WatchTower): { cost: number; constructionDays: number } | null => {
+  if (tower.level >= WATCH_TOWER_MAX_LEVEL) return null;
+  const nextLevel = (tower.level + 1) as WatchTowerLevel;
+  const difficultTiles = Math.max(0, tower.roadAccessDistance - WATCH_TOWER_PLACEMENT_CONFIG.roadGraceTiles);
+  const accessMultiplier = Math.min(WATCH_TOWER_PLACEMENT_CONFIG.maxAccessCostMultiplier, 1 + difficultTiles * WATCH_TOWER_PLACEMENT_CONFIG.accessCostPerTile);
+  return {
+    cost: Math.round(getWatchTowerLevelTuning(nextLevel).upgradeCost * accessMultiplier),
+    constructionDays: WATCH_TOWER_PLACEMENT_CONFIG.constructionDaysPerLevel
+  };
+};
+
+const getElevation = (state: WorldState, x: number, y: number): number =>
+  state.tileElevation[y * state.grid.cols + x] ?? state.tiles[y * state.grid.cols + x]?.elevation ?? 0;
+
+const sampleElevation = (state: WorldState, x: number, y: number): number => {
+  const x0 = Math.floor(x);
+  const y0 = Math.floor(y);
+  const x1 = Math.min(state.grid.cols - 1, x0 + 1);
+  const y1 = Math.min(state.grid.rows - 1, y0 + 1);
+  const tx = x - x0;
+  const ty = y - y0;
+  const top = getElevation(state, x0, y0) * (1 - tx) + getElevation(state, x1, y0) * tx;
+  const bottom = getElevation(state, x0, y1) * (1 - tx) + getElevation(state, x1, y1) * tx;
+  return top * (1 - ty) + bottom * ty;
+};
+
+const getNearestRoadDistance = (state: WorldState, x: number, y: number): number => {
+  let best = Math.hypot(state.grid.cols, state.grid.rows);
+  for (let idx = 0; idx < state.grid.totalTiles; idx += 1) {
+    if ((state.tileTypeId[idx] ?? -1) !== TILE_TYPE_IDS.road) continue;
+    best = Math.min(best, Math.hypot((idx % state.grid.cols) - x, Math.floor(idx / state.grid.cols) - y));
+  }
+  return best;
+};
+
+export const quoteWatchTowerPlacement = (state: WorldState, townId: number, x: number, y: number): WatchTowerPlacementQuote => {
+  const town = state.towns.find((entry) => entry.id === townId) ?? null;
+  const ix = Math.round(x);
+  const iy = Math.round(y);
+  const base = getWatchTowerLevelTuning(1);
+  let reason = "";
+  let invalidReasonCode: WatchTowerPlacementQuote["invalidReasonCode"] = null;
+  if (!town) { reason = "Town not found."; invalidReasonCode = "town-not-found"; }
+  else if (state.phase !== "maintenance") { reason = "Watch towers can only be placed during maintenance."; invalidReasonCode = "maintenance-only"; }
+  else if (getWatchTowerForTown(state, townId)) { reason = "This town already has a watch tower."; invalidReasonCode = "tower-exists"; }
+  const townX = town ? (Number.isFinite(town.cx) ? town.cx : town.x) : ix;
+  const townY = town ? (Number.isFinite(town.cy) ? town.cy : town.y) : iy;
+  const centerX = ix + 0.5;
+  const centerY = iy + 0.5;
+  const footprintOffsets = getWatchTowerFootprintSampleOffsets();
+  const footprintPoints = footprintOffsets.map((offset) => ({ x: centerX + offset.x, y: centerY + offset.y }));
+  if (!reason && footprintPoints.some((point) => point.x < 0 || point.y < 0 || point.x >= state.grid.cols || point.y >= state.grid.rows || !isBuildableWatchTowerTile(state, Math.min(state.grid.cols - 1, Math.floor(point.x)), Math.min(state.grid.rows - 1, Math.floor(point.y))))) {
+    reason = "Choose clear land away from roads, water, structures, and map edges.";
+    invalidReasonCode = "blocked";
+  }
+  if (!reason && Math.hypot(ix - townX, iy - townY) > WATCH_TOWER_PLACEMENT_CONFIG.townServiceRadius) { reason = "Site is outside this town's service range."; invalidReasonCode = "out-of-range"; }
+  const footprintElevations = footprintPoints.every((point) => point.x >= 0 && point.y >= 0 && point.x < state.grid.cols && point.y < state.grid.rows)
+    ? footprintPoints.map((point) => sampleElevation(state, point.x, point.y))
+    : [0];
+  const maxFootprintElevationDelta = Math.max(...footprintElevations) - Math.min(...footprintElevations);
+  let maxFootprintGrade = 0;
+  for (let i = 1; i < footprintPoints.length; i += 1) {
+    const distance = Math.max(0.001, Math.hypot(footprintPoints[i].x - footprintPoints[0].x, footprintPoints[i].y - footprintPoints[0].y));
+    maxFootprintGrade = Math.max(maxFootprintGrade, Math.abs(footprintElevations[i] - footprintElevations[0]) / distance);
+  }
+  if (!reason && (maxFootprintElevationDelta > WATCH_TOWER_PLACEMENT_CONFIG.maxFootprintElevationDelta || maxFootprintGrade > WATCH_TOWER_PLACEMENT_CONFIG.maxFootprintGrade)) {
+    reason = "Cliff or terrain too steep for watch tower footings.";
+    invalidReasonCode = "cliff";
+  }
+  const roadAccessDistance = getNearestRoadDistance(state, ix, iy);
+  const difficultTiles = Math.max(0, roadAccessDistance - WATCH_TOWER_PLACEMENT_CONFIG.roadGraceTiles);
+  const accessMultiplier = Math.min(WATCH_TOWER_PLACEMENT_CONFIG.maxAccessCostMultiplier, 1 + difficultTiles * WATCH_TOWER_PLACEMENT_CONFIG.accessCostPerTile);
+  const townElevation = town ? getElevation(state, clamp(Math.round(townX), 0, state.grid.cols - 1), clamp(Math.round(townY), 0, state.grid.rows - 1)) : 0;
+  const elevationMeters = Math.max(0, (getElevation(state, clamp(ix, 0, state.grid.cols - 1), clamp(iy, 0, state.grid.rows - 1)) - townElevation) * 100);
+  const elevationMultiplier = 1 + Math.min(WATCH_TOWER_PLACEMENT_CONFIG.maxElevationBonus, (elevationMeters / 10) * WATCH_TOWER_PLACEMENT_CONFIG.elevationBonusPer10Meters);
+  const totalCost = Math.round(base.buildCost * accessMultiplier);
+  return {
+    valid: reason === "", reason, invalidReasonCode, x: ix, y: iy, roadAccessDistance, accessMultiplier,
+    accessSurcharge: totalCost - base.buildCost, elevationMultiplier, maxFootprintElevationDelta, maxFootprintGrade,
+    effectiveRadius: base.detectionRadius * elevationMultiplier,
+    totalCost,
+    constructionDays: WATCH_TOWER_PLACEMENT_CONFIG.constructionDaysPerLevel
+  };
 };
 
 const resolveWatchTowerBuildSite = (
@@ -137,7 +242,8 @@ const resolveWatchTowerBuildSite = (
 
 export const buildWatchTowerForTown = (
   state: WorldState,
-  townId: number
+  townId: number,
+  requestedSite?: { x: number; y: number }
 ): { ok: boolean; message: string; tower: WatchTower | null } => {
   const town = state.towns.find((entry) => entry.id === townId) ?? null;
   if (!town) {
@@ -151,10 +257,10 @@ export const buildWatchTowerForTown = (
     return { ok: false, message: `${town.name} already has a watch tower.`, tower: existing };
   }
   const tuning = getWatchTowerLevelTuning(1);
-  if (state.budget < tuning.buildCost) {
-    return { ok: false, message: `Need $${tuning.buildCost} to build a watch tower.`, tower: null };
-  }
-  const site = resolveWatchTowerBuildSite(state, town, tuning.detectionRadius);
+  const site = requestedSite ?? resolveWatchTowerBuildSite(state, town, tuning.detectionRadius);
+  const quote = quoteWatchTowerPlacement(state, townId, site.x, site.y);
+  if (!quote.valid) return { ok: false, message: quote.reason, tower: null };
+  if (state.budget < quote.totalCost) return { ok: false, message: `Need $${quote.totalCost} to build this watch tower.`, tower: null };
   const tower: WatchTower = {
     id: state.nextWatchTowerId++,
     typeId: WATCH_TOWER_TYPE_ID,
@@ -162,16 +268,26 @@ export const buildWatchTowerForTown = (
     x: site.x,
     y: site.y,
     level: 1,
-    detectionRadius: tuning.detectionRadius,
+    detectionRadius: quote.effectiveRadius,
     detectionDelayDays: tuning.detectionDelayDays,
     accuracyRadius: tuning.accuracyRadius,
-    active: true,
-    builtCareerDay: state.careerDay
+    active: false,
+    builtCareerDay: state.careerDay,
+    siteElevationMultiplier: quote.elevationMultiplier,
+    roadAccessDistance: quote.roadAccessDistance,
+    constructionKind: "build",
+    constructionTargetLevel: 1,
+    constructionDaysRemaining: quote.constructionDays
   };
-  state.budget -= tuning.buildCost;
+  state.budget -= quote.totalCost;
   state.watchTowers.push(tower);
+  for (let oy = -1; oy <= 1; oy += 1) for (let ox = -1; ox <= 1; ox += 1) {
+    const sx = site.x + ox;
+    const sy = site.y + oy;
+    if (sx >= 0 && sy >= 0 && sx < state.grid.cols && sy < state.grid.rows) state.structureMask[sy * state.grid.cols + sx] = 1;
+  }
   state.structureRevision += 1;
-  return { ok: true, message: `Watch tower built in ${town.name}.`, tower };
+  return { ok: true, message: `Watch tower construction started near ${town.name} (${quote.constructionDays.toFixed(2)}d).`, tower };
 };
 
 export const upgradeWatchTowerForTown = (
@@ -183,22 +299,23 @@ export const upgradeWatchTowerForTown = (
   if (!town || !tower) {
     return { ok: false, message: "Build a watch tower first.", tower: null };
   }
-  if (state.phase !== "maintenance") {
-    return { ok: false, message: "Watch towers can only be upgraded during maintenance.", tower };
-  }
   if (tower.level >= WATCH_TOWER_MAX_LEVEL) {
     return { ok: false, message: `${town.name} watch tower is already fully upgraded.`, tower };
   }
+  if (tower.constructionKind) return { ok: false, message: "Finish the current tower work first.", tower };
   const nextLevel = (tower.level + 1) as WatchTowerLevel;
-  const tuning = getWatchTowerLevelTuning(nextLevel);
-  if (state.budget < tuning.upgradeCost) {
-    return { ok: false, message: `Need $${tuning.upgradeCost} to upgrade this watch tower.`, tower };
+  const quote = getWatchTowerUpgradeQuote(tower)!;
+  const cost = quote.cost;
+  if (state.budget < cost) {
+    return { ok: false, message: `Need $${cost} to upgrade this watch tower.`, tower };
   }
-  state.budget -= tuning.upgradeCost;
-  tower.level = nextLevel;
-  applyTowerTuning(tower);
+  state.budget -= cost;
+  tower.active = false;
+  tower.constructionKind = "upgrade";
+  tower.constructionTargetLevel = nextLevel;
+  tower.constructionDaysRemaining = quote.constructionDays;
   state.structureRevision += 1;
-  return { ok: true, message: `${town.name} watch tower upgraded to level ${tower.level}.`, tower };
+  return { ok: true, message: `${town.name} watch tower upgrade to level ${nextLevel} started.`, tower };
 };
 
 const getNearestTownIdForTile = (state: WorldState, x: number, y: number): number => {
@@ -403,6 +520,22 @@ const updateReport = (
   knowledge.latestReportId = report.id;
   updateTileKnowledge(knowledge, input.tileIndex, report.confidence, state.careerDay);
   return report;
+};
+
+export const stepWatchTowerConstruction = (state: WorldState, dayDelta: number): void => {
+  if (dayDelta > 0) {
+    for (const tower of state.watchTowers ?? []) {
+      if (!tower.constructionKind) continue;
+      tower.constructionDaysRemaining = Math.max(0, tower.constructionDaysRemaining - dayDelta);
+      if (tower.constructionDaysRemaining > 0) continue;
+      if (tower.constructionTargetLevel) tower.level = tower.constructionTargetLevel;
+      tower.constructionKind = null;
+      tower.constructionTargetLevel = null;
+      tower.active = true;
+      applyTowerTuning(tower);
+      state.structureRevision += 1;
+    }
+  }
 };
 
 export const stepFireDetection = (state: WorldState, dayDelta: number): FireDetectionStepResult => {

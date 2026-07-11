@@ -4,7 +4,7 @@ import {
   WATCH_TOWER_MAX_LEVEL,
   getWatchTowerLevelTuning
 } from "../../../systems/fire/constants/fireDetectionConfig.js";
-import { getWatchTowerForTown } from "../../../systems/fire/sim/fireDetection.js";
+import { getWatchTowerForTown, getWatchTowerUpgradeQuote } from "../../../systems/fire/sim/fireDetection.js";
 import type { TownFacilityDescriptor, TownFacilityRenderContext } from "./types.js";
 
 export const getWatchTowerFacilityId = (townId: number): string => `watch-tower:${townId}`;
@@ -23,14 +23,16 @@ export const buildWatchTowerFacilityDescriptor = (world: WorldState, townId: num
       warning: world.phase === "maintenance" ? null : "Maintenance only"
     };
   }
-  const nextLevel = tower.level < WATCH_TOWER_MAX_LEVEL ? getWatchTowerLevelTuning((tower.level + 1) as 2 | 3) : null;
+  const nextLevel = tower.level < WATCH_TOWER_MAX_LEVEL ? getWatchTowerLevelTuning((tower.level + 1) as typeof tower.level) : null;
   return {
     id: getWatchTowerFacilityId(townId),
     type: "watchTower",
     townId,
     name: "Watch Tower",
     icon: "WT",
-    summary: `Level ${tower.level} - radius ${Math.round(tower.detectionRadius)} - ${tower.active ? "active" : "inactive"}`,
+    summary: tower.constructionKind
+      ? `${tower.constructionKind === "build" ? "Building" : `Upgrading to L${tower.constructionTargetLevel}`} - ${tower.constructionDaysRemaining.toFixed(2)}d`
+      : `Level ${tower.level} - radius ${Math.round(tower.detectionRadius)} - ${tower.active ? "active" : "inactive"}`,
     warning:
       tower.level >= WATCH_TOWER_MAX_LEVEL
         ? null
@@ -82,7 +84,9 @@ const getWatchTowerContentRenderKey = (context: TownFacilityRenderContext): stri
           active: tower.active,
           radius: tower.detectionRadius,
           delay: tower.detectionDelayDays,
-          accuracy: tower.accuracyRadius
+          accuracy: tower.accuracyRadius,
+          construction: tower.constructionKind,
+          remaining: tower.constructionDaysRemaining
         }
       : null
   });
@@ -107,7 +111,9 @@ export const renderWatchTowerFacilityContent = (root: HTMLElement, context: Town
       Object.assign(document.createElement("span"), { textContent: `Level ${tower.level}` }),
       Object.assign(document.createElement("span"), { textContent: `Radius ${Math.round(tower.detectionRadius)}` }),
       Object.assign(document.createElement("span"), { textContent: `Delay ${tower.detectionDelayDays.toFixed(2)}d` }),
-      Object.assign(document.createElement("span"), { textContent: `Accuracy ${Math.round(tower.accuracyRadius)}` })
+      Object.assign(document.createElement("span"), { textContent: `Accuracy ${Math.round(tower.accuracyRadius)}` }),
+      Object.assign(document.createElement("span"), { textContent: `High ground +${Math.round((tower.siteElevationMultiplier - 1) * 100)}%` }),
+      Object.assign(document.createElement("span"), { textContent: tower.constructionKind ? `Offline - ${tower.constructionDaysRemaining.toFixed(2)}d remaining` : `Road access ${tower.roadAccessDistance.toFixed(1)} tiles` })
     );
   } else {
     stats.append(
@@ -130,20 +136,20 @@ export const renderWatchTowerFacilityContent = (root: HTMLElement, context: Town
     bindActionButton(buildButton, context.dispatchAction, context.town.id);
     grid.appendChild(buildButton);
   } else {
-    const nextLevel = tower.level < WATCH_TOWER_MAX_LEVEL ? ((tower.level + 1) as 2 | 3) : null;
-    const upgradeCost = nextLevel ? getWatchTowerLevelTuning(nextLevel).upgradeCost : 0;
+    const nextLevel = tower.level < WATCH_TOWER_MAX_LEVEL ? ((tower.level + 1) as typeof tower.level) : null;
+    const upgradeCost = nextLevel ? (getWatchTowerUpgradeQuote(tower)?.cost ?? 0) : 0;
     const upgradeButton = createActionButton(
       tower.level >= WATCH_TOWER_MAX_LEVEL ? "Max Level" : `Upgrade L${nextLevel}`,
       "watch-tower-upgrade",
       upgradeCost
     );
-    upgradeButton.disabled = !maintenanceOpen || !nextLevel || budget < upgradeCost;
-    upgradeButton.title = !maintenanceOpen
-      ? "Only available during maintenance."
-      : !nextLevel
+    upgradeButton.disabled = !nextLevel || !!tower.constructionKind || budget < upgradeCost;
+    upgradeButton.title = !nextLevel
         ? "Watch tower is fully upgraded."
+        : tower.constructionKind
+          ? "Finish the current tower work first."
         : budget >= upgradeCost
-          ? "Improve detection range, delay, and accuracy."
+          ? "Improve detection range, delay, and accuracy. The tower will be offline for 90 days."
           : `Need ${formatCurrency(upgradeCost)}.`;
     bindActionButton(upgradeButton, context.dispatchAction, context.town.id);
     grid.appendChild(upgradeButton);
@@ -151,8 +157,10 @@ export const renderWatchTowerFacilityContent = (root: HTMLElement, context: Town
 
   const hint = document.createElement("div");
   hint.className = "three-test-hq-empty";
-  hint.textContent = maintenanceOpen
-    ? "Detection affects player knowledge and alerts only."
-    : "Watch tower work is locked outside maintenance.";
+  hint.textContent = tower
+    ? "Upgrades can start at any time; detection is offline for the 90-day build."
+    : maintenanceOpen
+      ? "Detection affects player knowledge and alerts only."
+      : "New towers can only be placed during maintenance.";
   root.append(stats, grid, hint);
 };

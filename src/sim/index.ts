@@ -94,7 +94,7 @@ import type { SettlementRoadAdapter } from "../systems/settlements/types/settlem
 import { stepTownConstructionSchedule } from "../systems/settlements/sim/townConstruction.js";
 import { stepWaterTowers } from "../systems/settlements/sim/waterTowerInfrastructure.js";
 import { applyFireActivityMetrics } from "../systems/fire/sim/fireActivityState.js";
-import { stepFireDetection, type FireDetectionStepResult } from "../systems/fire/sim/fireDetection.js";
+import { stepFireDetection, stepWatchTowerConstruction, type FireDetectionStepResult } from "../systems/fire/sim/fireDetection.js";
 import type { FireDetectionReport } from "../core/types.js";
 import { stepEvacuations } from "../systems/evacuation/sim/evacuationRuntime.js";
 import type { EvacuationLossEvent } from "../systems/evacuation/types/evacuationTypes.js";
@@ -1087,6 +1087,7 @@ export function stepSim(
   updateClimateForecastWindow(state);
   syncSeasonalRainToCareerDay(state);
   stepWaterTowers(state, dayDelta);
+  stepWatchTowerConstruction(state, dayDelta);
   state.simPerfCalendarMs = nowMs() - calendarPerfStart;
   if (maybePauseForSeasonalRainStart(state, previousSpeedIndex, previousSliderValue)) {
     return;

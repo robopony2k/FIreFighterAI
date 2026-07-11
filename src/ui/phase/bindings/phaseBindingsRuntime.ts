@@ -1134,7 +1134,22 @@ export const bindPhaseUi = ({
       if (!Number.isFinite(townId)) {
         return;
       }
-      const result = buildWatchTowerForTown(state, townId);
+      const siteXRaw = actionTarget?.dataset.x;
+      const siteYRaw = actionTarget?.dataset.y;
+      const siteX = Number(siteXRaw);
+      const siteY = Number(siteYRaw);
+      if (siteXRaw === undefined || siteYRaw === undefined || !Number.isFinite(siteX) || !Number.isFinite(siteY)) {
+        inputState.watchTowerPlacementTownId = townId;
+        inputState.watchTowerPlacementTile = null;
+        setStatus(state, "Choose a clear watch tower site on the map. Escape cancels.");
+        phaseUi.sync(state, inputState);
+        return;
+      }
+      const result = buildWatchTowerForTown(state, townId, { x: siteX, y: siteY });
+      if (result.ok) {
+        inputState.watchTowerPlacementTownId = null;
+        inputState.watchTowerPlacementTile = null;
+      }
       setStatus(state, result.message);
       phaseUi.sync(state, inputState);
       return;

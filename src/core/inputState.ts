@@ -19,6 +19,8 @@ export interface InputState {
   debugHoverTile: Point | null;
   debugHoverWorld: Point | null;
   evacuationDestinationTownId: number | null;
+  watchTowerPlacementTownId: number | null;
+  watchTowerPlacementTile: Point | null;
   lastInteractionTime: number;
 }
 
@@ -39,6 +41,8 @@ export const createInputState = (): InputState => ({
   debugHoverTile: null,
   debugHoverWorld: null,
   evacuationDestinationTownId: null,
+  watchTowerPlacementTownId: null,
+  watchTowerPlacementTile: null,
   lastInteractionTime: 0
 });
 
@@ -59,5 +63,7 @@ export const resetInputState = (state: InputState): void => {
   state.debugHoverTile = null;
   state.debugHoverWorld = null;
   state.evacuationDestinationTownId = null;
+  state.watchTowerPlacementTownId = null;
+  state.watchTowerPlacementTile = null;
   state.lastInteractionTime = 0;
 };

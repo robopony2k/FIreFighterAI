@@ -335,6 +335,16 @@ const canPlaceHouseFootprint = (state: WorldState, bounds: HouseFootprintBounds)
 
 export const rebuildGrowthContext = (state: WorldState): GrowthContext => {
   state.structureMask.fill(0);
+  for (const tower of state.waterTowers ?? []) {
+    if (!tower.active) {
+      continue;
+    }
+    const x = Math.round(tower.x);
+    const y = Math.round(tower.y);
+    if (inBounds(state.grid, x, y)) {
+      state.structureMask[indexFor(state.grid, x, y)] = 1;
+    }
+  }
   const context: GrowthContext = {
     footprints: new Map<number, HouseFootprintBounds>(),
     clearanceRects: new Map<number, HouseClearanceRect>()

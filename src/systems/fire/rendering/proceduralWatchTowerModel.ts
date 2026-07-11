@@ -4,7 +4,6 @@ import type { WatchTowerLevel } from "../../../core/types.js";
 import {
   addBoxPart,
   addCylinderBetween,
-  addFootingPads,
   createFourLegTowerScaffold
 } from "../../../shared/rendering/proceduralTowerScaffold.js";
 
@@ -14,7 +13,7 @@ const makeMaterial = (color: number, roughness: number, metalness: number): THRE
 const metersToTiles = (meters: number): number => meters / Math.max(0.001, TILE_SIZE);
 
 const clampWatchTowerLevel = (level: WatchTowerLevel | number): WatchTowerLevel =>
-  level <= 1 ? 1 : level >= 3 ? 3 : 2;
+  Math.max(1, Math.min(8, Math.round(level))) as WatchTowerLevel;
 
 const addRailings = (
   group: THREE.Group,
@@ -156,12 +155,11 @@ export const createProceduralWatchTowerModel = (level: WatchTowerLevel | number)
   const deckMaterial = makeMaterial(0x8f6b42, 0.82, 0.04);
   const railMaterial = makeMaterial(0x513c2a, 0.84, 0.03);
   const windowMaterial = makeMaterial(0x26343c, 0.42, 0.02);
-  const footingMaterial = makeMaterial(0x4b4036, 0.95, 0.02);
 
-  const supportHeight = metersToTiles(visualLevel === 1 ? 11.5 : visualLevel === 2 ? 17.8 : 23.8);
-  const baseWidth = metersToTiles(visualLevel === 1 ? 7.0 : visualLevel === 2 ? 8.6 : 10.0);
-  const topWidth = metersToTiles(visualLevel === 1 ? 4.6 : visualLevel === 2 ? 5.7 : 6.6);
-  const frame = createFourLegTowerScaffold(group, {
+  const supportHeight = metersToTiles(11.5 + (visualLevel - 1) * 6.3);
+  const baseWidth = metersToTiles(10);
+  const topWidth = metersToTiles(Math.min(6.6, 4.6 + (visualLevel - 1) * 0.42));
+  createFourLegTowerScaffold(group, {
     height: supportHeight,
     baseWidth,
     topWidth,
@@ -171,15 +169,14 @@ export const createProceduralWatchTowerModel = (level: WatchTowerLevel | number)
     legMaterial,
     strutMaterial
   });
-  addFootingPads(group, frame.corners, footingMaterial, metersToTiles(0.8));
 
-  const deckWidth = metersToTiles(visualLevel === 1 ? 5.8 : visualLevel === 2 ? 6.8 : 7.8);
+  const deckWidth = metersToTiles(Math.min(7.8, 5.8 + (visualLevel - 1) * 0.5));
   const deckY = supportHeight + metersToTiles(0.22);
   addBoxPart(group, new THREE.Vector3(0, deckY, 0), new THREE.Vector3(deckWidth, metersToTiles(0.24), deckWidth), deckMaterial, "watch-tower-deck");
   addRailings(group, deckY, deckWidth, railMaterial, railMaterial);
 
-  const cabinWidth = metersToTiles(visualLevel === 1 ? 4.1 : visualLevel === 2 ? 4.8 : 5.4);
-  const cabinDepth = metersToTiles(visualLevel === 1 ? 3.8 : visualLevel === 2 ? 4.3 : 4.8);
+  const cabinWidth = metersToTiles(Math.min(5.4, 4.1 + (visualLevel - 1) * 0.35));
+  const cabinDepth = metersToTiles(Math.min(4.8, 3.8 + (visualLevel - 1) * 0.25));
   const cabinHeight = metersToTiles(2.65);
   const cabinCenterY = deckY + metersToTiles(0.18) + cabinHeight * 0.5;
   addBoxPart(group, new THREE.Vector3(0, cabinCenterY, 0), new THREE.Vector3(cabinWidth, cabinHeight, cabinDepth), cabinMaterial, "watch-tower-cabin");

@@ -349,8 +349,32 @@ const report = {
     x: town.x,
     y: town.y,
     houseCount: town.houseCount,
-    archetype: town.streetArchetype
+    archetype: town.streetArchetype,
+    seedTile: (() => {
+      const idx = town.y * state.grid.cols + town.x;
+      return {
+        type: state.tiles[idx]?.type ?? null,
+        typeId: state.tileTypeId[idx] ?? -1,
+        ocean: state.tileOceanMask[idx] ?? 0,
+        lake: state.tileLakeMask[idx] ?? 0,
+        structureMask: state.structureMask[idx] ?? 0,
+        tileStructure: state.tileStructure[idx] ?? 0
+      };
+    })()
   })),
+  waterTowers: state.waterTowers.map((tower) => {
+    const idx = tower.y * state.grid.cols + tower.x;
+    return {
+      id: tower.id,
+      townId: tower.townId,
+      x: tower.x,
+      y: tower.y,
+      active: tower.active,
+      tileType: state.tiles[idx]?.type ?? null,
+      structureMask: state.structureMask[idx] ?? 0,
+      tileStructure: state.tileStructure[idx] ?? 0
+    };
+  }),
   houses,
   unconnectedHouses,
   namedTownConnectivity,
@@ -383,12 +407,40 @@ if (
   throw new Error("Struggling road share code did not complete a contour guaranteed connector.");
 }
 if (shareCode === strugglingRoadShareCode) {
+  if (state.waterTowers.length !== state.towns.length) {
+    throw new Error(`Expected one water tower per town, got ${state.waterTowers.length}/${state.towns.length}.`);
+  }
+  for (const town of state.towns) {
+    const tower = state.waterTowers.find((candidate) => candidate.townId === town.id);
+    if (!tower) {
+      throw new Error(`Missing water tower for ${town.name}.`);
+    }
+    const idx = tower.y * state.grid.cols + tower.x;
+    if (state.tiles[idx]?.type === "road" || (state.structureMask[idx] ?? 0) <= 0) {
+      throw new Error(`Invalid water tower reservation for ${town.name} at ${tower.x},${tower.y}: tile=${state.tiles[idx]?.type ?? "missing"} mask=${state.structureMask[idx] ?? 0}.`);
+    }
+    const perimeter = [];
+    for (let x = tower.x - 2; x <= tower.x + 2; x += 1) perimeter.push({ x, y: tower.y - 2 });
+    for (let y = tower.y - 1; y <= tower.y + 2; y += 1) perimeter.push({ x: tower.x + 2, y });
+    for (let x = tower.x + 1; x >= tower.x - 2; x -= 1) perimeter.push({ x, y: tower.y + 2 });
+    for (let y = tower.y + 1; y >= tower.y - 1; y -= 1) perimeter.push({ x: tower.x - 2, y });
+    if (perimeter.length !== 16 || new Set(perimeter.map((point) => `${point.x},${point.y}`)).size !== 16) {
+      throw new Error(`Invalid civic hub perimeter shape for ${town.name}.`);
+    }
+    if (perimeter.some((point) => !isRoadLike(state, point.x, point.y))) {
+      throw new Error(`Incomplete civic hub perimeter for ${town.name}.`);
+    }
+  }
+  const civicHubAttempts = events.filter((event) => event.kind === "road:attempt" && event.diagnosticRouteId?.startsWith("civic-hub:")).length;
+  if (civicHubAttempts !== 0) {
+    throw new Error(`Expected direct civic hub paths to use zero route attempts, got ${civicHubAttempts}.`);
+  }
   const outOfRangeTown = state.towns.find((town) => town.houseCount < 8 || town.houseCount > 11);
   if (outOfRangeTown) {
     throw new Error(`Compact bootstrap house count out of range for ${outOfRangeTown.name}: ${outOfRangeTown.houseCount}.`);
   }
-  if (report.lowLevel.attempts >= 8_000) {
-    throw new Error(`Expected compact bootstrap to keep road attempts below 8000, got ${report.lowLevel.attempts}.`);
+  if (report.lowLevel.attempts > 2_199) {
+    throw new Error(`Expected bounded civic hubs to keep road attempts at or below 2199, got ${report.lowLevel.attempts}.`);
   }
   if (state.plannedTownGrowth.plannedYears !== 20 || state.plannedTownGrowth.entries.length === 0) {
     throw new Error("Expected the supplied share code to retain a non-empty 20-year future growth cache.");
@@ -443,6 +495,8 @@ if (!baseline) {
   console.log(`[road-sharecode] no baseline at ${path.relative(repoRoot, baselinePath)} hash=${report.hash}`);
   console.log(JSON.stringify({
     towns: report.towns.length,
+    townSeeds: report.towns.map((town) => ({ id: town.id, x: town.x, y: town.y, seedTile: town.seedTile })),
+    waterTowers: report.waterTowers,
     houses: report.houses.length,
     intertownCompleted: groupedRoads.completed.filter((event) => event.type === "intertown").length,
     intertownFailed: groupedRoads.failed.filter((event) => event.type === "intertown").length,
@@ -451,6 +505,10 @@ if (!baseline) {
     guaranteedConnectorStyles,
     townsWithUnconnectedHouses: townsWithUnconnectedHouses.length,
     futureGrowthEntries: state.plannedTownGrowth.entries.length,
+    attemptsByGroup: Object.fromEntries([...new Set(events.filter((event) => event.kind === "road:attempt").map((event) => event.routeGroup ?? "unknown"))]
+      .sort()
+      .map((group) => [group, events.filter((event) => event.kind === "road:attempt" && (event.routeGroup ?? "unknown") === group).length])),
+    duplicateRetries: groupedRoads.duplicateRetries.map((event) => `${event.id}:${event.reason}`),
     attempts: report.lowLevel.attempts,
     routingMs: report.roadStageMs
   }, null, 2));

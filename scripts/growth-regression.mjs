@@ -674,6 +674,7 @@ const terrainSignatureSample = (() => {
   const textureBaseSample = { cols, rows, elevations: textureElevations, tileTypes: textureTypes, fastUpdate: true };
   const textureBaseSurface = prepareTerrainRenderSurface(textureBaseSample);
   const initialTexture = buildRegressionTileTexture(textureBaseSample, textureBaseSurface, texturePalette);
+  const initialTexturePixels = Array.from(initialTexture.image.data);
   const textureRoadTypes = textureTypes.slice();
   textureRoadTypes[12] = TILE_TYPE_IDS.road;
   const textureRoadSample = { cols, rows, elevations: textureElevations, tileTypes: textureRoadTypes, fastUpdate: true };
@@ -682,17 +683,18 @@ const terrainSignatureSample = (() => {
     prepareTerrainRenderSurface(textureRoadSample);
   const fullRoadTexture = buildRegressionTileTexture(textureRoadSample, textureRoadSurface, texturePalette);
   const partialRoadTexture = buildRegressionTileTexture(textureRoadSample, textureRoadSurface, texturePalette, {
-    texture: initialTexture,
+    sourceTexture: initialTexture,
     dirtyTileBounds: { minX: 2, minY: 2, maxX: 2, maxY: 2 }
   });
-  assert.equal(partialRoadTexture, initialTexture, "dirty tile texture update should reuse the existing DataTexture");
-  assert.ok(initialTexture.updateRanges.length > 0, "dirty tile texture update should record row update ranges");
-  assert.deepEqual(
-    Array.from(initialTexture.image.data),
-    Array.from(fullRoadTexture.image.data),
-    "dirty tile texture update should match a full texture rebuild"
+  assert.notEqual(partialRoadTexture, initialTexture, "dirty tile texture update should stage into a different DataTexture");
+  assert.deepEqual(Array.from(initialTexture.image.data), initialTexturePixels, "staging must not mutate the visible front texture");
+  assert.notDeepEqual(
+    Array.from(partialRoadTexture.image.data),
+    initialTexturePixels,
+    "dirty tile texture update should repaint the staged texture"
   );
   fullRoadTexture.dispose();
+  partialRoadTexture.dispose();
   initialTexture.dispose();
 
   const makeDisposableTexture = (label) => ({

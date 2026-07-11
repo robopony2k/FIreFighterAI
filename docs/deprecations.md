@@ -602,3 +602,12 @@ Migration guidance:
 1. Keep town-level status and actions in the shared Town panel.
 2. Add facility-specific operational controls to facility detail content, not directly to the Town panel.
 3. Derive facility presentation from authoritative state and keep sidecar open/selected/tab state as UI-only state.
+# Automatic three-level watch-tower siting and slab foundations
+
+Status: Deprecated as of July 11, 2026.
+
+- Watch towers are now sited by the player within their owning town's service boundary instead of choosing an automatic near-town tile.
+- The former three-level ceiling is replaced by eight construction-backed levels with exponentially increasing upgrade costs.
+- Full-width dirt/foundation slabs are replaced by independently grounded concrete piers at each structural leg.
+- Future tower gameplay belongs in fire simulation placement/construction boundaries; tower meshes and radius overlays remain rendering-only consumers.
+- Centre-tile-only slope checks, arbitrary tower rotation, duplicate model footing pads, sub-day construction, and maintenance-only upgrades are also obsolete. Placement now validates the shared four-leg footprint, towers are grid-aligned with one pier system, and each build or upgrade takes 90 days while upgrades may start in any phase.

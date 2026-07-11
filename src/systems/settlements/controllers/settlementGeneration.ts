@@ -20,7 +20,7 @@ import {
 import { createEmptySettlementGrowthPlan } from "../sim/townGrowth.js";
 import { createPrecomputedSettlementGrowthPlan } from "../sim/futureSettlementGrowthPlan.js";
 import { bootstrapInitialTowns } from "../sim/initialTownBootstrap.js";
-import { ensureDefaultWaterTowers } from "../sim/waterTowerInfrastructure.js";
+import { getWaterTowerForTown, reserveGenerationWaterTowers } from "../sim/waterTowerInfrastructure.js";
 import { applyGuaranteedTownConnectorRoadbedCleanup, buildGuaranteedTownConnectorPath } from "../sim/guaranteedTownConnector.js";
 import {
   SETTLEMENT_PLOT_MAX_ANGLE_DEG,
@@ -1341,6 +1341,103 @@ const pushFrontier = (
   });
 };
 
+const getTownCivicHubCenter = (state: WorldState, town: Town): Point => {
+  const tower = getWaterTowerForTown(state, town.id);
+  return tower ? { x: Math.round(tower.x), y: Math.round(tower.y) } : { x: town.x, y: town.y };
+};
+
+const buildCivicHubPerimeter = (center: Point): Point[] => {
+  const perimeter: Point[] = [];
+  for (let x = center.x - 2; x <= center.x + 2; x += 1) {
+    perimeter.push({ x, y: center.y - 2 });
+  }
+  for (let y = center.y - 1; y <= center.y + 2; y += 1) {
+    perimeter.push({ x: center.x + 2, y });
+  }
+  for (let x = center.x + 1; x >= center.x - 2; x -= 1) {
+    perimeter.push({ x, y: center.y + 2 });
+  }
+  for (let y = center.y + 1; y >= center.y - 1; y -= 1) {
+    perimeter.push({ x: center.x - 2, y });
+  }
+  return perimeter;
+};
+
+const buildCivicHubLoop = (
+  state: WorldState,
+  roadAdapter: SettlementRoadAdapter,
+  center: Point,
+  townId: number
+): boolean => {
+  if (!roadAdapter.carveRoadPath) {
+    return false;
+  }
+  const perimeter = buildCivicHubPerimeter(center);
+  return roadAdapter.carveRoadPath(state, [...perimeter, perimeter[0]!], [], {
+    diagnosticRouteGroup: "localSettlement",
+    diagnosticRouteId: `civic-hub:${townId}`,
+    diagnosticRouteLabel: `Town ${townId} civic hub`
+  });
+};
+
+const buildTowerCenteredStreetSkeleton = (
+  state: WorldState,
+  town: Town,
+  primaryDir: { dx: number; dy: number },
+  plan: SettlementPlacementResult,
+  roadAdapter: SettlementRoadAdapter,
+  isBaseTown: boolean
+): LocalStreetBuildResult => {
+  const center = getTownCivicHubCenter(state, town);
+  const archetype = isBaseTown ? "crossroads" : town.streetArchetype;
+  const branchDir = getSecondaryDirection(primaryDir);
+  const primaryLength = isBaseTown || archetype === "crossroads" ? 4 : 3;
+  const secondaryLength = isBaseTown || archetype === "crossroads" ? 3 : 2;
+  const frontiers: TownGrowthFrontier[] = [];
+  buildCivicHubLoop(state, roadAdapter, center, town.id);
+  const directions = [
+    { dir: primaryDir, length: primaryLength, branchType: "primary" as const, active: true },
+    { dir: { dx: -primaryDir.dx, dy: -primaryDir.dy }, length: primaryLength, branchType: "primary" as const, active: true },
+    { dir: branchDir, length: secondaryLength, branchType: "secondary" as const, active: archetype !== "ribbon" },
+    { dir: { dx: -branchDir.dx, dy: -branchDir.dy }, length: secondaryLength, branchType: "secondary" as const, active: isBaseTown || archetype === "crossroads" }
+  ];
+  for (const entry of directions) {
+    const attachment = { x: center.x + entry.dir.dx * 2, y: center.y + entry.dir.dy * 2 };
+    const end = carveStreetArm(state, roadAdapter, attachment, entry.dir.dx, entry.dir.dy, entry.length, plan);
+    pushFrontier(frontiers, center, end, entry.dir.dx, entry.dir.dy, entry.branchType, entry.active);
+  }
+  return { frontiers, streetArchetype: archetype };
+};
+
+const buildTowerCenteredStreetSkeletonAsync = async (
+  state: WorldState,
+  town: Town,
+  primaryDir: { dx: number; dy: number },
+  plan: SettlementPlacementResult,
+  roadAdapter: SettlementRoadAdapter,
+  isBaseTown: boolean
+): Promise<LocalStreetBuildResult> => {
+  const center = getTownCivicHubCenter(state, town);
+  const archetype = isBaseTown ? "crossroads" : town.streetArchetype;
+  const branchDir = getSecondaryDirection(primaryDir);
+  const primaryLength = isBaseTown || archetype === "crossroads" ? 4 : 3;
+  const secondaryLength = isBaseTown || archetype === "crossroads" ? 3 : 2;
+  const frontiers: TownGrowthFrontier[] = [];
+  buildCivicHubLoop(state, roadAdapter, center, town.id);
+  const directions = [
+    { dir: primaryDir, length: primaryLength, branchType: "primary" as const, active: true },
+    { dir: { dx: -primaryDir.dx, dy: -primaryDir.dy }, length: primaryLength, branchType: "primary" as const, active: true },
+    { dir: branchDir, length: secondaryLength, branchType: "secondary" as const, active: archetype !== "ribbon" },
+    { dir: { dx: -branchDir.dx, dy: -branchDir.dy }, length: secondaryLength, branchType: "secondary" as const, active: isBaseTown || archetype === "crossroads" }
+  ];
+  for (const entry of directions) {
+    const attachment = { x: center.x + entry.dir.dx * 2, y: center.y + entry.dir.dy * 2 };
+    const end = await carveStreetArmAsync(state, roadAdapter, attachment, entry.dir.dx, entry.dir.dy, entry.length, plan);
+    pushFrontier(frontiers, center, end, entry.dir.dx, entry.dir.dy, entry.branchType, entry.active);
+  }
+  return { frontiers, streetArchetype: archetype };
+};
+
 const buildCompactStreetSkeleton = (
   state: WorldState,
   town: Town,
@@ -1433,6 +1530,9 @@ const buildLocalStreetSkeleton = (
   roadAdapter: SettlementRoadAdapter,
   isBaseTown: boolean
 ): LocalStreetBuildResult => {
+  if (getWaterTowerForTown(state, town.id)) {
+    return buildTowerCenteredStreetSkeleton(state, town, primaryDir, plan, roadAdapter, isBaseTown);
+  }
   const archetype = isBaseTown ? "crossroads" : town.streetArchetype;
   if (isBaseTown || isCompactTownArchetype(archetype)) {
     const compact = buildCompactStreetSkeleton(state, town, primaryDir, plan, roadAdapter, isBaseTown);
@@ -1471,6 +1571,9 @@ const buildLocalStreetSkeletonAsync = async (
   roadAdapter: SettlementRoadAdapter,
   isBaseTown: boolean
 ): Promise<LocalStreetBuildResult> => {
+  if (getWaterTowerForTown(state, town.id)) {
+    return buildTowerCenteredStreetSkeletonAsync(state, town, primaryDir, plan, roadAdapter, isBaseTown);
+  }
   const archetype = isBaseTown ? "crossroads" : town.streetArchetype;
   if (isBaseTown || isCompactTownArchetype(archetype)) {
     const compact = await buildCompactStreetSkeletonAsync(state, town, primaryDir, plan, roadAdapter, isBaseTown);
@@ -1742,12 +1845,9 @@ const areRoadAnchorsAlreadyLocallyConnected = (
   if (!isRoadLikeTile(state, left.x, left.y) || !isRoadLikeTile(state, right.x, right.y)) {
     return false;
   }
-  const direct = Math.max(1, Math.hypot(right.x - left.x, right.y - left.y));
-  const maxSteps = Math.max(8, Math.ceil(direct * 1.45 + 6));
   const startIdx = indexFor(state.grid, left.x, left.y);
   const targetIdx = indexFor(state.grid, right.x, right.y);
   const visited = new Uint8Array(state.grid.totalTiles);
-  const depth = new Int16Array(state.grid.totalTiles);
   const queue = new Int32Array(state.grid.totalTiles);
   let head = 0;
   let tail = 0;
@@ -1757,9 +1857,6 @@ const areRoadAnchorsAlreadyLocallyConnected = (
   while (head < tail) {
     const current = queue[head];
     head += 1;
-    if (depth[current] >= maxSteps) {
-      continue;
-    }
     const cx = current % state.grid.cols;
     const cy = Math.floor(current / state.grid.cols);
     const neighbors = roadAdapter.collectConnectedRoadNeighbors(state, cx, cy);
@@ -1773,7 +1870,6 @@ const areRoadAnchorsAlreadyLocallyConnected = (
         return true;
       }
       visited[nIdx] = 1;
-      depth[nIdx] = depth[current] + 1;
       queue[tail] = nIdx;
       tail += 1;
     }
@@ -2196,39 +2292,6 @@ const ensureTownLocalStreetLinks = (
     if (!localStreet) {
       continue;
     }
-    if (!areRoadAnchorsAlreadyLocallyConnected(state, roadAdapter, baseAnchor, localStreet) && (
-      tryCarveCachedRoad(
-        state,
-        roadAdapter,
-        baseAnchor,
-        localStreet,
-        buildBoundedConnectorOptions(
-          state,
-          baseAnchor,
-          localStreet,
-          plan,
-          withDiagnosticRouteGroup(buildConnectorRoadOptions(plan), "localSettlement")
-        ),
-        failedCache
-      ) ||
-      tryCarveCachedRoad(
-        state,
-        roadAdapter,
-        baseAnchor,
-        localStreet,
-        buildBoundedConnectorOptions(
-          state,
-          baseAnchor,
-          localStreet,
-          plan,
-          withDiagnosticRouteGroup(buildSwitchbackConnectorRoadOptions(plan), "localSettlement")
-        ),
-        failedCache
-      ) ||
-      carveRescueConnectorWithWaypoints(state, roadAdapter, baseAnchor, localStreet, plan, failedCache, true, "localSettlement")
-    )) {
-      repaired = true;
-    }
     const selectedAnchor = resolveTownRoadAnchor(state, town, baseAnchor, roadAdapter);
     if (localStreet.x === selectedAnchor.x && localStreet.y === selectedAnchor.y) {
       continue;
@@ -2285,39 +2348,6 @@ const ensureTownLocalStreetLinksAsync = async (
     const localStreet = findStreetNearTown(state, { x: town.x, y: town.y }, 10);
     if (!localStreet) {
       continue;
-    }
-    if (!areRoadAnchorsAlreadyLocallyConnected(state, roadAdapter, baseAnchor, localStreet) && (
-      await tryCarveCachedRoadAsync(
-        state,
-        roadAdapter,
-        baseAnchor,
-        localStreet,
-        buildBoundedConnectorOptions(
-          state,
-          baseAnchor,
-          localStreet,
-          plan,
-          withDiagnosticRouteGroup(buildConnectorRoadOptions(plan), "localSettlement")
-        ),
-        failedCache
-      ) ||
-      await tryCarveCachedRoadAsync(
-        state,
-        roadAdapter,
-        baseAnchor,
-        localStreet,
-        buildBoundedConnectorOptions(
-          state,
-          baseAnchor,
-          localStreet,
-          plan,
-          withDiagnosticRouteGroup(buildSwitchbackConnectorRoadOptions(plan), "localSettlement")
-        ),
-        failedCache
-      ) ||
-      await carveRescueConnectorWithWaypointsAsync(state, roadAdapter, baseAnchor, localStreet, plan, failedCache, true, "localSettlement")
-    )) {
-      repaired = true;
     }
     const selectedAnchor = resolveTownRoadAnchor(state, town, baseAnchor, roadAdapter);
     if (localStreet.x === selectedAnchor.x && localStreet.y === selectedAnchor.y) {
@@ -3427,6 +3457,7 @@ export const executeSettlementPlacementPlan = (
   const repairEnabled = isConnectivityRepairEnabled(realized);
   const bootstrapRoadAdapter = createRouteGroupRoadAdapter(roadAdapter, "initialSettlementBootstrap");
   const futureGrowthRoadAdapter = createRouteGroupRoadAdapter(roadAdapter, "futureGrowthPrecompute");
+  reserveGenerationWaterTowers(state);
   buildInitialRoadSkeletons(state, towns, roadAdapter, realized);
   if (intertownPasses >= 1) {
     connectTownRoads(state, towns, roadAdapter, realized, intertownFailedCache, 1);
@@ -3436,7 +3467,6 @@ export const executeSettlementPlacementPlan = (
   }
   roadAdapter.backfillRoadEdgesFromAdjacency(state);
   bootstrapInitialTowns(state, bootstrapRoadAdapter, realized.townDensity ?? 0.5);
-  ensureDefaultWaterTowers(state);
   if (repairEnabled) {
     ensureTownLocalRoadAnchors(state, towns, roadAdapter, realized);
   }
@@ -3488,6 +3518,7 @@ export const executeSettlementPlacementPlanAsync = async (
   const repairEnabled = isConnectivityRepairEnabled(realized);
   const bootstrapRoadAdapter = createRouteGroupRoadAdapter(roadAdapter, "initialSettlementBootstrap");
   const futureGrowthRoadAdapter = createRouteGroupRoadAdapter(roadAdapter, "futureGrowthPrecompute");
+  reserveGenerationWaterTowers(state);
   await buildInitialRoadSkeletonsAsync(state, towns, roadAdapter, realized);
   if (intertownPasses >= 1) {
     await connectTownRoadsAsync(state, towns, roadAdapter, realized, intertownFailedCache, 1);
@@ -3497,7 +3528,6 @@ export const executeSettlementPlacementPlanAsync = async (
   }
   roadAdapter.backfillRoadEdgesFromAdjacency(state);
   bootstrapInitialTowns(state, bootstrapRoadAdapter, realized.townDensity ?? 0.5);
-  ensureDefaultWaterTowers(state);
   if (repairEnabled) {
     await ensureTownLocalRoadAnchorsAsync(state, towns, roadAdapter, realized);
   }

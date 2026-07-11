@@ -1,12 +1,14 @@
 import assert from "node:assert/strict";
 
 import { RNG } from "../dist/core/rng.js";
-import { computeChecksum, createInitialState, syncTileSoA } from "../dist/core/state.js";
+import { computeChecksum, createInitialState, syncTileSoA, TILE_TYPE_IDS } from "../dist/core/state.js";
 import { applyFuel } from "../dist/core/tiles.js";
 import {
   buildWatchTowerForTown,
+  quoteWatchTowerPlacement,
   getWatchTowerForTown,
   stepFireDetection,
+  stepWatchTowerConstruction,
   upgradeWatchTowerForTown
 } from "../dist/systems/fire/sim/fireDetection.js";
 import { captureFireRenderSnapshot } from "../dist/systems/fire/rendering/fireRenderSnapshot.js";
@@ -217,15 +219,65 @@ const ignite = (state, x, y) => {
   state.budget = 5000;
   state.towns = [createTown(3, 32, 32, 2)];
   assert.equal(buildWatchTowerForTown(state, 3).ok, true, "tower should build");
+  stepWatchTowerConstruction(state, 89);
+  assert.equal(getWatchTowerForTown(state, 3).active, false, "tower should remain offline before day 90");
+  stepWatchTowerConstruction(state, 1);
   const level1 = { ...getWatchTowerForTown(state, 3) };
+  state.phase = "fire";
   assert.equal(upgradeWatchTowerForTown(state, 3).ok, true, "tower should upgrade to level 2");
+  assert.equal(getWatchTowerForTown(state, 3).active, false, "tower should be offline during upgrade");
+  assert.equal(getWatchTowerForTown(state, 3).constructionDaysRemaining, 90, "each upgrade should take 90 days");
+  stepWatchTowerConstruction(state, 90);
   const level2 = { ...getWatchTowerForTown(state, 3) };
   assert.equal(upgradeWatchTowerForTown(state, 3).ok, true, "tower should upgrade to level 3");
+  stepWatchTowerConstruction(state, 90);
   const level3 = getWatchTowerForTown(state, 3);
   assert.equal(level2.detectionRadius > level1.detectionRadius, true, "level 2 should improve radius");
   assert.equal(level2.detectionDelayDays < level1.detectionDelayDays, true, "level 2 should improve delay");
   assert.equal(level3.accuracyRadius < level2.accuracyRadius, true, "level 3 should improve accuracy");
   console.log("tower upgrades: ok");
+}
+
+{
+  const state = buildState();
+  state.phase = "maintenance";
+  state.budget = 1_000_000;
+  state.towns = [createTown(9, 32, 32, 2)];
+  const roadIdx = 32 * state.grid.cols + 40;
+  state.tileTypeId[roadIdx] = TILE_TYPE_IDS.road;
+  state.tiles[roadIdx].type = "road";
+  const roadQuote = quoteWatchTowerPlacement(state, 9, 40, 32);
+  assert.equal(roadQuote.valid, false, "road tiles must reject tower placement");
+  for (let oy = -1; oy <= 1; oy += 1) for (let ox = -1; ox <= 1; ox += 1) {
+    state.tileElevation[(32 + oy) * state.grid.cols + 42 + ox] = 0.7;
+  }
+  const highQuote = quoteWatchTowerPlacement(state, 9, 42, 32);
+  assert.equal(highQuote.valid, true, "clear high ground should be placeable");
+  assert.equal(highQuote.elevationMultiplier > 1, true, "high ground should improve radius");
+  assert.equal(buildWatchTowerForTown(state, 9, { x: 42, y: 32 }).ok, true, "quoted site should build");
+  assert.equal(getWatchTowerForTown(state, 9).constructionDaysRemaining, 90, "initial build should take 90 days");
+  stepWatchTowerConstruction(state, 90);
+  for (let target = 2; target <= 8; target += 1) {
+    assert.equal(upgradeWatchTowerForTown(state, 9).ok, true, `tower should begin level ${target}`);
+    stepWatchTowerConstruction(state, 90);
+    assert.equal(getWatchTowerForTown(state, 9).level, target, `tower should complete level ${target}`);
+  }
+  assert.equal(upgradeWatchTowerForTown(state, 9).ok, false, "level 9 must be unavailable");
+  console.log("tower placement and level cap: ok");
+}
+
+{
+  const state = buildState();
+  state.phase = "maintenance";
+  state.budget = 5000;
+  state.towns = [createTown(11, 32, 32, 2)];
+  state.tileElevation[32 * state.grid.cols + 41] = 1;
+  state.tileElevation[33 * state.grid.cols + 41] = 1;
+  const cliffQuote = quoteWatchTowerPlacement(state, 11, 40, 32);
+  assert.equal(cliffQuote.valid, false, "footprint crossing a cliff must be rejected");
+  assert.equal(cliffQuote.invalidReasonCode, "cliff", "cliff rejection should expose a stable reason code");
+  assert.equal(cliffQuote.maxFootprintElevationDelta > 0, true, "quote should report footprint elevation delta");
+  console.log("tower cliff footprint: ok");
 }
 
 console.log("\nFire detection regression passed.");

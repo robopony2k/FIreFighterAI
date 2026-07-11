@@ -229,7 +229,8 @@ export interface Town extends Point {
 }
 
 export type WatchTowerTypeId = "town-watch-tower";
-export type WatchTowerLevel = 1 | 2 | 3;
+export type WatchTowerLevel = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8;
+export type WatchTowerConstructionKind = "build" | "upgrade";
 
 export interface WatchTower {
   id: number;
@@ -243,6 +244,11 @@ export interface WatchTower {
   accuracyRadius: number;
   active: boolean;
   builtCareerDay: number;
+  siteElevationMultiplier: number;
+  roadAccessDistance: number;
+  constructionKind: WatchTowerConstructionKind | null;
+  constructionTargetLevel: WatchTowerLevel | null;
+  constructionDaysRemaining: number;
 }
 
 export type FireKnowledgeTileState = 0 | 1 | 2;

@@ -38,11 +38,27 @@ export const WATCH_TOWER_LEVEL_TUNING: Record<WatchTowerLevel, WatchTowerLevelTu
     accuracyRadius: 3,
     smokeSensitivity: 1.24,
     buildCost: 0,
-    upgradeCost: 980
-  }
+    upgradeCost: 1360
+  },
+  4: { level: 4, detectionRadius: 48, detectionDelayDays: 0.035, accuracyRadius: 2.5, smokeSensitivity: 1.36, buildCost: 0, upgradeCost: 2720 },
+  5: { level: 5, detectionRadius: 58, detectionDelayDays: 0.028, accuracyRadius: 2.1, smokeSensitivity: 1.46, buildCost: 0, upgradeCost: 5440 },
+  6: { level: 6, detectionRadius: 68, detectionDelayDays: 0.023, accuracyRadius: 1.8, smokeSensitivity: 1.54, buildCost: 0, upgradeCost: 10880 },
+  7: { level: 7, detectionRadius: 78, detectionDelayDays: 0.02, accuracyRadius: 1.6, smokeSensitivity: 1.6, buildCost: 0, upgradeCost: 21760 },
+  8: { level: 8, detectionRadius: 88, detectionDelayDays: 0.018, accuracyRadius: 1.5, smokeSensitivity: 1.65, buildCost: 0, upgradeCost: 43520 }
 };
 
-export const WATCH_TOWER_MAX_LEVEL: WatchTowerLevel = 3;
+export const WATCH_TOWER_MAX_LEVEL: WatchTowerLevel = 8;
+export const WATCH_TOWER_PLACEMENT_CONFIG = {
+  townServiceRadius: 32,
+  roadGraceTiles: 2,
+  accessCostPerTile: 0.05,
+  maxAccessCostMultiplier: 2,
+  elevationBonusPer10Meters: 0.01,
+  maxElevationBonus: 0.5,
+  maxFootprintElevationDelta: 0.12,
+  maxFootprintGrade: 0.18,
+  constructionDaysPerLevel: 90
+} as const;
 
 export const FIRE_DETECTION_CONFIG = {
   minActiveFire: 0.02,

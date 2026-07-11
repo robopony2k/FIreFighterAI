@@ -14,6 +14,28 @@ Touchpoints: `src/systems/roads/`, `src/mapgen/roads.ts`, `src/mapgen/stages/Roa
 Constraints: keep road planning simulation-first, deterministic, mapgen-authored, and independent of render behavior; do not add more production solver layers without first reducing repeated bad connector attempts.
 
 Status: done
+TSK-0162: Add tactical watch tower placement and extended upgrades
+
+Type: feature
+
+Why: Automatic tower sites could overlap roads and offered no terrain or access tradeoff, while three upgrades and a broad dirt slab limited strategy and visual growth.
+
+Done when:
+- [x] Players place one tower per town on valid road-free terrain with authoritative high-ground, access-cost, and construction-time previews.
+- [x] New construction and upgrades remain offline until complete, and levels extend to eight with doubling raise prices.
+- [x] Tower geometry uses independently grounded concrete leg piers and visibly taller scaffold tiers without scaling the cabin indefinitely.
+- [x] Placement and selected-facility states project the effective detection radius over terrain.
+- [x] Existing saves normalize legacy towers as completed neutral sites and focused fire-detection/type checks pass.
+- [x] Placement validates the actual leg footprint against cliffs and blocked terrain, with one grid-aligned pier system directly beneath the scaffold legs.
+- [x] A cursor-following quote shows authoritative cost, access surcharge, 90-day duration, radius, elevation benefit, or rejection reason.
+- [x] Initial builds remain maintenance-only, while 90-day upgrades may begin in any phase and stay offline until completion.
+- [x] Tower construction advances with the always-running calendar even without fire activity, and clicking a rendered tower opens its owning Town Watch Tower interface.
+
+Touchpoints: `src/systems/fire/`, `src/ui/runtime/town-panel/`, `src/render/threeTest.ts`, `src/core/types.ts`
+
+Constraints: keep fire knowledge separate from authoritative fire state, preserve one tower per town, and keep gameplay calculations out of rendering.
+
+Status: done
 
 TSK-0159: Add town water towers V1 refill utility
 

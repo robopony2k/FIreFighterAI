@@ -43,7 +43,7 @@ export type TileTextureDirtyBounds = {
 };
 
 export type TileTextureUpdateTarget = {
-  texture: THREE.DataTexture;
+  sourceTexture: THREE.DataTexture;
   dirtyTileBounds: TileTextureDirtyBounds;
 };
 
@@ -122,13 +122,23 @@ const createTexture = (data: Uint8Array, sampleCols: number, sampleRows: number)
   return texture;
 };
 
+const copyTextureToWorkingRows = (source: Uint8Array, sampleCols: number, sampleRows: number): Uint8Array => {
+  const data = new Uint8Array(source.length);
+  const rowStride = sampleCols * 4;
+  for (let y = 0; y < sampleRows; y += 1) {
+    const src = (sampleRows - 1 - y) * rowStride;
+    data.set(source.subarray(src, src + rowStride), y * rowStride);
+  }
+  return data;
+};
+
 const normalizeBuildOptions = (
   options?: TileTextureUpdateTarget | TileTextureBuildOptions
 ): Required<Pick<TileTextureBuildOptions, "includeDynamicFireScorch">> & Pick<TileTextureBuildOptions, "updateTarget"> => {
   if (!options) {
     return { updateTarget: undefined, includeDynamicFireScorch: true };
   }
-  if ("texture" in options) {
+  if ("sourceTexture" in options) {
     return { updateTarget: options, includeDynamicFireScorch: true };
   }
   return {
@@ -175,12 +185,13 @@ export const buildTileTexture = (
   const debugScalarField = sample.debugScalarField;
   const climateDryness = clamp(sample.climateDryness ?? 0.35, 0, 1);
   const ashId = TILE_TYPE_IDS.ash;
-  const reusableData =
-    updateTarget?.texture.image?.width === sampleCols &&
-    updateTarget.texture.image?.height === sampleRows &&
-    updateTarget.texture.image?.data instanceof Uint8Array
-      ? updateTarget.texture.image.data
+  const sourceData =
+    updateTarget?.sourceTexture.image?.width === sampleCols &&
+    updateTarget.sourceTexture.image?.height === sampleRows &&
+    updateTarget.sourceTexture.image?.data instanceof Uint8Array
+      ? updateTarget.sourceTexture.image.data
       : null;
+  const reusableData = sourceData ? copyTextureToWorkingRows(sourceData, sampleCols, sampleRows) : null;
   const dirtyBounds = reusableData ? updateTarget?.dirtyTileBounds : undefined;
   const minDirtyCol = dirtyBounds ? clamp(Math.floor(dirtyBounds.minX / step) - 1, 0, sampleCols - 1) : 0;
   const maxDirtyCol = dirtyBounds ? clamp(Math.ceil(dirtyBounds.maxX / step) + 1, 0, sampleCols - 1) : sampleCols - 1;
@@ -556,15 +567,7 @@ export const buildTileTexture = (
     }
   }
   if (reusableData && updateTarget) {
-    updateTarget.texture.clearUpdateRanges();
-    for (let row = minDirtyRow; row <= maxDirtyRow; row += 1) {
-      const flippedRow = sampleRows - 1 - row;
-      const start = (flippedRow * sampleCols + minDirtyCol) * 4;
-      const count = (maxDirtyCol - minDirtyCol + 1) * 4;
-      updateTarget.texture.addUpdateRange(start, count);
-    }
-    updateTarget.texture.needsUpdate = true;
-    return updateTarget.texture;
+    return createTexture(reusableData, sampleCols, sampleRows);
   }
   return createTexture(data, sampleCols, sampleRows);
 };

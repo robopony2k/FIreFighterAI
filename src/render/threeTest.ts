@@ -17,9 +17,15 @@ import { findBestRoadReferenceForPlot, pickHouseRotationFromRoadMask } from "../
 import { getBuildingLifecycleStageFromId, getBuildingLifecycleStageId } from "../systems/settlements/sim/buildingLifecycle.js";
 import { createConstructionFxRuntime } from "../systems/settlements/rendering/constructionFxRuntime.js";
 import { getProceduralHouseVariantKey } from "../systems/settlements/rendering/proceduralHouseBuilder.js";
-import { createProceduralWaterTowerModel } from "../systems/settlements/rendering/proceduralWaterTowerModel.js";
+import {
+  createProceduralWaterTowerModel,
+  WATER_TOWER_BASE_WIDTH_TILES,
+  WATER_TOWER_FOOTING_SIZE_TILES
+} from "../systems/settlements/rendering/proceduralWaterTowerModel.js";
 import type { RenderBuildingLot } from "../systems/settlements/types/buildingTypes.js";
 import { createProceduralWatchTowerModel } from "../systems/fire/rendering/proceduralWatchTowerModel.js";
+import { getWatchTowerForTown, quoteWatchTowerPlacement } from "../systems/fire/sim/fireDetection.js";
+import { getWatchTowerLegOffsets, WATCH_TOWER_GRID_ROTATION_RADIANS } from "../systems/fire/types/watchTowerFootprint.js";
 import { createFormationProjectionLayer } from "../systems/units/rendering/formationProjectionLayer.js";
 import { createFormationTarget } from "../systems/units/sim/formationProjection.js";
 import { buildEvacuationRenderModel } from "../systems/evacuation/rendering/evacuationRenderModel.js";
@@ -3686,6 +3692,7 @@ export const createThreeTest = (
     selectedFacility = null;
     facilityPanelElements.root.classList.add("hidden");
     facilityPanelElements.content.replaceChildren();
+    refreshWatchTowerOverlay();
   };
 
   const closeTownFacilityForTown = (townId: number): void => {
@@ -3708,6 +3715,7 @@ export const createThreeTest = (
       activeFacilityTabs.get(facilityId) ?? (facility?.type === "hq" ? "squads" : "overview")
     );
     updateTownMetrics();
+    refreshWatchTowerOverlay();
   };
 
   const renderSelectedFacilityPanel = (): void => {
@@ -5493,6 +5501,87 @@ export const createThreeTest = (
 
   const raycaster = new THREE.Raycaster();
   const pointerNdc = new THREE.Vector2();
+  const watchTowerOverlay = new THREE.Group();
+  watchTowerOverlay.name = "watch-tower-coverage-overlay";
+  scene.add(watchTowerOverlay);
+  const watchTowerQuoteTooltip = document.createElement("div");
+  watchTowerQuoteTooltip.className = "watch-tower-placement-quote";
+  Object.assign(watchTowerQuoteTooltip.style, {
+    position: "fixed", zIndex: "10020", pointerEvents: "none", display: "none",
+    maxWidth: "260px", padding: "8px 10px", borderRadius: "6px",
+    background: "rgba(12, 20, 18, 0.92)", color: "#eef7f1", border: "1px solid rgba(120, 220, 170, 0.75)",
+    font: "600 12px/1.35 Barlow, sans-serif", whiteSpace: "pre-line", boxShadow: "0 4px 16px rgba(0,0,0,0.35)"
+  });
+  document.body.appendChild(watchTowerQuoteTooltip);
+  const hideWatchTowerQuoteTooltip = (): void => { watchTowerQuoteTooltip.style.display = "none"; };
+  const showWatchTowerQuoteTooltip = (event: MouseEvent, quote: ReturnType<typeof quoteWatchTowerPlacement>): void => {
+    watchTowerQuoteTooltip.textContent = quote.valid
+      ? `Cost $${quote.totalCost}${quote.accessSurcharge > 0 ? ` (+$${quote.accessSurcharge} access)` : ""}\nConstruction ${quote.constructionDays.toFixed(0)} days\nRadius ${quote.effectiveRadius.toFixed(1)} · High ground +${Math.round((quote.elevationMultiplier - 1) * 100)}%`
+      : quote.reason;
+    watchTowerQuoteTooltip.style.borderColor = quote.valid ? (quote.elevationMultiplier > 1.001 ? "#61d9ff" : "#68e18c") : "#ff5b55";
+    watchTowerQuoteTooltip.style.display = "block";
+    const margin = 10;
+    const offset = 16;
+    const width = watchTowerQuoteTooltip.offsetWidth;
+    const height = watchTowerQuoteTooltip.offsetHeight;
+    watchTowerQuoteTooltip.style.left = `${Math.max(margin, Math.min(window.innerWidth - width - margin, event.clientX + offset))}px`;
+    watchTowerQuoteTooltip.style.top = `${Math.max(margin, Math.min(window.innerHeight - height - margin, event.clientY + offset))}px`;
+  };
+  const clearWatchTowerOverlay = (): void => {
+    while (watchTowerOverlay.children.length > 0) {
+      const child = watchTowerOverlay.children.pop();
+      if (!child) continue;
+      child.traverse((object) => {
+        if (!(object instanceof THREE.Mesh || object instanceof THREE.Line)) return;
+        object.geometry.dispose();
+        const materials = Array.isArray(object.material) ? object.material : [object.material];
+        materials.forEach((material) => material.dispose());
+      });
+    }
+  };
+  const refreshWatchTowerOverlay = (): void => {
+    clearWatchTowerOverlay();
+    if (!lastTerrainSurface) return;
+    const overlaySurface = lastTerrainSurface;
+    const placementTownId = inputState.watchTowerPlacementTownId;
+    const placementTile = inputState.watchTowerPlacementTile;
+    const selectedTower = selectedFacility?.facilityId.startsWith("watch-tower:")
+      ? getWatchTowerForTown(world, selectedFacility.townId)
+      : null;
+    if (placementTownId === null && !selectedTower) return;
+    const tileX = placementTile?.x ?? selectedTower?.x;
+    const tileY = placementTile?.y ?? selectedTower?.y;
+    if (tileX === undefined || tileY === undefined) return;
+    const quote = placementTownId !== null ? quoteWatchTowerPlacement(world, placementTownId, tileX, tileY) : null;
+    const radius = quote?.effectiveRadius ?? selectedTower?.detectionRadius ?? 0;
+    const valid = quote?.valid ?? true;
+    const elevated = (quote?.elevationMultiplier ?? selectedTower?.siteElevationMultiplier ?? 1) > 1.001;
+    const color = valid ? (selectedTower?.constructionKind ? 0xd89a45 : elevated ? 0x61d9ff : 0x68e18c) : 0xff5b55;
+    const centerX = overlaySurface.toWorldX(tileX + 0.5);
+    const centerZ = overlaySurface.toWorldZ(tileY + 0.5);
+    const centerY = overlaySurface.heightAtTile(Math.round(tileX), Math.round(tileY)) * overlaySurface.heightScale + 0.06;
+    const tileSpan = overlaySurface.size.width / Math.max(1, world.grid.cols);
+    const points = Array.from({ length: 97 }, (_, index) => {
+      const angle = (index / 96) * Math.PI * 2;
+      const sampleX = tileX + 0.5 + Math.cos(angle) * radius;
+      const sampleY = tileY + 0.5 + Math.sin(angle) * radius;
+      const x = overlaySurface.toWorldX(sampleX);
+      const z = overlaySurface.toWorldZ(sampleY);
+      const sx = Math.max(0, Math.min(world.grid.cols - 1, Math.floor(sampleX)));
+      const sy = Math.max(0, Math.min(world.grid.rows - 1, Math.floor(sampleY)));
+      const y = overlaySurface.heightAtTile(sx, sy) * overlaySurface.heightScale + 0.08;
+      return new THREE.Vector3(x, y, z);
+    });
+    watchTowerOverlay.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(points), new THREE.LineBasicMaterial({ color, transparent: true, opacity: 0.9 })));
+    if (quote) {
+      const ghost = createProceduralWatchTowerModel(1);
+      ghost.position.set(centerX, centerY, centerZ);
+      ghost.rotation.y = WATCH_TOWER_GRID_ROTATION_RADIANS;
+      ghost.scale.setScalar(Math.max(0.7, Math.min(1.2, tileSpan)));
+      ghost.traverse((object) => { if (object instanceof THREE.Mesh) object.material = new THREE.MeshBasicMaterial({ color, transparent: true, opacity: valid ? 0.42 : 0.25, wireframe: !valid }); });
+      watchTowerOverlay.add(ghost);
+    }
+  };
   let lastHoverPickAt = 0;
   type TerrainPick = { tileX: number; tileY: number; worldX: number; worldY: number };
   const pickTerrainTile = (event: MouseEvent): TerrainPick | null => {
@@ -5626,6 +5715,21 @@ export const createThreeTest = (
     if (!running) {
       return;
     }
+    if (inputState.watchTowerPlacementTownId !== null) {
+      const placementHit = pickTerrainTile(event);
+      const previousTile = inputState.watchTowerPlacementTile;
+      inputState.watchTowerPlacementTile = placementHit ? { x: placementHit.tileX, y: placementHit.tileY } : null;
+      if (placementHit && (previousTile?.x !== placementHit.tileX || previousTile?.y !== placementHit.tileY)) {
+        const quote = quoteWatchTowerPlacement(world, inputState.watchTowerPlacementTownId, placementHit.tileX, placementHit.tileY);
+        dispatchStatusCommand(quote.valid
+          ? `Tower preview: $${quote.totalCost}, ${quote.constructionDays.toFixed(2)}d, radius ${quote.effectiveRadius.toFixed(1)}, high ground +${Math.round((quote.elevationMultiplier - 1) * 100)}%.`
+          : quote.reason);
+      }
+      if (placementHit) showWatchTowerQuoteTooltip(event, quoteWatchTowerPlacement(world, inputState.watchTowerPlacementTownId, placementHit.tileX, placementHit.tileY));
+      else hideWatchTowerQuoteTooltip();
+      refreshWatchTowerOverlay();
+      return;
+    }
     if (isFormationDrag) {
       const hit = pickTerrainTile(event);
       if (hit) {
@@ -5663,6 +5767,7 @@ export const createThreeTest = (
   };
 
   const handleCanvasMouseLeave = (): void => {
+    hideWatchTowerQuoteTooltip();
     clearDebugHover();
     cancelFormationDrag();
   };
@@ -5677,6 +5782,10 @@ export const createThreeTest = (
       return;
     }
     if (event.key === "Escape") {
+      inputState.watchTowerPlacementTownId = null;
+      inputState.watchTowerPlacementTile = null;
+      hideWatchTowerQuoteTooltip();
+      refreshWatchTowerOverlay();
       selectedTownId = null;
       closeTownFacility();
       hoverPeekTownId = null;
@@ -5700,6 +5809,15 @@ export const createThreeTest = (
     if (!running) {
       return;
     }
+    if (inputState.watchTowerPlacementTownId !== null) {
+      const placementHit = pickTerrainTile(event);
+      if (placementHit) {
+        dispatchSelectionAction("watch-tower-build", { townId: String(inputState.watchTowerPlacementTownId), x: String(placementHit.tileX), y: String(placementHit.tileY) });
+      }
+      refreshWatchTowerOverlay();
+      if (inputState.watchTowerPlacementTownId === null) hideWatchTowerQuoteTooltip();
+      return;
+    }
     const rect = canvas.getBoundingClientRect();
     const scaleX = rect.width > 0 ? hudState.viewport.width / rect.width : 1;
     const scaleY = rect.height > 0 ? hudState.viewport.height / rect.height : 1;
@@ -5708,6 +5826,21 @@ export const createThreeTest = (
     if (!THREE_TEST_DISABLE_HUD) {
       const handled = handleHudClick(x, y, world, hudState, dispatchSelectionAction);
       if (handled) {
+        return;
+      }
+    }
+    if (structureOverlayGroup) {
+      pointerNdc.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+      pointerNdc.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+      raycaster.setFromCamera(pointerNdc, camera);
+      const structureHits = raycaster.intersectObject(structureOverlayGroup, true);
+      for (const hit of structureHits) {
+        let target: THREE.Object3D | null = hit.object;
+        while (target && !Number.isFinite(target.userData?.watchTowerTownId)) target = target.parent;
+        if (!target) continue;
+        const towerTownId = Number(target.userData.watchTowerTownId);
+        openTownFacility(towerTownId, `watch-tower:${towerTownId}`);
+        inputState.lastInteractionTime = performance.now();
         return;
       }
     }
@@ -6877,8 +7010,7 @@ export const createThreeTest = (
   ): void => {
     const structureRevision = sample.structureRevision ?? -1;
     const watchTowerVisualKey = (sample.watchTowers ?? [])
-      .filter((tower) => tower.active)
-      .map((tower) => `${tower.id}:${tower.level}:${tower.x.toFixed(2)},${tower.y.toFixed(2)}`)
+      .map((tower) => `${tower.id}:${tower.level}:${tower.active ? 1 : 0}:${tower.x.toFixed(2)},${tower.y.toFixed(2)}`)
       .join("|");
     const waterTowerVisualKey = (sample.waterTowers ?? [])
       .filter((tower) => tower.active)
@@ -7358,38 +7490,38 @@ export const createThreeTest = (
       }
     }
 
-    const activeWatchTowers = (sample.watchTowers ?? []).filter((tower) => tower.active);
-    if (activeWatchTowers.length > 0) {
-      activeWatchTowers.forEach((tower) => {
+    const visibleWatchTowers = sample.watchTowers ?? [];
+    if (visibleWatchTowers.length > 0) {
+      visibleWatchTowers.forEach((tower) => {
         const tileX = clampToRange(Math.round(tower.x), 0, cols - 1);
         const tileY = clampToRange(Math.round(tower.y), 0, rows - 1);
         const centerX = surface.toWorldX(tileX + 0.5);
         const centerZ = surface.toWorldZ(tileY + 0.5);
-        const grounding = resolveStructureGrounding({
-          surface: sample,
-          minTileX: Math.max(0, tileX - 1),
-          maxTileX: Math.min(cols - 1, tileX + 1),
-          minTileY: Math.max(0, tileY - 1),
-          maxTileY: Math.min(rows - 1, tileY + 1),
-          heightScale: surface.heightScale,
-          heightAtTileCoord: surface.heightAtTileCoord
-        });
-        const supportTop = grounding.foundationTop;
-        const supportBottom = grounding.foundationBottom;
-        const rotation = noiseAt(tower.id + (sample.worldSeed ?? 0)) * Math.PI * 2;
+        const legOffsets = getWatchTowerLegOffsets();
+        const legGrounds = legOffsets.map((offset) => surface.heightAtTileCoord(tileX + 0.5 + offset.x, tileY + 0.5 + offset.y) * surface.heightScale);
+        const supportTop = Math.max(...legGrounds);
+        const rotation = WATCH_TOWER_GRID_ROTATION_RADIANS;
         const towerModel = createProceduralWatchTowerModel(tower.level);
+        towerModel.userData.watchTowerTownId = tower.townId;
+        towerModel.userData.watchTowerId = tower.id;
+        if (!tower.active) towerModel.traverse((object) => { if (object instanceof THREE.Mesh) object.material = new THREE.MeshStandardMaterial({ color: 0xb88b56, transparent: true, opacity: 0.58 }); });
         towerModel.position.set(centerX, supportTop, centerZ);
         towerModel.rotation.set(0, rotation, 0);
         group.add(towerModel);
-        if (supportBottom < supportTop - 0.01) {
-          const foundationHeight = Math.max(0.08, supportTop - supportBottom);
-          const foundation = new THREE.Mesh(buildingGeometry, foundationMaterial.clone());
-          foundation.scale.set(1.8, foundationHeight, 1.8);
-          foundation.position.set(centerX, supportBottom + foundationHeight / 2, centerZ);
-          foundation.rotation.set(0, rotation, 0);
-          foundation.castShadow = true;
-          foundation.receiveShadow = true;
-          group.add(foundation);
+        {
+          const footingMaterial = new THREE.MeshStandardMaterial({ color: 0xb8bab5, roughness: 0.92, metalness: 0.02 });
+          for (let legIndex = 0; legIndex < legOffsets.length; legIndex += 1) {
+            const offset = legOffsets[legIndex];
+            const legGround = legGrounds[legIndex];
+            const foundationHeight = Math.max(0.08, supportTop - legGround + 0.08);
+            const footing = new THREE.Mesh(buildingGeometry, footingMaterial);
+            footing.name = "watch-tower-grounding-pier";
+            footing.scale.set(0.34, foundationHeight, 0.34);
+            footing.position.set(surface.toWorldX(tileX + 0.5 + offset.x), legGround + foundationHeight / 2, surface.toWorldZ(tileY + 0.5 + offset.y));
+            footing.castShadow = true;
+            footing.receiveShadow = true;
+            group.add(footing);
+          }
         }
       });
     }
@@ -7419,13 +7551,20 @@ export const createThreeTest = (
         group.add(towerModel);
         if (supportBottom < supportTop - 0.01) {
           const foundationHeight = Math.max(0.08, supportTop - supportBottom);
-          const foundation = new THREE.Mesh(buildingGeometry, foundationMaterial.clone());
-          foundation.scale.set(2.1, foundationHeight, 2.1);
-          foundation.position.set(centerX, supportBottom + foundationHeight / 2, centerZ);
-          foundation.rotation.set(0, rotation, 0);
-          foundation.castShadow = true;
-          foundation.receiveShadow = true;
-          group.add(foundation);
+          const footingMaterial = new THREE.MeshStandardMaterial({ color: 0xb8bab5, roughness: 0.92, metalness: 0.02 });
+          const halfBase = WATER_TOWER_BASE_WIDTH_TILES * 0.5;
+          for (const [localX, localZ] of [[-halfBase, -halfBase], [halfBase, -halfBase], [halfBase, halfBase], [-halfBase, halfBase]] as const) {
+            const rotatedX = localX * Math.cos(rotation) - localZ * Math.sin(rotation);
+            const rotatedZ = localX * Math.sin(rotation) + localZ * Math.cos(rotation);
+            const footing = new THREE.Mesh(buildingGeometry, footingMaterial);
+            footing.name = "water-tower-grounding-pier";
+            footing.scale.set(WATER_TOWER_FOOTING_SIZE_TILES, foundationHeight, WATER_TOWER_FOOTING_SIZE_TILES);
+            footing.position.set(centerX + rotatedX, supportBottom + foundationHeight / 2, centerZ + rotatedZ);
+            footing.rotation.set(0, rotation, 0);
+            footing.castShadow = true;
+            footing.receiveShadow = true;
+            group.add(footing);
+          }
         }
       });
     }
@@ -7490,6 +7629,7 @@ export const createThreeTest = (
     dockOverlayRoot.remove();
     unitTrayRoot.remove();
     sparkDebugOverlay.remove();
+    watchTowerQuoteTooltip.remove();
     removeUiAudioChangeListener?.();
     removeUiAudioChangeListener = null;
     removeMusicControlsChangeListener?.();
@@ -8847,7 +8987,7 @@ export const createThreeTest = (
           updateTarget:
             currentTexture && intent.dirtyTileBounds
               ? {
-                  texture: currentTexture,
+                  sourceTexture: currentTexture,
                   dirtyTileBounds: intent.dirtyTileBounds
                 }
               : undefined

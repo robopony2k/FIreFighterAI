@@ -55,6 +55,9 @@ const {
   distImport(["systems", "settlements", "constants", "waterTowerConstants.js"])
 );
 const { buildRenderTerrainSample } = await import(distImport(["render", "simView.js"]));
+const { createProceduralWaterTowerModel } = await import(
+  distImport(["systems", "settlements", "rendering", "proceduralWaterTowerModel.js"])
+);
 const {
   BUILDING_RUIN_PERSISTENCE_DAYS
 } = await import(distImport(["systems", "settlements", "constants", "settlementConstants.js"]));
@@ -452,7 +455,36 @@ const runWaterTowerInfrastructureCase = () => {
     assert.equal(left.structureMask[idx], 1, "water tower should reserve structure space");
     assert.equal(left.tileStructure[idx], 0, "water tower should not be recorded as a house structure");
     assert.equal(left.tileTownId[idx], town.id, "water tower should retain town ownership");
+    for (let dy = -1; dy <= 1; dy += 1) {
+      for (let dx = -1; dx <= 1; dx += 1) {
+        const neighborIndex = (tower.y + dy) * left.grid.cols + tower.x + dx;
+        const neighbor = left.tiles[neighborIndex];
+        assert.notEqual(neighbor?.type, "road", "water tower footprint clearance should reject road tiles");
+        if (dx !== 0 || dy !== 0) {
+          assert.equal(left.structureMask[neighborIndex], 0, "water tower footprint clearance should reject nearby structures");
+          assert.equal(left.tileStructure[neighborIndex], 0, "water tower footprint clearance should reject nearby building anchors");
+        }
+      }
+    }
   }
+
+  rebuildGrowthContext(left);
+  for (const tower of left.waterTowers) {
+    const idx = tower.y * left.grid.cols + tower.x;
+    assert.equal(left.structureMask[idx], 1, "growth-context rebuild should preserve water tower reservations");
+  }
+
+  const towerModel = createProceduralWaterTowerModel();
+  assert.equal(
+    towerModel.children.filter((child) => child.name === "tower-footing").length,
+    4,
+    "water tower model should use one concrete footing per scaffold leg"
+  );
+  assert.equal(
+    towerModel.children.some((child) => child.name === "water-tower-foundation"),
+    false,
+    "water tower model should not contain a broad foundation slab"
+  );
 
   const sample = buildRenderTerrainSample(left, buildTreeTypes(left), false, false);
   assert.equal(sample.waterTowers.length, left.towns.length, "render sample should expose water towers");

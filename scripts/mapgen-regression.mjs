@@ -1,4 +1,5 @@
 import { performance } from "node:perf_hooks";
+import assert from "node:assert/strict";
 import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -1739,6 +1740,19 @@ const runCase = async (sizeId, seed) => {
       }
     }
   });
+  assert.equal(state.waterTowers.length, state.towns.length, `${sizeId}:${seed} should generate one water tower per town`);
+  for (const town of state.towns) {
+    const tower = state.waterTowers.find((candidate) => candidate.townId === town.id);
+    assert.ok(tower, `${sizeId}:${seed} town ${town.id} should own a water tower`);
+    const towerIndex = tower.y * state.grid.cols + tower.x;
+    assert.equal(state.structureMask[towerIndex], 1, `${sizeId}:${seed} tower should retain its structure reservation`);
+    assert.notEqual(state.tiles[towerIndex]?.type, "road", `${sizeId}:${seed} tower should not be overwritten by a road`);
+    if (town.id !== 0) {
+      assert.deepEqual({ x: tower.x, y: tower.y }, { x: town.x, y: town.y }, `${sizeId}:${seed} non-HQ tower should occupy its town seed`);
+    } else {
+      assert.notDeepEqual({ x: tower.x, y: tower.y }, state.basePoint, `${sizeId}:${seed} HQ tower should not overlap the firebase`);
+    }
+  }
   assertPhaseOrder(emittedPhases, EXPECTED_DEBUG_PHASE_ORDER, `${sizeId}:${seed}`);
   const durationMs = performance.now() - started;
 

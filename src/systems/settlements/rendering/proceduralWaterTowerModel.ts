@@ -12,6 +12,9 @@ const makeMaterial = (color: number, roughness: number, metalness: number): THRE
 
 const metersToTiles = (meters: number): number => meters / Math.max(0.001, TILE_SIZE);
 
+export const WATER_TOWER_BASE_WIDTH_TILES = metersToTiles(9.4);
+export const WATER_TOWER_FOOTING_SIZE_TILES = metersToTiles(0.65);
+
 const addLadder = (
   group: THREE.Group,
   z: number,
@@ -39,10 +42,10 @@ export const createProceduralWaterTowerModel = (): THREE.Group => {
   const tankMaterial = makeMaterial(0xa6b8bc, 0.52, 0.42);
   const roofMaterial = makeMaterial(0xc2c9ca, 0.55, 0.34);
   const pipeMaterial = makeMaterial(0x394145, 0.66, 0.36);
-  const footingMaterial = makeMaterial(0x4b4036, 0.95, 0.02);
+  const footingMaterial = makeMaterial(0xb8bab5, 0.92, 0.02);
 
   const scaffoldHeight = metersToTiles(15.2);
-  const baseWidth = metersToTiles(9.4);
+  const baseWidth = WATER_TOWER_BASE_WIDTH_TILES;
   const topWidth = metersToTiles(6.4);
   const tankRadius = metersToTiles(3.15);
   const tankHeight = metersToTiles(4.35);
@@ -60,7 +63,7 @@ export const createProceduralWaterTowerModel = (): THREE.Group => {
     legMaterial,
     strutMaterial
   });
-  addFootingPads(group, frame.corners, footingMaterial, metersToTiles(0.8));
+  addFootingPads(group, frame.corners, footingMaterial, WATER_TOWER_FOOTING_SIZE_TILES);
 
   addBoxPart(
     group,
