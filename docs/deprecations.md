@@ -1,5 +1,19 @@
 # Deprecations
 
+## Full-World Static Batches And Full-Terrain Road Overlay
+
+Status: Deprecated as of July 10, 2026.
+
+- Vegetation and repeated structure instances are now partitioned into bounded 64-tile render chunks so the camera and shadow frusta can reject unseen regions without changing model detail or density.
+- The road texture now uses sparse terrain geometry around road-bearing tiles instead of drawing a transparent copy of the complete terrain surface.
+- The zero-weight shadow-blend light is hidden outside directional-light transitions, while both lights remain active for the existing smooth transition window.
+
+Migration guidance:
+
+1. Give new large static instance families spatial chunk bounds instead of disabling frustum culling or creating one world-sized batch.
+2. Keep terrain overlays sparse when their visible coverage is sparse; do not restore full-surface transparent passes for roads.
+3. Preserve the one-light steady state and use the existing blend controller when changing sun or shadow transitions.
+
 ## External Water And Watch Tower GLB Render Path
 
 Status: Deprecated as of July 6, 2026.

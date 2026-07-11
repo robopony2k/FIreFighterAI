@@ -315,3 +315,23 @@ Touchpoints: `src/systems/terrain/sim/`, `src/systems/settlements/sim/`, `src/sy
 Constraints: preserve deterministic generation, keep future roads invisible until construction, preserve existing dirty roadbed work, and do not reintroduce runtime road searches for generated campaign maps.
 
 Status: done
+TSK-0161: Optimize steady-state 3D rendering without reducing visual quality
+
+Type: refactor
+
+Why: Large maps paid steady-state GPU and main-thread costs for world-sized vegetation/structure batches, a full-terrain transparent road pass, an inactive shadow-blend light, unnecessary post depth storage, and unchanged per-frame UI/scene uploads.
+
+Done when:
+- [x] Vegetation and repeated structures use bounded spatial batches with normal camera and shadow-frustum culling, and roads use sparse overlay geometry.
+- [x] Steady-state shadows expose one active shadow light outside transitions, with asynchronous GPU timing and visibility counters in the existing perf diagnostics.
+- [x] Accelerated seasonal lighting coalesces shadow-direction changes between blends, and renderer counters include the world instead of reporting the final fullscreen pass.
+- [x] Post-processing allocates depth textures only for DOF, while unchanged dock, environment, evacuation, and vehicle work is cached or throttled.
+- [x] Paused static DOM-HUD scenes can reuse the previous world frame, and focused rendering plus existing runtime/domain regressions pass.
+
+Touchpoints: `src/core/rendering/`, `src/systems/terrain/rendering/`, `src/render/threeTest.ts`, `src/render/threeTestTerrain.ts`, `src/render/post/`, `scripts/render-performance-regression.mjs`
+
+Constraints: preserve DPR, asset detail, effect counts, shadow resolution, water quality, simulation behavior, and player-visible output; keep fire visibility authoritative and fire FX culling independent.
+
+Notes: A player-supplied GPU capture confirmed a roughly 30 ms world-render bottleneck, sub-millisecond post cost, near-continuous two-light transitions at 20x speed, and invalid final-pass-only draw counters. The follow-up coalesces those transitions and fixes the counters. Supported performance acceptance is 256x256; 512x512 maps are not a target and are known to crash. A fresh 256x256 capture remains required for measured before/after comparison.
+
+Status: done

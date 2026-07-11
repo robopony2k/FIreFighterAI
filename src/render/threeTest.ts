@@ -31,6 +31,10 @@ import {
   TerrainShadowBlendController,
   type TerrainShadowLightSlot
 } from "../systems/terrain/rendering/terrainShadowBlendController.js";
+import {
+  finalizeInstancedMeshBounds,
+  partitionTerrainInstances
+} from "../systems/terrain/rendering/terrainRenderChunks.js";
 import { createVehicleModelLayer, type VehicleModelInstance } from "./vehicleModelLayer.js";
 import type { InputState } from "../core/inputState.js";
 import { indexFor } from "../core/grid.js";
@@ -154,6 +158,7 @@ import type { AudioChannelId, RuntimeWidgetId } from "../ui/runtime/widgets/type
 import type { UiAudioController } from "../audio/uiAudio.js";
 import { getRuntimeSettings, setRuntimeSetting, subscribeRuntimeSettings } from "../persistence/runtimeSettings.js";
 import { constrainCameraToTerrain } from "../systems/terrain/rendering/terrainCameraConstraints.js";
+import { WebGlGpuTimer } from "../core/rendering/webglGpuTimer.js";
 
 export type SeasonVisualState = {
   seasonT01: number;
@@ -181,6 +186,19 @@ export type ThreeTestPerfSnapshot = {
   dofMs: number;
   hudMs: number;
   uiRenderMs: number;
+  gpuWorldMs: number | null;
+  gpuShadowRefreshMs: number | null;
+  gpuPostMs: number | null;
+  gpuUiMs: number | null;
+  activeShadowLights: number;
+  shadowRefreshCount: number;
+  terrainChunkCount: number;
+  terrainVisibleChunkCount: number;
+  terrainCulledInstanceCount: number;
+  roadOverlayTriangles: number;
+  roadOverlaySourceTriangles: number;
+  postPassCount: number;
+  vehicleBufferUploads: number;
   fps: number;
   rafGapMs: number;
   rafGapLastMs: number;
@@ -354,6 +372,7 @@ type ThreeTestCinematicLookConfig = ThreeTestCinematicGradeConfig & {
 let threeTestInitCount = 0;
 let activeThreeTestCleanup: (() => void) | null = null;
 const HUD_REDRAW_INTERVAL_MS = 120;
+const DOM_DOCK_REDRAW_INTERVAL_MS = 120;
 const ADAPTIVE_DPR_FALLBACK_FPS = 55;
 const ADAPTIVE_DPR_RECOVERY_FPS = 60;
 const ADAPTIVE_DPR_FALLBACK_SCENE_MS = 13.2;
@@ -363,6 +382,7 @@ const ADAPTIVE_DPR_RECOVERY_SECONDS = 7.5;
 const ADAPTIVE_DPR_STEP_DOWN = 0.2;
 const ADAPTIVE_DPR_STEP_UP = 0.1;
 const FRAME_CAP_TOLERANCE_MS = 0.75;
+const STATIC_FRAME_HEARTBEAT_MS = 250;
 const THREE_TEST_ENV_FOG_ENABLED = true;
 const THREE_TEST_SHADOW_VIEW_PADDING = 1.08;
 const THREE_TEST_SHADOW_HEIGHT_PADDING = 1.28;
@@ -372,6 +392,7 @@ const THREE_TEST_SHADOW_EXTENT_EPSILON = 0.35;
 const THREE_TEST_SHADOW_FAR_EPSILON = 1;
 const THREE_TEST_SHADOW_DIRECTION_STEP_DEG = 0.65;
 const THREE_TEST_SHADOW_BLEND_DURATION_MS = 760;
+const THREE_TEST_SHADOW_MINIMUM_STEADY_HOLD_MS = 1_200;
 const THREE_TEST_SHADOW_LIGHT_SHARE = 0.72;
 const THREE_TEST_LEGACY_EXPOSURE = 1.05;
 const THREE_TEST_CINEMATIC_GRADE_CONFIG: ThreeTestCinematicLookConfig = {
@@ -597,9 +618,10 @@ export const createThreeTest = (
   };
   let cinematicGradeEnabled = render.flags.cinematicGrade;
   let dofEnabled = render.flags.dof;
+  const webglContext = getRequiredWebGLContext(canvas, "3D mode");
   const renderer = new THREE.WebGLRenderer({
     canvas,
-    context: getRequiredWebGLContext(canvas, "3D mode"),
+    context: webglContext,
     antialias: true,
     alpha: false,
     powerPreference: "default"
@@ -615,6 +637,8 @@ export const createThreeTest = (
   renderer.shadowMap.type = THREE.PCFSoftShadowMap;
   renderer.shadowMap.autoUpdate = !ENABLE_THREE_TEST_SEASONAL_RECOLOR;
   renderer.autoClear = false;
+  renderer.info.autoReset = false;
+  const gpuTimer = new WebGlGpuTimer(webglContext);
   setRoadOverlayMaxSize(renderer.capabilities.maxTextureSize || 4096);
 
   const scene = new THREE.Scene();
@@ -716,7 +740,8 @@ export const createThreeTest = (
         fogColor: THREE_TEST_CINEMATIC_GRADE_CONFIG.fogColor
       },
       dofSettings,
-      gradeEnabled: cinematicGradeEnabled
+      gradeEnabled: cinematicGradeEnabled,
+      gpuTimer
     });
   } catch (error) {
     cinematicGradeEnabled = false;
@@ -2750,12 +2775,19 @@ export const createThreeTest = (
     return SEASON_LABELS[seasonIndex] ?? "Season";
   };
 
+  let lastDockOverlayUpdateAt = -Infinity;
+  let lastClimateKpiKey = "";
+  let lastTimeSummaryKey = "";
   const updateDockOverlay = (time: number): void => {
     if (!THREE_TEST_DISABLE_HUD) {
       dockOverlayRoot.classList.add("hidden");
       return;
     }
     dockOverlayRoot.classList.remove("hidden");
+    if (time - lastDockOverlayUpdateAt < DOM_DOCK_REDRAW_INTERVAL_MS) {
+      return;
+    }
+    lastDockOverlayUpdateAt = time;
     const forecastDays = Math.max(1, world.climateForecast?.days ?? getClimateRiskSeries().length);
     const markerIndex = Math.max(0, Math.min(forecastDays - 1, Math.floor(world.climateForecastDay ?? 0)));
     const riskSeries = getClimateRiskSeries();
@@ -2783,14 +2815,18 @@ export const createThreeTest = (
     }
     const windSpeed = Math.round(Math.max(0, world.wind.strength) * 10);
     const windDir = (world.wind.name ?? "Calm").toUpperCase();
-    climateKpis.innerHTML = "";
-    const kpiRisk = document.createElement("div");
-    kpiRisk.textContent = `Risk ${riskPct}%`;
-    climateKpis.append(kpiRisk);
-    if (windUnlocked) {
-      const kpiWind = document.createElement("div");
-      kpiWind.textContent = `Wind ${world.wind.name} ${windSpeed}`;
-      climateKpis.append(kpiWind);
+    const climateKpiKey = `${riskPct}|${windUnlocked ? `${world.wind.name}|${windSpeed}` : "locked"}`;
+    if (climateKpiKey !== lastClimateKpiKey) {
+      lastClimateKpiKey = climateKpiKey;
+      climateKpis.innerHTML = "";
+      const kpiRisk = document.createElement("div");
+      kpiRisk.textContent = `Risk ${riskPct}%`;
+      climateKpis.append(kpiRisk);
+      if (windUnlocked) {
+        const kpiWind = document.createElement("div");
+        kpiWind.textContent = `Wind ${world.wind.name} ${windSpeed}`;
+        climateKpis.append(kpiWind);
+      }
     }
     climateDock.indicatorChip.textContent = `${riskPct}%`;
     climateDock.indicatorChip.classList.remove("is-low", "is-moderate", "is-high", "is-extreme");
@@ -2835,20 +2871,24 @@ export const createThreeTest = (
     const canAdvanceToNextEvent = isAdvanceToNextEventAvailable(world);
     const usingSlider = world.timeSpeedControlMode === "slider";
     const effectivelyPaused = isSimulationEffectivelyPaused(world);
-    timeSummary.innerHTML = "";
-    const timeLine = document.createElement("div");
-    timeLine.textContent = effectivelyPaused ? "State Paused" : "State Running";
-    const speedLine = document.createElement("div");
-    speedLine.textContent = `${timeModeLabel} ${speedLabel}`;
-    const phaseLine = document.createElement("div");
-    phaseLine.textContent = `Phase ${world.phase}`;
-    const advanceLine = document.createElement("div");
-    advanceLine.textContent = advanceToNextEventActive
-      ? "Advancing to next event..."
-      : canAdvanceToNextEvent
-        ? "Next event advance ready"
-        : "Next event advance unavailable";
-    timeSummary.append(timeLine, speedLine, phaseLine, advanceLine);
+    const timeSummaryKey = `${effectivelyPaused}|${timeModeLabel}|${speedLabel}|${world.phase}|${advanceToNextEventActive}|${canAdvanceToNextEvent}`;
+    if (timeSummaryKey !== lastTimeSummaryKey) {
+      lastTimeSummaryKey = timeSummaryKey;
+      timeSummary.innerHTML = "";
+      const timeLine = document.createElement("div");
+      timeLine.textContent = effectivelyPaused ? "State Paused" : "State Running";
+      const speedLine = document.createElement("div");
+      speedLine.textContent = `${timeModeLabel} ${speedLabel}`;
+      const phaseLine = document.createElement("div");
+      phaseLine.textContent = `Phase ${world.phase}`;
+      const advanceLine = document.createElement("div");
+      advanceLine.textContent = advanceToNextEventActive
+        ? "Advancing to next event..."
+        : canAdvanceToNextEvent
+          ? "Next event advance ready"
+          : "Next event advance unavailable";
+      timeSummary.append(timeLine, speedLine, phaseLine, advanceLine);
+    }
     pauseButton.textContent = world.paused ? ">" : "||";
     pauseButton.title = world.paused ? "Resume simulation" : "Pause simulation";
     pauseButton.setAttribute("aria-label", world.paused ? "Resume simulation" : "Pause simulation");
@@ -5932,6 +5972,10 @@ export const createThreeTest = (
   let lastEnvironmentApplied: EnvironmentSignalState | null = null;
   let currentEnvironmentPalette = buildEnvironmentPalette(environmentCurrent);
   let lastLightingApplied: LightingDirectorState | null = null;
+  let lastDynamicEnvironmentKey = "";
+  let activeShadowLightCount = THREE_TEST_SHADOWS_ENABLED ? 1 : 0;
+  let shadowRefreshPendingForFrame = false;
+  let shadowRefreshCount = 0;
   const shadowBlendController = new TerrainShadowBlendController({
     mapSize: THREE_TEST_SHADOW_MAP_SIZE,
     viewPadding: THREE_TEST_SHADOW_VIEW_PADDING,
@@ -5941,7 +5985,8 @@ export const createThreeTest = (
     extentEpsilon: THREE_TEST_SHADOW_EXTENT_EPSILON,
     farEpsilon: THREE_TEST_SHADOW_FAR_EPSILON,
     directionStepDeg: THREE_TEST_SHADOW_DIRECTION_STEP_DEG,
-    blendDurationMs: THREE_TEST_SHADOW_BLEND_DURATION_MS
+    blendDurationMs: THREE_TEST_SHADOW_BLEND_DURATION_MS,
+    minimumSteadyHoldMs: THREE_TEST_SHADOW_MINIMUM_STEADY_HOLD_MS
   });
   const glareProjection = new THREE.Vector3();
   const glareForward = new THREE.Vector3();
@@ -6089,8 +6134,11 @@ export const createThreeTest = (
     light.updateMatrixWorld();
     if (slot.needsShadowUpdate && light.castShadow) {
       light.shadow.needsUpdate = true;
-      renderer.shadowMap.needsUpdate = true;
       slot.needsShadowUpdate = false;
+      if (light.visible) {
+        renderer.shadowMap.needsUpdate = true;
+        shadowRefreshPendingForFrame = true;
+      }
     }
   };
   const syncDirectionalLightRig = (lighting: LightingDirectorState): void => {
@@ -6124,6 +6172,9 @@ export const createThreeTest = (
     nextShadowLight.intensity = THREE_TEST_SHADOWS_ENABLED
       ? lighting.sunIntensity * THREE_TEST_SHADOW_LIGHT_SHARE * shadowState.slots[1].weight
       : 0;
+    previousShadowLight.visible = THREE_TEST_SHADOWS_ENABLED && (shadowState.blendActive || shadowState.slots[0].weight > 0.0001);
+    nextShadowLight.visible = THREE_TEST_SHADOWS_ENABLED && (shadowState.blendActive || shadowState.slots[1].weight > 0.0001);
+    activeShadowLightCount = THREE_TEST_SHADOWS_ENABLED ? shadowState.activeLightCount : 0;
     configureShadowBlendLight(previousShadowLight, shadowState.slots[0], shadowState.shadowExtent, shadowState.shadowFar);
     configureShadowBlendLight(nextShadowLight, shadowState.slots[1], shadowState.shadowExtent, shadowState.shadowFar);
     waterSystem.setLightDirectionFromKeyLight();
@@ -6184,7 +6235,25 @@ export const createThreeTest = (
     postPipeline.setSunGlare(screenX, screenY, glare, rgbToHex(lighting.sunColor));
   };
   const applyDynamicEnvironmentState = (force = false): void => {
-    const lighting = buildLightingDirectorState(getCurrentLightingInput());
+    const input = getCurrentLightingInput();
+    const dynamicKey = [
+      Math.round(input.seasonT01 / SEASON_VISUAL_EPSILON),
+      Math.round(input.risk01 / SEASON_VISUAL_EPSILON),
+      input.careerDay,
+      input.windDx,
+      input.windDy,
+      input.windStrength,
+      input.rainIntensity01,
+      input.rainSeed ?? -1,
+      input.worldSeed,
+      input.timeSpeedValue,
+      currentEnvironmentPalette.signals.fireLoad01
+    ].join("|");
+    if (!force && dynamicKey === lastDynamicEnvironmentKey) {
+      return;
+    }
+    lastDynamicEnvironmentKey = dynamicKey;
+    const lighting = buildLightingDirectorState(input);
     seasonalSky.setState(lighting);
     syncFogState(lighting);
     fireFx.setEnvironmentSignals({
@@ -6272,6 +6341,19 @@ export const createThreeTest = (
     dofMs: 0,
     hudMs: 0,
     uiRenderMs: 0,
+    gpuWorldMs: null,
+    gpuShadowRefreshMs: null,
+    gpuPostMs: null,
+    gpuUiMs: null,
+    activeShadowLights: activeShadowLightCount,
+    shadowRefreshCount: 0,
+    terrainChunkCount: 0,
+    terrainVisibleChunkCount: 0,
+    terrainCulledInstanceCount: 0,
+    roadOverlayTriangles: 0,
+    roadOverlaySourceTriangles: 0,
+    postPassCount: 0,
+    vehicleBufferUploads: 0,
     fps: 0,
     rafGapMs: 0,
     rafGapLastMs: 0,
@@ -6500,6 +6582,7 @@ export const createThreeTest = (
     return new THREE.Color(EVACUATION_CAR_ACCENT_COLORS[index]);
   };
 
+  let lastEvacuationStaticKey = "";
   const clearEvacuationVisuals = (): void => {
     while (evacuationVisualGroup.children.length > 0) {
       const child = evacuationVisualGroup.children[evacuationVisualGroup.children.length - 1];
@@ -6507,10 +6590,11 @@ export const createThreeTest = (
         continue;
       }
       evacuationVisualGroup.remove(child);
-      if (child instanceof THREE.Line || child instanceof THREE.Mesh) {
+      if (child instanceof THREE.Line || (child instanceof THREE.Mesh && child.geometry !== evacuationObstacleGeometry)) {
         child.geometry.dispose();
       }
     }
+    lastEvacuationStaticKey = "";
   };
 
   const updateEvacuationVisuals = (): void => {
@@ -6521,22 +6605,40 @@ export const createThreeTest = (
     }
     const model = buildEvacuationRenderModel(world);
     const vehicleInstances: VehicleModelInstance[] = [];
-    for (const route of model.routes) {
-      const points: THREE.Vector3[] = [];
-      for (const tile of route.tiles) {
-        const point = toWorldCommandPoint(tile.x + 0.5, tile.y + 0.5, route.active ? 0.18 : 0.14);
-        if (point) {
-          points.push(point);
+    const staticKey = [
+      ...model.routes.map((route) => `${route.active ? 1 : 0}:${route.tiles.map((tile) => `${tile.x},${tile.y}`).join(";")}`),
+      ...model.obstacles.map((obstacle) => `o:${obstacle.x},${obstacle.y}`)
+    ].join("|");
+    if (staticKey !== lastEvacuationStaticKey) {
+      clearEvacuationVisuals();
+      lastEvacuationStaticKey = staticKey;
+      for (const route of model.routes) {
+        const points: THREE.Vector3[] = [];
+        for (const tile of route.tiles) {
+          const point = toWorldCommandPoint(tile.x + 0.5, tile.y + 0.5, route.active ? 0.18 : 0.14);
+          if (point) {
+            points.push(point);
+          }
+        }
+        if (points.length >= 2) {
+          const line = new THREE.Line(
+            new THREE.BufferGeometry().setFromPoints(points),
+            route.active ? evacuationActiveMaterial : evacuationPreviewMaterial
+          );
+          line.frustumCulled = true;
+          line.geometry.computeBoundingSphere();
+          line.renderOrder = route.active ? 9 : 8;
+          evacuationVisualGroup.add(line);
         }
       }
-      if (points.length >= 2) {
-        const line = new THREE.Line(
-          new THREE.BufferGeometry().setFromPoints(points),
-          route.active ? evacuationActiveMaterial : evacuationPreviewMaterial
-        );
-        line.frustumCulled = false;
-        line.renderOrder = route.active ? 9 : 8;
-        evacuationVisualGroup.add(line);
+      for (const obstacle of model.obstacles) {
+        const point = toWorldCommandPoint(obstacle.x + 0.5, obstacle.y + 0.5, 0.12);
+        if (point) {
+          const mesh = new THREE.Mesh(evacuationObstacleGeometry, evacuationObstacleMaterial);
+          mesh.position.copy(point);
+          mesh.renderOrder = 10;
+          evacuationVisualGroup.add(mesh);
+        }
       }
     }
     for (const vehicle of model.vehicles) {
@@ -6550,16 +6652,6 @@ export const createThreeTest = (
       });
     }
     evacuationVehicleLayer.update(lastTerrainSurface, vehicleInstances);
-    for (const obstacle of model.obstacles) {
-      const point = toWorldCommandPoint(obstacle.x + 0.5, obstacle.y + 0.5, 0.12);
-      if (!point) {
-        continue;
-      }
-      const mesh = new THREE.Mesh(evacuationObstacleGeometry.clone(), evacuationObstacleMaterial);
-      mesh.position.copy(point);
-      mesh.renderOrder = 10;
-      evacuationVisualGroup.add(mesh);
-    }
   };
 
   const acquireScoreFlowPulse = (): ScoreFlowPulse => {
@@ -6861,6 +6953,8 @@ export const createThreeTest = (
     };
 
     type OverlayHouseSpot = {
+      tileX: number;
+      tileY: number;
       x: number;
       z: number;
       footprintX: number;
@@ -6905,6 +6999,8 @@ export const createThreeTest = (
           heightAtTileCoord: surface.heightAtTileCoord
         });
         houseSpots.push({
+          tileX,
+          tileY,
           x: surface.toWorldX(tileX + 0.5),
           z: surface.toWorldZ(tileY + 0.5),
           footprintX: bounds.width,
@@ -6957,6 +7053,8 @@ export const createThreeTest = (
         heightAtTileCoord: surface.heightAtTileCoord
       });
       houseSpots.push({
+        tileX,
+        tileY,
         x: surface.toWorldX(tileX + 0.5),
         z: surface.toWorldZ(tileY + 0.5),
         footprintX: bounds.width,
@@ -6997,6 +7095,8 @@ export const createThreeTest = (
         scaleY: number;
         scaleZ: number;
         rotation: number;
+        tileX: number;
+        tileY: number;
       };
       const availableHouseVariants = THREE_TEST_DETAILED_STRUCTURES_ENABLED ? houseAssets?.variants ?? [] : [];
       const houseByKey = new Map<string, OverlayHouseVariant[]>();
@@ -7075,7 +7175,9 @@ export const createThreeTest = (
             scaleX: footprintX,
             scaleY: foundationHeight,
             scaleZ: footprintZ,
-            rotation: spot.rotation
+            rotation: spot.rotation,
+            tileX: spot.tileX,
+            tileY: spot.tileY
           });
         }
 
@@ -7116,55 +7218,70 @@ export const createThreeTest = (
         if (instances.length === 0) {
           return;
         }
-        const geometry = template.geometry.clone();
-        const material = Array.isArray(template.material)
-          ? template.material.map((entry) => entry.clone())
-          : template.material.clone();
-        const instanced = new THREE.InstancedMesh(geometry, material, instances.length);
-        instanced.castShadow = true;
-        instanced.receiveShadow = true;
-        instances.forEach((instance, index) => {
-          dummy.position.set(instance.spot.x, instance.baseY, instance.spot.z);
-          dummy.rotation.set(0, instance.spot.rotation, 0);
-          dummy.scale.set(instance.scaleX, instance.scaleY, instance.scaleZ);
-          dummy.updateMatrix();
-          tempMatrix.copy(dummy.matrix).multiply(template.baseMatrix);
-          instanced.setMatrixAt(index, tempMatrix);
+        partitionTerrainInstances(instances, (instance) => ({ x: instance.spot.tileX, y: instance.spot.tileY })).forEach(({ key, instances: chunkInstances }) => {
+          const geometry = template.geometry.clone();
+          const material = Array.isArray(template.material)
+            ? template.material.map((entry) => entry.clone())
+            : template.material.clone();
+          const instanced = new THREE.InstancedMesh(geometry, material, chunkInstances.length);
+          instanced.name = `dynamic-house-${key}`;
+          instanced.userData.terrainChunkKey = key;
+          instanced.castShadow = true;
+          instanced.receiveShadow = true;
+          chunkInstances.forEach((instance, index) => {
+            dummy.position.set(instance.spot.x, instance.baseY, instance.spot.z);
+            dummy.rotation.set(0, instance.spot.rotation, 0);
+            dummy.scale.set(instance.scaleX, instance.scaleY, instance.scaleZ);
+            dummy.updateMatrix();
+            tempMatrix.copy(dummy.matrix).multiply(template.baseMatrix);
+            instanced.setMatrixAt(index, tempMatrix);
+          });
+          instanced.instanceMatrix.needsUpdate = true;
+          finalizeInstancedMeshBounds(instanced);
+          group.add(instanced);
         });
-        instanced.instanceMatrix.needsUpdate = true;
-        group.add(instanced);
       });
 
       if (fallbackInstances.length > 0) {
-        const fallbackMesh = new THREE.InstancedMesh(buildingGeometry, houseMaterial, fallbackInstances.length);
-        fallbackMesh.castShadow = true;
-        fallbackMesh.receiveShadow = true;
-        fallbackInstances.forEach((spot, index) => {
-          const footprintX = Math.max(0.5, spot.footprintX);
-          const footprintZ = Math.max(0.5, spot.footprintZ);
-          dummy.position.set(spot.x, spot.supportTop + 0.3, spot.z);
-          dummy.rotation.set(0, spot.rotation, 0);
-          dummy.scale.set(footprintX, 0.6, footprintZ);
-          dummy.updateMatrix();
-          fallbackMesh.setMatrixAt(index, dummy.matrix);
+        partitionTerrainInstances(fallbackInstances, (spot) => ({ x: spot.tileX, y: spot.tileY })).forEach(({ key, instances }) => {
+          const fallbackMesh = new THREE.InstancedMesh(buildingGeometry, houseMaterial, instances.length);
+          fallbackMesh.name = `dynamic-house-fallback-${key}`;
+          fallbackMesh.userData.terrainChunkKey = key;
+          fallbackMesh.castShadow = true;
+          fallbackMesh.receiveShadow = true;
+          instances.forEach((spot, index) => {
+            const footprintX = Math.max(0.5, spot.footprintX);
+            const footprintZ = Math.max(0.5, spot.footprintZ);
+            dummy.position.set(spot.x, spot.supportTop + 0.3, spot.z);
+            dummy.rotation.set(0, spot.rotation, 0);
+            dummy.scale.set(footprintX, 0.6, footprintZ);
+            dummy.updateMatrix();
+            fallbackMesh.setMatrixAt(index, dummy.matrix);
+          });
+          fallbackMesh.instanceMatrix.needsUpdate = true;
+          finalizeInstancedMeshBounds(fallbackMesh);
+          group.add(fallbackMesh);
         });
-        fallbackMesh.instanceMatrix.needsUpdate = true;
-        group.add(fallbackMesh);
       }
 
       if (foundationInstances.length > 0) {
-        const foundationMesh = new THREE.InstancedMesh(buildingGeometry, foundationMaterial, foundationInstances.length);
-        foundationMesh.castShadow = true;
-        foundationMesh.receiveShadow = true;
-        foundationInstances.forEach((instance, index) => {
-          dummy.position.set(instance.x, instance.y, instance.z);
-          dummy.rotation.set(0, instance.rotation, 0);
-          dummy.scale.set(instance.scaleX, instance.scaleY, instance.scaleZ);
-          dummy.updateMatrix();
-          foundationMesh.setMatrixAt(index, dummy.matrix);
+        partitionTerrainInstances(foundationInstances, (instance) => ({ x: instance.tileX, y: instance.tileY })).forEach(({ key, instances }) => {
+          const foundationMesh = new THREE.InstancedMesh(buildingGeometry, foundationMaterial, instances.length);
+          foundationMesh.name = `dynamic-house-foundation-${key}`;
+          foundationMesh.userData.terrainChunkKey = key;
+          foundationMesh.castShadow = true;
+          foundationMesh.receiveShadow = true;
+          instances.forEach((instance, index) => {
+            dummy.position.set(instance.x, instance.y, instance.z);
+            dummy.rotation.set(0, instance.rotation, 0);
+            dummy.scale.set(instance.scaleX, instance.scaleY, instance.scaleZ);
+            dummy.updateMatrix();
+            foundationMesh.setMatrixAt(index, dummy.matrix);
+          });
+          foundationMesh.instanceMatrix.needsUpdate = true;
+          finalizeInstancedMeshBounds(foundationMesh);
+          group.add(foundationMesh);
         });
-        foundationMesh.instanceMatrix.needsUpdate = true;
-        group.add(foundationMesh);
       }
     }
 
@@ -7409,6 +7526,7 @@ export const createThreeTest = (
     unitCommandMarkerMaterial.dispose();
     postPipeline?.dispose();
     postPipeline = null;
+    gpuTimer.dispose();
     scene.remove(seasonalSky.mesh);
     seasonalSky.dispose();
     waterSystem.dispose();
@@ -7546,8 +7664,21 @@ export const createThreeTest = (
   };
 
   const renderWorldScene = (): void => {
+    const gpuLabel = shadowRefreshPendingForFrame ? "shadowRefresh" : "world";
+    const gpuTimerActive = gpuTimer.begin(gpuLabel);
     renderer.clear();
     renderer.render(scene, camera);
+    threePerf.sceneCalls = smoothPerf(threePerf.sceneCalls, renderer.info.render.calls);
+    threePerf.sceneTriangles = smoothPerf(threePerf.sceneTriangles, renderer.info.render.triangles);
+    threePerf.sceneLines = smoothPerf(threePerf.sceneLines, renderer.info.render.lines);
+    threePerf.scenePoints = smoothPerf(threePerf.scenePoints, renderer.info.render.points);
+    if (gpuTimerActive) {
+      gpuTimer.end();
+    }
+    if (shadowRefreshPendingForFrame) {
+      shadowRefreshCount += 1;
+      shadowRefreshPendingForFrame = false;
+    }
   };
 
   const isSeasonalRainVisualActive = (): boolean =>
@@ -7587,6 +7718,48 @@ export const createThreeTest = (
       return;
     }
     renderWorldScene();
+  };
+
+  let lastStaticFrameKey = "";
+  let lastWorldRenderAt = -Infinity;
+  const shouldRenderWorldFrame = (time: number): boolean => {
+    if (
+      !THREE_TEST_DISABLE_HUD ||
+      !world.paused ||
+      world.lastActiveFires > 0 ||
+      isSeasonalRainVisualActive() ||
+      world.units.some((unit) => unit.kind === "firefighter" && unit.carrierId === null) ||
+      (lastSample?.buildingLots ?? []).some((lot) => {
+        const stage = getBuildingLifecycleStageFromId(lot.stageId);
+        return stage === "site_prep" || stage === "frame" || stage === "enclosed";
+      }) ||
+      cameraFlight !== null ||
+      resolveCameraInteracting() ||
+      scoreFlowPulses.some((pulse) => pulse.mesh.visible)
+    ) {
+      lastStaticFrameKey = "";
+      return true;
+    }
+    const unitKey = world.units
+      .map((unit) => `${unit.id}:${unit.x},${unit.y},${unit.prevX},${unit.prevY},${unit.selected ? 1 : 0},${unit.pathIndex}`)
+      .join(";");
+    const staticKey = [
+      camera.position.x,
+      camera.position.y,
+      camera.position.z,
+      controls.target.x,
+      controls.target.y,
+      controls.target.z,
+      world.careerDay,
+      world.terrainTypeRevision ?? 0,
+      lastSample?.structureRevision ?? -1,
+      unitKey
+    ].join("|");
+    if (staticKey !== lastStaticFrameKey) {
+      lastStaticFrameKey = staticKey;
+      return true;
+    }
+    return time - lastWorldRenderAt >= STATIC_FRAME_HEARTBEAT_MS;
   };
 
   const renderFrame = (time: number): void => {
@@ -7747,19 +7920,21 @@ export const createThreeTest = (
     updateDockOverlay(time);
     updateUnitTrayOverlay(time);
     refreshRoadOverlayIfNeeded();
+    renderer.info.reset();
     const sceneRenderStart = performance.now();
-    renderWorldPass();
+    const renderedWorldFrame = shouldRenderWorldFrame(time);
+    if (renderedWorldFrame) {
+      renderWorldPass();
+      renderer.clearDepth();
+      lastWorldRenderAt = time;
+    }
     const postStats = postPipeline?.getStats() ?? null;
-    renderer.clearDepth();
     const sceneRenderRawMs = performance.now() - sceneRenderStart;
     threePerf.sceneRenderLastMs = sceneRenderRawMs;
     threePerf.sceneRenderMs = smoothPerf(threePerf.sceneRenderMs, sceneRenderRawMs);
     threePerf.postMs = smoothPerf(threePerf.postMs, postStats?.postMs ?? 0);
     threePerf.dofMs = smoothPerf(threePerf.dofMs, postStats?.dofMs ?? 0);
-    threePerf.sceneCalls = smoothPerf(threePerf.sceneCalls, renderer.info.render.calls);
-    threePerf.sceneTriangles = smoothPerf(threePerf.sceneTriangles, renderer.info.render.triangles);
-    threePerf.sceneLines = smoothPerf(threePerf.sceneLines, renderer.info.render.lines);
-    threePerf.scenePoints = smoothPerf(threePerf.scenePoints, renderer.info.render.points);
+    threePerf.postPassCount = postStats?.passCount ?? 0;
     const fpsEstimate = threePerf.fps > 0 ? threePerf.fps : instantFps;
     if (THREE_TEST_ADAPTIVE_DPR_ENABLED && dt > 0) {
       const overloaded =
@@ -7810,8 +7985,12 @@ export const createThreeTest = (
     }
     threePerf.hudMs = smoothPerf(threePerf.hudMs, performance.now() - hudStart);
     const uiRenderStart = performance.now();
+    const uiGpuTimerActive = !THREE_TEST_DISABLE_HUD && gpuTimer.begin("ui");
     if (!THREE_TEST_DISABLE_HUD) {
       renderer.render(uiScene, uiCamera);
+    }
+    if (uiGpuTimerActive) {
+      gpuTimer.end();
     }
     flushTerrainTextureDisposals(pendingTerrainTextureDisposals);
     threePerf.uiRenderMs = smoothPerf(threePerf.uiRenderMs, performance.now() - uiRenderStart);
@@ -7820,6 +7999,14 @@ export const createThreeTest = (
     threePerf.memoryTextures = smoothPerf(threePerf.memoryTextures, renderer.info.memory.textures);
     threePerf.contextLosses = contextLosses;
     threePerf.contextRestores = contextRestores;
+    const gpuSnapshot = gpuTimer.getSnapshot();
+    threePerf.gpuWorldMs = gpuSnapshot.world;
+    threePerf.gpuShadowRefreshMs = gpuSnapshot.shadowRefresh;
+    threePerf.gpuPostMs = gpuSnapshot.post;
+    threePerf.gpuUiMs = gpuSnapshot.ui;
+    threePerf.activeShadowLights = activeShadowLightCount;
+    threePerf.shadowRefreshCount = shadowRefreshCount;
+    threePerf.vehicleBufferUploads = unitsLayer.getVehicleBufferUploadCount() + evacuationVehicleLayer.getBufferUploadCount();
     const frameRawMs = performance.now() - frameStart;
     threePerf.frameLastMs = frameRawMs;
     threePerf.frameMs = smoothPerf(threePerf.frameMs, frameRawMs);
@@ -7844,12 +8031,22 @@ export const createThreeTest = (
       applyResize(pendingResize.width, pendingResize.height);
       pendingResize = null;
     }
+    if (THREE_TEST_SHADOWS_ENABLED) {
+      const previousVisible = previousShadowLight.visible;
+      const nextVisible = nextShadowLight.visible;
+      previousShadowLight.visible = true;
+      nextShadowLight.visible = true;
+      renderer.compile(scene, camera);
+      previousShadowLight.visible = previousVisible;
+      nextShadowLight.visible = nextVisible;
+    }
     renderer.compile(scene, camera);
     seasonalSky.syncToCamera(camera);
     if (lastLightingApplied) {
       syncDirectionalLightRig(lastLightingApplied);
       syncSunGlare(lastLightingApplied);
     }
+    renderer.info.reset();
     renderWorldPass();
     if (!THREE_TEST_DISABLE_HUD) {
       renderer.clearDepth();
@@ -8053,6 +8250,41 @@ export const createThreeTest = (
 
   const getTerrainWaterDebugControls = (): TerrainWaterDebugControls => waterSystem.getDebugControls();
 
+  const collectTerrainChunkStats = (): { total: number; visible: number; culledInstances: number } => {
+    if (!terrainMesh) {
+      return { total: 0, visible: 0, culledInstances: 0 };
+    }
+    camera.updateMatrixWorld();
+    terrainMesh.updateMatrixWorld(true);
+    structureOverlayGroup?.updateMatrixWorld(true);
+    const viewProjection = new THREE.Matrix4().multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
+    const frustum = new THREE.Frustum().setFromProjectionMatrix(viewProjection);
+    const worldSphere = new THREE.Sphere();
+    let total = 0;
+    let visible = 0;
+    let culledInstances = 0;
+    const collectRoot = (root: THREE.Object3D): void => root.traverse((child) => {
+      if (!(child instanceof THREE.InstancedMesh) || !child.userData?.terrainChunkKey) {
+        return;
+      }
+      total += 1;
+      if (!child.boundingSphere) {
+        child.computeBoundingSphere();
+      }
+      const isVisible = child.visible && !!child.boundingSphere && frustum.intersectsSphere(worldSphere.copy(child.boundingSphere).applyMatrix4(child.matrixWorld));
+      if (isVisible) {
+        visible += 1;
+      } else {
+        culledInstances += child.count;
+      }
+    });
+    collectRoot(terrainMesh);
+    if (structureOverlayGroup) {
+      collectRoot(structureOverlayGroup);
+    }
+    return { total, visible, culledInstances };
+  };
+
   const getPerfSnapshot = (): ThreeTestPerfSnapshot => {
     const waterfallDebug = lastTerrainWater?.waterfallDebug ?? null;
     const riverDebug = lastTerrainWater?.river?.debugRiverDomainStats;
@@ -8069,6 +8301,7 @@ export const createThreeTest = (
           .map((count) => Math.max(0, Math.round(count)).toString())
           .join("/")
       : "n/a";
+    const terrainChunks = collectTerrainChunkStats();
     return {
       frameMs: threePerf.frameMs,
       frameLastMs: threePerf.frameLastMs,
@@ -8090,6 +8323,19 @@ export const createThreeTest = (
       dofMs: threePerf.dofMs,
       hudMs: threePerf.hudMs,
       uiRenderMs: threePerf.uiRenderMs,
+      gpuWorldMs: threePerf.gpuWorldMs,
+      gpuShadowRefreshMs: threePerf.gpuShadowRefreshMs,
+      gpuPostMs: threePerf.gpuPostMs,
+      gpuUiMs: threePerf.gpuUiMs,
+      activeShadowLights: activeShadowLightCount,
+      shadowRefreshCount,
+      terrainChunkCount: terrainChunks.total,
+      terrainVisibleChunkCount: terrainChunks.visible,
+      terrainCulledInstanceCount: terrainChunks.culledInstances,
+      roadOverlayTriangles: Number(terrainRoadOverlayMesh?.geometry.userData?.sparseTriangleCount ?? 0),
+      roadOverlaySourceTriangles: Number(terrainRoadOverlayMesh?.geometry.userData?.sourceTriangleCount ?? 0),
+      postPassCount: threePerf.postPassCount,
+      vehicleBufferUploads: threePerf.vehicleBufferUploads,
       fps: threePerf.fps,
       rafGapMs: threePerf.rafGapMs,
       rafGapLastMs: threePerf.rafGapLastMs,

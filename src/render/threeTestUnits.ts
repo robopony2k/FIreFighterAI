@@ -71,6 +71,7 @@ export type ThreeTestUnitsLayer = {
     surface: TerrainRenderSurface | null,
     interpolationAlpha: number
   ) => void;
+  getVehicleBufferUploadCount: () => number;
   dispose: () => void;
 };
 
@@ -630,5 +631,9 @@ export const createThreeTestUnitsLayer = (scene: THREE.Scene): ThreeTestUnitsLay
     firefighterNozzleMaterial.dispose();
   };
 
-  return { update, dispose };
+  return {
+    update,
+    getVehicleBufferUploadCount: () => truckVehicleLayer.getBufferUploadCount(),
+    dispose
+  };
 };

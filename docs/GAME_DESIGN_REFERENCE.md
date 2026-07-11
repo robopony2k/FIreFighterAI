@@ -186,6 +186,7 @@ Command Roster
 
 Terrain
 - Seed and map size presets.
+- The supported campaign world size and rendering-performance target is 256x256 tiles. 512x512 worlds are not a supported gameplay target and currently may crash, so runtime acceptance and profiling should not use them.
 - Map generation sliders (forest/meadow/water settings).
 - Island archetypes should visibly change the same-seed initial relief, coastline plan, watershed ridges, valley corridors, catchments, and lake-prone basin pockets. The `None` archetype is intentionally neutral, applying no named island bias so developers can judge pure noise and exposed terrain parameters directly. The fast noise/elevation redistribution layer is the primary landform proxy for natural islands, ridges, shelves, bays, uplands, and static-hydrology support; literal plate simulation is not a design goal.
 - Default islands should read as varied single-island regions rather than volcano cones: center position should not imply highest elevation, and uplands should be distributed by seeded ridges, basins, shelves, and valleys.

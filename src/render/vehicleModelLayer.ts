@@ -37,6 +37,7 @@ type VehicleModelTemplate = {
 
 export type VehicleModelLayer = {
   update: (surface: TerrainRenderSurface | null, instances: VehicleModelInstance[]) => void;
+  getBufferUploadCount: () => number;
   dispose: () => void;
 };
 
@@ -157,6 +158,9 @@ export const createVehicleModelLayer = (
   let modelScale = 1;
   let useModel = false;
   let disposed = false;
+  let lastSurfaceKey = "";
+  let lastInstanceState = new Float64Array(0);
+  let bufferUploadCount = 0;
 
   const clearModelMeshes = (): void => {
     modelMeshes.forEach(({ mesh }) => {
@@ -166,6 +170,8 @@ export const createVehicleModelLayer = (
     });
     modelMeshes.length = 0;
     useModel = false;
+    lastSurfaceKey = "";
+    lastInstanceState = new Float64Array(0);
   };
 
   const loader = registerPbrSpecularGlossiness(new GLTFLoader());
@@ -194,6 +200,8 @@ export const createVehicleModelLayer = (
         modelMeshes.push({ mesh, baseMatrix: template.baseMatrix, tintSlot: template.tintSlot });
       });
       useModel = modelMeshes.length > 0;
+      lastSurfaceKey = "";
+      lastInstanceState = new Float64Array(0);
     },
     undefined,
     (error) => {
@@ -278,6 +286,36 @@ export const createVehicleModelLayer = (
   };
 
   const update = (surface: TerrainRenderSurface | null, instances: VehicleModelInstance[]): void => {
+    const surfaceKey = surface ? `${surface.geometrySignature}|${surface.heightScale}|${useModel ? 1 : 0}` : "no-surface";
+    const componentCount = 7;
+    let unchanged = surfaceKey === lastSurfaceKey && lastInstanceState.length === instances.length * componentCount;
+    for (let index = 0; unchanged && index < instances.length; index += 1) {
+      const instance = instances[index]!;
+      const offset = index * componentCount;
+      unchanged =
+        lastInstanceState[offset] === instance.x &&
+        lastInstanceState[offset + 1] === instance.y &&
+        lastInstanceState[offset + 2] === instance.yaw &&
+        lastInstanceState[offset + 3] === instance.color.getHex() &&
+        lastInstanceState[offset + 4] === (instance.modelColor?.getHex() ?? -1) &&
+        lastInstanceState[offset + 5] === (instance.modelAccentColor?.getHex() ?? -1) &&
+        lastInstanceState[offset + 6] === (instance.fallbackColor?.getHex() ?? -1);
+    }
+    if (unchanged) {
+      return;
+    }
+    lastSurfaceKey = surfaceKey;
+    lastInstanceState = new Float64Array(instances.length * componentCount);
+    instances.forEach((instance, index) => {
+      const offset = index * componentCount;
+      lastInstanceState[offset] = instance.x;
+      lastInstanceState[offset + 1] = instance.y;
+      lastInstanceState[offset + 2] = instance.yaw;
+      lastInstanceState[offset + 3] = instance.color.getHex();
+      lastInstanceState[offset + 4] = instance.modelColor?.getHex() ?? -1;
+      lastInstanceState[offset + 5] = instance.modelAccentColor?.getHex() ?? -1;
+      lastInstanceState[offset + 6] = instance.fallbackColor?.getHex() ?? -1;
+    });
     if (!surface || instances.length === 0) {
       fallbackMesh.count = 0;
       modelMeshes.forEach(({ mesh }) => {
@@ -311,6 +349,7 @@ export const createVehicleModelLayer = (
           mesh.instanceColor.needsUpdate = true;
         }
       });
+      bufferUploadCount += modelMeshes.length;
       return;
     }
 
@@ -327,6 +366,7 @@ export const createVehicleModelLayer = (
     if (fallbackMesh.instanceColor) {
       fallbackMesh.instanceColor.needsUpdate = true;
     }
+    bufferUploadCount += 1;
   };
 
   const dispose = (): void => {
@@ -337,5 +377,5 @@ export const createVehicleModelLayer = (
     config.fallbackMaterial.dispose();
   };
 
-  return { update, dispose };
+  return { update, getBufferUploadCount: () => bufferUploadCount, dispose };
 };

@@ -8,6 +8,7 @@ import {
   createSeasonalRainOverlayPass,
   type SeasonalRainOverlayState
 } from "../../systems/climate/rendering/seasonalRainOverlayPass.js";
+import type { WebGlGpuTimer } from "../../core/rendering/webglGpuTimer.js";
 
 export type DepthOfFieldFocusMode = "target" | "manual";
 
@@ -27,6 +28,7 @@ export type ThreeTestPostPipelineStats = {
   postMs: number;
   dofMs: number;
   blurScale: number;
+  passCount: number;
 };
 
 export type ThreeTestPostPipeline = {
@@ -48,6 +50,7 @@ type CreateThreeTestPostPipelineOptions = {
   gradeConfig: ThreeTestCinematicGradeConfig;
   dofSettings: DepthOfFieldSettings;
   gradeEnabled: boolean;
+  gpuTimer?: WebGlGpuTimer;
 };
 
 const FULL_RES_TARGET_MIN = 1;
@@ -79,7 +82,7 @@ const createColorTarget = (width: number, height: number, name: string): THREE.W
     name
   );
 
-const createSceneTarget = (width: number, height: number): THREE.WebGLRenderTarget => {
+const createSceneTarget = (width: number, height: number, withDepthTexture: boolean): THREE.WebGLRenderTarget => {
   const target = configureColorTarget(
     new THREE.WebGLRenderTarget(width, height, {
       depthBuffer: true,
@@ -87,19 +90,21 @@ const createSceneTarget = (width: number, height: number): THREE.WebGLRenderTarg
     }),
     "three-test-scene-color"
   );
-  const depthTexture = new THREE.DepthTexture(width, height, THREE.UnsignedIntType);
-  depthTexture.format = THREE.DepthFormat;
-  depthTexture.minFilter = THREE.NearestFilter;
-  depthTexture.magFilter = THREE.NearestFilter;
-  depthTexture.name = "three-test-scene-depth";
-  target.depthTexture = depthTexture;
+  if (withDepthTexture) {
+    const depthTexture = new THREE.DepthTexture(width, height, THREE.UnsignedIntType);
+    depthTexture.format = THREE.DepthFormat;
+    depthTexture.minFilter = THREE.NearestFilter;
+    depthTexture.magFilter = THREE.NearestFilter;
+    depthTexture.name = "three-test-scene-depth";
+    target.depthTexture = depthTexture;
+  }
   return target;
 };
 
 export const createThreeTestPostPipeline = (
   options: CreateThreeTestPostPipelineOptions
 ): ThreeTestPostPipeline => {
-  const { renderer, camera, gradeConfig } = options;
+  const { renderer, camera, gradeConfig, gpuTimer } = options;
   let gradeEnabled = options.gradeEnabled;
   let dofSettings: DepthOfFieldSettings = {
     ...options.dofSettings
@@ -107,7 +112,8 @@ export const createThreeTestPostPipeline = (
   const stats: ThreeTestPostPipelineStats = {
     postMs: 0,
     dofMs: 0,
-    blurScale: dofSettings.blurScale
+    blurScale: dofSettings.blurScale,
+    passCount: 0
   };
 
   const gradePass = createThreeTestCinematicGradePass(gradeConfig);
@@ -261,7 +267,7 @@ export const createThreeTestPostPipeline = (
     disposeSceneTargets();
     try {
       const size = resolveFullResolution();
-      sceneTarget = createSceneTarget(size.width, size.height);
+      sceneTarget = createSceneTarget(size.width, size.height, dofSettings.enabled);
       sceneTargetsDirty = false;
       return true;
     } catch (error) {
@@ -369,6 +375,7 @@ export const createThreeTestPostPipeline = (
   };
 
   const render = (renderSceneFn: () => void): boolean => {
+    stats.passCount = 0;
     const rainActive = rainPass.isActive();
     if ((!gradeEnabled && !dofSettings.enabled && !rainActive) || postFailed) {
       stats.postMs = 0;
@@ -386,6 +393,8 @@ export const createThreeTestPostPipeline = (
     const previousTarget = renderer.getRenderTarget();
     const previousAutoClear = renderer.autoClear;
     const postStart = performance.now();
+    let postTimerActive = false;
+    let passCount = 0;
     let dofStart = 0;
     let finalTexture: THREE.Texture = sceneTarget.texture;
 
@@ -393,6 +402,7 @@ export const createThreeTestPostPipeline = (
       renderer.autoClear = previousAutoClear;
       renderer.setRenderTarget(sceneTarget);
       renderSceneFn();
+      postTimerActive = gpuTimer?.begin("post") ?? false;
 
       if (dofSettings.enabled) {
         if (ensureDofTargets() && cocTarget && farBlurTargetA && farBlurTargetB && compositeTarget) {
@@ -400,8 +410,10 @@ export const createThreeTestPostPipeline = (
           updateDofUniforms();
           cocUniforms.uDepthTex.value = (sceneTarget.depthTexture as THREE.DepthTexture | null) ?? null;
           cocPass.render(renderer, cocTarget);
+          passCount += 1;
 
           const farTexture = renderBlurChain(sceneTarget.texture, 1, farBlurTargetA, farBlurTargetB);
+          passCount += 2;
           compositeUniforms.uSceneTex.value = sceneTarget.texture;
           compositeUniforms.uCocTex.value = cocTarget.texture;
           compositeUniforms.uFarBlurTex.value = farTexture;
@@ -409,9 +421,11 @@ export const createThreeTestPostPipeline = (
 
           if (dofSettings.nearBlurEnabled && nearBlurTargetA && nearBlurTargetB) {
             compositeUniforms.uNearBlurTex.value = renderBlurChain(sceneTarget.texture, -1, nearBlurTargetA, nearBlurTargetB);
+            passCount += 2;
           }
 
           compositePass.render(renderer, compositeTarget);
+          passCount += 1;
           finalTexture = compositeTarget.texture;
           stats.dofMs = performance.now() - dofStart;
         } else {
@@ -423,15 +437,26 @@ export const createThreeTestPostPipeline = (
 
       const gradeTarget = rainActive && ensureRainInputTarget() ? rainInputTarget : previousTarget;
       gradePass.render(renderer, finalTexture, gradeTarget);
+      passCount += 1;
       if (rainActive && rainInputTarget) {
         finalTexture = rainInputTarget.texture;
       }
       if (rainActive) {
         rainPass.render(renderer, finalTexture, previousTarget);
+        passCount += 1;
       }
+      if (postTimerActive) {
+        gpuTimer?.end();
+        postTimerActive = false;
+      }
+      stats.passCount = passCount;
       stats.postMs = performance.now() - postStart;
       return true;
     } catch (error) {
+      if (postTimerActive) {
+        gpuTimer?.end();
+        postTimerActive = false;
+      }
       try {
         failPost(error);
       } finally {
@@ -440,6 +465,7 @@ export const createThreeTestPostPipeline = (
       }
       stats.postMs = 0;
       stats.dofMs = 0;
+      stats.passCount = 0;
       renderSceneFn();
       return false;
     } finally {
@@ -468,6 +494,9 @@ export const createThreeTestPostPipeline = (
       dofSettings = next;
       if (blurScaleChanged || nearBlurChanged || enabledChanged) {
         dofTargetsDirty = true;
+      }
+      if (enabledChanged) {
+        sceneTargetsDirty = true;
       }
       if (!dofSettings.enabled) {
         disposeDofTargets();
@@ -501,7 +530,8 @@ export const createThreeTestPostPipeline = (
     getStats: () => ({
       postMs: stats.postMs,
       dofMs: stats.dofMs,
-      blurScale: stats.blurScale
+      blurScale: stats.blurScale,
+      passCount: stats.passCount
     }),
     dispose: () => {
       disposeSceneTargets();

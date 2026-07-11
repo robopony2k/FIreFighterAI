@@ -19,6 +19,7 @@ export type TerrainShadowBlendControllerConfig = {
   farEpsilon: number;
   directionStepDeg: number;
   blendDurationMs: number;
+  minimumSteadyHoldMs: number;
 };
 
 export type TerrainShadowBlendControllerInput = {
@@ -37,6 +38,9 @@ export type TerrainShadowBlendControllerState = {
   shadowExtent: number;
   shadowFar: number;
   lightDistance: number;
+  blendActive: boolean;
+  activeSlotIndex: number;
+  activeLightCount: 1 | 2;
 };
 
 const DEFAULT_UP = new THREE.Vector3(0, 1, 0);
@@ -73,6 +77,7 @@ export class TerrainShadowBlendController {
   private blendSlotIndex = 1;
   private blendStartMs = 0;
   private blendActive = false;
+  private steadySinceMs = Number.NEGATIVE_INFINITY;
   private initialized = false;
   private forceRefreshPending = true;
   private lastCameraInteracting = false;
@@ -96,6 +101,7 @@ export class TerrainShadowBlendController {
       this.slots[0].weight = 1;
       this.slots[1].weight = 0;
       this.initialized = true;
+      this.steadySinceMs = input.timeMs;
       this.forceRefreshPending = true;
     }
 
@@ -126,7 +132,10 @@ export class TerrainShadowBlendController {
       slots: this.slots,
       shadowExtent,
       shadowFar,
-      lightDistance
+      lightDistance,
+      blendActive: this.blendActive,
+      activeSlotIndex: this.activeSlotIndex,
+      activeLightCount: this.blendActive ? 2 : 1
     };
   }
 
@@ -143,12 +152,19 @@ export class TerrainShadowBlendController {
         this.slots[this.activeSlotIndex].weight = 1;
         this.slots[this.blendSlotIndex].weight = 0;
         this.blendActive = false;
+        this.steadySinceMs = timeMs;
       }
       return;
     }
 
     const activeDirection = this.slots[this.activeSlotIndex].direction;
     if (angleBetweenDirectionsDeg(activeDirection, sunDirection) < this.config.directionStepDeg) {
+      this.slots[this.activeSlotIndex].weight = 1;
+      this.slots[this.blendSlotIndex].weight = 0;
+      return;
+    }
+
+    if (timeMs - this.steadySinceMs < this.config.minimumSteadyHoldMs) {
       this.slots[this.activeSlotIndex].weight = 1;
       this.slots[this.blendSlotIndex].weight = 0;
       return;

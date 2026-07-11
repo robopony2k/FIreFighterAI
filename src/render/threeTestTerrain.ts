@@ -92,6 +92,11 @@ import {
   buildScorchedGroundMaskTexture
 } from "../systems/terrain/rendering/scorchedGroundMaterial.js";
 import { createTerrainRenderCoordinateMapper } from "../systems/terrain/rendering/terrainRenderCoordinates.js";
+import { buildSparseRoadOverlayGeometry } from "../systems/terrain/rendering/sparseRoadOverlayGeometry.js";
+import {
+  finalizeInstancedMeshBounds,
+  partitionTerrainInstances
+} from "../systems/terrain/rendering/terrainRenderChunks.js";
 import {
   applyTreeSeasonShader,
   applyTrunkTopCropShader,
@@ -416,6 +421,8 @@ type ScrubPlaceholderInstance = {
   scale: number;
   rotation: number;
   colorJitter: number;
+  tileX: number;
+  tileY: number;
 };
 
 export type OceanWaterData = {
@@ -2385,30 +2392,51 @@ export const refreshTerrainRoadVisuals = (
   clearTerrainRoadVisuals(mesh);
   const roadId = TILE_TYPE_IDS.road;
   const baseId = TILE_TYPE_IDS.base;
+  const totalTiles = sample.cols * sample.rows;
+  let hasRoadVisuals = false;
+  for (let index = 0; index < totalTiles; index += 1) {
+    const type = sample.tileTypes?.[index] ?? -1;
+    if (
+      type === roadId ||
+      type === baseId ||
+      (sample.roadEdges?.[index] ?? 0) > 0 ||
+      (sample.roadBridgeMask?.[index] ?? 0) > 0 ||
+      (sample.roadWallEdges?.[index] ?? 0) > 0
+    ) {
+      hasRoadVisuals = true;
+      break;
+    }
+  }
+  if (!hasRoadVisuals) {
+    return null;
+  }
   const roadOverlay = buildRoadOverlayTexture(sample, roadId, baseId, ROAD_SURFACE_WIDTH, ROAD_TEX_SCALE);
   let roadOverlayMesh: THREE.Mesh | null = null;
   if (roadOverlay) {
-    const roadMaterial = new THREE.MeshStandardMaterial({
-      map: roadOverlay,
-      color: new THREE.Color(0xffffff),
-      transparent: true,
-      depthWrite: false,
-      roughness: 0.9,
-      metalness: 0.05,
-      side: THREE.DoubleSide,
-      polygonOffset: true,
-      polygonOffsetFactor: -2,
-      polygonOffsetUnits: -2
-    });
-    roadMaterial.alphaTest = 0.02;
-    roadOverlayMesh = new THREE.Mesh(mesh.geometry, roadMaterial);
-    roadOverlayMesh.castShadow = false;
-    roadOverlayMesh.receiveShadow = true;
-    roadOverlayMesh.renderOrder = 1;
-    roadOverlayMesh.userData.roadOverlay = true;
-    roadOverlayMesh.userData.roadOverlayVersion = getRoadAtlasVersion();
-    markTerrainRoadVisual(roadOverlayMesh, "overlay");
-    mesh.add(roadOverlayMesh);
+    const sparseGeometry = buildSparseRoadOverlayGeometry(mesh.geometry, sample, roadId, baseId);
+    if (sparseGeometry) {
+      const roadMaterial = new THREE.MeshStandardMaterial({
+        map: roadOverlay,
+        color: new THREE.Color(0xffffff),
+        transparent: true,
+        depthWrite: false,
+        roughness: 0.9,
+        metalness: 0.05,
+        side: THREE.DoubleSide,
+        polygonOffset: true,
+        polygonOffsetFactor: -2,
+        polygonOffsetUnits: -2
+      });
+      roadMaterial.alphaTest = 0.02;
+      roadOverlayMesh = new THREE.Mesh(sparseGeometry, roadMaterial);
+      roadOverlayMesh.castShadow = false;
+      roadOverlayMesh.receiveShadow = true;
+      roadOverlayMesh.renderOrder = 1;
+      roadOverlayMesh.userData.roadOverlay = true;
+      roadOverlayMesh.userData.roadOverlayVersion = getRoadAtlasVersion();
+      markTerrainRoadVisual(roadOverlayMesh, "overlay");
+      mesh.add(roadOverlayMesh);
+    }
   }
 
   const roadDeckMesh = buildRoadDeckMesh(
@@ -3655,7 +3683,9 @@ export const buildTerrainMesh = (
               z: centerZ + jitterZ,
               scale,
               rotation: noiseAt(idx + 8.23) * Math.PI * 2,
-              colorJitter: noiseAt(idx + 9.57)
+              colorJitter: noiseAt(idx + 9.57),
+              tileX,
+              tileY
             });
           }
         }
@@ -3768,10 +3798,12 @@ export const buildTerrainMesh = (
         buckets[index].push(instance);
       });
       variants.forEach((variant, variantIndex) => {
-        const variantInstances = buckets[variantIndex];
-        if (variantInstances.length === 0) {
+        const variantBucket = buckets[variantIndex];
+        if (variantBucket.length === 0) {
           return;
         }
+        const variantOrder = new Map(variantBucket.map((instance, index) => [instance, index]));
+        const chunks = partitionTerrainInstances(variantBucket, (instance) => ({ x: instance.tileX, y: instance.tileY }));
         variant.meshes.forEach((meshTemplate) => {
           const role = getTreeBurnRole(meshTemplate.material);
           if (role === "trunk") {
@@ -3784,11 +3816,14 @@ export const buildTerrainMesh = (
           const geometryBounds = meshTemplate.geometry.boundingBox;
           const cropMinY = geometryBounds?.min.y ?? 0;
           const cropMaxY = geometryBounds?.max.y ?? 0;
+          chunks.forEach(({ key, instances: variantInstances }) => {
           const instanced = new THREE.InstancedMesh(
-            meshTemplate.geometry,
+            meshTemplate.geometry.clone(),
             meshTemplate.material,
             variantInstances.length
           );
+          instanced.name = `terrain-tree-${treeType}-${variantIndex}-${key}`;
+          instanced.userData.terrainChunkKey = key;
           instanced.castShadow = true;
           instanced.receiveShadow = true;
           const baseMatrix = meshTemplate.baseMatrix;
@@ -3856,7 +3891,7 @@ export const buildTerrainMesh = (
               const noiseBase =
                 worldSeed * 0.000013 +
                 instance.tileIndex * 0.173 +
-                i * 0.619 +
+                (variantOrder.get(instance) ?? i) * 0.619 +
                 variantIndex * 1.331 +
                 treeTypeId * 0.41;
               const n0 = noiseAt(noiseBase + 0.11);
@@ -3916,7 +3951,9 @@ export const buildTerrainMesh = (
             cropMinY,
             cropMaxY
           });
+          finalizeInstancedMeshBounds(instanced);
           treeGroup.add(instanced);
+          });
         });
       });
     };
@@ -3935,44 +3972,51 @@ export const buildTerrainMesh = (
       metalness: 0,
       vertexColors: true
     });
-    const trunkMesh = new THREE.InstancedMesh(trunkGeometry, trunkMaterial, treeInstances.length);
-    const canopyMesh = new THREE.InstancedMesh(canopyGeometry, canopyMaterial, treeInstances.length);
     const canopyColor = new THREE.Color();
     const dummy = new THREE.Object3D();
-    trunkMesh.castShadow = true;
-    trunkMesh.receiveShadow = true;
-    canopyMesh.castShadow = true;
-    canopyMesh.receiveShadow = true;
-    treeInstances.forEach((instance, i) => {
-      const treeHeight = Math.max(0.7, instance.scale * TREE_HEIGHT_FACTOR * 0.95);
-      const trunkHeight = Math.max(0.22, treeHeight * 0.44);
-      const canopyHeight = Math.max(0.28, treeHeight * 0.66);
-      const canopyRadius = Math.max(0.18, treeHeight * 0.23);
-      const trunkRadius = Math.max(0.05, canopyRadius * 0.22);
+    partitionTerrainInstances(treeInstances, (instance) => ({ x: instance.tileX, y: instance.tileY })).forEach(({ key, instances }) => {
+      const trunkMesh = new THREE.InstancedMesh(trunkGeometry, trunkMaterial, instances.length);
+      const canopyMesh = new THREE.InstancedMesh(canopyGeometry, canopyMaterial, instances.length);
+      trunkMesh.name = `terrain-tree-fallback-trunk-${key}`;
+      canopyMesh.name = `terrain-tree-fallback-canopy-${key}`;
+      trunkMesh.userData.terrainChunkKey = key;
+      canopyMesh.userData.terrainChunkKey = key;
+      trunkMesh.castShadow = true;
+      trunkMesh.receiveShadow = true;
+      canopyMesh.castShadow = true;
+      canopyMesh.receiveShadow = true;
+      instances.forEach((instance, i) => {
+        const treeHeight = Math.max(0.7, instance.scale * TREE_HEIGHT_FACTOR * 0.95);
+        const trunkHeight = Math.max(0.22, treeHeight * 0.44);
+        const canopyHeight = Math.max(0.28, treeHeight * 0.66);
+        const canopyRadius = Math.max(0.18, treeHeight * 0.23);
+        const trunkRadius = Math.max(0.05, canopyRadius * 0.22);
 
-      dummy.position.set(instance.x, instance.y + trunkHeight * 0.5, instance.z);
-      dummy.rotation.set(0, instance.rotation, 0);
-      dummy.scale.set(trunkRadius / 0.1, trunkHeight, trunkRadius / 0.1);
-      dummy.updateMatrix();
-      trunkMesh.setMatrixAt(i, dummy.matrix);
+        dummy.position.set(instance.x, instance.y + trunkHeight * 0.5, instance.z);
+        dummy.rotation.set(0, instance.rotation, 0);
+        dummy.scale.set(trunkRadius / 0.1, trunkHeight, trunkRadius / 0.1);
+        dummy.updateMatrix();
+        trunkMesh.setMatrixAt(i, dummy.matrix);
 
-      dummy.position.set(instance.x, instance.y + trunkHeight + canopyHeight * 0.26, instance.z);
-      dummy.rotation.set(0, instance.rotation, 0);
-      dummy.scale.set(canopyRadius / 0.35, canopyHeight / 0.7, canopyRadius / 0.35);
-      dummy.updateMatrix();
-      canopyMesh.setMatrixAt(i, dummy.matrix);
+        dummy.position.set(instance.x, instance.y + trunkHeight + canopyHeight * 0.26, instance.z);
+        dummy.rotation.set(0, instance.rotation, 0);
+        dummy.scale.set(canopyRadius / 0.35, canopyHeight / 0.7, canopyRadius / 0.35);
+        dummy.updateMatrix();
+        canopyMesh.setMatrixAt(i, dummy.matrix);
 
-      const tint = FOREST_CANOPY_TONES[instance.treeType] ?? FOREST_TONE_BASE;
-      canopyColor.setRGB(tint.r / 255, tint.g / 255, tint.b / 255);
-      canopyMesh.setColorAt(i, canopyColor);
+        const tint = FOREST_CANOPY_TONES[instance.treeType] ?? FOREST_TONE_BASE;
+        canopyColor.setRGB(tint.r / 255, tint.g / 255, tint.b / 255);
+        canopyMesh.setColorAt(i, canopyColor);
+      });
+      trunkMesh.instanceMatrix.needsUpdate = true;
+      canopyMesh.instanceMatrix.needsUpdate = true;
+      if (canopyMesh.instanceColor) {
+        canopyMesh.instanceColor.needsUpdate = true;
+      }
+      finalizeInstancedMeshBounds(trunkMesh);
+      finalizeInstancedMeshBounds(canopyMesh);
+      treeGroup.add(trunkMesh, canopyMesh);
     });
-    trunkMesh.instanceMatrix.needsUpdate = true;
-    canopyMesh.instanceMatrix.needsUpdate = true;
-    if (canopyMesh.instanceColor) {
-      canopyMesh.instanceColor.needsUpdate = true;
-    }
-    treeGroup.add(trunkMesh);
-    treeGroup.add(canopyMesh);
     mesh.add(treeGroup);
   }
   if (scrubPlaceholderInstances.length > 0) {
@@ -3983,35 +4027,40 @@ export const buildTerrainMesh = (
       metalness: 0.02,
       vertexColors: true
     });
-    const shrubMesh = new THREE.InstancedMesh(shrubGeometry, shrubMaterial, scrubPlaceholderInstances.length);
     const baseScrub = TILE_COLOR_RGB.scrub;
     const baseR = baseScrub.r / 255;
     const baseG = baseScrub.g / 255;
     const baseB = baseScrub.b / 255;
     const tintColor = new THREE.Color();
     const dummy = new THREE.Object3D();
-    shrubMesh.castShadow = true;
-    shrubMesh.receiveShadow = true;
-    scrubPlaceholderInstances.forEach((instance, index) => {
-      const tint = 0.9 + instance.colorJitter * 0.22;
-      const warmShift = (instance.colorJitter - 0.5) * 0.06;
-      tintColor.setRGB(
-        clamp(baseR * (tint + warmShift), 0, 1),
-        clamp(baseG * (tint + 0.03), 0, 1),
-        clamp(baseB * (tint - warmShift * 0.6), 0, 1)
-      );
-      dummy.position.set(instance.x, instance.y + instance.scale * 0.2, instance.z);
-      dummy.rotation.set(0, instance.rotation, 0);
-      dummy.scale.set(instance.scale, instance.scale * 0.68, instance.scale);
-      dummy.updateMatrix();
-      shrubMesh.setMatrixAt(index, dummy.matrix);
-      shrubMesh.setColorAt(index, tintColor);
+    partitionTerrainInstances(scrubPlaceholderInstances, (instance) => ({ x: instance.tileX, y: instance.tileY })).forEach(({ key, instances }) => {
+      const shrubMesh = new THREE.InstancedMesh(shrubGeometry, shrubMaterial, instances.length);
+      shrubMesh.name = `terrain-scrub-${key}`;
+      shrubMesh.userData.terrainChunkKey = key;
+      shrubMesh.castShadow = true;
+      shrubMesh.receiveShadow = true;
+      instances.forEach((instance, index) => {
+        const tint = 0.9 + instance.colorJitter * 0.22;
+        const warmShift = (instance.colorJitter - 0.5) * 0.06;
+        tintColor.setRGB(
+          clamp(baseR * (tint + warmShift), 0, 1),
+          clamp(baseG * (tint + 0.03), 0, 1),
+          clamp(baseB * (tint - warmShift * 0.6), 0, 1)
+        );
+        dummy.position.set(instance.x, instance.y + instance.scale * 0.2, instance.z);
+        dummy.rotation.set(0, instance.rotation, 0);
+        dummy.scale.set(instance.scale, instance.scale * 0.68, instance.scale);
+        dummy.updateMatrix();
+        shrubMesh.setMatrixAt(index, dummy.matrix);
+        shrubMesh.setColorAt(index, tintColor);
+      });
+      shrubMesh.instanceMatrix.needsUpdate = true;
+      if (shrubMesh.instanceColor) {
+        shrubMesh.instanceColor.needsUpdate = true;
+      }
+      finalizeInstancedMeshBounds(shrubMesh);
+      mesh.add(shrubMesh);
     });
-    shrubMesh.instanceMatrix.needsUpdate = true;
-    if (shrubMesh.instanceColor) {
-      shrubMesh.instanceColor.needsUpdate = true;
-    }
-    mesh.add(shrubMesh);
   }
   const markStructureTopHeight = (
     minTileX: number,
@@ -4254,6 +4303,8 @@ export const buildTerrainMesh = (
         scaleY: number;
         scaleZ: number;
         rotation: number;
+        tileX: number;
+        tileY: number;
       };
       const variantIds = new Map<HouseVariant, number>();
       availableHouseVariants.forEach((variant, index) => {
@@ -4276,7 +4327,9 @@ export const buildTerrainMesh = (
             scaleX: footprintX,
             scaleY: foundationHeight,
             scaleZ: footprintZ,
-            rotation: spot.rotation
+            rotation: spot.rotation,
+            tileX: spot.minTileX,
+            tileY: spot.minTileY
           });
         }
         const variant = pickHouseVariant(spot);
@@ -4320,51 +4373,66 @@ export const buildTerrainMesh = (
         if (instances.length === 0) {
           return;
         }
-        const instanced = new THREE.InstancedMesh(template.geometry, template.material, instances.length);
-        instanced.castShadow = true;
-        instanced.receiveShadow = true;
-        instances.forEach((instance, index) => {
-          dummy.position.set(instance.spot.x, instance.baseY, instance.spot.z);
-          dummy.rotation.set(0, instance.spot.rotation, 0);
-          dummy.scale.set(instance.scaleX, instance.scaleY, instance.scaleZ);
-          dummy.updateMatrix();
-          tempMatrix.copy(dummy.matrix).multiply(template.baseMatrix);
-          instanced.setMatrixAt(index, tempMatrix);
+        partitionTerrainInstances(instances, (instance) => ({ x: instance.spot.minTileX, y: instance.spot.minTileY })).forEach(({ key, instances: chunkInstances }) => {
+          const instanced = new THREE.InstancedMesh(template.geometry, template.material, chunkInstances.length);
+          instanced.name = `terrain-house-${key}`;
+          instanced.userData.terrainChunkKey = key;
+          instanced.castShadow = true;
+          instanced.receiveShadow = true;
+          chunkInstances.forEach((instance, index) => {
+            dummy.position.set(instance.spot.x, instance.baseY, instance.spot.z);
+            dummy.rotation.set(0, instance.spot.rotation, 0);
+            dummy.scale.set(instance.scaleX, instance.scaleY, instance.scaleZ);
+            dummy.updateMatrix();
+            tempMatrix.copy(dummy.matrix).multiply(template.baseMatrix);
+            instanced.setMatrixAt(index, tempMatrix);
+          });
+          instanced.instanceMatrix.needsUpdate = true;
+          finalizeInstancedMeshBounds(instanced);
+          mesh.add(instanced);
         });
-        instanced.instanceMatrix.needsUpdate = true;
-        mesh.add(instanced);
       });
 
       if (fallbackInstances.length > 0) {
-        const fallbackMesh = new THREE.InstancedMesh(buildingGeometry, houseMaterial, fallbackInstances.length);
-        fallbackMesh.castShadow = true;
-        fallbackMesh.receiveShadow = true;
-        fallbackInstances.forEach((spot, index) => {
-          const footprintX = Math.max(0.5, spot.footprintX);
-          const footprintZ = Math.max(0.5, spot.footprintZ);
-          dummy.position.set(spot.x, spot.supportTop + 0.3, spot.z);
-          dummy.rotation.set(0, spot.rotation, 0);
-          dummy.scale.set(footprintX, 0.6, footprintZ);
-          dummy.updateMatrix();
-          fallbackMesh.setMatrixAt(index, dummy.matrix);
+        partitionTerrainInstances(fallbackInstances, (spot) => ({ x: spot.minTileX, y: spot.minTileY })).forEach(({ key, instances }) => {
+          const fallbackMesh = new THREE.InstancedMesh(buildingGeometry, houseMaterial, instances.length);
+          fallbackMesh.name = `terrain-house-fallback-${key}`;
+          fallbackMesh.userData.terrainChunkKey = key;
+          fallbackMesh.castShadow = true;
+          fallbackMesh.receiveShadow = true;
+          instances.forEach((spot, index) => {
+            const footprintX = Math.max(0.5, spot.footprintX);
+            const footprintZ = Math.max(0.5, spot.footprintZ);
+            dummy.position.set(spot.x, spot.supportTop + 0.3, spot.z);
+            dummy.rotation.set(0, spot.rotation, 0);
+            dummy.scale.set(footprintX, 0.6, footprintZ);
+            dummy.updateMatrix();
+            fallbackMesh.setMatrixAt(index, dummy.matrix);
+          });
+          fallbackMesh.instanceMatrix.needsUpdate = true;
+          finalizeInstancedMeshBounds(fallbackMesh);
+          mesh.add(fallbackMesh);
         });
-        fallbackMesh.instanceMatrix.needsUpdate = true;
-        mesh.add(fallbackMesh);
       }
 
       if (foundationInstances.length > 0) {
-        const foundationMesh = new THREE.InstancedMesh(buildingGeometry, foundationMaterial, foundationInstances.length);
-        foundationMesh.castShadow = true;
-        foundationMesh.receiveShadow = true;
-        foundationInstances.forEach((instance, index) => {
-          dummy.position.set(instance.x, instance.y, instance.z);
-          dummy.rotation.set(0, instance.rotation, 0);
-          dummy.scale.set(instance.scaleX, instance.scaleY, instance.scaleZ);
-          dummy.updateMatrix();
-          foundationMesh.setMatrixAt(index, dummy.matrix);
+        partitionTerrainInstances(foundationInstances, (instance) => ({ x: instance.tileX, y: instance.tileY })).forEach(({ key, instances }) => {
+          const foundationMesh = new THREE.InstancedMesh(buildingGeometry, foundationMaterial, instances.length);
+          foundationMesh.name = `terrain-house-foundation-${key}`;
+          foundationMesh.userData.terrainChunkKey = key;
+          foundationMesh.castShadow = true;
+          foundationMesh.receiveShadow = true;
+          instances.forEach((instance, index) => {
+            dummy.position.set(instance.x, instance.y, instance.z);
+            dummy.rotation.set(0, instance.rotation, 0);
+            dummy.scale.set(instance.scaleX, instance.scaleY, instance.scaleZ);
+            dummy.updateMatrix();
+            foundationMesh.setMatrixAt(index, dummy.matrix);
+          });
+          foundationMesh.instanceMatrix.needsUpdate = true;
+          finalizeInstancedMeshBounds(foundationMesh);
+          mesh.add(foundationMesh);
         });
-        foundationMesh.instanceMatrix.needsUpdate = true;
-        mesh.add(foundationMesh);
       }
     }
 
