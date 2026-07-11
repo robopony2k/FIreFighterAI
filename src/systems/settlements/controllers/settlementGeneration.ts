@@ -21,7 +21,17 @@ import { createEmptySettlementGrowthPlan } from "../sim/townGrowth.js";
 import { createPrecomputedSettlementGrowthPlan } from "../sim/futureSettlementGrowthPlan.js";
 import { bootstrapInitialTowns } from "../sim/initialTownBootstrap.js";
 import { getWaterTowerForTown, reserveGenerationWaterTowers } from "../sim/waterTowerInfrastructure.js";
-import { applyGuaranteedTownConnectorRoadbedCleanup, buildGuaranteedTownConnectorPath } from "../sim/guaranteedTownConnector.js";
+import {
+  createIntertownRoadPassState,
+  isIntertownTownPairComplete,
+  markIntertownTownPairComplete,
+  type IntertownRoadPassState
+} from "../sim/intertownRoadPassState.js";
+import {
+  applyGuaranteedTownConnectorRoadbedCleanup,
+  buildGuaranteedTownConnectorPath,
+  cloneGuaranteedTownConnectorTrialState
+} from "../sim/guaranteedTownConnector.js";
 import {
   SETTLEMENT_PLOT_MAX_ANGLE_DEG,
   SETTLEMENT_TOWN_FALLBACK_ANGLE_DEG,
@@ -2813,6 +2823,37 @@ const ensureGuaranteedTownConnectivity = (
       if (result.path.length === 0) {
         continue;
       }
+      const trialState = cloneGuaranteedTownConnectorTrialState(state);
+      const trialCarved = roadAdapter.carveRoadPath(trialState, result.path, result.bridgeTileIndices, {
+        diagnosticRouteGroup: "connectivityRepair",
+        diagnosticRouteId,
+        diagnosticRouteLabel,
+        suppressDiagnosticEvent: true
+      });
+      if (trialCarved) {
+        applyGuaranteedTownConnectorRoadbedCleanup(trialState, result.path, result.bridgeTileIndices);
+        roadAdapter.backfillRoadEdgesFromAdjacency(trialState);
+      }
+      const trialStillDisconnected =
+        !trialCarved ||
+        collectGuaranteedConnectivityCandidates(trialState, towns, roadAdapter).some(
+          (entry) => entry.disconnectedTown.id === candidate.disconnectedTown.id
+        );
+      if (trialStillDisconnected) {
+        emitFailedRoadDiagnostic(roadAdapter, {
+          diagnosticRouteId,
+          diagnosticRouteLabel,
+          routeType: "intertown",
+          routeGroup: "connectivityRepair",
+          reason: "guaranteed-town-connectivity",
+          townA: candidate.connectedTown ? createDiagnosticTownRef(candidate.connectedTown) : undefined,
+          townB: createDiagnosticTownRef(candidate.disconnectedTown),
+          startedAtMs,
+          searchBudget: result.maxPathLength,
+          failureReason: "route-failed"
+        });
+        continue;
+      }
       const carved = roadAdapter.carveRoadPath(state, result.path, result.bridgeTileIndices, {
         diagnosticRouteGroup: "connectivityRepair",
         diagnosticRouteId,
@@ -2962,6 +3003,7 @@ const connectTownRoads = (
   roadAdapter: SettlementRoadAdapter,
   plan: SettlementPlacementResult,
   failedCache: ConnectorAttemptCache = new Set(),
+  passState: IntertownRoadPassState = createIntertownRoadPassState(),
   passNumber = 1
 ): void => {
   if (!isIntertownConnectionEnabled(plan)) {
@@ -3011,13 +3053,29 @@ const connectTownRoads = (
       end: rightRoad,
       searchBudget: primaryBudget
     });
-    if (areRoadAnchorsAlreadyLocallyConnected(state, roadAdapter, leftRoad, rightRoad)) {
+    if (isIntertownTownPairComplete(passState, left.id, right.id)) {
       emitDuplicateRetryRoadDiagnostic(roadAdapter, {
         diagnosticRouteId,
         diagnosticRouteLabel,
         routeType: "intertown",
         routeGroup: "intertown",
         reason: baseReason,
+        duplicateCause: "completed-town-pair",
+        start: leftRoad,
+        end: rightRoad,
+        startedAtMs: routeStartedAt
+      });
+      continue;
+    }
+    if (areRoadAnchorsAlreadyLocallyConnected(state, roadAdapter, leftRoad, rightRoad)) {
+      markIntertownTownPairComplete(passState, left.id, right.id);
+      emitDuplicateRetryRoadDiagnostic(roadAdapter, {
+        diagnosticRouteId,
+        diagnosticRouteLabel,
+        routeType: "intertown",
+        routeGroup: "intertown",
+        reason: baseReason,
+        duplicateCause: "already-connected-anchors",
         start: leftRoad,
         end: rightRoad,
         startedAtMs: routeStartedAt
@@ -3025,6 +3083,7 @@ const connectTownRoads = (
       continue;
     }
     if (carveConnectorSwitchbackFirst(state, roadAdapter, leftRoad, rightRoad, plan, junctions, connectorOptions, failedCache)) {
+      markIntertownTownPairComplete(passState, left.id, right.id);
       emitCompletedRoadDiagnostic(roadAdapter, {
         diagnosticRouteId,
         diagnosticRouteLabel,
@@ -3049,6 +3108,7 @@ const connectTownRoads = (
         routeType: "intertown",
         routeGroup: "intertown",
         reason: "fallback-nearest-road",
+        duplicateCause: "same-endpoints",
         start: fallbackLeft,
         end: fallbackRight,
         startedAtMs: routeStartedAt
@@ -3078,12 +3138,14 @@ const connectTownRoads = (
       searchBudget: fallbackBudget
     });
     if (areRoadAnchorsAlreadyLocallyConnected(state, roadAdapter, fallbackLeft, fallbackRight)) {
+      markIntertownTownPairComplete(passState, left.id, right.id);
       emitDuplicateRetryRoadDiagnostic(roadAdapter, {
         diagnosticRouteId,
         diagnosticRouteLabel,
         routeType: "intertown",
         routeGroup: "intertown",
         reason: "fallback-nearest-road",
+        duplicateCause: "already-connected-anchors",
         start: fallbackLeft,
         end: fallbackRight,
         startedAtMs: routeStartedAt
@@ -3091,6 +3153,7 @@ const connectTownRoads = (
       continue;
     }
     if (carveConnectorSwitchbackFirst(state, roadAdapter, fallbackLeft, fallbackRight, plan, junctions, fallbackOptions, failedCache)) {
+      markIntertownTownPairComplete(passState, left.id, right.id);
       emitCompletedRoadDiagnostic(roadAdapter, {
         diagnosticRouteId,
         diagnosticRouteLabel,
@@ -3123,6 +3186,7 @@ const connectTownRoads = (
       searchBudget: fallbackBudget
     });
     if (carveRescueConnectorWithWaypoints(state, roadAdapter, fallbackLeft, fallbackRight, plan, failedCache, true, "intertown", rescueMetadata)) {
+      markIntertownTownPairComplete(passState, left.id, right.id);
       emitCompletedRoadDiagnostic(roadAdapter, {
         diagnosticRouteId,
         diagnosticRouteLabel,
@@ -3159,6 +3223,7 @@ const connectTownRoadsAsync = async (
   roadAdapter: SettlementRoadAdapter,
   plan: SettlementPlacementResult,
   failedCache: ConnectorAttemptCache = new Set(),
+  passState: IntertownRoadPassState = createIntertownRoadPassState(),
   passNumber = 1
 ): Promise<void> => {
   if (!isIntertownConnectionEnabled(plan)) {
@@ -3208,13 +3273,29 @@ const connectTownRoadsAsync = async (
       end: rightRoad,
       searchBudget: primaryBudget
     });
-    if (areRoadAnchorsAlreadyLocallyConnected(state, roadAdapter, leftRoad, rightRoad)) {
+    if (isIntertownTownPairComplete(passState, left.id, right.id)) {
       emitDuplicateRetryRoadDiagnostic(roadAdapter, {
         diagnosticRouteId,
         diagnosticRouteLabel,
         routeType: "intertown",
         routeGroup: "intertown",
         reason: baseReason,
+        duplicateCause: "completed-town-pair",
+        start: leftRoad,
+        end: rightRoad,
+        startedAtMs: routeStartedAt
+      });
+      continue;
+    }
+    if (areRoadAnchorsAlreadyLocallyConnected(state, roadAdapter, leftRoad, rightRoad)) {
+      markIntertownTownPairComplete(passState, left.id, right.id);
+      emitDuplicateRetryRoadDiagnostic(roadAdapter, {
+        diagnosticRouteId,
+        diagnosticRouteLabel,
+        routeType: "intertown",
+        routeGroup: "intertown",
+        reason: baseReason,
+        duplicateCause: "already-connected-anchors",
         start: leftRoad,
         end: rightRoad,
         startedAtMs: routeStartedAt
@@ -3222,6 +3303,7 @@ const connectTownRoadsAsync = async (
       continue;
     }
     if (await carveConnectorSwitchbackFirstAsync(state, roadAdapter, leftRoad, rightRoad, plan, junctions, connectorOptions, failedCache)) {
+      markIntertownTownPairComplete(passState, left.id, right.id);
       emitCompletedRoadDiagnostic(roadAdapter, {
         diagnosticRouteId,
         diagnosticRouteLabel,
@@ -3246,6 +3328,7 @@ const connectTownRoadsAsync = async (
         routeType: "intertown",
         routeGroup: "intertown",
         reason: "fallback-nearest-road",
+        duplicateCause: "same-endpoints",
         start: fallbackLeft,
         end: fallbackRight,
         startedAtMs: routeStartedAt
@@ -3275,12 +3358,14 @@ const connectTownRoadsAsync = async (
       searchBudget: fallbackBudget
     });
     if (areRoadAnchorsAlreadyLocallyConnected(state, roadAdapter, fallbackLeft, fallbackRight)) {
+      markIntertownTownPairComplete(passState, left.id, right.id);
       emitDuplicateRetryRoadDiagnostic(roadAdapter, {
         diagnosticRouteId,
         diagnosticRouteLabel,
         routeType: "intertown",
         routeGroup: "intertown",
         reason: "fallback-nearest-road",
+        duplicateCause: "already-connected-anchors",
         start: fallbackLeft,
         end: fallbackRight,
         startedAtMs: routeStartedAt
@@ -3288,6 +3373,7 @@ const connectTownRoadsAsync = async (
       continue;
     }
     if (await carveConnectorSwitchbackFirstAsync(state, roadAdapter, fallbackLeft, fallbackRight, plan, junctions, fallbackOptions, failedCache)) {
+      markIntertownTownPairComplete(passState, left.id, right.id);
       emitCompletedRoadDiagnostic(roadAdapter, {
         diagnosticRouteId,
         diagnosticRouteLabel,
@@ -3320,6 +3406,7 @@ const connectTownRoadsAsync = async (
       searchBudget: fallbackBudget
     });
     if (await carveRescueConnectorWithWaypointsAsync(state, roadAdapter, fallbackLeft, fallbackRight, plan, failedCache, true, "intertown", rescueMetadata)) {
+      markIntertownTownPairComplete(passState, left.id, right.id);
       emitCompletedRoadDiagnostic(roadAdapter, {
         diagnosticRouteId,
         diagnosticRouteLabel,
@@ -3454,13 +3541,14 @@ export const executeSettlementPlacementPlan = (
   const towns = seedTowns(state, realized);
   const intertownPasses = getIntertownConnectionPassLimit(realized);
   const intertownFailedCache: ConnectorAttemptCache = new Set();
+  const intertownPassState = createIntertownRoadPassState();
   const repairEnabled = isConnectivityRepairEnabled(realized);
   const bootstrapRoadAdapter = createRouteGroupRoadAdapter(roadAdapter, "initialSettlementBootstrap");
   const futureGrowthRoadAdapter = createRouteGroupRoadAdapter(roadAdapter, "futureGrowthPrecompute");
   reserveGenerationWaterTowers(state);
   buildInitialRoadSkeletons(state, towns, roadAdapter, realized);
   if (intertownPasses >= 1) {
-    connectTownRoads(state, towns, roadAdapter, realized, intertownFailedCache, 1);
+    connectTownRoads(state, towns, roadAdapter, realized, intertownFailedCache, intertownPassState, 1);
   }
   if (repairEnabled) {
     ensureTownRoadConnectivity(state, towns, roadAdapter, realized);
@@ -3471,7 +3559,7 @@ export const executeSettlementPlacementPlan = (
     ensureTownLocalRoadAnchors(state, towns, roadAdapter, realized);
   }
   if (intertownPasses >= 2) {
-    connectTownRoads(state, towns, roadAdapter, realized, intertownFailedCache, 2);
+    connectTownRoads(state, towns, roadAdapter, realized, intertownFailedCache, intertownPassState, 2);
   }
   if (repairEnabled) {
     ensureTownRoadConnectivity(state, towns, roadAdapter, realized);
@@ -3515,13 +3603,14 @@ export const executeSettlementPlacementPlanAsync = async (
   const towns = seedTowns(state, realized);
   const intertownPasses = getIntertownConnectionPassLimit(realized);
   const intertownFailedCache: ConnectorAttemptCache = new Set();
+  const intertownPassState = createIntertownRoadPassState();
   const repairEnabled = isConnectivityRepairEnabled(realized);
   const bootstrapRoadAdapter = createRouteGroupRoadAdapter(roadAdapter, "initialSettlementBootstrap");
   const futureGrowthRoadAdapter = createRouteGroupRoadAdapter(roadAdapter, "futureGrowthPrecompute");
   reserveGenerationWaterTowers(state);
   await buildInitialRoadSkeletonsAsync(state, towns, roadAdapter, realized);
   if (intertownPasses >= 1) {
-    await connectTownRoadsAsync(state, towns, roadAdapter, realized, intertownFailedCache, 1);
+    await connectTownRoadsAsync(state, towns, roadAdapter, realized, intertownFailedCache, intertownPassState, 1);
   }
   if (repairEnabled) {
     await ensureTownRoadConnectivityAsync(state, towns, roadAdapter, realized);
@@ -3532,7 +3621,7 @@ export const executeSettlementPlacementPlanAsync = async (
     await ensureTownLocalRoadAnchorsAsync(state, towns, roadAdapter, realized);
   }
   if (intertownPasses >= 2) {
-    await connectTownRoadsAsync(state, towns, roadAdapter, realized, intertownFailedCache, 2);
+    await connectTownRoadsAsync(state, towns, roadAdapter, realized, intertownFailedCache, intertownPassState, 2);
   }
   if (repairEnabled) {
     await ensureTownRoadConnectivityAsync(state, towns, roadAdapter, realized);

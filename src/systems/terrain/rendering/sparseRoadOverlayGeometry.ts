@@ -1,4 +1,5 @@
 import * as THREE from "three";
+import { resolveAuthoritativeRoadEdgeMask } from "../../../render/terrain/shared/roadTopology.js";
 
 export type SparseRoadOverlaySample = {
   cols: number;
@@ -16,11 +17,31 @@ const markRoadCoverage = (
 ): Uint8Array => {
   const { cols, rows } = sample;
   const mask = new Uint8Array(Math.max(0, cols * rows));
+  const isRoadLike = (x: number, y: number): boolean => {
+    if (x < 0 || y < 0 || x >= cols || y >= rows) {
+      return false;
+    }
+    const index = y * cols + x;
+    const type = sample.tileTypes?.[index] ?? -1;
+    return type === roadId || type === baseId || (sample.roadBridgeMask?.[index] ?? 0) > 0;
+  };
   for (let y = 0; y < rows; y += 1) {
     for (let x = 0; x < cols; x += 1) {
       const index = y * cols + x;
       const type = sample.tileTypes?.[index] ?? -1;
-      const active = type === roadId || type === baseId || (sample.roadEdges?.[index] ?? 0) > 0 || (sample.roadBridgeMask?.[index] ?? 0) > 0;
+      const bridge = (sample.roadBridgeMask?.[index] ?? 0) > 0;
+      const authoritativeMask = resolveAuthoritativeRoadEdgeMask(
+        sample.roadEdges,
+        cols,
+        rows,
+        x,
+        y,
+        isRoadLike
+      );
+      const active =
+        type === baseId ||
+        bridge ||
+        (authoritativeMask ?? (type === roadId ? 1 : 0)) !== 0;
       if (!active) {
         continue;
       }

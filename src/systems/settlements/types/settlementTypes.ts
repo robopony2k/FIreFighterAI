@@ -54,6 +54,7 @@ export type SettlementRoadOptions = {
   diagnosticRouteLabel?: string;
   diagnosticRouteType?: RoadPathDiagnosticRouteType;
   diagnosticRouteReason?: RoadPathDiagnosticRouteReason;
+  suppressDiagnosticEvent?: boolean;
   searchBounds?: {
     minX: number;
     maxX: number;
@@ -102,7 +103,10 @@ export type SettlementRoadAdapter = {
     state: WorldState,
     path: Point[],
     bridgeTileIndices?: number[],
-    options?: Pick<SettlementRoadOptions, "diagnosticRouteGroup" | "diagnosticRouteId" | "diagnosticRouteLabel">
+    options?: Pick<
+      SettlementRoadOptions,
+      "diagnosticRouteGroup" | "diagnosticRouteId" | "diagnosticRouteLabel" | "suppressDiagnosticEvent"
+    >
   ) => boolean;
   carveRoadSequence?: (
     state: WorldState,

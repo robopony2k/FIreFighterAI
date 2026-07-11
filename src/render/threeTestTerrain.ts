@@ -37,6 +37,7 @@ import {
   ROAD_TEX_SCALE
 } from "./terrain/roads/roadGeometryConstants.js";
 import { buildRoadRetainingWallMesh } from "./terrain/roads/roadRetainingWallMesh.js";
+import { TERRAIN_ROAD_VISUAL_USER_DATA } from "./terrain/roads/roadHighContrast.js";
 import { buildDistanceField } from "./terrain/shared/distanceField.js";
 import { resolveStructureGrounding } from "./terrain/shared/structureGrounding.js";
 import {
@@ -2317,8 +2318,6 @@ export const buildRoadOverlayTexture = (
   scale: number
 ): THREE.Texture | null =>
   buildRoadOverlayTextureInternal(sample, roadId, baseId, roadWidth, scale);
-
-const TERRAIN_ROAD_VISUAL_USER_DATA = "terrainRoadVisual";
 
 const markTerrainRoadVisual = (object: THREE.Object3D, kind: string): void => {
   object.userData[TERRAIN_ROAD_VISUAL_USER_DATA] = kind;

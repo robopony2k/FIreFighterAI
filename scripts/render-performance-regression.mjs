@@ -6,7 +6,17 @@ import {
   partitionTerrainInstances
 } from "../dist/systems/terrain/rendering/terrainRenderChunks.js";
 import { buildSparseRoadOverlayGeometry } from "../dist/systems/terrain/rendering/sparseRoadOverlayGeometry.js";
+import {
+  ROAD_EDGE_E,
+  ROAD_EDGE_W,
+  resolveAuthoritativeRoadEdgeMask
+} from "../dist/render/terrain/shared/roadTopology.js";
 import { TerrainShadowBlendController } from "../dist/systems/terrain/rendering/terrainShadowBlendController.js";
+import {
+  ROAD_HIGH_CONTRAST_COLOR_HEX,
+  TERRAIN_ROAD_VISUAL_USER_DATA,
+  setTerrainRoadHighContrast
+} from "../dist/render/terrain/roads/roadHighContrast.js";
 
 const instances = [
   { tileX: 0, tileY: 0 },
@@ -51,6 +61,127 @@ assert.equal(
   null,
   "a road-free sample should not create an overlay draw"
 );
+
+const authoritativeTileTypes = new Uint8Array(16);
+authoritativeTileTypes[5] = 7;
+authoritativeTileTypes[6] = 7;
+const authoritativeRoadEdges = new Uint8Array(16);
+assert.equal(
+  buildSparseRoadOverlayGeometry(
+    fullRoadGeometry,
+    { cols: 4, rows: 4, tileTypes: authoritativeTileTypes, roadEdges: authoritativeRoadEdges },
+    7,
+    8,
+    0
+  ),
+  null,
+  "zero-edge ordinary road remnants should not allocate overlay geometry"
+);
+authoritativeRoadEdges[5] = ROAD_EDGE_E;
+authoritativeRoadEdges[6] = ROAD_EDGE_W;
+assert.ok(
+  buildSparseRoadOverlayGeometry(
+    fullRoadGeometry,
+    { cols: 4, rows: 4, tileTypes: authoritativeTileTypes, roadEdges: authoritativeRoadEdges },
+    7,
+    8,
+    0
+  ),
+  "authoritatively connected road tiles should remain renderable"
+);
+authoritativeTileTypes[6] = 0;
+assert.equal(
+  resolveAuthoritativeRoadEdgeMask(
+    authoritativeRoadEdges,
+    4,
+    4,
+    1,
+    1,
+    (x, y) => authoritativeTileTypes[y * 4 + x] === 7
+  ),
+  0,
+  "authoritative masks should sanitize removed neighbors without reconstructing adjacency"
+);
+const baseOnlyTypes = new Uint8Array(16);
+baseOnlyTypes[5] = 8;
+assert.ok(
+  buildSparseRoadOverlayGeometry(
+    fullRoadGeometry,
+    { cols: 4, rows: 4, tileTypes: baseOnlyTypes, roadEdges: new Uint8Array(16) },
+    7,
+    8,
+    0
+  ),
+  "base tiles should remain in sparse road coverage without road edges"
+);
+const bridgeOnlyMask = new Uint8Array(16);
+bridgeOnlyMask[5] = 1;
+assert.ok(
+  buildSparseRoadOverlayGeometry(
+    fullRoadGeometry,
+    {
+      cols: 4,
+      rows: 4,
+      tileTypes: new Uint8Array(16),
+      roadEdges: new Uint8Array(16),
+      roadBridgeMask: bridgeOnlyMask
+    },
+    7,
+    8,
+    0
+  ),
+  "bridge tiles should remain in sparse road coverage without ordinary road edges"
+);
+
+const roadVisualTerrain = new THREE.Group();
+const roadVisualRoot = new THREE.Group();
+roadVisualRoot.userData[TERRAIN_ROAD_VISUAL_USER_DATA] = "overlay";
+const originalRoadTexture = new THREE.Texture();
+const texturedRoadMaterial = new THREE.MeshStandardMaterial({
+  color: 0x778899,
+  emissive: 0x010203,
+  emissiveIntensity: 0.35,
+  map: originalRoadTexture,
+  toneMapped: true
+});
+const solidRoadMaterial = new THREE.MeshStandardMaterial({
+  color: 0x334455,
+  emissive: 0x040506,
+  emissiveIntensity: 0.2,
+  toneMapped: true
+});
+roadVisualRoot.add(
+  new THREE.Mesh(new THREE.PlaneGeometry(1, 1), texturedRoadMaterial),
+  new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1), solidRoadMaterial)
+);
+roadVisualTerrain.add(roadVisualRoot);
+assert.equal(setTerrainRoadHighContrast(roadVisualTerrain, true), 2, "road contrast should update every road material");
+assert.equal(texturedRoadMaterial.color.getHex(), 0xffffff, "textured roads should preserve their texture color range");
+assert.equal(texturedRoadMaterial.emissive.getHex(), ROAD_HIGH_CONTRAST_COLOR_HEX);
+assert.equal(texturedRoadMaterial.emissiveMap, originalRoadTexture);
+assert.equal(solidRoadMaterial.color.getHex(), ROAD_HIGH_CONTRAST_COLOR_HEX);
+assert.equal(solidRoadMaterial.toneMapped, false);
+assert.equal(setTerrainRoadHighContrast(roadVisualTerrain, false), 2, "road contrast should restore every road material");
+assert.equal(texturedRoadMaterial.color.getHex(), 0x778899);
+assert.equal(texturedRoadMaterial.emissive.getHex(), 0x010203);
+assert.equal(texturedRoadMaterial.emissiveIntensity, 0.35);
+assert.equal(texturedRoadMaterial.emissiveMap, null);
+assert.equal(texturedRoadMaterial.toneMapped, true);
+assert.equal(solidRoadMaterial.color.getHex(), 0x334455);
+assert.equal(solidRoadMaterial.emissive.getHex(), 0x040506);
+assert.equal(solidRoadMaterial.emissiveIntensity, 0.2);
+const rebuiltRoadVisualRoot = new THREE.Group();
+rebuiltRoadVisualRoot.userData[TERRAIN_ROAD_VISUAL_USER_DATA] = "deck";
+const rebuiltRoadMaterial = new THREE.MeshStandardMaterial({ color: 0x222222 });
+rebuiltRoadVisualRoot.add(new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1), rebuiltRoadMaterial));
+roadVisualTerrain.clear();
+roadVisualTerrain.add(rebuiltRoadVisualRoot);
+assert.equal(
+  setTerrainRoadHighContrast(roadVisualTerrain, true),
+  1,
+  "road contrast should apply to newly rebuilt road visuals"
+);
+assert.equal(rebuiltRoadMaterial.color.getHex(), ROAD_HIGH_CONTRAST_COLOR_HEX);
 
 const shadowController = new TerrainShadowBlendController({
   mapSize: 2048,

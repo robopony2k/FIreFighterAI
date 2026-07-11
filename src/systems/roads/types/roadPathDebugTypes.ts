@@ -6,6 +6,10 @@ import type { RoadPathPlannerFailureReason } from "./roadPathPlannerTypes.js";
 export type RoadPathDebugAttemptKind = "point" | "target" | "sequence";
 export type RoadPathDebugPlannerKind = "streamer" | "astar" | "dijkstra";
 export type RoadPathDiagnosticRouteType = "intertown" | "intratown";
+export type RoadPathDiagnosticDuplicateCause =
+  | "same-endpoints"
+  | "already-connected-anchors"
+  | "completed-town-pair";
 export type RoadPathDiagnosticRouteReason =
   | "minimum-spanning-town-link"
   | "second-pass-connectivity"
@@ -131,6 +135,7 @@ export type RoadPathDebugDuplicateRetryEvent = {
   routeType: RoadPathDiagnosticRouteType;
   routeGroup: RoadDiagnosticRouteGroup;
   reason: RoadPathDiagnosticRouteReason;
+  duplicateCause?: RoadPathDiagnosticDuplicateCause;
   start?: Point;
   end?: Point;
   attempts: number;

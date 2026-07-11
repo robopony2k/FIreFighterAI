@@ -231,6 +231,7 @@ const summarizeGroupedRoads = (events) => ({
       type: event.routeType,
       group: event.routeGroup,
       reason: event.reason,
+      duplicateCause: event.duplicateCause ?? null,
       attempts: event.attempts
     })),
   intratown: events
@@ -314,6 +315,15 @@ const durationMs = Math.max(0, performance.now() - startedAt);
 const groupedRoads = summarizeGroupedRoads(events);
 const guaranteedConnectorStyles = summarizeGuaranteedConnectorStyles(groupedRoads);
 const lowLevelResults = events.filter((event) => event.kind === "road:result");
+const roadCarves = events
+  .filter((event) => event.kind === "road:carve")
+  .map((event) => ({
+    id: event.diagnosticRouteId ?? null,
+    label: event.diagnosticRouteLabel ?? null,
+    group: event.routeGroup,
+    pathLength: event.pathLength,
+    bounds: event.bounds ?? null
+  }));
 const houses = collectHouses(state);
 const unconnectedHouses = collectUnconnectedHouses(state, houses);
 const namedTownConnectivity = summarizeNamedTownConnectivity(state);
@@ -388,11 +398,27 @@ const report = {
     budgetAborted: lowLevelResults.filter((event) => event.budgetAborted).length,
     carves: events.filter((event) => event.kind === "road:carve").length
   },
+  roadCarves,
   groupedRoads
 };
 
 if (!namedTownConnectivity.allNamedTownsConnected) {
   throw new Error(`Named towns are not connected: ${namedTownConnectivity.disconnectedTowns.join(", ")}`);
+}
+const completedGuaranteedRouteIds = new Set(
+  groupedRoads.completed
+    .filter((event) => event.id.startsWith("intertown:guaranteed:"))
+    .map((event) => event.id)
+);
+const rejectedGuaranteedCarves = roadCarves.filter(
+  (event) => event.id?.startsWith("intertown:guaranteed:") && !completedGuaranteedRouteIds.has(event.id)
+);
+if (rejectedGuaranteedCarves.length > 0) {
+  throw new Error(
+    `Rejected guaranteed connectors mutated the authoritative road graph: ${rejectedGuaranteedCarves
+      .map((event) => `${event.id}:${event.pathLength}`)
+      .join(", ")}`
+  );
 }
 if (
   shareCode === strugglingRoadShareCode &&
@@ -407,6 +433,19 @@ if (
   throw new Error("Struggling road share code did not complete a contour guaranteed connector.");
 }
 if (shareCode === strugglingRoadShareCode) {
+  const guaranteedCarves = roadCarves.filter((event) => event.id?.startsWith("intertown:guaranteed:"));
+  if (guaranteedCarves.length !== 1) {
+    throw new Error(`Expected exactly one committed guaranteed connector, got ${guaranteedCarves.length}.`);
+  }
+  const guaranteedCarve = guaranteedCarves[0];
+  if (
+    guaranteedCarve.pathLength > 200 ||
+    (guaranteedCarve.bounds?.maxX ?? Number.POSITIVE_INFINITY) > 170
+  ) {
+    throw new Error(
+      `Guaranteed connector regressed to a perimeter artifact: length=${guaranteedCarve.pathLength} bounds=${JSON.stringify(guaranteedCarve.bounds)}.`
+    );
+  }
   if (state.waterTowers.length !== state.towns.length) {
     throw new Error(`Expected one water tower per town, got ${state.waterTowers.length}/${state.towns.length}.`);
   }

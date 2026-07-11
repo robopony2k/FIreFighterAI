@@ -26,3 +26,31 @@ export const ROAD_EDGE_DIRS: RoadEdgeDirection[] = [
   { dx: 1, dy: 1, bit: ROAD_EDGE_SE, diagonal: true },
   { dx: -1, dy: 1, bit: ROAD_EDGE_SW, diagonal: true }
 ];
+
+export const resolveAuthoritativeRoadEdgeMask = (
+  roadEdges: ArrayLike<number> | undefined,
+  cols: number,
+  rows: number,
+  x: number,
+  y: number,
+  isRoadLike: (tileX: number, tileY: number) => boolean
+): number | null => {
+  const total = cols * rows;
+  if (!roadEdges || roadEdges.length !== total || x < 0 || y < 0 || x >= cols || y >= rows) {
+    return null;
+  }
+  const stored = roadEdges[y * cols + x] ?? 0;
+  let sanitized = 0;
+  for (let i = 0; i < ROAD_EDGE_DIRS.length; i += 1) {
+    const dir = ROAD_EDGE_DIRS[i]!;
+    if ((stored & dir.bit) === 0) {
+      continue;
+    }
+    const nx = x + dir.dx;
+    const ny = y + dir.dy;
+    if (nx >= 0 && ny >= 0 && nx < cols && ny < rows && isRoadLike(nx, ny)) {
+      sanitized |= dir.bit;
+    }
+  }
+  return sanitized;
+};

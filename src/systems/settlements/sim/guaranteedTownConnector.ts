@@ -195,8 +195,18 @@ const isBlockedForGuaranteedConnector = (state: WorldState, point: Point, startI
   if (tile.type === "house" || tile.type === "base") {
     return true;
   }
-  return false;
+  return (state.structureMask[idx] ?? 0) > 0;
 };
+
+export const cloneGuaranteedTownConnectorTrialState = (state: WorldState): WorldState =>
+  ({
+    ...state,
+    tiles: state.tiles.map((tile) => ({ ...tile })),
+    tileElevation: new Float32Array(state.tileElevation),
+    tileRoadBridge: new Uint8Array(state.tileRoadBridge),
+    tileRoadEdges: new Uint8Array(state.tileRoadEdges),
+    tileRoadWallEdges: new Uint8Array(state.tileRoadWallEdges)
+  }) as WorldState;
 
 const localRelief = (state: WorldState, x: number, y: number): number => {
   const center = state.tiles[indexFor(state.grid, x, y)]?.elevation ?? 0;

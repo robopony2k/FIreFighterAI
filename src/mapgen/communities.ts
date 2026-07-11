@@ -104,7 +104,8 @@ const createRoadAdapter = (rng: RNG, tuning: RoadDiagnosticTuning | null = null)
       allowBridgeIndices: new Set(bridgeTileIndices),
       diagnosticRouteGroup: options.diagnosticRouteGroup,
       diagnosticRouteId: options.diagnosticRouteId,
-      diagnosticRouteLabel: options.diagnosticRouteLabel
+      diagnosticRouteLabel: options.diagnosticRouteLabel,
+      suppressDiagnosticEvent: options.suppressDiagnosticEvent
     }),
   carveRoadSequence: (state, segments) => {
     const tunedSegments = segments.map((segment) => ({

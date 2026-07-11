@@ -530,6 +530,7 @@ export const createAppRuntime = (): AppRuntime => {
   };
   const perfOverlayFogToggle = createPerfOverlayCheckbox("Fog", "F8");
   const perfOverlayWaterfallToggle = createPerfOverlayCheckbox("Waterfall X-Ray", "F9");
+  const perfOverlayRoadContrastToggle = createPerfOverlayCheckbox("Roads Ultra Contrast", "F10");
   let perfOverlayVisible = runtimeSettings.perf;
   let lastPerfOverlayUpdate = 0;
   let lastPerfConsoleLog = 0;
@@ -588,14 +589,17 @@ export const createAppRuntime = (): AppRuntime => {
     perfOverlayControls.style.display = canToggle ? "flex" : "none";
     perfOverlayFogToggle.input.disabled = !canToggle;
     perfOverlayWaterfallToggle.input.disabled = !canToggle;
+    perfOverlayRoadContrastToggle.input.disabled = !canToggle;
     if (!canToggle || !threeTestController) {
       perfOverlayFogToggle.input.checked = false;
       perfOverlayWaterfallToggle.input.checked = false;
+      perfOverlayRoadContrastToggle.input.checked = false;
       return;
     }
     perfOverlayFogToggle.input.checked = threeTestController.getEnvironmentFogEnabled();
     perfOverlayWaterfallToggle.input.checked =
       threeTestController.getTerrainWaterDebugControls().waterfallDebugHighlight;
+    perfOverlayRoadContrastToggle.input.checked = threeTestController.getRoadHighContrastEnabled();
   };
   const setRunFogEnabled = (enabled: boolean): void => {
     if (!canUsePerfOverlayRunToggles() || !threeTestController) {
@@ -621,6 +625,20 @@ export const createAppRuntime = (): AppRuntime => {
       enabled
         ? "Waterfall x-ray highlight enabled. Press F9 to disable."
         : "Waterfall x-ray highlight disabled."
+    );
+    syncPerfOverlayControls();
+  };
+  const setRunRoadHighContrastEnabled = (enabled: boolean): void => {
+    if (!canUsePerfOverlayRunToggles() || !threeTestController) {
+      syncPerfOverlayControls();
+      return;
+    }
+    threeTestController.setRoadHighContrastEnabled(enabled);
+    setStatus(
+      state,
+      enabled
+        ? "Ultra-high-contrast roads enabled. Press F10 to disable."
+        : "Ultra-high-contrast roads disabled."
     );
     syncPerfOverlayControls();
   };
@@ -674,10 +692,14 @@ export const createAppRuntime = (): AppRuntime => {
     perfOverlayWaterfallToggle.input.addEventListener("change", () => {
       setRunWaterfallHighlightEnabled(perfOverlayWaterfallToggle.input.checked);
     });
+    perfOverlayRoadContrastToggle.input.addEventListener("change", () => {
+      setRunRoadHighContrastEnabled(perfOverlayRoadContrastToggle.input.checked);
+    });
     perfOverlayControls.append(
       perfOverlayControlsTitle,
       perfOverlayFogToggle.row,
-      perfOverlayWaterfallToggle.row
+      perfOverlayWaterfallToggle.row,
+      perfOverlayRoadContrastToggle.row
     );
     perfOverlay.append(perfOverlayText, perfOverlayControls);
     document.body.appendChild(perfOverlay);
@@ -813,6 +835,7 @@ export const createAppRuntime = (): AppRuntime => {
         lines.push(`3D fall span: q/f ${threePerf.waterfallWallQuadBreakdown}`);
         lines.push(`3D env: fog ${threePerf.environmentFogEnabled ? "on" : "off"}  F8 toggle`);
         lines.push(`3D fall viz: ${threePerf.waterfallDebugHighlightEnabled ? "xray on" : "xray off"}  F9 toggle`);
+        lines.push(`3D roads: ${threeTestController?.getRoadHighContrastEnabled() ? "ultra contrast" : "normal"}  F10 toggle`);
         lines.push(
           `3D mem: geom ${formatInt(threePerf.memoryGeometries)} tex ${formatInt(threePerf.memoryTextures)} totalCalls ${formatInt(threePerf.totalCalls)}`
         );
@@ -1949,15 +1972,19 @@ export const createAppRuntime = (): AppRuntime => {
       setRuntimeSetting("perf", !perfOverlayVisible);
       return;
     }
-    if (key !== "f9" || event.ctrlKey || event.shiftKey || event.altKey || event.metaKey) {
+    if ((key !== "f9" && key !== "f10") || event.ctrlKey || event.shiftKey || event.altKey || event.metaKey) {
       return;
     }
     if (!canUsePerfOverlayRunToggles() || !threeTestController) {
       return;
     }
     event.preventDefault();
-    const nextHighlight = !threeTestController.getTerrainWaterDebugControls().waterfallDebugHighlight;
-    setRunWaterfallHighlightEnabled(nextHighlight);
+    if (key === "f9") {
+      const nextHighlight = !threeTestController.getTerrainWaterDebugControls().waterfallDebugHighlight;
+      setRunWaterfallHighlightEnabled(nextHighlight);
+      return;
+    }
+    setRunRoadHighContrastEnabled(!threeTestController.getRoadHighContrastEnabled());
   });
   
   applyPerfOverlayStyle();

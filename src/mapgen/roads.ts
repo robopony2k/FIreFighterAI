@@ -1217,6 +1217,9 @@ export const pruneRoadConnectorArtifacts = (state: WorldState): number => {
     pruned += 1;
   }
   roadGenerationStats.connectorArtifactPrunedEdgeCount += pruned;
+  if (pruned > 0) {
+    bumpRoadNetworkRevision(state);
+  }
   return pruned;
 };
 
@@ -3700,6 +3703,7 @@ export function carveRoadPath(
     diagnosticRouteGroup?: RoadDiagnosticRouteGroup;
     diagnosticRouteId?: string;
     diagnosticRouteLabel?: string;
+    suppressDiagnosticEvent?: boolean;
   } = {}
 ): boolean {
   if (path.length === 0) {
@@ -3722,15 +3726,17 @@ export function carveRoadPath(
     connectRoadPoints(state, prev.x, prev.y, next.x, next.y);
   }
   bumpRoadNetworkRevision(state);
-  emitRoadPathDebugEvent({
-    kind: "road:carve",
-    diagnosticRouteId: options.diagnosticRouteId,
-    diagnosticRouteLabel: options.diagnosticRouteLabel,
-    routeGroup: options.diagnosticRouteGroup ?? "unknown",
-    pathLength: path.length,
-    bridgeTileIndices: bridgeTileIndices.length > 0 ? bridgeTileIndices : undefined,
-    bounds: getPathBounds(path) ?? undefined
-  });
+  if (!options.suppressDiagnosticEvent) {
+    emitRoadPathDebugEvent({
+      kind: "road:carve",
+      diagnosticRouteId: options.diagnosticRouteId,
+      diagnosticRouteLabel: options.diagnosticRouteLabel,
+      routeGroup: options.diagnosticRouteGroup ?? "unknown",
+      pathLength: path.length,
+      bridgeTileIndices: bridgeTileIndices.length > 0 ? bridgeTileIndices : undefined,
+      bounds: getPathBounds(path) ?? undefined
+    });
+  }
   return true;
 }
 

@@ -2,6 +2,7 @@ import type { Point, Town } from "../../../core/types.js";
 import type { RoadDiagnosticRouteGroup } from "../../roads/types/roadDiagnosticTuning.js";
 import type {
   RoadPathDebugEvent,
+  RoadPathDiagnosticDuplicateCause,
   RoadPathDiagnosticFailureReason,
   RoadPathDiagnosticRouteReason,
   RoadPathDiagnosticRouteType,
@@ -197,6 +198,7 @@ export const emitDuplicateRetryRoadDiagnostic = (
     routeType: RoadPathDiagnosticRouteType;
     routeGroup: RoadDiagnosticRouteGroup;
     reason: RoadPathDiagnosticRouteReason;
+    duplicateCause?: RoadPathDiagnosticDuplicateCause;
     start?: Point;
     end?: Point;
     startedAtMs: number;
@@ -210,6 +212,7 @@ export const emitDuplicateRetryRoadDiagnostic = (
     routeType: input.routeType,
     routeGroup: input.routeGroup,
     reason: input.reason,
+    duplicateCause: input.duplicateCause,
     start: input.start,
     end: input.end,
     attempts: stats.attempts,

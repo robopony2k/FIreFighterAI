@@ -32,6 +32,9 @@ const {
   setRoadPathDebugHooks
 } = await import(distImport(["mapgen", "roads.js"]));
 const { computeRenderedSlopeAngleDeg } = await import(distImport(["shared", "terrainSlope.js"]));
+const { resolveAuthoritativeRoadEdgeMask } = await import(
+  distImport(["render", "terrain", "shared", "roadTopology.js"])
+);
 
 const allSizes = ["medium", "massive", "colossal", "gigantic", "titanic"];
 const quickSizes = ["medium", "massive"];
@@ -2168,11 +2171,35 @@ const runSyntheticRoadArtifactCleanupCase = () => {
   connectRoadPoints(state, 4, 6, 5, 6);
   connectRoadPoints(state, 5, 6, 5, 5);
   connectRoadPoints(state, 4, 5, 5, 6);
+  const edgesBeforeCleanup = new Uint8Array(state.tileRoadEdges);
   const pruned = pruneRoadConnectorArtifacts(state);
+  let prunedEdgesStayAbsent = true;
+  for (let idx = 0; idx < state.grid.totalTiles; idx += 1) {
+    const removedMask = edgesBeforeCleanup[idx] & ~(state.tileRoadEdges[idx] ?? 0);
+    if (removedMask === 0) {
+      continue;
+    }
+    const x = idx % grid.cols;
+    const y = Math.floor(idx / grid.cols);
+    const renderMask = resolveAuthoritativeRoadEdgeMask(
+      state.tileRoadEdges,
+      grid.cols,
+      grid.rows,
+      x,
+      y,
+      (tileX, tileY) => state.tiles[tileY * grid.cols + tileX]?.type === "road"
+    ) ?? 0;
+    for (const dir of ROAD_EDGE_DIRS) {
+      if ((removedMask & dir.bit) !== 0 && (renderMask & dir.bit) !== 0) {
+        prunedEdgesStayAbsent = false;
+      }
+    }
+  }
   return {
     pruned,
     stats: getRoadGenerationStats(),
-    stillConnected: (state.tileRoadEdges[5 * grid.cols + 4] ?? 0) > 0 && (state.tileRoadEdges[6 * grid.cols + 5] ?? 0) > 0
+    stillConnected: (state.tileRoadEdges[5 * grid.cols + 4] ?? 0) > 0 && (state.tileRoadEdges[6 * grid.cols + 5] ?? 0) > 0,
+    prunedEdgesStayAbsent
   };
 };
 
@@ -2587,10 +2614,11 @@ const runAll = async () => {
   if (
     syntheticRoadCleanup.pruned < 1 ||
     syntheticRoadCleanup.stats.connectorArtifactPrunedEdgeCount !== syntheticRoadCleanup.pruned ||
-    !syntheticRoadCleanup.stillConnected
+    !syntheticRoadCleanup.stillConnected ||
+    !syntheticRoadCleanup.prunedEdgesStayAbsent
   ) {
     throw new Error(
-      `[mapgen] synthetic road cleanup case failed: pruned=${syntheticRoadCleanup.pruned} stats=${syntheticRoadCleanup.stats.connectorArtifactPrunedEdgeCount} connected=${syntheticRoadCleanup.stillConnected}`
+      `[mapgen] synthetic road cleanup case failed: pruned=${syntheticRoadCleanup.pruned} stats=${syntheticRoadCleanup.stats.connectorArtifactPrunedEdgeCount} connected=${syntheticRoadCleanup.stillConnected} renderAbsent=${syntheticRoadCleanup.prunedEdgesStayAbsent}`
     );
   }
   const syntheticMountainPass = runSyntheticMountainPassCase();
@@ -3102,10 +3130,11 @@ if (syntheticRoadsOnly) {
   if (
     syntheticRoadCleanup.pruned < 1 ||
     syntheticRoadCleanup.stats.connectorArtifactPrunedEdgeCount !== syntheticRoadCleanup.pruned ||
-    !syntheticRoadCleanup.stillConnected
+    !syntheticRoadCleanup.stillConnected ||
+    !syntheticRoadCleanup.prunedEdgesStayAbsent
   ) {
     throw new Error(
-      `[mapgen] synthetic road cleanup case failed: pruned=${syntheticRoadCleanup.pruned} stats=${syntheticRoadCleanup.stats.connectorArtifactPrunedEdgeCount} connected=${syntheticRoadCleanup.stillConnected}`
+      `[mapgen] synthetic road cleanup case failed: pruned=${syntheticRoadCleanup.pruned} stats=${syntheticRoadCleanup.stats.connectorArtifactPrunedEdgeCount} connected=${syntheticRoadCleanup.stillConnected} renderAbsent=${syntheticRoadCleanup.prunedEdgesStayAbsent}`
     );
   }
   const syntheticMountainPass = runSyntheticMountainPassCase();

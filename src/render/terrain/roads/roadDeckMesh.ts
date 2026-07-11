@@ -9,7 +9,8 @@ import {
   ROAD_EDGE_S,
   ROAD_EDGE_SE,
   ROAD_EDGE_SW,
-  ROAD_EDGE_W
+  ROAD_EDGE_W,
+  resolveAuthoritativeRoadEdgeMask
 } from "../shared/roadTopology.js";
 import {
   ROAD_DECK_CAP_SIZE,
@@ -84,46 +85,16 @@ export const buildRoadDeckMesh = (
     if (!isRoadSurfaceTile(idx)) {
       return 0;
     }
-    const stored = roadEdges[idx] ?? 0;
-    if (stored !== 0) {
-      let sanitized = 0;
-      const tileX = idx % cols;
-      const tileY = Math.floor(idx / cols);
-      for (let i = 0; i < ROAD_EDGE_DIRS.length; i += 1) {
-        const dir = ROAD_EDGE_DIRS[i];
-        if ((stored & dir.bit) === 0) {
-          continue;
-        }
-        const nx = tileX + dir.dx;
-        const ny = tileY + dir.dy;
-        if (!inBounds(nx, ny)) {
-          continue;
-        }
-        const neighborIdx = getIndex(nx, ny);
-        if (isRoadSurfaceTile(neighborIdx)) {
-          sanitized |= dir.bit;
-        }
-      }
-      if (sanitized !== 0) {
-        return sanitized;
-      }
-    }
     const tileX = idx % cols;
     const tileY = Math.floor(idx / cols);
-    let mask = 0;
-    for (let i = 0; i < ROAD_EDGE_DIRS.length; i += 1) {
-      const dir = ROAD_EDGE_DIRS[i];
-      const nx = tileX + dir.dx;
-      const ny = tileY + dir.dy;
-      if (!inBounds(nx, ny)) {
-        continue;
-      }
-      const neighborIdx = getIndex(nx, ny);
-      if (isRoadSurfaceTile(neighborIdx)) {
-        mask |= dir.bit;
-      }
-    }
-    return mask;
+    return resolveAuthoritativeRoadEdgeMask(
+      roadEdges,
+      cols,
+      rows,
+      tileX,
+      tileY,
+      (x, y) => isRoadSurfaceTile(getIndex(x, y))
+    ) ?? 0;
   };
   const getElevationAt = (x: number, y: number, fallback: number): number => {
     if (!inBounds(x, y)) {

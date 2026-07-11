@@ -12,7 +12,8 @@ import {
   ROAD_EDGE_S,
   ROAD_EDGE_SE,
   ROAD_EDGE_SW,
-  ROAD_EDGE_W
+  ROAD_EDGE_W,
+  resolveAuthoritativeRoadEdgeMask
 } from "../shared/roadTopology.js";
 
 const ROAD_TEX_MAX_SIZE = 4096;
@@ -67,25 +68,9 @@ export const buildRoadOverlayTexture = (
     if (!isRoadLike(x, y)) {
       return 0;
     }
-    if (hasRoadEdges && roadEdges) {
-      const idx = getIndex(x, y);
-      let mask = roadEdges[idx] ?? 0;
-      let sanitized = 0;
-      for (let i = 0; i < ROAD_EDGE_DIRS.length; i += 1) {
-        const dir = ROAD_EDGE_DIRS[i];
-        if ((mask & dir.bit) === 0) {
-          continue;
-        }
-        const nx = x + dir.dx;
-        const ny = y + dir.dy;
-        if (!isRoadLike(nx, ny)) {
-          continue;
-        }
-        sanitized |= dir.bit;
-      }
-      if (sanitized !== 0) {
-        return sanitized;
-      }
+    const authoritativeMask = resolveAuthoritativeRoadEdgeMask(roadEdges, cols, rows, x, y, isRoadLike);
+    if (authoritativeMask !== null) {
+      return authoritativeMask;
     }
     let mask = 0;
     if (isRoadLike(x, y - 1)) {
@@ -113,6 +98,16 @@ export const buildRoadOverlayTexture = (
       mask |= ROAD_EDGE_SW;
     }
     return mask;
+  };
+  const isRenderableRoadLike = (x: number, y: number): boolean => {
+    if (!isRoadLike(x, y)) {
+      return false;
+    }
+    const idx = getIndex(x, y);
+    if (!hasRoadEdges || tileTypes[idx] === baseId || (roadBridgeMask?.[idx] ?? 0) > 0) {
+      return true;
+    }
+    return getRoadMask(x, y) !== 0;
   };
 
   const popCount4 = (mask: number, bits: number[]): number =>
@@ -309,7 +304,7 @@ export const buildRoadOverlayTexture = (
       if (targetX < 0 || targetY < 0 || targetX >= cols || targetY >= rows) {
         return;
       }
-      if (isRoadLike(targetX, targetY)) {
+      if (isRenderableRoadLike(targetX, targetY)) {
         return;
       }
       drawAtlasTile(["diag_infill_ne"], targetX, targetY, cornerRotationFromNe(corner));
@@ -317,7 +312,7 @@ export const buildRoadOverlayTexture = (
 
     for (let tileY = 0; tileY < rows; tileY += 1) {
       for (let tileX = 0; tileX < cols; tileX += 1) {
-        if (!isRoadLike(tileX, tileY)) {
+        if (!isRenderableRoadLike(tileX, tileY)) {
           continue;
         }
         const mask = getRoadMask(tileX, tileY);
@@ -560,7 +555,7 @@ export const buildRoadOverlayTexture = (
 
   for (let tileY = 0; tileY < rows; tileY += 1) {
     for (let tileX = 0; tileX < cols; tileX += 1) {
-      if (!isRoadLike(tileX, tileY)) {
+      if (!isRenderableRoadLike(tileX, tileY)) {
         continue;
       }
       const mask = getRoadMask(tileX, tileY);

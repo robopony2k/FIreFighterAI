@@ -125,6 +125,7 @@ import {
   WATERFALL_VERTICALITY_MIN,
   WATERFALL_DEBUG_FLAG_WATER
 } from "./threeTestTerrain.js";
+import { setTerrainRoadHighContrast } from "./terrain/roads/roadHighContrast.js";
 import { createThreeTestFireFx, type FireFxDebugSnapshot } from "./threeTestFireFx.js";
 import { createThreeTestWorldAudio, type WorldAudioChannelControls } from "./threeTestWorldAudio.js";
 import { createThreeTestUnitFxLayer } from "./threeTestUnitFx.js";
@@ -333,6 +334,8 @@ export type ThreeTestController = {
   panToTile: (tileX: number, tileY: number, options?: ThreeTestPanToTileOptions) => void;
   setEnvironmentFogEnabled: (enabled: boolean) => void;
   getEnvironmentFogEnabled: () => boolean;
+  setRoadHighContrastEnabled: (enabled: boolean) => void;
+  getRoadHighContrastEnabled: () => boolean;
   setTerrainWaterDebugControls: (controls: Partial<TerrainWaterDebugControls>) => void;
   getTerrainWaterDebugControls: () => TerrainWaterDebugControls;
   getPerfSnapshot: () => ThreeTestPerfSnapshot;
@@ -5993,6 +5996,7 @@ export const createThreeTest = (
 
   let terrainMesh: THREE.Mesh | null = null;
   let terrainRoadOverlayMesh: THREE.Mesh | null = null;
+  let roadHighContrastEnabled = false;
   const pendingTerrainTextureDisposals: PendingTerrainTextureDisposal[] = [];
   const waterSystem = new ThreeTestWaterSystem({
     scene,
@@ -6243,6 +6247,14 @@ export const createThreeTest = (
     syncFogState(lastLightingApplied);
   };
   const getEnvironmentFogEnabled = (): boolean => environmentFogEnabled;
+  const setRoadHighContrastEnabled = (enabled: boolean): void => {
+    roadHighContrastEnabled = enabled;
+    if (terrainMesh) {
+      setTerrainRoadHighContrast(terrainMesh, enabled);
+      markSatelliteMinimapVisualsDirty();
+    }
+  };
+  const getRoadHighContrastEnabled = (): boolean => roadHighContrastEnabled;
   let resolveCameraInteracting = (): boolean => false;
   const requestShadowRefresh = (): void => {
     shadowBlendController.requestRefresh();
@@ -9020,6 +9032,9 @@ export const createThreeTest = (
       } else if (roadMesh) {
         terrainRoadOverlayMesh = roadMesh;
       }
+      if (roadHighContrastEnabled) {
+        setTerrainRoadHighContrast(terrainMesh, true);
+      }
     }
     lastTerrainSurface = surface;
     lastTerrainSize = surface.size;
@@ -9201,6 +9216,9 @@ export const createThreeTest = (
       recordTerrainSetTiming("fullBuild", performance.now() - fullBuildStartedAt);
       terrainMesh = mesh;
       terrainRoadOverlayMesh = findRoadOverlayMesh(terrainMesh);
+      if (roadHighContrastEnabled) {
+        setTerrainRoadHighContrast(terrainMesh, true);
+      }
       patchTerrainClimateMaterials(terrainMesh.material);
       treeBurnController = treeBurn ?? null;
       scene.add(terrainMesh);
@@ -9299,6 +9317,9 @@ export const createThreeTest = (
     roadMaterial.map = roadOverlay;
     roadMaterial.needsUpdate = true;
     terrainRoadOverlayMesh.userData.roadOverlayVersion = nextRoadVersion;
+    if (roadHighContrastEnabled) {
+      setTerrainRoadHighContrast(terrainMesh, true);
+    }
     markSatelliteMinimapVisualsDirty();
   };
   const needTreeAssets = runtimeSettings.trees && !treeAssets;
@@ -9383,6 +9404,8 @@ export const createThreeTest = (
     panToTile,
     setEnvironmentFogEnabled,
     getEnvironmentFogEnabled,
+    setRoadHighContrastEnabled,
+    getRoadHighContrastEnabled,
     setTerrainWaterDebugControls,
     getTerrainWaterDebugControls,
     getPerfSnapshot

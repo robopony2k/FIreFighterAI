@@ -1562,7 +1562,7 @@ export const initMapEditor = (refs: MapEditorRefs, deps: MapEditorDeps): MapEdit
     const duplicateRetries = diagnosticsState.roadRecords
       .filter((event): event is Extract<RoadDiagnosticRecord, { kind: "road:duplicate-retry" }> => event.kind === "road:duplicate-retry")
       .map((event) =>
-        `${event.routeType} ${event.diagnosticRouteLabel} reason=${event.reason} attempts=${event.attempts}`
+        `${event.routeType} ${event.diagnosticRouteLabel} reason=${event.reason} duplicate=${event.duplicateCause ?? "unspecified"} attempts=${event.attempts}`
       );
     const completed = diagnosticsState.roadRecords
       .filter((event): event is Extract<RoadDiagnosticRecord, { kind: "road:completed" }> => event.kind === "road:completed")

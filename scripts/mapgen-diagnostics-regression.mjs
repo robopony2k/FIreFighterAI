@@ -38,9 +38,9 @@ const hashArrays = (...arrays) => {
   return hash.toString(16).padStart(8, "0");
 };
 
-const runMap = async (debug, terrainRecipe = terrain) => {
-  const state = createInitialState(seed, grid);
-  await generateMap(state, new RNG(seed), undefined, terrainRecipe, debug);
+const runMap = async (debug, terrainRecipe = terrain, worldSeed = seed, worldGrid = grid) => {
+  const state = createInitialState(worldSeed, worldGrid);
+  await generateMap(state, new RNG(worldSeed), undefined, terrainRecipe, debug);
   return {
     state,
     hash: hashArrays(
@@ -52,6 +52,68 @@ const runMap = async (debug, terrainRecipe = terrain) => {
       state.tileRoadBridge
     )
   };
+};
+
+const parseIntertownRouteId = (routeId) => {
+  const match = /^intertown:(\d+):(\d+)-(\d+)$/.exec(routeId ?? "");
+  return match
+    ? { pass: Number(match[1]), pairKey: `${match[2]}-${match[3]}` }
+    : null;
+};
+
+const assertCompletedIntertownPairsSkipLaterSearch = (records, label) => {
+  const completedPassOnePairs = new Set();
+  const failedPassOnePairs = new Set();
+  for (const event of records) {
+    const route = parseIntertownRouteId(event.diagnosticRouteId);
+    if (!route || route.pass !== 1) {
+      continue;
+    }
+    if (
+      event.kind === "road:completed" ||
+      (event.kind === "road:duplicate-retry" && event.duplicateCause === "already-connected-anchors")
+    ) {
+      completedPassOnePairs.add(route.pairKey);
+    }
+    if (event.kind === "road:failed") {
+      failedPassOnePairs.add(route.pairKey);
+    }
+  }
+  for (const pairKey of completedPassOnePairs) {
+    const passTwoRouteId = `intertown:2:${pairKey}`;
+    const completedPairSkip = records.find(
+      (event) =>
+        event.kind === "road:duplicate-retry" &&
+        event.diagnosticRouteId === passTwoRouteId &&
+        event.duplicateCause === "completed-town-pair"
+    );
+    if (!completedPairSkip) {
+      throw new Error(`${label} did not suppress completed intertown pair ${pairKey} during pass two.`);
+    }
+    const lowLevelWork = records.filter(
+      (event) =>
+        event.diagnosticRouteId === passTwoRouteId &&
+        (event.kind === "road:attempt" || event.kind === "road:result" || event.kind === "road:carve")
+    );
+    if (lowLevelWork.length > 0) {
+      throw new Error(`${label} repeated ${lowLevelWork.length} low-level operations for completed intertown pair ${pairKey}.`);
+    }
+  }
+  for (const pairKey of failedPassOnePairs) {
+    if (completedPassOnePairs.has(pairKey)) {
+      continue;
+    }
+    const incorrectSkip = records.some(
+      (event) =>
+        event.kind === "road:duplicate-retry" &&
+        event.diagnosticRouteId === `intertown:2:${pairKey}` &&
+        event.duplicateCause === "completed-town-pair"
+    );
+    if (incorrectSkip) {
+      throw new Error(`${label} incorrectly marked failed intertown pair ${pairKey} complete.`);
+    }
+  }
+  return completedPassOnePairs.size;
 };
 
 const baseline = await runMap(undefined);
@@ -107,6 +169,21 @@ await runMap({
     isolatedIntertownEvents.push(event);
   }
 });
+const secondSeedRoadEvents = [];
+const secondSeedGrid = { cols: 48, rows: 48, totalTiles: 48 * 48 };
+const secondSeedBaseline = await runMap(undefined, terrain, seed + 1, secondSeedGrid);
+const secondSeedDiagnostic = await runMap(
+  {
+    onPhase: () => {},
+    roadTuning: DEFAULT_ROAD_DIAGNOSTIC_TUNING,
+    onDiagnosticEvent: (event) => {
+      secondSeedRoadEvents.push(event);
+    }
+  },
+  terrain,
+  seed + 1,
+  secondSeedGrid
+);
 
 if (baseline.hash !== diagnostic.hash) {
   throw new Error(`Diagnostics changed generated map hash: ${baseline.hash} !== ${diagnostic.hash}`);
@@ -116,6 +193,11 @@ if (baseline.hash !== defaultTunedDiagnostic.hash) {
 }
 if (zeroPreGrowth.hash !== zeroPreGrowthRepeat.hash) {
   throw new Error(`Zero vegetation pre-growth was not deterministic: ${zeroPreGrowth.hash} !== ${zeroPreGrowthRepeat.hash}`);
+}
+if (secondSeedBaseline.hash !== secondSeedDiagnostic.hash) {
+  throw new Error(
+    `Second-seed sync/async road generation diverged: ${secondSeedBaseline.hash} !== ${secondSeedDiagnostic.hash}`
+  );
 }
 const baselineInfrastructureHash = hashArrays(
   baseline.state.tileElevation,
@@ -214,6 +296,12 @@ if (isolatedRepairAttempts.length > 0) {
 if (isolatedUnknownResults.length > 0) {
   throw new Error(`Expected no unknown road result route groups in isolated diagnostics, got ${isolatedUnknownResults.length}.`);
 }
+const completedPairSkips =
+  assertCompletedIntertownPairsSkipLaterSearch(events, `seed ${seed}`) +
+  assertCompletedIntertownPairsSkipLaterSearch(secondSeedRoadEvents, `seed ${seed + 1}`);
+if (completedPairSkips <= 0) {
+  throw new Error("Expected fixed diagnostic seeds to complete at least one intertown pair in pass one.");
+}
 const visibleRoadCarves = isolatedIntertownEvents.filter(
   (event) => event.kind === "road:carve" && event.routeGroup !== "futureGrowthPrecompute"
 );
@@ -239,5 +327,5 @@ if (!cancelSeen) {
 }
 
 console.log(
-  `[mapgen-diagnostics] hash=${baseline.hash} zeroGrowth=${zeroPreGrowth.hash} houses=${baseline.state.totalHouses} future=${baseline.state.plannedTownGrowth.entries.length} hydrology=${hydrologyCandidates}/${hydrologyResolved} roads=${roadResults}/${roadAttempts} planned=${roadPlanned} completed=${roadCompleted} intratown=${intratownSummaries} carves=${roadCarves} cancel=ok`
+  `[mapgen-diagnostics] hash=${baseline.hash} zeroGrowth=${zeroPreGrowth.hash} houses=${baseline.state.totalHouses} future=${baseline.state.plannedTownGrowth.entries.length} hydrology=${hydrologyCandidates}/${hydrologyResolved} roads=${roadResults}/${roadAttempts} planned=${roadPlanned} completed=${roadCompleted} pairSkips=${completedPairSkips} intratown=${intratownSummaries} carves=${roadCarves} cancel=ok`
 );
