@@ -2,15 +2,11 @@ import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { createEffectsState, type EffectsState } from "../../core/effectsState.js";
 import {
-  COAST_CLASS_BEACH,
-  COAST_CLASS_CLIFF,
-  COAST_CLASS_NONE,
-  COAST_CLASS_SHELF_WATER,
   createInitialState,
   TILE_TYPE_IDS,
   type WorldState
 } from "../../core/state.js";
-import { TREE_TYPE_IDS, TreeType, type Formation, type Grid, type Unit, type WaterSprayMode } from "../../core/types.js";
+import { type Formation, type Grid, type Unit, type WaterSprayMode } from "../../core/types.js";
 import {
   createSeasonalRainOverlayPass,
   resolveSeasonalRainScreenWind
@@ -63,18 +59,21 @@ import {
   type FxLabPlacementMode,
   type FxLabScenarioId
 } from "./types.js";
+import {
+  applyFxLabTerrainStamp,
+  createFxLabShowcaseMap,
+  FX_LAB_SHOWCASE_SEA_LEVEL,
+  FX_LAB_SHOWCASE_SIZE,
+  replaceFxLabEditableMap,
+  type FxLabShowcaseMapState,
+  type FxLabTerrainStamp
+} from "./showcaseMap.js";
+import { createFxLabMapPreset, formatFxLabMapPreset, parseFxLabMapPreset, type FxLabMapPreset } from "./showcaseMapPreset.js";
 
-const FX_LAB_GRID_SIZE = 72;
+const FX_LAB_GRID_SIZE = FX_LAB_SHOWCASE_SIZE;
 const FX_LAB_SEED = 18032026;
 const DEFAULT_STEP_SECONDS = 1 / 30;
-const FX_LAB_OCEAN_SEA_LEVEL = 0.12;
-const FX_LAB_COAST_BEACH_MAX_SLOPE = 0.3;
-const FX_LAB_COAST_BEACH_MAX_RELIEF = 0.16;
-const FX_LAB_COAST_BEACH_MAX_HEIGHT_ABOVE_SEA = 0.28;
-const FX_LAB_COAST_BEACH_LAND_BAND = 2;
-const FX_LAB_COAST_BEACH_SHELF_BAND = 6;
-const FX_LAB_COAST_BEACH_DRY_HEIGHTS = [0.01, 0.024] as const;
-const FX_LAB_COAST_BEACH_WET_DEPTHS = [0.003, 0.006, 0.01, 0.015, 0.021, 0.028] as const;
+const FX_LAB_OCEAN_SEA_LEVEL = FX_LAB_SHOWCASE_SEA_LEVEL;
 const FX_LAB_RAIN_SCENARIO_ID: FxLabScenarioId = "rain-overlay";
 const FX_LAB_RAIN_SEED = 26092026;
 const FX_LAB_RAIN_INTENSITY = 1;
@@ -95,228 +94,6 @@ export type FxLabWeatherMode = "rainEvent" | "yearCycle" | "winter" | "spring" |
 
 const clamp = (value: number, min: number, max: number): number => Math.max(min, Math.min(max, value));
 const fract = (value: number): number => value - Math.floor(value);
-const smoothstep = (edge0: number, edge1: number, value: number): number => {
-  if (Math.abs(edge1 - edge0) <= 1e-6) {
-    return value >= edge1 ? 1 : 0;
-  }
-  const t = clamp((value - edge0) / (edge1 - edge0), 0, 1);
-  return t * t * (3 - 2 * t);
-};
-
-const getCoastBandValue = (values: readonly number[], distance: number): number => {
-  if (distance <= 0) {
-    return values[0] ?? 0;
-  }
-  return values[Math.min(values.length - 1, distance - 1)] ?? values[values.length - 1] ?? 0;
-};
-
-const buildDistanceField = (
-  cols: number,
-  rows: number,
-  isSource: (idx: number) => boolean
-): Uint16Array => {
-  const total = cols * rows;
-  const maxDistance = cols + rows + 4;
-  const distances = new Uint16Array(total);
-  distances.fill(maxDistance);
-  const queue = new Int32Array(total);
-  let head = 0;
-  let tail = 0;
-  for (let i = 0; i < total; i += 1) {
-    if (!isSource(i)) {
-      continue;
-    }
-    distances[i] = 0;
-    queue[tail] = i;
-    tail += 1;
-  }
-  while (head < tail) {
-    const idx = queue[head];
-    head += 1;
-    const nextDistance = distances[idx] + 1;
-    const x = idx % cols;
-    const y = Math.floor(idx / cols);
-    if (x > 0) {
-      const nIdx = idx - 1;
-      if (nextDistance < distances[nIdx]) {
-        distances[nIdx] = nextDistance;
-        queue[tail] = nIdx;
-        tail += 1;
-      }
-    }
-    if (x + 1 < cols) {
-      const nIdx = idx + 1;
-      if (nextDistance < distances[nIdx]) {
-        distances[nIdx] = nextDistance;
-        queue[tail] = nIdx;
-        tail += 1;
-      }
-    }
-    if (y > 0) {
-      const nIdx = idx - cols;
-      if (nextDistance < distances[nIdx]) {
-        distances[nIdx] = nextDistance;
-        queue[tail] = nIdx;
-        tail += 1;
-      }
-    }
-    if (y + 1 < rows) {
-      const nIdx = idx + cols;
-      if (nextDistance < distances[nIdx]) {
-        distances[nIdx] = nextDistance;
-        queue[tail] = nIdx;
-        tail += 1;
-      }
-    }
-  }
-  return distances;
-};
-
-const applyOceanShorelineClassification = (
-  world: WorldState,
-  treeTypes: Uint8Array,
-  baseFuel: Float32Array
-): void => {
-  const { cols, rows, totalTiles } = world.grid;
-  const seaLevel = FX_LAB_OCEAN_SEA_LEVEL;
-  const shorelineByColumn = new Float32Array(cols);
-  for (let x = 0; x < cols; x += 1) {
-    const bayA = Math.exp(-((x - cols * 0.22) * (x - cols * 0.22)) / 84);
-    const bayB = Math.exp(-((x - cols * 0.72) * (x - cols * 0.72)) / 96);
-    const headland = Math.exp(-((x - cols * 0.5) * (x - cols * 0.5)) / 220);
-    const macro =
-      11.8 +
-      Math.sin(x * 0.11 + 0.6) * 1.4 +
-      Math.sin(x * 0.047 + 1.9) * 1.1 +
-      bayA * 1.6 +
-      bayB * 1.3 -
-      headland * 1.1;
-    shorelineByColumn[x] = clamp(macro, 8.2, 17.8);
-  }
-
-  for (let i = 0; i < totalTiles; i += 1) {
-    world.tileSeaLevel[i] = seaLevel;
-    world.tileOceanMask[i] = 0;
-    world.tileCoastDistance[i] = 0;
-    world.tileCoastClass[i] = COAST_CLASS_NONE;
-  }
-
-  for (let y = 0; y < rows; y += 1) {
-    for (let x = 0; x < cols; x += 1) {
-      const idx = y * cols + x;
-      if (world.tileRiverMask[idx] > 0) {
-        continue;
-      }
-      const shoreline =
-        shorelineByColumn[x] +
-        Math.sin(x * 0.37 + y * 0.21 + 0.9) * 0.34 +
-        Math.sin(x * 0.13 - y * 0.19 + 1.7) * 0.21;
-      if (y + 0.5 > shoreline) {
-        continue;
-      }
-      world.tileOceanMask[idx] = 1;
-      world.tileTypeId[idx] = TILE_TYPE_IDS.water;
-      world.tileMoisture[idx] = 1;
-      world.tileVegetationAge[idx] = 0;
-      world.tileCanopyCover[idx] = 0;
-      world.tileStemDensity[idx] = 0;
-      world.tileHeatRetention[idx] = 0.28;
-      world.tileWindFactor[idx] = 1.04;
-      world.tileHeatTransferCap[idx] = 0.18;
-      treeTypes[idx] = TREE_TYPE_IDS[TreeType.Scrub];
-      baseFuel[idx] = 0.02;
-      world.tileFuel[idx] = 0.02;
-    }
-  }
-
-  const distToOcean = buildDistanceField(cols, rows, (idx) => world.tileOceanMask[idx] > 0);
-  const distToLand = buildDistanceField(cols, rows, (idx) => world.tileOceanMask[idx] === 0);
-
-  for (let y = 0; y < rows; y += 1) {
-    for (let x = 0; x < cols; x += 1) {
-      const idx = y * cols + x;
-      const elevation = world.tileElevation[idx] ?? 0;
-      if (world.tileRiverMask[idx] > 0) {
-        world.tileCoastDistance[idx] = 0;
-        world.tileCoastClass[idx] = COAST_CLASS_NONE;
-        continue;
-      }
-      if (world.tileOceanMask[idx] > 0) {
-        const distance = distToLand[idx] ?? 0;
-        world.tileCoastDistance[idx] = distance;
-        if (distance >= 1 && distance <= FX_LAB_COAST_BEACH_SHELF_BAND) {
-          world.tileCoastClass[idx] = COAST_CLASS_SHELF_WATER;
-          const targetDepth = getCoastBandValue(FX_LAB_COAST_BEACH_WET_DEPTHS, distance);
-          world.tileElevation[idx] = Math.min(elevation, seaLevel - targetDepth);
-        } else {
-          const deepDistance = Math.max(0, distance - FX_LAB_COAST_BEACH_SHELF_BAND);
-          const depth = 0.03 + deepDistance * 0.0035;
-          world.tileElevation[idx] = Math.min(elevation, seaLevel - depth);
-        }
-        continue;
-      }
-
-      const distance = distToOcean[idx] ?? 0;
-      world.tileCoastDistance[idx] = distance;
-      if (distance < 1 || distance > FX_LAB_COAST_BEACH_LAND_BAND) {
-        continue;
-      }
-
-      let minElevation = elevation;
-      let maxElevation = elevation;
-      let localSlope = 0;
-      for (let dy = -1; dy <= 1; dy += 1) {
-        const ny = y + dy;
-        if (ny < 0 || ny >= rows) {
-          continue;
-        }
-        for (let dx = -1; dx <= 1; dx += 1) {
-          const nx = x + dx;
-          if (nx < 0 || nx >= cols) {
-            continue;
-          }
-          const nIdx = ny * cols + nx;
-          if (world.tileOceanMask[nIdx] > 0 || world.tileRiverMask[nIdx] > 0) {
-            continue;
-          }
-          const neighborElevation = world.tileElevation[nIdx] ?? elevation;
-          minElevation = Math.min(minElevation, neighborElevation);
-          maxElevation = Math.max(maxElevation, neighborElevation);
-          if (nIdx !== idx) {
-            localSlope = Math.max(localSlope, Math.abs(elevation - neighborElevation));
-          }
-        }
-      }
-
-      const relief = maxElevation - minElevation;
-      const isBeach =
-        localSlope <= FX_LAB_COAST_BEACH_MAX_SLOPE &&
-        relief <= FX_LAB_COAST_BEACH_MAX_RELIEF &&
-        elevation - seaLevel <= FX_LAB_COAST_BEACH_MAX_HEIGHT_ABOVE_SEA &&
-        world.tileTypeId[idx] !== TILE_TYPE_IDS.base &&
-        world.tileTypeId[idx] !== TILE_TYPE_IDS.road;
-
-      world.tileCoastClass[idx] = isBeach ? COAST_CLASS_BEACH : COAST_CLASS_CLIFF;
-      if (!isBeach) {
-        continue;
-      }
-
-      world.tileTypeId[idx] = TILE_TYPE_IDS.beach;
-      world.tileElevation[idx] = Math.min(
-        world.tileElevation[idx],
-        seaLevel + getCoastBandValue(FX_LAB_COAST_BEACH_DRY_HEIGHTS, distance)
-      );
-      world.tileMoisture[idx] = Math.max(world.tileMoisture[idx], 0.42);
-      world.tileVegetationAge[idx] = 0;
-      world.tileCanopyCover[idx] = 0;
-      world.tileStemDensity[idx] = 0;
-      treeTypes[idx] = TREE_TYPE_IDS[TreeType.Scrub];
-      baseFuel[idx] = Math.min(baseFuel[idx], 0.08);
-      world.tileFuel[idx] = Math.min(world.tileFuel[idx], baseFuel[idx]);
-    }
-  }
-};
-
 type FxLabSceneState = {
   world: WorldState;
   effects: EffectsState;
@@ -324,6 +101,7 @@ type FxLabSceneState = {
   truck: Unit;
   firefighter: Unit;
   baseFuel: Float32Array;
+  showcaseMap: FxLabShowcaseMapState;
 };
 
 type ManualTruckPlacement = {
@@ -378,6 +156,14 @@ export type FxLabController = {
   resetAllDebugControls: () => void;
   getOverridePayload: () => FxLabOverrides;
   getOverridePayloadText: () => string;
+  setTerrainStamp: (stamp: FxLabTerrainStamp | null) => void;
+  getTerrainStamp: () => FxLabTerrainStamp | null;
+  setTerrainStampRadius: (radius: 2 | 4 | 7) => void;
+  getTerrainStampRadius: () => 2 | 4 | 7;
+  getTerrainEditStatus: () => string;
+  resetShowcaseMap: () => void;
+  exportShowcaseMap: () => string;
+  importShowcaseMap: (text: string) => void;
 };
 
 const createLabUnit = (
@@ -424,260 +210,6 @@ const createLabUnit = (
   currentAlerts: []
 });
 
-const applyRiverWaterfallCorridor = (world: WorldState, treeTypes: Uint8Array, baseFuel: Float32Array): void => {
-  const { cols, rows } = world.grid;
-  const riverStartRow = 8;
-  const riverEndRow = rows - 9;
-  const centerline = new Float32Array(rows).fill(Number.NaN);
-  const surfaceByRow = new Float32Array(rows).fill(Number.NaN);
-  const widthByRow = new Float32Array(rows);
-  const stepByRow = new Float32Array(rows);
-  const bankBoostByRow = new Float32Array(rows);
-  let surface = 0.492;
-
-  const centerXAt = (y: number): number => 45.2 + Math.sin(y * 0.094) * 0.82 + Math.sin(y * 0.031 + 0.7) * 0.34;
-  const rapidShelfCenter = 24.8;
-  const mainFallCenter = 35.9;
-  const plungePoolCenter = 38.3;
-  const originalSurfaceByRow = new Float32Array(rows).fill(Number.NaN);
-
-  for (let y = riverStartRow; y <= riverEndRow; y += 1) {
-    const t = (y - riverStartRow) / Math.max(1, riverEndRow - riverStartRow);
-    const rapidShelf = Math.exp(-((y - rapidShelfCenter) * (y - rapidShelfCenter)) / 2.8);
-    const mainFall = Math.exp(-((y - mainFallCenter) * (y - mainFallCenter)) / 0.72);
-    const plungePool = Math.exp(-((y - plungePoolCenter) * (y - plungePoolCenter)) / 4.8);
-    let drop = 0.00074 + t * 0.00016;
-    if (y === 24) {
-      drop += 0.008;
-    } else if (y === 25) {
-      drop += 0.0045;
-    } else if (y === 26) {
-      drop += 0.0012;
-    } else if (y === 35) {
-      drop += 0.006;
-    } else if (y === 36) {
-      drop += 0.152;
-    } else if (y === 37) {
-      drop += 0.004;
-    } else if (y >= 38 && y <= 40) {
-      drop += 0.00002;
-    } else if (y === 41) {
-      drop += 0.0008;
-    }
-    surface = Math.max(0.214, surface - drop);
-    centerline[y] = centerXAt(y);
-    surfaceByRow[y] = surface;
-    originalSurfaceByRow[y] = surface;
-    widthByRow[y] = 1.02 + t * 0.05 + rapidShelf * 0.08 + plungePool * 0.24 + mainFall * 0.1;
-    stepByRow[y] = clamp(0.035 + rapidShelf * 0.34 + mainFall * 0.98 + plungePool * 0.08, 0, 1);
-    bankBoostByRow[y] = rapidShelf * 0.014 + mainFall * 0.064 + plungePool * 0.028;
-  }
-
-  if (riverEndRow >= 40) {
-    const rapidShelfLip = surfaceByRow[23];
-    if (Number.isFinite(rapidShelfLip)) {
-      surfaceByRow[24] = rapidShelfLip - 0.0022;
-      surfaceByRow[25] = rapidShelfLip - 0.0108;
-      surfaceByRow[26] = surfaceByRow[25] - 0.0007;
-    }
-    const lipSurface = surfaceByRow[34];
-    if (Number.isFinite(lipSurface)) {
-      const poolSurface = Math.max(0.214, lipSurface - 0.158);
-      surfaceByRow[35] = lipSurface - 0.0003;
-      surfaceByRow[36] = poolSurface;
-      surfaceByRow[37] = poolSurface - 0.00015;
-      surfaceByRow[38] = poolSurface - 0.00024;
-      surfaceByRow[39] = poolSurface - 0.00034;
-      for (let y = 40; y <= riverEndRow; y += 1) {
-        const baseDelta = Number.isFinite(originalSurfaceByRow[y - 1]) && Number.isFinite(originalSurfaceByRow[y])
-          ? Math.max(0.00008, originalSurfaceByRow[y - 1] - originalSurfaceByRow[y])
-          : 0.00012;
-        surfaceByRow[y] = Math.max(0.214, surfaceByRow[y - 1] - baseDelta);
-      }
-    }
-  }
-
-  for (let y = riverStartRow; y <= riverEndRow; y += 1) {
-    const t = (y - riverStartRow) / Math.max(1, riverEndRow - riverStartRow);
-    const centerX = centerline[y];
-    const baseSurface = surfaceByRow[y];
-    const channelWidth = widthByRow[y];
-    const stepStrength = stepByRow[y];
-    const bankBoost = bankBoostByRow[y];
-    const rapidShelf = Math.exp(-((y - rapidShelfCenter) * (y - rapidShelfCenter)) / 2.8);
-    const mainFall = Math.exp(-((y - mainFallCenter) * (y - mainFallCenter)) / 0.72);
-    const plungePool = Math.exp(-((y - plungePoolCenter) * (y - plungePoolCenter)) / 4.8);
-    const bankWidth = channelWidth + 1.02 + plungePool * 0.42 + mainFall * 0.24;
-    const minX = Math.max(0, Math.floor(centerX - bankWidth - 1));
-    const maxX = Math.min(cols - 1, Math.ceil(centerX + bankWidth + 1));
-    for (let x = minX; x <= maxX; x += 1) {
-      const idx = y * cols + x;
-      const tileCenterX = x + 0.5;
-      const dist = Math.abs(tileCenterX - centerX);
-      if (dist > bankWidth) {
-        continue;
-      }
-
-      const bankBlend = 1 - dist / Math.max(0.001, bankWidth);
-      world.tileMoisture[idx] = Math.max(world.tileMoisture[idx], 0.66 + bankBlend * 0.22);
-      world.tileHeatRetention[idx] = Math.min(world.tileHeatRetention[idx], 0.82);
-      world.tileSpreadBoost[idx] = Math.min(world.tileSpreadBoost[idx], 0.92);
-
-      if (dist <= channelWidth) {
-        const channelBlend = 1 - dist / Math.max(0.001, channelWidth);
-        const depthBase = 0.018 + t * 0.004 + rapidShelf * 0.004 + plungePool * 0.026 + mainFall * 0.014;
-        const localDepth = depthBase * (0.72 + channelBlend * 0.4);
-        const localSurface = baseSurface + (1 - channelBlend) * 0.0018;
-        const localBed = localSurface - localDepth;
-        const channelCap = localBed + 0.004 + (1 - channelBlend) * 0.01;
-        world.tileElevation[idx] = Math.min(world.tileElevation[idx], channelCap);
-        world.tileTypeId[idx] = TILE_TYPE_IDS.water;
-        world.tileRiverMask[idx] = 1;
-        world.tileRiverBed[idx] = Number.isFinite(world.tileRiverBed[idx])
-          ? Math.min(world.tileRiverBed[idx], localBed)
-          : localBed;
-        world.tileRiverSurface[idx] = Number.isFinite(world.tileRiverSurface[idx])
-          ? Math.min(world.tileRiverSurface[idx], localSurface)
-          : localSurface;
-        world.tileRiverStepStrength[idx] = Math.max(
-          world.tileRiverStepStrength[idx] ?? 0,
-          stepStrength * (0.52 + channelBlend * 0.48)
-        );
-        world.tileMoisture[idx] = 1;
-        world.tileHeatRetention[idx] = 0.32;
-        world.tileWindFactor[idx] = 1.04;
-        world.tileHeatTransferCap[idx] = 0.18;
-        world.tileVegetationAge[idx] = 0;
-        world.tileCanopyCover[idx] = 0;
-        world.tileStemDensity[idx] = 0;
-        treeTypes[idx] = TREE_TYPE_IDS[TreeType.Scrub];
-        baseFuel[idx] = 0.02;
-        world.tileFuel[idx] = baseFuel[idx];
-        continue;
-      }
-
-      const bankChannelBlend = 1 - (dist - channelWidth) / Math.max(0.001, bankWidth - channelWidth);
-      const desiredBankHeight =
-        baseSurface +
-        0.016 +
-        bankChannelBlend * (0.014 + bankBoost) +
-        mainFall * 0.05 +
-        plungePool * 0.018;
-      world.tileElevation[idx] = Math.max(world.tileElevation[idx], desiredBankHeight);
-      if (
-        (mainFall > 0.12 || rapidShelf > 0.3) &&
-        bankChannelBlend > 0.16 &&
-        world.tileTypeId[idx] !== TILE_TYPE_IDS.base &&
-        world.tileTypeId[idx] !== TILE_TYPE_IDS.road
-      ) {
-        world.tileTypeId[idx] = TILE_TYPE_IDS.rocky;
-        baseFuel[idx] = Math.min(baseFuel[idx], mainFall > 0.2 ? 0.12 : 0.18);
-        world.tileFuel[idx] = Math.min(world.tileFuel[idx], baseFuel[idx]);
-        world.tileCanopyCover[idx] = Math.min(world.tileCanopyCover[idx], 0.06);
-        world.tileStemDensity[idx] = Math.min(world.tileStemDensity[idx], 18);
-      } else if (world.tileTypeId[idx] === TILE_TYPE_IDS.grass && bankChannelBlend > 0.44) {
-        world.tileTypeId[idx] = TILE_TYPE_IDS.floodplain;
-        baseFuel[idx] = Math.min(baseFuel[idx], 0.46);
-        world.tileFuel[idx] = Math.min(world.tileFuel[idx], baseFuel[idx]);
-      }
-    }
-  }
-};
-
-const applyTerrainLayout = (world: WorldState): { treeTypes: Uint8Array; baseFuel: Float32Array } => {
-  const cols = world.grid.cols;
-  const rows = world.grid.rows;
-  const total = world.grid.totalTiles;
-  const treeTypes = new Uint8Array(total);
-  const baseFuel = new Float32Array(total);
-  for (let y = 0; y < rows; y += 1) {
-    for (let x = 0; x < cols; x += 1) {
-      const idx = y * cols + x;
-      const nx = x / Math.max(1, cols - 1) - 0.5;
-      const ny = y / Math.max(1, rows - 1) - 0.5;
-      const rolling = Math.sin(x * 0.18) * 0.08 + Math.cos(y * 0.14) * 0.06;
-      const hillWest = Math.exp(-(((x - 18) * (x - 18) + (y - 24) * (y - 24)) / 180)) * 0.38;
-      const hillEast = Math.exp(-(((x - 52) * (x - 52) + (y - 46) * (y - 46)) / 260)) * 0.32;
-      const ridge = Math.exp(-((x - 38) * (x - 38)) / 520) * (0.08 + Math.max(0, ny + 0.2) * 0.16);
-      world.tileElevation[idx] = 0.14 + rolling + hillWest + hillEast + ridge + (nx * nx + ny * ny) * 0.04;
-
-      const roadBand = y >= 41 && y <= 45 && x >= 12 && x <= 32;
-      const basePad = x >= 21 && x <= 25 && y >= 40 && y <= 44;
-      const forestWest = (x - 44) * (x - 44) + (y - 28) * (y - 28) < 150;
-      const forestEast = (x - 56) * (x - 56) + (y - 48) * (y - 48) < 120;
-      const scrubBelt = !forestWest && !forestEast && x >= 30 && x <= 54 && y >= 18 && y <= 58;
-      const rockyEdge = x <= 4 || y <= 4 || x >= cols - 5 || y >= rows - 5;
-
-      let tileType = TILE_TYPE_IDS.grass;
-      if (basePad) {
-        tileType = TILE_TYPE_IDS.base;
-      } else if (roadBand) {
-        tileType = TILE_TYPE_IDS.road;
-      } else if (forestWest || forestEast) {
-        tileType = TILE_TYPE_IDS.forest;
-      } else if (scrubBelt && (x + y) % 3 !== 0) {
-        tileType = TILE_TYPE_IDS.scrub;
-      } else if (rockyEdge) {
-        tileType = TILE_TYPE_IDS.rocky;
-      }
-
-      world.tileTypeId[idx] = tileType;
-      world.tileRiverMask[idx] = 0;
-      world.tileRoadBridge[idx] = 0;
-      world.tileRoadEdges[idx] = 0;
-      world.tileRoadWallEdges[idx] = 0;
-      world.tileRiverBed[idx] = Number.NaN;
-      world.tileRiverSurface[idx] = Number.NaN;
-      world.tileRiverStepStrength[idx] = 0;
-      world.tileStructure[idx] = 0;
-      world.structureMask[idx] = 0;
-      world.tileTownId[idx] = -1;
-      world.tileSpreadBoost[idx] = tileType === TILE_TYPE_IDS.forest ? 1.1 : tileType === TILE_TYPE_IDS.scrub ? 0.92 : 0.78;
-      world.tileHeatRetention[idx] = tileType === TILE_TYPE_IDS.forest ? 1.15 : tileType === TILE_TYPE_IDS.road ? 0.24 : 0.84;
-      world.tileWindFactor[idx] = tileType === TILE_TYPE_IDS.forest ? 0.76 : 1;
-      world.tileHeatTransferCap[idx] = tileType === TILE_TYPE_IDS.base ? 0.2 : 1;
-      world.tileMoisture[idx] = tileType === TILE_TYPE_IDS.forest ? 0.76 : tileType === TILE_TYPE_IDS.scrub ? 0.48 : 0.58;
-      world.tileVegetationAge[idx] = tileType === TILE_TYPE_IDS.forest ? 26 : tileType === TILE_TYPE_IDS.scrub ? 9 : 4;
-      world.tileCanopyCover[idx] = tileType === TILE_TYPE_IDS.forest ? 0.9 : tileType === TILE_TYPE_IDS.scrub ? 0.32 : 0.08;
-      world.tileStemDensity[idx] = tileType === TILE_TYPE_IDS.forest ? 180 : tileType === TILE_TYPE_IDS.scrub ? 84 : 0;
-      treeTypes[idx] =
-        tileType === TILE_TYPE_IDS.forest
-          ? (x + y) % 2 === 0
-            ? TREE_TYPE_IDS[TreeType.Pine]
-            : TREE_TYPE_IDS[TreeType.Oak]
-          : TREE_TYPE_IDS[TreeType.Scrub];
-      baseFuel[idx] =
-        tileType === TILE_TYPE_IDS.forest
-          ? 1
-          : tileType === TILE_TYPE_IDS.grass
-            ? 0.78
-            : tileType === TILE_TYPE_IDS.scrub
-              ? 0.58
-              : tileType === TILE_TYPE_IDS.road
-                ? 0.08
-                : tileType === TILE_TYPE_IDS.base
-                  ? 0.04
-                  : 0.2;
-      world.tileFuel[idx] = baseFuel[idx];
-    }
-  }
-  applyRiverWaterfallCorridor(world, treeTypes, baseFuel);
-  applyOceanShorelineClassification(world, treeTypes, baseFuel);
-  let landTiles = 0;
-  for (let i = 0; i < total; i += 1) {
-    const tileType = world.tileTypeId[i];
-    landTiles +=
-      tileType === TILE_TYPE_IDS.road || tileType === TILE_TYPE_IDS.base || tileType === TILE_TYPE_IDS.water ? 0 : 1;
-  }
-  world.totalLandTiles = Math.max(1, landTiles);
-  world.basePoint = { x: 23, y: 42 };
-  world.terrainTypeRevision = 1;
-  world.vegetationRevision = 1;
-  world.structureRevision = 0;
-  world.terrainDirty = false;
-  return { treeTypes, baseFuel };
-};
-
 const createSceneState = (): FxLabSceneState => {
   const grid: Grid = {
     cols: FX_LAB_GRID_SIZE,
@@ -696,7 +228,8 @@ const createSceneState = (): FxLabSceneState => {
   truck.crewIds = [firefighter.id];
   world.units = [truck, firefighter];
   world.nextUnitId = 3;
-  const { treeTypes, baseFuel } = applyTerrainLayout(world);
+  const showcaseMap = createFxLabShowcaseMap(world);
+  const { treeTypes, baseFuel } = showcaseMap;
   const sample: TerrainSample = {
     cols: grid.cols,
     rows: grid.rows,
@@ -712,6 +245,9 @@ const createSceneState = (): FxLabSceneState => {
     tileCanopyCover: world.tileCanopyCover,
     tileStemDensity: world.tileStemDensity,
     riverMask: world.tileRiverMask,
+    lakeMask: world.tileLakeMask,
+    lakeSurface: world.tileLakeSurface,
+    lakeOutletMask: world.tileLakeOutletMask,
     oceanMask: world.tileOceanMask,
     seaLevel: world.tileSeaLevel,
     coastDistance: world.tileCoastDistance,
@@ -737,7 +273,8 @@ const createSceneState = (): FxLabSceneState => {
     sample,
     truck,
     firefighter,
-    baseFuel
+    baseFuel,
+    showcaseMap
   };
 };
 
@@ -831,6 +368,7 @@ export const createFxLabController = (
   });
 
   const sceneState = createSceneState();
+  const canonicalMapPreset: FxLabMapPreset = createFxLabMapPreset(sceneState.world, sceneState.showcaseMap);
   let currentScenarioId = normalizeFxLabScenarioId(initialScenarioId);
   let fireDebugControls = cloneDefaultFireFxDebugControls();
   let waterDebugControls = cloneDefaultWaterFxDebugControls();
@@ -861,6 +399,11 @@ export const createFxLabController = (
   let manualSprayEnabled = false;
   let manualSprayMode: WaterSprayMode = "balanced";
   let manualSprayTarget: ManualSprayTarget | null = null;
+  let terrainStamp: FxLabTerrainStamp | null = null;
+  let terrainStampRadius: 2 | 4 | 7 = 4;
+  let terrainStrokeActive = false;
+  let terrainEditStatus = "Choose a stamp, then drag over editable land.";
+  let lastTerrainStampTile = -1;
 
   const fireFx: ThreeTestFireFx = createThreeTestFireFx(scene, camera, fireDebugControls);
   const constructionFx = createConstructionFxRuntime(scene, camera, null);
@@ -1066,8 +609,16 @@ export const createFxLabController = (
       const focusWorldX = (shoreFocus.x / FX_LAB_GRID_SIZE - 0.5) * terrainSize.width;
       const focusWorldZ = (shoreFocus.y / FX_LAB_GRID_SIZE - 0.5) * terrainSize.depth;
       const distance = Math.max(9, Math.max(terrainSize.width, terrainSize.depth) * 0.18);
-      camera.position.set(focusWorldX - distance * 0.3, Math.max(4.2, distance * 0.18), focusWorldZ + distance * 0.56);
-      controls.target.set(focusWorldX, 0.85, focusWorldZ - distance * 0.04);
+      const cameraX = focusWorldX - distance * 0.3;
+      const cameraZ = focusWorldZ + distance * 0.56;
+      const seaLevelWorld = FX_LAB_OCEAN_SEA_LEVEL * (terrainSurface?.heightScale ?? 1);
+      const cameraGroundWorld = terrainSurface?.heightAtRenderedWorldPosition(cameraX, cameraZ) ?? 0;
+      const cameraY = Math.max(
+        seaLevelWorld + distance * 0.36,
+        cameraGroundWorld + distance * 0.2
+      );
+      camera.position.set(cameraX, cameraY, cameraZ);
+      controls.target.set(focusWorldX, seaLevelWorld + 0.35, focusWorldZ - distance * 0.04);
       controls.minDistance = Math.max(4, distance * 0.32);
       controls.maxDistance = Math.max(24, distance * 2.6);
       camera.updateProjectionMatrix();
@@ -1148,6 +699,33 @@ export const createFxLabController = (
     sceneState.sample.dynamicStructures = false;
   };
 
+  const finishTerrainStroke = (): void => {
+    if (!terrainStrokeActive) return;
+    terrainStrokeActive = false;
+    lastTerrainStampTile = -1;
+    refreshTerrainSampleFromWorld();
+    rebuildTerrain();
+    renderOnce();
+  };
+
+  const stampTerrainAt = (tile: { x: number; y: number }): void => {
+    if (!terrainStamp) return;
+    const tileIndex = Math.floor(tile.y) * sceneState.world.grid.cols + Math.floor(tile.x);
+    if (tileIndex === lastTerrainStampTile) return;
+    lastTerrainStampTile = tileIndex;
+    const result = applyFxLabTerrainStamp(
+      sceneState.world,
+      sceneState.showcaseMap,
+      terrainStamp,
+      tile.x,
+      tile.y,
+      terrainStampRadius
+    );
+    terrainEditStatus = result.protected > 0
+      ? `Changed ${result.changed} tiles; ${result.protected} protected tiles were skipped.`
+      : `Changed ${result.changed} tiles.`;
+  };
+
   const hydrateTreeAssets = (): void => {
     if (treeAssets) {
       return;
@@ -1213,9 +791,10 @@ export const createFxLabController = (
   };
 
   const setPlacementMode = (mode: FxLabPlacementMode): void => {
+    if (mode !== "none") terrainStamp = null;
     placementMode = mode;
-    controls.enabled = mode === "none";
-    canvas.style.cursor = mode === "none" ? "" : "crosshair";
+    controls.enabled = mode === "none" && terrainStamp === null;
+    canvas.style.cursor = mode === "none" && terrainStamp === null ? "" : "crosshair";
   };
 
   const clearPlacementOverrides = (): void => {
@@ -1617,7 +1196,7 @@ export const createFxLabController = (
   };
 
   const handleCanvasPointerDown = (event: PointerEvent): void => {
-    if (placementMode === "none" || event.button !== 0) {
+    if ((placementMode === "none" && terrainStamp === null) || event.button !== 0) {
       return;
     }
     const tile = pickTerrainTile(event.clientX, event.clientY);
@@ -1625,7 +1204,11 @@ export const createFxLabController = (
       return;
     }
     event.preventDefault();
-    if (placementMode === "truck") {
+    if (terrainStamp) {
+      terrainStrokeActive = true;
+      canvas.setPointerCapture(event.pointerId);
+      stampTerrainAt(tile);
+    } else if (placementMode === "truck") {
       manualTruckPlacement = {
         x: tile.x,
         y: tile.y,
@@ -1637,6 +1220,18 @@ export const createFxLabController = (
       manualFirefighterPlacement = tile;
     }
     renderOnce();
+  };
+
+  const handleCanvasPointerMove = (event: PointerEvent): void => {
+    if (!terrainStrokeActive || !terrainStamp) return;
+    const tile = pickTerrainTile(event.clientX, event.clientY);
+    if (tile) stampTerrainAt(tile);
+  };
+
+  const handleCanvasPointerUp = (event: PointerEvent): void => {
+    if (!terrainStrokeActive) return;
+    if (canvas.hasPointerCapture(event.pointerId)) canvas.releasePointerCapture(event.pointerId);
+    finishTerrainStroke();
   };
 
   const renderFrame = (now: number): void => {
@@ -1709,6 +1304,9 @@ export const createFxLabController = (
   resize();
   renderOnce();
   canvas.addEventListener("pointerdown", handleCanvasPointerDown);
+  canvas.addEventListener("pointermove", handleCanvasPointerMove);
+  canvas.addEventListener("pointerup", handleCanvasPointerUp);
+  canvas.addEventListener("pointercancel", handleCanvasPointerUp);
 
   return {
     start: () => {
@@ -1736,6 +1334,9 @@ export const createFxLabController = (
         window.cancelAnimationFrame(rafId);
       }
       canvas.removeEventListener("pointerdown", handleCanvasPointerDown);
+      canvas.removeEventListener("pointermove", handleCanvasPointerMove);
+      canvas.removeEventListener("pointerup", handleCanvasPointerUp);
+      canvas.removeEventListener("pointercancel", handleCanvasPointerUp);
       setPlacementMode("none");
       controls.dispose();
       fireFx.dispose();
@@ -1865,6 +1466,47 @@ export const createFxLabController = (
       unitFxLayer.setDebugControls(waterDebugControls);
       waterSystem.setOceanDebugControls(oceanWaterDebugControls);
       waterSystem.setDebugControls(terrainWaterDebugControls);
+      renderOnce();
+    },
+    setTerrainStamp: (stamp: FxLabTerrainStamp | null) => {
+      finishTerrainStroke();
+      terrainStamp = stamp;
+      if (stamp) placementMode = "none";
+      controls.enabled = stamp === null && placementMode === "none";
+      canvas.style.cursor = controls.enabled ? "" : "crosshair";
+      terrainEditStatus = stamp ? `${stamp} stamp selected.` : "Terrain stamping off.";
+    },
+    getTerrainStamp: () => terrainStamp,
+    setTerrainStampRadius: (radius: 2 | 4 | 7) => {
+      terrainStampRadius = radius;
+    },
+    getTerrainStampRadius: () => terrainStampRadius,
+    getTerrainEditStatus: () => terrainEditStatus,
+    resetShowcaseMap: () => {
+      finishTerrainStroke();
+      sceneState.showcaseMap = createFxLabShowcaseMap(sceneState.world);
+      sceneState.baseFuel = sceneState.showcaseMap.baseFuel;
+      sceneState.world.tileFuel.set(sceneState.baseFuel);
+      refreshTerrainSampleFromWorld();
+      rebuildTerrain();
+      terrainEditStatus = "Canonical showcase map restored.";
+      renderOnce();
+    },
+    exportShowcaseMap: () => formatFxLabMapPreset(createFxLabMapPreset(sceneState.world, sceneState.showcaseMap)),
+    importShowcaseMap: (text: string) => {
+      finishTerrainStroke();
+      let preset: FxLabMapPreset;
+      try {
+        preset = parseFxLabMapPreset(text, canonicalMapPreset, sceneState.showcaseMap.protectedMask);
+      } catch (error) {
+        terrainEditStatus = error instanceof Error ? error.message : "Map import failed.";
+        throw error;
+      }
+      replaceFxLabEditableMap(sceneState.world, sceneState.showcaseMap, preset.elevations, preset.tileTypes, preset.treeTypes);
+      sceneState.baseFuel = sceneState.showcaseMap.baseFuel;
+      refreshTerrainSampleFromWorld();
+      rebuildTerrain();
+      terrainEditStatus = "Showcase map preset imported.";
       renderOnce();
     },
     getOverridePayload: () => buildFxLabOverrides(fireDebugControls, waterDebugControls, terrainWaterDebugControls, oceanWaterDebugControls),

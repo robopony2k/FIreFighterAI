@@ -1,7 +1,6 @@
 import * as THREE from "three";
 import { FUEL_PROFILES } from "../../../core/config.js";
 import { TILE_ID_TO_TYPE, TILE_TYPE_IDS } from "../../../core/state.js";
-import { buildDistanceField } from "../shared/distanceField.js";
 import { applyFuelScorchColor } from "./fuelScorchColor.js";
 
 type Rgb = { r: number; g: number; b: number };
@@ -27,9 +26,6 @@ type TileTextureBuildDeps = {
   forestTintById: ArrayLike<Rgb | undefined>;
   noiseAt: (value: number) => number;
   waterAlphaMinRatio: number;
-  oceanBorderOpenWaterDistanceMin: number;
-  oceanSurfaceShoreClipBand: number;
-  oceanRatioMin: number;
   riverRatioMin: number;
   stepRockyTintMax: number;
   sunDir: { x: number; y: number; z: number };
@@ -197,14 +193,6 @@ export const buildTileTexture = (
   const maxDirtyCol = dirtyBounds ? clamp(Math.ceil(dirtyBounds.maxX / step) + 1, 0, sampleCols - 1) : sampleCols - 1;
   const minDirtyRow = dirtyBounds ? clamp(Math.floor(dirtyBounds.minY / step) - 1, 0, sampleRows - 1) : 0;
   const maxDirtyRow = dirtyBounds ? clamp(Math.ceil(dirtyBounds.maxY / step) + 1, 0, sampleRows - 1) : sampleRows - 1;
-  const distanceToLand = reusableData ? null : (() => {
-    const total = sampleCols * sampleRows;
-    const mapped = new Uint8Array(total);
-    for (let i = 0; i < total; i += 1) {
-      mapped[i] = sampleTypes[i] === waterId ? 1 : 0;
-    }
-    return buildDistanceField(mapped, sampleCols, sampleRows, 0);
-  })();
   const data = reusableData ?? new Uint8Array(sampleCols * sampleRows * 4);
   const getRoadGroundColor = (row: number, col: number): number[] => {
     if (roadId === null) {
@@ -260,13 +248,10 @@ export const buildTileTexture = (
         continue;
       }
       const tileX = Math.min(cols - 1, col * step);
-      const endX = Math.min(cols, tileX + step);
-      const endY = Math.min(rows, tileY + step);
       const idx = tileY * cols + tileX;
       const sampleIndex = row * sampleCols + col;
       const typeId = sampleTypes[sampleIndex] ?? grassId;
       const debugScalar = debugScalarField ? debugScalarField[idx] : undefined;
-      const touchesWorldBorder = sampleTouchesWorldBorder(tileX, tileY, endX, endY, cols, rows);
       const localWaterRatio = waterRatio ? clamp(waterRatio[sampleIndex] ?? 0, 0, 1) : typeId === waterId ? 1 : 0;
       const localOceanRatio = oceanRatio ? clamp(oceanRatio[sampleIndex] ?? 0, 0, 1) : localWaterRatio;
       const localRiverRatio = riverRatio ? clamp(riverRatio[sampleIndex] ?? 0, 0, 1) : 0;
@@ -278,10 +263,6 @@ export const buildTileTexture = (
       if (reusableData && typeId === waterId) {
         continue;
       }
-      const coastalDistanceToLand =
-        distanceToLand && distanceToLand[sampleIndex] >= 0
-          ? distanceToLand[sampleIndex]
-          : sampleCols + sampleRows;
       const localMoisture = tileMoisture ? clamp(tileMoisture[idx] ?? 0.5, 0, 1) : 0.5;
       const riverMaskAtTile = riverMask ? riverMask[idx] > 0 : false;
       const riverMaskNearby = (() => {
@@ -533,34 +514,13 @@ export const buildTileTexture = (
       const r = colorMode === "mask" ? 255 : clamp((debugTypeColors ? rawR : (rawR + noise) * tone + fineNoise), 0, 1) * 255;
       const g = colorMode === "mask" ? 255 : clamp((debugTypeColors ? rawG : (rawG + noise) * tone + fineNoise), 0, 1) * 255;
       const b = colorMode === "mask" ? 255 : clamp((debugTypeColors ? rawB : (rawB + noise) * tone + fineNoise), 0, 1) * 255;
-      const sampleBorderDistance = Math.min(
-        col,
-        row,
-        Math.max(0, sampleCols - 1 - col),
-        Math.max(0, sampleRows - 1 - row)
-      );
-      const borderOpenOcean =
-        touchesWorldBorder &&
-        coastalDistanceToLand > deps.oceanBorderOpenWaterDistanceMin;
-      const borderOceanCutout =
-        sampleBorderDistance <= 1 &&
-        typeId === waterId &&
-        localOceanRatio >= deps.oceanRatioMin &&
-        !riverDominant;
-      const shouldCutForOcean =
-        !debugTypeColors &&
-        !debugScalarField &&
-        !riverDominant &&
-        localOceanRatio >= deps.waterAlphaMinRatio &&
-        (borderOceanCutout ||
-          borderOpenOcean ||
-          (typeId === waterId &&
-            coastalDistanceToLand > deps.oceanSurfaceShoreClipBand &&
-            !touchesWorldBorder));
       data[pixelOffset] = Math.round(r);
       data[pixelOffset + 1] = Math.round(g);
       data[pixelOffset + 2] = Math.round(b);
-      data[pixelOffset + 3] = reusableData ? data[pixelOffset + 3] : shouldCutForOcean ? 0 : 255;
+      // The terrain is the opaque seabed beneath the independently rendered
+      // water surface. Cutting ocean pixels out here creates a literal hole
+      // whenever the shoreline shader intentionally emits partial coverage.
+      data[pixelOffset + 3] = 255;
       if (!reusableData) {
         offset += 4;
       }

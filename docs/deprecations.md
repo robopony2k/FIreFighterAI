@@ -408,6 +408,34 @@ Migration guidance:
 2. Put height tuning under Landform and ridge/surface tuning under Surface.
 3. Keep final-quality erosion behavior behind the Erosion Detail preview step instead of reintroducing a skip-carving toggle.
 
+## Alpha-Cut Ocean Terrain
+
+Status: Deprecated as of July 12, 2026.
+
+- Ocean-classified terrain is no longer made transparent to reveal the separate water surface.
+- Below-water terrain now remains an opaque sand/rock seabed, while the ocean shader owns the continuous visible waterline and partial shallow-water coverage.
+- Authoritative water cells, ocean connectivity, generated elevation, and sea level remain simulation/mapgen data rather than being rewritten for visual smoothing.
+
+Migration guidance:
+
+1. Do not restore ocean alpha holes in terrain textures or materials.
+2. Put shoreline smoothing, shoaling, breakers, foam, and swash in the terrain/water rendering boundary.
+3. Preserve opaque seabed coverage anywhere the water shader may fade or discard fragments.
+
+## FX Lab Sine-Wave Terrain
+
+Status: Deprecated as of July 12, 2026.
+
+- The FX Lab no longer builds its shared synthetic world from global sine/cosine elevation waves with independently stamped shoreline and river geometry.
+- A deterministic authored showcase map now provides coherent landforms, connected inland and coastal water features, representative terrain types, infrastructure, and protected dev-only editing boundaries.
+- FX scenarios still load immediately and share one world; land edits can be reset or moved through versioned JSON presets without invoking production map generation.
+
+Migration guidance:
+
+1. Add future FX calibration landmarks to the canonical showcase-map boundary rather than rebuilding terrain inside the FX Lab controller.
+2. Keep water topology and infrastructure protected from the lightweight land stamps.
+3. Use production map generation only when validating mapgen itself, not as a prerequisite for rendering-effect tuning.
+
 ## Fast Rivers Preview
 
 Status: Deprecated as of May 6, 2026.

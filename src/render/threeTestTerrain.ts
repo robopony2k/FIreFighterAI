@@ -329,8 +329,6 @@ const LAKE_TRACE_MAX_SAMPLE_DISTANCE = 3;
 const OCEAN_SAMPLE_SUPPORT_FLOOR = 0.12;
 const EDGE_WATER_SAMPLE_RATIO = 0.2;
 const INTERIOR_WATER_SAMPLE_RATIO = 0.5;
-const OCEAN_SHORE_TERRAIN_BAND = 3;
-const OCEAN_TERRAIN_CUTOUT_BAND = 6;
 const COAST_SAMPLE_BEACH_LAND_HEIGHTS = [0.014, 0.032] as const;
 const COAST_SAMPLE_BEACH_WET_DEPTHS = [0.003, 0.006, 0.01, 0.015, 0.021, 0.028] as const;
 const COAST_SAMPLE_CLIFF_LAND_MIN = [0.045, 0.085] as const;
@@ -1633,16 +1631,28 @@ const buildWaterDomainMapTexture = (
 const buildShoreSdfTextureFromSupportMask = (
   supportMask: Uint8Array,
   sampleCols: number,
-  sampleRows: number
+  sampleRows: number,
+  oceanSupportMask?: Uint8Array,
+  shoreTransition?: ShoreTransitionData
 ): THREE.DataTexture => {
   const distToWater = buildDistanceField(supportMask, sampleCols, sampleRows, 1);
   const distToLand = buildDistanceField(supportMask, sampleCols, sampleRows, 0);
+  const distToOcean = oceanSupportMask
+    ? buildDistanceField(oceanSupportMask, sampleCols, sampleRows, 1)
+    : null;
   const data = new Uint8Array(sampleCols * sampleRows * 4);
   for (let i = 0; i < supportMask.length; i += 1) {
     const isWater = supportMask[i] > 0;
     const waterDist = distToWater[i] >= 0 ? distToWater[i] : SHORE_SDF_MAX_DISTANCE;
     const landDist = distToLand[i] >= 0 ? distToLand[i] : SHORE_SDF_MAX_DISTANCE;
-    const signed = isWater ? landDist : -waterDist;
+    const useContinuousOceanDistance = Boolean(
+      shoreTransition &&
+      oceanSupportMask &&
+      (oceanSupportMask[i] > 0 || (distToOcean?.[i] ?? Number.POSITIVE_INFINITY) <= 2)
+    );
+    const signed = useContinuousOceanDistance
+      ? shoreTransition?.signedDistance[i] ?? (isWater ? landDist : -waterDist)
+      : isWater ? landDist : -waterDist;
     const normalized = clamp(signed / SHORE_SDF_MAX_DISTANCE, -1, 1);
     const encoded = Math.round((normalized * 0.5 + 0.5) * 255);
     const base = i * 4;
@@ -2554,9 +2564,6 @@ export const buildTileTexture = (
       forestTintById: FOREST_TINT_BY_ID,
       noiseAt,
       waterAlphaMinRatio: WATER_ALPHA_MIN_RATIO,
-      oceanBorderOpenWaterDistanceMin: OCEAN_BORDER_OPEN_WATER_DISTANCE_MIN,
-      oceanSurfaceShoreClipBand: OCEAN_SURFACE_SHORE_CLIP_BAND,
-      oceanRatioMin: OCEAN_RATIO_MIN,
       riverRatioMin: RIVER_RATIO_MIN,
       stepRockyTintMax: STEP_ROCKY_TINT_MAX,
       sunDir: SUN_DIR
@@ -3031,11 +3038,11 @@ export const prepareTerrainRenderSurface = (
       riverRatioMin: RIVER_RATIO_MIN
     }
   );
-  const shoreTerrainHeightAboveWater = new Float32Array(sampleCols * sampleRows);
+  const shoreTerrainHeightRelativeToWater = new Float32Array(sampleCols * sampleRows);
   const waterLevelWorld = waterLevel !== null ? clamp(waterLevel, 0, 1) * heightScale : 0;
   for (let i = 0; i < sampleCols * sampleRows; i += 1) {
     const terrainWorld = (sampleHeights[i] ?? 0) * heightScale;
-    shoreTerrainHeightAboveWater[i] = Math.max(0, terrainWorld - waterLevelWorld);
+    shoreTerrainHeightRelativeToWater[i] = terrainWorld - waterLevelWorld;
   }
   let coastDeltaCount = 0;
   let coastDeltaSum = 0;
@@ -3069,7 +3076,7 @@ export const prepareTerrainRenderSurface = (
     oceanSupportMask,
     sampleCoastClass,
     coastData,
-    shoreTerrainHeightAboveWater,
+    shoreTerrainHeightRelativeToWater,
     oceanRatio: oceanRenderRatios.ocean
   });
   if (DEBUG_TERRAIN_RENDER && riverRenderDomain) {
@@ -3762,7 +3769,7 @@ export const buildTerrainMesh = (
     vertexColors: !useLegacyFacetedTerrain
   });
   material.transparent = false;
-  material.alphaTest = 0.5;
+  material.alphaTest = 0;
   if (ENABLE_GRASS_DETAIL_FX) {
     applyGrassDetailFx(material, {
       enabled: ENABLE_GRASS_DETAIL_FX,
@@ -4495,7 +4502,6 @@ export const buildTerrainMesh = (
     const standingWaterMaskTexture = buildWaterMaskTexture(sampleCols, sampleRows, standingWater.ratios);
     const standingWaterInlandMap = buildInlandWaterMapTexture(sampleCols, sampleRows, standingWater.lakeCoverage);
     const standingWaterSupportMap = buildWaterSupportMapTexture(sampleCols, sampleRows, standingWater.supportMask);
-    const standingWaterShoreSdf = buildShoreSdfTextureFromSupportMask(standingWater.supportMask, sampleCols, sampleRows);
     const normalizedOceanHeights = buildWaterSurfaceHeights(
       sampleHeights,
       resolvedOceanSupportMask,
@@ -4563,10 +4569,10 @@ export const buildTerrainMesh = (
     const fallbackLevelWorld = waterCount > 0 ? waterHeightSum / Math.max(1, waterCount) : 0;
     const waterLevelWorld =
       representativeLevel !== null ? clamp(representativeLevel, 0, 1) * heightScale : fallbackLevelWorld;
-    const shoreTerrainHeightAboveWater = new Float32Array(sampleCols * sampleRows);
+    const shoreTerrainHeightRelativeToWater = new Float32Array(sampleCols * sampleRows);
     for (let i = 0; i < sampleCols * sampleRows; i += 1) {
       const terrainWorld = (sampleHeights[i] ?? 0) * heightScale;
-      shoreTerrainHeightAboveWater[i] = Math.max(0, terrainWorld - waterLevelWorld);
+      shoreTerrainHeightRelativeToWater[i] = terrainWorld - waterLevelWorld;
     }
     const standingWaterTerrainHeightAboveWater = new Float32Array(sampleCols * sampleRows);
     for (let i = 0; i < sampleCols * sampleRows; i += 1) {
@@ -4589,11 +4595,18 @@ export const buildTerrainMesh = (
         oceanSupportMask: resolvedOceanSupportMask,
         sampleCoastClass,
         coastData,
-        shoreTerrainHeightAboveWater,
+        shoreTerrainHeightRelativeToWater,
         oceanRatio: resolvedOceanRatios.ocean
       });
     surface.shoreTransition = resolvedShoreTransition;
     const shoreTransitionMap = buildShoreTransitionMapTexture(sampleCols, sampleRows, resolvedShoreTransition);
+    const standingWaterShoreSdf = buildShoreSdfTextureFromSupportMask(
+      standingWater.supportMask,
+      sampleCols,
+      sampleRows,
+      resolvedOceanSupportMask,
+      resolvedShoreTransition
+    );
     applyShoreTransitionTerrainMaterial(material, { shoreTransitionMap });
     const waterHeights = new Float32Array(normalizedWaterHeights.length);
     let validationCount = 0;

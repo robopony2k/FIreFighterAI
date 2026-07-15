@@ -12,6 +12,7 @@ import type { OceanWaterDebugControls } from "../oceanWaterDebug.js";
 import type { TerrainWaterDebugControls } from "../terrainWaterDebug.js";
 import type { WaterFxDebugControls } from "../threeTestUnitFx.js";
 import type { FxLabPlacementMode, FxLabScenarioId } from "./types.js";
+import type { FxLabTerrainStamp } from "./showcaseMap.js";
 
 type ControlBinding = {
   apply: (value: string | number | boolean) => void;
@@ -22,7 +23,7 @@ export type FxLabPanelHandle = {
   sync: () => void;
 };
 
-type FxLabToolTab = "scene" | "fire" | "hose" | "water" | "export";
+type FxLabToolTab = "scene" | "terrain" | "fire" | "hose" | "water" | "export";
 
 const getRecommendedToolTab = (scenarioId: FxLabScenarioId): FxLabToolTab =>
   scenarioId === "rain-overlay"
@@ -110,6 +111,7 @@ export const createFxLabPanel = (mount: HTMLElement, controller: FxLabController
 
   ([
     { id: "scene", label: "Scene" },
+    { id: "terrain", label: "Terrain" },
     { id: "fire", label: "Fire" },
     { id: "hose", label: "Hose" },
     { id: "water", label: "Water" },
@@ -255,6 +257,61 @@ export const createFxLabPanel = (mount: HTMLElement, controller: FxLabController
   sprayNote.className = "fx-lab-section-note";
   spraySection.append(sprayTitle, sprayActions, sprayModeLabel, sprayNote);
   registerTabSection("scene", spraySection);
+
+  const terrainEditSection = document.createElement("section");
+  terrainEditSection.className = "fx-lab-section";
+  const terrainEditTitle = document.createElement("h3");
+  terrainEditTitle.textContent = "Showcase Terrain";
+  const stampLabel = document.createElement("label");
+  stampLabel.className = "fx-lab-inline-field";
+  const stampText = document.createElement("span");
+  stampText.textContent = "Stamp";
+  const stampSelect = document.createElement("select");
+  stampSelect.className = "fx-lab-select";
+  ([
+    ["", "Off"], ["raise", "Raise"], ["lower", "Lower"], ["flatten", "Flatten"],
+    ["grass", "Grass"], ["scrub", "Scrub"], ["forest", "Forest"], ["rocky", "Rocky"],
+    ["bare", "Bare"], ["ash", "Ash"], ["clearing", "Clearing"]
+  ] as const).forEach(([value, label]) => {
+    const option = document.createElement("option");
+    option.value = value;
+    option.textContent = label;
+    stampSelect.appendChild(option);
+  });
+  stampLabel.append(stampText, stampSelect);
+  const radiusLabel = document.createElement("label");
+  radiusLabel.className = "fx-lab-inline-field";
+  const radiusText = document.createElement("span");
+  radiusText.textContent = "Radius";
+  const radiusSelect = document.createElement("select");
+  radiusSelect.className = "fx-lab-select";
+  ([2, 4, 7] as const).forEach((radius) => {
+    const option = document.createElement("option");
+    option.value = `${radius}`;
+    option.textContent = `${radius} tiles`;
+    radiusSelect.appendChild(option);
+  });
+  radiusLabel.append(radiusText, radiusSelect);
+  const mapActions = document.createElement("div");
+  mapActions.className = "fx-lab-inline-actions";
+  const resetMapButton = document.createElement("button");
+  resetMapButton.type = "button";
+  resetMapButton.textContent = "Reset Map";
+  const exportMapButton = document.createElement("button");
+  exportMapButton.type = "button";
+  exportMapButton.textContent = "Export Map";
+  const importMapButton = document.createElement("button");
+  importMapButton.type = "button";
+  importMapButton.textContent = "Import Map";
+  const importMapInput = document.createElement("input");
+  importMapInput.type = "file";
+  importMapInput.accept = "application/json,.json";
+  importMapInput.hidden = true;
+  mapActions.append(resetMapButton, exportMapButton, importMapButton, importMapInput);
+  const terrainEditStatus = document.createElement("p");
+  terrainEditStatus.className = "fx-lab-section-note";
+  terrainEditSection.append(terrainEditTitle, stampLabel, radiusLabel, mapActions, terrainEditStatus);
+  registerTabSection("terrain", terrainEditSection);
 
   const waterSection = document.createElement("section");
   waterSection.className = "fx-lab-section";
@@ -742,6 +799,9 @@ export const createFxLabPanel = (mount: HTMLElement, controller: FxLabController
     }
     timeScaleSelect.value = `${timeScale}`;
     weatherModeSelect.value = controller.getWeatherMode();
+    stampSelect.value = controller.getTerrainStamp() ?? "";
+    radiusSelect.value = `${controller.getTerrainStampRadius()}`;
+    terrainEditStatus.textContent = controller.getTerrainEditStatus();
     placeFirefighterButton.setAttribute("aria-pressed", `${placementMode === "firefighter"}`);
     placeTruckButton.setAttribute("aria-pressed", `${placementMode === "truck"}`);
     clearPlacementButton.setAttribute("aria-pressed", "false");
@@ -846,6 +906,40 @@ export const createFxLabPanel = (mount: HTMLElement, controller: FxLabController
     controller.setManualSprayMode(sprayModeSelect.value as WaterSprayMode);
     sync();
   });
+  stampSelect.addEventListener("change", () => {
+    controller.setTerrainStamp((stampSelect.value || null) as FxLabTerrainStamp | null);
+    sync();
+  });
+  radiusSelect.addEventListener("change", () => {
+    controller.setTerrainStampRadius(Number(radiusSelect.value) as 2 | 4 | 7);
+    sync();
+  });
+  resetMapButton.addEventListener("click", () => {
+    controller.resetShowcaseMap();
+    sync();
+  });
+  exportMapButton.addEventListener("click", () => {
+    const blob = new Blob([controller.exportShowcaseMap()], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = "fx-showcase-map.json";
+    link.click();
+    URL.revokeObjectURL(url);
+  });
+  importMapButton.addEventListener("click", () => importMapInput.click());
+  importMapInput.addEventListener("change", async () => {
+    const file = importMapInput.files?.[0];
+    if (!file) return;
+    try {
+      controller.importShowcaseMap(await file.text());
+      sync();
+    } catch (error) {
+      terrainEditStatus.textContent = error instanceof Error ? error.message : "Map import failed.";
+    } finally {
+      importMapInput.value = "";
+    }
+  });
   fireResetButton.addEventListener("click", () => {
     controller.resetFireDebugControls();
     sync();
@@ -878,9 +972,13 @@ export const createFxLabPanel = (mount: HTMLElement, controller: FxLabController
 
   setActiveToolTab(activeToolTab);
   sync();
+  const terrainStatusTimer = window.setInterval(() => {
+    terrainEditStatus.textContent = controller.getTerrainEditStatus();
+  }, 250);
 
   return {
     destroy: () => {
+      window.clearInterval(terrainStatusTimer);
       root.remove();
     },
     sync

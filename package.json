@@ -29,6 +29,8 @@
     "terrain:eval:quick": "npm run build && node scripts/terrain-eval.mjs --size=massive --samples=1",
     "terrain:grounding-regression": "npm run build && node scripts/terrain-grounding-regression.mjs",
     "terrain:fast-preview": "npm run build && node scripts/fast-terrain-preview-regression.mjs",
+    "coastline:regression": "npm run build && node scripts/coastline-render-regression.mjs",
+    "fx-lab:regression": "npm run build && node scripts/fx-lab-showcase-regression.mjs",
     "mapgen:diagnostics": "npm run build && node scripts/mapgen-diagnostics-regression.mjs",
     "road:sharecode-regression": "npm run build && node scripts/road-sharecode-regression.mjs",
     "mapgen:regression": "npm run build && node scripts/mapgen-regression.mjs",

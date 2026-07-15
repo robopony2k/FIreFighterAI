@@ -32,18 +32,18 @@ export const DEFAULT_OCEAN_WATER_DEBUG_CONTROLS: OceanWaterDebugControls = {
   enableSwashSheet: true,
   enableShoreWaveModulation: true,
   shoreSwashStart: 0,
-  shoreSwashEnd: 0.364,
-  shoreShoalEnd: 0.46,
-  organicEdgeInset: 0.22,
-  swashPushMax: 0.28,
-  swashPushFeather: 0.042,
-  swashCoverageMin: 0.98,
-  swashCoverageFadeEnd: 1,
-  shoreWaveAmpMinScale: 1,
-  shoreWaveLengthMinScale: 0.2,
-  waveAmpScale: 0.95,
-  waveLengthScale: 0.8,
-  shoreFoamScale: 1.91
+  shoreSwashEnd: 0.31,
+  shoreShoalEnd: 0.58,
+  organicEdgeInset: 0.16,
+  swashPushMax: 0.18,
+  swashPushFeather: 0.08,
+  swashCoverageMin: 0.16,
+  swashCoverageFadeEnd: 0.62,
+  shoreWaveAmpMinScale: 0.34,
+  shoreWaveLengthMinScale: 0.42,
+  waveAmpScale: 0.88,
+  waveLengthScale: 0.9,
+  shoreFoamScale: 1.42
 };
 
 export const normalizeOceanWaterDebugControls = (

@@ -65,13 +65,26 @@ const shaderNoiseFns = `
 `;
 
 const shaderShoreFns = `
+  float sampleSmoothShoreSdf(vec2 uvCoord) {
+    vec2 stepX = vec2(u_uvStep.x, 0.0);
+    vec2 stepY = vec2(0.0, u_uvStep.y);
+    float center = texture2D(u_shoreSdf, uvCoord).r * 2.0 - 1.0;
+    float crossSum =
+      texture2D(u_shoreSdf, uvCoord + stepX).r +
+      texture2D(u_shoreSdf, uvCoord - stepX).r +
+      texture2D(u_shoreSdf, uvCoord + stepY).r +
+      texture2D(u_shoreSdf, uvCoord - stepY).r;
+    float crossSigned = crossSum * 2.0 - 4.0;
+    return center * 0.52 + crossSigned * 0.12;
+  }
+
   vec2 sampleShoreGradient(vec2 uvCoord) {
     vec2 stepX = vec2(u_uvStep.x, 0.0);
     vec2 stepY = vec2(0.0, u_uvStep.y);
-    float sdfPosX = texture2D(u_shoreSdf, uvCoord + stepX).r * 2.0 - 1.0;
-    float sdfNegX = texture2D(u_shoreSdf, uvCoord - stepX).r * 2.0 - 1.0;
-    float sdfPosY = texture2D(u_shoreSdf, uvCoord + stepY).r * 2.0 - 1.0;
-    float sdfNegY = texture2D(u_shoreSdf, uvCoord - stepY).r * 2.0 - 1.0;
+    float sdfPosX = sampleSmoothShoreSdf(uvCoord + stepX);
+    float sdfNegX = sampleSmoothShoreSdf(uvCoord - stepX);
+    float sdfPosY = sampleSmoothShoreSdf(uvCoord + stepY);
+    float sdfNegY = sampleSmoothShoreSdf(uvCoord - stepY);
     vec2 grad = vec2(sdfPosX - sdfNegX, sdfPosY - sdfNegY);
     float gradLen = length(grad);
     if (gradLen < 1e-4) {
@@ -351,9 +364,13 @@ export const createOceanSurfaceMaterial = (uniforms: OceanUniforms): THREE.Shade
         coverage = domain.b;
         surfAtten = domain.a;
         inlandWater = texture2D(u_inlandWaterMap, uvCoord).r;
-        sdf = texture2D(u_shoreSdf, uvCoord).r * 2.0 - 1.0;
+        sdf = sampleSmoothShoreSdf(uvCoord);
         float positiveSdf = max(0.0, sdf);
-        shorelineSdf = max(0.0, positiveSdf - computeOrganicShoreInset(worldXZ, positiveSdf));
+        float organicInset = computeOrganicShoreInset(worldXZ, positiveSdf);
+        // Preserve the land-side sign. The former clamp collapsed every
+        // landward sample onto the same zero contour, making the visible edge
+        // follow sampled grid cells instead of a continuous waterline.
+        shorelineSdf = sdf > 0.0 ? sdf - organicInset : sdf;
         vec3 animated = computeAnimatedWave(worldXZ, uvCoord, ocean, coverage, surfAtten, shorelineSdf);
         animated *= mix(1.0, 0.16, clamp(inlandWater, 0.0, 1.0));
         return p + animated;
@@ -484,7 +501,7 @@ export const createOceanSurfaceMaterial = (uniforms: OceanUniforms): THREE.Shade
       void main() {
         float support = texture2D(u_supportMap, vUv).r;
         float mask = texture2D(u_mask, vUv).a;
-        float shorelineSdf = max(0.0, vShorelineSdf);
+        float shorelineSdf = vShorelineSdf;
         vec4 domain = texture2D(u_domainMap, vUv);
         float inlandWater = clamp(max(vInlandWater, texture2D(u_inlandWaterMap, vUv).r), 0.0, 1.0);
         float oceanMotion = 1.0 - inlandWater;
@@ -598,6 +615,10 @@ export const createOceanSurfaceMaterial = (uniforms: OceanUniforms): THREE.Shade
           );
         alpha *= max(max(coverageStrength, swashSheet * 1.12), shorelineCover);
         alpha *= 1.0 - seawardCoastMask * 0.08;
+        // Open ocean must be optically complete. Transparency is reserved for
+        // shallow water where the now-opaque seabed is intentionally visible.
+        float openOceanCoverage = smoothstep(0.72, 0.98, max(vOcean, domainWater));
+        alpha = max(alpha, u_opacity * openOceanCoverage);
         alpha = max(alpha, lakeAlpha);
         if (alpha < 0.01) {
           discard;

@@ -24,7 +24,7 @@ type ShoreTransitionBuildOptions = {
   oceanSupportMask: Uint8Array;
   sampleCoastClass: Uint8Array | undefined;
   coastData: ShoreTransitionCoastData;
-  shoreTerrainHeightAboveWater: Float32Array;
+  shoreTerrainHeightRelativeToWater: Float32Array;
   oceanRatio: Float32Array;
 };
 
@@ -77,7 +77,7 @@ export const buildShoreTransitionData = ({
   oceanSupportMask,
   sampleCoastClass,
   coastData,
-  shoreTerrainHeightAboveWater,
+  shoreTerrainHeightRelativeToWater,
   oceanRatio
 }: ShoreTransitionBuildOptions): ShoreTransitionData => {
   const total = sampleCols * sampleRows;
@@ -99,10 +99,35 @@ export const buildShoreTransitionData = ({
   const distToWater = buildDistanceField(oceanSupportMask, sampleCols, sampleRows, 1);
   const distToLand = buildDistanceField(oceanSupportMask, sampleCols, sampleRows, 0);
   for (let i = 0; i < total; i += 1) {
+    const x = i % sampleCols;
+    const y = Math.floor(i / sampleCols);
     const isWater = oceanSupportMask[i] > 0;
     const waterDist = distToWater[i] >= 0 ? distToWater[i] : sampleCols + sampleRows;
     const landDist = distToLand[i] >= 0 ? distToLand[i] : sampleCols + sampleRows;
-    const d = isWater ? landDist : -waterDist;
+    const maskDistance = isWater ? Math.max(0.5, landDist - 0.5) : -Math.max(0.5, waterDist - 0.5);
+    const terrainDelta = shoreTerrainHeightRelativeToWater[i] ?? 0;
+    let localHeightGradient = 0;
+    const sampleNeighbor = (nx: number, ny: number): void => {
+      if (nx < 0 || ny < 0 || nx >= sampleCols || ny >= sampleRows) {
+        return;
+      }
+      localHeightGradient = Math.max(
+        localHeightGradient,
+        Math.abs((shoreTerrainHeightRelativeToWater[ny * sampleCols + nx] ?? terrainDelta) - terrainDelta)
+      );
+    };
+    sampleNeighbor(x - 1, y);
+    sampleNeighbor(x + 1, y);
+    sampleNeighbor(x, y - 1);
+    sampleNeighbor(x, y + 1);
+    const terrainSideConsistent = isWater ? terrainDelta <= 0.03 : terrainDelta >= -0.01;
+    const terrainDistance = -terrainDelta / Math.max(0.004, localHeightGradient);
+    const terrainBlend = terrainSideConsistent
+      ? smoothstep(0.004, 0.035, localHeightGradient) *
+        (1 - smoothstep(0.75, 2.0, Math.abs(maskDistance)))
+      : 0;
+    const d = maskDistance * (1 - terrainBlend) +
+      clamp(terrainDistance, isWater ? 0.04 : -2.25, isWater ? 2.25 : -0.04) * terrainBlend;
     const coastClass = sampleCoastClass?.[i] ?? COAST_CLASS_NONE;
     const baseEligibility = clamp(
       (coastData.beachWeight?.[i] ?? 0) +
@@ -114,7 +139,7 @@ export const buildShoreTransitionData = ({
     const heightMask = 1 - smoothstep(
       SHORE_TRANSITION_HEIGHT_FADE_START,
       SHORE_TRANSITION_HEIGHT_FADE_END,
-      shoreTerrainHeightAboveWater[i] ?? 0
+      Math.max(0, shoreTerrainHeightRelativeToWater[i] ?? 0)
     );
     const oceanPresence = clamp(oceanRatio[i] ?? 0, 0, 1);
     const waterSideEligibility =
