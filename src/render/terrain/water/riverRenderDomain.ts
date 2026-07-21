@@ -1,4 +1,5 @@
 import { DEBUG_TERRAIN_RENDER } from "../../../core/config.js";
+import type { InlandWaterRenderSurface } from "../../../systems/terrain/rendering/inlandWaterRenderSurface.js";
 import { buildDistanceField } from "../shared/distanceField.js";
 
 type RiverRenderDomainSample = {
@@ -9,6 +10,7 @@ type RiverRenderDomainSample = {
   riverMask?: Uint8Array;
   lakeMask?: Uint16Array;
   riverSurface?: Float32Array;
+  inlandWater?: InlandWaterRenderSurface;
 };
 
 export type RiverContourVertex = {
@@ -55,6 +57,8 @@ export type RiverRenderDomain = {
   cutoutBoundaryEdges: Float32Array;
   cutoutBoundaryVertexHeights?: Float32Array;
   cutoutBoundaryWallEdges?: Float32Array;
+  // Packed edge endpoints: edgeX, edgeY, worldY, terrainU, terrainV.
+  cutoutBoundarySkirtEdges?: Float32Array;
   distanceToBank: Int16Array;
   debugStats?: RiverDomainDebugStats;
 };
@@ -86,8 +90,12 @@ const buildRenderRiverSupportMasks = (
   const base = new Uint8Array(total);
   let sourceCount = 0;
   for (let i = 0; i < total; i += 1) {
-    const hasSurface = !riverSurface || Number.isFinite(riverSurface[i]);
-    base[i] = tileTypes[i] === waterId && riverMask[i] > 0 && (lakeMask?.[i] ?? 0) === 0 && hasSurface ? 1 : 0;
+    const hasRiverSurface = !riverSurface || Number.isFinite(riverSurface[i]);
+    const hasLake = (lakeMask?.[i] ?? 0) > 0;
+    const hasInlandWater = sample.inlandWater
+      ? sample.inlandWater.support[i] > 0
+      : tileTypes[i] === waterId && ((riverMask[i] > 0 && hasRiverSurface) || hasLake);
+    base[i] = hasInlandWater ? 1 : 0;
     if (base[i]) {
       sourceCount += 1;
     }
@@ -702,4 +710,125 @@ export const buildSnappedRiverContourVertices = (
     }
   }
   return snapped;
+};
+
+export type CutoutConformingRiverContourMesh = {
+  vertices: Float32Array;
+  indices: Uint32Array;
+};
+
+/**
+ * Inserts the terrain cutout's additional boundary endpoints into the water
+ * contour. Projection alone is insufficient: a coarse terrain triangle can
+ * turn several detailed contour edges into one chord, leaving both meshes with
+ * different segment topology even when their existing vertices are nearby.
+ */
+export const buildCutoutConformingRiverContourMesh = (
+  riverDomain: RiverRenderDomain
+): CutoutConformingRiverContourMesh => {
+  const sourceIndices = Array.from(riverDomain.contourIndices);
+  const vertices = Array.from(buildSnappedRiverContourVertices(riverDomain, sourceIndices));
+  const vertexCount = vertices.length / 2;
+  if (vertexCount === 0 || sourceIndices.length < 3) {
+    return { vertices: new Float32Array(vertices), indices: new Uint32Array(sourceIndices) };
+  }
+  const cutoutEdges = riverDomain.cutoutBoundaryEdges;
+  if (!cutoutEdges || cutoutEdges.length < 4) {
+    return { vertices: new Float32Array(vertices), indices: new Uint32Array(sourceIndices) };
+  }
+
+  type BoundaryRecord = { count: number; a: number; b: number };
+  type EdgeInsertion = { vertexIndex: number; tFromMin: number };
+  const edgeRecords = new Map<string, BoundaryRecord>();
+  const edgeKey = (a: number, b: number): string => a < b ? `${a}|${b}` : `${b}|${a}`;
+  const addEdge = (a: number, b: number): void => {
+    const key = edgeKey(a, b);
+    const existing = edgeRecords.get(key);
+    if (existing) {
+      existing.count += 1;
+    } else {
+      edgeRecords.set(key, { count: 1, a: Math.min(a, b), b: Math.max(a, b) });
+    }
+  };
+  for (let i = 0; i < sourceIndices.length; i += 3) {
+    const a = sourceIndices[i] as number;
+    const b = sourceIndices[i + 1] as number;
+    const c = sourceIndices[i + 2] as number;
+    addEdge(a, b);
+    addEdge(b, c);
+    addEdge(c, a);
+  }
+  const boundaryRecords = Array.from(edgeRecords.values()).filter((record) => record.count === 1);
+  const insertionsByEdge = new Map<string, EdgeInsertion[]>();
+  const insertedVertexByPosition = new Map<string, number>();
+  const quantScale = 8192;
+  const positionKey = (x: number, y: number): string => `${Math.round(x * quantScale)},${Math.round(y * quantScale)}`;
+  for (let i = 0; i < vertexCount; i += 1) {
+    insertedVertexByPosition.set(positionKey(vertices[i * 2], vertices[i * 2 + 1]), i);
+  }
+  const cutoutEndpoints = new Map<string, { x: number; y: number }>();
+  for (let i = 0; i + 3 < cutoutEdges.length; i += 4) {
+    cutoutEndpoints.set(positionKey(cutoutEdges[i], cutoutEdges[i + 1]), { x: cutoutEdges[i], y: cutoutEdges[i + 1] });
+    cutoutEndpoints.set(positionKey(cutoutEdges[i + 2], cutoutEdges[i + 3]), { x: cutoutEdges[i + 2], y: cutoutEdges[i + 3] });
+  }
+  cutoutEndpoints.forEach((point, key) => {
+    if (insertedVertexByPosition.has(key)) {
+      return;
+    }
+    let bestRecord: BoundaryRecord | undefined;
+    let bestT = 0;
+    let bestDistance = Number.POSITIVE_INFINITY;
+    for (const record of boundaryRecords) {
+      const ax = vertices[record.a * 2];
+      const ay = vertices[record.a * 2 + 1];
+      const bx = vertices[record.b * 2];
+      const by = vertices[record.b * 2 + 1];
+      const dx = bx - ax;
+      const dy = by - ay;
+      const lengthSq = dx * dx + dy * dy;
+      if (lengthSq <= 1e-10) continue;
+      const t = clamp(((point.x - ax) * dx + (point.y - ay) * dy) / lengthSq, 0, 1);
+      const distance = Math.hypot(point.x - (ax + dx * t), point.y - (ay + dy * t));
+      if (distance < bestDistance) {
+        bestDistance = distance;
+        bestRecord = record;
+        bestT = t;
+      }
+    }
+    if (!bestRecord) return;
+    const newVertexIndex = vertices.length / 2;
+    vertices.push(point.x, point.y);
+    insertedVertexByPosition.set(key, newVertexIndex);
+    const keyForEdge = edgeKey(bestRecord.a, bestRecord.b);
+    const bucket = insertionsByEdge.get(keyForEdge) ?? [];
+    bucket.push({ vertexIndex: newVertexIndex, tFromMin: bestT });
+    insertionsByEdge.set(keyForEdge, bucket);
+  });
+  insertionsByEdge.forEach((insertions) => insertions.sort((a, b) => a.tFromMin - b.tFromMin));
+
+  const outIndices: number[] = [];
+  const appendOrientedEdge = (polygon: number[], a: number, b: number): void => {
+    polygon.push(a);
+    const insertions = insertionsByEdge.get(edgeKey(a, b));
+    if (!insertions || insertions.length === 0) return;
+    const ascending = a < b;
+    const ordered = ascending ? insertions : insertions.slice().reverse();
+    for (const insertion of ordered) polygon.push(insertion.vertexIndex);
+  };
+  for (let i = 0; i < sourceIndices.length; i += 3) {
+    const a = sourceIndices[i] as number;
+    const b = sourceIndices[i + 1] as number;
+    const c = sourceIndices[i + 2] as number;
+    const polygon: number[] = [];
+    appendOrientedEdge(polygon, a, b);
+    appendOrientedEdge(polygon, b, c);
+    appendOrientedEdge(polygon, c, a);
+    for (let p = 1; p < polygon.length - 1; p += 1) {
+      const ia = polygon[0];
+      const ib = polygon[p];
+      const ic = polygon[p + 1];
+      if (ia !== ib && ib !== ic && ic !== ia) outIndices.push(ia, ib, ic);
+    }
+  }
+  return { vertices: new Float32Array(vertices), indices: new Uint32Array(outIndices) };
 };

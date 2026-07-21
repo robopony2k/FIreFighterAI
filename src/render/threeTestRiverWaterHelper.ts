@@ -510,6 +510,7 @@ export class ThreeTestRiverWaterHelper {
     geometry.setAttribute("a_flowDir", new THREE.BufferAttribute(river.flowDir, 2));
     geometry.setAttribute("a_flowSpeed", new THREE.BufferAttribute(river.flowSpeed, 1));
     geometry.setAttribute("a_rapid", new THREE.BufferAttribute(river.rapid, 1));
+    geometry.setAttribute("a_lakeFactor", new THREE.BufferAttribute(river.lakeFactor, 1));
     geometry.setIndex(new THREE.BufferAttribute(river.indices, 1));
     geometry.computeVertexNormals();
 
@@ -558,6 +559,7 @@ export class ThreeTestRiverWaterHelper {
         varying vec2 vFlowDir;
         varying float vFlowSpeed;
         varying float vRapid;
+        varying float vLakeFactor;
         uniform float u_time;
         uniform float u_quality;
         uniform float u_flowSpeedScale;
@@ -565,6 +567,7 @@ export class ThreeTestRiverWaterHelper {
         attribute vec2 a_flowDir;
         attribute float a_flowSpeed;
         attribute float a_rapid;
+        attribute float a_lakeFactor;
         float sampleRiverWave(
           vec2 worldXZ,
           vec2 flowN,
@@ -595,17 +598,19 @@ export class ThreeTestRiverWaterHelper {
           vFlowDir = a_flowDir;
           vFlowSpeed = a_flowSpeed;
           vRapid = a_rapid;
+          vLakeFactor = a_lakeFactor;
           float detailFactor = clamp(u_quality * 0.5, 0.0, 1.0);
           float qualityFactor = mix(0.68, 1.0, detailFactor);
           float centerFactor = smoothstep(0.08, 0.6, a_bankDist);
           float speedFactor = clamp(a_flowSpeed * u_flowSpeedScale, 0.25, 3.4);
           vec2 flowN = normalize(a_flowDir + vec2(1e-4, 0.0));
           vec2 worldXZ = (modelMatrix * vec4(position, 1.0)).xz;
-          float waveDisp = sampleRiverWave(worldXZ, flowN, centerFactor, speedFactor, a_rapid, qualityFactor);
+          float calmFactor = mix(1.0, 0.18, a_lakeFactor);
+          float waveDisp = sampleRiverWave(worldXZ, flowN, centerFactor, speedFactor, a_rapid, qualityFactor) * calmFactor;
           vec3 displaced = position + vec3(0.0, waveDisp, 0.0);
           const float sampleStep = 0.65;
-          float dispX = sampleRiverWave(worldXZ + vec2(sampleStep, 0.0), flowN, centerFactor, speedFactor, a_rapid, qualityFactor);
-          float dispZ = sampleRiverWave(worldXZ + vec2(0.0, sampleStep), flowN, centerFactor, speedFactor, a_rapid, qualityFactor);
+          float dispX = sampleRiverWave(worldXZ + vec2(sampleStep, 0.0), flowN, centerFactor, speedFactor, a_rapid, qualityFactor) * calmFactor;
+          float dispZ = sampleRiverWave(worldXZ + vec2(0.0, sampleStep), flowN, centerFactor, speedFactor, a_rapid, qualityFactor) * calmFactor;
           vec3 tangentX = vec3(sampleStep, dispX - waveDisp, 0.0);
           vec3 tangentZ = vec3(0.0, dispZ - waveDisp, sampleStep);
           vec3 geomNormalLocal = cross(tangentZ, tangentX);
@@ -629,6 +634,7 @@ export class ThreeTestRiverWaterHelper {
         varying vec2 vFlowDir;
         varying float vFlowSpeed;
         varying float vRapid;
+        varying float vLakeFactor;
         uniform float u_time;
         uniform vec3 u_color;
         uniform vec3 u_deepColor;
@@ -663,7 +669,7 @@ export class ThreeTestRiverWaterHelper {
           vec2 worldUv = vWorldPos.xz * u_waveScale;
           vec2 flowN = normalize(vFlowDir + vec2(1e-4));
           float flowSpeed = clamp(vFlowSpeed * u_flowSpeedScale, 0.25, 3.4);
-          vec2 flowOffset = flowN * (u_time * (0.07 + vRapid * 0.2) * flowSpeed);
+          vec2 flowOffset = flowN * (u_time * (0.07 + vRapid * 0.2) * flowSpeed * mix(1.0, 0.16, vLakeFactor));
           vec2 uv1 = worldUv * 8.0 + flowOffset * 1.7 + u_scroll1 * (u_time * 1.8);
           vec2 uv2 = worldUv * 10.4 - flowOffset.yx * 1.4 + u_scroll2 * (u_time * 2.2);
           vec2 nXY = texture2D(u_normalMap1, uv1).xy * 2.0 - 1.0 + (texture2D(u_normalMap2, uv2).xy * 2.0 - 1.0) * 0.85;
@@ -706,7 +712,7 @@ export class ThreeTestRiverWaterHelper {
               return;
             }
           }
-          float rapid = clamp(vRapid * (0.68 + qualityFactor * 0.38) + fallBoost * 0.62 + seamRapid * 0.82 + plungeFoam * 0.2, 0.0, 1.0);
+          float rapid = clamp((vRapid * (0.68 + qualityFactor * 0.38) + fallBoost * 0.62 + seamRapid * 0.82 + plungeFoam * 0.2) * mix(1.0, 0.08, vLakeFactor), 0.0, 1.0);
           float spec = specBase * u_specular * u_specularScale * (0.4 + rapid * 0.8 + seamRapid * 0.26) * (0.7 + 0.45 * grazing);
           spec *= mix(0.82, 1.14, crestMask);
           float fresnel = pow(1.0 - max(dot(viewDir, n), 0.0), 3.5);

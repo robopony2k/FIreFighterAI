@@ -80,7 +80,7 @@ export const createEmptyHydrologyFeatureCounts = (): StaticHydrologyFeatureCount
   "failed-overflow": 0
 });
 
-const featureForCode = (code: number): StaticHydrologyFeatureClass =>
+export const featureForCode = (code: number): StaticHydrologyFeatureClass =>
   HYDROLOGY_FEATURE_CLASS_BY_CODE[code] ?? "none";
 
 const setFeature = (classes: Uint8Array, idx: number, feature: StaticHydrologyFeatureClass): void => {
@@ -93,7 +93,7 @@ const setFeature = (classes: Uint8Array, idx: number, feature: StaticHydrologyFe
   }
 };
 
-const countFeatures = (classes: Uint8Array): StaticHydrologyFeatureCounts => {
+export const countHydrologyFeatures = (classes: Uint8Array): StaticHydrologyFeatureCounts => {
   const counts = createEmptyHydrologyFeatureCounts();
   for (let i = 0; i < classes.length; i += 1) {
     counts[featureForCode(classes[i] ?? 0)] += 1;
@@ -191,8 +191,6 @@ export const classifyHydrologyFeatures = (
       const isOutletStep = pathIndex === 0;
       const waterfallMinDrop = isOutletStep ? outletWaterfallMinDrop : settings.waterfallMinDrop;
       if (sourceIndex >= 0 && localDrop >= waterfallMinDrop) {
-        setFeature(featureClass, sourceIndex, "waterfall-lip");
-        setFeature(featureClass, idx, "waterfall-runout");
         waterfallCandidates.push({
           sourceIndex,
           targetIndex: idx,
@@ -210,7 +208,7 @@ export const classifyHydrologyFeatures = (
 
   return {
     featureClass,
-    featureCounts: countFeatures(featureClass),
+    featureCounts: countHydrologyFeatures(featureClass),
     routes: [...routes],
     waterfallCandidates,
     terminalRoutes,

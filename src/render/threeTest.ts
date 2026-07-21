@@ -4671,16 +4671,15 @@ export const createThreeTest = (
     hoverGridY: number,
     sample: TerrainSample
   ): NearestWaterfallInstance | null => {
-    const instances = lastTerrainWater?.waterfallInstances;
-    if (!instances || instances.length < 7 || !lastTerrainSize) {
+    const spans = lastTerrainWater?.inland?.surface.waterfalls;
+    if (!spans || spans.length === 0 || !lastTerrainSize) {
       return null;
     }
-    const instanceCount = Math.floor(instances.length / 7);
     let best: NearestWaterfallInstance | null = null;
-    for (let i = 0; i < instanceCount; i += 1) {
-      const base = i * 7;
-      const gridX = (instances[base] / Math.max(1e-4, lastTerrainSize.width) + 0.5) * sample.cols - 0.5;
-      const gridY = (instances[base + 1] / Math.max(1e-4, lastTerrainSize.depth) + 0.5) * sample.rows - 0.5;
+    for (let i = 0; i < spans.length; i += 1) {
+      const span = spans[i];
+      const gridX = span.sourceIndex % sample.cols;
+      const gridY = Math.floor(span.sourceIndex / sample.cols);
       const distanceTiles = Math.hypot(gridX - hoverGridX, gridY - hoverGridY);
       if (best && distanceTiles >= best.distanceTiles) {
         continue;
@@ -4690,11 +4689,11 @@ export const createThreeTest = (
         distanceTiles,
         gridX,
         gridY,
-        top: instances[base + 2],
-        drop: instances[base + 3],
-        dirX: instances[base + 4],
-        dirZ: instances[base + 5],
-        width: instances[base + 6]
+        top: span.topWorldY,
+        drop: span.dropWorld,
+        dirX: span.flowWorldX,
+        dirZ: span.flowWorldZ,
+        width: span.halfWidthWorld
       };
     }
     return best;
@@ -4852,6 +4851,8 @@ export const createThreeTest = (
   const buildHoverWaterfallSection: HoverDebugSectionBuilder = (context) => {
     const debug = context.terrainWater?.waterfallDebug ?? null;
     const riverMask = context.sample.riverMask?.[context.tileIndex] ?? 0;
+    const lakeId = context.sample.lakeMask?.[context.tileIndex] ?? 0;
+    const oceanMask = context.sample.oceanMask?.[context.tileIndex] ?? 0;
     if (!debug && riverMask <= 0 && (world.tileTypeId[context.tileIndex] ?? -1) !== TILE_TYPE_IDS.water) {
       return null;
     }
@@ -4864,11 +4865,21 @@ export const createThreeTest = (
     const flags = debug ? debug.flags[sampleIdx] ?? 0 : 0;
     const riverSurfaceRaw = context.sample.riverSurface?.[context.tileIndex];
     const riverSurfaceWorld = Number.isFinite(riverSurfaceRaw) ? (riverSurfaceRaw as number) * context.heightScale : Number.NaN;
+    const lakeSurfaceRaw = context.sample.lakeSurface?.[context.tileIndex];
+    const lakeSurfaceWorld = Number.isFinite(lakeSurfaceRaw) ? (lakeSurfaceRaw as number) * context.heightScale : Number.NaN;
     const tileStep = context.sample.riverStepStrength?.[context.tileIndex] ?? Number.NaN;
     const hoverGridX = context.hoverGrid?.x ?? context.tileX + 0.5;
     const hoverGridY = context.hoverGrid?.y ?? context.tileY + 0.5;
     const nearestInstance = findNearestWaterfallInstance(hoverGridX, hoverGridY, context.sample);
-    const lines = [`river=${riverMask > 0 ? "1" : "0"} surfaceY=${formatDebugNumber(riverSurfaceWorld, 2)} tileStep=${formatDebugNumber(tileStep, 2)}`];
+    const inlandDiagnostics = context.terrainWater?.inland?.surface.diagnostics;
+    const lines = [
+      `kind=${lakeId > 0 ? `lake#${lakeId}` : riverMask > 0 ? "river" : oceanMask > 0 ? "ocean" : "none"} riverY=${formatDebugNumber(riverSurfaceWorld, 2)} lakeY=${formatDebugNumber(lakeSurfaceWorld, 2)} tileStep=${formatDebugNumber(tileStep, 2)}`
+    ];
+    if (inlandDiagnostics) {
+      lines.push(
+        `align xz=${formatDebugNumber(inlandDiagnostics.terrainWaterXzErrorMax, 5)} uncovered=${formatDebugNumber(inlandDiagnostics.uncoveredBoundaryLengthWorld, 5)} joinY=${formatDebugNumber(inlandDiagnostics.riverLakeJoinDeltaMax, 3)} orphan=${inlandDiagnostics.orphanMarkerCount}`
+      );
+    }
     if (debug) {
       lines.push(
         `sample=${sampleCol},${sampleRow} step=${formatDebugNumber(debug.stepStrength[sampleIdx] ?? Number.NaN, 2)} best=${formatDebugNumber(debug.bestNeighborDrop[sampleIdx] ?? Number.NaN, 2)} local=${formatDebugNumber(debug.localDrop[sampleIdx] ?? Number.NaN, 2)}`
@@ -4876,7 +4887,9 @@ export const createThreeTest = (
       lines.push(
         `profile immediate=${formatDebugNumber(debug.immediateDrop[sampleIdx] ?? Number.NaN, 2)} total=${formatDebugNumber(debug.totalDrop[sampleIdx] ?? Number.NaN, 2)} vertical=${formatDebugNumber(debug.verticality[sampleIdx] ?? Number.NaN, 2)} run=${formatDebugNumber(debug.runToPool[sampleIdx] ?? Number.NaN, 2)}/${formatDebugNumber(debug.runLimit[sampleIdx] ?? Number.NaN, 2)}`
       );
-      lines.push(`status=${formatWaterfallStatus(flags, debug, sampleIdx)}`);
+      lines.push(
+        `status=${lakeId > 0 && (flags & WATERFALL_DEBUG_FLAG_RIVER) === 0 ? "lake (not procedural river candidate)" : formatWaterfallStatus(flags, debug, sampleIdx)}`
+      );
     } else {
       lines.push("status=no sampled waterfall debug");
     }
@@ -4889,7 +4902,7 @@ export const createThreeTest = (
     }
     if (debug) {
       let summary = `emit=${debug.emittedCount}/${debug.candidateCount} clusters=${debug.clusterCount} lowVert=${debug.lowVerticalityRejectedCount} longRun=${debug.longRunRejectedCount}`;
-      const riverStats = context.terrainWater?.river?.debugRiverDomainStats;
+      const riverStats = context.terrainWater?.inland?.mesh.debugRiverDomainStats;
       if (riverStats) {
         summary += ` anchorMax=${formatDebugNumber(riverStats.waterfallAnchorErrorMax, 3)}`;
       }
@@ -4994,6 +5007,9 @@ export const createThreeTest = (
         canopyCover: world.tileCanopyCover[tileIndex] ?? null,
         stemDensity: world.tileStemDensity[tileIndex] ?? null,
         riverMask: world.tileRiverMask[tileIndex] ?? null,
+        lakeId: world.tileLakeMask[tileIndex] ?? null,
+        lakeSurface: world.tileLakeSurface[tileIndex] ?? null,
+        lakeOutlet: world.tileLakeOutletMask[tileIndex] ?? null,
         oceanMask: world.tileOceanMask[tileIndex] ?? null,
         seaLevel: world.tileSeaLevel[tileIndex] ?? null,
         coastDistance: world.tileCoastDistance[tileIndex] ?? null,
@@ -5004,6 +5020,9 @@ export const createThreeTest = (
         riverBed: world.tileRiverBed[tileIndex] ?? null,
         riverSurface: world.tileRiverSurface[tileIndex] ?? null,
         riverStepStrength: world.tileRiverStepStrength[tileIndex] ?? null,
+        waterfallSource: world.tileWaterfallSourceMask[tileIndex] ?? null,
+        waterfallTarget: world.tileWaterfallTarget[tileIndex] ?? null,
+        waterfallDrop: world.tileWaterfallDrop[tileIndex] ?? null,
         structureMask: world.structureMask[tileIndex] ?? null,
         townId: world.tileTownId[tileIndex] ?? null,
         structure: world.tileStructure[tileIndex] ?? null
@@ -8439,14 +8458,14 @@ export const createThreeTest = (
 
   const getPerfSnapshot = (): ThreeTestPerfSnapshot => {
     const waterfallDebug = lastTerrainWater?.waterfallDebug ?? null;
-    const riverDebug = lastTerrainWater?.river?.debugRiverDomainStats;
+    const riverDebug = lastTerrainWater?.inland?.mesh.debugRiverDomainStats;
     const waterDebugControls = waterSystem.getDebugControls();
-    const waterfallCount = Math.floor((lastTerrainWater?.waterfallInstances?.length ?? 0) / 7);
-    const waterfallWallTriangleCount = Math.floor((lastTerrainWater?.river?.waterfallWallIndices?.length ?? 0) / 3);
+    const waterfallCount = lastTerrainWater?.inland?.surface.waterfalls.length ?? 0;
+    const waterfallWallTriangleCount = Math.floor((lastTerrainWater?.inland?.mesh.waterfallWallIndices?.length ?? 0) / 3);
     const waterfallWallQuadCount =
       riverDebug?.wallQuadCount && Number.isFinite(riverDebug.wallQuadCount)
-        ? Math.max(0, Math.round((lastTerrainWater?.river?.waterfallWallIndices?.length ?? 0) / 6))
-        : Math.max(0, Math.round((lastTerrainWater?.river?.waterfallWallIndices?.length ?? 0) / 6));
+        ? Math.max(0, Math.round((lastTerrainWater?.inland?.mesh.waterfallWallIndices?.length ?? 0) / 6))
+        : Math.max(0, Math.round((lastTerrainWater?.inland?.mesh.waterfallWallIndices?.length ?? 0) / 6));
     const waterfallWallQuadBreakdown = riverDebug?.waterfallWallQuadCounts?.length
       ? riverDebug.waterfallWallQuadCounts
           .slice(0, 8)

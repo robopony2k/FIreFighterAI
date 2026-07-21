@@ -39,6 +39,7 @@ const { resolveAuthoritativeRoadEdgeMask } = await import(
 const allSizes = ["medium", "massive", "colossal", "gigantic", "titanic"];
 const quickSizes = ["medium", "massive"];
 const fullMode = process.argv.includes("--full");
+const hydrologyOnly = process.argv.includes("--hydrology-only");
 const syntheticRoadsOnly = process.argv.includes("--synthetic-roads-only");
 const argValue = (prefix) => process.argv.find((arg) => arg.startsWith(prefix))?.slice(prefix.length);
 const sizeFilter = argValue("--size=");
@@ -2748,7 +2749,7 @@ const runDeterministicHydrologySmoke = async () => {
   };
   const first = await runOnce("MASSIF");
   const second = await runOnce("MASSIF");
-  const fields = ["lakeTiles", "lakeCount", "lakeOutletCount", "waterfallCount", "lakeHash", "waterfallHash"];
+  const fields = ["riverCount", "riverTopologyHash", "lakeTiles", "lakeCount", "lakeOutletCount", "waterfallCount", "lakeHash", "waterfallHash"];
   for (const field of fields) {
     if (first[field] !== second[field]) {
       throw new Error(`[mapgen] hydrology determinism failed for ${field}: ${first[field]} !== ${second[field]}`);
@@ -3100,6 +3101,11 @@ const compareAgainstBaseline = async (results) => {
 };
 
 validateHouseParcels();
+if (hydrologyOnly) {
+  await runDeterministicHydrologySmoke();
+  console.log("[mapgen] focused hydrology regression passed");
+  process.exit(0);
+}
 if (syntheticRoadsOnly) {
   const syntheticDijkstra = runSyntheticDijkstraCases();
   const syntheticRoads = runSyntheticRoadAngleCases();

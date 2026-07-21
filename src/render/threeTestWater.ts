@@ -344,8 +344,8 @@ export class ThreeTestWaterSystem {
     const qualityValue = waterQualityToUniform(this.quality);
     this.oceanHelper.rebuild(baseMesh, water.ocean, qualityValue);
     this.oceanHelper.setDebugControls(this.oceanDebugControls);
-    if (water.river) {
-      this.riverHelper.rebuild(baseMesh, water.river, qualityValue);
+    if (water.inland) {
+      this.riverHelper.rebuild(baseMesh, water.inland.mesh, qualityValue);
     } else {
       this.riverHelper.clear();
     }

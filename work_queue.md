@@ -14,6 +14,27 @@ Touchpoints: `src/systems/roads/`, `src/mapgen/roads.ts`, `src/mapgen/stages/Roa
 Constraints: keep road planning simulation-first, deterministic, mapgen-authored, and independent of render behavior; do not add more production solver layers without first reducing repeated bad connector attempts.
 
 Status: done
+TSK-0163: Unify inland-water rendering and final waterfall classification
+
+Type: bug
+
+Why: River surfaces used a full-resolution contour while terrain cutouts, standing-water lakes, seam walls, and waterfall anchors used different sampled coordinate and height sources, producing visible horizontal/vertical gaps, broken lake joins, and stale waterfall placement after hydrology cleanup.
+
+Done when:
+- [x] Rivers and inland lakes share one full-resolution world-space render contract, contour, material path, and terrain cutout transform while ocean remains separate.
+- [x] Terrain cutouts carry terrain-material skirts that overlap water, and the pale standalone bank-wall render path is removed.
+- [x] Waterfalls are reclassified deterministically from final river/lake surfaces after lake absorption/outlet relocation, with invalid render spans omitted through diagnostics.
+- [x] Accepted waterfalls use typed bank-to-bank spans, split surface seams, and explicit curtains whose endpoints match final source/target surfaces.
+- [x] Terrain water, focused hydrology, FX Lab, render-performance, and runtime-performance regressions pass without changing river/lake topology or authoritative surfaces.
+- [ ] The same deterministic overhead/oblique scene has no pale skirt bands or visible terrain/water cracks after the landward skirt-material correction.
+
+Touchpoints: `src/systems/terrain/rendering/inlandWaterRenderSurface.ts`, `src/systems/terrain/rendering/inlandWaterMeshBuilder.ts`, `src/systems/terrain/sim/finalWaterfallClassifier.ts`, `src/systems/terrain/sim/basinLakeHydrology.ts`, `src/render/threeTestTerrain.ts`, `src/render/terrain/water/`, `scripts/terrain-water-regression.mjs`, `scripts/mapgen-regression.mjs`
+
+Constraints: preserve deterministic river/lake masks, carved elevations, beds, surfaces, share codes, and saves; keep ocean separate; rebuild static geometry only with existing terrain/hydrology invalidation; add no per-frame sampling or draw calls.
+
+Notes: Command-level and deterministic FX Lab validation passed. User-supplied live screenshots showed the pale region was generated closure geometry, not empty space: the skirt used boundary/water UVs, the attempted water apron made that misclassified area larger, and per-segment endpoint resolution left visible seams between otherwise adjacent skirt polygons. The apron is removed. True clipped-polygon perimeter segments are welded through one shared boundary-vertex table before skirt emission, so incident segments share XZ, top/bottom height, and averaged retained-terrain UVs. Skirt faces use both windings only after that material correction and are excluded from top-surface normal averaging; every terrain-cutout endpoint is inserted into the water boundary with affected triangles retriangulated. The obsolete combined standing-water mean-height warning was removed, the rendered contract is reported post-build, and copied cell diagnostics identify lake/outlet/waterfall state. Browser-based repeat inspection remains unavailable because the local in-app browser bridge failed before opening the scene.
+
+Status: in-progress
 TSK-0162: Add tactical watch tower placement and extended upgrades
 
 Type: feature

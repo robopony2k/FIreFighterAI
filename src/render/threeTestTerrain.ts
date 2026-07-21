@@ -64,7 +64,6 @@ import {
   WATERFALL_DEBUG_FLAG_STEP_OK,
   WATERFALL_DEBUG_FLAG_WATER,
   WATERFALL_MIN_DROP_NORM,
-  WATERFALL_TOP_OFFSET,
   WATERFALL_VERTICALITY_MIN,
   buildWaterfallInstances,
   type WaterfallDebugData,
@@ -73,8 +72,7 @@ import {
 import { buildRiverMeshData as buildRiverMeshDataInternal, type RiverWaterData } from "./terrain/water/riverMeshData.js";
 import { buildWaterSurfaceHeights } from "./terrain/water/waterSurfaceHeights.js";
 import {
-  createRiverSpaceTransform,
-  validateRiverSpaceTransform
+  createRiverSpaceTransform
 } from "./terrain/water/waterSampling.js";
 import {
   buildRapidMapTexture,
@@ -93,6 +91,15 @@ import {
   buildScorchedGroundMaskTexture
 } from "../systems/terrain/rendering/scorchedGroundMaterial.js";
 import { createTerrainRenderCoordinateMapper } from "../systems/terrain/rendering/terrainRenderCoordinates.js";
+import {
+  buildInlandWaterRenderSurface,
+  type InlandWaterRenderSurface
+} from "../systems/terrain/rendering/inlandWaterRenderSurface.js";
+import {
+  buildInlandWaterTerrainSkirtQuad,
+  insetInlandWaterTerrainUv,
+  weldInlandWaterTerrainSkirtEdges
+} from "../systems/terrain/rendering/inlandWaterMeshBuilder.js";
 import { buildSparseRoadOverlayGeometry } from "../systems/terrain/rendering/sparseRoadOverlayGeometry.js";
 import {
   finalizeInstancedMeshBounds,
@@ -238,74 +245,6 @@ const darken = (color: RGB, amount: number): RGB => mixRgb(color, { r: 0, g: 0, 
 const getCoastProfileValue = (values: readonly number[], distance: number): number =>
   values[Math.max(0, Math.min(values.length - 1, distance - 1))] ?? values[values.length - 1] ?? 0;
 
-const pointToSegmentDistance2D = (
-  px: number,
-  py: number,
-  ax: number,
-  ay: number,
-  bx: number,
-  by: number
-): number => {
-  const abX = bx - ax;
-  const abY = by - ay;
-  const abLenSq = abX * abX + abY * abY;
-  if (abLenSq <= 1e-8) {
-    return Math.hypot(px - ax, py - ay);
-  }
-  const t = clamp(((px - ax) * abX + (py - ay) * abY) / abLenSq, 0, 1);
-  const qx = ax + abX * t;
-  const qy = ay + abY * t;
-  return Math.hypot(px - qx, py - qy);
-};
-
-const computeBoundaryMismatchStats = (
-  aEdges: ArrayLike<number>,
-  bEdges: ArrayLike<number>
-): { mean: number; max: number; countA: number; countB: number } => {
-  const countA = Math.floor(aEdges.length / 4);
-  const countB = Math.floor(bEdges.length / 4);
-  if (countA <= 0 || countB <= 0) {
-    return { mean: 0, max: 0, countA, countB };
-  }
-  let sum = 0;
-  let total = 0;
-  let max = 0;
-  const accumulate = (src: ArrayLike<number>, srcCount: number, dst: ArrayLike<number>, dstCount: number): void => {
-    for (let i = 0; i < srcCount; i += 1) {
-      const base = i * 4;
-      const mx = (src[base] + src[base + 2]) * 0.5;
-      const my = (src[base + 1] + src[base + 3]) * 0.5;
-      let best = Number.POSITIVE_INFINITY;
-      for (let j = 0; j < dstCount; j += 1) {
-        const d = j * 4;
-        const dist = pointToSegmentDistance2D(mx, my, dst[d], dst[d + 1], dst[d + 2], dst[d + 3]);
-        if (dist < best) {
-          best = dist;
-          if (best <= 1e-4) {
-            break;
-          }
-        }
-      }
-      if (!Number.isFinite(best)) {
-        continue;
-      }
-      sum += best;
-      total += 1;
-      if (best > max) {
-        max = best;
-      }
-    }
-  };
-  accumulate(aEdges, countA, bEdges, countB);
-  accumulate(bEdges, countB, aEdges, countA);
-  return {
-    mean: total > 0 ? sum / total : 0,
-    max,
-    countA,
-    countB
-  };
-};
-
 const HEIGHT_SAMPLE_NODE_WEIGHT = 0.85;
 const HEIGHT_SAMPLE_SPIKE_THRESHOLD = 0.014;
 const HEIGHT_SAMPLE_SPIKE_CLAMP_MARGIN = 0.003;
@@ -445,9 +384,10 @@ export type OceanWaterData = {
 
 export type TerrainWaterData = {
   ocean: OceanWaterData;
-  river?: RiverWaterData;
-  // Packed x,z,top,drop,dirX,dirZ,width; top/drop are world-space offsets relative to `level`.
-  waterfallInstances?: Float32Array;
+  inland?: {
+    surface: InlandWaterRenderSurface;
+    mesh: RiverWaterData;
+  };
   waterfallDebug?: WaterfallDebugData;
 };
 
@@ -1366,6 +1306,7 @@ export type TerrainRenderSurface = {
   sampledRiverCoverage?: Float32Array;
   sampledLakeSurface?: Float32Array;
   sampledLakeCoverage?: Float32Array;
+  inlandWater?: InlandWaterRenderSurface;
   riverRenderDomain?: RiverRenderDomain;
   structureTopHeightsWorld?: Float32Array;
   coastHeightDeltaStats?: {
@@ -1527,7 +1468,7 @@ const buildWaterSupportMask = (
 const buildStandingWaterRenderData = (
   oceanRatios: WaterSampleRatios,
   oceanSupportMask: Uint8Array,
-  sampledLakeCoverage: Float32Array | undefined
+  _sampledLakeCoverage: Float32Array | undefined
 ): { ratios: WaterSampleRatios; supportMask: Uint8Array; lakeCoverage: Float32Array } => {
   const total = oceanSupportMask.length;
   const water = new Float32Array(total);
@@ -1538,72 +1479,16 @@ const buildStandingWaterRenderData = (
   for (let i = 0; i < total; i += 1) {
     const oceanWater = clamp(oceanRatios.water[i] ?? 0, 0, 1);
     const oceanRatio = clamp(oceanRatios.ocean[i] ?? 0, 0, 1);
-    const lakeRatio = clamp(sampledLakeCoverage?.[i] ?? 0, 0, 1);
-    lakeCoverage[i] = lakeRatio;
-    water[i] = Math.max(oceanWater, lakeRatio);
+    lakeCoverage[i] = 0;
+    water[i] = oceanWater;
     ocean[i] = oceanRatio;
-    supportMask[i] = oceanSupportMask[i] > 0 || lakeRatio >= WATER_ALPHA_MIN_RATIO ? 1 : 0;
+    supportMask[i] = oceanSupportMask[i] > 0 ? 1 : 0;
   }
   return {
     ratios: { water, ocean, river },
     supportMask,
     lakeCoverage
   };
-};
-
-const buildStaticWaterfallInstancesFromSample = (
-  sample: TerrainSample,
-  surface: TerrainRenderSurface,
-  waterLevelWorld: number,
-  minDropWorld: number
-): Float32Array | undefined => {
-  const sourceMask = sample.waterfallSourceMask;
-  const targetMap = sample.waterfallTarget;
-  const dropMap = sample.waterfallDrop;
-  if (!sourceMask || !targetMap || !dropMap) {
-    return undefined;
-  }
-  const instances: number[] = [];
-  const cols = sample.cols;
-  const rows = sample.rows;
-  const worldTileX = surface.width / Math.max(1, cols);
-  const worldTileZ = surface.depth / Math.max(1, rows);
-  const halfWidth = Math.max(0.22, Math.min(worldTileX, worldTileZ) * 0.46);
-  for (let idx = 0; idx < sourceMask.length; idx += 1) {
-    if (sourceMask[idx] === 0) {
-      continue;
-    }
-    const target = targetMap[idx] ?? -1;
-    if (target < 0 || target >= sourceMask.length) {
-      continue;
-    }
-    const dropWorld = (dropMap[idx] ?? 0) * surface.heightScale;
-    if (!Number.isFinite(dropWorld) || dropWorld < minDropWorld) {
-      continue;
-    }
-    const sx = idx % cols;
-    const sy = Math.floor(idx / cols);
-    const tx = target % cols;
-    const ty = Math.floor(target / cols);
-    let dirX = tx - sx;
-    let dirZ = ty - sy;
-    const dirLen = Math.hypot(dirX, dirZ);
-    if (dirLen <= 1e-5) {
-      continue;
-    }
-    dirX /= dirLen;
-    dirZ /= dirLen;
-    const wx = surface.toWorldX(sx + 0.5);
-    const wz = surface.toWorldZ(sy + 0.5);
-    const sampleX = clamp((sx + 0.5) / surface.step, 0, surface.sampleCols - 1);
-    const sampleY = clamp((sy + 0.5) / surface.step, 0, surface.sampleRows - 1);
-    const sampleCol = Math.round(sampleX);
-    const sampleRow = Math.round(sampleY);
-    const sampleIdx = sampleRow * surface.sampleCols + sampleCol;
-    const top = (surface.waterSurfaceHeights[sampleIdx] ?? 0) + WATERFALL_TOP_OFFSET;
-    instances.push(wx, wz, top, dropWorld, dirX, dirZ, halfWidth);
-  }
-  return instances.length > 0 ? new Float32Array(instances) : undefined;
 };
 
 const buildWaterDomainMapTexture = (
@@ -1824,13 +1709,15 @@ const applyRiverTerrainTriangleCutout = (
   geometry: THREE.BufferGeometry,
   sampleCols: number,
   sampleRows: number,
-  riverDomain: RiverRenderDomain | undefined
+  riverDomain: RiverRenderDomain | undefined,
+  inlandWater: InlandWaterRenderSurface | undefined
 ): void => {
   if (!riverDomain || sampleCols < 2 || sampleRows < 2) {
     return;
   }
   riverDomain.cutoutBoundaryVertexHeights = undefined;
   riverDomain.cutoutBoundaryWallEdges = undefined;
+  riverDomain.cutoutBoundarySkirtEdges = undefined;
   const index = geometry.getIndex();
   if (!index) {
     return;
@@ -2034,9 +1921,19 @@ const applyRiverTerrainTriangleCutout = (
 
   const outPositions: number[] = [];
   const outUvs: number[] = [];
-  type BoundarySegment = { ax: number; ay: number; az: number; bx: number; by: number; bz: number };
+  type BoundarySegment = {
+    ax: number;
+    ay: number;
+    az: number;
+    au: number;
+    av: number;
+    bx: number;
+    by: number;
+    bz: number;
+    bu: number;
+    bv: number;
+  };
   const boundarySegments: BoundarySegment[] = [];
-  const boundaryEdgeMap = new Map<string, { count: number; ax: number; ay: number; az: number; bx: number; by: number; bz: number; boundary: boolean }>();
   const boundaryQuant = 8192;
   const boundaryVertexKey = (v: CutVertex): string => `${Math.round(v.ex * boundaryQuant)},${Math.round(v.ey * boundaryQuant)}`;
   const directBoundaryVertexHeightByKey = new Map<string, number>();
@@ -2050,38 +1947,12 @@ const applyRiverTerrainTriangleCutout = (
       directBoundaryVertexHeightByKey.set(key, v.y);
     }
   };
-  const registerBoundaryEdge = (a: CutVertex, b: CutVertex): void => {
-    const keyA = boundaryVertexKey(a);
-    const keyB = boundaryVertexKey(b);
-    if (keyA === keyB) {
-      return;
-    }
-    const forward = keyA < keyB;
-    const edgeKey = forward ? `${keyA}|${keyB}` : `${keyB}|${keyA}`;
-    const ax = forward ? a.ex : b.ex;
-    const ay = forward ? a.ey : b.ey;
-    const az = forward ? a.y : b.y;
-    const bx = forward ? b.ex : a.ex;
-    const by = forward ? b.ey : a.ey;
-    const bz = forward ? b.y : a.y;
-    const boundary = a.boundary && b.boundary;
-    const existing = boundaryEdgeMap.get(edgeKey);
-    if (!existing) {
-      boundaryEdgeMap.set(edgeKey, { count: 1, ax, ay, az, bx, by, bz, boundary });
-      return;
-    }
-    existing.count += 1;
-    existing.boundary = existing.boundary || boundary;
-    if (boundary) {
-      if (az > existing.az) {
-        existing.az = az;
-      }
-      if (bz > existing.bz) {
-        existing.bz = bz;
-      }
-    }
-  };
-  const registerBoundarySegment = (a: CutVertex, b: CutVertex): void => {
+  const registerBoundarySegment = (
+    a: CutVertex,
+    b: CutVertex,
+    retainedInteriorU: number,
+    retainedInteriorV: number
+  ): void => {
     if (!a.boundary || !b.boundary) {
       return;
     }
@@ -2092,13 +1963,19 @@ const applyRiverTerrainTriangleCutout = (
     if (dx * dx + dy * dy <= 1e-10) {
       return;
     }
+    const uvA = insetInlandWaterTerrainUv([a.u, a.v], [retainedInteriorU, retainedInteriorV], 0.45);
+    const uvB = insetInlandWaterTerrainUv([b.u, b.v], [retainedInteriorU, retainedInteriorV], 0.45);
     boundarySegments.push({
       ax: a.ex,
       ay: a.ey,
       az: a.y,
+      au: uvA[0],
+      av: uvA[1],
       bx: b.ex,
       by: b.ey,
-      bz: b.y
+      bz: b.y,
+      bu: uvB[0],
+      bv: uvB[1]
     });
   };
   const triCount = Math.floor(src.length / 3);
@@ -2132,10 +2009,14 @@ const applyRiverTerrainTriangleCutout = (
     if (changed) {
       cutCount += 1;
     }
+    const retainedVertices = clipped.filter((vertex) => !vertex.boundary);
+    const retainedUvSource = retainedVertices.length > 0 ? retainedVertices : clipped;
+    const retainedInteriorU = retainedUvSource.reduce((sum, vertex) => sum + vertex.u, 0) / retainedUvSource.length;
+    const retainedInteriorV = retainedUvSource.reduce((sum, vertex) => sum + vertex.v, 0) / retainedUvSource.length;
     for (let e = 0; e < clipped.length; e += 1) {
       const vA = clipped[e];
       const vB = clipped[(e + 1) % clipped.length];
-      registerBoundarySegment(vA, vB);
+      registerBoundarySegment(vA, vB, retainedInteriorU, retainedInteriorV);
     }
     const base = clipped[0];
     for (let t = 1; t < clipped.length - 1; t += 1) {
@@ -2168,20 +2049,34 @@ const applyRiverTerrainTriangleCutout = (
         p1.u, p1.v,
         p2.u, p2.v
       );
-      registerBoundaryEdge(base, p1);
-      registerBoundaryEdge(p1, p2);
-      registerBoundaryEdge(p2, base);
     }
   }
   const cutBoundaryEdges: number[] = [];
   const cutBoundaryWallEdges: number[] = [];
-  boundaryEdgeMap.forEach((record) => {
-    if (record.count !== 1 || !record.boundary) {
-      return;
-    }
-    cutBoundaryEdges.push(record.ax, record.ay, record.bx, record.by);
-    cutBoundaryWallEdges.push(record.ax, record.ay, record.az, record.bx, record.by, record.bz);
-  });
+  const cutBoundarySkirtEdges: number[] = [];
+  const weldedSkirtEdges = weldInlandWaterTerrainSkirtEdges(
+    boundarySegments.map((segment) => ({
+      ax: segment.ax,
+      ay: segment.ay,
+      topA: segment.az,
+      uA: segment.au,
+      vA: segment.av,
+      bx: segment.bx,
+      by: segment.by,
+      topB: segment.bz,
+      uB: segment.bu,
+      vB: segment.bv
+    })),
+    boundaryQuant
+  );
+  for (const edge of weldedSkirtEdges) {
+    cutBoundaryEdges.push(edge.ax, edge.ay, edge.bx, edge.by);
+    cutBoundaryWallEdges.push(edge.ax, edge.ay, edge.topA, edge.bx, edge.by, edge.topB);
+    cutBoundarySkirtEdges.push(
+      edge.ax, edge.ay, edge.topA, edge.uA, edge.vA,
+      edge.bx, edge.by, edge.topB, edge.uB, edge.vB
+    );
+  }
   riverDomain.cutoutBoundaryEdges =
     cutBoundaryEdges.length >= 4
       ? new Float32Array(cutBoundaryEdges)
@@ -2192,6 +2087,49 @@ const applyRiverTerrainTriangleCutout = (
     cutBoundaryWallEdges.length >= 6
       ? new Float32Array(cutBoundaryWallEdges)
       : undefined;
+  riverDomain.cutoutBoundarySkirtEdges =
+    cutBoundarySkirtEdges.length >= 10
+      ? new Float32Array(cutBoundarySkirtEdges)
+      : undefined;
+  // Skirts are part of the terrain mesh and use the exact clipped contour.
+  // Their bottoms sit just below the authoritative inland-water surface, so
+  // normal depth precision cannot expose a crack between separate meshes.
+  const packedSkirtEdges = riverDomain.cutoutBoundarySkirtEdges;
+  if (inlandWater && packedSkirtEdges && packedSkirtEdges.length >= 10) {
+    const overlapWorld = Math.max(0.003, inlandWater.heightScale * 0.00015);
+    for (let i = 0; i + 9 < packedSkirtEdges.length; i += 10) {
+      const ax = packedSkirtEdges[i];
+      const ay = packedSkirtEdges[i + 1];
+      const topA = packedSkirtEdges[i + 2];
+      const uvA: [number, number] = [packedSkirtEdges[i + 3], packedSkirtEdges[i + 4]];
+      const bx = packedSkirtEdges[i + 5];
+      const by = packedSkirtEdges[i + 6];
+      const topB = packedSkirtEdges[i + 7];
+      const uvB: [number, number] = [packedSkirtEdges[i + 8], packedSkirtEdges[i + 9]];
+      const waterA = inlandWater.sampleWaterWorldYAtEdge(ax, ay);
+      const waterB = inlandWater.sampleWaterWorldYAtEdge(bx, by);
+      const bottomA = Number.isFinite(waterA) ? Math.min(topA - overlapWorld, waterA - overlapWorld) : topA - overlapWorld;
+      const bottomB = Number.isFinite(waterB) ? Math.min(topB - overlapWorld, waterB - overlapWorld) : topB - overlapWorld;
+      const worldAx = inlandWater.edgeToWorldX(ax);
+      const worldAz = inlandWater.edgeToWorldZ(ay);
+      const worldBx = inlandWater.edgeToWorldX(bx);
+      const worldBz = inlandWater.edgeToWorldZ(by);
+      const skirt = buildInlandWaterTerrainSkirtQuad({
+        worldAx,
+        worldAz,
+        worldBx,
+        worldBz,
+        topA,
+        topB,
+        bottomA,
+        bottomB,
+        uvA,
+        uvB
+      });
+      outPositions.push(...skirt.positions);
+      outUvs.push(...skirt.uvs);
+    }
+  }
   if (boundarySegments.length > 0 && riverDomain.cutoutBoundaryEdges.length >= 4) {
     const quantScale = 8192;
     const keyOf = (x: number, y: number): string => `${Math.round(x * quantScale)},${Math.round(y * quantScale)}`;
@@ -2266,17 +2204,6 @@ const applyRiverTerrainTriangleCutout = (
       riverDomain.cutoutBoundaryVertexHeights = new Float32Array(packed);
     }
   }
-  if (riverDomain.debugStats) {
-    const mismatch = computeBoundaryMismatchStats(riverDomain.cutoutBoundaryEdges, riverDomain.boundaryEdges);
-    riverDomain.debugStats.cutoutBoundaryEdgeCount = mismatch.countA;
-    riverDomain.debugStats.boundaryMismatchMean = mismatch.mean;
-    riverDomain.debugStats.boundaryMismatchMax = mismatch.max;
-    if (DEBUG_TERRAIN_RENDER) {
-      console.log(
-        `[threeTestTerrain] river boundary mismatch cutoutEdges=${mismatch.countA} domainEdges=${mismatch.countB} mean=${mismatch.mean.toFixed(4)} max=${mismatch.max.toFixed(4)}`
-      );
-    }
-  }
   if (outPositions.length < 9) {
     return;
   }
@@ -2304,7 +2231,7 @@ const buildRiverMeshData = (
   depth: number,
   waterLevelWorld: number,
   riverDomain: RiverRenderDomain | undefined,
-  waterfallInstances?: Float32Array
+  inlandWater?: InlandWaterRenderSurface
 ): RiverWaterData | undefined =>
   buildRiverMeshDataInternal(
     sample,
@@ -2314,7 +2241,7 @@ const buildRiverMeshData = (
     depth,
     waterLevelWorld,
     riverDomain,
-    waterfallInstances,
+    inlandWater,
     {
       riverSurfaceBankClearance: RIVER_SURFACE_BANK_CLEARANCE,
       waterSurfaceLiftRiver: WATER_SURFACE_LIFT_RIVER
@@ -2715,13 +2642,20 @@ const smoothTerrainSharedVertexNormals = (geometry: THREE.BufferGeometry): void 
     return;
   }
   const keyScale = 100000;
+  const positionKeyScale = 10000;
   const accum = new Map<string, { x: number; y: number; z: number }>();
   for (let i = 0; i < positionAttr.count; i += 1) {
-    const key = `${Math.round(uvAttr.getX(i) * keyScale)},${Math.round(uvAttr.getY(i) * keyScale)}`;
-    const entry = accum.get(key);
     const nx = normalAttr.getX(i);
     const ny = normalAttr.getY(i);
     const nz = normalAttr.getZ(i);
+    // Terrain skirts intentionally contain opposing faces so steep banks are
+    // visible from either side. Do not average their near-horizontal normals
+    // together or the opposing vectors cancel to zero.
+    if (ny < 0.2) {
+      continue;
+    }
+    const key = `${Math.round(positionAttr.getX(i) * positionKeyScale)},${Math.round(positionAttr.getY(i) * positionKeyScale)},${Math.round(positionAttr.getZ(i) * positionKeyScale)}|${Math.round(uvAttr.getX(i) * keyScale)},${Math.round(uvAttr.getY(i) * keyScale)}`;
+    const entry = accum.get(key);
     if (entry) {
       entry.x += nx;
       entry.y += ny;
@@ -2731,7 +2665,7 @@ const smoothTerrainSharedVertexNormals = (geometry: THREE.BufferGeometry): void 
     }
   }
   for (let i = 0; i < positionAttr.count; i += 1) {
-    const key = `${Math.round(uvAttr.getX(i) * keyScale)},${Math.round(uvAttr.getY(i) * keyScale)}`;
+    const key = `${Math.round(positionAttr.getX(i) * positionKeyScale)},${Math.round(positionAttr.getY(i) * positionKeyScale)},${Math.round(positionAttr.getZ(i) * positionKeyScale)}|${Math.round(uvAttr.getX(i) * keyScale)},${Math.round(uvAttr.getY(i) * keyScale)}`;
     const entry = accum.get(key);
     if (!entry) {
       continue;
@@ -2990,7 +2924,46 @@ export const prepareTerrainRenderSurface = (
     undefined,
     "mean"
   );
-  const riverRenderDomain = buildRiverRenderDomain(sample, waterId);
+  const inlandWater = buildInlandWaterRenderSurface({
+    cols,
+    rows,
+    width,
+    depth,
+    heightScale,
+    terrainSampleCols: sampleCols,
+    terrainSampleRows: sampleRows,
+    terrainHeights: finalSampleHeights,
+    riverMask: sample.riverMask,
+    lakeMask: sample.lakeMask,
+    oceanMask: sample.oceanMask,
+    riverSurface: sample.riverSurface,
+    riverBed: sample.riverBed,
+    riverStepStrength: sample.riverStepStrength,
+    lakeSurface: sample.lakeSurface,
+    waterfallSourceMask: sample.waterfallSourceMask,
+    waterfallTarget: sample.waterfallTarget
+  });
+  const riverRenderDomain = buildRiverRenderDomain({ ...sample, inlandWater }, waterId);
+  if (inlandWater && riverRenderDomain) {
+    let uncoveredBoundaryLengthWorld = 0;
+    for (let i = 0; i + 3 < riverRenderDomain.boundaryEdges.length; i += 4) {
+      const ax = riverRenderDomain.boundaryEdges[i];
+      const ay = riverRenderDomain.boundaryEdges[i + 1];
+      const bx = riverRenderDomain.boundaryEdges[i + 2];
+      const by = riverRenderDomain.boundaryEdges[i + 3];
+      if (
+        Number.isFinite(inlandWater.sampleWaterWorldYAtEdge(ax, ay)) &&
+        Number.isFinite(inlandWater.sampleWaterWorldYAtEdge(bx, by))
+      ) {
+        continue;
+      }
+      uncoveredBoundaryLengthWorld += Math.hypot(
+        inlandWater.edgeToWorldX(bx) - inlandWater.edgeToWorldX(ax),
+        inlandWater.edgeToWorldZ(by) - inlandWater.edgeToWorldZ(ay)
+      );
+    }
+    inlandWater.diagnostics.uncoveredBoundaryLengthWorld = uncoveredBoundaryLengthWorld;
+  }
   const sampledRiverCoverage = buildSampleMaskCoverage(
     sample,
     riverRenderDomain?.renderSupport ?? riverMask ?? undefined,
@@ -3079,20 +3052,6 @@ export const prepareTerrainRenderSurface = (
     shoreTerrainHeightRelativeToWater,
     oceanRatio: oceanRenderRatios.ocean
   });
-  if (DEBUG_TERRAIN_RENDER && riverRenderDomain) {
-    const transform = createRiverSpaceTransform(
-      riverRenderDomain.cols,
-      riverRenderDomain.rows,
-      width,
-      depth,
-      sampleCols,
-      sampleRows
-    );
-    const check = validateRiverSpaceTransform(transform, sampleCols, sampleRows);
-    console.log(
-      `[threeTestTerrain] river xform validation worldRoundTripMax=${check.worldRoundTripMax.toFixed(5)} sampleRoundTripMax=${check.sampleRoundTripMax.toFixed(5)}`
-    );
-  }
   const heightAtSample = (x: number, y: number): number => {
     const clampedX = Math.max(0, Math.min(sampleCols - 1, x));
     const clampedY = Math.max(0, Math.min(sampleRows - 1, y));
@@ -3182,6 +3141,7 @@ export const prepareTerrainRenderSurface = (
     sampledRiverCoverage,
     sampledLakeSurface,
     sampledLakeCoverage,
+    inlandWater,
     riverRenderDomain,
     structureTopHeightsWorld: structureTopHeights,
     coastHeightDeltaStats,
@@ -3700,7 +3660,7 @@ export const buildTerrainMesh = (
     }
   }
   if (!debugRenderOptions?.disableRiverCutout) {
-    applyRiverTerrainTriangleCutout(geometry, sampleCols, sampleRows, riverRenderDomain);
+    applyRiverTerrainTriangleCutout(geometry, sampleCols, sampleRows, riverRenderDomain, surface.inlandWater);
   }
   geometry.computeVertexNormals();
   if (!useLegacyFacetedTerrain) {
@@ -4609,11 +4569,7 @@ export const buildTerrainMesh = (
     );
     applyShoreTransitionTerrainMaterial(material, { shoreTransitionMap });
     const waterHeights = new Float32Array(normalizedWaterHeights.length);
-    let validationCount = 0;
-    let terrainWaterMean = 0;
-    let surfaceWaterMean = 0;
     for (let i = 0; i < normalizedWaterHeights.length; i += 1) {
-      const ratio = ratios.water[i] ?? 0;
       const riverRatio = clamp(ratios.river[i] ?? 0, 0, 1);
       const lakeRatio = clamp(surface.sampledLakeCoverage?.[i] ?? 0, 0, 1);
       const lakeRenderRatio = clamp(standingWater.lakeCoverage[i] ?? 0, 0, 1);
@@ -4665,24 +4621,6 @@ export const buildTerrainMesh = (
       }
       const offsetY = surfaceWorld - waterLevelWorld + lift;
       waterHeights[i] = offsetY;
-      if (ratio < WATER_ALPHA_MIN_RATIO || inlandRenderRatio >= RIVER_RATIO_MIN) {
-        continue;
-      }
-      if (DEBUG_TERRAIN_RENDER) {
-        validationCount += 1;
-        terrainWaterMean += (sampleHeights[i] ?? 0) * heightScale;
-        surfaceWaterMean += waterLevelWorld + offsetY;
-      }
-    }
-    if (DEBUG_TERRAIN_RENDER && validationCount > 0) {
-      terrainWaterMean /= validationCount;
-      surfaceWaterMean /= validationCount;
-      const delta = Math.abs(surfaceWaterMean - terrainWaterMean);
-      if (delta > 0.35) {
-        console.warn(
-          `[threeTestTerrain] Water/terrain mean Y mismatch: delta=${delta.toFixed(3)} terrain=${terrainWaterMean.toFixed(3)} surface=${surfaceWaterMean.toFixed(3)} samples=${validationCount}`
-        );
-      }
     }
     const waterfallMinDrop = Math.max(0.12, WATERFALL_MIN_DROP_NORM * heightScale);
     const waterfallRiverDomain: WaterfallRiverDomainInput | undefined = riverRenderDomain
@@ -4708,15 +4646,8 @@ export const buildTerrainMesh = (
       depth,
       waterfallRiverDomain
     );
-    const staticWaterfallInstances = buildStaticWaterfallInstancesFromSample(
-      sample,
-      surface,
-      waterLevelWorld,
-      waterfallMinDrop
-    );
-    const waterfallInstances = staticWaterfallInstances ?? waterfall.instances;
-    if (staticWaterfallInstances) {
-      waterfall.debug.emittedCount = Math.floor(staticWaterfallInstances.length / 7);
+    if (surface.inlandWater) {
+      waterfall.debug.emittedCount = surface.inlandWater.waterfalls.length;
       waterfall.debug.candidateCount = Math.max(waterfall.debug.candidateCount, waterfall.debug.emittedCount);
       waterfall.debug.clusterCount = Math.max(waterfall.debug.clusterCount, waterfall.debug.emittedCount);
     }
@@ -4728,8 +4659,14 @@ export const buildTerrainMesh = (
       depth,
       waterLevelWorld,
       riverRenderDomain,
-      waterfallInstances
+      surface.inlandWater
     );
+    if (DEBUG_TERRAIN_RENDER && surface.inlandWater) {
+      const diagnostics = surface.inlandWater.diagnostics;
+      console.log(
+        `[threeTestTerrain] rendered inland-water contract xz=${diagnostics.terrainWaterXzErrorMax.toExponential(2)} uncovered=${diagnostics.uncoveredBoundaryLengthWorld.toFixed(4)} joinY=${diagnostics.riverLakeJoinDeltaMax.toFixed(4)} waterfallY=${diagnostics.waterfallLipRunoutErrorMax.toExponential(2)} orphan=${diagnostics.orphanMarkerCount} skirtTopology=welded-strip skirtUv=retained-terrain skirtFaces=double-unsmoothed`
+      );
+    }
     water = {
       ocean: {
         mask: standingWaterMaskTexture,
@@ -4747,8 +4684,7 @@ export const buildTerrainMesh = (
         depth,
         heights: waterHeights
       },
-      river,
-      waterfallInstances,
+      inland: river && surface.inlandWater ? { surface: surface.inlandWater, mesh: river } : undefined,
       waterfallDebug: waterfall.debug
     };
   }

@@ -639,3 +639,18 @@ Status: Deprecated as of July 11, 2026.
 - Full-width dirt/foundation slabs are replaced by independently grounded concrete piers at each structural leg.
 - Future tower gameplay belongs in fire simulation placement/construction boundaries; tower meshes and radius overlays remain rendering-only consumers.
 - Centre-tile-only slope checks, arbitrary tower rotation, duplicate model footing pads, sub-day construction, and maintenance-only upgrades are also obsolete. Placement now validates the shared four-leg footprint, towers are grid-aligned with one pier system, and each build or upgrade takes 90 days while upgrades may start in any phase.
+
+## Separate Inland-Water Render Paths
+
+Status: Deprecated as of July 16, 2026.
+
+- Inland lakes no longer render through the ocean/standing-water mesh; rivers and lakes share one full-resolution inland-water contour and surface contract.
+- The pale standalone river bank-wall mesh is replaced by terrain-material skirts attached to the clipped terrain geometry and overlapping the inland-water surface.
+- Packed relative-height waterfall instances, disabled river-waterfall geometry, outer-bank waterfall wall matching, and the standalone waterfall helper are obsolete.
+- Pre-carve waterfall feature labels are no longer authoritative after hydrology cleanup; final markers and lip/runout labels are rebuilt from final river/lake surfaces after lake absorption and outlet relocation.
+
+Migration guidance:
+
+1. Build terrain cutouts, inland-water geometry, lake joins, and waterfall anchors from `InlandWaterRenderSurface` transforms and world-space heights.
+2. Pass typed `InlandWaterfallSpan` data to the inland mesh builder; do not reconstruct drops from normalized terrain or packed arrays.
+3. Keep ocean rendering separate and allow only the controlled river-mouth overlap between ocean and inland-water domains.

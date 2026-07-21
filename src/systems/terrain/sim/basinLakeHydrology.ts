@@ -9,6 +9,7 @@ import {
   classifyHydrologyFeatures,
   type HydrologyFeatureClassification
 } from "./hydrologyFeatureClassifier.js";
+import { classifyFinalWaterfalls } from "./finalWaterfallClassifier.js";
 import { buildLakeSpillContour } from "./lakeSpillContour.js";
 import { solveDepressionBasins, type DepressionBasin } from "./depressionBasinSolver.js";
 import type {
@@ -16,9 +17,7 @@ import type {
   StaticHydrologyDebugHooks,
   StaticHydrologyRejectReason,
   StaticHydrologyRejectSummary,
-  StaticHydrologyResult,
-  StaticHydrologyWaterfall,
-  StaticHydrologyWaterfallRejectReason
+  StaticHydrologyResult
 } from "../types/staticHydrologyTypes.js";
 import type { LakeOverflowRiverPath } from "./lakeOverflowRiverRouting.js";
 
@@ -31,9 +30,6 @@ const NEIGHBORS_4 = [
 
 const MIN_VISIBLE_LAKE_OUTLET_TILES = 4;
 const MAX_LAKE_LAND_COVERAGE = 0.12;
-const LAKE_OUTLET_WATERFALL_MIN_DROP_SCALE = 0.5;
-const LAKE_OUTLET_WATERFALL_MIN_DROP_FLOOR = 0.01;
-
 type AcceptedBasinLake = StaticHydrologyLake & {
   basin: DepressionBasin;
 };
@@ -612,6 +608,18 @@ const stampClassifiedHydrologyFeatures = (
 ): Promise<void> => {
   const run = async (): Promise<void> => {
   const lakeById = new Map<number, AcceptedBasinLake>(lakes.map((lake) => [lake.id, lake]));
+  // These provisional markers are used only to preserve the established carve
+  // profile. Exported waterfall metadata is rebuilt from the final surfaces.
+  const provisionalLipMask = new Uint8Array(riverMask.length);
+  const provisionalRunoutMask = new Uint8Array(riverMask.length);
+  for (const candidate of classification.waterfallCandidates) {
+    if (candidate.sourceIndex >= 0 && candidate.sourceIndex < provisionalLipMask.length) {
+      provisionalLipMask[candidate.sourceIndex] = 1;
+    }
+    if (candidate.targetIndex >= 0 && candidate.targetIndex < provisionalRunoutMask.length) {
+      provisionalRunoutMask[candidate.targetIndex] = 1;
+    }
+  }
 
   for (const route of classification.routes) {
     debug?.checkCancelled?.();
@@ -646,8 +654,8 @@ const stampClassifiedHydrologyFeatures = (
         : routeElevations[pathIndex - 1] ?? lake.surfaceLevel;
       const localDrop = Math.max(0, upstreamElevation - targetElevation);
       const featureCode = classification.featureClass[idx] ?? HYDROLOGY_FEATURE_CLASS_CODE.none;
-      const isWaterfallRunout = featureCode === HYDROLOGY_FEATURE_CLASS_CODE["waterfall-runout"];
-      const isWaterfallLip = featureCode === HYDROLOGY_FEATURE_CLASS_CODE["waterfall-lip"];
+      const isWaterfallRunout = provisionalRunoutMask[idx] > 0;
+      const isWaterfallLip = provisionalLipMask[idx] > 0;
       const isRiverMouth = featureCode === HYDROLOGY_FEATURE_CLASS_CODE["river-mouth"];
       const isChannel = featureCode === HYDROLOGY_FEATURE_CLASS_CODE.channel;
       const minimumSegmentDrop = isWaterfallRunout
@@ -700,99 +708,6 @@ const stampClassifiedHydrologyFeatures = (
     }
     await debug?.yieldIfNeeded?.();
   }
-  };
-  return run();
-};
-
-const farEnoughFromWaterfalls = (
-  sourceIdx: number,
-  cols: number,
-  accepted: StaticHydrologyWaterfall[],
-  spacing: number
-): boolean => {
-  const x = sourceIdx % cols;
-  const y = Math.floor(sourceIdx / cols);
-  for (const waterfall of accepted) {
-    const ox = waterfall.sourceIndex % cols;
-    const oy = Math.floor(waterfall.sourceIndex / cols);
-    if (Math.hypot(x - ox, y - oy) < spacing) {
-      return false;
-    }
-  }
-  return true;
-};
-
-const addWaterfall = (
-  waterfall: StaticHydrologyWaterfall,
-  cols: number,
-  settings: MapGenSettings,
-  accepted: StaticHydrologyWaterfall[],
-  minDrop = settings.waterfallMinDrop
-): StaticHydrologyWaterfallRejectReason | null => {
-  if (waterfall.drop < minDrop) {
-    return "drop-small";
-  }
-  if (waterfall.flowScore < settings.waterfallMinFlow) {
-    return "flow-small";
-  }
-  if (!farEnoughFromWaterfalls(waterfall.sourceIndex, cols, accepted, settings.waterfallMinSpacingTiles)) {
-    return "spacing";
-  }
-  if (accepted.length >= settings.waterfallMaxPerRiver) {
-    return "max-count";
-  }
-  accepted.push(waterfall);
-  return null;
-};
-
-const buildWaterfalls = (
-  classification: HydrologyFeatureClassification,
-  cols: number,
-  oceanMask: Uint8Array,
-  oceanDistance: Uint16Array,
-  settings: MapGenSettings,
-  debug?: StaticHydrologyDebugHooks
-): Promise<{ waterfalls: StaticHydrologyWaterfall[]; rejected: number }> => {
-  const run = async (): Promise<{ waterfalls: StaticHydrologyWaterfall[]; rejected: number }> => {
-  const waterfalls: StaticHydrologyWaterfall[] = [];
-  let rejected = 0;
-
-  for (const waterfall of classification.waterfallCandidates) {
-    debug?.checkCancelled?.();
-    const avoidCoast = waterfall.targetIndex < 0 ||
-      waterfall.targetIndex >= oceanMask.length ||
-      oceanMask[waterfall.targetIndex] > 0 ||
-      (oceanDistance[waterfall.targetIndex] ?? 0) < settings.waterfallAvoidCoastTiles;
-    if (avoidCoast) {
-      rejected += 1;
-      await debug?.emit?.({ kind: "hydrology:waterfall", accepted: false, waterfall, reason: "coast-proximity" });
-      continue;
-    }
-    if (!settings.waterfallAllowLakeOutlet && waterfall.lakeId > 0) {
-      rejected += 1;
-      await debug?.emit?.({ kind: "hydrology:waterfall", accepted: false, waterfall, reason: "drop-small" });
-      continue;
-    }
-    const reason = addWaterfall(
-      waterfall,
-      cols,
-      settings,
-      waterfalls,
-      waterfall.lakeId > 0
-        ? Math.max(
-            LAKE_OUTLET_WATERFALL_MIN_DROP_FLOOR,
-            settings.waterfallMinDrop * LAKE_OUTLET_WATERFALL_MIN_DROP_SCALE
-          )
-        : settings.waterfallMinDrop
-    );
-    await debug?.emit?.({ kind: "hydrology:waterfall", accepted: !reason, waterfall, reason: reason ?? undefined });
-    if (reason) {
-      rejected += 1;
-    }
-    await debug?.yieldIfNeeded?.();
-  }
-
-  return { waterfalls, rejected };
   };
   return run();
 };
@@ -985,15 +900,35 @@ export const buildBasinLakeHydrology = async (input: {
     settings
   );
 
-  const waterfallBuild = await buildWaterfalls(
-    hydrologyClassification,
+  const finalWaterfallClassification = classifyFinalWaterfalls({
     cols,
+    rows,
+    routes: hydrologyClassification.routes,
+    lakes,
+    riverMask,
     oceanMask,
+    lakeMask,
+    lakeOutletMask,
+    riverSurface: state.tileRiverSurface,
+    lakeSurface,
+    flow: solve.flow,
     oceanDistance,
-    settings,
-    debug
-  );
-  for (const waterfall of waterfallBuild.waterfalls) {
+    baseFeatureClass: hydrologyClassification.featureClass,
+    settings
+  });
+  hydrologyClassification.featureClass = finalWaterfallClassification.featureClass;
+  hydrologyClassification.featureCounts = finalWaterfallClassification.featureCounts;
+  for (const decision of finalWaterfallClassification.decisions) {
+    debug?.checkCancelled?.();
+    await debug?.emit?.({
+      kind: "hydrology:waterfall",
+      accepted: decision.accepted,
+      waterfall: decision.waterfall,
+      reason: decision.reason
+    });
+    await debug?.yieldIfNeeded?.();
+  }
+  for (const waterfall of finalWaterfallClassification.waterfalls) {
     waterfallSourceMask[waterfall.sourceIndex] = 1;
     waterfallTarget[waterfall.sourceIndex] = waterfall.targetIndex;
     waterfallDrop[waterfall.sourceIndex] = waterfall.drop;
@@ -1017,8 +952,8 @@ export const buildBasinLakeHydrology = async (input: {
     hydrologyFeatureClass: hydrologyClassification.featureClass,
     hydrologyFeatureCounts: hydrologyClassification.featureCounts,
     lakes: lakes.map(({ basin, ...lake }) => lake),
-    waterfalls: waterfallBuild.waterfalls,
+    waterfalls: finalWaterfallClassification.waterfalls,
     rejectedLakeCandidates,
-    rejectedWaterfallCandidates: waterfallBuild.rejected
+    rejectedWaterfallCandidates: finalWaterfallClassification.decisions.length - finalWaterfallClassification.waterfalls.length
   };
 };

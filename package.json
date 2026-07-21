@@ -28,6 +28,7 @@
     "terrain:eval": "npm run build && node scripts/terrain-eval.mjs",
     "terrain:eval:quick": "npm run build && node scripts/terrain-eval.mjs --size=massive --samples=1",
     "terrain:grounding-regression": "npm run build && node scripts/terrain-grounding-regression.mjs",
+    "terrain:water-regression": "npm run build && node scripts/terrain-water-regression.mjs",
     "terrain:fast-preview": "npm run build && node scripts/fast-terrain-preview-regression.mjs",
     "coastline:regression": "npm run build && node scripts/coastline-render-regression.mjs",
     "fx-lab:regression": "npm run build && node scripts/fx-lab-showcase-regression.mjs",
