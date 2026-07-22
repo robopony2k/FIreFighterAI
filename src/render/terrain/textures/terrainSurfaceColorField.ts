@@ -1,5 +1,9 @@
 import { FUEL_PROFILES } from "../../../core/config.js";
-import { TILE_ID_TO_TYPE, TILE_TYPE_IDS } from "../../../core/state.js";
+import { COAST_CLASS_NONE, TILE_ID_TO_TYPE, TILE_TYPE_IDS } from "../../../core/state.js";
+import {
+  resolveCoastalSeabedColor,
+  type TerrainColorTriplet
+} from "../../../systems/terrain/rendering/coastalSeabedColor.js";
 import { applyFuelScorchColor } from "./fuelScorchColor.js";
 
 type Rgb = { r: number; g: number; b: number };
@@ -46,6 +50,8 @@ export type BuildTerrainSurfaceColorFieldOptions = {
   heightScale: number;
   sampleHeights: Float32Array;
   sampleTypes: Uint8Array;
+  sampleCoastClass?: Uint8Array;
+  sampleCoastDistance?: Uint16Array;
   riverRatio: Float32Array | null;
   oceanRatio: Float32Array | null;
   sampledErosionWear: Float32Array | null;
@@ -285,6 +291,8 @@ export const buildTerrainSurfaceColorField = (options: BuildTerrainSurfaceColorF
     heightScale,
     sampleHeights,
     sampleTypes,
+    sampleCoastClass,
+    sampleCoastDistance,
     riverRatio,
     oceanRatio,
     sampledErosionWear,
@@ -333,8 +341,11 @@ export const buildTerrainSurfaceColorField = (options: BuildTerrainSurfaceColorF
       const idx = tileY * cols + tileX;
       const sampleIndex = row * sampleCols + col;
       const typeId = sampleTypes[sampleIndex] ?? grassId;
+      const coastClass = sampleCoastClass?.[sampleIndex] ?? COAST_CLASS_NONE;
+      const coastDistance = sampleCoastDistance?.[sampleIndex] ?? 0;
       const debugScalar = debugScalarField ? debugScalarField[idx] : undefined;
       let colorType = typeId;
+      let coastalSeabedColor: [number, number, number] | null = null;
       const localOceanRatio = oceanRatio ? clamp(oceanRatio[sampleIndex] ?? 0, 0, 1) : typeId === waterId ? 1 : 0;
       const localRiverRatio = riverRatio ? clamp(riverRatio[sampleIndex] ?? 0, 0, 1) : 0;
       const rawErosionWear = sampledErosionWear ? sampledErosionWear[sampleIndex] : 0;
@@ -385,11 +396,23 @@ export const buildTerrainSurfaceColorField = (options: BuildTerrainSurfaceColorF
             colorType = grassId;
           }
         } else if (typeId === waterId) {
-          colorType = riverDominant ? floodplainId : beachId;
+          if (riverDominant) {
+            colorType = floodplainId;
+          } else if (localOceanRatio >= deps.waterAlphaMinRatio) {
+            coastalSeabedColor = resolveCoastalSeabedColor({
+              coastClass,
+              coastDistance,
+              beachColor: (deps.palette[beachId] ?? deps.palette[grassId] ?? [0, 0, 0]) as TerrainColorTriplet,
+              rockyColor: (deps.palette[rockyId] ?? deps.palette[grassId] ?? [0, 0, 0]) as TerrainColorTriplet,
+              waterColor: (deps.palette[waterId] ?? deps.palette[grassId] ?? [0, 0, 0]) as TerrainColorTriplet
+            });
+          } else {
+            colorType = beachId;
+          }
         }
       }
 
-      let color = deps.palette[colorType] ?? deps.palette[grassId] ?? [0, 0, 0];
+      let color = coastalSeabedColor ?? deps.palette[colorType] ?? deps.palette[grassId] ?? [0, 0, 0];
       if (debugScalarField && Number.isFinite(debugScalar)) {
         color = scalarDebugColor(debugScalar as number, sample.debugScalarMode);
       } else if (!debugTypeColors && !debugScalarField && roadId !== null && typeId === roadId) {

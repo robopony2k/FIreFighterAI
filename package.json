@@ -30,6 +30,7 @@
     "terrain:grounding-regression": "npm run build && node scripts/terrain-grounding-regression.mjs",
     "terrain:water-regression": "npm run build && node scripts/terrain-water-regression.mjs",
     "terrain:fast-preview": "npm run build && node scripts/fast-terrain-preview-regression.mjs",
+    "shoreline:authority-regression": "npm run build && node scripts/shoreline-authority-regression.mjs",
     "coastline:regression": "npm run build && node scripts/coastline-render-regression.mjs",
     "fx-lab:regression": "npm run build && node scripts/fx-lab-showcase-regression.mjs",
     "mapgen:diagnostics": "npm run build && node scripts/mapgen-diagnostics-regression.mjs",

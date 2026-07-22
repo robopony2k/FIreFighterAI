@@ -1,6 +1,10 @@
 import * as THREE from "three";
 import { FUEL_PROFILES } from "../../../core/config.js";
-import { TILE_ID_TO_TYPE, TILE_TYPE_IDS } from "../../../core/state.js";
+import { COAST_CLASS_NONE, TILE_ID_TO_TYPE, TILE_TYPE_IDS } from "../../../core/state.js";
+import {
+  resolveCoastalSeabedColor,
+  type TerrainColorTriplet
+} from "../../../systems/terrain/rendering/coastalSeabedColor.js";
 import { applyFuelScorchColor } from "./fuelScorchColor.js";
 
 type Rgb = { r: number; g: number; b: number };
@@ -46,6 +50,8 @@ export type TileTextureUpdateTarget = {
 export type TileTextureBuildOptions = {
   updateTarget?: TileTextureUpdateTarget;
   includeDynamicFireScorch?: boolean;
+  sampleCoastClass?: Uint8Array;
+  sampleCoastDistance?: Uint16Array;
 };
 
 export type TileTextureColorMode = "legacy" | "mask";
@@ -130,16 +136,29 @@ const copyTextureToWorkingRows = (source: Uint8Array, sampleCols: number, sample
 
 const normalizeBuildOptions = (
   options?: TileTextureUpdateTarget | TileTextureBuildOptions
-): Required<Pick<TileTextureBuildOptions, "includeDynamicFireScorch">> & Pick<TileTextureBuildOptions, "updateTarget"> => {
+): Required<Pick<TileTextureBuildOptions, "includeDynamicFireScorch">> &
+  Pick<TileTextureBuildOptions, "updateTarget" | "sampleCoastClass" | "sampleCoastDistance"> => {
   if (!options) {
-    return { updateTarget: undefined, includeDynamicFireScorch: true };
+    return {
+      updateTarget: undefined,
+      includeDynamicFireScorch: true,
+      sampleCoastClass: undefined,
+      sampleCoastDistance: undefined
+    };
   }
   if ("sourceTexture" in options) {
-    return { updateTarget: options, includeDynamicFireScorch: true };
+    return {
+      updateTarget: options,
+      includeDynamicFireScorch: true,
+      sampleCoastClass: undefined,
+      sampleCoastDistance: undefined
+    };
   }
   return {
     updateTarget: options.updateTarget,
-    includeDynamicFireScorch: options.includeDynamicFireScorch ?? true
+    includeDynamicFireScorch: options.includeDynamicFireScorch ?? true,
+    sampleCoastClass: options.sampleCoastClass,
+    sampleCoastDistance: options.sampleCoastDistance
   };
 };
 
@@ -174,6 +193,8 @@ export const buildTileTexture = (
   const buildOptions = normalizeBuildOptions(options);
   const updateTarget = buildOptions.updateTarget;
   const includeDynamicFireScorch = buildOptions.includeDynamicFireScorch;
+  const sampleCoastClass = buildOptions.sampleCoastClass;
+  const sampleCoastDistance = buildOptions.sampleCoastDistance;
   const { cols, rows } = sample;
   const treeTypes = sample.treeTypes;
   const riverMask = sample.riverMask;
@@ -251,6 +272,8 @@ export const buildTileTexture = (
       const idx = tileY * cols + tileX;
       const sampleIndex = row * sampleCols + col;
       const typeId = sampleTypes[sampleIndex] ?? grassId;
+      const coastClass = sampleCoastClass?.[sampleIndex] ?? COAST_CLASS_NONE;
+      const coastDistance = sampleCoastDistance?.[sampleIndex] ?? 0;
       const debugScalar = debugScalarField ? debugScalarField[idx] : undefined;
       const localWaterRatio = waterRatio ? clamp(waterRatio[sampleIndex] ?? 0, 0, 1) : typeId === waterId ? 1 : 0;
       const localOceanRatio = oceanRatio ? clamp(oceanRatio[sampleIndex] ?? 0, 0, 1) : localWaterRatio;
@@ -293,6 +316,7 @@ export const buildTileTexture = (
         localRiverCoverage >= 0.1 ||
         localRiverRatio >= Math.max(0.08, localOceanRatio * 0.7);
       let colorType = typeId;
+      let coastalSeabedColor: [number, number, number] | null = null;
       if (!debugTypeColors && !debugScalarField) {
         if (typeId === forestId) {
           colorType = grassId;
@@ -309,12 +333,20 @@ export const buildTileTexture = (
         } else if (typeId === waterId) {
           if (riverDominant) {
             colorType = floodplainId;
+          } else if (localOceanRatio >= deps.waterAlphaMinRatio) {
+            coastalSeabedColor = resolveCoastalSeabedColor({
+              coastClass,
+              coastDistance,
+              beachColor: (palette[beachId] ?? palette[grassId] ?? [0, 0, 0]) as TerrainColorTriplet,
+              rockyColor: (palette[TILE_TYPE_IDS.rocky] ?? palette[grassId] ?? [0, 0, 0]) as TerrainColorTriplet,
+              waterColor: (palette[waterId] ?? palette[grassId] ?? [0, 0, 0]) as TerrainColorTriplet
+            });
           } else {
             colorType = beachId;
           }
         }
       }
-      let color = palette[colorType] ?? palette[grassId];
+      let color = coastalSeabedColor ?? palette[colorType] ?? palette[grassId];
       if (debugScalarField && Number.isFinite(debugScalar)) {
         color = scalarDebugColor(debugScalar as number, sample.debugScalarMode);
       } else if (!debugTypeColors && !debugScalarField && roadId !== null && typeId === roadId) {

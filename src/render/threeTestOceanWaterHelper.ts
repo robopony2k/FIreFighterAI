@@ -9,6 +9,11 @@ import {
   createOceanSurfaceMaterial,
   type OceanUniforms
 } from "./water/ocean/oceanSurfaceShader.js";
+import {
+  DEFAULT_OCEAN_SURFACE_CONTEXT,
+  oceanSurfaceContextsEqual,
+  type OceanSurfaceContext
+} from "./water/ocean/oceanSurfaceContext.js";
 
 const disposeMaterial = (material: THREE.Material | THREE.Material[]): void => {
   if (Array.isArray(material)) {
@@ -110,6 +115,7 @@ export class ThreeTestOceanWaterHelper {
   private readonly backdropShoreSdf: THREE.DataTexture;
   private readonly backdropShoreTransitionMap: THREE.DataTexture;
   private debugControls: OceanWaterDebugControls = { ...DEFAULT_OCEAN_WATER_DEBUG_CONTROLS };
+  private surfaceContext: OceanSurfaceContext = { ...DEFAULT_OCEAN_SURFACE_CONTEXT };
 
   constructor(options: ThreeTestOceanWaterHelperOptions) {
     this.scene = options.scene;
@@ -292,6 +298,17 @@ export class ThreeTestOceanWaterHelper {
           this.debugControls.enableShoreWaveModulation ? 1 : 0,
           0
         )
+      },
+      u_waveDirection: {
+        value: new THREE.Vector2(this.surfaceContext.windDirX, this.surfaceContext.windDirY)
+      },
+      u_oceanContext: {
+        value: new THREE.Vector4(
+          this.surfaceContext.waveEnergy01,
+          this.surfaceContext.foamEnergy01,
+          this.surfaceContext.shallowClarity01,
+          this.surfaceContext.rainIntensity01
+        )
       }
     };
   }
@@ -417,6 +434,22 @@ export class ThreeTestOceanWaterHelper {
   public setLightDirectionFromKeyLight(): void {
     this.forEachUniformSet((uniforms) => {
       uniforms.u_lightDir.value.copy(this.keyLight.position).normalize();
+    });
+  }
+
+  public setOceanSurfaceContext(context: OceanSurfaceContext): void {
+    if (oceanSurfaceContextsEqual(this.surfaceContext, context)) {
+      return;
+    }
+    this.surfaceContext = { ...context };
+    this.forEachUniformSet((uniforms) => {
+      uniforms.u_waveDirection.value.set(context.windDirX, context.windDirY);
+      uniforms.u_oceanContext.value.set(
+        context.waveEnergy01,
+        context.foamEnergy01,
+        context.shallowClarity01,
+        context.rainIntensity01
+      );
     });
   }
 

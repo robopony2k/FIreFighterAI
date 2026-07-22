@@ -654,3 +654,49 @@ Migration guidance:
 1. Build terrain cutouts, inland-water geometry, lake joins, and waterfall anchors from `InlandWaterRenderSurface` transforms and world-space heights.
 2. Pass typed `InlandWaterfallSpan` data to the inland mesh builder; do not reconstruct drops from normalized terrain or packed arrays.
 3. Keep ocean rendering separate and allow only the controlled river-mouth overlap between ocean and inland-water domains.
+
+## Post-Sea-Level Shoreline Topology and Elevation Rewrites
+
+Status: Deprecated as of July 22, 2026.
+
+- The downstream shoreline phase no longer recomputes ocean surface level, displaces or smooths the ocean mask, expands flooding, or stamps fixed beach and shelf elevation bands after Water has solved the coast.
+- Water now exclusively owns resolved sea level and edge-connected ocean membership; coast metadata, rivers, lakes, biomes, roads, finalization, and rendering consume that boundary.
+- Road-lake shoulder grading no longer raises authoritative water cells while terracing nearby land.
+- Regenerating an existing share code may intentionally change baked terrain and static hydrology, while already-saved worlds retain their stored terrain.
+
+Migration guidance:
+
+1. Add future beach, headland, shelf, and cliff morphology to upstream terrain generation before Water calibration.
+2. Keep `terrain:shoreline` limited to coast distance and beach/cliff/shelf classification.
+3. Do not repair shoreline visuals by changing sea level, ocean membership, lake beds, or river topology downstream.
+
+## Dry-Beach Coloring for Authoritative Ocean Cells
+
+Status: Deprecated as of July 22, 2026.
+
+- Ocean shelf and deep-ocean terrain no longer reuse the same dry-beach ground color as playable beach land.
+- Authoritative shelf cells remain Water and retain their six-cell shoaling metadata, but their sandy seabed cools and darkens seaward beneath a minimum translucent water layer.
+- Dry beach color remains reserved for dry beach cells; river and lake ground-color behavior is unchanged.
+- The ocean renderer no longer estimates its surface from the upper quartile of seabed elevations when Water's authoritative sea-level field is available.
+
+Migration guidance:
+
+1. Derive submerged seabed color from sampled coast class and distance without adding a simulation tile type.
+2. Keep minimum shelf-water coverage gated to the positive, seaward side of the signed shoreline.
+3. Do not narrow the visual beach by moving the ocean mask or reclassifying authoritative water as land.
+4. Render the ocean at Water's supplied sea level; retain seabed estimation only for legacy or synthetic samples without that field.
+
+## Static Weather-Insensitive Ocean Shelf Treatment
+
+Status: Deprecated as of July 22, 2026.
+
+- Authoritative shelf water no longer uses one fixed opacity floor and near-shore tint regardless of conditions.
+- The existing ocean shader now keeps clear-weather shallows visibly blue-green and submerged, then adjusts wave energy, foam, coverage, and clarity from cached wind and active-rain context.
+- Seasons continue to own palette and lighting changes; they do not independently create rough water.
+- The replacement adds no surf mesh, particle layer, texture sampler, render pass, or per-frame terrain sampling.
+
+Migration guidance:
+
+1. Feed normalized rendering context through the water-system boundary rather than importing climate state into the ocean renderer.
+2. Keep shelf coverage gated by positive shoreline distance, seaward transition support, and authoritative ocean coverage.
+3. Extend the existing signed-distance breaker and swash logic instead of adding a separate shoreline FX renderer.

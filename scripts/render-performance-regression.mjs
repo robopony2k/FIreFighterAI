@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
+import { fileURLToPath } from "node:url";
 import * as THREE from "three";
 import {
   TERRAIN_RENDER_CHUNK_TILE_SPAN,
@@ -236,5 +238,18 @@ const coalescedShadowState = shadowController.update({
 });
 assert.equal(coalescedShadowState.blendActive, true, "the latest sun direction should blend after the hold");
 assert.equal(coalescedShadowState.activeLightCount, 2);
+
+const oceanShaderSource = await readFile(
+  fileURLToPath(new URL("../src/render/water/ocean/oceanSurfaceShader.ts", import.meta.url)),
+  "utf8"
+);
+const oceanContextSource = await readFile(
+  fileURLToPath(new URL("../src/render/water/ocean/oceanSurfaceContext.ts", import.meta.url)),
+  "utf8"
+);
+assert.equal((oceanShaderSource.match(/uniform sampler2D/g) ?? []).length, 11, "contextual surf must not add ocean texture samplers");
+assert.match(oceanShaderSource, /return 8\.0;/, "fast water quality must retain eight broad wave iterations");
+assert.match(oceanShaderSource, /breakerGate/, "fast water quality must retain the SDF breaker band");
+assert.doesNotMatch(oceanContextSource, /from ["']three["']|new THREE\.|Texture|Mesh|requestAnimationFrame/, "ocean context policy must remain allocation-light and renderer-independent");
 
 console.log("3D renderer performance regression passed.");

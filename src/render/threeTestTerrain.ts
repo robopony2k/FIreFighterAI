@@ -788,6 +788,28 @@ export const computeWaterLevel = (
     return null;
   }
   const { elevations } = sample;
+  const seaLevel = sample.seaLevel;
+  if (seaLevel && seaLevel.length === elevations.length) {
+    let authoritativeLevelSum = 0;
+    let authoritativeLevelCount = 0;
+    for (let i = 0; i < elevations.length; i += 1) {
+      const isOceanTile = oceanMask
+        ? oceanMask[i] > 0 && !(riverMask && riverMask[i])
+        : tileTypes?.[i] === waterId && !(riverMask && riverMask[i]);
+      const localSeaLevel = seaLevel[i];
+      if (!isOceanTile || !Number.isFinite(localSeaLevel)) {
+        continue;
+      }
+      authoritativeLevelSum += clamp(localSeaLevel, 0, 1);
+      authoritativeLevelCount += 1;
+    }
+    if (authoritativeLevelCount > 0) {
+      return authoritativeLevelSum / authoritativeLevelCount;
+    }
+  }
+
+  // Compatibility fallback for legacy and synthetic render samples that do not
+  // carry Water's authoritative sea-level field.
   const bins = 32;
   const counts = new Uint32Array(bins);
   const sums = new Float32Array(bins);
@@ -2555,6 +2577,8 @@ const buildTerrainSurfaceColorFieldOptions = (
   heightScale: surface.heightScale,
   sampleHeights: surface.sampleHeights,
   sampleTypes: surface.sampleTypes,
+  sampleCoastClass: surface.sampleCoastClass,
+  sampleCoastDistance: surface.sampleCoastDistance,
   riverRatio: surface.waterRatios.river,
   oceanRatio: surface.waterRatios.ocean,
   sampledErosionWear: surface.sampledErosionWear ?? null,
@@ -3701,7 +3725,11 @@ export const buildTerrainMesh = (
     surface.sampledLakeCoverage ?? null,
     sampledRiverStepStrength,
     sample.debugTypeColors ?? false,
-    useLegacyFacetedTerrain ? "legacy" : "mask"
+    useLegacyFacetedTerrain ? "legacy" : "mask",
+    {
+      sampleCoastClass: surface.sampleCoastClass,
+      sampleCoastDistance: surface.sampleCoastDistance
+    }
   );
   const mountainRockMaskTexture =
     !sample.debugTypeColors && !sample.debugScalarField

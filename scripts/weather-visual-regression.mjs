@@ -14,6 +14,9 @@ const { sampleSeasonalAtmosphereVisualState } = await import(
   distImport(["systems", "climate", "rendering", "seasonalAtmosphereVisualState.js"])
 );
 const { buildSeasonalSkyState } = await import(distImport(["render", "seasonalSky.js"]));
+const { resolveOceanSurfaceContext } = await import(
+  distImport(["render", "water", "ocean", "oceanSurfaceContext.js"])
+);
 
 const baseInput = {
   careerDay: 286.5,
@@ -43,6 +46,23 @@ const visualDifferentRainSeed = sampleSeasonalWeatherVisualState({
 });
 assert.notEqual(visualA.weatherSeed, visualDifferentRainSeed.weatherSeed, "rain event seed should vary weather noise seed");
 assert.notEqual(visualA.rainTimeSeconds, visualDifferentRainSeed.rainTimeSeconds, "rain event seed should vary rain phase");
+
+const calmOcean = resolveOceanSurfaceContext({ windDx: 0, windDy: 0, windStrength01: 0, rainIntensity01: 0 });
+const windyOcean = resolveOceanSurfaceContext({ windDx: 3, windDy: 4, windStrength01: 0.75, rainIntensity01: 0 });
+const rainyOcean = resolveOceanSurfaceContext({ windDx: 3, windDy: 4, windStrength01: 0.75, rainIntensity01: 0.8 });
+assert.ok(Math.abs(Math.hypot(calmOcean.windDirX, calmOcean.windDirY) - 1) < 1e-12, "calm ocean fallback wind must be normalized");
+assert.ok(Math.abs(windyOcean.windDirX - 0.6) < 1e-12 && Math.abs(windyOcean.windDirY - 0.8) < 1e-12, "ocean wind direction must be normalized");
+assert.ok(windyOcean.waveEnergy01 > calmOcean.waveEnergy01, "wind must increase ocean wave energy");
+assert.ok(windyOcean.foamEnergy01 > calmOcean.foamEnergy01, "wind must increase ocean foam energy");
+assert.ok(windyOcean.shallowClarity01 < calmOcean.shallowClarity01, "wind must reduce shallow clarity");
+assert.ok(rainyOcean.waveEnergy01 > windyOcean.waveEnergy01, "active rain must increase wave energy");
+assert.ok(rainyOcean.foamEnergy01 > windyOcean.foamEnergy01, "active rain must increase foam energy");
+assert.ok(rainyOcean.shallowClarity01 < windyOcean.shallowClarity01, "active rain must reduce shallow clarity");
+assert.deepEqual(
+  resolveOceanSurfaceContext({ windDx: 0.2, windDy: -0.8, windStrength01: 0.4, rainIntensity01: 0, seasonT01: 0.1 }),
+  resolveOceanSurfaceContext({ windDx: 0.2, windDy: -0.8, windStrength01: 0.4, rainIntensity01: 0, seasonT01: 0.8 }),
+  "season alone must not change ocean wave context"
+);
 
 const skySlow = buildSeasonalSkyState({
   ...baseInput,

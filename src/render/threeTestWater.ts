@@ -8,6 +8,7 @@ import {
 import type { WaterEnvironmentPalette } from "./environmentPalette.js";
 import { ThreeTestOceanWaterHelper } from "./threeTestOceanWaterHelper.js";
 import { ThreeTestRiverWaterHelper } from "./threeTestRiverWaterHelper.js";
+import type { OceanSurfaceContext } from "./water/ocean/oceanSurfaceContext.js";
 import {
   DEFAULT_TERRAIN_WATER_DEBUG_CONTROLS,
   normalizeTerrainWaterDebugControls,
@@ -284,6 +285,10 @@ export class ThreeTestWaterSystem {
   public setLightDirectionFromKeyLight(): void {
     this.oceanHelper.setLightDirectionFromKeyLight();
     this.riverHelper.setLightDirectionFromKeyLight();
+  }
+
+  public setOceanSurfaceContext(context: OceanSurfaceContext): void {
+    this.oceanHelper.setOceanSurfaceContext(context);
   }
 
   public clear(): void {

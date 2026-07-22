@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
+import { fileURLToPath } from "node:url";
 import { createInitialState, TILE_TYPE_IDS } from "../dist/core/state.js";
 import { TREE_TYPE_IDS } from "../dist/core/types.js";
 import {
@@ -12,6 +14,7 @@ import {
   formatFxLabMapPreset,
   parseFxLabMapPreset
 } from "../dist/render/fxLab/showcaseMapPreset.js";
+import { resolveOceanSurfaceContext } from "../dist/render/water/ocean/oceanSurfaceContext.js";
 
 const grid = { cols: FX_LAB_SHOWCASE_SIZE, rows: FX_LAB_SHOWCASE_SIZE, totalTiles: FX_LAB_SHOWCASE_SIZE ** 2 };
 const createWorld = () => createInitialState(18032026, grid);
@@ -90,5 +93,17 @@ for (const mutation of [
 ]) {
   assert.throws(() => parseFxLabMapPreset(JSON.stringify({ ...preset, ...mutation }), preset, map.protectedMask));
 }
+
+const clearOcean = resolveOceanSurfaceContext({ windDx: 0.7, windDy: -0.3, windStrength01: 0.55, rainIntensity01: 0 });
+const rainEventOcean = resolveOceanSurfaceContext({ windDx: 0.7, windDy: -0.3, windStrength01: 0.55, rainIntensity01: 0.8 });
+assert.ok(rainEventOcean.waveEnergy01 > clearOcean.waveEnergy01, "FX Lab rain event must strengthen ocean waves");
+assert.ok(rainEventOcean.foamEnergy01 > clearOcean.foamEnergy01, "FX Lab rain event must strengthen shoreline foam");
+assert.ok(rainEventOcean.shallowClarity01 < clearOcean.shallowClarity01, "FX Lab rain event must reduce shallow clarity");
+const fxLabControllerSource = await readFile(
+  fileURLToPath(new URL("../src/render/fxLab/controller.ts", import.meta.url)),
+  "utf8"
+);
+assert.match(fxLabControllerSource, /setOceanSurfaceContext\(resolveOceanSurfaceContext\(/, "FX Lab must feed weather into the ocean shader");
+assert.match(fxLabControllerSource, /rainIntensity01: rainActive \? rainIntensity : 0/, "non-rain FX Lab modes must not inherit storm wave energy");
 
 console.log("FX Lab showcase regression passed.");

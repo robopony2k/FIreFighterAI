@@ -26,13 +26,56 @@ Done when:
 - [x] Waterfalls are reclassified deterministically from final river/lake surfaces after lake absorption/outlet relocation, with invalid render spans omitted through diagnostics.
 - [x] Accepted waterfalls use typed bank-to-bank spans, split surface seams, and explicit curtains whose endpoints match final source/target surfaces.
 - [x] Terrain water, focused hydrology, FX Lab, render-performance, and runtime-performance regressions pass without changing river/lake topology or authoritative surfaces.
-- [ ] The same deterministic overhead/oblique scene has no pale skirt bands or visible terrain/water cracks after the landward skirt-material correction.
+- [x] The same deterministic overhead/oblique scene has no pale skirt bands or visible terrain/water cracks after the landward skirt-material correction.
 
 Touchpoints: `src/systems/terrain/rendering/inlandWaterRenderSurface.ts`, `src/systems/terrain/rendering/inlandWaterMeshBuilder.ts`, `src/systems/terrain/sim/finalWaterfallClassifier.ts`, `src/systems/terrain/sim/basinLakeHydrology.ts`, `src/render/threeTestTerrain.ts`, `src/render/terrain/water/`, `scripts/terrain-water-regression.mjs`, `scripts/mapgen-regression.mjs`
 
 Constraints: preserve deterministic river/lake masks, carved elevations, beds, surfaces, share codes, and saves; keep ocean separate; rebuild static geometry only with existing terrain/hydrology invalidation; add no per-frame sampling or draw calls.
 
-Notes: Command-level and deterministic FX Lab validation passed. User-supplied live screenshots showed the pale region was generated closure geometry, not empty space: the skirt used boundary/water UVs, the attempted water apron made that misclassified area larger, and per-segment endpoint resolution left visible seams between otherwise adjacent skirt polygons. The apron is removed. True clipped-polygon perimeter segments are welded through one shared boundary-vertex table before skirt emission, so incident segments share XZ, top/bottom height, and averaged retained-terrain UVs. Skirt faces use both windings only after that material correction and are excluded from top-surface normal averaging; every terrain-cutout endpoint is inserted into the water boundary with affected triangles retriangulated. The obsolete combined standing-water mean-height warning was removed, the rendered contract is reported post-build, and copied cell diagnostics identify lake/outlet/waterfall state. Browser-based repeat inspection remains unavailable because the local in-app browser bridge failed before opening the scene.
+Notes: Command-level and deterministic FX Lab validation passed. User-supplied live screenshots showed the pale region was generated closure geometry, not empty space: the skirt used boundary/water UVs, the attempted water apron made that misclassified area larger, and per-segment endpoint resolution left visible seams between otherwise adjacent skirt polygons. The apron is removed. True clipped-polygon perimeter segments are welded through one shared boundary-vertex table before skirt emission, so incident segments share XZ, top/bottom height, and averaged retained-terrain UVs. Skirt faces use both windings only after that material correction and are excluded from top-surface normal averaging; every terrain-cutout endpoint is inserted into the water boundary with affected triangles retriangulated. The obsolete combined standing-water mean-height warning was removed, the rendered contract is reported post-build, and copied cell diagnostics identify lake/outlet/waterfall state. TSK-0164 stabilized the upstream sea-level and ocean-mask inputs, and the user confirmed the deterministic live scene no longer shows the pale inland-water skirt/gap defect.
+
+Status: done
+TSK-0164: Make Sea Level authoritative across shoreline and rivers
+
+Type: bug
+
+Why: The downstream shoreline phase recomputed sea level, changed ocean membership, and stamped a uniform coast profile after Water, so Rivers/Lakes consumed a different coastline and exposed disconnected-looking land and river mouths.
+
+Done when:
+- [x] Water's sea-level and ocean-mask arrays remain byte-identical through coast metadata and Rivers/Lakes.
+- [x] The shoreline phase changes no elevations and derives only coast distance and beach/cliff/shelf classifications.
+- [x] Finalization and road-lake terracing do not reshape authoritative coast or inland-water cells.
+- [x] The supplied share-code regression verifies water classification, ocean-bound overflow termination, unstamped probe profiles, and non-dominant coast-stage timing.
+- [x] Focused hydrology, coastline rendering, inland-water, TypeScript, and deterministic mapgen regressions pass with reviewed baselines.
+
+Touchpoints: `src/mapgen/stages/`, `src/mapgen/runtime.ts`, `scripts/shoreline-authority-regression.mjs`, `scripts/mapgen-regression.mjs`, `docs/`
+
+Constraints: preserve public share-code/save schemas and static runtime hydrology; allow intentional regenerated-map drift; add no renderer changes, runtime helper layers, per-frame work, or new terrain controls.
+
+Notes: The supplied colossal map reduced `terrain:shoreline` from roughly 12.3 seconds to 20.1 milliseconds in the final focused run. Upstream beach/cliff morphology, stronger failed/short overflow routing, and expanded waterfall derivation remain separate follow-on work; do not restore downstream coast sculpting to address them.
+
+Status: done
+TSK-0165: Align beach appearance with gameplay semantics
+
+Type: bug
+
+Why: The terrain renderer colored authoritative ocean shelf cells with the same palette as dry playable beach, making a two-cell land beach look roughly eight cells wide and contradicting Water hover diagnostics.
+
+Done when:
+- [x] Dry beach coloring is reserved for dry land while ocean shelf cells remain authoritative Water.
+- [x] Shelf seabed stays sandy but cools and darkens across the existing six-cell shoaling band, with deeper seabed continuing toward the water palette.
+- [x] The ocean shader maintains a contextual `0.62`-to-`0.70` opacity-relative water floor only on the positive seaward shelf while preserving landward run-up and foam.
+- [x] Coast fixtures at render strides 1-4 keep dry beach metadata on land and within three source tiles.
+- [x] TypeScript, coastline, terrain-water, FX Lab, render-performance, shoreline-authority, and deterministic mapgen regressions pass without hydrology drift.
+- [x] The ocean surface consumes Water's authoritative sea-level field instead of estimating a lower plane from seabed elevations.
+- [ ] Clear-weather shelf water reads as light blue-green submerged shallows, with wind and active rain monotonically strengthening waves and intermittent foam while reducing clarity.
+- [ ] The supplied share code passes calm and rain live overhead and oblique inspection: shelf hover reports Water, sand reads as submerged, moving breakers meet beaches, and cliffs suppress landward swash without a noticeable frame-time regression.
+
+Touchpoints: `src/systems/terrain/rendering/coastalSeabedColor.ts`, `src/render/terrain/textures/`, `src/render/water/ocean/`, `scripts/coastline-render-regression.mjs`, `scripts/weather-visual-regression.mjs`
+
+Constraints: do not alter sea level, ocean mask, elevations, hydrology, saves, share codes, tile types, controls, or per-frame sampling; retain the six-cell shelf for water rendering behavior.
+
+Notes: The first live inspection found authoritative ocean cells protruding above the visible ocean. The cells were below Water's `0.508171` sea level (`167,41 = 0.484006`; `191,41 = 0.507530`), but rendering had independently estimated a `0.463015` ocean plane from seabed elevations. Rendering now consumes the supplied sea-level field. The user confirmed the contextual shelf color and water coverage look good, but the next live inspection exposed no readable breakers or swash. The shader had multiplied the already filtered landward fade by duplicate height/eligibility masks and applied shoreline advance with the wrong sign; the focused correction consumes the prepared fade once, advances toward negative landward SDF, and gives intermittent seaward breakers a direct foam contribution. Final live surf acceptance remains open.
 
 Status: in-progress
 TSK-0162: Add tactical watch tower placement and extended upgrades

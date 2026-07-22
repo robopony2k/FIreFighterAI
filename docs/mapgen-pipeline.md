@@ -33,7 +33,9 @@ Context:
 - Debug snapshots are stage-labeled and emitted through `MapGenDebug`.
 - Elevation still emits its historical debug subphases (`terrain:relief`, `terrain:carving`, `terrain:flooding`) before the stage-level `terrain:elevation` snapshot, but these remain dry landmass snapshots; `hydro:solve` owns sea-level and ocean classification.
 - Dry elevation is shaped as an island before hydrology runs. Sea level is calibrated from `landCoverageTarget` against connected ocean coverage, then optionally nudged by the advanced `seaLevelBias` override.
-- `terrain:shoreline` performs an ocean-only coastal polish pass (organic shoreline smoothing + near-shore elevation sculpt).
+- `hydro:solve` exclusively owns the resolved sea-level field and edge-connected ocean mask.
+- `terrain:shoreline` preserves those Water-stage arrays and elevations byte-for-byte while deriving coast distance plus beach/cliff/shelf metadata and tile classification.
+- Coastal morphology must be shaped upstream of Water calibration; later stages must not revise the authoritative ocean boundary.
 - `hydro:rivers` owns the final static inland water network: priority-flood depression/basin solving, spill-elevation inland lakes, lake overflow outlet routing, lake-fed river continuation, and waterfall source/target/drop metadata.
 - `settlement:place` selects a central lowland firebase site using terrain-aware scoring, then prepares settlement-road plan data only; road carving now happens in `roads:connect`.
 - `roads:connect` is non-noop and owns road/bridge network carving plus edge-mask stamping (`WorldState.tileRoadEdges`).

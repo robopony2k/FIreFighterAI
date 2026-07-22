@@ -10,7 +10,7 @@ import { TerrainPipeline } from "./pipeline/TerrainPipeline.js";
 import { ElevationStage } from "./stages/ElevationStage.js";
 import { ErosionStage } from "./stages/ErosionStage.js";
 import { HydrologyStage } from "./stages/HydrologyStage.js";
-import { ShorelinePolishStage } from "./stages/ShorelinePolishStage.js";
+import { CoastMetadataStage } from "./stages/CoastMetadataStage.js";
 import { RiverStage } from "./stages/RiverStage.js";
 import { BiomeFieldsStage } from "./stages/BiomeFieldsStage.js";
 import { BiomeSpreadStage } from "./stages/BiomeSpreadStage.js";
@@ -26,7 +26,7 @@ const MAPGEN_PIPELINE = new TerrainPipeline([
   ElevationStage,
   ErosionStage,
   HydrologyStage,
-  ShorelinePolishStage,
+  CoastMetadataStage,
   RiverStage,
   BiomeFieldsStage,
   BiomeSpreadStage,

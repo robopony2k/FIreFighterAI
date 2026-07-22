@@ -131,6 +131,7 @@ import { createThreeTestWorldAudio, type WorldAudioChannelControls } from "./thr
 import { createThreeTestUnitFxLayer } from "./threeTestUnitFx.js";
 import type { TerrainWaterDebugControls } from "./terrainWaterDebug.js";
 import { ThreeTestWaterSystem, type WaterQualityProfile } from "./threeTestWater.js";
+import { resolveOceanSurfaceContext } from "./water/ocean/oceanSurfaceContext.js";
 import { createThreeTestUnitsLayer } from "./threeTestUnits.js";
 import { createThreeTestPostPipeline, type DepthOfFieldSettings } from "./post/dofPipeline.js";
 import type { ThreeTestCinematicGradeConfig } from "./post/cinematicGradePass.js";
@@ -6360,7 +6361,10 @@ export const createThreeTest = (
     hemisphere.intensity = Math.min(1, 0.48 + lighting.ambientIntensity * 1.18);
     syncDirectionalLightRig(lighting);
   };
-  const syncWaterEnvironment = (lighting: LightingDirectorState): void => {
+  const syncWaterEnvironment = (
+    lighting: LightingDirectorState,
+    input: LightingDirectorInput = getCurrentLightingInput()
+  ): void => {
     const waterSkyHorizon = mixRgb(lighting.skyHorizonColor, lighting.skyTopColor, 0.32);
     waterSystem.setPalette({
       ...currentEnvironmentPalette.water,
@@ -6370,6 +6374,12 @@ export const createThreeTest = (
       oceanDeep: lighting.oceanDeepColor,
       sun: lighting.waterSunColor
     });
+    waterSystem.setOceanSurfaceContext(resolveOceanSurfaceContext({
+      windDx: input.windDx,
+      windDy: input.windDy,
+      windStrength01: input.windStrength,
+      rainIntensity01: input.rainIntensity01
+    }));
   };
   const syncSunGlare = (lighting: LightingDirectorState | null): void => {
     if (!postPipeline || !lighting) {
@@ -6430,7 +6440,7 @@ export const createThreeTest = (
       smokeTint: rgbToHex(lighting.smokeTint)
     });
     applyLightingState(lighting);
-    syncWaterEnvironment(lighting);
+    syncWaterEnvironment(lighting, input);
     lastLightingApplied = lighting;
     if (force) {
       requestShadowRefresh();
@@ -9015,6 +9025,8 @@ export const createThreeTest = (
         useLegacyFacetedTerrain || useTextureColorFastPath ? "legacy" : "mask",
         {
           includeDynamicFireScorch: false,
+          sampleCoastClass: surface.sampleCoastClass,
+          sampleCoastDistance: surface.sampleCoastDistance,
           updateTarget:
             currentTexture && intent.dirtyTileBounds
               ? {

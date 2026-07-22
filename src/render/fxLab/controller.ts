@@ -18,6 +18,7 @@ import { createSeasonalSkyDome } from "../seasonalSky.js";
 import { buildRenderTerrainSample } from "../simView.js";
 import { buildTerrainMesh, prepareTerrainRenderSurface, type TerrainRenderSurface, type TerrainSample } from "../threeTestTerrain.js";
 import { ThreeTestWaterSystem } from "../threeTestWater.js";
+import { resolveOceanSurfaceContext } from "../water/ocean/oceanSurfaceContext.js";
 import {
   createThreeTestFireFx,
   normalizeFireFxDebugControls,
@@ -534,6 +535,12 @@ export const createFxLabController = (
       riverShallow: FX_LAB_RIVER_SHALLOW,
       riverDeep: FX_LAB_RIVER_DEEP
     });
+    waterSystem.setOceanSurfaceContext(resolveOceanSurfaceContext({
+      windDx: sceneState.world.wind.dx,
+      windDy: sceneState.world.wind.dy,
+      windStrength01: sceneState.world.wind.strength,
+      rainIntensity01: rainActive ? rainIntensity : 0
+    }));
   };
 
   const renderSceneWithOptionalRain = (): void => {
