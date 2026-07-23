@@ -144,6 +144,8 @@ import {
   queueTerrainTextureDisposals,
   type PendingTerrainTextureDisposal
 } from "../systems/terrain/rendering/terrainTextureSwap.js";
+import { setInlandWaterSeamDebugMaterialMode } from "../systems/terrain/rendering/inlandWaterSeamDebugMaterial.js";
+import { findNearestInlandWaterTerrainSeamSegment } from "../systems/terrain/rendering/inlandWaterTerrainSeam.js";
 import { CardStateModel } from "../ui/cards/cardState.js";
 import { resolveTownLabelDepthAwareLayout } from "../ui/town-labels/townLabelOcclusion.js";
 import { createUnitCommandTray } from "../ui/unit-control/UnitCommandTray.js";
@@ -4873,12 +4875,39 @@ export const createThreeTest = (
     const hoverGridY = context.hoverGrid?.y ?? context.tileY + 0.5;
     const nearestInstance = findNearestWaterfallInstance(hoverGridX, hoverGridY, context.sample);
     const inlandDiagnostics = context.terrainWater?.inland?.surface.diagnostics;
+    const terrainSeam = context.terrainWater?.inland?.surface.terrainSeam;
+    const nearestSeam = terrainSeam
+      ? findNearestInlandWaterTerrainSeamSegment(terrainSeam, hoverGridX, hoverGridY)
+      : undefined;
     const lines = [
       `kind=${lakeId > 0 ? `lake#${lakeId}` : riverMask > 0 ? "river" : oceanMask > 0 ? "ocean" : "none"} riverY=${formatDebugNumber(riverSurfaceWorld, 2)} lakeY=${formatDebugNumber(lakeSurfaceWorld, 2)} tileStep=${formatDebugNumber(tileStep, 2)}`
     ];
     if (inlandDiagnostics) {
       lines.push(
-        `align xz=${formatDebugNumber(inlandDiagnostics.terrainWaterXzErrorMax, 5)} uncovered=${formatDebugNumber(inlandDiagnostics.uncoveredBoundaryLengthWorld, 5)} joinY=${formatDebugNumber(inlandDiagnostics.riverLakeJoinDeltaMax, 3)} orphan=${inlandDiagnostics.orphanMarkerCount}`
+        `seam originalMove=${formatDebugNumber(inlandDiagnostics.originalBoundaryDisplacementMax, 6)} preError=${formatDebugNumber(inlandDiagnostics.maximumPreConformanceError, 6)} unmatched=${inlandDiagnostics.unmatchedSeamVertexCount} tJunction=${inlandDiagnostics.seamTjunctionCount}`
+      );
+      lines.push(
+        `shared=${inlandDiagnostics.sharedSegmentCount} degenerate=${inlandDiagnostics.degenerateBoundaryTriangleCount} skirtGap=${formatDebugNumber(inlandDiagnostics.skirtJointGapMax, 6)} guard=${formatDebugNumber(inlandDiagnostics.guardOverlapMin, 6)}`
+      );
+    }
+    if (nearestSeam && terrainSeam) {
+      const segment = nearestSeam.segment;
+      const a = terrainSeam.vertices[segment.a];
+      const b = terrainSeam.vertices[segment.b];
+      const t = nearestSeam.t;
+      const lerp = (left: number, right: number): number => left + (right - left) * t;
+      const sourceTriangles = Array.from(new Set([...a.sourceTerrainTriangleIds, ...b.sourceTerrainTriangleIds]));
+      lines.push(
+        `segment=${segment.id} contour=${segment.sourceContourSegmentId} d=${formatDebugNumber(nearestSeam.distance, 4)} mouth=${segment.openToOcean ? 1 : 0}`
+      );
+      lines.push(
+        `xz original=${formatDebugNumber(lerp(a.originalEdgeX, b.originalEdgeX), 4)},${formatDebugNumber(lerp(a.originalEdgeY, b.originalEdgeY), 4)} rendered=${formatDebugNumber(lerp(a.renderedEdgeX, b.renderedEdgeX), 4)},${formatDebugNumber(lerp(a.renderedEdgeY, b.renderedEdgeY), 4)} forced=${formatDebugNumber(Math.max(a.forcedDisplacementCells, b.forcedDisplacementCells), 6)}`
+      );
+      lines.push(
+        `height terrain=${formatDebugNumber(lerp(a.terrainTopWorldY, b.terrainTopWorldY), 3)} water=${formatDebugNumber(lerp(a.waterWorldY, b.waterWorldY), 3)} skirt=${formatDebugNumber(lerp(a.skirtBottomWorldY, b.skirtBottomWorldY), 3)}`
+      );
+      lines.push(
+        `sourceTri=${sourceTriangles.slice(0, 4).join("/") || "n/a"} normal=${a.normalClassification} uv=${a.uvClassification}`
       );
     }
     if (debug) {
@@ -8427,6 +8456,12 @@ export const createThreeTest = (
 
   const setTerrainWaterDebugControls = (controls: Partial<TerrainWaterDebugControls>): void => {
     waterSystem.setDebugControls(controls);
+    if (terrainMesh) {
+      setInlandWaterSeamDebugMaterialMode(
+        terrainMesh.material,
+        waterSystem.getDebugControls().inlandWaterSeamDebugMode
+      );
+    }
   };
 
   const getTerrainWaterDebugControls = (): TerrainWaterDebugControls => waterSystem.getDebugControls();
@@ -9246,6 +9281,10 @@ export const createThreeTest = (
       );
       recordTerrainSetTiming("fullBuild", performance.now() - fullBuildStartedAt);
       terrainMesh = mesh;
+      setInlandWaterSeamDebugMaterialMode(
+        terrainMesh.material,
+        waterSystem.getDebugControls().inlandWaterSeamDebugMode
+      );
       terrainRoadOverlayMesh = findRoadOverlayMesh(terrainMesh);
       if (roadHighContrastEnabled) {
         setTerrainRoadHighContrast(terrainMesh, true);

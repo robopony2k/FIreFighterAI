@@ -13,6 +13,7 @@ import {
   SUBMERGED_SHELF_DISTANCE_MAX
 } from "../dist/systems/terrain/rendering/coastalSeabedColor.js";
 import { buildShoreTransitionData } from "../dist/render/terrain/water/shoreTransition.js";
+import { applyRiverMouthOceanOverlap } from "../dist/systems/terrain/rendering/riverMouthRenderTransition.js";
 import {
   OCEAN_SHELF_ALPHA_FLOOR,
   OCEAN_SHELF_ALPHA_FLOOR_ROUGH
@@ -22,6 +23,26 @@ import { buildTileTexture, computeWaterLevel } from "../dist/render/threeTestTer
 
 const BASE_SIZE = 28;
 const strides = [1, 2, 3, 4];
+
+const mouthOceanWater = Float32Array.from([0, 0, 1]);
+const mouthOceanRatio = Float32Array.from([0, 0, 1]);
+const mouthOceanSupport = Uint8Array.from([0, 0, 1]);
+applyRiverMouthOceanOverlap(
+  Float32Array.from([0, 1, 0]),
+  mouthOceanWater,
+  mouthOceanRatio,
+  mouthOceanSupport
+);
+const mouthTransition = buildShoreTransitionData({
+  sampleCols: 3,
+  sampleRows: 1,
+  oceanSupportMask: mouthOceanSupport,
+  sampleCoastClass: new Uint8Array(3),
+  coastData: {},
+  shoreTerrainHeightRelativeToWater: Float32Array.from([0.1, 0, -0.1]),
+  oceanRatio: mouthOceanRatio
+});
+assert.ok(mouthTransition.signedDistance[1] > 0, "render-only mouth overlap must remain on the water side of the shore field");
 
 const authoritativeSeaLevel = 0.5081713795661926;
 const waterLevelSample = {
@@ -331,6 +352,8 @@ texture.dispose();
 
 const shaderPath = fileURLToPath(new URL("../src/render/water/ocean/oceanSurfaceShader.ts", import.meta.url));
 const shaderSource = await readFile(shaderPath, "utf8");
+const riverShaderPath = fileURLToPath(new URL("../src/render/threeTestRiverWaterHelper.ts", import.meta.url));
+const riverShaderSource = await readFile(riverShaderPath, "utf8");
 assert.equal(OCEAN_SHELF_ALPHA_FLOOR, 0.62, "calm authoritative shelf water must remain visibly covered");
 assert.equal(OCEAN_SHELF_ALPHA_FLOOR_ROUGH, 0.7, "rough authoritative shelf water must gain coverage");
 assert.match(shaderSource, /shorelineSdf = sdf > 0\.0 \? sdf - organicInset : sdf;/, "shader must preserve signed shoreline distance");
@@ -341,11 +364,20 @@ assert.match(shaderSource, /float shelfAlphaFloor = mix/, "shelf coverage must r
 assert.match(shaderSource, /readableShallowTint/, "authoritative shallows must receive a readable blue-green tint");
 assert.match(shaderSource, /breakerGate/, "shore foam must retain an intermittent breaker gate");
 assert.match(shaderSource, /float breakerLine =/, "seaward breakers must retain a directly visible foam contribution");
+assert.match(shaderSource, /varying float vShorePulse;/, "the vertex shoreline pulse must reach the fragment surf treatment");
+assert.match(shaderSource, /shorePulse = computeShorePulse\(/, "surface displacement must expose its shoreline pulse");
+assert.match(shaderSource, /drag \+= shoreIn \* shorePulse/, "the synchronized breaker pulse must lean its displaced crest landward");
+assert.match(shaderSource, /float syncedShorePulse = clamp\(vShorePulse/, "breaker timing must consume the displacement pulse");
+assert.match(shaderSource, /seawardCoastMask \*\s*breakerCrest \*/, "the visible breaker line must be gated by the displaced crest");
+assert.doesNotMatch(shaderSource, /shoreLapping[AB]?/, "surf must not run an independent fragment-stage shoreline clock");
 assert.match(shaderSource, /float landwardCoastMask = transitionLandSide;/, "swash must consume the already-filtered landward fade without suppressing it twice");
 assert.match(shaderSource, /shoreRenderSdf = shorelineSdf \+ shorelineAdvance;/, "positive shoreline advance must move the rendered edge landward");
 assert.doesNotMatch(shaderSource, /landwardCoastMask = transitionLandSide \* transitionOverlap/, "swash eligibility must not be squared in the ocean shader");
 assert.match(shaderSource, /max\(seawardCoastMask \* 0\.72, landwardCoastMask \* 0\.52\)/, "surf must preserve separate seaward and beach-gated masks");
 assert.match(shaderSource, /sampleSmoothShoreSdf/, "shader must filter the signed shoreline field without adding mesh density");
+assert.match(shaderSource, /float riverMouth = inlandSample\.g;/, "ocean shader must read render-only mouth coverage from the existing inland map");
+assert.match(riverShaderSource, /a_riverMouthBlend/, "river mesh must carry its estuary blend attribute");
+assert.match(riverShaderSource, /stableCoverageNoise/, "river mouth hand-off must use stable world-space coverage");
 assert.doesNotMatch(shaderSource, /float shorelineSdf = max\(0\.0, vShorelineSdf\);/, "shader must not collapse land-side shoreline distance");
 
 console.log(`Coastline render regression passed: fixtures=${fixtures.length} strides=${strides.join(",")} opaqueTexels=${total}`);

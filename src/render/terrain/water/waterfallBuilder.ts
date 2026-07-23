@@ -57,7 +57,6 @@ export type WaterfallRiverDomainInput = {
   cols: number;
   rows: number;
   boundaryEdges: Float32Array;
-  cutoutBoundaryEdges: Float32Array;
   debugStats?: WaterfallDebugStats;
 };
 
@@ -734,10 +733,7 @@ export const buildWaterfallInstances = (
   }
 
   clusters.sort((a, b) => b.drop - a.drop);
-  const contourEdges =
-    riverDomain?.cutoutBoundaryEdges && riverDomain.cutoutBoundaryEdges.length >= 4
-      ? riverDomain.cutoutBoundaryEdges
-      : riverDomain?.boundaryEdges;
+  const contourEdges = riverDomain?.boundaryEdges;
   const contourCols = riverDomain?.cols ?? sampleCols;
   const contourRows = riverDomain?.rows ?? sampleRows;
   const contourSpace = createRiverSpaceTransform(contourCols, contourRows, width, depth, sampleCols, sampleRows);

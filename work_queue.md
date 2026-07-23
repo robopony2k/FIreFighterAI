@@ -26,15 +26,22 @@ Done when:
 - [x] Waterfalls are reclassified deterministically from final river/lake surfaces after lake absorption/outlet relocation, with invalid render spans omitted through diagnostics.
 - [x] Accepted waterfalls use typed bank-to-bank spans, split surface seams, and explicit curtains whose endpoints match final source/target surfaces.
 - [x] Terrain water, focused hydrology, FX Lab, render-performance, and runtime-performance regressions pass without changing river/lake topology or authoritative surfaces.
-- [x] The same deterministic overhead/oblique scene has no pale skirt bands or visible terrain/water cracks after the landward skirt-material correction.
+- [x] The initial deterministic overhead/oblique scene removed the pale skirt bands after the landward skirt-material correction.
+- [x] The immutable full-resolution water contour owns XZ; terrain triangles are subtracted by the indexed water triangles, and exact terrain-edge intersections split both terrain and water without projection or snapping.
+- [x] Canonical seam tops remain above authoritative water and skirt bottoms remain below it, including steep mixed-height lake edges and render strides 1-4.
+- [x] Closed-bank geometric water displacement is exactly zero at the seam and reaches full strength within one water cell without disabling normal-map, foam, flow, or lake-calmness animation.
+- [x] Developer ownership modes isolate terrain, skirts, inland water, and uncovered background, while hover diagnostics report original/rendered XZ, forced displacement, source contour/terrain provenance, height ordering, and pre-conformance error.
+- [x] The supplied share code executes the real full-resolution production mesh path with zero moved or unmatched boundary vertices, T-junctions, unexpected open ends, shared-segment gaps, skirt-joint gaps, or water-above-seam error; calm banks no longer receive unconditional white foam.
+- [x] Ownership-mode evidence identifies the remaining pale line as uncovered raster/depth space, and closed seam segments receive measured mitered submerged guard coverage in the existing terrain buffers while river-mouth openings receive none.
+- [ ] The supplied deterministic scene passes renewed live overhead and oblique inspection while paused and animated without white/black cracks, skirt segment gaps, surface crossings, z-fighting, or a restored river-mouth lip.
 
-Touchpoints: `src/systems/terrain/rendering/inlandWaterRenderSurface.ts`, `src/systems/terrain/rendering/inlandWaterMeshBuilder.ts`, `src/systems/terrain/sim/finalWaterfallClassifier.ts`, `src/systems/terrain/sim/basinLakeHydrology.ts`, `src/render/threeTestTerrain.ts`, `src/render/terrain/water/`, `scripts/terrain-water-regression.mjs`, `scripts/mapgen-regression.mjs`
+Touchpoints: `src/systems/terrain/rendering/inlandWaterRenderSurface.ts`, `src/systems/terrain/rendering/inlandWaterMeshBuilder.ts`, `src/systems/terrain/rendering/inlandWaterTerrainCutout.ts`, `src/systems/terrain/rendering/inlandWaterTerrainSeam.ts`, `src/systems/terrain/rendering/inlandWaterSeamDebugMaterial.ts`, `src/systems/terrain/sim/finalWaterfallClassifier.ts`, `src/systems/terrain/sim/basinLakeHydrology.ts`, `src/render/threeTestTerrain.ts`, `src/render/terrain/water/`, `scripts/terrain-water-regression.mjs`, `scripts/mapgen-regression.mjs`
 
 Constraints: preserve deterministic river/lake masks, carved elevations, beds, surfaces, share codes, and saves; keep ocean separate; rebuild static geometry only with existing terrain/hydrology invalidation; add no per-frame sampling or draw calls.
 
-Notes: Command-level and deterministic FX Lab validation passed. User-supplied live screenshots showed the pale region was generated closure geometry, not empty space: the skirt used boundary/water UVs, the attempted water apron made that misclassified area larger, and per-segment endpoint resolution left visible seams between otherwise adjacent skirt polygons. The apron is removed. True clipped-polygon perimeter segments are welded through one shared boundary-vertex table before skirt emission, so incident segments share XZ, top/bottom height, and averaged retained-terrain UVs. Skirt faces use both windings only after that material correction and are excluded from top-surface normal averaging; every terrain-cutout endpoint is inserted into the water boundary with affected triangles retriangulated. The obsolete combined standing-water mean-height warning was removed, the rendered contract is reported post-build, and copied cell diagnostics identify lake/outlet/waterfall state. TSK-0164 stabilized the upstream sea-level and ocean-mask inputs, and the user confirmed the deterministic live scene no longer shows the pale inland-water skirt/gap defect.
+Notes: The first two geometry repairs did not solve the reported scene. Production-path evidence from share code `MAP6-115-22002R2S1W1M152B0R1G1W2R2C1X1N1J141K0Y1M1A1E181Q0K1K12161C` showed why: the projection seam moved 73 original boundary vertices more than `0.02` cells, left three unmatched, and moved one by `0.795` cells while its post-snap metric misleadingly displayed roughly zero. The failed projection approach is replaced by direct terrain subtraction against immutable indexed water triangles. The same production case at its real `1.6105` height multiplier reports zero original displacement, unmatched vertices, T-junctions, unexpected open ends, segment gaps, skirt-joint gaps, and water-above-seam error. Subsequent ownership captures showed continuous magenta skirt geometry with a pale line precisely at the cyan-water/skirt contact, proving the residual defect was uncovered raster/depth space rather than another XZ topology error. Closed banks now add a fully submerged `0.04`-cell waterward guard strip, with contour-derived interior direction and mitered joints whose minimum overlap is measured by the production regression; river-mouth openings emit neither wall nor guard. Stride 1-4 fixtures invoke the production cutout and mesh builder. F11 cycles normal, ownership, water-without-FX, skirt-only, and water-only modes. Renewed normal paused/animated overhead and oblique acceptance remains open after the guard change.
 
-Status: done
+Status: in-progress
 TSK-0164: Make Sea Level authoritative across shoreline and rivers
 
 Type: bug
@@ -75,7 +82,27 @@ Touchpoints: `src/systems/terrain/rendering/coastalSeabedColor.ts`, `src/render/
 
 Constraints: do not alter sea level, ocean mask, elevations, hydrology, saves, share codes, tile types, controls, or per-frame sampling; retain the six-cell shelf for water rendering behavior.
 
-Notes: The first live inspection found authoritative ocean cells protruding above the visible ocean. The cells were below Water's `0.508171` sea level (`167,41 = 0.484006`; `191,41 = 0.507530`), but rendering had independently estimated a `0.463015` ocean plane from seabed elevations. Rendering now consumes the supplied sea-level field. The user confirmed the contextual shelf color and water coverage look good, but the next live inspection exposed no readable breakers or swash. The shader had multiplied the already filtered landward fade by duplicate height/eligibility masks and applied shoreline advance with the wrong sign; the focused correction consumes the prepared fade once, advances toward negative landward SDF, and gives intermittent seaward breakers a direct foam contribution. Final live surf acceptance remains open.
+Notes: The first live inspection found authoritative ocean cells protruding above the visible ocean. The cells were below Water's `0.508171` sea level (`167,41 = 0.484006`; `191,41 = 0.507530`), but rendering had independently estimated a `0.463015` ocean plane from seabed elevations. Rendering now consumes the supplied sea-level field. The user confirmed the contextual shelf color and water coverage look good, but the next live inspection exposed no readable breakers or swash. The shader had multiplied the already filtered landward fade by duplicate height/eligibility masks and applied shoreline advance with the wrong sign; the focused correction consumes the prepared fade once and advances toward negative landward SDF. A subsequent live check showed the now-visible breaker still read as recoloring because its fragment-stage sine clock was independent of the pulse displacing the water surface. Breaker crests, collapse trails, and swash now consume that exact vertex pulse, with crest visibility gated by displaced height and surface slope. Final live surf acceptance remains open.
+
+Status: in-progress
+TSK-0166: Blend river mouths into the ocean
+
+Type: bug
+
+Why: The inland-water contour stopped short of authoritative ocean cells and closed with a normal terrain skirt, leaving a land-colored lip across otherwise valid river-mouth water and a hard river/ocean motion seam.
+
+Done when:
+- [x] River contours and terrain cutouts reach the exact shared river/ocean edge without emitting a skirt or wall across the outlet.
+- [x] A render-only terminal-cell overlap fades river flow, foam, color, and coverage into the existing animated ocean while side banks remain closed.
+- [x] Ocean, river, sea-level, terrain, hydrology, save, and share-code data remain unchanged, with no additional draw call or per-frame topology work.
+- [x] Focused water, coastline, shoreline-authority, weather, FX Lab, mapgen, and render-performance regressions pass.
+- [ ] The deterministic estuary passes live overhead and oblique inspection in calm and rain without a lip, crack, void, z-fighting, or false breaker across the outlet.
+
+Touchpoints: `src/systems/terrain/rendering/`, `src/render/terrain/water/`, `src/render/threeTestTerrain.ts`, `src/render/threeTestRiverWaterHelper.ts`, `scripts/terrain-water-regression.mjs`, `scripts/coastline-render-regression.mjs`, `docs/GAME_DESIGN_REFERENCE.md`
+
+Constraints: preserve authoritative water classification and hydrology; keep ocean and inland water as separate existing draw calls; derive all overlap and fade fields during static terrain rendering.
+
+Notes: Automated and synthetic geometry verification passed, including an exact shared-edge contour at render strides 1-4 and zero outlet-facing skirt edges in a full terrain cutout. Live browser inspection remains open because the in-app browser connection was unavailable in the implementation session.
 
 Status: in-progress
 TSK-0162: Add tactical watch tower placement and extended upgrades

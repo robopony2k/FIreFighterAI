@@ -1,21 +1,38 @@
 import assert from "node:assert/strict";
 
-import { TILE_TYPE_IDS } from "../dist/core/state.js";
+import { MAP_SIZE_PRESETS } from "../dist/core/config.js";
+import { RNG } from "../dist/core/rng.js";
+import { createInitialState, TILE_TYPE_IDS } from "../dist/core/state.js";
+import { generateMap } from "../dist/mapgen/index.js";
+import { getTerrainHeightScaleMultiplier } from "../dist/mapgen/terrainProfile.js";
+import { buildRenderTerrainSample } from "../dist/render/simView.js";
+import { decodeTerrainSeedCode } from "../dist/ui/terrainSeedCode.js";
 import {
-  buildInlandWaterRenderSurface
-} from "../dist/systems/terrain/rendering/inlandWaterRenderSurface.js";
+  buildTerrainMesh,
+  prepareTerrainRenderSurface
+} from "../dist/render/threeTestTerrain.js";
 import {
   buildInlandWaterfallMeshData,
-  buildInlandWaterTerrainSkirtQuad,
-  insetInlandWaterTerrainUv,
-  splitInlandWaterSurfaceAtWaterfalls,
-  weldInlandWaterTerrainSkirtEdges
+  splitInlandWaterSurfaceAtWaterfalls
 } from "../dist/systems/terrain/rendering/inlandWaterMeshBuilder.js";
+import {
+  buildInlandWaterTerrainSeam,
+  buildInlandWaterTerrainSkirtMesh,
+  findNearestInlandWaterTerrainSeamSegment,
+  findInlandWaterTerrainSeamVertex,
+  INLAND_WATER_GUARD_OVERLAP_CELLS,
+  sampleInlandWaterEdgeMotionFactor
+} from "../dist/systems/terrain/rendering/inlandWaterTerrainSeam.js";
+import { INLAND_WATER_CALM_BANK_STATIC_FOAM } from "../dist/render/threeTestRiverWaterHelper.js";
 import {
   buildBoundaryEdgesFromIndexedContour,
   buildCutoutConformingRiverContourMesh,
   buildRiverRenderDomain
 } from "../dist/render/terrain/water/riverRenderDomain.js";
+import {
+  applyRiverMouthOceanOverlap,
+  isRiverMouthOpeningSegment
+} from "../dist/systems/terrain/rendering/riverMouthRenderTransition.js";
 
 const cols = 12;
 const rows = 10;
@@ -82,61 +99,118 @@ const buildFixture = (fixture, step) => {
     sourceMask[idx(1, 8)] = 1;
     targetMap[idx(1, 8)] = idx(2, 8);
   }
-  const sampleCols = Math.floor((cols - 1) / step) + 1;
-  const sampleRows = Math.floor((rows - 1) / step) + 1;
-  const terrainHeights = new Float32Array(sampleCols * sampleRows);
-  for (let y = 0; y < sampleRows; y += 1) {
-    for (let x = 0; x < sampleCols; x += 1) terrainHeights[y * sampleCols + x] = 0.3 + x * 0.003 + y * 0.004;
+  const terrainHeights = new Float32Array(total);
+  for (let y = 0; y < rows; y += 1) {
+    for (let x = 0; x < cols; x += 1) terrainHeights[y * cols + x] = 0.3 + x * 0.003 + y * 0.004;
   }
-  const width = (sampleCols - 1) * step;
-  const depth = (sampleRows - 1) * step;
-  const inland = buildInlandWaterRenderSurface({
-    cols, rows, width, depth, heightScale,
-    terrainSampleCols: sampleCols,
-    terrainSampleRows: sampleRows,
-    terrainHeights,
-    riverMask, lakeMask, oceanMask, riverSurface, riverBed, riverStepStrength, lakeSurface,
+  const sample = {
+    cols,
+    rows,
+    elevations: terrainHeights,
+    heightScaleMultiplier: heightScale / 18,
+    tileTypes,
+    riverMask,
+    lakeMask,
+    oceanMask,
+    riverSurface,
+    riverBed,
+    riverStepStrength,
+    lakeSurface,
     waterfallSourceMask: sourceMask,
-    waterfallTarget: targetMap
-  });
-  return { inland, riverMask, lakeMask, oceanMask, riverSurface, tileTypes, width, depth };
+    waterfallTarget: targetMap,
+    debugTypeColors: true,
+    debugRenderOptions: { terrainSampleStrideOverride: step }
+  };
+  const terrainSurface = prepareTerrainRenderSurface(sample);
+  const terrainResult = buildTerrainMesh(terrainSurface, null, null, null);
+  const inland = terrainResult.water?.inland?.surface;
+  return {
+    inland, terrainResult, riverMask, lakeMask, oceanMask, riverSurface, tileTypes,
+    width: terrainSurface.width, depth: terrainSurface.depth
+  };
 };
 
 let cases = 0;
-const insetUv = insetInlandWaterTerrainUv([0.5, 0.5], [0.25, 0.75], 0.4);
-close(insetUv[0], 0.4, 1e-9, "skirt UV insets toward retained terrain x");
-close(insetUv[1], 0.6, 1e-9, "skirt UV insets toward retained terrain y");
-const weldedSkirtEdges = weldInlandWaterTerrainSkirtEdges([
-  { ax: 0, ay: 0, topA: 3, uA: 0.1, vA: 0.5, bx: 1, by: 0, topB: 2, uB: 0.4, vB: 0.5 },
-  { ax: 1 + 1e-6, ay: 0, topA: 4, uA: 0.6, vA: 0.5, bx: 2, by: 0, topB: 5, uB: 0.9, vB: 0.5 }
+const steepBoundarySamples = [
+  { ax: 0, ay: 0, terrainTopA: 9, uA: 0, vA: 0, bx: 1, by: 0, terrainTopB: 5, uB: 0.5, vB: 0, sourceContourSegmentId: 0, sourceTerrainTriangleId: 0, openToOcean: false },
+  { ax: 1, ay: 0, terrainTopA: 5, uA: 0.5, vA: 0, bx: 2, by: 0, terrainTopB: 1, uB: 1, vB: 0, sourceContourSegmentId: 1, sourceTerrainTriangleId: 1, openToOcean: false },
+  { ax: 2, ay: 0, terrainTopA: 1, uA: 1, vA: 0, bx: 2, by: 2, terrainTopB: 3, uB: 1, vB: 1, sourceContourSegmentId: 2, sourceTerrainTriangleId: 2, openToOcean: false },
+  { ax: 2, ay: 2, terrainTopA: 3, uA: 1, vA: 1, bx: 0, by: 2, terrainTopB: 3, uB: 0, vB: 1, sourceContourSegmentId: 3, sourceTerrainTriangleId: 3, openToOcean: false },
+  { ax: 0, ay: 2, terrainTopA: 3, uA: 0, vA: 1, bx: 0, by: 0, terrainTopB: 9, uB: 0, vB: 0, sourceContourSegmentId: 4, sourceTerrainTriangleId: 4, openToOcean: false }
+];
+const splitSquareWaterSegments = [
+  { id: 0, sourceA: 0, sourceB: 1, ax: 0, ay: 0, bx: 1, by: 0, waterwardX: 0, waterwardY: 1 },
+  { id: 1, sourceA: 1, sourceB: 2, ax: 1, ay: 0, bx: 2, by: 0, waterwardX: 0, waterwardY: 1 },
+  { id: 2, sourceA: 2, sourceB: 3, ax: 2, ay: 0, bx: 2, by: 2, waterwardX: -1, waterwardY: 0 },
+  { id: 3, sourceA: 3, sourceB: 4, ax: 2, ay: 2, bx: 0, by: 2, waterwardX: 0, waterwardY: -1 },
+  { id: 4, sourceA: 4, sourceB: 0, ax: 0, ay: 2, bx: 0, by: 0, waterwardX: 1, waterwardY: 0 }
+];
+const splitSquareWaterBoundary = new Float32Array([
+  0, 0, 1, 0, 1, 0, 2, 0, 2, 0, 2, 2, 2, 2, 0, 2, 0, 2, 0, 0
 ]);
-assert.equal(weldedSkirtEdges.length, 2, "connected skirt retains both perimeter segments");
-const endpointNearestOne = (edge) => Math.abs(edge.ax - 1) <= Math.abs(edge.bx - 1)
-  ? { top: edge.topA, u: edge.uA }
-  : { top: edge.topB, u: edge.uB };
-const weldedJointA = endpointNearestOne(weldedSkirtEdges[0]);
-const weldedJointB = endpointNearestOne(weldedSkirtEdges[1]);
-close(weldedJointA.top, weldedJointB.top, 1e-9, "connected skirt shares joint height");
-close(weldedJointA.u, weldedJointB.u, 1e-9, "connected skirt shares retained-terrain UV");
-const skirtQuad = buildInlandWaterTerrainSkirtQuad({
-  worldAx: 0, worldAz: 0, worldBx: 2, worldBz: 0,
-  topA: 3, topB: 4, bottomA: 1, bottomB: 1,
-  uvA: [0.2, 0.7], uvB: [0.4, 0.7]
+const seam = buildInlandWaterTerrainSeam({
+  boundarySamples: steepBoundarySamples,
+  waterBoundarySegments: splitSquareWaterSegments,
+  heightScale: 24,
+  waterSurfaceLiftWorld: 0,
+  sampleWaterWorldYAtEdge: () => 8
 });
-assert.equal(skirtQuad.positions.length, 36, "skirt emits opposing faces");
-assert.equal(skirtQuad.uvs.length, 24, "double-sided retained-terrain UV count");
-assert.deepEqual(skirtQuad.uvs.slice(0, 6), [0.2, 0.7, 0.4, 0.7, 0.4, 0.7], "skirt inherits retained terrain endpoint UVs");
-const triangleNormalZ = (positions, offset) => {
-  const ax = positions[offset + 3] - positions[offset];
-  const ay = positions[offset + 4] - positions[offset + 1];
-  const bx = positions[offset + 6] - positions[offset];
-  const by = positions[offset + 7] - positions[offset + 1];
-  return ax * by - ay * bx;
-};
-assert.ok(
-  triangleNormalZ(skirtQuad.positions, 0) * triangleNormalZ(skirtQuad.positions, 18) < 0,
-  "skirt contains opposing visible windings"
+assert.ok(seam, "canonical seam builds for steep mixed-height lake fixture");
+assert.equal(seam.diagnostics.unmatchedWaterVertexCount, 0, "all full-resolution water vertices match terrain seam");
+assert.equal(seam.diagnostics.tJunctionCount, 0, "canonical seam removes T-junctions");
+assert.equal(seam.diagnostics.unexpectedOpenEndCount, 0, "closed lake seam has degree two");
+assert.equal(seam.components.length, 1, "closed lake remains one component");
+assert.equal(seam.components[0].closed, true, "lake seam component is closed");
+const steepMidpoint = findInlandWaterTerrainSeamVertex(seam, 1, 0);
+assert.ok(steepMidpoint, "intermediate lake boundary vertex is retained");
+close(steepMidpoint.rawTerrainTopWorldY, 5, 1e-9, "steep seam retains interpolated terrain height");
+close(steepMidpoint.terrainTopWorldY, 8 + seam.overlapWorld, 1e-9, "steep seam lifts terrain closure above water");
+close(steepMidpoint.skirtBottomWorldY, 8 - seam.overlapWorld, 1e-9, "skirt bottom overlaps below water");
+assert.equal(seam.diagnostics.waterAboveSeamMax, 0, "water never exceeds canonical seam top");
+assert.ok(seam.diagnostics.seamLiftMax > 3, "steep render-only seam lift is diagnosed");
+close(sampleInlandWaterEdgeMotionFactor(seam, 1, 0), 0, 1e-9, "closed bank displacement is exactly zero");
+close(sampleInlandWaterEdgeMotionFactor(seam, 1, 1), 1, 1e-9, "water displacement reaches full strength one cell inland");
+const skirtMesh = buildInlandWaterTerrainSkirtMesh(seam, (x) => x, (y) => y);
+assert.equal(skirtMesh.indices.length, seam.segments.length * 24, "every closed segment emits skirt faces plus a submerged guard strip");
+assert.equal(
+  skirtMesh.positions.length,
+  seam.vertices.length * 6 + seam.segments.length * 12,
+  "guard strips extend the shared skirt joints without another mesh"
 );
+const firstGuardPositionOffset = seam.vertices.length * 6;
+for (let offset = firstGuardPositionOffset + 1; offset < skirtMesh.positions.length; offset += 3) {
+  assert.ok(skirtMesh.positions[offset] < 8, "every guard-strip vertex remains below authoritative water");
+}
+close(
+  skirtMesh.positions[firstGuardPositionOffset + 8],
+  INLAND_WATER_GUARD_OVERLAP_CELLS,
+  1e-9,
+  "guard strip follows the contour-derived waterward direction"
+);
+assert.ok(
+  seam.diagnostics.guardOverlapMin >= INLAND_WATER_GUARD_OVERLAP_CELLS - 1e-9,
+  "closed lake guard overlaps water by the configured minimum"
+);
+const mouthSeam = buildInlandWaterTerrainSeam({
+  boundarySamples: steepBoundarySamples.map((sample, index) => ({ ...sample, openToOcean: index === 3 })),
+  waterBoundarySegments: splitSquareWaterSegments,
+  heightScale: 24,
+  waterSurfaceLiftWorld: 0,
+  sampleWaterWorldYAtEdge: () => 8
+});
+assert.ok(mouthSeam, "river-mouth seam builds");
+const mouthSkirtMesh = buildInlandWaterTerrainSkirtMesh(mouthSeam, (x) => x, (y) => y);
+const mouthOpeningSegmentCount = mouthSeam.segments.filter((segment) => segment.openToOcean).length;
+assert.ok(mouthOpeningSegmentCount > 0, "river-mouth opening is marked on canonical segments");
+assert.equal(mouthSeam.components.length, 1, "river-mouth closure remains one component");
+assert.equal(mouthSeam.components[0].closed, false, "river-mouth closure is an intentional open chain");
+assert.equal(mouthSeam.diagnostics.unexpectedOpenEndCount, 0, "river-mouth endpoints are intentional");
+assert.equal(
+  mouthSkirtMesh.indices.length,
+  (mouthSeam.segments.length - mouthOpeningSegmentCount) * 24,
+  "neither skirt nor guard geometry crosses a river-mouth opening"
+);
+close(sampleInlandWaterEdgeMotionFactor(mouthSeam, 1, 2), 1, 1e-9, "river-mouth opening keeps the ocean hand-off motion path");
 const syntheticContour = {
   cols: 2,
   rows: 2,
@@ -146,7 +220,7 @@ const syntheticContour = {
   contourVertices: new Float32Array([0, 0, 2, 0, 2, 2, 0, 2]),
   contourIndices: new Uint32Array([0, 1, 2, 0, 2, 3]),
   boundaryEdges: new Float32Array([0, 0, 2, 0, 2, 0, 2, 2, 2, 2, 0, 2, 0, 2, 0, 0]),
-  cutoutBoundaryEdges: new Float32Array([0, 0, 1, 0, 1, 0, 2, 0, 2, 0, 2, 2, 2, 2, 0, 2, 0, 2, 0, 0]),
+  terrainSeam: seam,
   distanceToBank: new Int16Array(4)
 };
 const conforming = buildCutoutConformingRiverContourMesh(syntheticContour);
@@ -158,16 +232,42 @@ for (let i = 0; i + 3 < conformingBoundary.length; i += 4) {
 }
 assert.ok(boundaryPointKeys.has("1.00000,0.00000"), "water topology inserts terrain cutout endpoint");
 assert.ok(conforming.indices.length > syntheticContour.contourIndices.length, "affected water triangle is retriangulated");
+assert.equal(conformingBoundary.length, seam.boundaryEdges.length, "water and terrain use identical boundary segmentation");
+for (let i = 0; i + 3 < seam.boundaryEdges.length; i += 4) {
+  const a = `${seam.boundaryEdges[i].toFixed(5)},${seam.boundaryEdges[i + 1].toFixed(5)}`;
+  const b = `${seam.boundaryEdges[i + 2].toFixed(5)},${seam.boundaryEdges[i + 3].toFixed(5)}`;
+  let matched = false;
+  for (let edge = 0; edge + 3 < conformingBoundary.length; edge += 4) {
+    const c = `${conformingBoundary[edge].toFixed(5)},${conformingBoundary[edge + 1].toFixed(5)}`;
+    const d = `${conformingBoundary[edge + 2].toFixed(5)},${conformingBoundary[edge + 3].toFixed(5)}`;
+    if ((a === c && b === d) || (a === d && b === c)) matched = true;
+  }
+  assert.equal(matched, true, `canonical seam segment ${a}|${b} appears in water topology`);
+}
 for (const fixture of fixtures) {
   for (const step of [1, 2, 3, 4]) {
-    const built = buildFixture(fixture, step);
+      const built = buildFixture(fixture, step);
     if (fixture.name === "empty-water") {
       assert.equal(built.inland, undefined, `empty fixture step ${step}`);
+      built.terrainResult.mesh.geometry.dispose();
       cases += 1;
       continue;
     }
     const inland = built.inland;
     assert.ok(inland, `${fixture.name} step ${step} should build inland water`);
+    const productionSeam = inland.terrainSeam;
+    assert.ok(productionSeam, `${fixture.name} step ${step} production mesh builds a seam`);
+    assert.equal(productionSeam.diagnostics.originalBoundaryDisplacementMax, 0, `${fixture.name} step ${step} immutable contour`);
+    assert.equal(productionSeam.diagnostics.unmatchedWaterVertexCount, 0, `${fixture.name} step ${step} unmatched vertices`);
+    assert.equal(productionSeam.diagnostics.tJunctionCount, 0, `${fixture.name} step ${step} T-junctions`);
+    assert.equal(productionSeam.diagnostics.unexpectedOpenEndCount, 0, `${fixture.name} step ${step} unexpected open ends`);
+    assert.equal(productionSeam.diagnostics.degenerateBoundaryTriangleCount, 0, `${fixture.name} step ${step} degenerate boundary triangles`);
+    assert.equal(inland.diagnostics.segmentXzErrorMax, 0, `${fixture.name} step ${step} shared segmentation`);
+    assert.equal(inland.diagnostics.skirtJointGapMax, 0, `${fixture.name} step ${step} skirt joints`);
+    assert.equal(inland.diagnostics.waterAboveSeamMax, 0, `${fixture.name} step ${step} height ordering`);
+    assert.ok(productionSeam.segments.length > 0, `${fixture.name} step ${step} non-default production diagnostics`);
+    const edgeMotion = built.terrainResult.water?.inland?.mesh.edgeMotionFactor;
+    assert.ok(edgeMotion && edgeMotion.some((value) => value === 0), `${fixture.name} step ${step} bank motion reaches zero`);
     assert.equal(inland.diagnostics.terrainWaterXzErrorMax, 0);
     assert.equal(inland.diagnostics.orphanMarkerCount, 1);
     for (const edgeX of [0, 1.25, cols * 0.5, cols]) {
@@ -181,7 +281,7 @@ for (const fixture of fixtures) {
       if (!inland.support[i]) continue;
       const normalized = built.lakeMask[i] ? 0.61 : built.riverSurface[i];
       if (!fixture.waterfall || i !== idx(fixture.waterfall[0][0], fixture.waterfall[0][1])) {
-        close(inland.surfaceWorldY[i], normalized * heightScale, 1e-4, `${fixture.name} world height`);
+        close(inland.surfaceWorldY[i], normalized * inland.heightScale, 1e-4, `${fixture.name} world height`);
       }
     }
     const domain = buildRiverRenderDomain({
@@ -193,6 +293,35 @@ for (const fixture of fixtures) {
       inlandWater: inland
     }, TILE_TYPE_IDS.water);
     assert.ok(domain, `${fixture.name} contour`);
+    if (fixture.name === "river-mouth") {
+      const mouth = idx(5, 7);
+      const upstream = idx(5, 6);
+      assert.equal(inland.riverMouthMask[mouth], 1, `river-mouth step ${step} terminal cell`);
+      close(inland.riverMouthBlend[mouth], 1, 1e-9, `river-mouth step ${step} terminal blend`);
+      close(inland.riverMouthBlend[upstream], 0.35, 1e-6, `river-mouth step ${step} upstream blend`);
+      assert.equal(inland.oceanOverlapMask[mouth], 1, `river-mouth step ${step} ocean overlap`);
+      assert.equal(built.oceanMask[mouth], 0, `river-mouth step ${step} authoritative ocean unchanged`);
+      assert.ok(
+        isRiverMouthOpeningSegment(5, 8, 6, 8, inland.riverMouthOpeningEdges),
+        `river-mouth step ${step} opening edge`
+      );
+      let contourReachesOcean = false;
+      for (let edge = 0; edge + 3 < domain.boundaryEdges.length; edge += 4) {
+        if (
+          isRiverMouthOpeningSegment(
+            domain.boundaryEdges[edge],
+            domain.boundaryEdges[edge + 1],
+            domain.boundaryEdges[edge + 2],
+            domain.boundaryEdges[edge + 3],
+            inland.riverMouthOpeningEdges
+          )
+        ) {
+          contourReachesOcean = true;
+          break;
+        }
+      }
+      assert.equal(contourReachesOcean, true, `river-mouth step ${step} contour reaches shared ocean edge`);
+    }
     for (let i = 0; i + 3 < domain.boundaryEdges.length; i += 4) {
       const ax = domain.boundaryEdges[i];
       const ay = domain.boundaryEdges[i + 1];
@@ -218,12 +347,124 @@ for (const fixture of fixtures) {
       const split = splitInlandWaterSurfaceAtWaterfalls({
         positions: [span.centerWorldX - span.flowWorldX, 0, span.centerWorldZ - span.flowWorldZ, span.centerWorldX + span.flowWorldX, 0, span.centerWorldZ + span.flowWorldZ, span.leftWorldX, 0, span.leftWorldZ],
         uvs: [0, 0, 1, 0, 0, 1], indices: [0, 1, 2], bankDist: [1, 1, 1],
-        flowDir: [1, 0, 1, 0, 1, 0], flowSpeed: [1, 1, 1], rapid: [0, 0, 0], lakeFactor: [0, 0, 0]
+        flowDir: [1, 0, 1, 0, 1, 0], flowSpeed: [1, 1, 1], rapid: [0, 0, 0], lakeFactor: [0, 0, 0],
+        riverMouthBlend: [0, 0, 0], edgeMotionFactor: [1, 1, 1]
       }, [span], 0);
       assert.equal(split.indices.length, 0, `${fixture.name} no triangle crosses lip`);
     }
+    built.terrainResult.mesh.geometry.dispose();
     cases += 1;
   }
 }
+
+const REPORTED_SHARE_CODE = "MAP6-115-22002R2S1W1M152B0R1G1W2R2C1X1N1J141K0Y1M1A1E181Q0K1K12161C";
+const decoded = decodeTerrainSeedCode(REPORTED_SHARE_CODE);
+assert.ok(decoded, "reported inland-water share code decodes");
+const productionSize = MAP_SIZE_PRESETS[decoded.mapSize];
+assert.ok(productionSize, "reported inland-water map size resolves");
+const productionGrid = {
+  cols: productionSize,
+  rows: productionSize,
+  totalTiles: productionSize * productionSize
+};
+const productionState = createInitialState(decoded.seed, productionGrid);
+await generateMap(productionState, new RNG(decoded.seed), undefined, decoded.terrain, {
+  stopAfterPhase: "hydro:rivers",
+  onPhase: () => {}
+});
+const productionHeightMultiplier = getTerrainHeightScaleMultiplier(decoded.terrain, decoded.mapSize);
+const productionSample = buildRenderTerrainSample(
+  productionState,
+  new Uint8Array(productionGrid.totalTiles),
+  true,
+  false,
+  false,
+  true,
+  productionHeightMultiplier
+);
+const productionSurface = prepareTerrainRenderSurface(productionSample);
+const productionResult = buildTerrainMesh(productionSurface, null, null, null);
+const productionInland = productionResult.water?.inland?.surface;
+const productionSeam = productionInland?.terrainSeam;
+assert.ok(productionInland && productionSeam, "reported share code executes the full production cutout and mesh path");
+assert.equal(productionSurface.step, 1, "reported share code uses full-resolution terrain rendering");
+assert.equal(productionSeam.diagnostics.originalBoundaryDisplacementMax, 0, "reported contour vertices never move in XZ");
+assert.equal(productionSeam.diagnostics.maximumPreConformanceError, 0, "reported pre-conformance displacement is truthful and zero");
+assert.equal(productionSeam.diagnostics.unmatchedWaterVertexCount, 0, "reported share code has no unmatched seam vertices");
+assert.equal(productionSeam.diagnostics.tJunctionCount, 0, "reported share code has no T-junctions");
+assert.equal(productionSeam.diagnostics.unexpectedOpenEndCount, 0, "reported share code has no unexpected open ends");
+assert.equal(productionSeam.diagnostics.degenerateBoundaryTriangleCount, 0, "reported share code has no degenerate boundary triangles");
+assert.equal(productionInland.diagnostics.segmentXzErrorMax, 0, "reported terrain and water share exact split segmentation");
+assert.equal(productionInland.diagnostics.skirtJointGapMax, 0, "reported share code has no skirt joint gaps");
+assert.equal(productionInland.diagnostics.waterAboveSeamMax, 0, "reported water remains below the terrain closure");
+assert.ok(
+  productionSeam.vertices.every((vertex) => vertex.skirtBottomWorldY < vertex.waterWorldY),
+  "reported skirt bottoms remain below water"
+);
+for (const [name, x, y] of [["reported lake", 136, 137], ["former global mismatch", 130, 119]]) {
+  const probe = findNearestInlandWaterTerrainSeamSegment(productionSeam, x + 0.5, y + 0.5);
+  assert.ok(probe, `${name} resolves a seam segment`);
+  const a = productionSeam.vertices[probe.segment.a];
+  const b = productionSeam.vertices[probe.segment.b];
+  assert.equal(Math.max(a.forcedDisplacementCells, b.forcedDisplacementCells), 0, `${name} has no forced XZ displacement`);
+  assert.ok(a.sourceTerrainTriangleIds.length + b.sourceTerrainTriangleIds.length > 0, `${name} records terrain-intersection provenance`);
+}
+const productionDomain = buildRiverRenderDomain({
+  cols: productionGrid.cols,
+  rows: productionGrid.rows,
+  elevations: productionSample.elevations,
+  tileTypes: productionSample.tileTypes,
+  riverMask: productionSample.riverMask,
+  lakeMask: productionSample.lakeMask,
+  riverSurface: productionSample.riverSurface,
+  inlandWater: productionInland
+}, TILE_TYPE_IDS.water);
+assert.ok(productionDomain, "reported share code contour rebuilds for immutability verification");
+productionDomain.terrainSeam = productionSeam;
+const productionConforming = buildCutoutConformingRiverContourMesh(productionDomain);
+for (let index = 0; index < productionDomain.contourVertices.length; index += 1) {
+  assert.equal(
+    productionConforming.vertices[index],
+    productionDomain.contourVertices[index],
+    `reported original contour coordinate ${index} is immutable`
+  );
+}
+assert.equal(INLAND_WATER_CALM_BANK_STATIC_FOAM, 0, "calm banks have no continuous static white foam rim");
+assert.ok(
+  productionResult.water?.inland?.mesh.rapid.some((value) => value > 0),
+  "rapid foam inputs remain present"
+);
+const productionSkirt = buildInlandWaterTerrainSkirtMesh(
+  productionSeam,
+  productionInland.edgeToWorldX,
+  productionInland.edgeToWorldZ
+);
+assert.equal(
+  productionSkirt.indices.length,
+  productionSeam.segments.filter((segment) => !segment.openToOcean).length * 24,
+  "reported river-mouth openings receive neither skirt nor guard geometry"
+);
+assert.ok(
+  productionSeam.diagnostics.guardOverlapMin >= INLAND_WATER_GUARD_OVERLAP_CELLS - 1e-6,
+  "reported share code has measured submerged guard overlap at every closed seam endpoint"
+);
+productionResult.mesh.geometry.dispose();
+cases += 1;
+
+const overlapWater = new Float32Array(4);
+const overlapOcean = new Float32Array(4);
+const overlapSupport = new Uint8Array(4);
+const overlapSurfAttenuation = new Float32Array(4).fill(0.8);
+applyRiverMouthOceanOverlap(
+  Float32Array.from([0, 1, 0.0625, 0]),
+  overlapWater,
+  overlapOcean,
+  overlapSupport,
+  overlapSurfAttenuation
+);
+assert.deepEqual(Array.from(overlapSupport), [0, 1, 1, 0], "mouth overlap extends only render support");
+close(overlapOcean[1], 1, 1e-9, "terminal mouth renders at ocean level");
+close(overlapOcean[2], 0.35, 1e-6, "sampled partial mouth coverage receives a visible support floor");
+close(overlapSurfAttenuation[1], 0, 1e-9, "mouth overlap does not inherit a false beach attenuation");
 
 console.log(`Terrain inland-water regression passed cases=${cases}`);

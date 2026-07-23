@@ -1,5 +1,6 @@
 import { DEBUG_TERRAIN_RENDER } from "../../../core/config.js";
 import type { InlandWaterRenderSurface } from "../../../systems/terrain/rendering/inlandWaterRenderSurface.js";
+import type { InlandWaterTerrainSeam } from "../../../systems/terrain/rendering/inlandWaterTerrainSeam.js";
 import { buildDistanceField } from "../shared/distanceField.js";
 
 type RiverRenderDomainSample = {
@@ -54,11 +55,8 @@ export type RiverRenderDomain = {
   contourVertices: Float32Array;
   contourIndices: Uint32Array;
   boundaryEdges: Float32Array;
-  cutoutBoundaryEdges: Float32Array;
-  cutoutBoundaryVertexHeights?: Float32Array;
-  cutoutBoundaryWallEdges?: Float32Array;
-  // Packed edge endpoints: edgeX, edgeY, worldY, terrainU, terrainV.
-  cutoutBoundarySkirtEdges?: Float32Array;
+  riverMouthOpeningEdges?: Float32Array;
+  terrainSeam?: InlandWaterTerrainSeam;
   distanceToBank: Int16Array;
   debugStats?: RiverDomainDebugStats;
 };
@@ -313,6 +311,21 @@ export const buildRiverRenderDomain = (
       vertexField[vIdx(x, y)] = count > 0 ? sum / count : 0;
     }
   }
+  const riverMouthOpeningEdges = sample.inlandWater?.riverMouthOpeningEdges;
+  if (riverMouthOpeningEdges) {
+    for (let i = 0; i + 3 < riverMouthOpeningEdges.length; i += 4) {
+      const ax = Math.round(riverMouthOpeningEdges[i] ?? 0);
+      const ay = Math.round(riverMouthOpeningEdges[i + 1] ?? 0);
+      const bx = Math.round(riverMouthOpeningEdges[i + 2] ?? 0);
+      const by = Math.round(riverMouthOpeningEdges[i + 3] ?? 0);
+      if (ax >= 0 && ay >= 0 && ax <= cols && ay <= rows) {
+        vertexField[vIdx(ax, ay)] = Math.max(vertexField[vIdx(ax, ay)] ?? 0, RIVER_FIELD_THRESHOLD);
+      }
+      if (bx >= 0 && by >= 0 && bx <= cols && by <= rows) {
+        vertexField[vIdx(bx, by)] = Math.max(vertexField[vIdx(bx, by)] ?? 0, RIVER_FIELD_THRESHOLD);
+      }
+    }
+  }
   if (RIVER_VERTEX_FIELD_BLUR_BLEND > 0) {
     const smoothed = new Float32Array(vertexField.length);
     const vIsValid = (x: number, y: number): boolean => x >= 0 && y >= 0 && x <= cols && y <= rows;
@@ -531,7 +544,7 @@ export const buildRiverRenderDomain = (
     contourVertices: new Float32Array(contourVertices),
     contourIndices: new Uint32Array(contourIndices),
     boundaryEdges: new Float32Array(boundaryEdges),
-    cutoutBoundaryEdges: new Float32Array(boundaryEdges),
+    riverMouthOpeningEdges,
     distanceToBank: buildDistanceField(renderSupport, cols, rows, 0),
     debugStats: DEBUG_TERRAIN_RENDER
       ? {
@@ -604,137 +617,27 @@ export const buildBoundaryEdgesFromIndexedContour = (
   return new Float32Array(edges);
 };
 
-export const buildSnappedRiverContourVertices = (
-  riverDomain: RiverRenderDomain,
-  contourIndices: number[]
-): Float32Array => {
-  const contourVertexCount = riverDomain.contourVertices.length / 2;
-  const snapped = new Float32Array(riverDomain.contourVertices);
-  if (contourVertexCount === 0) {
-    return snapped;
-  }
-  const cutoutEdges =
-    riverDomain.cutoutBoundaryEdges && riverDomain.cutoutBoundaryEdges.length >= 4
-      ? riverDomain.cutoutBoundaryEdges
-      : riverDomain.boundaryEdges;
-  if (!cutoutEdges || cutoutEdges.length < 4) {
-    return snapped;
-  }
-  const quantScale = 8192;
-  const keyOf = (x: number, y: number): string => `${Math.round(x * quantScale)},${Math.round(y * quantScale)}`;
-  const boundaryFlags = new Uint8Array(contourVertexCount);
-  const boundaryEdgeMap = new Map<string, { count: number; a: number; b: number }>();
-  const addBoundaryCandidate = (a: number, b: number): void => {
-    if (a === b) {
-      return;
-    }
-    const key = a < b ? `${a}|${b}` : `${b}|${a}`;
-    const existing = boundaryEdgeMap.get(key);
-    if (!existing) {
-      boundaryEdgeMap.set(key, { count: 1, a, b });
-      return;
-    }
-    existing.count += 1;
-  };
-  for (let i = 0; i < contourIndices.length; i += 3) {
-    const a = contourIndices[i] as number;
-    const b = contourIndices[i + 1] as number;
-    const c = contourIndices[i + 2] as number;
-    if (a < 0 || b < 0 || c < 0 || a >= contourVertexCount || b >= contourVertexCount || c >= contourVertexCount) {
-      continue;
-    }
-    addBoundaryCandidate(a, b);
-    addBoundaryCandidate(b, c);
-    addBoundaryCandidate(c, a);
-  }
-  boundaryEdgeMap.forEach((record) => {
-    if (record.count !== 1) {
-      return;
-    }
-    boundaryFlags[record.a] = 1;
-    boundaryFlags[record.b] = 1;
-  });
-  const cutoutEndpointLookup = new Map<string, { x: number; y: number }>();
-  const registerEndpoint = (x: number, y: number): void => {
-    const key = keyOf(x, y);
-    if (!cutoutEndpointLookup.has(key)) {
-      cutoutEndpointLookup.set(key, { x, y });
-    }
-  };
-  for (let e = 0; e < cutoutEdges.length; e += 4) {
-    registerEndpoint(cutoutEdges[e], cutoutEdges[e + 1]);
-    registerEndpoint(cutoutEdges[e + 2], cutoutEdges[e + 3]);
-  }
-  for (let i = 0; i < contourVertexCount; i += 1) {
-    if (!boundaryFlags[i]) {
-      continue;
-    }
-    const vx = snapped[i * 2];
-    const vy = snapped[i * 2 + 1];
-    const exact = cutoutEndpointLookup.get(keyOf(vx, vy));
-    if (exact) {
-      snapped[i * 2] = exact.x;
-      snapped[i * 2 + 1] = exact.y;
-      continue;
-    }
-    let bestDist = Number.POSITIVE_INFINITY;
-    let bestX = vx;
-    let bestY = vy;
-    for (let e = 0; e < cutoutEdges.length; e += 4) {
-      const ax = cutoutEdges[e];
-      const ay = cutoutEdges[e + 1];
-      const bx = cutoutEdges[e + 2];
-      const by = cutoutEdges[e + 3];
-      const abX = bx - ax;
-      const abY = by - ay;
-      const lenSq = abX * abX + abY * abY;
-      if (lenSq <= 1e-8) {
-        continue;
-      }
-      const t = clamp(((vx - ax) * abX + (vy - ay) * abY) / lenSq, 0, 1);
-      const qx = ax + abX * t;
-      const qy = ay + abY * t;
-      const dist = Math.hypot(vx - qx, vy - qy);
-      if (dist < bestDist) {
-        bestDist = dist;
-        bestX = qx;
-        bestY = qy;
-        if (bestDist <= 1e-4) {
-          break;
-        }
-      }
-    }
-    if (Number.isFinite(bestDist)) {
-      snapped[i * 2] = bestX;
-      snapped[i * 2 + 1] = bestY;
-    }
-  }
-  return snapped;
-};
-
 export type CutoutConformingRiverContourMesh = {
   vertices: Float32Array;
   indices: Uint32Array;
+  boundaryVertices: Uint8Array;
 };
 
-/**
- * Inserts the terrain cutout's additional boundary endpoints into the water
- * contour. Projection alone is insufficient: a coarse terrain triangle can
- * turn several detailed contour edges into one chord, leaving both meshes with
- * different segment topology even when their existing vertices are nearby.
- */
+/** Inserts exact terrain-edge intersections without moving contour vertices. */
 export const buildCutoutConformingRiverContourMesh = (
   riverDomain: RiverRenderDomain
 ): CutoutConformingRiverContourMesh => {
   const sourceIndices = Array.from(riverDomain.contourIndices);
-  const vertices = Array.from(buildSnappedRiverContourVertices(riverDomain, sourceIndices));
+  // The generated contour owns XZ. Terrain-intersection vertices may split its
+  // boundary edges, but existing contour vertices must never be conformed.
+  const vertices = Array.from(riverDomain.contourVertices);
   const vertexCount = vertices.length / 2;
   if (vertexCount === 0 || sourceIndices.length < 3) {
-    return { vertices: new Float32Array(vertices), indices: new Uint32Array(sourceIndices) };
+    return { vertices: new Float32Array(vertices), indices: new Uint32Array(sourceIndices), boundaryVertices: new Uint8Array(vertexCount) };
   }
-  const cutoutEdges = riverDomain.cutoutBoundaryEdges;
+  const cutoutEdges = riverDomain.terrainSeam?.boundaryEdges;
   if (!cutoutEdges || cutoutEdges.length < 4) {
-    return { vertices: new Float32Array(vertices), indices: new Uint32Array(sourceIndices) };
+    return { vertices: new Float32Array(vertices), indices: new Uint32Array(sourceIndices), boundaryVertices: new Uint8Array(vertexCount) };
   }
 
   type BoundaryRecord = { count: number; a: number; b: number };
@@ -795,7 +698,7 @@ export const buildCutoutConformingRiverContourMesh = (
         bestT = t;
       }
     }
-    if (!bestRecord) return;
+    if (!bestRecord || bestDistance > 2 / quantScale) return;
     const newVertexIndex = vertices.length / 2;
     vertices.push(point.x, point.y);
     insertedVertexByPosition.set(key, newVertexIndex);
@@ -830,5 +733,13 @@ export const buildCutoutConformingRiverContourMesh = (
       if (ia !== ib && ib !== ic && ic !== ia) outIndices.push(ia, ib, ic);
     }
   }
-  return { vertices: new Float32Array(vertices), indices: new Uint32Array(outIndices) };
+  const boundaryVertices = new Uint8Array(vertices.length / 2);
+  for (const record of boundaryRecords) {
+    boundaryVertices[record.a] = 1;
+    boundaryVertices[record.b] = 1;
+  }
+  insertionsByEdge.forEach((insertions) => {
+    for (const insertion of insertions) boundaryVertices[insertion.vertexIndex] = 1;
+  });
+  return { vertices: new Float32Array(vertices), indices: new Uint32Array(outIndices), boundaryVertices };
 };

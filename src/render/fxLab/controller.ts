@@ -53,6 +53,7 @@ import {
 } from "./controls.js";
 import type { OceanWaterDebugControls } from "../oceanWaterDebug.js";
 import type { TerrainWaterDebugControls } from "../terrainWaterDebug.js";
+import { setInlandWaterSeamDebugMaterialMode } from "../../systems/terrain/rendering/inlandWaterSeamDebugMaterial.js";
 import { applyFxLabScenarioFrame, type FxLabScenarioFrameContext } from "./scenarios.js";
 import {
   normalizeFxLabScenarioId,
@@ -682,6 +683,7 @@ export const createFxLabController = (
     terrainSurface = prepareTerrainRenderSurface(sceneState.sample);
     const result = buildTerrainMesh(terrainSurface, treeAssets, houseAssets, null);
     terrainMesh = result.mesh;
+    setInlandWaterSeamDebugMaterialMode(terrainMesh.material, terrainWaterDebugControls.inlandWaterSeamDebugMode);
     terrainSize = result.size;
     scene.add(terrainMesh);
     if (result.water) {
@@ -1456,12 +1458,18 @@ export const createFxLabController = (
     setTerrainWaterDebugControls: (controls: Partial<TerrainWaterDebugControls>) => {
       waterSystem.setDebugControls(controls);
       terrainWaterDebugControls = waterSystem.getDebugControls();
+      if (terrainMesh) {
+        setInlandWaterSeamDebugMaterialMode(terrainMesh.material, terrainWaterDebugControls.inlandWaterSeamDebugMode);
+      }
       renderOnce();
     },
     getTerrainWaterDebugControls: () => ({ ...terrainWaterDebugControls }),
     resetTerrainWaterDebugControls: () => {
       terrainWaterDebugControls = cloneDefaultTerrainWaterDebugControls();
       waterSystem.setDebugControls(terrainWaterDebugControls);
+      if (terrainMesh) {
+        setInlandWaterSeamDebugMaterialMode(terrainMesh.material, terrainWaterDebugControls.inlandWaterSeamDebugMode);
+      }
       renderOnce();
     },
     resetAllDebugControls: () => {

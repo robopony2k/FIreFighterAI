@@ -1,6 +1,17 @@
+import {
+  INLAND_WATER_SEAM_DEBUG_MODES,
+  type InlandWaterSeamDebugMode
+} from "../systems/terrain/rendering/inlandWaterSeamDebugMaterial.js";
+
 const clamp = (value: number, min: number, max: number): number => Math.max(min, Math.min(max, value));
 
+export { INLAND_WATER_SEAM_DEBUG_MODES, type InlandWaterSeamDebugMode };
+
+const normalizeSeamDebugMode = (value: InlandWaterSeamDebugMode | undefined): InlandWaterSeamDebugMode =>
+  value && INLAND_WATER_SEAM_DEBUG_MODES.includes(value) ? value : "normal";
+
 export type TerrainWaterDebugControls = {
+  inlandWaterSeamDebugMode: InlandWaterSeamDebugMode;
   showRiver: boolean;
   riverFlowSpeedScale: number;
   riverNormalStrengthScale: number;
@@ -16,6 +27,7 @@ export type TerrainWaterDebugControls = {
 };
 
 export const DEFAULT_TERRAIN_WATER_DEBUG_CONTROLS: TerrainWaterDebugControls = {
+  inlandWaterSeamDebugMode: "normal",
   showRiver: true,
   riverFlowSpeedScale: 1,
   riverNormalStrengthScale: 1,
@@ -33,6 +45,7 @@ export const DEFAULT_TERRAIN_WATER_DEBUG_CONTROLS: TerrainWaterDebugControls = {
 export const normalizeTerrainWaterDebugControls = (
   controls: Partial<TerrainWaterDebugControls> | undefined
 ): TerrainWaterDebugControls => ({
+  inlandWaterSeamDebugMode: normalizeSeamDebugMode(controls?.inlandWaterSeamDebugMode),
   showRiver: controls?.showRiver ?? DEFAULT_TERRAIN_WATER_DEBUG_CONTROLS.showRiver,
   riverFlowSpeedScale: clamp(
     controls?.riverFlowSpeedScale ?? DEFAULT_TERRAIN_WATER_DEBUG_CONTROLS.riverFlowSpeedScale,

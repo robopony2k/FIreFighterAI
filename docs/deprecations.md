@@ -655,6 +655,23 @@ Migration guidance:
 2. Pass typed `InlandWaterfallSpan` data to the inland mesh builder; do not reconstruct drops from normalized terrain or packed arrays.
 3. Keep ocean rendering separate and allow only the controlled river-mouth overlap between ocean and inland-water domains.
 
+## Endpoint-Only and Projection-Based Inland-Water Skirt Welding
+
+Status: Deprecated as of July 22, 2026.
+
+- Packed terrain-cutout endpoint arrays and nearest/exact-key height fallbacks no longer define inland-water closure geometry.
+- Projecting or snapping full-resolution water vertices onto scalar-field terrain-cutout chords is also obsolete; post-snap near-zero error must not be presented as the original alignment error.
+- The replacement treats the complete indexed lake/river contour as immutable XZ authority, subtracts its water triangles directly from terrain triangles, and splits both surfaces only at exact terrain-edge intersections.
+- Shared seam vertices retain source-contour and terrain-triangle provenance and own the resolved terrain top, authoritative water height, skirt bottom, and retained-land UV.
+- Exact coplanar contact alone is not considered sufficient depth coverage: closed skirt bottoms carry a measured, miter-jointed, fully submerged waterward guard strip in the existing terrain buffers. Do not restore projection or inflate the visible seam to hide raster pinholes.
+- Closed-bank vertex displacement fades to zero at the seam; river-mouth opening segments remain skirt-free and retain their ocean hand-off behavior.
+
+Migration guidance:
+
+1. Pass `InlandWaterTerrainSeam` through the terrain rendering boundary and build it from `inlandWaterTerrainCutout` intersections instead of adding parallel packed boundary arrays or projection fallbacks.
+2. Diagnose original-boundary displacement, segment-level XZ error, unmatched vertices, T-junctions, open ends, degenerate boundary triangles, skirt joints, height ordering, measured guard overlap, and render-only lift rather than relying on endpoint-only or post-conformance metrics.
+3. Keep seam topology static and rendering-only; do not repair visual gaps by changing hydrology, water surfaces, terrain generation, save data, or draw-call structure.
+
 ## Post-Sea-Level Shoreline Topology and Elevation Rewrites
 
 Status: Deprecated as of July 22, 2026.

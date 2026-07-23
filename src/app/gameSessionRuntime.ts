@@ -23,6 +23,7 @@ import {
   loadTreeAssets
 } from "../render/threeTestAssets.js";
 import { asRenderSim, buildRenderTerrainSample } from "../render/simView.js";
+import { INLAND_WATER_SEAM_DEBUG_MODES } from "../render/terrainWaterDebug.js";
 import { createRenderState, syncRenderState } from "../render/renderState.js";
 import { initPhaseUI } from "../ui/phase/index.js";
 import { bindPhaseUi } from "../ui/phase/bindings.js";
@@ -642,6 +643,14 @@ export const createAppRuntime = (): AppRuntime => {
     );
     syncPerfOverlayControls();
   };
+  const cycleInlandWaterSeamDebugMode = (): void => {
+    if (!canUsePerfOverlayRunToggles() || !threeTestController) return;
+    const current = threeTestController.getTerrainWaterDebugControls().inlandWaterSeamDebugMode;
+    const currentIndex = INLAND_WATER_SEAM_DEBUG_MODES.indexOf(current);
+    const next = INLAND_WATER_SEAM_DEBUG_MODES[(currentIndex + 1) % INLAND_WATER_SEAM_DEBUG_MODES.length];
+    threeTestController.setTerrainWaterDebugControls({ inlandWaterSeamDebugMode: next });
+    setStatus(state, `Inland-water seam isolation: ${next}. Press F11 to cycle.`);
+  };
   
   const setPerfOverlayVisible = (visible: boolean): void => {
     perfOverlayVisible = visible;
@@ -836,6 +845,7 @@ export const createAppRuntime = (): AppRuntime => {
         lines.push(`3D env: fog ${threePerf.environmentFogEnabled ? "on" : "off"}  F8 toggle`);
         lines.push(`3D fall viz: ${threePerf.waterfallDebugHighlightEnabled ? "xray on" : "xray off"}  F9 toggle`);
         lines.push(`3D roads: ${threeTestController?.getRoadHighContrastEnabled() ? "ultra contrast" : "normal"}  F10 toggle`);
+        lines.push(`3D water seam: ${threeTestController?.getTerrainWaterDebugControls().inlandWaterSeamDebugMode ?? "normal"}  F11 cycle`);
         lines.push(
           `3D mem: geom ${formatInt(threePerf.memoryGeometries)} tex ${formatInt(threePerf.memoryTextures)} totalCalls ${formatInt(threePerf.totalCalls)}`
         );
@@ -1972,7 +1982,7 @@ export const createAppRuntime = (): AppRuntime => {
       setRuntimeSetting("perf", !perfOverlayVisible);
       return;
     }
-    if ((key !== "f9" && key !== "f10") || event.ctrlKey || event.shiftKey || event.altKey || event.metaKey) {
+    if ((key !== "f9" && key !== "f10" && key !== "f11") || event.ctrlKey || event.shiftKey || event.altKey || event.metaKey) {
       return;
     }
     if (!canUsePerfOverlayRunToggles() || !threeTestController) {
@@ -1982,6 +1992,10 @@ export const createAppRuntime = (): AppRuntime => {
     if (key === "f9") {
       const nextHighlight = !threeTestController.getTerrainWaterDebugControls().waterfallDebugHighlight;
       setRunWaterfallHighlightEnabled(nextHighlight);
+      return;
+    }
+    if (key === "f11") {
+      cycleInlandWaterSeamDebugMode();
       return;
     }
     setRunRoadHighContrastEnabled(!threeTestController.getRoadHighContrastEnabled());
@@ -2224,9 +2238,3 @@ export const createAppRuntime = (): AppRuntime => {
     dispose
   };
 };
-
-
-
-
-
-

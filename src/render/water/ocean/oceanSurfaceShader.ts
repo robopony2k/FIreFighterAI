@@ -107,7 +107,12 @@ const shaderShoreFns = `
     return mix(0.34, 1.0, edgeNoise) * u_shoreParamsA.w * edgePresence * surfBand * u_shoreFeatureMix.x;
   }
 
-  float computeShorePulse(vec2 worldXZ, vec2 uvCoord, float shorelineSdf) {
+  float computeShorePulse(
+    vec2 worldXZ,
+    vec2 uvCoord,
+    float shorelineSdf,
+    out vec2 shoreIn
+  ) {
     vec2 noiseUv = worldXZ * vec2(0.013, 0.011);
     float cellNoiseA = valueNoise21(noiseUv + vec2(0.17, 0.61));
     float cellNoiseB = valueNoise21(noiseUv * 1.13 + vec2(2.91, 1.37));
@@ -129,7 +134,7 @@ const shaderShoreFns = `
       u_shoreTuning.z *
       localWaveLengthScale;
     vec2 shoreOut = sampleShoreGradient(uvCoord);
-    vec2 shoreIn = -shoreOut;
+    shoreIn = -shoreOut;
     vec2 shoreAlong = vec2(-shoreIn.y, shoreIn.x);
     float shorePhaseA =
       dot(worldXZ, normalize(shoreIn + shoreAlong * 0.26)) *
@@ -214,7 +219,8 @@ const shaderWaveFns = `
     float ocean,
     float coverage,
     float surfAtten,
-    float shorelineSdf
+    float shorelineSdf,
+    out float shorePulse
   ) {
     float shoreWaveBlend = smoothstep(u_shoreParamsA.x, u_shoreParamsA.z, shorelineSdf);
     float localWaveAmpScale = mix(
@@ -272,9 +278,10 @@ const shaderWaveFns = `
       mix(0.32, 1.0, shorePresence) *
       mix(0.55, 1.0, openWater);
     waveAmp *= 1.0 - attenuation * mix(0.62, 0.28, shoreWaveBlend);
-    float shorePulse = computeShorePulse(worldXZ, uvCoord, shorelineSdf);
+    vec2 shoreIn;
+    shorePulse = computeShorePulse(worldXZ, uvCoord, shorelineSdf, shoreIn);
     float waveHeight = (broad.z * 0.68 + detail.z * 0.22 + chop.z * 0.10) * waveAmp;
-    waveHeight += shorePulse * waveAmp * (0.12 + 0.38 * coastWeight) * mix(0.78, 1.28, u_oceanContext.x);
+    waveHeight += shorePulse * waveAmp * (0.16 + 0.5 * coastWeight) * mix(0.78, 1.28, u_oceanContext.x);
     float troughFloor = -waveAmp * mix(1.0, 0.2, coastWeight);
     waveHeight = mix(waveHeight, max(waveHeight, troughFloor), u_shoreFeatureMix.z);
     float tide =
@@ -285,6 +292,9 @@ const shaderWaveFns = `
       max(openWater, coverage);
     vec2 drag = (broad.xy * 0.64 + detail.xy * 0.24 + chop.xy * 0.12) * waveAmp * 0.58;
     drag *= mix(1.0, 0.42, attenuation);
+    // A small landward lean gives the lifted pulse a moving lip without adding
+    // geometry, samples, or another wave evaluation.
+    drag += shoreIn * shorePulse * waveAmp * (0.08 + 0.2 * coastWeight);
     return vec3(drag.x, waveHeight + tide, drag.y);
   }
 `;
@@ -336,6 +346,7 @@ export const createOceanSurfaceMaterial = (uniforms: OceanUniforms): THREE.Shade
       varying float vSurfAtten;
       varying float vShorelineSdf;
       varying float vInlandWater;
+      varying float vShorePulse;
 
       uniform float u_time;
       uniform sampler2D u_domainMap;
@@ -370,14 +381,16 @@ export const createOceanSurfaceMaterial = (uniforms: OceanUniforms): THREE.Shade
         out float sdf,
         out float surfAtten,
         out float shorelineSdf,
-        out float inlandWater
+        out float inlandWater,
+        out float shorePulse
       ) {
         vec2 worldXZ = (modelMatrix * vec4(p, 1.0)).xz;
         vec4 domain = texture2D(u_domainMap, uvCoord);
         ocean = domain.r;
         coverage = domain.b;
         surfAtten = domain.a;
-        inlandWater = texture2D(u_inlandWaterMap, uvCoord).r;
+        vec4 inlandSample = texture2D(u_inlandWaterMap, uvCoord);
+        inlandWater = inlandSample.r;
         sdf = sampleSmoothShoreSdf(uvCoord);
         float positiveSdf = max(0.0, sdf);
         float organicInset = computeOrganicShoreInset(worldXZ, positiveSdf);
@@ -385,7 +398,23 @@ export const createOceanSurfaceMaterial = (uniforms: OceanUniforms): THREE.Shade
         // landward sample onto the same zero contour, making the visible edge
         // follow sampled grid cells instead of a continuous waterline.
         shorelineSdf = sdf > 0.0 ? sdf - organicInset : sdf;
-        vec3 animated = computeAnimatedWave(worldXZ, uvCoord, ocean, coverage, surfAtten, shorelineSdf);
+        // The green channel marks the render-only river-mouth overlap. Treat
+        // it as open water for shore effects so no breaker closes the outlet.
+        float riverMouth = inlandSample.g;
+        shorelineSdf = mix(
+          shorelineSdf,
+          max(shorelineSdf, u_shoreParamsA.z + u_shoreParamsB.y),
+          riverMouth
+        );
+        vec3 animated = computeAnimatedWave(
+          worldXZ,
+          uvCoord,
+          ocean,
+          coverage,
+          surfAtten,
+          shorelineSdf,
+          shorePulse
+        );
         animated *= mix(1.0, 0.16, clamp(inlandWater, 0.0, 1.0));
         return p + animated;
       }
@@ -399,7 +428,18 @@ export const createOceanSurfaceMaterial = (uniforms: OceanUniforms): THREE.Shade
         float surfAtten;
         float shorelineSdf;
         float inlandWater;
-        vec3 displaced = computeSurfacePosition(position, vUv, ocean, coverage, sdf, surfAtten, shorelineSdf, inlandWater);
+        float shorePulse;
+        vec3 displaced = computeSurfacePosition(
+          position,
+          vUv,
+          ocean,
+          coverage,
+          sdf,
+          surfAtten,
+          shorelineSdf,
+          inlandWater,
+          shorePulse
+        );
 
         float oceanX;
         float coverageX;
@@ -407,6 +447,7 @@ export const createOceanSurfaceMaterial = (uniforms: OceanUniforms): THREE.Shade
         float surfAttenX;
         float shorelineSdfX;
         float inlandWaterX;
+        float shorePulseX;
         vec3 displacedX = computeSurfacePosition(
           position + vec3(u_worldStep.x, 0.0, 0.0),
           vUv + vec2(u_uvStep.x, 0.0),
@@ -415,7 +456,8 @@ export const createOceanSurfaceMaterial = (uniforms: OceanUniforms): THREE.Shade
           sdfX,
           surfAttenX,
           shorelineSdfX,
-          inlandWaterX
+          inlandWaterX,
+          shorePulseX
         );
 
         float oceanZ;
@@ -424,6 +466,7 @@ export const createOceanSurfaceMaterial = (uniforms: OceanUniforms): THREE.Shade
         float surfAttenZ;
         float shorelineSdfZ;
         float inlandWaterZ;
+        float shorePulseZ;
         vec3 displacedZ = computeSurfacePosition(
           position + vec3(0.0, 0.0, u_worldStep.y),
           vUv + vec2(0.0, u_uvStep.y),
@@ -432,7 +475,8 @@ export const createOceanSurfaceMaterial = (uniforms: OceanUniforms): THREE.Shade
           sdfZ,
           surfAttenZ,
           shorelineSdfZ,
-          inlandWaterZ
+          inlandWaterZ,
+          shorePulseZ
         );
 
         vec3 tangentX = displacedX - displaced;
@@ -453,6 +497,7 @@ export const createOceanSurfaceMaterial = (uniforms: OceanUniforms): THREE.Shade
         vSurfAtten = surfAtten;
         vShorelineSdf = shorelineSdf;
         vInlandWater = inlandWater;
+        vShorePulse = shorePulse;
         gl_Position = projectionMatrix * viewMatrix * worldPos;
       }
     `,
@@ -469,6 +514,7 @@ export const createOceanSurfaceMaterial = (uniforms: OceanUniforms): THREE.Shade
       varying float vSurfAtten;
       varying float vShorelineSdf;
       varying float vInlandWater;
+      varying float vShorePulse;
 
       uniform sampler2D u_mask;
       uniform sampler2D u_supportMap;
@@ -561,29 +607,37 @@ export const createOceanSurfaceMaterial = (uniforms: OceanUniforms): THREE.Shade
           clamp(swashWeight * 0.92 + shoreWaveSuppression * 0.24, 0.0, 1.0)
         );
         float shoreImpact = (shoalWeight * 0.76 + swashWeight) * oceanMotion;
-        float shoreLappingA = sin(u_time * 1.55 + dot(vWorldPos.xz, vec2(0.48, 0.29)));
-        float shoreLappingB = sin(u_time * 2.2 - dot(vWorldPos.xz, vec2(0.31, -0.57)));
-        float shoreLapping = smoothstep(0.14, 0.96, shoreLappingA * 0.28 + shoreLappingB * 0.22 + 0.5);
+        // This is the exact pulse that lifts the shoreline vertices. Keeping
+        // crest, collapse, and swash on that phase prevents foam from reading
+        // as a separate animated color band sliding over the surface.
+        float syncedShorePulse = clamp(vShorePulse, 0.0, 1.0);
         float breakerGate = smoothstep(
-          mix(0.56, 0.38, u_oceanContext.y),
-          mix(0.88, 0.72, u_oceanContext.y),
-          shoreLapping
+          mix(0.5, 0.3, u_oceanContext.y),
+          mix(0.82, 0.62, u_oceanContext.y),
+          syncedShorePulse
+        );
+        float displacedCrest = smoothstep(0.006, 0.05, max(0.0, vDisp));
+        float crestFace = smoothstep(
+          0.004,
+          0.07,
+          1.0 - clamp(vGeomNormal.y, 0.0, 1.0)
         );
         float breakerCrest =
-          smoothstep(0.008, 0.05, max(0.0, vDisp)) *
+          breakerGate *
+          mix(0.52, 1.0, max(displacedCrest, crestFace)) *
           mix(0.45, 1.0, clamp(shoreImpact + shorePresence * 0.22, 0.0, 1.0));
-        float shorePulse =
-          max(breakerCrest, breakerGate * (0.18 + swashWeight * 0.18)) *
-          staticCoastMask *
-          oceanMotion;
+        float collapseTrail =
+          smoothstep(0.08, 0.36, syncedShorePulse) *
+          (1.0 - smoothstep(0.72, 0.98, syncedShorePulse));
+        float swashPulse = smoothstep(0.1, 0.5, syncedShorePulse);
         float swashBand = 1.0 - smoothstep(0.0, u_shoreParamsA.y + u_shoreParamsB.y, shorelineSdf);
         float shoreMotionMask = max(
           seawardCoastMask * mix(0.4, 1.0, surfWeight),
-          landwardCoastMask * swashBand * mix(0.62, 1.0, shoreLapping)
+          landwardCoastMask * swashBand * mix(0.58, 1.0, swashPulse)
         );
         float coastalMask = max(staticCoastMask, shoreMotionMask);
         float swashAdvance =
-          (0.012 + 0.03 * breakerCrest + 0.016 * breakerGate) *
+          (0.008 + 0.038 * swashPulse + 0.025 * breakerCrest) *
           mix(0.82, 1.32, u_oceanContext.x) *
           u_shoreParamsB.x *
           clamp(
@@ -614,11 +668,11 @@ export const createOceanSurfaceMaterial = (uniforms: OceanUniforms): THREE.Shade
         );
         float swashSheet =
           landwardCoastMask *
-          (0.055 + 0.24 * breakerGate + 0.18 * breakerCrest) *
+          (0.035 + 0.22 * swashPulse + 0.16 * collapseTrail) *
           mix(0.8, 1.24, u_oceanContext.y) *
           u_shoreTuning.x *
           oceanMotion;
-        renderShoreClip = max(renderShoreClip, swashSheet * mix(0.24, 0.42, breakerGate));
+        renderShoreClip = max(renderShoreClip, swashSheet * mix(0.2, 0.44, swashPulse));
         float shorelineCover = clamp((0.12 + shorelineAdvance * 1.8) * shoreMotionMask * oceanMotion, 0.0, 1.0);
         float coverage = max(max(max(effectiveCoverage, swashSheet * 1.02), shorelineCover), lakeCoverage);
         if (
@@ -744,10 +798,10 @@ export const createOceanSurfaceMaterial = (uniforms: OceanUniforms): THREE.Shade
           clamp(vSurfAtten * 0.72 + shoreImpact * 0.36 + u_oceanContext.y * 0.34, 0.0, 1.0)
         );
         float foamBand = 1.0 - smoothstep(-u_shoreParamsB.y * 0.18, foamWidth, shoreRenderSdf);
-        float intermittentBreaker = breakerGate * (0.24 + breakerCrest * 0.4) + breakerCrest * 0.24;
+        float intermittentBreaker = breakerCrest * (0.34 + crestFace * 0.38) + collapseTrail * 0.14;
         float shoreFoam =
           foamBand *
-          (0.018 + shoreLapping * 0.035 + intermittentBreaker) *
+          (0.018 + collapseTrail * 0.035 + intermittentBreaker) *
           (0.82 + shoreImpact * 0.22) *
           max(seawardCoastMask * 0.72, landwardCoastMask * 0.52);
         float foam =
@@ -758,7 +812,7 @@ export const createOceanSurfaceMaterial = (uniforms: OceanUniforms): THREE.Shade
         float breakerLine =
           foamBand *
           seawardCoastMask *
-          breakerGate *
+          breakerCrest *
           mix(0.22, 0.48, u_oceanContext.y) *
           oceanMotion;
         vec3 foamColor = mix(vec3(0.96, 0.98, 1.0), u_sunColor, 0.08);

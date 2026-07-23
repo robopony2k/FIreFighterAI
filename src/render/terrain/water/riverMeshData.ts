@@ -9,6 +9,10 @@ import {
   type InlandWaterRenderSurface
 } from "../../../systems/terrain/rendering/inlandWaterRenderSurface.js";
 import {
+  findInlandWaterTerrainSeamVertex,
+  sampleInlandWaterEdgeMotionFactor
+} from "../../../systems/terrain/rendering/inlandWaterTerrainSeam.js";
+import {
   buildBoundaryEdgesFromIndexedContour,
   buildCutoutConformingRiverContourMesh,
   type RiverContourVertex,
@@ -55,7 +59,6 @@ type RiverMeshDataBuildDeps = {
 
 const RIVER_MIN_DEPTH_NORM = 0.006;
 const RIVER_MIN_VISUAL_WIDTH_CELLS = 1.35;
-const WALL_WATER_OVERLAP = 0.002;
 const RIVER_EDGE_SURFACE_UNDERSHOOT = 0.002;
 
 const clamp = (value: number, min: number, max: number): number => Math.min(max, Math.max(min, value));
@@ -267,80 +270,80 @@ export const buildRiverMeshData = (
   const flowSpeed: number[] = [];
   const rapid: number[] = [];
   const lakeFactor: number[] = [];
-  const contourQuantScale = 8192;
-  const contourKeyOf = (x: number, y: number): string =>
-    `${Math.round(x * contourQuantScale)},${Math.round(y * contourQuantScale)}`;
-  const contourBoundaryTerrainWorldByKey = new Map<string, number>();
+  const riverMouthBlend: number[] = [];
+  const edgeMotionFactor: number[] = [];
   const conformingContourMesh = buildCutoutConformingRiverContourMesh(riverDomain);
   const indices = Array.from(conformingContourMesh.indices);
   const distToNonRiver = riverDomain.distanceToBank;
   const renderContourVertices = conformingContourMesh.vertices;
-  if (inlandWater && riverDomain.cutoutBoundaryEdges.length >= 4) {
+  if (inlandWater && riverDomain.terrainSeam) {
     const waterBoundary = buildBoundaryEdgesFromIndexedContour(renderContourVertices, indices);
-    const endpointQuantScale = 8192;
-    const endpointKey = (x: number, y: number): string =>
-      `${Math.round(x * endpointQuantScale)},${Math.round(y * endpointQuantScale)}`;
-    const waterBoundaryEndpoints = new Set<string>();
-    for (let edge = 0; edge + 3 < waterBoundary.length; edge += 4) {
-      waterBoundaryEndpoints.add(endpointKey(waterBoundary[edge], waterBoundary[edge + 1]));
-      waterBoundaryEndpoints.add(endpointKey(waterBoundary[edge + 2], waterBoundary[edge + 3]));
-    }
-    let maxEndpointErrorWorld = 0;
+    const seam = riverDomain.terrainSeam;
+    let maxSegmentErrorWorld = 0;
     let uncoveredBoundaryLengthWorld = 0;
-    for (let i = 0; i + 3 < riverDomain.cutoutBoundaryEdges.length; i += 4) {
-      const ax = riverDomain.cutoutBoundaryEdges[i];
-      const ay = riverDomain.cutoutBoundaryEdges[i + 1];
-      const bx = riverDomain.cutoutBoundaryEdges[i + 2];
-      const by = riverDomain.cutoutBoundaryEdges[i + 3];
-      const endpointDistanceWorld = (x: number, y: number): number => {
-        if (waterBoundaryEndpoints.has(endpointKey(x, y))) return 0;
+    // Render attributes are Float32; compare the canonical shared IDs at a
+    // precision comfortably above their conversion error.
+    const quantScale = Math.min(2048, seam.quantScale);
+    const pointKey = (x: number, y: number): string => `${Math.round(x * quantScale)},${Math.round(y * quantScale)}`;
+    const segmentKey = (ax: number, ay: number, bx: number, by: number): string => {
+      const a = pointKey(ax, ay);
+      const b = pointKey(bx, by);
+      return a < b ? `${a}|${b}` : `${b}|${a}`;
+    };
+    const waterSegmentKeys = new Set<string>();
+    const float32WorldTolerance = Math.max(
+      inlandWater.width / Math.max(1, inlandWater.cols),
+      inlandWater.depth / Math.max(1, inlandWater.rows)
+    ) * 2e-5;
+    for (let edge = 0; edge + 3 < waterBoundary.length; edge += 4) {
+      waterSegmentKeys.add(segmentKey(
+        waterBoundary[edge],
+        waterBoundary[edge + 1],
+        waterBoundary[edge + 2],
+        waterBoundary[edge + 3]
+      ));
+    }
+    const pointDistanceWorld = (x: number, y: number): number => {
         let best = Number.POSITIVE_INFINITY;
         for (let edge = 0; edge + 3 < waterBoundary.length; edge += 4) {
-          for (const offset of [0, 2]) {
-            const dx = inlandWater.edgeToWorldX(x) - inlandWater.edgeToWorldX(waterBoundary[edge + offset]);
-            const dz = inlandWater.edgeToWorldZ(y) - inlandWater.edgeToWorldZ(waterBoundary[edge + offset + 1]);
-            best = Math.min(best, Math.hypot(dx, dz));
-          }
+          const ax = waterBoundary[edge];
+          const ay = waterBoundary[edge + 1];
+          const bx = waterBoundary[edge + 2];
+          const by = waterBoundary[edge + 3];
+          const dx = bx - ax;
+          const dy = by - ay;
+          const lengthSq = dx * dx + dy * dy;
+          const t = lengthSq > 1e-10 ? clamp(((x - ax) * dx + (y - ay) * dy) / lengthSq, 0, 1) : 0;
+          const worldDx = inlandWater.edgeToWorldX(x) - inlandWater.edgeToWorldX(ax + dx * t);
+          const worldDz = inlandWater.edgeToWorldZ(y) - inlandWater.edgeToWorldZ(ay + dy * t);
+          best = Math.min(best, Math.hypot(worldDx, worldDz));
         }
         return best;
-      };
-      const errorA = endpointDistanceWorld(ax, ay);
-      const errorB = endpointDistanceWorld(bx, by);
-      maxEndpointErrorWorld = Math.max(maxEndpointErrorWorld, errorA, errorB);
-      if (Math.max(errorA, errorB) > 1e-5) {
+    };
+    for (const segment of seam.segments) {
+      const a = seam.vertices[segment.a];
+      const b = seam.vertices[segment.b];
+      if (waterSegmentKeys.has(segmentKey(a.edgeX, a.edgeY, b.edgeX, b.edgeY))) continue;
+      const midpointX = (a.edgeX + b.edgeX) * 0.5;
+      const midpointY = (a.edgeY + b.edgeY) * 0.5;
+      const segmentError = Math.max(
+        pointDistanceWorld(a.edgeX, a.edgeY),
+        pointDistanceWorld(b.edgeX, b.edgeY),
+        pointDistanceWorld(midpointX, midpointY)
+      );
+      if (segmentError <= float32WorldTolerance) continue;
+      maxSegmentErrorWorld = Math.max(maxSegmentErrorWorld, segmentError);
+      if (segmentError > 1e-5) {
         uncoveredBoundaryLengthWorld += Math.hypot(
-          inlandWater.edgeToWorldX(bx) - inlandWater.edgeToWorldX(ax),
-          inlandWater.edgeToWorldZ(by) - inlandWater.edgeToWorldZ(ay)
+          inlandWater.edgeToWorldX(b.edgeX) - inlandWater.edgeToWorldX(a.edgeX),
+          inlandWater.edgeToWorldZ(b.edgeY) - inlandWater.edgeToWorldZ(a.edgeY)
         );
       }
     }
-    inlandWater.diagnostics.terrainWaterXzErrorMax = maxEndpointErrorWorld;
+    seam.diagnostics.segmentXzErrorMax = maxSegmentErrorWorld;
+    inlandWater.diagnostics.terrainWaterXzErrorMax = maxSegmentErrorWorld;
+    inlandWater.diagnostics.segmentXzErrorMax = maxSegmentErrorWorld;
     inlandWater.diagnostics.uncoveredBoundaryLengthWorld = uncoveredBoundaryLengthWorld;
-  }
-  const packedCutoutWallEdges = riverDomain.cutoutBoundaryWallEdges;
-  if (packedCutoutWallEdges && packedCutoutWallEdges.length >= 6) {
-    const registerBoundaryTerrainHeight = (x: number, y: number, worldY: number): void => {
-      if (!Number.isFinite(worldY)) {
-        return;
-      }
-      const key = contourKeyOf(x, y);
-      const existing = contourBoundaryTerrainWorldByKey.get(key);
-      if (existing === undefined || worldY > existing) {
-        contourBoundaryTerrainWorldByKey.set(key, worldY);
-      }
-    };
-    for (let i = 0; i + 5 < packedCutoutWallEdges.length; i += 6) {
-      registerBoundaryTerrainHeight(
-        packedCutoutWallEdges[i],
-        packedCutoutWallEdges[i + 1],
-        packedCutoutWallEdges[i + 2]
-      );
-      registerBoundaryTerrainHeight(
-        packedCutoutWallEdges[i + 3],
-        packedCutoutWallEdges[i + 4],
-        packedCutoutWallEdges[i + 5]
-      );
-    }
   }
 
   const riverSpace = createRiverSpaceTransform(cols, rows, width, depth, cols + 1, rows + 1);
@@ -467,16 +470,18 @@ export const buildRiverMeshData = (
     const value = sampleFromCells(fx, fy, (idx) => lakeFactorCenter[idx]);
     return clamp(Number.isFinite(value) ? value : 0, 0, 1);
   };
+  const sampleRiverMouthBlend = (fx: number, fy: number): number => {
+    const value = sampleFromCells(fx, fy, (idx) => inlandWater?.riverMouthBlend[idx] ?? 0);
+    return clamp(Number.isFinite(value) ? value : 0, 0, 1);
+  };
   const addVertex = (v: RiverContourVertex): void => {
     const flow = sampleFlow(v.x, v.y);
     let waterOffset = sampleSurfaceOffset(v.x, v.y);
-    const boundaryTerrainWorld = contourBoundaryTerrainWorldByKey.get(contourKeyOf(v.x, v.y));
-    if (Number.isFinite(boundaryTerrainWorld)) {
-      // Keep boundary water strictly below the cutout terrain top so wall top can always cover it.
-      const maxBoundarySurfaceOffset = (boundaryTerrainWorld as number) - waterLevelWorld - WALL_WATER_OVERLAP;
-      if (Number.isFinite(maxBoundarySurfaceOffset)) {
-        waterOffset = Math.min(waterOffset, maxBoundarySurfaceOffset);
-      }
+    const seamVertex = riverDomain.terrainSeam
+      ? findInlandWaterTerrainSeamVertex(riverDomain.terrainSeam, v.x, v.y)
+      : undefined;
+    if (seamVertex) {
+      waterOffset = seamVertex.waterWorldY - waterLevelWorld;
     }
     positions.push(worldXEdge(v.x), waterOffset, worldZEdge(v.y));
     uvs.push(v.x / Math.max(1, cols), v.y / Math.max(1, rows));
@@ -485,6 +490,8 @@ export const buildRiverMeshData = (
     flowSpeed.push(sampleFlowSpeed(v.x, v.y));
     rapid.push(sampleRapid(v.x, v.y));
     lakeFactor.push(sampleLakeFactor(v.x, v.y));
+    riverMouthBlend.push(sampleRiverMouthBlend(v.x, v.y));
+    edgeMotionFactor.push(sampleInlandWaterEdgeMotionFactor(riverDomain.terrainSeam, v.x, v.y));
   };
   for (let i = 0; i < renderContourVertices.length; i += 2) {
     addVertex({
@@ -496,7 +503,7 @@ export const buildRiverMeshData = (
     return undefined;
   }
   const splitSurfaceMesh = splitInlandWaterSurfaceAtWaterfalls(
-    { positions, uvs, indices, bankDist, flowDir, flowSpeed, rapid, lakeFactor },
+    { positions, uvs, indices, bankDist, flowDir, flowSpeed, rapid, lakeFactor, riverMouthBlend, edgeMotionFactor },
     inlandWater?.waterfalls ?? [],
     waterLevelWorld
   );
@@ -535,6 +542,8 @@ export const buildRiverMeshData = (
     flowSpeed: new Float32Array(splitSurfaceMesh.flowSpeed),
     rapid: new Float32Array(splitSurfaceMesh.rapid),
     lakeFactor: new Float32Array(splitSurfaceMesh.lakeFactor),
+    riverMouthBlend: new Float32Array(splitSurfaceMesh.riverMouthBlend),
+    edgeMotionFactor: new Float32Array(splitSurfaceMesh.edgeMotionFactor),
     supportMap: riverSupportMap,
     flowMap: riverFlowMap,
     rapidMap: riverRapidMap,

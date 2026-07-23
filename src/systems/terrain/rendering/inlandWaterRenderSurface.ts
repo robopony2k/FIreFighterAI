@@ -1,3 +1,6 @@
+import { buildRiverMouthRenderTransition } from "./riverMouthRenderTransition.js";
+import type { InlandWaterTerrainSeam } from "./inlandWaterTerrainSeam.js";
+
 export const INLAND_WATER_KIND_NONE = 0;
 export const INLAND_WATER_KIND_RIVER = 1;
 export const INLAND_WATER_KIND_LAKE = 2;
@@ -28,6 +31,19 @@ export type InlandWaterfallSpan = {
 export type InlandWaterRenderDiagnostics = {
   terrainWaterXzErrorMax: number;
   uncoveredBoundaryLengthWorld: number;
+  unmatchedSeamVertexCount: number;
+  seamTjunctionCount: number;
+  unexpectedSeamOpenEndCount: number;
+  segmentXzErrorMax: number;
+  skirtJointGapMax: number;
+  skirtTerrainTopErrorMax: number;
+  waterAboveSeamMax: number;
+  seamLiftMax: number;
+  originalBoundaryDisplacementMax: number;
+  maximumPreConformanceError: number;
+  degenerateBoundaryTriangleCount: number;
+  sharedSegmentCount: number;
+  guardOverlapMin: number;
   riverLakeJoinDeltaMax: number;
   waterfallLipRunoutErrorMax: number;
   orphanMarkerCount: number;
@@ -46,8 +62,13 @@ export type InlandWaterRenderSurface = {
   surfaceWorldY: Float32Array;
   bedWorldY: Float32Array;
   stepStrength: Float32Array;
+  riverMouthMask: Uint8Array;
+  riverMouthBlend: Float32Array;
+  oceanOverlapMask: Uint8Array;
+  riverMouthOpeningEdges: Float32Array;
   waterfalls: InlandWaterfallSpan[];
   diagnostics: InlandWaterRenderDiagnostics;
+  terrainSeam?: InlandWaterTerrainSeam;
   edgeToWorldX: (edgeX: number) => number;
   edgeToWorldZ: (edgeY: number) => number;
   cellCenterToWorldX: (cellX: number) => number;
@@ -125,6 +146,12 @@ export const buildInlandWaterRenderSurface = (
   const surfaceWorldY = new Float32Array(total).fill(Number.NaN);
   const bedWorldY = new Float32Array(total).fill(Number.NaN);
   const stepStrength = new Float32Array(total);
+  const riverMouthTransition = buildRiverMouthRenderTransition({
+    cols,
+    rows,
+    riverMask: input.riverMask,
+    oceanMask: input.oceanMask
+  });
   let count = 0;
   for (let i = 0; i < total; i += 1) {
     if ((input.oceanMask?.[i] ?? 0) > 0) {
@@ -330,10 +357,27 @@ export const buildInlandWaterRenderSurface = (
     surfaceWorldY,
     bedWorldY,
     stepStrength,
+    riverMouthMask: riverMouthTransition.mouthMask,
+    riverMouthBlend: riverMouthTransition.mouthBlend,
+    oceanOverlapMask: riverMouthTransition.oceanOverlapMask,
+    riverMouthOpeningEdges: riverMouthTransition.openingEdges,
     waterfalls,
     diagnostics: {
       terrainWaterXzErrorMax: 0,
       uncoveredBoundaryLengthWorld: 0,
+      unmatchedSeamVertexCount: 0,
+      seamTjunctionCount: 0,
+      unexpectedSeamOpenEndCount: 0,
+      segmentXzErrorMax: 0,
+      skirtJointGapMax: 0,
+      skirtTerrainTopErrorMax: 0,
+      waterAboveSeamMax: 0,
+      seamLiftMax: 0,
+      originalBoundaryDisplacementMax: 0,
+      maximumPreConformanceError: 0,
+      degenerateBoundaryTriangleCount: 0,
+      sharedSegmentCount: 0,
+      guardOverlapMin: 0,
       riverLakeJoinDeltaMax,
       waterfallLipRunoutErrorMax: 0,
       orphanMarkerCount

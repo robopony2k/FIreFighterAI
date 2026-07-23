@@ -4,11 +4,16 @@ import {
   DEFAULT_TERRAIN_WATER_DEBUG_CONTROLS,
   type TerrainWaterDebugControls
 } from "./terrainWaterDebug.js";
+import { getInlandWaterSeamDebugModeValue } from "../systems/terrain/rendering/inlandWaterSeamDebugMaterial.js";
+
+export const INLAND_WATER_CALM_BANK_STATIC_FOAM = 0;
 
 type RiverUniforms = {
   u_time: { value: number };
   u_color: { value: THREE.Color };
   u_deepColor: { value: THREE.Color };
+  u_oceanColor: { value: THREE.Color };
+  u_oceanDeepColor: { value: THREE.Color };
   u_opacity: { value: number };
   u_normalMap1: { value: THREE.Texture };
   u_normalMap2: { value: THREE.Texture };
@@ -33,6 +38,7 @@ type RiverUniforms = {
   u_foamScale: { value: number };
   u_specularScale: { value: number };
   u_debugWaterfallHighlight: { value: number };
+  u_inlandWaterSeamDebugMode: { value: number };
 };
 
 type WaterfallWallUniforms = {
@@ -81,6 +87,8 @@ type RiverWaterPalette = {
   skyHorizonColor: THREE.ColorRepresentation;
   shallowColor: THREE.ColorRepresentation;
   deepColor: THREE.ColorRepresentation;
+  oceanShallowColor: THREE.ColorRepresentation;
+  oceanDeepColor: THREE.ColorRepresentation;
   sunColor: THREE.ColorRepresentation;
 };
 
@@ -98,6 +106,8 @@ export class ThreeTestRiverWaterHelper {
     skyHorizonColor: THREE.Color;
     shallowColor: THREE.Color;
     deepColor: THREE.Color;
+    oceanShallowColor: THREE.Color;
+    oceanDeepColor: THREE.Color;
     sunColor: THREE.Color;
   };
   private fogState: {
@@ -143,6 +153,8 @@ export class ThreeTestRiverWaterHelper {
       skyHorizonColor: new THREE.Color(options.skyHorizonColor),
       shallowColor: new THREE.Color(0x3f86bf),
       deepColor: new THREE.Color(0x1a4d79),
+      oceanShallowColor: new THREE.Color(0x4f98bd),
+      oceanDeepColor: new THREE.Color(0x173f65),
       sunColor: new THREE.Color(0xfff0cf)
     };
     this.fogState = {
@@ -157,6 +169,8 @@ export class ThreeTestRiverWaterHelper {
     this.currentPalette.skyHorizonColor.set(palette.skyHorizonColor);
     this.currentPalette.shallowColor.set(palette.shallowColor);
     this.currentPalette.deepColor.set(palette.deepColor);
+    this.currentPalette.oceanShallowColor.set(palette.oceanShallowColor);
+    this.currentPalette.oceanDeepColor.set(palette.oceanDeepColor);
     this.currentPalette.sunColor.set(palette.sunColor);
     if (!this.uniforms && !this.waterfallWallUniforms) {
       return;
@@ -166,6 +180,8 @@ export class ThreeTestRiverWaterHelper {
       this.uniforms.u_skyHorizonColor.value.copy(this.currentPalette.skyHorizonColor);
       this.uniforms.u_color.value.copy(this.currentPalette.shallowColor);
       this.uniforms.u_deepColor.value.copy(this.currentPalette.deepColor);
+      this.uniforms.u_oceanColor.value.copy(this.currentPalette.oceanShallowColor);
+      this.uniforms.u_oceanDeepColor.value.copy(this.currentPalette.oceanDeepColor);
       this.uniforms.u_sunColor.value.copy(this.currentPalette.sunColor);
     }
     if (this.waterfallWallUniforms) {
@@ -216,6 +232,9 @@ export class ThreeTestRiverWaterHelper {
       this.uniforms.u_foamScale.value = this.debugControls.riverFoamScale;
       this.uniforms.u_specularScale.value = this.debugControls.riverSpecularScale;
       this.uniforms.u_debugWaterfallHighlight.value = this.debugControls.waterfallDebugHighlight ? 1 : 0;
+      this.uniforms.u_inlandWaterSeamDebugMode.value = getInlandWaterSeamDebugModeValue(
+        this.debugControls.inlandWaterSeamDebugMode
+      );
     }
     if (this.waterfallWallUniforms) {
       this.waterfallWallUniforms.u_opacity.value = 0.84 * this.debugControls.waterfallOpacityScale;
@@ -511,6 +530,8 @@ export class ThreeTestRiverWaterHelper {
     geometry.setAttribute("a_flowSpeed", new THREE.BufferAttribute(river.flowSpeed, 1));
     geometry.setAttribute("a_rapid", new THREE.BufferAttribute(river.rapid, 1));
     geometry.setAttribute("a_lakeFactor", new THREE.BufferAttribute(river.lakeFactor, 1));
+    geometry.setAttribute("a_riverMouthBlend", new THREE.BufferAttribute(river.riverMouthBlend, 1));
+    geometry.setAttribute("a_edgeMotionFactor", new THREE.BufferAttribute(river.edgeMotionFactor, 1));
     geometry.setIndex(new THREE.BufferAttribute(river.indices, 1));
     geometry.computeVertexNormals();
 
@@ -518,6 +539,8 @@ export class ThreeTestRiverWaterHelper {
       u_time: { value: 0 },
       u_color: { value: this.currentPalette.shallowColor.clone() },
       u_deepColor: { value: this.currentPalette.deepColor.clone() },
+      u_oceanColor: { value: this.currentPalette.oceanShallowColor.clone() },
+      u_oceanDeepColor: { value: this.currentPalette.oceanDeepColor.clone() },
       u_opacity: { value: 1.0 },
       u_normalMap1: { value: this.normal1 as THREE.Texture },
       u_normalMap2: { value: this.normal2 as THREE.Texture },
@@ -541,7 +564,10 @@ export class ThreeTestRiverWaterHelper {
       u_normalStrengthScale: { value: this.debugControls.riverNormalStrengthScale },
       u_foamScale: { value: this.debugControls.riverFoamScale },
       u_specularScale: { value: this.debugControls.riverSpecularScale },
-      u_debugWaterfallHighlight: { value: this.debugControls.waterfallDebugHighlight ? 1 : 0 }
+      u_debugWaterfallHighlight: { value: this.debugControls.waterfallDebugHighlight ? 1 : 0 },
+      u_inlandWaterSeamDebugMode: {
+        value: getInlandWaterSeamDebugModeValue(this.debugControls.inlandWaterSeamDebugMode)
+      }
     };
 
     const material = new THREE.ShaderMaterial({
@@ -560,14 +586,18 @@ export class ThreeTestRiverWaterHelper {
         varying float vFlowSpeed;
         varying float vRapid;
         varying float vLakeFactor;
+        varying float vRiverMouthBlend;
         uniform float u_time;
         uniform float u_quality;
         uniform float u_flowSpeedScale;
+        uniform float u_inlandWaterSeamDebugMode;
         attribute float a_bankDist;
         attribute vec2 a_flowDir;
         attribute float a_flowSpeed;
         attribute float a_rapid;
         attribute float a_lakeFactor;
+        attribute float a_riverMouthBlend;
+        attribute float a_edgeMotionFactor;
         float sampleRiverWave(
           vec2 worldXZ,
           vec2 flowN,
@@ -599,6 +629,7 @@ export class ThreeTestRiverWaterHelper {
           vFlowSpeed = a_flowSpeed;
           vRapid = a_rapid;
           vLakeFactor = a_lakeFactor;
+          vRiverMouthBlend = a_riverMouthBlend;
           float detailFactor = clamp(u_quality * 0.5, 0.0, 1.0);
           float qualityFactor = mix(0.68, 1.0, detailFactor);
           float centerFactor = smoothstep(0.08, 0.6, a_bankDist);
@@ -606,11 +637,14 @@ export class ThreeTestRiverWaterHelper {
           vec2 flowN = normalize(a_flowDir + vec2(1e-4, 0.0));
           vec2 worldXZ = (modelMatrix * vec4(position, 1.0)).xz;
           float calmFactor = mix(1.0, 0.18, a_lakeFactor);
-          float waveDisp = sampleRiverWave(worldXZ, flowN, centerFactor, speedFactor, a_rapid, qualityFactor) * calmFactor;
+          float mouthFlow = 1.0 - smoothstep(0.08, 1.0, a_riverMouthBlend);
+          float debugMotionFactor = u_inlandWaterSeamDebugMode < 0.5 ? 1.0 : 0.0;
+          float edgeMotionFactor = clamp(a_edgeMotionFactor, 0.0, 1.0) * debugMotionFactor;
+          float waveDisp = sampleRiverWave(worldXZ, flowN, centerFactor, speedFactor, a_rapid, qualityFactor) * calmFactor * mouthFlow * edgeMotionFactor;
           vec3 displaced = position + vec3(0.0, waveDisp, 0.0);
           const float sampleStep = 0.65;
-          float dispX = sampleRiverWave(worldXZ + vec2(sampleStep, 0.0), flowN, centerFactor, speedFactor, a_rapid, qualityFactor) * calmFactor;
-          float dispZ = sampleRiverWave(worldXZ + vec2(0.0, sampleStep), flowN, centerFactor, speedFactor, a_rapid, qualityFactor) * calmFactor;
+          float dispX = sampleRiverWave(worldXZ + vec2(sampleStep, 0.0), flowN, centerFactor, speedFactor, a_rapid, qualityFactor) * calmFactor * mouthFlow * edgeMotionFactor;
+          float dispZ = sampleRiverWave(worldXZ + vec2(0.0, sampleStep), flowN, centerFactor, speedFactor, a_rapid, qualityFactor) * calmFactor * mouthFlow * edgeMotionFactor;
           vec3 tangentX = vec3(sampleStep, dispX - waveDisp, 0.0);
           vec3 tangentZ = vec3(0.0, dispZ - waveDisp, sampleStep);
           vec3 geomNormalLocal = cross(tangentZ, tangentX);
@@ -635,9 +669,12 @@ export class ThreeTestRiverWaterHelper {
         varying float vFlowSpeed;
         varying float vRapid;
         varying float vLakeFactor;
+        varying float vRiverMouthBlend;
         uniform float u_time;
         uniform vec3 u_color;
         uniform vec3 u_deepColor;
+        uniform vec3 u_oceanColor;
+        uniform vec3 u_oceanDeepColor;
         uniform float u_opacity;
         uniform sampler2D u_normalMap1;
         uniform sampler2D u_normalMap2;
@@ -662,14 +699,35 @@ export class ThreeTestRiverWaterHelper {
         uniform float u_foamScale;
         uniform float u_specularScale;
         uniform float u_debugWaterfallHighlight;
+        uniform float u_inlandWaterSeamDebugMode;
+        float stableCoverageNoise(vec2 worldXZ) {
+          vec2 cell = floor(worldXZ * 3.0);
+          return fract(sin(dot(cell, vec2(12.9898, 78.233))) * 43758.5453);
+        }
         void main() {
+          float riverMouthBlend = clamp(vRiverMouthBlend, 0.0, 1.0);
+          float mouthCoverageFade = smoothstep(0.72, 1.0, riverMouthBlend);
+          if (riverMouthBlend >= 0.995 || stableCoverageNoise(vWorldPos.xz) < mouthCoverageFade) {
+            discard;
+          }
+          if (u_inlandWaterSeamDebugMode > 2.5 && u_inlandWaterSeamDebugMode < 3.5) {
+            discard;
+          }
+          if (u_inlandWaterSeamDebugMode > 3.5 || (u_inlandWaterSeamDebugMode > 0.5 && u_inlandWaterSeamDebugMode < 2.5)) {
+            vec3 debugColor = u_inlandWaterSeamDebugMode > 1.5 && u_inlandWaterSeamDebugMode < 2.5
+              ? vec3(0.04, 0.32, 0.82)
+              : vec3(0.02, 0.88, 1.0);
+            gl_FragColor = vec4(debugColor, 1.0);
+            return;
+          }
           float qualityFactor = step(0.5, u_quality);
           float edge = smoothstep(0.02, 0.25, vBankDist);
           float edgeFeather = smoothstep(0.0, 0.14, vBankDist);
           vec2 worldUv = vWorldPos.xz * u_waveScale;
           vec2 flowN = normalize(vFlowDir + vec2(1e-4));
+          float mouthFlow = 1.0 - smoothstep(0.08, 1.0, riverMouthBlend);
           float flowSpeed = clamp(vFlowSpeed * u_flowSpeedScale, 0.25, 3.4);
-          vec2 flowOffset = flowN * (u_time * (0.07 + vRapid * 0.2) * flowSpeed * mix(1.0, 0.16, vLakeFactor));
+          vec2 flowOffset = flowN * (u_time * (0.07 + vRapid * 0.2) * flowSpeed * mix(1.0, 0.16, vLakeFactor)) * mouthFlow;
           vec2 uv1 = worldUv * 8.0 + flowOffset * 1.7 + u_scroll1 * (u_time * 1.8);
           vec2 uv2 = worldUv * 10.4 - flowOffset.yx * 1.4 + u_scroll2 * (u_time * 2.2);
           vec2 nXY = texture2D(u_normalMap1, uv1).xy * 2.0 - 1.0 + (texture2D(u_normalMap2, uv2).xy * 2.0 - 1.0) * 0.85;
@@ -712,22 +770,25 @@ export class ThreeTestRiverWaterHelper {
               return;
             }
           }
-          float rapid = clamp((vRapid * (0.68 + qualityFactor * 0.38) + fallBoost * 0.62 + seamRapid * 0.82 + plungeFoam * 0.2) * mix(1.0, 0.08, vLakeFactor), 0.0, 1.0);
+          float rapid = clamp((vRapid * (0.68 + qualityFactor * 0.38) + fallBoost * 0.62 + seamRapid * 0.82 + plungeFoam * 0.2) * mix(1.0, 0.08, vLakeFactor) * mouthFlow, 0.0, 1.0);
           float spec = specBase * u_specular * u_specularScale * (0.4 + rapid * 0.8 + seamRapid * 0.26) * (0.7 + 0.45 * grazing);
           spec *= mix(0.82, 1.14, crestMask);
           float fresnel = pow(1.0 - max(dot(viewDir, n), 0.0), 3.5);
           vec3 baseColor = mix(u_color, u_deepColor, clamp(1.0 - edge * 1.2, 0.0, 1.0) * 0.42);
+          vec3 oceanColor = mix(u_oceanColor, u_oceanDeepColor, clamp(1.0 - edge * 1.05, 0.0, 1.0) * 0.34);
+          baseColor = mix(baseColor, oceanColor, smoothstep(0.12, 1.0, riverMouthBlend));
           float centerBand = smoothstep(0.08, 0.55, vBankDist) * (1.0 - smoothstep(0.62, 0.95, vBankDist));
           float ripplePhase = dot(worldUv, flowN * 18.0) - u_time * (2.4 + flowSpeed * 1.6);
           float centerRipple = 0.5 + 0.5 * sin(ripplePhase);
           float seamPulse = 0.5 + 0.5 * sin(ripplePhase * 1.45 + u_time * 5.2);
           float foam =
-            ((1.0 - edge) * (0.1 + rapid * 0.28) + rapid * 0.14 + centerBand * centerRipple * (0.05 + rapid * 0.09)) *
+            ((1.0 - edge) * (${INLAND_WATER_CALM_BANK_STATIC_FOAM.toFixed(1)} + rapid * 0.28) + rapid * 0.14 + centerBand * centerRipple * rapid * 0.09) *
             u_foamScale;
           foam += crestMask * (0.05 + rapid * 0.07 + centerBand * 0.03) * u_foamScale;
           foam += seamRapid * (0.18 + seamPulse * 0.24 + centerBand * 0.06) * u_foamScale;
           foam += lipFoam * (0.28 + seamPulse * 0.34) * u_foamScale;
           foam += plungeFoam * (0.46 + seamPulse * 0.52) * u_foamScale;
+          foam *= mouthFlow;
           vec3 foamColor = vec3(0.93, 0.97, 1.0);
           vec3 litBase = mix(baseColor, foamColor, clamp(foam, 0.0, 1.0) * (0.5 + edgeFeather * 0.1));
           litBase = mix(litBase, foamColor, clamp(seamRapid * 0.34 + lipFoam * 0.42 + plungeFoam * 0.7, 0.0, 0.92));

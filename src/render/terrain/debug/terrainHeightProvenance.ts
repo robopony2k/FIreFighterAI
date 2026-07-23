@@ -1,5 +1,6 @@
 import { TILE_TYPE_IDS } from "../../../core/state.js";
 import type { TerrainRenderSurface } from "../../threeTestTerrain.js";
+import type { InlandWaterSeamDebugMode } from "../../../systems/terrain/rendering/inlandWaterSeamDebugMaterial.js";
 
 const clamp = (value: number, min: number, max: number): number => Math.max(min, Math.min(max, value));
 
@@ -11,6 +12,8 @@ export type TerrainRenderDebugOptions = {
   logHeightAnomalies?: boolean;
   terrainHeightMode?: TerrainRenderHeightMode;
   terrainSurfaceShadingMode?: TerrainSurfaceShadingMode;
+  inlandWaterSeamDebugMode?: InlandWaterSeamDebugMode;
+  terrainSampleStrideOverride?: 1 | 2 | 3 | 4;
   disableRiverWater?: boolean;
   disableRiverCutout?: boolean;
   disableBridges?: boolean;
