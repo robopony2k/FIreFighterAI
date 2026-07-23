@@ -6,7 +6,9 @@ export type MountainRockMaterialOptions = {
   seed?: number;
 };
 
-const PROGRAM_KEY_SUFFIX = "|mountainRock:v3";
+export const MOUNTAIN_ROCK_VERTEX_RELIEF_SCALE = 0;
+
+const PROGRAM_KEY_SUFFIX = "|mountainRock:v5";
 
 const isMeshStandardMaterial = (
   material: THREE.Material
@@ -110,13 +112,6 @@ const patchMaterial = (
       "#include <begin_vertex>",
       [
         "#include <begin_vertex>",
-        "#ifdef USE_MAP",
-        "  vec4 mountainRockVertexMask = texture2D(uMountainRockMask, vMapUv);",
-        "  float mountainRockVertexGate = clamp(mountainRockVertexMask.r + mountainRockVertexMask.g * 0.35 + mountainRockVertexMask.b * 0.25, 0.0, 1.0);",
-        "  if (mountainRockVertexGate > 0.01) {",
-        "    transformed += normalize(objectNormal) * mountainRockVertexRelief(vMapUv, transformed, mountainRockVertexMask);",
-        "  }",
-        "#endif",
         "vMountainRockWorldPos = (modelMatrix * vec4(transformed, 1.0)).xyz;"
       ].join("\n")
     );

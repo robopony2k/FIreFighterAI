@@ -499,7 +499,9 @@ export const sampleInlandWaterEdgeMotionFactor = (
     const b = seam.vertices[segment.b];
     distance = Math.min(distance, pointSegmentProjection(edgeX, edgeY, a.edgeX, a.edgeY, b.edgeX, b.edgeY).distance);
   }
-  return Number.isFinite(distance) ? smoothstep(0, Math.max(1e-4, fadeDistanceCells), distance) : 1;
+  if (!Number.isFinite(distance)) return 1;
+  if (distance <= 2 / seam.quantScale) return 0;
+  return smoothstep(0, Math.max(1e-4, fadeDistanceCells), distance);
 };
 
 export const buildInlandWaterTerrainSkirtMesh = (

@@ -1907,6 +1907,8 @@ const applyRiverTerrainTriangleCutout = (
   const outPositions: number[] = [];
   const outUvs: number[] = [];
   const outOwners: number[] = [];
+  let rejectedTerrainFoldCount = 0;
+  let rejectedTerrainFoldAreaMax = 0;
   const vertexKey = (vertex: InlandWaterTerrainCutoutVertex): string =>
     `${Math.round(vertex.edgeX * 8192)},${Math.round(vertex.edgeY * 8192)}`;
   const resolveVertex = (vertex: InlandWaterTerrainCutoutVertex): InlandWaterTerrainCutoutVertex => {
@@ -1942,6 +1944,12 @@ const applyRiverTerrainTriangleCutout = (
     const ny = abz * acx - abx * acz;
     const nz = abx * acy - aby * acx;
     if (Math.hypot(nx, ny, nz) <= 1e-9) return;
+    const projectedDoubleArea = Math.abs(abx * acz - abz * acx);
+    if (owner < 0.5 && projectedDoubleArea <= 1e-8) {
+      rejectedTerrainFoldCount += 1;
+      rejectedTerrainFoldAreaMax = Math.max(rejectedTerrainFoldAreaMax, projectedDoubleArea * 0.5);
+      return;
+    }
     if (ny < 0) [b, c] = [c, b];
     outPositions.push(
       base.worldX, base.worldY, base.worldZ,
@@ -1952,6 +1960,7 @@ const applyRiverTerrainTriangleCutout = (
     outOwners.push(owner, owner, owner);
   };
 
+  const refinedPolygons: InlandWaterTerrainCutoutPolygon[] = [];
   for (const polygon of retainedPolygons) {
     const refined: InlandWaterTerrainCutoutVertex[] = [];
     for (let edgeIndex = 0; edgeIndex < polygon.vertices.length; edgeIndex += 1) {
@@ -1959,14 +1968,6 @@ const applyRiverTerrainTriangleCutout = (
       const sourceB = polygon.vertices[(edgeIndex + 1) % polygon.vertices.length];
       refined.push(resolveVertex(sourceA));
       if (!seam) continue;
-      const contourSegment = findInlandWaterContourSegment(
-        cutoutDomain,
-        sourceA.edgeX,
-        sourceA.edgeY,
-        sourceB.edgeX,
-        sourceB.edgeY
-      );
-      if (!contourSegment) continue;
       for (const seamVertex of getInlandWaterTerrainSeamVerticesAlongEdge(
         seam,
         sourceA.edgeX,
@@ -1989,6 +1990,86 @@ const applyRiverTerrainTriangleCutout = (
       }
     }
     const deduped = refined.filter((vertex, index) => index === 0 || vertexKey(vertex) !== vertexKey(refined[index - 1]));
+    if (deduped.length >= 3) {
+      refinedPolygons.push({ vertices: deduped, sourceTerrainTriangleId: polygon.sourceTerrainTriangleId });
+    }
+  }
+
+  // Resolve independently clipped copies before looking for collinear edge
+  // vertices. Canonicalizing only during emission creates post-split
+  // T-junctions because the final shared coordinates did not exist when the
+  // long edge was subdivided.
+  const terrainVertexWorldKey = (vertex: InlandWaterTerrainCutoutVertex): string =>
+    `${Math.round(vertex.worldX * 10000)},${Math.round(vertex.worldZ * 10000)}`;
+  const canonicalTerrainVertexByWorldKey = new Map<string, InlandWaterTerrainCutoutVertex>();
+  for (const polygon of refinedPolygons) {
+    for (const vertex of polygon.vertices) {
+      const key = terrainVertexWorldKey(vertex);
+      const canonical = canonicalTerrainVertexByWorldKey.get(key);
+      if (!canonical || vertex.worldY > canonical.worldY) {
+        canonicalTerrainVertexByWorldKey.set(key, vertex);
+      }
+    }
+  }
+  for (const polygon of refinedPolygons) {
+    polygon.vertices = polygon.vertices.map((vertex) =>
+      canonicalTerrainVertexByWorldKey.get(terrainVertexWorldKey(vertex)) ?? vertex
+    );
+  }
+
+  const splitTolerance = 2 / 8192;
+  const terrainVertexBuckets = new Map<string, InlandWaterTerrainCutoutVertex[]>();
+  for (const polygon of refinedPolygons) {
+    for (const vertex of polygon.vertices) {
+      const minBucketX = Math.floor(vertex.edgeX - splitTolerance);
+      const maxBucketX = Math.floor(vertex.edgeX + splitTolerance);
+      const minBucketY = Math.floor(vertex.edgeY - splitTolerance);
+      const maxBucketY = Math.floor(vertex.edgeY + splitTolerance);
+      for (let bucketY = minBucketY; bucketY <= maxBucketY; bucketY += 1) {
+        for (let bucketX = minBucketX; bucketX <= maxBucketX; bucketX += 1) {
+          const key = `${bucketX},${bucketY}`;
+          const bucket = terrainVertexBuckets.get(key) ?? [];
+          bucket.push(vertex);
+          terrainVertexBuckets.set(key, bucket);
+        }
+      }
+    }
+  }
+  const splitTerrainEdge = (
+    a: InlandWaterTerrainCutoutVertex,
+    b: InlandWaterTerrainCutoutVertex
+  ): InlandWaterTerrainCutoutVertex[] => {
+    const dx = b.edgeX - a.edgeX;
+    const dy = b.edgeY - a.edgeY;
+    const lengthSq = dx * dx + dy * dy;
+    if (lengthSq <= 1e-12) return [a];
+    const candidates = new Map<string, { vertex: InlandWaterTerrainCutoutVertex; t: number }>();
+    const minBucketX = Math.floor(Math.min(a.edgeX, b.edgeX) - splitTolerance);
+    const maxBucketX = Math.floor(Math.max(a.edgeX, b.edgeX) + splitTolerance);
+    const minBucketY = Math.floor(Math.min(a.edgeY, b.edgeY) - splitTolerance);
+    const maxBucketY = Math.floor(Math.max(a.edgeY, b.edgeY) + splitTolerance);
+    for (let bucketY = minBucketY; bucketY <= maxBucketY; bucketY += 1) {
+      for (let bucketX = minBucketX; bucketX <= maxBucketX; bucketX += 1) {
+        for (const vertex of terrainVertexBuckets.get(`${bucketX},${bucketY}`) ?? []) {
+          const t = ((vertex.edgeX - a.edgeX) * dx + (vertex.edgeY - a.edgeY) * dy) / lengthSq;
+          if (t <= splitTolerance || t >= 1 - splitTolerance) continue;
+          const distance = Math.hypot(vertex.edgeX - (a.edgeX + dx * t), vertex.edgeY - (a.edgeY + dy * t));
+          if (distance > splitTolerance) continue;
+          candidates.set(vertexKey(vertex), { vertex, t });
+        }
+      }
+    }
+    return [a, ...Array.from(candidates.values()).sort((left, right) => left.t - right.t).map(({ vertex }) => vertex)];
+  };
+  for (const polygon of refinedPolygons) {
+    const conformed: InlandWaterTerrainCutoutVertex[] = [];
+    for (let edgeIndex = 0; edgeIndex < polygon.vertices.length; edgeIndex += 1) {
+      conformed.push(...splitTerrainEdge(
+        polygon.vertices[edgeIndex],
+        polygon.vertices[(edgeIndex + 1) % polygon.vertices.length]
+      ));
+    }
+    const deduped = conformed.filter((vertex, index) => index === 0 || vertexKey(vertex) !== vertexKey(conformed[index - 1]));
     if (deduped.length < 3) continue;
     for (let triangleIndex = 1; triangleIndex < deduped.length - 1; triangleIndex += 1) {
       emitTriangle(deduped[0], deduped[triangleIndex], deduped[triangleIndex + 1], 0);
@@ -2023,16 +2104,41 @@ const applyRiverTerrainTriangleCutout = (
     }
   }
   if (outPositions.length < 9) return;
+  // Float32 clipping and independently traversed polygon edges can land on
+  // opposite sides of a quantization boundary even after logical vertex
+  // sharing. Canonicalize every retained-terrain copy from the final emitted
+  // world position so the GPU receives bit-identical seam inputs.
+  const canonicalTerrainIndexByFinalWorldKey = new Map<string, number>();
+  for (let vertexIndex = 0; vertexIndex < outOwners.length; vertexIndex += 1) {
+    if (outOwners[vertexIndex] > 0.5) continue;
+    const positionOffset = vertexIndex * 3;
+    const uvOffset = vertexIndex * 2;
+    const key = `${Math.round(Math.fround(outPositions[positionOffset]) * 10000)},${Math.round(Math.fround(outPositions[positionOffset + 2]) * 10000)}`;
+    const canonicalIndex = canonicalTerrainIndexByFinalWorldKey.get(key);
+    if (canonicalIndex === undefined) {
+      canonicalTerrainIndexByFinalWorldKey.set(key, vertexIndex);
+      continue;
+    }
+    const canonicalPositionOffset = canonicalIndex * 3;
+    const canonicalUvOffset = canonicalIndex * 2;
+    outPositions[positionOffset] = outPositions[canonicalPositionOffset];
+    outPositions[positionOffset + 1] = outPositions[canonicalPositionOffset + 1];
+    outPositions[positionOffset + 2] = outPositions[canonicalPositionOffset + 2];
+    outUvs[uvOffset] = outUvs[canonicalUvOffset];
+    outUvs[uvOffset + 1] = outUvs[canonicalUvOffset + 1];
+  }
   geometry.setIndex(null);
   geometry.setAttribute("position", new THREE.Float32BufferAttribute(new Float32Array(outPositions), 3));
   geometry.setAttribute("uv", new THREE.Float32BufferAttribute(new Float32Array(outUvs), 2));
   geometry.setAttribute("inlandWaterOwner", new THREE.Float32BufferAttribute(new Float32Array(outOwners), 1));
+  geometry.userData.inlandWaterRejectedTerrainFoldCount = rejectedTerrainFoldCount;
+  geometry.userData.inlandWaterRejectedTerrainFoldAreaMax = rejectedTerrainFoldAreaMax;
   geometry.deleteAttribute("normal");
   geometry.clearGroups();
   geometry.addGroup(0, outPositions.length / 3, 0);
   if (DEBUG_TERRAIN_RENDER) {
     console.log(
-      `[threeTestTerrain] authoritative river cutout tris total=${Math.floor(src.length / 3)} cut=${cutCount} retained-polygons=${retainedPolygons.length}`
+      `[threeTestTerrain] authoritative river cutout tris total=${Math.floor(src.length / 3)} cut=${cutCount} retained-polygons=${retainedPolygons.length} foldRejected=${rejectedTerrainFoldCount}`
     );
   }
 };
@@ -2441,35 +2547,29 @@ export const refreshTerrainScorchedGroundMaterial = (
 const smoothTerrainSharedVertexNormals = (geometry: THREE.BufferGeometry): void => {
   const positionAttr = geometry.getAttribute("position");
   const normalAttr = geometry.getAttribute("normal");
-  const uvAttr = geometry.getAttribute("uv");
+  const ownerAttr = geometry.getAttribute("inlandWaterOwner");
   if (
     geometry.getIndex() ||
     !positionAttr ||
     !normalAttr ||
-    !uvAttr ||
     !("getX" in normalAttr) ||
     !("getY" in normalAttr) ||
     !("getZ" in normalAttr) ||
-    !("setXYZ" in normalAttr) ||
-    !("getX" in uvAttr) ||
-    !("getY" in uvAttr)
+    !("setXYZ" in normalAttr)
   ) {
     return;
   }
-  const keyScale = 100000;
   const positionKeyScale = 10000;
   const accum = new Map<string, { x: number; y: number; z: number }>();
   for (let i = 0; i < positionAttr.count; i += 1) {
+    if (ownerAttr && ownerAttr.getX(i) > 0.5) continue;
     const nx = normalAttr.getX(i);
     const ny = normalAttr.getY(i);
     const nz = normalAttr.getZ(i);
-    // Terrain skirts intentionally contain opposing faces so steep banks are
-    // visible from either side. Do not average their near-horizontal normals
-    // together or the opposing vectors cancel to zero.
-    if (ny < 0.2) {
-      continue;
-    }
-    const key = `${Math.round(positionAttr.getX(i) * positionKeyScale)},${Math.round(positionAttr.getY(i) * positionKeyScale)},${Math.round(positionAttr.getZ(i) * positionKeyScale)}|${Math.round(uvAttr.getX(i) * keyScale)},${Math.round(uvAttr.getY(i) * keyScale)}`;
+    // Ownership, rather than slope, distinguishes terrain from the opposing
+    // skirt faces. Steep retained terrain must still share one normal or
+    // normal-directed vertex relief separates duplicated triangle vertices.
+    const key = `${Math.round(positionAttr.getX(i) * positionKeyScale)},${Math.round(positionAttr.getY(i) * positionKeyScale)},${Math.round(positionAttr.getZ(i) * positionKeyScale)}`;
     const entry = accum.get(key);
     if (entry) {
       entry.x += nx;
@@ -2480,7 +2580,8 @@ const smoothTerrainSharedVertexNormals = (geometry: THREE.BufferGeometry): void 
     }
   }
   for (let i = 0; i < positionAttr.count; i += 1) {
-    const key = `${Math.round(positionAttr.getX(i) * positionKeyScale)},${Math.round(positionAttr.getY(i) * positionKeyScale)},${Math.round(positionAttr.getZ(i) * positionKeyScale)}|${Math.round(uvAttr.getX(i) * keyScale)},${Math.round(uvAttr.getY(i) * keyScale)}`;
+    if (ownerAttr && ownerAttr.getX(i) > 0.5) continue;
+    const key = `${Math.round(positionAttr.getX(i) * positionKeyScale)},${Math.round(positionAttr.getY(i) * positionKeyScale)},${Math.round(positionAttr.getZ(i) * positionKeyScale)}`;
     const entry = accum.get(key);
     if (!entry) {
       continue;

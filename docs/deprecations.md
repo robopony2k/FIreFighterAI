@@ -664,6 +664,7 @@ Status: Deprecated as of July 22, 2026.
 - The replacement treats the complete indexed lake/river contour as immutable XZ authority, subtracts its water triangles directly from terrain triangles, and splits both surfaces only at exact terrain-edge intersections.
 - Shared seam vertices retain source-contour and terrain-triangle provenance and own the resolved terrain top, authoritative water height, skirt bottom, and retained-land UV.
 - Exact coplanar contact alone is not considered sufficient depth coverage: closed skirt bottoms carry a measured, miter-jointed, fully submerged waterward guard strip in the existing terrain buffers. Do not restore projection or inflate the visible seam to hide raster pinholes.
+- Applying procedural rock vertex displacement to the terrain cutout is obsolete. Its T-junction topology cannot support nonlinear vertex morphing without separating long and subdivided tile edges; rock depth remains fragment-stage bump/normal detail instead. Retained terrain edges must also be split at every collinear cutout vertex before triangulation.
 - Closed-bank vertex displacement fades to zero at the seam; river-mouth opening segments remain skirt-free and retain their ocean hand-off behavior.
 
 Migration guidance:

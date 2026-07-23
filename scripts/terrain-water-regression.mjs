@@ -24,6 +24,7 @@ import {
   sampleInlandWaterEdgeMotionFactor
 } from "../dist/systems/terrain/rendering/inlandWaterTerrainSeam.js";
 import { INLAND_WATER_CALM_BANK_STATIC_FOAM } from "../dist/render/threeTestRiverWaterHelper.js";
+import { MOUNTAIN_ROCK_VERTEX_RELIEF_SCALE } from "../dist/render/terrain/textures/mountainRockMaterial.js";
 import {
   buildBoundaryEdgesFromIndexedContour,
   buildCutoutConformingRiverContourMesh,
@@ -448,6 +449,132 @@ assert.ok(
   productionSeam.diagnostics.guardOverlapMin >= INLAND_WATER_GUARD_OVERLAP_CELLS - 1e-6,
   "reported share code has measured submerged guard overlap at every closed seam endpoint"
 );
+const productionTerrainGeometry = productionResult.mesh.geometry;
+const productionOwner = productionTerrainGeometry.getAttribute("inlandWaterOwner");
+const productionPosition = productionTerrainGeometry.getAttribute("position");
+const productionNormal = productionTerrainGeometry.getAttribute("normal");
+const productionUv = productionTerrainGeometry.getAttribute("uv");
+assert.ok(productionOwner, "production terrain carries seam ownership");
+assert.equal(MOUNTAIN_ROCK_VERTEX_RELIEF_SCALE, 0, "T-junction terrain receives no geometric rock morphing");
+const seamWorldKeys = new Set(productionSeam.vertices.map((vertex) =>
+  `${Math.round(productionInland.edgeToWorldX(vertex.edgeX) * 10000)},${Math.round(productionInland.edgeToWorldZ(vertex.edgeY) * 10000)}`
+));
+let matchedTerrainSeamVertices = 0;
+const sharedTerrainNormals = new Map();
+for (let index = 0; index < productionPosition.count; index += 1) {
+  const owner = productionOwner.getX(index);
+  if (owner > 0.5) continue;
+  const seamKey = `${Math.round(productionPosition.getX(index) * 10000)},${Math.round(productionPosition.getZ(index) * 10000)}`;
+  if (seamWorldKeys.has(seamKey)) {
+    matchedTerrainSeamVertices += 1;
+  }
+  const positionKey = `${seamKey},${Math.round(productionPosition.getY(index) * 10000)}`;
+  const vertexInputs = {
+    normal: [productionNormal.getX(index), productionNormal.getY(index), productionNormal.getZ(index)],
+    uv: [productionUv.getX(index), productionUv.getY(index)]
+  };
+  const priorInputs = sharedTerrainNormals.get(positionKey);
+  if (priorInputs) {
+    close(vertexInputs.normal[0], priorInputs.normal[0], 1e-6, "duplicated terrain vertices share normal x");
+    close(vertexInputs.normal[1], priorInputs.normal[1], 1e-6, "duplicated terrain vertices share normal y");
+    close(vertexInputs.normal[2], priorInputs.normal[2], 1e-6, "duplicated terrain vertices share normal z");
+    close(vertexInputs.uv[0], priorInputs.uv[0], 1e-6, "duplicated terrain vertices share shader UV x");
+    close(vertexInputs.uv[1], priorInputs.uv[1], 1e-6, "duplicated terrain vertices share shader UV y");
+  } else {
+    sharedTerrainNormals.set(positionKey, vertexInputs);
+  }
+}
+assert.ok(matchedTerrainSeamVertices > 0, "production terrain exposes canonical seam vertices for relief isolation");
+
+const terrainEdgeUse = new Map();
+const positionKeyAt = (index) => `${Math.round(productionPosition.getX(index) * 10000)},${Math.round(productionPosition.getY(index) * 10000)},${Math.round(productionPosition.getZ(index) * 10000)}`;
+for (let triangle = 0; triangle + 2 < productionPosition.count; triangle += 3) {
+  if (productionOwner.getX(triangle) > 0.5) continue;
+  for (const [a, b] of [[triangle, triangle + 1], [triangle + 1, triangle + 2], [triangle + 2, triangle]]) {
+    const aKey = positionKeyAt(a);
+    const bKey = positionKeyAt(b);
+    const key = aKey < bKey ? `${aKey}|${bKey}` : `${bKey}|${aKey}`;
+    const edge = terrainEdgeUse.get(key) ?? { count: 0, a, b };
+    edge.count += 1;
+    terrainEdgeUse.set(key, edge);
+  }
+}
+let minTerrainX = Number.POSITIVE_INFINITY;
+let maxTerrainX = Number.NEGATIVE_INFINITY;
+let minTerrainZ = Number.POSITIVE_INFINITY;
+let maxTerrainZ = Number.NEGATIVE_INFINITY;
+for (let index = 0; index < productionPosition.count; index += 1) {
+  minTerrainX = Math.min(minTerrainX, productionPosition.getX(index));
+  maxTerrainX = Math.max(maxTerrainX, productionPosition.getX(index));
+  minTerrainZ = Math.min(minTerrainZ, productionPosition.getZ(index));
+  maxTerrainZ = Math.max(maxTerrainZ, productionPosition.getZ(index));
+}
+const unexpectedInteriorEdges = [];
+for (const edge of terrainEdgeUse.values()) {
+  if (edge.count !== 1) continue;
+  const ax = productionPosition.getX(edge.a);
+  const az = productionPosition.getZ(edge.a);
+  const bx = productionPosition.getX(edge.b);
+  const bz = productionPosition.getZ(edge.b);
+  const onMapBoundary = [ax, bx].every((x) => Math.abs(x - minTerrainX) < 1e-4 || Math.abs(x - maxTerrainX) < 1e-4)
+    || [az, bz].every((z) => Math.abs(z - minTerrainZ) < 1e-4 || Math.abs(z - maxTerrainZ) < 1e-4);
+  const seamProbe = findNearestInlandWaterTerrainSeamSegment(
+    productionSeam,
+    productionInland.worldToEdgeX((ax + bx) * 0.5),
+    productionInland.worldToEdgeY((az + bz) * 0.5)
+  );
+  if (!onMapBoundary && (!seamProbe || seamProbe.distance > 1e-3)) {
+    unexpectedInteriorEdges.push({ ax, ay: productionPosition.getY(edge.a), az, bx, by: productionPosition.getY(edge.b), bz });
+  }
+}
+const pointLineDistance = (point, edge) => {
+  const dx = edge.bx - edge.ax;
+  const dy = edge.by - edge.ay;
+  const dz = edge.bz - edge.az;
+  const lengthSq = dx * dx + dy * dy + dz * dz;
+  const t = lengthSq > 1e-12
+    ? ((point.x - edge.ax) * dx + (point.y - edge.ay) * dy + (point.z - edge.az) * dz) / lengthSq
+    : 0;
+  return {
+    t,
+    distance: Math.hypot(point.x - (edge.ax + dx * t), point.y - (edge.ay + dy * t), point.z - (edge.az + dz * t))
+  };
+};
+let uncoveredInteriorEdgeCount = 0;
+const uncoveredInteriorEdges = [];
+for (let edgeIndex = 0; edgeIndex < unexpectedInteriorEdges.length; edgeIndex += 1) {
+  const edge = unexpectedInteriorEdges[edgeIndex];
+  const intervals = [];
+  for (let candidateIndex = 0; candidateIndex < unexpectedInteriorEdges.length; candidateIndex += 1) {
+    if (candidateIndex === edgeIndex) continue;
+    const candidate = unexpectedInteriorEdges[candidateIndex];
+    const a = pointLineDistance({ x: candidate.ax, y: candidate.ay, z: candidate.az }, edge);
+    const b = pointLineDistance({ x: candidate.bx, y: candidate.by, z: candidate.bz }, edge);
+    if (a.distance > 1e-3 || b.distance > 1e-3) continue;
+    const start = Math.max(0, Math.min(a.t, b.t));
+    const end = Math.min(1, Math.max(a.t, b.t));
+    if (end > start + 1e-6) intervals.push([start, end]);
+  }
+  intervals.sort((left, right) => left[0] - right[0]);
+  let coveredTo = 0;
+  for (const [start, end] of intervals) {
+    if (start > coveredTo + 1e-3) break;
+    coveredTo = Math.max(coveredTo, end);
+  }
+  if (coveredTo < 1 - 1e-3) {
+    uncoveredInteriorEdgeCount += 1;
+    uncoveredInteriorEdges.push({ ...edge, coveredTo });
+  }
+}
+assert.ok(unexpectedInteriorEdges.length > 0, "production fixture exercises retained-terrain T-junction segmentation");
+const rejectedTerrainFoldCount = productionTerrainGeometry.userData.inlandWaterRejectedTerrainFoldCount ?? 0;
+const rejectedTerrainFoldAreaMax = productionTerrainGeometry.userData.inlandWaterRejectedTerrainFoldAreaMax ?? Number.POSITIVE_INFINITY;
+assert.ok(rejectedTerrainFoldCount > 0, "production fixture exercises zero-width clipped terrain folds");
+assert.ok(
+  uncoveredInteriorEdgeCount <= rejectedTerrainFoldCount * 3,
+  `every residual one-sided edge belongs to a rejected terrain fold: ${JSON.stringify(uncoveredInteriorEdges.slice(0, 12))}`
+);
+assert.ok(rejectedTerrainFoldAreaMax <= 5e-9, "rejected terrain folds enclose no raster-scale XZ area");
 productionResult.mesh.geometry.dispose();
 cases += 1;
 
