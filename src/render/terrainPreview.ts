@@ -9,7 +9,7 @@ import {
   loadHouseAssets,
   loadTreeAssets
 } from "./threeTestAssets.js";
-import { createSeasonalSkyDome } from "./seasonalSky.js";
+import { createSeasonalSkyDome } from "../systems/climate/rendering/seasonalSkyDome.js";
 import {
   buildTerrainMesh,
   prepareTerrainRenderSurface,

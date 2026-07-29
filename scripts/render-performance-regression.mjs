@@ -19,6 +19,15 @@ import {
   TERRAIN_ROAD_VISUAL_USER_DATA,
   setTerrainRoadHighContrast
 } from "../dist/render/terrain/roads/roadHighContrast.js";
+import {
+  SEASONAL_CLOUD_MARCH_STEPS
+} from "../dist/systems/climate/rendering/seasonalCloudField.js";
+import {
+  seasonalSkyFragmentShader
+} from "../dist/systems/climate/rendering/seasonalCloudShader.js";
+import {
+  createSeasonalSkyDome
+} from "../dist/systems/climate/rendering/seasonalSkyDome.js";
 
 const instances = [
   { tileX: 0, tileY: 0 },
@@ -247,9 +256,141 @@ const oceanContextSource = await readFile(
   fileURLToPath(new URL("../src/render/water/ocean/oceanSurfaceContext.ts", import.meta.url)),
   "utf8"
 );
+const seasonalSkyDomeSource = await readFile(
+  fileURLToPath(new URL("../src/systems/climate/rendering/seasonalSkyDome.ts", import.meta.url)),
+  "utf8"
+);
+const seasonalSkyStateSource = await readFile(
+  fileURLToPath(new URL("../src/systems/climate/rendering/seasonalSkyState.ts", import.meta.url)),
+  "utf8"
+);
+const seasonalCloudAdvectionSource = await readFile(
+  fileURLToPath(new URL("../src/systems/climate/rendering/seasonalCloudAdvection.ts", import.meta.url)),
+  "utf8"
+);
+const webglContextSource = await readFile(
+  fileURLToPath(new URL("../src/render/webglContext.ts", import.meta.url)),
+  "utf8"
+);
+const seasonalCloudVolumeSource = await readFile(
+  fileURLToPath(new URL("../src/systems/climate/rendering/seasonalCloudVolume.ts", import.meta.url)),
+  "utf8"
+);
 assert.equal((oceanShaderSource.match(/uniform sampler2D/g) ?? []).length, 11, "contextual surf must not add ocean texture samplers");
 assert.match(oceanShaderSource, /return 8\.0;/, "fast water quality must retain eight broad wave iterations");
 assert.match(oceanShaderSource, /breakerGate/, "fast water quality must retain the SDF breaker band");
 assert.doesNotMatch(oceanContextSource, /from ["']three["']|new THREE\.|Texture|Mesh|requestAnimationFrame/, "ocean context policy must remain allocation-light and renderer-independent");
+
+assert.equal(SEASONAL_CLOUD_MARCH_STEPS, 20, "volumetric seasonal clouds must cap the primary march at 20 slices");
+assert.equal(
+  (seasonalSkyFragmentShader.match(/uniform sampler2D/g) ?? []).length,
+  2,
+  "seasonal clouds must use one weather texture and one packed volume atlas"
+);
+assert.match(
+  seasonalSkyFragmentShader,
+  /for \(int i = 0; i < 20; i\+\+\)/,
+  "seasonal clouds must retain the fixed 20-slice march"
+);
+assert.match(
+  seasonalSkyFragmentShader,
+  /if \(transmittance < 0\.04\)/,
+  "opaque cloud rays must terminate early"
+);
+assert.match(
+  seasonalSkyFragmentShader,
+  /lightProbeNear[\s\S]*lightProbeFar/,
+  "seasonal clouds must retain multiple bounded sunward density probes"
+);
+assert.match(
+  seasonalSkyFragmentShader,
+  /rotatedHorizontal/,
+  "cloud footprints must use a rotated broad-scale field instead of screen-aligned repetition"
+);
+assert.match(
+  seasonalSkyFragmentShader,
+  /footprint \* body \* verticalProfile/,
+  "true volume density must remain gated by coherent cloud footprints"
+);
+assert.doesNotMatch(
+  seasonalSkyFragmentShader,
+  /localTop01/,
+  "cloud silhouettes must not return to a heightfield-derived local top"
+);
+assert.match(
+  seasonalSkyFragmentShader,
+  /sampleCloudVolume\(vec3 position\)[\s\S]*lowSlice[\s\S]*highSlice/,
+  "cloud density must interpolate adjacent atlas slices as a true 3D field"
+);
+assert.match(
+  seasonalSkyFragmentShader,
+  /cloudBase \/ rayY/,
+  "view rays must enter a bounded cloud slab instead of painting density onto the dome"
+);
+assert.match(
+  seasonalSkyFragmentShader,
+  /density \* stepLength/,
+  "cloud extinction must scale with distance travelled through the volume"
+);
+assert.match(
+  seasonalSkyFragmentShader,
+  /uCloudTimeDays \* 0\.0012/,
+  "simulation-derived weather time must move through the volume so cloud shapes evolve"
+);
+assert.doesNotMatch(
+  seasonalSkyStateSource,
+  /windDir[XY].*driftDays|driftDays.*windDir[XY]/,
+  "instantaneous wind must not reproject all accumulated cloud travel"
+);
+assert.match(
+  seasonalCloudAdvectionSource,
+  /prevailingWindAngleRad[\s\S]*seasonalOffset/,
+  "cloud travel must follow the stable seeded prevailing and seasonal climate track"
+);
+assert.doesNotMatch(
+  seasonalCloudAdvectionSource,
+  /new THREE\.|Vector2|new Map|new Array|requestAnimationFrame|performance\.now/,
+  "cloud advection must remain a pure allocation-light climate calculation"
+);
+assert.match(
+  webglContextSource,
+  /pixelStorei\(context\.UNPACK_FLIP_Y_WEBGL, false\)/,
+  "reused WebGL contexts must clear flip-Y before Three initializes 3D fallback textures"
+);
+assert.match(
+  webglContextSource,
+  /pixelStorei\(context\.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false\)/,
+  "reused WebGL contexts must clear premultiplied alpha before Three initializes 3D fallback textures"
+);
+assert.equal(
+  (seasonalSkyDomeSource.match(/new THREE\.DataTexture/g) ?? []).length,
+  2,
+  "each seasonal sky dome must own separate weather and volume textures"
+);
+assert.match(
+  seasonalCloudVolumeSource,
+  /SEASONAL_CLOUD_VOLUME_ATLAS_BORDER = 1/,
+  "the volume atlas must pad every slice to prevent cross-slice filtering"
+);
+assert.doesNotMatch(
+  seasonalSkyDomeSource,
+  /Data3DTexture|sampler3D/,
+  "the cloud volume must preserve the WebGL-compatible 2D atlas path"
+);
+assert.doesNotMatch(
+  seasonalSkyDomeSource,
+  /requestAnimationFrame|performance\.now/,
+  "the seasonal sky dome must not create a wall-clock animation path"
+);
+const seasonalSkyDome = createSeasonalSkyDome();
+assert.ok(seasonalSkyDome.mesh instanceof THREE.Mesh, "seasonal clouds must remain one sky-dome draw");
+const seasonalSkyMaterial = seasonalSkyDome.mesh.material;
+assert.ok(seasonalSkyMaterial instanceof THREE.ShaderMaterial);
+assert.ok(
+  seasonalSkyMaterial.uniforms.uCloudNoiseTex.value instanceof THREE.DataTexture &&
+    seasonalSkyMaterial.uniforms.uCloudVolumeTex.value instanceof THREE.DataTexture,
+  "the sky material must bind both deterministic cloud textures"
+);
+seasonalSkyDome.dispose();
 
 console.log("3D renderer performance regression passed.");

@@ -1,5 +1,117 @@
 # Deprecations
 
+## Tri-Planar Heightfield Cloud Bodies
+
+Status: Deprecated as of July 30, 2026.
+
+- Projecting one 2D noise texture across XZ, XY, and ZY no longer supplies the internal seasonal-cloud density.
+- Even with ray marching, a footprint-derived `localTop01` made silhouettes behave like smooth heightfields and produced flat pancake clouds.
+- The replacement keeps a separate 2D weather map for placement and samples a deterministic padded 32³ RGBA atlas as a continuous trilinearly interpolated volume for broad density, billows, detail, and erosion.
+
+Migration guidance:
+
+1. Keep cloud count and large-scale placement in the 2D weather field.
+2. Shape occupied footprints from the true 3D density signal and vertical layer envelope rather than calculating a per-footprint top height.
+3. Preserve padded atlas slices, manual Z interpolation, matching CPU voxel sampling, and the two-texture single-draw resource contract.
+
+## Reused WebGL Context With Stale Texture-Unpack Flags
+
+Status: Deprecated as of July 29, 2026.
+
+- Renderer initialization no longer assumes that a canvas-provided WebGL context has default pixel-unpack state.
+- A disposed Three.js renderer could leave flip-Y or premultiplied-alpha enabled; reusing that context then made Three.js emit `INVALID_OPERATION` while creating its internal 3D and array fallback textures.
+- The shared WebGL context boundary now clears both incompatible flags before constructing any new Three.js renderer.
+
+Migration guidance:
+
+1. Acquire 3D-mode, terrain-preview, and FX Lab contexts through `getRequiredWebGLContext`.
+2. Reset incompatible pixel-unpack state before initializing a renderer on any context that may have been used previously.
+3. Do not use a native 3D texture to address this warning; seasonal weather and the padded volume atlas remain ordinary 2D RGBA `DataTexture` resources.
+
+## Instantaneous-Wind Lifetime Cloud Offset
+
+Status: Deprecated as of July 29, 2026.
+
+- Seasonal clouds no longer multiply the current wind direction by all elapsed simulation time or move opposite the wind because of texture-offset sign.
+- That calculation reprojected the complete historical cloud offset whenever wind direction changed, producing visible sideways jumps and apparent jiggling during accelerated time.
+- Rain-event seeds also no longer alter the underlying cloud track or morph phase; rain changes the continuous weather presentation without teleporting its formations.
+
+Migration guidance:
+
+1. Derive accumulated cloud travel from the stable world-seeded prevailing and seasonal direction field shared with gameplay wind.
+2. Apply bounded continuous meander as a function of simulation career time rather than integrating render frames or reprojecting elapsed time.
+3. Keep transient wind and rain changes in cloud coverage, density, height, lighting, and precipitation unless a persistent velocity integrator is introduced.
+
+## Dense Small Fair-Season Cloud Field
+
+Status: Deprecated as of July 29, 2026.
+
+- Spring and summer no longer distribute their fair-weather coverage across many connected small or smeared formations.
+- The replacement samples the broad weather field at a larger world scale and applies a nonlinear fair-coverage threshold, producing fewer substantial clouds with wider clear gaps.
+- Local density is biased upward as global coverage falls, so reducing cloud count does not make the remaining cumulus faint.
+
+Migration guidance:
+
+1. Tune fair-weather count through global coverage and footprint threshold, not by reducing local body opacity.
+2. Keep spring cloud occupancy materially above summer while preserving visible blue-sky gaps in both.
+3. Verify that normal-speed pattern travel follows the displayed wind direction before judging motion only under time acceleration.
+
+## Uniform-Top Cloud Footprint Slab
+
+Status: Deprecated as of July 29, 2026.
+
+- Broad 2D weather footprints no longer occupy one shared vertical profile from cloud base to a uniform slab top.
+- A common top height turned otherwise volumetric ray-marched density into long horizontal shelves and smeared cloud bands at oblique viewing angles.
+- Each footprint now derives a local top and crown from its broad billow and volume detail, retaining a coherent base while producing rounded, differently sized cloud bodies.
+
+Migration guidance:
+
+1. Keep coverage responsible for the number and footprint of formations, and local height responsible for their silhouette.
+2. Preserve a continuous top fade wide enough for the fixed march budget to resolve without slice banding.
+3. Inspect oblique horizon views as well as overhead views when tuning cloud height, footprint scale, or erosion.
+
+## Stacked-Slice Pseudo-3D Cloud Noise
+
+Status: Deprecated as of July 29, 2026.
+
+- Interpolating offset 2D texture slices along the volume axis produced repeated diagonal streaks when shallow sky rays crossed many slices.
+- Independent density opportunities along every ray also let sparse summer weather read as a continuous textured ceiling instead of separated cloud bodies.
+- The replacement uses a rotated low-frequency horizontal weather map to gate whole cloud footprints, then shapes only those footprints with continuous tri-planar detail at a larger world scale.
+
+Migration guidance:
+
+1. Keep broad footprint coverage separate from internal body detail so low coverage creates clear gaps rather than thin noise everywhere.
+2. Avoid stacked texture-slice interpolation for cloud volume reconstruction.
+3. Check shallow-angle and horizon views for directional repetition whenever cloud scale or noise projection changes.
+
+## Height-Indexed 12-Slice Cloud Field
+
+Status: Deprecated as of July 29, 2026.
+
+- The first seasonal-cloud upgrade sampled a 2D field at normalized height indices, so its nominal volume remained an extruded mask that read as translucent smears on the sky dome.
+- Wind translated the mask but could not make cloud bodies develop or morph, and low seasonal density prevented sparse fair-weather clouds from forming opaque cores.
+- The replacement intersects view rays with a bounded cloud slab, samples continuous pseudo-3D packed noise, scales extinction by path length, and moves simulation weather time through the third noise axis.
+
+Migration guidance:
+
+1. Preserve separate coverage and local-density behavior so sparse conditions reduce cloud count without making every remaining cloud translucent.
+2. Keep cloud-base/cloud-top ray intersection and pseudo-3D sampling when tuning shape, lighting, or performance.
+3. Validate future changes against live cloud-body volume and evolution, not only shader-source limits or static coverage values.
+
+## Layered Planar Seasonal Cloud Shader
+
+Status: Deprecated as of July 29, 2026.
+
+- The seasonal sky no longer combines two planar noise layers with a nine-slice pseudo-volume overlay.
+- A climate-owned packed-noise field and capped 20-slice front-to-back cloud march now provide rounded height profiles, detail erosion, self-shadowed interiors, and sun-facing highlights in the same sky-dome draw.
+- Seasonal coverage, storm mood, wind drift, sun occlusion, and simulation-time pause behavior remain authoritative.
+
+Migration guidance:
+
+1. Keep seasonal cloud state, deterministic field sampling, shader source, and dome lifecycle under `src/systems/climate/rendering/`.
+2. Preserve the packed weather and volume-atlas textures, single sky draw, fixed march cap, and early transmittance exit when extending cloud visuals.
+3. Derive future cloud motion from climate weather time and wind rather than render-frame time.
+
 ## HQ-First Squad Dispatch Arming
 
 Status: Deprecated as of July 29, 2026.

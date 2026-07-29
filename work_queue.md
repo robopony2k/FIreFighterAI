@@ -1,3 +1,28 @@
+TSK-0169: Upgrade seasonal clouds with balanced volumetric depth
+
+Type: polish
+
+Why: The seasonal sky used layered planar cloud shapes with limited depth and lighting, so fair-weather cumulus and storm fronts did not reach the intended ShaderToy-inspired atmosphere.
+
+Done when:
+- [x] A deterministic 2D weather texture and padded 32³ packed volume atlas drive matching CPU sun occlusion and GPU cloud density.
+- [x] The single sky draw intersects a bounded cloud slab and uses a capped 20-slice front-to-back march with path-length extinction, detail erosion, early exit, and two bounded sunward lighting probes.
+- [x] A rotated low-frequency weather map gates coherent large footprints while trilinearly interpolated true 3D density shapes rounded bodies without a heightfield-derived top.
+- [x] Spring and summer leave substantial clear gaps between fewer, larger cumulus bodies with tall locally opaque crowns; winter and active rain produce progressively broader, darker formations.
+- [x] Stable world-seeded weather time evolves the third noise axis slowly while the prevailing and seasonal gameplay-wind direction carries formations visibly across the sky at normal speed.
+- [x] Instantaneous wind and rain-event seed changes cannot reproject or teleport accumulated cloud travel; simulation career time and pause behavior remain authoritative without new saves, assets, controls, or wall-clock animation.
+- [x] Reused WebGL contexts clear incompatible 2D upload flags before Three.js creates its internal 3D/array fallback textures.
+- [x] The seasonal sky implementation is split into focused climate-rendering modules and all consumers use that boundary.
+- [x] TypeScript, weather visual, render-performance, and queue regressions pass.
+
+Touchpoints: `src/systems/climate/rendering/seasonalCloud*.ts`, `src/systems/climate/rendering/seasonalSky*.ts`, `src/render/`, `scripts/weather-visual-regression.mjs`, `scripts/render-performance-regression.mjs`, `docs/`
+
+Constraints: retain two generated packed cloud textures and one sky draw; cap the march at 20 slices with early exit; preserve deterministic climate-driven motion and existing public sky state behavior; do not port external shader source.
+
+Notes: The initial 12-slice implementation was rejected after live comparison because it extruded a 2D field by height, translated without shape evolution, and made fair-weather clouds translucent. A follow-up stacked-slice pseudo-3D sampler was also rejected because shallow rays exposed repeated streaks and turned sparse summer coverage into a textured ceiling. A broad-footprint correction still read as horizontal shelves because each occupied column shared one slab top, and multiplying current wind by total elapsed time made direction changes reproject the whole cloud field. The accepted correction slows internal evolution, enlarges the broad footprint scale while nonlinearly reducing fair-season occupancy, analytically integrates the prevailing and seasonal gameplay-wind track, and replaces tri-planar height shaping with a padded 32³ RGBA volume atlas. Texture-offset sign is inverted so visible formations travel with the wind rather than against it. Both cloud inputs remain WebGL-compatible 2D textures: the second is an atlas whose padded slices are interpolated through Z as a continuous volume. Reported `texImage3D` errors came from Three.js initializing unrelated internal fallback textures on a reused context with stale flip-Y/premultiplied-alpha state, now reset by the shared context boundary.
+
+Status: done
+
 TSK-0167: Randomize new-campaign terrain setup
 
 Type: feature

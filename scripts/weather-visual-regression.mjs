@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import * as THREE from "three";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -13,7 +14,24 @@ const { sampleSeasonalWeatherVisualState } = await import(
 const { sampleSeasonalAtmosphereVisualState } = await import(
   distImport(["systems", "climate", "rendering", "seasonalAtmosphereVisualState.js"])
 );
-const { buildSeasonalSkyState } = await import(distImport(["render", "seasonalSky.js"]));
+const { buildSeasonalSkyState } = await import(
+  distImport(["systems", "climate", "rendering", "seasonalSkyState.js"])
+);
+const { sampleClimateWindDirection } = await import(
+  distImport(["systems", "climate", "sim", "climateWindDirection.js"])
+);
+const {
+  SEASONAL_CLOUD_NOISE,
+  SEASONAL_CLOUD_NOISE_CHANNELS,
+  sampleSeasonalCloudDensity
+} = await import(distImport(["systems", "climate", "rendering", "seasonalCloudField.js"]));
+const {
+  SEASONAL_CLOUD_VOLUME,
+  SEASONAL_CLOUD_VOLUME_ATLAS_HEIGHT,
+  SEASONAL_CLOUD_VOLUME_ATLAS_WIDTH,
+  SEASONAL_CLOUD_VOLUME_CHANNELS,
+  sampleSeasonalCloudVolume
+} = await import(distImport(["systems", "climate", "rendering", "seasonalCloudVolume.js"]));
 const { resolveOceanSurfaceContext } = await import(
   distImport(["render", "water", "ocean", "oceanSurfaceContext.js"])
 );
@@ -74,11 +92,264 @@ const skyFast = buildSeasonalSkyState({
   risk01: 0.35,
   timeSpeedValue: 20
 });
+const skyRepeat = buildSeasonalSkyState({
+  ...baseInput,
+  risk01: 0.35
+});
 assert.equal(skySlow.cloudTimeDays, skyFast.cloudTimeDays, "time speed alone must not move the cloud clock");
 assert.equal(skySlow.cloudNearOffset.x, skyFast.cloudNearOffset.x, "time speed alone must not change near cloud X drift");
 assert.equal(skySlow.cloudNearOffset.y, skyFast.cloudNearOffset.y, "time speed alone must not change near cloud Y drift");
 assert.equal(skySlow.cloudFarOffset.x, skyFast.cloudFarOffset.x, "time speed alone must not change far cloud X drift");
 assert.equal(skySlow.cloudFarOffset.y, skyFast.cloudFarOffset.y, "time speed alone must not change far cloud Y drift");
+assert.equal(skySlow.sunOcclusion01, skyRepeat.sunOcclusion01, "same climate input must reproduce sun occlusion");
+assert.ok(
+  skySlow.sunOcclusion01 >= 0 && skySlow.sunOcclusion01 <= 1,
+  "sun occlusion must remain normalized"
+);
+const clearAutumnSky = buildSeasonalSkyState({
+  ...baseInput,
+  risk01: 0.35,
+  rainIntensity01: 0
+});
+assert.ok(
+  skySlow.cloudCoverage > clearAutumnSky.cloudCoverage,
+  "the rain front should increase overall cloud coverage even when the sun lies in a local break"
+);
+
+assert.equal(
+  SEASONAL_CLOUD_NOISE.data.length,
+  SEASONAL_CLOUD_NOISE.size * SEASONAL_CLOUD_NOISE.size * SEASONAL_CLOUD_NOISE_CHANNELS,
+  "packed cloud noise must expose every RGBA texel"
+);
+assert.equal(
+  SEASONAL_CLOUD_VOLUME.data.length,
+  SEASONAL_CLOUD_VOLUME.size ** 3 * SEASONAL_CLOUD_VOLUME_CHANNELS,
+  "the deterministic cloud volume must expose every packed voxel"
+);
+assert.equal(
+  SEASONAL_CLOUD_VOLUME.atlasData.length,
+  SEASONAL_CLOUD_VOLUME_ATLAS_WIDTH *
+    SEASONAL_CLOUD_VOLUME_ATLAS_HEIGHT *
+    SEASONAL_CLOUD_VOLUME_CHANNELS,
+  "the GPU cloud atlas must contain every padded volume slice"
+);
+const volumeProbe = sampleSeasonalCloudVolume(0.27, 0.43, 0.61, 0);
+assert.equal(
+  volumeProbe,
+  sampleSeasonalCloudVolume(0.27, 0.43, 0.61, 0),
+  "true 3D cloud noise must be deterministic"
+);
+assert.ok(
+  Math.abs(volumeProbe - sampleSeasonalCloudVolume(0.27, 0.43, 0.78, 0)) > 0.01,
+  "cloud noise must vary through the volume Z axis"
+);
+assert.ok(
+  Math.abs(volumeProbe - sampleSeasonalCloudVolume(1.27, 0.43, 0.61, 0)) < 1e-12,
+  "the generated cloud volume must tile without a horizontal seam"
+);
+const cloudField = {
+  cloudCoverage: skySlow.cloudCoverage,
+  cloudSoftness01: skySlow.cloudSoftness01,
+  cloudDensity01: skySlow.cloudDensity01,
+  cloudNearScale: skySlow.cloudNearScale,
+  cloudFarScale: skySlow.cloudFarScale,
+  cloudNearOffset: skySlow.cloudNearOffset,
+  cloudFarOffset: skySlow.cloudFarOffset,
+  stormIntensity01: skySlow.stormIntensity01,
+  cloudTimeDays: skySlow.cloudTimeDays
+};
+const cloudProbeDirection = new THREE.Vector3(0.38, 0.72, -0.41).normalize();
+const cloudProbeA = sampleSeasonalCloudDensity(cloudProbeDirection, cloudField);
+const cloudProbeB = sampleSeasonalCloudDensity(cloudProbeDirection, cloudField);
+assert.equal(cloudProbeA, cloudProbeB, "CPU cloud density probes must be deterministic");
+assert.ok(cloudProbeA >= 0 && cloudProbeA <= 1, "CPU cloud density must remain normalized");
+const evolvedCloudField = {
+  ...cloudField,
+  cloudTimeDays: cloudField.cloudTimeDays + 5
+};
+const evolutionProbeDirections = [];
+for (const elevation of [0.25, 0.5, 0.75]) {
+  const horizontal = Math.sqrt(1 - elevation * elevation);
+  for (let index = 0; index < 16; index += 1) {
+    const azimuth = (index / 16) * Math.PI * 2;
+    evolutionProbeDirections.push(
+      new THREE.Vector3(
+        Math.cos(azimuth) * horizontal,
+        elevation,
+        Math.sin(azimuth) * horizontal
+      )
+    );
+  }
+}
+const evolutionDelta = evolutionProbeDirections.reduce(
+  (total, direction) =>
+    total +
+    Math.abs(
+      sampleSeasonalCloudDensity(direction, cloudField) -
+        sampleSeasonalCloudDensity(direction, evolvedCloudField)
+    ),
+  0
+);
+assert.ok(
+  evolutionDelta > 1e-5,
+  "simulation weather time must evolve cloud density even when wind offsets are held fixed"
+);
+
+const summerSkyVolume = buildSeasonalSkyState({
+  ...baseInput,
+  careerDay: 190,
+  seasonT01: 190 / 360,
+  risk01: 0.35,
+  rainIntensity01: 0
+});
+const springSkyVolume = buildSeasonalSkyState({
+  ...baseInput,
+  careerDay: 116,
+  seasonT01: 116 / 360,
+  risk01: 0.35,
+  rainIntensity01: 0
+});
+const springCloudField = {
+  cloudCoverage: springSkyVolume.cloudCoverage,
+  cloudSoftness01: springSkyVolume.cloudSoftness01,
+  cloudDensity01: springSkyVolume.cloudDensity01,
+  cloudNearScale: springSkyVolume.cloudNearScale,
+  cloudFarScale: springSkyVolume.cloudFarScale,
+  cloudNearOffset: springSkyVolume.cloudNearOffset,
+  cloudFarOffset: springSkyVolume.cloudFarOffset,
+  stormIntensity01: springSkyVolume.stormIntensity01,
+  cloudTimeDays: springSkyVolume.cloudTimeDays
+};
+const summerCloudField = {
+  cloudCoverage: summerSkyVolume.cloudCoverage,
+  cloudSoftness01: summerSkyVolume.cloudSoftness01,
+  cloudDensity01: summerSkyVolume.cloudDensity01,
+  cloudNearScale: summerSkyVolume.cloudNearScale,
+  cloudFarScale: summerSkyVolume.cloudFarScale,
+  cloudNearOffset: summerSkyVolume.cloudNearOffset,
+  cloudFarOffset: summerSkyVolume.cloudFarOffset,
+  stormIntensity01: summerSkyVolume.stormIntensity01,
+  cloudTimeDays: summerSkyVolume.cloudTimeDays
+};
+const springVolumeSamples = [];
+const summerVolumeSamples = [];
+const stormVolumeSamples = [];
+for (const elevation of [0.22, 0.42, 0.62, 0.82]) {
+  const horizontal = Math.sqrt(1 - elevation * elevation);
+  for (let index = 0; index < 32; index += 1) {
+    const azimuth = (index / 32) * Math.PI * 2;
+    const direction = new THREE.Vector3(
+      Math.cos(azimuth) * horizontal,
+      elevation,
+      Math.sin(azimuth) * horizontal
+    );
+    springVolumeSamples.push(sampleSeasonalCloudDensity(direction, springCloudField));
+    summerVolumeSamples.push(sampleSeasonalCloudDensity(direction, summerCloudField));
+    stormVolumeSamples.push(sampleSeasonalCloudDensity(direction, cloudField));
+  }
+}
+const average = (values) => values.reduce((total, value) => total + value, 0) / values.length;
+assert.ok(
+  Math.max(...summerVolumeSamples) > 0.35,
+  "sparse summer clouds must still form locally opaque volumetric bodies"
+);
+assert.ok(
+  summerVolumeSamples.filter((value) => value > 0.1).length < summerVolumeSamples.length * 0.65,
+  "summer cloud bodies must remain separated by substantial clear sky"
+);
+assert.ok(
+  springVolumeSamples.filter((value) => value > 0.1).length < springVolumeSamples.length * 0.35,
+  "spring must leave broad gaps between its larger cloud bodies"
+);
+assert.ok(
+  Math.max(...springVolumeSamples) > 0.65,
+  "reduced spring coverage must retain locally dense fluffy clouds"
+);
+assert.ok(
+  springVolumeSamples.filter((value) => value > 0.1).length >
+    summerVolumeSamples.filter((value) => value > 0.1).length,
+  "spring should retain more cloud bodies than summer"
+);
+assert.ok(
+  average(stormVolumeSamples) > average(summerVolumeSamples),
+  "the rain front must occupy more of the sampled sky volume than fair summer clouds"
+);
+
+const skyLater = buildSeasonalSkyState({
+  ...baseInput,
+  careerDay: baseInput.careerDay + 0.25,
+  risk01: 0.35
+});
+assert.notEqual(skySlow.cloudNearOffset.x, skyLater.cloudNearOffset.x, "career time must advance cloud drift");
+assert.notEqual(skySlow.cloudFarOffset.y, skyLater.cloudFarOffset.y, "career time must advance both cloud layers");
+assert.ok(
+  skySlow.cloudNearOffset.distanceTo(skyLater.cloudNearOffset) < 0.02,
+  "a small simulation-time step must move the cloud field continuously"
+);
+assert.ok(
+  skySlow.cloudNearOffset.distanceTo(skyLater.cloudNearOffset) > 0.004,
+  "normal-speed simulation time must produce readable cloud travel"
+);
+const windDirectionAtProbe = sampleClimateWindDirection(
+  baseInput.worldSeed,
+  (baseInput.careerDay % 360) + 1,
+  Math.floor(baseInput.careerDay / 360)
+);
+const visibleCloudTravel = skySlow.cloudNearOffset.clone().sub(skyLater.cloudNearOffset).normalize();
+assert.ok(
+  visibleCloudTravel.dot(new THREE.Vector2(windDirectionAtProbe.dx, windDirectionAtProbe.dy)) > 0.98,
+  "normal-speed cloud travel must visibly follow the authoritative gameplay wind direction"
+);
+
+const eastwardSky = buildSeasonalSkyState({
+  ...baseInput,
+  risk01: 0.35,
+  windDx: 1,
+  windDy: 0
+});
+const westwardSky = buildSeasonalSkyState({
+  ...baseInput,
+  risk01: 0.35,
+  windDx: -1,
+  windDy: 0
+});
+assert.equal(
+  eastwardSky.cloudNearOffset.x,
+  westwardSky.cloudNearOffset.x,
+  "changing instantaneous wind must not reproject the accumulated cloud X position"
+);
+assert.equal(
+  eastwardSky.cloudNearOffset.y,
+  westwardSky.cloudNearOffset.y,
+  "changing instantaneous wind must not reproject the accumulated cloud Y position"
+);
+
+const alternateSeedSky = buildSeasonalSkyState({
+  ...baseInput,
+  risk01: 0.35,
+  rainSeed: baseInput.rainSeed + 1
+});
+assert.notEqual(alternateSeedSky.weatherSeed, skySlow.weatherSeed, "sky state must retain the varied weather seed");
+assert.equal(
+  alternateSeedSky.cloudNearOffset.x,
+  skySlow.cloudNearOffset.x,
+  "rain-event seed changes must not teleport the underlying cloud field"
+);
+assert.equal(
+  alternateSeedSky.cloudTimeDays,
+  skySlow.cloudTimeDays,
+  "rain-event seed changes must not jump the internal cloud morph phase"
+);
+const alternateWorldSky = buildSeasonalSkyState({
+  ...baseInput,
+  risk01: 0.35,
+  worldSeed: baseInput.worldSeed + 1
+});
+assert.notEqual(
+  alternateWorldSky.cloudNearOffset.x,
+  skySlow.cloudNearOffset.x,
+  "world seed must vary the deterministic cloud track"
+);
 
 assert.ok(visualA.stormIntensity01 > visualA.wetSeason01 * 0.3, "active rain should lift storm intensity");
 assert.ok(skySlow.stormIntensity01 > 0.5, "rainy autumn sky should report a stormy state");
@@ -147,7 +418,12 @@ assert.ok(summer.cloudCoverage01 < spring.cloudCoverage01, "summer should be les
 assert.ok(spring.cloudCoverage01 < autumn.cloudCoverage01, "spring should be less cloudy than autumn");
 assert.ok(autumn.cloudCoverage01 < winter.cloudCoverage01, "autumn should be less cloudy than winter");
 assert.ok(winter.cloudCoverage01 < 0.7, "default winter cloud cover should be heavy but not fully overcast");
-assert.ok(summer.cloudDensity01 < 0.18, "clear summer sky should have low baseline cloud density");
+assert.ok(summer.cloudCoverage01 < 0.06, "clear summer sky should retain broad gaps between clouds");
+assert.ok(spring.cloudCoverage01 < 0.24, "fair spring sky should remain open between larger clouds");
+assert.ok(
+  summer.cloudDensity01 > 0.3,
+  "the few surviving summer clouds should retain locally substantial density"
+);
 assert.equal(summerHighRisk.cloudCoverage01, summerLowRisk.cloudCoverage01, "fire risk must not alter cloud coverage");
 assert.ok(storm.cloudCoverage01 > autumn.cloudCoverage01, "rain should clearly increase autumn cloud coverage");
 assert.ok(storm.stormMood01 > autumn.stormMood01 + 0.4, "rain should clearly lift storm mood");

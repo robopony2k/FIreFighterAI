@@ -19,6 +19,11 @@ export const getRequiredWebGLContext = (
       `WebGL is unavailable in this environment. ${consumerLabel} requires hardware acceleration.`
     );
   }
+  // A canvas can retain its WebGL context after a Three.js renderer is disposed.
+  // Texture uploads from that renderer may leave these unpack flags enabled,
+  // but WebGL forbids both flags when Three initializes its 3D/array fallbacks.
+  context.pixelStorei(context.UNPACK_FLIP_Y_WEBGL, false);
+  context.pixelStorei(context.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
   return context;
 };
 

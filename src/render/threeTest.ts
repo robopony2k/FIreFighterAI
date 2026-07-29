@@ -51,7 +51,7 @@ import { createHudState, setHudViewport, type HudTheme } from "./hud/hudState.js
 import { handleHudClick, handleHudKey, renderHud } from "./hud/hud.js";
 import { buildEnvironmentPalette, computeFireLoad01 } from "./environmentPalette.js";
 import { buildLightingDirectorState, type LightingDirectorInput, type LightingDirectorState } from "./lightingDirector.js";
-import { createSeasonalSkyDome } from "./seasonalSky.js";
+import { createSeasonalSkyDome } from "../systems/climate/rendering/seasonalSkyDome.js";
 import { sampleSeasonalWeatherVisualState } from "../systems/climate/rendering/seasonalWeatherVisualState.js";
 import {
   getMinimapModeLabel,

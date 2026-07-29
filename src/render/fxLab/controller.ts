@@ -14,7 +14,7 @@ import {
 import { sampleSeasonalWeatherVisualState } from "../../systems/climate/rendering/seasonalWeatherVisualState.js";
 import { createConstructionFxRuntime } from "../../systems/settlements/rendering/constructionFxRuntime.js";
 import { buildLightingDirectorState } from "../lightingDirector.js";
-import { createSeasonalSkyDome } from "../seasonalSky.js";
+import { createSeasonalSkyDome } from "../../systems/climate/rendering/seasonalSkyDome.js";
 import { buildRenderTerrainSample } from "../simView.js";
 import { buildTerrainMesh, prepareTerrainRenderSurface, type TerrainRenderSurface, type TerrainSample } from "../threeTestTerrain.js";
 import { ThreeTestWaterSystem } from "../threeTestWater.js";

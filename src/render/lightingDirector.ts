@@ -6,7 +6,7 @@ import {
   buildSeasonalSkyState,
   type SeasonalSkyInput,
   type SeasonalSkyState
-} from "./seasonalSky.js";
+} from "../systems/climate/rendering/seasonalSkyState.js";
 
 const SHADOW_NORMAL_REFRESH_MS = 160;
 const SHADOW_FAST_REFRESH_MS = 90;
