@@ -1,5 +1,45 @@
 # Deprecations
 
+## HQ-First Squad Dispatch Arming
+
+Status: Deprecated as of July 29, 2026.
+
+- Players no longer need to open the HQ facility before they can dispatch a staffed squad from headquarters.
+- Fixed squad hotkeys 1-5 and the matching bottom-tray slots now activate both fielded squads and squads with available trucks at HQ.
+- A fielded squad receives mouse terrain orders immediately; an HQ squad uses the same pointer gesture to enter the world.
+
+Migration guidance:
+
+1. Keep fixed squad-slot activation independent from whether the squad is currently fielded.
+2. Route future squad command gestures through the bottom command tray and world pointer rather than adding an HQ-open prerequisite.
+3. Leave recruitment, crew assignment, training, and roster maintenance in the HQ facility.
+
+## Combined New-Campaign Seed And Slider Randomization
+
+Status: Deprecated as of July 28, 2026.
+
+- The single Randomise action that changed both the seed and terrain sliders is replaced by independent Randomise Seed and Randomise Sliders actions.
+- The numeric seed now has its own editable field; Share Code is a separate field that continues to encode the seed, map size, and terrain variables together.
+- Importing a valid share code updates the separate seed field and all encoded terrain controls.
+
+Migration guidance:
+
+1. Keep seed-only changes independent from slider-only changes.
+2. Synchronize both inputs into the existing share-code format rather than introducing separate partial codes.
+
+## New-Campaign Fuel Profile Editor
+
+Status: Deprecated as of July 27, 2026.
+
+- Fuel-profile fields are no longer displayed or editable in the new-campaign Terrain tab.
+- Campaign setup continues to carry existing configured fuel-profile overrides unchanged; the Terrain randomizer does not modify them.
+- Dev-facing fuel-profile tuning remains available in SIM Lab, which owns the intended tuning workflow.
+
+Migration guidance:
+
+1. Add fire-behavior tuning controls to SIM Lab rather than restoring the campaign setup grid.
+2. Keep terrain randomization scoped to the displayed terrain recipe and seed while preserving map size and fuel-profile configuration.
+
 ## Full-World Static Batches And Full-Terrain Road Overlay
 
 Status: Deprecated as of July 10, 2026.

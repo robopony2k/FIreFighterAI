@@ -5,10 +5,18 @@ import { createEffectsState } from "../dist/core/effectsState.js";
 import { createInputState } from "../dist/core/inputState.js";
 import { createInitialState, syncTileSoA } from "../dist/core/state.js";
 import { applyFuel } from "../dist/core/tiles.js";
-import { handleMapFormationDragCommand, handleMapRetaskTileCommand } from "../dist/sim/input/mapTileActions.js";
+import {
+  handleMapFormationDragCommand,
+  handleMapPrimaryTileClick,
+  handleMapRetaskTileCommand
+} from "../dist/sim/input/mapTileActions.js";
 import { stepSim } from "../dist/sim/index.js";
 import { getTruckCrewDeploymentRoles } from "../dist/systems/units/sim/crewReadiness.js";
 import { updateTruckWater } from "../dist/systems/units/sim/unitWater.js";
+import {
+  activateSquadCommandSlot,
+  activateSquadForWorldCommand
+} from "../dist/ui/unit-control/squadCommandActivation.js";
 import {
   applyCommandIntentToSelection,
   applyExtinguishStep,
@@ -395,6 +403,54 @@ const testPendingSquadDispatchProjection = () => {
   assert.ok(commandUnit, "projected dispatch should field the pending squad");
   assert.equal(inputState.pendingSquadDispatchId, null, "successful projected dispatch should clear pending squad state");
   assert.equal(commandUnit.currentIntent?.target.kind, "formation", "projected dispatch should commit a formation target");
+};
+
+const testSquadCommandHotkeyActivation = () => {
+  const { state, rng } = buildState(2029);
+  seedStartingRoster(state, rng);
+  ensureDefaultSquads(state);
+  const squad = state.squads[0];
+  assert.ok(squad, "the first fixed squad slot should exist");
+  const inputState = createInputState();
+
+  assert.equal(
+    activateSquadCommandSlot(state, inputState, 0),
+    "dispatch-ready",
+    "a fixed hotkey slot with available HQ trucks should arm immediate world dispatch"
+  );
+  assert.equal(inputState.pendingSquadDispatchId, squad.id, "HQ hotkey activation should remember the squad to dispatch");
+  assert.deepEqual(state.selectedCommandUnitIds, [], "HQ hotkey activation should clear an unrelated field selection");
+
+  assert.equal(
+    handleMapPrimaryTileClick({ state, inputState, rng, tile: { x: 5, y: 5 } }),
+    true,
+    "the pointer command should handle an armed HQ squad"
+  );
+  const commandUnit = state.commandUnits.find((entry) => entry.squadId === squad.id);
+  assert.ok(commandUnit, "the pointer command should dispatch the hotkey-selected HQ squad");
+  assert.equal(inputState.pendingSquadDispatchId, null, "successful pointer dispatch should clear dispatch arming");
+
+  assert.equal(
+    activateSquadForWorldCommand(state, inputState, squad.id),
+    "fielded",
+    "the same command activation should select a squad already in the world"
+  );
+  assert.deepEqual(
+    state.selectedCommandUnitIds,
+    [commandUnit.id],
+    "fielded hotkey activation should select the squad command unit"
+  );
+
+  assert.equal(
+    activateSquadCommandSlot(state, inputState, 1),
+    "unavailable",
+    "a fixed slot without active trucks should not replace the current command selection"
+  );
+  assert.deepEqual(
+    state.selectedCommandUnitIds,
+    [commandUnit.id],
+    "an unavailable squad slot should preserve the current command selection"
+  );
 };
 
 const testSuppressionWaterSpendAndRefill = () => {
@@ -892,6 +948,7 @@ testFormationAndCommandTargets();
 testProjectedFormationTargets();
 testMapActionsCommitProjectedTargets();
 testPendingSquadDispatchProjection();
+testSquadCommandHotkeyActivation();
 testSuppressionWaterSpendAndRefill();
 testTownWaterTowerRefillSource();
 testTruckDoesNotSprayDirectly();

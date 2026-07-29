@@ -102,10 +102,28 @@
                 <div class="run-settings-card">
                   <div class="run-settings-title">Seed</div>
                   <label class="run-input">
-                    Seed code
-                    <input id="runSeedInput" type="text" spellcheck="false" autocomplete="off" value="1337" />
+                    Seed
+                    <div class="run-seed-row">
+                      <input
+                        id="runSeedNumberInput"
+                        type="text"
+                        inputmode="numeric"
+                        pattern="[0-9]*"
+                        spellcheck="false"
+                        autocomplete="off"
+                        value="1337"
+                      />
+                      <button id="runSeedRandom" type="button">Randomise Seed</button>
+                    </div>
                   </label>
-                  <div class="run-settings-note">Encodes the random seed and terrain sliders for this run.</div>
+                  <label class="run-input">
+                    Share code
+                    <div class="run-seed-row">
+                      <input id="runShareCodeInput" type="text" spellcheck="false" autocomplete="off" />
+                      <button id="runTerrainRandom" type="button">Randomise Sliders</button>
+                    </div>
+                  </label>
+                  <div class="run-settings-note">The share code encodes the seed and all terrain variables for this run.</div>
                 </div>
                 <div class="run-settings-card">
                   <div class="run-settings-title">Map Size</div>
@@ -148,13 +166,6 @@
                   </div>
                 </div>
                 <div id="terrainControls" class="run-settings-slot"></div>
-                <div class="run-settings-card run-settings-card--wide">
-                  <div class="run-settings-title">Fuel Profiles</div>
-                  <div id="fuelProfileGrid" class="fuel-grid" role="table" aria-label="Fuel profile grid"></div>
-                  <div class="run-settings-note">
-                    Adjusted values are saved locally and applied to new maps.
-                  </div>
-                </div>
               </div>
             </section>
             <section class="run-tab-panel" data-tab-panel="fire">

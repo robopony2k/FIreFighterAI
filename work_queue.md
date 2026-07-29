@@ -1,3 +1,43 @@
+TSK-0167: Randomize new-campaign terrain setup
+
+Type: feature
+
+Why: Creating a fresh terrain recipe required changing the seed and every terrain control manually, while developer-oriented fuel-profile fields occupied a large campaign setup surface.
+
+Done when:
+- [x] Separate Randomise Seed and Randomise Sliders buttons change only their respective source of terrain variation.
+- [x] The numeric seed is displayed and editable separately from the share code.
+- [x] The share code continuously encodes the current seed, map size, and terrain variables, and valid imported codes update both fields and controls.
+- [x] The selected map size and configured fuel-profile overrides remain unchanged.
+- [x] Fuel-profile controls are removed from the new-campaign Terrain interface while SIM Lab tuning remains available.
+- [x] TypeScript and focused randomizer regression coverage pass.
+
+Touchpoints: `index.html`, `styles.css`, `src/ui/character-select.ts`, `src/ui/terrainRandomizer.ts`, `src/ui/phase/bindings/phaseBindingsRuntime.ts`, `scripts/terrain-randomizer-regression.mjs`, `docs/`
+
+Constraints: preserve share-code compatibility, saved fuel-profile overrides, map-size selection, and UI-to-terrain dependency direction.
+
+Notes: The initial combined Randomise action was replaced by independent seed and slider actions on July 28, 2026.
+
+Status: done
+
+TSK-0168: Activate HQ squads directly from command hotkeys
+
+Type: feature
+
+Why: Fixed squad hotkeys selected only already-fielded command units, forcing players to open the HQ facility before they could dispatch an available squad into the world.
+
+Done when:
+- [x] Keys 1-5 map to the five persistent squad slots instead of the current fielded-unit ordering.
+- [x] A fielded squad becomes selected immediately, while an HQ squad with available trucks becomes ready for the next mouse terrain order.
+- [x] Bottom-tray squad activation follows the same behavior without changing HQ roster-management selection.
+- [x] Unit regression coverage verifies HQ activation, mouse dispatch, fielded reselection, and empty-slot behavior.
+
+Touchpoints: `src/ui/unit-control/`, `src/ui/phase/bindings/phaseBindingsRuntime.ts`, `scripts/units-regression.mjs`
+
+Constraints: keep unit simulation independent from UI, preserve the five fixed squad slots, and do not move recruitment or roster maintenance out of the HQ facility.
+
+Status: done
+
 TSK-0157: Prototype bidirectional streamer road routing
 
 Type: feature

@@ -5045,6 +5045,20 @@ canvas {
   color: var(--run-text-strong);
 }
 
+.run-seed-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 142px;
+  gap: 8px;
+}
+
+.run-seed-row input {
+  min-width: 0;
+}
+
+.run-seed-row > button {
+  padding-inline: 14px;
+}
+
 .run-toggle {
   display: grid;
   gap: 6px;

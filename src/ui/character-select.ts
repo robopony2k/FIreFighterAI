@@ -1,14 +1,15 @@
 import type { WorldState } from "../core/state.js";
 import { CHARACTERS, CHIEF_GENDERS, DEFAULT_CHIEF_GENDER, getCharacterInitials } from "../core/characters.js";
 import type { CharacterId, CharacterDefinition, ChiefGender } from "../core/characters.js";
-import { FUEL_PROFILES, type MapSizeId } from "../core/config.js";
-import type { FireSettings, FuelProfile, TileType } from "../core/types.js";
+import type { MapSizeId } from "../core/config.js";
+import type { FireSettings } from "../core/types.js";
 import { DEFAULT_MAP_SIZE, DEFAULT_RUN_OPTIONS, DEFAULT_RUN_SEED, normalizeFireSettings } from "./run-config.js";
 import type { FuelProfileOverrides, NewRunConfig, RunOptions } from "./run-config.js";
 import { cloneTerrainRecipe, createDefaultTerrainRecipe, terrainRecipeEqual, type TerrainRecipe } from "../mapgen/terrainProfile.js";
-import { loadFuelProfileOverrides, saveFuelProfileOverrides } from "../persistence/fuelProfiles.js";
+import { loadFuelProfileOverrides } from "../persistence/fuelProfiles.js";
 import { loadMapScenarios, type MapScenario } from "../persistence/mapScenarios.js";
 import { buildTerrainControls } from "./terrain-controls.js";
+import { createRandomTerrainRecipe, createRandomTerrainSeed } from "./terrainRandomizer.js";
 import {
   coerceTerrainSeedNumber,
   decodeTerrainSeedCode,
@@ -22,13 +23,6 @@ import {
   syncTerrainControlOutputs,
   TERRAIN_RUN_GROUPS
 } from "./terrain-schema.js";
-import {
-  FUEL_PROFILE_FIELD_DEFINITIONS,
-  buildFuelFieldTooltip,
-  buildFuelInputTooltip,
-  buildFuelTypeTooltip,
-  formatFuelTileTypeLabel
-} from "./fuelProfileHelp.js";
 export type CharacterSelectRefs = {
   characterScreen: HTMLDivElement;
   characterGrid: HTMLDivElement;
@@ -39,7 +33,10 @@ export type CharacterSelectRefs = {
   characterPreviewInitials: HTMLSpanElement;
   characterNameInput: HTMLInputElement;
   characterNameRandom: HTMLButtonElement;
-  runSeedInput: HTMLInputElement;
+  runSeedNumberInput: HTMLInputElement;
+  runShareCodeInput: HTMLInputElement;
+  runSeedRandom: HTMLButtonElement;
+  runTerrainRandom: HTMLButtonElement;
   runMapSizeInputs: HTMLInputElement[];
   runScenarioSelect: HTMLSelectElement;
   runScenarioLoad: HTMLButtonElement;
@@ -47,7 +44,6 @@ export type CharacterSelectRefs = {
   runUnlimitedMoney: HTMLInputElement;
   terrainControls: HTMLDivElement;
   fireInputs: HTMLInputElement[];
-  fuelProfileGrid: HTMLDivElement;
 };
 
 const formatPercent = (value: number): string => {
@@ -68,36 +64,6 @@ const buildStats = (character: CharacterDefinition): string[] => [
   `Firebreak Cost ${formatMultiplier(character.modifiers.firebreakCostMultiplier)}`,
   `Approval Retention ${formatMultiplier(character.modifiers.approvalRetentionMultiplier)}`
 ];
-
-const FUEL_PROFILE_TYPES = Object.keys(FUEL_PROFILES) as TileType[];
-
-const buildFuelProfiles = (overrides: FuelProfileOverrides): Record<TileType, FuelProfile> => {
-  const result = {} as Record<TileType, FuelProfile>;
-  for (const type of FUEL_PROFILE_TYPES) {
-    const base = FUEL_PROFILES[type];
-    result[type] = { ...base, ...(overrides[type] ?? {}) };
-  }
-  return result;
-};
-
-const buildFuelProfileOverrides = (profiles: Record<TileType, FuelProfile>): FuelProfileOverrides => {
-  const overrides: FuelProfileOverrides = {};
-  for (const type of FUEL_PROFILE_TYPES) {
-    const base = FUEL_PROFILES[type];
-    const profile = profiles[type];
-    const delta: Partial<FuelProfile> = {};
-    for (const field of FUEL_PROFILE_FIELD_DEFINITIONS) {
-      const key = field.key;
-      if (Math.abs(profile[key] - base[key]) > 1e-6) {
-        delta[key] = profile[key];
-      }
-    }
-    if (Object.keys(delta).length > 0) {
-      overrides[type] = delta;
-    }
-  }
-  return overrides;
-};
 
 const cloneRunOptions = (options: RunOptions): RunOptions => ({
   ...DEFAULT_RUN_OPTIONS,
@@ -208,10 +174,6 @@ export function initCharacterSelect(
   let selectedId: CharacterId = defaultConfig.characterId;
   let selectedGender: ChiefGender = defaultConfig.chiefGender;
   let fuelProfileOverrides = { ...defaultConfig.options.fuelProfiles };
-  let fuelProfiles = buildFuelProfiles(fuelProfileOverrides);
-  const fuelProfileInputs: HTMLInputElement[] = [];
-  const fuelProfileHeaderCells = new Map<keyof FuelProfile, HTMLDivElement>();
-  const fuelProfileTypeCells = new Map<TileType, HTMLDivElement>();
   const cards = new Map<CharacterId, HTMLButtonElement>();
   const genderButtons = new Map<ChiefGender, HTMLButtonElement>();
   const genderControl = document.createElement("div");
@@ -408,25 +370,31 @@ export function initCharacterSelect(
   };
 
   const readSeedNumber = (): number =>
-    decodeTerrainSeedCode(ui.runSeedInput.value)?.seed
-    ?? coerceTerrainSeedNumber(ui.runSeedInput.value, DEFAULT_RUN_SEED);
+    coerceTerrainSeedNumber(ui.runSeedNumberInput.value, DEFAULT_RUN_SEED);
 
-  const syncSeedField = (seedNumber = readSeedNumber()): void => {
-    ui.runSeedInput.value = encodeTerrainSeedCode({
+  const setSeedNumber = (seedNumber: number): number => {
+    const normalized = coerceTerrainSeedNumber(`${seedNumber}`, DEFAULT_RUN_SEED);
+    ui.runSeedNumberInput.value = `${normalized}`;
+    return normalized;
+  };
+
+  const syncShareCode = (seedNumber = readSeedNumber()): void => {
+    ui.runShareCodeInput.value = encodeTerrainSeedCode({
       seed: seedNumber,
       mapSize: getSelectedMapSize(),
       terrain: getTerrainRecipe()
     });
   };
 
-  const applySeedFieldIfEncoded = (): boolean => {
-    const decoded = decodeTerrainSeedCode(ui.runSeedInput.value);
+  const applyShareCodeIfEncoded = (): boolean => {
+    const decoded = decodeTerrainSeedCode(ui.runShareCodeInput.value);
     if (!decoded) {
       return false;
     }
+    setSeedNumber(decoded.seed);
     setSelectedMapSize(decoded.mapSize);
     applyTerrainRecipe(decoded.terrain);
-    ui.runSeedInput.value = encodeTerrainSeedCode(decoded);
+    ui.runShareCodeInput.value = encodeTerrainSeedCode(decoded);
     return true;
   };
 
@@ -504,123 +472,8 @@ export function initCharacterSelect(
     });
   };
 
-  const handleFuelProfileInput = (event: Event): void => {
-    const input = event.target as HTMLInputElement | null;
-    if (!input) {
-      return;
-    }
-    const type = input.dataset.fuelType as TileType | undefined;
-    const key = input.dataset.fuelKey as keyof FuelProfile | undefined;
-    if (!type || !key) {
-      return;
-    }
-    if (input.value.trim().length === 0) {
-      return;
-    }
-    const value = Number(input.value);
-    if (!Number.isFinite(value)) {
-      return;
-    }
-    fuelProfiles[type] = { ...fuelProfiles[type], [key]: value };
-    fuelProfileOverrides = buildFuelProfileOverrides(fuelProfiles);
-    saveFuelProfileOverrides(fuelProfileOverrides);
-    syncFuelProfileTooltips();
-  };
-
-  const syncFuelProfileInputs = (): void => {
-    fuelProfileInputs.forEach((input) => {
-      const type = input.dataset.fuelType as TileType | undefined;
-      const key = input.dataset.fuelKey as keyof FuelProfile | undefined;
-      if (!type || !key) {
-        return;
-      }
-      const value = fuelProfiles[type]?.[key];
-      if (Number.isFinite(value)) {
-        input.value = value.toFixed(2);
-      }
-    });
-  };
-
-  const syncFuelProfileTooltips = (): void => {
-    const heatCap = getFireSettings().heatCap;
-    fuelProfileHeaderCells.forEach((cell, key) => {
-      cell.title = buildFuelFieldTooltip(key, heatCap);
-    });
-    fuelProfileTypeCells.forEach((cell, type) => {
-      cell.title = buildFuelTypeTooltip(type, fuelProfiles[type], heatCap);
-    });
-    fuelProfileInputs.forEach((input) => {
-      const type = input.dataset.fuelType as TileType | undefined;
-      const key = input.dataset.fuelKey as keyof FuelProfile | undefined;
-      if (!type || !key) {
-        return;
-      }
-      input.title = buildFuelInputTooltip(type, key, fuelProfiles[type], heatCap);
-    });
-  };
-
-  const buildFuelProfileGrid = (): void => {
-    if (!ui.fuelProfileGrid) {
-      return;
-    }
-    fuelProfileInputs.length = 0;
-    fuelProfileHeaderCells.clear();
-    fuelProfileTypeCells.clear();
-    ui.fuelProfileGrid.innerHTML = "";
-    const headerLabels = ["Tile", ...FUEL_PROFILE_FIELD_DEFINITIONS.map((field) => field.label)];
-    headerLabels.forEach((label) => {
-      const cell = document.createElement("div");
-      cell.className = "fuel-grid-cell fuel-grid-head";
-      cell.textContent = label;
-      if (label === "Tile") {
-        cell.title = "Tile type these fire-tuning values apply to.";
-      } else {
-        const field = FUEL_PROFILE_FIELD_DEFINITIONS.find((entry) => entry.label === label);
-        if (field) {
-          fuelProfileHeaderCells.set(field.key, cell);
-        }
-      }
-      ui.fuelProfileGrid.appendChild(cell);
-    });
-
-    for (const type of FUEL_PROFILE_TYPES) {
-      const typeCell = document.createElement("div");
-      typeCell.className = "fuel-grid-cell fuel-grid-type";
-      const swatch = document.createElement("span");
-      swatch.className = "fuel-grid-swatch";
-      swatch.dataset.type = type;
-      const label = document.createElement("span");
-      label.textContent = formatFuelTileTypeLabel(type);
-      typeCell.appendChild(swatch);
-      typeCell.appendChild(label);
-      fuelProfileTypeCells.set(type, typeCell);
-      ui.fuelProfileGrid.appendChild(typeCell);
-
-      for (const field of FUEL_PROFILE_FIELD_DEFINITIONS) {
-        const cell = document.createElement("div");
-        cell.className = "fuel-grid-cell";
-        const input = document.createElement("input");
-        input.type = "number";
-        input.min = "0";
-        input.step = field.step;
-        const value = fuelProfiles[type][field.key];
-        input.value = Number.isFinite(value) ? value.toFixed(2) : "0";
-        input.dataset.fuelType = type;
-        input.dataset.fuelKey = field.key;
-        input.addEventListener("input", handleFuelProfileInput);
-        cell.appendChild(input);
-        ui.fuelProfileGrid.appendChild(cell);
-        fuelProfileInputs.push(input);
-      }
-    }
-  };
-
   const applyFuelProfileOverrides = (overrides: FuelProfileOverrides): void => {
     fuelProfileOverrides = { ...overrides };
-    fuelProfiles = buildFuelProfiles(fuelProfileOverrides);
-    syncFuelProfileInputs();
-    syncFuelProfileTooltips();
-    saveFuelProfileOverrides(fuelProfileOverrides);
   };
 
   const getRunOptions = (): RunOptions => ({
@@ -642,7 +495,8 @@ export function initCharacterSelect(
     setSelectedMapSize(nextConfig.mapSize);
     ui.runUnlimitedMoney.checked = nextConfig.options.unlimitedMoney;
     applyTerrainRecipe(nextConfig.options.terrain);
-    syncSeedField(nextConfig.seed);
+    setSeedNumber(nextConfig.seed);
+    syncShareCode(nextConfig.seed);
     applyFireSettings(nextConfig.options.fire);
     applyFuelProfileOverrides(nextConfig.options.fuelProfiles ?? {});
     const matchingScenario = findMatchingScenario(nextConfig.seed, nextConfig.mapSize, nextConfig.options.terrain);
@@ -660,21 +514,30 @@ export function initCharacterSelect(
     updateConfirmState();
   });
 
-  syncSeedField(readSeedNumber());
-  ui.runSeedInput.addEventListener("input", () => {
-    applySeedFieldIfEncoded();
+  syncShareCode(readSeedNumber());
+  ui.runSeedNumberInput.addEventListener("input", () => {
+    syncShareCode();
     syncCurrentScenarioState();
   });
-  ui.runSeedInput.addEventListener("blur", () => {
-    if (!applySeedFieldIfEncoded()) {
-      syncSeedField(readSeedNumber());
+  ui.runSeedNumberInput.addEventListener("blur", () => {
+    setSeedNumber(readSeedNumber());
+    syncShareCode();
+    syncCurrentScenarioState();
+  });
+  ui.runShareCodeInput.addEventListener("input", () => {
+    applyShareCodeIfEncoded();
+    syncCurrentScenarioState();
+  });
+  ui.runShareCodeInput.addEventListener("blur", () => {
+    if (!applyShareCodeIfEncoded()) {
+      syncShareCode();
     }
     syncCurrentScenarioState();
   });
 
   ui.runMapSizeInputs.forEach((input) => {
     input.addEventListener("change", () => {
-      syncSeedField();
+      syncShareCode();
       syncCurrentScenarioState();
     });
   });
@@ -691,12 +554,25 @@ export function initCharacterSelect(
     }
     setSelectedMapSize(scenario.mapSize);
     applyTerrainRecipe(scenario.terrain);
-    syncSeedField(scenario.seed);
+    setSeedNumber(scenario.seed);
+    syncShareCode(scenario.seed);
     syncCurrentScenarioState();
   });
 
   ui.characterNameRandom.addEventListener("click", () => {
     applyRandomName();
+  });
+
+  ui.runSeedRandom.addEventListener("click", () => {
+    const seedNumber = setSeedNumber(createRandomTerrainSeed());
+    syncShareCode(seedNumber);
+    syncCurrentScenarioState();
+  });
+
+  ui.runTerrainRandom.addEventListener("click", () => {
+    applyTerrainRecipe(createRandomTerrainRecipe(getSelectedMapSize()));
+    syncShareCode();
+    syncCurrentScenarioState();
   });
 
   terrainControlElements.inputs.forEach((input) => {
@@ -705,17 +581,12 @@ export function initCharacterSelect(
         applyTerrainArchetypeDefaultsToControls(input.value as TerrainRecipe["archetype"], getSelectedMapSize(), terrainControlElements);
       }
       syncTerrainControlOutputs(terrainControlElements);
-      syncSeedField();
+      syncShareCode();
       syncCurrentScenarioState();
     };
     input.addEventListener(input instanceof HTMLSelectElement ? "change" : "input", sync);
   });
   syncTerrainControlOutputs(terrainControlElements);
-  ui.fireInputs.forEach((input) => {
-    input.addEventListener("input", syncFuelProfileTooltips);
-  });
-  buildFuelProfileGrid();
-  syncFuelProfileTooltips();
   refreshScenarioOptions();
   applyConfigToForm(defaultConfig, false);
 

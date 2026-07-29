@@ -454,15 +454,22 @@ const createSquadSlot = (
   card.addEventListener("click", (event) => {
     event.preventDefault();
     event.stopPropagation();
+    if (commandUnit && event.shiftKey) {
+      onAction("select-command-unit", {
+        commandUnitId: String(commandUnit.id),
+        toggle: "1"
+      });
+      return;
+    }
+    if (squad) {
+      onAction("activate-squad-command", { squadId: String(squad.id) });
+      return;
+    }
     if (commandUnit) {
       onAction("select-command-unit", {
         commandUnitId: String(commandUnit.id),
         ...(event.shiftKey ? { toggle: "1" } : {})
       });
-      return;
-    }
-    if (squad) {
-      onAction("select-squad", { squadId: String(squad.id) });
     }
   });
   return card;

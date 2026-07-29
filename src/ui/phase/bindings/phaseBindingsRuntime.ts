@@ -89,6 +89,10 @@ import {
 } from "../../../persistence/runtimeSettings.js";
 import { resolveActiveFireFrontTargets } from "../../../systems/fire/sim/activeFireFrontTargets.js";
 import { buildWatchTowerForTown, upgradeWatchTowerForTown } from "../../../systems/fire/sim/fireDetection.js";
+import {
+  activateSquadCommandSlot,
+  activateSquadForWorldCommand
+} from "../../unit-control/squadCommandActivation.js";
 
 type HudAudioChannelSettings = {
   muted: boolean;
@@ -375,7 +379,10 @@ export const bindPhaseUi = ({
     characterPreviewInitials: document.getElementById("characterPreviewInitials") as HTMLSpanElement,
     characterNameInput: document.getElementById("characterNameInput") as HTMLInputElement,
     characterNameRandom: document.getElementById("characterNameRandom") as HTMLButtonElement,
-    runSeedInput: document.getElementById("runSeedInput") as HTMLInputElement,
+    runSeedNumberInput: document.getElementById("runSeedNumberInput") as HTMLInputElement,
+    runShareCodeInput: document.getElementById("runShareCodeInput") as HTMLInputElement,
+    runSeedRandom: document.getElementById("runSeedRandom") as HTMLButtonElement,
+    runTerrainRandom: document.getElementById("runTerrainRandom") as HTMLButtonElement,
     runMapSizeInputs: Array.from(
       document.querySelectorAll<HTMLInputElement>('#characterScreen input[name="mapSize"]')
     ),
@@ -386,8 +393,7 @@ export const bindPhaseUi = ({
     terrainControls: document.getElementById("terrainControls") as HTMLDivElement,
     fireInputs: Array.from(
       document.querySelectorAll<HTMLInputElement>('#characterScreen input[data-fire-key]')
-    ),
-    fuelProfileGrid: document.getElementById("fuelProfileGrid") as HTMLDivElement
+    )
   };
 
   const defaultRunConfig: NewRunConfig = {
@@ -546,6 +552,7 @@ export const bindPhaseUi = ({
     if (
       action === "select-unit" ||
       action === "select-command-unit" ||
+      action === "activate-squad-command" ||
       action === "select-truck" ||
       action === "select-roster" ||
       action === "zoom-in" ||
@@ -912,6 +919,16 @@ export const bindPhaseUi = ({
         gate("select", () => {
           selectSquad(state, id);
           inputState.pendingSquadDispatchId = null;
+          phaseUi.sync(state, inputState);
+        });
+      }
+      return;
+    }
+    if (resolvedAction === "activate-squad-command") {
+      const id = Number(actionTarget?.dataset.squadId ?? "");
+      if (Number.isFinite(id)) {
+        gate("select", () => {
+          activateSquadForWorldCommand(state, inputState, id);
           phaseUi.sync(state, inputState);
         });
       }
@@ -1499,17 +1516,13 @@ export const bindPhaseUi = ({
     }
     if (/^[1-5]$/.test(event.key)) {
       const slot = Number(event.key) - 1;
-      const target = [...state.commandUnits].sort((a, b) => a.id - b.id)[slot] ?? null;
-      if (target) {
-        gate("select", () => {
-          selectCommandUnit(state, target.id);
-          setDeployMode(state, null);
-        });
+      gate("select", () => {
+        activateSquadCommandSlot(state, inputState, slot);
         phaseUi.sync(state, inputState);
-        noteInteraction();
-        event.preventDefault();
-        return;
-      }
+      });
+      noteInteraction();
+      event.preventDefault();
+      return;
     }
     if (event.key === "m" || event.key === "M") {
       noteInteraction();
