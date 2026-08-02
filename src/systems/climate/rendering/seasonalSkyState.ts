@@ -17,6 +17,10 @@ import {
   type SeasonalCloudFieldSample
 } from "./seasonalCloudField.js";
 import { sampleSeasonalCloudAdvection } from "./seasonalCloudAdvection.js";
+import {
+  sampleSeasonalCloudProfile,
+  type SeasonalCloudProfile
+} from "./seasonalCloudProfile.js";
 
 const clamp01 = (value: number): number => Math.min(1, Math.max(0, value));
 const clamp = (value: number, min: number, max: number): number => Math.min(max, Math.max(min, value));
@@ -119,6 +123,7 @@ export type SeasonalSkyState = {
   oceanShallowColor: RGB;
   oceanDeepColor: RGB;
   weatherSeed: number;
+  cloudProfile: SeasonalCloudProfile;
 };
 
 const computeSunOcclusion = (
@@ -196,6 +201,10 @@ export const buildSeasonalSkyState = (
   const cloudNearOffset = new THREE.Vector2(advection.nearX, advection.nearY);
   const cloudFarOffset = new THREE.Vector2(advection.farX, advection.farY);
   const cloudTimeDays = advection.morphTimeDays;
+  const cloudProfile = sampleSeasonalCloudProfile({
+    seasonT01,
+    stormIntensity01: weather.stormIntensity01
+  });
   const cloudField: SeasonalCloudFieldSample = {
     cloudCoverage,
     cloudSoftness01: atmosphere.cloudSoftness01,
@@ -205,7 +214,8 @@ export const buildSeasonalSkyState = (
     cloudNearOffset,
     cloudFarOffset,
     stormIntensity01: weather.stormIntensity01,
-    cloudTimeDays
+    cloudTimeDays,
+    cloudProfile
   };
   const sunOcclusion01 = computeSunOcclusion(sunDirection, cloudField, config);
   const overcastStrength = clamp01(
@@ -277,7 +287,8 @@ export const buildSeasonalSkyState = (
     stormMood01: atmosphere.stormMood01,
     oceanShallowColor: atmosphere.oceanShallowColor,
     oceanDeepColor: atmosphere.oceanDeepColor,
-    weatherSeed: weather.weatherSeed
+    weatherSeed: weather.weatherSeed,
+    cloudProfile
   };
 };
 

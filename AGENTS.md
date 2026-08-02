@@ -5,6 +5,15 @@
 
 ## Repo Skills
 - Use `skills/game-design-maintainer/SKILL.md` for requests that scope or ship features, update `docs/GAME_DESIGN_REFERENCE.md`, mark obsolete work in `docs/deprecations.md`, maintain `work_queue.md`, answer "what should I work on next?", or turn an accepted plan into a queued task for later implementation.
+- Use `.agents/skills/validate-visual-work/SKILL.md` when a request depends on visually inspecting localhost, WebGL, shaders, rendering effects, UI layout, or live browser state.
+
+## Visual Inspection
+- Treat live browser inspection as a capability of the current Codex surface, not as a property of this repository or its development server.
+- The Codex IDE extension in VS Code does not support the built-in Browser. A Browser plugin or browser-related tool appearing enabled is not proof that the end-to-end connection works; this workspace has exposed those tools while rejecting calls because required sandbox-policy metadata was absent.
+- In VS Code, do not call or retry the built-in Browser for local visual inspection. Stop before appearance-dependent edits and ask the user to switch to a supported desktop Browser session, attach screenshots or video, or explicitly authorize source-only work without visual verification.
+- On a supported Codex surface with a working Browser, use the normal Browser workflow.
+- Do not claim that a render was visually inspected when the evidence came only from source code, configuration, automated tests, or regression scripts. Label those findings as static or automated evidence.
+- Keep public web research, inspection of local image files, and nonvisual automated checks distinct from live inspection of a running local app.
 
 ## Core Principles
 - Feature/domain-first organisation.

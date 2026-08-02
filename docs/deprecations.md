@@ -1,5 +1,19 @@
 # Deprecations
 
+## Fixed-Envelope Value-Noise Cloud Field
+
+Status: Deprecated as of August 3, 2026.
+
+- Seasonal clouds no longer blend the same symmetric vertical crown and shallow value-noise body across every season.
+- That field turned fair cumulus into repeated horizontal ripples, kept winter clouds visually thin, and allowed autumn to read as heavier than winter despite different coverage values.
+- The replacement uses climate-owned morphology profiles, cellular weather footprints, a Perlin-Worley volume atlas, weather-first empty-space rejection, and one bounded lighting probe per occupied slice.
+
+Migration guidance:
+
+1. Tune cloud base, depth, cumulus character, footprint scale, erosion, and shadow strength through `SeasonalCloudProfile` rather than adding season branches to the shader.
+2. Keep broad placement independent of morph time; simulation time may gently warp internal detail but must not slide the volume vertically or reproject accumulated wind travel.
+3. Preserve two WebGL-compatible 2D textures, manual atlas interpolation, the single sky draw, the fixed 20-slice ceiling, and matching CPU sun-occlusion density.
+
 ## Tri-Planar Heightfield Cloud Bodies
 
 Status: Deprecated as of July 30, 2026.

@@ -1,4 +1,5 @@
 import type { MapGenSettings } from "../../../mapgen/settings.js";
+import { TERRAIN_GENERATION_LIMITS } from "../constants/terrainGenerationLimits.js";
 
 const clamp = (value: number, min: number, max: number): number => Math.max(min, Math.min(max, value));
 const clamp01 = (value: number): number => clamp(value, 0, 1);
@@ -81,9 +82,17 @@ export const getCoastlineEnvelopeFields = (
   const ny = y / (rows - 1);
   const px = nx * 2 - 1;
   const py = ny * 2 - 1;
-  const landCoverage = clamp(settings.landCoverageTarget, 0.32, 0.82);
+  const landCoverage = clamp(
+    settings.landCoverageTarget,
+    TERRAIN_GENERATION_LIMITS.landCoverageTarget.min,
+    TERRAIN_GENERATION_LIMITS.landCoverageTarget.max
+  );
   const coastComplexity = clamp01(settings.coastComplexity);
-  const compactness = clamp01(settings.islandCompactness);
+  const compactness = clamp(
+    settings.islandCompactness,
+    TERRAIN_GENERATION_LIMITS.islandCompactness.min,
+    TERRAIN_GENERATION_LIMITS.islandCompactness.max
+  );
   const shelf = clamp01(settings.coastalShelfWidth);
   const asymmetry = clamp01(settings.asymmetry);
   const anisotropy = clamp01(settings.anisotropy);

@@ -17,13 +17,17 @@ const { sampleSeasonalAtmosphereVisualState } = await import(
 const { buildSeasonalSkyState } = await import(
   distImport(["systems", "climate", "rendering", "seasonalSkyState.js"])
 );
+const { sampleSeasonalCloudProfile } = await import(
+  distImport(["systems", "climate", "rendering", "seasonalCloudProfile.js"])
+);
 const { sampleClimateWindDirection } = await import(
   distImport(["systems", "climate", "sim", "climateWindDirection.js"])
 );
 const {
   SEASONAL_CLOUD_NOISE,
   SEASONAL_CLOUD_NOISE_CHANNELS,
-  sampleSeasonalCloudDensity
+  sampleSeasonalCloudDensity,
+  sampleSeasonalCloudWeather
 } = await import(distImport(["systems", "climate", "rendering", "seasonalCloudField.js"]));
 const {
   SEASONAL_CLOUD_VOLUME,
@@ -121,6 +125,16 @@ assert.equal(
   SEASONAL_CLOUD_NOISE.size * SEASONAL_CLOUD_NOISE.size * SEASONAL_CLOUD_NOISE_CHANNELS,
   "packed cloud noise must expose every RGBA texel"
 );
+const weatherProbe = sampleSeasonalCloudWeather(0.27, 0.61, 0);
+assert.equal(
+  weatherProbe,
+  sampleSeasonalCloudWeather(0.27, 0.61, 0),
+  "cellular weather footprints must be deterministic"
+);
+assert.ok(
+  Math.abs(weatherProbe - sampleSeasonalCloudWeather(1.27, 0.61, 0)) < 1e-12,
+  "the generated weather field must tile without a horizontal seam"
+);
 assert.equal(
   SEASONAL_CLOUD_VOLUME.data.length,
   SEASONAL_CLOUD_VOLUME.size ** 3 * SEASONAL_CLOUD_VOLUME_CHANNELS,
@@ -156,7 +170,8 @@ const cloudField = {
   cloudNearOffset: skySlow.cloudNearOffset,
   cloudFarOffset: skySlow.cloudFarOffset,
   stormIntensity01: skySlow.stormIntensity01,
-  cloudTimeDays: skySlow.cloudTimeDays
+  cloudTimeDays: skySlow.cloudTimeDays,
+  cloudProfile: skySlow.cloudProfile
 };
 const cloudProbeDirection = new THREE.Vector3(0.38, 0.72, -0.41).normalize();
 const cloudProbeA = sampleSeasonalCloudDensity(cloudProbeDirection, cloudField);
@@ -209,6 +224,43 @@ const springSkyVolume = buildSeasonalSkyState({
   risk01: 0.35,
   rainIntensity01: 0
 });
+const winterSkyVolume = buildSeasonalSkyState({
+  ...baseInput,
+  careerDay: 24,
+  seasonT01: 24 / 360,
+  risk01: 0.35,
+  rainIntensity01: 0
+});
+const autumnSkyVolume = buildSeasonalSkyState({
+  ...baseInput,
+  careerDay: 286,
+  seasonT01: 286 / 360,
+  risk01: 0.35,
+  rainIntensity01: 0
+});
+assert.ok(
+  summerSkyVolume.cloudProfile.cumulus01 > springSkyVolume.cloudProfile.cumulus01 &&
+    springSkyVolume.cloudProfile.cumulus01 > autumnSkyVolume.cloudProfile.cumulus01 &&
+    autumnSkyVolume.cloudProfile.cumulus01 > winterSkyVolume.cloudProfile.cumulus01,
+  "seasonal profiles must progress from tall fair cumulus to winter stratocumulus"
+);
+assert.ok(
+  winterSkyVolume.cloudProfile.topHeight - winterSkyVolume.cloudProfile.baseHeight >
+    autumnSkyVolume.cloudProfile.topHeight - autumnSkyVolume.cloudProfile.baseHeight,
+  "winter clouds must occupy a deeper layer than autumn clouds"
+);
+assert.ok(
+  winterSkyVolume.cloudProfile.baseHeight < autumnSkyVolume.cloudProfile.baseHeight,
+  "winter clouds must form below the autumn layer"
+);
+assert.ok(
+  skySlow.cloudCoverage >= 0.75 && skySlow.cloudCoverage <= 0.92,
+  "active rain must form a nearly connected but bounded storm front"
+);
+assert.ok(
+  skySlow.cloudProfile.shadowStrength > winterSkyVolume.cloudProfile.shadowStrength,
+  "active storms must self-shadow more strongly than fair winter clouds"
+);
 const springCloudField = {
   cloudCoverage: springSkyVolume.cloudCoverage,
   cloudSoftness01: springSkyVolume.cloudSoftness01,
@@ -218,7 +270,8 @@ const springCloudField = {
   cloudNearOffset: springSkyVolume.cloudNearOffset,
   cloudFarOffset: springSkyVolume.cloudFarOffset,
   stormIntensity01: springSkyVolume.stormIntensity01,
-  cloudTimeDays: springSkyVolume.cloudTimeDays
+  cloudTimeDays: springSkyVolume.cloudTimeDays,
+  cloudProfile: springSkyVolume.cloudProfile
 };
 const summerCloudField = {
   cloudCoverage: summerSkyVolume.cloudCoverage,
@@ -229,7 +282,8 @@ const summerCloudField = {
   cloudNearOffset: summerSkyVolume.cloudNearOffset,
   cloudFarOffset: summerSkyVolume.cloudFarOffset,
   stormIntensity01: summerSkyVolume.stormIntensity01,
-  cloudTimeDays: summerSkyVolume.cloudTimeDays
+  cloudTimeDays: summerSkyVolume.cloudTimeDays,
+  cloudProfile: summerSkyVolume.cloudProfile
 };
 const springVolumeSamples = [];
 const summerVolumeSamples = [];
@@ -273,6 +327,13 @@ assert.ok(
 assert.ok(
   average(stormVolumeSamples) > average(summerVolumeSamples),
   "the rain front must occupy more of the sampled sky volume than fair summer clouds"
+);
+const summerElevationAverages = [0, 1, 2, 3].map((index) =>
+  average(summerVolumeSamples.slice(index * 32, (index + 1) * 32))
+);
+assert.ok(
+  Math.max(...summerElevationAverages) - Math.min(...summerElevationAverages) > 0.025,
+  "fair cumulus density must vary materially with elevation instead of forming aligned bands"
 );
 
 const skyLater = buildSeasonalSkyState({
@@ -417,6 +478,10 @@ const forcedCloudyOcean = sampleSeasonalAtmosphereVisualState({
 assert.ok(summer.cloudCoverage01 < spring.cloudCoverage01, "summer should be less cloudy than spring");
 assert.ok(spring.cloudCoverage01 < autumn.cloudCoverage01, "spring should be less cloudy than autumn");
 assert.ok(autumn.cloudCoverage01 < winter.cloudCoverage01, "autumn should be less cloudy than winter");
+assert.ok(
+  luminance(autumn.cloudShadowColor) > luminance(winter.cloudShadowColor),
+  "autumn cloud shadows must remain visibly lighter than winter cloud shadows"
+);
 assert.ok(winter.cloudCoverage01 < 0.7, "default winter cloud cover should be heavy but not fully overcast");
 assert.ok(summer.cloudCoverage01 < 0.06, "clear summer sky should retain broad gaps between clouds");
 assert.ok(spring.cloudCoverage01 < 0.24, "fair spring sky should remain open between larger clouds");
@@ -451,6 +516,20 @@ for (const edge of [0.18, 0.28, 0.42, 0.52, 0.62, 0.7, 0.88, 0.96]) {
   assert.ok(
     colorDistance(before.oceanShallowColor, after.oceanShallowColor) < 34,
     `ocean color should transition smoothly around season edge ${edge}`
+  );
+  const profileBefore = sampleSeasonalCloudProfile({
+    seasonT01: edge - 0.002,
+    stormIntensity01: 0
+  });
+  const profileAfter = sampleSeasonalCloudProfile({
+    seasonT01: edge + 0.002,
+    stormIntensity01: 0
+  });
+  assert.ok(
+    Math.abs(profileBefore.baseHeight - profileAfter.baseHeight) < 0.08 &&
+      Math.abs(profileBefore.topHeight - profileAfter.topHeight) < 0.08 &&
+      Math.abs(profileBefore.cumulus01 - profileAfter.cumulus01) < 0.08,
+    `cloud morphology should transition smoothly around season edge ${edge}`
   );
 }
 

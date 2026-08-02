@@ -4,6 +4,7 @@ import type {
   TerrainRecipe
 } from "../mapgen/terrainProfile.js";
 import { cloneTerrainRecipe, createDefaultTerrainRecipe } from "../mapgen/terrainProfile.js";
+import { TERRAIN_GENERATION_LIMITS } from "../systems/terrain/constants/terrainGenerationLimits.js";
 
 export type TerrainControlFormat = "percent" | "int";
 
@@ -126,17 +127,50 @@ export const TERRAIN_RUN_GROUPS: readonly TerrainControlGroup[] = [
     title: "Island Shape",
     fields: [
       selectField("archetype", "archetype", "Archetype", "Primary island layout and relief style.", TERRAIN_ARCHETYPE_OPTIONS),
-      sliderField("recipe", "relief", "relief", "Relief", "How much the terrain rises and falls across the island."),
-      sliderField("recipe", "landCoverageTarget", "landCoverageTarget", "Land mass", "Target amount of dry island land after sea level is applied."),
+      sliderField(
+        "recipe",
+        "relief",
+        "relief",
+        "Relief",
+        "How much the terrain rises and falls across the island.",
+        {
+          min: TERRAIN_GENERATION_LIMITS.sliders.relief.min,
+          max: TERRAIN_GENERATION_LIMITS.sliders.relief.max
+        }
+      ),
+      sliderField(
+        "recipe",
+        "landCoverageTarget",
+        "landCoverageTarget",
+        "Land mass",
+        "Target dry island coverage before the advanced sea-level bias applies its bounded two-point adjustment.",
+        {
+          min: TERRAIN_GENERATION_LIMITS.landCoverageTarget.min,
+          max: TERRAIN_GENERATION_LIMITS.landCoverageTarget.max
+        }
+      ),
       sliderField(
         "advanced",
         "maxHeight",
         "maxHeight",
         "Max height",
-        "How high the tallest mountains are allowed to climb before peak compression kicks in.",
-        { max: 1.5 }
+        "How high the tallest mountains are allowed to climb within the gameplay-safe relief envelope.",
+        {
+          min: TERRAIN_GENERATION_LIMITS.sliders.maxHeight.min,
+          max: TERRAIN_GENERATION_LIMITS.sliders.maxHeight.max
+        }
       ),
-      sliderField("recipe", "ruggedness", "ruggedness", "Ruggedness", "How broken, ridged, and difficult the terrain becomes.")
+      sliderField(
+        "recipe",
+        "ruggedness",
+        "ruggedness",
+        "Ruggedness",
+        "How broken, ridged, and difficult the terrain becomes.",
+        {
+          min: TERRAIN_GENERATION_LIMITS.sliders.ruggedness.min,
+          max: TERRAIN_GENERATION_LIMITS.sliders.ruggedness.max
+        }
+      )
     ]
   },
   {
@@ -234,15 +268,38 @@ export const MAP_EDITOR_TERRAIN_GROUPS = {
       id: "carving-simple",
       title: "Elevation Field",
       fields: [
-        sliderField("recipe", "relief", "relief", "Relief", "How much the noise elevation rises and falls before sea level."),
-        sliderField("recipe", "ruggedness", "ruggedness", "Ruggedness", "How much octave detail, ridge breakup, and local terrain variation remains visible."),
+        sliderField(
+          "recipe",
+          "relief",
+          "relief",
+          "Relief",
+          "How much the noise elevation rises and falls before sea level.",
+          {
+            min: TERRAIN_GENERATION_LIMITS.sliders.relief.min,
+            max: TERRAIN_GENERATION_LIMITS.sliders.relief.max
+          }
+        ),
+        sliderField(
+          "recipe",
+          "ruggedness",
+          "ruggedness",
+          "Ruggedness",
+          "How much octave detail, ridge breakup, and local terrain variation remains visible.",
+          {
+            min: TERRAIN_GENERATION_LIMITS.sliders.ruggedness.min,
+            max: TERRAIN_GENERATION_LIMITS.sliders.ruggedness.max
+          }
+        ),
         sliderField(
           "advanced",
           "maxHeight",
           "maxHeight",
           "Max height",
-          "How high the tallest mountains are allowed to climb before peak compression kicks in.",
-          { max: 1.5 }
+          "How high the tallest mountains are allowed to climb within the gameplay-safe relief envelope.",
+          {
+            min: TERRAIN_GENERATION_LIMITS.sliders.maxHeight.min,
+            max: TERRAIN_GENERATION_LIMITS.sliders.maxHeight.max
+          }
         )
       ]
     },
@@ -267,14 +324,24 @@ export const MAP_EDITOR_TERRAIN_GROUPS = {
       id: "flooding-simple",
       title: "Sea Level + Coastline",
       fields: [
-        sliderField("recipe", "landCoverageTarget", "landCoverageTarget", "Land mass", "Target amount of dry island land after sea level is applied."),
+        sliderField(
+          "recipe",
+          "landCoverageTarget",
+          "landCoverageTarget",
+          "Land mass",
+          "Target dry island coverage before the advanced sea-level bias applies its bounded two-point adjustment.",
+          {
+            min: TERRAIN_GENERATION_LIMITS.landCoverageTarget.min,
+            max: TERRAIN_GENERATION_LIMITS.landCoverageTarget.max
+          }
+        ),
         sliderField("recipe", "coastComplexity", "coastComplexity", "Coast complexity", "How much low-frequency shoreline and coastal elevation variation is added before sea level."),
         sliderField(
           "advanced",
           "seaLevelBias",
           "seaLevelBias",
           "Sea-level bias",
-          "Manual bias after automatic coastline calibration; 50% is neutral."
+          "Fine-tunes automatic land coverage by up to two percentage points; lower values expose more land and 50% is neutral."
         )
       ]
     },
@@ -289,7 +356,11 @@ export const MAP_EDITOR_TERRAIN_GROUPS = {
           "islandCompactness",
           "islandCompactness",
           "Border water falloff",
-          "How firmly the distance shaper forces edge water while leaving the middle to the elevation noise."
+          "How firmly the distance shaper forces edge water while leaving the middle to the elevation noise.",
+          {
+            min: TERRAIN_GENERATION_LIMITS.islandCompactness.min,
+            max: TERRAIN_GENERATION_LIMITS.islandCompactness.max
+          }
         ),
         sliderField("advanced", "interiorRise", "interiorRise", "Interior land floor", "How strongly the distance shaper protects central land without replacing the noise field."),
         sliderField("advanced", "anisotropy", "anisotropy", "Anisotropy", "How strongly the island is stretched into a directional landform."),

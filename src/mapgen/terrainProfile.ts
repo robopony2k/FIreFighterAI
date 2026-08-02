@@ -9,6 +9,7 @@ import {
   ISLAND_ARCHETYPE_IDS,
   type IslandArchetypeId
 } from "./islandArchetypes.js";
+import { TERRAIN_GENERATION_LIMITS } from "../systems/terrain/constants/terrainGenerationLimits.js";
 
 export type TerrainArchetypeId = IslandArchetypeId;
 
@@ -66,13 +67,17 @@ const clamp = (value: number, min: number, max: number): number => Math.max(min,
 const clampWhole = (value: number, min: number, max: number): number => Math.max(min, Math.min(max, Math.round(value)));
 const mix = (a: number, b: number, t: number): number => a + (b - a) * clamp01(t);
 const MAX_HEIGHT_REFERENCE = 0.62;
-const MAX_HEIGHT_LIMIT = 1.5;
 const ROAD_MAX_GRADE_MIN = 0.12;
 const ROAD_MAX_GRADE_MAX = 0.42;
 const LEGACY_WATER_COVERAGE_MIN = 0.22;
 const LEGACY_WATER_COVERAGE_MAX = 0.68;
 
-const clampMaxHeight = (value: number): number => clamp(value, 0, MAX_HEIGHT_LIMIT);
+const clampMaxHeight = (value: number): number =>
+  clamp(
+    value,
+    TERRAIN_GENERATION_LIMITS.maxHeight.min,
+    TERRAIN_GENERATION_LIMITS.maxHeight.max
+  );
 
 const computeTerrainHeightScaleMultiplier = (maxHeight: number): number =>
   clamp(1 + (clampMaxHeight(maxHeight) - MAX_HEIGHT_REFERENCE) * 1.65, 0.65, 2.45);
@@ -116,6 +121,16 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
 const clampOverride = (value: unknown, fallback: number): number => {
   const parsed = toFiniteNumber(value);
   return parsed === null ? fallback : clamp01(parsed);
+};
+
+const clampRangeOverride = (
+  value: unknown,
+  fallback: number,
+  min: number,
+  max: number
+): number => {
+  const parsed = toFiniteNumber(value);
+  return clamp(parsed === null ? fallback : parsed, min, max);
 };
 
 const clampMaxHeightOverride = (value: unknown, fallback: number): number => {
@@ -395,9 +410,11 @@ export const cloneTerrainRecipe = (recipe?: Partial<TerrainRecipe>): TerrainReci
     archetype
   );
   const sourceAdvanced = isRecord(recipe?.advancedOverrides) ? recipe.advancedOverrides : {};
-  const landCoverageTarget = clampOverride(
+  const landCoverageTarget = clampRangeOverride(
     recipe?.landCoverageTarget,
-    landCoverageFromLegacyWaterLevel(recipe?.waterLevel, defaults.landCoverageTarget)
+    landCoverageFromLegacyWaterLevel(recipe?.waterLevel, defaults.landCoverageTarget),
+    TERRAIN_GENERATION_LIMITS.landCoverageTarget.min,
+    TERRAIN_GENERATION_LIMITS.landCoverageTarget.max
   );
   return {
     archetype,
@@ -429,9 +446,11 @@ export const cloneTerrainRecipe = (recipe?: Partial<TerrainRecipe>): TerrainReci
         sourceAdvanced.noiseFrequency,
         defaults.advancedOverrides?.noiseFrequency ?? DEFAULT_ADVANCED_OVERRIDES.noiseFrequency
       ),
-      islandCompactness: clampOverride(
+      islandCompactness: clampRangeOverride(
         sourceAdvanced.islandCompactness,
-        defaults.advancedOverrides?.islandCompactness ?? DEFAULT_ADVANCED_OVERRIDES.islandCompactness
+        defaults.advancedOverrides?.islandCompactness ?? DEFAULT_ADVANCED_OVERRIDES.islandCompactness,
+        TERRAIN_GENERATION_LIMITS.islandCompactness.min,
+        TERRAIN_GENERATION_LIMITS.islandCompactness.max
       ),
       ridgeFrequency: clampOverride(
         sourceAdvanced.ridgeFrequency,
@@ -554,7 +573,12 @@ const resolveAdvancedOverrides = (recipe: TerrainRecipe): Required<TerrainAdvanc
     ridgeAlignment: clampOverride(advanced.ridgeAlignment, preset.ridgeAlignment),
     uplandDistribution: clampOverride(advanced.uplandDistribution, preset.uplandDistribution),
     noiseFrequency: clampOverride(advanced.noiseFrequency, preset.noiseFrequency),
-    islandCompactness: clampOverride(advanced.islandCompactness, preset.islandCompactness),
+    islandCompactness: clampRangeOverride(
+      advanced.islandCompactness,
+      preset.islandCompactness,
+      TERRAIN_GENERATION_LIMITS.islandCompactness.min,
+      TERRAIN_GENERATION_LIMITS.islandCompactness.max
+    ),
     ridgeFrequency: clampOverride(advanced.ridgeFrequency, preset.ridgeFrequency),
     basinStrength: clampOverride(advanced.basinStrength, preset.basinStrength),
     coastalShelfWidth: clampOverride(advanced.coastalShelfWidth, preset.coastalShelfWidth),
@@ -578,7 +602,11 @@ export const compileTerrainRecipe = (recipeInput: TerrainRecipe): ResolvedTerrai
   const relief = clamp01(recipe.relief);
   const ruggedness = clamp01(recipe.ruggedness);
   const coastComplexity = clamp01(recipe.coastComplexity);
-  const landCoverageTarget = clamp(recipe.landCoverageTarget, 0.32, 0.82);
+  const landCoverageTarget = clamp(
+    recipe.landCoverageTarget,
+    TERRAIN_GENERATION_LIMITS.landCoverageTarget.min,
+    TERRAIN_GENERATION_LIMITS.landCoverageTarget.max
+  );
   const waterLevel = clamp01(recipe.waterLevel);
   const riverIntensity = clamp01(recipe.riverIntensity);
   const vegetationDensity = clamp01(recipe.vegetationDensity);

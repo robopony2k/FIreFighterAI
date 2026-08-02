@@ -1,0 +1,4 @@
+interface:
+  display_name: "Validate Visual Work"
+  short_description: "Guard live visual checks by Codex surface"
+  default_prompt: "Use $validate-visual-work to verify whether this visual task can be inspected in the current Codex surface."

@@ -1,3 +1,41 @@
+TSK-0171: Replace seasonal cloud bands with morphology-driven volumes
+
+Type: polish
+
+Why: The first packed-volume cloud field still gave every season one shallow symmetric envelope, so fair clouds formed horizontal ripples, winter lacked ominous depth, and autumn could read as heavier than winter.
+
+Done when:
+- [x] Smooth seasonal profiles produce sparse tall spring/summer cumulus, intermediate broken autumn stratocumulus, a lower deeper winter deck, and a nearly connected active storm front.
+- [x] The generated weather texture packs cellular placement and growth data, while the padded 32³ atlas packs Perlin-Worley bodies, rounded billows, and two erosion scales without native 3D textures or external assets.
+- [x] CPU and GPU density reject empty weather before atlas sampling and use balanced warped volume coordinates, asymmetric height gradients, and slow internal-only morphing.
+- [x] Occupied slices use one bounded lighting probe while the renderer retains two textures, one sky draw, a fixed 20-slice ceiling, early transmittance exit, and allocation-free state updates.
+- [x] Determinism, seasonal morphology, wind/time behavior, texture/resource limits, TypeScript, weather, render, and FX Lab regressions pass.
+
+Touchpoints: `src/systems/climate/rendering/seasonalCloud*.ts`, `src/systems/climate/rendering/seasonalSky*.ts`, `scripts/weather-visual-regression.mjs`, `scripts/render-performance-regression.mjs`, `docs/`
+
+Constraints: preserve existing sky entrypoints, climate-owned deterministic motion, pause behavior, WebGL-compatible 2D texture uploads, one sky draw, and unrelated dirty terrain ledger changes; add no saves, assets, player settings, or wall-clock animation.
+
+Status: done
+
+TSK-0170: Enforce safe terrain generation envelopes
+
+Type: bug
+
+Why: Production terrain controls and randomization could combine extremely low land coverage and height settings into flat shelf maps, while high coverage, raw sea-level offsets, and weak border falloff could crowd land against the world boundary.
+
+Done when:
+- [x] Player/editor sliders and slider randomization lock Relief and Ruggedness to 75-100% and Max height to 50-100%, while terrain-owned production limits normalize Land mass to 50-70%, Max height to 40-100%, and border-water falloff to 40-100%.
+- [x] Sea-level bias deterministically adjusts effective land coverage by at most two percentage points before calibration instead of applying a nonlinear post-calibration height offset.
+- [x] Legacy share codes remain readable but normalize unsafe terrain values without changing the wire format.
+- [x] Boundary regressions cover every archetype at 64, 128, and 256 tiles for land coverage, perimeter ocean, coastline inset, visible relief, and deterministic replay.
+- [x] TypeScript, terrain randomizer, fast-preview, terrain evaluation, and deterministic mapgen regressions pass.
+
+Touchpoints: `src/systems/terrain/constants/terrainGenerationLimits.ts`, `src/systems/terrain/sim/`, `src/mapgen/terrainProfile.ts`, `src/ui/terrain-schema.ts`, `scripts/terrain-randomizer-regression.mjs`, `scripts/fast-terrain-preview-regression.mjs`, `docs/GAME_DESIGN_REFERENCE.md`
+
+Constraints: preserve deterministic seeds, the existing terrain recipe and share-code schemas, Water's sole ownership of sea level and connected ocean membership, and terrain-to-UI dependency direction.
+
+Status: done
+
 TSK-0169: Upgrade seasonal clouds with balanced volumetric depth
 
 Type: polish

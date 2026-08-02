@@ -276,6 +276,10 @@ const seasonalCloudVolumeSource = await readFile(
   fileURLToPath(new URL("../src/systems/climate/rendering/seasonalCloudVolume.ts", import.meta.url)),
   "utf8"
 );
+const seasonalCloudProfileSource = await readFile(
+  fileURLToPath(new URL("../src/systems/climate/rendering/seasonalCloudProfile.ts", import.meta.url)),
+  "utf8"
+);
 assert.equal((oceanShaderSource.match(/uniform sampler2D/g) ?? []).length, 11, "contextual surf must not add ocean texture samplers");
 assert.match(oceanShaderSource, /return 8\.0;/, "fast water quality must retain eight broad wave iterations");
 assert.match(oceanShaderSource, /breakerGate/, "fast water quality must retain the SDF breaker band");
@@ -299,8 +303,13 @@ assert.match(
 );
 assert.match(
   seasonalSkyFragmentShader,
-  /lightProbeNear[\s\S]*lightProbeFar/,
-  "seasonal clouds must retain multiple bounded sunward density probes"
+  /vec3 lightProbe[\s\S]*float lightDensity/,
+  "occupied cloud slices must retain one bounded sunward density probe"
+);
+assert.doesNotMatch(
+  seasonalSkyFragmentShader,
+  /lightProbeNear|lightProbeFar/,
+  "seasonal clouds must not restore the previous dual-probe lighting cost"
 );
 assert.match(
   seasonalSkyFragmentShader,
@@ -309,8 +318,13 @@ assert.match(
 );
 assert.match(
   seasonalSkyFragmentShader,
-  /footprint \* body \* verticalProfile/,
+  /footprint \* verticalProfile \* \(body - edgeErosion\)/,
   "true volume density must remain gated by coherent cloud footprints"
+);
+assert.match(
+  seasonalSkyFragmentShader,
+  /weatherPacked[\s\S]*if \(footprint <= 0\.001\)[\s\S]*sampleCloudVolume/,
+  "clear weather samples must return before the packed volume atlas is read"
 );
 assert.doesNotMatch(
   seasonalSkyFragmentShader,
@@ -334,8 +348,13 @@ assert.match(
 );
 assert.match(
   seasonalSkyFragmentShader,
-  /uCloudTimeDays \* 0\.0012/,
-  "simulation-derived weather time must move through the volume so cloud shapes evolve"
+  /uCloudTimeDays \* 0\.035/,
+  "simulation-derived weather time must gently warp internal cloud detail"
+);
+assert.doesNotMatch(
+  seasonalSkyFragmentShader,
+  /height01 \* 1\.08[\s\S]{0,120}uCloudTimeDays/,
+  "simulation time must not slide the cloud field through its vertical axis"
 );
 assert.doesNotMatch(
   seasonalSkyStateSource,
@@ -372,6 +391,21 @@ assert.match(
   /SEASONAL_CLOUD_VOLUME_ATLAS_BORDER = 1/,
   "the volume atlas must pad every slice to prevent cross-slice filtering"
 );
+assert.match(
+  seasonalCloudVolumeSource,
+  /sampleTileableWorley3d[\s\S]*perlinWorley[\s\S]*roundedBillow/,
+  "the packed volume must provide Perlin-Worley bodies and rounded cellular billows"
+);
+assert.match(
+  seasonalSkyFragmentShader,
+  /uCloudBaseHeight[\s\S]*uCloudCumulus[\s\S]*uCloudShadowStrength/,
+  "the shader must consume the shared seasonal morphology profile"
+);
+assert.doesNotMatch(
+  seasonalCloudProfileSource,
+  /from ["'](?:\.\.\/)*ui\//,
+  "cloud morphology policy must remain inside the climate rendering boundary"
+);
 assert.doesNotMatch(
   seasonalSkyDomeSource,
   /Data3DTexture|sampler3D/,
@@ -381,6 +415,15 @@ assert.doesNotMatch(
   seasonalSkyDomeSource,
   /requestAnimationFrame|performance\.now/,
   "the seasonal sky dome must not create a wall-clock animation path"
+);
+const seasonalSkySetStateSource = seasonalSkyDomeSource.match(
+  /const setState = \(state: SeasonalSkyState\): void => \{[\s\S]*?\n  \};/
+)?.[0] ?? "";
+assert.ok(seasonalSkySetStateSource.length > 0, "the sky dome must retain an explicit state update boundary");
+assert.doesNotMatch(
+  seasonalSkySetStateSource,
+  /new |\.clone\(|\[\.\.\./,
+  "seasonal sky state updates must remain allocation-free"
 );
 const seasonalSkyDome = createSeasonalSkyDome();
 assert.ok(seasonalSkyDome.mesh instanceof THREE.Mesh, "seasonal clouds must remain one sky-dome draw");

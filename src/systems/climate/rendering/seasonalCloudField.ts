@@ -1,5 +1,6 @@
 import * as THREE from "three";
 import { sampleSeasonalCloudVolume } from "./seasonalCloudVolume.js";
+import type { SeasonalCloudProfile } from "./seasonalCloudProfile.js";
 
 export const SEASONAL_CLOUD_NOISE_SIZE = 128;
 export const SEASONAL_CLOUD_NOISE_CHANNELS = 4;
@@ -20,6 +21,7 @@ export type SeasonalCloudFieldSample = {
   cloudFarOffset: THREE.Vector2;
   stormIntensity01: number;
   cloudTimeDays: number;
+  cloudProfile: SeasonalCloudProfile;
 };
 
 const clamp01 = (value: number): number => Math.min(1, Math.max(0, value));
@@ -54,6 +56,39 @@ const sampleTileableValueNoise = (u: number, v: number, frequency: number, salt:
   return lerp(lerp(v00, v10, sx), lerp(v01, v11, sx), sy);
 };
 
+const sampleTileableWorley = (
+  u: number,
+  v: number,
+  frequency: number,
+  salt: number
+): { core: number; growth: number } => {
+  const x = wrap01(u) * frequency;
+  const y = wrap01(v) * frequency;
+  const cellX = Math.floor(x);
+  const cellY = Math.floor(y);
+  let nearestDistanceSq = Number.POSITIVE_INFINITY;
+  let nearestGrowth = 0.5;
+  for (let dy = -1; dy <= 1; dy += 1) {
+    for (let dx = -1; dx <= 1; dx += 1) {
+      const unwrappedX = cellX + dx;
+      const unwrappedY = cellY + dy;
+      const wrappedX = (unwrappedX + frequency) % frequency;
+      const wrappedY = (unwrappedY + frequency) % frequency;
+      const featureX = unwrappedX + hashNoiseLattice(wrappedX, wrappedY, salt);
+      const featureY = unwrappedY + hashNoiseLattice(wrappedX, wrappedY, salt + 1.91);
+      const distanceSq = (x - featureX) ** 2 + (y - featureY) ** 2;
+      if (distanceSq < nearestDistanceSq) {
+        nearestDistanceSq = distanceSq;
+        nearestGrowth = hashNoiseLattice(wrappedX, wrappedY, salt + 4.37);
+      }
+    }
+  }
+  return {
+    core: clamp01(1 - Math.sqrt(nearestDistanceSq) / 1.02),
+    growth: nearestGrowth
+  };
+};
+
 const createSeasonalCloudNoiseData = (): SeasonalCloudNoiseData => {
   const size = SEASONAL_CLOUD_NOISE_SIZE;
   const data = new Uint8Array(size * size * SEASONAL_CLOUD_NOISE_CHANNELS);
@@ -61,17 +96,19 @@ const createSeasonalCloudNoiseData = (): SeasonalCloudNoiseData => {
     for (let x = 0; x < size; x += 1) {
       const u = x / size;
       const v = y / size;
-      const broad0 = sampleTileableValueNoise(u, v, 4, 0.17);
-      const broad1 = sampleTileableValueNoise(u, v, 8, 1.31);
-      const medium = sampleTileableValueNoise(u, v, 16, 2.73);
-      const fine = sampleTileableValueNoise(u, v, 32, 4.19);
-      const billow = 1 - Math.abs(broad1 * 2 - 1);
-      const erosion = 1 - Math.abs(medium * 2 - 1);
+      const warpX = sampleTileableValueNoise(u, v, 4, 2.73);
+      const warpY = sampleTileableValueNoise(u, v, 4, 4.19);
+      const warpedU = u + (warpX - 0.5) * 0.14;
+      const warpedV = v + (warpY - 0.5) * 0.14;
+      const cellular = sampleTileableWorley(warpedU, warpedV, 5, 0.17);
+      const broad = sampleTileableValueNoise(warpedU, warpedV, 3, 1.31);
+      const footprint = clamp01(cellular.core * 0.76 + broad * 0.24);
+      const growth = clamp01(cellular.growth * 0.58 + cellular.core * 0.42);
       const index = (y * size + x) * SEASONAL_CLOUD_NOISE_CHANNELS;
-      data[index] = Math.round(clamp01(broad0 * 0.68 + broad1 * 0.32) * 255);
-      data[index + 1] = Math.round(clamp01(billow * 0.76 + broad0 * 0.24) * 255);
-      data[index + 2] = Math.round(clamp01(medium * 0.64 + fine * 0.36) * 255);
-      data[index + 3] = Math.round(clamp01(erosion * 0.58 + fine * 0.42) * 255);
+      data[index] = Math.round(footprint * 255);
+      data[index + 1] = Math.round(growth * 255);
+      data[index + 2] = Math.round(warpX * 255);
+      data[index + 3] = Math.round(warpY * 255);
     }
   }
   return { data, size };
@@ -97,6 +134,12 @@ const sampleNoiseChannel = (u: number, v: number, channel: number): number => {
   return lerp(lerp(v00, v10, tx), lerp(v01, v11, tx), ty);
 };
 
+export const sampleSeasonalCloudWeather = (
+  u: number,
+  v: number,
+  channel: number
+): number => sampleNoiseChannel(u, v, channel);
+
 const sampleCloudDensityAtPosition = (
   worldX: number,
   worldY: number,
@@ -106,71 +149,98 @@ const sampleCloudDensityAtPosition = (
   cloudState: SeasonalCloudFieldSample
 ): number => {
   const height01 = clamp01((worldY - cloudBase) / Math.max(0.0001, cloudTop - cloudBase));
+  const profile = cloudState.cloudProfile;
   const scale = lerp(cloudState.cloudNearScale, cloudState.cloudFarScale, height01);
   const offsetX =
-    lerp(cloudState.cloudNearOffset.x, cloudState.cloudFarOffset.x, height01) + (height01 - 0.5) * 0.17;
+    lerp(cloudState.cloudNearOffset.x, cloudState.cloudFarOffset.x, height01) +
+    (height01 - 0.5) * 0.09;
   const offsetY =
-    lerp(cloudState.cloudNearOffset.y, cloudState.cloudFarOffset.y, height01) - (height01 - 0.5) * 0.13;
+    lerp(cloudState.cloudNearOffset.y, cloudState.cloudFarOffset.y, height01) -
+    (height01 - 0.5) * 0.07;
   const rotatedX = worldX * 0.8 + worldZ * 0.6;
   const rotatedZ = -worldX * 0.6 + worldZ * 0.8;
-  const weatherU = rotatedX * scale * 0.032 + offsetX * 0.44;
-  const weatherV = rotatedZ * scale * 0.032 + offsetY * 0.44;
-  const weatherBroad = sampleNoiseChannel(weatherU, weatherV, 0);
-  const weatherBillow = sampleNoiseChannel(weatherU, weatherV, 1);
-  const morphPhase = cloudState.cloudTimeDays * 0.0015;
-  const morphX = Math.sin(morphPhase + worldY * 0.7) * 0.11;
-  const morphZ = Math.cos(morphPhase * 0.83 - worldY * 0.6) * 0.11;
-  const volumeX = rotatedX * scale * 0.105 + offsetX * 0.82 + morphX;
+  const weatherU = rotatedX * scale * 0.021 * profile.footprintScale + offsetX * 0.36;
+  const weatherV = rotatedZ * scale * 0.021 * profile.footprintScale + offsetY * 0.36;
+  const weatherFootprint = sampleNoiseChannel(weatherU, weatherV, 0);
+  const weatherGrowth = sampleNoiseChannel(weatherU, weatherV, 1);
+  const weatherWarpX = sampleNoiseChannel(weatherU, weatherV, 2) - 0.5;
+  const weatherWarpZ = sampleNoiseChannel(weatherU, weatherV, 3) - 0.5;
+  const coverage = clamp01(cloudState.cloudCoverage);
+  const coverageThreshold =
+    0.85 -
+    0.3 * smoothstep(0, 0.8, coverage) +
+    profile.footprintThresholdBias;
+  const middleBulge = Math.sin(height01 * Math.PI);
+  const cumulusContraction =
+    profile.cumulus01 *
+    (Math.max(0, height01 - 0.16) * 0.16 - middleBulge * 0.035);
+  const stratiformContraction =
+    (1 - profile.cumulus01) * Math.max(0, height01 - 0.72) * 0.075;
+  const growthLift = profile.cumulus01 * (weatherGrowth - 0.5) * height01 * 0.11;
+  const heightAdjustedFootprint =
+    weatherFootprint - cumulusContraction - stratiformContraction + growthLift;
+  const footprint = smoothstep(
+    coverageThreshold - 0.045,
+    coverageThreshold + 0.065,
+    heightAdjustedFootprint
+  );
+  if (footprint <= 0.001) {
+    return 0;
+  }
+
+  const morphPhase = cloudState.cloudTimeDays * 0.035;
+  const morphX = Math.sin(morphPhase + weatherWarpZ * 4.1) * 0.045;
+  const morphZ = Math.cos(morphPhase * 0.83 - weatherWarpX * 3.7) * 0.045;
+  const volumeFrequency = 0.15 * profile.volumeScale;
+  const volumeX =
+    rotatedX * scale * volumeFrequency +
+    height01 * 0.17 +
+    offsetX * 0.74 +
+    weatherWarpX * 0.28 +
+    morphX;
   const volumeY =
-    height01 * 0.72 +
-    cloudState.cloudTimeDays * 0.0012 +
-    offsetX * 0.11 -
-    offsetY * 0.07;
-  const volumeZ = rotatedZ * scale * 0.105 + offsetY * 0.82 + morphZ;
+    height01 * 1.08 +
+    rotatedZ * scale * 0.028 +
+    weatherWarpZ * 0.16 +
+    offsetX * 0.08 -
+    offsetY * 0.05;
+  const volumeZ =
+    rotatedZ * scale * volumeFrequency -
+    height01 * 0.13 +
+    offsetY * 0.74 +
+    weatherWarpZ * 0.28 +
+    morphZ;
   const volumeBroad = sampleSeasonalCloudVolume(volumeX, volumeY, volumeZ, 0);
   const volumeBillow = sampleSeasonalCloudVolume(volumeX, volumeY, volumeZ, 1);
-  const volumeDetail = sampleSeasonalCloudVolume(volumeX, volumeY, volumeZ, 2);
-  const erosionDetail = sampleSeasonalCloudVolume(volumeX, volumeY, volumeZ, 3);
-  const storm01 = clamp01(cloudState.stormIntensity01);
-  const coverage = clamp01(cloudState.cloudCoverage + storm01 * 0.16);
-  const coverageThreshold = 0.795 - 0.3 * Math.pow(coverage, 1.5);
-  const footprintShape = weatherBroad * 0.78 + weatherBillow * 0.22;
-  const footprint = smoothstep(
-    coverageThreshold - 0.035,
-    coverageThreshold + 0.075,
-    footprintShape
-  );
-  const localBase01 = (volumeDetail - 0.5) * 0.025;
-  const verticalProfile =
-    smoothstep(localBase01, localBase01 + 0.07, height01) *
-    (1 - smoothstep(lerp(0.68, 0.78, storm01), 1, height01));
-  const crown = 1 - Math.abs(height01 * 2 - 1);
+  const mediumErosion = sampleSeasonalCloudVolume(volumeX, volumeY, volumeZ, 2);
+  const fineErosion = sampleSeasonalCloudVolume(volumeX, volumeY, volumeZ, 3);
+  const baseRamp = smoothstep(0, lerp(0.09, 0.055, profile.cumulus01), height01);
+  const stratiformTop = 1 - smoothstep(0.72 + weatherGrowth * 0.08, 1, height01);
+  const cumulusTop = 1 - smoothstep(0.68 + weatherGrowth * 0.2, 1, height01);
+  const verticalProfile = baseRamp * lerp(stratiformTop, cumulusTop, profile.cumulus01);
   const volumeShape =
-    volumeBroad * 0.56 +
-    volumeBillow * 0.34 +
-    volumeDetail * 0.1 +
-    crown * lerp(0.18, 0.1, storm01);
-  const bodyThreshold = lerp(0.63, 0.51, storm01);
-  const bodySoftness = lerp(0.055, 0.095, clamp01(cloudState.cloudSoftness01));
+    volumeBroad * 0.62 +
+    volumeBillow * 0.38 +
+    middleBulge * lerp(0.08, 0.17, profile.cumulus01);
+  const bodyThreshold = lerp(0.5, 0.56, profile.cumulus01);
+  const bodySoftness = lerp(0.045, 0.085, clamp01(cloudState.cloudSoftness01));
   const body = smoothstep(
     bodyThreshold - bodySoftness,
     bodyThreshold + bodySoftness,
     volumeShape
   );
+  const edgeExposure = 1 - smoothstep(0.18, 0.78, body);
   const edgeErosion =
-    Math.max(0, erosionDetail - lerp(0.46, 0.62, storm01)) *
-    lerp(0.32, 0.1, storm01) *
-    (1 - volumeBroad * 0.55);
+    (1 - (mediumErosion * 0.68 + fineErosion * 0.32)) *
+    edgeExposure *
+    profile.erosionStrength *
+    lerp(0.18, 0.34, profile.cumulus01);
   const localDensityScale =
-    lerp(0.9, 1.3, clamp01(cloudState.cloudDensity01)) *
-    lerp(1.22, 1, coverage) *
-    lerp(1, 1.3, storm01);
+    lerp(1.02, 1.46, clamp01(cloudState.cloudDensity01)) *
+    lerp(1.28, 1, coverage) *
+    lerp(1.12, 1, profile.cumulus01);
   return clamp01(
-    Math.max(
-      0,
-      footprint * body * verticalProfile -
-        edgeErosion * footprint * (1 - body * 0.45)
-    ) *
+    Math.max(0, footprint * verticalProfile * (body - edgeErosion)) *
       localDensityScale
   );
 };
@@ -186,9 +256,8 @@ export const sampleSeasonalCloudDensity = (
   if (dirY <= 0.012) {
     return 0;
   }
-  const storm01 = clamp01(cloudState.stormIntensity01);
-  const cloudBase = lerp(1.82, 1.22, storm01);
-  const cloudTop = lerp(3.82, 2.72, storm01);
+  const cloudBase = cloudState.cloudProfile.baseHeight;
+  const cloudTop = cloudState.cloudProfile.topHeight;
   const horizon01 = 1 - clamp01(dirY);
   const rayStart = cloudBase / Math.max(0.035, dirY);
   const rayEnd = Math.min(

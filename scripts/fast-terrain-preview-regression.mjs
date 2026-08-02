@@ -22,28 +22,28 @@ const PERF_BUDGET_MS = 220;
 const EXPECTED_HASHES = {
   MASSIF: {
     height: "07dceed5",
-    relief: "c2eec41e",
-    water: "00dfb5ae"
+    relief: "94d5bd5a",
+    water: "d2c6aeea"
   },
   LONG_SPINE: {
     height: "d75d040d",
-    relief: "3e4bc9a6",
-    water: "459104b6"
+    relief: "c26131dc",
+    water: "c9a66cec"
   },
   TWIN_BAY: {
     height: "be61a997",
-    relief: "7245c2c7",
-    water: "70962b66"
+    relief: "32532a23",
+    water: "30a392c2"
   },
   SHELF: {
     height: "7ae300bb",
-    relief: "2de2d2f0",
-    water: "01959ff1"
+    relief: "57f5915c",
+    water: "2ba85e5d"
   },
   NONE: {
     height: "0b21f3a4",
-    relief: "b5f05691",
-    water: "757150d1"
+    relief: "955a1c39",
+    water: "54db1679"
   }
 };
 
@@ -459,11 +459,16 @@ for (const archetype of archetypes) {
   }
 }
 
-for (const run of runs) {
-  const expected = EXPECTED_HASHES[run.archetype]?.[run.mode];
-  if (run.hash !== expected) {
-    throw new Error(`Fast preview hash changed for ${run.archetype}:${run.mode}: expected ${expected}, got ${run.hash}`);
-  }
+const hashMismatches = runs
+  .map((run) => ({
+    archetype: run.archetype,
+    mode: run.mode,
+    expected: EXPECTED_HASHES[run.archetype]?.[run.mode],
+    actual: run.hash
+  }))
+  .filter((entry) => entry.actual !== entry.expected);
+if (hashMismatches.length > 0) {
+  throw new Error(`Fast preview hashes changed: ${JSON.stringify(hashMismatches)}`);
 }
 
 if (runs.some((run) => run.riverRatio > 0)) {

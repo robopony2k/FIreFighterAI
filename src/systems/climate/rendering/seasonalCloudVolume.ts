@@ -64,6 +64,46 @@ const sampleTileableValueNoise3d = (
   return lerp(lowZ, highZ, sz);
 };
 
+const sampleTileableWorley3d = (
+  u: number,
+  v: number,
+  w: number,
+  frequency: number,
+  salt: number
+): number => {
+  const x = wrap01(u) * frequency;
+  const y = wrap01(v) * frequency;
+  const z = wrap01(w) * frequency;
+  const cellX = Math.floor(x);
+  const cellY = Math.floor(y);
+  const cellZ = Math.floor(z);
+  let nearestDistanceSq = Number.POSITIVE_INFINITY;
+  for (let dz = -1; dz <= 1; dz += 1) {
+    for (let dy = -1; dy <= 1; dy += 1) {
+      for (let dx = -1; dx <= 1; dx += 1) {
+        const unwrappedX = cellX + dx;
+        const unwrappedY = cellY + dy;
+        const unwrappedZ = cellZ + dz;
+        const wrappedX = (unwrappedX + frequency) % frequency;
+        const wrappedY = (unwrappedY + frequency) % frequency;
+        const wrappedZ = (unwrappedZ + frequency) % frequency;
+        const featureX =
+          unwrappedX + hashNoiseLattice3d(wrappedX, wrappedY, wrappedZ, salt);
+        const featureY =
+          unwrappedY + hashNoiseLattice3d(wrappedX, wrappedY, wrappedZ, salt + 1.73);
+        const featureZ =
+          unwrappedZ + hashNoiseLattice3d(wrappedX, wrappedY, wrappedZ, salt + 3.41);
+        const distanceSq =
+          (x - featureX) ** 2 +
+          (y - featureY) ** 2 +
+          (z - featureZ) ** 2;
+        nearestDistanceSq = Math.min(nearestDistanceSq, distanceSq);
+      }
+    }
+  }
+  return clamp01(1 - Math.sqrt(nearestDistanceSq) / 1.08);
+};
+
 const buildSeasonalCloudVolumeData = (): SeasonalCloudVolumeData => {
   const size = SEASONAL_CLOUD_VOLUME_SIZE;
   const channels = SEASONAL_CLOUD_VOLUME_CHANNELS;
@@ -74,17 +114,19 @@ const buildSeasonalCloudVolumeData = (): SeasonalCloudVolumeData => {
         const u = x / size;
         const v = y / size;
         const w = z / size;
-        const broad = sampleTileableValueNoise3d(u, v, w, 2, 0.43);
-        const billowBase = sampleTileableValueNoise3d(u, v, w, 4, 1.87);
-        const medium = sampleTileableValueNoise3d(u, v, w, 8, 3.11);
-        const fine = sampleTileableValueNoise3d(u, v, w, 16, 5.29);
-        const billow = 1 - Math.abs(billowBase * 2 - 1);
-        const erosion = 1 - Math.abs(medium * 2 - 1);
+        const perlinBroad = sampleTileableValueNoise3d(u, v, w, 3, 0.43);
+        const worleyBroad = sampleTileableWorley3d(u, v, w, 4, 1.87);
+        const worleyMedium = sampleTileableWorley3d(u, v, w, 8, 3.11);
+        const worleyFine = sampleTileableWorley3d(u, v, w, 12, 5.29);
+        const perlinWorley = clamp01(
+          (perlinBroad - (1 - worleyBroad) * 0.34) * 1.28 + worleyBroad * 0.18
+        );
+        const roundedBillow = clamp01(worleyBroad * 0.72 + worleyMedium * 0.28);
         const index = ((z * size + y) * size + x) * channels;
-        data[index] = Math.round(clamp01(broad * 0.58 + billowBase * 0.29 + medium * 0.13) * 255);
-        data[index + 1] = Math.round(clamp01(billow * 0.68 + broad * 0.22 + medium * 0.1) * 255);
-        data[index + 2] = Math.round(clamp01(medium * 0.68 + fine * 0.32) * 255);
-        data[index + 3] = Math.round(clamp01(erosion * 0.62 + fine * 0.38) * 255);
+        data[index] = Math.round(perlinWorley * 255);
+        data[index + 1] = Math.round(roundedBillow * 255);
+        data[index + 2] = Math.round(worleyMedium * 255);
+        data[index + 3] = Math.round(worleyFine * 255);
       }
     }
   }

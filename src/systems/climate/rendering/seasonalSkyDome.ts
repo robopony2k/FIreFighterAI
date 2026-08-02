@@ -105,9 +105,16 @@ export const createSeasonalSkyDome = (): SeasonalSkyDome => {
     uSunVisibility: { value: 1 },
     uHazeStrength: { value: SEASONAL_SKY_CONFIG.hazeStrengthSummer },
     uCloudTimeDays: { value: 0 },
-    uStormIntensity: { value: 0 },
     uCloudSoftness: { value: 0.8 },
-    uCloudDensity: { value: 0.4 }
+    uCloudDensity: { value: 0.4 },
+    uCloudBaseHeight: { value: 1.65 },
+    uCloudTopHeight: { value: 4.65 },
+    uCloudCumulus: { value: 0.96 },
+    uCloudFootprintScale: { value: 0.8 },
+    uCloudVolumeScale: { value: 1.12 },
+    uCloudErosion: { value: 0.78 },
+    uCloudShadowStrength: { value: 0.42 },
+    uCloudFootprintThresholdBias: { value: 0.015 }
   };
   const material = new THREE.ShaderMaterial({
     uniforms,
@@ -140,9 +147,17 @@ export const createSeasonalSkyDome = (): SeasonalSkyDome => {
     uniforms.uSunVisibility.value = state.sunVisibility;
     uniforms.uHazeStrength.value = state.hazeStrength;
     uniforms.uCloudTimeDays.value = state.cloudTimeDays;
-    uniforms.uStormIntensity.value = state.stormIntensity01;
     uniforms.uCloudSoftness.value = state.cloudSoftness01;
     uniforms.uCloudDensity.value = state.cloudDensity01;
+    uniforms.uCloudBaseHeight.value = state.cloudProfile.baseHeight;
+    uniforms.uCloudTopHeight.value = state.cloudProfile.topHeight;
+    uniforms.uCloudCumulus.value = state.cloudProfile.cumulus01;
+    uniforms.uCloudFootprintScale.value = state.cloudProfile.footprintScale;
+    uniforms.uCloudVolumeScale.value = state.cloudProfile.volumeScale;
+    uniforms.uCloudErosion.value = state.cloudProfile.erosionStrength;
+    uniforms.uCloudShadowStrength.value = state.cloudProfile.shadowStrength;
+    uniforms.uCloudFootprintThresholdBias.value =
+      state.cloudProfile.footprintThresholdBias;
   };
 
   const syncToCamera = (camera: THREE.Camera): void => {

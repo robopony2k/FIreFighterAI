@@ -135,7 +135,11 @@ export const sampleSeasonalAtmosphereVisualState = (
   const stormMood01 = Math.max(rainIntensity01, stormIntensity01);
 
   const seasonalCloudCoverage = blendSeasonNumber(0.48, 0.09, 0.018, 0.26, season);
-  const cloudCoverage01 = clamp01(seasonalCloudCoverage + wetSeason01 * 0.04 + stormMood01 * 0.32);
+  const fairCloudCoverage = clamp01(seasonalCloudCoverage + wetSeason01 * 0.04);
+  const stormCoverageBlend = smoothstep(0.2, 0.85, stormMood01);
+  const cloudCoverage01 = clamp01(
+    fairCloudCoverage + (0.86 - fairCloudCoverage) * stormCoverageBlend
+  );
   const cloudDensity01 = clamp01(0.32 + cloudCoverage01 * 0.38 + stormMood01 * 0.3);
   const cloudSoftness01 = clamp01(0.78 - cloudCoverage01 * 0.2 + stormMood01 * 0.16);
 

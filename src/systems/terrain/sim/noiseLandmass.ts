@@ -3,6 +3,10 @@ import { fbmNoise, gradientNoise, hash2D, ridgedFbmNoise } from "../../../mapgen
 import type { MapGenDebug, MapGenDebugPhase, MapGenReporter } from "../../../mapgen/mapgenTypes.js";
 import type { MapGenSettings } from "../../../mapgen/settings.js";
 import { buildArchetypeStructurePlan, sampleArchetypeStructure } from "./archetypeTerrainStructure.js";
+import {
+  getEffectiveLandCoverageTarget,
+  TERRAIN_GENERATION_LIMITS
+} from "../constants/terrainGenerationLimits.js";
 
 export type NoiseLandmassCoreInput = {
   seed: number;
@@ -189,9 +193,11 @@ const applyDistanceShaping = (
   );
   const centerLandWeight = 1 - smoothstep(0.18, 0.72, noisyDistance);
   const outerWaterWeight = smoothstep(0.56, 0.98, noisyDistance);
+  const borderSafetyWeight = smoothstep(0.92, 1, noisyDistance);
   const distanceContourWeight = mix(0.12, 0.32, compactness) * smoothstep(0.08, 0.9, noisyDistance);
   const landFloor = SEA_LEVEL + mix(0.04, 0.12, compactness);
   const waterCeiling = SEA_LEVEL - mix(0.075, 0.17, compactness);
+  const safeWaterCeiling = mix(waterCeiling, SEA_LEVEL_MIN, borderSafetyWeight);
   const centerLift = centerLandWeight * mix(0.018, 0.06, compactness);
   const edgeDrop = outerWaterWeight * mix(0.045, 0.13, compactness);
   const contoured = mix(elevation, 1 - noisyDistance, distanceContourWeight);
@@ -203,8 +209,11 @@ const applyDistanceShaping = (
   );
   return clamp01(mix(
     centerShaped,
-    Math.min(centerShaped, waterCeiling),
-    outerWaterWeight * mix(0.78, 1, compactness)
+    Math.min(centerShaped, safeWaterCeiling),
+    Math.max(
+      outerWaterWeight * mix(0.78, 1, compactness),
+      borderSafetyWeight
+    )
   ));
 };
 
@@ -241,8 +250,11 @@ const resolveCalibratedSeaLevel = (
   settings: MapGenSettings
 ): { seaLevelBase: number; seaLevelMap: Float32Array; oceanMask: Uint8Array } => {
   const total = Math.max(1, cols * rows);
-  const targetOceanRatio = clamp(1 - settings.landCoverageTarget, 0.18, 0.68);
-  const biasOffset = (clamp01(settings.seaLevelBias) - 0.5) * 0.16;
+  const effectiveLandCoverageTarget = getEffectiveLandCoverageTarget(
+    settings.landCoverageTarget,
+    settings.seaLevelBias
+  );
+  const targetOceanRatio = 1 - effectiveLandCoverageTarget;
   let low = SEA_LEVEL_MIN;
   let high = SEA_LEVEL_MAX;
   let bestBase = settings.baseWaterThreshold;
@@ -265,13 +277,12 @@ const resolveCalibratedSeaLevel = (
     }
   }
 
-  const biasedBase = clamp(bestBase + biasOffset, SEA_LEVEL_MIN, SEA_LEVEL_MAX);
-  const biasedMap = buildSeaLevelMap(cols, rows, settings, biasedBase).seaLevelMap;
-  const biasedOcean = buildOceanMask(elevations, biasedMap, cols, rows);
+  const seaLevelMap = buildSeaLevelMap(cols, rows, settings, bestBase).seaLevelMap;
+  const oceanMask = buildOceanMask(elevations, seaLevelMap, cols, rows);
   return {
-    seaLevelBase: biasedBase,
-    seaLevelMap: biasedMap,
-    oceanMask: biasedOcean
+    seaLevelBase: bestBase,
+    seaLevelMap,
+    oceanMask
   };
 };
 
@@ -608,11 +619,25 @@ export function buildNoiseLandmassCore(input: NoiseLandmassCoreInput): NoiseLand
   const ruggedness = clamp01(settings.ruggedness);
   const anisotropy = clamp01(settings.anisotropy);
   const embayment = clamp01(settings.embayment);
-  const compactness = clamp01(settings.islandCompactness);
-  const landCoverageTarget = clamp(settings.landCoverageTarget, 0.32, 0.82);
+  const compactness = clamp(
+    settings.islandCompactness,
+    TERRAIN_GENERATION_LIMITS.islandCompactness.min,
+    TERRAIN_GENERATION_LIMITS.islandCompactness.max
+  );
+  const landCoverageTarget = clamp(
+    settings.landCoverageTarget,
+    TERRAIN_GENERATION_LIMITS.landCoverageTarget.min,
+    TERRAIN_GENERATION_LIMITS.landCoverageTarget.max
+  );
   const landTargetOffset = (landCoverageTarget - 0.62) / 0.5;
   const interiorRise = clamp01(settings.interiorRise);
-  const maxHeightPressure = clamp(settings.maxHeight / 1.5, 0, 1);
+  const maxHeightPressure =
+    clamp(
+      settings.maxHeight,
+      TERRAIN_GENERATION_LIMITS.maxHeight.min,
+      TERRAIN_GENERATION_LIMITS.maxHeight.max
+    )
+    / 1.5;
   const asymmetry = clamp01(settings.asymmetry);
   const uplandDistribution = clamp01(settings.uplandDistribution);
   const ridgeFrequency = clamp01(settings.ridgeFrequency);

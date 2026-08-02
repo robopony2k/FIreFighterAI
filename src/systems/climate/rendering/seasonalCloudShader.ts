@@ -35,9 +35,16 @@ export const seasonalSkyFragmentShader = `
   uniform float uSunVisibility;
   uniform float uHazeStrength;
   uniform float uCloudTimeDays;
-  uniform float uStormIntensity;
   uniform float uCloudSoftness;
   uniform float uCloudDensity;
+  uniform float uCloudBaseHeight;
+  uniform float uCloudTopHeight;
+  uniform float uCloudCumulus;
+  uniform float uCloudFootprintScale;
+  uniform float uCloudVolumeScale;
+  uniform float uCloudErosion;
+  uniform float uCloudShadowStrength;
+  uniform float uCloudFootprintThresholdBias;
 
   varying vec3 vSkyDir;
 
@@ -78,75 +85,102 @@ export const seasonalSkyFragmentShader = `
   }
 
   float sampleCloudDensity(vec3 worldPosition, float cloudBase, float cloudTop) {
-    float storm01 = clamp(uStormIntensity, 0.0, 1.0);
     float height01 = clamp((worldPosition.y - cloudBase) / max(0.0001, cloudTop - cloudBase), 0.0, 1.0);
     float layerMix = smoothstep(0.18, 0.86, height01);
     float scale = mix(uCloudNearScale, uCloudFarScale, layerMix);
     vec2 offset = mix(uCloudNearOffset, uCloudFarOffset, layerMix);
-    offset += vec2(height01 * 0.17, -height01 * 0.13);
+    offset += vec2((height01 - 0.5) * 0.09, -(height01 - 0.5) * 0.07);
     vec2 rotatedHorizontal = vec2(
       worldPosition.x * 0.8 + worldPosition.z * 0.6,
       -worldPosition.x * 0.6 + worldPosition.z * 0.8
     );
-    vec2 weatherUv = rotatedHorizontal * scale * 0.032 + offset * 0.44;
+    vec2 weatherUv =
+      rotatedHorizontal * scale * 0.021 * uCloudFootprintScale +
+      offset * 0.36;
     vec4 weatherPacked = samplePackedCloudNoise(weatherUv);
-    float morphPhase = uCloudTimeDays * 0.0015;
+    float coverage = clamp(uCloudCoverage, 0.0, 1.0);
+    float coverageThreshold =
+      0.85 -
+      0.3 * smoothstep(0.0, 0.8, coverage) +
+      uCloudFootprintThresholdBias;
+    float middleBulge = sin(height01 * 3.14159265);
+    float cumulusContraction =
+      uCloudCumulus *
+      (max(0.0, height01 - 0.16) * 0.16 - middleBulge * 0.035);
+    float stratiformContraction =
+      (1.0 - uCloudCumulus) * max(0.0, height01 - 0.72) * 0.075;
+    float growthLift =
+      uCloudCumulus * (weatherPacked.g - 0.5) * height01 * 0.11;
+    float heightAdjustedFootprint =
+      weatherPacked.r - cumulusContraction - stratiformContraction + growthLift;
+    float footprint = smoothstep(
+      coverageThreshold - 0.045,
+      coverageThreshold + 0.065,
+      heightAdjustedFootprint
+    );
+    if (footprint <= 0.001) {
+      return 0.0;
+    }
+
+    vec2 weatherWarp = weatherPacked.ba - 0.5;
+    float morphPhase = uCloudTimeDays * 0.035;
     vec2 morph = vec2(
-      sin(morphPhase + worldPosition.y * 0.7),
-      cos(morphPhase * 0.83 - worldPosition.y * 0.6)
-    ) * 0.11;
+      sin(morphPhase + weatherWarp.y * 4.1),
+      cos(morphPhase * 0.83 - weatherWarp.x * 3.7)
+    ) * 0.045;
+    float volumeFrequency = 0.15 * uCloudVolumeScale;
     vec3 volumePosition = vec3(
-      rotatedHorizontal.x * scale * 0.105 + offset.x * 0.82 + morph.x,
-      height01 * 0.72 +
-        uCloudTimeDays * 0.0012 +
-        offset.x * 0.11 -
-        offset.y * 0.07,
-      rotatedHorizontal.y * scale * 0.105 + offset.y * 0.82 + morph.y
+      rotatedHorizontal.x * scale * volumeFrequency +
+        height01 * 0.17 +
+        offset.x * 0.74 +
+        weatherWarp.x * 0.28 +
+        morph.x,
+      height01 * 1.08 +
+        rotatedHorizontal.y * scale * 0.028 +
+        weatherWarp.y * 0.16 +
+        offset.x * 0.08 -
+        offset.y * 0.05,
+      rotatedHorizontal.y * scale * volumeFrequency -
+        height01 * 0.13 +
+        offset.y * 0.74 +
+        weatherWarp.y * 0.28 +
+        morph.y
     );
     vec4 volumePacked = sampleCloudVolume(volumePosition);
-    float volumeDetail = volumePacked.b;
-    float erosionDetail = volumePacked.a;
-
-    float coverage = clamp(uCloudCoverage + storm01 * 0.16, 0.0, 1.0);
-    float coverageThreshold = 0.795 - 0.3 * pow(coverage, 1.5);
-    float footprintShape = weatherPacked.r * 0.78 + weatherPacked.g * 0.22;
-    float footprint = smoothstep(
-      coverageThreshold - 0.035,
-      coverageThreshold + 0.075,
-      footprintShape
+    float baseRamp = smoothstep(
+      0.0,
+      mix(0.09, 0.055, uCloudCumulus),
+      height01
     );
-    float localBase01 = (volumeDetail - 0.5) * 0.025;
-    float crown = 1.0 - abs(height01 * 2.0 - 1.0);
+    float stratiformTop =
+      1.0 - smoothstep(0.72 + weatherPacked.g * 0.08, 1.0, height01);
+    float cumulusTop =
+      1.0 - smoothstep(0.68 + weatherPacked.g * 0.2, 1.0, height01);
     float verticalProfile =
-      smoothstep(localBase01, localBase01 + 0.07, height01) *
-      (1.0 - smoothstep(mix(0.68, 0.78, storm01), 1.0, height01));
+      baseRamp * mix(stratiformTop, cumulusTop, uCloudCumulus);
     float volumeShape =
-      volumePacked.r * 0.56 +
-      volumePacked.g * 0.34 +
-      volumeDetail * 0.1 +
-      crown * mix(0.18, 0.1, storm01);
-    float bodyThreshold = mix(0.63, 0.51, storm01);
-    float bodySoftness = mix(0.055, 0.095, clamp(uCloudSoftness, 0.0, 1.0));
+      volumePacked.r * 0.62 +
+      volumePacked.g * 0.38 +
+      middleBulge * mix(0.08, 0.17, uCloudCumulus);
+    float bodyThreshold = mix(0.5, 0.56, uCloudCumulus);
+    float bodySoftness = mix(0.045, 0.085, clamp(uCloudSoftness, 0.0, 1.0));
     float body = smoothstep(
       bodyThreshold - bodySoftness,
       bodyThreshold + bodySoftness,
       volumeShape
     );
+    float edgeExposure = 1.0 - smoothstep(0.18, 0.78, body);
     float edgeErosion =
-      max(0.0, erosionDetail - mix(0.46, 0.62, storm01)) *
-      (1.0 - volumePacked.r * 0.55);
-    float density = max(
-      0.0,
-      footprint * body * verticalProfile -
-        edgeErosion *
-          footprint *
-          mix(0.32, 0.1, storm01) *
-          (1.0 - body * 0.45)
-    );
+      (1.0 - (volumePacked.b * 0.68 + volumePacked.a * 0.32)) *
+      edgeExposure *
+      uCloudErosion *
+      mix(0.18, 0.34, uCloudCumulus);
+    float density =
+      max(0.0, footprint * verticalProfile * (body - edgeErosion));
     float localDensityScale =
-      mix(0.9, 1.3, clamp(uCloudDensity, 0.0, 1.0)) *
-      mix(1.22, 1.0, coverage) *
-      mix(1.0, 1.3, storm01);
+      mix(1.02, 1.46, clamp(uCloudDensity, 0.0, 1.0)) *
+      mix(1.28, 1.0, coverage) *
+      mix(1.12, 1.0, uCloudCumulus);
     return clamp(density * localDensityScale, 0.0, 1.0);
   }
 
@@ -159,9 +193,8 @@ export const seasonalSkyFragmentShader = `
       return vec4(0.0);
     }
     vec3 sunDir = normalize(uSunDirection);
-    float storm01 = clamp(uStormIntensity, 0.0, 1.0);
-    float cloudBase = mix(1.82, 1.22, storm01);
-    float cloudTop = mix(3.82, 2.72, storm01);
+    float cloudBase = uCloudBaseHeight;
+    float cloudTop = uCloudTopHeight;
     float rayY = max(0.035, dir.y);
     float rayStart = cloudBase / rayY;
     float rayEnd = min(cloudTop / rayY, rayStart + mix(8.0, 22.0, horizonMask));
@@ -179,33 +212,30 @@ export const seasonalSkyFragmentShader = `
       float sliceAlpha = 1.0 - exp(-density * stepLength * 1.35);
 
       if (sliceAlpha > 0.002) {
-        vec3 lightProbeNear =
-          worldPosition + sunDir * mix(0.28, 0.38, storm01);
-        vec3 lightProbeFar =
-          worldPosition + sunDir * mix(0.72, 0.94, storm01);
-        float lightDensityNear =
-          sampleCloudDensity(lightProbeNear, cloudBase, cloudTop);
-        float lightDensityFar =
-          sampleCloudDensity(lightProbeFar, cloudBase, cloudTop);
-        float lightOpticalDepth =
-          lightDensityNear * 0.52 + lightDensityFar * 0.78;
+        vec3 lightProbe =
+          worldPosition + sunDir * mix(0.46, 0.82, uCloudShadowStrength);
+        float lightDensity =
+          sampleCloudDensity(lightProbe, cloudBase, cloudTop);
+        float lightOpticalDepth = density * 0.32 + lightDensity * 0.86;
         float selfShadow =
-          exp(-lightOpticalDepth * mix(2.6, 4.2, storm01));
+          exp(-lightOpticalDepth * mix(2.5, 4.8, uCloudShadowStrength));
         float densityGradient =
-          clamp((density - lightDensityNear) * 3.2 + 0.42, 0.0, 1.0);
+          clamp((density - lightDensity) * 3.2 + 0.42, 0.0, 1.0);
         float sunFacing = smoothstep(-0.12, 0.98, dot(dir, sunDir));
-        float heightFill = mix(0.16, 0.58, height01);
+        float heightFill =
+          mix(0.1, 0.58, height01) *
+          mix(1.0, 0.68, uCloudShadowStrength);
         float directLight =
           selfShadow *
           mix(0.26, 0.78, densityGradient) *
-          (1.0 - storm01 * 0.22);
+          mix(1.0, 0.7, uCloudShadowStrength);
         float lighting = clamp(heightFill + directLight, 0.0, 1.0);
         vec3 sliceColor = mix(uCloudFarColor, uCloudNearColor, lighting);
         float silverLining =
           pow(sunFacing, 6.0) *
           selfShadow *
           (1.0 - density) *
-          mix(0.28, 0.1, storm01);
+          mix(0.28, 0.08, uCloudShadowStrength);
         sliceColor = mix(sliceColor, uSunColor, silverLining);
         float contribution = transmittance * sliceAlpha;
         accumulatedColor += sliceColor * contribution;
