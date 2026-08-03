@@ -117,6 +117,7 @@ import {
   finalizeInstancedMeshBounds,
   partitionTerrainInstances
 } from "../systems/terrain/rendering/terrainRenderChunks.js";
+import { resolveTreeGrounding } from "../systems/terrain/rendering/vegetation/treeGrounding.js";
 import { buildTreeLod } from "../systems/terrain/rendering/vegetation/treeLodController.js";
 import type {
   TreeImpostorAtlas,
@@ -3407,8 +3408,8 @@ export const buildTerrainMesh = (
         continue;
       }
       const densityScale = Math.min(1.5, 1 + Math.max(0, step - 1) * 0.2) * treeDensitySafetyScale;
-      const centerX = ((tileX + 0.5) / Math.max(1, cols) - 0.5) * width;
-      const centerZ = ((tileY + 0.5) / Math.max(1, rows) - 0.5) * depth;
+      const centerTileX = tileX + 0.5;
+      const centerTileY = tileY + 0.5;
       const vegetationType =
         typeId === forestId
           ? "forest"
@@ -3485,10 +3486,11 @@ export const buildTerrainMesh = (
           const sourceHeight = Math.max(0.35, variant?.height ?? 1.5);
           const scale = (targetHeight / sourceHeight) * (0.85 + noiseAt(idx + 7.9 + attempt * 0.41) * 0.3);
           const rotation = noiseAt(idx + 3.3 + attempt * 0.23) * Math.PI * 2;
-          // Place trees relative to tile centers (not terrain vertices), then jitter within the tile.
-          const x = centerX + jitterX;
-          const z = centerZ + jitterZ;
-          const treeY = y + (variant ? variant.baseOffset * scale : 0);
+          // Keep placement in tile space until X/Z and ground Y are resolved together.
+          const ground = resolveTreeGrounding(surface, centerTileX + jitterX, centerTileY + jitterZ);
+          const x = ground.x;
+          const z = ground.z;
+          const treeY = ground.y + (variant ? variant.baseOffset * scale : 0);
           const treeHeight = Math.max(0.2, sourceHeight * scale);
           const crownHeight = Math.max(0.25, treeHeight * 0.72);
           const trunkHeight = Math.max(0.2, treeHeight * 0.45);
@@ -3550,9 +3552,10 @@ export const buildTerrainMesh = (
             const sourceHeight = Math.max(0.35, variant?.height ?? 1.5);
             const scale = (targetHeight / sourceHeight) * (0.82 + noiseAt(idx + 6.41) * 0.24);
             const rotation = noiseAt(idx + 8.23) * Math.PI * 2;
-            const x = centerX + jitterX;
-            const z = centerZ + jitterZ;
-            const treeY = y + (variant ? variant.baseOffset * scale : 0);
+            const ground = resolveTreeGrounding(surface, centerTileX + jitterX, centerTileY + jitterZ);
+            const x = ground.x;
+            const z = ground.z;
+            const treeY = ground.y + (variant ? variant.baseOffset * scale : 0);
             treeInstances.push({
               x,
               y: treeY,
@@ -3586,10 +3589,11 @@ export const buildTerrainMesh = (
             const scale =
               SCRUB_PLACEHOLDER_SCALE_MIN +
               noiseAt(idx + 6.41) * (SCRUB_PLACEHOLDER_SCALE_MAX - SCRUB_PLACEHOLDER_SCALE_MIN);
+            const ground = resolveTreeGrounding(surface, centerTileX + jitterX, centerTileY + jitterZ);
             scrubPlaceholderInstances.push({
-              x: centerX + jitterX,
-              y,
-              z: centerZ + jitterZ,
+              x: ground.x,
+              y: ground.y,
+              z: ground.z,
               scale,
               rotation: noiseAt(idx + 8.23) * Math.PI * 2,
               colorJitter: noiseAt(idx + 9.57),
