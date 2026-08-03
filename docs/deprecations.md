@@ -1,5 +1,19 @@
 # Deprecations
 
+## Wind-Opposed Ocean Phases and Tick-Stepped Cloud Motion
+
+Status: Deprecated as of August 3, 2026.
+
+- Production ocean waves no longer combine a gameplay-wind direction with positive-time phase or positive wind texture offsets, which made visible crests and sampled normal detail move upwind.
+- Cloud advection no longer exposes the fixed 0.25-second simulation cadence directly to sky uniforms; an allocation-free render clock now interpolates authoritative career time with simulation alpha.
+- The direct MdXyzX reference retains its original unbiased phase, and neither cloud nor ocean motion introduces an independent wall-clock authority.
+
+Migration guidance:
+
+1. Use inverse sampling motion for textures and negative temporal phase for waves intended to travel along their supplied direction.
+2. Interpolate cloud career time from consecutive authoritative simulation samples; do not integrate cloud travel from render-frame delta.
+3. Apply production wind bias consistently to ocean height evaluation, raymarch hits, detail normals, and macro normals while keeping shoreline-normal surf independent.
+
 ## Fixed-Envelope Value-Noise Cloud Field
 
 Status: Deprecated as of August 3, 2026.

@@ -59,6 +59,7 @@ import { handleHudClick, handleHudKey, renderHud } from "./hud/hud.js";
 import { buildEnvironmentPalette, computeFireLoad01 } from "./environmentPalette.js";
 import { buildLightingDirectorState, type LightingDirectorInput, type LightingDirectorState } from "./lightingDirector.js";
 import { createSeasonalSkyDome } from "../systems/climate/rendering/seasonalSkyDome.js";
+import { SeasonalCloudRenderClock } from "../systems/climate/controllers/seasonalCloudRenderClock.js";
 import { sampleSeasonalWeatherVisualState } from "../systems/climate/rendering/seasonalWeatherVisualState.js";
 import {
   getMinimapModeLabel,
@@ -685,6 +686,7 @@ export const createThreeTest = (
   const zenithColor = cinematicGradeEnabled ? 0x1a212c : 0x87ceeb;
   scene.background = null;
   const seasonalSky = createSeasonalSkyDome();
+  const seasonalCloudRenderClock = new SeasonalCloudRenderClock();
   scene.add(seasonalSky.mesh);
 
   const camera = new THREE.PerspectiveCamera(45, 1, 0.1, 100);
@@ -6506,6 +6508,17 @@ export const createThreeTest = (
       requestShadowRefresh();
     }
   };
+  const syncSeasonalCloudRenderMotion = (): void => {
+    if (!lastLightingApplied) {
+      return;
+    }
+    seasonalSky.setCloudMotion(seasonalCloudRenderClock.sample(
+      world.careerDay ?? 0,
+      simulationAlpha,
+      lastLightingApplied.weatherSeed,
+      world.seed
+    ));
+  };
   applyEnvironmentPalette = (force = false): void => {
     if (!ENABLE_THREE_TEST_SEASONAL_RECOLOR) {
       return;
@@ -8100,6 +8113,7 @@ export const createThreeTest = (
       applyEnvironmentPalette();
     }
     applyDynamicEnvironmentState();
+    syncSeasonalCloudRenderMotion();
     let instantFps = 0;
     if (dt > 0) {
       instantFps = 1 / Math.max(1 / 240, dt);

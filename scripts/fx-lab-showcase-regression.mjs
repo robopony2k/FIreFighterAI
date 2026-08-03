@@ -158,8 +158,13 @@ assert.deepEqual(MDXYZX_REFERENCE_MODES.map((mode) => mode.value), [0, 1, 2, 3, 
 assert.equal(normalizeMdXyzxReferenceMode(8.7), 7);
 assert.match(
   mdXyzxWaveCoreSource,
-  /mdXyzxWavedx[\s\S]*mdXyzxGetWaves[\s\S]*length\(position\) \* 0\.1[\s\S]*position \+= direction \* wave\.y[\s\S]*frequency \*= 1\.18[\s\S]*timeMultiplier \*= 1\.07/,
+  /mdXyzxWavedx[\s\S]*mdXyzxGetDrivenWaves[\s\S]*length\(position\) \* 0\.1[\s\S]*position \+= direction \* wave\.y[\s\S]*frequency \*= 1\.18[\s\S]*timeMultiplier \*= 1\.07[\s\S]*mdXyzxGetWaves/,
   "the isolated reference must retain the MdXyzX dragged-wave construction"
+);
+assert.doesNotMatch(
+  mdXyzxReferenceSource,
+  /mdXyzxGetProductionWaves|mdXyzxRaymarchProductionWater|mdXyzxCalculateProductionNormal/,
+  "the isolated reference must not opt into production wind-phase adapters"
 );
 assert.match(
   `${mdXyzxWaveCoreSource}\n${mdXyzxReferenceSource}`,

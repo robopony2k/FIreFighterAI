@@ -34,7 +34,9 @@ import {
   MDXYZX_QUALITY_PROFILES,
   MDXYZX_MAX_RAYMARCH_STEPS,
   MDXYZX_NORMAL_WAVE_ITERATIONS,
-  MDXYZX_RAYMARCH_WAVE_ITERATIONS
+  MDXYZX_PRODUCTION_TIME_DIRECTION,
+  MDXYZX_RAYMARCH_WAVE_ITERATIONS,
+  mdXyzxWaveCoreShader
 } from "../dist/render/water/ocean/mdXyzxWaveCoreShader.js";
 import {
   MDXYZX_MACRO_AMPLITUDE_SCALE,
@@ -488,6 +490,10 @@ const seasonalCloudAdvectionSource = await readFile(
   fileURLToPath(new URL("../src/systems/climate/rendering/seasonalCloudAdvection.ts", import.meta.url)),
   "utf8"
 );
+const seasonalCloudRenderClockSource = await readFile(
+  fileURLToPath(new URL("../src/systems/climate/controllers/seasonalCloudRenderClock.ts", import.meta.url)),
+  "utf8"
+);
 const webglContextSource = await readFile(
   fileURLToPath(new URL("../src/render/webglContext.ts", import.meta.url)),
   "utf8"
@@ -510,6 +516,7 @@ assert.match(oceanShaderSource, /breakerGate/, "fast water quality must retain t
 assert.equal(MDXYZX_RAYMARCH_WAVE_ITERATIONS, 12);
 assert.equal(MDXYZX_NORMAL_WAVE_ITERATIONS, 36);
 assert.equal(MDXYZX_MAX_RAYMARCH_STEPS, 96);
+assert.equal(MDXYZX_PRODUCTION_TIME_DIRECTION, -1);
 assert.deepEqual(MDXYZX_QUALITY_PROFILES, {
   fast: { raymarchWaveIterations: 8, normalWaveIterations: 18, maxRaymarchSteps: 48 },
   balanced: { raymarchWaveIterations: 10, normalWaveIterations: 27, maxRaymarchSteps: 72 },
@@ -523,19 +530,42 @@ assert.equal(MDXYZX_MAX_FAR_NORMAL_CALM, 0.28);
 assert.ok(1 - MDXYZX_MAX_FAR_NORMAL_CALM >= 0.7, "strategic ocean must retain bounded broad normal variance");
 assert.match(
   mdXyzxWaveCoreSource,
-  /length\(position\) \* 0\.1[\s\S]*position \+= direction \* wave\.y[\s\S]*frequency \*= 1\.18[\s\S]*timeMultiplier \*= 1\.07/,
+  /mdXyzxGetDrivenWaves[\s\S]*length\(position\) \* 0\.1[\s\S]*position \+= direction \* wave\.y[\s\S]*frequency \*= 1\.18[\s\S]*timeMultiplier \*= 1\.07/,
   "production and reference oceans must share the actual MdXyzX dragged-wave sequence"
 );
 assert.match(
   mdXyzxProductionRaymarchSource,
-  /mdXyzxFootprintIterationLimit[\s\S]*log\(1\.18\)[\s\S]*mdXyzxRaymarchWater[\s\S]*mdXyzxCalculateNormal/,
+  /mdXyzxFootprintIterationLimit[\s\S]*log\(1\.18\)[\s\S]*mdXyzxRaymarchProductionWater[\s\S]*mdXyzxCalculateProductionNormal/,
   "the production adapter must reconstruct a hit and filter the source octave progression by pixel footprint"
 );
 assert.match(
   mdXyzxProductionRaymarchSource,
-  /mdXyzxCalculateMacroNormal[\s\S]*mdXyzxGetWaves[\s\S]*macroIterations[\s\S]*mix\(detailNormal, macroNormal, hit\.macroBlend\)/,
+  /mdXyzxCalculateMacroNormal[\s\S]*mdXyzxGetProductionWaves[\s\S]*macroIterations[\s\S]*mix\(detailNormal, macroNormal, hit\.macroBlend\)/,
   "strategic ocean must replace filtered detail with a low-iteration slope from the same MdXyzX function"
 );
+assert.match(
+  mdXyzxWaveCoreShader,
+  /mdXyzxGetWaves[\s\S]*vec2\(0\.0, 1\.0\)[\s\S]*-1\.0,[\s\S]*1\.0[\s\S]*mdXyzxGetProductionWaves[\s\S]*windDirection[\s\S]*windEnergy[\s\S]*-1\.0/,
+  "the reference wrapper must retain its original phase while production opts into downwind phase motion"
+);
+assert.match(
+  oceanShaderSource,
+  /wavedx\(position, dir, frequency, -u_time \* timeMultiplier \+ wavePhaseShift\)/,
+  "coastal wind-biased geometry must move with rather than against its wave direction"
+);
+assert.match(
+  oceanShaderSource,
+  /contextScroll = -normalize\(u_waveDirection\) \* u_time/,
+  "wind-driven coastal normal sampling must move visible detail downwind"
+);
+assert.match(
+  mdXyzxProductionRaymarchSource,
+  /windDirection = windDirectionLength[\s\S]*windEnergy = clamp\(u_oceanContext\.x[\s\S]*mdXyzxRaymarchProductionWater[\s\S]*windDirection,[\s\S]*windEnergy[\s\S]*mdXyzxCalculateProductionNormal[\s\S]*windDirection,[\s\S]*windEnergy/,
+  "production raymarch hits and normals must consume the same normalized gameplay wind"
+);
+const eastwardPhaseVelocity = new THREE.Vector2(1, 0).multiplyScalar(-MDXYZX_PRODUCTION_TIME_DIRECTION);
+const westwardPhaseVelocity = new THREE.Vector2(-1, 0).multiplyScalar(-MDXYZX_PRODUCTION_TIME_DIRECTION);
+assert.ok(eastwardPhaseVelocity.x > 0 && westwardPhaseVelocity.x < 0, "reversing wind must reverse production ocean travel");
 assert.match(
   mdXyzxProductionRaymarchSource,
   /hit\.normalCalm =[\s\S]*smoothstep\(1\.35, 5\.5, pixelFootprint\)[\s\S]*MDXYZX_MAX_FAR_NORMAL_CALM/,
@@ -664,6 +694,26 @@ assert.doesNotMatch(
   seasonalCloudAdvectionSource,
   /new THREE\.|Vector2|new Map|new Array|requestAnimationFrame|performance\.now/,
   "cloud advection must remain a pure allocation-light climate calculation"
+);
+assert.match(
+  seasonalCloudRenderClockSource,
+  /previousCareerDay[\s\S]*currentCareerDay[\s\S]*simulationAlpha[\s\S]*renderedCareerDay/,
+  "cloud render motion must interpolate consecutive authoritative simulation samples"
+);
+assert.match(
+  seasonalCloudRenderClockSource,
+  /readonly advectionInput[\s\S]*readonly output[\s\S]*sampleSeasonalCloudAdvectionInto/,
+  "per-frame cloud interpolation must reuse its input and output state"
+);
+assert.doesNotMatch(
+  seasonalCloudRenderClockSource,
+  /requestAnimationFrame|performance\.now|Date\.now|deltaSeconds|new THREE\./,
+  "the cloud render clock must not introduce an independent wall-clock animation path"
+);
+assert.match(
+  `${seasonalSkyDomeSource}\n${threeTestSource}`,
+  /setCloudMotion[\s\S]*SeasonalCloudRenderClock[\s\S]*syncSeasonalCloudRenderMotion/,
+  "the Three.js composition root must update only cloud motion uniforms every render frame"
 );
 assert.match(
   webglContextSource,

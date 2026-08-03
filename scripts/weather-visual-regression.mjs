@@ -39,6 +39,9 @@ const {
 const { resolveOceanSurfaceContext } = await import(
   distImport(["render", "water", "ocean", "oceanSurfaceContext.js"])
 );
+const { SeasonalCloudRenderClock } = await import(
+  distImport(["systems", "climate", "controllers", "seasonalCloudRenderClock.js"])
+);
 
 const baseInput = {
   careerDay: 286.5,
@@ -361,6 +364,107 @@ assert.ok(
   visibleCloudTravel.dot(new THREE.Vector2(windDirectionAtProbe.dx, windDirectionAtProbe.dy)) > 0.98,
   "normal-speed cloud travel must visibly follow the authoritative gameplay wind direction"
 );
+
+const snapshotCloudMotion = (state) => ({ ...state });
+const renderClock = new SeasonalCloudRenderClock();
+const clockStart = snapshotCloudMotion(renderClock.sample(
+  baseInput.careerDay,
+  1,
+  skySlow.weatherSeed,
+  baseInput.worldSeed
+));
+const clockStepStart = snapshotCloudMotion(renderClock.sample(
+  baseInput.careerDay + 0.25,
+  0,
+  skySlow.weatherSeed,
+  baseInput.worldSeed
+));
+assert.deepEqual(clockStepStart, clockStart, "a new fixed simulation step must begin at the previous rendered cloud state");
+const clockMidpoint = snapshotCloudMotion(renderClock.sample(
+  baseInput.careerDay + 0.25,
+  0.5,
+  skySlow.weatherSeed,
+  baseInput.worldSeed
+));
+assert.ok(
+  clockMidpoint.morphTimeDays > clockStart.morphTimeDays,
+  "render interpolation must advance the cloud morph clock between fixed simulation ticks"
+);
+const clockAfterAlphaReset = snapshotCloudMotion(renderClock.sample(
+  baseInput.careerDay + 0.25,
+  0,
+  skySlow.weatherSeed,
+  baseInput.worldSeed
+));
+assert.deepEqual(
+  clockAfterAlphaReset,
+  clockMidpoint,
+  "an alpha reset without a new simulation sample must not move cloud rendering backward"
+);
+const clockEnd = snapshotCloudMotion(renderClock.sample(
+  baseInput.careerDay + 0.25,
+  1,
+  skySlow.weatherSeed,
+  baseInput.worldSeed
+));
+assert.ok(
+  Math.abs(clockEnd.morphTimeDays - clockStart.morphTimeDays - 0.25) < 1e-9,
+  "the interpolated cloud clock must end exactly on the authoritative career day"
+);
+const interpolatedTravel = new THREE.Vector2(
+  clockStart.nearX - clockMidpoint.nearX,
+  clockStart.nearY - clockMidpoint.nearY
+).normalize();
+assert.ok(
+  interpolatedTravel.dot(new THREE.Vector2(windDirectionAtProbe.dx, windDirectionAtProbe.dy)) > 0.98,
+  "interpolated cloud travel must retain the authoritative downwind direction"
+);
+const pausedClock = snapshotCloudMotion(renderClock.sample(
+  baseInput.careerDay + 0.25,
+  1,
+  skySlow.weatherSeed,
+  baseInput.worldSeed
+));
+assert.deepEqual(pausedClock, clockEnd, "an unchanged paused career clock must hold cloud motion exactly");
+const acceleratedMidpoint = snapshotCloudMotion(renderClock.sample(
+  baseInput.careerDay + 5.25,
+  0.5,
+  skySlow.weatherSeed,
+  baseInput.worldSeed
+));
+assert.ok(
+  acceleratedMidpoint.morphTimeDays > clockEnd.morphTimeDays &&
+    acceleratedMidpoint.morphTimeDays < clockEnd.morphTimeDays + 5,
+  "accelerated simulation gaps must interpolate instead of teleporting the cloud clock"
+);
+const backwardDay = 12.5;
+const backwardSnap = snapshotCloudMotion(renderClock.sample(
+  backwardDay,
+  0.4,
+  skySlow.weatherSeed,
+  baseInput.worldSeed
+));
+const backwardReference = snapshotCloudMotion(new SeasonalCloudRenderClock().sample(
+  backwardDay,
+  1,
+  skySlow.weatherSeed,
+  baseInput.worldSeed
+));
+assert.deepEqual(backwardSnap, backwardReference, "backward career-time changes must snap instead of interpolating stale motion");
+const alternateRenderSeed = baseInput.worldSeed + 1;
+const seedSnap = snapshotCloudMotion(renderClock.sample(
+  backwardDay,
+  0.4,
+  skySlow.weatherSeed,
+  alternateRenderSeed
+));
+const seedReference = snapshotCloudMotion(new SeasonalCloudRenderClock().sample(
+  backwardDay,
+  1,
+  skySlow.weatherSeed,
+  alternateRenderSeed
+));
+assert.deepEqual(seedSnap, seedReference, "world changes must snap the interpolated cloud clock to the new deterministic track");
 
 const eastwardSky = buildSeasonalSkyState({
   ...baseInput,

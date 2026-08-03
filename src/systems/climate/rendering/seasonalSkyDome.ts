@@ -17,10 +17,12 @@ import {
   SEASONAL_SKY_CONFIG,
   type SeasonalSkyState
 } from "./seasonalSkyState.js";
+import type { SeasonalCloudAdvectionState } from "./seasonalCloudAdvection.js";
 
 export type SeasonalSkyDome = {
   mesh: THREE.Mesh;
   setState: (state: SeasonalSkyState) => void;
+  setCloudMotion: (state: SeasonalCloudAdvectionState) => void;
   syncToCamera: (camera: THREE.Camera) => void;
   dispose: () => void;
 };
@@ -160,6 +162,12 @@ export const createSeasonalSkyDome = (): SeasonalSkyDome => {
       state.cloudProfile.footprintThresholdBias;
   };
 
+  const setCloudMotion = (state: SeasonalCloudAdvectionState): void => {
+    uniforms.uCloudNearOffset.value.set(state.nearX, state.nearY);
+    uniforms.uCloudFarOffset.value.set(state.farX, state.farY);
+    uniforms.uCloudTimeDays.value = state.morphTimeDays;
+  };
+
   const syncToCamera = (camera: THREE.Camera): void => {
     mesh.position.copy(camera.position);
     if ("far" in camera && typeof camera.far === "number" && Number.isFinite(camera.far)) {
@@ -177,6 +185,7 @@ export const createSeasonalSkyDome = (): SeasonalSkyDome => {
   return {
     mesh,
     setState,
+    setCloudMotion,
     syncToCamera,
     dispose
   };

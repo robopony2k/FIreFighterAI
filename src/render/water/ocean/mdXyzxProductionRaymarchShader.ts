@@ -66,16 +66,33 @@ export const mdXyzxProductionRaymarchShader = `
     vec2 worldPosition,
     float worldEpsilon,
     float waterDepth,
-    int waveIterations
+    int waveIterations,
+    vec2 windDirection,
+    float windEnergy
   ) {
     float domainScale = ${MDXYZX_MACRO_DOMAIN_SCALE.toFixed(2)};
     float macroDepth = waterDepth * ${MDXYZX_MACRO_AMPLITUDE_SCALE.toFixed(1)};
     vec2 macroPosition = worldPosition * domainScale;
     vec2 macroOffsetX = vec2(worldEpsilon * domainScale, 0.0);
     vec2 macroOffsetZ = vec2(0.0, worldEpsilon * domainScale);
-    float centerHeight = mdXyzxGetWaves(macroPosition, waveIterations) * macroDepth;
-    float xHeight = mdXyzxGetWaves(macroPosition - macroOffsetX, waveIterations) * macroDepth;
-    float zHeight = mdXyzxGetWaves(macroPosition + macroOffsetZ, waveIterations) * macroDepth;
+    float centerHeight = mdXyzxGetProductionWaves(
+      macroPosition,
+      waveIterations,
+      windDirection,
+      windEnergy
+    ) * macroDepth;
+    float xHeight = mdXyzxGetProductionWaves(
+      macroPosition - macroOffsetX,
+      waveIterations,
+      windDirection,
+      windEnergy
+    ) * macroDepth;
+    float zHeight = mdXyzxGetProductionWaves(
+      macroPosition + macroOffsetZ,
+      waveIterations,
+      windDirection,
+      windEnergy
+    ) * macroDepth;
     // The vertical component stays in world units, so the broader domain
     // naturally produces gentler slopes instead of oversized far waves.
     return normalize(vec3(
@@ -134,6 +151,11 @@ export const mdXyzxProductionRaymarchShader = `
     hit.waveIterations = float(rayIterations);
     hit.normalIterations = float(normalIterations);
     hit.macroIterations = float(macroIterations);
+    float windDirectionLength = length(u_waveDirection);
+    vec2 windDirection = windDirectionLength > 0.0001
+      ? u_waveDirection / windDirectionLength
+      : vec2(0.0, 1.0);
+    float windEnergy = clamp(u_oceanContext.x, 0.0, 1.0);
 
     vec3 cameraRay = normalize(carrierWorldPosition - cameraPosition);
     float waterTop = waterLevel + (1.0 - ${MDXYZX_WAVE_MEAN.toFixed(3)}) * waterDepth;
@@ -147,7 +169,7 @@ export const mdXyzxProductionRaymarchShader = `
     vec3 upperPlaneHit = cameraPosition + cameraRay * upperDistance;
     vec3 lowerPlaneHit = cameraPosition + cameraRay * lowerDistance;
     float raymarchConverged;
-    float hitDistance = mdXyzxRaymarchWater(
+    float hitDistance = mdXyzxRaymarchProductionWater(
       cameraPosition,
       upperPlaneHit,
       lowerPlaneHit,
@@ -155,6 +177,8 @@ export const mdXyzxProductionRaymarchShader = `
       waterDepth,
       rayIterations,
       stepLimit,
+      windDirection,
+      windEnergy,
       hit.stepCount,
       raymarchConverged
     );
@@ -173,11 +197,13 @@ export const mdXyzxProductionRaymarchShader = `
     vec3 detailNormal = vec3(0.0, 1.0, 0.0);
     if (hit.macroBlend < 0.999) {
       float normalEpsilon = max(0.01, pixelFootprint * 0.08);
-      detailNormal = mdXyzxCalculateNormal(
+      detailNormal = mdXyzxCalculateProductionNormal(
         hit.position.xz,
         normalEpsilon,
         waterDepth,
-        normalIterations
+        normalIterations,
+        windDirection,
+        windEnergy
       );
     }
     vec3 macroNormal = detailNormal;
@@ -187,7 +213,9 @@ export const mdXyzxProductionRaymarchShader = `
         hit.position.xz,
         macroEpsilon,
         waterDepth,
-        macroIterations
+        macroIterations,
+        windDirection,
+        windEnergy
       );
     }
     hit.normal = normalize(mix(detailNormal, macroNormal, hit.macroBlend));

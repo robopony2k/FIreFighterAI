@@ -203,7 +203,7 @@ const shaderWaveFns = `
       vec2 blendedDir = mix(proceduralDir, contextWindDir, windBias);
       float blendedDirLength = length(blendedDir);
       vec2 dir = blendedDirLength > 1e-4 ? blendedDir / blendedDirLength : contextWindDir;
-      vec2 res = wavedx(position, dir, frequency, u_time * timeMultiplier + wavePhaseShift);
+      vec2 res = wavedx(position, dir, frequency, -u_time * timeMultiplier + wavePhaseShift);
       drag += dir * res.y * weight;
       position += dir * res.y * weight * DRAG_MULT;
       sumOfValues += res.x * weight;
@@ -792,7 +792,7 @@ export const createOceanSurfaceMaterial = (uniforms: OceanUniforms): THREE.Shade
         if (raymarchMix < 0.999) {
           float farT = smoothstep(70.0, 240.0, viewDist);
           vec2 worldUv = vWorldPos.xz * u_waveScale;
-          vec2 contextScroll = normalize(u_waveDirection) * u_time * mix(0.0012, 0.0038, u_oceanContext.x);
+          vec2 contextScroll = -normalize(u_waveDirection) * u_time * mix(0.0012, 0.0038, u_oceanContext.x);
           vec2 uv1 = worldUv * 3.2 + u_scroll1 * (u_time * 0.92) + contextScroll;
           vec2 uv2 = worldUv * 5.0 + u_scroll2 * (u_time * 1.16) + contextScroll * 1.18;
           vec2 uvFar1 = worldUv * 0.7 + u_scroll1 * (u_time * 0.36) + contextScroll * 0.42;

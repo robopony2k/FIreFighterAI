@@ -1,3 +1,23 @@
+TSK-0174: Align ocean and cloud motion with gameplay wind
+
+Type: bug
+
+Why: Ocean phases and wind-driven normal sampling moved visible detail against the supplied wind, while cloud offsets advanced only on the fixed 0.25-second simulation tick and appeared to stair-step beside frame-smooth water.
+
+Done when:
+- [x] Coastal geometry, sampled surface detail, and production raymarched ocean hits and normals use one downwind phase convention without changing shoreline-normal breakers or tides.
+- [x] The direct MdXyzX reference keeps its original unbiased phase while the production adapter applies the existing energy-dependent gameplay-wind bias.
+- [x] Cloud offsets and morph time interpolate authoritative career time between simulation samples without wall-clock integration, backward alpha jumps, pause drift, or per-frame allocation.
+- [x] TypeScript, weather, renderer, FX Lab, and queue regressions pass.
+
+Touchpoints: `src/render/water/ocean/`, `src/systems/climate/controllers/`, `src/systems/climate/rendering/`, `src/render/threeTest.ts`, `scripts/weather-visual-regression.mjs`, `scripts/render-performance-regression.mjs`, `scripts/fx-lab-showcase-regression.mjs`, `docs/`
+
+Constraints: preserve authoritative wind and career time, pause behavior, deterministic cloud travel, the direct MdXyzX reference, ocean carrier geometry, texture/draw budgets, saves, share codes, and simulation state; live motion acceptance still requires a supported Browser session or attached recording.
+
+Notes: Source analysis showed the ocean used positive time in wind-biased wave phases and positive wind UV offsets, which makes sampled features travel against their direction. Cloud direction was already correct, but its uniforms inherited the campaign's four-Hz fixed simulation cadence. Production now uses driven MdXyzX overloads and the sky dome receives allocation-free interpolated motion uniforms each render frame. Automated evidence passes; live visual acceptance remains external to this VS Code session.
+
+Status: done
+
 TSK-0173: Rebase distant ocean rendering on MdXyzX raymarched hits
 
 Type: bug
