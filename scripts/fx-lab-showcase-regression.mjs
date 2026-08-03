@@ -15,6 +15,17 @@ import {
   parseFxLabMapPreset
 } from "../dist/render/fxLab/showcaseMapPreset.js";
 import { resolveOceanSurfaceContext } from "../dist/render/water/ocean/oceanSurfaceContext.js";
+import {
+  DEFAULT_OCEAN_WATER_DEBUG_CONTROLS,
+  normalizeOceanWaterDebugControls
+} from "../dist/render/oceanWaterDebug.js";
+import {
+  MDXYZX_MAX_RAYMARCH_STEPS,
+  MDXYZX_NORMAL_WAVE_ITERATIONS,
+  MDXYZX_RAYMARCH_WAVE_ITERATIONS,
+  MDXYZX_REFERENCE_MODES,
+  normalizeMdXyzxReferenceMode
+} from "../dist/render/water/ocean/mdXyzxReferenceShader.js";
 
 const grid = { cols: FX_LAB_SHOWCASE_SIZE, rows: FX_LAB_SHOWCASE_SIZE, totalTiles: FX_LAB_SHOWCASE_SIZE ** 2 };
 const createWorld = () => createInitialState(18032026, grid);
@@ -99,11 +110,85 @@ const rainEventOcean = resolveOceanSurfaceContext({ windDx: 0.7, windDy: -0.3, w
 assert.ok(rainEventOcean.waveEnergy01 > clearOcean.waveEnergy01, "FX Lab rain event must strengthen ocean waves");
 assert.ok(rainEventOcean.foamEnergy01 > clearOcean.foamEnergy01, "FX Lab rain event must strengthen shoreline foam");
 assert.ok(rainEventOcean.shallowClarity01 < clearOcean.shallowClarity01, "FX Lab rain event must reduce shallow clarity");
+assert.equal(DEFAULT_OCEAN_WATER_DEBUG_CONTROLS.raymarchDebugView, 0, "ocean diagnostics must default off");
+assert.equal(
+  normalizeOceanWaterDebugControls({ raymarchDebugView: 4.6 }).raymarchDebugView,
+  5,
+  "the ocean diagnostic selector must normalize to a valid integral shader mode"
+);
 const fxLabControllerSource = await readFile(
   fileURLToPath(new URL("../src/render/fxLab/controller.ts", import.meta.url)),
   "utf8"
 );
+const fxLabPanelSource = await readFile(
+  fileURLToPath(new URL("../src/render/fxLab/panel.ts", import.meta.url)),
+  "utf8"
+);
+const mdXyzxReferenceSource = await readFile(
+  fileURLToPath(new URL("../src/render/water/ocean/mdXyzxReferenceShader.ts", import.meta.url)),
+  "utf8"
+);
+const mdXyzxWaveCoreSource = await readFile(
+  fileURLToPath(new URL("../src/render/water/ocean/mdXyzxWaveCoreShader.ts", import.meta.url)),
+  "utf8"
+);
+const mdXyzxProductionRaymarchSource = await readFile(
+  fileURLToPath(new URL("../src/render/water/ocean/mdXyzxProductionRaymarchShader.ts", import.meta.url)),
+  "utf8"
+);
+const oceanReferenceComparisonSource = await readFile(
+  fileURLToPath(new URL("../src/render/fxLab/oceanReferenceComparison.ts", import.meta.url)),
+  "utf8"
+);
+const productionOceanShaderSource = await readFile(
+  fileURLToPath(new URL("../src/render/water/ocean/oceanSurfaceShader.ts", import.meta.url)),
+  "utf8"
+);
 assert.match(fxLabControllerSource, /setOceanSurfaceContext\(resolveOceanSurfaceContext\(/, "FX Lab must feed weather into the ocean shader");
 assert.match(fxLabControllerSource, /rainIntensity01: rainActive \? rainIntensity : 0/, "non-rain FX Lab modes must not inherit storm wave energy");
+assert.match(fxLabControllerSource, /buildTreeImpostorAtlas\(renderer, treeAssets\)/, "FX Lab must use the shared runtime tree atlas path");
+assert.match(fxLabPanelSource, /Force Models/, "FX Lab must expose the full-model comparison mode");
+assert.match(fxLabPanelSource, /Force Impostors/, "FX Lab must expose the impostor comparison mode");
+assert.match(fxLabPanelSource, /Production Raymarch Debug/, "FX Lab must expose production raymarch diagnostics");
+assert.match(fxLabPanelSource, /raymarchDebugView/, "FX Lab must bind the production raymarch view selector");
+assert.equal(MDXYZX_RAYMARCH_WAVE_ITERATIONS, 12, "the reference raymarch must retain 12 wave iterations");
+assert.equal(MDXYZX_NORMAL_WAVE_ITERATIONS, 36, "the reference normal must retain 36 wave iterations");
+assert.equal(MDXYZX_MAX_RAYMARCH_STEPS, 96, "the reference baseline must retain its bounded raymarch safety cap");
+assert.deepEqual(MDXYZX_REFERENCE_MODES.map((mode) => mode.value), [0, 1, 2, 3, 4, 5, 6, 7]);
+assert.equal(normalizeMdXyzxReferenceMode(8.7), 7);
+assert.match(
+  mdXyzxWaveCoreSource,
+  /mdXyzxWavedx[\s\S]*mdXyzxGetWaves[\s\S]*length\(position\) \* 0\.1[\s\S]*position \+= direction \* wave\.y[\s\S]*frequency \*= 1\.18[\s\S]*timeMultiplier \*= 1\.07/,
+  "the isolated reference must retain the MdXyzX dragged-wave construction"
+);
+assert.match(
+  `${mdXyzxWaveCoreSource}\n${mdXyzxReferenceSource}`,
+  /mdXyzxIntersectWaterPlane[\s\S]*mdXyzxRaymarchWater[\s\S]*waterHitPosition[\s\S]*mdXyzxCalculateNormal[\s\S]*distanceSmoothing[\s\S]*fresnel/,
+  "the reference must reconstruct and shade a raymarched water hit rather than a flat carrier normal"
+);
+assert.match(
+  oceanReferenceComparisonSource,
+  /new THREE\.WebGLRenderTarget[\s\S]*mode === 2[\s\S]*u_gameTexture[\s\S]*comparisonTarget\?\.dispose/,
+  "split comparison must use and dispose an isolated game-scene render target"
+);
+assert.match(fxLabControllerSource, /createFxLabOceanReferenceComparison\(\)/);
+assert.match(fxLabControllerSource, /setOceanReferenceMode[\s\S]*getOceanReferenceMode/);
+assert.match(fxLabPanelSource, /MdXyzX Reference Baseline/);
+assert.match(mdXyzxReferenceSource, /Split: Reference \/ Game/);
+assert.match(
+  mdXyzxProductionRaymarchSource,
+  /mdXyzxWaveCoreShader[\s\S]*mdXyzxTraceProductionOcean/,
+  "production must consume the same verified MdXyzX core as the isolated reference"
+);
+assert.match(
+  mdXyzxProductionRaymarchSource,
+  /mdXyzxCalculateMacroNormal[\s\S]*macroBlend[\s\S]*normalCalm/,
+  "production diagnostics must retain strategic-scale MdXyzX slope and bounded normal-calming state"
+);
+assert.match(
+  productionOceanShaderSource,
+  /mdXyzxProductionRaymarchShader[\s\S]*mdXyzxTraceProductionOcean/,
+  "the campaign ocean must use the approved raymarched surface reconstruction"
+);
 
 console.log("FX Lab showcase regression passed.");

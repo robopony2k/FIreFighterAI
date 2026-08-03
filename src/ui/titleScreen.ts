@@ -238,7 +238,7 @@ const DEBUG_SETTINGS_SECTIONS: ReadonlyArray<RuntimeSettingsSectionSpec> = [
   },
   {
     title: "Advanced Rendering",
-    keys: ["hud", "nohud", "autodpr", "dpr", "mindpr", "waterq", "shadowres", "nofx", "fxbudget", "fxfallback", "firewall", "firevol"]
+    keys: ["hud", "nohud", "autodpr", "dpr", "mindpr", "waterq", "trees", "treeimpostors", "detailedstructures", "shadows", "shadowres", "nofx", "fxbudget", "fxfallback", "firewall", "firevol"]
   },
   {
     title: "3D Debug",

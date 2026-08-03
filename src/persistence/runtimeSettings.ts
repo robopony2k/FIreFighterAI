@@ -21,6 +21,7 @@ export type RuntimeSettings = {
   mindpr: number;
   waterq: "fast" | "balanced" | "high";
   trees: boolean;
+  treeimpostors: boolean;
   detailedstructures: boolean;
   rivercam: "" | "top" | "under" | "oblique";
   rivercamlock: boolean;
@@ -126,6 +127,7 @@ export const DEFAULT_RUNTIME_SETTINGS: RuntimeSettings = {
   mindpr: 1,
   waterq: "balanced",
   trees: true,
+  treeimpostors: false,
   detailedstructures: true,
   rivercam: "",
   rivercamlock: false,
@@ -360,6 +362,15 @@ export const RUNTIME_SETTING_DEFINITIONS: ReadonlyArray<RuntimeSettingDefinition
     label: "3D Trees",
     description: "Render decorative instanced 3D tree and scrub meshes.",
     defaultValue: DEFAULT_RUNTIME_SETTINGS.trees,
+    queryStyle: "0-false"
+  },
+  {
+    key: "treeimpostors",
+    section: "3D Renderer",
+    kind: "boolean",
+    label: "Far Tree Impostors",
+    description: "Experimental: replace the smallest, furthest 3D tree chunks with atlas impostors.",
+    defaultValue: DEFAULT_RUNTIME_SETTINGS.treeimpostors,
     queryStyle: "0-false"
   },
   {

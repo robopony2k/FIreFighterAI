@@ -13,6 +13,11 @@ import type { TerrainWaterDebugControls } from "../terrainWaterDebug.js";
 import type { WaterFxDebugControls } from "../threeTestUnitFx.js";
 import type { FxLabPlacementMode, FxLabScenarioId } from "./types.js";
 import type { FxLabTerrainStamp } from "./showcaseMap.js";
+import type { TreeLodMode } from "../../systems/terrain/rendering/vegetation/treeRenderTypes.js";
+import {
+  MDXYZX_REFERENCE_MODES,
+  type MdXyzxReferenceMode
+} from "../water/ocean/mdXyzxReferenceShader.js";
 
 type ControlBinding = {
   apply: (value: string | number | boolean) => void;
@@ -147,6 +152,33 @@ export const createFxLabPanel = (mount: HTMLElement, controller: FxLabController
   scenarioDescription.className = "fx-lab-section-note";
   scenarioSection.append(scenarioTitle, scenarioSelect, scenarioDescription);
   registerTabSection("scene", scenarioSection);
+
+  const treeLodSection = document.createElement("section");
+  treeLodSection.className = "fx-lab-section";
+  const treeLodTitle = document.createElement("h3");
+  treeLodTitle.textContent = "Tree LOD";
+  const treeLodLabel = document.createElement("label");
+  treeLodLabel.className = "fx-lab-inline-field";
+  const treeLodText = document.createElement("span");
+  treeLodText.textContent = "Representation";
+  const treeLodSelect = document.createElement("select");
+  treeLodSelect.className = "fx-lab-select";
+  ([
+    { value: "auto", label: "Auto" },
+    { value: "models", label: "Force Models" },
+    { value: "impostors", label: "Force Impostors" }
+  ] as const).forEach((entry) => {
+    const option = document.createElement("option");
+    option.value = entry.value;
+    option.textContent = entry.label;
+    treeLodSelect.appendChild(option);
+  });
+  treeLodLabel.append(treeLodText, treeLodSelect);
+  const treeLodNote = document.createElement("p");
+  treeLodNote.className = "fx-lab-section-note";
+  treeLodNote.textContent = "Compare GLB trees with the four-view far-tree atlas.";
+  treeLodSection.append(treeLodTitle, treeLodLabel, treeLodNote);
+  registerTabSection("scene", treeLodSection);
 
   const playbackSection = document.createElement("section");
   playbackSection.className = "fx-lab-section";
@@ -353,6 +385,30 @@ export const createFxLabPanel = (mount: HTMLElement, controller: FxLabController
   oceanWaterResetButton.className = "fx-lab-section-button";
   oceanWaterSection.append(oceanWaterTitle, oceanWaterControlsRoot, oceanWaterResetButton);
   registerTabSection("water", oceanWaterSection);
+
+  const oceanReferenceSection = document.createElement("section");
+  oceanReferenceSection.className = "fx-lab-section";
+  const oceanReferenceTitle = document.createElement("h3");
+  oceanReferenceTitle.textContent = "MdXyzX Reference Baseline";
+  const oceanReferenceLabel = document.createElement("label");
+  oceanReferenceLabel.className = "fx-lab-inline-field";
+  const oceanReferenceText = document.createElement("span");
+  oceanReferenceText.textContent = "Comparison";
+  const oceanReferenceSelect = document.createElement("select");
+  oceanReferenceSelect.className = "fx-lab-select";
+  MDXYZX_REFERENCE_MODES.forEach((mode) => {
+    const option = document.createElement("option");
+    option.value = `${mode.value}`;
+    option.textContent = `${mode.value}. ${mode.label}`;
+    oceanReferenceSelect.appendChild(option);
+  });
+  oceanReferenceLabel.append(oceanReferenceText, oceanReferenceSelect);
+  const oceanReferenceNote = document.createElement("p");
+  oceanReferenceNote.className = "fx-lab-section-note";
+  oceanReferenceNote.textContent =
+    "Standalone raymarched reference. Split mode remaps both halves to the same camera view; it does not alter the game ocean.";
+  oceanReferenceSection.append(oceanReferenceTitle, oceanReferenceLabel, oceanReferenceNote);
+  registerTabSection("water", oceanReferenceSection);
 
   const terrainWaterSection = document.createElement("section");
   terrainWaterSection.className = "fx-lab-section";
@@ -703,6 +759,13 @@ export const createFxLabPanel = (mount: HTMLElement, controller: FxLabController
     "shoreFoamScale"
   ]);
   createOceanControlCluster(
+    "Ocean",
+    "Production Raymarch Debug",
+    "Inspect reconstructed height, hit distance, filtered work, normals, and the coastal-to-open blend.",
+    null,
+    ["raymarchDebugView"]
+  );
+  createOceanControlCluster(
     "Shoreline",
     "Organic Edge",
     "Break up the coast edge with a noisy inset.",
@@ -799,6 +862,8 @@ export const createFxLabPanel = (mount: HTMLElement, controller: FxLabController
     }
     timeScaleSelect.value = `${timeScale}`;
     weatherModeSelect.value = controller.getWeatherMode();
+    treeLodSelect.value = controller.getTreeLodMode();
+    oceanReferenceSelect.value = `${controller.getOceanReferenceMode()}`;
     stampSelect.value = controller.getTerrainStamp() ?? "";
     radiusSelect.value = `${controller.getTerrainStampRadius()}`;
     terrainEditStatus.textContent = controller.getTerrainEditStatus();
@@ -873,6 +938,14 @@ export const createFxLabPanel = (mount: HTMLElement, controller: FxLabController
   });
   weatherModeSelect.addEventListener("change", () => {
     controller.setWeatherMode(weatherModeSelect.value as FxLabWeatherMode);
+    sync();
+  });
+  treeLodSelect.addEventListener("change", () => {
+    controller.setTreeLodMode(treeLodSelect.value as TreeLodMode);
+    sync();
+  });
+  oceanReferenceSelect.addEventListener("change", () => {
+    controller.setOceanReferenceMode(Number(oceanReferenceSelect.value) as MdXyzxReferenceMode);
     sync();
   });
   const togglePlacementMode = (mode: FxLabPlacementMode): void => {

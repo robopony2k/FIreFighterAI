@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import * as THREE from "three";
+import { TreeType } from "../dist/core/types.js";
 import {
   TERRAIN_RENDER_CHUNK_TILE_SPAN,
   finalizeInstancedMeshBounds,
@@ -26,8 +27,35 @@ import {
   seasonalSkyFragmentShader
 } from "../dist/systems/climate/rendering/seasonalCloudShader.js";
 import {
+  DISTANT_OCEAN_SEGMENT_WORLD_SIZE,
+  buildDistantOceanBackdropLayout
+} from "../dist/render/water/ocean/distantOceanBackdropGeometry.js";
+import {
+  MDXYZX_QUALITY_PROFILES,
+  MDXYZX_MAX_RAYMARCH_STEPS,
+  MDXYZX_NORMAL_WAVE_ITERATIONS,
+  MDXYZX_RAYMARCH_WAVE_ITERATIONS
+} from "../dist/render/water/ocean/mdXyzxWaveCoreShader.js";
+import {
+  MDXYZX_MACRO_AMPLITUDE_SCALE,
+  MDXYZX_MACRO_BLEND_FOOTPRINT_END,
+  MDXYZX_MACRO_BLEND_FOOTPRINT_START,
+  MDXYZX_MACRO_DOMAIN_SCALE,
+  MDXYZX_MAX_FAR_NORMAL_CALM
+} from "../dist/render/water/ocean/mdXyzxProductionRaymarchShader.js";
+import {
   createSeasonalSkyDome
 } from "../dist/systems/climate/rendering/seasonalSkyDome.js";
+import {
+  TREE_IMPOSTOR_AZIMUTH_COUNT,
+  buildTreeImpostorFrameLayout
+} from "../dist/systems/terrain/rendering/vegetation/treeImpostorAtlas.js";
+import {
+  TREE_IMPOSTOR_ENTER_PX,
+  TREE_IMPOSTOR_EXIT_PX,
+  buildTreeLod
+} from "../dist/systems/terrain/rendering/vegetation/treeLodController.js";
+import { createTreeBurnController } from "../dist/render/terrain/vegetation/treeBurnController.js";
 
 const instances = [
   { tileX: 0, tileY: 0 },
@@ -50,6 +78,172 @@ boundedMesh.setMatrixAt(1, transform.makeTranslation(5, 0, 0));
 finalizeInstancedMeshBounds(boundedMesh);
 assert.equal(boundedMesh.frustumCulled, true, "chunk meshes should use normal frustum culling");
 assert.ok((boundedMesh.boundingSphere?.radius ?? 0) >= 5, "chunk bounds should include every instance");
+
+const treeVariantCounts = {
+  [TreeType.Pine]: 3,
+  [TreeType.Oak]: 3,
+  [TreeType.Maple]: 3,
+  [TreeType.Birch]: 3,
+  [TreeType.Elm]: 1,
+  [TreeType.Scrub]: 3
+};
+const treeAssets = Object.fromEntries(
+  Object.entries(treeVariantCounts).map(([treeType, count]) => [
+    treeType,
+    Array.from({ length: count }, (_, index) => ({ meshes: [], height: 1.5 + index * 0.1, baseOffset: 0 }))
+  ])
+);
+const atlasLayout = buildTreeImpostorFrameLayout(treeAssets);
+assert.equal(atlasLayout.length, 16, "atlas layout should include every loaded tree variant");
+const occupiedAtlasFrames = new Set();
+atlasLayout.forEach((entry) => {
+  assert.equal(entry.frame.frameCount, TREE_IMPOSTOR_AZIMUTH_COUNT, "every tree variant should own four azimuths");
+  for (let view = 0; view < entry.frame.frameCount; view += 1) {
+    const frame = entry.frame.baseFrame + view;
+    assert.equal(occupiedAtlasFrames.has(frame), false, `atlas frame ${frame} must not overlap`);
+    occupiedAtlasFrames.add(frame);
+  }
+});
+assert.equal(occupiedAtlasFrames.size, 64, "the supported tree asset set should deterministically fill 64 atlas cells");
+assert.equal(TREE_IMPOSTOR_ENTER_PX, 18);
+assert.equal(TREE_IMPOSTOR_EXIT_PX, 24);
+
+const treeRoot = new THREE.Group();
+const fullTreeMesh = new THREE.InstancedMesh(
+  new THREE.BoxGeometry(1, 2, 1),
+  new THREE.MeshBasicMaterial(),
+  1
+);
+treeRoot.add(fullTreeMesh);
+const colorAtlasTexture = new THREE.Texture();
+const roleAtlasTexture = new THREE.Texture();
+colorAtlasTexture.userData.treeImpostorSharedTexture = true;
+roleAtlasTexture.userData.treeImpostorSharedTexture = true;
+let atlasTextureDisposed = false;
+colorAtlasTexture.addEventListener("dispose", () => { atlasTextureDisposed = true; });
+const treeAtlas = {
+  colorTexture: colorAtlasTexture,
+  roleTexture: roleAtlasTexture,
+  atlasSize: 1024,
+  gridSize: 8,
+  frameCount: 64,
+  getFrame: () => ({ baseFrame: 0, frameCount: 4, worldSpan: 2, baseOffsetY: 0 }),
+  dispose: () => {
+    colorAtlasTexture.dispose();
+    roleAtlasTexture.dispose();
+  }
+};
+const seasonVisual = {
+  enabled: true,
+  uniforms: {
+    uRisk01: { value: 0.4 },
+    uSeasonT01: { value: 0.2 },
+    uWorldSeed: { value: 1 }
+  },
+  phaseShiftMax: 0.08,
+  rateJitter: 0.035,
+  autumnHueJitter: 0.22
+};
+const fallbackRoot = new THREE.Group();
+const fallbackFullMesh = new THREE.InstancedMesh(
+  new THREE.BoxGeometry(1, 1, 1),
+  new THREE.MeshBasicMaterial(),
+  1
+);
+fallbackRoot.add(fallbackFullMesh);
+assert.equal(buildTreeLod({
+  root: fallbackRoot,
+  instances: [{
+    x: 0, y: 0, z: 0, scale: 1, rotation: 0, treeType: TreeType.Pine,
+    variantIndex: 0, tileIndex: 0, tileX: 0, tileY: 0, sourceHeight: 2
+  }],
+  fullMeshesByChunk: new Map([["0,0", [fallbackFullMesh]]]),
+  atlas: { ...treeAtlas, getFrame: () => null }
+}), null, "an incomplete atlas should preserve the full-model path");
+assert.equal(fallbackFullMesh.visible, true);
+const lodBuild = buildTreeLod({
+  root: treeRoot,
+  instances: [{
+    x: 0, y: 0, z: 0, scale: 1, rotation: 0, treeType: TreeType.Pine,
+    variantIndex: 0, tileIndex: 0, tileX: 0, tileY: 0, sourceHeight: 2
+  }],
+  fullMeshesByChunk: new Map([["0,0", [fullTreeMesh]]]),
+  atlas: treeAtlas,
+  seasonVisual,
+  tileFuel: new Float32Array([1])
+});
+assert.ok(lodBuild, "loaded tree assets and an atlas should create a tree LOD controller");
+const lodCamera = new THREE.PerspectiveCamera(50, 1, 0.1, 1000);
+lodCamera.position.set(0, 1, 200);
+lodCamera.lookAt(0, 1, 0);
+assert.equal(lodBuild.controller.update(lodCamera, 1000), true, "far chunks should enter impostor mode");
+assert.equal(lodBuild.controller.getStats().impostorChunks, 1);
+assert.equal(lodBuild.controller.getStats().impostorDrawCount, 1, "effective far-tree draws should count visible impostor chunks");
+assert.equal(fullTreeMesh.visible, false, "a chunk must hide full models while its impostor is active");
+const transitionCountAtFar = lodBuild.controller.getStats().transitionCount;
+assert.equal(lodBuild.controller.update(lodCamera, 1000), false, "an unchanged camera must not re-evaluate LOD");
+assert.equal(lodBuild.controller.getStats().transitionCount, transitionCountAtFar);
+lodCamera.position.z = 100;
+lodCamera.lookAt(0, 1, 0);
+lodBuild.controller.update(lodCamera, 1000);
+assert.equal(lodBuild.controller.getStats().impostorChunks, 1, "18-24 px hysteresis should retain the current impostor");
+lodCamera.position.z = 50;
+lodCamera.lookAt(0, 1, 0);
+lodBuild.controller.update(lodCamera, 1000);
+assert.equal(lodBuild.controller.getStats().modelChunks, 1, "chunks above 24 px should return to full models");
+assert.equal(fullTreeMesh.visible, true);
+lodCamera.position.set(0, 1, 10);
+lodCamera.lookAt(0, 1, 20);
+lodBuild.controller.update(lodCamera, 1000);
+assert.equal(lodBuild.controller.getStats().impostorChunks, 1, "behind-camera chunks should not retain full shadow-casting models");
+assert.equal(lodBuild.controller.getStats().impostorDrawCount, 0, "behind-camera impostors should be rejected by the view frustum");
+lodBuild.controller.setMode("impostors");
+assert.equal(lodBuild.controller.getMode(), "impostors");
+assert.equal(lodBuild.controller.getStats().impostorChunks, 1, "forced impostors should provide an A/B comparison path");
+assert.equal(lodBuild.controller.setMode("models"), true);
+assert.equal(lodBuild.controller.getStats().modelChunks, 1, "forced models should provide the fallback comparison path");
+assert.equal(lodBuild.burnStates.length, 1, "impostors should register a mixed tree burn state");
+const impostorMaterial = lodBuild.burnStates[0].mesh.material;
+assert.ok(impostorMaterial instanceof THREE.ShaderMaterial);
+assert.ok(
+  impostorMaterial.uniforms.fogColor &&
+    impostorMaterial.uniforms.fogNear &&
+    impostorMaterial.uniforms.fogFar &&
+    impostorMaterial.uniforms.fogDensity,
+  "fog-enabled tree impostors must provide Three's complete fog uniform set"
+);
+seasonVisual.uniforms.uSeasonT01.value = 0.8;
+assert.equal(impostorMaterial.uniforms.uSeasonT01.value, 0.8, "season changes should reach hidden impostors");
+const impostorBurnState = lodBuild.burnStates[0];
+const modelBurnState = {
+  ...impostorBurnState,
+  mesh: fullTreeMesh,
+  baseScale: new Float32Array([1]),
+  scalePivotY: new Float32Array([0.9]),
+  burnProgress: new Float32Array(1),
+  burnQ: new Uint8Array(1),
+  visibilityQ: new Uint8Array([255])
+};
+const burnController = createTreeBurnController([modelBurnState, impostorBurnState], 255, new Map());
+burnController.update(1000, {
+  lastActiveFires: 1,
+  fireBoundsActive: true,
+  fireMinX: 0,
+  fireMaxX: 0,
+  fireMinY: 0,
+  fireMaxY: 0,
+  tileFire: new Float32Array([0.8]),
+  tileFuel: new Float32Array([0.4]),
+  tileHeat: new Float32Array([0.8]),
+  tileTypeId: new Uint8Array([0]),
+  fireSettings: { heatCap: 1 }
+});
+assert.equal(modelBurnState.burnQ[0], impostorBurnState.burnQ[0], "visible and hidden tree representations should receive matching burn progress");
+assert.ok(impostorBurnState.burnQ[0] > 0, "a hidden impostor should still receive burn updates");
+lodBuild.controller.dispose();
+assert.equal(atlasTextureDisposed, false, "terrain LOD disposal must not destroy controller-owned atlas textures");
+treeAtlas.dispose();
+assert.equal(atlasTextureDisposed, true, "the atlas owner should dispose shared atlas textures on teardown");
 
 const fullRoadGeometry = new THREE.PlaneGeometry(4, 4, 4, 4);
 fullRoadGeometry.rotateX(-Math.PI / 2);
@@ -248,8 +442,34 @@ const coalescedShadowState = shadowController.update({
 assert.equal(coalescedShadowState.blendActive, true, "the latest sun direction should blend after the hold");
 assert.equal(coalescedShadowState.activeLightCount, 2);
 
+const campaignOceanBackdrop = buildDistantOceanBackdropLayout({
+  width: 256,
+  depth: 256,
+  sampleCols: 256,
+  sampleRows: 256
+});
+assert.equal(DISTANT_OCEAN_SEGMENT_WORLD_SIZE, 220);
+assert.equal(campaignOceanBackdrop.strips.length, 4, "the distant ocean should remain a four-strip backdrop");
+assert.equal(campaignOceanBackdrop.triangleCount, 1_456, "the supported campaign backdrop must retain its coarse carrier budget");
+assert.ok(
+  campaignOceanBackdrop.triangleCount <= 2_000,
+  `the 256x256 distant ocean must stay coarse (received ${campaignOceanBackdrop.triangleCount} triangles)`
+);
+campaignOceanBackdrop.strips.forEach((strip) => {
+  assert.ok(strip.segmentsX >= 1 && strip.segmentsY >= 1, `${strip.edge} must retain valid geometry`);
+  assert.ok(strip.width >= 256 || strip.depth >= 256, `${strip.edge} must cover the authored terrain edge`);
+});
+
 const oceanShaderSource = await readFile(
   fileURLToPath(new URL("../src/render/water/ocean/oceanSurfaceShader.ts", import.meta.url)),
+  "utf8"
+);
+const mdXyzxWaveCoreSource = await readFile(
+  fileURLToPath(new URL("../src/render/water/ocean/mdXyzxWaveCoreShader.ts", import.meta.url)),
+  "utf8"
+);
+const mdXyzxProductionRaymarchSource = await readFile(
+  fileURLToPath(new URL("../src/render/water/ocean/mdXyzxProductionRaymarchShader.ts", import.meta.url)),
   "utf8"
 );
 const oceanContextSource = await readFile(
@@ -280,9 +500,83 @@ const seasonalCloudProfileSource = await readFile(
   fileURLToPath(new URL("../src/systems/climate/rendering/seasonalCloudProfile.ts", import.meta.url)),
   "utf8"
 );
+const threeTestSource = await readFile(
+  fileURLToPath(new URL("../src/render/threeTest.ts", import.meta.url)),
+  "utf8"
+);
 assert.equal((oceanShaderSource.match(/uniform sampler2D/g) ?? []).length, 11, "contextual surf must not add ocean texture samplers");
 assert.match(oceanShaderSource, /return 8\.0;/, "fast water quality must retain eight broad wave iterations");
 assert.match(oceanShaderSource, /breakerGate/, "fast water quality must retain the SDF breaker band");
+assert.equal(MDXYZX_RAYMARCH_WAVE_ITERATIONS, 12);
+assert.equal(MDXYZX_NORMAL_WAVE_ITERATIONS, 36);
+assert.equal(MDXYZX_MAX_RAYMARCH_STEPS, 96);
+assert.deepEqual(MDXYZX_QUALITY_PROFILES, {
+  fast: { raymarchWaveIterations: 8, normalWaveIterations: 18, maxRaymarchSteps: 48 },
+  balanced: { raymarchWaveIterations: 10, normalWaveIterations: 27, maxRaymarchSteps: 72 },
+  high: { raymarchWaveIterations: 12, normalWaveIterations: 36, maxRaymarchSteps: 96 }
+});
+assert.equal(MDXYZX_MACRO_DOMAIN_SCALE, 0.22);
+assert.equal(MDXYZX_MACRO_AMPLITUDE_SCALE, 1.8);
+assert.equal(MDXYZX_MACRO_BLEND_FOOTPRINT_START, 0.28);
+assert.equal(MDXYZX_MACRO_BLEND_FOOTPRINT_END, 1.35);
+assert.equal(MDXYZX_MAX_FAR_NORMAL_CALM, 0.28);
+assert.ok(1 - MDXYZX_MAX_FAR_NORMAL_CALM >= 0.7, "strategic ocean must retain bounded broad normal variance");
+assert.match(
+  mdXyzxWaveCoreSource,
+  /length\(position\) \* 0\.1[\s\S]*position \+= direction \* wave\.y[\s\S]*frequency \*= 1\.18[\s\S]*timeMultiplier \*= 1\.07/,
+  "production and reference oceans must share the actual MdXyzX dragged-wave sequence"
+);
+assert.match(
+  mdXyzxProductionRaymarchSource,
+  /mdXyzxFootprintIterationLimit[\s\S]*log\(1\.18\)[\s\S]*mdXyzxRaymarchWater[\s\S]*mdXyzxCalculateNormal/,
+  "the production adapter must reconstruct a hit and filter the source octave progression by pixel footprint"
+);
+assert.match(
+  mdXyzxProductionRaymarchSource,
+  /mdXyzxCalculateMacroNormal[\s\S]*mdXyzxGetWaves[\s\S]*macroIterations[\s\S]*mix\(detailNormal, macroNormal, hit\.macroBlend\)/,
+  "strategic ocean must replace filtered detail with a low-iteration slope from the same MdXyzX function"
+);
+assert.match(
+  mdXyzxProductionRaymarchSource,
+  /hit\.normalCalm =[\s\S]*smoothstep\(1\.35, 5\.5, pixelFootprint\)[\s\S]*MDXYZX_MAX_FAR_NORMAL_CALM/,
+  "normal calming must be footprint-driven and bounded independently from wave filtering"
+);
+assert.doesNotMatch(
+  mdXyzxProductionRaymarchSource,
+  /distanceSmoothing|sqrt\(max\(0\.0, hitDistance\) \* 0\.01\)/,
+  "camera distance must not force every strategic-ocean normal fully vertical"
+);
+assert.match(
+  oceanShaderSource,
+  /dFdx\(vWorldPos\.xz\)[\s\S]*pixelFootprint/,
+  "the ocean raymarch limit must derive its footprint from fragment derivatives"
+);
+assert.match(
+  oceanShaderSource,
+  /openOceanRaymarchMix[\s\S]*raymarchMix[\s\S]*mdXyzxTraceProductionOcean[\s\S]*mix\(coastalN, raymarchedOceanN, resolvedRaymarchMix\)/,
+  "authored coastal water must blend continuously into the raymarched open-ocean tier"
+);
+assert.match(
+  oceanShaderSource,
+  /u_oceanRaymarchDebugView[\s\S]*oceanHit\.height[\s\S]*oceanHit\.distance[\s\S]*oceanHit\.stepCount[\s\S]*raymarchMix/,
+  "the ocean shader must expose controlled hit, work, normal, and coastal-blend debug views"
+);
+assert.match(
+  oceanShaderSource,
+  /horizonCalm[\s\S]*min\(fresnel, 0\.58\)[\s\S]*calmHorizonReflection[\s\S]*horizonCalm \* 0\.32[\s\S]*glitter \*= mix\(1\.0, 0\.38, horizonCalm\)[\s\S]*specular \*= mix\(1\.0, 0\.52, horizonCalm\)/,
+  "horizon lighting must remain bounded without erasing broad reflection and highlight variation"
+);
+assert.doesNotMatch(
+  oceanShaderSource,
+  /horizonBoost = 1\.0 \/ max/,
+  "ocean atmosphere must not use an unbounded reciprocal horizon highlight"
+);
+assert.match(
+  oceanShaderSource,
+  /raymarchOpenWater[\s\S]*animated \*= 1\.0 - max\(clamp\(u_backdropMix/,
+  "distant and open-ocean carriers must not expose coarse vertex displacement"
+);
+assert.doesNotMatch(oceanShaderSource, /proceduralOceanSpectrum|sampleProceduralOceanWaveHeight/);
 assert.doesNotMatch(oceanContextSource, /from ["']three["']|new THREE\.|Texture|Mesh|requestAnimationFrame/, "ocean context policy must remain allocation-light and renderer-independent");
 
 assert.equal(SEASONAL_CLOUD_MARCH_STEPS, 20, "volumetric seasonal clouds must cap the primary march at 20 slices");
@@ -410,6 +704,11 @@ assert.doesNotMatch(
   seasonalSkyDomeSource,
   /Data3DTexture|sampler3D/,
   "the cloud volume must preserve the WebGL-compatible 2D atlas path"
+);
+assert.match(
+  threeTestSource,
+  /includesShadowRefresh[\s\S]*submittedTriangles - lastColorPassTriangles/,
+  "renderer diagnostics must separate estimated shadow submissions from stable color-pass triangles"
 );
 assert.doesNotMatch(
   seasonalSkyDomeSource,

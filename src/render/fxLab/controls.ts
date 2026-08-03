@@ -527,6 +527,16 @@ export const FX_LAB_OCEAN_WATER_CONTROLS: ReadonlyArray<FxLabOceanWaterControlDe
     step: 0.01
   },
   {
+    key: "raymarchDebugView",
+    section: "Ocean",
+    kind: "range",
+    label: "Raymarch View",
+    description: "0 composite, 1 height, 2 hit distance, 3 step/footprint budget, 4 normals, 5 coastal blend.",
+    min: 0,
+    max: 5,
+    step: 1
+  },
+  {
     key: "enableOrganicEdge",
     section: "Shoreline",
     kind: "boolean",

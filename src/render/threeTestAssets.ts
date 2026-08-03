@@ -9,6 +9,11 @@ import type {
 } from "../systems/settlements/types/buildingTypes.js";
 import { registerPbrSpecularGlossiness } from "./gltfSpecGloss.js";
 import { createProceduralHouseAssets } from "../systems/settlements/rendering/proceduralHouseBuilder.js";
+import type {
+  TreeRenderAssets,
+  TreeRenderMeshTemplate,
+  TreeRenderVariant
+} from "../systems/terrain/rendering/vegetation/treeRenderTypes.js";
 
 type RGB = { r: number; g: number; b: number };
 
@@ -21,19 +26,9 @@ const mixRgb = (a: RGB, b: RGB, t: number): RGB => ({
 const lighten = (color: RGB, amount: number): RGB => mixRgb(color, { r: 255, g: 255, b: 255 }, clamp(amount, 0, 1));
 const darken = (color: RGB, amount: number): RGB => mixRgb(color, { r: 0, g: 0, b: 0 }, clamp(amount, 0, 1));
 
-export type TreeMeshTemplate = {
-  geometry: THREE.BufferGeometry;
-  material: THREE.Material | THREE.Material[];
-  baseMatrix: THREE.Matrix4;
-};
-
-export type TreeVariant = {
-  meshes: TreeMeshTemplate[];
-  height: number;
-  baseOffset: number;
-};
-
-export type TreeAssets = Record<TreeType, TreeVariant[]>;
+export type TreeMeshTemplate = TreeRenderMeshTemplate;
+export type TreeVariant = TreeRenderVariant;
+export type TreeAssets = TreeRenderAssets;
 
 export type HouseVariant = SettlementHouseVariant;
 
@@ -345,9 +340,13 @@ const loadTreeVariant = (loader: GLTFLoader, url: string): Promise<TreeVariant> 
                 })();
             const baseMatrix = child.matrixWorld.clone();
             baseMatrix.premultiply(recenter);
+            const impostorCaptureMaterial = Array.isArray(material)
+              ? material.map((entry) => entry.clone())
+              : material.clone();
             meshes.push({
               geometry,
               material,
+              impostorCaptureMaterial,
               baseMatrix
             });
           }

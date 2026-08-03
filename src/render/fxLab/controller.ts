@@ -54,6 +54,14 @@ import {
 import type { OceanWaterDebugControls } from "../oceanWaterDebug.js";
 import type { TerrainWaterDebugControls } from "../terrainWaterDebug.js";
 import { setInlandWaterSeamDebugMaterialMode } from "../../systems/terrain/rendering/inlandWaterSeamDebugMaterial.js";
+import { buildTreeImpostorAtlas } from "../../systems/terrain/rendering/vegetation/treeImpostorAtlas.js";
+import { isSharedTreeImpostorTexture } from "../../systems/terrain/rendering/vegetation/treeRenderResourceDisposal.js";
+import type {
+  TreeImpostorAtlas,
+  TreeLodController,
+  TreeLodMode,
+  TreeSeasonVisualConfig
+} from "../../systems/terrain/rendering/vegetation/treeRenderTypes.js";
 import { applyFxLabScenarioFrame, type FxLabScenarioFrameContext } from "./scenarios.js";
 import {
   normalizeFxLabScenarioId,
@@ -71,6 +79,8 @@ import {
   type FxLabTerrainStamp
 } from "./showcaseMap.js";
 import { createFxLabMapPreset, formatFxLabMapPreset, parseFxLabMapPreset, type FxLabMapPreset } from "./showcaseMapPreset.js";
+import { createFxLabOceanReferenceComparison } from "./oceanReferenceComparison.js";
+import type { MdXyzxReferenceMode } from "../water/ocean/mdXyzxReferenceShader.js";
 
 const FX_LAB_GRID_SIZE = FX_LAB_SHOWCASE_SIZE;
 const FX_LAB_SEED = 18032026;
@@ -132,6 +142,10 @@ export type FxLabController = {
   getTimeScale: () => number;
   setWeatherMode: (mode: FxLabWeatherMode) => void;
   getWeatherMode: () => FxLabWeatherMode;
+  setTreeLodMode: (mode: TreeLodMode) => void;
+  getTreeLodMode: () => TreeLodMode;
+  setOceanReferenceMode: (mode: MdXyzxReferenceMode) => void;
+  getOceanReferenceMode: () => MdXyzxReferenceMode;
   setPlacementMode: (mode: FxLabPlacementMode) => void;
   getPlacementMode: () => FxLabPlacementMode;
   clearPlacementOverrides: () => void;
@@ -293,7 +307,7 @@ const disposeTerrainMesh = (mesh: THREE.Mesh | null): void => {
     }
     const disposeMaterial = (material: THREE.Material): void => {
       const textured = material as THREE.Material & { map?: THREE.Texture | null };
-      if (textured.map) {
+      if (textured.map && !isSharedTreeImpostorTexture(textured.map)) {
         textured.map.dispose();
       }
       material.dispose();
@@ -368,6 +382,8 @@ export const createFxLabController = (
     fogFar: 86,
     preferredQuality: "high"
   });
+  const oceanReferenceComparison = createFxLabOceanReferenceComparison();
+  const oceanReferenceSunDirection = new THREE.Vector3();
 
   const sceneState = createSceneState();
   const canonicalMapPreset: FxLabMapPreset = createFxLabMapPreset(sceneState.world, sceneState.showcaseMap);
@@ -382,6 +398,9 @@ export const createFxLabController = (
   let lastTerrainStructureRevision = -1;
   let houseAssets: HouseAssets | null = getHouseAssetsCache();
   let treeAssets: TreeAssets | null = getTreeAssetsCache();
+  let treeImpostorAtlas: TreeImpostorAtlas | null = null;
+  let treeLodController: TreeLodController | null = null;
+  let treeLodMode: TreeLodMode = "auto";
   let rainSceneTarget: THREE.WebGLRenderTarget | null = null;
   let rainSceneTargetFailed = false;
   const rainTargetSize = new THREE.Vector2(1, 1);
@@ -406,6 +425,17 @@ export const createFxLabController = (
   let terrainStrokeActive = false;
   let terrainEditStatus = "Choose a stamp, then drag over editable land.";
   let lastTerrainStampTile = -1;
+  const treeSeasonVisualConfig: TreeSeasonVisualConfig = {
+    enabled: true,
+    uniforms: {
+      uRisk01: { value: 0.44 },
+      uSeasonT01: { value: 0 },
+      uWorldSeed: { value: FX_LAB_SEED }
+    },
+    phaseShiftMax: 0.08,
+    rateJitter: 0.035,
+    autumnHueJitter: 0.22
+  };
 
   const fireFx: ThreeTestFireFx = createThreeTestFireFx(scene, camera, fireDebugControls);
   const constructionFx = createConstructionFxRuntime(scene, camera, null);
@@ -492,6 +522,8 @@ export const createFxLabController = (
     const rainActive = currentScenarioId === FX_LAB_RAIN_SCENARIO_ID && rainIntensity > 0.001;
     const careerDay = getFxLabWeatherCareerDay();
     const seasonT01 = getFxLabWeatherSeasonT01();
+    treeSeasonVisualConfig.uniforms.uSeasonT01.value = seasonT01;
+    treeSeasonVisualConfig.uniforms.uRisk01.value = rainActive ? 0.22 : 0.44;
     const lighting = buildLightingDirectorState({
       seasonT01,
       risk01: rainActive ? 0.22 : 0.44,
@@ -545,7 +577,6 @@ export const createFxLabController = (
   };
 
   const renderSceneWithOptionalRain = (): void => {
-    syncWeatherRenderer();
     if (currentScenarioId !== FX_LAB_RAIN_SCENARIO_ID) {
       renderer.render(scene, camera);
       return;
@@ -675,14 +706,25 @@ export const createFxLabController = (
       return;
     }
     waterSystem.clear();
+    treeLodController?.dispose();
+    treeLodController = null;
     if (terrainMesh) {
       scene.remove(terrainMesh);
       disposeTerrainMesh(terrainMesh);
       terrainMesh = null;
     }
     terrainSurface = prepareTerrainRenderSurface(sceneState.sample);
-    const result = buildTerrainMesh(terrainSurface, treeAssets, houseAssets, null);
+    const result = buildTerrainMesh(
+      terrainSurface,
+      treeAssets,
+      houseAssets,
+      null,
+      treeSeasonVisualConfig,
+      treeImpostorAtlas,
+      treeLodMode
+    );
     terrainMesh = result.mesh;
+    treeLodController = result.treeLod ?? null;
     setInlandWaterSeamDebugMaterialMode(terrainMesh.material, terrainWaterDebugControls.inlandWaterSeamDebugMode);
     terrainSize = result.size;
     scene.add(terrainMesh);
@@ -691,7 +733,19 @@ export const createFxLabController = (
     }
     waterSystem.setLightDirectionFromKeyLight();
     fitCameraToTerrain();
+    treeLodController?.update(camera, canvas.clientHeight || canvas.height || 1);
     lastTerrainStructureRevision = sceneState.world.structureRevision;
+  };
+
+  const rebuildTreeImpostorAtlas = (): void => {
+    treeImpostorAtlas?.dispose();
+    treeImpostorAtlas = null;
+    if (!treeAssets) return;
+    try {
+      treeImpostorAtlas = buildTreeImpostorAtlas(renderer, treeAssets);
+    } catch (error) {
+      console.warn("[fxLab] Failed to capture the tree impostor atlas; retaining full models.", error);
+    }
   };
 
   const refreshTerrainSampleFromWorld = (): void => {
@@ -745,6 +799,7 @@ export const createFxLabController = (
           return;
         }
         treeAssets = assets;
+        rebuildTreeImpostorAtlas();
         rebuildTerrain();
       })
       .catch((error) => {
@@ -1259,6 +1314,7 @@ export const createFxLabController = (
     }
     const fireAnimationRate = paused ? 0 : timeScale;
     controls.update();
+    treeLodController?.update(camera, canvas.clientHeight || canvas.height || 1);
     waterSystem.setLightDirectionFromKeyLight();
     waterSystem.update(now, frameDeltaMs * 0.001, 1000 / Math.max(1, frameDeltaMs), lastSceneRenderMs);
     applyScenarioFrame();
@@ -1282,8 +1338,16 @@ export const createFxLabController = (
     unitsLayer.update(sceneState.world, terrainSurface, 1);
     unitFxLayer.update(sceneState.world, sceneState.effects, terrainSurface, 1, now);
     updateSprayTargetMarker(now);
+    syncWeatherRenderer();
+    oceanReferenceSunDirection.subVectors(keyLight.position, keyLight.target.position).normalize();
+    oceanReferenceComparison.update(
+      camera,
+      labTimeMs * 0.001,
+      FX_LAB_OCEAN_SEA_LEVEL * (terrainSurface?.heightScale ?? 1),
+      oceanReferenceSunDirection
+    );
     const renderStartedAt = performance.now();
-    renderSceneWithOptionalRain();
+    oceanReferenceComparison.render(renderer, camera, renderSceneWithOptionalRain);
     lastSceneRenderMs = performance.now() - renderStartedAt;
   };
 
@@ -1307,6 +1371,16 @@ export const createFxLabController = (
     disposeRainSceneTarget();
   };
 
+  const handleContextLost = (event: Event): void => {
+    event.preventDefault();
+  };
+  const handleContextRestored = (): void => {
+    rebuildTreeImpostorAtlas();
+    rebuildTerrain();
+    renderOnce();
+  };
+
+  rebuildTreeImpostorAtlas();
   rebuildTerrain();
   hydrateTreeAssets();
   hydrateHouseAssets();
@@ -1316,6 +1390,8 @@ export const createFxLabController = (
   canvas.addEventListener("pointermove", handleCanvasPointerMove);
   canvas.addEventListener("pointerup", handleCanvasPointerUp);
   canvas.addEventListener("pointercancel", handleCanvasPointerUp);
+  canvas.addEventListener("webglcontextlost", handleContextLost, false);
+  canvas.addEventListener("webglcontextrestored", handleContextRestored, false);
 
   return {
     start: () => {
@@ -1346,6 +1422,8 @@ export const createFxLabController = (
       canvas.removeEventListener("pointermove", handleCanvasPointerMove);
       canvas.removeEventListener("pointerup", handleCanvasPointerUp);
       canvas.removeEventListener("pointercancel", handleCanvasPointerUp);
+      canvas.removeEventListener("webglcontextlost", handleContextLost, false);
+      canvas.removeEventListener("webglcontextrestored", handleContextRestored, false);
       setPlacementMode("none");
       controls.dispose();
       fireFx.dispose();
@@ -1353,6 +1431,7 @@ export const createFxLabController = (
       unitFxLayer.dispose();
       unitsLayer.dispose();
       waterSystem.dispose();
+      oceanReferenceComparison.dispose();
       rainOverlayPass.dispose();
       scene.remove(seasonalSky.mesh);
       seasonalSky.dispose();
@@ -1361,10 +1440,14 @@ export const createFxLabController = (
       sprayTargetMarker.geometry.dispose();
       (sprayTargetMarker.material as THREE.Material).dispose();
       if (terrainMesh) {
+        treeLodController?.dispose();
+        treeLodController = null;
         scene.remove(terrainMesh);
         disposeTerrainMesh(terrainMesh);
         terrainMesh = null;
       }
+      treeImpostorAtlas?.dispose();
+      treeImpostorAtlas = null;
       terrainSurface = null;
       renderer.dispose();
     },
@@ -1405,6 +1488,18 @@ export const createFxLabController = (
       renderOnce();
     },
     getWeatherMode: () => weatherMode,
+    setTreeLodMode: (mode: TreeLodMode) => {
+      treeLodMode = mode;
+      treeLodController?.setMode(mode);
+      treeLodController?.update(camera, canvas.clientHeight || canvas.height || 1);
+      renderOnce();
+    },
+    getTreeLodMode: () => treeLodMode,
+    setOceanReferenceMode: (mode: MdXyzxReferenceMode) => {
+      oceanReferenceComparison.setMode(mode);
+      renderOnce();
+    },
+    getOceanReferenceMode: () => oceanReferenceComparison.getMode(),
     setPlacementMode,
     getPlacementMode: () => placementMode,
     clearPlacementOverrides,
@@ -1481,6 +1576,7 @@ export const createFxLabController = (
       unitFxLayer.setDebugControls(waterDebugControls);
       waterSystem.setOceanDebugControls(oceanWaterDebugControls);
       waterSystem.setDebugControls(terrainWaterDebugControls);
+      oceanReferenceComparison.setMode(0);
       renderOnce();
     },
     setTerrainStamp: (stamp: FxLabTerrainStamp | null) => {

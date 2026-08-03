@@ -789,6 +789,12 @@ export const createAppRuntime = (): AppRuntime => {
           `3D visibility: shadow lights ${formatInt(threePerf.activeShadowLights)} refresh ${formatInt(threePerf.shadowRefreshCount)} chunks ${formatInt(threePerf.terrainVisibleChunkCount)}/${formatInt(threePerf.terrainChunkCount)} culled inst ${formatInt(threePerf.terrainCulledInstanceCount)} road tri ${formatInt(threePerf.roadOverlayTriangles)}/${formatInt(threePerf.roadOverlaySourceTriangles)} post passes ${formatInt(threePerf.postPassCount)} vehicle uploads ${formatInt(threePerf.vehicleBufferUploads)}`
         );
         lines.push(
+          `3D batch est: tree ${formatInt(threePerf.terrainVisibleTreeCalls)}/${formatInt(threePerf.terrainVisibleTreeTriangles)} house ${formatInt(threePerf.terrainVisibleHouseCalls)}/${formatInt(threePerf.terrainVisibleHouseTriangles)} other ${formatInt(threePerf.terrainVisibleOtherCalls)}/${formatInt(threePerf.terrainVisibleOtherTriangles)}`
+        );
+        lines.push(
+          `3D trees: ${threePerf.treeLodMode} chunks m/i ${formatInt(threePerf.treeModelChunkCount)}/${formatInt(threePerf.treeImpostorChunkCount)} inst m/i ${formatInt(threePerf.treeModelInstanceCount)}/${formatInt(threePerf.treeImpostorInstanceCount)} transitions ${formatInt(threePerf.treeLodTransitionCount)} far draws ${formatInt(threePerf.treeImpostorDrawCount)} atlas ${threePerf.treeImpostorAtlasState}`
+        );
+        lines.push(
           `3D misc: fx ${formatMs(threePerf.fireFxMs)}  controls ${formatMs(threePerf.controlsMs)}  hud ${formatMs(threePerf.hudMs)}  ui ${formatMs(threePerf.uiRenderMs)}`
         );
         if (threePerf.fireFxDebug) {
@@ -833,7 +839,7 @@ export const createAppRuntime = (): AppRuntime => {
           `3D gap: avg ${formatMs(threePerf.rafGapMs)}  last ${formatMs(threePerf.rafGapLastMs)}  max ${formatMs(threePerf.rafGapMaxMs)}  hitches ${formatInt(threePerf.hitchCount)}`
         );
         lines.push(
-          `3D geo: calls ${formatInt(threePerf.sceneCalls)} tri ${formatInt(threePerf.sceneTriangles)} line ${formatInt(threePerf.sceneLines)} pt ${formatInt(threePerf.scenePoints)}`
+          `3D geo: color calls ${formatInt(threePerf.sceneCalls)} tri ${formatInt(threePerf.sceneTriangles)} shadow+ calls ${formatInt(threePerf.shadowGeometryCalls)} tri ${formatInt(threePerf.shadowGeometryTriangles)} submitted last ${formatInt(threePerf.submittedCallsLast)}/${formatInt(threePerf.submittedTrianglesLast)} line ${formatInt(threePerf.sceneLines)} pt ${formatInt(threePerf.scenePoints)}`
         );
         lines.push(
           `3D falls: inst ${formatInt(threePerf.waterfallCount)} cand ${formatInt(threePerf.waterfallCandidateCount)} cluster ${formatInt(threePerf.waterfallClusterCount)} emit ${formatInt(threePerf.waterfallEmittedCount)} wallQ ${formatInt(threePerf.waterfallWallQuadCount)} tri ${formatInt(threePerf.waterfallWallTriangleCount)}`
@@ -905,6 +911,8 @@ export const createAppRuntime = (): AppRuntime => {
         const threeHud = readRecentPerf("3d.hud", now)?.avg ?? 0;
         const sceneCalls = threePerf?.sceneCalls ?? 0;
         const sceneTriangles = threePerf?.sceneTriangles ?? 0;
+        const shadowGeometryCalls = threePerf?.shadowGeometryCalls ?? 0;
+        const shadowGeometryTriangles = threePerf?.shadowGeometryTriangles ?? 0;
         const contextLosses = threePerf?.contextLosses ?? 0;
         const contextRestores = threePerf?.contextRestores ?? 0;
         const mainGap = readRecentPerf("main.rafGap", now)?.avg ?? 0;
@@ -919,16 +927,18 @@ export const createAppRuntime = (): AppRuntime => {
             `nosim=${isThreeTestNoSimEnabled() ? 1 : 0} ` +
             `noterrain=${isThreeTestTerrainSyncDisabled() ? 1 : 0} ` +
             `trees=${isThreeTestTreeRenderingEnabled() ? 1 : 0} ` +
+            `treeLod=${threePerf?.treeLodMode ?? "models"} treeAtlas=${threePerf?.treeImpostorAtlasState ?? "unavailable"} ` +
             `detailStruct=${isThreeTestDetailedStructuresEnabled() ? 1 : 0} ` +
             `gap=${mainGap.toFixed(2)}ms hitch=${hitch.toFixed(2)}ms ` +
             `growthWork=${growthBlocks.toFixed(2)}/${growthTiles.toFixed(2)}/${growthChanged.toFixed(2)} ` +
             `sync(climate=${climateAvg.toFixed(2)} terrain=${terrainAvg.toFixed(2)} defer=${terrainDeferred.toFixed(2)}) ` +
             `3dFrame=${threeFrame.toFixed(2)}ms scene=${threeScene.toFixed(2)} post=${threePost.toFixed(2)} dof=${threeDof.toFixed(2)} sceneLast=${(threePerf?.sceneRenderLastMs ?? 0).toFixed(2)} ` +
             `gpuWorld=${(threePerf?.gpuWorldMs ?? 0).toFixed(2)} gpuShadowRefresh=${(threePerf?.gpuShadowRefreshMs ?? 0).toFixed(2)} gpuPost=${(threePerf?.gpuPostMs ?? 0).toFixed(2)} gpuUi=${(threePerf?.gpuUiMs ?? 0).toFixed(2)} shadowLights=${Math.round(threePerf?.activeShadowLights ?? 0)} shadowRefresh=${Math.round(threePerf?.shadowRefreshCount ?? 0)} terrainChunks=${Math.round(threePerf?.terrainVisibleChunkCount ?? 0)}/${Math.round(threePerf?.terrainChunkCount ?? 0)} terrainChunkCull=${Math.round(threePerf?.terrainCulledInstanceCount ?? 0)} roadOverlayTri=${Math.round(threePerf?.roadOverlayTriangles ?? 0)}/${Math.round(threePerf?.roadOverlaySourceTriangles ?? 0)} postPasses=${Math.round(threePerf?.postPassCount ?? 0)} vehicleUploads=${Math.round(threePerf?.vehicleBufferUploads ?? 0)} ` +
+            `treeChunks=${Math.round(threePerf?.treeModelChunkCount ?? 0)}/${Math.round(threePerf?.treeImpostorChunkCount ?? 0)} treeInst=${Math.round(threePerf?.treeModelInstanceCount ?? 0)}/${Math.round(threePerf?.treeImpostorInstanceCount ?? 0)} treeTransitions=${Math.round(threePerf?.treeLodTransitionCount ?? 0)} treeFarDraws=${Math.round(threePerf?.treeImpostorDrawCount ?? 0)} ` +
             `gap3d=${(threePerf?.rafGapLastMs ?? 0).toFixed(2)} terrainSetLast=${terrainSetLast.toFixed(2)} terrainSetMax=${terrainSetMax.toFixed(2)} terrainSetN=${Math.round(terrainSetCount)} ` +
             `terrainSample=${terrainSampleBuild.toFixed(2)} terrainSkip=${terrainSkipped.toFixed(2)}(${Math.round(threeTestTerrainSyncSkippedCount)}) terrainBatch=${terrainVisualBatched.toFixed(2)}(${Math.round(threeTestTerrainVisualBatchedCount)}) terrainReuseFull=${Math.round(threePerf?.terrainSetFastReuseCount ?? 0)}/${Math.round(threePerf?.terrainSetFullRebuildCount ?? 0)} terrainReason=${threePerf?.terrainSetFullRebuildReason ?? "none"} terrainIntent=${threePerf?.terrainSetIntent ?? "none"} terrainPath=${threePerf?.terrainSetPath ?? "none"} terrainHot=${threePerf?.terrainSetDominantStep ?? "none"} terrainMaxHot=${threePerf?.terrainSetMaxDominantStep ?? "none"} terrainGeom=${threePerf?.terrainGeometrySignature ?? "none"}${threePerf?.terrainGeometrySignatureChanged ? "*" : ""} terrainPrep=${(threePerf?.terrainSetPrepareLastMs ?? 0).toFixed(2)} terrainStaticPrep=${(threePerf?.terrainSetStaticPrepareLastMs ?? 0).toFixed(2)} terrainVisualPrep=${(threePerf?.terrainSetVisualPrepareLastMs ?? 0).toFixed(2)} terrainPrepSkip=${Math.round(threePerf?.terrainSetPrepareSkippedCount ?? 0)} terrainReuse=${(threePerf?.terrainSetReuseCheckLastMs ?? 0).toFixed(2)} terrainColor=${(threePerf?.terrainSetColorLastMs ?? 0).toFixed(2)} terrainTex=${(threePerf?.terrainSetTextureLastMs ?? 0).toFixed(2)} terrainSwap=${(threePerf?.terrainSetTextureSwapLastMs ?? 0).toFixed(2)} terrainRoadSig=${(threePerf?.terrainSetRoadSignatureLastMs ?? 0).toFixed(2)} terrainRoad=${(threePerf?.terrainRoadRefreshLastMs ?? 0).toFixed(2)} terrainStruct=${(threePerf?.terrainSetStructureLastMs ?? 0).toFixed(2)} terrainEditNoop=${Math.round(state.settlementRuntimeTerrainEditAttempts)} ` +
             `fx=${threeFx.toFixed(2)} hud=${threeHud.toFixed(2)} ctxLoss=${Math.round(contextLosses)} ctxRestore=${Math.round(contextRestores)} ` +
-            `calls=${Math.round(sceneCalls)} tri=${Math.round(sceneTriangles)}`
+            `colorCalls=${Math.round(sceneCalls)} colorTri=${Math.round(sceneTriangles)} shadowGeo=${Math.round(shadowGeometryCalls)}/${Math.round(shadowGeometryTriangles)} submittedLast=${Math.round(threePerf?.submittedCallsLast ?? 0)}/${Math.round(threePerf?.submittedTrianglesLast ?? 0)}`
         );
       }
       lastPerfConsoleLog = now;

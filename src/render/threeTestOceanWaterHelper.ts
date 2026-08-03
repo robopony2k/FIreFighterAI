@@ -14,6 +14,7 @@ import {
   oceanSurfaceContextsEqual,
   type OceanSurfaceContext
 } from "./water/ocean/oceanSurfaceContext.js";
+import { buildDistantOceanBackdropLayout } from "./water/ocean/distantOceanBackdropGeometry.js";
 
 const disposeMaterial = (material: THREE.Material | THREE.Material[]): void => {
   if (Array.isArray(material)) {
@@ -61,11 +62,6 @@ type OceanBackdropEntry = {
   uniforms: OceanUniforms;
   material: THREE.ShaderMaterial;
 };
-
-const DISTANT_OCEAN_EXTENSION_SCALE = 10.5;
-const DISTANT_OCEAN_EXTENSION_MIN = 1400;
-const DISTANT_OCEAN_EDGE_OVERLAP_STEPS = 1;
-const DISTANT_OCEAN_SEGMENT_WORLD_SIZE = 220;
 
 const createSolidTexture = (r: number, g: number, b: number, a = 255): THREE.DataTexture => {
   const texture = new THREE.DataTexture(new Uint8Array([r, g, b, a]), 1, 1, THREE.RGBAFormat);
@@ -181,6 +177,7 @@ export class ThreeTestOceanWaterHelper {
         this.debugControls.enableShoreWaveModulation ? 1 : 0,
         0
       );
+      uniforms.u_oceanRaymarchDebugView.value = this.debugControls.raymarchDebugView;
     });
   }
 
@@ -309,7 +306,10 @@ export class ThreeTestOceanWaterHelper {
           this.surfaceContext.shallowClarity01,
           this.surfaceContext.rainIntensity01
         )
-      }
+      },
+      u_backdropMix: { value: 0 },
+      u_waterLevel: { value: 0 },
+      u_oceanRaymarchDebugView: { value: this.debugControls.raymarchDebugView }
     };
   }
 
@@ -474,39 +474,20 @@ export class ThreeTestOceanWaterHelper {
     ocean: OceanWaterData,
     qualityUniform: number
   ): void {
-    const span = Math.max(ocean.width, ocean.depth);
-    const extension = Math.max(DISTANT_OCEAN_EXTENSION_MIN, span * DISTANT_OCEAN_EXTENSION_SCALE);
     const oceanStepX = ocean.width / Math.max(1, ocean.sampleCols - 1);
     const oceanStepZ = ocean.depth / Math.max(1, ocean.sampleRows - 1);
-    const extensionSegmentsX = Math.max(1, Math.ceil(extension / Math.max(1e-3, oceanStepX)));
-    const extensionSegmentsZ = Math.max(1, Math.ceil(extension / Math.max(1e-3, oceanStepZ)));
-    const alignedExtensionX = extensionSegmentsX * oceanStepX;
-    const alignedExtensionZ = extensionSegmentsZ * oceanStepZ;
-    const overlapSteps = DISTANT_OCEAN_EDGE_OVERLAP_STEPS;
-    const overlapX = oceanStepX * overlapSteps;
-    const overlapZ = oceanStepZ * overlapSteps;
     const mainWorldStep = new THREE.Vector2(Math.max(0.1, oceanStepX), Math.max(0.1, oceanStepZ));
     const mainUvStep = new THREE.Vector2(
       1 / Math.max(1, ocean.sampleCols - 1),
       1 / Math.max(1, ocean.sampleRows - 1)
     );
-    const halfWidth = ocean.width * 0.5;
-    const halfDepth = ocean.depth * 0.5;
-    const fullWidth = ocean.width + alignedExtensionX * 2 + overlapX * 2;
-    const stripDepth = alignedExtensionZ + overlapZ;
-    const stripWidth = alignedExtensionX + overlapX;
-    const createBackdropStrip = (
-      width: number,
-      depth: number,
-      x: number,
-      z: number,
-      segmentsX: number,
-      segmentsY: number,
-      edge: "north" | "south" | "west" | "east"
-    ): void => {
-      const geometry = new THREE.PlaneGeometry(width, depth, segmentsX, segmentsY);
+    const layout = buildDistantOceanBackdropLayout(ocean);
+    layout.strips.forEach((strip) => {
+      const geometry = new THREE.PlaneGeometry(strip.width, strip.depth, strip.segmentsX, strip.segmentsY);
       geometry.rotateX(-Math.PI / 2);
-      this.applyBackdropEdgeProfile(geometry, ocean, edge, width, depth);
+      this.applyBackdropEdgeProfile(geometry, ocean, strip.edge, strip.width, strip.depth);
+      geometry.computeBoundingBox();
+      geometry.computeBoundingSphere();
       const uniforms = this.createOceanUniforms(
         this.backdropMask,
         this.backdropSupportMap,
@@ -514,67 +495,33 @@ export class ThreeTestOceanWaterHelper {
         this.backdropInlandWaterMap,
         this.backdropShoreSdf,
         this.backdropShoreTransitionMap,
-        width,
-        depth,
-        segmentsX + 1,
-        segmentsY + 1,
+        strip.width,
+        strip.depth,
+        strip.segmentsX + 1,
+        strip.segmentsY + 1,
         qualityUniform,
         mainWorldStep,
         mainUvStep
       );
+      uniforms.u_backdropMix.value = 1;
+      uniforms.u_waterLevel.value = baseMesh.position.y + ocean.level;
       const material = createOceanSurfaceMaterial(uniforms);
       material.polygonOffset = true;
       material.polygonOffsetFactor = 1;
       material.polygonOffsetUnits = 1;
       const mesh = new THREE.Mesh(geometry, material);
+      mesh.name = `distant-ocean-${strip.edge}`;
       mesh.position.copy(baseMesh.position);
-      mesh.position.x += x;
+      mesh.position.x += strip.x;
       mesh.position.y += ocean.level;
-      mesh.position.z += z;
+      mesh.position.z += strip.z;
       mesh.renderOrder = 2;
       mesh.castShadow = false;
       mesh.receiveShadow = false;
-      mesh.frustumCulled = false;
+      mesh.frustumCulled = true;
       this.scene.add(mesh);
       this.backdropEntries.push({ mesh, uniforms, material });
-    };
-
-    createBackdropStrip(
-      fullWidth,
-      stripDepth,
-      0,
-      -(halfDepth + (alignedExtensionZ - overlapZ) * 0.5),
-      Math.max(1, ocean.sampleCols - 1 + extensionSegmentsX * 2 + overlapSteps * 2),
-      Math.max(2, extensionSegmentsZ + overlapSteps),
-      "north"
-    );
-    createBackdropStrip(
-      fullWidth,
-      stripDepth,
-      0,
-      halfDepth + (alignedExtensionZ - overlapZ) * 0.5,
-      Math.max(1, ocean.sampleCols - 1 + extensionSegmentsX * 2 + overlapSteps * 2),
-      Math.max(2, extensionSegmentsZ + overlapSteps),
-      "south"
-    );
-    createBackdropStrip(
-      stripWidth,
-      ocean.depth + overlapZ * 2,
-      halfWidth + (alignedExtensionX - overlapX) * 0.5,
-      0,
-      Math.max(2, extensionSegmentsX + overlapSteps),
-      Math.max(1, ocean.sampleRows - 1 + overlapSteps * 2),
-      "east"
-    );
-    createBackdropStrip(
-      stripWidth,
-      ocean.depth + overlapZ * 2,
-      -(halfWidth + (alignedExtensionX - overlapX) * 0.5),
-      0,
-      Math.max(2, extensionSegmentsX + overlapSteps),
-      Math.max(1, ocean.sampleRows - 1 + overlapSteps * 2),
-      "west"
-    );
+    });
   }
 
   public clear(): void {
@@ -661,6 +608,7 @@ export class ThreeTestOceanWaterHelper {
       ocean.sampleRows,
       qualityUniform
     );
+    this.uniforms.u_waterLevel.value = baseMesh.position.y + ocean.level;
 
     const material = createOceanSurfaceMaterial(this.uniforms);
     this.mesh = new THREE.Mesh(geometry, material);

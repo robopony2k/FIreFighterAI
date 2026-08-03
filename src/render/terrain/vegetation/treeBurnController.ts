@@ -1,6 +1,11 @@
 import * as THREE from "three";
 import type { WorldState } from "../../../core/state.js";
 import { TreeType } from "../../../core/types.js";
+import type {
+  TreeBurnMeshRole,
+  TreeBurnMeshState,
+  TreeSeasonVisualConfig
+} from "../../../systems/terrain/rendering/vegetation/treeRenderTypes.js";
 
 const TREE_BURN_UPDATE_INTERVAL_MS = 120;
 export const TREE_BURN_FUEL_EPS = 0.02;
@@ -24,41 +29,11 @@ export const TREE_BURN_MIXED_PIVOT_HEIGHT_FACTOR = 0.46;
 export const TREE_BURN_TRUNK_PIVOT_HEIGHT_FACTOR = 0.06;
 export const TREE_LEAF_DROP_BIAS_MAX = 0.22;
 
-export type TreeSeasonVisualConfig = {
-  enabled: boolean;
-  uniforms: {
-    uRisk01: { value: number };
-    uSeasonT01: { value: number };
-    uWorldSeed: { value: number };
-  };
-  phaseShiftMax: number;
-  rateJitter: number;
-  autumnHueJitter: number;
-};
-
-export type TreeBurnMeshRole = "leaf" | "trunk" | "mixed";
-
-export type TreeBurnMeshState = {
-  mesh: THREE.InstancedMesh;
-  role: TreeBurnMeshRole;
-  baseMatrix: THREE.Matrix4;
-  tileIndices: Uint32Array;
-  tileX: Uint16Array;
-  tileY: Uint16Array;
-  baseX: Float32Array;
-  baseY: Float32Array;
-  baseZ: Float32Array;
-  baseRotation: Float32Array;
-  baseScale: Float32Array;
-  scalePivotY: Float32Array;
-  fuelReference: Float32Array;
-  burnProgress: Float32Array;
-  burnQ: Uint8Array;
-  visibilityQ: Uint8Array;
-  cropTopAttr: THREE.InstancedBufferAttribute | null;
-  cropMinY: number;
-  cropMaxY: number;
-};
+export type {
+  TreeBurnMeshRole,
+  TreeBurnMeshState,
+  TreeSeasonVisualConfig
+} from "../../../systems/terrain/rendering/vegetation/treeRenderTypes.js";
 
 export type TreeFlameProfile = {
   x: number;

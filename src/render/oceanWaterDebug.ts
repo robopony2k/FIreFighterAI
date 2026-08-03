@@ -21,6 +21,7 @@ export type OceanWaterDebugControls = {
   waveAmpScale: number;
   waveLengthScale: number;
   shoreFoamScale: number;
+  raymarchDebugView: number;
 };
 
 export const DEFAULT_OCEAN_WATER_DEBUG_CONTROLS: OceanWaterDebugControls = {
@@ -43,7 +44,8 @@ export const DEFAULT_OCEAN_WATER_DEBUG_CONTROLS: OceanWaterDebugControls = {
   shoreWaveLengthMinScale: 0.42,
   waveAmpScale: 0.88,
   waveLengthScale: 0.9,
-  shoreFoamScale: 1.42
+  shoreFoamScale: 1.42,
+  raymarchDebugView: 0
 };
 
 export const normalizeOceanWaterDebugControls = (
@@ -127,6 +129,13 @@ export const normalizeOceanWaterDebugControls = (
       controls?.shoreFoamScale ?? DEFAULT_OCEAN_WATER_DEBUG_CONTROLS.shoreFoamScale,
       0,
       2.5
+    ),
+    raymarchDebugView: Math.round(
+      clamp(
+        controls?.raymarchDebugView ?? DEFAULT_OCEAN_WATER_DEBUG_CONTROLS.raymarchDebugView,
+        0,
+        5
+      )
     )
   };
 };

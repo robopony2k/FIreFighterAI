@@ -43,6 +43,7 @@ storage.clear();
   expect(settings.pauseOnFireEvent, "pauseOnFireEvent should default to true.");
   expect(settings.pauseOnAnnualReportEvent, "pauseOnAnnualReportEvent should default to true.");
   expect(settings.pauseOnRainEvent, "pauseOnRainEvent should default to true.");
+  expect(!settings.treeimpostors, "treeimpostors should default to disabled while visual/performance acceptance is unresolved.");
 }
 
 storage.clear();
@@ -65,13 +66,14 @@ storage.set(
   expect(settings.pauseOnFireEvent, "Invalid persisted pauseOnFireEvent should sanitize to the default true value.");
   expect(!settings.pauseOnAnnualReportEvent, "Persisted false pauseOnAnnualReportEvent should be preserved.");
   expect(!settings.pauseOnRainEvent, "Persisted string '0' pauseOnRainEvent should sanitize to false.");
+  expect(!settings.treeimpostors, "Older saved settings should safely inherit disabled experimental tree impostors.");
 }
 
 storage.clear();
 {
   const mod = await loadRuntimeSettingsModule(
     "query-overrides",
-    "?pauseOnFireEvent=0&pauseOnAnnualReportEvent=0&pauseOnRainEvent=0"
+    "?pauseOnFireEvent=0&pauseOnAnnualReportEvent=0&pauseOnRainEvent=0&treeimpostors=0"
   );
   const settings = mod.getRuntimeSettings();
   const persisted = JSON.parse(storage.get(STORAGE_KEY) ?? "{}");
@@ -83,9 +85,11 @@ storage.clear();
   expect(!settings.pauseOnFireEvent, "Query pauseOnFireEvent=0 should override to false.");
   expect(!settings.pauseOnAnnualReportEvent, "Query pauseOnAnnualReportEvent=0 should override to false.");
   expect(!settings.pauseOnRainEvent, "Query pauseOnRainEvent=0 should override to false.");
+  expect(!settings.treeimpostors, "Query treeimpostors=0 should disable the far-tree tier.");
   expect(persisted.pauseOnFireEvent === false, "Query pauseOnFireEvent override should persist.");
   expect(persisted.pauseOnAnnualReportEvent === false, "Query pauseOnAnnualReportEvent override should persist.");
   expect(persisted.pauseOnRainEvent === false, "Query pauseOnRainEvent override should persist.");
+  expect(persisted.treeimpostors === false, "Query treeimpostors override should persist.");
 
   mod.setRuntimeSetting("pauseOnRainEvent", "true");
   mod.setRuntimeSetting("pauseOnFireEvent", "invalid");

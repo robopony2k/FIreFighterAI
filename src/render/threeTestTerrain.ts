@@ -117,6 +117,13 @@ import {
   finalizeInstancedMeshBounds,
   partitionTerrainInstances
 } from "../systems/terrain/rendering/terrainRenderChunks.js";
+import { buildTreeLod } from "../systems/terrain/rendering/vegetation/treeLodController.js";
+import type {
+  TreeImpostorAtlas,
+  TreeImpostorInstance,
+  TreeLodController,
+  TreeLodMode
+} from "../systems/terrain/rendering/vegetation/treeRenderTypes.js";
 import {
   applyTreeSeasonShader,
   applyTrunkTopCropShader,
@@ -351,7 +358,7 @@ FOREST_TINT_BY_ID[TREE_TYPE_IDS[TreeType.Scrub]] = FOREST_CANOPY_TONES[TreeType.
 
 let threeTestLoggedTotal = -1;
 
-type TreeInstance = {
+type TreeInstance = TreeImpostorInstance & {
   x: number;
   y: number;
   z: number;
@@ -361,7 +368,6 @@ type TreeInstance = {
   variantIndex: number;
   tileIndex: number;
   tileX: number;
-  tileY: number;
 };
 
 type ScrubPlaceholderInstance = {
@@ -3184,12 +3190,15 @@ export const buildTerrainMesh = (
   treeAssets: TreeAssets | null,
   houseAssets: HouseAssets | null,
   firestationAsset: FirestationAsset | null,
-  seasonVisualConfig?: TreeSeasonVisualConfig
+  seasonVisualConfig?: TreeSeasonVisualConfig,
+  treeImpostorAtlas?: TreeImpostorAtlas | null,
+  treeLodMode: TreeLodMode = "auto"
 ): {
   mesh: THREE.Mesh;
   size: { width: number; depth: number };
   water?: TerrainWaterData;
   treeBurn?: TreeBurnController;
+  treeLod?: TreeLodController;
 } => {
   const sample = surface.sample;
   const debugRenderOptions = sample.debugRenderOptions;
@@ -3494,7 +3503,8 @@ export const buildTerrainMesh = (
             variantIndex,
             tileIndex: idx,
             tileX,
-            tileY
+            tileY,
+            sourceHeight
           });
           placedTreeOnTile = true;
           const profile = treeTileProfilesRaw.get(idx);
@@ -3553,7 +3563,8 @@ export const buildTerrainMesh = (
               variantIndex,
               tileIndex: idx,
               tileX,
-              tileY
+              tileY,
+              sourceHeight
             });
             const crownHeight = targetHeight * 0.64;
             const crownRadius = targetHeight * 0.2;
@@ -3688,8 +3699,16 @@ export const buildTerrainMesh = (
   mesh.receiveShadow = true;
   refreshTerrainRoadVisuals(mesh, sample, surface);
   const treeBurnMeshStates: TreeBurnMeshState[] = [];
+  const fullTreeMeshesByChunk = new Map<string, THREE.InstancedMesh[]>();
+  let activeTreeGroup: THREE.Group | null = null;
+  const registerFullTreeMesh = (key: string, treeMesh: THREE.InstancedMesh): void => {
+    const meshes = fullTreeMeshesByChunk.get(key);
+    if (meshes) meshes.push(treeMesh);
+    else fullTreeMeshesByChunk.set(key, [treeMesh]);
+  };
   if (hasTreeAssets && treeInstances.length > 0) {
     const treeGroup = new THREE.Group();
+    activeTreeGroup = treeGroup;
     const whiteColor = new THREE.Color(1, 1, 1);
     const dummy = new THREE.Object3D();
     const tempMatrix = new THREE.Matrix4();
@@ -3858,6 +3877,7 @@ export const buildTerrainMesh = (
             cropMaxY
           });
           finalizeInstancedMeshBounds(instanced);
+          registerFullTreeMesh(key, instanced);
           treeGroup.add(instanced);
           });
         });
@@ -3869,6 +3889,7 @@ export const buildTerrainMesh = (
     mesh.add(treeGroup);
   } else if (treeInstances.length > 0) {
     const treeGroup = new THREE.Group();
+    activeTreeGroup = treeGroup;
     const trunkGeometry = new THREE.CylinderGeometry(0.1, 0.12, 1, 6);
     const canopyGeometry = new THREE.SphereGeometry(0.35, 9, 7);
     const trunkMaterial = new THREE.MeshStandardMaterial({ color: 0x5f4330, roughness: 0.92, metalness: 0.03 });
@@ -3921,9 +3942,26 @@ export const buildTerrainMesh = (
       }
       finalizeInstancedMeshBounds(trunkMesh);
       finalizeInstancedMeshBounds(canopyMesh);
+      registerFullTreeMesh(key, trunkMesh);
+      registerFullTreeMesh(key, canopyMesh);
       treeGroup.add(trunkMesh, canopyMesh);
     });
     mesh.add(treeGroup);
+  }
+  const treeLodBuild =
+    hasTreeAssets && activeTreeGroup && treeImpostorAtlas
+      ? buildTreeLod({
+          root: activeTreeGroup,
+          instances: treeInstances,
+          fullMeshesByChunk: fullTreeMeshesByChunk,
+          atlas: treeImpostorAtlas,
+          seasonVisual: seasonVisualConfig,
+          tileFuel: sample.tileFuel,
+          initialMode: treeLodMode
+        })
+      : null;
+  if (treeLodBuild) {
+    treeBurnMeshStates.push(...treeLodBuild.burnStates);
   }
   if (scrubPlaceholderInstances.length > 0) {
     const shrubGeometry = new THREE.IcosahedronGeometry(0.24, 0);
@@ -4656,5 +4694,5 @@ export const buildTerrainMesh = (
     treeBurnMeshStates.length > 0
       ? createTreeBurnController(treeBurnMeshStates, TILE_TYPE_IDS.ash, treeTileProfiles)
       : undefined;
-  return { mesh, size: { width, depth }, water, treeBurn };
+  return { mesh, size: { width, depth }, water, treeBurn, treeLod: treeLodBuild?.controller };
 };

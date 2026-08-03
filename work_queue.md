@@ -1,3 +1,51 @@
+TSK-0173: Rebase distant ocean rendering on MdXyzX raymarched hits
+
+Type: bug
+
+Why: The temporary flat-carrier normal spectrum produced long grooves, rectangular highlights, and overview lattice patterns because it never reconstructed the displaced per-pixel water surface shown by the intended MdXyzX reference.
+
+Done when:
+- [x] FX Lab provides isolated current/reference/split views plus height, hit-distance, raymarch-work, normal, and Fresnel diagnostics using the gameplay camera.
+- [x] The shared MdXyzX core retains radial phase, derivative-driven position drag, sin/cos directions, declining weights, and 1.18/1.07 frequency/time progression.
+- [x] Open and distant ocean fragments reconstruct a bounded height-field hit and normal while the distant carrier remains exactly 1,456 triangles.
+- [x] Existing shoreline displacement, breakers, foam, masks, shallow-water colour, and terrain interaction remain authoritative through a shoreline-derived transition.
+- [x] Existing water quality and pixel footprint bound raymarch/normal iterations and calm distant normals; FX Lab exposes production hit, work, normal, and coastal-blend views.
+- [x] Strategic LOD filters sub-pixel frequencies separately from bounded normal calming and blends to a lower-iteration broad-scale slope evaluation from the same MdXyzX function.
+- [x] TypeScript, renderer, FX Lab, coastline, shoreline-authority, and terrain-water regressions pass.
+- [ ] The production overview has no stable diamond, crossed-band, radial, moiré, or long-groove pattern during slow camera movement.
+- [ ] The production shoreline has no rectangular seam or broken hand-off, and the same-camera GPU-world median is recorded after 120 warm-up frames.
+
+Touchpoints: `src/render/water/ocean/`, `src/render/threeTestOceanWaterHelper.ts`, `src/render/oceanWaterDebug.ts`, `src/render/fxLab/`, `scripts/render-performance-regression.mjs`, `scripts/fx-lab-showcase-regression.mjs`, `docs/`
+
+Constraints: keep the carrier at 1,456 triangles; preserve coastal rendering and authoritative terrain/hydrology; add no simulation, save, share-code, texture-sampler, or dense-geometry changes; live motion and measured GPU acceptance require a supported Browser session or attached evidence.
+
+Notes: The August 3 FX Lab split capture approved reference mode 2: its short irregular crests and broken highlights were materially closer to the intended ocean, while modes 5 and 6 confirmed bounded raymarch concentration and local normals. Production integration now shares that core instead of the rejected 12-band approximation. A subsequent campaign capture showed the initial distance normal fade reached full vertical at roughly 82.6 world units and erased the valid low-frequency field at strategic zoom; filtering is now separated from bounded flattening, with a 0.22-domain macro slope tier taking over as footprints grow. Final campaign motion, shoreline, and GPU evidence remain open.
+
+Status: in-progress
+
+TSK-0172: Add a far-tree impostor rendering tier
+
+Type: refactor
+
+Why: The supported 256x256 campaign view submitted every distant GLB tree mesh and shadow caster, making world rendering and shadow refreshes the dominant GPU cost at overview distance.
+
+Done when:
+- [x] A deterministic 1024x1024 runtime color and role-mask atlas captures every loaded tree variant from four fixed azimuths and falls back to full models if capture fails.
+- [x] Occupied 64-tile vegetation chunks switch exclusively between existing GLB batches and one merged camera-facing impostor draw using 18/24 CSS-pixel hysteresis.
+- [x] Impostors preserve seasonal and burn state, use fog/depth/tone mapping/alpha coverage, cast no shadows, and retain existing fire anchors and near/middle tree behavior.
+- [x] Campaign and FX Lab share the path; FX Lab exposes Auto, Force Models, and Force Impostors, while persisted `treeimpostors` enables A/B fallback.
+- [x] Diagnostics and focused regressions cover atlas layout, LOD transitions, visibility ownership, seasonal/burn synchronization, fallback, and resource lifetime.
+- [ ] The same-camera 256x256 capture reaches the triangle, draw-call, and GPU-world acceptance targets after warmup.
+- [ ] Forced-model and automatic comparisons retain acceptable silhouettes, grounding, season, and burn appearance.
+
+Touchpoints: `src/systems/terrain/rendering/vegetation/`, `src/render/threeTestTerrain.ts`, `src/render/threeTest.ts`, `src/render/fxLab/`, `src/persistence/runtimeSettings.ts`, `scripts/render-performance-regression.mjs`, `docs/`
+
+Constraints: preserve authoritative simulation vegetation, near/middle GLB geometry and shadows, current fire-FX anchors, save-world/share-code formats, and UI/controller-to-terrain dependency direction; live visual and measured GPU acceptance requires a supported Browser session or attached captures.
+
+Notes: This first tier deliberately excludes cross-fading, multiple elevation bands, normal/depth impostor maps, and middle-distance mesh LOD. The August 3 live capture rejected the first result: triangles fell only about 8%, GPU-world time about 7%, and the impostors looked worse. It also exposed behind-camera chunks incorrectly returning to full shadow-casting models; the controller now keeps off-screen chunks on the shadowless representation, pending a fresh capture and visual review.
+
+Status: in-progress
+
 TSK-0171: Replace seasonal cloud bands with morphology-driven volumes
 
 Type: polish

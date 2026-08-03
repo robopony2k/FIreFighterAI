@@ -41,6 +41,13 @@ import {
   finalizeInstancedMeshBounds,
   partitionTerrainInstances
 } from "../systems/terrain/rendering/terrainRenderChunks.js";
+import { buildTreeImpostorAtlas } from "../systems/terrain/rendering/vegetation/treeImpostorAtlas.js";
+import { isSharedTreeImpostorTexture } from "../systems/terrain/rendering/vegetation/treeRenderResourceDisposal.js";
+import type {
+  TreeImpostorAtlas,
+  TreeLodController,
+  TreeLodStats
+} from "../systems/terrain/rendering/vegetation/treeRenderTypes.js";
 import { createVehicleModelLayer, type VehicleModelInstance } from "./vehicleModelLayer.js";
 import type { InputState } from "../core/inputState.js";
 import { indexFor } from "../core/grid.js";
@@ -205,6 +212,20 @@ export type ThreeTestPerfSnapshot = {
   terrainChunkCount: number;
   terrainVisibleChunkCount: number;
   terrainCulledInstanceCount: number;
+  terrainVisibleTreeCalls: number;
+  terrainVisibleTreeTriangles: number;
+  terrainVisibleHouseCalls: number;
+  terrainVisibleHouseTriangles: number;
+  terrainVisibleOtherCalls: number;
+  terrainVisibleOtherTriangles: number;
+  treeLodMode: string;
+  treeModelChunkCount: number;
+  treeImpostorChunkCount: number;
+  treeModelInstanceCount: number;
+  treeImpostorInstanceCount: number;
+  treeLodTransitionCount: number;
+  treeImpostorDrawCount: number;
+  treeImpostorAtlasState: string;
   roadOverlayTriangles: number;
   roadOverlaySourceTriangles: number;
   postPassCount: number;
@@ -264,6 +285,10 @@ export type ThreeTestPerfSnapshot = {
   sceneTriangles: number;
   sceneLines: number;
   scenePoints: number;
+  shadowGeometryCalls: number;
+  shadowGeometryTriangles: number;
+  submittedCallsLast: number;
+  submittedTrianglesLast: number;
   totalCalls: number;
   memoryGeometries: number;
   memoryTextures: number;
@@ -604,6 +629,7 @@ export const createThreeTest = (
   const THREE_TEST_RIVER_VIEW_LOCK = runtimeSettings.rivercamlock;
   const THREE_TEST_SHADOWS_ENABLED = runtimeSettings.shadows;
   const THREE_TEST_DETAILED_STRUCTURES_ENABLED = runtimeSettings.detailedstructures;
+  const THREE_TEST_TREE_IMPOSTORS_ENABLED = runtimeSettings.treeimpostors;
   const THREE_TEST_FIRE_WALL_BLEND = Math.max(0, Math.min(1, runtimeSettings.firewall));
   const THREE_TEST_FIRE_HERO_VOL = Math.max(0, Math.min(1, runtimeSettings.firevol));
   const THREE_TEST_FIRE_BUDGET_SCALE = Math.max(0.4, Math.min(1.25, runtimeSettings.fxbudget));
@@ -6031,6 +6057,7 @@ export const createThreeTest = (
   canvas.addEventListener("contextmenu", handleCanvasContextMenu);
   canvas.addEventListener("mousemove", handleCanvasMouseMove);
   canvas.addEventListener("mouseleave", handleCanvasMouseLeave);
+  let restoreTreeImpostorResources = (): void => {};
   const handleContextLost = (event: Event): void => {
     event.preventDefault();
     contextLosses += 1;
@@ -6039,6 +6066,7 @@ export const createThreeTest = (
   const handleContextRestored = (): void => {
     contextRestores += 1;
     console.warn("[threeTest] WebGL context restored.");
+    restoreTreeImpostorResources();
   };
   canvas.addEventListener("webglcontextlost", handleContextLost as EventListener, false);
   canvas.addEventListener("webglcontextrestored", handleContextRestored as EventListener, false);
@@ -6111,6 +6139,8 @@ export const createThreeTest = (
   };
   let applyEnvironmentPalette = (_force = false): void => {};
   let treeAssets: TreeAssets | null = getTreeAssetsCache();
+  let treeImpostorAtlas: TreeImpostorAtlas | null = null;
+  let treeImpostorAtlasState = THREE_TEST_TREE_IMPOSTORS_ENABLED ? "pending" : "disabled";
   let houseAssets: HouseAssets | null = getHouseAssetsCache();
   let firestationAsset: FirestationAsset | null = getFirestationAssetCache();
   let lastSample: TerrainSample | null = null;
@@ -6122,6 +6152,7 @@ export const createThreeTest = (
   let lastStructureRevision = -1;
   let lastStructureOverlayKey = "";
   let treeBurnController: TreeBurnController | null = null;
+  let treeLodController: TreeLodController | null = null;
   let cameraLockedToTerrain = false;
   const applyTerrainCameraConstraints = (): boolean => {
     if (!lastTerrainSurface) {
@@ -6553,6 +6584,20 @@ export const createThreeTest = (
     terrainChunkCount: 0,
     terrainVisibleChunkCount: 0,
     terrainCulledInstanceCount: 0,
+    terrainVisibleTreeCalls: 0,
+    terrainVisibleTreeTriangles: 0,
+    terrainVisibleHouseCalls: 0,
+    terrainVisibleHouseTriangles: 0,
+    terrainVisibleOtherCalls: 0,
+    terrainVisibleOtherTriangles: 0,
+    treeLodMode: THREE_TEST_TREE_IMPOSTORS_ENABLED ? "auto" : "models",
+    treeModelChunkCount: 0,
+    treeImpostorChunkCount: 0,
+    treeModelInstanceCount: 0,
+    treeImpostorInstanceCount: 0,
+    treeLodTransitionCount: 0,
+    treeImpostorDrawCount: 0,
+    treeImpostorAtlasState,
     roadOverlayTriangles: 0,
     roadOverlaySourceTriangles: 0,
     postPassCount: 0,
@@ -6612,6 +6657,10 @@ export const createThreeTest = (
     sceneTriangles: 0,
     sceneLines: 0,
     scenePoints: 0,
+    shadowGeometryCalls: 0,
+    shadowGeometryTriangles: 0,
+    submittedCallsLast: 0,
+    submittedTrianglesLast: 0,
     totalCalls: 0,
     memoryGeometries: 0,
     memoryTextures: 0,
@@ -7679,6 +7728,10 @@ export const createThreeTest = (
     lastTerrainWater = null;
     lastTerrainSurface = null;
     lastTerrainSize = null;
+    treeLodController?.dispose();
+    treeLodController = null;
+    treeImpostorAtlas?.dispose();
+    treeImpostorAtlas = null;
     disposeSatelliteMinimapTarget();
     disposeStructureOverlay();
     clearUnitCommandVisuals();
@@ -7873,15 +7926,39 @@ export const createThreeTest = (
     disableCinematicGrade();
   };
 
+  let lastColorPassCalls = 0;
+  let lastColorPassTriangles = 0;
   const renderWorldScene = (): void => {
-    const gpuLabel = shadowRefreshPendingForFrame ? "shadowRefresh" : "world";
+    const includesShadowRefresh = shadowRefreshPendingForFrame;
+    const gpuLabel = includesShadowRefresh ? "shadowRefresh" : "world";
     const gpuTimerActive = gpuTimer.begin(gpuLabel);
     renderer.clear();
     renderer.render(scene, camera);
-    threePerf.sceneCalls = smoothPerf(threePerf.sceneCalls, renderer.info.render.calls);
-    threePerf.sceneTriangles = smoothPerf(threePerf.sceneTriangles, renderer.info.render.triangles);
-    threePerf.sceneLines = smoothPerf(threePerf.sceneLines, renderer.info.render.lines);
-    threePerf.scenePoints = smoothPerf(threePerf.scenePoints, renderer.info.render.points);
+    const submittedCalls = renderer.info.render.calls;
+    const submittedTriangles = renderer.info.render.triangles;
+    threePerf.submittedCallsLast = submittedCalls;
+    threePerf.submittedTrianglesLast = submittedTriangles;
+    if (includesShadowRefresh) {
+      if (lastColorPassCalls > 0) {
+        threePerf.shadowGeometryCalls = smoothPerf(
+          threePerf.shadowGeometryCalls,
+          Math.max(0, submittedCalls - lastColorPassCalls)
+        );
+      }
+      if (lastColorPassTriangles > 0) {
+        threePerf.shadowGeometryTriangles = smoothPerf(
+          threePerf.shadowGeometryTriangles,
+          Math.max(0, submittedTriangles - lastColorPassTriangles)
+        );
+      }
+    } else {
+      lastColorPassCalls = submittedCalls;
+      lastColorPassTriangles = submittedTriangles;
+      threePerf.sceneCalls = smoothPerf(threePerf.sceneCalls, submittedCalls);
+      threePerf.sceneTriangles = smoothPerf(threePerf.sceneTriangles, submittedTriangles);
+      threePerf.sceneLines = smoothPerf(threePerf.sceneLines, renderer.info.render.lines);
+      threePerf.scenePoints = smoothPerf(threePerf.scenePoints, renderer.info.render.points);
+    }
     if (gpuTimerActive) {
       gpuTimer.end();
     }
@@ -8047,6 +8124,15 @@ export const createThreeTest = (
     controls.update();
     applyTerrainCameraConstraints();
     syncCameraClipPlanes();
+    if (treeLodController) {
+      const modelChunksBefore = treeLodController.getStats().modelChunks;
+      if (treeLodController.update(camera, canvas.clientHeight || canvas.height || 1)) {
+        lastStaticFrameKey = "";
+        if (treeLodController.getStats().modelChunks > modelChunksBefore) {
+          requestShadowRefresh();
+        }
+      }
+    }
     threePerf.controlsMs = smoothPerf(threePerf.controlsMs, performance.now() - controlsStart);
     seasonalSky.syncToCamera(camera);
     if (environmentFogEnabled) {
@@ -8466,9 +8552,29 @@ export const createThreeTest = (
 
   const getTerrainWaterDebugControls = (): TerrainWaterDebugControls => waterSystem.getDebugControls();
 
-  const collectTerrainChunkStats = (): { total: number; visible: number; culledInstances: number } => {
+  const collectTerrainChunkStats = (): {
+    total: number;
+    visible: number;
+    culledInstances: number;
+    treeCalls: number;
+    treeTriangles: number;
+    houseCalls: number;
+    houseTriangles: number;
+    otherCalls: number;
+    otherTriangles: number;
+  } => {
     if (!terrainMesh) {
-      return { total: 0, visible: 0, culledInstances: 0 };
+      return {
+        total: 0,
+        visible: 0,
+        culledInstances: 0,
+        treeCalls: 0,
+        treeTriangles: 0,
+        houseCalls: 0,
+        houseTriangles: 0,
+        otherCalls: 0,
+        otherTriangles: 0
+      };
     }
     camera.updateMatrixWorld();
     terrainMesh.updateMatrixWorld(true);
@@ -8479,6 +8585,12 @@ export const createThreeTest = (
     let total = 0;
     let visible = 0;
     let culledInstances = 0;
+    let treeCalls = 0;
+    let treeTriangles = 0;
+    let houseCalls = 0;
+    let houseTriangles = 0;
+    let otherCalls = 0;
+    let otherTriangles = 0;
     const collectRoot = (root: THREE.Object3D): void => root.traverse((child) => {
       if (!(child instanceof THREE.InstancedMesh) || !child.userData?.terrainChunkKey) {
         return;
@@ -8490,6 +8602,19 @@ export const createThreeTest = (
       const isVisible = child.visible && !!child.boundingSphere && frustum.intersectsSphere(worldSphere.copy(child.boundingSphere).applyMatrix4(child.matrixWorld));
       if (isVisible) {
         visible += 1;
+        const indexCount = child.geometry.index?.count;
+        const positionCount = child.geometry.getAttribute("position")?.count ?? 0;
+        const triangles = Math.max(0, (indexCount ?? positionCount) / 3) * child.count;
+        if (child.name.startsWith("terrain-tree-") || child.name.startsWith("terrain-scrub-")) {
+          treeCalls += 1;
+          treeTriangles += triangles;
+        } else if (child.name.startsWith("terrain-house-") || child.name.startsWith("dynamic-house-")) {
+          houseCalls += 1;
+          houseTriangles += triangles;
+        } else {
+          otherCalls += 1;
+          otherTriangles += triangles;
+        }
       } else {
         culledInstances += child.count;
       }
@@ -8498,7 +8623,17 @@ export const createThreeTest = (
     if (structureOverlayGroup) {
       collectRoot(structureOverlayGroup);
     }
-    return { total, visible, culledInstances };
+    return {
+      total,
+      visible,
+      culledInstances,
+      treeCalls,
+      treeTriangles,
+      houseCalls,
+      houseTriangles,
+      otherCalls,
+      otherTriangles
+    };
   };
 
   const getPerfSnapshot = (): ThreeTestPerfSnapshot => {
@@ -8518,6 +8653,16 @@ export const createThreeTest = (
           .join("/")
       : "n/a";
     const terrainChunks = collectTerrainChunkStats();
+    const treeLodStats: TreeLodStats = treeLodController?.getStats() ?? {
+      mode: "models",
+      totalChunks: 0,
+      modelChunks: 0,
+      impostorChunks: 0,
+      modelInstances: 0,
+      impostorInstances: 0,
+      transitionCount: 0,
+      impostorDrawCount: 0
+    };
     return {
       frameMs: threePerf.frameMs,
       frameLastMs: threePerf.frameLastMs,
@@ -8548,6 +8693,20 @@ export const createThreeTest = (
       terrainChunkCount: terrainChunks.total,
       terrainVisibleChunkCount: terrainChunks.visible,
       terrainCulledInstanceCount: terrainChunks.culledInstances,
+      terrainVisibleTreeCalls: terrainChunks.treeCalls,
+      terrainVisibleTreeTriangles: terrainChunks.treeTriangles,
+      terrainVisibleHouseCalls: terrainChunks.houseCalls,
+      terrainVisibleHouseTriangles: terrainChunks.houseTriangles,
+      terrainVisibleOtherCalls: terrainChunks.otherCalls,
+      terrainVisibleOtherTriangles: terrainChunks.otherTriangles,
+      treeLodMode: treeLodStats.mode,
+      treeModelChunkCount: treeLodStats.modelChunks,
+      treeImpostorChunkCount: treeLodStats.impostorChunks,
+      treeModelInstanceCount: treeLodStats.modelInstances,
+      treeImpostorInstanceCount: treeLodStats.impostorInstances,
+      treeLodTransitionCount: treeLodStats.transitionCount,
+      treeImpostorDrawCount: treeLodStats.impostorDrawCount,
+      treeImpostorAtlasState,
       roadOverlayTriangles: Number(terrainRoadOverlayMesh?.geometry.userData?.sparseTriangleCount ?? 0),
       roadOverlaySourceTriangles: Number(terrainRoadOverlayMesh?.geometry.userData?.sourceTriangleCount ?? 0),
       postPassCount: threePerf.postPassCount,
@@ -8607,6 +8766,10 @@ export const createThreeTest = (
       sceneTriangles: threePerf.sceneTriangles,
       sceneLines: threePerf.sceneLines,
       scenePoints: threePerf.scenePoints,
+      shadowGeometryCalls: threePerf.shadowGeometryCalls,
+      shadowGeometryTriangles: threePerf.shadowGeometryTriangles,
+      submittedCallsLast: threePerf.submittedCallsLast,
+      submittedTrianglesLast: threePerf.submittedTrianglesLast,
       totalCalls: threePerf.totalCalls,
       memoryGeometries: threePerf.memoryGeometries,
       memoryTextures: threePerf.memoryTextures,
@@ -9200,6 +9363,8 @@ export const createThreeTest = (
       lastSample = nextSample;
       if (terrainMesh) {
         const fullDisposeStartedAt = performance.now();
+        treeLodController?.dispose();
+        treeLodController = null;
         const activeTerrainMesh = terrainMesh;
         scene.remove(activeTerrainMesh);
         activeTerrainMesh.traverse((child) => {
@@ -9216,7 +9381,7 @@ export const createThreeTest = (
           const material = meshChild.material;
           const disposeMaterial = (mat: THREE.Material) => {
             const textured = mat as THREE.Material & { map?: THREE.Texture | null };
-            if (textured.map) {
+            if (textured.map && !isSharedTreeImpostorTexture(textured.map)) {
               textured.map.dispose();
             }
             mat.dispose();
@@ -9272,12 +9437,14 @@ export const createThreeTest = (
         return;
       }
       const fullBuildStartedAt = performance.now();
-      const { mesh, size, water, treeBurn } = buildTerrainMesh(
+      const { mesh, size, water, treeBurn, treeLod } = buildTerrainMesh(
         nextSurface,
         treeAssets,
         houseAssets,
         firestationAsset,
-        treeSeasonVisualConfig
+        treeSeasonVisualConfig,
+        THREE_TEST_TREE_IMPOSTORS_ENABLED ? treeImpostorAtlas : null,
+        THREE_TEST_TREE_IMPOSTORS_ENABLED ? "auto" : "models"
       );
       recordTerrainSetTiming("fullBuild", performance.now() - fullBuildStartedAt);
       terrainMesh = mesh;
@@ -9291,6 +9458,8 @@ export const createThreeTest = (
       }
       patchTerrainClimateMaterials(terrainMesh.material);
       treeBurnController = treeBurn ?? null;
+      treeLodController = treeLod ?? null;
+      treeLodController?.update(camera, canvas.clientHeight || canvas.height || 1);
       scene.add(terrainMesh);
       ground.visible = false;
 
@@ -9392,6 +9561,29 @@ export const createThreeTest = (
     }
     markSatelliteMinimapVisualsDirty();
   };
+  const rebuildTreeImpostorAtlas = (): void => {
+    if (!THREE_TEST_TREE_IMPOSTORS_ENABLED || !treeAssets) {
+      treeImpostorAtlasState = THREE_TEST_TREE_IMPOSTORS_ENABLED ? "pending" : "disabled";
+      return;
+    }
+    treeImpostorAtlas?.dispose();
+    treeImpostorAtlas = null;
+    try {
+      treeImpostorAtlas = buildTreeImpostorAtlas(renderer, treeAssets);
+      treeImpostorAtlasState = "ready";
+    } catch (error) {
+      treeImpostorAtlasState = "failed";
+      console.warn("[threeTest] Failed to build tree impostor atlas; retaining full tree models.", error);
+    }
+  };
+  restoreTreeImpostorResources = (): void => {
+    rebuildTreeImpostorAtlas();
+    rebuildTerrainFromLastSample();
+    requestShadowRefresh();
+  };
+  if (treeAssets) {
+    rebuildTreeImpostorAtlas();
+  }
   const needTreeAssets = runtimeSettings.trees && !treeAssets;
   const needHouseAssets = THREE_TEST_DETAILED_STRUCTURES_ENABLED && !houseAssets;
   const needFirestationAsset = THREE_TEST_DETAILED_STRUCTURES_ENABLED && !firestationAsset;
@@ -9422,6 +9614,7 @@ export const createThreeTest = (
     void loadTreeAssets()
       .then((assets) => {
         treeAssets = assets;
+        rebuildTreeImpostorAtlas();
         markAssetSettled();
       })
       .catch((error) => {

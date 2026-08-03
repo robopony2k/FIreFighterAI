@@ -1,4 +1,5 @@
 import * as THREE from "three";
+import { mdXyzxProductionRaymarchShader } from "./mdXyzxProductionRaymarchShader.js";
 
 export const OCEAN_SHELF_ALPHA_FLOOR = 0.62;
 export const OCEAN_SHELF_ALPHA_FLOOR_ROUGH = 0.7;
@@ -48,6 +49,9 @@ export type OceanUniforms = {
   u_shoreWaveShape: { value: THREE.Vector4 };
   u_waveDirection: { value: THREE.Vector2 };
   u_oceanContext: { value: THREE.Vector4 };
+  u_backdropMix: { value: number };
+  u_waterLevel: { value: number };
+  u_oceanRaymarchDebugView: { value: number };
 };
 
 const shaderNoiseFns = `
@@ -306,7 +310,10 @@ const shaderAtmosphereFns = `
 
   vec3 extraCheapAtmosphere(vec3 raydir, vec3 sundir) {
     float rayY = clamp(raydir.y, -0.22, 1.0);
-    float horizonBoost = 1.0 / max(rayY + 0.16, 0.08);
+    // The former reciprocal gain approached 12.5 at grazing angles, turning
+    // modest normal coherence into a saturated cyan stripe. Keep the horizon
+    // lift bounded and let fog provide the long-distance transition instead.
+    float horizonBoost = mix(1.55, 0.72, smoothstep(-0.02, 0.82, rayY));
     float sunBoost = 1.0 / max(sundir.y * 11.0 + 1.0, 0.35);
     float raySun = pow(abs(dot(sundir, raydir)), 2.0);
     float sunFocus = pow(max(0.0, dot(sundir, raydir)), 8.0);
@@ -368,6 +375,7 @@ export const createOceanSurfaceMaterial = (uniforms: OceanUniforms): THREE.Shade
       uniform vec4 u_shoreWaveShape;
       uniform vec2 u_waveDirection;
       uniform vec4 u_oceanContext;
+      uniform float u_backdropMix;
 
       ${shaderNoiseFns}
       ${shaderShoreFns}
@@ -416,6 +424,10 @@ export const createOceanSurfaceMaterial = (uniforms: OceanUniforms): THREE.Shade
           shorePulse
         );
         animated *= mix(1.0, 0.16, clamp(inlandWater, 0.0, 1.0));
+        float raymarchOpenWater =
+          (1.0 - clamp(inlandWater, 0.0, 1.0)) *
+          smoothstep(u_shoreParamsA.y, u_shoreParamsA.z, shorelineSdf);
+        animated *= 1.0 - max(clamp(u_backdropMix, 0.0, 1.0), raymarchOpenWater);
         return p + animated;
       }
 
@@ -530,6 +542,7 @@ export const createOceanSurfaceMaterial = (uniforms: OceanUniforms): THREE.Shade
       uniform float u_time;
       uniform float u_waveScale;
       uniform float u_waveVariance;
+      uniform float u_waveAmp;
       uniform float u_normalScale;
       uniform float u_normalStrength;
       uniform vec2 u_uvStep;
@@ -555,9 +568,13 @@ export const createOceanSurfaceMaterial = (uniforms: OceanUniforms): THREE.Shade
       uniform vec4 u_shoreWaveShape;
       uniform vec2 u_waveDirection;
       uniform vec4 u_oceanContext;
+      uniform float u_backdropMix;
+      uniform float u_waterLevel;
+      uniform float u_oceanRaymarchDebugView;
 
       ${shaderNoiseFns}
       ${shaderShoreFns}
+      ${mdXyzxProductionRaymarchShader}
       ${shaderAtmosphereFns}
 
       void main() {
@@ -728,45 +745,124 @@ export const createOceanSurfaceMaterial = (uniforms: OceanUniforms): THREE.Shade
         }
 
         vec3 geomN = normalize(vGeomNormal);
-        vec3 viewDir = normalize(cameraPosition - vWorldPos);
-        float viewDist = length(cameraPosition - vWorldPos);
-        float farT = smoothstep(70.0, 240.0, viewDist);
-        vec2 worldUv = vWorldPos.xz * u_waveScale;
-        vec2 contextScroll = normalize(u_waveDirection) * u_time * mix(0.0012, 0.0038, u_oceanContext.x);
-        vec2 uv1 = worldUv * 3.2 + u_scroll1 * (u_time * 0.92) + contextScroll;
-        vec2 uv2 = worldUv * 5.0 + u_scroll2 * (u_time * 1.16) + contextScroll * 1.18;
-        vec2 uvFar1 = worldUv * 0.7 + u_scroll1 * (u_time * 0.36) + contextScroll * 0.42;
-        vec2 uvFar2 = worldUv * 0.92 + u_scroll2 * (u_time * 0.44) + contextScroll * 0.54;
-        vec2 nearXY =
-          texture2D(u_normalMap1, uv1).xy * 2.0 - 1.0 +
-          (texture2D(u_normalMap2, uv2).xy * 2.0 - 1.0) * 0.55;
-        vec2 farXY =
-          texture2D(u_normalMap1, uvFar1).xy * 2.0 - 1.0 +
-          (texture2D(u_normalMap2, uvFar2).xy * 2.0 - 1.0) * 0.35;
-        vec2 nXY = mix(nearXY, farXY, farT * 0.82);
+        vec2 worldDx = dFdx(vWorldPos.xz);
+        vec2 worldDy = dFdy(vWorldPos.xz);
+        float pixelFootprint = max(length(worldDx), length(worldDy));
+        float openOceanRaymarchMix =
+          (1.0 - inlandWater) *
+          smoothstep(u_shoreParamsA.y, u_shoreParamsA.z, shorelineSdf);
+        float raymarchMix = max(clamp(u_backdropMix, 0.0, 1.0), openOceanRaymarchMix);
+        MdXyzxOceanHit oceanHit;
+        oceanHit.position = vWorldPos;
+        oceanHit.normal = geomN;
+        oceanHit.height = 0.5;
+        oceanHit.distance = length(cameraPosition - vWorldPos);
+        oceanHit.stepCount = 0.0;
+        oceanHit.converged = 0.0;
+        oceanHit.waveIterations = 0.0;
+        oceanHit.normalIterations = 0.0;
+        oceanHit.macroIterations = 0.0;
+        oceanHit.macroBlend = 0.0;
+        oceanHit.normalCalm = 0.0;
+        float diagnosticTrace =
+          step(0.5, u_oceanRaymarchDebugView) *
+          (1.0 - step(4.5, u_oceanRaymarchDebugView));
+        if (max(raymarchMix, diagnosticTrace) > 0.001) {
+          float waterDepth = max(
+            0.35,
+            0.55 *
+              u_waveAmp *
+              u_shoreTuning.y *
+              mix(0.78, 1.28, u_oceanContext.x)
+          );
+          oceanHit = mdXyzxTraceProductionOcean(
+            vWorldPos,
+            u_waterLevel,
+            waterDepth,
+            pixelFootprint
+          );
+        }
+        float resolvedRaymarchMix = raymarchMix * oceanHit.converged;
+        vec3 surfaceWorldPos = mix(vWorldPos, oceanHit.position, resolvedRaymarchMix);
+        vec3 raymarchedOceanN = normalize(mix(geomN, oceanHit.normal, oceanHit.converged));
+        vec3 viewDir = normalize(cameraPosition - surfaceWorldPos);
+        float viewDist = length(cameraPosition - surfaceWorldPos);
         float grazing = 1.0 - clamp(abs(viewDir.y), 0.0, 1.0);
-        float normalScale =
-          u_normalScale *
-          (0.95 + 0.22 * grazing) *
-          (1.0 + 0.18 * max(vOcean, coverage)) *
-          mix(0.82, 1.24, u_oceanContext.x) *
-          mix(1.0, 0.46, inlandWater);
-        vec3 normalMapN = normalize(vec3(
-          nXY.x * normalScale * u_normalStrength,
-          1.0,
-          nXY.y * normalScale * u_normalStrength
-        ));
-        vec3 n = normalize(mix(geomN, normalMapN, clamp(0.22 + 0.14 * max(vOcean, coverage), 0.2, 0.4)));
+        vec3 coastalN = geomN;
+        if (raymarchMix < 0.999) {
+          float farT = smoothstep(70.0, 240.0, viewDist);
+          vec2 worldUv = vWorldPos.xz * u_waveScale;
+          vec2 contextScroll = normalize(u_waveDirection) * u_time * mix(0.0012, 0.0038, u_oceanContext.x);
+          vec2 uv1 = worldUv * 3.2 + u_scroll1 * (u_time * 0.92) + contextScroll;
+          vec2 uv2 = worldUv * 5.0 + u_scroll2 * (u_time * 1.16) + contextScroll * 1.18;
+          vec2 uvFar1 = worldUv * 0.7 + u_scroll1 * (u_time * 0.36) + contextScroll * 0.42;
+          vec2 uvFar2 = worldUv * 0.92 + u_scroll2 * (u_time * 0.44) + contextScroll * 0.54;
+          vec2 nearXY =
+            texture2D(u_normalMap1, uv1).xy * 2.0 - 1.0 +
+            (texture2D(u_normalMap2, uv2).xy * 2.0 - 1.0) * 0.55;
+          vec2 farXY =
+            texture2D(u_normalMap1, uvFar1).xy * 2.0 - 1.0 +
+            (texture2D(u_normalMap2, uvFar2).xy * 2.0 - 1.0) * 0.35;
+          vec2 nXY = mix(nearXY, farXY, farT * 0.82);
+          float normalScale =
+            u_normalScale *
+            (0.95 + 0.22 * grazing) *
+            (1.0 + 0.18 * max(vOcean, coverage)) *
+            mix(0.82, 1.24, u_oceanContext.x) *
+            mix(1.0, 0.46, inlandWater);
+          vec3 normalMapN = normalize(vec3(
+            nXY.x * normalScale * u_normalStrength,
+            1.0,
+            nXY.y * normalScale * u_normalStrength
+          ));
+          coastalN = normalize(mix(geomN, normalMapN, clamp(0.22 + 0.14 * max(vOcean, coverage), 0.2, 0.4)));
+        }
+        vec3 n = normalize(mix(coastalN, raymarchedOceanN, resolvedRaymarchMix));
+
+        if (u_oceanRaymarchDebugView > 0.5) {
+          vec3 debugColor = vec3(0.0);
+          if (u_oceanRaymarchDebugView < 1.5) {
+            debugColor = vec3(clamp(oceanHit.height, 0.0, 1.0));
+          } else if (u_oceanRaymarchDebugView < 2.5) {
+            float hitDistanceView = 1.0 - exp(-oceanHit.distance * 0.025);
+            debugColor = vec3(hitDistanceView, 1.0 - abs(hitDistanceView * 2.0 - 1.0), 1.0 - hitDistanceView);
+          } else if (u_oceanRaymarchDebugView < 3.5) {
+            float maxSteps = mdXyzxQualityValue(48.0, 72.0, 96.0);
+            float normalWork = mix(
+              clamp(oceanHit.normalIterations / 36.0, 0.0, 1.0),
+              clamp(oceanHit.macroIterations / 7.0, 0.0, 1.0),
+              oceanHit.macroBlend
+            );
+            debugColor = vec3(
+              clamp(oceanHit.stepCount / maxSteps, 0.0, 1.0),
+              normalWork,
+              oceanHit.macroBlend
+            );
+          } else if (u_oceanRaymarchDebugView < 4.5) {
+            debugColor = raymarchedOceanN * 0.5 + 0.5;
+          } else {
+            debugColor = mix(vec3(0.08, 0.18, 0.9), vec3(0.95, 0.18, 0.06), raymarchMix);
+          }
+          gl_FragColor = vec4(clamp(debugColor, 0.0, 1.0), 1.0);
+          return;
+        }
 
         vec3 lightDir = normalize(u_lightDir);
         float diffuse = max(dot(n, lightDir), 0.0);
         vec3 halfDir = normalize(lightDir + viewDir);
         float specBase = pow(max(dot(n, halfDir), 0.0), max(1.0, u_shininess));
         float fresnel = 0.04 + 0.96 * pow(1.0 - max(dot(viewDir, n), 0.0), 5.0);
+        float horizonCalm =
+          smoothstep(0.7, 0.995, grazing) *
+          smoothstep(180.0, 1350.0, viewDist) *
+          raymarchMix;
+        fresnel = mix(fresnel, min(fresnel, 0.58), horizonCalm * 0.52);
 
         vec3 reflectDir = normalize(reflect(-viewDir, n));
         reflectDir.y = abs(reflectDir.y);
         vec3 reflection = getAtmosphere(reflectDir) + u_sunColor * getSun(reflectDir);
+        vec3 calmHorizonReflection = mix(u_skyHorizonColor, u_fogColor, 0.58) * 0.72;
+        reflection = mix(reflection, calmHorizonReflection, horizonCalm * 0.32);
 
         float shoreTransitionTint = clamp(seawardCoastMask * 0.92 + landwardCoastMask * 0.14, 0.0, 1.0);
         float shoreDepth = clamp(pow(max(shoreRenderSdf, 0.0), 0.62) * 1.8, 0.0, 1.0);
@@ -833,6 +929,8 @@ export const createOceanSurfaceMaterial = (uniforms: OceanUniforms): THREE.Shade
           (0.08 + 0.42 * vOcean) *
           mix(1.0, 0.42, inlandWater);
         float specular = specBase * u_specular * (0.18 + 0.82 * fresnel) * mix(1.0, 0.64, inlandWater);
+        glitter *= mix(1.0, 0.38, horizonCalm);
+        specular *= mix(1.0, 0.52, horizonCalm);
         vec3 color =
           litWater * (0.82 + diffuse * 0.18) +
           getAtmosphere(vec3(0.0, max(viewDir.y, 0.0) + 0.001, 1.0)) * skyFill +
@@ -844,6 +942,7 @@ export const createOceanSurfaceMaterial = (uniforms: OceanUniforms): THREE.Shade
           smoothstep(u_fogNear * 1.3, u_fogFar * 1.9, viewDist),
           1.35
         ) * 0.38;
+        fogFactor = max(fogFactor, horizonCalm * 0.18);
         color = mix(color, u_fogColor, fogFactor);
         alpha = clamp(mix(alpha, 1.0, fogFactor * 0.08), 0.0, 1.0);
         gl_FragColor = vec4(color, alpha);

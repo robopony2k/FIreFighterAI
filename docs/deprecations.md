@@ -884,3 +884,31 @@ Migration guidance:
 1. Feed normalized rendering context through the water-system boundary rather than importing climate state into the ocean renderer.
 2. Keep shelf coverage gated by positive shoreline distance, seaward transition support, and authoritative ocean coverage.
 3. Extend the existing signed-distance breaker and swash logic instead of adding a separate shoreline FX renderer.
+
+## Fixed 12-Band Flat-Normal Distant Ocean
+
+Status: Deprecated as of August 3, 2026.
+
+- The temporary distant-ocean spectrum that summed 12 fixed directional bands and applied their normal to a flat carrier is removed.
+- Pixel-footprint octave removal could reduce aliasing in that path, but it could not reproduce the short, displaced, derivative-dragged crests of the approved MdXyzX reference and retained visibly coherent grooves.
+- The coarse 1,456-triangle carrier remains; production fragments now reconstruct a bounded MdXyzX height-field hit and normal, while the specialised coastal surface retains shoreline displacement, breakers, foam, masks, and shallow-water treatment.
+
+Migration guidance:
+
+1. Extend the shared MdXyzX wave core and production raymarch adapter rather than adding another fixed sine-band spectrum or tiled distant normal map.
+2. Keep quality and pixel-footprint limits in the render layer, but keep normal calming separately bounded so surviving broad slopes remain visible.
+3. Blend the raymarched surface through the signed coastal transition; do not replace shoreline authority or alter terrain, hydrology, saves, or simulation state.
+
+## Unbounded Strategic-Ocean Normal Flattening
+
+Status: Deprecated as of August 3, 2026.
+
+- MdXyzX production normals are no longer forced completely vertical once hit distance exceeds roughly 82.6 world units.
+- Pixel footprint still removes frequencies before they become sub-pixel, but lost close-scale contribution is replaced by a lower-iteration, broader-domain slope evaluation from the same MdXyzX function.
+- Far normal calming is footprint-driven and capped, while horizon reflection, Fresnel, glitter, and specular suppression retain enough response for broad slopes to remain readable.
+
+Migration guidance:
+
+1. Treat frequency filtering and normal flattening as independent operations; do not use an unbounded distance term as a normal-variance multiplier.
+2. Add strategic variation by evaluating the shared wave character at broader scale, not with fixed sine tables, tiled normal maps, denser geometry, or brightness-only compensation.
+3. Keep macro/detail blending continuous in fragment shading and preserve the signed coastal transition and coarse carrier.
