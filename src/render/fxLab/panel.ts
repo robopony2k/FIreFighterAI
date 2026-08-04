@@ -1,5 +1,6 @@
 import {
   FX_LAB_FIRE_CONTROLS,
+  FX_LAB_GRASS_CONTROLS,
   FX_LAB_OCEAN_WATER_CONTROLS,
   FX_LAB_TERRAIN_WATER_CONTROLS,
   FX_LAB_WATER_CONTROLS
@@ -14,6 +15,11 @@ import type { WaterFxDebugControls } from "../threeTestUnitFx.js";
 import type { FxLabPlacementMode, FxLabScenarioId } from "./types.js";
 import type { FxLabTerrainStamp } from "./showcaseMap.js";
 import type { TreeLodMode } from "../../systems/terrain/rendering/vegetation/treeRenderTypes.js";
+import type {
+  GrassVolumeControls,
+  GrassVolumeDebugView,
+  GrassVolumeVariant
+} from "../../systems/terrain/rendering/vegetation/grassVolumeShader.js";
 import {
   MDXYZX_REFERENCE_MODES,
   type MdXyzxReferenceMode
@@ -28,10 +34,12 @@ export type FxLabPanelHandle = {
   sync: () => void;
 };
 
-type FxLabToolTab = "scene" | "terrain" | "fire" | "hose" | "water" | "export";
+type FxLabToolTab = "scene" | "terrain" | "grass" | "fire" | "hose" | "water" | "export";
 
 const getRecommendedToolTab = (scenarioId: FxLabScenarioId): FxLabToolTab =>
-  scenarioId === "rain-overlay"
+  scenarioId === "grass-fidelity"
+    ? "grass"
+    : scenarioId === "rain-overlay"
     ? "scene"
     : scenarioId === "river-waterfall" || scenarioId === "ocean-shoreline"
     ? "water"
@@ -117,6 +125,7 @@ export const createFxLabPanel = (mount: HTMLElement, controller: FxLabController
   ([
     { id: "scene", label: "Scene" },
     { id: "terrain", label: "Terrain" },
+    { id: "grass", label: "Grass" },
     { id: "fire", label: "Fire" },
     { id: "hose", label: "Hose" },
     { id: "water", label: "Water" },
@@ -423,6 +432,21 @@ export const createFxLabPanel = (mount: HTMLElement, controller: FxLabController
   terrainWaterSection.append(terrainWaterTitle, terrainWaterControlsRoot, terrainWaterResetButton);
   registerTabSection("water", terrainWaterSection);
 
+  const grassSection = document.createElement("section");
+  grassSection.className = "fx-lab-section";
+  const grassTitle = document.createElement("h3");
+  grassTitle.textContent = "Grass Fidelity";
+  const grassControlsRoot = document.createElement("div");
+  grassControlsRoot.className = "fx-lab-controls";
+  const grassResetButton = document.createElement("button");
+  grassResetButton.type = "button";
+  grassResetButton.className = "fx-lab-section-button";
+  grassResetButton.textContent = "Reset Grass";
+  const grassStatus = document.createElement("p");
+  grassStatus.className = "fx-lab-section-note";
+  grassSection.append(grassTitle, grassControlsRoot, grassResetButton, grassStatus);
+  registerTabSection("grass", grassSection);
+
   const exportSection = document.createElement("section");
   exportSection.className = "fx-lab-section";
   const exportTitle = document.createElement("h3");
@@ -449,6 +473,7 @@ export const createFxLabPanel = (mount: HTMLElement, controller: FxLabController
   const waterBindings = new Map<keyof WaterFxDebugControls & string, ControlBinding>();
   const oceanWaterBindings = new Map<keyof OceanWaterDebugControls & string, ControlBinding>();
   const terrainWaterBindings = new Map<keyof TerrainWaterDebugControls & string, ControlBinding>();
+  const grassBindings = new Map<keyof GrassVolumeControls & string, ControlBinding>();
 
   const createControlGroupRoot = (
     container: HTMLElement,
@@ -690,6 +715,42 @@ export const createFxLabPanel = (mount: HTMLElement, controller: FxLabController
     waterBindings.set(key, binding);
   });
 
+  FX_LAB_GRASS_CONTROLS.forEach((definition) => {
+    const key = definition.key;
+    let binding: ControlBinding;
+    if (definition.kind === "range") {
+      binding = createRangeRow(
+        grassControlsRoot,
+        definition.label,
+        definition.description,
+        definition.min,
+        definition.max,
+        definition.step,
+        (value) => {
+          controller.setGrassVolumeControls({ [key]: value } as Partial<GrassVolumeControls>);
+          sync();
+        }
+      );
+    } else if (definition.kind === "boolean") {
+      binding = createBooleanRow(grassControlsRoot, definition.label, definition.description, (value) => {
+        controller.setGrassVolumeControls({ [key]: value } as Partial<GrassVolumeControls>);
+        sync();
+      });
+    } else {
+      binding = createEnumRow<GrassVolumeDebugView | GrassVolumeVariant>(
+        grassControlsRoot,
+        definition.label,
+        definition.description,
+        definition.options,
+        (value) => {
+          controller.setGrassVolumeControls({ [key]: value } as Partial<GrassVolumeControls>);
+          sync();
+        }
+      );
+    }
+    grassBindings.set(key, binding);
+  });
+
   const oceanWaterGroups = new Map<string, HTMLElement>();
   const oceanDefinitionsByKey = new Map(
     FX_LAB_OCEAN_WATER_CONTROLS.map((definition) => [definition.key, definition] as const)
@@ -911,6 +972,14 @@ export const createFxLabPanel = (mount: HTMLElement, controller: FxLabController
     FX_LAB_TERRAIN_WATER_CONTROLS.forEach((definition) => {
       terrainWaterBindings.get(definition.key)?.apply(terrainWaterControls[definition.key]);
     });
+    const grassControls = controller.getGrassVolumeControls();
+    FX_LAB_GRASS_CONTROLS.forEach((definition) => {
+      grassBindings.get(definition.key)?.apply(grassControls[definition.key]);
+    });
+    const grassSnapshot = controller.getGrassVolumeSnapshot();
+    grassStatus.textContent = grassSnapshot.gpuMs === null
+      ? `${grassSnapshot.message} GPU timing unavailable.`
+      : `${grassSnapshot.message} GPU ${grassSnapshot.gpuMs.toFixed(2)}ms.`;
     payloadPreview.value = controller.getOverridePayloadText();
   };
 
@@ -1029,6 +1098,10 @@ export const createFxLabPanel = (mount: HTMLElement, controller: FxLabController
     controller.resetTerrainWaterDebugControls();
     sync();
   });
+  grassResetButton.addEventListener("click", () => {
+    controller.resetGrassVolumeControls();
+    sync();
+  });
   resetAllButton.addEventListener("click", () => {
     controller.resetAllDebugControls();
     sync();
@@ -1047,6 +1120,10 @@ export const createFxLabPanel = (mount: HTMLElement, controller: FxLabController
   sync();
   const terrainStatusTimer = window.setInterval(() => {
     terrainEditStatus.textContent = controller.getTerrainEditStatus();
+    const grassSnapshot = controller.getGrassVolumeSnapshot();
+    grassStatus.textContent = grassSnapshot.gpuMs === null
+      ? `${grassSnapshot.message} GPU timing unavailable.`
+      : `${grassSnapshot.message} GPU ${grassSnapshot.gpuMs.toFixed(2)}ms.`;
   }, 250);
 
   return {

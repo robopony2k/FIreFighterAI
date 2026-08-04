@@ -21,8 +21,15 @@ import {
   type OceanWaterDebugControls
 } from "../oceanWaterDebug.js";
 import type { FxLabOverrides } from "./types.js";
+import {
+  DEFAULT_GRASS_VOLUME_CONTROLS,
+  normalizeGrassVolumeControls,
+  type GrassVolumeControls,
+  type GrassVolumeDebugView,
+  type GrassVolumeVariant
+} from "../../systems/terrain/rendering/vegetation/grassVolumeShader.js";
 
-type FxLabControlSection = "Fire" | "Hose" | "Ocean" | "Shoreline" | "River" | "Waterfall";
+type FxLabControlSection = "Fire" | "Hose" | "Ocean" | "Shoreline" | "River" | "Waterfall" | "Grass";
 
 type FxLabControlBase<K extends string> = {
   key: K;
@@ -66,6 +73,102 @@ export type FxLabOceanWaterControlDefinition =
   | FxLabRangeControl<keyof OceanWaterDebugControls & string>
   | FxLabBooleanControl<keyof OceanWaterDebugControls & string>
   | FxLabEnumControl<keyof OceanWaterDebugControls & string, never>;
+
+export type FxLabGrassControlDefinition =
+  | FxLabRangeControl<keyof GrassVolumeControls & string>
+  | FxLabBooleanControl<keyof GrassVolumeControls & string>
+  | FxLabEnumControl<keyof GrassVolumeControls & string, GrassVolumeDebugView | GrassVolumeVariant>;
+
+export const FX_LAB_GRASS_CONTROLS: ReadonlyArray<FxLabGrassControlDefinition> = [
+  {
+    key: "enabled",
+    section: "Grass",
+    kind: "boolean",
+    label: "Grass Shader",
+    description: "Toggle the volume compositor for same-camera before/after comparison."
+  },
+  {
+    key: "variant",
+    section: "Grass",
+    kind: "enum",
+    label: "Grass Version",
+    description: "Compare the tuned volume clumps with PCG-hashed implicit SDF blades.",
+    options: [
+      { value: "volume-clumps", label: "Volume Clumps" },
+      { value: "pcg-sdf", label: "PCG SDF Blades" }
+    ]
+  },
+  {
+    key: "autoAge",
+    section: "Grass",
+    kind: "boolean",
+    label: "30s Age Cycle",
+    description: "Override fixed dryness with the repeatable ShaderToy ageing cycle."
+  },
+  {
+    key: "dryness",
+    section: "Grass",
+    kind: "range",
+    label: "Dryness",
+    description: "Base green-to-cured state used while automatic ageing is off.",
+    min: 0,
+    max: 1,
+    step: 0.01
+  },
+  {
+    key: "grassLength",
+    section: "Grass",
+    kind: "range",
+    label: "Grass Length",
+    description: "Centre height for deterministic local fuel-length variation.",
+    min: 0.08,
+    max: 0.25,
+    step: 0.01
+  },
+  {
+    key: "density",
+    section: "Grass",
+    kind: "range",
+    label: "Density",
+    description: "Centre density for clumps and blade coverage.",
+    min: 0,
+    max: 1,
+    step: 0.01
+  },
+  {
+    key: "windResponse",
+    section: "Grass",
+    kind: "range",
+    label: "Wind Response",
+    description: "Scale bending and gust response; zero isolates completely static grass.",
+    min: 0,
+    max: 1,
+    step: 0.01
+  },
+  {
+    key: "windSpeed",
+    section: "Grass",
+    kind: "range",
+    label: "Wind Speed",
+    description: "Scale grass wind-field time; zero freezes animation at its deterministic base phase.",
+    min: 0,
+    max: 2,
+    step: 0.01
+  },
+  {
+    key: "debugView",
+    section: "Grass",
+    kind: "enum",
+    label: "Diagnostic View",
+    description: "Inspect final compositing, tile ownership, canopy height, or raymarch work.",
+    options: [
+      { value: "final", label: "Final Composite" },
+      { value: "grass-mask", label: "Grass Mask" },
+      { value: "canopy-height", label: "Canopy Height" },
+      { value: "march-work", label: "March Work" }
+    ]
+  }
+];
 
 export const FX_LAB_FIRE_CONTROLS: ReadonlyArray<FxLabFireControlDefinition> = [
   {
@@ -697,20 +800,27 @@ export const buildFxLabOverrides = (
   fireControls: FireFxDebugControls,
   waterControls: WaterFxDebugControls,
   terrainWaterControls: TerrainWaterDebugControls,
-  oceanWaterControls: OceanWaterDebugControls
+  oceanWaterControls: OceanWaterDebugControls,
+  grassControls: GrassVolumeControls
 ): FxLabOverrides => ({
   fire: hasOwnDiff(fireControls, DEFAULT_FIRE_FX_DEBUG_CONTROLS),
   water: hasOwnDiff(waterControls, DEFAULT_WATER_FX_DEBUG_CONTROLS),
   oceanWater: hasOwnDiff(oceanWaterControls, DEFAULT_OCEAN_WATER_DEBUG_CONTROLS),
-  riverWater: hasOwnDiff(terrainWaterControls, DEFAULT_TERRAIN_WATER_DEBUG_CONTROLS)
+  riverWater: hasOwnDiff(terrainWaterControls, DEFAULT_TERRAIN_WATER_DEBUG_CONTROLS),
+  grass: hasOwnDiff(grassControls, DEFAULT_GRASS_VOLUME_CONTROLS)
 });
 
 export const formatFxLabOverrides = (
   fireControls: FireFxDebugControls,
   waterControls: WaterFxDebugControls,
   terrainWaterControls: TerrainWaterDebugControls,
-  oceanWaterControls: OceanWaterDebugControls
-): string => JSON.stringify(buildFxLabOverrides(fireControls, waterControls, terrainWaterControls, oceanWaterControls), null, 2);
+  oceanWaterControls: OceanWaterDebugControls,
+  grassControls: GrassVolumeControls
+): string => JSON.stringify(
+  buildFxLabOverrides(fireControls, waterControls, terrainWaterControls, oceanWaterControls, grassControls),
+  null,
+  2
+);
 
 export const cloneDefaultFireFxDebugControls = (): FireFxDebugControls =>
   normalizeFireFxDebugControls(DEFAULT_FIRE_FX_DEBUG_CONTROLS);
@@ -723,3 +833,6 @@ export const cloneDefaultTerrainWaterDebugControls = (): TerrainWaterDebugContro
 
 export const cloneDefaultOceanWaterDebugControls = (): OceanWaterDebugControls =>
   normalizeOceanWaterDebugControls(DEFAULT_OCEAN_WATER_DEBUG_CONTROLS);
+
+export const cloneDefaultGrassVolumeControls = (): GrassVolumeControls =>
+  normalizeGrassVolumeControls(DEFAULT_GRASS_VOLUME_CONTROLS);

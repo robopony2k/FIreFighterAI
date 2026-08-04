@@ -1,6 +1,7 @@
 import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { createEffectsState, type EffectsState } from "../../core/effectsState.js";
+import { WebGlGpuTimer } from "../../core/rendering/webglGpuTimer.js";
 import {
   createInitialState,
   TILE_TYPE_IDS,
@@ -46,6 +47,7 @@ import { getRequiredWebGLContext } from "../webglContext.js";
 import {
   buildFxLabOverrides,
   cloneDefaultFireFxDebugControls,
+  cloneDefaultGrassVolumeControls,
   cloneDefaultOceanWaterDebugControls,
   cloneDefaultTerrainWaterDebugControls,
   cloneDefaultWaterFxDebugControls,
@@ -62,6 +64,11 @@ import type {
   TreeLodMode,
   TreeSeasonVisualConfig
 } from "../../systems/terrain/rendering/vegetation/treeRenderTypes.js";
+import { createGrassVolumePass } from "../../systems/terrain/rendering/vegetation/grassVolumePass.js";
+import {
+  normalizeGrassVolumeControls,
+  type GrassVolumeControls
+} from "../../systems/terrain/rendering/vegetation/grassVolumeShader.js";
 import { applyFxLabScenarioFrame, type FxLabScenarioFrameContext } from "./scenarios.js";
 import {
   normalizeFxLabScenarioId,
@@ -87,6 +94,7 @@ const FX_LAB_SEED = 18032026;
 const DEFAULT_STEP_SECONDS = 1 / 30;
 const FX_LAB_OCEAN_SEA_LEVEL = FX_LAB_SHOWCASE_SEA_LEVEL;
 const FX_LAB_RAIN_SCENARIO_ID: FxLabScenarioId = "rain-overlay";
+const FX_LAB_GRASS_SCENARIO_ID: FxLabScenarioId = "grass-fidelity";
 const FX_LAB_RAIN_SEED = 26092026;
 const FX_LAB_RAIN_INTENSITY = 1;
 const FX_LAB_RAIN_CAREER_DAY = 286;
@@ -103,6 +111,12 @@ const FX_LAB_WEATHER_MODE_CAREER_DAY: Record<FxLabWeatherMode, number> = {
 };
 
 export type FxLabWeatherMode = "rainEvent" | "yearCycle" | "winter" | "spring" | "summer" | "autumn";
+
+export type FxLabGrassVolumeSnapshot = {
+  supported: boolean;
+  message: string;
+  gpuMs: number | null;
+};
 
 const clamp = (value: number, min: number, max: number): number => Math.max(min, Math.min(max, value));
 const fract = (value: number): number => value - Math.floor(value);
@@ -169,6 +183,10 @@ export type FxLabController = {
   setTerrainWaterDebugControls: (controls: Partial<TerrainWaterDebugControls>) => void;
   getTerrainWaterDebugControls: () => TerrainWaterDebugControls;
   resetTerrainWaterDebugControls: () => void;
+  setGrassVolumeControls: (controls: Partial<GrassVolumeControls>) => void;
+  getGrassVolumeControls: () => GrassVolumeControls;
+  resetGrassVolumeControls: () => void;
+  getGrassVolumeSnapshot: () => FxLabGrassVolumeSnapshot;
   resetAllDebugControls: () => void;
   getOverridePayload: () => FxLabOverrides;
   getOverridePayloadText: () => string;
@@ -345,6 +363,8 @@ export const createFxLabController = (
   renderer.setClearColor(0x0d1117, 1);
   renderer.shadowMap.enabled = true;
   renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+  const gpuTimer = new WebGlGpuTimer(renderer.getContext());
+  const grassVolumePass = createGrassVolumePass(renderer);
   const rainOverlayPass = createSeasonalRainOverlayPass();
 
   const scene = new THREE.Scene();
@@ -392,6 +412,8 @@ export const createFxLabController = (
   let waterDebugControls = cloneDefaultWaterFxDebugControls();
   let oceanWaterDebugControls = cloneDefaultOceanWaterDebugControls();
   let terrainWaterDebugControls = cloneDefaultTerrainWaterDebugControls();
+  let grassVolumeControls = cloneDefaultGrassVolumeControls();
+  let grassVolumeGpuMs: number | null = null;
   let terrainMesh: THREE.Mesh | null = null;
   let terrainSize: { width: number; depth: number } | null = null;
   let terrainSurface: TerrainRenderSurface | null = null;
@@ -618,6 +640,27 @@ export const createFxLabController = (
     }
   };
 
+  const renderSceneWithOptionalGrass = (): void => {
+    if (currentScenarioId !== FX_LAB_GRASS_SCENARIO_ID) {
+      renderSceneWithOptionalRain();
+      return;
+    }
+    const timerActive = gpuTimer.begin("post");
+    try {
+      grassVolumePass.render(renderer, camera, {
+        timeSeconds: labTimeMs * 0.001,
+        windX: sceneState.world.wind.dx,
+        windZ: sceneState.world.wind.dy,
+        windStrength: sceneState.world.wind.strength,
+        sunDirection: oceanReferenceSunDirection,
+        controls: grassVolumeControls
+      }, renderSceneWithOptionalRain);
+    } finally {
+      if (timerActive) gpuTimer.end();
+      grassVolumeGpuMs = gpuTimer.getSnapshot().post;
+    }
+  };
+
   const fitCameraToTerrain = (): void => {
     if (!terrainSize) {
       return;
@@ -660,6 +703,25 @@ export const createFxLabController = (
       controls.target.set(focusWorldX, seaLevelWorld + 0.35, focusWorldZ - distance * 0.04);
       controls.minDistance = Math.max(4, distance * 0.32);
       controls.maxDistance = Math.max(24, distance * 2.6);
+      camera.updateProjectionMatrix();
+      controls.update();
+      return;
+    }
+    if (currentScenarioId === FX_LAB_GRASS_SCENARIO_ID) {
+      const focusTileX = 22.0;
+      const focusTileY = 31.0;
+      const focusWorldX = (focusTileX / FX_LAB_GRID_SIZE - 0.5) * terrainSize.width;
+      const focusWorldZ = (focusTileY / FX_LAB_GRID_SIZE - 0.5) * terrainSize.depth;
+      const focusHeight = terrainSurface?.heightAtRenderedWorldPosition(focusWorldX, focusWorldZ) ?? 0;
+      const distance = Math.max(7, Math.max(terrainSize.width, terrainSize.depth) * 0.13);
+      camera.position.set(
+        focusWorldX - distance * 0.62,
+        focusHeight + Math.max(3.6, distance * 0.32),
+        focusWorldZ + distance * 0.78
+      );
+      controls.target.set(focusWorldX, focusHeight + 0.55, focusWorldZ);
+      controls.minDistance = Math.max(3, distance * 0.32);
+      controls.maxDistance = Math.max(26, distance * 2.8);
       camera.updateProjectionMatrix();
       controls.update();
       return;
@@ -714,6 +776,16 @@ export const createFxLabController = (
       terrainMesh = null;
     }
     terrainSurface = prepareTerrainRenderSurface(sceneState.sample);
+    grassVolumePass.setTerrain({
+      sampleCols: terrainSurface.sampleCols,
+      sampleRows: terrainSurface.sampleRows,
+      sampleHeights: terrainSurface.sampleHeights,
+      sampleTypes: terrainSurface.sampleTypes,
+      grassTypeId: TILE_TYPE_IDS.grass,
+      heightScale: terrainSurface.heightScale,
+      width: terrainSurface.width,
+      depth: terrainSurface.depth
+    });
     const result = buildTerrainMesh(
       terrainSurface,
       treeAssets,
@@ -1347,7 +1419,7 @@ export const createFxLabController = (
       oceanReferenceSunDirection
     );
     const renderStartedAt = performance.now();
-    oceanReferenceComparison.render(renderer, camera, renderSceneWithOptionalRain);
+    oceanReferenceComparison.render(renderer, camera, renderSceneWithOptionalGrass);
     lastSceneRenderMs = performance.now() - renderStartedAt;
   };
 
@@ -1368,6 +1440,7 @@ export const createFxLabController = (
     camera.aspect = width / height;
     camera.updateProjectionMatrix();
     rainOverlayPass.resize(width, height);
+    grassVolumePass.resize();
     disposeRainSceneTarget();
   };
 
@@ -1432,6 +1505,8 @@ export const createFxLabController = (
       unitsLayer.dispose();
       waterSystem.dispose();
       oceanReferenceComparison.dispose();
+      grassVolumePass.dispose();
+      gpuTimer.dispose();
       rainOverlayPass.dispose();
       scene.remove(seasonalSky.mesh);
       seasonalSky.dispose();
@@ -1453,6 +1528,9 @@ export const createFxLabController = (
     },
     setScenario: (scenarioId: FxLabScenarioId) => {
       currentScenarioId = normalizeFxLabScenarioId(scenarioId);
+      if (currentScenarioId !== "ocean-shoreline") {
+        oceanReferenceComparison.setMode(0);
+      }
       if (currentScenarioId !== FX_LAB_RAIN_SCENARIO_ID) {
         disposeRainSceneTarget();
       }
@@ -1567,11 +1645,27 @@ export const createFxLabController = (
       }
       renderOnce();
     },
+    setGrassVolumeControls: (controls: Partial<GrassVolumeControls>) => {
+      grassVolumeControls = normalizeGrassVolumeControls({ ...grassVolumeControls, ...controls });
+      renderOnce();
+    },
+    getGrassVolumeControls: () => ({ ...grassVolumeControls }),
+    resetGrassVolumeControls: () => {
+      grassVolumeControls = cloneDefaultGrassVolumeControls();
+      renderOnce();
+    },
+    getGrassVolumeSnapshot: () => ({
+      ...grassVolumePass.getStatus(),
+      gpuMs: currentScenarioId === FX_LAB_GRASS_SCENARIO_ID && grassVolumeControls.enabled
+        ? grassVolumeGpuMs
+        : null
+    }),
     resetAllDebugControls: () => {
       fireDebugControls = cloneDefaultFireFxDebugControls();
       waterDebugControls = cloneDefaultWaterFxDebugControls();
       oceanWaterDebugControls = cloneDefaultOceanWaterDebugControls();
       terrainWaterDebugControls = cloneDefaultTerrainWaterDebugControls();
+      grassVolumeControls = cloneDefaultGrassVolumeControls();
       fireFx.setDebugControls(fireDebugControls);
       unitFxLayer.setDebugControls(waterDebugControls);
       waterSystem.setOceanDebugControls(oceanWaterDebugControls);
@@ -1620,7 +1714,19 @@ export const createFxLabController = (
       terrainEditStatus = "Showcase map preset imported.";
       renderOnce();
     },
-    getOverridePayload: () => buildFxLabOverrides(fireDebugControls, waterDebugControls, terrainWaterDebugControls, oceanWaterDebugControls),
-    getOverridePayloadText: () => formatFxLabOverrides(fireDebugControls, waterDebugControls, terrainWaterDebugControls, oceanWaterDebugControls)
+    getOverridePayload: () => buildFxLabOverrides(
+      fireDebugControls,
+      waterDebugControls,
+      terrainWaterDebugControls,
+      oceanWaterDebugControls,
+      grassVolumeControls
+    ),
+    getOverridePayloadText: () => formatFxLabOverrides(
+      fireDebugControls,
+      waterDebugControls,
+      terrainWaterDebugControls,
+      oceanWaterDebugControls,
+      grassVolumeControls
+    )
   };
 };

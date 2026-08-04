@@ -2,6 +2,7 @@ import type { FireFxDebugControls } from "../threeTestFireFx.js";
 import type { OceanWaterDebugControls } from "../oceanWaterDebug.js";
 import type { TerrainWaterDebugControls } from "../terrainWaterDebug.js";
 import type { WaterFxDebugControls } from "../threeTestUnitFx.js";
+import type { GrassVolumeControls } from "../../systems/terrain/rendering/vegetation/grassVolumeShader.js";
 
 export type FxLabScenarioId =
   | "fire-line"
@@ -9,6 +10,7 @@ export type FxLabScenarioId =
   | "ocean-shoreline"
   | "river-waterfall"
   | "rain-overlay"
+  | "grass-fidelity"
   | "house-lifecycle"
   | "water-precision"
   | "water-suppression"
@@ -19,6 +21,7 @@ export type FxLabOverrides = {
   water?: Partial<WaterFxDebugControls>;
   oceanWater?: Partial<OceanWaterDebugControls>;
   riverWater?: Partial<TerrainWaterDebugControls>;
+  grass?: Partial<GrassVolumeControls>;
 };
 
 export type FxLabPlacementMode = "none" | "firefighter" | "truck" | "spray-target";
@@ -29,6 +32,7 @@ export const FX_LAB_SCENARIO_IDS: readonly FxLabScenarioId[] = [
   "ocean-shoreline",
   "river-waterfall",
   "rain-overlay",
+  "grass-fidelity",
   "house-lifecycle",
   "water-precision",
   "water-suppression",

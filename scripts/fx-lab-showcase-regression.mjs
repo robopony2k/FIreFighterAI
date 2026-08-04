@@ -26,11 +26,184 @@ import {
   MDXYZX_REFERENCE_MODES,
   normalizeMdXyzxReferenceMode
 } from "../dist/render/water/ocean/mdXyzxReferenceShader.js";
+import {
+  buildGrassChebyshevDistanceField,
+  decodePackedGrassHeight,
+  packGrassVolumeField
+} from "../dist/systems/terrain/rendering/vegetation/grassVolumeField.js";
+import {
+  GRASS_VOLUME_NOISE_FIELD_MAX_SIZE,
+  GRASS_VOLUME_NOISE_FIELD_MIN_SIZE,
+  GRASS_VOLUME_WIND_TIME_SCALE,
+  grassVolumeVariationFieldFragmentShader,
+  grassVolumeWindFieldFragmentShader
+} from "../dist/systems/terrain/rendering/vegetation/grassVolumeNoiseFields.js";
+import {
+  DEFAULT_GRASS_VOLUME_CONTROLS,
+  GRASS_VOLUME_AGE_CYCLE_SECONDS,
+  GRASS_VOLUME_DISTANT_MARCH_STEPS,
+  GRASS_VOLUME_CLUMP_DETAIL_MIN_PIXELS,
+  GRASS_VOLUME_FINE_DETAIL_MIN_PIXELS,
+  GRASS_VOLUME_MAX_LENGTH,
+  GRASS_VOLUME_MARCH_STEPS,
+  GRASS_VOLUME_MID_MARCH_STEPS,
+  GRASS_VOLUME_WIND_BEND_SCALE,
+  grassVolumeFragmentShader,
+  normalizeGrassVolumeControls,
+  resolveGrassVolumeDryness
+} from "../dist/systems/terrain/rendering/vegetation/grassVolumeShader.js";
+import { grassVolumeCompositeFragmentShader } from "../dist/systems/terrain/rendering/vegetation/grassVolumeCompositeShader.js";
+import { GRASS_VOLUME_RENDER_SCALE } from "../dist/systems/terrain/rendering/vegetation/grassVolumePass.js";
+import {
+  GRASS_PCG_MARCH_STEPS,
+  grassPcgBladeFragmentShader
+} from "../dist/systems/terrain/rendering/vegetation/grassPcgBladeShader.js";
+import {
+  buildFxLabOverrides,
+  cloneDefaultFireFxDebugControls,
+  cloneDefaultGrassVolumeControls,
+  cloneDefaultOceanWaterDebugControls,
+  cloneDefaultTerrainWaterDebugControls,
+  cloneDefaultWaterFxDebugControls
+} from "../dist/render/fxLab/controls.js";
 
 const grid = { cols: FX_LAB_SHOWCASE_SIZE, rows: FX_LAB_SHOWCASE_SIZE, totalTiles: FX_LAB_SHOWCASE_SIZE ** 2 };
 const createWorld = () => createInitialState(18032026, grid);
 const world = createWorld();
 const map = createFxLabShowcaseMap(world);
+
+const grassFieldInput = {
+  sampleCols: 2,
+  sampleRows: 2,
+  sampleHeights: Float32Array.from([0.1, 0.45, 0.8, 0.25]),
+  sampleTypes: Uint8Array.from([
+    TILE_TYPE_IDS.grass,
+    TILE_TYPE_IDS.water,
+    TILE_TYPE_IDS.grass,
+    TILE_TYPE_IDS.road
+  ]),
+  grassTypeId: TILE_TYPE_IDS.grass,
+  heightScale: 10,
+  width: 12,
+  depth: 12
+};
+const packedGrassField = packGrassVolumeField(grassFieldInput);
+const repackedGrassField = packGrassVolumeField(grassFieldInput);
+assert.deepEqual(packedGrassField.data, repackedGrassField.data, "grass field packing must be deterministic");
+assert.deepEqual(
+  Array.from(packedGrassField.data.filter((_, index) => index % 4 === 2)),
+  [255, 0, 255, 0],
+  "only authoritative grass samples may enable volume coverage"
+);
+assert.deepEqual(
+  Array.from(packedGrassField.data.filter((_, index) => index % 4 === 3)),
+  [0, 1, 0, 1],
+  "the packed alpha channel must carry conservative distance to grass"
+);
+const sparseGrassDistances = buildGrassChebyshevDistanceField(
+  Uint8Array.from([
+    0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0,
+    0, 0, TILE_TYPE_IDS.grass, 0, 0,
+    0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0
+  ]),
+  5,
+  5,
+  TILE_TYPE_IDS.grass
+);
+assert.equal(sparseGrassDistances[2 * 5 + 2], 0, "grass cells must have zero skip distance");
+assert.equal(sparseGrassDistances[0], 2, "diagonal distance must be conservative Chebyshev distance");
+assert.equal(sparseGrassDistances[2 * 5], 2, "axial distance must match the nearest grass cell");
+for (let index = 0; index < grassFieldInput.sampleHeights.length; index += 1) {
+  const offset = index * 4;
+  const decoded = decodePackedGrassHeight(
+    packedGrassField.data[offset],
+    packedGrassField.data[offset + 1],
+    packedGrassField.minHeight,
+    packedGrassField.maxHeight
+  );
+  assert.ok(
+    Math.abs(decoded - grassFieldInput.sampleHeights[index] * grassFieldInput.heightScale) < 0.001,
+    `packed grass height ${index} lost excessive precision`
+  );
+}
+const clampedGrassControls = normalizeGrassVolumeControls({
+  dryness: 2,
+  grassLength: -1,
+  density: 5,
+  windResponse: 4,
+  windSpeed: -2,
+  debugView: "bad"
+});
+assert.equal(clampedGrassControls.dryness, 1);
+assert.equal(clampedGrassControls.grassLength, 0.08);
+assert.equal(clampedGrassControls.density, 1);
+assert.equal(clampedGrassControls.windResponse, 1);
+assert.equal(clampedGrassControls.windSpeed, 0);
+assert.equal(clampedGrassControls.debugView, "final");
+assert.equal(clampedGrassControls.variant, "volume-clumps");
+assert.equal(normalizeGrassVolumeControls({ variant: "pcg-sdf" }).variant, "pcg-sdf");
+assert.equal(normalizeGrassVolumeControls({ grassLength: 1 }).grassLength, 0.25);
+assert.equal(normalizeGrassVolumeControls({ windSpeed: 4 }).windSpeed, 2);
+const cyclingGrassControls = normalizeGrassVolumeControls({ ...DEFAULT_GRASS_VOLUME_CONTROLS, autoAge: true });
+assert.equal(resolveGrassVolumeDryness(cyclingGrassControls, 0), 0);
+assert.equal(resolveGrassVolumeDryness(cyclingGrassControls, GRASS_VOLUME_AGE_CYCLE_SECONDS * 0.5), 0.5);
+assert.equal(resolveGrassVolumeDryness(cyclingGrassControls, GRASS_VOLUME_AGE_CYCLE_SECONDS), 0);
+assert.equal(GRASS_VOLUME_MARCH_STEPS, 96);
+assert.equal(GRASS_VOLUME_MID_MARCH_STEPS, 64);
+assert.equal(GRASS_VOLUME_DISTANT_MARCH_STEPS, 40);
+assert.equal(GRASS_VOLUME_RENDER_SCALE, 0.6);
+assert.equal(GRASS_PCG_MARCH_STEPS, 64);
+assert.equal(GRASS_VOLUME_WIND_TIME_SCALE, 0.35);
+assert.equal(GRASS_VOLUME_WIND_BEND_SCALE, 0.34);
+assert.equal(GRASS_VOLUME_CLUMP_DETAIL_MIN_PIXELS, 2);
+assert.equal(GRASS_VOLUME_FINE_DETAIL_MIN_PIXELS, 8);
+assert.equal(GRASS_VOLUME_MAX_LENGTH, 0.25);
+assert.match(grassVolumeFragmentShader, /#define GRASS_MARCH_STEPS 96/);
+assert.match(grassVolumeFragmentShader, /sceneDepth >= 0\.999999[\s\S]*gl_FragColor = vec4\(0\.0\)[\s\S]*vec3 farWorld/, "volume grass must reject sky rays before terrain-plane evaluation");
+assert.match(grassVolumeFragmentShader, /farDistance = min\(farDistance, sceneDistance\)/);
+assert.match(grassVolumeFragmentShader, /sampleGrassDistanceCells/, "grass rays must skip conservatively across non-grass terrain");
+assert.match(grassVolumeFragmentShader, /float sampleGrassCoverage[\s\S]*hardOwnership[\s\S]*if \(hardOwnership < 0\.5\) return 0\.0/, "non-grass cells must retain strict zero ownership");
+assert.match(grassVolumeFragmentShader, /filteredOwnership[\s\S]*smoothstep\(0\.50, 0\.96, filteredOwnership\)/, "grass coverage must feather inward from hard tile junctions");
+assert.match(grassVolumeFragmentShader, /projectedGrassPixels/, "sub-pixel grass must fade before expensive blade work");
+assert.match(grassVolumeFragmentShader, /marchDistance \+= max\(stepLength, emptyWorldDistance\)/);
+assert.doesNotMatch(grassVolumeFragmentShader, /float fbm\(/, "per-step raymarching must not recompute FBM fields");
+assert.match(grassVolumeFragmentShader, /targetStepCount[\s\S]*64\.0[\s\S]*40\.0/, "grass must retain the aggressive 96/64/40 projected-size tiers");
+assert.match(grassVolumeFragmentShader, /float sampleTerrainHeight[\s\S]*return decodeHeight\(texture2D/, "packed terrain height must use continuous hardware-bilinear interpolation");
+assert.doesNotMatch(grassVolumeFragmentShader, /sampleTerrainPlane|terrainPlane/, "terrain planes must not be extrapolated across multiple cells");
+assert.match(grassVolumeFragmentShader, /float terrainHeight = sampleTerrainHeight\(fieldUv\)/, "occupied march samples must follow their actual terrain height");
+assert.match(grassVolumeFragmentShader, /terrainSlopeX[\s\S]*terrainSlopeZ[\s\S]*slopeWork[\s\S]*targetStepCount \* 1\.35/, "steep terrain must retain selectively increased march work");
+assert.match(grassVolumeFragmentShader, /vec4 rayProps = grassProperties\(referenceXZ\)[\s\S]*for \(int stepIndex/, "wind and properties must be cached once per ray");
+assert.match(grassVolumeFragmentShader, /projectedGrassPixels > 8\.0[\s\S]*rawFineNoise/, "sub-pixel fine noise must be omitted before it can form moire");
+assert.match(grassVolumeFragmentShader, /detailStrength < 0\.001[\s\S]*return 0\.72/, "distant blade structure must resolve to stable density");
+assert.match(grassVolumeWindFieldFragmentShader, /visualTime = uTime \* 0\.35/, "grass wind must remain smooth but intentionally slow");
+assert.match(grassVolumeWindFieldFragmentShader, /smoothstep\(0\.35, 0\.92, gustWave\)/, "grass gusts must include deterministic calm intervals");
+assert.match(grassVolumeCompositeFragmentShader, /vec4 grassLayer = texture2D\(uGrassLayer, vUv\)/, "reduced grass must use stable hardware-bilinear reconstruction");
+assert.doesNotMatch(grassVolumeCompositeFragmentShader, /depthWeight|uvA|uvB/, "direction-switching reconstruction must not reintroduce camera-motion shimmer");
+assert.match(grassVolumeFragmentShader, /localGrassHeight = grassHeight \* edgeCoverage[\s\S]*localDensity = density \* edgeCoverage/, "grass height and density must collapse inside hard coverage boundaries");
+assert.match(grassVolumeFragmentShader, /grassWorkSteps \+= edgeCoverage[\s\S]*hasGrassWork[\s\S]*vec4\(debugHeat\(work\) \* hasGrassWork, hasGrassWork\)/, "march-work diagnostics must weight work by grass edge coverage");
+assert.match(grassPcgBladeFragmentShader, /uint pcg_hash[\s\S]*float hash21[\s\S]*float hash31/, "the alternate grass must retain the supplied PCG hash construction");
+assert.match(grassPcgBladeFragmentShader, /#define PCG_GRASS_MARCH_STEPS 64/);
+assert.match(grassPcgBladeFragmentShader, /sceneDepth >= 0\.999999[\s\S]*outColour = vec4\(0\.0\)[\s\S]*vec3 farWorld/, "PCG grass must reject sky rays before marching");
+assert.match(grassPcgBladeFragmentShader, /farDistance = min\(farDistance, sceneDistance\)/, "PCG grass must stop at authoritative scene depth");
+assert.match(grassPcgBladeFragmentShader, /sampleGrassMask[\s\S]*mapGrass[\s\S]*evaluateBlade/, "PCG blades must remain confined to the packed terrain field");
+assert.match(grassPcgBladeFragmentShader, /float mapDistance = 0\.04[\s\S]*return mapDistance/, "PCG map must use one initialized return for strict ANGLE compilers");
+assert.doesNotMatch(grassPcgBladeFragmentShader, /inout vec4 properties|inout vec4 wind/, "PCG map must not expose ANGLE-prone vec4 output parameters");
+assert.match(grassPcgBladeFragmentShader, /canopy boundary is an entry guide[\s\S]*mapDistance = max\(0\.012/, "the canopy entry plane must not become a visible sheet");
+assert.doesNotMatch(grassPcgBladeFragmentShader, /800\.0/, "the synthetic 800-step loop must not enter FX Lab");
+assert.equal(GRASS_VOLUME_NOISE_FIELD_MIN_SIZE, 128);
+assert.equal(GRASS_VOLUME_NOISE_FIELD_MAX_SIZE, 256);
+assert.match(grassVolumeWindFieldFragmentShader, /float fbm\(/, "the cached wind prepass must preserve procedural variation");
+assert.match(grassVolumeVariationFieldFragmentShader, /densityField/, "the static cache must retain density variation");
+const grassOverrides = buildFxLabOverrides(
+  cloneDefaultFireFxDebugControls(),
+  cloneDefaultWaterFxDebugControls(),
+  cloneDefaultTerrainWaterDebugControls(),
+  cloneDefaultOceanWaterDebugControls(),
+  normalizeGrassVolumeControls({ ...cloneDefaultGrassVolumeControls(), dryness: 0.9 })
+);
+assert.deepEqual(grassOverrides.grass, { dryness: 0.9 }, "grass tuning must export through the FX Lab payload");
 
 const hashArrays = (...arrays) => {
   let hash = 2166136261;
@@ -124,6 +297,10 @@ const fxLabPanelSource = await readFile(
   fileURLToPath(new URL("../src/render/fxLab/panel.ts", import.meta.url)),
   "utf8"
 );
+const fxLabControlsSource = await readFile(
+  fileURLToPath(new URL("../src/render/fxLab/controls.ts", import.meta.url)),
+  "utf8"
+);
 const mdXyzxReferenceSource = await readFile(
   fileURLToPath(new URL("../src/render/water/ocean/mdXyzxReferenceShader.ts", import.meta.url)),
   "utf8"
@@ -144,11 +321,48 @@ const productionOceanShaderSource = await readFile(
   fileURLToPath(new URL("../src/render/water/ocean/oceanSurfaceShader.ts", import.meta.url)),
   "utf8"
 );
+const grassVolumePassSource = await readFile(
+  fileURLToPath(new URL("../src/systems/terrain/rendering/vegetation/grassVolumePass.ts", import.meta.url)),
+  "utf8"
+);
+const grassVolumeFieldSource = await readFile(
+  fileURLToPath(new URL("../src/systems/terrain/rendering/vegetation/grassVolumeField.ts", import.meta.url)),
+  "utf8"
+);
+const terrainRendererSource = await readFile(
+  fileURLToPath(new URL("../src/render/threeTestTerrain.ts", import.meta.url)),
+  "utf8"
+);
+const coreConfigSource = await readFile(
+  fileURLToPath(new URL("../src/core/config.ts", import.meta.url)),
+  "utf8"
+);
 assert.match(fxLabControllerSource, /setOceanSurfaceContext\(resolveOceanSurfaceContext\(/, "FX Lab must feed weather into the ocean shader");
 assert.match(fxLabControllerSource, /rainIntensity01: rainActive \? rainIntensity : 0/, "non-rain FX Lab modes must not inherit storm wave energy");
 assert.match(fxLabControllerSource, /buildTreeImpostorAtlas\(renderer, treeAssets\)/, "FX Lab must use the shared runtime tree atlas path");
 assert.match(fxLabPanelSource, /Force Models/, "FX Lab must expose the full-model comparison mode");
 assert.match(fxLabPanelSource, /Force Impostors/, "FX Lab must expose the impostor comparison mode");
+assert.match(fxLabPanelSource, /Grass Fidelity/, "FX Lab must expose dedicated grass controls");
+assert.match(fxLabControlsSource, /PCG SDF Blades/, "FX Lab must expose the alternate PCG grass renderer");
+assert.match(fxLabControlsSource, /Wind Response[\s\S]*Wind Speed/, "FX Lab must expose independent grass wind diagnostics");
+assert.match(fxLabPanelSource, /GPU timing unavailable/, "FX Lab must report unavailable grass GPU timing honestly");
+assert.match(fxLabControllerSource, /createGrassVolumePass\(renderer\)/, "FX Lab must own the isolated grass compositor");
+assert.match(fxLabControllerSource, /currentScenarioId !== FX_LAB_GRASS_SCENARIO_ID/, "grass compositing must remain scenario-gated");
+assert.match(grassVolumePassSource, /new THREE\.DepthTexture/, "grass compositing must use scene depth");
+assert.match(grassVolumePassSource, /normal scene fallback active/, "unsupported grass rendering must retain the normal scene");
+assert.match(grassVolumePassSource, /createGrassVolumeNoiseFields/, "grass FBM must be cached outside the raymarch");
+assert.match(grassVolumePassSource, /noiseFields\.dispose\(\)/, "grass field caches must be disposed with the pass");
+assert.match(grassVolumePassSource, /GRASS_VOLUME_RENDER_SCALE = 0\.60/, "grass raymarching must use the aggressive 60% linear scale");
+assert.match(grassVolumeFieldSource, /texture\.minFilter = THREE\.LinearFilter[\s\S]*texture\.magFilter = THREE\.LinearFilter/, "exact packed field cell centres must remain filterable for portable texture access");
+assert.match(grassVolumePassSource, /configureGrassTarget[\s\S]*texture\.minFilter = THREE\.LinearFilter[\s\S]*texture\.magFilter = THREE\.LinearFilter/, "the reduced grass layer must reconstruct with stable bilinear filtering");
+assert.match(grassVolumePassSource, /state\.timeSeconds \* controls\.windSpeed/, "FX Lab time must remain authoritative while allowing wind motion to be frozen");
+assert.match(grassVolumePassSource, /uWindResponse\.value = controls\.windResponse/, "wind response must be adjustable without rebuilding terrain");
+assert.match(grassVolumePassSource, /grassTarget\?\.dispose\(\)/, "the reduced grass layer must be disposed with the pass");
+assert.match(grassVolumePassSource, /glslVersion: THREE\.GLSL3/, "the PCG uint shader must compile through the WebGL2 GLSL3 path");
+assert.match(grassVolumePassSource, /pcgBladeMaterial\.dispose\(\)/, "the alternate grass material must be disposed with the pass");
+assert.match(grassVolumePassSource, /PCG SDF blades require WebGL2/, "unsupported PCG contexts must identify the volume fallback");
+assert.doesNotMatch(terrainRendererSource, /applyGrassDetailFx|ENABLE_GRASS_DETAIL_FX/, "campaign terrain must not retain the obsolete grass patch");
+assert.doesNotMatch(coreConfigSource, /ENABLE_GRASS_DETAIL_FX/, "campaign configuration must not expose the retired grass flag");
 assert.match(fxLabPanelSource, /Production Raymarch Debug/, "FX Lab must expose production raymarch diagnostics");
 assert.match(fxLabPanelSource, /raymarchDebugView/, "FX Lab must bind the production raymarch view selector");
 assert.equal(MDXYZX_RAYMARCH_WAVE_ITERATIONS, 12, "the reference raymarch must retain 12 wave iterations");

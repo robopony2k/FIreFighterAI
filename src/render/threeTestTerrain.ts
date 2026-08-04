@@ -1,7 +1,6 @@
 import * as THREE from "three";
 import {
   DEBUG_TERRAIN_RENDER,
-  ENABLE_GRASS_DETAIL_FX,
   TILE_COLOR_RGB
 } from "../core/config.js";
 import { getHouseFootprintBounds, pickHouseFootprint } from "../core/houseFootprints.js";
@@ -23,7 +22,6 @@ import {
 import { TreeType, TREE_TYPE_IDS, type Town, type WatchTower } from "../core/types.js";
 import type { FirestationAsset, HouseAssets, HouseVariant, TreeAssets, TreeMeshTemplate, TreeVariant } from "./threeTestAssets.js";
 import { TREE_MODEL_PATHS } from "./threeTestAssets.js";
-import { applyGrassDetailFx } from "./grassDetailFx.js";
 import { getRoadAtlasVersion } from "./terrain/canvas/roadAtlas.js";
 import {
   buildRoadOverlayTexture as buildRoadOverlayTextureInternal,
@@ -3685,19 +3683,6 @@ export const buildTerrainMesh = (
     material,
     debugRenderOptions?.inlandWaterSeamDebugMode ?? "normal"
   );
-  if (ENABLE_GRASS_DETAIL_FX) {
-    applyGrassDetailFx(material, {
-      enabled: ENABLE_GRASS_DETAIL_FX,
-      tileWorldSize: step,
-      seed: sample.worldSeed ?? 0,
-      sampleTypes,
-      sampleCols,
-      sampleRows,
-      grassTypeId: grassId,
-      originX: -width * 0.5,
-      originZ: -depth * 0.5
-    });
-  }
   refreshTerrainScorchedGroundMaterial(material, sample, surface, !useLegacyFacetedTerrain);
   const mesh = new THREE.Mesh(geometry, material);
   mesh.receiveShadow = true;

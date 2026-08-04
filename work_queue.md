@@ -18,6 +18,34 @@ Notes: Source analysis showed the ocean used positive time in wind-biased wave p
 
 Status: done
 
+TSK-0175: Prototype volumetric grass fidelity in FX Lab
+
+Type: feature
+
+Why: Flat grass tiles lacked close-range structure, wind response, and a readable green-to-cured transition, while the supplied ShaderToy prototype had not yet been exercised against the game's terrain, camera, depth, and lighting.
+
+Done when:
+- [x] FX Lab exposes a grass-fidelity scenario using the real showcase terrain, orbit camera, grass mask, scene depth, wind, and key light without enabling the effect in campaign rendering.
+- [x] The adapted shader retains deterministic wind, blade, density, curing-colour, canopy, and fixed 144-step raymarch behavior with repeatable grass controls and diagnostic views.
+- [x] Terrain field uploads occur only on terrain rebuild, resource failure falls back to the normal scene, and the obsolete disabled ground-colour grass patch is removed.
+- [x] Mixed maps use a conservative grass-distance field, projected-size rejection, and cached 128-256px wind/property fields to avoid full raymarch work over non-grass and sub-pixel regions without lowering output resolution or the 144-step ceiling.
+- [x] The aggressively optimized grass layer raymarches at 60% linear resolution, reconstructs with stable hardware bilinear filtering, and uses projected 96/64/40 sampling tiers while the final scene composite remains full resolution.
+- [x] Volume Clumps samples continuously interpolated packed height at each occupied step, selectively raises work on steep slopes, rejects samples outside the canopy before detail work, and caches wind, properties, and lighting once per ray.
+- [x] Grass length is capped at 0.25 after deterministic spatial variation, while independent wind-response and wind-speed controls can isolate bending from animation shimmer.
+- [x] Grass/non-grass junctions preserve strict zero ownership outside grass while canopy height and density feather inward, avoiding a vertical volume face at square tile boundaries.
+- [x] Wind motion remains frame-smooth but uses slower intermittent gusts, reduced bending and canopy pulsing, while projected-size filtering removes fine hashes and hard blade occupancy before they form distant moire or close vertical columns.
+- [x] FX Lab offers the original tuned Volume Clumps and an alternate WebGL2 PCG SDF Blades renderer adapted from the supplied implicit-map study, bounded to 64 steps, real terrain/masks/depth, shared curing controls and wind, with an explicit fallback on unsupported contexts.
+- [x] TypeScript, FX Lab, renderer, and queue regressions pass.
+- [ ] User-supplied fixed-state captures and an accelerated ageing recording pass live visual acceptance without mask leakage, floating roots, depth errors, moire, or hard volume boundaries.
+
+Touchpoints: `src/systems/terrain/rendering/vegetation/`, `src/render/fxLab/`, `src/render/threeTestTerrain.ts`, `scripts/fx-lab-showcase-regression.mjs`, `docs/`
+
+Constraints: keep the prototype FX-Lab-only; preserve simulation, fuel profiles, saves, share codes, map generation, and campaign rendering; retain full-resolution scene output, stop the reduced grass march at authoritative scene depth, keep distance skipping conservative at grass boundaries, and rebuild static property fields only when terrain dimensions change.
+
+Notes: The ShaderToy source was supplied by the user from `https://www.shadertoy.com/view/7cyGzd`. The first live look was visually approved but slow, so procedural FBM moved from every occupied march sample into one animated and one static bounded texture prepass; the packed terrain alpha channel now provides conservative empty-space skipping for mixed 256x256 maps. An intermediate 75%-resolution 144/96/64 profile measured roughly 5-10 ms and approved dryness, length, and medium-distance readability, but identified excessive motion, close streaking, and distant moire; the stability pass slowed phase continuously and filtered projected frequencies. The explicitly requested aggressive Volume Clumps profile measured roughly 6 ms at 60% resolution with 96/64/40 tiers and per-ray cached fields. A stabilization attempt cached a local terrain plane per ray, but later live captures showed that extrapolating it across multiple terrain cells created large translucent walls at oblique angles. Volume Clumps now returns to one continuously filtered packed-height sample per occupied step and retains cheap per-ray slope work selection. Follow-up captures isolated a smaller remaining wall at square grass/non-grass junctions: authoritative ownership remains binary, while filtered coverage now collapses canopy height and density inward on the grass side so the volume has no hard vertical face; March Work uses the same weighted coverage. The profile also uses stable bilinear layer reconstruction, caps final local length at 0.25, and exposes wind-response/speed controls. An upward-looking capture separately exposed false grass slabs in no-depth sky pixels; both variants reject those rays before terrain evaluation or marching. A user-supplied PCG implicit-map study remains a separate comparison rather than replacing Volume Clumps. Its first live capture measured about 11 ms and exposed tile-scale columns, canopy-entry sheets, and a persistent ANGLE warning; the follow-up uses actual blade-scale dimensions, a shallow 64-step volume, per-ray cached properties, and a single initialized map return without vec4 outputs. Automated evidence can be completed in VS Code; final appearance, motion, compiler-log, and comparative GPU-time acceptance require the requested user captures.
+
+Status: in-progress
+
 TSK-0173: Rebase distant ocean rendering on MdXyzX raymarched hits
 
 Type: bug

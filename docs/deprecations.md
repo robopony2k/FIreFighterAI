@@ -1,5 +1,19 @@
 # Deprecations
 
+## Disabled Grass Ground-Colour Detail Patch
+
+Status: Deprecated as of August 4, 2026.
+
+- The disabled `grassDetailFx` material patch and `ENABLE_GRASS_DETAIL_FX` flag have been removed; they only darkened tile edges and jittered ground colour without representing grass height, wind, curing, or depth.
+- The replacement experiment is the FX-Lab-only terrain-domain volume compositor, which uses authoritative grass coverage and rendered terrain height without changing campaign rendering.
+- No save, simulation, map-generation, fuel-profile, or campaign-rendering behavior changed during this replacement.
+
+Migration guidance:
+
+1. Develop and validate grass rendering under `src/systems/terrain/rendering/vegetation/` through the `grass-fidelity` FX Lab scenario.
+2. Do not restore a core feature flag or terrain-material patch before the volume prototype passes live visual and performance review.
+3. Keep future production integration separate from the FX Lab controls and preserve terrain-domain ownership.
+
 ## Wind-Opposed Ocean Phases and Tick-Stepped Cloud Motion
 
 Status: Deprecated as of August 3, 2026.

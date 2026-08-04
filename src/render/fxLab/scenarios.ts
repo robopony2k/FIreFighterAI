@@ -72,6 +72,11 @@ export const FX_LAB_SCENARIOS: ReadonlyArray<FxLabScenarioDefinition> = [
     description: "A quiet terrain view with the autumn rain screen-space overlay enabled for streak, dimming, and wet-lens tuning."
   },
   {
+    id: "grass-fidelity",
+    label: "Grass Fidelity",
+    description: "A close game-camera view of real grass boundaries, terrain relief, units, curing colour, and coherent wind-driven volume detail."
+  },
+  {
     id: "house-lifecycle",
     label: "House Lifecycle",
     description: "Procedural house previews showing frame, roofed, and charred-remains states from the same generator."
@@ -347,6 +352,12 @@ export const applyFxLabScenarioFrame = (scenarioId: FxLabScenarioId, ctx: FxLabS
     ctx.setWind(0.48, -0.88, 0.42, "Rain");
     ctx.placeTruck(26.5, 45.5, "medium");
     ctx.placeFirefighter(28.2, 44.4);
+    return;
+  }
+  if (scenarioId === "grass-fidelity") {
+    ctx.setWind(0.92, 0.38, 0.7, "ENE");
+    ctx.placeTruck(23.2, 34.8, "medium");
+    ctx.placeFirefighter(25.0, 33.6);
     return;
   }
   if (scenarioId === "water-precision") {
