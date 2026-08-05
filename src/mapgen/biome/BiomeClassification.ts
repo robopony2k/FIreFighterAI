@@ -397,7 +397,7 @@ export const classifySeedSpreadTile = (input: SeedSpreadClassificationInput): Ti
   if (
     forestCandidate &&
     !slopeBlocksForest &&
-    scores.moistureScore > 0.4 &&
+    scores.moistureScore > 0.08 &&
     scores.exposureScore < 0.7 &&
     scores.treeSlopeSuitability > 0.22 &&
     scores.slopeScore < 0.62

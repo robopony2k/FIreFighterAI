@@ -176,7 +176,22 @@ const assertSnapshotShape = (snapshot, totalTiles, label) => {
   if (snapshot.coastClass && (!(snapshot.coastClass instanceof Uint8Array) || snapshot.coastClass.length !== totalTiles)) {
     throw new Error(`[mapgen] ${label} invalid coastClass payload for ${snapshot.phase}`);
   }
-  for (const field of ["rawMoisture", "elevationStress", "slopeStress", "treeSuitability", "treeProbability", "rainfall", "runoff", "waterfallDrop"]) {
+  for (const field of [
+    "rawMoisture",
+    "elevationStress",
+    "slopeStress",
+    "treeSuitability",
+    "treeProbability",
+    "windExposure",
+    "leeShelter",
+    "terrainCurvature",
+    "drainage",
+    "vegetationCluster",
+    "vegetationSiteQuality",
+    "rainfall",
+    "runoff",
+    "waterfallDrop"
+  ]) {
     const value = snapshot[field];
     if (value && (!(value instanceof Float32Array) || value.length !== totalTiles)) {
       throw new Error(`[mapgen] ${label} invalid ${field} payload for ${snapshot.phase}`);
@@ -211,6 +226,7 @@ const analyzeForestPatches = (state) => {
   const visited = new Uint8Array(totalTiles);
   const queue = new Int32Array(totalTiles);
   const sizes = [];
+  let totalPerimeter = 0;
   for (let i = 0; i < totalTiles; i += 1) {
     if (visited[i] > 0 || state.tiles[i]?.type !== "forest") {
       continue;
@@ -227,6 +243,15 @@ const analyzeForestPatches = (state) => {
       area += 1;
       const x = idx % cols;
       const y = Math.floor(idx / cols);
+      const perimeterNeighbors = [
+        x > 0 ? idx - 1 : -1,
+        x < cols - 1 ? idx + 1 : -1,
+        y > 0 ? idx - cols : -1,
+        y < rows - 1 ? idx + cols : -1
+      ];
+      for (const neighbor of perimeterNeighbors) {
+        if (neighbor < 0 || state.tiles[neighbor]?.type !== "forest") totalPerimeter += 1;
+      }
       if (x > 0) {
         const n = idx - 1;
         if (visited[n] === 0 && state.tiles[n]?.type === "forest") {
@@ -262,8 +287,50 @@ const analyzeForestPatches = (state) => {
     }
     sizes.push(area);
   }
+  const clearingVisited = new Uint8Array(totalTiles);
+  const clearingSizes = [];
+  const clearingTypes = new Set(["grass", "scrub", "floodplain", "bare"]);
+  for (let start = 0; start < totalTiles; start += 1) {
+    if (clearingVisited[start] || !clearingTypes.has(state.tiles[start]?.type)) continue;
+    let head = 0;
+    let tail = 0;
+    let open = false;
+    clearingVisited[start] = 1;
+    queue[tail++] = start;
+    while (head < tail) {
+      const idx = queue[head++];
+      const x = idx % cols;
+      const y = Math.floor(idx / cols);
+      if (x === 0 || y === 0 || x === cols - 1 || y === rows - 1) open = true;
+      const neighbors = [
+        x > 0 ? idx - 1 : -1,
+        x < cols - 1 ? idx + 1 : -1,
+        y > 0 ? idx - cols : -1,
+        y < rows - 1 ? idx + cols : -1
+      ];
+      for (const neighbor of neighbors) {
+        if (neighbor < 0) continue;
+        const type = state.tiles[neighbor]?.type;
+        if (type === "water" || type === "road" || type === "house" || type === "base") open = true;
+        if (!clearingVisited[neighbor] && clearingTypes.has(type)) {
+          clearingVisited[neighbor] = 1;
+          queue[tail++] = neighbor;
+        }
+      }
+    }
+    if (!open && tail >= 4) clearingSizes.push(tail);
+  }
   if (sizes.length === 0) {
-    return { forestPatchCount: 0, forestPatchMean: 0, forestPatchP95: 0 };
+    return {
+      forestPatchCount: 0,
+      forestPatchMean: 0,
+      forestPatchP95: 0,
+      forestPatchMin: 0,
+      forestTinyPatchCount: 0,
+      forestPerimeterAreaRatio: 0,
+      forestClearingCount: clearingSizes.length,
+      forestClearingMean: Number((clearingSizes.reduce((sum, size) => sum + size, 0) / Math.max(1, clearingSizes.length)).toFixed(2))
+    };
   }
   sizes.sort((a, b) => a - b);
   const mean = sizes.reduce((sum, value) => sum + value, 0) / sizes.length;
@@ -271,7 +338,12 @@ const analyzeForestPatches = (state) => {
   return {
     forestPatchCount: sizes.length,
     forestPatchMean: Number(mean.toFixed(2)),
-    forestPatchP95: sizes[p95Index]
+    forestPatchP95: sizes[p95Index],
+    forestPatchMin: sizes[0],
+    forestTinyPatchCount: sizes.filter((size) => size < 6).length,
+    forestPerimeterAreaRatio: Number((totalPerimeter / Math.max(1, sizes.reduce((sum, size) => sum + size, 0))).toFixed(4)),
+    forestClearingCount: clearingSizes.length,
+    forestClearingMean: Number((clearingSizes.reduce((sum, size) => sum + size, 0) / Math.max(1, clearingSizes.length)).toFixed(2))
   };
 };
 
@@ -2652,6 +2724,9 @@ const runAll = async () => {
       results.push(metrics);
       console.log(
         `[mapgen] size=${metrics.sizeId} seed=${metrics.seed} ms=${metrics.durationMs.toFixed(2)} biome=${metrics.biomeSpreadClassifyMs.toFixed(2)}ms water=${metrics.waterPct.toFixed(2)}% forest=${metrics.forestPct.toFixed(2)}% forestAgeMean=${metrics.forestAgeMean.toFixed(2)} forestMaturityP95=${metrics.forestMaturityP95.toFixed(3)} patches=${metrics.forestPatchCount} meanPatch=${metrics.forestPatchMean} p95Patch=${metrics.forestPatchP95} houses=${metrics.houseCount} placed=${metrics.placedHouseCount}/${metrics.requestedHouseCount} compactEval=${metrics.compactTownEvalCount} compactViolations=${metrics.compactTownViolationCount} compactMaxAspect=${metrics.compactTownMaxAspect.toFixed(2)} base=(${metrics.baseX},${metrics.baseY}) baseElev=${metrics.baseElevation.toFixed(4)} baseRelief=${metrics.baseLocalRelief.toFixed(4)} baseCenter=${metrics.baseCenterDistanceRatio.toFixed(4)} baseVeg=${metrics.baseNearbyVegetationRatio.toFixed(4)} townAngle=${metrics.settlementTownSeedMaxAngle.toFixed(2)}/${metrics.settlementTownSeedMeanAngle.toFixed(2)} houseAngle=${metrics.houseFootprintMaxAngle.toFixed(2)}/${metrics.houseFootprintMeanAngle.toFixed(2)} highHouseAngle=${metrics.highAngleHouseFootprintCount} padReliefMax=${metrics.settlementPadReliefMax.toFixed(4)} padReliefMean=${metrics.settlementPadReliefMean.toFixed(4)} roads=${metrics.roadCount} roadComps=${metrics.roadComponentCount} townRoadComps=${metrics.townRoadComponentCount} townRoadMissing=${metrics.townRoadMissingCount} townRoadDisconnected=${metrics.townRoadDisconnectedCount} rivers=${metrics.riverCount} lakes=${metrics.lakeCount}/${metrics.lakeTiles} lakeOut=${metrics.lakeOutletCount} lakeOutAdj=${metrics.lakeOutletAdjacentRiverCount} lakeOutRead=${metrics.lakeOutletReadableCount} lakeOutMiss=${metrics.lakeOutletConnectionFailures} lakeOutShort=${metrics.lakeOutletShortRiverFailures} lakeOutLap=${metrics.lakeOutletShorelineLapFailures} lakeOutLat=${metrics.lakeOutletLateralStartFailures} overflow=${metrics.hydrologyOverflowTerminalRoutes}/${metrics.hydrologyOverflowRoutes} overflowFail=${metrics.hydrologyOverflowFailedRoutes} overflowCarved=${metrics.hydrologyFailedOverflowCarvedTiles} classRoutes=${metrics.hydrologyClassifiedRoutes} classFalls=${metrics.hydrologyClassifiedWaterfallCandidates}/${metrics.hydrologyClassifiedWaterfallLipTiles}/${metrics.hydrologyClassifiedWaterfallRunoutTiles} classFailed=${metrics.hydrologyClassifiedFailedOverflowTiles} falls=${metrics.waterfallCount} fallReject=${metrics.hydrologyWaterfallRejected} roadIgnoredDiag=${metrics.ignoredDiagonalCount} roadUnmatched=${metrics.unmatchedPatternCount} roadGrade=${metrics.maxRoadGrade.toFixed(3)} roadCrossfall=${metrics.maxRoadCrossfall.toFixed(3)} roadGradeChange=${metrics.maxRoadGradeChange.toFixed(3)} roadAngle=${metrics.maxRoadAngleDeg.toFixed(2)}/${metrics.meanRoadAngleDeg.toFixed(2)} highRoadAngle=${metrics.highAngleRoadStepCount} straightSteep=${metrics.roadLongStraightSteepSegmentCount} gradingDelta=${metrics.roadGradingDelta.toFixed(3)} routedAngle=${metrics.routedRoadMaxAngle.toFixed(2)}/${metrics.routedRoadMeanAngle.toFixed(2)} routedHighAngle=${metrics.routedHighAngleStepCount} routedStraightSteep=${metrics.routedLongStraightSteepSegmentCount} passes=${metrics.mountainPassFallbackCount} junctions=${metrics.generatedJunctionCount} switchbacks=${metrics.switchbackTurnCount} hairpins=${metrics.hairpinGradeDiscountCount} cleanup=${metrics.connectorArtifactPrunedEdgeCount} switchbackRoutes=${metrics.switchbackRouteCount}/${metrics.switchbackRouteAttempts} budgetAbort=${metrics.searchBudgetAbortCount} cacheSkip=${metrics.connectorCacheSkipCount} roadWalls=${metrics.wallEdgeCount} riverDiagOnly=${metrics.riverDiagOnlyLinks} riverIso=${metrics.riverIsolatedCells} riverOrthRatio=${metrics.riverOrthConnectivityRatio.toFixed(4)} riverComps=${metrics.riverComponentCount} riverDetachedComps=${metrics.detachedRiverComponents} riverDetachedCells=${metrics.detachedRiverCells} coastNatural=${metrics.coastalNaturalCount} coastBeach=${metrics.coastalBeachCount} coastRocky=${metrics.coastalRockyCount} coastOther=${metrics.coastalOtherCount} coastSlope=${metrics.coastSlopeMean.toFixed(4)}/${metrics.coastSlopeP95.toFixed(4)} coastDrop=${metrics.coastBoundaryDropMean.toFixed(4)}/${metrics.coastBoundaryDropMax.toFixed(4)} coastCliff=${metrics.coastCliffRatio.toFixed(3)} forcedCliff=${metrics.coastForcedCliffRatio.toFixed(3)} coastInsetStd=${metrics.coastalEdgeInsetStdDev.toFixed(2)} coastInsetDominant=${metrics.coastalDominantInsetRatio.toFixed(3)} coastSideRun=${metrics.coastalSideWallRunRatio.toFixed(3)} coastSideStd=${metrics.coastalSideWallMinStdDev.toFixed(2)}`
+      );
+      console.log(
+        `[mapgen:vegetation] minPatch=${metrics.forestPatchMin} tiny=${metrics.forestTinyPatchCount} perimeterArea=${metrics.forestPerimeterAreaRatio.toFixed(4)} clearings=${metrics.forestClearingCount} clearingMean=${metrics.forestClearingMean}`
       );
     }
   }

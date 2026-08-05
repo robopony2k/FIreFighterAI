@@ -29,6 +29,10 @@ Moisture is generated **once at map creation** and stored as a deterministic, pe
 Moisture is then derived from:
 - Normalised distance to water (with saturation cap),
 - Elevation-based dryness adjustment,
+- Seeded prevailing-wind transport and orographic rainfall,
+- Persistent downwind air transport with limited rainout so interior valleys do not collapse to zero moisture,
+- Exposed ridge/coastal drying and lee-shelter retention,
+- Local gully curvature, drainage/runoff, and valley influence,
 - Optional gamma shaping for distribution control.
 
 The resulting moisture value is stored in both:
@@ -44,8 +48,9 @@ The resulting moisture value is stored in both:
 
 ## Performance Characteristics
 - Distance-to-water is computed once during map generation.
+- Vegetation exposure, shelter, curvature, drainage, coast response, and cluster fields are built in bounded linear passes during map generation.
 - No per-tile distance scanning or pathfinding is performed at runtime.
-- All moisture-related runtime systems rely only on cheap arithmetic.
+- Campaign vegetation succession reuses one cached static site-quality field; per-frame spatial queries are not used.
 
 
 ## Performance Trade-Offs

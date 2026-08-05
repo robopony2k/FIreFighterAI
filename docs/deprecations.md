@@ -940,3 +940,32 @@ Migration guidance:
 1. Treat frequency filtering and normal flattening as independent operations; do not use an unbounded distance term as a normal-variance multiplier.
 2. Add strategic variation by evaluating the shared wave character at broader scale, not with fixed sine tables, tiled normal maps, denser geometry, or brightness-only compensation.
 3. Keep macro/detail blending continuous in fragment shading and preserve the signed coastal transition and coarse carrier.
+
+## Uniform Tile-Local Tree Placement
+
+Status: Deprecated as of August 5, 2026.
+
+- Forest occupancy and structure no longer come from independent tile hashes plus uniform within-tile jitter.
+- Map generation now derives deterministic vegetation exposure, shelter, curvature, drainage, coast response, site quality, coherent stands, and retained clearings from final static terrain and seeded climate.
+- Campaign succession reuses the same immutable terrain response, while render-only tree candidates use seeded blue-noise templates and globally fair instance-budget thinning.
+- Fuel authority remains tile type, visible static moisture, vegetation age, and configured fuel profiles; tree transforms and species do not add hidden fire behavior.
+
+Migration guidance:
+
+1. Add future vegetation distribution rules to the terrain simulation scoring boundary, not directly to the renderer.
+2. Keep exact tree transforms render-only and deterministic from prepared vegetation state plus world seed.
+3. Use precomputed or cached O(n) terrain fields; do not introduce per-frame distance, raycast, or neighborhood searches.
+
+## Tall-Tree Rendering from Grass Structure
+
+Status: Deprecated as of August 5, 2026.
+
+- Grass canopy cover and stem density no longer cause the terrain renderer to emit scrub-shaped tree instances.
+- Tall-tree candidates now come primarily from forest tiles; scrub and floodplain retain limited, visually subordinate woody accents while grass remains ground vegetation.
+- This is a render-authority correction only: grass biome, moisture, vegetation age, fuel load, and fuel profiles remain authoritative and unchanged by tree-instance placement.
+
+Migration guidance:
+
+1. Treat open-biome canopy and stem values as vegetation structure, not an automatic request for tree models.
+2. Add future low vegetation through grass or scrub rendering paths instead of routing it through tall-tree placement.
+3. Keep visual candidate weights deterministic and separate from fuel or biome rules.

@@ -4,6 +4,8 @@ import {
 } from "../../systems/terrain/sim/treeSuitability.js";
 import { computeRenderedSlopeAngleDeg } from "../../shared/terrainSlope.js";
 import type { MapGenContext } from "../pipeline/MapGenContext.js";
+import { VEGETATION_DISTRIBUTION_TUNING } from "../../systems/terrain/constants/vegetationDistributionTuning.js";
+import { vegetationFbmNoise } from "../../systems/terrain/utils/vegetationSeedHash.js";
 
 export const isFloodplainCandidate = (
   elevation: number,
@@ -30,6 +32,12 @@ export const computeBiomeSuitabilityValue = (input: {
   forestPatchiness?: number;
   slopeAngleDeg?: number;
   isWater?: boolean;
+  windExposure?: number;
+  leeShelter?: number;
+  curvature?: number;
+  drainage?: number;
+  coastExposure?: number;
+  clusterScore?: number;
 }): number => computeBiomeSuitabilityDetails(input).treeSuitability;
 
 export const computeBiomeSuitabilityDetails = (input: {
@@ -50,6 +58,12 @@ export const computeBiomeSuitabilityDetails = (input: {
   forestPatchiness?: number;
   slopeAngleDeg?: number;
   isWater?: boolean;
+  windExposure?: number;
+  leeShelter?: number;
+  curvature?: number;
+  drainage?: number;
+  coastExposure?: number;
+  clusterScore?: number;
 }): TreeSuitabilityResult =>
   computeTreeSuitability({
     seed: input.seed ?? 0,
@@ -68,7 +82,13 @@ export const computeBiomeSuitabilityDetails = (input: {
     vegetationDensity: input.vegetationDensity ?? 0.56,
     forestPatchiness: input.forestPatchiness ?? 0.42,
     slopeAngleDeg: input.slopeAngleDeg,
-    isWater: input.isWater
+    isWater: input.isWater,
+    windExposure: input.windExposure,
+    leeShelter: input.leeShelter,
+    curvature: input.curvature,
+    drainage: input.drainage,
+    coastExposure: input.coastExposure,
+    clusterScore: input.clusterScore
   });
 
 export const computeTreePlacementHash = (seed: number, x: number, y: number): number => {
@@ -93,11 +113,20 @@ export const buildBiomeSuitability = (ctx: MapGenContext): Float32Array => {
   const treeSuitability = new Float32Array(state.grid.totalTiles);
   const treeProbability = new Float32Array(state.grid.totalTiles);
   const treeDensity = new Float32Array(state.grid.totalTiles);
+  const clusterMap = new Float32Array(state.grid.totalTiles);
+  const siteQualityMap = new Float32Array(state.grid.totalTiles);
+  const patchiness = Math.max(0, Math.min(1, settings.forestPatchiness));
+  const scaleFactor = 1.4 - patchiness * 0.8;
+  const broadScaleM = VEGETATION_DISTRIBUTION_TUNING.broadStandScaleM * scaleFactor;
+  const detailScaleM = VEGETATION_DISTRIBUTION_TUNING.edgeDetailScaleM * scaleFactor;
+  const clearingScaleM = VEGETATION_DISTRIBUTION_TUNING.clearingScaleM * scaleFactor;
   for (let i = 0; i < state.grid.totalTiles; i += 1) {
     if (oceanMask[i] || riverMask[i] > 0) {
       suitability[i] = 0;
       elevationStress[i] = 1;
       slopeStress[i] = 1;
+      clusterMap[i] = 0;
+      siteQualityMap[i] = 0;
       continue;
     }
     const tile = state.tiles[i];
@@ -114,6 +143,34 @@ export const buildBiomeSuitability = (ctx: MapGenContext): Float32Array => {
     const moisture = moistureMap[i] ?? 0;
     const valley = state.valleyMap[i] ?? 0;
     const seaLevel = seaLevelMap[i] ?? 0;
+    const worldX = ctx.worldOffsetXM + x * ctx.cellSizeM;
+    const worldY = ctx.worldOffsetYM + y * ctx.cellSizeM;
+    const broadCluster = vegetationFbmNoise(worldX / broadScaleM, worldY / broadScaleM, state.seed + 31_013, 3);
+    const edgeCluster = vegetationFbmNoise(worldX / detailScaleM, worldY / detailScaleM, state.seed + 31_037, 2);
+    const clearingNoise = vegetationFbmNoise(worldX / clearingScaleM, worldY / clearingScaleM, state.seed + 31_061, 2);
+    const clearingCut = Math.max(0, (0.42 - clearingNoise) * (0.45 + patchiness * 0.55));
+    const rawClusterScore = broadCluster * 0.76 + edgeCluster * 0.24 - clearingCut;
+    const windExposure = ctx.windExposureMap?.[i] ?? 0;
+    const leeShelter = ctx.leeShelterMap?.[i] ?? 0;
+    const curvature = ctx.terrainCurvatureMap?.[i] ?? 0;
+    const drainage = ctx.drainageMap?.[i] ?? 0;
+    const coastExposure = ctx.coastExposureMap?.[i] ?? 0;
+    const terrainClusterShift =
+      leeShelter * VEGETATION_DISTRIBUTION_TUNING.clusterLeeShelterWeight +
+      drainage * VEGETATION_DISTRIBUTION_TUNING.clusterDrainageWeight +
+      Math.max(0, -curvature) * VEGETATION_DISTRIBUTION_TUNING.clusterConcavityWeight -
+      windExposure * VEGETATION_DISTRIBUTION_TUNING.clusterWindExposurePenalty -
+      coastExposure * VEGETATION_DISTRIBUTION_TUNING.clusterCoastExposurePenalty;
+    const clusterScore = Math.max(
+      0,
+      Math.min(
+        1,
+        0.5 +
+          (rawClusterScore - 0.5) * VEGETATION_DISTRIBUTION_TUNING.forestClusterContrast +
+          terrainClusterShift
+      )
+    );
+    clusterMap[i] = clusterScore;
     const details = computeBiomeSuitabilityDetails({
       elevation,
       slope,
@@ -124,13 +181,19 @@ export const buildBiomeSuitability = (ctx: MapGenContext): Float32Array => {
       seed: state.seed,
       x,
       y,
-      worldX: ctx.worldOffsetXM + x * ctx.cellSizeM,
-      worldY: ctx.worldOffsetYM + y * ctx.cellSizeM,
+      worldX,
+      worldY,
       cellSizeM: ctx.cellSizeM,
       waterDist: tile?.waterDist ?? ctx.waterDistMap?.[i] ?? 24,
       vegetationDensity: settings.vegetationDensity,
       forestPatchiness: settings.forestPatchiness,
-      slopeAngleDeg
+      slopeAngleDeg,
+      windExposure,
+      leeShelter,
+      curvature,
+      drainage,
+      coastExposure,
+      clusterScore
     });
     suitability[i] = details.treeSuitability;
     elevationStress[i] = details.elevationStress;
@@ -138,11 +201,14 @@ export const buildBiomeSuitability = (ctx: MapGenContext): Float32Array => {
     treeSuitability[i] = details.treeSuitability;
     treeProbability[i] = details.treeProbability;
     treeDensity[i] = details.treeDensity;
+    siteQualityMap[i] = details.siteQuality;
   }
   ctx.elevationStressMap = elevationStress;
   ctx.slopeStressMap = slopeStress;
   ctx.treeSuitabilityMap = treeSuitability;
   ctx.treeProbabilityMap = treeProbability;
   ctx.treeDensityMap = treeDensity;
+  ctx.vegetationClusterMap = clusterMap;
+  ctx.vegetationSiteQualityMap = siteQualityMap;
   return suitability;
 };

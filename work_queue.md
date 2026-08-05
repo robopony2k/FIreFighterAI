@@ -18,6 +18,48 @@ Notes: Source analysis showed the ocean used positive time in wind-biased wave p
 
 Status: done
 
+TSK-0176: Redistribute vegetation into terrain-responsive woodland clusters
+
+Type: feature
+
+Why: Broadly uniform tree placement obscured terrain and climate character, produced planted-looking edges, and did not keep campaign succession aligned with sheltered or exposed terrain.
+
+Done when:
+- [x] Mapgen derives deterministic moisture, wind exposure, lee shelter, curvature, drainage, coast exposure, cluster, and site-quality fields in bounded linear passes.
+- [x] Forest spread produces coherent stands, retained clearings, pruned speckles, and terrain-responsive canopy/stem structure without adding hidden fire modifiers.
+- [x] Campaign succession reuses cached terrain site quality and render-only tree candidates use deterministic blue-noise placement with fair global budget thinning.
+- [x] Focused vegetation plus climate, growth, grounding, renderer, runtime, and mapgen regressions pass.
+- [ ] Normal strategic-camera appearance is approved from a supported Browser surface or supplied captures across representative seeds and terrain archetypes.
+
+Touchpoints: `src/systems/terrain/sim/`, `src/mapgen/biome/`, `src/systems/terrain/rendering/vegetation/`, `scripts/vegetation-distribution-regression.mjs`
+
+Constraints: preserve seed determinism, saved-setting/share-code compatibility, explicit fuel authority, and O(n) generation/rebuild work without runtime spatial queries.
+
+Notes: Source implementation and automated acceptance are complete. Live visual approval remains open because the current VS Code Codex surface cannot inspect the running WebGL view.
+
+Status: done
+
+TSK-0176A: Tune terrain-responsive vegetation for strategic-camera readability
+
+Type: polish
+
+Why: The first strategic-camera capture shows a dense coastal vegetation ring, sparse sheltered inland terrain, weak broad windward/leeward contrast, residual isolated trees, and insufficient visual separation between coastal scrub and inland woodland.
+
+Done when:
+- [x] Tall-tree density no longer forms a continuous coastal perimeter; exposed coast reads primarily as scrub or low vegetation, with trees limited to coherent sheltered pockets.
+- [x] Sheltered inland valleys, leeward slope faces, gullies, and drainage corridors form readable woodland regions while ridges, rock, infrastructure, and town sightlines remain open.
+- [x] Forest masks and render placement have softer coherent edges and materially fewer isolated outlier trees without removing intentional clearings.
+- [x] Deterministic field and placement hashes, O(n) generation/rebuild behavior, instance budgets, and authoritative fuel/biome separation remain intact.
+- [ ] Fixed-state strategic-camera captures pass across at least three seeds and the Massif, Long Spine, and Shelf terrain archetypes.
+
+Touchpoints: `src/systems/terrain/constants/vegetationDistributionTuning.ts`, `src/systems/terrain/sim/vegetationTerrainFields.ts`, `src/systems/terrain/sim/treeSuitability.ts`, `src/mapgen/biome/BiomeSuitability.ts`, `src/mapgen/biome/ForestSpread.ts`, `src/systems/terrain/rendering/vegetation/treePlacementPlan.ts`, `src/render/threeTestTerrain.ts`, `scripts/vegetation-distribution-regression.mjs`
+
+Constraints: correct the measured grass/scrub tall-tree leakage and recalibrate the existing moisture/exposure fields before considering any larger architecture change. Add only a bounded broad-scale wind aggregation if normalized field tuning cannot make slope-face response coherent. Preserve saves, share codes, simulation authority, deterministic seeds, instance budgets, and no runtime spatial queries.
+
+Notes: Planned from user-supplied August 5, 2026 strategic-camera captures. Reproduction share code `MAP6-I2W7TL-21002P23131P261G0L1K1W281N02002M191K0Y1M1A1E181Q0K1K12161C` decodes to colossal Long Spine seed `1093253529`, vegetation density `0.52`, patchiness `0.42`, and 20 years of pre-growth. Before tuning, only `2.46%` of land was forest; the first eight coastal tiles were `11.09%` forest versus `1.11%` inland, grass supplied roughly `5,324` tall-tree candidates, and the exposure/shelter fields were too weak to affect broad faces. The final production pipeline now has `0%` forest in the first eight coastal tiles, `3.08%` deep-inland forest, `27.05%` lower-leeward coverage, `34.56%` inland sheltered-drainage coverage, zero grass tall-tree candidates, and approximately `97%` of tall-tree candidate weight from actual forest. TypeScript, focused vegetation, mapgen, climate, growth, grounding, renderer, and runtime-performance regressions pass. The supplied still is sufficient to identify the original static distribution problems, but final multi-seed appearance, LOD stability, and camera-motion approval remain open.
+
+Status: in-progress
+
 TSK-0175: Prototype volumetric grass fidelity in FX Lab
 
 Type: feature

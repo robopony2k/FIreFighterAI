@@ -2,6 +2,7 @@ import type { Tile } from "../../../core/types.js";
 import { clamp } from "../../../core/utils.js";
 import { hash2D } from "../../../mapgen/noise.js";
 import type { WorldClimateSeed } from "../../climate/types/worldClimateSeed.js";
+import { VEGETATION_DISTRIBUTION_TUNING } from "../constants/vegetationDistributionTuning.js";
 
 export type WindDrivenMoistureInput = {
   seed: number;
@@ -15,8 +16,13 @@ export type WindDrivenMoistureInput = {
   yieldIfNeeded?: () => Promise<boolean>;
 };
 
+export type WindDrivenMoistureFields = {
+  moisture: Float32Array;
+  windwardExposure: Float32Array;
+  leeShelter: Float32Array;
+};
+
 const AIR_INJECTION_WATER = 0.96;
-const AIR_DECAY = 0.985;
 const SHADOW_DECAY = 0.9;
 const MIN_BUCKETS = 32;
 const MAX_BUCKETS_PER_AXIS = 3;
@@ -36,8 +42,8 @@ const bucketIndexFor = (
 };
 
 const getDirectionalStep = (windX: number, windY: number): { x: number; y: number } => {
-  const x = windX > 0.33 ? 1 : windX < -0.33 ? -1 : 0;
-  const y = windY > 0.33 ? 1 : windY < -0.33 ? -1 : 0;
+  const x = windX > 0.414 ? 1 : windX < -0.414 ? -1 : 0;
+  const y = windY > 0.414 ? 1 : windY < -0.414 ? -1 : 0;
   if (x !== 0 || y !== 0) {
     return { x, y };
   }
@@ -74,9 +80,9 @@ const propagateAir = (
   nextShadow: number
 ): void => {
   const targets = [
-    { x: x + step.x, y: y + step.y, weight: 0.72 },
-    { x: x + step.x - step.y, y: y + step.y + step.x, weight: 0.14 },
-    { x: x + step.x + step.y, y: y + step.y - step.x, weight: 0.14 }
+    { x: x + step.x, y: y + step.y, weight: VEGETATION_DISTRIBUTION_TUNING.windMainFlowRetention },
+    { x: x + step.x - step.y, y: y + step.y + step.x, weight: VEGETATION_DISTRIBUTION_TUNING.windLateralFlowRetention },
+    { x: x + step.x + step.y, y: y + step.y - step.x, weight: VEGETATION_DISTRIBUTION_TUNING.windLateralFlowRetention }
   ];
 
   for (const target of targets) {
@@ -94,15 +100,17 @@ const propagateAir = (
   }
 };
 
-export const buildWindDrivenMoistureMap = async (
+export const buildWindDrivenMoistureFields = async (
   input: WindDrivenMoistureInput
-): Promise<Float32Array> => {
+): Promise<WindDrivenMoistureFields> => {
   const { seed, cols, rows, tiles, distToWater, climate, report, yieldIfNeeded } = input;
   const total = cols * rows;
   const moisture = new Float32Array(total);
   const air = new Float32Array(total);
   const shadow = new Float32Array(total);
   const rainfall = new Float32Array(total);
+  const windwardExposure = new Float32Array(total);
+  const leeShelter = new Float32Array(total);
   const maxWaterDistance = Math.max(1, Math.min(0xffff - 1, Math.floor(input.maxWaterDistance)));
   const windX = Math.cos(climate.prevailingWindAngleRad);
   const windY = Math.sin(climate.prevailingWindAngleRad);
@@ -157,6 +165,8 @@ export const buildWindDrivenMoistureMap = async (
         air[idx] = Math.max(air[idx], AIR_INJECTION_WATER + rainfallBias * 0.15);
         rainfall[idx] = 1;
         moisture[idx] = 1;
+        windwardExposure[idx] = 0;
+        leeShelter[idx] = 0;
       } else {
         const incomingAir = clamp(air[idx], 0, 1.3);
         const incomingShadow = clamp(shadow[idx], 0, 1);
@@ -164,6 +174,17 @@ export const buildWindDrivenMoistureMap = async (
         const downwindElevation = getElevationAt(tiles, cols, rows, x + step.x, y + step.y, elevation);
         const windwardRise = Math.max(0, elevation - upwindElevation);
         const leewardDrop = Math.max(0, elevation - downwindElevation);
+        const upwindBarrier = Math.max(0, upwindElevation - elevation);
+        windwardExposure[idx] = clamp(
+          (windwardRise / 0.055) * (0.62 + windStrength * 0.38) + Math.max(0, elevation - 0.68) * 0.2,
+          0,
+          1
+        );
+        leeShelter[idx] = clamp(
+          incomingShadow * 0.72 + (upwindBarrier / 0.05) * 0.28,
+          0,
+          1
+        );
         const orographicRain = clamp(windwardRise * (1.8 + windStrength * 1.6), 0, 0.44);
         const baseDeposit = incomingAir * (0.09 + windStrength * 0.11);
         const deposit = clamp(baseDeposit + orographicRain + rainfallBias * 0.08 - incomingShadow * 0.16, 0, 0.78);
@@ -177,10 +198,11 @@ export const buildWindDrivenMoistureMap = async (
         const leewardDrying = leewardDrop * windStrength * 0.28;
 
         moisture[idx] = clamp(
-          distanceMoisture * 0.46 +
-            deposit * 0.52 +
-            orographicRain * 0.26 -
-            elevationDryness * 0.22 -
+          VEGETATION_DISTRIBUTION_TUNING.inlandMoistureBase +
+            distanceMoisture * VEGETATION_DISTRIBUTION_TUNING.moistureDistanceWeight +
+            deposit * VEGETATION_DISTRIBUTION_TUNING.moistureDepositWeight +
+            orographicRain * VEGETATION_DISTRIBUTION_TUNING.moistureOrographicWeight -
+            elevationDryness * VEGETATION_DISTRIBUTION_TUNING.moistureElevationDrying -
             shadowDrying -
             leewardDrying -
             aridityBias * 0.22 +
@@ -191,8 +213,11 @@ export const buildWindDrivenMoistureMap = async (
       }
 
       const retainedAir = clamp(
-        (air[idx] + (tile?.type === "water" ? AIR_INJECTION_WATER : 0)) * AIR_DECAY -
-          rainfall[idx] * (0.42 + windStrength * 0.18),
+        (air[idx] + (tile?.type === "water" ? AIR_INJECTION_WATER : 0)) *
+          VEGETATION_DISTRIBUTION_TUNING.windAirDecay -
+          rainfall[idx] *
+            (VEGETATION_DISTRIBUTION_TUNING.windRainoutBase +
+              windStrength * VEGETATION_DISTRIBUTION_TUNING.windRainoutStrengthScale),
         0,
         1.2
       );
@@ -211,5 +236,9 @@ export const buildWindDrivenMoistureMap = async (
   for (let i = 0; i < total; i += 1) {
     moisture[i] = tiles[i]?.type === "water" ? 1 : clamp(moisture[i] ?? 0, 0, 1);
   }
-  return moisture;
+  return { moisture, windwardExposure, leeShelter };
 };
+
+export const buildWindDrivenMoistureMap = async (
+  input: WindDrivenMoistureInput
+): Promise<Float32Array> => (await buildWindDrivenMoistureFields(input)).moisture;

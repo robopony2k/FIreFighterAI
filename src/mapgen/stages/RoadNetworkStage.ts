@@ -101,7 +101,14 @@ export const RoadNetworkStage: PipelineStage = {
           tile.isBase = false;
         }
       }
-      seedInitialVegetationState(ctx.state, ctx.biomeSuitabilityMap, ctx.microMap, ctx.meadowMaskMap, ctx.treeDensityMap);
+      seedInitialVegetationState(
+        ctx.state,
+        ctx.biomeSuitabilityMap,
+        ctx.microMap,
+        ctx.meadowMaskMap,
+        ctx.treeDensityMap,
+        ctx.vegetationSiteQualityMap
+      );
       assignForestComposition(ctx.state);
       await ctx.reportStage(
         ctx.settings.skipRoadNetworkRouting

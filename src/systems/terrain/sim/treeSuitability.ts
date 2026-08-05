@@ -1,5 +1,6 @@
 import { clamp } from "../../../core/utils.js";
 import { fbmNoise, hash2D } from "../../../mapgen/noise.js";
+import { VEGETATION_DISTRIBUTION_TUNING } from "../constants/vegetationDistributionTuning.js";
 export { computeRenderedSlopeAngleDeg } from "../../../shared/terrainSlope.js";
 
 export type TreeSuitabilityInput = {
@@ -20,6 +21,12 @@ export type TreeSuitabilityInput = {
   forestPatchiness: number;
   slopeAngleDeg?: number;
   isWater?: boolean;
+  windExposure?: number;
+  leeShelter?: number;
+  curvature?: number;
+  drainage?: number;
+  coastExposure?: number;
+  clusterScore?: number;
 };
 
 export type TreeSuitabilityResult = {
@@ -31,6 +38,13 @@ export type TreeSuitabilityResult = {
   treeSuitability: number;
   treeProbability: number;
   treeDensity: number;
+  windExposure: number;
+  leeShelter: number;
+  curvature: number;
+  drainage: number;
+  coastExposure: number;
+  clusterScore: number;
+  siteQuality: number;
 };
 
 const smoothstep = (edge0: number, edge1: number, value: number): number => {
@@ -79,7 +93,14 @@ export const computeTreeSuitability = (input: TreeSuitabilityInput): TreeSuitabi
       localBiomeNoise: 0.5,
       treeSuitability: 0,
       treeProbability: 0,
-      treeDensity: 0
+      treeDensity: 0,
+      windExposure: 0,
+      leeShelter: 0,
+      curvature: 0,
+      drainage: 0,
+      coastExposure: 0,
+      clusterScore: 0.5,
+      siteQuality: 0
     };
   }
 
@@ -93,13 +114,21 @@ export const computeTreeSuitability = (input: TreeSuitabilityInput): TreeSuitabi
   const moisture = clamp(input.moisture, 0, 1);
   const waterDistM = Math.max(0, input.waterDist) * cellSizeM;
   const headroom = Math.max(0, elevation - input.seaLevel);
+  const windExposure = clamp(input.windExposure ?? 0, 0, 1);
+  const leeShelter = clamp(input.leeShelter ?? 0, 0, 1);
+  const curvature = clamp(input.curvature ?? 0, -1, 1);
+  const drainage = clamp(input.drainage ?? 0, 0, 1);
+  const coastExposure = clamp(input.coastExposure ?? 0, 0, 1);
+  const clusterScore = clamp(input.clusterScore ?? 0.5, 0, 1);
+  const ridgeCurvature = Math.max(0, curvature);
+  const gullyCurvature = Math.max(0, -curvature);
 
   const waterInfluence =
     smoothstep(320, 24, waterDistM) * 0.62 +
     smoothstep(90, 0, waterDistM) * 0.2 +
     smoothstep(0.035, 0.22, input.valley) * smoothstep(0.24, 0.02, slope) * 0.18;
   const effectiveMoisture = clamp(moisture + waterInfluence * 0.24, 0, 1);
-  const moistureFactor = smoothstep(0.18, 0.68, effectiveMoisture);
+  const moistureFactor = smoothstep(0.12, 0.58, effectiveMoisture);
 
   const highlandStart = Math.max(input.seaLevel + 0.16, input.highlandForestElevation - 0.18);
   const highlandEnd = Math.min(0.98, input.highlandForestElevation + 0.2);
@@ -126,15 +155,33 @@ export const computeTreeSuitability = (input: TreeSuitabilityInput): TreeSuitabi
     1
   );
   const baseSuitability = clamp(wetBase * stressFactor, 0, 1);
-  const transition = transitionWeight(baseSuitability);
+  const protectedInland =
+    (1 - coastExposure) *
+    (1 - windExposure) *
+    clamp(0.45 + leeShelter * 0.35 + drainage * 0.2, 0, 1);
+  const terrainResponse =
+    protectedInland * VEGETATION_DISTRIBUTION_TUNING.protectedInlandBonus +
+    leeShelter * VEGETATION_DISTRIBUTION_TUNING.leeShelterBonus +
+    drainage * VEGETATION_DISTRIBUTION_TUNING.drainageBonus +
+    gullyCurvature * VEGETATION_DISTRIBUTION_TUNING.concavityBonus -
+    windExposure * VEGETATION_DISTRIBUTION_TUNING.windExposurePenalty -
+    ridgeCurvature * VEGETATION_DISTRIBUTION_TUNING.ridgePenalty -
+    coastExposure * VEGETATION_DISTRIBUTION_TUNING.coastExposurePenalty;
+  const siteQuality = clamp(baseSuitability + terrainResponse, 0, 1);
+  const transition = transitionWeight(siteQuality);
   const noiseShift =
     (macroNoise - 0.5) * (0.2 + patchiness * 0.2) +
     (patchNoise - 0.5) * transition * (0.12 + patchiness * 0.18);
   const localBiomeNoise = clamp(macroNoise * 0.7 + patchNoise * 0.3, 0, 1);
-  const treeSuitability = clamp(baseSuitability + noiseShift, 0, 1);
+  const clusterShift = (clusterScore - 0.5) * (0.18 + patchiness * 0.28);
+  const treeSuitability = clamp(siteQuality + noiseShift + clusterShift, 0, 1);
   const densityBias = 0.86 + vegetationDensity * 0.34;
+  const coastTreeFactor = clamp(Math.exp(-coastExposure * 5), 0.04, 1);
   const treeProbability = clamp(
-    smoothstep(0.24, 0.76, treeSuitability) * densityBias * (0.9 + transition * patchiness * 0.16),
+    smoothstep(0.2, 0.68, treeSuitability) *
+      densityBias *
+      (0.9 + transition * patchiness * 0.16) *
+      coastTreeFactor,
     0,
     1
   );
@@ -149,6 +196,13 @@ export const computeTreeSuitability = (input: TreeSuitabilityInput): TreeSuitabi
     localBiomeNoise,
     treeSuitability,
     treeProbability,
-    treeDensity
+    treeDensity,
+    windExposure,
+    leeShelter,
+    curvature,
+    drainage,
+    coastExposure,
+    clusterScore,
+    siteQuality
   };
 };

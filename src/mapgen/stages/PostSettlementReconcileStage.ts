@@ -3,6 +3,8 @@ import { TILE_TYPE_IDS } from "../../core/state.js";
 import type { TileType } from "../../core/types.js";
 import { clamp } from "../../core/utils.js";
 import { clearVegetationState } from "../../core/vegetation.js";
+import { generateWorldClimateSeed } from "../../systems/climate/sim/worldClimateSeed.js";
+import { buildVegetationTerrainFields } from "../../systems/terrain/sim/vegetationTerrainFields.js";
 import { computeRenderedSlopeAngleDeg } from "../../shared/terrainSlope.js";
 import type { PipelineStage } from "../pipeline/TerrainPipeline.js";
 import { computeBiomeSuitabilityDetails } from "../biome/BiomeSuitability.js";
@@ -60,6 +62,31 @@ export const PostSettlementReconcileStage: PipelineStage = {
       await emitStageSnapshot(ctx, "reconcile:postSettlement");
       return;
     }
+
+    const climate = generateWorldClimateSeed(state.seed);
+    const finalTerrainFields = buildVegetationTerrainFields({
+      cols: state.grid.cols,
+      rows: state.grid.rows,
+      cellSizeM: ctx.cellSizeM,
+      elevations: ctx.elevationMap,
+      baseMoisture: ctx.moistureMap,
+      waterDistance: ctx.waterDistMap ?? state.tiles.map((tile) => tile.waterDist),
+      coastDistance: state.tileCoastDistance,
+      valley: state.valleyMap,
+      runoff: ctx.runoffMap,
+      oceanMask: ctx.oceanMask,
+      riverMask: ctx.riverMask,
+      lakeMask: state.tileLakeMask,
+      prevailingWindDx: Math.cos(climate.prevailingWindAngleRad),
+      prevailingWindDy: Math.sin(climate.prevailingWindAngleRad),
+      prevailingWindStrength: climate.prevailingWindStrength,
+      refineMoisture: false
+    });
+    ctx.windExposureMap = finalTerrainFields.windExposure;
+    ctx.leeShelterMap = finalTerrainFields.leeShelter;
+    ctx.terrainCurvatureMap = finalTerrainFields.curvature;
+    ctx.drainageMap = finalTerrainFields.drainage;
+    ctx.coastExposureMap = finalTerrainFields.coastExposure;
 
     let processed = 0;
     const total = regions.reduce((sum, region) => sum + (region.maxX - region.minX + 1) * (region.maxY - region.minY + 1), 0);
@@ -161,7 +188,13 @@ export const PostSettlementReconcileStage: PipelineStage = {
               waterDist: tile.waterDist,
               vegetationDensity: ctx.settings.vegetationDensity,
               forestPatchiness: ctx.settings.forestPatchiness,
-              slopeAngleDeg
+              slopeAngleDeg,
+              windExposure: ctx.windExposureMap?.[idx] ?? 0,
+              leeShelter: ctx.leeShelterMap?.[idx] ?? 0,
+              curvature: ctx.terrainCurvatureMap?.[idx] ?? 0,
+              drainage: ctx.drainageMap?.[idx] ?? 0,
+              coastExposure: ctx.coastExposureMap?.[idx] ?? 0,
+              clusterScore: ctx.vegetationClusterMap?.[idx] ?? 0.5
             });
             const suitability = details.treeSuitability;
             ctx.biomeSuitabilityMap[idx] = suitability;
@@ -179,6 +212,9 @@ export const PostSettlementReconcileStage: PipelineStage = {
             }
             if (ctx.treeDensityMap) {
               ctx.treeDensityMap[idx] = details.treeDensity;
+            }
+            if (ctx.vegetationSiteQualityMap) {
+              ctx.vegetationSiteQualityMap[idx] = details.siteQuality;
             }
             let forestNeighborCount = 0;
             for (let dy = -1; dy <= 1; dy += 1) {
@@ -275,7 +311,14 @@ export const PostSettlementReconcileStage: PipelineStage = {
         }
       }
     }
-    seedInitialVegetationState(state, ctx.biomeSuitabilityMap, ctx.microMap, ctx.meadowMaskMap, ctx.treeDensityMap);
+    seedInitialVegetationState(
+      state,
+      ctx.biomeSuitabilityMap,
+      ctx.microMap,
+      ctx.meadowMaskMap,
+      ctx.treeDensityMap,
+      ctx.vegetationSiteQualityMap
+    );
     assignForestComposition(state);
     await emitStageSnapshot(ctx, "reconcile:postSettlement");
   }

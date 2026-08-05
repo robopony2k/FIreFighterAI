@@ -41,6 +41,8 @@ Context:
 - `roads:connect` is non-noop and owns road/bridge network carving plus edge-mask stamping (`WorldState.tileRoadEdges`).
 - Post-settlement reconcile only touches dirty regions captured from settlement deltas.
 - `biome:spread` builds deterministic suitability and `forestMask` layers before `biome:classify`.
+- `biome:fields` also derives broad prevailing-wind slope-face exposure, lee shelter, local curvature, drainage, exponentially tapered coast exposure, and corrected static moisture with persistent inland air transport; `biome:spread` combines them with seeded world-metre cluster and clearing fields biased toward protected inland terrain.
+- Post-settlement reconcile refreshes the terrain-response fields from final graded terrain without applying the static moisture correction a second time.
 
 ## Maintenance Notes
 - Active pipeline stage execution lives in `src/mapgen/stages/`.

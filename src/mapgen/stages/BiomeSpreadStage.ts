@@ -14,6 +14,8 @@ export const BiomeSpreadStage: PipelineStage = {
       ctx.treeSuitabilityMap = null;
       ctx.treeProbabilityMap = null;
       ctx.treeDensityMap = null;
+      ctx.vegetationClusterMap = null;
+      ctx.vegetationSiteQualityMap = null;
       ctx.forestMask = null;
       await ctx.reportStage("Biome spread skipped (legacy mode).", 1);
       await emitStageSnapshot(ctx, "biome:spread");

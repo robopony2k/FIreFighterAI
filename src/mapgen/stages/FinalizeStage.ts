@@ -18,7 +18,14 @@ export const FinalizeStage: PipelineStage = {
   weight: 6,
   run: async (ctx) => {
     const { state, rng, settings, cellSizeM } = ctx;
-    seedInitialVegetationState(state, ctx.biomeSuitabilityMap, ctx.microMap, ctx.meadowMaskMap, ctx.treeDensityMap);
+    seedInitialVegetationState(
+      state,
+      ctx.biomeSuitabilityMap,
+      ctx.microMap,
+      ctx.meadowMaskMap,
+      ctx.treeDensityMap,
+      ctx.vegetationSiteQualityMap
+    );
     assignForestComposition(state);
     applyVegetationPreGrowth(state, settings.vegetationPreGrowthYears, rng);
     state.vegetationRevision += 1;

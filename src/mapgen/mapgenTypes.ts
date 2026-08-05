@@ -39,6 +39,12 @@ export type MapGenDebugSnapshot = {
   slopeStress?: Float32Array;
   treeSuitability?: Float32Array;
   treeProbability?: Float32Array;
+  windExposure?: Float32Array;
+  leeShelter?: Float32Array;
+  terrainCurvature?: Float32Array;
+  drainage?: Float32Array;
+  vegetationCluster?: Float32Array;
+  vegetationSiteQuality?: Float32Array;
   lakeMask?: Uint16Array;
   lakeSurface?: Float32Array;
   lakeOutletMask?: Uint8Array;

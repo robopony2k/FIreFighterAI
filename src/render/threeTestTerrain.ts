@@ -117,6 +117,12 @@ import {
 } from "../systems/terrain/rendering/terrainRenderChunks.js";
 import { resolveTreeGrounding } from "../systems/terrain/rendering/vegetation/treeGrounding.js";
 import { buildTreeLod } from "../systems/terrain/rendering/vegetation/treeLodController.js";
+import {
+  computeTreeBudgetScale,
+  computeTreeDensityGradient,
+  getTallTreeAttemptWeight,
+  resolveTreeCandidateOffset
+} from "../systems/terrain/rendering/vegetation/treePlacementPlan.js";
 import type {
   TreeImpostorAtlas,
   TreeImpostorInstance,
@@ -3316,6 +3322,37 @@ export const buildTerrainMesh = (
   const tileVegetationAge = sample.tileVegetationAge;
   const tileCanopyCover = sample.tileCanopyCover;
   const tileStemDensity = sample.tileStemDensity;
+  const getTreeAttemptWeight = (typeId: number): number =>
+    typeId === forestId
+      ? getTallTreeAttemptWeight("forest")
+      : typeId === scrubId
+        ? getTallTreeAttemptWeight("scrub")
+        : typeId === floodplainId
+          ? getTallTreeAttemptWeight("floodplain")
+          : typeId === grassId
+            ? getTallTreeAttemptWeight("grass")
+            : 0;
+  let estimatedTreeCandidates = 0;
+  if (sample.tileTypes && tileStemDensity && tileCanopyCover) {
+    for (let idx = 0; idx < sample.tileTypes.length; idx += 1) {
+      const typeId = sample.tileTypes[idx];
+      const isForest = typeId === forestId;
+      const isVegetation = isForest || typeId === scrubId || typeId === floodplainId || typeId === grassId;
+      if (!isVegetation) continue;
+      const stemDensity = Math.max(0, tileStemDensity[idx] ?? 0);
+      const canopyCover = clamp(tileCanopyCover[idx] ?? 0, 0, 1);
+      const attemptWeight = getTreeAttemptWeight(typeId);
+      if (stemDensity <= 0 || canopyCover <= 0.015 || attemptWeight <= 0) continue;
+      const rawCount =
+        stemDensity *
+        attemptWeight *
+        Math.min(1.5, 1 + Math.max(0, step - 1) * 0.2) *
+        treeDensitySafetyScale *
+        (0.4 + canopyCover * 0.8);
+      estimatedTreeCandidates += Math.min(Math.max(1, treeAttemptCap * 2 + 1), Math.max(1, Math.ceil(rawCount)));
+    }
+  }
+  const treeBudgetScale = computeTreeBudgetScale(estimatedTreeCandidates, treeInstanceBudget);
   const birchId = TREE_TYPE_IDS[TreeType.Birch];
   const pineId = TREE_TYPE_IDS[TreeType.Pine];
   const oakId = TREE_TYPE_IDS[TreeType.Oak];
@@ -3421,8 +3458,15 @@ export const buildTerrainMesh = (
       const stemDensity = Math.max(0, tileStemDensity?.[idx] ?? 0);
       const canopyCover = clamp(tileCanopyCover?.[idx] ?? 0, 0, 1);
       const vegetationAgeYears = Math.max(0, tileVegetationAge?.[idx] ?? 0);
+      const treeAttemptWeight = getTreeAttemptWeight(typeId);
       let placedTreeOnTile = false;
-      if (vegetationType && stemDensity > 0 && canopyCover > 0.015 && treeInstances.length < treeInstanceBudget) {
+      if (
+        vegetationType &&
+        treeAttemptWeight > 0 &&
+        stemDensity > 0 &&
+        canopyCover > 0.015 &&
+        treeInstances.length < treeInstanceBudget
+      ) {
         const dominantId = treeTypes ? treeTypes[idx] : 255;
         const isForest = typeId === forestId;
         const forestScale =
@@ -3439,7 +3483,7 @@ export const buildTerrainMesh = (
                   : 1;
         const baseScale =
           TREE_SCALE_BASE + Math.min(TREE_SCALE_STEP_CAP, Math.max(0, step - 1) * TREE_SCALE_STEP_GAIN);
-        const typeScale = isForest ? forestScale : typeId === scrubId ? 0.75 : 0.6;
+        const typeScale = isForest ? forestScale : typeId === scrubId ? 0.48 : 0.58;
         const vegetationHeightScale = getVegetationRenderHeightMultiplier(vegetationType, vegetationAgeYears);
         const canopyHeightScale = clamp(0.72 + canopyCover * 0.55, 0.72, 1.28);
         let treeType: TreeType = TreeType.Scrub;
@@ -3459,7 +3503,7 @@ export const buildTerrainMesh = (
         const variants = hasTreeAssets ? getTreeVariants(treeType) : [];
         const rawCount =
           stemDensity *
-          (isForest ? 0.45 : typeId === scrubId ? 0.4 : 0.35) *
+          treeAttemptWeight *
           densityScale *
           (0.4 + canopyCover * 0.8);
         let attempts = Math.min(Math.max(1, treeAttemptCap * 2 + 1), Math.floor(rawCount));
@@ -3470,13 +3514,25 @@ export const buildTerrainMesh = (
         ) {
           attempts += 1;
         }
+        const densityGradient = computeTreeDensityGradient(tileStemDensity, cols, rows, tileX, tileY);
         for (let attempt = 0; attempt < attempts; attempt += 1) {
           if (treeInstances.length >= treeInstanceBudget) {
             break;
           }
           const jitterRange = Math.max(0.1, step * 0.42);
-          const jitterX = (noiseAt(idx + 0.27 + attempt * 0.31) - 0.5) * jitterRange;
-          const jitterZ = (noiseAt(idx + 0.61 + attempt * 0.29) - 0.5) * jitterRange;
+          const candidate = resolveTreeCandidateOffset({
+            worldSeed: sample.worldSeed ?? 0,
+            tileX,
+            tileY,
+            attempt,
+            jitterRange,
+            densityGradient
+          });
+          if (candidate.priority > treeBudgetScale) {
+            continue;
+          }
+          const jitterX = candidate.x;
+          const jitterZ = candidate.y;
           const variantIndex =
             variants.length > 0 ? Math.floor(noiseAt(idx + 9.7 + attempt * 0.53) * variants.length) : 0;
           const variant = variants.length > 0 ? variants[variantIndex] ?? variants[0] : null;
@@ -3532,8 +3588,16 @@ export const buildTerrainMesh = (
         );
         if (noiseAt(idx + 14.39) < placeholderChance) {
           const jitterRange = Math.max(0.1, step * 0.34);
-          const jitterX = (noiseAt(idx + 2.91) - 0.5) * jitterRange;
-          const jitterZ = (noiseAt(idx + 3.17) - 0.5) * jitterRange;
+          const scrubCandidate = resolveTreeCandidateOffset({
+            worldSeed: sample.worldSeed ?? 0,
+            tileX,
+            tileY,
+            attempt: 0,
+            jitterRange,
+            densityGradient: computeTreeDensityGradient(tileStemDensity, cols, rows, tileX, tileY)
+          });
+          const jitterX = scrubCandidate.x;
+          const jitterZ = scrubCandidate.y;
           if (hasNativeScrubVariants && treeInstances.length < treeInstanceBudget) {
             const scrubVariants = getTreeVariants(TreeType.Scrub);
             const variantIndex =
@@ -3543,7 +3607,7 @@ export const buildTerrainMesh = (
               TREE_SCALE_BASE + Math.min(TREE_SCALE_STEP_CAP, Math.max(0, step - 1) * TREE_SCALE_STEP_GAIN);
             const targetHeight =
               baseScale *
-              0.75 *
+              0.48 *
               getVegetationRenderHeightMultiplier("scrub", vegetationAgeYears) *
               clamp(0.76 + canopyCover * 0.5, 0.76, 1.18) *
               TREE_HEIGHT_FACTOR;

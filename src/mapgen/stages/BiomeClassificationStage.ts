@@ -36,7 +36,6 @@ export const BiomeClassificationStage: PipelineStage = {
       microMap,
       meadowMaskMap,
       biomeSuitabilityMap,
-      treeProbabilityMap,
       treeDensityMap,
       forestMask,
       waterfallDropMap,
@@ -57,7 +56,7 @@ export const BiomeClassificationStage: PipelineStage = {
     }
 
     const useSeedSpread = settings.biomeClassifierMode === "seedSpread";
-    if (useSeedSpread && (!biomeSuitabilityMap || !forestMask || !treeProbabilityMap || !treeDensityMap)) {
+    if (useSeedSpread && (!biomeSuitabilityMap || !forestMask || !treeDensityMap)) {
       throw new Error("Seed-spread biome classification missing spread maps.");
     }
 
@@ -128,7 +127,7 @@ export const BiomeClassificationStage: PipelineStage = {
                 moisture,
                 seaLevel,
                 highlandForestElevation: settings.highlandForestElevation,
-                forestCandidate: (forestMask?.[idx] ?? 0) > 0 || (treeProbabilityMap?.[idx] ?? 0) >= 0.78,
+                forestCandidate: (forestMask?.[idx] ?? 0) > 0,
                 localContext,
                 seededNoiseOffset,
                 slopeAngleDeg
@@ -212,7 +211,14 @@ export const BiomeClassificationStage: PipelineStage = {
       }
     }
 
-    seedInitialVegetationState(state, biomeSuitabilityMap, microMap, meadowMaskMap, treeDensityMap);
+    seedInitialVegetationState(
+      state,
+      biomeSuitabilityMap,
+      microMap,
+      meadowMaskMap,
+      treeDensityMap,
+      ctx.vegetationSiteQualityMap
+    );
     assignForestComposition(state);
     assertEdgeWater(state);
     await emitStageSnapshot(ctx, "biome:classify");

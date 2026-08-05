@@ -3,6 +3,8 @@ import { indexFor, inBounds } from "../../../core/grid.js";
 import { clamp } from "../../../core/utils.js";
 import { computeRenderedSlopeAngleDeg } from "../../../shared/terrainSlope.js";
 import { computeTreeSuitability } from "./treeSuitability.js";
+import { buildVegetationTerrainFields, type VegetationTerrainFields } from "./vegetationTerrainFields.js";
+import { generateWorldClimateSeed } from "../../climate/sim/worldClimateSeed.js";
 
 const MAX_SUITABILITY_SLOPE = 0.5;
 
@@ -15,6 +17,7 @@ type RuntimeVegetationSuitabilityCache = {
   seaLevelRef: Float32Array | null;
   valleyRef: Float32Array | number[] | null;
   suitability: Float32Array;
+  siteQuality: Float32Array;
 };
 
 const caches = new WeakMap<WorldState, RuntimeVegetationSuitabilityCache>();
@@ -39,7 +42,12 @@ const computeLocalSlope = (state: WorldState, x: number, y: number): number => {
   return clamp(maxDiff / MAX_SUITABILITY_SLOPE, 0, 1);
 };
 
-const computeSuitabilityAt = (state: WorldState, x: number, y: number): number => {
+const computeSuitabilityAt = (
+  state: WorldState,
+  fields: VegetationTerrainFields,
+  x: number,
+  y: number
+): ReturnType<typeof computeTreeSuitability> => {
   const idx = indexFor(state.grid, x, y);
   const tile = state.tiles[idx];
   const seaLevel = state.tileSeaLevel?.[idx] ?? 0.08;
@@ -61,9 +69,14 @@ const computeSuitabilityAt = (state: WorldState, x: number, y: number): number =
     vegetationDensity: 0.62,
     forestPatchiness: 0.48,
     slopeAngleDeg: computeRenderedSlopeAngleDeg(slope, state.grid.cols, state.grid.rows),
-    isWater: tile?.type === "water"
+    isWater: tile?.type === "water",
+    windExposure: fields.windExposure[idx] ?? 0,
+    leeShelter: fields.leeShelter[idx] ?? 0,
+    curvature: fields.curvature[idx] ?? 0,
+    drainage: fields.drainage[idx] ?? 0,
+    coastExposure: fields.coastExposure[idx] ?? 0
   });
-  return details.treeSuitability;
+  return details;
 };
 
 const cacheMatches = (cache: RuntimeVegetationSuitabilityCache, state: WorldState): boolean =>
@@ -82,9 +95,35 @@ export const getRuntimeVegetationSuitabilityMap = (state: WorldState): Float32Ar
   }
 
   const suitability = new Float32Array(state.grid.totalTiles);
+  const siteQuality = new Float32Array(state.grid.totalTiles);
+  const waterDistance = new Uint16Array(state.grid.totalTiles);
+  for (let i = 0; i < state.grid.totalTiles; i += 1) {
+    waterDistance[i] = Math.max(0, Math.min(0xffff, Math.round(state.tiles[i]?.waterDist ?? 24)));
+  }
+  const climate = generateWorldClimateSeed(state.seed);
+  const fields = buildVegetationTerrainFields({
+    cols: state.grid.cols,
+    rows: state.grid.rows,
+    cellSizeM: 10,
+    elevations: state.tileElevation,
+    baseMoisture: state.tileMoisture,
+    waterDistance,
+    coastDistance: state.tileCoastDistance,
+    valley: state.valleyMap,
+    oceanMask: state.tileOceanMask,
+    riverMask: state.tileRiverMask,
+    lakeMask: state.tileLakeMask,
+    prevailingWindDx: Math.cos(climate.prevailingWindAngleRad),
+    prevailingWindDy: Math.sin(climate.prevailingWindAngleRad),
+    prevailingWindStrength: climate.prevailingWindStrength,
+    refineMoisture: false
+  });
   for (let y = 0; y < state.grid.rows; y += 1) {
     for (let x = 0; x < state.grid.cols; x += 1) {
-      suitability[indexFor(state.grid, x, y)] = computeSuitabilityAt(state, x, y);
+      const idx = indexFor(state.grid, x, y);
+      const details = computeSuitabilityAt(state, fields, x, y);
+      suitability[idx] = details.treeSuitability;
+      siteQuality[idx] = details.siteQuality;
     }
   }
   caches.set(state, {
@@ -95,10 +134,16 @@ export const getRuntimeVegetationSuitabilityMap = (state: WorldState): Float32Ar
     elevationRef: state.tileElevation,
     seaLevelRef: state.tileSeaLevel ?? null,
     valleyRef: state.valleyMap ?? null,
-    suitability
+    suitability,
+    siteQuality
   });
   return suitability;
 };
 
 export const getRuntimeVegetationSuitabilityAt = (state: WorldState, x: number, y: number): number =>
   getRuntimeVegetationSuitabilityMap(state)[indexFor(state.grid, x, y)] ?? 0;
+
+export const getRuntimeVegetationSiteQualityAt = (state: WorldState, x: number, y: number): number => {
+  getRuntimeVegetationSuitabilityMap(state);
+  return caches.get(state)?.siteQuality[indexFor(state.grid, x, y)] ?? 0;
+};

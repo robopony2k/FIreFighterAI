@@ -5,6 +5,8 @@ import type { PipelineStage } from "../pipeline/TerrainPipeline.js";
 import { fractalNoise } from "../noise.js";
 import { emitStageSnapshot } from "../pipeline/stageDebug.js";
 import { buildMoistureMap, buildSlopeMap, computeWaterDistances } from "../runtime.js";
+import { generateWorldClimateSeed } from "../../systems/climate/sim/worldClimateSeed.js";
+import { buildVegetationTerrainFields } from "../../systems/terrain/sim/vegetationTerrainFields.js";
 
 const FOREST_MACRO_WEIGHT = 0.85;
 const FOREST_DETAIL_WEIGHT = 0.15;
@@ -126,7 +128,30 @@ export const BiomeFieldsStage: PipelineStage = {
       async (message, progress) => ctx.reportStage(message, 0.8 + progress * 0.2),
       ctx.yieldIfNeeded
     );
-    ctx.moistureMap = moistureMap;
+    const climate = generateWorldClimateSeed(state.seed);
+    const terrainFields = buildVegetationTerrainFields({
+      cols: state.grid.cols,
+      rows: state.grid.rows,
+      cellSizeM: ctx.cellSizeM,
+      elevations: elevationMap,
+      baseMoisture: moistureMap,
+      waterDistance: waterDistMap,
+      coastDistance: state.tileCoastDistance,
+      valley: state.valleyMap,
+      runoff: ctx.runoffMap,
+      oceanMask: ctx.oceanMask,
+      riverMask: ctx.riverMask,
+      lakeMask: state.tileLakeMask,
+      prevailingWindDx: Math.cos(climate.prevailingWindAngleRad),
+      prevailingWindDy: Math.sin(climate.prevailingWindAngleRad),
+      prevailingWindStrength: climate.prevailingWindStrength
+    });
+    ctx.moistureMap = terrainFields.moisture;
+    ctx.windExposureMap = terrainFields.windExposure;
+    ctx.leeShelterMap = terrainFields.leeShelter;
+    ctx.terrainCurvatureMap = terrainFields.curvature;
+    ctx.drainageMap = terrainFields.drainage;
+    ctx.coastExposureMap = terrainFields.coastExposure;
     await emitStageSnapshot(ctx, "biome:fields");
   }
 };

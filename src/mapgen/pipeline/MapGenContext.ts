@@ -58,6 +58,13 @@ export class MapGenContext {
   oceanMask: Uint8Array | null = null;
   waterDistMap: Uint16Array | null = null;
   moistureMap: Float32Array | null = null;
+  windExposureMap: Float32Array | null = null;
+  leeShelterMap: Float32Array | null = null;
+  terrainCurvatureMap: Float32Array | null = null;
+  drainageMap: Float32Array | null = null;
+  coastExposureMap: Float32Array | null = null;
+  vegetationClusterMap: Float32Array | null = null;
+  vegetationSiteQualityMap: Float32Array | null = null;
   biomeSuitabilityMap: Float32Array | null = null;
   elevationStressMap: Float32Array | null = null;
   slopeStressMap: Float32Array | null = null;

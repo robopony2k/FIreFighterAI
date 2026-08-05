@@ -18,7 +18,11 @@ import { clamp } from "../../../core/utils.js";
 import { applyFuel, getFuelProfiles } from "../../../core/tiles.js";
 import { indexFor, inBounds } from "../../../core/grid.js";
 import { hash2D } from "../../../mapgen/noise.js";
-import { getRuntimeVegetationSuitabilityAt } from "./runtimeVegetationSuitabilityCache.js";
+import {
+  getRuntimeVegetationSiteQualityAt,
+  getRuntimeVegetationSuitabilityAt
+} from "./runtimeVegetationSuitabilityCache.js";
+import { getTerrainResponsiveVegetationStructure } from "./vegetationStructure.js";
 
 export type VegetationBlockResult = {
   terrainTypeChanged: boolean;
@@ -207,6 +211,27 @@ const syncVegetationTileState = (state: WorldState, idx: number, typeChanged: bo
   state.tileTypeId[idx] = TILE_TYPE_IDS[tile.type];
 };
 
+const syncTerrainResponsiveVegetationState = (
+  state: WorldState,
+  x: number,
+  y: number
+): void => {
+  const tile = state.tiles[indexFor(state.grid, x, y)];
+  syncDerivedVegetationState(tile, state.seed, x, y);
+  if (!isVegetationType(tile.type)) return;
+  const structure = getTerrainResponsiveVegetationStructure({
+    worldSeed: state.seed,
+    type: tile.type,
+    ageYears: tile.vegetationAgeYears,
+    x,
+    y,
+    siteQuality: getRuntimeVegetationSiteQualityAt(state, x, y)
+  });
+  tile.canopy = structure.canopyCover;
+  tile.canopyCover = structure.canopyCover;
+  tile.stemDensity = structure.stemDensity;
+};
+
 export const processVegetationSuccessionBlock = (
   state: WorldState,
   bounds: VegetationBlockBounds,
@@ -264,7 +289,7 @@ export const processVegetationSuccessionBlock = (
           tile.ashAge = 0;
           tile.dominantTreeType = null;
           tile.treeType = null;
-          syncDerivedVegetationState(tile, state.seed, x, y);
+          syncTerrainResponsiveVegetationState(state, x, y);
           applyFuel(tile, tile.moisture, rng);
           state.burnedTiles = Math.max(0, state.burnedTiles - 1);
           typeChanged = true;
@@ -278,7 +303,7 @@ export const processVegetationSuccessionBlock = (
           tile.vegetationAgeYears = 0.2;
           tile.dominantTreeType = null;
           tile.treeType = null;
-          syncDerivedVegetationState(tile, state.seed, x, y);
+          syncTerrainResponsiveVegetationState(state, x, y);
           applyFuel(tile, tile.moisture, rng);
           typeChanged = true;
           tileStateChanged = true;
@@ -291,7 +316,7 @@ export const processVegetationSuccessionBlock = (
           tile.vegetationAgeYears = 0.15;
           tile.dominantTreeType = null;
           tile.treeType = null;
-          syncDerivedVegetationState(tile, state.seed, x, y);
+          syncTerrainResponsiveVegetationState(state, x, y);
           applyFuel(tile, tile.moisture, rng);
           typeChanged = true;
           tileStateChanged = true;
@@ -305,7 +330,7 @@ export const processVegetationSuccessionBlock = (
         const seedBoost = tile.type === "forest" ? 0.7 + seedPressure * 1.0 : 0.85 + seedPressure * 0.65 + suitability * 0.28;
         const maturityDrag = 0.35 + 0.65 * (1 - maturity01);
         tile.vegetationAgeYears += elapsedDays * ageRate * successionEnv * seedBoost * maturityDrag;
-        syncDerivedVegetationState(tile, state.seed, x, y);
+        syncTerrainResponsiveVegetationState(state, x, y);
         const maxFuel = profile.baseFuel * getVegetationFuelCapMultiplier(tile.type, tile.vegetationAgeYears);
         const fuelGrowth = elapsedDays * FUEL_GROWTH_RATE * (0.4 + 0.6 * successionEnv);
         tile.fuel = clamp(tile.fuel + fuelGrowth, 0, maxFuel);
@@ -317,7 +342,7 @@ export const processVegetationSuccessionBlock = (
             tile.type = "forest";
             tile.vegetationAgeYears = FOREST_RECRUIT_AGE_YEARS;
             setForestIdentity(state, x, y);
-            syncDerivedVegetationState(tile, state.seed, x, y);
+            syncTerrainResponsiveVegetationState(state, x, y);
             applyFuel(tile, tile.moisture, rng);
             typeChanged = true;
             tileStateChanged = true;

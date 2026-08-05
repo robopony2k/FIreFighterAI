@@ -89,6 +89,7 @@ import { buildNoiseLandmass } from "../systems/terrain/sim/noiseLandmass.js";
 import { computeRenderedSlopeAngleDeg } from "../shared/terrainSlope.js";
 import { generateWorldClimateSeed } from "../systems/climate/sim/worldClimateSeed.js";
 import { buildWindDrivenMoistureMap } from "../systems/terrain/sim/windDrivenMoisture.js";
+import { getTerrainResponsiveVegetationStructure } from "../systems/terrain/sim/vegetationStructure.js";
 import { selectBaseSite } from "../systems/settlements/sim/baseSiteSelection.js";
 
 const nextFrame = () =>
@@ -4456,7 +4457,8 @@ export function seedInitialVegetationState(
   biomeSuitabilityMap?: ArrayLike<number> | null,
   microMap?: ArrayLike<number> | null,
   meadowMaskMap?: ArrayLike<number> | null,
-  treeDensityMap?: ArrayLike<number> | null
+  treeDensityMap?: ArrayLike<number> | null,
+  siteQualityMap?: ArrayLike<number> | null
 ): void {
   const total = state.grid.totalTiles;
   const visited = new Uint8Array(total);
@@ -4486,6 +4488,17 @@ export function seedInitialVegetationState(
         microMap?.[i] ?? 0.5
       );
       syncDerivedVegetationState(tile, state.seed, x, y);
+      const structure = getTerrainResponsiveVegetationStructure({
+        worldSeed: state.seed,
+        type: tile.type,
+        ageYears: tile.vegetationAgeYears,
+        x,
+        y,
+        siteQuality: siteQualityMap?.[i] ?? biomeSuitabilityMap?.[i] ?? 0.5
+      });
+      tile.canopy = structure.canopyCover;
+      tile.canopyCover = structure.canopyCover;
+      tile.stemDensity = structure.stemDensity;
       tile.dominantTreeType = null;
       tile.treeType = null;
     }
@@ -4636,6 +4649,17 @@ export function seedInitialVegetationState(
       const upperAge = FOREST_AGE_CAP_YEARS * (0.48 + hash2D(x, y, state.seed + 12067) * 0.38);
       tile.vegetationAgeYears = clamp(edgeAge * (1 - maturityBias) + upperAge * maturityBias, 0, FOREST_AGE_CAP_YEARS);
       syncDerivedVegetationState(tile, state.seed, x, y);
+      const structure = getTerrainResponsiveVegetationStructure({
+        worldSeed: state.seed,
+        type: tile.type,
+        ageYears: tile.vegetationAgeYears,
+        x,
+        y,
+        siteQuality: siteQualityMap?.[idx] ?? suitability
+      });
+      tile.canopy = structure.canopyCover;
+      tile.canopyCover = structure.canopyCover;
+      tile.stemDensity = structure.stemDensity;
     }
   }
 }
