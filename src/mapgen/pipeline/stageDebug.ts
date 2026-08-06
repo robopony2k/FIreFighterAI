@@ -25,6 +25,7 @@ export const emitStageSnapshot = async (ctx: MapGenContext, phase: MapGenDebugPh
     seaLevel: ctx.seaLevelMap ? Float32Array.from(ctx.seaLevelMap) : undefined,
     coastDistance: ctx.state.tileCoastDistance.length > 0 ? Uint16Array.from(ctx.state.tileCoastDistance) : undefined,
     coastClass: ctx.state.tileCoastClass.length > 0 ? Uint8Array.from(ctx.state.tileCoastClass) : undefined,
+    cragUplift: ctx.cragUpliftMap ? Float32Array.from(ctx.cragUpliftMap) : undefined,
     rawMoisture: ctx.moistureMap ? Float32Array.from(ctx.moistureMap) : undefined,
     elevationStress: ctx.elevationStressMap ? Float32Array.from(ctx.elevationStressMap) : undefined,
     slopeStress: ctx.slopeStressMap ? Float32Array.from(ctx.slopeStressMap) : undefined,

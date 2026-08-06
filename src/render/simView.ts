@@ -23,6 +23,7 @@ export type RenderTerrainSample = {
   cols: number;
   rows: number;
   elevations: Float32Array;
+  cragUplift?: Float32Array;
   heightScaleMultiplier?: number;
   tileTypes?: Uint8Array;
   treeTypes?: Uint8Array;
@@ -57,6 +58,7 @@ export type RenderTerrainSample = {
   climateDryness?: number;
   debugScalarField?: Float32Array;
   debugScalarMode?: "color" | "grayscale";
+  debugScalarScale?: number;
   debugTypeColors?: boolean;
   treesEnabled?: boolean;
   fastUpdate?: boolean;
@@ -119,6 +121,7 @@ export const buildRenderTerrainSample = (
     cols: state.grid.cols,
     rows: state.grid.rows,
     elevations: state.tileElevation,
+    cragUplift: state.tileCragUplift,
     heightScaleMultiplier,
     tileTypes: state.tileTypeId,
     treeTypes,

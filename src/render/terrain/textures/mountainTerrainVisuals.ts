@@ -25,6 +25,20 @@ export type BuildMountainTerrainMaskTextureOptions = {
   sampledLakeCoverage: Float32Array | null | undefined;
 };
 
+export type MountainTerrainVisualMetrics = {
+  rockExposure: number;
+  ridge: number;
+  gully: number;
+  highland: number;
+};
+
+export type MountainTerrainMaskField = {
+  data: Uint8Array;
+  sampleCols: number;
+  sampleRows: number;
+  step: number;
+};
+
 const clamp = (value: number, min: number, max: number): number => Math.min(max, Math.max(min, value));
 
 const smoothstep = (edge0: number, edge1: number, x: number): number => {
@@ -98,7 +112,8 @@ const heightAtSample = (sampleHeights: Float32Array, sampleCols: number, sampleR
   return sampleHeights[clampedY * sampleCols + clampedX] ?? 0;
 };
 
-const createMountainMaskTexture = (data: Uint8Array, sampleCols: number, sampleRows: number): THREE.DataTexture => {
+export const createMountainTerrainMaskTexture = (field: MountainTerrainMaskField): THREE.DataTexture => {
+  const { data, sampleCols, sampleRows } = field;
   const flipped = new Uint8Array(data.length);
   const rowStride = sampleCols * 4;
   for (let y = 0; y < sampleRows; y += 1) {
@@ -118,7 +133,25 @@ const createMountainMaskTexture = (data: Uint8Array, sampleCols: number, sampleR
   return texture;
 };
 
-export const buildMountainTerrainMaskTexture = (options: BuildMountainTerrainMaskTextureOptions): THREE.DataTexture => {
+export const sampleMountainTerrainMaskAtTile = (
+  field: MountainTerrainMaskField,
+  tileX: number,
+  tileY: number
+): MountainTerrainVisualMetrics => {
+  const col = Math.max(0, Math.min(field.sampleCols - 1, Math.round(tileX / Math.max(1, field.step))));
+  const row = Math.max(0, Math.min(field.sampleRows - 1, Math.round(tileY / Math.max(1, field.step))));
+  const base = (row * field.sampleCols + col) * 4;
+  return {
+    rockExposure: (field.data[base] ?? 0) / 255,
+    ridge: (field.data[base + 1] ?? 0) / 255,
+    gully: (field.data[base + 2] ?? 0) / 255,
+    highland: (field.data[base + 3] ?? 0) / 255
+  };
+};
+
+export const buildMountainTerrainMaskField = (
+  options: BuildMountainTerrainMaskTextureOptions
+): MountainTerrainMaskField => {
   const {
     sample,
     sampleCols,
@@ -240,5 +273,8 @@ export const buildMountainTerrainMaskTexture = (options: BuildMountainTerrainMas
     }
   }
 
-  return createMountainMaskTexture(data, sampleCols, sampleRows);
+  return { data, sampleCols, sampleRows, step };
 };
+
+export const buildMountainTerrainMaskTexture = (options: BuildMountainTerrainMaskTextureOptions): THREE.DataTexture =>
+  createMountainTerrainMaskTexture(buildMountainTerrainMaskField(options));

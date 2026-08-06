@@ -3,6 +3,7 @@ import { fbmNoise, gradientNoise, hash2D, ridgedFbmNoise } from "../../../mapgen
 import type { MapGenDebug, MapGenDebugPhase, MapGenReporter } from "../../../mapgen/mapgenTypes.js";
 import type { MapGenSettings } from "../../../mapgen/settings.js";
 import { buildArchetypeStructurePlan, sampleArchetypeStructure } from "./archetypeTerrainStructure.js";
+import { applyCraggyRidgeRelief } from "./craggyRidgeRelief.js";
 import {
   getEffectiveLandCoverageTarget,
   TERRAIN_GENERATION_LIMITS
@@ -46,6 +47,7 @@ export type NoiseLandmassResult = {
   edgeDistanceMap: Float32Array;
   islandMask: Float32Array;
   ridgeMask: Float32Array;
+  cragUpliftMap: Float32Array;
   valleyMask: Float32Array;
   flowMap: Float32Array;
 };
@@ -876,6 +878,16 @@ export function buildNoiseLandmassCore(input: NoiseLandmassCoreInput): NoiseLand
     }
   }
 
+  const cragRelief = applyCraggyRidgeRelief({
+    seed,
+    cols,
+    rows,
+    settings,
+    elevations: elevationFloatMap,
+    ridgeMask,
+    interiorMask: islandMask
+  });
+
   const { seaLevelBase, seaLevelMap, oceanMask: resolvedOceanMask } =
     resolveCalibratedSeaLevel(elevationFloatMap, cols, rows, settings);
   const oceanMask = includeOcean ? resolvedOceanMask : new Uint8Array(total);
@@ -909,6 +921,7 @@ export function buildNoiseLandmassCore(input: NoiseLandmassCoreInput): NoiseLand
     edgeDistanceMap,
     islandMask,
     ridgeMask,
+    cragUpliftMap: cragRelief.upliftMap,
     valleyMask,
     flowMap: drainage.flowMap
   };

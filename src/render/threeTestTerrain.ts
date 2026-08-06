@@ -149,7 +149,11 @@ import {
   type BuildTerrainSurfaceColorFieldOptions
 } from "./terrain/textures/terrainSurfaceColorField.js";
 import { applyMountainRockMaterial } from "./terrain/textures/mountainRockMaterial.js";
-import { buildMountainTerrainMaskTexture } from "./terrain/textures/mountainTerrainVisuals.js";
+import {
+  buildMountainTerrainMaskField,
+  createMountainTerrainMaskTexture,
+  type MountainTerrainMaskField
+} from "./terrain/textures/mountainTerrainVisuals.js";
 import { getRockTextureAsset } from "./terrain/textures/rockTextureAsset.js";
 import {
   buildTileTexture as buildTileTextureInternal,
@@ -192,7 +196,9 @@ export type TerrainSample = {
   cols: number;
   rows: number;
   elevations: Float32Array;
+  cragUplift?: Float32Array;
   heightScaleMultiplier?: number;
+  debugScalarScale?: number;
   tileTypes?: Uint8Array;
   treeTypes?: Uint8Array;
   tileFire?: Float32Array;
@@ -1357,6 +1363,7 @@ export type TerrainRenderSurface = {
   inlandWater?: InlandWaterRenderSurface;
   riverRenderDomain?: RiverRenderDomain;
   structureTopHeightsWorld?: Float32Array;
+  mountainTerrainMaskField?: MountainTerrainMaskField;
   coastHeightDeltaStats?: {
     sampleCount: number;
     meanAbsDelta: number;
@@ -3716,9 +3723,9 @@ export const buildTerrainMesh = (
       sampleCoastDistance: surface.sampleCoastDistance
     }
   );
-  const mountainRockMaskTexture =
+  const mountainTerrainMaskField =
     !sample.debugTypeColors && !sample.debugScalarField
-      ? buildMountainTerrainMaskTexture({
+      ? buildMountainTerrainMaskField({
           sample,
           sampleCols,
           sampleRows,
@@ -3732,6 +3739,10 @@ export const buildTerrainMesh = (
           sampledLakeCoverage: surface.sampledLakeCoverage
         })
       : null;
+  surface.mountainTerrainMaskField = mountainTerrainMaskField ?? undefined;
+  const mountainRockMaskTexture = mountainTerrainMaskField
+    ? createMountainTerrainMaskTexture(mountainTerrainMaskField)
+    : null;
   const mountainRockDetailTexture = mountainRockMaskTexture
     ? getRockTextureAsset()
     : null;

@@ -251,6 +251,7 @@ const renderDebugCellOverlay = (
   const cachedIgnition = world.tileIgnitionPoint[idx];
   const cachedBurnRate = world.tileBurnRate[idx];
   const cachedHeatOutput = world.tileHeatOutput[idx];
+  const cragUplift = world.tileCragUplift[idx] ?? 0;
   const inBounds =
     world.fireBoundsActive &&
     tileX >= world.fireMinX &&
@@ -261,6 +262,7 @@ const renderDebugCellOverlay = (
   const lines = [
     `cell ${tileX},${tileY}`,
     `type=${tile.type} id=${world.tileTypeId[idx] ?? "n/a"} base=${tile.isBase ? "1" : "0"}`,
+    `landform=${cragUplift > 1e-5 ? "crag" : "none"} cragUplift=${formatNumber(cragUplift, 4)} strength=${formatNumber(Math.min(1, cragUplift / 0.04), 2)}`,
     `phase=${world.phase} paused=${world.paused ? "1" : "0"} fireDay=${formatNumber(world.fireSeasonDay, 2)}`,
     `substeps=${world.firePerfSubsteps} fireDays=${formatNumber(world.firePerfSimulatedDays, 2)} active=${world.lastActiveFires}`,
     `fire=${formatNumber(tile.fire)} heat=${formatNumber(tile.heat)} fuel=${formatNumber(tile.fuel)}`,

@@ -1,3 +1,26 @@
+TSK-0177: Add occasional authoritative craggy ridge silhouettes
+
+Type: feature
+
+Why: Broad rounded terrain lacked occasional broken ridge and mountain-peak silhouettes at strategic camera distance, while render-only displacement would contradict authoritative elevation and reopen terrain/water seam risks.
+
+Done when:
+- [x] Massif and Long Spine deterministically select one to three separated interior highland ridge formations with bounded uplift, broad lobes, saddles, broken segments, and asymmetric escarpment shoulders.
+- [x] Crag uplift modifies authoritative elevation before Water and reinforces the existing ridge/stress field without changing public terrain settings, saves, share codes, render geometry, draw calls, or runtime work.
+- [x] Focused regression coverage proves deterministic masks, different-seed variation, inactive Shelf/None output, bounded coverage/uplift/cardinal deltas, ridge alignment, and silhouette survival at render strides 1-4.
+- [x] Generated crag uplift remains available as inspection-only provenance, and the Map Editor reports map-level presence, provides a normalized locator overlay, and identifies hovered crag tiles independently of biome type.
+- [x] Runtime and editor tile diagnostics expose the rock-exposure, ridge, gully, and highland channels derived by the same mountain-rock mask builder used for final terrain material shading.
+- [x] TypeScript, fast-preview performance, deterministic mapgen, terrain evaluation, hydrology, shoreline, inland-water, grounding, vegetation, units, and renderer regressions pass.
+- [ ] Strategic-camera appearance is approved from a supported Browser surface or supplied captures across representative seeds and map sizes before enabling a weaker Twin Bay profile.
+
+Touchpoints: `src/systems/terrain/sim/craggyRidgeRelief.ts`, `src/systems/terrain/sim/noiseLandmass.ts`, `src/mapgen/`, `src/core/state.ts`, `src/render/terrain/textures/mountainTerrainVisuals.ts`, `src/render/threeTestTerrain.ts`, `src/render/terrainPreview.ts`, `src/render/threeTest.ts`, `src/ui/map-editor.ts`, `scripts/craggy-ridge-regression.mjs`, `scripts/fast-terrain-preview-regression.mjs`, `docs/GAME_DESIGN_REFERENCE.md`
+
+Constraints: preserve deterministic seeded generation, authoritative terrain ownership, existing terrain/water topology, public setting and persistence schemas, terrain render vertex/draw budgets, and no per-frame terrain work; keep geometric mountain-rock displacement disabled.
+
+Notes: Source implementation and automated acceptance are complete. Massif/Long Spine relief and water preview hashes intentionally changed while height, Twin Bay, Shelf, and None hashes remained stable. The generated uplift map is retained as immutable diagnostic provenance rather than being inferred from the broader `rocky` biome. The existing fragment-stage mountain-rock material supplies surface detail without vertex displacement, and its CPU-built mask channels now remain inspectable without adding a draw call or per-frame sampler. Live silhouette and rocky-material approval remain external to this VS Code session. The unrelated fire regression still reports its existing high-speed event-cap/advance-event failures; terrain elevation and terrain-wind assertions within that suite pass.
+
+Status: done
+
 TSK-0174: Align ocean and cloud motion with gameplay wind
 
 Type: bug

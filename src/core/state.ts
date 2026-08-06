@@ -148,6 +148,7 @@ export interface WorldState {
   tileHeatOutput: Float32Array;
 
   tileElevation: Float32Array;
+  tileCragUplift: Float32Array;
   tileMoisture: Float32Array;
   tileVegetationAge: Float32Array;
   tileCanopyCover: Float32Array;
@@ -503,6 +504,7 @@ export function createInitialState(seed: number, grid: Grid): WorldState {
     tileBurnRate: new Float32Array(grid.totalTiles),
     tileHeatOutput: new Float32Array(grid.totalTiles),
     tileElevation: new Float32Array(grid.totalTiles),
+    tileCragUplift: new Float32Array(grid.totalTiles),
     tileMoisture: new Float32Array(grid.totalTiles),
     tileVegetationAge: new Float32Array(grid.totalTiles),
     tileCanopyCover: new Float32Array(grid.totalTiles),
@@ -829,6 +831,8 @@ export function syncTileSoA(state: WorldState): void {
     state.tileRoadWallEdges.length !== total ||
     !state.tileErosionWear ||
     state.tileErosionWear.length !== total ||
+    !state.tileCragUplift ||
+    state.tileCragUplift.length !== total ||
     !state.tileLakeMask ||
     state.tileLakeMask.length !== total ||
     !state.tileLakeSurface ||
@@ -858,6 +862,7 @@ export function syncTileSoA(state: WorldState): void {
     state.tileBurnRate = new Float32Array(total);
     state.tileHeatOutput = new Float32Array(total);
     state.tileElevation = new Float32Array(total);
+    state.tileCragUplift = new Float32Array(total);
     state.tileMoisture = new Float32Array(total);
     state.tileVegetationAge = new Float32Array(total);
     state.tileCanopyCover = new Float32Array(total);

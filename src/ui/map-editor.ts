@@ -241,7 +241,7 @@ type StepPreviewConfig = {
 type MapEditorRenderDebugState = {
   terrainHeightMode: "final" | "raw";
   terrainSurfaceShadingMode: "refined" | "legacyFaceted";
-  biomeScalarField: "none" | "rawMoisture" | "elevationStress" | "slopeStress" | "treeSuitability" | "treeProbability";
+  biomeScalarField: "none" | "cragUplift" | "rawMoisture" | "elevationStress" | "slopeStress" | "treeSuitability" | "treeProbability";
   riverWaterOff: boolean;
   riverCutoutOff: boolean;
   bridgesOff: boolean;
@@ -355,6 +355,7 @@ const buildSnapshotSample = (
   cols: grid.cols,
   rows: grid.rows,
   elevations: snapshot.elevations,
+  cragUplift: snapshot.cragUplift,
   heightScaleMultiplier,
   tileTypes: snapshot.tileTypes,
   riverMask: snapshot.riverMask,
@@ -443,6 +444,7 @@ const buildFastPreviewSample = (
     cols: result.cols,
     rows: result.rows,
     elevations: result.elevationMap,
+    cragUplift: result.cragUpliftMap,
     heightScaleMultiplier,
     tileTypes: result.tileTypes,
     riverMask: result.riverMask,
@@ -465,6 +467,31 @@ type WorldPreviewSample = ReturnType<typeof buildWorldPreviewSample>;
 type FastPreviewSample = RenderTerrainSample & { fastPreviewTimingsMs: FastTerrainPreviewResult["timingsMs"] };
 type PreviewRenderableSample = SnapshotPreviewSample | WorldPreviewSample | FastPreviewSample;
 type DebugPreviewRenderableSample = PreviewRenderableSample & { debugRenderOptions?: TerrainRenderDebugOptions };
+type CragMapSummary = { tileCount: number; maxUplift: number };
+const cragMapSummaryCache = new WeakMap<object, CragMapSummary>();
+
+const summarizeCragMap = (sample: PreviewRenderableSample): CragMapSummary => {
+  const cached = cragMapSummaryCache.get(sample);
+  if (cached) {
+    return cached;
+  }
+  let tileCount = 0;
+  let maxUplift = 0;
+  const values = sample.cragUplift;
+  if (values) {
+    for (let index = 0; index < values.length; index += 1) {
+      const uplift = values[index] ?? 0;
+      if (uplift <= 1e-5) {
+        continue;
+      }
+      tileCount += 1;
+      maxUplift = Math.max(maxUplift, uplift);
+    }
+  }
+  const summary = { tileCount, maxUplift };
+  cragMapSummaryCache.set(sample, summary);
+  return summary;
+};
 type MapEditorDiagnosticsTab = "hydrology" | "road" | "timeline";
 type HydrologyDiagnosticRecord = Extract<MapGenDiagnosticEvent, { kind: `hydrology:${string}` }>;
 type RoadDiagnosticRecord = Extract<MapGenDiagnosticEvent, { kind: `road:${string}` }>;
@@ -628,6 +655,7 @@ const applyTerrainRenderDebugOptions = (
     ...sample,
     debugScalarField: biomeScalarField ?? sample.debugScalarField,
     debugScalarMode: biomeScalarField ? undefined : sample.debugScalarMode,
+    debugScalarScale: state.biomeScalarField === "cragUplift" && biomeScalarField ? 25 : 1,
     debugRenderOptions: buildTerrainRenderDebugOptions(state, logHeightAnomalies)
   };
 };
@@ -926,9 +954,15 @@ const buildHeightProvenanceReport = (
     };
   }
   if (!hoveredTile) {
+    const cragSummary = summarizeCragMap(sample);
     return {
-      meta: "Hover a tile in the 3D preview to capture height provenance.",
-      text: ["heightProvenance=hover tile required", toggleLine, `activeStep=${activeStep}`].join("\n")
+      meta: `Crag map contains ${cragSummary.tileCount.toLocaleString()} tiles; hover a tile to inspect provenance and material.`,
+      text: [
+        "heightProvenance=hover tile required",
+        `cragMap=${cragSummary.tileCount > 0 ? "present" : "none"} tiles=${cragSummary.tileCount} maxUplift=${cragSummary.maxUplift.toFixed(4)}`,
+        toggleLine,
+        `activeStep=${activeStep}`
+      ].join("\n")
     };
   }
   const debugSurface = prepareTerrainRenderSurface(applyTerrainRenderDebugOptions(sample, renderDebugState, false));
@@ -940,9 +974,18 @@ const buildHeightProvenanceReport = (
     };
   }
   const anomalies = debugSurface.debugHeightAnomalies ?? [];
+  const tileIndex = hoveredTile.tileY * sample.cols + hoveredTile.tileX;
+  const cragUplift = sample.cragUplift?.[tileIndex] ?? 0;
+  const cragSummary = summarizeCragMap(sample);
+  const mountainMaterial = hoveredTile.mountainMaterial;
   const lines = [
     `heightProvenance=${provenance.tileX},${provenance.tileY}`,
     toggleLine,
+    `cragMap=${cragSummary.tileCount > 0 ? "present" : "none"} tiles=${cragSummary.tileCount} maxUplift=${cragSummary.maxUplift.toFixed(4)}`,
+    `landform=${cragUplift > 1e-5 ? "crag" : "none"} cragUplift=${cragUplift.toFixed(4)} cragStrength=${Math.min(1, cragUplift / 0.04).toFixed(2)}`,
+    mountainMaterial
+      ? `mountainRock exposure=${mountainMaterial.rockExposure.toFixed(2)} ridge=${mountainMaterial.ridge.toFixed(2)} gully=${mountainMaterial.gully.toFixed(2)} highland=${mountainMaterial.highland.toFixed(2)}`
+      : "mountainRock=unavailable (disable terrain overlay to inspect material)",
     `authoritative=${provenance.authoritativeElevation.toFixed(4)} rawCenter=${provenance.rawCenterHeight.toFixed(4)} finalCenter=${provenance.finalCenterHeight.toFixed(4)} shownCenter=${provenance.displayedCenterHeight.toFixed(4)}`,
     `tileFlags rv=${provenance.riverMask} oc=${provenance.oceanMask} sea=${Number.isFinite(provenance.seaLevel) ? provenance.seaLevel!.toFixed(4) : "n/a"}`,
     `interp sx=${provenance.interpolation.sampleCoordX.toFixed(3)} sy=${provenance.interpolation.sampleCoordY.toFixed(3)} tx=${provenance.interpolation.tx.toFixed(3)} ty=${provenance.interpolation.ty.toFixed(3)} raw=${provenance.interpolation.rawHeight.toFixed(4)} final=${provenance.interpolation.finalHeight.toFixed(4)} shown=${provenance.interpolation.displayedHeight.toFixed(4)}`,
@@ -1029,6 +1072,7 @@ const clonePreviewSample = (sample: PreviewRenderableSample): PreviewRenderableS
     return {
       ...worldSample,
       elevations: Float32Array.from(worldSample.elevations),
+      cragUplift: cloneFloat32Array(worldSample.cragUplift),
       tileTypes: cloneUint8Array(worldSample.tileTypes),
       treeTypes: cloneUint8Array(worldSample.treeTypes),
       tileFire: cloneFloat32Array(worldSample.tileFire),
@@ -1069,6 +1113,7 @@ const clonePreviewSample = (sample: PreviewRenderableSample): PreviewRenderableS
   return {
     ...snapshotSample,
     elevations: Float32Array.from(snapshotSample.elevations),
+    cragUplift: cloneFloat32Array(snapshotSample.cragUplift),
     tileTypes: cloneUint8Array(snapshotSample.tileTypes),
     riverMask: cloneUint8Array(snapshotSample.riverMask),
     oceanMask: cloneUint8Array(snapshotSample.oceanMask),
@@ -1276,7 +1321,8 @@ export const initMapEditor = (refs: MapEditorRefs, deps: MapEditorDeps): MapEdit
     label.style.marginRight = "0.75rem";
     const select = document.createElement("select");
     const options: Array<{ value: MapEditorRenderDebugState["biomeScalarField"]; label: string }> = [
-      { value: "none", label: "biome_overlay_off" },
+      { value: "none", label: "terrain_overlay_off" },
+      { value: "cragUplift", label: "crag_uplift" },
       { value: "rawMoisture", label: "raw_moisture" },
       { value: "elevationStress", label: "elevation_stress" },
       { value: "slopeStress", label: "slope_stress" },
@@ -1289,7 +1335,7 @@ export const initMapEditor = (refs: MapEditorRefs, deps: MapEditorDeps): MapEdit
       node.textContent = option.label;
       select.appendChild(node);
     });
-    label.append(document.createTextNode("biome_debug"), select);
+    label.append(document.createTextNode("terrain_debug"), select);
     renderDebugControlsRoot.appendChild(label);
     return select;
   };

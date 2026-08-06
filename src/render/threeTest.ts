@@ -134,6 +134,7 @@ import {
   WATERFALL_DEBUG_FLAG_WATER
 } from "./threeTestTerrain.js";
 import { setTerrainRoadHighContrast } from "./terrain/roads/roadHighContrast.js";
+import { sampleMountainTerrainMaskAtTile } from "./terrain/textures/mountainTerrainVisuals.js";
 import { createThreeTestFireFx, type FireFxDebugSnapshot } from "./threeTestFireFx.js";
 import { createThreeTestWorldAudio, type WorldAudioChannelControls } from "./threeTestWorldAudio.js";
 import { createThreeTestUnitFxLayer } from "./threeTestUnitFx.js";
@@ -4822,11 +4823,24 @@ export const createThreeTest = (
     const cachedWetness = world.tileSuppressionWetness[context.tileIndex] ?? 0;
     const cachedBurnAge = world.tileBurnAge[context.tileIndex] ?? 0;
     const cachedHeatRelease = world.tileHeatRelease[context.tileIndex] ?? 0;
+    const cragUplift = world.tileCragUplift[context.tileIndex] ?? 0;
+    const cragStrength = Math.min(1, cragUplift / 0.04);
+    const mountainMaterial = lastTerrainSurface?.mountainTerrainMaskField
+      ? sampleMountainTerrainMaskAtTile(
+          lastTerrainSurface.mountainTerrainMaskField,
+          context.tileX,
+          context.tileY
+        )
+      : null;
     const biomeShape = computeHoverBiomeShape(context.tileX, context.tileY, context.tileIndex, context.heightScale);
     const lines = [
       `type=${tile.type} id=${world.tileTypeId[context.tileIndex] ?? "n/a"} base=${tile.isBase ? "1" : "0"}`,
+      `landform=${cragUplift > 1e-5 ? "crag" : "none"} cragUplift=${formatDebugNumber(cragUplift, 4)} cragStrength=${formatDebugNumber(cragStrength, 2)}`,
       `elev=${formatDebugNumber(world.tileElevation[context.tileIndex] ?? tile.elevation, 3)} y=${formatDebugNumber((world.tileElevation[context.tileIndex] ?? 0) * context.heightScale, 2)} moist=${formatDebugNumber(world.tileMoisture[context.tileIndex] ?? tile.moisture, 2)}`,
       `biome slope=${formatDebugNumber(biomeShape.slope, 3)} relief=${formatDebugNumber(biomeShape.relief, 3)} grade=${formatDebugNumber(biomeShape.renderGrade, 2)} angle=${formatDebugNumber(biomeShape.renderAngleDeg, 0)}deg`,
+      mountainMaterial
+        ? `mountainRock exposure=${formatDebugNumber(mountainMaterial.rockExposure, 2)} ridge=${formatDebugNumber(mountainMaterial.ridge, 2)} gully=${formatDebugNumber(mountainMaterial.gully, 2)} highland=${formatDebugNumber(mountainMaterial.highland, 2)}`
+        : "mountainRock=unavailable (render isolation active)",
       `fire=${formatDebugNumber(world.tileFire[context.tileIndex] ?? tile.fire, 2)} heat=${formatDebugNumber(world.tileHeat[context.tileIndex] ?? tile.heat, 2)} fuel=${formatDebugNumber(world.tileFuel[context.tileIndex] ?? tile.fuel, 2)}`,
       `wet=${formatDebugNumber(cachedWetness, 2)} burnAge=${formatDebugNumber(cachedBurnAge, 2)} release=${formatDebugNumber(cachedHeatRelease, 2)}`
     ];
@@ -4875,7 +4889,8 @@ export const createThreeTest = (
     return {
       key: "cell",
       label: "CELL",
-      lines
+      lines,
+      tone: cragUplift > 1e-5 ? "watch" : "default"
     };
   };
 
@@ -5050,6 +5065,7 @@ export const createThreeTest = (
       soa: {
         typeId: world.tileTypeId[tileIndex] ?? null,
         elevation: world.tileElevation[tileIndex] ?? null,
+        cragUplift: world.tileCragUplift[tileIndex] ?? null,
         moisture: world.tileMoisture[tileIndex] ?? null,
         fire: world.tileFire[tileIndex] ?? null,
         heat: world.tileHeat[tileIndex] ?? null,

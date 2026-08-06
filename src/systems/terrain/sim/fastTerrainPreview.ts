@@ -19,6 +19,7 @@ export type FastTerrainPreviewResult = {
   constraintRows: number;
   constraintMap: Float32Array;
   elevationMap: Float32Array;
+  cragUpliftMap: Float32Array;
   tileTypes: Uint8Array;
   oceanMask: Uint8Array;
   seaLevelMap: Float32Array;
@@ -71,6 +72,7 @@ export function buildFastTerrainPreview(input: FastTerrainPreviewInput): FastTer
     constraintRows: input.rows,
     constraintMap: isNoisePreview ? landmass.rawNoiseMap : landmass.islandMask,
     elevationMap: isNoisePreview ? flatElevationMap : landmass.elevationFloatMap,
+    cragUpliftMap: isNoisePreview ? flatElevationMap : landmass.cragUpliftMap,
     tileTypes: isNoisePreview ? flatTileTypes : landmass.tileTypes,
     oceanMask: isNoisePreview ? emptyMask : landmass.oceanMask,
     seaLevelMap: isNoisePreview ? flatSeaLevelMap : landmass.seaLevelMap,

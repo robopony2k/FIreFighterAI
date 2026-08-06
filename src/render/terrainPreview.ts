@@ -20,6 +20,10 @@ import {
 } from "./threeTestTerrain.js";
 import { ThreeTestWaterSystem } from "./threeTestWater.js";
 import { getRequiredWebGLContext } from "./webglContext.js";
+import {
+  sampleMountainTerrainMaskAtTile,
+  type MountainTerrainVisualMetrics
+} from "./terrain/textures/mountainTerrainVisuals.js";
 export type TerrainPreviewAssetProgress = {
   label: string;
   completed: number;
@@ -39,6 +43,7 @@ export type TerrainPreviewBridgeSelection = {
 export type TerrainPreviewHoverTile = {
   tileX: number;
   tileY: number;
+  mountainMaterial: MountainTerrainVisualMetrics | null;
 };
 
 export type TerrainPreviewController = {
@@ -231,7 +236,10 @@ export const createTerrainPreviewController = (canvas: HTMLCanvasElement): Terra
     if (tileX < 0 || tileY < 0 || tileX >= terrainSurface.cols || tileY >= terrainSurface.rows) {
       return null;
     }
-    return { tileX, tileY };
+    const mountainMaterial = terrainSurface.mountainTerrainMaskField
+      ? sampleMountainTerrainMaskAtTile(terrainSurface.mountainTerrainMaskField, tileX, tileY)
+      : null;
+    return { tileX, tileY, mountainMaterial };
   };
 
   const resolveBridgeSpanDebug = (object: THREE.Object3D | null): TerrainBridgeSpanDebug | null => {
@@ -519,7 +527,11 @@ export const createTerrainPreviewController = (canvas: HTMLCanvasElement): Terra
       return;
     }
     const [tileX, tileY] = lastHoverTileKey.split(",").map((value) => Number.parseInt(value, 10));
-    hoverTileListener(Number.isFinite(tileX) && Number.isFinite(tileY) ? { tileX, tileY } : null);
+    const mountainMaterial =
+      terrainSurface?.mountainTerrainMaskField && Number.isFinite(tileX) && Number.isFinite(tileY)
+        ? sampleMountainTerrainMaskAtTile(terrainSurface.mountainTerrainMaskField, tileX, tileY)
+        : null;
+    hoverTileListener(Number.isFinite(tileX) && Number.isFinite(tileY) ? { tileX, tileY, mountainMaterial } : null);
   };
 
   const dispose = (): void => {

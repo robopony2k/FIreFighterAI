@@ -47,6 +47,7 @@ export class MapGenContext {
   erosionHardnessMap: Float32Array | null = null;
   erosionFlowXMap: Float32Array | null = null;
   erosionFlowYMap: Float32Array | null = null;
+  cragUpliftMap: Float32Array | null = null;
   tectonicStressMap: Float32Array | null = null;
   tectonicTrendXMap: Float32Array | null = null;
   tectonicTrendYMap: Float32Array | null = null;

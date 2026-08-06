@@ -17,6 +17,7 @@ export const ElevationStage: PipelineStage = {
       erosionHardnessMap,
       erosionFlowXMap,
       erosionFlowYMap,
+      cragUpliftMap,
       tectonicStressMap,
       tectonicTrendXMap,
       tectonicTrendYMap
@@ -36,9 +37,15 @@ export const ElevationStage: PipelineStage = {
     ctx.erosionHardnessMap = erosionHardnessMap;
     ctx.erosionFlowXMap = erosionFlowXMap;
     ctx.erosionFlowYMap = erosionFlowYMap;
+    const resolvedCragUpliftMap = cragUpliftMap ?? new Float32Array(erosionWearMap.length);
+    ctx.cragUpliftMap = resolvedCragUpliftMap;
     ctx.tectonicStressMap = tectonicStressMap ?? new Float32Array(erosionWearMap.length);
     ctx.tectonicTrendXMap = tectonicTrendXMap ?? new Float32Array(erosionWearMap.length);
     ctx.tectonicTrendYMap = tectonicTrendYMap ?? new Float32Array(erosionWearMap.length);
+    if (ctx.state.tileCragUplift.length !== resolvedCragUpliftMap.length) {
+      ctx.state.tileCragUplift = new Float32Array(resolvedCragUpliftMap.length);
+    }
+    ctx.state.tileCragUplift.set(resolvedCragUpliftMap);
     if (ctx.state.tileErosionWear.length !== erosionWearMap.length) {
       ctx.state.tileErosionWear = new Float32Array(erosionWearMap.length);
     }

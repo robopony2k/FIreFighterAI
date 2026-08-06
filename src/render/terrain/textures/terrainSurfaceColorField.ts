@@ -24,6 +24,7 @@ type TerrainSurfaceColorSample = {
   fastUpdate?: boolean;
   debugScalarField?: Float32Array;
   debugScalarMode?: "color" | "grayscale";
+  debugScalarScale?: number;
 };
 
 type TerrainSurfaceColorFieldDeps = {
@@ -343,7 +344,9 @@ export const buildTerrainSurfaceColorField = (options: BuildTerrainSurfaceColorF
       const typeId = sampleTypes[sampleIndex] ?? grassId;
       const coastClass = sampleCoastClass?.[sampleIndex] ?? COAST_CLASS_NONE;
       const coastDistance = sampleCoastDistance?.[sampleIndex] ?? 0;
-      const debugScalar = debugScalarField ? debugScalarField[idx] : undefined;
+      const debugScalar = debugScalarField
+        ? (debugScalarField[idx] ?? 0) * Math.max(0, sample.debugScalarScale ?? 1)
+        : undefined;
       let colorType = typeId;
       let coastalSeabedColor: [number, number, number] | null = null;
       const localOceanRatio = oceanRatio ? clamp(oceanRatio[sampleIndex] ?? 0, 0, 1) : typeId === waterId ? 1 : 0;

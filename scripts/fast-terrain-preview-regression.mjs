@@ -22,13 +22,13 @@ const PERF_BUDGET_MS = 220;
 const EXPECTED_HASHES = {
   MASSIF: {
     height: "07dceed5",
-    relief: "94d5bd5a",
-    water: "d2c6aeea"
+    relief: "e050f20d",
+    water: "a260007d"
   },
   LONG_SPINE: {
     height: "d75d040d",
-    relief: "c26131dc",
-    water: "c9a66cec"
+    relief: "2cc0c2c4",
+    water: "3405fdd4"
   },
   TWIN_BAY: {
     height: "be61a997",

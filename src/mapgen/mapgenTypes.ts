@@ -34,6 +34,7 @@ export type MapGenDebugSnapshot = {
   seaLevel?: Float32Array;
   coastDistance?: Uint16Array;
   coastClass?: Uint8Array;
+  cragUplift?: Float32Array;
   rawMoisture?: Float32Array;
   elevationStress?: Float32Array;
   slopeStress?: Float32Array;
