@@ -6153,6 +6153,28 @@ export const createThreeTest = (
   let structureOverlayGroup: THREE.Group | null = null;
   let lastStructureRevision = -1;
   let lastStructureOverlayKey = "";
+  type StructureInstancedMeshCacheEntry = {
+    mesh: THREE.InstancedMesh;
+    geometry: THREE.BufferGeometry;
+    material: THREE.Material | THREE.Material[];
+    capacity: number;
+    buildSerial: number;
+    contentSignature: string;
+  };
+  const structureInstancedMeshCache = new Map<string, StructureInstancedMeshCacheEntry>();
+  const structureBoxGeometry = new THREE.BoxGeometry(1, 1, 1);
+  const structureHouseMaterial = new THREE.MeshStandardMaterial({ color: 0xc19a66, roughness: 0.82, metalness: 0.06 });
+  const structureBaseMaterial = new THREE.MeshStandardMaterial({ color: 0xa0a7ad, roughness: 0.74, metalness: 0.12 });
+  const structureFoundationMaterial = new THREE.MeshStandardMaterial({ color: 0x4b4036, roughness: 0.95, metalness: 0 });
+  const structureFootingMaterial = new THREE.MeshStandardMaterial({ color: 0xb8bab5, roughness: 0.92, metalness: 0.02 });
+  const inactiveWatchTowerMaterial = new THREE.MeshStandardMaterial({
+    color: 0xb88b56,
+    transparent: true,
+    opacity: 0.58
+  });
+  const watchTowerStructurePrototypes = new Map<number, THREE.Group>();
+  let waterTowerStructurePrototype: THREE.Group | null = null;
+  let structureOverlayBuildSerial = 0;
   let treeBurnController: TreeBurnController | null = null;
   let treeLodController: TreeLodController | null = null;
   let cameraLockedToTerrain = false;
@@ -7117,23 +7139,168 @@ export const createThreeTest = (
     geometry.userData.terrainVertexColorsWhite = true;
   };
 
+  const getStructureInstancedMeshCapacity = (count: number): number => {
+    let capacity = 1;
+    while (capacity < count) {
+      capacity *= 2;
+    }
+    return capacity;
+  };
+
+  const getOrCreateStructureInstancedMesh = (
+    cacheKey: string,
+    geometry: THREE.BufferGeometry,
+    material: THREE.Material | THREE.Material[],
+    count: number,
+    name: string,
+    contentSignature: string
+  ): { mesh: THREE.InstancedMesh; contentChanged: boolean } => {
+    const cached = structureInstancedMeshCache.get(cacheKey);
+    if (cached && cached.geometry === geometry && cached.material === material && cached.capacity >= count) {
+      const contentChanged = cached.contentSignature !== contentSignature;
+      cached.buildSerial = structureOverlayBuildSerial;
+      cached.contentSignature = contentSignature;
+      cached.mesh.count = count;
+      cached.mesh.name = name;
+      cached.mesh.visible = true;
+      return { mesh: cached.mesh, contentChanged };
+    }
+    if (cached) {
+      cached.mesh.removeFromParent();
+      cached.mesh.dispose();
+      structureInstancedMeshCache.delete(cacheKey);
+    }
+    const capacity = getStructureInstancedMeshCapacity(Math.max(1, count));
+    const mesh = new THREE.InstancedMesh(geometry, material, capacity);
+    mesh.count = count;
+    mesh.name = name;
+    structureInstancedMeshCache.set(cacheKey, {
+      mesh,
+      geometry,
+      material,
+      capacity,
+      buildSerial: structureOverlayBuildSerial,
+      contentSignature
+    });
+    return { mesh, contentChanged: true };
+  };
+
+  const parkUnusedStructureInstancedMeshes = (): void => {
+    structureInstancedMeshCache.forEach((entry) => {
+      if (entry.buildSerial === structureOverlayBuildSerial) {
+        return;
+      }
+      entry.mesh.removeFromParent();
+      entry.mesh.count = 0;
+      entry.mesh.visible = false;
+    });
+  };
+
+  const cloneStructureWatchTower = (level: number): THREE.Group => {
+    const normalizedLevel = Math.max(1, Math.trunc(level));
+    let prototype = watchTowerStructurePrototypes.get(normalizedLevel);
+    if (!prototype) {
+      prototype = createProceduralWatchTowerModel(normalizedLevel);
+      watchTowerStructurePrototypes.set(normalizedLevel, prototype);
+    }
+    return prototype.clone(true);
+  };
+
+  const cloneStructureWaterTower = (): THREE.Group => {
+    if (!waterTowerStructurePrototype) {
+      waterTowerStructurePrototype = createProceduralWaterTowerModel();
+    }
+    return waterTowerStructurePrototype.clone(true);
+  };
+
   const disposeStructureOverlay = (): void => {
     if (!structureOverlayGroup) {
       return;
     }
     scene.remove(structureOverlayGroup);
-    structureOverlayGroup.traverse((child) => {
-      if (!(child instanceof THREE.Mesh)) {
-        return;
-      }
-      child.geometry.dispose();
-      if (Array.isArray(child.material)) {
-        child.material.forEach((material) => material.dispose());
-      } else {
-        child.material.dispose();
+    structureOverlayGroup.clear();
+    structureOverlayGroup = null;
+    structureInstancedMeshCache.forEach((entry) => {
+      entry.mesh.removeFromParent();
+      entry.mesh.count = 0;
+      entry.mesh.visible = false;
+    });
+  };
+
+  const disposeStructureOverlayResources = (): void => {
+    disposeStructureOverlay();
+    structureInstancedMeshCache.forEach((entry) => entry.mesh.dispose());
+    structureInstancedMeshCache.clear();
+
+    const geometries = new Set<THREE.BufferGeometry>();
+    const materials = new Set<THREE.Material>();
+    const collectResources = (root: THREE.Object3D): void => {
+      root.traverse((child) => {
+        if (!(child instanceof THREE.Mesh)) {
+          return;
+        }
+        geometries.add(child.geometry);
+        if (Array.isArray(child.material)) {
+          child.material.forEach((material) => materials.add(material));
+        } else {
+          materials.add(child.material);
+        }
+      });
+    };
+    watchTowerStructurePrototypes.forEach(collectResources);
+    if (waterTowerStructurePrototype) {
+      collectResources(waterTowerStructurePrototype);
+    }
+    geometries.forEach((geometry) => geometry.dispose());
+    materials.forEach((material) => material.dispose());
+    watchTowerStructurePrototypes.clear();
+    waterTowerStructurePrototype = null;
+
+    structureBoxGeometry.dispose();
+    structureHouseMaterial.dispose();
+    structureBaseMaterial.dispose();
+    structureFoundationMaterial.dispose();
+    structureFootingMaterial.dispose();
+    inactiveWatchTowerMaterial.dispose();
+  };
+
+  const createStructureShaderWarmupGroup = (): THREE.Group => {
+    const group = new THREE.Group();
+    group.name = "structure-shader-warmup";
+    const identity = new THREE.Matrix4();
+    const addInstanced = (
+      geometry: THREE.BufferGeometry,
+      material: THREE.Material | THREE.Material[]
+    ): void => {
+      const mesh = new THREE.InstancedMesh(geometry, material, 1);
+      mesh.castShadow = true;
+      mesh.receiveShadow = true;
+      mesh.setMatrixAt(0, identity);
+      mesh.instanceMatrix.needsUpdate = true;
+      group.add(mesh);
+    };
+
+    addInstanced(structureBoxGeometry, structureHouseMaterial);
+    addInstanced(structureBoxGeometry, structureBaseMaterial);
+    addInstanced(structureBoxGeometry, structureFoundationMaterial);
+    addInstanced(structureBoxGeometry, structureFootingMaterial);
+    addInstanced(structureBoxGeometry, inactiveWatchTowerMaterial);
+    if (THREE_TEST_DETAILED_STRUCTURES_ENABLED) {
+      (houseAssets?.variants ?? []).forEach((variant) => {
+        variant.meshes.forEach((template) => addInstanced(template.geometry, template.material));
+      });
+      firestationAsset?.meshes.forEach((template) => addInstanced(template.geometry, template.material));
+    }
+    return group;
+  };
+
+  const disposeStructureShaderWarmupGroup = (group: THREE.Group): void => {
+    group.traverse((child) => {
+      if (child instanceof THREE.InstancedMesh) {
+        child.dispose();
       }
     });
-    structureOverlayGroup = null;
+    group.clear();
   };
 
   const rebuildStructureOverlay = (
@@ -7167,12 +7334,14 @@ export const createThreeTest = (
     ) {
       return;
     }
-    disposeStructureOverlay();
     if (!sample.tileTypes || !surface || sample.cols <= 0 || sample.rows <= 0) {
+      disposeStructureOverlay();
       lastStructureRevision = structureRevision;
       lastStructureOverlayKey = structureOverlayKey;
       return;
     }
+    structureOverlayBuildSerial += 1;
+    const previousStructureOverlayGroup = structureOverlayGroup;
 
     const houseId = TILE_TYPE_IDS.house;
     const baseId = TILE_TYPE_IDS.base;
@@ -7336,10 +7505,6 @@ export const createThreeTest = (
 
     const group = new THREE.Group();
     group.name = "dynamic-structures";
-    const buildingGeometry = new THREE.BoxGeometry(1, 1, 1);
-    const houseMaterial = new THREE.MeshStandardMaterial({ color: 0xc19a66, roughness: 0.82, metalness: 0.06 });
-    const baseMaterial = new THREE.MeshStandardMaterial({ color: 0xa0a7ad, roughness: 0.74, metalness: 0.12 });
-    const foundationMaterial = new THREE.MeshStandardMaterial({ color: 0x4b4036, roughness: 0.95, metalness: 0 });
     const dummy = new THREE.Object3D();
 
     if (houseSpots.length > 0) {
@@ -7477,73 +7642,104 @@ export const createThreeTest = (
       });
 
       const tempMatrix = new THREE.Matrix4();
-      detailedBatches.forEach((batch) => {
+      detailedBatches.forEach((batch, batchKey) => {
         const { template, instances } = batch;
         if (instances.length === 0) {
           return;
         }
         partitionTerrainInstances(instances, (instance) => ({ x: instance.spot.tileX, y: instance.spot.tileY })).forEach(({ key, instances: chunkInstances }) => {
-          const geometry = template.geometry.clone();
-          const material = Array.isArray(template.material)
-            ? template.material.map((entry) => entry.clone())
-            : template.material.clone();
-          const instanced = new THREE.InstancedMesh(geometry, material, chunkInstances.length);
-          instanced.name = `dynamic-house-${key}`;
+          const contentSignature = chunkInstances
+            .map((instance) =>
+              `${instance.spot.tileX},${instance.spot.tileY},${instance.spot.x},${instance.baseY},${instance.spot.z},${instance.spot.rotation},${instance.scaleX},${instance.scaleY},${instance.scaleZ}`
+            )
+            .join("|");
+          const { mesh: instanced, contentChanged } = getOrCreateStructureInstancedMesh(
+            `house:${batchKey}:${key}`,
+            template.geometry,
+            template.material,
+            chunkInstances.length,
+            `dynamic-house-${batchKey}-${key}`,
+            contentSignature
+          );
           instanced.userData.terrainChunkKey = key;
           instanced.castShadow = true;
           instanced.receiveShadow = true;
-          chunkInstances.forEach((instance, index) => {
-            dummy.position.set(instance.spot.x, instance.baseY, instance.spot.z);
-            dummy.rotation.set(0, instance.spot.rotation, 0);
-            dummy.scale.set(instance.scaleX, instance.scaleY, instance.scaleZ);
-            dummy.updateMatrix();
-            tempMatrix.copy(dummy.matrix).multiply(template.baseMatrix);
-            instanced.setMatrixAt(index, tempMatrix);
-          });
-          instanced.instanceMatrix.needsUpdate = true;
-          finalizeInstancedMeshBounds(instanced);
+          if (contentChanged) {
+            chunkInstances.forEach((instance, index) => {
+              dummy.position.set(instance.spot.x, instance.baseY, instance.spot.z);
+              dummy.rotation.set(0, instance.spot.rotation, 0);
+              dummy.scale.set(instance.scaleX, instance.scaleY, instance.scaleZ);
+              dummy.updateMatrix();
+              tempMatrix.copy(dummy.matrix).multiply(template.baseMatrix);
+              instanced.setMatrixAt(index, tempMatrix);
+            });
+            instanced.instanceMatrix.needsUpdate = true;
+            finalizeInstancedMeshBounds(instanced);
+          }
           group.add(instanced);
         });
       });
 
       if (fallbackInstances.length > 0) {
         partitionTerrainInstances(fallbackInstances, (spot) => ({ x: spot.tileX, y: spot.tileY })).forEach(({ key, instances }) => {
-          const fallbackMesh = new THREE.InstancedMesh(buildingGeometry, houseMaterial, instances.length);
-          fallbackMesh.name = `dynamic-house-fallback-${key}`;
+          const contentSignature = instances
+            .map((spot) => `${spot.tileX},${spot.tileY},${spot.x},${spot.supportTop},${spot.z},${spot.rotation},${spot.footprintX},${spot.footprintZ}`)
+            .join("|");
+          const { mesh: fallbackMesh, contentChanged } = getOrCreateStructureInstancedMesh(
+            `house-fallback:${key}`,
+            structureBoxGeometry,
+            structureHouseMaterial,
+            instances.length,
+            `dynamic-house-fallback-${key}`,
+            contentSignature
+          );
           fallbackMesh.userData.terrainChunkKey = key;
           fallbackMesh.castShadow = true;
           fallbackMesh.receiveShadow = true;
-          instances.forEach((spot, index) => {
-            const footprintX = Math.max(0.5, spot.footprintX);
-            const footprintZ = Math.max(0.5, spot.footprintZ);
-            dummy.position.set(spot.x, spot.supportTop + 0.3, spot.z);
-            dummy.rotation.set(0, spot.rotation, 0);
-            dummy.scale.set(footprintX, 0.6, footprintZ);
-            dummy.updateMatrix();
-            fallbackMesh.setMatrixAt(index, dummy.matrix);
-          });
-          fallbackMesh.instanceMatrix.needsUpdate = true;
-          finalizeInstancedMeshBounds(fallbackMesh);
+          if (contentChanged) {
+            instances.forEach((spot, index) => {
+              const footprintX = Math.max(0.5, spot.footprintX);
+              const footprintZ = Math.max(0.5, spot.footprintZ);
+              dummy.position.set(spot.x, spot.supportTop + 0.3, spot.z);
+              dummy.rotation.set(0, spot.rotation, 0);
+              dummy.scale.set(footprintX, 0.6, footprintZ);
+              dummy.updateMatrix();
+              fallbackMesh.setMatrixAt(index, dummy.matrix);
+            });
+            fallbackMesh.instanceMatrix.needsUpdate = true;
+            finalizeInstancedMeshBounds(fallbackMesh);
+          }
           group.add(fallbackMesh);
         });
       }
 
       if (foundationInstances.length > 0) {
         partitionTerrainInstances(foundationInstances, (instance) => ({ x: instance.tileX, y: instance.tileY })).forEach(({ key, instances }) => {
-          const foundationMesh = new THREE.InstancedMesh(buildingGeometry, foundationMaterial, instances.length);
-          foundationMesh.name = `dynamic-house-foundation-${key}`;
+          const contentSignature = instances
+            .map((instance) => `${instance.tileX},${instance.tileY},${instance.x},${instance.y},${instance.z},${instance.rotation},${instance.scaleX},${instance.scaleY},${instance.scaleZ}`)
+            .join("|");
+          const { mesh: foundationMesh, contentChanged } = getOrCreateStructureInstancedMesh(
+            `house-foundation:${key}`,
+            structureBoxGeometry,
+            structureFoundationMaterial,
+            instances.length,
+            `dynamic-house-foundation-${key}`,
+            contentSignature
+          );
           foundationMesh.userData.terrainChunkKey = key;
           foundationMesh.castShadow = true;
           foundationMesh.receiveShadow = true;
-          instances.forEach((instance, index) => {
-            dummy.position.set(instance.x, instance.y, instance.z);
-            dummy.rotation.set(0, instance.rotation, 0);
-            dummy.scale.set(instance.scaleX, instance.scaleY, instance.scaleZ);
-            dummy.updateMatrix();
-            foundationMesh.setMatrixAt(index, dummy.matrix);
-          });
-          foundationMesh.instanceMatrix.needsUpdate = true;
-          finalizeInstancedMeshBounds(foundationMesh);
+          if (contentChanged) {
+            instances.forEach((instance, index) => {
+              dummy.position.set(instance.x, instance.y, instance.z);
+              dummy.rotation.set(0, instance.rotation, 0);
+              dummy.scale.set(instance.scaleX, instance.scaleY, instance.scaleZ);
+              dummy.updateMatrix();
+              foundationMesh.setMatrixAt(index, dummy.matrix);
+            });
+            foundationMesh.instanceMatrix.needsUpdate = true;
+            finalizeInstancedMeshBounds(foundationMesh);
+          }
           group.add(foundationMesh);
         });
       }
@@ -7575,26 +7771,33 @@ export const createThreeTest = (
         const scale = footprintTarget / Math.max(0.01, assetFootprint);
         const baseY = supportTop + firestationAsset.baseOffset * scale;
         const tempMatrix = new THREE.Matrix4();
-        firestationAsset.meshes.forEach((template) => {
-          const geometry = template.geometry.clone();
-          const material = Array.isArray(template.material)
-            ? template.material.map((entry) => entry.clone())
-            : template.material.clone();
-          const instanced = new THREE.InstancedMesh(geometry, material, 1);
+        firestationAsset.meshes.forEach((template, templateIndex) => {
+          const contentSignature = `${centerX},${baseY},${centerZ},${rotation},${scale}`;
+          const { mesh: instanced, contentChanged } = getOrCreateStructureInstancedMesh(
+            `firestation:${templateIndex}`,
+            template.geometry,
+            template.material,
+            1,
+            `dynamic-firestation-${templateIndex}`,
+            contentSignature
+          );
           instanced.castShadow = true;
           instanced.receiveShadow = true;
-          dummy.position.set(centerX, baseY, centerZ);
-          dummy.rotation.set(0, rotation, 0);
-          dummy.scale.set(scale, scale, scale);
-          dummy.updateMatrix();
-          tempMatrix.copy(dummy.matrix).multiply(template.baseMatrix);
-          instanced.setMatrixAt(0, tempMatrix);
-          instanced.instanceMatrix.needsUpdate = true;
+          if (contentChanged) {
+            dummy.position.set(centerX, baseY, centerZ);
+            dummy.rotation.set(0, rotation, 0);
+            dummy.scale.set(scale, scale, scale);
+            dummy.updateMatrix();
+            tempMatrix.copy(dummy.matrix).multiply(template.baseMatrix);
+            instanced.setMatrixAt(0, tempMatrix);
+            instanced.instanceMatrix.needsUpdate = true;
+            finalizeInstancedMeshBounds(instanced);
+          }
           group.add(instanced);
         });
         if (supportBottom < supportTop - 0.01) {
           const foundationHeight = Math.max(0.1, supportTop - supportBottom);
-          const foundation = new THREE.Mesh(buildingGeometry, foundationMaterial);
+          const foundation = new THREE.Mesh(structureBoxGeometry, structureFoundationMaterial);
           foundation.scale.set(baseFootprintX, foundationHeight, baseFootprintZ);
           foundation.position.set(centerX, supportBottom + foundationHeight / 2, centerZ);
           foundation.rotation.set(0, rotation, 0);
@@ -7603,7 +7806,7 @@ export const createThreeTest = (
           group.add(foundation);
         }
       } else {
-        const baseMesh = new THREE.Mesh(buildingGeometry, baseMaterial);
+        const baseMesh = new THREE.Mesh(structureBoxGeometry, structureBaseMaterial);
         baseMesh.castShadow = true;
         baseMesh.receiveShadow = true;
         baseMesh.scale.set(baseFootprintX, 0.66, baseFootprintZ);
@@ -7611,7 +7814,7 @@ export const createThreeTest = (
         group.add(baseMesh);
         if (supportBottom < supportTop - 0.01) {
           const foundationHeight = Math.max(0.1, supportTop - supportBottom);
-          const foundation = new THREE.Mesh(buildingGeometry, foundationMaterial);
+          const foundation = new THREE.Mesh(structureBoxGeometry, structureFoundationMaterial);
           foundation.scale.set(baseFootprintX, foundationHeight, baseFootprintZ);
           foundation.position.set(centerX, supportBottom + foundationHeight / 2, centerZ);
           foundation.rotation.set(0, rotation, 0);
@@ -7633,20 +7836,19 @@ export const createThreeTest = (
         const legGrounds = legOffsets.map((offset) => surface.heightAtTileCoord(tileX + 0.5 + offset.x, tileY + 0.5 + offset.y) * surface.heightScale);
         const supportTop = Math.max(...legGrounds);
         const rotation = WATCH_TOWER_GRID_ROTATION_RADIANS;
-        const towerModel = createProceduralWatchTowerModel(tower.level);
+        const towerModel = cloneStructureWatchTower(tower.level);
         towerModel.userData.watchTowerTownId = tower.townId;
         towerModel.userData.watchTowerId = tower.id;
-        if (!tower.active) towerModel.traverse((object) => { if (object instanceof THREE.Mesh) object.material = new THREE.MeshStandardMaterial({ color: 0xb88b56, transparent: true, opacity: 0.58 }); });
+        if (!tower.active) towerModel.traverse((object) => { if (object instanceof THREE.Mesh) object.material = inactiveWatchTowerMaterial; });
         towerModel.position.set(centerX, supportTop, centerZ);
         towerModel.rotation.set(0, rotation, 0);
         group.add(towerModel);
         {
-          const footingMaterial = new THREE.MeshStandardMaterial({ color: 0xb8bab5, roughness: 0.92, metalness: 0.02 });
           for (let legIndex = 0; legIndex < legOffsets.length; legIndex += 1) {
             const offset = legOffsets[legIndex];
             const legGround = legGrounds[legIndex];
             const foundationHeight = Math.max(0.08, supportTop - legGround + 0.08);
-            const footing = new THREE.Mesh(buildingGeometry, footingMaterial);
+            const footing = new THREE.Mesh(structureBoxGeometry, structureFootingMaterial);
             footing.name = "watch-tower-grounding-pier";
             footing.scale.set(0.34, foundationHeight, 0.34);
             footing.position.set(surface.toWorldX(tileX + 0.5 + offset.x), legGround + foundationHeight / 2, surface.toWorldZ(tileY + 0.5 + offset.y));
@@ -7677,18 +7879,17 @@ export const createThreeTest = (
         const supportTop = grounding.foundationTop;
         const supportBottom = grounding.foundationBottom;
         const rotation = noiseAt(tower.id * 3.17 + (sample.worldSeed ?? 0)) * Math.PI * 2;
-        const towerModel = createProceduralWaterTowerModel();
+        const towerModel = cloneStructureWaterTower();
         towerModel.position.set(centerX, supportTop, centerZ);
         towerModel.rotation.set(0, rotation, 0);
         group.add(towerModel);
         if (supportBottom < supportTop - 0.01) {
           const foundationHeight = Math.max(0.08, supportTop - supportBottom);
-          const footingMaterial = new THREE.MeshStandardMaterial({ color: 0xb8bab5, roughness: 0.92, metalness: 0.02 });
           const halfBase = WATER_TOWER_BASE_WIDTH_TILES * 0.5;
           for (const [localX, localZ] of [[-halfBase, -halfBase], [halfBase, -halfBase], [halfBase, halfBase], [-halfBase, halfBase]] as const) {
             const rotatedX = localX * Math.cos(rotation) - localZ * Math.sin(rotation);
             const rotatedZ = localX * Math.sin(rotation) + localZ * Math.cos(rotation);
-            const footing = new THREE.Mesh(buildingGeometry, footingMaterial);
+            const footing = new THREE.Mesh(structureBoxGeometry, structureFootingMaterial);
             footing.name = "water-tower-grounding-pier";
             footing.scale.set(WATER_TOWER_FOOTING_SIZE_TILES, foundationHeight, WATER_TOWER_FOOTING_SIZE_TILES);
             footing.position.set(centerX + rotatedX, supportBottom + foundationHeight / 2, centerZ + rotatedZ);
@@ -7701,6 +7902,11 @@ export const createThreeTest = (
       });
     }
 
+    parkUnusedStructureInstancedMeshes();
+    if (previousStructureOverlayGroup) {
+      scene.remove(previousStructureOverlayGroup);
+      previousStructureOverlayGroup.clear();
+    }
     if (group.children.length > 0) {
       structureOverlayGroup = group;
       scene.add(group);
@@ -7746,7 +7952,7 @@ export const createThreeTest = (
     treeImpostorAtlas?.dispose();
     treeImpostorAtlas = null;
     disposeSatelliteMinimapTarget();
-    disposeStructureOverlay();
+    disposeStructureOverlayResources();
     clearUnitCommandVisuals();
     clearEvacuationVisuals();
     lastStructureOverlayKey = "";
@@ -8341,16 +8547,23 @@ export const createThreeTest = (
       applyResize(pendingResize.width, pendingResize.height);
       pendingResize = null;
     }
-    if (THREE_TEST_SHADOWS_ENABLED) {
-      const previousVisible = previousShadowLight.visible;
-      const nextVisible = nextShadowLight.visible;
-      previousShadowLight.visible = true;
-      nextShadowLight.visible = true;
+    const structureShaderWarmupGroup = createStructureShaderWarmupGroup();
+    scene.add(structureShaderWarmupGroup);
+    try {
+      if (THREE_TEST_SHADOWS_ENABLED) {
+        const previousVisible = previousShadowLight.visible;
+        const nextVisible = nextShadowLight.visible;
+        previousShadowLight.visible = true;
+        nextShadowLight.visible = true;
+        renderer.compile(scene, camera);
+        previousShadowLight.visible = previousVisible;
+        nextShadowLight.visible = nextVisible;
+      }
       renderer.compile(scene, camera);
-      previousShadowLight.visible = previousVisible;
-      nextShadowLight.visible = nextVisible;
+    } finally {
+      scene.remove(structureShaderWarmupGroup);
+      disposeStructureShaderWarmupGroup(structureShaderWarmupGroup);
     }
-    renderer.compile(scene, camera);
     seasonalSky.syncToCamera(camera);
     if (lastLightingApplied) {
       syncDirectionalLightRig(lastLightingApplied);

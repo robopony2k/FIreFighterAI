@@ -3,6 +3,7 @@ import { markTileSoADirty } from "../../core/tileCache.js";
 import { applyFuel } from "../../core/tiles.js";
 import { clamp } from "../../core/utils.js";
 import { applyVegetationPreGrowth } from "../../systems/terrain/sim/vegetationPreGrowth.js";
+import { primeRuntimeVegetationSuitabilityCache } from "../../systems/terrain/sim/runtimeVegetationSuitabilityCache.js";
 import type { PipelineStage } from "../pipeline/TerrainPipeline.js";
 import { fractalNoise } from "../noise.js";
 import { emitStageSnapshot } from "../pipeline/stageDebug.js";
@@ -18,6 +19,12 @@ export const FinalizeStage: PipelineStage = {
   weight: 6,
   run: async (ctx) => {
     const { state, rng, settings, cellSizeM } = ctx;
+    if (ctx.treeSuitabilityMap && ctx.vegetationSiteQualityMap) {
+      primeRuntimeVegetationSuitabilityCache(state, {
+        suitability: ctx.treeSuitabilityMap,
+        siteQuality: ctx.vegetationSiteQualityMap
+      });
+    }
     seedInitialVegetationState(
       state,
       ctx.biomeSuitabilityMap,

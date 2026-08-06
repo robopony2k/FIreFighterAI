@@ -23,6 +23,10 @@ export type TerrainTypeDiff = {
   dirtyTileBounds?: TerrainDirtyTileBounds;
 };
 
+export type TerrainTypeDiffOptions = {
+  dynamicStructures?: boolean;
+};
+
 export type ThreeTestTreeTypeMapState = {
   cachedLength: number;
   totalTiles: number;
@@ -77,6 +81,11 @@ const GEOMETRY_TERRAIN_TYPES = new Set<number>([
   TILE_TYPE_IDS.house
 ]);
 
+const DYNAMIC_STRUCTURE_TERRAIN_TYPES = new Set<number>([
+  TILE_TYPE_IDS.base,
+  TILE_TYPE_IDS.house
+]);
+
 const ROAD_TERRAIN_TYPES = new Set<number>([
   TILE_TYPE_IDS.road,
   TILE_TYPE_IDS.base
@@ -108,7 +117,8 @@ const includeDirtyTile = (
 export const analyzeTerrainTypeDiff = (
   previous: Uint8Array | null,
   next: Uint8Array,
-  cols: number
+  cols: number,
+  options: TerrainTypeDiffOptions = {}
 ): TerrainTypeDiff => {
   if (!previous || previous.length !== next.length || cols <= 0) {
     return {
@@ -135,7 +145,13 @@ export const analyzeTerrainTypeDiff = (
     const y = Math.floor(i / cols);
     dirtyTileBounds = includeDirtyTile(dirtyTileBounds, x, y);
     changedTileCount += 1;
-    geometryTerrainChanged ||= isTerrainTypeInSet(prevType, GEOMETRY_TERRAIN_TYPES) || isTerrainTypeInSet(nextType, GEOMETRY_TERRAIN_TYPES);
+    const previousGeometryType =
+      isTerrainTypeInSet(prevType, GEOMETRY_TERRAIN_TYPES) &&
+      !(options.dynamicStructures && isTerrainTypeInSet(prevType, DYNAMIC_STRUCTURE_TERRAIN_TYPES));
+    const nextGeometryType =
+      isTerrainTypeInSet(nextType, GEOMETRY_TERRAIN_TYPES) &&
+      !(options.dynamicStructures && isTerrainTypeInSet(nextType, DYNAMIC_STRUCTURE_TERRAIN_TYPES));
+    geometryTerrainChanged ||= previousGeometryType || nextGeometryType;
     roadTerrainChanged ||= isTerrainTypeInSet(prevType, ROAD_TERRAIN_TYPES) || isTerrainTypeInSet(nextType, ROAD_TERRAIN_TYPES);
     waterOrCoastChanged ||= isTerrainTypeInSet(prevType, WATER_OR_COAST_TERRAIN_TYPES) || isTerrainTypeInSet(nextType, WATER_OR_COAST_TERRAIN_TYPES);
   }

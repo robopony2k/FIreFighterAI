@@ -63,6 +63,7 @@ import {
   type TerrainVisualInvalidation,
   type ThreeTestTerrainRevisionState
 } from "../systems/terrain/controllers/terrainVisualSyncController.js";
+import { getRuntimeVegetationSuitabilityCacheDiagnostics } from "../systems/terrain/sim/runtimeVegetationSuitabilityCache.js";
 import { createUiAudioController } from "../audio/uiAudio.js";
 import { createMusicController } from "../audio/musicController.js";
 import { showTitleScreen as mountTitleScreen, type TitleScreenHandle } from "../ui/titleScreen.js";
@@ -726,6 +727,7 @@ export const createAppRuntime = (): AppRuntime => {
   });
   
   const buildPerfOverlayText = (threePerf: ThreeTestPerfSnapshot | null, now: number): string => {
+    const vegetationSuitabilityCache = getRuntimeVegetationSuitabilityCacheDiagnostics(state);
     const mainFrame = readRecentPerf("main.frame", now);
     const mainRafGap = readRecentPerf("main.rafGap", now);
     const mainHitch = readRecentPerf("main.hitch", now);
@@ -769,7 +771,7 @@ export const createAppRuntime = (): AppRuntime => {
       `Sim slices: cal ${formatMs(simCalendar?.avg)} town ${formatMs(simTownConstruction?.avg)} growth ${formatMs(simGrowth?.avg)} units ${formatMs(simUnits?.avg)} fire ${formatMs(simFire?.avg)} score ${formatMs(simScoring?.avg)} part ${formatMs(simParticles?.avg)} snap ${formatMs(simFireSnapshot?.avg)}`
     );
     lines.push(
-      `Growth: blocks ${formatNum(simGrowthBlocks?.avg)} tiles ${formatNum(simGrowthTiles?.avg)} changed ${formatNum(simGrowthChanged?.avg)}`
+      `Growth: blocks ${formatNum(simGrowthBlocks?.avg)} tiles ${formatNum(simGrowthTiles?.avg)} changed ${formatNum(simGrowthChanged?.avg)} cache ${vegetationSuitabilityCache.source} n ${formatInt(vegetationSuitabilityCache.tileCount)} builds ${formatInt(vegetationSuitabilityCache.fallbackBuildCount)} last ${formatMs(vegetationSuitabilityCache.lastFallbackBuildMs)}`
     );
     lines.push(
       `Fire budget: substeps ${formatNum(fireSubsteps?.avg)} deferredDays ${formatNum(fireDeferredDays?.avg)} terrainMut ${formatNum(fireTerrainMutations?.avg)} ranged ${formatNum(fireRangedSamples?.avg)} ignite ${formatNum(fireIgniteCandidates?.avg)} roadSearch ${formatInt(state.settlementRuntimeRoadPathSearches)} terrainEditNoop ${formatInt(state.settlementRuntimeTerrainEditAttempts)}`
@@ -1087,7 +1089,9 @@ export const createAppRuntime = (): AppRuntime => {
     }
     const terrainTypesChanged = next.terrainTypeRevision !== previous.terrainTypeRevision;
     const terrainTypeDiff = terrainTypesChanged
-      ? analyzeTerrainTypeDiff(lastThreeTestGeometryTypeSnapshot, state.tileTypeId, state.grid.cols)
+      ? analyzeTerrainTypeDiff(lastThreeTestGeometryTypeSnapshot, state.tileTypeId, state.grid.cols, {
+          dynamicStructures: true
+        })
       : null;
     const invalidation = classifyTerrainVisualInvalidation({
       previous,
@@ -1129,7 +1133,9 @@ export const createAppRuntime = (): AppRuntime => {
       }
       const now = performance.now();
       const terrainTypeDiff = terrainTypesChanged
-        ? analyzeTerrainTypeDiff(lastThreeTestGeometryTypeSnapshot, state.tileTypeId, state.grid.cols)
+        ? analyzeTerrainTypeDiff(lastThreeTestGeometryTypeSnapshot, state.tileTypeId, state.grid.cols, {
+            dynamicStructures: true
+          })
         : null;
       const decision = decideTerrainVisualSync({
         previous: prevRevisionState,

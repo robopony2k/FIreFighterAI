@@ -8,6 +8,18 @@ import { generateWorldClimateSeed } from "../../climate/sim/worldClimateSeed.js"
 
 const MAX_SUITABILITY_SLOPE = 0.5;
 
+export type RuntimeVegetationSuitabilitySnapshot = {
+  readonly suitability: Float32Array;
+  readonly siteQuality: Float32Array;
+};
+
+export type RuntimeVegetationSuitabilityCacheDiagnostics = {
+  source: "none" | "primed" | "runtime-fallback";
+  tileCount: number;
+  fallbackBuildCount: number;
+  lastFallbackBuildMs: number;
+};
+
 type RuntimeVegetationSuitabilityCache = {
   cols: number;
   rows: number;
@@ -18,9 +30,17 @@ type RuntimeVegetationSuitabilityCache = {
   valleyRef: Float32Array | number[] | null;
   suitability: Float32Array;
   siteQuality: Float32Array;
+  source: "primed" | "runtime-fallback";
+  fallbackBuildCount: number;
+  lastFallbackBuildMs: number;
 };
 
 const caches = new WeakMap<WorldState, RuntimeVegetationSuitabilityCache>();
+
+const nowMs = (): number =>
+  typeof performance !== "undefined" && typeof performance.now === "function"
+    ? performance.now()
+    : Date.now();
 
 const computeLocalSlope = (state: WorldState, x: number, y: number): number => {
   const idx = indexFor(state.grid, x, y);
@@ -88,12 +108,52 @@ const cacheMatches = (cache: RuntimeVegetationSuitabilityCache, state: WorldStat
   cache.seaLevelRef === (state.tileSeaLevel ?? null) &&
   cache.valleyRef === (state.valleyMap ?? null);
 
-export const getRuntimeVegetationSuitabilityMap = (state: WorldState): Float32Array => {
+const createCache = (
+  state: WorldState,
+  snapshot: RuntimeVegetationSuitabilitySnapshot,
+  source: RuntimeVegetationSuitabilityCache["source"],
+  fallbackBuildCount: number,
+  lastFallbackBuildMs: number
+): RuntimeVegetationSuitabilityCache => ({
+  cols: state.grid.cols,
+  rows: state.grid.rows,
+  totalTiles: state.grid.totalTiles,
+  seed: state.seed,
+  elevationRef: state.tileElevation,
+  seaLevelRef: state.tileSeaLevel ?? null,
+  valleyRef: state.valleyMap ?? null,
+  suitability: snapshot.suitability,
+  siteQuality: snapshot.siteQuality,
+  source,
+  fallbackBuildCount,
+  lastFallbackBuildMs
+});
+
+export const primeRuntimeVegetationSuitabilityCache = (
+  state: WorldState,
+  snapshot: RuntimeVegetationSuitabilitySnapshot
+): boolean => {
+  if (
+    !(snapshot.suitability instanceof Float32Array) ||
+    !(snapshot.siteQuality instanceof Float32Array) ||
+    snapshot.suitability.length !== state.grid.totalTiles ||
+    snapshot.siteQuality.length !== state.grid.totalTiles
+  ) {
+    return false;
+  }
+  caches.set(state, createCache(state, snapshot, "primed", 0, 0));
+  return true;
+};
+
+export const getRuntimeVegetationSuitabilitySnapshot = (
+  state: WorldState
+): RuntimeVegetationSuitabilitySnapshot => {
   const cached = caches.get(state);
   if (cached && cacheMatches(cached, state)) {
-    return cached.suitability;
+    return cached;
   }
 
+  const startedAt = nowMs();
   const suitability = new Float32Array(state.grid.totalTiles);
   const siteQuality = new Float32Array(state.grid.totalTiles);
   const waterDistance = new Uint16Array(state.grid.totalTiles);
@@ -126,24 +186,42 @@ export const getRuntimeVegetationSuitabilityMap = (state: WorldState): Float32Ar
       siteQuality[idx] = details.siteQuality;
     }
   }
-  caches.set(state, {
-    cols: state.grid.cols,
-    rows: state.grid.rows,
-    totalTiles: state.grid.totalTiles,
-    seed: state.seed,
-    elevationRef: state.tileElevation,
-    seaLevelRef: state.tileSeaLevel ?? null,
-    valleyRef: state.valleyMap ?? null,
-    suitability,
-    siteQuality
-  });
-  return suitability;
+  const nextCache = createCache(
+    state,
+    { suitability, siteQuality },
+    "runtime-fallback",
+    (cached?.fallbackBuildCount ?? 0) + 1,
+    Math.max(0, nowMs() - startedAt)
+  );
+  caches.set(state, nextCache);
+  return nextCache;
 };
+
+export const getRuntimeVegetationSuitabilityCacheDiagnostics = (
+  state: WorldState
+): RuntimeVegetationSuitabilityCacheDiagnostics => {
+  const cached = caches.get(state);
+  if (!cached || !cacheMatches(cached, state)) {
+    return {
+      source: "none",
+      tileCount: state.grid.totalTiles,
+      fallbackBuildCount: 0,
+      lastFallbackBuildMs: 0
+    };
+  }
+  return {
+    source: cached.source,
+    tileCount: cached.totalTiles,
+    fallbackBuildCount: cached.fallbackBuildCount,
+    lastFallbackBuildMs: cached.lastFallbackBuildMs
+  };
+};
+
+export const getRuntimeVegetationSuitabilityMap = (state: WorldState): Float32Array =>
+  getRuntimeVegetationSuitabilitySnapshot(state).suitability;
 
 export const getRuntimeVegetationSuitabilityAt = (state: WorldState, x: number, y: number): number =>
   getRuntimeVegetationSuitabilityMap(state)[indexFor(state.grid, x, y)] ?? 0;
 
-export const getRuntimeVegetationSiteQualityAt = (state: WorldState, x: number, y: number): number => {
-  getRuntimeVegetationSuitabilityMap(state);
-  return caches.get(state)?.siteQuality[indexFor(state.grid, x, y)] ?? 0;
-};
+export const getRuntimeVegetationSiteQualityAt = (state: WorldState, x: number, y: number): number =>
+  getRuntimeVegetationSuitabilitySnapshot(state).siteQuality[indexFor(state.grid, x, y)] ?? 0;
