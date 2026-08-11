@@ -16,6 +16,10 @@ import {
 } from "../dist/render/terrain/shared/roadTopology.js";
 import { TerrainShadowBlendController } from "../dist/systems/terrain/rendering/terrainShadowBlendController.js";
 import {
+  resolveAspectAwareFocusDistance,
+  resolveTerrainCameraFocusPoint
+} from "../dist/systems/terrain/rendering/terrainCameraConstraints.js";
+import {
   ROAD_HIGH_CONTRAST_COLOR_HEX,
   TERRAIN_ROAD_VISUAL_USER_DATA,
   setTerrainRoadHighContrast
@@ -57,7 +61,51 @@ import {
   TREE_IMPOSTOR_EXIT_PX,
   buildTreeLod
 } from "../dist/systems/terrain/rendering/vegetation/treeLodController.js";
+import {
+  computeTreeBudgetScale,
+  resolveForestTreeCohort,
+  resolveTreeBudgetPriority
+} from "../dist/systems/terrain/rendering/vegetation/treePlacementPlan.js";
 import { createTreeBurnController } from "../dist/render/terrain/vegetation/treeBurnController.js";
+
+const focusSurface = {
+  cols: 11,
+  rows: 21,
+  heightScale: 10,
+  heightAtTileCoord: (tileX, tileY) => tileX * 0.1 + tileY * 0.01,
+  toRenderedWorldX: (tileX) => tileX - 5,
+  toRenderedWorldZ: (tileY) => tileY - 10,
+  renderedWorldToTileX: (worldX) => worldX + 5,
+  renderedWorldToTileY: (worldZ) => worldZ + 10
+};
+const worldFocus = resolveTerrainCameraFocusPoint(focusSurface, 2.5, 4, 0.25);
+assert.deepEqual(worldFocus.toArray(), [-2.5, 3.15, -6], "camera focus must sample height and XZ at one rendered-world coordinate");
+const landscapeFocusDistance = resolveAspectAwareFocusDistance({
+  preferredDistance: 5,
+  framingRadiusWorld: 4,
+  verticalFovDeg: 45,
+  aspect: 16 / 9,
+  minDistance: 3,
+  maxDistance: 100
+});
+const portraitFocusDistance = resolveAspectAwareFocusDistance({
+  preferredDistance: 5,
+  framingRadiusWorld: 4,
+  verticalFovDeg: 45,
+  aspect: 9 / 16,
+  minDistance: 3,
+  maxDistance: 100
+});
+assert.ok(portraitFocusDistance > landscapeFocusDistance, "narrow viewports must back away enough to retain the focus radius");
+const townEyeFocusDistance = resolveAspectAwareFocusDistance({
+  preferredDistance: 60 * 0.62,
+  framingRadiusWorld: 4,
+  verticalFovDeg: 45,
+  aspect: 4 / 3,
+  minDistance: 3,
+  maxDistance: 120
+});
+assert.ok(townEyeFocusDistance < 60, "town eye focus must produce a real zoom after a normal viewport resize");
 
 const instances = [
   { tileX: 0, tileY: 0 },
@@ -109,6 +157,34 @@ atlasLayout.forEach((entry) => {
 assert.equal(occupiedAtlasFrames.size, 64, "the supported tree asset set should deterministically fill 64 atlas cells");
 assert.equal(TREE_IMPOSTOR_ENTER_PX, 18);
 assert.equal(TREE_IMPOSTOR_EXIT_PX, 24);
+
+const forestCohortCounts = { sapling: 0, mid: 0, mature: 0 };
+for (let index = 0; index < 1_000; index += 1) {
+  const resolved = resolveForestTreeCohort((index + 0.5) / 1_000);
+  forestCohortCounts[resolved.cohort] += 1;
+  if (resolved.cohort === "sapling") {
+    assert.ok(resolved.scale >= 0.35 && resolved.scale <= 0.55, "sapling scale should stay within its cohort range");
+  } else if (resolved.cohort === "mid") {
+    assert.ok(resolved.scale >= 0.65 && resolved.scale <= 0.85, "mid-sized scale should stay within its cohort range");
+  } else {
+    assert.ok(resolved.scale >= 0.9 && resolved.scale <= 1.1, "mature scale should stay within its cohort range");
+  }
+}
+assert.deepEqual(
+  forestCohortCounts,
+  { sapling: 200, mid: 350, mature: 450 },
+  "mature stands should retain the deterministic 20/35/45 forest cohort mixture"
+);
+assert.ok(
+  resolveTreeBudgetPriority(0.4, "forest", 1, 0.95) < resolveTreeBudgetPriority(0.4, "forest", 0.25, 0.3),
+  "instance thinning should prioritize mature high-canopy forest"
+);
+assert.ok(
+  resolveTreeBudgetPriority(0.4, "forest", 1, 0.95) < resolveTreeBudgetPriority(0.4, "scrub", 1, 0.95),
+  "instance thinning should keep shrub visually subordinate to mature forest"
+);
+assert.ok(computeTreeBudgetScale(30_000, 18_000) < 1, "large candidate sets should thin to the 18,000-tree budget");
+assert.equal(computeTreeBudgetScale(18_000, 18_000), 1, "the renderer should not thin candidates already within budget");
 
 const treeRoot = new THREE.Group();
 const fullTreeMesh = new THREE.InstancedMesh(
@@ -509,6 +585,108 @@ const seasonalCloudProfileSource = await readFile(
 const threeTestSource = await readFile(
   fileURLToPath(new URL("../src/render/threeTest.ts", import.meta.url)),
   "utf8"
+);
+const threeTestTerrainSource = await readFile(
+  fileURLToPath(new URL("../src/render/threeTestTerrain.ts", import.meta.url)),
+  "utf8"
+);
+const gameSessionRuntimeSource = await readFile(
+  fileURLToPath(new URL("../src/app/gameSessionRuntime.ts", import.meta.url)),
+  "utf8"
+);
+const loadingTipsSource = await readFile(
+  fileURLToPath(new URL("../src/ui/loadingTips.ts", import.meta.url)),
+  "utf8"
+);
+const inlandWaterCutoutSource = await readFile(
+  fileURLToPath(new URL("../src/systems/terrain/rendering/inlandWaterTerrainCutout.ts", import.meta.url)),
+  "utf8"
+);
+const inlandWaterSeamSource = await readFile(
+  fileURLToPath(new URL("../src/systems/terrain/rendering/inlandWaterTerrainSeam.ts", import.meta.url)),
+  "utf8"
+);
+const stylesSource = await readFile(
+  fileURLToPath(new URL("../styles.css", import.meta.url)),
+  "utf8"
+);
+assert.match(
+  threeTestTerrainSource,
+  /TerrainBuildCutoutTelemetry[\s\S]*domain: number[\s\S]*clipping: number[\s\S]*seam: number[\s\S]*conformance: number[\s\S]*skirt: number/,
+  "terrain build telemetry must keep inland-water cutout substeps independently measurable"
+);
+assert.match(
+  threeTestTerrainSource,
+  /sourceTriangles[\s\S]*cutSourceTriangles[\s\S]*seamSegments[\s\S]*retainedTriangles[\s\S]*skirtTriangles[\s\S]*outputTriangles/,
+  "cutout telemetry must report geometry counts that explain timing growth"
+);
+assert.match(
+  threeTestSource,
+  /\[terrainbuild\][\s\S]*\[terrainbuild:cutout\]/,
+  "completed terrain rebuilds must emit copyable overall and cutout console profiles"
+);
+assert.match(
+  threeTestSource,
+  /treeImpostorAtlasBuildMs[\s\S]*\[threeTest:impostoratlas\]/,
+  "renderer initialization must isolate tree impostor-atlas construction time"
+);
+assert.match(
+  gameSessionRuntimeSource,
+  /0\.75 \+ assetProgress \* 0\.15[\s\S]*initializing WebGL[\s\S]*await yieldToBrowserPaint\(\)[\s\S]*building terrain surface[\s\S]*priming shaders/,
+  "startup progress must reserve post-asset stages and yield so each stage can paint"
+);
+assert.match(
+  loadingTipsSource,
+  /terrain assembly, inland-water clipping, seam conformance, skirt geometry, normals, vegetation, structures, and water separately/,
+  "the loading explanation must identify the newly isolated terrain-build work"
+);
+const contourLookupSource = inlandWaterCutoutSource.match(
+  /export const findInlandWaterContourSegment[\s\S]*?\n};/
+)?.[0] ?? "";
+assert.match(contourLookupSource, /boundarySegmentBuckets\.get/, "contour lookup must use the spatial boundary index");
+assert.doesNotMatch(
+  contourLookupSource,
+  /for \(const segment of domain\.boundarySegments\)/,
+  "terrain clipping must not rescan every inland-water boundary segment for each polygon edge"
+);
+const seamVertexLookupSource = inlandWaterSeamSource.match(
+  /export const findInlandWaterTerrainSeamVertex[\s\S]*?\n};/
+)?.[0] ?? "";
+assert.match(seamVertexLookupSource, /vertexIdByQuantizedKey\.get/, "canonical seam vertex lookup must remain indexed");
+assert.doesNotMatch(seamVertexLookupSource, /seam\.vertices\.find/, "canonical seam lookup must not be linear");
+const seamAlongEdgeSource = inlandWaterSeamSource.match(
+  /export const getInlandWaterTerrainSeamVerticesAlongEdge[\s\S]*?\n};/
+)?.[0] ?? "";
+assert.match(seamAlongEdgeSource, /vertexBuckets\.get/, "along-edge conformance must query local seam buckets");
+assert.doesNotMatch(seamAlongEdgeSource, /seam\.vertices\s*\.map/, "along-edge conformance must not rescan every seam vertex");
+assert.match(
+  stylesSource,
+  /\.mapgen-overlay\s*\{[\s\S]*?z-index:\s*45;/,
+  "map preparation must remain above the mounted 3D world overlay"
+);
+const resizeScheduleSource = threeTestSource.match(/const scheduleResize = \(\): void => \{[\s\S]*?\n  const applyResize/)?.[0] ?? "";
+const resizeSource = threeTestSource.match(/const applyResize = \(resizeState: PendingViewportResize\): void => \{[\s\S]*?\n  const applyPendingViewportResize/)?.[0] ?? "";
+assert.match(
+  resizeScheduleSource,
+  /camera\.position\.clone\(\)[\s\S]*camera\.quaternion\.clone\(\)[\s\S]*controls\.target\.clone\(\)/,
+  "viewport resize must snapshot the current camera pose and orbit target"
+);
+assert.ok(resizeSource.length > 0, "3D resize implementation must remain discoverable by the renderer regression");
+assert.match(
+  resizeSource,
+  /camera\.position\.copy\(cameraPosition\)[\s\S]*camera\.quaternion\.copy\(cameraQuaternion\)[\s\S]*controls\.target\.copy\(controlsTarget\)/,
+  "viewport resize must restore the identical camera pose and orbit target"
+);
+assert.doesNotMatch(resizeSource, /cancelCameraFlight/, "viewport resize must not cancel an active town focus flight");
+assert.doesNotMatch(
+  threeTestSource,
+  /ensureTerrainVertexColorsWhite|useTextureColorFastPath/,
+  "fast terrain refreshes must not erase authoritative refined surface colours"
+);
+assert.match(
+  threeTestSource,
+  /if \(useLegacyFacetedTerrain\)[\s\S]*?deleteAttribute\("color"\);[\s\S]*?else \{[\s\S]*?applyTerrainSurfaceColors/,
+  "refined fast terrain refreshes must recompute the surface-colour attribute"
 );
 assert.equal((oceanShaderSource.match(/uniform sampler2D/g) ?? []).length, 11, "contextual surf must not add ocean texture samplers");
 assert.match(oceanShaderSource, /return 8\.0;/, "fast water quality must retain eight broad wave iterations");

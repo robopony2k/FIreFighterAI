@@ -13,14 +13,18 @@ import { createGameEventBus, type GameOverPayload } from "../core/gameEvents.js"
 import { CLIMATE_IGNITION_MAX, CLIMATE_IGNITION_MIN, VIRTUAL_CLIMATE_PARAMS } from "../core/climate.js";
 import { generateMap, type MapGenDebug, type MapGenDebugSnapshot } from "../mapgen/index.js";
 import { createThreeTest, type ThreeTestPerfSnapshot, type ThreeTestTerrainUpdateIntent } from "../render/threeTest.js";
-import { preloadThreeTestWorldAudioAssets } from "../render/threeTestWorldAudio.js";
+import {
+  preloadThreeTestWorldAudioAssets,
+  WORLD_AUDIO_ASSET_COUNT
+} from "../render/threeTestWorldAudio.js";
 import {
   getFirestationAssetCache,
   getHouseAssetsCache,
   getTreeAssetsCache,
   loadFirestationAsset,
   loadHouseAssets,
-  loadTreeAssets
+  loadTreeAssets,
+  TREE_MODEL_ASSET_COUNT
 } from "../render/threeTestAssets.js";
 import { asRenderSim, buildRenderTerrainSample } from "../render/simView.js";
 import { INLAND_WATER_SEAM_DEBUG_MODES } from "../render/terrainWaterDebug.js";
@@ -30,7 +34,13 @@ import { bindPhaseUi } from "../ui/phase/bindings.js";
 import { getMapEditorRefs, initMapEditor, type MapEditorHandle } from "../ui/map-editor.js";
 import { getOverlayRefs, updateOverlay } from "../ui/overlay.js";
 import { createEndRunScreen, type EndRunScreenHandle } from "../ui/end-run/endRunScreen.js";
-import { getMapPrepLoadingScene, getMapPrepStateLine } from "../ui/loadingTips.js";
+import {
+  getMapPrepAssetLoadingMessage,
+  getMapPrepAssetLoadingProgress,
+  getMapPrepLoadingScene,
+  getMapPrepStateLine,
+  type MapPrepAssetTaskStatus
+} from "../ui/loadingTips.js";
 import { saveLeaderboard } from "../persistence/leaderboard.js";
 import { loadFuelProfileOverrides } from "../persistence/fuelProfiles.js";
 import { loadLastRunConfig } from "../persistence/lastRunConfig.js";
@@ -58,6 +68,7 @@ import {
   classifyTerrainVisualInvalidation,
   decideTerrainVisualSync,
   shouldRebuildThreeTestTreeTypeMap,
+  shouldRebuildThreeTestVegetationInstances,
   shouldHoldSimulationForTerrainInvalidation,
   shouldSyncThreeTestTerrain,
   type TerrainVisualInvalidation,
@@ -445,7 +456,9 @@ export const createAppRuntime = (): AppRuntime => {
     if (!mapgenOverlay) {
       return;
     }
-    mapgenOverlayShownAt = typeof performance !== "undefined" ? performance.now() : Date.now();
+    if (mapgenOverlayShownAt <= 0) {
+      mapgenOverlayShownAt = typeof performance !== "undefined" ? performance.now() : Date.now();
+    }
     updateMapgenTipScene();
     if (mapgenTipTimer !== null) {
       window.clearInterval(mapgenTipTimer);
@@ -474,6 +487,14 @@ export const createAppRuntime = (): AppRuntime => {
     mapgenPercent.textContent = `${Math.round(clamped * 100)}%`;
     updateMapgenTipScene();
   };
+  const yieldToBrowserPaint = (): Promise<void> =>
+    new Promise((resolve) => {
+      if (document.visibilityState === "hidden") {
+        window.setTimeout(resolve, 0);
+        return;
+      }
+      window.requestAnimationFrame(() => window.setTimeout(resolve, 0));
+    });
   
   let threeTestController: ReturnType<typeof createThreeTest> | null = null;
   let fxLabController: FxLabController | null = null;
@@ -741,9 +762,13 @@ export const createAppRuntime = (): AppRuntime => {
     const simCalendar = readRecentPerf("sim.calendar", now);
     const simTownConstruction = readRecentPerf("sim.townConstruction", now);
     const simGrowth = readRecentPerf("sim.growth", now);
-    const simGrowthBlocks = readRecentPerf("sim.growthBlocks", now);
     const simGrowthTiles = readRecentPerf("sim.growthTiles", now);
-    const simGrowthChanged = readRecentPerf("sim.growthChanged", now);
+    const simGrowthAged = readRecentPerf("sim.growthAged", now);
+    const simGrowthFuel = readRecentPerf("sim.growthFuel", now);
+    const simGrowthShrub = readRecentPerf("sim.growthShrub", now);
+    const simGrowthForest = readRecentPerf("sim.growthForest", now);
+    const simGrowthRecovered = readRecentPerf("sim.growthRecovered", now);
+    const simGrowthVisual = readRecentPerf("sim.growthVisual", now);
     const simUnits = readRecentPerf("sim.units", now);
     const simFire = readRecentPerf("sim.fire", now);
     const simScoring = readRecentPerf("sim.scoring", now);
@@ -771,7 +796,7 @@ export const createAppRuntime = (): AppRuntime => {
       `Sim slices: cal ${formatMs(simCalendar?.avg)} town ${formatMs(simTownConstruction?.avg)} growth ${formatMs(simGrowth?.avg)} units ${formatMs(simUnits?.avg)} fire ${formatMs(simFire?.avg)} score ${formatMs(simScoring?.avg)} part ${formatMs(simParticles?.avg)} snap ${formatMs(simFireSnapshot?.avg)}`
     );
     lines.push(
-      `Growth: blocks ${formatNum(simGrowthBlocks?.avg)} tiles ${formatNum(simGrowthTiles?.avg)} changed ${formatNum(simGrowthChanged?.avg)} cache ${vegetationSuitabilityCache.source} n ${formatInt(vegetationSuitabilityCache.tileCount)} builds ${formatInt(vegetationSuitabilityCache.fallbackBuildCount)} last ${formatMs(vegetationSuitabilityCache.lastFallbackBuildMs)}`
+      `Annual growth: tiles ${formatNum(simGrowthTiles?.avg)} aged ${formatNum(simGrowthAged?.avg)} fuel ${formatNum(simGrowthFuel?.avg)} shrub ${formatNum(simGrowthShrub?.avg)} forest ${formatNum(simGrowthForest?.avg)} recover ${formatNum(simGrowthRecovered?.avg)} visual ${formatNum(simGrowthVisual?.avg)} cache ${vegetationSuitabilityCache.source} n ${formatInt(vegetationSuitabilityCache.tileCount)} builds ${formatInt(vegetationSuitabilityCache.fallbackBuildCount)} last ${formatMs(vegetationSuitabilityCache.lastFallbackBuildMs)}`
     );
     lines.push(
       `Fire budget: substeps ${formatNum(fireSubsteps?.avg)} deferredDays ${formatNum(fireDeferredDays?.avg)} terrainMut ${formatNum(fireTerrainMutations?.avg)} ranged ${formatNum(fireRangedSamples?.avg)} ignite ${formatNum(fireIgniteCandidates?.avg)} roadSearch ${formatInt(state.settlementRuntimeRoadPathSearches)} terrainEditNoop ${formatInt(state.settlementRuntimeTerrainEditAttempts)}`
@@ -794,7 +819,7 @@ export const createAppRuntime = (): AppRuntime => {
           `3D batch est: tree ${formatInt(threePerf.terrainVisibleTreeCalls)}/${formatInt(threePerf.terrainVisibleTreeTriangles)} house ${formatInt(threePerf.terrainVisibleHouseCalls)}/${formatInt(threePerf.terrainVisibleHouseTriangles)} other ${formatInt(threePerf.terrainVisibleOtherCalls)}/${formatInt(threePerf.terrainVisibleOtherTriangles)}`
         );
         lines.push(
-          `3D trees: ${threePerf.treeLodMode} chunks m/i ${formatInt(threePerf.treeModelChunkCount)}/${formatInt(threePerf.treeImpostorChunkCount)} inst m/i ${formatInt(threePerf.treeModelInstanceCount)}/${formatInt(threePerf.treeImpostorInstanceCount)} transitions ${formatInt(threePerf.treeLodTransitionCount)} far draws ${formatInt(threePerf.treeImpostorDrawCount)} atlas ${threePerf.treeImpostorAtlasState}`
+          `3D trees: ${threePerf.treeLodMode} chunks m/i ${formatInt(threePerf.treeModelChunkCount)}/${formatInt(threePerf.treeImpostorChunkCount)} inst m/i ${formatInt(threePerf.treeModelInstanceCount)}/${formatInt(threePerf.treeImpostorInstanceCount)} transitions ${formatInt(threePerf.treeLodTransitionCount)} far draws ${formatInt(threePerf.treeImpostorDrawCount)} atlas ${threePerf.treeImpostorAtlasState}/${formatMs(threePerf.treeImpostorAtlasBuildMs)}`
         );
         lines.push(
           `3D misc: fx ${formatMs(threePerf.fireFxMs)}  controls ${formatMs(threePerf.controlsMs)}  hud ${formatMs(threePerf.hudMs)}  ui ${formatMs(threePerf.uiRenderMs)}`
@@ -834,6 +859,23 @@ export const createAppRuntime = (): AppRuntime => {
         lines.push(
           `3D terrain aux: roadSig ${formatMs(threePerf.terrainSetRoadSignatureLastMs)}/${formatMs(threePerf.terrainSetRoadSignatureMs)} road ${formatMs(threePerf.terrainRoadRefreshLastMs)}/${formatMs(threePerf.terrainRoadRefreshMs)} n ${formatInt(threePerf.terrainRoadRefreshCount)} struct ${formatMs(threePerf.terrainSetStructureLastMs)}/${formatMs(threePerf.terrainSetStructureMs)} full ${formatMs(threePerf.terrainSetFullDisposeLastMs)}/${formatMs(threePerf.terrainSetFullBuildLastMs)} water ${formatMs(threePerf.terrainSetWaterLastMs)}`
         );
+        if (threePerf.terrainBuildTelemetry) {
+          const build = threePerf.terrainBuildTelemetry;
+          lines.push(
+            `3D terrain build: total ${formatMs(build.timingsMs.total)} assembly ${formatMs(build.timingsMs.terrainAssembly)} cutout ${formatMs(build.timingsMs.inlandWaterCutout)} normals ${formatMs(build.timingsMs.normals)} material ${formatMs(build.timingsMs.surfaceMaterial)} vegetation ${formatMs(build.timingsMs.vegetation)} structures ${formatMs(build.timingsMs.structures)} water ${formatMs(build.timingsMs.water)}`
+          );
+          lines.push(
+            `3D terrain counts: tri ${formatInt(build.counts.sourceTerrainTriangles)}→${formatInt(build.counts.outputTerrainTriangles)} trees ${formatInt(build.counts.treeInstances)} scrub ${formatInt(build.counts.scrubInstances)} water samples ${formatInt(build.counts.waterSupportSamples)} inland tri ${formatInt(build.counts.inlandWaterTriangles)}`
+          );
+          if (build.cutout) {
+            lines.push(
+              `3D cutout: domain ${formatMs(build.cutout.timingsMs.domain)} clip ${formatMs(build.cutout.timingsMs.clipping)} seam ${formatMs(build.cutout.timingsMs.seam)} conform ${formatMs(build.cutout.timingsMs.conformance)} skirt ${formatMs(build.cutout.timingsMs.skirt)} final ${formatMs(build.cutout.timingsMs.finalize)}`
+            );
+            lines.push(
+              `3D cutout counts: cut ${formatInt(build.cutout.counts.cutSourceTriangles)}/${formatInt(build.cutout.counts.sourceTriangles)} boundary ${formatInt(build.cutout.counts.boundarySamples)} seam ${formatInt(build.cutout.counts.seamSegments)} retained ${formatInt(build.cutout.counts.retainedTriangles)} skirt ${formatInt(build.cutout.counts.skirtTriangles)} out ${formatInt(build.cutout.counts.outputTriangles)}`
+            );
+          }
+        }
         lines.push(
           `3D terrain sync: sample ${formatMs(terrainSampleBuild3d?.avg)} skip ${formatNum(terrainSyncSkipped3d?.avg)}(${formatInt(threeTestTerrainSyncSkippedCount)}) visualBatch ${formatNum(terrainVisualBatched3d?.avg)}(${formatInt(threeTestTerrainVisualBatchedCount)})`
         );
@@ -895,9 +937,12 @@ export const createAppRuntime = (): AppRuntime => {
         const requestedSpeed = readRecentPerf("sim.requestedSpeed", now)?.avg ?? 0;
         const effectiveSpeed = readRecentPerf("sim.effectiveSpeed", now)?.avg ?? 0;
         const appliedSpeed = readRecentPerf("sim.appliedSpeed", now)?.avg ?? 0;
-        const growthBlocks = readRecentPerf("sim.growthBlocks", now)?.avg ?? 0;
         const growthTiles = readRecentPerf("sim.growthTiles", now)?.avg ?? 0;
-        const growthChanged = readRecentPerf("sim.growthChanged", now)?.avg ?? 0;
+        const growthAged = readRecentPerf("sim.growthAged", now)?.avg ?? 0;
+        const growthFuel = readRecentPerf("sim.growthFuel", now)?.avg ?? 0;
+        const growthShrub = readRecentPerf("sim.growthShrub", now)?.avg ?? 0;
+        const growthForest = readRecentPerf("sim.growthForest", now)?.avg ?? 0;
+        const growthRecovered = readRecentPerf("sim.growthRecovered", now)?.avg ?? 0;
         const visualSyncHold = readRecentPerf("sim.visualSyncHold", now)?.avg ?? 0;
         const climateAvg = readRecentPerf("3d.climateSync", now)?.avg ?? 0;
         const terrainAvg = readRecentPerf("3d.terrainSync", now)?.avg ?? 0;
@@ -932,7 +977,7 @@ export const createAppRuntime = (): AppRuntime => {
             `treeLod=${threePerf?.treeLodMode ?? "models"} treeAtlas=${threePerf?.treeImpostorAtlasState ?? "unavailable"} ` +
             `detailStruct=${isThreeTestDetailedStructuresEnabled() ? 1 : 0} ` +
             `gap=${mainGap.toFixed(2)}ms hitch=${hitch.toFixed(2)}ms ` +
-            `growthWork=${growthBlocks.toFixed(2)}/${growthTiles.toFixed(2)}/${growthChanged.toFixed(2)} ` +
+            `annualGrowth=${growthTiles.toFixed(2)}/${growthAged.toFixed(2)}/${growthFuel.toFixed(2)}/${growthShrub.toFixed(2)}/${growthForest.toFixed(2)}/${growthRecovered.toFixed(2)} ` +
             `sync(climate=${climateAvg.toFixed(2)} terrain=${terrainAvg.toFixed(2)} defer=${terrainDeferred.toFixed(2)}) ` +
             `3dFrame=${threeFrame.toFixed(2)}ms scene=${threeScene.toFixed(2)} post=${threePost.toFixed(2)} dof=${threeDof.toFixed(2)} sceneLast=${(threePerf?.sceneRenderLastMs ?? 0).toFixed(2)} ` +
             `gpuWorld=${(threePerf?.gpuWorldMs ?? 0).toFixed(2)} gpuShadowRefresh=${(threePerf?.gpuShadowRefreshMs ?? 0).toFixed(2)} gpuPost=${(threePerf?.gpuPostMs ?? 0).toFixed(2)} gpuUi=${(threePerf?.gpuUiMs ?? 0).toFixed(2)} shadowLights=${Math.round(threePerf?.activeShadowLights ?? 0)} shadowRefresh=${Math.round(threePerf?.shadowRefreshCount ?? 0)} terrainChunks=${Math.round(threePerf?.terrainVisibleChunkCount ?? 0)}/${Math.round(threePerf?.terrainChunkCount ?? 0)} terrainChunkCull=${Math.round(threePerf?.terrainCulledInstanceCount ?? 0)} roadOverlayTri=${Math.round(threePerf?.roadOverlayTriangles ?? 0)}/${Math.round(threePerf?.roadOverlaySourceTriangles ?? 0)} postPasses=${Math.round(threePerf?.postPassCount ?? 0)} vehicleUploads=${Math.round(threePerf?.vehicleBufferUploads ?? 0)} ` +
@@ -1166,8 +1211,9 @@ export const createAppRuntime = (): AppRuntime => {
       recordPerfSample("3d.terrainVisualBatched", decision.visualBatched ? 1 : 0);
       lastThreeTestTerrainSync = now;
       ensureTileSoA(state);
+      const rebuildVegetationInstances = shouldRebuildThreeTestVegetationInstances(decision.invalidation);
       threeTestController.setTerrain(
-        buildThreeTestSample(!force),
+        buildThreeTestSample(!force && !rebuildVegetationInstances),
         buildThreeTestTerrainUpdateIntent(decision.invalidation, force, reason)
       );
       lastThreeTestGeometryTypeSnapshot = state.tileTypeId.slice();
@@ -1320,40 +1366,141 @@ export const createAppRuntime = (): AppRuntime => {
     }
   };
   
-  const preloadThreeTestAssets = async (): Promise<void> => {
+  const preloadThreeTestAssets = async (keepOverlayVisible = false): Promise<void> => {
     if (getTreeAssetsCache() && getHouseAssetsCache() && getFirestationAssetCache()) {
       return;
     }
     const startedAt = performance.now();
     showMapgenOverlay();
-    updateMapgenOverlay("Loading 3D assets...", 0);
-    const tasks: Array<{ label: string; run: () => Promise<unknown> }> = [
-      { label: "trees", run: () => loadTreeAssets() },
-      { label: "houses", run: () => loadHouseAssets() },
-      { label: "firestation", run: () => loadFirestationAsset() },
-      { label: "world-audio", run: () => preloadThreeTestWorldAudioAssets() }
-    ];
-    let completed = 0;
-    const updateProgress = (label: string): void => {
-      completed += 1;
-      const progress = completed / tasks.length;
-      updateMapgenOverlay(`Loading 3D assets (${label})...`, progress);
+    type AssetUnitProgress = {
+      completed: number;
+      total: number;
+      item: string;
+      durationMs: number;
+      failed: boolean;
+      phase: "waiting" | "downloading" | "parsing" | "preparing" | "complete";
+      loadedBytes?: number;
+      totalBytes?: number;
     };
+    type AssetPreloadTask = {
+      label: string;
+      total: number;
+      run: (reportProgress: (progress: AssetUnitProgress) => void) => Promise<unknown>;
+    };
+    const tasks: AssetPreloadTask[] = [
+      { label: "trees", total: TREE_MODEL_ASSET_COUNT, run: (report) => loadTreeAssets(report) },
+      { label: "houses", total: 1, run: () => loadHouseAssets() },
+      { label: "firestation", total: 1, run: (report) => loadFirestationAsset(report) },
+      {
+        label: "world audio",
+        total: WORLD_AUDIO_ASSET_COUNT,
+        run: (report) => preloadThreeTestWorldAudioAssets(report)
+      }
+    ];
+    const statuses: MapPrepAssetTaskStatus[] = tasks.map((task) => ({
+      label: task.label,
+      state: "waiting",
+      completed: 0,
+      total: task.total,
+      failedUnits: 0,
+      activeItem: null,
+      startedAtMs: null,
+      endedAtMs: null
+    }));
+    const activeUnits = tasks.map(() => new Map<string, string>());
+    const formatActiveUnit = (progress: AssetUnitProgress): string => {
+      switch (progress.phase) {
+        case "downloading": {
+          const percent = progress.totalBytes && progress.totalBytes > 0
+            ? ` ${Math.round(progress.loadedBytes! / progress.totalBytes * 100)}%`
+            : "";
+          return `${progress.item} download${percent}`;
+        }
+        case "parsing":
+          return `${progress.item} parsing`;
+        case "preparing":
+          return `${progress.item} geometry prep`;
+        case "waiting":
+          return `${progress.item} request`;
+        default:
+          return progress.item;
+      }
+    };
+    const syncActiveItemLabel = (status: MapPrepAssetTaskStatus, units: Map<string, string>): void => {
+      const labels = Array.from(units.values());
+      const visible = labels.slice(0, 2).join(" + ");
+      status.activeItem = labels.length > 2 ? `${visible} +${labels.length - 2} more` : visible || null;
+    };
+    const renderAssetProgress = (): void => {
+      const now = performance.now();
+      const assetProgress = getMapPrepAssetLoadingProgress(statuses);
+      updateMapgenOverlay(
+        getMapPrepAssetLoadingMessage(statuses, now),
+        0.75 + assetProgress * 0.15
+      );
+    };
+    renderAssetProgress();
+    const heartbeat = window.setInterval(renderAssetProgress, 1000);
     try {
       await Promise.all(
-        tasks.map(async (task) => {
+        tasks.map(async (task, index) => {
+          const status = statuses[index]!;
+          const taskActiveUnits = activeUnits[index]!;
+          status.state = "running";
+          status.startedAtMs = performance.now();
+          renderAssetProgress();
           try {
-            await task.run();
+            await task.run((progress) => {
+              if (status.state !== "running") {
+                return;
+              }
+              status.completed = Math.max(status.completed, Math.min(status.total, progress.completed));
+              if (progress.phase === "complete") {
+                taskActiveUnits.delete(progress.item);
+                status.failedUnits += progress.failed ? 1 : 0;
+                console.log(
+                  `[assetpreload:item] ${task.label} ${progress.item} ${progress.durationMs.toFixed(2)}ms ` +
+                    `status=${progress.failed ? "failed" : "complete"} units=${progress.completed}/${progress.total}`
+                );
+              } else {
+                taskActiveUnits.set(progress.item, formatActiveUnit(progress));
+              }
+              syncActiveItemLabel(status, taskActiveUnits);
+              renderAssetProgress();
+            });
+            status.state = "complete";
           } catch (error) {
+            status.state = "failed";
             console.warn(`[threeTest] Failed to preload ${task.label} asset(s).`, error);
           } finally {
-            updateProgress(task.label);
+            status.completed = status.total;
+            status.endedAtMs = performance.now();
+            const durationMs = Math.max(0, status.endedAtMs - (status.startedAtMs ?? status.endedAtMs));
+            console.log(
+              `[assetpreload] ${task.label} ${durationMs.toFixed(2)}ms status=${status.state} ` +
+                `units=${status.completed}/${status.total} failedUnits=${status.failedUnits}`
+            );
+            renderAssetProgress();
           }
         })
       );
     } finally {
-      hideMapgenOverlay();
-      recordPerfSample("3d.assetPreload", performance.now() - startedAt);
+      window.clearInterval(heartbeat);
+      const endedAt = performance.now();
+      const ranked = statuses
+        .map((status) => ({
+          label: status.label,
+          durationMs: Math.max(0, (status.endedAtMs ?? endedAt) - (status.startedAtMs ?? startedAt))
+        }))
+        .sort((a, b) => b.durationMs - a.durationMs);
+      console.log(
+        `[assetpreload] total ${Math.max(0, endedAt - startedAt).toFixed(2)}ms ` +
+          `slowest=${ranked.map((entry) => `${entry.label}:${entry.durationMs.toFixed(2)}ms`).join(",")}`
+      );
+      if (!keepOverlayVisible) {
+        hideMapgenOverlay();
+      }
+      recordPerfSample("3d.assetPreload", endedAt - startedAt);
     }
   };
 
@@ -1484,13 +1631,23 @@ export const createAppRuntime = (): AppRuntime => {
       `[threeTest] opening 3D mode with flags seasonal=${isThreeTestSeasonalRecolorEnabled() ? 1 : 0} ` +
         `nosim=${isThreeTestNoSimEnabled() ? 1 : 0} noterrain=${isThreeTestTerrainSyncDisabled() ? 1 : 0} trees=${isThreeTestTreeRenderingEnabled() ? 1 : 0} detailStruct=${isThreeTestDetailedStructuresEnabled() ? 1 : 0} dpr=${getThreeTestDprCap().toFixed(2)} fps=${getFrameCapFps() > 0 ? getFrameCapFps().toFixed(0) : "off"}`
     );
-    await preloadThreeTestAssets();
+    await preloadThreeTestAssets(true);
+    const startupStartedAt = performance.now();
+    showMapgenOverlay();
+    updateMapgenOverlay(
+      threeTestController
+        ? "Preparing 3D world: reusing the WebGL renderer..."
+        : "Preparing 3D world: initializing WebGL, HUD, and the tree impostor atlas...",
+      0.92
+    );
+    await yieldToBrowserPaint();
     if (savedThreeTestSmokeRate === null) {
       savedThreeTestSmokeRate = state.simPerf.smokeRate;
     }
     state.simPerf.smokeRate = 0;
     effectsState.smokeParticles.length = 0;
     effectsState.waterParticles.length = 0;
+    const rendererInitStartedAt = performance.now();
     if (!threeTestController) {
       try {
         threeTestController = createThreeTest(
@@ -1513,9 +1670,15 @@ export const createAppRuntime = (): AppRuntime => {
         } else {
           showFallbackMenu();
         }
+        hideMapgenOverlay();
         return;
       }
     }
+    const rendererInitMs = performance.now() - rendererInitStartedAt;
+    console.log(
+      `[threeTest:startupprofile] rendererInit=${rendererInitMs.toFixed(2)}ms ` +
+        `treeImpostorAtlas=${threeTestController.getPerfSnapshot().treeImpostorAtlasBuildMs.toFixed(2)}ms`
+    );
     if (threeTestController) {
       threeTestController.setBaseCardOpen(false);
     }
@@ -1578,6 +1741,7 @@ export const createAppRuntime = (): AppRuntime => {
     const previewDuringMapgen = state.tiles.length === 0;
     configureThreeOverlayMode("run");
     setThreeOverlayVisible(true, true);
+    phaseUi?.controller.resetRuntimeWidgetState();
     handleThreeResize();
     window.addEventListener("resize", handleThreeResize);
     if (previewDuringMapgen) {
@@ -1616,7 +1780,34 @@ export const createAppRuntime = (): AppRuntime => {
       await prepareTerrainPreview(config, debug);
       syncTileSoA(state);
     }
+    showMapgenOverlay();
+    updateMapgenOverlay(
+      "Preparing 3D world: building terrain surface, inland-water cutout, skirts, vegetation, structures, and water...",
+      0.95
+    );
+    await yieldToBrowserPaint();
+    const terrainSyncStartedAt = performance.now();
     syncThreeTestTerrain(true, "initial");
+    const terrainSyncMs = performance.now() - terrainSyncStartedAt;
+    const terrainPerf = threeTestController.getPerfSnapshot();
+    const terrainBuild = terrainPerf.terrainBuildTelemetry;
+    const cutout = terrainBuild?.cutout;
+    const terrainSummary = terrainBuild
+      ? `terrain ${terrainBuild.timingsMs.total.toFixed(0)}ms, cutout ${terrainBuild.timingsMs.inlandWaterCutout.toFixed(0)}ms, ` +
+        `vegetation ${terrainBuild.timingsMs.vegetation.toFixed(0)}ms, water ${terrainBuild.timingsMs.water.toFixed(0)}ms`
+      : `terrain sync ${terrainSyncMs.toFixed(0)}ms`;
+    updateMapgenOverlay(`Preparing 3D world: ${terrainSummary}. Finalizing runtime state...`, 0.98);
+    console.log(
+      `[threeTest:startupprofile] terrainSync=${terrainSyncMs.toFixed(2)}ms terrainSet=${terrainPerf.terrainSetLastMs.toFixed(2)}ms ` +
+        `surfacePrepare=${terrainPerf.terrainSetPrepareLastMs.toFixed(2)}ms fullBuild=${terrainPerf.terrainSetFullBuildLastMs.toFixed(2)}ms ` +
+        `cutout=${(terrainBuild?.timingsMs.inlandWaterCutout ?? 0).toFixed(2)}ms ` +
+        `clip=${(cutout?.timingsMs.clipping ?? 0).toFixed(2)}ms seam=${(cutout?.timingsMs.seam ?? 0).toFixed(2)}ms ` +
+        `conform=${(cutout?.timingsMs.conformance ?? 0).toFixed(2)}ms skirt=${(cutout?.timingsMs.skirt ?? 0).toFixed(2)}ms ` +
+        `sourceTriangles=${terrainBuild?.counts.sourceTerrainTriangles ?? 0} ` +
+        `outputTriangles=${terrainBuild?.counts.outputTerrainTriangles ?? 0} ` +
+        `skirtTriangles=${cutout?.counts.skirtTriangles ?? 0}`
+    );
+    await yieldToBrowserPaint();
     if (isThreeTestSeasonalRecolorEnabled()) {
       syncThreeTestClimateVisuals();
     } else {
@@ -1624,10 +1815,18 @@ export const createAppRuntime = (): AppRuntime => {
     }
     syncThreeTestSeasonalRainVisuals();
     threeTestController.captureFireSnapshot(asRenderSim(state));
+    updateMapgenOverlay("Preparing 3D world: priming shaders and presenting the first frame...", 0.99);
+    await yieldToBrowserPaint();
+    const primeStartedAt = performance.now();
     threeTestController.prime();
     if (!previewDuringMapgen) {
       threeTestController.start();
     }
+    console.log(
+      `[threeTest:startupprofile] prime=${(performance.now() - primeStartedAt).toFixed(2)}ms ` +
+        `startupTotal=${(performance.now() - startupStartedAt).toFixed(2)}ms`
+    );
+    hideMapgenOverlay();
   };
   
   const closeThreeTest = (force = false): void => {
@@ -2176,9 +2375,13 @@ export const createAppRuntime = (): AppRuntime => {
         recordPerfSample("sim.calendar", state.simPerfCalendarMs);
         recordPerfSample("sim.townConstruction", state.simPerfTownConstructionMs);
         recordPerfSample("sim.growth", state.simPerfGrowthMs);
-        recordPerfSample("sim.growthBlocks", state.simPerfGrowthBlocksProcessed);
-        recordPerfSample("sim.growthTiles", state.simPerfGrowthTilesVisited);
-        recordPerfSample("sim.growthChanged", state.simPerfGrowthTilesChanged);
+        recordPerfSample("sim.growthTiles", state.simPerfGrowthTilesScanned);
+        recordPerfSample("sim.growthAged", state.simPerfGrowthAgedTiles);
+        recordPerfSample("sim.growthFuel", state.simPerfGrowthFuelTilesChanged);
+        recordPerfSample("sim.growthShrub", state.simPerfGrowthShrubExpandedTiles);
+        recordPerfSample("sim.growthForest", state.simPerfGrowthForestExpandedTiles);
+        recordPerfSample("sim.growthRecovered", state.simPerfGrowthRecoveredTiles);
+        recordPerfSample("sim.growthVisual", state.simPerfGrowthVisualSync);
         recordPerfSample("sim.units", state.simPerfUnitsMs);
         recordPerfSample("sim.fire", state.simPerfFireMs);
         recordPerfSample("sim.scoring", state.simPerfScoringMs);

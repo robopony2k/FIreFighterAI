@@ -8,7 +8,7 @@ const distImport = (segments) => pathToFileURL(path.join(repoRoot, "dist", ...se
 
 const { RNG } = await import(distImport(["core", "rng.js"]));
 const { createInitialState } = await import(distImport(["core", "state.js"]));
-const { generateMap, isMapGenCancelledError } = await import(distImport(["mapgen", "index.js"]));
+const { createMapGenSession, generateMap, isMapGenCancelledError } = await import(distImport(["mapgen", "index.js"]));
 const { createDefaultTerrainRecipe } = await import(distImport(["mapgen", "terrainProfile.js"]));
 const { DEFAULT_ROAD_DIAGNOSTIC_TUNING } = await import(distImport(["systems", "roads", "types", "roadDiagnosticTuning.js"]));
 const { getInitialTownHouseTarget } = await import(
@@ -117,6 +117,21 @@ const assertCompletedIntertownPairsSkipLaterSearch = (records, label) => {
 };
 
 const baseline = await runMap(undefined);
+const progressReports = [];
+const telemetryState = createInitialState(seed, grid);
+const telemetrySession = createMapGenSession(telemetryState, new RNG(seed), terrain);
+await telemetrySession.advanceTo("reconcile:postSettlement");
+await telemetrySession.advanceTo("map:finalize", (message, progress) => {
+  progressReports.push({ message, progress });
+});
+const telemetryHash = hashArrays(
+  telemetryState.tileElevation,
+  telemetryState.tileTypeId,
+  telemetryState.tileRiverMask,
+  telemetryState.tileLakeMask,
+  telemetryState.tileRoadEdges,
+  telemetryState.tileRoadBridge
+);
 const zeroPreGrowthTerrain = {
   ...terrain,
   advancedOverrides: {
@@ -187,6 +202,42 @@ const secondSeedDiagnostic = await runMap(
 
 if (baseline.hash !== diagnostic.hash) {
   throw new Error(`Diagnostics changed generated map hash: ${baseline.hash} !== ${diagnostic.hash}`);
+}
+if (baseline.hash !== telemetryHash) {
+  throw new Error(`Finalization telemetry changed generated map hash: ${baseline.hash} !== ${telemetryHash}`);
+}
+const expectedFinalizeTelemetry = [
+  "Deriving final terrain morphology",
+  "Caching vegetation suitability",
+  "Seeding initial vegetation structure",
+  "Assigning forest composition",
+  "Simulating vegetation pre-growth",
+  "Initializing tile fuel and land totals",
+  "Initializing campaign vegetation fuel",
+  "Generating terrain color variation",
+  "Publishing final map state",
+  "Capturing final map diagnostics",
+  "Map generation complete"
+];
+for (const expected of expectedFinalizeTelemetry) {
+  if (!progressReports.some(({ message }) => message.includes(expected))) {
+    throw new Error(`Expected mapgen finalization telemetry containing '${expected}'.`);
+  }
+}
+const finalizeProgressReports = progressReports.slice(
+  progressReports.findIndex(({ message }) => message.includes("Deriving final terrain morphology"))
+);
+for (let i = 0; i < finalizeProgressReports.length; i += 1) {
+  const current = finalizeProgressReports[i];
+  const previous = finalizeProgressReports[i - 1];
+  if (!Number.isFinite(current.progress) || current.progress < 0 || current.progress > 1) {
+    throw new Error(`Invalid mapgen telemetry progress ${current.progress} for '${current.message}'.`);
+  }
+  if (previous && current.progress + 1e-9 < previous.progress) {
+    throw new Error(
+      `Mapgen telemetry regressed from ${previous.progress} ('${previous.message}') to ${current.progress} ('${current.message}').`
+    );
+  }
 }
 if (baseline.hash !== defaultTunedDiagnostic.hash) {
   throw new Error(`Default road tuning changed generated map hash: ${baseline.hash} !== ${defaultTunedDiagnostic.hash}`);

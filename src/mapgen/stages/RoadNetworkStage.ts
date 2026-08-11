@@ -61,6 +61,9 @@ export const RoadNetworkStage: PipelineStage = {
         await ctx.reportStage(formatRoadSolveStatus("Road solver: settlement routes planned"), 0.42);
         await yieldToNextFrame();
       }
+      // Settlement creation happens during road connection, so its pads must be
+      // established after that work exists and before the road surface is graded.
+      flattenSettlementGround(ctx.state);
       let roadSurfaceMetrics = gradeRoadNetworkTerrain(ctx.state, ctx.settings.heightScaleMultiplier);
       if (!ctx.settings.skipRoadNetworkRouting && (!roadTuning || roadTuning.enableConnectivityRepairPass)) {
         await ctx.reportStage("Road solver: checking isolated town components...", 0.58);

@@ -134,7 +134,7 @@ const buildSpringGrowthScenario = () => {
     return tile;
   });
   syncTileSoA(state);
-  syncFireSeasonCursor(state, 100);
+  syncFireSeasonCursor(state, 89);
   pinGrowthWeather(state);
   state.paused = false;
   state.simTimeMode = "strategic";
@@ -143,7 +143,6 @@ const buildSpringGrowthScenario = () => {
   state.fireSettings.ignitionChancePerDay = 0;
   state.lastActiveFires = 0;
   applyFireActivityMetrics(state, 0);
-  state.growthBlockLastCareerDay.fill(state.careerDay);
   return { state, effects: createEffectsState(), rng };
 };
 
@@ -177,27 +176,27 @@ const runScenario = (speed) => {
 
 const runSpringGrowthScenario = () => {
   const { state, effects, rng } = buildSpringGrowthScenario();
+  const initialStartedAt = performance.now();
   stepSim(state, effects, rng, BASE_STEP * SPRING_SPEED);
+  const initialFrameMs = performance.now() - initialStartedAt;
   if (state.paused) {
     state.paused = false;
   }
   pinGrowthWeather(state);
 
-  let maxFrameMs = 0;
-  let maxGrowthMs = 0;
+  let maxFrameMs = initialFrameMs;
+  let maxGrowthMs = state.simPerfGrowthMs;
   let maxTownConstructionMs = 0;
-  let maxGrowthBlocks = 0;
-  let totalGrowthTilesVisited = 0;
-  let totalGrowthTilesChanged = 0;
+  let totalGrowthTilesScanned = state.simPerfGrowthTilesScanned;
+  let totalGrowthFuelChanged = state.simPerfGrowthFuelTilesChanged;
   for (let frame = 0; frame < SPRING_FRAMES && !state.gameOver; frame += 1) {
     const startedAt = performance.now();
     stepSim(state, effects, rng, BASE_STEP * SPRING_SPEED);
     maxFrameMs = Math.max(maxFrameMs, performance.now() - startedAt);
     maxGrowthMs = Math.max(maxGrowthMs, state.simPerfGrowthMs);
     maxTownConstructionMs = Math.max(maxTownConstructionMs, state.simPerfTownConstructionMs);
-    maxGrowthBlocks = Math.max(maxGrowthBlocks, state.simPerfGrowthBlocksProcessed);
-    totalGrowthTilesVisited += state.simPerfGrowthTilesVisited;
-    totalGrowthTilesChanged += state.simPerfGrowthTilesChanged;
+    totalGrowthTilesScanned += state.simPerfGrowthTilesScanned;
+    totalGrowthFuelChanged += state.simPerfGrowthFuelTilesChanged;
     if (state.paused) {
       state.paused = false;
     }
@@ -208,9 +207,8 @@ const runSpringGrowthScenario = () => {
     maxFrameMs,
     maxGrowthMs,
     maxTownConstructionMs,
-    maxGrowthBlocks,
-    totalGrowthTilesVisited,
-    totalGrowthTilesChanged,
+    totalGrowthTilesScanned,
+    totalGrowthFuelChanged,
     phase: state.phase,
     careerDay: state.careerDay
   };
@@ -263,12 +261,11 @@ console.log(
     `maxFrameMs=${springResult.maxFrameMs.toFixed(1)}`,
     `maxGrowthMs=${springResult.maxGrowthMs.toFixed(1)}`,
     `maxTownMs=${springResult.maxTownConstructionMs.toFixed(1)}`,
-    `maxGrowthBlocks=${springResult.maxGrowthBlocks}`,
-    `growthTiles=${springResult.totalGrowthTilesVisited}`,
-    `growthChanged=${springResult.totalGrowthTilesChanged}`
+    `annualGrowthTiles=${springResult.totalGrowthTilesScanned}`,
+    `growthFuelChanged=${springResult.totalGrowthFuelChanged}`
   ].join(" ")
 );
-assert.ok(springResult.totalGrowthTilesVisited > 0, "spring runtime scenario did not execute vegetation growth");
+assert.ok(springResult.totalGrowthTilesScanned > 0, "spring runtime scenario did not execute annual vegetation growth");
 assert.ok(
   springResult.maxFrameMs < MAX_SPRING_FRAME_MS,
   `spring runtime frame exceeded ${MAX_SPRING_FRAME_MS}ms at ${SPRING_SPEED}x`

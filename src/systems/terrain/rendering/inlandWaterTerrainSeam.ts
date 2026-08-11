@@ -77,6 +77,8 @@ export type InlandWaterTerrainSeam = {
   overlapWorld: number;
   guardOverlapCells: number;
   vertices: InlandWaterTerrainSeamVertex[];
+  vertexIdByQuantizedKey: Map<string, number>;
+  vertexBuckets: Map<string, number[]>;
   segments: InlandWaterTerrainSeamSegment[];
   components: InlandWaterTerrainSeamComponent[];
   boundaryEdges: Float32Array;
@@ -394,6 +396,13 @@ export const buildInlandWaterTerrainSeam = (input: {
     const b = vertices[segment.b];
     boundaryEdges.set([a.edgeX, a.edgeY, b.edgeX, b.edgeY], index * 4);
   });
+  const vertexBuckets = new Map<string, number[]>();
+  vertices.forEach((vertex) => {
+    const key = `${Math.floor(vertex.edgeX)},${Math.floor(vertex.edgeY)}`;
+    const bucket = vertexBuckets.get(key) ?? [];
+    bucket.push(vertex.id);
+    vertexBuckets.set(key, bucket);
+  });
   const tJunctionCount = vertices.reduce((count, vertex) => count + (segments.some((segment) => {
     if (segment.a === vertex.id || segment.b === vertex.id) return false;
     const a = vertices[segment.a];
@@ -420,6 +429,8 @@ export const buildInlandWaterTerrainSeam = (input: {
     overlapWorld,
     guardOverlapCells: INLAND_WATER_GUARD_OVERLAP_CELLS,
     vertices,
+    vertexIdByQuantizedKey: vertexIdByKey,
+    vertexBuckets,
     segments,
     components,
     boundaryEdges,
@@ -450,9 +461,8 @@ export const findInlandWaterTerrainSeamVertex = (
 ): InlandWaterTerrainSeamVertex | undefined => {
   const keyX = Math.round(edgeX * seam.quantScale);
   const keyY = Math.round(edgeY * seam.quantScale);
-  return seam.vertices.find((vertex) =>
-    Math.round(vertex.edgeX * seam.quantScale) === keyX && Math.round(vertex.edgeY * seam.quantScale) === keyY
-  );
+  const vertexId = seam.vertexIdByQuantizedKey.get(`${keyX},${keyY}`);
+  return vertexId === undefined ? undefined : seam.vertices[vertexId];
 };
 
 export const getInlandWaterTerrainSeamVerticesAlongEdge = (
@@ -463,7 +473,19 @@ export const getInlandWaterTerrainSeamVerticesAlongEdge = (
   by: number
 ): InlandWaterTerrainSeamVertex[] => {
   const tolerance = 2 / seam.quantScale;
-  return seam.vertices
+  const minX = Math.floor(Math.min(ax, bx) - tolerance);
+  const maxX = Math.floor(Math.max(ax, bx) + tolerance);
+  const minY = Math.floor(Math.min(ay, by) - tolerance);
+  const maxY = Math.floor(Math.max(ay, by) + tolerance);
+  const candidateIds = new Set<number>();
+  for (let y = minY; y <= maxY; y += 1) {
+    for (let x = minX; x <= maxX; x += 1) {
+      for (const vertexId of seam.vertexBuckets.get(`${x},${y}`) ?? []) candidateIds.add(vertexId);
+    }
+  }
+  return Array.from(candidateIds)
+    .map((vertexId) => seam.vertices[vertexId])
+    .filter((vertex): vertex is InlandWaterTerrainSeamVertex => !!vertex)
     .map((vertex) => ({ vertex, projection: pointSegmentProjection(vertex.edgeX, vertex.edgeY, ax, ay, bx, by) }))
     .filter(({ projection }) => projection.distance <= tolerance)
     .sort((a, b) => a.projection.t - b.projection.t)

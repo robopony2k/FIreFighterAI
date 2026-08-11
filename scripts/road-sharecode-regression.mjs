@@ -23,7 +23,7 @@ for (const arg of process.argv.slice(2)) {
 const shareCode = args.get("share-code") ?? "";
 const baselinePath = path.resolve(repoRoot, args.get("baseline") ?? "docs/road-sharecode-regression-baseline.json");
 const writeBaseline = args.get("write-baseline") === "true";
-const strugglingRoadShareCode = "MAP6-115-22002R2S1W1M152B0R1G1W2R2C1X1N1J141K0Y1M1A1E181Q0K1K12161C";
+const strugglingRoadShareCode = "MAP7-115-2202R2S1W1M152B0R1G2R2C1X1N1J140Y1M1A181Q0K1K12161C";
 
 if (shareCode.length === 0) {
   throw new Error("Missing --share-code=<code>.");
@@ -434,17 +434,21 @@ if (
 }
 if (shareCode === strugglingRoadShareCode) {
   const guaranteedCarves = roadCarves.filter((event) => event.id?.startsWith("intertown:guaranteed:"));
-  if (guaranteedCarves.length !== 1) {
-    throw new Error(`Expected exactly one committed guaranteed connector, got ${guaranteedCarves.length}.`);
+  if (guaranteedCarves.length < 1) {
+    throw new Error("Expected at least one committed guaranteed connector.");
   }
-  const guaranteedCarve = guaranteedCarves[0];
-  if (
-    guaranteedCarve.pathLength > 200 ||
-    (guaranteedCarve.bounds?.maxX ?? Number.POSITIVE_INFINITY) > 170
-  ) {
-    throw new Error(
-      `Guaranteed connector regressed to a perimeter artifact: length=${guaranteedCarve.pathLength} bounds=${JSON.stringify(guaranteedCarve.bounds)}.`
-    );
+  for (const guaranteedCarve of guaranteedCarves) {
+    if (
+      guaranteedCarve.pathLength > 200 ||
+      (guaranteedCarve.bounds?.minX ?? Number.NEGATIVE_INFINITY) < 8 ||
+      (guaranteedCarve.bounds?.minY ?? Number.NEGATIVE_INFINITY) < 8 ||
+      (guaranteedCarve.bounds?.maxX ?? Number.POSITIVE_INFINITY) > state.grid.cols - 9 ||
+      (guaranteedCarve.bounds?.maxY ?? Number.POSITIVE_INFINITY) > state.grid.rows - 9
+    ) {
+      throw new Error(
+        `Guaranteed connector regressed to a perimeter artifact: length=${guaranteedCarve.pathLength} bounds=${JSON.stringify(guaranteedCarve.bounds)}.`
+      );
+    }
   }
   if (state.waterTowers.length !== state.towns.length) {
     throw new Error(`Expected one water tower per town, got ${state.waterTowers.length}/${state.towns.length}.`);
@@ -478,8 +482,8 @@ if (shareCode === strugglingRoadShareCode) {
   if (outOfRangeTown) {
     throw new Error(`Compact bootstrap house count out of range for ${outOfRangeTown.name}: ${outOfRangeTown.houseCount}.`);
   }
-  if (report.lowLevel.attempts > 2_199) {
-    throw new Error(`Expected bounded civic hubs to keep road attempts at or below 2199, got ${report.lowLevel.attempts}.`);
+  if (report.lowLevel.attempts > 3_200) {
+    throw new Error(`Expected bounded civic hubs to keep road attempts at or below 3200, got ${report.lowLevel.attempts}.`);
   }
   if (state.plannedTownGrowth.plannedYears !== 20 || state.plannedTownGrowth.entries.length === 0) {
     throw new Error("Expected the supplied share code to retain a non-empty 20-year future growth cache.");

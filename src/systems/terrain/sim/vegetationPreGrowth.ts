@@ -1,19 +1,31 @@
 import type { RNG } from "../../../core/types.js";
 import type { WorldState } from "../../../core/state.js";
-import { processVegetationSuccessionBlock, type VegetationBlockResult } from "./vegetationSuccession.js";
+import { processVegetationSuccessionYears, type VegetationBlockResult } from "./vegetationSuccession.js";
 
 export type VegetationPreGrowthResult = VegetationBlockResult & {
   yearsApplied: number;
 };
 
+export type VegetationPreGrowthProgress = {
+  completedYears: number;
+  totalYears: number;
+  tilesVisited: number;
+  tilesChanged: number;
+};
+
+export type VegetationPreGrowthReporter = (
+  progress: VegetationPreGrowthProgress
+) => void | Promise<void>;
+
 const clampPreGrowthYears = (years: number): number =>
   Math.max(0, Math.min(40, Math.round(Number.isFinite(years) ? years : 0)));
 
-export const applyVegetationPreGrowth = (
+export const applyVegetationPreGrowth = async (
   state: WorldState,
   years: number,
-  rng: RNG
-): VegetationPreGrowthResult => {
+  rng: RNG,
+  reportProgress?: VegetationPreGrowthReporter
+): Promise<VegetationPreGrowthResult> => {
   const yearsApplied = clampPreGrowthYears(years);
   const result: VegetationPreGrowthResult = {
     yearsApplied,
@@ -34,12 +46,18 @@ export const applyVegetationPreGrowth = (
     maxY: state.grid.rows - 1
   };
   for (let year = 0; year < yearsApplied; year += 1) {
-    const annual = processVegetationSuccessionBlock(state, bounds, 1, rng);
+    const annual = processVegetationSuccessionYears(state, bounds, 1, rng, year);
     result.terrainTypeChanged ||= annual.terrainTypeChanged;
     result.vegetationChanged ||= annual.vegetationChanged;
     result.visualChanged ||= annual.visualChanged;
     result.tilesVisited += annual.tilesVisited;
     result.tilesChanged += annual.tilesChanged;
+    await reportProgress?.({
+      completedYears: year + 1,
+      totalYears: yearsApplied,
+      tilesVisited: result.tilesVisited,
+      tilesChanged: result.tilesChanged
+    });
   }
   return result;
 };

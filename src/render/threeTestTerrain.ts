@@ -6,7 +6,7 @@ import {
 import { getHouseFootprintBounds, pickHouseFootprint } from "../core/houseFootprints.js";
 import { findBestRoadReferenceForPlot, pickHouseRotationFromRoadMask } from "../core/roadAlignment.js";
 import { getTerrainHeightScale } from "../core/terrainScale.js";
-import { getVegetationRenderHeightMultiplier } from "../core/vegetation.js";
+import { getVegetationMaturity01, getVegetationRenderHeightMultiplier } from "../core/vegetation.js";
 import { getBuildingLifecycleStageFromId, getBuildingLifecycleStageId } from "../systems/settlements/sim/buildingLifecycle.js";
 import type { RenderBuildingLot } from "../systems/settlements/types/buildingTypes.js";
 import type { WaterTower } from "../systems/settlements/types/waterTowerTypes.js";
@@ -121,6 +121,8 @@ import {
   computeTreeBudgetScale,
   computeTreeDensityGradient,
   getTallTreeAttemptWeight,
+  resolveForestTreeCohort,
+  resolveTreeBudgetPriority,
   resolveTreeCandidateOffset
 } from "../systems/terrain/rendering/vegetation/treePlacementPlan.js";
 import type {
@@ -196,7 +198,10 @@ export type TerrainSample = {
   cols: number;
   rows: number;
   elevations: Float32Array;
-  cragUplift?: Float32Array;
+  archetypeUplift?: Float32Array;
+  flowAccumulation?: Float32Array;
+  erosionDeposit?: Float32Array;
+  rockExposure?: Float32Array;
   heightScaleMultiplier?: number;
   debugScalarScale?: number;
   tileTypes?: Uint8Array;
@@ -418,6 +423,54 @@ export type TerrainWaterData = {
     mesh: RiverWaterData;
   };
   waterfallDebug?: WaterfallDebugData;
+};
+
+export type TerrainBuildCutoutTelemetry = {
+  timingsMs: {
+    domain: number;
+    clipping: number;
+    seam: number;
+    conformance: number;
+    skirt: number;
+    finalize: number;
+    total: number;
+  };
+  counts: {
+    sourceTriangles: number;
+    cutSourceTriangles: number;
+    retainedPolygons: number;
+    boundarySamples: number;
+    seamSegments: number;
+    retainedTriangles: number;
+    skirtTriangles: number;
+    outputTriangles: number;
+    rejectedTerrainFolds: number;
+  };
+};
+
+export type TerrainBuildTelemetry = {
+  timingsMs: {
+    terrainAssembly: number;
+    inlandWaterCutout: number;
+    normals: number;
+    surfaceMaterial: number;
+    vegetation: number;
+    structures: number;
+    water: number;
+    finalize: number;
+    total: number;
+  };
+  counts: {
+    sampleCols: number;
+    sampleRows: number;
+    sourceTerrainTriangles: number;
+    outputTerrainTriangles: number;
+    treeInstances: number;
+    scrubInstances: number;
+    waterSupportSamples: number;
+    inlandWaterTriangles: number;
+  };
+  cutout: TerrainBuildCutoutTelemetry | null;
 };
 
 type HouseSpot = {
@@ -1768,12 +1821,13 @@ const applyRiverTerrainTriangleCutout = (
   sampleRows: number,
   riverDomain: RiverRenderDomain | undefined,
   inlandWater: InlandWaterRenderSurface | undefined
-): void => {
-  if (!riverDomain || sampleCols < 2 || sampleRows < 2) return;
+): TerrainBuildCutoutTelemetry | null => {
+  if (!riverDomain || sampleCols < 2 || sampleRows < 2) return null;
+  const startedAt = performance.now();
   riverDomain.terrainSeam = undefined;
   const index = geometry.getIndex();
   const positionAttr = geometry.getAttribute("position") as THREE.BufferAttribute | undefined;
-  if (!index || !positionAttr) return;
+  if (!index || !positionAttr) return null;
   const uvAttr = geometry.getAttribute("uv") as THREE.BufferAttribute | undefined;
   const src = index.array as ArrayLike<number>;
   const positions = positionAttr.array as ArrayLike<number>;
@@ -1808,12 +1862,14 @@ const applyRiverTerrainTriangleCutout = (
     sampleCols,
     sampleRows
   );
+  const domainStartedAt = performance.now();
   const cutoutDomain = buildInlandWaterTerrainCutoutDomain({
     contourVertices: riverDomain.contourVertices,
     contourIndices: riverDomain.contourIndices,
     cols: riverDomain.cols,
     rows: riverDomain.rows
   });
+  const domainMs = performance.now() - domainStartedAt;
   const makeVertex = (
     vertexIndex: number,
     sourceTerrainTriangleId: number
@@ -1838,6 +1894,7 @@ const applyRiverTerrainTriangleCutout = (
   const retainedPolygons: InlandWaterTerrainCutoutPolygon[] = [];
   const boundarySamples: InlandWaterTerrainBoundarySample[] = [];
   let cutCount = 0;
+  const clippingStartedAt = performance.now();
   for (let offset = 0; offset + 2 < src.length; offset += 3) {
     const sourceTerrainTriangleId = Math.floor(offset / 3);
     const a = makeVertex(src[offset] as number, sourceTerrainTriangleId);
@@ -1893,7 +1950,9 @@ const applyRiverTerrainTriangleCutout = (
       retainedPolygons.push(polygon);
     }
   }
+  const clippingMs = performance.now() - clippingStartedAt;
 
+  const seamStartedAt = performance.now();
   const seam = inlandWater
     ? buildInlandWaterTerrainSeam({
         boundarySamples,
@@ -1921,10 +1980,14 @@ const applyRiverTerrainTriangleCutout = (
     inlandWater.diagnostics.sharedSegmentCount = diagnostics.sharedSegmentCount;
     inlandWater.diagnostics.guardOverlapMin = diagnostics.guardOverlapMin;
   }
+  const seamMs = performance.now() - seamStartedAt;
 
+  const conformanceStartedAt = performance.now();
   const outPositions: number[] = [];
   const outUvs: number[] = [];
   const outOwners: number[] = [];
+  let retainedTriangleCount = 0;
+  let skirtTriangleCount = 0;
   let rejectedTerrainFoldCount = 0;
   let rejectedTerrainFoldAreaMax = 0;
   const vertexKey = (vertex: InlandWaterTerrainCutoutVertex): string =>
@@ -1976,6 +2039,11 @@ const applyRiverTerrainTriangleCutout = (
     );
     outUvs.push(base.u, base.v, b.u, b.v, c.u, c.v);
     outOwners.push(owner, owner, owner);
+    if (owner > 0.5) {
+      skirtTriangleCount += 1;
+    } else {
+      retainedTriangleCount += 1;
+    }
   };
 
   const refinedPolygons: InlandWaterTerrainCutoutPolygon[] = [];
@@ -2093,7 +2161,9 @@ const applyRiverTerrainTriangleCutout = (
       emitTriangle(deduped[0], deduped[triangleIndex], deduped[triangleIndex + 1], 0);
     }
   }
+  const conformanceMs = performance.now() - conformanceStartedAt;
 
+  const skirtStartedAt = performance.now();
   if (seam) {
     const skirt = buildInlandWaterTerrainSkirtMesh(
       seam,
@@ -2121,7 +2191,31 @@ const applyRiverTerrainTriangleCutout = (
       riverDomain.debugStats.wallQuadCount = seam.segments.filter((segment) => !segment.openToOcean).length;
     }
   }
-  if (outPositions.length < 9) return;
+  const skirtMs = performance.now() - skirtStartedAt;
+  const buildTelemetry = (finalizeMs: number): TerrainBuildCutoutTelemetry => ({
+    timingsMs: {
+      domain: domainMs,
+      clipping: clippingMs,
+      seam: seamMs,
+      conformance: conformanceMs,
+      skirt: skirtMs,
+      finalize: finalizeMs,
+      total: performance.now() - startedAt
+    },
+    counts: {
+      sourceTriangles: Math.floor(src.length / 3),
+      cutSourceTriangles: cutCount,
+      retainedPolygons: retainedPolygons.length,
+      boundarySamples: boundarySamples.length,
+      seamSegments: seam?.segments.length ?? 0,
+      retainedTriangles: retainedTriangleCount,
+      skirtTriangles: skirtTriangleCount,
+      outputTriangles: retainedTriangleCount + skirtTriangleCount,
+      rejectedTerrainFolds: rejectedTerrainFoldCount
+    }
+  });
+  if (outPositions.length < 9) return buildTelemetry(0);
+  const finalizeStartedAt = performance.now();
   // Float32 clipping and independently traversed polygon edges can land on
   // opposite sides of a quantization boundary even after logical vertex
   // sharing. Canonicalize every retained-terrain copy from the final emitted
@@ -2159,6 +2253,7 @@ const applyRiverTerrainTriangleCutout = (
       `[threeTestTerrain] authoritative river cutout tris total=${Math.floor(src.length / 3)} cut=${cutCount} retained-polygons=${retainedPolygons.length} foldRejected=${rejectedTerrainFoldCount}`
     );
   }
+  return buildTelemetry(performance.now() - finalizeStartedAt);
 };
 const buildRiverMeshData = (
   sample: TerrainSample,
@@ -3211,7 +3306,33 @@ export const buildTerrainMesh = (
   water?: TerrainWaterData;
   treeBurn?: TreeBurnController;
   treeLod?: TreeLodController;
+  telemetry: TerrainBuildTelemetry;
 } => {
+  const buildStartedAt = performance.now();
+  const telemetry: TerrainBuildTelemetry = {
+    timingsMs: {
+      terrainAssembly: 0,
+      inlandWaterCutout: 0,
+      normals: 0,
+      surfaceMaterial: 0,
+      vegetation: 0,
+      structures: 0,
+      water: 0,
+      finalize: 0,
+      total: 0
+    },
+    counts: {
+      sampleCols: surface.sampleCols,
+      sampleRows: surface.sampleRows,
+      sourceTerrainTriangles: 0,
+      outputTerrainTriangles: 0,
+      treeInstances: 0,
+      scrubInstances: 0,
+      waterSupportSamples: 0,
+      inlandWaterTriangles: Math.floor((surface.riverRenderDomain?.contourIndices.length ?? 0) / 3)
+    },
+    cutout: null
+  };
   const sample = surface.sample;
   const debugRenderOptions = sample.debugRenderOptions;
   const terrainSurfaceShadingMode = debugRenderOptions?.terrainSurfaceShadingMode ?? "refined";
@@ -3277,6 +3398,7 @@ export const buildTerrainMesh = (
   const useDetailedStructures = maxMapSpan < DETAILED_STRUCTURE_THRESHOLD;
   const geometry = new THREE.PlaneGeometry(width, depth, sampleCols - 1, sampleRows - 1);
   geometry.rotateX(-Math.PI / 2);
+  telemetry.counts.sourceTerrainTriangles = Math.floor((geometry.getIndex()?.count ?? 0) / 3);
 
   const positions = geometry.attributes.position;
   let minHeight = Number.POSITIVE_INFINITY;
@@ -3465,6 +3587,7 @@ export const buildTerrainMesh = (
       const stemDensity = Math.max(0, tileStemDensity?.[idx] ?? 0);
       const canopyCover = clamp(tileCanopyCover?.[idx] ?? 0, 0, 1);
       const vegetationAgeYears = Math.max(0, tileVegetationAge?.[idx] ?? 0);
+      const vegetationMaturity01 = getVegetationMaturity01(vegetationType ?? "grass", vegetationAgeYears);
       const treeAttemptWeight = getTreeAttemptWeight(typeId);
       let placedTreeOnTile = false;
       if (
@@ -3535,7 +3658,7 @@ export const buildTerrainMesh = (
             jitterRange,
             densityGradient
           });
-          if (candidate.priority > treeBudgetScale) {
+          if (resolveTreeBudgetPriority(candidate.priority, vegetationType, vegetationMaturity01, canopyCover) > treeBudgetScale) {
             continue;
           }
           const jitterX = candidate.x;
@@ -3545,7 +3668,13 @@ export const buildTerrainMesh = (
           const variant = variants.length > 0 ? variants[variantIndex] ?? variants[0] : null;
           const targetHeight = baseScale * typeScale * vegetationHeightScale * canopyHeightScale * TREE_HEIGHT_FACTOR;
           const sourceHeight = Math.max(0.35, variant?.height ?? 1.5);
-          const scale = (targetHeight / sourceHeight) * (0.85 + noiseAt(idx + 7.9 + attempt * 0.41) * 0.3);
+          const cohortScale = isForest
+            ? resolveForestTreeCohort(noiseAt(idx + 18.7 + attempt * 0.67)).scale
+            : 1;
+          const scale =
+            (targetHeight / sourceHeight) *
+            cohortScale *
+            (isForest ? 0.96 + vegetationMaturity01 * 0.12 : 0.85 + noiseAt(idx + 7.9 + attempt * 0.41) * 0.3);
           const rotation = noiseAt(idx + 3.3 + attempt * 0.23) * Math.PI * 2;
           // Keep placement in tile space until X/Z and ground Y are resolved together.
           const ground = resolveTreeGrounding(surface, centerTileX + jitterX, centerTileY + jitterZ);
@@ -3675,13 +3804,27 @@ export const buildTerrainMesh = (
       vertexIndex += 1;
     }
   }
+  telemetry.timingsMs.terrainAssembly = performance.now() - buildStartedAt;
+  const cutoutStartedAt = performance.now();
   if (!debugRenderOptions?.disableRiverCutout) {
-    applyRiverTerrainTriangleCutout(geometry, sampleCols, sampleRows, riverRenderDomain, surface.inlandWater);
+    telemetry.cutout = applyRiverTerrainTriangleCutout(
+      geometry,
+      sampleCols,
+      sampleRows,
+      riverRenderDomain,
+      surface.inlandWater
+    );
   }
+  telemetry.timingsMs.inlandWaterCutout = performance.now() - cutoutStartedAt;
+  const normalsStartedAt = performance.now();
   geometry.computeVertexNormals();
   if (!useLegacyFacetedTerrain) {
     smoothTerrainSharedVertexNormals(geometry);
   }
+  telemetry.timingsMs.normals = performance.now() - normalsStartedAt;
+  telemetry.counts.outputTerrainTriangles = Math.floor(
+    (geometry.getIndex()?.count ?? geometry.getAttribute("position")?.count ?? 0) / 3
+  );
   if (DEBUG_TERRAIN_RENDER && threeTestLoggedTotal !== cols * rows) {
     console.log(
       `ThreeTest heights: min=${minHeight.toFixed(2)} max=${maxHeight.toFixed(2)} scale=${heightScale.toFixed(2)}`
@@ -3689,6 +3832,7 @@ export const buildTerrainMesh = (
     threeTestLoggedTotal = cols * rows;
   }
 
+  const surfaceMaterialStartedAt = performance.now();
   if (!useLegacyFacetedTerrain) {
     applyTerrainSurfaceColors(geometry, sample, surface);
   }
@@ -3762,6 +3906,8 @@ export const buildTerrainMesh = (
   const mesh = new THREE.Mesh(geometry, material);
   mesh.receiveShadow = true;
   refreshTerrainRoadVisuals(mesh, sample, surface);
+  telemetry.timingsMs.surfaceMaterial = performance.now() - surfaceMaterialStartedAt;
+  const vegetationStartedAt = performance.now();
   const treeBurnMeshStates: TreeBurnMeshState[] = [];
   const fullTreeMeshesByChunk = new Map<string, THREE.InstancedMesh[]>();
   let activeTreeGroup: THREE.Group | null = null;
@@ -4070,6 +4216,10 @@ export const buildTerrainMesh = (
       mesh.add(shrubMesh);
     });
   }
+  telemetry.timingsMs.vegetation = performance.now() - vegetationStartedAt;
+  telemetry.counts.treeInstances = treeInstances.length;
+  telemetry.counts.scrubInstances = scrubPlaceholderInstances.length;
+  const structuresStartedAt = performance.now();
   const markStructureTopHeight = (
     minTileX: number,
     maxTileX: number,
@@ -4457,7 +4607,9 @@ export const buildTerrainMesh = (
   if (townLabelGroup) {
     mesh.add(townLabelGroup);
   }
+  telemetry.timingsMs.structures = performance.now() - structuresStartedAt;
 
+  const waterStartedAt = performance.now();
   let water: TerrainWaterData | undefined;
   const oceanLevel = waterLevel;
   const ratios = waterRatios;
@@ -4465,8 +4617,8 @@ export const buildTerrainMesh = (
   let hasVisibleWater = false;
   for (let i = 0; i < supportMask.length; i += 1) {
     if (supportMask[i] > 0) {
+      telemetry.counts.waterSupportSamples += 1;
       hasVisibleWater = true;
-      break;
     }
   }
   if (hasVisibleWater) {
@@ -4734,7 +4886,9 @@ export const buildTerrainMesh = (
       waterfallDebug: waterfall.debug
     };
   }
+  telemetry.timingsMs.water = performance.now() - waterStartedAt;
 
+  const finalizeStartedAt = performance.now();
   applyMountainRockMaterial(material, {
     maskTexture: mountainRockMaskTexture,
     detailTexture: mountainRockDetailTexture,
@@ -4758,5 +4912,7 @@ export const buildTerrainMesh = (
     treeBurnMeshStates.length > 0
       ? createTreeBurnController(treeBurnMeshStates, TILE_TYPE_IDS.ash, treeTileProfiles)
       : undefined;
-  return { mesh, size: { width, depth }, water, treeBurn, treeLod: treeLodBuild?.controller };
+  telemetry.timingsMs.finalize = performance.now() - finalizeStartedAt;
+  telemetry.timingsMs.total = performance.now() - buildStartedAt;
+  return { mesh, size: { width, depth }, water, treeBurn, treeLod: treeLodBuild?.controller, telemetry };
 };

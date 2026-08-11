@@ -10,7 +10,10 @@ import {
   getVegetationMaturity01,
   syncDerivedVegetationState
 } from "../dist/core/vegetation.js";
-import { stepGrowth } from "../dist/sim/growth.js";
+import {
+  applyAnnualVegetationGrowth,
+  initializeCampaignVegetationFuel
+} from "../dist/systems/terrain/sim/annualVegetationGrowth.js";
 import { stepTownConstructionSchedule } from "../dist/systems/settlements/sim/townConstruction.js";
 import {
   buildTileTexture,
@@ -28,6 +31,7 @@ import {
   decideTerrainVisualSync,
   getTerrainVisualSyncUrgency,
   shouldRebuildThreeTestTreeTypeMap,
+  shouldRebuildThreeTestVegetationInstances,
   shouldHoldSimulationForTerrainInvalidation,
   shouldSyncThreeTestTerrain
 } from "../dist/app/threeTestTerrainSync.js";
@@ -72,7 +76,6 @@ const syncAll = (state, rng) => {
     applyFuel(tile, tile.moisture, rng);
   }
   syncTileSoA(state);
-  state.simPerf.growthBlocksPerTick = state.fireBlockCount;
 };
 
 const buildGrowthOnlyState = () => {
@@ -98,6 +101,7 @@ const buildGrowthOnlyState = () => {
     return forestTile;
   });
   syncAll(state, rng);
+  initializeCampaignVegetationFuel(state);
   return { state, rng, targetIdx: 3 + 3 * grid.cols };
 };
 
@@ -156,7 +160,6 @@ const buildLowBudgetCatchupState = () => {
     });
   });
   syncAll(state, rng);
-  state.simPerf.growthBlocksPerTick = 1;
   return { state, rng };
 };
 
@@ -166,8 +169,11 @@ const buildOpenRecruitState = () => {
   const state = createInitialState(seed, grid);
   const rng = new RNG(seed ^ 0x7c15);
   const center = 4 + 4 * grid.cols;
-  const target = 2 + 2 * grid.cols;
+  const target = 3 + 3 * grid.cols;
   state.tiles = Array.from({ length: grid.totalTiles }, (_, index) => {
+    if (index === 0) {
+      return buildTile("road");
+    }
     if (index === center) {
       return buildTile("forest", {
         moisture: 0.82,
@@ -187,6 +193,55 @@ const buildOpenRecruitState = () => {
   });
   syncAll(state, rng);
   return { state, rng, target };
+};
+
+const buildCampaignSuccessionState = () => {
+  const seed = 6121;
+  const grid = { cols: 31, rows: 31, totalTiles: 31 * 31 };
+  const state = createInitialState(seed, grid);
+  const rng = new RNG(seed ^ 0x51f15e);
+  const forestCenters = [
+    [8, 8], [22, 8], [8, 22], [22, 22], [15, 15]
+  ];
+  state.tiles = Array.from({ length: grid.totalTiles }, (_, index) => {
+    const x = index % grid.cols;
+    const y = Math.floor(index / grid.cols);
+    const border = x === 0 || y === 0 || x === grid.cols - 1 || y === grid.rows - 1;
+    if (border) return buildTile("rocky", { moisture: 0.65, elevation: 0.3, waterDist: 18 });
+    const seededForest = forestCenters.some(([cx, cy]) => Math.abs(x - cx) <= 2 && Math.abs(y - cy) <= 2);
+    return seededForest
+      ? buildTile("forest", {
+          moisture: 0.72,
+          elevation: 0.18,
+          waterDist: 6,
+          vegetationAgeYears: 5,
+          dominantTreeType: TreeType.Oak,
+          treeType: TreeType.Oak
+        })
+      : buildTile("grass", { moisture: 0.72, elevation: 0.18, waterDist: 7, vegetationAgeYears: 1 });
+  });
+  syncAll(state, rng);
+  initializeCampaignVegetationFuel(state);
+  return { state, rng };
+};
+
+const countCampaignVegetation = (state) => {
+  let viable = 0;
+  let forest = 0;
+  let scrub = 0;
+  let matureForest = 0;
+  let forestFuel = 0;
+  for (const tile of state.tiles) {
+    if (tile.type === "rocky") continue;
+    viable += 1;
+    if (tile.type === "scrub") scrub += 1;
+    if (tile.type === "forest") {
+      forest += 1;
+      forestFuel += tile.fuel;
+      if (getVegetationMaturity01("forest", tile.vegetationAgeYears) >= 0.9) matureForest += 1;
+    }
+  }
+  return { viable, forest, scrub, matureForest, forestFuel };
 };
 
 const buildRevisionBatchState = () => {
@@ -392,33 +447,60 @@ const growthTileBefore = growthOnly.state.tiles[growthOnly.targetIdx];
 const growthAgeBefore = growthTileBefore.vegetationAgeYears;
 const growthCanopyBefore = growthTileBefore.canopyCover;
 const growthStemBefore = growthTileBefore.stemDensity;
-let growthTelemetryBlocks = 0;
-let growthTelemetryTilesVisited = 0;
-let growthTelemetryTilesChanged = 0;
+const growthFuelCap = 1 * (1 - growthTileBefore.moisture * 0.6);
+const growthFuelBefore = growthTileBefore.fuel;
+let growthTelemetryTilesScanned = 0;
+let growthTelemetryFuelChanged = 0;
+let growthTelemetryAged = 0;
+let growthVisualYears = 0;
 
-for (let step = 0; step < 12; step += 1) {
-  stepGrowth(growthOnly.state, 30, growthOnly.rng);
-  growthTelemetryBlocks += growthOnly.state.simPerfGrowthBlocksProcessed;
-  growthTelemetryTilesVisited += growthOnly.state.simPerfGrowthTilesVisited;
-  growthTelemetryTilesChanged += growthOnly.state.simPerfGrowthTilesChanged;
+for (let year = 1; year <= 12; year += 1) {
+  const annual = applyAnnualVegetationGrowth(growthOnly.state, year, growthOnly.rng);
+  growthTelemetryTilesScanned += annual.tilesScanned;
+  growthTelemetryFuelChanged += annual.fuelTilesChanged;
+  growthTelemetryAged += annual.agedTiles;
+  growthVisualYears += annual.vegetationVisualChanged ? 1 : 0;
 }
 
 const growthTileAfter = growthOnly.state.tiles[growthOnly.targetIdx];
-assert.ok(growthTileAfter.vegetationAgeYears > growthAgeBefore, "young forest age did not increase");
-assert.ok(growthTileAfter.canopyCover > growthCanopyBefore, "young forest canopy did not increase");
-assert.ok(growthTileAfter.stemDensity >= growthStemBefore, "young forest stem density regressed");
+assert.ok(growthTileAfter.vegetationAgeYears > growthAgeBefore, "annual growth did not mature forest age");
+assert.ok(growthTileAfter.canopyCover > growthCanopyBefore, "annual growth did not increase canopy");
+assert.ok(growthTileAfter.stemDensity >= growthStemBefore, "annual growth regressed stem density");
+assert.ok(growthTileAfter.fuel > growthFuelBefore, "untreated forest fuel did not increase");
+assert.ok(
+  growthTileAfter.fuel / growthFuelCap >= 0.92 && growthTileAfter.fuel / growthFuelCap <= 0.96,
+  `twelve-year age-scaled fuel curve missed its target (${(growthTileAfter.fuel / growthFuelCap).toFixed(3)})`
+);
+assert.ok(growthTileAfter.fuel <= growthFuelCap + 1e-6, "forest fuel exceeded carrying capacity");
 assert.equal(
   growthOnly.state.terrainTypeRevision,
   growthPrevRevision.terrainTypeRevision,
-  "pure forest growth should not change terrain type revision"
+  "fuel-only growth should not change terrain type revision"
 );
 assert.ok(
   growthOnly.state.vegetationRevision > growthPrevRevision.vegetationRevision,
-  "pure forest growth should bump vegetation revision"
+  "forest maturation should bump vegetation revision"
 );
-assert.ok(growthTelemetryBlocks > 0, "growth telemetry should count processed blocks");
-assert.ok(growthTelemetryTilesVisited > 0, "growth telemetry should count visited vegetation tiles");
-assert.ok(growthTelemetryTilesChanged > 0, "growth telemetry should count changed vegetation tiles");
+growthOnly.state.terrainDirty = false;
+const matureFuelOnlyVegetationRevision = growthOnly.state.vegetationRevision;
+const matureFuelOnlyTerrainRevision = growthOnly.state.terrainTypeRevision;
+const matureFuelOnlyResult = applyAnnualVegetationGrowth(growthOnly.state, 13, growthOnly.rng);
+assert.equal(matureFuelOnlyResult.fuelChanged, true, "mature forest should keep accumulating fuel below capacity");
+assert.equal(matureFuelOnlyResult.vegetationVisualChanged, false, "mature fuel-only growth should remain render-free");
+assert.equal(
+  growthOnly.state.vegetationRevision,
+  matureFuelOnlyVegetationRevision,
+  "mature fuel-only growth should not bump vegetation revision"
+);
+assert.equal(
+  growthOnly.state.terrainTypeRevision,
+  matureFuelOnlyTerrainRevision,
+  "mature fuel-only growth should not bump terrain revision"
+);
+assert.equal(growthOnly.state.terrainDirty, false, "mature fuel-only growth should not mark terrain dirty");
+assert.equal(growthTelemetryTilesScanned, growthOnly.state.grid.totalTiles * 12, "annual telemetry should count one map scan per year");
+assert.ok(growthTelemetryAged > 0 && growthVisualYears > 0, "annual telemetry should count visible maturation");
+assert.ok(growthTelemetryFuelChanged > 0, "annual telemetry should count fuel changes");
 assert.ok(
   shouldSyncThreeTestTerrain(growthPrevRevision, {
     terrainTypeRevision: growthOnly.state.terrainTypeRevision,
@@ -426,47 +508,8 @@ assert.ok(
     structureRevision: growthOnly.state.structureRevision,
     debugTypeColors: false
   }),
-  "vegetation-only revision change should trigger 3D terrain sync"
+  "visible annual maturation should trigger 3D vegetation sync"
 );
-const fastTimeVegetationDecision = decideTerrainVisualSync({
-  previous: growthPrevRevision,
-  next: {
-    terrainTypeRevision: growthOnly.state.terrainTypeRevision,
-    vegetationRevision: growthOnly.state.vegetationRevision,
-    structureRevision: growthOnly.state.structureRevision,
-    debugTypeColors: false
-  },
-  geometryTerrainChanged: false,
-  activeFireTerrainPressure: false,
-  nowMs: 1000,
-  lastSyncMs: 0,
-  cooldownMs: 0,
-  fireVisualCooldownMs: 0,
-  cameraInteracting: false
-});
-assert.equal(
-  fastTimeVegetationDecision.shouldSync,
-  true,
-  "fast strategic time should no longer defer terrain sync solely because speed is high"
-);
-const cameraInteractionDecision = decideTerrainVisualSync({
-  previous: growthPrevRevision,
-  next: {
-    terrainTypeRevision: growthOnly.state.terrainTypeRevision,
-    vegetationRevision: growthOnly.state.vegetationRevision,
-    structureRevision: growthOnly.state.structureRevision,
-    debugTypeColors: false
-  },
-  geometryTerrainChanged: false,
-  activeFireTerrainPressure: false,
-  nowMs: 1000,
-  lastSyncMs: 0,
-  cooldownMs: 0,
-  fireVisualCooldownMs: 0,
-  cameraInteracting: true
-});
-assert.equal(cameraInteractionDecision.shouldSync, false, "camera interaction should still defer non-immediate terrain sync");
-assert.equal(cameraInteractionDecision.deferredReason, 1, "camera interaction should keep its deferred reason");
 const vegetationOnlyInvalidation = classifyTerrainVisualInvalidation({
   previous: { terrainTypeRevision: 4, vegetationRevision: 7, structureRevision: 2, debugTypeColors: false },
   next: { terrainTypeRevision: 4, vegetationRevision: 8, structureRevision: 2, debugTypeColors: false },
@@ -477,6 +520,11 @@ assert.equal(vegetationOnlyInvalidation.geometry, false, "vegetation-only growth
 assert.equal(vegetationOnlyInvalidation.surfaceColor, false, "vegetation-only growth should not require terrain surface-color work");
 assert.equal(vegetationOnlyInvalidation.vegetation, true, "vegetation-only growth should still invalidate vegetation visuals");
 assert.equal(vegetationOnlyInvalidation.dirtyTileBounds, undefined, "vegetation-only growth should not request tile texture updates");
+assert.equal(
+  shouldRebuildThreeTestVegetationInstances(vegetationOnlyInvalidation),
+  true,
+  "annual vegetation growth should rebuild rendered tree instances"
+);
 assert.equal(
   shouldRebuildThreeTestTreeTypeMap(
     {
@@ -500,6 +548,11 @@ assert.equal(ashOnlyInvalidation.geometry, false, "ash-only terrain changes shou
 assert.equal(ashOnlyInvalidation.surfaceColor, true, "ash-only terrain changes should invalidate surface color");
 assert.equal(ashOnlyInvalidation.vegetation, true, "ash-only vegetation cleanup should invalidate vegetation visuals");
 assert.equal(ashOnlyInvalidation.fireVisual, true, "active fire visual terrain changes should be batchable");
+assert.equal(
+  shouldRebuildThreeTestVegetationInstances(ashOnlyInvalidation),
+  false,
+  "active fire cleanup should retain its batched tree-burn visual path"
+);
 assert.equal(getTerrainVisualSyncUrgency(ashOnlyInvalidation), "deferred", "active fire ash visuals should not hold simulation");
 assert.equal(
   shouldHoldSimulationForTerrainInvalidation(ashOnlyInvalidation),
@@ -574,47 +627,105 @@ assert.ok(
   "vegetation age SoA did not update"
 );
 
-const lowBudget = buildLowBudgetCatchupState();
-const lowBudgetStartAge = Math.min(...lowBudget.state.tiles.map((tile) => tile.vegetationAgeYears));
-for (let step = 0; step < lowBudget.state.fireBlockCount * 2; step += 1) {
-  lowBudget.state.careerDay += 30;
-  stepGrowth(lowBudget.state, 30, lowBudget.rng);
-}
-const lowBudgetEndAge = Math.min(...lowBudget.state.tiles.map((tile) => tile.vegetationAgeYears));
-assert.ok(
-  lowBudgetEndAge > lowBudgetStartAge + 0.4,
-  `low block budget catch-up did not advance every block (${lowBudgetStartAge.toFixed(2)} -> ${lowBudgetEndAge.toFixed(2)})`
-);
-
 const openRecruit = buildOpenRecruitState();
-for (let step = 0; step < 12; step += 1) {
-  openRecruit.state.careerDay += 30;
-  stepGrowth(openRecruit.state, 30, openRecruit.rng);
+const recruitTerrainRevision = openRecruit.state.terrainTypeRevision;
+const recruitVegetationRevision = openRecruit.state.vegetationRevision;
+let recruitResult = null;
+for (let year = 1; year <= 200 && openRecruit.state.tiles[openRecruit.target].type !== "forest"; year += 1) {
+  recruitResult = applyAnnualVegetationGrowth(openRecruit.state, year, openRecruit.rng);
+  if (year === 1) {
+    assert.notEqual(openRecruit.state.tiles[1 + openRecruit.state.grid.cols].type, "forest", "non-edge land recruited in one annual step");
+    assert.equal(openRecruit.state.tiles[0].type, "road", "protected road terrain changed during annual growth");
+  }
 }
 assert.equal(
   openRecruit.state.tiles[openRecruit.target].type,
   "forest",
-  "suitable open/bare land should recruit into visible forest during quiet growth"
+  "suitable forest-edge land should eventually recruit deterministically"
+);
+assert.equal(
+  openRecruit.state.tiles[openRecruit.target].treeType,
+  TreeType.Elm,
+  "forest recruitment should inherit the neighboring mature forest species"
+);
+assert.ok(
+  openRecruit.state.terrainTypeRevision > recruitTerrainRevision &&
+    openRecruit.state.vegetationRevision > recruitVegetationRevision &&
+    recruitResult?.vegetationVisualChanged,
+  "recruitment should produce one annual visual revision batch"
+);
+const deterministicA = buildOpenRecruitState();
+const deterministicB = buildOpenRecruitState();
+for (let year = 1; year <= 20; year += 1) {
+  applyAnnualVegetationGrowth(deterministicA.state, year, deterministicA.rng);
+  applyAnnualVegetationGrowth(deterministicB.state, year, deterministicB.rng);
+}
+assert.deepEqual(
+  deterministicA.state.tiles.map((tile) => [tile.type, tile.treeType, tile.fuel]),
+  deterministicB.state.tiles.map((tile) => [tile.type, tile.treeType, tile.fuel]),
+  "annual vegetation growth was not deterministic"
 );
 
-const revisionBatch = buildRevisionBatchState();
-const revisionStart = revisionBatch.state.vegetationRevision;
-for (let step = 0; step < 10; step += 1) {
-  revisionBatch.state.careerDay += 1;
-  stepGrowth(revisionBatch.state, 1, revisionBatch.rng);
+const noFireCampaign = buildCampaignSuccessionState();
+const burnedCampaign = buildCampaignSuccessionState();
+const campaignInitial = countCampaignVegetation(noFireCampaign.state);
+let campaignYear8 = campaignInitial;
+let grassToShrubTransitions = 0;
+let shrubToForestTransitions = 0;
+let directForestTransitions = 0;
+for (let year = 1; year <= 20; year += 1) {
+  const beforeTypes = noFireCampaign.state.tiles.map((tile) => tile.type);
+  applyAnnualVegetationGrowth(noFireCampaign.state, year, noFireCampaign.rng);
+  for (let idx = 0; idx < beforeTypes.length; idx += 1) {
+    const beforeType = beforeTypes[idx];
+    const afterTile = noFireCampaign.state.tiles[idx];
+    if ((beforeType === "grass" || beforeType === "floodplain") && afterTile.type === "scrub") {
+      grassToShrubTransitions += 1;
+      assert.equal(afterTile.vegetationAgeYears, 0.35, "new shrub should not mature again within its establishment year");
+    } else if (beforeType === "scrub" && afterTile.type === "forest") {
+      shrubToForestTransitions += 1;
+    } else if ((beforeType === "grass" || beforeType === "floodplain") && afterTile.type === "forest") {
+      directForestTransitions += 1;
+    }
+  }
+  if (year % 3 === 0) {
+    for (let idx = 0; idx < burnedCampaign.state.tiles.length; idx += 1) {
+      const tile = burnedCampaign.state.tiles[idx];
+      const x = idx % burnedCampaign.state.grid.cols;
+      const y = Math.floor(idx / burnedCampaign.state.grid.cols);
+      if (tile.type !== "forest" || (x * 11 + y * 7 + year) % 9 !== 0) continue;
+      tile.type = "ash";
+      tile.fuel = 0;
+      tile.vegetationAgeYears = 0;
+      tile.canopy = 0;
+      tile.canopyCover = 0;
+      tile.stemDensity = 0;
+      tile.treeType = null;
+      tile.dominantTreeType = null;
+    }
+    syncTileSoA(burnedCampaign.state);
+  }
+  applyAnnualVegetationGrowth(burnedCampaign.state, year, burnedCampaign.rng);
+  if (year === 8) campaignYear8 = countCampaignVegetation(noFireCampaign.state);
 }
-assert.equal(
-  revisionBatch.state.vegetationRevision,
-  revisionStart,
-  "small vegetation-only ticks should be batched instead of forcing terrain sync every day"
-);
-for (let step = 0; step < 30; step += 1) {
-  revisionBatch.state.careerDay += 1;
-  stepGrowth(revisionBatch.state, 1, revisionBatch.rng);
-}
+const campaignEnd = countCampaignVegetation(noFireCampaign.state);
+const burnedEnd = countCampaignVegetation(burnedCampaign.state);
+console.log("[growth-campaign]", { campaignInitial, campaignYear8, campaignEnd, burnedEnd });
 assert.ok(
-  revisionBatch.state.vegetationRevision > revisionStart,
-  "batched vegetation visuals should flush after enough growth days"
+  campaignYear8.forest + campaignYear8.scrub >= campaignInitial.forest + campaignInitial.scrub + campaignInitial.viable * 0.1,
+  "no-fire campaign did not show material woody expansion by year 8"
+);
+assert.ok(grassToShrubTransitions > 0, "campaign succession did not exercise grass-to-shrub establishment");
+assert.ok(shrubToForestTransitions > 0, "campaign succession did not exercise mature-shrub-to-forest establishment");
+assert.ok(directForestTransitions > 0, "campaign succession did not exercise direct mature-forest edge recruitment");
+assert.ok(campaignEnd.forest / campaignEnd.viable >= 0.85, "no-fire campaign did not reach late-game forest saturation");
+assert.ok(
+  campaignEnd.matureForest / Math.max(1, campaignEnd.forest) >= 0.8,
+  "late-game forest did not reach the mature-canopy target"
+);
+assert.ok(
+  burnedEnd.forest <= campaignEnd.forest * 0.75 || burnedEnd.forestFuel <= campaignEnd.forestFuel * 0.75,
+  "periodic burning did not materially reduce late-game forest hazard"
 );
 
 const terrainSignatureSample = (() => {
@@ -789,8 +900,13 @@ const recovery = buildRecoveryState();
 let sawGrass = false;
 let sawForest = false;
 for (let step = 0; step < 144; step += 1) {
-  stepGrowth(recovery.state, 10, recovery.rng);
+  const previousType = recovery.state.tiles[recovery.center].type;
+  applyAnnualVegetationGrowth(recovery.state, step + 1, recovery.rng);
   const centerTile = recovery.state.tiles[recovery.center];
+  if (previousType === "ash" && centerTile.type !== "ash") {
+    assert.equal(centerTile.type, "grass", "ash recovery should stop at grass for the remainder of that year");
+    assert.equal(centerTile.vegetationAgeYears, 0.2, "recovered grass should not mature again in its recovery year");
+  }
   if (centerTile.type === "grass") {
     sawGrass = true;
   }
@@ -821,7 +937,7 @@ console.log(
     `stem ${growthStemBefore} -> ${growthTileAfter.stemDensity}`,
     `centerType=${recoveredTile.type}`,
     `centerTree=${recoveredTile.treeType}`,
-    `lowBudgetMinAge=${lowBudgetEndAge.toFixed(2)}`,
+    `fuelRatio=${(growthTileAfter.fuel / growthFuelCap).toFixed(3)}`,
     `openRecruit=${openRecruit.state.tiles[openRecruit.target].type}`,
     `roadReplay=${replayRoads.counts.replay}`,
     `roadFallback=${fallbackRoads.counts.search}`,

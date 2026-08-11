@@ -1,126 +1,183 @@
 import { clearVegetationState } from "../../core/vegetation.js";
+import { getTerrainHeightScale } from "../../core/terrainScale.js";
+import { buildDepressionLakeField } from "../../systems/terrain/sim/depressionLakeField.js";
+import { buildFlowAccumulationRiverNetwork } from "../../systems/terrain/sim/flowAccumulationRiverNetwork.js";
+import { HYDROLOGY_FEATURE_CLASS_CODE } from "../../systems/terrain/sim/hydrologyFeatureClassifier.js";
+import { buildTerrainMorphologyFields } from "../../systems/terrain/sim/terrainMorphology.js";
+import type { StaticHydrologyFeatureCounts } from "../../systems/terrain/types/staticHydrologyTypes.js";
 import type { PipelineStage } from "../pipeline/TerrainPipeline.js";
 import { emitStageSnapshot } from "../pipeline/stageDebug.js";
-import { clampRiverMouthDepthsToSeaLevel, suppressIsolatedElevationSpikes } from "../runtime.js";
-import { buildStaticInlandLakeNetwork } from "../../systems/terrain/sim/inlandLakeNetwork.js";
+
+const emptyFeatureCounts = (): StaticHydrologyFeatureCounts => ({
+  none: 0,
+  "sheet-flow": 0,
+  channel: 0,
+  river: 0,
+  lake: 0,
+  "lake-outlet": 0,
+  "waterfall-lip": 0,
+  "waterfall-runout": 0,
+  "river-mouth": 0,
+  "failed-overflow": 0
+});
 
 export const RiverStage: PipelineStage = {
   id: "hydro:rivers",
   weight: 10,
   run: async (ctx) => {
-    const { state, settings, elevationMap, seaLevelMap, oceanMask, riverMask } = ctx;
-    if (!elevationMap || !seaLevelMap || !oceanMask || !riverMask) {
-      throw new Error("River stage missing terrain or shoreline fields.");
+    const {
+      state,
+      settings,
+      elevationMap,
+      seaLevelMap,
+      oceanMask,
+      riverMask,
+      drainageReceiverMap,
+      flowAccumulationMap,
+      depressionFillMap,
+      depressionDepthMap
+    } = ctx;
+    if (
+      !elevationMap ||
+      !seaLevelMap ||
+      !oceanMask ||
+      !riverMask ||
+      !drainageReceiverMap ||
+      !flowAccumulationMap ||
+      !depressionFillMap ||
+      !depressionDepthMap
+    ) {
+      throw new Error("River stage missing terrain, shoreline, or erosion drainage fields.");
     }
 
     const total = state.grid.totalTiles;
     riverMask.fill(0);
-    if (state.tileRiverMask.length !== total) {
-      state.tileRiverMask = new Uint8Array(total);
-    } else {
-      state.tileRiverMask.fill(0);
-    }
-    if (state.tileRiverBed.length !== total) {
-      state.tileRiverBed = new Float32Array(total).fill(Number.NaN);
-    } else {
-      state.tileRiverBed.fill(Number.NaN);
-    }
-    if (state.tileRiverSurface.length !== total) {
-      state.tileRiverSurface = new Float32Array(total).fill(Number.NaN);
-    } else {
-      state.tileRiverSurface.fill(Number.NaN);
-    }
-    if (state.tileRiverStepStrength.length !== total) {
-      state.tileRiverStepStrength = new Float32Array(total);
-    } else {
-      state.tileRiverStepStrength.fill(0);
-    }
-    if (state.tileLakeMask.length !== total) {
-      state.tileLakeMask = new Uint16Array(total);
-    } else {
-      state.tileLakeMask.fill(0);
-    }
-    if (state.tileLakeSurface.length !== total) {
-      state.tileLakeSurface = new Float32Array(total).fill(Number.NaN);
-    } else {
-      state.tileLakeSurface.fill(Number.NaN);
-    }
-    if (state.tileLakeOutletMask.length !== total) {
-      state.tileLakeOutletMask = new Uint8Array(total);
-    } else {
-      state.tileLakeOutletMask.fill(0);
-    }
-    if (state.tileWaterfallSourceMask.length !== total) {
-      state.tileWaterfallSourceMask = new Uint8Array(total);
-    } else {
-      state.tileWaterfallSourceMask.fill(0);
-    }
-    if (state.tileWaterfallTarget.length !== total) {
-      state.tileWaterfallTarget = new Int32Array(total).fill(-1);
-    } else {
-      state.tileWaterfallTarget.fill(-1);
-    }
-    if (state.tileWaterfallDrop.length !== total) {
-      state.tileWaterfallDrop = new Float32Array(total);
-    } else {
-      state.tileWaterfallDrop.fill(0);
-    }
-
+    state.tileRiverMask = new Uint8Array(total);
+    state.tileRiverBed = new Float32Array(total).fill(Number.NaN);
+    state.tileRiverSurface = new Float32Array(total).fill(Number.NaN);
+    state.tileRiverStepStrength = new Float32Array(total);
+    state.tileLakeMask = new Uint16Array(total);
+    state.tileLakeSurface = new Float32Array(total).fill(Number.NaN);
+    state.tileLakeOutletMask = new Uint8Array(total);
+    state.tileWaterfallSourceMask = new Uint8Array(total);
+    state.tileWaterfallTarget = new Int32Array(total).fill(-1);
+    state.tileWaterfallDrop = new Float32Array(total);
     state.valleyMap = Array.from({ length: total }, () => 0);
 
-    await ctx.reportStage("Resolving inland lake overflow network...", 0.72);
-    const staticHydrology = await buildStaticInlandLakeNetwork({
-      state,
-      elevationMap,
-      riverMask,
+    const rivers = buildFlowAccumulationRiverNetwork({
+      cols: state.grid.cols,
+      rows: state.grid.rows,
+      elevations: elevationMap,
       oceanMask,
-      settings,
-      debug: {
-        emit: (event) => ctx.emitDiagnosticEvent(event),
-        yieldIfNeeded: () => ctx.yieldAndCheck(),
-        checkCancelled: () => ctx.checkCancelled()
-      }
+      seaLevelMap,
+      receiver: drainageReceiverMap,
+      flowAccumulation: flowAccumulationMap,
+      riverIntensity: settings.riverIntensity,
+      riverBudget: settings.riverBudget,
+      minLakeDepth: settings.minLakeDepth
     });
-    ctx.lakeMask = staticHydrology.lakeMask;
-    ctx.lakeSurfaceMap = staticHydrology.lakeSurface;
-    ctx.lakeOutletMask = staticHydrology.lakeOutletMask;
-    ctx.rainfallMap = staticHydrology.rainfall;
-    ctx.runoffMap = staticHydrology.runoff;
-    ctx.riverLakeEntryMask = staticHydrology.riverLakeEntryMask;
-    ctx.riverLakeExitMask = staticHydrology.riverLakeExitMask;
-    ctx.waterfallSourceMask = staticHydrology.waterfallSourceMask;
-    ctx.waterfallTargetMap = staticHydrology.waterfallTarget;
-    ctx.waterfallDropMap = staticHydrology.waterfallDrop;
-    ctx.hydrologyFeatureClass = staticHydrology.hydrologyFeatureClass;
-    ctx.hydrologyFeatureCounts = staticHydrology.hydrologyFeatureCounts;
-    ctx.staticHydrologyLakes = staticHydrology.lakes;
-    ctx.staticHydrologyWaterfalls = staticHydrology.waterfalls;
-    ctx.staticHydrologyRejectedLakeCandidates = staticHydrology.rejectedLakeCandidates;
-    ctx.staticHydrologyRejectedWaterfallCandidates = staticHydrology.rejectedWaterfallCandidates;
+    const lakes = buildDepressionLakeField({
+      cols: state.grid.cols,
+      rows: state.grid.rows,
+      elevations: elevationMap,
+      filledElevation: depressionFillMap,
+      depressionDepth: depressionDepthMap,
+      flowAccumulation: flowAccumulationMap,
+      oceanMask,
+      riverIntensity: settings.riverIntensity,
+      basinStrength: settings.basinStrength,
+      minLakeDepth: settings.minLakeDepth,
+      minLakeAreaTiles: settings.minLakeAreaTiles,
+      maxLakeAreaTiles: settings.maxLakeAreaTiles,
+      maxLakeCount: settings.maxLakeCount
+    });
 
+    const featureClass = new Uint8Array(total);
+    const featureCounts = emptyFeatureCounts();
     for (let i = 0; i < total; i += 1) {
-      state.tiles[i].elevation = elevationMap[i] ?? state.tiles[i].elevation;
-      if (riverMask[i] > 0 || state.tileLakeMask[i] > 0) {
-        state.tiles[i].type = "water";
-        clearVegetationState(state.tiles[i]);
-        state.tiles[i].dominantTreeType = null;
-        state.tiles[i].treeType = null;
-        state.tiles[i].isBase = false;
+      if (oceanMask[i] > 0) continue;
+      const lakeId = lakes.lakeMask[i] ?? 0;
+      if (lakeId > 0) {
+        const surface = lakes.lakeSurface[i] ?? elevationMap[i] ?? 0;
+        const bed = Math.min(elevationMap[i] ?? surface, surface - Math.max(0.00045, settings.minLakeDepth * 0.35));
+        elevationMap[i] = Math.max(0, bed);
+        state.tileLakeMask[i] = lakeId;
+        state.tileLakeSurface[i] = surface;
+        featureClass[i] = HYDROLOGY_FEATURE_CLASS_CODE.lake;
+        featureCounts.lake += 1;
+      } else if (rivers.riverMask[i] > 0) {
+        const surface = rivers.riverSurface[i] ?? elevationMap[i] ?? 0;
+        const bed = rivers.riverBed[i] ?? surface - 0.00045;
+        riverMask[i] = 1;
+        state.tileRiverMask[i] = 1;
+        state.tileRiverSurface[i] = surface;
+        state.tileRiverBed[i] = bed;
+        state.tileRiverStepStrength[i] = rivers.channelStrength[i] ?? 0;
+        state.valleyMap[i] = rivers.valleyDepth[i] ?? 0;
+        elevationMap[i] = Math.min(elevationMap[i] ?? bed, bed);
+        featureClass[i] = HYDROLOGY_FEATURE_CLASS_CODE.river;
+        featureCounts.river += 1;
+      } else {
+        featureCounts.none += 1;
+        continue;
       }
+
+      const tile = state.tiles[i];
+      tile.type = "water";
+      tile.elevation = elevationMap[i] ?? tile.elevation;
+      tile.moisture = 1;
+      tile.waterDist = 0;
+      tile.fuel = 0;
+      tile.fire = 0;
+      tile.heat = 0;
+      tile.isBase = false;
+      clearVegetationState(tile);
+      tile.dominantTreeType = null;
+      tile.treeType = null;
+      state.tileElevation[i] = tile.elevation;
+      state.tileMoisture[i] = 1;
+      state.tileFuel[i] = 0;
+      state.tileFire[i] = 0;
     }
-    const protectedRiverWater = new Uint8Array(total);
-    for (let i = 0; i < total; i += 1) {
-      protectedRiverWater[i] = oceanMask[i] > 0 || riverMask[i] > 0 || state.tileLakeMask[i] > 0 ? 1 : 0;
+
+    ctx.lakeMask = state.tileLakeMask;
+    ctx.lakeSurfaceMap = state.tileLakeSurface;
+    ctx.lakeOutletMask = state.tileLakeOutletMask;
+    ctx.rainfallMap = Float32Array.from(flowAccumulationMap);
+    ctx.runoffMap = Float32Array.from(flowAccumulationMap);
+    ctx.riverLakeEntryMask = new Uint8Array(total);
+    ctx.riverLakeExitMask = new Uint8Array(total);
+    ctx.waterfallSourceMask = state.tileWaterfallSourceMask;
+    ctx.waterfallTargetMap = state.tileWaterfallTarget;
+    ctx.waterfallDropMap = state.tileWaterfallDrop;
+    ctx.hydrologyFeatureClass = featureClass;
+    ctx.hydrologyFeatureCounts = featureCounts;
+    ctx.staticHydrologyLakes = lakes.lakes;
+    ctx.staticHydrologyWaterfalls = [];
+    ctx.staticHydrologyRejectedLakeCandidates = {};
+    ctx.staticHydrologyRejectedWaterfallCandidates = 0;
+
+    const morphology = buildTerrainMorphologyFields({
+      cols: state.grid.cols,
+      rows: state.grid.rows,
+      elevations: elevationMap,
+      heightScale: getTerrainHeightScale(state.grid.cols, state.grid.rows, settings.heightScaleMultiplier),
+      erosionWear: ctx.erosionWearMap,
+      erosionDeposit: ctx.erosionDepositMap
+    });
+    ctx.rockExposureMap = morphology.rockExposure;
+    ctx.terrainCurvatureMap = morphology.curvature;
+    if (state.tileRockExposure.length !== morphology.rockExposure.length) {
+      state.tileRockExposure = new Float32Array(morphology.rockExposure.length);
     }
-    suppressIsolatedElevationSpikes(elevationMap, state.grid.cols, state.grid.rows, protectedRiverWater);
+    state.tileRockExposure.set(morphology.rockExposure);
     for (let i = 0; i < total; i += 1) {
       const resolvedElevation = elevationMap[i] ?? state.tiles[i].elevation;
       state.tiles[i].elevation = resolvedElevation;
       state.tileElevation[i] = resolvedElevation;
     }
     state.tileRiverMask = riverMask;
-    clampRiverMouthDepthsToSeaLevel(state, oceanMask, riverMask, seaLevelMap);
-    await ctx.reportStage("Rivers carved.", 1);
+    await ctx.reportStage("Resolving accumulation rivers and depression lakes...", 1);
     await emitStageSnapshot(ctx, "hydro:rivers");
   }
 };

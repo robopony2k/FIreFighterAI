@@ -118,6 +118,7 @@ import {
   ROAD_TEX_SCALE,
   setRoadOverlayMaxSize,
   type TerrainRenderSurface,
+  type TerrainBuildTelemetry,
   type TreeSeasonVisualConfig,
   type TreeBurnController,
   type TerrainSample,
@@ -176,7 +177,11 @@ import { getThreeDockCardSpec } from "../ui/runtime/widgets/threeDock.js";
 import type { AudioChannelId, RuntimeWidgetId } from "../ui/runtime/widgets/types.js";
 import type { UiAudioController } from "../audio/uiAudio.js";
 import { getRuntimeSettings, setRuntimeSetting, subscribeRuntimeSettings } from "../persistence/runtimeSettings.js";
-import { constrainCameraToTerrain } from "../systems/terrain/rendering/terrainCameraConstraints.js";
+import {
+  constrainCameraToTerrain,
+  resolveAspectAwareFocusDistance,
+  resolveTerrainCameraFocusPoint
+} from "../systems/terrain/rendering/terrainCameraConstraints.js";
 import { WebGlGpuTimer } from "../core/rendering/webglGpuTimer.js";
 
 export type SeasonVisualState = {
@@ -228,6 +233,7 @@ export type ThreeTestPerfSnapshot = {
   treeLodTransitionCount: number;
   treeImpostorDrawCount: number;
   treeImpostorAtlasState: string;
+  treeImpostorAtlasBuildMs: number;
   roadOverlayTriangles: number;
   roadOverlaySourceTriangles: number;
   postPassCount: number;
@@ -280,6 +286,7 @@ export type ThreeTestPerfSnapshot = {
   terrainSetFullBuildLastMs: number;
   terrainSetWaterMs: number;
   terrainSetWaterLastMs: number;
+  terrainBuildTelemetry: TerrainBuildTelemetry | null;
   terrainRoadRefreshMs: number;
   terrainRoadRefreshLastMs: number;
   terrainRoadRefreshCount: number;
@@ -531,6 +538,7 @@ const TERRAIN_CAMERA_MIN_POLAR_ANGLE = THREE.MathUtils.degToRad(8);
 const TERRAIN_CAMERA_MAX_POLAR_ANGLE = THREE.MathUtils.degToRad(78);
 const TERRAIN_CAMERA_TARGET_GROUND_CLEARANCE = 0.04;
 const TERRAIN_CAMERA_BODY_GROUND_CLEARANCE = 0.35;
+const TOWN_CAMERA_MAX_FRAMING_RADIUS_TILES = 4;
 const EVACUATION_CAR_ACCENT_COLORS = [
   0xf2efe6,
   0x9ec5d6,
@@ -1007,7 +1015,8 @@ export const createThreeTest = (
 
   const unitTrayRoot = document.createElement("div");
   unitTrayRoot.className = "three-test-unit-tray hidden";
-  canvas.parentElement?.appendChild(unitTrayRoot);
+  const viewportOverlayRoot = canvas.closest<HTMLElement>(".three-test-overlay");
+  (viewportOverlayRoot ?? canvas.parentElement)?.appendChild(unitTrayRoot);
   const sparkDebugOverlay = document.createElement("div");
   sparkDebugOverlay.className = THREE_TEST_SPARK_DEBUG
     ? "three-test-spark-debug"
@@ -3531,33 +3540,39 @@ export const createThreeTest = (
     return null;
   };
 
-  const focusCameraOnTile = (tileX: number, tileY: number): void => {
+  const focusCameraOnTile = (tileX: number, tileY: number, framingRadiusTiles = 1.5): void => {
     if (!lastTerrainSurface) {
       return;
     }
+    flushViewportResize();
     const cols = Math.max(1, world.grid.cols);
     const rows = Math.max(1, world.grid.rows);
-    const clampedX = Math.max(0, Math.min(cols - 1, Math.floor(tileX)));
-    const clampedY = Math.max(0, Math.min(rows - 1, Math.floor(tileY)));
-    const worldX = lastTerrainSurface.toWorldX(clampedX + 0.5);
-    const worldZ = lastTerrainSurface.toWorldZ(clampedY + 0.5);
-    const worldY = lastTerrainSurface.heightAtTile(clampedX, clampedY) * lastTerrainSurface.heightScale;
-    const target = new THREE.Vector3(worldX, worldY, worldZ);
-    const currentDistance = Math.max(0.001, camera.position.distanceTo(controls.target));
-    const desiredDistance = Math.max(
-      controls.minDistance * 1.3,
-      Math.min(controls.maxDistance, currentDistance * 0.62)
+    const clampedX = Math.max(0, Math.min(cols - 1, tileX));
+    const clampedY = Math.max(0, Math.min(rows - 1, tileY));
+    const target = resolveTerrainCameraFocusPoint(
+      lastTerrainSurface,
+      clampedX,
+      clampedY,
+      TERRAIN_CAMERA_TARGET_GROUND_CLEARANCE
     );
-    // 45-degree downward view: vertical offset equals horizontal offset.
-    const horizontalDistance = desiredDistance / Math.SQRT2;
-    const verticalDistance = desiredDistance / Math.SQRT2;
+    const currentDistance = Math.max(0.001, camera.position.distanceTo(controls.target));
+    const tileWorldSpan = Math.max(
+      lastTerrainSurface.width / Math.max(1, cols - 1),
+      lastTerrainSurface.depth / Math.max(1, rows - 1)
+    );
+    const desiredDistance = resolveAspectAwareFocusDistance({
+      preferredDistance: Math.max(controls.minDistance * 1.3, currentDistance * 0.62),
+      framingRadiusWorld: Math.max(tileWorldSpan * 1.5, framingRadiusTiles * tileWorldSpan),
+      verticalFovDeg: camera.fov,
+      aspect: camera.aspect,
+      minDistance: controls.minDistance,
+      maxDistance: controls.maxDistance
+    });
     const heading = camera.position.clone().sub(controls.target);
-    heading.y = 0;
     if (heading.lengthSq() < 1e-6) {
-      heading.set(1, 0, 1);
+      heading.set(1, 1, 1);
     }
-    heading.normalize().multiplyScalar(horizontalDistance);
-    const endPosition = new THREE.Vector3(target.x + heading.x, target.y + verticalDistance, target.z + heading.z);
+    const endPosition = target.clone().addScaledVector(heading.normalize(), desiredDistance);
     const startTarget = controls.target.clone();
     const startPosition = camera.position.clone();
     const travel =
@@ -3581,7 +3596,11 @@ export const createThreeTest = (
     if (!town) {
       return;
     }
-    focusCameraOnTile(Math.floor(getTownCenterX(town)), Math.floor(getTownCenterY(town)));
+    focusCameraOnTile(
+      getTownCenterX(town),
+      getTownCenterY(town),
+      Math.max(1.5, Math.min(TOWN_CAMERA_MAX_FRAMING_RADIUS_TILES, town.radius * 0.5))
+    );
   };
 
   const focusCameraOnBase = (): void => {
@@ -4823,8 +4842,7 @@ export const createThreeTest = (
     const cachedWetness = world.tileSuppressionWetness[context.tileIndex] ?? 0;
     const cachedBurnAge = world.tileBurnAge[context.tileIndex] ?? 0;
     const cachedHeatRelease = world.tileHeatRelease[context.tileIndex] ?? 0;
-    const cragUplift = world.tileCragUplift[context.tileIndex] ?? 0;
-    const cragStrength = Math.min(1, cragUplift / 0.04);
+    const rockExposure = world.tileRockExposure[context.tileIndex] ?? 0;
     const mountainMaterial = lastTerrainSurface?.mountainTerrainMaskField
       ? sampleMountainTerrainMaskAtTile(
           lastTerrainSurface.mountainTerrainMaskField,
@@ -4835,7 +4853,7 @@ export const createThreeTest = (
     const biomeShape = computeHoverBiomeShape(context.tileX, context.tileY, context.tileIndex, context.heightScale);
     const lines = [
       `type=${tile.type} id=${world.tileTypeId[context.tileIndex] ?? "n/a"} base=${tile.isBase ? "1" : "0"}`,
-      `landform=${cragUplift > 1e-5 ? "crag" : "none"} cragUplift=${formatDebugNumber(cragUplift, 4)} cragStrength=${formatDebugNumber(cragStrength, 2)}`,
+      `morphology rockExposure=${formatDebugNumber(rockExposure, 3)} erosionWear=${formatDebugNumber(world.tileErosionWear[context.tileIndex] ?? 0, 4)}`,
       `elev=${formatDebugNumber(world.tileElevation[context.tileIndex] ?? tile.elevation, 3)} y=${formatDebugNumber((world.tileElevation[context.tileIndex] ?? 0) * context.heightScale, 2)} moist=${formatDebugNumber(world.tileMoisture[context.tileIndex] ?? tile.moisture, 2)}`,
       `biome slope=${formatDebugNumber(biomeShape.slope, 3)} relief=${formatDebugNumber(biomeShape.relief, 3)} grade=${formatDebugNumber(biomeShape.renderGrade, 2)} angle=${formatDebugNumber(biomeShape.renderAngleDeg, 0)}deg`,
       mountainMaterial
@@ -4890,7 +4908,7 @@ export const createThreeTest = (
       key: "cell",
       label: "CELL",
       lines,
-      tone: cragUplift > 1e-5 ? "watch" : "default"
+      tone: rockExposure > 0.7 ? "watch" : "default"
     };
   };
 
@@ -5065,7 +5083,8 @@ export const createThreeTest = (
       soa: {
         typeId: world.tileTypeId[tileIndex] ?? null,
         elevation: world.tileElevation[tileIndex] ?? null,
-        cragUplift: world.tileCragUplift[tileIndex] ?? null,
+        rockExposure: world.tileRockExposure[tileIndex] ?? null,
+        erosionWear: world.tileErosionWear[tileIndex] ?? null,
         moisture: world.tileMoisture[tileIndex] ?? null,
         fire: world.tileFire[tileIndex] ?? null,
         heat: world.tileHeat[tileIndex] ?? null,
@@ -6609,7 +6628,19 @@ export const createThreeTest = (
     invViewProj: hudInvViewProj
   };
   hudState.camera = hudCameraSnapshot;
-  let pendingResize: { width: number; height: number } | null = null;
+  type PendingViewportResize = {
+    width: number;
+    height: number;
+    cameraPosition: THREE.Vector3;
+    cameraQuaternion: THREE.Quaternion;
+    controlsTarget: THREE.Vector3;
+  };
+  let pendingResize: PendingViewportResize | null = null;
+  let canvasResizeObserver: ResizeObserver | null = null;
+  let appliedViewportWidth = 0;
+  let appliedViewportHeight = 0;
+  let appliedViewportDpr = 0;
+  let lastStaticFrameKey = "";
   let adaptiveDpr = Math.max(THREE_TEST_MIN_DPR, Math.min(window.devicePixelRatio ?? 1, THREE_TEST_MAX_DPR));
   let adaptiveDprFallbackAccum = 0;
   let adaptiveDprRecoveryAccum = 0;
@@ -6649,6 +6680,7 @@ export const createThreeTest = (
     treeLodTransitionCount: 0,
     treeImpostorDrawCount: 0,
     treeImpostorAtlasState,
+    treeImpostorAtlasBuildMs: 0,
     roadOverlayTriangles: 0,
     roadOverlaySourceTriangles: 0,
     postPassCount: 0,
@@ -6701,6 +6733,7 @@ export const createThreeTest = (
     terrainSetFullBuildLastMs: 0,
     terrainSetWaterMs: 0,
     terrainSetWaterLastMs: 0,
+    terrainBuildTelemetry: null,
     terrainRoadRefreshMs: 0,
     terrainRoadRefreshLastMs: 0,
     terrainRoadRefreshCount: 0,
@@ -7123,36 +7156,6 @@ export const createThreeTest = (
         removeUnitCommandVisual(unitId);
       }
     });
-  };
-
-  const ensureTerrainVertexColorsWhite = (geometry: THREE.BufferGeometry): void => {
-    if (geometry.userData?.terrainVertexColorsWhite === true) {
-      return;
-    }
-    const positionAttr = geometry.getAttribute("position");
-    if (!positionAttr) {
-      return;
-    }
-    const colorAttr = geometry.getAttribute("color");
-    const expectedLength = positionAttr.count * 3;
-    if (!colorAttr || colorAttr.count !== positionAttr.count || !("array" in colorAttr)) {
-      const colors = new Float32Array(expectedLength);
-      colors.fill(1);
-      geometry.setAttribute("color", new THREE.Float32BufferAttribute(colors, 3));
-      geometry.userData.terrainVertexColorsWhite = true;
-      return;
-    }
-    const colorArray = colorAttr.array;
-    if (colorArray.length !== expectedLength) {
-      const colors = new Float32Array(expectedLength);
-      colors.fill(1);
-      geometry.setAttribute("color", new THREE.Float32BufferAttribute(colors, 3));
-      geometry.userData.terrainVertexColorsWhite = true;
-      return;
-    }
-    colorArray.fill(1);
-    colorAttr.needsUpdate = true;
-    geometry.userData.terrainVertexColorsWhite = true;
   };
 
   const getStructureInstancedMeshCapacity = (count: number): number => {
@@ -7938,6 +7941,8 @@ export const createThreeTest = (
     cancelCameraFlight();
     running = false;
     controls.enabled = false;
+    canvasResizeObserver?.disconnect();
+    canvasResizeObserver = null;
     if (raf) {
       window.cancelAnimationFrame(raf);
       raf = 0;
@@ -8036,13 +8041,27 @@ export const createThreeTest = (
 
   const scheduleResize = (): void => {
     const rect = canvas.getBoundingClientRect();
+    const preservedPose = pendingResize ?? {
+      cameraPosition: camera.position.clone(),
+      cameraQuaternion: camera.quaternion.clone(),
+      controlsTarget: controls.target.clone()
+    };
     pendingResize = {
       width: Math.max(1, Math.floor(rect.width)),
-      height: Math.max(1, Math.floor(rect.height))
+      height: Math.max(1, Math.floor(rect.height)),
+      cameraPosition: preservedPose.cameraPosition,
+      cameraQuaternion: preservedPose.cameraQuaternion,
+      controlsTarget: preservedPose.controlsTarget
     };
   };
 
-  const applyResize = (width: number, height: number): void => {
+  const applyResize = (resizeState: PendingViewportResize): void => {
+    const { width, height, cameraPosition, cameraQuaternion, controlsTarget } = resizeState;
+    const restoreCameraPose = (): void => {
+      camera.position.copy(cameraPosition);
+      camera.quaternion.copy(cameraQuaternion);
+      controls.target.copy(controlsTarget);
+    };
     const deviceDpr = Math.min(window.devicePixelRatio ?? 1, THREE_TEST_MAX_DPR);
     if (THREE_TEST_ADAPTIVE_DPR_ENABLED) {
       adaptiveDpr = Math.max(THREE_TEST_MIN_DPR, Math.min(deviceDpr, adaptiveDpr));
@@ -8050,10 +8069,22 @@ export const createThreeTest = (
       adaptiveDpr = deviceDpr;
     }
     const effectiveDpr = THREE_TEST_ADAPTIVE_DPR_ENABLED ? adaptiveDpr : deviceDpr;
+    const nextAspect = width / height;
+    if (
+      width === appliedViewportWidth &&
+      height === appliedViewportHeight &&
+      Math.abs(effectiveDpr - appliedViewportDpr) <= 1e-6
+    ) {
+      restoreCameraPose();
+      return;
+    }
+    appliedViewportWidth = width;
+    appliedViewportHeight = height;
+    appliedViewportDpr = effectiveDpr;
     renderer.setPixelRatio(effectiveDpr);
     renderer.setSize(width, height, false);
     postPipeline?.resize(width, height, effectiveDpr);
-    camera.aspect = width / height;
+    camera.aspect = nextAspect;
     camera.updateProjectionMatrix();
     uiCamera.left = 0;
     uiCamera.right = width;
@@ -8086,17 +8117,39 @@ export const createThreeTest = (
     hudSprite.scale.set(width, height, 1);
     hudSprite.position.set(0, height, 0);
     hudTexture.needsUpdate = true;
+    restoreCameraPose();
+    lastStaticFrameKey = "";
+    markCameraMotion();
     lastFrameTime = 0;
     lastPresentedAt = 0;
   };
 
-  const resize = (): void => {
-    scheduleResize();
-    if (!running && pendingResize) {
-      applyResize(pendingResize.width, pendingResize.height);
-      pendingResize = null;
+  const applyPendingViewportResize = (): void => {
+    if (!pendingResize) {
+      return;
     }
+    const resizeState = pendingResize;
+    pendingResize = null;
+    applyResize(resizeState);
   };
+
+  const flushViewportResize = (): void => {
+    scheduleResize();
+    applyPendingViewportResize();
+  };
+
+  const resize = (): void => {
+    if (!running) {
+      flushViewportResize();
+      return;
+    }
+    scheduleResize();
+  };
+
+  if (typeof ResizeObserver !== "undefined") {
+    canvasResizeObserver = new ResizeObserver(() => resize());
+    canvasResizeObserver.observe(canvas);
+  }
 
   const updateCameraFlight = (time: number): void => {
     if (!cameraFlight) {
@@ -8242,7 +8295,6 @@ export const createThreeTest = (
     renderWorldScene();
   };
 
-  let lastStaticFrameKey = "";
   let lastWorldRenderAt = -Infinity;
   const shouldRenderWorldFrame = (time: number): boolean => {
     if (
@@ -8342,8 +8394,7 @@ export const createThreeTest = (
       threePerf.fps = smoothPerf(threePerf.fps, instantFps);
     }
     if (pendingResize) {
-      applyResize(pendingResize.width, pendingResize.height);
-      pendingResize = null;
+      applyPendingViewportResize();
     }
     cube.rotation.y = time * 0.0006;
     cube.rotation.x = time * 0.00035;
@@ -8560,8 +8611,7 @@ export const createThreeTest = (
 
   const prime = (): void => {
     if (pendingResize) {
-      applyResize(pendingResize.width, pendingResize.height);
-      pendingResize = null;
+      applyPendingViewportResize();
     }
     const structureShaderWarmupGroup = createStructureShaderWarmupGroup();
     scene.add(structureShaderWarmupGroup);
@@ -8739,10 +8789,12 @@ export const createThreeTest = (
     const rows = Math.max(1, world.grid.rows);
     const clampedX = Math.max(0, Math.min(cols - 1, Math.floor(tileX)));
     const clampedY = Math.max(0, Math.min(rows - 1, Math.floor(tileY)));
-    const worldX = lastTerrainSurface.toWorldX(clampedX + 0.5);
-    const worldZ = lastTerrainSurface.toWorldZ(clampedY + 0.5);
-    const worldY = lastTerrainSurface.heightAtTile(clampedX, clampedY) * lastTerrainSurface.heightScale;
-    const endTarget = new THREE.Vector3(worldX, worldY, worldZ);
+    const endTarget = resolveTerrainCameraFocusPoint(
+      lastTerrainSurface,
+      clampedX,
+      clampedY,
+      TERRAIN_CAMERA_TARGET_GROUND_CLEARANCE
+    );
     const cameraOffset = camera.position.clone().sub(controls.target);
     const endPosition = endTarget.clone().add(cameraOffset);
     if (options.transition === "contextual") {
@@ -8950,6 +9002,7 @@ export const createThreeTest = (
       treeLodTransitionCount: treeLodStats.transitionCount,
       treeImpostorDrawCount: treeLodStats.impostorDrawCount,
       treeImpostorAtlasState,
+      treeImpostorAtlasBuildMs: threePerf.treeImpostorAtlasBuildMs,
       roadOverlayTriangles: Number(terrainRoadOverlayMesh?.geometry.userData?.sparseTriangleCount ?? 0),
       roadOverlaySourceTriangles: Number(terrainRoadOverlayMesh?.geometry.userData?.sourceTriangleCount ?? 0),
       postPassCount: threePerf.postPassCount,
@@ -9002,6 +9055,18 @@ export const createThreeTest = (
       terrainSetFullBuildLastMs: threePerf.terrainSetFullBuildLastMs,
       terrainSetWaterMs: threePerf.terrainSetWaterMs,
       terrainSetWaterLastMs: threePerf.terrainSetWaterLastMs,
+      terrainBuildTelemetry: threePerf.terrainBuildTelemetry
+        ? {
+            timingsMs: { ...threePerf.terrainBuildTelemetry.timingsMs },
+            counts: { ...threePerf.terrainBuildTelemetry.counts },
+            cutout: threePerf.terrainBuildTelemetry.cutout
+              ? {
+                  timingsMs: { ...threePerf.terrainBuildTelemetry.cutout.timingsMs },
+                  counts: { ...threePerf.terrainBuildTelemetry.cutout.counts }
+                }
+              : null
+          }
+        : null,
       terrainRoadRefreshMs: threePerf.terrainRoadRefreshMs,
       terrainRoadRefreshLastMs: threePerf.terrainRoadRefreshLastMs,
       terrainRoadRefreshCount: threePerf.terrainRoadRefreshCount,
@@ -9408,7 +9473,6 @@ export const createThreeTest = (
     threePerf.terrainSetPath = roadOnly ? "road-only" : structureOnly ? "structure-only" : vegetationOnly ? "vegetation-only" : "fast";
     const terrainSurfaceShadingMode = sample.debugRenderOptions?.terrainSurfaceShadingMode ?? "refined";
     const useLegacyFacetedTerrain = terrainSurfaceShadingMode === "legacyFaceted";
-    const useTextureColorFastPath = !useLegacyFacetedTerrain && sample.fastUpdate === true;
     const palette = buildPalette();
     const grassId = TILE_TYPE_IDS.grass;
     const forestId = TILE_TYPE_IDS.forest;
@@ -9419,8 +9483,6 @@ export const createThreeTest = (
       try {
         if (useLegacyFacetedTerrain) {
           terrainMesh.geometry.deleteAttribute("color");
-        } else if (useTextureColorFastPath) {
-          ensureTerrainVertexColorsWhite(terrainMesh.geometry);
         } else {
           applyTerrainSurfaceColors(terrainMesh.geometry, sample, surface);
         }
@@ -9463,7 +9525,7 @@ export const createThreeTest = (
         surface.sampledLakeCoverage ?? null,
         surface.sampledRiverStepStrength,
         sample.debugTypeColors ?? false,
-        useLegacyFacetedTerrain || useTextureColorFastPath ? "legacy" : "mask",
+        useLegacyFacetedTerrain ? "legacy" : "mask",
         {
           includeDynamicFireScorch: false,
           sampleCoastClass: surface.sampleCoastClass,
@@ -9680,7 +9742,7 @@ export const createThreeTest = (
         return;
       }
       const fullBuildStartedAt = performance.now();
-      const { mesh, size, water, treeBurn, treeLod } = buildTerrainMesh(
+      const { mesh, size, water, treeBurn, treeLod, telemetry } = buildTerrainMesh(
         nextSurface,
         treeAssets,
         houseAssets,
@@ -9690,6 +9752,32 @@ export const createThreeTest = (
         THREE_TEST_TREE_IMPOSTORS_ENABLED ? "auto" : "models"
       );
       recordTerrainSetTiming("fullBuild", performance.now() - fullBuildStartedAt);
+      threePerf.terrainBuildTelemetry = telemetry;
+      const timings = telemetry.timingsMs;
+      const counts = telemetry.counts;
+      console.log(
+        `[terrainbuild] total=${timings.total.toFixed(2)}ms assembly=${timings.terrainAssembly.toFixed(2)}ms ` +
+          `cutout=${timings.inlandWaterCutout.toFixed(2)}ms normals=${timings.normals.toFixed(2)}ms ` +
+          `material=${timings.surfaceMaterial.toFixed(2)}ms vegetation=${timings.vegetation.toFixed(2)}ms ` +
+          `structures=${timings.structures.toFixed(2)}ms water=${timings.water.toFixed(2)}ms ` +
+          `terrainTriangles=${counts.sourceTerrainTriangles}->${counts.outputTerrainTriangles} ` +
+          `trees=${counts.treeInstances} scrub=${counts.scrubInstances} waterSamples=${counts.waterSupportSamples} ` +
+          `inlandWaterTriangles=${counts.inlandWaterTriangles}`
+      );
+      if (telemetry.cutout) {
+        const cutoutTimings = telemetry.cutout.timingsMs;
+        const cutoutCounts = telemetry.cutout.counts;
+        console.log(
+          `[terrainbuild:cutout] total=${cutoutTimings.total.toFixed(2)}ms domain=${cutoutTimings.domain.toFixed(2)}ms ` +
+            `clip=${cutoutTimings.clipping.toFixed(2)}ms seam=${cutoutTimings.seam.toFixed(2)}ms ` +
+            `conform=${cutoutTimings.conformance.toFixed(2)}ms skirt=${cutoutTimings.skirt.toFixed(2)}ms ` +
+            `finalize=${cutoutTimings.finalize.toFixed(2)}ms source=${cutoutCounts.sourceTriangles} ` +
+            `cut=${cutoutCounts.cutSourceTriangles} retainedPolygons=${cutoutCounts.retainedPolygons} ` +
+            `boundarySamples=${cutoutCounts.boundarySamples} seamSegments=${cutoutCounts.seamSegments} ` +
+            `retainedTriangles=${cutoutCounts.retainedTriangles} skirtTriangles=${cutoutCounts.skirtTriangles} ` +
+            `outputTriangles=${cutoutCounts.outputTriangles} foldRejected=${cutoutCounts.rejectedTerrainFolds}`
+        );
+      }
       terrainMesh = mesh;
       setInlandWaterSeamDebugMaterialMode(
         terrainMesh.material,
@@ -9805,8 +9893,10 @@ export const createThreeTest = (
     markSatelliteMinimapVisualsDirty();
   };
   const rebuildTreeImpostorAtlas = (): void => {
+    const startedAt = performance.now();
     if (!THREE_TEST_TREE_IMPOSTORS_ENABLED || !treeAssets) {
       treeImpostorAtlasState = THREE_TEST_TREE_IMPOSTORS_ENABLED ? "pending" : "disabled";
+      threePerf.treeImpostorAtlasBuildMs = 0;
       return;
     }
     treeImpostorAtlas?.dispose();
@@ -9817,6 +9907,11 @@ export const createThreeTest = (
     } catch (error) {
       treeImpostorAtlasState = "failed";
       console.warn("[threeTest] Failed to build tree impostor atlas; retaining full tree models.", error);
+    } finally {
+      threePerf.treeImpostorAtlasBuildMs = performance.now() - startedAt;
+      console.log(
+        `[threeTest:impostoratlas] ${threePerf.treeImpostorAtlasBuildMs.toFixed(2)}ms state=${treeImpostorAtlasState}`
+      );
     }
   };
   restoreTreeImpostorResources = (): void => {

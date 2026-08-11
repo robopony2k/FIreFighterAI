@@ -266,7 +266,7 @@
           </div>
         </div>
       </div>
-      <div id="mapEditorScreen" class="map-editor-screen hidden">
+      <div id="mapEditorScreen" class="map-editor-screen hidden" data-preview-step="scenario">
         <div class="map-editor-panel">
           <div class="character-header">
             <div class="badge">MAP EDITOR</div>
@@ -291,6 +291,16 @@
                       <div id="mapEditorPreviewProgressBar" class="map-editor-preview-progress-bar"></div>
                     </div>
                   </div>
+                </div>
+                <div class="map-editor-uplift-legend" aria-label="Uplift field legend">
+                  <div class="map-editor-uplift-legend-title">Archetype field</div>
+                  <div class="map-editor-uplift-legend-gradient" aria-hidden="true"></div>
+                  <div class="map-editor-uplift-legend-labels">
+                    <span>Basin tendency</span>
+                    <span>Neutral</span>
+                    <span>Uplift</span>
+                  </div>
+                  <div class="map-editor-uplift-legend-note">Coastline tint is context only; Surface adds terrain variation.</div>
                 </div>
               </div>
               <details class="map-editor-debug-drawer">
@@ -346,11 +356,11 @@
                   <span class="map-editor-step-index">1</span>
                   <span class="map-editor-step-label">Scenario</span>
                 </button>
-                <button type="button" class="run-tab map-editor-step" data-step="carving" aria-selected="false">
+                <button type="button" class="run-tab map-editor-step" data-step="uplift" aria-selected="false">
                   <span class="map-editor-step-index">2</span>
-                  <span class="map-editor-step-label">Landform</span>
+                  <span class="map-editor-step-label">Uplift</span>
                 </button>
-                <button type="button" class="run-tab map-editor-step" data-step="relief" aria-selected="false">
+                <button type="button" class="run-tab map-editor-step" data-step="surface" aria-selected="false">
                   <span class="map-editor-step-index">3</span>
                   <span class="map-editor-step-label">Surface</span>
                 </button>
@@ -465,11 +475,19 @@
                     <div id="mapEditorScenarioControls" class="run-settings-card run-settings-card--wide"></div>
                   </div>
                 </section>
-                <section class="map-editor-step-panel" data-step-panel="carving">
-                  <div id="mapEditorCarvingControls" class="run-settings"></div>
+                <section class="map-editor-step-panel" data-step-panel="uplift">
+                  <div class="run-settings">
+                    <div class="run-settings-card run-settings-card--wide">
+                      <div class="run-settings-title">Archetype Uplift Field</div>
+                      <div class="run-settings-note">
+                        This view isolates broad uplift and basin tendency on a shared neutral surface. It is an initial force field, not a preview of the final mountain silhouette.
+                      </div>
+                    </div>
+                    <div id="mapEditorUpliftControls" class="run-settings-slot"></div>
+                  </div>
                 </section>
-                <section class="map-editor-step-panel" data-step-panel="relief">
-                  <div id="mapEditorReliefControls" class="run-settings"></div>
+                <section class="map-editor-step-panel" data-step-panel="surface">
+                  <div id="mapEditorSurfaceControls" class="run-settings"></div>
                 </section>
                 <section class="map-editor-step-panel" data-step-panel="flooding">
                   <div id="mapEditorFloodingControls" class="run-settings"></div>
@@ -479,14 +497,22 @@
                     <div class="run-settings-card">
                       <div class="run-settings-title">Erosion Preview</div>
                       <div class="run-settings-note">
-                        This stage shows the final-quality directional erosion detail pass after the fast landmass is accepted. Use Compare pre-erosion to flip against the un-eroded baseline.
+                        This stage routes deterministic drainage, accumulates flow, carves bounded stream-power channels, deposits sediment, and relaxes unsafe slopes. Use Compare pre-erosion to flip against the initial terrain baseline.
                       </div>
                     </div>
                     <div id="mapEditorErosionControls" class="run-settings-slot"></div>
                   </div>
                 </section>
                 <section class="map-editor-step-panel" data-step-panel="rivers">
-                  <div id="mapEditorRiverControls" class="run-settings"></div>
+                  <div class="run-settings">
+                    <div class="run-settings-card">
+                      <div class="run-settings-title">Rivers + Lakes Preview</div>
+                      <div class="run-settings-note">
+                        This read-only stage shows the river and lake network resolved from the eroded terrain and the Hydrology intensity selected in Erosion.
+                      </div>
+                    </div>
+                    <div id="mapEditorRiverControls" class="run-settings-slot"></div>
+                  </div>
                 </section>
                 <section class="map-editor-step-panel" data-step-panel="biomes">
                   <div id="mapEditorBiomeControls" class="run-settings"></div>

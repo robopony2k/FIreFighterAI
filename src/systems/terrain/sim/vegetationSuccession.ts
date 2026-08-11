@@ -131,12 +131,11 @@ const getWaterFactor = (waterDist: number): number => {
 
 const getElevationFactor = (elevation: number): number => clamp(0.35 + (1 - elevation) * 0.65, 0.35, 1);
 
-const eventProbability = (ratePerDay: number, elapsedDays: number): number =>
-  clamp(1 - Math.exp(-Math.max(0, ratePerDay) * Math.max(0, elapsedDays)), 0, 1);
+const eventProbability = (ratePerYear: number, elapsedYears: number): number =>
+  clamp(1 - Math.exp(-Math.max(0, ratePerYear) * Math.max(0, elapsedYears)), 0, 1);
 
-const sampleGrowthEvent = (state: WorldState, x: number, y: number, elapsedDays: number, salt: number): number => {
-  const visualClock = Number.isFinite(state.growthVisualDayAccumulator) ? state.growthVisualDayAccumulator : 0;
-  const seasonBucket = Math.floor(Math.max(0, Math.max(state.careerDay, visualClock) - elapsedDays * 0.5) / 30);
+const sampleGrowthEvent = (state: WorldState, x: number, y: number, eventYear: number, salt: number): number => {
+  const seasonBucket = Math.max(0, Math.floor(eventYear));
   return hash2D(x + seasonBucket * 17, y + salt * 31, state.seed + salt * 9973);
 };
 
@@ -230,11 +229,12 @@ const syncTerrainResponsiveVegetationState = (
   tile.stemDensity = structure.stemDensity;
 };
 
-export const processVegetationSuccessionBlock = (
+export const processVegetationSuccessionYears = (
   state: WorldState,
   bounds: VegetationBlockBounds,
-  elapsedDays: number,
-  rng: RNG
+  elapsedYears: number,
+  rng: RNG,
+  eventYear = 0
 ): VegetationBlockResult => {
   const snapshots = ensureVegetationSeedSnapshots(state);
   updateSeedSnapshotsInBounds(state, snapshots.canopy, snapshots.forest, bounds);
@@ -280,10 +280,10 @@ export const processVegetationSuccessionBlock = (
           snapshots.forest[idx] = 0;
           continue;
         }
-        tile.ashAge += elapsedDays;
+        tile.ashAge += elapsedYears * 360;
         const ageFactor = clamp(tile.ashAge / ASH_RECOVERY_RAMP_DAYS, 0, 1);
-        const recoverChance = eventProbability(ASH_RECOVERY_RATE * successionEnv * (0.25 + 0.75 * ageFactor), elapsedDays);
-        if (sampleGrowthEvent(state, x, y, elapsedDays, 101) < recoverChance) {
+        const recoverChance = eventProbability(ASH_RECOVERY_RATE * successionEnv * (0.25 + 0.75 * ageFactor), elapsedYears);
+        if (sampleGrowthEvent(state, x, y, eventYear, 101) < recoverChance) {
           tile.type = "grass";
           tile.vegetationAgeYears = 0.25;
           tile.ashAge = 0;
@@ -297,8 +297,8 @@ export const processVegetationSuccessionBlock = (
         }
       } else if (tile.type === "firebreak") {
         clearVegetationState(tile);
-        const recoverChance = eventProbability(FIREBREAK_RECOVERY_RATE * successionEnv, elapsedDays);
-        if (!tile.houseDestroyed && sampleGrowthEvent(state, x, y, elapsedDays, 211) < recoverChance) {
+        const recoverChance = eventProbability(FIREBREAK_RECOVERY_RATE * successionEnv, elapsedYears);
+        if (!tile.houseDestroyed && sampleGrowthEvent(state, x, y, eventYear, 211) < recoverChance) {
           tile.type = "grass";
           tile.vegetationAgeYears = 0.2;
           tile.dominantTreeType = null;
@@ -310,8 +310,8 @@ export const processVegetationSuccessionBlock = (
         }
       } else if (tile.type === "bare") {
         clearVegetationState(tile);
-        const colonizeChance = eventProbability(BARE_COLONIZE_RATE * successionEnv * suitability, elapsedDays);
-        if (suitability >= 0.32 && sampleGrowthEvent(state, x, y, elapsedDays, 307) < colonizeChance) {
+        const colonizeChance = eventProbability(BARE_COLONIZE_RATE * successionEnv * suitability, elapsedYears);
+        if (suitability >= 0.32 && sampleGrowthEvent(state, x, y, eventYear, 307) < colonizeChance) {
           tile.type = pickOpenColonizedType(tile.moisture, tile.elevation, suitability);
           tile.vegetationAgeYears = 0.15;
           tile.dominantTreeType = null;
@@ -329,16 +329,16 @@ export const processVegetationSuccessionBlock = (
         const ageRate = tile.type === "forest" ? FOREST_AGE_RATE : OPEN_VEGETATION_AGE_RATE;
         const seedBoost = tile.type === "forest" ? 0.7 + seedPressure * 1.0 : 0.85 + seedPressure * 0.65 + suitability * 0.28;
         const maturityDrag = 0.35 + 0.65 * (1 - maturity01);
-        tile.vegetationAgeYears += elapsedDays * ageRate * successionEnv * seedBoost * maturityDrag;
+        tile.vegetationAgeYears += elapsedYears * ageRate * successionEnv * seedBoost * maturityDrag;
         syncTerrainResponsiveVegetationState(state, x, y, siteQuality);
         const maxFuel = profile.baseFuel * getVegetationFuelCapMultiplier(tile.type, tile.vegetationAgeYears);
-        const fuelGrowth = elapsedDays * FUEL_GROWTH_RATE * (0.4 + 0.6 * successionEnv);
+        const fuelGrowth = elapsedYears * FUEL_GROWTH_RATE * (0.4 + 0.6 * successionEnv);
         tile.fuel = clamp(tile.fuel + fuelGrowth, 0, maxFuel);
 
         if (!isForestType(tile.type) && tile.canopy >= CANOPY_FOREST_THRESHOLD && suitability >= 0.28) {
           const recruitPressure = Math.max(seedPressure, suitability * LONG_DISTANCE_RECRUIT_FACTOR);
-          const recruitChance = eventProbability(FOREST_RECRUIT_RATE * successionEnv * (0.25 + recruitPressure), elapsedDays);
-          if (sampleGrowthEvent(state, x, y, elapsedDays, 419) < recruitChance) {
+          const recruitChance = eventProbability(FOREST_RECRUIT_RATE * successionEnv * (0.25 + recruitPressure), elapsedYears);
+          if (sampleGrowthEvent(state, x, y, eventYear, 419) < recruitChance) {
             tile.type = "forest";
             tile.vegetationAgeYears = FOREST_RECRUIT_AGE_YEARS;
             setForestIdentity(state, x, y);

@@ -7,7 +7,7 @@ import { generateMap } from "../dist/mapgen/index.js";
 import { computeWaterLevel } from "../dist/render/threeTestTerrain.js";
 import { decodeTerrainSeedCode } from "../dist/ui/terrainSeedCode.js";
 
-const SHARE_CODE = "MAP6-115-22002R2S1W1M152B0R1G1W2R2C1X1N1J141K0Y1M1A1E181Q0K1K12161C";
+const SHARE_CODE = "MAP7-115-2202R2S1W1M152B0R1G2R2C1X1N1J140Y1M1A181Q0K1K12161C";
 const STAMPED_PROFILE = [0.024, 0.01, -0.003, -0.006];
 const PROFILE_EPSILON = 0.0002;
 const PROBES = [

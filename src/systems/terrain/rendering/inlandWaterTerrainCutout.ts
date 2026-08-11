@@ -30,6 +30,7 @@ export type InlandWaterTerrainCutoutDomain = {
   contourVertices: ArrayLike<number>;
   contourIndices: ArrayLike<number>;
   boundarySegments: InlandWaterContourSegment[];
+  boundarySegmentBuckets: Map<number, number[]>;
   triangleBuckets: Map<number, number[]>;
   bucketCols: number;
   bucketRows: number;
@@ -216,10 +217,27 @@ export const buildInlandWaterTerrainCutoutDomain = (input: {
       waterwardY: length > EPSILON ? (interiorOnLeft ? dx : -dx) / length : 0
     });
   });
+  const boundarySegmentBuckets = new Map<number, number[]>();
+  const addBoundarySegmentBucket = (x: number, y: number, segmentId: number): void => {
+    const key = y * bucketCols + x;
+    const bucket = boundarySegmentBuckets.get(key) ?? [];
+    bucket.push(segmentId);
+    boundarySegmentBuckets.set(key, bucket);
+  };
+  for (const segment of boundarySegments) {
+    const minX = Math.max(0, Math.floor(Math.min(segment.ax, segment.bx) - EPSILON));
+    const maxX = Math.min(bucketCols - 1, Math.floor(Math.max(segment.ax, segment.bx) + EPSILON));
+    const minY = Math.max(0, Math.floor(Math.min(segment.ay, segment.by) - EPSILON));
+    const maxY = Math.min(bucketRows - 1, Math.floor(Math.max(segment.ay, segment.by) + EPSILON));
+    for (let y = minY; y <= maxY; y += 1) {
+      for (let x = minX; x <= maxX; x += 1) addBoundarySegmentBucket(x, y, segment.id);
+    }
+  }
   return {
     contourVertices: input.contourVertices,
     contourIndices: input.contourIndices,
     boundarySegments,
+    boundarySegmentBuckets,
     triangleBuckets,
     bucketCols,
     bucketRows
@@ -278,9 +296,23 @@ export const findInlandWaterContourSegment = (
 ): InlandWaterContourSegment | undefined => {
   const midpointX = (ax + bx) * 0.5;
   const midpointY = (ay + by) * 0.5;
+  const minX = Math.max(0, Math.floor(Math.min(ax, bx) - tolerance));
+  const maxX = Math.min(domain.bucketCols - 1, Math.floor(Math.max(ax, bx) + tolerance));
+  const minY = Math.max(0, Math.floor(Math.min(ay, by) - tolerance));
+  const maxY = Math.min(domain.bucketRows - 1, Math.floor(Math.max(ay, by) + tolerance));
+  const candidateIds = new Set<number>();
+  for (let y = minY; y <= maxY; y += 1) {
+    for (let x = minX; x <= maxX; x += 1) {
+      for (const segmentId of domain.boundarySegmentBuckets.get(y * domain.bucketCols + x) ?? []) {
+        candidateIds.add(segmentId);
+      }
+    }
+  }
   let best: InlandWaterContourSegment | undefined;
   let bestError = Number.POSITIVE_INFINITY;
-  for (const segment of domain.boundarySegments) {
+  for (const segmentId of Array.from(candidateIds).sort((left, right) => left - right)) {
+    const segment = domain.boundarySegments[segmentId];
+    if (!segment) continue;
     const dx = segment.bx - segment.ax;
     const dy = segment.by - segment.ay;
     const lengthSq = dx * dx + dy * dy;

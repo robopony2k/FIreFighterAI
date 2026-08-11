@@ -130,7 +130,8 @@ export const BiomeClassificationStage: PipelineStage = {
                 forestCandidate: (forestMask?.[idx] ?? 0) > 0,
                 localContext,
                 seededNoiseOffset,
-                slopeAngleDeg
+                slopeAngleDeg,
+                rockExposure: ctx.rockExposureMap?.[idx] ?? 0
               })
             : classifyTile({
                 elevation,
@@ -144,7 +145,8 @@ export const BiomeClassificationStage: PipelineStage = {
                 highlandForestElevation: settings.highlandForestElevation,
                 localContext,
                 seededNoiseOffset,
-                slopeAngleDeg
+                slopeAngleDeg,
+                rockExposure: ctx.rockExposureMap?.[idx] ?? 0
               }));
         nextTypes[idx] = nextType;
 

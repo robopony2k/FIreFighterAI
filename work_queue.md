@@ -1,3 +1,327 @@
+TSK-0192: Restore campaign-scale forest succession and canopy maturation
+
+Type: feature
+
+Why: Fuel-only annual growth left the forest footprint and tree structure visually static, so successful early suppression did not build the dense late-campaign canopy and catastrophic fuel exposure that the campaign is intended to create.
+
+Done when:
+- [x] One deterministic annual linear pass snapshots woody occupancy and applies ash recovery, grass/floodplain-to-shrub or direct-forest establishment, and mature-shrub-to-forest succession without within-year cascades.
+- [x] Forest and shrub age, canopy, stems, and age-scaled fuel capacity mature annually on suitable unprotected land, while existing-save fuel is retained and never reduced to a lower recalculated cap.
+- [x] A deterministic no-fire fixture shows visible year-8 woody expansion, at least 85% forest coverage and 80% mature forest by year 20, while periodic burns reduce final forest coverage or combustible forest fuel by at least 25%.
+- [x] Forest rendering retains deterministic 20% sapling, 35% mid-sized, and 45% mature cohorts, prioritizes mature high-canopy forest under the existing 18,000-instance budget, and keeps shrub visually subordinate.
+- [x] Non-fire vegetation revisions rebuild rendered tree instances so annual recruitment and canopy growth appear in the 3D world instead of being acknowledged by a no-op fast path.
+- [x] Annual telemetry distinguishes aged, shrub-expanded, forest-expanded, recovered, fuel-changed, and visual-sync work; build plus focused growth, vegetation, renderer, grounding, and runtime-performance checks pass.
+
+Touchpoints: `src/systems/terrain/sim/annualVegetationGrowth.ts`, `src/systems/terrain/sim/annualVegetationFuel.ts`, `src/systems/terrain/sim/annualVegetationSuccessionRules.ts`, `src/systems/terrain/rendering/vegetation/treePlacementPlan.ts`, `src/render/threeTestTerrain.ts`, `src/sim/index.ts`, `src/core/state.ts`, `src/app/gameSessionRuntime.ts`, `scripts/growth-regression.mjs`, `scripts/render-performance-regression.mjs`, `docs/GAME_DESIGN_REFERENCE.md`, `docs/deprecations.md`
+
+Constraints: keep runtime growth to one O(n) annual event, preserve deterministic saves and map-generation pre-growth, add no per-tree simulation state or risk UI, and do not raise the large-map tree-instance budget.
+
+Notes: The deterministic 31x31 no-fire fixture grows from 125 to 340 forest tiles by year 8 and reaches 718/841 viable forest tiles by year 20; 653 are mature. The paired periodic-burn fixture ends with 25.6% less combustible forest fuel. Supplied year-1/year-14 captures exposed that the vegetation-only fast path reused stale tree instances even though authoritative growth passed; non-fire vegetation sync now forces the instance rebuild while active-fire batching remains lightweight. A refreshed post-fix capture is still required for live visual acceptance.
+
+Status: done
+TSK-0191: Preserve refined terrain colour during spring vegetation refresh
+
+Type: bug
+
+Why: The first annual growth refresh whitened refined terrain vertex colours while partially rewriting the reused tile texture, leaving pale tile-aligned regions until a later full rebuild.
+
+Done when:
+- [x] Refined fast terrain updates recompute authoritative surface colours instead of replacing vertex colours with white.
+- [x] Refined updates keep the tile texture in mask mode, including partial vegetation/type refreshes.
+- [x] Renderer, growth, TypeScript, and diff checks pass against the supplied first-spring artifact.
+
+Touchpoints: `src/render/threeTest.ts`, `scripts/render-performance-regression.mjs`
+
+Constraints: preserve the legacy faceted colour path, partial texture reuse, seasonal shader uniforms, and terrain geometry reuse.
+
+Notes: Fixed from the supplied static screenshot and source tracing. Live transition verification remains pending because this VS Code Codex surface cannot inspect localhost.
+
+Status: done
+
+TSK-0190: Replace continuous vegetation succession with annual fuel growth
+
+Type: refactor
+
+Why: Continuous block succession repeatedly scanned the campaign map and invalidated vegetation rendering while mature forests showed little change and their fuel quickly remained capped.
+
+Done when:
+- [x] Growth season runs one deterministic annual linear pass instead of per-tick block catch-up work.
+- [x] New-campaign forests begin at 60% of moisture-adjusted carrying capacity and approach approximately 95% after 12 untreated annual events without changing mature tree visuals.
+- [x] Disturbed ground recovers annually and sparse deterministic forest recruitment is suitability-gated and limited to the pre-event forest edge.
+- [x] Fuel-only changes update authoritative fuel arrays without terrain or vegetation revisions; visual type changes produce one batched revision.
+- [x] Runtime telemetry reports annual scan, fuel, recruitment, recovery, and visual-sync work; focused growth, vegetation, runtime-performance, and build checks pass.
+
+Touchpoints: `src/systems/terrain/sim/`, `src/sim/index.ts`, `src/core/state.ts`, `src/app/gameSessionRuntime.ts`, `scripts/growth-regression.mjs`
+
+Constraints: preserve deterministic seeds and existing-save fuel values, keep mapgen pre-growth separate, and do not reintroduce runtime neighborhood scans outside the annual event.
+
+Notes: Implemented from static and automated evidence. Live visual acceptance remains pending because this VS Code Codex surface cannot inspect localhost.
+
+Status: done
+
+TSK-0189: Increase inland-water scale and river readability
+
+Type: bug
+
+Why: The routed hydrology follow-up became slow and produced fragmented aqueduct-like channels through cumulative surface stepping, lake promotion, overflow routing, and iterative cleanup.
+
+Done when:
+- [x] River generation directly thresholds erosion flow accumulation and derives shallow water surfaces from local eroded elevation without cumulative stepping, route repair, or authoritative width expansion.
+- [x] Lake generation directly selects connected depression-depth cells from erosion's existing priority flood without a second solve, candidate rejection model, footprint promotion, overflow search, or iterative cleanup.
+- [x] The active Rivers/Lakes stage is linear and materially faster on a 512² maximum-Hydrology fixture while retaining substantial rivers and inland lake area.
+- [x] TypeScript/build and a small direct-rule smoke fixture pass without using broad topology or renderer regressions as the implementation gate.
+- [ ] A refreshed Rivers/Lakes capture confirms the supplied aqueduct walls and fragmented water surfaces are gone.
+
+Touchpoints: `src/systems/terrain/sim/drainageErosion.ts`, `src/systems/terrain/sim/depressionLakeField.ts`, `src/systems/terrain/sim/flowAccumulationRiverNetwork.ts`, `src/mapgen/pipeline/MapGenContext.ts`, `src/mapgen/stages/ErosionStage.ts`, `src/mapgen/stages/RiverStage.ts`, `scripts/terrain-hydrology-regression.mjs`, `docs/GAME_DESIGN_REFERENCE.md`, `docs/deprecations.md`
+
+Constraints: keep hydrology static, deterministic, shallow, and particle-free; add no new editor control or MAP7 field; do not reintroduce routed overflow, validation repair, a second priority flood, or cumulative river-surface descent.
+
+Notes: The supplied 100% Hydrology captures are valid evidence of both failures: the earlier network was visually faint, while the attempted enlargement became slow and produced deep straight-sided fragments. The final replacement reduces the 512² Rivers/Lakes stage from about 1,952 ms to 148 ms on seed 1337, with 4,105 river cells, eight depression lakes, 728 lake cells, a `0.00045` maximum river-bed depth, and no cumulative surface stepping. Live post-change appearance remains unverified in this VS Code surface.
+
+Status: in-progress
+
+TSK-0188: Connect drainage accumulation to viable rivers and lakes
+
+Type: bug
+
+Why: Erosion produced deterministic receivers and flow accumulation, but the River stage ignored them and only emitted lake-overflow channels. Post-erosion basins were rejected by obsolete area, depth, elevation, and score assumptions, leaving all current archetypes without visible rivers or lakes across common settings.
+
+Done when:
+- [x] Flow accumulation creates deterministic, ocean-bound rivers independently of lake acceptance, with Hydrology intensity and river budget changing channel extent monotonically.
+- [x] Accepted lakes intercept river flow and resume it from spill outlets without overlapping river/lake ownership or breaking water surfaces.
+- [x] Lake acceptance uses visible spill-contour area and normalized terrain-compatible depth/elevation thresholds, producing credible lake opportunities without accepting arbitrary single-cell puddles.
+- [x] Zero hydrology intensity produces no direct accumulation rivers, while representative default/high-intensity seeds produce nonzero connected channels and bounded lake coverage.
+- [x] TypeScript, focused hydrology, morphology, terrain-water, shoreline, mapgen, road, settlement, vegetation, renderer, and queue validation pass; refreshed captures remain the appearance gate.
+
+Touchpoints: `src/systems/terrain/sim/flowAccumulationRiverNetwork.ts`, `src/systems/terrain/sim/lakeFootprintPromotion.ts`, `src/mapgen/pipeline/MapGenContext.ts`, `src/mapgen/stages/ErosionStage.ts`, `src/mapgen/stages/RiverStage.ts`, `src/mapgen/terrainProfile.ts`, `src/systems/terrain/sim/basinLakeHydrology.ts`, `src/core/config.ts`, `src/render/terrain/water/riverMeshData.ts`, `scripts/terrain-hydrology-regression.mjs`, `scripts/mapgen-regression.mjs`, `docs/GAME_DESIGN_REFERENCE.md`, `docs/deprecations.md`
+
+Constraints: keep generation static, deterministic, bounded, and particle-free; retain current editor controls and MAP7 schema; preserve authoritative water ownership and renderer seam contracts.
+
+Notes: Source diagnosis found erosion receivers and accumulation were diagnostic-only while the active River stage depended on accepted-lake overflow. Direct channels now threshold the shared accumulation field, carry to ocean, and convert diagonal receiver edges into deterministic orthogonal water cells. Accepted priority-flood lakes intercept those channels; credible undersized spill contours may expand only to the configured readable minimum within a bounded shore tolerance, and basin tendency lowers the viable depth floor. On the 20-seed Massif sample, default lake-bearing maps improved from 13/20 to 16/20, maximum basin tendency raised total accepted lakes from 25 to 34, and maximum river intensity no longer reduced lake-bearing seeds. The refreshed medium/massive mapgen baseline has a 100% lake hit rate, zero detached river components, orthogonal connectivity of 0.995-1.0, and connected roads/towns. TypeScript/build, focused hydrology, morphology, fast preview, randomizer, shoreline authority, coastline, grounding, terrain-water, mapgen baseline, and queue validation pass. Live localhost appearance remains unverified in this VS Code surface, so refreshed overhead and oblique captures remain the visual approval gate.
+
+Status: done
+
+TSK-0187: Simplify island shaping and remove conflicting terrain controls
+
+Type: bug
+
+Why: The late-gated square-bump blend kept most terrain on a broad plateau before dropping through sea level in a narrow coastal wall, while duplicate centre, edge, and sea-level controls obscured archetype identity and made preview and production calibration disagree.
+
+Done when:
+- [x] Surface applies a fixed 0.5 square-bump conversion to low-frequency terrain, adds fine detail afterward, and retains exact perimeter ocean without a late coastal slope spike.
+- [x] Named archetypes visibly influence broad terrain and coastline plans while shared seeded noise remains the primary local surface signal and None stays neutral.
+- [x] Border-water falloff, interior land floor, sea-level bias, legacy water level, skip-carving compatibility state, unused edge-water bias, and their dead coastline path are removed.
+- [x] Compact MAP7 share codes contain only active fields and intentionally reject MAP6 and earlier formats; saved scenario sanitization ignores removed properties.
+- [x] TypeScript, fast-preview, terrain profile/randomizer, terrain-water, morphology, hydrology, coastline, grounding, settlement, road, vegetation, renderer, performance, and supported mapgen regressions pass; post-change archetype captures remain the visual approval gate.
+
+Touchpoints: `src/systems/terrain/sim/islandBoundaryShaping.ts`, `src/systems/terrain/sim/noiseLandmass.ts`, `src/mapgen/terrainProfile.ts`, `src/mapgen/settings.ts`, `src/ui/terrainSeedCode.ts`, `src/ui/terrain-schema.ts`, `scripts/fast-terrain-preview-regression.mjs`, `docs/GAME_DESIGN_REFERENCE.md`, `docs/deprecations.md`
+
+Constraints: preserve deterministic generation, static erosion, active advanced archetype modifiers, saved-scenario sanitization, and Surface/Sea Level elevation identity; add no player-facing erosion control or runtime work.
+
+Notes: Surface now converts its macro field continuously with the fixed square-bump blend, applies one bounded archetype coastline-plan offset, and adds shared seeded fine detail after conversion with only the outer-six-percent fade. Sea Level classifies the unchanged Surface exclusively from Land mass; connected-ocean expansion no longer admits above-threshold terrain. Removed recipe/settings/UI fields do not survive scenario sanitization, and `MAP7` rejects the former format. TypeScript/build, deterministic fast-preview hashes, boundary/profile fixtures, randomizer/share-code, morphology, terrain-water, hydrology, shoreline authority, coastline, grounding, settlement, road, vegetation, renderer/performance, and supported mapgen baseline generation pass. Supplied overhead and side-profile captures remain pre-change evidence; this VS Code surface cannot perform live localhost inspection, so refreshed fixed-seed archetype captures remain the visual approval gate.
+
+Status: done
+
+TSK-0186: Replace authored mountains with uplift-driven deterministic erosion
+
+Type: feature
+
+Why: Long Spine and authored crag additions directly constructed persistent final ridges that the previous `0.0014` erosion refinement could not materially reshape.
+
+Done when:
+- [x] Every named terrain archetype supplies a broad deterministic uplift field while preserving coastline envelopes, seeded controls, and large-scale identity.
+- [x] Stable priority-flood drainage, unit runoff accumulation, bounded stream-power incision, routed deposition, two talus passes, and a 60-degree safety cap run once during map generation without particles.
+- [x] Final morphology publishes continuous flow, wear, deposition, and rock exposure diagnostics; biome scoring and mountain material consume rock exposure without authored crag authority.
+- [x] Crag uplift/footprint state, shader fields, gameplay exclusions, diagnostics, and obsolete coarse/iterative hydraulic paths are removed while public terrain recipes and share-code schemas remain unchanged.
+- [x] Pure morphology fixtures, TypeScript/build, fast-preview hashes, terrain evaluation, and mapgen smoke validation pass; representative strategic and grazing-angle approval remains visual-only follow-up.
+
+Touchpoints: `src/systems/terrain/sim/archetypeUpliftField.ts`, `src/systems/terrain/sim/drainageErosion.ts`, `src/systems/terrain/sim/terrainMorphology.ts`, `src/systems/terrain/sim/noiseLandmass.ts`, `src/mapgen/stages/`, `src/mapgen/biome/BiomeClassification.ts`, `src/render/terrain/textures/`, `src/ui/map-editor.ts`, `scripts/terrain-morphology-regression.mjs`, `docs/GAME_DESIGN_REFERENCE.md`, `docs/deprecations.md`
+
+Constraints: preserve player-facing terrain controls and persistence schemas; keep generation deterministic and static; use no particle hydraulic erosion; retain hard classification only where gameplay topology is genuinely binary.
+
+Notes: Automated fixtures cover replay, drainage acyclicity, accumulation, sediment accounting, depression preservation, bounded incision/deposition, footslope deposition, archetype identity, continuous morphology, and the 60-degree cap. The follow-up editor alignment renames Landform/Surface internals to Uplift/Surface, moves existing controls to their first meaningful pipeline stage, makes Rivers/Lakes observational, preserves the erosion baseline comparison and terrain-field overlays, and hides the ignored `skipCarving` control without changing its share-code slot. Supplied Uplift-step captures first showed that generic octave elevation visually obscured archetype identity, so Uplift gained an isolated field view, diverging legend, subdued coastline context, and near-overhead camera. Later Uplift/Surface captures exposed the opposite failure: excessive archetype authority and radial, then Chebyshev, edge constraints made the initial surface read as a circle or square. Surface is now noise-led, with archetype uplift retained as a bounded low-frequency bias; a noisy nonlinear square-bump constraint falls gently inland and accelerates at the exact perimeter. Surface and Sea Level share elevation, and fast-preview regression verifies deterministic hashes, noise-over-uplift interior correlation, bounded extreme Long Spine identity, nonuniform coastline contours, and sea-level-only water classification. Boundary randomization passes from 64-256 tiles; medium multi-seed, targeted massive, and multi-seed colossal validation retain coastline, lake, settlement, road, renderer, and vegetation viability. The supplied captures are valid pre-change visual evidence, but live post-change approval was not performed because this VS Code Codex surface cannot inspect localhost.
+
+Status: done
+
+TSK-0185: Localise crag faces and vegetated breaks
+
+Type: polish
+
+Why: The curved plan-view pass removed straight walls and repeated teeth, but supplied visual evidence still showed broad mesas and continuous cliff bands with similarly high faces, smooth grassy backs, and clean rock/grass boundaries.
+
+Done when:
+- [x] Long escarpment runs are replaced by one to four deterministic mass-owned face patches, each 2.5-6 tiles long, collectively covering no more than 30% of the formation and varying substantially in height and side.
+- [x] Face patches occupy bounded cross-slope windows so major exposures and subordinate upper/lower ledges may terminate below the crown or above the base.
+- [x] One or two compact erosion ramps interrupt local face, ledge, crown-detail, and footprint exposure while retaining the broad authoritative mountain foundation.
+- [x] Crown slabs use independent crown and face presence, omit or lower roughly 36% of crown intervals, and permit no more than two consecutive strong crown slabs.
+- [x] The broad cross-profile is rounded from its centre, volume-compensated without increasing maximum uplift, and rocky/blocked footprints require local geometric exposure rather than foundation uplift alone.
+- [x] TypeScript/build, a 96-seed bounded face-plan sweep, a deterministic curved-ridge fixture, repeated supplied-share elevation generation, non-crag archetype gating, and final authority/exclusion smoke pass; full regression suites remain skipped as requested.
+- [ ] A supplied overhead and grazing capture confirms several related outcrops, vegetated ramps, non-horizontal rock boundaries, rounded intervening crowns, and no renewed teeth, mesas, continuous bands, or isolated spikes.
+
+Touchpoints: `src/systems/terrain/sim/cragFaceMorphology.ts`, `src/systems/terrain/sim/cragFormationMorphology.ts`, `src/systems/terrain/sim/craggyRidgeRelief.ts`, `docs/GAME_DESIGN_REFERENCE.md`, `work_queue.md`
+
+Constraints: preserve formation selection, curved centrelines, mass positions, peak count, public state, hydrology order, downstream pathing/road/fire authority, renderer architecture, and the `0.082` hard uplift cap; add no global noise, texture, draw call, shader displacement, or fragment-depth path.
+
+Notes: On share code `MAP6-35R80P-21002J2S161P1K1G1E0U1W2S142A1K2G1W1K0Y1M1A1E181Q0K1K12161C`, the five strong sections remain sized 143, 128, 91, 27, and 10 tiles. Integrated uplift is 9.999 versus 10.755 previously (93.0%), maximum uplift decreases from 0.06550 to 0.06540, and localised authority decreases from 45 to 16 blocked tiles and from 383 to 70 low-fuel tiles. Final generation retains zero water, road, bridge, structure, or base conflicts. Evidence is automated/static because this VS Code Codex surface cannot inspect localhost.
+
+Status: done
+
+TSK-0184: Erode crag plan-view morphology
+
+Type: polish
+
+Why: The latest overhead capture showed that expanded authoritative crags could read as long straight walls: their analytic axes were linear, width stayed nearly constant, one steep side persisted along the run, and both ends stopped abruptly.
+
+Done when:
+- [x] Each formation follows a deterministic 5-11-node centreline traced through the shared local ridge-orientation field, with bounded adjacent turns and total drift rather than a single analytic axis.
+- [x] Two to four irregular outcrop masses vary width and lateral bias along the line; narrower necks, 1.5-4-tile erosion gaps, and 18-25% tapered ends break up the continuous strip.
+- [x] Deterministic 2.8-6.5-tile slab intervals vary crown width, offset, height, and fracture gaps, with approximately one interval in five lowered rather than using regular sinusoidal waviness.
+- [x] Optional short forks and asymmetric bulges remain subordinate, while one to three short mass-owned escarpment runs vary side and are interrupted by shoulders and eroded gaps.
+- [x] A wider, lower foundation envelope preserves the existing broad hill beneath concentrated rocky masses; the existing formation selection, `0.082` total uplift cap, authority bits, archetype gates, and downstream reconciliation remain unchanged.
+- [x] TypeScript/build, repeated exact-seed elevation output, a synthetic ridge morphology fixture, final supplied-share authority generation, and deterministic non-crag gating pass; full regression suites remain skipped as requested.
+- [ ] A supplied overhead capture confirms that the same formations read as eroded bedrock masses rather than straight walls, embankments, regular waves, or isolated spikes.
+
+Touchpoints: `src/systems/terrain/sim/cragFormationMorphology.ts`, `src/systems/terrain/sim/craggyRidgeRelief.ts`, `docs/GAME_DESIGN_REFERENCE.md`, `work_queue.md`
+
+Constraints: preserve current crag frequency, authoritative elevation and footprint semantics, hydrology order, road/pathing/fire consumers, public schemas, renderer behavior, and performance class; do not add high-frequency noise or increase peak height.
+
+Notes: On share code `MAP6-35R80P-21002J2S161P1K1G1E0U1W2S142A1K2G1W1K0Y1M1A1E181Q0K1K12161C`, five strong connected rocky sections are produced from the selected formations, sized 149, 132, 92, 28, and 10 tiles. Repeated elevation output is byte-identical. Final output contains 45 blocked and 383 low-fuel tiles, reaches 0.06550 maximum uplift, and has zero water, road, bridge, structure, or base conflicts. Evidence is automated/static because this VS Code Codex surface cannot inspect localhost.
+
+Status: done
+
+TSK-0183: Expand crags across prominent peaks
+
+Type: polish
+
+Why: The approved authoritative crag reads clearly, but conservative one-to-three formation selection can leave most of a colossal massif's highest or steepest peaks smooth and visually unrelated.
+
+Done when:
+- [x] The strongest legacy ridge candidate remains the primary formation while additional candidates are limited to local height/ridge prominence maxima or local steepness maxima with moderate ridge support.
+- [x] Formation capacity scales from one on small maps to six on colossal maps; colossal Massifs request four to six formations and Long Spines request three to six, with deterministic separation between anchors.
+- [x] Later-ranked formations use progressively smaller length, width, and amplitude so secondary peaks receive crag accents without every peak becoming a dominant obstacle.
+- [x] The supplied colossal share code increases from one to four separated strong crag regions, preserves the approved reference formation, stays below the existing `0.082` uplift cap, and retains zero final water/infrastructure conflicts.
+- [x] TypeScript/build, repeated exact-seed elevation generation, final authority smoke, and a deterministic three-formation Long Spine fixture pass; full regression suites remain skipped as requested.
+- [ ] A supplied strategic capture confirms the additional peaks read as distributed crags rather than one merged rocky belt or excessive obstruction.
+
+Touchpoints: `src/systems/terrain/sim/craggyRidgeRelief.ts`, `docs/GAME_DESIGN_REFERENCE.md`, `work_queue.md`
+
+Constraints: preserve the original strongest crag, per-formation uplift and footprint thresholds, Massif/Long Spine archetype gate, water and infrastructure reconciliation, share/save schemas, and renderer behavior; additional density must come from peak selection and map-scaled count rather than higher individual formations.
+
+Notes: On share code `MAP6-35R80P-21002J2S161P1K1G1E0U1W2S142A1K2G1W1K0Y1M1A1E181Q0K1K12161C`, strong connected regions increased from one to four. Final output contains 185 blocked and 762 low-fuel crag tiles, maximum uplift 0.06826, and zero water/infrastructure conflicts. Cells 106,115 and 116,118 retain their approved blocked uplift values while cell 125,114 remains unfootprinted. Evidence is automated/static because this VS Code Codex surface cannot inspect localhost.
+
+Status: done
+
+TSK-0182: Polish authoritative crag readability
+
+Type: polish
+
+Why: The authoritative fractured ridge finally reads as terrain geometry, but supplied captures show a repetitive sawtooth crown, a uniform warm stone patch, weak ledge recesses, and an abrupt material edge.
+
+Done when:
+- [x] Crown segmentation uses deterministic phase warping, varied fracture widths, correlated lateral offsets, broader crown-width variation, and approximately one lowered segment in five without raising the authority cap.
+- [x] Strong steep faces receive one or two broken shoulder ribs at 25–45% of crown relief, remain low-fuel outside existing blocked-crown rules, and cannot create a continuous barrier.
+- [x] Final-mode material uses authority-gated pale limestone, restrained ochre seams, bounded crown/face value separation, minimum-albedo recesses, a narrow talus apron, distance-filtered fine normals, and no parallax invocation.
+- [x] TypeScript/build and exact-share-code smoke checks pass; repeated elevation-stage generation is byte-identical and final blocked/low-fuel coverage remains inside the agreed 10% increase ceiling.
+- [ ] A supplied final/mask capture confirms the less repetitive crown, readable shoulder depth, integrated stone edge, and absence of black or green debug leakage.
+
+Touchpoints: `src/systems/terrain/sim/craggyRidgeRelief.ts`, `src/systems/terrain/rendering/crags/cragRockShader.ts`, `docs/GAME_DESIGN_REFERENCE.md`, `docs/deprecations.md`, `work_queue.md`
+
+Constraints: preserve the `0.082` total uplift cap, existing blocked-footprint threshold, deterministic generation, share/save schemas, terrain draw count, and renderer-to-simulation dependency direction; do not restore parallax as depth, independent crag geometry, fragment-depth writes, or terrain-wide shadow casting.
+
+Notes: Implemented from supplied screenshot evidence because this VS Code Codex surface cannot inspect localhost. On share code `MAP6-35R80P-21002J2S161P1K1G1E0U1W2S142A1K2G1W1K0Y1M1A1E181Q0K1K12161C`, blocked tiles changed from 35 to 27, low-fuel tiles remained 199, maximum uplift changed from 0.06526 to 0.05771, cells 106,115 and 116,118 remain blocked, and cell 125,114 remains unfootprinted. Full regression suites were skipped at the user's request.
+
+Status: done
+
+TSK-0181: Escalate crags to authoritative fractured ridge formations
+
+Type: feature
+
+Why: Supplied `surface-v1` evidence proved that the continuous render-only mesh was active but its 0.62-unit authority-safe rise remained visually negligible at the strategic camera. Convincing crowns and scarps require elevation, movement, placement, grounding, and fuel to agree on the same larger formations.
+
+Done when:
+- [x] Massif and Long Spine crag plans add deterministic segmented crowns, transverse fracture gaps, asymmetric ledges, and 0.022–0.048 normalized local relief to the existing broad authoritative uplift before hydrology.
+- [x] A deterministic two-bit `tileCragFootprint` marks blocked crown/face tiles and a wider low-fuel rocky footprint without changing share-code or save schemas.
+- [x] Unit pathing, road routing/carving, settlement terrain fit, house growth, base/tower placement, and firebreak construction reject blocked footprints.
+- [x] Final biome/fuel reconciliation removes water or infrastructure conflicts, forces accepted crag footprint tiles to rocky zero-fuel terrain, and clears vegetation.
+- [x] The normal terrain mesh renders authoritative relief directly, preserves crag peaks from spike suppression, keeps crag triangles faceted, and retains the ridge-oriented rock field only for material/debug use.
+- [x] Hover diagnostics report `pipeline=authority-v1` and distinguish blocked, low-fuel, and unfootprinted uplift.
+- [ ] A supplied capture of the reported share code confirms readable fractured crowns and face depth at strategic and grazing views without water, road, town, vegetation, or grounding conflicts.
+
+Touchpoints: `src/systems/terrain/sim/craggyRidgeRelief.ts`, `src/systems/terrain/sim/cragFootprintAuthority.ts`, `src/systems/terrain/constants/cragFootprint.ts`, `src/mapgen/`, `src/core/state.ts`, `src/sim/pathing.ts`, `src/systems/roads/`, `src/systems/settlements/`, `src/systems/fire/`, `src/render/threeTestTerrain.ts`, `src/render/threeTest.ts`, `docs/GAME_DESIGN_REFERENCE.md`
+
+Constraints: preserve deterministic generation and existing share codes; hydrology and the main terrain mesh consume the modified elevation; rendering never creates independent collision geometry; blocked bands remain broken so they do not seal an entire massif.
+
+Notes: Implemented from supplied screenshot evidence; this Codex surface cannot perform live browser validation. A targeted elevation-stage smoke generation of the supplied share code produced 35 blocked cells, 199 low-fuel crag cells, maximum uplift 0.0653 at 106,116, and a 0.0464 maximum cardinal elevation step (about 4.18 world units at height scale 90). Cells 106,115 and 116,118 are blocked crag footprint; non-crag cell 125,114 remains zero. TypeScript/build checks pass; regression suites remain skipped at the user's request.
+
+Status: done
+
+TSK-0180: [Superseded] Replace painted crags with a continuous microterrain surface
+
+Type: feature
+
+Why: The emitted fragment-parallax pass read as pale contour painting. Later identical captures were traced to an unbuilt `dist` tree rather than the revised renderer, so the replacement also needs an explicit version marker and a delivery check alongside enough local topology for geometric depth.
+
+Done when:
+- [x] Strong valid crag samples are segmented into deterministic connected regions and the strongest three feed one batched terrain-owned surface mesh.
+- [x] Selected tiles receive adaptive local subdivision, terrain-conforming bases, deterministic ridge-oriented block planes, recessed fractures, stepped ledges, flat facet normals, restrained stone colors, shadow casting, and bounded silhouette relief.
+- [x] Geometry remains within one draw call, 24,000 triangles, three subdivisions per tile, three regions, and 0.62 tile widths of rise.
+- [x] Final mode no longer paints or displaces the coarse base terrain; `off` hides the surface while `mask`, `height`, and `normal` retain field diagnostics.
+- [x] Water, town, road, bridge, structure, firebreak, planned-lot, and boundary validity still select the surface, and a runtime validity change conservatively hides stale geometry until rebuild.
+- [ ] A supplied strategic and grazing-angle capture confirms visible geometric facets, ledges, depth, shadows, and silhouette breakup without a pale decal boundary, floating edges, infrastructure overlap, or repeated asset piles.
+
+Touchpoints: `src/systems/terrain/rendering/crags/cragSurfaceGeometry.ts`, `src/systems/terrain/rendering/crags/cragRockField.ts`, `src/render/terrain/textures/mountainRockMaterial.ts`, `src/render/threeTestTerrain.ts`, `src/render/threeTest.ts`, `src/app/gameSessionRuntime.ts`, `scripts/craggy-ridge-regression.mjs`, `scripts/render-performance-regression.mjs`, `docs/GAME_DESIGN_REFERENCE.md`
+
+Constraints: keep CPU elevation authoritative for water, picking, grounding, movement, fire, saves, and share codes; keep relief below the render-only gameplay-obstacle envelope; do not restore instanced rock assets, final-mode painted parallax, or coarse base-mesh displacement.
+
+Notes: Superseded by TSK-0181 after a valid `surface-v1` capture showed 3,040 relief triangles but no strategic-camera crag form. The 0.62-unit render-only envelope was insufficient; the replacement makes the larger relief authoritative.
+
+Status: done
+
+TSK-0179: [Superseded] Replace instanced crags with ridge-oriented relief shading
+
+Type: feature
+
+Why: Captures of both low-poly geometry and the first fragment-only relief pass failed: geometry read as disconnected black protrusions, while parallax-only strata read as a flat painted patch. Strong authoritative crag ridges need continuous angular surface structure and bounded physical relief without reopening water-seam, grounding, or gameplay-authority failures.
+
+Done when:
+- [x] One deterministic terrain-sample RGBA8 field encodes normalized `tileCragUplift`, shared ridge tangent, and validity after town, road, bridge, water, structure, firebreak, planned-lot, and boundary exclusions.
+- [x] The terrain mountain-rock shader renders original ridge-oriented angular blocks, stepped strata, fractured planes, crevices, restrained stone/mineral color, stronger facet normals, roughness, and bounded 12/8/6-step parallax with normal-only distance fallback.
+- [x] Strong valid interior samples receive static vertex relief capped at 0.28 tile widths, while the shared validity field fades displacement to zero before water cutouts, boundaries, roads, towns, structures, firebreaks, bridges, and planned lots.
+- [x] Instanced crag planning, primitive geometry, tree suppression, scene objects, LOD, shadow work, geometry telemetry, and dynamic cluster hiding are removed; crag shading adds only one texture and no terrain draw calls.
+- [x] `final`, `off`, `mask`, `height`, and `normal` developer modes, cell diagnostics, field telemetry, dynamic exclusion refresh, fast-reuse compatibility, and texture disposal are wired through the existing terrain renderer controls.
+- [x] Determinism, ridge encoding, stride retention, exclusion boundaries, texture refresh/disposal, shader iteration and vertex-relief limits, no fragment-depth/time input, TypeScript, and authoritative crag elevation behavior pass automated checks.
+- [ ] Supplied share-code captures confirm continuous readable rock at cell 106,115, no crag treatment at cell 125,114, no black artifacts or projection swimming, and no more than 2 ms median / 3 ms p95 shader-on cost on the colossal map.
+
+Touchpoints: `src/systems/terrain/rendering/crags/`, `src/systems/terrain/utils/ridgeOrientation.ts`, `src/render/terrain/textures/mountainRockMaterial.ts`, `src/render/threeTestTerrain.ts`, `src/render/threeTest.ts`, `src/app/gameSessionRuntime.ts`, `scripts/craggy-ridge-regression.mjs`, `docs/GAME_DESIGN_REFERENCE.md`
+
+Constraints: keep `tileCragUplift` and CPU terrain authoritative for water, picking, grounding, movement, fire, saves, and share codes; cap render-only crag displacement below the gameplay-obstacle envelope and fade it to zero before every excluded domain. Do not copy Shadertoy source, write fragment depth, add time-dependent inputs, or add draw calls.
+
+Notes: Superseded by TSK-0180. The Dry Rocky Gorge link was treated as visual direction only and the material code was original. The first emitted parallax pass read as a painted contour patch; the coarse-base-vertex revision was never emitted into the served `dist` tree and was therefore not visually evaluated. Final-mode presentation moved to a locally subdivided continuous microterrain surface with an explicit runtime version marker.
+
+Status: done
+
+TSK-0178: [Superseded] Add deterministic render geometry to strong crag regions
+
+Type: feature
+
+Why: Authoritative crag uplift supplied broad ridge forms, but strategic terrain still read as smooth rounded ground because fragment-stage rock detail could not create ledges, facet shadows, or broken silhouettes.
+
+Done when:
+- [x] Strong dry `tileCragUplift` regions deterministically select conservative crown, broken-ridge, shoulder, or exposed-face clusters using the same mountain-rock diagnostics and shared ridge orientation.
+- [x] Reusable flat-faceted slabs, ledges, buttresses, and short shards are independently grounded, embedded, instanced in terrain chunks, shadow-capable, and bounded by fixed cluster, instance, triangle, and draw-call budgets.
+- [x] Town, road, water, structure, boundary, slope, and runtime road/structure revision exclusions prevent conflicting placement without changing elevation, movement, fire, saves, or share codes.
+- [x] Overlapping render trees are suppressed while authoritative vegetation and fuel remain unchanged; hover and performance diagnostics report cluster provenance, geometry, visibility, and LOD state.
+- [x] Determinism, seed variation, ridge alignment, primitive complexity, exclusions, grounding depth, hard budgets, LOD hysteresis, dynamic hiding, TypeScript, and existing crag elevation behavior pass automated regression.
+- [ ] Strategic-camera appearance, grazing-angle grounding, shadow readability, repetition, and camera-motion LOD are approved from a supported Browser surface or supplied captures.
+
+Touchpoints: `src/systems/terrain/rendering/crags/`, `src/systems/terrain/utils/ridgeOrientation.ts`, `src/systems/terrain/sim/craggyRidgeRelief.ts`, `src/render/threeTestTerrain.ts`, `src/render/threeTest.ts`, `src/app/gameSessionRuntime.ts`, `scripts/craggy-ridge-regression.mjs`, `docs/GAME_DESIGN_REFERENCE.md`
+
+Constraints: keep authoritative elevation and mountain-rock vertex displacement unchanged; preserve water/cutout topology, movement/fire authority, deterministic generation, fixed render budgets, and no per-frame placement work. Larger formations require a separately generated authoritative blocked or low-fuel footprint before their geometry may exceed the render-only envelope.
+
+Notes: Superseded first by TSK-0179 and then TSK-0180 after supplied captures showed that compact clusters, multi-tile asset bands, and painted relief all failed visually. The historical instanced implementation remains removed; authoritative uplift now selects the continuous microterrain surface.
+
+Status: done
+
 TSK-0177: Add occasional authoritative craggy ridge silhouettes
 
 Type: feature
@@ -711,5 +1035,97 @@ Touchpoints: `src/core/rendering/`, `src/systems/terrain/rendering/`, `src/rende
 Constraints: preserve DPR, asset detail, effect counts, shadow resolution, water quality, simulation behavior, and player-visible output; keep fire visibility authoritative and fire FX culling independent.
 
 Notes: A player-supplied GPU capture confirmed a roughly 30 ms world-render bottleneck, sub-millisecond post cost, near-continuous two-light transitions at 20x speed, and invalid final-pass-only draw counters. The follow-up coalesces those transitions and fixes the counters. Supported performance acceptance is 256x256; 512x512 maps are not a target and are known to crash. A fresh 256x256 capture remains required for measured before/after comparison.
+
+Status: done
+TSK-0193: Instrument map-generation finalization substeps
+
+Type: bug
+
+Why: New-run generation could sit at 99% with a stale `Coloring terrain` label while final morphology, vegetation pre-growth, fuel initialization, color noise, or diagnostic publication performed unreported work.
+
+Done when:
+- [x] The loading state line identifies each finalization substep and reports vegetation pre-growth by year plus terrain-color generation by completed row.
+- [x] Each completed finalization substep emits a console duration, with per-year vegetation timings and cumulative visited/changed tile counts.
+- [x] Telemetry yields between major substeps and pre-growth years without changing deterministic map output, and diagnostics regression coverage checks ordered bounded finalization progress plus the expected messages.
+
+Touchpoints: `src/mapgen/stages/FinalizeStage.ts`, `src/systems/terrain/sim/vegetationPreGrowth.ts`, `src/ui/loadingTips.ts`, `scripts/mapgen-diagnostics-regression.mjs`, `docs/GAME_DESIGN_REFERENCE.md`
+
+Constraints: preserve deterministic seeds and generated output, keep UI dependencies out of terrain simulation, and avoid adding another mapgen stage solely for telemetry.
+
+Notes: TypeScript and queue validation pass. The focused diagnostics run reached and passed the new expected-message, bounded/ordered finalization progress, and baseline-versus-finalization-reporter hash assertions. The broader script then failed its existing zero-pre-growth elevation invariant (`e3783012` versus `9fe7f7fc`) while river, lake, road-edge, and bridge hashes matched; that branch-level terrain drift is outside this telemetry change. Live localhost appearance remains unverified in this VS Code surface.
+
+Status: done
+TSK-0194: Instrument parallel 3D asset preload
+
+Type: bug
+
+Why: The new-run loading overlay showed the last completed asset family at 25% increments, so a stale `trees` label at 75% could mask which parallel loader was actually still running and how long it had been stalled.
+
+Done when:
+- [x] The loading state line refreshes every second and lists active, completed, and failed asset families rather than presenting the last completion as current work.
+- [x] Tree GLTF and world-audio preload report individual filenames, unit counts, failures, and timings; family and total console telemetry identify the slowest loader.
+- [x] Progress is weighted by the 26 actual preload units while cached callers remain compatible, and TypeScript plus a focused formatter smoke check pass.
+
+Touchpoints: `src/render/threeTestAssets.ts`, `src/render/threeTestWorldAudio.ts`, `src/app/gameSessionRuntime.ts`, `src/ui/loadingTips.ts`, `docs/GAME_DESIGN_REFERENCE.md`
+
+Constraints: keep the four asset families parallel, preserve loader caches and failure fallback behavior, and keep renderer/audio loaders independent of app and UI code.
+
+Notes: Implemented from the supplied static loading capture. Live timing and layout remain pending a refreshed run because this VS Code surface cannot inspect localhost.
+
+Status: done
+TSK-0195: Bound GLTF preload work and expose blocking phases
+
+Type: bug
+
+Why: Refined preload telemetry still appeared frozen at `0s` with 14/16 trees complete because all sixteen tree GLBs plus the firestation were requested together, and GLTF parsing followed by bounds calculation and geometry/material cloning can starve the browser main thread and prevent the heartbeat from repainting.
+
+Done when:
+- [x] Tree loading uses at most two concurrent GLTF requests and yields one browser frame after each model is prepared while houses, firestation, and audio remain parallel families.
+- [x] Tree and firestation status distinguish request, download percentage, parsing, and geometry preparation, and show up to two genuinely in-flight files rather than the last completed filename.
+- [x] The loading explanation states that a paused timer identifies main-thread parsing/preparation starvation; TypeScript/build, formatter smoke, and queue validation pass.
+
+Touchpoints: `src/render/threeTestAssets.ts`, `src/app/gameSessionRuntime.ts`, `src/ui/loadingTips.ts`, `docs/GAME_DESIGN_REFERENCE.md`
+
+Constraints: preserve asset contents, seasonal tree material preparation, cache behavior, fallback behavior, and family-level parallelism; do not move Three.js objects across workers.
+
+Notes: Static diagnosis used the supplied frozen `0s` capture plus local asset sizes. The remaining candidates included three 1.0–1.1 MB Maple GLBs, a 0.76 MB Elm GLB, and a 1.09 MB firestation GLB. Live timing and responsiveness remain pending a refreshed run because this VS Code surface cannot inspect localhost.
+
+Status: done
+TSK-0196: Profile post-asset 3D world construction
+
+Type: bug
+
+Why: The loading overlay could remain visibly frozen at 100% and continue describing completed assets while synchronous renderer initialization, terrain construction, or first-frame priming blocked browser repaint. Existing terrain telemetry collapsed inland-water cutout, skirts, vegetation, structures, and water preparation into one `fullBuild` duration, leaving no evidence for optimization decisions.
+
+Done when:
+- [x] Asset loading reserves progress for renderer initialization, terrain construction, runtime finalization, and first-frame priming, with a browser paint opportunity before each synchronous high-level stage.
+- [x] Terrain build telemetry separately measures assembly, inland-water cutout, normals, material/texture work, vegetation, structures, water, and finalization, and remains visible in the runtime performance overlay.
+- [x] Inland-water telemetry measures domain construction, clipping, seam construction, conformance, skirt emission, and buffer finalization with source, cut, boundary, seam, retained, skirt, and output geometry counts.
+- [x] Copyable console profiles report renderer, tree-impostor-atlas, terrain-sync, terrain-build, cutout, and first-frame timings; TypeScript and the focused renderer regression pass.
+
+Touchpoints: `src/app/gameSessionRuntime.ts`, `src/render/threeTest.ts`, `src/render/threeTestTerrain.ts`, `src/ui/loadingTips.ts`, `scripts/render-performance-regression.mjs`, `docs/GAME_DESIGN_REFERENCE.md`
+
+Constraints: preserve generated terrain, water topology, render assets, deterministic instance placement, and existing renderer/domain dependency direction; measure before changing geometry algorithms or visual quality.
+
+Notes: Implemented from the supplied static loading captures. Live timing, progress repaint behavior, and the actual dominant stage remain pending a refreshed run because this VS Code surface cannot inspect localhost. The console lines `[threeTest:startupprofile]`, `[threeTest:impostoratlas]`, `[terrainbuild]`, and `[terrainbuild:cutout]` are the evidence to capture before selecting an optimization.
+
+Status: done
+TSK-0197: Remove quadratic inland-water cutout lookup
+
+Type: bug
+
+Why: A supplied 256x256 startup profile measured 168.1 seconds for terrain construction, with 166.1 seconds inside inland-water cutout. Boundary association repeatedly scanned 5,440 contour segments and canonical conformance repeatedly scanned every seam vertex across 146,982 retained polygons. During that blocked work, the higher-stacked 3D overlay exposed a black world and HUD above the loading screen.
+
+Done when:
+- [x] Contour-boundary association uses a deterministic cell-bucket index instead of scanning every inland-water segment for each retained polygon edge.
+- [x] Canonical seam vertex and along-edge lookup use quantized and cell-bucket indices instead of scanning every seam vertex during terrain conformance.
+- [x] The loading overlay remains stacked above the mounted 3D runtime until terrain and first-frame preparation finish.
+- [x] Focused water regression preserves canonical seams, split ordering, skirt topology, and retained-terrain closure while enforcing a generous supported-map cutout budget; renderer, TypeScript, build, queue, and diff checks pass.
+
+Touchpoints: `src/systems/terrain/rendering/inlandWaterTerrainCutout.ts`, `src/systems/terrain/rendering/inlandWaterTerrainSeam.ts`, `src/render/threeTestTerrain.ts`, `styles.css`, `scripts/terrain-water-regression.mjs`, `scripts/render-performance-regression.mjs`, `docs/GAME_DESIGN_REFERENCE.md`
+
+Constraints: preserve immutable water-contour coordinates, canonical seam segmentation, terrain/skirt UV and normal ownership, deterministic segment selection, and existing rendering dependency direction; do not remove the retained-terrain conformance safeguard without equivalent topology evidence.
+
+Notes: The player-supplied profile showed skirt emission itself took only 14.8 ms despite 42,984 skirt triangles; the actual bottleneck was 65.1 seconds of clipping/boundary association plus 99.8 seconds of conformance lookup. After spatial indexing, the focused full-resolution fixture measured a 2.73-second cutout (472 ms clipping and 1.42 seconds conformance), about 59x faster than the supplied 162.3-second cutout, while the complete 37-case water suite finished in about 11.6 seconds. The player confirmed during implementation that the map loaded much faster with seams still correct. The loading-overlay stacking result still needs a refreshed live capture.
 
 Status: done

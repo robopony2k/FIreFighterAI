@@ -41,6 +41,7 @@ export type TileClassificationInput = {
   localContext?: BiomeLocalContext;
   seededNoiseOffset?: number;
   slopeAngleDeg?: number;
+  rockExposure?: number;
 };
 
 export type SeedSpreadClassificationInput = {
@@ -55,6 +56,7 @@ export type SeedSpreadClassificationInput = {
   localContext?: BiomeLocalContext;
   seededNoiseOffset?: number;
   slopeAngleDeg?: number;
+  rockExposure?: number;
 };
 
 type BiomeScores = {
@@ -70,6 +72,7 @@ type BiomeScores = {
   slopeAngleDeg: number;
   treeSlopeSuitability: number;
   shrubSlopeSuitability: number;
+  rockExposureScore: number;
 };
 
 const smoothstep = (edge0: number, edge1: number, value: number): number => {
@@ -152,6 +155,7 @@ const computeBiomeScores = (input: {
   localContext?: BiomeLocalContext;
   seededNoiseOffset?: number;
   slopeAngleDeg?: number;
+  rockExposure?: number;
 }): BiomeScores => {
   const context = input.localContext ?? defaultLocalContext;
   const slopeAngleDeg = Math.max(0, input.slopeAngleDeg ?? (Math.atan(Math.max(0, input.slope)) * 180) / Math.PI);
@@ -168,6 +172,7 @@ const computeBiomeScores = (input: {
   const nearWaterScore = smoothstep(260, 20, input.waterDistM);
   const valleyWetScore = smoothstep(0.04, 0.24, input.valley);
   const seededNoise = clamp(input.seededNoiseOffset ?? 0, -0.5, 0.5);
+  const rockExposureScore = clamp(input.rockExposure ?? 0, 0, 1);
 
   const effectiveMoisture = clamp(
     input.moisture +
@@ -194,6 +199,7 @@ const computeBiomeScores = (input: {
       drynessScore * 0.18 +
       context.ridgeScore * 0.14 +
       localReliefScore * 0.16 +
+      rockExposureScore * 0.34 +
       elevationScore * 0.08 -
       nearWaterScore * 0.08 -
       context.gullyScore * 0.1 +
@@ -214,7 +220,8 @@ const computeBiomeScores = (input: {
     localReliefScore,
     slopeAngleDeg,
     treeSlopeSuitability,
-    shrubSlopeSuitability
+    shrubSlopeSuitability,
+    rockExposureScore
   };
 };
 
@@ -258,71 +265,19 @@ const classifyOpenTerrain = (
   seaLevel: number
 ): TileType => {
   const headroom = Math.max(0, elevation - seaLevel);
-  const dryThresholdOffset = (0.5 - scores.drynessScore) * 0.08;
   const wetShelteredSlope = isWetShelteredSlope(scores, context);
-  if (!wetShelteredSlope && scores.hardSteepScore > 0.58 && headroom > 0.08) {
-    return "rocky";
-  }
-  if (!wetShelteredSlope && scores.slopeAngleDeg >= 55 && headroom > 0.08) {
-    return "rocky";
-  }
-  if (
-    !wetShelteredSlope &&
-    scores.localReliefScore > 0.78 &&
-    (scores.drynessScore > 0.26 || scores.elevationScore > 0.5 || context.ridgeScore > 0.34) &&
-    headroom > 0.08
-  ) {
-    return "rocky";
-  }
-  if (
-    !wetShelteredSlope &&
-    scores.steepScore > 0.62 &&
-    (scores.localReliefScore > 0.32 || scores.exposureScore > 0.5 || scores.drynessScore > 0.34) &&
-    headroom > 0.09
-  ) {
-    return "rocky";
-  }
-  if (
-    !wetShelteredSlope &&
-    scores.cliffScore > 0.5 &&
-    scores.slopeScore > 0.46 &&
-    headroom > 0.08
-  ) {
-    return "rocky";
-  }
-  if (
-    !wetShelteredSlope &&
-    scores.slopeScore > 0.56 &&
-    scores.drynessScore > 0.46 &&
-    headroom > 0.1
-  ) {
-    return scores.cliffScore > 0.32 || context.localRelief > 0.035 ? "rocky" : "bare";
-  }
-  if (
-    scores.exposureScore > 0.62 + dryThresholdOffset &&
-    scores.slopeScore > 0.52 &&
-    scores.drynessScore > 0.42 &&
-    headroom > 0.12
-  ) {
-    return "rocky";
-  }
-  if (
-    scores.exposureScore > 0.56 &&
-    scores.drynessScore > 0.72 &&
-    scores.slopeScore > 0.26 &&
-    headroom > 0.16
-  ) {
-    return "bare";
-  }
-  if (scores.shrubSlopeSuitability < 0.18 && headroom > 0.08) {
-    return scores.drynessScore > 0.48 || scores.localReliefScore > 0.55 ? "rocky" : "bare";
-  }
-  if (
-    scores.shrubSlopeSuitability < 0.46 &&
-    !(scores.moistureScore > 0.72 && context.gullyScore > 0.45 && scores.exposureScore < 0.58)
-  ) {
-    return scores.drynessScore > 0.46 || scores.exposureScore > 0.5 ? "rocky" : "bare";
-  }
+  const shelter = wetShelteredSlope ? 0.28 : 0;
+  const rockScore = clamp(
+    scores.rockExposureScore * 0.68 +
+      scores.exposureScore * 0.3 +
+      scores.drynessScore * 0.1 +
+      (1 - scores.shrubSlopeSuitability) * 0.12 -
+      shelter,
+    0,
+    1
+  );
+  if (headroom > 0.08 && rockScore > 0.58) return "rocky";
+  if (headroom > 0.1 && rockScore > 0.42 && scores.drynessScore > 0.46) return "bare";
   if (
     scores.moistureScore > 0.34 ||
     scores.elevationScore > 0.56 ||

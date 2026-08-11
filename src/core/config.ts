@@ -21,12 +21,11 @@ export type MapSizeId = keyof typeof MAP_SIZE_PRESETS;
 
 export const CAREER_YEARS = 20;
 export const DAYS_PER_SECOND = 1;
-export const GROWTH_SPEED_MULTIPLIER = 3;
 export const DEBUG_GROWTH_METRICS = false;
 export const DEBUG_TERRAIN = true;
 export const DEBUG_TERRAIN_EDGE = false;
 export const DEBUG_TERRAIN_RENDER = true;
-export const DISABLE_INLAND_LAKES = true;
+export const DISABLE_DISCONNECTED_INLAND_WATER = true;
 export const FIREBREAK_COST_PER_TILE = 45;
 export const BASE_BUDGET = 320;
 export const DEBUG_UNLIMITED_MONEY_BUDGET = 50000;
@@ -111,9 +110,6 @@ export const DEFAULT_FIRE_SETTINGS: FireSettings = {
   terrainWindObstructionPenalty: 1.45,
   terrainWindFunnelBonus: 0.8
 };
-export const GROWTH_WEATHER_TEMP_MIN = 18;
-export const GROWTH_WEATHER_TEMP_MAX = 30;
-export const GROWTH_WEATHER_MOISTURE_MIN = 0.22;
 export const EDGE_WATER_WIDTH_TILES = 16;
 export const EDGE_WATER_WIDTH_SCALE = 0.055;
 export const EDGE_WATER_NOISE_TILES = 3;

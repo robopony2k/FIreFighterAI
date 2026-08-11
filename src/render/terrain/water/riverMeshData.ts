@@ -294,7 +294,7 @@ export const buildRiverMeshData = (
     const float32WorldTolerance = Math.max(
       inlandWater.width / Math.max(1, inlandWater.cols),
       inlandWater.depth / Math.max(1, inlandWater.rows)
-    ) * 2e-5;
+    ) * 2.25e-5;
     for (let edge = 0; edge + 3 < waterBoundary.length; edge += 4) {
       waterSegmentKeys.add(segmentKey(
         waterBoundary[edge],

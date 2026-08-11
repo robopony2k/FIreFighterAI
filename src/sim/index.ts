@@ -9,9 +9,6 @@ import {
   DEFAULT_INCIDENT_TIME_SPEED_INDEX,
   DAYS_PER_SECOND,
   FIRE_WEATHER_RISK_MIN,
-  GROWTH_WEATHER_MOISTURE_MIN,
-  GROWTH_WEATHER_TEMP_MAX,
-  GROWTH_WEATHER_TEMP_MIN,
   INCIDENT_FIRE_PACING_SCALE,
   INCIDENT_TIME_SPEED_OPTIONS,
   NEIGHBOR_DIRS,
@@ -49,7 +46,7 @@ import { clearFireBlocks, markFireBlockActiveByTile } from "./fire/activeBlocks.
 import { advanceCareerDay, getClimateRisk } from "./climateRuntime.js";
 import { isBaseTileLost } from "./failure.js";
 import { updatePhaseControls } from "./lifecycle.js";
-import { stepGrowth } from "./growth.js";
+import { applyAnnualVegetationGrowth } from "../systems/terrain/sim/annualVegetationGrowth.js";
 import { stepTownAlertPosture } from "./towns.js";
 import { stepParticles } from "./particles.js";
 import { freezeScoringSeason, queueScoreFlowEvent, startScoringSeason, stepScoring } from "./scoring.js";
@@ -130,9 +127,13 @@ const resetStepPerfTelemetry = (state: WorldState): void => {
   state.simPerfCalendarMs = 0;
   state.simPerfTownConstructionMs = 0;
   state.simPerfGrowthMs = 0;
-  state.simPerfGrowthBlocksProcessed = 0;
-  state.simPerfGrowthTilesVisited = 0;
-  state.simPerfGrowthTilesChanged = 0;
+  state.simPerfGrowthTilesScanned = 0;
+  state.simPerfGrowthAgedTiles = 0;
+  state.simPerfGrowthFuelTilesChanged = 0;
+  state.simPerfGrowthShrubExpandedTiles = 0;
+  state.simPerfGrowthForestExpandedTiles = 0;
+  state.simPerfGrowthRecoveredTiles = 0;
+  state.simPerfGrowthVisualSync = 0;
   state.simPerfUnitsMs = 0;
   state.simPerfFireMs = 0;
   state.simPerfScoringMs = 0;
@@ -599,11 +600,6 @@ export const getStrategicFireSimulationStepCap = (state: WorldState): number | n
   return fireEligibleWeather ? STRATEGIC_FIRE_SIM_STEP_CAP_DAYS / Math.max(DAYS_PER_SECOND, 0.0001) : null;
 };
 
-const isGrowthWeather = (state: WorldState): boolean =>
-  state.climateTemp >= GROWTH_WEATHER_TEMP_MIN &&
-  state.climateTemp <= GROWTH_WEATHER_TEMP_MAX &&
-  state.climateMoisture >= GROWTH_WEATHER_MOISTURE_MIN;
-
 export const isAdvanceToNextEventAvailable = (state: WorldState): boolean =>
   !state.gameOver && state.simTimeMode === "strategic" && state.fireActivityState === "idle" && !state.advanceToNextEvent;
 
@@ -863,6 +859,18 @@ export function setPhase(state: WorldState, rng: RNG, next: WorldState["phase"],
   updateClimateForecastWindow(state);
   updatePhaseControls(state);
   if (state.phase === "growth") {
+    const growthPerfStart = nowMs();
+    const growthProfStart = profStart();
+    const result = applyAnnualVegetationGrowth(state, state.year, rng);
+    profEnd("annualGrowth", growthProfStart);
+    state.simPerfGrowthMs = nowMs() - growthPerfStart;
+    state.simPerfGrowthTilesScanned = result.tilesScanned;
+    state.simPerfGrowthAgedTiles = result.agedTiles;
+    state.simPerfGrowthFuelTilesChanged = result.fuelTilesChanged;
+    state.simPerfGrowthShrubExpandedTiles = result.shrubExpandedTiles;
+    state.simPerfGrowthForestExpandedTiles = result.forestExpandedTiles;
+    state.simPerfGrowthRecoveredTiles = result.recoveredTiles;
+    state.simPerfGrowthVisualSync = result.vegetationVisualChanged ? 1 : 0;
     setStatus(state, `Year ${state.year} begins. Growth fuels the region.`);
     showSeasonOverlay(state);
     return;
@@ -1120,17 +1128,8 @@ export function stepSim(
   });
   profEnd("townConstruction", townConstructionProfStart);
   state.simPerfTownConstructionMs = nowMs() - townConstructionPerfStart;
-  const allowGrowth = state.phase === "growth" && isGrowthWeather(state);
   const allowIgnition = state.phase === "fire" && climateRisk >= FIRE_WEATHER_RISK_MIN;
   const allowFireSim = hasFireSimulationWork(state) || allowIgnition;
-
-  if (allowGrowth) {
-    const growthPerfStart = nowMs();
-    const growthProfStart = profStart();
-    stepGrowth(state, dayDelta, rng);
-    profEnd("growthStep", growthProfStart);
-    state.simPerfGrowthMs = nowMs() - growthPerfStart;
-  }
 
   if (state.units.length > 0) {
     const unitsPerfStart = nowMs();

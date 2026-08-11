@@ -65,7 +65,7 @@ export const MAPGEN_GROUPS: readonly MapGenGroup[] = [
         key: "ridgeStrength",
         slug: "ridgeStrength",
         label: "Ridge sharpness",
-        tooltip: "Adds sharp ridges and crags. Higher values make terrain more rugged.",
+        tooltip: "Strengthens broad uplift and the terrain available for drainage to dissect.",
         min: 0,
         max: 0.35,
         step: 0.01
@@ -184,15 +184,6 @@ export const MAPGEN_GROUPS: readonly MapGenGroup[] = [
         max: 0.75,
         step: 0.01,
         format: "percent"
-      },
-      {
-        key: "edgeWaterBias",
-        slug: "edgeWaterBias",
-        label: "Coast water bias",
-        tooltip: "How strongly water is favored near edges when setting sea level. Higher values enlarge coastlines.",
-        min: 0,
-        max: 0.4,
-        step: 0.01
       },
       {
         key: "riverWaterBias",

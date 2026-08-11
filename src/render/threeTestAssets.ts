@@ -41,6 +41,30 @@ export type FirestationAsset = {
   size: THREE.Vector3;
 };
 
+export type ThreeTestAssetLoadProgress = {
+  completed: number;
+  total: number;
+  item: string;
+  durationMs: number;
+  failed: boolean;
+  phase: "waiting" | "downloading" | "parsing" | "preparing" | "complete";
+  loadedBytes?: number;
+  totalBytes?: number;
+};
+
+export type ThreeTestAssetLoadReporter = (progress: ThreeTestAssetLoadProgress) => void;
+
+const emitAssetLoadProgress = (
+  reportProgress: ThreeTestAssetLoadReporter | undefined,
+  progress: ThreeTestAssetLoadProgress
+): void => {
+  try {
+    reportProgress?.(progress);
+  } catch (error) {
+    console.warn("[threeTestAssets] Asset telemetry reporter failed.", error);
+  }
+};
+
 type SeasonPreset = {
   name: string;
   mix: number;
@@ -257,8 +281,24 @@ export const TREE_MODEL_PATHS: Record<TreeType, string[]> = {
   ]
 };
 
+export const TREE_MODEL_ASSET_COUNT = Object.values(TREE_MODEL_PATHS)
+  .reduce((total, paths) => total + paths.length, 0);
+
 const createGLTFLoader = (): GLTFLoader => registerPbrSpecularGlossiness(new GLTFLoader());
 const FIRESTATION_MODEL_PATH = "assets/3d/GLTF/Firestation/Classic Fire Station.glb";
+export const TREE_MODEL_LOAD_CONCURRENCY = 2;
+
+const yieldToAssetFrame = (): Promise<void> =>
+  new Promise((resolve) => {
+    if (
+      typeof requestAnimationFrame === "function" &&
+      (typeof document === "undefined" || !document.hidden)
+    ) {
+      requestAnimationFrame(() => setTimeout(resolve, 0));
+    } else {
+      setTimeout(resolve, 0);
+    }
+  });
 
 let treeAssetsCache: TreeAssets | null = null;
 let treeAssetsPromise: Promise<TreeAssets> | null = null;
@@ -302,78 +342,176 @@ const getBuildKey = (object: THREE.Object3D): string | null => {
   return null;
 };
 
-const loadTreeVariant = (loader: GLTFLoader, url: string): Promise<TreeVariant> =>
+const loadTreeVariant = (
+  loader: GLTFLoader,
+  url: string,
+  reportPhase?: (
+    phase: ThreeTestAssetLoadProgress["phase"],
+    loadedBytes?: number,
+    totalBytes?: number
+  ) => void
+): Promise<TreeVariant> =>
   new Promise((resolve, reject) => {
     loader.load(
       url,
-      (gltf) => {
-        const scene = gltf.scene;
-        scene.updateMatrixWorld(true);
-        const bounds = new THREE.Box3().setFromObject(scene);
-        const height = Math.max(0.01, bounds.max.y - bounds.min.y);
-        const baseOffset = -bounds.min.y;
-        const center = new THREE.Vector3();
-        bounds.getCenter(center);
-        const recenter = new THREE.Matrix4().makeTranslation(-center.x, baseOffset, -center.z);
-        const meshes: TreeMeshTemplate[] = [];
-        scene.traverse((child) => {
-          if (child instanceof THREE.Mesh) {
-            const geometry = child.geometry.clone();
-            geometry.userData.treeAsset = true;
-            const leafHint = isLeafName(child.name);
-            const material = Array.isArray(child.material)
-              ? child.material.map((mat) => {
-                  const clone = mat.clone();
-                  clone.userData.treeAsset = true;
-                  if (leafHint || isLeafName(mat.name)) {
-                    clone.userData.treeLeafHint = true;
-                  }
-                  return clone;
-                })
-              : (() => {
-                  const clone = child.material.clone();
-                  clone.userData.treeAsset = true;
-                  if (leafHint || isLeafName(child.material.name)) {
-                    clone.userData.treeLeafHint = true;
-                  }
-                  return clone;
-                })();
-            const baseMatrix = child.matrixWorld.clone();
-            baseMatrix.premultiply(recenter);
-            const impostorCaptureMaterial = Array.isArray(material)
-              ? material.map((entry) => entry.clone())
-              : material.clone();
-            meshes.push({
-              geometry,
-              material,
-              impostorCaptureMaterial,
-              baseMatrix
-            });
-          }
-        });
-        resolve({ meshes, height, baseOffset: 0 });
+      async (gltf) => {
+        try {
+          reportPhase?.("preparing");
+          await yieldToAssetFrame();
+          const scene = gltf.scene;
+          scene.updateMatrixWorld(true);
+          const bounds = new THREE.Box3().setFromObject(scene);
+          const height = Math.max(0.01, bounds.max.y - bounds.min.y);
+          const baseOffset = -bounds.min.y;
+          const center = new THREE.Vector3();
+          bounds.getCenter(center);
+          const recenter = new THREE.Matrix4().makeTranslation(-center.x, baseOffset, -center.z);
+          const meshes: TreeMeshTemplate[] = [];
+          scene.traverse((child) => {
+            if (child instanceof THREE.Mesh) {
+              const geometry = child.geometry.clone();
+              geometry.userData.treeAsset = true;
+              const leafHint = isLeafName(child.name);
+              const material = Array.isArray(child.material)
+                ? child.material.map((mat) => {
+                    const clone = mat.clone();
+                    clone.userData.treeAsset = true;
+                    if (leafHint || isLeafName(mat.name)) {
+                      clone.userData.treeLeafHint = true;
+                    }
+                    return clone;
+                  })
+                : (() => {
+                    const clone = child.material.clone();
+                    clone.userData.treeAsset = true;
+                    if (leafHint || isLeafName(child.material.name)) {
+                      clone.userData.treeLeafHint = true;
+                    }
+                    return clone;
+                  })();
+              const baseMatrix = child.matrixWorld.clone();
+              baseMatrix.premultiply(recenter);
+              const impostorCaptureMaterial = Array.isArray(material)
+                ? material.map((entry) => entry.clone())
+                : material.clone();
+              meshes.push({
+                geometry,
+                material,
+                impostorCaptureMaterial,
+                baseMatrix
+              });
+            }
+          });
+          resolve({ meshes, height, baseOffset: 0 });
+        } catch (error) {
+          reject(error);
+        }
       },
-      undefined,
+      (event) => {
+        const loadedBytes = Math.max(0, event.loaded);
+        const totalBytes = event.lengthComputable ? Math.max(0, event.total) : undefined;
+        const phase = totalBytes !== undefined && totalBytes > 0 && loadedBytes >= totalBytes
+          ? "parsing"
+          : "downloading";
+        reportPhase?.(phase, loadedBytes, totalBytes);
+      },
       (error) => reject(error)
     );
   });
 
-export const loadTreeAssets = (): Promise<TreeAssets> => {
+export const loadTreeAssets = (reportProgress?: ThreeTestAssetLoadReporter): Promise<TreeAssets> => {
   if (treeAssetsCache) {
+    emitAssetLoadProgress(reportProgress, {
+      completed: TREE_MODEL_ASSET_COUNT,
+      total: TREE_MODEL_ASSET_COUNT,
+      item: "cached tree models",
+      durationMs: 0,
+      failed: false,
+      phase: "complete"
+    });
     return Promise.resolve(treeAssetsCache);
   }
   if (treeAssetsPromise) {
-    return treeAssetsPromise;
+    return treeAssetsPromise.then((assets) => {
+      emitAssetLoadProgress(reportProgress, {
+        completed: TREE_MODEL_ASSET_COUNT,
+        total: TREE_MODEL_ASSET_COUNT,
+        item: "shared tree-model request",
+        durationMs: 0,
+        failed: false,
+        phase: "complete"
+      });
+      return assets;
+    });
   }
   const loader = createGLTFLoader();
   const entries = Object.entries(TREE_MODEL_PATHS) as [TreeType, string[]][];
-  const loads = entries.map(([type, urls]) =>
-    Promise.all(urls.map((url) => loadTreeVariant(loader, url))).then((models) => [type, models] as const)
+  const jobs = entries.flatMap(([type, urls]) =>
+    urls.map((url, variantIndex) => ({ type, url, variantIndex }))
   );
-  treeAssetsPromise = Promise.all(loads).then((loaded) => {
+  const loadedByType = new Map<TreeType, TreeVariant[]>(
+    entries.map(([type, urls]) => [type, new Array<TreeVariant>(urls.length)])
+  );
+  let nextJobIndex = 0;
+  let completed = 0;
+  const runNextJob = async (): Promise<void> => {
+    while (nextJobIndex < jobs.length) {
+      const job = jobs[nextJobIndex];
+      nextJobIndex += 1;
+      if (!job) {
+        return;
+      }
+      const startedAt = typeof performance !== "undefined" ? performance.now() : Date.now();
+      let failed = false;
+      try {
+        emitAssetLoadProgress(reportProgress, {
+          completed,
+          total: TREE_MODEL_ASSET_COUNT,
+          item: job.url.split(/[\\/]/).pop() ?? job.url,
+          durationMs: 0,
+          failed: false,
+          phase: "waiting"
+        });
+        const variant = await loadTreeVariant(loader, job.url, (phase, loadedBytes, totalBytes) => {
+          emitAssetLoadProgress(reportProgress, {
+            completed,
+            total: TREE_MODEL_ASSET_COUNT,
+            item: job.url.split(/[\\/]/).pop() ?? job.url,
+            durationMs: Math.max(
+              0,
+              (typeof performance !== "undefined" ? performance.now() : Date.now()) - startedAt
+            ),
+            failed: false,
+            phase,
+            loadedBytes,
+            totalBytes
+          });
+        });
+        loadedByType.get(job.type)![job.variantIndex] = variant;
+      } catch (error) {
+        failed = true;
+        throw error;
+      } finally {
+        completed += 1;
+        emitAssetLoadProgress(reportProgress, {
+          completed,
+          total: TREE_MODEL_ASSET_COUNT,
+          item: job.url.split(/[\\/]/).pop() ?? job.url,
+          durationMs: Math.max(0, (typeof performance !== "undefined" ? performance.now() : Date.now()) - startedAt),
+          failed,
+          phase: "complete"
+        });
+        await yieldToAssetFrame();
+      }
+    }
+  };
+  const workerCount = Math.min(TREE_MODEL_LOAD_CONCURRENCY, jobs.length);
+  treeAssetsPromise = Promise.all(
+    Array.from({ length: workerCount }, () => runNextJob())
+  ).then(() => {
     const assets = {} as TreeAssets;
-    loaded.forEach(([type, models]) => {
-      assets[type] = models;
+    entries.forEach(([type]) => {
+      assets[type] = loadedByType.get(type) ?? [];
     });
     treeAssetsCache = assets;
     return assets;
@@ -601,24 +739,106 @@ const extractFirestationAsset = (scene: THREE.Object3D): FirestationAsset | null
   return { meshes, height, baseOffset, size };
 };
 
-export const loadFirestationAsset = (): Promise<FirestationAsset | null> => {
+export const loadFirestationAsset = (
+  reportProgress?: ThreeTestAssetLoadReporter
+): Promise<FirestationAsset | null> => {
   if (firestationAssetCache) {
+    emitAssetLoadProgress(reportProgress, {
+      completed: 1,
+      total: 1,
+      item: FIRESTATION_MODEL_PATH.split(/[\\/]/).pop() ?? FIRESTATION_MODEL_PATH,
+      durationMs: 0,
+      failed: false,
+      phase: "complete"
+    });
     return Promise.resolve(firestationAssetCache);
   }
   if (firestationAssetPromise) {
-    return firestationAssetPromise;
+    return firestationAssetPromise.then((asset) => {
+      emitAssetLoadProgress(reportProgress, {
+        completed: 1,
+        total: 1,
+        item: "shared firestation request",
+        durationMs: 0,
+        failed: asset === null,
+        phase: "complete"
+      });
+      return asset;
+    });
   }
   const loader = createGLTFLoader();
+  const startedAt = typeof performance !== "undefined" ? performance.now() : Date.now();
+  const item = FIRESTATION_MODEL_PATH.split(/[\\/]/).pop() ?? FIRESTATION_MODEL_PATH;
+  emitAssetLoadProgress(reportProgress, {
+    completed: 0,
+    total: 1,
+    item,
+    durationMs: 0,
+    failed: false,
+    phase: "waiting"
+  });
   firestationAssetPromise = new Promise<FirestationAsset | null>((resolve, reject) => {
     loader.load(
       FIRESTATION_MODEL_PATH,
-      (gltf) => {
-        const asset = extractFirestationAsset(gltf.scene);
-        firestationAssetCache = asset;
-        resolve(asset);
+      async (gltf) => {
+        try {
+          emitAssetLoadProgress(reportProgress, {
+            completed: 0,
+            total: 1,
+            item,
+            durationMs: Math.max(0, (typeof performance !== "undefined" ? performance.now() : Date.now()) - startedAt),
+            failed: false,
+            phase: "preparing"
+          });
+          await yieldToAssetFrame();
+          const asset = extractFirestationAsset(gltf.scene);
+          firestationAssetCache = asset;
+          emitAssetLoadProgress(reportProgress, {
+            completed: 1,
+            total: 1,
+            item,
+            durationMs: Math.max(0, (typeof performance !== "undefined" ? performance.now() : Date.now()) - startedAt),
+            failed: asset === null,
+            phase: "complete"
+          });
+          resolve(asset);
+        } catch (error) {
+          emitAssetLoadProgress(reportProgress, {
+            completed: 1,
+            total: 1,
+            item,
+            durationMs: Math.max(0, (typeof performance !== "undefined" ? performance.now() : Date.now()) - startedAt),
+            failed: true,
+            phase: "complete"
+          });
+          reject(error);
+        }
       },
-      undefined,
-      (error) => reject(error)
+      (event) => {
+        const loadedBytes = Math.max(0, event.loaded);
+        const totalBytes = event.lengthComputable ? Math.max(0, event.total) : undefined;
+        emitAssetLoadProgress(reportProgress, {
+          completed: 0,
+          total: 1,
+          item,
+          durationMs: Math.max(0, (typeof performance !== "undefined" ? performance.now() : Date.now()) - startedAt),
+          failed: false,
+          phase: totalBytes !== undefined && totalBytes > 0 && loadedBytes >= totalBytes ? "parsing" : "downloading",
+          loadedBytes,
+          totalBytes
+        });
+      },
+      (error) => {
+        emitAssetLoadProgress(reportProgress, {
+          completed: 1,
+          total: 1,
+          item,
+          durationMs: Math.max(0, (typeof performance !== "undefined" ? performance.now() : Date.now()) - startedAt),
+          failed: true,
+          phase: "complete"
+        });
+        reject(error);
+      }
     );
   });
   return firestationAssetPromise;

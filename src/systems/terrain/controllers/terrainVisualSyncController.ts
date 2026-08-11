@@ -75,6 +75,10 @@ export const shouldSyncThreeTestTerrain = (
   previous.structureRevision !== next.structureRevision ||
   previous.debugTypeColors !== next.debugTypeColors;
 
+export const shouldRebuildThreeTestVegetationInstances = (
+  invalidation: TerrainVisualInvalidation
+): boolean => invalidation.vegetation && !invalidation.fireVisual;
+
 const GEOMETRY_TERRAIN_TYPES = new Set<number>([
   TILE_TYPE_IDS.water,
   TILE_TYPE_IDS.base,

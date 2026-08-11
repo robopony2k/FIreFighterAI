@@ -32,11 +32,11 @@ Context:
 - Stage progress is normalized through `ProgressTracker`.
 - Debug snapshots are stage-labeled and emitted through `MapGenDebug`.
 - Elevation still emits its historical debug subphases (`terrain:relief`, `terrain:carving`, `terrain:flooding`) before the stage-level `terrain:elevation` snapshot, but these remain dry landmass snapshots; `hydro:solve` owns sea-level and ocean classification.
-- Dry elevation is shaped as an island before hydrology runs. Sea level is calibrated from `landCoverageTarget` against connected ocean coverage, then optionally nudged by the advanced `seaLevelBias` override.
+- Dry elevation is shaped as an island before hydrology runs. Its low-frequency macro field is mixed by a fixed `0.5` toward the square-bump boundary target, then receives fine detail with an outer-six-percent fade and exact perimeter clamp. Sea level is calibrated exclusively from `landCoverageTarget` against connected ocean coverage and does not reshape the elevation field.
 - `hydro:solve` exclusively owns the resolved sea-level field and edge-connected ocean mask.
 - `terrain:shoreline` preserves those Water-stage arrays and elevations byte-for-byte while deriving coast distance plus beach/cliff/shelf metadata and tile classification.
 - Coastal morphology must be shaped upstream of Water calibration; later stages must not revise the authoritative ocean boundary.
-- `hydro:rivers` owns the final static inland water network: priority-flood depression/basin solving, spill-elevation inland lakes, lake overflow outlet routing, lake-fed river continuation, and waterfall source/target/drop metadata.
+- `hydro:rivers` owns the final static inland water network. It thresholds the Erosion stage's log-normalized flow accumulation into deterministic channels, rasterizes diagonal receiver links into orthogonally contiguous water cells, solves priority-flood basins and spill-elevation lakes, lets accepted lakes intercept those channels, then resumes flow from lake outlets and classifies waterfalls. Hydrology intensity and river budget change direct channel extent; lake acceptance remains depression-driven.
 - `settlement:place` selects a central lowland firebase site using terrain-aware scoring, then prepares settlement-road plan data only; road carving now happens in `roads:connect`.
 - `roads:connect` is non-noop and owns road/bridge network carving plus edge-mask stamping (`WorldState.tileRoadEdges`).
 - Post-settlement reconcile only touches dirty regions captured from settlement deltas.

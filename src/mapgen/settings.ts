@@ -33,7 +33,6 @@ export type MapGenSettings = {
   grassCanopyRange: number;
   waterCoverage: number;
   baseWaterThreshold: number;
-  edgeWaterBias: number;
   riverCount: number;
   riverWaterBias: number;
   biomeClassifierMode: BiomeClassifierMode;
@@ -42,14 +41,11 @@ export type MapGenSettings = {
   relief: number;
   ruggedness: number;
   coastComplexity: number;
-  waterLevel: number;
   landCoverageTarget: number;
-  seaLevelBias: number;
   riverIntensity: number;
   vegetationDensity: number;
   townDensity: number;
   bridgeAllowance: number;
-  interiorRise: number;
   maxHeight: number;
   embayment: number;
   anisotropy: number;
@@ -57,7 +53,6 @@ export type MapGenSettings = {
   ridgeAlignment: number;
   uplandDistribution: number;
   noiseFrequency: number;
-  islandCompactness: number;
   ridgeFrequency: number;
   basinStrength: number;
   coastalShelfWidth: number;
@@ -69,7 +64,6 @@ export type MapGenSettings = {
   erosionCoastFade: number;
   erosionSlopeMaskMin: number;
   erosionSlopeMaskMax: number;
-  skipCarving: boolean;
   skipRoadNetworkRouting: boolean;
   riverBudget: number;
   settlementSpacing: number;
@@ -138,7 +132,6 @@ export const DEFAULT_MAP_GEN_SETTINGS: MapGenSettings = {
   grassCanopyRange: 0.22,
   waterCoverage: 0.32,
   baseWaterThreshold: 0.14,
-  edgeWaterBias: 0.14,
   riverCount: 0,
   riverWaterBias: 0.18,
   biomeClassifierMode: "seedSpread",
@@ -147,14 +140,11 @@ export const DEFAULT_MAP_GEN_SETTINGS: MapGenSettings = {
   relief: 0.7,
   ruggedness: 0.55,
   coastComplexity: 0.42,
-  waterLevel: 0.34,
   landCoverageTarget: 0.64,
-  seaLevelBias: 0.5,
   riverIntensity: 0.45,
   vegetationDensity: 0.56,
   townDensity: 0.48,
   bridgeAllowance: 0.18,
-  interiorRise: 0.78,
   maxHeight: 0.6,
   embayment: 0.28,
   anisotropy: 0.32,
@@ -162,7 +152,6 @@ export const DEFAULT_MAP_GEN_SETTINGS: MapGenSettings = {
   ridgeAlignment: 0.34,
   uplandDistribution: 0.42,
   noiseFrequency: 0.5,
-  islandCompactness: 0.72,
   ridgeFrequency: 0.34,
   basinStrength: 0.3,
   coastalShelfWidth: 0.46,
@@ -174,7 +163,6 @@ export const DEFAULT_MAP_GEN_SETTINGS: MapGenSettings = {
   erosionCoastFade: 0.035,
   erosionSlopeMaskMin: 0.005,
   erosionSlopeMaskMax: 0.05,
-  skipCarving: false,
   skipRoadNetworkRouting: false,
   riverBudget: 0.44,
   settlementSpacing: 0.62,

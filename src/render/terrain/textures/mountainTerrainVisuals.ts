@@ -5,6 +5,7 @@ export type MountainTerrainMaskSample = {
   cols: number;
   rows: number;
   tileMoisture?: Float32Array;
+  rockExposure?: Float32Array;
   structureMask?: Uint8Array;
   tileTownId?: Int16Array;
   climateDryness?: number;
@@ -242,27 +243,23 @@ export const buildMountainTerrainMaskField = (
             sampleValueNoise(tileX + 0.5, tileY + 0.5, 11, worldSeed + 659)
           );
         const chippedNoise = smoothstep(0.18, 0.58, angularNoise + slope * 0.42 + highland * 0.08);
-        rockExposure = clamp(
-          cliffMask * 0.72 +
-          slopeMask * (0.12 + dryMask * 0.18 + highland * 0.08) +
-          ridgeMask * 0.22 +
-          gullyMask * 0.24 +
+        const morphologyExposure = clamp(sample.rockExposure?.[idx] ?? 0, 0, 1);
+        const renderDetail = clamp(
+          cliffMask * 0.42 +
+          slopeMask * (0.1 + dryMask * 0.1) +
+          ridgeMask * 0.18 +
+          gullyMask * 0.18 +
           chippedNoise * 0.12,
           0,
           1
         );
-        if (typeId === TILE_TYPE_IDS.rocky || typeId === TILE_TYPE_IDS.bare) {
-          rockExposure = Math.max(rockExposure, clamp(smoothstep(0.04, 0.26, slope) * 0.82 + chippedNoise * 0.26, 0, 1));
-          highland = Math.max(highland, 0.35);
-        }
+        rockExposure = clamp(morphologyExposure * 0.86 + renderDetail * 0.14, 0, 1);
         ridge = ridgeMask * (0.48 + highland * 0.52);
         gully = gullyMask * (0.58 + highland * 0.42);
-        if (typeId === TILE_TYPE_IDS.rocky || typeId === TILE_TYPE_IDS.bare) {
-          const brokenRidge = chippedNoise * smoothstep(-0.01, 0.018, -curvature + angularNoise * 0.018);
-          const brokenGully = chippedNoise * smoothstep(-0.008, 0.022, curvature + (1 - angularNoise) * 0.012);
-          ridge = Math.max(ridge, brokenRidge * (0.32 + highland * 0.28));
-          gully = Math.max(gully, brokenGully * (0.28 + highland * 0.24));
-        }
+        const brokenRidge = chippedNoise * smoothstep(-0.01, 0.018, -curvature + angularNoise * 0.018);
+        const brokenGully = chippedNoise * smoothstep(-0.008, 0.022, curvature + (1 - angularNoise) * 0.012);
+        ridge = Math.max(ridge, brokenRidge * morphologyExposure * (0.32 + highland * 0.28));
+        gully = Math.max(gully, brokenGully * morphologyExposure * (0.28 + highland * 0.24));
       }
 
       const base = sampleIndex * 4;

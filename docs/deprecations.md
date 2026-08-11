@@ -1,5 +1,152 @@
 # Deprecations
 
+## Lake-Overflow-Only Rivers and Rigid Spill-Contour Rejection
+
+Status: Deprecated as of August 11, 2026.
+
+- Visible rivers no longer depend on an accepted lake. The Erosion stage's deterministic receivers and flow accumulation now directly author channel extent, while accepted lakes intercept those channels and reconnect them through spill outlets.
+- Eight-neighbour drainage remains the simulation routing model, but diagonal links are converted into deterministic orthogonal water cells before terrain, rendering, road, and connectivity consumers receive the river mask.
+- A solved depression is no longer discarded solely because its natural spill contour is one tile short of the readable minimum. A bounded promotion may add only the lowest connected shore cells close to spill elevation; single-cell puddles are still not accepted as final lakes.
+- Hydrology intensity still strengthens incision and increases direct channel extent, but its erosion contribution is limited so higher intensity does not systematically drain otherwise credible basins. Basin tendency also lowers the minimum viable lake depth without stamping water independently of priority-flood geometry.
+
+Migration guidance:
+
+1. Consume `flowAccumulation` and the final river mask instead of inferring that every river begins at a lake.
+2. Preserve depression-first lake authority and the bounded 2-3 tile readable footprint; do not restore authored lake stamps or particle erosion.
+3. Test direct-channel determinism separately from lake-overflow channels: zero intensity disables the former, while accepted lakes may still emit the latter.
+
+## Late-Gated Island Falloff, Redundant Terrain Controls, and MAP6
+
+Status: Deprecated as of August 10, 2026.
+
+- Late `smoothstep` activation, squared edge influence, generic centre-upland/basin Gaussians, and the unused legacy coastline-envelope path are retired. They produced a raised interior slab followed by a narrow coastal wall and competed with named archetype fields.
+- Low-frequency Surface terrain now receives a fixed `0.5` linear conversion toward the Red Blob square-bump target `1 - d`, where `d = 1 - (1 - nx²) × (1 - ny²)`. Fine detail is added afterward and fades only through the outermost six percent before the exact perimeter clamp.
+- Border-water falloff (`islandCompactness`), interior land floor (`interiorRise`), sea-level bias, legacy `waterLevel`, `edgeWaterBias`, and compatibility-only `skipCarving` state are removed from active settings, recipes, presets, randomization, and editor controls.
+- Sea Level chooses its threshold exclusively from Land mass and never reshapes Surface. Coast complexity may perturb the square-bump contour, but that perturbation vanishes at both the centre and perimeter.
+- `MAP7` is the only supported terrain share-code format and serializes active fields only. `MAP6` and earlier formats are rejected; saved scenario objects are sanitized by ignoring retired properties rather than reproducing old terrain.
+
+Migration guidance:
+
+1. Regenerate terrain and issue a new `MAP7` code; do not translate removed values or reserved bits.
+2. Tune broad identity with archetype, Relief, Max height, upland distribution, and the retained advanced archetype modifiers; use Land mass for coastline coverage.
+3. Keep shared seeded noise authoritative for local Surface structure, apply named uplift and coastline plans only as bounded macro offsets, and add fine detail after island conversion.
+
+## Archetype-Dominant Surface and Radial/Chebyshev Island Constraints
+
+Status: Deprecated as of August 10, 2026.
+
+- Treating the displayed archetype field as the dominant Surface elevation is retired. It caused Long Spine, Massif, and other identities to read as prescribed final geometry with noise merely painted over them.
+- Radial distance produced generic circular islands, while the temporary `max(abs(x), abs(y))` correction produced a square pyramid. Neither is the Surface contract.
+- Surface elevation is now led by seeded octave noise. Archetype uplift and basin tendency remain visible but bounded low-frequency biases, and the legacy coastline envelope is retained only as a smaller coastline-planning term.
+- Island containment now follows the nonlinear square-bump distance formulation: noise remains authoritative inland, the boundary influence accelerates near the edge, contour noise breaks uniformity, and the exact perimeter is clamped for ocean topology. Surface and Sea Level use the same elevation field; Sea Level adds classification only.
+
+Migration guidance:
+
+1. Tune archetype amplitude as an uplift bias, not as a target mountain silhouette.
+2. Preserve more correlation with Scenario noise than with Uplift inside the unaffected map interior while keeping named uplift direction or pairing measurable.
+3. Do not replace the nonlinear boundary constraint with a radial dome, Chebyshev pyramid, or authored island outline.
+
+## Preview-Only Uplift Contract and Archetype-Reseeded Surface Noise
+
+Status: Deprecated as of August 10, 2026.
+
+- The temporary preview-only Uplift contract is retired. It made archetype fields legible but left Surface dominated by a separately scaled octave heightfield, so the next editor stage did not visibly deform toward the shape it had just presented.
+- The control-shaped archetype uplift and basin signal is now shared by Uplift and production Surface composition. It supplies a measurable bounded bias, while shared seeded noise remains the primary Surface elevation before erosion.
+- Scenario noise no longer receives an archetype-specific seed offset. With other controls held constant, changing only the archetype applies a different deformation to the same initial noise rather than silently replacing that noise.
+- Twin Bay's central basin is bounded so the stronger deformation retains a deterministic medium-map lake opportunity instead of expanding beyond the accepted lake footprint.
+
+Migration guidance:
+
+1. Treat Uplift as the broad deformation Surface will actually inherit, not as an exaggerated field inspector disconnected from production elevation.
+2. Keep octave noise primary at Surface while retaining measurable axial, radial, paired, or shelf-scale uplift influence.
+3. Preserve lake-prone basin area and depth when tuning deformation strength, and verify the focused deterministic hydrology fixture after terrain changes.
+
+## Composite-Height Uplift Preview
+
+Status: Deprecated as of August 10, 2026.
+
+- The Uplift editor step no longer renders low-detail composite elevation dominated by generic octave noise. That presentation obscured the defining Long Spine, Massif, Twin Bay, Shelf, and None field structures even though their underlying uplift maps differed.
+- Uplift now isolates archetype uplift and basin tendency on a shared nearly flat context surface, uses a diverging field overlay and near-overhead camera, and shows the coastline envelope as context rather than final terrain geometry.
+- Surface remains the first step that combines archetype uplift with seeded terrain variation. Production terrain composition, archetype strengths, recipes, controls, and share-code data are unchanged by the preview-only presentation.
+
+Migration guidance:
+
+1. Judge archetype identity in Uplift by field direction, concentration, pairing, asymmetry, and basin placement, not by a finished mountain silhouette.
+2. Use Surface when assessing the combined pre-erosion terrain, and Erosion or later stages when assessing final morphological consequences.
+3. Keep `None` field-neutral and essentially flat in Uplift; do not reintroduce generic noise there merely to make the preview look terrain-like.
+
+## Authored Crag Authority and Legacy Hydraulic Terrain Paths
+
+Status: Deprecated as of August 10, 2026.
+
+- Authored crag uplift, blocked/low-fuel footprints, crag-only shader fields, and crag-specific pathing or placement rules are retired. Mountains now emerge from broad archetype uplift followed by deterministic drainage, stream-power carving, sediment deposition, and talus relaxation.
+- The unused coarse terrain generator, tectonic-proxy seed path, pre-river erosion path, and iterative hydraulic solver are removed. Terrain generation does not use particles or runtime hydraulic erosion.
+- Historical completed crag tasks remain in `work_queue.md` as records of the superseded approach; they are not active design authority.
+
+Migration guidance:
+
+1. Express archetype identity through `archetypeUpliftField.ts`, not through final ridge, valley, cliff, or outcrop geometry.
+2. Tune drainage and bounded material transfer in `drainageErosion.ts`, and derive exposed rock through `terrainMorphology.ts`.
+3. Keep hard terrain boundaries for water topology and genuinely binary infrastructure/gameplay decisions; do not restore crag footprint authority or height-band mountain materials.
+
+## Coarse-Carving Map Editor Model and Visible Bypass
+
+Status: Deprecated as of August 10, 2026.
+
+- The editor's Landform/carving and Surface/relief stage identities are retired. The authoring sequence now names broad Uplift and initial Surface conditions before deterministic Erosion.
+- The shared new-run UI no longer exposes `skipCarving`; the coarse pre-river carving path it described no longer exists.
+- The serialized `skipCarving` field and share-code bit remain readable and round-trip for compatibility, but have no terrain-pipeline effect and default to `false` in new workflows.
+- Hydrology intensity is authored at Erosion because it controls drainage incision before the same value shapes the downstream Rivers/Lakes result.
+
+Migration guidance:
+
+1. Put archetype, Relief, Max height, upland distribution, landform alignment, and basin tendency under Uplift.
+2. Put Ruggedness and surface frequency under Surface, and describe both as pre-erosion initial conditions rather than final mountain geometry.
+3. Use the `terrain:elevation` and `terrain:erosion` snapshots for comparison; keep legacy debug-phase names only as accepted compatibility aliases.
+4. Do not restore a carving bypass or add player-facing erosion controls without a new persistence and control-contract decision.
+
+## Render-Only Continuous Crag Microterrain
+
+Status: Deprecated as of August 6, 2026.
+
+- The `surface-v1` batched microterrain overlay is retired. A supplied capture verified that it was active with 3,040 triangles, but its authority-safe 0.62-unit rise still read as smooth terrain at the strategic camera.
+- Segmented crag crowns, ledges, and fracture gaps now modify authoritative elevation before hydrology. A two-bit footprint makes substantial crown/face tiles blocked and the wider formation rocky and zero-fuel.
+- The normal terrain mesh now owns crag depth, shadows, silhouette, picking, and grounding. The deterministic crag field remains for ridge-oriented material evaluation and diagnostics, not independent geometry.
+
+Migration guidance:
+
+1. Tune authoritative crown segment length, crown width, relief amplitude, fracture gaps, and footprint thresholds in `craggyRidgeRelief.ts`.
+2. Route gameplay exclusions through `tileCragFootprint`; do not infer collision from renderer output.
+3. Keep water and infrastructure reconciliation in the terrain authority pass, and do not restore `cragSurfaceGeometry.ts`.
+
+## Painted and Coarse-Vertex Crag Relief
+
+Status: Deprecated as of August 6, 2026.
+
+- Crag-specific parallax and fragment material as the primary source of relief remain retired because supplied captures showed a pale contour patch without convincing depth. Authority-gated stone color, bounded crevice values, talus blending, and distance-filtered fine normals may supplement the authoritative terrain geometry, but must not imitate silhouette or collision depth.
+- Displacing the existing base-terrain vertices is also retired in source, but it was never emitted into the `dist` tree used for the follow-up capture and therefore did not receive valid visual evaluation. The continuous microterrain path supersedes it because it provides an explicit local topology and geometry budget.
+- The immediate replacement was one batched terrain-conforming microterrain surface, which is now itself superseded by authoritative fractured ridge formations. Shader height and normal evaluation remain available only as developer diagnostics.
+
+Migration guidance:
+
+1. Tune authoritative crown and fracture formation parameters in `craggyRidgeRelief.ts`.
+2. Do not treat screenshots from an unbuilt `dist` tree as evidence for or against a renderer revision; confirm the `surface-v1` marker before tuning.
+3. Keep blocked and low-fuel behavior tied to `tileCragFootprint` rather than renderer geometry, and keep any supplemental final material free of parallax and fragment-depth writes.
+
+## Instanced Crag Outcrop Geometry
+
+Status: Deprecated as of August 6, 2026.
+
+- All terrain-owned instanced crag geometry is retired, including the original tile-local clusters and the later multi-tile band variant. Supplied captures showed isolated black protrusions and scratch-like marks rather than coherent mountain geology.
+- The current replacement is authoritative fractured ridge elevation plus `tileCragFootprint`; the normal terrain mesh supplies depth, shadows, and silhouette variation without returning to reusable asset piles.
+- Share-code and save schemas remain unchanged, while movement, roads, settlements, fuel, vegetation, water reconciliation, and grounding now explicitly consume the authoritative formation or footprint. Fragment-depth writes remain disabled.
+
+Migration guidance:
+
+1. Tune authoritative crown segmentation, relief, ledges, fracture gaps, and footprint thresholds rather than reintroducing outcrop assets.
+2. Keep material construction tied to the authoritative uplift field and keep gameplay exclusion tied to `tileCragFootprint`.
+3. Extend the authoritative plan before pursuing any larger silhouette-changing formations.
+
 ## Disabled Grass Ground-Colour Detail Patch
 
 Status: Deprecated as of August 4, 2026.
@@ -858,7 +1005,7 @@ Status: Deprecated as of July 22, 2026.
 - The replacement treats the complete indexed lake/river contour as immutable XZ authority, subtracts its water triangles directly from terrain triangles, and splits both surfaces only at exact terrain-edge intersections.
 - Shared seam vertices retain source-contour and terrain-triangle provenance and own the resolved terrain top, authoritative water height, skirt bottom, and retained-land UV.
 - Exact coplanar contact alone is not considered sufficient depth coverage: closed skirt bottoms carry a measured, miter-jointed, fully submerged waterward guard strip in the existing terrain buffers. Do not restore projection or inflate the visible seam to hide raster pinholes.
-- Applying procedural rock vertex displacement to the terrain cutout is obsolete. Its T-junction topology cannot support nonlinear vertex morphing without separating long and subdivided tile edges; rock depth remains fragment-stage bump/normal detail instead. Retained terrain edges must also be split at every collinear cutout vertex before triangulation.
+- Applying procedural rock vertex displacement at or across the terrain cutout remains obsolete. Its T-junction topology cannot support nonlinear vertex morphing without separating long and subdivided tile edges. Crag relief now uses a separate locally subdivided surface selected only after validity has excluded the water domain; retained terrain edges must still be split at every collinear cutout vertex before triangulation.
 - Closed-bank vertex displacement fades to zero at the seam; river-mouth opening segments remain skirt-free and retain their ocean hand-off behavior.
 
 Migration guidance:
@@ -969,3 +1116,58 @@ Migration guidance:
 1. Treat open-biome canopy and stem values as vegetation structure, not an automatic request for tree models.
 2. Add future low vegetation through grass or scrub rendering paths instead of routing it through tall-tree placement.
 3. Keep visual candidate weights deterministic and separate from fuel or biome rules.
+
+## Routed and Iteratively Repaired Static Hydrology
+
+Status: Deprecated as of August 11, 2026.
+
+- The second priority-flood basin solve, rainfall/runoff candidate scoring, minimum-footprint promotion, lake-overflow routing, waterfall classification, lake-adjacent absorption, detached-component repair, and authoritative lateral river widening are no longer part of map generation.
+- Cumulative per-cell river-surface descent is removed because it produced deep straight-sided channels and fragmented aqueduct-like water surfaces.
+- The replacement reuses erosion's existing priority-flood depression depth, thresholds its existing flow accumulation once, and derives every water surface locally in one linear River stage.
+
+Migration guidance:
+
+1. Add future river abundance by changing the accumulation threshold, not by splicing, widening, or validating route fragments.
+2. Add future lake abundance by changing the depression-depth threshold, not by promoting arbitrary shore cells or rerunning basin hydrology.
+3. Keep waterfall and overflow metadata empty unless a future simple morphology rule can derive it without routing or iterative cleanup.
+
+## Continuous Runtime Vegetation Block Succession
+
+Status: Deprecated as of August 11, 2026.
+
+- Growth season no longer repeatedly advances 16x16 vegetation blocks, maintains per-block catch-up clocks, or flushes canopy/stem visual changes every 30 simulated days.
+- Runtime growth is one deterministic annual linear pass: forest fuel accumulates toward carrying capacity, disturbed ground can recover, and sparse recruitment is restricted to the existing forest edge.
+- Fuel-only changes update authoritative fuel data without incrementing terrain or vegetation revisions; map-generation pre-growth retains the full visual succession model in explicit year units.
+
+Migration guidance:
+
+1. Add campaign fuel-risk tuning to the annual terrain simulation operation, not a per-frame or per-block loop.
+2. Trigger vegetation rendering only for annual tile-type recovery or recruitment, never for fuel-only accumulation.
+3. Keep broad canopy maturation and stand formation in map generation unless a future feature demonstrates a clear player-visible runtime need.
+
+## Fuel-Only Visually Static Annual Vegetation Growth
+
+Status: Deprecated as of August 11, 2026.
+
+- The fuel-only, sparse-edge-recruitment behavior introduced by `TSK-0190` no longer defines campaign vegetation growth. Forest and shrub structure now visibly matures during the same annual event, and woody vegetation can encroach through grass, floodplain, and shrub stages.
+- Runtime processing remains one deterministic O(n) annual pass. Pre-event woody occupancy is snapshotted so recovery and establishment cannot cascade through multiple ecological stages in one year.
+- Forest and shrub fuel capacity is age-scaled, type transitions retain existing fuel, and deterministic render-only cohorts preserve young trees inside mature stands without adding per-tree state or raising the 18,000-instance budget.
+
+Migration guidance:
+
+1. Tune campaign succession through the annual terrain-domain probabilities, suitability threshold, age gains, and fuel catch-up rate rather than restoring per-tick block growth.
+2. Batch age, canopy, stem, or tile-type visual changes into one vegetation revision after the annual pass; keep genuinely fuel-only mature years render-free.
+3. Preserve the suppression-success/late-risk loop: untreated viable connected land should close into mature forest over a 15-20 year campaign, while fire should impose a multi-year recovery delay.
+
+## Separate 3D Score and Progression Cards
+
+Status: Deprecated as of August 11, 2026.
+
+- The temporary score-only collapse control and independently framed Budget, progression, and score cards no longer define the 3D top-left HUD.
+- One operational-summary widget now owns a permanent Main Menu / Score and Budget / pin and `x` header, with dock-compatible collapsed/hovered Compact behavior and pinned Full scoring counters.
+- Collapse state remains run-local and resets to Full for a new run.
+
+Migration guidance:
+
+1. Add future always-available run actions or headline values to the unified header.
+2. Add progression-level detail to Compact mode and dense operational counters to Full mode rather than creating another top-left card.

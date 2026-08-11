@@ -221,6 +221,10 @@ export class UIController {
     this.topBar.attachProgressionActions(actions);
   }
 
+  resetRuntimeWidgetState(): void {
+    this.topBar.resetRuntimeWidgetState();
+  }
+
   private buildLayout(): void {
     const shell = document.createElement("div");
     shell.className = "phase-shell";

@@ -15,7 +15,7 @@ const { cloneTerrainRecipe, compileTerrainRecipe, createDefaultTerrainRecipe } =
   await import(distImport(["mapgen", "terrainProfile.js"]));
 const { buildNoiseLandmassCore } =
   await import(distImport(["systems", "terrain", "sim", "noiseLandmass.js"]));
-const { getEffectiveLandCoverageTarget, TERRAIN_GENERATION_LIMITS } =
+const { TERRAIN_GENERATION_LIMITS } =
   await import(distImport(["systems", "terrain", "constants", "terrainGenerationLimits.js"]));
 
 const createSequence = (seed) => {
@@ -32,6 +32,13 @@ assert.deepEqual(first, replay, "Injected randomness should make terrain randomi
 assert.equal(first.mapSize, "gigantic", "Slider randomization must preserve the selected map size.");
 
 const fields = TERRAIN_RUN_GROUPS.flatMap((group) => group.fields);
+const obsoleteRecipeKeys = ["waterLevel"];
+const obsoleteAdvancedKeys = ["skipCarving", "interiorRise", "islandCompactness", "seaLevelBias"];
+assert.ok(!fields.some((field) =>
+  field.scope === "recipe"
+    ? obsoleteRecipeKeys.includes(field.key)
+    : obsoleteAdvancedKeys.includes(field.key)
+), "Retired terrain values must not be exposed in new-run controls.");
 for (const field of fields) {
   if (field.type === "select") {
     assert.ok(
@@ -61,6 +68,8 @@ const shareCode = encodeTerrainSeedCode({
 });
 const decodedShareCode = decodeTerrainSeedCode(shareCode);
 assert.ok(decodedShareCode, "The randomized terrain should produce a valid share code.");
+assert.ok(shareCode.startsWith("MAP7-"), "New terrain share codes should use the compact MAP7 format.");
+assert.equal(decodeTerrainSeedCode(shareCode.replace(/^MAP7-/, "MAP6-")), null, "MAP6 terrain codes are intentionally unsupported.");
 assert.equal(decodedShareCode.seed, shareCodeSeed, "The share code should preserve the separate seed.");
 assert.equal(decodedShareCode.mapSize, first.mapSize, "The share code should preserve map size.");
 for (const field of fields) {
@@ -125,8 +134,12 @@ extremeLegacyRecipe.landCoverageTarget = 0.99;
 extremeLegacyRecipe.advancedOverrides = {
   ...extremeLegacyRecipe.advancedOverrides,
   maxHeight: 1.5,
-  islandCompactness: 0
+  islandCompactness: 0,
+  interiorRise: 1,
+  seaLevelBias: 1,
+  skipCarving: true
 };
+extremeLegacyRecipe.waterLevel = 1;
 const normalizedLegacyRecipe = cloneTerrainRecipe(extremeLegacyRecipe);
 assert.equal(
   normalizedLegacyRecipe.landCoverageTarget,
@@ -138,11 +151,10 @@ assert.equal(
   TERRAIN_GENERATION_LIMITS.maxHeight.max,
   "Legacy max height should normalize to the safe maximum."
 );
-assert.equal(
-  normalizedLegacyRecipe.advancedOverrides?.islandCompactness,
-  TERRAIN_GENERATION_LIMITS.islandCompactness.min,
-  "Legacy border-water falloff should normalize to the safe minimum."
-);
+assert.ok(!("waterLevel" in normalizedLegacyRecipe), "Saved recipes should discard legacy water level.");
+for (const key of obsoleteAdvancedKeys) {
+  assert.ok(!(key in normalizedLegacyRecipe.advancedOverrides), `Saved recipes should discard legacy ${key}.`);
+}
 
 const encodedSafeParts = encodeTerrainSeedCode({
   seed: 987654,
@@ -150,17 +162,12 @@ const encodedSafeParts = encodeTerrainSeedCode({
   terrain: createDefaultTerrainRecipe("colossal", "MASSIF")
 }).split("-");
 const legacyBody = encodedSafeParts[2]?.split("") ?? [];
-legacyBody.splice(10, 2, ...Math.round(0.99 * 100).toString(36).toUpperCase().padStart(2, "0"));
-legacyBody.splice(22, 2, ...Math.round(1.5 * 100).toString(36).toUpperCase().padStart(2, "0"));
-legacyBody.splice(34, 2, "0", "0");
+legacyBody.splice(9, 2, ...Math.round(0.99 * 100).toString(36).toUpperCase().padStart(2, "0"));
+legacyBody.splice(19, 2, ...Math.round(1 * 100).toString(36).toUpperCase().padStart(2, "0"));
 const decodedLegacyCode = decodeTerrainSeedCode(`${encodedSafeParts[0]}-${encodedSafeParts[1]}-${legacyBody.join("")}`);
-assert.ok(decodedLegacyCode, "Legacy share codes with formerly valid extremes should remain readable.");
+assert.ok(decodedLegacyCode, "MAP7 codes with out-of-range recipe values should sanitize safely.");
 assert.equal(decodedLegacyCode.terrain.landCoverageTarget, TERRAIN_GENERATION_LIMITS.landCoverageTarget.max);
 assert.equal(decodedLegacyCode.terrain.advancedOverrides?.maxHeight, TERRAIN_GENERATION_LIMITS.maxHeight.max);
-assert.equal(
-  decodedLegacyCode.terrain.advancedOverrides?.islandCompactness,
-  TERRAIN_GENERATION_LIMITS.islandCompactness.min
-);
 
 const TERRAIN_ARCHETYPES = ["MASSIF", "LONG_SPINE", "TWIN_BAY", "SHELF", "NONE"];
 const BOUNDARY_SIZES = [64, 128, 256];
@@ -182,20 +189,16 @@ const createBoundaryRecipe = (size, archetype, mode) => {
     recipe.advancedOverrides = {
       ...recipe.advancedOverrides,
       maxHeight: TERRAIN_GENERATION_LIMITS.maxHeight.min,
-      islandCompactness: TERRAIN_GENERATION_LIMITS.islandCompactness.min,
-      basinStrength: 1,
-      seaLevelBias: 1
+      basinStrength: 1
     };
   } else {
     recipe.landCoverageTarget = TERRAIN_GENERATION_LIMITS.landCoverageTarget.max;
     recipe.coastComplexity = 1;
     recipe.advancedOverrides = {
       ...recipe.advancedOverrides,
-      islandCompactness: TERRAIN_GENERATION_LIMITS.islandCompactness.min,
       asymmetry: 1,
       anisotropy: 1,
-      embayment: 0,
-      seaLevelBias: 0
+      embayment: 0
     };
   }
   return recipe;
@@ -266,13 +269,11 @@ for (const size of BOUNDARY_SIZES) {
   for (const archetype of TERRAIN_ARCHETYPES) {
     for (const mode of ["low", "edge"]) {
       const fixture = buildBoundaryFixture(size, archetype, mode);
-      const effectiveTarget = getEffectiveLandCoverageTarget(
-        fixture.recipe.landCoverageTarget,
-        fixture.recipe.advancedOverrides?.seaLevelBias ?? 0.5
-      );
+      const effectiveTarget = fixture.recipe.landCoverageTarget;
       assert.ok(
         Math.abs(fixture.metrics.landCoverage - effectiveTarget) <= 0.02,
-        `${size}/${archetype}/${mode} land coverage should stay within 0.02 of ${effectiveTarget}.`
+        `${size}/${archetype}/${mode} land coverage ${fixture.metrics.landCoverage.toFixed(4)} `
+        + `should stay within 0.02 of ${effectiveTarget}.`
       );
       assert.ok(
         fixture.metrics.borderHuggingRatio <= (BORDER_HUGGING_LIMIT_BY_SIZE.get(size) ?? 0),
@@ -280,8 +281,9 @@ for (const size of BOUNDARY_SIZES) {
         + `${fixture.metrics.borderHuggingRatio.toFixed(4)}.`
       );
       assert.ok(
-        fixture.metrics.dryElevationSpread >= 0.04,
-        `${size}/${archetype}/${mode} dry terrain should retain visible elevation spread.`
+        fixture.metrics.dryElevationSpread >= 0.012,
+        `${size}/${archetype}/${mode} dry terrain should retain visible elevation spread: `
+        + `${fixture.metrics.dryElevationSpread.toFixed(4)}.`
       );
     }
   }

@@ -33,6 +33,7 @@ export type TerrainPreviewAssetProgress = {
 
 export type TerrainPreviewSetTerrainOptions = {
   recenter?: boolean;
+  viewPreset?: "default" | "uplift";
 };
 
 export type TerrainPreviewBridgeSelection = {
@@ -64,6 +65,7 @@ const FOG_COLOR = 0x4d5a68;
 const WATER_FOG_NEAR = 10_000;
 const WATER_FOG_FAR = 20_000;
 const DEFAULT_CAMERA_DIRECTION = new THREE.Vector3(0.65, 0.55, 0.65).normalize();
+const UPLIFT_CAMERA_DIRECTION = new THREE.Vector3(0.16, 1, 0.12).normalize();
 const CAMERA_FIT_PADDING = 1.12;
 
 type TerrainPreviewFrame = {
@@ -193,6 +195,7 @@ export const createTerrainPreviewController = (canvas: HTMLCanvasElement): Terra
   let terrainMesh: THREE.Mesh | null = null;
   let terrainSurface: TerrainRenderSurface | null = null;
   let lastTerrainFrame: TerrainPreviewFrame | null = null;
+  let currentViewPreset: "default" | "uplift" = "default";
   let bridgeDebug: TerrainBridgeDebug | null = null;
   let selectedBridgeSpan: TerrainBridgeSpanDebug | null = null;
   let bridgeSelectionListener: ((selection: TerrainPreviewBridgeSelection) => void) | null = null;
@@ -307,7 +310,7 @@ export const createTerrainPreviewController = (canvas: HTMLCanvasElement): Terra
   canvas.addEventListener("mousemove", handleCanvasPointerMove);
   canvas.addEventListener("mouseleave", handleCanvasPointerLeave);
 
-  const syncCameraForTerrain = (frame: TerrainPreviewFrame): void => {
+  const syncCameraForTerrain = (frame: TerrainPreviewFrame, viewPreset = currentViewPreset): void => {
     const verticalFov = THREE.MathUtils.degToRad(camera.fov);
     const horizontalFov = 2 * Math.atan(Math.tan(verticalFov / 2) * Math.max(0.001, camera.aspect));
     const fitFov = Math.max(0.1, Math.min(verticalFov, horizontalFov));
@@ -323,8 +326,9 @@ export const createTerrainPreviewController = (canvas: HTMLCanvasElement): Terra
       THREE.MathUtils.lerp(frame.baseY, frame.center.y, 0.08),
       frame.center.z
     );
-    const position = target.clone().addScaledVector(DEFAULT_CAMERA_DIRECTION, distance);
-    position.y += Math.max(0, frame.size.y * 0.18);
+    const direction = viewPreset === "uplift" ? UPLIFT_CAMERA_DIRECTION : DEFAULT_CAMERA_DIRECTION;
+    const position = target.clone().addScaledVector(direction, distance);
+    position.y += viewPreset === "uplift" ? 0 : Math.max(0, frame.size.y * 0.18);
 
     camera.near = Math.max(0.1, distance - radius * 3.2);
     camera.far = Math.max(400, distance + radius * 10);
@@ -427,6 +431,9 @@ export const createTerrainPreviewController = (canvas: HTMLCanvasElement): Terra
 
   const setTerrain = (sample: TerrainSample, options: TerrainPreviewSetTerrainOptions = {}): void => {
     const hadTerrain = lastTerrainFrame !== null;
+    const nextViewPreset = options.viewPreset ?? "default";
+    const viewPresetChanged = nextViewPreset !== currentViewPreset;
+    currentViewPreset = nextViewPreset;
     disposeTerrainMesh(terrainMesh, scene);
     terrainMesh = null;
     waterSystem.clear();
@@ -478,8 +485,8 @@ export const createTerrainPreviewController = (canvas: HTMLCanvasElement): Terra
         showWaterfalls: true
       });
     }
-    if (options.recenter || !hadTerrain) {
-      syncCameraForTerrain(lastTerrainFrame);
+    if (options.recenter || !hadTerrain || viewPresetChanged) {
+      syncCameraForTerrain(lastTerrainFrame, currentViewPreset);
     }
   };
 
@@ -505,7 +512,7 @@ export const createTerrainPreviewController = (canvas: HTMLCanvasElement): Terra
     if (!lastTerrainFrame) {
       return;
     }
-    syncCameraForTerrain(lastTerrainFrame);
+    syncCameraForTerrain(lastTerrainFrame, currentViewPreset);
   };
 
   const setBridgeSelectionListener = (

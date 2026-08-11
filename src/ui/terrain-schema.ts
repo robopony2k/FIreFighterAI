@@ -13,7 +13,6 @@ export type TerrainSliderKey =
   | "ruggedness"
   | "coastComplexity"
   | "landCoverageTarget"
-  | "waterLevel"
   | "riverIntensity"
   | "vegetationDensity"
   | "townDensity"
@@ -21,9 +20,9 @@ export type TerrainSliderKey =
 
 export type TerrainSelectKey = "archetype";
 
-export type TerrainAdvancedNumericKey = Exclude<keyof TerrainAdvancedOverrides, "skipCarving" | "skipRoadNetworkRouting">;
+export type TerrainAdvancedNumericKey = Exclude<keyof TerrainAdvancedOverrides, "skipRoadNetworkRouting">;
 
-export type TerrainToggleKey = Extract<keyof TerrainAdvancedOverrides, "skipCarving" | "skipRoadNetworkRouting">;
+export type TerrainToggleKey = Extract<keyof TerrainAdvancedOverrides, "skipRoadNetworkRouting">;
 
 export type TerrainControlField =
   | {
@@ -126,7 +125,13 @@ export const TERRAIN_RUN_GROUPS: readonly TerrainControlGroup[] = [
     id: "terrain-shape",
     title: "Island Shape",
     fields: [
-      selectField("archetype", "archetype", "Archetype", "Primary island layout and relief style.", TERRAIN_ARCHETYPE_OPTIONS),
+      selectField(
+        "archetype",
+        "archetype",
+        "Archetype",
+        "Broad coastline and uplift identity; erosion determines the resulting mountain and valley forms.",
+        TERRAIN_ARCHETYPE_OPTIONS
+      ),
       sliderField(
         "recipe",
         "relief",
@@ -143,7 +148,7 @@ export const TERRAIN_RUN_GROUPS: readonly TerrainControlGroup[] = [
         "landCoverageTarget",
         "landCoverageTarget",
         "Land mass",
-        "Target dry island coverage before the advanced sea-level bias applies its bounded two-point adjustment.",
+        "Target dry island coverage resolved by the generated sea level.",
         {
           min: TERRAIN_GENERATION_LIMITS.landCoverageTarget.min,
           max: TERRAIN_GENERATION_LIMITS.landCoverageTarget.max
@@ -154,7 +159,7 @@ export const TERRAIN_RUN_GROUPS: readonly TerrainControlGroup[] = [
         "maxHeight",
         "maxHeight",
         "Max height",
-        "How high the tallest mountains are allowed to climb within the gameplay-safe relief envelope.",
+        "How high the final terrain may climb within the gameplay-safe relief envelope.",
         {
           min: TERRAIN_GENERATION_LIMITS.sliders.maxHeight.min,
           max: TERRAIN_GENERATION_LIMITS.sliders.maxHeight.max
@@ -165,7 +170,7 @@ export const TERRAIN_RUN_GROUPS: readonly TerrainControlGroup[] = [
         "ruggedness",
         "ruggedness",
         "Ruggedness",
-        "How broken, ridged, and difficult the terrain becomes.",
+        "How much seeded surface variation is available for drainage and slope relaxation to reshape.",
         {
           min: TERRAIN_GENERATION_LIMITS.sliders.ruggedness.min,
           max: TERRAIN_GENERATION_LIMITS.sliders.ruggedness.max
@@ -185,8 +190,8 @@ export const TERRAIN_RUN_GROUPS: readonly TerrainControlGroup[] = [
         "advanced",
         "ridgeAlignment",
         "ridgeAlignment",
-        "Ridge alignment",
-        "How strongly uplands align into coherent ridge corridors instead of scattered lumps."
+        "Landform alignment",
+        "Changes the seeded directional alignment shared by the island envelope and broad uplift."
       ),
       sliderField(
         "advanced",
@@ -202,8 +207,13 @@ export const TERRAIN_RUN_GROUPS: readonly TerrainControlGroup[] = [
     title: "Coast + Water",
     fields: [
       sliderField("recipe", "coastComplexity", "coastComplexity", "Coast complexity", "How much low-frequency shoreline and coastal elevation variation is added before sea level."),
-      sliderField("recipe", "riverIntensity", "riverIntensity", "Hydrology intensity", "Runoff, channel carve strength, and lake outlet emphasis."),
-      checkboxField("skipCarving", "skipCarving", "Skip terrain carving", "Bypass the coarse pre-river carving pass and keep the relief stage untouched.")
+      sliderField(
+        "recipe",
+        "riverIntensity",
+        "riverIntensity",
+        "Hydrology intensity",
+        "Strength of deterministic drainage incision and the downstream river and lake network."
+      )
     ]
   },
   {
@@ -223,7 +233,6 @@ export const MAP_EDITOR_TERRAIN_GROUPS = {
       id: "scenario-shape",
       title: "World Plan",
       fields: [
-        selectField("archetype", "archetype", "Archetype", "Primary island layout and relief style.", TERRAIN_ARCHETYPE_OPTIONS),
         sliderField(
           "advanced",
           "noiseFrequency",
@@ -234,57 +243,17 @@ export const MAP_EDITOR_TERRAIN_GROUPS = {
       ]
     }
   ],
-  relief: [
+  surface: [
     {
-      id: "relief-simple",
-      title: "Surface Pattern",
+      id: "surface-simple",
+      title: "Initial Surface",
       fields: [
-        sliderField(
-          "advanced",
-          "ridgeFrequency",
-          "ridgeFrequency",
-          "Surface frequency",
-          "How frequently secondary ridge texture and surface bands repeat across the map."
-        )
-      ]
-    },
-    {
-      id: "relief-advanced",
-      title: "Surface Direction",
-      advanced: true,
-      fields: [
-        sliderField(
-          "advanced",
-          "ridgeAlignment",
-          "ridgeAlignment",
-          "Surface alignment",
-          "How strongly secondary ridge texture leans into a shared direction instead of staying scattered."
-        )
-      ]
-    }
-  ],
-  carving: [
-    {
-      id: "carving-simple",
-      title: "Elevation Field",
-      fields: [
-        sliderField(
-          "recipe",
-          "relief",
-          "relief",
-          "Relief",
-          "How much the noise elevation rises and falls before sea level.",
-          {
-            min: TERRAIN_GENERATION_LIMITS.sliders.relief.min,
-            max: TERRAIN_GENERATION_LIMITS.sliders.relief.max
-          }
-        ),
         sliderField(
           "recipe",
           "ruggedness",
           "ruggedness",
           "Ruggedness",
-          "How much octave detail, ridge breakup, and local terrain variation remains visible.",
+          "How much seeded surface variation remains available for drainage and slope relaxation to reshape.",
           {
             min: TERRAIN_GENERATION_LIMITS.sliders.ruggedness.min,
             max: TERRAIN_GENERATION_LIMITS.sliders.ruggedness.max
@@ -292,10 +261,43 @@ export const MAP_EDITOR_TERRAIN_GROUPS = {
         ),
         sliderField(
           "advanced",
+          "ridgeFrequency",
+          "ridgeFrequency",
+          "Surface frequency",
+          "How frequently small-scale pre-erosion surface variation repeats across the map."
+        )
+      ]
+    }
+  ],
+  uplift: [
+    {
+      id: "uplift-simple",
+      title: "Broad Uplift",
+      fields: [
+        selectField(
+          "archetype",
+          "archetype",
+          "Archetype",
+          "Broad coastline and uplift identity; erosion determines the resulting mountain and valley forms.",
+          TERRAIN_ARCHETYPE_OPTIONS
+        ),
+        sliderField(
+          "recipe",
+          "relief",
+          "relief",
+          "Relief",
+          "How strongly broad uplands rise above lowlands before erosion.",
+          {
+            min: TERRAIN_GENERATION_LIMITS.sliders.relief.min,
+            max: TERRAIN_GENERATION_LIMITS.sliders.relief.max
+          }
+        ),
+        sliderField(
+          "advanced",
           "maxHeight",
           "maxHeight",
           "Max height",
-          "How high the tallest mountains are allowed to climb within the gameplay-safe relief envelope.",
+          "How high the final terrain may climb within the gameplay-safe relief envelope.",
           {
             min: TERRAIN_GENERATION_LIMITS.sliders.maxHeight.min,
             max: TERRAIN_GENERATION_LIMITS.sliders.maxHeight.max
@@ -304,19 +306,41 @@ export const MAP_EDITOR_TERRAIN_GROUPS = {
       ]
     },
     {
-      id: "carving-advanced",
-      title: "Height Overrides",
+      id: "uplift-advanced",
+      title: "Uplift Overrides",
       advanced: true,
       fields: [
-        sliderField("advanced", "uplandDistribution", "uplandDistribution", "Upland distribution", "Whether high ground concentrates into one core or spreads across multiple upland shoulders.")
+        sliderField("advanced", "uplandDistribution", "uplandDistribution", "Upland distribution", "Whether broad uplift concentrates into one core or spreads across multiple upland shoulders."),
+        sliderField(
+          "advanced",
+          "ridgeAlignment",
+          "ridgeAlignment",
+          "Landform alignment",
+          "Changes the seeded directional alignment shared by the island envelope and broad uplift."
+        ),
+        sliderField(
+          "advanced",
+          "basinStrength",
+          "basinStrength",
+          "Basin tendency",
+          "How strongly the initial terrain favors broad lowland and lake-prone basin areas."
+        )
       ]
     }
   ],
   erosion: [
     {
       id: "erosion-simple",
-      title: "Erosion",
-      fields: []
+      title: "Drainage + Erosion",
+      fields: [
+        sliderField(
+          "recipe",
+          "riverIntensity",
+          "riverIntensity",
+          "Hydrology intensity",
+          "Strength of deterministic drainage incision and the downstream river and lake network."
+        )
+      ]
     }
   ],
   flooding: [
@@ -329,20 +353,13 @@ export const MAP_EDITOR_TERRAIN_GROUPS = {
           "landCoverageTarget",
           "landCoverageTarget",
           "Land mass",
-          "Target dry island coverage before the advanced sea-level bias applies its bounded two-point adjustment.",
+          "Target dry island coverage resolved by the generated sea level.",
           {
             min: TERRAIN_GENERATION_LIMITS.landCoverageTarget.min,
             max: TERRAIN_GENERATION_LIMITS.landCoverageTarget.max
           }
         ),
-        sliderField("recipe", "coastComplexity", "coastComplexity", "Coast complexity", "How much low-frequency shoreline and coastal elevation variation is added before sea level."),
-        sliderField(
-          "advanced",
-          "seaLevelBias",
-          "seaLevelBias",
-          "Sea-level bias",
-          "Fine-tunes automatic land coverage by up to two percentage points; lower values expose more land and 50% is neutral."
-        )
+        sliderField("recipe", "coastComplexity", "coastComplexity", "Coast complexity", "How much bounded shoreline variation perturbs the continuous island conversion before sea level.")
       ]
     },
     {
@@ -351,18 +368,6 @@ export const MAP_EDITOR_TERRAIN_GROUPS = {
       advanced: true,
       fields: [
         sliderField("advanced", "embayment", "embayment", "Embayment", "How strongly the coastline opens into coves, bays, and inlets."),
-        sliderField(
-          "advanced",
-          "islandCompactness",
-          "islandCompactness",
-          "Border water falloff",
-          "How firmly the distance shaper forces edge water while leaving the middle to the elevation noise.",
-          {
-            min: TERRAIN_GENERATION_LIMITS.islandCompactness.min,
-            max: TERRAIN_GENERATION_LIMITS.islandCompactness.max
-          }
-        ),
-        sliderField("advanced", "interiorRise", "interiorRise", "Interior land floor", "How strongly the distance shaper protects central land without replacing the noise field."),
         sliderField("advanced", "anisotropy", "anisotropy", "Anisotropy", "How strongly the island is stretched into a directional landform."),
         sliderField("advanced", "asymmetry", "asymmetry", "Asymmetry", "How much the island mass shifts away from a balanced center."),
         sliderField(
@@ -378,18 +383,8 @@ export const MAP_EDITOR_TERRAIN_GROUPS = {
   rivers: [
     {
       id: "river-simple",
-      title: "Rivers",
-      fields: [
-        sliderField("recipe", "riverIntensity", "riverIntensity", "Hydrology intensity", "Runoff, channel carve strength, and lake outlet emphasis.")
-      ]
-    },
-    {
-      id: "river-advanced",
-      title: "Hydrology Overrides",
-      advanced: true,
-      fields: [
-        sliderField("advanced", "basinStrength", "basinStrength", "Basin strength", "How much lowland carving and interior basins are emphasized.")
-      ]
+      title: "Rivers + Lakes",
+      fields: []
     }
   ],
   settlements: [

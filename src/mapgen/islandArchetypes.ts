@@ -21,7 +21,6 @@ export type IslandArchetypeDefinition = {
   ridgeAlignment: number;
   uplandDistribution: number;
   coastalShelfWidth: number;
-  interiorRise: number;
   ridgeFrequency: number;
   basinStrength: number;
   maxHeight: number;
@@ -42,7 +41,6 @@ export const ISLAND_ARCHETYPE_DEFINITIONS: Record<IslandArchetypeId, IslandArche
     ridgeAlignment: 0.28,
     uplandDistribution: 0.44,
     coastalShelfWidth: 0.46,
-    interiorRise: 0.68,
     ridgeFrequency: 0.34,
     basinStrength: 0.42,
     maxHeight: 0.58,
@@ -68,7 +66,6 @@ export const ISLAND_ARCHETYPE_DEFINITIONS: Record<IslandArchetypeId, IslandArche
     ridgeAlignment: 0.88,
     uplandDistribution: 0.68,
     coastalShelfWidth: 0.38,
-    interiorRise: 0.7,
     ridgeFrequency: 0.82,
     basinStrength: 0.4,
     maxHeight: 0.72,
@@ -94,7 +91,6 @@ export const ISLAND_ARCHETYPE_DEFINITIONS: Record<IslandArchetypeId, IslandArche
     ridgeAlignment: 0.52,
     uplandDistribution: 0.5,
     coastalShelfWidth: 0.4,
-    interiorRise: 0.62,
     ridgeFrequency: 0.46,
     basinStrength: 0.34,
     maxHeight: 0.56,
@@ -120,7 +116,6 @@ export const ISLAND_ARCHETYPE_DEFINITIONS: Record<IslandArchetypeId, IslandArche
     ridgeAlignment: 0.22,
     uplandDistribution: 0.18,
     coastalShelfWidth: 0.72,
-    interiorRise: 0.38,
     ridgeFrequency: 0.18,
     basinStrength: 0.24,
     maxHeight: 0.4,
@@ -146,7 +141,6 @@ export const ISLAND_ARCHETYPE_DEFINITIONS: Record<IslandArchetypeId, IslandArche
     ridgeAlignment: 0.5,
     uplandDistribution: 0.5,
     coastalShelfWidth: 0.5,
-    interiorRise: 0.5,
     ridgeFrequency: 0.5,
     basinStrength: 0.5,
     maxHeight: 0.5,

@@ -309,7 +309,7 @@ canvas {
 .mapgen-overlay {
   position: absolute;
   inset: 0;
-  z-index: 25;
+  z-index: 45;
   pointer-events: none;
   background: #050607;
   animation: fadeIn 0.25s ease;
@@ -4431,6 +4431,57 @@ canvas {
     #0c0d11;
 }
 
+.map-editor-uplift-legend {
+  position: absolute;
+  left: 14px;
+  bottom: 14px;
+  z-index: 1;
+  display: none;
+  width: min(310px, calc(100% - 28px));
+  padding: 10px 12px;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 7px;
+  background: rgba(9, 12, 14, 0.82);
+  box-shadow: 0 8px 22px rgba(0, 0, 0, 0.28);
+  color: rgba(245, 233, 215, 0.9);
+  pointer-events: none;
+}
+
+.map-editor-screen[data-preview-step="uplift"] .map-editor-uplift-legend {
+  display: block;
+}
+
+.map-editor-uplift-legend-title {
+  margin-bottom: 6px;
+  font-family: var(--font-ui);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.map-editor-uplift-legend-gradient {
+  height: 8px;
+  border-radius: 999px;
+  background: linear-gradient(90deg, rgb(20, 41, 107) 0%, rgb(51, 163, 41) 50%, rgb(235, 128, 20) 100%);
+}
+
+.map-editor-uplift-legend-labels {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 4px;
+  color: rgba(245, 233, 215, 0.8);
+  font-size: 10px;
+}
+
+.map-editor-uplift-legend-note {
+  margin-top: 6px;
+  color: rgba(245, 233, 215, 0.62);
+  font-size: 10px;
+  line-height: 1.35;
+}
+
 .map-editor-debug-drawer {
   border-radius: 8px;
   border: 1px solid rgba(255, 204, 146, 0.14);
@@ -6013,13 +6064,20 @@ input[type="text"] {
 
 .phase-ui-root--three-test .phase-topbar {
   align-self: flex-start;
-  gap: 10px;
-  padding: 0;
+  width: min(760px, calc(100vw - 360px));
   max-width: min(760px, calc(100vw - 360px));
+  gap: 0;
+  padding: 8px 10px 10px;
+  overflow: hidden;
+  border: 1px solid rgba(255, 214, 155, 0.22);
+  border-radius: 14px;
+  background:
+    linear-gradient(180deg, rgba(22, 20, 16, 0.965), rgba(16, 14, 12, 0.94)),
+    radial-gradient(circle at top left, rgba(255, 181, 93, 0.08), transparent 38%);
+  box-shadow: 0 16px 28px rgba(0, 0, 0, 0.34);
   z-index: 4;
 }
 
-.phase-ui-root--three-test .phase-score-counter,
 .phase-ui-root--three-test .phase-badge,
 .phase-ui-root--three-test .phase-alert,
 .phase-ui-root--three-test .phase-cta,
@@ -6911,6 +6969,10 @@ input[type="text"] {
   display: none;
 }
 
+.phase-runtime-header-actions {
+  display: none;
+}
+
 .phase-score-legacy.is-hidden,
 .phase-score-ledger.is-hidden {
   display: none;
@@ -7112,15 +7174,115 @@ input[type="text"] {
 }
 
 .phase-ui-root--three-test .phase-score-strip {
-  width: min(100%, 780px);
+  width: 100%;
   gap: 0;
-  padding: 10px 12px;
-  border-radius: 16px;
+  margin-top: 8px;
+  padding: 10px 2px 2px;
+  border: 0;
+  border-top: 1px solid rgba(255, 214, 155, 0.16);
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.phase-ui-root--three-test .phase-topbar-content {
+  width: 100%;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+}
+
+.phase-ui-root--three-test .phase-score-counter {
+  min-height: 28px;
+  padding: 6px 10px;
   border: 1px solid rgba(255, 214, 155, 0.22);
-  background:
-    linear-gradient(180deg, rgba(22, 20, 16, 0.965), rgba(16, 14, 12, 0.94)),
-    radial-gradient(circle at top left, rgba(255, 181, 93, 0.08), transparent 38%);
-  box-shadow: 0 16px 28px rgba(0, 0, 0, 0.34);
+  background: rgba(22, 20, 16, 0.9);
+  color: rgba(248, 236, 216, 0.96);
+  box-shadow: none;
+}
+
+.phase-ui-root--three-test .phase-budget-chip {
+  box-shadow: none;
+}
+
+.phase-runtime-metrics {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.phase-ui-root--three-test .phase-runtime-metrics {
+  justify-content: center;
+  min-width: 0;
+  cursor: pointer;
+}
+
+.phase-ui-root--three-test .phase-runtime-metrics:focus-visible {
+  border-radius: 8px;
+  outline: 2px solid rgba(240, 179, 59, 0.92);
+  outline-offset: 2px;
+}
+
+.phase-ui-root--three-test .phase-progression-actions {
+  margin: 0;
+  justify-content: flex-start;
+}
+
+.phase-ui-root--three-test .phase-runtime-header-actions {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.phase-ui-root--three-test .phase-runtime-pin,
+.phase-ui-root--three-test .phase-runtime-close {
+  min-width: 28px;
+  min-height: 28px;
+  padding: 4px 7px;
+  border: 1px solid rgba(255, 203, 141, 0.26);
+  border-radius: 6px;
+  background: linear-gradient(135deg, rgba(58, 43, 29, 0.98), rgba(28, 23, 18, 0.98));
+  color: rgba(248, 236, 216, 0.96);
+  box-shadow: none;
+  font-size: 11px;
+  transform: none;
+}
+
+.phase-ui-root--three-test .phase-runtime-pin:hover,
+.phase-ui-root--three-test .phase-runtime-close:hover {
+  background: linear-gradient(135deg, rgba(76, 55, 34, 0.98), rgba(36, 28, 21, 0.98));
+  transform: none;
+}
+
+.phase-ui-root--three-test .phase-runtime-pin:focus-visible,
+.phase-ui-root--three-test .phase-runtime-close:focus-visible {
+  outline: 2px solid rgba(240, 179, 59, 0.92);
+  outline-offset: 2px;
+}
+
+.phase-ui-root--three-test .phase-progression-strip {
+  width: 100%;
+  margin-top: 8px;
+  padding: 10px 2px 2px;
+  border: 0;
+  border-top: 1px solid rgba(255, 214, 155, 0.16);
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.phase-ui-root--three-test .phase-topbar.is-runtime-collapsed {
+  width: max-content;
+  max-width: calc(100vw - 24px);
+  padding-bottom: 8px;
+}
+
+.phase-ui-root--three-test .phase-topbar.is-runtime-collapsed .phase-progression-strip,
+.phase-ui-root--three-test .phase-topbar.is-runtime-collapsed .phase-score-strip,
+.phase-ui-root--three-test .phase-topbar.is-runtime-compact .phase-score-strip {
+  display: none;
 }
 
 .phase-score-ledger {
@@ -8161,6 +8323,7 @@ input[type="text"] {
 
 @media (max-width: 900px) {
   .phase-ui-root--three-test .phase-topbar {
+    width: min(100%, calc(100vw - 24px));
     max-width: min(100%, calc(100vw - 24px));
   }
 

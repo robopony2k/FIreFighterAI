@@ -1,4 +1,4 @@
-import { DISABLE_INLAND_LAKES } from "../../core/config.js";
+import { DISABLE_DISCONNECTED_INLAND_WATER } from "../../core/config.js";
 import { indexFor } from "../../core/grid.js";
 import { COAST_CLASS_NONE } from "../../core/state.js";
 import type { Tile } from "../../core/types.js";
@@ -103,7 +103,7 @@ export const HydrologyStage: PipelineStage = {
       }
     }
 
-    if (DISABLE_INLAND_LAKES && oceanMaskCount > 0) {
+    if (DISABLE_DISCONNECTED_INLAND_WATER && oceanMaskCount > 0) {
       for (let i = 0; i < state.tiles.length; i += 1) {
         if (oceanMask[i] || riverMask[i] > 0) {
           continue;

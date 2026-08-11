@@ -4,6 +4,7 @@ export {
   decideTerrainVisualSync,
   getTerrainVisualSyncUrgency,
   shouldRebuildThreeTestTreeTypeMap,
+  shouldRebuildThreeTestVegetationInstances,
   shouldHoldSimulationForTerrainInvalidation,
   shouldSyncThreeTestTerrain
 } from "../systems/terrain/controllers/terrainVisualSyncController.js";

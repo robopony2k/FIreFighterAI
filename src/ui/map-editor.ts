@@ -81,8 +81,8 @@ import {
 
 type MapEditorStepId =
   | "scenario"
-  | "relief"
-  | "carving"
+  | "surface"
+  | "uplift"
   | "erosion"
   | "flooding"
   | "rivers"
@@ -162,8 +162,8 @@ type MapEditorRefs = {
   stepButtons: HTMLButtonElement[];
   stepPanels: HTMLElement[];
   scenarioControls: HTMLDivElement;
-  reliefControls: HTMLDivElement;
-  carvingControls: HTMLDivElement;
+  surfaceControls: HTMLDivElement;
+  upliftControls: HTMLDivElement;
   erosionControls: HTMLDivElement;
   floodingControls: HTMLDivElement;
   riverControls: HTMLDivElement;
@@ -211,9 +211,6 @@ const formatPreviewUnavailableMessage = (reason: string | null): string =>
 
 const MAP_EDITOR_PHASE_ORDER: MapGenDebugPhase[] = [
   "terrain:fastPreview",
-  "terrain:relief",
-  "terrain:carving",
-  "terrain:flooding",
   "terrain:elevation",
   "terrain:erosion",
   "hydro:solve",
@@ -241,7 +238,7 @@ type StepPreviewConfig = {
 type MapEditorRenderDebugState = {
   terrainHeightMode: "final" | "raw";
   terrainSurfaceShadingMode: "refined" | "legacyFaceted";
-  biomeScalarField: "none" | "cragUplift" | "rawMoisture" | "elevationStress" | "slopeStress" | "treeSuitability" | "treeProbability";
+  terrainScalarField: "none" | "archetypeUplift" | "flowAccumulation" | "erosionWear" | "erosionDeposit" | "rockExposure" | "rawMoisture" | "elevationStress" | "slopeStress" | "treeSuitability" | "treeProbability";
   riverWaterOff: boolean;
   riverCutoutOff: boolean;
   bridgesOff: boolean;
@@ -250,7 +247,7 @@ type MapEditorRenderDebugState = {
 const DEFAULT_MAP_EDITOR_RENDER_DEBUG_STATE: MapEditorRenderDebugState = {
   terrainHeightMode: "final",
   terrainSurfaceShadingMode: "refined",
-  biomeScalarField: "none",
+  terrainScalarField: "none",
   riverWaterOff: false,
   riverCutoutOff: false,
   bridgesOff: false
@@ -263,14 +260,14 @@ const MAP_EDITOR_PREVIEW_BY_STEP: Record<MapEditorStepId, StepPreviewConfig> = {
     sampleSource: "fast",
     treesEnabled: false
   },
-  relief: {
-    label: "Surface Detail",
+  uplift: {
+    label: "Broad Uplift",
     stopAfterPhase: "terrain:fastPreview",
     sampleSource: "fast",
     treesEnabled: false
   },
-  carving: {
-    label: "Landform",
+  surface: {
+    label: "Initial Surface",
     stopAfterPhase: "terrain:fastPreview",
     sampleSource: "fast",
     treesEnabled: false
@@ -355,7 +352,11 @@ const buildSnapshotSample = (
   cols: grid.cols,
   rows: grid.rows,
   elevations: snapshot.elevations,
-  cragUplift: snapshot.cragUplift,
+  archetypeUplift: snapshot.archetypeUplift,
+  flowAccumulation: snapshot.flowAccumulation,
+  erosionWear: snapshot.erosionWear,
+  erosionDeposit: snapshot.erosionDeposit,
+  rockExposure: snapshot.rockExposure,
   heightScaleMultiplier,
   tileTypes: snapshot.tileTypes,
   riverMask: snapshot.riverMask,
@@ -399,6 +400,11 @@ const buildWorldPreviewSample = (
       heightScaleMultiplier
     ),
     rawMoisture: snapshot?.rawMoisture,
+    archetypeUplift: snapshot?.archetypeUplift,
+    flowAccumulation: snapshot?.flowAccumulation,
+    erosionWear: snapshot?.erosionWear ?? state.tileErosionWear,
+    erosionDeposit: snapshot?.erosionDeposit,
+    rockExposure: snapshot?.rockExposure ?? state.tileRockExposure,
     elevationStress: snapshot?.elevationStress,
     slopeStress: snapshot?.slopeStress,
     treeSuitability: snapshot?.treeSuitability,
@@ -410,10 +416,10 @@ const getFastPreviewMode = (stepId: MapEditorStepId): FastTerrainPreviewMode | n
   switch (stepId) {
     case "scenario":
       return "noise";
-    case "carving":
-      return "height";
-    case "relief":
-      return "relief";
+    case "uplift":
+      return "uplift";
+    case "surface":
+      return "surface";
     case "flooding":
       return "water";
     default:
@@ -439,12 +445,13 @@ const buildFastPreviewSample = (
     settings,
     mode
   });
-  const debugScalarMode: "color" | "grayscale" | undefined = mode === "noise" ? "grayscale" : undefined;
+  const debugScalarMode: "color" | "grayscale" | undefined =
+    mode === "noise" ? "grayscale" : mode === "uplift" ? "color" : undefined;
   return {
     cols: result.cols,
     rows: result.rows,
     elevations: result.elevationMap,
-    cragUplift: result.cragUpliftMap,
+    archetypeUplift: result.archetypeUpliftMap,
     heightScaleMultiplier,
     tileTypes: result.tileTypes,
     riverMask: result.riverMask,
@@ -467,17 +474,17 @@ type WorldPreviewSample = ReturnType<typeof buildWorldPreviewSample>;
 type FastPreviewSample = RenderTerrainSample & { fastPreviewTimingsMs: FastTerrainPreviewResult["timingsMs"] };
 type PreviewRenderableSample = SnapshotPreviewSample | WorldPreviewSample | FastPreviewSample;
 type DebugPreviewRenderableSample = PreviewRenderableSample & { debugRenderOptions?: TerrainRenderDebugOptions };
-type CragMapSummary = { tileCount: number; maxUplift: number };
-const cragMapSummaryCache = new WeakMap<object, CragMapSummary>();
+type UpliftMapSummary = { tileCount: number; maxUplift: number };
+const upliftMapSummaryCache = new WeakMap<object, UpliftMapSummary>();
 
-const summarizeCragMap = (sample: PreviewRenderableSample): CragMapSummary => {
-  const cached = cragMapSummaryCache.get(sample);
+const summarizeUpliftMap = (sample: PreviewRenderableSample): UpliftMapSummary => {
+  const cached = upliftMapSummaryCache.get(sample);
   if (cached) {
     return cached;
   }
   let tileCount = 0;
   let maxUplift = 0;
-  const values = sample.cragUplift;
+  const values = sample.archetypeUplift;
   if (values) {
     for (let index = 0; index < values.length; index += 1) {
       const uplift = values[index] ?? 0;
@@ -489,7 +496,7 @@ const summarizeCragMap = (sample: PreviewRenderableSample): CragMapSummary => {
     }
   }
   const summary = { tileCount, maxUplift };
-  cragMapSummaryCache.set(sample, summary);
+  upliftMapSummaryCache.set(sample, summary);
   return summary;
 };
 type MapEditorDiagnosticsTab = "hydrology" | "road" | "timeline";
@@ -595,8 +602,8 @@ type CoastlineProbe = {
 
 const MAP_EDITOR_STEP_SEQUENCE: readonly MapEditorStepId[] = [
   "scenario",
-  "carving",
-  "relief",
+  "uplift",
+  "surface",
   "flooding",
   "erosion",
   "rivers",
@@ -635,9 +642,9 @@ const buildTerrainRenderDebugOptions = (
   disableBridges: state.bridgesOff
 });
 
-const getBiomeDebugScalarField = (
+const getTerrainDebugScalarField = (
   sample: PreviewRenderableSample,
-  field: MapEditorRenderDebugState["biomeScalarField"]
+  field: MapEditorRenderDebugState["terrainScalarField"]
 ): Float32Array | undefined => {
   if (field === "none") {
     return undefined;
@@ -650,12 +657,12 @@ const applyTerrainRenderDebugOptions = (
   state: MapEditorRenderDebugState,
   logHeightAnomalies = true
 ): DebugPreviewRenderableSample => {
-  const biomeScalarField = getBiomeDebugScalarField(sample, state.biomeScalarField);
+  const terrainScalarField = getTerrainDebugScalarField(sample, state.terrainScalarField);
   return {
     ...sample,
-    debugScalarField: biomeScalarField ?? sample.debugScalarField,
-    debugScalarMode: biomeScalarField ? undefined : sample.debugScalarMode,
-    debugScalarScale: state.biomeScalarField === "cragUplift" && biomeScalarField ? 25 : 1,
+    debugScalarField: terrainScalarField ?? sample.debugScalarField,
+    debugScalarMode: terrainScalarField ? undefined : sample.debugScalarMode,
+    debugScalarScale: state.terrainScalarField === "archetypeUplift" && terrainScalarField ? 8 : 1,
     debugRenderOptions: buildTerrainRenderDebugOptions(state, logHeightAnomalies)
   };
 };
@@ -954,12 +961,12 @@ const buildHeightProvenanceReport = (
     };
   }
   if (!hoveredTile) {
-    const cragSummary = summarizeCragMap(sample);
+    const upliftSummary = summarizeUpliftMap(sample);
     return {
-      meta: `Crag map contains ${cragSummary.tileCount.toLocaleString()} tiles; hover a tile to inspect provenance and material.`,
+      meta: `Archetype uplift affects ${upliftSummary.tileCount.toLocaleString()} tiles; hover a tile to inspect morphology.`,
       text: [
         "heightProvenance=hover tile required",
-        `cragMap=${cragSummary.tileCount > 0 ? "present" : "none"} tiles=${cragSummary.tileCount} maxUplift=${cragSummary.maxUplift.toFixed(4)}`,
+        `upliftMap=${upliftSummary.tileCount > 0 ? "present" : "none"} tiles=${upliftSummary.tileCount} maxUplift=${upliftSummary.maxUplift.toFixed(4)}`,
         toggleLine,
         `activeStep=${activeStep}`
       ].join("\n")
@@ -975,14 +982,18 @@ const buildHeightProvenanceReport = (
   }
   const anomalies = debugSurface.debugHeightAnomalies ?? [];
   const tileIndex = hoveredTile.tileY * sample.cols + hoveredTile.tileX;
-  const cragUplift = sample.cragUplift?.[tileIndex] ?? 0;
-  const cragSummary = summarizeCragMap(sample);
+  const archetypeUplift = sample.archetypeUplift?.[tileIndex] ?? 0;
+  const flowAccumulation = sample.flowAccumulation?.[tileIndex] ?? 0;
+  const erosionWear = sample.erosionWear?.[tileIndex] ?? 0;
+  const erosionDeposit = sample.erosionDeposit?.[tileIndex] ?? 0;
+  const rockExposure = sample.rockExposure?.[tileIndex] ?? 0;
+  const upliftSummary = summarizeUpliftMap(sample);
   const mountainMaterial = hoveredTile.mountainMaterial;
   const lines = [
     `heightProvenance=${provenance.tileX},${provenance.tileY}`,
     toggleLine,
-    `cragMap=${cragSummary.tileCount > 0 ? "present" : "none"} tiles=${cragSummary.tileCount} maxUplift=${cragSummary.maxUplift.toFixed(4)}`,
-    `landform=${cragUplift > 1e-5 ? "crag" : "none"} cragUplift=${cragUplift.toFixed(4)} cragStrength=${Math.min(1, cragUplift / 0.04).toFixed(2)}`,
+    `upliftMap=${upliftSummary.tileCount > 0 ? "present" : "none"} tiles=${upliftSummary.tileCount} maxUplift=${upliftSummary.maxUplift.toFixed(4)}`,
+    `morphology uplift=${archetypeUplift.toFixed(4)} flow=${flowAccumulation.toFixed(3)} wear=${erosionWear.toFixed(4)} deposit=${erosionDeposit.toFixed(4)} rock=${rockExposure.toFixed(3)}`,
     mountainMaterial
       ? `mountainRock exposure=${mountainMaterial.rockExposure.toFixed(2)} ridge=${mountainMaterial.ridge.toFixed(2)} gully=${mountainMaterial.gully.toFixed(2)} highland=${mountainMaterial.highland.toFixed(2)}`
       : "mountainRock=unavailable (disable terrain overlay to inspect material)",
@@ -1072,7 +1083,11 @@ const clonePreviewSample = (sample: PreviewRenderableSample): PreviewRenderableS
     return {
       ...worldSample,
       elevations: Float32Array.from(worldSample.elevations),
-      cragUplift: cloneFloat32Array(worldSample.cragUplift),
+      archetypeUplift: cloneFloat32Array(worldSample.archetypeUplift),
+      flowAccumulation: cloneFloat32Array(worldSample.flowAccumulation),
+      erosionWear: Float32Array.from(worldSample.erosionWear),
+      erosionDeposit: cloneFloat32Array(worldSample.erosionDeposit),
+      rockExposure: Float32Array.from(worldSample.rockExposure),
       tileTypes: cloneUint8Array(worldSample.tileTypes),
       treeTypes: cloneUint8Array(worldSample.treeTypes),
       tileFire: cloneFloat32Array(worldSample.tileFire),
@@ -1113,7 +1128,11 @@ const clonePreviewSample = (sample: PreviewRenderableSample): PreviewRenderableS
   return {
     ...snapshotSample,
     elevations: Float32Array.from(snapshotSample.elevations),
-    cragUplift: cloneFloat32Array(snapshotSample.cragUplift),
+    archetypeUplift: cloneFloat32Array(snapshotSample.archetypeUplift),
+    flowAccumulation: cloneFloat32Array(snapshotSample.flowAccumulation),
+    erosionWear: cloneFloat32Array(snapshotSample.erosionWear),
+    erosionDeposit: cloneFloat32Array(snapshotSample.erosionDeposit),
+    rockExposure: cloneFloat32Array(snapshotSample.rockExposure),
     tileTypes: cloneUint8Array(snapshotSample.tileTypes),
     riverMask: cloneUint8Array(snapshotSample.riverMask),
     oceanMask: cloneUint8Array(snapshotSample.oceanMask),
@@ -1215,8 +1234,8 @@ export const getMapEditorRefs = (): MapEditorRefs => ({
   stepButtons: Array.from(document.querySelectorAll<HTMLButtonElement>("#mapEditorScreen .map-editor-step")),
   stepPanels: Array.from(document.querySelectorAll<HTMLElement>("#mapEditorScreen .map-editor-step-panel")),
   scenarioControls: document.getElementById("mapEditorScenarioControls") as HTMLDivElement,
-  reliefControls: document.getElementById("mapEditorReliefControls") as HTMLDivElement,
-  carvingControls: document.getElementById("mapEditorCarvingControls") as HTMLDivElement,
+  surfaceControls: document.getElementById("mapEditorSurfaceControls") as HTMLDivElement,
+  upliftControls: document.getElementById("mapEditorUpliftControls") as HTMLDivElement,
   erosionControls: document.getElementById("mapEditorErosionControls") as HTMLDivElement,
   floodingControls: document.getElementById("mapEditorFloodingControls") as HTMLDivElement,
   riverControls: document.getElementById("mapEditorRiverControls") as HTMLDivElement,
@@ -1232,14 +1251,14 @@ export const initMapEditor = (refs: MapEditorRefs, deps: MapEditorDeps): MapEdit
     groups: MAP_EDITOR_TERRAIN_GROUPS.scenario
   });
   buildTerrainControls({
-    container: refs.reliefControls,
-    idPrefix: "mapEditorRelief",
-    groups: MAP_EDITOR_TERRAIN_GROUPS.relief
+    container: refs.upliftControls,
+    idPrefix: "mapEditorUplift",
+    groups: MAP_EDITOR_TERRAIN_GROUPS.uplift
   });
   buildTerrainControls({
-    container: refs.carvingControls,
-    idPrefix: "mapEditorCarving",
-    groups: MAP_EDITOR_TERRAIN_GROUPS.carving
+    container: refs.surfaceControls,
+    idPrefix: "mapEditorSurface",
+    groups: MAP_EDITOR_TERRAIN_GROUPS.surface
   });
   buildTerrainControls({
     container: refs.erosionControls,
@@ -1313,21 +1332,25 @@ export const initMapEditor = (refs: MapEditorRefs, deps: MapEditorDeps): MapEdit
     return input;
   };
 
-  const createBiomeScalarSelect = (): HTMLSelectElement => {
+  const createTerrainScalarSelect = (): HTMLSelectElement => {
     const label = document.createElement("label");
     label.style.display = "inline-flex";
     label.style.alignItems = "center";
     label.style.gap = "0.35rem";
     label.style.marginRight = "0.75rem";
     const select = document.createElement("select");
-    const options: Array<{ value: MapEditorRenderDebugState["biomeScalarField"]; label: string }> = [
-      { value: "none", label: "terrain_overlay_off" },
-      { value: "cragUplift", label: "crag_uplift" },
-      { value: "rawMoisture", label: "raw_moisture" },
-      { value: "elevationStress", label: "elevation_stress" },
-      { value: "slopeStress", label: "slope_stress" },
-      { value: "treeSuitability", label: "tree_suitability" },
-      { value: "treeProbability", label: "tree_probability" }
+    const options: Array<{ value: MapEditorRenderDebugState["terrainScalarField"]; label: string }> = [
+      { value: "none", label: "Off" },
+      { value: "archetypeUplift", label: "Archetype uplift" },
+      { value: "flowAccumulation", label: "Flow accumulation" },
+      { value: "erosionWear", label: "Erosion wear" },
+      { value: "erosionDeposit", label: "Erosion deposition" },
+      { value: "rockExposure", label: "Rock exposure" },
+      { value: "rawMoisture", label: "Raw moisture" },
+      { value: "elevationStress", label: "Elevation stress" },
+      { value: "slopeStress", label: "Slope stress" },
+      { value: "treeSuitability", label: "Tree suitability" },
+      { value: "treeProbability", label: "Tree probability" }
     ];
     options.forEach((option) => {
       const node = document.createElement("option");
@@ -1335,7 +1358,7 @@ export const initMapEditor = (refs: MapEditorRefs, deps: MapEditorDeps): MapEdit
       node.textContent = option.label;
       select.appendChild(node);
     });
-    label.append(document.createTextNode("terrain_debug"), select);
+    label.append(document.createTextNode("Terrain field"), select);
     renderDebugControlsRoot.appendChild(label);
     return select;
   };
@@ -1346,7 +1369,7 @@ export const initMapEditor = (refs: MapEditorRefs, deps: MapEditorDeps): MapEdit
   const riverWaterOffToggle = createRenderDebugCheckbox("river_water_off");
   const riverCutoutOffToggle = createRenderDebugCheckbox("river_cutout_off");
   const bridgesOffToggle = createRenderDebugCheckbox("bridges_off");
-  const biomeScalarSelect = createBiomeScalarSelect();
+  const terrainScalarSelect = createTerrainScalarSelect();
   refs.coastDebugOutput.parentElement?.insertBefore(renderDebugControlsRoot, refs.coastDebugOutput);
   const terrainControlElements = collectTerrainControlElements(refs.screen);
   refs.legacyNotice.textContent = "Older saved map scenarios used the legacy slider model and are not loaded in this editor.";
@@ -1809,6 +1832,7 @@ export const initMapEditor = (refs: MapEditorRefs, deps: MapEditorDeps): MapEdit
 
   const setActiveStep = (stepId: MapEditorStepId): void => {
     activeStep = stepId;
+    refs.screen.dataset.previewStep = stepId;
     refs.stepButtons.forEach((button) => {
       const active = button.dataset.step === stepId;
       button.classList.toggle("is-active", active);
@@ -1928,26 +1952,21 @@ export const initMapEditor = (refs: MapEditorRefs, deps: MapEditorDeps): MapEdit
       ruggedness: jitterValue(rng, base.ruggedness, archetype === "SHELF" ? 0.08 : 0.16),
       coastComplexity: jitterValue(rng, base.coastComplexity, archetype === "TWIN_BAY" ? 0.16 : 0.12),
       landCoverageTarget: jitterValue(rng, base.landCoverageTarget, 0.1),
-      waterLevel: base.waterLevel,
       riverIntensity: jitterValue(rng, base.riverIntensity, 0.14),
       vegetationDensity: jitterValue(rng, base.vegetationDensity, 0.18),
       townDensity: jitterValue(rng, base.townDensity, 0.16),
       bridgeAllowance: jitterValue(rng, base.bridgeAllowance, 0.14),
       advancedOverrides: {
         ...advanced,
-        interiorRise: jitterValue(rng, advanced.interiorRise ?? 0.5, archetype === "SHELF" ? 0.1 : 0.14),
         maxHeight: jitterValue(rng, advanced.maxHeight ?? 0.5, archetype === "SHELF" ? 0.08 : 0.12),
         embayment: jitterValue(rng, advanced.embayment ?? 0.5, archetype === "TWIN_BAY" ? 0.14 : 0.1),
         anisotropy: jitterValue(rng, advanced.anisotropy ?? 0.5, archetype === "LONG_SPINE" ? 0.14 : 0.1),
         asymmetry: jitterValue(rng, advanced.asymmetry ?? 0.5, 0.12),
         ridgeAlignment: jitterValue(rng, advanced.ridgeAlignment ?? 0.5, archetype === "LONG_SPINE" ? 0.12 : 0.1),
         uplandDistribution: jitterValue(rng, advanced.uplandDistribution ?? 0.5, 0.12),
-        islandCompactness: jitterValue(rng, advanced.islandCompactness ?? 0.5, 0.12),
         ridgeFrequency: jitterValue(rng, advanced.ridgeFrequency ?? 0.5, archetype === "LONG_SPINE" ? 0.1 : 0.14),
         basinStrength: jitterValue(rng, advanced.basinStrength ?? 0.5, 0.12),
         coastalShelfWidth: jitterValue(rng, advanced.coastalShelfWidth ?? 0.5, archetype === "SHELF" ? 0.14 : 0.1),
-        seaLevelBias: jitterValue(rng, advanced.seaLevelBias ?? 0.5, 0.04),
-        skipCarving: false,
         riverBudget: jitterValue(rng, advanced.riverBudget ?? 0.5, 0.14),
         settlementSpacing: jitterValue(rng, advanced.settlementSpacing ?? 0.5, 0.12),
         vegetationPreGrowthYears: Math.max(0, Math.min(40, Math.round((advanced.vegetationPreGrowthYears ?? 20) + (rng.next() * 16 - 8)))),
@@ -2056,7 +2075,10 @@ export const initMapEditor = (refs: MapEditorRefs, deps: MapEditorDeps): MapEdit
     if (!sample) {
       return false;
     }
-    preview.setTerrain(applyTerrainRenderDebugOptions(sample, previewRenderDebugState), { recenter });
+    preview.setTerrain(applyTerrainRenderDebugOptions(sample, previewRenderDebugState), {
+      recenter,
+      viewPreset: stepId === "uplift" ? "uplift" : "default"
+    });
     previewNeedsGenerate = false;
     hidePreviewOverlay();
     syncCurrentScenarioLabel();
@@ -2095,7 +2117,10 @@ export const initMapEditor = (refs: MapEditorRefs, deps: MapEditorDeps): MapEdit
     cacheEquivalentPreviewSample(cacheKey, stepId, sample);
     if (activeStep === stepId) {
       previewNeedsGenerate = false;
-      preview.setTerrain(applyTerrainRenderDebugOptions(sample, previewRenderDebugState, false), { recenter });
+      preview.setTerrain(applyTerrainRenderDebugOptions(sample, previewRenderDebugState, false), {
+        recenter,
+        viewPreset: stepId === "uplift" ? "uplift" : "default"
+      });
       hidePreviewOverlay();
       syncCurrentScenarioLabel();
     }
@@ -2232,7 +2257,7 @@ export const initMapEditor = (refs: MapEditorRefs, deps: MapEditorDeps): MapEdit
     previewRenderDebugState = {
       terrainHeightMode: terrainRawVerticesToggle.checked ? "raw" : "final",
       terrainSurfaceShadingMode: legacyFacetedShadingToggle.checked ? "legacyFaceted" : "refined",
-      biomeScalarField: biomeScalarSelect.value as MapEditorRenderDebugState["biomeScalarField"],
+      terrainScalarField: terrainScalarSelect.value as MapEditorRenderDebugState["terrainScalarField"],
       riverWaterOff: riverWaterOffToggle.checked,
       riverCutoutOff: riverCutoutOffToggle.checked,
       bridgesOff: bridgesOffToggle.checked
@@ -2253,7 +2278,7 @@ export const initMapEditor = (refs: MapEditorRefs, deps: MapEditorDeps): MapEdit
     riverWaterOffToggle,
     riverCutoutOffToggle,
     bridgesOffToggle,
-    biomeScalarSelect
+    terrainScalarSelect
   ].forEach((input) => {
     input.addEventListener("change", syncPreviewRenderDebugState);
   });
@@ -2450,14 +2475,6 @@ export const initMapEditor = (refs: MapEditorRefs, deps: MapEditorDeps): MapEdit
           }
           const isRequestedStepActive = activeStep === requestedStep;
           switch (snapshot.phase) {
-            case "terrain:carving": {
-              cacheEquivalentPreviewSample(
-                cacheKey,
-                "carving",
-                buildSnapshotSample(snapshot, world.grid, world.seed, terrainHeightScaleMultiplier, false)
-              );
-              break;
-            }
             case "terrain:elevation": {
               cacheErosionBaselineSample(
                 cacheKey,

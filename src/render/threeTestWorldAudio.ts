@@ -88,6 +88,30 @@ const WORLD_AUDIO_SOURCES = [
   FIRE_SIREN_LOOP
 ] as const;
 
+export const WORLD_AUDIO_ASSET_COUNT = WORLD_AUDIO_SOURCES.length;
+
+export type WorldAudioPreloadProgress = {
+  completed: number;
+  total: number;
+  item: string;
+  durationMs: number;
+  failed: boolean;
+  phase: "downloading" | "complete";
+};
+
+export type WorldAudioPreloadReporter = (progress: WorldAudioPreloadProgress) => void;
+
+const emitWorldAudioPreloadProgress = (
+  reportProgress: WorldAudioPreloadReporter | undefined,
+  progress: WorldAudioPreloadProgress
+): void => {
+  try {
+    reportProgress?.(progress);
+  } catch (error) {
+    console.warn("[threeTestWorldAudio] Asset telemetry reporter failed.", error);
+  }
+};
+
 const clamp = (value: number, min: number, max: number): number => Math.min(max, Math.max(min, value));
 const lerp = (a: number, b: number, t: number): number => a + (b - a) * t;
 const hash01 = (value: number): number => {
@@ -168,8 +192,32 @@ const getRawAudioAsset = (source: string): Promise<ArrayBuffer | null> => {
   return created;
 };
 
-export const preloadThreeTestWorldAudioAssets = async (): Promise<void> => {
-  await Promise.all(WORLD_AUDIO_SOURCES.map((source) => getRawAudioAsset(source)));
+export const preloadThreeTestWorldAudioAssets = async (
+  reportProgress?: WorldAudioPreloadReporter
+): Promise<void> => {
+  let completed = 0;
+  await Promise.all(WORLD_AUDIO_SOURCES.map(async (source) => {
+    const startedAt = typeof performance !== "undefined" ? performance.now() : Date.now();
+    const item = source.split(/[\\/]/).pop() ?? source;
+    emitWorldAudioPreloadProgress(reportProgress, {
+      completed,
+      total: WORLD_AUDIO_ASSET_COUNT,
+      item,
+      durationMs: 0,
+      failed: false,
+      phase: "downloading"
+    });
+    const buffer = await getRawAudioAsset(source);
+    completed += 1;
+    emitWorldAudioPreloadProgress(reportProgress, {
+      completed,
+      total: WORLD_AUDIO_ASSET_COUNT,
+      item,
+      durationMs: Math.max(0, (typeof performance !== "undefined" ? performance.now() : Date.now()) - startedAt),
+      failed: buffer === null,
+      phase: "complete"
+    });
+  }));
 };
 
 type EmitterLayerState = {

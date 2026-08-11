@@ -14,6 +14,7 @@ import {
   computeYearLayout
 } from "../forecastLayout.js";
 import { dispatchPhaseUiCommand } from "../commandChannel.js";
+import { CardStateModel } from "../../cards/cardState.js";
 
 export type TopBarData = {
   phase: Phase;
@@ -83,6 +84,7 @@ export type TopBarData = {
 export type TopBarView = {
   element: HTMLElement;
   update: (data: TopBarData) => void;
+  resetRuntimeWidgetState: () => void;
   onCta: (handler: (actionId: string) => void) => void;
   attachControls: (controls: HTMLElement) => void;
   attachProgressionActions: (actions: HTMLElement | null) => void;
@@ -951,19 +953,16 @@ const getAnimatedRemainingSeconds = (
   return Math.max(0, tracked.remainingSeconds - (now - tracked.seenAtMs) / 1000);
 };
 
-const syncThreeTestTopClearance = (element: HTMLElement, scoreStrip: HTMLElement): void => {
+const syncThreeTestTopClearance = (element: HTMLElement): void => {
   const overlayRoot = element.closest(".three-test-overlay") as HTMLElement | null;
   if (!overlayRoot) {
     return;
   }
-  if (scoreStrip.classList.contains("is-hidden")) {
-    overlayRoot.style.setProperty("--three-test-top-clearance", "12px");
-    return;
-  }
-  const stripHeight = scoreStrip.offsetHeight;
-  const clearance = Math.max(12, Math.ceil(stripHeight + 24));
+  const clearance = Math.max(12, Math.ceil(element.offsetHeight + 24));
   overlayRoot.style.setProperty("--three-test-top-clearance", `${clearance}px`);
 };
+
+type RuntimeSummaryMode = "collapsed" | "compact" | "full";
 
 export const createTopBar = (): TopBarView => {
   const element = document.createElement("header");
@@ -1098,6 +1097,19 @@ export const createTopBar = (): TopBarView => {
   const cta = document.createElement("button");
   cta.className = "phase-cta";
 
+  const runtimePinButton = document.createElement("button");
+  runtimePinButton.type = "button";
+  runtimePinButton.className = "phase-runtime-pin";
+  const runtimeCloseButton = document.createElement("button");
+  runtimeCloseButton.type = "button";
+  runtimeCloseButton.className = "phase-runtime-close";
+  runtimeCloseButton.textContent = "x";
+  runtimeCloseButton.title = "Minimize";
+  runtimeCloseButton.setAttribute("aria-label", "Minimize operational summary");
+  const runtimeHeaderActions = document.createElement("div");
+  runtimeHeaderActions.className = "phase-runtime-header-actions";
+  runtimeHeaderActions.append(runtimePinButton, runtimeCloseButton);
+
   const scoreCounter = document.createElement("div");
   scoreCounter.className = "phase-score-counter is-hidden";
 
@@ -1222,7 +1234,11 @@ export const createTopBar = (): TopBarView => {
 
   const content = document.createElement("div");
   content.className = "phase-topbar-content";
-  content.append(badge, budgetChip, scoreCounter, alert, cta);
+  const runtimeMetrics = document.createElement("div");
+  runtimeMetrics.className = "phase-runtime-metrics";
+  runtimeMetrics.setAttribute("role", "button");
+  runtimeMetrics.tabIndex = 0;
+  runtimeMetrics.append(scoreCounter, budgetChip);
 
   const progressionStrip = document.createElement("div");
   progressionStrip.className = "phase-progression-strip is-hidden";
@@ -1246,7 +1262,7 @@ export const createTopBar = (): TopBarView => {
   progressionReview.textContent = "Review Draft";
   const progressionActions = document.createElement("div");
   progressionActions.className = "phase-progression-actions is-empty";
-  progressionMeta.append(progressionStatus, progressionActions, progressionReview);
+  progressionMeta.append(progressionStatus, progressionReview);
   progressionHeader.append(progressionCopy, progressionMeta);
   const progressionBar = document.createElement("div");
   progressionBar.className = "phase-progression-bar";
@@ -1256,6 +1272,7 @@ export const createTopBar = (): TopBarView => {
   const progressionRewards = document.createElement("div");
   progressionRewards.className = "phase-progression-rewards";
   progressionStrip.append(progressionHeader, progressionBar, progressionRewards);
+  content.append(progressionActions, runtimeMetrics, runtimeHeaderActions, badge, alert, cta);
 
   element.append(content, progressionStrip, scoreStrip, scoreEvents, forecast);
 
@@ -1274,6 +1291,74 @@ export const createTopBar = (): TopBarView => {
   let pipeTransferTokens: PipeTransferToken[] = [];
   let lastProcessedVisualFlowId = 0;
   let lastActiveQueueUpdateMs: number | null = null;
+  const runtimeCardId = "operational-summary";
+  const runtimeCardState = new CardStateModel();
+  runtimeCardState.register(runtimeCardId);
+  runtimeCardState.setPinned(runtimeCardId, true);
+  const applyRuntimeSummaryMode = (): void => {
+    const snapshot = runtimeCardState.get(runtimeCardId);
+    const runtimeSummaryMode: RuntimeSummaryMode = snapshot.pinned
+      ? "full"
+      : snapshot.visual === "collapsed"
+        ? "collapsed"
+        : "compact";
+    element.classList.toggle("is-runtime-collapsed", runtimeSummaryMode === "collapsed");
+    element.classList.toggle("is-runtime-compact", runtimeSummaryMode === "compact");
+    element.classList.toggle("is-runtime-full", runtimeSummaryMode === "full");
+    const pinned = snapshot.pinned;
+    element.classList.toggle("is-pinned", pinned);
+    runtimePinButton.textContent = pinned ? "\u{1F4CC}" : "\u{1F4CD}";
+    runtimePinButton.title = pinned ? "Unpin" : "Pin";
+    runtimePinButton.setAttribute("aria-label", pinned ? "Unpin operational summary" : "Pin operational summary");
+    runtimeMetrics.setAttribute("aria-expanded", String(runtimeSummaryMode !== "collapsed"));
+    runtimeMetrics.setAttribute(
+      "aria-label",
+      runtimeSummaryMode === "collapsed" ? "Show compact operational summary" : "Collapse operational summary"
+    );
+    syncThreeTestTopClearance(element);
+  };
+  const toggleRuntimeCompact = (): void => {
+    const snapshot = runtimeCardState.get(runtimeCardId);
+    if (snapshot.pinned) {
+      return;
+    }
+    if (snapshot.visual === "expanded") {
+      runtimeCardState.collapse(runtimeCardId);
+    } else {
+      runtimeCardState.clickExpand(runtimeCardId);
+    }
+    applyRuntimeSummaryMode();
+  };
+  element.addEventListener("mouseenter", () => {
+    runtimeCardState.hoverEnter(runtimeCardId);
+    applyRuntimeSummaryMode();
+  });
+  element.addEventListener("mouseleave", () => {
+    runtimeCardState.hoverLeave(runtimeCardId);
+    applyRuntimeSummaryMode();
+  });
+  runtimeMetrics.addEventListener("click", toggleRuntimeCompact);
+  runtimeMetrics.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter" && event.key !== " ") {
+      return;
+    }
+    event.preventDefault();
+    toggleRuntimeCompact();
+  });
+  runtimePinButton.addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    runtimeCardState.togglePin(runtimeCardId);
+    applyRuntimeSummaryMode();
+  });
+  runtimeCloseButton.addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    runtimeCardState.setPinned(runtimeCardId, false);
+    runtimeCardState.collapse(runtimeCardId);
+    applyRuntimeSummaryMode();
+  });
+  applyRuntimeSummaryMode();
   cta.addEventListener("click", () => {
     if (currentAction && ctaHandler) {
       ctaHandler(currentAction);
@@ -1561,6 +1646,10 @@ export const createTopBar = (): TopBarView => {
       }
       progressionActions.classList.toggle("is-empty", !actions);
     },
+    resetRuntimeWidgetState: () => {
+      runtimeCardState.setPinned(runtimeCardId, true);
+      applyRuntimeSummaryMode();
+    },
     update: (data) => {
       const isThreeTest = element.closest(".phase-ui-root--three-test") !== null;
       badge.textContent = phaseLabels[data.phase];
@@ -1673,8 +1762,8 @@ export const createTopBar = (): TopBarView => {
         applyMultiplierLabels(animatedScoring, isThreeTest);
         if (isThreeTest) {
           syncActiveFireFocusControls(true, animatedScoring.activeFireCount);
-          scoreCounter.classList.add("is-hidden");
-          scoreCounter.textContent = "";
+          scoreCounter.classList.remove("is-hidden");
+          scoreCounter.textContent = `Score ${Math.round(animatedScoring.score).toLocaleString("en-US")}`;
           legacyScoreContent.classList.add("is-hidden");
           ledgerBoard.classList.remove("is-hidden");
           scoreEvents.classList.add("is-hidden");
@@ -1751,7 +1840,8 @@ export const createTopBar = (): TopBarView => {
         clearManagedNodes(activeIncomingQueueMap);
         clearManagedNodes(activeOutgoingQueueMap);
         clearManagedNodes(pipeTransferWrapperMap);
-        scoreCounter.classList.add("is-hidden");
+        scoreCounter.classList.toggle("is-hidden", !isThreeTest);
+        scoreCounter.textContent = isThreeTest ? "Score --" : "";
         scoreStrip.classList.add("is-hidden");
         scoreEvents.classList.add("is-hidden");
         scoreEvents.innerHTML = "";
@@ -1759,7 +1849,7 @@ export const createTopBar = (): TopBarView => {
         legacyScoreContent.classList.add("is-hidden");
         ledgerBoard.classList.add("is-hidden");
       }
-      syncThreeTestTopClearance(element, scoreStrip);
+      syncThreeTestTopClearance(element);
     },
     onCta: (handler) => {
       ctaHandler = handler;

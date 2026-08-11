@@ -23,7 +23,10 @@ export type RenderTerrainSample = {
   cols: number;
   rows: number;
   elevations: Float32Array;
-  cragUplift?: Float32Array;
+  archetypeUplift?: Float32Array;
+  flowAccumulation?: Float32Array;
+  erosionDeposit?: Float32Array;
+  rockExposure?: Float32Array;
   heightScaleMultiplier?: number;
   tileTypes?: Uint8Array;
   treeTypes?: Uint8Array;
@@ -121,7 +124,7 @@ export const buildRenderTerrainSample = (
     cols: state.grid.cols,
     rows: state.grid.rows,
     elevations: state.tileElevation,
-    cragUplift: state.tileCragUplift,
+    rockExposure: state.tileRockExposure,
     heightScaleMultiplier,
     tileTypes: state.tileTypeId,
     treeTypes,

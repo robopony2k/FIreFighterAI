@@ -14,7 +14,6 @@ import { TERRAIN_GENERATION_LIMITS } from "../systems/terrain/constants/terrainG
 export type TerrainArchetypeId = IslandArchetypeId;
 
 export type TerrainAdvancedOverrides = {
-  interiorRise?: number;
   maxHeight?: number;
   embayment?: number;
   anisotropy?: number;
@@ -22,12 +21,9 @@ export type TerrainAdvancedOverrides = {
   ridgeAlignment?: number;
   uplandDistribution?: number;
   noiseFrequency?: number;
-  islandCompactness?: number;
   ridgeFrequency?: number;
   basinStrength?: number;
   coastalShelfWidth?: number;
-  seaLevelBias?: number;
-  skipCarving?: boolean;
   skipRoadNetworkRouting?: boolean;
   riverBudget?: number;
   settlementSpacing?: number;
@@ -44,7 +40,6 @@ export type TerrainRecipe = {
   ruggedness: number;
   coastComplexity: number;
   landCoverageTarget: number;
-  waterLevel: number;
   riverIntensity: number;
   vegetationDensity: number;
   townDensity: number;
@@ -69,8 +64,6 @@ const mix = (a: number, b: number, t: number): number => a + (b - a) * clamp01(t
 const MAX_HEIGHT_REFERENCE = 0.62;
 const ROAD_MAX_GRADE_MIN = 0.12;
 const ROAD_MAX_GRADE_MAX = 0.42;
-const LEGACY_WATER_COVERAGE_MIN = 0.22;
-const LEGACY_WATER_COVERAGE_MAX = 0.68;
 
 const clampMaxHeight = (value: number): number =>
   clamp(
@@ -91,18 +84,6 @@ const inferMaxHeightFromScaleMultiplier = (multiplier: number | undefined): numb
   }
   return clampMaxHeight(MAX_HEIGHT_REFERENCE + ((multiplier as number) - 1) / 1.65);
 };
-
-const landCoverageFromLegacyWaterLevel = (waterLevel: unknown, fallback: number): number => {
-  const parsed = toFiniteNumber(waterLevel);
-  if (parsed === null) {
-    return fallback;
-  }
-  return clamp01(1 - mix(LEGACY_WATER_COVERAGE_MIN, LEGACY_WATER_COVERAGE_MAX, parsed));
-};
-
-const legacyWaterLevelFromLandCoverage = (landCoverageTarget: number): number =>
-  clamp01((1 - clamp01(landCoverageTarget) - LEGACY_WATER_COVERAGE_MIN) /
-    Math.max(0.0001, LEGACY_WATER_COVERAGE_MAX - LEGACY_WATER_COVERAGE_MIN));
 
 const toFiniteNumber = (value: unknown): number | null => {
   if (typeof value === "number" && Number.isFinite(value)) {
@@ -170,7 +151,6 @@ const clampIntegerOverride = (value: unknown, fallback: number, min: number, max
 };
 
 const DEFAULT_ADVANCED_OVERRIDES: Required<TerrainAdvancedOverrides> = {
-  interiorRise: 0.62,
   maxHeight: 0.58,
   embayment: 0.32,
   anisotropy: 0.4,
@@ -178,12 +158,9 @@ const DEFAULT_ADVANCED_OVERRIDES: Required<TerrainAdvancedOverrides> = {
   ridgeAlignment: 0.42,
   uplandDistribution: 0.42,
   noiseFrequency: 0.5,
-  islandCompactness: 0.6,
   ridgeFrequency: 0.48,
   basinStrength: 0.42,
   coastalShelfWidth: 0.48,
-  seaLevelBias: 0.5,
-  skipCarving: false,
   skipRoadNetworkRouting: false,
   riverBudget: 0.42,
   settlementSpacing: 0.58,
@@ -200,7 +177,6 @@ const ARCHETYPE_PRESETS: Record<
     ruggedness: number;
     coastComplexity: number;
     landCoverageTarget: number;
-    waterLevel: number;
     riverIntensity: number;
     vegetationDensity: number;
     townDensity: number;
@@ -213,13 +189,11 @@ const ARCHETYPE_PRESETS: Record<
     ruggedness: 0.55,
     coastComplexity: 0.5,
     landCoverageTarget: 0.64,
-    waterLevel: 0.34,
     riverIntensity: 0.45,
     vegetationDensity: 0.62,
     townDensity: 0.48,
     bridgeAllowance: 0.18,
     advanced: {
-      interiorRise: ISLAND_ARCHETYPE_DEFINITIONS.MASSIF.interiorRise,
       maxHeight: ISLAND_ARCHETYPE_DEFINITIONS.MASSIF.maxHeight,
       embayment: ISLAND_ARCHETYPE_DEFINITIONS.MASSIF.embayment,
       anisotropy: ISLAND_ARCHETYPE_DEFINITIONS.MASSIF.anisotropy,
@@ -227,12 +201,9 @@ const ARCHETYPE_PRESETS: Record<
       ridgeAlignment: ISLAND_ARCHETYPE_DEFINITIONS.MASSIF.ridgeAlignment,
       uplandDistribution: ISLAND_ARCHETYPE_DEFINITIONS.MASSIF.uplandDistribution,
       noiseFrequency: 0.48,
-      islandCompactness: 0.56,
       ridgeFrequency: ISLAND_ARCHETYPE_DEFINITIONS.MASSIF.ridgeFrequency,
       basinStrength: 0.58,
       coastalShelfWidth: ISLAND_ARCHETYPE_DEFINITIONS.MASSIF.coastalShelfWidth,
-      seaLevelBias: 0.5,
-      skipCarving: false,
       skipRoadNetworkRouting: false,
       riverBudget: 0.44,
       settlementSpacing: 0.62,
@@ -247,13 +218,11 @@ const ARCHETYPE_PRESETS: Record<
     ruggedness: 0.68,
     coastComplexity: 0.42,
     landCoverageTarget: 0.61,
-    waterLevel: 0.36,
     riverIntensity: 0.56,
     vegetationDensity: 0.52,
     townDensity: 0.5,
     bridgeAllowance: 0.3,
     advanced: {
-      interiorRise: ISLAND_ARCHETYPE_DEFINITIONS.LONG_SPINE.interiorRise,
       maxHeight: ISLAND_ARCHETYPE_DEFINITIONS.LONG_SPINE.maxHeight,
       embayment: ISLAND_ARCHETYPE_DEFINITIONS.LONG_SPINE.embayment,
       anisotropy: ISLAND_ARCHETYPE_DEFINITIONS.LONG_SPINE.anisotropy,
@@ -261,12 +230,9 @@ const ARCHETYPE_PRESETS: Record<
       ridgeAlignment: ISLAND_ARCHETYPE_DEFINITIONS.LONG_SPINE.ridgeAlignment,
       uplandDistribution: ISLAND_ARCHETYPE_DEFINITIONS.LONG_SPINE.uplandDistribution,
       noiseFrequency: 0.56,
-      islandCompactness: 0.6,
       ridgeFrequency: ISLAND_ARCHETYPE_DEFINITIONS.LONG_SPINE.ridgeFrequency,
       basinStrength: ISLAND_ARCHETYPE_DEFINITIONS.LONG_SPINE.basinStrength,
       coastalShelfWidth: ISLAND_ARCHETYPE_DEFINITIONS.LONG_SPINE.coastalShelfWidth,
-      seaLevelBias: 0.5,
-      skipCarving: false,
       skipRoadNetworkRouting: false,
       riverBudget: 0.58,
       settlementSpacing: 0.6,
@@ -281,13 +247,11 @@ const ARCHETYPE_PRESETS: Record<
     ruggedness: 0.5,
     coastComplexity: 0.58,
     landCoverageTarget: 0.58,
-    waterLevel: 0.42,
     riverIntensity: 0.48,
     vegetationDensity: 0.5,
     townDensity: 0.52,
     bridgeAllowance: 0.24,
     advanced: {
-      interiorRise: ISLAND_ARCHETYPE_DEFINITIONS.TWIN_BAY.interiorRise,
       maxHeight: ISLAND_ARCHETYPE_DEFINITIONS.TWIN_BAY.maxHeight,
       embayment: ISLAND_ARCHETYPE_DEFINITIONS.TWIN_BAY.embayment,
       anisotropy: ISLAND_ARCHETYPE_DEFINITIONS.TWIN_BAY.anisotropy,
@@ -295,12 +259,9 @@ const ARCHETYPE_PRESETS: Record<
       ridgeAlignment: ISLAND_ARCHETYPE_DEFINITIONS.TWIN_BAY.ridgeAlignment,
       uplandDistribution: ISLAND_ARCHETYPE_DEFINITIONS.TWIN_BAY.uplandDistribution,
       noiseFrequency: 0.5,
-      islandCompactness: 0.62,
       ridgeFrequency: ISLAND_ARCHETYPE_DEFINITIONS.TWIN_BAY.ridgeFrequency,
       basinStrength: ISLAND_ARCHETYPE_DEFINITIONS.TWIN_BAY.basinStrength,
       coastalShelfWidth: ISLAND_ARCHETYPE_DEFINITIONS.TWIN_BAY.coastalShelfWidth,
-      seaLevelBias: 0.5,
-      skipCarving: false,
       skipRoadNetworkRouting: false,
       riverBudget: 0.52,
       settlementSpacing: 0.58,
@@ -315,13 +276,11 @@ const ARCHETYPE_PRESETS: Record<
     ruggedness: 0.24,
     coastComplexity: 0.24,
     landCoverageTarget: 0.68,
-    waterLevel: 0.3,
     riverIntensity: 0.3,
     vegetationDensity: 0.48,
     townDensity: 0.54,
     bridgeAllowance: 0.12,
     advanced: {
-      interiorRise: ISLAND_ARCHETYPE_DEFINITIONS.SHELF.interiorRise,
       maxHeight: ISLAND_ARCHETYPE_DEFINITIONS.SHELF.maxHeight,
       embayment: ISLAND_ARCHETYPE_DEFINITIONS.SHELF.embayment,
       anisotropy: ISLAND_ARCHETYPE_DEFINITIONS.SHELF.anisotropy,
@@ -329,12 +288,9 @@ const ARCHETYPE_PRESETS: Record<
       ridgeAlignment: ISLAND_ARCHETYPE_DEFINITIONS.SHELF.ridgeAlignment,
       uplandDistribution: ISLAND_ARCHETYPE_DEFINITIONS.SHELF.uplandDistribution,
       noiseFrequency: 0.38,
-      islandCompactness: 0.78,
       ridgeFrequency: ISLAND_ARCHETYPE_DEFINITIONS.SHELF.ridgeFrequency,
       basinStrength: ISLAND_ARCHETYPE_DEFINITIONS.SHELF.basinStrength,
       coastalShelfWidth: ISLAND_ARCHETYPE_DEFINITIONS.SHELF.coastalShelfWidth,
-      seaLevelBias: 0.5,
-      skipCarving: false,
       skipRoadNetworkRouting: false,
       riverBudget: 0.28,
       settlementSpacing: 0.56,
@@ -349,13 +305,11 @@ const ARCHETYPE_PRESETS: Record<
     ruggedness: 0.5,
     coastComplexity: 0.42,
     landCoverageTarget: 0.64,
-    waterLevel: 0.34,
     riverIntensity: 0.45,
     vegetationDensity: 0.56,
     townDensity: 0.48,
     bridgeAllowance: 0.18,
     advanced: {
-      interiorRise: ISLAND_ARCHETYPE_DEFINITIONS.NONE.interiorRise,
       maxHeight: ISLAND_ARCHETYPE_DEFINITIONS.NONE.maxHeight,
       embayment: ISLAND_ARCHETYPE_DEFINITIONS.NONE.embayment,
       anisotropy: ISLAND_ARCHETYPE_DEFINITIONS.NONE.anisotropy,
@@ -363,12 +317,9 @@ const ARCHETYPE_PRESETS: Record<
       ridgeAlignment: ISLAND_ARCHETYPE_DEFINITIONS.NONE.ridgeAlignment,
       uplandDistribution: ISLAND_ARCHETYPE_DEFINITIONS.NONE.uplandDistribution,
       noiseFrequency: 0.5,
-      islandCompactness: 0.6,
       ridgeFrequency: ISLAND_ARCHETYPE_DEFINITIONS.NONE.ridgeFrequency,
       basinStrength: ISLAND_ARCHETYPE_DEFINITIONS.NONE.basinStrength,
       coastalShelfWidth: ISLAND_ARCHETYPE_DEFINITIONS.NONE.coastalShelfWidth,
-      seaLevelBias: 0.5,
-      skipCarving: false,
       skipRoadNetworkRouting: false,
       riverBudget: 0.42,
       settlementSpacing: 0.58,
@@ -392,7 +343,6 @@ export const createDefaultTerrainRecipe = (
     ruggedness: preset.ruggedness,
     coastComplexity: preset.coastComplexity,
     landCoverageTarget: preset.landCoverageTarget,
-    waterLevel: preset.waterLevel,
     riverIntensity: preset.riverIntensity,
     vegetationDensity: preset.vegetationDensity,
     townDensity: preset.townDensity,
@@ -412,7 +362,7 @@ export const cloneTerrainRecipe = (recipe?: Partial<TerrainRecipe>): TerrainReci
   const sourceAdvanced = isRecord(recipe?.advancedOverrides) ? recipe.advancedOverrides : {};
   const landCoverageTarget = clampRangeOverride(
     recipe?.landCoverageTarget,
-    landCoverageFromLegacyWaterLevel(recipe?.waterLevel, defaults.landCoverageTarget),
+    defaults.landCoverageTarget,
     TERRAIN_GENERATION_LIMITS.landCoverageTarget.min,
     TERRAIN_GENERATION_LIMITS.landCoverageTarget.max
   );
@@ -423,13 +373,11 @@ export const cloneTerrainRecipe = (recipe?: Partial<TerrainRecipe>): TerrainReci
     ruggedness: clampOverride(recipe?.ruggedness, defaults.ruggedness),
     coastComplexity: clampOverride(recipe?.coastComplexity, defaults.coastComplexity),
     landCoverageTarget,
-    waterLevel: clampOverride(recipe?.waterLevel, legacyWaterLevelFromLandCoverage(landCoverageTarget)),
     riverIntensity: clampOverride(recipe?.riverIntensity, defaults.riverIntensity),
     vegetationDensity: clampOverride(recipe?.vegetationDensity, defaults.vegetationDensity),
     townDensity: clampOverride(recipe?.townDensity, defaults.townDensity),
     bridgeAllowance: clampOverride(recipe?.bridgeAllowance, defaults.bridgeAllowance),
     advancedOverrides: {
-      interiorRise: clampOverride(sourceAdvanced.interiorRise, defaults.advancedOverrides?.interiorRise ?? DEFAULT_ADVANCED_OVERRIDES.interiorRise),
       maxHeight: clampMaxHeightOverride(sourceAdvanced.maxHeight, defaults.advancedOverrides?.maxHeight ?? DEFAULT_ADVANCED_OVERRIDES.maxHeight),
       embayment: clampOverride(sourceAdvanced.embayment, defaults.advancedOverrides?.embayment ?? DEFAULT_ADVANCED_OVERRIDES.embayment),
       anisotropy: clampOverride(sourceAdvanced.anisotropy, defaults.advancedOverrides?.anisotropy ?? DEFAULT_ADVANCED_OVERRIDES.anisotropy),
@@ -446,12 +394,6 @@ export const cloneTerrainRecipe = (recipe?: Partial<TerrainRecipe>): TerrainReci
         sourceAdvanced.noiseFrequency,
         defaults.advancedOverrides?.noiseFrequency ?? DEFAULT_ADVANCED_OVERRIDES.noiseFrequency
       ),
-      islandCompactness: clampRangeOverride(
-        sourceAdvanced.islandCompactness,
-        defaults.advancedOverrides?.islandCompactness ?? DEFAULT_ADVANCED_OVERRIDES.islandCompactness,
-        TERRAIN_GENERATION_LIMITS.islandCompactness.min,
-        TERRAIN_GENERATION_LIMITS.islandCompactness.max
-      ),
       ridgeFrequency: clampOverride(
         sourceAdvanced.ridgeFrequency,
         defaults.advancedOverrides?.ridgeFrequency ?? DEFAULT_ADVANCED_OVERRIDES.ridgeFrequency
@@ -463,14 +405,6 @@ export const cloneTerrainRecipe = (recipe?: Partial<TerrainRecipe>): TerrainReci
       coastalShelfWidth: clampOverride(
         sourceAdvanced.coastalShelfWidth,
         defaults.advancedOverrides?.coastalShelfWidth ?? DEFAULT_ADVANCED_OVERRIDES.coastalShelfWidth
-      ),
-      seaLevelBias: clampOverride(
-        sourceAdvanced.seaLevelBias,
-        defaults.advancedOverrides?.seaLevelBias ?? DEFAULT_ADVANCED_OVERRIDES.seaLevelBias
-      ),
-      skipCarving: parseBooleanOverride(
-        sourceAdvanced.skipCarving,
-        defaults.advancedOverrides?.skipCarving ?? DEFAULT_ADVANCED_OVERRIDES.skipCarving
       ),
       skipRoadNetworkRouting: parseBooleanOverride(
         sourceAdvanced.skipRoadNetworkRouting,
@@ -521,7 +455,6 @@ export const terrainRecipeEqual = (a: TerrainRecipe, b: TerrainRecipe): boolean 
     Math.abs(a.ruggedness - b.ruggedness) > 1e-6 ||
     Math.abs(a.coastComplexity - b.coastComplexity) > 1e-6 ||
     Math.abs(a.landCoverageTarget - b.landCoverageTarget) > 1e-6 ||
-    Math.abs(a.waterLevel - b.waterLevel) > 1e-6 ||
     Math.abs(a.riverIntensity - b.riverIntensity) > 1e-6 ||
     Math.abs(a.vegetationDensity - b.vegetationDensity) > 1e-6 ||
     Math.abs(a.townDensity - b.townDensity) > 1e-6 ||
@@ -532,7 +465,6 @@ export const terrainRecipeEqual = (a: TerrainRecipe, b: TerrainRecipe): boolean 
   const aAdvanced = cloneTerrainRecipe(a).advancedOverrides ?? DEFAULT_ADVANCED_OVERRIDES;
   const bAdvanced = cloneTerrainRecipe(b).advancedOverrides ?? DEFAULT_ADVANCED_OVERRIDES;
   return (
-    Math.abs((aAdvanced.interiorRise ?? 0) - (bAdvanced.interiorRise ?? 0)) <= 1e-6 &&
     Math.abs((aAdvanced.maxHeight ?? 0) - (bAdvanced.maxHeight ?? 0)) <= 1e-6 &&
     Math.abs((aAdvanced.embayment ?? 0) - (bAdvanced.embayment ?? 0)) <= 1e-6 &&
     Math.abs((aAdvanced.anisotropy ?? 0) - (bAdvanced.anisotropy ?? 0)) <= 1e-6 &&
@@ -540,12 +472,9 @@ export const terrainRecipeEqual = (a: TerrainRecipe, b: TerrainRecipe): boolean 
     Math.abs((aAdvanced.ridgeAlignment ?? 0) - (bAdvanced.ridgeAlignment ?? 0)) <= 1e-6 &&
     Math.abs((aAdvanced.uplandDistribution ?? 0) - (bAdvanced.uplandDistribution ?? 0)) <= 1e-6 &&
     Math.abs((aAdvanced.noiseFrequency ?? 0) - (bAdvanced.noiseFrequency ?? 0)) <= 1e-6 &&
-    Math.abs((aAdvanced.islandCompactness ?? 0) - (bAdvanced.islandCompactness ?? 0)) <= 1e-6 &&
     Math.abs((aAdvanced.ridgeFrequency ?? 0) - (bAdvanced.ridgeFrequency ?? 0)) <= 1e-6 &&
     Math.abs((aAdvanced.basinStrength ?? 0) - (bAdvanced.basinStrength ?? 0)) <= 1e-6 &&
     Math.abs((aAdvanced.coastalShelfWidth ?? 0) - (bAdvanced.coastalShelfWidth ?? 0)) <= 1e-6 &&
-    Math.abs((aAdvanced.seaLevelBias ?? 0) - (bAdvanced.seaLevelBias ?? 0)) <= 1e-6 &&
-    Boolean(aAdvanced.skipCarving) === Boolean(bAdvanced.skipCarving) &&
     Boolean(aAdvanced.skipRoadNetworkRouting) === Boolean(bAdvanced.skipRoadNetworkRouting) &&
     Math.abs((aAdvanced.riverBudget ?? 0) - (bAdvanced.riverBudget ?? 0)) <= 1e-6 &&
     Math.abs((aAdvanced.settlementSpacing ?? 0) - (bAdvanced.settlementSpacing ?? 0)) <= 1e-6 &&
@@ -565,7 +494,6 @@ const resolveAdvancedOverrides = (recipe: TerrainRecipe): Required<TerrainAdvanc
   const preset = ARCHETYPE_PRESETS[recipe.archetype].advanced;
   const advanced = recipe.advancedOverrides ?? {};
   return {
-    interiorRise: clampOverride(advanced.interiorRise, preset.interiorRise),
     maxHeight: clampMaxHeightOverride(advanced.maxHeight, preset.maxHeight),
     embayment: clampOverride(advanced.embayment, preset.embayment),
     anisotropy: clampOverride(advanced.anisotropy, preset.anisotropy),
@@ -573,17 +501,9 @@ const resolveAdvancedOverrides = (recipe: TerrainRecipe): Required<TerrainAdvanc
     ridgeAlignment: clampOverride(advanced.ridgeAlignment, preset.ridgeAlignment),
     uplandDistribution: clampOverride(advanced.uplandDistribution, preset.uplandDistribution),
     noiseFrequency: clampOverride(advanced.noiseFrequency, preset.noiseFrequency),
-    islandCompactness: clampRangeOverride(
-      advanced.islandCompactness,
-      preset.islandCompactness,
-      TERRAIN_GENERATION_LIMITS.islandCompactness.min,
-      TERRAIN_GENERATION_LIMITS.islandCompactness.max
-    ),
     ridgeFrequency: clampOverride(advanced.ridgeFrequency, preset.ridgeFrequency),
     basinStrength: clampOverride(advanced.basinStrength, preset.basinStrength),
     coastalShelfWidth: clampOverride(advanced.coastalShelfWidth, preset.coastalShelfWidth),
-    seaLevelBias: clampOverride(advanced.seaLevelBias, preset.seaLevelBias),
-    skipCarving: parseBooleanOverride(advanced.skipCarving, preset.skipCarving),
     skipRoadNetworkRouting: parseBooleanOverride(advanced.skipRoadNetworkRouting, preset.skipRoadNetworkRouting),
     riverBudget: clampOverride(advanced.riverBudget, preset.riverBudget),
     settlementSpacing: clampOverride(advanced.settlementSpacing, preset.settlementSpacing),
@@ -607,7 +527,6 @@ export const compileTerrainRecipe = (recipeInput: TerrainRecipe): ResolvedTerrai
     TERRAIN_GENERATION_LIMITS.landCoverageTarget.min,
     TERRAIN_GENERATION_LIMITS.landCoverageTarget.max
   );
-  const waterLevel = clamp01(recipe.waterLevel);
   const riverIntensity = clamp01(recipe.riverIntensity);
   const vegetationDensity = clamp01(recipe.vegetationDensity);
   const townDensity = clamp01(recipe.townDensity);
@@ -620,17 +539,16 @@ export const compileTerrainRecipe = (recipeInput: TerrainRecipe): ResolvedTerrai
   const ridgeAlignment = clamp01(advanced.ridgeAlignment);
   const uplandDistribution = clamp01(advanced.uplandDistribution);
   const noiseFrequency = clamp01(advanced.noiseFrequency);
-  const seaLevelBias = clamp01(advanced.seaLevelBias);
   const heightScaleMultiplier = computeTerrainHeightScaleMultiplier(maxHeight);
   const normalizedHeightPressure = computeNormalizedHeightPressure(maxHeight);
   const valleyDepthScale = mix(0.74, 1, reliefCurve);
 
   const mountainScale =
     recipe.archetype === "SHELF"
-      ? mix(0.72, 0.96, 1 - advanced.islandCompactness)
+      ? mix(0.72, 0.96, 1 - uplandDistribution)
       : recipe.archetype === "LONG_SPINE"
-        ? mix(0.92, 1.12, mix(1 - advanced.islandCompactness, anisotropy, 0.55))
-        : mix(0.84, 1.18, mix(1 - advanced.islandCompactness, uplandDistribution, 0.35));
+        ? mix(0.92, 1.12, anisotropy)
+        : mix(0.84, 1.18, uplandDistribution);
 
   const riverBudget = clamp01(advanced.riverBudget);
   const riverCount = 0;
@@ -662,7 +580,6 @@ export const compileTerrainRecipe = (recipeInput: TerrainRecipe): ResolvedTerrai
     elevationScale:
       mix(0.84, 1.18, reliefCurve)
       * normalizedHeightPressure
-      * mix(0.9, 1.14, advanced.interiorRise)
       * mix(0.94, 1.06, uplandDistribution),
     elevationExponent: mix(0.9, 1.06, Math.pow(relief, 1.04)),
     mountainScale,
@@ -684,8 +601,7 @@ export const compileTerrainRecipe = (recipeInput: TerrainRecipe): ResolvedTerrai
     grassCanopyBase: mix(0.03, 0.14, vegetationDensity),
     grassCanopyRange: mix(0.08, 0.34, forestPatchiness),
     waterCoverage: clamp(1 - landCoverageTarget, 0.18, 0.68),
-    baseWaterThreshold: mix(0.08, 0.2, waterLevel),
-    edgeWaterBias: mix(0.05, 0.24, coastComplexity),
+    baseWaterThreshold: DEFAULT_MAP_GEN_SETTINGS.baseWaterThreshold,
     riverCount,
     riverWaterBias: mix(0.08, 0.32, riverIntensity),
     biomeClassifierMode: "seedSpread",
@@ -700,14 +616,11 @@ export const compileTerrainRecipe = (recipeInput: TerrainRecipe): ResolvedTerrai
     relief,
     ruggedness,
     coastComplexity,
-    waterLevel,
     landCoverageTarget,
-    seaLevelBias,
     riverIntensity,
     vegetationDensity,
     townDensity,
     bridgeAllowance,
-    interiorRise: advanced.interiorRise,
     maxHeight,
     embayment,
     anisotropy,
@@ -715,7 +628,6 @@ export const compileTerrainRecipe = (recipeInput: TerrainRecipe): ResolvedTerrai
     ridgeAlignment,
     uplandDistribution,
     noiseFrequency,
-    islandCompactness: advanced.islandCompactness,
     ridgeFrequency: advanced.ridgeFrequency,
     basinStrength: advanced.basinStrength,
     coastalShelfWidth: advanced.coastalShelfWidth,
@@ -725,15 +637,13 @@ export const compileTerrainRecipe = (recipeInput: TerrainRecipe): ResolvedTerrai
       * erosionArchetypeScale,
     erosionDetailScaleM:
       mix(340, 140, erosionTightness)
-      * mix(1.08, 0.9, clamp01(mountainScale - 0.68))
-      * mix(1.02, 0.9, advanced.islandCompactness),
+      * mix(1.08, 0.9, clamp01(mountainScale - 0.68)),
     erosionDetailOctaves: 4,
     erosionSlopeStrength: mix(1.1, 2.5, clamp01(ruggedness * 0.75 + relief * 0.25)),
     erosionBranchStrength: mix(0.8, 2.25, clamp01(ruggedness * 0.55 + riverIntensity * 0.45)),
     erosionCoastFade: mix(0.012, 0.064, clamp01((1 - landCoverageTarget) * 0.7 + advanced.coastalShelfWidth * 0.3)),
     erosionSlopeMaskMin: mix(0.007, 0.0025, ruggedness),
     erosionSlopeMaskMax: mix(0.026, 0.076, clamp01(ruggedness * 0.65 + relief * 0.35)),
-    skipCarving: advanced.skipCarving,
     skipRoadNetworkRouting: advanced.skipRoadNetworkRouting,
     riverBudget,
     settlementSpacing: advanced.settlementSpacing,
@@ -743,13 +653,15 @@ export const compileTerrainRecipe = (recipeInput: TerrainRecipe): ResolvedTerrai
     forestPatchiness,
     lakeChance: mix(0.36, 0.9, lakeBias),
     maxLakeCount: Math.max(1, Math.round(mix(1, 6, lakeBias) * Math.max(0.75, sizeScale))),
-    minLakeAreaTiles: Math.max(8, Math.round(mix(8, 20, sizeScale))),
+    minLakeAreaTiles: Math.max(2, Math.round(mix(1, 3, sizeScale))),
     maxLakeAreaTiles: Math.round(clamp(totalTiles * mix(0.0025, 0.011, lakeBias), 48, 2400)),
-    minLakeDepth: mix(0.006, 0.012, relief),
+    minLakeDepth:
+      mix(0.0018, 0.004, relief)
+      * mix(1, 0.68, advanced.basinStrength),
     maxLakeDepth: mix(0.026, 0.055, clamp01(ruggedness * 0.55 + relief * 0.45)),
     minDistanceFromOceanTiles: Math.max(5, Math.round(mix(5, 12, 1 - landCoverageTarget) * Math.max(0.75, sizeScale))),
-    lakeElevationMin: mix(0.1, 0.18, waterLevel),
-    lakeElevationMax: mix(0.62, 0.82, relief),
+    lakeElevationMin: mix(0.12, 0.16, relief),
+    lakeElevationMax: mix(0.86, 0.94, relief),
     lakeShapeSmoothingPasses: lakeBias >= 0.45 ? 1 : 0,
     rainfallWindwardBoost: mix(0.14, 0.28, ruggedness),
     rainfallLeewardPenalty: mix(0.12, 0.24, ruggedness),
@@ -857,9 +769,8 @@ const inferRecipeFromSettings = (settingsInput: Partial<MapGenSettings>, mapSize
     mapSize,
     relief: clamp01((settings.relief ?? ((settings.elevationScale - 0.88) / Math.max(0.0001, 1.58 - 0.88)))),
     ruggedness: clamp01(settings.ruggedness ?? (settings.ridgeStrength / 0.24)),
-    coastComplexity: clamp01(settings.coastComplexity ?? ((settings.edgeWaterBias - 0.06) / Math.max(0.0001, 0.28 - 0.06))),
+    coastComplexity: clamp01(settings.coastComplexity ?? DEFAULT_MAP_GEN_SETTINGS.coastComplexity),
     landCoverageTarget: clamp01(settings.landCoverageTarget ?? (1 - settings.waterCoverage)),
-    waterLevel: clamp01(settings.waterLevel ?? ((settings.waterCoverage - 0.22) / Math.max(0.0001, 0.68 - 0.22))),
     riverIntensity: clamp01(settings.riverIntensity ?? ((settings.riverWaterBias - 0.08) / Math.max(0.0001, 0.32 - 0.08))),
     vegetationDensity: clamp01(
       settings.vegetationDensity ?? ((0.76 - settings.forestThreshold) / Math.max(0.0001, 0.76 - 0.48))
@@ -867,7 +778,6 @@ const inferRecipeFromSettings = (settingsInput: Partial<MapGenSettings>, mapSize
     townDensity: clamp01(settings.townDensity ?? 0.5),
     bridgeAllowance: clamp01(settings.bridgeAllowance ?? (settings.road.bridgeTransitions ? 0.7 : 0.2)),
     advancedOverrides: {
-      interiorRise: clamp01(settings.interiorRise ?? DEFAULT_ADVANCED_OVERRIDES.interiorRise),
       maxHeight: clampMaxHeight(settings.maxHeight ?? inferMaxHeightFromScaleMultiplier(settings.heightScaleMultiplier)),
       embayment: clamp01(settings.embayment ?? DEFAULT_ADVANCED_OVERRIDES.embayment),
       anisotropy: clamp01(settings.anisotropy ?? DEFAULT_ADVANCED_OVERRIDES.anisotropy),
@@ -875,12 +785,9 @@ const inferRecipeFromSettings = (settingsInput: Partial<MapGenSettings>, mapSize
       ridgeAlignment: clamp01(settings.ridgeAlignment ?? DEFAULT_ADVANCED_OVERRIDES.ridgeAlignment),
       uplandDistribution: clamp01(settings.uplandDistribution ?? DEFAULT_ADVANCED_OVERRIDES.uplandDistribution),
       noiseFrequency: clamp01(settings.noiseFrequency ?? DEFAULT_ADVANCED_OVERRIDES.noiseFrequency),
-      islandCompactness: clamp01(settings.islandCompactness ?? DEFAULT_ADVANCED_OVERRIDES.islandCompactness),
       ridgeFrequency: clamp01(settings.ridgeFrequency ?? DEFAULT_ADVANCED_OVERRIDES.ridgeFrequency),
       basinStrength: clamp01(settings.basinStrength ?? DEFAULT_ADVANCED_OVERRIDES.basinStrength),
       coastalShelfWidth: clamp01(settings.coastalShelfWidth ?? DEFAULT_ADVANCED_OVERRIDES.coastalShelfWidth),
-      seaLevelBias: clamp01(settings.seaLevelBias ?? DEFAULT_ADVANCED_OVERRIDES.seaLevelBias),
-      skipCarving: Boolean(settings.skipCarving ?? DEFAULT_ADVANCED_OVERRIDES.skipCarving),
       skipRoadNetworkRouting: Boolean(settings.skipRoadNetworkRouting ?? DEFAULT_ADVANCED_OVERRIDES.skipRoadNetworkRouting),
       riverBudget: clamp01(settings.riverBudget ?? DEFAULT_ADVANCED_OVERRIDES.riverBudget),
       settlementSpacing: clamp01(settings.settlementSpacing ?? DEFAULT_ADVANCED_OVERRIDES.settlementSpacing),

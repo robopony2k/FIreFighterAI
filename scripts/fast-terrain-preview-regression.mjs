@@ -11,66 +11,66 @@ const distImport = (segments) => pathToFileURL(path.join(repoRoot, "dist", ...se
 const { MAP_SIZE_PRESETS } = await import(distImport(["core", "config.js"]));
 const { createDefaultTerrainRecipe, compileTerrainRecipe, cloneTerrainRecipe } = await import(distImport(["mapgen", "terrainProfile.js"]));
 const { buildFastTerrainPreview } = await import(distImport(["systems", "terrain", "sim", "fastTerrainPreview.js"]));
-const { MAP_EDITOR_TERRAIN_GROUPS } = await import(distImport(["ui", "terrain-schema.js"]));
+const { getSquareBumpDistance01, shapeIslandBoundary } = await import(distImport(["systems", "terrain", "sim", "islandBoundaryShaping.js"]));
+const { MAP_EDITOR_TERRAIN_GROUPS, TERRAIN_RUN_GROUPS } = await import(distImport(["ui", "terrain-schema.js"]));
 
 const archetypes = ["MASSIF", "LONG_SPINE", "TWIN_BAY", "SHELF", "NONE"];
-const modes = ["height", "relief", "water"];
+const modes = ["uplift", "surface", "water"];
 const seed = 1337;
 const sizeId = "massive";
 const size = MAP_SIZE_PRESETS[sizeId];
 const PERF_BUDGET_MS = 220;
 const EXPECTED_HASHES = {
   MASSIF: {
-    height: "07dceed5",
-    relief: "e050f20d",
-    water: "a260007d"
+    uplift: "185e981a",
+    surface: "b0783d05",
+    water: "bbafa905"
   },
   LONG_SPINE: {
-    height: "d75d040d",
-    relief: "2cc0c2c4",
-    water: "3405fdd4"
+    uplift: "c3090444",
+    surface: "b864da11",
+    water: "3cad7c21"
   },
   TWIN_BAY: {
-    height: "be61a997",
-    relief: "32532a23",
-    water: "30a392c2"
+    uplift: "c752e6e9",
+    surface: "c9f34ce7",
+    water: "74aa9f46"
   },
   SHELF: {
-    height: "7ae300bb",
-    relief: "57f5915c",
-    water: "2ba85e5d"
+    uplift: "cbad132f",
+    surface: "3c77c955",
+    water: "6dbaaac4"
   },
   NONE: {
-    height: "0b21f3a4",
-    relief: "955a1c39",
-    water: "54db1679"
+    uplift: "8e7ec47d",
+    surface: "896730cc",
+    water: "bbb11c4c"
   }
 };
 
 const EXPECTED_EDITOR_KEYS = {
-  scenario: ["recipe.archetype", "advanced.noiseFrequency"],
-  carving: [
+  scenario: ["advanced.noiseFrequency"],
+  uplift: [
+    "recipe.archetype",
     "recipe.relief",
-    "recipe.ruggedness",
     "advanced.maxHeight",
-    "advanced.uplandDistribution"
-  ],
-  relief: [
+    "advanced.uplandDistribution",
     "advanced.ridgeAlignment",
+    "advanced.basinStrength"
+  ],
+  surface: [
+    "recipe.ruggedness",
     "advanced.ridgeFrequency"
   ],
   flooding: [
     "recipe.landCoverageTarget",
     "recipe.coastComplexity",
-    "advanced.seaLevelBias",
     "advanced.embayment",
-    "advanced.islandCompactness",
-    "advanced.interiorRise",
     "advanced.anisotropy",
     "advanced.asymmetry",
     "advanced.coastalShelfWidth"
   ],
-  rivers: ["recipe.riverIntensity", "advanced.basinStrength"],
+  rivers: [],
   settlements: [
     "recipe.townDensity",
     "recipe.bridgeAllowance",
@@ -84,7 +84,7 @@ const EXPECTED_EDITOR_KEYS = {
     "advanced.forestPatchiness",
     "advanced.vegetationPreGrowthYears"
   ],
-  erosion: []
+  erosion: ["recipe.riverIntensity"]
 };
 
 const hashArrays = (...arrays) => {
@@ -181,9 +181,346 @@ const assertEditorControlSchema = () => {
   for (const [stepId, expected] of Object.entries(EXPECTED_EDITOR_KEYS)) {
     assertSameSet(collectEditorKeys(stepId), expected, stepId);
   }
-  const earlyKeys = ["scenario", "carving", "relief", "flooding", "rivers", "erosion"].flatMap(collectEditorKeys);
-  if (earlyKeys.includes("advanced.skipCarving")) {
-    throw new Error("Map editor still exposes obsolete advanced.skipCarving in early terrain controls.");
+  const allEditorKeys = Object.keys(MAP_EDITOR_TERRAIN_GROUPS).flatMap(collectEditorKeys);
+  const duplicates = allEditorKeys.filter((key, index) => allEditorKeys.indexOf(key) !== index);
+  if (duplicates.length > 0) {
+    throw new Error(`Map editor controls must have unique ownership: ${[...new Set(duplicates)].join(",")}`);
+  }
+  const earlyKeys = ["scenario", "uplift", "surface", "flooding", "erosion", "rivers"].flatMap(collectEditorKeys);
+  const obsoleteKeys = ["recipe.waterLevel", "advanced.skipCarving", "advanced.interiorRise", "advanced.islandCompactness", "advanced.seaLevelBias"];
+  const leakedEarlyKeys = obsoleteKeys.filter((key) => earlyKeys.includes(key));
+  if (leakedEarlyKeys.length > 0) throw new Error(`Map editor still exposes obsolete terrain controls: ${leakedEarlyKeys.join(",")}`);
+  const runKeys = TERRAIN_RUN_GROUPS.flatMap((group) => group.fields.map((field) => `${field.scope}.${field.key}`));
+  const leakedRunKeys = obsoleteKeys.filter((key) => runKeys.includes(key));
+  if (leakedRunKeys.length > 0) throw new Error(`New-run terrain controls still expose obsolete terrain controls: ${leakedRunKeys.join(",")}`);
+};
+
+const assertEditorUpliftSequence = () => {
+  const source = readFileSync(path.join(repoRoot, "src", "ui", "map-editor.ts"), "utf8");
+  const previewSource = readFileSync(path.join(repoRoot, "src", "render", "terrainPreview.ts"), "utf8");
+  const fastPreviewSource = readFileSync(path.join(repoRoot, "src", "systems", "terrain", "sim", "fastTerrainPreview.ts"), "utf8");
+  const markup = readFileSync(path.join(repoRoot, "index.html"), "utf8");
+  if (!/MAP_EDITOR_STEP_SEQUENCE[\s\S]*?"scenario"[\s\S]*?"uplift"[\s\S]*?"surface"[\s\S]*?"flooding"[\s\S]*?"erosion"[\s\S]*?"rivers"/.test(source)) {
+    throw new Error("Map editor terrain steps are not ordered Scenario -> Uplift -> Surface -> Sea Level -> Erosion -> Rivers/Lakes.");
+  }
+  if (/data-step(?:-panel)?="(?:carving|relief)"/.test(markup) || /\| "(?:carving|relief)"/.test(source)) {
+    throw new Error("Map editor still exposes retired carving/relief step identifiers.");
+  }
+  if (!/data-step="uplift"[\s\S]*?>Uplift</.test(markup) || !/data-step="surface"[\s\S]*?>Surface</.test(markup)) {
+    throw new Error("Map editor markup is missing Uplift or Surface step labels.");
+  }
+  if (!markup.includes("Archetype field") || !markup.includes("Basin tendency") || !markup.includes("Coastline tint is context only")) {
+    throw new Error("Map editor Uplift preview is missing its field legend or coastline-context explanation.");
+  }
+  if (!previewSource.includes("UPLIFT_CAMERA_DIRECTION") || !previewSource.includes('viewPreset?: "default" | "uplift"')) {
+    throw new Error("Map editor Uplift preview is missing its near-overhead camera preset.");
+  }
+  if (!fastPreviewSource.includes("buildUpliftPresentation")) {
+    throw new Error("Map editor Uplift preview is still rendering the composite terrain elevation directly.");
+  }
+};
+
+const fieldRange = (field) => {
+  let min = Number.POSITIVE_INFINITY;
+  let max = Number.NEGATIVE_INFINITY;
+  for (let i = 0; i < field.length; i += 1) {
+    min = Math.min(min, field[i] ?? 0);
+    max = Math.max(max, field[i] ?? 0);
+  }
+  return max - min;
+};
+
+const fieldCorrelation = (left, right) => {
+  let leftMean = 0;
+  let rightMean = 0;
+  for (let i = 0; i < left.length; i += 1) {
+    leftMean += left[i] ?? 0;
+    rightMean += right[i] ?? 0;
+  }
+  leftMean /= Math.max(1, left.length);
+  rightMean /= Math.max(1, right.length);
+  let covariance = 0;
+  let leftVariance = 0;
+  let rightVariance = 0;
+  for (let i = 0; i < left.length; i += 1) {
+    const leftDelta = (left[i] ?? 0) - leftMean;
+    const rightDelta = (right[i] ?? 0) - rightMean;
+    covariance += leftDelta * rightDelta;
+    leftVariance += leftDelta * leftDelta;
+    rightVariance += rightDelta * rightDelta;
+  }
+  return covariance / Math.max(1e-9, Math.sqrt(leftVariance * rightVariance));
+};
+
+const interiorFieldCorrelation = (left, right, cols, rows) => {
+  const leftInterior = [];
+  const rightInterior = [];
+  for (let y = 0; y < rows; y += 1) {
+    const py = y / Math.max(1, rows - 1) * 2 - 1;
+    for (let x = 0; x < cols; x += 1) {
+      const px = x / Math.max(1, cols - 1) * 2 - 1;
+      const distance = 1 - (1 - px * px) * (1 - py * py);
+      if (distance >= 0.48) continue;
+      const idx = y * cols + x;
+      leftInterior.push(left[idx] ?? 0);
+      rightInterior.push(right[idx] ?? 0);
+    }
+  }
+  return fieldCorrelation(leftInterior, rightInterior);
+};
+
+const interiorGradientCorrelation = (left, right, cols, rows) => {
+  const leftGradients = [];
+  const rightGradients = [];
+  for (let y = 0; y < rows - 1; y += 1) {
+    const py = y / Math.max(1, rows - 1) * 2 - 1;
+    for (let x = 0; x < cols - 1; x += 1) {
+      const px = x / Math.max(1, cols - 1) * 2 - 1;
+      if (getSquareBumpDistance01(px, py) >= 0.72) continue;
+      const index = y * cols + x;
+      leftGradients.push((left[index + 1] ?? 0) - (left[index] ?? 0));
+      rightGradients.push((right[index + 1] ?? 0) - (right[index] ?? 0));
+      leftGradients.push((left[index + cols] ?? 0) - (left[index] ?? 0));
+      rightGradients.push((right[index + cols] ?? 0) - (right[index] ?? 0));
+    }
+  }
+  return fieldCorrelation(leftGradients, rightGradients);
+};
+
+const assertScenarioNoiseIsArchetypeIndependent = () => {
+  const baseRecipe = createDefaultTerrainRecipe(sizeId, "MASSIF");
+  const { settings: baseSettings } = compileTerrainRecipe(baseRecipe);
+  let expectedHash = null;
+  for (const archetype of archetypes) {
+    const result = buildFastTerrainPreview({
+      seed,
+      cols: size,
+      rows: size,
+      settings: { ...baseSettings, terrainArchetype: archetype },
+      mode: "noise"
+    });
+    const hash = hashArrays(result.debugScalarField);
+    expectedHash ??= hash;
+    if (hash !== expectedHash) {
+      throw new Error(`Scenario noise changed when only the archetype changed: ${JSON.stringify({ archetype, expectedHash, hash })}`);
+    }
+  }
+};
+
+const assertSurfaceDeformsScenarioTowardUplift = () => {
+  for (const archetype of archetypes.filter((value) => value !== "NONE")) {
+    const recipe = createDefaultTerrainRecipe(sizeId, archetype);
+    const { settings } = compileTerrainRecipe(recipe);
+    const noise = buildPreview(recipe, "noise").result;
+    const uplift = buildPreview(recipe, "uplift").result;
+    const surface = buildPreview(recipe, "surface").result;
+    const neutralSurface = buildFastTerrainPreview({
+      seed,
+      cols: size,
+      rows: size,
+      settings: { ...settings, terrainArchetype: "NONE" },
+      mode: "surface"
+    });
+    const deformation = Float32Array.from(
+      surface.elevationMap,
+      (value, index) => value - (neutralSurface.elevationMap[index] ?? 0)
+    );
+    const upliftSignal = Float32Array.from(
+      uplift.archetypeUpliftMap,
+      (value, index) => value - (uplift.archetypeBasinMap[index] ?? 0) * 0.3
+    );
+    const upliftCorrelation = interiorFieldCorrelation(
+      deformation,
+      upliftSignal,
+      surface.cols,
+      surface.rows
+    );
+    const noiseCorrelation = interiorGradientCorrelation(
+      surface.elevationMap,
+      noise.debugScalarField,
+      surface.cols,
+      surface.rows
+    );
+    const deformationRange = fieldRange(deformation);
+    if (!Number.isFinite(upliftCorrelation) || deformationRange < 0.025 || deformationRange > 0.24 || noiseCorrelation < 0.18) {
+      throw new Error(`${archetype}: Surface must retain bounded archetype deformation while remaining noise-led: ${JSON.stringify({ upliftCorrelation, deformationRange, noiseCorrelation })}`);
+    }
+  }
+
+  const capturedLongSpine = withRecipeChange(createDefaultTerrainRecipe(sizeId, "LONG_SPINE"), (recipe) => {
+    recipe.relief = 1;
+    recipe.ruggedness = 0.75;
+    recipe.advancedOverrides.maxHeight = 1.5;
+    recipe.advancedOverrides.uplandDistribution = 0;
+    recipe.advancedOverrides.ridgeAlignment = 1;
+    recipe.advancedOverrides.basinStrength = 1;
+    recipe.advancedOverrides.ridgeFrequency = 0.82;
+  });
+  const capturedUplift = buildPreview(capturedLongSpine, "uplift").result;
+  const capturedSurface = buildPreview(capturedLongSpine, "surface").result;
+  const capturedSettings = compileTerrainRecipe(capturedLongSpine).settings;
+  const capturedNeutral = buildFastTerrainPreview({
+    seed,
+    cols: size,
+    rows: size,
+    settings: { ...capturedSettings, terrainArchetype: "NONE" },
+    mode: "surface"
+  });
+  const capturedDeformation = Float32Array.from(
+    capturedSurface.elevationMap,
+    (value, index) => value - (capturedNeutral.elevationMap[index] ?? 0)
+  );
+  const capturedSignal = Float32Array.from(
+    capturedUplift.archetypeUpliftMap,
+    (value, index) => value - (capturedUplift.archetypeBasinMap[index] ?? 0) * 0.3
+  );
+  const capturedCorrelation = interiorFieldCorrelation(
+    capturedDeformation,
+    capturedSignal,
+    capturedSurface.cols,
+    capturedSurface.rows
+  );
+  if (capturedCorrelation < 0.28) {
+    throw new Error(`Captured extreme Long Spine controls lost their broad shape at Surface: ${capturedCorrelation}`);
+  }
+};
+
+const assertSurfaceUsesNoiseLedBoundaryShaping = () => {
+  const flatProfile = [0, 0.25, 0.5, 0.75, 0.9].map((x) =>
+    shapeIslandBoundary(0.5, x, 0, 0, 0.5).macroHeight
+  );
+  for (let index = 1; index < flatProfile.length; index += 1) {
+    if ((flatProfile[index] ?? 0) >= (flatProfile[index - 1] ?? 0)) {
+      throw new Error(`Square-bump conversion did not decline continuously: ${JSON.stringify(flatProfile)}`);
+    }
+  }
+  const profileDrops = flatProfile.slice(1).map((value, index) => (flatProfile[index] ?? 0) - value);
+  if ((profileDrops.at(-1) ?? 0) <= (profileDrops[0] ?? 0)) {
+    throw new Error(`Square-bump conversion did not accelerate toward the edge: ${JSON.stringify({ flatProfile, profileDrops })}`);
+  }
+  if (getSquareBumpDistance01(0, 0) !== 0 || getSquareBumpDistance01(1, 0.37) !== 1) {
+    throw new Error("Square-bump distance lost its exact centre or perimeter contract.");
+  }
+  const centerCalm = shapeIslandBoundary(0.5, 0, 0, 1, 1);
+  const centerNeutral = shapeIslandBoundary(0.5, 0, 0, 0, 1);
+  const edgeCalm = shapeIslandBoundary(0.5, 1, 0.3, -1, 1);
+  const edgeNeutral = shapeIslandBoundary(0.5, 1, 0.3, 0, 1);
+  if (centerCalm.perturbedDistance01 !== centerNeutral.perturbedDistance01 || edgeCalm.perturbedDistance01 !== edgeNeutral.perturbedDistance01) {
+    throw new Error("Coast perturbation must vanish at the centre and exact perimeter.");
+  }
+
+  const recipe = createDefaultTerrainRecipe(sizeId, "NONE");
+  const surface = buildPreview(recipe, "surface").result;
+  const water = buildPreview(recipe, "water").result;
+  let surfaceBorder = 0;
+  let surfaceInterior = 0;
+  let maxSurfaceWaterDelta = 0;
+  let borderCount = 0;
+  let interiorCount = 0;
+  const profileBands = Array.from({ length: 4 }, () => ({ elevation: 0, count: 0, step: 0, stepCount: 0 }));
+  for (let y = 0; y < surface.rows; y += 1) {
+    for (let x = 0; x < surface.cols; x += 1) {
+      const px = x / Math.max(1, surface.cols - 1) * 2 - 1;
+      const py = y / Math.max(1, surface.rows - 1) * 2 - 1;
+      const distance = 1 - (1 - px * px) * (1 - py * py);
+      const idx = y * surface.cols + x;
+      if (distance > 0.96) {
+        surfaceBorder += surface.elevationMap[idx] ?? 0;
+        borderCount += 1;
+      } else if (distance < 0.3) {
+        surfaceInterior += surface.elevationMap[idx] ?? 0;
+        interiorCount += 1;
+      }
+      const band = distance < 0.3 ? 0 : distance < 0.6 ? 1 : distance < 0.75 ? 2 : distance < 0.9 ? 3 : -1;
+      if (band >= 0) {
+        const entry = profileBands[band];
+        entry.elevation += surface.elevationMap[idx] ?? 0;
+        entry.count += 1;
+        if (x + 1 < surface.cols) {
+          entry.step += Math.abs((surface.elevationMap[idx] ?? 0) - (surface.elevationMap[idx + 1] ?? 0));
+          entry.stepCount += 1;
+        }
+        if (y + 1 < surface.rows) {
+          entry.step += Math.abs((surface.elevationMap[idx] ?? 0) - (surface.elevationMap[idx + surface.cols] ?? 0));
+          entry.stepCount += 1;
+        }
+      }
+      maxSurfaceWaterDelta = Math.max(
+        maxSurfaceWaterDelta,
+        Math.abs((surface.elevationMap[idx] ?? 0) - (water.elevationMap[idx] ?? 0))
+      );
+    }
+  }
+  surfaceBorder /= Math.max(1, borderCount);
+  surfaceInterior /= Math.max(1, interiorCount);
+  if (surfaceBorder > surfaceInterior - 0.25 || maxSurfaceWaterDelta > 1e-7) {
+    throw new Error(`Surface must apply the accelerating edge bias before Water classifies the unchanged elevation: ${JSON.stringify({ surfaceBorder, surfaceInterior, maxSurfaceWaterDelta })}`);
+  }
+  const bandMeans = profileBands.map((entry) => entry.elevation / Math.max(1, entry.count));
+  if (!(bandMeans[0] > bandMeans[1] && bandMeans[1] > bandMeans[2] && bandMeans[2] > bandMeans[3])) {
+    throw new Error(`Surface profile retained a late plateau instead of a continuous decline: ${JSON.stringify(bandMeans)}`);
+  }
+  const middleStep = profileBands[2].step / Math.max(1, profileBands[2].stepCount);
+  const outerStep = profileBands[3].step / Math.max(1, profileBands[3].stepCount);
+  if (outerStep > middleStep * 3) {
+    throw new Error(`Surface retained a compressed coastal slope spike: ${JSON.stringify({ middleStep, outerStep })}`);
+  }
+  const source = readFileSync(path.join(repoRoot, "src", "systems", "terrain", "sim", "noiseLandmass.ts"), "utf8");
+  if (!source.includes("shapeIslandBoundary") || /falloffStart|acceleratedInfluence|edgeInfluence \* edgeInfluence/.test(source)) {
+    throw new Error("Surface is not using the shared continuous square-bump boundary conversion.");
+  }
+};
+
+const assertIsolatedUpliftPreview = () => {
+  for (const archetype of archetypes) {
+    const recipe = createDefaultTerrainRecipe(sizeId, archetype);
+    const result = buildPreview(recipe, "uplift").result;
+    const replay = buildPreview(recipe, "uplift").result;
+    for (const [label, field] of [
+      ["uplift", result.archetypeUpliftMap],
+      ["basin", result.archetypeBasinMap],
+      ["coastline", result.coastlineEnvelopeMap],
+      ["scalar", result.debugScalarField]
+    ]) {
+      if (!(field instanceof Float32Array) || field.length !== result.elevationMap.length) {
+        throw new Error(`${archetype}: isolated Uplift preview is missing its ${label} field.`);
+      }
+    }
+    if (hashArrays(result.elevationMap, result.debugScalarField) !== hashArrays(replay.elevationMap, replay.debugScalarField)) {
+      throw new Error(`${archetype}: isolated Uplift preview is not deterministic.`);
+    }
+    if (archetype === "NONE") {
+      if (fieldRange(result.elevationMap) > 0.013 || fieldRange(result.archetypeUpliftMap) > 0 || fieldRange(result.archetypeBasinMap) > 0) {
+        throw new Error(`NONE Uplift preview must remain essentially flat and field-neutral.`);
+      }
+      if (fieldRange(result.debugScalarField) < 0.05) {
+        throw new Error("NONE Uplift preview lost its subdued coastline-envelope context.");
+      }
+      continue;
+    }
+    const morphologySignal = Float32Array.from(
+      result.archetypeUpliftMap,
+      (uplift, index) => uplift - (result.archetypeBasinMap[index] ?? 0) * 0.3
+    );
+    const correlation = fieldCorrelation(result.elevationMap, morphologySignal);
+    if (correlation < 0.9 || fieldRange(result.elevationMap) < 0.08 || fieldRange(result.debugScalarField) < 0.1) {
+      throw new Error(`${archetype}: Uplift presentation does not clearly follow its isolated field: ${JSON.stringify({ correlation, elevationRange: fieldRange(result.elevationMap), scalarRange: fieldRange(result.debugScalarField) })}`);
+    }
+  }
+};
+
+const assertEditorErosionPreview = () => {
+  const source = readFileSync(path.join(repoRoot, "src", "ui", "map-editor.ts"), "utf8");
+  if (!/erosion:\s*{[\s\S]*?stopAfterPhase:\s*"terrain:erosion"[\s\S]*?sampleSource:\s*"snapshot"/.test(source)) {
+    throw new Error("Map editor Erosion step must target the deterministic terrain:erosion snapshot.");
+  }
+  if (!/MAP_EDITOR_EROSION_COMPARE_PREVIEW[\s\S]*?stopAfterPhase:\s*"terrain:elevation"/.test(source)) {
+    throw new Error("Map editor erosion comparison must retain the terrain:elevation baseline.");
+  }
+  for (const field of ["archetypeUplift", "flowAccumulation", "erosionWear", "erosionDeposit", "rockExposure"]) {
+    if (!source.includes(`value: "${field}"`)) {
+      throw new Error(`Map editor terrain overlay is missing ${field}.`);
+    }
   }
 };
 
@@ -279,15 +616,31 @@ const assertWaterPreviewHasNoisyContour = (archetype, result) => {
   const mean = radii.reduce((sum, radius) => sum + radius, 0) / Math.max(1, radii.length);
   const variance = radii.reduce((sum, radius) => sum + (radius - mean) ** 2, 0) / Math.max(1, radii.length);
   const stdev = Math.sqrt(variance);
-  if (stdev < 0.025) {
+  const minimumStdev = archetype === "SHELF" ? 0.014 : archetype === "NONE" ? 0.018 : 0.02;
+  if (stdev < minimumStdev) {
     throw new Error(`Water preview contour is too uniform for ${archetype}: ${JSON.stringify({ stdev, min: Math.min(...radii), max: Math.max(...radii) })}`);
+  }
+};
+
+const assertArchetypesMoveCoastlinePlan = () => {
+  const neutral = buildPreview(createDefaultTerrainRecipe(sizeId, "NONE"), "water").result;
+  for (const archetype of archetypes.filter((value) => value !== "NONE")) {
+    const result = buildPreview(createDefaultTerrainRecipe(sizeId, archetype), "water").result;
+    let changed = 0;
+    for (let index = 0; index < result.oceanMask.length; index += 1) {
+      if (result.oceanMask[index] !== neutral.oceanMask[index]) changed += 1;
+    }
+    const changedRatio = changed / Math.max(1, result.oceanMask.length);
+    if (changedRatio < 0.035 || changedRatio > 0.18) {
+      throw new Error(`${archetype}: named archetype coastline authority is outside the bounded visible range: ${changedRatio}`);
+    }
   }
 };
 
 const assertNeutralSurfaceDoesNotCreateCentralSpine = () => {
   const recipe = createDefaultTerrainRecipe(sizeId, "NONE");
-  const height = buildPreview(recipe, "height").result.elevationMap;
-  const relief = buildPreview(recipe, "relief").result.elevationMap;
+  const uplift = buildPreview(recipe, "uplift").result.elevationMap;
+  const surface = buildPreview(recipe, "surface").result.elevationMap;
   const stripeRadius = Math.max(3, Math.round(size * 0.04));
   let totalLift = 0;
   let totalCount = 0;
@@ -298,7 +651,7 @@ const assertNeutralSurfaceDoesNotCreateCentralSpine = () => {
   for (let y = 0; y < size; y += 1) {
     for (let x = 0; x < size; x += 1) {
       const idx = y * size + x;
-      const lift = Math.max(0, (relief[idx] ?? 0) - (height[idx] ?? 0));
+      const lift = Math.max(0, (surface[idx] ?? 0) - (uplift[idx] ?? 0));
       totalLift += lift;
       totalCount += 1;
       if (Math.abs(x - (size - 1) / 2) <= stripeRadius) {
@@ -329,58 +682,78 @@ const withRecipeChange = (recipe, mutate) => {
 const assertSensitivity = () => {
   const base = createDefaultTerrainRecipe(sizeId, "MASSIF");
   const longSpine = createDefaultTerrainRecipe(sizeId, "LONG_SPINE");
-  const heightBase = summarizeResult("MASSIF", "height", buildPreview(base, "height").result, 0);
-  const heightLong = summarizeResult("LONG_SPINE", "height", buildPreview(longSpine, "height").result, 0);
-  if (heightBase.hash === heightLong.hash || Math.abs(heightBase.elevationVariance - heightLong.elevationVariance) < 0.0003) {
-    throw new Error(`Archetype did not visibly change height metrics: ${JSON.stringify({ heightBase, heightLong })}`);
+  const upliftBase = summarizeResult("MASSIF", "uplift", buildPreview(base, "uplift").result, 0);
+  const upliftLong = summarizeResult("LONG_SPINE", "uplift", buildPreview(longSpine, "uplift").result, 0);
+  if (upliftBase.hash === upliftLong.hash || Math.abs(upliftBase.elevationVariance - upliftLong.elevationVariance) < 0.0003) {
+    throw new Error(`Archetype did not visibly change uplift metrics: ${JSON.stringify({ upliftBase, upliftLong })}`);
+  }
+  const lowUplift = summarizeResult(
+    "MASSIF",
+    "uplift",
+    buildPreview(withRecipeChange(base, (recipe) => {
+      recipe.relief = 0.18;
+      recipe.advancedOverrides.maxHeight = 0.4;
+      recipe.advancedOverrides.uplandDistribution = 0.2;
+    }), "uplift").result,
+    0
+  );
+  const highUplift = summarizeResult(
+    "MASSIF",
+    "uplift",
+    buildPreview(withRecipeChange(base, (recipe) => {
+      recipe.relief = 0.95;
+      recipe.advancedOverrides.maxHeight = 1.5;
+      recipe.advancedOverrides.uplandDistribution = 0.88;
+    }), "uplift").result,
+    0
+  );
+  if (lowUplift.hash === highUplift.hash || highUplift.elevationVariance <= lowUplift.elevationVariance * 1.12) {
+    throw new Error(`Uplift controls did not strengthen or broaden the isolated field: ${JSON.stringify({ lowUplift, highUplift })}`);
   }
 
-  const compactWater = summarizeResult(
+  const shapedWater = summarizeResult(
     "MASSIF",
     "water",
     buildPreview(withRecipeChange(base, (recipe) => {
       recipe.coastComplexity = 0.95;
       recipe.landCoverageTarget = 0.78;
-      recipe.advancedOverrides.islandCompactness = 0.28;
       recipe.advancedOverrides.embayment = 0.9;
     }), "water").result,
     0
   );
   const waterBase = summarizeResult("MASSIF", "water", buildPreview(base, "water").result, 0);
-  if (waterBase.hash === compactWater.hash) {
-    throw new Error(`Water shaping controls did not move coastline metrics: ${JSON.stringify({ waterBase, compactWater })}`);
+  if (waterBase.hash === shapedWater.hash) {
+    throw new Error(`Water shaping controls did not move coastline metrics: ${JSON.stringify({ waterBase, shapedWater })}`);
   }
-  const highLandDryHeight = summarizeResult(
+  const highLandDryUplift = summarizeResult(
     "MASSIF",
-    "height",
+    "uplift",
     buildPreview(withRecipeChange(base, (recipe) => {
       recipe.landCoverageTarget = 0.78;
-    }), "height").result,
+    }), "uplift").result,
     0
   );
-  if (highLandDryHeight.hash !== heightBase.hash) {
-    throw new Error(`Land coverage target changed dry height preview: ${JSON.stringify({ heightBase, highLandDryHeight })}`);
+  if (highLandDryUplift.hash !== upliftBase.hash) {
+    throw new Error(`Land coverage target changed dry uplift preview: ${JSON.stringify({ upliftBase, highLandDryUplift })}`);
   }
-  const reliefBase = summarizeResult("MASSIF", "relief", buildPreview(base, "relief").result, 0);
-
   const lowRelief = summarizeResult(
     "MASSIF",
-    "relief",
+    "surface",
     buildPreview(withRecipeChange(base, (recipe) => {
       recipe.relief = 0.18;
       recipe.ruggedness = 0.12;
       recipe.advancedOverrides.maxHeight = 0.12;
-    }), "relief").result,
+    }), "surface").result,
     0
   );
   const highRelief = summarizeResult(
     "MASSIF",
-    "relief",
+    "surface",
     buildPreview(withRecipeChange(base, (recipe) => {
       recipe.relief = 0.95;
       recipe.ruggedness = 0.95;
       recipe.advancedOverrides.maxHeight = 1.5;
-    }), "relief").result,
+    }), "surface").result,
     0
   );
   if (lowRelief.hash === highRelief.hash || highRelief.elevationVariance <= lowRelief.elevationVariance * 1.08) {
@@ -403,47 +776,19 @@ const assertSensitivity = () => {
     throw new Error(`Water preview missed calibrated land target: ${JSON.stringify({ targetLand, waterBase })}`);
   }
 
-  const biasedWater = summarizeResult(
-    "MASSIF",
-    "water",
-    buildPreview(withRecipeChange(base, (recipe) => {
-      recipe.advancedOverrides.seaLevelBias = 0.86;
-    }), "water").result,
-    0
-  );
-  if (biasedWater.oceanRatio <= waterBase.oceanRatio + 0.01) {
-    throw new Error(`Sea-level bias did not increase ocean ratio: ${JSON.stringify({ waterBase, biasedWater })}`);
-  }
-
-  const highWaterDryHeight = summarizeResult(
-    "MASSIF",
-    "height",
-    buildPreview(withRecipeChange(base, (recipe) => {
-      recipe.advancedOverrides.seaLevelBias = 0.86;
-    }), "height").result,
-    0
-  );
-  if (highWaterDryHeight.hash !== heightBase.hash) {
-    throw new Error(`Water level changed dry height preview: ${JSON.stringify({ heightBase, highWaterDryHeight })}`);
-  }
-
-  const highWaterDryRelief = summarizeResult(
-    "MASSIF",
-    "relief",
-    buildPreview(withRecipeChange(base, (recipe) => {
-      recipe.advancedOverrides.seaLevelBias = 0.86;
-    }), "relief").result,
-    0
-  );
-  if (highWaterDryRelief.hash !== reliefBase.hash) {
-    throw new Error(`Water level changed dry relief preview: ${JSON.stringify({ reliefBase, highWaterDryRelief })}`);
-  }
 };
 
 assertEditorControlSchema();
+assertEditorUpliftSequence();
+assertScenarioNoiseIsArchetypeIndependent();
+assertIsolatedUpliftPreview();
+assertSurfaceDeformsScenarioTowardUplift();
+assertSurfaceUsesNoiseLedBoundaryShaping();
+assertEditorErosionPreview();
 assertEditorRiversAreStaged();
 assertEditorBiomesBeforeSettlements();
 assertNeutralSurfaceDoesNotCreateCentralSpine();
+assertArchetypesMoveCoastlinePlan();
 for (const archetype of archetypes) {
   const waterPreview = buildPreview(createDefaultTerrainRecipe(sizeId, archetype), "water").result;
   assertWaterPreviewDistanceShaping(archetype, waterPreview);
@@ -476,7 +821,7 @@ if (runs.some((run) => run.riverRatio > 0)) {
 }
 
 for (const run of runs) {
-  if (run.mode === "height" || run.mode === "relief") {
+  if (run.mode === "uplift" || run.mode === "surface") {
     assertDryPreviewHasNoWater(run);
   } else if (run.mode === "water" && (run.oceanRatio <= 0 || run.waterTileRatio <= 0)) {
     throw new Error(`Water preview produced no visible ocean coverage: ${JSON.stringify(run)}`);

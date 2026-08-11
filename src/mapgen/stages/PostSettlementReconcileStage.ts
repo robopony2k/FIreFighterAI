@@ -3,8 +3,10 @@ import { TILE_TYPE_IDS } from "../../core/state.js";
 import type { TileType } from "../../core/types.js";
 import { clamp } from "../../core/utils.js";
 import { clearVegetationState } from "../../core/vegetation.js";
+import { getTerrainHeightScale } from "../../core/terrainScale.js";
 import { generateWorldClimateSeed } from "../../systems/climate/sim/worldClimateSeed.js";
 import { buildVegetationTerrainFields } from "../../systems/terrain/sim/vegetationTerrainFields.js";
+import { buildTerrainMorphologyFields } from "../../systems/terrain/sim/terrainMorphology.js";
 import { computeRenderedSlopeAngleDeg } from "../../shared/terrainSlope.js";
 import type { PipelineStage } from "../pipeline/TerrainPipeline.js";
 import { computeBiomeSuitabilityDetails } from "../biome/BiomeSuitability.js";
@@ -62,6 +64,29 @@ export const PostSettlementReconcileStage: PipelineStage = {
       await emitStageSnapshot(ctx, "reconcile:postSettlement");
       return;
     }
+
+    for (const region of regions) {
+      for (let y = region.minY; y <= region.maxY; y += 1) {
+        for (let x = region.minX; x <= region.maxX; x += 1) {
+          const idx = indexFor(state.grid, x, y);
+          ctx.elevationMap[idx] = state.tiles[idx]?.elevation ?? ctx.elevationMap[idx] ?? 0;
+        }
+      }
+    }
+    const refreshedMorphology = buildTerrainMorphologyFields({
+      cols: state.grid.cols,
+      rows: state.grid.rows,
+      elevations: ctx.elevationMap,
+      heightScale: getTerrainHeightScale(state.grid.cols, state.grid.rows, ctx.settings.heightScaleMultiplier),
+      erosionWear: ctx.erosionWearMap,
+      erosionDeposit: ctx.erosionDepositMap
+    });
+    ctx.rockExposureMap = refreshedMorphology.rockExposure;
+    ctx.terrainCurvatureMap = refreshedMorphology.curvature;
+    if (state.tileRockExposure.length !== refreshedMorphology.rockExposure.length) {
+      state.tileRockExposure = new Float32Array(refreshedMorphology.rockExposure.length);
+    }
+    state.tileRockExposure.set(refreshedMorphology.rockExposure);
 
     const climate = generateWorldClimateSeed(state.seed);
     const finalTerrainFields = buildVegetationTerrainFields({
@@ -136,7 +161,7 @@ export const PostSettlementReconcileStage: PipelineStage = {
             processed += 1;
             continue;
           }
-          if (tile.type === "road" || tile.type === "house" || tile.type === "base") {
+          if (tile.type === "road" || tile.type === "house" || tile.type === "base" || state.structureMask[idx] === 1) {
             clearVegetationState(tile);
             tile.dominantTreeType = null;
             tile.treeType = null;
@@ -255,7 +280,8 @@ export const PostSettlementReconcileStage: PipelineStage = {
               forestCandidate,
               localContext,
               seededNoiseOffset,
-              slopeAngleDeg
+              slopeAngleDeg,
+              rockExposure: ctx.rockExposureMap?.[idx] ?? 0
             });
           } else {
             nextType = classifyTile({
@@ -270,7 +296,8 @@ export const PostSettlementReconcileStage: PipelineStage = {
               highlandForestElevation: ctx.settings.highlandForestElevation,
               localContext,
               seededNoiseOffset,
-              slopeAngleDeg
+              slopeAngleDeg,
+              rockExposure: ctx.rockExposureMap?.[idx] ?? 0
             });
           }
           tile.type = nextType;

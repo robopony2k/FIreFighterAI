@@ -11,6 +11,11 @@ import {
 } from "./hydrologyFeatureClassifier.js";
 import { classifyFinalWaterfalls } from "./finalWaterfallClassifier.js";
 import { buildLakeSpillContour } from "./lakeSpillContour.js";
+import {
+  promoteLakeFootprint,
+  resolveLakeFootprintTarget,
+  resolveLakeShoreRaiseLimit
+} from "./lakeFootprintPromotion.js";
 import { solveDepressionBasins, type DepressionBasin } from "./depressionBasinSolver.js";
 import type {
   StaticHydrologyLake,
@@ -151,7 +156,7 @@ const candidateRejectReason = (
   landTileCount: number,
   settings: MapGenSettings
 ): StaticHydrologyRejectReason | null => {
-  if (basin.area < settings.minLakeAreaTiles || footprintTiles.length < settings.minLakeAreaTiles) {
+  if (footprintTiles.length < settings.minLakeAreaTiles) {
     return "area-small";
   }
   if (footprintTiles.length > settings.maxLakeAreaTiles) {
@@ -756,14 +761,14 @@ export const buildBasinLakeHydrology = async (input: {
     const scored = solve.basins
       .map((basin) => ({ basin, score: scoreBasin(basin, settings) }))
       .sort((a, b) => b.score - a.score || b.basin.catchmentRunoff - a.basin.catchmentRunoff || a.basin.floorIndex - b.basin.floorIndex);
-    const scoreThreshold = 0.16 + (1 - clamp(settings.lakeChance, 0, 1)) * 0.34;
+    const scoreThreshold = 0.1 + (1 - clamp(settings.lakeChance, 0, 1)) * 0.18;
     for (const candidate of scored) {
       debug?.checkCancelled?.();
       if (lakes.length >= settings.maxLakeCount) {
         break;
       }
       const basin = candidate.basin;
-      const contourTiles = buildLakeSpillContour({
+      const solvedContourTiles = buildLakeSpillContour({
         cols,
         rows,
         basin,
@@ -773,6 +778,33 @@ export const buildBasinLakeHydrology = async (input: {
         exclude: basin.outletTargetIndex >= 0 ? [basin.outletTargetIndex] : undefined,
         spillTolerance: Math.max(0.0025, settings.minLakeDepth * 0.3),
         surfaceMargin: 0.0001
+      });
+      const targetTiles = resolveLakeFootprintTarget({
+        minimumTiles: settings.minLakeAreaTiles,
+        maximumTiles: settings.maxLakeAreaTiles,
+        mapTileCount: totalTiles,
+        riverIntensity: settings.riverIntensity,
+        basinStrength: settings.basinStrength,
+        lakeChance: settings.lakeChance,
+        runoffScore: basin.runoffScore,
+        rainfallScore: basin.rainfallScore
+      });
+      const contourTiles = promoteLakeFootprint({
+        cols,
+        rows,
+        footprintTiles: solvedContourTiles,
+        basinTiles: basin.tiles,
+        elevationMap,
+        oceanMask,
+        surfaceLevel: basin.spillElevation,
+        targetTiles,
+        maximumShoreRaise: resolveLakeShoreRaiseLimit(
+          settings.minLakeDepth,
+          settings.riverIntensity,
+          settings.basinStrength,
+          basin.runoffScore
+        ),
+        exclude: basin.outletTargetIndex >= 0 ? [basin.outletTargetIndex] : undefined
       });
       await debug?.emit?.({
         kind: "hydrology:candidate",

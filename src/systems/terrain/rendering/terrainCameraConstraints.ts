@@ -16,6 +16,16 @@ export type TerrainCameraConstraintOptions = {
   cameraGroundClearance?: number;
 };
 
+export type TerrainCameraFocusDistanceOptions = {
+  preferredDistance: number;
+  framingRadiusWorld: number;
+  verticalFovDeg: number;
+  aspect: number;
+  minDistance: number;
+  maxDistance: number;
+  framingPadding?: number;
+};
+
 const DEFAULT_TARGET_GROUND_CLEARANCE = 0.04;
 const DEFAULT_CAMERA_GROUND_CLEARANCE = 0.35;
 const targetDelta = new THREE.Vector3();
@@ -35,6 +45,39 @@ const sampleTerrainHeightWorld = (
   const tileX = surface.renderedWorldToTileX(worldX);
   const tileY = surface.renderedWorldToTileY(worldZ);
   return surface.heightAtTileCoord(tileX, tileY) * surface.heightScale;
+};
+
+export const resolveTerrainCameraFocusPoint = (
+  surface: TerrainCameraConstraintSurface,
+  tileX: number,
+  tileY: number,
+  targetGroundClearance = DEFAULT_TARGET_GROUND_CLEARANCE
+): THREE.Vector3 => {
+  const clampedTileX = clamp(tileX, 0, Math.max(0, surface.cols - 1));
+  const clampedTileY = clamp(tileY, 0, Math.max(0, surface.rows - 1));
+  const worldX = surface.toRenderedWorldX(clampedTileX);
+  const worldZ = surface.toRenderedWorldZ(clampedTileY);
+  const worldY = surface.heightAtTileCoord(clampedTileX, clampedTileY) * surface.heightScale;
+  return new THREE.Vector3(worldX, worldY + targetGroundClearance, worldZ);
+};
+
+export const resolveAspectAwareFocusDistance = ({
+  preferredDistance,
+  framingRadiusWorld,
+  verticalFovDeg,
+  aspect,
+  minDistance,
+  maxDistance,
+  framingPadding = 1.2
+}: TerrainCameraFocusDistanceOptions): number => {
+  const verticalFov = THREE.MathUtils.degToRad(clamp(verticalFovDeg, 1, 179));
+  const safeAspect = Math.max(0.01, aspect);
+  const horizontalFov = 2 * Math.atan(Math.tan(verticalFov * 0.5) * safeAspect);
+  const fitFov = Math.max(THREE.MathUtils.degToRad(1), Math.min(verticalFov, horizontalFov));
+  const framingDistance =
+    Math.max(0, framingRadiusWorld) * Math.max(1, framingPadding) /
+    Math.max(0.01, Math.sin(fitFov * 0.5));
+  return clamp(Math.max(preferredDistance, framingDistance), minDistance, maxDistance);
 };
 
 export const constrainCameraToTerrain = (

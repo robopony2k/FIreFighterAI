@@ -66,8 +66,6 @@ export type SimPerfConfig = {
 
   blockSize: number;
 
-  growthBlocksPerTick: number;
-
   pathEpsilon: number;
 
   pathMaxExpansions: number;
@@ -148,7 +146,7 @@ export interface WorldState {
   tileHeatOutput: Float32Array;
 
   tileElevation: Float32Array;
-  tileCragUplift: Float32Array;
+  tileRockExposure: Float32Array;
   tileMoisture: Float32Array;
   tileVegetationAge: Float32Array;
   tileCanopyCover: Float32Array;
@@ -369,16 +367,17 @@ export interface WorldState {
   simPerfCalendarMs: number;
   simPerfTownConstructionMs: number;
   simPerfGrowthMs: number;
-  simPerfGrowthBlocksProcessed: number;
-  simPerfGrowthTilesVisited: number;
-  simPerfGrowthTilesChanged: number;
+  simPerfGrowthTilesScanned: number;
+  simPerfGrowthAgedTiles: number;
+  simPerfGrowthFuelTilesChanged: number;
+  simPerfGrowthShrubExpandedTiles: number;
+  simPerfGrowthForestExpandedTiles: number;
+  simPerfGrowthRecoveredTiles: number;
+  simPerfGrowthVisualSync: number;
   simPerfUnitsMs: number;
   simPerfFireMs: number;
   simPerfScoringMs: number;
   simPerfParticlesMs: number;
-  growthBlockCursor: number;
-  growthBlockLastCareerDay: Float32Array;
-  growthVisualDayAccumulator: number;
   pathPrev: Int32Array;
   pathGScore: Float32Array;
   pathVisitStamp: Uint32Array;
@@ -504,7 +503,7 @@ export function createInitialState(seed: number, grid: Grid): WorldState {
     tileBurnRate: new Float32Array(grid.totalTiles),
     tileHeatOutput: new Float32Array(grid.totalTiles),
     tileElevation: new Float32Array(grid.totalTiles),
-    tileCragUplift: new Float32Array(grid.totalTiles),
+    tileRockExposure: new Float32Array(grid.totalTiles),
     tileMoisture: new Float32Array(grid.totalTiles),
     tileVegetationAge: new Float32Array(grid.totalTiles),
     tileCanopyCover: new Float32Array(grid.totalTiles),
@@ -565,8 +564,6 @@ export function createInitialState(seed: number, grid: Grid): WorldState {
       diffusionEps: 0.02,
 
       blockSize,
-
-      growthBlocksPerTick: 32,
 
       pathEpsilon: 1.2,
 
@@ -775,16 +772,17 @@ export function createInitialState(seed: number, grid: Grid): WorldState {
     simPerfCalendarMs: 0,
     simPerfTownConstructionMs: 0,
     simPerfGrowthMs: 0,
-    simPerfGrowthBlocksProcessed: 0,
-    simPerfGrowthTilesVisited: 0,
-    simPerfGrowthTilesChanged: 0,
+    simPerfGrowthTilesScanned: 0,
+    simPerfGrowthAgedTiles: 0,
+    simPerfGrowthFuelTilesChanged: 0,
+    simPerfGrowthShrubExpandedTiles: 0,
+    simPerfGrowthForestExpandedTiles: 0,
+    simPerfGrowthRecoveredTiles: 0,
+    simPerfGrowthVisualSync: 0,
     simPerfUnitsMs: 0,
     simPerfFireMs: 0,
     simPerfScoringMs: 0,
     simPerfParticlesMs: 0,
-    growthBlockCursor: 0,
-    growthBlockLastCareerDay: new Float32Array(blockCount),
-    growthVisualDayAccumulator: 0,
     pathPrev: new Int32Array(grid.totalTiles),
     pathGScore: new Float32Array(grid.totalTiles),
     pathVisitStamp: new Uint32Array(grid.totalTiles),
@@ -831,8 +829,8 @@ export function syncTileSoA(state: WorldState): void {
     state.tileRoadWallEdges.length !== total ||
     !state.tileErosionWear ||
     state.tileErosionWear.length !== total ||
-    !state.tileCragUplift ||
-    state.tileCragUplift.length !== total ||
+    !state.tileRockExposure ||
+    state.tileRockExposure.length !== total ||
     !state.tileLakeMask ||
     state.tileLakeMask.length !== total ||
     !state.tileLakeSurface ||
@@ -862,7 +860,7 @@ export function syncTileSoA(state: WorldState): void {
     state.tileBurnRate = new Float32Array(total);
     state.tileHeatOutput = new Float32Array(total);
     state.tileElevation = new Float32Array(total);
-    state.tileCragUplift = new Float32Array(total);
+    state.tileRockExposure = new Float32Array(total);
     state.tileMoisture = new Float32Array(total);
     state.tileVegetationAge = new Float32Array(total);
     state.tileCanopyCover = new Float32Array(total);
@@ -917,8 +915,6 @@ export function syncTileSoA(state: WorldState): void {
     state.fireBlockActiveCount = 0;
     state.fireBlockWorkCount = 0;
     state.fireBlockNextCount = 0;
-    state.growthBlockLastCareerDay = new Float32Array(state.fireBlockCount).fill(state.careerDay);
-    state.growthBlockCursor = 0;
     state.tileBlockIndex = new Int32Array(total);
     state.heatStamp = new Uint32Array(total);
     state.heatStampId = 0;
@@ -1014,16 +1010,7 @@ export function syncTileSoA(state: WorldState): void {
     state.fireBlockActiveCount = 0;
     state.fireBlockWorkCount = 0;
     state.fireBlockNextCount = 0;
-    state.growthBlockLastCareerDay = new Float32Array(state.fireBlockCount).fill(state.careerDay);
-    state.growthBlockCursor = 0;
     state.tileBlockIndex = new Int32Array(total);
-  }
-  if (!state.growthBlockLastCareerDay || state.growthBlockLastCareerDay.length !== state.fireBlockCount) {
-    state.growthBlockLastCareerDay = new Float32Array(state.fireBlockCount).fill(state.careerDay);
-    state.growthBlockCursor = 0;
-  }
-  if (!Number.isFinite(state.growthVisualDayAccumulator)) {
-    state.growthVisualDayAccumulator = 0;
   }
   for (let i = 0; i < total; i += 1) {
     const x = i % state.grid.cols;

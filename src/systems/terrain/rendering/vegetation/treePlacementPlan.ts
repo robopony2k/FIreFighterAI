@@ -13,6 +13,30 @@ const BLUE_NOISE_TEMPLATE = [
 
 export type TreeDensityGradient = { x: number; y: number };
 export type TreePlacementVegetationType = "forest" | "scrub" | "floodplain" | "grass";
+export type ForestTreeCohort = "sapling" | "mid" | "mature";
+
+export const resolveForestTreeCohort = (seed01: number): { cohort: ForestTreeCohort; scale: number } => {
+  const seed = clamp(seed01, 0, 1);
+  if (seed < 0.2) {
+    return { cohort: "sapling", scale: 0.35 + (seed / 0.2) * 0.2 };
+  }
+  if (seed < 0.55) {
+    return { cohort: "mid", scale: 0.65 + ((seed - 0.2) / 0.35) * 0.2 };
+  }
+  return { cohort: "mature", scale: 0.9 + ((seed - 0.55) / 0.45) * 0.2 };
+};
+
+export const resolveTreeBudgetPriority = (
+  basePriority: number,
+  type: TreePlacementVegetationType,
+  maturity01: number,
+  canopyCover: number
+): number => {
+  const maturityPenalty = (1 - clamp(maturity01, 0, 1)) * 0.22;
+  const canopyPenalty = (1 - clamp(canopyCover, 0, 1)) * 0.12;
+  const typePenalty = type === "forest" ? 0 : type === "floodplain" ? 0.12 : type === "scrub" ? 0.2 : 0.3;
+  return clamp(basePriority + maturityPenalty + canopyPenalty + typePenalty, 0, 1);
+};
 
 export const getTallTreeAttemptWeight = (type: TreePlacementVegetationType): number => {
   switch (type) {
