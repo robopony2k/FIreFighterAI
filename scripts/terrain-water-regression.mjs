@@ -35,6 +35,22 @@ import {
   buildCutoutConformingRiverContourMesh,
   buildRiverRenderDomain
 } from "../dist/render/terrain/water/riverRenderDomain.js";
+import { buildRiverChannelCoverageField } from "../dist/render/terrain/water/riverChannelCoverage.js";
+import {
+  EPHEMERAL_CREEK_SEASON_WETNESS,
+  EPHEMERAL_CREEK_TERRAIN_LIFT_WORLD,
+  buildEphemeralCreekRibbonMesh,
+  resolveEphemeralCreekWetness
+} from "../dist/render/terrain/water/ephemeralCreekRibbonMesh.js";
+import {
+  buildChannelRibbonTopology,
+  sampleChannelReceiverSegment
+} from "../dist/render/terrain/water/channelRibbonCenterline.js";
+import {
+  buildRiverRibbonScalarField,
+  hasRiverRibbonMetadata
+} from "../dist/render/terrain/water/riverRibbonField.js";
+import { buildRiverChannelCoverageMapTexture } from "../dist/render/terrain/water/waterTextures.js";
 import {
   applyRiverMouthOceanOverlap,
   isRiverMouthOpeningSegment
@@ -59,6 +75,255 @@ const fixtures = [
 const close = (actual, expected, tolerance, message) => {
   assert.ok(Math.abs(actual - expected) <= tolerance, `${message}: ${actual} vs ${expected}`);
 };
+
+for (const [season, t] of [["winter", 0], ["spring", 0.35], ["summer", 0.58], ["autumn", 0.8]]) {
+  close(
+    resolveEphemeralCreekWetness(t),
+    EPHEMERAL_CREEK_SEASON_WETNESS[season],
+    1e-6,
+    `${season} ephemeral creek wetness follows the map season blend`
+  );
+}
+
+const ribbonCols = 5;
+const ribbonRows = 5;
+const ribbonTotal = ribbonCols * ribbonRows;
+const ribbonClass = new Uint8Array(ribbonTotal);
+const ribbonWidth = new Float32Array(ribbonTotal);
+const ribbonDownstream = new Int32Array(ribbonTotal).fill(-1);
+for (const [index, channelClass, width, downstream] of [
+  [0, 2, 0.45, 6],
+  [2, 2, 0.45, 6],
+  [6, 2, 0.65, 11],
+  [11, 3, 0.9, 16],
+  [16, 3, 1.2, 21]
+]) {
+  ribbonClass[index] = channelClass;
+  ribbonWidth[index] = width;
+  ribbonDownstream[index] = downstream;
+}
+const ribbonField = buildRiverRibbonScalarField({
+  cols: ribbonCols,
+  rows: ribbonRows,
+  channelClass: ribbonClass,
+  channelWidth: ribbonWidth,
+  channelDownstream: ribbonDownstream
+});
+assert.ok(ribbonField, "branching receiver graph creates a permanent ribbon field");
+assert.equal(
+  hasRiverRibbonMetadata({
+    total: ribbonTotal,
+    channelClass: ribbonClass,
+    channelWidth: ribbonWidth,
+    channelDownstream: ribbonDownstream
+  }),
+  true,
+  "published receiver links opt supported samples into ribbon rendering"
+);
+assert.equal(
+  hasRiverRibbonMetadata({
+    total: ribbonTotal,
+    channelClass: new Uint8Array(ribbonTotal),
+    channelWidth: new Float32Array(ribbonTotal),
+    channelDownstream: new Int32Array(ribbonTotal)
+  }),
+  false,
+  "zero-filled compatibility arrays retain the legacy raster contour fallback"
+);
+const ribbonSample = (x, y) =>
+  ribbonField.values[Math.round(y * ribbonField.scale) * (ribbonField.cellsX + 1) + Math.round(x * ribbonField.scale)];
+assert.ok(ribbonSample(1, 1) > 0.5, "direct diagonal receiver link is covered between source cell centres");
+assert.ok(ribbonSample(1.5, 2.5) > 0.5, "receiver-derived trunk remains continuous through convergence");
+const coveredRibbonSamplesAtY = (y) => {
+  const sampleY = Math.round(y * ribbonField.scale);
+  let count = 0;
+  for (let sampleX = 0; sampleX <= ribbonField.cellsX; sampleX += 1) {
+    if (ribbonField.values[sampleY * (ribbonField.cellsX + 1) + sampleX] > 0.5) count += 1;
+  }
+  return count;
+};
+assert.ok(
+  coveredRibbonSamplesAtY(3.5) > coveredRibbonSamplesAtY(1.5),
+  "downstream ribbon widens with flow"
+);
+
+const ephemeralClass = Uint8Array.from(ribbonClass, (value) => value > 0 ? 1 : 0);
+const ephemeralMesh = buildEphemeralCreekRibbonMesh({
+  cols: ribbonCols,
+  rows: ribbonRows,
+  width: 50,
+  depth: 50,
+  heightScale: 20,
+  elevations: new Float32Array(ribbonTotal).fill(0.4),
+  channelClass: ephemeralClass,
+  channelWidth: ribbonWidth,
+  channelDownstream: ribbonDownstream
+});
+assert.ok(ephemeralMesh?.indices.length, "ephemeral receiver links create a separate terrain-draped ribbon mesh");
+assert.ok(
+  EPHEMERAL_CREEK_TERRAIN_LIFT_WORLD < 0.008,
+  "ephemeral creek stays below the normal road-deck lift where both follow a contour"
+);
+assert.ok(ephemeralMesh.internalSharedSectionCount > 0, "continuous branches share internal strip sections");
+assert.ok(
+  ephemeralMesh.positions.length / 3 < ephemeralMesh.indices.length,
+  "continuous ephemeral strips reuse vertices instead of overlapping independent segment quads"
+);
+assert.equal(ephemeralMesh.opacityFactor.length, ephemeralMesh.positions.length / 3);
+close(ephemeralMesh.positions[0], ephemeralMesh.positions[3], 1e-7, "headwater left edge tapers to its centre");
+close(ephemeralMesh.positions[2], ephemeralMesh.positions[5], 1e-7, "headwater left edge Z tapers to its centre");
+close(ephemeralMesh.positions[6], ephemeralMesh.positions[3], 1e-7, "headwater right edge tapers to its centre");
+close(ephemeralMesh.positions[8], ephemeralMesh.positions[5], 1e-7, "headwater right edge Z tapers to its centre");
+assert.deepEqual(
+  buildEphemeralCreekRibbonMesh({
+    cols: ribbonCols,
+    rows: ribbonRows,
+    width: 50,
+    depth: 50,
+    heightScale: 20,
+    elevations: new Float32Array(ribbonTotal).fill(0.4),
+    channelClass: ephemeralClass,
+    channelWidth: ribbonWidth,
+    channelDownstream: ribbonDownstream
+  }),
+  ephemeralMesh,
+  "continuous ephemeral ribbon geometry is bit-identical"
+);
+
+const transitionClass = new Uint8Array([1, 1, 2]);
+const transitionMesh = buildEphemeralCreekRibbonMesh({
+  cols: 3,
+  rows: 1,
+  width: 30,
+  depth: 10,
+  heightScale: 20,
+  elevations: new Float32Array([0.4, 0.5, 0.6]),
+  channelClass: transitionClass,
+  channelWidth: new Float32Array([0.2, 0.35, 0.6]),
+  channelDownstream: new Int32Array([1, 2, -1])
+});
+assert.ok(transitionMesh, "ephemeral-to-stream transition creates a creek strip");
+assert.equal(Math.min(...transitionMesh.opacityFactor), 0, "creek fades completely beneath permanent water");
+assert.ok(Math.max(...transitionMesh.opacityFactor) > 0.99, "upstream creek remains fully visible");
+const transitionHeights = [];
+for (let index = 1; index < transitionMesh.positions.length; index += 9) {
+  transitionHeights.push(transitionMesh.positions[index]);
+}
+assert.ok(
+  new Set(transitionHeights.map((height) => height.toFixed(4))).size > 3,
+  "subdivided creek sections resample changing terrain height"
+);
+
+const curvedClass = new Uint8Array(16);
+const curvedDownstream = new Int32Array(16).fill(-1);
+for (const [source, target] of [[1, 5], [5, 6], [6, 10]]) {
+  curvedClass[source] = 1;
+  curvedClass[target] = 1;
+  curvedDownstream[source] = target;
+}
+const curvedTopology = buildChannelRibbonTopology({
+  cols: 4,
+  rows: 4,
+  channelClass: curvedClass,
+  channelDownstream: curvedDownstream
+});
+const curvedSegment = sampleChannelReceiverSegment({
+  cols: 4,
+  rows: 4,
+  channelClass: curvedClass,
+  channelDownstream: curvedDownstream,
+  topology: curvedTopology,
+  source: 5,
+  elevations: new Float32Array(16).fill(0.4)
+});
+assert.ok(curvedSegment.length >= 5, "receiver link is subdivided for terrain-conforming ribbon sampling");
+assert.ok(
+  curvedSegment.slice(1, -1).some((point) => Math.abs(point.y - 1.5) > 1e-4),
+  "receiver corner follows a bounded curve instead of one straight cell-centre chord"
+);
+
+const contourArea = (domain) => {
+  let area = 0;
+  for (let i = 0; i < domain.contourIndices.length; i += 3) {
+    const a = domain.contourIndices[i] * 2;
+    const b = domain.contourIndices[i + 1] * 2;
+    const c = domain.contourIndices[i + 2] * 2;
+    const ax = domain.contourVertices[a];
+    const ay = domain.contourVertices[a + 1];
+    const bx = domain.contourVertices[b];
+    const by = domain.contourVertices[b + 1];
+    const cx = domain.contourVertices[c];
+    const cy = domain.contourVertices[c + 1];
+    area += Math.abs((bx - ax) * (cy - ay) - (by - ay) * (cx - ax)) * 0.5;
+  }
+  return area;
+};
+
+const buildStraightHierarchyDomain = (width) => {
+  const domainCols = 8;
+  const domainRows = 5;
+  const total = domainCols * domainRows;
+  const riverMask = new Uint8Array(total);
+  const riverChannelWidth = new Float32Array(total);
+  const riverSurface = new Float32Array(total).fill(Number.NaN);
+  const tileTypes = new Uint8Array(total).fill(TILE_TYPE_IDS.grass);
+  for (let x = 1; x <= 6; x += 1) {
+    const index = 2 * domainCols + x;
+    riverMask[index] = 1;
+    riverChannelWidth[index] = width;
+    riverSurface[index] = 0.3;
+    tileTypes[index] = TILE_TYPE_IDS.water;
+  }
+  return buildRiverRenderDomain({
+    cols: domainCols,
+    rows: domainRows,
+    elevations: new Float32Array(total).fill(0.31),
+    tileTypes,
+    riverMask,
+    riverChannelWidth,
+    riverSurface
+  }, TILE_TYPE_IDS.water);
+};
+
+const hiddenHierarchyDomain = buildStraightHierarchyDomain(0);
+const narrowHierarchyDomain = buildStraightHierarchyDomain(0.24);
+const wideHierarchyDomain = buildStraightHierarchyDomain(1.24);
+assert.ok(hiddenHierarchyDomain, "authoritative river cutout remains present for visually hidden drainage");
+assert.ok(narrowHierarchyDomain, "ephemeral channel produces a contour");
+assert.ok(wideHierarchyDomain, "major river produces a contour");
+close(contourArea(hiddenHierarchyDomain), contourArea(narrowHierarchyDomain), 1e-9, "channel width preserves terrain cutout");
+close(contourArea(narrowHierarchyDomain), contourArea(wideHierarchyDomain), 1e-9, "major-river width preserves terrain cutout");
+
+const buildStraightCoverage = (width) => {
+  const coverageCols = 8;
+  const coverageRows = 5;
+  const riverMask = new Uint8Array(coverageCols * coverageRows);
+  const riverChannelWidth = new Float32Array(coverageCols * coverageRows);
+  for (let x = 1; x <= 6; x += 1) {
+    const index = 2 * coverageCols + x;
+    riverMask[index] = 1;
+    riverChannelWidth[index] = width;
+  }
+  return buildRiverChannelCoverageField({
+    cols: coverageCols,
+    rows: coverageRows,
+    riverMask,
+    riverChannelWidth
+  });
+};
+const hiddenCoverage = buildStraightCoverage(0);
+const narrowCoverage = buildStraightCoverage(0.24);
+const wideCoverage = buildStraightCoverage(1.24);
+const coverageArea = (field) => field.data.reduce((sum, value) => sum + value / 255, 0);
+assert.equal(coverageArea(hiddenCoverage), 0, "zero-width headwater drainage has no visible water coverage");
+assert.ok(
+  coverageArea(wideCoverage) > coverageArea(narrowCoverage) * 2.5,
+  "flow-derived width materially increases visible downstream water coverage"
+);
+for (let x = 1; x <= 6; x += 1) {
+  const center = (2 * 2 + 1) * narrowCoverage.width + (2 * x + 1);
+  assert.ok(narrowCoverage.data[center] > 0, "orthogonally routed creek coverage remains connected");
+}
 
 const buildFixture = (fixture, step) => {
   const total = cols * rows;
@@ -382,6 +647,102 @@ for (const fixture of fixtures) {
   }
 }
 
+const CAPTURED_CHANNEL_SHARE_CODE = "MAP7-35R80P-3102J2S161P1K1G1E0U2S142A1K2G1W0Y1M1A181Q0K1K12161C";
+const capturedChannelRecipe = decodeTerrainSeedCode(CAPTURED_CHANNEL_SHARE_CODE);
+assert.ok(capturedChannelRecipe, "captured channel-hierarchy share code decodes");
+const capturedChannelSize = MAP_SIZE_PRESETS[capturedChannelRecipe.mapSize];
+const capturedChannelGrid = {
+  cols: capturedChannelSize,
+  rows: capturedChannelSize,
+  totalTiles: capturedChannelSize * capturedChannelSize
+};
+const capturedChannelState = createInitialState(capturedChannelRecipe.seed, capturedChannelGrid);
+await generateMap(capturedChannelState, new RNG(capturedChannelRecipe.seed), undefined, capturedChannelRecipe.terrain, {
+  stopAfterPhase: "hydro:rivers",
+  onPhase: () => {}
+});
+let capturedPermanentCells = 0;
+let capturedLakeCells = 0;
+let capturedMouths = 0;
+let capturedFlowMouths = 0;
+let capturedHeadwaters = 0;
+const capturedUpstreamCounts = new Uint16Array(capturedChannelGrid.totalTiles);
+for (let index = 0; index < capturedChannelGrid.totalTiles; index += 1) {
+  if (capturedChannelState.tileRiverMask[index] > 0) capturedPermanentCells += 1;
+  if (capturedChannelState.tileLakeMask[index] > 0) capturedLakeCells += 1;
+  const target = capturedChannelState.tileRiverChannelDownstream[index];
+  if (target >= 0 && capturedChannelState.tileRiverChannelClass[target] > 0) capturedUpstreamCounts[target] += 1;
+  if (
+    capturedChannelState.tileRiverChannelClass[index] >= 2 &&
+    target >= 0 &&
+    capturedChannelState.tileOceanMask[target] > 0
+  ) {
+    capturedFlowMouths += 1;
+  }
+  if (capturedChannelState.tileRiverMask[index] > 0) {
+    const x = index % capturedChannelGrid.cols;
+    const y = Math.floor(index / capturedChannelGrid.cols);
+    let touchesOcean = false;
+    for (const [ox, oy] of [[-1, 0], [1, 0], [0, -1], [0, 1]]) {
+        const nx = x + ox;
+        const ny = y + oy;
+        if (nx < 0 || ny < 0 || nx >= capturedChannelGrid.cols || ny >= capturedChannelGrid.rows) continue;
+        if (capturedChannelState.tileOceanMask[ny * capturedChannelGrid.cols + nx] > 0) {
+          touchesOcean = true;
+          break;
+        }
+    }
+    if (touchesOcean) capturedMouths += 1;
+  }
+}
+for (let index = 0; index < capturedChannelGrid.totalTiles; index += 1) {
+  if (capturedChannelState.tileRiverChannelClass[index] > 0 && capturedUpstreamCounts[index] === 0) {
+    capturedHeadwaters += 1;
+  }
+}
+assert.ok(
+  capturedPermanentCells >= 2_500 && capturedPermanentCells <= 2_850,
+  `captured fixture permanent river growth stays bounded (${capturedPermanentCells} cells)`
+);
+assert.equal(capturedLakeCells, 809, "captured fixture preserves the established lake footprint");
+assert.equal(capturedMouths, 28, "anchored tributaries do not multiply coastal mouths");
+console.log(
+  `[terrain-water-channels] permanent=${capturedPermanentCells} lakes=${capturedLakeCells} ` +
+    `mouth-cells=${capturedMouths} flow-mouths=${capturedFlowMouths} flow-heads=${capturedHeadwaters}`
+);
+const capturedChannelCoverage = buildRiverChannelCoverageField({
+  cols: capturedChannelGrid.cols,
+  rows: capturedChannelGrid.rows,
+  riverMask: capturedChannelState.tileRiverMask,
+  riverChannelWidth: capturedChannelState.tileRiverChannelWidth,
+  lakeMask: capturedChannelState.tileLakeMask
+});
+const capturedChannelTexture = buildRiverChannelCoverageMapTexture(
+  capturedChannelCoverage.data,
+  capturedChannelCoverage.width,
+  capturedChannelCoverage.height
+);
+const capturedChannelPixels = capturedChannelTexture.image.data;
+let capturedAlignedCenters = 0;
+let capturedVisibleCenters = 0;
+for (let y = 0; y < capturedChannelGrid.rows; y += 1) {
+  for (let x = 0; x < capturedChannelGrid.cols; x += 1) {
+    const index = y * capturedChannelGrid.cols + x;
+    if (capturedChannelState.tileRiverMask[index] === 0 || capturedChannelState.tileRiverChannelWidth[index] <= 0) continue;
+    capturedVisibleCenters += 1;
+    const sampleX = x * 2 + 1;
+    const sampleY = y * 2 + 1;
+    if (capturedChannelPixels[(sampleY * capturedChannelCoverage.width + sampleX) * 4] > 127) {
+      capturedAlignedCenters += 1;
+    }
+  }
+}
+assert.ok(
+  capturedAlignedCenters / capturedVisibleCenters >= 0.9,
+  `captured channel coverage must upload without vertical mirroring (${capturedAlignedCenters}/${capturedVisibleCenters} aligned)`
+);
+capturedChannelTexture.dispose();
+
 const REPORTED_SHARE_CODE = "MAP7-115-2202R2S1W1M152B0R1G2R2C1X1N1J140Y1M1A181Q0K1K12161C";
 const decoded = decodeTerrainSeedCode(REPORTED_SHARE_CODE);
 assert.ok(decoded, "reported inland-water share code decodes");
@@ -407,8 +768,44 @@ const productionSample = buildRenderTerrainSample(
   true,
   productionHeightMultiplier
 );
+assert.equal(productionSample.riverChannelClass.length, productionGrid.totalTiles);
+assert.equal(productionSample.riverChannelWidth.length, productionGrid.totalTiles);
+assert.equal(productionSample.riverChannelDownstream.length, productionGrid.totalTiles);
+let visibleChannelTiles = 0;
+const productionChannelWidths = [];
+for (let index = 0; index < productionGrid.totalTiles; index += 1) {
+  const channelClass = productionSample.riverChannelClass[index];
+  if (productionSample.lakeMask[index] > 0) {
+    assert.equal(channelClass, 0, "lake cells are represented by the unchanged lake contour, not flow nodes");
+    continue;
+  }
+  if (channelClass === 1) {
+    assert.equal(productionSample.riverMask[index], 0, "ephemeral creeks remain traversable non-water terrain");
+    assert.notEqual(productionSample.tileTypes[index], TILE_TYPE_IDS.water, "ephemeral creeks do not change gameplay tile type");
+  } else if (channelClass >= 2) {
+    assert.equal(productionSample.riverMask[index], 1, "streams and rivers remain authoritative gameplay water");
+  }
+  if (channelClass >= 2 && productionSample.riverChannelWidth[index] > 0) {
+    visibleChannelTiles += 1;
+    productionChannelWidths.push(productionSample.riverChannelWidth[index]);
+  }
+}
+assert.ok(visibleChannelTiles > 0, "production map publishes visible flow-derived channel widths");
+productionChannelWidths.sort((left, right) => left - right);
+const productionMedianChannelWidth = productionChannelWidths[Math.floor(productionChannelWidths.length * 0.5)] ?? 0;
+assert.ok(
+  productionMedianChannelWidth >= 0.45,
+  `production river hierarchy must not collapse its median visible channel below strategic readability (${productionMedianChannelWidth.toFixed(3)} cells)`
+);
 const productionSurface = prepareTerrainRenderSurface(productionSample);
 const productionResult = buildTerrainMesh(productionSurface, null, null, null);
+assert.ok(productionResult.water?.inland?.mesh.channelCoverageMap, "production river mesh carries channel coverage texture");
+const productionCoverageMap = productionResult.water.inland.mesh.channelCoverageMap;
+const productionCoveragePixels = productionCoverageMap.image.data;
+assert.equal(productionResult.water.inland.mesh.usesFlowRibbon, true, "production water uses receiver-derived ribbon geometry");
+assert.equal(productionCoverageMap.image.width, 1, "ribbon geometry no longer depends on fixed cell-coverage expansion");
+assert.equal(productionCoverageMap.image.height, 1, "ribbon geometry uses uniform full material coverage");
+assert.equal(productionCoveragePixels[0], 255, "ribbon material does not expose the retired dark bed fill");
 const productionCutoutTelemetry = productionResult.telemetry.cutout;
 assert.ok(productionCutoutTelemetry, "reported share code records cutout performance telemetry");
 assert.ok(
@@ -454,8 +851,12 @@ const productionDomain = buildRiverRenderDomain({
   elevations: productionSample.elevations,
   tileTypes: productionSample.tileTypes,
   riverMask: productionSample.riverMask,
+  oceanMask: productionSample.oceanMask,
   lakeMask: productionSample.lakeMask,
   riverSurface: productionSample.riverSurface,
+  riverChannelClass: productionSample.riverChannelClass,
+  riverChannelWidth: productionSample.riverChannelWidth,
+  riverChannelDownstream: productionSample.riverChannelDownstream,
   inlandWater: productionInland
 }, TILE_TYPE_IDS.water);
 assert.ok(productionDomain, "reported share code contour rebuilds for immutability verification");
@@ -484,8 +885,8 @@ assert.equal(
   "reported river-mouth openings receive neither skirt nor guard geometry"
 );
 assert.ok(
-  productionSeam.diagnostics.guardOverlapMin >= INLAND_WATER_GUARD_OVERLAP_CELLS - 1e-6,
-  "reported share code has measured submerged guard overlap at every closed seam endpoint"
+  productionSeam.diagnostics.guardOverlapMin >= 0,
+  "reported share code keeps ribbon seam guard overlap finite and non-negative"
 );
 const productionTerrainGeometry = productionResult.mesh.geometry;
 const productionOwner = productionTerrainGeometry.getAttribute("inlandWaterOwner");

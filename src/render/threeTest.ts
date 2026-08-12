@@ -6493,6 +6493,7 @@ export const createThreeTest = (
       oceanDeep: lighting.oceanDeepColor,
       sun: lighting.waterSunColor
     });
+    waterSystem.setSeasonT01(input.seasonT01);
     waterSystem.setOceanSurfaceContext(resolveOceanSurfaceContext({
       windDx: input.windDx,
       windDy: input.windDy,
@@ -9307,6 +9308,9 @@ export const createThreeTest = (
     if (
       sample.oceanMask !== lastSample.oceanMask ||
       sample.riverMask !== lastSample.riverMask ||
+      sample.riverChannelClass !== lastSample.riverChannelClass ||
+      sample.riverChannelWidth !== lastSample.riverChannelWidth ||
+      sample.riverChannelDownstream !== lastSample.riverChannelDownstream ||
       sample.lakeMask !== lastSample.lakeMask ||
       sample.seaLevel !== lastSample.seaLevel ||
       sample.coastDistance !== lastSample.coastDistance ||

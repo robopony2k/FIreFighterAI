@@ -52,6 +52,9 @@ export type RenderTerrainSample = {
   riverBed?: Float32Array;
   riverSurface?: Float32Array;
   riverStepStrength?: Float32Array;
+  riverChannelClass?: Uint8Array;
+  riverChannelWidth?: Float32Array;
+  riverChannelDownstream?: Int32Array;
   lakeMask?: Uint16Array;
   lakeSurface?: Float32Array;
   lakeOutletMask?: Uint8Array;
@@ -150,6 +153,9 @@ export const buildRenderTerrainSample = (
     riverBed: state.tileRiverBed,
     riverSurface: state.tileRiverSurface,
     riverStepStrength: state.tileRiverStepStrength,
+    riverChannelClass: state.tileRiverChannelClass,
+    riverChannelWidth: state.tileRiverChannelWidth,
+    riverChannelDownstream: state.tileRiverChannelDownstream,
     lakeMask: state.tileLakeMask,
     lakeSurface: state.tileLakeSurface,
     lakeOutletMask: state.tileLakeOutletMask,

@@ -125,11 +125,26 @@ export const isRiverMouthOpeningSegment = (
   openingEdges: ArrayLike<number>,
   epsilon = 1e-4
 ): boolean => {
+  const pointDistance = (px: number, py: number, ax: number, ay: number, bx: number, by: number): number => {
+    const dx = bx - ax;
+    const dy = by - ay;
+    const lengthSq = dx * dx + dy * dy;
+    const t = lengthSq > epsilon * epsilon
+      ? Math.max(0, Math.min(1, ((px - ax) * dx + (py - ay) * dy) / lengthSq))
+      : 0;
+    return Math.hypot(px - (ax + dx * t), py - (ay + dy * t));
+  };
   for (let i = 0; i + 3 < openingEdges.length; i += 4) {
     const ox0 = openingEdges[i] ?? 0;
     const oy0 = openingEdges[i + 1] ?? 0;
     const ox1 = openingEdges[i + 2] ?? 0;
     const oy1 = openingEdges[i + 3] ?? 0;
+    if (
+      pointDistance(ax, ay, ox0, oy0, ox1, oy1) <= epsilon &&
+      pointDistance(bx, by, ox0, oy0, ox1, oy1) <= epsilon
+    ) {
+      return true;
+    }
     const openingHorizontal = Math.abs(oy1 - oy0) <= epsilon;
     const segmentHorizontal = Math.abs(by - ay) <= epsilon;
     if (openingHorizontal && segmentHorizontal) {

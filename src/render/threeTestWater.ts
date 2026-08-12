@@ -291,6 +291,10 @@ export class ThreeTestWaterSystem {
     this.oceanHelper.setOceanSurfaceContext(context);
   }
 
+  public setSeasonT01(seasonT01: number): void {
+    this.riverHelper.setSeasonT01(seasonT01);
+  }
+
   public clear(): void {
     this.oceanHelper.clear();
     this.riverHelper.clear();

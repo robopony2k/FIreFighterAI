@@ -24,16 +24,20 @@ const createDataTexture = (
   width: number,
   height: number,
   magFilter: THREE.MagnificationTextureFilter,
-  minFilter: THREE.MinificationTextureFilter
+  minFilter: THREE.MinificationTextureFilter,
+  flipRows = true
 ): THREE.DataTexture => {
-  const flipped = new Uint8Array(data.length);
-  const rowStride = width * 4;
-  for (let y = 0; y < height; y += 1) {
-    const src = y * rowStride;
-    const dst = (height - 1 - y) * rowStride;
-    flipped.set(data.subarray(src, src + rowStride), dst);
+  let textureData = data;
+  if (flipRows) {
+    textureData = new Uint8Array(data.length);
+    const rowStride = width * 4;
+    for (let y = 0; y < height; y += 1) {
+      const src = y * rowStride;
+      const dst = (height - 1 - y) * rowStride;
+      textureData.set(data.subarray(src, src + rowStride), dst);
+    }
   }
-  const texture = new THREE.DataTexture(flipped, width, height, THREE.RGBAFormat);
+  const texture = new THREE.DataTexture(textureData, width, height, THREE.RGBAFormat);
   texture.needsUpdate = true;
   texture.colorSpace = THREE.NoColorSpace;
   texture.magFilter = magFilter;
@@ -60,6 +64,24 @@ export const buildWaterSupportMapTexture = (
     data[base + 3] = 255;
   }
   return createDataTexture(data, sampleCols, sampleRows, THREE.NearestFilter, THREE.NearestFilter);
+};
+
+export const buildRiverChannelCoverageMapTexture = (
+  coverage: Uint8Array,
+  width: number,
+  height: number
+): THREE.DataTexture => {
+  const data = new Uint8Array(width * height * 4);
+  for (let i = 0; i < coverage.length; i += 1) {
+    const base = i * 4;
+    data[base] = coverage[i];
+    data[base + 1] = coverage[i];
+    data[base + 2] = coverage[i];
+    data[base + 3] = 255;
+  }
+  // River contour UVs already increase in the same direction as the map-grid
+  // coverage rows. Flipping this field mirrors channels onto unrelated terrain.
+  return createDataTexture(data, width, height, THREE.LinearFilter, THREE.LinearFilter, false);
 };
 
 export const buildRiverBankMapTexture = (

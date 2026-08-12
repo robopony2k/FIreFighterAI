@@ -168,6 +168,9 @@ export interface WorldState {
   tileRiverBed: Float32Array;
   tileRiverSurface: Float32Array;
   tileRiverStepStrength: Float32Array;
+  tileRiverChannelClass: Uint8Array;
+  tileRiverChannelWidth: Float32Array;
+  tileRiverChannelDownstream: Int32Array;
   tileLakeMask: Uint16Array;
   tileLakeSurface: Float32Array;
   tileLakeOutletMask: Uint8Array;
@@ -525,6 +528,9 @@ export function createInitialState(seed: number, grid: Grid): WorldState {
     tileRiverBed: new Float32Array(grid.totalTiles).fill(Number.NaN),
     tileRiverSurface: new Float32Array(grid.totalTiles).fill(Number.NaN),
     tileRiverStepStrength: new Float32Array(grid.totalTiles),
+    tileRiverChannelClass: new Uint8Array(grid.totalTiles),
+    tileRiverChannelWidth: new Float32Array(grid.totalTiles),
+    tileRiverChannelDownstream: new Int32Array(grid.totalTiles).fill(-1),
     tileLakeMask: new Uint16Array(grid.totalTiles),
     tileLakeSurface: new Float32Array(grid.totalTiles).fill(Number.NaN),
     tileLakeOutletMask: new Uint8Array(grid.totalTiles),
@@ -831,6 +837,12 @@ export function syncTileSoA(state: WorldState): void {
     state.tileErosionWear.length !== total ||
     !state.tileRockExposure ||
     state.tileRockExposure.length !== total ||
+    !state.tileRiverChannelClass ||
+    state.tileRiverChannelClass.length !== total ||
+    !state.tileRiverChannelWidth ||
+    state.tileRiverChannelWidth.length !== total ||
+    !state.tileRiverChannelDownstream ||
+    state.tileRiverChannelDownstream.length !== total ||
     !state.tileLakeMask ||
     state.tileLakeMask.length !== total ||
     !state.tileLakeSurface ||
@@ -882,6 +894,9 @@ export function syncTileSoA(state: WorldState): void {
     state.tileRiverBed = new Float32Array(total).fill(Number.NaN);
     state.tileRiverSurface = new Float32Array(total).fill(Number.NaN);
     state.tileRiverStepStrength = new Float32Array(total);
+    state.tileRiverChannelClass = new Uint8Array(total);
+    state.tileRiverChannelWidth = new Float32Array(total);
+    state.tileRiverChannelDownstream = new Int32Array(total).fill(-1);
     state.tileLakeMask = new Uint16Array(total);
     state.tileLakeSurface = new Float32Array(total).fill(Number.NaN);
     state.tileLakeOutletMask = new Uint8Array(total);

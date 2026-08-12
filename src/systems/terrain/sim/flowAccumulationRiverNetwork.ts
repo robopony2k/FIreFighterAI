@@ -1,3 +1,5 @@
+import { buildAnchoredDrainageChannelNetwork } from "./anchoredDrainageChannelNetwork.js";
+
 export type FlowAccumulationRiverInput = {
   cols: number;
   rows: number;
@@ -6,6 +8,7 @@ export type FlowAccumulationRiverInput = {
   seaLevelMap: ArrayLike<number>;
   receiver: Int32Array;
   flowAccumulation: Float32Array;
+  lakeMask?: Uint16Array;
   riverIntensity: number;
   riverBudget: number;
   minLakeDepth: number;
@@ -18,6 +21,11 @@ export type FlowAccumulationRiverResult = {
   channelStrength: Float32Array;
   valleyDepth: Float32Array;
   threshold: number;
+  tributaryThreshold: number;
+  streamThreshold: number;
+  riverThreshold: number;
+  channelNodeMask: Uint8Array;
+  channelDownstream: Int32Array;
 };
 
 const clamp = (value: number, min: number, max: number): number => Math.max(min, Math.min(max, value));
@@ -28,6 +36,11 @@ const smoothstep = (edge0: number, edge1: number, value: number): number => {
   const t = clamp01((value - edge0) / (edge1 - edge0));
   return t * t * (3 - 2 * t);
 };
+
+export const RIVER_TRIBUTARY_THRESHOLD_GAP = 0.12;
+export const RIVER_STREAM_THRESHOLD_BLEND = 0.7;
+export const RIVER_CLASS_THRESHOLD_BLEND = 0.55;
+export const RIVER_MIN_TERMINAL_BRANCH_CELLS = 3;
 
 export const buildFlowAccumulationRiverNetwork = (
   input: FlowAccumulationRiverInput
@@ -52,16 +65,28 @@ export const buildFlowAccumulationRiverNetwork = (
   const budget = clamp01(input.riverBudget);
   const effectiveIntensity = clamp01(intensity * mix(0.75, 1.15, budget));
   const threshold = effectiveIntensity < 0.025 ? 1.01 : mix(0.94, 0.7, effectiveIntensity);
+  const tributaryThreshold = Math.max(0, threshold - RIVER_TRIBUTARY_THRESHOLD_GAP);
+  const streamThreshold = mix(tributaryThreshold, threshold, RIVER_STREAM_THRESHOLD_BLEND);
+  const riverThreshold = mix(threshold, 1, RIVER_CLASS_THRESHOLD_BLEND);
+  const channelNetwork = buildAnchoredDrainageChannelNetwork({
+    receiver: input.receiver,
+    flowAccumulation: input.flowAccumulation,
+    oceanMask: input.oceanMask,
+    lakeMask: input.lakeMask,
+    tributaryThreshold,
+    trunkThreshold: threshold,
+    minimumTerminalBranchCells: RIVER_MIN_TERMINAL_BRANCH_CELLS
+  });
   const channelIndexes: number[] = [];
 
   for (let idx = 0; idx < total; idx += 1) {
-    if (input.oceanMask[idx] > 0 || (input.receiver[idx] ?? -1) < 0) continue;
+    if (channelNetwork.channelNodeMask[idx] === 0 || input.oceanMask[idx] > 0) continue;
     const seaLevel = input.seaLevelMap[idx] ?? 0;
     const elevation = input.elevations[idx] ?? 0;
     const accumulation = input.flowAccumulation[idx] ?? 0;
-    if (accumulation < threshold) continue;
+    if (accumulation < streamThreshold) continue;
     riverMask[idx] = 1;
-    channelStrength[idx] = smoothstep(threshold, 1, accumulation);
+    channelStrength[idx] = smoothstep(streamThreshold, 1, accumulation);
     riverSurface[idx] = Math.max(
       seaLevel + 0.0002,
       elevation - mix(0.00008, 0.00022, channelStrength[idx] ?? 0)
@@ -79,7 +104,12 @@ export const buildFlowAccumulationRiverNetwork = (
     const ty = Math.floor(target / input.cols);
     if (Math.abs(tx - x) !== 1 || Math.abs(ty - y) !== 1) continue;
     const connector = [y * input.cols + tx, ty * input.cols + x]
-      .filter((candidate) => candidate >= 0 && candidate < total && input.oceanMask[candidate] === 0)
+      .filter((candidate) =>
+        candidate >= 0 &&
+        candidate < total &&
+        input.oceanMask[candidate] === 0 &&
+        channelNetwork.channelNodeMask[candidate] === 0
+      )
       .sort((left, right) =>
         (input.elevations[left] ?? 0) - (input.elevations[right] ?? 0) || left - right
       )[0];
@@ -113,5 +143,17 @@ export const buildFlowAccumulationRiverNetwork = (
     valleyDepth[idx] = Math.max(0, elevation - bed);
   }
 
-  return { riverMask, riverSurface, riverBed, channelStrength, valleyDepth, threshold };
+  return {
+    riverMask,
+    riverSurface,
+    riverBed,
+    channelStrength,
+    valleyDepth,
+    threshold,
+    tributaryThreshold,
+    streamThreshold,
+    riverThreshold,
+    channelNodeMask: channelNetwork.channelNodeMask,
+    channelDownstream: channelNetwork.channelDownstream
+  };
 };

@@ -2,6 +2,8 @@ import { DEBUG_TERRAIN_RENDER } from "../../../core/config.js";
 import type { InlandWaterRenderSurface } from "../../../systems/terrain/rendering/inlandWaterRenderSurface.js";
 import type { InlandWaterTerrainSeam } from "../../../systems/terrain/rendering/inlandWaterTerrainSeam.js";
 import { buildDistanceField } from "../shared/distanceField.js";
+import { buildRiverRibbonScalarField, hasRiverRibbonMetadata } from "./riverRibbonField.js";
+import { ShapeUtils, Vector2 } from "three";
 
 type RiverRenderDomainSample = {
   cols: number;
@@ -9,8 +11,12 @@ type RiverRenderDomainSample = {
   elevations: Float32Array;
   tileTypes?: Uint8Array;
   riverMask?: Uint8Array;
+  oceanMask?: Uint8Array;
   lakeMask?: Uint16Array;
   riverSurface?: Float32Array;
+  riverChannelClass?: Uint8Array;
+  riverChannelWidth?: Float32Array;
+  riverChannelDownstream?: Int32Array;
   inlandWater?: InlandWaterRenderSurface;
 };
 
@@ -64,9 +70,202 @@ export type RiverRenderDomain = {
 const RIVER_DIAGONAL_FILL_MAX_ADDS_PER_CELL = 1;
 const RIVER_WIDTH_EXPAND_MAX_PASSES = 1;
 export const RIVER_FIELD_THRESHOLD = 0.5;
+const RIVER_RIBBON_CONTOUR_THRESHOLD = RIVER_FIELD_THRESHOLD + 0.00005;
 const RIVER_VERTEX_FIELD_BLUR_BLEND = 0;
 
 const clamp = (value: number, min: number, max: number): number => Math.min(max, Math.max(min, value));
+
+export const compactIndexedContour = (
+  sourceVertices: number[],
+  boundaryPairs: Array<readonly [number, number]>
+): { vertices: number[]; indices: number[] } | undefined => {
+  const adjacency = new Map<number, number[]>();
+  const addNeighbor = (from: number, to: number): void => {
+    const neighbors = adjacency.get(from) ?? [];
+    if (!neighbors.includes(to)) neighbors.push(to);
+    adjacency.set(from, neighbors);
+  };
+  for (const [a, b] of boundaryPairs) {
+    addNeighbor(a, b);
+    addNeighbor(b, a);
+  }
+  if (adjacency.size === 0 || Array.from(adjacency.values()).some((neighbors) => neighbors.length !== 2)) {
+    return undefined;
+  }
+  const edgeKey = (a: number, b: number): string => a < b ? `${a}|${b}` : `${b}|${a}`;
+  const visited = new Set<string>();
+  const loops: number[][] = [];
+  for (const [startA, startB] of boundaryPairs) {
+    if (visited.has(edgeKey(startA, startB))) continue;
+    const loop = [startA];
+    let previous = startA;
+    let current = startB;
+    visited.add(edgeKey(previous, current));
+    while (current !== startA && loop.length <= boundaryPairs.length + 1) {
+      loop.push(current);
+      const neighbors = adjacency.get(current)!;
+      const next = neighbors[0] === previous ? neighbors[1] : neighbors[0];
+      const key = edgeKey(current, next);
+      if (visited.has(key) && next !== startA) return undefined;
+      visited.add(key);
+      previous = current;
+      current = next;
+    }
+    if (current !== startA || loop.length < 3) return undefined;
+    const simplified = loop.filter((vertex, index) => {
+      const before = loop[(index + loop.length - 1) % loop.length];
+      const after = loop[(index + 1) % loop.length];
+      const ax = sourceVertices[vertex * 2] - sourceVertices[before * 2];
+      const ay = sourceVertices[vertex * 2 + 1] - sourceVertices[before * 2 + 1];
+      const bx = sourceVertices[after * 2] - sourceVertices[vertex * 2];
+      const by = sourceVertices[after * 2 + 1] - sourceVertices[vertex * 2 + 1];
+      return Math.abs(ax * by - ay * bx) > 1e-8;
+    });
+    if (simplified.length >= 3) loops.push(simplified);
+  }
+  if (visited.size !== boundaryPairs.length || loops.length === 0) return undefined;
+
+  const signedArea = (loop: number[]): number => {
+    let area = 0;
+    for (let index = 0; index < loop.length; index += 1) {
+      const a = loop[index] * 2;
+      const b = loop[(index + 1) % loop.length] * 2;
+      area += sourceVertices[a] * sourceVertices[b + 1] - sourceVertices[b] * sourceVertices[a + 1];
+    }
+    return area * 0.5;
+  };
+  const pointInLoop = (x: number, y: number, loop: number[]): boolean => {
+    let inside = false;
+    for (let i = 0, j = loop.length - 1; i < loop.length; j = i, i += 1) {
+      const ix = sourceVertices[loop[i] * 2];
+      const iy = sourceVertices[loop[i] * 2 + 1];
+      const jx = sourceVertices[loop[j] * 2];
+      const jy = sourceVertices[loop[j] * 2 + 1];
+      if ((iy > y) !== (jy > y) && x < ((jx - ix) * (y - iy)) / (jy - iy) + ix) inside = !inside;
+    }
+    return inside;
+  };
+  const loopDepth = loops.map((loop) => {
+    const a = loop[0] * 2;
+    const b = loop[1] * 2;
+    const ax = sourceVertices[a];
+    const ay = sourceVertices[a + 1];
+    const bx = sourceVertices[b];
+    const by = sourceVertices[b + 1];
+    const length = Math.max(1e-6, Math.hypot(bx - ax, by - ay));
+    const area = signedArea(loop);
+    const side = area >= 0 ? 1 : -1;
+    const probeX = (ax + bx) * 0.5 - ((by - ay) / length) * 1e-4 * side;
+    const probeY = (ay + by) * 0.5 + ((bx - ax) / length) * 1e-4 * side;
+    return loops.reduce((depth, other) => other !== loop && pointInLoop(probeX, probeY, other) ? depth + 1 : depth, 0);
+  });
+  const outerLoops = loops.filter((_, index) => loopDepth[index] % 2 === 0);
+  const holeLoops = loops.filter((_, index) => loopDepth[index] % 2 === 1);
+  const holesByOuter = outerLoops.map(() => [] as number[][]);
+  for (const hole of holeLoops) {
+    const x = sourceVertices[hole[0] * 2];
+    const y = sourceVertices[hole[0] * 2 + 1];
+    let owner = -1;
+    let ownerArea = Number.POSITIVE_INFINITY;
+    for (let index = 0; index < outerLoops.length; index += 1) {
+      if (!pointInLoop(x, y, outerLoops[index])) continue;
+      const area = Math.abs(signedArea(outerLoops[index]));
+      if (area < ownerArea) {
+        owner = index;
+        ownerArea = area;
+      }
+    }
+    if (owner < 0) return undefined;
+    holesByOuter[owner].push(hole);
+  }
+
+  const vertices: number[] = [];
+  const indices: number[] = [];
+  for (let outerIndex = 0; outerIndex < outerLoops.length; outerIndex += 1) {
+    const groupedLoops = [outerLoops[outerIndex], ...holesByOuter[outerIndex]];
+    const vectors = groupedLoops.map((loop) => loop.map((vertex) =>
+      new Vector2(sourceVertices[vertex * 2], sourceVertices[vertex * 2 + 1])
+    ));
+    const vertexOffset = vertices.length / 2;
+    for (const loop of groupedLoops) {
+      for (const vertex of loop) vertices.push(sourceVertices[vertex * 2], sourceVertices[vertex * 2 + 1]);
+    }
+    const faces = ShapeUtils.triangulateShape(vectors[0], vectors.slice(1));
+    for (const face of faces) indices.push(vertexOffset + face[0], vertexOffset + face[1], vertexOffset + face[2]);
+  }
+  return indices.length > 0 ? { vertices, indices } : undefined;
+};
+
+export const buildScalarBoundaryGraph = (
+  values: Float32Array,
+  cellsX: number,
+  cellsY: number,
+  scale: number,
+  threshold: number
+): { vertices: number[]; pairs: Array<readonly [number, number]> } => {
+  const vertices: number[] = [];
+  const vertexByKey = new Map<string, number>();
+  const pairs: Array<readonly [number, number]> = [];
+  const rowStride = cellsX + 1;
+  const valueAt = (x: number, y: number): number => values[y * rowStride + x] ?? 0;
+  const vertexAt = (x: number, y: number): number => {
+    const worldX = x / scale;
+    const worldY = y / scale;
+    const key = `${Math.round(worldX * 1e9)},${Math.round(worldY * 1e9)}`;
+    const existing = vertexByKey.get(key);
+    if (existing !== undefined) return existing;
+    const index = vertices.length / 2;
+    vertices.push(worldX, worldY);
+    vertexByKey.set(key, index);
+    return index;
+  };
+  const crossing = (ax: number, ay: number, av: number, bx: number, by: number, bv: number): number => {
+    const t = Math.abs(bv - av) <= 1e-8 ? 0.5 : clamp((threshold - av) / (bv - av), 0, 1);
+    return vertexAt(ax + (bx - ax) * t, ay + (by - ay) * t);
+  };
+  for (let y = 0; y < cellsY; y += 1) {
+    for (let x = 0; x < cellsX; x += 1) {
+      const a = valueAt(x, y);
+      const b = valueAt(x + 1, y);
+      const c = valueAt(x + 1, y + 1);
+      const d = valueAt(x, y + 1);
+      const mask = (a > threshold ? 1 : 0) | (b > threshold ? 2 : 0) |
+        (c > threshold ? 4 : 0) | (d > threshold ? 8 : 0);
+      if (mask === 0 || mask === 15) continue;
+      const top = (): number => crossing(x, y, a, x + 1, y, b);
+      const right = (): number => crossing(x + 1, y, b, x + 1, y + 1, c);
+      const bottom = (): number => crossing(x, y + 1, d, x + 1, y + 1, c);
+      const left = (): number => crossing(x, y, a, x, y + 1, d);
+      const add = (first: number, second: number): void => {
+        pairs.push([first, second]);
+      };
+      const centerInside = (a + b + c + d) * 0.25 > threshold;
+      switch (mask) {
+        case 1: add(left(), top()); break;
+        case 2: add(top(), right()); break;
+        case 3: add(left(), right()); break;
+        case 4: add(right(), bottom()); break;
+        case 5:
+          if (centerInside) { add(top(), right()); add(bottom(), left()); }
+          else { add(left(), top()); add(right(), bottom()); }
+          break;
+        case 6: add(top(), bottom()); break;
+        case 7: add(left(), bottom()); break;
+        case 8: add(bottom(), left()); break;
+        case 9: add(bottom(), top()); break;
+        case 10:
+          if (centerInside) { add(left(), top()); add(right(), bottom()); }
+          else { add(top(), right()); add(bottom(), left()); }
+          break;
+        case 11: add(bottom(), right()); break;
+        case 12: add(right(), left()); break;
+        case 13: add(right(), top()); break;
+        case 14: add(top(), left()); break;
+      }
+    }
+  }
+  return { vertices, pairs };
+};
 
 const buildRenderRiverSupportMasks = (
   sample: RiverRenderDomainSample,
@@ -114,8 +313,8 @@ const buildRenderRiverSupportMasks = (
     const canAdd = (idx: number): boolean => !isTaken(idx) && !isNonRiverWaterCell(idx);
     const neighborSupport = (x: number, y: number): number => {
       let support = 0;
-      for (let oy = -1; oy <= 1; oy += 1) {
-        for (let ox = -1; ox <= 1; ox += 1) {
+      for (let oy = -3; oy <= 3; oy += 1) {
+        for (let ox = -3; ox <= 3; ox += 1) {
           if (ox === 0 && oy === 0) {
             continue;
           }
@@ -291,46 +490,67 @@ export const buildRiverRenderDomain = (
     return undefined;
   }
 
-  const vertexField = new Float32Array((cols + 1) * (rows + 1));
-  const vIdx = (x: number, y: number): number => y * (cols + 1) + x;
+  const ribbonField = hasRiverRibbonMetadata({
+    total: cols * rows,
+    channelClass: sample.riverChannelClass,
+    channelWidth: sample.riverChannelWidth,
+    channelDownstream: sample.riverChannelDownstream
+  })
+    ? buildRiverRibbonScalarField({
+        cols,
+        rows,
+        channelClass: sample.riverChannelClass!,
+        channelWidth: sample.riverChannelWidth!,
+        channelDownstream: sample.riverChannelDownstream!,
+        lakeMask: sample.lakeMask,
+        oceanMask: sample.oceanMask
+      })
+    : undefined;
+  const fieldScale = ribbonField?.scale ?? 1;
+  const fieldCellsX = ribbonField?.cellsX ?? cols;
+  const fieldCellsY = ribbonField?.cellsY ?? rows;
+  const vertexField = ribbonField?.values ?? new Float32Array((cols + 1) * (rows + 1));
+  const vIdx = (x: number, y: number): number => y * (fieldCellsX + 1) + x;
   const isValid = (x: number, y: number): boolean => x >= 0 && y >= 0 && x < cols && y < rows;
   const idxAt = (x: number, y: number): number => y * cols + x;
-  for (let y = 0; y <= rows; y += 1) {
-    for (let x = 0; x <= cols; x += 1) {
-      let sum = 0;
-      let count = 0;
-      const cells = [{ x: x - 1, y: y - 1 }, { x, y: y - 1 }, { x: x - 1, y }, { x, y }];
-      for (let i = 0; i < cells.length; i += 1) {
-        const cell = cells[i];
-        if (!isValid(cell.x, cell.y)) {
-          continue;
+  if (!ribbonField) {
+    for (let y = 0; y <= rows; y += 1) {
+      for (let x = 0; x <= cols; x += 1) {
+        let sum = 0;
+        let count = 0;
+        const cells = [{ x: x - 1, y: y - 1 }, { x, y: y - 1 }, { x: x - 1, y }, { x, y }];
+        for (let i = 0; i < cells.length; i += 1) {
+          const cell = cells[i];
+          if (!isValid(cell.x, cell.y)) continue;
+          sum += renderSupport[idxAt(cell.x, cell.y)] ? 1 : 0;
+          count += 1;
         }
-        sum += renderSupport[idxAt(cell.x, cell.y)] ? 1 : 0;
-        count += 1;
+        vertexField[vIdx(x, y)] = count > 0 ? sum / count : 0;
       }
-      vertexField[vIdx(x, y)] = count > 0 ? sum / count : 0;
     }
   }
-  const riverMouthOpeningEdges = sample.inlandWater?.riverMouthOpeningEdges;
-  if (riverMouthOpeningEdges) {
-    for (let i = 0; i + 3 < riverMouthOpeningEdges.length; i += 4) {
-      const ax = Math.round(riverMouthOpeningEdges[i] ?? 0);
-      const ay = Math.round(riverMouthOpeningEdges[i + 1] ?? 0);
-      const bx = Math.round(riverMouthOpeningEdges[i + 2] ?? 0);
-      const by = Math.round(riverMouthOpeningEdges[i + 3] ?? 0);
-      if (ax >= 0 && ay >= 0 && ax <= cols && ay <= rows) {
-        vertexField[vIdx(ax, ay)] = Math.max(vertexField[vIdx(ax, ay)] ?? 0, RIVER_FIELD_THRESHOLD);
+  const authoritativeRiverMouthOpeningEdges = sample.inlandWater?.riverMouthOpeningEdges;
+  const mouthFieldValue = ribbonField ? RIVER_FIELD_THRESHOLD + 0.0001 : RIVER_FIELD_THRESHOLD;
+  if (authoritativeRiverMouthOpeningEdges) {
+    for (let i = 0; i + 3 < authoritativeRiverMouthOpeningEdges.length; i += 4) {
+      const ax = Math.round((authoritativeRiverMouthOpeningEdges[i] ?? 0) * fieldScale);
+      const ay = Math.round((authoritativeRiverMouthOpeningEdges[i + 1] ?? 0) * fieldScale);
+      const bx = Math.round((authoritativeRiverMouthOpeningEdges[i + 2] ?? 0) * fieldScale);
+      const by = Math.round((authoritativeRiverMouthOpeningEdges[i + 3] ?? 0) * fieldScale);
+      if (ax >= 0 && ay >= 0 && ax <= fieldCellsX && ay <= fieldCellsY) {
+        vertexField[vIdx(ax, ay)] = Math.max(vertexField[vIdx(ax, ay)] ?? 0, mouthFieldValue);
       }
-      if (bx >= 0 && by >= 0 && bx <= cols && by <= rows) {
-        vertexField[vIdx(bx, by)] = Math.max(vertexField[vIdx(bx, by)] ?? 0, RIVER_FIELD_THRESHOLD);
+      if (bx >= 0 && by >= 0 && bx <= fieldCellsX && by <= fieldCellsY) {
+        vertexField[vIdx(bx, by)] = Math.max(vertexField[vIdx(bx, by)] ?? 0, mouthFieldValue);
       }
     }
   }
   if (RIVER_VERTEX_FIELD_BLUR_BLEND > 0) {
     const smoothed = new Float32Array(vertexField.length);
-    const vIsValid = (x: number, y: number): boolean => x >= 0 && y >= 0 && x <= cols && y <= rows;
-    for (let y = 0; y <= rows; y += 1) {
-      for (let x = 0; x <= cols; x += 1) {
+    const vIsValid = (x: number, y: number): boolean =>
+      x >= 0 && y >= 0 && x <= fieldCellsX && y <= fieldCellsY;
+    for (let y = 0; y <= fieldCellsY; y += 1) {
+      for (let x = 0; x <= fieldCellsX; x += 1) {
         let sum = 0;
         let wSum = 0;
         for (let oy = -1; oy <= 1; oy += 1) {
@@ -477,12 +697,42 @@ export const buildRiverRenderDomain = (
     }
   };
 
-  for (let y = 0; y < rows; y += 1) {
-    for (let x = 0; x < cols; x += 1) {
-      const a: RiverContourVertex = { x, y };
-      const b: RiverContourVertex = { x: x + 1, y };
-      const c: RiverContourVertex = { x: x + 1, y: y + 1 };
-      const d: RiverContourVertex = { x, y: y + 1 };
+  if (ribbonField) {
+    const graph = buildScalarBoundaryGraph(
+      vertexField,
+      fieldCellsX,
+      fieldCellsY,
+      fieldScale,
+      RIVER_RIBBON_CONTOUR_THRESHOLD
+    );
+    const compact = compactIndexedContour(graph.vertices, graph.pairs);
+    if (compact) {
+      contourVertices.push(...compact.vertices);
+      contourIndices.push(...compact.indices);
+      for (let index = 0; index + 2 < compact.indices.length; index += 3) {
+        registerOrientedEdge(compact.indices[index], compact.indices[index + 1]);
+        registerOrientedEdge(compact.indices[index + 1], compact.indices[index + 2]);
+        registerOrientedEdge(compact.indices[index + 2], compact.indices[index]);
+      }
+    } else if (DEBUG_TERRAIN_RENDER) {
+      const degree = new Uint16Array(graph.vertices.length / 2);
+      for (const [a, b] of graph.pairs) {
+        degree[a] += 1;
+        degree[b] += 1;
+      }
+      const histogram = Array.from(degree).reduce<Record<number, number>>((counts, value) => {
+        counts[value] = (counts[value] ?? 0) + 1;
+        return counts;
+      }, {});
+      console.warn(`[riverRenderDomain] flow-ribbon contour graph could not be compacted degrees=${JSON.stringify(histogram)}`);
+    }
+  } else {
+    for (let y = 0; y < fieldCellsY; y += 1) {
+      for (let x = 0; x < fieldCellsX; x += 1) {
+      const a: RiverContourVertex = { x: x / fieldScale, y: y / fieldScale };
+      const b: RiverContourVertex = { x: (x + 1) / fieldScale, y: y / fieldScale };
+      const c: RiverContourVertex = { x: (x + 1) / fieldScale, y: (y + 1) / fieldScale };
+      const d: RiverContourVertex = { x: x / fieldScale, y: (y + 1) / fieldScale };
       const sa = vertexField[vIdx(x, y)];
       const sb = vertexField[vIdx(x + 1, y)];
       const sc = vertexField[vIdx(x + 1, y + 1)];
@@ -506,6 +756,7 @@ export const buildRiverRenderDomain = (
         emitTriangleClipped(a, sa, b, sb, d, sd);
         emitTriangleClipped(b, sb, c, sc, d, sd);
       }
+      }
     }
   }
 
@@ -513,20 +764,65 @@ export const buildRiverRenderDomain = (
     return undefined;
   }
 
-  const boundaryEdges: number[] = [];
+  const boundaryPairs: Array<readonly [number, number]> = [];
   edgeCounts.forEach((record) => {
-    if (record.count !== 1) {
-      return;
+    if (record.count === 1) boundaryPairs.push([record.a, record.b]);
+  });
+  const outputContourVertices = contourVertices;
+  const outputContourIndices = contourIndices;
+  const boundaryEdges: number[] = [];
+  const outputEdgeCounts = new Map<string, { count: number; a: number; b: number }>();
+  for (let index = 0; index + 2 < outputContourIndices.length; index += 3) {
+    const triangle = [outputContourIndices[index], outputContourIndices[index + 1], outputContourIndices[index + 2]];
+    for (let edge = 0; edge < 3; edge += 1) {
+      const a = triangle[edge];
+      const b = triangle[(edge + 1) % 3];
+      const key = undirectedEdgeKey(a, b);
+      const existing = outputEdgeCounts.get(key);
+      if (existing) existing.count += 1;
+      else outputEdgeCounts.set(key, { count: 1, a, b });
     }
-    const aOffset = record.a * 2;
-    const bOffset = record.b * 2;
+  }
+  outputEdgeCounts.forEach((edge) => {
+    if (edge.count !== 1) return;
+    const a = edge.a * 2;
+    const b = edge.b * 2;
     boundaryEdges.push(
-      contourVertices[aOffset],
-      contourVertices[aOffset + 1],
-      contourVertices[bOffset],
-      contourVertices[bOffset + 1]
+      outputContourVertices[a],
+      outputContourVertices[a + 1],
+      outputContourVertices[b],
+      outputContourVertices[b + 1]
     );
   });
+  let riverMouthOpeningEdges = authoritativeRiverMouthOpeningEdges;
+  if (ribbonField && authoritativeRiverMouthOpeningEdges) {
+    const actualOpeningEdges: number[] = [];
+    const distanceToAuthoritativeOpening = (x: number, y: number): number => {
+      let minimum = Number.POSITIVE_INFINITY;
+      for (let index = 0; index + 3 < authoritativeRiverMouthOpeningEdges.length; index += 4) {
+        const ax = authoritativeRiverMouthOpeningEdges[index];
+        const ay = authoritativeRiverMouthOpeningEdges[index + 1];
+        const bx = authoritativeRiverMouthOpeningEdges[index + 2];
+        const by = authoritativeRiverMouthOpeningEdges[index + 3];
+        const dx = bx - ax;
+        const dy = by - ay;
+        const lengthSq = dx * dx + dy * dy;
+        const t = lengthSq > 1e-8 ? clamp(((x - ax) * dx + (y - ay) * dy) / lengthSq, 0, 1) : 0;
+        minimum = Math.min(minimum, Math.hypot(x - (ax + dx * t), y - (ay + dy * t)));
+      }
+      return minimum;
+    };
+    for (let index = 0; index + 3 < boundaryEdges.length; index += 4) {
+      const ax = boundaryEdges[index];
+      const ay = boundaryEdges[index + 1];
+      const bx = boundaryEdges[index + 2];
+      const by = boundaryEdges[index + 3];
+      if (distanceToAuthoritativeOpening((ax + bx) * 0.5, (ay + by) * 0.5) <= 1.25) {
+        actualOpeningEdges.push(ax, ay, bx, by);
+      }
+    }
+    riverMouthOpeningEdges = new Float32Array(actualOpeningEdges);
+  }
 
   let baseCount = 0;
   for (let i = 0; i < baseSupport.length; i += 1) {
@@ -541,8 +837,8 @@ export const buildRiverRenderDomain = (
     baseSupport,
     renderSupport,
     vertexField,
-    contourVertices: new Float32Array(contourVertices),
-    contourIndices: new Uint32Array(contourIndices),
+    contourVertices: new Float32Array(outputContourVertices),
+    contourIndices: new Uint32Array(outputContourIndices),
     boundaryEdges: new Float32Array(boundaryEdges),
     riverMouthOpeningEdges,
     distanceToBank: buildDistanceField(renderSupport, cols, rows, 0),
@@ -550,8 +846,8 @@ export const buildRiverRenderDomain = (
       ? {
           baseCount,
           renderCount,
-          contourVertexCount: contourVertices.length / 2,
-          contourTriangleCount: contourIndices.length / 3,
+          contourVertexCount: outputContourVertices.length / 2,
+          contourTriangleCount: outputContourIndices.length / 3,
           boundaryEdgeCount: boundaryEdges.length / 4,
           cutoutBoundaryEdgeCount: 0,
           boundaryMismatchMean: 0,

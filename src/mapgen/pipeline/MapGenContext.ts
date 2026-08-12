@@ -50,6 +50,9 @@ export class MapGenContext {
   archetypeUpliftMap: Float32Array | null = null;
   drainageReceiverMap: Int32Array | null = null;
   flowAccumulationMap: Float32Array | null = null;
+  riverChannelClassMap: Uint8Array | null = null;
+  riverChannelWidthMap: Float32Array | null = null;
+  riverChannelDownstreamMap: Int32Array | null = null;
   depressionFillMap: Float32Array | null = null;
   depressionDepthMap: Float32Array | null = null;
   rockExposureMap: Float32Array | null = null;

@@ -439,8 +439,12 @@ export const buildInlandWaterTerrainSeam = (input: {
       maximumPreConformanceError: originalBoundaryDisplacementMax,
       unmatchedWaterVertexCount,
       tJunctionCount,
+      // Closed contour loops may meet at an exactly shared sampled vertex,
+      // producing an even degree above two without creating an open end. The
+      // T-junction diagnostic handles vertices terminating inside a segment;
+      // this diagnostic is specifically for unpaired degree-one endpoints.
       unexpectedOpenEndCount: adjacency.reduce((count, incident, vertexId) =>
-        count + (incident.length !== 2 && !intentionalOpenVertices.has(vertexId) ? 1 : 0), 0),
+        count + (incident.length === 1 && !intentionalOpenVertices.has(vertexId) ? 1 : 0), 0),
       degenerateBoundaryTriangleCount: 0,
       sharedSegmentCount: segments.length,
       sourceProjectionErrorMax: originalBoundaryDisplacementMax,

@@ -360,6 +360,9 @@ const buildSnapshotSample = (
   heightScaleMultiplier,
   tileTypes: snapshot.tileTypes,
   riverMask: snapshot.riverMask,
+  riverChannelClass: snapshot.riverChannelClass,
+  riverChannelWidth: snapshot.riverChannelWidth,
+  riverChannelDownstream: snapshot.riverChannelDownstream,
   oceanMask: snapshot.oceanMask,
   seaLevel: snapshot.seaLevel,
   coastDistance: snapshot.coastDistance,
@@ -1098,6 +1101,11 @@ const clonePreviewSample = (sample: PreviewRenderableSample): PreviewRenderableS
       tileCanopyCover: cloneFloat32Array(worldSample.tileCanopyCover),
       tileStemDensity: cloneUint8Array(worldSample.tileStemDensity),
       riverMask: cloneUint8Array(worldSample.riverMask),
+      riverChannelClass: cloneUint8Array(worldSample.riverChannelClass),
+      riverChannelWidth: cloneFloat32Array(worldSample.riverChannelWidth),
+      riverChannelDownstream: worldSample.riverChannelDownstream
+        ? Int32Array.from(worldSample.riverChannelDownstream)
+        : undefined,
       oceanMask: cloneUint8Array(worldSample.oceanMask),
       seaLevel: cloneFloat32Array(worldSample.seaLevel),
       coastDistance: worldSample.coastDistance ? Uint16Array.from(worldSample.coastDistance) : undefined,
@@ -1135,6 +1143,11 @@ const clonePreviewSample = (sample: PreviewRenderableSample): PreviewRenderableS
     rockExposure: cloneFloat32Array(snapshotSample.rockExposure),
     tileTypes: cloneUint8Array(snapshotSample.tileTypes),
     riverMask: cloneUint8Array(snapshotSample.riverMask),
+    riverChannelClass: cloneUint8Array(snapshotSample.riverChannelClass),
+    riverChannelWidth: cloneFloat32Array(snapshotSample.riverChannelWidth),
+    riverChannelDownstream: snapshotSample.riverChannelDownstream
+      ? Int32Array.from(snapshotSample.riverChannelDownstream)
+      : undefined,
     oceanMask: cloneUint8Array(snapshotSample.oceanMask),
     seaLevel: cloneFloat32Array(snapshotSample.seaLevel),
     coastDistance: snapshotSample.coastDistance ? Uint16Array.from(snapshotSample.coastDistance) : undefined,

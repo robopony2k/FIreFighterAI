@@ -1,5 +1,35 @@
 # Deprecations
 
+## Overlapping Ephemeral Segment Quads and Node Discs
+
+Status: Deprecated as of August 12, 2026.
+
+- Emitting each ephemeral receiver link as an independent transparent quad and covering its endpoints with separate circular fans is retired. Overlap darkened internal joins and made every cell-centre chord visible as a separate segment.
+- Each uninterrupted ephemeral branch now uses one indexed terrain-conforming strip with shared internal sections, bounded receiver-tangent interpolation, zero-width terminal taper, and a fade beneath permanent water at its downstream transition.
+- The centreline may move only by a bounded deterministic cross-slope low-point adjustment derived from existing terrain. It does not alter receivers, create hydrology, add random wiggle, or avoid roads.
+- Creek presentation sits below road decks where the two overlap. Future road-routing policy may handle undesirable valley co-location separately; creek rendering must not mutate or suppress authoritative drainage to solve it.
+
+Migration guidance:
+
+1. Add ephemeral geometry through `channelRibbonCenterline.ts` and the branch-strip builder rather than reinstating per-link transparent meshes or node caps.
+2. Keep permanent stream/river contours on the canonical passing cutout path unless a replacement preserves exact seam topology and performance.
+3. Preserve ephemeral non-water gameplay behavior and keep road-generation changes outside the creek-rendering boundary.
+
+## Single-Threshold Raster Rivers and Fixed Cell-Support Contours
+
+Status: Deprecated as of August 12, 2026.
+
+- A single threshold that made every accepted drainage cell authoritative water is retired. The River stage retains established trunks, admits lower-flow branches only when their receiver chain anchors to a trunk or lake, and prunes short terminal twigs without adding coastal mouths.
+- The fixed cell-support contour and dark bed-colour fill are retired for samples carrying channel downstream metadata. Permanent water now follows deterministic tapered capsules between original receiver-linked cell centres, with round confluence unions and four samples per cell; lakes remain unchanged in the shared indexed water/cutout contour.
+- Ephemeral creeks are presentation metadata outside the authoritative river mask. They remain traversable and normally burnable, never become a water source, and use a separate seasonally wet terrain-draped ribbon with no terrain cutout.
+- Orthogonal connector cells remain authoritative water support for gameplay continuity but carry class and width zero. Visible geometry follows the original diagonal receiver link directly, without random displacement, decorative wiggle, or renderer-derived hydrology.
+
+Migration guidance:
+
+1. Use `tileRiverChannelClass`, `tileRiverChannelWidth`, and `tileRiverChannelDownstream` as mapgen-owned presentation metadata; keep `tileRiverMask` authoritative for stream/river gameplay water.
+2. Tune branch admission in `flowAccumulationRiverNetwork.ts`, channel widths in `riverChannelHierarchy.ts`, and seasonal ephemeral wetness in `ephemeralCreekRibbonMesh.ts`; do not derive competing hydrology in rendering.
+3. Keep the legacy raster contour only as compatibility fallback for old saves and synthetic samples without downstream metadata.
+
 ## Lake-Overflow-Only Rivers and Rigid Spill-Contour Rejection
 
 Status: Deprecated as of August 11, 2026.

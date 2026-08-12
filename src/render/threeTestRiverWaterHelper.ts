@@ -5,6 +5,7 @@ import {
   type TerrainWaterDebugControls
 } from "./terrainWaterDebug.js";
 import { getInlandWaterSeamDebugModeValue } from "../systems/terrain/rendering/inlandWaterSeamDebugMaterial.js";
+import { EphemeralCreekRenderHelper } from "./terrain/water/ephemeralCreekRenderHelper.js";
 
 export const INLAND_WATER_CALM_BANK_STATIC_FOAM = 0;
 
@@ -33,6 +34,8 @@ type RiverUniforms = {
   u_fogFar: { value: number };
   u_quality: { value: number };
   u_waterfallInfluenceMap: { value: THREE.Texture };
+  u_channelCoverageMap: { value: THREE.Texture };
+  u_channelBedColor: { value: THREE.Color };
   u_flowSpeedScale: { value: number };
   u_normalStrengthScale: { value: number };
   u_foamScale: { value: number };
@@ -56,6 +59,12 @@ type WaterfallWallUniforms = {
   u_speedScale: { value: number };
   u_debugHighlight: { value: number };
 };
+
+// Waterfall curtains are sparse and already execute the same shader work in
+// every water-quality profile. Keep their foam and mist readable when the
+// adaptive water system falls back to the fast profile instead of reducing
+// those contributions to zero.
+export const WATERFALL_FAST_QUALITY_FX_FLOOR = 0.65;
 
 const disposeMaterial = (material: THREE.Material | THREE.Material[]): void => {
   if (Array.isArray(material)) {
@@ -101,6 +110,7 @@ type RiverWaterFog = {
 export class ThreeTestRiverWaterHelper {
   private readonly scene: THREE.Scene;
   private readonly keyLight: THREE.DirectionalLight;
+  private readonly ephemeralCreeks: EphemeralCreekRenderHelper;
   private currentPalette: {
     skyTopColor: THREE.Color;
     skyHorizonColor: THREE.Color;
@@ -127,6 +137,7 @@ export class ThreeTestRiverWaterHelper {
   private flowMap: THREE.Texture | null = null;
   private rapidMap: THREE.Texture | null = null;
   private riverBankMap: THREE.Texture | null = null;
+  private channelCoverageMap: THREE.Texture | null = null;
   private waterfallInfluenceMap: THREE.Texture | null = null;
   private debugControls: TerrainWaterDebugControls = { ...DEFAULT_TERRAIN_WATER_DEBUG_CONTROLS };
 
@@ -148,6 +159,7 @@ export class ThreeTestRiverWaterHelper {
   constructor(options: ThreeTestRiverWaterHelperOptions) {
     this.scene = options.scene;
     this.keyLight = options.keyLight;
+    this.ephemeralCreeks = new EphemeralCreekRenderHelper(options.scene);
     this.currentPalette = {
       skyTopColor: new THREE.Color(options.skyTopColor),
       skyHorizonColor: new THREE.Color(options.skyHorizonColor),
@@ -172,6 +184,7 @@ export class ThreeTestRiverWaterHelper {
     this.currentPalette.oceanShallowColor.set(palette.oceanShallowColor);
     this.currentPalette.oceanDeepColor.set(palette.oceanDeepColor);
     this.currentPalette.sunColor.set(palette.sunColor);
+    this.ephemeralCreeks.setPalette(palette.shallowColor);
     if (!this.uniforms && !this.waterfallWallUniforms) {
       return;
     }
@@ -208,8 +221,13 @@ export class ThreeTestRiverWaterHelper {
     }
   }
 
+  public setSeasonT01(seasonT01: number): void {
+    this.ephemeralCreeks.setSeasonT01(seasonT01);
+  }
+
   public setDebugControls(controls: TerrainWaterDebugControls): void {
     this.debugControls = { ...controls };
+    this.ephemeralCreeks.setVisible(this.debugControls.showRiver);
     if (this.mesh) {
       this.mesh.visible = this.debugControls.showRiver;
     }
@@ -250,6 +268,7 @@ export class ThreeTestRiverWaterHelper {
     this.fogState.color.set(fog.color);
     this.fogState.near = fog.near;
     this.fogState.far = fog.far;
+    this.ephemeralCreeks.setFog(fog.color, fog.near, fog.far);
     if (!this.uniforms) {
       if (!this.waterfallWallUniforms) {
         return;
@@ -289,6 +308,7 @@ export class ThreeTestRiverWaterHelper {
   }
 
   public clear(): void {
+    this.ephemeralCreeks.clear();
     if (this.mesh) {
       this.scene.remove(this.mesh);
       this.mesh.geometry.dispose();
@@ -319,16 +339,19 @@ export class ThreeTestRiverWaterHelper {
     disposeTexture(this.flowMap);
     disposeTexture(this.rapidMap);
     disposeTexture(this.riverBankMap);
+    disposeTexture(this.channelCoverageMap);
     disposeTexture(this.waterfallInfluenceMap);
     this.supportMap = null;
     this.flowMap = null;
     this.rapidMap = null;
     this.riverBankMap = null;
+    this.channelCoverageMap = null;
     this.waterfallInfluenceMap = null;
   }
 
   public dispose(): void {
     this.clear();
+    this.ephemeralCreeks.dispose();
   }
 
   private buildWaterfallWallMesh(baseMesh: THREE.Mesh, river: RiverWaterData, qualityUniform: number): void {
@@ -426,7 +449,11 @@ export class ThreeTestRiverWaterHelper {
             gl_FragColor = vec4(debugColor, 1.0);
             return;
           }
-          float qualityFactor = clamp(u_quality * 0.5, 0.0, 1.0);
+          float qualityFactor = mix(
+            ${WATERFALL_FAST_QUALITY_FX_FLOOR.toFixed(2)},
+            1.0,
+            clamp(u_quality * 0.5, 0.0, 1.0)
+          );
           float centerBand = 1.0 - smoothstep(mix(0.2, 0.32, vFallStyle), 0.5, abs(vUv.x - 0.5));
           float edgeFade = smoothstep(0.0, 0.08, vUv.x) * (1.0 - smoothstep(0.92, 1.0, vUv.x));
           float t = u_time * (2.2 + vDropNorm * 1.6) * u_speedScale;
@@ -520,6 +547,7 @@ export class ThreeTestRiverWaterHelper {
     this.flowMap = river.flowMap;
     this.rapidMap = river.rapidMap;
     this.riverBankMap = river.riverBankMap;
+    this.channelCoverageMap = river.channelCoverageMap;
     this.waterfallInfluenceMap = river.waterfallInfluenceMap;
 
     const geometry = new THREE.BufferGeometry();
@@ -560,6 +588,8 @@ export class ThreeTestRiverWaterHelper {
       u_fogFar: { value: this.fogState.far },
       u_quality: { value: qualityUniform },
       u_waterfallInfluenceMap: { value: this.waterfallInfluenceMap },
+      u_channelCoverageMap: { value: this.channelCoverageMap },
+      u_channelBedColor: { value: new THREE.Color(0x59634f) },
       u_flowSpeedScale: { value: this.debugControls.riverFlowSpeedScale },
       u_normalStrengthScale: { value: this.debugControls.riverNormalStrengthScale },
       u_foamScale: { value: this.debugControls.riverFoamScale },
@@ -591,6 +621,7 @@ export class ThreeTestRiverWaterHelper {
         uniform float u_quality;
         uniform float u_flowSpeedScale;
         uniform float u_inlandWaterSeamDebugMode;
+        uniform sampler2D u_channelCoverageMap;
         attribute float a_bankDist;
         attribute vec2 a_flowDir;
         attribute float a_flowSpeed;
@@ -640,11 +671,12 @@ export class ThreeTestRiverWaterHelper {
           float mouthFlow = 1.0 - smoothstep(0.08, 1.0, a_riverMouthBlend);
           float debugMotionFactor = u_inlandWaterSeamDebugMode < 0.5 ? 1.0 : 0.0;
           float edgeMotionFactor = clamp(a_edgeMotionFactor, 0.0, 1.0) * debugMotionFactor;
-          float waveDisp = sampleRiverWave(worldXZ, flowN, centerFactor, speedFactor, a_rapid, qualityFactor) * calmFactor * mouthFlow * edgeMotionFactor;
+          float channelCoverage = max(texture2D(u_channelCoverageMap, vUv).r, a_lakeFactor);
+          float waveDisp = sampleRiverWave(worldXZ, flowN, centerFactor, speedFactor, a_rapid, qualityFactor) * calmFactor * mouthFlow * edgeMotionFactor * channelCoverage;
           vec3 displaced = position + vec3(0.0, waveDisp, 0.0);
           const float sampleStep = 0.65;
-          float dispX = sampleRiverWave(worldXZ + vec2(sampleStep, 0.0), flowN, centerFactor, speedFactor, a_rapid, qualityFactor) * calmFactor * mouthFlow * edgeMotionFactor;
-          float dispZ = sampleRiverWave(worldXZ + vec2(0.0, sampleStep), flowN, centerFactor, speedFactor, a_rapid, qualityFactor) * calmFactor * mouthFlow * edgeMotionFactor;
+          float dispX = sampleRiverWave(worldXZ + vec2(sampleStep, 0.0), flowN, centerFactor, speedFactor, a_rapid, qualityFactor) * calmFactor * mouthFlow * edgeMotionFactor * channelCoverage;
+          float dispZ = sampleRiverWave(worldXZ + vec2(0.0, sampleStep), flowN, centerFactor, speedFactor, a_rapid, qualityFactor) * calmFactor * mouthFlow * edgeMotionFactor * channelCoverage;
           vec3 tangentX = vec3(sampleStep, dispX - waveDisp, 0.0);
           vec3 tangentZ = vec3(0.0, dispZ - waveDisp, sampleStep);
           vec3 geomNormalLocal = cross(tangentZ, tangentX);
@@ -694,6 +726,8 @@ export class ThreeTestRiverWaterHelper {
         uniform float u_fogFar;
         uniform float u_quality;
         uniform sampler2D u_waterfallInfluenceMap;
+        uniform sampler2D u_channelCoverageMap;
+        uniform vec3 u_channelBedColor;
         uniform float u_flowSpeedScale;
         uniform float u_normalStrengthScale;
         uniform float u_foamScale;
@@ -721,6 +755,7 @@ export class ThreeTestRiverWaterHelper {
             return;
           }
           float qualityFactor = step(0.5, u_quality);
+          float channelCoverage = max(texture2D(u_channelCoverageMap, vUv).r, vLakeFactor);
           float edge = smoothstep(0.02, 0.25, vBankDist);
           float edgeFeather = smoothstep(0.0, 0.14, vBankDist);
           vec2 worldUv = vWorldPos.xz * u_waveScale;
@@ -770,9 +805,9 @@ export class ThreeTestRiverWaterHelper {
               return;
             }
           }
-          float rapid = clamp((vRapid * (0.68 + qualityFactor * 0.38) + fallBoost * 0.62 + seamRapid * 0.82 + plungeFoam * 0.2) * mix(1.0, 0.08, vLakeFactor) * mouthFlow, 0.0, 1.0);
+          float rapid = clamp((vRapid * (0.68 + qualityFactor * 0.38) + fallBoost * 0.62 + seamRapid * 0.82 + plungeFoam * 0.2) * mix(1.0, 0.08, vLakeFactor) * mouthFlow * channelCoverage, 0.0, 1.0);
           float spec = specBase * u_specular * u_specularScale * (0.4 + rapid * 0.8 + seamRapid * 0.26) * (0.7 + 0.45 * grazing);
-          spec *= mix(0.82, 1.14, crestMask);
+          spec *= mix(0.82, 1.14, crestMask) * channelCoverage;
           float fresnel = pow(1.0 - max(dot(viewDir, n), 0.0), 3.5);
           vec3 baseColor = mix(u_color, u_deepColor, clamp(1.0 - edge * 1.2, 0.0, 1.0) * 0.42);
           vec3 oceanColor = mix(u_oceanColor, u_oceanDeepColor, clamp(1.0 - edge * 1.05, 0.0, 1.0) * 0.34);
@@ -788,7 +823,7 @@ export class ThreeTestRiverWaterHelper {
           foam += seamRapid * (0.18 + seamPulse * 0.24 + centerBand * 0.06) * u_foamScale;
           foam += lipFoam * (0.28 + seamPulse * 0.34) * u_foamScale;
           foam += plungeFoam * (0.46 + seamPulse * 0.52) * u_foamScale;
-          foam *= mouthFlow;
+          foam *= mouthFlow * channelCoverage;
           vec3 foamColor = vec3(0.93, 0.97, 1.0);
           vec3 litBase = mix(baseColor, foamColor, clamp(foam, 0.0, 1.0) * (0.5 + edgeFeather * 0.1));
           litBase = mix(litBase, foamColor, clamp(seamRapid * 0.34 + lipFoam * 0.42 + plungeFoam * 0.7, 0.0, 0.92));
@@ -796,9 +831,11 @@ export class ThreeTestRiverWaterHelper {
           float skyT = clamp(0.58 + 0.42 * viewDir.y, 0.0, 1.0);
           vec3 skyReflect = mix(u_skyHorizonColor, u_skyTopColor, skyT);
           float sunGlitter = pow(max(dot(reflect(-viewDir, n), lightDir), 0.0), mix(130.0, 74.0, grazing)) * (0.24 + rapid * 0.7);
-          vec3 reflection = skyReflect * (fresnel * 0.22) + u_sunColor * (sunGlitter * 0.12);
+          vec3 reflection = (skyReflect * (fresnel * 0.22) + u_sunColor * (sunGlitter * 0.12)) * channelCoverage;
           float flowShade = clamp(0.96 + vDisp * 8.0 + (1.0 - geomN.y) * 0.28 + seamRapid * 0.08, 0.88, 1.22);
-          vec3 color = litBase * (0.82 + diffuse * 0.2) * flowShade + reflection + u_sunColor * spec;
+          vec3 waterColor = litBase * (0.82 + diffuse * 0.2) * flowShade + reflection + u_sunColor * spec;
+          vec3 bedColor = u_channelBedColor * (0.78 + diffuse * 0.18);
+          vec3 color = mix(bedColor, waterColor, channelCoverage);
           float fogFactor = pow(smoothstep(u_fogNear, u_fogFar, viewDist), 1.15);
           color = mix(color, u_fogColor, fogFactor);
           gl_FragColor = vec4(color, 1.0);
@@ -813,6 +850,7 @@ export class ThreeTestRiverWaterHelper {
     this.mesh.receiveShadow = false;
     this.mesh.visible = this.debugControls.showRiver;
     this.scene.add(this.mesh);
+    this.ephemeralCreeks.rebuild(baseMesh, river);
 
     if (river.wallPositions && river.wallUvs && river.wallIndices) {
       const wallGeometry = new THREE.BufferGeometry();

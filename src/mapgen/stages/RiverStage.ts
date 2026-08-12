@@ -5,6 +5,7 @@ import { buildFlowAccumulationRiverNetwork } from "../../systems/terrain/sim/flo
 import { HYDROLOGY_FEATURE_CLASS_CODE } from "../../systems/terrain/sim/hydrologyFeatureClassifier.js";
 import { buildTerrainMorphologyFields } from "../../systems/terrain/sim/terrainMorphology.js";
 import type { StaticHydrologyFeatureCounts } from "../../systems/terrain/types/staticHydrologyTypes.js";
+import { buildRiverChannelHierarchy } from "../riverChannelHierarchy.js";
 import type { PipelineStage } from "../pipeline/TerrainPipeline.js";
 import { emitStageSnapshot } from "../pipeline/stageDebug.js";
 
@@ -56,6 +57,9 @@ export const RiverStage: PipelineStage = {
     state.tileRiverBed = new Float32Array(total).fill(Number.NaN);
     state.tileRiverSurface = new Float32Array(total).fill(Number.NaN);
     state.tileRiverStepStrength = new Float32Array(total);
+    state.tileRiverChannelClass = new Uint8Array(total);
+    state.tileRiverChannelWidth = new Float32Array(total);
+    state.tileRiverChannelDownstream = new Int32Array(total).fill(-1);
     state.tileLakeMask = new Uint16Array(total);
     state.tileLakeSurface = new Float32Array(total).fill(Number.NaN);
     state.tileLakeOutletMask = new Uint8Array(total);
@@ -64,18 +68,6 @@ export const RiverStage: PipelineStage = {
     state.tileWaterfallDrop = new Float32Array(total);
     state.valleyMap = Array.from({ length: total }, () => 0);
 
-    const rivers = buildFlowAccumulationRiverNetwork({
-      cols: state.grid.cols,
-      rows: state.grid.rows,
-      elevations: elevationMap,
-      oceanMask,
-      seaLevelMap,
-      receiver: drainageReceiverMap,
-      flowAccumulation: flowAccumulationMap,
-      riverIntensity: settings.riverIntensity,
-      riverBudget: settings.riverBudget,
-      minLakeDepth: settings.minLakeDepth
-    });
     const lakes = buildDepressionLakeField({
       cols: state.grid.cols,
       rows: state.grid.rows,
@@ -90,6 +82,19 @@ export const RiverStage: PipelineStage = {
       minLakeAreaTiles: settings.minLakeAreaTiles,
       maxLakeAreaTiles: settings.maxLakeAreaTiles,
       maxLakeCount: settings.maxLakeCount
+    });
+    const rivers = buildFlowAccumulationRiverNetwork({
+      cols: state.grid.cols,
+      rows: state.grid.rows,
+      elevations: elevationMap,
+      oceanMask,
+      seaLevelMap,
+      receiver: drainageReceiverMap,
+      flowAccumulation: flowAccumulationMap,
+      lakeMask: lakes.lakeMask,
+      riverIntensity: settings.riverIntensity,
+      riverBudget: settings.riverBudget,
+      minLakeDepth: settings.minLakeDepth
     });
 
     const featureClass = new Uint8Array(total);
@@ -139,6 +144,22 @@ export const RiverStage: PipelineStage = {
       state.tileFuel[i] = 0;
       state.tileFire[i] = 0;
     }
+
+    const channelHierarchy = buildRiverChannelHierarchy(
+      rivers.channelNodeMask,
+      flowAccumulationMap,
+      {
+        tributary: rivers.tributaryThreshold,
+        stream: rivers.streamThreshold,
+        river: rivers.riverThreshold
+      }
+    );
+    state.tileRiverChannelClass = channelHierarchy.channelClass;
+    state.tileRiverChannelWidth = channelHierarchy.channelWidth;
+    state.tileRiverChannelDownstream = rivers.channelDownstream;
+    ctx.riverChannelClassMap = channelHierarchy.channelClass;
+    ctx.riverChannelWidthMap = channelHierarchy.channelWidth;
+    ctx.riverChannelDownstreamMap = rivers.channelDownstream;
 
     ctx.lakeMask = state.tileLakeMask;
     ctx.lakeSurfaceMap = state.tileLakeSurface;

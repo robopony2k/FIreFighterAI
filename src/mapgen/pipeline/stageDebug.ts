@@ -21,6 +21,11 @@ export const emitStageSnapshot = async (ctx: MapGenContext, phase: MapGenDebugPh
     elevations: Float32Array.from(ctx.elevationMap),
     tileTypes: buildTypeIdsFromState(ctx.state),
     riverMask: ctx.riverMask ? Uint8Array.from(ctx.riverMask) : undefined,
+    riverChannelClass: ctx.riverChannelClassMap ? Uint8Array.from(ctx.riverChannelClassMap) : undefined,
+    riverChannelWidth: ctx.riverChannelWidthMap ? Float32Array.from(ctx.riverChannelWidthMap) : undefined,
+    riverChannelDownstream: ctx.riverChannelDownstreamMap
+      ? Int32Array.from(ctx.riverChannelDownstreamMap)
+      : undefined,
     oceanMask: ctx.oceanMask ? Uint8Array.from(ctx.oceanMask) : undefined,
     seaLevel: ctx.seaLevelMap ? Float32Array.from(ctx.seaLevelMap) : undefined,
     coastDistance: ctx.state.tileCoastDistance.length > 0 ? Uint16Array.from(ctx.state.tileCoastDistance) : undefined,

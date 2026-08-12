@@ -228,6 +228,9 @@ export type TerrainSample = {
   riverBed?: Float32Array;
   riverSurface?: Float32Array;
   riverStepStrength?: Float32Array;
+  riverChannelClass?: Uint8Array;
+  riverChannelWidth?: Float32Array;
+  riverChannelDownstream?: Int32Array;
   lakeMask?: Uint16Array;
   lakeSurface?: Float32Array;
   lakeOutletMask?: Uint8Array;
@@ -1820,7 +1823,9 @@ const applyRiverTerrainTriangleCutout = (
   sampleCols: number,
   sampleRows: number,
   riverDomain: RiverRenderDomain | undefined,
-  inlandWater: InlandWaterRenderSurface | undefined
+  inlandWater: InlandWaterRenderSurface | undefined,
+  usesFlowRibbon: boolean,
+  oceanMask?: Uint8Array
 ): TerrainBuildCutoutTelemetry | null => {
   if (!riverDomain || sampleCols < 2 || sampleRows < 2) return null;
   const startedAt = performance.now();
@@ -1944,7 +1949,13 @@ const applyRiverTerrainTriangleCutout = (
             edgeB.edgeX,
             edgeB.edgeY,
             riverDomain.riverMouthOpeningEdges ?? new Float32Array()
-          )
+          ) || (usesFlowRibbon && Boolean(oceanMask) && (() => {
+            const midpointX = (edgeA.edgeX + edgeB.edgeX) * 0.5;
+            const midpointY = (edgeA.edgeY + edgeB.edgeY) * 0.5;
+            const cellX = clamp(Math.floor(midpointX), 0, riverDomain.cols - 1);
+            const cellY = clamp(Math.floor(midpointY), 0, riverDomain.rows - 1);
+            return (oceanMask?.[cellY * riverDomain.cols + cellX] ?? 0) > 0;
+          })())
         });
       }
       retainedPolygons.push(polygon);
@@ -3812,7 +3823,9 @@ export const buildTerrainMesh = (
       sampleCols,
       sampleRows,
       riverRenderDomain,
-      surface.inlandWater
+      surface.inlandWater,
+      Boolean(sample.riverChannelDownstream),
+      sample.oceanMask
     );
   }
   telemetry.timingsMs.inlandWaterCutout = performance.now() - cutoutStartedAt;

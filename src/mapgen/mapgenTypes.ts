@@ -30,6 +30,9 @@ export type MapGenDebugSnapshot = {
   elevations: Float32Array;
   tileTypes?: Uint8Array;
   riverMask?: Uint8Array;
+  riverChannelClass?: Uint8Array;
+  riverChannelWidth?: Float32Array;
+  riverChannelDownstream?: Int32Array;
   oceanMask?: Uint8Array;
   seaLevel?: Float32Array;
   coastDistance?: Uint16Array;

@@ -590,6 +590,10 @@ const threeTestTerrainSource = await readFile(
   fileURLToPath(new URL("../src/render/threeTestTerrain.ts", import.meta.url)),
   "utf8"
 );
+const riverWaterHelperSource = await readFile(
+  fileURLToPath(new URL("../src/render/threeTestRiverWaterHelper.ts", import.meta.url)),
+  "utf8"
+);
 const gameSessionRuntimeSource = await readFile(
   fileURLToPath(new URL("../src/app/gameSessionRuntime.ts", import.meta.url)),
   "utf8"
@@ -609,6 +613,16 @@ const inlandWaterSeamSource = await readFile(
 const stylesSource = await readFile(
   fileURLToPath(new URL("../styles.css", import.meta.url)),
   "utf8"
+);
+assert.match(
+  riverWaterHelperSource,
+  /WATERFALL_FAST_QUALITY_FX_FLOOR = 0\.65[\s\S]*float qualityFactor = mix\([\s\S]*WATERFALL_FAST_QUALITY_FX_FLOOR\.toFixed\(2\)/,
+  "fast adaptive water quality must retain a visible waterfall foam and mist floor"
+);
+assert.doesNotMatch(
+  riverWaterHelperSource,
+  /float qualityFactor = clamp\(u_quality \* 0\.5, 0\.0, 1\.0\)/,
+  "fast adaptive water quality must not zero waterfall FX"
 );
 assert.match(
   threeTestTerrainSource,

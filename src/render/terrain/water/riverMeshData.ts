@@ -20,8 +20,12 @@ import {
   type RiverRenderDomain
 } from "./riverRenderDomain.js";
 import { buildWaterfallInfluenceMap } from "./waterfallBuilder.js";
+import { buildRiverChannelCoverageField } from "./riverChannelCoverage.js";
+import { buildEphemeralCreekRibbonMesh } from "./ephemeralCreekRibbonMesh.js";
+import { hasRiverRibbonMetadata } from "./riverRibbonField.js";
 import { createRiverSpaceTransform } from "./waterSampling.js";
 import {
+  buildRiverChannelCoverageMapTexture,
   buildRapidMapTexture,
   buildRiverBankMapTexture,
   buildRiverFlowTexture,
@@ -37,8 +41,14 @@ export type RiverWaterData = InlandWaterMeshData & {
   flowMap: THREE.DataTexture;
   rapidMap: THREE.DataTexture;
   riverBankMap: THREE.DataTexture;
+  channelCoverageMap: THREE.DataTexture;
   waterfallInfluenceMap: THREE.DataTexture;
   debugRiverDomainStats?: RiverDomainDebugStats;
+  usesFlowRibbon: boolean;
+  ephemeralPositions?: Float32Array;
+  ephemeralEdgeFactor?: Float32Array;
+  ephemeralOpacityFactor?: Float32Array;
+  ephemeralIndices?: Uint32Array;
 };
 
 type RiverMeshDataSample = {
@@ -49,6 +59,11 @@ type RiverMeshDataSample = {
   riverSurface?: Float32Array;
   riverBed?: Float32Array;
   riverStepStrength?: Float32Array;
+  riverMask?: Uint8Array;
+  riverChannelClass?: Uint8Array;
+  riverChannelWidth?: Float32Array;
+  riverChannelDownstream?: Int32Array;
+  lakeMask?: Uint16Array;
   inlandWater?: InlandWaterRenderSurface;
 };
 
@@ -111,6 +126,12 @@ export const buildRiverMeshData = (
   const surfaceWorld = new Float32Array(total).fill(Number.NaN);
   const riverBed = sample.riverBed;
   const riverStepStrength = inlandWater?.stepStrength ?? sample.riverStepStrength;
+  const usesFlowRibbon = hasRiverRibbonMetadata({
+    total,
+    channelClass: sample.riverChannelClass,
+    channelWidth: sample.riverChannelWidth,
+    channelDownstream: sample.riverChannelDownstream
+  });
   const minDepthWorld = RIVER_MIN_DEPTH_NORM * heightScale;
 
   for (let i = 0; i < total; i += 1) {
@@ -252,6 +273,20 @@ export const buildRiverMeshData = (
   const riverRatios: WaterSampleRatios = { water: riverRatio, ocean: new Float32Array(total), river: riverRatio };
   const riverRapidMap = buildRapidMapTexture(surfaceNorm, cols, rows, riverRatios, riverStepStrength);
   const riverBankMap = buildRiverBankMapTexture(cols, rows, renderSupport, riverRatio);
+  const channelCoverageField = !usesFlowRibbon && sample.riverChannelWidth?.length === total
+    ? buildRiverChannelCoverageField({
+        cols,
+        rows,
+        riverMask: sample.riverMask ?? riverSupportBase,
+        riverChannelWidth: sample.riverChannelWidth,
+        lakeMask: sample.lakeMask
+      })
+    : { data: new Uint8Array([255]), width: 1, height: 1 };
+  const channelCoverageMap = buildRiverChannelCoverageMapTexture(
+    channelCoverageField.data,
+    channelCoverageField.width,
+    channelCoverageField.height
+  );
   const riverWaterfallInfluence = buildWaterfallInfluenceMap(
     cols,
     rows,
@@ -414,8 +449,55 @@ export const buildRiverMeshData = (
     }
     return Number.NaN;
   };
+  const sampleFlowRibbonSurfaceWorld = (fx: number, fy: number): number => {
+    if (!usesFlowRibbon) return Number.NaN;
+    const channelClass = sample.riverChannelClass!;
+    const channelDownstream = sample.riverChannelDownstream!;
+    const centerX = Math.floor(fx);
+    const centerY = Math.floor(fy);
+    let bestDistanceSq = Number.POSITIVE_INFINITY;
+    let bestSurface = Number.NaN;
+    // Drainage receivers are eight-neighbour links. This bounded local search
+    // samples the authoritative source/receiver segment without a full-network
+    // query for every contour vertex.
+    for (let sourceY = Math.max(0, centerY - 2); sourceY <= Math.min(rows - 1, centerY + 2); sourceY += 1) {
+      for (let sourceX = Math.max(0, centerX - 2); sourceX <= Math.min(cols - 1, centerX + 2); sourceX += 1) {
+        const source = idxAt(sourceX, sourceY);
+        if ((channelClass[source] ?? 0) < 2) continue;
+        const target = channelDownstream[source] ?? -1;
+        if (target < 0 || target >= total) continue;
+        const targetX = target % cols;
+        const targetY = Math.floor(target / cols);
+        const ax = sourceX + 0.5;
+        const ay = sourceY + 0.5;
+        const bx = targetX + 0.5;
+        const by = targetY + 0.5;
+        const dx = bx - ax;
+        const dy = by - ay;
+        const lengthSq = dx * dx + dy * dy;
+        const t = lengthSq > 1e-8 ? clamp(((fx - ax) * dx + (fy - ay) * dy) / lengthSq, 0, 1) : 0;
+        const distanceSq = (fx - (ax + dx * t)) ** 2 + (fy - (ay + dy * t)) ** 2;
+        if (distanceSq >= bestDistanceSq) continue;
+        const sourceSurface = surfaceWorld[source];
+        const targetSurface = surfaceWorld[target];
+        if (!Number.isFinite(sourceSurface) && !Number.isFinite(targetSurface)) continue;
+        const from = Number.isFinite(sourceSurface) ? sourceSurface : targetSurface;
+        const to = Number.isFinite(targetSurface) ? targetSurface : sourceSurface;
+        const crossesTypedWaterfall =
+          (riverStepStrength?.[source] ?? 0) > 1e-6 || (riverStepStrength?.[target] ?? 0) > 1e-6;
+        bestSurface = crossesTypedWaterfall
+          ? (t < 0.5 ? from : to)
+          : from + (to - from) * t;
+        bestDistanceSq = distanceSq;
+      }
+    }
+    return bestSurface;
+  };
   const sampleSurfaceOffset = (fx: number, fy: number): number => {
-    const surface = sampleFromCells(fx, fy, (idx) => surfaceWorld[idx]);
+    const ribbonSurface = sampleFlowRibbonSurfaceWorld(fx, fy);
+    const surface = Number.isFinite(ribbonSurface)
+      ? ribbonSurface
+      : sampleFromCells(fx, fy, (idx) => surfaceWorld[idx]);
     let topWorld = surface;
     let minBankWorld = Number.POSITIVE_INFINITY;
     const vx = Math.floor(fx);
@@ -507,6 +589,21 @@ export const buildRiverMeshData = (
     inlandWater?.waterfalls ?? [],
     waterLevelWorld
   );
+  const ephemeralMesh = usesFlowRibbon
+    ? buildEphemeralCreekRibbonMesh({
+        cols,
+        rows,
+        width,
+        depth,
+        heightScale,
+        elevations: sample.elevations,
+        channelClass: sample.riverChannelClass!,
+        channelWidth: sample.riverChannelWidth!,
+        channelDownstream: sample.riverChannelDownstream!,
+        lakeMask: sample.lakeMask,
+        sampleTerrainWorldYAtEdge: inlandWater?.sampleTerrainWorldYAtEdge
+      })
+    : undefined;
   const explicitWaterfallMesh = buildInlandWaterfallMeshData(inlandWater?.waterfalls ?? [], waterLevelWorld);
   if (riverDomain.debugStats) {
     riverDomain.debugStats.waterfallWallQuadCounts = (inlandWater?.waterfalls ?? []).map(() => 1);
@@ -548,13 +645,19 @@ export const buildRiverMeshData = (
     flowMap: riverFlowMap,
     rapidMap: riverRapidMap,
     riverBankMap,
+    channelCoverageMap,
     waterfallInfluenceMap: riverWaterfallInfluence,
     level: waterLevelWorld,
     cols,
     rows,
     width,
     depth,
-    debugRiverDomainStats: riverDomain.debugStats
+    debugRiverDomainStats: riverDomain.debugStats,
+    usesFlowRibbon,
+    ephemeralPositions: ephemeralMesh?.positions,
+    ephemeralEdgeFactor: ephemeralMesh?.edgeFactor,
+    ephemeralOpacityFactor: ephemeralMesh?.opacityFactor,
+    ephemeralIndices: ephemeralMesh?.indices
   };
 };
 

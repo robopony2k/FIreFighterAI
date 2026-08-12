@@ -1,3 +1,47 @@
+TSK-0201: Remove ephemeral creek seams and rigid segment chords
+
+Type: polish
+
+Why: Close-up winter captures validated creek colour and width but exposed dark seams from overlapping transparent segment/node geometry, rigid cell-centre chords, and creek presentation drawing through roads that share the same valley contour.
+
+Done when:
+- [x] Each uninterrupted ephemeral branch renders as one indexed strip with shared internal sections and no overlapping circular node fans.
+- [x] Branch centrelines use deterministic bounded receiver tangents, four subdivisions per receiver link, and a cross-slope low-point adjustment derived only from existing terrain elevation.
+- [x] Intermediate strip sections resample terrain height, terminal headwaters taper from zero, and ephemeral-to-permanent transitions fade beneath stream, river, or lake presentation.
+- [x] Creek terrain lift is below the normal road-deck lift and creek geometry renders before road overlays, without changing road generation, bridge classification, channel receivers, masks, classes, or gameplay water.
+- [x] TypeScript, focused deterministic strip/curve assertions, all 37 inland-water cases, hydrology smoke, renderer regression, and queue validation pass with permanent-water T-junction/open-end counts remaining zero.
+- [ ] A refreshed close-up capture confirms internal creek seams are gone, long turns read as continuous curves, terrain conformance is stable, and road decks visually own legitimate overlaps.
+
+Touchpoints: `src/render/terrain/water/channelRibbonCenterline.ts`, `src/render/terrain/water/ephemeralCreekRibbonMesh.ts`, `src/render/terrain/water/ephemeralCreekRenderHelper.ts`, `src/render/terrain/water/riverMeshData.ts`, `scripts/terrain-water-regression.mjs`, `docs/GAME_DESIGN_REFERENCE.md`, `docs/deprecations.md`
+
+Constraints: keep hydrology and road routing unchanged; preserve seeded determinism, permanent water cutout/seam authority, bridge behavior, seasonal wetness, traversable ephemeral gameplay, and mapgen-to-render dependency direction; add no random wiggle.
+
+Notes: Supplied close-up captures are valid visual evidence of the pre-fix seams, straight receiver chords, and road/creek co-location. Static inspection traced the seam to independent transparent quads plus eight-triangle node discs at a `0.018` world lift. The replacement shares internal strip sections, samples four points per receiver edge, lowers lift to `0.003`, and renders before road overlays. An attempted application of the curved centreline to permanent-water contours was rejected after regression measured two T-junctions, one open end, and a large cutout-time increase; permanent rivers retain their passing canonical receiver-capsule contour.
+
+Status: done
+
+TSK-0200: Add anchored tributaries and flow-derived river ribbons
+
+Type: feature
+
+Why: Accumulation-based width alone hid much of the established drainage network and still followed tile-shaped raster support, producing sparse strategic rivers, staircase bends, blocky confluences, and dark trench halos.
+
+Done when:
+- [x] One deterministic memoized receiver-graph pass admits lower-flow branches only when they reach an established trunk or accepted lake, rejects coastal/sink branches, and prunes terminal twigs shorter than three cells without iterative map searches.
+- [x] Channel metadata publishes direct downstream receivers, stable ephemeral/stream/river classes, and monotonic widths; ephemeral nodes remain traversable non-water terrain while classes 2-3 retain authoritative water behavior and orthogonal raster connectors.
+- [x] Permanent rendering uses a four-samples-per-cell tapered receiver ribbon with round joins and unchanged lake union for both water and terrain cutout, while missing metadata retains the legacy contour fallback.
+- [x] Ephemeral branches render separately as terrain-draped, non-cutting ribbons whose wetness blends through winter `1.0`, spring `0.9`, autumn `0.25`, and summer `0.05` without adding foam-heavy permanent-water treatment.
+- [x] The supplied MAP7 fixture retains 809 lake cells and 28 mouth cells while growing permanent rivers from 2,281 to 2,714 cells; focused hydrology, 37-case inland-water, renderer, TypeScript, and queue checks pass.
+- [ ] Refreshed winter strategic, spring close-up, and summer strategic captures of the supplied deterministic map confirm the intended density, smooth joins, readable trunks, and seasonal creek fade.
+
+Touchpoints: `src/systems/terrain/sim/anchoredDrainageChannelNetwork.ts`, `src/systems/terrain/sim/flowAccumulationRiverNetwork.ts`, `src/mapgen/riverChannelHierarchy.ts`, `src/mapgen/stages/RiverStage.ts`, `src/core/state.ts`, `src/mapgen/mapgenTypes.ts`, `src/render/simView.ts`, `src/render/terrain/water/riverRibbonField.ts`, `src/render/terrain/water/ephemeralCreekRibbonMesh.ts`, `src/render/terrain/water/ephemeralCreekRenderHelper.ts`, `src/render/terrain/water/riverRenderDomain.ts`, `src/render/terrain/water/riverMeshData.ts`, `src/render/threeTestRiverWaterHelper.ts`, `scripts/terrain-hydrology-regression.mjs`, `scripts/terrain-water-regression.mjs`, `docs/GAME_DESIGN_REFERENCE.md`, `docs/deprecations.md`
+
+Constraints: preserve seeded determinism, lake authority, existing local beds/surfaces, mouths, typed waterfalls, roads, and mapgen-to-render dependency direction; add no recipe, MAP7, editor, save-schema, random wiggle, or camera-derived hydrology.
+
+Notes: The supplied before/after captures showed that threshold-only hierarchy reduced visible water without creating a more legible dendritic network. Anchored hysteresis now adds 661 ephemeral nodes on the supplied fixture without increasing its 28 raster mouth cells, and direct receiver ribbons replace visual orthogonal connectors. The supported production contour/cutout completes in roughly 3.6-4.2 seconds in local automated runs, with zero measured T-junctions or unexpected degree-one ends. Live localhost cannot be inspected from this VS Code surface, so the requested seasonal captures remain the appearance gate. The full mapgen regression completes but retains 11 pre-existing lake-bed/outlet and detached-river baseline failures documented under TSK-0199; no baseline data was rewritten.
+
+Status: done
+
 TSK-0192: Restore campaign-scale forest succession and canopy maturation
 
 Type: feature
@@ -17,6 +61,45 @@ Touchpoints: `src/systems/terrain/sim/annualVegetationGrowth.ts`, `src/systems/t
 Constraints: keep runtime growth to one O(n) annual event, preserve deterministic saves and map-generation pre-growth, add no per-tree simulation state or risk UI, and do not raise the large-map tree-instance budget.
 
 Notes: The deterministic 31x31 no-fire fixture grows from 125 to 340 forest tiles by year 8 and reaches 718/841 viable forest tiles by year 20; 653 are mature. The paired periodic-burn fixture ends with 25.6% less combustible forest fuel. Supplied year-1/year-14 captures exposed that the vegetation-only fast path reused stale tree instances even though authoritative growth passed; non-fire vegetation sync now forces the instance rebuild while active-fire batching remains lightweight. A refreshed post-fix capture is still required for live visual acceptance.
+
+Status: done
+TSK-0199: Add flow-accumulation river channel hierarchy
+
+Type: feature
+
+Why: Rendering every accepted drainage cell with the same visible width made headwater catchments compete visually with their converged downstream rivers.
+
+Done when:
+- [x] The River stage deterministically publishes stable none, ephemeral, stream, and river classes plus smoothly increasing widths from existing accumulation strength, with zero width outside the authoritative river mask.
+- [x] Diagonal raster connectors inherit their adjoining strength, repeated generation is bit-identical, and existing masks, beds, surfaces, elevation, routing, lake footprints, and gameplay water classification remain unchanged.
+- [x] Inland-water rendering consumes mapgen-owned width through a bounded half-cell coverage field that connects only existing orthogonal river support, preserves full lakes and the existing contour/cutout/seam/mouth/waterfall paths, and adds no noise or decorative routes.
+- [x] TypeScript, focused hierarchy/hydrology, and all 37 inland-water regression cases pass without increasing the supported-map contour/cutout baseline by more than 20%.
+- [ ] Near and strategic captures of the same deterministic map confirm subtle converging headwaters, dominant downstream rivers, and gap-free lakes and mouths.
+
+Touchpoints: `src/mapgen/riverChannelHierarchy.ts`, `src/mapgen/stages/RiverStage.ts`, `src/core/state.ts`, `src/mapgen/mapgenTypes.ts`, `src/render/simView.ts`, `src/render/terrain/water/riverChannelCoverage.ts`, `src/render/terrain/water/riverMeshData.ts`, `src/render/threeTestRiverWaterHelper.ts`, `scripts/terrain-hydrology-regression.mjs`, `scripts/terrain-water-regression.mjs`, `docs/GAME_DESIGN_REFERENCE.md`, `docs/deprecations.md`
+
+Constraints: keep the five hierarchy tunables code-only, preserve seeded determinism and mapgen-to-render dependency direction, add no save/share/editor migration, and do not let rendering derive or mutate hydrology.
+
+Notes: The first supplied before/after strategic capture showed that the initial `0.05` onset and `0.80` exponent compounded the drainage solver's existing smoothstep, reducing blue water to sub-pixel coverage. Capture-driven tuning now uses a `0.001` onset and `0.35` direct power exponent, with a production regression requiring at least `0.75` cells of median visible width. A second capture for `MAP7-35R80P-3102J2S161P1K1G1E0U2S142A1K2G1W0Y1M1A181Q0K1K12161C` showed almost all water still absent; exact-fixture analysis found 2,206 of 2,281 river centres covered before upload but only 40 aligned after the generic texture row flip. Channel coverage now uploads in map-grid row order and regression requires at least 90% centre alignment. A refreshed capture remains required. The supported production water fixture retains zero T-junctions and unexpected open ends and completed contour/cutout work in about 2.61 seconds versus the pre-change 3.15-second baseline. The broader mapgen regression remains red on 16 pre-existing lake/outlet, detached-river, and orthogonal-ratio expectations; this change does not modify those topology fields.
+
+Status: done
+TSK-0198: Restore waterfall FX in adaptive fast water quality
+
+Type: bug
+
+Why: The main 3D game could retain valid waterfall spans and render them in the x-ray diagnostic while normal waterfall foam and mist were effectively disabled after adaptive water quality fell back to the fast profile.
+
+Done when:
+- [x] Fast water quality retains a nonzero waterfall foam and mist contribution while balanced and high quality keep progressively stronger presentation.
+- [x] Waterfall span geometry, hydrology metadata, debug x-ray behavior, and terrain-water dependency direction remain unchanged.
+- [x] TypeScript, focused renderer regression, and queue validation pass.
+- [ ] A refreshed normal-mode capture confirms the waterfall presentation is readable in the main 3D game with x-ray disabled.
+
+Touchpoints: `src/render/threeTestRiverWaterHelper.ts`, `scripts/render-performance-regression.mjs`, `docs/GAME_DESIGN_REFERENCE.md`
+
+Constraints: do not add waterfall geometry, alter hydrology, or restore deprecated packed-instance helpers; keep fast-profile cost bounded to the existing sparse waterfall curtain shader.
+
+Notes: Diagnosed from a player-supplied main-game capture showing the typed waterfall curtain in cyan/magenta x-ray. That evidence proves waterfall detection and geometry exist, but a refreshed normal-mode capture is still required for appearance confirmation because this VS Code surface cannot inspect localhost.
 
 Status: done
 TSK-0191: Preserve refined terrain colour during spring vegetation refresh
