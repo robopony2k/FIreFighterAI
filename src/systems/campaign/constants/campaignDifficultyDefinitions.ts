@@ -8,7 +8,7 @@ export interface CampaignDifficultyDefinition {
   label: string;
   budgetMultiplier: number;
   startingTeamModifier: number;
-  portraitFlameScale: number;
+  portraitFlameFerocity: number;
 }
 
 export const CAMPAIGN_DIFFICULTIES: readonly CampaignDifficultyDefinition[] = [
@@ -17,28 +17,28 @@ export const CAMPAIGN_DIFFICULTIES: readonly CampaignDifficultyDefinition[] = [
     label: "Ember",
     budgetMultiplier: 1.25,
     startingTeamModifier: 2,
-    portraitFlameScale: 0.55
+    portraitFlameFerocity: 0
   },
   {
     id: "blaze",
     label: "Blaze",
     budgetMultiplier: 1,
     startingTeamModifier: 1,
-    portraitFlameScale: 0.8
+    portraitFlameFerocity: 0.5
   },
   {
     id: "firestorm",
     label: "Firestorm",
     budgetMultiplier: 0.85,
     startingTeamModifier: 0,
-    portraitFlameScale: 1.05
+    portraitFlameFerocity: 0.75
   },
   {
     id: "inferno",
     label: "Inferno",
     budgetMultiplier: 0.7,
     startingTeamModifier: -1,
-    portraitFlameScale: 1.3
+    portraitFlameFerocity: 1
   }
 ];
 

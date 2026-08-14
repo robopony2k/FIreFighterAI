@@ -29,7 +29,7 @@ import {
   getCampaignDifficultyDefinition
 } from "../systems/campaign/constants/campaignDifficultyDefinitions.js";
 import { resolveStartingResponseTeamCount } from "../systems/campaign/sim/campaignStartingResources.js";
-import { createTitleFlameCanvasController } from "./title-screen/titleFlameCanvasController.js";
+import { createPortraitFlameCanvasController } from "./character-select/portraitFlameCanvasController.js";
 export type CharacterSelectRefs = {
   characterScreen: HTMLDivElement;
   characterGrid: HTMLDivElement;
@@ -193,7 +193,7 @@ export function initCharacterSelect(
   const cards = new Map<CharacterId, HTMLButtonElement>();
   const genderButtons = new Map<ChiefGender, HTMLButtonElement>();
   const difficultyButtons = new Map<CampaignDifficultyId, HTMLButtonElement>();
-  const titleFlameCanvasController = createTitleFlameCanvasController(ui.characterPreviewFlameCanvas);
+  const portraitFlameCanvasController = createPortraitFlameCanvasController(ui.characterPreviewFlameCanvas);
   const genderControl = document.createElement("div");
   const previewDetails = document.createElement("div");
 
@@ -206,7 +206,7 @@ export function initCharacterSelect(
     });
     const difficulty = getCampaignDifficultyDefinition(selectedDifficultyId);
     ui.characterPreviewPortrait.dataset.difficultyId = difficulty.id;
-    titleFlameCanvasController.setFlameScale(difficulty.portraitFlameScale);
+    portraitFlameCanvasController.setFerocity(difficulty.portraitFlameFerocity);
   };
 
   const selectDifficulty = (difficultyId: CampaignDifficultyId, focus = false): void => {
@@ -722,5 +722,5 @@ export function initCharacterSelect(
     ui.characterScreen.classList.remove("hidden");
   };
 
-  return { open, getCurrentConfig, destroy: titleFlameCanvasController.destroy };
+  return { open, getCurrentConfig, destroy: portraitFlameCanvasController.destroy };
 }

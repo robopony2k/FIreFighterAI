@@ -1350,8 +1350,7 @@ export const showTitleScreen = (deps: TitleScreenDeps): TitleScreenHandle => {
         windCurrent,
         activeFlameGlyphCount,
         flameGlyphCenters,
-        flameGlyphHalfWidths,
-        1
+        flameGlyphHalfWidths
       );
       return;
     }
@@ -1365,8 +1364,7 @@ export const showTitleScreen = (deps: TitleScreenDeps): TitleScreenHandle => {
       glyphCenters: flameGlyphCenters,
       glyphHalfWidths: flameGlyphHalfWidths,
       timeSeconds: flameMotionSeconds * TITLE_FLAME_MOTION_TIME_SCALE,
-      wind: windCurrent,
-      flameScale: 1
+      wind: windCurrent
     });
     fireCtx.putImageData(fireImageData, 0, 0);
   };

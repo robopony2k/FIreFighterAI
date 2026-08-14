@@ -1,5 +1,35 @@
 # Deprecations
 
+## Raw Multi-Glyph Chief Portrait Flame Field
+
+Status: Deprecated as of August 14, 2026.
+
+- Chief portraits no longer display the title shader's raw nearest-glyph bands, which exposed vertical noise-strength boundaries outside the title masks.
+- Portraits now use a dedicated procedural field derived from the same noise/fBm basis, where independent emitters blend with a continuous wall layer instead of selecting a nearest glyph zone.
+- Ember retires its flame emitters in favor of sparks and a faint lower glow; the remaining profiles use positive height envelopes at approximately 50%/75%/100% without exposing a horizontal cutoff pane.
+- The portrait field uses the title renderer's heat-color curve rather than a separate red-heavy palette; the title screen itself remains unchanged.
+- Clipped upward sparks are prewarmed across the frame so every profile reads immediately; Ember keeps a substantial slow, long-lived field, while density and rise speed increase toward Inferno.
+
+Migration guidance:
+
+1. Keep multi-glyph flame bands inside masked title artwork and use the portrait wall/emitter blend for unmasked picture-frame presentation.
+2. Tune portrait height through its positive flame envelope rather than the title shader's fixed row-heat cutoff.
+3. Drive future portrait emitter and spark changes through the shared ferocity dynamics instead of canvas scaling or independent difficulty branches.
+
+## Difficulty-Scaled Chief Portrait Flame Surface
+
+Status: Deprecated as of August 14, 2026.
+
+- Campaign difficulty no longer resizes the rendered flame surface behind the selected Chief.
+- The portrait canvas remains fixed while a portrait-owned dynamics profile changes emitter count, wall blend, lower glow, occupied height, heat, opacity, turbulence, motion rate, gust strength, spark rate, rise speed, and lifetime.
+- The title screen retains its original multi-glyph shader API, masking, and existing appearance.
+
+Migration guidance:
+
+1. Pass normalized portrait ferocity through the title-flame dynamics resolver instead of transforming the canvas or draw rectangle.
+2. Add future presentation tuning to the shared dynamics contract without rescaling UV or noise coordinates.
+3. Keep these values presentation-only unless campaign difficulty scope is intentionally expanded.
+
 ## Fixed Single-Team Campaign Start
 
 Status: Deprecated as of August 13, 2026.
