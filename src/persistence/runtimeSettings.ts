@@ -185,7 +185,7 @@ export const RUNTIME_SETTING_DEFINITIONS: ReadonlyArray<RuntimeSettingDefinition
     section: "General",
     kind: "boolean",
     label: "Pause on Fire",
-    description: "Pause when a fire incident starts, including during Advance to Next Event.",
+    description: "Pause when a detected fire enters slow incident time. When disabled, incident time still engages without pausing.",
     defaultValue: DEFAULT_RUNTIME_SETTINGS.pauseOnFireEvent,
     queryStyle: "0-false"
   },

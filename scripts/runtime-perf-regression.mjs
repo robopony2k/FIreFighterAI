@@ -9,6 +9,12 @@ import { createEffectsState } from "../dist/core/effectsState.js";
 import { markFireBlockActiveByTile } from "../dist/sim/fire/activeBlocks.js";
 import { stepSim } from "../dist/sim/index.js";
 import { applyFireActivityMetrics } from "../dist/systems/fire/sim/fireActivityState.js";
+import { getLatestFireRuntimeTelemetry } from "../dist/systems/fire/controllers/fireRuntimeTelemetry.js";
+import { getLatestAnnualVegetationGrowthTelemetry } from "../dist/systems/terrain/sim/annualVegetationGrowth.js";
+import {
+  createRuntimeTelemetryPresenter,
+  selectDominantContributor
+} from "../dist/ui/performance/runtimeTelemetryPresenter.js";
 import { decideTerrainVisualSync } from "../dist/app/threeTestTerrainSync.js";
 
 const BASE_STEP = 0.25;
@@ -170,7 +176,8 @@ const runScenario = (speed) => {
     maxFrameMs,
     maxSubsteps,
     maxDeferredDays,
-    maxRangedSamples
+    maxRangedSamples,
+    telemetry: getLatestFireRuntimeTelemetry(state)
   };
 };
 
@@ -210,7 +217,8 @@ const runSpringGrowthScenario = () => {
     totalGrowthTilesScanned,
     totalGrowthFuelChanged,
     phase: state.phase,
-    careerDay: state.careerDay
+    careerDay: state.careerDay,
+    telemetry: getLatestAnnualVegetationGrowthTelemetry(state)
   };
 };
 
@@ -245,11 +253,27 @@ for (const result of results) {
       `maxFrameMs=${result.maxFrameMs.toFixed(1)}`,
       `maxSubsteps=${result.maxSubsteps}`,
       `maxDeferredDays=${result.maxDeferredDays.toFixed(2)}`,
-      `maxRanged=${result.maxRangedSamples}`
+      `maxRanged=${result.maxRangedSamples}`,
+      `inactiveSkip=${result.telemetry?.inactiveTilesSkipped ?? 0}/${result.telemetry?.processedTiles ?? 0}`
     ].join(" ")
   );
   assert.ok(result.maxFrameMs < MAX_FRAME_MS, `runtime frame exceeded ${MAX_FRAME_MS}ms at ${result.speed}x`);
   assert.ok(result.maxSubsteps <= MAX_FIRE_SUBSTEPS, `fire substep budget exceeded at ${result.speed}x`);
+  assert.ok(result.telemetry, `fire runtime telemetry missing at ${result.speed}x`);
+  assert.ok(Number.isInteger(result.telemetry.substeps), "fire telemetry substeps should be integral");
+  assert.ok(result.telemetry.activeFiresStart >= 0 && result.telemetry.activeFiresEnd >= 0, "fire telemetry active counts should be non-negative");
+  assert.ok(result.telemetry.ignitionsCommitted <= result.telemetry.ignitionCandidates, "committed ignitions exceeded candidates");
+  assert.ok(result.telemetry.processedTiles >= result.telemetry.burningTilesEvaluated, "burning visits exceeded processed tiles");
+  assert.ok(
+    result.telemetry.inactiveTilesSkipped >= 0 &&
+      result.telemetry.inactiveTilesSkipped <= result.telemetry.processedTiles,
+    "inactive fire skips must remain bounded by visited tiles"
+  );
+  assert.ok(result.telemetry.inactiveTilesSkipped > 0, "sparse fire work blocks should bypass inactive tile work");
+  assert.ok(result.telemetry.maxSubstepMs <= result.telemetry.totalMs + 1, "max fire substep exceeded frame fire time");
+  for (const [phase, duration] of Object.entries(result.telemetry.timingsMs)) {
+    assert.ok(Number.isFinite(duration) && duration >= 0, `fire ${phase} timing should be finite and non-negative`);
+  }
 }
 
 const springResult = runSpringGrowthScenario();
@@ -266,6 +290,7 @@ console.log(
   ].join(" ")
 );
 assert.ok(springResult.totalGrowthTilesScanned > 0, "spring runtime scenario did not execute annual vegetation growth");
+assert.ok(springResult.telemetry, "spring runtime scenario did not retain annual growth telemetry");
 assert.ok(
   springResult.maxFrameMs < MAX_SPRING_FRAME_MS,
   `spring runtime frame exceeded ${MAX_SPRING_FRAME_MS}ms at ${SPRING_SPEED}x`
@@ -295,6 +320,147 @@ assert.equal(
   activeFireVisualDecision.invalidation.fireVisual,
   false,
   "active fire visual pressure alone must not create fireVisual terrain invalidation"
+);
+
+const telemetryPresenter = createRuntimeTelemetryPresenter(45, 60_000);
+const telemetryContext = {
+  nowMs: 100,
+  phase: "growth",
+  year: 2,
+  careerDay: 90,
+  speed: 20,
+  simTimeMode: "strategic",
+  pauseOnFireEvent: true,
+  advancingToEvent: false
+};
+const growthCapture = telemetryPresenter.captureGrowth(springResult.telemetry, telemetryContext);
+assert.match(growthCapture.consoleLine ?? "", /^\[growthprofile\] id=G\d+ /, "growth profile prefix or event id changed");
+const fireTelemetry = results.find((result) => result.telemetry?.activeFiresEnd > 0)?.telemetry ?? results[0].telemetry;
+const fireCapture = telemetryPresenter.captureFire(fireTelemetry, {
+  ...telemetryContext,
+  nowMs: 101,
+  phase: "fire",
+  careerDay: 225
+});
+assert.match(fireCapture.consoleLine ?? "", /^\[fireprofile\] id=F\d+ /, "fire profile prefix or event id changed");
+assert.match(
+  fireCapture.consoleLine ?? "",
+  /kernel=setup:[\d.]+\/wind:[\d.]+\/blocks:[\d.]+\/loop:[\d.]+\/ignite:[\d.]+\/final:[\d.]+ms/,
+  "fire profile should expose named terrain-wind and kernel phase timings"
+);
+const terrainCapture = telemetryPresenter.captureTerrainSync({
+  ...telemetryContext,
+  nowMs: 102,
+  totalMs: 150,
+  sampleBuildMs: 10,
+  terrainSetMs: 135,
+  intent: "vegetation",
+  path: "full",
+  dominantStep: "fullBuild",
+  fullRebuildReason: "fast-update-disabled",
+  terrainTypeRevisionDelta: 0,
+  vegetationRevisionDelta: 1,
+  structureRevisionDelta: 0
+});
+assert.match(terrainCapture.consoleLine ?? "", /\[terrainsyncprofile\].*cause=G\d+/, "terrain profile did not link annual growth");
+const delayedTelemetryPresenter = createRuntimeTelemetryPresenter(45, 60_000);
+delayedTelemetryPresenter.captureGrowth(springResult.telemetry, telemetryContext);
+const delayedTerrainCapture = delayedTelemetryPresenter.captureTerrainSync({
+  ...telemetryContext,
+  nowMs: 30_100,
+  totalMs: 29_100,
+  sampleBuildMs: 10,
+  terrainSetMs: 29_080,
+  intent: "mixed:surfaceColor+vegetation",
+  path: "full",
+  dominantStep: "fullBuild",
+  fullRebuildReason: "full-sample",
+  terrainTypeRevisionDelta: 1,
+  vegetationRevisionDelta: 1,
+  structureRevisionDelta: 0
+});
+assert.match(
+  delayedTerrainCapture.consoleLine ?? "",
+  /\[terrainsyncprofile\].*cause=G\d+/,
+  "a slow terrain sync must retain its initiating growth link through the 60-second episode window"
+);
+const hitchCapture = telemetryPresenter.captureHitch({
+  ...telemetryContext,
+  nowMs: 103,
+  gapMs: 175,
+  mainFrameMs: 160,
+  simMs: 8,
+  renderMs: 2,
+  terrainSyncMs: 140,
+  frameBudgetMs: 16.67,
+  gpuWorldMs: 12,
+  gpuShadowRefreshMs: 12,
+  longTaskMs: 0,
+  longTaskAgeMs: Infinity,
+  longTaskSource: "n/a"
+});
+assert.match(hitchCapture.consoleLine ?? "", /\[hitchprofile\].*dominant=terrain.*links=.*G\d+.*F\d+.*T\d+/, "hitch profile attribution or links changed");
+assert.equal(
+  selectDominantContributor({ sim: 8, render: 2, terrain: 140, unattributed: 25 }),
+  "terrain",
+  "dominant telemetry contributor selection changed"
+);
+const retainedOverlay = telemetryPresenter.formatOverlayLines(104);
+assert.equal(retainedOverlay.length, 5, "runtime telemetry overlay should contain five compact event lines");
+assert.ok(retainedOverlay.every((line) => line.startsWith("Event ")), "runtime telemetry overlay line format changed");
+assert.match(retainedOverlay[1], /loop\/wind [\d.]+ms\/[\d.]+ms/, "fire overlay should lead with loop and wind timings");
+const gpuBoundCapture = telemetryPresenter.captureHitch({
+  ...telemetryContext,
+  nowMs: 500,
+  phase: "fire",
+  gapMs: 52,
+  mainFrameMs: 7,
+  simMs: 0.5,
+  renderMs: 8,
+  terrainSyncMs: 0,
+  frameBudgetMs: 16.67,
+  gpuWorldMs: 23,
+  gpuShadowRefreshMs: 0,
+  longTaskMs: 0,
+  longTaskAgeMs: Infinity,
+  longTaskSource: "n/a"
+});
+assert.match(gpuBoundCapture.consoleLine ?? "", /dominant=gpu-frame-pacing/, "GPU-bound frame gap was not classified");
+const browserTaskCapture = telemetryPresenter.captureHitch({
+  ...telemetryContext,
+  nowMs: 800,
+  gapMs: 74,
+  mainFrameMs: 8,
+  simMs: 0.5,
+  renderMs: 8,
+  terrainSyncMs: 0,
+  frameBudgetMs: 16.67,
+  gpuWorldMs: 12,
+  gpuShadowRefreshMs: 0,
+  longTaskMs: 65,
+  longTaskAgeMs: 20,
+  longTaskSource: "self"
+});
+assert.match(browserTaskCapture.consoleLine ?? "", /dominant=browser-long-task/, "browser long task was not classified");
+const gpuCapture = telemetryPresenter.captureGpu({
+  ...telemetryContext,
+  nowMs: 600,
+  result: {
+    sequence: 1,
+    status: "complete",
+    reason: "complete",
+    completedAtMs: 599,
+    measurements: [
+      { category: "baseline", gpuMs: 24, calls: 1800, triangles: 7_000_000 },
+      { category: "terrain", gpuMs: 10, calls: 400, triangles: 1_000_000 },
+      { category: "fireFx", gpuMs: 20, calls: 1750, triangles: 6_800_000 }
+    ]
+  }
+});
+assert.match(gpuCapture.consoleLine ?? "", /^\[gpuprofile\].*deltaMs=terrain:14\.00\/fireFx:4\.00/, "GPU profile formatting changed");
+assert.ok(
+  telemetryPresenter.formatOverlayLines(60_801).every((line) => line.endsWith("n/a")),
+  "runtime telemetry events should expire after the retention window"
 );
 
 console.log("Runtime perf regression passed.");

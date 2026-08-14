@@ -3,7 +3,6 @@ import type {
   ClimateForecast,
   ClimateTimeline,
   DeployMode,
-  FireAlertIncident,
   FireKnowledgeState,
   FireSimWork,
   FireSettings,
@@ -223,8 +222,6 @@ export interface WorldState {
   lastActiveFires: number;
   fireActivityCount: number;
   fireActivityState: FireActivityState;
-  latestFireAlert: FireAlertIncident | null;
-  nextFireAlertId: number;
   watchTowers: WatchTower[];
   nextWatchTowerId: number;
   waterTowers: WaterTower[];
@@ -407,6 +404,7 @@ const createInitialFireKnowledgeState = (totalTiles: number): FireKnowledgeState
   tileDetectionProgress: new Float32Array(totalTiles),
   tileFirstKnownDay: new Float32Array(totalTiles).fill(-1),
   tileLastSeenDay: new Float32Array(totalTiles).fill(-1),
+  frontReportIdByTile: new Int32Array(totalTiles),
   reports: [],
   latestReportId: null
 });
@@ -620,8 +618,6 @@ export function createInitialState(seed: number, grid: Grid): WorldState {
     lastActiveFires: 0,
     fireActivityCount: 0,
     fireActivityState: "idle",
-    latestFireAlert: null,
-    nextFireAlertId: 1,
     watchTowers: [],
     nextWatchTowerId: 1,
     waterTowers: [],
@@ -1047,7 +1043,8 @@ export function syncTileSoA(state: WorldState): void {
     state.fireKnowledge.tileConfidence.length !== total ||
     state.fireKnowledge.tileDetectionProgress.length !== total ||
     state.fireKnowledge.tileFirstKnownDay.length !== total ||
-    state.fireKnowledge.tileLastSeenDay.length !== total
+    state.fireKnowledge.tileLastSeenDay.length !== total ||
+    state.fireKnowledge.frontReportIdByTile?.length !== total
   ) {
     state.fireKnowledge = createInitialFireKnowledgeState(total);
   }

@@ -396,13 +396,13 @@ export const handleHudClick = (
   const layout = buildHudLayout({ width: ui.viewport.width, height: ui.viewport.height });
   const speedRect = getSpeedButtonRect(layout.topBar);
   if (x >= speedRect.x && x <= speedRect.x + speedRect.width && y >= speedRect.y && y <= speedRect.y + speedRect.height) {
-    if (world.timeSpeedControlMode === "slider") {
+    if (world.simTimeMode === "strategic" && world.timeSpeedControlMode === "slider") {
       const delta = x < speedRect.x + SPEED_BUTTON_SIDE ? -1 : 1;
       const nextValue = stepTimeSpeedSliderValue(world.timeSpeedSliderValue, delta);
       dispatchAction(TIME_CONTROL_ACTIONS.sliderStep.action, { delta: String(delta) });
       addToast(
         ui,
-        `${world.simTimeMode === "incident" ? "Incident" : "Strategic"} time ${formatTimeSpeedValue(nextValue)}.`,
+        `Strategic time ${formatTimeSpeedValue(nextValue)}.`,
         "info",
         2200
       );

@@ -1,7 +1,7 @@
 import type { RNG } from "../core/types.js";
 import type { WorldState } from "../core/state.js";
 import type { EventBus } from "../core/eventBus.js";
-import type { GameEvents, OverlayPayload } from "../core/gameEvents.js";
+import type { GameEvents, GameNotificationPayload, OverlayPayload } from "../core/gameEvents.js";
 import {
   APPROVAL_MIN,
   BASE_BUDGET,
@@ -91,7 +91,12 @@ import type { SettlementRoadAdapter } from "../systems/settlements/types/settlem
 import { stepTownConstructionSchedule } from "../systems/settlements/sim/townConstruction.js";
 import { stepWaterTowers } from "../systems/settlements/sim/waterTowerInfrastructure.js";
 import { applyFireActivityMetrics } from "../systems/fire/sim/fireActivityState.js";
-import { stepFireDetection, stepWatchTowerConstruction, type FireDetectionStepResult } from "../systems/fire/sim/fireDetection.js";
+import {
+  resetFireFrontLineage,
+  stepFireDetection,
+  stepWatchTowerConstruction,
+  type FireDetectionStepResult
+} from "../systems/fire/sim/fireDetection.js";
 import type { FireDetectionReport } from "../core/types.js";
 import { stepEvacuations } from "../systems/evacuation/sim/evacuationRuntime.js";
 import type { EvacuationLossEvent } from "../systems/evacuation/types/evacuationTypes.js";
@@ -104,6 +109,10 @@ import {
   hasDeferredFireRuntimeWork,
   resolveRuntimeWorkBudget
 } from "../systems/fire/controllers/fireRuntimeController.js";
+import {
+  beginFireRuntimeTelemetry,
+  finishFireRuntimeTelemetry
+} from "../systems/fire/controllers/fireRuntimeTelemetry.js";
 export { updatePhaseControls };
 
 const FIRE_HEAT_PADDING = 8;
@@ -164,6 +173,10 @@ const emitOverlay = (payload: OverlayPayload): void => {
 
 const emitGameOver = (payload: GameEvents["game:over"]): void => {
   gameEvents?.emit("game:over", payload);
+};
+
+const emitNotification = (payload: GameNotificationPayload): void => {
+  gameEvents?.emit("notification:publish", payload);
 };
 
 const applyEvacuationLossEvents = (state: WorldState, events: EvacuationLossEvent[]): void => {
@@ -493,25 +506,16 @@ const exitIncidentMode = (state: WorldState): void => {
   state.timeSpeedIndex = state.strategicTimeSpeedIndex;
 };
 
-const recordLatestFireAlertFromReport = (state: WorldState, report: FireDetectionReport): void => {
-  state.latestFireAlert = {
-    id: report.id,
-    tileX: report.tileX,
-    tileY: report.tileY,
-    townId: report.townId,
-    year: state.year,
-    careerDay: state.careerDay,
-    phaseDay: state.phaseDay,
-    confidence: report.confidence,
-    confidenceLabel: report.confidenceLabel,
-    reportState: report.state,
-    source: report.source,
-    message: report.message
-  };
-};
-
-const clearLatestFireAlert = (state: WorldState): void => {
-  state.latestFireAlert = null;
+const emitFireFrontNotification = (report: FireDetectionReport): void => {
+  emitNotification({
+    type: "fire.front.detected",
+    category: "fire",
+    severity: report.state === "confirmed" ? "critical" : "warning",
+    title: "Fire Alert",
+    details: `${report.message} ${report.state === "confirmed" ? "Confirmed" : "Suspected"} fire · Confidence ${report.confidenceLabel}`,
+    dedupeKey: `fire.front.detected:${report.id}`,
+    focusTarget: { kind: "tile", x: report.tileX, y: report.tileY }
+  });
 };
 
 const restoreAdvanceToNextEventTimeControls = (
@@ -538,40 +542,24 @@ const restoreAdvanceToNextEventTimeControls = (
   state.advanceToNextEvent = null;
 };
 
-const pauseForDetectedFireIncident = (
-  state: WorldState,
-  report: FireDetectionReport,
-  previousSpeedIndex: number,
-  previousSliderValue: number
-): void => {
-  recordLatestFireAlertFromReport(state, report);
-  const incident = state.latestFireAlert;
-  const nearestTown = incident && incident.townId >= 0
-    ? state.towns.find((town) => town.id === incident.townId) ?? null
-    : null;
-  restoreAdvanceToNextEventTimeControls(state, previousSpeedIndex, previousSliderValue);
-  enterIncidentMode(state, previousSpeedIndex);
-  state.timeSpeedSliderValue = previousSliderValue;
-  state.paused = true;
-  if (nearestTown) {
-    setStatus(state, `${incident?.message ?? `Fire incident detected near ${nearestTown.name}.`} Simulation paused.`);
-  } else {
-    setStatus(state, `${incident?.message ?? "Fire incident detected."} Simulation paused.`);
-  }
-};
-
-const maybePauseForDetectedFireIncident = (
+const handleDetectedFireIncident = (
   state: WorldState,
   report: FireDetectionReport,
   previousSpeedIndex: number,
   previousSliderValue: number
 ): boolean => {
-  if (!pauseOnFireEvent) {
-    recordLatestFireAlertFromReport(state, report);
-    return false;
-  }
-  pauseForDetectedFireIncident(state, report, previousSpeedIndex, previousSliderValue);
-  return true;
+  const nearestTown = report.townId >= 0
+    ? state.towns.find((town) => town.id === report.townId) ?? null
+    : null;
+  restoreAdvanceToNextEventTimeControls(state, previousSpeedIndex, previousSliderValue);
+  enterIncidentMode(state, previousSpeedIndex);
+  state.timeSpeedSliderValue = previousSliderValue;
+  state.paused = pauseOnFireEvent;
+  const message = report.message || (nearestTown
+    ? `Fire incident detected near ${nearestTown.name}.`
+    : "Fire incident detected.");
+  setStatus(state, pauseOnFireEvent ? `${message} Simulation paused.` : `${message} Incident time engaged.`);
+  return pauseOnFireEvent;
 };
 
 const hasFireActivity = (
@@ -656,7 +644,7 @@ const extinguishSeasonCarryoverFires = (state: WorldState): void => {
   state.lastActiveFires = 0;
   applyFireActivityMetrics(state, 0);
   resetFireBounds(state);
-  clearLatestFireAlert(state);
+  resetFireFrontLineage(state);
 };
 
 const showSeasonOverlay = (state: WorldState): void => {
@@ -723,7 +711,7 @@ export function extinguishAllFires(state: WorldState, effects: EffectsState): vo
   state.lastActiveFires = 0;
   applyFireActivityMetrics(state, 0);
   resetFireBounds(state);
-  clearLatestFireAlert(state);
+  resetFireFrontLineage(state);
 }
 
 const syncWeatherClearedFireScoringSnapshot = (state: WorldState): void => {
@@ -1150,6 +1138,7 @@ export function stepSim(
   state.firePerfIgniteCandidates = 0;
   if (allowFireSim) {
     const firePerfStart = nowMs();
+    beginFireRuntimeTelemetry(state);
     const maxConfiguredSubstep = Math.max(0.05, state.fireSettings.simTickSeconds || 0.05);
     state.fireSimAccumulator = Math.max(0, state.fireSimAccumulator + delta);
     const budget = resolveRuntimeWorkBudget(state, delta);
@@ -1217,21 +1206,33 @@ export function stepSim(
     state.firePerfSimulatedDays = fireDaysSimulated;
     state.firePerfDeferredDays = state.fireSimAccumulator * DAYS_PER_SECOND;
     state.simPerfFireMs = nowMs() - firePerfStart;
+    finishFireRuntimeTelemetry(
+      state,
+      state.simPerfFireMs,
+      state.firePerfSimulatedDays,
+      state.firePerfDeferredDays
+    );
   } else {
     state.fireSimAccumulator = 0;
     stepWind(state, delta, rng);
     applyFireActivityMetrics(state, 0);
   }
   state.lastActiveFires = activeFires;
-  let fireDetection: FireDetectionStepResult = { alertReport: null, activeReportCount: 0 };
+  let fireDetection: FireDetectionStepResult = {
+    alertReport: null,
+    alertReports: [],
+    notificationReports: [],
+    activeReportCount: 0
+  };
   if (hasFireActivity(state)) {
     fireDetection = stepFireDetection(state, dayDelta);
+  } else {
+    resetFireFrontLineage(state);
   }
-  if (!hasFireActivity(state) || fireDetection.activeReportCount <= 0) {
-    clearLatestFireAlert(state);
-  }
-  if (fireDetection.alertReport) {
-    if (maybePauseForDetectedFireIncident(state, fireDetection.alertReport, previousSpeedIndex, previousSliderValue)) {
+  fireDetection.notificationReports.forEach(emitFireFrontNotification);
+  const primaryAlertReport = fireDetection.alertReports[0] ?? fireDetection.alertReport;
+  if (primaryAlertReport) {
+    if (handleDetectedFireIncident(state, primaryAlertReport, previousSpeedIndex, previousSliderValue)) {
       stepParticles(state, effects, delta);
       return;
     }

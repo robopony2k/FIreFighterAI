@@ -37,6 +37,7 @@ export type FireKernelVegetationBurnoutEvent = {
 
 export type FireKernelHooks = {
   profStart: () => number;
+  profElapsed: (start: number) => number;
   profEnd: (name: string, start: number) => void;
   ensureFireBlocks: (state: WorldState) => void;
   buildFireWorkBlocks: (state: WorldState) => void;

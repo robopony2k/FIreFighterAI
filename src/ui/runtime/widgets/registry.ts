@@ -247,6 +247,33 @@ export const RUNTIME_WIDGET_SPECS: readonly RuntimeWidgetSpec[] = [
     actions: SIMULATION_TOGGLE_SPECS.map((toggle) => toggle.action)
   },
   {
+    id: "notificationSettings",
+    title: "Notification Settings",
+    shortTitle: "Notifications",
+    description: "Choose which event types create transient player-facing notifications.",
+    surfaceTitles: {
+      phaseDom: "Notifications",
+      threeDock: "NOTIFICATIONS"
+    },
+    placements: runtimeWidgetPlacements([
+      {
+        surface: "phaseDom",
+        container: PHASE_DOM_SETTINGS_WIDGET_CONTAINER,
+        region: "group",
+        order: 40,
+        visibleByDefault: true
+      },
+      {
+        surface: "threeDock",
+        container: THREE_DOCK_SETTINGS_CARD_CONTAINER,
+        region: "details",
+        order: 40,
+        visibleByDefault: true
+      }
+    ]),
+    actions: []
+  },
+  {
     id: "climate",
     title: "Climate Forecast",
     shortTitle: "Climate",

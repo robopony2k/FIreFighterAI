@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 
 import {
   DEBUG_UNLIMITED_MONEY_BUDGET,
+  INCIDENT_TIME_SPEED_OPTIONS,
   RECRUIT_TRUCK_COST,
   STRATEGIC_TIME_SPEED_MAX,
   TIME_SPEED_OPTIONS
@@ -52,6 +53,24 @@ expect(
   expect(requested, "Advance to Next Event should be available in idle strategic time.");
   expect(state.timeSpeedSliderValue === 20, "Advance to Next Event should force the slider to 20x.");
   expect(getActiveTimeSpeedValue(state) === 20, "Advance to Next Event active speed should be 20x.");
+}
+
+{
+  const state = createInitialState(1702, { cols: 8, rows: 8, totalTiles: 64 });
+  state.timeSpeedControlMode = "slider";
+  state.timeSpeedSliderValue = 20;
+  state.simTimeMode = "incident";
+  state.incidentTimeSpeedIndex = 1;
+  state.timeSpeedIndex = state.incidentTimeSpeedIndex;
+  const incidentSpeed = getActiveTimeSpeedValue(state);
+  console.log(
+    `Incident slider isolation strategicSlider=${state.timeSpeedSliderValue} incidentIndex=${state.incidentTimeSpeedIndex} active=${incidentSpeed}`
+  );
+  expect(
+    incidentSpeed === INCIDENT_TIME_SPEED_OPTIONS[state.incidentTimeSpeedIndex],
+    "Incident mode should resolve from incident presets even when strategic time uses the slider."
+  );
+  expect(state.timeSpeedSliderValue === 20, "Incident speed resolution should preserve the strategic slider value.");
 }
 
 {

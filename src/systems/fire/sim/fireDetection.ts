@@ -17,11 +17,20 @@ import {
   getWatchTowerLevelTuning
 } from "../constants/fireDetectionConfig.js";
 import { getWatchTowerFootprintSampleOffsets } from "../types/watchTowerFootprint.js";
+import {
+  assignComponentLineage,
+  getComponentLineageIds,
+  replaceLineageId,
+  resolveActiveFireFrontComponents,
+  type ActiveFireFrontComponent
+} from "./fireFrontComponents.js";
 
 const clamp = (value: number, min: number, max: number): number => Math.min(max, Math.max(min, value));
 
 export type FireDetectionStepResult = {
   alertReport: FireDetectionReport | null;
+  alertReports: FireDetectionReport[];
+  notificationReports: FireDetectionReport[];
   activeReportCount: number;
 };
 
@@ -31,6 +40,7 @@ const createFireKnowledgeState = (totalTiles: number): FireKnowledgeState => ({
   tileDetectionProgress: new Float32Array(totalTiles),
   tileFirstKnownDay: new Float32Array(totalTiles).fill(-1),
   tileLastSeenDay: new Float32Array(totalTiles).fill(-1),
+  frontReportIdByTile: new Int32Array(totalTiles),
   reports: [],
   latestReportId: null
 });
@@ -43,10 +53,14 @@ export const ensureFireKnowledgeState = (state: WorldState): FireKnowledgeState 
     state.fireKnowledge.tileConfidence.length !== total ||
     state.fireKnowledge.tileDetectionProgress.length !== total ||
     state.fireKnowledge.tileFirstKnownDay.length !== total ||
-    state.fireKnowledge.tileLastSeenDay.length !== total
+    state.fireKnowledge.tileLastSeenDay.length !== total ||
+    state.fireKnowledge.frontReportIdByTile?.length !== total
   ) {
     state.fireKnowledge = createFireKnowledgeState(total);
   }
+  state.fireKnowledge.reports.forEach((report) => {
+    report.mergedIntoReportId ??= null;
+  });
   return state.fireKnowledge;
 };
 
@@ -439,78 +453,61 @@ const getFallbackReveal = (
   return null;
 };
 
-const findReportForTile = (
-  knowledge: FireKnowledgeState,
-  x: number,
-  y: number,
-  careerDay: number
-): FireDetectionReport | null => {
-  let best: FireDetectionReport | null = null;
-  let bestDistSq = Number.POSITIVE_INFINITY;
-  const radius = FIRE_DETECTION_CONFIG.reportMergeRadius;
-  const radiusSq = radius * radius;
-  for (const report of knowledge.reports) {
-    if (careerDay - report.lastUpdatedDay > FIRE_DETECTION_CONFIG.staleReportDays) {
-      continue;
-    }
-    const distSq = (x - report.actualTileX) * (x - report.actualTileX) + (y - report.actualTileY) * (y - report.actualTileY);
-    if (distSq <= radiusSq && distSq < bestDistSq) {
-      best = report;
-      bestDistSq = distSq;
-    }
-  }
-  return best;
+type DetectionObservation = {
+  tileIndex: number;
+  x: number;
+  y: number;
+  confidence: number;
+  source: FireDetectionSource;
+  towerIds: number[];
+  accuracyRadius: number;
+  tileCount: number;
+  intensity: number;
 };
 
-const updateReport = (
+const createReport = (
   state: WorldState,
   knowledge: FireKnowledgeState,
-  input: {
-    tileIndex: number;
-    x: number;
-    y: number;
-    confidence: number;
-    source: FireDetectionSource;
-    towerIds: number[];
-    accuracyRadius: number;
-    tileCount: number;
-  }
+  input: DetectionObservation
 ): FireDetectionReport => {
-  let report = findReportForTile(knowledge, input.x, input.y, state.careerDay);
-  if (!report) {
-    const id = state.nextFireDetectionReportId++;
-    const offset = deterministicOffset(state.seed, id, input.accuracyRadius);
-    report = {
-      id,
-      tileX: clamp(input.x + offset.x, 0, state.grid.cols - 1),
-      tileY: clamp(input.y + offset.y, 0, state.grid.rows - 1),
-      actualTileX: input.x,
-      actualTileY: input.y,
-      townId: getNearestTownIdForTile(state, input.x, input.y),
-      confidence: 0,
-      confidenceLabel: "Low",
-      state: "suspected",
-      source: input.source,
-      firstReportedDay: state.careerDay,
-      lastUpdatedDay: state.careerDay,
-      active: true,
-      alerted: false,
-      towerIds: [],
-      tileCount: 0,
-      message: ""
-    };
-    knowledge.reports.push(report);
-  }
+  const id = state.nextFireDetectionReportId++;
+  const offset = deterministicOffset(state.seed, id, input.accuracyRadius);
+  const report: FireDetectionReport = {
+    id,
+    tileX: clamp(input.x + offset.x, 0, state.grid.cols - 1),
+    tileY: clamp(input.y + offset.y, 0, state.grid.rows - 1),
+    actualTileX: input.x,
+    actualTileY: input.y,
+    townId: getNearestTownIdForTile(state, input.x, input.y),
+    confidence: 0,
+    confidenceLabel: "Low",
+    state: "suspected",
+    source: input.source,
+    firstReportedDay: state.careerDay,
+    lastUpdatedDay: state.careerDay,
+    active: false,
+    alerted: false,
+    mergedIntoReportId: null,
+    towerIds: [],
+    tileCount: 0,
+    message: ""
+  };
+  knowledge.reports.push(report);
+  return report;
+};
+
+const updateReport = (state: WorldState, knowledge: FireKnowledgeState, report: FireDetectionReport, input: DetectionObservation): void => {
+  const previousConfidence = report.confidence;
 
   report.active = true;
   report.lastUpdatedDay = state.careerDay;
   report.actualTileX = input.x;
   report.actualTileY = input.y;
   report.townId = getNearestTownIdForTile(state, input.x, input.y);
-  report.confidence = clamp(Math.max(report.confidence, input.confidence), 0, 1);
+  report.confidence = clamp(Math.max(previousConfidence, input.confidence), 0, 1);
   report.confidenceLabel = getFireDetectionConfidenceLabel(report.confidence);
   report.state = report.confidence >= FIRE_DETECTION_CONFIG.confirmedConfidence ? "confirmed" : "suspected";
-  report.source = report.confidence >= input.confidence ? report.source : input.source;
+  if (input.confidence > previousConfidence) report.source = input.source;
   report.towerIds = Array.from(new Set([...report.towerIds, ...input.towerIds])).sort((a, b) => a - b);
   report.tileCount = Math.max(report.tileCount, input.tileCount);
   const blend = report.confidence;
@@ -518,7 +515,59 @@ const updateReport = (
   report.tileY = Math.round(report.tileY * (1 - blend) + input.y * blend);
   report.message = formatReportMessage(state, report);
   knowledge.latestReportId = report.id;
-  updateTileKnowledge(knowledge, input.tileIndex, report.confidence, state.careerDay);
+};
+
+const resolveCanonicalReport = (knowledge: FireKnowledgeState, reportId: number): FireDetectionReport | null => {
+  let report = knowledge.reports.find((entry) => entry.id === reportId) ?? null;
+  const visited = new Set<number>();
+  while (report?.mergedIntoReportId && !visited.has(report.id)) {
+    visited.add(report.id);
+    report = knowledge.reports.find((entry) => entry.id === report!.mergedIntoReportId) ?? report;
+  }
+  return report;
+};
+
+const mergeReportLineages = (
+  knowledge: FireKnowledgeState,
+  reportIds: readonly number[]
+): FireDetectionReport | null => {
+  const reports = Array.from(
+    new Map(
+      reportIds
+        .map((id) => resolveCanonicalReport(knowledge, id))
+        .filter((report): report is FireDetectionReport => !!report)
+        .map((report) => [report.id, report])
+    ).values()
+  ).sort((left, right) => left.id - right.id);
+  const canonical = reports[0] ?? null;
+  if (!canonical) return null;
+  reports.slice(1).forEach((report) => {
+    canonical.confidence = Math.max(canonical.confidence, report.confidence);
+    canonical.alerted ||= report.alerted;
+    canonical.firstReportedDay = Math.min(canonical.firstReportedDay, report.firstReportedDay);
+    canonical.tileCount = Math.max(canonical.tileCount, report.tileCount);
+    canonical.towerIds = Array.from(new Set([...canonical.towerIds, ...report.towerIds])).sort((a, b) => a - b);
+    report.active = false;
+    report.mergedIntoReportId = canonical.id;
+    replaceLineageId(knowledge.frontReportIdByTile, report.id, canonical.id);
+  });
+  return canonical;
+};
+
+const resolveComponentReport = (
+  state: WorldState,
+  knowledge: FireKnowledgeState,
+  component: ActiveFireFrontComponent,
+  observation: DetectionObservation | null
+): FireDetectionReport | null => {
+  const lineageIds = getComponentLineageIds(
+    component,
+    knowledge.frontReportIdByTile,
+    state.grid.cols,
+    state.grid.rows
+  );
+  const report = mergeReportLineages(knowledge, lineageIds) ?? (observation ? createReport(state, knowledge, observation) : null);
+  if (report) assignComponentLineage(component, knowledge.frontReportIdByTile, report.id);
   return report;
 };
 
@@ -549,22 +598,19 @@ export const stepFireDetection = (state: WorldState, dayDelta: number): FireDete
     report.active = false;
   }
   if (cols <= 0 || rows <= 0 || state.lastActiveFires <= 0) {
-    return { alertReport: null, activeReportCount: 0 };
+    return { alertReport: null, alertReports: [], notificationReports: [], activeReportCount: 0 };
   }
 
-  const minX = state.fireBoundsActive ? clamp(state.fireMinX, 0, cols - 1) : 0;
-  const maxX = state.fireBoundsActive ? clamp(state.fireMaxX, 0, cols - 1) : cols - 1;
-  const minY = state.fireBoundsActive ? clamp(state.fireMinY, 0, rows - 1) : 0;
-  const maxY = state.fireBoundsActive ? clamp(state.fireMaxY, 0, rows - 1) : rows - 1;
-  for (let y = minY; y <= maxY; y += 1) {
-    let idx = y * cols + minX;
-    for (let x = minX; x <= maxX; x += 1, idx += 1) {
+  const components = resolveActiveFireFrontComponents(state, {
+    minFire: FIRE_DETECTION_CONFIG.minActiveFire,
+    minHeat01: FIRE_DETECTION_CONFIG.minHeat01,
+    heatCap
+  });
+  for (const component of components) {
+    for (const idx of component.tileIndices) {
       const fire = state.tileFire[idx] ?? 0;
       const heat01 = (state.tileHeat[idx] ?? 0) / heatCap;
       const intensity = clamp(Math.max(fire, heat01 * 0.6), 0, 1);
-      if (fire <= FIRE_DETECTION_CONFIG.minActiveFire && heat01 <= FIRE_DETECTION_CONFIG.minHeat01) {
-        continue;
-      }
       activeTileCount += 1;
       smokeScore += intensity;
     }
@@ -572,17 +618,17 @@ export const stepFireDetection = (state: WorldState, dayDelta: number): FireDete
   const smokeRevealActive =
     activeTileCount >= FIRE_DETECTION_CONFIG.smokeRevealTileCount ||
     smokeScore >= FIRE_DETECTION_CONFIG.smokeRevealScore;
-  let alertReport: FireDetectionReport | null = null;
+  const alertReports: FireDetectionReport[] = [];
+  const notificationReports: FireDetectionReport[] = [];
 
-  for (let y = minY; y <= maxY; y += 1) {
-    let idx = y * cols + minX;
-    for (let x = minX; x <= maxX; x += 1, idx += 1) {
+  for (const component of components) {
+    let observation: DetectionObservation | null = null;
+    for (const idx of component.tileIndices) {
+      const x = idx % cols;
+      const y = Math.floor(idx / cols);
       const fire = state.tileFire[idx] ?? 0;
       const heat01 = (state.tileHeat[idx] ?? 0) / heatCap;
       const intensity = clamp(Math.max(fire, heat01 * 0.6), 0, 1);
-      if (fire <= FIRE_DETECTION_CONFIG.minActiveFire && heat01 <= FIRE_DETECTION_CONFIG.minHeat01) {
-        continue;
-      }
 
       let towerConfidence = 0;
       let towerAccuracy = Number.POSITIVE_INFINITY;
@@ -619,7 +665,8 @@ export const stepFireDetection = (state: WorldState, dayDelta: number): FireDete
         continue;
       }
       const source: FireDetectionSource = towerConfidence >= (fallback?.confidence ?? 0) ? "watchTower" : fallback!.source;
-      const report = updateReport(state, knowledge, {
+      updateTileKnowledge(knowledge, idx, confidence, state.careerDay);
+      const candidate: DetectionObservation = {
         tileIndex: idx,
         x,
         y,
@@ -627,20 +674,47 @@ export const stepFireDetection = (state: WorldState, dayDelta: number): FireDete
         source,
         towerIds,
         accuracyRadius: Number.isFinite(towerAccuracy) ? towerAccuracy : FIRE_DETECTION_CONFIG.reportMergeRadius,
-        tileCount: activeTileCount
-      });
-      if (!report.alerted && report.confidence >= FIRE_DETECTION_CONFIG.alertConfidence) {
-        report.alerted = true;
-        alertReport = report;
+        tileCount: component.tileCount,
+        intensity
+      };
+      if (
+        !observation ||
+        candidate.confidence > observation.confidence ||
+        (candidate.confidence === observation.confidence && candidate.intensity > observation.intensity) ||
+        (candidate.confidence === observation.confidence &&
+          candidate.intensity === observation.intensity &&
+          candidate.tileIndex < observation.tileIndex)
+      ) {
+        observation = candidate;
       }
+    }
+    const report = resolveComponentReport(state, knowledge, component, observation);
+    if (!report || !observation) continue;
+    const previousState = report.state;
+    updateReport(state, knowledge, report, observation);
+    if (!report.alerted && report.confidence >= FIRE_DETECTION_CONFIG.alertConfidence) {
+      report.alerted = true;
+      alertReports.push(report);
+      notificationReports.push(report);
+    } else if (report.alerted && report.state !== previousState) {
+      notificationReports.push(report);
     }
   }
 
-  const activeReportCount = knowledge.reports.filter((report) => report.active).length;
+  const activeReportCount = knowledge.reports.filter((report) => report.active && report.mergedIntoReportId === null).length;
   if (activeReportCount <= 0) {
     knowledge.latestReportId = null;
   }
-  return { alertReport, activeReportCount };
+  return { alertReport: alertReports[0] ?? null, alertReports, notificationReports, activeReportCount };
+};
+
+export const resetFireFrontLineage = (state: WorldState): void => {
+  const knowledge = ensureFireKnowledgeState(state);
+  knowledge.frontReportIdByTile.fill(0);
+  knowledge.latestReportId = null;
+  knowledge.reports.forEach((report) => {
+    report.active = false;
+  });
 };
 
 export const getLatestFireDetectionReport = (state: WorldState): FireDetectionReport | null => {

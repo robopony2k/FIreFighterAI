@@ -96,22 +96,38 @@ export function unassignRosterCrew(state: WorldState, firefighterId: number): vo
   }
 }
 
-export function seedStartingRoster(state: WorldState, rng: RNG): void {
+const STARTING_RESPONSE_TEAM_CREW_COUNT = 2;
+
+export function seedStartingRoster(state: WorldState, rng: RNG, responseTeamCount: number): void {
   if (state.roster.length > 0) {
     return;
   }
-  recruitUnit(state, rng, "firefighter", true);
-  recruitUnit(state, rng, "firefighter", true);
-  recruitUnit(state, rng, "truck", true);
-  const truck = state.roster.find((unit) => unit.kind === "truck") ?? null;
-  if (!truck) {
-    return;
+  const normalizedTeamCount = Math.max(
+    1,
+    Number.isFinite(responseTeamCount) ? Math.floor(responseTeamCount) : 1
+  );
+  for (let teamIndex = 0; teamIndex < normalizedTeamCount; teamIndex += 1) {
+    for (let crewIndex = 0; crewIndex < STARTING_RESPONSE_TEAM_CREW_COUNT; crewIndex += 1) {
+      recruitUnit(state, rng, "firefighter", true);
+    }
+    recruitUnit(state, rng, "truck", true);
   }
-  truck.crewIds = [];
-  const starters = state.roster.filter((unit) => unit.kind === "firefighter");
-  starters.slice(0, TRUCK_CAPACITY).forEach((firefighter) => {
-    firefighter.assignedTruckId = truck.id;
-    truck.crewIds.push(firefighter.id);
+  const trucks = state.roster.filter((unit) => unit.kind === "truck");
+  const firefighters = state.roster.filter((unit) => unit.kind === "firefighter");
+  trucks.forEach((truck) => {
+    truck.crewIds = [];
+  });
+  firefighters.forEach((firefighter) => {
+    firefighter.assignedTruckId = null;
+  });
+  trucks.forEach((truck, teamIndex) => {
+    const crewStart = teamIndex * STARTING_RESPONSE_TEAM_CREW_COUNT;
+    firefighters
+      .slice(crewStart, crewStart + STARTING_RESPONSE_TEAM_CREW_COUNT)
+      .forEach((firefighter) => {
+        firefighter.assignedTruckId = truck.id;
+        truck.crewIds.push(firefighter.id);
+      });
   });
   ensureDefaultSquads(state);
 }

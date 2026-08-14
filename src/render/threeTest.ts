@@ -42,7 +42,10 @@ import {
   partitionTerrainInstances
 } from "../systems/terrain/rendering/terrainRenderChunks.js";
 import { buildTreeImpostorAtlas } from "../systems/terrain/rendering/vegetation/treeImpostorAtlas.js";
-import { isSharedTreeImpostorTexture } from "../systems/terrain/rendering/vegetation/treeRenderResourceDisposal.js";
+import {
+  disposeTerrainVegetationRoot,
+  isSharedTreeImpostorTexture
+} from "../systems/terrain/rendering/vegetation/treeRenderResourceDisposal.js";
 import type {
   TreeImpostorAtlas,
   TreeLodController,
@@ -114,6 +117,7 @@ import {
   prepareTerrainRenderVisualSurface,
   refreshTerrainScorchedGroundMaterial,
   refreshTerrainRoadVisuals,
+  TERRAIN_STRUCTURE_ROOT_NAME,
   ROAD_SURFACE_WIDTH,
   ROAD_TEX_SCALE,
   setRoadOverlayMaxSize,
@@ -134,6 +138,11 @@ import {
   WATERFALL_VERTICALITY_MIN,
   WATERFALL_DEBUG_FLAG_WATER
 } from "./threeTestTerrain.js";
+import {
+  createGpuCategoryCaptureController,
+  type GpuCategoryCaptureSnapshot,
+  type GpuCaptureCategory
+} from "./diagnostics/gpuCategoryCapture.js";
 import { setTerrainRoadHighContrast } from "./terrain/roads/roadHighContrast.js";
 import { sampleMountainTerrainMaskAtTile } from "./terrain/textures/mountainTerrainVisuals.js";
 import { createThreeTestFireFx, type FireFxDebugSnapshot } from "./threeTestFireFx.js";
@@ -175,6 +184,7 @@ import {
 } from "../ui/runtime/widgets/registry.js";
 import { getThreeDockCardSpec } from "../ui/runtime/widgets/threeDock.js";
 import type { AudioChannelId, RuntimeWidgetId } from "../ui/runtime/widgets/types.js";
+import { createNotificationSettingsView } from "../ui/notifications/notificationSettingsView.js";
 import type { UiAudioController } from "../audio/uiAudio.js";
 import { getRuntimeSettings, setRuntimeSetting, subscribeRuntimeSettings } from "../persistence/runtimeSettings.js";
 import {
@@ -211,9 +221,12 @@ export type ThreeTestPerfSnapshot = {
   hudMs: number;
   uiRenderMs: number;
   gpuWorldMs: number | null;
+  gpuWorldRecordedAtMs: number;
   gpuShadowRefreshMs: number | null;
+  gpuShadowRefreshRecordedAtMs: number;
   gpuPostMs: number | null;
   gpuUiMs: number | null;
+  gpuCategoryCapture: GpuCategoryCaptureSnapshot;
   activeShadowLights: number;
   shadowRefreshCount: number;
   terrainChunkCount: number;
@@ -284,6 +297,8 @@ export type ThreeTestPerfSnapshot = {
   terrainSetFullDisposeLastMs: number;
   terrainSetFullBuildMs: number;
   terrainSetFullBuildLastMs: number;
+  terrainSetVegetationMs: number;
+  terrainSetVegetationLastMs: number;
   terrainSetWaterMs: number;
   terrainSetWaterLastMs: number;
   terrainBuildTelemetry: TerrainBuildTelemetry | null;
@@ -375,6 +390,9 @@ export type ThreeTestController = {
   getRoadHighContrastEnabled: () => boolean;
   setTerrainWaterDebugControls: (controls: Partial<TerrainWaterDebugControls>) => void;
   getTerrainWaterDebugControls: () => TerrainWaterDebugControls;
+  startGpuCategoryCapture: () => boolean;
+  cancelGpuCategoryCapture: () => void;
+  isGpuCategoryCaptureActive: () => boolean;
   getPerfSnapshot: () => ThreeTestPerfSnapshot;
 };
 
@@ -1191,16 +1209,6 @@ export const createThreeTest = (
     deployTruckButton: HTMLButtonElement;
     deployFirefighterButton: HTMLButtonElement;
   };
-  type FireAlertCardElements = {
-    root: HTMLDivElement;
-    summary: HTMLDivElement;
-    details: HTMLDivElement;
-    zoomButton: HTMLButtonElement;
-    openTownButton: HTMLButtonElement;
-    deployTruckButton: HTMLButtonElement;
-    deployCrewButton: HTMLButtonElement;
-    dismissButton: HTMLButtonElement;
-  };
   type SquadMarkerLayoutEntry = {
     commandUnitId: number;
     anchorScreenX: number;
@@ -1232,10 +1240,6 @@ export const createThreeTest = (
   let hoverPeekTownId: number | null = null;
   let hoverDelayHandle: number | null = null;
   let lastTownMetricsUpdateAt = -Infinity;
-  let visibleFireAlertId: number | null = null;
-  let dismissedFireAlertId: number | null = null;
-  let activeFireAlertTownId: number | null = null;
-  let activeFireAlertTile: { x: number; y: number } | null = null;
 
   const createTownCardAction = (
     iconText: string,
@@ -1365,51 +1369,6 @@ export const createThreeTest = (
   const townCardElements = createTownCardElements(false);
   const facilityPanelElements: FacilityPanelElements = createFacilityPanel();
   townOverlayRoot.appendChild(facilityPanelElements.root);
-  const fireAlertCardRoot = document.createElement("div");
-  fireAlertCardRoot.className = "three-test-town-card three-test-fire-alert-card hidden";
-  const fireAlertHeader = document.createElement("div");
-  fireAlertHeader.className = "three-test-town-card-header";
-  const fireAlertTitle = document.createElement("div");
-  fireAlertTitle.className = "three-test-town-nameplate-main";
-  fireAlertTitle.innerHTML = `<span class="three-test-town-dot is-critical"></span><span class="three-test-town-name">Fire Alert</span>`;
-  fireAlertHeader.appendChild(fireAlertTitle);
-  const fireAlertSummary = document.createElement("div");
-  fireAlertSummary.className = "three-test-town-card-metrics three-test-town-summary-line";
-  const fireAlertDetails = document.createElement("div");
-  fireAlertDetails.className = "three-test-fire-alert-details";
-  const fireAlertActions = document.createElement("div");
-  fireAlertActions.className = "three-test-town-card-actions";
-  const createFireAlertAction = (label: string): HTMLButtonElement => {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = "three-test-town-card-action";
-    button.textContent = label;
-    return button;
-  };
-  const fireAlertZoomButton = createFireAlertAction("Zoom to Fire");
-  const fireAlertOpenTownButton = createFireAlertAction("Open Town");
-  const fireAlertDeployTruckButton = createFireAlertAction("Dispatch Squad");
-  const fireAlertDeployCrewButton = createFireAlertAction("Open HQ");
-  const fireAlertDismissButton = createFireAlertAction("Dismiss");
-  fireAlertActions.append(
-    fireAlertZoomButton,
-    fireAlertOpenTownButton,
-    fireAlertDeployTruckButton,
-    fireAlertDeployCrewButton,
-    fireAlertDismissButton
-  );
-  fireAlertCardRoot.append(fireAlertHeader, fireAlertSummary, fireAlertDetails, fireAlertActions);
-  townOverlayRoot.appendChild(fireAlertCardRoot);
-  const fireAlertCardElements: FireAlertCardElements = {
-    root: fireAlertCardRoot,
-    summary: fireAlertSummary,
-    details: fireAlertDetails,
-    zoomButton: fireAlertZoomButton,
-    openTownButton: fireAlertOpenTownButton,
-    deployTruckButton: fireAlertDeployTruckButton,
-    deployCrewButton: fireAlertDeployCrewButton,
-    dismissButton: fireAlertDismissButton
-  };
 
   const baseLabelRoot = document.createElement("div");
   baseLabelRoot.className = "three-test-town-nameplate three-test-base-nameplate";
@@ -1929,16 +1888,28 @@ export const createThreeTest = (
   settingsEventsTab.type = "button";
   settingsEventsTab.className = "three-test-settings-tab";
   settingsEventsTab.textContent = "Events";
+  const settingsNotificationsTab = document.createElement("button");
+  settingsNotificationsTab.type = "button";
+  settingsNotificationsTab.className = "three-test-settings-tab";
+  settingsNotificationsTab.textContent = "Notifications";
   const settingsMainPanel = document.createElement("div");
   settingsMainPanel.className = "three-test-settings-tab-panel";
   const settingsEventsPanel = document.createElement("div");
   settingsEventsPanel.className = "three-test-settings-tab-panel hidden";
-  const setActiveSettingsTab = (tab: "main" | "events"): void => {
+  const settingsNotificationsPanel = document.createElement("div");
+  settingsNotificationsPanel.className = "three-test-settings-tab-panel hidden";
+  const notificationSettingsView = createNotificationSettingsView();
+  settingsNotificationsPanel.appendChild(notificationSettingsView.element);
+  const setActiveSettingsTab = (tab: "main" | "events" | "notifications"): void => {
     const mainActive = tab === "main";
+    const eventsActive = tab === "events";
+    const notificationsActive = tab === "notifications";
     settingsMainTab.classList.toggle("is-active", mainActive);
-    settingsEventsTab.classList.toggle("is-active", !mainActive);
+    settingsEventsTab.classList.toggle("is-active", eventsActive);
+    settingsNotificationsTab.classList.toggle("is-active", notificationsActive);
     settingsMainPanel.classList.toggle("hidden", !mainActive);
-    settingsEventsPanel.classList.toggle("hidden", mainActive);
+    settingsEventsPanel.classList.toggle("hidden", !eventsActive);
+    settingsNotificationsPanel.classList.toggle("hidden", !notificationsActive);
   };
   settingsMainTab.addEventListener("click", (event) => {
     event.preventDefault();
@@ -1950,10 +1921,15 @@ export const createThreeTest = (
     event.stopPropagation();
     setActiveSettingsTab("events");
   });
-  settingsTabBar.append(settingsMainTab, settingsEventsTab);
+  settingsNotificationsTab.addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    setActiveSettingsTab("notifications");
+  });
+  settingsTabBar.append(settingsMainTab, settingsEventsTab, settingsNotificationsTab);
   settingsMainPanel.append(timeControls, timeAudioSection);
   settingsEventsPanel.appendChild(timeTestingSection);
-  settingsTabs.append(settingsTabBar, settingsMainPanel, settingsEventsPanel);
+  settingsTabs.append(settingsTabBar, settingsMainPanel, settingsEventsPanel, settingsNotificationsPanel);
   const mutedAudioIcon = "\u{1F507}";
   const unmutedAudioIcon = "\u{1F50A}";
   const applyRuntimeToggleState = (): void => {
@@ -2919,7 +2895,7 @@ export const createThreeTest = (
     const timeModeLabel = world.simTimeMode === "incident" ? "Incident" : "Strategic";
     const advanceToNextEventActive = !!world.advanceToNextEvent;
     const canAdvanceToNextEvent = isAdvanceToNextEventAvailable(world);
-    const usingSlider = world.timeSpeedControlMode === "slider";
+    const usingSlider = world.simTimeMode === "strategic" && world.timeSpeedControlMode === "slider";
     const effectivelyPaused = isSimulationEffectivelyPaused(world);
     const timeSummaryKey = `${effectivelyPaused}|${timeModeLabel}|${speedLabel}|${world.phase}|${advanceToNextEventActive}|${canAdvanceToNextEvent}`;
     if (timeSummaryKey !== lastTimeSummaryKey) {
@@ -4086,52 +4062,6 @@ export const createThreeTest = (
   const dispatchBaseAction = (action: string): void => {
     dispatchPhaseUiCommand({ type: "action", action });
   };
-  fireAlertCardElements.root.addEventListener("pointerdown", (event) => {
-    event.stopPropagation();
-  });
-  fireAlertCardElements.zoomButton.addEventListener("click", (event) => {
-    event.preventDefault();
-    event.stopPropagation();
-    playUiCue("click");
-    if (!activeFireAlertTile) {
-      return;
-    }
-    inputState.lastInteractionTime = performance.now();
-    focusCameraOnTile(activeFireAlertTile.x, activeFireAlertTile.y);
-  });
-  fireAlertCardElements.openTownButton.addEventListener("click", (event) => {
-    event.preventDefault();
-    event.stopPropagation();
-    playUiCue("click");
-    if (activeFireAlertTownId === null) {
-      return;
-    }
-    inputState.lastInteractionTime = performance.now();
-    openTownCard(activeFireAlertTownId);
-  });
-  fireAlertCardElements.deployTruckButton.addEventListener("click", (event) => {
-    event.preventDefault();
-    event.stopPropagation();
-    playUiCue("confirm");
-    dispatchBaseAction("squad-dispatch");
-  });
-  fireAlertCardElements.deployCrewButton.addEventListener("click", (event) => {
-    event.preventDefault();
-    event.stopPropagation();
-    playUiCue("confirm");
-    openHeadquartersFacility();
-  });
-  fireAlertCardElements.dismissButton.addEventListener("click", (event) => {
-    event.preventDefault();
-    event.stopPropagation();
-    playUiCue("click");
-    if (visibleFireAlertId !== null) {
-      dismissedFireAlertId = visibleFireAlertId;
-    }
-    activeFireAlertTownId = null;
-    activeFireAlertTile = null;
-    fireAlertCardElements.root.classList.add("hidden");
-  });
 
   const updateBaseCardState = (): void => {
     if (!baseAnchor) {
@@ -4574,43 +4504,6 @@ export const createThreeTest = (
       }
     }
     return bestTile;
-  };
-
-  const updateFireAlertCard = (): void => {
-    const alert = world.latestFireAlert;
-    if (!alert) {
-      visibleFireAlertId = null;
-      activeFireAlertTownId = null;
-      activeFireAlertTile = null;
-      fireAlertCardElements.root.classList.add("hidden");
-      return;
-    }
-    if (dismissedFireAlertId === alert.id) {
-      activeFireAlertTownId = null;
-      activeFireAlertTile = null;
-      fireAlertCardElements.root.classList.add("hidden");
-      return;
-    }
-    visibleFireAlertId = alert.id;
-    activeFireAlertTile = { x: alert.tileX, y: alert.tileY };
-    activeFireAlertTownId = alert.townId >= 0 ? alert.townId : null;
-    const town = activeFireAlertTownId !== null ? getTownById(activeFireAlertTownId) : null;
-    if (town) {
-      const snapshot = readTownUiSnapshot(town);
-      fireAlertCardElements.summary.textContent =
-        alert.message ?? `${town.name} | Tile ${alert.tileX},${alert.tileY}`;
-      fireAlertCardElements.details.textContent =
-        `${alert.reportState === "confirmed" ? "Confirmed" : "Suspected"} fire | Confidence ${alert.confidenceLabel ?? "Medium"} | Houses ${snapshot.houses} | Alert ${snapshot.postureLabel}`;
-      fireAlertCardElements.openTownButton.disabled = false;
-      fireAlertCardElements.openTownButton.title = `Open ${town.name} card`;
-    } else {
-      fireAlertCardElements.summary.textContent = alert.message ?? `Incident Tile ${alert.tileX},${alert.tileY}`;
-      fireAlertCardElements.details.textContent =
-        `${alert.reportState === "confirmed" ? "Confirmed" : "Suspected"} fire | Confidence ${alert.confidenceLabel ?? "Medium"}`;
-      fireAlertCardElements.openTownButton.disabled = true;
-      fireAlertCardElements.openTownButton.title = "No nearby town for this incident.";
-    }
-    fireAlertCardElements.root.classList.remove("hidden");
   };
 
   const hideHoverDebugBillboard = (): void => {
@@ -5310,9 +5203,6 @@ export const createThreeTest = (
     if (dockOverlayRoot.contains(target) || unitTrayRoot.contains(target) || squadMarkerOverlayRoot.contains(target)) {
       return;
     }
-    if (fireAlertCardElements.root.contains(target)) {
-      return;
-    }
     if (facilityPanelElements.root.contains(target)) {
       return;
     }
@@ -5384,11 +5274,6 @@ export const createThreeTest = (
       baseAnchor = null;
       hideHoverDebugBillboard();
       townCardElements.root.classList.add("hidden");
-      fireAlertCardElements.root.classList.add("hidden");
-      visibleFireAlertId = null;
-      dismissedFireAlertId = null;
-      activeFireAlertTownId = null;
-      activeFireAlertTile = null;
       pinnedTownCards.forEach((card) => card.root.classList.add("hidden"));
       baseCardElements.root.classList.add("hidden");
       baseCardElements.connector.style.display = "none";
@@ -5406,7 +5291,6 @@ export const createThreeTest = (
     ensureTownLabels();
     if (time - lastTownMetricsUpdateAt >= TOWN_LABEL_UPDATE_INTERVAL_MS) {
       updateTownMetrics();
-      updateFireAlertCard();
       lastTownMetricsUpdateAt = time;
     }
     const cols = Math.max(1, world.grid.cols);
@@ -6098,6 +5982,7 @@ export const createThreeTest = (
   const handleContextLost = (event: Event): void => {
     event.preventDefault();
     contextLosses += 1;
+    gpuCategoryCapture.cancel("context-lost");
     console.warn("[threeTest] WebGL context lost.");
   };
   const handleContextRestored = (): void => {
@@ -6109,6 +5994,7 @@ export const createThreeTest = (
   canvas.addEventListener("webglcontextrestored", handleContextRestored as EventListener, false);
 
   let terrainMesh: THREE.Mesh | null = null;
+  let terrainStructureRoot: THREE.Group | null = null;
   let terrainRoadOverlayMesh: THREE.Mesh | null = null;
   let roadHighContrastEnabled = false;
   const pendingTerrainTextureDisposals: PendingTerrainTextureDisposal[] = [];
@@ -6207,11 +6093,102 @@ export const createThreeTest = (
     transparent: true,
     opacity: 0.58
   });
+  let gpuCaptureRestoreState: {
+    terrainMaterialVisible: boolean[];
+    vegetationVisible: boolean;
+    terrainStructuresVisible: boolean;
+    dynamicStructuresVisible: boolean;
+    fireFxVisible: boolean;
+    terrainWaterControls: TerrainWaterDebugControls;
+    oceanVisible: boolean;
+    shadowsEnabled: boolean;
+    controlsEnabled: boolean;
+  } | null = null;
+  const setTerrainMaterialVisible = (visible: boolean): void => {
+    if (!terrainMesh) return;
+    const materials = Array.isArray(terrainMesh.material) ? terrainMesh.material : [terrainMesh.material];
+    materials.forEach((material) => {
+      material.visible = visible;
+    });
+  };
+  const restoreGpuCaptureVisibility = (): void => {
+    const saved = gpuCaptureRestoreState;
+    if (!saved) return;
+    if (terrainMesh) {
+      const materials = Array.isArray(terrainMesh.material) ? terrainMesh.material : [terrainMesh.material];
+      materials.forEach((material, index) => {
+        material.visible = saved.terrainMaterialVisible[index] ?? true;
+      });
+    }
+    if (terrainVegetationRoot) terrainVegetationRoot.visible = saved.vegetationVisible;
+    if (terrainStructureRoot) terrainStructureRoot.visible = saved.terrainStructuresVisible;
+    if (structureOverlayGroup) structureOverlayGroup.visible = saved.dynamicStructuresVisible;
+    fireFx.setVisible(saved.fireFxVisible);
+    waterSystem.setDebugControls(saved.terrainWaterControls);
+    waterSystem.setOceanDebugControls({ showOcean: saved.oceanVisible });
+    renderer.shadowMap.enabled = saved.shadowsEnabled;
+    controls.enabled = saved.controlsEnabled;
+    gpuCaptureRestoreState = null;
+  };
+  const applyGpuCaptureCategory = (category: GpuCaptureCategory | null): void => {
+    if (category === null) {
+      restoreGpuCaptureVisibility();
+      return;
+    }
+    if (!gpuCaptureRestoreState) {
+      gpuCaptureRestoreState = {
+        terrainMaterialVisible: terrainMesh
+          ? (Array.isArray(terrainMesh.material) ? terrainMesh.material : [terrainMesh.material])
+              .map((material) => material.visible)
+          : [true],
+        vegetationVisible: terrainVegetationRoot?.visible ?? true,
+        terrainStructuresVisible: terrainStructureRoot?.visible ?? true,
+        dynamicStructuresVisible: structureOverlayGroup?.visible ?? true,
+        fireFxVisible: fireFx.getVisible(),
+        terrainWaterControls: waterSystem.getDebugControls(),
+        oceanVisible: waterSystem.getOceanDebugControls().showOcean,
+        shadowsEnabled: renderer.shadowMap.enabled,
+        controlsEnabled: controls.enabled
+      };
+    }
+    const saved = gpuCaptureRestoreState;
+    if (terrainMesh) {
+      const materials = Array.isArray(terrainMesh.material) ? terrainMesh.material : [terrainMesh.material];
+      materials.forEach((material, index) => {
+        material.visible = saved.terrainMaterialVisible[index] ?? true;
+      });
+    }
+    if (terrainVegetationRoot) terrainVegetationRoot.visible = saved.vegetationVisible;
+    if (terrainStructureRoot) terrainStructureRoot.visible = saved.terrainStructuresVisible;
+    if (structureOverlayGroup) structureOverlayGroup.visible = saved.dynamicStructuresVisible;
+    fireFx.setVisible(saved.fireFxVisible);
+    waterSystem.setDebugControls(saved.terrainWaterControls);
+    waterSystem.setOceanDebugControls({ showOcean: saved.oceanVisible });
+    renderer.shadowMap.enabled = saved.shadowsEnabled;
+    controls.enabled = false;
+    if (category === "terrain") setTerrainMaterialVisible(false);
+    if (category === "vegetation" && terrainVegetationRoot) terrainVegetationRoot.visible = false;
+    if (category === "structures") {
+      if (terrainStructureRoot) terrainStructureRoot.visible = false;
+      if (structureOverlayGroup) structureOverlayGroup.visible = false;
+    }
+    if (category === "fireFx") fireFx.setVisible(false);
+    if (category === "water") {
+      waterSystem.setDebugControls({ showRiver: false, showWaterfalls: false });
+      waterSystem.setOceanDebugControls({ showOcean: false });
+    }
+    if (category === "shadows") renderer.shadowMap.enabled = false;
+    lastStaticFrameKey = "";
+  };
+  const gpuCategoryCapture = createGpuCategoryCaptureController({
+    applyCategory: applyGpuCaptureCategory
+  });
   const watchTowerStructurePrototypes = new Map<number, THREE.Group>();
   let waterTowerStructurePrototype: THREE.Group | null = null;
   let structureOverlayBuildSerial = 0;
   let treeBurnController: TreeBurnController | null = null;
   let treeLodController: TreeLodController | null = null;
+  let terrainVegetationRoot: THREE.Group | null = null;
   let cameraLockedToTerrain = false;
   const applyTerrainCameraConstraints = (): boolean => {
     if (!lastTerrainSurface) {
@@ -6659,9 +6636,12 @@ export const createThreeTest = (
     hudMs: 0,
     uiRenderMs: 0,
     gpuWorldMs: null,
+    gpuWorldRecordedAtMs: 0,
     gpuShadowRefreshMs: null,
+    gpuShadowRefreshRecordedAtMs: 0,
     gpuPostMs: null,
     gpuUiMs: null,
+    gpuCategoryCapture: gpuCategoryCapture.getSnapshot(),
     activeShadowLights: activeShadowLightCount,
     shadowRefreshCount: 0,
     terrainChunkCount: 0,
@@ -6732,6 +6712,8 @@ export const createThreeTest = (
     terrainSetFullDisposeLastMs: 0,
     terrainSetFullBuildMs: 0,
     terrainSetFullBuildLastMs: 0,
+    terrainSetVegetationMs: 0,
+    terrainSetVegetationLastMs: 0,
     terrainSetWaterMs: 0,
     terrainSetWaterLastMs: 0,
     terrainBuildTelemetry: null,
@@ -6780,6 +6762,7 @@ export const createThreeTest = (
     | "structure"
     | "fullDispose"
     | "fullBuild"
+    | "vegetation"
     | "water";
   const terrainSetTimingFields: Record<TerrainSetTimingKey, { avg: keyof ThreeTestPerfSnapshot; last: keyof ThreeTestPerfSnapshot }> = {
     prepare: { avg: "terrainSetPrepareMs", last: "terrainSetPrepareLastMs" },
@@ -6793,6 +6776,7 @@ export const createThreeTest = (
     structure: { avg: "terrainSetStructureMs", last: "terrainSetStructureLastMs" },
     fullDispose: { avg: "terrainSetFullDisposeMs", last: "terrainSetFullDisposeLastMs" },
     fullBuild: { avg: "terrainSetFullBuildMs", last: "terrainSetFullBuildLastMs" },
+    vegetation: { avg: "terrainSetVegetationMs", last: "terrainSetVegetationLastMs" },
     water: { avg: "terrainSetWaterMs", last: "terrainSetWaterLastMs" }
   };
   const resetTerrainSetLastTimings = (): void => {
@@ -6863,6 +6847,15 @@ export const createThreeTest = (
     !intent.roads &&
     !intent.structure &&
     !intent.debug;
+  const isVegetationResourceUpdateIntent = (
+    intent: NormalizedThreeTestTerrainUpdateIntent
+  ): boolean =>
+    intent.vegetation &&
+    !intent.geometry &&
+    !intent.roads &&
+    !intent.structure &&
+    !intent.debug &&
+    !intent.fireVisual;
   let lastRafAt = 0;
   let lastPresentedAt = 0;
 
@@ -8002,6 +7995,7 @@ export const createThreeTest = (
     removeWorldAudioChangeListener = null;
     removeRuntimeSettingsChangeListener?.();
     removeRuntimeSettingsChangeListener = null;
+    notificationSettingsView.destroy();
     uiScene.remove(hudSprite);
     hudTexture.dispose();
     hudMaterial.dispose();
@@ -8220,7 +8214,7 @@ export const createThreeTest = (
   const renderWorldScene = (): void => {
     const includesShadowRefresh = shadowRefreshPendingForFrame;
     const gpuLabel = includesShadowRefresh ? "shadowRefresh" : "world";
-    const gpuTimerActive = gpuTimer.begin(gpuLabel);
+    const gpuTimerActive = gpuTimer.begin(gpuLabel, gpuCategoryCapture.getQueryTag());
     renderer.clear();
     renderer.render(scene, camera);
     const submittedCalls = renderer.info.render.calls;
@@ -8399,7 +8393,9 @@ export const createThreeTest = (
     }
     cube.rotation.y = time * 0.0006;
     cube.rotation.x = time * 0.00035;
-    const simulationAnimationRate = isSimulationEffectivelyPaused(world) ? 0 : getResolvedTimeSpeedValue(world);
+    const simulationAnimationRate = gpuCategoryCapture.getSnapshot().active || isSimulationEffectivelyPaused(world)
+      ? 0
+      : getResolvedTimeSpeedValue(world);
     waterSystem.update(
       time,
       dt,
@@ -8408,8 +8404,10 @@ export const createThreeTest = (
       simulationAnimationRate
     );
     const controlsStart = performance.now();
-    updateCameraFlight(time);
-    controls.update();
+    if (!gpuCategoryCapture.getSnapshot().active) {
+      updateCameraFlight(time);
+      controls.update();
+    }
     applyTerrainCameraConstraints();
     syncCameraClipPlanes();
     if (treeLodController) {
@@ -8569,7 +8567,10 @@ export const createThreeTest = (
     }
     threePerf.hudMs = smoothPerf(threePerf.hudMs, performance.now() - hudStart);
     const uiRenderStart = performance.now();
-    const uiGpuTimerActive = !THREE_TEST_DISABLE_HUD && gpuTimer.begin("ui");
+    const uiGpuTimerActive =
+      !THREE_TEST_DISABLE_HUD &&
+      !gpuCategoryCapture.getSnapshot().active &&
+      gpuTimer.begin("ui");
     if (!THREE_TEST_DISABLE_HUD) {
       renderer.render(uiScene, uiCamera);
     }
@@ -8585,9 +8586,18 @@ export const createThreeTest = (
     threePerf.contextRestores = contextRestores;
     const gpuSnapshot = gpuTimer.getSnapshot();
     threePerf.gpuWorldMs = gpuSnapshot.world;
+    threePerf.gpuWorldRecordedAtMs = gpuSnapshot.samples.world?.recordedAtMs ?? threePerf.gpuWorldRecordedAtMs;
     threePerf.gpuShadowRefreshMs = gpuSnapshot.shadowRefresh;
+    threePerf.gpuShadowRefreshRecordedAtMs =
+      gpuSnapshot.samples.shadowRefresh?.recordedAtMs ?? threePerf.gpuShadowRefreshRecordedAtMs;
     threePerf.gpuPostMs = gpuSnapshot.post;
     threePerf.gpuUiMs = gpuSnapshot.ui;
+    gpuCategoryCapture.acceptSample(
+      gpuSnapshot.samples.world,
+      threePerf.submittedCallsLast,
+      threePerf.submittedTrianglesLast
+    );
+    threePerf.gpuCategoryCapture = gpuCategoryCapture.getSnapshot();
     threePerf.activeShadowLights = activeShadowLightCount;
     threePerf.shadowRefreshCount = shadowRefreshCount;
     threePerf.vehicleBufferUploads = unitsLayer.getVehicleBufferUploadCount() + evacuationVehicleLayer.getBufferUploadCount();
@@ -8653,6 +8663,7 @@ export const createThreeTest = (
   resolveCameraInteracting = isCameraInteracting;
 
   const stop = (): void => {
+    gpuCategoryCapture.cancel("renderer-stopped");
     cancelCameraFlight();
     running = false;
     worldAudio?.setRunning(false);
@@ -8981,9 +8992,12 @@ export const createThreeTest = (
       hudMs: threePerf.hudMs,
       uiRenderMs: threePerf.uiRenderMs,
       gpuWorldMs: threePerf.gpuWorldMs,
+      gpuWorldRecordedAtMs: threePerf.gpuWorldRecordedAtMs,
       gpuShadowRefreshMs: threePerf.gpuShadowRefreshMs,
+      gpuShadowRefreshRecordedAtMs: threePerf.gpuShadowRefreshRecordedAtMs,
       gpuPostMs: threePerf.gpuPostMs,
       gpuUiMs: threePerf.gpuUiMs,
+      gpuCategoryCapture: gpuCategoryCapture.getSnapshot(),
       activeShadowLights: activeShadowLightCount,
       shadowRefreshCount,
       terrainChunkCount: terrainChunks.total,
@@ -9054,6 +9068,8 @@ export const createThreeTest = (
       terrainSetFullDisposeLastMs: threePerf.terrainSetFullDisposeLastMs,
       terrainSetFullBuildMs: threePerf.terrainSetFullBuildMs,
       terrainSetFullBuildLastMs: threePerf.terrainSetFullBuildLastMs,
+      terrainSetVegetationMs: threePerf.terrainSetVegetationMs,
+      terrainSetVegetationLastMs: threePerf.terrainSetVegetationLastMs,
       terrainSetWaterMs: threePerf.terrainSetWaterMs,
       terrainSetWaterLastMs: threePerf.terrainSetWaterLastMs,
       terrainBuildTelemetry: threePerf.terrainBuildTelemetry
@@ -9288,6 +9304,19 @@ export const createThreeTest = (
     }
     return true;
   };
+  const startGpuCategoryCapture = (): boolean => {
+    if (!running || shadowRefreshPendingForFrame) return false;
+    cancelCameraFlight();
+    const supported = gpuTimer.getSnapshot().supported;
+    const started = gpuCategoryCapture.start(supported);
+    threePerf.gpuCategoryCapture = gpuCategoryCapture.getSnapshot();
+    return started;
+  };
+  const cancelGpuCategoryCapture = (): void => {
+    gpuCategoryCapture.cancel("user-cancelled");
+    threePerf.gpuCategoryCapture = gpuCategoryCapture.getSnapshot();
+  };
+  const isGpuCategoryCaptureActive = (): boolean => gpuCategoryCapture.getSnapshot().active;
 
   const staticTerrainSourceMatchesCache = (sample: TerrainSample): boolean => {
     if (!terrainMesh || !lastSample || !lastTerrainSurface || !lastTerrainSize) {
@@ -9458,6 +9487,39 @@ export const createThreeTest = (
     return Math.abs(previousWaterLevel - nextWaterLevel) <= 1e-6 ? "unknown" : "water-level";
   };
 
+  const rebuildTerrainVegetationResources = (surface: TerrainRenderSurface): boolean => {
+    if (!terrainMesh) return false;
+    const vegetationStartedAt = performance.now();
+    const nextVegetation = buildTerrainMesh(
+      surface,
+      treeAssets,
+      null,
+      null,
+      treeSeasonVisualConfig,
+      THREE_TEST_TREE_IMPOSTORS_ENABLED ? treeImpostorAtlas : null,
+      THREE_TEST_TREE_IMPOSTORS_ENABLED ? "auto" : "models",
+      "vegetation-only"
+    );
+    treeLodController?.dispose();
+    treeLodController = null;
+    if (terrainVegetationRoot) {
+      disposeTerrainVegetationRoot(terrainVegetationRoot);
+    }
+    nextVegetation.mesh.remove(nextVegetation.vegetationRoot);
+    terrainMesh.add(nextVegetation.vegetationRoot);
+    terrainVegetationRoot = nextVegetation.vegetationRoot;
+    treeBurnController = nextVegetation.treeBurn ?? null;
+    treeLodController = nextVegetation.treeLod ?? null;
+    treeLodController?.update(camera, canvas.clientHeight || canvas.height || 1);
+    nextVegetation.mesh.geometry.dispose();
+    const containerMaterials = Array.isArray(nextVegetation.mesh.material)
+      ? nextVegetation.mesh.material
+      : [nextVegetation.mesh.material];
+    containerMaterials.forEach((material) => material.dispose());
+    recordTerrainSetTiming("vegetation", performance.now() - vegetationStartedAt);
+    return true;
+  };
+
   const updateTerrainSurface = (
     sample: TerrainSample,
     surface: TerrainRenderSurface,
@@ -9472,9 +9534,19 @@ export const createThreeTest = (
     const roadOnly = isOnlyTerrainUpdateIntent(intent, "roads");
     const structureOnly = isOnlyTerrainUpdateIntent(intent, "structure");
     const vegetationOnly = isOnlyTerrainUpdateIntent(intent, "vegetation");
+    const vegetationRefresh = isVegetationResourceUpdateIntent(intent);
     const shouldUpdateBaseSurface = !roadOnly && !structureOnly && !vegetationOnly;
-    const shouldCheckRoadVisuals = !structureOnly && !vegetationOnly && (intent.roads || intent.geometry || intent.debug || intent.label === "fast-unspecified");
-    threePerf.terrainSetPath = roadOnly ? "road-only" : structureOnly ? "structure-only" : vegetationOnly ? "vegetation-only" : "fast";
+    const shouldCheckRoadVisuals =
+      !structureOnly &&
+      !vegetationRefresh &&
+      (intent.roads || intent.geometry || intent.debug || intent.label === "fast-unspecified");
+    threePerf.terrainSetPath = roadOnly
+      ? "road-only"
+      : structureOnly
+        ? "structure-only"
+        : vegetationRefresh
+          ? "vegetation-refresh"
+          : "fast";
     const terrainSurfaceShadingMode = sample.debugRenderOptions?.terrainSurfaceShadingMode ?? "refined";
     const useLegacyFacetedTerrain = terrainSurfaceShadingMode === "legacyFaceted";
     const palette = buildPalette();
@@ -9610,7 +9682,8 @@ export const createThreeTest = (
       const roadOnly = isOnlyTerrainUpdateIntent(intent, "roads");
       const structureOnly = isOnlyTerrainUpdateIntent(intent, "structure");
       const vegetationOnly = isOnlyTerrainUpdateIntent(intent, "vegetation");
-      const shouldPrepareVisualSurface = !roadOnly && !structureOnly && !vegetationOnly;
+      const vegetationRefresh = isVegetationResourceUpdateIntent(intent);
+      const shouldPrepareVisualSurface = !roadOnly && !structureOnly;
       const canUseStaticCache = staticTerrainSourceMatchesCache(nextSample);
       let nextSurface: TerrainRenderSurface | null = null;
       let preparedStaticSurface = false;
@@ -9655,7 +9728,9 @@ export const createThreeTest = (
         lastTerrainSurface = nextSurface;
         lastTerrainSize = nextSurface.size;
         applyTerrainCameraConstraints();
-        if (!vegetationOnly) {
+        if (vegetationRefresh) {
+          rebuildTerrainVegetationResources(nextSurface);
+        } else if (!vegetationOnly) {
           const structureStartedAt = performance.now();
           rebuildStructureOverlay(nextSample, nextSurface);
           recordTerrainSetTiming("structure", performance.now() - structureStartedAt);
@@ -9674,6 +9749,11 @@ export const createThreeTest = (
         const fullDisposeStartedAt = performance.now();
         treeLodController?.dispose();
         treeLodController = null;
+        if (terrainVegetationRoot) {
+          disposeTerrainVegetationRoot(terrainVegetationRoot);
+          terrainVegetationRoot = null;
+        }
+        terrainStructureRoot = null;
         const activeTerrainMesh = terrainMesh;
         scene.remove(activeTerrainMesh);
         activeTerrainMesh.traverse((child) => {
@@ -9746,7 +9826,7 @@ export const createThreeTest = (
         return;
       }
       const fullBuildStartedAt = performance.now();
-      const { mesh, size, water, treeBurn, treeLod, telemetry } = buildTerrainMesh(
+      const { mesh, vegetationRoot, structureRoot, size, water, treeBurn, treeLod, telemetry } = buildTerrainMesh(
         nextSurface,
         treeAssets,
         houseAssets,
@@ -9765,7 +9845,9 @@ export const createThreeTest = (
           `material=${timings.surfaceMaterial.toFixed(2)}ms vegetation=${timings.vegetation.toFixed(2)}ms ` +
           `structures=${timings.structures.toFixed(2)}ms water=${timings.water.toFixed(2)}ms ` +
           `terrainTriangles=${counts.sourceTerrainTriangles}->${counts.outputTerrainTriangles} ` +
-          `trees=${counts.treeInstances} scrub=${counts.scrubInstances} waterSamples=${counts.waterSupportSamples} ` +
+          `trees=${counts.treeInstances} forestCoverage=${counts.modelCoveredForestTiles}+${counts.fallbackCoveredForestTiles}` +
+          `/${counts.eligibleForestTiles} uncoveredForest=${counts.uncoveredForestTiles} ` +
+          `forestFallbackDraws=${counts.forestCoverageFallbackDrawCalls} scrub=${counts.scrubInstances} waterSamples=${counts.waterSupportSamples} ` +
           `inlandWaterTriangles=${counts.inlandWaterTriangles}`
       );
       if (telemetry.cutout) {
@@ -9794,6 +9876,8 @@ export const createThreeTest = (
       patchTerrainClimateMaterials(terrainMesh.material);
       treeBurnController = treeBurn ?? null;
       treeLodController = treeLod ?? null;
+      terrainVegetationRoot = vegetationRoot;
+      terrainStructureRoot = structureRoot;
       treeLodController?.update(camera, canvas.clientHeight || canvas.height || 1);
       scene.add(terrainMesh);
       ground.visible = false;
@@ -10013,6 +10097,9 @@ export const createThreeTest = (
     getRoadHighContrastEnabled,
     setTerrainWaterDebugControls,
     getTerrainWaterDebugControls,
+    startGpuCategoryCapture,
+    cancelGpuCategoryCapture,
+    isGpuCategoryCaptureActive,
     getPerfSnapshot
   };
 };

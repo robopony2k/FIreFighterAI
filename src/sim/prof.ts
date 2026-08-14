@@ -7,19 +7,27 @@ type Stat = {
 };
 
 let enableSimProf = getRuntimeSettings().simprof;
+let enablePerfTiming = (() => {
+  const settings = getRuntimeSettings();
+  return typeof window === "undefined" || settings.simprof || settings.perf || settings.perflog;
+})();
 if (typeof window !== "undefined") {
   subscribeRuntimeSettings((settings) => {
     enableSimProf = settings.simprof;
+    enablePerfTiming = settings.simprof || settings.perf || settings.perflog;
   });
 }
 const stats = new Map<string, Stat>();
 const REPORT_INTERVAL_MS = 2000;
 let lastReport = 0;
 
-export const profStart = (): number => (enableSimProf ? performance.now() : 0);
+export const profStart = (): number => (enablePerfTiming ? performance.now() : 0);
+
+export const profElapsed = (start: number): number =>
+  start > 0 && enablePerfTiming ? Math.max(0, performance.now() - start) : 0;
 
 export const profEnd = (name: string, start: number): void => {
-  if (!enableSimProf) {
+  if (!enableSimProf || start <= 0) {
     return;
   }
   const dt = performance.now() - start;

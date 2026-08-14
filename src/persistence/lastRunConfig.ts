@@ -5,12 +5,15 @@ import {
   type CharacterId,
   type ChiefGender
 } from "../core/characters.js";
+import { DEFAULT_CAMPAIGN_DIFFICULTY_ID } from "../core/campaign.js";
+import type { CampaignDifficultyId } from "../core/campaign.js";
 import { MAP_SIZE_PRESETS, type MapSizeId } from "../core/config.js";
 import type { FireSettings } from "../core/types.js";
 import { sanitizeFuelProfileOverrides } from "./fuelProfiles.js";
 import { DEFAULT_MAP_SIZE, DEFAULT_RUN_OPTIONS, DEFAULT_RUN_SEED, normalizeFireSettings } from "../ui/run-config.js";
 import type { NewRunConfig } from "../ui/run-config.js";
 import { resolveTerrainProfile, sanitizeTerrainRecipe } from "../mapgen/terrainProfile.js";
+import { isCampaignDifficultyId } from "../systems/campaign/constants/campaignDifficultyDefinitions.js";
 
 const LAST_RUN_CONFIG_KEY = "fireline.lastRunConfig";
 const CHARACTER_IDS = new Set<CharacterId>(CHARACTERS.map((character) => character.id));
@@ -49,6 +52,9 @@ const sanitizeChiefGender = (value: unknown): ChiefGender =>
     ? (value as ChiefGender)
     : DEFAULT_CHIEF_GENDER;
 
+const sanitizeDifficultyId = (value: unknown): CampaignDifficultyId =>
+  isCampaignDifficultyId(value) ? value : DEFAULT_CAMPAIGN_DIFFICULTY_ID;
+
 const sanitizeCallsign = (value: unknown): string => {
   if (typeof value !== "string") {
     return "";
@@ -70,6 +76,7 @@ const sanitizeNewRunConfig = (value: unknown): NewRunConfig | null => {
     characterId: sanitizeCharacterId(value.characterId),
     chiefGender: sanitizeChiefGender(value.chiefGender),
     callsign: sanitizeCallsign(value.callsign),
+    difficultyId: sanitizeDifficultyId(value.difficultyId),
     options: {
       ...DEFAULT_RUN_OPTIONS,
       unlimitedMoney: typeof options.unlimitedMoney === "boolean" ? options.unlimitedMoney : DEFAULT_RUN_OPTIONS.unlimitedMoney,

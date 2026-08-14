@@ -1,4 +1,5 @@
 import { clamp } from "../../../../core/utils.js";
+import { getVegetationMaturity01 } from "../../../../core/vegetation.js";
 import { vegetationHash2D } from "../../utils/vegetationSeedHash.js";
 
 const BLUE_NOISE_TEMPLATE = [
@@ -101,3 +102,154 @@ export const computeTreeBudgetScale = (estimatedCandidates: number, instanceBudg
   Number.isFinite(instanceBudget) && estimatedCandidates > instanceBudget
     ? clamp((instanceBudget * 0.96) / Math.max(1, estimatedCandidates), 0, 1)
     : 1;
+
+export type TreeCoverageCandidate = {
+  tileIndex: number;
+  tileX: number;
+  tileY: number;
+  attempt: number;
+  vegetationType: TreePlacementVegetationType;
+  maturity01: number;
+  canopyCover: number;
+  offsetX: number;
+  offsetY: number;
+  priority: number;
+  requiredForestCoverage: boolean;
+};
+
+export type FullResolutionTreeCoveragePlan = {
+  modelCandidates: TreeCoverageCandidate[];
+  fallbackCandidates: TreeCoverageCandidate[];
+  eligibleForestTiles: number;
+  modelCoveredForestTiles: number;
+  fallbackCoveredForestTiles: number;
+  uncoveredForestTiles: number;
+};
+
+export type FullResolutionTreeCoverageInput = {
+  cols: number;
+  rows: number;
+  worldSeed: number;
+  tileTypes: ArrayLike<number>;
+  tileVegetationAge?: ArrayLike<number>;
+  tileCanopyCover?: ArrayLike<number>;
+  tileStemDensity?: ArrayLike<number>;
+  occludedMask?: ArrayLike<number>;
+  forestId: number;
+  scrubId: number;
+  floodplainId: number;
+  grassId: number;
+  densityScale: number;
+  attemptCap: number;
+  modelInstanceBudget: number;
+};
+
+const compareCoverageCandidates = (left: TreeCoverageCandidate, right: TreeCoverageCandidate): number =>
+  left.priority - right.priority || left.tileIndex - right.tileIndex || left.attempt - right.attempt;
+
+const resolveVegetationType = (
+  typeId: number,
+  input: Pick<FullResolutionTreeCoverageInput, "forestId" | "scrubId" | "floodplainId" | "grassId">
+): TreePlacementVegetationType | null => {
+  if (typeId === input.forestId) return "forest";
+  if (typeId === input.scrubId) return "scrub";
+  if (typeId === input.floodplainId) return "floodplain";
+  if (typeId === input.grassId) return "grass";
+  return null;
+};
+
+export const buildFullResolutionTreeCoveragePlan = (
+  input: FullResolutionTreeCoverageInput
+): FullResolutionTreeCoveragePlan => {
+  const cols = Math.max(0, Math.floor(input.cols));
+  const rows = Math.max(0, Math.floor(input.rows));
+  const totalTiles = Math.min(input.tileTypes.length, cols * rows);
+  const modelBudget = Number.isFinite(input.modelInstanceBudget)
+    ? Math.max(0, Math.floor(input.modelInstanceBudget))
+    : Number.MAX_SAFE_INTEGER;
+  const attemptLimit = Math.max(1, Math.floor(input.attemptCap) * 2 + 1);
+  const requiredForest: TreeCoverageCandidate[] = [];
+  const optional: TreeCoverageCandidate[] = [];
+
+  for (let tileIndex = 0; tileIndex < totalTiles; tileIndex += 1) {
+    const vegetationType = resolveVegetationType(input.tileTypes[tileIndex] ?? -1, input);
+    if (!vegetationType || input.occludedMask?.[tileIndex]) continue;
+    const tileX = tileIndex % cols;
+    const tileY = Math.floor(tileIndex / cols);
+    const canopyCover = clamp(input.tileCanopyCover?.[tileIndex] ?? 0, 0, 1);
+    const stemDensity = Math.max(0, input.tileStemDensity?.[tileIndex] ?? 0);
+    const ageYears = Math.max(0, input.tileVegetationAge?.[tileIndex] ?? 0);
+    const maturity01 = getVegetationMaturity01(vegetationType, ageYears);
+    const attemptWeight = getTallTreeAttemptWeight(vegetationType);
+    const rawCount = stemDensity * attemptWeight * input.densityScale * (0.4 + canopyCover * 0.8);
+    let attempts = Math.min(attemptLimit, Math.floor(rawCount));
+    const fractionalCount = rawCount - Math.floor(rawCount);
+    if (
+      attempts < attemptLimit &&
+      vegetationHash2D(tileX, tileY, input.worldSeed + 41_791) < fractionalCount
+    ) {
+      attempts += 1;
+    }
+    if (vegetationType === "forest") {
+      attempts = Math.max(1, attempts);
+    }
+    if (attempts <= 0) continue;
+
+    const densityGradient = computeTreeDensityGradient(
+      input.tileStemDensity,
+      cols,
+      rows,
+      tileX,
+      tileY
+    );
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+      const offset = resolveTreeCandidateOffset({
+        worldSeed: input.worldSeed,
+        tileX,
+        tileY,
+        attempt,
+        jitterRange: 0.42,
+        densityGradient
+      });
+      const candidate: TreeCoverageCandidate = {
+        tileIndex,
+        tileX,
+        tileY,
+        attempt,
+        vegetationType,
+        maturity01,
+        canopyCover,
+        offsetX: offset.x,
+        offsetY: offset.y,
+        priority: resolveTreeBudgetPriority(offset.priority, vegetationType, maturity01, canopyCover),
+        requiredForestCoverage: vegetationType === "forest" && attempt === 0
+      };
+      if (candidate.requiredForestCoverage) requiredForest.push(candidate);
+      else optional.push(candidate);
+    }
+  }
+
+  requiredForest.sort(compareCoverageCandidates);
+  optional.sort(compareCoverageCandidates);
+  const modelCandidates = requiredForest.slice(0, modelBudget);
+  const fallbackCandidates = requiredForest.slice(modelBudget);
+  const optionalCapacity = Math.max(0, modelBudget - modelCandidates.length);
+  modelCandidates.push(...optional.slice(0, optionalCapacity));
+  modelCandidates.sort((left, right) => left.tileIndex - right.tileIndex || left.attempt - right.attempt);
+  fallbackCandidates.sort((left, right) => left.tileIndex - right.tileIndex);
+
+  const eligibleForestTiles = requiredForest.length;
+  const modelCoveredForestTiles = Math.min(requiredForest.length, modelBudget);
+  const fallbackCoveredForestTiles = fallbackCandidates.length;
+  return {
+    modelCandidates,
+    fallbackCandidates,
+    eligibleForestTiles,
+    modelCoveredForestTiles,
+    fallbackCoveredForestTiles,
+    uncoveredForestTiles: Math.max(
+      0,
+      eligibleForestTiles - modelCoveredForestTiles - fallbackCoveredForestTiles
+    )
+  };
+};

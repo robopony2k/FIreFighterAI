@@ -35,13 +35,30 @@ import {
   SHRUB_FOREST_BACKGROUND_CHANCE,
   SHRUB_FOREST_PRESSURE_CHANCE
 } from "./annualVegetationSuccessionRules.js";
-import { getRuntimeVegetationSuitabilitySnapshot } from "./runtimeVegetationSuitabilityCache.js";
+import {
+  getRuntimeVegetationSuitabilityCacheDiagnostics,
+  getRuntimeVegetationSuitabilitySnapshot,
+  type RuntimeVegetationSuitabilityCacheDiagnostics
+} from "./runtimeVegetationSuitabilityCache.js";
 import { getTerrainResponsiveVegetationStructure } from "./vegetationStructure.js";
 
 const FOREST_ANNUAL_AGE_GAIN = 0.7;
 const SCRUB_ANNUAL_AGE_GAIN = 0.8;
 
 export type AnnualVegetationGrowthResult = {
+  sequence: number;
+  recordedAtMs: number;
+  year: number;
+  timingsMs: {
+    maskBuild: number;
+    suitabilityCache: number;
+    mutationScan: number;
+    revisionFinalize: number;
+    total: number;
+  };
+  cacheSource: RuntimeVegetationSuitabilityCacheDiagnostics["source"];
+  terrainTypeRevisionDelta: number;
+  vegetationRevisionDelta: number;
   tilesScanned: number;
   agedTiles: number;
   fuelTilesChanged: number;
@@ -51,6 +68,22 @@ export type AnnualVegetationGrowthResult = {
   fuelChanged: boolean;
   terrainTypeChanged: boolean;
   vegetationVisualChanged: boolean;
+};
+
+const latestGrowthTelemetry = new WeakMap<WorldState, AnnualVegetationGrowthResult>();
+
+const nowMs = (): number =>
+  typeof performance !== "undefined" && typeof performance.now === "function" ? performance.now() : Date.now();
+
+export const getLatestAnnualVegetationGrowthTelemetry = (
+  state: WorldState
+): AnnualVegetationGrowthResult | null => {
+  const result = latestGrowthTelemetry.get(state);
+  return result ? { ...result, timingsMs: { ...result.timingsMs } } : null;
+};
+
+export const clearAnnualVegetationGrowthTelemetry = (state: WorldState): void => {
+  latestGrowthTelemetry.delete(state);
 };
 
 const syncVegetationStructure = (state: WorldState, idx: number, siteQuality: number): void => {
@@ -139,7 +172,24 @@ export const applyAnnualVegetationGrowth = (
   year: number,
   rng: RNG
 ): AnnualVegetationGrowthResult => {
+  const totalStartedAt = nowMs();
+  const previousTelemetry = latestGrowthTelemetry.get(state);
+  const terrainTypeRevisionBefore = state.terrainTypeRevision;
+  const vegetationRevisionBefore = state.vegetationRevision;
   const result: AnnualVegetationGrowthResult = {
+    sequence: (previousTelemetry?.sequence ?? 0) + 1,
+    recordedAtMs: 0,
+    year,
+    timingsMs: {
+      maskBuild: 0,
+      suitabilityCache: 0,
+      mutationScan: 0,
+      revisionFinalize: 0,
+      total: 0
+    },
+    cacheSource: "none",
+    terrainTypeRevisionDelta: 0,
+    vegetationRevisionDelta: 0,
     tilesScanned: state.grid.totalTiles,
     agedTiles: 0,
     fuelTilesChanged: 0,
@@ -150,6 +200,7 @@ export const applyAnnualVegetationGrowth = (
     terrainTypeChanged: false,
     vegetationVisualChanged: false
   };
+  const maskStartedAt = nowMs();
   const forestMask = new Uint8Array(state.grid.totalTiles);
   const matureForestMask = new Uint8Array(state.grid.totalTiles);
   const shrubMask = new Uint8Array(state.grid.totalTiles);
@@ -162,8 +213,13 @@ export const applyAnnualVegetationGrowth = (
       shrubMask[idx] = 1;
     }
   }
+  result.timingsMs.maskBuild = nowMs() - maskStartedAt;
+  const suitabilityStartedAt = nowMs();
   const terrain = getRuntimeVegetationSuitabilitySnapshot(state);
+  result.timingsMs.suitabilityCache = nowMs() - suitabilityStartedAt;
+  result.cacheSource = getRuntimeVegetationSuitabilityCacheDiagnostics(state).source;
 
+  const mutationStartedAt = nowMs();
   for (let idx = 0; idx < state.grid.totalTiles; idx += 1) {
     const tile = state.tiles[idx];
     if (!tile || tile.fire > 0 || isProtectedAnnualVegetationType(tile.type)) continue;
@@ -274,12 +330,20 @@ export const applyAnnualVegetationGrowth = (
       }
     }
   }
+  result.timingsMs.mutationScan = nowMs() - mutationStartedAt;
 
+  const revisionStartedAt = nowMs();
   if (result.terrainTypeChanged) state.terrainTypeRevision += 1;
   if (result.vegetationVisualChanged) {
     state.vegetationRevision += 1;
     state.terrainDirty = true;
   }
+  result.timingsMs.revisionFinalize = nowMs() - revisionStartedAt;
+  result.terrainTypeRevisionDelta = state.terrainTypeRevision - terrainTypeRevisionBefore;
+  result.vegetationRevisionDelta = state.vegetationRevision - vegetationRevisionBefore;
+  result.recordedAtMs = nowMs();
+  result.timingsMs.total = result.recordedAtMs - totalStartedAt;
+  latestGrowthTelemetry.set(state, { ...result, timingsMs: { ...result.timingsMs } });
   return result;
 };
 

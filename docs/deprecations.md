@@ -1,5 +1,59 @@
 # Deprecations
 
+## Fixed Single-Team Campaign Start
+
+Status: Deprecated as of August 13, 2026.
+
+- New campaigns no longer always seed exactly two firefighters and one truck.
+- The New Game difficulty selection now derives a starting response-team count from a two-team baseline, with each complete team retaining one truck and two firefighters.
+- Difficulty adjusts only initial budget and team count; existing Chief modifiers remain separately applied and all fire, weather, suppression, later-year economy, scoring, and unit-performance behavior remains unchanged.
+
+Migration guidance:
+
+1. Pass the campaign-resolved response-team count into roster seeding instead of assuming a fixed three-entry roster.
+2. Add future difficulty values to the campaign difficulty catalogue rather than branching in UI, runtime, or units code.
+3. Preserve the one-complete-team minimum unless the campaign validity rules are intentionally redesigned.
+
+## Terrain-Stride-Coupled Forest Placement
+
+Status: Deprecated as of August 13, 2026.
+
+- Supported 256x256 terrain no longer discovers tree candidates only while walking the stride-two terrain-mesh sample lattice. That path could tint authoritative forest ground while never considering most forest tiles for a tree instance.
+- Full-resolution vegetation planning now reserves visible coverage before optional density and keeps the 28,000 high-detail model ceiling. Any uncovered reservation uses deterministic chunked low-poly tree geometry without changing terrain type, fuel, succession, or saves.
+- The guarantee applies only to the supported 256x256 campaign; larger experimental presets retain their existing sampled placement behavior.
+
+Migration guidance:
+
+1. Add future forest placement rules to the terrain vegetation planner rather than coupling them to terrain vertex traversal.
+2. Preserve one-way simulation-to-render data flow; render budgets must not rewrite authoritative biome or fuel state.
+3. Keep coverage fallback geometry inside the terrain vegetation root so annual refresh, disposal, season, and fire behavior stay coordinated.
+
+## Centered Multi-Button Fire Alert Card
+
+Status: Deprecated as of August 13, 2026.
+
+- The centered fire card with Zoom to Fire, Open Town, Dispatch Squad, Open HQ, and Dismiss buttons is retired.
+- New fire-front reports now publish through the typed notification event boundary and appear as bottom-screen toasts with only focus and dismiss actions.
+- Fire-alert presentation no longer lives in the 3D renderer or in `WorldState`; fire simulation owns front/report lineage, the app bridges typed events, and notification UI owns preferences, timing, stacking, and rendering.
+
+Migration guidance:
+
+1. Register future notification types in the notification registry and publish a stable deduplication key through `notification:publish`.
+2. Keep gameplay actions in their owning panels instead of adding workflow buttons to transient notifications.
+
+## Shared Strategic Slider During Incident Time
+
+Status: Deprecated as of August 12, 2026.
+
+- Resolving the persisted 0x-20x strategic slider directly during incident mode is retired. It allowed a newly detected fire to continue at strategic speed even after the runtime switched to incident controls.
+- Incident mode now always resolves from the existing dedicated incident presets. The strategic slider value remains stored and is restored when the incident ends.
+- Incident UI surfaces show preset controls regardless of the persisted strategic control style.
+
+Migration guidance:
+
+1. Resolve active time through `getResolvedTimeSpeedValue`; do not read `timeSpeedSliderValue` as the incident rate.
+2. Keep strategic and incident speed state independent when adding time-control surfaces.
+
 ## Overlapping Ephemeral Segment Quads and Node Discs
 
 Status: Deprecated as of August 12, 2026.
@@ -1201,3 +1255,17 @@ Migration guidance:
 
 1. Add future always-available run actions or headline values to the unified header.
 2. Add progression-level detail to Compact mode and dense operational counters to Full mode rather than creating another top-left card.
+
+## Pause-Disabled Fires Retaining Strategic Speed
+
+Status: Deprecated as of August 13, 2026.
+
+- `Pause on Fire` no longer decides whether a detected fire enters incident mode; it controls only the paused/running state after that transition.
+- Every detected fire now stops Advance to Next Event, preserves the strategic speed for restoration, and engages the dedicated incident-speed preset.
+- Turning the setting off continues the detected incident at slow incident time without pausing.
+
+Migration guidance:
+
+1. Treat fire detection, incident-mode entry, and optional pausing as separate decisions.
+2. Keep pre-detection strategic fire work bounded by the existing runtime cap; do not use the pause preference to retain strategic speed after detection.
+3. Explain future event toggles in terms of the single behavior they control.

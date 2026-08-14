@@ -7,6 +7,7 @@ import {
   buildWatchTowerForTown,
   quoteWatchTowerPlacement,
   getWatchTowerForTown,
+  resetFireFrontLineage,
   stepFireDetection,
   stepWatchTowerConstruction,
   upgradeWatchTowerForTown
@@ -131,19 +132,35 @@ const buildState = (seed = 901, size = 65) => {
 
 const ignite = (state, x, y) => {
   const idx = y * state.grid.cols + x;
+  const alreadyActive = (state.tileFire[idx] ?? 0) > 0;
   const tile = state.tiles[idx];
   tile.fire = 0.9;
   tile.heat = 2.4;
   state.tileFire[idx] = tile.fire;
   state.tileHeat[idx] = tile.heat;
-  state.lastActiveFires = 1;
+  state.lastActiveFires = Math.max(1, state.lastActiveFires + (alreadyActive ? 0 : 1));
   state.fireActivityState = "burning";
-  state.fireBoundsActive = true;
-  state.fireMinX = Math.max(0, x - 1);
-  state.fireMaxX = Math.min(state.grid.cols - 1, x + 1);
-  state.fireMinY = Math.max(0, y - 1);
-  state.fireMaxY = Math.min(state.grid.rows - 1, y + 1);
+  if (state.fireBoundsActive) {
+    state.fireMinX = Math.min(state.fireMinX, Math.max(0, x - 1));
+    state.fireMaxX = Math.max(state.fireMaxX, Math.min(state.grid.cols - 1, x + 1));
+    state.fireMinY = Math.min(state.fireMinY, Math.max(0, y - 1));
+    state.fireMaxY = Math.max(state.fireMaxY, Math.min(state.grid.rows - 1, y + 1));
+  } else {
+    state.fireBoundsActive = true;
+    state.fireMinX = Math.max(0, x - 1);
+    state.fireMaxX = Math.min(state.grid.cols - 1, x + 1);
+    state.fireMinY = Math.max(0, y - 1);
+    state.fireMaxY = Math.min(state.grid.rows - 1, y + 1);
+  }
   return idx;
+};
+
+const extinguishTile = (state, x, y) => {
+  const idx = y * state.grid.cols + x;
+  state.tiles[idx].fire = 0;
+  state.tiles[idx].heat = 0;
+  state.tileFire[idx] = 0;
+  state.tileHeat[idx] = 0;
 };
 
 {
@@ -176,7 +193,59 @@ const ignite = (state, x, y) => {
   assert.equal(result.activeReportCount > 0, true, "tower should detect in-radius fire");
   assert.equal(state.fireKnowledge.tileState[idx] > 0, true, "in-radius fire should become known");
   assert.equal(result.alertReport?.confidenceLabel, "Medium", "initial tower alert should be medium confidence");
+  state.towns[0].radius = 64;
+  const confidenceUpdate = stepFireDetection(state, 0.01);
+  assert.equal(confidenceUpdate.alertReports.length, 0, "confidence escalation must not alert the same front again");
+  assert.equal(confidenceUpdate.notificationReports.length, 1, "confidence escalation should update a visible notification once");
+  assert.equal(state.fireKnowledge.reports[0]?.confidenceLabel, "High", "tower persistence should confirm the report");
   console.log("tower in radius: ok");
+}
+
+{
+  const state = buildState(902);
+  state.towns = [createTown(20, 32, 32, 64)];
+  for (let x = 8; x <= 20; x += 1) ignite(state, x, 30);
+  const initial = stepFireDetection(state, 0.01);
+  assert.equal(initial.alertReports.length, 1, "one connected front should emit one alert");
+  const firstReportId = initial.alertReport.id;
+
+  for (let x = 21; x <= 42; x += 1) ignite(state, x, 30);
+  const expanded = stepFireDetection(state, 0.01);
+  assert.equal(expanded.alertReports.length, 0, "front growth beyond the old merge radius must not re-alert");
+  assert.equal(state.fireKnowledge.reports.filter((report) => !report.mergedIntoReportId).length, 1, "front growth should retain one lineage");
+
+  ignite(state, 52, 30);
+  const disconnected = stepFireDetection(state, 0.01);
+  assert.equal(disconnected.alertReports.length, 1, "a disconnected ignition should emit one new alert");
+  assert.notEqual(disconnected.alertReport.id, firstReportId, "the disconnected ignition should receive a new lineage");
+
+  for (let x = 43; x <= 51; x += 1) ignite(state, x, 30);
+  const merged = stepFireDetection(state, 0.01);
+  assert.equal(merged.alertReports.length, 0, "merging known fronts must not emit another alert");
+  assert.equal(state.fireKnowledge.reports.filter((report) => !report.mergedIntoReportId).length, 1, "merged fronts should keep one canonical lineage");
+
+  extinguishTile(state, 30, 30);
+  const split = stepFireDetection(state, 0.01);
+  assert.equal(split.alertReports.length, 0, "a split in an existing lineage must not emit another alert");
+  ignite(state, 30, 30);
+  const rejoined = stepFireDetection(state, 0.01);
+  assert.equal(rejoined.alertReports.length, 0, "rejoining an existing lineage must not emit another alert");
+  console.log("front lineage growth, disconnect, merge, and split: ok");
+}
+
+{
+  const state = buildState(903);
+  state.towns = [createTown(21, 32, 32, 64)];
+  ignite(state, 20, 20);
+  assert.equal(stepFireDetection(state, 0.01).alertReports.length, 1, "initial incident should alert");
+  state.tileFire.fill(0);
+  state.tileHeat.fill(0);
+  state.lastActiveFires = 0;
+  state.fireActivityState = "idle";
+  resetFireFrontLineage(state);
+  ignite(state, 22, 20);
+  assert.equal(stepFireDetection(state, 0.01).alertReports.length, 1, "an ignition after idle should start a new lineage");
+  console.log("front lineage reset after idle: ok");
 }
 
 {

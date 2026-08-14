@@ -5,13 +5,14 @@ import type { RNG } from "../core/types.js";
 import { clearVegetationState } from "../core/vegetation.js";
 import { advanceHouseDamage } from "../systems/settlements/sim/buildingLifecycle.js";
 import { runFireKernel } from "../systems/fire/sim/fireKernel.js";
+import { recordFireKernelTelemetry } from "../systems/fire/controllers/fireRuntimeTelemetry.js";
 import type { FireKernelHooks, FireKernelStepOptions } from "../systems/fire/sim/fireKernelTypes.js";
 import { buildFireWorkBlocks, ensureFireBlocks, finalizeFireBlocks, markFireBlockNextByTile } from "./fire/activeBlocks.js";
 import { resetFireBounds } from "./fire/bounds.js";
 import type { FireWeatherResponse } from "./fire/fireWeather.js";
 import { igniteRandomFire } from "./fire/ignite.js";
 import { emitSmokeAt } from "./particles.js";
-import { profEnd, profStart } from "./prof.js";
+import { profElapsed, profEnd, profStart } from "./prof.js";
 import { markAttributedFireLossTile, queueScoreFlowEvent } from "./scoring.js";
 import { recordTownHouseLoss } from "./towns.js";
 
@@ -29,6 +30,7 @@ const createFxRng = (seed: number): RNG => {
 
 const createFireKernelHooks = (state: WorldState, effects: EffectsState): FireKernelHooks => ({
   profStart,
+  profElapsed,
   profEnd,
   ensureFireBlocks,
   buildFireWorkBlocks,
@@ -101,6 +103,7 @@ export function stepFire(
     allowIgnitionEvents
   };
   const result = runFireKernel(state, rng, options, createFireKernelHooks(state, effects));
+  recordFireKernelTelemetry(state, result, options);
   state.firePerfTerrainMutations += result.telemetry.terrainMutations;
   state.firePerfRangedDiffusionSamples += result.telemetry.rangedDiffusionSamples;
   state.firePerfIgniteCandidates += result.telemetry.igniteCandidates;

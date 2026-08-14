@@ -6,6 +6,7 @@ import type { RenderState } from "../../../render/renderState.js";
 import { ZOOM_STEP } from "../../../core/config.js";
 import { inBounds } from "../../../core/grid.js";
 import { DEFAULT_CHIEF_GENDER } from "../../../core/characters.js";
+import { DEFAULT_CAMPAIGN_DIFFICULTY_ID } from "../../../core/campaign.js";
 import { screenToWorld, zoomAtPointer } from "../../../render/inputProjection.js";
 import { setStatus } from "../../../core/state.js";
 import { formatTimeSpeedValue, stepTimeSpeedSliderValue } from "../../../core/timeSpeed.js";
@@ -112,6 +113,7 @@ const cloneRunConfig = (config: NewRunConfig): NewRunConfig => ({
   characterId: config.characterId,
   chiefGender: config.chiefGender ?? DEFAULT_CHIEF_GENDER,
   callsign: config.callsign,
+  difficultyId: config.difficultyId ?? DEFAULT_CAMPAIGN_DIFFICULTY_ID,
   options: {
     ...DEFAULT_RUN_OPTIONS,
     ...config.options,
@@ -131,6 +133,7 @@ const resolveRunConfig = (defaults: NewRunConfig, persisted?: NewRunConfig | nul
     characterId: persisted.characterId,
     chiefGender: persisted.chiefGender ?? defaults.chiefGender,
     callsign: persisted.callsign.trim().length > 0 ? persisted.callsign : defaults.callsign,
+    difficultyId: persisted.difficultyId ?? defaults.difficultyId,
     options: {
       ...defaults.options,
       ...persisted.options,
@@ -375,6 +378,7 @@ export const bindPhaseUi = ({
     characterSummary: document.getElementById("characterSummary") as HTMLParagraphElement,
     characterConfirm: document.getElementById("characterConfirm") as HTMLButtonElement,
     characterPreviewPortrait: document.getElementById("characterPreviewPortrait") as HTMLDivElement,
+    characterPreviewFlameCanvas: document.getElementById("characterPreviewFlameCanvas") as HTMLCanvasElement,
     characterPreviewImage: document.getElementById("characterPreviewImage") as HTMLImageElement,
     characterPreviewInitials: document.getElementById("characterPreviewInitials") as HTMLSpanElement,
     characterNameInput: document.getElementById("characterNameInput") as HTMLInputElement,
@@ -390,6 +394,7 @@ export const bindPhaseUi = ({
     runScenarioLoad: document.getElementById("runScenarioLoad") as HTMLButtonElement,
     runScenarioState: document.getElementById("runScenarioState") as HTMLDivElement,
     runUnlimitedMoney: document.getElementById("runUnlimitedMoney") as HTMLInputElement,
+    runDifficultyOptions: document.getElementById("runDifficultyOptions") as HTMLDivElement,
     terrainControls: document.getElementById("terrainControls") as HTMLDivElement,
     fireInputs: Array.from(
       document.querySelectorAll<HTMLInputElement>('#characterScreen input[data-fire-key]')
@@ -407,7 +412,8 @@ export const bindPhaseUi = ({
     },
     characterId: state.campaign.characterId,
     chiefGender: state.campaign.chiefGender,
-    callsign: state.campaign.callsign
+    callsign: state.campaign.callsign,
+    difficultyId: state.campaign.difficultyId
   };
   let lastRunConfig: NewRunConfig = resolveRunConfig(defaultRunConfig, loadLastRunConfig());
 
@@ -430,6 +436,7 @@ export const bindPhaseUi = ({
   const characterSelect = initCharacterSelect(characterRefs, state, (config) => {
     void launchSession(config);
   }, lastRunConfig);
+  disposers.push(characterSelect.destroy);
 
   if (startNewRunButton) {
     listenElement(startNewRunButton, "click", () => {
@@ -787,7 +794,12 @@ export const bindPhaseUi = ({
     if (action === "time-speed-step") {
       const rawDelta = actionTarget?.dataset.delta;
       const delta = rawDelta ? Number(rawDelta) : 0;
-      if (!Number.isFinite(delta) || delta === 0 || state.timeSpeedControlMode !== "slider") {
+      if (
+        !Number.isFinite(delta) ||
+        delta === 0 ||
+        state.simTimeMode !== "strategic" ||
+        state.timeSpeedControlMode !== "slider"
+      ) {
         return;
       }
       gate("timeControl", () => {
@@ -809,7 +821,11 @@ export const bindPhaseUi = ({
       const rawValue =
         actionTarget instanceof HTMLInputElement ? actionTarget.value : actionTarget?.dataset.value;
       const nextValue = rawValue === undefined ? Number.NaN : Number(rawValue);
-      if (!Number.isFinite(nextValue) || state.timeSpeedControlMode !== "slider") {
+      if (
+        !Number.isFinite(nextValue) ||
+        state.simTimeMode !== "strategic" ||
+        state.timeSpeedControlMode !== "slider"
+      ) {
         return;
       }
       gate("timeControl", () => {

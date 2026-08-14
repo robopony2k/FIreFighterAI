@@ -1,3 +1,194 @@
+TSK-0211: Add four-level campaign difficulty
+
+Type: feature
+
+Why: New campaigns always used one fixed starting budget and one fixed response team, leaving no player-facing way to choose a gentler or more constrained opening without changing unrelated simulation behavior.
+
+Done when:
+- [x] New Game exposes Ember, Blaze, Firestorm, and Inferno from one data-driven catalogue, with Blaze as the legacy/default fallback and the last valid choice remembered.
+- [x] Difficulty derives the initial budget before the unchanged Chief budget modifier and produces 4, 3, 2, or 1 complete response teams from the accepted two-team baseline.
+- [x] Campaign configuration and state retain the selected difficulty, while missing or invalid persisted values sanitize to Blaze.
+- [x] The selected Chief portrait reuses the title-screen GPU flame renderer and CPU fallback, clipped to the rounded picture frame, with internal flame height and width increasing from Ember through Inferno while the canvas and Chief artwork stay fixed.
+- [x] TypeScript/build, focused campaign-difficulty persistence/resource coverage, unit composition/assignment coverage, and queue validation pass.
+- [ ] A supplied capture or supported Browser session confirms the selector's final appearance, keyboard interaction, and responsive layout.
+
+Touchpoints: `src/systems/campaign/`, New Game configuration UI/persistence, `src/systems/units/controllers/rosterController.ts`, focused regression scripts, design/queue records
+
+Constraints: difficulty affects only starting budget and complete starting response teams; preserve unlimited-money behavior, existing Chief modifiers, terrain share codes, later-year economy, scoring, fire, weather, suppression, and unit performance.
+
+Notes: Implemented source-first in the current VS Code surface using supplied New Game screenshots as static layout evidence. The first portrait pass incorrectly transformed the full canvas and exposed its rectangular bounds; the corrected path keeps that layer fixed and applies difficulty scale inside the shared title flame shader and CPU field fallback. Automated evidence covers definition order, defaults, persistence migration, budget ordering, team-count clamping, deterministic complete-team seeding, crew assignment, squad ownership, and ordered portrait flame scales. Live animation verification remains unavailable on this surface.
+
+Status: done
+
+TSK-0209: Attribute fire-time GPU and frame-pacing cost
+
+Type: bug
+
+Why: The post-fix incident capture showed sub-millisecond fire simulation and roughly 5-11 ms of CPU work, but 19-25 ms GPU-world samples and repeated 48-61 ms frame gaps. Whole-world timing could not distinguish fire FX from terrain, vegetation, structures, water, or shadows.
+
+Done when:
+- [x] GPU timer samples expose fresh sequence, timestamp, and capture tags so asynchronous results cannot be reused accidentally.
+- [x] A run-only capture holds simulation/camera presentation, records two warm-up plus five measured frames for baseline and six reversible category exclusions, and restores all visibility and shadow state.
+- [x] `[gpuprofile]` and the retained overlay report median baseline and the two largest non-additive sensitivity deltas.
+- [x] Hitch profiles include mode/pause/advance state and classify recent GPU-bound or browser-long-task gaps separately from unattributed work.
+- [x] TypeScript/build, runtime-performance, renderer, fire, and queue regressions pass.
+- [ ] A refreshed capture confirms overlay readability, restoration, and useful category deltas on the affected machine.
+
+Touchpoints: `src/core/rendering/webglGpuTimer.ts`, `src/render/diagnostics/gpuCategoryCapture.ts`, `src/render/threeTest.ts`, `src/ui/performance/runtimeTelemetryPresenter.ts`, focused regression scripts
+
+Constraints: diagnostic-only in normal play; preserve render quality, simulation state, camera pose, water/shadow settings, saves, checksums, and dependency direction. GPU deltas are non-additive sensitivity measurements.
+
+Notes: Automated evidence verifies fresh tagged queries, medians, unsupported-query handling, cancellation cleanup, state restoration calls, and stable output formatting. Live visual acceptance remains capture-based because the current VS Code surface cannot inspect localhost.
+
+Status: done
+
+TSK-0208: Decouple fire incident entry from automatic pausing
+
+Type: bug
+
+Why: `Pause on Fire` was labeled as a pause preference but also prevented incident-mode entry. With it disabled, a detected fire could remain at strategic speed and Advance to Next Event could continue through the event.
+
+Done when:
+- [x] Every detected fire stops Advance to Next Event, preserves strategic controls, and enters dedicated incident time.
+- [x] The setting controls only whether the detected incident pauses; disabled incidents continue running at the incident preset.
+- [x] Setting copy, design memory, deprecation guidance, and telemetry expose the corrected semantics.
+- [x] Fire, time-speed, TypeScript/build, runtime-performance, renderer, and queue validation pass.
+
+Touchpoints: `src/sim/index.ts`, runtime-setting copy, fire/time-speed regressions, design/deprecation records
+
+Constraints: preserve detection confidence and delay, pre-detection strategic behavior and cap, fire equations, RNG order, saves, and checksums.
+
+Notes: The supplied post-fix capture confirms the expected incident signature at `speed=0.03`, about `0.01` simulated day per profile, and `0.2-0.8 ms` fire kernel time. This task makes that incident pacing independent of the pause preference.
+
+Status: done
+
+TSK-0210: Guarantee visible trees on supported forest tiles
+
+Type: bug
+
+Why: Supported 256x256 terrain used stride-two terrain-mesh samples to place vegetation, so authoritative forest tiles could receive a dark forest tint without ever being considered for visible tree geometry.
+
+Done when:
+- [x] The supported 256x256 renderer plans vegetation from the full-resolution tile field and reserves one deterministic tree candidate for every forest tile not covered by a structure footprint.
+- [x] High-detail trees remain capped at 28,000, with mature high-canopy priority for optional density and chunked low-poly trunk/canopy fallback geometry covering any remaining forest reservations.
+- [x] Coverage fallbacks participate in seasonal attributes, fire/ash collapse, vegetation-only spring refresh, bounded disposal, spatial culling, and telemetry without casting fallback shadows.
+- [x] Terrain-build telemetry reports eligible, model-covered, fallback-covered, and uncovered forest counts plus fallback instances and draw calls.
+- [x] TypeScript/build, vegetation, renderer, growth, fire, terrain-grounding, runtime-performance, and queue validation pass without changing simulation state, fuel, succession, saves, or larger-map behavior.
+- [ ] A refreshed 256x256 capture confirms forest-coloured ground no longer appears without visible tree geometry.
+
+Touchpoints: `src/systems/terrain/rendering/vegetation/`, `src/render/threeTestTerrain.ts`, focused vegetation/render/growth/fire regressions, design/queue records
+
+Constraints: preserve the 28,000 high-detail ceiling, biome/fuel authority, deterministic cohorts, tree LOD and burn behavior, save/share schemas, and simulation-to-render dependency direction; do not extend the guarantee to 512x512 or larger experimental maps.
+
+Notes: The supplied static screenshot is a 512-scale run and therefore demonstrates the symptom but is outside this accepted guarantee. Automated fixtures cover a forced 29,999-tile forest, the exact 28,000-model ceiling with 1,999 fallbacks, stride-two rendering with 400/400 forest tiles covered, spring recruitment, chunked fallback draws, seasonal attributes, grounding, and ash collapse. Live localhost inspection is unavailable in the current VS Code surface, so final appearance requires a new supported-map capture.
+
+Status: done
+
+TSK-0207: Raise the large-fire visual instance ceiling
+
+Type: bug
+
+Why: A player capture showed roughly 1,600 actively burning cells while the 3D fire renderer stopped at 560 primary flame instances, making a large connected burn area look materially smaller than its simulation footprint.
+
+Done when:
+- [x] The primary flame mesh supports 4,096 instances, with 1,024 cross-slice and 1,024 front-segment capacities.
+- [x] Runtime mesh allocation and adaptive fire analysis consume the same domain-owned capacity constants.
+- [x] Ground-glow capacity continues to scale at two instances per primary flame slot.
+- [x] TypeScript, build, renderer, fire, and queue validation complete without changing fire simulation state or spread behavior.
+
+Touchpoints: `src/systems/fire/constants/fireRenderConstants.ts`, `src/systems/fire/rendering/fireFxRuntime.ts`, `scripts/render-performance-regression.mjs`, design/queue records
+
+Constraints: preserve fire simulation, active-fire counting, smoke limits, draw-call structure, adaptive overload fallbacks, saves, and deterministic behavior; live appearance and GPU cost require a refreshed player capture or supported Browser surface.
+
+Notes: The supplied capture reported about 1,626 clustered active tiles and a saturated 560-instance primary flame mesh. The higher fixed buffers add capacity without adding draw calls; existing overload and emergency modes still reduce emitted density under measured render pressure. Automated verification covers constants, compilation, and deterministic regressions, while post-change appearance remains capture-based in the current VS Code surface.
+
+Status: done
+
+TSK-0206: Replace tile-level fire cards with scalable event toasts
+
+Type: feature
+
+Why: Fire reports appeared as a centered multi-button card and could repeat as one connected front expanded beyond a distance threshold, creating noisy alerts and a presentation path that could not scale to other event types.
+
+Done when:
+- [x] Typed notification events carry type, category, severity, title, details, deduplication identity, and optional tile focus data through the core event bus.
+- [x] Bottom-center toasts show at most three entries for six visible seconds, pause while interacted with or hidden, fade for roughly 220 ms, and expose only focus and dismiss actions.
+- [x] Per-event notification preferences are registry-driven, persisted, and available in both in-game settings surfaces independently of event-source and pause controls.
+- [x] Fire detection aggregates four-neighbour connected fronts and preserves lineage through growth, split, merge, and rejoin so only disconnected new fronts alert; confidence escalation updates without re-alerting.
+- [x] TypeScript/build, notification, fire-detection, runtime-settings, and full fire regressions pass.
+
+Touchpoints: `src/systems/fire/sim/`, `src/ui/notifications/`, `src/core/gameEvents.ts`, runtime settings surfaces, `src/app/gameSessionRuntime.ts`, focused regression scripts, design/queue records
+
+Constraints: preserve hidden-fire knowledge rules, approximate suspected coordinates, incident pause behavior, simulation/render dependency direction, existing uncommitted work, and fire determinism; do not migrate non-fire notices or add notification history in this release.
+
+Notes: Implemented from the supplied static screenshot and approved behavior plan. Source and automated evidence cover layout rules, timing, focus/dismiss behavior, filtering, deduplication, and fire-front lineage. Live localhost appearance and interaction remain pending a capture or a supported Codex Browser surface because the current VS Code surface cannot inspect the running app.
+
+Status: done
+
+TSK-0205: Isolate incident speed from the strategic slider
+
+Type: bug
+
+Why: A refreshed fire profile showed newly detected fires continuing at `speed=20.00` and consuming half-day strategic steps. Slider mode ignored `simTimeMode`, so entering incident mode changed the incident speed index but active time still resolved from the strategic slider.
+
+Done when:
+- [x] Incident mode resolves from the dedicated incident presets in both button and slider UI configurations.
+- [x] Entering an incident preserves the strategic slider value for restoration instead of applying it to fire playback.
+- [x] Incident UI surfaces expose preset controls and cannot mutate the strategic slider through hidden incident slider actions.
+- [x] High-speed ignition, Advance-to-Next-Event fire pause/restoration, time-speed, TypeScript, and build regressions pass.
+
+Touchpoints: `src/core/timeSpeed.ts`, runtime time-control presentation/bindings, `scripts/time-speed-regression.mjs`, `scripts/fire-regression.mjs`, design/queue records
+
+Constraints: preserve fire spread equations, detection confidence/delay, strategic slider range, incident preset values, Advance-to-Next-Event restoration, saves, and checksums.
+
+Notes: Player telemetry showed `F57-F73` continuing at strategic `20x` after fire ignition, with each runtime episode simulating `0.50` days; it dropped to `1x` only after a manual speed change. The shared resolver now uses the incident index (`0.03125x` by default) while retaining the strategic `20x` slider value. Correcting the regression fixture to activate its constructed watch tower also confirmed that all three previously reported high-speed fire-event pause failures pass through the intended detection path.
+
+Status: done
+
+TSK-0204: Eliminate redundant expanding-fire work
+
+Type: bug
+
+Why: Supplied active-fire captures measured about 716-758 ms of fire work while fire rendering remained near 10 ms. The first pass cut work visits from roughly 670,000 to 51,700, exposing a second dominant cost: each burned vegetation tile advanced `terrainTypeRevision`, invalidating and rebuilding the full-map elevation-owned terrain-wind field on every fire substep even though that field does not read surface types.
+
+Done when:
+- [x] The fire kernel bypasses tiles whose fire, heat, suppression wetness, burn age, and heat release are all exactly zero without changing block construction or traversal order.
+- [x] Neighbor and ignition-threshold work is avoided when the tile state cannot consume it, with ignition candidate ordering and RNG calls unchanged.
+- [x] Fire telemetry reports exact inactive skips in console and overlay profiles so large-map benefit is measurable.
+- [x] Surface-type changes do not invalidate the terrain-wind field; elevation, dimensions, wind, and terrain-wind settings remain cache inputs.
+- [x] Fire profiles report exact terrain-wind time separately and put loop/wind timing before clipped overlay work counts.
+- [x] TypeScript/build, runtime-performance, fire, growth, renderer, and queue validation complete with unchanged fire settings and fixed-scenario outcomes.
+- [ ] A refreshed expanding-fire capture shows the skip count, lower fire cell-loop time, and materially reduced main-thread hitch.
+
+Touchpoints: `src/systems/fire/sim/fireKernel.ts`, `src/systems/fire/sim/terrainWindField.ts`, `src/systems/fire/types/fireRuntimeTypes.ts`, `src/systems/fire/controllers/fireRuntimeTelemetry.ts`, `src/ui/performance/runtimeTelemetryPresenter.ts`, focused regression scripts
+
+Constraints: preserve 16x16 block policy, seeded RNG order, spread calculations, simulation caps, terrain-sync policy, fire FX, saves, and checksums; do not reduce rendering quality or tune fire behavior.
+
+Notes: The supplied screenshots are static visual evidence that fire FX cost was small relative to simulation. A tested 8x8 block experiment was rejected because it changed complete fire/heat/fuel state and increased focused-scenario visits. The accepted exact-zero bypass skips 42-96% of focused work-block visits while leaving the existing calculations in their original order for every nonzero tile. The refreshed capture confirmed visits fell from roughly 670,000 to 51,700 but still measured about 716 ms of fire work; static inspection then found the terrain-wind cache key included the unrelated surface-type revision even though the field reads elevation, wind, dimensions, seed, and terrain-wind settings only. Runtime landform is generation-owned and static during a campaign, so burned forest-to-ash transitions now retain that cache. A 512x512 benchmark measured the wind field at about 248 ms cold, 0.08 ms after 1,000 surface revisions with the same field identity, and about 217 ms plus a new identity after a real wind change. Build, check, runtime-performance, growth, renderer, diff, and queue checks pass; the performance smoke completed in about 37 ms. The broader fire suite retains only its same three documented event-pause failures while its terrain-wind, spread, suppression, seasonal, and fixed-scenario outputs pass unchanged.
+
+Status: done
+
+TSK-0203: Keep annual vegetation refresh off the static terrain rebuild path
+
+Type: bug
+
+Why: TSK-0202 telemetry showed annual growth itself completing in about 69 ms while the resulting vegetation invalidation disabled terrain reuse and synchronously rebuilt river cutout and water resources for roughly 29 seconds.
+
+Done when:
+- [x] Annual vegetation revisions retain the reusable terrain sample and refresh current surface colour, tree instances, tree-burn metadata, and tree LOD without replacing static terrain or water resources.
+- [x] Vegetation resources live under one owned render root and can be replaced with bounded disposal that does not dispose shared tree asset materials.
+- [x] Terrain diagnostics identify the `vegetation-refresh` path and its exact vegetation-resource timing separately from full-build timing.
+- [x] TypeScript/build, growth, runtime-performance, renderer, terrain grounding/water, fire, and queue validation complete without simulation, determinism, fire-spread, water, or render-quality changes.
+- [ ] A refreshed 20x winter-to-spring capture confirms the former growth-linked terrain sync uses `path=vegetation-refresh`, performs no cutout/water build, and no longer produces the multi-second spring stall.
+
+Touchpoints: `src/app/gameSessionRuntime.ts`, `src/render/threeTest.ts`, `src/render/threeTestTerrain.ts`, `src/systems/terrain/rendering/vegetation/treeRenderResourceDisposal.ts`, focused regression scripts
+
+Constraints: preserve annual succession results, deterministic tree placement, terrain colour updates, tree burn/LOD behavior, static terrain/water geometry, fire behavior, saves, checksums, and rendering quality; do not tune simulation budgets.
+
+Notes: The supplied console capture linked `G1` (69.20 ms annual growth) to `T2` (29,092.90 ms terrain sync) whose hot step was `fullBuild`, including about 18.2 seconds of river cutout and 12.7 seconds of water work. Its `cause=none` exposed that the old 10-second correlation window expired inside the 29-second rebuild; growth-to-terrain linkage now uses the existing 60-second episode retention. The capture also exposed title/mapgen hitch-profile noise, so hitch attribution is limited to an active 3D run with a renderer snapshot. TypeScript/build, growth, runtime-performance, renderer, terrain-grounding, terrain-water, and queue checks pass. The broader fire regression completes with the same three pre-existing high-speed event-pause assertion failures documented by TSK-0202 and still reports the configured/applied `0.500` cap; this render-only fix does not touch those branches or fire RNG. Visual acceptance remains capture-based because this VS Code surface cannot inspect localhost.
+
+Status: done
+
 TSK-0201: Remove ephemeral creek seams and rigid segment chords
 
 Type: polish
@@ -17,6 +208,25 @@ Touchpoints: `src/render/terrain/water/channelRibbonCenterline.ts`, `src/render/
 Constraints: keep hydrology and road routing unchanged; preserve seeded determinism, permanent water cutout/seam authority, bridge behavior, seasonal wetness, traversable ephemeral gameplay, and mapgen-to-render dependency direction; add no random wiggle.
 
 Notes: Supplied close-up captures are valid visual evidence of the pre-fix seams, straight receiver chords, and road/creek co-location. Static inspection traced the seam to independent transparent quads plus eight-triangle node discs at a `0.018` world lift. The replacement shares internal strip sections, samples four points per receiver edge, lowers lift to `0.003`, and renders before road overlays. An attempted application of the curved centreline to permanent-water contours was rejected after regression measured two T-junctions, one open end, and a large cutout-time increase; permanent rivers retain their passing canonical receiver-capsule contour.
+
+Status: done
+
+TSK-0202: Correlate fire, annual-growth, terrain-sync, and hitch telemetry
+
+Type: bug
+
+Why: Rapid fire expansion and spring transitions produced large hitches, but periodic averages obscured whether simulation work, annual growth, terrain rebuilding, or rendering caused each episode.
+
+Done when:
+- [x] Annual growth and fire runtime expose exact domain-owned timing and work snapshots without changing deterministic simulation behavior.
+- [x] Copyable growth, fire, terrain-sync, and hitch profiles share event links, while the perf overlay retains four compact exact-event summaries for 60 seconds.
+- [x] Focused growth, runtime-performance, and renderer regressions plus TypeScript/build and queue validation pass; the broader fire suite reaches its existing three event-pause assertion failures with the configured/applied `0.500` runtime cap unchanged.
+
+Touchpoints: `src/systems/fire/`, `src/systems/terrain/sim/`, `src/core/diagnostics/`, `src/ui/performance/`, `src/app/gameSessionRuntime.ts`, focused regression scripts
+
+Constraints: telemetry only; preserve fire spread, vegetation growth, terrain-sync policy, rendering quality, simulation budgets, saves, and checksums; keep console output quiet when diagnostics are disabled.
+
+Notes: Implemented from player-supplied static logs and screenshots. TypeScript/build, growth, runtime-performance, renderer, diff, and queue checks pass. The broader fire regression remains red on its existing high-speed random-ignition/advance-to-event pause expectations; its output confirms the runtime cap remains configured and applied at `0.500`, and this telemetry-only change does not touch those event-pause branches or RNG flow. Live localhost overlay readability and real-run event correlation require a refreshed capture because this VS Code surface cannot inspect localhost.
 
 Status: done
 

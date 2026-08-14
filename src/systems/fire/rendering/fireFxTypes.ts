@@ -379,6 +379,8 @@ export type ThreeTestFireFx = {
     animationRate?: number
   ) => void;
   setEnvironmentSignals: (signals: FireFxEnvironmentSignals) => void;
+  setVisible: (visible: boolean) => void;
+  getVisible: () => boolean;
   setDebugControls: (controls: Partial<FireFxDebugControls>) => void;
   getDebugControls: () => FireFxDebugControls;
   getSparkDebugSnapshot: () => SparkDebugSnapshot;

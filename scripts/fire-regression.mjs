@@ -5,6 +5,7 @@ import { DEFAULT_FIRE_SETTINGS, INCIDENT_TIME_SPEED_OPTIONS } from "../dist/core
 import { createEffectsState } from "../dist/core/effectsState.js";
 import { RNG } from "../dist/core/rng.js";
 import { TILE_TYPE_IDS, createInitialState, syncTileSoA } from "../dist/core/state.js";
+import { TreeType } from "../dist/core/types.js";
 import { PHASES } from "../dist/core/time.js";
 import { applyFuel } from "../dist/core/tiles.js";
 import { buildSampleTypeMap } from "../dist/render/threeTestTerrain.js";
@@ -41,6 +42,9 @@ import {
   upgradeWatchTowerForTown
 } from "../dist/systems/fire/sim/fireDetection.js";
 import { createLabTile } from "../dist/systems/fire/sim/fireSimLabScenario.js";
+import { buildForestCoverageFallbackRenderer } from "../dist/systems/terrain/rendering/vegetation/forestCoverageFallbackRenderer.js";
+import { disposeTerrainVegetationRoot } from "../dist/systems/terrain/rendering/vegetation/treeRenderResourceDisposal.js";
+import { createTreeBurnController } from "../dist/render/terrain/vegetation/treeBurnController.js";
 
 const YEAR_DAYS = 360;
 const PHASE_DAYS = 90;
@@ -48,6 +52,49 @@ const BASE_STEP = 0.25;
 const GRID_SIZE = 33;
 const MAX_SCENARIO_STEPS = 4096;
 const EXPOSURE_SEQUENCE_MAX_DAYS = 20;
+
+const fallbackBurnFixture = buildForestCoverageFallbackRenderer({
+  instances: [{
+    x: 0,
+    y: 0,
+    z: 0,
+    scale: 1,
+    rotation: 0,
+    treeType: TreeType.Pine,
+    variantIndex: 0,
+    tileIndex: 0,
+    tileX: 0,
+    tileY: 0,
+    sourceHeight: 1
+  }],
+  canopyPalette: { [TreeType.Pine]: { r: 64, g: 104, b: 70 } },
+  tileFuel: new Float32Array([1]),
+  worldSeed: 71
+});
+const fallbackBurnController = createTreeBurnController(
+  fallbackBurnFixture.burnStates,
+  TILE_TYPE_IDS.ash,
+  new Map([[0, { x: 0, y: 0, z: 0, crownHeight: 0.7, crownRadius: 0.2, trunkHeight: 0.4, treeCount: 1 }]])
+);
+const fallbackAshWorld = {
+  lastActiveFires: 1,
+  fireBoundsActive: true,
+  fireMinX: 0,
+  fireMaxX: 0,
+  fireMinY: 0,
+  fireMaxY: 0,
+  tileFire: new Float32Array([0]),
+  tileFuel: new Float32Array([0]),
+  tileHeat: new Float32Array([0]),
+  tileTypeId: new Uint8Array([TILE_TYPE_IDS.ash]),
+  fireSettings: { heatCap: 5 }
+};
+fallbackBurnController.update(1_000, fallbackAshWorld);
+fallbackBurnController.update(2_000, fallbackAshWorld);
+if (!fallbackBurnFixture.burnStates.every((state) => state.visibilityQ[0] === 0)) {
+  throw new Error("ash conversion must collapse both trunk and canopy coverage-fallback geometry");
+}
+disposeTerrainVegetationRoot(fallbackBurnFixture.root);
 
 const getCenter = (state) => Math.floor(state.grid.cols / 2);
 const syncFireActivity = (state, activeFires = state.lastActiveFires) => applyFireActivityMetrics(state, activeFires);
@@ -162,10 +209,28 @@ const addFullMapWatchTower = (state) => {
   state.budget = Math.max(state.budget, 10000);
   state.towns = [createDetectionTown(1, center, center)];
   buildWatchTowerForTown(state, 1);
+  const builtTower = getWatchTowerForTown(state, 1);
+  if (builtTower) {
+    builtTower.active = true;
+    builtTower.constructionKind = null;
+    builtTower.constructionTargetLevel = null;
+    builtTower.constructionDaysRemaining = 0;
+  }
   upgradeWatchTowerForTown(state, 1);
+  const upgradedTower = getWatchTowerForTown(state, 1);
+  if (upgradedTower) {
+    upgradedTower.active = true;
+    upgradedTower.constructionKind = null;
+    upgradedTower.constructionTargetLevel = null;
+    upgradedTower.constructionDaysRemaining = 0;
+  }
   upgradeWatchTowerForTown(state, 1);
   const tower = getWatchTowerForTown(state, 1);
   if (tower) {
+    tower.active = true;
+    tower.constructionKind = null;
+    tower.constructionTargetLevel = null;
+    tower.constructionDaysRemaining = 0;
     tower.detectionRadius = Math.max(tower.detectionRadius, state.grid.cols + state.grid.rows);
   }
   state.phase = previousPhase;
@@ -220,9 +285,16 @@ const seedAlertIncident = (state) => {
   state.simTimeMode = "strategic";
   state.timeSpeedIndex = state.strategicTimeSpeedIndex;
   state.paused = false;
-  state.latestFireAlert = null;
+  state.fireKnowledge.latestReportId = null;
+  state.fireKnowledge.reports.length = 0;
+  state.fireKnowledge.frontReportIdByTile.fill(0);
   syncFireActivity(state, 0);
   return idx;
+};
+
+const getLatestFireAlertReport = (state) => {
+  const id = state.fireKnowledge.latestReportId;
+  return id === null ? null : state.fireKnowledge.reports.find((report) => report.id === id) ?? null;
 };
 
 const seedExposureIncident = (state) => {
@@ -294,15 +366,6 @@ const seedExposureIncident = (state) => {
   state.simTimeMode = "incident";
   state.timeSpeedIndex = state.incidentTimeSpeedIndex;
   state.paused = false;
-  state.latestFireAlert = {
-    id: state.nextFireAlertId++,
-    tileX: center,
-    tileY: center,
-    townId: -1,
-    year: state.year,
-    careerDay: state.careerDay,
-    phaseDay: state.phaseDay
-  };
   markFireBlockActiveByTile(state, sourceIdx);
   markFireBlockActiveByTile(state, targetIdx);
   syncFireActivity(state, 1);
@@ -996,7 +1059,12 @@ const failures = [];
   };
 
   const flatWorld = buildWindWorld({ name: "E", dx: 1, dy: 0, strength: 1 });
-  const flat = sampleField(flatWorld, 8, 8);
+  const flatField = getTerrainWindField(flatWorld);
+  const flat = sampleTerrainWindAt(flatField, 8 * flatWorld.grid.cols + 8, flatWorld.wind);
+  flatWorld.terrainTypeRevision += 1;
+  const surfaceRevisionField = getTerrainWindField(flatWorld);
+  flatWorld.wind = { ...flatWorld.wind, strength: 1.1 };
+  const changedWindField = getTerrainWindField(flatWorld);
 
   const ridgeWorld = buildWindWorld({ name: "E", dx: 1, dy: 0, strength: 1 }, (_world, setElev) => {
     for (let y = 4; y <= 12; y += 1) {
@@ -1035,6 +1103,12 @@ const failures = [];
 
   if (Math.abs(flat.dx - 1) > 0.001 || Math.abs(flat.dy) > 0.001 || Math.abs(flat.strength - 1) > 0.001) {
     failures.push("Propagated terrain wind field changed flat terrain wind.");
+  }
+  if (surfaceRevisionField !== flatField) {
+    failures.push("Surface-type revision unnecessarily invalidated the elevation-owned terrain wind field.");
+  }
+  if (changedWindField === surfaceRevisionField) {
+    failures.push("Terrain wind field cache did not invalidate after the wind input changed.");
   }
   if (!(northShoulder.dy < -0.14 && southShoulder.dy > 0.14)) {
     failures.push("Propagated terrain wind did not split around a central ridge.");
@@ -1230,10 +1304,11 @@ const failures = [];
   addFullMapWatchTower(state);
   seedAlertIncident(state);
   stepSim(state, effects, rng, BASE_STEP);
+  const alertReport = getLatestFireAlertReport(state);
   console.log(
-    `\nIncident Alert\npaused=${state.paused ? 1 : 0} mode=${state.simTimeMode} speedIndex=${state.timeSpeedIndex} alertId=${state.latestFireAlert?.id ?? "none"}`
+    `\nIncident Alert\npaused=${state.paused ? 1 : 0} mode=${state.simTimeMode} speedIndex=${state.timeSpeedIndex} alertId=${alertReport?.id ?? "none"}`
   );
-  if (!state.paused || state.simTimeMode !== "incident" || !state.latestFireAlert) {
+  if (!state.paused || state.simTimeMode !== "incident" || !alertReport) {
     failures.push("New incidents did not auto-pause and switch into incident mode.");
   }
 }
@@ -1248,10 +1323,11 @@ const failures = [];
   state.timeSpeedSliderValue = 80;
   state.paused = false;
   stepSim(state, effects, rng, BASE_STEP * 80);
+  const alertReport = getLatestFireAlertReport(state);
   console.log(
-    `\nHigh-Speed Season Entry Alert\nphase=${state.phase} paused=${state.paused ? 1 : 0} mode=${state.simTimeMode} active=${state.lastActiveFires} alertId=${state.latestFireAlert?.id ?? "none"} burned=${state.burnedTiles}`
+    `\nHigh-Speed Season Entry Alert\nphase=${state.phase} paused=${state.paused ? 1 : 0} mode=${state.simTimeMode} active=${state.lastActiveFires} alertId=${alertReport?.id ?? "none"} burned=${state.burnedTiles}`
   );
-  if (!state.paused || state.simTimeMode !== "incident" || !state.latestFireAlert) {
+  if (!state.paused || state.simTimeMode !== "incident" || !alertReport) {
     failures.push("High-speed season entry did not pause immediately on the seeded fire incident.");
   }
 }
@@ -1275,7 +1351,7 @@ const failures = [];
     appliedDelta > 0.5 + 0.0001 ||
     !state.paused ||
     state.simTimeMode !== "incident" ||
-    !state.latestFireAlert ||
+    !getLatestFireAlertReport(state) ||
     state.firePerfSimulatedDays > 0.5 + 0.0001
   ) {
     failures.push("High-speed random ignition was not capped before incident pause.");
@@ -1300,7 +1376,7 @@ const failures = [];
     appliedDelta > 0.5 + 0.0001 ||
     !state.paused ||
     state.simTimeMode !== "incident" ||
-    !state.latestFireAlert ||
+    !getLatestFireAlertReport(state) ||
     state.advanceToNextEvent !== null ||
     Math.abs(state.timeSpeedSliderValue - 17) > 0.0001
   ) {
@@ -1317,18 +1393,21 @@ withRuntimeSetting("pauseOnFireEvent", false, () => {
   state.timeSpeedSliderValue = 19;
   const requested = requestAdvanceToNextEvent(state);
   const { cap, appliedDelta } = stepWithRuntimeCap(state, effects, rng, BASE_STEP * 80);
+  const alertReport = getLatestFireAlertReport(state);
   console.log(
-    `\nAdvance-To-Event Fire Pause Disabled\nrequested=${requested ? 1 : 0} cap=${cap?.toFixed(3) ?? "none"} applied=${appliedDelta.toFixed(3)} paused=${state.paused ? 1 : 0} advance=${state.advanceToNextEvent ? 1 : 0} alertId=${state.latestFireAlert?.id ?? "none"} active=${state.lastActiveFires}`
+    `\nAdvance-To-Event Fire Pause Disabled\nrequested=${requested ? 1 : 0} cap=${cap?.toFixed(3) ?? "none"} applied=${appliedDelta.toFixed(3)} paused=${state.paused ? 1 : 0} mode=${state.simTimeMode} advance=${state.advanceToNextEvent ? 1 : 0} alertId=${alertReport?.id ?? "none"} active=${state.lastActiveFires}`
   );
   if (
     !requested ||
     cap === null ||
-    !state.latestFireAlert ||
+    !alertReport ||
     state.paused ||
-    state.advanceToNextEvent === null ||
+    state.simTimeMode !== "incident" ||
+    state.advanceToNextEvent !== null ||
+    Math.abs(state.timeSpeedSliderValue - 19) > 0.0001 ||
     state.lastActiveFires <= 0
   ) {
-    failures.push("Disabled fire pause did not let a fire event occur while advance-to-event continued.");
+    failures.push("Disabled fire pause did not stop advance-to-event and continue in incident time.");
   }
 });
 

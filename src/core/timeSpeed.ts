@@ -49,7 +49,7 @@ export type TimeSpeedPauseStateLike = TimeSpeedStateLike & {
 };
 
 export const getResolvedTimeSpeedValue = (state: TimeSpeedStateLike): number =>
-  state.timeSpeedControlMode === "slider"
+  state.simTimeMode === "strategic" && state.timeSpeedControlMode === "slider"
     ? clampTimeSpeedSliderValue(state.timeSpeedSliderValue)
     : getIndexedTimeSpeedValue(state.simTimeMode, state.timeSpeedIndex);
 

@@ -1,6 +1,7 @@
 import type { WorldState } from "../core/state.js";
 import { CHARACTERS, CHIEF_GENDERS, DEFAULT_CHIEF_GENDER, getCharacterInitials } from "../core/characters.js";
 import type { CharacterId, CharacterDefinition, ChiefGender } from "../core/characters.js";
+import { DEFAULT_CAMPAIGN_DIFFICULTY_ID, type CampaignDifficultyId } from "../core/campaign.js";
 import type { MapSizeId } from "../core/config.js";
 import type { FireSettings } from "../core/types.js";
 import { DEFAULT_MAP_SIZE, DEFAULT_RUN_OPTIONS, DEFAULT_RUN_SEED, normalizeFireSettings } from "./run-config.js";
@@ -23,12 +24,19 @@ import {
   syncTerrainControlOutputs,
   TERRAIN_RUN_GROUPS
 } from "./terrain-schema.js";
+import {
+  CAMPAIGN_DIFFICULTIES,
+  getCampaignDifficultyDefinition
+} from "../systems/campaign/constants/campaignDifficultyDefinitions.js";
+import { resolveStartingResponseTeamCount } from "../systems/campaign/sim/campaignStartingResources.js";
+import { createTitleFlameCanvasController } from "./title-screen/titleFlameCanvasController.js";
 export type CharacterSelectRefs = {
   characterScreen: HTMLDivElement;
   characterGrid: HTMLDivElement;
   characterSummary: HTMLParagraphElement;
   characterConfirm: HTMLButtonElement;
   characterPreviewPortrait: HTMLDivElement;
+  characterPreviewFlameCanvas: HTMLCanvasElement;
   characterPreviewImage: HTMLImageElement;
   characterPreviewInitials: HTMLSpanElement;
   characterNameInput: HTMLInputElement;
@@ -42,6 +50,7 @@ export type CharacterSelectRefs = {
   runScenarioLoad: HTMLButtonElement;
   runScenarioState: HTMLDivElement;
   runUnlimitedMoney: HTMLInputElement;
+  runDifficultyOptions: HTMLDivElement;
   terrainControls: HTMLDivElement;
   fireInputs: HTMLInputElement[];
 };
@@ -79,6 +88,7 @@ const cloneRunConfig = (config: NewRunConfig): NewRunConfig => ({
   characterId: config.characterId,
   chiefGender: config.chiefGender ?? DEFAULT_CHIEF_GENDER,
   callsign: config.callsign,
+  difficultyId: config.difficultyId ?? DEFAULT_CAMPAIGN_DIFFICULTY_ID,
   options: cloneRunOptions(config.options)
 });
 
@@ -155,7 +165,11 @@ export function initCharacterSelect(
   state: WorldState,
   onConfirm: (config: NewRunConfig) => void | Promise<void>,
   initialConfig?: NewRunConfig
-): { open: (config: NewRunConfig) => void; getCurrentConfig: () => NewRunConfig } {
+): {
+  open: (config: NewRunConfig) => void;
+  getCurrentConfig: () => NewRunConfig;
+  destroy: () => void;
+} {
   const defaultConfig: NewRunConfig = cloneRunConfig(
     initialConfig ?? {
       seed: DEFAULT_RUN_SEED,
@@ -168,16 +182,83 @@ export function initCharacterSelect(
       },
       characterId: state.campaign.characterId,
       chiefGender: state.campaign.chiefGender,
-      callsign: state.campaign.callsign
+      callsign: state.campaign.callsign,
+      difficultyId: state.campaign.difficultyId
     }
   );
   let selectedId: CharacterId = defaultConfig.characterId;
   let selectedGender: ChiefGender = defaultConfig.chiefGender;
+  let selectedDifficultyId: CampaignDifficultyId = defaultConfig.difficultyId;
   let fuelProfileOverrides = { ...defaultConfig.options.fuelProfiles };
   const cards = new Map<CharacterId, HTMLButtonElement>();
   const genderButtons = new Map<ChiefGender, HTMLButtonElement>();
+  const difficultyButtons = new Map<CampaignDifficultyId, HTMLButtonElement>();
+  const titleFlameCanvasController = createTitleFlameCanvasController(ui.characterPreviewFlameCanvas);
   const genderControl = document.createElement("div");
   const previewDetails = document.createElement("div");
+
+  const updateDifficultySelection = (): void => {
+    difficultyButtons.forEach((button, difficultyId) => {
+      const active = difficultyId === selectedDifficultyId;
+      button.classList.toggle("is-active", active);
+      button.setAttribute("aria-checked", active ? "true" : "false");
+      button.tabIndex = active ? 0 : -1;
+    });
+    const difficulty = getCampaignDifficultyDefinition(selectedDifficultyId);
+    ui.characterPreviewPortrait.dataset.difficultyId = difficulty.id;
+    titleFlameCanvasController.setFlameScale(difficulty.portraitFlameScale);
+  };
+
+  const selectDifficulty = (difficultyId: CampaignDifficultyId, focus = false): void => {
+    selectedDifficultyId = difficultyId;
+    state.campaign.difficultyId = difficultyId;
+    updateDifficultySelection();
+    if (focus) {
+      difficultyButtons.get(difficultyId)?.focus();
+    }
+  };
+
+  const moveDifficultySelection = (currentId: CampaignDifficultyId, offset: number): void => {
+    const currentIndex = CAMPAIGN_DIFFICULTIES.findIndex((difficulty) => difficulty.id === currentId);
+    const nextIndex = (currentIndex + offset + CAMPAIGN_DIFFICULTIES.length) % CAMPAIGN_DIFFICULTIES.length;
+    selectDifficulty(CAMPAIGN_DIFFICULTIES[nextIndex]!.id, true);
+  };
+
+  ui.runDifficultyOptions.innerHTML = "";
+  CAMPAIGN_DIFFICULTIES.forEach((difficulty) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "run-difficulty-option";
+    button.dataset.difficultyId = difficulty.id;
+    button.setAttribute("role", "radio");
+    const budgetPercent = Math.round(difficulty.budgetMultiplier * 100);
+    const teamCount = resolveStartingResponseTeamCount(difficulty.id);
+    button.innerHTML = `
+      <span class="run-difficulty-name">${difficulty.label}</span>
+      ${difficulty.id === DEFAULT_CAMPAIGN_DIFFICULTY_ID ? '<span class="run-difficulty-default">Default</span>' : ""}
+      <span class="run-difficulty-meta">${budgetPercent}% starting budget</span>
+      <span class="run-difficulty-meta">${teamCount} response ${teamCount === 1 ? "team" : "teams"}</span>
+    `;
+    button.addEventListener("click", () => selectDifficulty(difficulty.id));
+    button.addEventListener("keydown", (event) => {
+      if (event.key === "ArrowLeft" || event.key === "ArrowUp") {
+        event.preventDefault();
+        moveDifficultySelection(difficulty.id, -1);
+      } else if (event.key === "ArrowRight" || event.key === "ArrowDown") {
+        event.preventDefault();
+        moveDifficultySelection(difficulty.id, 1);
+      } else if (event.key === "Home") {
+        event.preventDefault();
+        selectDifficulty(CAMPAIGN_DIFFICULTIES[0]!.id, true);
+      } else if (event.key === "End") {
+        event.preventDefault();
+        selectDifficulty(CAMPAIGN_DIFFICULTIES[CAMPAIGN_DIFFICULTIES.length - 1]!.id, true);
+      }
+    });
+    ui.runDifficultyOptions.appendChild(button);
+    difficultyButtons.set(difficulty.id, button);
+  });
+  updateDifficultySelection();
   let mapScenarios: MapScenario[] = [];
   let selectedScenarioOptionId = "";
 
@@ -488,9 +569,11 @@ export function initCharacterSelect(
     const nextConfig = cloneRunConfig(config);
     selectedId = nextConfig.characterId;
     selectedGender = nextConfig.chiefGender;
+    selectedDifficultyId = nextConfig.difficultyId;
     state.campaign.characterId = selectedId;
     state.campaign.chiefGender = selectedGender;
     state.campaign.callsign = nextConfig.callsign;
+    state.campaign.difficultyId = selectedDifficultyId;
     ui.characterNameInput.value = nextConfig.callsign;
     setSelectedMapSize(nextConfig.mapSize);
     ui.runUnlimitedMoney.checked = nextConfig.options.unlimitedMoney;
@@ -506,6 +589,7 @@ export function initCharacterSelect(
       applyRandomName();
     }
     updateSelection();
+    updateDifficultySelection();
     updateConfirmState();
   };
 
@@ -599,6 +683,7 @@ export function initCharacterSelect(
   ui.characterConfirm.addEventListener("click", () => {
     state.campaign.characterId = selectedId;
     state.campaign.chiefGender = selectedGender;
+    state.campaign.difficultyId = selectedDifficultyId;
     const trimmed = ui.characterNameInput.value.trim();
     const callsign = trimmed || buildCallsign(selectedId, selectedGender);
     state.campaign.callsign = callsign;
@@ -609,7 +694,8 @@ export function initCharacterSelect(
       options: getRunOptions(),
       characterId: selectedId,
       chiefGender: selectedGender,
-      callsign
+      callsign,
+      difficultyId: selectedDifficultyId
     };
     ui.characterScreen.classList.add("hidden");
     state.paused = false;
@@ -625,7 +711,8 @@ export function initCharacterSelect(
       options: getRunOptions(),
       characterId: selectedId,
       chiefGender: selectedGender,
-      callsign
+      callsign,
+      difficultyId: selectedDifficultyId
     };
   };
 
@@ -635,5 +722,5 @@ export function initCharacterSelect(
     ui.characterScreen.classList.remove("hidden");
   };
 
-  return { open, getCurrentConfig };
+  return { open, getCurrentConfig, destroy: titleFlameCanvasController.destroy };
 }

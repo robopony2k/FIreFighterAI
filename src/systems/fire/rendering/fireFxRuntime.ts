@@ -76,14 +76,16 @@ import {
   smoothstep,
   sortSmokeParticlesByDepth
 } from "./fireRenderMath.js";
+import {
+  EMBER_MAX_INSTANCES,
+  FIRE_CROSS_MAX_INSTANCES,
+  FIRE_MAX_INSTANCES,
+  GLOW_MAX_INSTANCES,
+  SMOKE_MAX_INSTANCES,
+  SPARK_POINT_MAX_INSTANCES,
+  SPARK_STREAK_MAX_INSTANCES
+} from "../constants/fireRenderConstants.js";
 
-const FIRE_MAX_INSTANCES = 560;
-const FIRE_CROSS_MAX_INSTANCES = 180;
-const SMOKE_MAX_INSTANCES = 1400;
-const EMBER_MAX_INSTANCES = 700;
-const SPARK_STREAK_MAX_INSTANCES = 900;
-const SPARK_POINT_MAX_INSTANCES = 1800;
-const GLOW_MAX_INSTANCES = FIRE_MAX_INSTANCES * 2;
 const SMOKE_QUALITY_FALLBACK_FPS = 56;
 const SMOKE_QUALITY_RECOVERY_FPS = 61;
 const SMOKE_QUALITY_FALLBACK_SCENE_MS = 14;
@@ -126,8 +128,6 @@ const DEFAULT_FIRE_WALL_BLEND = 0.62;
 const DEFAULT_FIRE_HERO_VOLUMETRIC_SHARE = 0.55;
 const DEFAULT_FIRE_BUDGET_SCALE = 1.0;
 const FIRE_RENDER_SNAPSHOT_PADDING = 2;
-const FIRE_FRONT_MAX_INSTANCES = 320;
-const FIRE_FRONT_MIN_INSTANCES = 48;
 const FIRE_FRONT_CORRIDOR_MAX_SEGMENTS = 14;
 const FIRE_FRONT_VISUAL_MIN = 0.08;
 const FIRE_FRONT_PASS_MIN_WEIGHT = 6;
@@ -3636,6 +3636,24 @@ export const createThreeTestFireFx = (
     modes: { ...fireDebugSnapshot.modes }
   });
   const getAudioClusterSnapshot = (): FireAudioClusterSnapshot[] => audioClusterSnapshots;
+  const fireVisualObjects = [
+    fireMesh,
+    fireCrossMesh,
+    fireCoreMesh,
+    groundGlowMesh,
+    smokePoints,
+    emberMesh,
+    sparkStreakMesh,
+    sparkPoints
+  ];
+  let fireFxVisible = true;
+  const setVisible = (visible: boolean): void => {
+    fireFxVisible = visible;
+    fireVisualObjects.forEach((object) => {
+      object.visible = visible;
+    });
+  };
+  const getVisible = (): boolean => fireFxVisible;
 
   const setDebugControls = (controls: Partial<FireFxDebugControls>): void => {
     if (Object.keys(controls).length === 0) {
@@ -3656,6 +3674,8 @@ export const createThreeTestFireFx = (
     setSimulationAlpha,
     update,
     setEnvironmentSignals,
+    setVisible,
+    getVisible,
     setDebugControls,
     getDebugControls,
     getSparkDebugSnapshot,

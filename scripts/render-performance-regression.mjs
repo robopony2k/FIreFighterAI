@@ -3,6 +3,11 @@ import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import * as THREE from "three";
 import { TreeType } from "../dist/core/types.js";
+import { TILE_TYPE_IDS } from "../dist/core/state.js";
+import {
+  buildTerrainMesh,
+  prepareTerrainRenderSurface
+} from "../dist/render/threeTestTerrain.js";
 import {
   TERRAIN_RENDER_CHUNK_TILE_SPAN,
   finalizeInstancedMeshBounds,
@@ -52,6 +57,7 @@ import {
 import {
   createSeasonalSkyDome
 } from "../dist/systems/climate/rendering/seasonalSkyDome.js";
+import { createGpuCategoryCaptureController } from "../dist/render/diagnostics/gpuCategoryCapture.js";
 import {
   TREE_IMPOSTOR_AZIMUTH_COUNT,
   buildTreeImpostorFrameLayout
@@ -66,7 +72,106 @@ import {
   resolveForestTreeCohort,
   resolveTreeBudgetPriority
 } from "../dist/systems/terrain/rendering/vegetation/treePlacementPlan.js";
+import { buildForestCoverageFallbackRenderer } from "../dist/systems/terrain/rendering/vegetation/forestCoverageFallbackRenderer.js";
 import { createTreeBurnController } from "../dist/render/terrain/vegetation/treeBurnController.js";
+import { disposeTerrainVegetationRoot } from "../dist/systems/terrain/rendering/vegetation/treeRenderResourceDisposal.js";
+import {
+  FIRE_CROSS_MAX_INSTANCES,
+  FIRE_FRONT_MAX_INSTANCES,
+  FIRE_MAX_INSTANCES,
+  GLOW_MAX_INSTANCES
+} from "../dist/systems/fire/constants/fireRenderConstants.js";
+
+assert.equal(FIRE_MAX_INSTANCES, 4096, "large fire fronts should retain the raised 4,096-instance flame capacity");
+assert.equal(FIRE_CROSS_MAX_INSTANCES, 1024, "hero cross-slices should scale with the raised flame capacity");
+assert.equal(FIRE_FRONT_MAX_INSTANCES, 1024, "front segments should not retain the legacy 320-instance ceiling");
+assert.equal(GLOW_MAX_INSTANCES, FIRE_MAX_INSTANCES * 2, "ground-glow capacity should track the flame capacity");
+
+const coverageFallbackChunk = buildForestCoverageFallbackRenderer({
+  instances: [0, 1, 2].map((tileIndex) => ({
+    x: tileIndex,
+    y: 0,
+    z: 0,
+    scale: 1,
+    rotation: 0,
+    treeType: TreeType.Pine,
+    variantIndex: 0,
+    tileIndex,
+    tileX: tileIndex,
+    tileY: 0,
+    sourceHeight: 1
+  })),
+  canopyPalette: { [TreeType.Pine]: { r: 64, g: 104, b: 70 } },
+  tileFuel: new Float32Array([1, 1, 1]),
+  worldSeed: 71,
+  seasonVisual: {
+    enabled: true,
+    uniforms: {
+      uRisk01: { value: 0.2 },
+      uSeasonT01: { value: 0.3 },
+      uWorldSeed: { value: 71 }
+    },
+    phaseShiftMax: 0.08,
+    rateJitter: 0.035,
+    autumnHueJitter: 0.22
+  }
+});
+assert.equal(coverageFallbackChunk.drawCalls, 2, "one occupied fallback chunk must use only trunk and canopy draws");
+assert.equal(coverageFallbackChunk.burnStates.length, 2, "fallback trunk and canopy must both participate in burn removal");
+coverageFallbackChunk.root.traverse((child) => {
+  if (!(child instanceof THREE.InstancedMesh)) return;
+  assert.equal(child.castShadow, false, "coverage fallback geometry must not expand the shadow pass");
+  assert.ok(child.geometry.getAttribute("aSeasonPhaseOffset"), "coverage fallback geometry must retain seasonal attributes");
+});
+disposeTerrainVegetationRoot(coverageFallbackChunk.root);
+
+const strideTwoForestCoverage = (() => {
+  const cols = 256;
+  const rows = 256;
+  const total = cols * rows;
+  const tileTypes = new Uint8Array(total).fill(TILE_TYPE_IDS.grass);
+  let forestTiles = 0;
+  for (let y = 40; y < 60; y += 1) {
+    for (let x = 50; x < 70; x += 1) {
+      tileTypes[y * cols + x] = TILE_TYPE_IDS.forest;
+      forestTiles += 1;
+    }
+  }
+  const surface = prepareTerrainRenderSurface({
+    cols,
+    rows,
+    elevations: new Float32Array(total).fill(0.24),
+    tileTypes,
+    tileFuel: new Float32Array(total).fill(1),
+    tileVegetationAge: new Float32Array(total),
+    tileCanopyCover: new Float32Array(total),
+    tileStemDensity: new Uint8Array(total),
+    treesEnabled: true,
+    worldSeed: 417
+  });
+  assert.equal(surface.step, 2, "the supported 256 terrain fixture must exercise stride-two terrain sampling");
+  const result = buildTerrainMesh(surface, null, null, null, undefined, null, "models", "vegetation-only");
+  assert.equal(result.telemetry.counts.eligibleForestTiles, forestTiles);
+  assert.equal(result.telemetry.counts.modelCoveredForestTiles, forestTiles);
+  assert.equal(result.telemetry.counts.fallbackCoveredForestTiles, 0);
+  assert.equal(result.telemetry.counts.uncoveredForestTiles, 0);
+  assert.equal(result.telemetry.counts.treeInstances, forestTiles);
+  assert.equal(result.telemetry.counts.forestCoverageFallbackDrawCalls, 0);
+  let renderedForestInstances = 0;
+  result.vegetationRoot.traverse((child) => {
+    if (child instanceof THREE.InstancedMesh && child.name.startsWith("terrain-tree-fallback-trunk-")) {
+      renderedForestInstances += child.count;
+    }
+  });
+  assert.equal(renderedForestInstances, forestTiles, "stride-two terrain must still emit one visible tree per forest tile");
+  result.treeLod?.dispose();
+  disposeTerrainVegetationRoot(result.vegetationRoot);
+  result.mesh.geometry.dispose();
+  const materials = Array.isArray(result.mesh.material) ? result.mesh.material : [result.mesh.material];
+  materials.forEach((material) => material.dispose());
+  return result.telemetry.counts;
+})();
+assert.equal(strideTwoForestCoverage.uncoveredForestTiles, 0);
 
 const focusSurface = {
   cols: 11,
@@ -128,6 +233,21 @@ boundedMesh.setMatrixAt(1, transform.makeTranslation(5, 0, 0));
 finalizeInstancedMeshBounds(boundedMesh);
 assert.equal(boundedMesh.frustumCulled, true, "chunk meshes should use normal frustum culling");
 assert.ok((boundedMesh.boundingSphere?.radius ?? 0) >= 5, "chunk bounds should include every instance");
+
+const vegetationDisposalRoot = new THREE.Group();
+const sharedTreeMaterial = new THREE.MeshBasicMaterial();
+const ownedTreeMaterial = new THREE.MeshBasicMaterial();
+let sharedMaterialDisposals = 0;
+let ownedMaterialDisposals = 0;
+sharedTreeMaterial.dispose = () => { sharedMaterialDisposals += 1; };
+ownedTreeMaterial.dispose = () => { ownedMaterialDisposals += 1; };
+const sharedAssetMesh = new THREE.Mesh(new THREE.BufferGeometry(), sharedTreeMaterial);
+const generatedFallbackMesh = new THREE.Mesh(new THREE.BufferGeometry(), ownedTreeMaterial);
+generatedFallbackMesh.userData.terrainVegetationOwnsMaterial = true;
+vegetationDisposalRoot.add(sharedAssetMesh, generatedFallbackMesh);
+disposeTerrainVegetationRoot(vegetationDisposalRoot);
+assert.equal(sharedMaterialDisposals, 0, "vegetation replacement must preserve shared tree asset materials");
+assert.equal(ownedMaterialDisposals, 1, "vegetation replacement must dispose generated fallback materials exactly once");
 
 const treeVariantCounts = {
   [TreeType.Pine]: 3,
@@ -590,6 +710,14 @@ const threeTestTerrainSource = await readFile(
   fileURLToPath(new URL("../src/render/threeTestTerrain.ts", import.meta.url)),
   "utf8"
 );
+const gpuTimerSource = await readFile(
+  fileURLToPath(new URL("../src/core/rendering/webglGpuTimer.ts", import.meta.url)),
+  "utf8"
+);
+const gpuCategoryCaptureSource = await readFile(
+  fileURLToPath(new URL("../src/render/diagnostics/gpuCategoryCapture.ts", import.meta.url)),
+  "utf8"
+);
 const riverWaterHelperSource = await readFile(
   fileURLToPath(new URL("../src/render/threeTestRiverWaterHelper.ts", import.meta.url)),
   "utf8"
@@ -597,6 +725,42 @@ const riverWaterHelperSource = await readFile(
 const gameSessionRuntimeSource = await readFile(
   fileURLToPath(new URL("../src/app/gameSessionRuntime.ts", import.meta.url)),
   "utf8"
+);
+
+assert.match(
+  gameSessionRuntimeSource,
+  /const terrainSample = buildThreeTestSample\(!force\)/,
+  "vegetation invalidation must retain the reusable terrain sample path"
+);
+assert.doesNotMatch(
+  gameSessionRuntimeSource,
+  /buildThreeTestSample\(!force && !rebuildVegetationInstances\)/,
+  "vegetation instance refresh must not disable static terrain reuse"
+);
+assert.match(
+  gameSessionRuntimeSource,
+  /isDetailedRuntimeTelemetryEnabled\(\) && activeThreeOverlayMode === "run" && threePerf/,
+  "hitch profiles must ignore title-screen and map-generation frame gaps"
+);
+assert.match(
+  threeTestSource,
+  /"vegetation-only"[\s\S]*disposeTerrainVegetationRoot[\s\S]*terrainMesh\.add\(nextVegetation\.vegetationRoot\)/,
+  "the renderer must replace vegetation-owned resources without replacing the terrain mesh"
+);
+assert.match(
+  threeTestTerrainSource,
+  /if \(vegetationOnly\)[\s\S]*timingsMs\.total[\s\S]*vegetationRoot[\s\S]*treeLod/,
+  "the vegetation-only builder must return before structure and water construction"
+);
+assert.match(
+  threeTestSource,
+  /forestCoverage=\$\{counts\.modelCoveredForestTiles\}\+\$\{counts\.fallbackCoveredForestTiles\}[\s\S]*uncoveredForest=\$\{counts\.uncoveredForestTiles\}/,
+  "copyable terrain telemetry must publish model, fallback, and uncovered forest coverage"
+);
+assert.match(
+  gameSessionRuntimeSource,
+  /forest coverage \$\{formatInt\(build\.counts\.modelCoveredForestTiles\)\}\+\$\{formatInt\(build\.counts\.fallbackCoveredForestTiles\)\}[\s\S]*uncovered \$\{formatInt\(build\.counts\.uncoveredForestTiles\)\}/,
+  "the performance overlay must expose forest coverage diagnostics"
 );
 const loadingTipsSource = await readFile(
   fileURLToPath(new URL("../src/ui/loadingTips.ts", import.meta.url)),
@@ -952,6 +1116,17 @@ assert.match(
   /includesShadowRefresh[\s\S]*submittedTriangles - lastColorPassTriangles/,
   "renderer diagnostics must separate estimated shadow submissions from stable color-pass triangles"
 );
+assert.match(gpuTimerSource, /sequence[\s\S]*recordedAtMs[\s\S]*tag/, "GPU timer samples must expose freshness metadata");
+assert.match(
+  gpuCategoryCaptureSource,
+  /warmupSamples \?\? 2[\s\S]*measuredSamples \?\? 5[\s\S]*median/,
+  "GPU category capture must retain the two-warm-up/five-median sampling policy"
+);
+assert.match(
+  threeTestSource,
+  /gpuCategoryCapture\.cancel\("context-lost"\)[\s\S]*restoreGpuCaptureVisibility/,
+  "GPU category capture must restore renderer state on context loss"
+);
 assert.doesNotMatch(
   seasonalSkyDomeSource,
   /requestAnimationFrame|performance\.now/,
@@ -976,5 +1151,31 @@ assert.ok(
   "the sky material must bind both deterministic cloud textures"
 );
 seasonalSkyDome.dispose();
+
+const appliedGpuCategories = [];
+const gpuCapture = createGpuCategoryCaptureController({
+  applyCategory: (category) => appliedGpuCategories.push(category),
+  warmupSamples: 2,
+  measuredSamples: 5
+});
+assert.equal(gpuCapture.start(true), true, "GPU category capture should start when timer queries are supported");
+let gpuSequence = 0;
+for (const category of ["baseline", "terrain", "vegetation", "structures", "fireFx", "water", "shadows"]) {
+  for (let sampleIndex = 0; sampleIndex < 7; sampleIndex += 1) {
+    gpuSequence += 1;
+    gpuCapture.acceptSample(
+      { valueMs: 20 - sampleIndex * 0.1, sequence: gpuSequence, recordedAtMs: gpuSequence, tag: gpuCapture.getQueryTag() },
+      1000 - sampleIndex,
+      2_000_000 - sampleIndex
+    );
+  }
+}
+const gpuCaptureResult = gpuCapture.getSnapshot().result;
+assert.equal(gpuCaptureResult?.status, "complete", "GPU category capture did not finish");
+assert.equal(gpuCaptureResult?.measurements.length, 7, "GPU capture did not retain every category median");
+assert.equal(appliedGpuCategories.at(-1), null, "GPU category visibility was not restored after capture");
+const unsupportedGpuCapture = createGpuCategoryCaptureController({ applyCategory: () => undefined });
+assert.equal(unsupportedGpuCapture.start(false), false, "unsupported GPU capture should not start");
+assert.equal(unsupportedGpuCapture.getSnapshot().result?.reason, "timer-query-unavailable");
 
 console.log("3D renderer performance regression passed.");

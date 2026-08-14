@@ -1,6 +1,16 @@
 export type WebGlGpuTimerLabel = "world" | "shadowRefresh" | "post" | "ui";
 
-export type WebGlGpuTimerSnapshot = Record<WebGlGpuTimerLabel, number | null>;
+export type WebGlGpuTimerSample = {
+  valueMs: number;
+  sequence: number;
+  recordedAtMs: number;
+  tag: string;
+};
+
+export type WebGlGpuTimerSnapshot = Record<WebGlGpuTimerLabel, number | null> & {
+  supported: boolean;
+  samples: Record<WebGlGpuTimerLabel, WebGlGpuTimerSample | null>;
+};
 
 type TimerQueryExtension = {
   TIME_ELAPSED_EXT: number;
@@ -10,30 +20,43 @@ type TimerQueryExtension = {
 type PendingQuery = {
   label: WebGlGpuTimerLabel;
   query: WebGLQuery;
+  sequence: number;
+  tag: string;
 };
 
-const createEmptySnapshot = (): WebGlGpuTimerSnapshot => ({
+const createEmptySamples = (): Record<WebGlGpuTimerLabel, WebGlGpuTimerSample | null> => ({
   world: null,
   shadowRefresh: null,
   post: null,
   ui: null
 });
 
+const createEmptySnapshot = (supported = false): WebGlGpuTimerSnapshot => ({
+  world: null,
+  shadowRefresh: null,
+  post: null,
+  ui: null,
+  supported,
+  samples: createEmptySamples()
+});
+
 export class WebGlGpuTimer {
   private readonly gl: WebGL2RenderingContext | null;
   private readonly extension: TimerQueryExtension | null;
   private readonly pending: PendingQuery[] = [];
-  private readonly snapshot = createEmptySnapshot();
+  private readonly snapshot: WebGlGpuTimerSnapshot;
   private active: PendingQuery | null = null;
+  private sequence = 0;
 
   public constructor(context: WebGLRenderingContext | WebGL2RenderingContext) {
     this.gl = "beginQuery" in context ? context as WebGL2RenderingContext : null;
     this.extension = this.gl
       ? this.gl.getExtension("EXT_disjoint_timer_query_webgl2") as TimerQueryExtension | null
       : null;
+    this.snapshot = createEmptySnapshot(Boolean(this.gl && this.extension));
   }
 
-  public begin(label: WebGlGpuTimerLabel): boolean {
+  public begin(label: WebGlGpuTimerLabel, tag = "runtime"): boolean {
     this.poll();
     if (!this.gl || !this.extension || this.active || this.pending.length >= 8) {
       return false;
@@ -42,7 +65,8 @@ export class WebGlGpuTimer {
     if (!query) {
       return false;
     }
-    this.active = { label, query };
+    this.sequence += 1;
+    this.active = { label, query, sequence: this.sequence, tag };
     this.gl.beginQuery(this.extension.TIME_ELAPSED_EXT, query);
     return true;
   }
@@ -70,7 +94,16 @@ export class WebGlGpuTimer {
       }
       if (!disjoint) {
         const elapsedNs = Number(this.gl.getQueryParameter(entry.query, this.gl.QUERY_RESULT));
-        this.snapshot[entry.label] = Number.isFinite(elapsedNs) ? elapsedNs / 1_000_000 : null;
+        const valueMs = Number.isFinite(elapsedNs) ? elapsedNs / 1_000_000 : null;
+        this.snapshot[entry.label] = valueMs;
+        this.snapshot.samples[entry.label] = valueMs === null
+          ? null
+          : {
+              valueMs,
+              sequence: entry.sequence,
+              recordedAtMs: performance.now(),
+              tag: entry.tag
+            };
       }
       this.gl.deleteQuery(entry.query);
       this.pending.splice(index, 1);
@@ -79,7 +112,7 @@ export class WebGlGpuTimer {
 
   public getSnapshot(): WebGlGpuTimerSnapshot {
     this.poll();
-    return { ...this.snapshot };
+    return { ...this.snapshot, samples: { ...this.snapshot.samples } };
   }
 
   public dispose(): void {

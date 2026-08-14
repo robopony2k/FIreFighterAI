@@ -12,14 +12,18 @@ import {
 } from "../dist/core/vegetation.js";
 import {
   applyAnnualVegetationGrowth,
+  getLatestAnnualVegetationGrowthTelemetry,
   initializeCampaignVegetationFuel
 } from "../dist/systems/terrain/sim/annualVegetationGrowth.js";
 import { stepTownConstructionSchedule } from "../dist/systems/settlements/sim/townConstruction.js";
 import {
+  buildTerrainMesh,
   buildTileTexture,
   prepareTerrainRenderSurface,
-  prepareTerrainRenderVisualSurface
+  prepareTerrainRenderVisualSurface,
+  TERRAIN_VEGETATION_ROOT_NAME
 } from "../dist/render/threeTestTerrain.js";
+import { disposeTerrainVegetationRoot } from "../dist/systems/terrain/rendering/vegetation/treeRenderResourceDisposal.js";
 import {
   assignTerrainTextureMap,
   flushTerrainTextureDisposals,
@@ -485,6 +489,25 @@ growthOnly.state.terrainDirty = false;
 const matureFuelOnlyVegetationRevision = growthOnly.state.vegetationRevision;
 const matureFuelOnlyTerrainRevision = growthOnly.state.terrainTypeRevision;
 const matureFuelOnlyResult = applyAnnualVegetationGrowth(growthOnly.state, 13, growthOnly.rng);
+const latestGrowthTelemetry = getLatestAnnualVegetationGrowthTelemetry(growthOnly.state);
+assert.ok(latestGrowthTelemetry, "annual growth should retain its latest non-authoritative telemetry snapshot");
+assert.equal(latestGrowthTelemetry.sequence, 13, "annual growth telemetry sequence should advance once per event");
+assert.equal(latestGrowthTelemetry.year, 13, "annual growth telemetry should retain the event year");
+assert.ok(
+  ["primed", "runtime-fallback"].includes(latestGrowthTelemetry.cacheSource),
+  `annual growth telemetry reported an invalid cache source (${latestGrowthTelemetry.cacheSource})`
+);
+for (const [phase, duration] of Object.entries(latestGrowthTelemetry.timingsMs)) {
+  assert.ok(Number.isFinite(duration) && duration >= 0, `annual growth ${phase} timing should be finite and non-negative`);
+}
+assert.ok(
+  latestGrowthTelemetry.timingsMs.total + 1 >=
+    latestGrowthTelemetry.timingsMs.maskBuild +
+      latestGrowthTelemetry.timingsMs.suitabilityCache +
+      latestGrowthTelemetry.timingsMs.mutationScan +
+      latestGrowthTelemetry.timingsMs.revisionFinalize,
+  "annual growth total timing should contain its measured phases"
+);
 assert.equal(matureFuelOnlyResult.fuelChanged, true, "mature forest should keep accumulating fuel below capacity");
 assert.equal(matureFuelOnlyResult.vegetationVisualChanged, false, "mature fuel-only growth should remain render-free");
 assert.equal(
@@ -654,6 +677,44 @@ assert.ok(
     recruitResult?.vegetationVisualChanged,
   "recruitment should produce one annual visual revision batch"
 );
+const recruitedForestCoverage = (() => {
+  const cols = 256;
+  const rows = 256;
+  const total = cols * rows;
+  const recruitedTile = openRecruit.state.tiles[openRecruit.target];
+  const recruitedIndex = 128 * cols + 128;
+  const tileTypes = new Uint8Array(total).fill(TILE_TYPE_IDS.grass);
+  tileTypes[recruitedIndex] = TILE_TYPE_IDS.forest;
+  const tileAge = new Float32Array(total);
+  const tileCanopy = new Float32Array(total);
+  const tileStems = new Uint8Array(total);
+  tileAge[recruitedIndex] = recruitedTile.vegetationAgeYears;
+  tileCanopy[recruitedIndex] = recruitedTile.canopyCover;
+  tileStems[recruitedIndex] = recruitedTile.stemDensity;
+  const surface = prepareTerrainRenderSurface({
+    cols,
+    rows,
+    elevations: new Float32Array(total).fill(0.24),
+    tileTypes,
+    tileFuel: new Float32Array(total).fill(1),
+    tileVegetationAge: tileAge,
+    tileCanopyCover: tileCanopy,
+    tileStemDensity: tileStems,
+    treesEnabled: true,
+    worldSeed: openRecruit.state.seed
+  });
+  const result = buildTerrainMesh(surface, null, null, null, undefined, null, "models", "vegetation-only");
+  assert.equal(result.telemetry.counts.eligibleForestTiles, 1);
+  assert.equal(result.telemetry.counts.modelCoveredForestTiles, 1);
+  assert.equal(result.telemetry.counts.uncoveredForestTiles, 0, "spring-recruited forest must receive tree geometry on refresh");
+  result.treeLod?.dispose();
+  disposeTerrainVegetationRoot(result.vegetationRoot);
+  result.mesh.geometry.dispose();
+  const materials = Array.isArray(result.mesh.material) ? result.mesh.material : [result.mesh.material];
+  materials.forEach((material) => material.dispose());
+  return result.telemetry.counts;
+})();
+assert.ok(recruitedForestCoverage.treeInstances >= 1, "spring-recruited forest must retain at least one visible tree");
 const deterministicA = buildOpenRecruitState();
 const deterministicB = buildOpenRecruitState();
 for (let year = 1; year <= 20; year += 1) {
@@ -872,6 +933,44 @@ const terrainSignatureSample = (() => {
   scorchedFireTexture.dispose();
   return baseSurface.geometrySignature;
 })();
+
+const vegetationOnlyBuildSample = (() => {
+  const cols = 9;
+  const rows = 9;
+  const total = cols * rows;
+  const sample = {
+    cols,
+    rows,
+    elevations: new Float32Array(total).fill(0.24),
+    tileTypes: new Uint8Array(total).fill(TILE_TYPE_IDS.forest),
+    tileFuel: new Float32Array(total).fill(1),
+    tileVegetationAge: new Float32Array(total).fill(12),
+    tileCanopyCover: new Float32Array(total).fill(0.82),
+    tileStemDensity: new Float32Array(total).fill(1),
+    fastUpdate: true,
+    treesEnabled: true,
+    worldSeed: 19
+  };
+  const surface = prepareTerrainRenderSurface(sample);
+  const result = buildTerrainMesh(surface, null, null, null, undefined, null, "models", "vegetation-only");
+  assert.equal(result.vegetationRoot.name, TERRAIN_VEGETATION_ROOT_NAME, "vegetation refresh should expose one swappable root");
+  assert.equal(result.telemetry.cutout, null, "vegetation refresh must not enter the river cutout pipeline");
+  assert.equal(result.telemetry.counts.sourceTerrainTriangles, 0, "vegetation refresh must not allocate terrain geometry");
+  assert.equal(result.telemetry.timingsMs.structures, 0, "vegetation refresh must not rebuild structures");
+  assert.equal(result.telemetry.timingsMs.water, 0, "vegetation refresh must not rebuild water");
+  assert.equal(result.water, undefined, "vegetation refresh must not publish replacement water resources");
+  assert.ok(result.telemetry.counts.treeInstances > 0, "vegetation refresh should rebuild visible tree instances");
+  result.treeLod?.dispose();
+  disposeTerrainVegetationRoot(result.vegetationRoot);
+  result.mesh.geometry.dispose();
+  const materials = Array.isArray(result.mesh.material) ? result.mesh.material : [result.mesh.material];
+  materials.forEach((material) => material.dispose());
+  return result.telemetry;
+})();
+assert.ok(
+  vegetationOnlyBuildSample.timingsMs.total >= vegetationOnlyBuildSample.timingsMs.vegetation,
+  "vegetation refresh telemetry should bound its vegetation work"
+);
 
 const replayConstruction = buildSettlementConstructionState(true);
 const replayElevationBefore = new Float32Array(replayConstruction.tileElevation);

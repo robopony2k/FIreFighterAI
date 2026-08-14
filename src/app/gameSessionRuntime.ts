@@ -1,6 +1,7 @@
 import { BASE_BUDGET, DEBUG_UNLIMITED_MONEY_BUDGET, MAP_SIZE_PRESETS } from "../core/config.js";
 import type { MapSizeId } from "../core/config.js";
-import { DEFAULT_CHIEF_GENDER, getCharacterBaseBudget } from "../core/characters.js";
+import { DEFAULT_CHIEF_GENDER } from "../core/characters.js";
+import { DEFAULT_CAMPAIGN_DIFFICULTY_ID } from "../core/campaign.js";
 import { RNG } from "../core/rng.js";
 import { computeChecksum, createInitialState, resetState, setStatus } from "../core/state.js";
 import { ensureTileSoA, syncTileSoA } from "../core/tileCache.js";
@@ -9,7 +10,11 @@ import { TREE_TYPE_IDS } from "../core/types.js";
 import { createEffectsState, resetEffectsState } from "../core/effectsState.js";
 import { createInputState, resetInputState } from "../core/inputState.js";
 import { createUiState, resetUiState } from "../core/uiState.js";
-import { createGameEventBus, type GameOverPayload } from "../core/gameEvents.js";
+import {
+  createGameEventBus,
+  type GameNotificationPayload,
+  type GameOverPayload
+} from "../core/gameEvents.js";
 import { CLIMATE_IGNITION_MAX, CLIMATE_IGNITION_MIN, VIRTUAL_CLIMATE_PARAMS } from "../core/climate.js";
 import { generateMap, type MapGenDebug, type MapGenDebugSnapshot } from "../mapgen/index.js";
 import { createThreeTest, type ThreeTestPerfSnapshot, type ThreeTestTerrainUpdateIntent } from "../render/threeTest.js";
@@ -56,25 +61,38 @@ import {
 } from "../sim/index.js";
 import { initScoringForRun } from "../sim/scoring.js";
 import { seedStartingRoster } from "../sim/units.js";
+import { resolveCampaignStartingResources } from "../systems/campaign/sim/campaignStartingResources.js";
 import { PHASES } from "../core/time.js";
 import { DEFAULT_MAP_SIZE, DEFAULT_RUN_OPTIONS, DEFAULT_RUN_SEED, normalizeFireSettings } from "../ui/run-config.js";
 import type { NewRunConfig } from "../ui/run-config.js";
 import { cloneTerrainRecipe, getTerrainHeightScaleMultiplier } from "../mapgen/terrainProfile.js";
 import type { GameUiSnapshot } from "../ui/phase/types.js";
-import { updatePerfCounter } from "./perfDiagnostics.js";
+import { updatePerfCounter } from "../core/diagnostics/performanceTelemetry.js";
 import { startAppBootLoop } from "./bootLoop.js";
 import {
   analyzeTerrainTypeDiff,
   classifyTerrainVisualInvalidation,
   decideTerrainVisualSync,
   shouldRebuildThreeTestTreeTypeMap,
-  shouldRebuildThreeTestVegetationInstances,
   shouldHoldSimulationForTerrainInvalidation,
   shouldSyncThreeTestTerrain,
   type TerrainVisualInvalidation,
   type ThreeTestTerrainRevisionState
 } from "../systems/terrain/controllers/terrainVisualSyncController.js";
 import { getRuntimeVegetationSuitabilityCacheDiagnostics } from "../systems/terrain/sim/runtimeVegetationSuitabilityCache.js";
+import {
+  clearAnnualVegetationGrowthTelemetry,
+  getLatestAnnualVegetationGrowthTelemetry
+} from "../systems/terrain/sim/annualVegetationGrowth.js";
+import {
+  clearFireRuntimeTelemetry,
+  getLatestFireRuntimeTelemetry
+} from "../systems/fire/controllers/fireRuntimeTelemetry.js";
+import {
+  createRuntimeTelemetryPresenter,
+  type RuntimeTelemetryCapture,
+  type RuntimeTelemetryContext
+} from "../ui/performance/runtimeTelemetryPresenter.js";
 import { createUiAudioController } from "../audio/uiAudio.js";
 import { createMusicController } from "../audio/musicController.js";
 import { showTitleScreen as mountTitleScreen, type TitleScreenHandle } from "../ui/titleScreen.js";
@@ -97,6 +115,9 @@ import { normalizeFxLabScenarioId, type FxLabScenarioId } from "../render/fxLab/
 import { createFireSimLabController, type FireSimLabController } from "../ui/fire-sim-lab/controller.js";
 import { normalizeFireSimLabScenarioId, type FireSimLabScenarioId } from "../systems/fire/types/fireSimLabTypes.js";
 import { describeWebGLError } from "../render/webglContext.js";
+import { createNotificationCenter } from "../ui/notifications/notificationCenter.js";
+import { notificationPreferenceStore } from "../ui/notifications/notificationPreferences.js";
+import { mountNotificationToastHost } from "../ui/notifications/notificationToastView.js";
 
 // Single switch for removing the startup title layer.
 const ENABLE_TITLE_SCREEN = true;
@@ -164,6 +185,7 @@ const cloneRunConfig = (config: NewRunConfig): NewRunConfig => ({
   characterId: config.characterId,
   chiefGender: config.chiefGender ?? DEFAULT_CHIEF_GENDER,
   callsign: config.callsign,
+  difficultyId: config.difficultyId ?? DEFAULT_CAMPAIGN_DIFFICULTY_ID,
   options: {
     ...DEFAULT_RUN_OPTIONS,
     ...config.options,
@@ -183,6 +205,7 @@ const resolveRunConfig = (defaults: NewRunConfig, persisted?: NewRunConfig | nul
     characterId: persisted.characterId,
     chiefGender: persisted.chiefGender ?? defaults.chiefGender,
     callsign: persisted.callsign.trim().length > 0 ? persisted.callsign : defaults.callsign,
+    difficultyId: persisted.difficultyId ?? defaults.difficultyId,
     options: {
       ...defaults.options,
       ...persisted.options,
@@ -522,10 +545,37 @@ export const createAppRuntime = (): AppRuntime => {
   let lastThreeTestGeometryTypeSnapshot: Uint8Array | null = null;
   let cachedThreeTestTreeTypeMap: Uint8Array | null = null;
   let cachedThreeTestTreeTypeTerrainRevision = -1;
+  const notificationCenter = createNotificationCenter({
+    maxVisible: 3,
+    exitDurationMs: 220,
+    isEnabled: (payload) => notificationPreferenceStore.isEnabled(payload.type),
+    onFocus: (payload) => {
+      const target = payload.focusTarget;
+      if (!target || target.kind !== "tile") return;
+      inputState.lastInteractionTime = performance.now();
+      threeTestController?.panToTile(target.x, target.y, { transition: "contextual" });
+    }
+  });
+  const handleNotificationPublish = (payload: GameNotificationPayload): void => {
+    notificationCenter.publish(payload);
+  };
+  gameEvents.on("notification:publish", handleNotificationPublish);
+  const notificationToastHost = threeTestOverlay
+    ? mountNotificationToastHost(threeTestOverlay, notificationCenter, {
+        resolveSafeBottomPx: () => {
+          const tray = threeTestOverlay.querySelector(".three-test-unit-tray");
+          if (!(tray instanceof HTMLElement) || tray.offsetParent === null) return 18;
+          const overlayRect = threeTestOverlay.getBoundingClientRect();
+          const trayRect = tray.getBoundingClientRect();
+          return Math.max(18, overlayRect.bottom - trayRect.top + 12);
+        }
+      })
+    : null;
   let cachedThreeTestTreeTypeVegetationRevision = -1;
   let savedThreeTestSmokeRate: number | null = null;
   let activeThreeOverlayMode: "run" | "fx-lab" | "sim-lab" | null = null;
   const perfStats = new Map<string, PerfStat>();
+  const runtimeTelemetryPresenter = createRuntimeTelemetryPresenter(MAIN_HITCH_THRESHOLD_MS);
   const perfOverlay = document.createElement("div");
   const perfOverlayText = document.createElement("pre");
   const perfOverlayControls = document.createElement("div");
@@ -554,16 +604,27 @@ export const createAppRuntime = (): AppRuntime => {
   const perfOverlayFogToggle = createPerfOverlayCheckbox("Fog", "F8");
   const perfOverlayWaterfallToggle = createPerfOverlayCheckbox("Waterfall X-Ray", "F9");
   const perfOverlayRoadContrastToggle = createPerfOverlayCheckbox("Roads Ultra Contrast", "F10");
+  const perfOverlayGpuCaptureButton = document.createElement("button");
+  perfOverlayGpuCaptureButton.type = "button";
+  perfOverlayGpuCaptureButton.textContent = "Capture GPU A/B";
+  perfOverlayGpuCaptureButton.style.pointerEvents = "auto";
+  perfOverlayGpuCaptureButton.style.cursor = "pointer";
   let perfOverlayVisible = runtimeSettings.perf;
   let lastPerfOverlayUpdate = 0;
   let lastPerfConsoleLog = 0;
+  let lastGpuProfileSequence = 0;
   type LongTaskStats = { count: number; totalMs: number; maxMs: number; lastMs: number; lastAt: number; lastDetail: string };
   const longTaskStats: LongTaskStats = { count: 0, totalMs: 0, maxMs: 0, lastMs: 0, lastAt: 0, lastDetail: "n/a" };
   
   const resetPerfDiagnostics = (): void => {
+    threeTestController?.cancelGpuCategoryCapture();
     perfStats.clear();
+    runtimeTelemetryPresenter.clear();
+    clearAnnualVegetationGrowthTelemetry(state);
+    clearFireRuntimeTelemetry(state);
     lastPerfOverlayUpdate = 0;
     lastPerfConsoleLog = 0;
+    lastGpuProfileSequence = threeTestController?.getPerfSnapshot().gpuCategoryCapture.result?.sequence ?? 0;
     longTaskStats.count = 0;
     longTaskStats.totalMs = 0;
     longTaskStats.maxMs = 0;
@@ -602,6 +663,23 @@ export const createAppRuntime = (): AppRuntime => {
     typeof value === "number" && Number.isFinite(value) ? value.toFixed(2) : "n/a";
   const formatInt = (value: number | null | undefined): string =>
     typeof value === "number" && Number.isFinite(value) ? Math.round(value).toString() : "n/a";
+  const isDetailedRuntimeTelemetryEnabled = (): boolean =>
+    perfOverlayVisible || runtimeSettings.perflog || runtimeSettings.simprof;
+  const emitRuntimeTelemetry = (capture: RuntimeTelemetryCapture): void => {
+    if (capture.consoleLine && isDetailedRuntimeTelemetryEnabled()) {
+      console.log(capture.consoleLine);
+    }
+  };
+  const getRuntimeTelemetryContext = (nowMs = performance.now()): RuntimeTelemetryContext => ({
+    nowMs,
+    phase: state.phase,
+    year: state.year,
+    careerDay: state.careerDay,
+    speed: getActiveTimeSpeedValue(state),
+    simTimeMode: state.simTimeMode,
+    pauseOnFireEvent: runtimeSettings.pauseOnFireEvent,
+    advancingToEvent: state.advanceToNextEvent !== null
+  });
   const canUsePerfOverlayRunToggles = (): boolean =>
     activeThreeOverlayMode === "run" &&
     !!threeTestController &&
@@ -613,6 +691,7 @@ export const createAppRuntime = (): AppRuntime => {
     perfOverlayFogToggle.input.disabled = !canToggle;
     perfOverlayWaterfallToggle.input.disabled = !canToggle;
     perfOverlayRoadContrastToggle.input.disabled = !canToggle;
+    perfOverlayGpuCaptureButton.disabled = !canToggle;
     if (!canToggle || !threeTestController) {
       perfOverlayFogToggle.input.checked = false;
       perfOverlayWaterfallToggle.input.checked = false;
@@ -623,6 +702,11 @@ export const createAppRuntime = (): AppRuntime => {
     perfOverlayWaterfallToggle.input.checked =
       threeTestController.getTerrainWaterDebugControls().waterfallDebugHighlight;
     perfOverlayRoadContrastToggle.input.checked = threeTestController.getRoadHighContrastEnabled();
+    const capture = threeTestController.getPerfSnapshot().gpuCategoryCapture;
+    perfOverlayGpuCaptureButton.textContent = capture.active
+      ? `Capturing ${capture.phase ?? "GPU"}...`
+      : "Capture GPU A/B";
+    perfOverlayGpuCaptureButton.disabled = !canToggle || capture.active;
   };
   const setRunFogEnabled = (enabled: boolean): void => {
     if (!canUsePerfOverlayRunToggles() || !threeTestController) {
@@ -726,11 +810,32 @@ export const createAppRuntime = (): AppRuntime => {
     perfOverlayRoadContrastToggle.input.addEventListener("change", () => {
       setRunRoadHighContrastEnabled(perfOverlayRoadContrastToggle.input.checked);
     });
+    perfOverlayGpuCaptureButton.addEventListener("click", () => {
+      if (!canUsePerfOverlayRunToggles() || !threeTestController) return;
+      if (state.terrainDirty) {
+        setStatus(state, "GPU A/B capture is waiting for terrain synchronization to finish.");
+        return;
+      }
+      const started = threeTestController.startGpuCategoryCapture();
+      const capture = threeTestController.getPerfSnapshot().gpuCategoryCapture;
+      if (started) {
+        setStatus(state, "GPU A/B capture running. Simulation and camera presentation are held temporarily.");
+      } else if (capture.status === "unsupported") {
+        lastGpuProfileSequence = capture.result!.sequence;
+        emitRuntimeTelemetry(runtimeTelemetryPresenter.captureGpu({
+          ...getRuntimeTelemetryContext(),
+          result: capture.result!
+        }));
+        setStatus(state, "GPU A/B capture unavailable: timer queries are unsupported.");
+      }
+      syncPerfOverlayControls();
+    });
     perfOverlayControls.append(
       perfOverlayControlsTitle,
       perfOverlayFogToggle.row,
       perfOverlayWaterfallToggle.row,
-      perfOverlayRoadContrastToggle.row
+      perfOverlayRoadContrastToggle.row,
+      perfOverlayGpuCaptureButton
     );
     perfOverlay.append(perfOverlayText, perfOverlayControls);
     document.body.appendChild(perfOverlay);
@@ -801,6 +906,7 @@ export const createAppRuntime = (): AppRuntime => {
     lines.push(
       `Fire budget: substeps ${formatNum(fireSubsteps?.avg)} deferredDays ${formatNum(fireDeferredDays?.avg)} terrainMut ${formatNum(fireTerrainMutations?.avg)} ranged ${formatNum(fireRangedSamples?.avg)} ignite ${formatNum(fireIgniteCandidates?.avg)} roadSearch ${formatInt(state.settlementRuntimeRoadPathSearches)} terrainEditNoop ${formatInt(state.settlementRuntimeTerrainEditAttempts)}`
     );
+    lines.push(...runtimeTelemetryPresenter.formatOverlayLines(now));
     lines.push(
       `3D sync: climate ${formatMs(climate3d?.avg)}  terrain ${formatMs(terrain3d?.avg)}  deferred ${formatNum(terrainDeferred3d?.avg)}`
     );
@@ -857,7 +963,7 @@ export const createAppRuntime = (): AppRuntime => {
           `3D terrain tex: color ${formatMs(threePerf.terrainSetColorLastMs)}/${formatMs(threePerf.terrainSetColorMs)} tex ${formatMs(threePerf.terrainSetTextureLastMs)}/${formatMs(threePerf.terrainSetTextureMs)} swap ${formatMs(threePerf.terrainSetTextureSwapLastMs)}/${formatMs(threePerf.terrainSetTextureSwapMs)}`
         );
         lines.push(
-          `3D terrain aux: roadSig ${formatMs(threePerf.terrainSetRoadSignatureLastMs)}/${formatMs(threePerf.terrainSetRoadSignatureMs)} road ${formatMs(threePerf.terrainRoadRefreshLastMs)}/${formatMs(threePerf.terrainRoadRefreshMs)} n ${formatInt(threePerf.terrainRoadRefreshCount)} struct ${formatMs(threePerf.terrainSetStructureLastMs)}/${formatMs(threePerf.terrainSetStructureMs)} full ${formatMs(threePerf.terrainSetFullDisposeLastMs)}/${formatMs(threePerf.terrainSetFullBuildLastMs)} water ${formatMs(threePerf.terrainSetWaterLastMs)}`
+          `3D terrain aux: roadSig ${formatMs(threePerf.terrainSetRoadSignatureLastMs)}/${formatMs(threePerf.terrainSetRoadSignatureMs)} road ${formatMs(threePerf.terrainRoadRefreshLastMs)}/${formatMs(threePerf.terrainRoadRefreshMs)} n ${formatInt(threePerf.terrainRoadRefreshCount)} struct ${formatMs(threePerf.terrainSetStructureLastMs)}/${formatMs(threePerf.terrainSetStructureMs)} vegetation ${formatMs(threePerf.terrainSetVegetationLastMs)}/${formatMs(threePerf.terrainSetVegetationMs)} full ${formatMs(threePerf.terrainSetFullDisposeLastMs)}/${formatMs(threePerf.terrainSetFullBuildLastMs)} water ${formatMs(threePerf.terrainSetWaterLastMs)}`
         );
         if (threePerf.terrainBuildTelemetry) {
           const build = threePerf.terrainBuildTelemetry;
@@ -865,7 +971,7 @@ export const createAppRuntime = (): AppRuntime => {
             `3D terrain build: total ${formatMs(build.timingsMs.total)} assembly ${formatMs(build.timingsMs.terrainAssembly)} cutout ${formatMs(build.timingsMs.inlandWaterCutout)} normals ${formatMs(build.timingsMs.normals)} material ${formatMs(build.timingsMs.surfaceMaterial)} vegetation ${formatMs(build.timingsMs.vegetation)} structures ${formatMs(build.timingsMs.structures)} water ${formatMs(build.timingsMs.water)}`
           );
           lines.push(
-            `3D terrain counts: tri ${formatInt(build.counts.sourceTerrainTriangles)}→${formatInt(build.counts.outputTerrainTriangles)} trees ${formatInt(build.counts.treeInstances)} scrub ${formatInt(build.counts.scrubInstances)} water samples ${formatInt(build.counts.waterSupportSamples)} inland tri ${formatInt(build.counts.inlandWaterTriangles)}`
+            `3D terrain counts: tri ${formatInt(build.counts.sourceTerrainTriangles)}→${formatInt(build.counts.outputTerrainTriangles)} trees ${formatInt(build.counts.treeInstances)} forest coverage ${formatInt(build.counts.modelCoveredForestTiles)}+${formatInt(build.counts.fallbackCoveredForestTiles)}/${formatInt(build.counts.eligibleForestTiles)} uncovered ${formatInt(build.counts.uncoveredForestTiles)} fallback draws ${formatInt(build.counts.forestCoverageFallbackDrawCalls)} scrub ${formatInt(build.counts.scrubInstances)} water samples ${formatInt(build.counts.waterSupportSamples)} inland tri ${formatInt(build.counts.inlandWaterTriangles)}`
           );
           if (build.cutout) {
             lines.push(
@@ -923,6 +1029,45 @@ export const createAppRuntime = (): AppRuntime => {
       recordPerfSample("3d.controls", threePerf.controlsMs);
       recordPerfSample("3d.treeBurn", threePerf.treeBurnMs);
       recordPerfSample("3d.uiRender", threePerf.uiRenderMs);
+      const gpuResult = threePerf.gpuCategoryCapture.result;
+      if (gpuResult && gpuResult.sequence > lastGpuProfileSequence) {
+        lastGpuProfileSequence = gpuResult.sequence;
+        emitRuntimeTelemetry(runtimeTelemetryPresenter.captureGpu({
+          ...getRuntimeTelemetryContext(now),
+          result: gpuResult
+        }));
+        if (gpuResult.status === "complete") {
+          setStatus(state, "GPU A/B capture complete. Copy [gpuprofile] from the console.");
+        } else if (gpuResult.status === "cancelled") {
+          setStatus(state, `GPU A/B capture cancelled: ${gpuResult.reason}.`);
+        }
+      }
+    }
+    if (isDetailedRuntimeTelemetryEnabled() && activeThreeOverlayMode === "run" && threePerf) {
+      const sampledAt = performance.now();
+      const mainFrameLast = readPerf("main.frame")?.last ?? 0;
+      const mainGapLast = readPerf("main.rafGap")?.last ?? 0;
+      if (Math.max(mainFrameLast, mainGapLast) >= MAIN_HITCH_THRESHOLD_MS) {
+        const recentTerrainSync = readRecentPerf("3d.terrainSync", sampledAt, 250)?.last ?? 0;
+        emitRuntimeTelemetry(
+          runtimeTelemetryPresenter.captureHitch({
+            ...getRuntimeTelemetryContext(sampledAt),
+            gapMs: mainGapLast,
+            mainFrameMs: mainFrameLast,
+            simMs: readPerf("sim.frame")?.last ?? 0,
+            renderMs: threePerf?.sceneRenderLastMs ?? threePerf?.sceneRenderMs ?? 0,
+            terrainSyncMs: recentTerrainSync,
+            frameBudgetMs: getFrameCapFps() > 0 ? 1000 / getFrameCapFps() : 1000 / 60,
+            gpuWorldMs:
+              sampledAt - threePerf.gpuWorldRecordedAtMs <= 250 ? threePerf.gpuWorldMs : null,
+            gpuShadowRefreshMs:
+              sampledAt - threePerf.gpuShadowRefreshRecordedAtMs <= 250 ? threePerf.gpuShadowRefreshMs : null,
+            longTaskMs: longTaskStats.lastMs,
+            longTaskAgeMs: longTaskStats.lastAt > 0 ? Math.max(0, sampledAt - longTaskStats.lastAt) : Number.POSITIVE_INFINITY,
+            longTaskSource: longTaskStats.lastDetail
+          })
+        );
+      }
     }
     if (perfOverlayVisible && now - lastPerfOverlayUpdate >= PERF_OVERLAY_REFRESH_MS) {
       perfOverlayText.textContent = buildPerfOverlayText(threePerf, now);
@@ -983,7 +1128,7 @@ export const createAppRuntime = (): AppRuntime => {
             `gpuWorld=${(threePerf?.gpuWorldMs ?? 0).toFixed(2)} gpuShadowRefresh=${(threePerf?.gpuShadowRefreshMs ?? 0).toFixed(2)} gpuPost=${(threePerf?.gpuPostMs ?? 0).toFixed(2)} gpuUi=${(threePerf?.gpuUiMs ?? 0).toFixed(2)} shadowLights=${Math.round(threePerf?.activeShadowLights ?? 0)} shadowRefresh=${Math.round(threePerf?.shadowRefreshCount ?? 0)} terrainChunks=${Math.round(threePerf?.terrainVisibleChunkCount ?? 0)}/${Math.round(threePerf?.terrainChunkCount ?? 0)} terrainChunkCull=${Math.round(threePerf?.terrainCulledInstanceCount ?? 0)} roadOverlayTri=${Math.round(threePerf?.roadOverlayTriangles ?? 0)}/${Math.round(threePerf?.roadOverlaySourceTriangles ?? 0)} postPasses=${Math.round(threePerf?.postPassCount ?? 0)} vehicleUploads=${Math.round(threePerf?.vehicleBufferUploads ?? 0)} ` +
             `treeChunks=${Math.round(threePerf?.treeModelChunkCount ?? 0)}/${Math.round(threePerf?.treeImpostorChunkCount ?? 0)} treeInst=${Math.round(threePerf?.treeModelInstanceCount ?? 0)}/${Math.round(threePerf?.treeImpostorInstanceCount ?? 0)} treeTransitions=${Math.round(threePerf?.treeLodTransitionCount ?? 0)} treeFarDraws=${Math.round(threePerf?.treeImpostorDrawCount ?? 0)} ` +
             `gap3d=${(threePerf?.rafGapLastMs ?? 0).toFixed(2)} terrainSetLast=${terrainSetLast.toFixed(2)} terrainSetMax=${terrainSetMax.toFixed(2)} terrainSetN=${Math.round(terrainSetCount)} ` +
-            `terrainSample=${terrainSampleBuild.toFixed(2)} terrainSkip=${terrainSkipped.toFixed(2)}(${Math.round(threeTestTerrainSyncSkippedCount)}) terrainBatch=${terrainVisualBatched.toFixed(2)}(${Math.round(threeTestTerrainVisualBatchedCount)}) terrainReuseFull=${Math.round(threePerf?.terrainSetFastReuseCount ?? 0)}/${Math.round(threePerf?.terrainSetFullRebuildCount ?? 0)} terrainReason=${threePerf?.terrainSetFullRebuildReason ?? "none"} terrainIntent=${threePerf?.terrainSetIntent ?? "none"} terrainPath=${threePerf?.terrainSetPath ?? "none"} terrainHot=${threePerf?.terrainSetDominantStep ?? "none"} terrainMaxHot=${threePerf?.terrainSetMaxDominantStep ?? "none"} terrainGeom=${threePerf?.terrainGeometrySignature ?? "none"}${threePerf?.terrainGeometrySignatureChanged ? "*" : ""} terrainPrep=${(threePerf?.terrainSetPrepareLastMs ?? 0).toFixed(2)} terrainStaticPrep=${(threePerf?.terrainSetStaticPrepareLastMs ?? 0).toFixed(2)} terrainVisualPrep=${(threePerf?.terrainSetVisualPrepareLastMs ?? 0).toFixed(2)} terrainPrepSkip=${Math.round(threePerf?.terrainSetPrepareSkippedCount ?? 0)} terrainReuse=${(threePerf?.terrainSetReuseCheckLastMs ?? 0).toFixed(2)} terrainColor=${(threePerf?.terrainSetColorLastMs ?? 0).toFixed(2)} terrainTex=${(threePerf?.terrainSetTextureLastMs ?? 0).toFixed(2)} terrainSwap=${(threePerf?.terrainSetTextureSwapLastMs ?? 0).toFixed(2)} terrainRoadSig=${(threePerf?.terrainSetRoadSignatureLastMs ?? 0).toFixed(2)} terrainRoad=${(threePerf?.terrainRoadRefreshLastMs ?? 0).toFixed(2)} terrainStruct=${(threePerf?.terrainSetStructureLastMs ?? 0).toFixed(2)} terrainEditNoop=${Math.round(state.settlementRuntimeTerrainEditAttempts)} ` +
+            `terrainSample=${terrainSampleBuild.toFixed(2)} terrainSkip=${terrainSkipped.toFixed(2)}(${Math.round(threeTestTerrainSyncSkippedCount)}) terrainBatch=${terrainVisualBatched.toFixed(2)}(${Math.round(threeTestTerrainVisualBatchedCount)}) terrainReuseFull=${Math.round(threePerf?.terrainSetFastReuseCount ?? 0)}/${Math.round(threePerf?.terrainSetFullRebuildCount ?? 0)} terrainReason=${threePerf?.terrainSetFullRebuildReason ?? "none"} terrainIntent=${threePerf?.terrainSetIntent ?? "none"} terrainPath=${threePerf?.terrainSetPath ?? "none"} terrainHot=${threePerf?.terrainSetDominantStep ?? "none"} terrainMaxHot=${threePerf?.terrainSetMaxDominantStep ?? "none"} terrainGeom=${threePerf?.terrainGeometrySignature ?? "none"}${threePerf?.terrainGeometrySignatureChanged ? "*" : ""} terrainPrep=${(threePerf?.terrainSetPrepareLastMs ?? 0).toFixed(2)} terrainStaticPrep=${(threePerf?.terrainSetStaticPrepareLastMs ?? 0).toFixed(2)} terrainVisualPrep=${(threePerf?.terrainSetVisualPrepareLastMs ?? 0).toFixed(2)} terrainPrepSkip=${Math.round(threePerf?.terrainSetPrepareSkippedCount ?? 0)} terrainReuse=${(threePerf?.terrainSetReuseCheckLastMs ?? 0).toFixed(2)} terrainColor=${(threePerf?.terrainSetColorLastMs ?? 0).toFixed(2)} terrainTex=${(threePerf?.terrainSetTextureLastMs ?? 0).toFixed(2)} terrainSwap=${(threePerf?.terrainSetTextureSwapLastMs ?? 0).toFixed(2)} terrainRoadSig=${(threePerf?.terrainSetRoadSignatureLastMs ?? 0).toFixed(2)} terrainRoad=${(threePerf?.terrainRoadRefreshLastMs ?? 0).toFixed(2)} terrainStruct=${(threePerf?.terrainSetStructureLastMs ?? 0).toFixed(2)} terrainVeg=${(threePerf?.terrainSetVegetationLastMs ?? 0).toFixed(2)} terrainEditNoop=${Math.round(state.settlementRuntimeTerrainEditAttempts)} ` +
             `fx=${threeFx.toFixed(2)} hud=${threeHud.toFixed(2)} ctxLoss=${Math.round(contextLosses)} ctxRestore=${Math.round(contextRestores)} ` +
             `colorCalls=${Math.round(sceneCalls)} colorTri=${Math.round(sceneTriangles)} shadowGeo=${Math.round(shadowGeometryCalls)}/${Math.round(shadowGeometryTriangles)} submittedLast=${Math.round(threePerf?.submittedCallsLast ?? 0)}/${Math.round(threePerf?.submittedTrianglesLast ?? 0)}`
         );
@@ -1124,6 +1269,9 @@ export const createAppRuntime = (): AppRuntime => {
     debugTypeColors: lastThreeTestDebugTypeColors
   });
   const shouldHoldThreeTestSimulationForVisualSync = (): boolean => {
+    if (threeTestController?.isGpuCategoryCaptureActive()) {
+      return true;
+    }
     if (activeThreeOverlayMode !== "run" || isThreeTestTerrainSyncDisabled() || !state.terrainDirty) {
       return false;
     }
@@ -1211,11 +1359,29 @@ export const createAppRuntime = (): AppRuntime => {
       recordPerfSample("3d.terrainVisualBatched", decision.visualBatched ? 1 : 0);
       lastThreeTestTerrainSync = now;
       ensureTileSoA(state);
-      const rebuildVegetationInstances = shouldRebuildThreeTestVegetationInstances(decision.invalidation);
-      threeTestController.setTerrain(
-        buildThreeTestSample(!force && !rebuildVegetationInstances),
-        buildThreeTestTerrainUpdateIntent(decision.invalidation, force, reason)
-      );
+      const sampleBuildStartedAt = performance.now();
+      const terrainSample = buildThreeTestSample(!force);
+      const sampleBuildMs = performance.now() - sampleBuildStartedAt;
+      const terrainIntent = buildThreeTestTerrainUpdateIntent(decision.invalidation, force, reason);
+      threeTestController.setTerrain(terrainSample, terrainIntent);
+      if (isDetailedRuntimeTelemetryEnabled()) {
+        const terrainPerf = threeTestController.getPerfSnapshot();
+        emitRuntimeTelemetry(
+          runtimeTelemetryPresenter.captureTerrainSync({
+            ...getRuntimeTelemetryContext(),
+            totalMs: performance.now() - startedAt,
+            sampleBuildMs,
+            terrainSetMs: terrainPerf.terrainSetLastMs,
+            intent: terrainPerf.terrainSetIntent,
+            path: terrainPerf.terrainSetPath,
+            dominantStep: terrainPerf.terrainSetDominantStep,
+            fullRebuildReason: terrainPerf.terrainSetFullRebuildReason,
+            terrainTypeRevisionDelta: nextRevisionState.terrainTypeRevision - prevRevisionState.terrainTypeRevision,
+            vegetationRevisionDelta: nextRevisionState.vegetationRevision - prevRevisionState.vegetationRevision,
+            structureRevisionDelta: nextRevisionState.structureRevision - prevRevisionState.structureRevision
+          })
+        );
+      }
       lastThreeTestGeometryTypeSnapshot = state.tileTypeId.slice();
       lastThreeTestTerrainTypeRevision = nextTypeRevision;
       lastThreeTestVegetationRevision = nextVegetationRevision;
@@ -2050,8 +2216,10 @@ export const createAppRuntime = (): AppRuntime => {
     }
     endRunScreen?.hide();
     mapEditor?.close();
+    notificationCenter.clear();
     isGenerating = true;
-    const { seed, mapSize, characterId, chiefGender, callsign } = config;
+    const { seed, mapSize, characterId, chiefGender, callsign, difficultyId } = config;
+    const startingResources = resolveCampaignStartingResources(BASE_BUDGET, difficultyId, characterId);
     try {
       resetInputState(inputState);
       resetEffectsState(effectsState);
@@ -2071,11 +2239,12 @@ export const createAppRuntime = (): AppRuntime => {
       state.campaign.characterId = characterId;
       state.campaign.chiefGender = chiefGender;
       state.campaign.callsign = callsign;
-      const baseBudget = config.options.unlimitedMoney
+      state.campaign.difficultyId = difficultyId;
+      const startingBudget = config.options.unlimitedMoney
         ? DEBUG_UNLIMITED_MONEY_BUDGET
-        : getCharacterBaseBudget(state.campaign.characterId, BASE_BUDGET);
-      state.budget = baseBudget;
-      state.pendingBudget = baseBudget;
+        : startingResources.startingBudget;
+      state.budget = startingBudget;
+      state.pendingBudget = startingBudget;
       randomizeWind(state, rng);
       rng.setState(seed);
       state.paused = true;
@@ -2090,7 +2259,7 @@ export const createAppRuntime = (): AppRuntime => {
       hideMapgenOverlay();
       isGenerating = false;
     }
-    seedStartingRoster(state, rng);
+    seedStartingRoster(state, rng, startingResources.responseTeamCount);
     initScoringForRun(state);
     renderState.cameraCenter = { x: state.basePoint.x + 0.5, y: state.basePoint.y + 0.5 };
     const maintenanceIndex = PHASES.findIndex((phase) => phase.id === "maintenance");
@@ -2112,7 +2281,8 @@ export const createAppRuntime = (): AppRuntime => {
     },
     characterId: state.campaign.characterId,
     chiefGender: state.campaign.chiefGender,
-    callsign: state.campaign.callsign
+    callsign: state.campaign.callsign,
+    difficultyId: state.campaign.difficultyId
   };
   const initialRunConfig: NewRunConfig = resolveRunConfig(defaultRunConfig, persistedLastRunConfig);
   activeTerrainSource = cloneTerrainRecipe(initialRunConfig.options.terrain);
@@ -2391,6 +2561,17 @@ export const createAppRuntime = (): AppRuntime => {
         recordPerfSample("fire.terrainMutations", state.firePerfTerrainMutations);
         recordPerfSample("fire.rangedSamples", state.firePerfRangedDiffusionSamples);
         recordPerfSample("fire.igniteCandidates", state.firePerfIgniteCandidates);
+        if (isDetailedRuntimeTelemetryEnabled()) {
+          const telemetryContext = getRuntimeTelemetryContext();
+          const growthTelemetry = getLatestAnnualVegetationGrowthTelemetry(state);
+          if (growthTelemetry) {
+            emitRuntimeTelemetry(runtimeTelemetryPresenter.captureGrowth(growthTelemetry, telemetryContext));
+          }
+          const fireTelemetry = getLatestFireRuntimeTelemetry(state);
+          if (fireTelemetry) {
+            emitRuntimeTelemetry(runtimeTelemetryPresenter.captureFire(fireTelemetry, telemetryContext));
+          }
+        }
         const snapshotStartedAt = performance.now();
         threeTestController?.captureFireSnapshot(asRenderSim(state));
         recordPerfSample("sim.fireSnapshot", performance.now() - snapshotStartedAt);
@@ -2440,6 +2621,8 @@ export const createAppRuntime = (): AppRuntime => {
     endRunScreen = null;
     phaseUiDisposer?.();
     phaseUiDisposer = null;
+    gameEvents.off("notification:publish", handleNotificationPublish);
+    notificationToastHost?.destroy();
     unsubscribeRuntimeSettings();
     musicController.dispose();
     if (resizeObserver) {

@@ -271,6 +271,7 @@ export interface FireDetectionReport {
   lastUpdatedDay: number;
   active: boolean;
   alerted: boolean;
+  mergedIntoReportId: number | null;
   towerIds: number[];
   tileCount: number;
   message: string;
@@ -282,23 +283,9 @@ export interface FireKnowledgeState {
   tileDetectionProgress: Float32Array;
   tileFirstKnownDay: Float32Array;
   tileLastSeenDay: Float32Array;
+  frontReportIdByTile: Int32Array;
   reports: FireDetectionReport[];
   latestReportId: number | null;
-}
-
-export interface FireAlertIncident {
-  id: number;
-  tileX: number;
-  tileY: number;
-  townId: number;
-  year: number;
-  careerDay: number;
-  phaseDay: number;
-  confidence?: number;
-  confidenceLabel?: FireDetectionConfidenceLabel;
-  reportState?: FireDetectionReportState;
-  source?: FireDetectionSource;
-  message?: string;
 }
 
 export interface AdvanceToNextEventState {

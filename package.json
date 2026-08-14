@@ -19,6 +19,8 @@
     "sun:regression": "node scripts/seasonal-sun-regression.mjs",
     "fire:regression": "npm run build && node scripts/fire-regression.mjs",
     "fire-detection:regression": "npm run build && node scripts/fire-detection-regression.mjs",
+    "notification:regression": "npm run build && node scripts/notification-regression.mjs",
+    "campaign-difficulty:regression": "npm run build && node scripts/campaign-difficulty-regression.mjs",
     "runtime:perf": "npm run build && node scripts/runtime-perf-regression.mjs",
     "render:regression": "npm run build && node scripts/render-performance-regression.mjs",
     "units:regression": "npm run build && node scripts/units-regression.mjs",

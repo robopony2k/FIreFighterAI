@@ -87,7 +87,7 @@ const buildState = (seed = 132) => {
 
 const buildDeployedTruckState = (seed = 132) => {
   const { state, rng } = buildState(seed);
-  seedStartingRoster(state, rng);
+  seedStartingRoster(state, rng, 1);
   const truckRoster = state.roster.find((unit) => unit.kind === "truck");
   assert.ok(truckRoster, "starting roster should include a truck");
   state.selectedRosterId = truckRoster.id;
@@ -378,7 +378,7 @@ const testMapActionsCommitProjectedTargets = () => {
 
 const testPendingSquadDispatchProjection = () => {
   const { state, rng } = buildState(2014);
-  seedStartingRoster(state, rng);
+  seedStartingRoster(state, rng, 1);
   ensureDefaultSquads(state);
   const squad = state.squads[0];
   assert.ok(squad, "default HQ squad should exist");
@@ -407,7 +407,7 @@ const testPendingSquadDispatchProjection = () => {
 
 const testSquadCommandHotkeyActivation = () => {
   const { state, rng } = buildState(2029);
-  seedStartingRoster(state, rng);
+  seedStartingRoster(state, rng, 1);
   ensureDefaultSquads(state);
   const squad = state.squads[0];
   assert.ok(squad, "the first fixed squad slot should exist");
@@ -928,7 +928,7 @@ const testHazardsAndRecallCleanup = () => {
 
 const testRosterAssignment = () => {
   const { state, rng } = buildState(2007);
-  seedStartingRoster(state, rng);
+  seedStartingRoster(state, rng, 1);
   const extraTruck = state.roster.find((unit) => unit.kind === "truck");
   const firefighter = state.roster.find((unit) => unit.kind === "firefighter");
   assert.ok(extraTruck && firefighter, "starting roster should include assignable units");
@@ -937,6 +937,51 @@ const testRosterAssignment = () => {
   assert.equal(assignRosterCrew(state, firefighter.id, extraTruck.id), true, "roster assignment should accept valid crew");
   assert.equal(firefighter.assignedTruckId, extraTruck.id, "assigned firefighter should point to truck");
   assert.deepEqual(extraTruck.crewIds, [firefighter.id], "assigned truck should list crew id");
+};
+
+const buildStartingRosterSnapshot = (seed, requestedTeamCount) => {
+  const { state, rng } = buildState(seed);
+  const budgetBefore = state.budget;
+  seedStartingRoster(state, rng, requestedTeamCount);
+  const trucks = state.roster.filter((unit) => unit.kind === "truck");
+  const firefighters = state.roster.filter((unit) => unit.kind === "firefighter");
+  return {
+    state,
+    trucks,
+    firefighters,
+    budgetBefore,
+    roster: state.roster.map((unit) => ({
+      id: unit.id,
+      kind: unit.kind,
+      name: unit.name,
+      assignedTruckId: unit.assignedTruckId,
+      crewIds: [...unit.crewIds],
+      squadId: unit.squadId
+    }))
+  };
+};
+
+const testDifficultyStartingResponseTeams = () => {
+  for (const [requestedTeamCount, expectedTeamCount] of [[0, 1], [1, 1], [2, 2], [3, 3], [4, 4]]) {
+    const result = buildStartingRosterSnapshot(2030 + requestedTeamCount, requestedTeamCount);
+    assert.equal(result.trucks.length, expectedTeamCount, `requested ${requestedTeamCount} teams should seed the clamped truck count`);
+    assert.equal(result.firefighters.length, expectedTeamCount * 2, `requested ${requestedTeamCount} teams should seed two crew per truck`);
+    assert.equal(result.state.roster.length, expectedTeamCount * 3, "each response team should contain one truck and two firefighters");
+    assert.equal(result.state.budget, result.budgetBefore, "starting response teams should be recruited without spending budget");
+    assert.equal(new Set(result.trucks.map((truck) => truck.squadId)).size, expectedTeamCount, "starting trucks should receive distinct HQ squad ownership");
+    result.trucks.forEach((truck) => {
+      assert.notEqual(truck.squadId, null, "each starting truck should belong to an HQ squad");
+      assert.equal(truck.crewIds.length, 2, "each starting truck should have a complete two-person crew");
+      truck.crewIds.forEach((crewId) => {
+        const firefighter = result.firefighters.find((unit) => unit.id === crewId);
+        assert.equal(firefighter?.assignedTruckId, truck.id, "crew assignment should be reciprocal and team-local");
+      });
+    });
+  }
+
+  const first = buildStartingRosterSnapshot(2040, 4).roster;
+  const second = buildStartingRosterSnapshot(2040, 4).roster;
+  assert.deepEqual(second, first, "starting response-team composition and assignments should be deterministic");
 };
 
 testStartingRosterAndDeployment();
@@ -962,5 +1007,6 @@ testStanceDoesNotRepositionPlacedTruck();
 testOutOfRangeSuppressionRequiresPlayerPlacement();
 testHazardsAndRecallCleanup();
 testRosterAssignment();
+testDifficultyStartingResponseTeams();
 
 console.log("units regression passed");

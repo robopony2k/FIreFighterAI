@@ -66,8 +66,21 @@
                 <h2>Choose Your Fire Chief</h2>
                 <p>Different leadership styles shape budgets, response speed, and containment.</p>
               </div>
+              <section class="run-difficulty-panel" aria-labelledby="runDifficultyTitle">
+                <div class="run-difficulty-heading">
+                  <div id="runDifficultyTitle" class="run-settings-title">Campaign Difficulty</div>
+                  <div class="run-settings-note">Difficulty changes only your starting budget and response teams. Each team includes one truck and two firefighters.</div>
+                </div>
+                <div
+                  id="runDifficultyOptions"
+                  class="run-difficulty-options"
+                  role="radiogroup"
+                  aria-label="Campaign difficulty"
+                ></div>
+              </section>
               <div class="character-preview">
                 <div id="characterPreviewPortrait" class="character-preview-portrait">
+                  <canvas id="characterPreviewFlameCanvas" class="character-preview-flames" aria-hidden="true"></canvas>
                   <img id="characterPreviewImage" class="character-preview-image" alt="Selected chief portrait" />
                   <span id="characterPreviewInitials"></span>
                 </div>

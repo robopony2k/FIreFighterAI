@@ -4,6 +4,7 @@ type TitleFlameProgramUniforms = {
   glyphHalfWidths: WebGLUniformLocation;
   time: WebGLUniformLocation;
   wind: WebGLUniformLocation;
+  flameScale: WebGLUniformLocation;
   emitter: WebGLUniformLocation;
 };
 
@@ -13,7 +14,8 @@ export type TitleFlameProgram = {
     wind: number,
     glyphCount: number,
     glyphCenters: Float32Array,
-    glyphHalfWidths: Float32Array
+    glyphHalfWidths: Float32Array,
+    flameScale: number
   ) => void;
   uploadEmitterMask: (pixels: Uint8Array, width: number, height: number) => void;
   destroy: () => void;
@@ -115,6 +117,7 @@ export const createTitleFlameProgram = (canvas: HTMLCanvasElement): TitleFlamePr
     uniform float u_glyphHalfWidths[16];
     uniform float u_time;
     uniform float u_wind;
+    uniform float u_flameScale;
     uniform sampler2D u_emitter;
 
     vec2 hash(vec2 p) {
@@ -157,6 +160,8 @@ export const createTitleFlameProgram = (canvas: HTMLCanvasElement): TitleFlamePr
 
     void main() {
       vec2 uv = v_uv;
+      float flameScale = max(u_flameScale, 0.1);
+      float flameY = uv.y / flameScale;
       float glyphCenter = u_glyphCenters[0];
       float glyphHalfWidth = max(u_glyphHalfWidths[0], 0.001);
       float strength = 1.0;
@@ -174,22 +179,23 @@ export const createTitleFlameProgram = (canvas: HTMLCanvasElement): TitleFlamePr
           strength = float(i + 1);
         }
       }
-      float bandWarp = sin(uv.y * 6.4 + glyphCenter * 31.0 + u_time * 1.18) * 0.09 * glyphHalfWidth * uv.y;
-      float qx = ((uv.x - glyphCenter) + bandWarp + u_wind * uv.y * uv.y * glyphHalfWidth * 0.9)
-        / max(glyphHalfWidth * 4.2, 0.001);
-      vec2 q = vec2(qx * (0.78 + uv.y * 0.06), uv.y * 1.56 - 0.31);
+      float scaledHalfWidth = glyphHalfWidth * flameScale;
+      float bandWarp = sin(flameY * 6.4 + glyphCenter * 31.0 + u_time * 1.18) * 0.09 * scaledHalfWidth * flameY;
+      float qx = ((uv.x - glyphCenter) + bandWarp + u_wind * flameY * flameY * scaledHalfWidth * 0.9)
+        / max(scaledHalfWidth * 4.2, 0.001);
+      vec2 q = vec2(qx * (0.78 + flameY * 0.06), flameY * 1.56 - 0.31);
       float flameTime = max(3.0, 1.25 * strength) * u_time;
       float n = fbm(strength * q - vec2(0.0, flameTime));
       float c = 1.0 - 14.0 * pow(
         max(0.0, length(q * vec2(1.18 + q.y * 0.96, 0.58)) - n * max(0.0, q.y + 0.38)),
         1.12
       );
-      float c1 = n * c * (1.62 - pow(2.05 * uv.y, 3.5));
+      float c1 = n * c * (1.62 - pow(2.05 * flameY, 3.5));
       float emitter = texture2D(u_emitter, vec2(uv.x, 1.0 - uv.y)).r;
       c1 = clamp(c1 * (0.88 + emitter * 0.78), 0.0, 1.0);
 
       vec3 col = vec3(1.5 * c1, 1.5 * c1 * c1 * c1, pow(c1, 6.0));
-      float alpha = clamp(c * (1.0 - pow(uv.y, 2.2)) * (0.52 + c1 * 0.96), 0.0, 1.0);
+      float alpha = clamp(c * (1.0 - pow(flameY, 2.2)) * (0.52 + c1 * 0.96), 0.0, 1.0);
       gl_FragColor = vec4(col, alpha);
     }
   `;
@@ -207,6 +213,7 @@ export const createTitleFlameProgram = (canvas: HTMLCanvasElement): TitleFlamePr
     glyphHalfWidths: requireUniform(gl, program, "u_glyphHalfWidths[0]"),
     time: requireUniform(gl, program, "u_time"),
     wind: requireUniform(gl, program, "u_wind"),
+    flameScale: requireUniform(gl, program, "u_flameScale"),
     emitter: requireUniform(gl, program, "u_emitter")
   };
 
@@ -253,7 +260,8 @@ export const createTitleFlameProgram = (canvas: HTMLCanvasElement): TitleFlamePr
       wind: number,
       glyphCount: number,
       glyphCenters: Float32Array,
-      glyphHalfWidths: Float32Array
+      glyphHalfWidths: Float32Array,
+      flameScale: number
     ): void => {
       if (canvas.width === 0 || canvas.height === 0) {
         return;
@@ -271,6 +279,7 @@ export const createTitleFlameProgram = (canvas: HTMLCanvasElement): TitleFlamePr
       gl.uniform1fv(uniforms.glyphHalfWidths, glyphHalfWidths);
       gl.uniform1f(uniforms.time, timeSeconds);
       gl.uniform1f(uniforms.wind, wind);
+      gl.uniform1f(uniforms.flameScale, Math.max(0.1, flameScale));
       gl.uniform1i(uniforms.emitter, 0);
       gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
     },

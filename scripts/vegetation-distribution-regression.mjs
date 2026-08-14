@@ -5,6 +5,7 @@ import { getTerrainResponsiveVegetationStructure } from "../dist/systems/terrain
 import { buildForestMask } from "../dist/mapgen/biome/ForestSpread.js";
 import { vegetationFbmNoise } from "../dist/systems/terrain/utils/vegetationSeedHash.js";
 import {
+  buildFullResolutionTreeCoveragePlan,
   computeTreeBudgetScale,
   computeTreeDensityGradient,
   getTallTreeAttemptWeight,
@@ -12,7 +13,7 @@ import {
 } from "../dist/systems/terrain/rendering/vegetation/treePlacementPlan.js";
 import { decodeTerrainSeedCode } from "../dist/ui/terrainSeedCode.js";
 import { MAP_SIZE_PRESETS } from "../dist/core/config.js";
-import { createInitialState } from "../dist/core/state.js";
+import { createInitialState, TILE_TYPE_IDS } from "../dist/core/state.js";
 import { RNG } from "../dist/core/rng.js";
 import { generateMap } from "../dist/mapgen/index.js";
 
@@ -209,6 +210,51 @@ assert.equal(getTallTreeAttemptWeight("grass"), 0, "grass structure must not emi
 assert.ok(
   getTallTreeAttemptWeight("scrub") < getTallTreeAttemptWeight("forest") * 0.2,
   "scrub must remain visually subordinate to forest"
+);
+
+const coverageCols = 256;
+const coverageRows = 256;
+const coverageTotal = coverageCols * coverageRows;
+const coverageTypes = new Uint8Array(coverageTotal).fill(TILE_TYPE_IDS.grass);
+coverageTypes.fill(TILE_TYPE_IDS.forest, 0, 30_000);
+const coverageOcclusion = new Uint8Array(coverageTotal);
+coverageOcclusion[7] = 1;
+const makeCoveragePlan = () => buildFullResolutionTreeCoveragePlan({
+  cols: coverageCols,
+  rows: coverageRows,
+  worldSeed: 90210,
+  tileTypes: coverageTypes,
+  tileVegetationAge: new Float32Array(coverageTotal),
+  tileCanopyCover: new Float32Array(coverageTotal),
+  tileStemDensity: new Uint8Array(coverageTotal),
+  occludedMask: coverageOcclusion,
+  forestId: TILE_TYPE_IDS.forest,
+  scrubId: TILE_TYPE_IDS.scrub,
+  floodplainId: TILE_TYPE_IDS.floodplain,
+  grassId: TILE_TYPE_IDS.grass,
+  densityScale: 0.96,
+  attemptCap: 2,
+  modelInstanceBudget: 28_000
+});
+const coveragePlanA = makeCoveragePlan();
+const coveragePlanB = makeCoveragePlan();
+assert.deepEqual(coveragePlanA, coveragePlanB, "full-resolution forest coverage planning must be deterministic");
+assert.equal(coveragePlanA.eligibleForestTiles, 29_999, "the structure footprint must be the only coverage exemption");
+assert.equal(coveragePlanA.modelCandidates.length, 28_000, "high-detail forest models must retain the 28,000-instance ceiling");
+assert.equal(coveragePlanA.modelCoveredForestTiles, 28_000);
+assert.equal(coveragePlanA.fallbackCoveredForestTiles, 1_999);
+assert.equal(coveragePlanA.uncoveredForestTiles, 0, "every eligible 256 forest tile must receive model or fallback geometry");
+const mandatoryCoverageTiles = new Set(
+  [...coveragePlanA.modelCandidates, ...coveragePlanA.fallbackCandidates]
+    .filter((candidate) => candidate.requiredForestCoverage)
+    .map((candidate) => candidate.tileIndex)
+);
+assert.equal(mandatoryCoverageTiles.size, coveragePlanA.eligibleForestTiles, "forest coverage candidates must not duplicate tiles");
+assert.ok(
+  [...coveragePlanA.modelCandidates, ...coveragePlanA.fallbackCandidates].every(
+    (candidate) => candidate.vegetationType === "forest" && Math.abs(candidate.offsetX) <= 0.42 && Math.abs(candidate.offsetY) <= 0.42
+  ),
+  "coverage candidates must remain forest-owned and inside their tile"
 );
 
 const reportedShareCode = "MAP7-115-1001Y1J1E1S191Q1C0I1M0O0U1A0S180Y1M1A181Q0K1K12161C";

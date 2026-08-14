@@ -56,6 +56,7 @@ export type TitleFlameFieldRenderParams = {
   glyphHalfWidths: Float32Array;
   timeSeconds: number;
   wind: number;
+  flameScale: number;
 };
 
 export const renderTitleFlameField = ({
@@ -65,20 +66,23 @@ export const renderTitleFlameField = ({
   glyphCenters,
   glyphHalfWidths,
   timeSeconds,
-  wind
+  wind,
+  flameScale
 }: TitleFlameFieldRenderParams): void => {
   const { data, width, height } = fireImageData;
   const xScale = width > 1 ? 1 / (width - 1) : 0;
   const yScale = height > 1 ? 1 / (height - 1) : 0;
   const activeGlyphCount = Math.max(1, glyphCount);
+  const resolvedFlameScale = Math.max(0.1, flameScale);
 
   for (let y = 0; y < height; y += 1) {
     const row = y * width;
     const uvY = 1 - y * yScale;
-    const qy = uvY * 1.56 - 0.31;
-    const rowHeat = Math.max(0, 1.62 - Math.pow(2.05 * uvY, 3.5));
-    const rowAlpha = Math.max(0, 1 - Math.pow(uvY, 2.2));
-    const windShear = wind * uvY * uvY * 0.14;
+    const flameY = uvY / resolvedFlameScale;
+    const qy = flameY * 1.56 - 0.31;
+    const rowHeat = Math.max(0, 1.62 - Math.pow(2.05 * flameY, 3.5));
+    const rowAlpha = Math.max(0, 1 - Math.pow(flameY, 2.2));
+    const windShear = wind * flameY * flameY * 0.14;
 
     for (let x = 0; x < width; x += 1) {
       const idx = row + x;
@@ -96,10 +100,11 @@ export const renderTitleFlameField = ({
       }
       const glyphCenter = glyphCenters[glyphIndex] ?? 0.5;
       const glyphHalfWidth = Math.max(glyphHalfWidths[glyphIndex] ?? 0.01, 0.001);
+      const scaledHalfWidth = glyphHalfWidth * resolvedFlameScale;
       const strength = glyphIndex + 1;
-      const bandWarp = Math.sin(uvY * 6.4 + glyphCenter * 31 + timeSeconds * 1.18) * 0.09 * glyphHalfWidth * uvY;
-      const qx = ((uvX - glyphCenter) + bandWarp + windShear * glyphHalfWidth * 6.4) / Math.max(glyphHalfWidth * 4.2, 0.001);
-      const fieldX = qx * (0.78 + uvY * 0.06);
+      const bandWarp = Math.sin(flameY * 6.4 + glyphCenter * 31 + timeSeconds * 1.18) * 0.09 * scaledHalfWidth * flameY;
+      const qx = ((uvX - glyphCenter) + bandWarp + windShear * scaledHalfWidth * 6.4) / Math.max(scaledHalfWidth * 4.2, 0.001);
+      const fieldX = qx * (0.78 + flameY * 0.06);
       const fieldY = qy;
       const bandTime = Math.max(3, 1.25 * strength) * timeSeconds;
       const n = fbm(strength * fieldX, strength * fieldY - bandTime);

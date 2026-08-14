@@ -3,7 +3,13 @@ import type { ProgressionCapabilityId } from "../../../systems/progression/types
 
 export type RuntimeSurfaceId = "phaseDom" | "threeDock" | "canvasHud";
 
-export type RuntimeWidgetId = "timeControls" | "audioControls" | "simulationSettings" | "climate" | "minimap";
+export type RuntimeWidgetId =
+  | "timeControls"
+  | "audioControls"
+  | "simulationSettings"
+  | "notificationSettings"
+  | "climate"
+  | "minimap";
 
 export type RuntimeWidgetContainerId = string;
 export type RuntimeWidgetRegionId = string;

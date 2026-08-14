@@ -67,7 +67,6 @@ const buildCacheKey = (state: WorldState): string => {
   return [
     state.grid.cols,
     state.grid.rows,
-    state.terrainTypeRevision ?? 0,
     buildElevationSignature(state),
     angleBucket,
     strengthBucket,

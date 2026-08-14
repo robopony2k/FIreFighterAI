@@ -107,6 +107,8 @@ export function runFireKernel(
         state.tileHeatRelease.fill(0);
         state.tileBurnAge.fill(0);
         applyFireActivityMetrics(state, 0);
+        result.telemetry.timingsMs.setup = hooks.profElapsed(tickStart);
+        result.telemetry.timingsMs.total = result.telemetry.timingsMs.setup;
         hooks.profEnd("fireTick", tickStart);
         return result;
     }
@@ -147,7 +149,9 @@ export function runFireKernel(
     const windDx = state.wind.dx;
     const windDy = state.wind.dy;
     const windStrength = state.wind.strength;
+    const terrainWindStart = hooks.profStart();
     const terrainWindField = fireQuality > 0 ? getTerrainWindField(state) : null;
+    result.telemetry.timingsMs.terrainWind = hooks.profElapsed(terrainWindStart);
     const globalWind = { dx: windDx, dy: windDy, strength: windStrength };
     const terrainWindScratch = { dx: windDx, dy: windDy, strength: windStrength };
     const exposureWindScratch = { dx: windDx, dy: windDy, strength: windStrength };
@@ -350,7 +354,13 @@ export function runFireKernel(
         }
         return false;
     };
+    result.telemetry.timingsMs.setup = Math.max(
+        0,
+        hooks.profElapsed(tickStart) - result.telemetry.timingsMs.terrainWind
+    );
+    const blockBuildStart = hooks.profStart();
     hooks.buildFireWorkBlocks(state);
+    result.telemetry.timingsMs.blockBuild = hooks.profElapsed(blockBuildStart);
     state.firePerfActiveBlocks = state.fireBlockActiveCount;
     state.firePerfWorkBlocks = state.fireBlockWorkCount;
     const loopStart = hooks.profStart();
@@ -365,10 +375,21 @@ export function runFireKernel(
         for (let y = minY; y <= maxY; y += 1) {
             let idx = y * cols + minX;
             for (let x = minX; x <= maxX; x += 1, idx += 1) {
+                result.telemetry.processedTiles += 1;
                 let fireValue = fire[idx];
-                let fuelValue = fuel[idx];
                 let heatValue = heat[idx];
                 let wetnessValue = Math.max(0, suppressionWetness[idx] || 0);
+                if (
+                    fireValue === 0 &&
+                    heatValue === 0 &&
+                    wetnessValue === 0 &&
+                    burnAge[idx] === 0 &&
+                    heatRelease[idx] === 0
+                ) {
+                    result.telemetry.inactiveTilesSkipped += 1;
+                    continue;
+                }
+                let fuelValue = fuel[idx];
                 if (wetnessValue > 0) {
                     wetnessValue *= wetnessDecayFactor;
                     if (wetnessValue < SUPPRESSION_WETNESS_ACTIVE_EPS) {
@@ -380,10 +401,10 @@ export function runFireKernel(
                 let burnAgeValue = Math.max(0, burnAge[idx] || 0);
                 let heatReleaseValue = 0;
                 const wetnessBlocked = wetnessValue > SUPPRESSION_WETNESS_BLOCK_THRESHOLD;
-                const effectiveIgnitionThreshold = applyWetnessToIgnitionThreshold(ignitionPoint[idx], wetnessValue, ignitionBoost);
-                const hasNeighborFire = hasNeighborFireAt(x, y);
                 const burning = fireValue > fireEps;
+                const hasNeighborFire = !burning && heatValue > 0 ? hasNeighborFireAt(x, y) : false;
                 if (burning) {
+                    result.telemetry.burningTilesEvaluated += 1;
                     burnAgeValue += delta;
                     if (smokeSampleRate <= 1 || ((idx + smokeSeed) % smokeSampleRate) === 0) {
                         hooks.emitSmoke({ idx, x: x + 0.5, y: y + 0.5, fireValue, seed: state.seed ^ (idx * 73856093) ^ smokeSeed });
@@ -710,8 +731,8 @@ export function runFireKernel(
                     !burning &&
                     !wetnessBlocked &&
                     fuelValue > 0 &&
-                    heatValue >= effectiveIgnitionThreshold &&
                     isIgnitableTypeId(tid) &&
+                    heatValue >= applyWetnessToIgnitionThreshold(ignitionPoint[idx], wetnessValue, ignitionBoost) &&
                     (hasNeighborFire || hasRangedFireExposureAt(x, y)) &&
                     weatherIgnition >= 0.12
                 ) {
@@ -757,6 +778,7 @@ export function runFireKernel(
             }
         }
     }
+    result.telemetry.timingsMs.cellLoop = hooks.profElapsed(loopStart);
     hooks.profEnd("fireLoop", loopStart);
     result.telemetry.igniteCandidates = igniteCount;
     const igniteStart = hooks.profStart();
@@ -786,6 +808,7 @@ export function runFireKernel(
         tile.heat = heat[idx];
         hooks.markFireBlockNextByTile(state, idx);
         activeFires += 1;
+        result.telemetry.ignitionsCommitted += 1;
         const x = idx % cols;
         const y = Math.floor(idx / cols);
         if (x < fireMinX)
@@ -797,7 +820,9 @@ export function runFireKernel(
         if (y > fireMaxY)
             fireMaxY = y;
     }
+    result.telemetry.timingsMs.ignitionCommit = hooks.profElapsed(igniteStart);
     hooks.profEnd("fireIgnite", igniteStart);
+    const finalizeStart = hooks.profStart();
     hooks.finalizeFireBlocks(state);
     state.firePerfActiveBlocks = state.fireBlockActiveCount;
     let heatBoundsArea = 0;
@@ -854,6 +879,8 @@ export function runFireKernel(
         hooks.resetFireBounds(state);
     }
     applyFireActivityMetrics(state, activeFires);
+    result.telemetry.timingsMs.finalize = hooks.profElapsed(finalizeStart);
+    result.telemetry.timingsMs.total = hooks.profElapsed(tickStart);
     hooks.profEnd("fireTick", tickStart);
     result.activeFires = activeFires;
     return result;

@@ -117,13 +117,17 @@ import {
 } from "../systems/terrain/rendering/terrainRenderChunks.js";
 import { resolveTreeGrounding } from "../systems/terrain/rendering/vegetation/treeGrounding.js";
 import { buildTreeLod } from "../systems/terrain/rendering/vegetation/treeLodController.js";
+import { buildForestCoverageFallbackRenderer } from "../systems/terrain/rendering/vegetation/forestCoverageFallbackRenderer.js";
 import {
+  buildFullResolutionTreeCoveragePlan,
   computeTreeBudgetScale,
   computeTreeDensityGradient,
   getTallTreeAttemptWeight,
   resolveForestTreeCohort,
   resolveTreeBudgetPriority,
-  resolveTreeCandidateOffset
+  resolveTreeCandidateOffset,
+  type FullResolutionTreeCoveragePlan,
+  type TreeCoverageCandidate
 } from "../systems/terrain/rendering/vegetation/treePlacementPlan.js";
 import type {
   TreeImpostorAtlas,
@@ -193,6 +197,11 @@ export type { RiverWaterData } from "./terrain/water/riverMeshData.js";
 export type { WaterSampleRatios } from "./terrain/water/waterTextures.js";
 export type { WaterfallDebugData } from "./terrain/water/waterfallBuilder.js";
 export type { TerrainHeightAnomaly, TerrainHeightProvenance, TerrainRenderDebugOptions } from "./terrain/debug/terrainHeightProvenance.js";
+
+export const TERRAIN_VEGETATION_ROOT_NAME = "terrain-vegetation-root";
+export const TERRAIN_STRUCTURE_ROOT_NAME = "terrain-structure-root";
+
+export type TerrainMeshBuildMode = "full" | "vegetation-only";
 
 export type TerrainSample = {
   cols: number;
@@ -469,6 +478,12 @@ export type TerrainBuildTelemetry = {
     sourceTerrainTriangles: number;
     outputTerrainTriangles: number;
     treeInstances: number;
+    eligibleForestTiles: number;
+    modelCoveredForestTiles: number;
+    fallbackCoveredForestTiles: number;
+    uncoveredForestTiles: number;
+    forestCoverageFallbackInstances: number;
+    forestCoverageFallbackDrawCalls: number;
     scrubInstances: number;
     waterSupportSamples: number;
     inlandWaterTriangles: number;
@@ -3310,9 +3325,12 @@ export const buildTerrainMesh = (
   firestationAsset: FirestationAsset | null,
   seasonVisualConfig?: TreeSeasonVisualConfig,
   treeImpostorAtlas?: TreeImpostorAtlas | null,
-  treeLodMode: TreeLodMode = "auto"
+  treeLodMode: TreeLodMode = "auto",
+  buildMode: TerrainMeshBuildMode = "full"
 ): {
   mesh: THREE.Mesh;
+  vegetationRoot: THREE.Group;
+  structureRoot: THREE.Group;
   size: { width: number; depth: number };
   water?: TerrainWaterData;
   treeBurn?: TreeBurnController;
@@ -3320,6 +3338,7 @@ export const buildTerrainMesh = (
   telemetry: TerrainBuildTelemetry;
 } => {
   const buildStartedAt = performance.now();
+  const vegetationOnly = buildMode === "vegetation-only";
   const telemetry: TerrainBuildTelemetry = {
     timingsMs: {
       terrainAssembly: 0,
@@ -3338,6 +3357,12 @@ export const buildTerrainMesh = (
       sourceTerrainTriangles: 0,
       outputTerrainTriangles: 0,
       treeInstances: 0,
+      eligibleForestTiles: 0,
+      modelCoveredForestTiles: 0,
+      fallbackCoveredForestTiles: 0,
+      uncoveredForestTiles: 0,
+      forestCoverageFallbackInstances: 0,
+      forestCoverageFallbackDrawCalls: 0,
       scrubInstances: 0,
       waterSupportSamples: 0,
       inlandWaterTriangles: Math.floor((surface.riverRenderDomain?.contourIndices.length ?? 0) / 3)
@@ -3407,8 +3432,12 @@ export const buildTerrainMesh = (
       ? TREE_INSTANCE_BUDGET_MEDIUM
       : Number.POSITIVE_INFINITY;
   const useDetailedStructures = maxMapSpan < DETAILED_STRUCTURE_THRESHOLD;
-  const geometry = new THREE.PlaneGeometry(width, depth, sampleCols - 1, sampleRows - 1);
-  geometry.rotateX(-Math.PI / 2);
+  const geometry = vegetationOnly
+    ? new THREE.BufferGeometry()
+    : new THREE.PlaneGeometry(width, depth, sampleCols - 1, sampleRows - 1);
+  if (!vegetationOnly) {
+    geometry.rotateX(-Math.PI / 2);
+  }
   telemetry.counts.sourceTerrainTriangles = Math.floor((geometry.getIndex()?.count ?? 0) / 3);
 
   const positions = geometry.attributes.position;
@@ -3418,6 +3447,7 @@ export const buildTerrainMesh = (
   let waterCount = 0;
   let vertexIndex = 0;
   const treeInstances: TreeInstance[] = [];
+  const forestCoverageFallbackInstances: TreeInstance[] = [];
   const scrubPlaceholderInstances: ScrubPlaceholderInstance[] = [];
   const treeTileProfilesRaw = new Map<
     number,
@@ -3533,6 +3563,149 @@ export const buildTerrainMesh = (
         return mask;
       })()
     : null;
+  const useFullResolutionTreeCoverage =
+    allowTrees &&
+    cols === 256 &&
+    rows === 256 &&
+    !!sample.tileTypes &&
+    !!tileStemDensity &&
+    !!tileCanopyCover;
+  let fullResolutionTreeCoveragePlan: FullResolutionTreeCoveragePlan | null = null;
+  const plannedTreeTileIndices = new Set<number>();
+  const recordTreeProfile = (
+    instance: TreeInstance,
+    treeHeight: number,
+    isForest: boolean
+  ): void => {
+    const crownHeight = Math.max(0.25, treeHeight * 0.72);
+    const trunkHeight = Math.max(0.2, treeHeight * 0.45);
+    const crownRadius = Math.max(0.16, treeHeight * (isForest ? 0.22 : 0.18));
+    const profile = treeTileProfilesRaw.get(instance.tileIndex);
+    if (profile) {
+      profile.x += instance.x;
+      profile.y += instance.y;
+      profile.z += instance.z;
+      profile.crownHeight += crownHeight;
+      profile.crownRadius += crownRadius;
+      profile.trunkHeight += trunkHeight;
+      profile.count += 1;
+    } else {
+      treeTileProfilesRaw.set(instance.tileIndex, {
+        x: instance.x,
+        y: instance.y,
+        z: instance.z,
+        crownHeight,
+        crownRadius,
+        trunkHeight,
+        count: 1
+      });
+    }
+  };
+  const appendPlannedTreeInstance = (
+    candidate: TreeCoverageCandidate,
+    target: TreeInstance[],
+    forceFallbackGeometry: boolean
+  ): void => {
+    const idx = candidate.tileIndex;
+    const typeId = sample.tileTypes?.[idx] ?? grassId;
+    const isForest = typeId === forestId;
+    const dominantId = treeTypes ? treeTypes[idx] : 255;
+    const forestScale =
+      dominantId === pineId
+        ? 1.05
+        : dominantId === oakId
+          ? 1
+          : dominantId === mapleId
+            ? 0.98
+            : dominantId === elmId
+              ? 1.02
+              : dominantId === birchId
+                ? 0.9
+                : 1;
+    const baseScale =
+      TREE_SCALE_BASE + Math.min(TREE_SCALE_STEP_CAP, Math.max(0, step - 1) * TREE_SCALE_STEP_GAIN);
+    const typeScale = isForest ? forestScale : typeId === scrubId ? 0.48 : 0.58;
+    const ageYears = Math.max(0, tileVegetationAge?.[idx] ?? 0);
+    const vegetationHeightScale = getVegetationRenderHeightMultiplier(candidate.vegetationType, ageYears);
+    const canopyHeightScale = clamp(0.72 + candidate.canopyCover * 0.55, 0.72, 1.28);
+    let treeType: TreeType = TreeType.Scrub;
+    if (isForest) {
+      treeType =
+        dominantId === birchId
+          ? TreeType.Birch
+          : dominantId === oakId
+            ? TreeType.Oak
+            : dominantId === mapleId
+              ? TreeType.Maple
+              : dominantId === elmId
+                ? TreeType.Elm
+                : TreeType.Pine;
+    }
+    const variants = forceFallbackGeometry || !hasTreeAssets ? [] : getTreeVariants(treeType);
+    const variantIndex =
+      variants.length > 0
+        ? Math.floor(noiseAt(idx + 9.7 + candidate.attempt * 0.53) * variants.length)
+        : 0;
+    const variant = variants.length > 0 ? variants[variantIndex] ?? variants[0] : null;
+    const targetHeight = baseScale * typeScale * vegetationHeightScale * canopyHeightScale * TREE_HEIGHT_FACTOR;
+    const sourceHeight = forceFallbackGeometry ? 1 : Math.max(0.35, variant?.height ?? 1.5);
+    const cohortScale = isForest
+      ? resolveForestTreeCohort(noiseAt(idx + 18.7 + candidate.attempt * 0.67)).scale
+      : 1;
+    const scale =
+      (targetHeight / sourceHeight) *
+      cohortScale *
+      (isForest ? 0.96 + candidate.maturity01 * 0.12 : 0.85 + noiseAt(idx + 7.9 + candidate.attempt * 0.41) * 0.3);
+    const rotation = noiseAt(idx + 3.3 + candidate.attempt * 0.23) * Math.PI * 2;
+    const ground = resolveTreeGrounding(
+      surface,
+      candidate.tileX + 0.5 + candidate.offsetX,
+      candidate.tileY + 0.5 + candidate.offsetY
+    );
+    const instance: TreeInstance = {
+      x: ground.x,
+      y: ground.y + (variant ? variant.baseOffset * scale : 0),
+      z: ground.z,
+      scale,
+      rotation,
+      treeType,
+      variantIndex,
+      tileIndex: idx,
+      tileX: candidate.tileX,
+      tileY: candidate.tileY,
+      sourceHeight
+    };
+    target.push(instance);
+    plannedTreeTileIndices.add(idx);
+    recordTreeProfile(instance, Math.max(0.2, sourceHeight * scale), isForest);
+  };
+  if (useFullResolutionTreeCoverage) {
+    const densityScale =
+      Math.min(1.5, 1 + Math.max(0, step - 1) * 0.2) * treeDensitySafetyScale;
+    fullResolutionTreeCoveragePlan = buildFullResolutionTreeCoveragePlan({
+      cols,
+      rows,
+      worldSeed: sample.worldSeed ?? 0,
+      tileTypes: sample.tileTypes!,
+      tileVegetationAge,
+      tileCanopyCover,
+      tileStemDensity,
+      occludedMask: houseMask ?? undefined,
+      forestId,
+      scrubId,
+      floodplainId,
+      grassId,
+      densityScale,
+      attemptCap: treeAttemptCap,
+      modelInstanceBudget: treeInstanceBudget
+    });
+    fullResolutionTreeCoveragePlan.modelCandidates.forEach((candidate) => {
+      appendPlannedTreeInstance(candidate, treeInstances, false);
+    });
+    fullResolutionTreeCoveragePlan.fallbackCandidates.forEach((candidate) => {
+      appendPlannedTreeInstance(candidate, forestCoverageFallbackInstances, true);
+    });
+  }
   for (let row = 0; row < sampleRows; row += 1) {
     const tileY = Math.min(rows - 1, row * step);
     for (let col = 0; col < sampleCols; col += 1) {
@@ -3541,7 +3714,7 @@ export const buildTerrainMesh = (
       const height = sampleHeights[vertexIndex] ?? 0;
       const clampedHeight = clamp(height, -1, 1);
       const y = clampedHeight * heightScale;
-      positions.setY(vertexIndex, y);
+      positions?.setY(vertexIndex, y);
       minHeight = Math.min(minHeight, y);
       maxHeight = Math.max(maxHeight, y);
       const typeId = sampleTypes[vertexIndex] ?? grassId;
@@ -3600,8 +3773,9 @@ export const buildTerrainMesh = (
       const vegetationAgeYears = Math.max(0, tileVegetationAge?.[idx] ?? 0);
       const vegetationMaturity01 = getVegetationMaturity01(vegetationType ?? "grass", vegetationAgeYears);
       const treeAttemptWeight = getTreeAttemptWeight(typeId);
-      let placedTreeOnTile = false;
+      let placedTreeOnTile = useFullResolutionTreeCoverage && plannedTreeTileIndices.has(idx);
       if (
+        !useFullResolutionTreeCoverage &&
         vegetationType &&
         treeAttemptWeight > 0 &&
         stemDensity > 0 &&
@@ -3817,7 +3991,7 @@ export const buildTerrainMesh = (
   }
   telemetry.timingsMs.terrainAssembly = performance.now() - buildStartedAt;
   const cutoutStartedAt = performance.now();
-  if (!debugRenderOptions?.disableRiverCutout) {
+  if (!vegetationOnly && !debugRenderOptions?.disableRiverCutout) {
     telemetry.cutout = applyRiverTerrainTriangleCutout(
       geometry,
       sampleCols,
@@ -3830,9 +4004,11 @@ export const buildTerrainMesh = (
   }
   telemetry.timingsMs.inlandWaterCutout = performance.now() - cutoutStartedAt;
   const normalsStartedAt = performance.now();
-  geometry.computeVertexNormals();
-  if (!useLegacyFacetedTerrain) {
-    smoothTerrainSharedVertexNormals(geometry);
+  if (!vegetationOnly) {
+    geometry.computeVertexNormals();
+    if (!useLegacyFacetedTerrain) {
+      smoothTerrainSharedVertexNormals(geometry);
+    }
   }
   telemetry.timingsMs.normals = performance.now() - normalsStartedAt;
   telemetry.counts.outputTerrainTriangles = Math.floor(
@@ -3846,11 +4022,11 @@ export const buildTerrainMesh = (
   }
 
   const surfaceMaterialStartedAt = performance.now();
-  if (!useLegacyFacetedTerrain) {
+  if (!vegetationOnly && !useLegacyFacetedTerrain) {
     applyTerrainSurfaceColors(geometry, sample, surface);
   }
 
-  const tileTexture = buildTileTexture(
+  const tileTexture = vegetationOnly ? null : buildTileTexture(
     sample,
     sampleCols,
     sampleRows,
@@ -3881,7 +4057,7 @@ export const buildTerrainMesh = (
     }
   );
   const mountainTerrainMaskField =
-    !sample.debugTypeColors && !sample.debugScalarField
+    !vegetationOnly && !sample.debugTypeColors && !sample.debugScalarField
       ? buildMountainTerrainMaskField({
           sample,
           sampleCols,
@@ -3911,16 +4087,28 @@ export const buildTerrainMesh = (
   });
   material.transparent = false;
   material.alphaTest = 0;
-  applyInlandWaterSeamDebugMaterial(
-    material,
-    debugRenderOptions?.inlandWaterSeamDebugMode ?? "normal"
-  );
-  refreshTerrainScorchedGroundMaterial(material, sample, surface, !useLegacyFacetedTerrain);
+  if (!vegetationOnly) {
+    applyInlandWaterSeamDebugMaterial(
+      material,
+      debugRenderOptions?.inlandWaterSeamDebugMode ?? "normal"
+    );
+    refreshTerrainScorchedGroundMaterial(material, sample, surface, !useLegacyFacetedTerrain);
+  } else {
+    material.visible = false;
+  }
   const mesh = new THREE.Mesh(geometry, material);
-  mesh.receiveShadow = true;
-  refreshTerrainRoadVisuals(mesh, sample, surface);
+  mesh.receiveShadow = !vegetationOnly;
+  if (!vegetationOnly) {
+    refreshTerrainRoadVisuals(mesh, sample, surface);
+  }
   telemetry.timingsMs.surfaceMaterial = performance.now() - surfaceMaterialStartedAt;
   const vegetationStartedAt = performance.now();
+  const vegetationRoot = new THREE.Group();
+  vegetationRoot.name = TERRAIN_VEGETATION_ROOT_NAME;
+  mesh.add(vegetationRoot);
+  const structureRoot = new THREE.Group();
+  structureRoot.name = TERRAIN_STRUCTURE_ROOT_NAME;
+  mesh.add(structureRoot);
   const treeBurnMeshStates: TreeBurnMeshState[] = [];
   const fullTreeMeshesByChunk = new Map<string, THREE.InstancedMesh[]>();
   let activeTreeGroup: THREE.Group | null = null;
@@ -4109,7 +4297,7 @@ export const buildTerrainMesh = (
     (Object.keys(TREE_MODEL_PATHS) as TreeType[]).forEach((treeType) => {
       addVariantInstances(treeType, getTreeVariants(treeType));
     });
-    mesh.add(treeGroup);
+    vegetationRoot.add(treeGroup);
   } else if (treeInstances.length > 0) {
     const treeGroup = new THREE.Group();
     activeTreeGroup = treeGroup;
@@ -4131,6 +4319,8 @@ export const buildTerrainMesh = (
       canopyMesh.name = `terrain-tree-fallback-canopy-${key}`;
       trunkMesh.userData.terrainChunkKey = key;
       canopyMesh.userData.terrainChunkKey = key;
+      trunkMesh.userData.terrainVegetationOwnsMaterial = true;
+      canopyMesh.userData.terrainVegetationOwnsMaterial = true;
       trunkMesh.castShadow = true;
       trunkMesh.receiveShadow = true;
       canopyMesh.castShadow = true;
@@ -4169,7 +4359,25 @@ export const buildTerrainMesh = (
       registerFullTreeMesh(key, canopyMesh);
       treeGroup.add(trunkMesh, canopyMesh);
     });
-    mesh.add(treeGroup);
+    vegetationRoot.add(treeGroup);
+  }
+  const forestCoverageFallbackBuild = buildForestCoverageFallbackRenderer({
+    instances: forestCoverageFallbackInstances,
+    canopyPalette: FOREST_CANOPY_TONES,
+    tileFuel: sample.tileFuel,
+    worldSeed: sample.worldSeed ?? 0,
+    seasonVisual,
+    prepareTrunkMaterial: (fallbackMaterial) => {
+      applyTrunkTopCropShader(fallbackMaterial);
+      applyTreeSeasonShader(fallbackMaterial, seasonVisual, TreeType.Scrub);
+    },
+    prepareCanopyMaterial: (fallbackMaterial) => {
+      applyTreeSeasonShader(fallbackMaterial, seasonVisual, TreeType.Scrub);
+    }
+  });
+  if (forestCoverageFallbackBuild.instances > 0) {
+    vegetationRoot.add(forestCoverageFallbackBuild.root);
+    treeBurnMeshStates.push(...forestCoverageFallbackBuild.burnStates);
   }
   const treeLodBuild =
     hasTreeAssets && activeTreeGroup && treeImpostorAtlas
@@ -4204,6 +4412,7 @@ export const buildTerrainMesh = (
       const shrubMesh = new THREE.InstancedMesh(shrubGeometry, shrubMaterial, instances.length);
       shrubMesh.name = `terrain-scrub-${key}`;
       shrubMesh.userData.terrainChunkKey = key;
+      shrubMesh.userData.terrainVegetationOwnsMaterial = true;
       shrubMesh.castShadow = true;
       shrubMesh.receiveShadow = true;
       instances.forEach((instance, index) => {
@@ -4226,12 +4435,49 @@ export const buildTerrainMesh = (
         shrubMesh.instanceColor.needsUpdate = true;
       }
       finalizeInstancedMeshBounds(shrubMesh);
-      mesh.add(shrubMesh);
+      vegetationRoot.add(shrubMesh);
     });
   }
   telemetry.timingsMs.vegetation = performance.now() - vegetationStartedAt;
   telemetry.counts.treeInstances = treeInstances.length;
+  telemetry.counts.eligibleForestTiles = fullResolutionTreeCoveragePlan?.eligibleForestTiles ?? 0;
+  telemetry.counts.modelCoveredForestTiles = fullResolutionTreeCoveragePlan?.modelCoveredForestTiles ?? 0;
+  telemetry.counts.fallbackCoveredForestTiles = fullResolutionTreeCoveragePlan?.fallbackCoveredForestTiles ?? 0;
+  telemetry.counts.uncoveredForestTiles = fullResolutionTreeCoveragePlan?.uncoveredForestTiles ?? 0;
+  telemetry.counts.forestCoverageFallbackInstances = forestCoverageFallbackBuild.instances;
+  telemetry.counts.forestCoverageFallbackDrawCalls = forestCoverageFallbackBuild.drawCalls;
   telemetry.counts.scrubInstances = scrubPlaceholderInstances.length;
+  if (vegetationOnly) {
+    const finalizeStartedAt = performance.now();
+    const treeTileProfiles = new Map<number, TreeFlameProfile>();
+    treeTileProfilesRaw.forEach((profile, tileIndex) => {
+      const count = Math.max(1, profile.count);
+      treeTileProfiles.set(tileIndex, {
+        x: profile.x / count,
+        y: profile.y / count,
+        z: profile.z / count,
+        crownHeight: profile.crownHeight / count,
+        crownRadius: profile.crownRadius / count,
+        trunkHeight: profile.trunkHeight / count,
+        treeCount: count
+      });
+    });
+    const treeBurn =
+      treeBurnMeshStates.length > 0
+        ? createTreeBurnController(treeBurnMeshStates, TILE_TYPE_IDS.ash, treeTileProfiles)
+        : undefined;
+    telemetry.timingsMs.finalize = performance.now() - finalizeStartedAt;
+    telemetry.timingsMs.total = performance.now() - buildStartedAt;
+    return {
+      mesh,
+      vegetationRoot,
+      structureRoot,
+      size: { width, depth },
+      treeBurn,
+      treeLod: treeLodBuild?.controller,
+      telemetry
+    };
+  }
   const structuresStartedAt = performance.now();
   const markStructureTopHeight = (
     minTileX: number,
@@ -4382,7 +4628,7 @@ export const buildTerrainMesh = (
           baseGroup.add(foundation);
         }
         markStructureTopHeight(minTileX, maxTileX, minTileY, maxTileY, topY);
-        mesh.add(baseGroup);
+        structureRoot.add(baseGroup);
       } else {
         const topY = supportTop + 0.6;
         const base = new THREE.Mesh(buildingGeometry, baseMaterial);
@@ -4391,7 +4637,7 @@ export const buildTerrainMesh = (
         base.rotation.set(0, rotation, 0);
         base.castShadow = true;
         base.receiveShadow = true;
-        mesh.add(base);
+        structureRoot.add(base);
         if (supportBottom < supportTop - 0.01) {
           const foundationHeight = Math.max(0.1, supportTop - supportBottom);
           const foundation = new THREE.Mesh(buildingGeometry, foundationMaterial);
@@ -4400,7 +4646,7 @@ export const buildTerrainMesh = (
           foundation.rotation.set(0, rotation, 0);
           foundation.castShadow = true;
           foundation.receiveShadow = true;
-          mesh.add(foundation);
+          structureRoot.add(foundation);
         }
         markStructureTopHeight(minTileX, maxTileX, minTileY, maxTileY, topY);
       }
@@ -4560,7 +4806,7 @@ export const buildTerrainMesh = (
           });
           instanced.instanceMatrix.needsUpdate = true;
           finalizeInstancedMeshBounds(instanced);
-          mesh.add(instanced);
+          structureRoot.add(instanced);
         });
       });
 
@@ -4582,7 +4828,7 @@ export const buildTerrainMesh = (
           });
           fallbackMesh.instanceMatrix.needsUpdate = true;
           finalizeInstancedMeshBounds(fallbackMesh);
-          mesh.add(fallbackMesh);
+          structureRoot.add(fallbackMesh);
         });
       }
 
@@ -4602,7 +4848,7 @@ export const buildTerrainMesh = (
           });
           foundationMesh.instanceMatrix.needsUpdate = true;
           finalizeInstancedMeshBounds(foundationMesh);
-          mesh.add(foundationMesh);
+          structureRoot.add(foundationMesh);
         });
       }
     }
@@ -4927,5 +5173,5 @@ export const buildTerrainMesh = (
       : undefined;
   telemetry.timingsMs.finalize = performance.now() - finalizeStartedAt;
   telemetry.timingsMs.total = performance.now() - buildStartedAt;
-  return { mesh, size: { width, depth }, water, treeBurn, treeLod: treeLodBuild?.controller, telemetry };
+  return { mesh, vegetationRoot, structureRoot, size: { width, depth }, water, treeBurn, treeLod: treeLodBuild?.controller, telemetry };
 };

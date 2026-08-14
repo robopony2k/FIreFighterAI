@@ -21,6 +21,7 @@ import type {
   TimeControlsWidgetModel
 } from "../../runtime/widgets/models.js";
 import type { AudioChannelId } from "../../runtime/widgets/types.js";
+import { createNotificationSettingsView } from "../../notifications/notificationSettingsView.js";
 
 export type BottomControlsData = TimeControlsWidgetModel;
 
@@ -78,17 +79,27 @@ export const createBottomLeftControls = (): BottomControlsView => {
   eventsTabButton.type = "button";
   eventsTabButton.className = "phase-control-tab";
   eventsTabButton.textContent = "Events";
-  tabBar.append(mainTabButton, eventsTabButton);
+  const notificationsTabButton = document.createElement("button");
+  notificationsTabButton.type = "button";
+  notificationsTabButton.className = "phase-control-tab";
+  notificationsTabButton.textContent = "Notifications";
+  tabBar.append(mainTabButton, eventsTabButton, notificationsTabButton);
   const mainTabPanel = document.createElement("div");
   mainTabPanel.className = "phase-control-tab-panel";
   const eventsTabPanel = document.createElement("div");
   eventsTabPanel.className = "phase-control-tab-panel is-hidden";
-  const setActiveSettingsTab = (tab: "main" | "events"): void => {
+  const notificationsTabPanel = document.createElement("div");
+  notificationsTabPanel.className = "phase-control-tab-panel is-hidden";
+  const setActiveSettingsTab = (tab: "main" | "events" | "notifications"): void => {
     const mainActive = tab === "main";
+    const eventsActive = tab === "events";
+    const notificationsActive = tab === "notifications";
     mainTabButton.classList.toggle("is-active", mainActive);
-    eventsTabButton.classList.toggle("is-active", !mainActive);
+    eventsTabButton.classList.toggle("is-active", eventsActive);
+    notificationsTabButton.classList.toggle("is-active", notificationsActive);
     mainTabPanel.classList.toggle("is-hidden", !mainActive);
-    eventsTabPanel.classList.toggle("is-hidden", mainActive);
+    eventsTabPanel.classList.toggle("is-hidden", !eventsActive);
+    notificationsTabPanel.classList.toggle("is-hidden", !notificationsActive);
   };
 
   const timeGroup = document.createElement("div");
@@ -202,6 +213,9 @@ export const createBottomLeftControls = (): BottomControlsView => {
     toggleRows.set(toggle.setting, controls);
     simulationGroup.appendChild(controls.row);
   });
+  const notificationSettingsView = createNotificationSettingsView();
+  notificationSettingsView.element.dataset.runtimeWidget = "notificationSettings";
+  notificationsTabPanel.appendChild(notificationSettingsView.element);
 
   const status = document.createElement("div");
   status.className = "phase-control-status";
@@ -221,7 +235,7 @@ export const createBottomLeftControls = (): BottomControlsView => {
       }
     }
   });
-  element.append(tabBar, mainTabPanel, eventsTabPanel);
+  element.append(tabBar, mainTabPanel, eventsTabPanel, notificationsTabPanel);
   element.appendChild(status);
 
   const buttonPauseButton = buttonSpeedRow.querySelector(`[data-action="${TIME_CONTROL_ACTIONS.pause.action}"]`) as HTMLButtonElement;
@@ -344,6 +358,7 @@ export const createBottomLeftControls = (): BottomControlsView => {
 
   mainTabButton.addEventListener("click", () => setActiveSettingsTab("main"));
   eventsTabButton.addEventListener("click", () => setActiveSettingsTab("events"));
+  notificationsTabButton.addEventListener("click", () => setActiveSettingsTab("notifications"));
 
   audioRows.get("sfx")?.muteButton.addEventListener("click", (event) => {
     event.preventDefault();
@@ -403,7 +418,7 @@ export const createBottomLeftControls = (): BottomControlsView => {
   return {
     element,
     update: (data) => {
-      const usingSlider = data.timeSpeedControlMode === "slider";
+      const usingSlider = data.simTimeMode === "strategic" && data.timeSpeedControlMode === "slider";
       timeGroup.classList.toggle("is-hidden", !data.showTimeControls);
       buttonSpeedRow.classList.toggle("is-hidden", !data.showSpeedControl || usingSlider);
       sliderSpeedRow.classList.toggle("is-hidden", !data.showSpeedControl || !usingSlider);
