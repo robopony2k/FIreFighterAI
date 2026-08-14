@@ -968,9 +968,21 @@ const testDifficultyStartingResponseTeams = () => {
     assert.equal(result.firefighters.length, expectedTeamCount * 2, `requested ${requestedTeamCount} teams should seed two crew per truck`);
     assert.equal(result.state.roster.length, expectedTeamCount * 3, "each response team should contain one truck and two firefighters");
     assert.equal(result.state.budget, result.budgetBefore, "starting response teams should be recruited without spending budget");
-    assert.equal(new Set(result.trucks.map((truck) => truck.squadId)).size, expectedTeamCount, "starting trucks should receive distinct HQ squad ownership");
+    const startingSquad = result.state.squads[0];
+    assert.ok(startingSquad, "campaign seeding should create the primary HQ squad");
+    assert.equal(new Set(result.trucks.map((truck) => truck.squadId)).size, 1, "all starting trucks should share one HQ squad");
+    assert.deepEqual(
+      startingSquad.truckRosterIds,
+      result.trucks.map((truck) => truck.id),
+      "the primary HQ squad should own every difficulty-granted starting truck"
+    );
+    assert.equal(
+      result.state.squads.slice(1).every((squad) => squad.truckRosterIds.length === 0),
+      true,
+      "campaign seeding should leave the remaining HQ squads empty"
+    );
     result.trucks.forEach((truck) => {
-      assert.notEqual(truck.squadId, null, "each starting truck should belong to an HQ squad");
+      assert.equal(truck.squadId, startingSquad.id, "each starting truck should belong to the primary HQ squad");
       assert.equal(truck.crewIds.length, 2, "each starting truck should have a complete two-person crew");
       truck.crewIds.forEach((crewId) => {
         const firefighter = result.firefighters.find((unit) => unit.id === crewId);

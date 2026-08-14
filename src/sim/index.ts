@@ -94,8 +94,7 @@ import { applyFireActivityMetrics } from "../systems/fire/sim/fireActivityState.
 import {
   resetFireFrontLineage,
   stepFireDetection,
-  stepWatchTowerConstruction,
-  type FireDetectionStepResult
+  stepWatchTowerConstruction
 } from "../systems/fire/sim/fireDetection.js";
 import type { FireDetectionReport } from "../core/types.js";
 import { stepEvacuations } from "../systems/evacuation/sim/evacuationRuntime.js";
@@ -1130,6 +1129,21 @@ export function stepSim(
 
   let activeFires = state.lastActiveFires;
   let fireActivityState = state.fireActivityState;
+  let detectedIncidentThisStep = false;
+  const pollFireDetection = (detectionDayDelta: number): boolean => {
+    if (!hasFireActivity(state)) {
+      return false;
+    }
+    const detection = stepFireDetection(state, detectionDayDelta);
+    detection.notificationReports.forEach(emitFireFrontNotification);
+    const primaryAlertReport = detection.alertReports[0] ?? detection.alertReport;
+    if (!primaryAlertReport) {
+      return false;
+    }
+    handleDetectedFireIncident(state, primaryAlertReport, previousSpeedIndex, previousSliderValue);
+    detectedIncidentThisStep = true;
+    return true;
+  };
   state.firePerfSubsteps = 0;
   state.firePerfSimulatedDays = 0;
   state.firePerfDeferredDays = 0;
@@ -1201,6 +1215,15 @@ export function stepSim(
       fireSubsteps += 1;
       fireDaysSimulated += simDayDelta;
       state.fireSimAccumulator = Math.max(0, state.fireSimAccumulator - simDelta);
+      state.lastActiveFires = activeFires;
+      if (pollFireDetection(simDayDelta)) {
+        state.fireSimAccumulator = 0;
+        remaining = 0;
+        break;
+      }
+    }
+    if (!detectedIncidentThisStep && hasFireActivity(state) && pollFireDetection(dayDelta)) {
+      state.fireSimAccumulator = 0;
     }
     state.firePerfSubsteps = fireSubsteps;
     state.firePerfSimulatedDays = fireDaysSimulated;
@@ -1218,25 +1241,14 @@ export function stepSim(
     applyFireActivityMetrics(state, 0);
   }
   state.lastActiveFires = activeFires;
-  let fireDetection: FireDetectionStepResult = {
-    alertReport: null,
-    alertReports: [],
-    notificationReports: [],
-    activeReportCount: 0
-  };
-  if (hasFireActivity(state)) {
-    fireDetection = stepFireDetection(state, dayDelta);
-  } else {
+  if (!hasFireActivity(state)) {
     resetFireFrontLineage(state);
   }
-  fireDetection.notificationReports.forEach(emitFireFrontNotification);
-  const primaryAlertReport = fireDetection.alertReports[0] ?? fireDetection.alertReport;
-  if (primaryAlertReport) {
-    if (handleDetectedFireIncident(state, primaryAlertReport, previousSpeedIndex, previousSliderValue)) {
-      stepParticles(state, effects, delta);
-      return;
-    }
-  } else if (state.simTimeMode === "incident" && state.fireActivityState === "idle") {
+  if (detectedIncidentThisStep && state.paused) {
+    stepParticles(state, effects, delta);
+    return;
+  }
+  if (!detectedIncidentThisStep && state.simTimeMode === "incident" && state.fireActivityState === "idle") {
     exitIncidentMode(state);
   }
 

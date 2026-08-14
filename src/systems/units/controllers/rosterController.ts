@@ -12,7 +12,12 @@ import { FIRST_NAMES, LAST_NAMES, TRUCK_PREFIX } from "../constants/runtimeConst
 import { clamp } from "../utils/unitMath.js";
 import { getRosterFirefighter, getRosterTruck, getRosterUnit } from "../utils/unitLookup.js";
 import { buildUnitDerivedStats, createTraining } from "../utils/unitStats.js";
-import { assignRosterTruckToMostEmptySquad, ensureDefaultSquads } from "./squadController.js";
+import {
+  assignRosterTruckToMostEmptySquad,
+  assignRosterTruckToSquad,
+  ensureDefaultSquads,
+  getSquadById
+} from "./squadController.js";
 
 const unassignRosterFirefighter = (state: WorldState, firefighter: RosterUnit): void => {
   if (firefighter.assignedTruckId === null) {
@@ -106,11 +111,13 @@ export function seedStartingRoster(state: WorldState, rng: RNG, responseTeamCoun
     1,
     Number.isFinite(responseTeamCount) ? Math.floor(responseTeamCount) : 1
   );
+  ensureDefaultSquads(state);
+  const startingSquadId = state.squads[0]?.id ?? null;
   for (let teamIndex = 0; teamIndex < normalizedTeamCount; teamIndex += 1) {
     for (let crewIndex = 0; crewIndex < STARTING_RESPONSE_TEAM_CREW_COUNT; crewIndex += 1) {
       recruitUnit(state, rng, "firefighter", true);
     }
-    recruitUnit(state, rng, "truck", true);
+    recruitUnit(state, rng, "truck", true, startingSquadId);
   }
   const trucks = state.roster.filter((unit) => unit.kind === "truck");
   const firefighters = state.roster.filter((unit) => unit.kind === "firefighter");
@@ -132,7 +139,13 @@ export function seedStartingRoster(state: WorldState, rng: RNG, responseTeamCoun
   ensureDefaultSquads(state);
 }
 
-export function recruitUnit(state: WorldState, rng: RNG, kind: UnitKind, free = false): boolean {
+export function recruitUnit(
+  state: WorldState,
+  rng: RNG,
+  kind: UnitKind,
+  free = false,
+  preferredSquadId: number | null = null
+): boolean {
   if (state.phase !== "maintenance" && !free) {
     setStatus(state, "Recruitment is only available during winter.");
     return false;
@@ -159,7 +172,10 @@ export function recruitUnit(state: WorldState, rng: RNG, kind: UnitKind, free = 
   let assignmentLabel = "";
   if (entry.kind === "truck") {
     ensureDefaultSquads(state);
-    const squad = assignRosterTruckToMostEmptySquad(state, entry.id);
+    const preferredSquad = getSquadById(state, preferredSquadId);
+    const squad = preferredSquad && assignRosterTruckToSquad(state, entry.id, preferredSquad.id)
+      ? preferredSquad
+      : assignRosterTruckToMostEmptySquad(state, entry.id);
     assignmentLabel = squad ? ` Assigned to ${squad.name}.` : " No squad vehicle slots are open.";
   } else {
     const truck = assignRosterFirefighterToMostEmptyTruck(state, entry);

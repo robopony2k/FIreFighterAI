@@ -68,6 +68,7 @@ import {
   updateFrontCorridorSlotActivation
 } from "./fireRenderAnalysisState.js";
 import {
+  accumulateSmokeEmission,
   clamp,
   fract,
   getVisualWindResponse,
@@ -917,6 +918,7 @@ export const createThreeTestFireFx = (
   let smokeAnimationTimeMs = 0;
   const analysisState = createInitialFireRenderAnalysisState();
   let tileSmokeSpawnAccum = new Float32Array(0);
+  let clusterSmokeSpawnAccum = new Float32Array(0);
   let smokeSpawnCursor = 0;
   let smokeSpawnSequence = 0;
   const smokeParticleActive = new Uint8Array(SMOKE_MAX_INSTANCES);
@@ -1003,6 +1005,7 @@ export const createThreeTestFireFx = (
     resetFireRenderAnalysisVisualState(analysisState);
     audioClusterSnapshots.length = 0;
     tileSmokeSpawnAccum.fill(0);
+    clusterSmokeSpawnAccum.fill(0);
     visualsCleared = true;
   };
 
@@ -1073,6 +1076,10 @@ export const createThreeTestFireFx = (
     ensureFireRenderAnalysisState(analysisState, cols, rows);
     if (tileSmokeSpawnAccum.length !== count) {
       tileSmokeSpawnAccum = new Float32Array(count);
+    }
+    const clusterAnchorCount = count * CLUSTER_PLUME_MAX_PER_CLUSTER;
+    if (clusterSmokeSpawnAccum.length !== clusterAnchorCount) {
+      clusterSmokeSpawnAccum = new Float32Array(clusterAnchorCount);
     }
   };
 
@@ -1951,7 +1958,7 @@ export const createThreeTestFireFx = (
           terrainMaxZ
         );
         const clusterSmokeSourceY = heightAtFireWorldPosition(anchorX, anchorZ, cluster.baseY) + clusterSmokeLift;
-        const spawnCount = clamp(
+        const emissionRate = clamp(
           Math.round(
             (1.4 + cluster.intensity * 4.2 + cluster.tileCount * 0.06 + clusterFront01 * 2.2) *
               effectiveSmokeBudgetScale *
@@ -1960,6 +1967,15 @@ export const createThreeTestFireFx = (
           1,
           8
         );
+        const accumulatorIdx = cluster.sourceIdx * CLUSTER_PLUME_MAX_PER_CLUSTER + anchor;
+        const emission = accumulateSmokeEmission(
+          clusterSmokeSpawnAccum[accumulatorIdx] ?? 0,
+          emissionRate,
+          smokeDeltaSeconds,
+          Math.min(8, smokeSpawnFrameCap - smokeSpawnsThisFrame)
+        );
+        clusterSmokeSpawnAccum[accumulatorIdx] = emission.carry;
+        const spawnCount = emission.spawnCount;
         for (let spawn = 0; spawn < spawnCount && smokeSpawnsThisFrame < smokeSpawnFrameCap; spawn += 1) {
           const r1 = hash1(a1 * 17.0 + spawn * 1.31 + smokeTimeSeconds * 0.19);
           const r2 = hash1(a2 * 23.0 + spawn * 2.17 + 7.0);
@@ -3282,11 +3298,14 @@ export const createThreeTestFireFx = (
             smokeDensityScale *
             frontSmokeScale *
             SMOKE_EMISSION_DENSITY_SCALE;
-          let spawnCarry = (tileSmokeSpawnAccum[idx] ?? 0) + emissionRate * smokeDeltaSeconds;
-          const spawnCount = Math.min(9, Math.floor(spawnCarry));
-          spawnCarry -= spawnCount;
-          tileSmokeSpawnAccum[idx] = spawnCarry;
-          const spawnLimit = Math.min(spawnCount, smokeSpawnFrameCap - smokeSpawnsThisFrame);
+          const emission = accumulateSmokeEmission(
+            tileSmokeSpawnAccum[idx] ?? 0,
+            emissionRate,
+            smokeDeltaSeconds,
+            9
+          );
+          tileSmokeSpawnAccum[idx] = emission.carry;
+          const spawnLimit = Math.min(emission.spawnCount, smokeSpawnFrameCap - smokeSpawnsThisFrame);
           const plumeRadius = sampleFootprint * (0.14 + smokeDrive * 0.58);
           const baseSize = tileSpan * (0.9 + smokeDrive * 1.28);
           for (let spawn = 0; spawn < spawnLimit; spawn += 1) {

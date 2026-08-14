@@ -1324,11 +1324,22 @@ const failures = [];
   state.paused = false;
   stepSim(state, effects, rng, BASE_STEP * 80);
   const alertReport = getLatestFireAlertReport(state);
+  const baseIdx = state.basePoint.y * state.grid.cols + state.basePoint.x;
+  const baseTileSafe = (state.tileFire[baseIdx] ?? 0) <= 0 && state.tiles[baseIdx]?.type !== "ash";
   console.log(
-    `\nHigh-Speed Season Entry Alert\nphase=${state.phase} paused=${state.paused ? 1 : 0} mode=${state.simTimeMode} active=${state.lastActiveFires} alertId=${alertReport?.id ?? "none"} burned=${state.burnedTiles}`
+    `\nHigh-Speed Season Entry Alert\nphase=${state.phase} paused=${state.paused ? 1 : 0} mode=${state.simTimeMode} active=${state.lastActiveFires} alertId=${alertReport?.id ?? "none"} burned=${state.burnedTiles} baseSafe=${baseTileSafe ? 1 : 0} simulatedDays=${state.firePerfSimulatedDays.toFixed(3)} deferredDays=${state.firePerfDeferredDays.toFixed(3)}`
   );
-  if (!state.paused || state.simTimeMode !== "incident" || !alertReport) {
-    failures.push("High-speed season entry did not pause immediately on the seeded fire incident.");
+  if (
+    !state.paused ||
+    state.simTimeMode !== "incident" ||
+    !alertReport ||
+    !baseTileSafe ||
+    state.burnedTiles > 0 ||
+    state.firePerfSimulatedDays >= 0.5 - 0.0001 ||
+    state.fireSimAccumulator > 0.0001 ||
+    state.firePerfDeferredDays > 0.0001
+  ) {
+    failures.push("High-speed season entry did not stop at a safe, backlog-free incident boundary.");
   }
 }
 

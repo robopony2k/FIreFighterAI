@@ -24,6 +24,23 @@ export const smoothApproach = (
   return current + (target - current) * k;
 };
 
+export const accumulateSmokeEmission = (
+  carry: number,
+  emissionsPerSecond: number,
+  deltaSeconds: number,
+  maxSpawns: number
+): { carry: number; spawnCount: number } => {
+  const safeCarry = Number.isFinite(carry) ? clamp(carry, 0, 0.999999) : 0;
+  const accumulated =
+    safeCarry + Math.max(0, Number.isFinite(emissionsPerSecond) ? emissionsPerSecond : 0) *
+      Math.max(0, Number.isFinite(deltaSeconds) ? deltaSeconds : 0);
+  const availableSpawns = Math.floor(accumulated + 1e-9);
+  return {
+    carry: Math.max(0, accumulated - availableSpawns),
+    spawnCount: Math.min(Math.max(0, Math.floor(maxSpawns)), availableSpawns)
+  };
+};
+
 export const normalizeXZ = (x: number, z: number): { x: number; z: number } => {
   const length = Math.hypot(x, z);
   if (length <= 1e-5) {

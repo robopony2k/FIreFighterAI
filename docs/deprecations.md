@@ -1,5 +1,46 @@
 # Deprecations
 
+## End-of-Batch Fire Incident Detection
+
+Status: Deprecated as of August 14, 2026.
+
+- Fire detection no longer waits until every internal substep in an accelerated strategic batch has committed.
+- Fire-eligible high-risk work now uses bounded detection slices and polls after each slice.
+- The first incident alert stops the batch and clears its remaining strategic fire backlog before pause or incident-speed continuation.
+
+Migration guidance:
+
+1. Keep fire-event detection inside the fire substep boundary rather than after the outer strategic step.
+2. Do not carry pre-alert accelerated fire backlog into incident mode.
+3. Preserve detection confidence and delay rules; the interruption occurs when those rules first emit an alert.
+
+## Frame-Based Cluster Smoke Emission
+
+Status: Deprecated as of August 14, 2026.
+
+- Cluster-plume smoke no longer emits a fixed particle batch on every fire-render rebuild.
+- Cluster anchors now accumulate emission from the same game-speed-scaled visual delta used for smoke movement and ageing.
+
+Migration guidance:
+
+1. Express fire-smoke emission as particles per scaled visual second.
+2. Retain fractional emission carry between render rebuilds.
+3. Keep adaptive frame caps as overload protection rather than as the primary emission clock.
+
+## Distributed Campaign Starting Squads
+
+Status: Deprecated as of August 14, 2026.
+
+- Difficulty-granted starting trucks are no longer distributed across the emptiest HQ squad slots during campaign seeding.
+- Every complete starting response team now belongs to the first HQ squad, allowing the opening roster to deploy as one command group.
+- Ordinary post-start truck recruitment retains the existing emptiest-squad assignment policy.
+
+Migration guidance:
+
+1. Supply the first HQ squad explicitly while seeding campaign trucks.
+2. Keep later recruitment and manual winter reassignment behavior unchanged.
+3. Preserve reciprocal firefighter-to-truck crew assignment within each response team.
+
 ## Raw Multi-Glyph Chief Portrait Flame Field
 
 Status: Deprecated as of August 14, 2026.

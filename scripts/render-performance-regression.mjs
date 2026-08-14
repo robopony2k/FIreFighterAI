@@ -81,11 +81,30 @@ import {
   FIRE_MAX_INSTANCES,
   GLOW_MAX_INSTANCES
 } from "../dist/systems/fire/constants/fireRenderConstants.js";
+import { accumulateSmokeEmission } from "../dist/systems/fire/rendering/fireRenderMath.js";
 
 assert.equal(FIRE_MAX_INSTANCES, 4096, "large fire fronts should retain the raised 4,096-instance flame capacity");
 assert.equal(FIRE_CROSS_MAX_INSTANCES, 1024, "hero cross-slices should scale with the raised flame capacity");
 assert.equal(FIRE_FRONT_MAX_INSTANCES, 1024, "front segments should not retain the legacy 320-instance ceiling");
 assert.equal(GLOW_MAX_INSTANCES, FIRE_MAX_INSTANCES * 2, "ground-glow capacity should track the flame capacity");
+
+const countSmokeEmissions = (emissionsPerSecond, deltaSeconds, steps) => {
+  let carry = 0;
+  let spawnCount = 0;
+  for (let step = 0; step < steps; step += 1) {
+    const emission = accumulateSmokeEmission(carry, emissionsPerSecond, deltaSeconds, 1000);
+    carry = emission.carry;
+    spawnCount += emission.spawnCount;
+  }
+  return { carry, spawnCount };
+};
+const sixtyFpsSmoke = countSmokeEmissions(6, 1 / 60, 600);
+const twentyFpsSmoke = countSmokeEmissions(6, 1 / 20, 200);
+const quarterSpeedSmoke = countSmokeEmissions(6, 1 / 240, 600);
+assert.equal(sixtyFpsSmoke.spawnCount, 60, "smoke emission must follow accumulated scaled time at 60 FPS");
+assert.equal(twentyFpsSmoke.spawnCount, 60, "smoke emission must not depend on render rebuild cadence");
+assert.equal(quarterSpeedSmoke.spawnCount, 15, "quarter-speed smoke must emit one quarter as many particles");
+assert.ok(sixtyFpsSmoke.carry < 1 && twentyFpsSmoke.carry < 1, "smoke emission carry must remain fractional");
 
 const coverageFallbackChunk = buildForestCoverageFallbackRenderer({
   instances: [0, 1, 2].map((tileIndex) => ({

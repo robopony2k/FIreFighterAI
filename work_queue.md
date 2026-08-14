@@ -1,3 +1,44 @@
+TSK-0213: Stop accelerated fire work at the detection boundary
+
+Type: bug
+
+Why: At 20x, fire detection ran only after an entire strategic fire batch. A detected incident could pause with hundreds of burned tiles and an already-burning HQ, while the early return deferred the HQ-loss check until the first resumed incident tick.
+
+Done when:
+- [x] Fire-eligible high-risk work uses bounded internal slices before a newly seeded or hidden fire can consume the full strategic batch.
+- [x] Detection runs after every fire substep and the first alert stops remaining accelerated fire work.
+- [x] Strategic fire backlog is cleared at incident entry so unpausing cannot replay pre-alert fast-time spread.
+- [x] The 20x season-entry regression pauses with the HQ safe, no burned tiles, and no deferred fire days; TypeScript, build, fire, and queue validation pass.
+
+Touchpoints: `src/sim/index.ts`, `src/systems/fire/sim/fireWeather.ts`, `scripts/fire-regression.mjs`, design/deprecation/queue records
+
+Constraints: preserve fire detection confidence and delay rules, incident-speed resolution, Pause on Fire preference semantics, fire equations, save data, and simulation-to-domain dependency direction.
+
+Notes: Before the fix, the deterministic high-speed fixture paused at 162 active fires and 208 burned tiles. Substep-boundary detection now pauses the same fixture at 9 active fires, zero burned tiles, a safe HQ, and zero deferred fire backlog. Evidence is automated and source-based; the supplied screenshot confirms the original paused-after-damage symptom but not event timing.
+
+Status: done
+
+TSK-0212: Scale cluster smoke emission with game speed
+
+Type: bug
+
+Why: Cluster plumes emitted a fixed smoke batch on every render rebuild while existing particles moved and aged using game-speed-scaled time, causing smoke to become extremely dense during slow incidents.
+
+Done when:
+- [x] Cluster-plume anchors accumulate particles from the same scaled smoke delta used for movement and ageing.
+- [x] Fractional carry makes total emission independent of render rebuild cadence while adaptive per-frame caps remain intact.
+- [x] Tile smoke uses the shared rate accumulator without changing its existing scaled-time contract.
+- [x] TypeScript, build, renderer regression, and queue validation pass.
+- [ ] A supplied recording or supported Browser session confirms comparable plume density across speed changes in live motion.
+
+Touchpoints: `src/systems/fire/rendering/fireFxRuntime.ts`, `src/systems/fire/rendering/fireRenderMath.ts`, `scripts/render-performance-regression.mjs`, design/queue records
+
+Constraints: preserve fire simulation, smoke motion/lifetimes, adaptive render caps, draw-call structure, save data, and simulation-to-render dependency direction.
+
+Notes: Source inspection found tile emitters already used scaled smoke time while cluster emitters spawned per rebuild. Automated coverage compares equal scaled durations at different rebuild cadences and verifies proportional slow-speed output. The supplied screenshot is static evidence of the density symptom; live timing validation remains capture-based because the current VS Code surface cannot inspect localhost.
+
+Status: done
+
 TSK-0211: Add four-level campaign difficulty
 
 Type: feature
@@ -7,6 +48,7 @@ Why: New campaigns always used one fixed starting budget and one fixed response 
 Done when:
 - [x] New Game exposes Ember, Blaze, Firestorm, and Inferno from one data-driven catalogue, with Blaze as the legacy/default fallback and the last valid choice remembered.
 - [x] Difficulty derives the initial budget before the unchanged Chief budget modifier and produces 4, 3, 2, or 1 complete response teams from the accepted two-team baseline.
+- [x] All difficulty-granted starting trucks are assigned to the first HQ squad, while the remaining squad slots start empty and later recruitment retains its existing assignment policy.
 - [x] Campaign configuration and state retain the selected difficulty, while missing or invalid persisted values sanitize to Blaze.
 - [x] The selected Chief portrait uses a dedicated procedural GPU field and CPU fallback derived from the title noise/fBm approach on a fixed near-black canvas: Ember is a prewarmed, clearly visible field of slow sparks over a faint glow, while 4/6/8 detailed emitters blend into progressively stronger 50%/75%/100% flame walls for Blaze through Inferno. Every profile prewarms its sparks, with density and rise speed increasing by difficulty without changing the title screen.
 - [x] TypeScript/build, focused campaign-difficulty persistence/resource coverage, unit composition/assignment coverage, and queue validation pass.
@@ -16,7 +58,7 @@ Touchpoints: `src/systems/campaign/`, New Game configuration UI/persistence, `sr
 
 Constraints: difficulty affects only starting budget and complete starting response teams; preserve unlimited-money behavior, existing Chief modifiers, terrain share codes, later-year economy, scoring, fire, weather, suppression, and unit performance.
 
-Notes: Implemented source-first in the current VS Code surface using supplied New Game screenshots, concept art, shader reference, and the annotated pane capture as static evidence. Canvas scaling exposed rectangular bounds, UV/noise scaling distorted the field, and raw multi-glyph rendering exposed vertical nearest-band seams plus the reference shader's early horizontal heat cutoff. The final portrait path isolates a dedicated procedural renderer: Ember has no flame field, while higher profiles soft-union overlapping emitters with an increasing continuous wall layer and use the title shader's heat-color curve. Automated evidence covers definition order, defaults, persistence migration, budget ordering, team-count clamping, deterministic complete-team seeding, crew assignment, squad ownership, exact glow/wall/emitter/height/heat/spark profiles, fixed CPU dimensions, occupied-height bands, Inferno horizontal coverage, and monotonic color/alpha/activity metrics. Live motion and final appearance still require refreshed captures because this surface cannot inspect localhost.
+Notes: Implemented source-first in the current VS Code surface using supplied New Game screenshots, concept art, shader reference, and the annotated pane capture as static evidence. Canvas scaling exposed rectangular bounds, UV/noise scaling distorted the field, and raw multi-glyph rendering exposed vertical nearest-band seams plus the reference shader's early horizontal heat cutoff. The final portrait path isolates a dedicated procedural renderer: Ember has no flame field, while higher profiles soft-union overlapping emitters with an increasing continuous wall layer and use the title shader's heat-color curve. Campaign seeding places every difficulty-granted truck in the first HQ squad without changing later recruitment. Automated evidence covers definition order, defaults, persistence migration, budget ordering, team-count clamping, deterministic complete-team seeding, crew assignment, shared opening-squad ownership, exact glow/wall/emitter/height/heat/spark profiles, fixed CPU dimensions, occupied-height bands, Inferno horizontal coverage, and monotonic color/alpha/activity metrics. Live motion and final appearance still require refreshed captures because this surface cannot inspect localhost.
 
 Status: done
 

@@ -168,8 +168,11 @@ export const getBurnoutFactorForRisk = (climateRisk: number): number =>
     : 0;
 
 export const getAdaptiveFireSubstepMax = (fireActivityState: FireActivityState, climateRisk: number): number => {
+  if (climateRisk >= 0.4) {
+    return 0.125;
+  }
   if (fireActivityState === "burning") {
-    return climateRisk >= 0.4 ? 0.125 : 0.25;
+    return 0.25;
   }
   return 0.5;
 };
