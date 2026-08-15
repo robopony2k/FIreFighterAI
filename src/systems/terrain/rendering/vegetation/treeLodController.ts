@@ -93,7 +93,6 @@ export const buildTreeLod = (options: {
     const treeRotation = new Float32Array(valid.length);
     const treeType = new Float32Array(valid.length);
     const seasonPhaseOffset = new Float32Array(valid.length);
-    const seasonRateJitter = new Float32Array(valid.length);
     const leafDropBias = new Float32Array(valid.length);
     const autumnHueBias = new Float32Array(valid.length);
     const tileIndices = new Uint32Array(valid.length);
@@ -130,7 +129,6 @@ export const buildTreeLod = (options: {
       treeType[index] = TREE_TYPE_INDEX[instance.treeType];
       const seed = instance.tileIndex * 17.17 + instance.variantIndex * 31.7 + TREE_TYPE_INDEX[instance.treeType] * 53.1;
       seasonPhaseOffset[index] = (noise01(seed) * 2 - 1) * (options.seasonVisual?.phaseShiftMax ?? 0);
-      seasonRateJitter[index] = (noise01(seed + 1.37) * 2 - 1) * (options.seasonVisual?.rateJitter ?? 0);
       leafDropBias[index] = (noise01(seed + 2.91) * 2 - 1) * 0.22;
       autumnHueBias[index] = (noise01(seed + 4.13) * 2 - 1) * (options.seasonVisual?.autumnHueJitter ?? 0);
       tileIndices[index] = instance.tileIndex;
@@ -152,7 +150,6 @@ export const buildTreeLod = (options: {
     geometry.setAttribute("aTreeRotation", new THREE.InstancedBufferAttribute(treeRotation, 1));
     geometry.setAttribute("aTreeType", new THREE.InstancedBufferAttribute(treeType, 1));
     geometry.setAttribute("aSeasonPhaseOffset", new THREE.InstancedBufferAttribute(seasonPhaseOffset, 1));
-    geometry.setAttribute("aSeasonRateJitter", new THREE.InstancedBufferAttribute(seasonRateJitter, 1));
     geometry.setAttribute("aLeafDropBias", new THREE.InstancedBufferAttribute(leafDropBias, 1));
     geometry.setAttribute("aAutumnHueBias", new THREE.InstancedBufferAttribute(autumnHueBias, 1));
     mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);

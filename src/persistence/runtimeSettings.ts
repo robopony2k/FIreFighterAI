@@ -22,6 +22,7 @@ export type RuntimeSettings = {
   waterq: "fast" | "balanced" | "high";
   trees: boolean;
   treeimpostors: boolean;
+  volumetricgrass: boolean;
   detailedstructures: boolean;
   rivercam: "" | "top" | "under" | "oblique";
   rivercamlock: boolean;
@@ -128,6 +129,7 @@ export const DEFAULT_RUNTIME_SETTINGS: RuntimeSettings = {
   waterq: "balanced",
   trees: true,
   treeimpostors: false,
+  volumetricgrass: false,
   detailedstructures: true,
   rivercam: "",
   rivercamlock: false,
@@ -372,6 +374,15 @@ export const RUNTIME_SETTING_DEFINITIONS: ReadonlyArray<RuntimeSettingDefinition
     description: "Experimental: replace the smallest, furthest 3D tree chunks with atlas impostors.",
     defaultValue: DEFAULT_RUNTIME_SETTINGS.treeimpostors,
     queryStyle: "0-false"
+  },
+  {
+    key: "volumetricgrass",
+    section: "3D FX",
+    kind: "boolean",
+    label: "Volumetric Grass",
+    description: "Render fuel-height and moisture-dryness grass in the campaign. This may reduce GPU performance.",
+    defaultValue: DEFAULT_RUNTIME_SETTINGS.volumetricgrass,
+    queryStyle: "1-true"
   },
   {
     key: "detailedstructures",

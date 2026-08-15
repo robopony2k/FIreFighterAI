@@ -6,6 +6,8 @@ import {
   computeFireAudioIntensity,
   computeTerrainOcclusion01,
   computeWindLoudnessGain,
+  isFireTruckAudioRoadTile,
+  isFireTruckRoadAudioEligible,
   selectPrioritizedFireAudioClusters
 } from "../dist/render/threeTestWorldAudioMath.js";
 
@@ -82,5 +84,50 @@ const clear = computeTerrainOcclusion01(
 );
 assert.ok(occluded > 0.5, "Terrain above the sight line should register strong occlusion.");
 approxEqual(clear, 0);
+
+const movingRoadTruck = {
+  phase: "fire",
+  paused: false,
+  kind: "truck",
+  movementDistanceTiles: 0.25,
+  previousOnRoad: true,
+  currentOnRoad: true
+};
+assert.equal(isFireTruckRoadAudioEligible(movingRoadTruck), true, "moving road trucks should be audio-eligible during fire season");
+assert.equal(
+  isFireTruckRoadAudioEligible({ ...movingRoadTruck, movementDistanceTiles: 0 }),
+  false,
+  "stationary trucks should not play the fire-engine loop"
+);
+assert.equal(
+  isFireTruckRoadAudioEligible({ ...movingRoadTruck, paused: true }),
+  false,
+  "paused trucks should not play the fire-engine loop"
+);
+assert.equal(
+  isFireTruckRoadAudioEligible({ ...movingRoadTruck, phase: "growth" }),
+  false,
+  "truck audio should remain silent outside fire season"
+);
+assert.equal(
+  isFireTruckRoadAudioEligible({ ...movingRoadTruck, previousOnRoad: false }),
+  false,
+  "trucks entering a road from off-road should remain silent for that movement sample"
+);
+assert.equal(
+  isFireTruckRoadAudioEligible({ ...movingRoadTruck, currentOnRoad: false }),
+  false,
+  "trucks leaving a road for off-road terrain should remain silent for that movement sample"
+);
+assert.equal(
+  isFireTruckRoadAudioEligible({ ...movingRoadTruck, kind: "firefighter" }),
+  false,
+  "non-truck units should never qualify for fire-engine audio"
+);
+assert.equal(isFireTruckAudioRoadTile("road", 0), true, "road tiles should qualify for fire-engine audio");
+assert.equal(isFireTruckAudioRoadTile("water", 1), true, "road bridges should qualify for fire-engine audio");
+assert.equal(isFireTruckAudioRoadTile("water", 0), false, "ordinary water should not qualify for fire-engine audio");
+assert.equal(isFireTruckAudioRoadTile("base", 0), false, "base tiles should not count as road movement for fire-engine audio");
+assert.equal(isFireTruckAudioRoadTile("grass", 0), false, "off-road terrain should not qualify for fire-engine audio");
 
 console.log("[world-audio:regression] Passed.");

@@ -4,6 +4,7 @@ import { RNG } from "../dist/core/rng.js";
 import { createEffectsState } from "../dist/core/effectsState.js";
 import { createInputState } from "../dist/core/inputState.js";
 import { createInitialState, syncTileSoA } from "../dist/core/state.js";
+import { getTerrainHeightScale } from "../dist/core/terrainScale.js";
 import { applyFuel } from "../dist/core/tiles.js";
 import {
   handleMapFormationDragCommand,
@@ -13,6 +14,14 @@ import {
 import { stepSim } from "../dist/sim/index.js";
 import { getTruckCrewDeploymentRoles } from "../dist/systems/units/sim/crewReadiness.js";
 import { updateTruckWater } from "../dist/systems/units/sim/unitWater.js";
+import { findUnitPath } from "../dist/systems/units/sim/unitPathfinder.js";
+import {
+  canTraverseUnitEdge,
+  getUnitMoveSpeedMultiplier,
+  getVehicleSlopeMultiplier
+} from "../dist/systems/units/sim/unitTraversalRules.js";
+import { getUnitRouteResolution } from "../dist/systems/units/sim/unitPathing.js";
+import { computeRenderedSegmentSlopeAngleDeg } from "../dist/shared/terrainSlope.js";
 import {
   activateSquadCommandSlot,
   activateSquadForWorldCommand
@@ -227,6 +236,7 @@ const testUpgradedHighSpeedMovementConsumesFullRouteBudget = () => {
   truck.y = 1.5;
   truck.prevX = truck.x;
   truck.prevY = truck.y;
+  setRoadPath(state, Array.from({ length: 5 }, (_, index) => ({ x: index + 1, y: 1 })));
   truck.path = [
     { x: 2, y: 1 },
     { x: 3, y: 1 },
@@ -252,6 +262,7 @@ const testActiveFireMovementUsesEffectiveMovementDelta = () => {
   truck.y = 1.5;
   truck.prevX = truck.x;
   truck.prevY = truck.y;
+  setRoadPath(state, Array.from({ length: 6 }, (_, index) => ({ x: index + 1, y: 1 })));
   truck.path = [
     { x: 2, y: 1 },
     { x: 3, y: 1 },
@@ -996,6 +1007,250 @@ const testDifficultyStartingResponseTeams = () => {
   assert.deepEqual(second, first, "starting response-team composition and assignments should be deterministic");
 };
 
+const setFlatMovementFixture = (state) => {
+  state.tiles.forEach((tile) => {
+    tile.type = "grass";
+    tile.elevation = 0.1;
+  });
+  state.tileRoadBridge.fill(0);
+  state.tileRoadEdges.fill(0);
+  state.structureMask.fill(0);
+  syncTileSoA(state);
+};
+
+const setRoadPath = (state, points) => {
+  points.forEach(({ x, y }) => {
+    state.tiles[y * state.grid.cols + x].type = "road";
+  });
+  syncTileSoA(state);
+};
+
+const addRoadTrafficTruck = (state, rng, x, y, path = []) => {
+  const truck = createUnit(state, "truck", rng, null);
+  truck.autonomous = false;
+  truck.x = x + 0.5;
+  truck.y = y + 0.5;
+  truck.prevX = truck.x;
+  truck.prevY = truck.y;
+  truck.target = path.length > 0 ? { ...path[path.length - 1] } : null;
+  truck.path = path.map((point) => ({ ...point }));
+  truck.pathIndex = 0;
+  truck.crewMode = "boarded";
+  truck.crewAction = null;
+
+  const driver = createUnit(state, "firefighter", rng, null);
+  driver.x = truck.x;
+  driver.y = truck.y;
+  driver.prevX = truck.x;
+  driver.prevY = truck.y;
+  driver.assignedTruckId = truck.id;
+  driver.carrierId = truck.id;
+  truck.crewIds = [driver.id];
+  truck.passengerIds = [driver.id];
+  state.units.push(truck, driver);
+  return truck;
+};
+
+const testVehicleRoadBiasAndLastMile = () => {
+  const preferred = buildState(2050).state;
+  setFlatMovementFixture(preferred);
+  const preferredRoad = [];
+  for (let y = 2; y >= 1; y -= 1) preferredRoad.push({ x: 1, y });
+  for (let x = 2; x <= 8; x += 1) preferredRoad.push({ x, y: 1 });
+  preferredRoad.push({ x: 8, y: 2 });
+  setRoadPath(preferred, preferredRoad);
+  const roadBiased = findUnitPath(preferred, { x: 1, y: 2 }, { x: 8, y: 2 }, "vehicle");
+  assert.equal(roadBiased.status, "exact", "vehicle road-bias fixture should reach the destination");
+  assert.equal(
+    roadBiased.path.every(({ x, y }) => preferred.tiles[y * preferred.grid.cols + x].type === "road"),
+    true,
+    "trucks should take a materially longer connected road instead of the direct off-road line"
+  );
+
+  const shortcut = buildState(2051).state;
+  setFlatMovementFixture(shortcut);
+  const longRoad = [];
+  for (let y = 9; y >= 1; y -= 1) longRoad.push({ x: 1, y });
+  for (let x = 2; x <= 3; x += 1) longRoad.push({ x, y: 1 });
+  for (let y = 2; y <= 9; y += 1) longRoad.push({ x: 3, y });
+  setRoadPath(shortcut, longRoad);
+  const shortcutRoute = findUnitPath(shortcut, { x: 1, y: 9 }, { x: 3, y: 9 }, "vehicle");
+  assert.equal(shortcutRoute.status, "exact", "vehicle shortcut fixture should reach the destination");
+  assert(
+    shortcutRoute.path.some(({ x, y }) => shortcut.tiles[y * shortcut.grid.cols + x].type !== "road"),
+    "trucks should take an off-road shortcut when the connected-road detour exceeds the strong bias"
+  );
+
+  const lastMile = buildState(2052).state;
+  setFlatMovementFixture(lastMile);
+  setRoadPath(lastMile, Array.from({ length: 8 }, (_, index) => ({ x: index + 1, y: 2 })));
+  const lastMileRoute = findUnitPath(lastMile, { x: 1, y: 2 }, { x: 8, y: 4 }, "vehicle");
+  const firstOffRoad = lastMileRoute.path.findIndex(
+    ({ x, y }) => lastMile.tiles[y * lastMile.grid.cols + x].type !== "road"
+  );
+  assert(firstOffRoad > 0, "an off-road destination should retain a road-led route");
+  assert.deepEqual(
+    lastMileRoute.path[firstOffRoad - 1],
+    { x: 8, y: 2 },
+    "the truck should remain on the road until its closest road approach before starting the final off-road leg"
+  );
+};
+
+const elevationDeltaForAngle = (state, angleDeg, dx = 1, dy = 0) => {
+  const tileSpan = Math.max(1e-4, Math.max(1, Math.min(state.grid.cols, state.grid.rows) - 1) /
+    Math.max(1, Math.min(state.grid.cols, state.grid.rows)));
+  const run = Math.hypot(dx, dy) * tileSpan;
+  return (Math.tan((angleDeg * Math.PI) / 180) * run) /
+    getTerrainHeightScale(state.grid.cols, state.grid.rows);
+};
+
+const testVehicleSlopeRules = () => {
+  assert.equal(getVehicleSlopeMultiplier(12), 1, "preferred vehicle slopes should have no extra penalty");
+  assert.equal(getVehicleSlopeMultiplier(18), 2, "soft vehicle slopes should use the 2x anchor");
+  assert.equal(getVehicleSlopeMultiplier(28), 6, "avoided vehicle slopes should use the 6x anchor");
+  assert.equal(getVehicleSlopeMultiplier(38), Number.POSITIVE_INFINITY, "38-degree vehicle slopes should be impassable");
+
+  const state = buildState(2053).state;
+  setFlatMovementFixture(state);
+  const from = { x: 2, y: 2 };
+  const to = { x: 3, y: 2 };
+  state.tiles[to.y * state.grid.cols + to.x].elevation = 0.1 + elevationDeltaForAngle(state, 37.5);
+  const uphillSpeed = getUnitMoveSpeedMultiplier(state, "vehicle", from.x, from.y, to.x, to.y);
+  const downhillSpeed = getUnitMoveSpeedMultiplier(state, "vehicle", to.x, to.y, from.x, from.y);
+  assert(Math.abs(uphillSpeed - downhillSpeed) < 1e-9, "vehicle incline penalties should be symmetric uphill and downhill");
+  assert.equal(canTraverseUnitEdge(state, "vehicle", from.x, from.y, to.x, to.y), true, "sub-38-degree slopes should remain passable");
+
+  state.tiles[to.y * state.grid.cols + to.x].elevation = 0.1 + elevationDeltaForAngle(state, 38);
+  assert.equal(canTraverseUnitEdge(state, "vehicle", from.x, from.y, to.x, to.y), false, "38-degree off-road slopes should be blocked");
+  state.tiles[from.y * state.grid.cols + from.x].type = "road";
+  state.tiles[to.y * state.grid.cols + to.x].type = "road";
+  assert.equal(canTraverseUnitEdge(state, "vehicle", from.x, from.y, to.x, to.y), false, "38-degree road slopes should also be blocked");
+
+  state.tiles[to.y * state.grid.cols + to.x].type = "water";
+  state.tileRoadBridge[to.y * state.grid.cols + to.x] = 1;
+  assert.equal(canTraverseUnitEdge(state, "vehicle", from.x, from.y, to.x, to.y), true, "bridge decks should ignore underlying terrain slope");
+
+  const diagonalDelta = elevationDeltaForAngle(state, 28, 1, 1);
+  const diagonalAngle = computeRenderedSegmentSlopeAngleDeg(
+    0.1,
+    0.1 + diagonalDelta,
+    1,
+    1,
+    state.grid.cols,
+    state.grid.rows
+  );
+  assert(Math.abs(diagonalAngle - 28) < 1e-6, "diagonal segment angles should include the longer diagonal run");
+};
+
+const testVehicleNearestReachableAndStalePathGuard = () => {
+  const { state, rng, truck } = buildDeployedTruckState(2054);
+  setFlatMovementFixture(state);
+  for (let y = 0; y < state.grid.rows; y += 1) {
+    state.tiles[y * state.grid.cols + 5].elevation = 0.5;
+  }
+  truck.x = 1.5;
+  truck.y = 5.5;
+  truck.prevX = truck.x;
+  truck.prevY = truck.y;
+  stationCrewAtTruck(state, truck, true);
+  truck.crewMode = "boarded";
+  truck.crewAction = null;
+  selectCommandUnit(state, state.commandUnits[0].id);
+  applyCommandIntentToSelection(
+    state,
+    makeCommandIntent({
+      placementMode: "move",
+      fireTask: "hold_fire",
+      target: { kind: "point", point: { x: 8, y: 5 } }
+    })
+  );
+  stepUnits(state, 0.01);
+  const resolution = getUnitRouteResolution(truck);
+  assert.equal(resolution?.status, "nearest", "an unreachable truck destination should produce a nearest route result");
+  assert.deepEqual(resolution?.resolvedTarget, { x: 4, y: 5 }, "nearest fallback should use distance, cost, and stable tile order");
+  assert(truck.currentAlerts.includes("route_blocked"), "nearest fallback should expose a route-blocked command alert");
+  const stampAfterRoute = state.pathStamp;
+  stepUnits(state, 0.01);
+  assert.equal(state.pathStamp, stampAfterRoute, "an unchanged partial route should not rerun A* on every unit step");
+
+  truck.x = 4.5;
+  truck.y = 5.5;
+  truck.prevX = truck.x;
+  truck.prevY = truck.y;
+  truck.target = { x: 6, y: 5 };
+  truck.path = [{ x: 5, y: 5 }, { x: 6, y: 5 }];
+  truck.pathIndex = 0;
+  stepUnits(state, 0.25);
+  assert.equal(truck.x, 4.5, "runtime motion should not enter a newly impassable stale path segment");
+
+  const footRoute = findUnitPath(state, { x: 4, y: 5 }, { x: 8, y: 5 }, "foot");
+  assert.equal(footRoute.status, "exact", "the vehicle slope wall should not change firefighter foot passability");
+  void rng;
+};
+
+const testRoadTruckOccupancyAndQueueing = () => {
+  const blockedFixture = buildState(2055);
+  setFlatMovementFixture(blockedFixture.state);
+  setRoadPath(blockedFixture.state, Array.from({ length: 7 }, (_, index) => ({ x: index + 1, y: 4 })));
+  const blocker = addRoadTrafficTruck(blockedFixture.state, blockedFixture.rng, 3, 4);
+  const queued = addRoadTrafficTruck(
+    blockedFixture.state,
+    blockedFixture.rng,
+    1,
+    4,
+    [{ x: 2, y: 4 }, { x: 3, y: 4 }, { x: 4, y: 4 }]
+  );
+  const pathStampBeforeTrafficWait = blockedFixture.state.pathStamp;
+  stepUnits(blockedFixture.state, 1);
+  assert.equal(Math.floor(queued.x), 2, "a high-speed truck should stop before an occupied road tile instead of passing through it");
+  assert.equal(queued.pathIndex, 1, "a queued truck should retain the blocked road waypoint");
+  assert.equal(Math.floor(blocker.x), 3, "a stationary road truck should retain its occupied tile");
+  assert.equal(
+    blockedFixture.state.pathStamp,
+    pathStampBeforeTrafficWait,
+    "temporary truck traffic should not trigger an A* replan"
+  );
+  stepUnits(blockedFixture.state, 1);
+  assert.equal(Math.floor(queued.x), 2, "a truck should remain queued while the next road tile stays occupied");
+  assert.equal(
+    blockedFixture.state.pathStamp,
+    pathStampBeforeTrafficWait,
+    "repeated traffic waits should not retry pathfinding"
+  );
+
+  const flowingFixture = buildState(2056);
+  setFlatMovementFixture(flowingFixture.state);
+  setRoadPath(flowingFixture.state, Array.from({ length: 6 }, (_, index) => ({ x: index + 1, y: 4 })));
+  const leader = addRoadTrafficTruck(flowingFixture.state, flowingFixture.rng, 3, 4, [{ x: 4, y: 4 }]);
+  const follower = addRoadTrafficTruck(flowingFixture.state, flowingFixture.rng, 2, 4, [{ x: 3, y: 4 }]);
+  stepUnits(flowingFixture.state, 1);
+  assert.equal(Math.floor(leader.x), 4, "the leading truck should vacate its road tile");
+  assert.equal(Math.floor(follower.x), 3, "the following truck should enter a road tile after the leader vacates it");
+  assert.notEqual(Math.floor(leader.x), Math.floor(follower.x), "moving trucks should finish on distinct road tiles");
+
+  const contestedFixture = buildState(2057);
+  setFlatMovementFixture(contestedFixture.state);
+  setRoadPath(contestedFixture.state, [{ x: 1, y: 4 }, { x: 2, y: 4 }, { x: 3, y: 4 }]);
+  const first = addRoadTrafficTruck(contestedFixture.state, contestedFixture.rng, 1, 4, [{ x: 2, y: 4 }]);
+  const second = addRoadTrafficTruck(contestedFixture.state, contestedFixture.rng, 3, 4, [{ x: 2, y: 4 }]);
+  stepUnits(contestedFixture.state, 1);
+  assert.equal(Math.floor(first.x), 2, "the first deterministic truck should reserve a contested road tile");
+  assert.equal(Math.floor(second.x), 3, "a later truck should wait rather than sharing the reserved road tile");
+
+  const bridgeFixture = buildState(2058);
+  setFlatMovementFixture(bridgeFixture.state);
+  setRoadPath(bridgeFixture.state, [{ x: 1, y: 4 }]);
+  const bridgeIndex = 4 * bridgeFixture.state.grid.cols + 2;
+  bridgeFixture.state.tiles[bridgeIndex].type = "water";
+  bridgeFixture.state.tileRoadBridge[bridgeIndex] = 1;
+  syncTileSoA(bridgeFixture.state);
+  const bridgeBlocker = addRoadTrafficTruck(bridgeFixture.state, bridgeFixture.rng, 2, 4);
+  const bridgeQueued = addRoadTrafficTruck(bridgeFixture.state, bridgeFixture.rng, 1, 4, [{ x: 2, y: 4 }]);
+  stepUnits(bridgeFixture.state, 1);
+  assert.equal(Math.floor(bridgeBlocker.x), 2, "a truck should occupy its bridge tile");
+  assert.equal(Math.floor(bridgeQueued.x), 1, "another truck should wait before an occupied bridge tile");
+};
+
 testStartingRosterAndDeployment();
 testCommandSelectionAndMovement();
 testFiveCommandUnitSlotsAndSelection();
@@ -1020,5 +1275,9 @@ testOutOfRangeSuppressionRequiresPlayerPlacement();
 testHazardsAndRecallCleanup();
 testRosterAssignment();
 testDifficultyStartingResponseTeams();
+testVehicleRoadBiasAndLastMile();
+testVehicleSlopeRules();
+testVehicleNearestReachableAndStalePathGuard();
+testRoadTruckOccupancyAndQueueing();
 
 console.log("units regression passed");

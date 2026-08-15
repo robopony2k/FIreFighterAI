@@ -430,7 +430,7 @@ const runSlowIncidentCrawlScenario = () => {
   state.tileHeat[targetIdx] = 0;
   state.tileBurnAge[targetIdx] = 0;
   state.tileHeatRelease[targetIdx] = 0;
-  const slowestIncidentSpeed = INCIDENT_TIME_SPEED_OPTIONS[0] ?? 0.015625;
+  const slowestIncidentSpeed = INCIDENT_TIME_SPEED_OPTIONS[0] ?? 0.25;
   for (let step = 0; step < 4; step += 1) {
     stepSim(state, effects, rng, BASE_STEP * slowestIncidentSpeed);
   }

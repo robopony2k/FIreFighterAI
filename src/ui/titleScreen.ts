@@ -226,6 +226,10 @@ const GRAPHICS_SETTINGS_SECTIONS: ReadonlyArray<RuntimeSettingsSectionSpec> = [
     keys: ["timespeedui", "fps", "seasonal", "cinematic"]
   },
   {
+    title: "Vegetation",
+    keys: ["volumetricgrass"]
+  },
+  {
     title: "Depth of Field",
     keys: ["dof", "doffocus", "dofrange", "dofaperture", "dofradius", "dofscale", "dofnear"]
   }
@@ -238,7 +242,7 @@ const DEBUG_SETTINGS_SECTIONS: ReadonlyArray<RuntimeSettingsSectionSpec> = [
   },
   {
     title: "Advanced Rendering",
-    keys: ["hud", "nohud", "autodpr", "dpr", "mindpr", "waterq", "trees", "treeimpostors", "detailedstructures", "shadows", "shadowres", "nofx", "fxbudget", "fxfallback", "firewall", "firevol"]
+    keys: ["hud", "nohud", "autodpr", "dpr", "mindpr", "waterq", "trees", "treeimpostors", "volumetricgrass", "detailedstructures", "shadows", "shadowres", "nofx", "fxbudget", "fxfallback", "firewall", "firevol"]
   },
   {
     title: "3D Debug",

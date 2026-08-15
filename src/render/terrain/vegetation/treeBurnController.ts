@@ -6,6 +6,10 @@ import type {
   TreeBurnMeshState,
   TreeSeasonVisualConfig
 } from "../../../systems/terrain/rendering/vegetation/treeRenderTypes.js";
+import {
+  getTreeDeciduousStrength,
+  treeSeasonPhenologyShader
+} from "../../../systems/terrain/rendering/vegetation/treeSeasonPhenology.js";
 
 const TREE_BURN_UPDATE_INTERVAL_MS = 120;
 export const TREE_BURN_FUEL_EPS = 0.02;
@@ -122,16 +126,6 @@ export const applyTrunkTopCropShader = (material: THREE.Material | THREE.Materia
   });
 };
 
-const getDeciduousStrength = (treeType: TreeType): number => {
-  if (treeType === TreeType.Pine) {
-    return 0;
-  }
-  if (treeType === TreeType.Scrub) {
-    return 0.45;
-  }
-  return 1;
-};
-
 export const applyTreeSeasonShader = (
   material: THREE.Material | THREE.Material[],
   seasonVisual: TreeSeasonVisualConfig | null,
@@ -141,7 +135,7 @@ export const applyTreeSeasonShader = (
     return;
   }
   const materials = Array.isArray(material) ? material : [material];
-  const deciduousStrength = getDeciduousStrength(treeType);
+  const deciduousStrength = getTreeDeciduousStrength(treeType);
   materials.forEach((mat) => {
     const standard = mat as THREE.MeshStandardMaterial & { userData?: Record<string, unknown> };
     if (!(standard instanceof THREE.MeshStandardMaterial)) {
@@ -166,7 +160,6 @@ export const applyTreeSeasonShader = (
       shader.uniforms.uSeasonT01 = seasonVisual.uniforms.uSeasonT01;
       shader.vertexShader =
         `attribute float aSeasonPhaseOffset;\n` +
-        `attribute float aSeasonRateJitter;\n` +
         `attribute float aLeafDropBias;\n` +
         `attribute float aAutumnHueBias;\n` +
         `varying float vTreeSeasonT;\n` +
@@ -178,7 +171,7 @@ export const applyTreeSeasonShader = (
         "#include <begin_vertex>",
         [
           "#include <begin_vertex>",
-          "vTreeSeasonT = fract(uSeasonT01 * (1.0 + aSeasonRateJitter) + aSeasonPhaseOffset);",
+          "vTreeSeasonT = fract(uSeasonT01 + aSeasonPhaseOffset);",
           "vLeafDropBias = aLeafDropBias;",
           "vAutumnHueBias = aAutumnHueBias;"
         ].join("\n")
@@ -188,6 +181,7 @@ export const applyTreeSeasonShader = (
         `varying float vTreeSeasonT;\n` +
         `varying float vLeafDropBias;\n` +
         `varying float vAutumnHueBias;\n` +
+        treeSeasonPhenologyShader +
         shader.fragmentShader;
       shader.fragmentShader = shader.fragmentShader.replace(
         "#include <color_fragment>",
@@ -216,10 +210,7 @@ export const applyTreeSeasonShader = (
         shader.fragmentShader = shader.fragmentShader.replace(
           "#include <dithering_fragment>",
           [
-            "float dropStart = 0.72 + vLeafDropBias * 0.12;",
-            "float dropEnd = 0.98 + vLeafDropBias * 0.12;",
-            "float leafDrop = smoothstep(dropStart, dropEnd, seasonT);",
-            `float leafPresence = clamp(1.0 - leafDrop * ${deciduousStrength.toFixed(4)}, 0.06, 1.0);`,
+            `float leafPresence = treeSeasonLeafPresence(seasonT, vLeafDropBias, ${deciduousStrength.toFixed(4)});`,
             "diffuseColor.a *= leafPresence;",
             "#include <dithering_fragment>"
           ].join("\n")

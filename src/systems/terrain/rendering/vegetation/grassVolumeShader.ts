@@ -1,3 +1,9 @@
+import {
+  GRASS_VOLUME_MAX_INTEGRATION_STEP,
+  grassVolumeMarchingShader
+} from "./grassVolumeMarchingShader.js";
+import { grassSeasonShader } from "./grassSeasonShader.js";
+
 export const GRASS_VOLUME_MARCH_STEPS = 96;
 export const GRASS_VOLUME_MID_MARCH_STEPS = 64;
 export const GRASS_VOLUME_DISTANT_MARCH_STEPS = 40;
@@ -5,9 +11,9 @@ export const GRASS_VOLUME_AGE_CYCLE_SECONDS = 30;
 export const GRASS_VOLUME_WIND_BEND_SCALE = 0.34;
 export const GRASS_VOLUME_CLUMP_DETAIL_MIN_PIXELS = 2;
 export const GRASS_VOLUME_FINE_DETAIL_MIN_PIXELS = 8;
-export const GRASS_VOLUME_MAX_LENGTH = 0.25;
+export const GRASS_VOLUME_MAX_LENGTH = 0.6;
 
-export type GrassVolumeDebugView = "final" | "grass-mask" | "canopy-height" | "march-work";
+export type GrassVolumeDebugView = "final" | "grass-mask" | "canopy-height" | "march-work" | "sample-spacing";
 export type GrassVolumeVariant = "volume-clumps" | "pcg-sdf";
 
 export type GrassVolumeControls = {
@@ -38,7 +44,8 @@ const DEBUG_VIEWS: readonly GrassVolumeDebugView[] = [
   "final",
   "grass-mask",
   "canopy-height",
-  "march-work"
+  "march-work",
+  "sample-spacing"
 ];
 const GRASS_VARIANTS: readonly GrassVolumeVariant[] = ["volume-clumps", "pcg-sdf"];
 
@@ -91,6 +98,7 @@ export const grassVolumeFragmentShader = `
 
   uniform sampler2D uSceneDepth;
   uniform sampler2D uTerrainField;
+  uniform sampler2D uGameplayGrassField;
   uniform sampler2D uWindField;
   uniform sampler2D uVariationField;
   uniform vec2 uFieldSize;
@@ -106,6 +114,9 @@ export const grassVolumeFragmentShader = `
   uniform float uGrassLength;
   uniform float uDensity;
   uniform float uWindResponse;
+  uniform float uSeasonT01;
+  uniform float uClimateDryness;
+  uniform float uUseGameplayProperties;
   uniform float uDebugView;
   varying vec2 vUv;
 
@@ -155,26 +166,8 @@ export const grassVolumeFragmentShader = `
     return floor(sampleFieldCell(cell).a * 255.0 + 0.5);
   }
 
-  vec3 reconstructWorld(vec2 uv, float depth) {
-    vec4 world = uInverseViewProjection * vec4(uv * 2.0 - 1.0, depth * 2.0 - 1.0, 1.0);
-    return world.xyz / max(abs(world.w), 0.00001);
-  }
-
-  bool intersectBox(vec3 ro, vec3 rd, vec3 boxMin, vec3 boxMax, out float nearT, out float farT) {
-    vec3 safeDirection = vec3(
-      abs(rd.x) < 0.00001 ? (rd.x < 0.0 ? -0.00001 : 0.00001) : rd.x,
-      abs(rd.y) < 0.00001 ? (rd.y < 0.0 ? -0.00001 : 0.00001) : rd.y,
-      abs(rd.z) < 0.00001 ? (rd.z < 0.0 ? -0.00001 : 0.00001) : rd.z
-    );
-    vec3 inverseDirection = 1.0 / safeDirection;
-    vec3 t0 = (boxMin - ro) * inverseDirection;
-    vec3 t1 = (boxMax - ro) * inverseDirection;
-    vec3 minimumT = min(t0, t1);
-    vec3 maximumT = max(t0, t1);
-    nearT = max(max(minimumT.x, minimumT.y), minimumT.z);
-    farT = min(min(maximumT.x, maximumT.y), maximumT.z);
-    return farT >= max(nearT, 0.0);
-  }
+  ${grassVolumeMarchingShader}
+  ${grassSeasonShader}
 
   vec4 windField(vec2 worldXZ) {
     vec4 encoded = texture2D(uWindField, worldToUv(worldXZ));
@@ -187,6 +180,19 @@ export const grassVolumeFragmentShader = `
 
   vec4 grassProperties(vec2 worldXZ) {
     vec4 variation = texture2D(uVariationField, worldToUv(worldXZ));
+    if (uUseGameplayProperties > 0.5) {
+      vec2 gameplayGrid = clamp(worldToUv(worldXZ), vec2(0.0), vec2(1.0)) * (uFieldSize - 1.0);
+      vec4 gameplay = texture2D(uGameplayGrassField, (gameplayGrid + 0.5) / uFieldSize);
+      float fuelLoad = clamp(gameplay.r, 0.0, 1.0);
+      float seasonalFuelLoad = fuelLoad * campaignGrassSeasonGrowth(uSeasonT01);
+      float fuelLength = mix(0.08, ${GRASS_VOLUME_MAX_LENGTH.toFixed(2)}, seasonalFuelLoad);
+      float density = clamp(
+        uDensity * mix(0.72, 1.08, variation.a) * smoothstep(0.0, 0.16, fuelLoad),
+        0.0,
+        1.0
+      );
+      return vec4(fuelLength, campaignGrassDryness(gameplay.g), density, 1.0);
+    }
     float fuelVariation = variation.r - 0.5;
     float localFuel = variation.g - 0.5;
     float fuelLength = clamp(
@@ -262,21 +268,37 @@ export const grassVolumeFragmentShader = `
       ? max(0.0, dot(sceneWorld - uCameraPosition, rayDirection))
       : 100000.0;
 
-    if (uDebugView > 0.5 && uDebugView < 2.5 && sceneDepth < 0.999999) {
-      vec2 diagnosticUv = worldToUv(sceneWorld.xz);
-      float mask = sampleGrassMask(diagnosticUv);
+    vec2 referenceXZ = sceneWorld.xz;
+    vec2 referenceUv = worldToUv(referenceXZ);
+    float referenceTerrainHeight = sampleTerrainHeight(referenceUv);
+    bool sceneMatchesTerrain =
+      abs(sceneWorld.y - referenceTerrainHeight) <= terrainDepthTolerance();
+    float referenceMask = sceneMatchesTerrain ? sampleGrassMask(referenceUv) : 0.0;
+
+    if (uDebugView > 0.5 && uDebugView < 2.5) {
       if (uDebugView < 1.5) {
-        gl_FragColor = vec4(vec3(mask), 1.0);
+        gl_FragColor = vec4(vec3(referenceMask), 1.0);
         return;
       }
-      vec4 props = grassProperties(sceneWorld.xz);
-      vec4 wind = windField(sceneWorld.xz);
-      float edgeCoverage = sampleGrassCoverage(diagnosticUv);
+      vec4 props = grassProperties(referenceXZ);
+      vec4 wind = windField(referenceXZ);
+      float edgeCoverage = referenceMask * sampleGrassCoverage(referenceUv);
       float canopy = mix(0.08, 1.15, props.x)
         * mix(0.42, 1.0, props.z)
         * mix(1.0, 0.96, wind.z)
         * edgeCoverage;
-      gl_FragColor = vec4(debugHeat(canopy / 1.15) * mask, 1.0);
+      gl_FragColor = vec4(debugHeat(canopy / 1.15) * referenceMask, 1.0);
+      return;
+    }
+
+    if (!sceneMatchesTerrain || referenceMask < 0.5) {
+      gl_FragColor = vec4(0.0);
+      return;
+    }
+
+    float referenceEdgeCoverage = sampleGrassCoverage(referenceUv);
+    if (referenceEdgeCoverage <= 0.001) {
+      gl_FragColor = vec4(0.0);
       return;
     }
 
@@ -301,29 +323,16 @@ export const grassVolumeFragmentShader = `
       return;
     }
 
-    vec2 referenceXZ = sceneDepth < 0.999999
-      ? sceneWorld.xz
-      : (uCameraPosition + rayDirection * farDistance).xz;
     vec4 rayProps = grassProperties(referenceXZ);
     vec4 rayWind = windField(referenceXZ);
-    vec2 referenceUv = worldToUv(referenceXZ);
-    vec2 terrainUvStep = 1.0 / max(uFieldSize - 1.0, vec2(1.0));
-    vec2 terrainWorldStep = uWorldSize / max(uFieldSize - 1.0, vec2(1.0));
-    float referenceTerrainHeight = sampleTerrainHeight(referenceUv);
-    float terrainSlopeX = (
-      sampleTerrainHeight(referenceUv + vec2(terrainUvStep.x, 0.0))
-      - referenceTerrainHeight
-    ) / max(terrainWorldStep.x, 0.0001);
-    float terrainSlopeZ = (
-      sampleTerrainHeight(referenceUv + vec2(0.0, terrainUvStep.y))
-      - referenceTerrainHeight
-    ) / max(terrainWorldStep.y, 0.0001);
+    vec2 terrainGradient = sampleTerrainGradient(referenceUv);
     float fuelLength = rayProps.x;
     float dryness = rayProps.y;
     float density = rayProps.z;
     float grassHeight = mix(0.08, 1.15, fuelLength)
       * mix(0.42, 1.0, density)
       * mix(1.0, 0.96, rayWind.z);
+    float anchoredGrassHeight = grassHeight * referenceEdgeCoverage;
     vec2 windVector = rayWind.xy;
     vec2 windDirection = normalize(windVector + vec2(0.0001));
     float sunFacing = clamp(
@@ -331,31 +340,42 @@ export const grassVolumeFragmentShader = `
       0.25,
       0.90
     );
-    float lodDistance = sceneDepth < 0.999999 ? sceneDistance : max(nearDistance, 0.1);
-    float maximumProjectedGrassHeight = grassHeight * uProjectionScale / max(lodDistance, 0.1);
+    float lodDistance = max(sceneDistance, 0.1);
+    float maximumProjectedGrassHeight = anchoredGrassHeight * uProjectionScale / lodDistance;
     if (maximumProjectedGrassHeight < 1.0) {
       gl_FragColor = vec4(0.0);
       return;
     }
 
-    float targetStepCount = maximumProjectedGrassHeight > 24.0
+    float stepCeiling = maximumProjectedGrassHeight > 24.0
       ? float(GRASS_MARCH_STEPS)
       : (maximumProjectedGrassHeight > 7.0
         ? ${GRASS_VOLUME_MID_MARCH_STEPS.toFixed(1)}
         : ${GRASS_VOLUME_DISTANT_MARCH_STEPS.toFixed(1)});
-    float slopeWork = smoothstep(0.08, 0.42, length(vec2(terrainSlopeX, terrainSlopeZ)));
-    targetStepCount = mix(
-      targetStepCount,
-      min(float(GRASS_MARCH_STEPS), targetStepCount * 1.35),
-      slopeWork
-    );
+    float closingRate = terrainClosingRate(rayDirection, terrainGradient);
+    float marchSpan = terrainAnchoredMarchSpan(anchoredGrassHeight, closingRate);
+    nearDistance = max(nearDistance, farDistance - marchSpan);
+    if (farDistance <= nearDistance) {
+      gl_FragColor = vec4(0.0);
+      return;
+    }
+    float targetStepCount = adaptiveMarchStepCount(farDistance - nearDistance, stepCeiling);
     float stepLength = (farDistance - nearDistance) / targetStepCount;
+    float integrationLength = min(stepLength, ${GRASS_VOLUME_MAX_INTEGRATION_STEP.toFixed(3)});
+
+    if (uDebugView > 3.5) {
+      float spacingRatio = stepLength / ${GRASS_VOLUME_MAX_INTEGRATION_STEP.toFixed(3)};
+      gl_FragColor = vec4(debugHeat(min(spacingRatio, 1.0)), 1.0);
+      return;
+    }
+
     float marchDistance = nearDistance + stepLength * 0.5;
     vec3 accumulatedColour = vec3(0.0);
     float accumulatedAlpha = 0.0;
-    float grassWorkSteps = 0.0;
+    float executedSteps = 0.0;
     for (int stepIndex = 0; stepIndex < GRASS_MARCH_STEPS; stepIndex++) {
       if (marchDistance >= farDistance) break;
+      executedSteps += 1.0;
       float sampleDistance = marchDistance;
       vec3 worldPosition = uCameraPosition + rayDirection * sampleDistance;
       vec2 fieldUv = worldToUv(worldPosition.xz);
@@ -368,7 +388,6 @@ export const grassVolumeFragmentShader = `
         continue;
       }
       marchDistance += stepLength;
-      grassWorkSteps += edgeCoverage;
       float terrainHeight = sampleTerrainHeight(fieldUv);
       float localGrassHeight = grassHeight * edgeCoverage;
       if (worldPosition.y <= terrainHeight || worldPosition.y >= terrainHeight + localGrassHeight) continue;
@@ -398,11 +417,9 @@ export const grassVolumeFragmentShader = `
       );
       float localDensity = density * edgeCoverage * projectedFade * verticalDensity * mix(0.45, 1.25, clumpNoise);
       localDensity *= mix(0.58, 1.18, fineNoise) * mix(0.55, 1.0, fuelLength) * bladeDensity * mix(0.97, 1.06, rayWind.z);
-      float sampleAlpha = 1.0 - exp(-localDensity * stepLength * 3.6);
+      float sampleAlpha = 1.0 - exp(-localDensity * integrationLength * 3.6);
       vec3 sampleColour = grassColour(dryness, verticalPosition, clumpNoise * 0.62 + fineNoise * 0.38);
       sampleColour *= sunFacing * mix(0.74, 1.28, verticalPosition) * mix(0.97, 1.05, rayWind.z);
-      sampleColour = sampleColour / (sampleColour + vec3(0.72));
-      sampleColour = pow(sampleColour, vec3(0.92));
       float contribution = (1.0 - accumulatedAlpha) * sampleAlpha;
       accumulatedColour += sampleColour * contribution;
       accumulatedAlpha += contribution;
@@ -410,8 +427,8 @@ export const grassVolumeFragmentShader = `
     }
 
     if (uDebugView > 2.5) {
-      float hasGrassWork = step(0.5, grassWorkSteps);
-      float work = grassWorkSteps / max(targetStepCount, 1.0);
+      float hasGrassWork = step(0.5, executedSteps);
+      float work = executedSteps / max(stepCeiling, 1.0);
       gl_FragColor = vec4(debugHeat(work) * hasGrassWork, hasGrassWork);
       return;
     }

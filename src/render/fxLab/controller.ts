@@ -455,7 +455,6 @@ export const createFxLabController = (
       uWorldSeed: { value: FX_LAB_SEED }
     },
     phaseShiftMax: 0.08,
-    rateJitter: 0.035,
     autumnHueJitter: 0.22
   };
 

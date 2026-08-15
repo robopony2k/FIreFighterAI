@@ -44,6 +44,7 @@ storage.clear();
   expect(settings.pauseOnAnnualReportEvent, "pauseOnAnnualReportEvent should default to true.");
   expect(settings.pauseOnRainEvent, "pauseOnRainEvent should default to true.");
   expect(!settings.treeimpostors, "treeimpostors should default to disabled while visual/performance acceptance is unresolved.");
+  expect(!settings.volumetricgrass, "volumetricgrass should default to disabled because it adds a GPU-heavy campaign pass.");
 }
 
 storage.clear();
@@ -67,13 +68,14 @@ storage.set(
   expect(!settings.pauseOnAnnualReportEvent, "Persisted false pauseOnAnnualReportEvent should be preserved.");
   expect(!settings.pauseOnRainEvent, "Persisted string '0' pauseOnRainEvent should sanitize to false.");
   expect(!settings.treeimpostors, "Older saved settings should safely inherit disabled experimental tree impostors.");
+  expect(!settings.volumetricgrass, "Older saved settings should safely inherit disabled volumetric grass.");
 }
 
 storage.clear();
 {
   const mod = await loadRuntimeSettingsModule(
     "query-overrides",
-    "?pauseOnFireEvent=0&pauseOnAnnualReportEvent=0&pauseOnRainEvent=0&treeimpostors=0"
+    "?pauseOnFireEvent=0&pauseOnAnnualReportEvent=0&pauseOnRainEvent=0&treeimpostors=0&volumetricgrass=1"
   );
   const settings = mod.getRuntimeSettings();
   const persisted = JSON.parse(storage.get(STORAGE_KEY) ?? "{}");
@@ -86,10 +88,12 @@ storage.clear();
   expect(!settings.pauseOnAnnualReportEvent, "Query pauseOnAnnualReportEvent=0 should override to false.");
   expect(!settings.pauseOnRainEvent, "Query pauseOnRainEvent=0 should override to false.");
   expect(!settings.treeimpostors, "Query treeimpostors=0 should disable the far-tree tier.");
+  expect(settings.volumetricgrass, "Query volumetricgrass=1 should enable campaign grass.");
   expect(persisted.pauseOnFireEvent === false, "Query pauseOnFireEvent override should persist.");
   expect(persisted.pauseOnAnnualReportEvent === false, "Query pauseOnAnnualReportEvent override should persist.");
   expect(persisted.pauseOnRainEvent === false, "Query pauseOnRainEvent override should persist.");
   expect(persisted.treeimpostors === false, "Query treeimpostors override should persist.");
+  expect(persisted.volumetricgrass === true, "Query volumetricgrass override should persist.");
 
   mod.setRuntimeSetting("pauseOnRainEvent", "true");
   mod.setRuntimeSetting("pauseOnFireEvent", "invalid");

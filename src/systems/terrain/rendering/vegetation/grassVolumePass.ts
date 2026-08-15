@@ -7,6 +7,11 @@ import {
 import { grassVolumeCompositeFragmentShader } from "./grassVolumeCompositeShader.js";
 import { createGrassVolumeField, type GrassVolumeField, type GrassVolumeTerrainInput } from "./grassVolumeField.js";
 import {
+  createGrassVolumePropertyField,
+  type GrassVolumePropertyField,
+  type GrassVolumePropertyInput
+} from "./grassVolumePropertyField.js";
+import {
   createGrassVolumeNoiseFields,
   GRASS_VOLUME_WIND_VECTOR_RANGE
 } from "./grassVolumeNoiseFields.js";
@@ -27,6 +32,8 @@ export type GrassVolumePassState = {
   windZ: number;
   windStrength: number;
   sunDirection: THREE.Vector3;
+  seasonT01?: number;
+  climateDryness?: number;
   controls: GrassVolumeControls;
 };
 
@@ -37,6 +44,7 @@ export type GrassVolumePassStatus = {
 
 export type GrassVolumePass = {
   setTerrain: (input: GrassVolumeTerrainInput | null) => void;
+  setGameplayProperties: (input: GrassVolumePropertyInput | null) => void;
   render: (
     renderer: THREE.WebGLRenderer,
     camera: THREE.PerspectiveCamera,
@@ -51,12 +59,12 @@ export type GrassVolumePass = {
 export const GRASS_VOLUME_RENDER_SCALE = 0.60;
 
 const configureTarget = (target: THREE.WebGLRenderTarget): THREE.WebGLRenderTarget => {
-  target.texture.name = "fx-lab-grass-scene-color";
+  target.texture.name = "grass-volume-scene-color";
   target.texture.minFilter = THREE.LinearFilter;
   target.texture.magFilter = THREE.LinearFilter;
   target.texture.generateMipmaps = false;
   const depthTexture = new THREE.DepthTexture(target.width, target.height, THREE.UnsignedIntType);
-  depthTexture.name = "fx-lab-grass-scene-depth";
+  depthTexture.name = "grass-volume-scene-depth";
   depthTexture.format = THREE.DepthFormat;
   depthTexture.minFilter = THREE.NearestFilter;
   depthTexture.magFilter = THREE.NearestFilter;
@@ -65,7 +73,7 @@ const configureTarget = (target: THREE.WebGLRenderTarget): THREE.WebGLRenderTarg
 };
 
 const configureGrassTarget = (target: THREE.WebGLRenderTarget): THREE.WebGLRenderTarget => {
-  target.texture.name = "fx-lab-grass-volume-layer";
+  target.texture.name = "grass-volume-layer";
   target.texture.colorSpace = THREE.NoColorSpace;
   target.texture.minFilter = THREE.LinearFilter;
   target.texture.magFilter = THREE.LinearFilter;
@@ -77,6 +85,7 @@ export const createGrassVolumePass = (renderer: THREE.WebGLRenderer): GrassVolum
   const grassUniforms = {
     uSceneDepth: { value: null as THREE.DepthTexture | null },
     uTerrainField: { value: null as THREE.DataTexture | null },
+    uGameplayGrassField: { value: null as THREE.DataTexture | null },
     uWindField: { value: null as THREE.Texture | null },
     uVariationField: { value: null as THREE.Texture | null },
     uFieldSize: { value: new THREE.Vector2(1, 1) },
@@ -92,6 +101,9 @@ export const createGrassVolumePass = (renderer: THREE.WebGLRenderer): GrassVolum
     uGrassLength: { value: DEFAULT_GRASS_VOLUME_CONTROLS.grassLength },
     uDensity: { value: DEFAULT_GRASS_VOLUME_CONTROLS.density },
     uWindResponse: { value: DEFAULT_GRASS_VOLUME_CONTROLS.windResponse },
+    uSeasonT01: { value: 0 },
+    uClimateDryness: { value: 0.5 },
+    uUseGameplayProperties: { value: 0 },
     uDebugView: { value: 0 }
   };
   const grassMaterial = new THREE.ShaderMaterial({
@@ -140,6 +152,7 @@ export const createGrassVolumePass = (renderer: THREE.WebGLRenderer): GrassVolum
   const inverseViewProjection = new THREE.Matrix4();
   const noiseFields = createGrassVolumeNoiseFields();
   let terrainField: GrassVolumeField | null = null;
+  let gameplayPropertyField: GrassVolumePropertyField | null = null;
   let sceneTarget: THREE.WebGLRenderTarget | null = null;
   let grassTarget: THREE.WebGLRenderTarget | null = null;
   let targetInvalidated = true;
@@ -218,6 +231,21 @@ export const createGrassVolumePass = (renderer: THREE.WebGLRenderer): GrassVolum
       );
       noiseFields.setWorldSize(terrainField.width, terrainField.depth);
     },
+    setGameplayProperties: (input) => {
+      if (input && gameplayPropertyField?.update(input)) {
+        grassUniforms.uGameplayGrassField.value = gameplayPropertyField.texture;
+        grassUniforms.uUseGameplayProperties.value = 1;
+        return;
+      }
+      gameplayPropertyField?.dispose();
+      gameplayPropertyField = null;
+      grassUniforms.uGameplayGrassField.value = null;
+      grassUniforms.uUseGameplayProperties.value = 0;
+      if (!input) return;
+      gameplayPropertyField = createGrassVolumePropertyField(input);
+      grassUniforms.uGameplayGrassField.value = gameplayPropertyField.texture;
+      grassUniforms.uUseGameplayProperties.value = 1;
+    },
     render: (activeRenderer, camera, state, renderScene) => {
       const controls = normalizeGrassVolumeControls(state.controls);
       const requestedPcg = controls.variant === "pcg-sdf";
@@ -253,6 +281,10 @@ export const createGrassVolumePass = (renderer: THREE.WebGLRenderer): GrassVolum
       grassUniforms.uGrassLength.value = controls.grassLength;
       grassUniforms.uDensity.value = controls.density;
       grassUniforms.uWindResponse.value = controls.windResponse;
+      grassUniforms.uSeasonT01.value = Number.isFinite(state.seasonT01) ? state.seasonT01 as number : 0;
+      grassUniforms.uClimateDryness.value = Number.isFinite(state.climateDryness)
+        ? Math.max(0, Math.min(1, state.climateDryness as number))
+        : 0.5;
       grassUniforms.uDebugView.value = grassVolumeDebugViewToUniform(controls.debugView);
 
       const previousTarget = activeRenderer.getRenderTarget();
@@ -294,7 +326,7 @@ export const createGrassVolumePass = (renderer: THREE.WebGLRenderer): GrassVolum
       }
       return {
         supported: true,
-        message: `60% stabilized 96/64/40-step grass ready (${noiseFields.getResolution()}px field cache).`
+        message: `60% terrain-anchored adaptive grass ready (96/64/40 ceilings, ${noiseFields.getResolution()}px field cache).`
       };
     },
     dispose: () => {
@@ -302,6 +334,8 @@ export const createGrassVolumePass = (renderer: THREE.WebGLRenderer): GrassVolum
       disposed = true;
       terrainField?.dispose();
       terrainField = null;
+      gameplayPropertyField?.dispose();
+      gameplayPropertyField = null;
       noiseFields.dispose();
       disposeTargets();
       geometry.dispose();

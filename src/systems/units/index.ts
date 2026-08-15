@@ -53,3 +53,4 @@ export { autoAssignTargets } from "./sim/commandRuntime.js";
 export { stepUnits, assignFormationTargets } from "./sim/unitMovement.js";
 export { applyUnitHazards, recallUnits } from "./sim/unitHazards.js";
 export { prepareExtinguish, applyExtinguishStep, applyExtinguish } from "./sim/unitSuppression.js";
+export type { UnitMovementProfile, UnitPathResult, UnitRouteResolution } from "./types/unitPathTypes.js";

@@ -162,27 +162,6 @@ export const FORMATION_SPACING = {
   medium: 2.5,
   wide: 4.0
 };
-export const MOVE_UPHILL_FACTOR = 2.1;
-export const MOVE_DOWNHILL_FACTOR = 0.8;
-export const MOVE_SLOPE_MIN = 0.65;
-export const MOVE_SLOPE_MAX = 2.2;
-
-export const MOVE_TERRAIN_COST: Record<TileType, number> = {
-  water: 99,
-  beach: 1.1,
-  floodplain: 1.25,
-  grass: 1.15,
-  scrub: 1.3,
-  forest: 1.5,
-  rocky: 1.6,
-  bare: 1.4,
-  ash: 1.25,
-  road: 1,
-  base: 1.05,
-  house: 1.2,
-  firebreak: 1.05
-};
-
 export const FIRE_COLORS = ["#d34b2a", "#f09a3e", "#f2c94c"];
 
 export const TILE_COLORS: Record<TileType | "ON_FIRE_GRASS", string> = {
@@ -239,7 +218,7 @@ export const LIGHT_DIR = { x: 0.6, y: -0.8 };
 
 export const STRATEGIC_TIME_SPEED_MAX = 20;
 export const TIME_SPEED_OPTIONS = [0.5, 1, 2, 3, 5, 10, STRATEGIC_TIME_SPEED_MAX];
-export const INCIDENT_TIME_SPEED_OPTIONS = [0.015625, 0.03125, 0.0625, 0.125, 0.25] as const;
+export const INCIDENT_TIME_SPEED_OPTIONS = [0.25, 0.5, 0.75, 1] as const;
 export const DEFAULT_INCIDENT_TIME_SPEED_INDEX = 1;
 
 export const getTimeSpeedOptions = (mode: SimTimeMode): readonly number[] =>

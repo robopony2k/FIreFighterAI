@@ -334,6 +334,10 @@ export const grassPcgBladeFragmentShader = `
       marchDistance += clamp(distanceToGrass * 0.58, 0.003, 0.65);
     }
 
+    if (uDebugView > 3.5) {
+      outColour = vec4(0.0);
+      return;
+    }
     if (uDebugView > 2.5) {
       outColour = vec4(debugHeat(marchedSteps / float(PCG_GRASS_MARCH_STEPS)), 1.0);
       return;
@@ -353,8 +357,6 @@ export const grassPcgBladeFragmentShader = `
     float lighting = 0.42 + max(dot(normal, normalize(uSunDirection)), 0.0) * 0.58;
     vec3 colour = grassColour(rayProperties.y, verticalPosition, cellVariation * 0.72 + broadVariation * 0.28);
     colour *= lighting * mix(0.86, 1.10, verticalPosition) * mix(0.98, 1.04, rayWind.z);
-    colour = colour / (colour + vec3(0.72));
-    colour = pow(colour, vec3(0.92));
     float alpha = mix(0.76, 0.96, rayProperties.z) * distanceFade;
     outColour = vec4(max(colour, vec3(0.0)) * alpha, alpha);
   }

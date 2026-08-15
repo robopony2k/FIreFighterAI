@@ -3,7 +3,7 @@ import type { WorldState } from "../../../core/state.js";
 import { TRUCK_CAPACITY } from "../../../core/config.js";
 import { inBounds } from "../../../core/grid.js";
 import { resetStatus, setStatus } from "../../../core/state.js";
-import { isPassable } from "../../../sim/pathing.js";
+import { isUnitTilePassable } from "./unitTraversalRules.js";
 import { buildUnitDerivedStats } from "../utils/unitStats.js";
 import { getRosterUnit, getUnitTile } from "../utils/unitLookup.js";
 import { boardTruck, assignFirefighterToTruck, setTruckCrewMode } from "./crewRuntime.js";
@@ -73,7 +73,7 @@ export function setUnitTarget(
   manual = true,
   options?: { silent?: boolean }
 ): void {
-  if (!inBounds(state.grid, tileX, tileY) || !isPassable(state, tileX, tileY)) {
+  if (!inBounds(state.grid, tileX, tileY) || !isUnitTilePassable(state, tileX, tileY)) {
     if (!options?.silent) {
       setStatus(state, "That location is blocked.");
     }

@@ -9,6 +9,8 @@ import {
   computeFireDistanceGain,
   computeTerrainOcclusion01,
   computeWindLoudnessGain,
+  isFireTruckAudioRoadTile,
+  isFireTruckRoadAudioEligible,
   selectPrioritizedFireAudioClusters,
   smoothstep,
   type FireAudioClusterCandidate,
@@ -804,17 +806,24 @@ export const createThreeTestWorldAudio = (
     simulationAlpha: number,
     tileSpan: number
   ): { truckId: number; x: number; y: number; z: number } | null => {
-    if (unit.kind !== "truck") {
+    const isRoadTileAt = (tileX: number, tileY: number): boolean => {
+      if (tileX < 0 || tileY < 0 || tileX >= world.grid.cols || tileY >= world.grid.rows) {
+        return false;
+      }
+      const idx = tileY * world.grid.cols + tileX;
+      return isFireTruckAudioRoadTile(world.tiles[idx]?.type, world.tileRoadBridge[idx] ?? 0);
+    };
+    if (!isFireTruckRoadAudioEligible({
+      phase: world.phase,
+      paused: world.paused,
+      kind: unit.kind,
+      movementDistanceTiles: Math.hypot(unit.x - unit.prevX, unit.y - unit.prevY),
+      previousOnRoad: isRoadTileAt(Math.floor(unit.prevX), Math.floor(unit.prevY)),
+      currentOnRoad: isRoadTileAt(Math.floor(unit.x), Math.floor(unit.y))
+    })) {
       return null;
     }
     const activeTarget = unit.attackTarget ?? unit.sprayTarget ?? unit.target;
-    const moving =
-      unit.pathIndex < unit.path.length ||
-      (activeTarget !== null && Math.hypot(activeTarget.x - unit.x, activeTarget.y - unit.y) > 0.35);
-    const hasSuppressionTarget = unit.attackTarget !== null || unit.sprayTarget !== null;
-    if (!moving && !hasSuppressionTarget) {
-      return null;
-    }
     if (fireClusters.length <= 0 || world.lastActiveFires <= 0) {
       return null;
     }

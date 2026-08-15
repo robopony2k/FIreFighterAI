@@ -2,7 +2,7 @@ import type { BehaviourMode, Point, Unit } from "../../../core/types.js";
 import type { WorldState } from "../../../core/state.js";
 import { FIREFIGHTER_TETHER_DISTANCE } from "../../../core/config.js";
 import { inBounds } from "../../../core/grid.js";
-import { isPassable } from "../../../sim/pathing.js";
+import { isUnitTilePassable } from "./unitTraversalRules.js";
 import { getUnitTile } from "../utils/unitLookup.js";
 import { findNearestPassable } from "./unitPathing.js";
 
@@ -64,7 +64,7 @@ export const findPassableStandoffSlot = (
         if (r > 0 && Math.abs(x - desiredX) < r && Math.abs(y - desiredY) < r) {
           continue;
         }
-        if (!inBounds(state.grid, x, y) || !isPassable(state, x, y)) {
+        if (!inBounds(state.grid, x, y) || !isUnitTilePassable(state, x, y)) {
           continue;
         }
         const fireSideDot = (x - fireTarget.x) * attackDirX + (y - fireTarget.y) * attackDirY;

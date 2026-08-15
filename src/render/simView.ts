@@ -83,7 +83,7 @@ export type RenderTerrainSample = {
   debugRenderOptions?: TerrainRenderDebugOptions;
 };
 
-const getClimateDryness = (state: RenderSim): number => {
+export const getRenderClimateDryness = (state: RenderSim): number => {
   const denom = Math.max(0.0001, DEFAULT_MOISTURE_PARAMS.Mmax - DEFAULT_MOISTURE_PARAMS.Mmin);
   const moistureNorm = clamp((state.climateMoisture - DEFAULT_MOISTURE_PARAMS.Mmin) / denom, 0, 1);
   return clamp(1 - moistureNorm, 0, 1);
@@ -162,7 +162,7 @@ export const buildRenderTerrainSample = (
     waterfallSourceMask: state.tileWaterfallSourceMask,
     waterfallTarget: state.tileWaterfallTarget,
     waterfallDrop: state.tileWaterfallDrop,
-    climateDryness: getClimateDryness(state),
+    climateDryness: getRenderClimateDryness(state),
     debugTypeColors,
     treesEnabled,
     fastUpdate,

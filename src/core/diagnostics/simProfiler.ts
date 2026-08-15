@@ -1,25 +1,23 @@
-import { getRuntimeSettings, subscribeRuntimeSettings } from "../persistence/runtimeSettings.js";
-
 type Stat = {
   count: number;
   total: number;
   max: number;
 };
 
-let enableSimProf = getRuntimeSettings().simprof;
-let enablePerfTiming = (() => {
-  const settings = getRuntimeSettings();
-  return typeof window === "undefined" || settings.simprof || settings.perf || settings.perflog;
-})();
-if (typeof window !== "undefined") {
-  subscribeRuntimeSettings((settings) => {
-    enableSimProf = settings.simprof;
-    enablePerfTiming = settings.simprof || settings.perf || settings.perflog;
-  });
-}
+let enableSimProf = false;
+let enablePerfTiming = typeof window === "undefined";
 const stats = new Map<string, Stat>();
 const REPORT_INTERVAL_MS = 2000;
 let lastReport = 0;
+
+export const configureSimProfiler = (settings: {
+  simprof: boolean;
+  perf: boolean;
+  perflog: boolean;
+}): void => {
+  enableSimProf = settings.simprof;
+  enablePerfTiming = typeof window === "undefined" || settings.simprof || settings.perf || settings.perflog;
+};
 
 export const profStart = (): number => (enablePerfTiming ? performance.now() : 0);
 

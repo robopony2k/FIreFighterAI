@@ -134,6 +134,7 @@ export type CommandUnitAlert =
   | "crew_transition"
   | "deploy_required"
   | "out_of_range"
+  | "route_blocked"
   | "holding_fire"
   | "danger";
 

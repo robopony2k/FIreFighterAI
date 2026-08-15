@@ -9,7 +9,8 @@ import {
   computeTreeBudgetScale,
   computeTreeDensityGradient,
   getTallTreeAttemptWeight,
-  resolveTreeCandidateOffset
+  resolveTreeCandidateOffset,
+  shouldPlaceScrubCoverage
 } from "../dist/systems/terrain/rendering/vegetation/treePlacementPlan.js";
 import { decodeTerrainSeedCode } from "../dist/ui/terrainSeedCode.js";
 import { MAP_SIZE_PRESETS } from "../dist/core/config.js";
@@ -256,6 +257,57 @@ assert.ok(
   ),
   "coverage candidates must remain forest-owned and inside their tile"
 );
+
+const scrubCoverageStart = 30_000;
+const scrubCoverageEnd = 32_000;
+const scrubReserve = 2_800;
+const mixedCoverageTypes = coverageTypes.slice();
+mixedCoverageTypes.fill(TILE_TYPE_IDS.scrub, scrubCoverageStart, scrubCoverageEnd);
+const mixedCanopyCover = new Float32Array(coverageTotal);
+mixedCanopyCover.fill(0.7, scrubCoverageStart, scrubCoverageEnd);
+const mixedCoveragePlan = buildFullResolutionTreeCoveragePlan({
+  cols: coverageCols,
+  rows: coverageRows,
+  worldSeed: 90210,
+  tileTypes: mixedCoverageTypes,
+  tileVegetationAge: new Float32Array(coverageTotal),
+  tileCanopyCover: mixedCanopyCover,
+  tileStemDensity: new Uint8Array(coverageTotal),
+  occludedMask: coverageOcclusion,
+  forestId: TILE_TYPE_IDS.forest,
+  scrubId: TILE_TYPE_IDS.scrub,
+  floodplainId: TILE_TYPE_IDS.floodplain,
+  grassId: TILE_TYPE_IDS.grass,
+  densityScale: 0.96,
+  attemptCap: 2,
+  modelInstanceBudget: 28_000,
+  nativeScrubModelReserve: scrubReserve
+});
+let expectedScrubCoverage = 0;
+for (let tileIndex = scrubCoverageStart; tileIndex < scrubCoverageEnd; tileIndex += 1) {
+  if (shouldPlaceScrubCoverage(tileIndex, 0.96, 0.7)) expectedScrubCoverage += 1;
+}
+const expectedNativeScrubModels = Math.min(scrubReserve, expectedScrubCoverage);
+const nativeScrubCandidates = mixedCoveragePlan.modelCandidates.filter(
+  (candidate) => candidate.vegetationType === "scrub"
+);
+assert.equal(
+  nativeScrubCandidates.length,
+  expectedNativeScrubModels,
+  "scrub coverage must receive native model slots even when forest demand saturates the shared ceiling"
+);
+assert.equal(mixedCoveragePlan.modelCoveredScrubTiles, expectedNativeScrubModels);
+assert.equal(
+  mixedCoveragePlan.modelCandidates.length,
+  28_000,
+  "native shrub allocation must reallocate, never increase, the shared model ceiling"
+);
+assert.equal(
+  mixedCoveragePlan.modelCoveredForestTiles + mixedCoveragePlan.modelCoveredScrubTiles,
+  28_000,
+  "each reserved shrub model must displace one forest model into coverage fallback"
+);
+assert.equal(mixedCoveragePlan.uncoveredForestTiles, 0);
 
 const reportedShareCode = "MAP7-115-1001Y1J1E1S191Q1C0I1M0O0U1A0S180Y1M1A181Q0K1K12161C";
 const decodedShareCode = decodeTerrainSeedCode(reportedShareCode);

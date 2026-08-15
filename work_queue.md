@@ -1,3 +1,105 @@
+TSK-0218: Prevent response trucks sharing road tiles
+
+Type: bug
+
+Why: Response trucks traversed routes independently, allowing multiple trucks to enter or pass through the same road or bridge tile during one movement update.
+
+Done when:
+- [x] Road and bridge movement permits only one response truck per occupied or reserved tile.
+- [x] Blocked trucks wait on their existing route without repeated A* searches and resume after the leading truck vacates the tile.
+- [x] High-speed traversal cannot tunnel through an occupied tile, and simultaneous claims resolve in deterministic unit order.
+- [x] Base/off-road truck positioning and civilian evacuation's separate road-slot model remain unchanged.
+- [x] TypeScript/build, focused unit and evacuation regressions, queue validation, and diff validation pass.
+
+Touchpoints: `src/systems/units/sim/unitRoadOccupancy.ts`, `src/systems/units/sim/unitMovement.ts`, `src/systems/units/sim/unitTraversalRules.ts`, `scripts/units-regression.mjs`, design/deprecation/queue records
+
+Constraints: preserve route selection, movement speed, stale-path replanning, crew behavior, bases, off-road formations, civilian evacuation traffic, saves, and deterministic simulation.
+
+Notes: Occupancy is runtime-only and rebuilt from committed truck positions each unit step; bridge tiles share the one-truck road rule, while base tiles remain exempt so HQ dispatch is not serialized through one slot. TypeScript checking, production build, focused unit and evacuation regressions, queue validation, and diff validation pass.
+
+Status: done
+
+TSK-0217: Gate firetruck audio to moving road response
+
+Type: bug
+
+Why: The firetruck loop could play for a stationary truck with a suppression target and had no explicit fire-season or road-occupancy gate.
+
+Done when:
+- [x] Firetruck audio is eligible only during fire season while an unpaused truck has committed movement across road or bridge tiles.
+- [x] Stationary, paused, off-road, base, non-fire-season, and non-truck movement are rejected by focused regression coverage.
+- [x] Existing active-fire proximity, attenuation, occlusion, and spatial-audio behavior remain intact.
+- [x] TypeScript/build, world-audio regression, and queue validation pass.
+
+Touchpoints: `src/render/threeTestWorldAudio.ts`, `src/render/threeTestWorldAudioMath.ts`, `scripts/world-audio-regression.mjs`, design/deprecation/queue records
+
+Constraints: rendering/audio-only; preserve fire simulation, unit routing, save data, the Web Audio graph, nearby-active-fire gating, attenuation, and occlusion.
+
+Notes: Uses committed previous/current positions rather than path intent, and treats road tiles plus water tiles carrying a road bridge as the audible network. TypeScript checking, production build, focused world-audio regression, queue validation, and diff validation pass.
+
+Status: done
+
+TSK-0216: Bias response vehicles toward roads and block steep traversal
+
+Type: feature
+
+Why: Response trucks shared pedestrian path costs, so small cross-country shortcuts routinely beat roads and even extremely steep terrain remained traversable.
+
+Done when:
+- [x] Response trucks strongly prefer connected road/base/bridge edges while retaining off-road fallback for materially shorter routes.
+- [x] Truck path cost and movement speed share symmetric rendered-angle penalties, with non-bridge segments at or above 38 degrees impassable.
+- [x] Unreachable truck orders resolve to the deterministic closest reachable tile, expose a command alert, and do not repeat path search every unit step.
+- [x] Firefighter foot movement and civilian evacuation routing remain unchanged under focused regression coverage.
+- [x] TypeScript/build, unit, evacuation, runtime-performance, and queue validation pass.
+
+Touchpoints: `src/systems/units/`, `src/shared/terrainSlope.ts`, `src/core/diagnostics/simProfiler.ts`, focused unit/evacuation regressions, design/deprecation/queue records
+
+Constraints: preserve firefighter traversal, civilian road-only evacuation, bridge semantics, deterministic path tie-breaking, game-speed movement budgets, saves, and terrain share codes; add no units-to-mapgen or units-to-roads dependency.
+
+Notes: Uses a sixfold off-road multiplier plus 12/18/28-degree incline anchors and a universal 38-degree cutoff, except for bridge decks whose underlying water elevation is non-authoritative for travel. TypeScript, build, focused unit and evacuation regressions, runtime-performance regression, and queue validation pass.
+
+Status: done
+
+TSK-0215: Set incident playback from quarter-speed to real time
+
+Type: feature
+
+Why: Incident controls were limited to ultra-slow multipliers between `0.015625x` and `0.25x`, preventing players from running an active response at real-time speed.
+
+Done when:
+- [x] Campaign and SIM Lab incident controls expose exactly `0.25x`, `0.5x`, `0.75x`, and `1x` without duplicate presets.
+- [x] New incidents default to `0.5x`, while strategic speed state and incident/strategic restoration remain unchanged.
+- [x] Time-speed regression, TypeScript, build, and queue validation pass.
+
+Touchpoints: `src/core/config.ts`, `src/systems/fire/types/fireSimLabTypes.ts`, `scripts/time-speed-regression.mjs`, `scripts/fire-regression.mjs`, design/deprecation/queue records
+
+Constraints: preserve strategic speed controls, save-state index compatibility, incident/strategic state isolation, fire equations, and internal incident fire-kernel pacing.
+
+Notes: The existing four-button time-control surfaces consume the shared preset list, so they now show all four supported values without UI-specific branching.
+
+Status: done
+
+TSK-0214: Keep deciduous trees dormant across the winter wrap
+
+Type: bug
+
+Why: Autumn leaf loss was derived from a phase whose multiplicative per-tree rate jitter reset at the annual wrap. Deciduous crowns therefore returned at the start of winter and stayed full until the following autumn, with no spring leaf-out transition.
+
+Done when:
+- [x] One terrain-rendering phenology module defines wrap-continuous autumn leaf loss, winter dormancy, and spring leaf-out for CPU regression and shared GLSL use.
+- [x] Detailed trees, impostors, and coverage fallbacks use offset-only annual phase variation and no longer generate or consume `aSeasonRateJitter`.
+- [x] Pine remains fully foliated, hardwoods retain the 0.06 winter rendering floor, and scrub retains 55% dormant foliage in both representations.
+- [x] TypeScript, build, renderer regression, FX Lab regression, and queue validation pass.
+- [ ] A supplied capture or supported Browser session confirms detailed-model/impostor seasonal parity and the final dormant crown silhouette.
+
+Touchpoints: `src/systems/terrain/rendering/vegetation/treeSeasonPhenology.ts`, detailed-tree and impostor shaders, seasonal instance attributes/configuration, renderer regression, design/deprecation/queue records
+
+Constraints: rendering-only; preserve simulation, saves, fire behavior, seasonal colour palettes, fallback classification, and existing per-tree phase/hue variation.
+
+Notes: Automated coverage verifies equal dormant foliage immediately before and after the annual wrap, intermediate spring leaf-out, full summer foliage, completed autumn loss, evergreen pine, partial-winter scrub, shared shader consumption, and removal of season-rate jitter. Live comparison remains capture-based because source-only implementation was explicitly selected for this VS Code session.
+
+Status: done
+
 TSK-0213: Stop accelerated fire work at the detection boundary
 
 Type: bug
@@ -183,7 +285,7 @@ Touchpoints: `src/core/timeSpeed.ts`, runtime time-control presentation/bindings
 
 Constraints: preserve fire spread equations, detection confidence/delay, strategic slider range, incident preset values, Advance-to-Next-Event restoration, saves, and checksums.
 
-Notes: Player telemetry showed `F57-F73` continuing at strategic `20x` after fire ignition, with each runtime episode simulating `0.50` days; it dropped to `1x` only after a manual speed change. The shared resolver now uses the incident index (`0.03125x` by default) while retaining the strategic `20x` slider value. Correcting the regression fixture to activate its constructed watch tower also confirmed that all three previously reported high-speed fire-event pause failures pass through the intended detection path.
+Notes: Player telemetry showed `F57-F73` continuing at strategic `20x` after fire ignition, with each runtime episode simulating `0.50` days; it dropped to `1x` only after a manual speed change. The shared resolver now uses the incident index (`0.03125x` by default at completion; later changed to `0.5x` by TSK-0215) while retaining the strategic `20x` slider value. Correcting the regression fixture to activate its constructed watch tower also confirmed that all three previously reported high-speed fire-event pause failures pass through the intended detection path.
 
 Status: done
 
@@ -749,24 +851,30 @@ Type: feature
 Why: Flat grass tiles lacked close-range structure, wind response, and a readable green-to-cured transition, while the supplied ShaderToy prototype had not yet been exercised against the game's terrain, camera, depth, and lighting.
 
 Done when:
-- [x] FX Lab exposes a grass-fidelity scenario using the real showcase terrain, orbit camera, grass mask, scene depth, wind, and key light without enabling the effect in campaign rendering.
+- [x] FX Lab exposes an independently tunable grass-fidelity scenario using the real showcase terrain, orbit camera, grass mask, scene depth, wind, and key light.
 - [x] The adapted shader retains deterministic wind, blade, density, curing-colour, canopy, and fixed 144-step raymarch behavior with repeatable grass controls and diagnostic views.
 - [x] Terrain field uploads occur only on terrain rebuild, resource failure falls back to the normal scene, and the obsolete disabled ground-colour grass patch is removed.
 - [x] Mixed maps use a conservative grass-distance field, projected-size rejection, and cached 128-256px wind/property fields to avoid full raymarch work over non-grass and sub-pixel regions without lowering output resolution or the 144-step ceiling.
-- [x] The aggressively optimized grass layer raymarches at 60% linear resolution, reconstructs with stable hardware bilinear filtering, and uses projected 96/64/40 sampling tiers while the final scene composite remains full resolution.
-- [x] Volume Clumps samples continuously interpolated packed height at each occupied step, selectively raises work on steep slopes, rejects samples outside the canopy before detail work, and caches wind, properties, and lighting once per ray.
-- [x] Grass length is capped at 0.25 after deterministic spatial variation, while independent wind-response and wind-speed controls can isolate bending from animation shimmer.
+- [x] The aggressively optimized grass layer raymarches at 60% linear resolution, reconstructs with stable hardware bilinear filtering, and retains projected 96/64/40 sampling ceilings while the final scene composite remains full resolution.
+- [x] Volume Clumps accepts only scene depth that agrees with authoritative grass terrain, derives a central-difference local gradient, backtracks through a padded canopy interval, and caps each adaptive opacity contribution at 0.065 world units with at least four samples.
+- [x] Volume Clumps continues sampling interpolated packed height and inward-feathered coverage at occupied steps, skips non-grass conservatively, and caches wind, properties, and lighting once per ray.
+- [x] Both grass variants output premultiplied linear colour for one full-resolution composite tone-map, while March Work reports terrain-backed executed work and Sample Spacing exposes capped grazing rays.
+- [x] Grass length is capped at 0.6 after deterministic spatial variation, while independent wind-response and wind-speed controls can isolate bending from animation shimmer.
 - [x] Grass/non-grass junctions preserve strict zero ownership outside grass while canopy height and density feather inward, avoiding a vertical volume face at square tile boundaries.
 - [x] Wind motion remains frame-smooth but uses slower intermittent gusts, reduced bending and canopy pulsing, while projected-size filtering removes fine hashes and hard blade occupancy before they form distant moire or close vertical columns.
 - [x] FX Lab offers the original tuned Volume Clumps and an alternate WebGL2 PCG SDF Blades renderer adapted from the supplied implicit-map study, bounded to 64 steps, real terrain/masks/depth, shared curing controls and wind, with an explicit fallback on unsupported contexts.
 - [x] TypeScript, FX Lab, renderer, and queue regressions pass.
-- [ ] User-supplied fixed-state captures and an accelerated ageing recording pass live visual acceptance without mask leakage, floating roots, depth errors, moire, or hard volume boundaries.
+- [x] Main Graphics settings expose a persisted Volumetric Grass toggle that defaults off and submits no campaign grass passes while disabled.
+- [x] The opt-in campaign Volume Clumps path combines current authoritative grass fuel with the interpolated seasonal growth envelope and blends local tile dryness with authoritative global climate dryness for curing colour.
+- [x] Campaign terrain rebuilds refresh packed grass ownership/height, while fuel-only fire updates reuse the gameplay property texture without rebuilding terrain geometry.
+- [x] Native scrub coverage receives a bounded reservation inside the unchanged shared tree-model ceiling, displacing the same number of forest models into existing coverage fallback; procedural scrub remains only for missing assets or reservation overflow.
+- [ ] User-supplied Final Composite, March Work, and Sample Spacing captures plus an orbit/wind recording pass without view-aligned panes, mask leakage, floating roots, depth errors, moire, or hard volume boundaries; the shader log stays clean and same-hardware timing holds a median at or below 6.0 ms without sustained readings above 6.5 ms.
 
-Touchpoints: `src/systems/terrain/rendering/vegetation/`, `src/render/fxLab/`, `src/render/threeTestTerrain.ts`, `scripts/fx-lab-showcase-regression.mjs`, `docs/`
+Touchpoints: `src/systems/terrain/rendering/vegetation/`, `src/render/fxLab/`, `src/render/threeTest.ts`, `src/render/threeTestTerrain.ts`, `src/persistence/runtimeSettings.ts`, `src/ui/titleScreen.ts`, `scripts/fx-lab-showcase-regression.mjs`, `scripts/runtime-settings-regression.mjs`, `scripts/vegetation-distribution-regression.mjs`, `docs/`
 
-Constraints: keep the prototype FX-Lab-only; preserve simulation, fuel profiles, saves, share codes, map generation, and campaign rendering; retain full-resolution scene output, stop the reduced grass march at authoritative scene depth, keep distance skipping conservative at grass boundaries, and rebuild static property fields only when terrain dimensions change.
+Constraints: keep FX Lab controls and diagnostics isolated; expose only the approved default-off Volume Clumps toggle in campaign graphics settings; preserve simulation authority, fuel profiles, campaign saves, share codes, map generation, and the existing native-tree budget; retain full-resolution scene output, stop the reduced grass march at authoritative scene depth, keep distance skipping conservative at grass boundaries, and update campaign fuel/dryness through bounded render-only inputs.
 
-Notes: The ShaderToy source was supplied by the user from `https://www.shadertoy.com/view/7cyGzd`. The first live look was visually approved but slow, so procedural FBM moved from every occupied march sample into one animated and one static bounded texture prepass; the packed terrain alpha channel now provides conservative empty-space skipping for mixed 256x256 maps. An intermediate 75%-resolution 144/96/64 profile measured roughly 5-10 ms and approved dryness, length, and medium-distance readability, but identified excessive motion, close streaking, and distant moire; the stability pass slowed phase continuously and filtered projected frequencies. The explicitly requested aggressive Volume Clumps profile measured roughly 6 ms at 60% resolution with 96/64/40 tiers and per-ray cached fields. A stabilization attempt cached a local terrain plane per ray, but later live captures showed that extrapolating it across multiple terrain cells created large translucent walls at oblique angles. Volume Clumps now returns to one continuously filtered packed-height sample per occupied step and retains cheap per-ray slope work selection. Follow-up captures isolated a smaller remaining wall at square grass/non-grass junctions: authoritative ownership remains binary, while filtered coverage now collapses canopy height and density inward on the grass side so the volume has no hard vertical face; March Work uses the same weighted coverage. The profile also uses stable bilinear layer reconstruction, caps final local length at 0.25, and exposes wind-response/speed controls. An upward-looking capture separately exposed false grass slabs in no-depth sky pixels; both variants reject those rays before terrain evaluation or marching. A user-supplied PCG implicit-map study remains a separate comparison rather than replacing Volume Clumps. Its first live capture measured about 11 ms and exposed tile-scale columns, canopy-entry sheets, and a persistent ANGLE warning; the follow-up uses actual blade-scale dimensions, a shallow 64-step volume, per-ray cached properties, and a single initialized map return without vec4 outputs. Automated evidence can be completed in VS Code; final appearance, motion, compiler-log, and comparative GPU-time acceptance require the requested user captures.
+Notes: The ShaderToy source was supplied by the user from `https://www.shadertoy.com/view/7cyGzd`. The first live look was visually approved but slow, so procedural FBM moved from every occupied march sample into one animated and one static bounded texture prepass; the packed terrain alpha channel now provides conservative empty-space skipping for mixed 256x256 maps. An intermediate 75%-resolution 144/96/64 profile measured roughly 5-10 ms and approved dryness, length, and medium-distance readability, but identified excessive motion, close streaking, and distant moire; the stability pass slowed phase continuously and filtered projected frequencies. The explicitly requested aggressive Volume Clumps profile measured roughly 6 ms at 60% resolution with 96/64/40 tiers and per-ray cached fields. A stabilization attempt cached a local terrain plane per ray, but later live captures showed that extrapolating it across multiple terrain cells created large translucent walls at oblique angles. Volume Clumps returned to continuously filtered packed height, and follow-up captures corrected hard grass/non-grass junctions plus false sky slabs. August 14 captures then exposed view-aligned jelly panes: unlike the ShaderToy centre ray's roughly 0.064-world-unit spacing, strategic FX rays assigned occasional canopy hits a much larger Beer-Lambert segment and also applied a display curve before the final composite tone-map. The corrected profile now validates scene depth against visible grass terrain, uses its central gradient to bound a padded canopy interval, adapts within the existing 96/64/40 ceilings, caps opacity integration at 0.065, and keeps both grass layers linear until one final composite transform. On August 15 the user approved a default-off campaign setting; follow-up campaign captures showed that static local moisture prevented seasonal curing, fuel alone kept height fixed through the year, and the forest-first 28,000-instance allocation left every scrub coverage instance on its fallback path. Campaign grass now receives interpolated season plus authoritative climate dryness, with the final local length ceiling increased from 0.25 to 0.6. Native scrub assets now reserve up to 16% (capped at 4,096) of the unchanged model ceiling before forest allocation; displaced forest coverage uses the existing bounded renderer, while the correctly tinted four-lobe scrub cluster remains only for missing assets or true overflow. A user-supplied PCG implicit-map study remains a separate FX Lab comparison rather than replacing Volume Clumps. Automated evidence can be completed in VS Code; final seasonal transition, shrub appearance, motion, compiler-log, and comparative GPU-time acceptance require user captures.
 
 Status: in-progress
 

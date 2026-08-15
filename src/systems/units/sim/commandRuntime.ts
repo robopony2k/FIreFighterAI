@@ -18,7 +18,13 @@ import {
   updateCommandUnitStatuses
 } from "./commandUnits.js";
 import { findNearestThreatForTarget, getCommandTargetBounds, resolveIntentSlotTarget } from "./commandTargeting.js";
-import { clearSuppressionTargets, findNearestPassable, setAttackTarget, setUnitTargetIfNeeded } from "./unitPathing.js";
+import {
+  clearSuppressionTargets,
+  findNearestPassable,
+  getUnitRouteResolution,
+  setAttackTarget,
+  setUnitTargetIfNeeded
+} from "./unitPathing.js";
 import { setTruckCrewMode, updateTruckCrewOrders } from "./crewRuntime.js";
 import { getTruckCrewReadiness, getTruckCrewUnits } from "./crewReadiness.js";
 import { getAverageHoseRange } from "./crewFormation.js";
@@ -174,6 +180,9 @@ const updateTruckAlerts = (state: WorldState, truck: Unit): void => {
   }
   if (intent && hasActiveHoseTask(intent) && truck.crewMode === "deployed" && truck.crewAction === null && !getReachableFireTaskTarget(state, truck, intent)) {
     alerts.push("out_of_range");
+  }
+  if (getUnitRouteResolution(truck)?.status === "nearest") {
+    alerts.push("route_blocked");
   }
   if (readiness.hoseSlots <= 0 && intent && hasActiveHoseTask(intent)) {
     alerts.push("hose_unstaffed");

@@ -1,5 +1,61 @@
 # Deprecations
 
+## Overlapping Response Trucks on Roads
+
+Status: Deprecated as of August 15, 2026.
+
+- Response trucks no longer advance through or finish movement on a road or bridge tile occupied or reserved by another response truck.
+- Trucks now queue on their existing route and resume when the next road tile is vacated; temporary traffic blockage does not trigger pathfinding retries.
+- Bases and off-road positioning retain their existing multi-truck behavior, and civilian evacuation continues using its separate road-slot traffic model.
+
+Migration guidance:
+
+1. Reserve road and bridge destinations before committing response-truck movement, including every waypoint crossed by a high-speed update.
+2. Synchronize occupancy from committed truck positions after each truck moves so following vehicles can use newly vacated tiles deterministically.
+3. Keep response-truck occupancy inside the units simulation domain rather than coupling it to evacuation traffic or road generation.
+
+## Stationary, Off-Road, and Out-of-Season Firetruck Audio
+
+Status: Deprecated as of August 15, 2026.
+
+- A truck route or suppression target no longer qualifies a firetruck for engine/siren playback while it is stationary.
+- Firetruck audio now requires committed movement during fire season, with both ends of the movement segment on a road or bridge tile.
+- Paused, off-road, base, non-fire-season, and non-truck movement remain silent; existing active-fire proximity, attenuation, and occlusion behavior is unchanged.
+
+Migration guidance:
+
+1. Determine playback eligibility from committed previous/current unit positions rather than route intent or task assignment.
+2. Require road or bridge occupancy at both segment endpoints so entering, leaving, and travelling off the road network cannot trigger the loop.
+3. Keep this rule in the rendering/audio boundary; do not add audio state to unit simulation or persistence.
+
+## Shared Pedestrian and Response-Truck Traversal Rules
+
+Status: Deprecated as of August 15, 2026.
+
+- Response trucks no longer reuse pedestrian terrain costs, signed raw-elevation slope factors, and unrestricted steep-surface passability.
+- Truck routes now strongly prefer connected road edges, apply symmetric rendered-angle penalties, reject non-bridge segments at or above 38 degrees, and resolve unreachable orders to the closest reachable tile with a command alert.
+- Firefighter foot movement and civilian evacuation's road-only routing remain unchanged.
+
+Migration guidance:
+
+1. Supply an explicit foot or vehicle movement profile when planning or advancing unit routes.
+2. Keep response-vehicle tuning in the units domain and use the shared rendered segment-angle helper instead of raw elevation thresholds.
+3. Do not restore imports from the retired transitional `src/sim/pathing.ts`; unit pathfinding now belongs under `src/systems/units/`.
+
+## Sub-Quarter-Speed Incident Presets
+
+Status: Deprecated as of August 15, 2026.
+
+- Incident controls no longer expose the `0.015625x` through `0.125x` ultra-slow presets or cap playback at `0.25x`.
+- Incident playback now offers `0.25x`, `0.5x`, `0.75x`, and real-time `1x`, with `0.5x` remaining the default selection.
+- SIM Lab consumes that same four-value list without appending duplicate `0.5x` and `1x` entries.
+- Strategic time controls, incident/strategic state isolation, and the internal incident fire-kernel pacing scale remain unchanged.
+
+Migration guidance:
+
+1. Treat `0.25x` and `1x` as the supported player-facing incident speed bounds.
+2. Use the shared incident preset list instead of encoding retired fractional values in UI or simulation code.
+
 ## End-of-Batch Fire Incident Detection
 
 Status: Deprecated as of August 14, 2026.
@@ -315,6 +371,20 @@ Migration guidance:
 1. Develop and validate grass rendering under `src/systems/terrain/rendering/vegetation/` through the `grass-fidelity` FX Lab scenario.
 2. Do not restore a core feature flag or terrain-material patch before the volume prototype passes live visual and performance review.
 3. Keep future production integration separate from the FX Lab controls and preserve terrain-domain ownership.
+
+## World-Spanning Grass Opacity Steps
+
+Status: Deprecated as of August 14, 2026.
+
+- Volume Clumps no longer divides the complete camera-to-scene world-box interval into 96/64/40 uniform samples. Strategic-camera gaps made individual occupied samples integrate far more than the thin canopy thickness and appear as stacked translucent panes.
+- The replacement validates visible grass terrain, computes its local gradient, and backtracks through a padded, bounded canopy interval. Adaptive samples retain the existing ceilings but cap every opacity contribution at 0.065 world units.
+- Both FX Lab grass variants now output premultiplied linear colour; the full-resolution composite owns the single tone-mapping and colour-space transform.
+
+Migration guidance:
+
+1. Keep future Volume Clumps sampling terrain-anchored and preserve the 0.065 integration ceiling unless a measured replacement proves equivalent stability.
+2. Use March Work and Sample Spacing to diagnose work and grazing-ray undersampling rather than visualizing ownership across the full world-box path.
+3. Do not restore per-sample display curves inside either grass-layer shader; colour transforms belong after scene compositing.
 
 ## Wind-Opposed Ocean Phases and Tick-Stepped Cloud Motion
 
@@ -1340,3 +1410,58 @@ Migration guidance:
 1. Treat fire detection, incident-mode entry, and optional pausing as separate decisions.
 2. Keep pre-detection strategic fire work bounded by the existing runtime cap; do not use the pause preference to retain strategic speed after detection.
 3. Explain future event toggles in terms of the single behavior they control.
+
+## FX-Lab-Only Volume Clumps Constraint
+
+Status: Deprecated as of August 15, 2026.
+
+- The corrected Volume Clumps grass compositor is no longer restricted to the FX Lab after the user approved an opt-in campaign setting.
+- Campaign use remains disabled by default and consumes authoritative grass fuel and tile moisture instead of FX Lab length, curing-cycle, or diagnostic controls.
+- The PCG SDF comparison and all grass diagnostics remain FX-Lab-only.
+
+Migration guidance:
+
+1. Gate campaign grass through the persisted `volumetricgrass` graphics setting; do not make the pass unconditional or tie it to a quality preset.
+2. Feed campaign appearance from the render-only fuel/dryness property texture without adding shader state to saves, share codes, or simulation data.
+3. Keep experimental variants and tuning controls in FX Lab until separately approved for campaign use.
+
+## Static-Local Campaign Grass, Single-Solid Scrub, and Forest-First Model Allocation
+
+Status: Deprecated as of August 15, 2026.
+
+- Campaign grass no longer holds one year-round height and curing colour from fuel plus static tile moisture alone.
+- It now combines fuel with the interpolated seasonal growth envelope and uses the terrain renderer's climate-dominated local/global dryness blend.
+- Scrub that exceeds the native tree-model budget no longer uses one doubly tinted icosahedron; one correctly tinted multi-lobe instanced shrub retains the bounded fallback path.
+- The shared model ceiling is no longer filled entirely by forest before scrub coverage is considered. Loaded native scrub assets receive a bounded reservation within that same ceiling, and displaced forest instances use the existing forest-coverage fallback.
+
+Migration guidance:
+
+1. Keep fuel authoritative for local grass quantity while treating seasonal growth and climate dryness as render-only presentation inputs.
+2. Reserve native scrub slots inside the existing shared tree budget; reuse the bounded procedural scrub geometry only when the asset is missing or the scrub reservation overflows.
+3. Do not restore multiplicative base and instance tinting on vegetation fallbacks.
+
+## Quarter-Unit Grass-Length Ceiling
+
+Status: Deprecated as of August 15, 2026.
+
+- The `0.25` final local grass-length ceiling no longer defines either FX Lab Volume Clumps or the opt-in campaign grass renderer.
+- Both paths now share a `0.6` maximum while retaining fuel, season, deterministic local variation, and the existing terrain-anchored march integration rules.
+
+Migration guidance:
+
+1. Use `GRASS_VOLUME_MAX_LENGTH` as the single rendering ceiling and keep the FX Lab control bound and regression synchronized with it.
+2. Do not introduce a separate campaign maximum unless performance or visual evidence justifies intentionally diverging the two paths.
+
+## Winter-Wrap Deciduous Foliage Reset
+
+Status: Deprecated as of August 15, 2026.
+
+- Multiplying annual season progress by per-tree rate jitter and applying autumn-only leaf loss no longer defines tree foliage. That phase reset restored full deciduous crowns at the start of winter and provided no spring leaf-out transition.
+- Detailed trees and impostors now share one render-only phenology function: autumn loss reaches dormancy before the wrap, winter preserves that endpoint, and spring restores foliage gradually.
+- Pine remains evergreen, hardwoods retain the existing sparse winter rendering floor, and scrub uses one 45% deciduous strength in both representations.
+
+Migration guidance:
+
+1. Tune leaf-out, leaf-drop, winter floor, and species strength in `treeSeasonPhenology.ts` rather than adding representation-specific shader curves.
+2. Preserve `fract(season + phaseOffset)` periodicity and do not restore multiplicative annual-rate jitter.
+3. Keep phenology rendering-only; do not add foliage phase to simulation, fire behavior, saves, or seasonal colour palettes.

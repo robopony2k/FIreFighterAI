@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 
 import {
   DEBUG_UNLIMITED_MONEY_BUDGET,
+  DEFAULT_INCIDENT_TIME_SPEED_INDEX,
   INCIDENT_TIME_SPEED_OPTIONS,
   RECRUIT_TRUCK_COST,
   STRATEGIC_TIME_SPEED_MAX,
@@ -36,6 +37,16 @@ expect(Math.max(...TIME_SPEED_OPTIONS) === 20, "Strategic presets should max at 
 expect(!TIME_SPEED_OPTIONS.includes(40), "Strategic presets should not expose 40x.");
 expect(!TIME_SPEED_OPTIONS.includes(80), "Strategic presets should not expose 80x.");
 expect(clampTimeSpeedSliderValue(80) === 20, "Stale 80x slider values should sanitize to 20x.");
+expect(
+  JSON.stringify(INCIDENT_TIME_SPEED_OPTIONS) === JSON.stringify([0.25, 0.5, 0.75, 1]),
+  "Incident presets should span 0.25x to real-time 1x in quarter-speed steps."
+);
+expect(Math.min(...INCIDENT_TIME_SPEED_OPTIONS) === 0.25, "Incident presets should not run below 0.25x.");
+expect(Math.max(...INCIDENT_TIME_SPEED_OPTIONS) === 1, "Incident presets should max at real-time 1x.");
+expect(
+  INCIDENT_TIME_SPEED_OPTIONS[DEFAULT_INCIDENT_TIME_SPEED_INDEX] === 0.5,
+  "New incidents should default to 0.5x."
+);
 expect(
   DEBUG_UNLIMITED_MONEY_BUDGET >= RECRUIT_TRUCK_COST * 20,
   "Unlimited money runs should start with enough budget to recruit many trucks."

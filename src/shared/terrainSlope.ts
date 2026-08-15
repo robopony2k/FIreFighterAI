@@ -11,6 +11,21 @@ export const computeRenderedSlopeAngleDeg = (
   return (Math.atan(grade) * 180) / Math.PI;
 };
 
+export const computeRenderedSegmentSlopeAngleDeg = (
+  fromElevation: number,
+  toElevation: number,
+  dx: number,
+  dy: number,
+  cols: number,
+  rows: number,
+  heightScaleMultiplier = 1
+): number => {
+  const tileSpan = Math.max(1e-4, Math.max(1, Math.min(cols, rows) - 1) / Math.max(1, Math.min(cols, rows)));
+  const run = Math.max(1e-4, Math.hypot(dx, dy) * tileSpan);
+  const rise = Math.abs(toElevation - fromElevation) * getTerrainHeightScale(cols, rows, heightScaleMultiplier);
+  return (Math.atan(rise / run) * 180) / Math.PI;
+};
+
 export type TerrainSlopeSurface = {
   cols: number;
   rows: number;

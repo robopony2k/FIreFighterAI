@@ -18,9 +18,29 @@ export type HeightOcclusionSample = {
   lineY: number;
 };
 
+export type FireTruckRoadAudioEligibility = {
+  phase: string;
+  paused: boolean;
+  kind: string;
+  movementDistanceTiles: number;
+  previousOnRoad: boolean;
+  currentOnRoad: boolean;
+};
+
 const clamp = (value: number, min: number, max: number): number => Math.min(max, Math.max(min, value));
 
 export const clamp01 = (value: number): number => clamp(value, 0, 1);
+
+export const isFireTruckAudioRoadTile = (tileType: string | undefined, roadBridge: number): boolean =>
+  tileType === "road" || (tileType === "water" && roadBridge > 0);
+
+export const isFireTruckRoadAudioEligible = (input: FireTruckRoadAudioEligibility): boolean =>
+  input.phase === "fire" &&
+  !input.paused &&
+  input.kind === "truck" &&
+  input.movementDistanceTiles > 1e-4 &&
+  input.previousOnRoad &&
+  input.currentOnRoad;
 
 export const smoothstep = (edge0: number, edge1: number, x: number): number => {
   if (edge0 === edge1) {

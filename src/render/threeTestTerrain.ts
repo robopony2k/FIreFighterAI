@@ -118,6 +118,7 @@ import {
 import { resolveTreeGrounding } from "../systems/terrain/rendering/vegetation/treeGrounding.js";
 import { buildTreeLod } from "../systems/terrain/rendering/vegetation/treeLodController.js";
 import { buildForestCoverageFallbackRenderer } from "../systems/terrain/rendering/vegetation/forestCoverageFallbackRenderer.js";
+import { createProceduralScrubFallbackGeometry } from "../systems/terrain/rendering/vegetation/proceduralScrubFallbackGeometry.js";
 import {
   buildFullResolutionTreeCoveragePlan,
   computeTreeBudgetScale,
@@ -126,6 +127,7 @@ import {
   resolveForestTreeCohort,
   resolveTreeBudgetPriority,
   resolveTreeCandidateOffset,
+  shouldPlaceScrubCoverage,
   type FullResolutionTreeCoveragePlan,
   type TreeCoverageCandidate
 } from "../systems/terrain/rendering/vegetation/treePlacementPlan.js";
@@ -351,8 +353,9 @@ const TREE_VARIANT_CAP_MEDIUM = 2;
 const TREE_VARIANT_CAP_LARGE = 1;
 const TREE_INSTANCE_BUDGET_MEDIUM = 28000;
 const TREE_INSTANCE_BUDGET_LARGE = 18000;
+const NATIVE_SCRUB_MODEL_RESERVE_SHARE = 0.16;
+const NATIVE_SCRUB_MODEL_RESERVE_MAX = 4096;
 const DETAILED_STRUCTURE_THRESHOLD = 512;
-const SCRUB_PLACEHOLDER_BASE_CHANCE = 0.42;
 const SCRUB_PLACEHOLDER_MAX_INSTANCES = 30000;
 const SCRUB_PLACEHOLDER_SCALE_MIN = 0.55;
 const SCRUB_PLACEHOLDER_SCALE_MAX = 0.95;
@@ -3488,6 +3491,13 @@ export const buildTerrainMesh = (
     return limitTreeVariants(treeAssets[TreeType.Pine] ?? []);
   };
   const hasNativeScrubVariants = (treeAssets?.[TreeType.Scrub]?.length ?? 0) > 0;
+  const nativeScrubModelReserve =
+    hasNativeScrubVariants && Number.isFinite(treeInstanceBudget)
+      ? Math.min(
+          NATIVE_SCRUB_MODEL_RESERVE_MAX,
+          Math.floor(treeInstanceBudget * NATIVE_SCRUB_MODEL_RESERVE_SHARE)
+        )
+      : 0;
   const treeTypes = sample.treeTypes;
   const tileVegetationAge = sample.tileVegetationAge;
   const tileCanopyCover = sample.tileCanopyCover;
@@ -3697,7 +3707,8 @@ export const buildTerrainMesh = (
       grassId,
       densityScale,
       attemptCap: treeAttemptCap,
-      modelInstanceBudget: treeInstanceBudget
+      modelInstanceBudget: treeInstanceBudget,
+      nativeScrubModelReserve
     });
     fullResolutionTreeCoveragePlan.modelCandidates.forEach((candidate) => {
       appendPlannedTreeInstance(candidate, treeInstances, false);
@@ -3903,11 +3914,7 @@ export const buildTerrainMesh = (
         !placedTreeOnTile &&
         scrubPlaceholderInstances.length < SCRUB_PLACEHOLDER_MAX_INSTANCES
       ) {
-        const placeholderChance = Math.min(
-          0.68,
-          SCRUB_PLACEHOLDER_BASE_CHANCE * densityScale * (0.45 + canopyCover * 0.9)
-        );
-        if (noiseAt(idx + 14.39) < placeholderChance) {
+        if (shouldPlaceScrubCoverage(idx, densityScale, canopyCover)) {
           const jitterRange = Math.max(0.1, step * 0.34);
           const scrubCandidate = resolveTreeCandidateOffset({
             worldSeed: sample.worldSeed ?? 0,
@@ -4177,7 +4184,6 @@ export const buildTerrainMesh = (
           const burnQ = new Uint8Array(variantInstances.length);
           const visibilityQ = new Uint8Array(variantInstances.length).fill(255);
           const seasonPhaseOffset = seasonVisual ? new Float32Array(variantInstances.length) : null;
-          const seasonRateJitter = seasonVisual ? new Float32Array(variantInstances.length) : null;
           const leafDropBias = seasonVisual ? new Float32Array(variantInstances.length) : null;
           const autumnHueBias = seasonVisual ? new Float32Array(variantInstances.length) : null;
           const cropTopAttr =
@@ -4218,7 +4224,6 @@ export const buildTerrainMesh = (
             if (
               seasonVisual &&
               seasonPhaseOffset &&
-              seasonRateJitter &&
               leafDropBias &&
               autumnHueBias
             ) {
@@ -4231,11 +4236,9 @@ export const buildTerrainMesh = (
                 variantIndex * 1.331 +
                 treeTypeId * 0.41;
               const n0 = noiseAt(noiseBase + 0.11);
-              const n1 = noiseAt(noiseBase + 1.37);
               const n2 = noiseAt(noiseBase + 2.71);
               const n3 = noiseAt(noiseBase + 3.97);
               seasonPhaseOffset[i] = (n0 * 2 - 1) * seasonVisual.phaseShiftMax;
-              seasonRateJitter[i] = (n1 * 2 - 1) * seasonVisual.rateJitter;
               leafDropBias[i] = (n2 * 2 - 1) * TREE_LEAF_DROP_BIAS_MAX;
               autumnHueBias[i] = (n3 * 2 - 1) * seasonVisual.autumnHueJitter;
             }
@@ -4243,21 +4246,17 @@ export const buildTerrainMesh = (
           if (
             seasonVisual &&
             seasonPhaseOffset &&
-            seasonRateJitter &&
             leafDropBias &&
             autumnHueBias
           ) {
             const geometry = instanced.geometry;
             const phaseAttr = new THREE.InstancedBufferAttribute(seasonPhaseOffset, 1);
-            const rateAttr = new THREE.InstancedBufferAttribute(seasonRateJitter, 1);
             const leafAttr = new THREE.InstancedBufferAttribute(leafDropBias, 1);
             const hueAttr = new THREE.InstancedBufferAttribute(autumnHueBias, 1);
             phaseAttr.setUsage(THREE.StaticDrawUsage);
-            rateAttr.setUsage(THREE.StaticDrawUsage);
             leafAttr.setUsage(THREE.StaticDrawUsage);
             hueAttr.setUsage(THREE.StaticDrawUsage);
             geometry.setAttribute("aSeasonPhaseOffset", phaseAttr);
-            geometry.setAttribute("aSeasonRateJitter", rateAttr);
             geometry.setAttribute("aLeafDropBias", leafAttr);
             geometry.setAttribute("aAutumnHueBias", hueAttr);
           }
@@ -4395,9 +4394,11 @@ export const buildTerrainMesh = (
     treeBurnMeshStates.push(...treeLodBuild.burnStates);
   }
   if (scrubPlaceholderInstances.length > 0) {
-    const shrubGeometry = new THREE.IcosahedronGeometry(0.24, 0);
+    const shrubGeometry = createProceduralScrubFallbackGeometry();
     const shrubMaterial = new THREE.MeshStandardMaterial({
-      color: 0x5f7d49,
+      // Instance colour is already the complete scrub tint. A white base avoids
+      // multiplying it by a second green and crushing the fallback to black.
+      color: 0xffffff,
       roughness: 0.94,
       metalness: 0.02,
       vertexColors: true

@@ -25,7 +25,7 @@ import { formatCurrency } from "../core/utils.js";
 import { getFireSeasonIntensity, getPhaseInfo, PHASES } from "../core/time.js";
 import { RNG as RuntimeRng } from "../core/rng.js";
 import { setStatus, resetStatus } from "../core/state.js";
-import { maybeReport, profEnd, profStart } from "./prof.js";
+import { configureSimProfiler, maybeReport, profEnd, profStart } from "../core/diagnostics/simProfiler.js";
 import { inBounds, indexFor } from "../core/grid.js";
 import { getCharacterBaseBudget, getCharacterDefinition } from "../core/characters.js";
 import {
@@ -128,6 +128,7 @@ let allowAnnualReport = getRuntimeSettings().annualReportEnabled;
 let pauseOnFireEvent = getRuntimeSettings().pauseOnFireEvent;
 let pauseOnAnnualReportEvent = getRuntimeSettings().pauseOnAnnualReportEvent;
 let pauseOnRainEvent = getRuntimeSettings().pauseOnRainEvent;
+configureSimProfiler(getRuntimeSettings());
 
 const nowMs = (): number => (typeof performance !== "undefined" ? performance.now() : Date.now());
 
@@ -149,6 +150,7 @@ const resetStepPerfTelemetry = (state: WorldState): void => {
 };
 
 subscribeRuntimeSettings((settings) => {
+  configureSimProfiler(settings);
   allowFireIgnitionEvents = settings.randomFireIgnition;
   allowAnnualReport = settings.annualReportEnabled;
   pauseOnFireEvent = settings.pauseOnFireEvent;

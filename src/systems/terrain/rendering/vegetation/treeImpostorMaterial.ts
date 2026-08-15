@@ -1,12 +1,15 @@
 import * as THREE from "three";
 import type { TreeImpostorAtlas, TreeSeasonVisualConfig } from "./treeRenderTypes.js";
+import {
+  TREE_SCRUB_DECIDUOUS_STRENGTH,
+  treeSeasonPhenologyShader
+} from "./treeSeasonPhenology.js";
 
 const vertexShader = /* glsl */ `
   attribute float aFrameBase;
   attribute float aTreeRotation;
   attribute float aTreeType;
   attribute float aSeasonPhaseOffset;
-  attribute float aSeasonRateJitter;
   attribute float aLeafDropBias;
   attribute float aAutumnHueBias;
   uniform float uAtlasGrid;
@@ -40,7 +43,7 @@ const vertexShader = /* glsl */ `
     gl_Position = projectionMatrix * mvPosition;
     vInstanceTint = instanceColor;
     vTreeType = aTreeType;
-    vSeasonT = fract(uSeasonT01 * (1.0 + aSeasonRateJitter) + aSeasonPhaseOffset);
+    vSeasonT = fract(uSeasonT01 + aSeasonPhaseOffset);
     vLeafDropBias = aLeafDropBias;
     vAutumnHueBias = aAutumnHueBias;
     #include <fog_vertex>
@@ -58,6 +61,7 @@ const fragmentShader = /* glsl */ `
   varying float vLeafDropBias;
   varying float vAutumnHueBias;
   #include <fog_pars_fragment>
+  ${treeSeasonPhenologyShader}
 
   void main() {
     vec4 atlasColor = texture2D(uColorAtlas, vAtlasUv);
@@ -70,10 +74,10 @@ const fragmentShader = /* glsl */ `
     float autumn = smoothstep(0.62, 0.70, seasonT) * (1.0 - smoothstep(0.90, 0.98, seasonT));
     float winter = clamp(1.0 - smoothstep(0.08, 0.18, seasonT) + smoothstep(0.88, 0.96, seasonT), 0.0, 1.0);
     float spring = smoothstep(0.18, 0.28, seasonT) * (1.0 - smoothstep(0.42, 0.52, seasonT));
-    float deciduous = vTreeType < 0.5 ? 0.0 : (vTreeType > 4.5 ? 0.65 : 1.0);
-    float leafDrop = smoothstep(0.72 + vLeafDropBias * 0.12, 0.98 + vLeafDropBias * 0.12, seasonT);
-    float leafPresence = clamp(1.0 - leafDrop * deciduous, 0.06, 1.0);
-    float roleCoverage = max(trunkCoverage, max(leafCoverage * leafPresence, mixedCoverage * mix(1.0, 0.35, leafDrop * deciduous)));
+    float deciduous = vTreeType < 0.5 ? 0.0 : (vTreeType > 4.5 ? ${TREE_SCRUB_DECIDUOUS_STRENGTH.toFixed(2)} : 1.0);
+    float leafCycle = treeSeasonLeafCycle(seasonT, vLeafDropBias);
+    float leafPresence = treeSeasonLeafPresence(seasonT, vLeafDropBias, deciduous);
+    float roleCoverage = max(trunkCoverage, max(leafCoverage * leafPresence, mixedCoverage * mix(1.0, 0.35, (1.0 - leafCycle) * deciduous)));
     float alpha = atlasColor.a * roleCoverage;
     if (alpha < 0.42) discard;
 

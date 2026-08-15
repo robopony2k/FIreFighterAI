@@ -122,6 +122,7 @@ export type FullResolutionTreeCoveragePlan = {
   fallbackCandidates: TreeCoverageCandidate[];
   eligibleForestTiles: number;
   modelCoveredForestTiles: number;
+  modelCoveredScrubTiles: number;
   fallbackCoveredForestTiles: number;
   uncoveredForestTiles: number;
 };
@@ -142,6 +143,24 @@ export type FullResolutionTreeCoverageInput = {
   densityScale: number;
   attemptCap: number;
   modelInstanceBudget: number;
+  nativeScrubModelReserve?: number;
+};
+
+const visualNoiseAt = (value: number): number => {
+  const sample = Math.sin(value * 12.9898 + 78.233) * 43758.5453;
+  return sample - Math.floor(sample);
+};
+
+export const shouldPlaceScrubCoverage = (
+  tileIndex: number,
+  densityScale: number,
+  canopyCover: number
+): boolean => {
+  const coverageChance = Math.min(
+    0.68,
+    0.42 * densityScale * (0.45 + clamp(canopyCover, 0, 1) * 0.9)
+  );
+  return visualNoiseAt(tileIndex + 14.39) < coverageChance;
 };
 
 const compareCoverageCandidates = (left: TreeCoverageCandidate, right: TreeCoverageCandidate): number =>
@@ -167,8 +186,12 @@ export const buildFullResolutionTreeCoveragePlan = (
   const modelBudget = Number.isFinite(input.modelInstanceBudget)
     ? Math.max(0, Math.floor(input.modelInstanceBudget))
     : Number.MAX_SAFE_INTEGER;
+  const nativeScrubModelReserve = Number.isFinite(input.nativeScrubModelReserve)
+    ? Math.min(modelBudget, Math.max(0, Math.floor(input.nativeScrubModelReserve ?? 0)))
+    : 0;
   const attemptLimit = Math.max(1, Math.floor(input.attemptCap) * 2 + 1);
   const requiredForest: TreeCoverageCandidate[] = [];
+  const scrubCoverage: TreeCoverageCandidate[] = [];
   const optional: TreeCoverageCandidate[] = [];
 
   for (let tileIndex = 0; tileIndex < totalTiles; tileIndex += 1) {
@@ -191,6 +214,12 @@ export const buildFullResolutionTreeCoveragePlan = (
       attempts += 1;
     }
     if (vegetationType === "forest") {
+      attempts = Math.max(1, attempts);
+    }
+    const requiresScrubCoverage =
+      vegetationType === "scrub" &&
+      shouldPlaceScrubCoverage(tileIndex, input.densityScale, canopyCover);
+    if (requiresScrubCoverage) {
       attempts = Math.max(1, attempts);
     }
     if (attempts <= 0) continue;
@@ -225,27 +254,35 @@ export const buildFullResolutionTreeCoveragePlan = (
         requiredForestCoverage: vegetationType === "forest" && attempt === 0
       };
       if (candidate.requiredForestCoverage) requiredForest.push(candidate);
+      else if (requiresScrubCoverage && attempt === 0) scrubCoverage.push(candidate);
       else optional.push(candidate);
     }
   }
 
   requiredForest.sort(compareCoverageCandidates);
+  scrubCoverage.sort(compareCoverageCandidates);
   optional.sort(compareCoverageCandidates);
-  const modelCandidates = requiredForest.slice(0, modelBudget);
-  const fallbackCandidates = requiredForest.slice(modelBudget);
+  const reservedScrubCandidates = scrubCoverage.slice(0, nativeScrubModelReserve);
+  const forestModelCapacity = Math.max(0, modelBudget - reservedScrubCandidates.length);
+  const modelCandidates = [
+    ...reservedScrubCandidates,
+    ...requiredForest.slice(0, forestModelCapacity)
+  ];
+  const fallbackCandidates = requiredForest.slice(forestModelCapacity);
   const optionalCapacity = Math.max(0, modelBudget - modelCandidates.length);
   modelCandidates.push(...optional.slice(0, optionalCapacity));
   modelCandidates.sort((left, right) => left.tileIndex - right.tileIndex || left.attempt - right.attempt);
   fallbackCandidates.sort((left, right) => left.tileIndex - right.tileIndex);
 
   const eligibleForestTiles = requiredForest.length;
-  const modelCoveredForestTiles = Math.min(requiredForest.length, modelBudget);
+  const modelCoveredForestTiles = Math.min(requiredForest.length, forestModelCapacity);
   const fallbackCoveredForestTiles = fallbackCandidates.length;
   return {
     modelCandidates,
     fallbackCandidates,
     eligibleForestTiles,
     modelCoveredForestTiles,
+    modelCoveredScrubTiles: reservedScrubCandidates.length,
     fallbackCoveredForestTiles,
     uncoveredForestTiles: Math.max(
       0,

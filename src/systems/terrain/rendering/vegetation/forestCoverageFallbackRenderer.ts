@@ -44,21 +44,17 @@ const attachSeasonAttributes = (
 ): void => {
   if (!seasonVisual?.enabled) return;
   const phase = new Float32Array(instances.length);
-  const rate = new Float32Array(instances.length);
   const leafDrop = new Float32Array(instances.length);
   const autumnHue = new Float32Array(instances.length);
   instances.forEach((instance, index) => {
     const n0 = vegetationHash2D(instance.tileX, instance.tileY, worldSeed + 42_101);
-    const n1 = vegetationHash2D(instance.tileX, instance.tileY, worldSeed + 42_103);
     const n2 = vegetationHash2D(instance.tileX, instance.tileY, worldSeed + 42_107);
     const n3 = vegetationHash2D(instance.tileX, instance.tileY, worldSeed + 42_109);
     phase[index] = (n0 * 2 - 1) * seasonVisual.phaseShiftMax;
-    rate[index] = (n1 * 2 - 1) * seasonVisual.rateJitter;
     leafDrop[index] = (n2 * 2 - 1) * FALLBACK_LEAF_DROP_BIAS_MAX;
     autumnHue[index] = (n3 * 2 - 1) * seasonVisual.autumnHueJitter;
   });
   geometry.setAttribute("aSeasonPhaseOffset", new THREE.InstancedBufferAttribute(phase, 1));
-  geometry.setAttribute("aSeasonRateJitter", new THREE.InstancedBufferAttribute(rate, 1));
   geometry.setAttribute("aLeafDropBias", new THREE.InstancedBufferAttribute(leafDrop, 1));
   geometry.setAttribute("aAutumnHueBias", new THREE.InstancedBufferAttribute(autumnHue, 1));
 };

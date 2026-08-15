@@ -122,7 +122,7 @@ export const FX_LAB_GRASS_CONTROLS: ReadonlyArray<FxLabGrassControlDefinition> =
     label: "Grass Length",
     description: "Centre height for deterministic local fuel-length variation.",
     min: 0.08,
-    max: 0.25,
+    max: 0.6,
     step: 0.01
   },
   {
@@ -160,12 +160,13 @@ export const FX_LAB_GRASS_CONTROLS: ReadonlyArray<FxLabGrassControlDefinition> =
     section: "Grass",
     kind: "enum",
     label: "Diagnostic View",
-    description: "Inspect final compositing, tile ownership, canopy height, or raymarch work.",
+    description: "Inspect final compositing, tile ownership, canopy height, raymarch work, or volume sample spacing.",
     options: [
       { value: "final", label: "Final Composite" },
       { value: "grass-mask", label: "Grass Mask" },
       { value: "canopy-height", label: "Canopy Height" },
-      { value: "march-work", label: "March Work" }
+      { value: "march-work", label: "March Work" },
+      { value: "sample-spacing", label: "Sample Spacing" }
     ]
   }
 ];

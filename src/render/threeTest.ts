@@ -13,6 +13,7 @@ import {
   TIME_SPEED_SLIDER_STEP
 } from "../core/timeSpeed.js";
 import { getHouseFootprintBounds, pickHouseFootprint } from "../core/houseFootprints.js";
+import { getFuelProfiles } from "../core/tiles.js";
 import { findBestRoadReferenceForPlot, pickHouseRotationFromRoadMask } from "../core/roadAlignment.js";
 import { getBuildingLifecycleStageFromId, getBuildingLifecycleStageId } from "../systems/settlements/sim/buildingLifecycle.js";
 import { createConstructionFxRuntime } from "../systems/settlements/rendering/constructionFxRuntime.js";
@@ -51,12 +52,14 @@ import type {
   TreeLodController,
   TreeLodStats
 } from "../systems/terrain/rendering/vegetation/treeRenderTypes.js";
+import { createGrassVolumePass } from "../systems/terrain/rendering/vegetation/grassVolumePass.js";
+import { DEFAULT_GRASS_VOLUME_CONTROLS } from "../systems/terrain/rendering/vegetation/grassVolumeShader.js";
 import { createVehicleModelLayer, type VehicleModelInstance } from "./vehicleModelLayer.js";
 import type { InputState } from "../core/inputState.js";
 import { indexFor } from "../core/grid.js";
 import { TILE_ID_TO_TYPE, TILE_TYPE_IDS } from "../core/state.js";
 import type { ClimateForecast, CommandFireTask, CommandPlacementMode, CommandUnitAlert, CommandUnitStatus, Town } from "../core/types.js";
-import type { RenderSim } from "./simView.js";
+import { getRenderClimateDryness, type RenderSim } from "./simView.js";
 import { createHudState, setHudViewport, type HudTheme } from "./hud/hudState.js";
 import { handleHudClick, handleHudKey, renderHud } from "./hud/hud.js";
 import { buildEnvironmentPalette, computeFireLoad01 } from "./environmentPalette.js";
@@ -479,7 +482,6 @@ const THREE_TEST_CINEMATIC_GRADE_CONFIG: ThreeTestCinematicLookConfig = {
 };
 const GROUND_PHASE_SHIFT_MAX = 0.06;
 const TREE_PHASE_SHIFT_MAX = 0.08;
-const TREE_RATE_JITTER = 0.1;
 const AUTUMN_HUE_JITTER = 0.18;
 const SEASON_VISUAL_EPSILON = 0.0005;
 const LEGACY_INDEX_TO_SEASON_T = [0.25, 0.5, 0.75, 0] as const;
@@ -684,6 +686,8 @@ export const createThreeTest = (
   };
   let cinematicGradeEnabled = render.flags.cinematicGrade;
   let dofEnabled = render.flags.dof;
+  let volumetricGrassEnabled = runtimeSettings.volumetricgrass;
+  let volumetricGrassSettingsDirty = false;
   const webglContext = getRequiredWebGLContext(canvas, "3D mode");
   const renderer = new THREE.WebGLRenderer({
     canvas,
@@ -818,6 +822,15 @@ export const createThreeTest = (
     console.warn("[threeTest] Post pipeline setup failed; using direct scene rendering.", error);
     applyCinematicLook(false);
   }
+  const grassVolumePass = createGrassVolumePass(renderer);
+  const campaignGrassControls = {
+    ...DEFAULT_GRASS_VOLUME_CONTROLS,
+    enabled: true,
+    variant: "volume-clumps" as const,
+    autoAge: false,
+    debugView: "final" as const
+  };
+  const campaignGrassSunDirection = new THREE.Vector3(1, 1, 1);
   type CameraFlightState = {
     startedAt: number;
     durationMs: number;
@@ -2058,8 +2071,12 @@ export const createThreeTest = (
     });
   });
   applyRuntimeToggleState();
-  removeRuntimeSettingsChangeListener = subscribeRuntimeSettings(() => {
+  removeRuntimeSettingsChangeListener = subscribeRuntimeSettings((nextSettings) => {
     applyRuntimeToggleState();
+    if (volumetricGrassEnabled !== nextSettings.volumetricgrass) {
+      volumetricGrassEnabled = nextSettings.volumetricgrass;
+      volumetricGrassSettingsDirty = true;
+    }
   });
 
   const summaryContentByWidget = new Map<RuntimeWidgetId, HTMLElement>([
@@ -5988,6 +6005,8 @@ export const createThreeTest = (
   const handleContextRestored = (): void => {
     contextRestores += 1;
     console.warn("[threeTest] WebGL context restored.");
+    grassVolumePass.resize();
+    volumetricGrassSettingsDirty = volumetricGrassEnabled;
     restoreTreeImpostorResources();
   };
   canvas.addEventListener("webglcontextlost", handleContextLost as EventListener, false);
@@ -6068,6 +6087,42 @@ export const createThreeTest = (
   let firestationAsset: FirestationAsset | null = getFirestationAssetCache();
   let lastSample: TerrainSample | null = null;
   let lastTerrainSurface: TerrainRenderSurface | null = null;
+  const syncCampaignGrassFields = (
+    sample: TerrainSample | null,
+    surface: TerrainRenderSurface | null,
+    includeTerrainField: boolean
+  ): void => {
+    if (!sample || !surface) {
+      grassVolumePass.setGameplayProperties(null);
+      if (includeTerrainField) grassVolumePass.setTerrain(null);
+      return;
+    }
+    if (includeTerrainField) {
+      grassVolumePass.setTerrain({
+        sampleCols: surface.sampleCols,
+        sampleRows: surface.sampleRows,
+        sampleHeights: surface.sampleHeights,
+        sampleTypes: surface.sampleTypes,
+        grassTypeId: TILE_TYPE_IDS.grass,
+        heightScale: surface.heightScale,
+        width: surface.width,
+        depth: surface.depth
+      });
+    }
+    grassVolumePass.setGameplayProperties({
+      sourceCols: sample.cols,
+      sourceRows: sample.rows,
+      sampleCols: surface.sampleCols,
+      sampleRows: surface.sampleRows,
+      sampleStep: surface.step,
+      sampleTypes: surface.sampleTypes,
+      tileTypes: sample.tileTypes,
+      tileFuel: sample.tileFuel,
+      tileMoisture: sample.tileMoisture,
+      grassTypeId: TILE_TYPE_IDS.grass,
+      grassFuelReference: getFuelProfiles().grass.baseFuel
+    });
+  };
   let lastTerrainWater: TerrainWaterData | null = null;
   let assetRebuildPending = false;
   let lastTerrainSize: { width: number; depth: number } | null = null;
@@ -6584,7 +6639,6 @@ export const createThreeTest = (
     enabled: ENABLE_THREE_TEST_SEASONAL_RECOLOR,
     uniforms: terrainClimateUniforms,
     phaseShiftMax: TREE_PHASE_SHIFT_MAX,
-    rateJitter: TREE_RATE_JITTER,
     autumnHueJitter: AUTUMN_HUE_JITTER
   };
 
@@ -8022,6 +8076,7 @@ export const createThreeTest = (
     unitCommandPathMaterial.dispose();
     unitCommandMarkerGeometry.dispose();
     unitCommandMarkerMaterial.dispose();
+    grassVolumePass.dispose();
     postPipeline?.dispose();
     postPipeline = null;
     gpuTimer.dispose();
@@ -8078,6 +8133,7 @@ export const createThreeTest = (
     appliedViewportDpr = effectiveDpr;
     renderer.setPixelRatio(effectiveDpr);
     renderer.setSize(width, height, false);
+    grassVolumePass.resize();
     postPipeline?.resize(width, height, effectiveDpr);
     camera.aspect = nextAspect;
     camera.updateProjectionMatrix();
@@ -8279,21 +8335,46 @@ export const createThreeTest = (
     });
   };
 
+  const renderWorldSceneWithOptionalGrass = (): void => {
+    if (THREE_TEST_DISABLE_FX || !volumetricGrassEnabled) {
+      renderWorldScene();
+      return;
+    }
+    campaignGrassSunDirection.subVectors(keyLight.position, keyLight.target.position).normalize();
+    grassVolumePass.render(renderer, camera, {
+      timeSeconds: performance.now() * 0.001,
+      windX: world.wind?.dx ?? 0,
+      windZ: world.wind?.dy ?? 0,
+      windStrength: world.wind?.strength ?? 0,
+      sunDirection: campaignGrassSunDirection,
+      seasonT01: environmentCurrent.seasonT01,
+      climateDryness: getRenderClimateDryness(world),
+      controls: campaignGrassControls
+    }, renderWorldScene);
+  };
+
   const renderWorldPass = (): void => {
+    if (volumetricGrassSettingsDirty) {
+      if (volumetricGrassEnabled) {
+        syncCampaignGrassFields(lastSample, lastTerrainSurface, true);
+      }
+      volumetricGrassSettingsDirty = false;
+    }
     if ((cinematicGradeEnabled || dofEnabled || isSeasonalRainVisualActive()) && postPipeline) {
-      const renderedWithPost = postPipeline.render(renderWorldScene);
+      const renderedWithPost = postPipeline.render(renderWorldSceneWithOptionalGrass);
       if (!renderedWithPost) {
         disablePostProcessing();
       }
       return;
     }
-    renderWorldScene();
+    renderWorldSceneWithOptionalGrass();
   };
 
   let lastWorldRenderAt = -Infinity;
   const shouldRenderWorldFrame = (time: number): boolean => {
     if (
       !THREE_TEST_DISABLE_HUD ||
+      volumetricGrassSettingsDirty ||
       !world.paused ||
       world.lastActiveFires > 0 ||
       isSeasonalRainVisualActive() ||
@@ -9676,6 +9757,9 @@ export const createThreeTest = (
       threePerf.terrainSetIntent = intent.label;
       threePerf.terrainSetPath = "pending";
       if (nextSample.fastUpdate && isFireVisualOnlyTerrainUpdateIntent(intent)) {
+        if (volumetricGrassEnabled && lastTerrainSurface) {
+          syncCampaignGrassFields(nextSample, lastTerrainSurface, false);
+        }
         threePerf.terrainSetPath = "fire-visual-skip";
         return;
       }
@@ -9713,6 +9797,9 @@ export const createThreeTest = (
           threePerf.terrainSetStaticPrepareCount += 1;
           preparedStaticSurface = true;
         }
+      }
+      if (volumetricGrassEnabled) {
+        syncCampaignGrassFields(nextSample, nextSurface, true);
       }
       threePerf.terrainGeometrySignature = nextSurface?.geometrySignature ?? "none";
       threePerf.terrainGeometrySignatureChanged =

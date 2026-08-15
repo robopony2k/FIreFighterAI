@@ -230,6 +230,7 @@ const getAlertPriority = (alert: CommandUnitAlert): number => {
     case "crew_transition":
     case "deploy_required":
     case "out_of_range":
+    case "route_blocked":
     case "holding_fire":
       return 2;
     case "driver_missing":
@@ -263,6 +264,8 @@ const getAlertText = (alert: CommandUnitAlert): string => {
       return "Deploy";
     case "out_of_range":
       return "Out of Range";
+    case "route_blocked":
+      return "Closest Reachable";
     case "holding_fire":
       return "Hold Fire";
     case "low":

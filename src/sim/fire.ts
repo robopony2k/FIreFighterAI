@@ -12,7 +12,7 @@ import { resetFireBounds } from "./fire/bounds.js";
 import type { FireWeatherResponse } from "./fire/fireWeather.js";
 import { igniteRandomFire } from "./fire/ignite.js";
 import { emitSmokeAt } from "./particles.js";
-import { profElapsed, profEnd, profStart } from "./prof.js";
+import { profElapsed, profEnd, profStart } from "../core/diagnostics/simProfiler.js";
 import { markAttributedFireLossTile, queueScoreFlowEvent } from "./scoring.js";
 import { recordTownHouseLoss } from "./towns.js";
 

@@ -73,6 +73,10 @@ import {
   resolveTreeBudgetPriority
 } from "../dist/systems/terrain/rendering/vegetation/treePlacementPlan.js";
 import { buildForestCoverageFallbackRenderer } from "../dist/systems/terrain/rendering/vegetation/forestCoverageFallbackRenderer.js";
+import {
+  resolveTreeLeafPresence,
+  treeSeasonPhenologyShader
+} from "../dist/systems/terrain/rendering/vegetation/treeSeasonPhenology.js";
 import { createTreeBurnController } from "../dist/render/terrain/vegetation/treeBurnController.js";
 import { disposeTerrainVegetationRoot } from "../dist/systems/terrain/rendering/vegetation/treeRenderResourceDisposal.js";
 import {
@@ -131,7 +135,6 @@ const coverageFallbackChunk = buildForestCoverageFallbackRenderer({
       uWorldSeed: { value: 71 }
     },
     phaseShiftMax: 0.08,
-    rateJitter: 0.035,
     autumnHueJitter: 0.22
   }
 });
@@ -141,6 +144,7 @@ coverageFallbackChunk.root.traverse((child) => {
   if (!(child instanceof THREE.InstancedMesh)) return;
   assert.equal(child.castShadow, false, "coverage fallback geometry must not expand the shadow pass");
   assert.ok(child.geometry.getAttribute("aSeasonPhaseOffset"), "coverage fallback geometry must retain seasonal attributes");
+  assert.equal(child.geometry.getAttribute("aSeasonRateJitter"), undefined, "season rate jitter must not survive on fallback geometry");
 });
 disposeTerrainVegetationRoot(coverageFallbackChunk.root);
 
@@ -297,6 +301,24 @@ assert.equal(occupiedAtlasFrames.size, 64, "the supported tree asset set should 
 assert.equal(TREE_IMPOSTOR_ENTER_PX, 18);
 assert.equal(TREE_IMPOSTOR_EXIT_PX, 24);
 
+const oakAtYearEnd = resolveTreeLeafPresence(0.999, TreeType.Oak);
+const oakAtYearStart = resolveTreeLeafPresence(0, TreeType.Oak);
+assert.equal(oakAtYearEnd, oakAtYearStart, "deciduous foliage must remain dormant across the annual wrap");
+[TreeType.Oak, TreeType.Maple, TreeType.Birch, TreeType.Elm].forEach((treeType) => {
+  assert.equal(resolveTreeLeafPresence(0, treeType), 0.06, "deciduous trees must retain only the rendering floor in winter");
+  assert.equal(resolveTreeLeafPresence(0.24, treeType), 0.06, "winter dormancy must persist through the winter quarter");
+  const springFoliage = resolveTreeLeafPresence(0.325, treeType);
+  assert.ok(springFoliage > 0.06 && springFoliage < 1, "deciduous trees must leaf out gradually during spring");
+  assert.equal(resolveTreeLeafPresence(0.4, treeType), 1, "deciduous trees must reach full foliage after spring leaf-out");
+  assert.equal(resolveTreeLeafPresence(0.6, treeType), 1, "deciduous trees must retain full summer foliage");
+  assert.equal(resolveTreeLeafPresence(0.94, treeType), 0.06, "deciduous trees must complete autumn leaf loss");
+});
+[0, 0.3, 0.75, 0.999].forEach((seasonT) => {
+  assert.equal(resolveTreeLeafPresence(seasonT, TreeType.Pine), 1, "pine foliage must remain evergreen");
+});
+assert.equal(resolveTreeLeafPresence(0, TreeType.Scrub), 0.55, "scrub must retain 55% winter foliage");
+assert.match(treeSeasonPhenologyShader, /treeSeasonLeafCycle[\s\S]*treeSeasonLeafPresence/);
+
 const forestCohortCounts = { sapling: 0, mid: 0, mature: 0 };
 for (let index = 0; index < 1_000; index += 1) {
   const resolved = resolveForestTreeCohort((index + 0.5) / 1_000);
@@ -358,7 +380,6 @@ const seasonVisual = {
     uWorldSeed: { value: 1 }
   },
   phaseShiftMax: 0.08,
-  rateJitter: 0.035,
   autumnHueJitter: 0.22
 };
 const fallbackRoot = new THREE.Group();
@@ -422,6 +443,8 @@ assert.equal(lodBuild.controller.getStats().modelChunks, 1, "forced models shoul
 assert.equal(lodBuild.burnStates.length, 1, "impostors should register a mixed tree burn state");
 const impostorMaterial = lodBuild.burnStates[0].mesh.material;
 assert.ok(impostorMaterial instanceof THREE.ShaderMaterial);
+assert.match(impostorMaterial.fragmentShader, /treeSeasonLeafPresence/, "impostors must consume shared tree phenology GLSL");
+assert.doesNotMatch(impostorMaterial.vertexShader, /aSeasonRateJitter/, "impostors must use a continuous offset-only annual phase");
 assert.ok(
   impostorMaterial.uniforms.fogColor &&
     impostorMaterial.uniforms.fogNear &&
@@ -729,6 +752,14 @@ const threeTestTerrainSource = await readFile(
   fileURLToPath(new URL("../src/render/threeTestTerrain.ts", import.meta.url)),
   "utf8"
 );
+const treeBurnControllerSource = await readFile(
+  fileURLToPath(new URL("../src/render/terrain/vegetation/treeBurnController.ts", import.meta.url)),
+  "utf8"
+);
+const treeImpostorMaterialSource = await readFile(
+  fileURLToPath(new URL("../src/systems/terrain/rendering/vegetation/treeImpostorMaterial.ts", import.meta.url)),
+  "utf8"
+);
 const gpuTimerSource = await readFile(
   fileURLToPath(new URL("../src/core/rendering/webglGpuTimer.ts", import.meta.url)),
   "utf8"
@@ -744,6 +775,22 @@ const riverWaterHelperSource = await readFile(
 const gameSessionRuntimeSource = await readFile(
   fileURLToPath(new URL("../src/app/gameSessionRuntime.ts", import.meta.url)),
   "utf8"
+);
+
+assert.match(
+  treeBurnControllerSource,
+  /treeSeasonPhenologyShader[\s\S]*treeSeasonLeafPresence/,
+  "detailed trees must consume the shared phenology shader"
+);
+assert.match(
+  treeImpostorMaterialSource,
+  /treeSeasonPhenologyShader[\s\S]*treeSeasonLeafPresence/,
+  "tree impostors must consume the shared phenology shader"
+);
+assert.doesNotMatch(
+  `${treeBurnControllerSource}\n${treeImpostorMaterialSource}\n${threeTestTerrainSource}`,
+  /aSeasonRateJitter/,
+  "tree render paths must not restore multiplicative season-rate jitter"
 );
 
 assert.match(

@@ -24,7 +24,6 @@ export type TreeSeasonVisualConfig = {
     uWorldSeed: { value: number };
   };
   phaseShiftMax: number;
-  rateJitter: number;
   autumnHueJitter: number;
 };
 

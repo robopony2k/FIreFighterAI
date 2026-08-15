@@ -1,15 +1,20 @@
 import type { Point, Unit } from "../../../core/types.js";
 import type { WorldState } from "../../../core/state.js";
-import { findPath, getMoveSpeedMultiplier } from "../../../sim/pathing.js";
 import { advanceRouteMotion, type RouteMotionPoint, type RouteMotionTarget } from "../../../shared/movement/routeMotion.js";
 import { MOVING_SPRAY_SPEED_FACTOR } from "../constants/runtimeConstants.js";
 import { getRosterUnit, getUnitTile } from "../utils/unitLookup.js";
 import { updateTruckCrewOrders, detachFromCarrier, stepTruckCrewAction } from "./crewRuntime.js";
 import { getTruckCrewReadiness } from "./crewReadiness.js";
 import { applyCommandIntentControl } from "./commandRuntime.js";
-import { findNearestPassable } from "./unitPathing.js";
+import { findNearestPassable, getUnitRouteResolution, routeUnitToTile } from "./unitPathing.js";
 import { setUnitTarget } from "./unitDeployment.js";
 import { syncCommandUnits } from "./commandUnits.js";
+import { canTraverseUnitEdge, getUnitMoveSpeedMultiplier } from "./unitTraversalRules.js";
+import {
+  createRoadTruckOccupancy,
+  syncRoadTruckOccupancy,
+  tryReserveRoadTruckTile
+} from "./unitRoadOccupancy.js";
 
 const getUnitMotionTarget = (unit: Unit): RouteMotionTarget | null => {
   if (unit.pathIndex >= unit.path.length) {
@@ -33,9 +38,20 @@ const getUnitSegmentSpeedScale = (
   if (!next) {
     return 1;
   }
-  const tileX = Math.floor(position.x);
-  const tileY = Math.floor(position.y);
-  let scale = getMoveSpeedMultiplier(state, tileX, tileY, next.x, next.y);
+  const tileX = unit.kind === "truck"
+    ? next.x - Math.sign(next.x + 0.5 - position.x)
+    : Math.floor(position.x);
+  const tileY = unit.kind === "truck"
+    ? next.y - Math.sign(next.y + 0.5 - position.y)
+    : Math.floor(position.y);
+  let scale = getUnitMoveSpeedMultiplier(
+    state,
+    unit.kind === "truck" ? "vehicle" : "foot",
+    tileX,
+    tileY,
+    next.x,
+    next.y
+  );
   if (unit.kind === "firefighter" && unit.sprayTarget) {
     const distToSpray = Math.hypot(unit.sprayTarget.x - position.x, unit.sprayTarget.y - position.y);
     if (distToSpray <= unit.hoseRange + Math.max(0.35, unit.radius * 0.35)) {
@@ -56,17 +72,37 @@ export function stepUnits(state: WorldState, delta: number): void {
   state.units.forEach((unit) => {
     unitsById.set(unit.id, unit);
   });
+  const roadTruckOccupancy = createRoadTruckOccupancy(state);
 
   const advanceUnit = (unit: Unit) => {
     if (unit.pathIndex >= unit.path.length) {
       return;
     }
+    let blockedByRoadTruck = false;
     const result = advanceRouteMotion({
       x: unit.x,
       y: unit.y,
       movementBudget: unit.speed * Math.max(0, delta),
       getTarget: () => getUnitMotionTarget(unit),
       getSegmentSpeedScale: (target, position) => getUnitSegmentSpeedScale(state, unit, target, position),
+      canEnterTarget: unit.kind === "truck"
+        ? (target, position) => {
+            const next = unit.path[target.index];
+            if (!next) {
+              return false;
+            }
+            const fromX = next.x - Math.sign(next.x + 0.5 - position.x);
+            const fromY = next.y - Math.sign(next.y + 0.5 - position.y);
+            if (!canTraverseUnitEdge(state, "vehicle", fromX, fromY, next.x, next.y)) {
+              return false;
+            }
+            if (!tryReserveRoadTruckTile(state, roadTruckOccupancy, unit.id, next.x, next.y)) {
+              blockedByRoadTruck = true;
+              return false;
+            }
+            return true;
+          }
+        : undefined,
       onReachTarget: () => {
         unit.pathIndex += 1;
       },
@@ -74,6 +110,15 @@ export function stepUnits(state: WorldState, delta: number): void {
     });
     unit.x = result.x;
     unit.y = result.y;
+    if (unit.kind === "truck") {
+      syncRoadTruckOccupancy(state, roadTruckOccupancy, unit);
+    }
+    if (result.blocked && unit.kind === "truck" && !blockedByRoadTruck) {
+      const requestedTarget = getUnitRouteResolution(unit)?.requestedTarget ?? unit.target;
+      if (requestedTarget) {
+        routeUnitToTile(state, unit, requestedTarget.x, requestedTarget.y, { silent: true });
+      }
+    }
   };
 
   state.units.forEach((unit) => {
@@ -113,8 +158,7 @@ export function stepUnits(state: WorldState, delta: number): void {
           const distToTarget = Math.hypot(unit.target.x + 0.5 - carrier.x, unit.target.y + 0.5 - carrier.y);
           if (distToTarget <= 0.8) {
             detachFromCarrier(state, unit);
-            unit.path = findPath(state, getUnitTile(unit), unit.target);
-            unit.pathIndex = 0;
+            routeUnitToTile(state, unit, unit.target.x, unit.target.y, { silent: true });
           }
         }
       }
