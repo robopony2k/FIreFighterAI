@@ -117,6 +117,7 @@ import { normalizeFireSimLabScenarioId, type FireSimLabScenarioId } from "../sys
 import { describeWebGLError } from "../render/webglContext.js";
 import { createNotificationCenter } from "../ui/notifications/notificationCenter.js";
 import { notificationPreferenceStore } from "../ui/notifications/notificationPreferences.js";
+import { calculateNotificationSafeBottomPx } from "../ui/notifications/notificationToastLayout.js";
 import { mountNotificationToastHost } from "../ui/notifications/notificationToastView.js";
 
 // Single switch for removing the startup title layer.
@@ -562,12 +563,14 @@ export const createAppRuntime = (): AppRuntime => {
   gameEvents.on("notification:publish", handleNotificationPublish);
   const notificationToastHost = threeTestOverlay
     ? mountNotificationToastHost(threeTestOverlay, notificationCenter, {
-        resolveSafeBottomPx: () => {
-          const tray = threeTestOverlay.querySelector(".three-test-unit-tray");
+        resolveSafeBottomPx: (notificationRect) => {
+          const tray = threeTestOverlay.querySelector(".three-test-unit-tray > .unit-command-tray");
           if (!(tray instanceof HTMLElement) || tray.offsetParent === null) return 18;
-          const overlayRect = threeTestOverlay.getBoundingClientRect();
-          const trayRect = tray.getBoundingClientRect();
-          return Math.max(18, overlayRect.bottom - trayRect.top + 12);
+          return calculateNotificationSafeBottomPx({
+            containerRect: threeTestOverlay.getBoundingClientRect(),
+            notificationRect,
+            obstructionRects: [tray.getBoundingClientRect()]
+          });
         }
       })
     : null;

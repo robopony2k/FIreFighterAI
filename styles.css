@@ -426,6 +426,7 @@ canvas {
 
 .three-test-overlay {
   --three-test-top-clearance: 12px;
+  --three-test-widget-layer: 20;
   --three-test-overlay-bg:
     radial-gradient(circle at 16% 18%, rgba(255, 129, 52, 0.16) 0%, transparent 58%),
     radial-gradient(circle at 84% 82%, rgba(90, 116, 146, 0.12) 0%, transparent 62%),
@@ -578,7 +579,7 @@ canvas {
   position: absolute;
   inset: 0;
   pointer-events: none;
-  z-index: 11;
+  z-index: var(--three-test-widget-layer);
 }
 
 .end-run-screen {
@@ -1322,6 +1323,7 @@ canvas {
   text-align: left;
   white-space: normal;
   will-change: transform;
+  transition: background 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease;
   transform-origin: center bottom;
   isolation: isolate;
   clip-path: polygon(0 0, calc(100% - 12px) 0, 100% 12px, 100% 100%, 0 100%);
@@ -2701,7 +2703,7 @@ canvas {
   position: absolute;
   inset: 0;
   pointer-events: none;
-  z-index: 12;
+  z-index: var(--three-test-widget-layer);
 }
 
 .three-test-right-dock {
@@ -3324,7 +3326,7 @@ canvas {
   display: grid;
   gap: 8px;
   pointer-events: none;
-  z-index: 13;
+  z-index: var(--three-test-widget-layer);
 }
 
 .three-test-command-bar {

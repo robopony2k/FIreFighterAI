@@ -725,6 +725,25 @@ export const createFxLabController = (
       controls.update();
       return;
     }
+    if (currentScenarioId === "emergency-lights") {
+      const focusTileX = 31.5;
+      const focusTileY = 42.5;
+      const focusWorldX = (focusTileX / FX_LAB_GRID_SIZE - 0.5) * terrainSize.width;
+      const focusWorldZ = (focusTileY / FX_LAB_GRID_SIZE - 0.5) * terrainSize.depth;
+      const focusHeight = terrainSurface?.heightAtRenderedWorldPosition(focusWorldX, focusWorldZ) ?? 0;
+      const distance = Math.max(5.5, Math.max(terrainSize.width, terrainSize.depth) * 0.09);
+      camera.position.set(
+        focusWorldX - distance * 0.62,
+        focusHeight + Math.max(2.4, distance * 0.38),
+        focusWorldZ + distance * 0.7
+      );
+      controls.target.set(focusWorldX, focusHeight + 0.24, focusWorldZ);
+      controls.minDistance = Math.max(2.2, distance * 0.32);
+      controls.maxDistance = Math.max(18, distance * 2.8);
+      camera.updateProjectionMatrix();
+      controls.update();
+      return;
+    }
     if (currentScenarioId === "river-waterfall") {
       const focusTileX = 45.0;
       const focusTileY = 36.1;
@@ -1406,6 +1425,7 @@ export const createFxLabController = (
       fireAnimationRate
     );
     constructionFx.update(now, frameDeltaMs * 0.001, sceneState.sample, terrainSurface, fireAnimationRate);
+    unitsLayer.setEmergencyLightsOverride(currentScenarioId === "emergency-lights");
     unitsLayer.update(sceneState.world, terrainSurface, 1);
     unitFxLayer.update(sceneState.world, sceneState.effects, terrainSurface, 1, now);
     updateSprayTargetMarker(now);

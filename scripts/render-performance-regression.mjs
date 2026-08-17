@@ -908,6 +908,29 @@ assert.match(
   /\.mapgen-overlay\s*\{[\s\S]*?z-index:\s*45;/,
   "map preparation must remain above the mounted 3D world overlay"
 );
+assert.match(
+  stylesSource,
+  /\.three-test-overlay\s*\{[\s\S]*?--three-test-widget-layer:\s*20;/,
+  "the 3D runtime must define one foreground layer for persistent screen widgets"
+);
+for (const selector of ["three-test-hud-mount", "three-test-dock-overlay", "three-test-unit-tray"]) {
+  assert.match(
+    stylesSource,
+    new RegExp(`\\.${selector}\\s*\\{[\\s\\S]*?z-index:\\s*var\\(--three-test-widget-layer\\);`),
+    `${selector} must remain above world-anchored hover cards on the shared widget layer`
+  );
+}
+const squadMarkerStyle = stylesSource.match(/\.three-test-squad-marker\s*\{[\s\S]*?\n\}/)?.[0] ?? "";
+assert.match(
+  squadMarkerStyle,
+  /transition:\s*background[^;]*border-color[^;]*box-shadow[^;]*;/,
+  "squad marker hover styling must retain non-positional transitions"
+);
+assert.doesNotMatch(
+  squadMarkerStyle,
+  /transition:[^;]*transform/,
+  "squad marker billboards must not interpolate behind their leader lines during camera motion"
+);
 const resizeScheduleSource = threeTestSource.match(/const scheduleResize = \(\): void => \{[\s\S]*?\n  const applyResize/)?.[0] ?? "";
 const resizeSource = threeTestSource.match(/const applyResize = \(resizeState: PendingViewportResize\): void => \{[\s\S]*?\n  const applyPendingViewportResize/)?.[0] ?? "";
 assert.match(

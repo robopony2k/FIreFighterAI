@@ -79,6 +79,10 @@ import {
   cloneDefaultTerrainWaterDebugControls,
   cloneDefaultWaterFxDebugControls
 } from "../dist/render/fxLab/controls.js";
+import {
+  resolveFireTruckEmergencyLightFlashState,
+  shouldActivateFireTruckEmergencyLights
+} from "../dist/systems/units/rendering/fireTruckEmergencyLights.js";
 
 const grid = { cols: FX_LAB_SHOWCASE_SIZE, rows: FX_LAB_SHOWCASE_SIZE, totalTiles: FX_LAB_SHOWCASE_SIZE ** 2 };
 const createWorld = () => createInitialState(18032026, grid);
@@ -342,6 +346,29 @@ assert.equal(
   5,
   "the ocean diagnostic selector must normalize to a valid integral shader mode"
 );
+const blueEmergencyFlash = resolveFireTruckEmergencyLightFlashState(0.064);
+const redEmergencyFlash = resolveFireTruckEmergencyLightFlashState(0.464);
+const emergencyFlashGap = resolveFireTruckEmergencyLightFlashState(0.32);
+assert.equal(blueEmergencyFlash.blueIntensity, 1, "the first emergency-light bank must reach full intensity");
+assert.equal(blueEmergencyFlash.redIntensity, 0, "the red bank must remain dark during the blue flash");
+assert.equal(redEmergencyFlash.redIntensity, 1, "the alternating emergency-light bank must reach full intensity");
+assert.equal(redEmergencyFlash.blueIntensity, 0, "the blue bank must remain dark during the red flash");
+assert.deepEqual(emergencyFlashGap, { blueIntensity: 0, redIntensity: 0 }, "the pattern must retain a readable dark gap");
+assert.equal(
+  shouldActivateFireTruckEmergencyLights({ simTimeMode: "incident", fireActivityState: "burning" }),
+  true,
+  "confirmed active incidents must activate campaign firetruck lights"
+);
+assert.equal(
+  shouldActivateFireTruckEmergencyLights({ simTimeMode: "strategic", fireActivityState: "burning" }),
+  false,
+  "undetected strategic fires must not activate response lights"
+);
+assert.equal(
+  shouldActivateFireTruckEmergencyLights({ simTimeMode: "incident", fireActivityState: "idle" }),
+  false,
+  "resolved incidents must deactivate response lights"
+);
 const fxLabControllerSource = await readFile(
   fileURLToPath(new URL("../src/render/fxLab/controller.ts", import.meta.url)),
   "utf8"
@@ -352,6 +379,18 @@ const fxLabPanelSource = await readFile(
 );
 const fxLabControlsSource = await readFile(
   fileURLToPath(new URL("../src/render/fxLab/controls.ts", import.meta.url)),
+  "utf8"
+);
+const fxLabScenariosSource = await readFile(
+  fileURLToPath(new URL("../src/render/fxLab/scenarios.ts", import.meta.url)),
+  "utf8"
+);
+const threeTestUnitsSource = await readFile(
+  fileURLToPath(new URL("../src/render/threeTestUnits.ts", import.meta.url)),
+  "utf8"
+);
+const fireTruckEmergencyLightsSource = await readFile(
+  fileURLToPath(new URL("../src/systems/units/rendering/fireTruckEmergencyLights.ts", import.meta.url)),
   "utf8"
 );
 const mdXyzxReferenceSource = await readFile(
@@ -412,6 +451,12 @@ assert.match(fxLabControllerSource, /buildTreeImpostorAtlas\(renderer, treeAsset
 assert.match(fxLabPanelSource, /Force Models/, "FX Lab must expose the full-model comparison mode");
 assert.match(fxLabPanelSource, /Force Impostors/, "FX Lab must expose the impostor comparison mode");
 assert.match(fxLabPanelSource, /Grass Fidelity/, "FX Lab must expose dedicated grass controls");
+assert.match(fxLabScenariosSource, /id: "emergency-lights"[\s\S]*label: "Emergency Lights"/, "FX Lab must expose the emergency-light prototype scenario");
+assert.match(fxLabControllerSource, /setEmergencyLightsOverride\(currentScenarioId === "emergency-lights"\)/, "FX Lab must retain its explicit emergency-light preview override");
+assert.match(threeTestUnitsSource, /createFireTruckEmergencyLightLayer\(scene, MAX_TRUCK_INSTANCES\)/, "truck rendering must compose the isolated emergency-light layer");
+assert.match(threeTestUnitsSource, /emergencyLightsOverride \?\? shouldActivateFireTruckEmergencyLights\(world\)/, "campaign truck rendering must derive lights from authoritative incident state");
+assert.match(fireTruckEmergencyLightsSource, /LIGHT_BAR_FORWARD_OFFSET = 0\.22/, "the prototype light bar must sit over the forward cab roof");
+assert.match(fireTruckEmergencyLightsSource, /LIGHT_BAR_GLOW_MIN_RADIUS = 0\.012[\s\S]*LIGHT_BAR_GLOW_RADIUS_RANGE = 0\.024/, "the model-aligned glow must remain bounded to the roof-light scale");
 assert.match(fxLabControlsSource, /PCG SDF Blades/, "FX Lab must expose the alternate PCG grass renderer");
 assert.match(fxLabControlsSource, /Wind Response[\s\S]*Wind Speed/, "FX Lab must expose independent grass wind diagnostics");
 assert.match(fxLabControlsSource, /Sample Spacing/, "FX Lab must expose the terrain-anchored integration diagnostic");

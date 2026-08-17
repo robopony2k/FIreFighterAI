@@ -1465,3 +1465,30 @@ Migration guidance:
 1. Tune leaf-out, leaf-drop, winter floor, and species strength in `treeSeasonPhenology.ts` rather than adding representation-specific shader curves.
 2. Preserve `fract(season + phaseOffset)` periodicity and do not restore multiplicative annual-rate jitter.
 3. Keep phenology rendering-only; do not add foliage phase to simulation, fire behavior, saves, or seasonal colour palettes.
+
+## FX-Lab-Only Fire-Engine Emergency Lights
+
+Status: Deprecated as of August 17, 2026.
+
+- The approved alternating red/blue fire-engine light treatment is no longer restricted to the FX Lab.
+- Campaign truck rendering now activates the same effect only while incident time and burning fire activity identify a confirmed active emergency.
+- FX Lab retains an explicit preview override so the effect can be inspected without creating a campaign incident.
+
+Migration guidance:
+
+1. Derive campaign activation from authoritative incident and fire-activity state; do not add emergency-light state to simulation or saves.
+2. Keep hidden strategic fires, resolved incidents, and ordinary deployments dark.
+3. Preserve the FX Lab override as a rendering-only calibration path.
+
+## Tray-Height-Only Notification Offset
+
+Status: Deprecated as of August 18, 2026.
+
+- Bottom-center notifications no longer inherit the full height of the bottom-left squad tray when those screen regions are horizontally separate.
+- Toasts retain their normal bottom-edge position on wide layouts and rise above the command tray only when their screen-space bounds overlap.
+- Notification timing, stacking, focus, dismissal, and incident behavior are unchanged.
+
+Migration guidance:
+
+1. Add future persistent HUD obstructions through notification layout bounds rather than unconditional edge offsets.
+2. Keep collision resolution in the notification UI boundary; do not couple it to simulation or event payloads.

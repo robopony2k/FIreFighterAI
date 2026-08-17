@@ -10,6 +10,7 @@ export type FxLabScenarioId =
   | "ocean-shoreline"
   | "river-waterfall"
   | "rain-overlay"
+  | "emergency-lights"
   | "grass-fidelity"
   | "house-lifecycle"
   | "water-precision"
@@ -32,6 +33,7 @@ export const FX_LAB_SCENARIO_IDS: readonly FxLabScenarioId[] = [
   "ocean-shoreline",
   "river-waterfall",
   "rain-overlay",
+  "emergency-lights",
   "grass-fidelity",
   "house-lifecycle",
   "water-precision",

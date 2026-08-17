@@ -14,6 +14,11 @@ import {
 } from "./firefighterVisuals.js";
 import type { TerrainRenderSurface } from "./threeTestTerrain.js";
 import { resolveWaterStreamTrajectory } from "../systems/fire/rendering/waterStreamTrajectory.js";
+import {
+  createFireTruckEmergencyLightLayer,
+  shouldActivateFireTruckEmergencyLights,
+  type FireTruckEmergencyLightPose
+} from "../systems/units/rendering/fireTruckEmergencyLights.js";
 import { approachAngleExp, resolveDesiredUnitYaw } from "./unitAimVisuals.js";
 import { registerPbrSpecularGlossiness } from "./gltfSpecGloss.js";
 import { createVehicleModelLayer, type VehicleModelInstance } from "./vehicleModelLayer.js";
@@ -71,6 +76,7 @@ export type ThreeTestUnitsLayer = {
     surface: TerrainRenderSurface | null,
     interpolationAlpha: number
   ) => void;
+  setEmergencyLightsOverride: (enabled: boolean | null) => void;
   getVehicleBufferUploadCount: () => number;
   dispose: () => void;
 };
@@ -103,6 +109,7 @@ export const createThreeTestUnitsLayer = (scene: THREE.Scene): ThreeTestUnitsLay
     vertexColors: true
     })
   });
+  const truckEmergencyLightLayer = createFireTruckEmergencyLightLayer(scene, MAX_TRUCK_INSTANCES);
   const truckSelectionRingGeometry = new THREE.RingGeometry(
     TRUCK_SELECTION_RING_INNER_RADIUS,
     TRUCK_SELECTION_RING_OUTER_RADIUS,
@@ -133,6 +140,7 @@ export const createThreeTestUnitsLayer = (scene: THREE.Scene): ThreeTestUnitsLay
   let useFirefighterModel = false;
   let firefighterModelScale = 1;
   let firefighterModelLift = FIREFIGHTER_MODEL_ROOT_Y_OFFSET;
+  let emergencyLightsOverride: boolean | null = null;
   let disposed = false;
 
   const disposeMaterial = (material: THREE.Material | THREE.Material[]): void => {
@@ -426,6 +434,7 @@ export const createThreeTestUnitsLayer = (scene: THREE.Scene): ThreeTestUnitsLay
   ): void => {
     if (!surface || world.units.length === 0) {
       truckVehicleLayer.update(null, []);
+      truckEmergencyLightLayer.update([], 0);
       truckSelectionMesh.count = 0;
       firefighterMesh.count = 0;
       firefighterNozzleMesh.count = 0;
@@ -443,6 +452,7 @@ export const createThreeTestUnitsLayer = (scene: THREE.Scene): ThreeTestUnitsLay
     const sampleHeightAt = (tileX: number, tileY: number): number => surface.heightAtTileCoord(tileX, tileY);
     const timeMs = performance.now();
     const timeSec = timeMs * 0.001;
+    const emergencyLightsEnabled = emergencyLightsOverride ?? shouldActivateFireTruckEmergencyLights(world);
     const deltaSeconds =
       lastUpdateTimeMs === null ? 1 / 60 : clamp((timeMs - lastUpdateTimeMs) * 0.001, 1 / 240, 0.12);
     lastUpdateTimeMs = timeMs;
@@ -451,6 +461,7 @@ export const createThreeTestUnitsLayer = (scene: THREE.Scene): ThreeTestUnitsLay
     let firefighterCount = 0;
     let firefighterNozzleCount = 0;
     const truckInstances: VehicleModelInstance[] = [];
+    const emergencyLightPoses: FireTruckEmergencyLightPose[] = [];
     const activeUnitIds = new Set<number>();
 
     for (let i = 0; i < world.units.length; i += 1) {
@@ -488,6 +499,17 @@ export const createThreeTestUnitsLayer = (scene: THREE.Scene): ThreeTestUnitsLay
           sampleHeightAt,
           surfaceNormal
         );
+        if (emergencyLightsEnabled) {
+          emergencyLightPoses.push({
+            x: wx,
+            y: wy,
+            z: wz,
+            yaw,
+            normalX: surfaceNormal.x,
+            normalY: surfaceNormal.y,
+            normalZ: surfaceNormal.z
+          });
+        }
         if (unit.selected && selectedTruckCount < MAX_TRUCK_INSTANCES) {
           truckSelectionPos.set(wx, wy + TRUCK_SELECTION_RING_Y_OFFSET, wz);
           truckSelectionQuat.setFromUnitVectors(worldUp, surfaceNormal);
@@ -594,6 +616,7 @@ export const createThreeTestUnitsLayer = (scene: THREE.Scene): ThreeTestUnitsLay
     });
 
     truckVehicleLayer.update(surface, truckInstances);
+    truckEmergencyLightLayer.update(emergencyLightPoses, timeSec);
     truckSelectionMesh.count = selectedTruckCount;
     truckSelectionMesh.instanceMatrix.needsUpdate = true;
     if (useFirefighterModel && firefighterModelMeshes.length > 0) {
@@ -619,6 +642,7 @@ export const createThreeTestUnitsLayer = (scene: THREE.Scene): ThreeTestUnitsLay
   const dispose = (): void => {
     disposed = true;
     truckVehicleLayer.dispose();
+    truckEmergencyLightLayer.dispose();
     clearFirefighterModelMeshes();
     scene.remove(truckSelectionMesh);
     scene.remove(firefighterMesh);
@@ -633,6 +657,9 @@ export const createThreeTestUnitsLayer = (scene: THREE.Scene): ThreeTestUnitsLay
 
   return {
     update,
+    setEmergencyLightsOverride: (enabled: boolean | null) => {
+      emergencyLightsOverride = enabled;
+    },
     getVehicleBufferUploadCount: () => truckVehicleLayer.getBufferUploadCount(),
     dispose
   };

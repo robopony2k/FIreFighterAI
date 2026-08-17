@@ -72,6 +72,11 @@ export const FX_LAB_SCENARIOS: ReadonlyArray<FxLabScenarioDefinition> = [
     description: "A quiet terrain view with the autumn rain screen-space overlay enabled for streak, dimming, and wet-lens tuning."
   },
   {
+    id: "emergency-lights",
+    label: "Emergency Lights",
+    description: "A close response-truck view for tuning the alternating red and blue roof-light pattern before campaign integration."
+  },
+  {
     id: "grass-fidelity",
     label: "Grass Fidelity",
     description: "A close game-camera view of real grass boundaries, terrain relief, units, curing colour, and coherent wind-driven volume detail."
@@ -352,6 +357,14 @@ export const applyFxLabScenarioFrame = (scenarioId: FxLabScenarioId, ctx: FxLabS
     ctx.setWind(0.48, -0.88, 0.42, "Rain");
     ctx.placeTruck(26.5, 45.5, "medium");
     ctx.placeFirefighter(28.2, 44.4);
+    return;
+  }
+  if (scenarioId === "emergency-lights") {
+    ctx.setWind(0.42, -0.9, 0.24, "NNE");
+    ctx.placeTruck(31.5, 42.5, "medium");
+    ctx.placeFirefighter(33.2, 41.4);
+    ctx.addFireDisk(43.5, 34.5, 4.6, 0.58 * pulse(timeSeconds, 0.22, 0.9, 1.1), 3.8);
+    ctx.addScheduledRing(43.5, 34.5, 5.2, 7.4);
     return;
   }
   if (scenarioId === "grass-fidelity") {

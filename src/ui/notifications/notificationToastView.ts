@@ -6,7 +6,7 @@ export type NotificationToastHost = {
 };
 
 export type NotificationToastHostOptions = {
-  resolveSafeBottomPx?: () => number;
+  resolveSafeBottomPx?: (notificationRect: DOMRectReadOnly) => number;
 };
 
 export const mountNotificationToastHost = (
@@ -85,7 +85,7 @@ export const mountNotificationToastHost = (
   const frame = (time: number): void => {
     center.step(time - previousTime);
     previousTime = time;
-    const safeBottom = Math.max(18, options.resolveSafeBottomPx?.() ?? 18);
+    const safeBottom = Math.max(18, options.resolveSafeBottomPx?.(element.getBoundingClientRect()) ?? 18);
     element.style.setProperty("--notification-safe-bottom", `${Math.round(safeBottom)}px`);
     raf = requestAnimationFrame(frame);
   };

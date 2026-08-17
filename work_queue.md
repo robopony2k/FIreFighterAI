@@ -1,3 +1,103 @@
+TSK-0223: Keep fire notifications out of the tactical map center
+
+Type: bug
+
+Why: Bottom-center fire toasts inherited the full height of the bottom-left squad tray even when their horizontal bounds did not overlap, lifting a three-toast stack into the map's primary tactical area on wide screens.
+
+Done when:
+- [x] Bottom-center notifications retain their normal edge offset when the squad tray is horizontally separate.
+- [x] Notifications still rise above the tray when their screen-space bounds actually overlap on narrower layouts.
+- [x] Notification lifecycle, stacking, focus, dismissal, and fire incident behavior remain unchanged under focused regression coverage.
+- [x] TypeScript/build, notification regression, and queue validation pass.
+
+Touchpoints: `src/ui/notifications/notificationToastLayout.ts`, `src/ui/notifications/notificationToastView.ts`, `src/app/gameSessionRuntime.ts`, `scripts/notification-regression.mjs`, design/deprecation/queue records
+
+Constraints: preserve the bottom-center notification design, three-toast limit, six-second visible timing, dedicated notification layer, squad tray positioning, and simulation/UI dependency direction.
+
+Notes: Implemented from supplied runtime captures. The first pass correctly added screen-space collision handling but measured the tray's full-width positioning wrapper, so the toast remained raised; the refreshed capture exposed that mismatch. The final pass measures the visible `.unit-command-tray` child instead. Post-change appearance remains pending another refreshed capture or supported live Browser surface.
+
+Status: done
+
+TSK-0222: Keep squad billboards locked to their leader lines
+
+Type: bug
+
+Why: Squad markers inherited the global button transform transition, so camera panning moved the leader line immediately while the billboard eased toward its new screen position.
+
+Done when:
+- [x] Squad billboard transforms update in the same frame as their leader lines during camera movement.
+- [x] Non-positional hover feedback retains its colour, border, and shadow transitions.
+- [x] Renderer regression coverage prevents transform interpolation from returning, and TypeScript/build plus queue validation pass.
+
+Touchpoints: `styles.css`, `scripts/render-performance-regression.mjs`, `docs/GAME_DESIGN_REFERENCE.md`, `work_queue.md`
+
+Constraints: preserve squad world-anchor smoothing for actual unit movement, marker selection behavior, pointer interaction, and world-card depth ordering.
+
+Notes: The source confirmed that the marker button inherited the global `transform 0.15s ease` transition while its sibling connector did not. Motion appearance remains pending live confirmation in a supported Browser surface or a refreshed user test.
+
+Status: done
+
+TSK-0221: Promote fire-engine emergency lights to campaign incidents
+
+Type: feature
+
+Why: The FX Lab treatment has been approved for the main game and needs an authoritative campaign activation rule without adding visual state to simulation or saves.
+
+Done when:
+- [x] Every fielded fire engine uses the approved alternating roof lights during confirmed active incidents.
+- [x] Incident time plus burning fire activity is the shared rendering gate, including paused, moving, staged, suppressing, deploying, and retreating response states.
+- [x] Hidden strategic fires, resolved incidents, and non-incident deployments remain dark under focused regression coverage.
+- [x] FX Lab retains its isolated preview scenario and explicit rendering override.
+- [x] TypeScript, build, FX Lab, renderer, queue, and diff validation pass.
+
+Touchpoints: `src/systems/units/rendering/fireTruckEmergencyLights.ts`, `src/render/threeTestUnits.ts`, `src/render/fxLab/controller.ts`, focused regressions, design/deprecation/queue records
+
+Constraints: rendering-only; preserve incident detection, fire simulation, truck commands and status, pause behavior, audio eligibility, saves, and the approved FX Lab treatment.
+
+Notes: Promotion reuses the approved model-aligned instanced light layer. Campaign activation reads existing world incident/fire-activity fields and does not persist a separate emergency flag.
+
+Status: done
+
+TSK-0220: Prototype fire-engine emergency lights in FX Lab
+
+Type: feature
+
+Why: Fire engines need an unmistakable visual response state, but the light-bar appearance and timing should be evaluated in isolation before campaign emergency-state rules activate it.
+
+Done when:
+- [x] FX Lab exposes a dedicated Emergency Lights scenario with a close response-truck camera and nearby incident context.
+- [x] The prototype renders alternating red and blue roof lights with deterministic double-flash timing and a readable dark interval.
+- [x] Emergency lights remain disabled outside the dedicated FX Lab scenario; campaign state, simulation, saves, and unit rules are unchanged.
+- [x] TypeScript, build, focused FX Lab regression, queue validation, and diff validation pass.
+- [x] A supplied capture or supported Browser session approves light-bar placement, strategic-scale visibility, brightness, and cadence before campaign integration.
+
+Touchpoints: `src/systems/units/rendering/fireTruckEmergencyLights.ts`, `src/render/threeTestUnits.ts`, `src/render/fxLab/`, `scripts/fx-lab-showcase-regression.mjs`, design/queue records
+
+Constraints: rendering-only and FX-Lab-gated; preserve unit simulation, movement, selection, audio eligibility, saves, and campaign rendering until the prototype is visually approved and emergency-state activation is separately defined.
+
+Notes: The prototype composes a small instanced roof bar, emissive lenses, and bounded additive glows over the existing truck model. Automated coverage verifies the alternating blue/red peaks, dark gap, scenario exposure, and FX-Lab-only gate. The August 17 supplied front/top captures approved the flashing treatment but showed that the initial bar was centred over the appliance body and its lenses/glow were oversized; the follow-up shifts the bar 0.22 world units forward onto the cab, reduces lens height/depth, and bounds peak glow radius to 0.036. The user subsequently approved promotion to the main game.
+
+Status: done
+
+TSK-0219: Keep runtime widgets above world hover cards
+
+Type: bug
+
+Why: World-space squad hover cards were stacked above the top-left operational summary, allowing unit details to cover the Score and Budget widget.
+
+Done when:
+- [x] The top-left operational summary, right-side dock, and bottom command tray share a foreground widget layer above world-anchored cards and connectors.
+- [x] Loading, modal, notification, and developer-diagnostic layers retain their intended higher priority.
+- [x] The renderer regression guards the shared widget-layer contract, and TypeScript/build plus queue validation pass.
+
+Touchpoints: `styles.css`, `scripts/render-performance-regression.mjs`, `docs/GAME_DESIGN_REFERENCE.md`, `work_queue.md`
+
+Constraints: preserve pointer-event behavior, world-card depth ordering, modal/loading visibility, and existing UI ownership boundaries.
+
+Notes: Implemented from the supplied runtime screenshot; live localhost appearance remains unverified in this VS Code surface.
+
+Status: done
+
 TSK-0218: Prevent response trucks sharing road tiles
 
 Type: bug

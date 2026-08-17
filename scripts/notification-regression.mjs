@@ -1,7 +1,16 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 
 import { createNotificationCenter } from "../dist/ui/notifications/notificationCenter.js";
 import { createNotificationPreferenceStore } from "../dist/ui/notifications/notificationPreferences.js";
+import { calculateNotificationSafeBottomPx } from "../dist/ui/notifications/notificationToastLayout.js";
+
+const gameSessionRuntimeSource = readFileSync(new URL("../src/app/gameSessionRuntime.ts", import.meta.url), "utf8");
+assert.match(
+  gameSessionRuntimeSource,
+  /querySelector\("\.three-test-unit-tray > \.unit-command-tray"\)/,
+  "notification placement should measure the visible command tray, not its full-width positioning wrapper"
+);
 
 const createMemoryStorage = () => {
   const values = new Map();
@@ -20,6 +29,30 @@ const makePayload = (dedupeKey, severity = "warning") => ({
   dedupeKey,
   focusTarget: { kind: "tile", x: 4, y: 7 }
 });
+
+{
+  const containerRect = { left: 0, right: 1_600, top: 0, bottom: 900 };
+  const notificationRect = { left: 580, right: 1_020, top: 780, bottom: 882 };
+  assert.equal(
+    calculateNotificationSafeBottomPx({
+      containerRect,
+      notificationRect,
+      obstructionRects: [{ left: 12, right: 332, top: 570, bottom: 888 }]
+    }),
+    18,
+    "a bottom-left tray must not lift a non-overlapping bottom-center notification"
+  );
+  assert.equal(
+    calculateNotificationSafeBottomPx({
+      containerRect,
+      notificationRect,
+      obstructionRects: [{ left: 520, right: 840, top: 570, bottom: 888 }]
+    }),
+    342,
+    "an intersecting tray should lift the notification stack above itself"
+  );
+  console.log("notification obstruction-aware placement: ok");
+}
 
 {
   const storage = createMemoryStorage();
