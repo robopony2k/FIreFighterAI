@@ -37,7 +37,7 @@ export type BottomControlsView = {
   onMusicMuteToggle: (handler: () => void) => void;
   onMusicVolumeChange: (handler: (value: number) => void) => void;
   setMusicState: (settings: AudioChannelState) => void;
-  onRandomFireIgnitionToggle: (handler: (enabled: boolean) => void) => void;
+  onFireIgnitionEventsToggle: (handler: (enabled: boolean) => void) => void;
   onAnnualReportToggle: (handler: (enabled: boolean) => void) => void;
   onPauseFireEventToggle: (handler: (enabled: boolean) => void) => void;
   onPauseAnnualReportEventToggle: (handler: (enabled: boolean) => void) => void;
@@ -271,13 +271,13 @@ export const createBottomLeftControls = (): BottomControlsView => {
   let onMusicMuteToggleHandler: (() => void) | null = null;
   let onMusicVolumeChangeHandler: ((value: number) => void) | null = null;
   let simulationToggleState: SimulationSettingsWidgetModel = {
-    randomFireIgnition: true,
+    fireIgnitionEvents: true,
     annualReportEnabled: true,
     pauseOnFireEvent: true,
     pauseOnAnnualReportEvent: true,
     pauseOnRainEvent: true
   };
-  let onRandomFireIgnitionToggleHandler: ((enabled: boolean) => void) | null = null;
+  let onFireIgnitionEventsToggleHandler: ((enabled: boolean) => void) | null = null;
   let onAnnualReportToggleHandler: ((enabled: boolean) => void) | null = null;
   let onPauseFireEventToggleHandler: ((enabled: boolean) => void) | null = null;
   let onPauseAnnualReportEventToggleHandler: ((enabled: boolean) => void) | null = null;
@@ -343,8 +343,8 @@ export const createBottomLeftControls = (): BottomControlsView => {
       const enabled = simulationToggleState[toggle.setting];
       controls.input.checked = enabled;
       const handlerMissing =
-        toggle.setting === "randomFireIgnition"
-          ? onRandomFireIgnitionToggleHandler === null
+        toggle.setting === "fireIgnitionEvents"
+          ? onFireIgnitionEventsToggleHandler === null
           : toggle.setting === "annualReportEnabled"
             ? onAnnualReportToggleHandler === null
             : toggle.setting === "pauseOnFireEvent"
@@ -396,8 +396,8 @@ export const createBottomLeftControls = (): BottomControlsView => {
     onMusicVolumeChangeHandler?.(next);
   });
 
-  toggleRows.get("randomFireIgnition")?.input.addEventListener("change", () => {
-    onRandomFireIgnitionToggleHandler?.(Boolean(toggleRows.get("randomFireIgnition")?.input.checked));
+  toggleRows.get("fireIgnitionEvents")?.input.addEventListener("change", () => {
+    onFireIgnitionEventsToggleHandler?.(Boolean(toggleRows.get("fireIgnitionEvents")?.input.checked));
   });
   toggleRows.get("annualReportEnabled")?.input.addEventListener("change", () => {
     onAnnualReportToggleHandler?.(Boolean(toggleRows.get("annualReportEnabled")?.input.checked));
@@ -522,8 +522,8 @@ export const createBottomLeftControls = (): BottomControlsView => {
       };
       refreshAudioControls();
     },
-    onRandomFireIgnitionToggle: (handler) => {
-      onRandomFireIgnitionToggleHandler = handler;
+    onFireIgnitionEventsToggle: (handler) => {
+      onFireIgnitionEventsToggleHandler = handler;
       refreshSimulationToggles();
     },
     onAnnualReportToggle: (handler) => {
@@ -544,7 +544,7 @@ export const createBottomLeftControls = (): BottomControlsView => {
     },
     setSimulationToggleState: (settings) => {
       simulationToggleState = {
-        randomFireIgnition: Boolean(settings.randomFireIgnition),
+        fireIgnitionEvents: Boolean(settings.fireIgnitionEvents),
         annualReportEnabled: Boolean(settings.annualReportEnabled),
         pauseOnFireEvent: Boolean(settings.pauseOnFireEvent),
         pauseOnAnnualReportEvent: Boolean(settings.pauseOnAnnualReportEvent),

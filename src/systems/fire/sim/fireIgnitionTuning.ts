@@ -1,10 +1,9 @@
 import type { RNG } from "../../../core/types.js";
 
-export type IgnitionSource = "spread" | "random";
+export type IgnitionSource = "spread";
 
 const IGNITION_FIRE_SEED_RANGES: Record<IgnitionSource, { min: number; max: number }> = {
-  spread: { min: 0.08, max: 0.18 },
-  random: { min: 0.1, max: 0.2 }
+  spread: { min: 0.08, max: 0.18 }
 };
 
 const IGNITION_HEAT_MULTIPLIER_RANGE = { min: 1.0, max: 1.05 } as const;

@@ -100,10 +100,20 @@ const createSeasonalCloudNoiseData = (): SeasonalCloudNoiseData => {
       const warpY = sampleTileableValueNoise(u, v, 4, 4.19);
       const warpedU = u + (warpX - 0.5) * 0.14;
       const warpedV = v + (warpY - 0.5) * 0.14;
-      const cellular = sampleTileableWorley(warpedU, warpedV, 5, 0.17);
+      const cellular = sampleTileableWorley(warpedU, warpedV, 4, 0.17);
       const broad = sampleTileableValueNoise(warpedU, warpedV, 3, 1.31);
-      const footprint = clamp01(cellular.core * 0.76 + broad * 0.24);
-      const growth = clamp01(cellular.growth * 0.58 + cellular.core * 0.42);
+      const weatherSystem = sampleTileableValueNoise(warpedU, warpedV, 2, 6.83);
+      const clusterStrength = smoothstep(
+        0.2,
+        0.8,
+        weatherSystem * 0.7 + broad * 0.3
+      );
+      const footprint = clamp01(
+        cellular.core * lerp(0.48, 1.16, clusterStrength) + broad * 0.08
+      );
+      const growth = clamp01(
+        cellular.growth * 0.48 + cellular.core * 0.27 + weatherSystem * 0.25
+      );
       const index = (y * size + x) * SEASONAL_CLOUD_NOISE_CHANNELS;
       data[index] = Math.round(footprint * 255);
       data[index + 1] = Math.round(growth * 255);
@@ -150,13 +160,9 @@ const sampleCloudDensityAtPosition = (
 ): number => {
   const height01 = clamp01((worldY - cloudBase) / Math.max(0.0001, cloudTop - cloudBase));
   const profile = cloudState.cloudProfile;
-  const scale = lerp(cloudState.cloudNearScale, cloudState.cloudFarScale, height01);
-  const offsetX =
-    lerp(cloudState.cloudNearOffset.x, cloudState.cloudFarOffset.x, height01) +
-    (height01 - 0.5) * 0.09;
-  const offsetY =
-    lerp(cloudState.cloudNearOffset.y, cloudState.cloudFarOffset.y, height01) -
-    (height01 - 0.5) * 0.07;
+  const scale = cloudState.cloudNearScale;
+  const offsetX = cloudState.cloudNearOffset.x;
+  const offsetY = cloudState.cloudNearOffset.y;
   const rotatedX = worldX * 0.8 + worldZ * 0.6;
   const rotatedZ = -worldX * 0.6 + worldZ * 0.8;
   const weatherU = rotatedX * scale * 0.021 * profile.footprintScale + offsetX * 0.36;
@@ -194,19 +200,14 @@ const sampleCloudDensityAtPosition = (
   const volumeFrequency = 0.15 * profile.volumeScale;
   const volumeX =
     rotatedX * scale * volumeFrequency +
-    height01 * 0.17 +
     offsetX * 0.74 +
     weatherWarpX * 0.28 +
     morphX;
   const volumeY =
     height01 * 1.08 +
-    rotatedZ * scale * 0.028 +
-    weatherWarpZ * 0.16 +
-    offsetX * 0.08 -
-    offsetY * 0.05;
+    weatherWarpZ * 0.16;
   const volumeZ =
-    rotatedZ * scale * volumeFrequency -
-    height01 * 0.13 +
+    rotatedZ * scale * volumeFrequency +
     offsetY * 0.74 +
     weatherWarpZ * 0.28 +
     morphZ;
@@ -259,9 +260,9 @@ export const sampleSeasonalCloudDensity = (
   const cloudBase = cloudState.cloudProfile.baseHeight;
   const cloudTop = cloudState.cloudProfile.topHeight;
   const horizon01 = 1 - clamp01(dirY);
-  const rayStart = cloudBase / Math.max(0.035, dirY);
+  const rayStart = cloudBase / dirY;
   const rayEnd = Math.min(
-    cloudTop / Math.max(0.035, dirY),
+    cloudTop / dirY,
     rayStart + lerp(8, 22, horizon01)
   );
   let transmittance = 1;

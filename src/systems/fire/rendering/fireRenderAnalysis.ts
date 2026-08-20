@@ -32,8 +32,6 @@ import {
   SMOKE_QUALITY_FALLBACK_SECONDS,
   SMOKE_QUALITY_RECOVERY_SCENE_MS,
   SMOKE_QUALITY_RECOVERY_SECONDS,
-  SMOKE_VISUAL_RATE_MAX,
-  SMOKE_VISUAL_RATE_SCALE,
   SPARK_STREAK_MAX_INSTANCES
 } from "../constants/fireRenderConstants.js";
 import {
@@ -44,7 +42,7 @@ import {
 } from "./fireClusterAnalysis.js";
 import { analyzeFireFronts } from "./fireFrontAnalysis.js";
 import { createInitialFireRenderAnalysisState } from "./fireRenderAnalysisState.js";
-import { smoothApproach } from "./fireRenderMath.js";
+import { resolveSmokeAnimationRate, smoothApproach } from "./fireRenderMath.js";
 import type {
   FireRenderCameraContext,
   FireRenderAnalysisTimings,
@@ -237,7 +235,7 @@ export const buildFireRenderBudgetPlan = (
   const fireMaxInstances = input.fireMaxInstances ?? FIRE_MAX_INSTANCES;
   const smokeMaxInstances = input.smokeMaxInstances ?? SMOKE_MAX_INSTANCES;
   const isRenderPaused = input.animationRate <= 0.0001;
-  const smokeAnimationRate = clamp(Math.max(0, input.animationRate) * SMOKE_VISUAL_RATE_SCALE, 0, SMOKE_VISUAL_RATE_MAX);
+  const smokeAnimationRate = resolveSmokeAnimationRate(input.animationRate);
   const minIntervalMs =
     isRenderPaused
       ? FIRE_FX_PAUSED_UPDATE_INTERVAL_MS
@@ -394,13 +392,7 @@ export const buildFireRenderBudgetPlan = (
       ? FIRE_FX_EMERGENCY_SMOKE_RENDER_STRIDE
       : overloaded
         ? FIRE_FX_OVERLOAD_SMOKE_RENDER_STRIDE
-        : effectiveSmokeBudgetScale >= 0.9
-          ? 1
-          : effectiveSmokeBudgetScale >= 0.7
-            ? 2
-            : effectiveSmokeBudgetScale >= 0.5
-              ? 3
-              : 4;
+        : 1;
   const preferSparseFullResolution = input.trackedFireTiles > 0 && input.area / input.trackedFireTiles >= 32;
   const pressureSampleStep = emergencyOverload ? 3 : overloaded ? 2 : 1;
   const fullResolutionSparse = preferSparseFullResolution && !overloaded;

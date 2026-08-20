@@ -69,10 +69,13 @@ import {
 } from "./fireRenderAnalysisState.js";
 import {
   accumulateSmokeEmission,
+  buildStableSmokeSelectionOrder,
   clamp,
   fract,
   getVisualWindResponse,
   hash1,
+  resolveSmokeAnimationRate,
+  selectStableVisibleSmokeSlots,
   smoothApproach,
   smoothstep,
   sortSmokeParticlesByDepth
@@ -82,6 +85,9 @@ import {
   FIRE_CROSS_MAX_INSTANCES,
   FIRE_MAX_INSTANCES,
   GLOW_MAX_INSTANCES,
+  SMOKE_EMISSION_DENSITY_SCALE,
+  SMOKE_INITIAL_AGE01,
+  SMOKE_LIFETIME_SCALE,
   SMOKE_MAX_INSTANCES,
   SPARK_POINT_MAX_INSTANCES,
   SPARK_STREAK_MAX_INSTANCES
@@ -94,7 +100,6 @@ const SMOKE_QUALITY_RECOVERY_SCENE_MS = 11;
 const SMOKE_QUALITY_FALLBACK_SECONDS = 1.2;
 const SMOKE_QUALITY_RECOVERY_SECONDS = 5;
 const SMOKE_BUDGET_MIN_SCALE = 0.3;
-const SMOKE_INITIAL_AGE01 = 0.04;
 const FLAME_BUDGET_MIN_SCALE = 0.35;
 const FIRE_FX_ACTIVE_UPDATE_INTERVAL_MS = 16;
 const FIRE_FX_IDLE_UPDATE_INTERVAL_MS = 120;
@@ -166,9 +171,6 @@ const FIRE_VISUAL_TUNING = {
 const FIRE_SHADER_TIME_SCALE = 0.5;
 const FLAME_MOTION_TIME_SCALE = 0.44;
 const SPARK_MOTION_TIME_SCALE = 0.62;
-const SMOKE_VISUAL_RATE_SCALE = 14;
-const SMOKE_VISUAL_RATE_MAX = 4;
-const SMOKE_EMISSION_DENSITY_SCALE = 0.5;
 const FLAME_BILLBOARD_OVERSCAN_X = 1.32;
 const FLAME_BILLBOARD_OVERSCAN_Y = 1.28;
 const FLAME_CORE_BILLBOARD_OVERSCAN_X = 1.16;
@@ -938,6 +940,8 @@ export const createThreeTestFireFx = (
   const smokeParticleSourceY = new Float32Array(SMOKE_MAX_INSTANCES);
   const smokeParticleSourceZ = new Float32Array(SMOKE_MAX_INSTANCES);
   const smokeParticleSourceIdx = new Int32Array(SMOKE_MAX_INSTANCES).fill(-1);
+  const smokeParticleVisible = new Uint8Array(SMOKE_MAX_INSTANCES);
+  const smokeSelectionPriority = buildStableSmokeSelectionOrder(SMOKE_MAX_INSTANCES);
   const smokeRenderOrder = new Uint16Array(SMOKE_MAX_INSTANCES);
   const smokeRenderDepth = new Float32Array(SMOKE_MAX_INSTANCES);
   const cameraWorldPos = new THREE.Vector3();
@@ -1113,9 +1117,7 @@ export const createThreeTestFireFx = (
     previousFrameTimeMs = frameTimeMs;
     const isRenderPaused = animationRate <= 0.0001;
     const scaledDeltaSeconds = Math.max(0, frameDeltaSeconds * animationRate);
-    // Incident speeds are small game-time fractions; scale smoke into a readable visual range
-    // while preserving proportional changes and still freezing completely on pause.
-    const smokeAnimationRate = clamp(Math.max(0, animationRate) * SMOKE_VISUAL_RATE_SCALE, 0, SMOKE_VISUAL_RATE_MAX);
+    const smokeAnimationRate = resolveSmokeAnimationRate(animationRate);
     const scaledSmokeDeltaSeconds = Math.max(0, frameDeltaSeconds * smokeAnimationRate);
     pendingDeltaSeconds = Math.min(0.3, pendingDeltaSeconds + scaledDeltaSeconds);
     pendingSmokeDeltaSeconds =
@@ -1993,7 +1995,8 @@ export const createThreeTestFireFx = (
           }
           smokeParticleActive[slot] = 1;
           smokeParticleAge[slot] = SMOKE_INITIAL_AGE01;
-          smokeParticleLife[slot] = 7.0 + cluster.intensity * 8.5 + r1 * 2.8 + windStrength * 1.6;
+          smokeParticleLife[slot] =
+            (7.0 + cluster.intensity * 8.5 + r1 * 2.8 + windStrength * 1.6) * SMOKE_LIFETIME_SCALE;
           smokeParticleX[slot] = anchorX + offsetX + crossWindX * velCross * 0.24 + windX * spawnDownwind;
           smokeParticleY[slot] = clusterSmokeSourceY + tileSpan * (0.06 + r3 * 0.22);
           smokeParticleZ[slot] = anchorZ + offsetZ + crossWindZ * velCross * 0.24 + windZ * spawnDownwind;
@@ -3326,7 +3329,8 @@ export const createThreeTestFireFx = (
             }
             smokeParticleActive[slot] = 1;
             smokeParticleAge[slot] = SMOKE_INITIAL_AGE01;
-            smokeParticleLife[slot] = 5.5 + smokeDrive * 7.0 + r1 * 2.4 + windStrength * 1.3;
+            smokeParticleLife[slot] =
+              (5.5 + smokeDrive * 7.0 + r1 * 2.4 + windStrength * 1.3) * SMOKE_LIFETIME_SCALE;
             smokeParticleX[slot] = jetClusterX + offsetX + crossWindX * velCross * 0.22 + windX * spawnDownwind;
             smokeParticleY[slot] = smokeSourceY + tileSpan * (0.04 + r3 * 0.18);
             smokeParticleZ[slot] = jetClusterZ + offsetZ + crossWindZ * velCross * 0.22 + windZ * spawnDownwind;
@@ -3351,6 +3355,7 @@ export const createThreeTestFireFx = (
     flameWriteMs = performance.now() - flameWriteStartedAt;
     const smokeStartedAt = performance.now();
     for (let i = 0; i < SMOKE_MAX_INSTANCES; i += 1) {
+      smokeParticleVisible[i] = 0;
       if (smokeParticleActive[i] === 0) {
         continue;
       }
@@ -3423,13 +3428,7 @@ export const createThreeTestFireFx = (
         }
         smokeParticleZ[i] += smokeParticleVz[i] * smokeDeltaSeconds + Math.cos(swirlPhase * 1.17) * swirlAmp;
       }
-      const dx = smokeParticleX[i] - cameraWorldPos.x;
-      const dy = smokeParticleY[i] - cameraWorldPos.y;
-      const dz = smokeParticleZ[i] - cameraWorldPos.z;
-      if (smokeCount >= smokeRenderCap) {
-        continue;
-      }
-      if (smokeRenderStride > 1 && (i % smokeRenderStride) !== 0) {
+      if (smokeRenderCap <= 0) {
         continue;
       }
       if (
@@ -3443,9 +3442,23 @@ export const createThreeTestFireFx = (
         visibility.stats.smokeParticlesCulledByVisibility += 1;
         continue;
       }
-      smokeRenderDepth[smokeCount] = dx * cameraForward.x + dy * cameraForward.y + dz * cameraForward.z;
-      smokeRenderOrder[smokeCount] = i;
+      smokeParticleVisible[i] = 1;
       smokeCount += 1;
+    }
+    const strideLimitedSmokeCount = Math.ceil(smokeCount / Math.max(1, smokeRenderStride));
+    const smokeSelectionTarget = Math.min(smokeRenderCap, strideLimitedSmokeCount);
+    smokeCount = selectStableVisibleSmokeSlots(
+      smokeSelectionPriority,
+      smokeParticleVisible,
+      smokeSelectionTarget,
+      smokeRenderOrder
+    );
+    for (let selected = 0; selected < smokeCount; selected += 1) {
+      const i = smokeRenderOrder[selected]!;
+      const dx = smokeParticleX[i] - cameraWorldPos.x;
+      const dy = smokeParticleY[i] - cameraWorldPos.y;
+      const dz = smokeParticleZ[i] - cameraWorldPos.z;
+      smokeRenderDepth[selected] = dx * cameraForward.x + dy * cameraForward.y + dz * cameraForward.z;
     }
     sortSmokeParticlesByDepth(smokeRenderDepth, smokeRenderOrder, smokeCount);
     for (let draw = 0; draw < smokeCount; draw += 1) {

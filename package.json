@@ -18,6 +18,8 @@
     "runtime-settings:regression": "npm run build && node scripts/runtime-settings-regression.mjs",
     "sun:regression": "node scripts/seasonal-sun-regression.mjs",
     "fire:regression": "npm run build && node scripts/fire-regression.mjs",
+    "ignition:regression": "npm run build && node scripts/ignition-regression.mjs",
+    "ignition:seed-regression": "npm run build && node scripts/ignition-seed-repro.mjs 1294615983 --sim",
     "fire-detection:regression": "npm run build && node scripts/fire-detection-regression.mjs",
     "notification:regression": "npm run build && node scripts/notification-regression.mjs",
     "campaign-difficulty:regression": "npm run build && node scripts/campaign-difficulty-regression.mjs",

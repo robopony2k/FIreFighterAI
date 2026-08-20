@@ -4,7 +4,7 @@ import type { EffectsState } from "../../../core/effectsState.js";
 import { SUPPRESSION_WETNESS_BLOCK_THRESHOLD } from "../../../core/config.js";
 import { indexFor } from "../../../core/grid.js";
 import { emitWaterSpray } from "../../../sim/particles.js";
-import { markFireBlockActiveByTile } from "../../../sim/fire/activeBlocks.js";
+import { markFireBlockActiveByTile } from "../../fire/sim/fireActiveBlocks.js";
 import { THREAT_FIRE_EPS } from "../constants/runtimeConstants.js";
 import { clamp } from "../utils/unitMath.js";
 import { getClusterSuppressionScore, getSuppressionThreatClass, getSuppressionThreatScore } from "./threatAssessment.js";

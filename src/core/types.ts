@@ -635,7 +635,7 @@ export interface FireSimWork {
 
 
 export interface FireSettings {
-  ignitionChancePerDay: number;
+  ignitionOpportunityRateScale: number;
   simSpeed: number;
   simTickSeconds: number;
   renderSmoothSeconds: number;

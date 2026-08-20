@@ -83,14 +83,132 @@ import {
   FIRE_CROSS_MAX_INSTANCES,
   FIRE_FRONT_MAX_INSTANCES,
   FIRE_MAX_INSTANCES,
-  GLOW_MAX_INSTANCES
+  GLOW_MAX_INSTANCES,
+  SMOKE_EMISSION_DENSITY_SCALE,
+  SMOKE_INITIAL_AGE01,
+  SMOKE_LIFETIME_SCALE
 } from "../dist/systems/fire/constants/fireRenderConstants.js";
-import { accumulateSmokeEmission } from "../dist/systems/fire/rendering/fireRenderMath.js";
+import { DEFAULT_FIRE_FX_DEBUG_CONTROLS } from "../dist/systems/fire/rendering/fireFxTypes.js";
+import {
+  buildFireRenderBudgetPlan,
+  createInitialFireRenderAdaptiveState
+} from "../dist/systems/fire/rendering/fireRenderAnalysis.js";
+import {
+  accumulateSmokeEmission,
+  buildStableSmokeSelectionOrder,
+  resolveSmokeAnimationRate,
+  selectStableVisibleSmokeSlots
+} from "../dist/systems/fire/rendering/fireRenderMath.js";
 
 assert.equal(FIRE_MAX_INSTANCES, 4096, "large fire fronts should retain the raised 4,096-instance flame capacity");
 assert.equal(FIRE_CROSS_MAX_INSTANCES, 1024, "hero cross-slices should scale with the raised flame capacity");
 assert.equal(FIRE_FRONT_MAX_INSTANCES, 1024, "front segments should not retain the legacy 320-instance ceiling");
 assert.equal(GLOW_MAX_INSTANCES, FIRE_MAX_INSTANCES * 2, "ground-glow capacity should track the flame capacity");
+assert.equal(SMOKE_EMISSION_DENSITY_SCALE, 1, "fire smoke should retain the doubled emission density");
+assert.equal(SMOKE_LIFETIME_SCALE, 2, "fire smoke should retain the doubled fade lifetime");
+assert.equal(SMOKE_INITIAL_AGE01, 0.06, "long-lived smoke should become readable near its source without a long fade-in");
+for (const incidentSpeed of [0, 0.25, 0.5, 0.75, 1]) {
+  assert.equal(
+    resolveSmokeAnimationRate(incidentSpeed),
+    incidentSpeed,
+    `smoke lifecycle rate must match the resolved ${incidentSpeed}x incident speed`
+  );
+}
+assert.equal(resolveSmokeAnimationRate(-1), 0, "negative smoke animation rates must freeze instead of reversing time");
+assert.equal(resolveSmokeAnimationRate(Number.NaN), 0, "invalid smoke animation rates must freeze safely");
+
+const stableSmokeOrder = buildStableSmokeSelectionOrder(1400);
+assert.equal(stableSmokeOrder.length, 1400, "stable smoke selection must cover the complete particle pool");
+assert.equal(new Set(stableSmokeOrder).size, 1400, "stable smoke selection must contain every slot exactly once");
+assert.deepEqual(
+  stableSmokeOrder,
+  buildStableSmokeSelectionOrder(1400),
+  "stable smoke slot priority must not change between frames"
+);
+assert.notDeepEqual(
+  Array.from(stableSmokeOrder.subarray(0, 160)),
+  Array.from({ length: 160 }, (_, index) => index),
+  "the normal smoke cap must not retain only the first particle slots"
+);
+const smokeVisibilityFixture = new Uint8Array(1400).fill(1);
+const smokeSelectionOutput = new Uint16Array(160);
+const stableSelectionCount = selectStableVisibleSmokeSlots(
+  stableSmokeOrder,
+  smokeVisibilityFixture,
+  160,
+  smokeSelectionOutput
+);
+const stableSelection = Array.from(smokeSelectionOutput.subarray(0, stableSelectionCount));
+smokeVisibilityFixture[stableSmokeOrder[1000]] = 0;
+const unchangedSelectionCount = selectStableVisibleSmokeSlots(
+  stableSmokeOrder,
+  smokeVisibilityFixture,
+  160,
+  smokeSelectionOutput
+);
+assert.deepEqual(
+  Array.from(smokeSelectionOutput.subarray(0, unchangedSelectionCount)),
+  stableSelection,
+  "an unselected candidate leaving view must not reshuffle capped smoke membership"
+);
+smokeVisibilityFixture[stableSelection[80]] = 0;
+const replacementSelectionCount = selectStableVisibleSmokeSlots(
+  stableSmokeOrder,
+  smokeVisibilityFixture,
+  160,
+  smokeSelectionOutput
+);
+const replacementSelection = Array.from(smokeSelectionOutput.subarray(0, replacementSelectionCount));
+assert.equal(replacementSelection.length, stableSelection.length, "a culled selected particle should receive one replacement");
+assert.equal(
+  replacementSelection.filter((slot) => !stableSelection.includes(slot)).length,
+  1,
+  "one selected particle leaving view must replace only that particle instead of reshuffling the draw set"
+);
+
+const smokeBudgetInput = {
+  controls: DEFAULT_FIRE_FX_DEBUG_CONTROLS,
+  frameDeltaSeconds: 1 / 60,
+  deltaSeconds: 1 / 60,
+  fpsEstimate: 60,
+  sceneRenderMs: 8,
+  fireFxMs: 2,
+  hasFireWork: true,
+  hasActiveSmoke: true,
+  trackedFireTiles: 200,
+  area: 4096,
+  smokeOnlyMode: false
+};
+const runningSmokeBudget = buildFireRenderBudgetPlan(createInitialFireRenderAdaptiveState(), {
+  ...smokeBudgetInput,
+  animationRate: 0.5
+});
+const pausedSmokeBudget = buildFireRenderBudgetPlan(createInitialFireRenderAdaptiveState(), {
+  ...smokeBudgetInput,
+  animationRate: 0
+});
+for (const incidentSpeed of [0.25, 0.5, 0.75, 1]) {
+  const speedBudget = buildFireRenderBudgetPlan(createInitialFireRenderAdaptiveState(), {
+    ...smokeBudgetInput,
+    animationRate: incidentSpeed
+  });
+  assert.equal(
+    speedBudget.smokeAnimationRate,
+    incidentSpeed,
+    `fire render planning must preserve the resolved ${incidentSpeed}x smoke lifecycle rate`
+  );
+}
+assert.equal(runningSmokeBudget.smokeRenderStride, 1, "normal running smoke should render every selected particle");
+assert.equal(
+  pausedSmokeBudget.smokeRenderStride,
+  runningSmokeBudget.smokeRenderStride,
+  "pausing must not change the visible smoke-particle stride"
+);
+assert.equal(
+  pausedSmokeBudget.smokeRenderCap,
+  runningSmokeBudget.smokeRenderCap,
+  "pausing must not change the normal smoke render cap"
+);
 
 const countSmokeEmissions = (emissionsPerSecond, deltaSeconds, steps) => {
   let carry = 0;

@@ -17,10 +17,8 @@ import {
   stepSim
 } from "../dist/sim/index.js";
 import { getRuntimeSettings, setRuntimeSetting } from "../dist/persistence/runtimeSettings.js";
-import { markFireBlockActiveByTile } from "../dist/sim/fire/activeBlocks.js";
+import { markFireBlockActiveByTile } from "../dist/systems/fire/sim/fireActiveBlocks.js";
 import { stepFire } from "../dist/sim/fire.js";
-import { isRandomIgnitionWeatherViable } from "../dist/sim/fire/fireWeather.js";
-import { findIgnitionCandidate } from "../dist/sim/fire/ignite.js";
 import { createUnit } from "../dist/sim/units.js";
 import { applyFireActivityMetrics } from "../dist/systems/fire/sim/fireActivityState.js";
 import { buildSeasonalRainEvent } from "../dist/systems/climate/sim/seasonalRain.js";
@@ -277,11 +275,6 @@ const igniteCenter = (state) => {
 const seedAlertIncident = (state) => {
   const idx = igniteCenter(state);
   state.lastActiveFires = 0;
-  state.fireBoundsActive = false;
-  state.fireMinX = 0;
-  state.fireMaxX = 0;
-  state.fireMinY = 0;
-  state.fireMaxY = 0;
   state.simTimeMode = "strategic";
   state.timeSpeedIndex = state.strategicTimeSpeedIndex;
   state.paused = false;
@@ -392,7 +385,7 @@ const runExposureSequence = (speed) => {
   const { state, rng } = buildState(3904);
   const effects = createEffectsState();
   setCareerCursor(state, 225);
-  state.fireSettings.ignitionChancePerDay = 0;
+  state.fireSettings.ignitionOpportunityRateScale = 0;
   seedExposureIncident(state);
   const transitions = [];
   captureDistinctActivitySequence(state, transitions);
@@ -422,7 +415,7 @@ const runSlowIncidentCrawlScenario = () => {
   const { state, rng } = buildState(3906);
   const effects = createEffectsState();
   setCareerCursor(state, 225);
-  state.fireSettings.ignitionChancePerDay = 0;
+  state.fireSettings.ignitionOpportunityRateScale = 0;
   const { sourceIdx, targetIdx } = seedExposureIncident(state);
   state.tiles[targetIdx].fire = 0;
   state.tiles[targetIdx].heat = 0;
@@ -461,7 +454,7 @@ const runScenario = ({ seed, startDay, speed, durationDays, withTruck = false, s
   const { state, rng } = buildState(seed, size);
   const effects = createEffectsState();
   setCareerCursor(state, startDay);
-  state.fireSettings.ignitionChancePerDay = 0;
+  state.fireSettings.ignitionOpportunityRateScale = 0;
   igniteCenter(state);
   if (withTruck) {
     addSupportTruck(state, rng);
@@ -523,7 +516,7 @@ const runSeasonalRainClearScenario = () => {
   const effects = createEffectsState();
   const rain = buildSeasonalRainEvent(seed, 0);
   setCareerCursor(state, rain.extinguishDayOfYear - 2);
-  state.fireSettings.ignitionChancePerDay = 0;
+  state.fireSettings.ignitionOpportunityRateScale = 0;
   const idx = igniteCenter(state);
   state.fireSnapshot[idx] = state.tileFire[idx];
   state.scoring.prevFireBoundsActive = true;
@@ -556,7 +549,7 @@ const runSingleTargetElevationSpread = (targetElevation) => {
   const sourceIdx = center * state.grid.cols + center;
   const targetIdx = center * state.grid.cols + center + 1;
   setCareerCursor(state, 225);
-  state.fireSettings.ignitionChancePerDay = 0;
+  state.fireSettings.ignitionOpportunityRateScale = 0;
   state.wind = { name: "calm", dx: 0, dy: 0, strength: 0 };
   for (let y = center - 2; y <= center + 2; y += 1) {
     for (let x = center - 2; x <= center + 3; x += 1) {
@@ -661,7 +654,7 @@ const prepareGapJumpState = (gapTiles, mode = "extreme") => {
   setCareerCursor(state, 225);
   state.fireSettings = {
     ...DEFAULT_FIRE_SETTINGS,
-    ignitionChancePerDay: 0,
+    ignitionOpportunityRateScale: 0,
     diffusionSecondary: mode === "explicit-30m" ? 0.52 : DEFAULT_FIRE_SETTINGS.diffusionSecondary,
     rangedDiffusionMaxTiles: mode === "explicit-30m" ? 4 : DEFAULT_FIRE_SETTINGS.rangedDiffusionMaxTiles,
     rangedDiffusionThreeTileThreshold:
@@ -771,7 +764,7 @@ const runMatchedFuelTypeSpread = (type) => {
   const sourceIdx = center * state.grid.cols + center;
   const targetIdx = center * state.grid.cols + center + 1;
   setCareerCursor(state, 225);
-  state.fireSettings = { ...DEFAULT_FIRE_SETTINGS, ignitionChancePerDay: 0, diffusionSecondary: 0 };
+  state.fireSettings = { ...DEFAULT_FIRE_SETTINGS, ignitionOpportunityRateScale: 0, diffusionSecondary: 0 };
   state.wind = { name: "east", dx: 1, dy: 0, strength: 0.7 };
   for (let y = center - 2; y <= center + 2; y += 1) {
     for (let x = center - 2; x <= center + 3; x += 1) {
@@ -855,18 +848,6 @@ const printScenarioGroup = (label, scenarios) => {
   });
 };
 
-const median = (values) => {
-  const sorted = [...values].sort((a, b) => a - b);
-  if (sorted.length === 0) {
-    return Number.NaN;
-  }
-  const middle = Math.floor(sorted.length / 2);
-  if (sorted.length % 2 === 1) {
-    return sorted[middle];
-  }
-  return (sorted[middle - 1] + sorted[middle]) * 0.5;
-};
-
 const failures = [];
 
 {
@@ -876,32 +857,6 @@ const failures = [];
   );
   if (!settings.pauseOnFireEvent || !settings.pauseOnAnnualReportEvent || !settings.pauseOnRainEvent) {
     failures.push("Runtime event pause toggles should default to enabled.");
-  }
-}
-
-{
-  const lowRiskWeather = {
-    climateRisk: 0.59,
-    ignition: 1.05,
-    spread: 1.1,
-    sustain: 1.0,
-    cooling: 1.0
-  };
-  const viableWeather = {
-    climateRisk: 0.65,
-    ignition: 0.9,
-    spread: 1.0,
-    sustain: 0.9,
-    cooling: 1.1
-  };
-  console.log(
-    `\nRandom Ignition Weather Viability\nlow=${isRandomIgnitionWeatherViable(lowRiskWeather) ? 1 : 0} viable=${isRandomIgnitionWeatherViable(viableWeather) ? 1 : 0}`
-  );
-  if (isRandomIgnitionWeatherViable(lowRiskWeather)) {
-    failures.push("Low-risk weather passed random ignition viability.");
-  }
-  if (!isRandomIgnitionWeatherViable(viableWeather)) {
-    failures.push("Viable weather failed random ignition viability.");
   }
 }
 
@@ -1314,115 +1269,6 @@ const failures = [];
 }
 
 {
-  const { state, rng } = buildState(3904);
-  const effects = createEffectsState();
-  setCareerCursor(state, 179.75);
-  addFullMapWatchTower(state);
-  state.simTimeMode = "strategic";
-  state.timeSpeedIndex = state.strategicTimeSpeedIndex;
-  state.timeSpeedSliderValue = 80;
-  state.paused = false;
-  stepSim(state, effects, rng, BASE_STEP * 80);
-  const alertReport = getLatestFireAlertReport(state);
-  const baseIdx = state.basePoint.y * state.grid.cols + state.basePoint.x;
-  const baseTileSafe = (state.tileFire[baseIdx] ?? 0) <= 0 && state.tiles[baseIdx]?.type !== "ash";
-  console.log(
-    `\nHigh-Speed Season Entry Alert\nphase=${state.phase} paused=${state.paused ? 1 : 0} mode=${state.simTimeMode} active=${state.lastActiveFires} alertId=${alertReport?.id ?? "none"} burned=${state.burnedTiles} baseSafe=${baseTileSafe ? 1 : 0} simulatedDays=${state.firePerfSimulatedDays.toFixed(3)} deferredDays=${state.firePerfDeferredDays.toFixed(3)}`
-  );
-  if (
-    !state.paused ||
-    state.simTimeMode !== "incident" ||
-    !alertReport ||
-    !baseTileSafe ||
-    state.burnedTiles > 0 ||
-    state.firePerfSimulatedDays >= 0.5 - 0.0001 ||
-    state.fireSimAccumulator > 0.0001 ||
-    state.firePerfDeferredDays > 0.0001
-  ) {
-    failures.push("High-speed season entry did not stop at a safe, backlog-free incident boundary.");
-  }
-}
-
-{
-  const { state, rng } = buildState(3910);
-  const effects = createEffectsState();
-  setCareerCursor(state, 225);
-  addFullMapWatchTower(state);
-  state.simTimeMode = "strategic";
-  state.timeSpeedIndex = state.strategicTimeSpeedIndex;
-  state.timeSpeedSliderValue = 80;
-  state.fireSettings.ignitionChancePerDay = 100;
-  state.paused = false;
-  const { cap, appliedDelta } = stepWithRuntimeCap(state, effects, rng, BASE_STEP * 80);
-  console.log(
-    `\nHigh-Speed Random Ignition Cap\ncap=${cap?.toFixed(3) ?? "none"} applied=${appliedDelta.toFixed(3)} paused=${state.paused ? 1 : 0} mode=${state.simTimeMode} active=${state.lastActiveFires} simulatedDays=${state.firePerfSimulatedDays.toFixed(3)} burned=${state.burnedTiles}`
-  );
-  if (
-    cap === null ||
-    appliedDelta > 0.5 + 0.0001 ||
-    !state.paused ||
-    state.simTimeMode !== "incident" ||
-    !getLatestFireAlertReport(state) ||
-    state.firePerfSimulatedDays > 0.5 + 0.0001
-  ) {
-    failures.push("High-speed random ignition was not capped before incident pause.");
-  }
-}
-
-{
-  const { state, rng } = buildState(3911);
-  const effects = createEffectsState();
-  setCareerCursor(state, 225);
-  addFullMapWatchTower(state);
-  state.fireSettings.ignitionChancePerDay = 100;
-  state.timeSpeedSliderValue = 17;
-  const requested = requestAdvanceToNextEvent(state);
-  const { cap, appliedDelta } = stepWithRuntimeCap(state, effects, rng, BASE_STEP * 80);
-  console.log(
-    `\nAdvance-To-Event Fire Runtime Cap\nrequested=${requested ? 1 : 0} cap=${cap?.toFixed(3) ?? "none"} applied=${appliedDelta.toFixed(3)} paused=${state.paused ? 1 : 0} mode=${state.simTimeMode} active=${state.lastActiveFires} slider=${state.timeSpeedSliderValue.toFixed(2)}`
-  );
-  if (
-    !requested ||
-    cap === null ||
-    appliedDelta > 0.5 + 0.0001 ||
-    !state.paused ||
-    state.simTimeMode !== "incident" ||
-    !getLatestFireAlertReport(state) ||
-    state.advanceToNextEvent !== null ||
-    Math.abs(state.timeSpeedSliderValue - 17) > 0.0001
-  ) {
-    failures.push("Advance to next event did not use the runtime cap and restore incident alert state.");
-  }
-}
-
-withRuntimeSetting("pauseOnFireEvent", false, () => {
-  const { state, rng } = buildState(3912);
-  const effects = createEffectsState();
-  setCareerCursor(state, 225);
-  addFullMapWatchTower(state);
-  state.fireSettings.ignitionChancePerDay = 100;
-  state.timeSpeedSliderValue = 19;
-  const requested = requestAdvanceToNextEvent(state);
-  const { cap, appliedDelta } = stepWithRuntimeCap(state, effects, rng, BASE_STEP * 80);
-  const alertReport = getLatestFireAlertReport(state);
-  console.log(
-    `\nAdvance-To-Event Fire Pause Disabled\nrequested=${requested ? 1 : 0} cap=${cap?.toFixed(3) ?? "none"} applied=${appliedDelta.toFixed(3)} paused=${state.paused ? 1 : 0} mode=${state.simTimeMode} advance=${state.advanceToNextEvent ? 1 : 0} alertId=${alertReport?.id ?? "none"} active=${state.lastActiveFires}`
-  );
-  if (
-    !requested ||
-    cap === null ||
-    !alertReport ||
-    state.paused ||
-    state.simTimeMode !== "incident" ||
-    state.advanceToNextEvent !== null ||
-    Math.abs(state.timeSpeedSliderValue - 19) > 0.0001 ||
-    state.lastActiveFires <= 0
-  ) {
-    failures.push("Disabled fire pause did not stop advance-to-event and continue in incident time.");
-  }
-});
-
-{
   const { state, rng } = buildState(3913);
   setCareerCursor(state, 269);
   state.timeSpeedSliderValue = 13;
@@ -1462,7 +1308,7 @@ withRuntimeSetting("pauseOnAnnualReportEvent", false, () => {
   const effects = createEffectsState();
   const rain = buildSeasonalRainEvent(seed, 0);
   setCareerCursor(state, rain.startDayOfYear);
-  state.fireSettings.ignitionChancePerDay = 0;
+  state.fireSettings.ignitionOpportunityRateScale = 0;
   state.paused = false;
   state.timeSpeedSliderValue = 15;
   const requested = requestAdvanceToNextEvent(state);
@@ -1488,7 +1334,7 @@ withRuntimeSetting("pauseOnRainEvent", false, () => {
   const effects = createEffectsState();
   const rain = buildSeasonalRainEvent(seed, 0);
   setCareerCursor(state, rain.startDayOfYear);
-  state.fireSettings.ignitionChancePerDay = 0;
+  state.fireSettings.ignitionOpportunityRateScale = 0;
   state.paused = false;
   const requested = requestAdvanceToNextEvent(state);
   stepSim(state, effects, rng, BASE_STEP);
@@ -1510,7 +1356,7 @@ withRuntimeSetting("pauseOnRainEvent", false, () => {
   const { state, rng } = buildState(3902);
   const effects = createEffectsState();
   setCareerCursor(state, 225);
-  state.fireSettings.ignitionChancePerDay = 0;
+  state.fireSettings.ignitionOpportunityRateScale = 0;
   const { targetIdx } = seedExposureIncident(state);
   stepSim(state, effects, rng, BASE_STEP);
   console.log(
@@ -1540,7 +1386,7 @@ withRuntimeSetting("pauseOnRainEvent", false, () => {
   const center = getCenter(state);
   const idx = center * state.grid.cols + center;
   setCareerCursor(state, 225);
-  state.fireSettings.ignitionChancePerDay = 0;
+  state.fireSettings.ignitionOpportunityRateScale = 0;
   state.tiles[idx].heat = 0.34;
   state.tileHeat[idx] = state.tiles[idx].heat;
   state.tileHeatRelease[idx] = 0;
@@ -1664,46 +1510,6 @@ withRuntimeSetting("pauseOnRainEvent", false, () => {
   );
   if ((sampledTypes[0] ?? -1) === TILE_TYPE_IDS.ash) {
     failures.push("Sparse ash tiles still overpaint an entire sampled terrain cell.");
-  }
-}
-
-{
-  const ignitionDistanceByYear = [1, 5, 10, 15].map((year, index) => {
-    const { state, rng } = buildState(4500 + index, 257);
-    setCareerCursor(state, (year - 1) * YEAR_DAYS + 225);
-    const distances = [];
-    for (let sample = 0; sample < 48; sample += 1) {
-      const candidate = findIgnitionCandidate(state, rng, { maxAttempts: 120 });
-      if (!candidate) {
-        continue;
-      }
-      distances.push(Math.hypot(candidate.x - state.basePoint.x, candidate.y - state.basePoint.y));
-    }
-    return {
-      year,
-      medianDistance: median(distances)
-    };
-  });
-
-  console.log("\nIgnition Distance");
-  ignitionDistanceByYear.forEach((entry) => {
-    console.log(`year=${entry.year} medianDistance=${entry.medianDistance.toFixed(2)}`);
-  });
-
-  const [year1, year5, year10, year15] = ignitionDistanceByYear;
-  if (
-    !Number.isFinite(year1?.medianDistance) ||
-    !Number.isFinite(year5?.medianDistance) ||
-    !Number.isFinite(year10?.medianDistance) ||
-    !Number.isFinite(year15?.medianDistance)
-  ) {
-    failures.push("Ignition-distance regression did not produce valid samples.");
-  } else if (
-    !(year1.medianDistance < year5.medianDistance &&
-      year5.medianDistance < year10.medianDistance &&
-      year10.medianDistance < year15.medianDistance)
-  ) {
-    failures.push("Ignition distance did not widen across career-year bands.");
   }
 }
 

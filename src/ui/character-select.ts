@@ -534,6 +534,9 @@ export function initCharacterSelect(
       if (!key) {
         return;
       }
+      if (input.value.trim() === "") {
+        return;
+      }
       const value = Number(input.value);
       if (Number.isFinite(value)) {
         settings[key] = value;

@@ -31,6 +31,7 @@ import type { BuildingLot } from "../systems/settlements/types/buildingTypes.js"
 import type { SettlementGrowthPlan } from "../systems/settlements/types/settlementTypes.js";
 import type { WaterTower } from "../systems/settlements/types/waterTowerTypes.js";
 import type { ActiveEvacuation } from "../systems/evacuation/types/evacuationTypes.js";
+import type { IgnitionScheduleState } from "../systems/fire/types/ignitionTypes.js";
 
 import { BASE_BUDGET, DEFAULT_FIRE_SETTINGS, DEFAULT_INCIDENT_TIME_SPEED_INDEX } from "./config.js";
 import { DEFAULT_TIME_SPEED_SLIDER_VALUE } from "./timeSpeed.js";
@@ -339,6 +340,7 @@ export interface WorldState {
   climateForecastDay: number;
   seasonalRain: SeasonalRainState;
   careerDay: number;
+  ignitionSchedule: IgnitionScheduleState | null;
 
   fireBlockSize: number;
   fireBlockCols: number;
@@ -739,6 +741,7 @@ export function createInitialState(seed: number, grid: Grid): WorldState {
       hasStartPauseHandled: false
     },
     careerDay: 0,
+    ignitionSchedule: null,
     fireSnapshot: new Float32Array(grid.totalTiles),
     roster: [],
 

@@ -38,8 +38,7 @@ const mixRgb = (a: RGB, b: RGB, t: number): RGB => ({
 export type SeasonalSkyConfig = {
   cloudLayerScaleNear: number;
   cloudLayerScaleFar: number;
-  cloudLayerDriftNear: number;
-  cloudLayerDriftFar: number;
+  cloudLayerDriftPerDay: number;
   sunIntensitySummer: number;
   sunIntensityWinter: number;
   glareIntensitySummer: number;
@@ -59,8 +58,7 @@ export type SeasonalSkyConfig = {
 export const SEASONAL_SKY_CONFIG: SeasonalSkyConfig = {
   cloudLayerScaleNear: 1.64,
   cloudLayerScaleFar: 0.88,
-  cloudLayerDriftNear: 0.032,
-  cloudLayerDriftFar: 0.0165,
+  cloudLayerDriftPerDay: 0.032,
   sunIntensitySummer: 1.16,
   sunIntensityWinter: 0.76,
   glareIntensitySummer: 0.16,
@@ -195,8 +193,7 @@ export const buildSeasonalSkyState = (
     careerDay: input.careerDay,
     weatherSeed: weather.weatherSeed,
     worldSeed: input.worldSeed,
-    nearDriftPerDay: config.cloudLayerDriftNear,
-    farDriftPerDay: config.cloudLayerDriftFar
+    driftPerDay: config.cloudLayerDriftPerDay
   });
   const cloudNearOffset = new THREE.Vector2(advection.nearX, advection.nearY);
   const cloudFarOffset = new THREE.Vector2(advection.farX, advection.farY);

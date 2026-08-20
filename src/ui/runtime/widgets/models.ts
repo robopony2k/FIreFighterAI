@@ -26,7 +26,7 @@ export type AudioControlsWidgetModel = {
 
 export type SimulationSettingsWidgetModel = Pick<
   RuntimeSettings,
-  | "randomFireIgnition"
+  | "fireIgnitionEvents"
   | "annualReportEnabled"
   | "pauseOnFireEvent"
   | "pauseOnAnnualReportEvent"

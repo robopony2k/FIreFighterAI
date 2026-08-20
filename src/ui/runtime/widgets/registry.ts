@@ -103,7 +103,7 @@ const getRuntimeSettingCopy = (setting: SimulationToggleSettingKey): { title: st
   };
 };
 
-const randomFireCopy = getRuntimeSettingCopy("randomFireIgnition");
+const fireIgnitionCopy = getRuntimeSettingCopy("fireIgnitionEvents");
 const annualReportCopy = getRuntimeSettingCopy("annualReportEnabled");
 const pauseOnFireCopy = getRuntimeSettingCopy("pauseOnFireEvent");
 const pauseOnAnnualReportCopy = getRuntimeSettingCopy("pauseOnAnnualReportEvent");
@@ -111,10 +111,10 @@ const pauseOnRainCopy = getRuntimeSettingCopy("pauseOnRainEvent");
 
 export const SIMULATION_TOGGLE_SPECS: readonly SimulationToggleSpec[] = [
   {
-    setting: "randomFireIgnition",
-    title: randomFireCopy.title,
-    description: randomFireCopy.description,
-    action: { kind: "runtimeSetting", setting: "randomFireIgnition" }
+    setting: "fireIgnitionEvents",
+    title: fireIgnitionCopy.title,
+    description: fireIgnitionCopy.description,
+    action: { kind: "runtimeSetting", setting: "fireIgnitionEvents" }
   },
   {
     setting: "annualReportEnabled",

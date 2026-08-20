@@ -35,7 +35,6 @@ export const TOWN_ALERT_CHANGE_COOLDOWN_DAYS = 0.75;
 export const TOWN_ALERT_FATIGUE_RATE_BY_POSTURE = [0, 0.5, 1.0, 2.0] as const;
 export const TOWN_ALERT_RECOVERY_RATE = 0.75;
 export const TOWN_EVAC_SPEED = 0.2;
-export const FIRE_IGNITION_CHANCE_PER_DAY = 0.08;
 export const FIRE_SIM_SPEED = 1.35;
 export const FIRE_SIM_TICK_SECONDS = 1;
 export const INCIDENT_FIRE_PACING_SCALE = 0.0625;
@@ -48,7 +47,6 @@ export const FIRE_JUMP_WIND_THRESHOLD = 0.7;
 export const FIRE_JUMP_BASE_CHANCE = 0.25;
 export const FIRE_JUMP_HEAT_BOOST = 0.4;
 export const FIRE_JUMP_DOT_THRESHOLD = 0.2;
-export const FIRE_WEATHER_RISK_MIN = 0.4;
 export const FIRE_WEATHER_BURNOUT_RISK = 0.25;
 export const SCORE_EXTINGUISHED_TILE_POINTS = 1000;
 export const SCORE_HOUSE_LOSS_PENALTY = 50000;
@@ -77,7 +75,7 @@ export const SCORE_RISK_TIERS: { tier: RiskTier; minRisk: number; multiplier: nu
   { tier: "low", minRisk: 0.00, multiplier: 1.00 }
 ];
 export const DEFAULT_FIRE_SETTINGS: FireSettings = {
-  ignitionChancePerDay: FIRE_IGNITION_CHANCE_PER_DAY,
+  ignitionOpportunityRateScale: 1,
   simSpeed: FIRE_SIM_SPEED,
   simTickSeconds: FIRE_SIM_TICK_SECONDS,
   renderSmoothSeconds: FIRE_RENDER_SMOOTH_SECONDS,

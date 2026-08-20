@@ -1,3 +1,122 @@
+TSK-0228: Remove seasonal-cloud volume sampling streaks
+
+Type: bug
+
+Why: The packed 3D cloud density initially mapped rotated horizontal travel into volume Y. Subsequent captures isolated the persistent spring artefact as movement-aligned: lower and upper offsets accumulated career travel at different speeds, and blending that growing separation through tall spring clouds wrapped their sampling coordinates into repeated wind-direction streaks.
+
+Done when:
+- [x] GPU and CPU density mappings keep rotated horizontal travel on volume X/Z and normalized cloud height as the primary volume-Y input.
+- [x] The padded 32³ atlas retains clamped linear filtering, disabled mipmaps, periodic one-pixel borders, and explicit interpolation between adjacent Z slices.
+- [x] Accepted shallow rays use their true elevation for slab intersection and deterministic pixel-stable jitter spans the complete step interval without continuous direction-field contours.
+- [x] The entire cloud volume shares one accumulated deterministic translation while its seeded height-parallax offset remains bounded across years.
+- [x] Weather and volume density use one horizontal transform through cloud height, with no height injection into volume X/Z or advection injection into volume Y.
+- [x] Fair-weather placement uses fewer cellular seeds gated by a broad deterministic weather-system envelope, producing varied footprint areas, clustered regions, and wide clear gaps.
+- [x] Seasonal profiles, weather footprint, deterministic simulation-time advection, lighting, the 20-step march ceiling, and texture/draw-call budgets remain unchanged.
+- [x] TypeScript, weather-visual, renderer, and queue regressions pass.
+- [ ] A post-fix motion capture shows clouds crossing shallow views without coherent sliding or streaking bands, shimmer, or popping.
+
+Touchpoints: `src/systems/climate/rendering/seasonalCloudShader.ts`, `src/systems/climate/rendering/seasonalCloudField.ts`, `scripts/weather-visual-regression.mjs`, deprecation/queue records
+
+Constraints: source-only implementation was explicitly authorized because this VS Code surface cannot inspect localhost; do not claim live visual acceptance without a supplied capture or supported Browser session.
+
+Notes: Static diagnosis ruled out atlas slice bleeding: the atlas already uses a sufficient periodic one-pixel border with clamp wrapping, linear min/mag filters, no mipmaps, and manual Z interpolation. Earlier corrections removed volume-Y shear, corrected horizon intersections, replaced continuous-direction jitter contours, stopped lifetime differential drift, and removed height-warped boomerang mapping. The latest spring capture then exposed the placement field itself: one feature per cell in a five-frequency Worley grid, blended 76/24 with broad value noise, made small clouds appear regularly distributed across the sky. Placement now uses four-frequency cellular seeds whose strength is gated by a two-frequency deterministic weather-system envelope. At a spring-like threshold the generated fixture occupies about 17% overall while 4x4 regional occupancy ranges from empty to roughly half full, and connected footprint areas vary by more than 8x. Automated regression locks those clustering/variation bounds alongside the prior volume, motion, atlas, and temporal contracts; refreshed live evidence remains required.
+
+Status: in-progress
+
+TSK-0227: Repair zeroed ignition rate from the retired run-form key
+
+Type: bug
+
+Why: The character setup form still bound its ignition input to removed `ignitionChancePerDay`; applying current settings emptied that number input, and `Number("")` silently saved a zero opportunity-rate scale even while Fire Ignition Events remained enabled.
+
+Done when:
+- [x] The run form edits `ignitionOpportunityRateScale` directly with a default value of 1.
+- [x] Blank fire-tuning inputs are ignored rather than coerced to zero.
+- [x] Last-run configurations carry a schema version and repair the known unversioned corrupted-zero shape.
+- [x] Legacy explicit `ignitionChancePerDay: 0` and versioned explicit `ignitionOpportunityRateScale: 0` remain preserved.
+- [x] Enabled zero-rate runs emit an explicit console warning explaining that no opportunities can be scheduled.
+- [x] TypeScript, campaign persistence, ignition, exact-seed, and queue validation pass.
+
+Touchpoints: `index.html`, `src/ui/character-select.ts`, `src/persistence/lastRunConfig.ts`, `src/systems/fire/sim/ignition/ignitionScheduler.ts`, focused regressions, design/deprecation/queue records
+
+Constraints: repair only the identified unversioned corruption signature; do not remove intentional zero-rate tuning or change calibrated ignition pacing.
+
+Notes: Reported telemetry `enabled=1 rateScale=0.000 opportunities=0` identified the form/persistence fault. Starting a new run after migration repairs the affected last-run configuration to rate scale 1.
+
+Status: done
+
+TSK-0226: Make accelerated ignition runs diagnosable
+
+Type: bug
+
+Why: A reported 20-year 20x run for seed 1294615983 appeared to produce no visible fire, while the ignition system exposed no cumulative telemetry capable of separating disabled scheduling, failed receptivity rolls, successful commits, kernel survival, and detection.
+
+Done when:
+- [x] The reported seed is reproduced on its generated 256x256 map through both direct scheduling and authoritative simulation.
+- [x] Exact-seed regression requires resolver successes to survive the commit step, create active fire, and enter the existing detection system.
+- [x] Ignition telemetry retains cumulative opportunities, candidates, successes, disabled skips, per-source failure reasons, and the latest bounded attempt records.
+- [x] Browser console telemetry reports scheduler seed/enabled/rate configuration, successful attempts, verbose failures, disabled-year warnings, and annual cumulative summaries with stable searchable prefixes.
+- [x] The investigation does not reintroduce neighbor heat priming, guaranteed fires, or the obsolete global weather gate without evidence that the resolver or kernel handoff needs them.
+- [x] TypeScript, focused ignition, exact-seed, fire, and queue validation pass.
+
+Touchpoints: `src/systems/fire/sim/ignition/ignitionScheduler.ts`, `src/systems/fire/types/ignitionTypes.ts`, `src/sim/index.ts`, `scripts/ignition-seed-repro.mjs`, focused regressions, design/queue records
+
+Constraints: preserve deterministic source sequences and current calibrated pacing; diagnostics must not consume simulation RNG or affect fire outcomes.
+
+Notes: The generated-map scheduler produced 1,453 opportunities and 219 successful commits for seed 1294615983 over 20 years. Authoritative simulation produced surviving active fire and 27 detection reports by year 3 before an unattended response-free run ended from losses, so the reported symptom did not reproduce as an ignition-strength or kernel-handoff failure. The added telemetry is intended to reveal disabled runtime configuration or stale/runtime-specific state in the next affected run.
+
+Status: done
+
+TSK-0225: Replace arbitrary campaign starts with modular ignition sources
+
+Type: feature
+
+Why: Guaranteed fire-season starts and HQ-distance-biased random placement produced arbitrary incidents that did not emerge from plausible catalysts or local environmental receptivity.
+
+Done when:
+- [x] Lightning, roadside-human, and settlement/activity sources implement one extensible source interface and immutable registry.
+- [x] Absolute source clocks and serials live in authoritative run state, with independent keyed interval, candidate, strength, and success RNG channels.
+- [x] Road and settlement candidate pools rebuild only on relevant map revisions, while lightning samples bounded deterministic moving storm footprints without full-map scans.
+- [x] One shared resolver hard-rejects inert, fuel-free, burning, or suppression-blocked tiles and makes failed attempts non-mutating.
+- [x] Successful attempts use one external-ignition commit path and hand spread to the existing fire kernel.
+- [x] Campaign scheduling runs year-round, strategic stepping stops at the next opportunity, disabled schedules advance without backlog, and annual scoring initializes at the year boundary.
+- [x] Forced season-entry ignition, HQ-distance weighting, neighbor heat priming, the uniform-random campaign path, and the old weather viability gate are removed.
+- [x] Legacy fire/run settings migrate to `ignitionOpportunityRateScale` and `fireIgnitionEvents`.
+- [x] Focused deterministic, spatial, receptivity, cache, toggle, calibration, TypeScript, fire, climate, settlement, settings, and performance regressions pass.
+
+Touchpoints: `src/systems/fire/sim/ignition/`, `src/systems/fire/types/ignitionTypes.ts`, `src/systems/climate/sim/convectiveStorms.ts`, authoritative simulation state/orchestration, runtime/run settings, focused regressions, design/deprecation/queue records
+
+Constraints: preserve seeded behavior and existing fire propagation; no HQ protection, full-map per-tick candidate scans, rendering dependency, new infrastructure type, or player-facing failed-attempt UI.
+
+Notes: Fixed-seed generated fixtures currently average 8.70 successful incidents in year 1, 6.83 across years 2-5, 9.72 across years 6-10, and 11.46 across years 11-15. Individual quiet years remain possible while aggregate late-career pressure rises.
+
+Status: done
+
+TSK-0224: Increase fire-smoke visibility
+
+Type: polish
+
+Why: Fire smoke dissipated too quickly and emitted too sparsely to remain obvious during active incidents.
+
+Done when:
+- [x] Cluster and tile smoke emit at twice the former baseline rate.
+- [x] Cluster and tile particles take twice as long to traverse their existing normalized fade lifecycle.
+- [x] Normal running and paused incidents use the same smoke render stride and cap, while overload and emergency thinning remain intact.
+- [x] The bounded draw set uses stable deterministic priorities across the complete visible particle pool instead of allowing early slots to monopolize the cap or candidate-count changes to reshuffle billboards between frames.
+- [x] Long-lived particles complete their initial fade quickly enough to remain readable near active flame sources.
+- [x] One smoke clock directly matches resolved incident speed, synchronizing emission, movement, procedural evolution, ageing, and fade across 0.25x, 0.5x, 0.75x, 1x, and pause.
+- [x] Adaptive render caps, game-speed-scaled smoke time, fire simulation, and draw-call structure remain unchanged.
+- [x] TypeScript/build, renderer regression, and queue validation pass.
+- [ ] A supplied capture or supported Browser session confirms the final plume density and fade timing in live motion.
+
+Touchpoints: `src/systems/fire/constants/fireRenderConstants.ts`, `src/systems/fire/rendering/fireFxRuntime.ts`, `src/systems/fire/rendering/fireRenderAnalysis.ts`, `src/systems/fire/rendering/fireRenderMath.ts`, `scripts/render-performance-regression.mjs`, design/deprecation/queue records
+
+Constraints: rendering-only; preserve smoke motion, normalized shader fade shape, adaptive overload fallbacks, fire simulation, saves, and simulation-to-render dependency direction.
+
+Notes: Source-only implementation was explicitly selected because the current VS Code surface cannot inspect localhost. The first supplied pair is static evidence that the former pause-only stride exposed roughly four times the running particle selection. Follow-up captures showed the 160-particle cap selecting early array slots, which often contained older smoke high above the fire after lifetime doubled. The supplied 55-frame GIF then showed that evenly recomputing selections from a changing candidate count made whole billboards pop between frames. The final fix retains the cap and emission rate, uses one fixed full-pool slot-priority order, advances only the short initial fade, and removes the separate 14x/clamped smoke clock so every lifecycle aspect consumes resolved incident speed directly. Automated regression locks the requested 2x emission/lifetime, source-fade timing, stable full-pool selection, exact incident-speed mapping, and pause/run cap parity; the supplied GIF is recorded evidence of the pre-fix membership jitter and a refreshed capture remains the final motion gate.
+
+Status: done
+
 TSK-0223: Keep fire notifications out of the tactical map center
 
 Type: bug

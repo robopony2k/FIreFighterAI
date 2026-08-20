@@ -4,6 +4,9 @@ export const fract = (value: number): number => value - Math.floor(value);
 
 export const hash1 = (value: number): number => fract(Math.sin(value * 12.9898) * 43758.5453);
 
+export const resolveSmokeAnimationRate = (simulationAnimationRate: number): number =>
+  Math.max(0, Number.isFinite(simulationAnimationRate) ? simulationAnimationRate : 0);
+
 export const smoothstep = (edge0: number, edge1: number, x: number): number => {
   if (edge0 === edge1) {
     return x < edge0 ? 0 : 1;
@@ -39,6 +42,39 @@ export const accumulateSmokeEmission = (
     carry: Math.max(0, accumulated - availableSpawns),
     spawnCount: Math.min(Math.max(0, Math.floor(maxSpawns)), availableSpawns)
   };
+};
+
+const getStableSmokeSlotPriority = (index: number): number => {
+  let value = (Math.max(0, Math.floor(index)) + 0x9e3779b9) >>> 0;
+  value = Math.imul(value ^ (value >>> 16), 0x21f0aaad) >>> 0;
+  value = Math.imul(value ^ (value >>> 15), 0x735a2d97) >>> 0;
+  return (value ^ (value >>> 15)) >>> 0;
+};
+
+export const buildStableSmokeSelectionOrder = (slotCount: number): Uint16Array => {
+  const safeSlotCount = Math.min(0x10000, Math.max(0, Math.floor(slotCount)));
+  const slots = Array.from({ length: safeSlotCount }, (_, index) => index);
+  slots.sort((a, b) => getStableSmokeSlotPriority(a) - getStableSmokeSlotPriority(b) || a - b);
+  return Uint16Array.from(slots);
+};
+
+export const selectStableVisibleSmokeSlots = (
+  priorityOrder: Uint16Array,
+  visibleSlots: Uint8Array,
+  maxSelected: number,
+  output: Uint16Array
+): number => {
+  const selectionLimit = Math.min(output.length, Math.max(0, Math.floor(maxSelected)));
+  let selectedCount = 0;
+  for (let priority = 0; priority < priorityOrder.length && selectedCount < selectionLimit; priority += 1) {
+    const slot = priorityOrder[priority]!;
+    if (slot >= visibleSlots.length || visibleSlots[slot] === 0) {
+      continue;
+    }
+    output[selectedCount] = slot;
+    selectedCount += 1;
+  }
+  return selectedCount;
 };
 
 export const normalizeXZ = (x: number, z: number): { x: number; z: number } => {

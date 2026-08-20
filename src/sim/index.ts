@@ -8,10 +8,8 @@ import {
   CAREER_YEARS,
   DEFAULT_INCIDENT_TIME_SPEED_INDEX,
   DAYS_PER_SECOND,
-  FIRE_WEATHER_RISK_MIN,
   INCIDENT_FIRE_PACING_SCALE,
   INCIDENT_TIME_SPEED_OPTIONS,
-  NEIGHBOR_DIRS,
   TIME_SPEED_OPTIONS,
   getTimeSpeedOptions
 } from "../core/config.js";
@@ -26,7 +24,7 @@ import { getFireSeasonIntensity, getPhaseInfo, PHASES } from "../core/time.js";
 import { RNG as RuntimeRng } from "../core/rng.js";
 import { setStatus, resetStatus } from "../core/state.js";
 import { configureSimProfiler, maybeReport, profEnd, profStart } from "../core/diagnostics/simProfiler.js";
-import { inBounds, indexFor } from "../core/grid.js";
+import { indexFor } from "../core/grid.js";
 import { getCharacterBaseBudget, getCharacterDefinition } from "../core/characters.js";
 import {
   ambientTemp,
@@ -41,8 +39,7 @@ import {
 } from "../core/climate.js";
 import { randomizeWind, stepWind } from "./wind.js";
 import { resetFireBounds, stepFire } from "./fire.js";
-import { INITIAL_IGNITION_ATTEMPTS, findIgnitionCandidate, igniteRandomFire } from "./fire/ignite.js";
-import { clearFireBlocks, markFireBlockActiveByTile } from "./fire/activeBlocks.js";
+import { clearFireBlocks } from "../systems/fire/sim/fireActiveBlocks.js";
 import { advanceCareerDay, getClimateRisk } from "./climateRuntime.js";
 import { isBaseTileLost } from "./failure.js";
 import { updatePhaseControls } from "./lifecycle.js";
@@ -68,9 +65,13 @@ import {
 import {
   getAdaptiveFireSubstepMax,
   getBurnoutFactorForRisk,
-  isRandomIgnitionWeatherViable,
   sampleFireWeatherResponse
 } from "./fire/fireWeather.js";
+import {
+  formatIgnitionTelemetrySummary,
+  getNextIgnitionOpportunityDay,
+  stepIgnitionSources
+} from "../systems/fire/sim/ignition/ignitionScheduler.js";
 import type { InputState } from "../core/inputState.js";
 import type { EffectsState } from "../core/effectsState.js";
 import { getRuntimeSettings, subscribeRuntimeSettings } from "../persistence/runtimeSettings.js";
@@ -123,7 +124,7 @@ const VIRTUAL_YEAR_DAYS = Math.max(1, Math.floor(VIRTUAL_CLIMATE_PARAMS.seasonLe
 const CAREER_TOTAL_DAYS = VIRTUAL_YEAR_DAYS * CAREER_YEARS;
 const CLIMATE_SEASONS = ["Winter", "Spring", "Summer", "Autumn"];
 const RUNTIME_CONSTRUCTION_EVENT_DAYS_PER_TICK = 2;
-let allowFireIgnitionEvents = getRuntimeSettings().randomFireIgnition;
+let allowFireIgnitionEvents = getRuntimeSettings().fireIgnitionEvents;
 let allowAnnualReport = getRuntimeSettings().annualReportEnabled;
 let pauseOnFireEvent = getRuntimeSettings().pauseOnFireEvent;
 let pauseOnAnnualReportEvent = getRuntimeSettings().pauseOnAnnualReportEvent;
@@ -151,7 +152,7 @@ const resetStepPerfTelemetry = (state: WorldState): void => {
 
 subscribeRuntimeSettings((settings) => {
   configureSimProfiler(settings);
-  allowFireIgnitionEvents = settings.randomFireIgnition;
+  allowFireIgnitionEvents = settings.fireIgnitionEvents;
   allowAnnualReport = settings.annualReportEnabled;
   pauseOnFireEvent = settings.pauseOnFireEvent;
   pauseOnAnnualReportEvent = settings.pauseOnAnnualReportEvent;
@@ -580,13 +581,13 @@ export const getStrategicFireSimulationStepCap = (state: WorldState): number | n
   if (hasFireSimulationWork(state)) {
     return STRATEGIC_FIRE_SIM_STEP_CAP_DAYS / Math.max(DAYS_PER_SECOND, 0.0001);
   }
-  if (state.phase !== "fire" || !allowFireIgnitionEvents) {
+  if (!allowFireIgnitionEvents) {
     return null;
   }
-  const weather = sampleFireWeatherResponse(state, state.careerDay);
-  const fireEligibleWeather =
-    weather.climateRisk >= FIRE_WEATHER_RISK_MIN || isRandomIgnitionWeatherViable(weather);
-  return fireEligibleWeather ? STRATEGIC_FIRE_SIM_STEP_CAP_DAYS / Math.max(DAYS_PER_SECOND, 0.0001) : null;
+  const nextOpportunityDay = getNextIgnitionOpportunityDay(state);
+  if (!Number.isFinite(nextOpportunityDay)) return null;
+  const daysUntilOpportunity = Math.max(0.0001, nextOpportunityDay - state.careerDay);
+  return daysUntilOpportunity / Math.max(DAYS_PER_SECOND, 0.0001);
 };
 
 export const isAdvanceToNextEventAvailable = (state: WorldState): boolean =>
@@ -788,11 +789,13 @@ export function calculateBudgetOutcome(state: WorldState): void {
 }
 
 export function startNewYear(state: WorldState): void {
+  if (typeof window !== "undefined") console.info(formatIgnitionTelemetrySummary(state));
   state.budget = state.pendingBudget;
   state.yearPropertyLost = 0;
   state.yearLivesLost = 0;
   state.yearBurnedTiles = 0;
   state.containedCount = 0;
+  startScoringSeason(state);
   selectUnit(state, null);
   setDeployMode(state, null);
 }
@@ -880,16 +883,12 @@ export function setPhase(state: WorldState, rng: RNG, next: WorldState["phase"],
   }
   if (state.phase === "fire") {
     randomizeWind(state, rng);
-    if (allowFireIgnitionEvents) {
-      pickInitialFires(state, rng);
-    }
     state.incidentTimeSpeedIndex = DEFAULT_INCIDENT_TIME_SPEED_INDEX;
-    startScoringSeason(state);
     debugClimateChecks(state.seed, VIRTUAL_CLIMATE_PARAMS, DEFAULT_MOISTURE_PARAMS);
     setStatus(
       state,
       allowFireIgnitionEvents
-        ? "Fire season begins. Stay ahead of the line."
+        ? "Fire season begins. Catalyst-driven ignition remains active across the year."
         : "Fire season begins with ignition events disabled."
     );
     showSeasonOverlay(state);
@@ -935,68 +934,6 @@ export function advanceCalendar(state: WorldState, rng: RNG, dayDelta: number): 
     }
     state.phaseDay -= current.duration;
     advancePhase(state, rng);
-  }
-}
-
-export function pickInitialFires(state: WorldState, rng: RNG): void {
-  let placed = 0;
-  const targetFires = state.year >= 15 ? 4 : state.year >= 10 ? 3 : state.year >= 5 ? 2 : 1;
-  let minX = state.grid.cols;
-  let maxX = -1;
-  let minY = state.grid.rows;
-  let maxY = -1;
-  const primeNeighborHeat = (originX: number, originY: number): void => {
-    const boost = 0.9;
-    for (const offset of NEIGHBOR_DIRS) {
-      const nx = originX + offset.x;
-      const ny = originY + offset.y;
-      if (!inBounds(state.grid, nx, ny)) {
-        continue;
-      }
-      const nIdx = indexFor(state.grid, nx, ny);
-      const neighbor = state.tiles[nIdx];
-      if (state.tileFire[nIdx] > 0 || state.tileFuel[nIdx] <= 0) {
-        continue;
-      }
-      const nextHeat = Math.max(state.tileHeat[nIdx], neighbor.ignitionPoint * boost);
-      neighbor.heat = nextHeat;
-      state.tileHeat[nIdx] = nextHeat;
-      markFireBlockActiveByTile(state, nIdx);
-    }
-  };
-  const igniteTile = (tile: WorldState["tiles"][number], idx: number, x: number, y: number): void => {
-    tile.fire = 0.5 + rng.next() * 0.2;
-    tile.heat = Math.max(tile.heat, tile.ignitionPoint * 1.4);
-    state.tileFire[idx] = tile.fire;
-    state.tileHeat[idx] = tile.heat;
-    markFireBlockActiveByTile(state, idx);
-    placed += 1;
-    minX = Math.min(minX, x);
-    maxX = Math.max(maxX, x);
-    minY = Math.min(minY, y);
-    maxY = Math.max(maxY, y);
-  };
-
-  while (placed < targetFires) {
-    const candidate = findIgnitionCandidate(state, rng, {
-      maxAttempts: INITIAL_IGNITION_ATTEMPTS,
-      preferredTerrainOnly: true
-    });
-    if (!candidate) {
-      break;
-    }
-    igniteTile(state.tiles[candidate.idx], candidate.idx, candidate.x, candidate.y);
-    primeNeighborHeat(candidate.x, candidate.y);
-  }
-
-  if (placed > 0) {
-    state.fireBoundsActive = true;
-    state.fireMinX = minX;
-    state.fireMaxX = maxX;
-    state.fireMinY = minY;
-    state.fireMaxY = maxY;
-    state.lastActiveFires = Math.max(state.lastActiveFires, placed);
-    applyFireActivityMetrics(state, state.lastActiveFires);
   }
 }
 
@@ -1117,8 +1054,8 @@ export function stepSim(
   });
   profEnd("townConstruction", townConstructionProfStart);
   state.simPerfTownConstructionMs = nowMs() - townConstructionPerfStart;
-  const allowIgnition = state.phase === "fire" && climateRisk >= FIRE_WEATHER_RISK_MIN;
-  const allowFireSim = hasFireSimulationWork(state) || allowIgnition;
+  const ignitionStep = stepIgnitionSources(state, state.careerDay, allowFireIgnitionEvents);
+  const allowFireSim = hasFireSimulationWork(state) || ignitionStep.successfulIgnitions > 0;
 
   if (state.units.length > 0) {
     const unitsPerfStart = nowMs();
@@ -1186,11 +1123,6 @@ export function stepSim(
       state.fireSeasonDay += simDayDelta;
       const seasonIntensity = phaseSample.id === "fire" ? getFireSeasonIntensity(phaseSample.phaseDay, state.fireSettings) : 1;
       const spreadScale = state.fireSettings.simSpeed * (0.55 + seasonIntensity * 0.45);
-      if (allowFireIgnitionEvents && phaseSample.id === "fire" && isRandomIgnitionWeatherViable(weather)) {
-        igniteRandomFire(state, rng, simDayDelta, clamp(weather.ignition, 0, 1.35));
-        activeFires = Math.max(activeFires, state.lastActiveFires);
-        fireActivityState = state.fireActivityState;
-      }
       if (state.units.length > 0) {
         applyExtinguishStep(state, simDelta, weather.suppression);
       }

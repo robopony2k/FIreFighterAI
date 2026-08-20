@@ -23,8 +23,7 @@ export class SeasonalCloudRenderClock {
     careerDay: 0,
     weatherSeed: 0,
     worldSeed: 0,
-    nearDriftPerDay: SEASONAL_SKY_CONFIG.cloudLayerDriftNear,
-    farDriftPerDay: SEASONAL_SKY_CONFIG.cloudLayerDriftFar
+    driftPerDay: SEASONAL_SKY_CONFIG.cloudLayerDriftPerDay
   };
   private readonly output = createSeasonalCloudAdvectionState();
 

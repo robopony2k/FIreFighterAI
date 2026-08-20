@@ -1,5 +1,150 @@
 # Deprecations
 
+## Uniform Five-Cell Cloud Opportunity Grid
+
+Status: Deprecated as of August 19, 2026.
+
+- Fair-weather placement no longer exposes nearly every feature of a five-by-five tileable Worley field with only a weak additive broad-noise bias.
+- That construction filled spring and, to a lesser extent, other seasons with many similarly sized, nearly evenly spaced clouds that moved as an obvious repeated set.
+- The replacement uses fewer primary cellular seeds and multiplicatively gates their strength through a deterministic two-cycle weather-system envelope, producing varied footprint sizes, clustered groups, and broad clear regions.
+
+Migration guidance:
+
+1. Control large-scale grouping in the generated weather footprint rather than changing seasonal density, volume morphology, or advection speed.
+2. Preserve one coherent wind translation for all footprints; spatial variety must come from placement rather than differential motion.
+3. Keep the existing packed RGBA weather texture and weather-first empty-space rejection cost.
+
+## Height-Warped Horizontal Cloud Coordinates
+
+Status: Deprecated as of August 19, 2026.
+
+- A single volumetric cloud body no longer interpolates between near/far horizontal scales and offsets from base to crown.
+- Normalized height is also removed from volume X/Z, while accumulated horizontal advection no longer shifts volume Y. Those cross-axis transforms bent tall spring formations into repeated hooks and boomerangs.
+- Weather and volume sampling now share one coherent horizontal transform; normalized cloud height primarily addresses volume Y, while existing profile contraction and density gradients continue shaping seasonal crowns.
+
+Migration guidance:
+
+1. Keep horizontal position and advection on volume X/Z and normalized cloud height on volume Y.
+2. Shape seasonal silhouettes through `SeasonalCloudProfile` and density envelopes rather than height-dependent coordinate shear.
+3. Preserve the coherent accumulated translation, deterministic local warp, atlas contract, and fixed march budget.
+
+## Differential Lifetime Drift Through Cloud Height
+
+Status: Deprecated as of August 19, 2026.
+
+- The lower and upper seasonal-cloud offsets no longer multiply all accumulated career travel by different drift rates.
+- Blending those increasingly separated offsets through cloud height sheared a single volume repeatedly along the prevailing wind. Tall, bright spring formations exposed the wraps most clearly as movement-aligned streaks.
+- Both offsets now share one deterministic accumulated translation while retaining only their bounded seeded separation, preserving wind direction, visible speed, parallax, pause behavior, and smooth render-clock interpolation.
+
+Migration guidance:
+
+1. Advect one volumetric cloud body with one accumulated translation; do not reuse independent planar-layer speeds across its height.
+2. Keep any height-dependent parallax bounded and independent of total career duration.
+3. Preserve the authoritative simulation clock and stable climate-wind track rather than integrating render frames.
+
+## Continuous-Direction Cloud Jitter Hash
+
+Status: Deprecated as of August 19, 2026.
+
+- Cloud ray jitter no longer hashes a continuous dot product of sky direction through `sin` and `fract`.
+- That scalar field produced coherent curved and horizontal level sets rather than spatially uncorrelated phases; expanding it across the full march interval made its fixed bands more visible in the supplied follow-up capture.
+- The replacement uses a stable interleaved-gradient phase derived from integer fragment coordinates, breaking march planes into fine stationary sampling variation without time input, extra textures, or extra volume samples.
+
+Migration guidance:
+
+1. Do not generate raymarch jitter by hashing a smoothly varying direction or world-coordinate scalar.
+2. Keep the stratification phase independent of simulation time and frame number so cloud advection remains continuous without temporal noise.
+3. Retain the full step interval, true-elevation slab intersection, fixed march ceiling, and existing cloud density evaluation.
+
+## Clamped and Narrow-Phase Horizon Cloud March
+
+Status: Deprecated as of August 19, 2026.
+
+- Accepted shallow cloud rays no longer replace their true vertical direction with `0.035` when intersecting the cloud slab.
+- The former intersection started some rays below the cloud base, while restricting deterministic jitter to the middle 36% of each march interval left most neighbouring samples on correlated height planes. Moving density exposed those planes as stippled horizontal streaks.
+- Rays now retain the existing low-horizon rejection, intersect at their true elevation, and use the full deterministic per-pixel stratification interval without frame-random noise or additional march steps.
+
+Migration guidance:
+
+1. Reject unsupported near-horizontal rays explicitly, then use the accepted direction unchanged for slab intersection.
+2. Keep sampling phase deterministic and pixel-stable, but distribute it across the full step interval to break coherent march planes.
+3. Preserve the fixed march ceiling, early transmittance exit, simulation-time advection, and matching CPU intersection geometry.
+
+## Horizontally Sheared Seasonal-Cloud Volume Y
+
+Status: Deprecated as of August 18, 2026.
+
+- Seasonal-cloud volume Y no longer includes a scaled horizontal-world contribution from the rotated Z direction.
+- The former cross-axis term made shallow rays traverse a sheared field and exposed moving, correlated horizontal streaks even though the weather footprint itself was coherent.
+- Volume X/Z remain driven primarily by rotated horizontal travel, while volume Y now follows normalized cloud height plus bounded deterministic local warp and layer offset.
+
+Migration guidance:
+
+1. Keep the GPU and CPU cloud-density coordinate mappings identical.
+2. Preserve the padded, non-mipmapped 2D atlas with clamped bilinear filtering and explicit adjacent-Z-slice interpolation.
+3. Do not add frame-random sampling or extra march steps to hide coordinate anisotropy; retain simulation-time advection and the fixed march budget.
+
+## Blank Legacy Ignition Input Coercion
+
+Status: Deprecated as of August 18, 2026.
+
+- The new-run fire tuning form no longer exposes the removed `ignitionChancePerDay` key or converts its blank migrated input through `Number("")` to zero.
+- The control now edits `ignitionOpportunityRateScale` directly and defaults to `1`; blank numeric controls are ignored during collection instead of becoming valid zeroes.
+- Last-run configurations now carry schema version 2. Unversioned configurations with the specific corrupted `ignitionOpportunityRateScale: 0` shape repair to the default, while legacy explicit `ignitionChancePerDay: 0` and future versioned explicit scale zero remain intentional.
+
+Migration guidance:
+
+1. Read ignition tuning through `normalizeFireSettings` and use `ignitionOpportunityRateScale` in current forms and saved data.
+2. Never treat an empty numeric input as zero without explicit product intent.
+3. Preserve explicit zero only when its legacy field or versioned schema establishes user intent.
+
+## HQ-Biased and Guaranteed Campaign Fire Starts
+
+Status: Deprecated as of August 18, 2026.
+
+- Campaign fires no longer use an HQ exclusion radius, career-expanded preferred radius, uniformly sampled terrain fallback, or guaranteed 1-4 fire-season entry starts.
+- Selected campaign opportunities no longer write a guaranteed fire or prime neighboring tiles to 90% of their ignition threshold.
+- The former global `ignitionChancePerDay` and persisted `randomFireIgnition` names are replaced by `ignitionOpportunityRateScale` and `fireIgnitionEvents`; compatibility reads preserve older run configurations and runtime settings.
+- Lightning, roadside-human, and settlement/activity sources now schedule deterministic opportunities and pass candidates through shared environmental receptivity before successful starts enter the existing spread kernel.
+
+Migration guidance:
+
+1. Add future catalysts through the immutable ignition-source registry and source interface rather than changing the scheduler or propagation kernel.
+2. Use source-owned cached candidate pools and keyed interval/candidate/strength/success streams; never inspect HQ distance.
+3. Treat failed opportunities as non-mutating diagnostics and commit successful starts only through the shared external-ignition boundary.
+4. Keep convective ignition storms separate from seasonal rain and rendering until those effects receive their own design work.
+
+## Accelerated and Capped Smoke Visual Clock
+
+Status: Deprecated as of August 18, 2026.
+
+- Smoke no longer multiplies resolved incident speed by 14 and caps the result at 4x.
+- The former mapping made 0.5x, 0.75x, and 1x incidents animate smoke at the same rate and left only a small difference at 0.25x.
+- Emission, movement, procedural evolution, ageing, and fade now consume the resolved incident game speed directly, while pause remains a zero-rate freeze.
+
+Migration guidance:
+
+1. Pass the resolved simulation animation rate into the fire rendering boundary.
+2. Use that rate without a smoke-only multiplier or ceiling for every smoke lifecycle delta and clock.
+3. Keep adaptive particle budgets independent from lifecycle speed.
+
+## State- and Slot-Biased Fire Smoke Selection
+
+Status: Deprecated as of August 18, 2026.
+
+- Pausing no longer changes normal fire smoke from a thinned running selection to a full-stride particle selection.
+- Normal running and paused incidents now render the same bounded particle selection, so pause only freezes smoke motion and ageing.
+- Reaching the render cap no longer keeps only the first visible particle slots, which biased dense incidents toward older smoke already high above its sources.
+- The bounded draw set now uses fixed deterministic slot priorities across the complete visible pool, and new long-lived particles begin further through their short fade-in so source smoke remains represented without frame-to-frame membership reshuffles.
+- Overload and emergency render strides remain available as performance safeguards.
+
+Migration guidance:
+
+1. Keep normal running and paused smoke on the same render stride and cap.
+2. Apply adaptive stride as a count limit over the complete visible pool rather than as a particle-slot modulus.
+3. Use a fixed slot-priority permutation for capped selection so ordinary candidate-count changes cannot reshuffle the full draw set.
+4. Preserve pause as a temporal freeze rather than a visual-density mode.
+
 ## Overlapping Response Trucks on Roads
 
 Status: Deprecated as of August 15, 2026.

@@ -701,10 +701,10 @@ export const bindPhaseUi = ({
   }
 
   phaseUi.controller.setSimulationToggleState(getRuntimeSettings());
-  phaseUi.controller.onRandomFireIgnitionToggle((enabled) => {
+  phaseUi.controller.onFireIgnitionEventsToggle((enabled) => {
     noteInteraction();
     uiAudio?.play("toggle");
-    setRuntimeSetting("randomFireIgnition", enabled);
+    setRuntimeSetting("fireIgnitionEvents", enabled);
   });
   phaseUi.controller.onAnnualReportToggle((enabled) => {
     noteInteraction();

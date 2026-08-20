@@ -2,8 +2,8 @@ import { inBounds, indexFor } from "../../core/grid.js";
 import { setStatus } from "../../core/state.js";
 import type { WorldState } from "../../core/state.js";
 import { ensureTileSoA } from "../../core/tileCache.js";
-import { ensureFireBlocks, markFireBlockActiveByTile } from "./activeBlocks.js";
-import { markFireBounds } from "./bounds.js";
+import { ensureFireBlocks, markFireBlockActiveByTile } from "../../systems/fire/sim/fireActiveBlocks.js";
+import { markFireBounds } from "../../systems/fire/sim/fireBounds.js";
 
 const DEBUG_IGNITE_SIM_KICK_SECONDS = 0.12;
 

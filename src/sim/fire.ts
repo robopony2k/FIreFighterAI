@@ -7,10 +7,9 @@ import { advanceHouseDamage } from "../systems/settlements/sim/buildingLifecycle
 import { runFireKernel } from "../systems/fire/sim/fireKernel.js";
 import { recordFireKernelTelemetry } from "../systems/fire/controllers/fireRuntimeTelemetry.js";
 import type { FireKernelHooks, FireKernelStepOptions } from "../systems/fire/sim/fireKernelTypes.js";
-import { buildFireWorkBlocks, ensureFireBlocks, finalizeFireBlocks, markFireBlockNextByTile } from "./fire/activeBlocks.js";
-import { resetFireBounds } from "./fire/bounds.js";
+import { buildFireWorkBlocks, ensureFireBlocks, finalizeFireBlocks, markFireBlockNextByTile } from "../systems/fire/sim/fireActiveBlocks.js";
+import { resetFireBounds } from "../systems/fire/sim/fireBounds.js";
 import type { FireWeatherResponse } from "./fire/fireWeather.js";
-import { igniteRandomFire } from "./fire/ignite.js";
 import { emitSmokeAt } from "./particles.js";
 import { profElapsed, profEnd, profStart } from "../core/diagnostics/simProfiler.js";
 import { markAttributedFireLossTile, queueScoreFlowEvent } from "./scoring.js";
@@ -110,5 +109,4 @@ export function stepFire(
   return result.activeFires;
 }
 
-export { igniteRandomFire };
 export { resetFireBounds };

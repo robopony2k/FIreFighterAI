@@ -13,8 +13,7 @@ export type SeasonalCloudAdvectionInput = {
   careerDay: number;
   weatherSeed: number;
   worldSeed?: number;
-  nearDriftPerDay: number;
-  farDriftPerDay: number;
+  driftPerDay: number;
 };
 
 export type SeasonalCloudAdvectionState = {
@@ -68,10 +67,12 @@ export const sampleSeasonalCloudAdvectionInto = (
   const travelY =
     (directionY * longitudinalDays + crosswindY * crosswindDays) * travelScale;
 
-  output.nearX = seedX - travelX * input.nearDriftPerDay;
-  output.nearY = seedY - travelY * input.nearDriftPerDay;
-  output.farX = seedX * 0.61 - travelX * input.farDriftPerDay + 0.19;
-  output.farY = seedY * 0.61 - travelY * input.farDriftPerDay - 0.11;
+  const driftX = travelX * input.driftPerDay;
+  const driftY = travelY * input.driftPerDay;
+  output.nearX = seedX - driftX;
+  output.nearY = seedY - driftY;
+  output.farX = seedX * 0.61 - driftX + 0.19;
+  output.farY = seedY * 0.61 - driftY - 0.11;
   output.morphTimeDays = careerDay + hash01(stableSeed, 95.83) * 23;
   return output;
 };

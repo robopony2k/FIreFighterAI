@@ -315,6 +315,39 @@ const createRunConfig = (difficultyId) => ({
 saveLastRunConfig(createRunConfig("inferno"));
 assert.equal(loadLastRunConfig()?.difficultyId, "inferno", "last-run persistence should remember the selected difficulty");
 
+const explicitZeroConfig = createRunConfig("blaze");
+explicitZeroConfig.options.fire.ignitionOpportunityRateScale = 0;
+saveLastRunConfig(explicitZeroConfig);
+assert.equal(
+  loadLastRunConfig()?.options.fire.ignitionOpportunityRateScale,
+  0,
+  "versioned last-run configurations should preserve an explicitly selected zero ignition rate"
+);
+assert.equal(
+  JSON.parse(localStorage.getItem("fireline.lastRunConfig")).schemaVersion,
+  2,
+  "saved last-run configurations should carry the ignition migration schema version"
+);
+
+const corruptedUnversionedZero = createRunConfig("blaze");
+corruptedUnversionedZero.options.fire.ignitionOpportunityRateScale = 0;
+localStorage.setItem("fireline.lastRunConfig", JSON.stringify(corruptedUnversionedZero));
+assert.equal(
+  loadLastRunConfig()?.options.fire.ignitionOpportunityRateScale,
+  1,
+  "unversioned zero produced by the retired blank ignition input should repair to the default rate"
+);
+
+const legacyExplicitZero = createRunConfig("blaze");
+delete legacyExplicitZero.options.fire.ignitionOpportunityRateScale;
+legacyExplicitZero.options.fire.ignitionChancePerDay = 0;
+localStorage.setItem("fireline.lastRunConfig", JSON.stringify(legacyExplicitZero));
+assert.equal(
+  loadLastRunConfig()?.options.fire.ignitionOpportunityRateScale,
+  0,
+  "legacy configurations that explicitly selected zero ignition chance should remain disabled"
+);
+
 const { difficultyId: omittedDifficulty, ...legacyConfig } = createRunConfig("ember");
 void omittedDifficulty;
 localStorage.setItem("fireline.lastRunConfig", JSON.stringify(legacyConfig));

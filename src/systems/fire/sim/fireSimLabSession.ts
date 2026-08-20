@@ -6,8 +6,8 @@ import { createInitialState, TILE_TYPE_IDS, type WorldState } from "../../../cor
 import { syncTileSoA, syncTileSoAIndex } from "../../../core/tileCache.js";
 import { clamp } from "../../../core/utils.js";
 import type { FuelProfile, TileType } from "../../../core/types.js";
-import { clearFireBlocks, markFireBlockActiveByTile } from "../../../sim/fire/activeBlocks.js";
-import { markFireBounds, resetFireBounds } from "../../../sim/fire/bounds.js";
+import { clearFireBlocks, markFireBlockActiveByTile } from "./fireActiveBlocks.js";
+import { markFireBounds, resetFireBounds } from "./fireBounds.js";
 import { stepFire } from "../../../sim/fire.js";
 import {
   DEFAULT_FIRE_SIM_LAB_ENVIRONMENT,

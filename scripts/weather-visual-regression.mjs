@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import * as THREE from "three";
@@ -23,6 +24,9 @@ const { sampleSeasonalCloudProfile } = await import(
 const { sampleClimateWindDirection } = await import(
   distImport(["systems", "climate", "sim", "climateWindDirection.js"])
 );
+const { sampleSeasonalCloudAdvection } = await import(
+  distImport(["systems", "climate", "rendering", "seasonalCloudAdvection.js"])
+);
 const {
   SEASONAL_CLOUD_NOISE,
   SEASONAL_CLOUD_NOISE_CHANNELS,
@@ -31,16 +35,30 @@ const {
 } = await import(distImport(["systems", "climate", "rendering", "seasonalCloudField.js"]));
 const {
   SEASONAL_CLOUD_VOLUME,
+  SEASONAL_CLOUD_VOLUME_ATLAS_BORDER,
+  SEASONAL_CLOUD_VOLUME_ATLAS_COLUMNS,
   SEASONAL_CLOUD_VOLUME_ATLAS_HEIGHT,
+  SEASONAL_CLOUD_VOLUME_ATLAS_STRIDE,
   SEASONAL_CLOUD_VOLUME_ATLAS_WIDTH,
   SEASONAL_CLOUD_VOLUME_CHANNELS,
   sampleSeasonalCloudVolume
 } = await import(distImport(["systems", "climate", "rendering", "seasonalCloudVolume.js"]));
+const { seasonalSkyFragmentShader } = await import(
+  distImport(["systems", "climate", "rendering", "seasonalCloudShader.js"])
+);
 const { resolveOceanSurfaceContext } = await import(
   distImport(["render", "water", "ocean", "oceanSurfaceContext.js"])
 );
 const { SeasonalCloudRenderClock } = await import(
   distImport(["systems", "climate", "controllers", "seasonalCloudRenderClock.js"])
+);
+const seasonalCloudFieldSource = await readFile(
+  path.join(repoRoot, "src", "systems", "climate", "rendering", "seasonalCloudField.ts"),
+  "utf8"
+);
+const seasonalSkyDomeSource = await readFile(
+  path.join(repoRoot, "src", "systems", "climate", "rendering", "seasonalSkyDome.ts"),
+  "utf8"
 );
 
 const baseInput = {
@@ -138,6 +156,86 @@ assert.ok(
   Math.abs(weatherProbe - sampleSeasonalCloudWeather(1.27, 0.61, 0)) < 1e-12,
   "the generated weather field must tile without a horizontal seam"
 );
+const springFootprintThreshold = 0.78;
+const footprintRegionOccupancy = [];
+let occupiedFootprintSamples = 0;
+for (let regionY = 0; regionY < 4; regionY += 1) {
+  for (let regionX = 0; regionX < 4; regionX += 1) {
+    let regionOccupied = 0;
+    for (let localY = 0; localY < 32; localY += 1) {
+      for (let localX = 0; localX < 32; localX += 1) {
+        const weatherU = (regionX * 32 + localX + 0.5) / SEASONAL_CLOUD_NOISE.size;
+        const weatherV = (regionY * 32 + localY + 0.5) / SEASONAL_CLOUD_NOISE.size;
+        if (sampleSeasonalCloudWeather(weatherU, weatherV, 0) > springFootprintThreshold) {
+          regionOccupied += 1;
+        }
+      }
+    }
+    footprintRegionOccupancy.push(regionOccupied / (32 * 32));
+    occupiedFootprintSamples += regionOccupied;
+  }
+}
+const footprintOccupancy = occupiedFootprintSamples / (SEASONAL_CLOUD_NOISE.size ** 2);
+assert.ok(
+  footprintOccupancy > 0.08 && footprintOccupancy < 0.3,
+  "fair-weather footprints must remain substantial without speckling the whole sky"
+);
+assert.ok(
+  Math.max(...footprintRegionOccupancy) - Math.min(...footprintRegionOccupancy) > 0.3 &&
+    footprintRegionOccupancy.filter((occupancy) => occupancy < 0.03).length >= 2,
+  "low-frequency weather systems must create clustered cloud regions and broad clear gaps"
+);
+const footprintMask = new Uint8Array(SEASONAL_CLOUD_NOISE.size ** 2);
+for (let index = 0; index < footprintMask.length; index += 1) {
+  footprintMask[index] =
+    (SEASONAL_CLOUD_NOISE.data[index * SEASONAL_CLOUD_NOISE_CHANNELS] ?? 0) / 255 > 0.76
+      ? 1
+      : 0;
+}
+const visitedFootprint = new Uint8Array(footprintMask.length);
+const footprintAreas = [];
+for (let start = 0; start < footprintMask.length; start += 1) {
+  if (footprintMask[start] === 0 || visitedFootprint[start] !== 0) {
+    continue;
+  }
+  const pending = [start];
+  visitedFootprint[start] = 1;
+  let area = 0;
+  while (pending.length > 0) {
+    const index = pending.pop();
+    const x = index % SEASONAL_CLOUD_NOISE.size;
+    const y = Math.floor(index / SEASONAL_CLOUD_NOISE.size);
+    area += 1;
+    for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+      const nextX = x + dx;
+      const nextY = y + dy;
+      if (
+        nextX < 0 || nextX >= SEASONAL_CLOUD_NOISE.size ||
+        nextY < 0 || nextY >= SEASONAL_CLOUD_NOISE.size
+      ) {
+        continue;
+      }
+      const next = nextY * SEASONAL_CLOUD_NOISE.size + nextX;
+      if (footprintMask[next] !== 0 && visitedFootprint[next] === 0) {
+        visitedFootprint[next] = 1;
+        pending.push(next);
+      }
+    }
+  }
+  footprintAreas.push(area);
+}
+footprintAreas.sort((a, b) => a - b);
+assert.ok(
+  footprintAreas.length >= 5 &&
+    footprintAreas.length <= 16 &&
+    footprintAreas.at(-1) > footprintAreas[0] * 8,
+  "fair-weather footprint islands must vary materially in size instead of repeating one cell scale"
+);
+assert.match(
+  seasonalCloudFieldSource,
+  /sampleTileableWorley\(warpedU, warpedV, 4, 0\.17\)[\s\S]*weatherSystem[\s\S]*clusterStrength/,
+  "cloud placement must combine fewer cellular seeds with a broad weather-system envelope"
+);
 assert.equal(
   SEASONAL_CLOUD_VOLUME.data.length,
   SEASONAL_CLOUD_VOLUME.size ** 3 * SEASONAL_CLOUD_VOLUME_CHANNELS,
@@ -149,6 +247,98 @@ assert.equal(
     SEASONAL_CLOUD_VOLUME_ATLAS_HEIGHT *
     SEASONAL_CLOUD_VOLUME_CHANNELS,
   "the GPU cloud atlas must contain every padded volume slice"
+);
+assert.equal(
+  SEASONAL_CLOUD_VOLUME_ATLAS_BORDER,
+  1,
+  "one periodic texel must pad each atlas slice for bilinear filtering"
+);
+const readAtlasChannel = (x, y, channel) =>
+  SEASONAL_CLOUD_VOLUME.atlasData[
+    (y * SEASONAL_CLOUD_VOLUME_ATLAS_WIDTH + x) * SEASONAL_CLOUD_VOLUME_CHANNELS + channel
+  ];
+for (let z = 0; z < SEASONAL_CLOUD_VOLUME.size; z += 1) {
+  const tileX = z % SEASONAL_CLOUD_VOLUME_ATLAS_COLUMNS;
+  const tileY = Math.floor(z / SEASONAL_CLOUD_VOLUME_ATLAS_COLUMNS);
+  const tileOriginX = tileX * SEASONAL_CLOUD_VOLUME_ATLAS_STRIDE;
+  const tileOriginY = tileY * SEASONAL_CLOUD_VOLUME_ATLAS_STRIDE;
+  for (let channel = 0; channel < SEASONAL_CLOUD_VOLUME_CHANNELS; channel += 1) {
+    assert.equal(
+      readAtlasChannel(tileOriginX, tileOriginY + 1, channel),
+      readAtlasChannel(tileOriginX + SEASONAL_CLOUD_VOLUME.size, tileOriginY + 1, channel),
+      `slice ${z} left atlas border must repeat its rightmost voxel`
+    );
+    assert.equal(
+      readAtlasChannel(tileOriginX + 1, tileOriginY, channel),
+      readAtlasChannel(tileOriginX + 1, tileOriginY + SEASONAL_CLOUD_VOLUME.size, channel),
+      `slice ${z} top atlas border must repeat its bottom voxel`
+    );
+  }
+}
+assert.match(
+  seasonalSkyDomeSource,
+  /texture\.wrapS = THREE\.ClampToEdgeWrapping;[\s\S]*texture\.wrapT = THREE\.ClampToEdgeWrapping;[\s\S]*texture\.magFilter = THREE\.LinearFilter;[\s\S]*texture\.minFilter = THREE\.LinearFilter;[\s\S]*texture\.generateMipmaps = false;/,
+  "the packed cloud atlas must use clamped non-mipmapped bilinear filtering"
+);
+assert.match(
+  seasonalSkyFragmentShader,
+  /sampleCloudVolume\(vec3 position\)[\s\S]*slice0[\s\S]*slice1[\s\S]*mix\(lowSlice, highSlice, sliceMix\)/,
+  "the shader must interpolate adjacent volume slices explicitly"
+);
+assert.doesNotMatch(
+  seasonalSkyFragmentShader,
+  /height01 \* 1\.08\s*\+\s*rotatedHorizontal\.(?:x|y)/,
+  "horizontal travel must not shear the GPU volume Y coordinate"
+);
+assert.doesNotMatch(
+  seasonalCloudFieldSource,
+  /height01 \* 1\.08\s*\+\s*rotated[XYZ] \* scale/,
+  "horizontal travel must not shear the CPU volume Y coordinate"
+);
+assert.doesNotMatch(
+  seasonalSkyFragmentShader,
+  /mix\(uCloudNearScale, uCloudFarScale|mix\(uCloudNearOffset, uCloudFarOffset|height01 \* 0\.17|height01 \* 0\.13/,
+  "one cloud body must not bend horizontal sampling coordinates through height"
+);
+assert.match(
+  seasonalSkyFragmentShader,
+  /float scale = uCloudNearScale;[\s\S]*vec2 offset = uCloudNearOffset;/,
+  "weather and volume sampling must share one coherent horizontal transform"
+);
+assert.doesNotMatch(
+  seasonalCloudFieldSource,
+  /lerp\(cloudState\.cloudNearScale, cloudState\.cloudFarScale|lerp\(cloudState\.cloudNearOffset|height01 \* 0\.17|height01 \* 0\.13/,
+  "CPU cloud sampling must mirror the coherent horizontal transform"
+);
+assert.match(
+  seasonalSkyFragmentShader,
+  /vec3 volumePosition = vec3\([\s\S]*rotatedHorizontal\.x \* scale \* volumeFrequency[\s\S]*height01 \* 1\.08 \+[\s\S]*rotatedHorizontal\.y \* scale \* volumeFrequency/,
+  "horizontal X/Z travel and cloud height must retain separate primary volume axes"
+);
+assert.match(
+  seasonalSkyFragmentShader,
+  /if \(dir\.y <= 0\.012\)[\s\S]*float rayY = dir\.y;[\s\S]*float rayStart = cloudBase \/ rayY/,
+  "accepted horizon rays must intersect the cloud slab at their true elevation"
+);
+assert.doesNotMatch(
+  seasonalSkyFragmentShader,
+  /max\(0\.035, dir\.y\)|mix\(0\.32, 0\.68, rayJitter\(\)\)/,
+  "horizon rays must not reuse a clamped elevation or a narrow shared sample phase"
+);
+assert.match(
+  seasonalSkyFragmentShader,
+  /float rayJitter\(\)[\s\S]*floor\(gl_FragCoord\.xy\)[\s\S]*float jitter = rayJitter\(\);/,
+  "the full march-step interval must use stable per-pixel stratification"
+);
+assert.doesNotMatch(
+  seasonalSkyFragmentShader.match(/float rayJitter\(\)[\s\S]*?\n  \}/)?.[0] ?? "",
+  /uCloudTimeDays|frame|random|sin\(|dot\(dir/i,
+  "ray jitter must remain independent of animation time, frame state, and continuous sky-direction contours"
+);
+assert.match(
+  seasonalCloudFieldSource,
+  /const rayStart = cloudBase \/ dirY;[\s\S]*cloudTop \/ dirY/,
+  "CPU sun-occlusion rays must mirror the true-elevation slab intersection"
 );
 const volumeProbe = sampleSeasonalCloudVolume(0.27, 0.43, 0.61, 0);
 assert.equal(
@@ -181,6 +371,22 @@ const cloudProbeA = sampleSeasonalCloudDensity(cloudProbeDirection, cloudField);
 const cloudProbeB = sampleSeasonalCloudDensity(cloudProbeDirection, cloudField);
 assert.equal(cloudProbeA, cloudProbeB, "CPU cloud density probes must be deterministic");
 assert.ok(cloudProbeA >= 0 && cloudProbeA <= 1, "CPU cloud density must remain normalized");
+const distortedFarLayerCloudField = {
+  ...cloudField,
+  cloudFarScale: cloudField.cloudFarScale * 0.1,
+  cloudFarOffset: cloudField.cloudFarOffset.clone().add(new THREE.Vector2(19, -23))
+};
+for (const direction of [
+  cloudProbeDirection,
+  new THREE.Vector3(-0.61, 0.48, 0.37).normalize(),
+  new THREE.Vector3(0.22, 0.31, 0.79).normalize()
+]) {
+  assert.equal(
+    sampleSeasonalCloudDensity(direction, cloudField),
+    sampleSeasonalCloudDensity(direction, distortedFarLayerCloudField),
+    "legacy far-layer inputs must not bend a single volumetric cloud through height"
+  );
+}
 const evolvedCloudField = {
   ...cloudField,
   cloudTimeDays: cloudField.cloudTimeDays + 5
@@ -363,6 +569,41 @@ const visibleCloudTravel = skySlow.cloudNearOffset.clone().sub(skyLater.cloudNea
 assert.ok(
   visibleCloudTravel.dot(new THREE.Vector2(windDirectionAtProbe.dx, windDirectionAtProbe.dy)) > 0.98,
   "normal-speed cloud travel must visibly follow the authoritative gameplay wind direction"
+);
+const earlyCloudAdvection = sampleSeasonalCloudAdvection({
+  careerDay: 90,
+  weatherSeed: baseInput.worldSeed,
+  worldSeed: baseInput.worldSeed,
+  driftPerDay: 0.032
+});
+const lateCloudAdvection = sampleSeasonalCloudAdvection({
+  careerDay: 810,
+  weatherSeed: baseInput.worldSeed,
+  worldSeed: baseInput.worldSeed,
+  driftPerDay: 0.032
+});
+const earlyLayerSeparation = new THREE.Vector2(
+  earlyCloudAdvection.farX - earlyCloudAdvection.nearX,
+  earlyCloudAdvection.farY - earlyCloudAdvection.nearY
+);
+const lateLayerSeparation = new THREE.Vector2(
+  lateCloudAdvection.farX - lateCloudAdvection.nearX,
+  lateCloudAdvection.farY - lateCloudAdvection.nearY
+);
+assert.ok(
+  earlyLayerSeparation.distanceTo(lateLayerSeparation) < 1e-12,
+  "cloud-height parallax must remain bounded instead of accumulating into wind-aligned streaks"
+);
+assert.ok(
+  Math.abs(
+    (lateCloudAdvection.nearX - earlyCloudAdvection.nearX) -
+      (lateCloudAdvection.farX - earlyCloudAdvection.farX)
+  ) < 1e-12 &&
+    Math.abs(
+      (lateCloudAdvection.nearY - earlyCloudAdvection.nearY) -
+        (lateCloudAdvection.farY - earlyCloudAdvection.farY)
+    ) < 1e-12,
+  "the full cloud volume must share one coherent deterministic translation"
 );
 
 const snapshotCloudMotion = (state) => ({ ...state });

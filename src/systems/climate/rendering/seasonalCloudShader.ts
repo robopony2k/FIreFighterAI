@@ -86,10 +86,8 @@ export const seasonalSkyFragmentShader = `
 
   float sampleCloudDensity(vec3 worldPosition, float cloudBase, float cloudTop) {
     float height01 = clamp((worldPosition.y - cloudBase) / max(0.0001, cloudTop - cloudBase), 0.0, 1.0);
-    float layerMix = smoothstep(0.18, 0.86, height01);
-    float scale = mix(uCloudNearScale, uCloudFarScale, layerMix);
-    vec2 offset = mix(uCloudNearOffset, uCloudFarOffset, layerMix);
-    offset += vec2((height01 - 0.5) * 0.09, -(height01 - 0.5) * 0.07);
+    float scale = uCloudNearScale;
+    vec2 offset = uCloudNearOffset;
     vec2 rotatedHorizontal = vec2(
       worldPosition.x * 0.8 + worldPosition.z * 0.6,
       -worldPosition.x * 0.6 + worldPosition.z * 0.8
@@ -131,17 +129,12 @@ export const seasonalSkyFragmentShader = `
     float volumeFrequency = 0.15 * uCloudVolumeScale;
     vec3 volumePosition = vec3(
       rotatedHorizontal.x * scale * volumeFrequency +
-        height01 * 0.17 +
         offset.x * 0.74 +
         weatherWarp.x * 0.28 +
         morph.x,
       height01 * 1.08 +
-        rotatedHorizontal.y * scale * 0.028 +
-        weatherWarp.y * 0.16 +
-        offset.x * 0.08 -
-        offset.y * 0.05,
-      rotatedHorizontal.y * scale * volumeFrequency -
-        height01 * 0.13 +
+        weatherWarp.y * 0.16,
+      rotatedHorizontal.y * scale * volumeFrequency +
         offset.y * 0.74 +
         weatherWarp.y * 0.28 +
         morph.y
@@ -184,8 +177,11 @@ export const seasonalSkyFragmentShader = `
     return clamp(density * localDensityScale, 0.0, 1.0);
   }
 
-  float rayJitter(vec3 dir) {
-    return fract(sin(dot(dir, vec3(71.43, 193.17, 37.11))) * 43758.5453);
+  float rayJitter() {
+    vec2 pixel = floor(gl_FragCoord.xy);
+    return fract(
+      52.9829189 * fract(dot(pixel, vec2(0.06711056, 0.00583715)))
+    );
   }
 
   vec4 raymarchSeasonalClouds(vec3 dir, float horizonMask) {
@@ -195,11 +191,11 @@ export const seasonalSkyFragmentShader = `
     vec3 sunDir = normalize(uSunDirection);
     float cloudBase = uCloudBaseHeight;
     float cloudTop = uCloudTopHeight;
-    float rayY = max(0.035, dir.y);
+    float rayY = dir.y;
     float rayStart = cloudBase / rayY;
     float rayEnd = min(cloudTop / rayY, rayStart + mix(8.0, 22.0, horizonMask));
     float stepLength = (rayEnd - rayStart) / float(${SEASONAL_CLOUD_MARCH_STEPS});
-    float jitter = mix(0.32, 0.68, rayJitter(dir));
+    float jitter = rayJitter();
     float transmittance = 1.0;
     vec3 accumulatedColor = vec3(0.0);
 

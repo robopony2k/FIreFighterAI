@@ -42,13 +42,18 @@ const toNumber = (value: unknown, fallback: number): number => {
 export const normalizeFireSettings = (settings?: Partial<FireSettings>): FireSettings => {
   const source = settings ?? {};
   const legacySource = source as Partial<FireSettings> & {
+    ignitionChancePerDay?: unknown;
     dayFactorMin?: unknown;
     dayFactorMax?: unknown;
   };
   void legacySource.dayFactorMin;
   void legacySource.dayFactorMax;
+  const legacyIgnitionRate = toNumber(legacySource.ignitionChancePerDay, Number.NaN);
   return {
-    ignitionChancePerDay: toNumber(source.ignitionChancePerDay, DEFAULT_FIRE_SETTINGS.ignitionChancePerDay),
+    ignitionOpportunityRateScale: toNumber(
+      source.ignitionOpportunityRateScale,
+      Number.isFinite(legacyIgnitionRate) ? legacyIgnitionRate / 0.08 : DEFAULT_FIRE_SETTINGS.ignitionOpportunityRateScale
+    ),
     simSpeed: toNumber(source.simSpeed, DEFAULT_FIRE_SETTINGS.simSpeed),
     simTickSeconds: toNumber(source.simTickSeconds, DEFAULT_FIRE_SETTINGS.simTickSeconds),
     renderSmoothSeconds: toNumber(source.renderSmoothSeconds, DEFAULT_FIRE_SETTINGS.renderSmoothSeconds),

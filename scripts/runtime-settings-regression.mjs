@@ -72,6 +72,23 @@ storage.set(
 }
 
 storage.clear();
+storage.set(STORAGE_KEY, JSON.stringify({ randomFireIgnition: false }));
+{
+  const mod = await loadRuntimeSettingsModule("legacy-ignition-key");
+  const settings = mod.getRuntimeSettings();
+  expect(!settings.fireIgnitionEvents, "Legacy randomFireIgnition=false should migrate to fireIgnitionEvents=false.");
+}
+
+storage.clear();
+{
+  const mod = await loadRuntimeSettingsModule("legacy-ignition-query", "?randomFireIgnition=0");
+  const settings = mod.getRuntimeSettings();
+  const persisted = JSON.parse(storage.get(STORAGE_KEY) ?? "{}");
+  expect(!settings.fireIgnitionEvents, "Legacy randomFireIgnition query override should remain compatible.");
+  expect(persisted.fireIgnitionEvents === false, "Legacy ignition query should persist under the new key.");
+}
+
+storage.clear();
 {
   const mod = await loadRuntimeSettingsModule(
     "query-overrides",

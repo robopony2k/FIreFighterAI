@@ -6,7 +6,7 @@ import { createInitialState, syncTileSoA } from "../dist/core/state.js";
 import { PHASES } from "../dist/core/time.js";
 import { applyFuel } from "../dist/core/tiles.js";
 import { createEffectsState } from "../dist/core/effectsState.js";
-import { markFireBlockActiveByTile } from "../dist/sim/fire/activeBlocks.js";
+import { markFireBlockActiveByTile } from "../dist/systems/fire/sim/fireActiveBlocks.js";
 import { stepSim } from "../dist/sim/index.js";
 import { applyFireActivityMetrics } from "../dist/systems/fire/sim/fireActivityState.js";
 import { getLatestFireRuntimeTelemetry } from "../dist/systems/fire/controllers/fireRuntimeTelemetry.js";
@@ -95,7 +95,7 @@ const buildScenario = (speed) => {
   state.simTimeMode = "strategic";
   state.timeSpeedIndex = 8;
   state.timeSpeedSliderValue = speed;
-  state.fireSettings.ignitionChancePerDay = 0;
+  state.fireSettings.ignitionOpportunityRateScale = 0;
   state.wind = { name: "SW", dx: 0.72, dy: -0.68, strength: 0.82 };
 
   const center = Math.floor(SIZE / 2);
@@ -146,7 +146,7 @@ const buildSpringGrowthScenario = () => {
   state.simTimeMode = "strategic";
   state.timeSpeedIndex = 8;
   state.timeSpeedSliderValue = SPRING_SPEED;
-  state.fireSettings.ignitionChancePerDay = 0;
+  state.fireSettings.ignitionOpportunityRateScale = 0;
   state.lastActiveFires = 0;
   applyFireActivityMetrics(state, 0);
   return { state, effects: createEffectsState(), rng };

@@ -1,6 +1,6 @@
 export type RuntimeSettings = {
   timespeedui: "buttons" | "slider";
-  randomFireIgnition: boolean;
+  fireIgnitionEvents: boolean;
   annualReportEnabled: boolean;
   pauseOnFireEvent: boolean;
   pauseOnAnnualReportEvent: boolean;
@@ -107,7 +107,7 @@ const toFiniteNumber = (value: unknown): number | null => {
 
 export const DEFAULT_RUNTIME_SETTINGS: RuntimeSettings = {
   timespeedui: "buttons",
-  randomFireIgnition: true,
+  fireIgnitionEvents: true,
   annualReportEnabled: true,
   pauseOnFireEvent: true,
   pauseOnAnnualReportEvent: true,
@@ -165,12 +165,12 @@ export const RUNTIME_SETTING_DEFINITIONS: ReadonlyArray<RuntimeSettingDefinition
     ]
   },
   {
-    key: "randomFireIgnition",
+    key: "fireIgnitionEvents",
     section: "General",
     kind: "boolean",
     label: "Fire Ignition Events",
     description: "Allow any new fire ignition events. Disable this for no-fire growth and town simulation runs.",
-    defaultValue: DEFAULT_RUNTIME_SETTINGS.randomFireIgnition,
+    defaultValue: DEFAULT_RUNTIME_SETTINGS.fireIgnitionEvents,
     queryStyle: "0-false"
   },
   {
@@ -655,7 +655,9 @@ const sanitizeRuntimeSettings = (value: unknown): RuntimeSettings => {
   RUNTIME_SETTING_DEFINITIONS.forEach((definition) => {
     sanitized[definition.key] = sanitizeSetting(
       definition as RuntimeSettingDefinition<RuntimeSettingKey>,
-      source[definition.key]
+      definition.key === "fireIgnitionEvents" && source.fireIgnitionEvents === undefined
+        ? source.randomFireIgnition
+        : source[definition.key]
     ) as never;
   });
   return sanitized;
@@ -687,7 +689,8 @@ const getQueryOverride = <K extends RuntimeSettingKey>(
   definition: RuntimeSettingDefinition<K>,
   params: URLSearchParams
 ): RuntimeSettings[K] | undefined => {
-  const raw = params.get(definition.key);
+  const raw = params.get(definition.key) ??
+    (definition.key === "fireIgnitionEvents" ? params.get("randomFireIgnition") : null);
   if (raw === null) {
     return undefined;
   }

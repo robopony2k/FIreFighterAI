@@ -1,8 +1,8 @@
 import type { WorldState } from "../../../core/state.js";
 import { clamp } from "../../../core/utils.js";
 import { indexFor } from "../../../core/grid.js";
-import { markFireBlockActiveByTile } from "../../../sim/fire/activeBlocks.js";
-import { markFireBounds } from "../../../sim/fire/bounds.js";
+import { markFireBlockActiveByTile } from "./fireActiveBlocks.js";
+import { markFireBounds } from "./fireBounds.js";
 import {
   FIRE_SIM_LAB_FIREFIGHTER_COOLING_RADIUS,
   FIRE_SIM_LAB_FIREFIGHTER_HOSE_RANGE,

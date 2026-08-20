@@ -184,8 +184,8 @@ export class UIController {
     this.bottomControls.onMusicVolumeChange(handler);
   }
 
-  onRandomFireIgnitionToggle(handler: (enabled: boolean) => void): void {
-    this.bottomControls.onRandomFireIgnitionToggle(handler);
+  onFireIgnitionEventsToggle(handler: (enabled: boolean) => void): void {
+    this.bottomControls.onFireIgnitionEventsToggle(handler);
   }
 
   onAnnualReportToggle(handler: (enabled: boolean) => void): void {
@@ -207,7 +207,7 @@ export class UIController {
   setSimulationToggleState(
     settings: Pick<
       RuntimeSettings,
-      | "randomFireIgnition"
+      | "fireIgnitionEvents"
       | "annualReportEnabled"
       | "pauseOnFireEvent"
       | "pauseOnAnnualReportEvent"

@@ -16,6 +16,7 @@ import { resolveTerrainProfile, sanitizeTerrainRecipe } from "../mapgen/terrainP
 import { isCampaignDifficultyId } from "../systems/campaign/constants/campaignDifficultyDefinitions.js";
 
 const LAST_RUN_CONFIG_KEY = "fireline.lastRunConfig";
+const LAST_RUN_CONFIG_SCHEMA_VERSION = 2;
 const CHARACTER_IDS = new Set<CharacterId>(CHARACTERS.map((character) => character.id));
 const CHIEF_GENDER_IDS = new Set<ChiefGender>(CHIEF_GENDERS);
 const MAP_SIZE_IDS = new Set<MapSizeId>(Object.keys(MAP_SIZE_PRESETS) as MapSizeId[]);
@@ -65,11 +66,23 @@ const sanitizeCallsign = (value: unknown): string => {
 const sanitizeFireSettings = (value: unknown): FireSettings =>
   normalizeFireSettings(isRecord(value) ? (value as Partial<FireSettings>) : undefined);
 
-const sanitizeNewRunConfig = (value: unknown): NewRunConfig | null => {
+const sanitizeNewRunConfig = (
+  value: unknown,
+  migration: { repairUnversionedIgnitionZero?: boolean } = {}
+): NewRunConfig | null => {
   if (!isRecord(value)) {
     return null;
   }
   const options = isRecord(value.options) ? value.options : {};
+  const rawFire = isRecord(options.fire) ? options.fire : null;
+  const fire = sanitizeFireSettings(rawFire);
+  const hasCorruptedUnversionedIgnitionZero =
+    migration.repairUnversionedIgnitionZero === true &&
+    rawFire?.ignitionOpportunityRateScale === 0 &&
+    rawFire.ignitionChancePerDay === undefined;
+  if (hasCorruptedUnversionedIgnitionZero) {
+    fire.ignitionOpportunityRateScale = DEFAULT_RUN_OPTIONS.fire.ignitionOpportunityRateScale;
+  }
   return {
     seed: sanitizeSeed(value.seed),
     mapSize: sanitizeMapSize(value.mapSize),
@@ -83,7 +96,7 @@ const sanitizeNewRunConfig = (value: unknown): NewRunConfig | null => {
       terrain: isRecord(options.terrain)
         ? sanitizeTerrainRecipe(options.terrain)
         : resolveTerrainProfile(isRecord(options.mapGen) ? options.mapGen : undefined, sanitizeMapSize(value.mapSize ?? DEFAULT_MAP_SIZE)).recipe,
-      fire: sanitizeFireSettings(options.fire),
+      fire,
       fuelProfiles: sanitizeFuelProfileOverrides(options.fuelProfiles)
     }
   };
@@ -99,7 +112,10 @@ export function loadLastRunConfig(): NewRunConfig | null {
   }
   try {
     const parsed = JSON.parse(raw) as unknown;
-    return sanitizeNewRunConfig(parsed);
+    const version = isRecord(parsed) ? toFiniteNumber(parsed.schemaVersion) : null;
+    return sanitizeNewRunConfig(parsed, {
+      repairUnversionedIgnitionZero: version === null || version < LAST_RUN_CONFIG_SCHEMA_VERSION
+    });
   } catch {
     return null;
   }
@@ -113,5 +129,8 @@ export function saveLastRunConfig(config: NewRunConfig): void {
   if (!sanitized) {
     return;
   }
-  localStorage.setItem(LAST_RUN_CONFIG_KEY, JSON.stringify(sanitized));
+  localStorage.setItem(LAST_RUN_CONFIG_KEY, JSON.stringify({
+    ...sanitized,
+    schemaVersion: LAST_RUN_CONFIG_SCHEMA_VERSION
+  }));
 }

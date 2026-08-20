@@ -1,7 +1,7 @@
 import type { CommandIntent, CommandUnitAlert, Point, Unit } from "../../../core/types.js";
 import type { WorldState } from "../../../core/state.js";
 import { inBounds, indexFor } from "../../../core/grid.js";
-import { markFireBlockActiveByTile } from "../../../sim/fire/activeBlocks.js";
+import { markFireBlockActiveByTile } from "../../fire/sim/fireActiveBlocks.js";
 import {
   BACKBURN_IGNITE_RADIUS,
   BACKBURN_IGNITE_INTERVAL_DAYS,
